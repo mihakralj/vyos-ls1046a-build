@@ -1,4 +1,4 @@
-name: VyOS nightly build
+name: VyOS arm64 build
 
 on:
   schedule:

@@ -1,0 +1,4 @@
+*.DS_Store
+vyos-build/
+vyos-1x/
+vyos-*-arm64.iso*
