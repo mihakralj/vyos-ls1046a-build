@@ -174,7 +174,6 @@ jobs:
         run: |
           cd vyos-build
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-          set -x
           # seems donot need filtering needed here, the build sciprt will install only the necessary packages
           deb_files=$(find scripts/package-build -name "*.deb" -type f | \
             grep -v -- -dbg | \
@@ -208,7 +207,6 @@ jobs:
             wide-dhcpv6-relay
             wide-dhcpv6-server
             vpp-plugin-devtools
-            linux-headers
           )
           for deb_file in $deb_files; do
             if [[ " ${ignore_packages[@]} " =~ " $(basename $deb_file | cut -d_ -f1) " ]]; then
@@ -229,6 +227,7 @@ jobs:
           find scripts/package-build/vpp -name "libvppinfra-dev*.deb" -type f -exec cp {} packages ';'
           find scripts/package-build/vpp -name "vpp-dev*.deb" -type f -exec cp {} packages ';'
 
+          rm -rf packages/linux-headers-*
           ls -alh packages
 
       - name: Build generic ISO image
