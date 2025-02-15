@@ -17,9 +17,10 @@ env:
   BUILD_BY: github@huihui.contact
   DEBIAN_MIRROR: http://deb.debian.org/debian/
   DEBIAN_SECURITY_MIRROR: http://deb.debian.org/debian-security
-  # VYOS_MIRROR: https://packages.vyos.net/repositories/current/
+  VYOS_MIRROR: https://packages.vyos.net/repositories/current/
+  # this repo doesn't seem to be updated anymore
   # https://dev.packages.vyos.net/?dir=repositories/current/dists/current
-  VYOS_MIRROR: https://rolling-packages.vyos.net/current/
+  # VYOS_MIRROR: https://rolling-packages.vyos.net/current/
 
 jobs:
   build_generic_iso:
@@ -29,7 +30,10 @@ jobs:
       contents: write
     container:
       image: vyos/vyos-build:current-arm64
-      options: --sysctl net.ipv6.conf.lo.disable_ipv6=0 --privileged
+      options: --sysctl net.ipv6.conf.lo.disable_ipv6=0 --privileged --user root
+    defaults:
+      run:
+        shell: bash
     outputs:
       BUILD_BY: ${{ steps.set_env_variables.outputs.BUILD_BY }}
       build_version: ${{ steps.set_env_variables.outputs.build_version }}
@@ -39,11 +43,28 @@ jobs:
       generic_image_name: ${{ steps.build_generic_iso.outputs.generic_image_name }}
 
     steps:
-      ### Initialization ###
+      - name: Install Dependencies
+        run: |
+          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
+          set -x
+          echo "HOME: $HOME"
+          echo "PATH: $PATH"
+          command -v go
+          command -v ocamlfind
+          # Install missing packages
+          apt-get update -qq
+          apt-get install -y \
+            git-lfs libglib2.0-dev libip4tc-dev libipset-dev libnfnetlink-dev bubblewrap \
+            libnftnl-dev libnl-nf-3-dev libpopt-dev libsystemd-dev perl-xs-dev \
+            kpartx clang llvm libpcap-dev xz-utils python-is-python3 libbpf-dev linux-libc-dev
+
       - uses: actions/checkout@v4
+        with:
+          lfs: true
       - name: "Initialization: set env variables"
         id: set_env_variables
         run: |
+          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
           set -x
           if [ -n "${{ github.event.inputs.BUILD_BY }}" ]; then
             echo "BUILD_BY=${{ github.event.inputs.BUILD_BY }}" >> $GITHUB_ENV
@@ -57,20 +78,165 @@ jobs:
           echo "PREVIOUS_SUCCESS_BUILD_TIMESTAMP=$(cat version.json | jq -r '.[0].timestamp')" >> $GITHUB_OUTPUT
           echo "BUILD_BY=$BUILD_BY" >> $GITHUB_OUTPUT
 
+      - name: Build global deps
+        run: |
+          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
+          set -x
+          eval $(opam env --root=/opt/opam --set-root)
+          mkdir global_deps
+          cd global_deps
+          global_deps=(
+            libvyosconfig
+            vyatta-bash
+            vyatta-biosdevname
+            vyatta-cfg
+            vyatta-wanloadbalance
+            vyos-utils
+            vyos-user-utils
+            vyos-http-api-tools
+            ipaddrcheck
+            udp-broadcast-relay
+            libnss-mapuser
+            hvinfo
+            live-boot
+          )
+          for global_dep in ${global_deps[@]}; do
+            git clone https://github.com/vyos/$global_dep
+            cd $global_dep
+
+            if [ "${global_dep}" = "ipaddrcheck" ]; then
+              rm src/*.o
+            fi
+            echo "y" | mk-build-deps --install --remove
+
+            # should update libvyosconfig due to hardcode on vyos-1x
+            # https://github.com/vyos/vyos-1x/blob/e90a2781f9eae555097e078b9b11dd0dca6c0acd/python/vyos/configtree.py#L22
+            # that will failed on reftree.cache
+            if [ "${global_dep}" = "libvyosconfig" ]; then
+              ./build.sh
+              cp _build/libvyosconfig.so /usr/lib/libvyosconfig.so.0
+            fi
+
+            dpkg-buildpackage -b -us -uc -tc
+            cd ..
+          done
+
       - name: Checkout vyos-build repo
         uses: actions/checkout@v4
         with:
           repository: vyos/vyos-build
           path: vyos-build
 
+      # fixing unknown internal blob file
+      # i don't know what is this file and why it's not in the repo
+      # without this file, the build will failed
+      # https://github.com/vyos/vyos-1x/commit/bab186b493145ee42453196e8ef4670afc71f6f1
+      # https://github.com/vyos/vyos-1x/commit/dd5f9c19550c1f8ccb5e93bab0b604f9f9e1383e
+      - name: Fix missing internal blob file
+        run: |
+          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
+          set -x
+          git clone --recursive https://github.com/vyos/vyos-1x \
+            -b current --single-branch vyos-build/scripts/package-build/vyos-1x/vyos-1x
+          cp data/reftree.cache vyos-build/scripts/package-build/vyos-1x/vyos-1x/data/reftree.cache
+
+      - name: Build Image Packages
+        run: |
+          cd vyos-build/scripts/package-build
+          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
+          set -x
+          packages=$(ls .)
+          ignore_packages=(amazon-cloudwatch-agent amazon-ssm-agent xen-guest-agent)
+          for package in $packages; do
+            [ ! -d $package ] && continue
+            [[ " ${ignore_packages[@]} " =~ " ${package} " ]] && continue
+            cd $package
+
+            if [ $package == "keepalived" ]; then
+              apt-get install -y libsnmp-dev
+            fi
+
+            ./build.py
+
+            if [ $package == "keepalived" ]; then
+              apt-get remove -y libsnmp-dev
+            fi
+
+            # clean
+            df -Th
+            apt-get autoremove -y
+            rm -rf $package *.gz *.xz $HOME/.cache/go-build $HOME/go/pkg/mod $HOME/.rustup
+            df -Th
+            cd ..
+          done
+
+      - name: Apply Packages
+        run: |
+          cd vyos-build
+          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
+          set -x
+          # seems donot need filtering needed here, the build sciprt will install only the necessary packages
+          deb_files=$(find scripts/package-build -name "*.deb" -type f | \
+            grep -v -- -dbg | \
+            grep -v -- -dev | \
+            grep -v -- -doc
+          )
+          ignore_packages=(
+            charon-cmd
+            dropbear-initramfs
+            dropbear-run
+            eapoltest
+            frr-test-tools
+            isc-dhcp-client-ddns
+            isc-dhcp-common
+            isc-dhcp-keama
+            isc-dhcp-server
+            isc-dhcp-server-ldap
+            libnetsnmptrapd40
+            libsnmp-perl
+            libtac2-bin
+            libyang-modules
+            libyang-tools
+            # python3-nftables
+            rtr-tools
+            sflowovsd.deb
+            snmptrapd
+            strongswan-nm
+            strongswan-pki
+            tkmib
+            waagent
+            wide-dhcpv6-relay
+            wide-dhcpv6-server
+            vpp-plugin-devtools
+            linux-headers
+          )
+          for deb_file in $deb_files; do
+            if [[ " ${ignore_packages[@]} " =~ " $(basename $deb_file | cut -d_ -f1) " ]]; then
+              echo "ignore $deb_file"
+              continue
+            fi
+            cp $deb_file packages
+          done
+          global_deb_files=$(find ../global_deps -name "*.deb" -type f | \
+            grep -v -- -dbg | \
+            grep -v -- -dev | \
+            grep -v -- -doc
+          )
+          for deb_file in $global_deb_files; do
+            cp $deb_file packages
+          done
+          # vpp addition files
+          find scripts/package-build/vpp -name "libvppinfra-dev*.deb" -type f -exec cp {} packages ';'
+          find scripts/package-build/vpp -name "vpp-dev*.deb" -type f -exec cp {} packages ';'
+
+          ls -alh packages
+
       - name: Build generic ISO image
         id: build_generic_iso
         run: |
           cd vyos-build
-
-          # Install missing packages
-          sudo apt-get update -qq
-          sudo apt-get install -y kpartx
+          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
+          set -x
 
           # setup db directory for vnstat
           echo '[[includes_chroot]]' >> data/build-flavors/generic.toml
@@ -79,26 +245,26 @@ jobs:
 
           # seems only have 6.6.52 kernel for now
           # https://dev.packages.vyos.net/?dir=repositories/current/pool/main/l/linux-upstream
-          sed -i 's|kernel_version = .*|kernel_version = "6.6.52"|g' data/defaults.toml
+          #sed -i 's|kernel_version = .*|kernel_version = "6.6.52"|g' data/defaults.toml
 
           # fix url of saltproject
           # https://github.com/vyos/vyos-build/blob/current/data/architectures/arm64.toml#L9
           sed -i 's|amd64|arm64|g' data/architectures/arm64.toml
 
           # Add required telegraf key
-          wget -q https://repos.influxdata.com/influxdata-archive_compat.key -O \
-            data/live-build-config/archives/influxdata.key.chroot
+          #wget -q https://repos.influxdata.com/influxdata-archive_compat.key -O \
+          #  data/live-build-config/archives/influxdata.key.chroot
+          # build-vyos-image with args
+          #  --custom-apt-entry "deb [arch=arm64] https://repos.influxdata.com/debian/ bookworm stable" \
 
-          sudo --preserve-env ./build-vyos-image \
+          ./build-vyos-image \
             --architecture arm64 \
             --build-by $BUILD_BY \
             --build-type release \
-            --custom-package vyos-1x-smoketest \
             --debian-mirror $DEBIAN_MIRROR \
             --debian-security-mirror $DEBIAN_SECURITY_MIRROR \
             --version ${{ steps.set_env_variables.outputs.build_version }} \
             --vyos-mirror $VYOS_MIRROR \
-            --custom-apt-entry "deb [arch=arm64] https://repos.influxdata.com/debian/ bookworm stable" \
             --custom-package vim-tiny \
             --custom-package vnstat \
             --custom-package neofetch \
