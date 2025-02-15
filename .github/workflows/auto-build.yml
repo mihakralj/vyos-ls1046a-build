@@ -270,6 +270,9 @@ jobs:
             --custom-package tree \
             --custom-package btop \
             --custom-package ripgrep \
+            --custom-package wget \
+            --custom-package fastnetmon \
+            --custom-package containernetworking-plugins \
             generic
           cd build
           # Determine image name and iso file
