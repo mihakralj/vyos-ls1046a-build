@@ -1,4 +1,455 @@
 ## vyos-1x
-- no changes
+- xml: T6146: add utils and helper to provide priority data
+   - PR: vyos/vyos-1x#3164
+- T6452: Add QoS Op Commands
+   - PR: vyos/vyos-1x#3591
+- T6539: add logging options to load-balancer reverse-proxy
+   - PR: vyos/vyos-1x#3753
+- T6496: Added support for WPA-Enterprise client-mode
+   - PR: vyos/vyos-1x#3711
+- configdep: T6559: fix regression in dependent script error under configd
+   - PR: vyos/vyos-1x#3813
+- T6525: Add default dir for ext-scripts without absolute path
+   - PR: vyos/vyos-1x#3827
+- OpenVPN CLI-option: T6571: rename ncp-ciphers with data-ciphers
+   - PR: vyos/vyos-1x#3823
+- T6486: use data-ciphers instead of ncp-ciphers in "run generate openvpn client-config"
+   - PR: vyos/vyos-1x#3930
+- T5794: firewall: change firewall priority in oder to be loaded after all interfaces
+   - PR: vyos/vyos-1x#3988
+- dhclient: T6667: Added workaround for communication with FRR
+   - PR: vyos/vyos-1x#4002
+- T6671: defer config dependency if scheduled in priority queue
+   - PR: vyos/vyos-1x#4015
+- T4974: add proper dependency on openvpn-dco
+   - PR: vyos/vyos-1x#4029
+- T6693: wireless: Enable WiFi-6 (802.11ax) for 2.4GHz AccessPoints
+   - PR: vyos/vyos-1x#4028
+- T6294: Service dns forwarding add the ability to configure ZonetoCache
+   - PR: vyos/vyos-1x#3896
+- T6703: Adds option to configure AMD pstate driver
+   - PR: vyos/vyos-1x#4046
+- T6674: Actions fix variable for trigger build reuse repo
+   - PR: vyos/vyos-1x#4067
+- GitHub: T6494: add TPM tests to ISO integration workflow
+   - PR: vyos/vyos-1x#4070
+- op-mode: T6682: Fix for show vpn ike sa peer that always shows all SAs
+   - PR: vyos/vyos-1x#4057
+- op-mode: T6715: manually changing time/date is not synced into hardware clock
+   - PR: vyos/vyos-1x#4071
+- bond: T6709: add EAPoL support
+   - PR: vyos/vyos-1x#4069
+- T861: op-mode: initial parts for UEFI secure boot CLI
+   - PR: vyos/vyos-1x#4020
+- T6716: don't automatically set ethernet offload
+   - PR: vyos/vyos-1x#4077
+- T6723: firewall: extend op-mode commands
+   - PR: vyos/vyos-1x#4084
+- syslog: T5367: add format option to include timezone in message
+   - PR: vyos/vyos-1x#4061
+- wireless: T6709: fix missing wpa_supplicant configuration
+   - PR: vyos/vyos-1x#4087
+- http-api: T6326: return full warning/error output through api
+   - PR: vyos/vyos-1x#4090
+- op-mode: T4833: Include wireguard peer name in interface summary report
+   - PR: vyos/vyos-1x#4089
+- lldp: T6727: add missing input validation for interface names
+   - PR: vyos/vyos-1x#4091
+- ethtool: T6729: drop text based feature parsing in favour of JSON
+   - PR: vyos/vyos-1x#4094
+- T6630: ntp: support hardware timestamp offload and other mechanisms to improve accuracy
+   - PR: vyos/vyos-1x#3966
+- bridge: T6675: VXLAN Interface configuration lost due to improper bridge detachment
+   - PR: vyos/vyos-1x#4086
+- syslog: T6719: fix the behavior of "syslog global preserve-fqdn"
+   - PR: vyos/vyos-1x#4079
+- configd: T6608: report uncaught config script exceptions as commit error
+   - PR: vyos/vyos-1x#3876
+- validators: T6739: fix ipaddrcheck argument quoting
+   - PR: vyos/vyos-1x#4099
+- validators: T6738: Revert "validators: T6739: fix ipaddrcheck argument quoting"
+   - PR: vyos/vyos-1x#4104
+- validators: T6739: correctly quote ipaddrcheck arguments to avoid ipaddrcheck syntax errors when values include whitespace
+   - PR: vyos/vyos-1x#4105
+- T6749: fix PR commenting permission issue with integration test workflow
+   - PR: vyos/vyos-1x#4107
+- T6687: add fqdn support to nat rules.
+   - PR: vyos/vyos-1x#4024
+- policy: T6751: add missing completion helpers for community-list
+   - PR: vyos/vyos-1x#4112
+- validators: T6743: use native ipaddrcheck validator options for ranges
+   - PR: vyos/vyos-1x#4106
+- T6757: Openconnect: fix template for correct config parsing while configuring source address for radius authentication.
+   - PR: vyos/vyos-1x#4120
+- vyos.configtree: T6742: add bindings for create_node and is_leaf/set_leaf
+   - PR: vyos/vyos-1x#4109
+- cli: T6752: add a wrapper for the show command
+   - PR: vyos/vyos-1x#4111
+- T6761: Add timeout for OSPF smoketest fail
+   - PR: vyos/vyos-1x#4125
+- T6763: Delete Jenkins file
+   - PR: vyos/vyos-1x#4126
+- T6760: firewall: add packet modifications existing in policy route to regular firewall ruleset.
+   - PR: vyos/vyos-1x#4123
+- T973: add basic node_exporter implementation
+   - PR: vyos/vyos-1x#4048
+- T6755: Change vyos mirror URL for smoketest
+   - PR: vyos/vyos-1x#4119
+- ipsec: T6101: Add validation for proposal option used in IKE group
+   - PR: vyos/vyos-1x#4121
+- http-api: T6736: move REST API to a node distinct from GraphQL API
+   - PR: vyos/vyos-1x#4110
+- Debian: T973: add missing dependency on node-exporter package
+   - PR: vyos/vyos-1x#4130
+- op-mode: T6753: Fix json output for mtr / monitor traceroute
+   - PR: vyos/vyos-1x#4122
+- static: T4283: fix missing f'ormat string
+   - PR: vyos/vyos-1x#4131
+- T6759: add support for italian keymap
+   - PR: vyos/vyos-1x#4132
+- GitHub: T6494: add parallel step to run interface based smoketests
+   - PR: vyos/vyos-1x#4133
+- pki: T6481: auto import ACME certificate chain into CLI
+   - PR: vyos/vyos-1x#4118
+- pbr: T6430: Local IP rules targeting VRFs by name as well as route table IDs
+   - PR: vyos/vyos-1x#3938
+- cli: T6740: add a converter from set commands to config
+   - PR: vyos/vyos-1x#4124
+- smoketest: T4576: add guard timeout for systemd in log level tests
+   - PR: vyos/vyos-1x#4129
+- vyos.configtree: T4318: Allow set tag flag to true or false
+   - PR: vyos/vyos-1x#4138
+- config-mgmt: T5976: add option for commit-confirm to use 'soft' rollback
+   - PR: vyos/vyos-1x#4128
+- haproxy: T6745: Rename reverse-proxy to haproxy 
+   - PR: vyos/vyos-1x#4147
+- pki: T6766: Add support for ECDSA private keys
+   - PR: vyos/vyos-1x#4146
+- T6712: Add nonproduction banner (backport #4148)
+   - PR: vyos/vyos-1x#4149
+- T973: add basic frr_exporter implementation
+   - PR: vyos/vyos-1x#4150
+- pki: T4914: Rewrite the PKI op mode in the new style
+   - PR: vyos/vyos-1x#4165
+- T6784: enabled repo-sync wokrflow only for current and equuleus
+   - PR: vyos/vyos-1x#4163
+- T6791: Extend fair-queue hash-interval
+   - PR: vyos/vyos-1x#4167
+- T4583: Rewrite VRRP op-mode to vyos.opmode format
+   - PR: vyos/vyos-1x#4155
+- T6812: Fix smoketest iproute2 check
+   - PR: vyos/vyos-1x#4174
+- login: T6712: honor 80x25 terminal size for nonproduction banner message
+   - PR: vyos/vyos-1x#4178
+- op_mode: T6808: Console server op mode commands throw errors when console server is not configured
+   - PR: vyos/vyos-1x#4172
+- system_login: T6807: allow a trailing slash character in system login
+   - PR: vyos/vyos-1x#4171
+- T6764: Fix unhandled exception on ethtool output parsing for Xen NICs
+   - PR: vyos/vyos-1x#4182
+- dhcp_server: T6852: Add op mode command "show dhcpv6 server statistics"
+   - PR: vyos/vyos-1x#4184
+- T6695: Machine-readable operational mode support for traceroute
+   - PR: vyos/vyos-1x#4151
+- dhcp_server: T6031: fix daemon load error when static-route options are present
+   - PR: vyos/vyos-1x#4183
+- T6802: Fix QoS Policy Round-Robin with Default Configuration
+   - PR: vyos/vyos-1x#4177
+- T3501: Allow using more than one tuned profile
+   - PR: vyos/vyos-1x#4179
+- syslog: T6858: bugfix remote syslog using TCP
+   - PR: vyos/vyos-1x#4185
+- T6861: op-mode: ignore error code 255 if this UEFI doesn't support secure boot
+   - PR: vyos/vyos-1x#4186
+- T6861: op-mode: add 0 into errno expect list
+   - PR: vyos/vyos-1x#4189
+- babel: T6866: IPv6 distribute-lists in access-list6 format have names not numbers
+   - PR: vyos/vyos-1x#4187
+- conntrack: T6878: stop the conntrack logger daemon correctly
+   - PR: vyos/vyos-1x#4193
+- dhcp-server: T6876: increase retries that Kea makes to open a socket
+   - PR: vyos/vyos-1x#4192
+- T6801: QoS: Policy rate-control is broken by default
+   - PR: vyos/vyos-1x#4191
+- T6795: QoS: Fix duplicate entries in class match filters
+   - PR: vyos/vyos-1x#4190
+- T6884: adds mtu option for container networks
+   - PR: vyos/vyos-1x#4195
+- T6490: Allow creation of wireguard interfaces without requiring peers
+   - PR: vyos/vyos-1x#4194
+- T6790: QoS: Improve CAKE Policy
+   - PR: vyos/vyos-1x#4173
+- configd: T6899: use multipart message instead of extra exchange
+   - PR: vyos/vyos-1x#4197
+- serial: T3397: Remove  which could result in unexpected baud rate
+   - PR: vyos/vyos-1x#4201
+- T6796: QoS: match filter by interface(iif)
+   - PR: vyos/vyos-1x#4188
+- T6806: Rework QoS Policy for HFSC Shaper
+   - PR: vyos/vyos-1x#4181
+- op-mode: T6900: remove uninformative 'show configuration files'
+   - PR: vyos/vyos-1x#4202
+- avahi: T6908: add option to define max-cache entries
+   - PR: vyos/vyos-1x#4207
+- dhcp: T6692: Fix range options not present when  is used
+   - PR: vyos/vyos-1x#4203
+- T264: IPsec add base64 encoded secret-type feature
+   - PR: vyos/vyos-1x#4198
+- ipoe_server: T6872: Add the ability to configure LUA scripts and username
+   - PR: vyos/vyos-1x#4196
+- T6906: IPoE-server add start-session option
+   - PR: vyos/vyos-1x#4206
+- multicast: T6920: static multicast routing throws TypeError
+   - PR: vyos/vyos-1x#4210
+- pki: T6809: Support system install of CA certificates
+   - PR: vyos/vyos-1x#4204
+- op_mode: T6909: Move "show monitoring" and "show zebra" to "show monitoring frr"
+   - PR: vyos/vyos-1x#4205
+- op_mode: T6770: Fix op command "show bridge vni"
+   - PR: vyos/vyos-1x#4209
+- config-mgmt: T6925: return from verify function on config object None
+   - PR: vyos/vyos-1x#4213
+- sudo: T6926: remove spam messages to syslog
+   - PR: vyos/vyos-1x#4212
+- T6630: ntp: fix timestamp nested under ptp
+   - PR: vyos/vyos-1x#4208
+- T6917: fix RPS ethernet settings for CPUs with more than 32 cores
+   - PR: vyos/vyos-1x#4215
+- T6923: Add debian-security-mirror for package-smoketests
+   - PR: vyos/vyos-1x#4220
+- vyconf: T6718: add keyword default for change in libvyosconfig binding
+   - PR: vyos/vyos-1x#4226
+- T6940: updated codeowners with user list to support sync
+   - PR: vyos/vyos-1x#4228
+- T6927: adds option to set container name server
+   - PR: vyos/vyos-1x#4218
+- pki: T6368: Add ability for acme to listen on IPv6 addresses
+   - PR: vyos/vyos-1x#4231
+- T6863: Fix default distance for PPPoE
+   - PR: vyos/vyos-1x#4229
+- T6927: adds option to set container name server
+   - PR: vyos/vyos-1x#4232
+- T6718: use the vyconf daemon for validation of set commands
+   - PR: vyos/vyos-1x#4176
+- op_mode: T6860: Display the EULA in "run show license"
+   - PR: vyos/vyos-1x#4222
+- T6940: added pr mirror sync caller workflows (revised)
+   - PR: vyos/vyos-1x#4239
+- ipoe_server: T6628: Add option to assign static IP address to end users with local auth
+   - PR: vyos/vyos-1x#4219
+- static: T4214: Allow several dhcp-interfaces to the same static rote
+   - PR: vyos/vyos-1x#4211
+- tacacs: T6613: dynamically build exclude_users list to avoid TACACS traffic
+   - PR: vyos/vyos-1x#4238
+- frr: upgrade to 10.2 and migrate protocols to unified FRRender class
+   - PR: vyos/vyos-1x#4227
+- service-dns-dynamic: T6950: fix migration script logic for missing addresses
+   - PR: vyos/vyos-1x#4240
+- T6799: QoS: Improve Priority-Queue Policy
+   - PR: vyos/vyos-1x#4175
+- T6918: Accept invalid PPPoE Session in stateful bridge firewall.
+   - PR: vyos/vyos-1x#4236
+- T6874: [QoS] Add class filter by ether
+   - PR: vyos/vyos-1x#4223
+- op_mode: T6767: Check latest image version in VRF context for "add system image latest vrf <name>"
+   - PR: vyos/vyos-1x#4225
+- T6934: Add preshared key for zabbix-agent monitoring service
+   - PR: vyos/vyos-1x#4233
+- frrender: T6746: runtime improvements
+   - PR: vyos/vyos-1x#4243
+- T5791: Modify ddclient smoketest for reliability
+   - PR: vyos/vyos-1x#4244
+- T6953: merges node and frr exporter under prometheus section
+   - PR: vyos/vyos-1x#4242
+- pppoe: T6930: Remove unnecessary code
+   - PR: vyos/vyos-1x#4246
+- op-mode: T6971: "monitor log" should have no output color at all
+   - PR: vyos/vyos-1x#4249
+- babel: T6746: define fixed testcase order
+   - PR: vyos/vyos-1x#4248
+- ifconfig: T6972: smoketests fail as IP address is not removed in time
+   - PR: vyos/vyos-1x#4250
+- dhcpv6-server: T5992: Fix op-mode Kea DHCP lease output
+   - PR: vyos/vyos-1x#4221
+- T6936: PPPoE-server add option combined to interface
+   - PR: vyos/vyos-1x#4247
+- T6013: Add support for configuring TrustedUserCAKeys for ssh service
+   - PR: vyos/vyos-1x#4234
+- smoketest: T6746: T5791: additional fixes/logic hardening
+   - PR: vyos/vyos-1x#4252
+- T6976: mirror workflows updated to use reusable workflows
+   - PR: vyos/vyos-1x#4254
+- T6944: adds option to enable switchdev mode on ethernet interface
+   - PR: vyos/vyos-1x#4235
+- xml: T5738: re-use XML building blocks for interfaces as much as possible
+   - PR: vyos/vyos-1x#4251
+- skel: T6979: disable iproute2 colors by default
+   - PR: vyos/vyos-1x#4257
+- udev: T6985: Fix udev rule to also register ttyACM serial devices
+   - PR: vyos/vyos-1x#4264
+- geoip: T6986: add missing cron installation path
+   - PR: vyos/vyos-1x#4265
+- op_mode: T6956: Fix for "generate tech-support archive" if /config contains directories
+   - PR: vyos/vyos-1x#4268
+- xml: T5738: De-duplicate 'openssh' tagNode
+   - PR: vyos/vyos-1x#4269
+- T6983: treat vyos-domain-resolver as a real service
+   - PR: vyos/vyos-1x#4261
+- frr: T6746: additional improvements after 10.2 upgrade
+   - PR: vyos/vyos-1x#4259
+- GitHub: adjust PR template to our current needs/workflow
+   - PR: vyos/vyos-1x#4262
+- T6896: OpenVPN change CRL revoke without restart
+   - PR: vyos/vyos-1x#4245
+- T6949: adds blackbox exporter
+   - PR: vyos/vyos-1x#4255
+- frrender: T6991: do not loose DHCP default route when no static route is defined
+   - PR: vyos/vyos-1x#4270
+- srv6: T6984: add locator format configuration
+   - PR: vyos/vyos-1x#4263
+- telegraf: T6477: adjusting "metric_name_label" indentation in config template
+   - PR: vyos/vyos-1x#4272
+- T6994: Add textfile collector config option
+   - PR: vyos/vyos-1x#4271
+- T5791: ddclient: Adjust process handling
+   - PR: vyos/vyos-1x#4267
+- GitHub: T7007: add build/manifest.json to build artifacts
+   - PR: vyos/vyos-1x#4275
+- T7016: force delete only dynamic IPv4 address from interface
+   - PR: vyos/vyos-1x#4278
+- T6841: firewall: improve config parsing for ZBF when using VRFs and interfaces attached to VRFs
+   - PR: vyos/vyos-1x#4180
+- ddclient: T5791: Keep ddclient.service in foreground
+   - PR: vyos/vyos-1x#4276
+- configd: T6747: use one long-lived instance of FRRender
+   - PR: vyos/vyos-1x#4274
+- packaging: T7020: hard pin libpam-radius-auth and add an explicit dependency on libnss-mapuser
+   - PR: vyos/vyos-1x#4281
+- utils: T6975: Add 'vrf' and 'netns' arguments to functions in 'vyos.utils.process'
+   - PR: vyos/vyos-1x#4253
+- smoketest: T7023: add tac_plus container to live validate login
+   - PR: vyos/vyos-1x#4285
+- vyos.ifconfig: T7018: drop 'iftype' class attribute
+   - PR: vyos/vyos-1x#4280
+- T6998: dhcp: fix depracted utcfromtimestamp usage
+   - PR: vyos/vyos-1x#4258
+- smoketest: T6841: fix config tests which validate migration scripts
+   - PR: vyos/vyos-1x#4287
+- interfaces: T7016: Simplify logic for force deleting dynamic IPv4 address from interface
+   - PR: vyos/vyos-1x#4284
+- vrf: T7024: instance name "up" and "down" are reserved and should not be used
+   - PR: vyos/vyos-1x#4286
+- xml: T7029: allow wildcard in include directive
+   - PR: vyos/vyos-1x#4290
+- smoketest: T7033: nat source group test should use an existing interface
+   - PR: vyos/vyos-1x#4295
+- xml: T5738: Reuse predefined regex constraint
+   - PR: vyos/vyos-1x#4294
+- haproxy: T5222: Enable backend completion in service ruleset
+   - PR: vyos/vyos-1x#4293
+- xml: T5738: reuse existing alpha-numeric-hyphen-underscore building block
+   - PR: vyos/vyos-1x#4296
+- ddclient: T5791: Relocate process params to ExecStart
+   - PR: vyos/vyos-1x#4283
+- Debian: T7023: download smoketest container images only once
+   - PR: vyos/vyos-1x#4291
+- T7042: drop use of inspect module in favor of ast for source analysis
+   - PR: vyos/vyos-1x#4300
+- nhrp: T2326: NHRP migration to FRR
+   - PR: vyos/vyos-1x#4217
+- kea: T7041: Check lease hostname string is not empty
+   - PR: vyos/vyos-1x#4301
+- T7038: T7039: fix broken RADIUS IPv6 source address and add smoketests
+   - PR: vyos/vyos-1x#4299
+- nhrp: T2326: Fixed network-id migration
+   - PR: vyos/vyos-1x#4309
+- remote: T7048: merge git environment with the os environment
+   - PR: vyos/vyos-1x#4303
+- dhcp: T5840: Merge systemd service overrides for kea-ctrl-agent
+   - PR: vyos/vyos-1x#4308
+- nhrp: T2326: Fixed opmode command help strings
+   - PR: vyos/vyos-1x#4304
+- T681: Fix QoS DSCP filter
+   - PR: vyos/vyos-1x#4302
+- telegraf: T7017: Telegraf should log at least info to a configured logging output
+   - PR: vyos/vyos-1x#4279
+- dhcp: T7052: Refactor kea dhcp op-mode functions to vyos.kea
+   - PR: vyos/vyos-1x#4307
+- T7046: add wrappers for reference tree utilities
+   - PR: vyos/vyos-1x#4306
+- T6895: Merge the hsflowd-based sFlow and uacctd-based sFlow
+   - PR: vyos/vyos-1x#4310
+- T7064: added pr mirror related workflows to current
+   - PR: vyos/vyos-1x#4311
+- T7065: pr mirror to trigger only when the pullrequest is merged
+   - PR: vyos/vyos-1x#4312
+- ntp: T6911: fix migration script to not allow empty "service ntp" CLI node
+   - PR: vyos/vyos-1x#4315
+- smoketest: T6911: fix wrong router-id in loaded config validation
+   - PR: vyos/vyos-1x#4316
+- T6641: Add vyos-network-event-logger Service
+   - PR: vyos/vyos-1x#4216
+- T4930: Allow WireGuard peers via DNS hostname
+   - PR: vyos/vyos-1x#4200
+- T6342: extend schema to handle documentation in xml
+   - PR: vyos/vyos-1x#4292
+- dhcp: T6998: Make dhcp lease datetime timezone aware
+   - PR: vyos/vyos-1x#4319
+- dhcp: T7052: Fix remaining time evaluation and formatting errors
+   - PR: vyos/vyos-1x#4320
+- haproxy: T7081: Support HTTP compression
+   - PR: vyos/vyos-1x#4314
+- opmode: T7084: reorganize the op mode cache format for ease of search
+   - PR: vyos/vyos-1x#4313
+- nhrp: T2326: Fixed jinja template to generate NHRP config
+   - PR: vyos/vyos-1x#4322
+- T7089: Fix static route when using PPPoE default route
+   - PR: vyos/vyos-1x#4318
+- installer: T7034: fail the upgrade if image flavors do not match
+   - PR: vyos/vyos-1x#4297
+- wireguard: T7087: Fix vyos-domain-resolver failing if no wireguard interfaces defined
+   - PR: vyos/vyos-1x#4317
+- T7106: Add vpp dependencies to debian control
+   - PR: vyos/vyos-1x#4324
+- T7106: Divert sysctl vpp settings
+   - PR: vyos/vyos-1x#4325
+- configd: T7119: fix misleading debug messages
+   - PR: vyos/vyos-1x#4328
+- installer: T7036: upgrade validation improvements
+   - PR: vyos/vyos-1x#4298
+- installer: T7102: download upgrade images to a random path in the root filesystem
+   - PR: vyos/vyos-1x#4330
+- T7076: Add script to validate ethernet interface
+   - PR: vyos/vyos-1x#4327
+- vyconf: T6718: drop hybrid set/delete functions
+   - PR: vyos/vyos-1x#4329
+- syslog: T6989: convert old configuration format to "advanced"
+   - PR: vyos/vyos-1x#4305
+- wireguard: T4930: remove pylint W0611: unused import
+   - PR: vyos/vyos-1x#4336
+- smoketest: T2326: remove NHRP pylint W0611: unused import
+   - PR: vyos/vyos-1x#4337
+- T7069: Add function to get available cpus
+   - PR: vyos/vyos-1x#4334
+- vyos.ifconfig: T5103: force dhclient restart on VRF change
+   - PR: vyos/vyos-1x#4335
+- T6058: Fix popen command wrapper handling
+   - PR: vyos/vyos-1x#4333
+- T7145: updated codeowners list
+   - PR: vyos/vyos-1x#4339
+- vyos.ifconfig: T5103: always stop the DHCP client process bevore changing VRF
+   - PR: vyos/vyos-1x#4340
+- T7145: updated team name for codeowners current branch
+   - PR: vyos/vyos-1x#4342
+- syslog: T6989: update default system configuration with new CLI syntax
+   - PR: vyos/vyos-1x#4343
+- webproxy: T7057: Fixed 'domain-nocache' command
+   - PR: vyos/vyos-1x#4344
+- T7076: Fix for script that validates ethernet interface
+   - PR: vyos/vyos-1x#4345
+- T7161: fix BGP IPv4/IPv6 unicast AFI "redistribute table" command
+   - PR: vyos/vyos-1x#4346
+
+
 ## vyos-build
 - no changes
