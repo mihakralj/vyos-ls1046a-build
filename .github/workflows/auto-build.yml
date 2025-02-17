@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       BUILD_BY:
-        description: 'Builder identifier (default: autobuild@vyos.net)'
+        description: 'Builder identifier (default: github@huihui.contact)'
         default: ''
       build_version:
         description: 'Version number (default: 1.5-rolling-ISO8601-TIMESTAMP)'
@@ -17,6 +17,7 @@ env:
   BUILD_BY: github@huihui.contact
   DEBIAN_MIRROR: http://deb.debian.org/debian/
   DEBIAN_SECURITY_MIRROR: http://deb.debian.org/debian-security
+  # no package on the official repo
   VYOS_MIRROR: https://packages.vyos.net/repositories/current/
   # this repo doesn't seem to be updated anymore
   # https://dev.packages.vyos.net/?dir=repositories/current/dists/current
@@ -25,7 +26,7 @@ env:
 jobs:
   build_generic_iso:
     runs-on: ubuntu-24.04-arm
-    if: github.repository == 'huihuimoe/vyos-arm64-build'
+    # if: github.repository == 'huihuimoe/vyos-arm64-build'
     permissions:
       contents: write
     container:
@@ -127,18 +128,22 @@ jobs:
           repository: vyos/vyos-build
           path: vyos-build
 
-      # fixing unknown internal blob file
-      # i don't know what is this file and why it's not in the repo
-      # without this file, the build will failed
-      # https://github.com/vyos/vyos-1x/commit/bab186b493145ee42453196e8ef4670afc71f6f1
-      # https://github.com/vyos/vyos-1x/commit/dd5f9c19550c1f8ccb5e93bab0b604f9f9e1383e
-      - name: Fix missing internal blob file
+      - name: Fix vyos-build
         run: |
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
           set -x
           git clone --recursive https://github.com/vyos/vyos-1x \
             -b current --single-branch vyos-build/scripts/package-build/vyos-1x/vyos-1x
+          # fixing unknown internal blob file
+          # i don't know what is this file and why it's not in the repo
+          # without this file, the build will failed
+          # https://github.com/vyos/vyos-1x/commit/bab186b493145ee42453196e8ef4670afc71f6f1
+          # https://github.com/vyos/vyos-1x/commit/dd5f9c19550c1f8ccb5e93bab0b604f9f9e1383e
           cp data/reftree.cache vyos-build/scripts/package-build/vyos-1x/vyos-1x/data/reftree.cache
+          # add default dhcpv4 configuration
+          cp data/config.boot.default vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/config.boot.default
+          # fix kernel config
+          patch -p1 -d vyos-build < data/kernel_config.patch
 
       - name: Build Image Packages
         run: |
@@ -387,7 +392,7 @@ jobs:
         with:
           tagging_message: ${{ needs.build_generic_iso.outputs.build_version }}
           commit_message: ${{ needs.build_generic_iso.outputs.build_version }}
-          commit_author: "vyosbot <${{ needs.build_generic_iso.outputs.BUILD_BY }}>"
+          commit_author: "github-actions <${{ needs.build_generic_iso.outputs.BUILD_BY }}>"
 
       - uses: actions/download-artifact@v4
         with:

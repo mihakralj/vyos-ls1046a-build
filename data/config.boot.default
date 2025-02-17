@@ -1,0 +1,50 @@
+system {
+    host-name vyos
+    login {
+        user vyos {
+            authentication {
+                plaintext-password "a_strong-p@ssword"
+            }
+        }
+    }
+    syslog {
+        global {
+            facility all {
+                level info
+            }
+            facility protocols {
+                level debug
+            }
+        }
+    }
+    ntp {
+        server "time1.vyos.net"
+        server "time2.vyos.net"
+        server "time3.vyos.net"
+    }
+    console {
+        device ttyS0 {
+            speed 115200
+        }
+    }
+    config-management {
+        commit-revisions 100
+    }
+    update-check {
+        auto-check
+        url https://raw.githubusercontent.com/huihuimoe/vyos-arm64-build/refs/heads/master/version.json
+    }
+}
+
+interfaces {
+    loopback lo {
+    }
+    ethernet eth0 {
+        address dhcp
+    }
+}
+
+service {
+    ssh {
+    }
+}
