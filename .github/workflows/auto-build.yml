@@ -245,7 +245,7 @@ jobs:
           # setup db directory for vnstat
           echo '[[includes_chroot]]' >> data/build-flavors/generic.toml
           echo 'path = "etc/vnstat.conf"' >> data/build-flavors/generic.toml
-          echo "data = 'DatabaseDir \"/config/user-data/vnstat\"'" >> data/build-flavors/generic.toml
+          echo "data = 'DatabaseDir \"/opt/vyatta/etc/config/user-data/vnstat\"'" >> data/build-flavors/generic.toml
 
           # seems only have 6.6.52 kernel for now
           # https://dev.packages.vyos.net/?dir=repositories/current/pool/main/l/linux-upstream
