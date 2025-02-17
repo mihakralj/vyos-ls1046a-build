@@ -18,9 +18,9 @@ system {
         }
     }
     ntp {
-        server "time1.vyos.net"
-        server "time2.vyos.net"
-        server "time3.vyos.net"
+        server "time.apple.com"
+        server "time.cloudflare.com"
+        server "time.google.com"
     }
     console {
         device ttyS0 {
