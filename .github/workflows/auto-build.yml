@@ -91,7 +91,8 @@ jobs:
             vyatta-bash
             vyatta-biosdevname
             vyatta-cfg
-            vyatta-wanloadbalance
+            # https://github.com/vyos/vyos-1x/commit/d6a82c134bed0b0921595928b7ec600b2935327b
+            # vyatta-wanloadbalance
             vyos-utils
             vyos-user-utils
             vyos-http-api-tools
@@ -183,11 +184,10 @@ jobs:
             cd ..
           done
 
-      - name: Apply Packages
+      - name: Pick Packages
         run: |
           cd vyos-build
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-          # seems donot need filtering needed here, the build sciprt will install only the necessary packages
           deb_files=$(find scripts/package-build -name "*.deb" -type f | \
             grep -v -- -dbg | \
             grep -v -- -dev | \
