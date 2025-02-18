@@ -144,6 +144,9 @@ jobs:
           cp data/config.boot.default vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/config.boot.default
           # fix kernel config
           patch -p1 -d vyos-build < data/kernel_config.patch
+          # let mksquashfs optimize for arm instead of x86
+          # https://manpages.debian.org/jessie/squashfs-tools/mksquashfs.1.en.html
+          sed -i 's|Xbcj x86|Xbcj arm|' vyos-build/data/defaults.toml
 
       - name: Build Image Packages
         run: |
