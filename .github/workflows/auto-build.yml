@@ -148,9 +148,11 @@ jobs:
           cp data/config.boot.default vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/config.boot.default
           # fix kernel config
           patch -p1 -d vyos-build < data/kernel_config.patch
-          # let mksquashfs optimize for arm instead of x86
           # https://manpages.debian.org/jessie/squashfs-tools/mksquashfs.1.en.html
-          sed -i 's|Xbcj x86|Xbcj arm|' vyos-build/data/defaults.toml
+          sed -i 's|-Xbcj x86||' vyos-build/data/defaults.toml
+          # fix hardcoded x86_64
+          sed -i 's|x86_64|aarch64|g' vyos-build/data/live-build-config/hooks/live/*.chroot
+          sed -i 's|x86_64|aarch64|g' vyos-build/data/live-build-config/includes.chroot/etc/initramfs-tools/hooks/*
           # fix url of saltproject
           # https://github.com/vyos/vyos-build/blob/current/data/architectures/arm64.toml#L9
           sed -i 's|amd64|arm64|g' vyos-build/data/architectures/arm64.toml
@@ -172,15 +174,11 @@ jobs:
             [[ " ${ignore_packages[@]} " =~ " ${package} " ]] && continue
             cd $package
 
-            if [ $package == "keepalived" ]; then
-              apt-get install -y libsnmp-dev
-            fi
+            [ $package == "keepalived" ] && apt-get install -y libsnmp-dev
 
             ./build.py
 
-            if [ $package == "keepalived" ]; then
-              apt-get remove -y libsnmp-dev
-            fi
+            [ $package == "keepalived" ] && apt-get remove -y libsnmp-dev
 
             # clean
             df -Th
@@ -287,6 +285,7 @@ jobs:
             --custom-package btop \
             --custom-package ripgrep \
             --custom-package wget \
+            --custom-package ncdu \
             --custom-package fastnetmon \
             --custom-package containernetworking-plugins \
             --custom-package qemu-guest-agent \
@@ -334,9 +333,11 @@ jobs:
          shell: bash
          run: |
           cd vyos-build
-          echo "CHANGELOG_COMMIT_VYOS_BUILD=$(git log --since "${{ needs.build_generic_iso.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}" --format="%H" --reverse | head -n1)" >> $GITHUB_OUTPUT
+          CHANGELOG_COMMIT_VYOS_BUILD=$(git log --since "${{ needs.build_generic_iso.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}" --format="%H" --reverse | head -n1)
+          echo "CHANGELOG_COMMIT_VYOS_BUILD=${CHANGELOG_COMMIT_VYOS_BUILD:-HEAD}" >> $GITHUB_OUTPUT
           cd ../vyos-1x
-          echo "CHANGELOG_COMMIT_VYOS_1X=$(git log --since "${{ needs.build_generic_iso.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}" --format="%H" --reverse | head -n1)" >> $GITHUB_OUTPUT
+          CHANGELOG_COMMIT_VYOS_1X=$(git log --since "${{ needs.build_generic_iso.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}" --format="%H" --reverse | head -n1)
+          echo "CHANGELOG_COMMIT_VYOS_1X=${CHANGELOG_COMMIT_VYOS_1X:-HEAD}" >> $GITHUB_OUTPUT
 
       - name: "Release publishing: generate changelog for vyos-1x"
         id: generate_changelog_for_vyos-1x
