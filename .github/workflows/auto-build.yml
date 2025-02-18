@@ -250,10 +250,12 @@ jobs:
           echo 'path = "etc/systemd/system/vnstat.service.d/override.conf"' >> data/build-flavors/generic.toml
           echo "data = '''" >> data/build-flavors/generic.toml
           echo "[Unit]" >> data/build-flavors/generic.toml
-          echo "Requires=opt-vyatta-etc-config.mount" >> data/build-flavors/generic.toml
+          echo "After=local-fs.target" >> data/build-flavors/generic.toml
           echo "[Service]" >> data/build-flavors/generic.toml
-          echo "ExecStartPre=+mkdir /opt/vyatta/etc/config/user-data/vnstat" >> data/build-flavors/generic.toml
+          echo "ExecStartPre=+mkdir -p /opt/vyatta/etc/config/user-data/vnstat" >> data/build-flavors/generic.toml
           echo "ExecStartPre=+chown 104:112 /opt/vyatta/etc/config/user-data/vnstat" >> data/build-flavors/generic.toml
+          echo "StateDirectory=" >> data/build-flavors/generic.toml
+          echo "ProtectSystem=off" >> data/build-flavors/generic.toml
           echo "'''" >> data/build-flavors/generic.toml
 
           # seems only have 6.6.52 kernel for now
