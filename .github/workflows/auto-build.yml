@@ -141,6 +141,9 @@ jobs:
           # https://github.com/vyos/vyos-1x/commit/bab186b493145ee42453196e8ef4670afc71f6f1
           # https://github.com/vyos/vyos-1x/commit/dd5f9c19550c1f8ccb5e93bab0b604f9f9e1383e
           cp data/reftree.cache vyos-build/scripts/package-build/vyos-1x/vyos-1x/data/reftree.cache
+          # arm64 *does* support telegraf
+          # https://github.com/vyos/vyos-1x/blob/1db5a06efe31d43c12847663990e7945ca465206/Makefile#L48
+          sed -i 's|rm -rf $(TMPL_DIR)/service/monitoring/telegraf|#|' vyos-build/scripts/package-build/vyos-1x/vyos-1x/Makefile
           # add default dhcpv4 configuration
           cp data/config.boot.default vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/config.boot.default
           # fix kernel config
@@ -151,6 +154,9 @@ jobs:
           # fix url of saltproject
           # https://github.com/vyos/vyos-build/blob/current/data/architectures/arm64.toml#L9
           sed -i 's|amd64|arm64|g' vyos-build/data/architectures/arm64.toml
+          # avoid frr backports TODO: delete me later
+          # https://github.com/FRRouting/frr/pull/18155
+          sed -i 's|stable/10.2|cdb2cc2f8970c7d5efa712bd0f4107c93cc8b826|' vyos-build/scripts/package-build/frr/package.toml
 
           true
 
