@@ -2,3 +2,4 @@
 vyos-build/
 vyos-1x/
 vyos-*-arm64.iso*
+data/mok/MOK.key

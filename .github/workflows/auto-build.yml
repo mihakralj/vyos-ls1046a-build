@@ -130,7 +130,10 @@ jobs:
           path: vyos-build
 
       - name: Fix vyos-build
+        env:
+          MOK_KEY: ${{ secrets.MOK_KEY }}
         run: |
+          [ -n "$MOK_KEY" ] && echo "$MOK_KEY" > data/mok/MOK.key
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
           set -x
 
@@ -164,6 +167,15 @@ jobs:
           # fix url of saltproject
           # https://github.com/vyos/vyos-build/blob/current/data/architectures/arm64.toml#L9
           sed -i 's|amd64|arm64|g' vyos-build/data/architectures/arm64.toml
+
+          ### Secure Boot
+          # https://github.com/vyos/vyos-build/blob/d235b31a095f9b8fdb2d5c231935c8b4b4c3da6c/scripts/package-build/linux-kernel/build-kernel.sh#L25
+          sed -i 's|arch/x86/configs/vyos_defconfig|arch/arm64/configs/vyos_defconfig|' vyos-build/scripts/package-build/linux-kernel/build-kernel.sh
+          # https://github.com/vyos/vyos-build/blob/fd737172f1068870fe1ededbe9b2ed4a86663acd/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/README.md
+          if [ -f data/mok/MOK.key ]; then
+            cp data/mok/MOK.key vyos-build/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/
+            cp data/mok/MOK.pem vyos-build/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/
+          fi
 
           ### other
           # avoid frr backports TODO: delete me later
@@ -300,6 +312,7 @@ jobs:
             --custom-package containernetworking-plugins \
             --custom-package qemu-guest-agent \
             --custom-package mokutil \
+            --custom-package sbsigntool \
             generic
           cd build
           # Determine image name and iso file
