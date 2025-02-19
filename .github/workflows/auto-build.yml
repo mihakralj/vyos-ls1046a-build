@@ -133,6 +133,8 @@ jobs:
         run: |
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
           set -x
+
+          ### vyos-1x
           git clone --recursive https://github.com/vyos/vyos-1x \
             -b current --single-branch vyos-build/scripts/package-build/vyos-1x/vyos-1x
           # fixing unknown internal blob file
@@ -146,6 +148,10 @@ jobs:
           sed -i 's|rm -rf $(TMPL_DIR)/service/monitoring/telegraf|#|' vyos-build/scripts/package-build/vyos-1x/vyos-1x/Makefile
           # add ttyAMA0/ttyACM0 console support
           patch -p1 -d vyos-build/scripts/package-build/vyos-1x/vyos-1x < data/vyos-1x-001-system_console.patch
+          # Error: OCI runtime error: crun: cannot set memory+swap limit less than the memory limit
+          sed -i 's| --memory-swap 0||' vyos-build/scripts/package-build/vyos-1x/vyos-1x/src/conf_mode/container.py
+
+          ### vyos-build
           # add default dhcpv4 configuration
           cp data/config.boot.default vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/config.boot.default
           # fix kernel config
@@ -158,6 +164,8 @@ jobs:
           # fix url of saltproject
           # https://github.com/vyos/vyos-build/blob/current/data/architectures/arm64.toml#L9
           sed -i 's|amd64|arm64|g' vyos-build/data/architectures/arm64.toml
+
+          ### other
           # avoid frr backports TODO: delete me later
           # https://github.com/FRRouting/frr/pull/18155
           sed -i 's|stable/10.2|cdb2cc2f8970c7d5efa712bd0f4107c93cc8b826|' vyos-build/scripts/package-build/frr/package.toml
