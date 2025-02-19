@@ -15,3 +15,5 @@ For amd64 users, refer the official nightly builds on <https://github.com/vyos/v
 Embedded a basic [config.boot](./data/config.boot.default) file that sets up DHCP for the eth0 interface and enables SSH access with the default username `vyos` and password `a_strong-p@ssword`.
 
 Can basically running in a qemu virtio environment(VGA needs to be `virtio-gpu`).
+
+Tested in Proxmox/HetznerCloud/Scaleway.

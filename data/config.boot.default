@@ -3,7 +3,8 @@ system {
     login {
         user vyos {
             authentication {
-                plaintext-password "a_strong-p@ssword"
+                encrypted-password "$6$rounds=656000$Uh9Fx/JsPWFTpfIO$DPQOFL8ThwtckZOrIEbGMwj6WNZnxV3ZfS/UuxuONg0oMpEDR350YkkYOdjcZWpsB9K1XHrOmBFtI34usaqvs."
+                // plaintext-password "a_strong-p@ssword"
             }
         }
     }
@@ -23,7 +24,7 @@ system {
         server "time.google.com"
     }
     console {
-        device ttyS0 {
+        device ttyAMA0 {
             speed 115200
         }
     }
