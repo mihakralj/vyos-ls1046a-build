@@ -1,5 +1,5 @@
 diff --git a/scripts/package-build/linux-kernel/arch/arm64/configs/vyos_defconfig b/scripts/package-build/linux-kernel/arch/arm64/configs/vyos_defconfig
-index 9592b39b..b42a435e 100644
+index 9592b39b..5066122e 100644
 --- a/scripts/package-build/linux-kernel/arch/arm64/configs/vyos_defconfig
 +++ b/scripts/package-build/linux-kernel/arch/arm64/configs/vyos_defconfig
 @@ -97,10 +97,11 @@ CONFIG_ARCH_WANT_DEFAULT_BPF_JIT=y
@@ -768,7 +768,7 @@ index 9592b39b..b42a435e 100644
  # end of I2C Hardware Bus support
  
  CONFIG_I2C_STUB=m
-@@ -4491,13 +4632,398 @@ CONFIG_REGULATOR_TPS65132=m
+@@ -4491,13 +4632,363 @@ CONFIG_REGULATOR_TPS65132=m
  # Graphics support
  #
  CONFIG_APERTURE_HELPERS=y
@@ -847,41 +847,6 @@ index 9592b39b..b42a435e 100644
 +CONFIG_DRM_KOMEDA=m
 +# end of ARM devices
 +
-+CONFIG_DRM_RADEON=m
-+CONFIG_DRM_RADEON_USERPTR=y
-+CONFIG_DRM_AMDGPU=m
-+CONFIG_DRM_AMDGPU_SI=y
-+CONFIG_DRM_AMDGPU_CIK=y
-+CONFIG_DRM_AMDGPU_USERPTR=y
-+# CONFIG_DRM_AMDGPU_WERROR is not set
-+
-+#
-+# ACP (Audio CoProcessor) Configuration
-+#
-+CONFIG_DRM_AMD_ACP=y
-+# end of ACP (Audio CoProcessor) Configuration
-+
-+#
-+# Display Engine Configuration
-+#
-+CONFIG_DRM_AMD_DC=y
-+CONFIG_DRM_AMD_DC_FP=y
-+CONFIG_DRM_AMD_DC_SI=y
-+# CONFIG_DEBUG_KERNEL_DC is not set
-+# CONFIG_DRM_AMD_SECURE_DISPLAY is not set
-+# end of Display Engine Configuration
-+
-+CONFIG_HSA_AMD=y
-+CONFIG_HSA_AMD_SVM=y
-+CONFIG_HSA_AMD_P2P=y
-+CONFIG_DRM_NOUVEAU=m
-+CONFIG_NOUVEAU_PLATFORM_DRIVER=y
-+CONFIG_NOUVEAU_DEBUG=5
-+CONFIG_NOUVEAU_DEBUG_DEFAULT=3
-+# CONFIG_NOUVEAU_DEBUG_MMU is not set
-+# CONFIG_NOUVEAU_DEBUG_PUSH is not set
-+CONFIG_DRM_NOUVEAU_BACKLIGHT=y
-+CONFIG_DRM_NOUVEAU_SVM=y
 +CONFIG_DRM_KMB_DISPLAY=m
 +CONFIG_DRM_VGEM=m
 +CONFIG_DRM_VKMS=m
@@ -1171,7 +1136,7 @@ index 9592b39b..b42a435e 100644
  
  #
  # Frame buffer Devices
-@@ -4511,7 +5037,7 @@ CONFIG_FB=y
+@@ -4511,7 +5002,7 @@ CONFIG_FB=y
  # CONFIG_FB_ASILIANT is not set
  # CONFIG_FB_IMSTT is not set
  # CONFIG_FB_UVESA is not set
@@ -1180,7 +1145,7 @@ index 9592b39b..b42a435e 100644
  # CONFIG_FB_OPENCORES is not set
  # CONFIG_FB_S1D13XXX is not set
  # CONFIG_FB_NVIDIA is not set
-@@ -4527,44 +5053,83 @@ CONFIG_FB_EFI=y
+@@ -4527,44 +5018,83 @@ CONFIG_FB_EFI=y
  # CONFIG_FB_NEOMAGIC is not set
  # CONFIG_FB_KYRO is not set
  # CONFIG_FB_3DFX is not set
@@ -1274,7 +1239,7 @@ index 9592b39b..b42a435e 100644
  #
  # Console display driver support
  #
-@@ -4748,43 +5313,54 @@ CONFIG_USB_AUTOSUSPEND_DELAY=2
+@@ -4748,43 +5278,54 @@ CONFIG_USB_AUTOSUSPEND_DELAY=2
  #
  # USB Host Controller Drivers
  #
@@ -1346,7 +1311,7 @@ index 9592b39b..b42a435e 100644
  
  #
  # NOTE: USB_STORAGE depends on SCSI but BLK_DEV_SD may
-@@ -4795,37 +5371,113 @@ CONFIG_USB_WDM=m
+@@ -4795,37 +5336,113 @@ CONFIG_USB_WDM=m
  #
  CONFIG_USB_STORAGE=m
  # CONFIG_USB_STORAGE_DEBUG is not set
@@ -1475,7 +1440,7 @@ index 9592b39b..b42a435e 100644
  
  #
  # USB port drivers
-@@ -4833,7 +5485,7 @@ CONFIG_USB_STORAGE=m
+@@ -4833,7 +5450,7 @@ CONFIG_USB_STORAGE=m
  CONFIG_USB_SERIAL=m
  CONFIG_USB_SERIAL_GENERIC=y
  CONFIG_USB_SERIAL_SIMPLE=m
@@ -1484,7 +1449,7 @@ index 9592b39b..b42a435e 100644
  CONFIG_USB_SERIAL_ARK3116=m
  CONFIG_USB_SERIAL_BELKIN=m
  CONFIG_USB_SERIAL_CH341=m
-@@ -4841,164 +5493,373 @@ CONFIG_USB_SERIAL_WHITEHEAT=m
+@@ -4841,164 +5458,373 @@ CONFIG_USB_SERIAL_WHITEHEAT=m
  CONFIG_USB_SERIAL_DIGI_ACCELEPORT=m
  CONFIG_USB_SERIAL_CP210X=m
  CONFIG_USB_SERIAL_CYPRESS_M8=m
@@ -1931,7 +1896,7 @@ index 9592b39b..b42a435e 100644
  CONFIG_LEDS_BRIGHTNESS_HW_CHANGED=y
  
  #
-@@ -5336,8 +6197,14 @@ CONFIG_VFIO_PCI=m
+@@ -5336,8 +6162,14 @@ CONFIG_VFIO_PCI=m
  #
  # VFIO support for platform devices
  #
@@ -1947,7 +1912,7 @@ index 9592b39b..b42a435e 100644
  # end of VFIO support for platform devices
  
  #
-@@ -5346,9 +6213,10 @@ CONFIG_VFIO_PCI=m
+@@ -5346,9 +6178,10 @@ CONFIG_VFIO_PCI=m
  CONFIG_VFIO_FSL_MC=m
  # end of VFIO support for FSL_MC bus devices
  
@@ -1960,7 +1925,7 @@ index 9592b39b..b42a435e 100644
  CONFIG_VIRTIO_ANCHOR=y
  CONFIG_VIRTIO=m
  CONFIG_VIRTIO_PCI_LIB=m
-@@ -5356,19 +6224,35 @@ CONFIG_VIRTIO_PCI_LIB_LEGACY=m
+@@ -5356,19 +6189,35 @@ CONFIG_VIRTIO_PCI_LIB_LEGACY=m
  CONFIG_VIRTIO_MENU=y
  CONFIG_VIRTIO_PCI=m
  CONFIG_VIRTIO_PCI_LEGACY=y
@@ -1998,7 +1963,7 @@ index 9592b39b..b42a435e 100644
  # CONFIG_VHOST_CROSS_ENDIAN_LEGACY is not set
  
  #
-@@ -6136,7 +7020,15 @@ CONFIG_JBD2=m
+@@ -6136,7 +6985,15 @@ CONFIG_JBD2=m
  CONFIG_FS_MBCACHE=m
  # CONFIG_REISERFS_FS is not set
  # CONFIG_JFS_FS is not set
@@ -2015,7 +1980,7 @@ index 9592b39b..b42a435e 100644
  # CONFIG_GFS2_FS is not set
  # CONFIG_OCFS2_FS is not set
  # CONFIG_BTRFS_FS is not set
-@@ -6153,7 +7045,7 @@ CONFIG_DNOTIFY=y
+@@ -6153,7 +7010,7 @@ CONFIG_DNOTIFY=y
  CONFIG_INOTIFY_USER=y
  # CONFIG_FANOTIFY is not set
  # CONFIG_QUOTA is not set
