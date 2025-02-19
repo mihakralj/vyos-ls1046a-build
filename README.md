@@ -16,4 +16,4 @@ Embedded a basic [config.boot](./data/config.boot.default) file that sets up DHC
 
 Can basically running in a qemu virtio environment(VGA needs to be `virtio-gpu`).
 
-Tested in Proxmox/HetznerCloud/Scaleway.
+Tested to be compatible with Proxmox/HetznerCloud/Scaleway.

@@ -299,6 +299,7 @@ jobs:
             --custom-package fastnetmon \
             --custom-package containernetworking-plugins \
             --custom-package qemu-guest-agent \
+            --custom-package mokutil \
             generic
           cd build
           # Determine image name and iso file
