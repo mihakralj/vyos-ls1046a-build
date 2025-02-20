@@ -308,6 +308,8 @@ jobs:
             --custom-package qemu-guest-agent \
             --custom-package mokutil \
             --custom-package sbsigntool \
+            --custom-package grub-efi-arm64-signed \
+            --custom-package shim-signed \
             generic
           cd build
           # Determine image name and iso file
