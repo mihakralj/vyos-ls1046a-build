@@ -1,5 +1,5 @@
 diff --git a/scripts/package-build/linux-kernel/arch/arm64/configs/vyos_defconfig b/scripts/package-build/linux-kernel/arch/arm64/configs/vyos_defconfig
-index 9592b39b..3b518dc1 100644
+index fe174f63..3b518dc1 100644
 --- a/scripts/package-build/linux-kernel/arch/arm64/configs/vyos_defconfig
 +++ b/scripts/package-build/linux-kernel/arch/arm64/configs/vyos_defconfig
 @@ -97,10 +97,11 @@ CONFIG_ARCH_WANT_DEFAULT_BPF_JIT=y
@@ -1803,7 +1803,7 @@ index 9592b39b..3b518dc1 100644
  CONFIG_VIRTIO_ANCHOR=y
  CONFIG_VIRTIO=m
  CONFIG_VIRTIO_PCI_LIB=m
-@@ -5356,19 +6081,30 @@ CONFIG_VIRTIO_PCI_LIB_LEGACY=m
+@@ -5356,21 +6081,30 @@ CONFIG_VIRTIO_PCI_LIB_LEGACY=m
  CONFIG_VIRTIO_MENU=y
  CONFIG_VIRTIO_PCI=m
  CONFIG_VIRTIO_PCI_LEGACY=y
@@ -1815,9 +1815,10 @@ index 9592b39b..3b518dc1 100644
  CONFIG_VIRTIO_INPUT=m
  CONFIG_VIRTIO_MMIO=m
  CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y
--# CONFIG_VDPA is not set
+-CONFIG_VIRTIO_VDPA=m
 +CONFIG_VIRTIO_DMA_SHARED_BUFFER=m
-+CONFIG_VDPA=m
+ CONFIG_VDPA=m
+-CONFIG_VHOST_VDPA=m
 +# CONFIG_VDPA_USER is not set
 +CONFIG_IFCVF=m
 +CONFIG_MLX5_VDPA=y
@@ -1836,7 +1837,7 @@ index 9592b39b..3b518dc1 100644
  # CONFIG_VHOST_CROSS_ENDIAN_LEGACY is not set
  
  #
-@@ -6136,7 +6872,15 @@ CONFIG_JBD2=m
+@@ -6138,7 +6872,15 @@ CONFIG_JBD2=m
  CONFIG_FS_MBCACHE=m
  # CONFIG_REISERFS_FS is not set
  # CONFIG_JFS_FS is not set
@@ -1853,7 +1854,7 @@ index 9592b39b..3b518dc1 100644
  # CONFIG_GFS2_FS is not set
  # CONFIG_OCFS2_FS is not set
  # CONFIG_BTRFS_FS is not set
-@@ -6153,7 +6897,7 @@ CONFIG_DNOTIFY=y
+@@ -6155,7 +6897,7 @@ CONFIG_DNOTIFY=y
  CONFIG_INOTIFY_USER=y
  # CONFIG_FANOTIFY is not set
  # CONFIG_QUOTA is not set
@@ -1862,7 +1863,7 @@ index 9592b39b..3b518dc1 100644
  CONFIG_FUSE_FS=m
  CONFIG_CUSE=m
  CONFIG_VIRTIO_FS=m
-@@ -6668,6 +7412,9 @@ CONFIG_SIGNED_PE_FILE_VERIFICATION=y
+@@ -6670,6 +7412,9 @@ CONFIG_SIGNED_PE_FILE_VERIFICATION=y
  #
  # Certificates for signature checking
  #
