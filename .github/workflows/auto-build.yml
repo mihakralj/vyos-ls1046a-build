@@ -177,11 +177,6 @@ jobs:
             cp data/mok/MOK.pem vyos-build/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/
           fi
 
-          ### other
-          # avoid frr backports TODO: delete me later
-          # https://github.com/FRRouting/frr/pull/18155
-          sed -i 's|stable/10.2|cdb2cc2f8970c7d5efa712bd0f4107c93cc8b826|' vyos-build/scripts/package-build/frr/package.toml
-
           true
 
       - name: Build Image Packages
