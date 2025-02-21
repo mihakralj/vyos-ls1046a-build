@@ -94,13 +94,17 @@ jobs:
             # https://github.com/vyos/vyos-1x/commit/d6a82c134bed0b0921595928b7ec600b2935327b
             # vyatta-wanloadbalance
             vyos-utils
-            vyos-user-utils
+            # Architecture:all, can install directly
+            # vyos-user-utils
             vyos-http-api-tools
+            # Architecture:all, can install directly
+            # vyos-cloud-init
             ipaddrcheck
             udp-broadcast-relay
             libnss-mapuser
             hvinfo
-            live-boot
+            # Architecture:all, can install directly
+            # live-boot
           )
           for global_dep in ${global_deps[@]}; do
             git clone https://github.com/vyos/$global_dep
@@ -170,18 +174,17 @@ jobs:
           # set up vim link
           echo 'update-alternatives --install /usr/bin/vim vim /usr/bin/vim.tiny 10 || true' >> vyos-build/data/live-build-config/hooks/live/11-busybox.chroot
 
-          ### Secure Boot
+          ### Sign
           # https://github.com/vyos/vyos-build/blob/d235b31a095f9b8fdb2d5c231935c8b4b4c3da6c/scripts/package-build/linux-kernel/build-kernel.sh#L25
           sed -i 's|arch/x86/configs/vyos_defconfig|arch/arm64/configs/vyos_defconfig|' vyos-build/scripts/package-build/linux-kernel/build-kernel.sh
           sed -i 's|find ../../../data/live-build-config|find ../../../../data/live-build-config|' vyos-build/scripts/package-build/linux-kernel/build-kernel.sh
           # https://github.com/vyos/vyos-build/blob/d235b31a095f9b8fdb2d5c231935c8b4b4c3da6c/data/live-build-config/hooks/live/93-sb-sign-kernel.chroot
-          # sign kernel module but donot sign vmlinuz for testing
+          # sign kernel module but donot sign vmlinuz
           sed -i 's|sbsign|#sbsign|' vyos-build/data/live-build-config/hooks/live/93-sb-sign-kernel.chroot
           sed -i 's|sbverify|#sbverify|' vyos-build/data/live-build-config/hooks/live/93-sb-sign-kernel.chroot
           # https://github.com/vyos/vyos-build/blob/fd737172f1068870fe1ededbe9b2ed4a86663acd/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/README.md
           if [ -f data/mok/MOK.key ]; then
-            cp data/mok/MOK.key vyos-build/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/
-            cp data/mok/MOK.pem vyos-build/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/
+            cp data/mok/MOK.{key,pem} vyos-build/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/
           fi
 
           true
@@ -317,6 +320,7 @@ jobs:
             --custom-package sbsigntool \
             --custom-package grub-efi-arm64-signed \
             --custom-package shim-signed \
+            --custom-package cloud-init \
             generic
           cd build
           # Determine image name and iso file
