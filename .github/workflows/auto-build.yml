@@ -321,7 +321,7 @@ jobs:
             --custom-package grub-efi-arm64-signed \
             --custom-package shim-signed \
             generic
-            # --custom-package cloud-init \
+            # --custom-package cloud-init
           cd build
           # Determine image name and iso file
           GENERIC_IMAGE_NAME=$(jq --raw-output .artifacts[0] manifest.json | sed -e 's/.iso//')
