@@ -1,0 +1,103 @@
+diff --git a/data/templates/grub/grub_compat.j2 b/data/templates/grub/grub_compat.j2
+index 8fb4f71dc..d6bf5c36d 100644
+--- a/data/templates/grub/grub_compat.j2
++++ b/data/templates/grub/grub_compat.j2
+@@ -14,6 +14,10 @@
+     KVM
+ {%- elif type == 'ttyS' -%}
+     Serial
++{%- elif type == 'ttyAM' -%}
++    AMBA serial port(pl010)
++{%- elif type == 'ttyAMA' -%}
++    AMBA serial port(pl011)
+ {%- else -%}
+     Unknown
+ {%- endif %}
+@@ -23,6 +27,10 @@
+     console=ttyS0,{{ console_speed }} console=tty0
+ {%- elif type == 'ttyS' -%}
+     console=tty0 console=ttyS0,{{ console_speed }}
++{%- elif type == 'ttyAM' -%}
++    console=tty0 console=ttyAM0,{{ console_speed }}
++{%- elif type == 'ttyAMA' -%}
++    console=tty0 console=ttyAMA0,{{ console_speed }}
+ {%- else -%}
+     console=tty0 console=ttyS0,{{ console_speed }}
+ {%- endif %}
+diff --git a/data/templates/grub/grub_options.j2 b/data/templates/grub/grub_options.j2
+index a00bf4e37..e3e3f6827 100644
+--- a/data/templates/grub/grub_options.j2
++++ b/data/templates/grub/grub_options.j2
+@@ -33,6 +33,18 @@ submenu "Boot options" {
+             setup_serial
+             configfile ${prefix}/grub.cfg.d/*vyos-menu*.cfg
+         }
++        menuentry "ttyAM (serial)" {
++            set console_type="ttyAM"
++            export console_type
++            setup_serial
++            configfile ${prefix}/grub.cfg.d/*vyos-menu*.cfg
++        }
++        menuentry "ttyAMA (serial)" {
++            set console_type="ttyAMA"
++            export console_type
++            setup_serial
++            configfile ${prefix}/grub.cfg.d/*vyos-menu*.cfg
++        }
+     }
+     menuentry "Enter console number" {
+         read console_num
+diff --git a/data/templates/grub/grub_vyos_version.j2 b/data/templates/grub/grub_vyos_version.j2
+index de85f1419..6e3c9dc7e 100644
+--- a/data/templates/grub/grub_vyos_version.j2
++++ b/data/templates/grub/grub_vyos_version.j2
+@@ -13,6 +13,10 @@ menuentry "{{ version_name }}" --id {{ version_uuid }} {
+     set boot_opts="{{ boot_opts_rendered }}"
+     if [ "${console_type}" == "ttyS" ]; then
+         set console_opts="console=${console_type}${console_num},${console_speed}"
++    elif [ "${console_type}" == "ttyAM" ]; then
++        set console_opts="console=${console_type}${console_num},${console_speed}"
++    elif [ "${console_type}" == "ttyAMA" ]; then
++        set console_opts="console=${console_type}${console_num},${console_speed}"
+     else
+         set console_opts="console=${console_type}${console_num}"
+     fi
+diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
+index 609b0b347..eaef17421 100755
+--- a/src/op_mode/image_installer.py
++++ b/src/op_mode/image_installer.py
+@@ -644,6 +644,10 @@ def console_hint() -> str:
+     name = Path(path).name
+     if name == 'ttyS0':
+         return 'S'
++    elif name == 'ttyAM0':
++        return 'AM'
++    elif name == 'ttyAMA0':
++        return 'AMA'
+     else:
+         return 'K'
+ 
+@@ -787,8 +791,8 @@ def install_image() -> None:
+     # ask for default console
+     console_type: str = ask_input(MSG_INPUT_CONSOLE_TYPE,
+                                   default=console_hint(),
+-                                  valid_responses=['K', 'S'])
+-    console_dict: dict[str, str] = {'K': 'tty', 'S': 'ttyS'}
++                                  valid_responses=['K', 'S', 'AM', 'AMA'])
++    console_dict: dict[str, str] = {'K': 'tty', 'S': 'ttyS', 'AM': 'ttyAM', 'AMA': 'ttyAMA'}
+ 
+     config_boot_list = ['/opt/vyatta/etc/config/config.boot',
+                         '/opt/vyatta/etc/config.boot.default']
+diff --git a/src/op_mode/image_manager.py b/src/op_mode/image_manager.py
+index fb4286dbc..58bf68c97 100755
+--- a/src/op_mode/image_manager.py
++++ b/src/op_mode/image_manager.py
+@@ -33,7 +33,7 @@
+ MSG_DELETE_IMAGE_RUNNING: str = 'Currently running image cannot be deleted; reboot into another image first'
+ MSG_DELETE_IMAGE_DEFAULT: str = 'Default image cannot be deleted; set another image as default first'
+ 
+-ConsoleType: TypeAlias = Literal['tty', 'ttyS']
++ConsoleType: TypeAlias = Literal['tty', 'ttyS', 'ttyAM', 'ttyAMA']
+ 
+ def annotate_list(images_list: list[str]) -> list[str]:
+     """Annotate list of images with additional info

@@ -7,7 +7,7 @@ index 5acd3e90b..6e0c4d064 100644
                <help>Serial console device name</help>
                <completionHelp>
 -                <script>ls -1 /dev | grep -e ttyS -e hvc</script>
-+                <script>ls -1 /dev | grep -e ttyS -e hvc -e ttyA</script>
++                <script>ls -1 /dev | grep -e ttyS -e hvc -e ttyAM</script>
                  <script>if [ -d /dev/serial/by-bus ]; then ls -1 /dev/serial/by-bus; fi</script>
                </completionHelp>
                <valueHelp>
@@ -26,7 +26,7 @@ index 5acd3e90b..6e0c4d064 100644
                </valueHelp>
                <constraint>
 -                  <regex>(ttyS[0-9]+|hvc[0-9]+|usb[0-9]+b.*)</regex>
-+                  <regex>(ttyS[0-9]+|ttyA[A-Z0-9]+|hvc[0-9]+|usb[0-9]+b.*)</regex>
++                  <regex>(ttyS[0-9]+|ttyAMA?[0-9]+|hvc[0-9]+|usb[0-9]+b.*)</regex>
                </constraint>
              </properties>
              <children>
