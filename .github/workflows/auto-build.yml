@@ -156,6 +156,7 @@ jobs:
           # add ttyAM0/ttyAMA0 console support
           patch -p1 -d vyos-build/scripts/package-build/vyos-1x/vyos-1x < data/vyos-1x-001-system_console.patch
           patch -p1 -d vyos-build/scripts/package-build/vyos-1x/vyos-1x < data/vyos-1x-002-boot_console.patch
+          patch -p1 -d vyos-build/scripts/package-build/vyos-1x/vyos-1x < data/vyos-1x-003-increase_vyshim_init_timeout.patch
           # Error: OCI runtime error: crun: cannot set memory+swap limit less than the memory limit
           sed -i 's| --memory-swap 0||' vyos-build/scripts/package-build/vyos-1x/vyos-1x/src/conf_mode/container.py
 

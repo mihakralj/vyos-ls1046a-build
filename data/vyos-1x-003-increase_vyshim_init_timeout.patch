@@ -1,0 +1,13 @@
+diff --git a/src/shim/vyshim.c b/src/shim/vyshim.c
+index 1eb653cbf..b48220106 100644
+--- a/src/shim/vyshim.c
++++ b/src/shim/vyshim.c
+@@ -177,7 +177,7 @@ int initialization(void* Requester)
+     sigaction(SIGALRM, &sa, NULL);
+ 
+     timer.it_value.tv_sec = 0;
+-    timer.it_value.tv_usec = 10000;
++    timer.it_value.tv_usec = 30000;
+     timer.it_interval.tv_sec = timer.it_interval.tv_usec = 0;
+     none_timer.it_value.tv_sec = none_timer.it_value.tv_usec = 0;
+     none_timer.it_interval.tv_sec = none_timer.it_interval.tv_usec = 0;
