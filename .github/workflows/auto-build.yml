@@ -150,40 +150,26 @@ jobs:
           # https://github.com/vyos/vyos-1x/commit/bab186b493145ee42453196e8ef4670afc71f6f1
           # https://github.com/vyos/vyos-1x/commit/dd5f9c19550c1f8ccb5e93bab0b604f9f9e1383e
           cp data/reftree.cache vyos-build/scripts/package-build/vyos-1x/vyos-1x/data/reftree.cache
-          # arm64 *does* support telegraf
-          # https://github.com/vyos/vyos-1x/blob/1db5a06efe31d43c12847663990e7945ca465206/Makefile#L48
-          sed -i 's|rm -rf $(TMPL_DIR)/service/monitoring/telegraf|#|' vyos-build/scripts/package-build/vyos-1x/vyos-1x/Makefile
-          # add ttyAM0/ttyAMA0 console support
+          # apply patches
           patch -p1 -d vyos-build/scripts/package-build/vyos-1x/vyos-1x < data/vyos-1x-001-system_console.patch
           patch -p1 -d vyos-build/scripts/package-build/vyos-1x/vyos-1x < data/vyos-1x-002-boot_console.patch
           patch -p1 -d vyos-build/scripts/package-build/vyos-1x/vyos-1x < data/vyos-1x-003-increase_vyshim_init_timeout.patch
+          patch -p1 -d vyos-build/scripts/package-build/vyos-1x/vyos-1x < data/vyos-1x-004-enable_telegraf_support.patch
           # Error: OCI runtime error: crun: cannot set memory+swap limit less than the memory limit
-          sed -i 's| --memory-swap 0||' vyos-build/scripts/package-build/vyos-1x/vyos-1x/src/conf_mode/container.py
+          patch -p1 -d vyos-build/scripts/package-build/vyos-1x/vyos-1x < data/vyos-1x-005-fix_podman_service.patch
 
           ### vyos-build
           # add default dhcpv4 configuration
           cp data/config.boot.default vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/config.boot.default
           # fix kernel config
-          patch -p1 -d vyos-build < data/kernel_config.patch
-          # https://manpages.debian.org/jessie/squashfs-tools/mksquashfs.1.en.html
-          sed -i 's|-Xbcj x86||' vyos-build/data/defaults.toml
-          # fix hardcoded x86_64
-          sed -i 's|x86_64|aarch64|g' vyos-build/data/live-build-config/hooks/live/*.chroot
-          sed -i 's|x86_64|aarch64|g' vyos-build/data/live-build-config/includes.chroot/etc/initramfs-tools/hooks/*
-          # fix url of saltproject
-          # https://github.com/vyos/vyos-build/blob/current/data/architectures/arm64.toml#L9
-          sed -i 's|amd64|arm64|g' vyos-build/data/architectures/arm64.toml
-          # set up vim link
-          echo 'update-alternatives --install /usr/bin/vim vim /usr/bin/vim.tiny 10 || true' >> vyos-build/data/live-build-config/hooks/live/11-busybox.chroot
-
-          ### Sign
-          # https://github.com/vyos/vyos-build/blob/d235b31a095f9b8fdb2d5c231935c8b4b4c3da6c/scripts/package-build/linux-kernel/build-kernel.sh#L25
-          sed -i 's|arch/x86/configs/vyos_defconfig|arch/arm64/configs/vyos_defconfig|' vyos-build/scripts/package-build/linux-kernel/build-kernel.sh
-          sed -i 's|find ../../../data/live-build-config|find ../../../../data/live-build-config|' vyos-build/scripts/package-build/linux-kernel/build-kernel.sh
-          # https://github.com/vyos/vyos-build/blob/d235b31a095f9b8fdb2d5c231935c8b4b4c3da6c/data/live-build-config/hooks/live/93-sb-sign-kernel.chroot
+          patch -p1 -d vyos-build < data/vyos-build-001-kernel_config.patch
+          patch -p1 -d vyos-build < data/vyos-build-002-mksquashfs_universal.patch
+          patch -p1 -d vyos-build < data/vyos-build-003-fix_hardcoded_x86_64.patch
+          patch -p1 -d vyos-build < data/vyos-build-004-fix_saltproject_package_url.patch
+          patch -p1 -d vyos-build < data/vyos-build-005-add_vim_link.patch
+          patch -p1 -d vyos-build < data/vyos-build-006-fix_kernel_sign.patch
           # sign kernel module but donot sign vmlinuz
-          sed -i 's|sbsign|#sbsign|' vyos-build/data/live-build-config/hooks/live/93-sb-sign-kernel.chroot
-          sed -i 's|sbverify|#sbverify|' vyos-build/data/live-build-config/hooks/live/93-sb-sign-kernel.chroot
+          patch -p1 -d vyos-build < data/vyos-build-007-no_sbsign.patch
           # https://github.com/vyos/vyos-build/blob/fd737172f1068870fe1ededbe9b2ed4a86663acd/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/README.md
           if [ -f data/mok/MOK.key ]; then
             cp data/mok/MOK.{key,pem} vyos-build/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/

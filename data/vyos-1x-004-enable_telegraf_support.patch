@@ -1,0 +1,12 @@
+diff --git a/Makefile b/Makefile
+index b5d114e59..4c6a24a66 100644
+--- a/Makefile
++++ b/Makefile
+@@ -45,7 +45,6 @@ interface_definitions: $(config_xml_obj)
+ 
+ ifeq ($(BUILD_ARCH),arm64)
+ 	# There is currently no telegraf support in VyOS for ARM64, remove CLI definitions
+-	rm -rf $(TMPL_DIR)/service/monitoring/telegraf
+ endif
+ 
+ .PHONY: op_mode_definitions

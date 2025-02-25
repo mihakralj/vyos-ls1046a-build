@@ -1,5 +1,6 @@
 *.DS_Store
 vyos-build/
 vyos-1x/
+global_deps/
 vyos-*-arm64.iso*
 data/mok/MOK.key

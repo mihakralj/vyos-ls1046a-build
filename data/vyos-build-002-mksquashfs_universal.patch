@@ -1,0 +1,13 @@
+diff --git a/data/defaults.toml b/data/defaults.toml
+index 7f1a1ca3..0bd526d9 100644
+--- a/data/defaults.toml
++++ b/data/defaults.toml
+@@ -18,7 +18,7 @@ kernel_version = "6.6.77"
+ kernel_flavor = "vyos"
+ bootloaders = "syslinux,grub-efi"
+ 
+-squashfs_compression_type = "xz -Xbcj x86 -b 256k -always-use-fragments -no-recovery"
++squashfs_compression_type = "xz -b 256k -always-use-fragments -no-recovery"
+ 
+ website_url = "https://vyos.io"
+ support_url = "https://support.vyos.io"

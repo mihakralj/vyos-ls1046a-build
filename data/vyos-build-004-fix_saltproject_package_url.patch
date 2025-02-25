@@ -1,0 +1,13 @@
+diff --git a/data/architectures/arm64.toml b/data/architectures/arm64.toml
+index ebf14ef4..4d8596c6 100644
+--- a/data/architectures/arm64.toml
++++ b/data/architectures/arm64.toml
+@@ -6,7 +6,7 @@ bootloaders = "grub-efi"
+ 
+ [additional_repositories.salt]
+   architecture = "arm64"
+-  url =	"https://packages.vyos.net/saltproject/debian/11/amd64/3005"
++  url =	"https://packages.vyos.net/saltproject/debian/11/arm64/3005"
+   distribution = "bullseye"
+ 
+ [additional_repositories.zabbix]

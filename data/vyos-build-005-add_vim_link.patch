@@ -1,0 +1,9 @@
+diff --git a/data/live-build-config/hooks/live/11-busybox.chroot b/data/live-build-config/hooks/live/11-busybox.chroot
+index 676cb35e..df79cb5c 100755
+--- a/data/live-build-config/hooks/live/11-busybox.chroot
++++ b/data/live-build-config/hooks/live/11-busybox.chroot
+@@ -182,3 +182,4 @@ bb_alternative /usr/sbin/watchdog
+ # mode: shell-script
+ # sh-indentation: 4
+ # End:
++update-alternatives --install /usr/bin/vim vim /usr/bin/vim.tiny 10 || true

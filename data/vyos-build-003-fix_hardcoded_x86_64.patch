@@ -1,0 +1,26 @@
+diff --git a/data/live-build-config/hooks/live/92-strip-symbols.chroot b/data/live-build-config/hooks/live/92-strip-symbols.chroot
+index f44cb01d..dd8f1bee 100755
+--- a/data/live-build-config/hooks/live/92-strip-symbols.chroot
++++ b/data/live-build-config/hooks/live/92-strip-symbols.chroot
+@@ -20,7 +20,7 @@ STRIPDIR_UNNEEDED="
+ /etc/hsflowd/modules
+ /usr/bin
+ /usr/lib/openvpn
+-/usr/lib/x86_64-linux-gnu
++/usr/lib/aarch64-linux-gnu
+ /usr/lib32
+ /usr/lib64
+ /usr/libx32
+diff --git a/data/live-build-config/includes.chroot/etc/initramfs-tools/hooks/10-vyos-addons b/data/live-build-config/includes.chroot/etc/initramfs-tools/hooks/10-vyos-addons
+index b9190971..0a31bfb3 100755
+--- a/data/live-build-config/includes.chroot/etc/initramfs-tools/hooks/10-vyos-addons
++++ b/data/live-build-config/includes.chroot/etc/initramfs-tools/hooks/10-vyos-addons
+@@ -23,7 +23,7 @@ manual_add_modules igb ixgbe ixgbevf i40e i40evf
+ # force_load xxx
+ 
+ # executable to copy to initramfs, with library dependencies
+-copy_exec /usr/lib/x86_64-linux-gnu/libnss_dns.so.2
++copy_exec /usr/lib/aarch64-linux-gnu/libnss_dns.so.2
+ 
+ # missing fsck in initramfs
+ copy_exec /usr/sbin/fsck
