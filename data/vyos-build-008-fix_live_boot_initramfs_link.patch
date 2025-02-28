@@ -1,8 +1,8 @@
 diff --git a/data/live-build-config/hooks/live/00-manifest.binary b/data/live-build-config/hooks/live/00-manifest.binary
-index 4bbf5bd8..d75d05a5 100755
+index 4bbf5bd8..89fb01a5 100755
 --- a/data/live-build-config/hooks/live/00-manifest.binary
 +++ b/data/live-build-config/hooks/live/00-manifest.binary
-@@ -2,3 +2,9 @@
+@@ -2,3 +2,8 @@
  
  echo I: Backwards compat packages.txt
  echo "ii  vyatta-version " > live/packages.txt
