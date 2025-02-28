@@ -47,7 +47,7 @@ jobs:
       - name: Install Dependencies
         run: |
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-          set -x
+          set -ex
           echo "HOME: $HOME"
           echo "PATH: $PATH"
           command -v go
@@ -66,7 +66,7 @@ jobs:
         id: set_env_variables
         run: |
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-          set -x
+          set -ex
           if [ -n "${{ github.event.inputs.BUILD_BY }}" ]; then
             echo "BUILD_BY=${{ github.event.inputs.BUILD_BY }}" >> $GITHUB_ENV
           fi
@@ -82,7 +82,7 @@ jobs:
       - name: Build global deps
         run: |
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-          set -x
+          set -ex
           eval $(opam env --root=/opt/opam --set-root)
           mkdir global_deps
           cd global_deps
@@ -110,10 +110,6 @@ jobs:
             git clone https://github.com/vyos/$global_dep
             cd $global_dep
 
-            # fixed
-            #if [ "${global_dep}" = "ipaddrcheck" ]; then
-            #  rm src/*.o
-            #fi
             echo "y" | mk-build-deps --install --remove
 
             # should update libvyosconfig due to hardcode on vyos-1x
@@ -140,7 +136,7 @@ jobs:
         run: |
           [ -n "$MOK_KEY" ] && echo "$MOK_KEY" > data/mok/MOK.key
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-          set -x
+          set -ex
 
           ### vyos-1x
           git clone --recursive https://github.com/vyos/vyos-1x \
@@ -171,6 +167,7 @@ jobs:
           patch -p1 -d vyos-build < data/vyos-build-006-fix_kernel_sign.patch
           # sign kernel module but donot sign vmlinuz
           patch -p1 -d vyos-build < data/vyos-build-007-no_sbsign.patch
+          patch -p1 -d vyos-build < data/vyos-build-008-fix_live_boot_initramfs_link.patch
           # https://github.com/vyos/vyos-build/blob/fd737172f1068870fe1ededbe9b2ed4a86663acd/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/README.md
           if [ -f data/mok/MOK.key ]; then
             cp data/mok/MOK.{key,pem} vyos-build/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/
@@ -182,7 +179,7 @@ jobs:
         run: |
           cd vyos-build/scripts/package-build
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-          set -x
+          set -ex
           packages=$(ls .)
           ignore_packages=(amazon-cloudwatch-agent amazon-ssm-agent xen-guest-agent)
           for package in $packages; do
@@ -268,7 +265,7 @@ jobs:
         run: |
           cd vyos-build
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-          set -x
+          set -ex
 
           # setup db directory for vnstat
           echo '[[includes_chroot]]' >> data/build-flavors/generic.toml
