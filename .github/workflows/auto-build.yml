@@ -110,9 +110,10 @@ jobs:
             git clone https://github.com/vyos/$global_dep
             cd $global_dep
 
-            if [ "${global_dep}" = "ipaddrcheck" ]; then
-              rm src/*.o
-            fi
+            # fixed
+            #if [ "${global_dep}" = "ipaddrcheck" ]; then
+            #  rm src/*.o
+            #fi
             echo "y" | mk-build-deps --install --remove
 
             # should update libvyosconfig due to hardcode on vyos-1x
