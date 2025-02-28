@@ -1,0 +1,107 @@
+diff --git a/Makefile b/Makefile
+index 911454c6..d0c23ffc 100644
+--- a/Makefile
++++ b/Makefile
+@@ -13,8 +13,8 @@ all:
+ .PHONY: checkiso
+ .ONESHELL:
+ checkiso:
+-	if [ ! -f build/live-image-amd64.hybrid.iso ]; then
+-		echo "Could not find build/live-image-amd64.hybrid.iso"
++	if [ ! -f build/live-image-arm64.hybrid.iso ]; then
++		echo "Could not find build/live-image-arm64.hybrid.iso"
+ 		exit 1
+ 	fi
+ 
+@@ -26,12 +26,12 @@ test: checkiso
+ .PHONY: test-no-interfaces
+ .ONESHELL:
+ test-no-interfaces: checkiso
+-	scripts/check-qemu-install --debug --configd --smoketest --uefi --no-interfaces --cpu 4 --memory 8 build/live-image-amd64.hybrid.iso
++	scripts/check-qemu-install --debug --configd --smoketest --uefi --no-interfaces --cpu 4 --memory 8 build/live-image-arm64.hybrid.iso
+ 
+ .PHONY: test-interfaces
+ .ONESHELL:
+ test-interfaces: checkiso
+-	scripts/check-qemu-install --debug --configd --match="interfaces_" --smoketest --uefi build/live-image-amd64.hybrid.iso
++	scripts/check-qemu-install --debug --configd --match="interfaces_" --smoketest --uefi build/live-image-arm64.hybrid.iso
+ 
+ .PHONY: test-vpp
+ .ONESHELL:
+@@ -41,12 +41,12 @@ test-vpp: checkiso
+ .PHONY: testc
+ .ONESHELL:
+ testc: checkiso
+-	scripts/check-qemu-install --debug --configd --cpu 2 --memory 7 --configtest build/live-image-amd64.hybrid.iso $(filter-out $@,$(MAKECMDGOALS))
++	scripts/check-qemu-install --debug --configd --cpu 2 --memory 7 --uefi --configtest build/live-image-arm64.hybrid.iso $(filter-out $@,$(MAKECMDGOALS))
+ 
+ .PHONY: testraid
+ .ONESHELL:
+ testraid: checkiso
+-	scripts/check-qemu-install --debug --configd --raid build/live-image-amd64.hybrid.iso $(filter-out $@,$(MAKECMDGOALS))
++	scripts/check-qemu-install --debug --configd --uefi --raid build/live-image-arm64.hybrid.iso $(filter-out $@,$(MAKECMDGOALS))
+ 
+ .PHONY: testsb
+ .ONESHELL:
+@@ -56,7 +56,7 @@ testsb: checkiso
+ .PHONY: testtpm
+ .ONESHELL:
+ testtpm: checkiso
+-	scripts/check-qemu-install --debug --tpmtest build/live-image-amd64.hybrid.iso $(filter-out $@,$(MAKECMDGOALS))
++	scripts/check-qemu-install --debug --uefi --tpmtest build/live-image-arm64.hybrid.iso $(filter-out $@,$(MAKECMDGOALS))
+ 
+ .PHONY: qemu-live
+ .ONESHELL:
+diff --git a/scripts/check-qemu-install b/scripts/check-qemu-install
+index 551d1e7e..6b73cadb 100755
+--- a/scripts/check-qemu-install
++++ b/scripts/check-qemu-install
+@@ -142,7 +142,7 @@ if args.sbtest:
+ def get_qemu_cmd(name, enable_uefi, disk_img, raid=None, iso_img=None, tpm=False, vnc_enabled=False, secure_boot=False):
+     uefi = ""
+     uuid = "f48b60b2-e6ad-49ef-9d09-4245d0585e52"
+-    machine = 'pc'
++    machine = 'virt'
+     vga = '-vga none'
+     vnc = ''
+     if vnc_enabled:
+@@ -150,7 +150,7 @@ def get_qemu_cmd(name, enable_uefi, disk_img, raid=None, iso_img=None, tpm=False
+         vnc = '-vnc :0'
+ 
+     if enable_uefi:
+-        uefi = '-bios /usr/share/OVMF/OVMF_CODE.fd'
++        uefi = '-bios /usr/share/AAVMF/AAVMF_CODE.fd'
+         name = f'{name}-UEFI'
+ 
+         if secure_boot:
+@@ -165,12 +165,11 @@ def get_qemu_cmd(name, enable_uefi, disk_img, raid=None, iso_img=None, tpm=False
+     cdrom = ""
+     if iso_img:
+         cdrom = f' -drive file={iso_img},format=raw,if=none,media=cdrom,id=drive-cd1,readonly=on' \
+-                f' -device ahci,id=achi0' \
+-                f' -device ide-cd,bus=achi0.0,drive=drive-cd1,id=cd1,bootindex=10'
++                f' -device scsi-cd,bus=scsi0.0,drive=drive-cd1,id=cd1,bootindex=10'
+ 
+     # RFC7042 section 2.1.2 MAC addresses used for documentation
+     macbase = '00:00:5E:00:53'
+-    cmd = f'qemu-system-x86_64 \
++    cmd = f'qemu-system-aarch64 \
+         -name "{name}" \
+         -smp {args.cpu},sockets=1,cores={args.cpu},threads=1 \
+         -cpu host \
+@@ -182,7 +181,6 @@ def get_qemu_cmd(name, enable_uefi, disk_img, raid=None, iso_img=None, tpm=False
+         {vga} {vnc}\
+         -uuid {uuid} \
+         -cpu host \
+-        {cdrom} \
+         -enable-kvm \
+         -monitor unix:/tmp/qemu-monitor-socket-{disk_img},server,nowait \
+         -netdev user,id=n0,net=192.0.2.0/24,dhcpstart=192.0.2.101,dns=192.0.2.10 -device virtio-net-pci,netdev=n0,mac={macbase}:00,romfile="" \
+@@ -194,6 +192,7 @@ def get_qemu_cmd(name, enable_uefi, disk_img, raid=None, iso_img=None, tpm=False
+         -netdev user,id=n6 -device virtio-net-pci,netdev=n6,mac={macbase}:06,romfile="" \
+         -netdev user,id=n7 -device virtio-net-pci,netdev=n7,mac={macbase}:07,romfile="" \
+         -device virtio-scsi-pci,id=scsi0 \
++        {cdrom} \
+         -drive format=raw,file={disk_img},if=none,media=disk,id=drive-hd1,readonly=off \
+         -device scsi-hd,bus=scsi0.0,drive=drive-hd1,id=hd1,bootindex=1'
+ 

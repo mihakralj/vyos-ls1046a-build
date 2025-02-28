@@ -1,0 +1,51 @@
+system {
+    host-name vyos
+    login {
+        user vyos {
+            authentication {
+                encrypted-password "$6$rounds=656000$Uh9Fx/JsPWFTpfIO$DPQOFL8ThwtckZOrIEbGMwj6WNZnxV3ZfS/UuxuONg0oMpEDR350YkkYOdjcZWpsB9K1XHrOmBFtI34usaqvs."
+                // plaintext-password "a_strong-p@ssword"
+            }
+        }
+    }
+    syslog {
+        global {
+            facility all {
+                level info
+            }
+            facility protocols {
+                level debug
+            }
+        }
+    }
+    ntp {
+        server "time.apple.com"
+        server "time.cloudflare.com"
+        server "time.google.com"
+    }
+    console {
+        device ttyAMA0 {
+            speed 115200
+        }
+    }
+    config-management {
+        commit-revisions 100
+    }
+    update-check {
+        auto-check
+        url https://raw.githubusercontent.com/huihuimoe/vyos-arm64-build/refs/heads/master/version.json
+    }
+}
+
+interfaces {
+    loopback lo {
+    }
+    ethernet eth0 {
+        address dhcp
+    }
+}
+
+service {
+    ssh {
+    }
+}

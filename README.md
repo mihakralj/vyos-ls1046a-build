@@ -12,8 +12,10 @@ For amd64 users, refer the official nightly builds on <https://github.com/vyos/v
 
 # Usage
 
-Embedded a basic [config.boot](./data/config.boot.default) file that sets up DHCP for the eth0 interface and enables SSH access with the default username `vyos` and password `a_strong-p@ssword`.
-
 Can basically running in a qemu virtio environment(VGA needs to be `virtio-gpu`).
 
 Tested to be compatible with Proxmox/HetznerCloud/Scaleway.
+
+# Troubleshooting
+
+This image also embedded a basic [/opt/vyatta/etc/config.boot.dhcp](./data/config.boot.dhcp) file that sets up DHCP for the eth0 interface and enables SSH access with the default username `vyos` and password `a_strong-p@ssword`. If you are unable to connect to the device, you can try using this configuration file(adding `vyos-config=/opt/vyatta/etc/config.boot.dhcp`) to troubleshoot connectivity issues following [documentation](https://docs.vyos.io/en/latest/operation/boot-options.html).

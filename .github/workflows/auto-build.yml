@@ -156,8 +156,9 @@ jobs:
           patch -p1 -d vyos-build/scripts/package-build/vyos-1x/vyos-1x < data/vyos-1x-005-fix_podman_service.patch
 
           ### vyos-build
-          # add default dhcpv4 configuration
-          cp data/config.boot.default vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/config.boot.default
+          # add default and dhcpv4 configuration
+          cp data/config.boot.default vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/
+          cp data/config.boot.dhcp vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/
           # fix kernel config
           patch -p1 -d vyos-build < data/vyos-build-001-kernel_config.patch
           patch -p1 -d vyos-build < data/vyos-build-002-mksquashfs_universal.patch
