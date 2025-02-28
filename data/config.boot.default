@@ -3,8 +3,8 @@ system {
     login {
         user vyos {
             authentication {
-                encrypted-password "*"
-                plaintext-password ""
+                encrypted-password "$6$rounds=656000$SJsG87tq0bbBWrqZ$BRzd3F6tTbAjGZrH.Pja3qxeABa2l47hSFUWAdqyaeZxMPo7vsrzlfmkngu9HklJMUdeBqrVxbeGfyZ0DFDg30"
+                // plaintext-password "vyos"
             }
             level admin
         }

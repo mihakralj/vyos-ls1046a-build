@@ -53,7 +53,7 @@ index 911454c6..d0c23ffc 100644
  .PHONY: qemu-live
  .ONESHELL:
 diff --git a/scripts/check-qemu-install b/scripts/check-qemu-install
-index 551d1e7e..6b73cadb 100755
+index 551d1e7e..8cd35e39 100755
 --- a/scripts/check-qemu-install
 +++ b/scripts/check-qemu-install
 @@ -142,7 +142,7 @@ if args.sbtest:
@@ -105,3 +105,12 @@ index 551d1e7e..6b73cadb 100755
          -drive format=raw,file={disk_img},if=none,media=disk,id=drive-hd1,readonly=off \
          -device scsi-hd,bus=scsi0.0,drive=drive-hd1,id=hd1,bootindex=1'
  
+@@ -412,7 +411,7 @@ try:
+     c.expect(f'\nPlease confirm password for the "{default_user}" user.*')
+     c.sendline('vyos')
+     c.expect('\nWhat console should be used by default?.*')
+-    c.sendline('S')
++    c.sendline('AMA')
+ 
+     if args.raid:
+         c.expect('\nWould you like to configure RAID-1 mirroring??.*')
