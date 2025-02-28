@@ -1,0 +1,59 @@
+diff --git a/data/live-build-config/hooks/live/01-live-serial.binary b/data/live-build-config/hooks/live/01-live-serial.binary
+index 05785da7..2b25f2ba 100755
+--- a/data/live-build-config/hooks/live/01-live-serial.binary
++++ b/data/live-build-config/hooks/live/01-live-serial.binary
+@@ -3,8 +3,8 @@
+ GRUB_PATH=boot/grub/grub.cfg
+ ISOLINUX_PATH=isolinux/live.cfg
+ 
+-KVM_CONSOLE="console=ttyS0,115200 console=tty0"
+-SERIAL_CONSOLE="console=tty0 console=ttyS0,115200"
++KVM_CONSOLE="console=ttyAMA0,115200 console=tty0"
++SERIAL_CONSOLE="console=tty0 console=ttyAMA0,115200"
+ 
+ # Grub.cfg Update
+ GRUB_MENUENTRY=$(sed -e '/menuentry.*hotkey.*/,/^}/!d' -e 's/--hotkey=l//g' $GRUB_PATH)
+diff --git a/data/live-build-config/includes.chroot/opt/vyatta/etc/grub/default-union-grub-entry b/data/live-build-config/includes.chroot/opt/vyatta/etc/grub/default-union-grub-entry
+index 49f4afc4..c8111a76 100644
+--- a/data/live-build-config/includes.chroot/opt/vyatta/etc/grub/default-union-grub-entry
++++ b/data/live-build-config/includes.chroot/opt/vyatta/etc/grub/default-union-grub-entry
+@@ -1,20 +1,20 @@
+ menuentry "VyOS  (KVM console)" {
+-        linux /boot//vmlinuz boot=live quiet rootdelay=5 noautologin net.ifnames=0 biosdevname=0 udev.exec_delay=3 vyos-union=/boot/ console=ttyS0,115200 console=tty0
++        linux /boot//vmlinuz boot=live quiet rootdelay=5 noautologin net.ifnames=0 biosdevname=0 udev.exec_delay=3 vyos-union=/boot/ console=ttyAMA0,115200 console=tty0
+         initrd /boot//initrd.img
+ }
+ 
+ menuentry "VyOS  (Serial console)" {
+-        linux /boot//vmlinuz boot=live quiet rootdelay=5 noautologin net.ifnames=0 biosdevname=0 udev.exec_delay=3 vyos-union=/boot/ console=tty0 console=ttyS0,115200
++        linux /boot//vmlinuz boot=live quiet rootdelay=5 noautologin net.ifnames=0 biosdevname=0 udev.exec_delay=3 vyos-union=/boot/ console=tty0 console=ttyAMA0,115200
+         initrd /boot//initrd.img
+ }
+ 
+ menuentry "Lost password change  (KVM console)" {
+-        linux /boot//vmlinuz boot=live quiet rootdelay=5 noautologin net.ifnames=0 biosdevname=0 udev.exec_delay=3 vyos-union=/boot/ console=ttyS0,115200 console=tty0 init=/opt/vyatta/sbin/standalone_root_pw_reset
++        linux /boot//vmlinuz boot=live quiet rootdelay=5 noautologin net.ifnames=0 biosdevname=0 udev.exec_delay=3 vyos-union=/boot/ console=ttyAMA0,115200 console=tty0 init=/opt/vyatta/sbin/standalone_root_pw_reset
+         initrd /boot//initrd.img
+ }
+ 
+ menuentry "Lost password change  (Serial console)" {
+-        linux /boot//vmlinuz boot=live quiet rootdelay=5 noautologin net.ifnames=0 biosdevname=0 udev.exec_delay=3 vyos-union=/boot/ console=tty0 console=ttyS0,115200 init=/opt/vyatta/sbin/standalone_root_pw_reset
++        linux /boot//vmlinuz boot=live quiet rootdelay=5 noautologin net.ifnames=0 biosdevname=0 udev.exec_delay=3 vyos-union=/boot/ console=tty0 console=ttyAMA0,115200 init=/opt/vyatta/sbin/standalone_root_pw_reset
+         initrd /boot//initrd.img
+ }
+ 
+diff --git a/scripts/image-build/build-vyos-image b/scripts/image-build/build-vyos-image
+index d969c157..7e36a1c4 100755
+--- a/scripts/image-build/build-vyos-image
++++ b/scripts/image-build/build-vyos-image
+@@ -618,8 +618,8 @@ DOCUMENTATION_URL="{build_config['documentation_url']}"
+                 --archive-areas {{debian_archive_areas}} \
+                 --backports true \
+                 --binary-image iso-hybrid \
+-                --bootappend-live "boot=live components hostname=vyos username=live nopersistence noautologin nonetworking union=overlay console=ttyS0,115200 console=tty0 net.ifnames=0 biosdevname=0" \
+-                --bootappend-live-failsafe "live components memtest noapic noapm nodma nomce nolapic nomodeset nosmp nosplash vga=normal console=ttyS0,115200 console=tty0 net.ifnames=0 biosdevname=0" \
++                --bootappend-live "boot=live components hostname=vyos username=live nopersistence noautologin nonetworking union=overlay console=ttyAMA0,115200 console=tty0 net.ifnames=0 biosdevname=0" \
++                --bootappend-live-failsafe "live components memtest noapic noapm nodma nomce nolapic nomodeset nosmp nosplash vga=normal console=ttyAMA0,115200 console=tty0 net.ifnames=0 biosdevname=0" \
+                 --bootloaders {{bootloaders}} \
+                 --checksums 'sha256 md5' \
+                 --chroot-squashfs-compression-type "{{squashfs_compression_type}}" \

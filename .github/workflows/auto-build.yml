@@ -168,6 +168,7 @@ jobs:
           # sign kernel module but donot sign vmlinuz
           patch -p1 -d vyos-build < data/vyos-build-007-no_sbsign.patch
           patch -p1 -d vyos-build < data/vyos-build-008-fix_live_boot_initramfs_link.patch
+          patch -p1 -d vyos-build < data/vyos-build-009-live_boot_serial_console_device.patch
           # https://github.com/vyos/vyos-build/blob/fd737172f1068870fe1ededbe9b2ed4a86663acd/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/README.md
           if [ -f data/mok/MOK.key ]; then
             cp data/mok/MOK.{key,pem} vyos-build/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/
