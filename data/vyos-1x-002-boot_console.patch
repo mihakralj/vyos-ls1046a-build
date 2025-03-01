@@ -63,9 +63,18 @@ index de85f1419..6e3c9dc7e 100644
          set console_opts="console=${console_type}${console_num}"
      fi
 diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
-index 609b0b347..eaef17421 100755
+index 609b0b347..93c6f8e43 100755
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
+@@ -72,7 +72,7 @@
+ MSG_INPUT_PASSWORD_CONFIRM: str = 'Please confirm password for the "vyos" user:'
+ MSG_INPUT_ROOT_SIZE_ALL: str = 'Would you like to use all the free space on the drive?'
+ MSG_INPUT_ROOT_SIZE_SET: str = 'Please specify the size (in GB) of the root partition (min is 1.5 GB)?'
+-MSG_INPUT_CONSOLE_TYPE: str = 'What console should be used by default? (K: KVM, S: Serial)?'
++MSG_INPUT_CONSOLE_TYPE: str = 'What console should be used by default? (K: KVM, S: Serial, AM: ttyAMn AMA: ttyAMAn)?'
+ MSG_INPUT_COPY_DATA: str = 'Would you like to copy data to the new image?'
+ MSG_INPUT_CHOOSE_COPY_DATA: str = 'From which image would you like to save config information?'
+ MSG_INPUT_COPY_ENC_DATA: str = 'Would you like to copy the encrypted config to the new image?'
 @@ -644,6 +644,10 @@ def console_hint() -> str:
      name = Path(path).name
      if name == 'ttyS0':
