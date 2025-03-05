@@ -115,6 +115,7 @@ jobs:
             # should update libvyosconfig due to hardcode on vyos-1x
             # https://github.com/vyos/vyos-1x/blob/e90a2781f9eae555097e078b9b11dd0dca6c0acd/python/vyos/configtree.py#L22
             # that will failed on reftree.cache
+            # TODO: Remove me, fixed on https://github.com/vyos/vyos-1x/commit/731195c7adb21208767199f5487dfdf29ce09380
             if [ "${global_dep}" = "libvyosconfig" ]; then
               ./build.sh
               cp _build/libvyosconfig.so /usr/lib/libvyosconfig.so.0
