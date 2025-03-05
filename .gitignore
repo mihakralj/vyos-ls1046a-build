@@ -4,3 +4,4 @@ vyos-1x/
 global_deps/
 vyos-*-arm64.iso*
 data/mok/MOK.key
+data/huihuimoe-vyos-arm64.minisign.key

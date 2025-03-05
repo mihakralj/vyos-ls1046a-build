@@ -134,8 +134,11 @@ jobs:
       - name: Fix vyos-build
         env:
           MOK_KEY: ${{ secrets.MOK_KEY }}
+          MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
         run: |
           [ -n "$MOK_KEY" ] && echo "$MOK_KEY" > data/mok/MOK.key
+          [ -n "$MINISIGN_PRIVATE_KEY" ] && echo "$MINISIGN_PRIVATE_KEY" > data/huihuimoe-vyos-arm64.minisign.key
+
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
           set -ex
 
@@ -175,6 +178,8 @@ jobs:
           if [ -f data/mok/MOK.key ]; then
             cp data/mok/MOK.{key,pem} vyos-build/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/
           fi
+          # add minisign pubkey
+          cp data/huihuimoe-vyos-arm64.minisign.pub vyos-build/data/live-build-config/includes.chroot/usr/share/vyos/keys/
 
           true
 
@@ -317,9 +322,18 @@ jobs:
           GENERIC_IMAGE_ISO=$(jq --raw-output .artifacts[0] manifest.json)
           echo "generic_image_name=${GENERIC_IMAGE_NAME}" >> $GITHUB_OUTPUT
           echo "generic_image_iso=${GENERIC_IMAGE_ISO}" >> $GITHUB_OUTPUT
-          sha1sum ${GENERIC_IMAGE_ISO} > ${GENERIC_IMAGE_ISO}.sha1sum
+          # Cryptographically sign the image
+          MINISIGN_PUBKEY_FILE=$GITHUB_WORKSPACE/data/huihuimoe-vyos-arm64.minisign.pub
+          MINISIGN_SECKEY_FILE=$GITHUB_WORKSPACE/data/huihuimoe-vyos-arm64.minisign.key
+          if [ -f "$MINISIGN_SECKEY_FILE" ]; then
+            $GITHUB_WORKSPACE/bin/minisign -s $MINISIGN_SECKEY_FILE -Sm ${GENERIC_IMAGE_ISO}
+            $GITHUB_WORKSPACE/bin/minisign -Vm ${GENERIC_IMAGE_ISO} -x ${GENERIC_IMAGE_ISO}.minisig -p $MINISIGN_PUBKEY_FILE
+          else
+            # create a empty file to indicate failure
+            touch ${GENERIC_IMAGE_ISO}.minisig
+          fi
           # Move artifacts to workspace to avoid nested path in artifact archive
-          mv manifest.json ${GENERIC_IMAGE_ISO} ${GENERIC_IMAGE_ISO}.sha1sum $GITHUB_WORKSPACE
+          mv manifest.json ${GENERIC_IMAGE_ISO} ${GENERIC_IMAGE_ISO}.minisig $GITHUB_WORKSPACE
 
       - uses: actions/upload-artifact@v4
         with:
@@ -327,7 +341,7 @@ jobs:
           path: |
             manifest.json
             ${{ steps.build_generic_iso.outputs.generic_image_iso }}
-            ${{ steps.build_generic_iso.outputs.generic_image_iso }}.sha1sum
+            ${{ steps.build_generic_iso.outputs.generic_image_iso }}.minisig
           retention-days: 15
           if-no-files-found: error
 
@@ -440,7 +454,7 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             ${{ needs.build_generic_iso.outputs.generic_image_iso }}
-            ${{ needs.build_generic_iso.outputs.generic_image_iso }}.sha1sum
+            ${{ needs.build_generic_iso.outputs.generic_image_iso }}.minisig
 
       - uses: Nats-ji/delete-old-releases@v1
         with:
