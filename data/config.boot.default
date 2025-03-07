@@ -6,7 +6,6 @@ system {
                 encrypted-password "$6$rounds=656000$SJsG87tq0bbBWrqZ$BRzd3F6tTbAjGZrH.Pja3qxeABa2l47hSFUWAdqyaeZxMPo7vsrzlfmkngu9HklJMUdeBqrVxbeGfyZ0DFDg30"
                 // plaintext-password "vyos"
             }
-            level admin
         }
     }
     syslog {
@@ -14,15 +13,28 @@ system {
             facility all {
                 level info
             }
-            facility protocols {
+            facility local7 {
                 level debug
             }
         }
     }
     ntp {
-        server "time.apple.com"
-        server "time.cloudflare.com"
-        server "time.google.com"
+        allow-client {
+            address "127.0.0.0/8"
+            address "169.254.0.0/16"
+            address "10.0.0.0/8"
+            address "172.16.0.0/12"
+            address "192.168.0.0/16"
+            address "::1/128"
+            address "fe80::/10"
+            address "fc00::/7"
+        }
+        server time.apple.com {
+        }
+        server time.cloudflare.com {
+        }
+        server time.google.com {
+        }
     }
     console {
         device ttyAMA0 {
