@@ -7,14 +7,14 @@ on:
   workflow_dispatch:
     inputs:
       BUILD_BY:
-        description: 'Builder identifier (default: github@huihui.contact)'
+        description: 'Builder identifier (default: 1707683+huihuimoe@users.noreply.github.com)'
         default: ''
       build_version:
         description: 'Version number (default: 1.5-rolling-ISO8601-TIMESTAMP)'
         default: ''
 
 env:
-  BUILD_BY: github@huihui.contact
+  BUILD_BY: 1707683+huihuimoe@users.noreply.github.com
   DEBIAN_MIRROR: http://deb.debian.org/debian/
   DEBIAN_SECURITY_MIRROR: http://deb.debian.org/debian-security
   # no package on the official repo
@@ -52,6 +52,8 @@ jobs:
           echo "PATH: $PATH"
           command -v go
           command -v ocamlfind
+          lscpu
+          free -m
           # Install missing packages
           apt-get update -qq
           apt-get install -y \
@@ -359,11 +361,13 @@ jobs:
         with:
           repository: vyos/vyos-build
           path: vyos-build
+          fetch-depth: 0
       - name: Clone vyos-1x source code
         uses: actions/checkout@v4
         with:
           repository: vyos/vyos-1x
           path: vyos-1x
+          fetch-depth: 0
       -  id: commit_ids
          shell: bash
          run: |
@@ -440,7 +444,7 @@ jobs:
         with:
           tagging_message: ${{ needs.build_generic_iso.outputs.build_version }}
           commit_message: ${{ needs.build_generic_iso.outputs.build_version }}
-          commit_author: "github-actions <${{ needs.build_generic_iso.outputs.BUILD_BY }}>"
+          # commit_author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
 
       - uses: actions/download-artifact@v4
         with:
