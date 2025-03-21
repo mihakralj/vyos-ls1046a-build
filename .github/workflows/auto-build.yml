@@ -181,7 +181,10 @@ jobs:
           patch -p1 -d vyos-build < data/vyos-build-009-live_boot_serial_console_device.patch
           # https://github.com/vyos/vyos-build/blob/fd737172f1068870fe1ededbe9b2ed4a86663acd/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/README.md
           if [ -f data/mok/MOK.key ]; then
-            cp data/mok/MOK.{key,pem} vyos-build/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/
+            # https://github.com/vyos/vyos-build/commit/d552f7f8c38d7ad3bd28d9019a58b57e41b07f0b
+            # data/live-build-config/includes.chroot/var/lib/shim-signed/mok -> vyos-build/data/certificates
+            cp data/mok/MOK.key vyos-build/data/certificates/vyos-dev-2025-linux.key
+            cp data/mok/MOK.pem vyos-build/data/certificates/vyos-dev-2025-linux.pem
           fi
           # add minisign pubkey
           cp data/huihuimoe-vyos-arm64.minisign.pub vyos-build/data/live-build-config/includes.chroot/usr/share/vyos/keys/
