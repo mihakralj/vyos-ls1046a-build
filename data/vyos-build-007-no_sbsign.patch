@@ -1,13 +1,15 @@
 diff --git a/data/live-build-config/hooks/live/93-sb-sign-kernel.chroot b/data/live-build-config/hooks/live/93-sb-sign-kernel.chroot
-index 1dc03186..bd249800 100755
+index 8494a5c8..c80cb3a1 100755
 --- a/data/live-build-config/hooks/live/93-sb-sign-kernel.chroot
 +++ b/data/live-build-config/hooks/live/93-sb-sign-kernel.chroot
-@@ -17,6 +17,6 @@ if [ ! -f ${MOK_KEY} ]; then
+@@ -17,8 +17,8 @@ if [ ! -f ${KERNEL_KEY} ] && [ ! -f ${KERNEL_CERT} ]; then
      echo "I: Signing key for Linux Kernel not found - Secure Boot not possible"
  else
      echo "I: Signing Linux Kernel for Secure Boot"
--    sbsign --key ${MOK_KEY} --cert ${MOK_CERT} /boot/${VMLINUZ} --output /boot/${VMLINUZ}
+-    sbsign --key ${KERNEL_KEY} --cert ${KERNEL_CERT} /boot/${VMLINUZ} --output /boot/${VMLINUZ}
 -    sbverify --list /boot/${VMLINUZ}
-+    #sbsign --key ${MOK_KEY} --cert ${MOK_CERT} /boot/${VMLINUZ} --output /boot/${VMLINUZ}
-+    #sbverify --list /boot/${VMLINUZ}
++    # sbsign --key ${KERNEL_KEY} --cert ${KERNEL_CERT} /boot/${VMLINUZ} --output /boot/${VMLINUZ}
++    # sbverify --list /boot/${VMLINUZ}
+     rm -f ${KERNEL_KEY}
  fi
+ 
