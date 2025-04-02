@@ -60,9 +60,10 @@ jobs:
             git-lfs libglib2.0-dev libip4tc-dev libipset-dev libnfnetlink-dev bubblewrap \
             libnftnl-dev libnl-nf-3-dev libpopt-dev libsystemd-dev perl-xs-dev \
             kpartx clang llvm libpcap-dev xz-utils python-is-python3 libbpf-dev linux-libc-dev \
-            protobuf-compiler python3-cracklib
+            protobuf-compiler python3-cracklib python3-protobuf
           # python3-cracklib: https://github.com/vyos/vyos-build/commit/e846e68f9f6457865f3e3af92adfe42933555c59
           # protobuf-compiler: https://github.com/vyos/vyos-build/commit/0a6c197226400c4bbe210b435baaa716d4fb8377
+          # python3-protobuf: https://github.com/vyos/vyos-build/commit/dd2c245be73c1e83b6ca392924aa549f77c5586e
 
       - uses: actions/checkout@v4
         with:
