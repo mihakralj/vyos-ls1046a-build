@@ -1,30 +1,42 @@
 ## vyos-1x
-- wireguard: T7246: verify Base64 encoded 32byte boundary on keys
-   - PR: vyos/vyos-1x#4402
-- T7138: Fix show qos
-   - PR: vyos/vyos-1x#4400
-- T861: rename Secure Boot MOK (Machine Owner Key) file
-   - PR: vyos/vyos-1x#4397
-- firewall: T5493: Implement remote-group
-   - PR: vyos/vyos-1x#4326
-- T7278: Remove cracklib hack from postconfig script template
-   - PR: vyos/vyos-1x#4413
-- T7246: update hash for strip version on config load
-   - PR: vyos/vyos-1x#4415
+- fixup: T7295: add an explicit dependency on tzdata > 2025 to prevent APT from pulling that package from buster
+   - PR: vyos/vyos-1x#4421
+- T7294: preserve /config symlinks on image upgrade
+   - PR: vyos/vyos-1x#4423
+- T7291: disabled codeowners review
+   - PR: vyos/vyos-1x#4418
+- T7286: Add CLI option to disable LDP establish packets
+   - PR: vyos/vyos-1x#4416
+- syslog: T7270: fix typos in rsyslog.conf
+   - PR: vyos/vyos-1x#4409
+- T7289: add libvyosconfig as git submodule for builds from private repos
+   - PR: vyos/vyos-1x#4417
+- T7296: update hash for restrict opam ppx_deriving_yojson <= v3.9.1
+   - PR: vyos/vyos-1x#4426
+- T7289: fix typo in git submodule status check
+   - PR: vyos/vyos-1x#4425
+- pki: T7299: race condition for acme requested certificates / CA chain
+   - PR: vyos/vyos-1x#4424
+- virtual-ethernet: T7293: add support to define interface MTU
+   - PR: vyos/vyos-1x#4420
+- installer: T7301: remove support for GnuPG signatures
+   - PR: vyos/vyos-1x#4429
+- login: T7159: limit the "not a production version" to dev builds
+   - PR: vyos/vyos-1x#4428
+- T7289: fix relative path for git submodule url
+   - PR: vyos/vyos-1x#4432
+- T7290: Fix VPN IPsec log level processing
+   - PR: vyos/vyos-1x#4431
 
 
 ## vyos-build
-- hooks: T7217: remove Dropbear SSH host keys at image build time
-   - PR: vyos/vyos-build#933
-- T7121: Set up communication vyconfd to vyos-commitd
-   - PR: vyos/vyos-build#931
-- T7226: Added FRR patch with option that disables LDP hello
-   - PR: vyos/vyos-build#932
-- T861: minor improvements to secure-boot certificate handling
-   - PR: vyos/vyos-build#930
-- T7226: Fixed ldpd crash with tLDP message for disabled LDP hello message
-   - PR: vyos/vyos-build#934
-- T7278: Fix python3-cracklib database creation on update
-   - PR: vyos/vyos-build#935
+- T7291: disabled codeowners review
+   - PR: vyos/vyos-build#937
+- Kernel: T6230: add ipt_NETFLOW out-of-tree module
+   - PR: vyos/vyos-build#924
+- T7292: add build dependency python3-protobuf
+   - PR: vyos/vyos-build#938
+- build: T7301: do not include the GPG image signing key in images
+   - PR: vyos/vyos-build#940
 
 
