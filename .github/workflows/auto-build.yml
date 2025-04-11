@@ -111,6 +111,9 @@ jobs:
             hvinfo
             # Architecture:all, can install directly
             # live-boot
+            # https://github.com/vyos/vyos-1x/commit/74b403c3e9474f0f80780e956f24008a602d1a00
+            libpam-radius-auth
+            libnss-mapuser
           )
           for global_dep in ${global_deps[@]}; do
             git clone https://github.com/vyos/$global_dep
