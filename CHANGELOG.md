@@ -1,38 +1,60 @@
 ## vyos-1x
-- netplug: T7346: only call interface helpers if interface is not removed
-   - PR: vyos/vyos-1x#4443
-- T7355: cleanup unused Python3 imports
-   - PR: vyos/vyos-1x#4448
-- T7359: confirm image name is available before proceeding with image installation
-   - PR: vyos/vyos-1x#4451
-- vyos-router: T7356: unset ANSI bold control character during boot
-   - PR: vyos/vyos-1x#4450
-- firewall: T7333: Use separate cache keys per inet family
-   - PR: vyos/vyos-1x#4440
-- kea: T7310: add support for RFC-5417 (option 138)
-   - PR: vyos/vyos-1x#4430
-- T7321: Replace legacy operations in configsession.py with vyconf client operations
-   - PR: vyos/vyos-1x#4445
-- T7353: T7360: netplug: behavior change 1.3.8 -> 1.4 when interface with DHCP address looses carrier
-   - PR: vyos/vyos-1x#4449
-- ids: T7241: remove Fastnetmon from the base system
-   - PR: vyos/vyos-1x#4214
-- kea: T7281: Add ping-check, use built-in option for classless static routes
-   - PR: vyos/vyos-1x#4412
-- dhcpv6-client: T6113: add proper startup/shutdown order for systemd units
-   - PR: vyos/vyos-1x#4454
-- T7343: IPsec add traffic-selector handling for VTI interfaces
-   - PR: vyos/vyos-1x#4446
-- grub: T7327: honor "system option kernel" settings during image upgrade
-   - PR: vyos/vyos-1x#4453
+- firewall: T7370: Add conntrack log commands
+   - PR: vyos/vyos-1x#4459
+- T7334: pr mirror trigger workflow added with label creation permission for default github token
+   - PR: vyos/vyos-1x#4462
+- T6773: RFC-2136 support for Kea DHCP4 server
+   - PR: vyos/vyos-1x#4153
+- ospf: T7383: Fixed unconfigured redistribution of nhrp into ospf
+   - PR: vyos/vyos-1x#4466
+- bridge: T7322:  fix slow performance of allowed vlan
+   - PR: vyos/vyos-1x#4444
+- interface: T4627: support setting of IPv6 Interface Identifier(Token)
+   - PR: vyos/vyos-1x#4392
+- geoip: T5636: Add geoip for policy route/route6
+   - PR: vyos/vyos-1x#4419
+- interface: T7375: cleanup SLAAC assigned address and default route after removing SLAAC CLI configuration
+   - PR: vyos/vyos-1x#4461
+- syslog: T7367: ensure rsyslog is registered as default systemd syslog service
+   - PR: vyos/vyos-1x#4460
+- interface: T4627: not every interface type supports IPv6 interface-identifiers
+   - PR: vyos/vyos-1x#4467
+- dhclient: T6253: Respect 
+   - PR: vyos/vyos-1x#4465
+- router-advert: T7380: Implement auto-ignore-prefix syntax for router advertisements
+   - PR: vyos/vyos-1x#4463
+- T7316: Add MTU validation for interfaces with MTU less then 1200
+   - PR: vyos/vyos-1x#4442
+- T7282: op-mode: show firewall group filtering and tab completion update
+   - PR: vyos/vyos-1x#4414
+- bgp: T7220: Add the option to disable enforce-first-as at peer level
+   - PR: vyos/vyos-1x#4469
+- firewall: T7358: add offload option to global state policy
+   - PR: vyos/vyos-1x#4457
+- T7394: add system image raises not iterable error
+   - PR: vyos/vyos-1x#4471
+- smoketest: T7400: fix unbound variable when checking VXLAN remote and group settings
+   - PR: vyos/vyos-1x#4475
 
 
 ## vyos-build
-- vyos-build: T7357: add libnss-mapuser package
-   - PR: vyos/vyos-build#945
-- T7353: netplug.service is started by vyos-router
-   - PR: vyos/vyos-build#944
-- kea: T7281: Update Kea to 2.6.1-2
-   - PR: vyos/vyos-build#936
+- T6322: Include microcode in amd64 architecture builds
+   - PR: vyos/vyos-build#922
+- build: T7241: remove fastnetmon from the list of services to be disabled by default
+   - PR: vyos/vyos-build#947
+- T7334: pr mirror trigger workflow added with label creation permission for default github token
+   - PR: vyos/vyos-build#950
+- radvd: T7376: upgrade package to v2.20
+   - PR: vyos/vyos-build#949
+- build: T7372: correctly quote lb_config arguments
+   - PR: vyos/vyos-build#948
+- T7367: syslog.service links to rsyslog.service - thus disable it, too
+   - PR: vyos/vyos-build#951
+- Kernel: T5887: update Linux Kernel to v6.6.87
+   - PR: vyos/vyos-build#952
+- T7384: Radius patch for Dns-Server-IPv6-Address attribute - accel-ppp
+   - PR: vyos/vyos-build#926
+- T7347: Update prometheus exporters
+   - PR: vyos/vyos-build#943
 
 
