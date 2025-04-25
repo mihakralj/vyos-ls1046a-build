@@ -10,7 +10,7 @@ on:
         description: 'Builder identifier (default: 1707683+huihuimoe@users.noreply.github.com)'
         default: ''
       build_version:
-        description: 'Version number (default: 1.5-rolling-ISO8601-TIMESTAMP)'
+        description: 'Version number (default: YYYY.MM.DD-TIMESTAMP-rolling)'
         default: ''
 
 env:
@@ -77,7 +77,7 @@ jobs:
             echo "BUILD_BY=${{ github.event.inputs.BUILD_BY }}" >> $GITHUB_ENV
           fi
           if [ -z "${{ github.event.inputs.build_version }}" ]; then
-            echo "build_version=1.5-rolling-$(date -u +%Y%m%d%H%M)" >> $GITHUB_OUTPUT
+            echo "build_version=$(date -u +%Y.%m.%d-%H%M)-rolling" >> $GITHUB_ENV
           else
             echo "build_version=${{ github.event.inputs.build_version }}" >> $GITHUB_OUTPUT
           fi
