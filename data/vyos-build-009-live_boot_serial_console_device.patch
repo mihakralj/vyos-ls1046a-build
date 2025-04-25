@@ -43,17 +43,17 @@ index 49f4afc4..c8111a76 100644
  }
  
 diff --git a/scripts/image-build/build-vyos-image b/scripts/image-build/build-vyos-image
-index d969c157..7e36a1c4 100755
+index 6cccb40c..9f93d45f 100755
 --- a/scripts/image-build/build-vyos-image
 +++ b/scripts/image-build/build-vyos-image
-@@ -618,8 +618,8 @@ DOCUMENTATION_URL="{build_config['documentation_url']}"
-                 --archive-areas {{debian_archive_areas}} \
+@@ -624,8 +624,8 @@ DOCUMENTATION_URL="{build_config['documentation_url']}"
+                 --archive-areas "{{debian_archive_areas}}" \
                  --backports true \
                  --binary-image iso-hybrid \
 -                --bootappend-live "boot=live components hostname=vyos username=live nopersistence noautologin nonetworking union=overlay console=ttyS0,115200 console=tty0 net.ifnames=0 biosdevname=0" \
 -                --bootappend-live-failsafe "live components memtest noapic noapm nodma nomce nolapic nomodeset nosmp nosplash vga=normal console=ttyS0,115200 console=tty0 net.ifnames=0 biosdevname=0" \
 +                --bootappend-live "boot=live components hostname=vyos username=live nopersistence noautologin nonetworking union=overlay console=ttyAMA0,115200 console=tty0 net.ifnames=0 biosdevname=0" \
 +                --bootappend-live-failsafe "live components memtest noapic noapm nodma nomce nolapic nomodeset nosmp nosplash vga=normal console=ttyAMA0,115200 console=tty0 net.ifnames=0 biosdevname=0" \
-                 --bootloaders {{bootloaders}} \
-                 --checksums 'sha256 md5' \
+                 --bootloaders "{{bootloaders}}" \
+                 --checksums "sha256 md5" \
                  --chroot-squashfs-compression-type "{{squashfs_compression_type}}" \
