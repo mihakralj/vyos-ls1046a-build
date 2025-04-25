@@ -77,7 +77,7 @@ jobs:
             echo "BUILD_BY=${{ github.event.inputs.BUILD_BY }}" >> $GITHUB_ENV
           fi
           if [ -z "${{ github.event.inputs.build_version }}" ]; then
-            echo "build_version=$(date -u +%Y.%m.%d-%H%M)-rolling" >> $GITHUB_ENV
+            echo "build_version=$(date -u +%Y.%m.%d-%H%M)-rolling" >> $GITHUB_OUTPUT
           else
             echo "build_version=${{ github.event.inputs.build_version }}" >> $GITHUB_OUTPUT
           fi
