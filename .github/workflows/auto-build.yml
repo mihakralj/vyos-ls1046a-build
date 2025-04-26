@@ -476,3 +476,5 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           keep-count: 10
           keep-old-minor-releases: false
+          semver-loose: true
+          remove-tags: true
