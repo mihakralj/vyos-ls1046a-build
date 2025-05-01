@@ -172,7 +172,8 @@ jobs:
           patch -p1 -d vyos-build < data/vyos-build-001-kernel_config.patch
           patch -p1 -d vyos-build < data/vyos-build-002-mksquashfs_universal.patch
           patch -p1 -d vyos-build < data/vyos-build-003-fix_hardcoded_x86_64.patch
-          patch -p1 -d vyos-build < data/vyos-build-004-fix_saltproject_package_url.patch
+          # fix on https://github.com/vyos/vyos-build/commit/82a40e68c7e4b3ea45fb2bbc4a1a7cff92e41942
+          #patch -p1 -d vyos-build < data/vyos-build-004-fix_saltproject_package_url.patch
           patch -p1 -d vyos-build < data/vyos-build-005-add_vim_link.patch
           patch -p1 -d vyos-build < data/vyos-build-006-fix_kernel_sign.patch
           # sign kernel module but donot sign vmlinuz
