@@ -12,6 +12,9 @@ on:
       build_version:
         description: 'Version number (default: YYYY.MM.DD-TIMESTAMP-rolling)'
         default: ''
+      builder_image:
+        description: 'Builder image (default: ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64, official: docker.io/vyos/vyos-build:current-arm64)'
+        default: 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64'
 
 env:
   DEBIAN_MIRROR: http://deb.debian.org/debian/
@@ -25,12 +28,12 @@ env:
 jobs:
   build_generic_iso:
     runs-on: ubuntu-24.04-arm
-    # if: github.repository == 'huihuimoe/vyos-arm64-build'
     permissions:
       contents: write
     container:
-      # TODO: this image too old, need to update(build it in other job?)
-      image: vyos/vyos-build:current-arm64
+      # the official image too old, need to update
+      # image: vyos/vyos-build:current-arm64
+      image: ${{ github.event.inputs.builder_image }}
       options: --sysctl net.ipv6.conf.lo.disable_ipv6=0 --privileged --user root
     defaults:
       run:
@@ -51,7 +54,7 @@ jobs:
           echo "HOME: $HOME"
           echo "PATH: $PATH"
           command -v go
-          command -v ocamlfind
+          command -v opam
           lscpu
           free -m
           # Install missing packages
