@@ -14,7 +14,6 @@ on:
         default: ''
 
 env:
-  BUILD_BY: 1707683+huihuimoe@users.noreply.github.com
   DEBIAN_MIRROR: http://deb.debian.org/debian/
   DEBIAN_SECURITY_MIRROR: http://deb.debian.org/debian-security
   # no package on the official repo
@@ -77,6 +76,10 @@ jobs:
           set -ex
           if [ -n "${{ github.event.inputs.BUILD_BY }}" ]; then
             echo "BUILD_BY=${{ github.event.inputs.BUILD_BY }}" >> $GITHUB_ENV
+            echo "BUILD_BY=${{ github.event.inputs.BUILD_BY }}" >> $GITHUB_OUTPUT
+          else
+            echo "BUILD_BY=${{ github.repository_owner_id }}+${{ github.repository_owner }}@users.noreply.github.com" >> $GITHUB_ENV
+            echo "BUILD_BY=${{ github.repository_owner_id }}+${{ github.repository_owner }}@users.noreply.github.com" >> $GITHUB_OUTPUT
           fi
           if [ -z "${{ github.event.inputs.build_version }}" ]; then
             echo "build_version=$(date -u +%Y.%m.%d-%H%M)-rolling" >> $GITHUB_OUTPUT
@@ -85,7 +88,6 @@ jobs:
           fi
           echo "TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
           echo "PREVIOUS_SUCCESS_BUILD_TIMESTAMP=$(cat version.json | jq -r '.[0].timestamp')" >> $GITHUB_OUTPUT
-          echo "BUILD_BY=$BUILD_BY" >> $GITHUB_OUTPUT
 
       - name: Build global deps
         run: |
@@ -362,7 +364,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-    if: github.ref_name == 'master'
+    if: github.ref_name == "${{ github.event.repository.default_branch }}"
     steps:
       - uses: actions/checkout@v4
       - name: Clone vyos-build repo
@@ -441,7 +443,7 @@ jobs:
           json: |
             [
               {
-                "url": "https://github.com/huihuimoe/vyos-arm64-build/releases/download/${{ needs.build_generic_iso.outputs.build_version }}/${{ needs.build_generic_iso.outputs.generic_image_iso }}",
+                "url": "https://github.com/${{ github.repository }}/releases/download/${{ needs.build_generic_iso.outputs.build_version }}/${{ needs.build_generic_iso.outputs.generic_image_iso }}",
                 "version": "${{ needs.build_generic_iso.outputs.build_version }}",
                 "timestamp": "${{ needs.build_generic_iso.outputs.TIMESTAMP }}"
               }
