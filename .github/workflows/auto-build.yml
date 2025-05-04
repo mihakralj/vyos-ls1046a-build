@@ -389,7 +389,7 @@ jobs:
           cd vyos-build
           git log --since "${{ needs.build_generic_iso.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}" --format="%H" --reverse
           CHANGELOG_COMMIT_VYOS_BUILD=$(git log --since "${{ needs.build_generic_iso.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}" --format="%H" --reverse | head -n1)
-          [ -z "$COMMIT_VYOS_BUILD" ] && COMMIT_VYOS_BUILD="HEAD"
+          [ -z "$CHANGELOG_COMMIT_VYOS_BUILD" ] && CHANGELOG_COMMIT_VYOS_BUILD="HEAD"
           echo "CHANGELOG_COMMIT_VYOS_BUILD=${CHANGELOG_COMMIT_VYOS_BUILD}" >> $GITHUB_OUTPUT
           cd ../vyos-1x
           git log --since "${{ needs.build_generic_iso.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}" --format="%H" --reverse
