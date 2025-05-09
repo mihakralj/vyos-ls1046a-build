@@ -14,7 +14,7 @@ on:
         default: ''
       builder_image:
         description: 'Builder image (default: ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64, official: docker.io/vyos/vyos-build:current-arm64)'
-        default: 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64'
+        default: ''
 
 env:
   DEBIAN_MIRROR: http://deb.debian.org/debian/
@@ -33,7 +33,7 @@ jobs:
     container:
       # the official image too old, need to update
       # image: vyos/vyos-build:current-arm64
-      image: ${{ github.event.inputs.builder_image }}
+      image: ${{ github.event.inputs.builder_image || 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64' }}
       options: --sysctl net.ipv6.conf.lo.disable_ipv6=0 --privileged --user root
     defaults:
       run:
