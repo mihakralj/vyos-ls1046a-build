@@ -345,8 +345,8 @@ jobs:
             $GITHUB_WORKSPACE/bin/minisign -s $MINISIGN_SECKEY_FILE -Sm ${GENERIC_IMAGE_ISO}
             $GITHUB_WORKSPACE/bin/minisign -Vm ${GENERIC_IMAGE_ISO} -x ${GENERIC_IMAGE_ISO}.minisig -p $MINISIGN_PUBKEY_FILE
           else
-            # create a empty file to indicate failure
-            touch ${GENERIC_IMAGE_ISO}.minisig
+            # create a non-zero file to indicate failure
+            echo "fake sign" > ${GENERIC_IMAGE_ISO}.minisig
           fi
           # Move artifacts to workspace to avoid nested path in artifact archive
           mv manifest.json ${GENERIC_IMAGE_ISO} ${GENERIC_IMAGE_ISO}.minisig $GITHUB_WORKSPACE
