@@ -460,7 +460,7 @@ jobs:
           git pull --autostash --rebase
 
       - name: "Release publishing: create autocommit and tag"
-        uses: stefanzweifel/git-auto-commit-action@v5
+        uses: stefanzweifel/git-auto-commit-action@v6
         with:
           tagging_message: ${{ needs.build_generic_iso.outputs.build_version }}
           commit_message: ${{ needs.build_generic_iso.outputs.build_version }}
