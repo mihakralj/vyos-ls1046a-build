@@ -4,7 +4,6 @@ system {
         user vyos {
             authentication {
                 encrypted-password "$6$rounds=656000$Uh9Fx/JsPWFTpfIO$DPQOFL8ThwtckZOrIEbGMwj6WNZnxV3ZfS/UuxuONg0oMpEDR350YkkYOdjcZWpsB9K1XHrOmBFtI34usaqvs."
-                // plaintext-password "a_strong-p@ssword"
             }
         }
     }
