@@ -1,25 +1,66 @@
 ## vyos-1x
-- vrf: T7506:  Do not use default table 254 for VRF
-   - PR: vyos/vyos-1x#4559
-- Container: T7473: Fix show/monitor container log failed when log-driver is journald
-   - PR: vyos/vyos-1x#4522
-- migration: T6968: check for ip address as next-hop-interface
-   - PR: vyos/vyos-1x#4566
-- firewall: T6951:  Add a configuration command for ethertypes that bridge firewalls should always accept
-   - PR: vyos/vyos-1x#4558
-- T7564: GitHub: remove ruff linter PR check - should be an automated review
-   - PR: vyos/vyos-1x#4560
-- T7554: fix wireguard fwmark parsing
-   - PR: vyos/vyos-1x#4564
-- op-mode: T7542: add support for "standalone" behavior of operational mode tag nodes
-   - PR: vyos/vyos-1x#4555
-- op-mode: T7543: move "clear interfaces <type> [name] counters" to "clear interfaces counters [type] [name]"
-   - PR: vyos/vyos-1x#4556
-- op-mode: T7541: convert duplicate nodes and tag nodes to standalone tag nodes
-   - PR: vyos/vyos-1x#4557
-- T7564: added darker ruff lint workflow
-   - PR: vyos/vyos-1x#4567
+- config-mgmt: T7508: use recursive defaults to read commit-confirm action
+   - PR: vyos/vyos-1x#4535
+- T7512: firewall: Modify accepting invalid traffic for VLAN aware bridge
+   - PR: vyos/vyos-1x#4539
+- nat: T7237: Remove expensive NAT address check
+   - PR: vyos/vyos-1x#4537
+- op-mode: T7459: eliminate direct use of sudo in op mode commands
+   - PR: vyos/vyos-1x#4512
+- T7514: Fix smoketest QoS burst bytes replaced with kilobytes
+   - PR: vyos/vyos-1x#4543
+- openconnect: T7511: bugfix invalid variable name
+   - PR: vyos/vyos-1x#4540
+- op-mode: T7509: add "detail" and "wide" modifier for BGP advertised-routes|received-routes
+   - PR: vyos/vyos-1x#4538
+- http-api: T3955: add commit-confirm to endpoints /configure /config-file
+   - PR: vyos/vyos-1x#4533
+- T7524: Fix binary path for gwlbtun
+   - PR: vyos/vyos-1x#4545
+- T7523: firewall: Accepting invalid traffic for pppoe discovery and wol
+   - PR: vyos/vyos-1x#4544
+-  conntrack: T7208: nf_conntrack_buckets defaults and behavior
+   - PR: vyos/vyos-1x#4548
+- T7532: container sysctl parameter values are quoted
+   - PR: vyos/vyos-1x#4549
+- T7365: add commit hooks and cli integration
+   - PR: vyos/vyos-1x#4526
+- T7510: ospfd.frr.j2 ospf nssa translation error - fix template
+   - PR: vyos/vyos-1x#4536
+- T7492: Fix modem connection code
+   - PR: vyos/vyos-1x#4527
+- op-mode: T7538: remove the obsolete "show login level" command
+   - PR: vyos/vyos-1x#4551
+- op-mode: T7527: move assorted embedded shel snippets to script files
+   - PR: vyos/vyos-1x#4550
+- op-mode: T7540: move "clear interface connection" to "reset connection"
+   - PR: vyos/vyos-1x#4553
+- smoketest: T7539: improve Kernel option check for WWAN
+   - PR: vyos/vyos-1x#4554
+- openvpn: T7056: Raise error if non-TAP device is bridged
+   - PR: vyos/vyos-1x#4546
+- T7432: RPKI VRF Support
+   - PR: vyos/vyos-1x#4497
+- T7488: add utility for automatic rollback of section on apply stage error
+   - PR: vyos/vyos-1x#4552
 
 
 ## vyos-build
-- no changes
+- Kernel: T5887: update Linux Kernel to v6.6.92
+   - PR: vyos/vyos-build#970
+- Kernel: T7428: re-enable CONFIG_INOTIFY_STACKFS
+   - PR: vyos/vyos-build#971
+- T7535: aws-gwlbtun: add cmake for depend
+   - PR: vyos/vyos-build#974
+- T7530: Build package binaries script should exit if repo is absent
+   - PR: vyos/vyos-build#975
+- T7534: netfilter: add asciidoc-base as build depend
+   - PR: vyos/vyos-build#973
+- build: T7453: Make raw image building logic more robust
+   - PR: vyos/vyos-build#972
+- T4409: Fix Framed-Route with attr Accel-VRF-Name
+   - PR: vyos/vyos-build#927
+- Kernel: T7539: compile in WWAN drivers and not use loadable modules
+   - PR: vyos/vyos-build#977
+
+
