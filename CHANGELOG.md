@@ -1,4 +1,10 @@
 ## vyos-1x
+- T7613: pr mirror workflow added with workflow dispatch support
+   - PR: vyos/vyos-1x#4595
+- wlb: T7622: fix the op mode "run show wan-load-balance" command
+   - PR: vyos/vyos-1x#4596
+- ipsec: T7545: Fix show vpn debug peer
+   - PR: vyos/vyos-1x#4582
 - T7579: fix of the run trigger
    - PR: vyos/vyos-1x#4600
 - T7624: smoketest: Fix typing QEMU in test_protocols_static.py
@@ -13,26 +19,44 @@
    - PR: vyos/vyos-1x#4599
 - T7625: load-balancing: prune limit key if not configured
    - PR: vyos/vyos-1x#4605
+- T7619: Removed REMOTE_REPO var from mirror workflow
+   - PR: vyos/vyos-1x#4610
+- T6704: limit size of noteworthy list in airbag
+   - PR: vyos/vyos-1x#4611
+- T7645: fix missing import and incorrect check of is_node_changed
+   - PR: vyos/vyos-1x#4612
+- T7648: Set up a linter check to check complete files for syntax errors and missing imports
+   - PR: vyos/vyos-1x#4613
+- T7637: T7605: update git submodule for typo and escape backslash
+   - PR: vyos/vyos-1x#4614
+- ipsec: T7504: Added IKEv2 retransmission options
+   - PR: vyos/vyos-1x#4601
+- T7648: pylint depends on XML cache generated in interface_definitions
+   - PR: vyos/vyos-1x#4615
+- T7489: Fix output state of ipsec passthrough child
+   - PR: vyos/vyos-1x#4616
+- T7626: op-mode: fix several op-mode command for syntax
+   - PR: vyos/vyos-1x#4603
+- T5797: Adjust MSS clamping from forward to postrouting hook
+   - PR: vyos/vyos-1x#4609
+- pylint: T7648: disable some linter-checks hit by GitHub action pipeline
+   - PR: vyos/vyos-1x#4620
+- T7649: Add missed system kernel options for image installer
+   - PR: vyos/vyos-1x#4619
 
 
 ## vyos-build
-- T7424: Create vyos.smoketests.hint file before starting vyos-configd
-   - PR: vyos/vyos-build#980
-- T7424: Restart vyos-configd after vyos.smoketests.hint file creation
-   - PR: vyos/vyos-build#983
-- Docker: T7568: clean apt cache + clean some /tmp files
-   - PR: vyos/vyos-build#979
-- iso: T7610: include a file with ISO9660 string to prevent upgrade failures from 1.3.x
-   - PR: vyos/vyos-build#985
-- T7606: Split VPP test for smoketest
-   - PR: vyos/vyos-build#984
-- T7579: added workflow for CLA
-   - PR: vyos/vyos-build#986
-- Docker: T7568: add apt-get update as last command
-   - PR: vyos/vyos-build#987
-- Kernel: T5887: update Linux Kernel to v6.6.96
-   - PR: vyos/vyos-build#988
-- CI: T7579: fix of the run trigger for CLA
-   - PR: vyos/vyos-build#989
+- Docker: T7648: add additional vyos-1x build dependencies
+   - PR: vyos/vyos-build#992
+- Docker: T7648: add additional vyos-1x dependencies python3-pyroute2, python3-voluptuous
+   - PR: vyos/vyos-build#994
+- VPP: T7175: Added sflow plugin to build
+   - PR: vyos/vyos-build#962
+- T7576: Remove unnecessary code for checking dirty build status
+   - PR: vyos/vyos-build#993
+- T7647: Bump keepalived version to 2.3.3
+   - PR: vyos/vyos-build#991
+- T7175: Downgraded vpp-sflow version v0.9.02-2
+   - PR: vyos/vyos-build#995
 
 
