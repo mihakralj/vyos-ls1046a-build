@@ -466,7 +466,7 @@ jobs:
           commit_message: ${{ needs.build_generic_iso.outputs.build_version }}
           commit_author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: ${{ needs.build_generic_iso.outputs.generic_image_name }}
 
