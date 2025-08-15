@@ -70,7 +70,7 @@ jobs:
           # python3-protobuf: https://github.com/vyos/vyos-build/commit/dd2c245be73c1e83b6ca392924aa549f77c5586e
           apt-get upgrade -y
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           lfs: true
       - name: "Initialization: set env variables"
@@ -139,7 +139,7 @@ jobs:
           done
 
       - name: Checkout vyos-build repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: vyos/vyos-build
           path: vyos-build
@@ -370,15 +370,15 @@ jobs:
       contents: write
     if: github.ref_name == "${{ github.event.repository.default_branch }}"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Clone vyos-build repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: vyos/vyos-build
           path: vyos-build
           fetch-depth: 0
       - name: Clone vyos-1x source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: vyos/vyos-1x
           path: vyos-1x
