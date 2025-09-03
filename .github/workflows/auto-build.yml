@@ -262,8 +262,7 @@ jobs:
             wide-dhcpv6-relay
             wide-dhcpv6-server
             vpp-plugin-devtools
-            accel-ppp.deb
-            accel-ppp_1.
+            accel-ppp
           )
           for deb_file in $deb_files; do
             if [[ " ${ignore_packages[@]} " =~ " $(basename $deb_file | cut -d_ -f1) " ]]; then
