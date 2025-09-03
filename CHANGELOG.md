@@ -1,23 +1,46 @@
 ## vyos-1x
-- no changes
+- T7744: Migrate from accel-ppp to accel-ppp-ng
+   - PR: vyos/vyos-1x#4675
+- op-mode: T7741: Fixes for 'show interfaces kernel'
+   - PR: vyos/vyos-1x#4673
+- op-mode: T7751: fix re-generating SSH server key causes PermissionError
+   - PR: vyos/vyos-1x#4677
+- T7670: VPP: Rely on all types of memory to verify memory resources
+   - PR: vyos/vyos-1x#4668
+- conntrack: T7482: Fix custom timeouts
+   - PR: vyos/vyos-1x#4628
+- T7743: PPPoE-server add option for VPP control plane
+   - PR: vyos/vyos-1x#4676
+- T7748: conflict check workflow updated to marketplace action with increased wait and retry
+   - PR: vyos/vyos-1x#4681
+- T7759: Revert "T7709: add atomic write for config file save"
+   - PR: vyos/vyos-1x#4683
+- bgp: T7708: correct logic for route-reflector-client peer_as check
+   - PR: vyos/vyos-1x#4663
+- op-mode: T7745: add a CLI for operator user command permissions
+   - PR: vyos/vyos-1x#4674
+- Debian: T7762: adjust vyos-1x package version to not mention 1.5 in any way
+   - PR: vyos/vyos-1x#4685
+- T7742: Add 'show interfaces kernel statistics' command
+   - PR: vyos/vyos-1x#4680
+
+
 ## vyos-build
-- T7692: Bump VPP version to the stable 2506
-   - PR: vyos/vyos-build#1005
-- docker: T7583: add build dependencies for operational command runner
-   - PR: vyos/vyos-build#1006
-- T7697: Remove vyos-vpp build requirements to build vyos-1x
-   - PR: vyos/vyos-build#1009
-- T7725: Bump accel-ppp-ng version to e14d23e
-   - PR: vyos/vyos-build#1010
-- T7729: Build accel-ppp-ng remove extra whitespace
-   - PR: vyos/vyos-build#1011
-- T7725: Bump accel-ppp-ng version to 1674efe
-   - PR: vyos/vyos-build#1012
-- T7714: Exclude auxiliary directories from common tarballs
-   - PR: vyos/vyos-build#1007
-- T7714: Exclude auxiliary directories from linux-kernel tarballs
-   - PR: vyos/vyos-build#1008
-- T7733: Add miss dependency libssl-dev for build tacacs
-   - PR: vyos/vyos-build#1013
+- T7725: Bump accel-ppp-ng version to f5764ea
+   - PR: vyos/vyos-build#1014
+- T7749: Dehardcode x86_64 ARCH to build VPP libraries for accel-pp-ng
+   - PR: vyos/vyos-build#1015
+- Kernel: T5887: update Linux Kernel to v6.6.102
+   - PR: vyos/vyos-build#1016
+- T7755: Bump hsflowd version
+   - PR: vyos/vyos-build#1017
+- T7755: Add clang dependency to build hsflowd
+   - PR: vyos/vyos-build#1019
+- T7763: Modify the amazon-ssm-agent build script
+   - PR: vyos/vyos-build#1020
+- T75: ipt-netflow enable sampler, mac and vlan
+   - PR: vyos/vyos-build#1022
+- Kernel: T5887: update Linux Kernel to v6.6.103
+   - PR: vyos/vyos-build#1021
 
 
