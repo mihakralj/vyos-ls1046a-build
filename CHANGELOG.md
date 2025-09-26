@@ -1,78 +1,64 @@
 ## vyos-1x
-- Revert "Makefile: T7793: "make clean" should also clean libvyosconfig"
-   - PR: vyos/vyos-1x#4719
-- Debian: T7817: vyos_net_name exists in debian/tmp but is not installed to anywhere
-   - PR: vyos/vyos-1x#4718
-- bgp: T6438: add solo option to peer-group config
-   - PR: vyos/vyos-1x#4706
-- route-map: T1124: Allow matching RPKI OVS extended community
-   - PR: vyos/vyos-1x#4699
-- Python: T7740: Update dict_search to return optional default value
-   - PR: vyos/vyos-1x#4700
-- op-mode: T5992: show dhcpv6 leases with (mostly) the same fields as dhcp leases
-   - PR: vyos/vyos-1x#4289
-- container: T7186: Add macvlan network type for containers
-   - PR: vyos/vyos-1x#4686
-- T6211: Fix kea VRF op-mode commands
-   - PR: vyos/vyos-1x#4689
-- vyos.ifconfig: T7814: suppress unnecessary syslog noise from missing nftables rules
-   - PR: vyos/vyos-1x#4716
-- T7682: incorrect sla-len in DHCPv6 client prefix delegation (DHCPv6-PD)
-   - PR: vyos/vyos-1x#4714
-- ethernet: T7813: remove VLAN interfaces first on deletion
-   - PR: vyos/vyos-1x#4715
-- firewall: T7452: update rule generation for Zone-based firewall
-   - PR: vyos/vyos-1x#4506
-- dhcpv6: T7646: restore missing default route after upgrade
-   - PR: vyos/vyos-1x#4717
-- T75: migrate from pmacct to ipt_NETFLOW
-   - PR: vyos/vyos-1x#4688
-- T7783: T7786: VPP clarify error messages for CPU requirements
-   - PR: vyos/vyos-1x#4696
-- T7806: VPP do not allow skip-cores to be configured without main-core
-   - PR: vyos/vyos-1x#4721
-- T7785: VPP enable L3 mode after removing interface from a bridge
-   - PR: vyos/vyos-1x#4726
-- T7746: updated conflict workflow reference in workflow
-   - PR: vyos/vyos-1x#4727
-- wlb: T114: Add firewall group support for WAN load balancer
-   - PR: vyos/vyos-1x#4708
-- T7796: PPPoE-server add mapping in vpp if vpp-cp is enabled
-   - PR: vyos/vyos-1x#4722
-- container: T6673: Fix restart of containers with podman
-   - PR: vyos/vyos-1x#4691
-- T7839: add deprecation warning for ssh-dss keys
-   - PR: vyos/vyos-1x#4731
-- op-mode: T7746: Fix 'show interfaces' description wrapping
-   - PR: vyos/vyos-1x#4725
-- T7805: VPP remove unused 'default-hugepage-size' from memory section and restrict page sizes in xml
-   - PR: vyos/vyos-1x#4729
-- container: T7681: fix multiple name servers
-   - PR: vyos/vyos-1x#4724
-- nose: T7825: Use nose2 for unit tests
-   - PR: vyos/vyos-1x#4728
-- op-mode: T6857: Fix default action for prerouting hook
-   - PR: vyos/vyos-1x#4692
-- kea: T7821: Update Kea to 3.0
-   - PR: vyos/vyos-1x#4723
+- T7842: VPP add pppoe enable-pass-nd-and-dhcpv6 option
+   - PR: vyos/vyos-1x#4730
+- T7836: move bind mount of /config to vyos-1x
+   - PR: vyos/vyos-1x#4732
+- op-mode: T7516: fix reset ip bgp base commands
+   - PR: vyos/vyos-1x#4733
+- ssh: T7839: fix warning on deprecated algorithms during commit
+   - PR: vyos/vyos-1x#4736
+- T7820: Add support for yescrypt encypted hashes
+   - PR: vyos/vyos-1x#4720
+- T7773: VPP move crypto engines to crypto-engines template section
+   - PR: vyos/vyos-1x#4740
+- frr_exporter: T7851: export IPv6 BGP sessions
+   - PR: vyos/vyos-1x#4738
+- Debian: T7847: add explicit dependency on net-tools providing arp binary
+   - PR: vyos/vyos-1x#4735
+- T7737: add vyconf-aware analogue of configfs
+   - PR: vyos/vyos-1x#4711
+- firewall: T7475: Add an option to disable conntrack for individual firewall chaisn
+   - PR: vyos/vyos-1x#4698
+- image: T7818: avoid error when skipping config migration
+   - PR: vyos/vyos-1x#4742
+- kea: T7281: Fix Kea 3.0 service failures
+   - PR: vyos/vyos-1x#4743
+- bgp: T7760: remove per vrf instance system-as node
+   - PR: vyos/vyos-1x#4684
+- T7850: make op_mode_config_dict edit level aware
+   - PR: vyos/vyos-1x#4737
+- T7859: VPP de-hardcode plugin path
+   - PR: vyos/vyos-1x#4748
+- T7801: VPP fails to start with logging level set to 'Error'
+   - PR: vyos/vyos-1x#4755
+- T7748: Using mergify rule to handle conflict checks for private repo
+   - PR: vyos/vyos-1x#4751
+- T7861: System options CPU vendor_id bug for some platforms
+   - PR: vyos/vyos-1x#4750
+- l2tpv3: T7721: fix show l2tpv3 interface information
+   - PR: vyos/vyos-1x#4746
+- T7862: VPP: Enable support of ixgbevf driver for DPDK
+   - PR: vyos/vyos-1x#4756
+- tpm: T7713: T7717: Multiple TPM fixes
+   - PR: vyos/vyos-1x#4669
+- T7709: Add file sync and atomic write to config save script
+   - PR: vyos/vyos-1x#4753
+- T7855: redirect stdout and catch exceptions on frr render
+   - PR: vyos/vyos-1x#4745
 
 
 ## vyos-build
-- Kernel: T5887: update Linux Kernel to v6.6.106
-   - PR: vyos/vyos-build#1028
-- T7824: Add support for disk controllers with the kernel MPI3MR option
-   - PR: vyos/vyos-build#1031
-- VD-1609: added PAT passing
-   - PR: vyos/vyos-build#1032
-- T6962: frr: fix wrong kernel routes updates
-   - PR: vyos/vyos-build#1029
-- T7827: Add unionfs-fuse package
-   - PR: vyos/vyos-build#1036
-- nose: T7825: Use nose2 for unit tests
-   - PR: vyos/vyos-build#1035
-- T75: remove pmacct
-   - PR: vyos/vyos-build#1030
-- kea: T7281: Update Kea to 3.0
-   - PR: vyos/vyos-build#1033
+- T7748: Updated conflict reusable workflow reference in workflow
+   - PR: vyos/vyos-build#1037
+- zerotier: T6455: Add zerotier-one to vyos-build pipeline
+   - PR: vyos/vyos-build#1041
+- T7836: use /opt/vyatta/etc/config in tmptest
+   - PR: vyos/vyos-build#1039
+- kea: T7821: Use correct Kea unit files
+   - PR: vyos/vyos-build#1042
+- T7864: Bump HostAP version to 2.11
+   - PR: vyos/vyos-build#1044
+- T6516: frr: fix isisd advertise-passive-only 
+   - PR: vyos/vyos-build#1040
 
 
