@@ -1,64 +1,48 @@
 ## vyos-1x
-- T7842: VPP add pppoe enable-pass-nd-and-dhcpv6 option
-   - PR: vyos/vyos-1x#4730
-- T7836: move bind mount of /config to vyos-1x
-   - PR: vyos/vyos-1x#4732
-- op-mode: T7516: fix reset ip bgp base commands
-   - PR: vyos/vyos-1x#4733
-- ssh: T7839: fix warning on deprecated algorithms during commit
-   - PR: vyos/vyos-1x#4736
-- T7820: Add support for yescrypt encypted hashes
-   - PR: vyos/vyos-1x#4720
-- T7773: VPP move crypto engines to crypto-engines template section
-   - PR: vyos/vyos-1x#4740
-- frr_exporter: T7851: export IPv6 BGP sessions
-   - PR: vyos/vyos-1x#4738
-- Debian: T7847: add explicit dependency on net-tools providing arp binary
-   - PR: vyos/vyos-1x#4735
-- T7737: add vyconf-aware analogue of configfs
-   - PR: vyos/vyos-1x#4711
-- firewall: T7475: Add an option to disable conntrack for individual firewall chaisn
-   - PR: vyos/vyos-1x#4698
-- image: T7818: avoid error when skipping config migration
-   - PR: vyos/vyos-1x#4742
-- kea: T7281: Fix Kea 3.0 service failures
-   - PR: vyos/vyos-1x#4743
-- bgp: T7760: remove per vrf instance system-as node
-   - PR: vyos/vyos-1x#4684
-- T7850: make op_mode_config_dict edit level aware
-   - PR: vyos/vyos-1x#4737
-- T7859: VPP de-hardcode plugin path
-   - PR: vyos/vyos-1x#4748
-- T7801: VPP fails to start with logging level set to 'Error'
-   - PR: vyos/vyos-1x#4755
-- T7748: Using mergify rule to handle conflict checks for private repo
-   - PR: vyos/vyos-1x#4751
-- T7861: System options CPU vendor_id bug for some platforms
-   - PR: vyos/vyos-1x#4750
-- l2tpv3: T7721: fix show l2tpv3 interface information
-   - PR: vyos/vyos-1x#4746
-- T7862: VPP: Enable support of ixgbevf driver for DPDK
-   - PR: vyos/vyos-1x#4756
-- tpm: T7713: T7717: Multiple TPM fixes
-   - PR: vyos/vyos-1x#4669
-- T7709: Add file sync and atomic write to config save script
-   - PR: vyos/vyos-1x#4753
-- T7855: redirect stdout and catch exceptions on frr render
-   - PR: vyos/vyos-1x#4745
+- T7815: VPP: NAT44 rules with port requires protocol specification and vice versa
+   - PR: vyos/vyos-1x#4754
+- kea: T7854: Use helper for Kea VRF systemd units
+   - PR: vyos/vyos-1x#4744
+- smoketest: T7858: add PPPoE client tests with IPv4, IPv6 and DHCPv6-PD
+   - PR: vyos/vyos-1x#4760
+- boot-config-loader: T7889: Inform user during login of config-load issues
+   - PR: vyos/vyos-1x#4763
+- syslog: T4251: Add TLS support to syslog
+   - PR: vyos/vyos-1x#4734
+- op-mode: T7868: fix op-cmd "reset ip arp table" is not working
+   - PR: vyos/vyos-1x#4768
+- vyos-dhcp: T7895: rename "DHCP Server" column to "Lease Time"
+   - PR: vyos/vyos-1x#4764
+- T7884: VPP: dependency issue when set interface address and NAT44 address translation interface in one commit
+   - PR: vyos/vyos-1x#4761
+- op-mode: T7871: add support for op mode command argument constraints
+   - PR: vyos/vyos-1x#4758
+- T7852: Switch to yescrypt password encryption
+   - PR: vyos/vyos-1x#4739
+- kea: T7823: DHCP-server lease cannot be cleared
+   - PR: vyos/vyos-1x#4741
+- container: T7863: Add user-defined MAC option for containers
+   - PR: vyos/vyos-1x#4762
+- pki: T7885: check_port_availability() can't be used during system boot
+   - PR: vyos/vyos-1x#4769
 
 
 ## vyos-build
-- T7748: Updated conflict reusable workflow reference in workflow
-   - PR: vyos/vyos-build#1037
-- zerotier: T6455: Add zerotier-one to vyos-build pipeline
-   - PR: vyos/vyos-build#1041
-- T7836: use /opt/vyatta/etc/config in tmptest
-   - PR: vyos/vyos-build#1039
-- kea: T7821: Use correct Kea unit files
-   - PR: vyos/vyos-build#1042
-- T7864: Bump HostAP version to 2.11
-   - PR: vyos/vyos-build#1044
-- T6516: frr: fix isisd advertise-passive-only 
-   - PR: vyos/vyos-build#1040
+- Kernel: T5887: update Linux Kernel to v6.6.108
+   - PR: vyos/vyos-build#1048
+- T7870: Kernel add option CONFIG_NO_HZ_FULL
+   - PR: vyos/vyos-build#1045
+- T7843: Remove accel-ppp form the packages
+   - PR: vyos/vyos-build#1038
+- T7873: Bump Suricata version to 7.0.10
+   - PR: vyos/vyos-build#1046
+- T7878: Using mergify rule to handle conflict checks for private repo
+   - PR: vyos/vyos-build#1047
+- T7830: Add signing key into vyos-dev.list file, apt-key is deprecated
+   - PR: vyos/vyos-build#1051
+- T7892: Bump accel-ppp-ng version to d8c4d38
+   - PR: vyos/vyos-build#1050
+- T7830: Fix GPG key file extension
+   - PR: vyos/vyos-build#1052
 
 
