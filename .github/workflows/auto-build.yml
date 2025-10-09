@@ -285,6 +285,14 @@ jobs:
           rm -rf packages/linux-headers-*
           ls -alh packages
 
+      - name: Archive Packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: vyos-packages
+          path: vyos-build/packages/
+          retention-days: 30
+          compression-level: 0
+
       - name: Build generic ISO image
         id: build_generic_iso
         run: |
@@ -361,6 +369,7 @@ jobs:
             ${{ steps.build_generic_iso.outputs.generic_image_iso }}.minisig
           retention-days: 15
           if-no-files-found: error
+          compression-level: 0
 
   publish:
     needs:
@@ -470,6 +479,12 @@ jobs:
       - uses: actions/download-artifact@v5
         with:
           name: ${{ needs.build_generic_iso.outputs.generic_image_name }}
+
+      # https://github.com/actions/download-artifact/issues/374
+      # - uses: actions/download-artifact@v5
+      #   with:
+      #     name: vyos-packages
+      #     decompress: false
 
       - name: "Release publishing: publish release"
         uses: softprops/action-gh-release@v2
