@@ -1,33 +1,29 @@
 ## vyos-1x
-- T7815: VPP: NAT44 rules with port requires protocol specification and vice versa
-   - PR: vyos/vyos-1x#4754
-- kea: T7854: Use helper for Kea VRF systemd units
-   - PR: vyos/vyos-1x#4744
-- smoketest: T7858: add PPPoE client tests with IPv4, IPv6 and DHCPv6-PD
-   - PR: vyos/vyos-1x#4760
-- boot-config-loader: T7889: Inform user during login of config-load issues
-   - PR: vyos/vyos-1x#4763
-- syslog: T4251: Add TLS support to syslog
-   - PR: vyos/vyos-1x#4734
-- op-mode: T7868: fix op-cmd "reset ip arp table" is not working
-   - PR: vyos/vyos-1x#4768
-- vyos-dhcp: T7895: rename "DHCP Server" column to "Lease Time"
-   - PR: vyos/vyos-1x#4764
-- T7884: VPP: dependency issue when set interface address and NAT44 address translation interface in one commit
-   - PR: vyos/vyos-1x#4761
-- op-mode: T7871: add support for op mode command argument constraints
-   - PR: vyos/vyos-1x#4758
-- T7852: Switch to yescrypt password encryption
-   - PR: vyos/vyos-1x#4739
-- kea: T7823: DHCP-server lease cannot be cleared
-   - PR: vyos/vyos-1x#4741
-- container: T7863: Add user-defined MAC option for containers
-   - PR: vyos/vyos-1x#4762
-- pki: T7885: check_port_availability() can't be used during system boot
-   - PR: vyos/vyos-1x#4769
+- T7905: Add system login to config-sync
+   - PR: vyos/vyos-1x#4773
+- vyos.utils.network: T7898: check if system UUID is available before trying to use it for host identity generation
+   - PR: vyos/vyos-1x#4774
+- wlb: T7902: remove explicit calls to sudo
+   - PR: vyos/vyos-1x#4770
+- Revert "bgp: T7760: remove per vrf instance system-as node"
+   - PR: vyos/vyos-1x#4778
+- T7818: remove uneeded calls of get_cli_kernel_options causing regression
+   - PR: vyos/vyos-1x#4777
+- T7907: archive config file on first boot to avoid misleading log entry
+   - PR: vyos/vyos-1x#4775
+- T7800: VPP: Bonding interface fails when change vpp configuration
+   - PR: vyos/vyos-1x#4779
+- T7803: Make failover route vrf-aware
+   - PR: vyos/vyos-1x#4749
+- image: T5455: Add migration of SSH  files during upgrade
+   - PR: vyos/vyos-1x#4678
 
 
 ## vyos-build
+- T7864: Bump HostAP version to 2.11
+   - PR: vyos/vyos-build#1044
+- T6516: frr: fix isisd advertise-passive-only 
+   - PR: vyos/vyos-build#1040
 - Kernel: T5887: update Linux Kernel to v6.6.108
    - PR: vyos/vyos-build#1048
 - T7870: Kernel add option CONFIG_NO_HZ_FULL
@@ -44,5 +40,7 @@
    - PR: vyos/vyos-build#1050
 - T7830: Fix GPG key file extension
    - PR: vyos/vyos-build#1052
+- T7857: Add Realtek RTL8126 5Gbit driver
+   - PR: vyos/vyos-build#1043
 
 
