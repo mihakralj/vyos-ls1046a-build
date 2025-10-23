@@ -485,6 +485,15 @@ jobs:
       #   with:
       #     name: vyos-packages
       #     decompress: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: vyos-packages
+          path: packages
+      - name: archive packages
+        run: |
+          set -ex
+          tar -cvf vyos-packages.tar packages
+          ls -alh vyos-packages.tar packages
 
       - name: "Release publishing: publish release"
         uses: softprops/action-gh-release@v2
@@ -495,6 +504,7 @@ jobs:
           files: |
             ${{ needs.build_generic_iso.outputs.generic_image_iso }}
             ${{ needs.build_generic_iso.outputs.generic_image_iso }}.minisig
+            vyos-packages.tar
 
       - uses: dev-drprasad/delete-older-releases@v0.3.4
         with:
