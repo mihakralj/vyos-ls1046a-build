@@ -1,34 +1,34 @@
 ## vyos-1x
-- smoketest: T7657: check for Kernel option CONFIG_SLUB_DEBUG
-   - PR: vyos/vyos-1x#4798
-- T7941: fix DHCP client running in VRF with non-word characters
-   - PR: vyos/vyos-1x#4800
-- kea: T7821: Fix subnet-id accepted range
-   - PR: vyos/vyos-1x#4801
-- T7942: consistent naming of "memory" in op-mode
-   - PR: vyos/vyos-1x#4799
-- frrender: T7927: de-nest DHCP and PPPoE interface section for VRFs
-   - PR: vyos/vyos-1x#4797
-- T7929: VPP: nat44: validate that only self-twice-nat external address is in translation pool
-   - PR: vyos/vyos-1x#4805
-- T7930: VPP: Changing NAT44 settings resets  to False
-   - PR: vyos/vyos-1x#4795
-- T5942: Make failover support dhcp-interface
-   - PR: vyos/vyos-1x#4783
-- T7946: log redirected stdout from FRRender
-   - PR: vyos/vyos-1x#4802
-- kea: T7925: Improve error handling, validate IPv6 PD prefix length
-   - PR: vyos/vyos-1x#4792
-- T7948: always call setUp() and tearDown() base class methods
-   - PR: vyos/vyos-1x#4803
-- frr: T7664: properly set log configuration during daemon startup
-   - PR: vyos/vyos-1x#4804
-- T3680: protocols: add dhclient hooks for dhcp-interface static routes
-   - PR: vyos/vyos-1x#4622
+- syslog: T4251: Fix TLS enablement logic for syslog
+   - PR: vyos/vyos-1x#4809
+- haproxy: T7906: Probing of a port other than the one to which normal traffic is sent
+   - PR: vyos/vyos-1x#4806
+- T7957: filter stderr when deleting container images
+   - PR: vyos/vyos-1x#4811
+- T7938: VPP: Rewrite sFlow implementation
+   - PR: vyos/vyos-1x#4796
+- dhcp-server: T3936: Added support for DHCP Option 82
+   - PR: vyos/vyos-1x#4665
+- dhcp-server: T3936: fix indent typo
+   - PR: vyos/vyos-1x#4815
+- T7896: Add frr profile selection
+   - PR: vyos/vyos-1x#4810
+- pki: T7953: refactor internal dependency generation
+   - PR: vyos/vyos-1x#4812
+- dhcpv6: T7967: fix migration script for automatic SLAAC selection
+   - PR: vyos/vyos-1x#4817
+- T6686: adds container health checks
+   - PR: vyos/vyos-1x#4702
+- T7797: VPP: switching from XDP to DPDK driver fails in cloud vm (hv_netvsc)
+   - PR: vyos/vyos-1x#4813
 
 
 ## vyos-build
-- build: T7828: use tomli instead of toml in the package build script
-   - PR: vyos/vyos-build#1061
+- Kernel: T7952: update Linux Kernel to v6.6.114
+   - PR: vyos/vyos-build#1063
+- T7958: Bump hsflowd version to v2.1.17-1
+   - PR: vyos/vyos-build#1064
+- kernel: T6788: Added patch to fix sequence adjustment for FTP DNAT
+   - PR: vyos/vyos-build#1065
 
 
