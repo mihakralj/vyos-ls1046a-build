@@ -1,0 +1,47 @@
+diff --git a/python/vyos/system/disk.py b/python/vyos/system/disk.py
+index 268a3b195..1a5cddcc6 100644
+--- a/python/vyos/system/disk.py
++++ b/python/vyos/system/disk.py
+@@ -63,7 +63,8 @@ def parttable_create(drive_path: str, root_size: int) -> None:
+     """Create a hybrid MBR/GPT partition table
+     0-2047 first sectors are free
+     2048-4095 sectors - BIOS Boot Partition
+-    4096 + 256 MB - EFI system partition
++    4096-36863 sectors - reserved for bootloader payload (16 MiB gap)
++    36864 + 256 MB - EFI system partition
+     Everything else till the end of a drive - Linux partition
+ 
+     Args:
+@@ -73,7 +74,7 @@ def parttable_create(drive_path: str, root_size: int) -> None:
+         root_size_text: str = '+100%'
+     else:
+         root_size_text: str = str(root_size)
+-    command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:4096:+256M -t2:EF00 \
++    command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:36864:+256M -t2:EF00 \
+         -n3:0:+{root_size_text}K -t3:8300 {drive_path}'
+ 
+     run(command)
+diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
+index 93c45b03f..72512da9d 100755
+--- a/src/op_mode/image_installer.py
++++ b/src/op_mode/image_installer.py
+@@ -79,7 +79,7 @@
+ MSG_ERR_UNSUPPORTED_SIGNATURE_TYPE: str = 'Unsupported signature type, signature cannot be verified.'
+ MSG_INFO_INSTALL_WELCOME: str = 'Welcome to VyOS installation!\nThis command will install VyOS to your permanent storage.'
+ MSG_INFO_INSTALL_EXIT: str = 'Exiting from VyOS installation'
+-MSG_INFO_INSTALL_SUCCESS: str = 'The image installed successfully; please reboot now.'
++MSG_INFO_INSTALL_SUCCESS: str = 'The image installed successfully.\nBefore rebooting, ensure any required bootloader (e.g. U-Boot) is written to the disk.'
+ MSG_INFO_INSTALL_DISKS_LIST: str = 'The following disks were found:'
+ MSG_INFO_INSTALL_DISK_SELECT: str = 'Which one should be used for installation?'
+ MSG_INFO_INSTALL_RAID_CONFIGURE: str = 'Would you like to configure RAID-1 mirroring?'
+@@ -117,8 +117,8 @@
+ 'Do you want to continue with installation?'
+ CONST_MIN_DISK_SIZE: int = 2147483648  # 2 GB
+ CONST_MIN_ROOT_SIZE: int = 1610612736  # 1.5 GB
+-# a reserved space: 2MB for header, 1 MB for BIOS partition, 256 MB for EFI
+-CONST_RESERVED_SPACE: int = (2 + 1 + 256) * 1024**2
++# a reserved space: 2MB for header, 1 MB for BIOS partition, 16 MB for bootloader, 256 MB for EFI
++CONST_RESERVED_SPACE: int = (2 + 1 + 16 + 256) * 1024**2
+ 
+ # define directories and paths
+ DIR_CONFIG: str = directories['config']
