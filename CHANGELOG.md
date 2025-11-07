@@ -1,34 +1,40 @@
 ## vyos-1x
-- syslog: T4251: Fix TLS enablement logic for syslog
-   - PR: vyos/vyos-1x#4809
-- haproxy: T7906: Probing of a port other than the one to which normal traffic is sent
-   - PR: vyos/vyos-1x#4806
-- T7957: filter stderr when deleting container images
-   - PR: vyos/vyos-1x#4811
-- T7938: VPP: Rewrite sFlow implementation
-   - PR: vyos/vyos-1x#4796
-- dhcp-server: T3936: Added support for DHCP Option 82
-   - PR: vyos/vyos-1x#4665
-- dhcp-server: T3936: fix indent typo
-   - PR: vyos/vyos-1x#4815
-- T7896: Add frr profile selection
-   - PR: vyos/vyos-1x#4810
-- pki: T7953: refactor internal dependency generation
-   - PR: vyos/vyos-1x#4812
-- dhcpv6: T7967: fix migration script for automatic SLAAC selection
-   - PR: vyos/vyos-1x#4817
-- T6686: adds container health checks
-   - PR: vyos/vyos-1x#4702
-- T7797: VPP: switching from XDP to DPDK driver fails in cloud vm (hv_netvsc)
-   - PR: vyos/vyos-1x#4813
+- T7975: VPP: Fix API calls for sFlow
+   - PR: vyos/vyos-1x#4822
+- pki: T7953: implement certbot_renew() function to have everything at one place
+   - PR: vyos/vyos-1x#4820
+- smoketests: T7971: Add docstrings to nftables verification helpers
+   - PR: vyos/vyos-1x#4819
+- wlb: T7966: Restore default route when interface disconnects/reconnects
+   - PR: vyos/vyos-1x#4818
+- T7980: Load active config on vyconfd restart
+   - PR: vyos/vyos-1x#4827
+- T7949: VPP add the ability to configure bond subinterfaces for NAT
+   - PR: vyos/vyos-1x#4808
+- T7980: T7910: update libvyosconfig/Makefile for vyconfd restart/show_session
+   - PR: vyos/vyos-1x#4831
+- T7789: T7661: VPP prevent failing to load XDP in clouds (ena/gve drivers)
+   - PR: vyos/vyos-1x#4747
+- pki: T7976: calls to node_changed_presence() must use unmangled config paths
+   - PR: vyos/vyos-1x#4829
+- T7849: ZBF allow to use wildcard interfaces as member
+   - PR: vyos/vyos-1x#4825
+- container: T7305: fix VRF loss when restarting pods
+   - PR: vyos/vyos-1x#4828
+- T7910: Standardize vyconf session resource management
+   - PR: vyos/vyos-1x#4807
+- veth: T7990: fix stale DHCP clients when removing virtual Ethernet pairs
+   - PR: vyos/vyos-1x#4833
+- firewall: T7112: Default action drop fails
+   - PR: vyos/vyos-1x#4834
+- T7915: minor fixes for consistent exception handling and error messages
+   - PR: vyos/vyos-1x#4814
+- wlb: T7977: Fix weight calculation for multiple interfaces
+   - PR: vyos/vyos-1x#4823
 
 
 ## vyos-build
-- Kernel: T7952: update Linux Kernel to v6.6.114
-   - PR: vyos/vyos-build#1063
-- T7958: Bump hsflowd version to v2.1.17-1
-   - PR: vyos/vyos-build#1064
-- kernel: T6788: Added patch to fix sequence adjustment for FTP DNAT
-   - PR: vyos/vyos-build#1065
+- hostap: T7993: fix the git source URL
+   - PR: vyos/vyos-build#1067
 
 
