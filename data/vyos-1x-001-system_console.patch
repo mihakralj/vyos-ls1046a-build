@@ -1,13 +1,13 @@
 diff --git a/interface-definitions/system_console.xml.in b/interface-definitions/system_console.xml.in
-index 5acd3e90b..6e0c4d064 100644
+index 5acd3e90b..80062a3bb 100644
 --- a/interface-definitions/system_console.xml.in
 +++ b/interface-definitions/system_console.xml.in
-@@ -12,13 +12,17 @@
+@@ -12,13 +12,21 @@
              <properties>
                <help>Serial console device name</help>
                <completionHelp>
 -                <script>ls -1 /dev | grep -e ttyS -e hvc</script>
-+                <script>ls -1 /dev | grep -e ttyS -e hvc -e ttyAM</script>
++                <script>ls -1 /dev | grep -e ttyS -e hvc -e ttyAM -e ttyFIQ</script>
                  <script>if [ -d /dev/serial/by-bus ]; then ls -1 /dev/serial/by-bus; fi</script>
                </completionHelp>
                <valueHelp>
@@ -18,15 +18,42 @@ index 5acd3e90b..6e0c4d064 100644
 +                <format>ttyAN</format>
 +                <description>TTY device name, abstract serial port</description>
 +              </valueHelp>
++              <valueHelp>
++                <format>ttyFIQ</format>
++                <description>TTY device name, performance serial port</description>
++              </valueHelp>
                <valueHelp>
                  <format>usbNbXpY</format>
                  <description>TTY device name, USB based</description>
-@@ -28,7 +32,7 @@
+@@ -28,7 +36,7 @@
                  <description>Xen console</description>
                </valueHelp>
                <constraint>
 -                  <regex>(ttyS[0-9]+|hvc[0-9]+|usb[0-9]+b.*)</regex>
-+                  <regex>(ttyS[0-9]+|ttyAMA?[0-9]+|hvc[0-9]+|usb[0-9]+b.*)</regex>
++                  <regex>(ttyS[0-9]+|ttyAMA?[0-9]+|ttyFIQ[0-9]+|hvc[0-9]+|usb[0-9]+b.*)</regex>
                </constraint>
              </properties>
              <children>
+@@ -36,7 +44,7 @@
+                 <properties>
+                   <help>Console baud rate</help>
+                   <completionHelp>
+-                    <list>1200 2400 4800 9600 19200 38400 57600 115200</list>
++                    <list>1200 2400 4800 9600 19200 38400 57600 115200 1500000</list>
+                   </completionHelp>
+                   <valueHelp>
+                     <format>1200</format>
+@@ -70,8 +78,12 @@
+                     <format>115200</format>
+                     <description>115200 bps</description>
+                   </valueHelp>
++                  <valueHelp>
++                    <format>1500000</format>
++                    <description>1500000 bps</description>
++                  </valueHelp>
+                   <constraint>
+-                    <regex>(1200|2400|4800|9600|19200|38400|57600|115200)</regex>
++                    <regex>(1200|2400|4800|9600|19200|38400|57600|115200|1500000)</regex>
+                   </constraint>
+                 </properties>
+                 <defaultValue>115200</defaultValue>
