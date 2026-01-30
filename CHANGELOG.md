@@ -1,78 +1,14 @@
 ## vyos-1x
-- T8108: Add smoketest for Kernel kexec and arm64 options
-   - PR: vyos/vyos-1x#4908
-- T8061: add protobuf messages related to getCompletionEnv
-   - PR: vyos/vyos-1x#4905
-- bond: T8084: disallow bond members that do not support MAC changes
-   - PR: vyos/vyos-1x#4911
-- vpp: T8080: Fix handling of configuration system lock after vpp commit failure
-   - PR: vyos/vyos-1x#4904
-- vpp: T7203: Add op-mode to show bridge-domain
-   - PR: vyos/vyos-1x#4913
-- T8010: Added the vyos_vpp plugin to the accel-pppd's template
-   - PR: vyos/vyos-1x#4910
-- bond: T2416: support hot-add/remove of bond member interfaces
-   - PR: vyos/vyos-1x#4917
-- config: T8124: make get_config_dict() pki={} node purely optional
-   - PR: vyos/vyos-1x#4918
-- T8133: BGP add local-rib feature for BMP
-   - PR: vyos/vyos-1x#4922
-- T8100: Refactor smoke test workflows for GitHub's pull_request_target policy change
-   - PR: vyos/vyos-1x#4914
-- T8100: smoke test workflow fixed whitespace handling with json
-   - PR: vyos/vyos-1x#4926
-- T8144: Updated trigger-rebuild-repo-package workflow for pull_request_target policy change
-   - PR: vyos/vyos-1x#4932
-- T8138: add nat66 as dependent of firewall groups
-   - PR: vyos/vyos-1x#4927
-- nat66: T8139: add support for NAT66 source groups
-   - PR: vyos/vyos-1x#4928
-- router-advert: T8140: add captive portal support (RFC 8910)
-   - PR: vyos/vyos-1x#4929
-- T8145: LUKS Encryption Passphrase Observable
-   - PR: vyos/vyos-1x#4934
-- T7635: OpenConnect Certificate Authentication
-   - PR: vyos/vyos-1x#4618
-- ethernet: T8142: do not raise ValueError for non-existing interfaces
-   - PR: vyos/vyos-1x#4933
-- T8153: PPPoE IPv6 autoconf: no Router Solicitation sent and default IPv6 route not installed after successful dial-up
-   - PR: vyos/vyos-1x#4936
-- T8146: Confirm the key when config encryption is configured without TPM
-   - PR: vyos/vyos-1x#4935
-- T7098: Fix VPP MTU misconfiguration
-   - PR: vyos/vyos-1x#4920
-- ipsec: T8022: Fix invalid automatic  prefix assignment for transport mode tunnels
-   - PR: vyos/vyos-1x#4887
-- T8046: traffic-engineering: support link-params
-   - PR: vyos/vyos-1x#4912
-- T8144: fix and correct TPM and VPP test result reporting in smoke test workflow
-   - PR: vyos/vyos-1x#4937
-- isis: T8158: fix lsp-timers
-   - PR: vyos/vyos-1x#4938
-- T8170: VPP fix IPFIX op-mode commands if VPP is not configured
-   - PR: vyos/vyos-1x#4941
-- T7876: VPP increase dpdk-options num-rx-desc to 16384
-   - PR: vyos/vyos-1x#4943
-- vrf: T8169: prevent deletion if instance referenced in policy based routing
-   - PR: vyos/vyos-1x#4939
-- T8171: Make vyos-smoketest more user-friendly
-   - PR: vyos/vyos-1x#4940
-- openvpn: T7633: Add support for  in site-to-site tunnels
-   - PR: vyos/vyos-1x#4923
-- T7101: Add hardware watchdog support via systemd
-   - PR: vyos/vyos-1x#4843
-- T8156: T8157: T8164: update commit hash for completion and other fixes
-   - PR: vyos/vyos-1x#4944
-- T8187: fix watchdog timeout validation if kernel min/max timeout are zero
-   - PR: vyos/vyos-1x#4946
-- ssh: T7483: Add fido2 PubkeyAuthOptions
-   - PR: vyos/vyos-1x#4852
-- T7664: support FRR 10.5
-   - PR: vyos/vyos-1x#4921
-- vpp: T8143: Incorrect mapping in IPFIX for bond interfaces
-   - PR: vyos/vyos-1x#4947
-- vpp: T8125: Enable ip4-dhcp-client-detect feature if interface address is configured as DHCP
-   - PR: vyos/vyos-1x#4942
+- pppoe-server: T8143: Set 'vpp-cp' option automatically if interface is in VPP
+   - PR: vyos/vyos-1x#4945
+- T7866: Fix not all CPUs have model name key
+   - PR: vyos/vyos-1x#4956
+- T6734: Nginx disable software version reporting
+   - PR: vyos/vyos-1x#4957
+- op-mode: T8154: fix tcpdump KeyboardInterrupt on Ctrl+C
+   - PR: vyos/vyos-1x#4951
+- vpp: T8202: Remove XDP driver and options from CLI and config
+   - PR: vyos/vyos-1x#4955
 
 
 ## vyos-build
@@ -94,5 +30,11 @@
    - PR: vyos/vyos-build#1104
 - T8135: backport the fix for CVE-2025-68615 (DoS in snmptrapd)
    - PR: vyos/vyos-build#1105
+- T8198: Use zabbix-agent2 from Debian backports
+   - PR: vyos/vyos-build#1108
+- Kernel: T8203: Update Linux Kernel to 6.6.121
+   - PR: vyos/vyos-build#1109
+- T8210: ARM: Add missing kernel modules for Marvell CN9130 platform
+   - PR: vyos/vyos-build#1111
 
 
