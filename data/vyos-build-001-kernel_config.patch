@@ -385,7 +385,7 @@ index e9eedeb2..ff13e85a 100644
 -# CONFIG_PCI_HISI is not set
 -# CONFIG_PCIE_KIRIN is not set
 -# CONFIG_PCIE_HISI_STB is not set
--# CONFIG_PCIE_ARMADA_8K is not set
+-CONFIG_PCIE_ARMADA_8K=y
 -# CONFIG_PCIE_DW_PLAT_HOST is not set
 -# CONFIG_PCIE_QCOM is not set
 -# CONFIG_PCIE_ROCKCHIP_DW_HOST is not set
@@ -1350,9 +1350,9 @@ index e9eedeb2..ff13e85a 100644
  #
 -# CONFIG_USB_CDNS_SUPPORT is not set
 -# CONFIG_USB_MUSB_HDRC is not set
--# CONFIG_USB_DWC3 is not set
--# CONFIG_USB_DWC2 is not set
--# CONFIG_USB_CHIPIDEA is not set
+-CONFIG_USB_DWC3=m
+-CONFIG_USB_DWC2=m
+-CONFIG_USB_CHIPIDEA=m
 -# CONFIG_USB_ISP1760 is not set
 +CONFIG_USB_CDNS_SUPPORT=m
 +CONFIG_USB_CDNS_HOST=y
@@ -1564,9 +1564,8 @@ index e9eedeb2..ff13e85a 100644
  #
  # USB Physical Layer drivers
  #
--# CONFIG_NOP_USB_XCEIV is not set
 +CONFIG_USB_PHY=y
-+CONFIG_NOP_USB_XCEIV=m
+ CONFIG_NOP_USB_XCEIV=m
  # CONFIG_USB_GPIO_VBUS is not set
 -# CONFIG_USB_ISP1301 is not set
 -# CONFIG_USB_MXS_PHY is not set
