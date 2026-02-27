@@ -291,7 +291,7 @@ jobs:
           ls -alh packages
 
       - name: Archive Packages
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: vyos-packages
           path: vyos-build/packages/
@@ -350,7 +350,7 @@ jobs:
           # Move artifacts to workspace to avoid nested path in artifact archive
           mv manifest.json ${GENERIC_IMAGE_ISO} ${GENERIC_IMAGE_ISO}.minisig $GITHUB_WORKSPACE
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.build_generic_iso.outputs.generic_image_name }}
           path: |
@@ -466,7 +466,7 @@ jobs:
           commit_message: ${{ needs.build_generic_iso.outputs.build_version }}
           commit_author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: ${{ needs.build_generic_iso.outputs.generic_image_name }}
 
@@ -475,7 +475,7 @@ jobs:
       #   with:
       #     name: vyos-packages
       #     decompress: false
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: vyos-packages
           path: packages
