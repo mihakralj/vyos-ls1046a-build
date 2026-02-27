@@ -29,7 +29,7 @@ index 5acd3e90b..80062a3bb 100644
                  <description>Xen console</description>
                </valueHelp>
                <constraint>
--                  <regex>(ttyS[0-9]+|hvc[0-9]+|usb[0-9]+b.*)</regex>
+-                  <regex>(ttyS[0-9]+|ttyAMA[0-9]+|hvc[0-9]+|usb[0-9]+b.*)</regex>
 +                  <regex>(ttyS[0-9]+|ttyAMA?[0-9]+|ttyFIQ[0-9]+|hvc[0-9]+|usb[0-9]+b.*)</regex>
                </constraint>
              </properties>
