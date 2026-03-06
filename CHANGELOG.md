@@ -1,32 +1,62 @@
 ## vyos-1x
-- igmp-proxy: T8295: render appropriate systemd unit file
-   - PR: vyos/vyos-1x#5005
-- T8302: Add Router Advertisement (RA) base-interface support for IPv6 wildcard prefix derivation.
-   - PR: vyos/vyos-1x#5007
-- T8120: Add support AMA console for ARM devices
-   - PR: vyos/vyos-1x#4915
-- T8310: Re-enable service monitoring telegraf for arm64 arch
-   - PR: vyos/vyos-1x#5009
-- vpp: T8297: Fixed double enabling of VPP
-   - PR: vyos/vyos-1x#5008
-- T8120: Fix grub for ARM use consistent string comparison operator
-   - PR: vyos/vyos-1x#5012
-- vpp: T8283: Move bonding interface from vpp section to 'interfaces vpp bonding'
-   - PR: vyos/vyos-1x#5001
-- vpp: T8318: Consolidate recent migrations into a single downgrade migration (target version 6)
-   - PR: vyos/vyos-1x#5013
 - T8279: recover config data provided by legacy image upgrade tools
    - PR: vyos/vyos-1x#4999
+- vpp: T8296: Move vxlan interface from vpp section to 'interfaces vpp vxlan'
+   - PR: vyos/vyos-1x#5014
+- vrf: T8320: only allow alpha numerical characters, - and _ as VRF name
+   - PR: vyos/vyos-1x#5018
+- ospf: T8319: virtual-link takes invalid input data <INT>
+   - PR: vyos/vyos-1x#5017
+- vpp: T8314: Migrate ipip interface to 'interfaces vpp ipip'
+   - PR: vyos/vyos-1x#5015
+- ospf: T7679: fix plaintext authentication on specific interface
+   - PR: vyos/vyos-1x#5016
+- vpp: T8324: Migrate loopback interface to 'interfaces vpp loopback'
+   - PR: vyos/vyos-1x#5019
+- vpp: T8325: Migrate gre interface to 'interfaces vpp gre'
+   - PR: vyos/vyos-1x#5020
+- vpp: T8327: Migrate bridge interface to 'interfaces vpp bridge'
+   - PR: vyos/vyos-1x#5022
+- ipsec: T8136: IPSEC PPK support
+   - PR: vyos/vyos-1x#4930
+- vpp: T8328: Migrate xconnect interface to 'interfaces vpp xconnect'
+   - PR: vyos/vyos-1x#5024
+- T7513: vyos-1x: CGNAT Exclude Rule CLI support
+   - PR: vyos/vyos-1x#5006
+- vpp: T8340: Remove vif option from vxlan interface
+   - PR: vyos/vyos-1x#5025
+- isis: T6978: add IS-IS SRv6 node-msd configuration
+   - PR: vyos/vyos-1x#4962
+- vpp: T8339: Cleanup vpp interfaces and kernel-interfaces after migration
+   - PR: vyos/vyos-1x#5026
+- T8313: T8074: add vyconf support for copy/rename
+   - PR: vyos/vyos-1x#5011
+- tech-support: T8215: Extend tech-support archive and report generation
+   - PR: vyos/vyos-1x#4967
+- geoip: T8326: Resolve permission issue on database paths
+   - PR: vyos/vyos-1x#5027
+- T7513: CGNAT show exclude rules - all protocol value fix
+   - PR: vyos/vyos-1x#5032
+- opmode: T8343: implement common verify_cli_exists() helper
+   - PR: vyos/vyos-1x#5030
 
 
 ## vyos-build
-- Makefile: T8294: autodetect CPU architecture for smoketests
-   - PR: vyos/vyos-build#1122
-- T8303: Missing build dependencies for ARM64 radvd package
-   - PR: vyos/vyos-build#1123
-- T8311: De-hardcode architecture for live-build-config
-   - PR: vyos/vyos-build#1124
-- T8311: add missing bootstrap binary dependency on dpkg-dev
-   - PR: vyos/vyos-build#1125
+- T8311: fix initramfs hook "dpkg-architecture: command not found"
+   - PR: vyos/vyos-build#1127
+- T8120: add support for per CPU architecture serial interface name
+   - PR: vyos/vyos-build#1128
+- T8330: ARM64: vyos-ipt-netflow package is missing in the build
+   - PR: vyos/vyos-build#1129
+- T8265: Revert leave config path hint in raw image install_image
+   - PR: vyos/vyos-build#1131
+- Kernel: T8332: consolidate WWAN configuration for ARM64 and X86
+   - PR: vyos/vyos-build#1132
+- T8336: frr: pin version to discrete commit and not the Git HEAD for stable/10.5
+   - PR: vyos/vyos-build#1133
+- T8311: move to GNU coreutils when building GLIBC multiarch variable
+   - PR: vyos/vyos-build#1130
+- Kernel: T8345: Update Linux Kernel to 6.6.128
+   - PR: vyos/vyos-build#1134
 
 
