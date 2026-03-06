@@ -59,7 +59,7 @@ jobs:
           tags: ${{ steps.set_env_variables.outputs.image_tag }}
       - name: Build and push Docker image
         id: push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: docker
           push: true
