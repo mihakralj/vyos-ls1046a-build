@@ -46,7 +46,7 @@ jobs:
           repository: vyos/vyos-build
           ref: ${{ steps.set_env_variables.outputs.source_ref }}
       - name: Log in to the Container registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.repository_owner }}
