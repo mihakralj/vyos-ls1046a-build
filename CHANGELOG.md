@@ -1,62 +1,42 @@
 ## vyos-1x
-- T8279: recover config data provided by legacy image upgrade tools
-   - PR: vyos/vyos-1x#4999
-- vpp: T8296: Move vxlan interface from vpp section to 'interfaces vpp vxlan'
-   - PR: vyos/vyos-1x#5014
-- vrf: T8320: only allow alpha numerical characters, - and _ as VRF name
-   - PR: vyos/vyos-1x#5018
-- ospf: T8319: virtual-link takes invalid input data <INT>
-   - PR: vyos/vyos-1x#5017
-- vpp: T8314: Migrate ipip interface to 'interfaces vpp ipip'
-   - PR: vyos/vyos-1x#5015
-- ospf: T7679: fix plaintext authentication on specific interface
-   - PR: vyos/vyos-1x#5016
-- vpp: T8324: Migrate loopback interface to 'interfaces vpp loopback'
-   - PR: vyos/vyos-1x#5019
-- vpp: T8325: Migrate gre interface to 'interfaces vpp gre'
-   - PR: vyos/vyos-1x#5020
-- vpp: T8327: Migrate bridge interface to 'interfaces vpp bridge'
-   - PR: vyos/vyos-1x#5022
-- ipsec: T8136: IPSEC PPK support
-   - PR: vyos/vyos-1x#4930
-- vpp: T8328: Migrate xconnect interface to 'interfaces vpp xconnect'
-   - PR: vyos/vyos-1x#5024
-- T7513: vyos-1x: CGNAT Exclude Rule CLI support
-   - PR: vyos/vyos-1x#5006
-- vpp: T8340: Remove vif option from vxlan interface
-   - PR: vyos/vyos-1x#5025
-- isis: T6978: add IS-IS SRv6 node-msd configuration
-   - PR: vyos/vyos-1x#4962
-- vpp: T8339: Cleanup vpp interfaces and kernel-interfaces after migration
-   - PR: vyos/vyos-1x#5026
-- T8313: T8074: add vyconf support for copy/rename
-   - PR: vyos/vyos-1x#5011
-- tech-support: T8215: Extend tech-support archive and report generation
-   - PR: vyos/vyos-1x#4967
-- geoip: T8326: Resolve permission issue on database paths
-   - PR: vyos/vyos-1x#5027
-- T7513: CGNAT show exclude rules - all protocol value fix
-   - PR: vyos/vyos-1x#5032
-- opmode: T8343: implement common verify_cli_exists() helper
-   - PR: vyos/vyos-1x#5030
+- op-mode: T8350: Move VPP op-mode 'show vpp interfaces' to 'show interfaces vpp'
+   - PR: vyos/vyos-1x#5033
+- T8347: enable pylint for all files under python/* path
+   - PR: vyos/vyos-1x#5031
+- op-mode: T8362: "compare" command lacks catch_broken_pipe decorator
+   - PR: vyos/vyos-1x#5037
+- vpp: T8354: Move 'ignore-kernel-routes' option out of resource-allocation section
+   - PR: vyos/vyos-1x#5034
+- T8370: VPP cosmetic fix for verify buffers path
+   - PR: vyos/vyos-1x#5040
+- vpp: T8356: Fix traceback when adding a VPP bridge without members
+   - PR: vyos/vyos-1x#5038
+- T8371: VPP add op-mode command show runtime
+   - PR: vyos/vyos-1x#5042
+- vyos.ifconfig: T8358: clear qdiscs when deleting mirror CLI node
+   - PR: vyos/vyos-1x#5036
+- T8357: Allow prefix vpp for show interfaces
+   - PR: vyos/vyos-1x#5044
+- vpp: T8276: Add verification for virtual interfaces in PPPoE server configuration
+   - PR: vyos/vyos-1x#5021
+- T8186: netflow: disable IPv6 for netflow protocol version 5
+   - PR: vyos/vyos-1x#5035
+- vpp: T8342: Add verification of members for bond and bridge interfaces
+   - PR: vyos/vyos-1x#5028
+- T8351: VPP add GRE tunnel key configuration
+   - PR: vyos/vyos-1x#5045
+- openvpn: T8304: fix migration for des, bf128 or bf256 cipher; use 3des instead
+   - PR: vyos/vyos-1x#5029
 
 
 ## vyos-build
-- T8311: fix initramfs hook "dpkg-architecture: command not found"
-   - PR: vyos/vyos-build#1127
-- T8120: add support for per CPU architecture serial interface name
-   - PR: vyos/vyos-build#1128
-- T8330: ARM64: vyos-ipt-netflow package is missing in the build
-   - PR: vyos/vyos-build#1129
-- T8265: Revert leave config path hint in raw image install_image
-   - PR: vyos/vyos-build#1131
-- Kernel: T8332: consolidate WWAN configuration for ARM64 and X86
-   - PR: vyos/vyos-build#1132
-- T8336: frr: pin version to discrete commit and not the Git HEAD for stable/10.5
-   - PR: vyos/vyos-build#1133
-- T8311: move to GNU coreutils when building GLIBC multiarch variable
-   - PR: vyos/vyos-build#1130
-- Kernel: T8345: Update Linux Kernel to 6.6.128
-   - PR: vyos/vyos-build#1134
+- T8363: Ensure FRR does not see duplicate local routes on interface changes
+   - PR: vyos/vyos-build#1136
+- T8373: check-qemu-install: increase BOOTLOADER_SLEEP time
+   - PR: vyos/vyos-build#1137
+- T8334: arm64: updating image via 'add system image' fails with vmlinuz not found error
+   - PR: vyos/vyos-build#1138
+- oci: T8366: remove features from container image which are not supported
+   - PR: vyos/vyos-build#1135
 
 
