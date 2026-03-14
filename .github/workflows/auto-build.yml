@@ -190,7 +190,8 @@ jobs:
           #patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-006-fix_kernel_sign.patch
           # sign kernel module but donot sign vmlinuz
           patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-007-no_sbsign.patch
-          patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-008-fix_live_boot_initramfs_link.patch
+          # fixed by https://github.com/vyos/vyos-build/commit/5fe0c17b8c6cb8e244762dcb88eb9c0bf705d9f5
+          #patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-008-fix_live_boot_initramfs_link.patch
           # https://github.com/vyos/vyos-build/commit/ff2a5df902ca31d51eda6744c94cb257d162fcfc
           #patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-009-live_boot_serial_console_device.patch
           # https://github.com/vyos/vyos-build/blob/fd737172f1068870fe1ededbe9b2ed4a86663acd/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/README.md
