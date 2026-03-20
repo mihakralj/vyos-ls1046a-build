@@ -8,9 +8,7 @@ Stock VyOS ARM64 ISO boots fine on Proxmox, Hetzner, and the usual cloud furnitu
 
 ## Target Hardware
 
-**NXP LS1046A** (QorIQ Layerscape, `fsl,ls1046a`)
-
-Validated on: Mono Gateway Development Kit (`mono,gateway-dk`)
+**NXP LS1046A** (QorIQ Layerscape, `fsl,ls1046a`), available as **Mono Gateway Development Kit** (`mono,gateway-dk`)
 
 | Component | Spec |
 |-----------|------|
