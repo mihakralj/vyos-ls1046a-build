@@ -11,19 +11,21 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Single 
 - **VyOS config syntax:** No comments allowed inside config blocks — `//` and `/* */` both cause parse failures. Comments are only safe at the top level outside `{}` blocks
 - **Branch:** `main` only (not `master`). Never create feature branches.
 - **Kernel config symbols:** Verify against actual Kconfig files — invalid symbols are silently ignored (e.g., `CONFIG_SERIAL_8250_OF` does not exist; the correct symbol is `CONFIG_SERIAL_OF_PLATFORM`)
+- **DPAA1 MDIO dependency:** `CONFIG_FSL_XGMAC_MDIO=y` is required for FMan networking — without it, all MACs defer with "missing pcs" and zero network interfaces appear. Not obvious from Kconfig dependencies.
 - **U-Boot boot order:** initrd must load LAST so `${filesize}` captures the initrd size, not kernel/DTB size
 - **eMMC layout:** `mmcblk0p1` = OpenWrt (do not touch), `mmcblk0p2` = VyOS. The `dd` of the eMMC image IS the installation — no `install image` step needed
 - **FMan firmware:** U-Boot injects from SPI flash `mtd4` into DTB before kernel boot. Not loaded via `request_firmware()`, no `/lib/firmware/` files needed
 - **Builder image:** Use `ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64` — do NOT fork or rebuild
 - **Live device SSH:** OpenWrt is at `root@192.168.1.234` (not the default 192.168.1.1)
 - **Git on Windows:** `core.filemode=false` required — NTFS can't represent Unix permissions
+- **Don't push during builds:** The workflow updates `version.json` — pushing while a build is running causes merge conflicts. Use `git pull --rebase` if this happens.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `.github/workflows/auto-build.yml` | THE build — kernel config overrides, ISO creation, eMMC image, release |
-| `data/config.boot.default` | Default VyOS config baked into ISO (uses `/* */` comments!) |
+| `data/config.boot.default` | Default VyOS config baked into ISO (NO comments allowed inside blocks!) |
 | `data/dtb/mono-gw.dtb` | Device tree blob for Mono Gateway hardware |
 | `data/vyos-1x-*.patch` | Patches applied to vyos-1x during build |
 | `data/vyos-build-*.patch` | Patches applied to vyos-build during build |
