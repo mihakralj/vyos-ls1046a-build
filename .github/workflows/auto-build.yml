@@ -185,6 +185,23 @@ jobs:
 
             [ $package == "keepalived" ] && apt-get remove -y libsnmp-dev
 
+            ### Build mainline LS1046A DTB from kernel source (before cleanup)
+            if [ "$package" == "linux-kernel" ]; then
+              KSRC=$(find . -maxdepth 1 -type d -name 'linux-*' | head -1)
+              if [ -n "$KSRC" ] && [ -d "$KSRC/arch/arm64/boot/dts/freescale" ]; then
+                echo "### Building mainline LS1046A RDB DTB from $KSRC"
+                make -C "$KSRC" dtbs 2>&1 | tail -5 || true
+                RDB_DTB="$KSRC/arch/arm64/boot/dts/freescale/fsl-ls1046a-rdb.dtb"
+                if [ -f "$RDB_DTB" ]; then
+                  cp "$RDB_DTB" "$GITHUB_WORKSPACE/data/dtb/fsl-ls1046a-rdb.dtb"
+                  echo "### Mainline RDB DTB built: $(ls -la $GITHUB_WORKSPACE/data/dtb/fsl-ls1046a-rdb.dtb)"
+                else
+                  echo "WARNING: fsl-ls1046a-rdb.dtb not found after build"
+                  ls "$KSRC/arch/arm64/boot/dts/freescale/"*.dtb 2>/dev/null | head -5 || true
+                fi
+              fi
+            fi
+
             # clean
             df -Th
             apt-get autoremove -y
@@ -254,6 +271,13 @@ jobs:
           cd vyos-build
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
           set -ex
+
+          ### Copy mainline RDB DTB if built during kernel step
+          if [ -f "$GITHUB_WORKSPACE/data/dtb/fsl-ls1046a-rdb.dtb" ]; then
+            cp "$GITHUB_WORKSPACE/data/dtb/fsl-ls1046a-rdb.dtb" \
+              data/live-build-config/includes.binary/fsl-ls1046a-rdb.dtb
+            echo "### Mainline RDB DTB included in ISO"
+          fi
 
           rm -rf packages/linux-headers-*
 
