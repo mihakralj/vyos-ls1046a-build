@@ -209,22 +209,79 @@ mmcblk0       ~29.6 GB total
 ## Troubleshooting
 
 **Kernel hangs after "Starting kernel..."**
-→ Confirm bootargs: `earlycon=uart8250,mmio,0x21c0500`
+Check bootargs: `earlycon=uart8250,mmio,0x21c0500`
 
 **live-boot cannot find filesystem.squashfs**
-→ eMMC driver missing. Must use ISOs from this repo, not generic ARM64.
-→ Check: `dmesg | grep -i 'mmc\|esdhc\|mmcblk'` — `mmcblk0` must appear.
+eMMC driver missing. Must use ISOs from this repo, not generic ARM64.
+Check: `dmesg | grep -i 'mmc\|esdhc\|mmcblk'` — `mmcblk0` must appear.
 
-**No network interfaces (eth0–eth4)**
-→ DPAA1/FMan init failed: `dmesg | grep -i 'fman\|dpaa'`
-→ FMan must show firmware loaded. If `firmware not available`, the DTB may
-  be wrong.
+**No network interfaces (eth0-eth4)**
+Run the FMan diagnostic sequence below.
 
 **U-Boot prompt not reachable**
-→ Press key within 5 seconds. Plug USB-TTL adapter in before powering on.
+Press key within 5 seconds. Plug USB-TTL adapter in before powering on.
 
 **`ext4load` fails with "File not found"**
-→ Files not on `mmcblk0p2`. Mount and check: `mount /dev/mmcblk0p2 /mnt; ls /mnt/live/`
+Files not on `mmcblk0p2`. Mount and check: `mount /dev/mmcblk0p2 /mnt; ls /mnt/live/`
+
+---
+
+## FMan / DPAA1 Network Diagnostics
+
+If no Ethernet interfaces appear after boot, run these commands on the
+VyOS serial console to diagnose:
+
+```bash
+# Check if drivers registered and bound to devices
+ls /sys/bus/platform/drivers/fsl-fman/
+ls /sys/bus/platform/drivers/dpaa-ethernet/
+ip link show
+
+# Verify kernel config includes DPAA/FMan
+zcat /proc/config.gz | grep -iE 'FMAN|DPAA|LAYERSCAPE'
+
+# Check dmesg for FMan/DPAA messages (may be empty if probe succeeded silently)
+dmesg | grep -iE 'fman|dpaa|fsl_dpa|memac|defer|probe'
+
+# Check for deferred probes
+mount -t debugfs none /sys/kernel/debug 2>/dev/null
+cat /sys/kernel/debug/devices_deferred 2>/dev/null
+```
+
+FMan uses `dev_dbg()` — success messages only appear with dynamic debug:
+
+```bash
+echo "file fman.c +p" > /sys/kernel/debug/dynamic_debug/control
+echo "file dpaa_eth.c +p" > /sys/kernel/debug/dynamic_debug/control
+echo "file mac.c +p" > /sys/kernel/debug/dynamic_debug/control
+dmesg | tail -30
+```
+
+---
+
+## Testing with Mainline RDB DTB
+
+Recent builds include a mainline `fsl-ls1046a-rdb.dtb` compiled from the
+kernel source tree. If networking fails with `mono-gw.dtb`, test with the
+RDB DTB to determine whether the issue is DTB-specific:
+
+At the U-Boot `=>` prompt, load the RDB DTB instead of `mono-gw.dtb`:
+
+```
+setenv vyos_rdb 'setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/mmcblk0p2 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet"; ext4load mmc 0:2 ${kernel_addr_r} /live/vmlinuz-6.6.128-vyos; ext4load mmc 0:2 ${fdt_addr_r} /fsl-ls1046a-rdb.dtb; ext4load mmc 0:2 ${ramdisk_addr_r} /live/initrd.img-6.6.128-vyos; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
+run vyos_rdb
+```
+
+> **Note:** The RDB DTB is designed for the NXP LS1046A-RDB reference board.
+> Hardware-specific peripherals (I2C devices, SPI flash layout, GPIO) may differ
+> from the Mono Gateway, but DPAA1/FMan networking should function identically
+> since both boards use the same SoC and FMan v3.
+
+If networking works with the RDB DTB but not `mono-gw.dtb`, the issue is in the
+custom DTB. The mono-gw DTB contains NXP SDK-specific nodes (`fsl,dpaa`,
+`fsl,dpa-oh`, `fman-extended-args`) that are not recognized by the mainline
+kernel. A new DTB based on the mainline `qoriq-fman3-0.dtsi` include files
+is required.
 
 ---
 
