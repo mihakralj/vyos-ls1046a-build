@@ -283,13 +283,11 @@ CONFIG_CDX_BUS=y                # CDX bus (DPAA dependency)
 
 ---
 
-## Open Issues
+## FMan Microcode (Resolved)
 
-**FMan microcode loading:** The microcode lives in `mtd4` on SPI flash. The kernel loads it via `request_firmware()` during FMan initialization. If the firmware request path does not include MTD devices, FMan initialization silently fails and DPAA1 interfaces do not appear.
+The FMan microcode (v210.10.1, ~50KB) lives in `mtd4` ("fman-ucode") on SPI flash. **U-Boot injects it into the DTB** at `fman@1a00000/fman-firmware/fsl,firmware` before the kernel starts. The FMan driver reads the firmware directly from this DTB node — no `request_firmware()` call, no `/lib/firmware/` files needed.
 
-Mitigation options:
-1. Extract the microcode from `mtd4` on OpenWrt and place it at `/lib/firmware/fsl_fman_ucode_ls1046_r1.0_106_4_18.bin` in the VyOS filesystem.
-2. Configure `CONFIG_EXTRA_FIRMWARE` to embed the blob directly in the kernel image.
+This is transparent to VyOS. Every Mono Gateway ships with the microcode pre-burned in SPI flash, and U-Boot handles injection automatically regardless of which OS boots.
 
 ---
 
