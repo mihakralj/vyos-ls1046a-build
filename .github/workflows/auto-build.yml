@@ -297,21 +297,30 @@ jobs:
             # create a non-zero file to indicate failure
             echo "fake sign" > ${GENERIC_IMAGE_ISO}.minisig
           fi
-          # Create recovery tarball (for devices that cannot mount ISO)
-          mkdir -p /tmp/recovery-tar
+          # Create dd-able eMMC image (ext4 with VyOS files, gzipped)
+          mkdir -p /tmp/iso-mount
           mount -o loop,ro ${GENERIC_IMAGE_ISO} /tmp/iso-mount || true
           if [ -d /tmp/iso-mount/live ]; then
-            cp /tmp/iso-mount/live/vmlinuz-* /tmp/recovery-tar/
-            cp /tmp/iso-mount/live/initrd.img-* /tmp/recovery-tar/
-            cp /tmp/iso-mount/live/filesystem.squashfs /tmp/recovery-tar/
-            [ -f /tmp/iso-mount/mono-gw.dtb ] && cp /tmp/iso-mount/mono-gw.dtb /tmp/recovery-tar/
-            tar czf ${GENERIC_IMAGE_NAME}-recovery.tar.gz -C /tmp/recovery-tar .
+            truncate -s 2G ${GENERIC_IMAGE_NAME}-emmc.img
+            mkfs.ext4 -q -L vyos ${GENERIC_IMAGE_NAME}-emmc.img
+            mkdir -p /tmp/img-mount
+            mount -o loop ${GENERIC_IMAGE_NAME}-emmc.img /tmp/img-mount
+            mkdir -p /tmp/img-mount/live
+            cp /tmp/iso-mount/live/vmlinuz-* /tmp/img-mount/live/
+            cp /tmp/iso-mount/live/initrd.img-* /tmp/img-mount/live/
+            cp /tmp/iso-mount/live/filesystem.squashfs /tmp/img-mount/live/
+            [ -f /tmp/iso-mount/mono-gw.dtb ] && cp /tmp/iso-mount/mono-gw.dtb /tmp/img-mount/
+            sync
+            umount /tmp/img-mount
             umount /tmp/iso-mount
+            gzip ${GENERIC_IMAGE_NAME}-emmc.img
+          else
+            umount /tmp/iso-mount 2>/dev/null || true
           fi
-          rm -rf /tmp/iso-mount /tmp/recovery-tar
+          rm -rf /tmp/iso-mount /tmp/img-mount
           # Move artifacts to workspace to avoid nested path in artifact archive
           mv manifest.json ${GENERIC_IMAGE_ISO} ${GENERIC_IMAGE_ISO}.minisig $GITHUB_WORKSPACE
-          [ -f ${GENERIC_IMAGE_NAME}-recovery.tar.gz ] && mv ${GENERIC_IMAGE_NAME}-recovery.tar.gz $GITHUB_WORKSPACE
+          [ -f ${GENERIC_IMAGE_NAME}-emmc.img.gz ] && mv ${GENERIC_IMAGE_NAME}-emmc.img.gz $GITHUB_WORKSPACE
 
       - uses: actions/upload-artifact@v7
         with:
@@ -320,7 +329,7 @@ jobs:
             manifest.json
             ${{ steps.build_generic_iso.outputs.generic_image_iso }}
             ${{ steps.build_generic_iso.outputs.generic_image_iso }}.minisig
-            ${{ steps.build_generic_iso.outputs.generic_image_name }}-recovery.tar.gz
+            ${{ steps.build_generic_iso.outputs.generic_image_name }}-emmc.img.gz
           retention-days: 15
           if-no-files-found: error
           compression-level: 0
@@ -452,7 +461,7 @@ jobs:
           files: |
             ${{ needs.build_generic_iso.outputs.generic_image_iso }}
             ${{ needs.build_generic_iso.outputs.generic_image_iso }}.minisig
-            ${{ needs.build_generic_iso.outputs.generic_image_name }}-recovery.tar.gz
+            ${{ needs.build_generic_iso.outputs.generic_image_name }}-emmc.img.gz
             vyos-packages.tar
 
       - uses: dev-drprasad/delete-older-releases@v0.3.4
