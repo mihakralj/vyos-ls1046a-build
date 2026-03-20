@@ -8,7 +8,7 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Single 
 
 ## Critical Non-Obvious Rules
 
-- **VyOS config syntax:** Uses `/* */` comments only — `//` causes silent parse failures at boot
+- **VyOS config syntax:** No comments allowed inside config blocks — `//` and `/* */` both cause parse failures. Comments are only safe at the top level outside `{}` blocks
 - **Branch:** `main` only (not `master`). Never create feature branches.
 - **Kernel config symbols:** Verify against actual Kconfig files — invalid symbols are silently ignored (e.g., `CONFIG_SERIAL_8250_OF` does not exist; the correct symbol is `CONFIG_SERIAL_OF_PLATFORM`)
 - **U-Boot boot order:** initrd must load LAST so `${filesize}` captures the initrd size, not kernel/DTB size
