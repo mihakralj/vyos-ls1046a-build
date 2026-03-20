@@ -67,10 +67,10 @@ Verify: `ping -c 2 github.com`
 
 ## Step 2: Download and Write VyOS to eMMC
 
-This script works on both OpenWrt and Recovery Linux:
+Copy-paste this script to either OpenWrt or Recovery Linux:
 
 ```bash
-# Get the latest eMMC image URL from GitHub
+# Get the latest VyOS eMMC image URL from GitHub
 IMG_URL=$(wget --no-check-certificate -qO- \
   https://api.github.com/repos/mihakralj/vyos-ls1046a-build/releases/latest \
   | grep -o '"browser_download_url": "[^"]*emmc\.img\.gz"' | cut -d'"' -f4)
@@ -90,7 +90,7 @@ umount /mnt/vyos
 # Print the U-Boot command with kernel version filled in
 echo ""
 echo "=== Copy this U-Boot command (one line) ==="
-echo "setenv vyos 'setenv bootargs \"console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet\"; ext4load mmc 0:2 \${kernel_addr_r} /live/vmlinuz-${KV}; ext4load mmc 0:2 \${ramdisk_addr_r} /live/initrd.img-${KV}; ext4load mmc 0:2 \${fdt_addr_r} /mono-gw.dtb; booti \${kernel_addr_r} \${ramdisk_addr_r}:\${filesize} \${fdt_addr_r}'"
+echo "setenv vyos 'setenv bootargs \"console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet\"; ext4load mmc 0:2 \${kernel_addr_r} /live/vmlinuz-${KV}; ext4load mmc 0:2 \${fdt_addr_r} /mono-gw.dtb; ext4load mmc 0:2 \${ramdisk_addr_r} /live/initrd.img-${KV}; booti \${kernel_addr_r} \${ramdisk_addr_r}:\${filesize} \${fdt_addr_r}'"
 echo "==========================================="
 ```
 
@@ -148,7 +148,7 @@ If you don't have the output anymore, check the kernel version:
 Note the version from the `vmlinuz-*` filename. The command format is:
 
 ```
-setenv vyos 'setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet"; ext4load mmc 0:2 ${kernel_addr_r} /live/vmlinuz-<KV>; ext4load mmc 0:2 ${ramdisk_addr_r} /live/initrd.img-<KV>; ext4load mmc 0:2 ${fdt_addr_r} /mono-gw.dtb; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
+setenv vyos 'setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet"; ext4load mmc 0:2 ${kernel_addr_r} /live/vmlinuz-<KV>; ext4load mmc 0:2 ${fdt_addr_r} /mono-gw.dtb; ext4load mmc 0:2 ${ramdisk_addr_r} /live/initrd.img-<KV>; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
 ```
 
 Replace `<KV>` with the actual kernel version (e.g., `6.6.128-vyos`).
