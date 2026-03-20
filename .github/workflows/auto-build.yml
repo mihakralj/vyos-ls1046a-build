@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       BUILD_BY:
-        description: 'Builder identifier (auto: your-github-id@users.noreply.github.com)'
+        description: 'Builder identifier (auto: mihakralj@users.noreply.github.com)'
         default: ''
       build_version:
         description: 'Version number (auto: YYYY.MM.DD-HHMM-rolling)'
