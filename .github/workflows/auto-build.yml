@@ -331,7 +331,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-    if: github.ref_name == 'master'
+    if: github.ref_name == 'main'
     steps:
       - uses: actions/checkout@v6
       - name: Clone vyos-build repo
