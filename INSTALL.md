@@ -73,8 +73,9 @@ cp /tmp/iso/live/initrd.img-*       /mnt/vyos/live/
 cp /tmp/iso/live/filesystem.squashfs /mnt/vyos/live/
 cp /tmp/iso/mono-gw.dtb             /mnt/vyos/
 
-# Verify
+# Verify and capture kernel version before unmounting
 ls -lh /mnt/vyos/live/ /mnt/vyos/mono-gw.dtb
+KV=$(ls /mnt/vyos/live/vmlinuz-* | sed 's/.*vmlinuz-//')
 
 # Clean up
 sync
@@ -83,7 +84,6 @@ umount /tmp/iso
 rm /tmp/vyos.iso
 
 # Print the U-Boot command with kernel version filled in
-KV=$(ls /mnt/vyos/live/vmlinuz-* | sed 's/.*vmlinuz-//' 2>/dev/null || echo '6.6.128-vyos')
 echo ""
 echo "=== Copy this U-Boot command (one line) ==="
 echo "setenv vyos 'setenv bootargs \"console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet\"; ext4load mmc 0:2 \${kernel_addr_r} /live/vmlinuz-${KV}; ext4load mmc 0:2 \${ramdisk_addr_r} /live/initrd.img-${KV}; ext4load mmc 0:2 \${fdt_addr_r} /mono-gw.dtb; booti \${kernel_addr_r} \${ramdisk_addr_r}:\${filesize} \${fdt_addr_r}'"
@@ -251,15 +251,13 @@ reboot                                   # activate new image
 If OpenWrt is broken or unreachable, VyOS can be installed from Recovery
 Linux. This path requires a **serial console** for the entire process.
 
-Recovery Linux is a minimal BusyBox-based environment stored in SPI NOR
-flash (`mtd7`). It has **no SSH server** — all commands are entered via
-the serial console. The upstream docs confirm it has `curl`, `ip`, and
-`dd`. Other tools (`mkfs.ext4`, `mount -o loop`) may or may not be
-present.
-
-Two approaches are documented below: **direct** (if the recovery
-environment has filesystem tools) and **from OpenWrt** (using recovery
-only for network download, then rebooting into OpenWrt to copy files).
+Recovery Linux is a BusyBox-based environment stored in SPI NOR flash
+(`mtd7`). It runs kernel 6.12.49, has ~7.5 GB RAM available, and
+includes `curl`, `wget`, `mkfs.ext4`, `mount`, `tar`, `gzip`, and `ip`.
+It has **no SSH server** and **no iso9660/squashfs filesystem support**,
+so it cannot mount VyOS ISO files directly. Instead, it uses the
+**recovery tarball** (`*-recovery.tar.gz`) published alongside each
+release.
 
 ### Step R1: Boot into Recovery Linux
 
@@ -292,10 +290,14 @@ Login as `root` (no password). The LED turns **orange (pulsing)**.
 
 ### Step R2: Configure networking
 
-Recovery Linux has **no DHCP** — configure the network manually.
-eth0 is the **leftmost** RJ-45 port:
+Recovery Linux uses `udhcpc` or manual IP. eth0 is the **leftmost**
+RJ-45 port:
 
 ```bash
+# Option A: DHCP (if your network has a DHCP server)
+udhcpc -i eth0
+
+# Option B: Static IP
 ip link set eth0 up
 ip addr add 10.0.0.199/24 dev eth0
 ip route add default via 10.0.0.1 dev eth0
@@ -310,73 +312,58 @@ Verify connectivity:
 ping -c 2 github.com
 ```
 
-### Step R3: Download VyOS ISO
+### Step R3: Download recovery tarball
+
+Recovery Linux cannot mount ISO files (no iso9660 kernel support).
+Download the **recovery tarball** instead — it contains the same files
+(vmlinuz, initrd, filesystem.squashfs, DTB) pre-extracted:
 
 ```bash
 cd /tmp
 
-# Get the latest release URL (uses grep — no jq needed)
-ISO_URL=$(curl -skL https://api.github.com/repos/mihakralj/vyos-ls1046a-build/releases/latest \
-  | grep -o '"browser_download_url": "[^"]*\.iso"' | cut -d'"' -f4)
+# Get the latest recovery tarball URL
+TAR_URL=$(curl -skL https://api.github.com/repos/mihakralj/vyos-ls1046a-build/releases/latest \
+  | grep -o '"browser_download_url": "[^"]*recovery\.tar\.gz"' | cut -d'"' -f4)
 
-echo "Downloading: $ISO_URL"
-curl -kLO "$ISO_URL"
-ls -lh /tmp/*.iso
+echo "Downloading: $TAR_URL"
+curl -kLO "$TAR_URL"
+ls -lh /tmp/*recovery.tar.gz
 ```
 
 > The `-k` flag skips TLS verification — Recovery Linux may not have
 > up-to-date CA certificates.
 
-### Step R4: Format and copy to eMMC
-
-First, check what tools are available:
+### Step R4: Format eMMC and extract files
 
 ```bash
-which mkfs.ext4 mount umount cp mkdir
-```
-
-**If `mkfs.ext4` and `mount` are available** — use the direct method:
-
-```bash
-# Format partition 2 (does NOT touch OpenWrt on p1)
+# Format partition 2 for VyOS (does NOT touch OpenWrt on p1)
 mkfs.ext4 -L vyos /dev/mmcblk0p2
 
-# Mount and copy
-mkdir -p /mnt/vyos /tmp/iso
+# Mount the target partition
+mkdir -p /mnt/vyos
 mount /dev/mmcblk0p2 /mnt/vyos
 mkdir -p /mnt/vyos/live
 
-# Mount ISO (requires loop device support)
-mount -o loop,ro /tmp/*.iso /tmp/iso
+# Extract the recovery tarball directly into the live directory
+tar xzf /tmp/*recovery.tar.gz -C /mnt/vyos/live/
 
-cp /tmp/iso/live/vmlinuz-*          /mnt/vyos/live/
-cp /tmp/iso/live/initrd.img-*       /mnt/vyos/live/
-cp /tmp/iso/live/filesystem.squashfs /mnt/vyos/live/
-cp /tmp/iso/mono-gw.dtb             /mnt/vyos/
+# Move DTB to root of partition (if included in tarball)
+[ -f /mnt/vyos/live/mono-gw.dtb ] && mv /mnt/vyos/live/mono-gw.dtb /mnt/vyos/
 
-# Note the kernel version for U-Boot
-ls /mnt/vyos/live/vmlinuz-*
+# Verify and capture kernel version
+ls -lh /mnt/vyos/live/ /mnt/vyos/mono-gw.dtb
+KV=$(ls /mnt/vyos/live/vmlinuz-* | sed 's/.*vmlinuz-//')
+
+# Print the U-Boot command
+echo ""
+echo "=== Copy this U-Boot command (one line) ==="
+echo "setenv vyos 'setenv bootargs \"console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet\"; ext4load mmc 0:2 \${kernel_addr_r} /live/vmlinuz-${KV}; ext4load mmc 0:2 \${ramdisk_addr_r} /live/initrd.img-${KV}; ext4load mmc 0:2 \${fdt_addr_r} /mono-gw.dtb; booti \${kernel_addr_r} \${ramdisk_addr_r}:\${filesize} \${fdt_addr_r}'"
+echo "==========================================="
 
 sync
 umount /mnt/vyos
-umount /tmp/iso
+rm /tmp/*recovery.tar.gz
 ```
-
-**If tools are missing** — use Recovery Linux only for the download,
-then reboot into OpenWrt to do the actual install:
-
-```bash
-# Save the ISO to mmcblk0p2 (OpenWrt partition has only ~511 MB — too small)
-# The ISO goes to /tmp which is in RAM, so just reboot into OpenWrt
-# and re-download there (it has wget, jq, mkfs.ext4, mount)
-reboot
-```
-
-After reboot, let OpenWrt start, SSH in, and follow
-[Step 2](#step-2-download-and-install-vyos). If OpenWrt is broken,
-the Recovery Linux reflash procedure in the
-[Mono Gateway docs](https://github.com/ryneches/mono-gateway-docs/blob/master/gateway-development-kit/getting-started.md)
-can restore it first.
 
 ### Step R5: Configure U-Boot
 
@@ -386,18 +373,17 @@ Since you are already on the serial console, reboot and interrupt U-Boot:
 reboot
 ```
 
-Press any key within 5 seconds, then paste the `setenv vyos` command.
+Press any key within 5 seconds, then paste the `setenv vyos` command
+printed in Step R4.
 
-If the install script printed the command, paste it directly. Otherwise,
-check the kernel version by loading it in U-Boot:
+If you lost the output, check the kernel version from U-Boot:
 
 ```
 => ext4ls mmc 0:2 /live/
 ```
 
-This shows the files on partition 2. Note the kernel version from the
-`vmlinuz-*` filename, then set the boot variable per
-[Step 3: Configure U-Boot](#step-3-configure-u-boot).
+Note the kernel version from the `vmlinuz-*` filename, then set the boot
+variable per [Step 3: Configure U-Boot](#step-3-configure-u-boot).
 
 After `saveenv`, test with `run vyos` — VyOS should boot directly.
 
