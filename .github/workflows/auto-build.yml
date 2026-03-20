@@ -224,6 +224,9 @@ jobs:
           fi
           # add minisign pubkey
           cp data/huihuimoe-vyos-arm64.minisign.pub vyos-build/data/live-build-config/includes.chroot/usr/share/vyos/keys/
+          # LS1046A DTB: place at ISO root via includes.binary so U-Boot can ext4load it
+          mkdir -p vyos-build/data/live-build-config/includes.binary
+          cp data/dtb/mono-gw.dtb vyos-build/data/live-build-config/includes.binary/mono-gw.dtb
 
           true
 
