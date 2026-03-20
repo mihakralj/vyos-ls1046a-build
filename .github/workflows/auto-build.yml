@@ -297,8 +297,21 @@ jobs:
             # create a non-zero file to indicate failure
             echo "fake sign" > ${GENERIC_IMAGE_ISO}.minisig
           fi
+          # Create recovery tarball (for devices that cannot mount ISO)
+          mkdir -p /tmp/recovery-tar
+          mount -o loop,ro ${GENERIC_IMAGE_ISO} /tmp/iso-mount || true
+          if [ -d /tmp/iso-mount/live ]; then
+            cp /tmp/iso-mount/live/vmlinuz-* /tmp/recovery-tar/
+            cp /tmp/iso-mount/live/initrd.img-* /tmp/recovery-tar/
+            cp /tmp/iso-mount/live/filesystem.squashfs /tmp/recovery-tar/
+            [ -f /tmp/iso-mount/mono-gw.dtb ] && cp /tmp/iso-mount/mono-gw.dtb /tmp/recovery-tar/
+            tar czf ${GENERIC_IMAGE_NAME}-recovery.tar.gz -C /tmp/recovery-tar .
+            umount /tmp/iso-mount
+          fi
+          rm -rf /tmp/iso-mount /tmp/recovery-tar
           # Move artifacts to workspace to avoid nested path in artifact archive
           mv manifest.json ${GENERIC_IMAGE_ISO} ${GENERIC_IMAGE_ISO}.minisig $GITHUB_WORKSPACE
+          [ -f ${GENERIC_IMAGE_NAME}-recovery.tar.gz ] && mv ${GENERIC_IMAGE_NAME}-recovery.tar.gz $GITHUB_WORKSPACE
 
       - uses: actions/upload-artifact@v7
         with:
@@ -307,6 +320,7 @@ jobs:
             manifest.json
             ${{ steps.build_generic_iso.outputs.generic_image_iso }}
             ${{ steps.build_generic_iso.outputs.generic_image_iso }}.minisig
+            ${{ steps.build_generic_iso.outputs.generic_image_name }}-recovery.tar.gz
           retention-days: 15
           if-no-files-found: error
           compression-level: 0
@@ -434,10 +448,11 @@ jobs:
         with:
           body_path: CHANGELOG.md
           tag_name: ${{ needs.build_generic_iso.outputs.build_version }}
-          fail_on_unmatched_files: true
+          fail_on_unmatched_files: false
           files: |
             ${{ needs.build_generic_iso.outputs.generic_image_iso }}
             ${{ needs.build_generic_iso.outputs.generic_image_iso }}.minisig
+            ${{ needs.build_generic_iso.outputs.generic_image_name }}-recovery.tar.gz
             vyos-packages.tar
 
       - uses: dev-drprasad/delete-older-releases@v0.3.4
