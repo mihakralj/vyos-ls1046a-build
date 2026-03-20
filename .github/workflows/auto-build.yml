@@ -453,7 +453,11 @@ jobs:
         id: check_if_the_repository_was_modified_during_runtime
         run: |
           sudo chown -R $(whoami):$(whoami) ./*
-          git pull --autostash --rebase
+          # Save version.json (modified by create-json step), pull latest, restore
+          cp version.json /tmp/version.json.new
+          git checkout -- version.json 2>/dev/null || true
+          git pull --rebase || true
+          cp /tmp/version.json.new version.json
 
       - name: "Release publishing: create autocommit and tag"
         uses: stefanzweifel/git-auto-commit-action@v7
