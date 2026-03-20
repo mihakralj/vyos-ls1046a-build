@@ -180,7 +180,7 @@ jobs:
           cp data/config.boot.default vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/
           cp data/config.boot.dhcp vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/
           # fix kernel config https://github.com/vyos/vyos-build/pull/1121
-          #patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-001-kernel_config.patch
+          patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-001-kernel_config.patch
           # https://github.com/vyos/vyos-build/commit/88f11dc01bb676bf652512d6bf23ba0f10f5101f
           #patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-003-fix_hardcoded_x86_64.patch
           # fix on https://github.com/vyos/vyos-build/commit/82a40e68c7e4b3ea45fb2bbc4a1a7cff92e41942
@@ -194,6 +194,24 @@ jobs:
           #patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-008-fix_live_boot_initramfs_link.patch
           # https://github.com/vyos/vyos-build/commit/ff2a5df902ca31d51eda6744c94cb257d162fcfc
           #patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-009-live_boot_serial_console_device.patch
+          # LS1046A: inject board-specific kernel config (DPAA1/FMan networking + console)
+          DEFCONFIG=vyos-build/scripts/package-build/linux-kernel/arch/arm64/configs/vyos_defconfig
+          cat >> "$DEFCONFIG" << 'KCONFIG'
+# === LS1046A / NXP Layerscape DPAA1 (Mono Gateway DK) ===
+CONFIG_FSL_FMAN=y
+CONFIG_FSL_DPAA=y
+CONFIG_FSL_DPAA_ETH=y
+CONFIG_FSL_BMAN=y
+CONFIG_FSL_QMAN=y
+CONFIG_FSL_PAMU=y
+CONFIG_SERIAL_8250_OF=y
+KCONFIG
+          echo "Appended LS1046A DPAA config to defconfig"
+          # Fix console: revert ttyAMA0 -> ttyS0 for LS1046A serial (8250 UART)
+          SERIAL_HOOK=vyos-build/data/live-build-config/hooks/live/01-live-serial.binary
+          sed -i 's/ttyAMA0/ttyS0/g' "$SERIAL_HOOK" 2>/dev/null || true
+          GRUB_ENTRY=vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/grub/default-union-grub-entry
+          sed -i 's/ttyAMA0/ttyS0/g' "$GRUB_ENTRY" 2>/dev/null || true
           # https://github.com/vyos/vyos-build/blob/fd737172f1068870fe1ededbe9b2ed4a86663acd/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/README.md
           if [ -f data/mok/MOK.key ]; then
             # https://github.com/vyos/vyos-build/commit/d552f7f8c38d7ad3bd28d9019a58b57e41b07f0b
