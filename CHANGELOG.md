@@ -17,8 +17,6 @@
    - PR: vyos/vyos-1x#4735
 - pki: T7885: check_port_availability() can't be used during system boot
    - PR: vyos/vyos-1x#4769
-- wlb: T7902: remove explicit calls to sudo
-   - PR: vyos/vyos-1x#4770
 - image: T5455: Add migration of SSH  files during upgrade
    - PR: vyos/vyos-1x#4678
 - vyos.ifconfig: T7919: call "ip addr flush" only if interface exists
