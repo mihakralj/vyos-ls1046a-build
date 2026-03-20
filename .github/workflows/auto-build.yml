@@ -135,6 +135,8 @@ jobs:
             'CONFIG_FSL_DPAA=y' \
             'CONFIG_FSL_DPAA_ETH=y' \
             'CONFIG_FSL_DPAA_MACSEC=y' \
+            'CONFIG_FSL_XGMAC_MDIO=y' \
+            'CONFIG_PHY_FSL_LYNX_28G=y' \
             'CONFIG_FSL_BMAN=y' \
             'CONFIG_FSL_QMAN=y' \
             'CONFIG_FSL_PAMU=y' \
