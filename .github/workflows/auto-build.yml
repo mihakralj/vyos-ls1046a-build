@@ -180,7 +180,9 @@ jobs:
           cp data/config.boot.default vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/
           cp data/config.boot.dhcp vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/
           # fix kernel config https://github.com/vyos/vyos-build/pull/1121
-          patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-001-kernel_config.patch
+          # vyos-build-001-kernel_config.patch disabled: defconfig moved from arch/arm64/configs/ to config/arm64/
+          # sdhci-of-esdhc and other options are now injected via printf block below
+          #patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-001-kernel_config.patch
           # https://github.com/vyos/vyos-build/commit/88f11dc01bb676bf652512d6bf23ba0f10f5101f
           #patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-003-fix_hardcoded_x86_64.patch
           # fix on https://github.com/vyos/vyos-build/commit/82a40e68c7e4b3ea45fb2bbc4a1a7cff92e41942
@@ -195,7 +197,7 @@ jobs:
           # https://github.com/vyos/vyos-build/commit/ff2a5df902ca31d51eda6744c94cb257d162fcfc
           #patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-009-live_boot_serial_console_device.patch
           # LS1046A: inject board-specific kernel config (DPAA1/FMan networking + console)
-          DEFCONFIG=vyos-build/scripts/package-build/linux-kernel/arch/arm64/configs/vyos_defconfig
+          DEFCONFIG=vyos-build/scripts/package-build/linux-kernel/config/arm64/vyos_defconfig
           printf '%s\n' \
             '# === LS1046A / NXP Layerscape DPAA1 (Mono Gateway DK) ===' \
             'CONFIG_FSL_FMAN=y' \
@@ -205,6 +207,7 @@ jobs:
             'CONFIG_FSL_QMAN=y' \
             'CONFIG_FSL_PAMU=y' \
             'CONFIG_SERIAL_8250_OF=y' \
+            'CONFIG_MMC_SDHCI_OF_ESDHC=m' \
             >> "$DEFCONFIG"
           echo "Appended LS1046A DPAA config to defconfig"
           # Fix console: revert ttyAMA0 -> ttyS0 for LS1046A serial (8250 UART)
