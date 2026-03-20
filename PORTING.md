@@ -4,7 +4,7 @@ Technical analysis of what breaks when you put a generic VyOS ARM64 ISO on NXP L
 
 ## The Problem
 
-"Generic ARM64" is a kernel configuration covering Raspberry Pi, AWS Graviton, Apple M-series guests, and Qualcomm server silicon — via `make defconfig` plus whatever the maintainer cared about last Tuesday. It does not cover QorIQ Layerscape. Not because the drivers don't exist (they've been in mainline Linux since 4.14), but because nobody building VyOS for cloud VMs needed DPAA1 Ethernet or Freescale eSDHC. The config symbols sit in the kernel source, untouched.
+"Generic ARM64" is a kernel configuration covering Raspberry Pi, AWS Graviton, Apple M-series guests, and Qualcomm server silicon -- via `make defconfig` plus whatever the maintainer cared about last Tuesday. It does not cover QorIQ Layerscape. Not because the drivers don't exist (they've been in mainline Linux since 4.14), but because nobody building VyOS for cloud VMs needed DPAA1 Ethernet or Freescale eSDHC. The config symbols sit in the kernel source, untouched.
 
 Three things kill the generic ARM64 ISO on this board. All three are kernel configuration.
 
@@ -16,7 +16,7 @@ The LS1046A eMMC controller is a Freescale eSDHC (`fsl,esdhc`). The generic ARM6
 # CONFIG_MMC_SDHCI_OF_ESDHC is not set
 ```
 
-No driver, no `mmcblk0`. U-Boot loads the kernel and initrd fine — it has its own eSDHC driver. The VyOS kernel then boots from RAM, `live-boot` searches every block device for `filesystem.squashfs`, finds nothing, and panics. Quietly.
+No driver, no `mmcblk0`. U-Boot loads the kernel and initrd fine -- it has its own eSDHC driver. The VyOS kernel then boots from RAM, `live-boot` searches every block device for `filesystem.squashfs`, finds nothing, and panics. Quietly.
 
 ### 2. No Networking
 
@@ -31,7 +31,7 @@ Zero interfaces. A router with no interfaces is a very expensive space heater.
 
 ### 3. Wrong Serial Console
 
-The generic ARM64 image hardcodes `console=ttyAMA0,115200` (PL011 UART — Raspberry Pi, QEMU virt, ARM Juno). The LS1046A speaks 8250 on `ttyS0`. You get a kernel that boots in complete silence.
+The generic ARM64 image hardcodes `console=ttyAMA0,115200` (PL011 UART -- Raspberry Pi, QEMU virt, ARM Juno). The LS1046A speaks 8250 on `ttyS0`. You get a kernel that boots in complete silence.
 
 ---
 
@@ -49,7 +49,7 @@ CONFIG_FSL_EDMA=y
 CONFIG_DEVTMPFS_MOUNT=y
 ```
 
-`CONFIG_DEVTMPFS_MOUNT=y` ensures `/dev/console` exists before init runs — without it, the initramfs init script fails with "unable to open an initial console."
+`CONFIG_DEVTMPFS_MOUNT=y` ensures `/dev/console` exists before init runs -- without it, the initramfs init script fails with "unable to open an initial console."
 
 ### Fix 2: Enable DPAA1 Networking Stack
 
@@ -84,7 +84,7 @@ U-Boot bootargs also set `console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500`
 **NXP QorIQ LS1046A** is a 2016-era network SoC targeting small enterprise routers and industrial gateways. It ships inside things that run for seven years in a telco closet without anyone noticing.
 
 ```
-CPU:        4× ARM Cortex-A72 (ARMv8-A), 1.8 GHz
+CPU:        4x ARM Cortex-A72 (ARMv8-A), 1.8 GHz
 L1 cache:   32 KB I + 32 KB D per core
 L2 cache:   1 MB shared
 DRAM:       8 GB DDR4-2100 ECC (Mono Gateway DK)
@@ -98,7 +98,7 @@ Verified from `/proc/cpuinfo` on the running OpenWrt system:
 CPU implementer : 0x41
 CPU architecture: 8
 CPU variant     : 0x0
-CPU part        : 0xd08     ← Cortex-A72
+CPU part        : 0xd08     <- Cortex-A72
 CPU revision    : 2
 ```
 
@@ -117,7 +117,7 @@ sdhci-of-esdhc.ko
     depends: sdhci-pltfm.ko
     depends: sdhci.ko
     depends: mmc_core.ko
-    optional: fsl-edma.ko     ← required for HS200 DMA
+    optional: fsl-edma.ko     <- required for HS200 DMA
 ```
 
 The VyOS initrd `conf/modules` explicitly lists `sdhci-of-esdhc` as a module to load at boot. The initrd was asking for a driver the kernel was not shipping.
@@ -138,7 +138,7 @@ FSL_FMAN          Frame Manager: packet parser, classifier, policer
 FSL_DPAA_ETH      Ethernet netdev layer sitting on top of FMan
 ```
 
-You cannot skip any layer. Each depends on the one below. `DPAA_ETH` without `FMAN` is a null pointer reference. `FMAN` without `BMAN` and `QMAN` never initializes. The kernel does not crash — it just silently fails to register any network interfaces. No errors. No warnings. Five Ethernet ports simply do not exist.
+You cannot skip any layer. Each depends on the one below. `DPAA_ETH` without `FMAN` is a null pointer reference. `FMAN` without `BMAN` and `QMAN` never initializes. The kernel does not crash -- it just silently fails to register any network interfaces. No errors. No warnings. Five Ethernet ports simply do not exist.
 
 **Why `=y` and not `=m`:**
 
@@ -154,7 +154,7 @@ kernel/drivers/tty/serial/8250/8250_fsl.ko
 
 **FMan microcode:**
 
-The Frame Manager requires firmware: a microcode blob loaded from `mtd4` (the `fman-ucode` NOR flash partition, 1 MB) at offset `0x400000` in SPI flash. The DTB correctly describes the MTD layout including `fman-ucode`. On the VyOS side, `CONFIG_FW_LOADER=y` is already enabled — the microcode loads from flash automatically.
+The Frame Manager requires firmware: a microcode blob loaded from `mtd4` (the `fman-ucode` NOR flash partition, 1 MB) at offset `0x400000` in SPI flash. The DTB correctly describes the MTD layout including `fman-ucode`. On the VyOS side, `CONFIG_FW_LOADER=y` is already enabled -- the microcode loads from flash automatically.
 
 ---
 
@@ -166,7 +166,7 @@ The LS1046A serial UART is an 8250-compatible device at MMIO address `0x21c0500`
 earlycon=uart8250,mmio,0x21c0500
 ```
 
-The upstream `vyos-build` changed the default console from `ttyS0` to `ttyAMA0` (PL011, ARM AMBA) — correct for Raspberry Pi 4 and QEMU, but produces zero output on LS1046A. After the console handoff, the live-boot initrd and all subsequent output go to `ttyAMA0`, which does not exist. Silence.
+The upstream `vyos-build` changed the default console from `ttyS0` to `ttyAMA0` (PL011, ARM AMBA) -- correct for Raspberry Pi 4 and QEMU, but produces zero output on LS1046A. After the console handoff, the live-boot initrd and all subsequent output go to `ttyAMA0`, which does not exist. Silence.
 
 ---
 
@@ -179,15 +179,15 @@ Power on
       BL31 / ATF (EL3 runtime, PSCI)
         U-Boot (mtd2: uboot, 2 MB) [EL2]
           bootcmd = "run emmc || run vyos || run recovery"
-          │
-          ├─ emmc:     ext4load mmc 0:1 → OpenWrt (mmcblk0p1)
-          │
-          ├─ vyos:     ext4load mmc 0:2 → VyOS (mmcblk0p2)
-          │            loads: vmlinuz, mono-gw.dtb, initrd.img
-          │            IMPORTANT: initrd must be loaded LAST
-          │            so ${filesize} is correct for booti
-          │
-          └─ recovery: sf read from mtd7 → recovery kernel
+          |
+          +-- emmc:     ext4load mmc 0:1 -> OpenWrt (mmcblk0p1)
+          |
+          +-- vyos:     ext4load mmc 0:2 -> VyOS (mmcblk0p2)
+          |             loads: vmlinuz, mono-gw.dtb, initrd.img
+          |             IMPORTANT: initrd must be loaded LAST
+          |             so ${filesize} is correct for booti
+          |
+          +-- recovery: sf read from mtd7 -> recovery kernel
 ```
 
 **U-Boot `${filesize}` gotcha:** Each `ext4load` overwrites the `${filesize}` variable. The `booti` command uses `${ramdisk_addr_r}:${filesize}` to tell the kernel the initrd size. If DTB is loaded after initrd, `${filesize}` = DTB size (94KB) instead of initrd size (~33MB), causing "ZSTD-compressed data is truncated" kernel panic.
@@ -225,10 +225,10 @@ mtd8  unallocated      32 MB
 
 ```
 mmcblk0       ~29.6 GB total
-├─ mmcblk0p1  ~511 MB   OpenWrt root (ext4) — factory OS
-├─ mmcblk0p2  ~29.1 GB  VyOS (ext4)
-├─ mmcblk0boot0  32 MB  hardware boot partition (unused)
-└─ mmcblk0boot1  32 MB  hardware boot partition (unused)
++-- mmcblk0p1  ~511 MB   OpenWrt root (ext4) -- factory OS
++-- mmcblk0p2  ~29.1 GB  VyOS (ext4)
++-- mmcblk0boot0  32 MB  hardware boot partition (unused)
++-- mmcblk0boot1  32 MB  hardware boot partition (unused)
 ```
 
 The hardware boot partitions are not used by U-Boot on this board.
@@ -251,9 +251,53 @@ serial:     uart8250, mmio, 0x21c0500, 115200
 
 ---
 
+## DTB Compatibility: NXP SDK vs Mainline
+
+The `mono-gw.dtb` was extracted from an OpenWrt build that uses the NXP
+Layerscape SDK kernel. This DTB contains SDK-specific nodes that are
+**not recognized** by the mainline Linux kernel's DPAA1 drivers:
+
+**SDK-specific nodes present in `mono-gw.dtb`:**
+
+| Node | Compatible | Issue |
+|------|-----------|-------|
+| `fman@1a00000` | `"fsl,fman", "simple-bus"` | Mainline uses `"fsl,fman"` only |
+| DPAA bus | `"fsl,dpaa", "fsl,ls1043a-dpaa", "simple-bus"` | No mainline driver |
+| `dpa-fman0-oh@2` | `"fsl,dpa-oh"` | SDK offline-port, no mainline support |
+| `fman0-extended-args` | `"fsl,fman-extended-args"` | SDK extension, ignored by mainline |
+| Port extended-args | `"fsl,fman-port-*-extended-args"` | SDK extension, ignored by mainline |
+
+**Mainline kernel driver requirements (from `qoriq-fman3-0.dtsi`):**
+
+```dts
+fman0: fman@1a00000 {
+    compatible = "fsl,fman";      /* NO "simple-bus" fallback */
+    clocks = <&clockgen QORIQ_CLK_FMAN 0>;
+    clock-names = "fmanclk";
+    fsl,qman-channel-range = <0x800 0x10>;
+    dma-coherent;
+    /* Child nodes: muram, ports, mdio, ethernet MACs */
+};
+```
+
+The mainline FMan driver (`fman.c`) matches `compatible = "fsl,fman"` and
+uses `pr_debug()`/`dev_dbg()` for all output -- a successful probe produces
+**zero visible dmesg messages** unless dynamic debug is enabled.
+
+The DPAA Ethernet driver (`dpaa_eth.c`) does NOT use OF matching. It
+expects `fman_mac.c` to create `"dpaa-ethernet"` platform devices
+programmatically. The SDK's `"fsl,dpaa"` bus node is irrelevant to mainline.
+
+**Testing strategy:** Boot with the mainline `fsl-ls1046a-rdb.dtb` (compiled
+from kernel source, included in recent builds). If networking works with the
+RDB DTB, a custom DTS file based on mainline `fsl-ls1046a.dtsi` and
+`qoriq-fman3-0.dtsi` includes is needed for the Mono Gateway.
+
+---
+
 ## Kernel Version Delta
 
-OpenWrt runs `6.12.66`. VyOS ships `6.6.128-vyos`. Both have the required DPAA1 drivers in their source trees. Module ABI is incompatible — modules from one kernel cannot be used on the other. The only correct fix is modifying `vyos_defconfig` and rebuilding.
+OpenWrt runs `6.12.66`. VyOS ships `6.6.128-vyos`. Both have the required DPAA1 drivers in their source trees. Module ABI is incompatible -- modules from one kernel cannot be used on the other. The only correct fix is modifying `vyos_defconfig` and rebuilding.
 
 ---
 
@@ -285,6 +329,6 @@ CONFIG_CDX_BUS=y                # CDX bus (DPAA dependency)
 
 ## See Also
 
-- [INSTALL.md](INSTALL.md) — step-by-step installation guide
-- [README.md](README.md) — project overview
-- [Mono Gateway Getting Started](https://github.com/ryneches/mono-gateway-docs/blob/master/gateway-development-kit/getting-started.md) — factory setup, serial console, Recovery Linux
+- [INSTALL.md](INSTALL.md) -- step-by-step installation guide
+- [README.md](README.md) -- project overview
+- [Mono Gateway Getting Started](https://github.com/ryneches/mono-gateway-docs/blob/master/gateway-development-kit/getting-started.md) -- factory setup, serial console, Recovery Linux
