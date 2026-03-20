@@ -2,7 +2,7 @@
 
 # VyOS ARM64 for NXP LS1046A
 
-This is a fork of [huihuimoe/vyos-arm64-build](https://github.com/huihuimoe/vyos-arm64-build), patched to survive contact with real NXP Layerscape silicon.
+Based on VyOS sources, patched to survive contact with real NXP Layerscape silicon.
 
 Stock VyOS ARM64 ISO boots fine on Proxmox, Hetzner, and the usual cloud furniture. Drop it on an LS1046A and it chokes quietly: no eMMC, no network, wrong serial device. The kernel strains against the hardware and finds nothing. This repo fixes that.
 
