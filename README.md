@@ -38,8 +38,8 @@ Automated weekly (Friday 01:00 UTC)
 
 | File | Purpose |
 |------|---------|
-| `*-generic-arm64.iso` | VyOS ISO for `add system image` upgrades |
-| `*-generic-arm64.iso.minisig` | Cryptographic signature |
+| `*-LS1046A-arm64.iso` | VyOS ISO for `add system image` upgrades |
+| `*-LS1046A-arm64.iso.minisig` | Cryptographic signature |
 | `*-emmc.img.gz` | dd-able eMMC image for fresh install |
 | `vyos-packages.tar` | Built kernel & package debs |
 

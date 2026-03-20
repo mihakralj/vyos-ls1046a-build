@@ -41,8 +41,8 @@ jobs:
       build_version: ${{ steps.set_env_variables.outputs.build_version }}
       TIMESTAMP: ${{ steps.set_env_variables.outputs.TIMESTAMP }}
       PREVIOUS_SUCCESS_BUILD_TIMESTAMP: ${{ steps.set_env_variables.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}
-      generic_image_iso: ${{ steps.build_iso.outputs.generic_image_iso }}
-      generic_image_name: ${{ steps.build_iso.outputs.generic_image_name }}
+      image_iso: ${{ steps.build_iso.outputs.image_iso }}
+      image_name: ${{ steps.build_iso.outputs.image_name }}
 
     steps:
       - name: Install Dependencies
@@ -281,29 +281,30 @@ jobs:
             --custom-package shim-signed \
             generic
           cd build
-          # Determine image name and iso file
-          GENERIC_IMAGE_NAME=$(jq --raw-output .artifacts[0] manifest.json | sed -e 's/.iso//')
-          GENERIC_IMAGE_ISO=$(jq --raw-output .artifacts[0] manifest.json)
-          echo "generic_image_name=${GENERIC_IMAGE_NAME}" >> $GITHUB_OUTPUT
-          echo "generic_image_iso=${GENERIC_IMAGE_ISO}" >> $GITHUB_OUTPUT
+          # Rename generic -> LS1046A in artifact filenames
+          ORIG_ISO=$(jq --raw-output .artifacts[0] manifest.json)
+          IMAGE_ISO="${ORIG_ISO/generic/LS1046A}"
+          IMAGE_NAME="${IMAGE_ISO%.iso}"
+          mv "$ORIG_ISO" "$IMAGE_ISO"
+          echo "image_name=${IMAGE_NAME}" >> $GITHUB_OUTPUT
+          echo "image_iso=${IMAGE_ISO}" >> $GITHUB_OUTPUT
           # Cryptographically sign the image
           MINISIGN_PUBKEY_FILE=$GITHUB_WORKSPACE/data/vyos-ls1046a.minisign.pub
           MINISIGN_SECKEY_FILE=$GITHUB_WORKSPACE/data/vyos-ls1046a.minisign.key
           if [ -f "$MINISIGN_SECKEY_FILE" ]; then
-            $GITHUB_WORKSPACE/bin/minisign -s $MINISIGN_SECKEY_FILE -Sm ${GENERIC_IMAGE_ISO}
-            $GITHUB_WORKSPACE/bin/minisign -Vm ${GENERIC_IMAGE_ISO} -x ${GENERIC_IMAGE_ISO}.minisig -p $MINISIGN_PUBKEY_FILE
+            $GITHUB_WORKSPACE/bin/minisign -s $MINISIGN_SECKEY_FILE -Sm ${IMAGE_ISO}
+            $GITHUB_WORKSPACE/bin/minisign -Vm ${IMAGE_ISO} -x ${IMAGE_ISO}.minisig -p $MINISIGN_PUBKEY_FILE
           else
-            # create a non-zero file to indicate failure
-            echo "fake sign" > ${GENERIC_IMAGE_ISO}.minisig
+            echo "fake sign" > ${IMAGE_ISO}.minisig
           fi
           # Create dd-able eMMC image (ext4 with VyOS files, gzipped)
           mkdir -p /tmp/iso-mount
-          mount -o loop,ro ${GENERIC_IMAGE_ISO} /tmp/iso-mount || true
+          mount -o loop,ro ${IMAGE_ISO} /tmp/iso-mount || true
           if [ -d /tmp/iso-mount/live ]; then
-            truncate -s 2G ${GENERIC_IMAGE_NAME}-emmc.img
-            mkfs.ext4 -q -L vyos ${GENERIC_IMAGE_NAME}-emmc.img
+            truncate -s 2G ${IMAGE_NAME}-emmc.img
+            mkfs.ext4 -q -L vyos ${IMAGE_NAME}-emmc.img
             mkdir -p /tmp/img-mount
-            mount -o loop ${GENERIC_IMAGE_NAME}-emmc.img /tmp/img-mount
+            mount -o loop ${IMAGE_NAME}-emmc.img /tmp/img-mount
             mkdir -p /tmp/img-mount/live
             cp /tmp/iso-mount/live/vmlinuz-* /tmp/img-mount/live/
             cp /tmp/iso-mount/live/initrd.img-* /tmp/img-mount/live/
@@ -312,23 +313,23 @@ jobs:
             sync
             umount /tmp/img-mount
             umount /tmp/iso-mount
-            gzip ${GENERIC_IMAGE_NAME}-emmc.img
+            gzip ${IMAGE_NAME}-emmc.img
           else
             umount /tmp/iso-mount 2>/dev/null || true
           fi
           rm -rf /tmp/iso-mount /tmp/img-mount
-          # Move artifacts to workspace to avoid nested path in artifact archive
-          mv manifest.json ${GENERIC_IMAGE_ISO} ${GENERIC_IMAGE_ISO}.minisig $GITHUB_WORKSPACE
-          [ -f ${GENERIC_IMAGE_NAME}-emmc.img.gz ] && mv ${GENERIC_IMAGE_NAME}-emmc.img.gz $GITHUB_WORKSPACE
+          # Move artifacts to workspace
+          mv manifest.json ${IMAGE_ISO} ${IMAGE_ISO}.minisig $GITHUB_WORKSPACE
+          [ -f ${IMAGE_NAME}-emmc.img.gz ] && mv ${IMAGE_NAME}-emmc.img.gz $GITHUB_WORKSPACE
 
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.build_iso.outputs.generic_image_name }}
+          name: ${{ steps.build_iso.outputs.image_name }}
           path: |
             manifest.json
-            ${{ steps.build_iso.outputs.generic_image_iso }}
-            ${{ steps.build_iso.outputs.generic_image_iso }}.minisig
-            ${{ steps.build_iso.outputs.generic_image_name }}-emmc.img.gz
+            ${{ steps.build_iso.outputs.image_iso }}
+            ${{ steps.build_iso.outputs.image_iso }}.minisig
+            ${{ steps.build_iso.outputs.image_name }}-emmc.img.gz
           retention-days: 15
           if-no-files-found: error
           compression-level: 0
@@ -418,7 +419,7 @@ jobs:
           json: |
             [
               {
-                "url": "https://github.com/${{ github.repository }}/releases/download/${{ needs.build_iso.outputs.build_version }}/${{ needs.build_iso.outputs.generic_image_iso }}",
+                "url": "https://github.com/${{ github.repository }}/releases/download/${{ needs.build_iso.outputs.build_version }}/${{ needs.build_iso.outputs.image_iso }}",
                 "version": "${{ needs.build_iso.outputs.build_version }}",
                 "timestamp": "${{ needs.build_iso.outputs.TIMESTAMP }}"
               }
@@ -439,7 +440,7 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: ${{ needs.build_iso.outputs.generic_image_name }}
+          name: ${{ needs.build_iso.outputs.image_name }}
 
       - uses: actions/download-artifact@v8
         with:
@@ -458,9 +459,9 @@ jobs:
           tag_name: ${{ needs.build_iso.outputs.build_version }}
           fail_on_unmatched_files: false
           files: |
-            ${{ needs.build_iso.outputs.generic_image_iso }}
-            ${{ needs.build_iso.outputs.generic_image_iso }}.minisig
-            ${{ needs.build_iso.outputs.generic_image_name }}-emmc.img.gz
+            ${{ needs.build_iso.outputs.image_iso }}
+            ${{ needs.build_iso.outputs.image_iso }}.minisig
+            ${{ needs.build_iso.outputs.image_name }}-emmc.img.gz
             vyos-packages.tar
 
       - uses: dev-drprasad/delete-older-releases@v0.3.4
