@@ -156,6 +156,21 @@ kernel/drivers/tty/serial/8250/8250_fsl.ko
 
 The Frame Manager requires firmware: a microcode blob loaded from `mtd4` (the `fman-ucode` NOR flash partition, 1 MB) at offset `0x400000` in SPI flash. The DTB correctly describes the MTD layout including `fman-ucode`. On the VyOS side, `CONFIG_FW_LOADER=y` is already enabled -- the microcode loads from flash automatically.
 
+**MDIO and PCS (the hidden dependency):**
+
+Even with the entire DPAA1 stack enabled, Ethernet MACs will not probe without the MDIO bus driver. The probe chain is:
+
+```
+fsl_dpaa_mac (mac.c)
+  -> memac_initialization (fman_memac.c)
+    -> memac_pcs_create()
+      -> of_parse_phandle("pcsphy-handle")
+      -> lynx_pcs_create_fwnode()
+        -> fwnode_mdio_find_device()   <-- needs MDIO bus registered
+```
+
+Each MAC's DTB node has a `pcsphy-handle` pointing to a PCS device on an MDIO bus. The MDIO buses (`fsl,fman-memac-mdio` compatible) are driven by `xgmac_mdio.c` (`CONFIG_FSL_XGMAC_MDIO`). Without it, nine MDIO platform devices exist but no driver claims them. `fwnode_mdio_find_device()` returns NULL, `lynx_pcs_create_fwnode()` returns `-EPROBE_DEFER`, and every MAC defers forever with `"missing pcs"` errors. The PCS devices themselves need `CONFIG_PHY_FSL_LYNX_28G` for the Lynx 28G SerDes PHY driver that handles SGMII/QSGMII/XFI link negotiation.
+
 ---
 
 ## Serial Console: PL011 vs 8250
@@ -312,6 +327,8 @@ CONFIG_FSL_FMAN=y               # Frame Manager (packet processing)
 CONFIG_FSL_DPAA=y               # DPAA1 framework
 CONFIG_FSL_DPAA_ETH=y           # DPAA1 Ethernet driver
 CONFIG_FSL_DPAA_MACSEC=y        # MACsec offload
+CONFIG_FSL_XGMAC_MDIO=y        # FMan MDIO bus driver (xgmac_mdio.c) -- required for PCS discovery
+CONFIG_PHY_FSL_LYNX_28G=y      # Lynx 28G SerDes PHY -- PCS for SGMII/QSGMII/XFI links
 CONFIG_FSL_BMAN=y               # Buffer Manager
 CONFIG_FSL_QMAN=y               # Queue Manager
 CONFIG_FSL_PAMU=y               # IOMMU for DMA isolation
