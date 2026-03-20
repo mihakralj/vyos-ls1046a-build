@@ -196,16 +196,16 @@ jobs:
           #patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-009-live_boot_serial_console_device.patch
           # LS1046A: inject board-specific kernel config (DPAA1/FMan networking + console)
           DEFCONFIG=vyos-build/scripts/package-build/linux-kernel/arch/arm64/configs/vyos_defconfig
-          cat >> "$DEFCONFIG" << 'KCONFIG'
-# === LS1046A / NXP Layerscape DPAA1 (Mono Gateway DK) ===
-CONFIG_FSL_FMAN=y
-CONFIG_FSL_DPAA=y
-CONFIG_FSL_DPAA_ETH=y
-CONFIG_FSL_BMAN=y
-CONFIG_FSL_QMAN=y
-CONFIG_FSL_PAMU=y
-CONFIG_SERIAL_8250_OF=y
-KCONFIG
+          printf '%s\n' \
+            '# === LS1046A / NXP Layerscape DPAA1 (Mono Gateway DK) ===' \
+            'CONFIG_FSL_FMAN=y' \
+            'CONFIG_FSL_DPAA=y' \
+            'CONFIG_FSL_DPAA_ETH=y' \
+            'CONFIG_FSL_BMAN=y' \
+            'CONFIG_FSL_QMAN=y' \
+            'CONFIG_FSL_PAMU=y' \
+            'CONFIG_SERIAL_8250_OF=y' \
+            >> "$DEFCONFIG"
           echo "Appended LS1046A DPAA config to defconfig"
           # Fix console: revert ttyAMA0 -> ttyS0 for LS1046A serial (8250 UART)
           SERIAL_HOOK=vyos-build/data/live-build-config/hooks/live/01-live-serial.binary
