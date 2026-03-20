@@ -4,79 +4,148 @@ VyOS installs onto the second eMMC partition (`mmcblk0p2`) alongside the
 factory OpenWrt on `mmcblk0p1`. Both operating systems coexist — U-Boot
 selects which one boots.
 
-The entire installation can be done directly from OpenWrt over the network.
-Serial console access is only needed once, to configure U-Boot.
-
 ## Prerequisites
 
 | Item | Details |
 |------|---------|
 | Hardware | Mono Gateway Development Kit (NXP LS1046A) |
-| Network | Ethernet cable to any RJ-45 port, internet access on OpenWrt |
-| Serial cable | USB-to-TTL, **115200 8N1** — needed only for U-Boot setup |
-| Terminal | `tio`, `minicom`, `picocom`, PuTTY, or equivalent |
-
-### Status LED
-
-| Color | Meaning |
-|-------|---------|
-| Green (solid) | All hardware tests passed |
-| Red (solid) | Hardware test failure — check serial output |
-| Orange (pulsing) | Recovery Linux |
-| White (solid) | OpenWrt booted |
+| Network | Ethernet cable on eth0 (leftmost port) with internet access |
+| Serial | USB-to-TTL, **115200 8N1** — needed only for U-Boot setup |
+| Terminal | `tio`, `minicom`, `picocom`, `PuTTY`, `Termius` or equivalent |
 
 ---
 
-## Step 1: Connect to OpenWrt
+## Step 1: Get a Shell
 
-Connect an Ethernet cable to any port. OpenWrt is at **192.168.1.1** by
-default. SSH in:
+Choose **one** column based on what's currently running on your board:
+
+<table>
+<tr>
+<th>From OpenWrt (SSH over network)</th>
+<th>From Recovery Linux (serial console)</th>
+</tr>
+<tr><td>
+
+Connect Ethernet to any port. SSH in:
 
 ```bash
 ssh root@192.168.1.1
 ```
 
-> Default credentials: `root` with **no password**.
+Default: `root` with **no password**.
 
-If OpenWrt is not running or not reachable, see
-[Alternative: Recovery Linux](#alternative-recovery-linux) below.
+</td><td>
+
+Connect USB-TTL to the **rightmost** header. Open a terminal:
+
+```bash
+# Linux
+tio /dev/ttyUSB0
+# macOS
+tio /dev/cu.usbserial-*
+```
+
+Settings: **115200 8N1**, no flow control.
+
+Power cycle → press any key within **5 seconds** to get the U-Boot `=>` prompt:
+
+```
+=> run recovery
+```
+
+Login as `root` (no password). LED turns **orange (pulsing)**.
+
+Configure networking:
+
+```bash
+# DHCP
+udhcpc -i eth0
+
+# — or static —
+ip link set eth0 up
+ip addr add 10.0.0.199/24 dev eth0
+ip route add default via 10.0.0.1
+```
+
+Verify: `ping -c 2 github.com`
+
+</td></tr>
+</table>
 
 ---
 
-## Step 2: Download and Install VyOS
+## Step 2: Download and Write VyOS to eMMC
 
-Run this entire block on the Mono Gateway (via SSH to OpenWrt):
+Choose the matching column from Step 1:
+
+<table>
+<tr>
+<th>From OpenWrt</th>
+<th>From Recovery Linux</th>
+</tr>
+<tr><td>
 
 ```bash
-# Fetch the latest eMMC image URL from GitHub
-IMG_URL=$(wget -qO- https://api.github.com/repos/mihakralj/vyos-ls1046a-build/releases/latest \
+# Get latest eMMC image URL
+IMG_URL=$(wget -qO- \
+  https://api.github.com/repos/mihakralj/vyos-ls1046a-build/releases/latest \
   | jq -r '.assets[] | select(.name | endswith("-emmc.img.gz")) | .browser_download_url')
 
-echo "Downloading: $IMG_URL"
-
-# Download and write directly to partition 2 (does NOT touch OpenWrt on p1)
-wget -qO- "$IMG_URL" | gunzip | dd of=/dev/mmcblk0p2 bs=4M
+# Download and write to partition 2
+wget -qO- "$IMG_URL" | gunzip \
+  | dd of=/dev/mmcblk0p2 bs=4M
 sync
 
-# Read back the kernel version for U-Boot configuration
+# Extract kernel version for U-Boot
 mkdir -p /mnt/vyos
 mount -r /dev/mmcblk0p2 /mnt/vyos
-KV=$(ls /mnt/vyos/live/vmlinuz-* | sed 's/.*vmlinuz-//')
+KV=$(ls /mnt/vyos/live/vmlinuz-* \
+  | sed 's/.*vmlinuz-//')
 umount /mnt/vyos
+```
 
-# Print the U-Boot command with kernel version filled in
+</td><td>
+
+```bash
+# Get latest eMMC image URL
+IMG_URL=$(curl -skL \
+  https://api.github.com/repos/mihakralj/vyos-ls1046a-build/releases/latest \
+  | grep -o '"browser_download_url": "[^"]*emmc\.img\.gz"' \
+  | cut -d'"' -f4)
+
+# Download and write to partition 2
+curl -kL "$IMG_URL" | gunzip \
+  | dd of=/dev/mmcblk0p2 bs=4M
+sync
+
+# Extract kernel version for U-Boot
+mkdir -p /mnt/vyos
+mount -r /dev/mmcblk0p2 /mnt/vyos
+KV=$(ls /mnt/vyos/live/vmlinuz-* \
+  | sed 's/.*vmlinuz-//')
+umount /mnt/vyos
+```
+
+> `-k` skips TLS verification (Recovery Linux
+> may lack CA certificates).
+
+</td></tr>
+</table>
+
+Both paths do the same thing: download `*-emmc.img.gz` (a pre-formatted
+ext4 filesystem with kernel, initramfs, squashfs root, and device tree),
+decompress it, and `dd` it directly to `mmcblk0p2`. OpenWrt on `p1` is
+not touched.
+
+After the write completes, print the U-Boot boot command with the correct
+kernel version filled in:
+
+```bash
 echo ""
 echo "=== Copy this U-Boot command (one line) ==="
 echo "setenv vyos 'setenv bootargs \"console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet\"; ext4load mmc 0:2 \${kernel_addr_r} /live/vmlinuz-${KV}; ext4load mmc 0:2 \${ramdisk_addr_r} /live/initrd.img-${KV}; ext4load mmc 0:2 \${fdt_addr_r} /mono-gw.dtb; booti \${kernel_addr_r} \${ramdisk_addr_r}:\${filesize} \${fdt_addr_r}'"
 echo "==========================================="
 ```
-
-The eMMC image is a pre-formatted ext4 filesystem containing the VyOS
-kernel, initramfs, root filesystem, and device tree. A single `dd`
-command writes everything — no `mkfs`, `mount`, or `cp` needed.
-
-The script prints the complete U-Boot `setenv` command with the correct
-kernel version filled in — ready to copy-paste into the serial console.
 
 ---
 
@@ -85,10 +154,9 @@ kernel version filled in — ready to copy-paste into the serial console.
 This step requires a **serial console**. U-Boot runs before any OS and
 cannot be reached over the network.
 
-### Connect serial
+### Connect serial (if not already connected)
 
-Connect the USB-TTL adapter to the board's **rightmost** header. Open a
-terminal:
+Connect the USB-TTL adapter to the board's **rightmost** header:
 
 ```bash
 # Linux
@@ -113,17 +181,22 @@ Hit any key to stop autoboot:  5
 
 ### Set the VyOS boot variable
 
-Paste the `setenv vyos` command that was printed at the end of Step 2
-(or Step R4). It already has the correct kernel version filled in.
+Paste the `setenv vyos` command that was printed at the end of Step 2.
+It already has the correct kernel version filled in.
 
-If you don't have the output anymore, the command format is:
+If you don't have the output anymore, check the kernel version:
+
+```
+=> ext4ls mmc 0:2 /live/
+```
+
+Note the version from the `vmlinuz-*` filename. The command format is:
 
 ```
 setenv vyos 'setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet"; ext4load mmc 0:2 ${kernel_addr_r} /live/vmlinuz-<KV>; ext4load mmc 0:2 ${ramdisk_addr_r} /live/initrd.img-<KV>; ext4load mmc 0:2 ${fdt_addr_r} /mono-gw.dtb; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
 ```
 
 Replace `<KV>` with the actual kernel version (e.g., `6.6.128-vyos`).
-You can check it by mounting the partition: `ls /mnt/vyos/live/vmlinuz-*`
 
 ### Set boot order
 
@@ -228,104 +301,6 @@ reboot                                   # activate new image
 > **Only use ISOs from this repository.** Generic VyOS ARM64 ISOs lack the
 > LS1046A kernel drivers (DPAA1, FMan, eSDHC) and will boot with no
 > networking and no eMMC support.
-
----
-
-## Alternative: Install from Recovery Linux
-
-If OpenWrt is broken or unreachable, VyOS can be installed from Recovery
-Linux. This path requires a **serial console** for the entire process.
-
-Recovery Linux is a BusyBox-based environment stored in SPI NOR flash
-(`mtd7`). It has `curl`, `dd`, `ip`, and `gunzip` — everything needed
-to write the eMMC image. No SSH server is available.
-
-### Step R1: Boot into Recovery Linux
-
-Connect the USB-TTL serial adapter to the **rightmost** header. Open a
-terminal:
-
-```bash
-# Linux
-tio /dev/ttyUSB0
-
-# macOS
-tio /dev/cu.usbserial-*
-```
-
-Power cycle the board. Press any key within **5 seconds** to interrupt
-U-Boot:
-
-```
-Hit any key to stop autoboot:  5
-=>
-```
-
-Boot Recovery Linux:
-
-```
-=> run recovery
-```
-
-Login as `root` (no password). The LED turns **orange (pulsing)**.
-
-### Step R2: Configure networking
-
-```bash
-# Option A: DHCP (if your network has a DHCP server)
-udhcpc -i eth0
-
-# Option B: Static IP
-ip link set eth0 up
-ip addr add 10.0.0.199/24 dev eth0
-ip route add default via 10.0.0.1 dev eth0
-```
-
-> Adjust the IP address and gateway to match your network. The device
-> needs internet access to reach `github.com`.
-
-Verify connectivity:
-
-```bash
-ping -c 2 github.com
-```
-
-### Step R3: Download and write eMMC image
-
-```bash
-# Get the latest eMMC image URL
-IMG_URL=$(curl -skL https://api.github.com/repos/mihakralj/vyos-ls1046a-build/releases/latest \
-  | grep -o '"browser_download_url": "[^"]*emmc\.img\.gz"' | cut -d'"' -f4)
-
-echo "Downloading and writing: $IMG_URL"
-
-# Download, decompress, and write directly to partition 2
-curl -kL "$IMG_URL" | gunzip | dd of=/dev/mmcblk0p2 bs=4M
-sync
-```
-
-> The `-k` flag skips TLS verification — Recovery Linux may not have
-> up-to-date CA certificates. This takes 2-5 minutes depending on
-> network speed.
-
-### Step R4: Configure U-Boot
-
-Since you are already on the serial console, reboot and interrupt U-Boot:
-
-```bash
-reboot
-```
-
-Press any key within 5 seconds. Check the kernel version:
-
-```
-=> ext4ls mmc 0:2 /live/
-```
-
-Note the kernel version from the `vmlinuz-*` filename, then set the boot
-variable per [Step 3: Configure U-Boot](#step-3-configure-u-boot).
-
-After `saveenv`, test with `run vyos` — VyOS should boot directly.
 
 ---
 
