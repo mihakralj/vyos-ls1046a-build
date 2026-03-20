@@ -7,14 +7,14 @@ on:
   workflow_dispatch:
     inputs:
       BUILD_BY:
-        description: 'Builder identifier (default: 1707683+huihuimoe@users.noreply.github.com)'
+        description: 'Builder identifier (auto: your-github-id@users.noreply.github.com)'
         default: ''
       build_version:
-        description: 'Version number (default: YYYY.MM.DD-TIMESTAMP-rolling)'
+        description: 'Version number (auto: YYYY.MM.DD-HHMM-rolling)'
         default: ''
       builder_image:
-        description: 'Builder image (default: ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64, official: docker.io/vyos/vyos-build:current-arm64)'
-        default: ''
+        description: 'Builder Docker image'
+        default: 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64'
 
 env:
   DEBIAN_MIRROR: http://deb.debian.org/debian/
@@ -31,9 +31,7 @@ jobs:
     permissions:
       contents: write
     container:
-      # the official image too old, need to update
-      # image: vyos/vyos-build:current-arm64
-      image: ${{ github.event.inputs.builder_image || 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64' }}
+      image: ${{ github.event.inputs.builder_image }}
       options: --sysctl net.ipv6.conf.lo.disable_ipv6=0 --privileged --user root
     defaults:
       run:
