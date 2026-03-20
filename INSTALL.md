@@ -21,12 +21,13 @@ Choose **one** column based on what's currently running on your board:
 
 <table>
 <tr>
-<th>From OpenWrt (SSH over network)</th>
+<th>From working OpenWrt (SSH over network)</th>
 <th>From Recovery Linux (serial console)</th>
 </tr>
 <tr><td>
 
-Connect Ethernet to any port. SSH into OpenWrt — assuming it is already configured with internet access:
+Connect Ethernet to any port.
+SSH into OpenWrt if it is already configured:
 
 ```bash
 ssh root@192.168.1.1
@@ -94,80 +95,19 @@ echo "setenv vyos 'setenv bootargs \"console=ttyS0,115200 earlycon=uart8250,mmio
 echo "==========================================="
 ```
 
-The `*-emmc.img.gz` image is a pre-formatted ext4 filesystem containing the
-VyOS kernel, initramfs, root filesystem, and device tree. A single `dd`
-command writes everything — no `mkfs`, `mount`, or `cp` needed. OpenWrt on
-`p1` is not touched.
-
-> `--no-check-certificate` is harmless on OpenWrt and necessary on
-> Recovery Linux (which may lack up-to-date CA certificates).
+COPY THIS U-BOOT COMMAND.
 
 ---
 
 ## Step 3: Configure U-Boot
 
-This step requires a **serial console**. U-Boot runs before any OS and
-cannot be reached over the network.
+- Interrupt boot process and enter U-Boot. 
+- Paste the `setenv vyos` command that was printed at the end of Step 2.
 
-### Connect serial (if not already connected)
-
-Connect the USB-TTL adapter to the board's **rightmost** header:
-
-```bash
-# Linux
-tio /dev/ttyUSB0
-
-# macOS
-tio /dev/cu.usbserial-*
-```
-
-Settings: **115200 8N1**, no flow control.
-
-### Interrupt U-Boot
-
-Power cycle the board. Press any key within **5 seconds**:
-
-```
-U-Boot 2025.04 (...)
-...
-Hit any key to stop autoboot:  5
-=>
-```
-
-### Set the VyOS boot variable
-
-Paste the `setenv vyos` command that was printed at the end of Step 2.
-It already has the correct kernel version filled in.
-
-If you don't have the output anymore, check the kernel version:
-
-```
-=> ext4ls mmc 0:2 /live/
-```
-
-Note the version from the `vmlinuz-*` filename. The command format is:
-
-```
-setenv vyos 'setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/mmcblk0p2 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet"; ext4load mmc 0:2 ${kernel_addr_r} /live/vmlinuz-<KV>; ext4load mmc 0:2 ${fdt_addr_r} /mono-gw.dtb; ext4load mmc 0:2 ${ramdisk_addr_r} /live/initrd.img-<KV>; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
-```
-
-Replace `<KV>` with the actual kernel version (e.g., `6.6.128-vyos`).
-
-### Set boot order
-
-Choose your preferred default OS:
-
-**VyOS first** (recommended after testing):
+Set boot order as **VyOS first** (recommended after testing):
 
 ```
 setenv bootcmd 'run vyos || run emmc || run recovery'
-saveenv
-```
-
-**OpenWrt first** (safe — VyOS as fallback):
-
-```
-setenv bootcmd 'run emmc || run vyos || run recovery'
 saveenv
 ```
 
@@ -190,7 +130,7 @@ Starting kernel ...
 
 ## Step 4: First VyOS Login
 
-VyOS boots in live mode. Login on the serial console:
+VyOS now boots in live mode. Login on the serial console:
 
 ```
 Username: vyos
@@ -253,9 +193,7 @@ delete system image <name>               # remove old images
 reboot                                   # activate new image
 ```
 
-> **Only use ISOs from this repository.** Generic VyOS ARM64 ISOs lack the
-> LS1046A kernel drivers (DPAA1, FMan, eSDHC) and will boot with no
-> networking and no eMMC support.
+## IMPORTANT: **Only use ISO images from this repository.** Generic VyOS ISOs are made for AMD64, not ARM64. Custom ISOs made for ARM64 lack the LS1046A kernel drivers (DPAA1, FMan, eSDHC) and will boot with no networking and no eMMC support
 
 ---
 
