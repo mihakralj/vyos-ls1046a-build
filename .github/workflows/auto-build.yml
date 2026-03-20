@@ -130,6 +130,7 @@ jobs:
           DEFCONFIG=vyos-build/scripts/package-build/linux-kernel/config/arm64/vyos_defconfig
           printf '%s\n' \
             '# === LS1046A / NXP Layerscape DPAA1 (Mono Gateway DK) ===' \
+            'CONFIG_DEVTMPFS_MOUNT=y' \
             'CONFIG_FSL_FMAN=y' \
             'CONFIG_FSL_DPAA=y' \
             'CONFIG_FSL_DPAA_ETH=y' \
