@@ -1,252 +1,181 @@
 # Installing VyOS on Mono Gateway Development Kit
 
-This guide installs VyOS onto the second eMMC partition (`mmcblk0p2`) alongside
-the factory OpenWrt installation on `mmcblk0p1`. Both operating systems coexist;
-U-Boot decides which one boots.
+VyOS installs onto the second eMMC partition (`mmcblk0p2`) alongside the
+factory OpenWrt on `mmcblk0p1`. Both operating systems coexist — U-Boot
+selects which one boots.
 
-Serial console access is required once, to configure U-Boot. After that, the
-device boots VyOS automatically.
+The entire installation can be done directly from OpenWrt over the network.
+Serial console access is only needed once, to configure U-Boot.
 
-## What You Need
+## Prerequisites
 
-- Mono Gateway Development Kit (NXP LS1046A, `mono,gateway-dk`)
-- Serial console cable: USB-to-TTL, **115200 8N1**, connected to the board's UART header
-- A terminal: minicom, picocom, PuTTY, or any equivalent
-- Network: the device running OpenWrt, reachable at `192.168.1.234`
-- SSH access: `root@192.168.1.234` (password `auckland`, or public key)
-- Build machine with Linux and `ssh`/`scp`
+| Item | Details |
+|------|---------|
+| Hardware | Mono Gateway Development Kit (NXP LS1046A) |
+| Network | Ethernet cable to any RJ-45 port, internet access on OpenWrt |
+| Serial cable | USB-to-TTL, **115200 8N1** — needed only for U-Boot setup |
+| Terminal | `tio`, `minicom`, `picocom`, PuTTY, or equivalent |
 
-The VyOS ISO for this board: [GitHub Releases](https://github.com/mihakralj/vyos-ls1046a-build/releases/latest)
+### Status LED
 
----
-
-## Step 1: Download the ISO
-
-On your build machine:
-
-```bash
-ISO_URL=$(curl -s https://api.github.com/repos/mihakralj/vyos-ls1046a-build/releases/latest \
-  | python3 -c "import json,sys; r=json.load(sys.stdin); print(next(a['browser_download_url'] for a in r['assets'] if a['name'].endswith('.iso')))")
-
-curl -L "$ISO_URL" -o vyos-ls1046a.iso
-echo "Downloaded: $ISO_URL"
-```
-
-Verify the sha256:
-
-```bash
-curl -sL "$(dirname $ISO_URL)/sha256sum.txt" | grep '\.iso' | sha256sum -c
-```
+| Color | Meaning |
+|-------|---------|
+| Green (solid) | All hardware tests passed |
+| Red (solid) | Hardware test failure — check serial output |
+| Orange (pulsing) | Recovery Linux |
+| White (solid) | OpenWrt booted |
 
 ---
 
-## Step 2: Extract ISO Contents
+## Step 1: Connect to OpenWrt
+
+Connect an Ethernet cable to any port. OpenWrt is at **192.168.1.1** by
+default. SSH in:
 
 ```bash
-mkdir -p /tmp/vyos-iso
-sudo mount -o loop,ro vyos-ls1046a.iso /tmp/vyos-iso
-ls /tmp/vyos-iso/live/
-ls /tmp/vyos-iso/*.dtb
+ssh root@192.168.1.1
 ```
 
-Expected files:
+> Default credentials: `root` with **no password**.
 
-```
-/tmp/vyos-iso/live/vmlinuz-6.6.128-vyos
-/tmp/vyos-iso/live/initrd.img-6.6.128-vyos
-/tmp/vyos-iso/live/filesystem.squashfs
-/tmp/vyos-iso/mono-gw.dtb
-```
-
-If `mono-gw.dtb` is missing, the board will not boot. Do not proceed.
+If OpenWrt is not running or not reachable, see
+[Alternative: Recovery Linux](#alternative-recovery-linux) below.
 
 ---
 
-## Step 3: Prepare eMMC Partition 2
+## Step 2: Download and Install VyOS
 
-SSH into the running OpenWrt:
-
-```bash
-ssh root@192.168.1.234
-```
-
-Check the partition layout — confirm `mmcblk0p2` exists and is the right size:
+Run this entire block on the Mono Gateway (via SSH to OpenWrt):
 
 ```bash
-cat /proc/partitions | grep mmcblk0
-```
+# Fetch the latest ISO URL from GitHub
+ISO_URL=$(wget -qO- https://api.github.com/repos/mihakralj/vyos-ls1046a-build/releases/latest \
+  | jq -r '.assets[] | select(.name | endswith(".iso")) | .browser_download_url')
 
-Expected output:
-```
-179    0  31080448 mmcblk0       ← ~29.6 GB total
-179    1    523264 mmcblk0p1     ← ~511 MB  OpenWrt (do not touch)
-179    2  30555136 mmcblk0p2     ← ~29 GB   VyOS target
-```
+echo "Downloading: $ISO_URL"
 
-Format `mmcblk0p2`. This erases it completely:
+# Download ISO to tmpfs (3.8 GB available)
+cd /tmp
+wget -O vyos.iso "$ISO_URL"
 
-```bash
+# Format partition 2 for VyOS (does NOT touch OpenWrt on p1)
 mke2fs -t ext4 -L vyos /dev/mmcblk0p2
-```
 
-Mount it:
+# Mount the ISO and the target partition
+mkdir -p /tmp/iso /mnt/vyos
+mount -o loop,ro /tmp/vyos.iso /tmp/iso
+mount /dev/mmcblk0p2 /mnt/vyos
+mkdir -p /mnt/vyos/live
 
-```bash
-mount /dev/mmcblk0p2 /mnt
-mkdir -p /mnt/live
-```
+# Copy VyOS files to eMMC
+cp /tmp/iso/live/vmlinuz-*          /mnt/vyos/live/
+cp /tmp/iso/live/initrd.img-*       /mnt/vyos/live/
+cp /tmp/iso/live/filesystem.squashfs /mnt/vyos/live/
+cp /tmp/iso/mono-gw.dtb             /mnt/vyos/
 
----
+# Verify
+ls -lh /mnt/vyos/live/ /mnt/vyos/mono-gw.dtb
 
-## Step 4: Copy VyOS Files to eMMC
-
-From your **build machine** (not the device), transfer the ISO contents.
-This takes a few minutes — `filesystem.squashfs` is ~450 MB.
-
-```bash
-KV=6.6.128-vyos
-
-scp -i ~/.ssh/dropbear_key \
-    /tmp/vyos-iso/live/vmlinuz-${KV} \
-    root@192.168.1.234:/mnt/live/
-
-scp -i ~/.ssh/dropbear_key \
-    /tmp/vyos-iso/live/initrd.img-${KV} \
-    root@192.168.1.234:/mnt/live/
-
-scp -i ~/.ssh/dropbear_key \
-    /tmp/vyos-iso/live/filesystem.squashfs \
-    root@192.168.1.234:/mnt/live/
-
-scp -i ~/.ssh/dropbear_key \
-    /tmp/vyos-iso/mono-gw.dtb \
-    root@192.168.1.234:/mnt/
-```
-
-Verify the transfer on the device:
-
-```bash
-ls -lh /mnt/live/ /mnt/*.dtb
+# Clean up
 sync
+umount /mnt/vyos
+umount /tmp/iso
+rm /tmp/vyos.iso
+
+# Print the U-Boot command with kernel version filled in
+KV=$(ls /mnt/vyos/live/vmlinuz-* | sed 's/.*vmlinuz-//' 2>/dev/null || echo '6.6.128-vyos')
+echo ""
+echo "=== Copy this U-Boot command (one line) ==="
+echo "setenv vyos 'setenv bootargs \"console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet\"; ext4load mmc 0:2 \${kernel_addr_r} /live/vmlinuz-${KV}; ext4load mmc 0:2 \${ramdisk_addr_r} /live/initrd.img-${KV}; ext4load mmc 0:2 \${fdt_addr_r} /mono-gw.dtb; booti \${kernel_addr_r} \${ramdisk_addr_r}:\${filesize} \${fdt_addr_r}'"
+echo "==========================================="
 ```
 
-Expected:
-
-```
-/mnt/mono-gw.dtb          92K
-/mnt/live/filesystem.squashfs   ~450M
-/mnt/live/initrd.img-6.6.128-vyos  ~22M
-/mnt/live/vmlinuz-6.6.128-vyos     ~9M
-```
-
-Unmount cleanly:
-
-```bash
-umount /mnt
-```
+The script prints the complete U-Boot `setenv` command with the correct
+kernel version filled in — ready to copy-paste into the serial console.
 
 ---
 
-## Step 5: Configure U-Boot
+## Step 3: Configure U-Boot
 
-This step requires the **serial console**. U-Boot runs before any OS and cannot
-be reached over the network.
+This step requires a **serial console**. U-Boot runs before any OS and
+cannot be reached over the network.
 
 ### Connect serial
 
-Connect your USB-TTL adapter to the UART header. Open a terminal:
+Connect the USB-TTL adapter to the board's **rightmost** header. Open a
+terminal:
 
 ```bash
 # Linux
-minicom -D /dev/ttyUSB0 -b 115200
+tio /dev/ttyUSB0
 
 # macOS
-minicom -D /dev/cu.usbserial-* -b 115200
+tio /dev/cu.usbserial-*
 ```
 
-Settings: **115200 8N1, no flow control**.
+Settings: **115200 8N1**, no flow control.
 
-### Interrupt the boot
+### Interrupt U-Boot
 
-Power cycle the board. Within **5 seconds** of U-Boot printing output, press
-any key. You will see the `=>` prompt.
+Power cycle the board. Press any key within **5 seconds**:
 
 ```
-U-Boot 2025.04 (Jan 18 2026)
+U-Boot 2025.04 (...)
 ...
 Hit any key to stop autoboot:  5
 =>
 ```
 
-If you miss the window, the board boots OpenWrt. Power cycle and try again.
-
 ### Set the VyOS boot variable
 
-At the `=>` prompt, enter these commands exactly. The `setenv vyos` command is
-one long line — copy-paste it whole:
+Paste the `setenv vyos` command that was printed at the end of Step 2
+(or Step R4). It already has the correct kernel version filled in.
+
+If you don't have the output anymore, the command format is:
 
 ```
-setenv vyos 'setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet"; ext4load mmc 0:2 ${kernel_addr_r} /live/vmlinuz-6.6.128-vyos; ext4load mmc 0:2 ${ramdisk_addr_r} /live/initrd.img-6.6.128-vyos; ext4load mmc 0:2 ${fdt_addr_r} /mono-gw.dtb; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
+setenv vyos 'setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet"; ext4load mmc 0:2 ${kernel_addr_r} /live/vmlinuz-<KV>; ext4load mmc 0:2 ${ramdisk_addr_r} /live/initrd.img-<KV>; ext4load mmc 0:2 ${fdt_addr_r} /mono-gw.dtb; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
 ```
 
-Update the boot order — OpenWrt boots first, VyOS as fallback:
+Replace `<KV>` with the actual kernel version (e.g., `6.6.128-vyos`).
+You can check it by mounting the partition: `ls /mnt/vyos/live/vmlinuz-*`
 
-```
-setenv bootcmd 'run emmc || run vyos || run recovery'
-saveenv
-```
+### Set boot order
 
-`saveenv` writes to SPI flash (`mtd3: uboot-env`). Confirm:
+Choose your preferred default OS:
 
-```
-=> saveenv
-Saving Environment to SPIFlash... Erasing SPI flash...Writing to SPI flash...done
-```
-
-### Test VyOS boot manually
-
-Before rebooting, confirm VyOS loads:
-
-```
-run vyos
-```
-
-You should see the kernel start:
-
-```
-Starting kernel ...
-[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x410fd083]
-[    0.000000] Linux version 6.6.128-vyos ...
-[    0.000000] Machine model: Mono Gateway Development Kit
-[    0.000000] SoC family: QorIQ LS1046A
-```
-
-If the kernel does not start, see [Troubleshooting](#troubleshooting).
-
----
-
-## Step 6: Normal Boot
-
-Once U-Boot is configured, normal operation is:
-
-```
-Power on
-  └─ U-Boot runs emmc → boots OpenWrt on mmcblk0p1 (normal operation)
-     └─ if that fails → runs vyos → boots VyOS on mmcblk0p2
-        └─ if that fails → runs recovery → boots from SPI flash
-```
-
-To switch the default boot to VyOS instead of OpenWrt, change the boot order
-from the U-Boot console:
+**VyOS first** (recommended after testing):
 
 ```
 setenv bootcmd 'run vyos || run emmc || run recovery'
 saveenv
 ```
 
+**OpenWrt first** (safe — VyOS as fallback):
+
+```
+setenv bootcmd 'run emmc || run vyos || run recovery'
+saveenv
+```
+
+### Test VyOS boot
+
+```
+=> run vyos
+```
+
+You should see:
+
+```
+Starting kernel ...
+[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x410fd083]
+[    0.000000] Linux version 6.6.xxx-vyos ...
+[    0.000000] Machine model: Mono Gateway Development Kit
+```
+
 ---
 
-## Step 7: First VyOS Login
+## Step 4: First VyOS Login
 
 VyOS boots in live mode. Login on the serial console:
 
@@ -255,91 +184,276 @@ Username: vyos
 Password: vyos
 ```
 
-SSH access is not enabled by default in live mode. Enable it:
+Enable network access:
 
 ```
 configure
-set service ssh
 set interfaces ethernet eth0 address dhcp
+set service ssh
 commit
+save
 ```
 
-Then connect over the network. VyOS assigns DHCP on `eth0`.
+Check the assigned IP:
+
+```
+show interfaces ethernet eth0
+```
+
+Connect over SSH from your workstation.
 
 ### Install to eMMC permanently
-
-To install VyOS from live mode to the eMMC partition (replacing the live
-squashfs with an installed system):
 
 ```
 install image
 ```
 
-Follow the prompts. When asked for console type, select **S (Serial)** or enter
-`ttyS0` for the Mono Gateway.
+Follow the prompts. When asked for console type, select **Serial** and
+enter `ttyS0`.
+
+---
+
+## Upgrading VyOS
+
+After `install image`, upgrades use the standard VyOS command — no serial
+console or manual file copying required:
+
+```
+add system image latest
+```
+
+The default configuration includes an update-check URL that points to this
+repo's releases. VyOS notifies you at login when a new build is available.
+
+You can also upgrade from a specific URL:
+
+```
+add system image https://github.com/mihakralj/vyos-ls1046a-build/releases/download/<VERSION>/<ISO>
+```
+
+### Image management
+
+```
+show system image                        # list installed images
+set system image default-boot <name>     # choose which boots next
+delete system image <name>               # remove old images
+reboot                                   # activate new image
+```
+
+> **Only use ISOs from this repository.** Generic VyOS ARM64 ISOs lack the
+> LS1046A kernel drivers (DPAA1, FMan, eSDHC) and will boot with no
+> networking and no eMMC support.
+
+---
+
+## Alternative: Install from Recovery Linux
+
+If OpenWrt is broken or unreachable, VyOS can be installed from Recovery
+Linux. This path requires a **serial console** for the entire process.
+
+Recovery Linux is a minimal BusyBox-based environment stored in SPI NOR
+flash (`mtd7`). It has **no SSH server** — all commands are entered via
+the serial console. The upstream docs confirm it has `curl`, `ip`, and
+`dd`. Other tools (`mkfs.ext4`, `mount -o loop`) may or may not be
+present.
+
+Two approaches are documented below: **direct** (if the recovery
+environment has filesystem tools) and **from OpenWrt** (using recovery
+only for network download, then rebooting into OpenWrt to copy files).
+
+### Step R1: Boot into Recovery Linux
+
+Connect the USB-TTL serial adapter to the **rightmost** header. Open a
+terminal:
+
+```bash
+# Linux
+tio /dev/ttyUSB0
+
+# macOS
+tio /dev/cu.usbserial-*
+```
+
+Power cycle the board. Press any key within **5 seconds** to interrupt
+U-Boot:
+
+```
+Hit any key to stop autoboot:  5
+=>
+```
+
+Boot Recovery Linux:
+
+```
+=> run recovery
+```
+
+Login as `root` (no password). The LED turns **orange (pulsing)**.
+
+### Step R2: Configure networking
+
+Recovery Linux has **no DHCP** — configure the network manually.
+eth0 is the **leftmost** RJ-45 port:
+
+```bash
+ip link set eth0 up
+ip addr add 10.0.0.199/24 dev eth0
+ip route add default via 10.0.0.1 dev eth0
+```
+
+> Adjust the IP address and gateway to match your network. The device
+> needs internet access to reach `github.com`.
+
+Verify connectivity:
+
+```bash
+ping -c 2 github.com
+```
+
+### Step R3: Download VyOS ISO
+
+```bash
+cd /tmp
+
+# Get the latest release URL (uses grep — no jq needed)
+ISO_URL=$(curl -skL https://api.github.com/repos/mihakralj/vyos-ls1046a-build/releases/latest \
+  | grep -o '"browser_download_url": "[^"]*\.iso"' | cut -d'"' -f4)
+
+echo "Downloading: $ISO_URL"
+curl -kLO "$ISO_URL"
+ls -lh /tmp/*.iso
+```
+
+> The `-k` flag skips TLS verification — Recovery Linux may not have
+> up-to-date CA certificates.
+
+### Step R4: Format and copy to eMMC
+
+First, check what tools are available:
+
+```bash
+which mkfs.ext4 mount umount cp mkdir
+```
+
+**If `mkfs.ext4` and `mount` are available** — use the direct method:
+
+```bash
+# Format partition 2 (does NOT touch OpenWrt on p1)
+mkfs.ext4 -L vyos /dev/mmcblk0p2
+
+# Mount and copy
+mkdir -p /mnt/vyos /tmp/iso
+mount /dev/mmcblk0p2 /mnt/vyos
+mkdir -p /mnt/vyos/live
+
+# Mount ISO (requires loop device support)
+mount -o loop,ro /tmp/*.iso /tmp/iso
+
+cp /tmp/iso/live/vmlinuz-*          /mnt/vyos/live/
+cp /tmp/iso/live/initrd.img-*       /mnt/vyos/live/
+cp /tmp/iso/live/filesystem.squashfs /mnt/vyos/live/
+cp /tmp/iso/mono-gw.dtb             /mnt/vyos/
+
+# Note the kernel version for U-Boot
+ls /mnt/vyos/live/vmlinuz-*
+
+sync
+umount /mnt/vyos
+umount /tmp/iso
+```
+
+**If tools are missing** — use Recovery Linux only for the download,
+then reboot into OpenWrt to do the actual install:
+
+```bash
+# Save the ISO to mmcblk0p2 (OpenWrt partition has only ~511 MB — too small)
+# The ISO goes to /tmp which is in RAM, so just reboot into OpenWrt
+# and re-download there (it has wget, jq, mkfs.ext4, mount)
+reboot
+```
+
+After reboot, let OpenWrt start, SSH in, and follow
+[Step 2](#step-2-download-and-install-vyos). If OpenWrt is broken,
+the Recovery Linux reflash procedure in the
+[Mono Gateway docs](https://github.com/ryneches/mono-gateway-docs/blob/master/gateway-development-kit/getting-started.md)
+can restore it first.
+
+### Step R5: Configure U-Boot
+
+Since you are already on the serial console, reboot and interrupt U-Boot:
+
+```bash
+reboot
+```
+
+Press any key within 5 seconds, then paste the `setenv vyos` command.
+
+If the install script printed the command, paste it directly. Otherwise,
+check the kernel version by loading it in U-Boot:
+
+```
+=> ext4ls mmc 0:2 /live/
+```
+
+This shows the files on partition 2. Note the kernel version from the
+`vmlinuz-*` filename, then set the boot variable per
+[Step 3: Configure U-Boot](#step-3-configure-u-boot).
+
+After `saveenv`, test with `run vyos` — VyOS should boot directly.
 
 ---
 
 ## Network Interfaces
 
-The LS1046A has 5 physical Ethernet ports via NXP DPAA1/FMan:
+The LS1046A has 5 Ethernet ports via NXP DPAA1/FMan. MAC addresses are
+unique per device — read yours from the board label or `show interfaces`:
 
-| VyOS name | Physical | MAC prefix | Notes |
-|-----------|----------|------------|-------|
-| `eth0` | Port 1 | e8:f6:d7:00:15:ff | Management (br-lan in OpenWrt) |
-| `eth1` | Port 2 | e8:f6:d7:00:16:00 | |
-| `eth2` | Port 3 | e8:f6:d7:00:16:01 | |
-| `eth3` | Port 4 | e8:f6:d7:00:16:02 | WAN in OpenWrt default config |
-| `eth4` | Port 5 | e8:f6:d7:00:16:03 | 192.168.0.1 in OpenWrt |
+| Port | Position | VyOS name | Notes |
+|------|----------|-----------|-------|
+| 1 | Leftmost | `eth0` | Management / DHCP |
+| 2 | | `eth1` | |
+| 3 | | `eth2` | |
+| 4 | | `eth3` | WAN in OpenWrt |
+| 5 | Rightmost | `eth4` | |
+
+---
+
+## eMMC Partition Layout
+
+```
+mmcblk0       ~29.6 GB total
+├─ mmcblk0p1  ~511 MB   OpenWrt (ext4) — factory OS, do not touch
+├─ mmcblk0p2  ~29.1 GB  VyOS (ext4)
+├─ mmcblk0boot0  32 MB  hardware boot partition (unused)
+└─ mmcblk0boot1  32 MB  hardware boot partition (unused)
+```
 
 ---
 
 ## Troubleshooting
 
-**Kernel starts but hangs with no output after "Starting kernel..."**
-
-earlycon is not initializing. Confirm U-Boot `bootargs` contains:
-`earlycon=uart8250,mmio,0x21c0500`
+**Kernel hangs after "Starting kernel..."**
+→ Confirm bootargs: `earlycon=uart8250,mmio,0x21c0500`
 
 **live-boot cannot find filesystem.squashfs**
+→ eMMC driver missing. Must use ISOs from this repo, not generic ARM64.
+→ Check: `dmesg | grep -i 'mmc\|esdhc\|mmcblk'` — `mmcblk0` must appear.
 
-eMMC driver not loaded. The kernel must be built from this repo (not the
-generic VyOS ARM64 ISO). Confirm build version matches.
-
-Verify on a booted system:
-```bash
-dmesg | grep -i 'mmc\|esdhc\|mmcblk'
-```
-
-`mmcblk0` must appear. If it does not, the `sdhci-of-esdhc` driver is absent.
-
-**No network interfaces (eth0–eth4 missing)**
-
-DPAA1 initialization failed. Check:
-```bash
-dmesg | grep -i 'fman\|dpaa\|fsl'
-```
-
-FMan must show successful init. If it shows `firmware not available`, the
-`mono-gw.dtb` embedded firmware is not being read correctly.
+**No network interfaces (eth0–eth4)**
+→ DPAA1/FMan init failed: `dmesg | grep -i 'fman\|dpaa'`
+→ FMan must show firmware loaded. If `firmware not available`, the DTB may
+  be wrong.
 
 **U-Boot prompt not reachable**
+→ Press key within 5 seconds. Plug USB-TTL adapter in before powering on.
 
-The 5-second window is short. Keep the terminal focused during power-on.
-Some USB-TTL adapters introduce 1–2 second startup latency — plug in before
-powering the board.
+**`ext4load` fails with "File not found"**
+→ Files not on `mmcblk0p2`. Mount and check: `mount /dev/mmcblk0p2 /mnt; ls /mnt/live/`
 
-**`ext4load` fails during `run vyos`**
+---
 
-```
-** File not found /live/vmlinuz-6.6.128-vyos **
-```
+## See Also
 
-Either the files were not copied to `mmcblk0p2`, or the partition is not
-ext4-formatted. From OpenWrt, check:
-
-```bash
-mount /dev/mmcblk0p2 /mnt
-ls /mnt/live/
-```
-
+- [Mono Gateway Getting Started](https://github.com/ryneches/mono-gateway-docs/blob/master/gateway-development-kit/getting-started.md) — factory setup, serial console, Recovery Linux
+- [PORTING.md](PORTING.md) — technical LS1046A porting notes
+- [README.md](README.md) — what this build changes and why

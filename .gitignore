@@ -4,4 +4,6 @@ vyos-1x/
 global_deps/
 vyos-*-arm64.iso*
 data/mok/MOK.key
+data/vyos-ls1046a.minisign.key
 data/huihuimoe-vyos-arm64.minisign.key
+.github/instructions/codacy.instructions.md

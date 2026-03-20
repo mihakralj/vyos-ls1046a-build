@@ -93,48 +93,6 @@ jobs:
           echo "TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
           echo "PREVIOUS_SUCCESS_BUILD_TIMESTAMP=$(cat version.json | jq -r '.[0].timestamp')" >> $GITHUB_OUTPUT
 
-      # - name: Build global deps
-      #   run: |
-      #     source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-      #     set -ex
-      #     eval $(opam env --root=/opt/opam --set-root)
-      #     mkdir global_deps
-      #     cd global_deps
-      #     global_deps=(
-      #       libvyosconfig
-      #       vyatta-bash
-      #       vyatta-biosdevname
-      #       vyatta-cfg
-      #       # https://github.com/vyos/vyos-1x/commit/d6a82c134bed0b0921595928b7ec600b2935327b
-      #       # vyatta-wanloadbalance
-      #       vyos-utils
-      #       # Architecture:all, can install directly
-      #       # vyos-user-utils
-      #       vyos-http-api-tools
-      #       # Architecture:all, can install directly
-      #       # vyos-cloud-init
-      #       ipaddrcheck
-      #       udp-broadcast-relay
-      #       hvinfo
-      #       # Architecture:all, can install directly
-      #       # live-boot
-      #     )
-      #     for global_dep in ${global_deps[@]}; do
-      #       git clone https://github.com/vyos/$global_dep
-      #       cd $global_dep
-      #       echo "y" | mk-build-deps --install --remove
-      #       # should update libvyosconfig due to hardcode on vyos-1x
-      #       # https://github.com/vyos/vyos-1x/blob/e90a2781f9eae555097e078b9b11dd0dca6c0acd/python/vyos/configtree.py#L22
-      #       # that will failed on reftree.cache
-      #       # 2025.03.05: fixed on https://github.com/vyos/vyos-1x/commit/731195c7adb21208767199f5487dfdf29ce09380
-      #       # if [ "${global_dep}" = "libvyosconfig" ]; then
-      #       #   ./build.sh
-      #       #   cp _build/libvyosconfig.so /usr/lib/libvyosconfig.so.0
-      #       # fi
-      #       dpkg-buildpackage -b -us -uc -tc
-      #       cd ..
-      #     done
-
       - name: Checkout vyos-build repo
         uses: actions/checkout@v6
         with:
@@ -147,88 +105,66 @@ jobs:
           MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
         run: |
           [ -n "$MOK_KEY" ] && echo "$MOK_KEY" > data/mok/MOK.key
-          [ -n "$MINISIGN_PRIVATE_KEY" ] && echo "$MINISIGN_PRIVATE_KEY" > data/huihuimoe-vyos-arm64.minisign.key
+          [ -n "$MINISIGN_PRIVATE_KEY" ] && echo "$MINISIGN_PRIVATE_KEY" > data/vyos-ls1046a.minisign.key
 
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
           set -ex
 
-          ### vyos-1x
+          ### vyos-1x patches
           git clone --recursive https://github.com/vyos/vyos-1x \
             -b current --single-branch vyos-build/scripts/package-build/vyos-1x/vyos-1x
-          # fixing unknown internal blob file
-          # i don't know what is this file and why it's not in the repo
-          # without this file, the build will failed
-          # https://github.com/vyos/vyos-1x/commit/bab186b493145ee42453196e8ef4670afc71f6f1
-          # https://github.com/vyos/vyos-1x/commit/dd5f9c19550c1f8ccb5e93bab0b604f9f9e1383e
+          # reftree.cache: internal blob required for build but missing from upstream repo
           cp data/reftree.cache vyos-build/scripts/package-build/vyos-1x/vyos-1x/data/reftree.cache
-          # apply patches
-          # https://github.com/vyos/vyos-1x/commit/6f0dde5f151caa47048be8ebd8dcb17b544aba97
-          patch --no-backup-if-mismatch -p1 -d vyos-build/scripts/package-build/vyos-1x/vyos-1x < data/vyos-1x-001-system_console.patch
-          # https://github.com/vyos/vyos-1x/commit/6f0dde5f151caa47048be8ebd8dcb17b544aba97
-          #patch --no-backup-if-mismatch -p1 -d vyos-build/scripts/package-build/vyos-1x/vyos-1x < data/vyos-1x-002-boot_console.patch
-          patch --no-backup-if-mismatch -p1 -d vyos-build/scripts/package-build/vyos-1x/vyos-1x < data/vyos-1x-003-increase_vyshim_init_timeout.patch
-          # https://github.com/vyos/vyos-1x/commit/6349b4785454d7dc27f66c09cc4456bc26c985f5
-          #patch --no-backup-if-mismatch -p1 -d vyos-build/scripts/package-build/vyos-1x/vyos-1x < data/vyos-1x-004-enable_telegraf_support.patch
-          # Error: OCI runtime error: crun: cannot set memory+swap limit less than the memory limit
-          patch --no-backup-if-mismatch -p1 -d vyos-build/scripts/package-build/vyos-1x/vyos-1x < data/vyos-1x-005-fix_podman_service.patch
-          patch --no-backup-if-mismatch -p1 -d vyos-build/scripts/package-build/vyos-1x/vyos-1x < data/vyos-1x-006-install-image-reserve-gap.patch
-          # https://github.com/vyos/vyos-1x/commit/1478516ae437f19ebeb7d6ff9b83dd74f8e76758
-          sed -i 's/all: clean copyright/all: clean/' vyos-build/scripts/package-build/vyos-1x/vyos-1x/Makefile
+          VYOS1X=vyos-build/scripts/package-build/vyos-1x/vyos-1x
+          patch --no-backup-if-mismatch -p1 -d "$VYOS1X" < data/vyos-1x-001-system_console.patch
+          patch --no-backup-if-mismatch -p1 -d "$VYOS1X" < data/vyos-1x-003-increase_vyshim_init_timeout.patch
+          patch --no-backup-if-mismatch -p1 -d "$VYOS1X" < data/vyos-1x-005-fix_podman_service.patch
+          patch --no-backup-if-mismatch -p1 -d "$VYOS1X" < data/vyos-1x-006-install-image-reserve-gap.patch
+          sed -i 's/all: clean copyright/all: clean/' "$VYOS1X/Makefile"
 
-          ### vyos-build
-          # add default and dhcpv4 configuration
+          ### vyos-build patches
           cp data/config.boot.default vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/
           cp data/config.boot.dhcp vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/
-          # fix kernel config https://github.com/vyos/vyos-build/pull/1121
-          # vyos-build-001-kernel_config.patch disabled: defconfig moved from arch/arm64/configs/ to config/arm64/
-          # sdhci-of-esdhc and other options are now injected via printf block below
-          #patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-001-kernel_config.patch
-          # https://github.com/vyos/vyos-build/commit/88f11dc01bb676bf652512d6bf23ba0f10f5101f
-          #patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-003-fix_hardcoded_x86_64.patch
-          # fix on https://github.com/vyos/vyos-build/commit/82a40e68c7e4b3ea45fb2bbc4a1a7cff92e41942
-          #patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-004-fix_saltproject_package_url.patch
           patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-005-add_vim_link.patch
-          # fix on https://github.com/vyos/vyos-build/commit/7e803f5000bd77b8cb172cf31b04146c4fc76c8a
-          #patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-006-fix_kernel_sign.patch
-          # sign kernel module but donot sign vmlinuz
           patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-007-no_sbsign.patch
-          # fixed by https://github.com/vyos/vyos-build/commit/5fe0c17b8c6cb8e244762dcb88eb9c0bf705d9f5
-          #patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-008-fix_live_boot_initramfs_link.patch
-          # https://github.com/vyos/vyos-build/commit/ff2a5df902ca31d51eda6744c94cb257d162fcfc
-          #patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-009-live_boot_serial_console_device.patch
-          # LS1046A: inject board-specific kernel config (DPAA1/FMan networking + console)
+
+          ### LS1046A kernel config (DPAA1/FMan networking, eMMC, serial, MTD/SPI for FMan firmware)
           DEFCONFIG=vyos-build/scripts/package-build/linux-kernel/config/arm64/vyos_defconfig
           printf '%s\n' \
             '# === LS1046A / NXP Layerscape DPAA1 (Mono Gateway DK) ===' \
             'CONFIG_FSL_FMAN=y' \
             'CONFIG_FSL_DPAA=y' \
             'CONFIG_FSL_DPAA_ETH=y' \
+            'CONFIG_FSL_DPAA_MACSEC=y' \
             'CONFIG_FSL_BMAN=y' \
             'CONFIG_FSL_QMAN=y' \
             'CONFIG_FSL_PAMU=y' \
+            'CONFIG_MMC_SDHCI_OF_ESDHC=y' \
+            'CONFIG_FSL_EDMA=y' \
             'CONFIG_SERIAL_8250_OF=y' \
-            'CONFIG_MMC_SDHCI_OF_ESDHC=m' \
+            'CONFIG_MTD=y' \
+            'CONFIG_MTD_SPI_NOR=m' \
+            'CONFIG_SPI=y' \
+            'CONFIG_SPI_FSL_DSPI=y' \
+            'CONFIG_CDX_BUS=y' \
             >> "$DEFCONFIG"
-          echo "Appended LS1046A DPAA config to defconfig"
-          # Fix console: revert ttyAMA0 -> ttyS0 for LS1046A serial (8250 UART)
-          SERIAL_HOOK=vyos-build/data/live-build-config/hooks/live/01-live-serial.binary
-          sed -i 's/ttyAMA0/ttyS0/g' "$SERIAL_HOOK" 2>/dev/null || true
-          GRUB_ENTRY=vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/grub/default-union-grub-entry
-          sed -i 's/ttyAMA0/ttyS0/g' "$GRUB_ENTRY" 2>/dev/null || true
-          # https://github.com/vyos/vyos-build/blob/fd737172f1068870fe1ededbe9b2ed4a86663acd/data/live-build-config/includes.chroot/var/lib/shim-signed/mok/README.md
+
+          ### LS1046A console: revert ttyAMA0 -> ttyS0 (8250 UART at 0x21c0500)
+          sed -i 's/ttyAMA0/ttyS0/g' \
+            vyos-build/data/live-build-config/hooks/live/01-live-serial.binary \
+            vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/grub/default-union-grub-entry \
+            2>/dev/null || true
+
+          ### MOK certificate for kernel module signing
           if [ -f data/mok/MOK.key ]; then
-            # https://github.com/vyos/vyos-build/commit/d552f7f8c38d7ad3bd28d9019a58b57e41b07f0b
-            # data/live-build-config/includes.chroot/var/lib/shim-signed/mok -> vyos-build/data/certificates
             cp data/mok/MOK.key vyos-build/data/certificates/vyos-dev-2025-linux.key
             cp data/mok/MOK.pem vyos-build/data/certificates/vyos-dev-2025-linux.pem
           fi
-          # add minisign pubkey
-          cp data/huihuimoe-vyos-arm64.minisign.pub vyos-build/data/live-build-config/includes.chroot/usr/share/vyos/keys/
-          # LS1046A DTB: place at ISO root via includes.binary so U-Boot can ext4load it
+
+          ### Minisign public key + DTB for ISO
+          cp data/vyos-ls1046a.minisign.pub vyos-build/data/live-build-config/includes.chroot/usr/share/vyos/keys/
           mkdir -p vyos-build/data/live-build-config/includes.binary
           cp data/dtb/mono-gw.dtb vyos-build/data/live-build-config/includes.binary/mono-gw.dtb
-
-          true
 
       - name: Build Image Packages
         run: |
@@ -303,17 +239,6 @@ jobs:
             fi
             cp $deb_file packages
           done
-          # global_deb_files=$(find ../global_deps -name "*.deb" -type f | \
-          #   grep -v -- -dbg | \
-          #   grep -v -- -dev | \
-          #   grep -v -- -doc
-          # )
-          # for deb_file in $global_deb_files; do
-          #   cp $deb_file packages
-          # done
-          # # vpp addition files
-          # find scripts/package-build/vpp -name "libvppinfra-dev*.deb" -type f -exec cp {} packages ';'
-          # find scripts/package-build/vpp -name "vpp-dev*.deb" -type f -exec cp {} packages ';'
           ls -alh packages
 
       - name: Archive Packages
@@ -356,7 +281,6 @@ jobs:
             --custom-package grub-efi-arm64-signed \
             --custom-package shim-signed \
             generic
-            # --custom-package cloud-init
           cd build
           # Determine image name and iso file
           GENERIC_IMAGE_NAME=$(jq --raw-output .artifacts[0] manifest.json | sed -e 's/.iso//')
@@ -364,8 +288,8 @@ jobs:
           echo "generic_image_name=${GENERIC_IMAGE_NAME}" >> $GITHUB_OUTPUT
           echo "generic_image_iso=${GENERIC_IMAGE_ISO}" >> $GITHUB_OUTPUT
           # Cryptographically sign the image
-          MINISIGN_PUBKEY_FILE=$GITHUB_WORKSPACE/data/huihuimoe-vyos-arm64.minisign.pub
-          MINISIGN_SECKEY_FILE=$GITHUB_WORKSPACE/data/huihuimoe-vyos-arm64.minisign.key
+          MINISIGN_PUBKEY_FILE=$GITHUB_WORKSPACE/data/vyos-ls1046a.minisign.pub
+          MINISIGN_SECKEY_FILE=$GITHUB_WORKSPACE/data/vyos-ls1046a.minisign.key
           if [ -f "$MINISIGN_SECKEY_FILE" ]; then
             $GITHUB_WORKSPACE/bin/minisign -s $MINISIGN_SECKEY_FILE -Sm ${GENERIC_IMAGE_ISO}
             $GITHUB_WORKSPACE/bin/minisign -Vm ${GENERIC_IMAGE_ISO} -x ${GENERIC_IMAGE_ISO}.minisig -p $MINISIGN_PUBKEY_FILE
@@ -393,7 +317,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-    # if: github.ref_name == "${{ github.event.repository.default_branch }}"
     if: github.ref_name == 'master'
     steps:
       - uses: actions/checkout@v6
@@ -496,11 +419,6 @@ jobs:
         with:
           name: ${{ needs.build_generic_iso.outputs.generic_image_name }}
 
-      # https://github.com/actions/download-artifact/issues/374
-      # - uses: actions/download-artifact@v5
-      #   with:
-      #     name: vyos-packages
-      #     decompress: false
       - uses: actions/download-artifact@v8
         with:
           name: vyos-packages
