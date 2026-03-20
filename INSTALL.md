@@ -26,7 +26,7 @@ Choose **one** column based on what's currently running on your board:
 </tr>
 <tr><td>
 
-Connect Ethernet to any port. SSH in:
+Connect Ethernet to any port. SSH into OpenWrt — assuming it is already configured with internet access:
 
 ```bash
 ssh root@192.168.1.1
@@ -34,26 +34,17 @@ ssh root@192.168.1.1
 
 Default: `root` with **no password**.
 
+Verify: `ping -c 2 github.com`
+
 </td><td>
 
-Connect USB-TTL to the **rightmost** header. Open a terminal:
-
-```bash
-# Linux
-tio /dev/ttyUSB0
-# macOS
-tio /dev/cu.usbserial-*
-```
-
-Settings: **115200 8N1**, no flow control.
-
-Power cycle → press any key within **5 seconds** to get the U-Boot `=>` prompt:
+In serial console get the U-Boot `=>` prompt:
 
 ```
 => run recovery
 ```
 
-Login as `root` (no password). LED turns **orange (pulsing)**.
+Login as `root` (no password).
 
 Configure networking:
 
@@ -76,76 +67,40 @@ Verify: `ping -c 2 github.com`
 
 ## Step 2: Download and Write VyOS to eMMC
 
-Choose the matching column from Step 1:
-
-<table>
-<tr>
-<th>From OpenWrt</th>
-<th>From Recovery Linux</th>
-</tr>
-<tr><td>
+This script works on both OpenWrt and Recovery Linux:
 
 ```bash
-# Get latest eMMC image URL
-IMG_URL=$(wget -qO- \
+# Get the latest eMMC image URL from GitHub
+IMG_URL=$(wget --no-check-certificate -qO- \
   https://api.github.com/repos/mihakralj/vyos-ls1046a-build/releases/latest \
-  | jq -r '.assets[] | select(.name | endswith("-emmc.img.gz")) | .browser_download_url')
+  | grep -o '"browser_download_url": "[^"]*emmc\.img\.gz"' | cut -d'"' -f4)
 
-# Download and write to partition 2
-wget -qO- "$IMG_URL" | gunzip \
-  | dd of=/dev/mmcblk0p2 bs=4M
+echo "Downloading: $IMG_URL"
+
+# Download and write directly to partition 2 (does NOT touch OpenWrt on p1)
+wget --no-check-certificate -qO- "$IMG_URL" | gunzip | dd of=/dev/mmcblk0p2 bs=4M
 sync
 
 # Extract kernel version for U-Boot
 mkdir -p /mnt/vyos
 mount -r /dev/mmcblk0p2 /mnt/vyos
-KV=$(ls /mnt/vyos/live/vmlinuz-* \
-  | sed 's/.*vmlinuz-//')
+KV=$(ls /mnt/vyos/live/vmlinuz-* | sed 's/.*vmlinuz-//')
 umount /mnt/vyos
-```
 
-</td><td>
-
-```bash
-# Get latest eMMC image URL
-IMG_URL=$(curl -skL \
-  https://api.github.com/repos/mihakralj/vyos-ls1046a-build/releases/latest \
-  | grep -o '"browser_download_url": "[^"]*emmc\.img\.gz"' \
-  | cut -d'"' -f4)
-
-# Download and write to partition 2
-curl -kL "$IMG_URL" | gunzip \
-  | dd of=/dev/mmcblk0p2 bs=4M
-sync
-
-# Extract kernel version for U-Boot
-mkdir -p /mnt/vyos
-mount -r /dev/mmcblk0p2 /mnt/vyos
-KV=$(ls /mnt/vyos/live/vmlinuz-* \
-  | sed 's/.*vmlinuz-//')
-umount /mnt/vyos
-```
-
-> `-k` skips TLS verification (Recovery Linux
-> may lack CA certificates).
-
-</td></tr>
-</table>
-
-Both paths do the same thing: download `*-emmc.img.gz` (a pre-formatted
-ext4 filesystem with kernel, initramfs, squashfs root, and device tree),
-decompress it, and `dd` it directly to `mmcblk0p2`. OpenWrt on `p1` is
-not touched.
-
-After the write completes, print the U-Boot boot command with the correct
-kernel version filled in:
-
-```bash
+# Print the U-Boot command with kernel version filled in
 echo ""
 echo "=== Copy this U-Boot command (one line) ==="
 echo "setenv vyos 'setenv bootargs \"console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet\"; ext4load mmc 0:2 \${kernel_addr_r} /live/vmlinuz-${KV}; ext4load mmc 0:2 \${ramdisk_addr_r} /live/initrd.img-${KV}; ext4load mmc 0:2 \${fdt_addr_r} /mono-gw.dtb; booti \${kernel_addr_r} \${ramdisk_addr_r}:\${filesize} \${fdt_addr_r}'"
 echo "==========================================="
 ```
+
+The `*-emmc.img.gz` image is a pre-formatted ext4 filesystem containing the
+VyOS kernel, initramfs, root filesystem, and device tree. A single `dd`
+command writes everything — no `mkfs`, `mount`, or `cp` needed. OpenWrt on
+`p1` is not touched.
+
+> `--no-check-certificate` is harmless on OpenWrt and necessary on
+> Recovery Linux (which may lack up-to-date CA certificates).
 
 ---
 
