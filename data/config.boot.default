@@ -4,7 +4,7 @@ system {
         user vyos {
             authentication {
                 encrypted-password "$6$rounds=656000$SJsG87tq0bbBWrqZ$BRzd3F6tTbAjGZrH.Pja3qxeABa2l47hSFUWAdqyaeZxMPo7vsrzlfmkngu9HklJMUdeBqrVxbeGfyZ0DFDg30"
-                // plaintext-password "vyos"
+                /* plaintext-password "vyos" */
             }
         }
     }
@@ -49,7 +49,7 @@ system {
     }
     update-check {
         auto-check
-        url https://raw.githubusercontent.com/mihakralj/vyos-ls1046a-build/refs/heads/master/version.json
+        url https://raw.githubusercontent.com/mihakralj/vyos-ls1046a-build/refs/heads/main/version.json
     }
 }
 

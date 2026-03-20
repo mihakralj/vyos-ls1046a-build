@@ -95,42 +95,44 @@ echo "setenv vyos 'setenv bootargs \"console=ttyS0,115200 earlycon=uart8250,mmio
 echo "==========================================="
 ```
 
-COPY THIS U-BOOT COMMAND.
+The wget will take a bit to pull the full ISO over - give it time.
+
+Then *Copy* the command shown - you will need it in U-Boot.
 
 ---
 
 ## Step 3: Configure U-Boot
 
-- Interrupt boot process and enter U-Boot. 
-- Paste the `setenv vyos` command that was printed at the end of Step 2.
+Reboot with `reboot`, then press a key to interrupt U-Boot autoboot.
 
-Set boot order as **VyOS first** (recommended after testing):
-
-```
-setenv bootcmd 'run vyos || run emmc || run recovery'
-saveenv
-```
-
-### Test VyOS boot
+**Paste** the `setenv vyos '...'` command printed at the end of Step 2. Then:
 
 ```
 => run vyos
 ```
 
-You should see:
+You should see VyOS booting:
 
 ```
 Starting kernel ...
 [    0.000000] Booting Linux on physical CPU 0x0000000000 [0x410fd083]
 [    0.000000] Linux version 6.6.xxx-vyos ...
 [    0.000000] Machine model: Mono Gateway Development Kit
+...
+```
+
+Once confirmed working, save the boot order so VyOS starts automatically:
+
+```
+=> setenv bootcmd 'run vyos || run emmc || run recovery'
+=> saveenv
 ```
 
 ---
 
 ## Step 4: First VyOS Login
 
-VyOS now boots in live mode. Login on the serial console:
+Login on the serial console:
 
 ```
 Username: vyos
@@ -155,45 +157,25 @@ show interfaces ethernet eth0
 
 Connect over SSH from your workstation.
 
-### Install to eMMC permanently
-
-```
-install image
-```
-
-Follow the prompts. When asked for console type, select **Serial** and
-enter `ttyS0`.
+> **Note:** VyOS runs from squashfs+overlay — this is normal and is how VyOS
+> operates in production. The eMMC image you dd'd **is** the installed system.
+> Running `install image` may work (U-Boot has EFI support) but would
+> repartition `mmcblk0p2` and add GRUB. Test carefully — it will not affect
+> OpenWrt on `mmcblk0p1` but may change the partition layout on p2.
 
 ---
 
 ## Upgrading VyOS
 
-After `install image`, upgrades use the standard VyOS command — no serial
-console or manual file copying required:
+Re-run the download script from Step 2 (from OpenWrt SSH or VyOS SSH),
+then reboot. This overwrites the squashfs image on `mmcblk0p2`.
 
-```
-add system image latest
-```
+If you ran `install image` and have GRUB managing images, the standard
+`add system image <url>` command should work for subsequent upgrades.
 
-The default configuration includes an update-check URL that points to this
-repo's releases. VyOS notifies you at login when a new build is available.
-
-You can also upgrade from a specific URL:
-
-```
-add system image https://github.com/mihakralj/vyos-ls1046a-build/releases/download/<VERSION>/<ISO>
-```
-
-### Image management
-
-```
-show system image                        # list installed images
-set system image default-boot <name>     # choose which boots next
-delete system image <name>               # remove old images
-reboot                                   # activate new image
-```
-
-## IMPORTANT: **Only use ISO images from this repository.** Generic VyOS ISOs are made for AMD64, not ARM64. Custom ISOs made for ARM64 lack the LS1046A kernel drivers (DPAA1, FMan, eSDHC) and will boot with no networking and no eMMC support
+> **Only use images from this repository.** Generic VyOS ARM64 ISOs lack
+> the LS1046A kernel drivers (DPAA1, FMan, eSDHC) and will boot with no
+> networking and no eMMC support.
 
 ---
 
