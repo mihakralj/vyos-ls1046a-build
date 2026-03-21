@@ -193,6 +193,21 @@ jobs:
           ln -sf /dev/null "$SYSD/acpid.socket"
           ln -sf /dev/null "$SYSD/acpid.path"
 
+          ### Ethernet port remapping: match physical port order (left to right)
+          # Mainline fsl_dpaa_mac probes in DT address order (e2000→e8000→ea000)
+          # which gives rightmost RJ45 = eth0. Physical expectation: leftmost = eth0.
+          UDEV=vyos-build/data/live-build-config/includes.chroot/etc/udev/rules.d
+          mkdir -p "$UDEV"
+          cat > "$UDEV/70-fman-port-order.rules" << 'RULES'
+# Mono Gateway LS1046A — remap FMan MACs to match physical port order (left to right)
+# Without this, mainline driver probes in DT address order: e2000=eth0 (rightmost)
+SUBSYSTEM=="net", ATTR{device_addr}=="1ae8000", NAME="eth0"
+SUBSYSTEM=="net", ATTR{device_addr}=="1aea000", NAME="eth1"
+SUBSYSTEM=="net", ATTR{device_addr}=="1ae2000", NAME="eth2"
+SUBSYSTEM=="net", ATTR{device_addr}=="1af0000", NAME="eth3"
+SUBSYSTEM=="net", ATTR{device_addr}=="1af2000", NAME="eth4"
+RULES
+
       - name: Build Image Packages
         run: |
           cd vyos-build/scripts/package-build

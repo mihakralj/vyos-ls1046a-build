@@ -56,7 +56,7 @@ system {
 }
 
 interfaces {
-    ethernet eth1 {
+    ethernet eth0 {
         address dhcp
         description "MGMT (leftmost RJ45)"
     }
