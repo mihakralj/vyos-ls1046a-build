@@ -310,6 +310,62 @@ RDB DTB, a custom DTS file based on mainline `fsl-ls1046a.dtsi` and
 
 ---
 
+## CPU Frequency Scaling
+
+The LS1046A QorIQ clockgen provides multiple PLL sources for CPU frequency scaling. The `qoriq-cpufreq` driver reads available clock parents from `cg-cmux0` (the CPU clock mux) and populates the cpufreq frequency table.
+
+**Clock tree (from live system):**
+
+```
+sysclk (100 MHz oscillator)
+├── cg-pll0 (Platform PLL)
+│   └── div2 = 300 MHz (SPI/DSPI)
+├── cg-pll1 (CGA PLL1)
+│   ├── div1 = 1600 MHz  ← max CPU frequency
+│   ├── div2 = 800 MHz
+│   ├── div3 = 533 MHz
+│   └── div4 = 400 MHz
+├── cg-pll2 (CGA PLL2)
+│   ├── div1 = 1400 MHz  (hwaccel1)
+│   ├── div2 = 700 MHz   ← current CPU clock (too slow!)
+│   ├── div3 = 466 MHz
+│   └── div4 = 350 MHz
+└── cg-cmux0 → cg-pll2-div2 (700 MHz)
+    ├── cpu@0 .. cpu@3
+    └── cg-hwaccel0 → FMan
+```
+
+The `t1040_cmux` mux definition in `clk-qoriq.c` (used for LS1046A) allows 4 parents:
+
+| CLKSEL | Source | Rate |
+|--------|--------|------|
+| 0 | CGA_PLL1 / DIV1 | 1600 MHz |
+| 1 | CGA_PLL1 / DIV2 | 800 MHz |
+| 2 | CGA_PLL2 / DIV1 | 1400 MHz |
+| 3 | CGA_PLL2 / DIV2 | 700 MHz |
+
+**The bug:** The upstream VyOS kernel ships `CONFIG_QORIQ_CPUFREQ=m` (module). The module loads at T+28s, but the clock framework runs `clk: Disabling unused clocks` at T+12s. By the time the cpufreq module initializes, only `cg-pll2-div2` (700 MHz) is available as a CMUX parent. The CPU is locked at **39% of maximum speed**.
+
+```
+# Observed on live system:
+scaling_cur_freq:              700000   (700 MHz)
+scaling_available_frequencies: 700000   (only one!)
+cpuinfo_max_freq:              700000
+scaling_governor:              performance (stuck at 700 MHz)
+scaling_driver:                qoriq_cpufreq
+```
+
+**The fix:** Two kernel config changes:
+
+```text
+CONFIG_QORIQ_CPUFREQ=y                          # built-in, claims PLLs before clk cleanup
+CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y        # router: always max frequency
+```
+
+Building the cpufreq driver as `=y` (built-in) ensures it registers with the clock mux before `late_initcall` disables unused clock parents. Setting the default governor to `performance` is appropriate for a network router (no power-saving needed).
+
+---
+
 ## Kernel Version Delta
 
 OpenWrt runs `6.12.66`. VyOS ships `6.6.128-vyos`. Both have the required DPAA1 drivers in their source trees. Module ABI is incompatible -- modules from one kernel cannot be used on the other. The only correct fix is modifying `vyos_defconfig` and rebuilding.
@@ -340,7 +396,16 @@ CONFIG_MTD_SPI_NOR=m            # SPI NOR flash driver
 CONFIG_SPI=y                    # SPI subsystem
 CONFIG_SPI_FSL_DSPI=y           # Freescale DSPI controller
 CONFIG_CDX_BUS=y                # CDX bus (DPAA dependency)
+# CONFIG_DEBUG_PREEMPT is not set  # suppress smp_processor_id() BUG spam on Cortex-A72
+CONFIG_QORIQ_CPUFREQ=y          # QorIQ CPU frequency scaling (built-in, not module)
+CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y  # router: always max frequency
 ```
+
+> **Why `QORIQ_CPUFREQ=y`:** The upstream VyOS kernel ships this as `=m` (module).
+> The module loads ~16s after the clock framework runs `clk: Disabling unused clocks`,
+> which can result in the CPU being locked at the minimum frequency (700 MHz instead
+> of 1600 MHz). Building it in ensures the cpufreq driver claims PLL clock parents
+> before they are disabled as "unused."
 
 ---
 
