@@ -1,29 +1,36 @@
-param([string]$Port = "COM7", [int]$Baud = 115200)
+param(
+    [string]$Port = "COM7",
+    [int]$Baud = 115200,
+    [string]$Command = "",
+    [int]$WaitMs = 3000
+)
 
 $serial = New-Object System.IO.Ports.SerialPort $Port, $Baud, 'None', 8, 'One'
 $serial.ReadTimeout  = 3000
 $serial.WriteTimeout = 2000
 $serial.Open()
 
-# First: drain anything already buffered (boot messages, prompts, etc.)
+# Flush RX buffer
 Start-Sleep -Milliseconds 500
-$buffered = ""
-$serial.ReadTimeout = 800
-try { while ($true) { $buffered += [char]$serial.ReadChar() } } catch {}
+if ($serial.BytesToRead -gt 0) { $serial.ReadExisting() | Out-Null }
 
-# Now send Enter and read the response
+# Send Enter to get a prompt
 $serial.Write("`r")
-Start-Sleep -Milliseconds 1200
-$serial.Write("`r")
-Start-Sleep -Milliseconds 1200
+Start-Sleep -Milliseconds 800
 
+# Send command if provided
+if ($Command -ne "") {
+    $serial.Write($Command + "`r")
+    Start-Sleep -Milliseconds $WaitMs
+}
+
+# Drain all output
 $out = ""
 $serial.ReadTimeout = 800
 try { while ($true) { $out += [char]$serial.ReadChar() } } catch {}
 
 $serial.Close()
-Write-Output "=== BUFFERED ON CONNECT ==="
-Write-Output $buffered
+Write-Output $out
 Write-Output "=== AFTER ENTER x2 ==="
 Write-Output $out
 Write-Output "=== END ==="

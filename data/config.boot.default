@@ -2,7 +2,7 @@ system {
     host-name vyos
     login {
         banner {
-            pre-login "\\n    ** ARM64 build for NXP LS1046A (Mono Gateway) **\\n"
+            pre-login "\\n** ARM64 build for NXP LS1046A (Mono Gateway) **\\n"
         }
         user vyos {
             authentication {
