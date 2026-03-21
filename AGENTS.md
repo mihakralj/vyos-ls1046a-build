@@ -13,13 +13,15 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Single 
 - **Kernel config symbols:** Verify against actual Kconfig files — invalid symbols are silently ignored (e.g., `CONFIG_SERIAL_8250_OF` does not exist; the correct symbol is `CONFIG_SERIAL_OF_PLATFORM`)
 - **DPAA1 MDIO dependency:** `CONFIG_FSL_XGMAC_MDIO=y` is required for FMan networking — without it, all MACs defer with "missing pcs" and zero network interfaces appear. Not obvious from Kconfig dependencies.
 - **DPAA1 must be `=y` not `=m`:** The entire DPAA1 stack (FMAN, DPAA, BMAN, QMAN, PAMU) must be built-in. If built as modules, FMan initializes too late and interfaces never appear. No errors — just silent failure.
+- **CPU frequency:** `CONFIG_QORIQ_CPUFREQ=y` (not `=m`). Module loads after clock cleanup at T+12s, locking CPU at 700 MHz. Built-in claims PLLs first → 1800 MHz.
 - **U-Boot boot order:** initrd must load LAST so `${filesize}` captures the initrd size, not kernel/DTB size
 - **U-Boot `booti` ramdisk format:** MUST use `${ramdisk_addr_r}:${filesize}` (colon+size), not just the address — otherwise "Wrong Ramdisk Image Format"
-- **Two boot paths exist:** (1) `dd` live-boot to `mmcblk0p2` — no install step, squashfs+overlay, `ext4load mmc 0:2`; (2) `install image` creates GPT with p1=BIOS boot (1MiB), 16MiB gap, p2=EFI (256MiB FAT32), p3=root (ext4) — completely different partition layout and boot command
-- **USB boot uses FAT, eMMC uses ext4:** `fatload usb 0:1` vs `ext4load mmc 0:2` — different U-Boot commands. Rufus "ISO Image mode" creates FAT32 on USB.
-- **`bootefi` fails with OOM:** `ramdisk_addr_r` (0x88080000) is only 512KB above `fdt_addr_r` (0x88000000). U-Boot EFI memory pool too small for GRUB-EFI (990KB + runtime).
+- **Boot method is `booti` only:** `bootefi` with GRUB permanently OOMs due to DPAA1 reserved-memory nodes in DTB. No EFI boot path exists. Image upgrades require `fw_setenv` to update `vyos_direct`.
+- **eMMC layout (after `install image`):** GPT with p1=BIOS boot (1MiB), 16MiB gap, p2=EFI (256MiB FAT32, GRUB — unused), p3=Linux root (ext4, VyOS). OpenWrt is destroyed. Use `install image` from USB live session.
+- **USB boot uses FAT, eMMC uses ext4:** `fatload usb 0:1` vs `ext4load mmc 0:3` — different U-Boot commands. Rufus "ISO Image mode" creates FAT32 on USB.
 - **kexec double-boot (LIVE-BOOT ONLY):** USB live boot always does a kexec reboot after first config mount — this is normal VyOS live-boot behavior, NOT a bug. First boot establishes the squashfs+overlay, config loading triggers a reboot, second boot succeeds with migration. `kexec-load.service` and `kexec.service` are masked but the reboot is triggered by `vyos-router` itself reaching `kexec.target`. Does NOT affect installed systems (after `install image` to eMMC). The ~70s penalty is a one-time cost during initial USB install only.
-- **eMMC layout (after `install image`):** GPT with p1=BIOS boot (1MiB), 16MiB gap, p2=EFI (256MiB FAT32, GRUB), p3=Linux root (ext4, VyOS). OpenWrt is destroyed. Use `install image` from USB live session.
+- **Port order reversed:** Physical RJ45 leftmost = eth1 (NOT eth0). Rightmost RJ45 = eth0. PCB routes MACs in reverse DT address order.
+- **RJ45 PHYs are Maxlinear GPY115C:** PHY ID `0x67C9DF10`. Requires `CONFIG_MAXLINEAR_GPHY=y` (driver: `mxl-gpy.c`). Without it, "Generic PHY" is used and SGMII AN re-trigger fails — eth2 (center RJ45) never gets link. The GPY2xx has a hardware constraint where SGMII AN only triggers on speed *change*; the proper driver works around this.
 - **FMan firmware:** U-Boot injects from SPI flash `mtd4` into DTB before kernel boot. Not loaded via `request_firmware()`, no `/lib/firmware/` files needed
 - **Builder image:** Use `ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64` — do NOT fork or rebuild
 - **Live device SSH:** OpenWrt is at `root@192.168.1.234` (not the default 192.168.1.1)
@@ -42,20 +44,29 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Single 
 - **`could not generate DUID ... failed!`** — Expected on live boot without persistence (no stable machine-id)
 - **`WARNING failed to get smmu node: FDT_ERR_NOTFOUND`** — DTB lacks SMMU/IOMMU nodes. Harmless.
 - **`PCIe: no link` / `disabled`** — No PCIe devices on the board. Normal.
+- **`bridge: filtering via arp/ip/ip6tables is no longer available`** — `br_netfilter` not loaded. VyOS loads it when needed.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `.github/workflows/auto-build.yml` | THE build — kernel config overrides, ISO creation, release |
+| `README.md` | Project overview: hardware, fixes, release assets, boot method |
+| `INSTALL.md` | Complete 11-step install guide: USB → serial → U-Boot → install image → GRUB fixes → verify |
+| `PORTING.md` | Deep technical analysis: driver archaeology, DPAA1 architecture, CPU freq, boot flow |
+| `boot.efi.md` | U-Boot reference: memory map, boot commands, failed attempts, hardware info, live state |
+| `captured_boot.md` | Raw boot log from USB live session (build 2026.03.21-0419-rolling) showing full boot + kexec |
+| `CHANGELOG.md` | Upstream VyOS changes tracking |
+| `AGENTS.md` | This file — agent guidance and non-obvious rules |
+| `fix-grub.sh` | Helper script for GRUB console fixes after install |
 | `data/config.boot.default` | Default VyOS config baked into ISO (NO comments allowed inside blocks!) |
 | `data/config.boot.dhcp` | Alternative DHCP-enabled boot config |
 | `data/dtb/mono-gw.dtb` | Device tree blob for Mono Gateway hardware (extracted from live OpenWrt, 94KB) |
 | `data/reftree.cache` | Required vyos-1x build artifact missing from upstream — must copy manually |
-| `data/vyos-1x-*.patch` | Patches applied to vyos-1x during build |
-| `data/vyos-build-*.patch` | Patches applied to vyos-build during build |
+| `data/vyos-1x-*.patch` | Patches applied to vyos-1x during build (4 patches: console, vyshim timeout, podman, install gap) |
+| `data/vyos-build-*.patch` | Patches applied to vyos-build during build (2 patches: vim link, no sbsign) |
 | `data/mok/MOK.pem` | Machine Owner Key certificate for Secure Boot kernel signing |
-| `boot.efi.md` | U-Boot reference: memory map, boot commands, failed attempts, hardware info |
+| `data/vyos-ls1046a.minisign.pub` | Public key for ISO signature verification |
 | `version.json` | Update-check version file (served via GitHub raw, auto-updated by CI) |
 
 ## Commands

@@ -1,3 +1,24 @@
+# Captured Boot Log — VyOS on Mono Gateway LS1046A
+
+Raw serial console output from USB live boot of build **2026.03.21-0419-rolling**.
+Captured 2026-03-21 from board #308 (`MT-R01A-0326-00308`).
+
+**What this log shows:**
+1. U-Boot USB detection and file loading (lines 1–39)
+2. Kernel boot: earlycon, 4 CPUs, BMan/QMan portals, FMan MACs probe (lines 40–530)
+3. First systemd boot (lines 48–176) → VyOS Router starts → config mount
+4. **Kexec double-boot** (line 291) — normal live-boot behavior, does NOT occur on installed systems
+5. Second kernel boot (lines 295–530) → full systemd + VyOS config success → login prompt (line 777)
+
+**Key timestamps:** Kernel start T+0, serial driver T+12.2s, FMan MACs T+12.2s,
+systemd T+17.5s, VyOS Router T+38s, config success T+81.3s, login prompt T+81.8s.
+
+**Cosmetic messages to ignore:** `FDT_ERR_NOTFOUND` (no SMMU), `PCIe: no link` (no PCIe devices),
+`bridge: filtering` (br_netfilter loaded on demand), `DUID failed` (no persistent machine-id).
+
+---
+
+```
 => usb start
 starting USB...
 Bus usb@2f00000: Register 200017f NbrPorts 2
