@@ -246,25 +246,29 @@ GRUB automatically adds the new image to its menu. U-Boot's `bootefi` or
 | Thermal | 42°C (via SoC thermal zone) |
 | PCIe | 3 controllers, no devices connected |
 
-### Ethernet Interfaces (confirmed from live dmesg)
+### Ethernet Interfaces (confirmed by cable-plug testing, eMMC boot)
 
-| DT Node | MAC Address | FMan Port | VyOS Interface | Position |
-|---------|-------------|-----------|----------------|----------|
-| `1ae2000.ethernet` | `E8:F6:D7:00:16:01` | MEMAC | eth0 | Leftmost |
-| `1ae8000.ethernet` | `E8:F6:D7:00:15:FF` | MEMAC | eth1 | |
-| `1aea000.ethernet` | `E8:F6:D7:00:16:00` | MEMAC | eth2 | |
-| `1af0000.ethernet` | `E8:F6:D7:00:16:02` | MEMAC | eth3 | |
-| `1af2000.ethernet` | `E8:F6:D7:00:16:03` | MEMAC | eth4 | Rightmost |
+> ⚠️ Physical RJ45 port order is REVERSED from DT node address order (PCB routing).
+
+| Physical Position | DT Node | MAC Address | PHY Addr | VyOS Name | Type |
+|-------------------|---------|-------------|----------|-----------|------|
+| Port 1 (leftmost RJ45) | `1ae8000.ethernet` | `E8:F6:D7:00:15:FF` | MDIO :00 | **eth1** | SGMII |
+| Port 2 (center RJ45) | `1aea000.ethernet` | `E8:F6:D7:00:16:00` | MDIO :01 | **eth2** | SGMII |
+| Port 3 (right RJ45) | `1ae2000.ethernet` | `E8:F6:D7:00:16:01` | MDIO :02 | **eth0** | SGMII |
+| SFP1 | `1af0000.ethernet` | `E8:F6:D7:00:16:02` | fixed-link | **eth3** | XGMII 10GBase-R |
+| SFP2 | `1af2000.ethernet` | `E8:F6:D7:00:16:03` | fixed-link | **eth4** | XGMII 10GBase-R |
+
+SFP ports always report "Link is Up — 10Gbps/Full" (fixed-link, no PHY polling).
 
 ### MAC Addresses (from U-Boot env)
 
-| Variable | Address | Interface |
-|----------|---------|-----------|
-| `ethaddr` | `E8:F6:D7:00:15:FF` | eth1 (fm1-mac5) |
-| `eth1addr` | `E8:F6:D7:00:16:00` | eth2 |
-| `eth2addr` | `E8:F6:D7:00:16:01` | eth0 |
-| `eth3addr` | `E8:F6:D7:00:16:02` | eth3 |
-| `eth4addr` | `E8:F6:D7:00:16:03` | eth4 |
+| Variable | Address | VyOS Interface | Physical Position |
+|----------|---------|----------------|-------------------|
+| `ethaddr` | `E8:F6:D7:00:15:FF` | eth1 | Leftmost RJ45 |
+| `eth1addr` | `E8:F6:D7:00:16:00` | eth2 | Center RJ45 |
+| `eth2addr` | `E8:F6:D7:00:16:01` | eth0 | Right RJ45 |
+| `eth3addr` | `E8:F6:D7:00:16:02` | eth3 | SFP1 |
+| `eth4addr` | `E8:F6:D7:00:16:03` | eth4 | SFP2 |
 
 ### Clock Tree & CPU Frequency
 
@@ -338,23 +342,23 @@ EFI/boot/grubaa64.efi        (3.9 MB)
 fsl-ls1046a-rdb.dtb           (27 KB)
 ```
 
-## Live VyOS State (2026-03-21)
+## Live VyOS State (2026-03-21, eMMC installed)
 
-**Version:** 2026.03.20-2209-rolling
+**Version:** 2026.03.21-0419-rolling
 **Kernel:** 6.6.128-vyos `#1 SMP PREEMPT_DYNAMIC`
 **FRRouting:** 10.5.2
-**Boot source:** USB live (`live-media=/dev/sda1`)
-**Boot args:** `console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda1 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0`
+**Boot source:** eMMC installed (`vyos_direct` booti from mmcblk0p3)
+**Boot args:** `console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin vyos-union=/boot/...`
 
 ### Interfaces
 
-| Interface | MAC | State | Address |
-|-----------|-----|-------|---------|
-| eth0 | `E8:F6:D7:00:16:01` | DOWN | — |
-| eth1 | `E8:F6:D7:00:15:FF` | UP | `192.168.1.120/16` |
-| eth2 | `E8:F6:D7:00:16:00` | DOWN | — |
-| eth3 | `E8:F6:D7:00:16:02` | UP | — |
-| eth4 | `E8:F6:D7:00:16:03` | UP | — |
+| Interface | Physical Position | MAC | State | Address |
+|-----------|-------------------|-----|-------|---------|
+| eth0 | Right RJ45 (port 3) | `E8:F6:D7:00:16:01` | u/D | — |
+| eth1 | Leftmost RJ45 (port 1) | `E8:F6:D7:00:15:FF` | u/u | `192.168.1.122/16` |
+| eth2 | Center RJ45 (port 2) | `E8:F6:D7:00:16:00` | u/D | — |
+| eth3 | SFP1 | `E8:F6:D7:00:16:02` | u/u | — (10Gbps fixed-link) |
+| eth4 | SFP2 | `E8:F6:D7:00:16:03` | u/u | — (10Gbps fixed-link) |
 
 ### eMMC Layout (post-install image)
 
@@ -375,11 +379,11 @@ Key services: `ssh`, `frr`, `chrony`, `fastnetmon`, `dhclient@eth{0-4}`,
 
 | Resource | Value |
 |----------|-------|
-| CPU frequency | 700 MHz ⚠️ (should be 1600 MHz) |
-| CPU governor | performance (stuck at 700) |
+| CPU frequency | 1800 MHz ✅ (`QORIQ_CPUFREQ=y` fix) |
+| CPU governor | performance |
 | Memory total | 7.8 GB |
-| Memory used | 791 MB (10%) |
+| Memory used | ~800 MB (10%) |
 | Load average | 0.29 |
-| Root filesystem | overlay (squashfs + tmpfs) |
+| Root filesystem | squashfs + overlay (eMMC) |
 | Temperature | 42°C |
-| Uptime | ~24 min |
+| Boot time | ~82s to login (no kexec double-boot) |

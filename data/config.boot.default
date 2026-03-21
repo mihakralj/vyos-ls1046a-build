@@ -56,6 +56,10 @@ system {
 }
 
 interfaces {
+    ethernet eth1 {
+        address dhcp
+        description "MGMT (leftmost RJ45)"
+    }
     loopback lo {
     }
 }

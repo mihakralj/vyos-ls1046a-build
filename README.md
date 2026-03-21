@@ -9,7 +9,7 @@ Generic VyOS ARM64 ISO on NXP LS1046A: no eMMC, no network, wrong serial console
 | | |
 |---|---|
 | **SoC** | NXP QorIQ LS1046A — 4× Cortex-A72 @ 1.8 GHz, 8 GB DDR4 ECC |
-| **Network** | 5× DPAA1/FMan Ethernet (eth0–eth4) |
+| **Network** | 5× DPAA1/FMan Ethernet — 3× RJ45 SGMII (eth0–eth2), 2× SFP+ 10GBase-R (eth3–eth4) |
 | **Storage** | eMMC via Freescale eSDHC (`mmcblk0p1` OpenWrt, `mmcblk0p2` VyOS) |
 | **Console** | 8250 UART at `0x21c0500`, 115200 baud (`ttyS0`) |
 | **Board** | [Mono Gateway Development Kit](https://github.com/ryneches/mono-gateway-docs) |
