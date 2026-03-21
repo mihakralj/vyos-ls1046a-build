@@ -154,6 +154,11 @@ jobs:
             'CONFIG_QORIQ_CPUFREQ=y' \
             'CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y' \
             '# CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL is not set' \
+            '# === SFP support (10G copper/fiber transceivers) ===' \
+            'CONFIG_SFP=y' \
+            'CONFIG_I2C_MUX=y' \
+            'CONFIG_I2C_MUX_PCA954x=y' \
+            'CONFIG_AQUANTIA_PHY=y' \
             >> "$DEFCONFIG"
 
           ### Remove --uefi-secure-boot from grub-install
@@ -198,15 +203,15 @@ jobs:
           # which gives rightmost RJ45 = eth0. Physical expectation: leftmost = eth0.
           UDEV=vyos-build/data/live-build-config/includes.chroot/etc/udev/rules.d
           mkdir -p "$UDEV"
-          cat > "$UDEV/70-fman-port-order.rules" << 'RULES'
-# Mono Gateway LS1046A — remap FMan MACs to match physical port order (left to right)
-# Without this, mainline driver probes in DT address order: e2000=eth0 (rightmost)
-SUBSYSTEM=="net", ATTR{device_addr}=="1ae8000", NAME="eth0"
-SUBSYSTEM=="net", ATTR{device_addr}=="1aea000", NAME="eth1"
-SUBSYSTEM=="net", ATTR{device_addr}=="1ae2000", NAME="eth2"
-SUBSYSTEM=="net", ATTR{device_addr}=="1af0000", NAME="eth3"
-SUBSYSTEM=="net", ATTR{device_addr}=="1af2000", NAME="eth4"
-RULES
+          printf '%s\n' \
+            '# Mono Gateway LS1046A - remap FMan MACs to match physical port order (left to right)' \
+            '# Without this, mainline driver probes in DT address order: e2000=eth0 (rightmost)' \
+            'SUBSYSTEM=="net", ATTR{device_addr}=="1ae8000", NAME="eth0"' \
+            'SUBSYSTEM=="net", ATTR{device_addr}=="1aea000", NAME="eth1"' \
+            'SUBSYSTEM=="net", ATTR{device_addr}=="1ae2000", NAME="eth2"' \
+            'SUBSYSTEM=="net", ATTR{device_addr}=="1af0000", NAME="eth3"' \
+            'SUBSYSTEM=="net", ATTR{device_addr}=="1af2000", NAME="eth4"' \
+            > "$UDEV/70-fman-port-order.rules"
 
       - name: Build Image Packages
         run: |
@@ -228,18 +233,23 @@ RULES
 
             [ $package == "keepalived" ] && apt-get remove -y libsnmp-dev
 
-            ### Build mainline LS1046A DTB from kernel source (before cleanup)
+            ### Build Mono Gateway DTB from kernel source (before cleanup)
             if [ "$package" == "linux-kernel" ]; then
               KSRC=$(find . -maxdepth 1 -type d -name 'linux-*' | head -1)
               if [ -n "$KSRC" ] && [ -d "$KSRC/arch/arm64/boot/dts/freescale" ]; then
-                echo "### Building mainline LS1046A RDB DTB from $KSRC"
-                make -C "$KSRC" dtbs 2>&1 | tail -5 || true
-                RDB_DTB="$KSRC/arch/arm64/boot/dts/freescale/fsl-ls1046a-rdb.dtb"
-                if [ -f "$RDB_DTB" ]; then
-                  cp "$RDB_DTB" "$GITHUB_WORKSPACE/data/dtb/fsl-ls1046a-rdb.dtb"
-                  echo "### Mainline RDB DTB built: $(ls -la $GITHUB_WORKSPACE/data/dtb/fsl-ls1046a-rdb.dtb)"
+                echo "### Building Mono Gateway DTB from kernel source"
+                # Copy our custom DTS into the kernel tree
+                cp "$GITHUB_WORKSPACE/data/dtb/mono-gateway-dk.dts" \
+                   "$KSRC/arch/arm64/boot/dts/freescale/mono-gateway-dk.dts"
+                # Build it using the kernel's DTS infrastructure
+                make -C "$KSRC" freescale/mono-gateway-dk.dtb 2>&1 | tail -10 || true
+                MONO_DTB="$KSRC/arch/arm64/boot/dts/freescale/mono-gateway-dk.dtb"
+                if [ -f "$MONO_DTB" ]; then
+                  # Replace the SDK-extracted DTB with our mainline-compiled one
+                  cp "$MONO_DTB" "$GITHUB_WORKSPACE/vyos-build/data/live-build-config/includes.binary/mono-gw.dtb"
+                  echo "### Mono Gateway DTB compiled: $(stat -c '%s bytes' "$MONO_DTB")"
                 else
-                  echo "WARNING: fsl-ls1046a-rdb.dtb not found after build"
+                  echo "WARNING: mono-gateway-dk.dtb build failed, keeping SDK DTB"
                   ls "$KSRC/arch/arm64/boot/dts/freescale/"*.dtb 2>/dev/null | head -5 || true
                 fi
               fi
