@@ -510,16 +510,22 @@ sudo fw_printenv vyos_direct | grep vyos-union
 
 ## Network Interfaces
 
-| Port | Position | VyOS name | Notes |
-|------|----------|-----------|-------|
-| 1 | Leftmost | `eth0` | Recommended management port |
-| 2 | | `eth1` | |
-| 3 | | `eth2` | |
-| 4 | | `eth3` | |
-| 5 | Rightmost | `eth4` | |
+> ⚠️ **Physical port order does NOT match ethN numbering.** The PCB routes
+> FMan MACs to RJ45 jacks in reverse address order. Use the table below.
 
-All five ports are NXP DPAA1/FMan. MAC addresses are unique per board —
-read from the board label or `show interfaces`.
+| Physical Position | Type | VyOS name | MAC (board #308) | DT Node | Notes |
+|-------------------|------|-----------|-------------------|---------|-------|
+| Port 1 (leftmost) | RJ45 | `eth1` | `E8:F6:D7:00:15:FF` | `1ae8000` | Recommended management port |
+| Port 2 (center) | RJ45 | `eth2` | `E8:F6:D7:00:16:00` | `1aea000` | |
+| Port 3 (right RJ45) | RJ45 | `eth0` | `E8:F6:D7:00:16:01` | `1ae2000` | |
+| SFP1 | SFP+ | `eth3` | `E8:F6:D7:00:16:02` | `1af0000` | 10GBase-R, fixed-link |
+| SFP2 | SFP+ | `eth4` | `E8:F6:D7:00:16:03` | `1af2000` | 10GBase-R, fixed-link |
+
+All five ports are NXP DPAA1/FMan MEMAC. MAC addresses are unique per board —
+yours will differ. Read from the board label or `show interfaces`.
+
+**SFP ports:** Always report "Link is Up — 10Gbps/Full" because the DTB uses
+`fixed-link` (no PHY polling). Link state does not reflect transceiver presence.
 
 ---
 
