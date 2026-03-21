@@ -6,7 +6,7 @@ Technical analysis of what breaks when you put a generic VyOS ARM64 ISO on NXP L
 
 "Generic ARM64" is a kernel configuration covering Raspberry Pi, AWS Graviton, Apple M-series guests, and Qualcomm server silicon -- via `make defconfig` plus whatever the maintainer cared about last Tuesday. It does not cover QorIQ Layerscape. Not because the drivers don't exist (they've been in mainline Linux since 4.14), but because nobody building VyOS for cloud VMs needed DPAA1 Ethernet or Freescale eSDHC. The config symbols sit in the kernel source, untouched.
 
-Three things kill the generic ARM64 ISO on this board. All three are kernel configuration.
+Five things kill the generic ARM64 ISO on this board. All five are kernel configuration.
 
 ### 1. No eMMC
 
@@ -33,11 +33,15 @@ Zero interfaces. A router with no interfaces is a very expensive space heater.
 
 The generic ARM64 image hardcodes `console=ttyAMA0,115200` (PL011 UART -- Raspberry Pi, QEMU virt, ARM Juno). The LS1046A speaks 8250 on `ttyS0`. You get a kernel that boots in complete silence.
 
+### 4. CPU Stuck at 700 MHz
+
+The upstream VyOS kernel ships `CONFIG_QORIQ_CPUFREQ=m` (module). The module loads at T+28s, but the clock framework runs `clk: Disabling unused clocks` at T+12s. By the time the cpufreq module initializes, only `cg-pll2-div2` (700 MHz) is available as a CMUX parent. The CPU is locked at **39% of maximum speed** (700 MHz instead of 1800 MHz).
+
 ---
 
 ## The Fixes
 
-Three targeted modifications to `vyos-build`. Nothing else.
+Five targeted modifications to `vyos-build`. Nothing else.
 
 ### Fix 1: Enable eSDHC Driver
 
@@ -60,6 +64,8 @@ CONFIG_FSL_FMAN=y
 CONFIG_FSL_DPAA=y
 CONFIG_FSL_DPAA_ETH=y
 CONFIG_FSL_DPAA_MACSEC=y
+CONFIG_FSL_XGMAC_MDIO=y
+CONFIG_PHY_FSL_LYNX_28G=y
 CONFIG_FSL_BMAN=y
 CONFIG_FSL_QMAN=y
 CONFIG_FSL_PAMU=y
@@ -76,6 +82,29 @@ sed -i 's/ttyAMA0/ttyS0/g' \
 ```
 
 U-Boot bootargs also set `console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500`.
+
+### Fix 4: CPU Frequency Scaling
+
+```text
+CONFIG_QORIQ_CPUFREQ=y                          # built-in, claims PLLs before clk cleanup
+CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y        # router: always max frequency
+# CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL is not set
+```
+
+Building the cpufreq driver as `=y` (built-in) ensures it registers with the clock mux before `late_initcall` disables unused clock parents. Confirmed: raid6 neonx8 jumped from 2056→4816 MB/s (2.3× improvement).
+
+### Fix 5: Maxlinear GPY115C PHY Driver
+
+The board uses three Maxlinear GPY115C PHYs (PHY ID `0x67C9DF10`) for the RJ45 SGMII ports. Without the proper driver, the kernel falls back to "Generic PHY" — which lacks the GPY-specific SGMII auto-negotiation re-trigger logic. The GPY2xx has a hardware design constraint where SGMII AN between PHY and MAC is only triggered on speed *change*. If the link partner's speed is unchanged after a link down/up cycle, no new in-band message flows from PHY to MAC, and the link never comes up. The Generic PHY driver cannot work around this.
+
+```text
+CONFIG_HWMON=y                          # dependency for MAXLINEAR_GPHY
+CONFIG_MAXLINEAR_GPHY=y                 # Maxlinear GPY115/211/215 PHY driver (mxl-gpy.c)
+```
+
+This ensures all three RJ45 PHYs bind to `mxl-gpy` instead of `genphy`, enabling proper SGMII AN re-trigger on link events. Previously, eth2 (center RJ45, MAC `1aea000`, PHY `1afd000:01`) never established link because its initial SGMII AN failed and Generic PHY could not retry.
+
+> **Hardware confirmed working:** OpenWrt's factory configuration had all three RJ45 ports as `br-lan` members — eth0, eth1, and eth2 all carried traffic. The NXP SDK DPAA driver (`fsl_dpa`) handles GPY115C PHY initialization differently, which is why eth2 worked under OpenWrt but not under VyOS's mainline `fsl_dpaa_eth` with Generic PHY.
 
 ---
 
@@ -154,7 +183,7 @@ kernel/drivers/tty/serial/8250/8250_fsl.ko
 
 **FMan microcode:**
 
-The Frame Manager requires firmware: a microcode blob loaded from `mtd4` (the `fman-ucode` NOR flash partition, 1 MB) at offset `0x400000` in SPI flash. The DTB correctly describes the MTD layout including `fman-ucode`. On the VyOS side, `CONFIG_FW_LOADER=y` is already enabled -- the microcode loads from flash automatically.
+The Frame Manager requires firmware: a microcode blob loaded from `mtd4` (the `fman-ucode` NOR flash partition, 1 MB) at offset `0x400000` in SPI flash. U-Boot injects this into the DTB before kernel handoff. The kernel does NOT load FMan firmware via `request_firmware()` -- no `/lib/firmware/` files are needed.
 
 **MDIO and PCS (the hidden dependency):**
 
@@ -173,6 +202,34 @@ Each MAC's DTB node has a `pcsphy-handle` pointing to a PCS device on an MDIO bu
 
 ---
 
+## Ethernet Interface Mapping
+
+> ⚠️ **Physical RJ45 port order is REVERSED from DT node address order (PCB routing).**
+
+Verified by cable-plug testing on board #308, eMMC installed boot:
+
+| Physical Position | Type | VyOS name | MAC Address | DT Node | PHY |
+|-------------------|------|-----------|-------------|---------|-----|
+| Port 1 (leftmost RJ45) | SGMII | **eth1** | `E8:F6:D7:00:15:FF` | `1ae8000` | MDIO :00 |
+| Port 2 (center RJ45) | SGMII | **eth2** | `E8:F6:D7:00:16:00` | `1aea000` | MDIO :01 |
+| Port 3 (right RJ45) | SGMII | **eth0** | `E8:F6:D7:00:16:01` | `1ae2000` | MDIO :02 |
+| SFP1 (left cage) | 10GBase-R | **eth3** | `E8:F6:D7:00:16:02` | `1af0000` | fixed-link |
+| SFP2 (right cage) | 10GBase-R | **eth4** | `E8:F6:D7:00:16:03` | `1af2000` | fixed-link |
+
+- Leftmost RJ45 = **eth1** (NOT eth0). Port 3 (rightmost) = **eth0**.
+- SFP ports always show "Link is Up — 10Gbps/Full" with fixed-link, regardless of transceiver presence.
+- All 5 interfaces probe at T+12.2s during kernel boot.
+- The rename dance: kernel assigns eth0-4 → udev renames to e2-e6 → `net.ifnames=0` bootarg renames back to eth0-4 (final order identical to probe order).
+- **eth1** (leftmost, MAC :15:FF) is the recommended management port.
+
+> **OpenWrt uses different naming:** The [official Mono Gateway docs](https://github.com/we-are-mono/meta-mono)
+> list left-to-right as eth0, eth1, eth2 — this is the NXP SDK DPAA driver (`fsl_dpa`) probe order.
+> VyOS uses mainline `fsl_dpaa_eth` which probes in DT address order, producing the reversed mapping above.
+> The NXP SDK also uses udev rules (`72-fsl-dpaa-persistent-networking.rules`) mapping addresses to
+> `fm1-mac1` through `fm1-mac10` — `1aea000` = `fm1-mac6`.
+
+---
+
 ## Serial Console: PL011 vs 8250
 
 The LS1046A serial UART is an 8250-compatible device at MMIO address `0x21c0500`, IRQ 57, base baud 18,750,000 Hz. It registers as `ttyS0`. The earlycon probe string is:
@@ -182,6 +239,8 @@ earlycon=uart8250,mmio,0x21c0500
 ```
 
 The upstream `vyos-build` changed the default console from `ttyS0` to `ttyAMA0` (PL011, ARM AMBA) -- correct for Raspberry Pi 4 and QEMU, but produces zero output on LS1046A. After the console handoff, the live-boot initrd and all subsequent output go to `ttyAMA0`, which does not exist. Silence.
+
+**CONFIG_SERIAL_OF_PLATFORM is critical:** This config option (maps to `drivers/tty/serial/8250/8250_of.c`) enables the DT-based 8250 platform driver needed for the LS1046A's `serial@21c0500` node. Without it, `earlycon` works (direct hardware access) but `/dev/ttyS0` is never created. Init's final `exec run-init ... < ${rootmnt}/dev/console` fails → init exits → kernel panic. The config symbol `CONFIG_SERIAL_8250_OF` does NOT exist — it must be `CONFIG_SERIAL_OF_PLATFORM`.
 
 ---
 
@@ -193,16 +252,14 @@ Power on
     RCW + BL2 (mtd1: rcw-bl2, 1 MB)
       BL31 / ATF (EL3 runtime, PSCI)
         U-Boot (mtd2: uboot, 2 MB) [EL2]
-          bootcmd = "run emmc || run vyos || run recovery"
+          bootcmd = "run vyos_direct || run recovery"
           |
-          +-- emmc:     ext4load mmc 0:1 -> OpenWrt (mmcblk0p1)
+          +-- vyos_direct: ext4load mmc 0:3 -> VyOS (mmcblk0p3)
+          |                loads: vmlinuz, mono-gw.dtb, initrd.img
+          |                IMPORTANT: initrd must be loaded LAST
+          |                so ${filesize} is correct for booti
           |
-          +-- vyos:     ext4load mmc 0:2 -> VyOS (mmcblk0p2)
-          |             loads: vmlinuz, mono-gw.dtb, initrd.img
-          |             IMPORTANT: initrd must be loaded LAST
-          |             so ${filesize} is correct for booti
-          |
-          +-- recovery: sf read from mtd7 -> recovery kernel
+          +-- recovery:    sf read from mtd7 -> recovery kernel
 ```
 
 **U-Boot `${filesize}` gotcha:** Each `ext4load` overwrites the `${filesize}` variable. The `booti` command uses `${ramdisk_addr_r}:${filesize}` to tell the kernel the initrd size. If DTB is loaded after initrd, `${filesize}` = DTB size (94KB) instead of initrd size (~33MB), causing "ZSTD-compressed data is truncated" kernel panic.
@@ -232,21 +289,21 @@ mtd7  kernel-initramfs 22 MB Recovery kernel+initramfs (fallback)
 mtd8  unallocated      32 MB
 ```
 
-`fw_printenv` requires `/etc/fw_env.config` pointing at `mtd3`. Without it, U-Boot environment is read-only from Linux.
+`fw_printenv` requires `/etc/fw_env.config` pointing at `/dev/mtd3`. Without it, U-Boot environment is read-only from Linux. Config: `/dev/mtd3 0x0 0x20000 0x20000`.
 
 ---
 
-## eMMC Layout
+## eMMC Layout (After `install image`)
 
 ```
-mmcblk0       ~29.6 GB total
-+-- mmcblk0p1  ~511 MB   OpenWrt root (ext4) -- factory OS
-+-- mmcblk0p2  ~29.1 GB  VyOS (ext4)
-+-- mmcblk0boot0  32 MB  hardware boot partition (unused)
-+-- mmcblk0boot1  32 MB  hardware boot partition (unused)
+mmcblk0       ~29.6 GB total (GPT)
++-- mmcblk0p1     1 MB    BIOS Boot  (EF02)  raw, no filesystem
++-- (16 MB gap)           bootloader clearance (our patch)
++-- mmcblk0p2   256 MB    EFI System (EF00)  FAT32, GRUB (unused — bootefi broken)
++-- mmcblk0p3  29.4 GB    Linux root (8300)  ext4, VyOS squashfs + data
 ```
 
-The hardware boot partitions are not used by U-Boot on this board.
+> **Factory layout (before install):** mmcblk0p1 = 511 MB OpenWrt root (ext4), mmcblk0p2 = rest empty. `install image` destroys this. No recovery back to OpenWrt without reflashing eMMC.
 
 ---
 
@@ -303,10 +360,9 @@ The DPAA Ethernet driver (`dpaa_eth.c`) does NOT use OF matching. It
 expects `fman_mac.c` to create `"dpaa-ethernet"` platform devices
 programmatically. The SDK's `"fsl,dpaa"` bus node is irrelevant to mainline.
 
-**Testing strategy:** Boot with the mainline `fsl-ls1046a-rdb.dtb` (compiled
-from kernel source, included in recent builds). If networking works with the
-RDB DTB, a custom DTS file based on mainline `fsl-ls1046a.dtsi` and
-`qoriq-fman3-0.dtsi` includes is needed for the Mono Gateway.
+Despite the SDK-format DTB, networking works because the FMan driver finds
+the essential nodes (`fsl,fman`, MAC subnodes, MDIO buses) and ignores
+the unrecognized SDK extensions.
 
 ---
 
@@ -327,10 +383,10 @@ sysclk (100 MHz oscillator)
 │   └── div4 = 400 MHz
 ├── cg-pll2 (CGA PLL2)
 │   ├── div1 = 1400 MHz  (hwaccel1)
-│   ├── div2 = 700 MHz   ← current CPU clock (too slow!)
+│   ├── div2 = 700 MHz   ← minimum CPU clock
 │   ├── div3 = 466 MHz
 │   └── div4 = 350 MHz
-└── cg-cmux0 → cg-pll2-div2 (700 MHz)
+└── cg-cmux0 → cg-pll1-div1 (1600 MHz) ← FIXED ✅
     ├── cpu@0 .. cpu@3
     └── cg-hwaccel0 → FMan
 ```
@@ -346,15 +402,6 @@ The `t1040_cmux` mux definition in `clk-qoriq.c` (used for LS1046A) allows 4 par
 
 **The bug:** The upstream VyOS kernel ships `CONFIG_QORIQ_CPUFREQ=m` (module). The module loads at T+28s, but the clock framework runs `clk: Disabling unused clocks` at T+12s. By the time the cpufreq module initializes, only `cg-pll2-div2` (700 MHz) is available as a CMUX parent. The CPU is locked at **39% of maximum speed**.
 
-```
-# Observed on live system:
-scaling_cur_freq:              700000   (700 MHz)
-scaling_available_frequencies: 700000   (only one!)
-cpuinfo_max_freq:              700000
-scaling_governor:              performance (stuck at 700 MHz)
-scaling_driver:                qoriq_cpufreq
-```
-
 **The fix:** Two kernel config changes:
 
 ```text
@@ -362,7 +409,47 @@ CONFIG_QORIQ_CPUFREQ=y                          # built-in, claims PLLs before c
 CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y        # router: always max frequency
 ```
 
-Building the cpufreq driver as `=y` (built-in) ensures it registers with the clock mux before `late_initcall` disables unused clock parents. Setting the default governor to `performance` is appropriate for a network router (no power-saving needed).
+Building the cpufreq driver as `=y` (built-in) ensures it registers with the clock mux before `late_initcall` disables unused clock parents. Setting the default governor to `performance` is appropriate for a network router (no power-saving needed). Confirmed working: raid6 neonx8 jumped from 2056→4816 MB/s (2.3×).
+
+---
+
+## Boot Optimizations
+
+### Services Masked in ISO
+
+The build workflow masks unnecessary services via symlinks to `/dev/null` in `includes.chroot/etc/systemd/system/`:
+
+| Service | Why masked | Savings |
+|---------|-----------|---------|
+| `kexec-load.service` | Prevents loading kexec kernel at boot | Minor |
+| `kexec.service` | Prevents kexec reboot trigger | Minor |
+| `acpid.service` | No ACPI on ARM64/DeviceTree | ~2s |
+| `acpid.socket` | No ACPI on ARM64/DeviceTree | — |
+| `acpid.path` | No ACPI on ARM64/DeviceTree | — |
+
+### Kernel Config Optimizations
+
+| Config | Effect | Savings |
+|--------|--------|---------|
+| `# CONFIG_DEBUG_PREEMPT is not set` | Suppresses `smp_processor_id()` BUG spam | ~20s |
+| `CONFIG_QORIQ_CPUFREQ=y` | CPU runs at 1.8 GHz instead of 700 MHz | 2.3× throughput |
+
+### Kexec Double-Boot (USB Live Only)
+
+USB live boot triggers a kexec reboot after first config mount — this is normal VyOS live-boot behavior, NOT a bug. `vyos-router` itself triggers the reboot via `kexec.target` (a built-in systemd target, different from the masked `kexec.service`). The ~70s penalty is a one-time cost during initial USB install only. **Installed systems boot in ~82s with no kexec.**
+
+### Boot Timeline (Installed System)
+
+```
+T+0.0s   Kernel start
+T+0.8s   4 CPUs online, BMan/QMan portals initialized
+T+12.2s  Serial driver replaces earlycon, 5 FMan MACs probed
+T+12.6s  Clocks claimed, cpufreq driver registered
+T+17.5s  systemd starts
+T+26.8s  VyOS Router service starts
+T+41.2s  NICs settled, config mounted
+T+81.3s  Config migration + success, login prompt
+```
 
 ---
 
@@ -388,6 +475,8 @@ CONFIG_PHY_FSL_LYNX_28G=y      # Lynx 28G SerDes PHY -- PCS for SGMII/QSGMII/XFI
 CONFIG_FSL_BMAN=y               # Buffer Manager
 CONFIG_FSL_QMAN=y               # Queue Manager
 CONFIG_FSL_PAMU=y               # IOMMU for DMA isolation
+CONFIG_HWMON=y                  # hardware monitoring (dependency for MAXLINEAR_GPHY)
+CONFIG_MAXLINEAR_GPHY=y         # Maxlinear GPY115C PHY driver (mxl-gpy.c) -- SGMII AN re-trigger
 CONFIG_MMC_SDHCI_OF_ESDHC=y     # eMMC controller
 CONFIG_FSL_EDMA=y               # DMA engine (eSDHC HS200)
 CONFIG_SERIAL_OF_PLATFORM=y     # 8250 UART device tree probe (8250_of.c)
@@ -399,6 +488,7 @@ CONFIG_CDX_BUS=y                # CDX bus (DPAA dependency)
 # CONFIG_DEBUG_PREEMPT is not set  # suppress smp_processor_id() BUG spam on Cortex-A72
 CONFIG_QORIQ_CPUFREQ=y          # QorIQ CPU frequency scaling (built-in, not module)
 CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y  # router: always max frequency
+# CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL is not set
 ```
 
 > **Why `QORIQ_CPUFREQ=y`:** The upstream VyOS kernel ships this as `=m` (module).
@@ -409,8 +499,24 @@ CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y  # router: always max frequency
 
 ---
 
+## Cosmetic Boot Messages (Ignore)
+
+| Message | Cause | Impact |
+|---------|-------|--------|
+| `smp_processor_id() in preemptible code: python3` | `PREEMPT_DYNAMIC` on Cortex-A72 | Suppressed by `CONFIG_DEBUG_PREEMPT=n` |
+| `could not generate DUID ... failed!` | No persistent machine-id on live boot | Expected, harmless |
+| `WARNING failed to get smmu node: FDT_ERR_NOTFOUND` | DTB lacks SMMU/IOMMU nodes | Harmless |
+| `PCIe: no link` / `disabled` | No PCIe devices on board | Normal |
+| `bridge: filtering via arp/ip/ip6tables is no longer available` | `br_netfilter` not loaded | VyOS loads it when needed |
+
+---
+
 ## See Also
 
 - [INSTALL.md](INSTALL.md) -- step-by-step installation guide
+- [boot.efi.md](boot.efi.md) -- U-Boot reference: memory map, boot commands, hardware details
 - [README.md](README.md) -- project overview
-- [Mono Gateway Getting Started](https://github.com/ryneches/mono-gateway-docs/blob/master/gateway-development-kit/getting-started.md) -- factory setup, serial console, Recovery Linux
+- [Mono Gateway Getting Started](https://github.com/we-are-mono/meta-mono/blob/master/gateway-development-kit/getting-started.md) -- factory setup, serial console, Recovery Linux
+- [Mono Gateway Hardware Description](https://github.com/we-are-mono/meta-mono/blob/master/gateway-development-kit/hardware-description.md) -- port pinouts, GPIO, M.2, fan headers, PCB dimensions
+- [NXP LS1046A DPDK/VPP Development](https://github.com/we-are-mono/meta-mono/blob/master/tutorials/development-set-up.md) -- cross-compilation for DPAA acceleration
+- [NXP SDK kernel](https://github.com/nxp-qoriq/linux) -- NXP's fork with DPAA extensions (branch `lf-6.6.3-1.0.0`)
