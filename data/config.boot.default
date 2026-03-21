@@ -63,3 +63,8 @@ interfaces {
     loopback lo {
     }
 }
+
+service {
+    ssh {
+    }
+}

@@ -140,6 +140,8 @@ jobs:
             'CONFIG_FSL_BMAN=y' \
             'CONFIG_FSL_QMAN=y' \
             'CONFIG_FSL_PAMU=y' \
+            'CONFIG_HWMON=y' \
+            'CONFIG_MAXLINEAR_GPHY=y' \
             'CONFIG_MMC_SDHCI_OF_ESDHC=y' \
             'CONFIG_FSL_EDMA=y' \
             'CONFIG_SERIAL_OF_PLATFORM=y' \
@@ -324,11 +326,8 @@ jobs:
             --custom-package ncdu \
             --custom-package fastnetmon \
             --custom-package containernetworking-plugins \
-            --custom-package qemu-guest-agent \
             --custom-package mokutil \
-            --custom-package sbsigntool \
             --custom-package grub-efi-arm64-signed \
-            --custom-package shim-signed \
             generic
           cd build
           # Rename generic -> LS1046A in artifact filenames
