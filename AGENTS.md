@@ -18,7 +18,7 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Single 
 - **Two boot paths exist:** (1) `dd` live-boot to `mmcblk0p2` — no install step, squashfs+overlay, `ext4load mmc 0:2`; (2) `install image` creates GPT with p1=BIOS boot (1MiB), 16MiB gap, p2=EFI (256MiB FAT32), p3=root (ext4) — completely different partition layout and boot command
 - **USB boot uses FAT, eMMC uses ext4:** `fatload usb 0:1` vs `ext4load mmc 0:2` — different U-Boot commands. Rufus "ISO Image mode" creates FAT32 on USB.
 - **`bootefi` fails with OOM:** `ramdisk_addr_r` (0x88080000) is only 512KB above `fdt_addr_r` (0x88000000). U-Boot EFI memory pool too small for GRUB-EFI (990KB + runtime).
-- **kexec double-boot (DISABLED):** VyOS ISO includes a kexec service that reboots the kernel during first boot, wasting ~70s and causing interface renames (eth0→e2). Both `kexec-load.service` and `kexec.service` are now masked via symlinks to `/dev/null` in `includes.chroot/etc/systemd/system/`. If re-enabled, watch for `e2`–`e6` interface names in dmesg.
+- **kexec double-boot (LIVE-BOOT ONLY):** USB live boot always does a kexec reboot after first config mount — this is normal VyOS live-boot behavior, NOT a bug. First boot establishes the squashfs+overlay, config loading triggers a reboot, second boot succeeds with migration. `kexec-load.service` and `kexec.service` are masked but the reboot is triggered by `vyos-router` itself reaching `kexec.target`. Does NOT affect installed systems (after `install image` to eMMC). The ~70s penalty is a one-time cost during initial USB install only.
 - **eMMC layout (after `install image`):** GPT with p1=BIOS boot (1MiB), 16MiB gap, p2=EFI (256MiB FAT32, GRUB), p3=Linux root (ext4, VyOS). OpenWrt is destroyed. Use `install image` from USB live session.
 - **FMan firmware:** U-Boot injects from SPI flash `mtd4` into DTB before kernel boot. Not loaded via `request_firmware()`, no `/lib/firmware/` files needed
 - **Builder image:** Use `ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64` — do NOT fork or rebuild
@@ -34,7 +34,7 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Single 
 - **linux-headers stripped:** `rm -rf packages/linux-headers-*` before ISO build to save space on the runner
 - **Secure Boot chain:** MOK.pem/MOK.key for kernel module signing, minisign for ISO signing, `grub-efi-arm64-signed` + `shim-signed` packages included
 - **Weekly schedule:** Cron runs Friday 01:00 UTC. Also triggered manually via `workflow_dispatch`
-- **Boot optimizations:** `kexec-load.service`, `kexec.service`, `acpid.service`, `acpid.socket`, `acpid.path` are masked in the ISO via symlinks to `/dev/null`. Saves ~70s (kexec) + ~2s (ACPI). Combined with `CONFIG_DEBUG_PREEMPT` suppression (~20s), total boot time drops from ~222s to ~100-130s
+- **Boot optimizations:** `kexec-load.service`, `kexec.service`, `acpid.service`, `acpid.socket`, `acpid.path` are masked in the ISO via symlinks to `/dev/null`. ACPI masking saves ~2s. kexec masking reduces load-at-boot but does NOT prevent the live-boot kexec reboot (see above). `CONFIG_DEBUG_PREEMPT` suppression saves ~20s. Installed system boot time: ~82s to login prompt.
 
 ## Boot Diagnostics (Ignore These)
 
@@ -47,7 +47,7 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Single 
 
 | File | Purpose |
 |------|---------|
-| `.github/workflows/auto-build.yml` | THE build — kernel config overrides, ISO creation, eMMC image, release |
+| `.github/workflows/auto-build.yml` | THE build — kernel config overrides, ISO creation, release |
 | `data/config.boot.default` | Default VyOS config baked into ISO (NO comments allowed inside blocks!) |
 | `data/config.boot.dhcp` | Alternative DHCP-enabled boot config |
 | `data/dtb/mono-gw.dtb` | Device tree blob for Mono Gateway hardware (extracted from live OpenWrt, 94KB) |
