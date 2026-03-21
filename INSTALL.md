@@ -252,18 +252,22 @@ The image installed successfully.
 Before rebooting, ensure any required bootloader (e.g. U-Boot) is written to the disk.
 ```
 
-**Do not reboot yet.**
+**Do not reboot yet.** If you reboot now, U-Boot will fail to find `mono-gw.dtb`
+and fall through to recovery Linux. See the **Recovery Rescue** section below
+if this happens.
 
 ---
 
 ## Step 8 — Post-Install Fixes
 
-Three things must be done before the first eMMC boot.
+Three things must be done before the first eMMC boot. **Step 8a is mandatory** —
+without the DTB, VyOS will not boot from eMMC.
 
-### 8a. Copy DTB to eMMC
+### 8a. Copy DTB to eMMC (MANDATORY)
 
 U-Boot loads the kernel and initrd from eMMC p3 but has no access to the squashfs.
 It needs `mono-gw.dtb` in the boot image directory on p3, loaded via `ext4load mmc 0:3`.
+**Without this file, U-Boot cannot boot VyOS and falls to recovery Linux.**
 
 The DTB source is `/sys/firmware/fdt` — the live, U-Boot-patched device tree that
 describes the full 8 GB memory map. It is always available in any running Linux
@@ -285,8 +289,10 @@ sudo sync
 echo "DTB copied."
 ```
 
-> The DTB at `/sys/firmware/fdt` is the same blob U-Boot uses at every boot —
-> it has the correct memory nodes for this specific board unit. No USB required.
+> **Why `/sys/firmware/fdt`?** This is the exact DTB blob that U-Boot passed to
+> the currently running kernel. It contains the full 8 GB memory map and all
+> hardware nodes specific to this board unit. It is always present — in VyOS
+> live boot, recovery Linux, or installed VyOS. No USB required.
 
 ### 8b. Fix GRUB Console Settings
 
@@ -421,10 +427,24 @@ ping 8.8.8.8 count 3
 
 ## Recovery Rescue: DTB Missing After Reboot
 
-If you rebooted before running Step 8 and now land in recovery Linux with
-`Failed to load '...mono-gw.dtb'` on the serial console:
+If you rebooted before running Step 8a (copy DTB), U-Boot will fail to boot
+VyOS. The serial console shows:
 
-Log in as `root` (no password) and run:
+```
+9208868 bytes read in 381 ms (23.1 MiB/s)
+Failed to load '/boot/<image>/mono-gw.dtb'
+33277271 bytes read in 1373 ms (23.1 MiB/s)
+ERROR: Did not find a cmdline Flattened Device Tree
+```
+
+U-Boot falls through to SPI flash recovery Linux and you see:
+
+```
+Mono Recovery Linux 1.0 recovery /dev/ttyS0
+```
+
+Log in as `root` (no password) and copy the DTB from the running kernel's
+device tree:
 
 ```bash
 mkdir -p /tmp/vyos
