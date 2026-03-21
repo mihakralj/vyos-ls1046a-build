@@ -157,18 +157,14 @@ Confirm `mono-gw.dtb` is listed.
 
 ## Step 5 — Boot VyOS Live from USB
 
-At the `=>` prompt, paste these five lines.
+At the `=>` prompt, paste as a single line (or line by line — either works).
 
 > **Version note:** check `fatls usb 0:1 live` for the exact kernel filename
 > and replace `6.6.128-vyos` with whatever version is shown. All four load
 > commands must use the same version string.
 
 ```
-setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda1 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet"
-fatload usb 0:1 ${kernel_addr_r} live/vmlinuz-6.6.128-vyos
-fatload usb 0:1 ${fdt_addr_r} mono-gw.dtb
-fatload usb 0:1 ${ramdisk_addr_r} live/initrd.img-6.6.128-vyos
-booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
+usb start; setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda1 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet"; fatload usb 0:1 ${kernel_addr_r} live/vmlinuz-6.6.128-vyos; fatload usb 0:1 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:1 ${ramdisk_addr_r} live/initrd.img-6.6.128-vyos; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
 ```
 
 **Load order is mandatory.** Each `fatload` overwrites `${filesize}`. The `booti`
@@ -266,29 +262,31 @@ Three things must be done before the first eMMC boot.
 
 ### 8a. Copy DTB to eMMC
 
-U-Boot has no filesystem access to the squashfs. It needs `mono-gw.dtb` placed
-explicitly in two locations:
-- EFI partition (p2): for the `bootefi` path (GRUB), loaded via `fatload mmc 0:2`
-- Boot image directory (p3): for the `booti` direct fallback, loaded via `ext4load mmc 0:3`
+U-Boot loads the kernel and initrd from eMMC p3 but has no access to the squashfs.
+It needs `mono-gw.dtb` in the boot image directory on p3, loaded via `ext4load mmc 0:3`.
+
+The DTB source is `/sys/firmware/fdt` — the live, U-Boot-patched device tree that
+describes the full 8 GB memory map. It is always available in any running Linux
+system on this board (VyOS live, recovery Linux, or installed VyOS).
 
 ```bash
-sudo mkdir -p /mnt/efi /mnt/root
-sudo mount /dev/mmcblk0p2 /mnt/efi
+sudo mkdir -p /mnt/root
 sudo mount /dev/mmcblk0p3 /mnt/root
 
 # Detect installed image name
 IMG=$(ls /mnt/root/boot/ | grep -v grub | grep -v efi | head -1)
 echo "Image name: $IMG"
 
-# Copy to EFI partition root (bootefi path)
-sudo cp /usr/lib/live/mount/medium/mono-gw.dtb /mnt/efi/mono-gw.dtb
-
-# Copy to boot image directory (booti path)
-sudo cp /usr/lib/live/mount/medium/mono-gw.dtb /mnt/root/boot/${IMG}/mono-gw.dtb
+# Copy live U-Boot-patched DTB to boot image directory
+sudo cp /sys/firmware/fdt /mnt/root/boot/${IMG}/mono-gw.dtb
+ls -la /mnt/root/boot/${IMG}/mono-gw.dtb
 
 sudo sync
-echo "DTBs copied."
+echo "DTB copied."
 ```
+
+> The DTB at `/sys/firmware/fdt` is the same blob U-Boot uses at every boot —
+> it has the correct memory nodes for this specific board unit. No USB required.
 
 ### 8b. Fix GRUB Console Settings
 
@@ -357,21 +355,25 @@ reboot
 **Remove the USB drive** as the board restarts. Press any key within 5 seconds
 to reach the U-Boot `=>` prompt.
 
-Paste these four commands. Replace `2026.03.20-2209-rolling` with the actual
+Paste these three commands. Replace `2026.03.20-2209-rolling` with the actual
 image name from Step 8c:
 
 ```
-setenv vyos_efi 'setenv fdt_high 0xffffffffffffffff; fatload mmc 0:2 ${fdt_addr_r} mono-gw.dtb; fatload mmc 0:2 ${kernel_addr_r} EFI/BOOT/BOOTAA64.EFI; bootefi ${kernel_addr_r} ${fdt_addr_r}'
 setenv vyos_direct 'setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin vyos-union=/boot/2026.03.20-2209-rolling"; ext4load mmc 0:3 ${kernel_addr_r} /boot/2026.03.20-2209-rolling/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/2026.03.20-2209-rolling/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/2026.03.20-2209-rolling/initrd.img; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
-setenv bootcmd 'run vyos_efi || run vyos_direct || run recovery'
+setenv bootcmd 'run vyos_direct || run recovery'
 saveenv
 ```
 
-> If `bootefi` OOM persists, `bootcmd` falls through to `vyos_direct` automatically.
-| `vyos_direct` | U-Boot → kernel directly via booti | Fallback; confirmed working; bypasses GRUB |
-| `bootcmd` | EFI first, direct second, recovery third | Automatic fallthrough on failure |
+> **Note:** EFI/GRUB boot (`bootefi`) is permanently broken on this board due to
+> NXP DPAA1 `reserved-memory` nodes in the DTB preventing U-Boot EFI initialization.
+> `vyos_direct` (booti) is the permanent boot method.
 
-Boot:
+| Variable | Purpose |
+|----------|---------|
+| `vyos_direct` | Loads kernel + initrd + DTB directly from eMMC p3 via booti |
+| `bootcmd` | Auto-boot: try vyos_direct, fall to SPI recovery on failure |
+
+Type `boot` or let the countdown finish — both work:
 ```
 boot
 ```
@@ -380,27 +382,23 @@ boot
 
 ## Step 10 — Verify Boot from eMMC
 
-**Via EFI / GRUB (preferred path):**
+Expected serial console output:
 ```
-=> run vyos_efi
-Loading mono-gw.dtb ... 94208 bytes
-Loading EFI/BOOT/BOOTAA64.EFI ... 990600 bytes
-...
-GNU GRUB  version 2.12
-...
+9210147 bytes read in 381 ms (23.1 MiB/s)     <- vmlinuz
+94208 bytes read in 5 ms (18 MiB/s)           <- mono-gw.dtb
+33287447 bytes read in 1373 ms (23.1 MiB/s)   <- initrd.img
+   Uncompressing Kernel Image to 0
+   Loading Ramdisk to f8c42000 ...
+Starting kernel ...
+[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x410fd083]
 [    0.000000] Machine model: Mono Gateway Development Kit
 [    0.000000] Linux version 6.6.128-vyos
 ```
 
-**Via direct booti (fallback path):**
-```
-=> run vyos_direct
-Loading /boot/2026.03.20-2209-rolling/vmlinuz ...
-Loading /boot/2026.03.20-2209-rolling/initrd.img ...
-[    0.000000] Machine model: Mono Gateway Development Kit
-```
+VyOS boots in ~60 seconds. Login: `vyos` / `vyos`.
 
-Both paths produce a fully working VyOS system. Login: `vyos` / `vyos`.
+**If you see `Failed to load '...mono-gw.dtb'` and boot falls to recovery:**
+See the Recovery rescue section below.
 
 ---
 
@@ -421,29 +419,72 @@ ping 8.8.8.8 count 3
 
 ---
 
+## Recovery Rescue: DTB Missing After Reboot
+
+If you rebooted before running Step 8 and now land in recovery Linux with
+`Failed to load '...mono-gw.dtb'` on the serial console:
+
+Log in as `root` (no password) and run:
+
+```bash
+mkdir -p /tmp/vyos
+mount /dev/mmcblk0p3 /tmp/vyos
+IMG=$(ls /tmp/vyos/boot/ | grep -v grub | grep -v efi | head -1)
+echo "Image: $IMG"
+cp /sys/firmware/fdt /tmp/vyos/boot/${IMG}/mono-gw.dtb
+ls -la /tmp/vyos/boot/${IMG}/mono-gw.dtb
+sync
+umount /tmp/vyos
+reboot
+```
+
+`/sys/firmware/fdt` is the live U-Boot-patched DTB — it has the full 8 GB memory
+map and is always present in recovery Linux. No USB required.
+
+After reboot, U-Boot's saved `bootcmd` will autoboot VyOS from eMMC. No need
+to interrupt U-Boot or re-run `setenv` commands — they were already saved to
+SPI flash by `saveenv` in Step 9.
+
+---
+
 ## Future Image Upgrades
 
-Once running from eMMC with GRUB installed, standard VyOS upgrades work:
+Because EFI/GRUB is broken on this board, after each `add system image` you
+must update U-Boot's `vyos_direct` to point to the new image name, and copy
+the DTB into the new image directory.
+
+**Step 1:** Install the new image from running VyOS:
 
 ```
 add system image https://github.com/mihakralj/vyos-ls1046a-build/releases/download/<version>/vyos-<version>-LS1046A-arm64.iso
 ```
 
-GRUB automatically adds the new image to its boot menu. On reboot, both images
-are listed with a 5-second selection timeout.
-
-**After each new image, apply the earlycon fix** (Fixes 1 and 2 persist across
-image additions; only Fix 3 needs repeating for each new image):
+**Step 2:** Copy DTB to new image directory:
 
 ```bash
-# From running VyOS — /boot is the installed partition, no mount needed:
-NEW_IMG=<new-image-name>
-sudo sed -i 's|set boot_opts="boot=live|set boot_opts="earlycon=uart8250,mmio,0x21c0500 boot=live|' \
-    /boot/grub/grub.cfg.d/vyos-versions/${NEW_IMG}.cfg
+NEW=<new-image-name>   # e.g. 2026.04.15-1200-rolling
+sudo cp /sys/firmware/fdt /boot/${NEW}/mono-gw.dtb
 ```
 
+**Step 3:** Update U-Boot to boot the new image.
+
+Setup `fw_env.config` once (tells `fw_setenv` where U-Boot env is on SPI flash):
+
+```bash
+echo "/dev/mtd3 0x0 0x20000 0x20000" | sudo tee /etc/fw_env.config
+```
+
+Then update `vyos_direct`:
+
+```bash
+sudo fw_setenv vyos_direct "setenv bootargs \"console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin vyos-union=/boot/${NEW}\"; ext4load mmc 0:3 \${kernel_addr_r} /boot/${NEW}/vmlinuz; ext4load mmc 0:3 \${fdt_addr_r} /boot/${NEW}/mono-gw.dtb; ext4load mmc 0:3 \${ramdisk_addr_r} /boot/${NEW}/initrd.img; booti \${kernel_addr_r} \${ramdisk_addr_r}:\${filesize} \${fdt_addr_r}"
+sudo fw_printenv vyos_direct | grep vyos-union
+```
+
+**Step 4:** Reboot.
+
 > **Use only ISOs from this repository** — generic ARM64 ISOs lack the LS1046A
-> kernel drivers and will fail to find the eMMC.
+> kernel drivers.
 
 ---
 
@@ -478,9 +519,8 @@ Verify `printenv bootargs` contains `earlycon=uart8250,mmio,0x21c0500`.
 Fix 1 or Fix 2 from Step 8b was not applied, or the install was done with `K`
 (KVM) console. Boot from USB again, mount mmcblk0p3, and apply the sed commands.
 
-**`bootefi` fails with "out of memory"**
-Known issue — see [boot.efi.md](boot.efi.md). The `vyos_direct` fallback in
-`bootcmd` handles this automatically. To test the fix: `setenv fdt_high 0xffffffffffffffff; run vyos_efi`.
+**`Failed to load '...mono-gw.dtb'` — falls to recovery**
+DTB was not copied in Step 8a. See the Recovery Rescue section above.
 
 **No networking after boot (eth0–eth4 missing)**
 Wrong ISO (generic ARM64 without DPAA1 drivers). Use only ISOs from this repo.
