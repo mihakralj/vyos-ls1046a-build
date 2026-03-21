@@ -186,6 +186,22 @@ jobs:
           mkdir -p vyos-build/data/live-build-config/includes.binary
           cp data/dtb/mono-gw.dtb vyos-build/data/live-build-config/includes.binary/mono-gw.dtb
 
+          ### DTB inside squashfs: install_image() copies all files from /boot/
+          # By placing the DTB at /boot/mono-gw.dtb inside the squashfs, VyOS's
+          # install_image() automatically copies it to the target boot directory.
+          # This requires ZERO changes to upstream image_installer.py.
+          CHROOT=vyos-build/data/live-build-config/includes.chroot
+          mkdir -p "$CHROOT/boot"
+          cp data/dtb/mono-gw.dtb "$CHROOT/boot/mono-gw.dtb"
+
+          ### U-Boot tools: fw_setenv config for updating boot env from Linux
+          cp data/scripts/fw_env.config "$CHROOT/etc/fw_env.config"
+
+          ### Post-install helper: copies DTB + updates U-Boot env after install/upgrade
+          mkdir -p "$CHROOT/usr/local/bin"
+          cp data/scripts/vyos-postinstall "$CHROOT/usr/local/bin/vyos-postinstall"
+          chmod +x "$CHROOT/usr/local/bin/vyos-postinstall"
+
           ### Boot optimization: mask unnecessary services for LS1046A
           # kexec double-boot wastes ~70s: first boot runs fully, then reboots via kexec
           # Disabling kexec also fixes interface renames (eth0→e2) caused by second boot
@@ -247,6 +263,8 @@ jobs:
                 if [ -f "$MONO_DTB" ]; then
                   # Replace the SDK-extracted DTB with our mainline-compiled one
                   cp "$MONO_DTB" "$GITHUB_WORKSPACE/vyos-build/data/live-build-config/includes.binary/mono-gw.dtb"
+                  # Also copy into squashfs (/boot/) so install_image() auto-copies it
+                  cp "$MONO_DTB" "$GITHUB_WORKSPACE/vyos-build/data/live-build-config/includes.chroot/boot/mono-gw.dtb"
                   echo "### Mono Gateway DTB compiled: $(stat -c '%s bytes' "$MONO_DTB")"
                 else
                   echo "WARNING: mono-gateway-dk.dtb build failed, keeping SDK DTB"
@@ -353,6 +371,7 @@ jobs:
             --custom-package containernetworking-plugins \
             --custom-package mokutil \
             --custom-package grub-efi-arm64-signed \
+            --custom-package u-boot-tools \
             generic
           cd build
           # Rename generic -> LS1046A in artifact filenames
