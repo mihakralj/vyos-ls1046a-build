@@ -31,7 +31,7 @@ jobs:
     permissions:
       contents: write
     container:
-      image: ${{ github.event.inputs.builder_image }}
+      image: ${{ github.event.inputs.builder_image || 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64' }}
       options: --sysctl net.ipv6.conf.lo.disable_ipv6=0 --privileged --user root
     defaults:
       run:
@@ -148,6 +148,10 @@ jobs:
             'CONFIG_SPI=y' \
             'CONFIG_SPI_FSL_DSPI=y' \
             'CONFIG_CDX_BUS=y' \
+            '# CONFIG_DEBUG_PREEMPT is not set' \
+            'CONFIG_QORIQ_CPUFREQ=y' \
+            'CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y' \
+            '# CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL is not set' \
             >> "$DEFCONFIG"
 
           ### LS1046A console: revert ttyAMA0 -> ttyS0 (8250 UART at 0x21c0500)
@@ -166,6 +170,18 @@ jobs:
           cp data/vyos-ls1046a.minisign.pub vyos-build/data/live-build-config/includes.chroot/usr/share/vyos/keys/
           mkdir -p vyos-build/data/live-build-config/includes.binary
           cp data/dtb/mono-gw.dtb vyos-build/data/live-build-config/includes.binary/mono-gw.dtb
+
+          ### Boot optimization: mask unnecessary services for LS1046A
+          # kexec double-boot wastes ~70s: first boot runs fully, then reboots via kexec
+          # Disabling kexec also fixes interface renames (eth0→e2) caused by second boot
+          SYSD=vyos-build/data/live-build-config/includes.chroot/etc/systemd/system
+          mkdir -p "$SYSD"
+          ln -sf /dev/null "$SYSD/kexec-load.service"
+          ln -sf /dev/null "$SYSD/kexec.service"
+          # ACPI daemon is useless on ARM64/DeviceTree platforms (LS1046A has no ACPI)
+          ln -sf /dev/null "$SYSD/acpid.service"
+          ln -sf /dev/null "$SYSD/acpid.socket"
+          ln -sf /dev/null "$SYSD/acpid.path"
 
       - name: Build Image Packages
         run: |
@@ -323,30 +339,8 @@ jobs:
           else
             echo "fake sign" > ${IMAGE_ISO}.minisig
           fi
-          # Create dd-able eMMC image (ext4 with VyOS files, gzipped)
-          mkdir -p /tmp/iso-mount
-          mount -o loop,ro ${IMAGE_ISO} /tmp/iso-mount || true
-          if [ -d /tmp/iso-mount/live ]; then
-            truncate -s 2G ${IMAGE_NAME}-emmc.img
-            mkfs.ext4 -q -L vyos ${IMAGE_NAME}-emmc.img
-            mkdir -p /tmp/img-mount
-            mount -o loop ${IMAGE_NAME}-emmc.img /tmp/img-mount
-            mkdir -p /tmp/img-mount/live
-            cp /tmp/iso-mount/live/vmlinuz-* /tmp/img-mount/live/
-            cp /tmp/iso-mount/live/initrd.img-* /tmp/img-mount/live/
-            cp /tmp/iso-mount/live/filesystem.squashfs /tmp/img-mount/live/
-            [ -f /tmp/iso-mount/mono-gw.dtb ] && cp /tmp/iso-mount/mono-gw.dtb /tmp/img-mount/
-            sync
-            umount /tmp/img-mount
-            umount /tmp/iso-mount
-            gzip ${IMAGE_NAME}-emmc.img
-          else
-            umount /tmp/iso-mount 2>/dev/null || true
-          fi
-          rm -rf /tmp/iso-mount /tmp/img-mount
           # Move artifacts to workspace
           mv manifest.json ${IMAGE_ISO} ${IMAGE_ISO}.minisig $GITHUB_WORKSPACE
-          [ -f ${IMAGE_NAME}-emmc.img.gz ] && mv ${IMAGE_NAME}-emmc.img.gz $GITHUB_WORKSPACE
 
       - uses: actions/upload-artifact@v7
         with:
@@ -355,7 +349,6 @@ jobs:
             manifest.json
             ${{ steps.build_iso.outputs.image_iso }}
             ${{ steps.build_iso.outputs.image_iso }}.minisig
-            ${{ steps.build_iso.outputs.image_name }}-emmc.img.gz
           retention-days: 15
           if-no-files-found: error
           compression-level: 0
@@ -393,7 +386,7 @@ jobs:
           cd ../vyos-1x
           git log --since "${{ needs.build_iso.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}" --format="%H" --reverse
           CHANGELOG_COMMIT_VYOS_1X=$(git log --since "${{ needs.build_iso.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}" --format="%H" --reverse | head -n1)
-          [ -z "$COMMIT_VYOS_1X" ] && COMMIT_VYOS_1X="HEAD"
+          [ -z "$CHANGELOG_COMMIT_VYOS_1X" ] && CHANGELOG_COMMIT_VYOS_1X="HEAD"
           echo "CHANGELOG_COMMIT_VYOS_1X=${CHANGELOG_COMMIT_VYOS_1X}" >> $GITHUB_OUTPUT
 
       - name: "Release publishing: generate changelog for vyos-1x"
@@ -491,7 +484,6 @@ jobs:
           files: |
             ${{ needs.build_iso.outputs.image_iso }}
             ${{ needs.build_iso.outputs.image_iso }}.minisig
-            ${{ needs.build_iso.outputs.image_name }}-emmc.img.gz
             vyos-packages.tar
 
       - uses: dev-drprasad/delete-older-releases@v0.3.4
