@@ -1,0 +1,228 @@
+#!/bin/bash
+# vyos-postinstall — Post-install/upgrade helper for LS1046A U-Boot boards
+#
+# Handles two things VyOS's image_installer.py doesn't:
+#   1. Copies DTB to the boot directory of the specified image
+#   2. Updates U-Boot environment via fw_setenv so the board boots the new image
+#
+# Usage:
+#   After 'install image':     vyos-postinstall            (auto-detects image)
+#   After 'add system image':  vyos-postinstall <image-name>
+#
+# This script is a no-op on non-LS1046A hardware.
+
+set -euo pipefail
+
+DTB_NAME="mono-gw.dtb"
+FW_ENV_CONFIG="/etc/fw_env.config"
+UBOOT_BOOTARGS="console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin"
+
+#--- Board detection ---
+check_board() {
+    local compat="/proc/device-tree/compatible"
+    if [ ! -f "$compat" ]; then
+        echo "Not running on a DeviceTree platform. Skipping."
+        exit 0
+    fi
+    if ! tr '\0' '\n' < "$compat" | grep -q "fsl,ls1046a"; then
+        echo "Not an LS1046A board. Skipping."
+        exit 0
+    fi
+}
+
+#--- Find persistence root (where /boot/{image}/ lives) ---
+find_root() {
+    # On installed VyOS, the persistence partition is mounted and /boot/ exists
+    # Check standard VyOS persistence mount points
+    for candidate in "/" "/mnt/root"; do
+        if [ -d "${candidate}/boot" ]; then
+            local count
+            count=$(find "${candidate}/boot" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)
+            if [ "$count" -gt 0 ]; then
+                echo "$candidate"
+                return 0
+            fi
+        fi
+    done
+    echo "ERROR: Cannot find persistence root with /boot/ image directories" >&2
+    return 1
+}
+
+#--- Detect current running image name ---
+get_running_image() {
+    # Extract image name from kernel cmdline: vyos-union=/boot/{IMAGE_NAME}
+    local cmdline
+    cmdline=$(cat /proc/cmdline)
+    if echo "$cmdline" | grep -qoP 'vyos-union=/boot/\K[^ ]+'; then
+        echo "$cmdline" | grep -oP 'vyos-union=/boot/\K[^ ]+'
+        return 0
+    fi
+    # Fallback: look at GRUB default
+    local root
+    root=$(find_root)
+    if [ -d "${root}/boot/grub/grub.cfg.d/vyos-versions" ]; then
+        ls -t "${root}/boot/grub/grub.cfg.d/vyos-versions/" | head -1 | sed 's/\.cfg$//'
+        return 0
+    fi
+    return 1
+}
+
+#--- Find DTB source ---
+find_dtb() {
+    # Priority 1: DTB compiled into squashfs at /boot/
+    if [ -f "/boot/${DTB_NAME}" ]; then
+        echo "/boot/${DTB_NAME}"
+        return 0
+    fi
+    # Priority 2: DTB in a known system location
+    if [ -f "/usr/share/vyos/${DTB_NAME}" ]; then
+        echo "/usr/share/vyos/${DTB_NAME}"
+        return 0
+    fi
+    # Priority 3: Live FDT from running kernel (U-Boot patched, includes memory nodes)
+    if [ -f "/sys/firmware/fdt" ]; then
+        echo "/sys/firmware/fdt"
+        return 0
+    fi
+    # Priority 4: Copy from current running image's boot dir
+    local running
+    running=$(get_running_image 2>/dev/null || true)
+    if [ -n "$running" ]; then
+        local root
+        root=$(find_root)
+        if [ -f "${root}/boot/${running}/${DTB_NAME}" ]; then
+            echo "${root}/boot/${running}/${DTB_NAME}"
+            return 0
+        fi
+    fi
+    echo "ERROR: No DTB source found" >&2
+    return 1
+}
+
+#--- Copy DTB to target image ---
+copy_dtb() {
+    local image_name="$1"
+    local root="$2"
+    local boot_dir="${root}/boot/${image_name}"
+
+    if [ ! -d "$boot_dir" ]; then
+        echo "ERROR: Boot directory does not exist: ${boot_dir}" >&2
+        return 1
+    fi
+
+    local dtb_src
+    dtb_src=$(find_dtb)
+    local dtb_dst="${boot_dir}/${DTB_NAME}"
+
+    if [ -f "$dtb_dst" ]; then
+        echo "DTB already exists at ${dtb_dst} ($(stat -c '%s bytes' "$dtb_dst"))"
+        echo "Overwriting with source: ${dtb_src}"
+    fi
+
+    cp "$dtb_src" "$dtb_dst"
+    echo "✓ DTB copied: ${dtb_src} → ${dtb_dst} ($(stat -c '%s bytes' "$dtb_dst"))"
+}
+
+#--- Update U-Boot environment ---
+update_uboot_env() {
+    local image_name="$1"
+
+    # Check prerequisites
+    if ! command -v fw_setenv &>/dev/null; then
+        echo "WARNING: fw_setenv not found (u-boot-tools not installed)"
+        echo "  U-Boot environment NOT updated. You must set it manually at the U-Boot prompt:"
+        echo "  setenv vyos_direct '...${image_name}...'"
+        echo "  saveenv"
+        return 1
+    fi
+
+    if [ ! -f "$FW_ENV_CONFIG" ]; then
+        echo "WARNING: ${FW_ENV_CONFIG} not found"
+        echo "  U-Boot environment NOT updated."
+        return 1
+    fi
+
+    # Build the vyos_direct boot command
+    # CRITICAL: initrd must be loaded LAST so ${filesize} captures its size
+    local vyos_direct
+    vyos_direct="ext4load mmc 0:3 \${kernel_addr_r} boot/${image_name}/vmlinuz; ext4load mmc 0:3 \${fdt_addr_r} boot/${image_name}/${DTB_NAME}; ext4load mmc 0:3 \${ramdisk_addr_r} boot/${image_name}/initrd.img; setenv bootargs ${UBOOT_BOOTARGS} vyos-union=/boot/${image_name}; booti \${kernel_addr_r} \${ramdisk_addr_r}:\${filesize} \${fdt_addr_r}"
+
+    fw_setenv vyos_direct "$vyos_direct"
+    fw_setenv bootcmd "run vyos_direct || run recovery"
+    echo "✓ U-Boot env updated: vyos_direct → boot/${image_name}/"
+    echo "✓ U-Boot env updated: bootcmd → 'run vyos_direct || run recovery'"
+}
+
+#--- List available images ---
+list_images() {
+    local root="$1"
+    echo "Available images:"
+    for dir in "${root}/boot"/*/; do
+        local name
+        name=$(basename "$dir")
+        # Skip non-image directories
+        case "$name" in
+            grub|efi|lost+found) continue ;;
+        esac
+        local has_vmlinuz="✗"
+        local has_dtb="✗"
+        local has_squashfs="✗"
+        [ -f "${dir}/vmlinuz" ] && has_vmlinuz="✓"
+        [ -f "${dir}/${DTB_NAME}" ] && has_dtb="✓"
+        ls "${dir}"/*.squashfs &>/dev/null && has_squashfs="✓"
+        printf "  %-50s vmlinuz=%s  dtb=%s  squashfs=%s\n" "$name" "$has_vmlinuz" "$has_dtb" "$has_squashfs"
+    done
+}
+
+#--- Main ---
+main() {
+    check_board
+
+    local root
+    root=$(find_root)
+    local image_name="${1:-}"
+
+    # If no image name given, try to detect it
+    if [ -z "$image_name" ]; then
+        # After 'install image', the newly installed image is the only one
+        # After 'add system image', there are multiple — pick the newest
+        local newest
+        newest=$(ls -t "${root}/boot/" 2>/dev/null | while read -r d; do
+            case "$d" in grub|efi|lost+found) continue ;; esac
+            [ -d "${root}/boot/${d}" ] && echo "$d" && break
+        done)
+
+        if [ -n "$newest" ]; then
+            image_name="$newest"
+            echo "Auto-detected image: ${image_name}"
+        else
+            echo "ERROR: No image found. Specify image name as argument." >&2
+            list_images "$root"
+            exit 1
+        fi
+    fi
+
+    # Validate the image directory exists
+    if [ ! -d "${root}/boot/${image_name}" ]; then
+        echo "ERROR: Image '${image_name}' not found at ${root}/boot/${image_name}" >&2
+        list_images "$root"
+        exit 1
+    fi
+
+    echo "=== VyOS Post-Install for LS1046A ==="
+    echo "Image:  ${image_name}"
+    echo "Root:   ${root}"
+    echo ""
+
+    # Step 1: Copy DTB
+    copy_dtb "$image_name" "$root"
+
+    # Step 2: Update U-Boot environment
+    echo ""
+    update_uboot_env "$image_name"
+
+    echo ""
+    echo "=== Done. You can now reboot. ==="
+}
+
+main "$@"
