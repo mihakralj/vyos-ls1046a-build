@@ -433,13 +433,13 @@
 
 	fm1_mac9: ethernet@f0000 { /* 10GEC1 */
 		sfp = <&sfp_xfi0>;
-		phy-connection-type = "10gbase-r";
+		phy-connection-type = "xgmii"; /* kernel converts to 10gbase-r; must use xgmii so fman_memac assigns PCS to xfi_pcs */
 		managed = "in-band-status";
 	};
 
 	fm1_mac10: ethernet@f2000 { /* 10GEC2 */
 		sfp = <&sfp_xfi1>;
-		phy-connection-type = "10gbase-r";
+		phy-connection-type = "xgmii"; /* kernel converts to 10gbase-r; must use xgmii so fman_memac assigns PCS to xfi_pcs */
 		managed = "in-band-status";
 	};
 

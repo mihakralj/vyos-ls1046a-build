@@ -163,6 +163,7 @@ jobs:
             'CONFIG_I2C_MUX=y' \
             'CONFIG_I2C_MUX_PCA954x=y' \
             'CONFIG_AQUANTIA_PHY=y' \
+            'CONFIG_REALTEK_PHY=y' \
             '# === I2C + GPIO controllers (required for SFP I2C mux and GPIOs) ===' \
             'CONFIG_I2C_IMX=y' \
             'CONFIG_GPIO_MPC8XXX=y' \
@@ -253,16 +254,29 @@ jobs:
           ### Ethernet port remapping: match physical port order (left to right)
           # Mainline fsl_dpaa_mac probes in DT address order (e2000→e8000→ea000)
           # which gives rightmost RJ45 = eth0. Physical expectation: leftmost = eth0.
-          # Using systemd .link files (not udev NAME=) to avoid rename-swap races
-          # and ensure names are set during net_setup_link before userspace sees them.
-          # .link files: lower number = higher priority (checked before 99-default.link)
-          NETD="$CHROOT/etc/systemd/network"
-          mkdir -p "$NETD"
-          printf '%s\n' '[Match]' 'Path=*1ae8000*' '[Link]' 'Name=eth0' > "$NETD/10-fman-eth0.link"
-          printf '%s\n' '[Match]' 'Path=*1aea000*' '[Link]' 'Name=eth1' > "$NETD/10-fman-eth1.link"
-          printf '%s\n' '[Match]' 'Path=*1ae2000*' '[Link]' 'Name=eth2' > "$NETD/10-fman-eth2.link"
-          printf '%s\n' '[Match]' 'Path=*1af0000*' '[Link]' 'Name=eth3' > "$NETD/10-fman-eth3.link"
-          printf '%s\n' '[Match]' 'Path=*1af2000*' '[Link]' 'Name=eth4' > "$NETD/10-fman-eth4.link"
+          #
+          # VyOS uses its own naming system (vyos_net_name at 65-vyos-net.rules)
+          # which overrides systemd .link files. The VyOS rule checks for
+          # ENV{VYOS_IFNAME}: if set, it's passed as "predefined" name to
+          # vyos_net_name, bypassing biosdevname. We set VYOS_IFNAME in a
+          # priority-64 rule (before 65) using DEVPATH to identify FMan MACs.
+          UDEVD="$CHROOT/etc/udev/rules.d"
+          mkdir -p "$UDEVD"
+          cat > "$UDEVD/64-fman-port-order.rules" << 'UDEV_EOF'
+# Mono Gateway LS1046A: remap FMan ethernet ports to match physical RJ45 order
+# DEVPATH contains the FMan MAC node address (always available, unlike ID_PATH)
+# Sets VYOS_IFNAME which vyos_net_name (65-vyos-net.rules) honors as "predefined"
+ACTION!="add", GOTO="fman_end"
+SUBSYSTEM!="net", GOTO="fman_end"
+# RJ45 ports (left to right facing the board)
+ENV{DEVPATH}=="*/1ae8000.ethernet/*", ENV{VYOS_IFNAME}="eth0"
+ENV{DEVPATH}=="*/1aea000.ethernet/*", ENV{VYOS_IFNAME}="eth1"
+ENV{DEVPATH}=="*/1ae2000.ethernet/*", ENV{VYOS_IFNAME}="eth2"
+# SFP+ ports (left to right)
+ENV{DEVPATH}=="*/1af0000.ethernet/*", ENV{VYOS_IFNAME}="eth3"
+ENV{DEVPATH}=="*/1af2000.ethernet/*", ENV{VYOS_IFNAME}="eth4"
+LABEL="fman_end"
+UDEV_EOF
 
       - name: Build Image Packages
         run: |

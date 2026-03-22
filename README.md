@@ -54,7 +54,7 @@ block-beta
   style eth4 fill:#49a,stroke:#333,color:#fff
 ```
 
-Remapped via systemd `.link` files — physical position matches interface name (left to right).
+Remapped via udev rule (`64-fman-port-order.rules`) — physical position matches interface name (left to right).
 
 ### Boot Flow
 
@@ -132,7 +132,7 @@ flowchart TB
 | 4 | CPU 700 MHz | `QORIQ_CPUFREQ=m` loads too late | `=y` + `CPU_FREQ_DEFAULT_GOV_PERFORMANCE` |
 | 5 | eth2 no link | Generic PHY — no SGMII AN workaround | `MAXLINEAR_GPHY=y` (GPY115C) |
 | 6 | No SFP+ | SFP framework + SerDes PHY missing | `SFP=y`, `PHYLINK=y`, `PHY_FSL_LYNX_10G=y` |
-| 7 | Wrong port order | DT probe order ≠ physical | `.link` files + DTS ethernet aliases |
+| 7 | Wrong port order | DT probe order ≠ physical | udev `VYOS_IFNAME` rule + DTS aliases |
 | 8 | No auto-boot | `install image` only updates GRUB | `vyos-postinstall` + `fw_setenv` |
 
 Full analysis: **[PORTING.md](PORTING.md)**
