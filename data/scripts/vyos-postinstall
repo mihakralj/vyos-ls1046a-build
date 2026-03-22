@@ -6,9 +6,10 @@
 #   2. Updates U-Boot environment via fw_setenv so the board boots the new image
 #
 # Usage:
-#   After 'install image':     vyos-postinstall            (auto-detects image)
-#   After 'add system image':  vyos-postinstall <image-name>
+#   After 'install image':     sudo vyos-postinstall
+#   After 'add system image':  sudo vyos-postinstall <image-name>
 #
+# Auto-detection picks the image with the latest version string.
 # This script is a no-op on non-LS1046A hardware.
 
 set -euo pipefail
@@ -30,40 +31,23 @@ check_board() {
     fi
 }
 
-#--- Find persistence root (where /boot/{image}/ lives) ---
+#--- Find persistence root (where /boot/{image}/ lives on eMMC) ---
 find_root() {
-    # On installed VyOS, the persistence partition is mounted and /boot/ exists
-    # Check standard VyOS persistence mount points
+    # After 'install image', VyOS mounts the eMMC persistence partition.
+    # Check multiple candidates — prefer one with actual image directories.
     for candidate in "/" "/mnt/root"; do
         if [ -d "${candidate}/boot" ]; then
-            local count
-            count=$(find "${candidate}/boot" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)
-            if [ "$count" -gt 0 ]; then
+            # Look for directories matching VyOS version pattern YYYY.MM.DD-*
+            local images
+            images=$(find "${candidate}/boot" -maxdepth 1 -mindepth 1 -type d \
+                -name '20*-*-rolling' 2>/dev/null | wc -l)
+            if [ "$images" -gt 0 ]; then
                 echo "$candidate"
                 return 0
             fi
         fi
     done
-    echo "ERROR: Cannot find persistence root with /boot/ image directories" >&2
-    return 1
-}
-
-#--- Detect current running image name ---
-get_running_image() {
-    # Extract image name from kernel cmdline: vyos-union=/boot/{IMAGE_NAME}
-    local cmdline
-    cmdline=$(cat /proc/cmdline)
-    if echo "$cmdline" | grep -qoP 'vyos-union=/boot/\K[^ ]+'; then
-        echo "$cmdline" | grep -oP 'vyos-union=/boot/\K[^ ]+'
-        return 0
-    fi
-    # Fallback: look at GRUB default
-    local root
-    root=$(find_root)
-    if [ -d "${root}/boot/grub/grub.cfg.d/vyos-versions" ]; then
-        ls -t "${root}/boot/grub/grub.cfg.d/vyos-versions/" | head -1 | sed 's/\.cfg$//'
-        return 0
-    fi
+    echo "ERROR: Cannot find persistence root with VyOS image directories in /boot/" >&2
     return 1
 }
 
@@ -74,29 +58,44 @@ find_dtb() {
         echo "/boot/${DTB_NAME}"
         return 0
     fi
-    # Priority 2: DTB in a known system location
-    if [ -f "/usr/share/vyos/${DTB_NAME}" ]; then
-        echo "/usr/share/vyos/${DTB_NAME}"
-        return 0
-    fi
-    # Priority 3: Live FDT from running kernel (U-Boot patched, includes memory nodes)
+    # Priority 2: Live FDT from running kernel
     if [ -f "/sys/firmware/fdt" ]; then
         echo "/sys/firmware/fdt"
         return 0
     fi
-    # Priority 4: Copy from current running image's boot dir
-    local running
-    running=$(get_running_image 2>/dev/null || true)
-    if [ -n "$running" ]; then
-        local root
-        root=$(find_root)
-        if [ -f "${root}/boot/${running}/${DTB_NAME}" ]; then
-            echo "${root}/boot/${running}/${DTB_NAME}"
-            return 0
-        fi
-    fi
     echo "ERROR: No DTB source found" >&2
     return 1
+}
+
+#--- Resolve actual boot filenames (handles versioned names) ---
+resolve_boot_files() {
+    local boot_dir="$1"
+
+    # Kernel: prefer 'vmlinuz', fall back to 'vmlinuz-*'
+    if [ -f "${boot_dir}/vmlinuz" ]; then
+        KERNEL_FILE="vmlinuz"
+    else
+        KERNEL_FILE=$(cd "$boot_dir" && ls vmlinuz-* 2>/dev/null | head -1)
+    fi
+    if [ -z "${KERNEL_FILE:-}" ]; then
+        echo "ERROR: No kernel found in ${boot_dir}" >&2
+        return 1
+    fi
+
+    # Initrd: prefer 'initrd.img', fall back to 'initrd.img-*'
+    if [ -f "${boot_dir}/initrd.img" ]; then
+        INITRD_FILE="initrd.img"
+    else
+        INITRD_FILE=$(cd "$boot_dir" && ls initrd.img-* 2>/dev/null | head -1)
+    fi
+    if [ -z "${INITRD_FILE:-}" ]; then
+        echo "ERROR: No initrd found in ${boot_dir}" >&2
+        return 1
+    fi
+
+    echo "  Kernel: ${KERNEL_FILE}"
+    echo "  Initrd: ${INITRD_FILE}"
+    echo "  DTB:    ${DTB_NAME}"
 }
 
 #--- Copy DTB to target image ---
@@ -114,64 +113,64 @@ copy_dtb() {
     dtb_src=$(find_dtb)
     local dtb_dst="${boot_dir}/${DTB_NAME}"
 
-    if [ -f "$dtb_dst" ]; then
-        echo "DTB already exists at ${dtb_dst} ($(stat -c '%s bytes' "$dtb_dst"))"
-        echo "Overwriting with source: ${dtb_src}"
-    fi
-
     cp "$dtb_src" "$dtb_dst"
-    echo "✓ DTB copied: ${dtb_src} → ${dtb_dst} ($(stat -c '%s bytes' "$dtb_dst"))"
+    echo "✓ DTB: ${dtb_src} → ${dtb_dst} ($(stat -c '%s' "$dtb_dst") bytes)"
 }
 
 #--- Update U-Boot environment ---
 update_uboot_env() {
     local image_name="$1"
+    local root="$2"
+    local boot_dir="${root}/boot/${image_name}"
 
-    # Check prerequisites
     if ! command -v fw_setenv &>/dev/null; then
-        echo "WARNING: fw_setenv not found (u-boot-tools not installed)"
-        echo "  U-Boot environment NOT updated. You must set it manually at the U-Boot prompt:"
-        echo "  setenv vyos_direct '...${image_name}...'"
-        echo "  saveenv"
+        echo "ERROR: fw_setenv not found. Install u-boot-tools." >&2
         return 1
     fi
 
     if [ ! -f "$FW_ENV_CONFIG" ]; then
-        echo "WARNING: ${FW_ENV_CONFIG} not found"
-        echo "  U-Boot environment NOT updated."
+        echo "ERROR: ${FW_ENV_CONFIG} not found." >&2
         return 1
     fi
 
+    # Resolve actual filenames (handles vmlinuz vs vmlinuz-<version>)
+    resolve_boot_files "$boot_dir"
+
     # Build the vyos_direct boot command
-    # CRITICAL: initrd must be loaded LAST so ${filesize} captures its size
+    # CRITICAL: initrd must be loaded LAST so ${filesize} captures its size for booti
     local vyos_direct
-    vyos_direct="ext4load mmc 0:3 \${kernel_addr_r} boot/${image_name}/vmlinuz; ext4load mmc 0:3 \${fdt_addr_r} boot/${image_name}/${DTB_NAME}; ext4load mmc 0:3 \${ramdisk_addr_r} boot/${image_name}/initrd.img; setenv bootargs ${UBOOT_BOOTARGS} vyos-union=/boot/${image_name}; booti \${kernel_addr_r} \${ramdisk_addr_r}:\${filesize} \${fdt_addr_r}"
+    vyos_direct="ext4load mmc 0:3 \${kernel_addr_r} boot/${image_name}/${KERNEL_FILE}; ext4load mmc 0:3 \${fdt_addr_r} boot/${image_name}/${DTB_NAME}; ext4load mmc 0:3 \${ramdisk_addr_r} boot/${image_name}/${INITRD_FILE}; setenv bootargs ${UBOOT_BOOTARGS} vyos-union=/boot/${image_name}; booti \${kernel_addr_r} \${ramdisk_addr_r}:\${filesize} \${fdt_addr_r}"
 
     fw_setenv vyos_direct "$vyos_direct"
     fw_setenv bootcmd "run vyos_direct || run recovery"
-    echo "✓ U-Boot env updated: vyos_direct → boot/${image_name}/"
-    echo "✓ U-Boot env updated: bootcmd → 'run vyos_direct || run recovery'"
+    echo "✓ U-Boot: vyos_direct → boot/${image_name}/"
+    echo "✓ U-Boot: bootcmd → 'run vyos_direct || run recovery'"
 }
 
 #--- List available images ---
 list_images() {
     local root="$1"
     echo "Available images:"
-    for dir in "${root}/boot"/*/; do
+    for dir in "${root}/boot"/20*-*-rolling/; do
+        [ ! -d "$dir" ] && continue
         local name
         name=$(basename "$dir")
-        # Skip non-image directories
-        case "$name" in
-            grub|efi|lost+found) continue ;;
-        esac
-        local has_vmlinuz="✗"
-        local has_dtb="✗"
-        local has_squashfs="✗"
-        [ -f "${dir}/vmlinuz" ] && has_vmlinuz="✓"
+        local has_kernel="✗" has_dtb="✗" has_squashfs="✗"
+        { [ -f "${dir}/vmlinuz" ] || ls "${dir}"/vmlinuz-* &>/dev/null; } && has_kernel="✓"
         [ -f "${dir}/${DTB_NAME}" ] && has_dtb="✓"
         ls "${dir}"/*.squashfs &>/dev/null && has_squashfs="✓"
-        printf "  %-50s vmlinuz=%s  dtb=%s  squashfs=%s\n" "$name" "$has_vmlinuz" "$has_dtb" "$has_squashfs"
+        printf "  %-45s kernel=%s dtb=%s squashfs=%s\n" "$name" "$has_kernel" "$has_dtb" "$has_squashfs"
     done
+}
+
+#--- Auto-detect latest image by version string ---
+detect_latest_image() {
+    local root="$1"
+    # VyOS image names are YYYY.MM.DD-HHMM-rolling — lexicographic sort = version sort
+    local latest
+    latest=$(find "${root}/boot" -maxdepth 1 -mindepth 1 -type d -name '20*-*-rolling' \
+        -printf '%f\n' 2>/dev/null | sort -r | head -1)
+    echo "$latest"
 }
 
 #--- Main ---
@@ -182,27 +181,19 @@ main() {
     root=$(find_root)
     local image_name="${1:-}"
 
-    # If no image name given, try to detect it
+    # Auto-detect: pick the image with the latest version string
     if [ -z "$image_name" ]; then
-        # After 'install image', the newly installed image is the only one
-        # After 'add system image', there are multiple — pick the newest
-        local newest
-        newest=$(ls -t "${root}/boot/" 2>/dev/null | while read -r d; do
-            case "$d" in grub|efi|lost+found) continue ;; esac
-            [ -d "${root}/boot/${d}" ] && echo "$d" && break
-        done)
-
-        if [ -n "$newest" ]; then
-            image_name="$newest"
+        image_name=$(detect_latest_image "$root")
+        if [ -n "$image_name" ]; then
             echo "Auto-detected image: ${image_name}"
         else
-            echo "ERROR: No image found. Specify image name as argument." >&2
+            echo "ERROR: No VyOS image found. Specify image name as argument." >&2
             list_images "$root"
             exit 1
         fi
     fi
 
-    # Validate the image directory exists
+    # Validate
     if [ ! -d "${root}/boot/${image_name}" ]; then
         echo "ERROR: Image '${image_name}' not found at ${root}/boot/${image_name}" >&2
         list_images "$root"
@@ -214,15 +205,12 @@ main() {
     echo "Root:   ${root}"
     echo ""
 
-    # Step 1: Copy DTB
     copy_dtb "$image_name" "$root"
-
-    # Step 2: Update U-Boot environment
     echo ""
-    update_uboot_env "$image_name"
+    update_uboot_env "$image_name" "$root"
 
     echo ""
-    echo "=== Done. You can now reboot. ==="
+    echo "=== Done. Reboot to boot from eMMC. ==="
 }
 
 main "$@"
