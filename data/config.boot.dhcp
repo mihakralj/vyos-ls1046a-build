@@ -11,7 +11,10 @@ system {
         }
     }
     option {
+        performance network-latency
+        reboot-on-panic
         reboot-on-upgrade-failure 5
+        time-format 24-hour
     }
     syslog {
         global {
@@ -52,6 +55,10 @@ system {
     update-check {
         auto-check
         url https://raw.githubusercontent.com/mihakralj/vyos-ls1046a-build/refs/heads/main/version.json
+    }
+    watchdog {
+        reboot-timeout 60
+        shutdown-timeout 60
     }
 }
 
