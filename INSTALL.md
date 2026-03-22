@@ -16,15 +16,16 @@
 **Windows (Rufus):** Select USB → SELECT iso → MBR → START → ISO Image mode
 
 **Linux / macOS:**
+
 ```bash
 sudo dd if=vyos-*-LS1046A-arm64.iso of=/dev/sdX bs=4M status=progress && sync
 ```
 
-## 2. Boot from USB
+## 2. in U-Boot - Boot VyOS Live from USB
 
 Insert USB, power on, press **any key** during U-Boot countdown. Paste:
 
-```
+``` uboot
 usb start; setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda1 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet"; fatload usb 0:1 ${kernel_addr_r} live/vmlinuz; fatload usb 0:1 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:1 ${ramdisk_addr_r} live/initrd.img; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
 ```
 
@@ -33,22 +34,29 @@ Wait 60–90 seconds for VyOS login prompt.
 > **If `fatload` says "File not found":** run `fatls usb 0:1 live` — if the
 > kernel has a version suffix (e.g. `vmlinuz-6.6.128-vyos`), use the full name.
 
-## 3. Install to eMMC
+> **Optional — wipe eMMC clean** before installing (removes OpenWrt or any
+> previous OS). After VyOS login, run before `install image`:
+> ```bash
+> sudo sgdisk --zap-all /dev/mmcblk0 && sudo partprobe /dev/mmcblk0
+> ```
+
+## 3. in VyOS Live - Install VyOS to eMMC
 
 Login `vyos` / `vyos`, then:
 
-```
+``` bash
 install image
 ```
 
 Accept defaults for most prompts. When asked:
+
 - **RAID-1 mirroring:** `n`
 - **Console type:** `S` (serial)
 - **Which disk:** `/dev/mmcblk0`
 
 Wait 2–4 minutes. The DTB is copied automatically.
 
-## 4. Configure U-Boot
+## 4. in VyOS Live - Configure U-Boot
 
 **Still in the live USB session** (do NOT reboot yet), run:
 
@@ -61,7 +69,7 @@ sudo umount /mnt
 This writes the correct boot command to U-Boot SPI flash automatically.
 You should see output like:
 
-```
+``` uboot
 Auto-detected image: 2026.03.22-0150-rolling
 ✓ DTB: /boot/mono-gw.dtb → /mnt/boot/2026.03.22-0150-rolling/mono-gw.dtb
 ✓ U-Boot: vyos_direct → boot/2026.03.22-0150-rolling/
@@ -72,7 +80,7 @@ Auto-detected image: 2026.03.22-0150-rolling
 
 Remove the USB drive and reboot:
 
-```
+``` bash
 reboot
 ```
 
@@ -83,7 +91,7 @@ U-Boot auto-boots into VyOS on eMMC. No manual U-Boot commands needed.
 
 ## 6. Initial Config
 
-```
+``` bash
 configure
 set interfaces ethernet eth0 address dhcp
 set service ssh
@@ -109,7 +117,7 @@ Physical port order, left to right on the back panel:
 
 ## Upgrading
 
-```
+``` bash
 add system image https://github.com/mihakralj/vyos-ls1046a-build/releases/download/<version>/vyos-<version>-LS1046A-arm64.iso
 sudo vyos-postinstall
 reboot
