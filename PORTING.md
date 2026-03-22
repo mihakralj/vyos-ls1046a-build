@@ -129,11 +129,20 @@ CONFIG_GPIO_MPC8XXX=y
 
 The dependency chain:
 
-```
-i2c-imx (fsl,vf610-i2c)     → I2C1 controller probes
-  → pca9545 mux (i2c-mux@70) → sfp0_i2c / sfp1_i2c channels
-    → sfp-xfi0 / sfp-xfi1    → SFP module detection
-      → AQR113C PHY (Aquantia) → 10GBase-R link
+```mermaid
+flowchart LR
+  I2C["i2c-imx\nI2C1 controller"] --> MUX["PCA9545\ni2c-mux@70"]
+  MUX -->|"ch 2"| SFP0["sfp-xfi0\nSFP module"]
+  MUX -->|"ch 3"| SFP1["sfp-xfi1\nSFP module"]
+  SFP0 --> PHY0["Lynx 10G PCS\n10GBase-R link"]
+  SFP1 --> PHY1["Lynx 10G PCS\n10GBase-R link"]
+
+  GPIO["GPIO MPC8XXX\ntx-disable, mod-def0, los"] -.-> SFP0 & SFP1
+
+  style I2C fill:#48a,stroke:#333,color:#fff
+  style MUX fill:#48a,stroke:#333,color:#fff
+  style SFP0 fill:#4a9,stroke:#333,color:#fff
+  style SFP1 fill:#4a9,stroke:#333,color:#fff
 ```
 
 Without `CONFIG_I2C_IMX=y`, the I2C controller hardware never probes, the PCA9545 mux can't bind, and the SFP driver defers forever. Without `CONFIG_GPIO_MPC8XXX=y`, the `fsl,qoriq-gpio` controller needed for SFP GPIO signals (tx-disable, mod-def0, los) is absent.
@@ -229,12 +238,19 @@ DPAA1 is not a simple NIC driver. It is a complete hardware packet processing su
 
 The component stack, bottom to top:
 
-```
-FSL_PAMU          IOMMU/memory partitioning for DMA isolation
-FSL_BMAN          Buffer Manager: hardware memory pool allocator
-FSL_QMAN          Queue Manager: hardware work-queue scheduler
-FSL_FMAN          Frame Manager: packet parser, classifier, policer
-FSL_DPAA_ETH      Ethernet netdev layer sitting on top of FMan
+```mermaid
+flowchart BT
+  PAMU["FSL_PAMU\nIOMMU / DMA isolation"] --> BMAN["FSL_BMAN\nBuffer Manager\nhardware pool allocator"]
+  PAMU --> QMAN["FSL_QMAN\nQueue Manager\nhardware work-queue scheduler"]
+  BMAN --> FMAN["FSL_FMAN\nFrame Manager\npacket parser, classifier, policer"]
+  QMAN --> FMAN
+  FMAN --> ETH["FSL_DPAA_ETH\nEthernet netdev"]
+
+  style PAMU fill:#555,stroke:#333,color:#fff
+  style BMAN fill:#48a,stroke:#333,color:#fff
+  style QMAN fill:#48a,stroke:#333,color:#fff
+  style FMAN fill:#2a6,stroke:#333,color:#fff
+  style ETH fill:#4a9,stroke:#333,color:#fff
 ```
 
 You cannot skip any layer. Each depends on the one below. `DPAA_ETH` without `FMAN` is a null pointer reference. `FMAN` without `BMAN` and `QMAN` never initializes.
@@ -251,13 +267,26 @@ The Frame Manager requires firmware: a microcode blob loaded from `mtd4` (the `f
 
 Even with the entire DPAA1 stack enabled, Ethernet MACs will not probe without the MDIO bus driver. The probe chain is:
 
-```
-fsl_dpaa_mac (mac.c)
-  -> memac_initialization (fman_memac.c)
-    -> memac_pcs_create()
-      -> of_parse_phandle("pcsphy-handle")
-      -> lynx_pcs_create_fwnode()
-        -> fwnode_mdio_find_device()   <-- needs MDIO bus registered
+```mermaid
+sequenceDiagram
+  participant MAC as fsl_dpaa_mac<br/>(mac.c)
+  participant MEMAC as memac_init<br/>(fman_memac.c)
+  participant PCS as lynx_pcs_create<br/>(pcs_lynx.c)
+  participant MDIO as xgmac_mdio<br/>(xgmac_mdio.c)
+
+  MAC->>MEMAC: memac_initialization()
+  MEMAC->>PCS: memac_pcs_create()
+  PCS->>PCS: of_parse_phandle("pcsphy-handle")
+  PCS->>MDIO: fwnode_mdio_find_device()
+  alt MDIO bus registered (XGMAC_MDIO=y)
+    MDIO-->>PCS: ✅ PCS device found
+    PCS-->>MEMAC: ✅ PCS ready
+    MEMAC-->>MAC: ✅ MAC probes successfully
+  else MDIO bus missing
+    MDIO-->>PCS: ❌ NULL
+    PCS-->>MEMAC: ❌ "missing pcs"
+    MEMAC-->>MAC: ❌ defers forever
+  end
 ```
 
 Each MAC's DTB node has a `pcsphy-handle` pointing to a PCS device on an MDIO bus. The MDIO buses are driven by `xgmac_mdio.c` (`CONFIG_FSL_XGMAC_MDIO`). Without it, `fwnode_mdio_find_device()` returns NULL, and every MAC defers forever with `"missing pcs"` errors.
@@ -296,21 +325,25 @@ earlycon=uart8250,mmio,0x21c0500
 
 ## Boot Flow
 
+```mermaid
+flowchart TD
+  PO["Power On"] --> NOR["SPI NOR Flash\n64 MB"]
+  NOR --> RCW["RCW + BL2\nmtd1, 1 MB"]
+  RCW --> ATF["BL31 / ATF\nEL3 runtime, PSCI"]
+  ATF --> UB["U-Boot 2025.04\nmtd2, 2 MB — EL2"]
+
+  UB -->|"bootcmd"| CMD{"run vyos_direct\n‖ run recovery"}
+  CMD -->|"vyos_direct"| VYOS["ext4load mmc 0:3\nvmlinuz → DTB → initrd ⚠️\nbooti addr:size"]
+  CMD -->|"recovery"| REC["sf read mtd7\nrecovery kernel"]
+  VYOS --> BOOT["Linux Kernel\nlive-boot → VyOS"]
+
+  style UB fill:#48a,stroke:#333,color:#fff
+  style VYOS fill:#4a9,stroke:#333,color:#fff
+  style REC fill:#a84,stroke:#333,color:#fff
+  style BOOT fill:#4a9,stroke:#333,color:#fff
 ```
-Power on
-  NOR Flash (SPI)
-    RCW + BL2 (mtd1: rcw-bl2, 1 MB)
-      BL31 / ATF (EL3 runtime, PSCI)
-        U-Boot (mtd2: uboot, 2 MB) [EL2]
-          bootcmd = "run vyos_direct || run recovery"
-          |
-          +-- vyos_direct: ext4load mmc 0:3 -> VyOS (mmcblk0p3)
-          |                loads: vmlinuz, mono-gw.dtb, initrd.img
-          |                IMPORTANT: initrd must be loaded LAST
-          |                so ${filesize} is correct for booti
-          |
-          +-- recovery:    sf read from mtd7 -> recovery kernel
-```
+
+> ⚠️ **Initrd must be loaded LAST** so `${filesize}` captures initrd size for `booti`.
 
 **U-Boot `${filesize}` gotcha:** Each `ext4load` overwrites the `${filesize}` variable. The `booti` command uses `${ramdisk_addr_r}:${filesize}` to tell the kernel the initrd size. If DTB is loaded after initrd, `${filesize}` = DTB size (94KB) instead of initrd size (~33MB), causing "ZSTD-compressed data is truncated" kernel panic.
 
@@ -329,16 +362,23 @@ kernel_comp_addr_r = 0x90000000
 
 ## MTD Flash Layout
 
-```
-mtd0  flash           64 MB  (full NOR flash)
-mtd1  rcw-bl2          1 MB  ARM Trusted Firmware stage 1
-mtd2  uboot            2 MB  U-Boot
-mtd3  uboot-env        1 MB  fw_printenv/setenv storage
-mtd4  fman-ucode       1 MB  Frame Manager microcode (required for DPAA1)
-mtd5  recovery-dtb     1 MB  DTB for recovery boot
-mtd6  backup           4 MB  Unused
-mtd7  kernel-initramfs 22 MB Recovery kernel+initramfs (fallback)
-mtd8  unallocated      32 MB
+```mermaid
+block-beta
+  columns 4
+  block:nor["SPI NOR Flash — 64 MB"]:4
+    columns 4
+    mtd1["mtd1\nrcw-bl2\n1 MB"]
+    mtd2["mtd2\nuboot\n2 MB"]
+    mtd3["mtd3\nuboot-env\n1 MB"]
+    mtd4["mtd4\nfman-ucode\n1 MB"]
+    mtd5["mtd5\nrecovery-dtb\n1 MB"]
+    mtd6["mtd6\nbackup\n4 MB"]
+    mtd7["mtd7\nkernel-initramfs\n22 MB"]:2
+  end
+
+  style mtd3 fill:#48a,stroke:#333,color:#fff
+  style mtd4 fill:#2a6,stroke:#333,color:#fff
+  style mtd7 fill:#a84,stroke:#333,color:#fff
 ```
 
 `fw_printenv` requires `/etc/fw_env.config` pointing at `/dev/mtd3`. Config: `/dev/mtd3 0x0 0x20000 0x20000`.
@@ -347,12 +387,20 @@ mtd8  unallocated      32 MB
 
 ## eMMC Layout (After `install image`)
 
-```
-mmcblk0       ~29.6 GB total (GPT)
-+-- mmcblk0p1     1 MB    BIOS Boot  (EF02)  raw, no filesystem
-+-- (16 MB gap)           bootloader clearance (vyos-1x-006 patch)
-+-- mmcblk0p2   256 MB    EFI System (EF00)  FAT32, GRUB (unused — bootefi broken)
-+-- mmcblk0p3  29.4 GB    Linux root (8300)  ext4, VyOS squashfs + data
+```mermaid
+block-beta
+  columns 4
+  block:emmc["eMMC (mmcblk0) — 29.6 GB GPT"]:4
+    columns 4
+    p1["p1: BIOS boot\n1 MB\nEF02"]
+    gap["16 MB gap\n(our patch)"]
+    p2["p2: EFI FAT32\n256 MB\n(unused)"]
+    p3["p3: ext4 root\n29.4 GB\nVyOS squashfs + data"]:1
+  end
+
+  style p2 fill:#666,stroke:#333,color:#aaa
+  style p3 fill:#4a9,stroke:#333,color:#fff
+  style gap fill:#555,stroke:#333,color:#aaa
 ```
 
 > **Factory layout (before install):** mmcblk0p1 = 511 MB OpenWrt root (ext4), mmcblk0p2 = rest empty. `install image` destroys this. No recovery back to OpenWrt without reflashing eMMC.
@@ -377,7 +425,7 @@ The DTS inherits from mainline `fsl-ls1046a.dtsi` via `#include`, ensuring compa
 Key DT properties:
 
 ```
-compatible: "fsl,ls1046a"
+compatible: "mono,gateway-dk", "fsl,ls1046a"
 model:      "Mono Gateway Development Kit"
 serial:     uart8250, mmio, 0x21c0500, 115200
 ```
@@ -390,18 +438,24 @@ The LS1046A QorIQ clockgen provides multiple PLL sources for CPU frequency scali
 
 **Clock tree:**
 
-```
-sysclk (100 MHz oscillator)
-├── cg-pll1 (CGA PLL1)
-│   ├── div1 = 1600 MHz  ← max CPU frequency
-│   ├── div2 = 800 MHz
-│   ├── div3 = 533 MHz
-│   └── div4 = 400 MHz
-├── cg-pll2 (CGA PLL2)
-│   ├── div1 = 1400 MHz
-│   ├── div2 = 700 MHz   ← minimum CPU clock
-│   └── ...
-└── cg-cmux0 → cg-pll1-div1 (1600 MHz) ← FIXED ✅
+```mermaid
+flowchart TD
+  OSC["sysclk\n100 MHz oscillator"] --> PLL1["cg-pll1\nCGA PLL1"]
+  OSC --> PLL2["cg-pll2\nCGA PLL2"]
+
+  PLL1 --> D1["div1\n1600 MHz ← max"]
+  PLL1 --> D2["div2\n800 MHz"]
+  PLL1 --> D3["div3\n533 MHz"]
+  PLL1 --> D4["div4\n400 MHz"]
+
+  PLL2 --> D5["div1\n1400 MHz"]
+  PLL2 --> D6["div2\n700 MHz ← min"]
+
+  D1 -->|"selected ✅"| CMUX["cg-cmux0\nCPU clock mux\n4× Cortex-A72"]
+
+  style D1 fill:#4a9,stroke:#333,color:#fff
+  style CMUX fill:#4a9,stroke:#333,color:#fff
+  style D6 fill:#a44,stroke:#333,color:#fff
 ```
 
 **The bug:** `CONFIG_QORIQ_CPUFREQ=m` (module) loads at T+28s, after `clk: Disabling unused clocks` at T+12s disables the PLL parents. CPU locked at 700 MHz.
@@ -496,6 +550,8 @@ CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y  # always max frequency
 
 # === SFP support (10G copper/fiber transceivers) ===
 CONFIG_SFP=y                    # SFP framework
+CONFIG_PHYLINK=y                # phylink layer (SFP dependency)
+CONFIG_PHY_FSL_LYNX_10G=y       # Lynx 10G SerDes PHY (SFP+ 10GBase-R)
 CONFIG_I2C_MUX=y                # I2C multiplexer framework
 CONFIG_I2C_MUX_PCA954x=y        # PCA9545 I2C mux driver
 CONFIG_AQUANTIA_PHY=y           # Aquantia/Marvell AQR PHY driver
@@ -503,6 +559,10 @@ CONFIG_AQUANTIA_PHY=y           # Aquantia/Marvell AQR PHY driver
 # === I2C + GPIO controllers (required for SFP) ===
 CONFIG_I2C_IMX=y                # fsl,vf610-i2c I2C controller
 CONFIG_GPIO_MPC8XXX=y           # fsl,qoriq-gpio controller
+
+# === Board peripherals (fan, thermal, RTC, power sensors) ===
+CONFIG_SENSORS_EMC2305=y        # emc2305 fan controller (Microchip, I2C 0x2e)
+CONFIG_RTC_DRV_PCF2127=y        # PCF2131 RTC (NXP, I2C 0x53)
 ```
 
 ---
@@ -522,7 +582,9 @@ CONFIG_GPIO_MPC8XXX=y           # fsl,qoriq-gpio controller
 ## See Also
 
 - [INSTALL.md](INSTALL.md) -- step-by-step installation guide
-- [boot.efi.md](boot.efi.md) -- U-Boot reference: memory map, boot commands, hardware details
+- [UBOOT.md](UBOOT.md) -- U-Boot serial console reference: memory map, boot commands, clock tree, MTD layout
 - [README.md](README.md) -- project overview
 - [Mono Gateway Getting Started](https://github.com/we-are-mono/meta-mono/blob/master/gateway-development-kit/getting-started.md) -- factory setup, serial console, Recovery Linux
 - [Mono Gateway Hardware Description](https://github.com/we-are-mono/meta-mono/blob/master/gateway-development-kit/hardware-description.md) -- port pinouts, GPIO, M.2, fan headers
+- [nix repo (Mono NixOS build)](https://github.com/nicator-company/nix) -- official DTS source, kernel patches (FMan ethernet-alias ordering, INA234 hwmon), defconfig
+- [OpenWRT-ASK (Mono OpenWrt fork)](https://github.com/nicator-company/OpenWRT-ASK) -- NXP SDK DPAA driver, SDK DTS overlays, upgrade scripts

@@ -157,12 +157,17 @@ jobs:
             '# CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL is not set' \
             '# === SFP support (10G copper/fiber transceivers) ===' \
             'CONFIG_SFP=y' \
+            'CONFIG_PHYLINK=y' \
+            'CONFIG_PHY_FSL_LYNX_10G=y' \
             'CONFIG_I2C_MUX=y' \
             'CONFIG_I2C_MUX_PCA954x=y' \
             'CONFIG_AQUANTIA_PHY=y' \
             '# === I2C + GPIO controllers (required for SFP I2C mux and GPIOs) ===' \
             'CONFIG_I2C_IMX=y' \
             'CONFIG_GPIO_MPC8XXX=y' \
+            '# === Board peripherals (fan, thermal, RTC, power sensors) ===' \
+            'CONFIG_SENSORS_EMC2305=y' \
+            'CONFIG_RTC_DRV_PCF2127=y' \
             >> "$DEFCONFIG"
 
           ### Remove --uefi-secure-boot from grub-install
@@ -501,15 +506,17 @@ jobs:
               "pr_template": "- #{{TITLE}}\n   - PR: vyos/vyos-build##{{NUMBER}}"
             }
 
-      - name: "Release publishing: generate CHANGELOG.md"
+      - name: "Release publishing: generate release notes"
         run: |
-          cat <<EOF > CHANGELOG.md
-          ## vyos-1x
+          cat <<EOF > /tmp/release_notes.md
+          ## Upstream changes since last build
+
+          ### vyos-1x
           ${{ steps.generate_changelog_for_vyos-1x.outputs.changelog }}
-          ## vyos-build
+          ### vyos-build
           ${{ steps.generate_changelog_for_vyos-build.outputs.changelog }}
           EOF
-          cat CHANGELOG.md
+          cat /tmp/release_notes.md
 
       - name: "Release publishing: create version.json"
         uses: jsdaniell/create-json@v1.2.3
@@ -558,7 +565,7 @@ jobs:
       - name: "Release publishing: publish release"
         uses: softprops/action-gh-release@v2
         with:
-          body_path: CHANGELOG.md
+          body_path: /tmp/release_notes.md
           tag_name: ${{ needs.build_iso.outputs.build_version }}
           fail_on_unmatched_files: false
           files: |
