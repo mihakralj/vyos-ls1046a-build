@@ -16,6 +16,8 @@ VPP (Vector Packet Processing) from fd.io bypasses the Linux kernel entirely:
 2. **Kernel Bypass:** Uses DPDK (Data Plane Development Kit) with a Poll Mode Driver (PMD) to talk directly to hardware — zero interrupts
 3. **DPAA1 Hardware Offload:** The LS1046A's Frame Manager, Buffer Manager, and Queue Manager become VPP's co-processors via USDPAA (Userspace DPAA)
 
+[Read more about VPP implementation in VyOS](https://docs.vyos.io/en/latest/vpp/description.html)
+
 ### Performance Comparison (Estimated)
 
 | Metric | Standard VyOS (Kernel) | VyOS + VPP (DPAA1 PMD) |
