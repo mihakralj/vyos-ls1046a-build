@@ -5,3 +5,4 @@ global_deps/
 vyos-*-arm64.iso*
 data/mok/MOK.key
 data/vyos-ls1046a.minisign.key
+.roo/

@@ -118,7 +118,7 @@ booti ${kernel_addr_r} - ${fdt_addr_r}
 ## Ethernet Interfaces
 
 > ⚠️ Physical RJ45 port order differs from DT node address order.
-> Port remapping is handled by systemd `.link` files, not DTS aliases.
+> Port remapping is handled by udev rule `64-fman-port-order.rules` setting `VYOS_IFNAME`.
 
 | Physical Position | DT Node | MAC Address | PHY Addr | VyOS Name | Type |
 |-------------------|---------|-------------|----------|-----------|------|

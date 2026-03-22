@@ -159,26 +159,33 @@ sfp_xfi0: sfp-xfi0 {
 
 ethernet@f0000 {
     sfp = <&sfp_xfi0>;
-    phy-connection-type = "10gbase-r";
+    phy-connection-type = "xgmii";  /* kernel converts to 10gbase-r */
     managed = "in-band-status";
 };
 ```
+
+**Critical:** The 10G MAC nodes must use `phy-connection-type = "xgmii"`, not `"10gbase-r"`. In kernel 6.6's `fman_memac.c`, the PCS assignment fallback path checks `phy_if == PHY_INTERFACE_MODE_XGMII` to assign the PCS to `xfi_pcs`. Using `"10gbase-r"` directly causes the PCS to be misassigned to `sgmii_pcs`, resulting in a NULL `xfi_pcs` and broken 10GBASE-R link detection. The kernel converts XGMII → 10GBASER after PCS assignment.
 
 The DTS is compiled from kernel source during build (using `make dtbs` against the kernel's `fsl-ls1046a.dtsi` includes), producing a DTB with correct mainline bindings.
 
 ### Fix 6: Port Remapping
 
-Systemd `.link` files in `/etc/systemd/network/` assign stable names based on FMAN MAC hardware addresses:
+VyOS uses its own interface naming system (`vyos_net_name` invoked by `65-vyos-net.rules`) which overrides systemd `.link` files. The VyOS naming chain: kernel assigns temporary names (e2–e6) → `vyos_net_name` converts via `biosdevname`/`mod_ifname()` → final ethN in DT address probe order (rightmost RJ45 = eth0).
+
+To override this, a udev rule at priority 64 (before 65) sets `ENV{VYOS_IFNAME}`, which VyOS's rule honors as a "predefined" name:
 
 ```
-10-fman-eth0.link: [Match] Path=*1ae8000* → [Link] Name=eth0  (leftmost RJ45)
-10-fman-eth1.link: [Match] Path=*1aea000* → [Link] Name=eth1  (center RJ45)
-10-fman-eth2.link: [Match] Path=*1ae2000* → [Link] Name=eth2  (rightmost RJ45)
-10-fman-eth3.link: [Match] Path=*1af0000* → [Link] Name=eth3  (SFP1, left cage)
-10-fman-eth4.link: [Match] Path=*1af2000* → [Link] Name=eth4  (SFP2, right cage)
+# /etc/udev/rules.d/64-fman-port-order.rules
+ENV{DEVPATH}=="*/1ae8000.ethernet/*", ENV{VYOS_IFNAME}="eth0"   # leftmost RJ45
+ENV{DEVPATH}=="*/1aea000.ethernet/*", ENV{VYOS_IFNAME}="eth1"   # center RJ45
+ENV{DEVPATH}=="*/1ae2000.ethernet/*", ENV{VYOS_IFNAME}="eth2"   # rightmost RJ45
+ENV{DEVPATH}=="*/1af0000.ethernet/*", ENV{VYOS_IFNAME}="eth3"   # SFP1 (left cage)
+ENV{DEVPATH}=="*/1af2000.ethernet/*", ENV{VYOS_IFNAME}="eth4"   # SFP2 (right cage)
 ```
 
-`.link` files process during `net_setup_link` (before userspace sees the interface), avoiding udev NAME= swap races. Priority 10 beats `99-default.link`.
+`DEVPATH` is always available (unlike `ID_PATH`) and contains the FMan MAC absolute address. When `VYOS_IFNAME` is set to `ethN`, `65-vyos-net.rules` passes it as the `predefined` argument to `vyos_net_name`, bypassing `biosdevname`.
+
+> **Note:** Systemd `.link` files do NOT work with VyOS — `vyos_net_name` overrides them.
 
 ### Fix 7: Automated Install/Upgrade Flow
 
@@ -295,17 +302,17 @@ Each MAC's DTB node has a `pcsphy-handle` pointing to a PCS device on an MDIO bu
 
 ## Ethernet Interface Mapping
 
-Verified by cable-plug testing on board #308. Port remapping via systemd `.link` files corrects the DT address order to match physical layout:
+Verified by cable-plug testing on board #308. Port remapping via udev rule `64-fman-port-order.rules` corrects the DT address order to match physical layout:
 
-| Physical Position | Type | VyOS name | MAC Address | DT Node | .link Match |
-|-------------------|------|-----------|-------------|---------|-------------|
-| Port 1 (leftmost RJ45) | SGMII | **eth0** | `E8:F6:D7:00:15:FF` | `1ae8000` | `Path=*1ae8000*` |
-| Port 2 (center RJ45) | SGMII | **eth1** | `E8:F6:D7:00:16:00` | `1aea000` | `Path=*1aea000*` |
-| Port 3 (right RJ45) | SGMII | **eth2** | `E8:F6:D7:00:16:01` | `1ae2000` | `Path=*1ae2000*` |
-| SFP1 (left cage) | 10GBase-R | **eth3** | `E8:F6:D7:00:16:02` | `1af0000` | `Path=*1af0000*` |
-| SFP2 (right cage) | 10GBase-R | **eth4** | `E8:F6:D7:00:16:03` | `1af2000` | `Path=*1af2000*` |
+| Physical Position | Type | VyOS name | MAC Address | DT Node | DEVPATH Match |
+|-------------------|------|-----------|-------------|---------|---------------|
+| Port 1 (leftmost RJ45) | SGMII | **eth0** | `E8:F6:D7:00:15:FF` | `1ae8000` | `*/1ae8000.ethernet/*` |
+| Port 2 (center RJ45) | SGMII | **eth1** | `E8:F6:D7:00:16:00` | `1aea000` | `*/1aea000.ethernet/*` |
+| Port 3 (right RJ45) | SGMII | **eth2** | `E8:F6:D7:00:16:01` | `1ae2000` | `*/1ae2000.ethernet/*` |
+| SFP1 (left cage) | 10GBase-R | **eth3** | `E8:F6:D7:00:16:02` | `1af0000` | `*/1af0000.ethernet/*` |
+| SFP2 (right cage) | 10GBase-R | **eth4** | `E8:F6:D7:00:16:03` | `1af2000` | `*/1af2000.ethernet/*` |
 
-Without `.link` files, the kernel assigns names by DT address order: rightmost RJ45 = eth0 (address `1ae2000` sorts first). The `.link` files override this during `net_setup_link`, before userspace sees the interfaces.
+Without the udev rule, VyOS's `vyos_net_name` assigns names by DT address probe order: rightmost RJ45 = eth0 (address `1ae2000` sorts first). The rule sets `VYOS_IFNAME` before `65-vyos-net.rules`, hooking into VyOS's native naming mechanism.
 
 > **OpenWrt uses different naming:** The NXP SDK DPAA driver (`fsl_dpa`) probes in a different order. The official Mono Gateway docs list left-to-right as eth0, eth1, eth2.
 
@@ -555,6 +562,7 @@ CONFIG_PHY_FSL_LYNX_10G=y       # Lynx 10G SerDes PHY (SFP+ 10GBase-R)
 CONFIG_I2C_MUX=y                # I2C multiplexer framework
 CONFIG_I2C_MUX_PCA954x=y        # PCA9545 I2C mux driver
 CONFIG_AQUANTIA_PHY=y           # Aquantia/Marvell AQR PHY driver
+CONFIG_REALTEK_PHY=y            # Realtek PHY driver (RTL821x/RTL822x)
 
 # === I2C + GPIO controllers (required for SFP) ===
 CONFIG_I2C_IMX=y                # fsl,vf610-i2c I2C controller
