@@ -38,6 +38,45 @@ VPP (Vector Packet Processing) from fd.io bypasses the Linux kernel entirely:
 
 ---
 
+## Why Not VyOS Built-in VPP?
+
+VyOS rolling includes a [VPP dataplane integration](https://docs.vyos.io/en/latest/vpp/description.html) with CLI commands (`set system vpp`). However, **it cannot work on the Mono Gateway** due to three hard blockers:
+
+| Blocker | VyOS Requirement | Mono Gateway Reality |
+|---------|-----------------|---------------------|
+| **CPU instruction set** | SSE4.2 (x86 only) | ARM64 Cortex-A72 — has NEON, not SSE4.2 |
+| **NIC detection** | PCI ID whitelist (ConnectX-5/6, E810, Virtio, ENA) | DPAA1 is SoC memory-mapped — no PCI IDs at all |
+| **DPDK PMD** | Ships Intel/Mellanox/virtio PMDs | NXP DPAA PMD not included in VyOS binary |
+
+VPP itself fully supports ARM64 (NEON vectorization), and DPDK has a DPAA1 PMD in NXP's fork — the blockers are in **VyOS's integration layer**, not in VPP or DPDK themselves.
+
+### Our Management Strategy
+
+```mermaid
+flowchart LR
+  P1["Phase 1<br/>Standalone VPP<br/>Custom systemd service<br/>vppctl management"] --> P2["Phase 2<br/>VyOS Wrappers<br/>Operational-mode commands<br/>Config templates → startup.conf"]
+  P2 --> P3["Phase 3<br/>Upstream Contribution<br/>ARM64 + DPAA1 platform<br/>Full set system vpp"]
+
+  style P1 fill:#4a9,stroke:#333,color:#fff
+  style P2 fill:#48a,stroke:#333,color:#fff
+  style P3 fill:#555,stroke:#333,color:#fff
+```
+
+**Phase 1 — Standalone NXP VPP**
+- Cross-compile NXP's DPDK + VPP forks with DPAA PMD
+- Run VPP as a custom `systemd` service managed via `vppctl`
+- FMC service pre-configures DPAA1 hardware queues
+- VyOS kernel retains RJ45 management ports (eth0–eth2)
+- VPP claims SFP+ 10G ports (eth3, eth4) via USDPAA
+
+**Phase 2 — VyOS Operational Wrappers** (after VPP is proven)
+- Add VyOS operational-mode commands: `show vpp interfaces`, `show vpp stats`
+- Config templates generate `/etc/vpp/startup.conf` from VyOS config tree
+- Does **not** use `set system vpp` — that path requires VyOS upstream changes
+
+
+---
+
 ## The Architecture: Kernel vs Userspace Data Planes
 
 ```mermaid
