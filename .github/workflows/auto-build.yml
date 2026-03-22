@@ -227,7 +227,7 @@ jobs:
             'WantedBy=multi-user.target' \
             > "$CHROOT/etc/systemd/system/vyos-postinstall.service"
           mkdir -p "$CHROOT/etc/systemd/system/multi-user.target.wants"
-          ln -sf /etc/systemd/system/vyos-postinstall.service \
+          ln -sf ../vyos-postinstall.service \
             "$CHROOT/etc/systemd/system/multi-user.target.wants/vyos-postinstall.service"
 
           ### Boot optimization: mask unnecessary services for LS1046A
