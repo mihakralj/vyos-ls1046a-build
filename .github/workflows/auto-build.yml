@@ -421,6 +421,7 @@ jobs:
             --custom-package mokutil \
             --custom-package grub-efi-arm64-signed \
             --custom-package u-boot-tools \
+            --custom-package libubootenv-tool \
             generic
           cd build
           # Rename generic -> LS1046A in artifact filenames
