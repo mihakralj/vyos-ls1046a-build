@@ -8,8 +8,12 @@ This project is a fork of [huihuimoe/vyos-arm64-build](https://github.com/huihui
 ### Added
 - Kernel configs: `PHYLINK`, `PHY_FSL_LYNX_10G` (10G PCS layer for SFP+)
 - Kernel configs: `SENSORS_EMC2305` (fan controller), `RTC_DRV_PCF2127` (RTC)
+- Kernel config: `CONFIG_REALTEK_PHY=y` (Realtek PHY driver for RTL821x/RTL822x)
 - DTS: ethernet aliases (`ethernet0`–`ethernet4`) for deterministic interface naming
 - DTS: `compatible = "mono,gateway-dk", "fsl,ls1046a"` board identification
+
+### Fixed
+- **SFP+ link DOWN**: DTS used `phy-connection-type = "10gbase-r"` which caused `fman_memac.c` to misassign PCS to `sgmii_pcs` instead of `xfi_pcs`. Changed to `"xgmii"` — kernel converts XGMII→10GBASER after correct PCS assignment. Root cause: PCS fallback path checks `phy_if == XGMII` to assign `xfi_pcs`; using `"10gbase-r"` directly bypasses this, leaving `xfi_pcs = NULL` and breaking in-band link detection.
 
 ### Changed
 - Renamed `boot.efi.md` → `UBOOT.md`, stripped duplicated content (kept unique U-Boot/MTD/clock data)
@@ -26,14 +30,14 @@ This project is a fork of [huihuimoe/vyos-arm64-build](https://github.com/huihui
 - DTB auto-copy on install via `vyos-postinstall` helper script
 - `vyos-postinstall.service` — systemd oneshot for DTB + U-Boot env on first boot
 - `vyos-1x-007-prefer-emmc-default.patch` — default `install image` to eMMC
-- Port remapping via systemd `.link` files (physical left-to-right = eth0–eth2)
+- Port remapping via udev `VYOS_IFNAME` rule (physical left-to-right = eth0–eth2)
 - I2C and GPIO kernel configs required for SFP cage control
 - `u-boot-tools` package for `fw_setenv` support
 - `fw_env.config` for U-Boot environment access via `/dev/mtd3`
 - Hardened default configs for headless embedded operation
 
 ### Fixed
-- Port remapping: replaced DTS-only approach with `.link` files (works with mainline)
+- Port remapping: replaced DTS-only approach with udev `64-fman-port-order.rules` (hooks into VyOS naming)
 - `vyos-postinstall` auto-detects latest image version string
 - Relative symlink for `vyos-postinstall.service` (copytree compatibility)
 

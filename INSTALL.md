@@ -65,15 +65,18 @@ Wait 2–4 minutes. The DTB is copied automatically.
 
 ```bash
 sudo mount /dev/mmcblk0p3 /mnt
-IMG=$(ls /mnt/boot/ | grep '20.*rolling' | head -1)
-echo "Image: $IMG"
-sudo cp /boot/mono-gw.dtb /mnt/boot/$IMG/
-sudo fw_setenv vyos_direct "ext4load mmc 0:3 \${kernel_addr_r} boot/${IMG}/vmlinuz; ext4load mmc 0:3 \${fdt_addr_r} boot/${IMG}/mono-gw.dtb; ext4load mmc 0:3 \${ramdisk_addr_r} boot/${IMG}/initrd.img; setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin vyos-union=/boot/${IMG}; booti \${kernel_addr_r} \${ramdisk_addr_r}:\${filesize} \${fdt_addr_r}"
-sudo fw_setenv bootcmd "run vyos_direct || run recovery"
+sudo vyos-postinstall
 sudo umount /mnt
 ```
 
-You should see `Image: 2026.03.22-XXXX-rolling` confirming the detected image name.
+You should see output like:
+
+```
+Auto-detected image: 2026.03.22-0150-rolling
+✓ DTB: /boot/mono-gw.dtb → /mnt/boot/2026.03.22-0150-rolling/mono-gw.dtb
+✓ U-Boot: vyos_direct → boot/2026.03.22-0150-rolling/
+✓ U-Boot: bootcmd → 'run vyos_direct || run recovery'
+```
 
 ## 5. Reboot into eMMC
 
