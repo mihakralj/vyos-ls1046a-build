@@ -34,10 +34,9 @@ check_board() {
 #--- Find persistence root (where /boot/{image}/ lives on eMMC) ---
 find_root() {
     # After 'install image', VyOS mounts the eMMC persistence partition.
-    # Check multiple candidates — prefer one with actual image directories.
+    # Check well-known paths first, then scan all mounted filesystems.
     for candidate in "/" "/mnt/root" "/mnt"; do
         if [ -d "${candidate}/boot" ]; then
-            # Look for directories matching VyOS version pattern YYYY.MM.DD-*
             local images
             images=$(find "${candidate}/boot" -maxdepth 1 -mindepth 1 -type d \
                 -name '20*-*-rolling' 2>/dev/null | wc -l)
@@ -47,7 +46,20 @@ find_root() {
             fi
         fi
     done
+    # Scan all mounted filesystems for VyOS image directories
+    while IFS= read -r mpoint; do
+        if [ -d "${mpoint}/boot" ]; then
+            local images
+            images=$(find "${mpoint}/boot" -maxdepth 1 -mindepth 1 -type d \
+                -name '20*-*-rolling' 2>/dev/null | wc -l)
+            if [ "$images" -gt 0 ]; then
+                echo "$mpoint"
+                return 0
+            fi
+        fi
+    done < <(mount | awk '{print $3}' | grep -v -E '^/(proc|sys|dev|run)')
     echo "ERROR: Cannot find persistence root with VyOS image directories in /boot/" >&2
+    echo "Mount eMMC first: sudo mount /dev/mmcblk0p3 /mnt" >&2
     return 1
 }
 
