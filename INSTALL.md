@@ -47,23 +47,21 @@ Accept defaults for most prompts. When asked:
 
 Wait 2–4 minutes. The DTB is copied automatically.
 
-## 4. Configure U-Boot
+## 4. Reboot into eMMC
 
-```bash
-sudo vyos-postinstall
-```
-
-This updates U-Boot to boot VyOS from eMMC on every reboot.
-
-## 5. Reboot
+Reboot, press **any key** at U-Boot, paste this **one time**:
 
 ```
-reboot
+ext4load mmc 0:3 ${kernel_addr_r} boot/IMGNAME/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} boot/IMGNAME/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} boot/IMGNAME/initrd.img; setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin vyos-union=/boot/IMGNAME; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
 ```
 
-Remove the USB drive. VyOS boots from eMMC automatically.
+Replace `IMGNAME` with the version shown during install (e.g. `2026.03.22-0117-rolling`).
 
-## 6. Initial Config
+> **After the first boot, U-Boot is auto-configured.** A systemd service runs
+> `vyos-postinstall` on every boot, saving the correct U-Boot env to SPI flash.
+> All subsequent reboots are automatic — no manual U-Boot commands needed.
+
+## 5. Initial Config
 
 ```
 configure
@@ -93,9 +91,12 @@ Physical port order, left to right on the back panel:
 
 ```
 add system image https://github.com/mihakralj/vyos-ls1046a-build/releases/download/<version>/vyos-<version>-LS1046A-arm64.iso
-sudo vyos-postinstall <new-image-name>
+sudo vyos-postinstall
 reboot
 ```
+
+The `vyos-postinstall` auto-detects the latest image by version and updates U-Boot.
+It also runs automatically on every boot via systemd service.
 
 ---
 

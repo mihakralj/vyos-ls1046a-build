@@ -205,6 +205,30 @@ jobs:
           cp data/scripts/vyos-postinstall "$CHROOT/usr/local/bin/vyos-postinstall"
           chmod +x "$CHROOT/usr/local/bin/vyos-postinstall"
 
+          ### Auto-run vyos-postinstall on every boot (ensures U-Boot env matches running image)
+          # After 'install image' + first manual U-Boot boot, this service auto-saves the
+          # correct env so all subsequent reboots are automatic. Also handles upgrades:
+          # after 'add system image' + reboot, the service detects the running image and
+          # updates U-Boot to match. No-op on non-LS1046A hardware (script exits early).
+          printf '%s\n' \
+            '[Unit]' \
+            'Description=Sync U-Boot env with running VyOS image (LS1046A)' \
+            'After=local-fs.target' \
+            'ConditionPathExists=/proc/device-tree/compatible' \
+            '' \
+            '[Service]' \
+            'Type=oneshot' \
+            'ExecStart=/usr/local/bin/vyos-postinstall' \
+            'RemainAfterExit=yes' \
+            'StandardOutput=journal' \
+            '' \
+            '[Install]' \
+            'WantedBy=multi-user.target' \
+            > "$CHROOT/etc/systemd/system/vyos-postinstall.service"
+          mkdir -p "$CHROOT/etc/systemd/system/multi-user.target.wants"
+          ln -sf /etc/systemd/system/vyos-postinstall.service \
+            "$CHROOT/etc/systemd/system/multi-user.target.wants/vyos-postinstall.service"
+
           ### Boot optimization: mask unnecessary services for LS1046A
           # kexec double-boot wastes ~70s: first boot runs fully, then reboots via kexec
           # Disabling kexec also fixes interface renames (eth0→e2) caused by second boot
