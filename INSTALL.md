@@ -26,12 +26,13 @@ sudo dd if=vyos-*-LS1046A-arm64.iso of=/dev/sdX bs=4M status=progress && sync
 Insert USB, power on, press **any key** during U-Boot countdown.
 
 > **Optional — wipe eMMC** (removes OpenWrt or any previous OS):
+
 > ```uboot
 > mmc dev 0 && mmc erase 0 0x10000
 > ```
 > This erases the first 32 MB of eMMC (partition table + headers). Takes ~1 second.
 
-Paste the boot command:
+Paste the live usb boot command:
 
 ``` uboot
 usb start; setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda1 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet"; fatload usb 0:1 ${kernel_addr_r} live/vmlinuz; fatload usb 0:1 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:1 ${ramdisk_addr_r} live/initrd.img; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
@@ -60,23 +61,19 @@ Wait 2–4 minutes. The DTB is copied automatically.
 
 ## 4. in VyOS Live - Configure U-Boot
 
-**Still in the live USB session** (do NOT reboot yet), run:
+**Still in the live USB session** (do NOT reboot yet), configure U-Boot to auto-boot from eMMC:
 
 ```bash
 sudo mount /dev/mmcblk0p3 /mnt
-sudo vyos-postinstall
+IMG=$(ls /mnt/boot/ | grep '20.*rolling' | head -1)
+echo "Image: $IMG"
+sudo cp /boot/mono-gw.dtb /mnt/boot/$IMG/
+sudo fw_setenv vyos_direct "ext4load mmc 0:3 \${kernel_addr_r} boot/${IMG}/vmlinuz; ext4load mmc 0:3 \${fdt_addr_r} boot/${IMG}/mono-gw.dtb; ext4load mmc 0:3 \${ramdisk_addr_r} boot/${IMG}/initrd.img; setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin vyos-union=/boot/${IMG}; booti \${kernel_addr_r} \${ramdisk_addr_r}:\${filesize} \${fdt_addr_r}"
+sudo fw_setenv bootcmd "run vyos_direct || run recovery"
 sudo umount /mnt
 ```
 
-This writes the correct boot command to U-Boot SPI flash automatically.
-You should see output like:
-
-``` uboot
-Auto-detected image: 2026.03.22-0150-rolling
-✓ DTB: /boot/mono-gw.dtb → /mnt/boot/2026.03.22-0150-rolling/mono-gw.dtb
-✓ U-Boot: vyos_direct → boot/2026.03.22-0150-rolling/
-✓ U-Boot: bootcmd → 'run vyos_direct || run recovery'
-```
+You should see `Image: 2026.03.22-XXXX-rolling` confirming the detected image name.
 
 ## 5. Reboot into eMMC
 
