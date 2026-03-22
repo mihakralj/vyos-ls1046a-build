@@ -23,7 +23,15 @@ sudo dd if=vyos-*-LS1046A-arm64.iso of=/dev/sdX bs=4M status=progress && sync
 
 ## 2. in U-Boot - Boot VyOS Live from USB
 
-Insert USB, power on, press **any key** during U-Boot countdown. Paste:
+Insert USB, power on, press **any key** during U-Boot countdown.
+
+> **Optional — wipe eMMC** (removes OpenWrt or any previous OS):
+> ```uboot
+> mmc dev 0 && mmc erase 0 0x10000
+> ```
+> This erases the first 32 MB of eMMC (partition table + headers). Takes ~1 second.
+
+Paste the boot command:
 
 ``` uboot
 usb start; setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda1 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet"; fatload usb 0:1 ${kernel_addr_r} live/vmlinuz; fatload usb 0:1 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:1 ${ramdisk_addr_r} live/initrd.img; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
@@ -33,12 +41,6 @@ Wait 60–90 seconds for VyOS login prompt.
 
 > **If `fatload` says "File not found":** run `fatls usb 0:1 live` — if the
 > kernel has a version suffix (e.g. `vmlinuz-6.6.128-vyos`), use the full name.
-
-> **Optional — wipe eMMC clean** before installing (removes OpenWrt or any
-> previous OS). After VyOS login, run before `install image`:
-> ```bash
-> sudo sgdisk --zap-all /dev/mmcblk0 && sudo partprobe /dev/mmcblk0
-> ```
 
 ## 3. in VyOS Live - Install VyOS to eMMC
 
