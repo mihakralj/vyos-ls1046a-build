@@ -42,26 +42,46 @@ install image
 ```
 
 Accept defaults for most prompts. When asked:
+- **RAID-1 mirroring:** `n`
 - **Console type:** `S` (serial)
 - **Which disk:** `/dev/mmcblk0`
 
 Wait 2–4 minutes. The DTB is copied automatically.
 
-## 4. Reboot into eMMC
+## 4. Configure U-Boot
 
-Reboot, press **any key** at U-Boot, paste this **one time**:
+**Still in the live USB session** (do NOT reboot yet), run:
+
+```bash
+sudo mount /dev/mmcblk0p3 /mnt
+sudo vyos-postinstall
+sudo umount /mnt
+```
+
+This writes the correct boot command to U-Boot SPI flash automatically.
+You should see output like:
 
 ```
-ext4load mmc 0:3 ${kernel_addr_r} boot/IMGNAME/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} boot/IMGNAME/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} boot/IMGNAME/initrd.img; setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin vyos-union=/boot/IMGNAME; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
+Auto-detected image: 2026.03.22-0150-rolling
+✓ DTB: /boot/mono-gw.dtb → /mnt/boot/2026.03.22-0150-rolling/mono-gw.dtb
+✓ U-Boot: vyos_direct → boot/2026.03.22-0150-rolling/
+✓ U-Boot: bootcmd → 'run vyos_direct || run recovery'
 ```
 
-Replace `IMGNAME` with the version shown during install (e.g. `2026.03.22-0117-rolling`).
+## 5. Reboot into eMMC
 
-> **After the first boot, U-Boot is auto-configured.** A systemd service runs
-> `vyos-postinstall` on every boot, saving the correct U-Boot env to SPI flash.
-> All subsequent reboots are automatic — no manual U-Boot commands needed.
+Remove the USB drive and reboot:
 
-## 5. Initial Config
+```
+reboot
+```
+
+U-Boot auto-boots into VyOS on eMMC. No manual U-Boot commands needed.
+
+> **All subsequent reboots are automatic.** `vyos-postinstall` also runs on
+> every boot via systemd service, keeping U-Boot in sync after upgrades.
+
+## 6. Initial Config
 
 ```
 configure
