@@ -36,7 +36,7 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Single 
 - **linux-headers stripped:** `rm -rf packages/linux-headers-*` before ISO build to save space on the runner
 - **Secure Boot chain:** MOK.pem/MOK.key for kernel module signing, minisign for ISO signing, `grub-efi-arm64-signed` + `shim-signed` packages included
 - **Weekly schedule:** Cron runs Friday 01:00 UTC. Also triggered manually via `workflow_dispatch`
-- **Boot optimizations:** `kexec-load.service`, `kexec.service`, `acpid.service`, `acpid.socket`, `acpid.path` are masked in the ISO via symlinks to `/dev/null`. ACPI masking saves ~2s. kexec masking reduces load-at-boot but does NOT prevent the live-boot kexec reboot (see above). `CONFIG_DEBUG_PREEMPT` suppression saves ~20s. Installed system boot time: ~82s to login prompt.
+- **Boot optimizations:** `kexec-load.service`, `kexec.service`, `acpid.service`, `acpid.socket`, `acpid.path` are masked in the ISO via symlinks to `/dev/null`. ACPI masking saves ~2s. kexec masking forces full cold reboots on installed systems (ensures DPAA1/SFP/I2C hardware re-initializes cleanly). Does NOT prevent the live-boot kexec double-boot — that is triggered by `vyos-router` reaching `kexec.target` (a systemd target, not a service). `CONFIG_DEBUG_PREEMPT` suppression saves ~20s. Installed system boot time: ~82s to login prompt.
 
 ## Boot Diagnostics (Ignore These)
 

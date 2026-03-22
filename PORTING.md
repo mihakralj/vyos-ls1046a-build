@@ -414,12 +414,17 @@ sysclk (100 MHz oscillator)
 
 ### Services Masked in ISO
 
-| Service | Why masked | Savings |
-|---------|-----------|---------|
-| `kexec-load.service` | Prevents kexec double-boot (~70s penalty) | ~70s |
-| `kexec.service` | Prevents kexec reboot trigger | Minor |
-| `acpid.service` | No ACPI on ARM64/DeviceTree | ~2s |
+| Service | Why masked | Effect |
+|---------|-----------|--------|
+| `kexec-load.service` | Forces full cold reboot (hardware re-init for DPAA1/SFP/I2C) | Reliability |
+| `kexec.service` | Prevents kexec fast-reboot path on installed system | Reliability |
+| `acpid.service` | No ACPI on ARM64/DeviceTree | ~2s saved |
 | `acpid.socket` / `acpid.path` | No ACPI on ARM64/DeviceTree | — |
+
+> **Note:** Masking kexec services does **not** prevent the live-boot double-boot
+> (~70s penalty). That is triggered by `vyos-router` reaching `kexec.target`,
+> which is a systemd target, not a service. The penalty only occurs during USB
+> live boot for initial installation and does not affect installed systems.
 
 ### Default Config Hardening
 
