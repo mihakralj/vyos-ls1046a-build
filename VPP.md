@@ -40,7 +40,7 @@ VPP (Vector Packet Processing) from fd.io bypasses the Linux kernel entirely:
 
 ## Why Not VyOS Built-in VPP?
 
-VyOS rolling includes a [VPP dataplane integration](https://docs.vyos.io/en/latest/vpp/description.html) with CLI commands (`set system vpp`). However, **it cannot work on the Mono Gateway** due to three hard blockers:
+VyOS rolling includes a VPP dataplane integration with CLI commands (`set system vpp`). However, **it cannot work on the Mono Gateway** due to three hard blockers:
 
 | Blocker | VyOS Requirement | Mono Gateway Reality |
 |---------|-----------------|---------------------|
@@ -55,11 +55,10 @@ VPP itself fully supports ARM64 (NEON vectorization), and DPDK has a DPAA1 PMD i
 ```mermaid
 flowchart LR
   P1["Phase 1<br/>Standalone VPP<br/>Custom systemd service<br/>vppctl management"] --> P2["Phase 2<br/>VyOS Wrappers<br/>Operational-mode commands<br/>Config templates → startup.conf"]
-  P2 --> P3["Phase 3<br/>Upstream Contribution<br/>ARM64 + DPAA1 platform<br/>Full set system vpp"]
 
   style P1 fill:#4a9,stroke:#333,color:#fff
   style P2 fill:#48a,stroke:#333,color:#fff
-  style P3 fill:#555,stroke:#333,color:#fff
+
 ```
 
 **Phase 1 — Standalone NXP VPP**
