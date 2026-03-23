@@ -63,12 +63,17 @@ wget https://github.com/mihakralj/vyos-ls1046a-build/releases/latest/download/vy
 Power on Mono Gateway, interrupt U-Boot (`Hit any key`), paste these lines:
 
 ```
+setenv ethact fm1-mac5
 setenv serverip 192.168.1.137
 setenv ipaddr 192.168.1.200
 setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin vyos-union=/boot/2026.03.22-0432-rolling"
 setenv dev_boot 'tftp 0xa0000000 vmlinuz; tftp 0x90000000 mono-gw.dtb; tftp 0xb0000000 initrd.img; booti 0xa0000000 0xb0000000:${filesize} 0x90000000'
 saveenv
 ```
+
+> **Note:** `ethact fm1-mac5` forces U-Boot to use the leftmost RJ45 port for TFTP.
+> Without this, U-Boot may default to an SFP port (fm1-mac9) which cannot do TFTP
+> with copper SFP-10G-T modules (no U-Boot RTL8261 driver).
 
 > **Critical:** `vyos-union=/boot/<IMAGE>` must match the installed VyOS image on eMMC.
 > Check with: `ls mmc 0:3 /boot/` in U-Boot or `show system image` in VyOS.
