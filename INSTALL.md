@@ -93,27 +93,32 @@ U-Boot auto-boots into VyOS on eMMC. No manual U-Boot commands needed.
 
 ## 6. Initial Config
 
-``` bash
-configure
-set interfaces ethernet eth0 address dhcp
-set service ssh
-commit
-save
-```
+The default config includes DHCP on all interfaces and SSH enabled.
+Login `vyos` / `vyos` — SSH key authentication is preconfigured for helga.
+
+No manual configuration needed for basic connectivity.
 
 ---
 
 ## Network Interfaces
 
-Physical port order, left to right on the back panel:
+Physical port order on the back panel:
 
-| Port | VyOS | Type |
-|------|------|------|
-| Leftmost RJ45 | `eth0` | 1G SGMII |
-| Center RJ45 | `eth1` | 1G SGMII |
-| Rightmost RJ45 | `eth2` | 1G SGMII |
-| SFP+ slot 1 | `eth3` | 10G XFI |
-| SFP+ slot 2 | `eth4` | 10G XFI |
+| Port | VyOS | Type | Notes |
+|------|------|------|-------|
+| RJ45 Left | `eth0` | 1G SGMII | GPY115C PHY |
+| RJ45 Right | `eth1` | 1G SGMII | GPY115C PHY |
+| RJ45 Center | `eth2` | 1G SGMII | GPY115C PHY |
+| SFP+ Left | `eth3` | 10G XFI | **10G modules only** |
+| SFP+ Right | `eth4` | 10G XFI | **10G modules only** |
+
+All interfaces are preconfigured with DHCP in the default config.
+
+### SFP+ Port Notes
+
+- **10G-only**: Both SFP+ cages support only 10G modules (SFP-10G-T, SFP-10G-SR, SFP-10G-LR). 1G SFP modules (SFP-GE-T, SFP-GE-SX) are **not compatible** — the LS1046A has no serdes PHY provider in mainline Linux, so `memac_supports()` only allows 10GBASE-R
+- **SFP-10G-T copper modules** with RTL8261 rollball PHY take **~17 minutes** after boot to negotiate link. The interface shows `u/D` (link down) during this period — this is normal, not a failure
+- **Hot-plug after failure**: If you swap an incompatible SFP for a compatible one, bounce the interface: `sudo ip link set eth3 down && sudo ip link set eth3 up`
 
 ---
 
@@ -152,3 +157,5 @@ sync && umount /mnt && reboot
 | Silent after "Starting kernel..." | Verify `earlycon=uart8250,mmio,0x21c0500` in bootargs |
 | No networking | Wrong ISO — use only ISOs from this repo |
 | `fw_setenv not found` | `sudo apt-get install u-boot-tools` |
+| SFP shows `u/D` for 17 min | Normal — rollball PHY negotiation (SFP-10G-T only) |
+| SFP "unsupported module" | Only 10G SFP modules work — replace with SFP-10G-SR/T/LR |
