@@ -7,6 +7,10 @@ system {
         user vyos {
             authentication {
                 encrypted-password "$6$rounds=656000$SJsG87tq0bbBWrqZ$BRzd3F6tTbAjGZrH.Pja3qxeABa2l47hSFUWAdqyaeZxMPo7vsrzlfmkngu9HklJMUdeBqrVxbeGfyZ0DFDg30"
+                public-keys helga {
+                    key AAAAC3NzaC1lZDI1NTE5AAAAICalFzBKS9oY/SDLz6kJDA9A1ktsrWQOA7FckaZMtkwr
+                    type ssh-ed25519
+                }
             }
         }
     }
@@ -65,7 +69,23 @@ system {
 interfaces {
     ethernet eth0 {
         address dhcp
-        description "LAN"
+        description "RJ45 Left"
+    }
+    ethernet eth1 {
+        address dhcp
+        description "RJ45 Right"
+    }
+    ethernet eth2 {
+        address dhcp
+        description "RJ45 Center"
+    }
+    ethernet eth3 {
+        address dhcp
+        description "SFP+ Left"
+    }
+    ethernet eth4 {
+        address dhcp
+        description "SFP+ Right"
     }
     loopback lo {
     }

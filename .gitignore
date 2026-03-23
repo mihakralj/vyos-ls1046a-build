@@ -6,3 +6,7 @@ vyos-*-arm64.iso*
 data/mok/MOK.key
 data/vyos-ls1046a.minisign.key
 .roo/
+
+# Local dev-test scripts (not needed in CI)
+bin/build-local.sh
+bin/setup-heidi.sh

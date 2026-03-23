@@ -166,6 +166,108 @@ ethernet@f0000 {
 
 **Critical:** The 10G MAC nodes must use `phy-connection-type = "xgmii"`, not `"10gbase-r"`. In kernel 6.6's `fman_memac.c`, the PCS assignment fallback path checks `phy_if == PHY_INTERFACE_MODE_XGMII` to assign the PCS to `xfi_pcs`. Using `"10gbase-r"` directly causes the PCS to be misassigned to `sgmii_pcs`, resulting in a NULL `xfi_pcs` and broken 10GBASE-R link detection. The kernel converts XGMII → 10GBASER after PCS assignment.
 
+#### Why SFP+ Ports Are 10G-Only
+
+The two SFP+ cages (eth3, eth4) **only support 10G modules**. Inserting a 1G SFP (SFP-GE-T, SFP-GE-SX, etc.) produces `"unsupported SFP module: no common interface modes"` and the port stays down. Even multi-rate SFP-10G-T modules — which negotiate 10G/5G/2.5G/1G on their copper RJ45 side — require a **10G-capable link partner**. If the remote switch port is only 1 Gbps, the link will never come up.
+
+This is not a bug. It is a hardware constraint enforced at three levels:
+
+**Level 1 — SerDes Lane Configuration (Hardware)**
+
+The LS1046A SerDes block configures each lane at boot time via the Reset Configuration Word (RCW). The SFP+ MAC ports (`ethernet@f0000` at `1af0000` and `ethernet@f2000` at `1af2000`) are wired to SerDes lanes configured for XFI — a 10.3125 Gbaud serial electrical interface. XFI is the host-side signaling standard for 10GBASE-R. The SerDes PLL driving these lanes is locked to 10G line rate; there is no runtime lane-rate switching on LS1046A DPAA1 hardware.
+
+```
+SerDes Protocol 0x1040 (typical):
+  Lane A → XFI (10G) → SFP+ cage 1 (eth3)
+  Lane B → XFI (10G) → SFP+ cage 2 (eth4)
+  Lane C → SGMII (1G) → RJ45 PHY
+  Lane D → SGMII (1G) → RJ45 PHY
+```
+
+**Level 2 — Device Tree Binding (Firmware)**
+
+The DTS declares `phy-connection-type = "xgmii"` on both SFP MAC nodes. The kernel converts this to `PHY_INTERFACE_MODE_10GBASER` after PCS assignment (see the "Critical" note above). This tells phylink: "this MAC speaks 10GBASE-R only."
+
+```dts
+/* mono-gateway-dk.dts */
+ethernet@f0000 {
+    phy-connection-type = "xgmii";   /* → 10GBASER after conversion */
+    managed = "in-band-status";      /* → phylink uses in-band AN */
+    sfp = <&sfp_xfi0>;
+};
+```
+
+**Level 3 — Kernel Driver Gate (`memac_supports()`)**
+
+The `fman_memac.c` driver decides which PHY interface modes the MAC advertises to phylink. The decision tree:
+
+```
+memac_supports(mac_dev, iface):
+  1. Does mac_dev have a serdes PHY provider?
+     → LS1046A: NO (fsl-ls1046a.dtsi has no fsl,lynx-28g #phy-cells binding)
+  2. Fallback: return (mac_dev->phy_if == iface)
+     → phy_if = 10GBASER (converted from xgmii)
+     → iface = SGMII?  → FALSE  (1G rejected)
+     → iface = 10GBASER? → TRUE  (10G accepted)
+```
+
+Only `10000baseSR/Full` and `10000baseT/Full` are added to the MAC's `supported_interfaces` bitmask. When phylink intersects this with the SFP module's advertised modes, any module that only speaks SGMII/1000BASE-X has zero overlap — hence `"no common interface modes"`.
+
+**The full rejection chain for a 1G SFP module:**
+
+```mermaid
+sequenceDiagram
+  participant SFP as SFP Module<br/>(1G copper)
+  participant PHY as phylink
+  participant MAC as fman_memac
+  participant SD as SerDes<br/>(NULL)
+
+  SFP->>PHY: Module inserted, EEPROM says 1000BASE-T
+  PHY->>MAC: Can you support SGMII?
+  MAC->>SD: phy_validate(SGMII)?
+  Note over SD: serdes = NULL<br/>(no PHY provider in DTB)
+  SD-->>MAC: Skip validation
+  MAC->>MAC: Fallback: phy_if(10GBASER) == SGMII?
+  MAC-->>PHY: ❌ No
+  PHY->>PHY: Intersection: MAC{10GBASER} ∩ SFP{SGMII} = ∅
+  PHY-->>SFP: "unsupported SFP module:<br/>no common interface modes"
+```
+
+**Why multi-rate SFP-10G-T modules also fail at 1G:**
+
+An SFP-10G-T module (e.g., with RTL8261 PHY) has two independent interfaces:
+- **Host side (SFI/XFI):** Always runs at 10.3125 Gbaud (10GBASE-R). This is the electrical interface to the LS1046A SerDes lane. It does NOT rate-adapt.
+- **Copper side (RJ45):** Negotiates 10GBASE-T / 5GBASE-T / 2.5GBASE-T / 1000BASE-T with the remote switch.
+
+The module's internal PHY bridges between these two interfaces. For this bridge to work, **both sides must link up at their respective rates**. The host side is fixed at 10G by the XFI lane. The copper side negotiates with whatever the remote switch offers. If the switch offers only 1 Gbps:
+
+1. The copper PHY negotiates **1000BASE-T** with the switch ✓
+2. The host SFI interface is **10GBASE-R** (fixed by hardware) ✓
+3. The internal bridge must convert **1G copper ↔ 10G SFI**
+
+Step 3 requires the SFP module's internal logic to perform **rate adaptation** — buffering and retiming between 1G and 10G clock domains. Most commodity SFP-10G-T modules (especially cheap OEM/generic units) do **not** implement rate adaptation. They operate in **pass-through mode**: the copper side must also be 10G for the host-side 10G link to carry valid data. When copper negotiates 1G, the host-side 10GBASE-R PCS never achieves block lock, and `RX Loss of Signal` stays asserted.
+
+Some enterprise-grade SFP-10G-T modules (Cisco SFP-10G-T-X, Intel X710-T) *do* implement rate adaptation down to 1G, but this is a premium feature — not common in generic modules.
+
+**Could the LS1046A support multi-rate?**
+
+In theory, the Lynx 28G SerDes *hardware* on LS1046A has multiple PLLs that can generate both SGMII (1.25 Gbaud) and XFI (10.3125 Gbaud) line rates. The mainline `phy-fsl-lynx-28g.c` driver implements dynamic lane reconfiguration on **newer SoCs** (LX2160A, LS2088A) where the DTB includes a proper SerDes PHY provider:
+
+```dts
+/* fsl-lx2160a.dtsi — has PHY provider (LS1046A does NOT have this) */
+serdes_1: serdes-phy@1ea0000 {
+    compatible = "fsl,lynx-28g";
+    #phy-cells = <1>;
+    /* ... */
+};
+```
+
+With this binding, `memac_supports()` calls `phy_validate()` on the serdes, which returns TRUE for both SGMII and 10GBASER. phylink then adds both modes to `supported_interfaces`, and the SFP framework can negotiate either rate. But the LS1046A's `fsl-ls1046a.dtsi` was written before this PHY provider infrastructure existed, and adding it would require significant validation of the SerDes register map differences between LS1046A and LX2160A.
+
+**Bottom line:** Use 10G SFP+ modules with a 10G switch port. For 1G connectivity, use the three RJ45 ports (eth0, eth1, eth2).
+
+**SFP-10G-T rollball delay:** Copper 10G SFP modules using RTL8261 rollball PHY (common in OEM SFP-10G-T modules) take ~17 minutes to negotiate link on kernel 6.6 (the rollball polling timeout is 1020 seconds with 12 retries). The interface shows `u/D` during this period — this is normal, not a failure. After the timeout, the SFP state machine transitions to PHY-less mode and link comes up via PCS in-band 10GBASE-R status (if the copper side has a valid 10G link partner).
+
 The DTS is compiled from kernel source during build (using `make dtbs` against the kernel's `fsl-ls1046a.dtsi` includes), producing a DTB with correct mainline bindings.
 
 ### Fix 6: Port Remapping
