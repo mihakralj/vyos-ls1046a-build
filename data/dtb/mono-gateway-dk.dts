@@ -462,7 +462,7 @@
 	};
 };
 
-&{/thermal-zones/cluster-thermal/trips} {
+&{/thermal-zones/core-cluster/trips} {
 	fan_level1: fan-level1 {
 		temperature = <40000>;
 		hysteresis = <1000>;
@@ -494,7 +494,7 @@
 	};
 };
 
-&{/thermal-zones/cluster-thermal/cooling-maps} {
+&{/thermal-zones/core-cluster/cooling-maps} {
 	fan-map1 {
 		trip = <&fan_level1>;
 		cooling-device = <&fan0 1 1>;
