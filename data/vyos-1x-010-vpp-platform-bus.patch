@@ -1,0 +1,117 @@
+Add platform-bus NIC support for VPP via AF_XDP.
+
+NXP DPAA1 FMan Ethernet NICs (driver: fsl_dpa) are on the platform bus,
+not PCI. VPP's default path hardcodes driver='dpdk' for all interfaces,
+which crashes on platform-bus NICs. This patch:
+
+1. Adds fsl_dpa to SUPPORTED_DRIVERS and not_pci_drv lists
+2. Introduces platform_bus_xdp_drivers list for auto-detection
+3. Auto-selects driver='xdp' for platform-bus NICs with XDP defaults
+4. Enables af_xdp_plugin.so and conditionally disables dpdk_plugin.so
+5. Lowers resource minimums for embedded ARM64 boards (2 CPUs, 256M heap)
+
+Tested on NXP LS1046A Mono Gateway with VPP v25.10.0-48 AF_XDP on
+eth3/eth4 (10G SFP+).
+
+--- a/src/conf_mode/vpp.py
++++ b/src/conf_mode/vpp.py
+@@ -94,7 +94,12 @@
+ }
+ 
+ # drivers that does not use PCIe addresses
+-not_pci_drv: list[str] = ['hv_netvsc']
++not_pci_drv: list[str] = ['hv_netvsc', 'fsl_dpa']
++
++# drivers on platform bus that must use XDP (not DPDK)
++platform_bus_xdp_drivers: list[str] = ['fsl_dpa']
+ 
+ # drivers that support interrupt RX mode for DPDK and XDP
+ drivers_support_interrupt: dict[str, list] = {
+@@ -131,6 +136,7 @@
+ SUPPORTED_DRIVERS = (
+     'hv_netvsc',  # Microsoft Hyper-V network interface card
++    'fsl_dpa',  # NXP DPAA1 FMan Ethernet (platform bus, AF_XDP)
+ )
+ 
+ 
+@@ -381,7 +387,12 @@
+         for _ename, iface_config in effective_config['settings']['interface'].items():
+-            iface_config['driver'] = 'dpdk'
++            _edrv = eth_ifaces_persist.get(_ename, {}).get('original_driver', '')
++            if _edrv in platform_bus_xdp_drivers:
++                iface_config['driver'] = 'xdp'
++            else:
++                iface_config['driver'] = 'dpdk'
+         config['effective'] = effective_config
+ 
+     # Save important info about all interfaces that cannot be retrieved later
+@@ -407,7 +418,19 @@
+ 
+             for iface, iface_config in config['settings']['interface'].items():
+-                iface_config['driver'] = 'dpdk'
++                # Auto-detect driver: platform-bus NICs use XDP, PCI NICs use DPDK
++                _orig_drv = eth_ifaces_persist.get(iface, {}).get('original_driver', '')
++                if not _orig_drv:
++                    try:
++                        _orig_drv = EthtoolGDrvinfo(iface).driver
++                    except Exception:
++                        _orig_drv = ''
++                if _orig_drv in platform_bus_xdp_drivers:
++                    iface_config['driver'] = 'xdp'
++                    # Provide default XDP options if CLI does not expose them
++                    if 'xdp_options' not in iface_config:
++                        iface_config['xdp_options'] = {
++                            'rx_queue_size': '4096',
++                            'tx_queue_size': '4096',
++                            'num_rx_queues': 'all',
++                        }
++                else:
++                    iface_config['driver'] = 'dpdk'
+ 
+                 # old_driver = leaf_node_changed(
+--- a/data/templates/vpp/startup.conf.j2
++++ b/data/templates/vpp/startup.conf.j2
+@@ -75,6 +75,14 @@
+ 
+ plugins {
+     plugin default { disable }
++    plugin af_xdp_plugin.so { enable }
++{% set has_dpdk = [] %}
++{% for iface, iface_config in interface.items() %}
++{%     if iface_config.driver == 'dpdk' %}
++{% if has_dpdk.append(1) %}{% endif %}
++{%     endif %}
++{% endfor %}
++{% if has_dpdk %}
+     plugin dpdk_plugin.so { enable }
++{% else %}
++    plugin dpdk_plugin.so { disable }
++{% endif %}
+     plugin lacp_plugin.so { enable }
+@@ -168,6 +176,7 @@
+ 
++{% if has_dpdk %}
+ dpdk {
+--- a/python/vyos/vpp/config_verify.py
++++ b/python/vyos/vpp/config_verify.py
+@@ -135,7 +135,7 @@
+     main_heap_page_size = mem_checks.main_heap_page_size(settings)
+ 
+-    if main_heap_size < 1 << 30:  # 1G
+-        raise ConfigError('The main heap size must be greater than or equal to 1G')
++    if main_heap_size < 1 << 28:  # 256M minimum for embedded/AF_XDP
++        raise ConfigError('The main heap size must be greater than or equal to 256M')
+ 
+     readable_heap_page = bytes_to_human_memory(main_heap_page_size, 'K')
+--- a/python/vyos/vpp/config_resource_checks/resource_defaults.py
++++ b/python/vyos/vpp/config_resource_checks/resource_defaults.py
+@@ -24,9 +24,9 @@
+     # Minimal amount of memory required to start VPP
+     'min_memory': '8G',
+     # Minimal number of physical CPU cores required to start VPP
+-    'min_cpus': 4,
++    'min_cpus': 2,
+     # Reserve at least 2 physical cores
+-    'reserved_cpu_cores': 2,
++    'reserved_cpu_cores': 1,
+ }

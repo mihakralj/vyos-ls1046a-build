@@ -121,6 +121,7 @@ jobs:
           patch --no-backup-if-mismatch -p1 -d "$VYOS1X" < data/vyos-1x-007-prefer-emmc-default.patch
           patch --no-backup-if-mismatch -p1 -d "$VYOS1X" < data/vyos-1x-008-raid-default-no.patch
           patch --no-backup-if-mismatch -p1 -d "$VYOS1X" < data/vyos-1x-009-uboot-live-boot-detection.patch
+          patch --no-backup-if-mismatch -p1 -d "$VYOS1X" < data/vyos-1x-010-vpp-platform-bus.patch
           sed -i 's/all: clean copyright/all: clean/' "$VYOS1X/Makefile"
 
           ### vyos-build patches

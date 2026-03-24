@@ -6,6 +6,10 @@ This project is a fork of [huihuimoe/vyos-arm64-build](https://github.com/huihui
 ## Unreleased
 
 ### Added
+- **VyOS native VPP integration**: `vyos-1x-010-vpp-platform-bus.patch` patches VyOS's `set vpp` CLI to support DPAA1 platform-bus NICs via AF_XDP. Auto-detects `fsl_dpa` driver → XDP mode (not DPDK). Enables `af_xdp_plugin.so`, disables `dpdk_plugin.so` when no PCI NICs present. Lowers resource minimums for embedded ARM64 (2 CPUs, 256M heap)
+- Default config: `hugepage-size 2M hugepage-count 512` (1024MB) — pre-allocated for VPP memory (heap + statseg + buffers on 2M pages)
+- VPP is **off by default** — users enable via `set vpp settings interface eth3` etc. in VyOS configurator. Patch 010 enables the capability; default config only pre-allocates hugepages
+- Default config: SFP+ MTU set to 3290 (DPAA1 XDP maximum)
 - Kernel configs: `PHYLINK`, `PHY_FSL_LYNX_10G` (10G PCS layer for SFP+)
 - Kernel configs: `SENSORS_EMC2305` (fan controller), `RTC_DRV_PCF2127` (RTC)
 - Kernel config: `CONFIG_REALTEK_PHY=y` (Realtek PHY driver for RTL821x/RTL822x)
