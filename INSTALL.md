@@ -35,7 +35,7 @@ Insert USB, power on, press **any key** during U-Boot countdown.
 Paste the live usb boot command:
 
 ``` uboot
-usb start; setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda1 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet"; fatload usb 0:1 ${kernel_addr_r} live/vmlinuz; fatload usb 0:1 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:1 ${ramdisk_addr_r} live/initrd.img; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
+usb start; setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda1 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fman.fsl_fm_max_frm=9600 quiet"; fatload usb 0:1 ${kernel_addr_r} live/vmlinuz; fatload usb 0:1 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:1 ${ramdisk_addr_r} live/initrd.img; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
 ```
 
 Wait 60–90 seconds for VyOS login prompt.
@@ -109,15 +109,17 @@ Physical port order on the back panel:
 | RJ45 Left | `eth0` | 1G SGMII | GPY115C PHY |
 | RJ45 Right | `eth1` | 1G SGMII | GPY115C PHY |
 | RJ45 Center | `eth2` | 1G SGMII | GPY115C PHY |
-| SFP+ Left | `eth3` | 10G XFI | **10G modules only** |
-| SFP+ Right | `eth4` | 10G XFI | **10G modules only** |
+| SFP+ Left | `eth3` | 10G XFI | SFP-10G-T, SFP-10G-SR/LR |
+| SFP+ Right | `eth4` | 10G XFI | SFP-10G-T, SFP-10G-SR/LR |
 
 All interfaces are preconfigured with DHCP in the default config.
 
 ### SFP+ Port Notes
 
-- **10G-only**: Both SFP+ cages support only 10G modules (SFP-10G-T, SFP-10G-SR, SFP-10G-LR). 1G SFP modules (SFP-GE-T, SFP-GE-SX) are **not compatible** — the LS1046A has no serdes PHY provider in mainline Linux, so `memac_supports()` only allows 10GBASE-R
-- **SFP-10G-T copper modules** with RTL8261 rollball PHY take **~17 minutes** after boot to negotiate link. The interface shows `u/D` (link down) during this period — this is normal, not a failure
+- **SFP-10G-T copper modules** negotiate any speed (10G/5G/2.5G/1G) via the internal RTL8261 rollball PHY. Rate adaptation between the 10G host XFI lane and the copper link speed happens inside the module — verified working at 1G with a 1G switch
+- **SFP-10G-SR/LR fiber modules** work at 10G only (fixed 10GBASE-R)
+- **1G SFP modules** (SFP-GE-T, SFP-GE-SX) are **not compatible** — the kernel rejects them with `"unsupported SFP module"` because the MAC only advertises 10GBASE-R mode
+- **SFP-10G-T boot delay**: Rollball PHY negotiation takes **~17 minutes** after boot. The interface shows `u/D` during this period — this is normal, not a failure
 - **Hot-plug after failure**: If you swap an incompatible SFP for a compatible one, bounce the interface: `sudo ip link set eth3 down && sudo ip link set eth3 up`
 
 ---
@@ -133,9 +135,16 @@ reboot
 The `vyos-postinstall` auto-detects the latest image by version and updates U-Boot.
 It also runs automatically on every boot via systemd service.
 
+> **NEVER run `install image` from an installed system.** It repartitions the
+> eMMC and then fails because `/usr/lib/live/mount/medium/live/filesystem.squashfs`
+> does not exist outside of a USB live session. The result is a **destroyed eMMC**
+> requiring USB live boot recovery.  Use `add system image` for all upgrades.
+
 ---
 
 ## Recovery
+
+### Missing DTB
 
 If U-Boot can't find the DTB, it drops to SPI flash recovery Linux.
 Log in as `root` (no password):
@@ -146,6 +155,16 @@ IMG=$(ls /mnt/boot/ | grep -vE 'grub|efi|lost' | head -1)
 cp /sys/firmware/fdt /mnt/boot/${IMG}/mono-gw.dtb
 sync && umount /mnt && reboot
 ```
+
+### Destroyed eMMC (ran `install image` from installed system)
+
+If `install image` was run from an eMMC-installed VyOS (not from USB live),
+the eMMC is repartitioned but empty. Recovery requires a **full USB reinstall**:
+
+1. Download the [latest ISO](https://github.com/mihakralj/vyos-ls1046a-build/releases/latest)
+2. Write to USB with Rufus (ISO Image mode) or `dd`
+3. Boot from USB via U-Boot — follow steps 1–5 above
+4. `install image` from the USB live session installs fresh to eMMC
 
 ---
 
@@ -159,3 +178,4 @@ sync && umount /mnt && reboot
 | `fw_setenv not found` | `sudo apt-get install u-boot-tools` |
 | SFP shows `u/D` for 17 min | Normal — rollball PHY negotiation (SFP-10G-T only) |
 | SFP "unsupported module" | Only 10G SFP modules work — replace with SFP-10G-SR/T/LR |
+| `install image` failed, eMMC empty | See "Destroyed eMMC" recovery above |

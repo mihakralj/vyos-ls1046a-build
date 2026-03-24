@@ -69,22 +69,57 @@ interfaces {
     ethernet eth0 {
         address dhcp
         description "RJ45 Left"
+        offload {
+            gro
+            gso
+            rfs
+            rps
+            sg
+        }
     }
     ethernet eth1 {
         address dhcp
         description "RJ45 Right"
+        offload {
+            gro
+            gso
+            rfs
+            rps
+            sg
+        }
     }
     ethernet eth2 {
         address dhcp
         description "RJ45 Center"
+        offload {
+            gro
+            gso
+            rfs
+            rps
+            sg
+        }
     }
     ethernet eth3 {
         address dhcp
         description "SFP+ Left"
+        offload {
+            gro
+            gso
+            rfs
+            rps
+            sg
+        }
     }
     ethernet eth4 {
         address dhcp
         description "SFP+ Right"
+        offload {
+            gro
+            gso
+            rfs
+            rps
+            sg
+        }
     }
     loopback lo {
     }
