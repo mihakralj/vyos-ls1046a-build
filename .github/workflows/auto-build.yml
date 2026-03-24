@@ -240,16 +240,24 @@ jobs:
           ln -sf ../vyos-postinstall.service \
             "$CHROOT/etc/systemd/system/multi-user.target.wants/vyos-postinstall.service"
 
-          ### Fan control: EMC2305 PWM thermal management
+          ### Fan control: EMC2305 PWM thermal management via standard fancontrol
           # DTS thermal-cooling binding is broken (EMC2305 registers cooling_device
-          # but thermal OF doesn't bind it). This service polls SoC temperature and
-          # sets PWM directly. Without it, SoC reaches 87°C under VPP poll mode.
-          # Board-gated: ConditionPathExists on EMC2305 hwmon sysfs.
-          cp data/scripts/fan-control.sh "$CHROOT/usr/local/bin/fan-control.sh"
-          chmod +x "$CHROOT/usr/local/bin/fan-control.sh"
-          cp data/scripts/fan-control.service "$CHROOT/etc/systemd/system/fan-control.service"
-          ln -sf ../fan-control.service \
-            "$CHROOT/etc/systemd/system/multi-user.target.wants/fan-control.service"
+          # but thermal OF doesn't bind it). Uses standard Linux fancontrol daemon
+          # with config mapping EMC2305 PWM to core-cluster thermal zone.
+          # Without fan control, SoC reaches 87°C under VPP poll mode.
+          cp data/scripts/fancontrol.conf "$CHROOT/etc/fancontrol"
+
+          ### Install fancontrol package and enable service (chroot hook)
+          HOOKS=vyos-build/data/live-build-config/hooks/live
+          cat > "$HOOKS/98-fancontrol.chroot" << 'FANHOOK'
+          #!/bin/bash
+          # Install fancontrol daemon for EMC2305 PWM fan control
+          # Config at /etc/fancontrol maps EMC2305 PWM to core-cluster thermal zone
+          apt-get update -qq && apt-get install -y --no-install-recommends fancontrol
+          systemctl enable fancontrol.service
+          apt-get clean
+          FANHOOK
+          chmod +x "$HOOKS/98-fancontrol.chroot"
 
           ### Boot optimization: mask unnecessary services for LS1046A
           # kexec masking forces full cold reboot on installed systems, ensuring
@@ -257,7 +265,6 @@ jobs:
           # IMPORTANT: ln -sf /dev/null in includes.chroot gets converted to empty
           # files by live-build (symlinks to absolute paths outside chroot are
           # dereferenced). We use a chroot hook to create proper symlinks instead.
-          HOOKS=vyos-build/data/live-build-config/hooks/live
           cat > "$HOOKS/99-mask-services.chroot" << 'MASKHOOK'
           #!/bin/bash
           # Mask kexec services: prevents kexec preloading kernel at boot
