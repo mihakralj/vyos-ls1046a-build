@@ -40,23 +40,41 @@ get_temp() {
 HWMON=$(find_emc2305) || { logger -t fan-control "EMC2305 not found"; exit 1; }
 logger -t fan-control "EMC2305 found at $HWMON"
 
-# Step-wise fan control based on core-cluster temperature
-# EMC2305 minimum effective PWM is ~51 (quantized from lower values)
+# Linear fan control based on core-cluster temperature
+# Matches fancontrol config: MINTEMP=40, MAXTEMP=80, MINSTART=51, MINSTOP=34
+MINTEMP=40     # Fan off below this (°C)
+MAXTEMP=80     # Full speed at this (°C)
+MINSTART=51    # Minimum PWM to start spinning
+MINSTOP=34     # Minimum PWM to keep spinning (below MINSTART, above 0)
+MAXPWM=255     # Full speed PWM
+
+# Track if fan is currently running (for hysteresis)
+FAN_ON=0
 COUNT=0
+
 while true; do
     TEMP=$(get_temp)
     TEMP_C=$((TEMP / 1000))
 
-    if [ "$TEMP_C" -ge 75 ]; then
-        PWM=255    # Full speed — emergency cooling
-    elif [ "$TEMP_C" -ge 65 ]; then
-        PWM=102    # High speed (~8600 RPM)
-    elif [ "$TEMP_C" -ge 55 ]; then
-        PWM=76     # Medium speed
-    elif [ "$TEMP_C" -ge 45 ]; then
-        PWM=51     # Low speed (~1700 RPM, quiet)
+    if [ "$TEMP_C" -ge "$MAXTEMP" ]; then
+        PWM=$MAXPWM
+        FAN_ON=1
+    elif [ "$TEMP_C" -le "$MINTEMP" ]; then
+        PWM=0
+        FAN_ON=0
     else
-        PWM=0      # Off below 45°C
+        # Linear interpolation: MINSTART..MAXPWM over MINTEMP..MAXTEMP
+        RANGE_TEMP=$((MAXTEMP - MINTEMP))
+        RANGE_PWM=$((MAXPWM - MINSTART))
+        PWM=$(( MINSTART + (TEMP_C - MINTEMP) * RANGE_PWM / RANGE_TEMP ))
+        # Hysteresis: if fan was off, need MINSTART to spin up
+        if [ "$FAN_ON" -eq 0 ] && [ "$PWM" -lt "$MINSTART" ]; then
+            PWM=0
+        else
+            FAN_ON=1
+            # Keep above MINSTOP if running
+            [ "$PWM" -lt "$MINSTOP" ] && PWM=$MINSTOP
+        fi
     fi
 
     # Set PWM for both fan channels
