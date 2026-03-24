@@ -36,16 +36,18 @@ aarch64-oe-linux-gcc (GCC) 14.3.0
 setenv bootcmd 'run vyos_direct || run recovery'
 
 # VyOS direct boot from eMMC p3
-setenv vyos_direct 'setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin vyos-union=/boot/<IMAGE>"; ext4load mmc 0:3 ${kernel_addr_r} /boot/<IMAGE>/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/<IMAGE>/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/<IMAGE>/initrd.img; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
+setenv vyos_direct 'setenv bootargs "BOOT_IMAGE=/boot/<IMAGE>/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin vyos-union=/boot/<IMAGE> fsl_dpaa_fman.fsl_fm_max_frm=9600"; ext4load mmc 0:3 ${kernel_addr_r} /boot/<IMAGE>/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/<IMAGE>/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/<IMAGE>/initrd.img; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
 saveenv
 ```
 
 Replace `<IMAGE>` with the actual image name (e.g., `2026.03.21-2144-rolling`).
 
 **Critical bootargs:**
+- `BOOT_IMAGE=/boot/<IMAGE>/vmlinuz` — must be FIRST arg; VyOS `is_live_boot()` regex requires it (U-Boot's `booti` doesn't set it like GRUB does)
 - `boot=live` — initramfs uses live-boot mode
-- `vyos-union=/boot/<IMAGE>` — squashfs overlay dir on p3
-- Missing either → drops to initramfs BusyBox shell
+- `vyos-union=/boot/<IMAGE>` — squashfs overlay dir on p3 (also used as `is_live_boot()` fallback for U-Boot boards)
+- `fsl_dpaa_fman.fsl_fm_max_frm=9600` — enables jumbo frames (max MTU 9578). Module name is `fsl_dpaa_fman`, NOT `fman`
+- Missing `boot=live` or `vyos-union=` → drops to initramfs BusyBox shell
 
 **Critical load order:**
 - Initrd must be loaded **LAST** so `${filesize}` captures the initrd size
@@ -174,9 +176,11 @@ MAC addresses are unique per board — yours will differ.
  22M(kernel-initramfs) — Recovery kernel + initramfs
 ```
 
-> MTD is not visible from VyOS (`/proc/mtd` is empty). SPI flash is
-> accessed through U-Boot `sf` commands or `fw_setenv` when
-> `/etc/fw_env.config` points at `/dev/mtd3`.
+> **MTD visibility requires `CONFIG_SPI_FSL_QSPI=y`.** Without it, `/proc/mtd` is empty and
+> `fw_setenv` fails with "Configuration file wrong or corrupted." With QSPI enabled,
+> 8 MTD partitions appear (`/dev/mtd0`–`/dev/mtd7`). `fw_setenv` uses `/dev/mtd3`
+> (uboot-env, 1 MB). VyOS ships `libubootenv-tool` (not classic `u-boot-tools`),
+> which requires its own `/etc/fw_env.config` format.
 
 ## USB Device Detection
 

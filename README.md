@@ -10,9 +10,9 @@ Stock VyOS ARM64 ISO has no eMMC driver, no networking, wrong serial console, an
 
 Because the LS1046A has a **hardware packet processing engine** (DPAA1) that neither OpenWrt nor OPNsense can fully exploit. OpenWrt tops out at ~4.5 Gbps — the Linux kernel's per-packet `sk_buff` overhead chokes the quad-core A72 long before the 10G SFP+ ports saturate. OPNsense is worse: FreeBSD's DPAA1 driver is immature, and you're looking at ~1.5 Gbps on hardware capable of 10.
 
-VyOS 1.5 ships with **VPP** (Vector Packet Processing) — a kernel-bypass data plane that processes packets in batches of 256, polls the hardware directly via DPDK, and uses the DPAA1 Frame Manager as a co-processor instead of fighting it. The result: **9.4+ Gbps wire-speed routing** on the same silicon that struggles to push 4 Gbps under OpenWrt. Add the LS1046A's CAAM crypto engine and you get 2.5+ Gbps encrypted tunnels for free.
+VyOS 1.5 ships with **VPP** (Vector Packet Processing) — a kernel-bypass data plane that processes packets in batches of 256, polls the hardware directly via AF_XDP, and uses the DPAA1 Frame Manager as a co-processor instead of fighting it. VPP is **deployed and running** on eth3/eth4 (10G SFP+) via AF_XDP, with kernel retaining direct control of eth0–eth2 (RJ45). The CAAM crypto engine provides 128 hardware algorithms for IPsec/WireGuard offload.
 
-This isn't a theoretical advantage. The hardware was designed for this. We just need to wire it up.
+The split-plane architecture is live: VPP handles 10G SFP+ traffic at 2.47M polls/sec, while the kernel stack manages RJ45 interfaces for VyOS routing and management.
 
 **→ [VPP.md](VPP.md)** — Full technical plan: DPAA1 acceleration, DPDK integration, performance targets, implementation roadmap.
 
@@ -145,6 +145,11 @@ flowchart TB
 | 6 | No SFP+ | SFP framework + SerDes PHY missing | `SFP=y`, `PHYLINK=y`, `PHY_FSL_LYNX_10G=y` |
 | 7 | Wrong port order | DT probe order ≠ physical | udev `VYOS_IFNAME` rule + DTS aliases |
 | 8 | No auto-boot | `install image` only updates GRUB | `vyos-postinstall` + `fw_setenv` |
+| 9 | Jumbo frames broken | Module param used `fman` (wrong KBUILD_MODNAME) | `fsl_dpaa_fman.fsl_fm_max_frm=9600` |
+| 10 | Live mode false positive | `is_live_boot()` needs `BOOT_IMAGE=` (GRUB-only) | Patch 009: `vyos-union=/boot/` fallback |
+| 11 | kexec breaks HW init | `ln -sf /dev/null` broken by live-build | Chroot hook + SysV script removal |
+| 12 | No QSPI flash access | `CONFIG_SPI_FSL_QSPI` not set | `=y` + DTS partition map |
+| 13 | VPP on SFP+ | AF_XDP max frame ~3304 bytes on DPAA1 (MTU ≤ 3290) | Split-plane: VPP SFP+ (no jumbo), kernel RJ45 (full 9578 MTU) |
 
 Full analysis: **[PORTING.md](PORTING.md)**
 

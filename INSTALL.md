@@ -35,7 +35,7 @@ Insert USB, power on, press **any key** during U-Boot countdown.
 Paste the live usb boot command:
 
 ``` uboot
-usb start; setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda1 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fman.fsl_fm_max_frm=9600 quiet"; fatload usb 0:1 ${kernel_addr_r} live/vmlinuz; fatload usb 0:1 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:1 ${ramdisk_addr_r} live/initrd.img; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
+usb start; setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda1 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 quiet"; fatload usb 0:1 ${kernel_addr_r} live/vmlinuz; fatload usb 0:1 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:1 ${ramdisk_addr_r} live/initrd.img; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
 ```
 
 Wait 60–90 seconds for VyOS login prompt.
@@ -175,7 +175,7 @@ the eMMC is repartitioned but empty. Recovery requires a **full USB reinstall**:
 | USB not detected | `usb reset`, or try USB 2.0 drive |
 | Silent after "Starting kernel..." | Verify `earlycon=uart8250,mmio,0x21c0500` in bootargs |
 | No networking | Wrong ISO — use only ISOs from this repo |
-| `fw_setenv not found` | `sudo apt-get install u-boot-tools` |
+| `fw_setenv not found` | VyOS ships `libubootenv-tool` (provides `fw_setenv`). Needs `CONFIG_SPI_FSL_QSPI=y` for `/dev/mtd3` |
 | SFP shows `u/D` for 17 min | Normal — rollball PHY negotiation (SFP-10G-T only) |
 | SFP "unsupported module" | Only 10G SFP modules work — replace with SFP-10G-SR/T/LR |
 | `install image` failed, eMMC empty | See "Destroyed eMMC" recovery above |

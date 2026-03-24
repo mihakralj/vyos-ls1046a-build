@@ -16,7 +16,7 @@ set -euo pipefail
 
 DTB_NAME="mono-gw.dtb"
 FW_ENV_CONFIG="/etc/fw_env.config"
-UBOOT_BOOTARGS="console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fman.fsl_fm_max_frm=9600"
+UBOOT_BOOTARGS_TAIL="console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600"
 
 #--- Board detection ---
 check_board() {
@@ -125,7 +125,7 @@ copy_dtb() {
     dtb_src=$(find_dtb)
     local dtb_dst="${boot_dir}/${DTB_NAME}"
 
-    cp "$dtb_src" "$dtb_dst"
+    cp -f "$dtb_src" "$dtb_dst" 2>/dev/null || true
     echo "✓ DTB: ${dtb_src} → ${dtb_dst} ($(stat -c '%s' "$dtb_dst") bytes)"
 }
 
@@ -150,8 +150,9 @@ update_uboot_env() {
 
     # Build the vyos_direct boot command
     # CRITICAL: initrd must be loaded LAST so ${filesize} captures its size for booti
+    # BOOT_IMAGE= must be FIRST in bootargs — VyOS regex uses ^ anchor to detect installed vs live
     local vyos_direct
-    vyos_direct="ext4load mmc 0:3 \${kernel_addr_r} boot/${image_name}/${KERNEL_FILE}; ext4load mmc 0:3 \${fdt_addr_r} boot/${image_name}/${DTB_NAME}; ext4load mmc 0:3 \${ramdisk_addr_r} boot/${image_name}/${INITRD_FILE}; setenv bootargs ${UBOOT_BOOTARGS} vyos-union=/boot/${image_name}; booti \${kernel_addr_r} \${ramdisk_addr_r}:\${filesize} \${fdt_addr_r}"
+    vyos_direct="ext4load mmc 0:3 \${kernel_addr_r} boot/${image_name}/${KERNEL_FILE}; ext4load mmc 0:3 \${fdt_addr_r} boot/${image_name}/${DTB_NAME}; ext4load mmc 0:3 \${ramdisk_addr_r} boot/${image_name}/${INITRD_FILE}; setenv bootargs BOOT_IMAGE=/boot/${image_name}/${KERNEL_FILE} ${UBOOT_BOOTARGS_TAIL} vyos-union=/boot/${image_name}; booti \${kernel_addr_r} \${ramdisk_addr_r}:\${filesize} \${fdt_addr_r}"
 
     fw_setenv vyos_direct "$vyos_direct"
     fw_setenv bootcmd "run vyos_direct || run recovery"

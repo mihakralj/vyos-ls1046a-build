@@ -9,21 +9,31 @@ This project is a fork of [huihuimoe/vyos-arm64-build](https://github.com/huihui
 - Kernel configs: `PHYLINK`, `PHY_FSL_LYNX_10G` (10G PCS layer for SFP+)
 - Kernel configs: `SENSORS_EMC2305` (fan controller), `RTC_DRV_PCF2127` (RTC)
 - Kernel config: `CONFIG_REALTEK_PHY=y` (Realtek PHY driver for RTL821x/RTL822x)
+- Kernel config: `CONFIG_SPI_FSL_QSPI=y` (QSPI controller for SPI NOR flash access from Linux)
 - DTS: ethernet aliases (`ethernet0`–`ethernet4`) for deterministic interface naming
 - DTS: `compatible = "mono,gateway-dk", "fsl,ls1046a"` board identification
-- Bootarg: `fman.fsl_fm_max_frm=9600` enables jumbo frames (MTU up to 9578) on all interfaces — FMan hardware supports it, but the kernel defaults to 1522
+- DTS: QSPI NOR flash MTD partition definitions (8 partitions: RCW, BL2, U-Boot, env, fman-ucode, optee, recovery, user)
+- Bootarg: `fsl_dpaa_fman.fsl_fm_max_frm=9600` enables jumbo frames (MTU up to 9578) on all interfaces — FMan hardware supports it, but the kernel defaults to 1522
 - Default offloads enabled on all interfaces: GRO, GSO, SG, RFS, RPS — maximum set supported by DPAA1 FMan hardware (TSO/LRO/hw-tc-offload are hardware-impossible `[fixed]`)
-- VPP v25.10.0 AF_XDP proof-of-concept: AF_XDP interfaces on eth3/eth4 with Linux CP plugin, 3.39M polls/sec on Cortex-A72, zero drops
+- VPP v25.10.0 AF_XDP on SFP+ ports: AF_XDP interfaces on eth3/eth4 with Linux CP plugin, 2.47M polls/sec on Cortex-A72 worker thread, zero drops. RJ45 ports (eth0-eth2) stay in direct kernel control
+- `vyos-1x-009-uboot-live-boot-detection.patch` — fixes `is_live_boot()` detection for U-Boot boards (adds `vyos-union=` fallback since U-Boot doesn't set `BOOT_IMAGE=`)
+- CAAM hardware crypto: 128 algorithms (AES, SHA, RSA, HMAC, authenc for IPsec) via 3 Job Rings + QI interface
+- PTP hardware timestamping via `ptp_qoriq` driver (`/dev/ptp0`)
 
 ### Fixed
+- **U-Boot live-boot detection**: VyOS `is_live_boot()` checks `BOOT_IMAGE=` in cmdline (GRUB-specific). U-Boot's `booti` doesn't set this. Added `vyos-union=/boot/` fallback check — system now correctly detected as installed. `show system image` and `add system image` now work
+- **Jumbo frame bootarg**: Was `fman.fsl_fm_max_frm=9600` (silently ignored). Correct module name from Makefile is `fsl_dpaa_fman` → `fsl_dpaa_fman.fsl_fm_max_frm=9600`
+- **Kexec masking broken by live-build**: `ln -sf /dev/null` in `includes.chroot` gets converted to empty files when live-build creates squashfs (absolute symlinks outside chroot are dereferenced). Empty files don't mask services. Additionally `kexec-load` comes from SysV init script — `systemd-sysv-generator` creates a unit, bypassing our mask. Fix: chroot hook creates proper symlinks AND removes SysV init scripts
+- **vyos-postinstall BOOT_IMAGE=**: Now prepends `BOOT_IMAGE=/boot/IMAGE/vmlinuz` as first bootarg (VyOS regex uses `^` anchor). Also fixed `fsl_dpaa_fman` module name
 - **SFP+ TX_DISABLE GPIO polarity**: DTS used `GPIO_ACTIVE_HIGH` on `tx-disable-gpios` for both SFP+ nodes, but the board has a hardware inverter between GPIO2 and the SFP cage TX_DISABLE pins. Changed to `GPIO_ACTIVE_LOW` — both SFP+ ports now link correctly (eth3 SFP-10G-T at 1G/10G, eth4 SFP-10G-SR at 10G)
-- **SFP+ link DOWN**: DTS used `phy-connection-type = "10gbase-r"` which caused `fman_memac.c` to misassign PCS to `sgmii_pcs` instead of `xfi_pcs`. Changed to `"xgmii"` — kernel converts XGMII→10GBASER after correct PCS assignment. Root cause: PCS fallback path checks `phy_if == XGMII` to assign `xfi_pcs`; using `"10gbase-r"` directly bypasses this, leaving `xfi_pcs = NULL` and breaking in-band link detection.
-- **SFP-10G-T rate adaptation documented**: SFP-10G-T copper modules with RTL8261 rollball PHY support multi-rate (10G/5G/2.5G/1G) via internal rate adaptation. Previously documented as "10G-only" — verified working at 1G with a 1G switch
+- **SFP+ link DOWN**: DTS used `phy-connection-type = "10gbase-r"` which caused `fman_memac.c` to misassign PCS to `sgmii_pcs` instead of `xfi_pcs`. Changed to `"xgmii"` — kernel converts XGMII→10GBASER after correct PCS assignment
+- **SFP-10G-T rate adaptation documented**: SFP-10G-T copper modules with RTL8261 rollball PHY support multi-rate (10G/5G/2.5G/1G) via internal rate adaptation
 
 ### Changed
 - Renamed `boot.efi.md` → `UBOOT.md`, stripped duplicated content (kept unique U-Boot/MTD/clock data)
 - CHANGELOG.md now manually maintained — CI no longer overwrites it (upstream changes go to GitHub release body only)
 - Updated PORTING.md, README.md, AGENTS.md with cross-repo findings from nix/OpenWrt
+- Kexec masking moved from `includes.chroot` symlinks to chroot hook (`99-mask-services.chroot`)
 
 ### Removed
 - `fix-grub.sh` — dead file, all fixes now handled at build time (patches + vyos-postinstall)
