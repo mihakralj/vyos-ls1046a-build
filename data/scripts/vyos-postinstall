@@ -1,20 +1,23 @@
 #!/bin/bash
-# vyos-postinstall — Post-install/upgrade helper for LS1046A U-Boot boards
+# vyos-postinstall — Seamless boot helper for LS1046A U-Boot boards
 #
-# Handles two things VyOS's image_installer.py doesn't:
-#   1. Copies DTB to the boot directory of the specified image
-#   2. Updates U-Boot environment via fw_setenv so the board boots the new image
+# Two responsibilities:
+#   1. ALWAYS: Write /boot/vyos.env so U-Boot knows which image to boot
+#   2. ONE-TIME: Set static U-Boot env vars (bootcmd, vyos_direct, usb_vyos)
+#      via fw_setenv — only if vyos_direct doesn't already contain "vyos.env"
+#
+# After the one-time setup, all future installs/upgrades only need step 1:
+# a single text file write on the eMMC ext4 partition. No SPI flash writes.
 #
 # Usage:
-#   After 'install image':     sudo vyos-postinstall
-#   After 'add system image':  sudo vyos-postinstall <image-name>
+#   sudo vyos-postinstall              # auto-detect latest image
+#   sudo vyos-postinstall <image-name> # explicit image
 #
-# Auto-detection picks the image with the latest version string.
 # This script is a no-op on non-LS1046A hardware.
 
 set -euo pipefail
 
-DTB_NAME="mono-gw.dtb"
+VYOS_ENV_FILE="vyos.env"
 FW_ENV_CONFIG="/etc/fw_env.config"
 UBOOT_BOOTARGS_TAIL="console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600"
 
@@ -33,8 +36,6 @@ check_board() {
 
 #--- Find persistence root (where /boot/{image}/ lives on eMMC) ---
 find_root() {
-    # After 'install image', VyOS mounts the eMMC persistence partition.
-    # Check well-known paths first, then scan all mounted filesystems.
     for candidate in "/" "/mnt/root" "/mnt"; do
         if [ -d "${candidate}/boot" ]; then
             local images
@@ -46,7 +47,6 @@ find_root() {
             fi
         fi
     done
-    # Scan all mounted filesystems for VyOS image directories
     while IFS= read -r mpoint; do
         if [ -d "${mpoint}/boot" ]; then
             local images
@@ -59,131 +59,62 @@ find_root() {
         fi
     done < <(mount | awk '{print $3}' | grep -v -E '^/(proc|sys|dev|run)')
     echo "ERROR: Cannot find persistence root with VyOS image directories in /boot/" >&2
-    echo "Mount eMMC first: sudo mount /dev/mmcblk0p3 /mnt" >&2
     return 1
-}
-
-#--- Find DTB source ---
-find_dtb() {
-    # Priority 1: DTB compiled into squashfs at /boot/
-    if [ -f "/boot/${DTB_NAME}" ]; then
-        echo "/boot/${DTB_NAME}"
-        return 0
-    fi
-    # Priority 2: Live FDT from running kernel
-    if [ -f "/sys/firmware/fdt" ]; then
-        echo "/sys/firmware/fdt"
-        return 0
-    fi
-    echo "ERROR: No DTB source found" >&2
-    return 1
-}
-
-#--- Resolve actual boot filenames (handles versioned names) ---
-resolve_boot_files() {
-    local boot_dir="$1"
-
-    # Kernel: prefer 'vmlinuz', fall back to 'vmlinuz-*'
-    if [ -f "${boot_dir}/vmlinuz" ]; then
-        KERNEL_FILE="vmlinuz"
-    else
-        KERNEL_FILE=$(cd "$boot_dir" && ls vmlinuz-* 2>/dev/null | head -1)
-    fi
-    if [ -z "${KERNEL_FILE:-}" ]; then
-        echo "ERROR: No kernel found in ${boot_dir}" >&2
-        return 1
-    fi
-
-    # Initrd: prefer 'initrd.img', fall back to 'initrd.img-*'
-    if [ -f "${boot_dir}/initrd.img" ]; then
-        INITRD_FILE="initrd.img"
-    else
-        INITRD_FILE=$(cd "$boot_dir" && ls initrd.img-* 2>/dev/null | head -1)
-    fi
-    if [ -z "${INITRD_FILE:-}" ]; then
-        echo "ERROR: No initrd found in ${boot_dir}" >&2
-        return 1
-    fi
-
-    echo "  Kernel: ${KERNEL_FILE}"
-    echo "  Initrd: ${INITRD_FILE}"
-    echo "  DTB:    ${DTB_NAME}"
-}
-
-#--- Copy DTB to target image ---
-copy_dtb() {
-    local image_name="$1"
-    local root="$2"
-    local boot_dir="${root}/boot/${image_name}"
-
-    if [ ! -d "$boot_dir" ]; then
-        echo "ERROR: Boot directory does not exist: ${boot_dir}" >&2
-        return 1
-    fi
-
-    local dtb_src
-    dtb_src=$(find_dtb)
-    local dtb_dst="${boot_dir}/${DTB_NAME}"
-
-    cp -f "$dtb_src" "$dtb_dst" 2>/dev/null || true
-    echo "✓ DTB: ${dtb_src} → ${dtb_dst} ($(stat -c '%s' "$dtb_dst") bytes)"
-}
-
-#--- Update U-Boot environment ---
-update_uboot_env() {
-    local image_name="$1"
-    local root="$2"
-    local boot_dir="${root}/boot/${image_name}"
-
-    if ! command -v fw_setenv &>/dev/null; then
-        echo "ERROR: fw_setenv not found. Install u-boot-tools." >&2
-        return 1
-    fi
-
-    if [ ! -f "$FW_ENV_CONFIG" ]; then
-        echo "ERROR: ${FW_ENV_CONFIG} not found." >&2
-        return 1
-    fi
-
-    # Resolve actual filenames (handles vmlinuz vs vmlinuz-<version>)
-    resolve_boot_files "$boot_dir"
-
-    # Build the vyos_direct boot command
-    # CRITICAL: initrd must be loaded LAST so ${filesize} captures its size for booti
-    # BOOT_IMAGE= must be FIRST in bootargs — VyOS regex uses ^ anchor to detect installed vs live
-    local vyos_direct
-    vyos_direct="ext4load mmc 0:3 \${kernel_addr_r} boot/${image_name}/${KERNEL_FILE}; ext4load mmc 0:3 \${fdt_addr_r} boot/${image_name}/${DTB_NAME}; ext4load mmc 0:3 \${ramdisk_addr_r} boot/${image_name}/${INITRD_FILE}; setenv bootargs BOOT_IMAGE=/boot/${image_name}/${KERNEL_FILE} ${UBOOT_BOOTARGS_TAIL} vyos-union=/boot/${image_name}; booti \${kernel_addr_r} \${ramdisk_addr_r}:\${filesize} \${fdt_addr_r}"
-
-    fw_setenv vyos_direct "$vyos_direct"
-    fw_setenv bootcmd "run vyos_direct || run recovery"
-    echo "✓ U-Boot: vyos_direct → boot/${image_name}/"
-    echo "✓ U-Boot: bootcmd → 'run vyos_direct || run recovery'"
-}
-
-#--- List available images ---
-list_images() {
-    local root="$1"
-    echo "Available images:"
-    for dir in "${root}/boot"/20*-*-rolling/; do
-        [ ! -d "$dir" ] && continue
-        local name
-        name=$(basename "$dir")
-        local has_kernel="✗" has_dtb="✗" has_squashfs="✗"
-        { [ -f "${dir}/vmlinuz" ] || ls "${dir}"/vmlinuz-* &>/dev/null; } && has_kernel="✓"
-        [ -f "${dir}/${DTB_NAME}" ] && has_dtb="✓"
-        ls "${dir}"/*.squashfs &>/dev/null && has_squashfs="✓"
-        printf "  %-45s kernel=%s dtb=%s squashfs=%s\n" "$name" "$has_kernel" "$has_dtb" "$has_squashfs"
-    done
 }
 
 #--- Auto-detect latest image by version string ---
 detect_latest_image() {
     local root="$1"
-    # VyOS image names are YYYY.MM.DD-HHMM-rolling — lexicographic sort = version sort
-    local latest
-    latest=$(find "${root}/boot" -maxdepth 1 -mindepth 1 -type d -name '20*-*-rolling' \
-        -printf '%f\n' 2>/dev/null | sort -r | head -1)
-    echo "$latest"
+    find "${root}/boot" -maxdepth 1 -mindepth 1 -type d -name '20*-*-rolling' \
+        -printf '%f\n' 2>/dev/null | sort -r | head -1
+}
+
+#--- Write /boot/vyos.env ---
+write_vyos_env() {
+    local image_name="$1"
+    local root="$2"
+    local env_path="${root}/boot/${VYOS_ENV_FILE}"
+
+    echo "vyos_image=${image_name}" > "$env_path"
+    echo "✓ Written: ${env_path} → vyos_image=${image_name}"
+}
+
+#--- One-time U-Boot env setup (static vyos_direct that reads vyos.env) ---
+setup_uboot_env_once() {
+    # Skip if vyos_direct already contains "vyos.env" (already set up)
+    if command -v fw_printenv &>/dev/null && [ -f "$FW_ENV_CONFIG" ]; then
+        local current
+        current=$(fw_printenv vyos_direct 2>/dev/null || echo "")
+        if echo "$current" | grep -q "vyos.env"; then
+            echo "✓ U-Boot env already configured (vyos_direct references vyos.env). Skipping fw_setenv."
+            return 0
+        fi
+    else
+        echo "WARNING: fw_printenv/fw_setenv not available or ${FW_ENV_CONFIG} missing."
+        echo "  One-time U-Boot setup skipped. Set these manually in U-Boot console:"
+        echo "  See INSTALL.md for the commands."
+        return 0
+    fi
+
+    echo "First-time U-Boot setup: writing static vyos_direct + usb_vyos + bootcmd..."
+
+    # Static vyos_direct: reads /boot/vyos.env, imports vyos_image, loads kernel/dtb/initrd
+    # CRITICAL: initrd loaded LAST so ${filesize} captures its size for booti
+    # CRITICAL: BOOT_IMAGE= must be in bootargs for VyOS is_live_boot() detection
+    local vyos_direct
+    vyos_direct='ext4load mmc 0:3 ${load_addr} /boot/vyos.env; env import -t ${load_addr} ${filesize}; ext4load mmc 0:3 ${kernel_addr_r} /boot/${vyos_image}/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/${vyos_image}/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/${vyos_image}/initrd.img; setenv bootargs "BOOT_IMAGE=/boot/${vyos_image}/vmlinuz '"${UBOOT_BOOTARGS_TAIL}"' vyos-union=/boot/${vyos_image}"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
+
+    # USB auto-boot: try FAT32 USB first (for re-installs without U-Boot interaction)
+    local usb_vyos
+    usb_vyos='usb start; if fatload usb 0:1 ${kernel_addr_r} live/vmlinuz; then fatload usb 0:1 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:1 ${ramdisk_addr_r} live/initrd.img; setenv bootargs "BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda1 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 quiet"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}; fi'
+
+    fw_setenv vyos_direct "$vyos_direct"
+    fw_setenv usb_vyos "$usb_vyos"
+    fw_setenv bootcmd "run usb_vyos || run vyos_direct || run recovery"
+
+    echo "✓ U-Boot: vyos_direct → static (reads /boot/vyos.env)"
+    echo "✓ U-Boot: usb_vyos → auto-detect USB live boot"
+    echo "✓ U-Boot: bootcmd → 'run usb_vyos || run vyos_direct || run recovery'"
 }
 
 #--- Main ---
@@ -194,22 +125,18 @@ main() {
     root=$(find_root)
     local image_name="${1:-}"
 
-    # Auto-detect: pick the image with the latest version string
     if [ -z "$image_name" ]; then
         image_name=$(detect_latest_image "$root")
         if [ -n "$image_name" ]; then
             echo "Auto-detected image: ${image_name}"
         else
             echo "ERROR: No VyOS image found. Specify image name as argument." >&2
-            list_images "$root"
             exit 1
         fi
     fi
 
-    # Validate
     if [ ! -d "${root}/boot/${image_name}" ]; then
         echo "ERROR: Image '${image_name}' not found at ${root}/boot/${image_name}" >&2
-        list_images "$root"
         exit 1
     fi
 
@@ -218,9 +145,8 @@ main() {
     echo "Root:   ${root}"
     echo ""
 
-    copy_dtb "$image_name" "$root"
-    echo ""
-    update_uboot_env "$image_name" "$root"
+    write_vyos_env "$image_name" "$root"
+    setup_uboot_env_once
 
     echo ""
     echo "=== Done. Reboot to boot from eMMC. ==="

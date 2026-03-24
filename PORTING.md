@@ -232,20 +232,22 @@ ENV{DEVPATH}=="*/1af2000.ethernet/*", ENV{VYOS_IFNAME}="eth4"   # SFP2 (right ca
 
 ### Fix 7: Automated Install/Upgrade Flow
 
-Three components make `install image` → reboot work without manual U-Boot commands:
+Five components make `install image` → reboot → `add system image` → reboot work without manual U-Boot commands:
 
 **1. DTB inside squashfs:** The compiled `mono-gw.dtb` is placed at `/boot/mono-gw.dtb` inside the squashfs. VyOS's `install_image()` copies all files from `/boot/` to the target — DTB gets copied automatically with zero VyOS code changes.
 
-**2. vyos-postinstall script** (`/usr/local/bin/vyos-postinstall`): After install or upgrade:
-- Auto-detects the latest image by version-sorting `YYYY.MM.DD-HHMM-rolling` directory names
-- Copies DTB to the boot directory
-- Updates U-Boot environment via `fw_setenv` (requires `u-boot-tools` package + `/etc/fw_env.config`)
+**2. `/boot/vyos.env` file** (`vyos-1x-011`): Patched into `grub.set_default()` — whenever VyOS sets the default boot image (install, upgrade, `set system image default-boot`, rename), it also writes `/boot/vyos.env` containing `vyos_image=<image-name>`. U-Boot reads this file via `ext4load` + `env import -t` to determine which image to boot. The `vyos_direct` U-Boot command is static — it never needs `fw_setenv` updates after initial setup.
 
-**3. Systemd service** (`vyos-postinstall.service`): Runs `vyos-postinstall` on every boot (`After=local-fs.target`). Ensures U-Boot env always points to the running image. No-op on non-LS1046A hardware (checks `/proc/device-tree/compatible`).
+**3. vyos-postinstall script** (`/usr/local/bin/vyos-postinstall`): Called automatically by `install_image()` during first install. Handles:
+- Writing `/boot/vyos.env` (safety net — also done by the grub.py hook)
+- One-time `fw_setenv` to set static `vyos_direct`, `usb_vyos`, and `bootcmd` U-Boot env vars (only runs if U-Boot env doesn't already reference `vyos.env`)
+- No-op on non-LS1046A hardware (checks `/proc/device-tree/compatible`)
 
-**4. eMMC default disk patch** (`vyos-1x-007`): VyOS's `ask_single_disk()` now prefers `mmcblk` devices as the default selection, so `install image` prompts with `/dev/mmcblk0` instead of `/dev/sda` (the USB boot media).
+**4. Systemd safety net** (`vyos-postinstall.service`): Runs `vyos-postinstall` on every boot (`After=local-fs.target`). Ensures `/boot/vyos.env` matches the running image even if the image_installer.py hook was bypassed. Also retries the one-time U-Boot setup if it failed during install.
 
-**5. 16 MiB gap patch** (`vyos-1x-006`): Reserves 16 MiB between the BIOS boot partition and EFI partition for potential bootloader payload, matching U-Boot's expectations.
+**5. eMMC default disk patch** (`vyos-1x-007`): VyOS's `ask_single_disk()` now prefers `mmcblk` devices as the default selection, so `install image` prompts with `/dev/mmcblk0` instead of `/dev/sda` (the USB boot media).
+
+**6. 16 MiB gap patch** (`vyos-1x-006`): Reserves 16 MiB between the BIOS boot partition and EFI partition for potential bootloader payload, matching U-Boot's expectations.
 
 ---
 
@@ -397,7 +399,7 @@ flowchart TD
 
 **U-Boot `${filesize}` gotcha:** Each `ext4load` overwrites the `${filesize}` variable. The `booti` command uses `${ramdisk_addr_r}:${filesize}` to tell the kernel the initrd size. If DTB is loaded after initrd, `${filesize}` = DTB size (94KB) instead of initrd size (~33MB), causing "ZSTD-compressed data is truncated" kernel panic.
 
-**vyos-postinstall automation:** A systemd service runs `/usr/local/bin/vyos-postinstall` on every boot. It auto-detects the latest image, copies the DTB, and updates U-Boot environment via `fw_setenv`. After `install image` and initial manual boot, subsequent reboots are fully automatic.
+**vyos-postinstall automation:** `install image` automatically calls `vyos-postinstall` which writes `/boot/vyos.env` and performs one-time `fw_setenv` to set a static `vyos_direct` command. Future `add system image` upgrades only update `/boot/vyos.env` (via patched `grub.set_default()`). A systemd service runs `vyos-postinstall` on every boot as a safety net. No SPI flash writes after initial setup.
 
 U-Boot key addresses:
 
@@ -561,6 +563,8 @@ Services are masked via a chroot hook (`99-mask-services.chroot`) that runs insi
 | `vyos-1x-007` | `image_installer.py` | Prefer mmcblk (eMMC) as default disk in `install image` |
 | `vyos-1x-008` | `image_installer.py` | Default RAID-1 mirroring answer to "No" (single eMMC) |
 | `vyos-1x-009` | `system/image.py` | Fix `is_live_boot()` for U-Boot: `vyos-union=/boot/` fallback |
+| `vyos-1x-010` | `vpp.py`, `startup.conf.j2`, config_verify, resource_defaults | Platform-bus NIC support for VPP AF_XDP (DPAA1 `fsl_dpa`) |
+| `vyos-1x-011` | `system/grub.py`, `image_installer.py` | Write `/boot/vyos.env` on set_default + call vyos-postinstall on install |
 
 ## vyos-build Patches
 
