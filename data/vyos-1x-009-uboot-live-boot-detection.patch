@@ -1,5 +1,5 @@
---- a/src/vyos/system/image.py
-+++ b/src/vyos/system/image.py
+--- a/python/vyos/system/image.py
++++ b/python/vyos/system/image.py
 @@ -262,6 +262,9 @@ def is_live_boot() -> bool:
          boot_type: str = running_image_result.groupdict().get('boot_type', '')
          if boot_type == 'boot':
