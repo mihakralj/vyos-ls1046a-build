@@ -1,12 +1,129 @@
 # U-Boot Reference — Mono Gateway LS1046A
 
-Low-level U-Boot reference for serial console debugging.
-Updated 2026-03-22 from live eMMC-installed system running build `2026.03.21-2144-rolling`.
+Low-level U-Boot reference and seamless boot specification.
+
+Updated 2026-03-24.
 
 For boot architecture and kernel config rationale, see [PORTING.md](PORTING.md).
 For install instructions, see [INSTALL.md](INSTALL.md).
+For detailed implementation spec, see [plans/BOOT-SPEC.md](plans/BOOT-SPEC.md).
 
-## U-Boot Version
+---
+
+## Seamless Boot Architecture
+
+### Design: `/boot/vyos.env` Replaces `fw_setenv`
+
+The current system writes the image name into U-Boot's SPI flash via `fw_setenv` on every install/upgrade. This requires `libubootenv-tool`, `/dev/mtd3`, QSPI driver, and a helper script.
+
+**New approach:** U-Boot reads the default image name from a text file on the eMMC ext4 partition. VyOS writes this file as part of its normal image management. No SPI flash writes needed after initial setup.
+
+```
+eMMC partition 3 (ext4):
+  /boot/vyos.env                               ← "vyos_image=2026.03.24-0338-rolling"
+  /boot/2026.03.24-0338-rolling/
+      vmlinuz
+      initrd.img
+      mono-gw.dtb
+      2026.03.24-0338-rolling.squashfs
+```
+
+U-Boot loads `/boot/vyos.env`, imports it via `env import -t`, and uses `${vyos_image}` to construct all paths. The `vyos_direct` command is **static** — it never needs `fw_setenv` updates.
+
+### Boot Chain
+
+```mermaid
+flowchart TD
+    PO["Power On"] --> UB["U-Boot 2025.04"]
+    UB --> CMD{"bootcmd:\nrun usb_vyos\n|| run vyos_direct\n|| run recovery"}
+
+    CMD -->|"USB inserted"| USB_TRY["usb_vyos:\nusb start\nfatload live/vmlinuz\nif success → booti"]
+    CMD -->|"No USB / fail ~3s"| EMMC["vyos_direct:\next4load /boot/vyos.env\nenv import → vyos_image\nload vmlinuz+dtb+initrd\nbooti"]
+    CMD -->|"eMMC fail"| REC["recovery:\nsf read from SPI NOR\nbooti"]
+
+    USB_TRY --> LIVE["VyOS Live\ninstall image available"]
+    EMMC --> INSTALLED["VyOS Installed\nadd system image available"]
+    REC --> RECOVERY["Recovery Linux"]
+
+    style USB_TRY fill:#4a9,stroke:#333,color:#fff
+    style EMMC fill:#48a,stroke:#333,color:#fff
+    style REC fill:#a84,stroke:#333,color:#fff
+```
+
+### When `fw_setenv` Is Used
+
+Only **once** — during the first `install image` from USB live boot. It sets:
+- `bootcmd` = `run usb_vyos || run vyos_direct || run recovery`
+- `vyos_direct` = static command that reads `/boot/vyos.env`
+- `usb_vyos` = auto-detect and boot from USB
+
+After this, **all future installs and upgrades only write `/boot/vyos.env`** — no SPI flash writes.
+
+### User Experience
+
+| Operation | User Action | Automated |
+|-----------|------------|-----------|
+| First USB boot (factory board) | Interrupt U-Boot, paste ONE line | — |
+| `install image` | Run command, accept defaults | Writes `vyos.env` + one-time `fw_setenv` |
+| Reboot after install | Remove USB, reboot | U-Boot reads `vyos.env`, boots from eMMC |
+| `add system image URL` | Run command | Writes `vyos.env` (no `fw_setenv`) |
+| Reboot after upgrade | Reboot | U-Boot reads `vyos.env`, boots new image |
+| USB re-install | Insert USB, power cycle | U-Boot auto-detects USB |
+| `set system image default-boot` | Run command | Updates `vyos.env` |
+
+---
+
+## U-Boot Environment (Target State)
+
+Set once during first `install image`, then never modified again:
+
+```bash
+# Try USB first (for re-installs), then eMMC via vyos.env, then SPI recovery
+bootcmd=run usb_vyos || run vyos_direct || run recovery
+
+# USB live boot — auto-detect VyOS ISO on FAT32 USB
+usb_vyos=usb start; if fatload usb 0:1 ${kernel_addr_r} live/vmlinuz; then fatload usb 0:1 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:1 ${ramdisk_addr_r} live/initrd.img; setenv bootargs "BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda1 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 quiet"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}; fi
+
+# eMMC boot — read image name from vyos.env, load and boot (STATIC — never changes)
+vyos_direct=ext4load mmc 0:3 ${load_addr} /boot/vyos.env; env import -t ${load_addr} ${filesize}; ext4load mmc 0:3 ${kernel_addr_r} /boot/${vyos_image}/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/${vyos_image}/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/${vyos_image}/initrd.img; setenv bootargs "BOOT_IMAGE=/boot/${vyos_image}/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 vyos-union=/boot/${vyos_image}"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
+
+# SPI flash recovery (factory, always available)
+recovery=sf probe 0:0; sf read ${kernel_addr_r} ${kernel_addr} ${kernel_size}; sf read ${fdt_addr_r} ${fdt_addr} ${fdt_size}; booti ${kernel_addr_r} - ${fdt_addr_r}
+```
+
+### `/boot/vyos.env` Format
+
+Single line, U-Boot `env import -t` compatible:
+```
+vyos_image=2026.03.24-0338-rolling
+```
+
+Written by VyOS's image installer Python code after every `install image` or `add system image`.
+
+---
+
+## Implementation Plan
+
+| Task | File | Description |
+|------|------|-------------|
+| 1 | `data/scripts/vyos-postinstall` | Rewrite: write `vyos.env` + one-time `fw_setenv` for static `vyos_direct` |
+| 2 | `data/vyos-1x-011-auto-postinstall.patch` | **NEW** — Hook `vyos.env` write into `install image` and `add system image` |
+| 3 | `.github/workflows/auto-build.yml` | Apply patch 011; fix `vyos-postinstall.service` symlink via chroot hook |
+| 4 | `INSTALL.md` | Simplify to 5 steps |
+| 5 | `AGENTS.md`, `PORTING.md` | Update to reflect new architecture |
+
+### Risk: `env import -t` Availability
+
+U-Boot 2025.04 supports `env import -t`. Must verify on actual Mono Gateway hardware that:
+1. `env import -t ${load_addr} ${filesize}` correctly parses `vyos_image=...`
+2. `${vyos_image}` is available for subsequent commands in the same script
+3. No side effects from importing into the running U-Boot environment
+
+**Fallback:** If `env import -t` does not work, revert to `fw_setenv` per-image approach (current `vyos-postinstall` logic).
+
+---
+
+## Reference: U-Boot Version
 
 ```
 U-Boot 2025.04-g26d27571ac82-dirty (Jan 18 2026 - 17:54:35 +0000)
@@ -31,6 +148,8 @@ aarch64-oe-linux-gcc (GCC) 14.3.0
 
 ## Boot Commands (Current — Installed VyOS)
 
+> **Note:** These are the CURRENT commands. The target state uses `vyos.env` instead — see above.
+
 ```bash
 # Saved bootcmd — try VyOS, fall back to SPI recovery
 setenv bootcmd 'run vyos_direct || run recovery'
@@ -43,7 +162,7 @@ saveenv
 Replace `<IMAGE>` with the actual image name (e.g., `2026.03.21-2144-rolling`).
 
 **Critical bootargs:**
-- `BOOT_IMAGE=/boot/<IMAGE>/vmlinuz` — must be FIRST arg; VyOS `is_live_boot()` regex requires it (U-Boot's `booti` doesn't set it like GRUB does)
+- `BOOT_IMAGE=/boot/<IMAGE>/vmlinuz` — must be FIRST arg; VyOS `is_live_boot()` regex requires it (U-Boot's `booti` does not set it like GRUB does)
 - `boot=live` — initramfs uses live-boot mode
 - `vyos-union=/boot/<IMAGE>` — squashfs overlay dir on p3 (also used as `is_live_boot()` fallback for U-Boot boards)
 - `fsl_dpaa_fman.fsl_fm_max_frm=9600` — enables jumbo frames (max MTU 9578). Module name is `fsl_dpaa_fman`, NOT `fman`
@@ -56,16 +175,14 @@ Replace `<IMAGE>` with the actual image name (e.g., `2026.03.21-2144-rolling`).
 ## Boot from USB (for initial install)
 
 ```bash
-usb start
-setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda1 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 quiet"
-fatload usb 0:1 ${kernel_addr_r} live/vmlinuz-6.6.128-vyos
-fatload usb 0:1 ${fdt_addr_r} mono-gw.dtb
-fatload usb 0:1 ${ramdisk_addr_r} live/initrd.img-6.6.128-vyos
-booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
+usb start; fatload usb 0:1 ${kernel_addr_r} live/vmlinuz; fatload usb 0:1 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:1 ${ramdisk_addr_r} live/initrd.img; setenv bootargs "BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda1 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 quiet"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
 ```
 
-> USB live boot triggers a kexec double-boot (~70s penalty). Normal for
-> VyOS live-boot, only during initial install. eMMC boot is single-pass (~82s).
+> USB live boot triggers a kexec double-boot (~70s penalty). Normal for VyOS live-boot,
+> only during initial install. eMMC boot is single-pass (~82s).
+
+> **If `fatload` says "File not found":** run `fatls usb 0:1 live` — if the
+> kernel has a version suffix (e.g. `vmlinuz-6.6.128-vyos`), use the full name.
 
 ## Factory Boot Commands (OpenWrt — Pre-Install)
 
@@ -201,9 +318,9 @@ EFI/boot/bootaa64.efi        (990 KB)
 EFI/boot/grubaa64.efi        (3.9 MB)
 ```
 
-## Live System State (2026-03-21, eMMC installed)
+## Live System State (2026-03-24, eMMC installed)
 
-**Version:** 2026.03.21-0419-rolling
+**Version:** 2026.03.24-0338-rolling
 **Kernel:** 6.6.128-vyos `#1 SMP PREEMPT_DYNAMIC`
 **FRRouting:** 10.5.2
 **Boot source:** eMMC installed (`vyos_direct` booti from mmcblk0p3)

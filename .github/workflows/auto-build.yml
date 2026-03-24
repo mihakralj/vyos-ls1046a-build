@@ -122,6 +122,7 @@ jobs:
           patch --no-backup-if-mismatch -p1 -d "$VYOS1X" < data/vyos-1x-008-raid-default-no.patch
           patch --no-backup-if-mismatch -p1 -d "$VYOS1X" < data/vyos-1x-009-uboot-live-boot-detection.patch
           patch --no-backup-if-mismatch -p1 -d "$VYOS1X" < data/vyos-1x-010-vpp-platform-bus.patch
+          patch --no-backup-if-mismatch -p1 -d "$VYOS1X" < data/vyos-1x-011-vyos-env-boot.patch
           sed -i 's/all: clean copyright/all: clean/' "$VYOS1X/Makefile"
 
           ### vyos-build patches
@@ -211,19 +212,18 @@ jobs:
           ### U-Boot tools: fw_setenv config for updating boot env from Linux
           cp data/scripts/fw_env.config "$CHROOT/etc/fw_env.config"
 
-          ### Post-install helper: copies DTB + updates U-Boot env after install/upgrade
+          ### Post-install helper: writes /boot/vyos.env + one-time U-Boot env setup
           mkdir -p "$CHROOT/usr/local/bin"
           cp data/scripts/vyos-postinstall "$CHROOT/usr/local/bin/vyos-postinstall"
           chmod +x "$CHROOT/usr/local/bin/vyos-postinstall"
 
-          ### Auto-run vyos-postinstall on every boot (ensures U-Boot env matches running image)
-          # After 'install image' + first manual U-Boot boot, this service auto-saves the
-          # correct env so all subsequent reboots are automatic. Also handles upgrades:
-          # after 'add system image' + reboot, the service detects the running image and
-          # updates U-Boot to match. No-op on non-LS1046A hardware (script exits early).
+          ### Safety net: run vyos-postinstall on every boot to sync vyos.env
+          # Ensures /boot/vyos.env matches the running image even if the
+          # image_installer.py hook (patch 011) was bypassed. Also handles
+          # one-time U-Boot fw_setenv on first boot. No-op on non-LS1046A.
           printf '%s\n' \
             '[Unit]' \
-            'Description=Sync U-Boot env with running VyOS image (LS1046A)' \
+            'Description=Sync /boot/vyos.env with running VyOS image (LS1046A)' \
             'After=local-fs.target' \
             'ConditionPathExists=/proc/device-tree/compatible' \
             '' \

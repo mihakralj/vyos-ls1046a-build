@@ -19,7 +19,8 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 - **CPU frequency:** `CONFIG_QORIQ_CPUFREQ=y` (not `=m`). Module loads after clock cleanup at T+12s, locking CPU at 700 MHz. Built-in claims PLLs first → 1800 MHz.
 - **U-Boot boot order:** initrd must load LAST so `${filesize}` captures the initrd size, not kernel/DTB size
 - **U-Boot `booti` ramdisk format:** MUST use `${ramdisk_addr_r}:${filesize}` (colon+size), not just the address — otherwise "Wrong Ramdisk Image Format"
-- **Boot method is `booti` only:** `bootefi` with GRUB permanently OOMs due to DPAA1 reserved-memory nodes in DTB. No EFI boot path exists. Image upgrades require `fw_setenv` to update `vyos_direct`.
+- **Boot method is `booti` only:** `bootefi` with GRUB permanently OOMs due to DPAA1 reserved-memory nodes in DTB. No EFI boot path exists. Image upgrades write `/boot/vyos.env` — no `fw_setenv` needed after initial setup.
+- **`/boot/vyos.env` is the boot image selector:** U-Boot reads this single-line text file (`vyos_image=<name>`) via `ext4load` + `env import -t`. Written automatically by patched `grub.set_default()` on every install/upgrade/set-default. Never edit manually unless recovering.
 - **eMMC layout (after `install image`):** GPT with p1=BIOS boot (1MiB), 16MiB gap, p2=EFI (256MiB FAT32, GRUB — unused), p3=Linux root (ext4, VyOS). OpenWrt is destroyed. Use `install image` from USB live session.
 - **USB boot uses FAT, eMMC uses ext4:** `fatload usb 0:1` vs `ext4load mmc 0:3` — different U-Boot commands. Rufus "ISO Image mode" creates FAT32 on USB.
 - **kexec double-boot (LIVE-BOOT ONLY):** USB live boot always does a kexec reboot after first config mount — this is normal VyOS live-boot behavior, NOT a bug. First boot establishes the squashfs+overlay, config loading triggers a reboot, second boot succeeds with migration. `kexec-load.service` and `kexec.service` are masked but the reboot is triggered by `vyos-router` itself reaching `kexec.target`. Does NOT affect installed systems (after `install image` to eMMC). The ~70s penalty is a one-time cost during initial USB install only.
@@ -74,6 +75,7 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 - **DTS must match nix reference:** `data/dtb/mono-gateway-dk.dts` must have `compatible = "mono,gateway-dk", "fsl,ls1046a"` and ethernet aliases. Canonical source: `nix/pkgs/kernel/dts/mono-gateway-dk.dts`
 - **MOK.key is a secret** — only `MOK.pem` is in the repo; the private key comes from `${{ secrets.MOK_KEY }}`
 - **vyos-postinstall is board-gated** — the script checks `/proc/device-tree/compatible` for `fsl,ls1046a` and exits early on non-matching hardware. Safe to include in every ISO.
+- **vyos-postinstall does NOT run fw_setenv on upgrades** — only on first install (when `vyos_direct` doesn't yet reference `vyos.env`). All upgrades just write `/boot/vyos.env`.
 
 ## Workflow-Specific Gotchas
 
@@ -114,15 +116,15 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 | `data/config.boot.dhcp` | Alternative DHCP-enabled boot config |
 | `data/dtb/mono-gw.dtb` | Device tree blob for Mono Gateway hardware (extracted from live OpenWrt, 94KB) |
 | `data/dtb/mono-gateway-dk.dts` | Custom DTS source — compiled during kernel build, includes ethernet aliases + SFP nodes |
-| `data/scripts/vyos-postinstall` | Post-install helper: copies DTB + updates U-Boot env via fw_setenv |
-| `data/scripts/fw_env.config` | U-Boot env access config for fw_printenv/fw_setenv (/dev/mtd3) |
+| `data/scripts/vyos-postinstall` | Post-install helper: writes `/boot/vyos.env` + one-time `fw_setenv` for static `vyos_direct` |
+| `data/scripts/fw_env.config` | U-Boot env access config for fw_printenv/fw_setenv (/dev/mtd3) — only used once during first install |
 | `data/scripts/vpp-setup-interfaces.sh` | Legacy VPP AF_XDP setup script (superseded by VyOS native `set vpp` CLI via patch 010) |
 | `data/scripts/vpp-setup.service` | Legacy systemd oneshot for VPP interface setup (superseded by VyOS native VPP service) |
 | `data/scripts/startup.conf` | Legacy VPP startup config (superseded by VyOS-generated `/etc/vpp/startup.conf`) |
 | `data/scripts/fan-control.sh` | Userspace fan control daemon: step-wise PWM based on SoC temperature (EMC2305 thermal binding workaround) |
 | `data/scripts/fan-control.service` | Systemd unit for fan control daemon — runs as simple service with restart-on-failure |
 | `data/reftree.cache` | Required vyos-1x build artifact missing from upstream — must copy manually |
-| `data/vyos-1x-*.patch` | Patches applied to vyos-1x during build (10 patches: console, vyshim timeout, podman, install gap, eMMC default, RAID default no, U-Boot live-boot detection, VPP platform-bus) |
+| `data/vyos-1x-*.patch` | Patches applied to vyos-1x during build (11 patches: console, vyshim timeout, podman, install gap, eMMC default, RAID default no, U-Boot live-boot detection, VPP platform-bus, vyos.env boot) |
 | `data/vyos-build-*.patch` | Patches applied to vyos-build during build (2 patches: vim link, no sbsign) |
 | `data/mok/MOK.pem` | Machine Owner Key certificate for Secure Boot kernel signing |
 | `data/vyos-ls1046a.minisign.pub` | Public key for ISO signature verification |
