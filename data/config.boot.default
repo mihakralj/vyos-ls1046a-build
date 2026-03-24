@@ -6,6 +6,7 @@ system {
         }
         user vyos {
             authentication {
+                encrypted-password $y$j9T$Rq06TVkTBOm.Xw0dNcvvd0$U73QHmRbKcnEQbQU90YTj9TZDDuIvCyakm25928fqn9
                 public-keys ed25519 {
                     key AAAAC3NzaC1lZDI1NTE5AAAAICalFzBKS9oY/SDLz6kJDA9A1ktsrWQOA7FckaZMtkwr
                     type ssh-ed25519
