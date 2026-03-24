@@ -240,6 +240,17 @@ jobs:
           ln -sf ../vyos-postinstall.service \
             "$CHROOT/etc/systemd/system/multi-user.target.wants/vyos-postinstall.service"
 
+          ### Fan control: EMC2305 PWM thermal management
+          # DTS thermal-cooling binding is broken (EMC2305 registers cooling_device
+          # but thermal OF doesn't bind it). This service polls SoC temperature and
+          # sets PWM directly. Without it, SoC reaches 87°C under VPP poll mode.
+          # Board-gated: ConditionPathExists on EMC2305 hwmon sysfs.
+          cp data/scripts/fan-control.sh "$CHROOT/usr/local/bin/fan-control.sh"
+          chmod +x "$CHROOT/usr/local/bin/fan-control.sh"
+          cp data/scripts/fan-control.service "$CHROOT/etc/systemd/system/fan-control.service"
+          ln -sf ../fan-control.service \
+            "$CHROOT/etc/systemd/system/multi-user.target.wants/fan-control.service"
+
           ### Boot optimization: mask unnecessary services for LS1046A
           # kexec masking forces full cold reboot on installed systems, ensuring
           # DPAA1/SFP/I2C hardware re-initializes cleanly (kexec skips firmware).
