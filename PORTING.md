@@ -525,6 +525,8 @@ flowchart TD
 | `acpid.service` | No ACPI on ARM64/DeviceTree | ~2s saved |
 | `acpid.socket` / `acpid.path` | No ACPI on ARM64/DeviceTree | — |
 
+Services are masked via a chroot hook (`99-mask-services.chroot`) that runs inside the build chroot to create `ln -sf /dev/null` symlinks AND remove SysV init scripts (`/etc/init.d/kexec-load`, `/etc/init.d/kexec`). The old approach of placing symlinks in `includes.chroot` was broken — live-build dereferences absolute symlinks to paths outside the chroot, producing empty files. The SysV scripts regenerate systemd units via `systemd-sysv-generator`, bypassing the mask.
+
 > **Note:** Masking kexec services does **not** prevent the live-boot double-boot
 > (~70s penalty). That is triggered by `vyos-router` reaching `kexec.target`,
 > which is a systemd target, not a service. The penalty only occurs during USB
@@ -557,6 +559,8 @@ flowchart TD
 | `vyos-1x-005` | `container.py` | Remove `--memory-swap 0` (broken on ARM64 cgroups) |
 | `vyos-1x-006` | `disk.py`, `image_installer.py` | 16 MiB gap for bootloader + updated success message |
 | `vyos-1x-007` | `image_installer.py` | Prefer mmcblk (eMMC) as default disk in `install image` |
+| `vyos-1x-008` | `image_installer.py` | Default RAID-1 mirroring answer to "No" (single eMMC) |
+| `vyos-1x-009` | `system/image.py` | Fix `is_live_boot()` for U-Boot: `vyos-union=/boot/` fallback |
 
 ## vyos-build Patches
 
@@ -614,6 +618,13 @@ CONFIG_GPIO_MPC8XXX=y           # fsl,qoriq-gpio controller
 # === Board peripherals (fan, thermal, RTC, power sensors) ===
 CONFIG_SENSORS_EMC2305=y        # emc2305 fan controller (Microchip, I2C 0x2e)
 CONFIG_RTC_DRV_PCF2127=y        # PCF2131 RTC (NXP, I2C 0x53)
+
+# === QSPI flash (U-Boot env access via fw_setenv) ===
+CONFIG_SPI_FSL_QSPI=y           # Freescale QSPI controller -- required for /dev/mtd* access
+
+# === Hardware crypto (CAAM) ===
+CONFIG_CRYPTO_DEV_FSL_CAAM=y    # CAAM crypto engine (128 algorithms: 45 QI + 83 JR)
+CONFIG_CRYPTO_DEV_FSL_CAAM_JR=y # CAAM Job Ring interface
 ```
 
 ---

@@ -1,0 +1,12 @@
+--- a/src/vyos/system/image.py
++++ b/src/vyos/system/image.py
+@@ -262,6 +262,9 @@ def is_live_boot() -> bool:
+         boot_type: str = running_image_result.groupdict().get('boot_type', '')
+         if boot_type == 'boot':
+             return False
++    # U-Boot boards lack BOOT_IMAGE= (GRUB-specific). Check vyos-union= as fallback.
++    if 'vyos-union=/boot/' in cmdline:
++        return False
+     return True
+ 
+ def if_not_live_boot(func):

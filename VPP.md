@@ -615,20 +615,23 @@ If the full VPP/DPDK/USDPAA/FMC stack proves too complex, VyOS 1.5+ supports **A
 
 ## Implementation Roadmap
 
-### Milestone 1: AF_XDP Quick Win (1–2 weeks)
+### Milestone 1: AF_XDP Quick Win ✅ COMPLETE
 
-- [ ] Verify VyOS 1.5 VPP package supports AF_XDP on ARM64
-- [ ] Configure VPP with AF_XDP driver for eth3/eth4
-- [ ] Benchmark: target 6–7 Gbps on 10G interfaces
-- [ ] Validate kernel stays functional for management (eth0–eth2)
-- [ ] Document VPP CLI configuration for VyOS
+- [x] Verify VyOS 1.5 VPP package supports AF_XDP on ARM64 — VPP v25.10.0-48, 89 plugins
+- [x] Configure VPP with AF_XDP driver for eth3/eth4 — 2.47M loops/sec, main-core 0, worker core 1
+- [ ] Benchmark: target 6–7 Gbps on 10G interfaces — needs iperf3 with SFP+ link partner
+- [x] Validate kernel stays functional for management (eth0–eth2) — split-plane confirmed
+- [x] Document VPP CLI configuration for VyOS — startup.conf + systemd units deployed
+- [x] **Discovery:** DPAA1 XDP max MTU = 3290 — `fsl_dpaa_mac` hard limit, max frame ~3304 bytes (3290 + 14 Ethernet). NOT jumbo-capable under VPP. Kernel RJ45 ports retain full 9578 MTU.
+- [x] **Discovery:** 8 plugins sufficient: af_xdp, linux_cp, linux_nl, ping, acl, nat44_ei, cnat, crypto_sw_scheduler
+- [x] LCP mirror interfaces created (lcp-eth3, lcp-eth4 tap devices) for VyOS visibility
 
-### Milestone 2: Kernel Preparation (1 week)
+### Milestone 2: Kernel Preparation (partially complete)
 
-- [ ] Add `CONFIG_CRYPTO_DEV_FSL_CAAM=y` for hardware crypto
-- [ ] Add hugepages bootargs to U-Boot environment
-- [ ] Add CPU isolation bootargs (`isolcpus=2-3`)
-- [ ] Test hugepages mount and CPU affinity
+- [x] Add `CONFIG_CRYPTO_DEV_FSL_CAAM=y` for hardware crypto — already enabled, 128 algorithms (45 QI + 83 JR)
+- [x] Add hugepages — 128× 2MB pages (256MB) via `/etc/sysctl.d/90-vpp-hugepages.conf`
+- [ ] Add CPU isolation bootargs (`isolcpus=2-3`) — not yet deployed
+- [x] Test hugepages mount and CPU affinity — VPP running on main-core 0, worker core 1
 
 ### Milestone 3: NXP Cross-Compilation Environment (2–3 weeks)
 
@@ -664,6 +667,208 @@ If the full VPP/DPDK/USDPAA/FMC stack proves too complex, VyOS 1.5+ supports **A
 - [ ] Build VPP crypto-caam plugin
 - [ ] Benchmark IPsec/WireGuard throughput with CAAM offload
 - [ ] Target: 2.5+ Gbps encrypted tunnel throughput
+
+---
+
+## VPP CLI Reference
+
+All commands require `sudo` (VPP CLI socket at `/run/vpp/cli.sock`).
+
+### Service Management
+
+```bash
+# Check VPP service status
+systemctl status vpp.service
+systemctl status vpp-setup.service
+systemctl status fan-control.service
+
+# Start/stop VPP
+sudo systemctl start vpp      # starts VPP daemon
+sudo systemctl stop vpp       # stops VPP (tears down all interfaces)
+
+# View VPP logs
+journalctl -u vpp.service --no-pager -n 50
+journalctl -u vpp-setup.service --no-pager -n 20
+sudo cat /var/log/vpp/vpp.log
+```
+
+### Interface Status
+
+```bash
+# Show all VPP interfaces with counters
+sudo vppctl show interface
+
+# Show interface details (MTU, flags, driver)
+sudo vppctl show interface vpp-eth3
+
+# Show hardware-level info (driver, queues, RSS)
+sudo vppctl show hardware-interfaces
+
+# Show interface addresses
+sudo vppctl show interface addr
+```
+
+### Linux Control Plane (LCP)
+
+```bash
+# Show LCP interface pairs (VPP ↔ kernel tap mirrors)
+sudo vppctl show lcp
+
+# LCP status (sync mode, netns)
+sudo vppctl show lcp
+
+# Expected output:
+#   itf-pair: [0] vpp-eth3 tap4096 lcp-eth3 16 type tap
+#   itf-pair: [1] vpp-eth4 tap4097 lcp-eth4 17 type tap
+```
+
+### Performance & Runtime
+
+```bash
+# Show runtime statistics (loops/sec, vector rates, per-node timing)
+sudo vppctl show runtime
+
+# Key metrics to watch:
+#   - loops/sec: ~6000 with workers 0 (thermal-safe), ~2.66M with workers (DANGEROUS)
+#   - af_xdp-input state: "interrupt wait" (good) vs "polling" (thermal risk)
+#   - Vectors/Call: >1 means batching is working
+
+# Clear runtime counters
+sudo vppctl clear runtime
+
+# Show thread info (should show only vpp_main, NO workers)
+sudo vppctl show threads
+
+# Show buffer usage
+sudo vppctl show buffers
+```
+
+### Packet Tracing & Debugging
+
+```bash
+# Trace packets through VPP graph (100 packets on af_xdp-input)
+sudo vppctl trace add af_xdp-input 100
+# ... wait for traffic ...
+sudo vppctl show trace
+
+# Show error counters
+sudo vppctl show errors
+
+# Clear all counters
+sudo vppctl clear interfaces
+sudo vppctl clear errors
+
+# Show IP neighbors learned via VPP
+sudo vppctl show ip neighbor
+sudo vppctl show ip6 neighbor
+```
+
+### Plugin & Version Info
+
+```bash
+# Show VPP version
+sudo vppctl show version
+
+# Show loaded plugins
+sudo vppctl show plugins
+
+# Show API message table
+sudo vppctl show api ring-stats
+```
+
+### AF_XDP Specific
+
+```bash
+# Create AF_XDP interface (done by vpp-setup.service, shown for reference)
+sudo vppctl create interface af_xdp host-if eth3 name vpp-eth3 num-rx-queues all
+sudo vppctl create interface af_xdp host-if eth4 name vpp-eth4 num-rx-queues all
+
+# Set interface up
+sudo vppctl set interface state vpp-eth3 up
+sudo vppctl set interface state vpp-eth4 up
+
+# Create LCP mirror (for VyOS management visibility)
+sudo vppctl lcp create vpp-eth3 host-if lcp-eth3
+sudo vppctl lcp create vpp-eth4 host-if lcp-eth4
+
+# Set MTU (max 3290 for DPAA1 XDP)
+sudo vppctl set interface mtu 3290 vpp-eth3
+```
+
+### Crypto Engines
+
+```bash
+# Show available crypto engines
+sudo vppctl show crypto engines
+
+# Show crypto handlers (which engine handles which algorithm)
+sudo vppctl show crypto handlers
+```
+
+---
+
+## Thermal Management & Fan Control
+
+### The Problem
+
+The Mono Gateway DK uses passive cooling (heatsink) with an optional EMC2305 PWM fan controller. Without active cooling, VPP poll-mode drives the SoC to **87°C** (thermal shutdown at 95°C). Even with `workers 0 + poll-sleep-usec 100`, temperatures remain dangerously high.
+
+### The Fix
+
+The DTS defines thermal trip points and cooling-maps for automatic fan control, but the **thermal-cooling framework binding is broken** — the EMC2305 cooling device registers but never gets bound to the thermal zone's cooling-maps. Root cause: phandle resolution issue in the emc2305 driver's interaction with thermal OF.
+
+**Workaround:** A userspace fan control daemon (`fan-control.service`) polls temperature and sets PWM directly via sysfs.
+
+### Temperature Impact
+
+| Configuration | Temperature | Risk |
+|---|---|---|
+| Fan off, VPP workers 0 | 87°C | ⚠️ Near thermal shutdown |
+| Fan PWM=51 (~1700 RPM), VPP workers 0 | 43–51°C | ✅ Safe |
+| Fan PWM=255 (~8700 RPM), VPP workers 0 | 43°C | ✅ Safe but loud |
+| Fan off, VPP worker thread | 91°C+ | ❌ THERMAL SHUTDOWN in <30 min |
+
+### Fan Control PWM Curve
+
+| SoC Temperature | PWM Value | Fan Speed | Noise |
+|---|---|---|---|
+| < 45°C | 0 | Off | Silent |
+| 45–54°C | 51 | ~1700 RPM | Quiet |
+| 55–64°C | 76 | ~3000 RPM | Moderate |
+| 65–74°C | 102 | ~8600 RPM | Loud |
+| ≥ 75°C | 255 | ~8700 RPM | Full blast |
+
+### Manual Fan Control
+
+```bash
+# Find EMC2305 hwmon device
+ls /sys/class/hwmon/hwmon*/name | xargs grep emc2305
+
+# Set fan to maximum (emergency cooling)
+sudo sh -c 'echo 255 > /sys/class/hwmon/hwmon3/pwm1'
+
+# Set fan to quiet mode
+sudo sh -c 'echo 51 > /sys/class/hwmon/hwmon3/pwm1'
+
+# Turn fan off
+sudo sh -c 'echo 0 > /sys/class/hwmon/hwmon3/pwm1'
+
+# Check current fan RPM and temperature
+cat /sys/class/hwmon/hwmon3/fan1_input
+cat /sys/class/thermal/thermal_zone3/temp
+
+# Check fan control service
+systemctl status fan-control.service
+journalctl -u fan-control.service --no-pager -n 10
+```
+
+### Hardware Details
+
+- **Controller:** Microchip EMC2305, I2C address 0x2E on PCA9545 mux channel 3
+- **Kernel driver:** `CONFIG_SENSORS_EMC2305=y` (hwmon3)
+- **Fan headers:** 2× 4-pin PWM (Fan 1 populated, Fan 2 optional)
+- **PWM quantization:** EMC2305 rounds to discrete steps (minimum effective: ~51)
+- **Tachometer:** Fan 1 reads RPM via tach input; Fan 2 available for second fan
 
 ---
 

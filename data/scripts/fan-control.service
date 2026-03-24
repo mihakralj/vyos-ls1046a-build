@@ -1,0 +1,14 @@
+[Unit]
+Description=Fan Control for Mono Gateway DK (EMC2305)
+Documentation=https://github.com/mihakralj/vyos-ls1046a-build
+After=sys-subsystem-hwmon.target
+ConditionPathExists=/sys/class/hwmon
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fan-control.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

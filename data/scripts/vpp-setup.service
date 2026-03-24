@@ -1,0 +1,15 @@
+[Unit]
+Description=VPP AF_XDP Interface Setup (SFP+ eth3/eth4)
+After=vpp.service sys-subsystem-net-devices-eth3.device sys-subsystem-net-devices-eth4.device
+Requires=vpp.service
+Wants=sys-subsystem-net-devices-eth3.device sys-subsystem-net-devices-eth4.device
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vpp-setup-interfaces.sh
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
