@@ -66,7 +66,7 @@ Power on Mono Gateway, interrupt U-Boot (`Hit any key`), paste these lines:
 setenv ethact fm1-mac5
 setenv serverip 192.168.1.137
 setenv ipaddr 192.168.1.200
-setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin vyos-union=/boot/2026.03.22-0432-rolling"
+setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fman.fsl_fm_max_frm=9600 vyos-union=/boot/2026.03.22-0432-rolling"
 setenv dev_boot 'tftp 0xa0000000 vmlinuz; tftp 0x90000000 mono-gw.dtb; tftp 0xb0000000 initrd.img; booti 0xa0000000 0xb0000000:${filesize} 0x90000000'
 saveenv
 ```

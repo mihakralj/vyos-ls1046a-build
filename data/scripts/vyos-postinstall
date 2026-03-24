@@ -16,7 +16,7 @@ set -euo pipefail
 
 DTB_NAME="mono-gw.dtb"
 FW_ENV_CONFIG="/etc/fw_env.config"
-UBOOT_BOOTARGS="console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin"
+UBOOT_BOOTARGS="console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fman.fsl_fm_max_frm=9600"
 
 #--- Board detection ---
 check_board() {

@@ -11,9 +11,14 @@ This project is a fork of [huihuimoe/vyos-arm64-build](https://github.com/huihui
 - Kernel config: `CONFIG_REALTEK_PHY=y` (Realtek PHY driver for RTL821x/RTL822x)
 - DTS: ethernet aliases (`ethernet0`–`ethernet4`) for deterministic interface naming
 - DTS: `compatible = "mono,gateway-dk", "fsl,ls1046a"` board identification
+- Bootarg: `fman.fsl_fm_max_frm=9600` enables jumbo frames (MTU up to 9578) on all interfaces — FMan hardware supports it, but the kernel defaults to 1522
+- Default offloads enabled on all interfaces: GRO, GSO, SG, RFS, RPS — maximum set supported by DPAA1 FMan hardware (TSO/LRO/hw-tc-offload are hardware-impossible `[fixed]`)
+- VPP v25.10.0 AF_XDP proof-of-concept: AF_XDP interfaces on eth3/eth4 with Linux CP plugin, 3.39M polls/sec on Cortex-A72, zero drops
 
 ### Fixed
+- **SFP+ TX_DISABLE GPIO polarity**: DTS used `GPIO_ACTIVE_HIGH` on `tx-disable-gpios` for both SFP+ nodes, but the board has a hardware inverter between GPIO2 and the SFP cage TX_DISABLE pins. Changed to `GPIO_ACTIVE_LOW` — both SFP+ ports now link correctly (eth3 SFP-10G-T at 1G/10G, eth4 SFP-10G-SR at 10G)
 - **SFP+ link DOWN**: DTS used `phy-connection-type = "10gbase-r"` which caused `fman_memac.c` to misassign PCS to `sgmii_pcs` instead of `xfi_pcs`. Changed to `"xgmii"` — kernel converts XGMII→10GBASER after correct PCS assignment. Root cause: PCS fallback path checks `phy_if == XGMII` to assign `xfi_pcs`; using `"10gbase-r"` directly bypasses this, leaving `xfi_pcs = NULL` and breaking in-band link detection.
+- **SFP-10G-T rate adaptation documented**: SFP-10G-T copper modules with RTL8261 rollball PHY support multi-rate (10G/5G/2.5G/1G) via internal rate adaptation. Previously documented as "10G-only" — verified working at 1G with a 1G switch
 
 ### Changed
 - Renamed `boot.efi.md` → `UBOOT.md`, stripped duplicated content (kept unique U-Boot/MTD/clock data)
