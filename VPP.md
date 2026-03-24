@@ -36,6 +36,34 @@ VPP (Vector Packet Processing) from fd.io bypasses the Linux kernel entirely:
 | **OpenWrt** (Linux kernel) | ~4.5 Gbps | ~2.0 Mpps | ⚠️ Partial | Good drivers but `sk_buff` per-packet overhead |
 | **VyOS + VPP** (DPAA1 PMD) | 9.4+ Gbps | 10+ Mpps | ✅ Line rate | Kernel bypass, vector batching, hardware offload |
 
+### Real-World Benchmarks (x86 Reference)
+
+These numbers come from [Andree Toonk's VPP benchmarks](https://toonk.io/kernel-bypass-networking-with-fd-io-and-vpp/) on an x86 server (Packet.com n2.xlarge.x86, 10GbE Intel NICs). They validate our estimates and show how VPP scales with cores:
+
+**Layer 3 Forwarding (no NAT):**
+
+| Scenario | VPP Cores | VPP Throughput | Linux Kernel Cores | Efficiency Ratio |
+|----------|-----------|----------------|-------------------|------------------|
+| Unidirectional 10k flows | 2 | 14 Mpps (line rate) | — | — |
+| Bidirectional 28 Mpps | 3 | 14 Mpps/direction | 26 | **9× fewer cores** |
+
+**NAT (SNAT with connection tracking):**
+
+| Scenario | VPP Cores | VPP Throughput | iptables Cores | Efficiency Ratio |
+|----------|-----------|----------------|---------------|------------------|
+| 16k sessions | 2 | 3.2 Mpps | 29 | **14.5× fewer cores** |
+| Line-rate NAT | 12 | 14 Mpps | — | — |
+
+**Projected LS1046A Performance** (4× A72 @ 1.8 GHz, ~60% per-core IPC vs Xeon):
+
+| Config | Forwarding | NAT | Notes |
+|--------|-----------|-----|-------|
+| 2 VPP workers (cores 2–3) | ~8 Mpps | ~3 Mpps | Control plane on cores 0–1 |
+| 1500B packets, 2 workers | **10G line rate** | ~4 Gbps | Large packets ≈ line rate |
+| + DPAA1 hardware offload | **10G line rate** | **10G line rate** | FMan pre-classifies, BMan zero-copy |
+
+> **Key insight:** VPP scales linearly with dedicated cores. Even with only 2 worker threads on A72, the x86 benchmarks predict we'll hit 10G line rate for typical traffic (≥256B average packet size). DPAA1 hardware offload closes the remaining gap for small packets.
+
 ---
 
 ## Why Not VyOS Built-in VPP?
