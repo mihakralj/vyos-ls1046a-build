@@ -120,6 +120,7 @@ jobs:
           patch --no-backup-if-mismatch -p1 -d "$VYOS1X" < data/vyos-1x-006-install-image-reserve-gap.patch
           patch --no-backup-if-mismatch -p1 -d "$VYOS1X" < data/vyos-1x-007-prefer-emmc-default.patch
           patch --no-backup-if-mismatch -p1 -d "$VYOS1X" < data/vyos-1x-008-raid-default-no.patch
+          patch --no-backup-if-mismatch -p1 -d "$VYOS1X" < data/vyos-1x-009-uboot-live-boot-detection.patch
           sed -i 's/all: clean copyright/all: clean/' "$VYOS1X/Makefile"
 
           ### vyos-build patches
@@ -148,9 +149,10 @@ jobs:
             'CONFIG_FSL_EDMA=y' \
             'CONFIG_SERIAL_OF_PLATFORM=y' \
             'CONFIG_MTD=y' \
-            'CONFIG_MTD_SPI_NOR=m' \
+            'CONFIG_MTD_SPI_NOR=y' \
             'CONFIG_SPI=y' \
             'CONFIG_SPI_FSL_DSPI=y' \
+            'CONFIG_SPI_FSL_QSPI=y' \
             'CONFIG_CDX_BUS=y' \
             '# CONFIG_DEBUG_PREEMPT is not set' \
             'CONFIG_QORIQ_CPUFREQ=y' \
@@ -240,16 +242,26 @@ jobs:
           ### Boot optimization: mask unnecessary services for LS1046A
           # kexec masking forces full cold reboot on installed systems, ensuring
           # DPAA1/SFP/I2C hardware re-initializes cleanly (kexec skips firmware).
-          # Note: does NOT prevent the live-boot kexec double-boot (~70s penalty)
-          # which is triggered by vyos-router reaching kexec.target, not these services.
-          SYSD=vyos-build/data/live-build-config/includes.chroot/etc/systemd/system
-          mkdir -p "$SYSD"
-          ln -sf /dev/null "$SYSD/kexec-load.service"
-          ln -sf /dev/null "$SYSD/kexec.service"
-          # ACPI daemon is useless on ARM64/DeviceTree platforms (LS1046A has no ACPI)
-          ln -sf /dev/null "$SYSD/acpid.service"
-          ln -sf /dev/null "$SYSD/acpid.socket"
-          ln -sf /dev/null "$SYSD/acpid.path"
+          # IMPORTANT: ln -sf /dev/null in includes.chroot gets converted to empty
+          # files by live-build (symlinks to absolute paths outside chroot are
+          # dereferenced). We use a chroot hook to create proper symlinks instead.
+          HOOKS=vyos-build/data/live-build-config/hooks/live
+          cat > "$HOOKS/99-mask-services.chroot" << 'MASKHOOK'
+          #!/bin/bash
+          # Mask kexec services: prevents kexec preloading kernel at boot
+          # (DPAA1/SFP/I2C needs full U-Boot re-init on reboot)
+          # Both SysV init scripts AND systemd units must be masked
+          ln -sf /dev/null /etc/systemd/system/kexec-load.service
+          ln -sf /dev/null /etc/systemd/system/kexec.service
+          # Remove SysV init scripts to prevent systemd-sysv-generator from
+          # creating auto-generated units that bypass our systemd masks
+          rm -f /etc/init.d/kexec-load /etc/init.d/kexec
+          # ACPI daemon is useless on ARM64/DeviceTree platforms
+          ln -sf /dev/null /etc/systemd/system/acpid.service
+          ln -sf /dev/null /etc/systemd/system/acpid.socket
+          ln -sf /dev/null /etc/systemd/system/acpid.path
+          MASKHOOK
+          chmod +x "$HOOKS/99-mask-services.chroot"
 
           ### Ethernet port remapping: match physical port order (left to right)
           # Mainline fsl_dpaa_mac probes in DT address order (e2000→e8000→ea000)

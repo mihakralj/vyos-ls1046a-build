@@ -23,6 +23,11 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 - **eMMC layout (after `install image`):** GPT with p1=BIOS boot (1MiB), 16MiB gap, p2=EFI (256MiB FAT32, GRUB — unused), p3=Linux root (ext4, VyOS). OpenWrt is destroyed. Use `install image` from USB live session.
 - **USB boot uses FAT, eMMC uses ext4:** `fatload usb 0:1` vs `ext4load mmc 0:3` — different U-Boot commands. Rufus "ISO Image mode" creates FAT32 on USB.
 - **kexec double-boot (LIVE-BOOT ONLY):** USB live boot always does a kexec reboot after first config mount — this is normal VyOS live-boot behavior, NOT a bug. First boot establishes the squashfs+overlay, config loading triggers a reboot, second boot succeeds with migration. `kexec-load.service` and `kexec.service` are masked but the reboot is triggered by `vyos-router` itself reaching `kexec.target`. Does NOT affect installed systems (after `install image` to eMMC). The ~70s penalty is a one-time cost during initial USB install only.
+- **is_live_boot() broken on U-Boot boards:** VyOS `is_live_boot()` in `python/vyos/system/image.py` checks for `BOOT_IMAGE=/boot/` or `BOOT_IMAGE=/live/` in `/proc/cmdline`. U-Boot's `booti` doesn't set `BOOT_IMAGE=` (it's GRUB-specific), so the regex never matches and the function always returns `True` (live mode). This blocks `add system image`. Fix: patch `vyos-1x-009` adds a `vyos-union=/boot/` fallback check. Also, `vyos-postinstall` now prepends `BOOT_IMAGE=/boot/<IMAGE>/vmlinuz` to bootargs so future builds work without the fallback.
+- **DPAA1 XDP maximum MTU is 3290:** `fsl_dpaa_mac` enforces a hard XDP MTU limit. AF_XDP socket creation (`xsk_socket__create()`) fails with `EINVAL` if the interface MTU exceeds 3290. Must lower MTU before creating AF_XDP sockets. This means VPP SFP+ ports are limited to ~3304-byte max frame size (3290 MTU + 14 Ethernet header), NOT jumbo. Kernel-managed RJ45 ports retain full 9578 MTU jumbo capability.
+- **VPP AF_XDP on SFP+ only:** VPP runs with AF_XDP driver on eth3/eth4 (10G SFP+), leaving eth0–eth2 (RJ45) under direct kernel control. LCP (Linux Control Plane) plugin creates tap mirror interfaces for VyOS management visibility. Main loop on core 0, **no worker threads** (`workers 0` in startup.conf). `poll-sleep-usec 100` prevents CPU burn on passively-cooled board.
+- **VPP thermal protection is mandatory:** Poll-mode VPP triggers `HARDWARE PROTECTION shutdown (Temperature too high)` on both `ddr-controller` (thermal_zone0) and `core-cluster` (thermal_zone3) within ~30 minutes of idle polling. startup.conf MUST have `workers 0` (no dedicated worker threads) and `poll-sleep-usec 100` (100µs sleep per poll cycle). AF_XDP does NOT support adaptive rx-mode — `set interface rx-mode` fails with "unable to set". The only fix is preventing worker thread creation entirely.
+- **EMC2305 fan thermal binding is broken:** DTS defines cooling-maps binding fan0 to core-cluster thermal zone trip points (40–60°C), but the thermal OF framework doesn't bind the cooling device to the zone (no `cdev*` in sysfs). Workaround: `fan-control.service` polls temperature via sysfs and sets PWM directly. EMC2305 quantizes PWM — minimum effective value is ~51 (~1700 RPM). Fan drops temperature from 87°C → 43°C.
 - **SFP+ ports are 10G-only:** Both SFP+ cages (eth3, eth4) only support 10G modules (SFP-10G-T, SFP-10G-SR, etc). 1G SFP modules fail with "unsupported SFP module: no common interface modes". Root cause: LS1046A DTB has no serdes PHY provider, so `fman_memac.c` can't query multi-rate support via `phy_validate()`, and `memac_supports()` only allows the DTS-specified mode (10GBASER after xgmii conversion).
 - **SFP-10G-T rollball PHY delay:** Copper 10G SFP modules with RTL8261 rollball PHY take ~17 minutes to negotiate link after boot. Interface shows `u/D` during this period — this is normal, not a failure.
 - **DTS thermal-zones path:** `mono-gateway-dk.dts` must reference `/thermal-zones/core-cluster/trips` (not `cluster-thermal`) to match kernel 6.6's `fsl-ls1046a.dtsi`. Wrong path causes DTB compilation failure, silently falling back to SDK DTB (no SFP nodes).
@@ -38,6 +43,9 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 - **Don't push during builds:** The workflow updates `version.json` — pushing while a build is running causes merge conflicts. Use `git pull --rebase` if this happens.
 - **NEVER `install image` from an installed system:** Use `add system image <url>` instead. `install image` is for USB live boot ONLY — it repartitions the eMMC and looks for `/usr/lib/live/mount/medium/live/filesystem.squashfs` which doesn't exist on installed systems. Running it from eMMC DESTROYS the existing installation.
 - **DPAA1 offloads are limited:** TSO/LRO/hw-tc-offload are hardware-impossible (`[fixed]` off). Maximum VyOS offloads: `gro gso sg rfs rps`. Do not attempt to enable TSO.
+- **Jumbo frame module parameter is `fsl_dpaa_fman`:** The FMan driver's `KBUILD_MODNAME` is `fsl_dpaa_fman`, NOT `fman`. Use `fsl_dpaa_fman.fsl_fm_max_frm=9600` in bootargs. The wrong name silently has no effect (max MTU stays at 1500).
+- **QSPI flash needs `CONFIG_SPI_FSL_QSPI=y`:** Without it, `/dev/mtd*` devices don't appear and `fw_setenv` cannot modify U-Boot environment. The DTS defines 8 partitions on the 64MB QSPI NOR flash.
+- **`libubootenv-tool` vs `u-boot-tools`:** VyOS ships `libubootenv-tool` which provides `/usr/bin/fw_setenv` but uses a different config file format than classic `u-boot-tools`. The `fw_env.config` must match the installed tool's expectations.
 
 ## Local Dev Loop Rules
 
@@ -71,7 +79,7 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 - **linux-headers stripped:** `rm -rf packages/linux-headers-*` before ISO build to save space on the runner
 - **Secure Boot chain:** MOK.pem/MOK.key for kernel module signing, minisign for ISO signing, `grub-efi-arm64-signed` + `shim-signed` packages included
 - **Weekly schedule:** Cron runs Friday 01:00 UTC. Also triggered manually via `workflow_dispatch`
-- **Boot optimizations:** `kexec-load.service`, `kexec.service`, `acpid.service`, `acpid.socket`, `acpid.path` are masked in the ISO via symlinks to `/dev/null`. ACPI masking saves ~2s. kexec masking forces full cold reboots on installed systems (ensures DPAA1/SFP/I2C hardware re-initializes cleanly). Does NOT prevent the live-boot kexec double-boot — that is triggered by `vyos-router` reaching `kexec.target` (a systemd target, not a service). `CONFIG_DEBUG_PREEMPT` suppression saves ~20s. Installed system boot time: ~82s to login prompt.
+- **Boot optimizations:** `kexec-load.service`, `kexec.service`, `acpid.service`, `acpid.socket`, `acpid.path` are masked in the ISO via a chroot hook (`99-mask-services.chroot`) that creates symlinks to `/dev/null` inside the build chroot AND removes SysV init scripts (`/etc/init.d/kexec-load`, `/etc/init.d/kexec`). The old `ln -sf /dev/null` in `includes.chroot` approach was broken — live-build dereferences absolute symlinks to paths outside the chroot, producing empty files instead. The SysV scripts regenerate systemd units via `systemd-sysv-generator`, bypassing the mask. ACPI masking saves ~2s. kexec masking forces full cold reboots on installed systems (ensures DPAA1/SFP/I2C hardware re-initializes cleanly). Does NOT prevent the live-boot kexec double-boot — that is triggered by `vyos-router` reaching `kexec.target` (a systemd target, not a service). `CONFIG_DEBUG_PREEMPT` suppression saves ~20s. Installed system boot time: ~82s to login prompt.
 
 ## Boot Diagnostics (Ignore These)
 
@@ -104,14 +112,20 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 | `data/dtb/mono-gateway-dk.dts` | Custom DTS source — compiled during kernel build, includes ethernet aliases + SFP nodes |
 | `data/scripts/vyos-postinstall` | Post-install helper: copies DTB + updates U-Boot env via fw_setenv |
 | `data/scripts/fw_env.config` | U-Boot env access config for fw_printenv/fw_setenv (/dev/mtd3) |
+| `data/scripts/vpp-setup-interfaces.sh` | VPP AF_XDP setup: creates interfaces on eth3/eth4, sets adaptive rx-mode, creates LCP mirrors |
+| `data/scripts/vpp-setup.service` | Systemd oneshot unit for VPP interface setup — waits for device readiness |
+| `data/scripts/startup.conf` | VPP startup config: workers 0 + poll-sleep-usec 100 for thermal safety on passive-cooled board |
+| `data/scripts/fan-control.sh` | Userspace fan control daemon: step-wise PWM based on SoC temperature (EMC2305 thermal binding workaround) |
+| `data/scripts/fan-control.service` | Systemd unit for fan control daemon — runs as simple service with restart-on-failure |
 | `data/reftree.cache` | Required vyos-1x build artifact missing from upstream — must copy manually |
-| `data/vyos-1x-*.patch` | Patches applied to vyos-1x during build (6 patches: console, vyshim timeout, podman, install gap, eMMC default, RAID default no) |
+| `data/vyos-1x-*.patch` | Patches applied to vyos-1x during build (7 patches: console, vyshim timeout, podman, install gap, eMMC default, RAID default no, U-Boot live-boot detection) |
 | `data/vyos-build-*.patch` | Patches applied to vyos-build during build (2 patches: vim link, no sbsign) |
 | `data/mok/MOK.pem` | Machine Owner Key certificate for Secure Boot kernel signing |
 | `data/vyos-ls1046a.minisign.pub` | Public key for ISO signature verification |
 | `version.json` | Update-check version file (served via GitHub raw, auto-updated by CI) |
 | `bin/build-local.sh` | Fast local build: `kernel`, `dtb`, `extract`, `vyos1x`, `iso` modes |
 | `bin/setup-heidi.sh` | One-time: provisions LXC 200 on Proxmox with cross-toolchain + TFTP |
+| `VPP.md` | VPP acceleration plan: AF_XDP on SFP+ (eth3/eth4), DPAA1 architecture, implementation roadmap |
 | `plans/DEV-LOOP.md` | Dev-test loop architecture doc — TFTP boot procedure, lessons learned |
 
 ## Commands
