@@ -15,6 +15,13 @@ system {
         }
     }
     option {
+        kernel {
+            memory {
+                hugepage-size 2M {
+                    hugepage-count 512
+                }
+            }
+        }
         performance network-latency
         reboot-on-panic
         reboot-on-upgrade-failure 5
@@ -103,22 +110,20 @@ interfaces {
     ethernet eth3 {
         address dhcp
         description "SFP+ Left"
+        mtu 3290
         offload {
             gro
             gso
-            rfs
-            rps
             sg
         }
     }
     ethernet eth4 {
         address dhcp
         description "SFP+ Right"
+        mtu 3290
         offload {
             gro
             gso
-            rfs
-            rps
             sg
         }
     }
@@ -130,3 +135,4 @@ service {
     ssh {
     }
 }
+
