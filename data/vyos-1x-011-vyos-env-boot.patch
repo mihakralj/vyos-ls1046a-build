@@ -12,9 +12,10 @@ call vyos-postinstall for one-time U-Boot env setup (fw_setenv).
 --- a/python/vyos/system/grub.py
 +++ b/python/vyos/system/grub.py
 @@ -353,3 +353,11 @@
+     vars_current = vars_read(vars_file)
      vars_current['default'] = gen_version_uuid(version_name)
      vars_write(vars_file, vars_current)
- 
++
 +    # U-Boot boards: write /boot/vyos.env so bootloader knows the default image.
 +    # On GRUB systems this file is harmless (ignored). On U-Boot systems it is
 +    # the primary mechanism for selecting the boot image at power-on.
