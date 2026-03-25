@@ -25,6 +25,8 @@ This project is a fork of [huihuimoe/vyos-arm64-build](https://github.com/huihui
 - PTP hardware timestamping via `ptp_qoriq` driver (`/dev/ptp0`)
 
 ### Fixed
+- **Kexec double-boot eliminated**: Root cause identified in `system_option.py:generate_cmdline_for_kexec()` — compares `/proc/cmdline` against config.boot `MANAGED_PARAMS` (hugepages, panic). U-Boot bootargs were missing `hugepagesz=2M hugepages=512 panic=60` that config.boot.default requests → mismatch → kexec reboot on every boot (~70s penalty). Fix: added params to `vyos-postinstall` UBOOT_BOOTARGS_TAIL. Boot time: ~165s → ~82s
+- **TFTP DTB address corruption**: DTB loaded at `0x90000000` destroyed during kernel decompression (that address is `kernel_comp_addr_r`, scratch space for decompressing kernel from `0xa0000000` → `0x0`). Fix: use `${fdt_addr_r}` (0x88000000) for DTB in all TFTP boot commands
 - **U-Boot live-boot detection**: VyOS `is_live_boot()` checks `BOOT_IMAGE=` in cmdline (GRUB-specific). U-Boot's `booti` doesn't set this. Added `vyos-union=/boot/` fallback check — system now correctly detected as installed. `show system image` and `add system image` now work
 - **Jumbo frame bootarg**: Was `fman.fsl_fm_max_frm=9600` (silently ignored). Correct module name from Makefile is `fsl_dpaa_fman` → `fsl_dpaa_fman.fsl_fm_max_frm=9600`
 - **Kexec masking broken by live-build**: `ln -sf /dev/null` in `includes.chroot` gets converted to empty files when live-build creates squashfs (absolute symlinks outside chroot are dereferenced). Empty files don't mask services. Additionally `kexec-load` comes from SysV init script — `systemd-sysv-generator` creates a unit, bypassing our mask. Fix: chroot hook creates proper symlinks AND removes SysV init scripts
