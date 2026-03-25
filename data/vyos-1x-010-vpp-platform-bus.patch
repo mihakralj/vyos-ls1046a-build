@@ -95,24 +95,16 @@ eth3/eth4 (10G SFP+).
  dpdk {
 --- a/python/vyos/vpp/config_verify.py
 +++ b/python/vyos/vpp/config_verify.py
-@@ -134,5 +134,5 @@
-     main_heap_size = mem_checks.memory_main_heap(settings)
-     main_heap_page_size = mem_checks.main_heap_page_size(settings)
- 
--    if main_heap_size < 1 << 30:  # 1G
+@@ -137,2 +137,2 @@
+-    if main_heap_size < 1 << 30:
 -        raise ConfigError('The main heap size must be greater than or equal to 1G')
-+    if main_heap_size < 1 << 28:  # 256M minimum for embedded/AF_XDP
++    if main_heap_size < 1 << 28:
 +        raise ConfigError('The main heap size must be greater than or equal to 256M')
- 
 --- a/python/vyos/vpp/config_resource_checks/resource_defaults.py
 +++ b/python/vyos/vpp/config_resource_checks/resource_defaults.py
-@@ -23,6 +23,6 @@
-     # Minimal amount of memory required to start VPP
-     'min_memory': '8G',
-     # Minimal number of physical CPU cores required to start VPP
+@@ -26,1 +26,1 @@
 -    'min_cpus': 4,
 +    'min_cpus': 2,
-     # Reserve at least 2 physical cores
+@@ -28,1 +28,1 @@
 -    'reserved_cpu_cores': 2,
 +    'reserved_cpu_cores': 1,
- }
