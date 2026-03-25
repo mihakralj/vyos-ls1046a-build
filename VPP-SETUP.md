@@ -105,12 +105,11 @@ Only eth3 (SFP+ Left) and eth4 (SFP+ Right) should be assigned to VPP. The RJ45 
 ### CPU Allocation
 
 ```vyos
-# Automatic: VPP picks cores (recommended)
+# Single core (recommended — thermal-safe)
 set vpp settings resource-allocation cpu-cores 1
 
-# Manual: pin VPP to specific cores
-set vpp settings cpu main-core 0
-set vpp settings cpu workers 0
+# Two cores (main + 1 worker — requires fan cooling)
+set vpp settings resource-allocation cpu-cores 2
 ```
 
 The Mono Gateway has 4 Cortex-A72 cores. Recommended allocation:
