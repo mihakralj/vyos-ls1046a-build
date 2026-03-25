@@ -27,14 +27,12 @@ eth3/eth4 (10G SFP+).
  
  # drivers that support interrupt RX mode for DPDK and XDP
  drivers_support_interrupt: dict[str, list] = {
-@@ -131,6 +136,7 @@
+@@ -131,3 +136,4 @@
  SUPPORTED_DRIVERS = (
      'hv_netvsc',  # Microsoft Hyper-V network interface card
 +    'fsl_dpa',  # NXP DPAA1 FMan Ethernet (platform bus, AF_XDP)
  )
- 
- 
-@@ -381,7 +387,12 @@
+@@ -381,4 +387,9 @@
          for _ename, iface_config in effective_config['settings']['interface'].items():
 -            iface_config['driver'] = 'dpdk'
 +            _edrv = eth_ifaces_persist.get(_ename, {}).get('original_driver', '')
@@ -45,7 +43,7 @@ eth3/eth4 (10G SFP+).
          config['effective'] = effective_config
  
      # Save important info about all interfaces that cannot be retrieved later
-@@ -407,7 +418,19 @@
+@@ -407,4 +418,16 @@
  
              for iface, iface_config in config['settings']['interface'].items():
 -                iface_config['driver'] = 'dpdk'
@@ -71,7 +69,7 @@ eth3/eth4 (10G SFP+).
                  # old_driver = leaf_node_changed(
 --- a/data/templates/vpp/startup.conf.j2
 +++ b/data/templates/vpp/startup.conf.j2
-@@ -75,6 +75,14 @@
+@@ -75,3 +75,11 @@
  
  plugins {
      plugin default { disable }
@@ -88,13 +86,13 @@ eth3/eth4 (10G SFP+).
 +    plugin dpdk_plugin.so { disable }
 +{% endif %}
      plugin lacp_plugin.so { enable }
-@@ -168,6 +176,7 @@
+@@ -168,2 +176,3 @@
  
 +{% if has_dpdk %}
  dpdk {
 --- a/python/vyos/vpp/config_verify.py
 +++ b/python/vyos/vpp/config_verify.py
-@@ -135,7 +135,7 @@
+@@ -135,4 +135,4 @@
      main_heap_page_size = mem_checks.main_heap_page_size(settings)
  
 -    if main_heap_size < 1 << 30:  # 1G
@@ -105,7 +103,7 @@ eth3/eth4 (10G SFP+).
      readable_heap_page = bytes_to_human_memory(main_heap_page_size, 'K')
 --- a/python/vyos/vpp/config_resource_checks/resource_defaults.py
 +++ b/python/vyos/vpp/config_resource_checks/resource_defaults.py
-@@ -24,9 +24,9 @@
+@@ -24,6 +24,6 @@
      # Minimal amount of memory required to start VPP
      'min_memory': '8G',
      # Minimal number of physical CPU cores required to start VPP
