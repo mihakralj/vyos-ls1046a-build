@@ -245,7 +245,19 @@ jobs:
           # but thermal OF doesn't bind it). Uses standard Linux fancontrol daemon
           # with config mapping EMC2305 PWM to core-cluster thermal zone.
           # Without fan control, SoC reaches 87°C under VPP poll mode.
+          # IMPORTANT: hwmon numbers are unstable across boots. fancontrol-setup.sh
+          # dynamically discovers emc2305 and core_cluster hwmon numbers by name
+          # and regenerates /etc/fancontrol before the fancontrol daemon starts.
           cp data/scripts/fancontrol.conf "$CHROOT/etc/fancontrol"
+          cp data/scripts/fancontrol-setup.sh "$CHROOT/usr/local/bin/fancontrol-setup"
+          chmod +x "$CHROOT/usr/local/bin/fancontrol-setup"
+
+          ### Systemd drop-in: run fancontrol-setup before fancontrol starts
+          mkdir -p "$CHROOT/etc/systemd/system/fancontrol.service.d"
+          printf '%s\n' \
+            '[Service]' \
+            'ExecStartPre=/usr/local/bin/fancontrol-setup' \
+            > "$CHROOT/etc/systemd/system/fancontrol.service.d/hwmon-setup.conf"
 
           ### Install fancontrol package and enable service (chroot hook)
           HOOKS=vyos-build/data/live-build-config/hooks/live
