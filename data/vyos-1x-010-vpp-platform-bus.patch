@@ -95,16 +95,26 @@ eth3/eth4 (10G SFP+).
  dpdk {
 --- a/python/vyos/vpp/config_verify.py
 +++ b/python/vyos/vpp/config_verify.py
-@@ -137,2 +137,2 @@
+@@ -134,8 +134,8 @@
+     main_heap_size = mem_checks.memory_main_heap(settings)
+     main_heap_page_size = mem_checks.main_heap_page_size(settings)
+ 
 -    if main_heap_size < 1 << 30:
 -        raise ConfigError('The main heap size must be greater than or equal to 1G')
 +    if main_heap_size < 1 << 28:
 +        raise ConfigError('The main heap size must be greater than or equal to 256M')
+ 
+     readable_heap_page = bytes_to_human_memory(main_heap_page_size, 'K')
+ 
 --- a/python/vyos/vpp/config_resource_checks/resource_defaults.py
 +++ b/python/vyos/vpp/config_resource_checks/resource_defaults.py
-@@ -26,1 +26,1 @@
+@@ -23,8 +23,8 @@
+     # Minimal amount of memory required to start VPP
+     'min_memory': '8G',
+     # Minimal number of physical CPU cores required to start VPP
 -    'min_cpus': 4,
 +    'min_cpus': 2,
-@@ -28,1 +28,1 @@
+     # Reserve at least 2 physical cores
 -    'reserved_cpu_cores': 2,
 +    'reserved_cpu_cores': 1,
+ }
