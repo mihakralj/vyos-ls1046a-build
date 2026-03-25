@@ -9,33 +9,36 @@ which is the single convergence point for all these operations.
 Additionally, after install_image() completes (first install from USB live),
 call vyos-postinstall for one-time U-Boot env setup (fw_setenv).
 
+diff --git a/python/vyos/system/grub.py b/python/vyos/system/grub.py
 --- a/python/vyos/system/grub.py
 +++ b/python/vyos/system/grub.py
-@@ -353,3 +353,11 @@
-     vars_current = vars_read(vars_file)
+@@ -354,6 +354,13 @@ def set_default(version_name: str, root_dir: str = '') -> None:
      vars_current['default'] = gen_version_uuid(version_name)
      vars_write(vars_file, vars_current)
-+
+ 
 +    # U-Boot boards: write /boot/vyos.env so bootloader knows the default image.
-+    # On GRUB systems this file is harmless (ignored). On U-Boot systems it is
-+    # the primary mechanism for selecting the boot image at power-on.
 +    try:
 +        Path(f'{root_dir}/boot/vyos.env').write_text(
 +            f'vyos_image={version_name}\n')
 +    except Exception:
 +        pass  # non-fatal: only relevant on U-Boot boards
++
+ 
+ def common_write(root_dir: str = '', grub_common: dict[str, str] = {}) -> None:
+     """Write common GRUB configuration file (overwrite everything)
+diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
-@@ -993,3 +993,11 @@
+@@ -993,6 +993,12 @@ def install_image() -> None:
          grub.set_default(image_name, DIR_DST_ROOT)
          grub.set_console_type(console_dict[console_type], DIR_DST_ROOT)
  
-+        # U-Boot boards: one-time bootloader env setup (sets static vyos_direct
-+        # command that reads /boot/vyos.env). Detects LS1046A via
-+        # /proc/device-tree/compatible; no-op on non-matching hardware.
++        # U-Boot boards: one-time bootloader env setup
 +        try:
 +            run('vyos-postinstall')
 +        except Exception:
-+            pass  # non-fatal: vyos-postinstall.service is a boot-time safety net
++            pass
 +
          if is_raid_install(install_target):
+             # add RAID specific modules
+             grub.modules_write(f'{DIR_DST_ROOT}/{grub.CFG_VYOS_MODULES}',
