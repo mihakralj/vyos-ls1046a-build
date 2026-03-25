@@ -88,11 +88,38 @@ eth3/eth4 (10G SFP+).
 +    plugin dpdk_plugin.so { disable }
 +{% endif %}
      plugin vmxnet3_plugin.so { enable }
-@@ -158,3 +168,4 @@
+@@ -158,29 +168,31 @@
  {% endif %}
  
 +{% if has_dpdk %}
  dpdk {
+     # Whitelist the fake PCI address 0000:00:00.0
+     # This prevents all devices from being added to VPP-DPDK by default
+     dev 0000:00:00.0
+ {% for iface, iface_config in interface.items() %}
+ {%     if iface_config.driver == 'dpdk' %}
+     dev {{ iface_config.dpdk_options.dev_id }} {
+         name {{ iface }}
+ {%         if iface_config.num_rx_desc is vyos_defined %}
+         num-rx-desc {{ iface_config.num_rx_desc }}
+ {%         endif %}
+ {%         if iface_config.num_tx_desc is vyos_defined %}
+         num-tx-desc {{ iface_config.num_tx_desc }}
+ {%         endif %}
+ {%         if iface_config.num_rx_queues is vyos_defined %}
+         num-rx-queues {{ iface_config.num_rx_queues }}
+ {%         endif %}
+ {%         if iface_config.num_tx_queues is vyos_defined %}
+         num-tx-queues {{ iface_config.num_tx_queues }}
+ {%         endif %}
+         }
+ {%     endif %}
+ {% endfor %}
+     uio-bind-force
+ }
++{% endif %}
+ 
+ {% if ipsec_acceleration is vyos_defined %}
 --- a/python/vyos/vpp/config_verify.py
 +++ b/python/vyos/vpp/config_verify.py
 @@ -134,8 +134,8 @@
