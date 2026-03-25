@@ -10,7 +10,7 @@ Stock VyOS ARM64 ISO has no eMMC driver, no networking, wrong serial console, an
 
 Because the LS1046A has a **hardware packet processing engine** (DPAA1) that neither OpenWrt nor OPNsense can fully exploit. OpenWrt tops out at ~4.5 Gbps — the Linux kernel's per-packet `sk_buff` overhead chokes the quad-core A72 long before the 10G SFP+ ports saturate. OPNsense is worse: FreeBSD's DPAA1 driver is immature, and you're looking at ~1.5 Gbps on hardware capable of 10.
 
-VyOS 1.5 ships with **VPP** (Vector Packet Processing) — a kernel-bypass data plane that processes packets in batches of 256, polls the hardware directly via AF_XDP, and uses the DPAA1 Frame Manager as a co-processor instead of fighting it. VPP is **deployed and running** on eth3/eth4 (10G SFP+) via AF_XDP, with kernel retaining direct control of eth0–eth2 (RJ45). The CAAM crypto engine provides 128 hardware algorithms for IPsec AES-GCM offload (~2–3 Gbps encrypted). WireGuard runs on ARM64 NEON SIMD (~1 Gbps).
+VyOS 1.5 ships with **VPP** (Vector Packet Processing) — a kernel-bypass data plane that processes packets in batches of 256, polls the hardware directly via AF_XDP, and uses the DPAA1 Frame Manager as a co-processor instead of fighting it. VPP is available on eth3/eth4 (10G SFP+) via AF_XDP, with kernel retaining direct control of eth0–eth2 (RJ45). The CAAM crypto engine provides 128 hardware algorithms for IPsec AES-GCM offload (~2–3 Gbps encrypted). WireGuard runs on ARM64 NEON SIMD (~1 Gbps). VPP is off by default — see **[VPP-SETUP.md](VPP-SETUP.md)** to enable it.
 
 The split-plane architecture is live: VPP handles 10G SFP+ traffic at 2.47M polls/sec, while the kernel stack manages RJ45 interfaces for VyOS routing and management.
 
