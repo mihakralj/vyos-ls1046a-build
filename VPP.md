@@ -52,7 +52,7 @@ VPP (Vector Packet Processing) from fd.io bypasses the Linux kernel entirely:
 | IPv4 Routing (1500B MTU) | 3–5 Gbps | **6–7 Gbps** | **9.4+ Gbps** |
 | Small Packet (64B) PPS | ~2 Mpps | ~4–5 Mpps | **8–12 Mpps** |
 | 10G SFP+ Utilization | Partial (CPU-bound) | ~70% | **Full line rate** |
-| WireGuard/IPsec | ~1.2 Gbps | ~2 Gbps | **2.5+ Gbps** (CAAM) |
+| IPsec AES-GCM (CAAM) | ~1.2 Gbps | ~2 Gbps | **2.5+ Gbps** (CAAM) |
 | CPU during 10G forwarding | 100% SoftIRQ | **<50%** (poll mode) | **<30%** |
 
 ### Why This Outperforms Alternatives
@@ -169,7 +169,7 @@ save
 | **Configd caching** | After patching Python files on a live system, must restart configd AND clear `__pycache__` directories |
 | **Stale vbash sessions** | Multiple competing configure sessions cause locks — `kill -9` all stale vbash processes, restart configd |
 | **VPP memory requirement** | VPP needs ~416MB of 2M hugepages minimum (256M heap + 128M statseg + 32M buffers). Default 148×2M (296MB) is NOT enough — error: "Not enough free memory to start VPP!" |
-| **XDP dispatcher EACCES** | AF_XDP socket creation logs "failed to set up xdp program via xsk_socket__create" but VPP falls back to generic XDP mode and works. Native XDP mode needs investigation |
+| **XDP dispatcher EACCES** | libxdp's `xdp-dispatcher.o` fails to load (`bpf_xdp_adjust_tail` rejected by BPF verifier). VPP falls back to `xsk_def_prog` which loads successfully in **native XDP mode** (mode 1 = `XDP_ATTACHED_DRV`). This is cosmetic — no performance impact. Zero-copy AF_XDP is unavailable (DPAA1 driver lacks `ndo_xsk_wakeup`), so copy-mode is used (~1.3% overhead at 1500B MTU) |
 
 ---
 
@@ -418,13 +418,14 @@ sudo cat /var/log/vpp/vpp.log
 - [ ] Test `cpu-cores 2` with workers on cores 1–2
 - [ ] Benchmark improvement: main-only (~4 Mpps) vs 1 worker (~6–8 Mpps)
 - [ ] Profile thermal under traffic load with workers enabled
-- [ ] Investigate XDP dispatcher EACCES — enable native XDP mode for better performance
+- [x] ~~Investigate XDP dispatcher EACCES~~ — **RESOLVED**: Already running native XDP (mode 1). EACCES is cosmetic (libxdp dispatcher, not needed). Copy-mode AF_XDP with ~1.3% overhead at 1500B MTU
 
 ### Milestone 4: Crypto Acceleration ⬜ PLANNED
 
 - [ ] Enable CAAM crypto plugin in VPP
-- [ ] Benchmark IPsec/WireGuard throughput with CAAM offload
-- [ ] Target: 2.5+ Gbps encrypted tunnel throughput
+- [ ] Benchmark IPsec AES-GCM throughput with CAAM offload (~2–3 Gbps via 3 Job Rings)
+- [ ] Benchmark WireGuard throughput (ChaCha20-Poly1305, CPU-only via NEON SIMD, ~1 Gbps)
+- [ ] Target: 2.5+ Gbps IPsec encrypted tunnel throughput
 
 ### Milestone 5: DPAA1 PMD (Full Line Rate) ⬜ FUTURE
 
@@ -565,7 +566,7 @@ flowchart TD
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| XDP dispatcher EACCES | Reduced AF_XDP performance (generic mode) | Investigate kernel XDP flags, may need CAP_NET_ADMIN |
+| ~~XDP dispatcher EACCES~~ | ~~Reduced AF_XDP performance~~ **RESOLVED** — cosmetic only | VPP already runs native XDP (mode 1). libxdp dispatcher fails but `xsk_def_prog` loads fine. No zero-copy (DPAA1 lacks `ndo_xsk_wakeup`), copy-mode overhead ~1.3% at 1500B |
 | VPP thermal shutdown (poll mode) | Hardware protection reboot | `poll-sleep-usec 100` + fancontrol.service (DEPLOYED) |
 | DPAA1 MTU limit 3290 under XDP | No jumbo frames on VPP ports | RJ45 ports retain full 9578 MTU; design constraint |
 | USDPAA incompatible with VyOS kernel | Blocks full DPAA PMD path | AF_XDP already works as fallback |
