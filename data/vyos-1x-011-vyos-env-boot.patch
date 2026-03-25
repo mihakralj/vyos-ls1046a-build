@@ -9,6 +9,11 @@ which is the single convergence point for all these operations.
 Additionally, after install_image() completes (first install from USB live),
 call vyos-postinstall for one-time U-Boot env setup (fw_setenv).
 
+Also, add_image() (upgrade path) now copies .dtb files from the ISO root
+to the new image's boot directory, so U-Boot can load the correct DTB.
+Without this, upgrades via "add system image" would leave the new image
+directory without mono-gw.dtb, causing boot failure on U-Boot boards.
+
 diff --git a/python/vyos/system/grub.py b/python/vyos/system/grub.py
 --- a/python/vyos/system/grub.py
 +++ b/python/vyos/system/grub.py
@@ -42,3 +47,14 @@ diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
          if is_raid_install(install_target):
              # add RAID specific modules
              grub.modules_write(f'{DIR_DST_ROOT}/{grub.CFG_VYOS_MODULES}',
+@@ -1242,6 +1248,11 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
+         copy(f'{DIR_ISO_MOUNT}/live/filesystem.squashfs',
+              f'{root_dir}/boot/{image_name}/{image_name}.squashfs')
+ 
++        # Copy device tree blobs for U-Boot boards (e.g., LS1046A)
++        for file in Path(DIR_ISO_MOUNT).iterdir():
++            if file.is_file() and file.suffix == '.dtb':
++                copy(file, f'{root_dir}/boot/{image_name}/')
++
+         # unmount an ISO and cleanup
+         cleanup([str(iso_path)])
