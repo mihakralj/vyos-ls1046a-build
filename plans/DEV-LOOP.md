@@ -66,8 +66,8 @@ Power on Mono Gateway, interrupt U-Boot (`Hit any key`), paste these lines:
 setenv ethact fm1-mac5
 setenv serverip 192.168.1.137
 setenv ipaddr 192.168.1.200
-setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fman.fsl_fm_max_frm=9600 vyos-union=/boot/2026.03.22-0432-rolling"
-setenv dev_boot 'tftp 0xa0000000 vmlinuz; tftp 0x90000000 mono-gw.dtb; tftp 0xb0000000 initrd.img; booti 0xa0000000 0xb0000000:${filesize} 0x90000000'
+setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 hugepagesz=2M hugepages=512 panic=60 vyos-union=/boot/2026.03.25-0531-rolling"
+setenv dev_boot 'tftp 0xa0000000 vmlinuz; tftp ${fdt_addr_r} mono-gw.dtb; tftp 0xb0000000 initrd.img; booti 0xa0000000 0xb0000000:${filesize} ${fdt_addr_r}'
 saveenv
 ```
 
@@ -78,6 +78,11 @@ saveenv
 > **Critical:** `vyos-union=/boot/<IMAGE>` must match the installed VyOS image on eMMC.
 > Check with: `ls mmc 0:3 /boot/` in U-Boot or `show system image` in VyOS.
 > Update after `add system image` with: `setenv bootargs "... vyos-union=/boot/NEW_IMAGE_NAME"` then `saveenv`.
+
+> **Warning:** DTB must use `${fdt_addr_r}` (0x88000000), NOT `0x90000000`.
+> `0x90000000` is `kernel_comp_addr_r` — the kernel decompression workspace.
+> The kernel decompresses from `0xa0000000` to `0x0` using `0x90000000` as scratch,
+> corrupting any DTB loaded there → `ERROR: Did not find a cmdline Flattened Device Tree`.
 
 ### 4. Dev iteration cycle (the fast path)
 
@@ -100,9 +105,9 @@ run dev_boot
 U-Boot
   └── run dev_boot
         ├── tftp 0xa0000000 vmlinuz      (TFTP kernel from LXC 200)
-        ├── tftp 0x90000000 mono-gw.dtb  (TFTP DTB)
+        ├── tftp ${fdt_addr_r} mono-gw.dtb  (TFTP DTB to 0x88000000)
         ├── tftp 0xb0000000 initrd.img   (TFTP initrd, loaded LAST for ${filesize})
-        └── booti 0xa0000000 0xb0000000:${filesize} 0x90000000
+        └── booti 0xa0000000 0xb0000000:${filesize} ${fdt_addr_r}
               │
               ├── [T+0 → T+26s] TFTP kernel 6.6.129 boots
               │   ├── eMMC probes (mmcblk0 p1 p2 p3) at T+1.8s
@@ -111,19 +116,17 @@ U-Boot
               │   ├── systemd multi-user at T+17s
               │   └── VyOS Router starts at T+26s
               │
-              ├── [T+26 → T+121s] live-boot kexec double-boot
-              │   └── vyos-router reaches kexec.target → reboots
-              │
-              └── [T+121 → T+200s] eMMC production kernel 6.6.128-vyos
+              └── [T+26 → T+82s] Configuration + login prompt
                   ├── Full driver stack (modules available)
                   ├── "Configuration success"
                   └── VyOS login prompt
 ```
 
-> **Note:** The kexec double-boot is normal for `boot=live`. The TFTP kernel runs
-> for ~120s (enough to verify all hardware probes), then kexec hands off to the
-> eMMC production kernel which completes config migration. For kernel config
-> testing, the first boot's dmesg is what matters.
+> **Note:** If bootargs are missing `hugepagesz=2M hugepages=512 panic=60`,
+> `system_option.py` detects the mismatch with `config.boot.default` options
+> and triggers a kexec reboot (adding ~70s). Always keep U-Boot bootargs in
+> sync with any `MANAGED_PARAMS` in config.boot (hugepages, panic, mitigations,
+> etc.). See [`system_option.py:generate_cmdline_for_kexec()`](https://github.com/vyos/vyos-1x/blob/current/src/conf_mode/system_option.py) for the full list.
 
 ## Build Modes
 
