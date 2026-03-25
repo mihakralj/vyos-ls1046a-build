@@ -234,7 +234,7 @@ ENV{DEVPATH}=="*/1af2000.ethernet/*", ENV{VYOS_IFNAME}="eth4"   # SFP2 (right ca
 
 Five components make `install image` → reboot → `add system image` → reboot work without manual U-Boot commands:
 
-**1. DTB inside squashfs:** The compiled `mono-gw.dtb` is placed at `/boot/mono-gw.dtb` inside the squashfs. VyOS's `install_image()` copies all files from `/boot/` to the target — DTB gets copied automatically with zero VyOS code changes.
+**1. DTB at ISO root:** The compiled `mono-gw.dtb` is placed at the ISO root (via `includes.binary/`). During `install image`, the DTB is copied from the live media to the boot directory. Patch `vyos-1x-011` also copies `.dtb` files during `add system image` upgrades (from ISO root to `{root_dir}/boot/{image_name}/`).
 
 **2. `/boot/vyos.env` file** (`vyos-1x-011`): Patched into `grub.set_default()` — whenever VyOS sets the default boot image (install, upgrade, `set system image default-boot`, rename), it also writes `/boot/vyos.env` containing `vyos_image=<image-name>`. U-Boot reads this file via `ext4load` + `env import -t` to determine which image to boot. The `vyos_direct` U-Boot command is static — it never needs `fw_setenv` updates after initial setup.
 

@@ -82,7 +82,7 @@ U-Boot auto-boots into VyOS on eMMC. No manual U-Boot commands needed.
 ## 5. Initial Config
 
 The default config includes DHCP on all interfaces and SSH enabled.
-Login `vyos` / `vyos` — SSH key authentication is preconfigured for helga.
+Login `vyos` / `vyos`.
 
 No manual configuration needed for basic connectivity.
 
@@ -95,8 +95,8 @@ Physical port order on the back panel:
 | Port | VyOS | Type | Notes |
 |------|------|------|-------|
 | RJ45 Left | `eth0` | 1G SGMII | GPY115C PHY |
-| RJ45 Right | `eth1` | 1G SGMII | GPY115C PHY |
-| RJ45 Center | `eth2` | 1G SGMII | GPY115C PHY |
+| RJ45 Center | `eth1` | 1G SGMII | GPY115C PHY |
+| RJ45 Right | `eth2` | 1G SGMII | GPY115C PHY |
 | SFP+ Left | `eth3` | 10G XFI | SFP-10G-T, SFP-10G-SR/LR |
 | SFP+ Right | `eth4` | 10G XFI | SFP-10G-T, SFP-10G-SR/LR |
 
