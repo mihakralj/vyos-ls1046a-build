@@ -2,7 +2,7 @@
 
 Low-level U-Boot reference and seamless boot specification.
 
-Updated 2026-03-24.
+Updated 2026-03-25.
 
 For boot architecture and kernel config rationale, see [PORTING.md](PORTING.md).
 For install instructions, see [INSTALL.md](INSTALL.md).
@@ -85,7 +85,7 @@ bootcmd=run usb_vyos || run vyos_direct || run recovery
 usb_vyos=usb start; if fatload usb 0:1 ${kernel_addr_r} live/vmlinuz; then fatload usb 0:1 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:1 ${ramdisk_addr_r} live/initrd.img; setenv bootargs "BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda1 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 quiet"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}; fi
 
 # eMMC boot — read image name from vyos.env, load and boot (STATIC — never changes)
-vyos_direct=ext4load mmc 0:3 ${load_addr} /boot/vyos.env; env import -t ${load_addr} ${filesize}; ext4load mmc 0:3 ${kernel_addr_r} /boot/${vyos_image}/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/${vyos_image}/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/${vyos_image}/initrd.img; setenv bootargs "BOOT_IMAGE=/boot/${vyos_image}/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 vyos-union=/boot/${vyos_image}"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
+vyos_direct=ext4load mmc 0:3 ${load_addr} /boot/vyos.env; env import -t ${load_addr} ${filesize}; ext4load mmc 0:3 ${kernel_addr_r} /boot/${vyos_image}/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/${vyos_image}/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/${vyos_image}/initrd.img; setenv bootargs "BOOT_IMAGE=/boot/${vyos_image}/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 hugepagesz=2M hugepages=512 panic=60 vyos-union=/boot/${vyos_image}"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
 
 # SPI flash recovery (factory, always available)
 recovery=sf probe 0:0; sf read ${kernel_addr_r} ${kernel_addr} ${kernel_size}; sf read ${fdt_addr_r} ${fdt_addr} ${fdt_size}; booti ${kernel_addr_r} - ${fdt_addr_r}
@@ -112,14 +112,13 @@ Written by VyOS's image installer Python code after every `install image` or `ad
 | 4 | `INSTALL.md` | Simplify to 5 steps |
 | 5 | `AGENTS.md`, `PORTING.md` | Update to reflect new architecture |
 
-### Risk: `env import -t` Availability
+### Verified: `env import -t` Works ✅
 
-U-Boot 2025.04 supports `env import -t`. Must verify on actual Mono Gateway hardware that:
-1. `env import -t ${load_addr} ${filesize}` correctly parses `vyos_image=...`
-2. `${vyos_image}` is available for subsequent commands in the same script
-3. No side effects from importing into the running U-Boot environment
-
-**Fallback:** If `env import -t` does not work, revert to `fw_setenv` per-image approach (current `vyos-postinstall` logic).
+Tested 2026-03-25 on board #308 (U-Boot 2025.04):
+1. ✅ `env import -t ${load_addr} ${filesize}` correctly parses `vyos_image=2026.03.25-0531-rolling`
+2. ✅ `${vyos_image}` is available for subsequent `ext4load` commands in the same script
+3. ✅ No side effects — only the `vyos_image` variable is imported
+4. ✅ Full boot chain works: `vyos.env` → `env import` → per-image `ext4load` → `booti` → VyOS login in ~97s
 
 ---
 
@@ -146,26 +145,26 @@ aarch64-oe-linux-gcc (GCC) 14.3.0
 - Bank 0: `0x80000000` – `0xfbdfffff` (1982 MB)
 - Bank 1: `0x880000000` – `0x9ffffffff` (6144 MB)
 
-## Boot Commands (Current — Installed VyOS)
+## Boot Commands (Deployed — vyos.env Architecture)
 
-> **Note:** These are the CURRENT commands. The target state uses `vyos.env` instead — see above.
+> **Status:** DEPLOYED and VERIFIED on board #308 (2026-03-25). Paste into U-Boot console once.
 
 ```bash
-# Saved bootcmd — try VyOS, fall back to SPI recovery
-setenv bootcmd 'run vyos_direct || run recovery'
-
-# VyOS direct boot from eMMC p3
-setenv vyos_direct 'setenv bootargs "BOOT_IMAGE=/boot/<IMAGE>/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin vyos-union=/boot/<IMAGE> fsl_dpaa_fman.fsl_fm_max_frm=9600"; ext4load mmc 0:3 ${kernel_addr_r} /boot/<IMAGE>/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/<IMAGE>/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/<IMAGE>/initrd.img; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
+# Save the three boot commands and bootcmd
+setenv usb_vyos 'usb start; if fatload usb 0:1 ${kernel_addr_r} live/vmlinuz; then fatload usb 0:1 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:1 ${ramdisk_addr_r} live/initrd.img; setenv bootargs "BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda1 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 quiet"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}; fi'
+setenv vyos_direct 'ext4load mmc 0:3 ${load_addr} /boot/vyos.env; env import -t ${load_addr} ${filesize}; ext4load mmc 0:3 ${kernel_addr_r} /boot/${vyos_image}/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/${vyos_image}/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/${vyos_image}/initrd.img; setenv bootargs "BOOT_IMAGE=/boot/${vyos_image}/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 hugepagesz=2M hugepages=512 panic=60 vyos-union=/boot/${vyos_image}"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
+setenv bootcmd 'run usb_vyos || run vyos_direct || run recovery'
 saveenv
 ```
 
-Replace `<IMAGE>` with the actual image name (e.g., `2026.03.21-2144-rolling`).
+After `saveenv`, the board auto-boots from eMMC via `/boot/vyos.env` on every power cycle. No further U-Boot intervention needed — ever. Future `add system image` upgrades only update `/boot/vyos.env`.
 
 **Critical bootargs:**
-- `BOOT_IMAGE=/boot/<IMAGE>/vmlinuz` — must be FIRST arg; VyOS `is_live_boot()` regex requires it (U-Boot's `booti` does not set it like GRUB does)
+- `BOOT_IMAGE=/boot/${vyos_image}/vmlinuz` — must be FIRST arg; VyOS `is_live_boot()` regex requires it (U-Boot's `booti` does not set it like GRUB does)
 - `boot=live` — initramfs uses live-boot mode
-- `vyos-union=/boot/<IMAGE>` — squashfs overlay dir on p3 (also used as `is_live_boot()` fallback for U-Boot boards)
+- `vyos-union=/boot/${vyos_image}` — squashfs overlay dir on p3 (also used as `is_live_boot()` fallback for U-Boot boards)
 - `fsl_dpaa_fman.fsl_fm_max_frm=9600` — enables jumbo frames (max MTU 9578). Module name is `fsl_dpaa_fman`, NOT `fman`
+- `hugepagesz=2M hugepages=512 panic=60` — MUST match config.boot.default or `system_option.py` triggers a kexec reboot
 - Missing `boot=live` or `vyos-union=` → drops to initramfs BusyBox shell
 
 **Critical load order:**
