@@ -236,9 +236,9 @@ jobs:
             '[Install]' \
             'WantedBy=multi-user.target' \
             > "$CHROOT/etc/systemd/system/vyos-postinstall.service"
-          mkdir -p "$CHROOT/etc/systemd/system/multi-user.target.wants"
-          ln -sf ../vyos-postinstall.service \
-            "$CHROOT/etc/systemd/system/multi-user.target.wants/vyos-postinstall.service"
+          # NOTE: Do NOT use ln -sf here. live-build dereferences symlinks in
+          # includes.chroot, converting them to empty files. The systemctl enable
+          # is done inside the 98-fancontrol.chroot hook below instead.
 
           ### Fan control: EMC2305 PWM thermal management via standard fancontrol
           # DTS thermal-cooling binding is broken (EMC2305 registers cooling_device
@@ -267,6 +267,10 @@ jobs:
           # Config at /etc/fancontrol maps EMC2305 PWM to core-cluster thermal zone
           apt-get update -qq && apt-get install -y --no-install-recommends fancontrol
           systemctl enable fancontrol.service
+          # Enable vyos-postinstall (writes /boot/vyos.env on install/upgrade).
+          # Must be done inside chroot hook — ln -sf in includes.chroot gets
+          # dereferenced by live-build, producing empty files instead of symlinks.
+          systemctl enable vyos-postinstall.service
           apt-get clean
           FANHOOK
           chmod +x "$HOOKS/98-fancontrol.chroot"
