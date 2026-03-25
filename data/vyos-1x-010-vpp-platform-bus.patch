@@ -15,7 +15,7 @@ eth3/eth4 (10G SFP+).
 
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
-@@ -94,7 +94,12 @@
+@@ -94,7 +94,10 @@
  }
  
  # drivers that does not use PCIe addresses
@@ -27,13 +27,15 @@ eth3/eth4 (10G SFP+).
  
  # drivers that support interrupt RX mode for DPDK and XDP
  drivers_support_interrupt: dict[str, list] = {
-@@ -131,3 +136,4 @@
+@@ -129,3 +132,4 @@
  SUPPORTED_DRIVERS = (
      'hv_netvsc',  # Microsoft Hyper-V network interface card
 +    'fsl_dpa',  # NXP DPAA1 FMan Ethernet (platform bus, AF_XDP)
  )
-@@ -381,4 +387,9 @@
-         for _ename, iface_config in effective_config['settings']['interface'].items():
+@@ -376,5 +380,9 @@
+         # Buffer normalization (auto  computed)
+         _normalize_buffers(effective_config)
+         for iface_config in effective_config['settings']['interface'].values():
 -            iface_config['driver'] = 'dpdk'
 +            _edrv = eth_ifaces_persist.get(_ename, {}).get('original_driver', '')
 +            if _edrv in platform_bus_xdp_drivers:
@@ -41,12 +43,11 @@ eth3/eth4 (10G SFP+).
 +            else:
 +                iface_config['driver'] = 'dpdk'
          config['effective'] = effective_config
- 
-     # Save important info about all interfaces that cannot be retrieved later
-@@ -407,4 +418,16 @@
+@@ -399,4 +407,20 @@
  
              for iface, iface_config in config['settings']['interface'].items():
 -                iface_config['driver'] = 'dpdk'
+-
 +                # Auto-detect driver: platform-bus NICs use XDP, PCI NICs use DPDK
 +                _orig_drv = eth_ifaces_persist.get(iface, {}).get('original_driver', '')
 +                if not _orig_drv:
@@ -65,14 +66,14 @@ eth3/eth4 (10G SFP+).
 +                        }
 +                else:
 +                    iface_config['driver'] = 'dpdk'
- 
                  # old_driver = leaf_node_changed(
 --- a/data/templates/vpp/startup.conf.j2
 +++ b/data/templates/vpp/startup.conf.j2
-@@ -75,3 +75,11 @@
- 
+@@ -76,4 +76,14 @@
  plugins {
      plugin default { disable }
+-    plugin avf_plugin.so { enable }
+-    plugin dpdk_plugin.so { enable }
 +    plugin af_xdp_plugin.so { enable }
 +{% set has_dpdk = [] %}
 +{% for iface, iface_config in interface.items() %}
@@ -81,18 +82,21 @@ eth3/eth4 (10G SFP+).
 +{%     endif %}
 +{% endfor %}
 +{% if has_dpdk %}
-     plugin dpdk_plugin.so { enable }
++    plugin avf_plugin.so { enable }
++    plugin dpdk_plugin.so { enable }
 +{% else %}
 +    plugin dpdk_plugin.so { disable }
 +{% endif %}
-     plugin lacp_plugin.so { enable }
-@@ -168,2 +176,3 @@
+     plugin vmxnet3_plugin.so { enable }
+@@ -158,3 +168,4 @@
+ {% endif %}
  
 +{% if has_dpdk %}
  dpdk {
 --- a/python/vyos/vpp/config_verify.py
 +++ b/python/vyos/vpp/config_verify.py
-@@ -135,4 +135,4 @@
+@@ -134,5 +134,5 @@
+     main_heap_size = mem_checks.memory_main_heap(settings)
      main_heap_page_size = mem_checks.main_heap_page_size(settings)
  
 -    if main_heap_size < 1 << 30:  # 1G
@@ -100,10 +104,9 @@ eth3/eth4 (10G SFP+).
 +    if main_heap_size < 1 << 28:  # 256M minimum for embedded/AF_XDP
 +        raise ConfigError('The main heap size must be greater than or equal to 256M')
  
-     readable_heap_page = bytes_to_human_memory(main_heap_page_size, 'K')
 --- a/python/vyos/vpp/config_resource_checks/resource_defaults.py
 +++ b/python/vyos/vpp/config_resource_checks/resource_defaults.py
-@@ -24,6 +24,6 @@
+@@ -23,6 +23,6 @@
      # Minimal amount of memory required to start VPP
      'min_memory': '8G',
      # Minimal number of physical CPU cores required to start VPP
