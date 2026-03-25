@@ -249,7 +249,7 @@ The Mono Gateway DK uses passive cooling (heatsink) with an optional EMC2305 PWM
 
 The DTS defines thermal trip points and cooling-maps for automatic fan control, but the **thermal-cooling framework binding is broken** — the EMC2305 cooling device registers but never gets bound to the thermal zone's cooling-maps. Root cause: phandle resolution issue in the emc2305 driver's interaction with thermal OF.
 
-**Workaround:** A userspace fan control daemon (`fan-control.service`) polls temperature and sets PWM directly via sysfs.
+**Workaround:** The standard Linux `fancontrol` daemon polls temperature and sets PWM directly via sysfs. Installed via chroot hook during ISO build, configured at `/etc/fancontrol`.
 
 ### Temperature Impact
 
@@ -290,8 +290,8 @@ cat /sys/class/hwmon/hwmon3/fan1_input
 cat /sys/class/thermal/thermal_zone3/temp
 
 # Check fan control service
-systemctl status fan-control.service
-journalctl -u fan-control.service --no-pager -n 10
+systemctl status fancontrol.service
+journalctl -u fancontrol.service --no-pager -n 10
 ```
 
 ### Hardware Details
@@ -344,7 +344,7 @@ All `vppctl` commands require `sudo`. VPP CLI socket: `/run/vpp/cli.sock`.
 ```bash
 # === Service Status ===
 systemctl status vpp.service
-systemctl status fan-control.service
+systemctl status fancontrol.service
 
 # === Interface Status ===
 sudo vppctl show interface               # All VPP interfaces with counters
@@ -566,7 +566,7 @@ flowchart TD
 | Risk | Impact | Mitigation |
 |------|--------|------------|
 | XDP dispatcher EACCES | Reduced AF_XDP performance (generic mode) | Investigate kernel XDP flags, may need CAP_NET_ADMIN |
-| VPP thermal shutdown (poll mode) | Hardware protection reboot | `poll-sleep-usec 100` + fan-control.service (DEPLOYED) |
+| VPP thermal shutdown (poll mode) | Hardware protection reboot | `poll-sleep-usec 100` + fancontrol.service (DEPLOYED) |
 | DPAA1 MTU limit 3290 under XDP | No jumbo frames on VPP ports | RJ45 ports retain full 9578 MTU; design constraint |
 | USDPAA incompatible with VyOS kernel | Blocks full DPAA PMD path | AF_XDP already works as fallback |
 | NXP DPDK fork too old for VPP 25.x | Build failures | Pin to NXP's VPP fork version |
