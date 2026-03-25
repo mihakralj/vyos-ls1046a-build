@@ -11,7 +11,7 @@ call vyos-postinstall for one-time U-Boot env setup (fw_setenv).
 
 --- a/python/vyos/system/grub.py
 +++ b/python/vyos/system/grub.py
-@@ -353,6 +353,13 @@
+@@ -353,3 +353,11 @@
      vars_current['default'] = gen_version_uuid(version_name)
      vars_write(vars_file, vars_current)
  
@@ -23,12 +23,9 @@ call vyos-postinstall for one-time U-Boot env setup (fw_setenv).
 +            f'vyos_image={version_name}\n')
 +    except Exception:
 +        pass  # non-fatal: only relevant on U-Boot boards
- 
- def common_write(root_dir: str = '', grub_common: dict[str, str] = {}) -> None:
-     """Write common GRUB configuration file (overwrite everything)
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
-@@ -993,6 +993,13 @@
+@@ -993,3 +993,11 @@
          grub.set_default(image_name, DIR_DST_ROOT)
          grub.set_console_type(console_dict[console_type], DIR_DST_ROOT)
  
@@ -41,5 +38,3 @@ call vyos-postinstall for one-time U-Boot env setup (fw_setenv).
 +            pass  # non-fatal: vyos-postinstall.service is a boot-time safety net
 +
          if is_raid_install(install_target):
-             # add RAID specific modules
-             grub.modules_write(f'{DIR_DST_ROOT}/{grub.CFG_VYOS_MODULES}',
