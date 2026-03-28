@@ -32,6 +32,22 @@
 		stdout-path = "serial0:115200n8";
 	};
 
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		/* DPDK DMA buffer pool — 256MB contiguous
+		 * Used by fsl_usdpaa_mainline driver for DMA_MAP ioctl.
+		 * Address 0xc000_0000 is below 4GB DMA boundary.
+		 */
+		usdpaa_mem: usdpaa-mem@c0000000 {
+			compatible = "fsl,usdpaa-mem";
+			reg = <0x0 0xc0000000 0x0 0x10000000>;
+			no-map;
+		};
+	};
+
 	leds {
 		compatible = "gpio-leds";
 
@@ -82,6 +98,19 @@
 		mod-def0-gpios = <&gpio2 10 GPIO_ACTIVE_LOW>;
 		los-gpios = <&gpio2 9 GPIO_ACTIVE_HIGH>;
 		maximum-power-milliwatt = <3000>;
+	};
+};
+
+/*
+ * BMan buffer pool for DPDK.
+ * DPDK's fman.c requires at least one bpool with fsl,bpid.
+ * The bpool-ethernet-cfg values (count/size/addr) are optional hints;
+ * DPDK overrides them with its own mbuf pool allocation.
+ */
+/ {
+	dpaa_pool: dpaa-bpool {
+		compatible = "fsl,bpool";
+		fsl,bpid = <16>;
 	};
 };
 
@@ -571,5 +600,134 @@
 	fan-map5 {
 		trip = <&fan_level5>;
 		cooling-device = <&fan0 6 6>;
+	};
+};
+
+/*
+	* DPDK DPAA1 PMD support.
+	*
+	* Mainline kernel DTSIs lack fsl,qman-channel-id on TX port nodes
+	* (only SDK DTSIs have it). DPDK's fman.c requires this property to
+	* determine the QMan enqueue channel for each MAC's TX path.
+	*
+	* LS1046A FMan0 QMan channel assignment (from LS1046A Reference Manual):
+	*   0x800 = 10GEC1 (MAC9,  ethernet@f0000)
+	*   0x801 = 10GEC2 (MAC10, ethernet@f2000)
+	*   0x802 = 1G MAC1 (ethernet@e0000) — disabled
+	*   0x803 = 1G MAC2 (ethernet@e2000)
+	*   0x804 = 1G MAC3 (ethernet@e4000) — disabled
+	*   0x805 = 1G MAC4 (ethernet@e6000) — disabled
+	*   0x806 = 1G MAC5 (ethernet@e8000)
+	*   0x807 = 1G MAC6 (ethernet@ea000)
+	*/
+&fman0_tx_0x28 { fsl,qman-channel-id = <0x802>; }; /* MAC1 */
+&fman0_tx_0x29 { fsl,qman-channel-id = <0x803>; }; /* MAC2 */
+&fman0_tx_0x2a { fsl,qman-channel-id = <0x804>; }; /* MAC3 */
+&fman0_tx_0x2b { fsl,qman-channel-id = <0x805>; }; /* MAC4 */
+&fman0_tx_0x2c { fsl,qman-channel-id = <0x806>; }; /* MAC5 */
+&fman0_tx_0x2d { fsl,qman-channel-id = <0x807>; }; /* MAC6 */
+&fman0_tx_0x30 { fsl,qman-channel-id = <0x800>; }; /* MAC9  10GEC1 */
+&fman0_tx_0x31 { fsl,qman-channel-id = <0x801>; }; /* MAC10 10GEC2 */
+
+/*
+ * DPDK QMan/BMan resource allocation ranges.
+ *
+ * These nodes live inside the QMan portals container (&qportals).
+ * The mainline kernel ignores them (no driver matches these compatible strings),
+ * but DPDK userspace reads them via /proc/device-tree/ for resource allocation.
+ *
+ * Source: NXP SDK qoriq-qman-portals-sdk.dtsi
+ * - fsl,pool-channel-range: REQUIRED by DPDK qman_driver.c:307
+ *   of_find_compatible_node(NULL, NULL, "fsl,pool-channel-range")
+ * - fsl,fqid-range: Frame Queue ID allocation pools for DPDK
+ * - fsl,cgrid-range: Congestion Group ID allocation for DPDK
+ */
+&qportals {
+	qman-fqids@0 {
+		compatible = "fsl,fqid-range";
+		fsl,fqid-range = <256 256>;
+	};
+
+	qman-fqids@1 {
+		compatible = "fsl,fqid-range";
+		fsl,fqid-range = <32768 32768>;
+	};
+
+	qman-pools@0 {
+		compatible = "fsl,pool-channel-range";
+		fsl,pool-channel-range = <0x401 0xf>;
+	};
+
+	qman-cgrids@0 {
+		compatible = "fsl,cgrid-range";
+		fsl,cgrid-range = <0 256>;
+	};
+};
+
+/*
+	* DPDK DPAA bus container.
+	*
+	* DPDK's fman_init() looks for a node with compatible = "fsl,dpaa",
+	* then iterates its children calling fman_if_init() for each.
+	* The kernel ignores this node — no mainline driver matches "fsl,dpaa".
+	*
+	* Each ethernet@N child must provide:
+	*   - compatible = "fsl,dpa-ethernet-init" (avoids SDK vsp-window check)
+	*   - fsl,fman-mac phandle → mainline FMan MAC node
+	*   - fsl,qman-frame-queues-rx = <err_fqid 1 default_fqid 1>
+	*   - fsl,qman-frame-queues-tx = <err_fqid 1 confirm_fqid 1>
+	*   - fsl,bman-buffer-pools phandle → bpool node with fsl,bpid
+	*
+	* FQIDs start at 0x400 to avoid conflict with kernel dynamic allocation.
+	* Only active (non-disabled) MACs are included.
+	*/
+&soc {
+	fsl,dpaa {
+		compatible = "fsl,ls1046a-dpaa", "simple-bus", "fsl,dpaa";
+
+		/* MAC5 — leftmost 1G RJ45 (eth0) */
+		ethernet@4 {
+			compatible = "fsl,dpa-ethernet-init";
+			fsl,fman-mac = <&enet4>;
+			fsl,qman-frame-queues-rx = <0x400 1 0x401 1>;
+			fsl,qman-frame-queues-tx = <0x402 1 0x403 1>;
+			fsl,bman-buffer-pools = <&dpaa_pool>;
+		};
+
+		/* MAC6 — center 1G RJ45 (eth1) */
+		ethernet@5 {
+			compatible = "fsl,dpa-ethernet-init";
+			fsl,fman-mac = <&enet5>;
+			fsl,qman-frame-queues-rx = <0x404 1 0x405 1>;
+			fsl,qman-frame-queues-tx = <0x406 1 0x407 1>;
+			fsl,bman-buffer-pools = <&dpaa_pool>;
+		};
+
+		/* MAC2 — rightmost 1G RJ45 (eth2) */
+		ethernet@1 {
+			compatible = "fsl,dpa-ethernet-init";
+			fsl,fman-mac = <&enet1>;
+			fsl,qman-frame-queues-rx = <0x408 1 0x409 1>;
+			fsl,qman-frame-queues-tx = <0x40a 1 0x40b 1>;
+			fsl,bman-buffer-pools = <&dpaa_pool>;
+		};
+
+		/* MAC9 — 10G left SFP+ (eth3) */
+		ethernet@8 {
+			compatible = "fsl,dpa-ethernet-init";
+			fsl,fman-mac = <&enet6>;
+			fsl,qman-frame-queues-rx = <0x40c 1 0x40d 1>;
+			fsl,qman-frame-queues-tx = <0x40e 1 0x40f 1>;
+			fsl,bman-buffer-pools = <&dpaa_pool>;
+		};
+
+		/* MAC10 — 10G right SFP+ (eth4) */
+		ethernet@9 {
+			compatible = "fsl,dpa-ethernet-init";
+			fsl,fman-mac = <&enet7>;
+			fsl,qman-frame-queues-rx = <0x410 1 0x411 1>;
+			fsl,qman-frame-queues-tx = <0x412 1 0x413 1>;
+			fsl,bman-buffer-pools = <&dpaa_pool>;
+		};
 	};
 };
