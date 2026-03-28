@@ -78,6 +78,21 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 - **vyos-postinstall is board-gated** — the script checks `/proc/device-tree/compatible` for `fsl,ls1046a` and exits early on non-matching hardware. Safe to include in every ISO.
 - **vyos-postinstall does NOT run fw_setenv on upgrades** — only on first install (when `vyos_direct` doesn't yet reference `vyos.env`). All upgrades just write `/boot/vyos.env`.
 
+## DPAA1 DPDK PMD Kernel Patches (data/kernel-patches/)
+
+A 6-patch series adds `/dev/fsl-usdpaa` chardev support to **mainline** kernel 6.6, enabling DPDK DPAA1 PMD userspace drivers for 10G wire-speed. This is a clean rewrite — NOT the NXP SDK kernel fork (which was evaluated and rejected for code quality/maintainability reasons). The NXP ioctl ABI is preserved for binary compatibility with DPDK `process.c`.
+
+- **Patch application order matters:** Patches 0001–0004 export kernel symbols; Patch 0005 is the new module that depends on those exports; Patch 0006 adds DTS reserved-memory. Apply in numeric order.
+- **Kernel config required:** `CONFIG_FSL_USDPAA_MAINLINE=y` (built-in, not module — needed before rootfs). Add to the `printf` block in `auto-build.yml` alongside other DPAA1 configs.
+- **Portal budget:** LS1046A has 10 BMan + 10 QMan portals. Kernel claims 4 (one per CPU). The remaining 6 sit idle and are available for DPDK userspace via the reservation API added in patches 0002/0003.
+- **Reserved memory:** Patch 0006 adds a 256MB CMA region at `0xc0000000` in the DTS. DPDK allocates DMA-safe buffers from this pool via `USDPAA_IOCTL_DMA_MAP`. U-Boot `mem=` parameter may need adjustment if it conflicts.
+- **ioctl ABI:** The module implements 20 ioctls matching NXP's `fsl_usdpaa.h` numbering (`0x01`–`0x14`). CEETM ioctls (unused on LS1046A) return `-ENOSYS`. Full ABI spec: `plans/USDPAA-IOCTL-SPEC.md`.
+- **Portal physical addresses:** Mainline kernel discards phys addrs after `ioremap()` during probe. Patches 0002/0003 store `addr_phys_ce/ci` + `size_ce/ci` in portal config structs and expose reservation functions (`bman_portal_reserve()`/`qman_portal_reserve()`).
+- **`bm_alloc_bpid_range()` was static:** Patch 0001 removes `static` and adds `EXPORT_SYMBOL()`. Without this, DPDK cannot allocate buffer pool IDs.
+- **`qman_set_sdest()` not exported:** Patch 0004 adds `EXPORT_SYMBOL()`. DPDK uses this to set stashing destination (CPU affinity) for QMan portals.
+- **Per-FD cleanup:** The module tracks all resources (portals, DMA maps, BPID/FQID/CGRID ranges) per file descriptor. `usdpaa_release()` frees everything on close — no resource leaks even if DPDK crashes.
+- **NXP SDK kernel approach was discarded:** The NXP `lf-6.6.36-2.1.0` fork was built and TFTP-tested but rejected due to: 2,623-line monolithic driver, `#ifdef` spaghetti for 15+ SoC variants, `CONFIG_FSL_SDK_*` symbols conflicting with mainline `CONFIG_FSL_DPAA_*`, and poor separation of concerns. See `plans/DPAA1-DPDK-PMD.md` for the original (now superseded) NXP approach.
+
 ## Workflow-Specific Gotchas
 
 - **reftree.cache:** Internal blob required for vyos-1x build but missing from upstream repo — must be copied from `data/reftree.cache`
@@ -134,6 +149,21 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 | `VPP.md` | VPP native integration: VyOS `set vpp` CLI with AF_XDP on SFP+ (eth3/eth4), thermal management, DPAA1 PMD roadmap |
 | `VPP-SETUP.md` | User-facing VPP setup guide: step-by-step enablement, configuration reference, troubleshooting, hardware constraints |
 | `plans/DEV-LOOP.md` | Dev-test loop architecture doc — TFTP boot procedure, lessons learned |
+| `plans/DPAA1-DPDK-PMD.md` | Original NXP SDK PMD build plan (superseded by mainline rewrite — kept for reference) |
+| `plans/MAINLINE-PATCH-SPEC.md` | Mainline kernel patch specification: export audit, DPDK call trace, 6-patch design |
+| `plans/USDPAA-IOCTL-SPEC.md` | Complete NXP USDPAA ioctl ABI spec (20 ioctls, all structs, mmap, cleanup) |
+| `plans/fsl_usdpaa.c` | NXP SDK reference source (2,623 lines — read-only reference, not used in build) |
+| `plans/fsl_usdpaa.h` | NXP SDK ioctl header (read-only reference for ABI compatibility verification) |
+| `data/kernel-patches/0001-*.patch` | Export `bm_alloc_bpid_range()` + `bm_release_bpid()`, add `bm_free_bpid_range()` (allocator-only) from bman.c |
+| `data/kernel-patches/0002-*.patch` | BMan portal phys addr storage + `bman_portal_reserve()` reservation pool |
+| `data/kernel-patches/0003-*.patch` | QMan portal phys addr storage + `qman_portal_reserve()` reservation pool |
+| `data/kernel-patches/0004-*.patch` | `EXPORT_SYMBOL(qman_set_sdest)` + `qman_free_fqid_range/pool_range/cgrid_range()` allocator-only frees in qman.c + qman.h |
+| `data/kernel-patches/0005-*.patch` | Kconfig + Makefile for `CONFIG_FSL_USDPAA_MAINLINE` module |
+| `data/kernel-patches/fsl_usdpaa_mainline.c` | Clean `/dev/fsl-usdpaa` + `/dev/fsl-usdpaa-irq` chardevs (1453 lines, 20 ioctls, NXP ABI-compatible, allocator-only cleanup) |
+| `data/kernel-patches/0006-*.patch` | DTS reserved-memory node (256MB CMA @ 0xc0000000) for DPDK DMA |
+| `data/dpdk-portal-mmap.patch` | DPDK `process.c` patch: adds portal mmap after PORTAL_MAP ioctl (CE=64KB WB-NS, CI=16KB Device-nGnRnE) |
+| `data/scripts/run-testpmd.sh` | Safe testpmd launcher: takes all interfaces DOWN, runs testpmd with timeout, reboots (no interface restore) |
+| `data/dtb/mono-gateway-dk-sdk.dts` | NXP SDK DTS variant (reference only — not used in mainline builds) |
 
 ## Commands
 
