@@ -1,30 +1,30 @@
-# VPP Setup Guide — Mono Gateway
+# VPP Setup Guide: Mono Gateway
 
-Enable high-performance packet processing on the 10G SFP+ ports using VPP (Vector Packet Processing) with AF_XDP kernel bypass.
+Enable high-performance packet processing on the 10G SFP+ ports using VPP (Vector Packet Processing) with AF_XDP kernel bypass. Five minutes from "VPP is off" to "VPP is forwarding packets."
 
 ## Overview
 
-By default, all five network interfaces (eth0–eth4) are managed by the Linux kernel. VPP is **off**. When enabled, VPP takes control of the 10G SFP+ ports (eth3, eth4) for high-speed forwarding while the kernel retains the 1G RJ45 ports (eth0–eth2) for management and routing.
+By default, all five network interfaces (eth0 through eth4) are managed by the Linux kernel. VPP is **off**. When enabled, VPP takes control of the 10G SFP+ ports (eth3, eth4) for high-speed forwarding while the kernel retains the 1G RJ45 ports (eth0 through eth2) for management and routing.
 
 | Interface | Without VPP | With VPP |
 |-----------|------------|----------|
 | eth0 (RJ45 Left) | Kernel | Kernel |
 | eth1 (RJ45 Right) | Kernel | Kernel |
 | eth2 (RJ45 Center) | Kernel | Kernel |
-| eth3 (SFP+ Left) | Kernel (~3–5 Gbps) | **VPP** (~6–7 Gbps) |
-| eth4 (SFP+ Right) | Kernel (~3–5 Gbps) | **VPP** (~6–7 Gbps) |
+| eth3 (SFP+ Left) | Kernel (~3 to 5 Gbps) | **VPP** (~6 to 7 Gbps) |
+| eth4 (SFP+ Right) | Kernel (~3 to 5 Gbps) | **VPP** (~6 to 7 Gbps) |
 
-VPP processes packets in batches of 256, bypassing the per-packet `sk_buff` overhead that limits the kernel to ~3–5 Gbps on 10G interfaces.
+VPP processes packets in batches of 256, bypassing the per-packet `sk_buff` overhead that chokes the kernel at 3 to 5 Gbps on 10G interfaces.
 
 ## Prerequisites
 
-The default configuration already includes the kernel settings VPP needs:
+The default configuration already includes everything VPP needs:
 
-- **Hugepages:** 512 × 2MB (1024 MB) — pre-allocated via `system option kernel memory`
-- **SFP+ MTU:** 3290 on eth3/eth4 — DPAA1 XDP maximum (pre-configured)
+- **Hugepages:** 512 x 2MB (1024 MB), pre-allocated via `system option kernel memory`
+- **SFP+ MTU:** 3290 on eth3/eth4, DPAA1 XDP maximum (pre-configured)
 - **VPP packages:** Pre-installed (v25.10, AF_XDP plugin included)
 
-No additional packages or kernel changes are required.
+No additional packages or kernel changes required.
 
 ## Quick Start
 
@@ -40,7 +40,7 @@ set vpp settings interface eth4
 # Required: allow platform-bus NICs (not PCI)
 set vpp settings allow-unsupported-nics
 
-# Thermal-safe polling (MANDATORY — prevents thermal shutdown)
+# Thermal-safe polling (MANDATORY: prevents thermal shutdown)
 set vpp settings poll-sleep-usec 100
 
 # Resource allocation for ARM64
@@ -70,22 +70,18 @@ show vpp
 # VPP service status
 show vpp
 
-# Detailed interface status (via vppctl)
+# Interface and LCP status
 sudo vppctl show interface
-sudo vppctl show hardware-interfaces
-
-# Performance counters
-sudo vppctl show runtime
-
-# Linux Control Plane mirrors
 sudo vppctl show lcp
 ```
 
-Expected output from `show lcp`:
+Expected LCP output:
 ```
 itf-pair: [0] vpp-eth3 tap4096 lcp-eth3 16 type tap
 itf-pair: [1] vpp-eth4 tap4097 lcp-eth4 17 type tap
 ```
+
+For full `vppctl` command reference, see [VPP.md § VPP Runtime Commands](VPP.md#vpp-runtime-commands-vppctl).
 
 ## Configuration Reference
 
@@ -220,47 +216,18 @@ VPP poll mode generates significant heat. Ensure:
 2. Fan is running: `systemctl status fancontrol`
 3. Check temperature: `cat /sys/class/thermal/thermal_zone3/temp` (divide by 1000 for °C)
 
-If the fan isn't running, start it manually:
-
-```bash
-# Find EMC2305 hwmon device
-ls /sys/class/hwmon/hwmon*/name | xargs grep emc2305
-
-# Set fan to maximum (emergency)
-sudo sh -c 'echo 255 > /sys/class/hwmon/hwmonN/pwm1'  # Replace N
-```
+For emergency fan override and detailed thermal management, see [VPP.md § Thermal Management](VPP.md#thermal-management-critical).
 
 ## Runtime Monitoring
 
-### VPP Performance
-
 ```bash
-# Real-time loop rate and packet counters
-sudo vppctl show runtime
-
-# Packet trace (capture 100 packets)
-sudo vppctl trace add af_xdp-input 100
-sudo vppctl show trace
-
-# Error counters
-sudo vppctl show errors
-
-# Clear all counters
-sudo vppctl clear runtime
+sudo vppctl show runtime          # Loop rate, packet counters
+sudo vppctl show errors           # Error counters
+cat /sys/class/thermal/thermal_zone3/temp  # SoC temp (÷1000 for °C)
+systemctl status fancontrol       # Fan status
 ```
 
-### Temperature Monitoring
-
-```bash
-# SoC temperature (millidegrees — divide by 1000)
-cat /sys/class/thermal/thermal_zone3/temp
-
-# Fan RPM
-cat /sys/class/hwmon/hwmon*/fan1_input 2>/dev/null
-
-# Fan control status
-systemctl status fancontrol
-```
+For packet tracing, performance analysis, and full `vppctl` reference, see [VPP.md § VPP Runtime Commands](VPP.md#vpp-runtime-commands-vppctl).
 
 ## Hardware Constraints
 

@@ -1,7 +1,8 @@
 # Changelog
 
-All notable changes to the VyOS LS1046A build are documented here.
-This project is a fork of [huihuimoe/vyos-arm64-build](https://github.com/huihuimoe/vyos-arm64-build), specialized for the Mono Gateway Development Kit (NXP LS1046A).
+All notable changes to the VyOS LS1046A build. Forked from [huihuimoe/vyos-arm64-build](https://github.com/huihuimoe/vyos-arm64-build), specialized for the Mono Gateway Development Kit (NXP LS1046A).
+
+Entries are factual. The humor is in the bugs.
 
 ## Unreleased
 

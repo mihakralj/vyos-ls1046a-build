@@ -1,7 +1,7 @@
-# Dev-Test Loop — Fast Iteration for VyOS LS1046A
+# Dev-Test Loop: Fast Iteration for VyOS LS1046A
 
 > **Status:** ✅ WORKING (verified 2026-03-22, build #7)
-> **Goal:** Reduce dev-test cycle from ~60–90 min to ~10 min (kernel) / ~2 min (DTB/config).
+> **Goal:** Reduce dev-test cycle from ~60 to 90 min down to ~10 min (kernel) / ~2 min (DTB/config). Because waiting an hour to test a one-line config change is not engineering. It's penance.
 
 ## Network Topology
 
@@ -45,7 +45,7 @@ scp bin/setup-heidi.sh admin@heidi:/tmp/
 ssh admin@heidi "sudo bash /tmp/setup-heidi.sh"
 ```
 
-Creates **LXC 200** with cross-toolchain, TFTP, Docker, kernel source, and vyos-build.
+Creates **LXC 200** with cross-toolchain, TFTP, Docker, kernel source, and vyos-build. Takes about 15 minutes. You do this once.
 
 ### 2. Seed TFTP with initrd from last good ISO (one-time)
 
@@ -156,9 +156,7 @@ scripts/config --set-val X y     # Force LS1046A overrides
 
 ### `--set-val` vs `--enable` (Critical)
 
-**`scripts/config --enable X` does NOT upgrade `=m` to `=y`.**
-Fragments set many configs to `=m` (module). For TFTP boot without modules,
-you MUST use `scripts/config --set-val X y` to force built-in.
+**`scripts/config --enable X` does NOT upgrade `=m` to `=y`.** This is the single most frustrating `scripts/config` behavior. Fragments set many configs to `=m` (module). For TFTP boot without modules, you MUST use `scripts/config --set-val X y` to force built-in.
 
 Subsystems that MUST be `=y` for TFTP boot:
 
@@ -219,4 +217,4 @@ boot=live rootdelay=5 noautologin vyos-union=/boot/<IMAGE_NAME>
 - Weekly automated builds (cron Friday 01:00 UTC)
 - Changelog generation from upstream vyos-1x / vyos-build
 
-The local dev loop is a **parallel fast-iteration path**, not a replacement for CI.
+The local dev loop is a **parallel fast-iteration path**, not a replacement for CI. CI produces signed releases. The dev loop produces answers in two minutes.

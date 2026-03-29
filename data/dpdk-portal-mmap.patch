@@ -16,10 +16,14 @@
 +/*
 + * Portal window sizes for QBMan portals on LS1046A.
 + * These are platform constants from the device-tree reg properties:
-+ *   bman-portal: reg = <0x0 0x10000>, <0x4000000 0x4000>
-+ *   qman-portal: reg = <0x0 0x10000>, <0x4000000 0x4000>
-+ * CE (cache-enabled)  = 64KB (0x10000)
++ *   bman-portal: reg = <0x0 0x4000>, <0x4000000 0x4000>
++ *   qman-portal: reg = <0x0 0x4000>, <0x4000000 0x4000>
++ * CE (cache-enabled)  = 16KB (0x4000) — verified from running DTS
 + * CI (cache-inhibited) = 16KB (0x4000)
++ *
++ * CRITICAL: LS1046A has 16KB portals, NOT 64KB. The kernel mmap
++ * handler checks len <= pr->size_ce; requesting 0x10000 when the
++ * portal is only 0x4000 returns EINVAL.
 + *
 + * On mainline kernels, the PORTAL_MAP ioctl returns physical addresses
 + * instead of virtual addresses (do_mmap from ioctl context is unsafe).
@@ -28,8 +32,8 @@
 + *   CE: Write-Back Non-Shareable (QBMan stashing protocol)
 + *   CI: Strongly-Ordered / Device-nGnRnE (portal doorbells)
 + */
-+#define DPAA_PORTAL_CE_SIZE	0x10000  /* 64KB */
-+#define DPAA_PORTAL_CI_SIZE	0x4000   /* 16KB */
++#define DPAA_PORTAL_CE_SIZE	0x4000   /* 16KB — from LS1046A DTS reg */
++#define DPAA_PORTAL_CI_SIZE	0x4000   /* 16KB — from LS1046A DTS reg */
 +
 +static int portal_mmap_phys(void **virt, uint64_t phys, size_t size);
 +
