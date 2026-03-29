@@ -47,7 +47,7 @@ vyos = ext4load mmc 0:3 ${load_addr} /boot/vyos.env;
                 console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500
                 net.ifnames=0 boot=live rootdelay=5 noautologin
                 fsl_dpaa_fman.fsl_fm_max_frm=9600
-                hugepagesz=2M hugepages=512 panic=60
+                panic=60
                 vyos-union=/boot/${vyos_image}";
               booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
 ```
@@ -213,7 +213,7 @@ bootcmd: run vyos
   ├─ ext4load mmc 0:3 0x88000000 /boot/${vyos_image}/mono-gw.dtb
   ├─ ext4load mmc 0:3 0x88080000 /boot/${vyos_image}/initrd.img  ← LAST
   ├─ setenv bootargs "BOOT_IMAGE=/boot/${vyos_image}/vmlinuz
-  │    ... boot=live hugepagesz=2M hugepages=512 panic=60
+  │    ... boot=live panic=60
   │    vyos-union=/boot/${vyos_image}"
   └─ booti 0x82000000 0x88080000:${filesize} 0x88000000
        │
@@ -250,8 +250,6 @@ boot=live
 rootdelay=5
 noautologin
 fsl_dpaa_fman.fsl_fm_max_frm=9600
-hugepagesz=2M
-hugepages=512
 panic=60
 vyos-union=/boot/2026.03.27-0142-rolling
 ```
@@ -260,10 +258,11 @@ vyos-union=/boot/2026.03.27-0142-rolling
 - `BOOT_IMAGE=/boot/<image>/vmlinuz` — required first argument; enables `is_live_boot()` detection (patch 009). Must be first in bootargs.
 - `boot=live` — required even on installed system; VyOS initramfs depends on this
 - `vyos-union=/boot/<image>` — tells live-boot where the squashfs is on the installed ext4 partition
-- `hugepagesz=2M hugepages=512` — reserves 1 GiB huge pages for VPP. Must be in bootargs or VPP fails. Also a `MANAGED_PARAMS` parameter — must match `config.boot` default to prevent kexec double-boot
-- `panic=60` — also a `MANAGED_PARAMS` parameter
+- `panic=60` — a `MANAGED_PARAMS` parameter; must match `config.boot` default to prevent kexec double-boot
 
-**MANAGED_PARAMS:** VyOS `system_option.py` compares `/proc/cmdline` against `config.boot` values for `hugepagesz`, `hugepages`, and `panic`. If they differ on boot (before config is applied), a kexec reboot is triggered. The bootargs above match `config.boot.default` to prevent this.
+**Hugepages:** Not pre-allocated in bootargs. VPP dynamically adds `hugepagesz=2M hugepages=512` via `set vpp settings`, which triggers a one-time kexec to apply them. Without VPP configured, no hugepages are needed.
+
+**MANAGED_PARAMS:** VyOS `system_option.py` compares `/proc/cmdline` against `config.boot` values for `panic` (and `hugepagesz`/`hugepages` if VPP is configured). If they differ on boot (before config is applied), a kexec reboot is triggered. The bootargs include `panic=60` to match `config.boot.default`.
 
 ---
 
@@ -308,9 +307,8 @@ For `add system image` (upgrade), patch 011 copies all `.dtb` files from the ISO
 
 VyOS `system_option.py` may trigger a kexec reboot if `/proc/cmdline` doesn't match `MANAGED_PARAMS` from `config.boot`. On this board:
 
-- `kexec-load.service` and `kexec.service` are **masked** (symlinked to `/dev/null` via `99-mask-services.chroot` hook). This forces full cold reboots — ensuring DPAA1, SFP, and I2C hardware re-initialize cleanly via U-Boot.
-- The `kexec.target` (systemd target) is still reached by `vyos-router` during boot. When reached, systemd attempts `systemctl kexec` which fails gracefully because `kexec.service` is masked.
-- The managed params (`hugepagesz=2M hugepages=512 panic=60`) are pre-baked into the U-Boot bootargs so they match `config.boot.default`. No mismatch → no kexec trigger.
+- `kexec-load.service` and `kexec.service` are **NOT masked** — mainline 6.6 QBMan kexec fix (`bman_requires_cleanup()` in `drivers/soc/fsl/qbman/`) allows kexec on DPAA1. VyOS managed-params self-healing works normally.
+- The managed param `panic=60` is pre-baked into U-Boot bootargs to match `config.boot.default`. Hugepages are NOT in bootargs by default — they are added dynamically when VPP is configured via `set vpp settings`, which triggers a one-time kexec to apply them.
 
 ---
 
@@ -343,7 +341,7 @@ QSPI NOR flash (64 MiB, `/dev/mtd*`):
 | `Bad Linux ARM64 Image magic!` | Factory env uses `bootm` (expects uImage). VyOS kernel requires `booti` | Run manual U-Boot setup |
 | `ERROR: Did not find a cmdline Flattened Device Tree` | DTB loaded at `0x90000000` (`kernel_comp_addr_r`) — overwritten by kernel decompression | Always use `${fdt_addr_r}` = `0x88000000` |
 | `Wrong Ramdisk Image Format` | `booti addr addr:size fdt` — missing `:${filesize}` colon-size suffix | Ensure initrd loads last; use `${ramdisk_addr_r}:${filesize}` |
-| Boot loops (kexec) | `hugepagesz`/`hugepages`/`panic` in bootargs don't match `config.boot` | Verify bootargs include `hugepagesz=2M hugepages=512 panic=60` |
+| Boot loops (kexec) | `panic` in bootargs doesn't match `config.boot` | Verify bootargs include `panic=60`. Hugepages are added dynamically by VPP — no need in base bootargs |
 | `fw_setenv` fails | `/dev/mtd3` missing — `CONFIG_SPI_FSL_QSPI` not built-in | Verify `CONFIG_SPI_FSL_QSPI=y` in kernel config |
 | `vyos-postinstall` skips SPI setup | `fw_printenv` not found or `/etc/fw_env.config` missing | Verify `libubootenv-tool` installed and `fw_env.config` copied into squashfs |
 | No network interfaces after boot | DPAA1 stack built as modules instead of `=y` | All `CONFIG_FSL_FMAN/DPAA/BMAN/QMAN/PAMU` must be `=y` |

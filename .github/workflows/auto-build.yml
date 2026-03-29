@@ -190,6 +190,13 @@ jobs:
             '# === Disable STRICT_DEVMEM for DPDK DPAA PMD (fman_init mmaps /dev/mem) ===' \
             '# CONFIG_STRICT_DEVMEM is not set' \
             '# CONFIG_IO_STRICT_DEVMEM is not set' \
+            '# === USB live boot support (built-in for initramfs FAT32 access) ===' \
+            'CONFIG_USB_STORAGE=y' \
+            'CONFIG_VFAT_FS=y' \
+            'CONFIG_FAT_FS=y' \
+            'CONFIG_NLS_CODEPAGE_437=y' \
+            'CONFIG_NLS_ISO8859_1=y' \
+            'CONFIG_NLS_UTF8=y' \
             >> "$DEFCONFIG"
 
           ### USDPAA kernel patches: BMan/QMan exports + /dev/fsl-usdpaa chardev
