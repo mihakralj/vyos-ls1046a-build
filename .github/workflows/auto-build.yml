@@ -323,33 +323,33 @@ jobs:
           # and rebinds on VPP stop, so removing a port from VPP config and
           # committing restores kernel control (ip link shows the port again)
           # without requiring a full reboot.
-          cat > "$CHROOT/usr/local/bin/vpp-dpaa-rebind" << 'VPPREBIND'
-#!/bin/bash
-# Rebind DPAA1 interfaces back to kernel fsl_dpa after VPP stops.
-# State file written by vpp.py _dpaa_unbind_ifaces() on VPP start.
-STATE=/run/vpp-dpaa-unbound.json
-BIND=/sys/bus/platform/drivers/fsl_dpa/bind
-[ -f "$STATE" ] || exit 0
-python3 - "$STATE" "$BIND" << 'PYEOF'
-import json, os, sys
-state_file, bind_path = sys.argv[1], sys.argv[2]
-try:
-    unbound = json.load(open(state_file))
-except Exception:
-    sys.exit(0)
-if os.path.exists(bind_path):
-    for iface, dev in unbound.items():
-        try:
-            open(bind_path, 'w').write(dev)
-            print(f'vpp-dpaa-rebind: restored {iface} ({dev}) to fsl_dpa')
-        except OSError as e:
-            print(f'vpp-dpaa-rebind: failed {iface}: {e}', file=sys.stderr)
-try:
-    os.unlink(state_file)
-except OSError:
-    pass
-PYEOF
-VPPREBIND
+          printf '%s\n' \
+            '#!/bin/bash' \
+            '# Rebind DPAA1 interfaces back to kernel fsl_dpa after VPP stops.' \
+            'STATE=/run/vpp-dpaa-unbound.json' \
+            'BIND=/sys/bus/platform/drivers/fsl_dpa/bind' \
+            '[ -f "$STATE" ] || exit 0' \
+            'python3 - <<PYEOF' \
+            'import json, os, sys' \
+            'state_file = "/run/vpp-dpaa-unbound.json"' \
+            'bind_path  = "/sys/bus/platform/drivers/fsl_dpa/bind"' \
+            'try:' \
+            '    unbound = json.load(open(state_file))' \
+            'except Exception:' \
+            '    raise SystemExit(0)' \
+            'if os.path.exists(bind_path):' \
+            '    for iface, dev in unbound.items():' \
+            '        try:' \
+            '            open(bind_path, "w").write(dev)' \
+            '            print(f"vpp-dpaa-rebind: restored {iface} ({dev}) to fsl_dpa")' \
+            '        except OSError as e:' \
+            '            print(f"vpp-dpaa-rebind: failed {iface}: {e}", file=__import__("sys").stderr)' \
+            'try:' \
+            '    os.unlink(state_file)' \
+            'except OSError:' \
+            '    pass' \
+            'PYEOF' \
+            > "$CHROOT/usr/local/bin/vpp-dpaa-rebind"
           chmod +x "$CHROOT/usr/local/bin/vpp-dpaa-rebind"
           mkdir -p "$CHROOT/etc/systemd/system/vpp.service.d"
           printf '%s\n' \
