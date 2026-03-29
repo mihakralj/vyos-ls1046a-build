@@ -7,6 +7,9 @@ Entries are factual. The humor is in the bugs.
 ## Unreleased
 
 ### Added
+- **Automatic U-Boot SPI flash configuration**: `vyos-postinstall` Phase 1 now writes `vyos`, `usb_vyos`, and `bootcmd` to SPI NOR flash via `fw_setenv` on first boot. Eliminates manual U-Boot serial console Step 4. Idempotent — skips if already configured. Hardware-verified on live board: `fw_printenv` reads back all 3 variables correctly
+- **`fw_env.config` hardware-verified**: Brute-force CRC test on live hardware confirmed `CONFIG_ENV_SIZE=0x2000` (8KB) and erase sector `0x1000` (4KB). Only `env_size=0x2000` produces valid CRC against `/dev/mtd3`
+- **Hide live boot USB from `install image`** (`vyos-1x-013`): `find_disks()` now detects and excludes the USB live media via `findmnt` + `lsblk PKNAME`. Only eMMC shown as install target — no RAID-1 prompt, no accidental USB overwrite. Supersedes patch 008 (RAID default no)
 - **USDPAA kernel module in CI build**: `CONFIG_FSL_USDPAA_MAINLINE=y` added to kernel defconfig. Consolidated kernel patch (`9001-usdpaa-bman-qman-exports-and-driver.patch`, 428 lines) replaces old template patches 0001–0005. Exports BMan/QMan symbols, adds portal reservation API, builds `/dev/fsl-usdpaa` chardev for DPDK DPAA1 PMD userspace access. `fsl_usdpaa_mainline.c` (1453 lines) injected into kernel tree during build via sed hook on `build-kernel.sh`
 - **VPP DPAA mempool ordering fix**: `bin/patch-vpp-dpaa-mempool.sh` updated with root cause #29 — BMan mempool must be created BEFORE `dpdk_lib_init()` so the pool exists when DPAA devices probe during EAL init. Uses `rte_pktmbuf_pool_create_by_ops("dpaa")` instead of checking `dm->devices` (empty before init)
 - **VyOS native VPP integration**: `vyos-1x-010-vpp-platform-bus.patch` patches VyOS's `set vpp` CLI to support DPAA1 platform-bus NICs via AF_XDP. Auto-detects `fsl_dpa` driver → XDP mode (not DPDK). Enables `af_xdp_plugin.so`, disables `dpdk_plugin.so` when no PCI NICs present. Lowers resource minimums for embedded ARM64 (2 CPUs, 256M heap)
@@ -29,6 +32,9 @@ Entries are factual. The humor is in the bugs.
 - PTP hardware timestamping via `ptp_qoriq` driver (`/dev/ptp0`)
 
 ### Fixed
+- **DTS QSPI partition table wrong**: Speculative partition layout didn't match actual `/proc/mtd` on live hardware. Rewritten to match: rcw-bl2 1MB, uboot 2MB, uboot-env 1MB, fman-ucode 1MB, recovery-dtb 1MB, backup 4MB, kernel-initramfs 22MB. Hardware-verified via hexdump + CRC test
+- **`fw_env.config` wrong env_size/sector_size**: Was `0x20000`/`0x10000` (caused "Cannot read environment"). Brute-force CRC test on all powers-of-2 confirmed only `0x2000` (8KB env) with `0x1000` (4KB sector) produces valid CRC. `fw_printenv bootcmd` now works
+- **`fw_setenv` "doesn't work" misconception**: Previous issue #7 comment stated fw_setenv doesn't work due to MTD mismatch. Root cause was wrong `fw_env.config` parameters. With correct 0x2000/0x1000, `fw_setenv` works perfectly — hardware verified
 - **CRITICAL: All 11 vyos-1x patches silently never applied in ANY build**: `build.py` does `git checkout current` after workflow applied patches to the cloned repo, reverting ALL changes. Every build since patch introduction shipped unpatched vyos-1x. Fix: replaced direct `patch -p1` calls with `pre_build_hook` in `package.toml` — hook executes AFTER `git checkout` but BEFORE `dpkg-buildpackage`, ensuring patches persist through the build
 - **Patch 010 missing `{% endif %}` for dpdk block**: startup.conf.j2 hunk added `{% if has_dpdk %}` before the `dpdk { }` stanza but was truncated — no closing `{% endif %}`. VPP crashed parsing the unconditional `dpdk { dev 0000:00:00.0 }` block even when dpdk_plugin.so was disabled. Fix: expanded hunk to cover entire dpdk block (29 context lines) with both `{% if has_dpdk %}` and `{% endif %}`
 - **vyos-postinstall.service not starting**: systemd ignored the WantedBy symlink ("not a symlink, ignoring") because `ln -sf` in includes.chroot gets dereferenced by live-build into an empty file. Fix: use `systemctl enable` inside 98-fancontrol.chroot hook where it runs inside the chroot
@@ -53,6 +59,7 @@ Entries are factual. The humor is in the bugs.
 
 ### Removed
 - `fix-grub.sh` — dead file, all fixes now handled at build time (patches + vyos-postinstall)
+- `vyos-1x-008-raid-default-no.patch` — superseded by patch 013 (hide live boot disk). With USB filtered from disk list, only 1 disk remains so RAID prompt never triggers
 
 ## 2026.03.21-2144-rolling
 
