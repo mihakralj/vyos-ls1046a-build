@@ -1,10 +1,10 @@
 # High-Performance VyOS on Mono Gateway: VPP + DPAA1 Acceleration
 
-Technical documentation for 10Gbps wire-speed packet processing on the NXP LS1046A Mono Gateway Development Kit using VyOS with VPP (Vector Packet Processing) and AF_XDP kernel bypass.
+How to push 10 Gbps through a $400 ARM64 box. Technical documentation for wire-speed packet processing on the NXP LS1046A Mono Gateway Development Kit using VyOS with VPP (Vector Packet Processing) and AF_XDP kernel bypass.
 
 ## Current Status: ✅ VyOS Native VPP — WORKING
 
-VPP is available through VyOS's native `set vpp` CLI on the Mono Gateway, providing AF_XDP kernel bypass on the 10G SFP+ ports (eth3, eth4). The kernel retains direct control of the 1G RJ45 management ports (eth0–eth2). This was achieved by patching VyOS's VPP integration layer (`vyos-1x-010-vpp-platform-bus.patch`) to support DPAA1 platform-bus NICs.
+VPP is available through VyOS's native `set vpp` CLI on the Mono Gateway, providing AF_XDP kernel bypass on the 10G SFP+ ports (eth3, eth4). The kernel retains direct control of the 1G RJ45 management ports (eth0 through eth2). This was achieved by patching VyOS's VPP integration layer (`vyos-1x-010-vpp-platform-bus.patch`) to support DPAA1 platform-bus NICs. One patch, four files, zero vendor forks.
 
 **VPP is off by default.** Users enable it through the VyOS configurator:
 
@@ -33,15 +33,15 @@ save
 
 ### The Kernel Bottleneck
 
-Standard Linux networking processes packets one at a time. Each packet triggers an interrupt, allocates an `sk_buff`, traverses the networking stack (netfilter, routing, bridging), and exits. On a quad-core A72 at 1.8 GHz, this hits an "Interrupt Storm" ceiling around **3–5 Gbps** — the CPUs spend more time context-switching than forwarding.
+Standard Linux networking processes packets one at a time. Each packet triggers an interrupt, allocates an `sk_buff`, traverses the networking stack (netfilter, routing, bridging), and exits. On a quad-core A72 at 1.8 GHz, this hits an "Interrupt Storm" ceiling around **3 to 5 Gbps**: the CPUs spend more time context-switching than forwarding.
 
 ### The VPP Solution
 
 VPP (Vector Packet Processing) from fd.io bypasses the Linux kernel entirely:
 
-1. **Batch Processing:** Instead of one packet per interrupt, VPP processes "vectors" of up to 256 packets per graph-walk cycle, staying in L1/L2 cache
-2. **Kernel Bypass:** Uses AF_XDP sockets to receive/transmit packets directly from NIC queues — reduced interrupt overhead
-3. **Linux Control Plane:** LCP plugin creates tap mirror interfaces so VyOS can still see and manage the VPP-controlled ports
+1. **Batch Processing:** Instead of one packet per interrupt, VPP processes "vectors" of up to 256 packets per graph-walk cycle, staying in L1/L2 cache.
+2. **Kernel Bypass:** Uses AF_XDP sockets to receive/transmit packets directly from NIC queues. Interrupt overhead drops to near zero.
+3. **Linux Control Plane:** LCP plugin creates tap mirror interfaces so VyOS can still see and manage the VPP-controlled ports. The split-brain problem, solved.
 
 [Read more about VPP implementation in VyOS](https://docs.vyos.io/en/latest/vpp/description.html)
 
@@ -97,7 +97,7 @@ These numbers come from [Andree Toonk's VPP benchmarks](https://toonk.io/kernel-
 
 ### The Original Problem
 
-VyOS rolling includes a VPP dataplane integration with CLI commands (`set vpp`). However, it was designed for x86 servers with PCI NICs. Three hard blockers prevented it from working on the Mono Gateway:
+VyOS rolling includes a VPP dataplane integration with CLI commands (`set vpp`). It was designed for x86 servers with PCI NICs. Three hard blockers prevented it from working on the Mono Gateway:
 
 | Blocker | VyOS's Assumption | Mono Gateway Reality | Our Fix (Patch 010) |
 |---------|------------------|---------------------|---------------------|
@@ -208,7 +208,7 @@ flowchart TD
   style CAAM fill:#a84,stroke:#333,color:#fff
 ```
 
-**Key Design Decision:** The kernel retains control of the 1G RJ45 management ports (eth0–eth2). VPP claims the 10G SFP+ ports (eth3, eth4) via AF_XDP for high-speed forwarding. LCP (Linux Control Plane) plugin creates tap mirror interfaces so VyOS can still see these ports. This "split-plane" model keeps VyOS management CLI functional while VPP handles the data plane.
+**Key Design Decision:** Kernel retains the 1G RJ45 management ports (eth0 through eth2). VPP claims the 10G SFP+ ports (eth3, eth4) via AF_XDP for high-speed forwarding. LCP (Linux Control Plane) plugin creates tap mirror interfaces so VyOS can still see these ports. Two data planes, one box. VyOS management stays functional while VPP handles the hot path.
 
 ### Port Assignment
 
@@ -243,13 +243,13 @@ flowchart TD
 
 ### The Problem
 
-The Mono Gateway DK uses passive cooling (heatsink) with an optional EMC2305 PWM fan controller. Without active cooling, VPP poll-mode drives the SoC to **87°C** (thermal shutdown at 95°C). Even with `workers 0 + poll-sleep-usec 100`, temperatures remain dangerously high without a fan.
+The Mono Gateway DK uses passive cooling (heatsink only) with an optional EMC2305 PWM fan controller. Without active cooling, VPP poll-mode drives the SoC to **87 degrees C** (thermal shutdown at 95). Even with `workers 0` and `poll-sleep-usec 100`, temperatures stay dangerously high without a fan. The SoC was not designed for continuous polling. It was designed for interrupt-driven workloads in a telco closet with airflow.
 
 ### The Fix
 
 The DTS defines thermal trip points and cooling-maps for automatic fan control, but the **thermal-cooling framework binding is broken** — the EMC2305 cooling device registers but never gets bound to the thermal zone's cooling-maps. Root cause: phandle resolution issue in the emc2305 driver's interaction with thermal OF.
 
-**Workaround:** The standard Linux `fancontrol` daemon polls temperature and sets PWM directly via sysfs. Installed via chroot hook during ISO build, configured at `/etc/fancontrol`.
+**Workaround:** The standard Linux `fancontrol` daemon polls temperature and sets PWM directly via sysfs. Installed via chroot hook during ISO build, configured at `/etc/fancontrol`. It works. It's not elegant. It keeps the silicon alive.
 
 ### Temperature Impact
 
@@ -427,15 +427,15 @@ sudo cat /var/log/vpp/vpp.log
 - [ ] Benchmark WireGuard throughput (ChaCha20-Poly1305, CPU-only via NEON SIMD, ~1 Gbps)
 - [ ] Target: 2.5+ Gbps IPsec encrypted tunnel throughput
 
-### Milestone 5: DPAA1 PMD (Full Line Rate) ⬜ FUTURE
+### Milestone 5: DPAA1 PMD (Full Line Rate) 🔶 IN PROGRESS
 
-This is the path to 10G wire-speed. Requires significant cross-compilation work but keeps AF_XDP as a working fallback.
+The path to 10G wire-speed. **Phase A (kernel patches) and Phase B (DPDK cross-compile) are complete.** Phase C (VPP DPDK plugin integration) is next.
 
-- [ ] Extract USDPAA module from NXP kernel fork (`nxp-qoriq/linux`)
+- [x] Clean mainline USDPAA kernel module (6 patches, 1453 lines) — [DPAA1-DPDK-PMD.md](plans/DPAA1-DPDK-PMD.md)
+- [x] Build DPDK 24.11 with DPAA PMD (cross-compiled, shared libs)
+- [x] Create USDPAA DTB variant for Mono Gateway
+- [ ] VPP DPDK plugin integration (Phase C — Option A/B evaluation)
 - [ ] Build FMlib + FMC from NXP LSDK
-- [ ] Build DPDK with DPAA PMD (`nxp-qoriq/dpdk`)
-- [ ] Build VPP with DPAA platform (`nxp-qoriq/vpp`)
-- [ ] Create USDPAA DTB variant for Mono Gateway
 - [ ] Benchmark: target 9.4+ Gbps
 
 ---
@@ -465,13 +465,13 @@ flowchart TD
 
 ### Component 1: USDPAA Kernel Module
 
-**What:** Userspace DPAA — a kernel module that creates `/dev/` device nodes allowing VPP to access DPAA1 hardware queues directly from userspace.
+**What:** Userspace DPAA — a kernel module that creates `/dev/fsl-usdpaa` and `/dev/fsl-usdpaa-irq` device nodes allowing VPP to access DPAA1 hardware queues directly from userspace.
 
-**Status:** Available in the NXP kernel fork. Requires `CONFIG_FSL_USDPAA=y` in the kernel config.
+**Status:** ✅ **COMPLETE** — Clean mainline rewrite (1453 lines, 6 kernel patches). Running on device as `CONFIG_FSL_USDPAA_MAINLINE=y`. NXP ioctl ABI preserved for DPDK binary compatibility.
 
 **Why it matters:** Without USDPAA, VPP cannot "grab" the Frame Manager's hardware queues. The kernel's `fsl_dpaa_eth` driver must release the 10G interfaces, and USDPAA provides the bridge for VPP to claim them.
 
-**Source:** `github.com/nxp-qoriq/linux` branch `lf-6.6.3-1.0.0`
+**Source:** [`data/kernel-patches/fsl_usdpaa_mainline.c`](data/kernel-patches/fsl_usdpaa_mainline.c) — see [DPAA1-DPDK-PMD.md](plans/DPAA1-DPDK-PMD.md) and [USDPAA-IOCTL-SPEC.md §13](plans/USDPAA-IOCTL-SPEC.md#13-mainline-implementation-status-2026-03-28)
 
 ### Component 2: FMC Tool + Policy Files
 
@@ -510,15 +510,15 @@ make V=0 PLATFORM=dpaa TAG=dpaa vpp-package-deb
 
 ### The Kernel Fork Decision
 
-The current VyOS build uses the upstream VyOS kernel (mainline 6.6). USDPAA requires the NXP kernel fork.
+The current VyOS build uses the upstream VyOS kernel (mainline 6.6). USDPAA was originally only in the NXP kernel fork.
 
-| Option | Approach | Pro | Con |
-|--------|----------|-----|-----|
-| **A** | Patch VyOS kernel with USDPAA module | Stays on VyOS kernel cadence | Must maintain patch across updates |
-| **B** | Use NXP kernel fork entirely | Full NXP support OOB | Diverges from VyOS upstream |
-| **C** | AF_XDP only (current) | Zero kernel changes | ~30% performance penalty |
+| Option | Approach | Pro | Con | Status |
+|--------|----------|-----|-----|--------|
+| **A** | Patch VyOS kernel with USDPAA module | Stays on VyOS kernel cadence | Must maintain patch across updates | ✅ **ACTIVE** |
+| **B** | Use NXP kernel fork entirely | Full NXP support OOB | Diverges from VyOS upstream | ❌ Rejected |
+| **C** | AF_XDP only (current fallback) | Zero kernel changes | ~30% performance penalty | ✅ Working fallback |
 
-**Current choice:** Option C (AF_XDP). It works today. Option A is the next step when 10G line rate is needed.
+**Current: Option A** — Clean mainline USDPAA rewrite (6 patches) running on VyOS kernel 6.6. The NXP fork approach (Option B) was [evaluated and rejected](plans/DPAA1-DPDK-PMD.md#-achievement-status-2026-03-27) for code quality reasons. AF_XDP (Option C) remains as a working fallback.
 
 ### Software Dependency Chain
 

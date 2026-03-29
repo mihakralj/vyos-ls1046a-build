@@ -132,16 +132,17 @@ index XXXXXXX..XXXXXXX 100644
 +	spin_unlock(&bman_free_lock);
 +
 +	/*
-+	 * Unmap kernel CE mapping to avoid ARM64 memory attribute conflict.
-+	 * Kernel maps CE as MEMREMAP_WC (Normal-NC), but userspace needs
-+	 * Normal-WB-NS for QBMan stashing. Two mappings with different
-+	 * Normal cacheability on ARM64 = CONSTRAINED UNPREDICTABLE.
-+	 * CI mapping kept: IRQ handler needs it for IIR write at CI+0xE0C.
++	 * NOTE: Do NOT unmap kernel CE mapping here.
++	 *
++	 * The upstream kernel maps addr_virt_ce to CI physical address
++	 * (platform_get_resource overwrites CE ptr with CI before memremap).
++	 * Unmapping it destabilizes vmalloc bookkeeping and triggers
++	 * translation faults on ADJACENT portal mappings (affine CPU portals).
++	 *
++	 * Reserved portals are never accessed by kernel code, so keeping
++	 * the stale mapping is harmless. Userspace creates its own mapping
++	 * via remap_pfn_range() using the CORRECT addr_phys_ce.
 +	 */
-+	if (pcfg->addr_virt_ce) {
-+		memunmap(pcfg->addr_virt_ce);
-+		pcfg->addr_virt_ce = NULL;
-+	}
 +
 +	*pcfg_out = pcfg;
 +	return 0;
