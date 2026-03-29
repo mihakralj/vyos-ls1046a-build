@@ -56,7 +56,7 @@ VyOS's `install image` and `add system image` only update GRUB configuration. On
 
 ## The Fixes
 
-Seven targeted modifications to `vyos-build`. No kernel patches. No forks. Just configuration and plumbing.
+Seven targeted modifications to `vyos-build`. No forks. Just configuration and plumbing.
 
 ### Fix 1: Enable eSDHC Driver
 
@@ -214,24 +214,15 @@ The module's rollball PHY exposes itself as an external MDIO PHY (PHYAD 11) to t
 
 The DTS is compiled from kernel source during build (using `make dtbs` against the kernel's `fsl-ls1046a.dtsi` includes), producing a DTB with correct mainline bindings.
 
-### Fix 6: Port Remapping
+### Fix 6: Port Ordering
 
-VyOS uses its own interface naming system (`vyos_net_name` invoked by `65-vyos-net.rules`) which overrides systemd `.link` files. The VyOS naming chain: kernel assigns temporary names (e2–e6) → `vyos_net_name` converts via `biosdevname`/`mod_ifname()` → final ethN in DT address probe order (rightmost RJ45 = eth0).
+**As of firmware 2026-03-29, port ordering is firmware-native — no udev rule is needed.**
 
-To override this, a udev rule at priority 64 (before 65) sets `ENV{VYOS_IFNAME}`, which VyOS's rule honors as a "predefined" name:
+The updated U-Boot + FMan firmware probes MACs in physical port order, so the kernel assigns `eth0`–`eth4` matching the physical left-to-right layout without any udev intervention. The `64-fman-port-order.rules` rule has been **removed** from the build.
 
-```
-# /etc/udev/rules.d/64-fman-port-order.rules
-ENV{DEVPATH}=="*/1ae8000.ethernet/*", ENV{VYOS_IFNAME}="eth0"   # leftmost RJ45
-ENV{DEVPATH}=="*/1aea000.ethernet/*", ENV{VYOS_IFNAME}="eth1"   # center RJ45
-ENV{DEVPATH}=="*/1ae2000.ethernet/*", ENV{VYOS_IFNAME}="eth2"   # rightmost RJ45
-ENV{DEVPATH}=="*/1af0000.ethernet/*", ENV{VYOS_IFNAME}="eth3"   # SFP1 (left cage)
-ENV{DEVPATH}=="*/1af2000.ethernet/*", ENV{VYOS_IFNAME}="eth4"   # SFP2 (right cage)
-```
+Historical note: earlier firmware probed MACs in DT address order (`1ae2000` sorted numerically first → rightmost RJ45 became eth0). The udev rule is preserved in git history if a firmware downgrade is ever needed.
 
-`DEVPATH` is always available (unlike `ID_PATH`) and contains the FMan MAC absolute address. When `VYOS_IFNAME` is set to `ethN`, `65-vyos-net.rules` passes it as the `predefined` argument to `vyos_net_name`, bypassing `biosdevname`.
-
-> **Note:** Systemd `.link` files do NOT work with VyOS — `vyos_net_name` overrides them.
+> **If port order regresses** (firmware downgrade): re-add `64-fman-port-order.rules` from git history. The rule sets `ENV{VYOS_IFNAME}` at priority 64 (before VyOS's `65-vyos-net.rules`), which VyOS honors as a predefined name bypassing `biosdevname`.
 
 ### Fix 7: Automated Install/Upgrade Flow
 
@@ -352,17 +343,15 @@ Each MAC's DTB node has a `pcsphy-handle` pointing to a PCS device on an MDIO bu
 
 Verified by cable-plug testing on board #308. Port remapping via udev rule `64-fman-port-order.rules` corrects the DT address order to match physical layout:
 
-| Physical Position | Type | VyOS name | MAC Address | DT Node | DEVPATH Match |
-|-------------------|------|-----------|-------------|---------|---------------|
-| Port 1 (leftmost RJ45) | SGMII | **eth0** | `E8:F6:D7:00:15:FF` | `1ae8000` | `*/1ae8000.ethernet/*` |
-| Port 2 (center RJ45) | SGMII | **eth1** | `E8:F6:D7:00:16:00` | `1aea000` | `*/1aea000.ethernet/*` |
-| Port 3 (right RJ45) | SGMII | **eth2** | `E8:F6:D7:00:16:01` | `1ae2000` | `*/1ae2000.ethernet/*` |
-| SFP1 (left cage) | 10GBase-R | **eth3** | `E8:F6:D7:00:16:02` | `1af0000` | `*/1af0000.ethernet/*` |
-| SFP2 (right cage) | 10GBase-R | **eth4** | `E8:F6:D7:00:16:03` | `1af2000` | `*/1af2000.ethernet/*` |
+| Physical Position | Type | VyOS name | MAC Address | DT Node |
+|-------------------|------|-----------|-------------|---------|
+| Port 1 (leftmost RJ45) | SGMII | **eth0** | `E8:F6:D7:00:15:FF` | `1ae8000` |
+| Port 2 (center RJ45) | SGMII | **eth1** | `E8:F6:D7:00:16:00` | `1aea000` |
+| Port 3 (right RJ45) | SGMII | **eth2** | `E8:F6:D7:00:16:01` | `1ae2000` |
+| SFP1 (left cage) | 10GBase-R | **eth3** | `E8:F6:D7:00:16:02` | `1af0000` |
+| SFP2 (right cage) | 10GBase-R | **eth4** | `E8:F6:D7:00:16:03` | `1af2000` |
 
-Without the udev rule, VyOS's `vyos_net_name` assigns names by DT address probe order: rightmost RJ45 = eth0 (address `1ae2000` sorts first). The rule sets `VYOS_IFNAME` before `65-vyos-net.rules`, hooking into VyOS's native naming mechanism.
-
-> **OpenWrt uses different naming:** The NXP SDK DPAA driver (`fsl_dpa`) probes in a different order. The official Mono Gateway docs list left-to-right as eth0, eth1, eth2.
+Port order is assigned by the firmware-native FMan MAC probe order and requires no udev rule as of 2026-03-29 firmware. MAC addresses are unique per board; values above are board #308.
 
 ---
 
@@ -521,21 +510,20 @@ flowchart TD
 
 ## Boot Optimizations
 
-### Services Masked in ISO
+### Services Masked or Adjusted in ISO
 
-| Service | Why masked | Effect |
-|---------|-----------|--------|
-| `kexec-load.service` | Forces full cold reboot (hardware re-init for DPAA1/SFP/I2C) | Reliability |
-| `kexec.service` | Prevents kexec fast-reboot path on installed system | Reliability |
-| `acpid.service` | No ACPI on ARM64/DeviceTree | ~2s saved |
-| `acpid.socket` / `acpid.path` | No ACPI on ARM64/DeviceTree | — |
+| Service | Status | Why | Effect |
+|---------|--------|-----|--------|
+| `acpid.service` | **Masked** | No ACPI on ARM64/DeviceTree | ~2s boot time saved |
+| `acpid.socket` / `acpid.path` | **Masked** | No ACPI on ARM64/DeviceTree | — |
+| `kexec-load.service` | **Active** (NOT masked) | Mainline 6.6 QBMan kexec fix | VyOS managed-params self-healing works |
+| `kexec.service` | **Active** (NOT masked) | Mainline 6.6 QBMan kexec fix | Normal kexec path via `system_option.py` |
 
-Services are masked via a chroot hook (`99-mask-services.chroot`) that runs inside the build chroot to create `ln -sf /dev/null` symlinks AND remove SysV init scripts (`/etc/init.d/kexec-load`, `/etc/init.d/kexec`). The old approach of placing symlinks in `includes.chroot` was broken: live-build dereferences absolute symlinks to paths outside the chroot, producing empty files. The SysV scripts regenerate systemd units via `systemd-sysv-generator`, bypassing the mask. Three layers of init system archaeology to get one service to stay dead.
+**kexec is intentionally active.** The mainline 6.6 kernel includes a QBMan kexec fix (`bman_requires_cleanup()` / `qman_requires_cleanup()` in `drivers/soc/fsl/qbman/`) that detects prior DPAA1 initialization and cleans up BMan/QMan state before kexec. This allows VyOS's `system_option.py` managed-params self-healing (hugepages, panic= bootarg sync) to work via kexec without cold reboot.
 
-> **Note:** Masking kexec services does **not** prevent the live-boot double-boot
-> (~70s penalty). That is triggered by `vyos-router` reaching `kexec.target`,
-> which is a systemd target, not a service. The penalty only occurs during USB
-> live boot for initial installation and does not affect installed systems.
+The SysV init scripts (`/etc/init.d/kexec-load`, `/etc/init.d/kexec`) are **removed** via `99-mask-services.chroot` to prevent `systemd-sysv-generator` from creating duplicate units that would improperly restart the services. The systemd units themselves remain active.
+
+The `99-mask-services.chroot` hook runs inside the build chroot. The old approach of placing `ln -sf /dev/null` symlinks in `includes.chroot` was broken: live-build dereferences absolute symlinks to paths outside the chroot, producing empty files.
 
 ### Default Config Hardening
 
@@ -565,9 +553,10 @@ Services are masked via a chroot hook (`99-mask-services.chroot`) that runs insi
 | `vyos-1x-006` | `disk.py`, `image_installer.py` | 16 MiB gap for bootloader + updated success message |
 | `vyos-1x-007` | `image_installer.py` | Prefer mmcblk (eMMC) as default disk in `install image` |
 | `vyos-1x-008` | `image_installer.py` | Default RAID-1 mirroring answer to "No" (single eMMC) |
-| `vyos-1x-009` | `system/image.py` | Fix `is_live_boot()` for U-Boot: `vyos-union=/boot/` fallback |
+| `vyos-1x-009` | `system/image.py` | Fix `is_live_boot()` for U-Boot: `vyos-union=/boot/` fallback; prepend `BOOT_IMAGE=` to bootargs |
 | `vyos-1x-010` | `vpp.py`, `startup.conf.j2`, config_verify, resource_defaults | Platform-bus NIC support for VPP AF_XDP (DPAA1 `fsl_dpa`) |
 | `vyos-1x-011` | `system/grub.py`, `image_installer.py` | Write `/boot/vyos.env` on set_default + call vyos-postinstall on install |
+| `vyos-1x-012` | `system/motd.py` | LS1046A-specific MOTD (board name, SFP note, DPAA1 status) |
 
 ## vyos-build Patches
 
@@ -576,36 +565,50 @@ Services are masked via a chroot hook (`99-mask-services.chroot`) that runs insi
 | `vyos-build-005` | `11-busybox.chroot` | Create `vim` → `vim.tiny` symlink |
 | `vyos-build-007` | `93-sb-sign-kernel.chroot` | Disable sbsign/sbverify (Secure Boot broken on ARM64) |
 
+## Kernel Patches (`data/kernel-patches/`)
+
+Two patches plus one out-of-tree source file are applied on top of the VyOS `linux-6.6.y` kernel tree during build:
+
+| File | Purpose |
+|------|---------|
+| `4002-hwmon-ina2xx-add-INA234-support.patch` | Adds `ti,ina234` to the kernel 6.6 `ina2xx` driver: OF match table, i2c_device_id, enum, config table with INA234-specific scaling (bus voltage LSB 1600 µV, power coefficient 32). Without this patch, the 8x INA234 power sensors on the board don't bind at all — no `ti,ina234` entry upstream. Prefix `4002-` avoids collision with the upstream VyOS `0002-inotify` kernel patch. |
+| `9001-usdpaa-bman-qman-exports-and-driver.patch` | Exports BMan/QMan kernel symbols for userspace DPAA1 PMD; stores portal physical addresses in portal config structs; adds `CONFIG_FSL_USDPAA_MAINLINE` Kconfig entry and Makefile hook. Required for DPDK DPAA1 userspace access via `/dev/fsl-usdpaa`. |
+| `fsl_usdpaa_mainline.c` | Clean-room `/dev/fsl-usdpaa` + `/dev/fsl-usdpaa-irq` character device driver (1453 lines). Implements 20 ioctls matching the NXP ABI for binary compatibility with DPDK `process.c`. Manages portals, DMA mappings, BPID/FQID/CGRID allocations per file descriptor with full cleanup on close. Too large for a unified diff — copied into `drivers/soc/fsl/qbman/` during build via an `awk`-injected line in `build-kernel.sh`. |
+
+The INA234 patch (`4002-`) was previously numbered in `0002-` series but was renumbered to avoid collision with the upstream VyOS inotify patch.
+
 ---
 
 ## Kernel Config Additions
 
-Complete list of config options appended to `vyos_defconfig`:
+Complete list of config options appended to `vyos_defconfig` (source of truth: `printf` block in `.github/workflows/auto-build.yml`):
 
 ```text
 # === LS1046A / NXP Layerscape DPAA1 (Mono Gateway DK) ===
 CONFIG_DEVTMPFS_MOUNT=y         # auto-mount /dev before init
-CONFIG_FSL_FMAN=y               # Frame Manager (packet processing)
-CONFIG_FSL_DPAA=y               # DPAA1 framework
-CONFIG_FSL_DPAA_ETH=y           # DPAA1 Ethernet driver
+CONFIG_FSL_FMAN=y               # Frame Manager (packet processing) — MUST be =y
+CONFIG_FSL_DPAA=y               # DPAA1 framework — MUST be =y
+CONFIG_FSL_DPAA_ETH=y           # DPAA1 Ethernet driver — MUST be =y
 CONFIG_FSL_DPAA_MACSEC=y        # MACsec offload
-CONFIG_FSL_XGMAC_MDIO=y        # FMan MDIO bus driver -- required for PCS discovery
-CONFIG_PHY_FSL_LYNX_28G=y      # Lynx 28G SerDes PHY -- PCS for SGMII/QSGMII/XFI
-CONFIG_FSL_BMAN=y               # Buffer Manager
-CONFIG_FSL_QMAN=y               # Queue Manager
-CONFIG_FSL_PAMU=y               # IOMMU for DMA isolation
+CONFIG_FSL_XGMAC_MDIO=y         # FMan MDIO bus driver — required for PCS discovery
+CONFIG_PHY_FSL_LYNX_28G=y       # Lynx 28G SerDes PHY — PCS for SGMII/QSGMII/XFI
+CONFIG_FSL_BMAN=y               # Buffer Manager — MUST be =y
+CONFIG_FSL_QMAN=y               # Queue Manager — MUST be =y
+CONFIG_FSL_PAMU=y               # IOMMU for DMA isolation — MUST be =y
 CONFIG_HWMON=y                  # hardware monitoring (MAXLINEAR_GPHY dependency)
-CONFIG_MAXLINEAR_GPHY=y         # Maxlinear GPY115C PHY driver -- SGMII AN re-trigger
+CONFIG_MAXLINEAR_GPHY=y         # Maxlinear GPY115C PHY driver — SGMII AN re-trigger fix
 CONFIG_MMC_SDHCI_OF_ESDHC=y     # eMMC controller
 CONFIG_FSL_EDMA=y               # DMA engine (eSDHC HS200)
 CONFIG_SERIAL_OF_PLATFORM=y     # 8250 UART device tree probe
 CONFIG_MTD=y                    # MTD subsystem (SPI flash access)
-CONFIG_MTD_SPI_NOR=m            # SPI NOR flash driver
+CONFIG_MTD_SPI_NOR=y            # SPI NOR flash driver
 CONFIG_SPI=y                    # SPI subsystem
 CONFIG_SPI_FSL_DSPI=y           # Freescale DSPI controller
+CONFIG_SPI_FSL_QSPI=y           # Freescale QSPI controller — required for /dev/mtd* and fw_setenv
+CONFIG_SPI_FSL_QUADSPI=y        # Alias for QSPI on some kernel versions
 CONFIG_CDX_BUS=y                # CDX bus (DPAA dependency)
-# CONFIG_DEBUG_PREEMPT is not set  # suppress preempt BUG spam
-CONFIG_QORIQ_CPUFREQ=y          # CPU frequency scaling (built-in)
+# CONFIG_DEBUG_PREEMPT is not set  # suppress preempt BUG spam, saves ~20s boot
+CONFIG_QORIQ_CPUFREQ=y          # CPU frequency scaling — MUST be =y (see Fix 4)
 CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y  # always max frequency
 # CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL is not set
 
@@ -623,16 +626,28 @@ CONFIG_I2C_IMX=y                # fsl,vf610-i2c I2C controller
 CONFIG_GPIO_MPC8XXX=y           # fsl,qoriq-gpio controller
 
 # === Board peripherals (fan, thermal, RTC, power sensors) ===
-CONFIG_SENSORS_EMC2305=y        # emc2305 fan controller (Microchip, I2C 0x2e)
+CONFIG_SENSORS_EMC2305=y        # EMC2305 fan controller (Microchip, I2C 0x2e)
+CONFIG_SENSORS_INA2XX=y         # INA234 power sensors (8x on board, via kernel patch 4002)
 CONFIG_RTC_DRV_PCF2127=y        # PCF2131 RTC (NXP, I2C 0x53)
 
-# === QSPI flash (U-Boot env access via fw_setenv) ===
-CONFIG_SPI_FSL_QSPI=y           # Freescale QSPI controller -- required for /dev/mtd* access
+# === DPDK USDPAA userspace PMD support (via kernel patch 9001) ===
+CONFIG_FSL_USDPAA_MAINLINE=y    # /dev/fsl-usdpaa chardev for DPDK DPAA1 PMD
 
-# === Hardware crypto (CAAM) ===
-CONFIG_CRYPTO_DEV_FSL_CAAM=y    # CAAM crypto engine (128 algorithms: 45 QI + 83 JR)
-CONFIG_CRYPTO_DEV_FSL_CAAM_JR=y # CAAM Job Ring interface
+# === Disable STRICT_DEVMEM for DPDK DPAA PMD ===
+# DPDK fman_init() mmaps FMan CCSR registers via /dev/mem
+# CONFIG_STRICT_DEVMEM is not set
+# CONFIG_IO_STRICT_DEVMEM is not set
+
+# === USB live boot support (built-in — needed before initramfs module loader) ===
+CONFIG_USB_STORAGE=y            # USB mass storage for live boot
+CONFIG_VFAT_FS=y                # FAT32 filesystem (USB image format)
+CONFIG_FAT_FS=y                 # FAT core
+CONFIG_NLS_CODEPAGE_437=y       # FAT codepage
+CONFIG_NLS_ISO8859_1=y          # FAT charset
+CONFIG_NLS_UTF8=y               # FAT UTF-8
 ```
+
+> **Why `=y` for USB and filesystem configs:** The TFTP dev-boot initramfs has no module loader. Any driver needed before rootfs mount must be built-in. `CONFIG_USB_STORAGE=m` means TFTP kernels cannot access the eMMC squashfs via live-boot's USB fallback path. All DPAA1 drivers have the same constraint — `=m` causes silent failure with zero interfaces.
 
 ---
 
@@ -651,11 +666,13 @@ CONFIG_CRYPTO_DEV_FSL_CAAM_JR=y # CAAM Job Ring interface
 ## See Also
 
 - [BOOT-PROCESS.md](BOOT-PROCESS.md) -- complete boot path specification: U-Boot env variables, annotated USB and eMMC sequences, `vyos.env` mechanism, SPI NOR layout, failure modes
+- [DEV-LOCAL.md](DEV-LOCAL.md) -- local dev build: LXC setup, TFTP dev loop, `bin/build-local.sh` reference, U-Boot `dev_boot` setup
 - [INSTALL.md](INSTALL.md) -- step-by-step installation guide
 - [UBOOT.md](UBOOT.md) -- U-Boot serial console reference: memory map, boot commands, clock tree, MTD layout
 - [README.md](README.md) -- project overview
-- [plans/DPAA1-DPDK-PMD.md](plans/DPAA1-DPDK-PMD.md) -- DPAA1 DPDK PMD build plan (Phase A+B complete, Phase C next)
+- [plans/DPAA1-DPDK-PMD.md](plans/DPAA1-DPDK-PMD.md) -- DPAA1 DPDK PMD build plan
 - [plans/USDPAA-IOCTL-SPEC.md](plans/USDPAA-IOCTL-SPEC.md) -- USDPAA ioctl ABI specification (20 ioctls, mainline implementation status)
+- [plans/MAINLINE-PATCH-SPEC.md](plans/MAINLINE-PATCH-SPEC.md) -- kernel patch design: export audit, DPDK call trace, 6-patch rationale
 - [Mono Gateway Getting Started](https://github.com/we-are-mono/meta-mono/blob/master/gateway-development-kit/getting-started.md) -- factory setup, serial console, Recovery Linux
 - [Mono Gateway Hardware Description](https://github.com/we-are-mono/meta-mono/blob/master/gateway-development-kit/hardware-description.md) -- port pinouts, GPIO, M.2, fan headers
 - [nix repo (Mono NixOS build)](https://github.com/nicator-company/nix) -- official DTS source, kernel patches (FMan ethernet-alias ordering, INA234 hwmon), defconfig
