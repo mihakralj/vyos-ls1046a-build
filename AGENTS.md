@@ -51,8 +51,9 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 - **NEVER `install image` from an installed system:** Use `add system image <url>` instead. `install image` is for USB live boot ONLY — it repartitions the eMMC and looks for `/usr/lib/live/mount/medium/live/filesystem.squashfs` which doesn't exist on installed systems. Running it from eMMC DESTROYS the existing installation.
 - **DPAA1 offloads are limited:** TSO/LRO/hw-tc-offload are hardware-impossible (`[fixed]` off). Maximum VyOS offloads: `gro gso sg rfs rps`. Do not attempt to enable TSO.
 - **Jumbo frame module parameter is `fsl_dpaa_fman`:** The FMan driver's `KBUILD_MODNAME` is `fsl_dpaa_fman`, NOT `fman`. Use `fsl_dpaa_fman.fsl_fm_max_frm=9600` in bootargs. The wrong name silently has no effect (max MTU stays at 1500).
-- **QSPI flash needs `CONFIG_SPI_FSL_QSPI=y`:** Without it, `/dev/mtd*` devices don't appear and `fw_setenv` cannot modify U-Boot environment. The DTS defines 8 partitions on the 64MB QSPI NOR flash.
-- **`libubootenv-tool` vs `u-boot-tools`:** VyOS ships `libubootenv-tool` which provides `/usr/bin/fw_setenv` but uses a different config file format than classic `u-boot-tools`. The `fw_env.config` must match the installed tool's expectations.
+- **QSPI flash needs `CONFIG_SPI_FSL_QSPI=y`:** Without it, `/dev/mtd*` devices don't appear and `fw_setenv` cannot modify U-Boot environment. The DTS defines 9 partitions on the 64MB QSPI NOR flash. U-Boot env is at `/dev/mtd3` ("uboot-env", 1MB partition, 4KB erase sector). CONFIG_ENV_SIZE = 0x2000 (8KB).
+- **`libubootenv-tool` config format:** VyOS ships `libubootenv-tool` which provides `/usr/bin/fw_setenv`. It accepts the classic `fw_env.config` legacy format: `Device Offset Env_size Sector_size`. The `/etc/fw_env.config` must point to `/dev/mtd3 0x0 0x2000 0x1000`. Env_size 0x2000 (8KB) and sector 0x1000 (4KB) were confirmed by brute-force CRC test on live hardware.
+- **`vyos-postinstall` writes U-Boot env via `fw_setenv`:** Phase 1 (`setup_uboot_env_once`) writes `vyos`, `usb_vyos`, and `bootcmd` to SPI flash on first boot. It checks `fw_printenv vyos` for `vyos.env` string — if found, skips (idempotent). Manual U-Boot console setup (INSTALL.md Step 4) is the fallback if `fw_setenv` fails.
 
 ## Local Dev Loop Rules
 
@@ -140,7 +141,7 @@ A 6-patch series adds `/dev/fsl-usdpaa` chardev support to **mainline** kernel 6
 | `data/scripts/startup.conf` | Legacy VPP startup config (superseded by VyOS-generated `/etc/vpp/startup.conf`) |
 | `data/scripts/fancontrol.conf` | Standard Linux fancontrol config: EMC2305 PWM → core-cluster thermal zone (installed as `/etc/fancontrol`) |
 | `data/reftree.cache` | Required vyos-1x build artifact missing from upstream — must copy manually |
-| `data/vyos-1x-*.patch` | Patches applied to vyos-1x during build (11 patches: console, vyshim timeout, podman, install gap, eMMC default, RAID default no, U-Boot live-boot detection, VPP platform-bus, vyos.env boot) |
+| `data/vyos-1x-*.patch` | Patches applied to vyos-1x during build (11 patches: console, vyshim timeout, podman, install gap, eMMC default, U-Boot live-boot detection, VPP platform-bus, vyos.env boot, LS1046A MOTD, hide live-boot disk from install) |
 | `data/vyos-build-*.patch` | Patches applied to vyos-build during build (2 patches: vim link, no sbsign) |
 | `data/mok/MOK.pem` | Machine Owner Key certificate for Secure Boot kernel signing |
 | `data/vyos-ls1046a.minisign.pub` | Public key for ISO signature verification |
