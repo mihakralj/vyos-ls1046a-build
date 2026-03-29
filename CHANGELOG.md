@@ -14,7 +14,8 @@ Entries are factual. The humor is in the bugs.
 - VPP is **off by default** — users enable via `set vpp settings interface eth3` etc. in VyOS configurator. Patch 010 enables the capability; default config only pre-allocates hugepages
 - Default config: SFP+ MTU set to 3290 (DPAA1 XDP maximum)
 - Kernel configs: `PHYLINK`, `PHY_FSL_LYNX_10G` (10G PCS layer for SFP+)
-- Kernel configs: `SENSORS_EMC2305` (fan controller), `RTC_DRV_PCF2127` (RTC)
+- **INA234 power sensor support**: `data/kernel-patches/0002-hwmon-ina2xx-add-INA234-support.patch` adds `ti,ina234` to the kernel 6.6 `ina2xx` hwmon driver. INA234 is register-compatible with INA226 but has different scaling: bus voltage LSB 1.6 mV (not 1.25 mV), power coefficient 32 (not 25). Without the patch, all 8x INA234 sensors on the board silently bind as INA226, producing a systematic 22% underread on all bus voltage measurements. `CONFIG_SENSORS_INA2XX=y` added to defconfig. Patch adapted from upstream LKML v3 submission (Ian Ray, 2026-02-20) to match kernel 6.6 driver structure
+- Kernel configs: `SENSORS_EMC2305` (fan controller), `SENSORS_INA2XX` (8x INA234 power sensors), `RTC_DRV_PCF2127` (RTC)
 - Kernel config: `CONFIG_REALTEK_PHY=y` (Realtek PHY driver for RTL821x/RTL822x)
 - Kernel config: `CONFIG_SPI_FSL_QSPI=y` (QSPI controller for SPI NOR flash access from Linux)
 - DTS: ethernet aliases (`ethernet0`–`ethernet4`) for deterministic interface naming
