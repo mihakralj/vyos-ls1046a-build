@@ -4,17 +4,21 @@
 
 VyOS ARM64 builds for the [Mono Gateway Development Kit](https://github.com/ryneches/mono-gateway-docs): NXP LS1046A, 4x Cortex-A72 @ 1.8 GHz, 8 GB ECC DDR4, 3x RJ45, 2x SFP+.
 
-Stock VyOS ARM64 ISO boots on this board with no eMMC driver, no networking, wrong serial console, and the CPU locked at 700 MHz. Thirteen fixes later, it works. The table below has the full horror show.
+## Why bother with VyOS?
 
-## Why VyOS? Why Not OpenWrt or OPNsense?
+**VPP userspace dataplane.** VyOS 1.5 ships with VPP (Vector Packet Processing): a kernel-bypass data plane that batches 256 packets at a time, polls hardware directly, and treats the Frame Manager as a co-processor instead of fighting it. Critically, VPP is not all-or-nothing - only interfaces explicitly assigned to VPP use the VPP forwarding path. VPP claims eth3/eth4 (10G SFP+) while the kernel retains eth0–eth2 (RJ45) for management and routing. The CAAM crypto engine provides 128 hardware algorithms for IPsec AES-GCM offload (~2-3 Gbps encrypted). VPP is off by default — see **[VPP-SETUP.md](VPP-SETUP.md)**. Full plan: **[VPP.md](VPP.md)**.
 
-Because the LS1046A has a **hardware packet processing engine** (DPAA1) that neither OpenWrt nor OPNsense can exploit. OpenWrt tops out around 4.5 Gbps when NATing and filtering packets: the Linux kernel's per-packet `sk_buff` overhead chokes the quad-core A72 long before the 10G SFP+ ports saturate. OPNsense is worse. FreeBSD's DPAA1 driver is immature, and you're staring at ~1.5 Gbps of routing/NATing/filtering on hardware built for ten.
+**Zone-based firewall with nftables.** Interfaces can be assigned to zones; policy applies to zone-pair traffic instead of per-interface rule-sets. `set firewall zone DMZ from LAN firewall name LAN-DMZ-v4` replaces dozens of interface-level rules that grow combinatorially with interface count. A zone can contain multiple interfaces, which makes multi-VLAN setups manageable. VyOS 1.5 adds VRF-awareness to zone policy.
 
-VyOS 1.5 ships with **VPP** (Vector Packet Processing): a kernel-bypass data plane that batches 256 packets at a time, polls hardware directly via AF_XDP, and treats the DPAA1 Frame Manager as a co-processor instead of fighting it. VPP claims eth3/eth4 (10G SFP+) while the kernel retains eth0 through eth2 (RJ45) for management and routing. The CAAM crypto engine provides 128 hardware algorithms for IPsec AES-GCM offload (~2-3 Gbps encrypted). WireGuard grinds through ChaCha20 on ARM64 NEON SIMD (~1 Gbps). VPP is off by default. See **[VPP-SETUP.md](VPP-SETUP.md)** to flip the switch.
+**Native containerization via Podman.** Containers are first-class config-tree citizens: image, network, environment variables, volumes, ports, and memory limits defined with `set container name ...` commands, committed and rolled back with everything else. Run AdGuard, monitoring agents, or DDNS updaters directly on the router — managed declaratively inside the same config that controls routing and firewall.
 
-When enabled, this split-plane architecture delivers 2.47M polls/sec on SFP+ traffic via VPP, while the kernel stack manages RJ45 interfaces for VyOS routing and management. Two data planes, one box, zero interference.
+**CLI-first, text-based configuration.** Entire router state lives in `config.boot` — hierarchical, human-readable, diffable, and version-controllable with Git. OPNsense stores configuration in XML (`config.xml`), GUI-first by design. Reviewing a diff between two VyOS configs reads like plain English; OPNsense XML diffs do not.
 
-**[VPP.md](VPP.md)**: Full technical plan covering DPAA1 acceleration, DPDK integration, performance targets, and implementation roadmap.
+**Transactional atomic commits.** Stage multiple changes, review with `compare`, apply atomically with `commit`. If commit fails, nothing changes. `commit-confirm` provides an automatic rollback timer. OPNsense applies changes per-section — firewall rules reload separately from interface changes — which can leave the system in an intermediate broken state.
+
+**Scriptable by design.** `vyatta-cfg-cmd-wrapper` for shell automation, `my_cli_shell_api` for programmatic access, HTTP API for CI/CD. Dedicated Ansible `vyos_config` module and Terraform provider. OPNsense has a REST API bolted onto a GUI-centric PHP architecture — you are automating button clicks, not driving a system designed for headless operation.
+
+**Full FRRouting integration.** BGP, OSPF, IS-IS, BFD, MPLS, VXLAN, segment routing, and PIM — all natively in the config tree with proper dependency resolution at commit time. OPNsense offers BGP and OSPF through plugins configured via web forms, not woven into the commit pipeline.
 
 ## Known Issues
 
@@ -25,7 +29,7 @@ Before installing, review the [open issues](https://github.com/mihakralj/vyos-ls
 Pick your adventure:
 
 | I want to... | Go to |
-i s|---|---|
+|---|---|
 | **Install VyOS** on the Mono Gateway | **[INSTALL.md](INSTALL.md)**: write USB image, `install image`, eMMC boot |
 | **Update board firmware** (bricked or fresh board) | [FIRMWARE.md](FIRMWARE.md): NOR + eMMC flash procedure, partition offset details |
 | **Understand the boot process** in detail | [BOOT-PROCESS.md](BOOT-PROCESS.md): USB and eMMC paths, U-Boot env, `booti` sequence, failure modes |
@@ -34,7 +38,6 @@ i s|---|---|
 | **Debug** at the U-Boot serial console | [UBOOT.md](UBOOT.md): memory map, boot commands, clock tree, MTD layout |
 | **Check** a raw boot log for known messages | [captured_boot.md](captured_boot.md): full USB live-boot serial capture |
 | **See** what changed between releases | [CHANGELOG.md](CHANGELOG.md): per-build changelog |
-
 
 This is, as far as anyone can tell, the only VyOS build targeting bare-metal ARM64 networking hardware with HW offload support and VPP implementation. Some highlights from the wreckage:
 

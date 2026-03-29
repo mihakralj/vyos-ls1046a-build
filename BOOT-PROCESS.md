@@ -15,7 +15,7 @@ Both paths use `booti` (raw ARM64 `Image` format). `bootm` (uImage) and `bootefi
 
 ## U-Boot Environment
 
-Stored in SPI NOR flash at `/dev/mtd3` (QSPI, 64 KiB sector, 64 KiB env). Written once during the first USB live boot by `vyos-postinstall.service` via `fw_setenv` (`libubootenv-tool`).
+Stored in SPI NOR flash at `/dev/mtd3` (QSPI, 64 KiB sector, 64 KiB env). Set once from the U-Boot serial console during initial install (see INSTALL.md Step 4). The `vyos-postinstall` Phase 1 (`setup_uboot_env_once`) is a no-op stub — `fw_setenv` does not work on this board due to MTD partition format mismatch.
 
 ### Variables
 
@@ -274,7 +274,7 @@ vyos-union=/boot/2026.03.27-0142-rolling
 
 | Event | Trigger | What writes vyos.env |
 |-------|---------|---------------------|
-| First USB boot | `vyos-postinstall.service` | Phase 1 only (SPI flash); no vyos.env (no images) |
+| First USB boot | (none) | No vyos.env written — live boot only, no installed images yet |
 | `install image` | `image_installer.install_image()` | `grub.set_default()` patch + `run('vyos-postinstall')` |
 | `add system image` | `image_installer.add_image()` | `grub.set_default()` patch |
 | `set system image default-boot` | VyOS CLI → `grub.set_default()` | `grub.set_default()` patch |
@@ -336,13 +336,13 @@ QSPI NOR flash (64 MiB, `/dev/mtd*`):
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `No partition table - usb 0` / `Couldn't find partition usb 0:1` | Old `usb_vyos` env uses `0:1` but USB image is whole-disk FAT32 (no MBR) | Use `usb 0:0` or boot via `boot.scr`: `usb start; fatload usb 0:0 ${load_addr} boot.scr; source ${load_addr}` |
-| `Kernel stuck after earlycon enabled` | `live-media=/dev/sda1` in bootargs — no partition 1 on whole-disk FAT USB | Use `live-media=/dev/sda` (whole disk). Old `usb_vyos` env predates this fix — update via `vyos-postinstall` after first boot. |
+| `Kernel stuck after earlycon enabled` | `live-media=/dev/sda1` in bootargs — no partition 1 on whole-disk FAT USB | Use `live-media=/dev/sda` (whole disk). Fix `usb_vyos` env from U-Boot console per INSTALL.md Step 4. |
 | `Can't set block device` | `emmc=mmc 0:1` — wrong partition (p1 is raw BIOS boot, no ext4) | Run manual U-Boot setup from INSTALL.md |
 | `Bad Linux ARM64 Image magic!` | Factory env uses `bootm` (expects uImage). VyOS kernel requires `booti` | Run manual U-Boot setup |
 | `ERROR: Did not find a cmdline Flattened Device Tree` | DTB loaded at `0x90000000` (`kernel_comp_addr_r`) — overwritten by kernel decompression | Always use `${fdt_addr_r}` = `0x88000000` |
 | `Wrong Ramdisk Image Format` | `booti addr addr:size fdt` — missing `:${filesize}` colon-size suffix | Ensure initrd loads last; use `${ramdisk_addr_r}:${filesize}` |
 | Boot loops (kexec) | `panic` in bootargs doesn't match `config.boot` | Verify bootargs include `panic=60`. Hugepages are added dynamically by VPP — no need in base bootargs |
 | `fw_setenv` fails | `/dev/mtd3` missing — `CONFIG_SPI_FSL_QSPI` not built-in | Verify `CONFIG_SPI_FSL_QSPI=y` in kernel config |
-| `vyos-postinstall` skips SPI setup | `fw_printenv` not found or `/etc/fw_env.config` missing | Verify `libubootenv-tool` installed and `fw_env.config` copied into squashfs |
+| `vyos-postinstall` Phase 1 is a no-op | `fw_setenv` doesn't work — MTD partition format mismatch on this board | Set U-Boot env manually from serial console per INSTALL.md Step 4 |
 | No network interfaces after boot | DPAA1 stack built as modules instead of `=y` | All `CONFIG_FSL_FMAN/DPAA/BMAN/QMAN/PAMU` must be `=y` |
 | CPU locked at 700 MHz | `CONFIG_QORIQ_CPUFREQ=m` — module loads too late, PLLs released | Set `CONFIG_QORIQ_CPUFREQ=y` |
