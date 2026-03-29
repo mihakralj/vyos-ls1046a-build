@@ -520,19 +520,19 @@
 		status = "okay";
 	};
 
-	fm1_mac9: ethernet@f0000 { /* 10GEC1 */
-		status = "disabled"; /* kernel dpaa_eth must NOT bind — DPDK owns via fsl,dpaa container */
-		sfp = <&sfp_xfi0>;
-		phy-connection-type = "xgmii"; /* kernel converts to 10gbase-r; must use xgmii so fman_memac assigns PCS to xfi_pcs */
-		managed = "in-band-status";
-	};
+fm1_mac9: ethernet@f0000 { /* 10GEC1 */
+status = "okay"; /* kernel fsl_dpaa_mac + fsl_dpa own this MAC at boot */
+sfp = <&sfp_xfi0>;
+phy-connection-type = "xgmii"; /* kernel converts to 10gbase-r; must use xgmii so fman_memac assigns PCS to xfi_pcs */
+managed = "in-band-status";
+};
 
-	fm1_mac10: ethernet@f2000 { /* 10GEC2 */
-		status = "disabled"; /* kernel dpaa_eth must NOT bind — DPDK owns via fsl,dpaa container */
-		sfp = <&sfp_xfi1>;
-		phy-connection-type = "xgmii"; /* kernel converts to 10gbase-r; must use xgmii so fman_memac assigns PCS to xfi_pcs */
-		managed = "in-band-status";
-	};
+fm1_mac10: ethernet@f2000 { /* 10GEC2 */
+status = "okay"; /* kernel fsl_dpaa_mac + fsl_dpa own this MAC at boot */
+sfp = <&sfp_xfi1>;
+phy-connection-type = "xgmii"; /* kernel converts to 10gbase-r; must use xgmii so fman_memac assigns PCS to xfi_pcs */
+managed = "in-band-status";
+};
 
 	mdio@fc000 {
 		status = "disabled";
@@ -674,23 +674,25 @@
 };
 
 /*
-	* DPDK DPAA bus container — SFP+ ports ONLY.
-	*
-	* DPDK's fman_init() looks for a node with compatible = "fsl,dpaa",
-	* then iterates its children calling fman_if_init() for each.
-	* The kernel ignores this node — no mainline driver matches "fsl,dpaa".
-	*
-	* CRITICAL: Only SFP+ ports (10G) are listed here. RJ45 ports (1G)
-	* are managed exclusively by kernel dpaa_eth and must NOT appear in
-	* this container. Including them causes DPDK to grab their QMan portals
-	* via /dev/mem, conflicting with kernel dpaa_eth → kernel panic.
-	*
-	* The SFP+ MAC nodes above have status = "disabled" so kernel dpaa_eth
-	* does not bind to them. DPDK accesses FMan hardware directly via
-	* /dev/mem and /dev/fsl-usdpaa, independent of kernel driver binding.
-	*
-	* FQIDs start at 0x40c to avoid conflict with kernel dynamic allocation.
-	*/
+* DPDK DPAA bus container — SFP+ ports ONLY.
+*
+* DPDK's fman_init() looks for a node with compatible = "fsl,dpaa",
+* then iterates its children calling fman_if_init() for each.
+* The kernel ignores this node — no mainline driver matches "fsl,dpaa".
+*
+* CRITICAL: Only SFP+ ports (10G) are listed here. RJ45 ports (1G)
+* are managed exclusively by kernel fsl_dpa and must NOT appear in
+* this container. Including them causes DPDK to grab their QMan portals
+* via /dev/mem, conflicting with kernel fsl_dpa → kernel panic.
+*
+* At boot, the SFP+ MAC nodes (status = "okay") are owned by the kernel
+* via fsl_dpaa_mac + fsl_dpa drivers. When VyOS configures a port for
+* VPP, vyos-1x vpp.py unbinds that port's dpaa-ethernet.N device from
+* fsl_dpa before starting VPP with DPDK DPAA PMD. On VPP stop, the
+* device is rebound to fsl_dpa, restoring kernel control.
+*
+* FQIDs start at 0x40c to avoid conflict with kernel dynamic allocation.
+*/
 &soc {
 	fsl,dpaa {
 		compatible = "fsl,ls1046a-dpaa", "simple-bus", "fsl,dpaa";

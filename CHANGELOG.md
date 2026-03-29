@@ -6,6 +6,48 @@ Entries are factual. The humor is in the bugs.
 
 ## Unreleased
 
+### Fixed
+- **eth3/eth4 SFP+ kernel visibility** (`mono-gateway-dk.dts`): MAC9 (`ethernet@f0000`) and
+  MAC10 (`ethernet@f2000`) had `status = "disabled"` which prevented `fsl_dpaa_mac` + `fsl_dpa`
+  from binding and creating kernel netdevs. Changed to `status = "okay"` — all 5 ports (eth0–eth4)
+  are visible to the kernel at boot regardless of VPP configuration. The `fsl,dpaa` DT container
+  (DPDK resource descriptor) remains and is harmlessly ignored by the mainline kernel.
+- **DTS QSPI partition table wrong**: Speculative partition layout didn't match actual `/proc/mtd` on live hardware. Rewritten to match: rcw-bl2 1MB, uboot 2MB, uboot-env 1MB, fman-ucode 1MB, recovery-dtb 1MB, backup 4MB, kernel-initramfs 22MB. Hardware-verified via hexdump + CRC test
+- **`fw_env.config` wrong env_size/sector_size**: Was `0x20000`/`0x10000` (caused "Cannot read environment"). Brute-force CRC test on all powers-of-2 confirmed only `0x2000` (8KB env) with `0x1000` (4KB sector) produces valid CRC. `fw_printenv bootcmd` now works
+- **`fw_setenv` "doesn't work" misconception**: Previous issue #7 comment stated fw_setenv doesn't work due to MTD mismatch. Root cause was wrong `fw_env.config` parameters. With correct 0x2000/0x1000, `fw_setenv` works perfectly — hardware verified
+- **CRITICAL: All 11 vyos-1x patches silently never applied in ANY build**: `build.py` does `git checkout current` after workflow applied patches to the cloned repo, reverting ALL changes. Every build since patch introduction shipped unpatched vyos-1x. Fix: replaced direct `patch -p1` calls with `pre_build_hook` in `package.toml` — hook executes AFTER `git checkout` but BEFORE `dpkg-buildpackage`, ensuring patches persist through the build
+- **Patch 010 missing `{% endif %}` for dpdk block**: startup.conf.j2 hunk added `{% if has_dpdk %}` before the `dpdk { }` stanza but was truncated — no closing `{% endif %}`. VPP crashed parsing the unconditional `dpdk { dev 0000:00:00.0 }` block even when dpdk_plugin.so was disabled. Fix: expanded hunk to cover entire dpdk block (29 context lines) with both `{% if has_dpdk %}` and `{% endif %}`
+- **vyos-postinstall.service not starting**: systemd ignored the WantedBy symlink ("not a symlink, ignoring") because `ln -sf` in includes.chroot gets dereferenced by live-build into an empty file. Fix: use `systemctl enable` inside 98-fancontrol.chroot hook where it runs inside the chroot
+- **Fan control "Device path changed" failure**: hwmon numbering is unstable across boots — `fancontrol` refused to start when EMC2305 moved from hwmon8 to hwmon9. Fix: `fancontrol-setup.sh` dynamically discovers emc2305 and core_cluster by scanning `/sys/class/hwmon/*/name` and regenerates `/etc/fancontrol` before daemon start (ExecStartPre)
+- **DTB missing after `add system image` upgrade**: `add_image()` only copied `initrd*` and `vmlinuz*` from ISO `/live/` directory — mono-gw.dtb (at ISO root) was never copied to the new image's boot directory. U-Boot would fail to find the DTB on next boot. Fix: patch 011 now also copies `.dtb` files from ISO root to `{root_dir}/boot/{image_name}/` during upgrades
+- **VPP "Configuration error" on boot**: Patch 010 hunks for `config_verify.py` and `resource_defaults.py` were silently failing to apply — insufficient context lines (1–2 lines instead of required 3). Result: VPP verify still required 1G main-heap-size while our config specifies 256M → `ERROR_COMMIT` on every boot → config-status=1. Fix: rewrote patch hunks with 3+ lines of context. `min_cpus` now correctly 2 (was stuck at 4), `reserved_cpu_cores` now 1 (was 2), `main_heap_size` minimum now 256M (was 1G)
+- **Kexec double-boot eliminated**: Root cause identified in `system_option.py:generate_cmdline_for_kexec()` — compares `/proc/cmdline` against config.boot `MANAGED_PARAMS` (hugepages, panic). U-Boot bootargs were missing `hugepagesz=2M hugepages=512 panic=60` that config.boot.default requests → mismatch → kexec reboot on every boot (~70s penalty). Fix: added params to `vyos-postinstall` UBOOT_BOOTARGS_TAIL. Boot time: ~165s → ~82s
+- **TFTP DTB address corruption**: DTB loaded at `0x90000000` destroyed during kernel decompression (that address is `kernel_comp_addr_r`, scratch space for decompressing kernel from `0xa0000000` → `0x0`). Fix: use `${fdt_addr_r}` (0x88000000) for DTB in all TFTP boot commands
+- **U-Boot live-boot detection**: VyOS `is_live_boot()` checks `BOOT_IMAGE=` in cmdline (GRUB-specific). U-Boot's `booti` doesn't set this. Added `vyos-union=/boot/` fallback check — system now correctly detected as installed. `show system image` and `add system image` now work
+- **Jumbo frame bootarg**: Was `fman.fsl_fm_max_frm=9600` (silently ignored). Correct module name from Makefile is `fsl_dpaa_fman` → `fsl_dpaa_fman.fsl_fm_max_frm=9600`
+- **Kexec masking broken by live-build**: `ln -sf /dev/null` in `includes.chroot` gets converted to empty files when live-build creates squashfs (absolute symlinks outside chroot are dereferenced). Empty files don't mask services. Additionally `kexec-load` comes from SysV init script — `systemd-sysv-generator` creates a unit, bypassing our mask. Fix: chroot hook creates proper symlinks AND removes SysV init scripts
+- **vyos-postinstall BOOT_IMAGE=**: Now prepends `BOOT_IMAGE=/boot/IMAGE/vmlinuz` as first bootarg (VyOS regex uses `^` anchor). Also fixed `fsl_dpaa_fman` module name
+- **SFP+ TX_DISABLE GPIO polarity**: DTS used `GPIO_ACTIVE_HIGH` on `tx-disable-gpios` for both SFP+ nodes, but the board has a hardware inverter between GPIO2 and the SFP cage TX_DISABLE pins. Changed to `GPIO_ACTIVE_LOW` — both SFP+ ports now link correctly (eth3 SFP-10G-T at 1G/10G, eth4 SFP-10G-SR at 10G)
+- **SFP+ link DOWN**: DTS used `phy-connection-type = "10gbase-r"` which caused `fman_memac.c` to misassign PCS to `sgmii_pcs` instead of `xfi_pcs`. Changed to `"xgmii"` — kernel converts XGMII→10GBASER after correct PCS assignment
+- **SFP-10G-T rate adaptation documented**: SFP-10G-T copper modules with RTL8261 rollball PHY support multi-rate (10G/5G/2.5G/1G) via internal rate adaptation
+
+### Changed
+- **VPP/DPAA1 kernel↔VPP handoff** (`vyos-1x-010-vpp-platform-bus.patch`, `auto-build.yml`):
+  Added `_dpaa_find_platform_dev()` and `_dpaa_unbind_ifaces()` to `vpp.py`. When VPP starts with
+  a DPAA1 port assigned, the port's `dpaa-ethernet.N` device is unbound from `fsl_dpa` before DPDK
+  DPAA PMD initialises (prevents FMan frame queue conflict → kernel panic). State persisted to
+  `/run/vpp-dpaa-unbound.json`. Added `/usr/local/bin/vpp-dpaa-rebind` script and
+  `vpp.service.d/dpaa-rebind.conf` (`ExecStopPost`) so removing a port from VPP config and
+  committing restores kernel control without reboot.
+- **Default port ownership**: All ports (eth0–eth4, including SFP+ eth3/eth4) start under kernel
+  `fsl_dpa` at boot. Only ports explicitly assigned via `set vpp settings interface ethX` in VyOS
+  config are handed to VPP on next apply/reboot. Changing port assignment takes effect immediately
+  on commit (rebind path) or after reboot (unbind path).
+- Renamed `boot.efi.md` → `UBOOT.md`, stripped duplicated content (kept unique U-Boot/MTD/clock data)
+- CHANGELOG.md now manually maintained — CI no longer overwrites it (upstream changes go to GitHub release body only)
+- Updated PORTING.md, README.md, AGENTS.md with cross-repo findings from nix/OpenWrt
+- Kexec masking moved from `includes.chroot` symlinks to chroot hook (`99-mask-services.chroot`)
+
 ### Added
 - **Automatic U-Boot SPI flash configuration**: `vyos-postinstall` Phase 1 now writes `vyos`, `usb_vyos`, and `bootcmd` to SPI NOR flash via `fw_setenv` on first boot. Eliminates manual U-Boot serial console Step 4. Idempotent — skips if already configured. Hardware-verified on live board: `fw_printenv` reads back all 3 variables correctly
 - **`fw_env.config` hardware-verified**: Brute-force CRC test on live hardware confirmed `CONFIG_ENV_SIZE=0x2000` (8KB) and erase sector `0x1000` (4KB). Only `env_size=0x2000` produces valid CRC against `/dev/mtd3`
@@ -30,32 +72,6 @@ Entries are factual. The humor is in the bugs.
 - `vyos-1x-009-uboot-live-boot-detection.patch` — fixes `is_live_boot()` detection for U-Boot boards (adds `vyos-union=` fallback since U-Boot doesn't set `BOOT_IMAGE=`)
 - CAAM hardware crypto: 128 algorithms (AES, SHA, RSA, HMAC, authenc for IPsec) via 3 Job Rings + QI interface
 - PTP hardware timestamping via `ptp_qoriq` driver (`/dev/ptp0`)
-
-### Fixed
-- **DTS QSPI partition table wrong**: Speculative partition layout didn't match actual `/proc/mtd` on live hardware. Rewritten to match: rcw-bl2 1MB, uboot 2MB, uboot-env 1MB, fman-ucode 1MB, recovery-dtb 1MB, backup 4MB, kernel-initramfs 22MB. Hardware-verified via hexdump + CRC test
-- **`fw_env.config` wrong env_size/sector_size**: Was `0x20000`/`0x10000` (caused "Cannot read environment"). Brute-force CRC test on all powers-of-2 confirmed only `0x2000` (8KB env) with `0x1000` (4KB sector) produces valid CRC. `fw_printenv bootcmd` now works
-- **`fw_setenv` "doesn't work" misconception**: Previous issue #7 comment stated fw_setenv doesn't work due to MTD mismatch. Root cause was wrong `fw_env.config` parameters. With correct 0x2000/0x1000, `fw_setenv` works perfectly — hardware verified
-- **CRITICAL: All 11 vyos-1x patches silently never applied in ANY build**: `build.py` does `git checkout current` after workflow applied patches to the cloned repo, reverting ALL changes. Every build since patch introduction shipped unpatched vyos-1x. Fix: replaced direct `patch -p1` calls with `pre_build_hook` in `package.toml` — hook executes AFTER `git checkout` but BEFORE `dpkg-buildpackage`, ensuring patches persist through the build
-- **Patch 010 missing `{% endif %}` for dpdk block**: startup.conf.j2 hunk added `{% if has_dpdk %}` before the `dpdk { }` stanza but was truncated — no closing `{% endif %}`. VPP crashed parsing the unconditional `dpdk { dev 0000:00:00.0 }` block even when dpdk_plugin.so was disabled. Fix: expanded hunk to cover entire dpdk block (29 context lines) with both `{% if has_dpdk %}` and `{% endif %}`
-- **vyos-postinstall.service not starting**: systemd ignored the WantedBy symlink ("not a symlink, ignoring") because `ln -sf` in includes.chroot gets dereferenced by live-build into an empty file. Fix: use `systemctl enable` inside 98-fancontrol.chroot hook where it runs inside the chroot
-- **Fan control "Device path changed" failure**: hwmon numbering is unstable across boots — `fancontrol` refused to start when EMC2305 moved from hwmon8 to hwmon9. Fix: `fancontrol-setup.sh` dynamically discovers emc2305 and core_cluster by scanning `/sys/class/hwmon/*/name` and regenerates `/etc/fancontrol` before daemon start (ExecStartPre)
-- **DTB missing after `add system image` upgrade**: `add_image()` only copied `initrd*` and `vmlinuz*` from ISO `/live/` directory — mono-gw.dtb (at ISO root) was never copied to the new image's boot directory. U-Boot would fail to find the DTB on next boot. Fix: patch 011 now also copies `.dtb` files from ISO root to `{root_dir}/boot/{image_name}/` during upgrades
-- **VPP "Configuration error" on boot**: Patch 010 hunks for `config_verify.py` and `resource_defaults.py` were silently failing to apply — insufficient context lines (1–2 lines instead of required 3). Result: VPP verify still required 1G main-heap-size while our config specifies 256M → `ERROR_COMMIT` on every boot → config-status=1. Fix: rewrote patch hunks with 3+ lines of context. `min_cpus` now correctly 2 (was stuck at 4), `reserved_cpu_cores` now 1 (was 2), `main_heap_size` minimum now 256M (was 1G)
-- **Kexec double-boot eliminated**: Root cause identified in `system_option.py:generate_cmdline_for_kexec()` — compares `/proc/cmdline` against config.boot `MANAGED_PARAMS` (hugepages, panic). U-Boot bootargs were missing `hugepagesz=2M hugepages=512 panic=60` that config.boot.default requests → mismatch → kexec reboot on every boot (~70s penalty). Fix: added params to `vyos-postinstall` UBOOT_BOOTARGS_TAIL. Boot time: ~165s → ~82s
-- **TFTP DTB address corruption**: DTB loaded at `0x90000000` destroyed during kernel decompression (that address is `kernel_comp_addr_r`, scratch space for decompressing kernel from `0xa0000000` → `0x0`). Fix: use `${fdt_addr_r}` (0x88000000) for DTB in all TFTP boot commands
-- **U-Boot live-boot detection**: VyOS `is_live_boot()` checks `BOOT_IMAGE=` in cmdline (GRUB-specific). U-Boot's `booti` doesn't set this. Added `vyos-union=/boot/` fallback check — system now correctly detected as installed. `show system image` and `add system image` now work
-- **Jumbo frame bootarg**: Was `fman.fsl_fm_max_frm=9600` (silently ignored). Correct module name from Makefile is `fsl_dpaa_fman` → `fsl_dpaa_fman.fsl_fm_max_frm=9600`
-- **Kexec masking broken by live-build**: `ln -sf /dev/null` in `includes.chroot` gets converted to empty files when live-build creates squashfs (absolute symlinks outside chroot are dereferenced). Empty files don't mask services. Additionally `kexec-load` comes from SysV init script — `systemd-sysv-generator` creates a unit, bypassing our mask. Fix: chroot hook creates proper symlinks AND removes SysV init scripts
-- **vyos-postinstall BOOT_IMAGE=**: Now prepends `BOOT_IMAGE=/boot/IMAGE/vmlinuz` as first bootarg (VyOS regex uses `^` anchor). Also fixed `fsl_dpaa_fman` module name
-- **SFP+ TX_DISABLE GPIO polarity**: DTS used `GPIO_ACTIVE_HIGH` on `tx-disable-gpios` for both SFP+ nodes, but the board has a hardware inverter between GPIO2 and the SFP cage TX_DISABLE pins. Changed to `GPIO_ACTIVE_LOW` — both SFP+ ports now link correctly (eth3 SFP-10G-T at 1G/10G, eth4 SFP-10G-SR at 10G)
-- **SFP+ link DOWN**: DTS used `phy-connection-type = "10gbase-r"` which caused `fman_memac.c` to misassign PCS to `sgmii_pcs` instead of `xfi_pcs`. Changed to `"xgmii"` — kernel converts XGMII→10GBASER after correct PCS assignment
-- **SFP-10G-T rate adaptation documented**: SFP-10G-T copper modules with RTL8261 rollball PHY support multi-rate (10G/5G/2.5G/1G) via internal rate adaptation
-
-### Changed
-- Renamed `boot.efi.md` → `UBOOT.md`, stripped duplicated content (kept unique U-Boot/MTD/clock data)
-- CHANGELOG.md now manually maintained — CI no longer overwrites it (upstream changes go to GitHub release body only)
-- Updated PORTING.md, README.md, AGENTS.md with cross-repo findings from nix/OpenWrt
-- Kexec masking moved from `includes.chroot` symlinks to chroot hook (`99-mask-services.chroot`)
 
 ### Removed
 - `fix-grub.sh` — dead file, all fixes now handled at build time (patches + vyos-postinstall)
