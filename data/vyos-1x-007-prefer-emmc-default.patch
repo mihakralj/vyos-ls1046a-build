@@ -1,4 +1,4 @@
- diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
+diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
 @@ -384,5 +384,10 @@ def ask_single_disk(disks_available: dict[str, int]) -> str:
