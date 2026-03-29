@@ -1,0 +1,428 @@
+diff --git a/drivers/soc/fsl/qbman/Kconfig b/drivers/soc/fsl/qbman/Kconfig
+index bdecb86bb..e2dd2797a 100644
+--- a/drivers/soc/fsl/qbman/Kconfig
++++ b/drivers/soc/fsl/qbman/Kconfig
+@@ -65,4 +65,14 @@ config FSL_QMAN_TEST_STASH
+ 	  across a series of FQs scheduled to different portals (and cpus), with
+ 	  DQRR, data and context stashing always on.
+ 
++config FSL_USDPAA_MAINLINE
++	tristate "Userspace DPAA driver for DPDK"
++	depends on FSL_DPAA
++	help
++	  Provides /dev/fsl-usdpaa character device for DPDK DPAA1 PMD.
++	  Allows userspace to allocate QBMan resources, reserve portals,
++	  and manage DMA memory from reserved-memory regions.
++	  Required for DPDK with the dpaa bus driver.
++	  If unsure, say N.
++
+ endif # FSL_DPAA
+diff --git a/drivers/soc/fsl/qbman/Makefile b/drivers/soc/fsl/qbman/Makefile
+index 811312ad5..fe69f0057 100644
+--- a/drivers/soc/fsl/qbman/Makefile
++++ b/drivers/soc/fsl/qbman/Makefile
+@@ -11,3 +11,4 @@ obj-$(CONFIG_FSL_QMAN_TEST)			+= qman-test.o
+ qman-test-y					 = qman_test.o
+ qman-test-$(CONFIG_FSL_QMAN_TEST_API)		+= qman_test_api.o
+ qman-test-$(CONFIG_FSL_QMAN_TEST_STASH)		+= qman_test_stash.o
++obj-$(CONFIG_FSL_USDPAA_MAINLINE)               += fsl_usdpaa_mainline.o
+diff --git a/drivers/soc/fsl/qbman/bman.c b/drivers/soc/fsl/qbman/bman.c
+index 6cc1847e5..97d55acfd 100644
+--- a/drivers/soc/fsl/qbman/bman.c
++++ b/drivers/soc/fsl/qbman/bman.c
+@@ -664,8 +664,9 @@ int bm_shutdown_pool(u32 bpid)
+ }
+ 
+ struct gen_pool *bm_bpalloc;
++EXPORT_SYMBOL(bm_bpalloc);
+ 
+-static int bm_alloc_bpid_range(u32 *result, u32 count)
++int bm_alloc_bpid_range(u32 *result, u32 count)
+ {
+ 	unsigned long addr;
+ 
+@@ -677,8 +678,9 @@ static int bm_alloc_bpid_range(u32 *result, u32 count)
+ 
+ 	return 0;
+ }
++EXPORT_SYMBOL(bm_alloc_bpid_range);
+ 
+-static int bm_release_bpid(u32 bpid)
++int bm_release_bpid(u32 bpid)
+ {
+ 	int ret;
+ 
+@@ -691,6 +693,21 @@ static int bm_release_bpid(u32 bpid)
+ 	gen_pool_free(bm_bpalloc, bpid | DPAA_GENALLOC_OFF, 1);
+ 	return 0;
+ }
++EXPORT_SYMBOL(bm_release_bpid);
++
++/*
++ * bm_free_bpid_range - Free BPID IDs without hardware pool drain
++ *
++ * Unlike bm_release_bpid() which calls bm_shutdown_pool() to drain
++ * the hardware buffer pool, this function ONLY returns the IDs to
++ * the genalloc allocator. Used by USDPAA driver where userspace
++ * DPDK manages pool draining before releasing BPIDs.
++ */
++void bm_free_bpid_range(u32 bpid, u32 count)
++{
++	gen_pool_free(bm_bpalloc, bpid | DPAA_GENALLOC_OFF, count);
++}
++EXPORT_SYMBOL(bm_free_bpid_range);
+ 
+ struct bman_pool *bman_new_pool(void)
+ {
+diff --git a/drivers/soc/fsl/qbman/bman_portal.c b/drivers/soc/fsl/qbman/bman_portal.c
+index 4d7b9caee..c858195ee 100644
+--- a/drivers/soc/fsl/qbman/bman_portal.c
++++ b/drivers/soc/fsl/qbman/bman_portal.c
+@@ -36,6 +36,10 @@ static int __bman_portals_probed;
+ /* protect bman global registers and global data shared among portals */
+ static DEFINE_SPINLOCK(bman_lock);
+ 
++/* Pool of portals available for userspace reservation */
++static LIST_HEAD(bman_free_portals);
++static DEFINE_SPINLOCK(bman_free_lock);
++
+ static struct bman_portal *init_pcfg(struct bm_portal_config *pcfg)
+ {
+ 	struct bman_portal *p = bman_create_affine_portal(pcfg);
+@@ -124,6 +128,8 @@ static int bman_portal_probe(struct platform_device *pdev)
+ 		dev_err(dev, "Can't get %pOF property 'reg::CE'\n", node);
+ 		goto err_ioremap1;
+ 	}
++	pcfg->addr_phys_ce = addr_phys[0]->start;
++	pcfg->size_ce = resource_size(addr_phys[0]);
+ 
+ 	addr_phys[1] = platform_get_resource(pdev, IORESOURCE_MEM,
+ 					     DPAA_PORTAL_CI);
+@@ -131,6 +137,8 @@ static int bman_portal_probe(struct platform_device *pdev)
+ 		dev_err(dev, "Can't get %pOF property 'reg::CI'\n", node);
+ 		goto err_ioremap1;
+ 	}
++	pcfg->addr_phys_ci = addr_phys[1]->start;
++	pcfg->size_ci = resource_size(addr_phys[1]);
+ 
+ 	pcfg->cpu = -1;
+ 
+@@ -193,6 +201,10 @@ static int bman_portal_probe(struct platform_device *pdev)
+ 		bman_done_cleanup();
+ 	}
+ 
++		pcfg->reserved = false;
++		spin_lock(&bman_free_lock);
++		list_add_tail(&pcfg->list, &bman_free_portals);
++		spin_unlock(&bman_free_lock);
+ 	return 0;
+ 
+ err_portal_init:
+@@ -205,6 +217,57 @@ static int bman_portal_probe(struct platform_device *pdev)
+ 	return -ENXIO;
+ }
+ 
++/**
++ * bman_portal_reserve - Reserve a BMan portal for userspace use
++ * @pcfg_out: pointer to receive the portal configuration
++ *
++ * Removes a portal from the free pool and marks it as reserved.
++ * The caller receives the portal's physical addresses for mmap.
++ *
++ * Returns 0 on success, -ENOENT if no free portals are available.
++ */
++int bman_portal_reserve(struct bm_portal_config **pcfg_out)
++{
++	struct bm_portal_config *pcfg;
++
++	spin_lock(&bman_free_lock);
++	if (list_empty(&bman_free_portals)) {
++		spin_unlock(&bman_free_lock);
++		return -ENOENT;
++	}
++	pcfg = list_first_entry(&bman_free_portals,
++				struct bm_portal_config, list);
++	list_del(&pcfg->list);
++	pcfg->reserved = true;
++	spin_unlock(&bman_free_lock);
++
++	/*
++	 * NOTE: Do NOT unmap kernel CE mapping here.
++	 *
++	 * The upstream kernel maps addr_virt_ce to CI physical address
++	 * (platform_get_resource overwrites CE ptr with CI before memremap).
++	 * Unmapping it destabilizes vmalloc bookkeeping and triggers
++	 * translation faults on ADJACENT portal mappings (affine CPU portals).
++	 *
++	 * Reserved portals are never accessed by kernel code, so keeping
++	 * the stale mapping is harmless. Userspace creates its own mapping
++	 * via remap_pfn_range() using the CORRECT addr_phys_ce.
++	 */
++
++	*pcfg_out = pcfg;
++	return 0;
++}
++EXPORT_SYMBOL(bman_portal_reserve);
++
++void bman_portal_release_reserved(struct bm_portal_config *pcfg)
++{
++	spin_lock(&bman_free_lock);
++	pcfg->reserved = false;
++	list_add_tail(&pcfg->list, &bman_free_portals);
++	spin_unlock(&bman_free_lock);
++}
++EXPORT_SYMBOL(bman_portal_release_reserved);
++
+ static const struct of_device_id bman_portal_ids[] = {
+ 	{
+ 		.compatible = "fsl,bman-portal",
+diff --git a/drivers/soc/fsl/qbman/bman_priv.h b/drivers/soc/fsl/qbman/bman_priv.h
+index aa3981e04..fe1784ede 100644
+--- a/drivers/soc/fsl/qbman/bman_priv.h
++++ b/drivers/soc/fsl/qbman/bman_priv.h
+@@ -45,10 +45,20 @@ extern u16 bman_ip_rev;	/* 0 if uninitialised, otherwise BMAN_REVx */
+ 
+ extern struct gen_pool *bm_bpalloc;
+ 
++/* BPID range allocator — exported for USDPAA mainline driver */
++int bm_alloc_bpid_range(u32 *result, u32 count);
++int bm_release_bpid(u32 bpid);
++void bm_free_bpid_range(u32 bpid, u32 count);
++
+ struct bm_portal_config {
+ 	/* Portal addresses */
+ 	void  *addr_virt_ce;
+ 	void __iomem *addr_virt_ci;
++	/* Physical addresses for userspace mmap (populated during probe) */
++	resource_size_t addr_phys_ce;
++	resource_size_t addr_phys_ci;
++	size_t size_ce;
++	size_t size_ci;
+ 	/* Allow these to be joined in lists */
+ 	struct list_head list;
+ 	struct device *dev;
+@@ -57,8 +67,14 @@ struct bm_portal_config {
+ 	int cpu;
+ 	/* portal interrupt line */
+ 	int irq;
++	/* true if reserved for userspace (not affine to any CPU) */
++	bool reserved;
+ };
+ 
++/* Portal reservation API for USDPAA mainline driver */
++int bman_portal_reserve(struct bm_portal_config **pcfg_out);
++void bman_portal_release_reserved(struct bm_portal_config *pcfg);
++
+ struct bman_portal *bman_create_affine_portal(
+ 			const struct bm_portal_config *config);
+ /*
+diff --git a/drivers/soc/fsl/qbman/qman.c b/drivers/soc/fsl/qbman/qman.c
+index 7e9074519..06ec724b9 100644
+--- a/drivers/soc/fsl/qbman/qman.c
++++ b/drivers/soc/fsl/qbman/qman.c
+@@ -2892,6 +2892,9 @@ EXPORT_SYMBOL(qman_get_qm_portal_config);
+ struct gen_pool *qm_fqalloc; /* FQID allocator */
+ struct gen_pool *qm_qpalloc; /* pool-channel allocator */
+ struct gen_pool *qm_cgralloc; /* CGR ID allocator */
++EXPORT_SYMBOL(qm_fqalloc);
++EXPORT_SYMBOL(qm_qpalloc);
++EXPORT_SYMBOL(qm_cgralloc);
+ 
+ static int qman_alloc_range(struct gen_pool *p, u32 *result, u32 cnt)
+ {
+@@ -3054,3 +3057,28 @@ int qman_release_cgrid(u32 cgrid)
+ 	return 0;
+ }
+ EXPORT_SYMBOL(qman_release_cgrid);
++
++/*
++ * Allocator-only free functions for USDPAA driver.
++ * These ONLY return IDs to the genalloc pool WITHOUT hardware cleanup.
++ * Used when DPDK userspace manages hardware state - calling the hardware
++ * cleanup variants (qman_shutdown_fq, qpool_cleanup, cgr_cleanup) crashes
++ * because portals may be reserved for userspace.
++ */
++void qman_free_fqid_range(u32 fqid, u32 count)
++{
++	gen_pool_free(qm_fqalloc, fqid | DPAA_GENALLOC_OFF, count);
++}
++EXPORT_SYMBOL(qman_free_fqid_range);
++
++void qman_free_pool_range(u32 qp, u32 count)
++{
++	gen_pool_free(qm_qpalloc, qp | DPAA_GENALLOC_OFF, count);
++}
++EXPORT_SYMBOL(qman_free_pool_range);
++
++void qman_free_cgrid_range(u32 cgrid, u32 count)
++{
++	gen_pool_free(qm_cgralloc, cgrid | DPAA_GENALLOC_OFF, count);
++}
++EXPORT_SYMBOL(qman_free_cgrid_range);
+diff --git a/drivers/soc/fsl/qbman/qman_ccsr.c b/drivers/soc/fsl/qbman/qman_ccsr.c
+index 157659fd0..779516e94 100644
+--- a/drivers/soc/fsl/qbman/qman_ccsr.c
++++ b/drivers/soc/fsl/qbman/qman_ccsr.c
+@@ -681,6 +681,7 @@ void qman_set_sdest(u16 channel, unsigned int cpu_idx)
+ 		qm_ccsr_out(REG_QCSP_IO_CFG(idx), after);
+ 	}
+ }
++EXPORT_SYMBOL(qman_set_sdest);
+ 
+ static int qman_resource_init(struct device *dev)
+ {
+diff --git a/drivers/soc/fsl/qbman/qman_portal.c b/drivers/soc/fsl/qbman/qman_portal.c
+index e23b60618..ad4eb6c43 100644
+--- a/drivers/soc/fsl/qbman/qman_portal.c
++++ b/drivers/soc/fsl/qbman/qman_portal.c
+@@ -42,6 +42,10 @@ static int __qman_portals_probed;
+ /* protect qman global registers and global data shared among portals */
+ static DEFINE_SPINLOCK(qman_lock);
+ 
++/* Pool of portals available for userspace reservation */
++static LIST_HEAD(qman_free_portals);
++static DEFINE_SPINLOCK(qman_free_lock);
++
+ static void portal_set_cpu(struct qm_portal_config *pcfg, int cpu)
+ {
+ #ifdef CONFIG_FSL_PAMU
+@@ -209,6 +213,8 @@ static int qman_portal_probe(struct platform_device *pdev)
+ 		dev_err(dev, "Can't get %pOF property 'reg::CE'\n", node);
+ 		goto err_ioremap1;
+ 	}
++	pcfg->addr_phys_ce = addr_phys[0]->start;
++	pcfg->size_ce = resource_size(addr_phys[0]);
+ 
+ 	addr_phys[1] = platform_get_resource(pdev, IORESOURCE_MEM,
+ 					     DPAA_PORTAL_CI);
+@@ -216,6 +222,8 @@ static int qman_portal_probe(struct platform_device *pdev)
+ 		dev_err(dev, "Can't get %pOF property 'reg::CI'\n", node);
+ 		goto err_ioremap1;
+ 	}
++	pcfg->addr_phys_ci = addr_phys[1]->start;
++	pcfg->size_ci = resource_size(addr_phys[1]);
+ 
+ 	err = of_property_read_u32(node, "cell-index", &val);
+ 	if (err) {
+@@ -291,6 +299,10 @@ static int qman_portal_probe(struct platform_device *pdev)
+ 		qman_done_cleanup();
+ 	}
+ 
++		pcfg->reserved = false;
++		spin_lock(&qman_free_lock);
++		list_add_tail(&pcfg->list, &qman_free_portals);
++		spin_unlock(&qman_free_lock);
+ 	return 0;
+ 
+ err_portal_init:
+@@ -303,6 +315,56 @@ static int qman_portal_probe(struct platform_device *pdev)
+ 	return -ENXIO;
+ }
+ 
++/**
++ * qman_portal_reserve - Reserve a QMan portal for userspace use
++ * @pcfg_out: pointer to receive the portal configuration
++ *
++ * Removes a portal from the free pool and marks it as reserved.
++ * The caller receives the portal's physical addresses, channel ID,
++ * IRQ, and pool mask for DPDK configuration.
++ *
++ * Returns 0 on success, -ENOENT if no free portals are available.
++ */
++int qman_portal_reserve(struct qm_portal_config **pcfg_out)
++{
++	struct qm_portal_config *pcfg;
++
++	spin_lock(&qman_free_lock);
++	if (list_empty(&qman_free_portals)) {
++		spin_unlock(&qman_free_lock);
++		return -ENOENT;
++	}
++	pcfg = list_first_entry(&qman_free_portals,
++				struct qm_portal_config, list);
++	list_del(&pcfg->list);
++	pcfg->reserved = true;
++	spin_unlock(&qman_free_lock);
++
++	/*
++	 * NOTE: Do NOT unmap kernel CE mapping here.
++	 * Same rationale as bman_portal_reserve() — see patch 0002.
++	 * Unmapping destabilizes vmalloc and crashes affine portals.
++	 * Reserved portals are never accessed by kernel code.
++	 */
++
++	*pcfg_out = pcfg;
++	return 0;
++}
++EXPORT_SYMBOL(qman_portal_reserve);
++
++/**
++ * qman_portal_release_reserved - Return a reserved QMan portal
++ * @pcfg: portal config previously obtained from qman_portal_reserve()
++ */
++void qman_portal_release_reserved(struct qm_portal_config *pcfg)
++{
++	spin_lock(&qman_free_lock);
++	pcfg->reserved = false;
++	list_add_tail(&pcfg->list, &qman_free_portals);
++	spin_unlock(&qman_free_lock);
++}
++EXPORT_SYMBOL(qman_portal_release_reserved);
++
+ static const struct of_device_id qman_portal_ids[] = {
+ 	{
+ 		.compatible = "fsl,qman-portal",
+diff --git a/drivers/soc/fsl/qbman/qman_priv.h b/drivers/soc/fsl/qbman/qman_priv.h
+index fd1cf543f..3bf6abaa8 100644
+--- a/drivers/soc/fsl/qbman/qman_priv.h
++++ b/drivers/soc/fsl/qbman/qman_priv.h
+@@ -150,12 +150,18 @@ static inline void qman_cgrs_xor(struct qman_cgrs *dest,
+ 		*_d++ = *_a++ ^ *_b++;
+ }
+ 
++
+ void qman_init_cgr_all(void);
+ 
+ struct qm_portal_config {
+ 	/* Portal addresses */
+ 	void *addr_virt_ce;
+ 	void __iomem *addr_virt_ci;
++	/* Physical addresses for userspace mmap (populated during probe) */
++	resource_size_t addr_phys_ce;
++	resource_size_t addr_phys_ci;
++	size_t size_ce;
++	size_t size_ci;
+ 	struct device *dev;
+ 	struct iommu_domain *iommu_domain;
+ 	/* Allow these to be joined in lists */
+@@ -175,8 +181,14 @@ struct qm_portal_config {
+ 	 * (using QM_SDQCR_CHANNELS_POOL(n) for the bitmask)
+ 	 */
+ 	u32 pools;
++	/* true if reserved for userspace (not affine to any CPU) */
++	bool reserved;
+ };
+ 
++/* Portal reservation API for USDPAA mainline driver */
++int qman_portal_reserve(struct qm_portal_config **pcfg_out);
++void qman_portal_release_reserved(struct qm_portal_config *pcfg);
++
+ /* Revision info (for errata and feature handling) */
+ #define QMAN_REV11 0x0101
+ #define QMAN_REV12 0x0102
+diff --git a/include/soc/fsl/qman.h b/include/soc/fsl/qman.h
+index 0d3d6beb7..895445c88 100644
+--- a/include/soc/fsl/qman.h
++++ b/include/soc/fsl/qman.h
+@@ -1197,6 +1197,11 @@ int qman_query_cgr_congested(struct qman_cgr *cgr, bool *result);
+ int qman_alloc_cgrid_range(u32 *result, u32 count);
+ #define qman_alloc_cgrid(result) qman_alloc_cgrid_range(result, 1)
+ 
++/* Allocator-only free - no hardware cleanup (for USDPAA driver) */
++void qman_free_fqid_range(u32 fqid, u32 count);
++void qman_free_pool_range(u32 qp, u32 count);
++void qman_free_cgrid_range(u32 cgrid, u32 count);
++
+ /**
+  * qman_release_cgrid - Release the specified CGR ID
+  * @id: the CGR ID to be released back to the resource pool
