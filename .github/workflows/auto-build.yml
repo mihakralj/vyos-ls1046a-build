@@ -268,13 +268,22 @@ jobs:
             'ExecStart=/usr/local/bin/vyos-postinstall' \
             'RemainAfterExit=yes' \
             'StandardOutput=journal' \
-            '' \
-            '[Install]' \
-            'WantedBy=multi-user.target' \
             > "$CHROOT/etc/systemd/system/vyos-postinstall.service"
-          # NOTE: Do NOT use ln -sf here. live-build dereferences symlinks in
-          # includes.chroot, converting them to empty files. The systemctl enable
-          # is done inside the 98-fancontrol.chroot hook below instead.
+          # NOTE: No [Install] section — we use tmpfiles.d to create the
+          # .wants symlink instead.  Neither `ln -sf` in includes.chroot
+          # nor `systemctl enable` in a chroot hook survive live-build:
+          #   - ln -sf: live-build dereferences absolute symlinks → empty file
+          #   - systemctl enable: squashfs packs the .wants symlink as a
+          #     regular file copy; systemd ignores non-symlink .wants entries
+          # tmpfiles.d creates the symlink at BOOT TIME, after the overlay
+          # is writable, so systemd sees a real symlink every time.
+          mkdir -p "$CHROOT/usr/lib/tmpfiles.d"
+          printf '%s\n' \
+            '# Create systemd .wants symlink for vyos-postinstall at boot.' \
+            '# Cannot use systemctl enable — live-build squashfs converts the' \
+            '# symlink to a regular file, which systemd ignores.' \
+            'L+ /etc/systemd/system/multi-user.target.wants/vyos-postinstall.service - - - - /etc/systemd/system/vyos-postinstall.service' \
+            > "$CHROOT/usr/lib/tmpfiles.d/vyos-postinstall.conf"
 
           ### Fan control: EMC2305 PWM thermal management via standard fancontrol
           # DTS thermal-cooling binding is broken (EMC2305 registers cooling_device
@@ -303,10 +312,9 @@ jobs:
           # Config at /etc/fancontrol maps EMC2305 PWM to core-cluster thermal zone
           apt-get update -qq && apt-get install -y --no-install-recommends fancontrol
           systemctl enable fancontrol.service
-          # Enable vyos-postinstall (writes /boot/vyos.env on install/upgrade).
-          # Must be done inside chroot hook — ln -sf in includes.chroot gets
-          # dereferenced by live-build, producing empty files instead of symlinks.
-          systemctl enable vyos-postinstall.service
+          # vyos-postinstall: enabled via tmpfiles.d (NOT systemctl enable).
+          # systemctl enable creates a .wants symlink that live-build's squashfs
+          # dereferences into a regular file — systemd ignores non-symlink .wants.
           apt-get clean
           FANHOOK
           chmod +x "$HOOKS/98-fancontrol.chroot"
@@ -539,16 +547,12 @@ jobs:
           mcopy -i "$USB_IMG" /tmp/iso-mount/live/filesystem.squashfs ::/live/filesystem.squashfs
           mcopy -i "$USB_IMG" $GITHUB_WORKSPACE/data/dtb/mono-gw.dtb  ::mono-gw.dtb
 
-          # Generate U-Boot boot script (boot.scr) — enables one-line manual boot on factory boards
-          # USB image is whole-disk FAT32 (no MBR partition table): usb 0:0, live-media=/dev/sda
-          cat > /tmp/boot.cmd << 'BOOTSCR'
-          fatload usb 0:0 ${kernel_addr_r} live/vmlinuz
-          fatload usb 0:0 ${fdt_addr_r} mono-gw.dtb
-          fatload usb 0:0 ${ramdisk_addr_r} live/initrd.img
-          setenv bootargs "BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 hugepagesz=2M hugepages=512 panic=60 quiet"
-          booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
-          BOOTSCR
-          mkimage -A arm64 -T script -C none -n "VyOS LS1046A USB Boot" -d /tmp/boot.cmd /tmp/boot.scr
+          # Generate U-Boot boot script (boot.scr) — auto-configures U-Boot vars on first USB boot.
+          # Sets vyos (eMMC boot via vyos.env), usb_vyos (USB live boot), bootcmd, then saveenv.
+          # After saveenv, all future boots are automatic — no serial console setup needed.
+          # Source: data/scripts/boot.cmd (compiled with mkimage)
+          mkimage -A arm64 -T script -C none -n "VyOS LS1046A USB Boot" \
+            -d "$GITHUB_WORKSPACE/data/scripts/boot.cmd" /tmp/boot.scr
           mcopy -i "$USB_IMG" /tmp/boot.scr ::boot.scr
 
           umount /tmp/iso-mount

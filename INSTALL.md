@@ -75,7 +75,7 @@ sudo dd if=vyos-*-LS1046A-arm64-usb.img of=/dev/sdX bs=4M status=progress conv=f
 2. Connect serial console (115200 8N1)
 3. Power on and **press any key** during the U-Boot countdown to stop autoboot
 
-Factory U-Boot boots OpenWrt from eMMC (`bootcmd=run emmc || run recovery`). It has no USB boot command, so you must manually tell it to boot from USB.
+Factory U-Boot boots OpenWrt from eMMC (`bootcmd=run emmc || run recovery`). It has no USB boot command, so you must tell it to run the installer script from USB.
 
 At the `=>` prompt, paste this single line:
 
@@ -83,9 +83,14 @@ At the `=>` prompt, paste this single line:
 usb start; fatload usb 0:0 ${load_addr} boot.scr; source ${load_addr}
 ```
 
-This loads `boot.scr` from the USB - a U-Boot script that handles everything (kernel, DTB, initrd, bootargs, `booti`). Nothing is written to SPI flash — it's a one-shot boot.
+This loads `boot.scr` from the USB, which automatically:
+1. **Configures U-Boot** — sets `vyos`, `usb_vyos`, `bootcmd` variables
+2. **Saves to SPI flash** — `saveenv` makes the config permanent (one-time)
+3. **Boots VyOS live** from USB
 
-Watch the boot log for 60–90 seconds until system gets to VyOS login prompt.
+After this single command, all future boots are automatic. **No more manual U-Boot setup.**
+
+Watch the boot log for 60–90 seconds until the VyOS login prompt appears.
 
 > **If `usb start` hangs or shows no devices:** Try a USB 2.0 drive. Some USB 3.0 drives aren't detected by the LS1046A USB controller.
 
@@ -107,11 +112,9 @@ install image
 - Enter a root password
 - Accept defaults for the rest
 
-After installation completes, the system automatically:
-- Writes `/boot/vyos.env` on eMMC p3 pointing to the new image
-- Writes `vyos`, `usb_vyos`, and `bootcmd` to U-Boot SPI flash via `fw_setenv`
+After installation completes, the system automatically writes `/boot/vyos.env` on eMMC p3 pointing to the new image.
 
-> This one-time SPI flash setup makes all future boots automatic — U-Boot tries USB first, then eMMC, then SPI recovery. No more manual U-Boot commands.
+> **U-Boot vars were already configured** by `boot.scr` during USB boot (Step 2). The `vyos` variable reads `vyos.env` dynamically — no further U-Boot setup needed.
 
 ---
 
@@ -129,6 +132,8 @@ reboot
 2. `run vyos` — reads `/boot/vyos.env` from eMMC p3 → loads `vmlinuz`, `mono-gw.dtb`, `initrd.img` → `booti` ✓
 
 VyOS will boot from eMMC. Login with the password you set during install.
+
+> **How it works:** The USB image contains `boot.scr`, which U-Boot auto-executes on first USB boot. This script sets the `vyos`, `usb_vyos`, and `bootcmd` variables in SPI flash via `saveenv`. After that, all future boots are automatic — no serial console setup needed. The `vyos` command reads `/boot/vyos.env` to determine which image to load, so `install image` and `add system image` work without touching U-Boot again.
 
 ---
 

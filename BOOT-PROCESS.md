@@ -20,17 +20,17 @@ Stored in SPI NOR flash at `/dev/mtd3` (QSPI, 64 KiB sector, 64 KiB env). Writte
 ### Variables
 
 ```
-bootcmd    = run usb_vyos || run vyos_direct || run recovery
+bootcmd    = run usb_vyos || run vyos || run recovery
 ```
 
 ```
 usb_vyos   = usb start;
-             if fatload usb 0:1 ${kernel_addr_r} live/vmlinuz; then
-               fatload usb 0:1 ${fdt_addr_r} mono-gw.dtb;
-               fatload usb 0:1 ${ramdisk_addr_r} live/initrd.img;
+             if fatload usb 0:0 ${kernel_addr_r} live/vmlinuz; then
+               fatload usb 0:0 ${fdt_addr_r} mono-gw.dtb;
+               fatload usb 0:0 ${ramdisk_addr_r} live/initrd.img;
                setenv bootargs "BOOT_IMAGE=/live/vmlinuz
                  console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500
-                 boot=live live-media=/dev/sda1 components noeject
+                 boot=live live-media=/dev/sda components noeject
                  nopersistence noautologin nonetworking union=overlay
                  net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 quiet";
                booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r};
@@ -38,7 +38,7 @@ usb_vyos   = usb start;
 ```
 
 ```
-vyos_direct = ext4load mmc 0:3 ${load_addr} /boot/vyos.env;
+vyos = ext4load mmc 0:3 ${load_addr} /boot/vyos.env;
               env import -t ${load_addr} ${filesize};
               ext4load mmc 0:3 ${kernel_addr_r} /boot/${vyos_image}/vmlinuz;
               ext4load mmc 0:3 ${fdt_addr_r}    /boot/${vyos_image}/mono-gw.dtb;
@@ -80,12 +80,13 @@ recovery    = sf probe 0:0;
 
 ### Prerequisites
 
-- USB drive contains a FAT32 filesystem (partition 1, `usb 0:1`) with:
+- USB drive contains a whole-disk FAT32 image (no MBR partition table, `usb 0:0`) with:
   ```
   /live/vmlinuz              ← kernel Image
   /live/initrd.img           ← initrd
   /live/filesystem.squashfs  ← VyOS squashfs (live root)
   /mono-gw.dtb               ← compiled device tree blob
+  /boot.scr                  ← U-Boot boot script (one-line manual boot shortcut)
   ```
 - USB image is written with `dd` (or Rufus DD mode). ISO9660 format is not readable by U-Boot.
 
@@ -101,19 +102,19 @@ U-Boot POST + memory init
 bootcmd: run usb_vyos
   │
   ├─ usb start               ← enumerate USB devices
-  ├─ fatload usb 0:1 live/vmlinuz    → 0x82000000
-  ├─ fatload usb 0:1 mono-gw.dtb    → 0x88000000
-  ├─ fatload usb 0:1 live/initrd.img → 0x88080000  ← LAST (captures filesize)
+  ├─ fatload usb 0:0 live/vmlinuz    → 0x82000000
+  ├─ fatload usb 0:0 mono-gw.dtb    → 0x88000000
+  ├─ fatload usb 0:0 live/initrd.img → 0x88080000  ← LAST (captures filesize)
   ├─ setenv bootargs "BOOT_IMAGE=/live/vmlinuz ... boot=live
-  │    live-media=/dev/sda1 ..."
+  │    live-media=/dev/sda ..."
   └─ booti 0x82000000 0x88080000:${filesize} 0x88000000
        │
        ▼
   Linux kernel decompresses at 0x0
   initramfs mounts
   live-boot scripts:
-    ├─ mount /dev/sda1 as live medium (FAT32)
-    ├─ find /live/filesystem.squashfs on /dev/sda1
+    ├─ mount /dev/sda as live medium (whole-disk FAT32)
+    ├─ find /live/filesystem.squashfs on /dev/sda
     ├─ loopback-mount squashfs → /run/live/rootfs/
     └─ overlay: squashfs (ro) + tmpfs (rw) → /
        │
@@ -121,8 +122,8 @@ bootcmd: run usb_vyos
   systemd starts
   vyos-postinstall.service (After=local-fs.target)
     ├─ Phase 1: setup_uboot_env_once()
-    │    ├─ fw_printenv vyos_direct → check if "vyos.env" present
-    │    ├─ If NOT present: fw_setenv vyos_direct / usb_vyos / bootcmd
+    │    ├─ fw_printenv vyos → check if "vyos.env" present
+    │    ├─ If NOT present: fw_setenv vyos / usb_vyos / bootcmd
     │    └─ Sets up SPI NOR env for all future eMMC boots
     └─ Phase 2: find_root() → returns "" (no installed images on USB)
          └─ Skips vyos.env write, prints informational message
@@ -138,7 +139,7 @@ BOOT_IMAGE=/live/vmlinuz
 console=ttyS0,115200
 earlycon=uart8250,mmio,0x21c0500
 boot=live
-live-media=/dev/sda1
+live-media=/dev/sda
 components
 noeject
 nopersistence
@@ -152,7 +153,7 @@ quiet
 
 **Key parameters:**
 - `boot=live` — activates live-boot initramfs scripts
-- `live-media=/dev/sda1` — USB FAT32 partition containing squashfs
+- `live-media=/dev/sda` — USB whole-disk FAT32 containing squashfs (no partition table)
 - `BOOT_IMAGE=/live/vmlinuz` — required for VyOS `is_live_boot()` detection (patch 009 adds `vyos-union=` fallback for older builds)
 - `nonetworking` — skips DHCP on live boot; user configures manually
 - `fsl_dpaa_fman.fsl_fm_max_frm=9600` — enables jumbo frames on RJ45 ports (FMan module parameter; wrong modname = silently no effect)
@@ -200,10 +201,10 @@ U-Boot POST + memory init
 bootcmd: run usb_vyos
   │
   ├─ usb start
-  └─ fatload usb 0:1 live/vmlinuz → FAIL (no USB)
+  └─ fatload usb 0:0 live/vmlinuz → FAIL (no USB)
        │
        ▼ (falls through via || operator)
-bootcmd: run vyos_direct
+bootcmd: run vyos
   │
   ├─ ext4load mmc 0:3 0xa0000000 /boot/vyos.env   (4 bytes: "vyos_image=...")
   ├─ env import -t 0xa0000000 ${filesize}
@@ -229,7 +230,7 @@ bootcmd: run vyos_direct
   systemd starts
   vyos-postinstall.service (After=local-fs.target)
     ├─ Phase 1: setup_uboot_env_once()
-    │    └─ fw_printenv vyos_direct → "vyos.env" found → SKIP (noop)
+    │    └─ fw_printenv vyos → "vyos.env" found → SKIP (noop)
     └─ Phase 2: find_root() → returns "/" (installed system)
          └─ write_vyos_env(image_name, "/")
               └─ writes /boot/vyos.env with current image name
@@ -296,8 +297,8 @@ The device tree blob `mono-gw.dtb` must be present in two locations:
 
 | Location | Used by | Written by |
 |----------|---------|-----------|
-| `/live/mono-gw.dtb` on USB FAT32 | U-Boot `usb_vyos` (`fatload usb 0:1 mono-gw.dtb`) | Build: `mcopy` into FAT32 USB image |
-| `/boot/<image>/mono-gw.dtb` on eMMC p3 | U-Boot `vyos_direct` (`ext4load mmc 0:3 /boot/${vyos_image}/mono-gw.dtb`) | `install_image()`: copies all files from squashfs `/boot/` (where `mono-gw.dtb` was placed at build time) |
+| `/live/mono-gw.dtb` on USB FAT32 | U-Boot `usb_vyos` (`fatload usb 0:0 mono-gw.dtb`) | Build: `mcopy` into FAT32 USB image |
+| `/boot/<image>/mono-gw.dtb` on eMMC p3 | U-Boot `vyos` (`ext4load mmc 0:3 /boot/${vyos_image}/mono-gw.dtb`) | `install_image()`: copies all files from squashfs `/boot/` (where `mono-gw.dtb` was placed at build time) |
 
 For `add system image` (upgrade), patch 011 copies all `.dtb` files from the ISO root into the new image directory during `add_image()`.
 
@@ -336,6 +337,8 @@ QSPI NOR flash (64 MiB, `/dev/mtd*`):
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
+| `No partition table - usb 0` / `Couldn't find partition usb 0:1` | Old `usb_vyos` env uses `0:1` but USB image is whole-disk FAT32 (no MBR) | Use `usb 0:0` or boot via `boot.scr`: `usb start; fatload usb 0:0 ${load_addr} boot.scr; source ${load_addr}` |
+| `Kernel stuck after earlycon enabled` | `live-media=/dev/sda1` in bootargs — no partition 1 on whole-disk FAT USB | Use `live-media=/dev/sda` (whole disk). Old `usb_vyos` env predates this fix — update via `vyos-postinstall` after first boot. |
 | `Can't set block device` | `emmc=mmc 0:1` — wrong partition (p1 is raw BIOS boot, no ext4) | Run manual U-Boot setup from INSTALL.md |
 | `Bad Linux ARM64 Image magic!` | Factory env uses `bootm` (expects uImage). VyOS kernel requires `booti` | Run manual U-Boot setup |
 | `ERROR: Did not find a cmdline Flattened Device Tree` | DTB loaded at `0x90000000` (`kernel_comp_addr_r`) — overwritten by kernel decompression | Always use `${fdt_addr_r}` = `0x88000000` |
