@@ -14,11 +14,9 @@ VyOS ARM64 builds for the [Mono Gateway Development Kit](https://github.com/ryne
 
 **CLI-first, text-based configuration.** Entire router state lives in `config.boot` — hierarchical, human-readable, diffable, and version-controllable with Git; reviewing a diff between two VyOS configs reads like plain English.
 
-**Transactional atomic commits.** Stage multiple changes, review with `compare`, apply atomically with `commit`. If commit fails, nothing changes. `commit-confirm` provides an automatic rollback timer. OPNsense applies changes per-section — firewall rules reload separately from interface changes — which can leave the system in an intermediate broken state.
+**Transactional atomic commits.** Stage multiple changes, review with `compare`, apply atomically with `commit`. If commit fails, nothing changes. `commit-confirm` provides an automatic rollback timer.
 
-**Scriptable by design.** `vyatta-cfg-cmd-wrapper` for shell automation, `my_cli_shell_api` for programmatic access, HTTP API for CI/CD. Dedicated Ansible `vyos_config` module and Terraform provider. OPNsense has a REST API bolted onto a GUI-centric PHP architecture — you are automating button clicks, not driving a system designed for headless operation.
-
-**Full FRRouting integration.** BGP, OSPF, IS-IS, BFD, MPLS, VXLAN, segment routing, and PIM — all natively in the config tree with proper dependency resolution at commit time. OPNsense offers BGP and OSPF through plugins configured via web forms, not woven into the commit pipeline.
+**Full FRRouting integration.** BGP, OSPF, IS-IS, BFD, MPLS, VXLAN, segment routing, and PIM — all natively in the config tree with proper dependency resolution at commit time. 
 
 ## Known Issues
 
