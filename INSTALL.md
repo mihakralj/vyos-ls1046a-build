@@ -6,10 +6,10 @@ The install process uses two separate artifacts:
 
 | Artifact | Use case |
 |----------|---------|
-| `vyos-...-LS1046A-arm64-usb.img` | **Initial install** — write to USB, boot, run `install image` |
+| `vyos-...-LS1046A-arm64-usb.img.zst` | **Initial install** — decompress, write to USB, boot, run `install image` |
 | `vyos-...-LS1046A-arm64.iso` | **Upgrade only** — passed to `add system image <url>` |
 
-U-Boot reads FAT32. The USB image is a raw FAT32 filesystem — write it with `dd` and U-Boot reads it directly. Never use the ISO for USB boot.
+U-Boot reads FAT32. The USB image is a zstd-compressed raw FAT32 filesystem — decompress it first, then write with `dd`. U-Boot reads it directly. Never use the ISO for USB boot.
 
 ---
 
@@ -29,31 +29,11 @@ Review the [open issues](https://github.com/mihakralj/vyos-ls1046a-build/issues)
 
 ## Step 1 — Write USB boot image
 
-Download the latest `vyos-...-LS1046A-arm64-usb.img` from [Releases](https://github.com/mihakralj/vyos-ls1046a-build/releases).
+Download the latest `vyos-...-LS1046A-arm64-usb.img.zst` from [Releases](https://github.com/mihakralj/vyos-ls1046a-build/releases).
 
-> **Important:** The `.img` file is a raw FAT32 disk image — write it directly with `dd` or Rufus. Do **not** use the `.iso` file for USB boot — U-Boot cannot read ISO 9660.
+> **Important:** The `.img.zst` file is a zstd-compressed raw FAT32 disk image. Decompress it first, then write with `dd`. Do **not** use the `.iso` file for USB boot — U-Boot cannot read ISO 9660.
 
-### Windows - Rufus
-
-1. Download [Rufus](https://rufus.ie/)
-2. Select the `.img` file — Rufus detects DD Image mode automatically — just click **Start**
-
-### macOS - dd
-
-```bash
-# Identify USB device
-diskutil list    # Look for your USB (e.g., /dev/disk2)
-
-# Unmount (do NOT eject — just unmount)
-diskutil unmountDisk /dev/diskN
-
-# Write directly (use rdiskN for raw device — 10x faster than diskN)
-sudo dd if=vyos-*-LS1046A-arm64-usb.img of=/dev/rdiskN bs=4m
-```
-
-> **Verify the write:** After writing, the USB should show as a FAT32 volume named `VYOSBOOT` containing `/live/vmlinuz`, `/live/initrd.img`, `/live/filesystem.squashfs`, `mono-gw.dtb`, and `boot.scr`.
-
-### Linux - dd
+### Linux — decompress + write (one pipeline)
 
 ```bash
 # Identify USB device (look for your USB drive size — NOT a partition like sdb1)
@@ -62,9 +42,39 @@ lsblk
 # Unmount any auto-mounted partitions
 sudo umount /dev/sdX* 2>/dev/null
 
-# Write directly (replace /dev/sdX with your USB device)
+# Decompress and write in one pipeline (replace /dev/sdX with your USB device)
+zstd -d vyos-*-LS1046A-arm64-usb.img.zst --stdout | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync
+```
+
+Or decompress first, then write separately:
+
+```bash
+zstd -d vyos-*-LS1046A-arm64-usb.img.zst   # produces .img file
 sudo dd if=vyos-*-LS1046A-arm64-usb.img of=/dev/sdX bs=4M status=progress conv=fsync
 ```
+
+### macOS — decompress + write (one pipeline)
+
+```bash
+# Identify USB device
+diskutil list    # Look for your USB (e.g., /dev/disk2)
+
+# Unmount (do NOT eject — just unmount)
+diskutil unmountDisk /dev/diskN
+
+# Decompress and write in one pipeline (use rdiskN — 10x faster than diskN)
+zstd -d vyos-*-LS1046A-arm64-usb.img.zst --stdout | sudo dd of=/dev/rdiskN bs=4m
+```
+
+> macOS ships without `zstd`. Install with `brew install zstd` or download from [zstd releases](https://github.com/facebook/zstd/releases).
+
+### Windows — Rufus
+
+1. Decompress with [zstd for Windows](https://github.com/facebook/zstd/releases) or [7-Zip](https://www.7-zip.org/) (supports `.zst`):
+   - **7-Zip:** right-click the `.zst` file → 7-Zip → Extract Here → produces `.img`
+   - **Command line:** `zstd -d vyos-...-usb.img.zst`
+2. Download [Rufus](https://rufus.ie/)
+3. Select the extracted `.img` file — Rufus detects DD Image mode automatically — click **Start**
 
 
 ---
