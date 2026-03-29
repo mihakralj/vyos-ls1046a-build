@@ -186,6 +186,9 @@ jobs:
             'CONFIG_RTC_DRV_PCF2127=y' \
             '# === DPDK USDPAA support (userspace DPAA1 for 10G PMD) ===' \
             'CONFIG_FSL_USDPAA_MAINLINE=y' \
+            '# === Disable STRICT_DEVMEM for DPDK DPAA PMD (fman_init mmaps /dev/mem) ===' \
+            '# CONFIG_STRICT_DEVMEM is not set' \
+            '# CONFIG_IO_STRICT_DEVMEM is not set' \
             >> "$DEFCONFIG"
 
           ### USDPAA kernel patches: BMan/QMan exports + /dev/fsl-usdpaa chardev
@@ -342,32 +345,10 @@ jobs:
           MASKHOOK
           chmod +x "$HOOKS/99-mask-services.chroot"
 
-          ### Ethernet port remapping: match physical port order (left to right)
-          # Mainline fsl_dpaa_mac probes in DT address order (e2000→e8000→ea000)
-          # which gives rightmost RJ45 = eth0. Physical expectation: leftmost = eth0.
-          #
-          # VyOS uses its own naming system (vyos_net_name at 65-vyos-net.rules)
-          # which overrides systemd .link files. The VyOS rule checks for
-          # ENV{VYOS_IFNAME}: if set, it's passed as "predefined" name to
-          # vyos_net_name, bypassing biosdevname. We set VYOS_IFNAME in a
-          # priority-64 rule (before 65) using DEVPATH to identify FMan MACs.
-          UDEVD="$CHROOT/etc/udev/rules.d"
-          mkdir -p "$UDEVD"
-          printf '%s\n' \
-            '# Mono Gateway LS1046A: remap FMan ethernet ports to match physical RJ45 order' \
-            '# DEVPATH contains the FMan MAC node address (always available, unlike ID_PATH)' \
-            '# Sets VYOS_IFNAME which vyos_net_name (65-vyos-net.rules) honors as "predefined"' \
-            'ACTION!="add", GOTO="fman_end"' \
-            'SUBSYSTEM!="net", GOTO="fman_end"' \
-            '# RJ45 ports (left to right facing the board)' \
-            'ENV{DEVPATH}=="*/1ae8000.ethernet/*", ENV{VYOS_IFNAME}="eth0"' \
-            'ENV{DEVPATH}=="*/1aea000.ethernet/*", ENV{VYOS_IFNAME}="eth1"' \
-            'ENV{DEVPATH}=="*/1ae2000.ethernet/*", ENV{VYOS_IFNAME}="eth2"' \
-            '# SFP+ ports (left to right)' \
-            'ENV{DEVPATH}=="*/1af0000.ethernet/*", ENV{VYOS_IFNAME}="eth3"' \
-            'ENV{DEVPATH}=="*/1af2000.ethernet/*", ENV{VYOS_IFNAME}="eth4"' \
-            'LABEL="fman_end"' \
-            > "$UDEVD/64-fman-port-order.rules"
+          ### Ethernet port remapping: REMOVED (2026-03-29)
+          # New firmware provides correct FMan MAC-to-physical-port mapping.
+          # Kernel assigns eth names matching physical port order without udev
+          # intervention. The 64-fman-port-order.rules is no longer needed.
 
       - name: Build Image Packages
         run: |
