@@ -29,22 +29,21 @@ Download the latest `vyos-...-LS1046A-arm64-usb.img.zst` from [Releases](https:/
 
 ### Windows
 
-**Option A — Rufus (recommended)**
+**Option A — Rufus (recommended, v4.7+)**
 
-1. Download [Rufus](https://rufus.ie/) (v4.6+)
+1. Download [Rufus](https://rufus.ie/) (v4.7 or later — has native zstd support)
 2. Insert USB drive, select it in Rufus
-3. Click **SELECT**, change file filter to **All files (\*.\*)**, choose the decompressed `.img` file
-4. Rufus will auto-detect DD Image mode — click **Start**
+3. Click **SELECT**, change file filter to **All files (\*.\*)** or **Disk Images**, choose the `.img.zst` file directly
+4. Rufus decompresses the zstd image automatically and detects DD Image mode — click **Start**
 
-> To decompress `.img.zst` on Windows: install [7-Zip-zstd](https://github.com/mcmilk/7-Zip-zstd/releases) (7-Zip fork with zstd support), then right-click the `.img.zst` → **7-Zip** → **Extract Here**.
->
-> Alternatively, use [zstd for Windows](https://github.com/ArsenyMalkov/zstd-for-windows/releases): `zstd -d vyos-*-usb.img.zst`
+> **Older Rufus (< v4.7):** Decompress first with [7-Zip-zstd](https://github.com/mcmilk/7-Zip-zstd/releases) (right-click → **7-Zip** → **Extract Here**), then select the `.img` file in Rufus.
 
 **Option B — balenaEtcher**
 
 1. Download [balenaEtcher](https://etcher.balena.io/)
-2. Click **Flash from file**, select the decompressed `.img`
-3. Select USB target, click **Flash**
+2. Decompress with [7-Zip-zstd](https://github.com/mcmilk/7-Zip-zstd/releases) or `zstd -d` first
+3. Click **Flash from file**, select the `.img`
+4. Select USB target, click **Flash**
 
 ### Linux
 
