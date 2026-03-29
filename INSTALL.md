@@ -180,8 +180,8 @@ After `install image`, the Mono Gateway eMMC (`mmcblk0`) has:
 
 | Partition | U-Boot ref | Type | Contents |
 |-----------|-----------|------|---------|
+| *(reserved)* | — | 32 MiB firmware zone | NXP firmware boundary — no partitions here |
 | p1 | `mmc 0:1` | Raw (1 MiB) | BIOS boot gap — no filesystem |
-| *(gap)* | — | 16 MiB unallocated | U-Boot environment (SPI NOR, not eMMC) |
 | p2 | `mmc 0:2` | FAT32 (256 MiB) | EFI partition — exists but unused on this board |
 | **p3** | **`mmc 0:3`** | **ext4** | **VyOS root — kernel, DTB, initrd, squashfs** |
 

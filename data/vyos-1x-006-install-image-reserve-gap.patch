@@ -2,22 +2,23 @@ diff --git a/python/vyos/system/disk.py b/python/vyos/system/disk.py
 index 268a3b195..1a5cddcc6 100644
 --- a/python/vyos/system/disk.py
 +++ b/python/vyos/system/disk.py
-@@ -63,7 +63,8 @@ def parttable_create(drive_path: str, root_size: int) -> None:
+@@ -63,7 +63,9 @@ def parttable_create(drive_path: str, root_size: int) -> None:
      """Create a hybrid MBR/GPT partition table
      0-2047 first sectors are free
-     2048-4095 sectors - BIOS Boot Partition
+-    2048-4095 sectors - BIOS Boot Partition
 -    4096 + 256 MB - EFI system partition
-+    4096-36863 sectors - reserved for bootloader payload (16 MiB gap)
-+    36864 + 256 MB - EFI system partition
++    0-65535 (first 32 MiB) reserved for NXP LS1046A firmware boundary
++    65536-67583 sectors (32-33 MiB) - BIOS Boot Partition
++    67584 + 256 MB - EFI system partition
      Everything else till the end of a drive - Linux partition
  
      Args:
-@@ -73,7 +74,7 @@ def parttable_create(drive_path: str, root_size: int) -> None:
+@@ -73,7 +75,7 @@ def parttable_create(drive_path: str, root_size: int) -> None:
          root_size_text: str = '+100%'
      else:
          root_size_text: str = str(root_size)
 -    command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:4096:+256M -t2:EF00 \
-+    command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:36864:+256M -t2:EF00 \
++    command = f'sgdisk -a1 -n1:65536:67583 -t1:EF02 -n2:67584:+256M -t2:EF00 \
          -n3:0:+{root_size_text}K -t3:8300 {drive_path}'
  
      run(command)
@@ -40,8 +41,8 @@ index 93c45b03f..72512da9d 100755
  CONST_MIN_ROOT_SIZE: int = 1610612736  # 1.5 GB
 -# a reserved space: 2MB for header, 1 MB for BIOS partition, 256 MB for EFI
 -CONST_RESERVED_SPACE: int = (2 + 1 + 256) * 1024**2
-+# a reserved space: 2MB for header, 1 MB for BIOS partition, 16 MB for bootloader, 256 MB for EFI
-+CONST_RESERVED_SPACE: int = (2 + 1 + 16 + 256) * 1024**2
++# a reserved space: 32 MB firmware boundary, 1 MB for BIOS partition, 256 MB for EFI
++CONST_RESERVED_SPACE: int = (32 + 1 + 256) * 1024**2
  
  # define directories and paths
  DIR_CONFIG: str = directories['config']

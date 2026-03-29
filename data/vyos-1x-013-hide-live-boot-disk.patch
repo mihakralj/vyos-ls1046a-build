@@ -1,7 +1,7 @@
 diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
-@@ -172,12 +172,27 @@ def find_disks() -> dict[str, int]:
+@@ -172,12 +172,36 @@ def find_disks() -> dict[str, int]:
      """Find a target disk for installation
  
      Returns:
@@ -16,17 +16,27 @@ diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
 +
 +    # Exclude the live boot media so it cannot be chosen as install
 +    # target and does not inflate the disk count (which triggers the
-+    # RAID-1 prompt).  findmnt resolves the device backing the live
-+    # media mount; lsblk PKNAME resolves a partition to its parent
-+    # whole-disk (handles both /dev/sda and /dev/sda1 cases).
-+    try:
-+        live_src = cmd('findmnt -n -o SOURCE /lib/live/mount/medium')
-+        pkname = cmd(f'lsblk -n -o PKNAME {live_src}').strip()
-+        live_disk = f'/dev/{pkname}' if pkname else live_src
-+        if live_disk in disks_available:
-+            del disks_available[live_disk]
-+    except Exception:
-+        pass  # detection failed — keep all disks (safe fallback)
++    # RAID-1 prompt).  Try well-known live-boot mount points
++    # (VyOS / Debian bookworm / older Debian) until one resolves.
++    live_src: str = ''
++    for _mnt in ('/usr/lib/live/mount/medium',
++                 '/run/live/medium',
++                 '/lib/live/mount/medium'):
++        try:
++            live_src = cmd(f'findmnt -n -o SOURCE {_mnt}').strip()
++            if live_src:
++                break
++        except Exception:
++            continue
++
++    if live_src:
++        try:
++            pkname = cmd(f'lsblk -n -o PKNAME {live_src}').strip()
++            live_disk = f'/dev/{pkname}' if pkname else live_src
++            if live_disk in disks_available:
++                del disks_available[live_disk]
++        except Exception:
++            pass  # lsblk failed — keep all disks (safe fallback)
 +
      if not disks_available:
          print(MSG_ERR_NO_DISK)

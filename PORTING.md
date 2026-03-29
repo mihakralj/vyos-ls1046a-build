@@ -241,7 +241,7 @@ Five components make `install image` → reboot → `add system image` → reboo
 
 **5. eMMC default disk patch** (`vyos-1x-007`): VyOS's `ask_single_disk()` now prefers `mmcblk` devices as the default selection, so `install image` prompts with `/dev/mmcblk0` instead of `/dev/sda` (the USB boot media).
 
-**6. 16 MiB gap patch** (`vyos-1x-006`): Reserves 16 MiB between the BIOS boot partition and EFI partition for potential bootloader payload, matching U-Boot's expectations.
+**6. 32 MiB firmware boundary patch** (`vyos-1x-006`): Moves all partitions past the 32 MiB NXP firmware boundary. p1 starts at 32 MiB (sector 65536), p2 at 33 MiB. Firmware re-flash no longer destroys the GPT.
 
 ---
 
@@ -436,15 +436,15 @@ block-beta
   columns 4
   block:emmc["eMMC (mmcblk0) — 29.6 GB GPT"]:4
     columns 4
+    fw["32 MB firmware\nreserved zone"]
     p1["p1: BIOS boot\n1 MB\nEF02"]
-    gap["16 MB gap\n(our patch)"]
     p2["p2: EFI FAT32\n256 MB\n(unused)"]
-    p3["p3: ext4 root\n29.4 GB\nVyOS squashfs + data"]:1
+    p3["p3: ext4 root\n29.1 GB\nVyOS squashfs + data"]:1
   end
 
+  style fw fill:#533,stroke:#333,color:#daa
   style p2 fill:#666,stroke:#333,color:#aaa
   style p3 fill:#4a9,stroke:#333,color:#fff
-  style gap fill:#555,stroke:#333,color:#aaa
 ```
 
 > **Factory layout (before install):** mmcblk0p1 = 511 MB OpenWrt root (ext4), mmcblk0p2 = rest empty. `install image` destroys this. There is no recovery back to OpenWrt without reflashing eMMC. Say goodbye to the recovery Linux.
@@ -550,7 +550,7 @@ The `99-mask-services.chroot` hook runs inside the build chroot. The old approac
 | `vyos-1x-001` | `system_console.xml.in` | Add ttyAMA/ttyFIQ serial types + 1500000 baud |
 | `vyos-1x-003` | `vyshim.c` | Increase ZMQ init timer 10ms→30ms (ARM64 slower) |
 | `vyos-1x-005` | `container.py` | Remove `--memory-swap 0` (broken on ARM64 cgroups) |
-| `vyos-1x-006` | `disk.py`, `image_installer.py` | 16 MiB gap for bootloader + updated success message |
+| `vyos-1x-006` | `disk.py`, `image_installer.py` | 32 MiB firmware boundary compliance + updated success message |
 | `vyos-1x-007` | `image_installer.py` | Prefer mmcblk (eMMC) as default disk in `install image` |
 | `vyos-1x-008` | `image_installer.py` | Default RAID-1 mirroring answer to "No" (single eMMC) |
 | `vyos-1x-009` | `system/image.py` | Fix `is_live_boot()` for U-Boot: `vyos-union=/boot/` fallback; prepend `BOOT_IMAGE=` to bootargs |

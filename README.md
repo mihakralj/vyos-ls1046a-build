@@ -98,9 +98,10 @@ flowchart LR
 
   subgraph eMMC ["eMMC (mmcblk0)"]
     direction TB
+    FW["32 MB firmware zone"]
     P1["p1: BIOS boot\n1 MB"]
     P2["p2: EFI FAT32\n256 MB (unused)"]
-    P3["p3: ext4 root\n29.4 GB"]
+    P3["p3: ext4 root\n29.1 GB"]
   end
 
   UB -->|"ext4load\nmmc 0:3"| P3
