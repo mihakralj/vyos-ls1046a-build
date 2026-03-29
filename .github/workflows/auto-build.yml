@@ -64,7 +64,7 @@ jobs:
             bubblewrap git-lfs kpartx clang llvm cmake \
             protobuf-compiler python3-cracklib python3-protobuf \
             libreadline-dev liblua5.3-dev byacc flex \
-            dosfstools mtools zstd
+            dosfstools mtools zstd u-boot-tools
           # python3-cracklib: https://github.com/vyos/vyos-build/commit/e846e68f9f6457865f3e3af92adfe42933555c59
           # protobuf-compiler: https://github.com/vyos/vyos-build/commit/0a6c197226400c4bbe210b435baaa716d4fb8377
           # python3-protobuf: https://github.com/vyos/vyos-build/commit/dd2c245be73c1e83b6ca392924aa549f77c5586e
@@ -201,15 +201,16 @@ jobs:
           # build-kernel.sh applies patches from patches/kernel/ then runs make.
           # We inject a cp command after the patch loop to place the .c file.
           cp data/kernel-patches/fsl_usdpaa_mainline.c "$KERNEL_BUILD/"
-          # Inject .c file copy after the kernel patch loop in build-kernel.sh.
-          # Target: the line "# Change name of Signing Cert" which follows the patch done
-          sed -i '/# Change name of Signing Cert/i\
-# Copy USDPAA mainline driver source (too large for unified diff)\
-if [ -f "${CWD}/fsl_usdpaa_mainline.c" ]; then\
-  echo "I: Copy fsl_usdpaa_mainline.c to drivers/soc/fsl/qbman/"\
-  cp "${CWD}/fsl_usdpaa_mainline.c" drivers/soc/fsl/qbman/fsl_usdpaa_mainline.c\
-fi\
-' "$KERNEL_BUILD/build-kernel.sh"
+          # Inject .c file copy before "# Change name of Signing Cert" in build-kernel.sh.
+          awk '/# Change name of Signing Cert/ {
+            print "# Copy USDPAA mainline driver source (too large for unified diff)"
+            print "if [ -f \"${CWD}/fsl_usdpaa_mainline.c\" ]; then"
+            print "  echo \"I: Copy fsl_usdpaa_mainline.c to drivers/soc/fsl/qbman/\""
+            print "  cp \"${CWD}/fsl_usdpaa_mainline.c\" drivers/soc/fsl/qbman/fsl_usdpaa_mainline.c"
+            print "fi"
+          } { print }' "$KERNEL_BUILD/build-kernel.sh" > /tmp/build-kernel-patched.sh
+          mv /tmp/build-kernel-patched.sh "$KERNEL_BUILD/build-kernel.sh"
+          chmod +x "$KERNEL_BUILD/build-kernel.sh"
 
           ### Remove --uefi-secure-boot from grub-install
           # U-Boot boots via booti (not bootefi) so no EFI runtime is present.
@@ -318,13 +319,13 @@ fi\
           # dereferenced). We use a chroot hook to create proper symlinks instead.
           cat > "$HOOKS/99-mask-services.chroot" << 'MASKHOOK'
           #!/bin/bash
-          # Mask kexec services: prevents kexec preloading kernel at boot
-          # (DPAA1/SFP/I2C needs full U-Boot re-init on reboot)
-          # Both SysV init scripts AND systemd units must be masked
-          ln -sf /dev/null /etc/systemd/system/kexec-load.service
-          ln -sf /dev/null /etc/systemd/system/kexec.service
-          # Remove SysV init scripts to prevent systemd-sysv-generator from
-          # creating auto-generated units that bypass our systemd masks
+          # kexec services: NOT masked — mainline 6.6 has QBMan kexec fix
+          # (bman_requires_cleanup() / qman_requires_cleanup() detect prior init
+          # and clean up BMan/QMan state, allowing kexec to work on DPAA1).
+          # kexec enables VyOS managed-params self-healing (hugepages, panic, etc.)
+          # via system_option.py without requiring SPI NOR writes or cold reboot.
+          # SysV init scripts removed to prevent duplicate systemd unit generation,
+          # but the systemd units themselves remain active (not masked).
           rm -f /etc/init.d/kexec-load /etc/init.d/kexec
           # ACPI daemon is useless on ARM64/DeviceTree platforms
           ln -sf /dev/null /etc/systemd/system/acpid.service
@@ -537,6 +538,19 @@ fi\
           mcopy -i "$USB_IMG" /tmp/iso-mount/live/initrd.img          ::/live/initrd.img
           mcopy -i "$USB_IMG" /tmp/iso-mount/live/filesystem.squashfs ::/live/filesystem.squashfs
           mcopy -i "$USB_IMG" $GITHUB_WORKSPACE/data/dtb/mono-gw.dtb  ::mono-gw.dtb
+
+          # Generate U-Boot boot script (boot.scr) — enables one-line manual boot on factory boards
+          # USB image is whole-disk FAT32 (no MBR partition table): usb 0:0, live-media=/dev/sda
+          cat > /tmp/boot.cmd << 'BOOTSCR'
+          fatload usb 0:0 ${kernel_addr_r} live/vmlinuz
+          fatload usb 0:0 ${fdt_addr_r} mono-gw.dtb
+          fatload usb 0:0 ${ramdisk_addr_r} live/initrd.img
+          setenv bootargs "BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 hugepagesz=2M hugepages=512 panic=60 quiet"
+          booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
+          BOOTSCR
+          mkimage -A arm64 -T script -C none -n "VyOS LS1046A USB Boot" -d /tmp/boot.cmd /tmp/boot.scr
+          mcopy -i "$USB_IMG" /tmp/boot.scr ::boot.scr
+
           umount /tmp/iso-mount
           zstd -9 "$USB_IMG" -o "${USB_IMG}.zst" && rm -f "$USB_IMG"
           if [ -f "$MINISIGN_SECKEY_FILE" ]; then
