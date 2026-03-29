@@ -12,15 +12,15 @@ This guide covers updating the NXP LS1046A Mono Gateway DK factory firmware (SPI
 
 **Always update firmware BEFORE installing VyOS.** Firmware flashing writes the first 32 MB of eMMC, destroying the GPT partition table. If you flash firmware after VyOS install, you must run `install image` again from USB.
 
-> **If you must re-flash firmware after VyOS is installed:** VyOS data (p3, ext4 root, starting at ~273 MiB) survives the eMMC firmware write. Only p1 (BIOS boot, 1 MiB) and p2 (EFI FAT32, 17 MiB) are destroyed. Boot from USB and run `install image` to rebuild the GPT — your VyOS images remain intact on p3.
+> **If you must re-flash firmware after VyOS is installed:** All VyOS data survives. The entire GPT and all partitions (p1 at 32 MiB, p2 at 33 MiB, p3 at ~289 MiB) are beyond the 32 MiB firmware zone. No reinstall needed — just reboot.
 
-## Partition Offset Note
+## Partition Offset Compliance
 
-NXP documentation states custom OS images should place all partitions at ≥ 32 MiB from the eMMC start. Our VyOS GPT layout does **not** follow this rule (p1 starts at 1 MiB, p2 at 17 MiB). This is intentional and safe because:
+NXP documentation states custom OS images should place all partitions at ≥ 32 MiB from the eMMC start. Our VyOS GPT layout **follows this rule**: p1 (BIOS boot) starts at 32 MiB, p2 (EFI) at 33 MiB, p3 (VyOS root) at ~289 MiB. This means:
 
+- Firmware re-flash (`dd` to first 32 MiB) destroys **nothing** — all partitions and data survive intact
+- No need to re-run `install image` after firmware update
 - VyOS boots from **SPI NOR** (DIP switch on NOR position) — the eMMC bootloader region is never executed
-- The 32 MiB rule only matters for eMMC-boot configurations where the SoC ROM reads the bootloader from eMMC
-- p3 (VyOS root, ext4) starts at ~273 MiB — well beyond 32 MiB — and survives any eMMC firmware re-flash
 
 ## Equipment Required
 

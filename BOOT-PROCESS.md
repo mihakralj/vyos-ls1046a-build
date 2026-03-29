@@ -168,8 +168,8 @@ quiet
 
   | Partition | U-Boot | Type | Size | Contents |
   |-----------|--------|------|------|---------|
+  | *(reserved)* | — | — | 32 MiB | NXP firmware boundary — no partitions |
   | p1 | `mmc 0:1` | raw | 1 MiB | BIOS boot gap — no filesystem |
-  | *(gap)* | — | — | 16 MiB | unallocated (preserves SPI U-Boot env region) |
   | p2 | `mmc 0:2` | FAT32 | 256 MiB | EFI — present but unused |
   | **p3** | **`mmc 0:3`** | **ext4** | remainder | **VyOS root** |
 

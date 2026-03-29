@@ -7,6 +7,20 @@ Entries are factual. The humor is in the bugs.
 ## Unreleased
 
 ### Fixed
+- **eMMC partition layout now past 32 MiB firmware boundary** (`vyos-1x-006-install-image-reserve-gap.patch`):
+  All partitions moved beyond the NXP 32 MiB firmware zone. p1 (BIOS boot) at sector 65536 (32 MiB),
+  p2 (EFI) at sector 67584 (33 MiB), p3 (VyOS root) at ~289 MiB. Firmware re-flash via `dd` to first
+  32 MiB no longer destroys the GPT — no reinstall needed. `CONST_RESERVED_SPACE` updated to 289 MiB
+  (32+1+256). Closes #4.
+- **`install image` shows USB disk as install target** (`vyos-1x-013-hide-live-boot-disk.patch`):
+  Patch used wrong live-boot mount path `/lib/live/mount/medium` — VyOS actually mounts at
+  `/usr/lib/live/mount/medium` (defined by `FILE_ROOTFS_SRC` in `image_installer.py`). `findmnt`
+  returned nothing, hit the `except: pass` fallback, USB disk was never excluded. Fix: try all
+  three known live-boot mount paths in preference order (`/usr/lib/live/mount/medium`,
+  `/run/live/medium`, `/lib/live/mount/medium`). Also separated findmnt/lsblk into independent
+  try blocks for more granular error handling. The "Found data from previous installation" prompt
+  is expected upstream behavior — `search_previous_installation()` runs BEFORE `create_partitions()`
+  so config/SSH keys can be preserved across reinstalls.
 - **eth3/eth4 SFP+ kernel visibility** (`mono-gateway-dk.dts`): MAC9 (`ethernet@f0000`) and
   MAC10 (`ethernet@f2000`) had `status = "disabled"` which prevented `fsl_dpaa_mac` + `fsl_dpa`
   from binding and creating kernel netdevs. Changed to `status = "okay"` — all 5 ports (eth0–eth4)
@@ -19,7 +33,14 @@ Entries are factual. The humor is in the bugs.
 - **Patch 010 missing `{% endif %}` for dpdk block**: startup.conf.j2 hunk added `{% if has_dpdk %}` before the `dpdk { }` stanza but was truncated — no closing `{% endif %}`. VPP crashed parsing the unconditional `dpdk { dev 0000:00:00.0 }` block even when dpdk_plugin.so was disabled. Fix: expanded hunk to cover entire dpdk block (29 context lines) with both `{% if has_dpdk %}` and `{% endif %}`
 - **vyos-postinstall.service not starting**: systemd ignored the WantedBy symlink ("not a symlink, ignoring") because `ln -sf` in includes.chroot gets dereferenced by live-build into an empty file. Fix: use `systemctl enable` inside 98-fancontrol.chroot hook where it runs inside the chroot
 - **Fan control "Device path changed" failure**: hwmon numbering is unstable across boots — `fancontrol` refused to start when EMC2305 moved from hwmon8 to hwmon9. Fix: `fancontrol-setup.sh` dynamically discovers emc2305 and core_cluster by scanning `/sys/class/hwmon/*/name` and regenerates `/etc/fancontrol` before daemon start (ExecStartPre)
-- **DTB missing after `add system image` upgrade**: `add_image()` only copied `initrd*` and `vmlinuz*` from ISO `/live/` directory — mono-gw.dtb (at ISO root) was never copied to the new image's boot directory. U-Boot would fail to find the DTB on next boot. Fix: patch 011 now also copies `.dtb` files from ISO root to `{root_dir}/boot/{image_name}/` during upgrades
+- **`/boot/vyos.env` not written during `install image`** (`vyos-1x-011-vyos-env-boot.patch`):
+  Rewritten with three hooks: (1) `grub.set_default()` now writes `vyos.env` on every call
+  (install, upgrade, set-default, rename) — single convergence point; (2) `install_image()`
+  writes `vyos.env` directly to eMMC mount as belt-and-suspenders guarantee, then calls
+  `vyos-postinstall --root <mount> <image>` for one-time SPI NOR `fw_setenv`; (3) `add_image()`
+  copies `.dtb` files from ISO root to new image boot dir. Previous version was never applied
+  (see `pre_build_hook` fix above). Without `vyos.env`, U-Boot cannot find the installed image
+  and falls back to USB recovery
 - **VPP "Configuration error" on boot**: Patch 010 hunks for `config_verify.py` and `resource_defaults.py` were silently failing to apply — insufficient context lines (1–2 lines instead of required 3). Result: VPP verify still required 1G main-heap-size while our config specifies 256M → `ERROR_COMMIT` on every boot → config-status=1. Fix: rewrote patch hunks with 3+ lines of context. `min_cpus` now correctly 2 (was stuck at 4), `reserved_cpu_cores` now 1 (was 2), `main_heap_size` minimum now 256M (was 1G)
 - **Kexec double-boot eliminated**: Root cause identified in `system_option.py:generate_cmdline_for_kexec()` — compares `/proc/cmdline` against config.boot `MANAGED_PARAMS` (hugepages, panic). U-Boot bootargs were missing `hugepagesz=2M hugepages=512 panic=60` that config.boot.default requests → mismatch → kexec reboot on every boot (~70s penalty). Fix: added params to `vyos-postinstall` UBOOT_BOOTARGS_TAIL. Boot time: ~165s → ~82s
 - **TFTP DTB address corruption**: DTB loaded at `0x90000000` destroyed during kernel decompression (that address is `kernel_comp_addr_r`, scratch space for decompressing kernel from `0xa0000000` → `0x0`). Fix: use `${fdt_addr_r}` (0x88000000) for DTB in all TFTP boot commands
