@@ -16,12 +16,16 @@ When enabled, this split-plane architecture delivers 2.47M polls/sec on SFP+ tra
 
 **[VPP.md](VPP.md)**: Full technical plan covering DPAA1 acceleration, DPDK integration, performance targets, and implementation roadmap.
 
+## Known Issues
+
+Before installing, review the [open issues](https://github.com/mihakralj/vyos-ls1046a-build/issues) to understand current limitations and decide whether this build meets your needs.
+
 ## Get Started
 
 Pick your adventure:
 
 | I want to... | Go to |
-|---|---|
+i s|---|---|
 | **Install VyOS** on the Mono Gateway | **[INSTALL.md](INSTALL.md)**: write USB image, `install image`, eMMC boot |
 | **Update board firmware** (bricked or fresh board) | [FIRMWARE.md](FIRMWARE.md): NOR + eMMC flash procedure, partition offset details |
 | **Understand the boot process** in detail | [BOOT-PROCESS.md](BOOT-PROCESS.md): USB and eMMC paths, U-Boot env, `booti` sequence, failure modes |

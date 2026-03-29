@@ -4,7 +4,7 @@
 > See [§13 of USDPAA-IOCTL-SPEC.md](USDPAA-IOCTL-SPEC.md#13-mainline-implementation-status-2026-03-28) for implementation vs spec comparison.
 > **Target kernel:** Linux 6.6.y (VyOS mainline)
 > **Target board:** NXP LS1046A (Mono Gateway DK)
-> **Author:** Beast (agentic analysis)
+> **Author:** Miha Kralj
 > **Date:** 2026-03-26
 > **Prerequisite:** [USDPAA-IOCTL-SPEC.md](USDPAA-IOCTL-SPEC.md)
 
