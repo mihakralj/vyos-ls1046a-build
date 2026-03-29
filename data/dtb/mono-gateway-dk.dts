@@ -514,12 +514,14 @@
 	};
 
 	fm1_mac9: ethernet@f0000 { /* 10GEC1 */
+		status = "disabled"; /* kernel dpaa_eth must NOT bind — DPDK owns via fsl,dpaa container */
 		sfp = <&sfp_xfi0>;
 		phy-connection-type = "xgmii"; /* kernel converts to 10gbase-r; must use xgmii so fman_memac assigns PCS to xfi_pcs */
 		managed = "in-band-status";
 	};
 
 	fm1_mac10: ethernet@f2000 { /* 10GEC2 */
+		status = "disabled"; /* kernel dpaa_eth must NOT bind — DPDK owns via fsl,dpaa container */
 		sfp = <&sfp_xfi1>;
 		phy-connection-type = "xgmii"; /* kernel converts to 10gbase-r; must use xgmii so fman_memac assigns PCS to xfi_pcs */
 		managed = "in-band-status";
@@ -665,52 +667,26 @@
 };
 
 /*
-	* DPDK DPAA bus container.
+	* DPDK DPAA bus container — SFP+ ports ONLY.
 	*
 	* DPDK's fman_init() looks for a node with compatible = "fsl,dpaa",
 	* then iterates its children calling fman_if_init() for each.
 	* The kernel ignores this node — no mainline driver matches "fsl,dpaa".
 	*
-	* Each ethernet@N child must provide:
-	*   - compatible = "fsl,dpa-ethernet-init" (avoids SDK vsp-window check)
-	*   - fsl,fman-mac phandle → mainline FMan MAC node
-	*   - fsl,qman-frame-queues-rx = <err_fqid 1 default_fqid 1>
-	*   - fsl,qman-frame-queues-tx = <err_fqid 1 confirm_fqid 1>
-	*   - fsl,bman-buffer-pools phandle → bpool node with fsl,bpid
+	* CRITICAL: Only SFP+ ports (10G) are listed here. RJ45 ports (1G)
+	* are managed exclusively by kernel dpaa_eth and must NOT appear in
+	* this container. Including them causes DPDK to grab their QMan portals
+	* via /dev/mem, conflicting with kernel dpaa_eth → kernel panic.
 	*
-	* FQIDs start at 0x400 to avoid conflict with kernel dynamic allocation.
-	* Only active (non-disabled) MACs are included.
+	* The SFP+ MAC nodes above have status = "disabled" so kernel dpaa_eth
+	* does not bind to them. DPDK accesses FMan hardware directly via
+	* /dev/mem and /dev/fsl-usdpaa, independent of kernel driver binding.
+	*
+	* FQIDs start at 0x40c to avoid conflict with kernel dynamic allocation.
 	*/
 &soc {
 	fsl,dpaa {
 		compatible = "fsl,ls1046a-dpaa", "simple-bus", "fsl,dpaa";
-
-		/* MAC5 — leftmost 1G RJ45 (eth0) */
-		ethernet@4 {
-			compatible = "fsl,dpa-ethernet-init";
-			fsl,fman-mac = <&enet4>;
-			fsl,qman-frame-queues-rx = <0x400 1 0x401 1>;
-			fsl,qman-frame-queues-tx = <0x402 1 0x403 1>;
-			fsl,bman-buffer-pools = <&dpaa_pool>;
-		};
-
-		/* MAC6 — center 1G RJ45 (eth1) */
-		ethernet@5 {
-			compatible = "fsl,dpa-ethernet-init";
-			fsl,fman-mac = <&enet5>;
-			fsl,qman-frame-queues-rx = <0x404 1 0x405 1>;
-			fsl,qman-frame-queues-tx = <0x406 1 0x407 1>;
-			fsl,bman-buffer-pools = <&dpaa_pool>;
-		};
-
-		/* MAC2 — rightmost 1G RJ45 (eth2) */
-		ethernet@1 {
-			compatible = "fsl,dpa-ethernet-init";
-			fsl,fman-mac = <&enet1>;
-			fsl,qman-frame-queues-rx = <0x408 1 0x409 1>;
-			fsl,qman-frame-queues-tx = <0x40a 1 0x40b 1>;
-			fsl,bman-buffer-pools = <&dpaa_pool>;
-		};
 
 		/* MAC9 — 10G left SFP+ (eth3) */
 		ethernet@8 {

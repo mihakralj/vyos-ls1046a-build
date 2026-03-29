@@ -43,6 +43,7 @@ jobs:
       PREVIOUS_SUCCESS_BUILD_TIMESTAMP: ${{ steps.set_env_variables.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}
       image_iso: ${{ steps.build_iso.outputs.image_iso }}
       image_name: ${{ steps.build_iso.outputs.image_name }}
+      usb_img: ${{ steps.build_iso.outputs.usb_img }}
 
     steps:
       - name: Install Dependencies
@@ -62,7 +63,8 @@ jobs:
             libnftnl-dev libnl-nf-3-dev libpopt-dev libpcap-dev libbpf-dev \
             bubblewrap git-lfs kpartx clang llvm cmake \
             protobuf-compiler python3-cracklib python3-protobuf \
-            libreadline-dev liblua5.3-dev byacc flex
+            libreadline-dev liblua5.3-dev byacc flex \
+            dosfstools mtools zstd
           # python3-cracklib: https://github.com/vyos/vyos-build/commit/e846e68f9f6457865f3e3af92adfe42933555c59
           # protobuf-compiler: https://github.com/vyos/vyos-build/commit/0a6c197226400c4bbe210b435baaa716d4fb8377
           # python3-protobuf: https://github.com/vyos/vyos-build/commit/dd2c245be73c1e83b6ca392924aa549f77c5586e
@@ -162,6 +164,7 @@ jobs:
             'CONFIG_SPI=y' \
             'CONFIG_SPI_FSL_DSPI=y' \
             'CONFIG_SPI_FSL_QSPI=y' \
+            'CONFIG_SPI_FSL_QUADSPI=y' \
             'CONFIG_CDX_BUS=y' \
             '# CONFIG_DEBUG_PREEMPT is not set' \
             'CONFIG_QORIQ_CPUFREQ=y' \
@@ -494,8 +497,34 @@ jobs:
           else
             echo "fake sign" > ${IMAGE_ISO}.minisig
           fi
-          # Move artifacts to workspace
-          mv manifest.json ${IMAGE_ISO} ${IMAGE_ISO}.minisig $GITHUB_WORKSPACE
+          ### Create FAT32 USB boot image
+          # U-Boot reads FAT32 natively. ISO9660 requires Rufus workarounds.
+          # This image is written with: dd if=vyos-*-usb.img of=/dev/sdX bs=4M
+          # Windows: Rufus → select .img.zst → DD Image mode (NOT ISO mode)
+          # Layout: /live/{vmlinuz,initrd.img,filesystem.squashfs} + /mono-gw.dtb
+          USB_IMG="${IMAGE_NAME}-usb.img"
+          mkdir -p /tmp/iso-mount
+          mount -o loop "$IMAGE_ISO" /tmp/iso-mount
+          truncate -s 4G "$USB_IMG"
+          mkdosfs -F 32 -n VYOSBOOT "$USB_IMG"
+          mmd   -i "$USB_IMG" ::/live
+          mcopy -i "$USB_IMG" /tmp/iso-mount/live/vmlinuz             ::/live/vmlinuz
+          mcopy -i "$USB_IMG" /tmp/iso-mount/live/initrd.img          ::/live/initrd.img
+          mcopy -i "$USB_IMG" /tmp/iso-mount/live/filesystem.squashfs ::/live/filesystem.squashfs
+          mcopy -i "$USB_IMG" $GITHUB_WORKSPACE/data/dtb/mono-gw.dtb  ::mono-gw.dtb
+          umount /tmp/iso-mount
+          zstd -9 "$USB_IMG" -o "${USB_IMG}.zst" && rm -f "$USB_IMG"
+          if [ -f "$MINISIGN_SECKEY_FILE" ]; then
+            $GITHUB_WORKSPACE/bin/minisign -s $MINISIGN_SECKEY_FILE -Sm "${USB_IMG}.zst"
+            $GITHUB_WORKSPACE/bin/minisign -Vm "${USB_IMG}.zst" -x "${USB_IMG}.zst.minisig" -p $MINISIGN_PUBKEY_FILE
+          else
+            echo "fake sign" > "${USB_IMG}.zst.minisig"
+          fi
+          echo "usb_img=${USB_IMG}.zst" >> $GITHUB_OUTPUT
+
+          # Move all artifacts to workspace
+          mv manifest.json ${IMAGE_ISO} ${IMAGE_ISO}.minisig \
+             "${USB_IMG}.zst" "${USB_IMG}.zst.minisig" $GITHUB_WORKSPACE
 
       - uses: actions/upload-artifact@v7
         with:
@@ -504,6 +533,8 @@ jobs:
             manifest.json
             ${{ steps.build_iso.outputs.image_iso }}
             ${{ steps.build_iso.outputs.image_iso }}.minisig
+            ${{ steps.build_iso.outputs.usb_img }}
+            ${{ steps.build_iso.outputs.usb_img }}.minisig
           retention-days: 15
           if-no-files-found: error
           compression-level: 0
@@ -641,6 +672,8 @@ jobs:
           files: |
             ${{ needs.build_iso.outputs.image_iso }}
             ${{ needs.build_iso.outputs.image_iso }}.minisig
+            vyos-*-usb.img.zst
+            vyos-*-usb.img.zst.minisig
             vyos-packages.tar
 
       - uses: dev-drprasad/delete-older-releases@v0.3.4

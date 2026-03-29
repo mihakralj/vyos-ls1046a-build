@@ -51,6 +51,8 @@
 #include "bman_priv.h"
 #include "qman_priv.h"
 
+/* DPAA_GENALLOC_OFF already defined via bman_priv.h -> dpaa_sys.h */
+
 /* ====================================================================
  * USDPAA ioctl ABI definitions
  * Must be binary-compatible with DPDK 24.11 process.h / process.c
@@ -256,6 +258,7 @@ struct resource_range {
 	enum usdpaa_id_type type;
 	u32 base;
 	u32 count;
+	bool reserved;  /* true = tracking-only (ID_RESERVE), no gen_pool free */
 };
 
 /*
@@ -374,6 +377,7 @@ static int ioctl_id_alloc(struct usdpaa_ctx *ctx,
 	rr->type = alloc.id_type;
 	rr->base = base;
 	rr->count = alloc.num;
+	rr->reserved = false;
 
 	mutex_lock(&ctx->lock);
 	list_add(&rr->node, &ctx->alloc_resources);
@@ -384,6 +388,63 @@ static int ioctl_id_alloc(struct usdpaa_ctx *ctx,
 		return -EFAULT;
 
 	return 0;
+}
+
+/* ====================================================================
+ * ioctl: ID_RESERVE (0x0A) - Reserve specific resource ID range
+ *
+ * Unlike ID_ALLOC (which picks any free range), ID_RESERVE marks a
+ * *specific* base+count as taken.  DPDK's DPAA PMD uses this to claim
+ * the FQIDs pre-configured in the device-tree by FMan firmware
+ * (fsl,qman-frame-queues-rx/tx properties).
+ *
+ * Implementation: tracking-only.  The hardware FQIDs/BPIDs are assigned
+ * by FMan firmware and configured in the DT — they are NOT allocated
+ * from gen_pool.  The mainline kernel gen_pool may or may not have
+ * these IDs depending on whether dpaa_eth has them allocated or has
+ * been unbound.  Instead of fighting gen_pool state, we simply record
+ * the reservation for per-FD accounting and return success.  DPDK
+ * programs the hardware queues directly via its own QMan portals.
+ *
+ * This matches the NXP SDK pattern where backend->reserve() operates
+ * on a separate allocator independent of the kernel's gen_pool.
+ * ==================================================================== */
+
+static int ioctl_id_reserve(struct usdpaa_ctx *ctx,
+ 		    struct usdpaa_ioctl_id_reserve __user *arg)
+{
+ struct usdpaa_ioctl_id_reserve rsv;
+ struct resource_range *rr;
+
+ if (copy_from_user(&rsv, arg, sizeof(rsv)))
+ 	return -EFAULT;
+
+ /* Validate type — CGRID has no reserve in NXP ABI */
+ switch (rsv.id_type) {
+ case usdpaa_id_fqid:
+ case usdpaa_id_bpid:
+ case usdpaa_id_qpool:
+ 	break;
+ case usdpaa_id_cgrid:
+ 	return -EINVAL;
+ default:
+ 	return -ENOSYS;
+ }
+
+ /* Track reservation for cleanup on fd close */
+ rr = kmalloc(sizeof(*rr), GFP_KERNEL);
+ if (!rr)
+ 	return -ENOMEM;
+ rr->type = rsv.id_type;
+ rr->base = rsv.base;
+ rr->count = rsv.num;
+ rr->reserved = true;
+
+ mutex_lock(&ctx->lock);
+ list_add(&rr->node, &ctx->alloc_resources);
+ mutex_unlock(&ctx->lock);
+
+ return 0;
 }
 
 /* ====================================================================
@@ -439,7 +500,8 @@ static int ioctl_id_release(struct usdpaa_ctx *ctx,
 		    rr->count == rel.num) {
 			list_del(&rr->node);
 			mutex_unlock(&ctx->lock);
-			release_id_range(rr->type, rr->base, rr->count);
+			if (!rr->reserved)
+				release_id_range(rr->type, rr->base, rr->count);
 			kfree(rr);
 			return 0;
 		}
@@ -570,17 +632,16 @@ static void portal_release_and_untrack(struct portal_reservation *pr)
  *   Non-Shareable (SH=00) since the portal hardware manages
  *   its own coherency.
  *
- * CRITICAL: On ARM64, the kernel maps portal CE as MEMREMAP_WC
- *   (Normal Non-Cacheable) via dpaa_sys.h QBMAN_MEMREMAP_ATTR.
- *   Our remap_pfn_range uses pgprot_cached_nonshared (Normal WB-NS).
- *   Two mappings with different Normal cacheability on ARM64 =
- *   CONSTRAINED UNPREDICTABLE (crash on Cortex-A72).
+ * NOTE: upstream kernel has a latent bug where addr_virt_ce is
+ *   actually mapped to CI physical (platform_get_resource overwrites
+ *   the CE resource ptr with CI before memremap). The kernel never
+ *   maps CE physical at all — portal ops work through CI window.
  *
- *   FIX: bman_portal_reserve() / qman_portal_reserve() call
- *   memunmap(addr_virt_ce) to remove the kernel WC mapping
- *   BEFORE our remap creates the WB-NS mapping. This is safe
- *   because the portal is exclusively owned by userspace after
- *   reservation.
+ *   We do NOT memunmap the kernel's stale mapping because doing so
+ *   destabilizes vmalloc bookkeeping and triggers translation faults
+ *   on adjacent affine portal mappings. Since reserved portals are
+ *   never accessed by kernel code, the stale mapping is harmless.
+ *   Our remap_pfn_range uses the CORRECT CE physical from addr_phys_ce.
  *
  * CI (cache-inhibited) window: Strongly-Ordered / Device-nGnRnE
  *   Required for portal doorbell/command registers.
@@ -1021,9 +1082,10 @@ static int usdpaa_release(struct inode *inode, struct file *filp)
 		portal_release_and_untrack(pr);
 	}
 
-	/* Release all resource IDs */
+	/* Release all resource IDs (only gen_pool-allocated, not reserved) */
 	list_for_each_entry_safe(rr, tmp_rr, &ctx->alloc_resources, node) {
-		release_id_range(rr->type, rr->base, rr->count);
+		if (!rr->reserved)
+			release_id_range(rr->type, rr->base, rr->count);
 		list_del(&rr->node);
 		kfree(rr);
 	}
@@ -1049,7 +1111,7 @@ static long usdpaa_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	case USDPAA_IOCTL_ID_RELEASE:
 		return ioctl_id_release(ctx, argp);
 	case USDPAA_IOCTL_ID_RESERVE:
-		return -ENOSYS; /* DPDK does not use */
+		return ioctl_id_reserve(ctx, argp);
 
 	/* DMA memory */
 	case USDPAA_IOCTL_DMA_MAP:

@@ -1,103 +1,110 @@
-Add platform-bus NIC support for VPP via AF_XDP.
+Add platform-bus NIC support for VPP via DPDK DPAA PMD.
 
 NXP DPAA1 FMan Ethernet NICs (driver: fsl_dpa) are on the platform bus,
-not PCI. VPP's default path hardcodes driver='dpdk' for all interfaces,
-which crashes on platform-bus NICs. This patch:
+not PCI. This patch:
 
 1. Adds fsl_dpa to SUPPORTED_DRIVERS and not_pci_drv lists
-2. Introduces platform_bus_xdp_drivers list for auto-detection
-3. Auto-selects driver='xdp' for platform-bus NICs with XDP defaults
-4. Enables af_xdp_plugin.so and conditionally disables dpdk_plugin.so
+2. All VPP-configured interfaces use driver='dpdk' — DPAA PMD for fsl_dpa
+   platform-bus NICs, standard DPDK for PCI NICs, configurable via VyOS CLI
+3. Injects original_driver into iface_config so startup.conf.j2 can
+   distinguish platform-bus from PCI NICs
+4. startup.conf.j2: always enables dpdk_plugin.so and af_xdp_plugin.so,
+   skips PCI dev entries for platform-bus NICs (DPAA bus auto-discovers),
+   adds no-pci when only platform-bus NICs present
 5. Lowers resource minimums for embedded ARM64 boards (2 CPUs, 256M heap)
+6. Removes SSE4.2 CPU check (irrelevant on ARM64)
 
-Tested on NXP LS1046A Mono Gateway with VPP v25.10.0-48 AF_XDP on
+VPP configuration is driven entirely by VyOS CLI:
+  set vpp settings interface eth3
+  set vpp settings interface eth4
+Ports assigned to VPP use DPDK; ports not assigned stay with the kernel.
+
+Tested on NXP LS1046A Mono Gateway with VPP v25.10.0-48 DPAA PMD on
 eth3/eth4 (10G SFP+).
 
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
-@@ -94,7 +94,10 @@
+@@ -94,7 +94,8 @@
  }
  
  # drivers that does not use PCIe addresses
 -not_pci_drv: list[str] = ['hv_netvsc']
 +not_pci_drv: list[str] = ['hv_netvsc', 'fsl_dpa']
 +
-+# drivers on platform bus that must use XDP (not DPDK)
-+platform_bus_xdp_drivers: list[str] = ['fsl_dpa']
  
  # drivers that support interrupt RX mode for DPDK and XDP
  drivers_support_interrupt: dict[str, list] = {
-@@ -129,3 +132,4 @@
+@@ -129,3 +130,4 @@
  SUPPORTED_DRIVERS = (
      'hv_netvsc',  # Microsoft Hyper-V network interface card
-+    'fsl_dpa',  # NXP DPAA1 FMan Ethernet (platform bus, AF_XDP)
++    'fsl_dpa',    # NXP DPAA1 FMan Ethernet (platform bus, DPDK DPAA PMD)
  )
-@@ -376,5 +380,9 @@
+@@ -376,9 +378,13 @@
          # Buffer normalization (auto  computed)
          _normalize_buffers(effective_config)
-         for iface_config in effective_config['settings']['interface'].values():
--            iface_config['driver'] = 'dpdk'
+-        for iface_config in effective_config['settings']['interface'].values():
++        for _ename, iface_config in effective_config['settings']['interface'].items():
+             iface_config['driver'] = 'dpdk'
++            # Inject original_driver into iface_config for template use
 +            _edrv = eth_ifaces_persist.get(_ename, {}).get('original_driver', '')
-+            if _edrv in platform_bus_xdp_drivers:
-+                iface_config['driver'] = 'xdp'
-+            else:
-+                iface_config['driver'] = 'dpdk'
++            iface_config['original_driver'] = _edrv
          config['effective'] = effective_config
-@@ -399,4 +407,20 @@
+@@ -399,4 +405,9 @@
  
              for iface, iface_config in config['settings']['interface'].items():
--                iface_config['driver'] = 'dpdk'
--
-+                # Auto-detect driver: platform-bus NICs use XDP, PCI NICs use DPDK
+                 iface_config['driver'] = 'dpdk'
++                # Inject original_driver into iface_config for template use
 +                _orig_drv = eth_ifaces_persist.get(iface, {}).get('original_driver', '')
 +                if not _orig_drv:
 +                    try:
 +                        _orig_drv = EthtoolGDrvinfo(iface).driver
 +                    except Exception:
 +                        _orig_drv = ''
-+                if _orig_drv in platform_bus_xdp_drivers:
-+                    iface_config['driver'] = 'xdp'
-+                    # Provide default XDP options if CLI does not expose them
-+                    if 'xdp_options' not in iface_config:
-+                        iface_config['xdp_options'] = {
-+                            'rx_queue_size': '4096',
-+                            'tx_queue_size': '4096',
-+                            'num_rx_queues': 'all',
-+                        }
-+                else:
-+                    iface_config['driver'] = 'dpdk'
++                iface_config['original_driver'] = _orig_drv
+ 
                  # old_driver = leaf_node_changed(
 --- a/data/templates/vpp/startup.conf.j2
 +++ b/data/templates/vpp/startup.conf.j2
-@@ -76,4 +76,14 @@
+@@ -76,4 +76,6 @@
  plugins {
      plugin default { disable }
 -    plugin avf_plugin.so { enable }
 -    plugin dpdk_plugin.so { enable }
 +    plugin af_xdp_plugin.so { enable }
-+{% set has_dpdk = [] %}
-+{% for iface, iface_config in interface.items() %}
-+{%     if iface_config.driver == 'dpdk' %}
-+{% if has_dpdk.append(1) %}{% endif %}
-+{%     endif %}
-+{% endfor %}
-+{% if has_dpdk %}
 +    plugin avf_plugin.so { enable }
 +    plugin dpdk_plugin.so { enable }
-+{% else %}
-+    plugin dpdk_plugin.so { disable }
-+{% endif %}
      plugin vmxnet3_plugin.so { enable }
-@@ -158,29 +168,31 @@
+@@ -158,29 +162,51 @@
  {% endif %}
  
-+{% if has_dpdk %}
++{# Classify interfaces: PCI-based DPDK vs platform-bus DPDK (DPAA auto-discovers) #}
++{% set has_pci_dpdk = [] %}
++{% set has_platform_dpdk = [] %}
++{% for iface, iface_config in interface.items() %}
++{%     if iface_config.driver == 'dpdk' %}
++{%         if iface_config.original_driver is defined and iface_config.original_driver in ['fsl_dpa'] %}
++{%             if has_platform_dpdk.append(1) %}{% endif %}
++{%         else %}
++{%             if has_pci_dpdk.append(1) %}{% endif %}
++{%         endif %}
++{%     endif %}
++{% endfor %}
++{% if has_pci_dpdk or has_platform_dpdk %}
  dpdk {
-     # Whitelist the fake PCI address 0000:00:00.0
-     # This prevents all devices from being added to VPP-DPDK by default
-     dev 0000:00:00.0
+-    # Whitelist the fake PCI address 0000:00:00.0
+-    # This prevents all devices from being added to VPP-DPDK by default
+-    dev 0000:00:00.0
++{% if not has_pci_dpdk %}
++    {# Platform-bus only (DPAA) — skip PCI scan entirely #}
++    no-pci
++{% else %}
++    {# PCI whitelist anchor — prevents auto-claiming all PCI devices #}
++    dev 0000:00:00.0
++{% endif %}
  {% for iface, iface_config in interface.items() %}
- {%     if iface_config.driver == 'dpdk' %}
+-{%     if iface_config.driver == 'dpdk' %}
++{%     if iface_config.driver == 'dpdk' and (iface_config.original_driver is not defined or iface_config.original_driver not in ['fsl_dpa']) %}
++    {# PCI NIC — whitelist by PCI address #}
      dev {{ iface_config.dpdk_options.dev_id }} {
          name {{ iface }}
  {%         if iface_config.num_rx_desc is vyos_defined %}
@@ -114,8 +121,14 @@ eth3/eth4 (10G SFP+).
  {%         endif %}
          }
  {%     endif %}
++{%     if iface_config.driver == 'dpdk' and iface_config.original_driver is defined and iface_config.original_driver in ['fsl_dpa'] %}
++    {# Platform-bus NIC (DPAA) — auto-discovered by dpaa_bus, no dev entry needed #}
++    {# Interface {{ iface }} uses DPAA PMD via /dev/fsl-usdpaa #}
++{%     endif %}
  {% endfor %}
++{% if has_pci_dpdk %}
      uio-bind-force
++{% endif %}
  }
 +{% endif %}
  

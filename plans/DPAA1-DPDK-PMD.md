@@ -1,10 +1,10 @@
-# DPAA1 DPDK PMD Build Plan — 10G Wire-Speed VPP on Mono Gateway
+# DPAA1 DPDK PMD Build Plan: 10G Wire-Speed VPP on Mono Gateway
 
-> **Status:** ✅ **Phase B COMPLETE** — testpmd runs clean on mainline kernel with custom USDPAA driver (2026-03-27)
+> **Status:** ✅ **Phase B COMPLETE**: testpmd runs clean on mainline kernel with custom USDPAA driver (2026-03-27)
 >
-> **Goal:** Replace AF_XDP (~6–7 Gbps, 3290 MTU cap) with the DPAA1 DPDK Poll Mode Driver for full 10G line rate (~9.4 Gbps, full jumbo 9578 MTU).
+> **Goal:** Replace AF_XDP (~6 to 7 Gbps, 3290 MTU cap) with the DPAA1 DPDK Poll Mode Driver for full 10G line rate (~9.4 Gbps, full jumbo 9578 MTU).
 >
-> **Key insight:** Both the kernel USDPAA driver and the DPDK DPAA1 PMD are **mainline** — no NXP forks needed anywhere in the stack. Our 6-patch kernel series + `fsl_usdpaa_mainline.c` provide the kernel-side USDPAA ABI. DPDK 24.11 mainline with `-Dplatform=dpaa` provides the userspace PMD.
+> **Key insight:** Both the kernel USDPAA driver and the DPDK DPAA1 PMD are **mainline**. No NXP forks needed anywhere in the stack. Our 6-patch kernel series + `fsl_usdpaa_mainline.c` provide the kernel-side USDPAA ABI. DPDK 24.11 mainline with `-Dplatform=dpaa` provides the userspace PMD. The entire path from silicon to VPP runs on upstream code.
 
 ---
 
@@ -78,13 +78,13 @@ flowchart LR
 
 ---
 
-## ~~Superseded: Original Phases 1–4 (NXP Kernel Fork Approach)~~
+## ~~Superseded: Original Phases 1 through 4 (NXP Kernel Fork Approach)~~
 
-> **These phases are SUPERSEDED and should not be followed.**
+> **These phases are SUPERSEDED. Do not follow them.**
 >
-> The original plan required the NXP kernel fork (`nxp-qoriq/linux lf-6.6.3-1.0.0`) because `fsl_usdpaa.c` used NXP-specific BMan/QMan APIs. We resolved this by writing `fsl_usdpaa_mainline.c` from scratch — 1453 lines that implement the same 20 NXP ioctls against **mainline** BMan/QMan APIs. The mainline kernel + our 6-patch series is now the production path. No NXP kernel fork, DPDK fork, or VPP fork is needed.
+> The original plan required the NXP kernel fork (`nxp-qoriq/linux lf-6.6.3-1.0.0`) because `fsl_usdpaa.c` used NXP-specific BMan/QMan APIs. That fork was 2,623 lines of `#ifdef` spaghetti covering 15+ SoC variants. We resolved this by writing `fsl_usdpaa_mainline.c` from scratch: 1453 lines that implement the same 20 NXP ioctls against **mainline** BMan/QMan APIs. Cleaner code, same ABI. The mainline kernel + our 6-patch series is now the production path. No NXP kernel fork, DPDK fork, or VPP fork is needed.
 >
-> See git history and `plans/MAINLINE-PATCH-SPEC.md` for the full architecture rationale.
+> See git history and [`plans/MAINLINE-PATCH-SPEC.md`](MAINLINE-PATCH-SPEC.md) for the full architecture rationale.
 
 ---
 

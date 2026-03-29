@@ -1,12 +1,11 @@
-# U-Boot Reference — Mono Gateway LS1046A
+# U-Boot Reference: Mono Gateway LS1046A
 
-Low-level U-Boot reference and seamless boot specification.
+Low-level U-Boot reference and seamless boot specification. The stuff you need when you're staring at a serial console at 115200 baud wondering why nothing happened.
 
 Updated 2026-03-25.
 
 For boot architecture and kernel config rationale, see [PORTING.md](PORTING.md).
 For install instructions, see [INSTALL.md](INSTALL.md).
-For detailed implementation spec, see [plans/BOOT-SPEC.md](plans/BOOT-SPEC.md).
 
 ---
 
@@ -14,9 +13,9 @@ For detailed implementation spec, see [plans/BOOT-SPEC.md](plans/BOOT-SPEC.md).
 
 ### Design: `/boot/vyos.env` Replaces `fw_setenv`
 
-The current system writes the image name into U-Boot's SPI flash via `fw_setenv` on every install/upgrade. This requires `libubootenv-tool`, `/dev/mtd3`, QSPI driver, and a helper script.
+The old approach wrote the image name into U-Boot's SPI flash via `fw_setenv` on every install and upgrade. This required `libubootenv-tool`, `/dev/mtd3`, a QSPI driver, and a helper script. Four moving parts for what is fundamentally a one-line config change.
 
-**New approach:** U-Boot reads the default image name from a text file on the eMMC ext4 partition. VyOS writes this file as part of its normal image management. No SPI flash writes needed after initial setup.
+**Current approach:** U-Boot reads the default image name from a text file on the eMMC ext4 partition. VyOS writes this file as part of its normal image management. No SPI flash writes needed after initial setup.
 
 ```
 eMMC partition 3 (ext4):
@@ -28,7 +27,7 @@ eMMC partition 3 (ext4):
       2026.03.24-0338-rolling.squashfs
 ```
 
-U-Boot loads `/boot/vyos.env`, imports it via `env import -t`, and uses `${vyos_image}` to construct all paths. The `vyos_direct` command is **static** — it never needs `fw_setenv` updates.
+U-Boot loads `/boot/vyos.env`, imports it via `env import -t`, and uses `${vyos_image}` to construct all paths. The `vyos_direct` command is **static**: it never needs `fw_setenv` updates. Set once, boot forever.
 
 ### Boot Chain
 
@@ -52,12 +51,12 @@ flowchart TD
 
 ### When `fw_setenv` Is Used
 
-Only **once** — during the first `install image` from USB live boot. It sets:
+Only **once**: during the first `install image` from USB live boot. It sets:
 - `bootcmd` = `run usb_vyos || run vyos_direct || run recovery`
 - `vyos_direct` = static command that reads `/boot/vyos.env`
 - `usb_vyos` = auto-detect and boot from USB
 
-After this, **all future installs and upgrades only write `/boot/vyos.env`** — no SPI flash writes.
+After this, **all future installs and upgrades only write `/boot/vyos.env`**. No SPI flash writes. No `fw_setenv`. Just a text file.
 
 ### User Experience
 
@@ -75,7 +74,7 @@ After this, **all future installs and upgrades only write `/boot/vyos.env`** —
 
 ## U-Boot Environment (Target State)
 
-Set once during first `install image`, then never modified again:
+Set once during first `install image`. Never modified again. If you find yourself running `fw_setenv` more than once, something went wrong.
 
 ```bash
 # Boot priority: USB → eMMC → SPI recovery
@@ -119,8 +118,8 @@ Written by VyOS's image installer Python code after every `install image` or `ad
 Tested 2026-03-25 on board #308 (U-Boot 2025.04):
 1. ✅ `env import -t ${load_addr} ${filesize}` correctly parses `vyos_image=2026.03.25-0531-rolling`
 2. ✅ `${vyos_image}` is available for subsequent `ext4load` commands in the same script
-3. ✅ No side effects — only the `vyos_image` variable is imported
-4. ✅ Full boot chain works: `vyos.env` → `env import` → per-image `ext4load` → `booti` → VyOS login in ~97s
+3. ✅ No side effects: only the `vyos_image` variable is imported
+4. ✅ Full boot chain works: `vyos.env`, `env import`, per-image `ext4load`, `booti`, VyOS login in ~97s
 
 ---
 
@@ -174,19 +173,19 @@ setenv bootcmd 'run usb_vyos || run vyos_direct || run recovery'
 saveenv
 ```
 
-After `saveenv`, the board auto-boots from eMMC via `/boot/vyos.env` on every power cycle. No further U-Boot intervention needed — ever. Future `add system image` upgrades only update `/boot/vyos.env`.
+After `saveenv`, the board auto-boots from eMMC via `/boot/vyos.env` on every power cycle. No further U-Boot intervention needed. Ever. Future `add system image` upgrades only update `/boot/vyos.env`.
 
 > **Note on quoting:** `setenv bootargs` does NOT need double quotes around the value — U-Boot's
 > `setenv` treats everything after the variable name as the value. Removing `"..."` avoids nested
 > quote parsing issues in hush shell.
 
-**Critical bootargs:**
-- `BOOT_IMAGE=/boot/${vyos_image}/vmlinuz` — must be FIRST arg; VyOS `is_live_boot()` regex requires it (U-Boot's `booti` does not set it like GRUB does)
-- `boot=live` — initramfs uses live-boot mode
-- `vyos-union=/boot/${vyos_image}` — squashfs overlay dir on p3 (also used as `is_live_boot()` fallback for U-Boot boards)
-- `fsl_dpaa_fman.fsl_fm_max_frm=9600` — enables jumbo frames (max MTU 9578). Module name is `fsl_dpaa_fman`, NOT `fman`
-- `hugepagesz=2M hugepages=512 panic=60` — MUST match config.boot.default or `system_option.py` triggers a kexec reboot
-- Missing `boot=live` or `vyos-union=` → drops to initramfs BusyBox shell
+**Critical bootargs (get any of these wrong and the boot fails silently):**
+- `BOOT_IMAGE=/boot/${vyos_image}/vmlinuz`: must be FIRST arg. VyOS `is_live_boot()` regex requires it (U-Boot's `booti` does not set it like GRUB does)
+- `boot=live`: initramfs uses live-boot mode
+- `vyos-union=/boot/${vyos_image}`: squashfs overlay dir on p3 (also used as `is_live_boot()` fallback for U-Boot boards)
+- `fsl_dpaa_fman.fsl_fm_max_frm=9600`: enables jumbo frames (max MTU 9578). Module name is `fsl_dpaa_fman`, NOT `fman`. The wrong name silently has no effect.
+- `hugepagesz=2M hugepages=512 panic=60`: MUST match config.boot.default or `system_option.py` triggers a kexec reboot
+- Missing `boot=live` or `vyos-union=` drops to initramfs BusyBox shell with no explanation
 
 **Critical load order:**
 - Initrd must be loaded **LAST** so `${filesize}` captures the initrd size
@@ -222,10 +221,9 @@ recovery=sf probe 0:0; sf read ${kernel_addr_r} ${kernel_addr} ${kernel_size};
     booti ${kernel_addr_r} - ${fdt_addr_r}
 ```
 
-## EFI/GRUB — Permanently Broken
+## EFI/GRUB: Permanently Broken
 
-`bootefi` with GRUB OOMs on this board. DTB `reserved-memory` nodes for DPAA1
-prevent U-Boot EFI initialization:
+`bootefi` with GRUB OOMs on this board. The DPAA1 `reserved-memory` nodes in the DTB consume too much of the EFI memory pool:
 
 ```
 reserved-memory:
@@ -277,7 +275,7 @@ booti ${kernel_addr_r} - ${fdt_addr_r}
 | `eth3addr` | `E8:F6:D7:00:16:02` | eth3 |
 | `eth4addr` | `E8:F6:D7:00:16:03` | eth4 |
 
-MAC addresses are unique per board — yours will differ.
+MAC addresses are unique per board. Yours will differ.
 
 ## Clock Tree & CPU Frequency
 
@@ -297,8 +295,7 @@ MAC addresses are unique per board — yours will differ.
 | `cg-hwaccel0` | 700 MHz | PLL2-div2 | FMan clock |
 | `cg-pll0-div2` | 300 MHz | PLL0 | SPI (DSPI controller) |
 
-`CONFIG_QORIQ_CPUFREQ=y` (built-in) claims PLL clock parents before
-`clk: Disabling unused clocks` runs at T+12s. Confirmed: raid6 neonx8 2056→4816 MB/s.
+`CONFIG_QORIQ_CPUFREQ=y` (built-in) claims PLL clock parents before `clk: Disabling unused clocks` runs at T+12s. Confirmed: raid6 neonx8 2056 to 4816 MB/s. The difference between 700 MHz and 1800 MHz is not subtle.
 
 ## SPI Flash (MTD) Layout
 

@@ -1,10 +1,11 @@
-# Mainline Kernel Patch Specification — USDPAA for DPDK DPAA1 PMD
+# Mainline Kernel Patch Specification: USDPAA for DPDK DPAA1 PMD
 
-> **Status:** Phase 1 EXTRACT — Complete  
-> **Target kernel:** Linux 6.6.y (VyOS mainline)  
-> **Target board:** NXP LS1046A (Mono Gateway DK)  
-> **Author:** Beast (agentic analysis)  
-> **Date:** 2026-03-26  
+> **Status:** ✅ **IMPLEMENTED** (2026-03-27). All 6 patches written, compiled, and running on device.
+> See [§13 of USDPAA-IOCTL-SPEC.md](USDPAA-IOCTL-SPEC.md#13-mainline-implementation-status-2026-03-28) for implementation vs spec comparison.
+> **Target kernel:** Linux 6.6.y (VyOS mainline)
+> **Target board:** NXP LS1046A (Mono Gateway DK)
+> **Author:** Beast (agentic analysis)
+> **Date:** 2026-03-26
 > **Prerequisite:** [USDPAA-IOCTL-SPEC.md](USDPAA-IOCTL-SPEC.md)
 
 ---
@@ -13,14 +14,14 @@
 
 1. [Executive Summary](#1-executive-summary)
 2. [Mainline Kernel Export Audit](#2-mainline-kernel-export-audit)
-3. [Gap Analysis — What's Missing](#3-gap-analysis--whats-missing)
+3. [Gap Analysis: What's Missing](#3-gap-analysis--whats-missing)
 4. [DPDK Userspace Call Trace](#4-dpdk-userspace-call-trace)
-5. [Patch 1 — BMan BPID Range Allocator Export](#5-patch-1--bman-bpid-range-allocator-export)
-6. [Patch 2 — BMan Portal Phys Addr + Reservation](#6-patch-2--bman-portal-phys-addr--reservation)
-7. [Patch 3 — QMan Portal Phys Addr + Reservation](#7-patch-3--qman-portal-phys-addr--reservation)
-8. [Patch 4 — QMan set_sdest Export](#8-patch-4--qman-set_sdest-export)
-9. [Patch 5 — fsl_usdpaa_mainline.c Module](#9-patch-5--fsl_usdpaa_mainlinec-module)
-10. [Patch 6 — DTS Reserved Memory](#10-patch-6--dts-reserved-memory)
+5. [Patch 1: BMan BPID Range Allocator Export](#5-patch-1--bman-bpid-range-allocator-export)
+6. [Patch 2: BMan Portal Phys Addr + Reservation](#6-patch-2--bman-portal-phys-addr--reservation)
+7. [Patch 3: QMan Portal Phys Addr + Reservation](#7-patch-3--qman-portal-phys-addr--reservation)
+8. [Patch 4: QMan set_sdest Export](#8-patch-4--qman-set_sdest-export)
+9. [Patch 5: fsl_usdpaa_mainline.c Module](#9-patch-5--fsl_usdpaa_mainlinec-module)
+10. [Patch 6: DTS Reserved Memory](#10-patch-6--dts-reserved-memory)
 11. [Build Integration](#11-build-integration)
 12. [Risk Assessment](#12-risk-assessment)
 
@@ -28,15 +29,16 @@
 
 ## 1. Executive Summary
 
-DPDK's DPAA1 PMD requires `/dev/fsl-usdpaa` — a character device providing ioctls for:
+DPDK's DPAA1 PMD requires `/dev/fsl-usdpaa`, a character device providing ioctls for:
 - **Resource allocation** (BPID, FQID, pool-channel, CGRID ranges)
 - **Portal reservation** (physical addresses for userspace mmap)
 - **DMA memory management** (contiguous memory from reserved-memory DT node)
 - **Link status queries** (PHY state via net_device)
 
 NXP's SDK implementation (`fsl_usdpaa.c`, 2,622 lines) is mutually exclusive with mainline
-DPAA (`FSL_SDK_DPA depends on !FSL_DPAA`). The rewrite strategy: implement a clean ~700-line
-module against mainline APIs, adding 5 small patches (~145 lines) to export missing internals.
+DPAA (`FSL_SDK_DPA depends on !FSL_DPAA`). Two codebases cannot coexist. The rewrite
+strategy: build a clean ~700-line module against mainline APIs, adding 5 small patches
+(~145 lines total) to export missing internals.
 
 **Total new/modified code: ~860 lines across 6 patches.**
 
@@ -44,7 +46,7 @@ module against mainline APIs, adding 5 small patches (~145 lines) to export miss
 
 ## 2. Mainline Kernel Export Audit
 
-### 2.1 BMan — `drivers/soc/fsl/qbman/bman.c`
+### 2.1 BMan: `drivers/soc/fsl/qbman/bman.c`
 
 | Symbol | Status | Signature |
 |--------|--------|-----------|
@@ -58,10 +60,10 @@ module against mainline APIs, adding 5 small patches (~145 lines) to export miss
 | `bm_shutdown_pool()` | ❌ **static** | `static int bm_shutdown_pool(u32 bpid)` |
 | `bm_bpalloc` | ❌ file-scope | `struct gen_pool *bm_bpalloc` (genalloc pool) |
 
-**Key finding:** `bman_new_pool()` wraps `bm_alloc_bpid_range()` but only allocates 1 BPID
-in a `struct bman_pool`. USDPAA needs raw range allocation (`count > 1`).
+**Key finding:** `bman_new_pool()` wraps `bm_alloc_bpid_range()` but allocates exactly 1 BPID
+inside a `struct bman_pool`. USDPAA needs raw range allocation (`count > 1`).
 
-### 2.2 QMan — `drivers/soc/fsl/qbman/qman.c`
+### 2.2 QMan: `drivers/soc/fsl/qbman/qman.c`
 
 | Symbol | Status | Signature |
 |--------|--------|-----------|
@@ -75,14 +77,14 @@ in a `struct bman_pool`. USDPAA needs raw range allocation (`count > 1`).
 
 **All QMan range allocators are already exported.** No patches needed for resource allocation.
 
-### 2.3 QMan CCSR — `drivers/soc/fsl/qbman/qman_ccsr.c`
+### 2.3 QMan CCSR: `drivers/soc/fsl/qbman/qman_ccsr.c`
 
 | Symbol | Status | Signature |
 |--------|--------|-----------|
 | `qman_set_sdest()` | ❌ **not exported** | `void qman_set_sdest(u16 channel, unsigned int cpu_idx)` |
 | `qm_get_pools_sdqcr()` | ❌ file-scope | `u32 qm_get_pools_sdqcr(void)` |
 
-**`qman_set_sdest()` exists but lacks `EXPORT_SYMBOL`.** DPDK needs it for stash destination.
+**`qman_set_sdest()` exists but lacks `EXPORT_SYMBOL`.** DPDK needs it for stashing destination (CPU affinity for portal cache-line prefetch).
 
 ### 2.4 Portal Config Structures
 
@@ -116,7 +118,7 @@ struct qm_portal_config {
 ```
 
 **Critical gap:** Physical addresses are obtained from `platform_get_resource()` during probe
-but only used for `memremap()`/`ioremap()` — they're **not stored** in the config structures.
+but only used for `memremap()`/`ioremap()`. They are **not stored** in the config structures.
 USDPAA needs them for the `ALLOC_RAW_PORTAL` ioctl (returns phys addrs to userspace for mmap).
 
 ### 2.5 Portal Probe Flow
@@ -139,12 +141,12 @@ static int Xman_portal_probe(struct platform_device *pdev) {
 ```
 
 On LS1046A: **10 BMan portals, 10 QMan portals, 4 CPUs**.
-→ Kernel assigns 4 portals affine to CPUs, **6 portals probe'd but idle** (cpu = -1).
-These idle portals are the reservation pool for DPDK.
+Kernel assigns 4 portals affine to CPUs; **6 portals probe but sit idle** (cpu = -1).
+Those idle portals become the reservation pool for DPDK.
 
 ---
 
-## 3. Gap Analysis — What's Missing
+## 3. Gap Analysis: What's Missing
 
 | # | Gap | Severity | Patch | Lines |
 |---|-----|----------|-------|-------|
@@ -191,18 +193,18 @@ From `drivers/bus/dpaa/base/qbman/process.c` (DPDK main branch):
 
 ### 4.4 Key observations
 
-- DPDK uses `ALLOC_RAW_PORTAL (0x0C)` exclusively — NOT `PORTAL_MAP (0x07)`
+- DPDK uses `ALLOC_RAW_PORTAL (0x0C)` exclusively, NOT `PORTAL_MAP (0x07)`
 - DPDK mmaps portals via `/dev/mem`, not via the USDPAA fd
 - DMA memory IS mmap'd via the USDPAA fd (custom `usdpaa_mmap()`)
 - Link status ioctls used only during eth_dev_start/stop/link_update
-- CEETM ioctls **never used by DPDK** — safe to stub
+- CEETM ioctls **never used by DPDK**. Safe to stub.
 
 ---
 
-## 5. Patch 1 — BMan BPID Range Allocator Export
+## 5. Patch 1: BMan BPID Range Allocator Export
 
-**File:** `drivers/soc/fsl/qbman/bman.c`  
-**Lines changed:** ~20  
+**File:** `drivers/soc/fsl/qbman/bman.c`
+**Lines changed:** ~20
 **Risk:** LOW (additive only, no behavior change)
 
 ### Changes
@@ -247,10 +249,10 @@ int bm_release_bpid(u32 bpid);
 
 ---
 
-## 6. Patch 2 — BMan Portal Phys Addr + Reservation
+## 6. Patch 2: BMan Portal Phys Addr + Reservation
 
-**Files:** `drivers/soc/fsl/qbman/bman_priv.h`, `drivers/soc/fsl/qbman/bman_portal.c`  
-**Lines changed:** ~60  
+**Files:** `drivers/soc/fsl/qbman/bman_priv.h`, `drivers/soc/fsl/qbman/bman_portal.c`
+**Lines changed:** ~60
 **Risk:** MEDIUM (modifies probe path, but additive)
 
 ### 6.1 Struct extension (`bman_priv.h`)
@@ -348,10 +350,10 @@ int bm_release_bpid(u32 bpid);
 
 ---
 
-## 7. Patch 3 — QMan Portal Phys Addr + Reservation
+## 7. Patch 3: QMan Portal Phys Addr + Reservation
 
-**Files:** `drivers/soc/fsl/qbman/qman_priv.h`, `drivers/soc/fsl/qbman/qman_portal.c`  
-**Lines changed:** ~60  
+**Files:** `drivers/soc/fsl/qbman/qman_priv.h`, `drivers/soc/fsl/qbman/qman_portal.c`
+**Lines changed:** ~60
 **Risk:** MEDIUM (same pattern as Patch 2)
 
 ### 7.1 Struct extension (`qman_priv.h`)
@@ -383,14 +385,14 @@ Identical pattern to Patch 2:
 - Unaffined portals (cpu >= nr_cpu_ids) go to free list
 - `qman_portal_reserve()` / `qman_portal_release_reserved()` exported
 
-**Additional:** QMan portals have `channel` field — DPDK needs this for frame queue scheduling.
+**Additional:** QMan portals carry a `channel` field. DPDK needs this for frame queue scheduling.
 
 ---
 
-## 8. Patch 4 — QMan set_sdest Export
+## 8. Patch 4: QMan set_sdest Export
 
-**File:** `drivers/soc/fsl/qbman/qman_ccsr.c`  
-**Lines changed:** ~5  
+**File:** `drivers/soc/fsl/qbman/qman_ccsr.c`
+**Lines changed:** ~5
 **Risk:** LOW (single line addition)
 
 ```c
@@ -406,10 +408,10 @@ can include `qman_priv.h`).
 
 ---
 
-## 9. Patch 5 — fsl_usdpaa_mainline.c Module
+## 9. Patch 5: fsl_usdpaa_mainline.c Module
 
-**File:** `drivers/soc/fsl/qbman/fsl_usdpaa_mainline.c` (NEW)  
-**Lines:** ~700  
+**File:** `drivers/soc/fsl/qbman/fsl_usdpaa_mainline.c` (NEW)
+**Lines:** ~700
 **Risk:** LOW (new file, no modification to existing code paths)
 
 ### 9.1 Module structure
@@ -674,10 +676,10 @@ module_init(usdpaa_init);
 
 ---
 
-## 10. Patch 6 — DTS Reserved Memory
+## 10. Patch 6: DTS Reserved Memory
 
-**File:** `data/dtb/mono-gateway-dk.dts`  
-**Lines changed:** ~15  
+**File:** `data/dtb/mono-gateway-dk.dts`
+**Lines changed:** ~15
 **Risk:** LOW (additive DT node)
 
 Add to the existing reserved-memory node (or create one):
@@ -699,13 +701,12 @@ Add to the existing reserved-memory node (or create one):
 };
 ```
 
-**Address selection:** `0xc0000000` (3GB) is above the typical kernel mapping for 8GB RAM
-and below the 4GB boundary for DMA. The LS1046A has full 40-bit DMA addressing, so this
-is safe.
+**Address selection:** `0xc0000000` (3GB) sits above the typical kernel mapping for 8GB RAM
+and below the 4GB boundary for DMA. The LS1046A has full 40-bit DMA addressing. Safe.
 
-**Alternative:** Use CMA instead of static reserved-memory. CMA is more flexible but
-requires `CONFIG_CMA=y` and `dma_alloc_coherent()` integration. Starting with static
-reserved-memory is simpler and matches NXP SDK behavior.
+**Alternative:** CMA instead of static reserved-memory. CMA is more flexible but
+requires `CONFIG_CMA=y` and `dma_alloc_coherent()` integration. Static reserved-memory
+is simpler, matches NXP SDK behavior, and works on day one.
 
 ---
 
@@ -771,15 +772,15 @@ CONFIG_FSL_USDPAA_MAINLINE=y
 
 ### 12.1 What we DON'T need (confirmed by DPDK source analysis)
 
-- **CEETM support** — DPDK doesn't use it. Stub with `-ENOSYS`.
-- **PAMU IOMMU stashing** — LS1046A doesn't have PAMU. No-op.
-- **Legacy PORTAL_MAP (0x07)** — DPDK uses ALLOC_RAW_PORTAL exclusively. Can implement PORTAL_MAP as a wrapper.
-- **Link status interrupts** — DPDK polls link state. Stub enable/disable.
-- **32-bit compat ioctls** — arm64 DPDK is 64-bit native.
+- **CEETM support.** DPDK never touches it. Stub with `-ENOSYS`.
+- **PAMU IOMMU stashing.** LS1046A has no PAMU. No-op.
+- **Legacy PORTAL_MAP (0x07).** DPDK uses ALLOC_RAW_PORTAL exclusively. PORTAL_MAP can be a thin wrapper.
+- **Link status interrupts.** DPDK polls link state. Stub enable/disable.
+- **32-bit compat ioctls.** arm64 DPDK is 64-bit native.
 
 ---
 
-## Appendix A — Mainline vs SDK Symbol Comparison
+## Appendix A: Mainline vs SDK Symbol Comparison
 
 | SDK Function | Mainline Equivalent | Status |
 |--------------|---------------------|--------|
@@ -797,7 +798,7 @@ CONFIG_FSL_USDPAA_MAINLINE=y
 | Portal phys addr access | `platform_get_resource()` | ❌ not stored → **Patch 2+3** |
 | Portal reserve/release pool | N/A | ❌ doesn't exist → **Patch 2+3** |
 
-## Appendix B — DPDK ioctl Header ABI
+## Appendix B: DPDK ioctl Header ABI
 
 The USDPAA ioctl numbers and structures must match exactly. DPDK's
 `drivers/bus/dpaa/include/fsl_usd.h` defines:
@@ -820,4 +821,4 @@ The USDPAA ioctl numbers and structures must match exactly. DPDK's
 ```
 
 **The ioctl magic ('u'), numbers (0x01-0x14), and structure layouts MUST be binary-compatible
-with NXP's `fsl_usdpaa.h`.** Our module provides the same ABI, different implementation.
+with NXP's `fsl_usdpaa.h`.** Same ABI, different implementation. That is the entire premise.

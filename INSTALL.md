@@ -1,173 +1,222 @@
-# Installing VyOS on Mono Gateway
+# Install Guide — VyOS on Mono Gateway DK (LS1046A)
 
-## What You Need
+## Overview
 
-- USB drive (≥ 2 GB, will be overwritten)
-- [Latest ISO](https://github.com/mihakralj/vyos-ls1046a-build/releases/latest) — `vyos-*-LS1046A-arm64.iso`
-- Serial console at **115200 8N1**
+The install process uses two separate artifacts:
 
-> **Use only ISOs from this repository.** Generic VyOS ARM64 ISOs lack the
-> LS1046A kernel drivers and will boot with no networking and no eMMC.
+| Artifact | Use case |
+|----------|---------|
+| `vyos-...-LS1046A-arm64-usb.img.zst` | **Initial install** — write to USB, boot, run `install image` |
+| `vyos-...-LS1046A-arm64.iso` | **Upgrade only** — passed to `add system image <url>` |
+
+U-Boot reads FAT32. The USB image is a raw FAT32 filesystem — write it with `dd` and U-Boot reads it directly. Never use the ISO for USB boot.
 
 ---
 
-## 1. Write ISO to USB
+## Requirements
 
-**Windows (Rufus):** Select USB → SELECT iso → MBR → START → ISO Image mode
+- USB flash drive ≥ 4 GB
+- Serial console access: USB-to-serial adapter, **115200 8N1**, connected to the Mono Gateway's RJ45 console port
+- Linux, macOS, or Windows (Rufus) host
 
-**Linux / macOS:**
+---
+
+## Step 1 — Write USB boot image
+
+Download the latest `vyos-...-LS1046A-arm64-usb.img.zst` from [Releases](https://github.com/mihakralj/vyos-ls1046a-build/releases).
+
+### Linux / macOS
 
 ```bash
-sudo dd if=vyos-*-LS1046A-arm64.iso of=/dev/sdX bs=4M status=progress && sync
+# Decompress
+zstd -d vyos-*-LS1046A-arm64-usb.img.zst
+
+# Find your USB device (e.g. /dev/sdb or /dev/disk2)
+lsblk        # Linux
+diskutil list  # macOS
+
+# Write (replace /dev/sdX with your USB device — NOT a partition)
+sudo dd if=vyos-*-LS1046A-arm64-usb.img of=/dev/sdX bs=4M status=progress
+sync
 ```
 
-## 2. in U-Boot - Boot VyOS Live from USB
+### Windows (Rufus)
 
-Insert USB, power on, press **any key** during U-Boot countdown.
+1. Download [Rufus](https://rufus.ie/)
+2. Select the `.img.zst` file
+3. When Rufus asks for the write mode, choose **DD Image** (not ISO Image)
+4. Click Start
 
-> **Returning users:** If U-Boot is already configured (you've previously
-> installed VyOS with `usb_vyos` set), just insert the USB and power on —
-> U-Boot auto-detects the USB and boots VyOS Live. Skip to step 3.
+> **Critical:** Rufus "ISO Image" mode restructures the filesystem. DD mode writes it byte-for-byte as U-Boot expects.
 
-> **Optional — wipe eMMC** (removes OpenWrt or any previous OS):
+---
 
-> ```uboot
-> mmc dev 0 && mmc erase 0 0x10000
+## Step 2 — Boot from USB
+
+1. Insert the USB drive into the Mono Gateway
+2. Connect serial console (115200 8N1)
+3. Power on the board
+
+U-Boot will try USB first (`run usb_vyos`). Watch the serial console — you should see:
+
+```
+U-Boot ...
+...
+Hit any key to stop autoboot:  3
+...
+USB:   USB0:  scanning bus 0 for devices... 1 USB Device(s) found
+...
+Loading: vmlinuz ... done
+Loading: mono-gw.dtb ... done
+Loading: initrd.img ... done
+...
+[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x410fd083]
+```
+
+VyOS will boot in live mode. Login with:
+
+- **Username:** `vyos`
+- **Password:** `vyos`
+
+**On first USB boot,** the U-Boot SPI flash environment is configured automatically — `bootcmd`, `vyos_direct`, and `usb_vyos` are written to SPI NOR. This is the one-time setup that makes all future eMMC boots work without any U-Boot console interaction.
+
+> **If U-Boot doesn't boot from USB automatically** (board still has factory OpenWrt env), interrupt the boot countdown and type at the U-Boot prompt:
 > ```
-> This erases the first 32 MB of eMMC (partition table + headers). Takes ~1 second.
+> run usb_vyos
+> ```
+> If `usb_vyos` is also not set, see [Manual U-Boot console setup](#manual-u-boot-console-setup) at the end of this guide.
 
-Paste the live USB boot command:
+---
 
-``` uboot
-usb start; setenv bootargs "console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda1 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 quiet"; fatload usb 0:1 ${kernel_addr_r} live/vmlinuz; fatload usb 0:1 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:1 ${ramdisk_addr_r} live/initrd.img; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
+## Step 3 — Install to eMMC
+
+From the live VyOS shell:
+
 ```
-
-Wait 60–90 seconds for VyOS login prompt.
-
-> **If `fatload` says "File not found":** run `fatls usb 0:1 live` — if the
-> kernel has a version suffix (e.g. `vmlinuz-6.6.128-vyos`), use the full name.
-
-## 3. in VyOS Live - Install VyOS to eMMC
-
-Login `vyos` / `vyos`, then:
-
-``` bash
 install image
 ```
 
-Accept defaults for most prompts. When asked:
+The installer uses the squashfs already on the USB — **no internet download needed**. Follow the prompts:
 
-- **RAID-1 mirroring:** `n`
-- **Console type:** `S` (serial)
-- **Which disk:** `/dev/mmcblk0`
+- Select installation target: `sda` is the USB (don't use this), `mmcblk0` is the eMMC — select `mmcblk0`
+- Enter a root password
+- Accept defaults for the rest
 
-Wait 2–4 minutes. The installer automatically:
-- Copies the DTB to the boot directory
-- Writes `/boot/vyos.env` (tells U-Boot which image to boot)
-- Sets up U-Boot environment via `fw_setenv` (one-time, on first install)
-
-## 4. Reboot into eMMC
-
-Remove the USB drive and reboot:
-
-``` bash
-reboot
-```
-
-U-Boot auto-boots into VyOS on eMMC. No manual U-Boot commands needed.
-
-> **All subsequent reboots are automatic.** U-Boot reads `/boot/vyos.env`
-> to find the default image. After upgrades, this file is updated automatically.
-
-## 5. Initial Config
-
-The default config includes DHCP on all interfaces and SSH enabled.
-Login `vyos` / `vyos`.
-
-No manual configuration needed for basic connectivity.
+After installation completes, the system automatically:
+- Writes `/boot/vyos.env` on eMMC p3 pointing to the new image
+- Confirms U-Boot SPI flash env is configured (already done in Step 2)
 
 ---
 
-## Network Interfaces
+## Step 4 — Reboot from eMMC
 
-Physical port order on the back panel:
+Remove the USB drive and reboot:
 
-| Port | VyOS | Type | Notes |
-|------|------|------|-------|
-| RJ45 Left | `eth0` | 1G SGMII | GPY115C PHY |
-| RJ45 Center | `eth1` | 1G SGMII | GPY115C PHY |
-| RJ45 Right | `eth2` | 1G SGMII | GPY115C PHY |
-| SFP+ Left | `eth3` | 10G XFI | SFP-10G-T, SFP-10G-SR/LR |
-| SFP+ Right | `eth4` | 10G XFI | SFP-10G-T, SFP-10G-SR/LR |
+```
+reboot
+```
 
-All interfaces are preconfigured with DHCP in the default config.
+**U-Boot boot sequence:**
 
-### SFP+ Port Notes
+1. `run usb_vyos` — fails (no USB) → falls through
+2. `run vyos_direct` — reads `/boot/vyos.env` from eMMC p3 → loads `vmlinuz`, `mono-gw.dtb`, `initrd.img` → `booti` ✓
 
-- **SFP-10G-T copper modules** negotiate any speed (10G/5G/2.5G/1G) via the internal RTL8261 rollball PHY. Rate adaptation between the 10G host XFI lane and the copper link speed happens inside the module — verified working at 1G with a 1G switch
-- **SFP-10G-SR/LR fiber modules** work at 10G only (fixed 10GBASE-R)
-- **1G SFP modules** (SFP-GE-T, SFP-GE-SX) are **not compatible** — the kernel rejects them with `"unsupported SFP module"` because the MAC only advertises 10GBASE-R mode
-- **SFP-10G-T boot delay**: Rollball PHY negotiation takes **~17 minutes** after boot. The interface shows `u/D` during this period — this is normal, not a failure
-- **Hot-plug after failure**: If you swap an incompatible SFP for a compatible one, bounce the interface: `sudo ip link set eth3 down && sudo ip link set eth3 up`
+VyOS will boot from eMMC. Login with the password you set during install.
 
 ---
 
 ## Upgrading
 
-``` bash
-add system image https://github.com/mihakralj/vyos-ls1046a-build/releases/download/<version>/vyos-<version>-LS1046A-arm64.iso
+Use `add system image` with the ISO URL (not the USB image):
+
+```
+add system image https://github.com/mihakralj/vyos-ls1046a-build/releases/latest/download/vyos-YYYY.MM.DD-HHMM-rolling-LS1046A-arm64.iso
+```
+
+After the upgrade completes, `/boot/vyos.env` is automatically updated to the new image name. Reboot when ready:
+
+```
+set system image default-boot <new-image-name>
 reboot
 ```
 
-The image installer automatically updates `/boot/vyos.env` so U-Boot boots the
-new image on next reboot. No manual `vyos-postinstall` needed.
+---
 
-> **USB re-install:** After initial setup, insert a USB with the new ISO and
-> power cycle — U-Boot auto-detects the USB and boots VyOS Live. No U-Boot
-> interaction required.
+## eMMC Partition Layout
 
-> **NEVER run `install image` from an installed system.** It repartitions the
-> eMMC and then fails because `/usr/lib/live/mount/medium/live/filesystem.squashfs`
-> does not exist outside of a USB live session. The result is a **destroyed eMMC**
-> requiring USB live boot recovery.  Use `add system image` for all upgrades.
+After `install image`, the Mono Gateway eMMC (`mmcblk0`) has:
+
+| Partition | U-Boot ref | Type | Contents |
+|-----------|-----------|------|---------|
+| p1 | `mmc 0:1` | Raw (1 MiB) | BIOS boot gap — no filesystem |
+| *(gap)* | — | 16 MiB unallocated | U-Boot environment (SPI NOR, not eMMC) |
+| p2 | `mmc 0:2` | FAT32 (256 MiB) | EFI partition — exists but unused on this board |
+| **p3** | **`mmc 0:3`** | **ext4** | **VyOS root — kernel, DTB, initrd, squashfs** |
+
+`/boot/vyos.env` lives on p3 (ext4). U-Boot loads it with `ext4load mmc 0:3`.
 
 ---
 
-## Recovery
+## Boot Variable Reference
 
-### Missing DTB
+| U-Boot variable | Purpose |
+|----------------|---------|
+| `bootcmd` | `run usb_vyos \|\| run vyos_direct \|\| run recovery` |
+| `usb_vyos` | FAT32 USB live boot — loads `live/vmlinuz`, `mono-gw.dtb`, `live/initrd.img` |
+| `vyos_direct` | eMMC boot — reads `/boot/vyos.env`, loads image, calls `booti` |
+| `recovery` | SPI NOR fallback — loads factory firmware |
 
-If U-Boot can't find the DTB, it drops to SPI flash recovery Linux.
-Log in as `root` (no password):
+| Address variable | Value | Role |
+|-----------------|-------|------|
+| `kernel_addr_r` | `0x82000000` | Kernel `Image` load address |
+| `fdt_addr_r` | `0x88000000` | DTB load address |
+| `ramdisk_addr_r` | `0x88080000` | initrd load address |
+| `load_addr` | `0xa0000000` | Scratch (used for `vyos.env` import) |
 
-```bash
-mount /dev/mmcblk0p3 /mnt
-IMG=$(ls /mnt/boot/ | grep -vE 'grub|efi|lost' | head -1)
-cp /sys/firmware/fdt /mnt/boot/${IMG}/mono-gw.dtb
-sync && umount /mnt && reboot
+---
+
+## Manual U-Boot Console Setup
+
+**Use this only if** the board fails to boot from USB automatically, or if U-Boot still has the factory OpenWrt env (no `vyos_direct` variable referencing `vyos.env`).
+
+Connect the serial console, interrupt the boot countdown (press any key), then paste these commands at the `=>` prompt:
+
+```
+setenv vyos_direct 'ext4load mmc 0:3 ${load_addr} /boot/vyos.env; env import -t ${load_addr} ${filesize}; ext4load mmc 0:3 ${kernel_addr_r} /boot/${vyos_image}/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/${vyos_image}/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/${vyos_image}/initrd.img; setenv bootargs "BOOT_IMAGE=/boot/${vyos_image}/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 hugepagesz=2M hugepages=512 panic=60 vyos-union=/boot/${vyos_image}"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
+
+setenv usb_vyos 'usb start; if fatload usb 0:1 ${kernel_addr_r} live/vmlinuz; then fatload usb 0:1 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:1 ${ramdisk_addr_r} live/initrd.img; setenv bootargs "BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda1 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 quiet"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}; fi'
+
+setenv bootcmd 'run usb_vyos || run vyos_direct || run recovery'
+
+saveenv
+reset
 ```
 
-### Destroyed eMMC (ran `install image` from installed system)
+### Emergency eMMC boot (one-shot, no saveenv)
 
-If `install image` was run from an eMMC-installed VyOS (not from USB live),
-the eMMC is repartitioned but empty. Recovery requires a **full USB reinstall**:
+If VyOS is installed but `vyos.env` is missing or corrupt, boot manually. First find the image name:
 
-1. Download the [latest ISO](https://github.com/mihakralj/vyos-ls1046a-build/releases/latest)
-2. Write to USB with Rufus (ISO Image mode) or `dd`
-3. Boot from USB via U-Boot — follow steps 1–5 above
-4. `install image` from the USB live session installs fresh to eMMC
+```
+ext4ls mmc 0:3 /boot
+```
+
+Then boot (replace `2026.03.27-0142-rolling` with the directory name you saw):
+
+```
+setenv vyos_image 2026.03.27-0142-rolling
+ext4load mmc 0:3 ${kernel_addr_r} /boot/${vyos_image}/vmlinuz
+ext4load mmc 0:3 ${fdt_addr_r} /boot/${vyos_image}/mono-gw.dtb
+ext4load mmc 0:3 ${ramdisk_addr_r} /boot/${vyos_image}/initrd.img
+setenv bootargs "BOOT_IMAGE=/boot/${vyos_image}/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 hugepagesz=2M hugepages=512 panic=60 vyos-union=/boot/${vyos_image}"
+booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
+```
+
+Once VyOS boots, reboot normally — the U-Boot environment and `vyos.env` are fixed automatically on the next clean boot.
 
 ---
 
-## Troubleshooting
+## See Also
 
-| Symptom | Fix |
-|---------|-----|
-| USB not detected | `usb reset`, or try USB 2.0 drive |
-| Silent after "Starting kernel..." | Verify `earlycon=uart8250,mmio,0x21c0500` in bootargs |
-| No networking | Wrong ISO — use only ISOs from this repo |
-| Upgrade boots old image | Check `/boot/vyos.env` contains correct `vyos_image=`. If missing, run `sudo vyos-postinstall` |
-| `fw_setenv` warning during install | Non-fatal — `vyos-postinstall.service` retries on boot. Only needed once for initial U-Boot setup |
-| SFP shows `u/D` for 17 min | Normal — rollball PHY negotiation (SFP-10G-T only) |
-| SFP "unsupported module" | Only 10G SFP modules work — replace with SFP-10G-SR/T/LR |
-| `install image` failed, eMMC empty | See "Destroyed eMMC" recovery above |
+- **[BOOT-PROCESS.md](BOOT-PROCESS.md)** — Complete technical specification: U-Boot variable definitions, annotated boot sequences for both USB and eMMC paths, `vyos.env` write paths, DTB delivery, kexec prevention, SPI NOR layout, and all documented failure modes
+- **[UBOOT.md](UBOOT.md)** — U-Boot serial console reference: memory map, working boot commands, clock tree, MTD layout
+- **[PORTING.md](PORTING.md)** — Why 13 things were broken and how each was fixed

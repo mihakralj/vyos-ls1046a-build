@@ -133,13 +133,11 @@ index XXXXXXX..XXXXXXX 100644
 +	spin_unlock(&qman_free_lock);
 +
 +	/*
-+	 * Unmap kernel CE mapping to avoid ARM64 memory attribute conflict.
-+	 * Same rationale as bman_portal_reserve().
++	 * NOTE: Do NOT unmap kernel CE mapping here.
++	 * Same rationale as bman_portal_reserve() — see patch 0002.
++	 * Unmapping destabilizes vmalloc and crashes affine portals.
++	 * Reserved portals are never accessed by kernel code.
 +	 */
-+	if (pcfg->addr_virt_ce) {
-+		memunmap(pcfg->addr_virt_ce);
-+		pcfg->addr_virt_ce = NULL;
-+	}
 +
 +	*pcfg_out = pcfg;
 +	return 0;
