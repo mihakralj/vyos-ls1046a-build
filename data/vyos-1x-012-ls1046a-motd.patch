@@ -1,0 +1,19 @@
+--- a/data/templates/login/default_motd.j2
++++ b/data/templates/login/default_motd.j2
+@@ -1,4 +1,4 @@
+-Welcome to VyOS!
++Welcome to VyOS (ARM64 / NXP LS1046A)
+ 
+    ┌── ┐
+    . VyOS {{ version_data.version }}
+@@ -8,6 +8,10 @@
+ {% if version_data.lts_build %}
+  * Support portal: {{ version_data.support_url }}
+ {% endif %}
++
++   Architecture:  {{ version_data.architecture }} - NXP LS1046A
++   Patches:       DPAA1 FMan, CAAM/SEC5, custom DTB
++
+  * Documentation:  {{ version_data.documentation_url }}
+  * Project news:   {{ version_data.project_news_url }}
+  * Bug reports:    {{ version_data.bugtracker_url }}
