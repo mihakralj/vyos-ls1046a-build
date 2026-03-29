@@ -525,9 +525,9 @@ jobs:
           fi
           ### Create FAT32 USB boot image
           # U-Boot reads FAT32 natively. ISO9660 requires Rufus workarounds.
-          # This image is written with: dd if=vyos-*-usb.img of=/dev/sdX bs=4M
-          # Windows: Rufus → select .img.zst → DD Image mode (NOT ISO mode)
-          # Layout: /live/{vmlinuz,initrd.img,filesystem.squashfs} + /mono-gw.dtb
+          # Linux/macOS: dd if=vyos-*-usb.img of=/dev/sdX bs=4M
+          # Windows: Rufus → select .img → DD Image mode (NOT ISO mode)
+          # Layout: /live/{vmlinuz,initrd.img,filesystem.squashfs} + /mono-gw.dtb + /boot.scr
           USB_IMG="${IMAGE_NAME}-usb.img"
           mkdir -p /tmp/iso-mount
           mount -o loop "$IMAGE_ISO" /tmp/iso-mount
@@ -552,18 +552,17 @@ jobs:
           mcopy -i "$USB_IMG" /tmp/boot.scr ::boot.scr
 
           umount /tmp/iso-mount
-          zstd -9 "$USB_IMG" -o "${USB_IMG}.zst" && rm -f "$USB_IMG"
           if [ -f "$MINISIGN_SECKEY_FILE" ]; then
-            $GITHUB_WORKSPACE/bin/minisign -s $MINISIGN_SECKEY_FILE -Sm "${USB_IMG}.zst"
-            $GITHUB_WORKSPACE/bin/minisign -Vm "${USB_IMG}.zst" -x "${USB_IMG}.zst.minisig" -p $MINISIGN_PUBKEY_FILE
+            $GITHUB_WORKSPACE/bin/minisign -s $MINISIGN_SECKEY_FILE -Sm "${USB_IMG}"
+            $GITHUB_WORKSPACE/bin/minisign -Vm "${USB_IMG}" -x "${USB_IMG}.minisig" -p $MINISIGN_PUBKEY_FILE
           else
-            echo "fake sign" > "${USB_IMG}.zst.minisig"
+            echo "fake sign" > "${USB_IMG}.minisig"
           fi
-          echo "usb_img=${USB_IMG}.zst" >> $GITHUB_OUTPUT
+          echo "usb_img=${USB_IMG}" >> $GITHUB_OUTPUT
 
           # Move all artifacts to workspace
           mv manifest.json ${IMAGE_ISO} ${IMAGE_ISO}.minisig \
-             "${USB_IMG}.zst" "${USB_IMG}.zst.minisig" $GITHUB_WORKSPACE
+             "${USB_IMG}" "${USB_IMG}.minisig" $GITHUB_WORKSPACE
 
       - uses: actions/upload-artifact@v7
         with:
@@ -709,10 +708,10 @@ jobs:
           tag_name: ${{ needs.build_iso.outputs.build_version }}
           fail_on_unmatched_files: false
           files: |
-            ${{ needs.build_iso.outputs.image_iso }}
-            ${{ needs.build_iso.outputs.image_iso }}.minisig
-            vyos-*-usb.img.zst
-            vyos-*-usb.img.zst.minisig
+            ${{ steps.build_iso.outputs.image_iso }}
+            ${{ steps.build_iso.outputs.image_iso }}.minisig
+            vyos-*-usb.img
+            vyos-*-usb.img.minisig
             vyos-packages.tar
 
       - uses: dev-drprasad/delete-older-releases@v0.3.4
