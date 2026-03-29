@@ -1060,12 +1060,9 @@ Portal window sizes are hardcoded to `0x4000` (16KB) matching `qoriq-qman-portal
 
 | Patch | Target | What It Does | Why |
 |-------|--------|-------------|-----|
-| [`0001`](../data/kernel-patches/0001-bman-export-bpid-range-allocator.patch) | `bman.c`, `bman_priv.h` | Export `bm_alloc_bpid_range()`, `bm_release_bpid()`, add `bm_free_bpid_range()` | USDPAA needs BPID range allocation; mainline only had `bman_new_pool()` |
-| [`0002`](../data/kernel-patches/0002-bman-portal-phys-addr-reservation.patch) | `bman_portal.c`, `bman_priv.h` | BMan portal phys addr storage + `bman_portal_reserve()` + CE `memunmap()` | USDPAA needs portal physical addresses and exclusive reservation |
-| [`0003`](../data/kernel-patches/0003-qman-portal-phys-addr-reservation.patch) | `qman_portal.c`, `qman_priv.h` | QMan portal phys addr storage + `qman_portal_reserve()` + CE `memunmap()` | Same for QMan portals |
-| [`0004`](../data/kernel-patches/0004-qman-export-sdest-and-allocator-frees.patch) | `qman_ccsr.c`, `qman.c`, `qman_priv.h`, `qman.h` | Export `qman_set_sdest()` + add allocator-only free functions | Root cause #15: `qman_release_fqid()` → translation fault; need allocator-only frees |
-| [`0005`](../data/kernel-patches/0005-fsl-usdpaa-mainline-driver.patch) | `Kconfig`, `Makefile` | `CONFIG_FSL_USDPAA_MAINLINE` + source file reference | Build system integration for the USDPAA driver |
-| [`0006`](../data/kernel-patches/0006-dts-ls1046a-usdpaa-reserved-mem.patch) | `mono-gateway-dk.dts` | 256MB `fsl,usdpaa-mem` reserved-memory at `0xc0000000` | DPDK DMA buffer pool. Must be `nomap` (not CMA) |
+| [`0001`](../data/kernel-patches/0001-usdpaa-bman-qman-exports-and-driver.patch) | `bman.c`, `bman_priv.h`, `bman_portal.c`, `qman.c`, `qman_ccsr.c`, `qman_portal.c`, `qman_priv.h`, `qman.h`, `Kconfig`, `Makefile` | Export BMan/QMan symbols, portal phys addr storage + reservation, allocator-only frees, `CONFIG_FSL_USDPAA_MAINLINE` | Combined patch (was 0001-0005); verified `patch -p1 --dry-run` clean |
+| — | [`fsl_usdpaa_mainline.c`](../data/kernel-patches/fsl_usdpaa_mainline.c) | 1453-line `/dev/fsl-usdpaa` + `/dev/fsl-usdpaa-irq` chardev driver | Copied separately (too large for unified diff) |
+| [`0006`](../data/kernel-patches/0006-dts-ls1046a-usdpaa-reserved-mem.patch) | `mono-gateway-dk.dts` | 256MB `fsl,usdpaa-mem` reserved-memory at `0xc0000000` | Already applied in DTS; kept for reference |
 
 ### 13.6 Gaps Resolved (vs §12)
 

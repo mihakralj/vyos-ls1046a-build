@@ -3,9 +3,11 @@
 #
 # Root cause #27: VPP mempool ops="vpp" but DPAA PMD requires ops="dpaa"
 # Root cause #28: VPP driver.c missing "net_dpaa" entry
+# Root cause #29: Mempool creation must happen BEFORE dpdk_lib_init() so
+#                 BMan pool exists when DPAA devices probe during EAL init
 #
 # Run on LXC 200 against /opt/vyos-dev/vpp source tree
-# Patches 1-4 applied in previous run; this version fixes patches 5-7
+# 7 patches across 4 files: driver.c, dpdk.h, init.c, common.c
 
 set -euo pipefail
 
@@ -88,49 +90,29 @@ else
     cat > /tmp/dpaa_mempool_func.c << 'CFUNC'
 
 /* DPAA1 BMan mempool: create hardware buffer pool for DPAA PMD devices.
- * Called after dpdk_lib_init() detects DPAA devices.
- * Uses rte_pktmbuf_pool_create() with ops="dpaa" which triggers
+ * MUST be called BEFORE dpdk_lib_init() so the BMan pool exists when
+ * DPAA devices probe during EAL init (root cause #29).
+ * Uses rte_pktmbuf_pool_create_by_ops() with ops="dpaa" which triggers
  * dpaa_mbuf_create_pool() -> bman_new_pool() -> allocates HW BPID.
- * FMan DMA writes received packets into these BMan-managed buffers. */
+ * FMan DMA writes received packets into these BMan-managed buffers.
+ *
+ * No device check needed: if "dpaa" mempool ops aren't registered
+ * (non-DPAA platform), create_by_ops() returns NULL harmlessly. */
 static void
 dpdk_dpaa_mempool_create (dpdk_main_t *dm)
 {
-  dpdk_device_t *xd;
-  int has_dpaa = 0;
-
-  /* Check if any DPAA devices were found */
-  vec_foreach (xd, dm->devices)
-    {
-      if (xd->flags & DPDK_DEVICE_FLAG_IS_DPAA)
-        {
-          has_dpaa = 1;
-          break;
-        }
-    }
-
-  if (!has_dpaa)
-    return;
-
-  dpdk_log_notice ("DPAA1 devices found, creating BMan hardware mempool");
-
-  /* Set default mbuf pool ops to "dpaa" so rte_pktmbuf_pool_create
-   * uses BMan hardware buffer management */
-  rte_mbuf_set_pool_ops_name ("dpaa");
-
-  dm->dpaa_mempool = rte_pktmbuf_pool_create (
-    "dpaa_vpp_pool",  /* name */
-    4096,              /* n mbufs */
-    256,               /* cache_size */
-    0,                 /* priv_size: dpaa ops fill pool_data */
-    RTE_MBUF_DEFAULT_BUF_SIZE, /* data_room_size */
-    0);                /* socket_id */
-
-  /* Reset default pool ops */
-  rte_mbuf_set_pool_ops_name (NULL);
+  dm->dpaa_mempool = rte_pktmbuf_pool_create_by_ops (
+    "dpaa_vpp_pool",           /* name */
+    4096,                       /* n mbufs */
+    256,                        /* cache_size */
+    0,                          /* priv_size: dpaa ops fill pool_data */
+    RTE_MBUF_DEFAULT_BUF_SIZE,  /* data_room_size */
+    0,                          /* socket_id */
+    "dpaa");                    /* ops_name: BMan HW pool */
 
   if (!dm->dpaa_mempool)
-    dpdk_log_err ("Failed to create DPAA mempool: %s",
-                  rte_strerror (rte_errno));
+    dpdk_log_notice ("DPAA mempool not created (no DPAA platform): %s",
+                     rte_strerror (rte_errno));
   else
     dpdk_log_notice ("DPAA BMan mempool created: %u buffers",
                      dm->dpaa_mempool->size);
@@ -145,13 +127,13 @@ CFUNC
     sed -i "${LAST_INCLUDE}r /tmp/dpaa_mempool_func.c" "${INIT}"
     log "  Inserted dpdk_dpaa_mempool_create() after line ${LAST_INCLUDE}"
 
-    # Now add the call after dpdk_lib_init
+    # Add the call BEFORE dpdk_lib_init (root cause #29: pool must exist during probe)
     # Use sed with alternate delimiter to avoid slash issues
-    sed -i '/error = dpdk_lib_init (dm);/a\
-\
-  /* Create DPAA BMan mempool if DPAA devices were detected */\
-  dpdk_dpaa_mempool_create (dm);' "${INIT}"
-    log "  Added dpdk_dpaa_mempool_create() call after dpdk_lib_init"
+    sed -i '/error = dpdk_lib_init (dm);/i\
+  /* Create DPAA BMan mempool BEFORE device init (root cause #29) */\
+  dpdk_dpaa_mempool_create (dm);\
+' "${INIT}"
+    log "  Added dpdk_dpaa_mempool_create() call BEFORE dpdk_lib_init"
 
     rm -f /tmp/dpaa_mempool_func.c
 fi

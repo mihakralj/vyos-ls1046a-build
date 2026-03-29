@@ -7,6 +7,8 @@ Entries are factual. The humor is in the bugs.
 ## Unreleased
 
 ### Added
+- **USDPAA kernel module in CI build**: `CONFIG_FSL_USDPAA_MAINLINE=y` added to kernel defconfig. Consolidated kernel patch (`9001-usdpaa-bman-qman-exports-and-driver.patch`, 428 lines) replaces old template patches 0001–0005. Exports BMan/QMan symbols, adds portal reservation API, builds `/dev/fsl-usdpaa` chardev for DPDK DPAA1 PMD userspace access. `fsl_usdpaa_mainline.c` (1453 lines) injected into kernel tree during build via sed hook on `build-kernel.sh`
+- **VPP DPAA mempool ordering fix**: `bin/patch-vpp-dpaa-mempool.sh` updated with root cause #29 — BMan mempool must be created BEFORE `dpdk_lib_init()` so the pool exists when DPAA devices probe during EAL init. Uses `rte_pktmbuf_pool_create_by_ops("dpaa")` instead of checking `dm->devices` (empty before init)
 - **VyOS native VPP integration**: `vyos-1x-010-vpp-platform-bus.patch` patches VyOS's `set vpp` CLI to support DPAA1 platform-bus NICs via AF_XDP. Auto-detects `fsl_dpa` driver → XDP mode (not DPDK). Enables `af_xdp_plugin.so`, disables `dpdk_plugin.so` when no PCI NICs present. Lowers resource minimums for embedded ARM64 (2 CPUs, 256M heap)
 - Default config: `hugepage-size 2M hugepage-count 512` (1024MB) — pre-allocated for VPP memory (heap + statseg + buffers on 2M pages)
 - VPP is **off by default** — users enable via `set vpp settings interface eth3` etc. in VyOS configurator. Patch 010 enables the capability; default config only pre-allocates hugepages

@@ -254,6 +254,7 @@ Once VyOS boots, reboot normally — the U-Boot environment and `vyos.env` are f
 
 ## See Also
 
+- **[FIRMWARE.md](FIRMWARE.md)** — Board firmware update (NOR + eMMC flash procedure, partition offset details, recovery)
 - **[BOOT-PROCESS.md](BOOT-PROCESS.md)** — Complete technical specification: U-Boot variable definitions, annotated boot sequences for both USB and eMMC paths, `vyos.env` write paths, DTB delivery, kexec prevention, SPI NOR layout, and all documented failure modes
 - **[UBOOT.md](UBOOT.md)** — U-Boot serial console reference: memory map, working boot commands, clock tree, MTD layout
 - **[PORTING.md](PORTING.md)** — Why 13 things were broken and how each was fixed

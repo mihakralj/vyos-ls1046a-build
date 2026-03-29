@@ -184,7 +184,32 @@ jobs:
             '# === Board peripherals (fan, thermal, RTC, power sensors) ===' \
             'CONFIG_SENSORS_EMC2305=y' \
             'CONFIG_RTC_DRV_PCF2127=y' \
+            '# === DPDK USDPAA support (userspace DPAA1 for 10G PMD) ===' \
+            'CONFIG_FSL_USDPAA_MAINLINE=y' \
             >> "$DEFCONFIG"
+
+          ### USDPAA kernel patches: BMan/QMan exports + /dev/fsl-usdpaa chardev
+          # Single combined patch: exports BMan/QMan symbols, adds portal
+          # reservation, and adds Kconfig/Makefile for fsl_usdpaa_mainline.
+          # fsl_usdpaa_mainline.c is copied separately (1453 lines, too large
+          # for a unified diff). DTS reserved-memory is in mono-gateway-dk.dts.
+          KERNEL_BUILD=vyos-build/scripts/package-build/linux-kernel
+          KERNEL_PATCHES="$KERNEL_BUILD/patches/kernel"
+          mkdir -p "$KERNEL_PATCHES"
+          cp data/kernel-patches/9001-usdpaa-bman-qman-exports-and-driver.patch "$KERNEL_PATCHES/"
+          # Stage the USDPAA source file for copy into kernel tree during build.
+          # build-kernel.sh applies patches from patches/kernel/ then runs make.
+          # We inject a cp command after the patch loop to place the .c file.
+          cp data/kernel-patches/fsl_usdpaa_mainline.c "$KERNEL_BUILD/"
+          # Inject .c file copy after the kernel patch loop in build-kernel.sh.
+          # Target: the line "# Change name of Signing Cert" which follows the patch done
+          sed -i '/# Change name of Signing Cert/i\
+# Copy USDPAA mainline driver source (too large for unified diff)\
+if [ -f "${CWD}/fsl_usdpaa_mainline.c" ]; then\
+  echo "I: Copy fsl_usdpaa_mainline.c to drivers/soc/fsl/qbman/"\
+  cp "${CWD}/fsl_usdpaa_mainline.c" drivers/soc/fsl/qbman/fsl_usdpaa_mainline.c\
+fi\
+' "$KERNEL_BUILD/build-kernel.sh"
 
           ### Remove --uefi-secure-boot from grub-install
           # U-Boot boots via booti (not bootefi) so no EFI runtime is present.

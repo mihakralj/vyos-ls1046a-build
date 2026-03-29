@@ -749,12 +749,9 @@ CONFIG_FSL_USDPAA_MAINLINE=y
 ### 11.4 Patch application order
 
 ```
-1. data/kernel-patches/0001-bman-export-bpid-range-allocator.patch
-2. data/kernel-patches/0002-bman-portal-phys-addr-reservation.patch
-3. data/kernel-patches/0003-qman-portal-phys-addr-reservation.patch
-4. data/kernel-patches/0004-qman-ccsr-export-set-sdest.patch
-5. data/kernel-patches/0005-fsl-usdpaa-mainline-driver.patch
-6. data/kernel-patches/0006-dts-ls1046a-usdpaa-reserved-mem.patch
+1. data/kernel-patches/0001-usdpaa-bman-qman-exports-and-driver.patch  (combined: BMan/QMan exports, portal reservation, Kconfig/Makefile)
+2. data/kernel-patches/fsl_usdpaa_mainline.c                           (copied separately into drivers/soc/fsl/qbman/ during build)
+3. data/kernel-patches/0006-dts-ls1046a-usdpaa-reserved-mem.patch      (already applied in mono-gateway-dk.dts, kept for reference)
 ```
 
 ---

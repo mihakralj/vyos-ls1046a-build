@@ -154,13 +154,9 @@ A 6-patch series adds `/dev/fsl-usdpaa` chardev support to **mainline** kernel 6
 | `plans/USDPAA-IOCTL-SPEC.md` | Complete NXP USDPAA ioctl ABI spec (20 ioctls, all structs, mmap, cleanup) |
 | `plans/fsl_usdpaa.c` | NXP SDK reference source (2,623 lines — read-only reference, not used in build) |
 | `plans/fsl_usdpaa.h` | NXP SDK ioctl header (read-only reference for ABI compatibility verification) |
-| `data/kernel-patches/0001-*.patch` | Export `bm_alloc_bpid_range()` + `bm_release_bpid()`, add `bm_free_bpid_range()` (allocator-only) from bman.c |
-| `data/kernel-patches/0002-*.patch` | BMan portal phys addr storage + `bman_portal_reserve()` reservation pool |
-| `data/kernel-patches/0003-*.patch` | QMan portal phys addr storage + `qman_portal_reserve()` reservation pool |
-| `data/kernel-patches/0004-*.patch` | `EXPORT_SYMBOL(qman_set_sdest)` + `qman_free_fqid_range/pool_range/cgrid_range()` allocator-only frees in qman.c + qman.h |
-| `data/kernel-patches/0005-*.patch` | Kconfig + Makefile for `CONFIG_FSL_USDPAA_MAINLINE` module |
-| `data/kernel-patches/fsl_usdpaa_mainline.c` | Clean `/dev/fsl-usdpaa` + `/dev/fsl-usdpaa-irq` chardevs (1453 lines, 20 ioctls, NXP ABI-compatible, allocator-only cleanup) |
-| `data/kernel-patches/0006-*.patch` | DTS reserved-memory node (256MB CMA @ 0xc0000000) for DPDK DMA |
+| `data/kernel-patches/9001-usdpaa-bman-qman-exports-and-driver.patch` | Combined kernel patch: BMan/QMan symbol exports, portal phys addr + reservation, allocator-only frees, Kconfig+Makefile for `CONFIG_FSL_USDPAA_MAINLINE` |
+| `data/kernel-patches/fsl_usdpaa_mainline.c` | Clean `/dev/fsl-usdpaa` + `/dev/fsl-usdpaa-irq` chardevs (1453 lines, 20 ioctls, NXP ABI-compatible, allocator-only cleanup) — copied to kernel tree during build |
+| `data/kernel-patches/0006-*.patch` | DTS reserved-memory reference (already applied in `mono-gateway-dk.dts`) |
 | `data/dpdk-portal-mmap.patch` | DPDK `process.c` patch: adds portal mmap after PORTAL_MAP ioctl (CE=64KB WB-NS, CI=16KB Device-nGnRnE) |
 | `data/scripts/run-testpmd.sh` | Safe testpmd launcher: takes all interfaces DOWN, runs testpmd with timeout, reboots (no interface restore) |
 | `data/dtb/mono-gateway-dk-sdk.dts` | NXP SDK DTS variant (reference only — not used in mainline builds) |
