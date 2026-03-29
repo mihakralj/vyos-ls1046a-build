@@ -1,4 +1,5 @@
 From: Ian Ray <ian.ray@gehealthcare.com>
+Date: Thu, 20 Feb 2026 11:20:24 +0000
 Subject: [PATCH] hwmon: (ina2xx) Add support for INA234 for kernel 6.6
 
 INA234 is register compatible to INA226 (excepting manufacturer and die
@@ -34,10 +35,9 @@ Signed-off-by: Ian Ray <ian.ray@gehealthcare.com>
  2 files changed, 21 insertions(+), 4 deletions(-)
 
 diff --git a/drivers/hwmon/Kconfig b/drivers/hwmon/Kconfig
-index 000000000..000000001 100644
 --- a/drivers/hwmon/Kconfig
 +++ b/drivers/hwmon/Kconfig
-@@ -2018,7 +2018,7 @@
+@@ -2018,7 +2018,7 @@ config SENSORS_INA2XX
  	select REGMAP_I2C
  	help
  	  If you say yes here you get support for INA219, INA220, INA226,
@@ -47,10 +47,9 @@ index 000000000..000000001 100644
  	  The INA2xx driver is configured for the default configuration of
  	  the part as described in the datasheet.
 diff --git a/drivers/hwmon/ina2xx.c b/drivers/hwmon/ina2xx.c
-index 000000000..000000001 100644
 --- a/drivers/hwmon/ina2xx.c
 +++ b/drivers/hwmon/ina2xx.c
-@@ -98,7 +98,7 @@
+@@ -98,7 +98,7 @@ static struct regmap_config ina2xx_regmap_config = {
  	.val_bits = 16,
  };
  
@@ -59,7 +58,7 @@ index 000000000..000000001 100644
  
  struct ina2xx_config {
  	u16 config_default;
-@@ -141,6 +141,15 @@
+@@ -138,6 +138,15 @@ static const struct ina2xx_config ina2xx_config[] = {
  		.bus_voltage_lsb = 1250,
  		.power_lsb_factor = 25,
  	},
@@ -75,7 +74,7 @@ index 000000000..000000001 100644
  };
  
  /*
-@@ -666,7 +675,7 @@
+@@ -667,7 +676,7 @@ static int ina2xx_probe(struct i2c_client *client)
  	}
  
  	data->groups[group++] = &ina2xx_group;
@@ -84,7 +83,7 @@ index 000000000..000000001 100644
  		data->groups[group++] = &ina226_group;
  
  	hwmon_dev = devm_hwmon_device_register_with_groups(dev, client->name,
-@@ -686,6 +695,7 @@
+@@ -687,6 +696,7 @@ static const struct i2c_device_id ina2xx_id[] = {
  	{ "ina226", ina226 },
  	{ "ina230", ina226 },
  	{ "ina231", ina226 },
@@ -92,7 +91,7 @@ index 000000000..000000001 100644
  	{ }
  };
  MODULE_DEVICE_TABLE(i2c, ina2xx_id);
-@@ -711,6 +721,10 @@
+@@ -712,6 +722,10 @@ static const struct of_device_id __maybe_unused ina2xx_of_match[] = {
  		.compatible = "ti,ina231",
  		.data = (void *)ina226
  	},
