@@ -114,6 +114,40 @@ detect_latest_image() {
         -printf '%f\n' 2>/dev/null | sort -r | head -1
 }
 
+# Determine image to boot — priority order:
+#   1. Currently running image (from /proc/cmdline vyos-union= or BOOT_IMAGE=)
+#   2. Existing vyos.env content (preserves user's set-default-boot choice)
+#   3. Lexicographically latest (fallback for first install)
+detect_current_image() {
+    local root="$1"
+    local img
+
+    # 1. Currently running image from /proc/cmdline
+    img=$(grep -oP '(?<=vyos-union=/boot/)[^ ]+' /proc/cmdline 2>/dev/null)
+    if [ -n "$img" ] && [ -d "${root}/boot/${img}" ]; then
+        echo "$img"
+        return 0
+    fi
+    img=$(grep -oP '(?<=BOOT_IMAGE=/boot/)[^/]+' /proc/cmdline 2>/dev/null)
+    if [ -n "$img" ] && [ -d "${root}/boot/${img}" ]; then
+        echo "$img"
+        return 0
+    fi
+
+    # 2. Existing vyos.env (preserves set-default-boot selection)
+    local env_path="${root}/boot/${VYOS_ENV_FILE}"
+    if [ -f "$env_path" ]; then
+        img=$(grep -oP '(?<=vyos_image=)\S+' "$env_path" 2>/dev/null)
+        if [ -n "$img" ] && [ -d "${root}/boot/${img}" ]; then
+            echo "$img"
+            return 0
+        fi
+    fi
+
+    # 3. Fallback: lexicographically latest
+    detect_latest_image "$root"
+}
+
 write_vyos_env() {
     local image_name="$1"
     local root="$2"
@@ -176,7 +210,7 @@ main() {
     fi
 
     if [ -z "$image_name" ]; then
-        image_name=$(detect_latest_image "$root")
+        image_name=$(detect_current_image "$root")
     fi
 
     if [ -z "$image_name" ]; then
