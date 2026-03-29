@@ -5,8 +5,8 @@
 #
 #   Phase 1 — ONE-TIME U-Boot SPI flash setup:
 #     Writes vyos, usb_vyos, bootcmd to SPI NOR via fw_setenv.
-#     Runs on EVERY boot (USB live boot or eMMC installed boot).
-#     Skips silently if already configured. No installed images required.
+#     Runs on EVERY boot but skips if already configured.
+#     Safe to call repeatedly — idempotent.
 #
 #   Phase 2 — EVERY INSTALL/UPGRADE: Write /boot/vyos.env:
 #     Tells U-Boot which image to load. Skipped gracefully if no
@@ -50,27 +50,127 @@ check_board() {
 
 # ─── Phase 1: One-time U-Boot SPI flash setup ───────────────────────────────
 #
-# Writes static vyos (reads /boot/vyos.env → loads vmlinuz/dtb/initrd →
-# booti), usb_vyos (FAT32 USB live boot), and bootcmd (try USB first, then
-# eMMC, then SPI recovery).
+# Writes static U-Boot variables to SPI NOR flash via fw_setenv:
+#   vyos       — reads /boot/vyos.env → loads vmlinuz/dtb/initrd → booti
+#   usb_vyos   — FAT32 USB live boot fallback
+#   bootcmd    — try USB first, then eMMC, then SPI recovery
 #
 # Safe to call repeatedly — checks current fw_printenv value first and skips
 # if vyos already references vyos.env.
 
 setup_uboot_env_once() {
-    # U-Boot SPI flash env cannot be written from Linux on the Mono Gateway.
-    # The DTS MTD partition map doesn't match the actual flash layout — mtd3
-    # (labeled "u-boot-env") contains FMan microcode, not the env sector.
-    # Therefore fw_setenv always fails with "Configuration file wrong or corrupted".
-    #
-    # The U-Boot vars (vyos, usb_vyos, bootcmd) must be set ONCE from the
-    # U-Boot console via serial. After that, all image changes are handled
-    # automatically via /boot/vyos.env (Phase 2 below).
-    #
-    # See INSTALL.md "Step 4 — Configure U-Boot" for the one-time commands.
-    echo "NOTE: U-Boot SPI flash vars must be set via serial console (see INSTALL.md)."
-    echo "  fw_setenv is not supported on this board (MTD partition mismatch)."
-    return 0
+    # Verify fw_setenv/fw_printenv tools exist
+    if ! command -v fw_setenv >/dev/null 2>&1; then
+        echo "WARNING: fw_setenv not found — cannot configure U-Boot SPI flash."
+        echo "  Install libubootenv-tool or u-boot-tools package."
+        RC=1
+        return 1
+    fi
+
+    # Verify fw_env.config exists
+    if [ ! -f "$FW_ENV_CONFIG" ]; then
+        echo "WARNING: ${FW_ENV_CONFIG} not found — cannot access U-Boot env."
+        RC=1
+        return 1
+    fi
+
+    # Verify the MTD device exists (requires CONFIG_SPI_FSL_QSPI=y in kernel)
+    local mtd_dev
+    mtd_dev=$(awk '/^[^#]/ {print $1; exit}' "$FW_ENV_CONFIG")
+    if [ -n "$mtd_dev" ] && [ ! -e "$mtd_dev" ]; then
+        echo "WARNING: ${mtd_dev} does not exist — QSPI flash not accessible."
+        echo "  Verify CONFIG_SPI_FSL_QSPI=y in kernel config."
+        RC=1
+        return 1
+    fi
+
+    # Test if fw_printenv can read the environment (validates config + flash access)
+    if ! fw_printenv bootcmd >/dev/null 2>&1; then
+        echo "WARNING: fw_printenv failed — cannot read U-Boot environment."
+        echo "  This may mean fw_env.config offsets don't match the actual flash layout."
+        echo "  Check /proc/mtd and compare with /etc/fw_env.config."
+        echo ""
+        echo "  Diagnostic info:"
+        echo "  fw_env.config: $(cat "$FW_ENV_CONFIG" 2>/dev/null | grep -v '^#' | head -1)"
+        if [ -f /proc/mtd ]; then
+            echo "  /proc/mtd:"
+            cat /proc/mtd | head -10
+        fi
+        RC=1
+        return 1
+    fi
+
+    # Check if already configured — look for vyos.env in the vyos variable
+    local current_vyos
+    current_vyos=$(fw_printenv -n vyos 2>/dev/null || true)
+    if echo "$current_vyos" | grep -q "vyos.env"; then
+        echo "✓ U-Boot SPI flash already configured (vyos references vyos.env)."
+        return 0
+    fi
+
+    echo "Configuring U-Boot SPI flash (one-time setup)..."
+
+    # --- Define the U-Boot variables ---
+    # Each variable value must work as a U-Boot hush command when run via 'run <var>'
+    # No quotes around values — fw_setenv handles escaping.
+    # initrd always loaded LAST so ${filesize} captures its size.
+
+    # eMMC boot: read vyos.env → load kernel/dtb/initrd from per-image dir → booti
+    local vyos_val
+    vyos_val='ext4load mmc 0:3 ${load_addr} /boot/vyos.env; env import -t ${load_addr} ${filesize}; ext4load mmc 0:3 ${kernel_addr_r} /boot/${vyos_image}/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/${vyos_image}/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/${vyos_image}/initrd.img; setenv bootargs BOOT_IMAGE=/boot/${vyos_image}/vmlinuz '"${UBOOT_BOOTARGS_TAIL}"' vyos-union=/boot/${vyos_image}; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
+
+    # USB live boot: detect USB, load from FAT32, boot live session
+    local usb_vyos_val
+    usb_vyos_val='usb start; if fatload usb 0:0 ${kernel_addr_r} live/vmlinuz; then fatload usb 0:0 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:0 ${ramdisk_addr_r} live/initrd.img; setenv bootargs BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda rootdelay=5 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}; fi'
+
+    # Boot priority: USB → eMMC → SPI recovery
+    local bootcmd_val='run usb_vyos || run vyos || run recovery'
+
+    # --- Write variables to SPI flash ---
+    local failed=0
+
+    echo "  Writing vyos..."
+    if ! fw_setenv vyos "$vyos_val"; then
+        echo "  ERROR: fw_setenv vyos failed"
+        failed=1
+    fi
+
+    echo "  Writing usb_vyos..."
+    if ! fw_setenv usb_vyos "$usb_vyos_val"; then
+        echo "  ERROR: fw_setenv usb_vyos failed"
+        failed=1
+    fi
+
+    echo "  Writing bootcmd..."
+    if ! fw_setenv bootcmd "$bootcmd_val"; then
+        echo "  ERROR: fw_setenv bootcmd failed"
+        failed=1
+    fi
+
+    if [ "$failed" -eq 1 ]; then
+        echo ""
+        echo "ERROR: One or more fw_setenv calls failed."
+        echo "  The U-Boot environment may be partially configured."
+        echo "  You can fix this manually from the U-Boot serial console."
+        echo "  See INSTALL.md Step 4 for the manual commands."
+        RC=1
+        return 1
+    fi
+
+    # Verify what we wrote
+    echo ""
+    echo "  Verifying..."
+    local verify_vyos
+    verify_vyos=$(fw_printenv -n vyos 2>/dev/null || true)
+    if echo "$verify_vyos" | grep -q "vyos.env"; then
+        echo "✓ U-Boot SPI flash configured successfully."
+        echo "  bootcmd: $(fw_printenv -n bootcmd 2>/dev/null)"
+        echo "  The board will now auto-boot from eMMC (or USB if inserted)."
+    else
+        echo "WARNING: Verification failed — vyos variable does not contain vyos.env."
+        echo "  Manual U-Boot setup may be required (see INSTALL.md Step 4)."
+        RC=1
+    fi
 }
 
 # ─── Phase 2: Write /boot/vyos.env ──────────────────────────────────────────

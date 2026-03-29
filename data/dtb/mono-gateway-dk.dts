@@ -430,50 +430,57 @@
 			#address-cells = <1>;
 			#size-cells = <1>;
 
-			/* RCW + BL2 (1 MB) */
+			/*
+			 * Partition table verified against live /proc/mtd
+			 * (2026-03-29, U-Boot 2025.04, Micron mt25qu512a 64MB QSPI).
+			 * Erase sector = 4KB (0x1000). Must match actual firmware layout
+			 * so mtd3 = uboot-env and fw_setenv works.
+			 */
+
+			/* RCW + BL2 (1 MB) — mtd1 */
 			partition@0 {
-				label = "rcw";
+				label = "rcw-bl2";
 				reg = <0x00000000 0x00100000>;
 				read-only;
 			};
-			/* BL31 / ATF (1 MB) */
+			/* U-Boot (2 MB) — mtd2 */
 			partition@100000 {
-				label = "atf";
-				reg = <0x00100000 0x00100000>;
+				label = "uboot";
+				reg = <0x00100000 0x00200000>;
 				read-only;
 			};
-			/* U-Boot (2 MB) */
-			partition@200000 {
-				label = "u-boot";
-				reg = <0x00200000 0x00200000>;
-				read-only;
+			/* U-Boot environment (1 MB, env=8KB) — mtd3, fw_setenv target */
+			partition@300000 {
+				label = "uboot-env";
+				reg = <0x00300000 0x00100000>;
 			};
-			/* U-Boot environment (128 KB) */
+			/* FMan microcode (1 MB) — mtd4 */
 			partition@400000 {
-				label = "u-boot-env";
-				reg = <0x00400000 0x00020000>;
-			};
-			/* FMan microcode (256 KB) */
-			partition@420000 {
 				label = "fman-ucode";
-				reg = <0x00420000 0x00040000>;
+				reg = <0x00400000 0x00100000>;
 				read-only;
 			};
-			/* Board EEPROM data (64 KB) */
-			partition@460000 {
-				label = "board-data";
-				reg = <0x00460000 0x00010000>;
+			/* Recovery DTB (1 MB) — mtd5 */
+			partition@500000 {
+				label = "recovery-dtb";
+				reg = <0x00500000 0x00100000>;
 				read-only;
 			};
-			/* Recovery kernel + initrd (22 MB) */
+			/* Backup (4 MB) — mtd6 */
+			partition@600000 {
+				label = "backup";
+				reg = <0x00600000 0x00400000>;
+				read-only;
+			};
+			/* Recovery kernel + initramfs (22 MB) — mtd7 */
 			partition@a00000 {
-				label = "recovery";
+				label = "kernel-initramfs";
 				reg = <0x00a00000 0x01600000>;
 				read-only;
 			};
-			/* Remaining space */
+			/* Remaining space (32 MB) — mtd8 */
 			partition@2000000 {
-				label = "spare";
+				label = "unallocated";
 				reg = <0x02000000 0x02000000>;
 			};
 		};

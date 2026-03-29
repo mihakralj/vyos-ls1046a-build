@@ -104,11 +104,17 @@ VyOS always runs with the DIP switch in **NOR position**. The eMMC position is o
 
 ## SPI NOR Layout Reference
 
+Verified against live `/proc/mtd` (2026-03-29, U-Boot 2025.04). Matches the `fixed-partitions` in `data/dtb/mono-gateway-dk.dts`. Linux creates `/dev/mtd0` (whole flash) + `/dev/mtd1`–`/dev/mtd8` from DTS entries. Erase sector = 4 KiB.
+
 | MTD | Offset | Size | Content |
 |-----|--------|------|---------|
-| mtd0 | 0x000000 | 1 MiB | RCW + PBI |
-| mtd1 | 0x100000 | 4 MiB | U-Boot |
-| mtd2 | 0x500000 | 256 KiB | U-Boot DTB |
-| mtd3 | 0x540000 | 256 KiB | U-Boot env |
-| mtd4 | 0x580000 | 4 MiB | FMan firmware |
-| mtd5 | 0x980000 | remainder | Unused |
+| mtd1 | `0x000000` | 1 MiB | RCW + BL2 |
+| mtd2 | `0x100000` | 2 MiB | U-Boot |
+| **mtd3** | **`0x300000`** | **1 MiB** | **U-Boot env** — `fw_setenv` target (8 KiB env, 4 KiB sector) |
+| mtd4 | `0x400000` | 1 MiB | FMan microcode |
+| mtd5 | `0x500000` | 1 MiB | Recovery DTB |
+| mtd6 | `0x600000` | 4 MiB | Backup |
+| mtd7 | `0xa00000` | 22 MiB | Recovery kernel + initramfs |
+| mtd8 | `0x2000000` | 32 MiB | Unallocated |
+
+`/etc/fw_env.config` → `/dev/mtd3 0x0 0x2000 0x1000` (8 KiB env, 4 KiB sector).
