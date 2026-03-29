@@ -67,10 +67,6 @@ system {
         auto-check
         url https://raw.githubusercontent.com/mihakralj/vyos-ls1046a-build/refs/heads/main/version.json
     }
-    watchdog {
-        reboot-timeout 60
-        shutdown-timeout 60
-    }
 }
 
 interfaces {
