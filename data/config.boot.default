@@ -15,13 +15,6 @@ system {
         }
     }
     option {
-        kernel {
-            memory {
-                hugepage-size 2M {
-                    hugepage-count 512
-                }
-            }
-        }
         performance network-latency
         reboot-on-panic
         reboot-on-upgrade-failure 5
