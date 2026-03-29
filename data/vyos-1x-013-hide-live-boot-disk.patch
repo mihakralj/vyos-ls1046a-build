@@ -1,0 +1,33 @@
+diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
+--- a/src/op_mode/image_installer.py
++++ b/src/op_mode/image_installer.py
+@@ -172,12 +172,27 @@ def find_disks() -> dict[str, int]:
+     """Find a target disk for installation
+ 
+     Returns:
+         dict[str, int]: a list of available disks by name and size
+     """
+     # check for available disks
+     print('Probing disks')
+     disks_available: dict[str, int] = disk.disks_size()
+     for disk_name, disk_size in disks_available.copy().items():
+         if disk_size < CONST_MIN_DISK_SIZE:
+             del disks_available[disk_name]
++
++    # Exclude the live boot media so it cannot be chosen as install
++    # target and does not inflate the disk count (which triggers the
++    # RAID-1 prompt).  findmnt resolves the device backing the live
++    # media mount; lsblk PKNAME resolves a partition to its parent
++    # whole-disk (handles both /dev/sda and /dev/sda1 cases).
++    try:
++        live_src = cmd('findmnt -n -o SOURCE /lib/live/mount/medium')
++        pkname = cmd(f'lsblk -n -o PKNAME {live_src}').strip()
++        live_disk = f'/dev/{pkname}' if pkname else live_src
++        if live_disk in disks_available:
++            del disks_available[live_disk]
++    except Exception:
++        pass  # detection failed — keep all disks (safe fallback)
++
+     if not disks_available:
+         print(MSG_ERR_NO_DISK)
+         exit(MSG_INFO_INSTALL_EXIT)

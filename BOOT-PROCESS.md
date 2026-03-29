@@ -15,7 +15,7 @@ Both paths use `booti` (raw ARM64 `Image` format). `bootm` (uImage) and `bootefi
 
 ## U-Boot Environment
 
-Stored in SPI NOR flash at `/dev/mtd3` (QSPI, 64 KiB sector, 64 KiB env). Set once from the U-Boot serial console during initial install (see INSTALL.md Step 4). The `vyos-postinstall` Phase 1 (`setup_uboot_env_once`) is a no-op stub — `fw_setenv` does not work on this board due to MTD partition format mismatch.
+Stored in SPI NOR flash at `/dev/mtd3` ("uboot-env", QSPI, 4 KiB erase sector, 8 KiB env size). Written automatically by `vyos-postinstall` Phase 1 (`setup_uboot_env_once`) via `fw_setenv` on first boot. Manual U-Boot console setup (INSTALL.md Step 4) is available as a fallback if `fw_setenv` fails. Config: `/etc/fw_env.config` → `/dev/mtd3 0x0 0x2000 0x1000`.
 
 ### Variables
 
@@ -122,9 +122,9 @@ bootcmd: run usb_vyos
   systemd starts
   vyos-postinstall.service (After=local-fs.target)
     ├─ Phase 1: setup_uboot_env_once()
-    │    ├─ fw_printenv vyos → check if "vyos.env" present
+    │    ├─ fw_printenv vyos → check if "vyos.env" in value
     │    ├─ If NOT present: fw_setenv vyos / usb_vyos / bootcmd
-    │    └─ Sets up SPI NOR env for all future eMMC boots
+    │    └─ Writes SPI NOR env for all future eMMC boots
     └─ Phase 2: find_root() → returns "" (no installed images on USB)
          └─ Skips vyos.env write, prints informational message
        │
@@ -230,7 +230,7 @@ bootcmd: run vyos
   systemd starts
   vyos-postinstall.service (After=local-fs.target)
     ├─ Phase 1: setup_uboot_env_once()
-    │    └─ fw_printenv vyos → "vyos.env" found → SKIP (noop)
+    │    └─ fw_printenv vyos → "vyos.env" found → SKIP (already configured)
     └─ Phase 2: find_root() → returns "/" (installed system)
          └─ write_vyos_env(image_name, "/")
               └─ writes /boot/vyos.env with current image name
@@ -314,20 +314,20 @@ VyOS `system_option.py` may trigger a kexec reboot if `/proc/cmdline` doesn't ma
 
 ## SPI NOR Flash Layout
 
-QSPI NOR flash (64 MiB, `/dev/mtd*`):
+QSPI NOR flash (Micron mt25qu512a, 64 MiB, 4 KiB erase sector). Verified against live `/proc/mtd` (2026-03-29). mtd0 is the whole flash device; mtd1–mtd8 are DTS-defined partitions.
 
-| MTD | Name | Size | Contents |
-|-----|------|------|---------|
-| mtd0 | `rcw` | 2 MiB | Reset Configuration Word |
-| mtd1 | `u-boot` | 1 MiB | U-Boot binary |
-| mtd2 | `u-boot-env-redundant` | 64 KiB | Redundant U-Boot env |
-| **mtd3** | **`u-boot-env`** | **64 KiB** | **Active U-Boot environment** |
-| mtd4 | `fman-firmware` | 1 MiB | FMan microcode (injected by U-Boot into DTB) |
-| mtd5 | `kernel` | varies | Recovery kernel |
-| mtd6 | `dtb` | varies | Recovery DTB |
-| mtd7 | `rootfs` | remainder | Recovery rootfs |
+| MTD | Offset | Name | Size | Contents |
+|-----|--------|------|------|---------|
+| mtd1 | `0x000000` | `rcw-bl2` | 1 MiB | RCW + BL2 |
+| mtd2 | `0x100000` | `uboot` | 2 MiB | U-Boot |
+| **mtd3** | **`0x300000`** | **`uboot-env`** | **1 MiB** | **U-Boot environment** (8 KiB env, 4 KiB sector) |
+| mtd4 | `0x400000` | `fman-ucode` | 1 MiB | FMan microcode (injected by U-Boot into DTB) |
+| mtd5 | `0x500000` | `recovery-dtb` | 1 MiB | Recovery device tree |
+| mtd6 | `0x600000` | `backup` | 4 MiB | Backup |
+| mtd7 | `0xa00000` | `kernel-initramfs` | 22 MiB | Recovery kernel + initramfs |
+| mtd8 | `0x2000000` | `unallocated` | 32 MiB | Remaining space |
 
-`/etc/fw_env.config` points to `/dev/mtd3` with 64 KiB size and 64 KiB sector. Used by `fw_setenv`/`fw_printenv` from `libubootenv-tool`. The classic `u-boot-tools` package uses a different config format and must not be used.
+`/etc/fw_env.config` → `/dev/mtd3 0x0 0x2000 0x1000` (8 KiB env size, 4 KiB sector). Used by `fw_setenv`/`fw_printenv` from `libubootenv-tool`.
 
 ---
 
@@ -343,6 +343,6 @@ QSPI NOR flash (64 MiB, `/dev/mtd*`):
 | `Wrong Ramdisk Image Format` | `booti addr addr:size fdt` — missing `:${filesize}` colon-size suffix | Ensure initrd loads last; use `${ramdisk_addr_r}:${filesize}` |
 | Boot loops (kexec) | `panic` in bootargs doesn't match `config.boot` | Verify bootargs include `panic=60`. Hugepages are added dynamically by VPP — no need in base bootargs |
 | `fw_setenv` fails | `/dev/mtd3` missing — `CONFIG_SPI_FSL_QSPI` not built-in | Verify `CONFIG_SPI_FSL_QSPI=y` in kernel config |
-| `vyos-postinstall` Phase 1 is a no-op | `fw_setenv` doesn't work — MTD partition format mismatch on this board | Set U-Boot env manually from serial console per INSTALL.md Step 4 |
+| `fw_printenv` CRC error | DTS partition offsets don't match actual flash layout | Verify `cat /proc/mtd` matches DTS; check `fw_env.config` env_size matches U-Boot `CONFIG_ENV_SIZE` |
 | No network interfaces after boot | DPAA1 stack built as modules instead of `=y` | All `CONFIG_FSL_FMAN/DPAA/BMAN/QMAN/PAMU` must be `=y` |
 | CPU locked at 700 MHz | `CONFIG_QORIQ_CPUFREQ=m` — module loads too late, PLLs released | Set `CONFIG_QORIQ_CPUFREQ=y` |
