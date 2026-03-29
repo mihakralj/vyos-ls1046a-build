@@ -12,7 +12,7 @@ VyOS ARM64 builds for the [Mono Gateway Development Kit](https://github.com/ryne
 
 **Native containerization via Podman.** Containers are first-class config-tree citizens: image, network, environment variables, volumes, ports, and memory limits defined with `set container name ...` commands, committed and rolled back with everything else. Run AdGuard, monitoring agents, or DDNS updaters directly on the router — managed declaratively inside the same config that controls routing and firewall.
 
-**CLI-first, text-based configuration.** Entire router state lives in `config.boot` — hierarchical, human-readable, diffable, and version-controllable with Git. OPNsense stores configuration in XML (`config.xml`), GUI-first by design. Reviewing a diff between two VyOS configs reads like plain English; OPNsense XML diffs do not.
+**CLI-first, text-based configuration.** Entire router state lives in `config.boot` — hierarchical, human-readable, diffable, and version-controllable with Git; reviewing a diff between two VyOS configs reads like plain English.
 
 **Transactional atomic commits.** Stage multiple changes, review with `compare`, apply atomically with `commit`. If commit fails, nothing changes. `commit-confirm` provides an automatic rollback timer. OPNsense applies changes per-section — firewall rules reload separately from interface changes — which can leave the system in an intermediate broken state.
 
