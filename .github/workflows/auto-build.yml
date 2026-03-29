@@ -183,6 +183,7 @@ jobs:
             'CONFIG_GPIO_MPC8XXX=y' \
             '# === Board peripherals (fan, thermal, RTC, power sensors) ===' \
             'CONFIG_SENSORS_EMC2305=y' \
+            'CONFIG_SENSORS_INA2XX=y' \
             'CONFIG_RTC_DRV_PCF2127=y' \
             '# === DPDK USDPAA support (userspace DPAA1 for 10G PMD) ===' \
             'CONFIG_FSL_USDPAA_MAINLINE=y' \
@@ -199,6 +200,7 @@ jobs:
           KERNEL_BUILD=vyos-build/scripts/package-build/linux-kernel
           KERNEL_PATCHES="$KERNEL_BUILD/patches/kernel"
           mkdir -p "$KERNEL_PATCHES"
+          cp data/kernel-patches/0002-hwmon-ina2xx-add-INA234-support.patch "$KERNEL_PATCHES/"
           cp data/kernel-patches/9001-usdpaa-bman-qman-exports-and-driver.patch "$KERNEL_PATCHES/"
           # Stage the USDPAA source file for copy into kernel tree during build.
           # build-kernel.sh applies patches from patches/kernel/ then runs make.
@@ -537,6 +539,13 @@ jobs:
           mcopy -i "$USB_IMG" /tmp/boot.scr ::boot.scr
 
           umount /tmp/iso-mount
+
+          # Compress USB image — raw 4 GiB FAT32 (mostly zeros) exceeds GitHub's
+          # 2 GiB release asset limit. zstd -19 shrinks it to ~800 MB.
+          # Decompress before writing to USB: zstd -d vyos-*-usb.img.zst
+          zstd -T0 -19 --rm "${USB_IMG}"
+          USB_IMG="${USB_IMG}.zst"
+
           if [ -f "$MINISIGN_SECKEY_FILE" ]; then
             $GITHUB_WORKSPACE/bin/minisign -s $MINISIGN_SECKEY_FILE -Sm "${USB_IMG}"
             $GITHUB_WORKSPACE/bin/minisign -Vm "${USB_IMG}" -x "${USB_IMG}.minisig" -p $MINISIGN_PUBKEY_FILE
@@ -693,10 +702,10 @@ jobs:
           tag_name: ${{ needs.build_iso.outputs.build_version }}
           fail_on_unmatched_files: false
           files: |
-            ${{ steps.build_iso.outputs.image_iso }}
-            ${{ steps.build_iso.outputs.image_iso }}.minisig
-            vyos-*-usb.img
-            vyos-*-usb.img.minisig
+            ${{ needs.build_iso.outputs.image_iso }}
+            ${{ needs.build_iso.outputs.image_iso }}.minisig
+            vyos-*-usb.img.zst
+            vyos-*-usb.img.zst.minisig
             vyos-packages.tar
 
       - uses: dev-drprasad/delete-older-releases@v0.3.4
