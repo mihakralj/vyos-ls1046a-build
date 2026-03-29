@@ -1,7 +1,7 @@
 diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
-@@ -415,6 +415,6 @@ def check_raid_install(disks_available: dict[str, int]) -> Union[str, None]:
+@@ -415,5 +415,5 @@ def check_raid_install(disks_available: dict[str, int]) -> Union[str, None]:
      if len(disks_available) < 2:
          return None
  
