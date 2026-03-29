@@ -23,6 +23,7 @@ Pick your adventure:
 | I want to... | Go to |
 |---|---|
 | **Install VyOS** on the Mono Gateway | **[INSTALL.md](INSTALL.md)**: write USB image, `install image`, eMMC boot |
+| **Update board firmware** (bricked or fresh board) | [FIRMWARE.md](FIRMWARE.md): NOR + eMMC flash procedure, partition offset details |
 | **Understand the boot process** in detail | [BOOT-PROCESS.md](BOOT-PROCESS.md): USB and eMMC paths, U-Boot env, `booti` sequence, failure modes |
 | **Understand** what broke and how it got fixed | [PORTING.md](PORTING.md): driver archaeology, DPAA1 architecture, boot flow |
 | **Push to 10 Gbps** with VPP acceleration | [VPP.md](VPP.md): DPAA1 + DPDK + VPP integration plan |
@@ -30,9 +31,6 @@ Pick your adventure:
 | **Check** a raw boot log for known messages | [captured_boot.md](captured_boot.md): full USB live-boot serial capture |
 | **See** what changed between releases | [CHANGELOG.md](CHANGELOG.md): per-build changelog |
 
-Default credentials: `vyos` / `vyos`
-
-## What Makes This VyOS Build Unique
 
 This is, as far as anyone can tell, the only VyOS build targeting bare-metal ARM64 networking hardware with HW offload support and VPP implementation. Some highlights from the wreckage:
 
