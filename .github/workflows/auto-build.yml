@@ -118,6 +118,7 @@ jobs:
           PATCH_STAGING="$VYOS1X_BUILD/ls1046a-patches"
           mkdir -p "$PATCH_STAGING"
           cp data/vyos-1x-*.patch "$PATCH_STAGING/"
+          cp data/scripts/patch-mmcblk-default.py "$PATCH_STAGING/"
           cp data/reftree.cache "$PATCH_STAGING/"
           cat > "$VYOS1X_BUILD/package.toml" <<'EOF'
           [[packages]]
@@ -131,6 +132,7 @@ jobs:
             for p in ../ls1046a-patches/vyos-1x-*.patch; do
               patch --no-backup-if-mismatch -p1 < "$p"
             done
+            python3 ../ls1046a-patches/patch-mmcblk-default.py
           """
           EOF
 
@@ -208,17 +210,25 @@ jobs:
           KERNEL_PATCHES="$KERNEL_BUILD/patches/kernel"
           mkdir -p "$KERNEL_PATCHES"
           cp data/kernel-patches/4002-hwmon-ina2xx-add-INA234-support.patch "$KERNEL_PATCHES/"
+          cp data/kernel-patches/4003-sfp-rollball-phylink-einval-fallback.patch "$KERNEL_PATCHES/"
           cp data/kernel-patches/9001-usdpaa-bman-qman-exports-and-driver.patch "$KERNEL_PATCHES/"
           # Stage the USDPAA source file for copy into kernel tree during build.
           # build-kernel.sh applies patches from patches/kernel/ then runs make.
           # We inject a cp command after the patch loop to place the .c file.
           cp data/kernel-patches/fsl_usdpaa_mainline.c "$KERNEL_BUILD/"
+          cp data/kernel-patches/patch-phylink.py "$KERNEL_BUILD/"
           # Inject .c file copy before "# Change name of Signing Cert" in build-kernel.sh.
           awk '/# Change name of Signing Cert/ {
             print "# Copy USDPAA mainline driver source (too large for unified diff)"
             print "if [ -f \"${CWD}/fsl_usdpaa_mainline.c\" ]; then"
             print "  echo \"I: Copy fsl_usdpaa_mainline.c to drivers/soc/fsl/qbman/\""
             print "  cp \"${CWD}/fsl_usdpaa_mainline.c\" drivers/soc/fsl/qbman/fsl_usdpaa_mainline.c"
+            print "fi"
+            print ""
+            print "# Patch phylink: trust SFP link over PCS in INBAND mode (LS1046A XFI regression)"
+            print "PHYLINK_C=$(find . -path \"*/net/phylink.c\" -maxdepth 4 | head -1)"
+            print "if [ -n \"$PHYLINK_C\" ] && [ -f \"${CWD}/patch-phylink.py\" ]; then"
+            print "  python3 \"${CWD}/patch-phylink.py\" \"$PHYLINK_C\""
             print "fi"
           } { print }' "$KERNEL_BUILD/build-kernel.sh" > /tmp/build-kernel-patched.sh
           mv /tmp/build-kernel-patched.sh "$KERNEL_BUILD/build-kernel.sh"
