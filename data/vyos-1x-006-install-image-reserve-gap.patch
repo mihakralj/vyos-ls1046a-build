@@ -1,5 +1,9 @@
 Reserve first 32 MiB for NXP LS1046A firmware boundary.
 
+Also update CONST_RESERVED_SPACE to account for the larger firmware
+zone (32 MiB instead of 2 MiB), so sgdisk does not try to create a
+root partition extending past the end of the disk.
+
 diff --git a/python/vyos/system/disk.py b/python/vyos/system/disk.py
 index 7ae9a15..4792350 100644
 --- a/python/vyos/system/disk.py
@@ -25,3 +29,18 @@ index 7ae9a15..4792350 100644
          -n3:0:+{root_size_text}K -t3:8300 {drive_path}'
  
      run(command)
+diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
+index cb3aa7b..e1f2a3c 100755
+--- a/src/op_mode/image_installer.py
++++ b/src/op_mode/image_installer.py
+@@ -118,8 +118,8 @@
+ 'Do you want to continue with installation?'
+ CONST_MIN_DISK_SIZE: int = 2147483648  # 2 GB
+ CONST_MIN_ROOT_SIZE: int = 1610612736  # 1.5 GB
+-# a reserved space: 2MB for header, 1 MB for BIOS partition, 256 MB for EFI
+-CONST_RESERVED_SPACE: int = (2 + 1 + 256) * 1024**2
++# a reserved space: 32MB firmware zone, 1 MB for BIOS partition, 256 MB for EFI
++CONST_RESERVED_SPACE: int = (32 + 1 + 256) * 1024**2
+ 
+ # define directories and paths
+ DIR_CONFIG: str = directories['config']
