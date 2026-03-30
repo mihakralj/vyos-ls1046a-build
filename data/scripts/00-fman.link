@@ -1,0 +1,18 @@
+# /etc/systemd/network/00-fman.link
+# Prevent systemd predictable naming from overriding udev-assigned names
+# for FMan DPAA1 network interfaces.
+#
+# Without this, systemd's 80-net-setup-link.rules processes the default
+# 99-default.link which applies NamePolicy=kernel database onboard slot path
+# and renames interfaces to e2, e5, e6, etc. (based on FMan MAC cell-index).
+#
+# NamePolicy=keep tells systemd to use whatever name was already assigned
+# by the kernel or by an earlier udev rule (our 10-fman-port-order.rules).
+#
+# Priority 00 ensures this .link file is matched before any other .link file.
+
+[Match]
+Driver=dpaa_eth
+
+[Link]
+NamePolicy=keep
