@@ -144,6 +144,15 @@ jobs:
 
           ### LS1046A kernel config (DPAA1/FMan networking, eMMC, serial, MTD/SPI for FMan firmware)
           DEFCONFIG=vyos-build/scripts/package-build/linux-kernel/config/arm64/vyos_defconfig
+          # Remove upstream explicit disables that conflict with our overrides.
+          # kconfig defconfig processing doesn't reliably let later entries win
+          # when an earlier "# CONFIG_X is not set" is present.  Removing conflicting
+          # lines before appending ensures our values stick after make vyos_defconfig.
+          sed -i '/CONFIG_DEVTMPFS_MOUNT/d'          "$DEFCONFIG"
+          sed -i '/CONFIG_CPU_FREQ_DEFAULT_GOV/d'     "$DEFCONFIG"
+          sed -i '/CONFIG_STRICT_DEVMEM/d'            "$DEFCONFIG"
+          sed -i '/CONFIG_IO_STRICT_DEVMEM/d'         "$DEFCONFIG"
+          sed -i '/CONFIG_DEBUG_PREEMPT/d'             "$DEFCONFIG"
           printf '%s\n' \
             '# === LS1046A / NXP Layerscape DPAA1 (Mono Gateway DK) ===' \
             'CONFIG_DEVTMPFS_MOUNT=y' \
