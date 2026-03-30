@@ -13,7 +13,7 @@
 # Strategy: Build DPDK 24.11 with same disable_drivers as VyOS to get a WORKING baseline.
 # DPAA PMD support will be added incrementally in a separate build once baseline is stable.
 #
-# Run on LXC 200: ssh admin@heidi "sudo pct exec 200 -- bash /opt/vyos-dev/rebuild-no-dpaa.sh"
+# Run on LXC 200: cd /opt/vyos-dev && ./rebuild-no-dpaa.sh
 set -euo pipefail
 
 WORKDIR="/opt/vyos-dev/dpaa-pmd"
