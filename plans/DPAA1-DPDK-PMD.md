@@ -213,7 +213,7 @@ On LXC 200, modify the meson setup call in `bin/build-dpdk.sh` (or run manually)
 
 ```bash
 # SSH into LXC 200 via Proxmox
-ssh admin@192.168.1.137 "sudo pct exec 200 -- bash -c '
+# On LXC 200:
 cd /opt/vyos-dev/dpaa-pmd/src/dpdk
 # Remove old static build
 rm -rf build-shared
@@ -233,33 +233,30 @@ meson setup build-shared \
   -Dexamples= \
   -Ddisable_drivers=net/mlx*,net/bnxt,net/ixg*,net/ice,net/i40e,net/e1000,crypto/qat,net/virtio,net/vmxnet*,net/ena,net/hns*,net/hinic,net/octeontx*,net/cnxk,net/thunderx
 
-ninja -C build-shared -j\$(nproc)
+ninja -C build-shared -j$(nproc)
 ninja -C build-shared install
 echo "=== Shared DPAA libraries ==="
-find /opt/vyos-dev/dpaa-pmd/output/dpdk-shared -name \"*dpaa*.so*\" | sort
-'"
+find /opt/vyos-dev/dpaa-pmd/output/dpdk-shared -name "*dpaa*.so*" | sort
 ```
 
 Verify the critical shared objects exist:
 
 ```bash
-ssh admin@192.168.1.137 "sudo pct exec 200 -- bash -c '
+# On LXC 200:
 OUTDIR=/opt/vyos-dev/dpaa-pmd/output/dpdk-shared
 for lib in librte_bus_dpaa librte_net_dpaa librte_mempool_dpaa librte_event_dpaa; do
-  f=\$(find \${OUTDIR} -name \"\${lib}.so*\" | head -1)
-  echo \"\${lib}: \${f:-MISSING}\"
+  f=$(find ${OUTDIR} -name "${lib}.so*" | head -1)
+  echo "${lib}: ${f:-MISSING}"
 done
-'"
 ```
 
 Package for deployment:
 
 ```bash
-ssh admin@192.168.1.137 "sudo pct exec 200 -- bash -c '
+# On LXC 200:
 cd /opt/vyos-dev/dpaa-pmd/output/dpdk-shared
 tar czf /srv/tftp/dpdk-dpaa-shared-arm64.tar.gz lib/
-echo \"Packaged: \$(du -sh /srv/tftp/dpdk-dpaa-shared-arm64.tar.gz | cut -f1)\"
-'"
+echo "Packaged: $(du -sh /srv/tftp/dpdk-dpaa-shared-arm64.tar.gz | cut -f1)"
 ```
 
 ---
@@ -386,7 +383,7 @@ VPP must be rebuilt against our DPAA-enabled DPDK 24.11. The version must match 
 cat > bin/build-vpp-dpaa.sh << 'BUILDSCRIPT'
 #!/bin/bash
 # Build VPP with DPAA DPDK plugin for ARM64
-# Run on LXC 200: ssh admin@heidi "sudo pct exec 200 -- bash /opt/vyos-dev/build-vpp-dpaa.sh <phase>"
+# Run on LXC 200: cd /opt/vyos-dev && ./build-vpp-dpaa.sh <phase>
 set -euo pipefail
 
 WORKDIR="/opt/vyos-dev/dpaa-pmd"
@@ -448,15 +445,11 @@ chmod +x bin/build-vpp-dpaa.sh
 Deploy and run on LXC 200:
 
 ```bash
-scp bin/build-vpp-dpaa.sh admin@192.168.1.137:/tmp/
-ssh admin@192.168.1.137 "
-  sudo pct push 200 /tmp/build-vpp-dpaa.sh /opt/vyos-dev/build-vpp-dpaa.sh
-  sudo pct exec 200 -- chmod +x /opt/vyos-dev/build-vpp-dpaa.sh
-  sudo pct exec 200 -- bash /opt/vyos-dev/build-vpp-dpaa.sh all 2>&1
-"
+# On LXC 200:
+cd /opt/vyos-dev && ./build-vpp-dpaa.sh all
 
-# Retrieve built .deb files
-scp admin@192.168.1.137:/srv/tftp/vpp-plugin-dpdk*arm64.deb /tmp/
+# Retrieve built .deb files from LXC 200
+scp root@192.168.1.137:/opt/vyos-dev/dpaa-pmd/debs/vpp-plugin-dpdk*arm64.deb /tmp/
 
 # Deploy custom dpdk plugin to gateway
 scp /tmp/vpp-plugin-dpdk*arm64.deb vyos@192.168.1.175:/tmp/

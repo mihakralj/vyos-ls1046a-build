@@ -4,22 +4,8 @@
 # Runs on LXC 200 "vyos-builder" (Debian 12, aarch64-linux-gnu-gcc 12.2.0)
 # Applies 6 patches to mainline kernel 6.6.y for /dev/fsl-usdpaa support.
 #
-# Deploy from helga:
-#   scp bin/build-usdpaa-mainline.sh admin@heidi:/tmp/
-#   ssh admin@heidi "sudo pct push 200 /tmp/build-usdpaa-mainline.sh \
-#     /opt/vyos-dev/build-usdpaa-mainline.sh && \
-#     sudo pct exec 200 -- chmod +x /opt/vyos-dev/build-usdpaa-mainline.sh"
-#
-# Also push the C source:
-#   scp data/kernel-patches/fsl_usdpaa_mainline.c admin@heidi:/tmp/
-#   ssh admin@heidi "sudo pct push 200 /tmp/fsl_usdpaa_mainline.c \
-#     /opt/vyos-dev/fsl_usdpaa_mainline.c"
-#
-# Run:
-#   ssh admin@heidi "sudo pct exec 200 -- bash -c \
-#     'cd /opt/vyos-dev && ./build-usdpaa-mainline.sh patch 2>&1'"
-#   ssh admin@heidi "sudo pct exec 200 -- bash -c \
-#     'cd /opt/vyos-dev && ./build-usdpaa-mainline.sh build 2>&1'"
+# Run on LXC 200:
+#   cd /opt/vyos-dev && ./build-usdpaa-mainline.sh all
 #
 # Phases: patch | build | deploy | all | verify | reset
 # See plans/MAINLINE-PATCH-SPEC.md for technical specification.
@@ -677,19 +663,8 @@ Phases:
   reset     Revert all patches (restore from backups)
   all       Run patch + build + deploy in sequence
 
-Deploy from helga:
-  # Push script + source to LXC 200
-  scp bin/build-usdpaa-mainline.sh admin@heidi:/tmp/
-  scp data/kernel-patches/fsl_usdpaa_mainline.c admin@heidi:/tmp/
-  ssh admin@heidi "sudo pct push 200 /tmp/build-usdpaa-mainline.sh \
-    /opt/vyos-dev/build-usdpaa-mainline.sh && \
-    sudo pct push 200 /tmp/fsl_usdpaa_mainline.c \
-    /opt/vyos-dev/fsl_usdpaa_mainline.c && \
-    sudo pct exec 200 -- chmod +x /opt/vyos-dev/build-usdpaa-mainline.sh"
-
-Run:
-  ssh admin@heidi "sudo pct exec 200 -- bash -c \
-    'cd /opt/vyos-dev && ./build-usdpaa-mainline.sh all 2>&1'"
+Run on LXC 200:
+  cd /opt/vyos-dev && ./build-usdpaa-mainline.sh all
 
 After TFTP boot, verify:
   ls -la /dev/fsl-usdpaa

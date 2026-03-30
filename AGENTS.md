@@ -6,7 +6,7 @@ This file provides guidance to agents when working with code in this repository.
 
 VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two build paths:
 1. **CI (production):** `auto-build.yml` builds signed VyOS ISO on ARM64 GitHub Actions runner via `workflow_dispatch`
-2. **Local dev loop (iteration):** `bin/build-local.sh` cross-compiles kernel on LXC 200 (heidi, 192.168.1.137) → TFTP boot on Mono Gateway (~2 min incremental). See `plans/DEV-LOOP.md`
+2. **Local dev loop (iteration):** `bin/build-local.sh` cross-compiles kernel on LXC 200 (192.168.1.137) → TFTP boot on Mono Gateway (~2 min incremental). See `plans/DEV-LOOP.md`
 
 ## Critical Non-Obvious Rules
 
@@ -155,7 +155,6 @@ A 6-patch series adds `/dev/fsl-usdpaa` chardev support to **mainline** kernel 6
 | `data/vyos-ls1046a.minisign.pub` | Public key for ISO signature verification |
 | `version.json` | Update-check version file (served via GitHub raw, auto-updated by CI) |
 | `bin/build-local.sh` | Fast local build: `kernel`, `dtb`, `extract`, `vyos1x`, `iso` modes |
-| `bin/setup-heidi.sh` | One-time: provisions LXC 200 on Proxmox with cross-toolchain + TFTP |
 | `VPP.md` | VPP native integration: VyOS `set vpp` CLI with AF_XDP on SFP+ (eth3/eth4), thermal management, DPAA1 PMD roadmap |
 | `VPP-SETUP.md` | User-facing VPP setup guide: step-by-step enablement, configuration reference, troubleshooting, hardware constraints |
 | `plans/DEV-LOOP.md` | Dev-test loop architecture doc — TFTP boot procedure, lessons learned |
@@ -185,8 +184,8 @@ gh run list --limit 3
 git push  # then manually trigger build
 
 # === Local dev loop (fast iteration) ===
-# Deploy build script + run kernel build on LXC 200
-scp bin/build-local.sh admin@heidi:/tmp/ ; ssh admin@heidi "sudo pct push 200 /tmp/build-local.sh /opt/vyos-dev/build-local.sh && sudo pct exec 200 -- chmod +x /opt/vyos-dev/build-local.sh && sudo pct exec 200 -- bash -c 'cd /opt/vyos-dev && ./build-local.sh kernel 2>&1'"
+# Build kernel on LXC 200 (SSH in or use VS Code Remote-SSH)
+ssh root@192.168.1.137 "cd /opt/vyos-dev && ./build-local.sh kernel 2>&1"
 
 # From U-Boot serial (PuTTY 115200 8N1): TFTP boot
 run dev_boot
