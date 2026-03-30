@@ -57,7 +57,8 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 - **Jumbo frame module parameter is `fsl_dpaa_fman`:** The FMan driver's `KBUILD_MODNAME` is `fsl_dpaa_fman`, NOT `fman`. Use `fsl_dpaa_fman.fsl_fm_max_frm=9600` in bootargs. The wrong name silently has no effect (max MTU stays at 1500).
 - **QSPI flash needs `CONFIG_SPI_FSL_QSPI=y`:** Without it, `/dev/mtd*` devices don't appear and `fw_setenv` cannot modify U-Boot environment. The DTS defines 9 partitions on the 64MB QSPI NOR flash. U-Boot env is at `/dev/mtd3` ("uboot-env", 1MB partition, 4KB erase sector). CONFIG_ENV_SIZE = 0x2000 (8KB).
 - **`libubootenv-tool` config format:** VyOS ships `libubootenv-tool` which provides `/usr/bin/fw_setenv`. It accepts the classic `fw_env.config` legacy format: `Device Offset Env_size Sector_size`. The `/etc/fw_env.config` must point to `/dev/mtd3 0x0 0x2000 0x1000`. Env_size 0x2000 (8KB) and sector 0x1000 (4KB) were confirmed by brute-force CRC test on live hardware.
-- **`vyos-postinstall` writes U-Boot env via `fw_setenv`:** Phase 1 (`setup_uboot_env_once`) writes `vyos`, `usb_vyos`, and `bootcmd` to SPI flash on first boot. It checks `fw_printenv vyos` for `vyos.env` string — if found, skips (idempotent). Manual U-Boot console setup (INSTALL.md Step 4) is the fallback if `fw_setenv` fails.
+- **`vyos-postinstall` Phase 1 always runs on `install image`, is idempotent on boot service:** Phase 1 (`setup_uboot_env_once`) is called with `force=1` when invoked from `install image` (detected by presence of `--root` flag) — it **always** rewrites `vyos`, `usb_vyos`, and `bootcmd` in SPI flash regardless of current state. When called from `vyos-postinstall.service` on every boot (no `--root`), it checks `fw_printenv -n vyos` for "vyos.env" and skips if already correct. Boot order written: USB first (`usb start; if fatload usb 0:0 ${load_addr} boot.scr; then source ${load_addr}; fi`) → eMMC (`run vyos`) → SPI recovery. Manual U-Boot console setup (INSTALL.md Step 4) is the fallback if `fw_setenv` fails.
+- **Transient U-Boot ext4 failure on first boot after fresh eMMC format:** After `install image` on a freshly wiped eMMC, the first boot may print `Failed to load '/boot/vyos.env'` and fall through to SPI recovery. This is a known U-Boot ext4 driver quirk: the driver cannot reliably read a freshly-formatted ext4 partition on first access. `/boot/vyos.env` was written correctly by the installer (via grub.py hook). Just reboot from the recovery shell (`reboot`) and the second boot will load eMMC correctly. This is not a bug in postinstall or the installer.
 
 ## Local Dev Loop Rules
 
@@ -82,7 +83,7 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 - **DTS must match nix reference:** `data/dtb/mono-gateway-dk.dts` must have `compatible = "mono,gateway-dk", "fsl,ls1046a"` and ethernet aliases. Canonical source: `nix/pkgs/kernel/dts/mono-gateway-dk.dts`
 - **MOK.key is a secret** — only `MOK.pem` is in the repo; the private key comes from `${{ secrets.MOK_KEY }}`
 - **vyos-postinstall is board-gated** — the script checks `/proc/device-tree/compatible` for `fsl,ls1046a` and exits early on non-matching hardware. Safe to include in every ISO.
-- **vyos-postinstall does NOT run fw_setenv on upgrades** — only on first install (when `vyos_direct` doesn't yet reference `vyos.env`). All upgrades just write `/boot/vyos.env`.
+- **vyos-postinstall Phase 1 runs on every `install image`** — forced (`force=1`) when `--root` is provided by the installer. On boot service calls (no `--root`), Phase 1 skips if SPI already has correct config. Phase 2 (writing `/boot/vyos.env`) runs on every boot of the installed system to keep it in sync with the running image.
 
 ## DPAA1 DPDK PMD Kernel Patches (data/kernel-patches/)
 
@@ -138,7 +139,7 @@ A 6-patch series adds `/dev/fsl-usdpaa` chardev support to **mainline** kernel 6
 | `data/config.boot.dhcp` | Alternative DHCP-enabled boot config |
 | `data/dtb/mono-gw.dtb` | Device tree blob for Mono Gateway hardware (extracted from live OpenWrt, 94KB) |
 | `data/dtb/mono-gateway-dk.dts` | Custom DTS source — compiled during kernel build, includes ethernet aliases + SFP nodes |
-| `data/scripts/vyos-postinstall` | Post-install helper: writes `/boot/vyos.env` + one-time `fw_setenv` for static `vyos_direct` |
+| `data/scripts/vyos-postinstall` | Post-install helper: Phase 1 = `fw_setenv` for `vyos`/`usb_vyos`/`bootcmd` (forced on `install image` via `--root`, idempotent on boot service); Phase 2 = writes `/boot/vyos.env` on every boot to sync running image |
 | `data/scripts/fw_env.config` | U-Boot env access config for fw_printenv/fw_setenv (/dev/mtd3) — only used once during first install |
 | `data/scripts/vpp-setup-interfaces.sh` | Legacy VPP AF_XDP setup script (superseded by VyOS native `set vpp` CLI via patch 010) |
 | `data/scripts/vpp-setup.service` | Legacy systemd oneshot for VPP interface setup (superseded by VyOS native VPP service) |
