@@ -1,22 +1,17 @@
 # Dev-Test Loop: Fast Iteration for VyOS LS1046A
 
-> **Status:** ✅ WORKING (verified 2026-03-22, build #7)
+> **Status:** ✅ WORKING (verified 2026-03-30)
 > **Goal:** Reduce dev-test cycle from ~60 to 90 min down to ~10 min (kernel) / ~2 min (DTB/config). Because waiting an hour to test a one-line config change is not engineering. It's penance.
 
 ## Network Topology
 
 ```
-helga (Windows workstation)
-  ├── VS Code + git (editing build-scripts)
-  ├── Serial USB → Mono Gateway (PuTTY 115200 8N1, U-Boot + VyOS console)
-  └── SSH → heidi (admin@192.168.1.15)
-
-heidi (Proxmox AMD64 — Ryzen 7 5700X, 16T, 128GB RAM, 192.168.1.15)
-  └── LXC 200 "vyos-builder" (192.168.1.137, 12 cores, 16GB RAM, 80GB disk)
-        ├── /srv/tftp/         → vmlinuz (27MB), mono-gw.dtb (92KB), initrd.img (32MB)
-        ├── /opt/vyos-dev/     → linux-6.6.y source, vyos-build, build-scripts
-        ├── aarch64-linux-gnu-gcc 12.2.0 (cross-toolchain)
-        └── tftpd-hpa on port 69
+LXC 200 "vyos-builder" (Ubuntu 22.04, 192.168.1.137, 12 cores, 16GB RAM, 80GB disk)
+  ├── VS Code Remote / SSH   ← edit + build here
+  ├── /srv/tftp/             → vmlinuz (27MB), mono-gw.dtb (92KB), initrd.img (32MB)
+  ├── /opt/vyos-dev/         → linux-6.6.y source, vyos-build, build-scripts
+  ├── aarch64-linux-gnu-gcc 12.2.0 (cross-toolchain)
+  └── tftpd-hpa on port 69
 
 Mono Gateway (LS1046A, 4× Cortex-A72, 8GB DDR4)
   ├── fm1-mac5 (rightmost RJ45) → U-Boot TFTP, static IP 192.168.1.200
@@ -24,11 +19,14 @@ Mono Gateway (LS1046A, 4× Cortex-A72, 8GB DDR4)
   └── U-Boot 2025.04: dev_boot → TFTP from LXC 200
 ```
 
+All development happens directly on **LXC 200**. SSH in or use VS Code Remote-SSH.
+Serial console to the Mono Gateway is via PuTTY/minicom (115200 8N1) from any machine with USB access.
+
 ## Verified Iteration Times
 
 | Change Type | Before (CI+USB) | After (local) | Method |
 |-------------|-----------------|---------------|--------|
-| Kernel config (`CONFIG_*`) | ~60 min | **~2 min** (incremental) | Cross-compile on heidi → TFTP boot |
+| Kernel config (`CONFIG_*`) | ~60 min | **~2 min** (incremental) | Cross-compile on LXC 200 → TFTP boot |
 | Full kernel rebuild | ~60 min | **~8 min** | From-scratch cross-compile |
 | DTS / DTB only | ~60 min | **~30 sec** | `dtc` compile → TFTP |
 | `config.boot.default` | ~60 min | **~2 min** | Edit on eMMC via SSH |
@@ -36,29 +34,20 @@ Mono Gateway (LS1046A, 4× Cortex-A72, 8GB DDR4)
 
 ## Quick Start
 
-### 1. Provision heidi (one-time)
+### 1. Provision LXC 200 (one-time)
 
-From helga PowerShell:
-
-```powershell
-scp bin/setup-heidi.sh admin@heidi:/tmp/
-ssh admin@heidi "sudo bash /tmp/setup-heidi.sh"
-```
-
-Creates **LXC 200** with cross-toolchain, TFTP, Docker, kernel source, and vyos-build. Takes about 15 minutes. You do this once.
+On the Proxmox host, create and provision LXC 200. See `DEV-LOCAL.md` Step 1 for the full `pct create` + toolchain install commands.
 
 ### 2. Seed TFTP with initrd from last good ISO (one-time)
 
 ```bash
-# SSH into LXC 200
-ssh -J admin@192.168.1.15 root@192.168.1.137
-
+# On LXC 200:
 cd /opt/vyos-dev
 wget https://github.com/mihakralj/vyos-ls1046a-build/releases/latest/download/vyos-2026.03.22-0432-rolling-LS1046A-arm64.iso
 ./build-local.sh extract *.iso
 ```
 
-### 3. Set up U-Boot dev_boot (one-time, from helga serial console)
+### 3. Set up U-Boot dev_boot (one-time, from serial console)
 
 Power on Mono Gateway, interrupt U-Boot (`Hit any key`), paste these lines:
 
@@ -71,7 +60,7 @@ setenv dev_boot 'tftp 0xa0000000 vmlinuz; tftp ${fdt_addr_r} mono-gw.dtb; tftp 0
 saveenv
 ```
 
-> **Note:** `ethact fm1-mac5` forces U-Boot to use the leftmost RJ45 port for TFTP.
+> **Note:** `ethact fm1-mac5` forces U-Boot to use the rightmost RJ45 port for TFTP.
 > Without this, U-Boot may default to an SFP port (fm1-mac9) which cannot do TFTP
 > with copper SFP-10G-T modules (no U-Boot RTL8261 driver).
 
@@ -86,13 +75,13 @@ saveenv
 
 ### 4. Dev iteration cycle (the fast path)
 
-```powershell
-# From helga: edit build-local.sh in VS Code, then deploy + build:
-scp bin/build-local.sh admin@heidi:/tmp/ ; ssh admin@heidi "sudo pct push 200 /tmp/build-local.sh /opt/vyos-dev/build-local.sh && sudo pct exec 200 -- chmod +x /opt/vyos-dev/build-local.sh && sudo pct exec 200 -- bash -c 'cd /opt/vyos-dev && ./build-local.sh kernel 2>&1'"
+```bash
+# On LXC 200: edit code, then build kernel
+cd /opt/vyos-dev && ./build-local.sh kernel
 ```
 
 ```
-# From helga serial console (PuTTY 115200 8N1):
+# From serial console (115200 8N1):
 # Power-cycle Mono Gateway or type 'reboot' in VyOS
 # Interrupt U-Boot → type:
 run dev_boot
@@ -199,9 +188,9 @@ boot=live rootdelay=5 noautologin vyos-union=/boot/<IMAGE_NAME>
 
 | File | Purpose |
 |------|---------|
-| [`bin/setup-heidi.sh`](../bin/setup-heidi.sh) | One-time: creates LXC 200 on Proxmox, installs everything |
 | [`bin/build-local.sh`](../bin/build-local.sh) | Fast build: `kernel`, `dtb`, `extract`, `vyos1x`, `iso` modes |
 | [`plans/DEV-LOOP.md`](DEV-LOOP.md) | This document |
+| [`DEV-LOCAL.md`](../DEV-LOCAL.md) | Full local dev setup guide |
 
 ## Constraints Preserved
 

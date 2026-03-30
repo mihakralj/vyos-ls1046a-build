@@ -9,7 +9,6 @@ data/vyos-ls1046a.minisign.key
 
 # Local dev-test scripts (not needed in CI)
 bin/build-local.sh
-bin/setup-heidi.sh
 
 # Node.js artifacts (MCP tools, not part of build)
 node_modules/

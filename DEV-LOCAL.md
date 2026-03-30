@@ -3,29 +3,27 @@
 Fast iteration loop for kernel, DTB, and VyOS package changes without waiting for GitHub CI.
 Reduces a one-hour CI cycle to **~2 minutes** for incremental kernel changes.
 
-> **Status:** ✅ WORKING (verified 2026-03-29)
+> **Status:** ✅ WORKING (verified 2026-03-30)
 
 ---
 
 ## Network Topology
 
 ```
-helga (Windows workstation, 192.168.1.x)
-  ├── VS Code + git          ← edit build scripts here
-  ├── PuTTY 115200 8N1       ← serial USB → Mono Gateway RJ45 console
-  └── SSH → admin@192.168.1.15 (heidi)
-
-heidi (Proxmox host, AMD64, 192.168.1.15)
-  └── LXC 200 "vyos-builder" (Ubuntu 22.04, 192.168.1.137)
-        ├── /srv/tftp/          ← vmlinuz · mono-gw.dtb · initrd.img (tftpd-hpa)
-        ├── /opt/vyos-dev/      ← linux-6.6.y · vyos-build · vyos-ls1046a-build
-        └── aarch64-linux-gnu-gcc 12+ (cross-toolchain)
+LXC 200 "vyos-builder" (Ubuntu 22.04, 192.168.1.137)
+  ├── VS Code Remote / SSH    ← edit + build here
+  ├── /srv/tftp/              ← vmlinuz · mono-gw.dtb · initrd.img (tftpd-hpa)
+  ├── /opt/vyos-dev/          ← linux-6.6.y · vyos-build · vyos-ls1046a-build
+  └── aarch64-linux-gnu-gcc 12+ (cross-toolchain)
 
 Mono Gateway DK (LS1046A, 4× Cortex-A72, 8 GB DDR4)
   ├── RJ45 rightmost (fm1-mac5) ← U-Boot TFTP, static IP 192.168.1.200
   ├── eMMC mmcblk0p3            ← installed VyOS root (ext4)
   └── U-Boot 2025.04            ← dev_boot → TFTP from LXC 200
 ```
+
+All development happens directly on **LXC 200**. SSH in or use VS Code Remote-SSH.
+Serial console to the Mono Gateway is via PuTTY/minicom (115200 8N1) from any machine with USB access.
 
 ---
 
@@ -41,13 +39,9 @@ Mono Gateway DK (LS1046A, 4× Cortex-A72, 8 GB DDR4)
 
 ---
 
-## Step 1 — One-time LXC setup on heidi
+## Step 1 — One-time LXC setup
 
-SSH into heidi and provision LXC 200:
-
-```bash
-ssh admin@192.168.1.15
-```
+On the Proxmox host, create and provision LXC 200:
 
 ```bash
 # Create LXC 200 (Ubuntu 22.04, 12 cores, 16 GB RAM, 80 GB disk)
@@ -88,9 +82,7 @@ sudo pct exec 200 -- bash -c '
 The initrd is large (~30 MB) and changes rarely. Extract it once from any recent release, then only replace `vmlinuz` + `mono-gw.dtb` during kernel iterations.
 
 ```bash
-# SSH into LXC 200
-ssh root@192.168.1.137
-
+# On LXC 200:
 cd /opt/vyos-dev
 LATEST=$(curl -s https://api.github.com/repos/mihakralj/vyos-ls1046a-build/releases/latest \
          | grep -oP '"tag_name": "\K[^"]+')
@@ -116,7 +108,7 @@ mono-gw.dtb  (~94 KB)
 
 ## Step 3 — Set up U-Boot `dev_boot` (one-time per board)
 
-Connect to the Mono Gateway serial console (PuTTY, 115200 8N1). Power-cycle the board and press any key during U-Boot countdown to stop auto-boot.
+Connect to the Mono Gateway serial console (115200 8N1). Power-cycle the board and press any key during U-Boot countdown to stop auto-boot.
 
 ### Check the installed VyOS image name first
 
@@ -161,22 +153,25 @@ saveenv
 
 ## Step 4 — The fast iteration cycle
 
-### 4a. Edit code on helga
+### 4a. Edit code on LXC 200
 
-Make your kernel config or DTS changes in VS Code.
+SSH into LXC 200 (or use VS Code Remote-SSH) and make your kernel config or DTS changes directly:
 
-### 4b. Deploy build script and run kernel build
+```bash
+ssh root@192.168.1.137
+cd /opt/vyos-dev/vyos-ls1046a-build
+# edit files...
+```
 
-From helga PowerShell:
+### 4b. Build kernel
 
-```powershell
-scp bin/build-local.sh admin@heidi:/tmp/
-ssh admin@heidi "sudo pct push 200 /tmp/build-local.sh /opt/vyos-dev/build-local.sh && sudo pct exec 200 -- chmod +x /opt/vyos-dev/build-local.sh && sudo pct exec 200 -- bash -c 'cd /opt/vyos-dev && ./build-local.sh kernel 2>&1'"
+```bash
+cd /opt/vyos-dev && ./build-local.sh kernel
 ```
 
 ### 4c. Boot the device via TFTP
 
-From PuTTY serial console, power-cycle the Mono Gateway. Stop U-Boot, then:
+From the serial console (115200 8N1), power-cycle the Mono Gateway. Stop U-Boot, then:
 
 ```
 run dev_boot
@@ -420,12 +415,12 @@ saveenv
 
 ### TFTP transfer fails / timeout
 
-```
+```bash
 # Check LXC 200 is reachable from U-Boot:
 ping 192.168.1.137
 
 # Check tftpd-hpa on LXC 200:
-ssh root@192.168.1.137 "systemctl status tftpd-hpa && ls -lh /srv/tftp/"
+systemctl status tftpd-hpa && ls -lh /srv/tftp/
 
 # Ensure ethact is set to the correct port:
 printenv ethact
