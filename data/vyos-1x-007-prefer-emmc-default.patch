@@ -1,13 +1,15 @@
 diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
-@@ -384,5 +384,10 @@ def ask_single_disk(disks_available: dict[str, int]) -> str:
+@@ -384,6 +384,12 @@ def ask_single_disk(disks_available: dict[str, int]) -> str:
      print(MSG_INFO_INSTALL_DISKS_LIST)
-     default_disk: str = list(disks_available)[0]
-+    # prefer eMMC/SD (mmcblk) as default on embedded/ARM systems
-+    for disk_name in disks_available:
-+        if 'mmcblk' in disk_name:
-+            default_disk = disk_name
+     default_disk: str = list(disks_available)
++    # Prefer eMMC/SD card (mmcblk) as default on embedded/ARM hardware.
++    # Upstream sets default_disk to the full list; override with a string
++    # so ask_input() shows the mmcblk device name, not /dev/sda.
++    for _d in disks_available:
++        if 'mmcblk' in _d:
++            default_disk = _d
 +            break
      for disk_name, disk_size in disks_available.items():
          disk_size_human: str = bytes_to_gb(disk_size)
