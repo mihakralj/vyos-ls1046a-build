@@ -1,15 +1,10 @@
+Exclude live boot media from install target disk list.
+
 diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
+index cb3aa7b..a0355a8 100755
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
-@@ -172,12 +172,36 @@ def find_disks() -> dict[str, int]:
-     """Find a target disk for installation
- 
-     Returns:
-         dict[str, int]: a list of available disks by name and size
-     """
-     # check for available disks
-     print('Probing disks')
-     disks_available: dict[str, int] = disk.disks_size()
+@@ -181,6 +181,31 @@ def find_disks() -> dict[str, int]:
      for disk_name, disk_size in disks_available.copy().items():
          if disk_size < CONST_MIN_DISK_SIZE:
              del disks_available[disk_name]

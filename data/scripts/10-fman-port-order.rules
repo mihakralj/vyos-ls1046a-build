@@ -1,0 +1,13 @@
+# /etc/udev/rules.d/10-fman-port-order.rules
+# Map FMan DPAA1 MAC addresses to physical port positions on Mono Gateway DK.
+#
+# Runs early (priority 10) BEFORE systemd's 80-net-setup-link.rules to set
+# the correct interface name. The companion 00-fman.link file tells systemd
+# to keep whatever name udev assigned (NamePolicy=keep), preventing the
+# predictable-name override (e2-e6) seen without this rule.
+#
+# The PROGRAM script reads /sys/class/net/<iface>/device/of_node to determine
+# which FMan MAC the interface belongs to, then outputs the correct ethN name.
+# Non-DPAA interfaces pass through unchanged.
+
+SUBSYSTEM=="net", ACTION=="add", PROGRAM="/usr/local/bin/fman-port-name %k", NAME="%c"
