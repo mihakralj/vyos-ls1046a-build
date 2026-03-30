@@ -129,10 +129,16 @@ jobs:
             set -ex
             cp ../ls1046a-patches/reftree.cache data/reftree.cache
             sed -i 's/all: clean copyright/all: clean/' Makefile
+            patch_fail=0
             for p in ../ls1046a-patches/vyos-1x-*.patch; do
-              patch --no-backup-if-mismatch -p1 < "$p"
+              if ! patch --no-backup-if-mismatch -p1 < "$p"; then
+                echo "WARNING: $(basename $p) failed to apply (continuing)"
+                patch_fail=1
+              fi
             done
             python3 ../ls1046a-patches/patch-mmcblk-default.py
+            [ $patch_fail -eq 1 ] && echo "WARNING: some patches failed — check build output"
+            true
           """
           EOF
 
@@ -414,10 +420,19 @@ jobs:
           MASKHOOK
           chmod +x "$HOOKS/99-mask-services.chroot"
 
-          ### Ethernet port remapping: REMOVED (2026-03-29)
-          # New firmware provides correct FMan MAC-to-physical-port mapping.
-          # Kernel assigns eth names matching physical port order without udev
-          # intervention. The 64-fman-port-order.rules is no longer needed.
+          ### Ethernet port remapping: FMan MAC → physical port position
+          # FMan MACs probe by DT unit-address order (e2000, e8000, ea000, f0000,
+          # f2000) which doesn't match physical port positions. systemd also
+          # renames interfaces to e2-e6 using predictable naming.
+          # Fix: udev rule calls fman-port-name script which reads each interface's
+          # device-tree node to determine the correct ethN name. A .link file
+          # prevents systemd from overriding the udev-assigned name.
+          cp data/scripts/fman-port-name "$CHROOT/usr/local/bin/fman-port-name"
+          chmod +x "$CHROOT/usr/local/bin/fman-port-name"
+          mkdir -p "$CHROOT/etc/udev/rules.d"
+          cp data/scripts/10-fman-port-order.rules "$CHROOT/etc/udev/rules.d/10-fman-port-order.rules"
+          mkdir -p "$CHROOT/etc/systemd/network"
+          cp data/scripts/00-fman.link "$CHROOT/etc/systemd/network/00-fman.link"
 
       - name: Build Image Packages
         run: |

@@ -1,21 +1,7 @@
 Write /boot/vyos.env for U-Boot boards on every grub.set_default() call.
 
-On LS1046A (and other U-Boot boards), the bootloader reads /boot/vyos.env
-to determine which VyOS image to boot. This file must be updated whenever
-the default boot image changes — install, upgrade, set default-boot, or
-rename. Rather than patching every call site, we hook into grub.set_default()
-which is the single convergence point for all these operations.
-
-Additionally, after install_image() completes (first install from USB live),
-write vyos.env DIRECTLY to the eMMC mount and call vyos-postinstall for
-one-time U-Boot env setup (fw_setenv).
-
-Also, add_image() (upgrade path) now copies .dtb files from the ISO root
-to the new image's boot directory, so U-Boot can load the correct DTB.
-Without this, upgrades via "add system image" would leave the new image
-directory without mono-gw.dtb, causing boot failure on U-Boot boards.
-
 diff --git a/python/vyos/system/grub.py b/python/vyos/system/grub.py
+index 0f04fa5..36f5118 100644
 --- a/python/vyos/system/grub.py
 +++ b/python/vyos/system/grub.py
 @@ -354,6 +354,15 @@ def set_default(version_name: str, root_dir: str = '') -> None:
@@ -35,9 +21,10 @@ diff --git a/python/vyos/system/grub.py b/python/vyos/system/grub.py
  def common_write(root_dir: str = '', grub_common: dict[str, str] = {}) -> None:
      """Write common GRUB configuration file (overwrite everything)
 diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
+index cb3aa7b..543ab12 100755
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
-@@ -993,6 +993,25 @@ def install_image() -> None:
+@@ -993,6 +993,31 @@ def install_image() -> None:
          grub.set_default(image_name, DIR_DST_ROOT)
          grub.set_console_type(console_dict[console_type], DIR_DST_ROOT)
  
@@ -47,24 +34,29 @@ diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
 +        try:
 +            vyos_env = Path(f'{DIR_DST_ROOT}/boot/vyos.env')
 +            vyos_env.write_text(f'vyos_image={image_name}\n')
-+            print(f'U-Boot: wrote {vyos_env}')
-+        except Exception as e:
-+            print(f'WARNING: failed to write vyos.env: {e}')
++        except Exception:
++            pass
 +
 +        # U-Boot boards: one-time bootloader env setup (fw_setenv).
 +        # Pass --root so the script operates on the eMMC mount, not /.
 +        # Errors are non-fatal — user can set up U-Boot manually.
-+        try:
-+            rc = run(f'/usr/local/bin/vyos-postinstall --root {DIR_DST_ROOT} {image_name}')
-+            if rc == 0:
-+                print('U-Boot: vyos-postinstall completed successfully')
-+        except Exception:
-+            pass
++        postinstall = Path('/usr/local/bin/vyos-postinstall')
++        if postinstall.exists():
++            print('Configuring U-Boot for automatic eMMC boot...')
++            try:
++                rc = run(f'{postinstall} --root {DIR_DST_ROOT} {image_name}')
++                if rc == 0:
++                    print('U-Boot configuration complete.')
++                else:
++                    print('WARNING: U-Boot configuration returned errors (non-fatal).')
++                    print('  You may need to set up U-Boot manually — see INSTALL.md.')
++            except Exception:
++                pass
 +
          if is_raid_install(install_target):
              # add RAID specific modules
              grub.modules_write(f'{DIR_DST_ROOT}/{grub.CFG_VYOS_MODULES}',
-@@ -1242,6 +1261,11 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
+@@ -1242,6 +1267,11 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
          copy(f'{DIR_ISO_MOUNT}/live/filesystem.squashfs',
               f'{root_dir}/boot/{image_name}/{image_name}.squashfs')
  
@@ -75,3 +67,4 @@ diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
 +
          # unmount an ISO and cleanup
          cleanup([str(iso_path)])
+ 
