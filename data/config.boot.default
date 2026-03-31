@@ -1,13 +1,10 @@
 system {
     host-name vyos
+    domain-name internal
     login {
         user vyos {
             authentication {
                 encrypted-password $y$j9T$Rq06TVkTBOm.Xw0dNcvvd0$U73QHmRbKcnEQbQU90YTj9TZDDuIvCyakm25928fqn9
-                public-keys ed25519 {
-                    key AAAAC3NzaC1lZDI1NTE5AAAAICalFzBKS9oY/SDLz6kJDA9A1ktsrWQOA7FckaZMtkwr
-                    type ssh-ed25519
-                }
             }
         }
     }
@@ -27,6 +24,7 @@ system {
             }
         }
     }
+    name-server 127.0.0.1
     ntp {
         allow-client {
             address "127.0.0.0/8"
@@ -56,6 +54,34 @@ system {
     update-check {
         auto-check
         url https://raw.githubusercontent.com/mihakralj/vyos-ls1046a-build/refs/heads/main/version.json
+    }
+    watchdog {
+        reboot-timeout 60
+        shutdown-timeout 60
+    }
+    sysctl {
+        parameter net.core.netdev_max_backlog {
+            value 5000
+        }
+        parameter net.ipv4.ip_local_port_range {
+            value "1024 65000"
+        }
+        parameter net.netfilter.nf_conntrack_tcp_timeout_established {
+            value 1800
+        }
+        parameter net.netfilter.nf_conntrack_tcp_timeout_close_wait {
+            value 20
+        }
+        parameter net.netfilter.nf_conntrack_tcp_timeout_fin_wait {
+            value 30
+        }
+        parameter net.netfilter.nf_conntrack_tcp_timeout_time_wait {
+            value 60
+        }
+    }
+    conntrack {
+        table-size 262144
+        hash-size 262144
     }
 }
 
@@ -119,6 +145,50 @@ interfaces {
 
 service {
     ssh {
+        cipher chacha20-poly1305@openssh.com
+        cipher aes256-gcm@openssh.com
+        cipher aes128-gcm@openssh.com
+        client-keepalive-interval 60
+        port 22
+    }
+    dns {
+        forwarding {
+            listen-address 127.0.0.1
+            listen-address ::1
+            allow-from 127.0.0.0/8
+            allow-from 192.168.0.0/16
+            allow-from 10.0.0.0/8
+            allow-from 172.16.0.0/12
+            allow-from 100.64.0.0/10
+            allow-from ::1/128
+            allow-from fe80::/10
+            allow-from fc00::/7
+            cache-size 10000
+            dnssec validate
+            name-server 1.1.1.1
+            name-server 9.9.9.9
+            name-server 2606:4700:4700::1111
+            name-server 2620:fe::fe
+            timeout 5000
+        }
     }
 }
 
+firewall {
+    global-options {
+        all-ping enable
+        send-redirects disable
+        source-validation loose
+        state-policy {
+            established {
+                action accept
+            }
+            invalid {
+                action drop
+            }
+            related {
+                action accept
+            }
+        }
+    }
+}
