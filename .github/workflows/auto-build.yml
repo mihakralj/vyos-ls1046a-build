@@ -542,10 +542,11 @@ jobs:
           mkdir -p $DPDK_WORK $DPDK_OUTPUT
 
           # Install DPDK build deps (meson/ninja may already exist in builder image)
+          # libfdt-dev: required by DPAA bus driver (bus/dpaa depends on libfdt)
           apt-get update -qq
           apt-get install -y --no-install-recommends \
             meson ninja-build pkg-config python3-pyelftools \
-            libelf-dev libnuma-dev 2>&1 | tail -5
+            libelf-dev libnuma-dev libfdt-dev 2>&1 | tail -5
 
           # Clone DPDK v24.11 (shallow)
           git clone --depth=1 -b v24.11 https://github.com/DPDK/dpdk.git $DPDK_WORK/dpdk
@@ -556,10 +557,13 @@ jobs:
 
           # Meson setup — native ARM64, static build, DPAA enabled
           export PKG_CONFIG_LIBDIR="/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
+          # -Dmachine=generic: runner is Neoverse-N2 but target is Cortex-A72 (LS1046A)
+          # Without this, meson auto-detects -mcpu=neoverse-n2+sve2 which crashes on A72
           meson setup build \
             --prefix="$DPDK_OUTPUT" \
             -Ddefault_library=static \
             -Dmax_lcores=4 \
+            -Dmachine=generic \
             -Denable_kmods=false \
             -Dtests=false \
             -Dexamples= \
@@ -567,19 +571,28 @@ jobs:
           ninja -C build -j$(nproc)
           ninja -C build install
 
-          # Verify DPAA PMD in static lib
-          DPAA_OBJS=$(ar t "$DPDK_OUTPUT/lib/aarch64-linux-gnu/libdpdk.a" 2>/dev/null | grep -ci dpaa || \
-                      ar t "$DPDK_OUTPUT/lib/libdpdk.a" 2>/dev/null | grep -ci dpaa || echo "0")
-          echo "### DPDK built: $(du -sh $DPDK_OUTPUT | cut -f1), DPAA objects: $DPAA_OBJS"
+          # Verify DPAA PMD: check for individual librte_*dpaa*.a files
+          # (libdpdk.a is a GROUP linker script on Debian, ar t fails on it)
+          DPAA_LIBS=$(find "$DPDK_OUTPUT" -name 'librte_*dpaa*.a' -not -name '*dpaa2*' | wc -l)
+          DPAA2_LIBS=$(find "$DPDK_OUTPUT" -name 'librte_*dpaa2*.a' | wc -l)
+          echo "### DPDK built: $(du -sh $DPDK_OUTPUT | cut -f1), DPAA1 libs: $DPAA_LIBS, DPAA2 libs: $DPAA2_LIBS"
 
           # Find actual libdpdk.a path (may be lib/ or lib/aarch64-linux-gnu/)
-          DPDK_LIB=$(find "$DPDK_OUTPUT" -name 'libdpdk.a' -type f | head -1)
+          # Use -maxdepth to avoid picking up build intermediates; accept any file type
+          # (meson creates GROUP linker scripts which are regular files)
+          DPDK_LIB=$(find "$DPDK_OUTPUT" -name 'libdpdk.a' | head -1)
           DPDK_INC=$(find "$DPDK_OUTPUT" -path '*/dpdk/rte_config.h' -type f -printf '%h\n' | head -1)
+          echo "DPDK_LIB=$DPDK_LIB"
+          echo "DPDK_INC=$DPDK_INC"
+          echo "DPDK_OUTPUT=$DPDK_OUTPUT"
           echo "DPDK_LIB=$DPDK_LIB" >> $GITHUB_ENV
           echo "DPDK_INC=$DPDK_INC" >> $GITHUB_ENV
           echo "DPDK_OUTPUT=$DPDK_OUTPUT" >> $GITHUB_ENV
+          ls -la "$DPDK_LIB" 2>/dev/null || echo "WARNING: libdpdk.a not found"
+          head -1 "$DPDK_LIB" 2>/dev/null || true
 
-          # Cleanup source to save disk
+          # Return to workspace before cleanup (rm -rf while cwd is inside target = fatal)
+          cd $GITHUB_WORKSPACE
           rm -rf $DPDK_WORK/dpdk
 
           echo "### Step 2/3: Build VPP DPDK plugin with DPAA1 mempool patches"
