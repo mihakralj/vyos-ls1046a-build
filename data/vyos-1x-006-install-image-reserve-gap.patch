@@ -1,14 +1,15 @@
 Reserve first 32 MiB for NXP LS1046A firmware boundary.
 
-Also update CONST_RESERVED_SPACE to account for the larger firmware
-zone (32 MiB instead of 2 MiB), so sgdisk does not try to create a
-root partition extending past the end of the disk.
+Shift BIOS boot and EFI partitions past the 32 MiB NXP firmware zone.
+Update CONST_RESERVED_SPACE to match (32 + 1 + 256 MiB).
+Use sgdisk end-sector 0 (fill remaining space) when user chooses
+"use all free space" to avoid double-counting reserved space.
 
 diff --git a/python/vyos/system/disk.py b/python/vyos/system/disk.py
-index 7ae9a15..4792350 100644
+index 7ae9a15..b3c5e01 100644
 --- a/python/vyos/system/disk.py
 +++ b/python/vyos/system/disk.py
-@@ -62,8 +62,9 @@ def find_persistence() -> str:
+@@ -62,17 +62,17 @@ def find_persistence() -> str:
  def parttable_create(drive_path: str, root_size: int) -> None:
      """Create a hybrid MBR/GPT partition table
      0-2047 first sectors are free
@@ -20,17 +21,21 @@ index 7ae9a15..4792350 100644
      Everything else till the end of a drive - Linux partition
  
      Args:
-@@ -73,7 +74,7 @@ def parttable_create(drive_path: str, root_size: int) -> None:
-         root_size_text: str = '+100%'
+         drive_path (str): path to a drive
+     """
+-    if not root_size:
+-        root_size_text: str = '+100%'
++    if root_size:
++        command = f'sgdisk -a1 -n1:65536:67583 -t1:EF02 -n2:67584:+256M -t2:EF00 -n3:0:+{root_size}K -t3:8300 {drive_path}'
      else:
-         root_size_text: str = str(root_size)
+-        root_size_text: str = str(root_size)
 -    command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:4096:+256M -t2:EF00 \
-+    command = f'sgdisk -a1 -n1:65536:67583 -t1:EF02 -n2:67584:+256M -t2:EF00 \
-         -n3:0:+{root_size_text}K -t3:8300 {drive_path}'
+-        -n3:0:+{root_size_text}K -t3:8300 {drive_path}'
++        command = f'sgdisk -a1 -n1:65536:67583 -t1:EF02 -n2:67584:+256M -t2:EF00 -n3:0:0 -t3:8300 {drive_path}'
  
      run(command)
 diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
-index cb3aa7b..e1f2a3c 100755
+index cb3aa7b..f5a9c12 100755
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
 @@ -118,8 +118,8 @@
@@ -44,3 +49,12 @@ index cb3aa7b..e1f2a3c 100755
  
  # define directories and paths
  DIR_CONFIG: str = directories['config']
+@@ -253,6 +253,9 @@ def create_partitions(target_disk: str, target_size: int,
+     print(MSG_INFO_INSTALL_PARTITONING)
+     raid.clear()
+     disk.disk_cleanup(target_disk)
++    # Use sgdisk "fill remaining" mode when user chose all free space
++    if rootfs_size == available_size:
++        rootfs_size = 0
+     disk_details: disk.DiskDetails = disk.parttable_create(target_disk,
+                                                            rootfs_size)
