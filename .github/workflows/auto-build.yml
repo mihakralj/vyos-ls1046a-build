@@ -2,7 +2,7 @@ name: VyOS LS1046A build
 
 on:
   schedule:
-    - cron: "0 1 * * 5"
+    - cron: "0 5 * * *"
 
   workflow_dispatch:
     inputs:
@@ -21,9 +21,6 @@ env:
   DEBIAN_SECURITY_MIRROR: http://deb.debian.org/debian-security
   # ~~no package on the official repo~~ fixed
   VYOS_MIRROR: https://packages.vyos.net/repositories/current/
-  # this repo doesn't seem to be updated anymore
-  # https://dev.packages.vyos.net/?dir=repositories/current/dists/current
-  # VYOS_MIRROR: https://rolling-packages.vyos.net/current/
 
 jobs:
   build_iso:
@@ -535,6 +532,233 @@ jobs:
             cp $deb_file packages
           done
           ls -alh packages
+
+      - name: Build DPDK + VPP DPAA Plugin
+        run: |
+          set -ex
+          echo "### Step 1/3: Build DPDK 24.11 with DPAA1 PMD (native ARM64, static)"
+          DPDK_WORK=/tmp/dpdk-build
+          DPDK_OUTPUT=$DPDK_WORK/output
+          mkdir -p $DPDK_WORK $DPDK_OUTPUT
+
+          # Install DPDK build deps (meson/ninja may already exist in builder image)
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config python3-pyelftools \
+            libelf-dev libnuma-dev 2>&1 | tail -5
+
+          # Clone DPDK v24.11 (shallow)
+          git clone --depth=1 -b v24.11 https://github.com/DPDK/dpdk.git $DPDK_WORK/dpdk
+
+          # Apply portal mmap patch (DPDK userspace must mmap portal windows via usdpaa fd)
+          cd $DPDK_WORK/dpdk
+          patch -p1 < $GITHUB_WORKSPACE/data/dpdk-portal-mmap.patch || true
+
+          # Meson setup — native ARM64, static build, DPAA enabled
+          export PKG_CONFIG_LIBDIR="/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
+          meson setup build \
+            --prefix="$DPDK_OUTPUT" \
+            -Ddefault_library=static \
+            -Dmax_lcores=4 \
+            -Denable_kmods=false \
+            -Dtests=false \
+            -Dexamples= \
+            -Ddisable_drivers="net/mlx*,net/bnxt,net/ixg*,net/ice,net/i40e,net/e1000,crypto/qat,net/virtio,net/vmxnet*,net/ena,net/hns*,net/hinic,net/octeontx*,net/cnxk,net/thunderx"
+          ninja -C build -j$(nproc)
+          ninja -C build install
+
+          # Verify DPAA PMD in static lib
+          DPAA_OBJS=$(ar t "$DPDK_OUTPUT/lib/aarch64-linux-gnu/libdpdk.a" 2>/dev/null | grep -ci dpaa || \
+                      ar t "$DPDK_OUTPUT/lib/libdpdk.a" 2>/dev/null | grep -ci dpaa || echo "0")
+          echo "### DPDK built: $(du -sh $DPDK_OUTPUT | cut -f1), DPAA objects: $DPAA_OBJS"
+
+          # Find actual libdpdk.a path (may be lib/ or lib/aarch64-linux-gnu/)
+          DPDK_LIB=$(find "$DPDK_OUTPUT" -name 'libdpdk.a' -type f | head -1)
+          DPDK_INC=$(find "$DPDK_OUTPUT" -path '*/dpdk/rte_config.h' -type f -printf '%h\n' | head -1)
+          echo "DPDK_LIB=$DPDK_LIB" >> $GITHUB_ENV
+          echo "DPDK_INC=$DPDK_INC" >> $GITHUB_ENV
+          echo "DPDK_OUTPUT=$DPDK_OUTPUT" >> $GITHUB_ENV
+
+          # Cleanup source to save disk
+          rm -rf $DPDK_WORK/dpdk
+
+          echo "### Step 2/3: Build VPP DPDK plugin with DPAA1 mempool patches"
+          VPP_WORK=/tmp/vpp-plugin-build
+          mkdir -p $VPP_WORK
+
+          # Clone VPP (shallow) — only need plugins/dpdk, vppinfra/linux, plugins/vxlan
+          git clone --depth=1 --filter=blob:none --sparse \
+            https://github.com/FDIo/vpp.git $VPP_WORK/vpp 2>&1 | tail -5
+          cd $VPP_WORK/vpp
+          git sparse-checkout set src/plugins/dpdk src/vppinfra/linux src/plugins/vxlan
+          VPP_SRC=$VPP_WORK/vpp/src
+
+          # Apply DPAA mempool patches to VPP dpdk plugin source
+          # (inline version of bin/patch-vpp-dpaa-mempool.sh adapted for CI paths)
+          DPDK_PLUGIN=$VPP_SRC/plugins/dpdk
+          DRIVER="$DPDK_PLUGIN/device/driver.c"
+          DPDK_H="$DPDK_PLUGIN/device/dpdk.h"
+          INIT="$DPDK_PLUGIN/device/init.c"
+          COMMON="$DPDK_PLUGIN/device/common.c"
+
+          # Patch 1: Add net_dpaa to driver.c
+          if ! grep -q '"net_dpaa"' "$DRIVER" 2>/dev/null; then
+            sed -i '/\.drivers = DPDK_DRIVERS.*"net_dpaa2"/i\  {\n    .drivers = DPDK_DRIVERS ({ "net_dpaa", "NXP DPAA1 FMan Mac" }),\n    .interface_name_prefix = "TenGigabitEthernet",\n  },' "$DRIVER"
+          fi
+
+          # Patch 2: Add IS_DPAA flag to dpdk.h
+          if ! grep -q 'IS_DPAA' "$DPDK_H" 2>/dev/null; then
+            sed -i '/_ (15, TX_PREPARE, "tx-prepare")/a\  _ (16, IS_DPAA, "dpaa-device")                                              \\' "$DPDK_H"
+          fi
+
+          # Patch 3: Add dpaa_mempool to dpdk_main_t
+          if ! grep -q 'dpaa_mempool' "$DPDK_H" 2>/dev/null; then
+            sed -i '/^} dpdk_main_t;/i\\n  /* DPAA1 BMan hardware mempool for DPAA PMD devices */\n  struct rte_mempool *dpaa_mempool;' "$DPDK_H"
+          fi
+
+          # Patch 4: Add IS_DPAA detection in init.c
+          if ! grep -q 'IS_DPAA' "$INIT" 2>/dev/null; then
+            sed -i "/dpdk_log_warn.*unknown driver.*driver_name/a\\
+          \\
+                /* Mark DPAA1 devices for BMan mempool routing */\\
+                if (di.driver_name \&\& strstr (di.driver_name, \"net_dpaa\") \&\&\\
+                    !strstr (di.driver_name, \"net_dpaa2\"))\\
+                  dpdk_device_flag_set (xd, DPDK_DEVICE_FLAG_IS_DPAA, 1);" "$INIT"
+          fi
+
+          # Patch 5: Add dpdk_dpaa_mempool_create() function + call
+          if ! grep -q 'dpaa_mempool_create' "$INIT" 2>/dev/null; then
+            cat > /tmp/dpaa_mempool_func.c << 'CFUNC'
+
+          static void
+          dpdk_dpaa_mempool_create (dpdk_main_t *dm)
+          {
+            dm->dpaa_mempool = rte_pktmbuf_pool_create_by_ops (
+              "dpaa_vpp_pool", 4096, 256, 0, RTE_MBUF_DEFAULT_BUF_SIZE, 0, "dpaa");
+            if (!dm->dpaa_mempool)
+              dpdk_log_notice ("DPAA mempool not created: %s", rte_strerror (rte_errno));
+            else
+              dpdk_log_notice ("DPAA BMan mempool created: %u buffers", dm->dpaa_mempool->size);
+          }
+          CFUNC
+            LAST_INCLUDE=$(grep -n '^#include' "$INIT" | tail -1 | cut -d: -f1)
+            sed -i "${LAST_INCLUDE}r /tmp/dpaa_mempool_func.c" "$INIT"
+            sed -i '/error = dpdk_lib_init (dm);/i\  dpdk_dpaa_mempool_create (dm);' "$INIT"
+            rm -f /tmp/dpaa_mempool_func.c
+          fi
+
+          # Patch 6: Route DPAA devices to BMan mempool in common.c
+          if ! grep -q 'IS_DPAA' "$COMMON" 2>/dev/null; then
+            sed -i '/^dpdk_device_setup (dpdk_device_t \* xd)/,/ASSERT/{
+              /ASSERT/a\  dpdk_main_t *dm = \&dpdk_main;
+            }' "$COMMON"
+            sed -i 's|struct rte_mempool \*mp = dpdk_mempool_by_buffer_pool_index\[bpidx\];|struct rte_mempool *mp;\n      if ((xd->flags \& DPDK_DEVICE_FLAG_IS_DPAA) \&\& dm->dpaa_mempool)\n        mp = dm->dpaa_mempool;\n      else\n        mp = dpdk_mempool_by_buffer_pool_index[bpidx];|' "$COMMON"
+          fi
+
+          # Patch 7: Add rte_mbuf.h include
+          if ! grep -q 'rte_mbuf.h' "$INIT" 2>/dev/null; then
+            sed -i '1,/^#include.*dpdk.h/{/^#include.*dpdk.h/a\#include <rte_mbuf.h>
+          }' "$INIT"
+          fi
+
+          echo "### VPP DPAA patches applied"
+
+          # Download vpp-dev headers from VyOS mirror
+          VPP_DEV_DIR=$VPP_WORK/vpp-dev
+          mkdir -p $VPP_DEV_DIR /tmp/vpp-debs
+          cd /tmp/vpp-debs
+
+          # Add VyOS repo temporarily to download vpp-dev
+          echo "deb [trusted=yes] $VYOS_MIRROR current main" > /etc/apt/sources.list.d/vyos-tmp.list
+          apt-get update -qq 2>&1 | tail -3
+          apt-get download vpp-dev vpp libvppinfra libvppinfra-dev 2>&1 | tail -5
+          rm -f /etc/apt/sources.list.d/vyos-tmp.list
+
+          # Extract headers
+          for deb in *.deb; do
+            dpkg-deb -x "$deb" "$VPP_DEV_DIR" 2>/dev/null || true
+          done
+          rm -f /tmp/vpp-debs/*.deb
+
+          # Remove upstream dpdk plugin headers (we use our DPAA-patched copy)
+          rm -rf "$VPP_DEV_DIR/usr/include/vpp_plugins/dpdk"
+
+          # Copy supplementary headers from VPP source
+          mkdir -p "$VPP_DEV_DIR/usr/include/vppinfra/linux"
+          cp "$VPP_SRC/vppinfra/linux/sysfs.c" "$VPP_DEV_DIR/usr/include/vppinfra/linux/" 2>/dev/null || true
+          mkdir -p "$VPP_DEV_DIR/usr/include/vpp_plugins/vxlan"
+          cp "$VPP_SRC/plugins/vxlan/vxlan.h" "$VPP_DEV_DIR/usr/include/vpp_plugins/vxlan/" 2>/dev/null || true
+          cp "$VPP_SRC/plugins/vxlan/vxlan_packet.h" "$VPP_DEV_DIR/usr/include/vpp_plugins/vxlan/" 2>/dev/null || true
+          cp "$VPP_SRC/plugins/vxlan/vxlan_error.def" "$VPP_DEV_DIR/usr/include/vpp_plugins/vxlan/" 2>/dev/null || true
+
+          # Set up out-of-tree cmake build
+          BUILD_DIR=$VPP_WORK/build-oot
+          mkdir -p "$BUILD_DIR/plugins"
+          cp -a "$DPDK_PLUGIN" "$BUILD_DIR/plugins/dpdk"
+
+          cat > "$BUILD_DIR/CMakeLists.txt" << 'CMAKE'
+          cmake_minimum_required(VERSION 3.16)
+          project(vpp-dpdk-plugin C)
+          macro(string_append var str)
+            if (NOT ${var}) set(${var} "${str}") else() set(${var} "${${var}} ${str}") endif()
+          endmacro()
+          macro(vpp_find_path var)
+            cmake_parse_arguments(ARG "" "" "PATH_SUFFIXES;NAMES" ${ARGN})
+            find_path(${var} PATH_SUFFIXES ${ARG_PATH_SUFFIXES} NAMES ${ARG_NAMES})
+          endmacro()
+          macro(vpp_plugin_find_library plugin var name)
+            find_library(${var} NAMES ${name})
+            if(NOT ${var}) message(WARNING "-- ${plugin} plugin needs ${name} - not found")
+            else() message(STATUS "-- ${plugin} plugin needs ${name} - found at ${${var}}") endif()
+          endmacro()
+          find_package(VPP REQUIRED)
+          set(VPP_USE_SYSTEM_DPDK OFF CACHE BOOL "" FORCE)
+          set(PRE_DATA_SIZE 128)
+          unset(OPENSSL_FOUND)
+          add_subdirectory(plugins/dpdk)
+          CMAKE
+
+          # Find VPP cmake path
+          VPP_CMAKE=$(find "$VPP_DEV_DIR" -name 'VPPConfig.cmake' -printf '%h\n' | head -1)
+
+          mkdir -p "$BUILD_DIR/build" && cd "$BUILD_DIR/build"
+          cmake .. \
+            -G Ninja \
+            -DCMAKE_C_FLAGS="-O2 -I$BUILD_DIR/plugins" \
+            -DCMAKE_PREFIX_PATH="$VPP_CMAKE" \
+            -DCMAKE_FIND_ROOT_PATH="$VPP_DEV_DIR/usr;$DPDK_OUTPUT" \
+            -DVPP_INCLUDE_DIR="$VPP_DEV_DIR/usr/include" \
+            -DVPP_APIGEN="$VPP_DEV_DIR/usr/bin/vppapigen" \
+            -DDPDK_INCLUDE_DIR="$DPDK_INC" \
+            -DDPDK_LIB="$DPDK_LIB" \
+            2>&1 | grep -E '(Found DPDK|libdpdk|numa|Configuring done|FATAL|ERROR)'
+          ninja -j$(nproc) 2>&1
+
+          echo "### Step 3/3: Verify and deploy plugin"
+          # Find the built plugin
+          PLUGIN=$(find "$BUILD_DIR" /vpp_plugins -name 'dpdk_plugin.so' -newer "$BUILD_DIR/CMakeLists.txt" 2>/dev/null | head -1)
+          if [ -z "$PLUGIN" ]; then
+            echo "WARNING: dpdk_plugin.so not found — ISO will use upstream plugin"
+          else
+            PLUGIN_SIZE=$(stat -c%s "$PLUGIN")
+            DPAA_SYMS=$(nm -D "$PLUGIN" 2>/dev/null | grep -ci dpaa || true)
+            PMD_INIT=$(nm "$PLUGIN" 2>/dev/null | grep -c 'dpaainitfn_net_dpaa' || true)
+            echo "### Plugin: $(du -h $PLUGIN | cut -f1), DPAA symbols: $DPAA_SYMS, PMD constructor: $PMD_INIT"
+
+            if [ "$PLUGIN_SIZE" -gt 5000000 ] && [ "$PMD_INIT" -ge 1 ]; then
+              # Deploy to includes.chroot (overrides upstream vpp-plugin-dpdk)
+              CHROOT=$GITHUB_WORKSPACE/vyos-build/data/live-build-config/includes.chroot
+              mkdir -p "$CHROOT/usr/lib/aarch64-linux-gnu/vpp_plugins"
+              cp "$PLUGIN" "$CHROOT/usr/lib/aarch64-linux-gnu/vpp_plugins/dpdk_plugin.so"
+              echo "### DPAA-enabled dpdk_plugin.so deployed to includes.chroot"
+            else
+              echo "WARNING: Plugin too small or missing PMD constructor — keeping upstream"
+            fi
+          fi
+
+          # Cleanup build artifacts to save disk
+          rm -rf $DPDK_WORK $VPP_WORK
+          df -Th
 
       - name: Build VyOS ISO
         id: build_iso
