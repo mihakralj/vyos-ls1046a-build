@@ -110,7 +110,8 @@ A 6-patch series adds `/dev/fsl-usdpaa` chardev support to **mainline** kernel 6
 - **Only 2 packages rebuilt:** Only `linux-kernel` and `vyos-1x` are built from source; all other packages come from upstream VyOS repos
 - **linux-headers stripped:** `rm -rf packages/linux-headers-*` before ISO build to save space on the runner
 - **Secure Boot chain:** MOK.pem/MOK.key for kernel module signing, minisign for ISO signing, `grub-efi-arm64-signed` + `shim-signed` packages included
-- **Weekly schedule:** Cron runs Friday 01:00 UTC. Also triggered manually via `workflow_dispatch`
+- **Weekly schedule:** Cron runs daily 05:00 UTC. Also triggered manually via `workflow_dispatch`
+- **DPDK + VPP plugin built in CI:** The "Build DPDK + VPP DPAA Plugin" step clones DPDK v24.11 + VPP, applies DPAA patches, builds static `libdpdk.a`, then builds `dpdk_plugin.so` against vpp-dev headers from VyOS mirror. Plugin is deployed to `includes.chroot/usr/lib/aarch64-linux-gnu/vpp_plugins/` overriding the upstream `vpp-plugin-dpdk` deb's copy. If the build fails, the ISO falls back to the upstream plugin (no DPAA1 support).
 - **Boot optimizations:** `acpid.service`, `acpid.socket`, `acpid.path` are masked in the ISO via `99-mask-services.chroot`. `kexec-load.service` and `kexec.service` are NOT masked — mainline 6.6 QBMan kexec fix enables VyOS managed-params self-healing on DPAA1. SysV init scripts (`/etc/init.d/kexec-load`, `/etc/init.d/kexec`) are removed to prevent `systemd-sysv-generator` from creating duplicate units that would bypass systemd. The old `ln -sf /dev/null` in `includes.chroot` approach was broken — live-build dereferences absolute symlinks to paths outside the chroot, producing empty files instead. ACPI masking saves ~2s. `CONFIG_DEBUG_PREEMPT` suppression saves ~20s. Installed system boot time: ~82s to login prompt.
 
 ## Boot Diagnostics (Ignore These)
@@ -166,7 +167,9 @@ A 6-patch series adds `/dev/fsl-usdpaa` chardev support to **mainline** kernel 6
 | `data/kernel-patches/9001-usdpaa-bman-qman-exports-and-driver.patch` | Combined kernel patch: BMan/QMan symbol exports, portal phys addr + reservation, allocator-only frees, Kconfig+Makefile for `CONFIG_FSL_USDPAA_MAINLINE` |
 | `data/kernel-patches/fsl_usdpaa_mainline.c` | Clean `/dev/fsl-usdpaa` + `/dev/fsl-usdpaa-irq` chardevs (1453 lines, 20 ioctls, NXP ABI-compatible, allocator-only cleanup) — copied to kernel tree during build |
 | `data/kernel-patches/0006-*.patch` | DTS reserved-memory reference (already applied in `mono-gateway-dk.dts`) |
-| `data/dpdk-portal-mmap.patch` | DPDK `process.c` patch: adds portal mmap after PORTAL_MAP ioctl (CE=64KB WB-NS, CI=16KB Device-nGnRnE) |
+| `data/dpdk-portal-mmap.patch` | DPDK `process.c` patch: adds portal mmap after PORTAL_MAP ioctl (CE=16KB WB-NS, CI=16KB Device-nGnRnE) |
+| `bin/build-dpdk-plugin.sh` | Out-of-tree VPP DPDK plugin build: extracts vpp-dev headers from upstream debs, builds against static libdpdk.a with DPAA PMD (12MB output, 173 DPAA symbols). Used locally on LXC 200 and adapted inline in CI. |
+| `bin/patch-vpp-dpaa-mempool.sh` | 7 patches across 4 VPP plugin files (driver.c, dpdk.h, init.c, common.c): adds net_dpaa driver, IS_DPAA flag, BMan mempool creation + routing |
 | `data/scripts/fman-port-name` | Script called by udev: reads `/sys/class/net/<iface>/device/of_node` to map FMan MAC DT address → physical port name (eth0-eth4) |
 | `data/scripts/10-fman-port-order.rules` | Udev rule: calls `fman-port-name` on net device add, sets `NAME=` to correct ethN (installed to `/etc/udev/rules.d/`) |
 | `data/scripts/00-fman.link` | Systemd .link file: `NamePolicy=keep` for `dpaa_eth` driver — prevents predictable naming override (installed to `/etc/systemd/network/`) |
