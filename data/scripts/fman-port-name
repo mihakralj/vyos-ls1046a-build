@@ -5,8 +5,8 @@
 #
 # Mapping (SoC-fixed FMan MAC addresses → physical port positions):
 #   ethernet@e8000  (MAC5)  → eth0  left RJ45
-#   ethernet@ea000  (MAC6)  → eth1  center RJ45
-#   ethernet@e2000  (MAC2)  → eth2  right RJ45
+#   ethernet@e2000  (MAC2)  → eth1  right RJ45
+#   ethernet@ea000  (MAC6)  → eth2  center RJ45
 #   ethernet@f0000  (MAC9)  → eth3  left SFP+
 #   ethernet@f2000  (MAC10) → eth4  right SFP+
 
@@ -27,8 +27,8 @@ fi
 # Extract the ethernet@XXXXX node name from the path
 case "$OF_NODE" in
     *ethernet@e8000)  echo "eth0" ;;  # MAC5  - left RJ45
-    *ethernet@ea000)  echo "eth1" ;;  # MAC6  - center RJ45
-    *ethernet@e2000)  echo "eth2" ;;  # MAC2  - right RJ45
+    *ethernet@e2000)  echo "eth1" ;;  # MAC2  - right RJ45
+    *ethernet@ea000)  echo "eth2" ;;  # MAC6  - center RJ45
     *ethernet@f0000)  echo "eth3" ;;  # MAC9  - left SFP+
     *ethernet@f2000)  echo "eth4" ;;  # MAC10 - right SFP+
     *)                echo "$IFACE" ;; # unknown MAC, keep original name
