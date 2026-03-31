@@ -298,7 +298,7 @@ jobs:
             'ConditionPathExists=/proc/device-tree/compatible' \
             '' \
             '[Service]' \
-            sed -i '/DPDK_DEVICE_FLAG_TX_PREPARE/a\  DPDK_DEVICE_FLAG_IS_DPAA = (1 << 16),' "$DPDK_H"
+            'Type=oneshot' \
             'ExecStart=/usr/local/bin/vyos-postinstall' \
             'RemainAfterExit=yes' \
             'StandardOutput=journal' \
@@ -626,13 +626,33 @@ jobs:
           COMMON="$DPDK_PLUGIN/device/common.c"
 
           # Patch 1: Add net_dpaa to driver.c
+          # Insert AFTER the dpaa2 entry (inserting BEFORE breaks because sed i\
+          # goes inside dpaa2's opening { brace). awk finds the dpaa2 entry's
+          # closing },  and appends our new entry block after it.
           if ! grep -q '"net_dpaa"' "$DRIVER" 2>/dev/null; then
-            sed -i '/\.drivers = DPDK_DRIVERS.*"net_dpaa2"/i\  {\n    .drivers = DPDK_DRIVERS ({ "net_dpaa", "NXP DPAA1 FMan Mac" }),\n    .interface_name_prefix = "TenGigabitEthernet",\n  },' "$DRIVER"
+            awk '
+              /net_dpaa2/ { in_dpaa2=1 }
+              in_dpaa2 && /^  },/ {
+                print
+                print "  {"
+                print "    .drivers = DPDK_DRIVERS ({ \"net_dpaa\", \"NXP DPAA1 FMan Mac\" }),"
+                print "    .interface_name_prefix = \"TenGigabitEthernet\","
+                print "  },"
+                in_dpaa2=0
+                next
+              }
+              { print }
+            ' "$DRIVER" > "$DRIVER.tmp" && mv "$DRIVER.tmp" "$DRIVER"
           fi
 
           # Patch 2: Add IS_DPAA flag to dpdk.h
+          # upstream foreach_dpdk_device_flags X-macro: _ (N, NAME, "desc") \
+          # TX_PREPARE is the LAST entry (no trailing \). We must:
+          #   1. Add trailing \ to TX_PREPARE so the macro continues
+          #   2. Append IS_DPAA as new last entry (no trailing \)
           if ! grep -q 'IS_DPAA' "$DPDK_H" 2>/dev/null; then
-            sed -i '/DPDK_DEVICE_FLAG_TX_PREPARE/a\  DPDK_DEVICE_FLAG_IS_DPAA = (1 << 16),' "$DPDK_H"
+            sed -i 's/_ (15, TX_PREPARE, "tx-prepare")/_ (15, TX_PREPARE, "tx-prepare")                                              \\/' "$DPDK_H"
+            sed -i '/_ (15, TX_PREPARE, "tx-prepare")/a\  _ (16, IS_DPAA, "dpaa-device")' "$DPDK_H"
           fi
 
           # Patch 3: Add dpaa_mempool to dpdk_main_t
@@ -642,7 +662,7 @@ jobs:
 
           # Patch 4: Add IS_DPAA detection in init.c
           if ! grep -q 'IS_DPAA' "$INIT" 2>/dev/null; then
-            sed -i "/xd->port_id = i;/a\\
+            sed -i "/dpdk_log_warn.*unknown driver.*driver_name/a\\
           \\
                 /* Mark DPAA1 devices for BMan mempool routing */\\
                 if (di.driver_name \&\& strstr (di.driver_name, \"net_dpaa\") \&\&\\
@@ -676,7 +696,7 @@ jobs:
             sed -i '/^dpdk_device_setup (dpdk_device_t \* xd)/,/ASSERT/{
               /ASSERT/a\  dpdk_main_t *dm = \&dpdk_main;
             }' "$COMMON"
-            sed -i 's|struct rte_mempool \*mp = dpdk_pool_by_buffer_pool_index[bpidx].mp;|struct rte_mempool *mp;\n      if ((xd->flags \& DPDK_DEVICE_FLAG_IS_DPAA) \&\& dm->dpaa_mempool)\n        mp = dm->dpaa_mempool;\n      else\n        mp = dpdk_pool_by_buffer_pool_index[bpidx].mp;|' "$COMMON"
+            sed -i 's|struct rte_mempool \*mp = dpdk_mempool_by_buffer_pool_index\[bpidx\];|/* Route DPAA devices to BMan hardware mempool */\n      struct rte_mempool *mp;\n      if ((xd->flags \& DPDK_DEVICE_FLAG_IS_DPAA) \&\& dm->dpaa_mempool)\n        mp = dm->dpaa_mempool;\n      else\n        mp = dpdk_mempool_by_buffer_pool_index[bpidx];|' "$COMMON"
           fi
 
           # Patch 7: Add rte_mbuf.h include

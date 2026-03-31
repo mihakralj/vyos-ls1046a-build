@@ -62,7 +62,7 @@ system {
 interfaces {
     ethernet eth0 {
         address dhcp
-        description "RJ45 Left"
+        description "Left RJ45"
         offload {
             gro
             gso
@@ -73,7 +73,7 @@ interfaces {
     }
     ethernet eth1 {
         address dhcp
-        description "RJ45 Right"
+        description "Center RJ45"
         offload {
             gro
             gso
@@ -84,7 +84,7 @@ interfaces {
     }
     ethernet eth2 {
         address dhcp
-        description "RJ45 Center"
+        description "Right RJ45"
         offload {
             gro
             gso
