@@ -76,7 +76,6 @@ zstd -d vyos-*-LS1046A-arm64-usb.img.zst --stdout | sudo dd of=/dev/rdiskN bs=4m
 2. Download [Rufus](https://rufus.ie/)
 3. Select the extracted `.img` file — Rufus detects DD Image mode automatically — click **Start**
 
-
 ---
 
 ## Step 2 — Boot from USB
@@ -85,7 +84,7 @@ zstd -d vyos-*-LS1046A-arm64-usb.img.zst --stdout | sudo dd of=/dev/rdiskN bs=4m
 2. Connect serial console (115200 8N1)
 3. Power on and **press any key** during the U-Boot countdown to stop autoboot
 
-Factory U-Boot boots OpenWrt from eMMC (`bootcmd=run emmc || run recovery`). It has no USB boot command, so you must tell it to run the boot script from USB.
+Factory U-Boot boots OpenWrt from eMMC. It has no USB boot command, so you must tell it to run the boot script from USB.
 
 At the `=>` prompt, paste this single line:
 
@@ -93,12 +92,7 @@ At the `=>` prompt, paste this single line:
 usb start; fatload usb 0:0 ${load_addr} boot.scr; source ${load_addr}
 ```
 
-This loads `boot.scr` from the USB, which:
-1. Loads the kernel, DTB, and initrd from the USB FAT32 filesystem
-2. Sets temporary bootargs for the live session
-3. Boots VyOS live via `booti`
-
-**`boot.scr` does NOT modify U-Boot environment or write to SPI flash.** It is a one-shot live boot script. U-Boot eMMC boot variables are configured separately in Step 4 after installation.
+This loads `boot.scr` from the USB, which loads the kernel, DTB, and initrd from USB FAT32, sets temporary bootargs, and boots VyOS live via `booti`.
 
 Watch the boot log for 60–90 seconds until the VyOS login prompt appears.
 
@@ -110,46 +104,31 @@ Watch the boot log for 60–90 seconds until the VyOS login prompt appears.
 
 ## Step 3 — Install to eMMC
 
-From the live VyOS shell:
-
-Login with **vyos** / **vyos**.
+From the live VyOS shell, login with **vyos** / **vyos**, then run:
 
 ```
 install image
 ```
 
-- Select installation target: `mmcblk0` (`mmcblk0` is the eMMC, `sda` is the USB)
+- Select installation target: `mmcblk0` (the eMMC — not `sda` which is the USB)
 - Enter a root password
 - Accept defaults for the rest
 
-After installation completes, the system automatically writes `/boot/vyos.env` on eMMC p3 pointing to the new image.
+The installer automatically:
+1. Partitions the eMMC (GPT with 32 MiB firmware reserved zone)
+2. Copies the VyOS image to eMMC partition 3 (ext4)
+3. Writes `/boot/vyos.env` pointing to the installed image
+4. **Configures U-Boot for eMMC boot** via `fw_setenv` — writes `vyos`, `usb_vyos`, and `bootcmd` to SPI flash
 
----
-
-## Step 4 — Configure U-Boot for eMMC boot
-
-**This is a one-time step.** `boot.scr` only boots the USB live image — it does not modify U-Boot environment. You must configure U-Boot once from the serial console to enable eMMC boot.
-
-Power off, remove the USB drive, power on, and **press any key** during the U-Boot countdown. At the `=>` prompt, paste these commands:
+After installation completes, remove the USB drive and reboot:
 
 ```
-setenv vyos 'ext4load mmc 0:3 ${load_addr} /boot/vyos.env; env import -t ${load_addr} ${filesize}; ext4load mmc 0:3 ${kernel_addr_r} /boot/${vyos_image}/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/${vyos_image}/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/${vyos_image}/initrd.img; setenv bootargs "BOOT_IMAGE=/boot/${vyos_image}/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 vyos-union=/boot/${vyos_image}"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
-
-setenv usb_vyos 'usb start; if fatload usb 0:0 ${kernel_addr_r} live/vmlinuz; then fatload usb 0:0 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:0 ${ramdisk_addr_r} live/initrd.img; setenv bootargs "BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda rootdelay=5 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}; fi'
-
-setenv bootcmd 'run usb_vyos || run vyos || run recovery'
-
-saveenv
-reset
+reboot
 ```
 
-After `saveenv`, U-Boot stores these variables in SPI flash permanently. On every subsequent boot:
+The board will boot VyOS from eMMC automatically. No manual U-Boot configuration needed.
 
-1. `run usb_vyos` — if a VyOS USB is inserted, boot from it (live mode)
-2. `run vyos` — reads `/boot/vyos.env` from eMMC p3 → loads the named image → `booti`
-3. `run recovery` — falls back to factory SPI firmware
-
-> **You only do this once.** After `saveenv`, all future boots are automatic. `install image`, `add system image`, and `set system image default-boot` all update `/boot/vyos.env` — U-Boot reads it dynamically.
+> **First boot may fail once:** After a fresh eMMC format, U-Boot's ext4 driver occasionally fails to read the new filesystem on the very first attempt (`Failed to load '/boot/vyos.env'`). This is a known U-Boot quirk — just reboot again from the recovery shell and it will work.
 
 ---
 
@@ -158,8 +137,8 @@ After `saveenv`, U-Boot stores these variables in SPI flash permanently. On ever
 From the VyOS CLI:
 
 ```
+show system updates
 add system image latest
-reboot
 ```
 
 `latest` is a built-in alias that checks the update server for the newest release. No need to find or paste a URL.
@@ -167,10 +146,12 @@ reboot
 Alternatively, specify a URL directly (e.g. for a specific version):
 
 ```
-add system image https://github.com/mihakralj/vyos-ls1046a-build/releases/latest/download/vyos-YYYY.MM.DD-HHMM-rolling-LS1046A-arm64.iso
+add system image <url>
 ```
 
 After the upgrade completes, `/boot/vyos.env` is automatically updated to the new image. Reboot when ready.
+
+> **Never use `install image` on an already-installed system.** Use `add system image` instead. `install image` repartitions the eMMC and is only for fresh installs from USB live sessions.
 
 ---
 
@@ -189,23 +170,15 @@ After `install image`, the Mono Gateway eMMC (`mmcblk0`) has:
 
 ---
 
-## Boot Variable Reference
+## Boot Sequence
 
-These variables are set once during [Step 4](#step-4--configure-u-boot-for-emmc-boot) and stored permanently in SPI flash via `saveenv`.
+After installation, every boot follows this order (configured automatically by `vyos-postinstall`):
 
-| U-Boot variable | Purpose |
-|----------------|---------|
-| `bootcmd` | `run usb_vyos \|\| run vyos \|\| run recovery` |
-| `usb_vyos` | FAT32 USB live boot — loads `live/vmlinuz`, `mono-gw.dtb`, `live/initrd.img` |
-| `vyos` | eMMC boot — reads `/boot/vyos.env`, loads image, calls `booti` |
-| `recovery` | SPI NOR fallback — loads factory firmware |
+1. **`run usb_vyos`** — if a VyOS USB is inserted, boot from it (live mode)
+2. **`run vyos`** — reads `/boot/vyos.env` from eMMC p3 → loads the named image → `booti`
+3. **`run recovery`** — falls back to factory SPI firmware
 
-| Address variable | Value | Role |
-|-----------------|-------|------|
-| `kernel_addr_r` | `0x82000000` | Kernel `Image` load address |
-| `fdt_addr_r` | `0x88000000` | DTB load address |
-| `ramdisk_addr_r` | `0x88080000` | initrd load address |
-| `load_addr` | `0xa0000000` | Scratch (used for `vyos.env` import) |
+`install image`, `add system image`, and `set system image default-boot` all update `/boot/vyos.env` automatically — U-Boot reads it dynamically on every boot.
 
 ---
 
@@ -213,7 +186,7 @@ These variables are set once during [Step 4](#step-4--configure-u-boot-for-emmc-
 
 ### Emergency eMMC boot (one-shot, no saveenv)
 
-If VyOS is installed but `vyos.env` is missing or corrupt, boot manually. First find the image name:
+If VyOS is installed but `vyos.env` is missing or corrupt, boot manually from the U-Boot console. First find the image name:
 
 ```
 ext4ls mmc 0:3 /boot
@@ -230,7 +203,42 @@ setenv bootargs "BOOT_IMAGE=/boot/${vyos_image}/vmlinuz console=ttyS0,115200 ear
 booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
 ```
 
-Once VyOS boots, reboot normally — the U-Boot environment and `vyos.env` are fixed automatically on the next clean boot.
+Once VyOS boots, reboot normally — `vyos-postinstall` fixes U-Boot environment and `vyos.env` automatically on the next clean boot.
+
+### Manual U-Boot environment setup (recovery fallback)
+
+If `fw_setenv` failed during install (e.g., `/dev/mtd3` not accessible), you can configure U-Boot manually from the serial console. Power on, press any key during the countdown, and paste:
+
+```
+setenv vyos 'ext4load mmc 0:3 ${load_addr} /boot/vyos.env; env import -t ${load_addr} ${filesize}; ext4load mmc 0:3 ${kernel_addr_r} /boot/${vyos_image}/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/${vyos_image}/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/${vyos_image}/initrd.img; setenv bootargs "BOOT_IMAGE=/boot/${vyos_image}/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 vyos-union=/boot/${vyos_image}"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
+
+setenv usb_vyos 'usb start; if fatload usb 0:0 ${kernel_addr_r} live/vmlinuz; then fatload usb 0:0 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:0 ${ramdisk_addr_r} live/initrd.img; setenv bootargs "BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda rootdelay=5 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}; fi'
+
+setenv bootcmd 'run usb_vyos || run vyos || run recovery'
+
+saveenv
+reset
+```
+
+This is the same configuration that `vyos-postinstall` writes automatically — you only need this if the automated setup failed.
+
+---
+
+## Boot Variable Reference
+
+| U-Boot variable | Purpose |
+|----------------|---------|
+| `bootcmd` | `run usb_vyos \|\| run vyos \|\| run recovery` |
+| `usb_vyos` | FAT32 USB live boot — loads `live/vmlinuz`, `mono-gw.dtb`, `live/initrd.img` |
+| `vyos` | eMMC boot — reads `/boot/vyos.env`, loads image, calls `booti` |
+| `recovery` | SPI NOR fallback — loads factory firmware |
+
+| Address variable | Value | Role |
+|-----------------|-------|------|
+| `kernel_addr_r` | `0x82000000` | Kernel `Image` load address |
+| `fdt_addr_r` | `0x88000000` | DTB load address |
+| `ramdisk_addr_r` | `0x88080000` | initrd load address |
+| `load_addr` | `0xa0000000` | Scratch (used for `vyos.env` import) |
 
 ---
 
