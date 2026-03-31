@@ -1,86 +1,88 @@
-Reserve first 32 MiB for NXP LS1046A firmware boundary.
-
-Shift BIOS boot and EFI partitions past the 32 MiB NXP firmware zone.
-Update CONST_RESERVED_SPACE to match (32 + 1 + 256 MiB).
-Use sgdisk end-sector 0 (fill remaining space) when user chooses
-"use all free space" to avoid double-counting reserved space.
-
-On eMMC (mmcblk) devices, replace destructive sgdisk -Z with sgdisk -o
-(create fresh empty GPT) that only writes minimal headers without bulk
-zeroing, and skip wipefs on the raw device to avoid scanning the
-firmware zone for filesystem signatures.
-
-diff --git a/python/vyos/system/disk.py b/python/vyos/system/disk.py
-index 7ae9a15..dd7ed39 100644
 --- a/python/vyos/system/disk.py
 +++ b/python/vyos/system/disk.py
-@@ -42,6 +42,17 @@ def disk_cleanup(drive_path: str) -> None:
+@@ -15,6 +15,7 @@
+ 
+ from json import loads as json_loads
+ from os import sync
++from os.path import basename as _basename
+ from dataclasses import dataclass
+ from time import sleep
+ 
+@@ -30,6 +31,18 @@
+     partition: dict[str, str]
+ 
+ 
++# LS1046A eMMC: first 32 MiB reserved for NXP firmware (U-Boot, RCW, PBI).
++# Partitions must start AFTER this zone.  sgdisk -Z and wipefs on the raw
++# device would overwrite LBA 0 and destroy the firmware.
++_FIRMWARE_RESERVED_SECTORS = 65536   # 32 MiB / 512 bytes per sector
++_BIOS_BOOT_START           = 65536   # sector (32 MiB)
++_BIOS_BOOT_END             = 67583   # sector (32 MiB + 1 MiB - 1)
++_EFI_START                 = 67584   # sector (33 MiB)
++
++def _is_emmc(drive_path: str) -> bool:
++    """Return True if drive_path is an eMMC device (mmcblk)."""
++    return 'mmcblk' in _basename(drive_path)
++
+ def disk_cleanup(drive_path: str) -> None:
+     """Clean up disk partition table (MBR and GPT)
+     Remove partition and device signatures.
+@@ -42,8 +55,14 @@
      partitions: list[str] = partition_list(drive_path)
      for partition in partitions:
          run(f'wipefs -af {partition}')
-+
-+    # On eMMC (mmcblk) devices, preserve the first 32 MiB firmware zone.
-+    # NXP LS1046A reserves 0-32 MiB for firmware boundary on eMMC.
-+    # sgdisk -Z zeroes GPT/MBR headers and wipefs -af scans for signatures
-+    # that may exist within the firmware zone. Use sgdisk -o to create a
-+    # fresh empty GPT (writes only protective MBR + header + empty entries
-+    # at sectors 0-33 and backup GPT at end, no bulk zeroing).
-+    if 'mmcblk' in drive_path:
+-    run(f'wipefs -af {drive_path}')
+-    run(f'sgdisk -Z {drive_path}')
++    if _is_emmc(drive_path):
++        # eMMC: first 32 MiB is NXP firmware — DO NOT zero LBA 0.
++        # sgdisk -o creates a fresh GPT without bulk-zeroing the disk.
++        # Skip wipefs on the raw device to avoid writing sector 0.
 +        run(f'sgdisk -o {drive_path}')
-+        return
-+
-     run(f'wipefs -af {drive_path}')
-     run(f'sgdisk -Z {drive_path}')
++    else:
++        run(f'wipefs -af {drive_path}')
++        run(f'sgdisk -Z {drive_path}')
  
-@@ -61,20 +72,18 @@ def find_persistence() -> str:
+ 
+ def find_persistence() -> str:
+@@ -61,11 +80,19 @@
  
  def parttable_create(drive_path: str, root_size: int) -> None:
      """Create a hybrid MBR/GPT partition table
 -    0-2047 first sectors are free
 -    2048-4095 sectors - BIOS Boot Partition
--    4096 + 256 MB - EFI system partition
-+    0-65535 (first 32 MiB) reserved for NXP LS1046A firmware boundary
-+    65536-67583 sectors (32-33 MiB) - BIOS Boot Partition
-+    67584 + 256 MB - EFI system partition
-     Everything else till the end of a drive - Linux partition
+-    4096-36863 sectors - reserved for bootloader payload (16 MiB gap)
+-    36864 + 256 MB - EFI system partition
+-    Everything else till the end of a drive - Linux partition
++
++    Standard x86 layout:
++        0-2047 first sectors are free
++        2048-4095 sectors - BIOS Boot Partition
++        4096-36863 sectors - reserved for bootloader payload (16 MiB gap)
++        36864 + 256 MB - EFI system partition
++        Everything else till the end of a drive - Linux partition
++
++    LS1046A eMMC layout (32 MiB firmware reservation):
++        0-65535 sectors (32 MiB) - NXP firmware (UNTOUCHED)
++        65536-67583 sectors - BIOS Boot Partition (1 MiB at 32 MiB)
++        67584 + 256 MB - EFI system partition (at 33 MiB)
++        Everything else till end - Linux partition
  
      Args:
          drive_path (str): path to a drive
-     """
--    if not root_size:
--        root_size_text: str = '+100%'
-+    if root_size:
-+        command = f'sgdisk -a1 -n1:65536:67583 -t1:EF02 -n2:67584:+256M -t2:EF00 -n3:0:+{root_size}K -t3:8300 {drive_path}'
+@@ -74,8 +101,14 @@
+         root_size_text: str = '+100%'
      else:
--        root_size_text: str = str(root_size)
--    command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:4096:+256M -t2:EF00 \
+         root_size_text: str = str(root_size)
+-    command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:36864:+256M -t2:EF00 \
 -        -n3:0:+{root_size_text}K -t3:8300 {drive_path}'
-+        command = f'sgdisk -a1 -n1:65536:67583 -t1:EF02 -n2:67584:+256M -t2:EF00 -n3:0:0 -t3:8300 {drive_path}'
++    if _is_emmc(drive_path):
++        # LS1046A eMMC: partitions start after 32 MiB firmware zone
++        command = f'sgdisk -a1 -n1:{_BIOS_BOOT_START}:{_BIOS_BOOT_END} -t1:EF02 \
++            -n2:{_EFI_START}:+256M -t2:EF00 \
++            -n3:0:+{root_size_text}K -t3:8300 {drive_path}'
++    else:
++        command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:36864:+256M -t2:EF00 \
++            -n3:0:+{root_size_text}K -t3:8300 {drive_path}'
  
      run(command)
      # update partitions in kernel
-diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
-index cb3aa7b..9446fa3 100755
---- a/src/op_mode/image_installer.py
-+++ b/src/op_mode/image_installer.py
-@@ -118,8 +118,8 @@
- 'Do you want to continue with installation?'
- CONST_MIN_DISK_SIZE: int = 2147483648  # 2 GB
- CONST_MIN_ROOT_SIZE: int = 1610612736  # 1.5 GB
--# a reserved space: 2MB for header, 1 MB for BIOS partition, 256 MB for EFI
--CONST_RESERVED_SPACE: int = (2 + 1 + 256) * 1024**2
-+# a reserved space: 32MB firmware zone, 1 MB for BIOS partition, 256 MB for EFI
-+CONST_RESERVED_SPACE: int = (32 + 1 + 256) * 1024**2
- 
- # define directories and paths
- DIR_CONFIG: str = directories['config']
-@@ -234,6 +234,9 @@ def create_partitions(target_disk: str, target_size: int,
-     print(MSG_INFO_INSTALL_PARTITONING)
-     raid.clear()
-     disk.disk_cleanup(target_disk)
-+    # Use sgdisk "fill remaining" mode when user chose all free space
-+    if rootfs_size == available_size:
-+        rootfs_size = 0
-     disk_details: disk.DiskDetails = disk.parttable_create(target_disk,
-                                                            rootfs_size)
- 

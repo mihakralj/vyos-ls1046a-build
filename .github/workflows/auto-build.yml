@@ -382,13 +382,16 @@ jobs:
             'ExecStopPost=/usr/local/bin/vpp-dpaa-rebind' \
             > "$CHROOT/etc/systemd/system/vpp.service.d/dpaa-rebind.conf"
 
-          ### Install fancontrol package and enable service (chroot hook)
+          ### Install fancontrol + libatomic1 (chroot hook)
           HOOKS=vyos-build/data/live-build-config/hooks/live
           cat > "$HOOKS/98-fancontrol.chroot" << 'FANHOOK'
           #!/bin/bash
           # Install fancontrol daemon for EMC2305 PWM fan control
           # Config at /etc/fancontrol maps EMC2305 PWM to core-cluster thermal zone
-          apt-get update -qq && apt-get install -y --no-install-recommends fancontrol
+          # libatomic1: required by DPAA-enabled dpdk_plugin.so (NEEDED: libatomic.so.1)
+          #   — upstream vpp-plugin-dpdk does not depend on it, but our custom build
+          #   statically links DPDK DPAA PMD which uses __atomic builtins on aarch64
+          apt-get update -qq && apt-get install -y --no-install-recommends fancontrol libatomic1
           systemctl enable fancontrol.service
           # vyos-postinstall: enabled via tmpfiles.d (NOT systemctl enable).
           # systemctl enable creates a .wants symlink that live-build's squashfs
