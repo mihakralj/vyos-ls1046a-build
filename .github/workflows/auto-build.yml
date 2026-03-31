@@ -710,6 +710,11 @@ jobs:
           # vpp-dev headers shipped by VyOS mirror (older API version).
           # We don't need crypto offload for DPAA1 networking.
           rm -rf "$DPDK_PLUGIN/cryptodev"
+          # Strip cryptodev #include and function calls from remaining sources
+          sed -i '/cryptodev\/cryptodev\.h/d' "$DPDK_PLUGIN/device/init.c"
+          sed -i '/dpdk_cryptodev/d' "$DPDK_PLUGIN/device/init.c"
+          # Remove cryptodev from CMakeLists if referenced
+          sed -i '/add_subdirectory.*cryptodev/d' "$DPDK_PLUGIN/CMakeLists.txt" 2>/dev/null || true
 
           echo "### VPP DPAA patches applied"
 
