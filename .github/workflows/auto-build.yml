@@ -565,6 +565,7 @@ jobs:
             -Dmax_lcores=4 \
             -Dmachine=generic \
             -Denable_kmods=false \
+            -Denable_driver_sdk=true \
             -Dtests=false \
             -Dexamples= \
             -Ddisable_drivers="net/mlx*,net/bnxt,net/ixg*,net/ice,net/i40e,net/e1000,crypto/qat,net/virtio,net/vmxnet*,net/ena,net/hns*,net/hinic,net/octeontx*,net/cnxk,net/thunderx"
