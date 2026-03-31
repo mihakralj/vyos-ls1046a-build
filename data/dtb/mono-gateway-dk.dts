@@ -22,8 +22,8 @@
 		serial0 = &duart0;
 		serial1 = &duart1;
 		ethernet0 = &enet4;  /* MAC5 - leftmost 1G port */
-		ethernet1 = &enet5;  /* MAC6 - center 1G port */
-		ethernet2 = &enet1;  /* MAC2 - rightmost 1G port */
+ethernet1 = &enet1;  /* MAC2 - right 1G port */
+ethernet2 = &enet5;  /* MAC6 - center 1G port */
 		ethernet3 = &enet6;  /* MAC9 - 10G left SFP */
 		ethernet4 = &enet7;  /* MAC10 - 10G right SFP */
 	};

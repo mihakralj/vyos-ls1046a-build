@@ -5,14 +5,38 @@ Update CONST_RESERVED_SPACE to match (32 + 1 + 256 MiB).
 Use sgdisk end-sector 0 (fill remaining space) when user chooses
 "use all free space" to avoid double-counting reserved space.
 
+On eMMC (mmcblk) devices, replace destructive sgdisk -Z with sgdisk -o
+(create fresh empty GPT) that only writes minimal headers without bulk
+zeroing, and skip wipefs on the raw device to avoid scanning the
+firmware zone for filesystem signatures.
+
 diff --git a/python/vyos/system/disk.py b/python/vyos/system/disk.py
-index 7ae9a15..b3c5e01 100644
+index 7ae9a15..dd7ed39 100644
 --- a/python/vyos/system/disk.py
 +++ b/python/vyos/system/disk.py
-@@ -62,17 +62,17 @@ def find_persistence() -> str:
+@@ -42,6 +42,17 @@ def disk_cleanup(drive_path: str) -> None:
+     partitions: list[str] = partition_list(drive_path)
+     for partition in partitions:
+         run(f'wipefs -af {partition}')
++
++    # On eMMC (mmcblk) devices, preserve the first 32 MiB firmware zone.
++    # NXP LS1046A reserves 0-32 MiB for firmware boundary on eMMC.
++    # sgdisk -Z zeroes GPT/MBR headers and wipefs -af scans for signatures
++    # that may exist within the firmware zone. Use sgdisk -o to create a
++    # fresh empty GPT (writes only protective MBR + header + empty entries
++    # at sectors 0-33 and backup GPT at end, no bulk zeroing).
++    if 'mmcblk' in drive_path:
++        run(f'sgdisk -o {drive_path}')
++        return
++
+     run(f'wipefs -af {drive_path}')
+     run(f'sgdisk -Z {drive_path}')
+ 
+@@ -61,20 +72,18 @@ def find_persistence() -> str:
+ 
  def parttable_create(drive_path: str, root_size: int) -> None:
      """Create a hybrid MBR/GPT partition table
-     0-2047 first sectors are free
+-    0-2047 first sectors are free
 -    2048-4095 sectors - BIOS Boot Partition
 -    4096 + 256 MB - EFI system partition
 +    0-65535 (first 32 MiB) reserved for NXP LS1046A firmware boundary
@@ -34,8 +58,9 @@ index 7ae9a15..b3c5e01 100644
 +        command = f'sgdisk -a1 -n1:65536:67583 -t1:EF02 -n2:67584:+256M -t2:EF00 -n3:0:0 -t3:8300 {drive_path}'
  
      run(command)
+     # update partitions in kernel
 diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
-index cb3aa7b..f5a9c12 100755
+index cb3aa7b..9446fa3 100755
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
 @@ -118,8 +118,8 @@
@@ -49,7 +74,7 @@ index cb3aa7b..f5a9c12 100755
  
  # define directories and paths
  DIR_CONFIG: str = directories['config']
-@@ -253,6 +253,9 @@ def create_partitions(target_disk: str, target_size: int,
+@@ -234,6 +234,9 @@ def create_partitions(target_disk: str, target_size: int,
      print(MSG_INFO_INSTALL_PARTITONING)
      raid.clear()
      disk.disk_cleanup(target_disk)
@@ -58,3 +83,4 @@ index cb3aa7b..f5a9c12 100755
 +        rootfs_size = 0
      disk_details: disk.DiskDetails = disk.parttable_create(target_disk,
                                                             rootfs_size)
+ 
