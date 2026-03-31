@@ -533,14 +533,6 @@ jobs:
           done
           ls -alh packages
 
-      - name: Archive Packages
-        uses: actions/upload-artifact@v7
-        with:
-          name: vyos-packages
-          path: vyos-build/packages/
-          retention-days: 30
-          compression-level: 0
-
       - name: Build VyOS ISO
         id: build_iso
         run: |
@@ -767,16 +759,6 @@ jobs:
         with:
           name: ${{ needs.build_iso.outputs.image_name }}
 
-      - uses: actions/download-artifact@v8
-        with:
-          name: vyos-packages
-          path: packages
-      - name: archive packages
-        run: |
-          set -ex
-          tar -cvf vyos-packages.tar packages
-          ls -alh vyos-packages.tar packages
-
       - name: "Release publishing: publish release"
         uses: softprops/action-gh-release@v2
         with:
@@ -788,7 +770,6 @@ jobs:
             ${{ needs.build_iso.outputs.image_iso }}.minisig
             vyos-*-usb.img.zst
             vyos-*-usb.img.zst.minisig
-            vyos-packages.tar
 
       - uses: dev-drprasad/delete-older-releases@v0.3.4
         with:
