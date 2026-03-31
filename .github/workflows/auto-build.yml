@@ -578,10 +578,20 @@ jobs:
           echo "### DPDK built: $(du -sh $DPDK_OUTPUT | cut -f1), DPAA1 libs: $DPAA_LIBS, DPAA2 libs: $DPAA2_LIBS"
 
           # Find actual libdpdk.a path (may be lib/ or lib/aarch64-linux-gnu/)
-          # Use -maxdepth to avoid picking up build intermediates; accept any file type
-          # (meson creates GROUP linker scripts which are regular files)
+          # Meson static builds may not create libdpdk.a — only individual librte_*.a files.
+          # If missing, create a GROUP linker script referencing all rte_ archives.
           DPDK_LIB=$(find "$DPDK_OUTPUT" -name 'libdpdk.a' | head -1)
-          DPDK_INC=$(find "$DPDK_OUTPUT" -path '*/dpdk/rte_config.h' -type f -printf '%h\n' | head -1)
+          if [ -z "$DPDK_LIB" ]; then
+            DPDK_LIBDIR=$(find "$DPDK_OUTPUT" -name 'librte_eal.a' -printf '%h\n' | head -1)
+            if [ -n "$DPDK_LIBDIR" ]; then
+              echo "### libdpdk.a not found, creating GROUP linker script in $DPDK_LIBDIR"
+              LIBS=$(cd "$DPDK_LIBDIR" && ls librte_*.a | sed 's/^/-l:/' | tr '\n' ' ')
+              echo "GROUP ( $LIBS )" > "$DPDK_LIBDIR/libdpdk.a"
+              DPDK_LIB="$DPDK_LIBDIR/libdpdk.a"
+            fi
+          fi
+          # Headers may be at include/dpdk/ or include/ depending on meson version
+          DPDK_INC=$(find "$DPDK_OUTPUT" -name 'rte_config.h' -type f -printf '%h\n' | head -1)
           echo "DPDK_LIB=$DPDK_LIB"
           echo "DPDK_INC=$DPDK_INC"
           echo "DPDK_OUTPUT=$DPDK_OUTPUT"
@@ -682,6 +692,8 @@ jobs:
           cd /tmp/vpp-debs
 
           # Add VyOS repo temporarily to download vpp-dev
+          # Remove any existing VyOS repo entries to avoid "Conflicting values for Trusted"
+          rm -f /etc/apt/sources.list.d/vyos*.list
           echo "deb [trusted=yes] $VYOS_MIRROR current main" > /etc/apt/sources.list.d/vyos-tmp.list
           apt-get update -qq 2>&1 | tail -3
           apt-get download vpp-dev vpp libvppinfra libvppinfra-dev 2>&1 | tail -5
