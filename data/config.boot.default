@@ -1,9 +1,6 @@
 system {
     host-name vyos
     login {
-        banner {
-            pre-login "** ARM64 rolling build of VyOS for NXP LS1046A (Mono Gateway) **\\n"
-        }
         user vyos {
             authentication {
                 encrypted-password $y$j9T$Rq06TVkTBOm.Xw0dNcvvd0$U73QHmRbKcnEQbQU90YTj9TZDDuIvCyakm25928fqn9

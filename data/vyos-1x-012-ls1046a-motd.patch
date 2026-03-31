@@ -6,11 +6,10 @@
  
     ┌── ┐
     . VyOS {{ version_data.version }}
-@@ -8,6 +8,10 @@
+@@ -8,6 +8,9 @@
  {% if version_data.lts_build %}
   * Support portal: {{ version_data.support_url }}
  {% endif %}
-+
 +   Architecture:  {{ version_data.architecture }} - NXP LS1046A
 +   Patches:       DPAA1 FMan, CAAM/SEC5, custom DTB
 +
