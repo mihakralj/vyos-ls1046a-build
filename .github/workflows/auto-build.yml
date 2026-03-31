@@ -756,7 +756,7 @@ jobs:
             -DVPP_APIGEN="$VPP_DEV_DIR/usr/bin/vppapigen" \
             -DDPDK_INCLUDE_DIR="$DPDK_INC" \
             -DDPDK_LIB="$DPDK_LIB" \
-            2>&1 | grep -E '(Found DPDK|libdpdk|numa|Configuring done|FATAL|ERROR)'
+            2>&1 | tail -50
           ninja -j$(nproc) 2>&1
 
           echo "### Step 3/3: Verify and deploy plugin"
