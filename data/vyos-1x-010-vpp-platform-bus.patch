@@ -251,9 +251,10 @@ eth3/eth4 (10G SFP+).
  
 --- a/python/vyos/vpp/config_resource_checks/resource_defaults.py
 +++ b/python/vyos/vpp/config_resource_checks/resource_defaults.py
-@@ -23,8 +23,8 @@
+@@ -23,9 +23,9 @@
      # Minimal amount of memory required to start VPP
-     'min_memory': '8G',
+-    'min_memory': '8G',
++    'min_memory': '7G',
      # Minimal number of physical CPU cores required to start VPP
 -    'min_cpus': 4,
 +    'min_cpus': 2,
