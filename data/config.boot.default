@@ -14,36 +14,7 @@ system {
         reboot-on-upgrade-failure 5
         time-format 24-hour
     }
-    syslog {
-        global {
-            facility all {
-                level info
-            }
-            facility local7 {
-                level debug
-            }
-        }
-    }
     name-server 127.0.0.1
-    ntp {
-        allow-client {
-            address "127.0.0.0/8"
-            address "169.254.0.0/16"
-            address "10.0.0.0/8"
-            address "172.16.0.0/12"
-            address "192.168.0.0/16"
-            address "::1/128"
-            address "fe80::/10"
-            address "fc00::/7"
-            address "2000::/3"
-        }
-        server time.apple.com {
-        }
-        server time.cloudflare.com {
-        }
-        server time.google.com {
-        }
-    }
     console {
         device ttyS0 {
             speed 115200
@@ -201,6 +172,36 @@ service {
             name-server 2606:4700:4700::1111
             name-server 2620:fe::fe
             timeout 5000
+        }
+    }
+    ntp {
+        allow-client {
+            address "127.0.0.0/8"
+            address "169.254.0.0/16"
+            address "10.0.0.0/8"
+            address "172.16.0.0/12"
+            address "192.168.0.0/16"
+            address "100.64.0.0/10"
+            address "::1/128"
+            address "fe80::/10"
+            address "fc00::/7"
+            address "2000::/3"
+        }
+        server time.apple.com {
+        }
+        server time.cloudflare.com {
+        }
+        server time.google.com {
+        }
+    }
+    syslog {
+        global {
+            facility all {
+                level info
+            }
+            facility local7 {
+                level debug
+            }
         }
     }
 }
