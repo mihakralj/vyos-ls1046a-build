@@ -27,10 +27,10 @@ firewall {
         interface-group IG-LAN {
             interface eth0
             interface eth1
-            interface eth3
+            interface eth2
         }
         interface-group IG-WAN {
-            interface eth2
+            interface eth3
             interface eth4
         }
     }
