@@ -1,7 +1,7 @@
 [
   {
-    "url": "https://github.com/mihakralj/vyos-ls1046a-build/releases/download/2026.03.31-2043-rolling/vyos-2026.03.31-2043-rolling-LS1046A-arm64.iso",
-    "version": "2026.03.31-2043-rolling",
-    "timestamp": "2026-03-31T20:43:23Z"
+    "url": "https://github.com/mihakralj/vyos-ls1046a-build/releases/download/2026.03.22-LTS/vyos-2026.03.22-LTS-LS1046A-arm64.iso",
+    "version": "2026.03.22-LTS",
+    "timestamp": "2026-03-31T23:11:36Z"
   }
 ]
