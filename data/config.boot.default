@@ -27,16 +27,12 @@ system {
         auto-check
         url https://raw.githubusercontent.com/mihakralj/vyos-ls1046a-build/refs/heads/main/version.json
     }
-    watchdog {
-        reboot-timeout 60
-        shutdown-timeout 60
-    }
     sysctl {
         parameter net.core.netdev_max_backlog {
             value 5000
         }
         parameter net.ipv4.ip_local_port_range {
-            value "1024 65000"
+            value "1024 65001"
         }
         parameter net.netfilter.nf_conntrack_tcp_timeout_established {
             value 1800
@@ -192,16 +188,6 @@ service {
         server time.cloudflare.com {
         }
         server time.google.com {
-        }
-    }
-    syslog {
-        global {
-            facility all {
-                level info
-            }
-            facility local7 {
-                level debug
-            }
         }
     }
 }
