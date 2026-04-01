@@ -114,8 +114,15 @@ jobs:
           VYOS1X_BUILD=vyos-build/scripts/package-build/vyos-1x
           PATCH_STAGING="$VYOS1X_BUILD/ls1046a-patches"
           mkdir -p "$PATCH_STAGING"
-          cp data/vyos-1x-*.patch "$PATCH_STAGING/"
+          # Copy unified diff patches EXCEPT 010 (replaced by Python patcher)
+          for p in data/vyos-1x-*.patch; do
+            case "$(basename "$p")" in
+              vyos-1x-010-*) echo "Skipping $p (replaced by patch-vpp-platform-bus.py)" ;;
+              *) cp "$p" "$PATCH_STAGING/" ;;
+            esac
+          done
           cp data/scripts/patch-mmcblk-default.py "$PATCH_STAGING/"
+          cp data/scripts/patch-vpp-platform-bus.py "$PATCH_STAGING/"
           cp data/reftree.cache "$PATCH_STAGING/"
           cat > "$VYOS1X_BUILD/package.toml" <<'EOF'
           [[packages]]
@@ -134,6 +141,7 @@ jobs:
               fi
             done
             python3 ../ls1046a-patches/patch-mmcblk-default.py
+            python3 ../ls1046a-patches/patch-vpp-platform-bus.py
             [ $patch_fail -eq 1 ] && echo "WARNING: some patches failed — check build output"
             true
           """
@@ -790,6 +798,8 @@ jobs:
           VPP_CMAKE=$(find "$VPP_DEV_DIR" -name 'VPPConfig.cmake' -printf '%h\n' | head -1)
 
           mkdir -p "$BUILD_DIR/build" && cd "$BUILD_DIR/build"
+          # IMPORTANT: do NOT pipe cmake to tail — pipeline swallows non-zero
+          # exit codes with set -e (only tail's exit status is checked).
           cmake .. \
             -G Ninja \
             -DCMAKE_C_FLAGS="-O2 -I$BUILD_DIR/plugins" \
@@ -799,8 +809,9 @@ jobs:
             -DVPP_APIGEN="$VPP_DEV_DIR/usr/bin/vppapigen" \
             -DDPDK_INCLUDE_DIR="$DPDK_INC" \
             -DDPDK_LIB="$DPDK_LIB" \
-            2>&1 | tail -50
-          ninja -j$(nproc) 2>&1
+            -DCMAKE_SHARED_LINKER_FLAGS="-lz -latomic -lfdt -lnuma" \
+            2>&1 || { echo "ERROR: cmake configuration failed"; exit 1; }
+          ninja -j$(nproc) 2>&1 || { echo "ERROR: ninja build failed"; exit 1; }
 
           echo "### Step 3/3: Verify and deploy plugin"
           # Find the built plugin
@@ -887,6 +898,7 @@ jobs:
             --custom-package grub-efi-arm64-signed \
             --custom-package u-boot-tools \
             --custom-package libubootenv-tool \
+            --custom-package binutils \
             generic
           cd build
           # Rename generic -> LS1046A in artifact filenames
