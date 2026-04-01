@@ -819,9 +819,9 @@ jobs:
           ninja -j$(nproc) 2>&1 || { echo "ERROR: ninja build failed"; exit 1; }
 
           echo "### Step 3/3: Verify and deploy plugin"
-          # Find the built plugin — ONLY search our build dir, NOT /vpp_plugins
-          # (which contains the upstream plugin pre-installed on the runner)
-          PLUGIN=$(find "$BUILD_DIR" -name 'dpdk_plugin.so' 2>/dev/null | head -1)
+          # Find the built plugin — search our build dir AND /vpp_plugins (VPP cmake output)
+          # NOTE: upstream plugin is at /usr/lib/.../vpp_plugins/ — NOT /vpp_plugins/
+          PLUGIN=$(find "$BUILD_DIR" /vpp_plugins -name 'dpdk_plugin.so' 2>/dev/null | head -1)
           if [ -z "$PLUGIN" ]; then
             echo "WARNING: dpdk_plugin.so not found — ISO will use upstream plugin"
           else
