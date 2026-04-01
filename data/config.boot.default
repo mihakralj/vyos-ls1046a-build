@@ -35,6 +35,7 @@ system {
             address "::1/128"
             address "fe80::/10"
             address "fc00::/7"
+            address "2000::/3"
         }
         server time.apple.com {
         }
@@ -89,6 +90,11 @@ interfaces {
     ethernet eth0 {
         address dhcp
         description "Left RJ45"
+        ipv6 {
+            address {
+                autoconf
+            }
+        }
         offload {
             gro
             gso
@@ -100,6 +106,11 @@ interfaces {
     ethernet eth1 {
         address dhcp
         description "Center RJ45"
+        ipv6 {
+            address {
+                autoconf
+            }
+        }
         offload {
             gro
             gso
@@ -111,6 +122,11 @@ interfaces {
     ethernet eth2 {
         address dhcp
         description "Right RJ45"
+        ipv6 {
+            address {
+                autoconf
+            }
+        }
         offload {
             gro
             gso
@@ -122,20 +138,34 @@ interfaces {
     ethernet eth3 {
         address dhcp
         description "SFP+ Left"
+        ipv6 {
+            address {
+                autoconf
+            }
+        }
         mtu 3290
         offload {
             gro
             gso
+            rfs
+            rps
             sg
         }
     }
     ethernet eth4 {
         address dhcp
         description "SFP+ Right"
+        ipv6 {
+            address {
+                autoconf
+            }
+        }
         mtu 3290
         offload {
             gro
             gso
+            rfs
+            rps
             sg
         }
     }
@@ -163,6 +193,7 @@ service {
             allow-from ::1/128
             allow-from fe80::/10
             allow-from fc00::/7
+            allow-from 2000::/3
             cache-size 10000
             dnssec validate
             name-server 1.1.1.1
