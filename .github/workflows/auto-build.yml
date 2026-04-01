@@ -814,11 +814,32 @@ jobs:
             echo "### Plugin: $(du -h $PLUGIN | cut -f1), DPAA symbols: $DPAA_SYMS, PMD constructor: $PMD_INIT"
 
             if [ "$PLUGIN_SIZE" -gt 5000000 ] && [ "$PMD_INIT" -ge 1 ]; then
-              # Deploy to includes.chroot (overrides upstream vpp-plugin-dpdk)
+              # Stage plugin inside includes.chroot at a temp path, then use a
+              # chroot hook to move it into place AFTER vpp-plugin-dpdk deb installs.
+              # includes.chroot is copied into the chroot BEFORE packages install,
+              # so the staged file survives. The hook runs AFTER all debs are
+              # installed, guaranteeing our DPAA-enabled plugin wins.
               CHROOT=$GITHUB_WORKSPACE/vyos-build/data/live-build-config/includes.chroot
-              mkdir -p "$CHROOT/usr/lib/aarch64-linux-gnu/vpp_plugins"
-              cp "$PLUGIN" "$CHROOT/usr/lib/aarch64-linux-gnu/vpp_plugins/dpdk_plugin.so"
-              echo "### DPAA-enabled dpdk_plugin.so deployed to includes.chroot"
+              mkdir -p "$CHROOT/tmp"
+              cp "$PLUGIN" "$CHROOT/tmp/dpaa-dpdk-plugin.so"
+              HOOKS=$GITHUB_WORKSPACE/vyos-build/data/live-build-config/hooks/live
+              cat > "$HOOKS/97-dpaa-dpdk-plugin.chroot" << 'PLUGINHOOK'
+          #!/bin/bash
+          # Replace upstream dpdk_plugin.so with DPAA1-enabled version.
+          # Must run AFTER vpp-plugin-dpdk deb is installed (hence chroot hook).
+          STAGED=/tmp/dpaa-dpdk-plugin.so
+          TARGET=/usr/lib/aarch64-linux-gnu/vpp_plugins/dpdk_plugin.so
+          if [ -f "$STAGED" ] && [ -f "$TARGET" ]; then
+            cp "$STAGED" "$TARGET"
+            rm -f "$STAGED"
+            echo "### DPAA dpdk_plugin.so installed over upstream ($(stat -c%s $TARGET) bytes)"
+          else
+            echo "WARNING: staged DPAA plugin or target not found"
+            ls -la "$STAGED" "$TARGET" 2>&1 || true
+          fi
+          PLUGINHOOK
+              chmod +x "$HOOKS/97-dpaa-dpdk-plugin.chroot"
+              echo "### DPAA-enabled dpdk_plugin.so staged to includes.chroot/tmp + hook created"
             else
               echo "WARNING: Plugin too small or missing PMD constructor — keeping upstream"
             fi
