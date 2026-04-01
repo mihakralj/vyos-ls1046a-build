@@ -324,53 +324,51 @@ def patch_vpp_py(content):
 # ---------------------------------------------------------------------------
 
 STARTUP_DPDK_BLOCK = """{# Classify interfaces: PCI-based DPDK vs platform-bus DPDK (DPAA auto-discovers) #}
-{% set has_pci_dpdk = [] %}
-{% set has_platform_dpdk = [] %}
+{% set ns = namespace(has_pci_dpdk=false, has_platform_dpdk=false) %}
 {% for iface, iface_config in interface.items() %}
 {%     if iface_config.driver == 'dpdk' %}
 {%         if iface_config.original_driver is defined and iface_config.original_driver in ['fsl_dpa'] %}
-{%             if has_platform_dpdk.append(1) %}{% endif %}
+{%             set ns.has_platform_dpdk = true %}
 {%         else %}
-{%             if has_pci_dpdk.append(1) %}{% endif %}
+{%             set ns.has_pci_dpdk = true %}
 {%         endif %}
 {%     endif %}
 {% endfor %}
-{% if has_pci_dpdk or has_platform_dpdk %}
+{% if ns.has_pci_dpdk or ns.has_platform_dpdk %}
 dpdk {
-{% if not has_pci_dpdk %}
-    {# Platform-bus only (DPAA) — skip PCI scan entirely #}
+{%     if not ns.has_pci_dpdk %}
+    {# Platform-bus only (DPAA) - skip PCI scan entirely #}
     no-pci
-{% else %}
-    {# PCI whitelist anchor — prevents auto-claiming all PCI devices #}
+{%     else %}
+    {# PCI whitelist anchor - prevents auto-claiming all PCI devices #}
     dev 0000:00:00.0
-{% endif %}
-{% for iface, iface_config in interface.items() %}
-{%     if iface_config.driver == 'dpdk' and (iface_config.original_driver is not defined or iface_config.original_driver not in ['fsl_dpa']) %}
-    {# PCI NIC — whitelist by PCI address #}
+{%     endif %}
+{%     for iface, iface_config in interface.items() %}
+{%         if iface_config.driver == 'dpdk' and (iface_config.original_driver is not defined or iface_config.original_driver not in ['fsl_dpa']) %}
     dev {{ iface_config.dpdk_options.dev_id }} {
         name {{ iface }}
-{%         if iface_config.num_rx_desc is vyos_defined %}
+{%             if iface_config.num_rx_desc is vyos_defined %}
         num-rx-desc {{ iface_config.num_rx_desc }}
-{%         endif %}
-{%         if iface_config.num_tx_desc is vyos_defined %}
+{%             endif %}
+{%             if iface_config.num_tx_desc is vyos_defined %}
         num-tx-desc {{ iface_config.num_tx_desc }}
-{%         endif %}
-{%         if iface_config.num_rx_queues is vyos_defined %}
+{%             endif %}
+{%             if iface_config.num_rx_queues is vyos_defined %}
         num-rx-queues {{ iface_config.num_rx_queues }}
-{%         endif %}
-{%         if iface_config.num_tx_queues is vyos_defined %}
+{%             endif %}
+{%             if iface_config.num_tx_queues is vyos_defined %}
         num-tx-queues {{ iface_config.num_tx_queues }}
-{%         endif %}
+{%             endif %}
         }
-{%     endif %}
-{%     if iface_config.driver == 'dpdk' and iface_config.original_driver is defined and iface_config.original_driver in ['fsl_dpa'] %}
-    {# Platform-bus NIC (DPAA) — auto-discovered by dpaa_bus, no explicit dev entry #}
+{%         endif %}
+{%         if iface_config.driver == 'dpdk' and iface_config.original_driver is defined and iface_config.original_driver in ['fsl_dpa'] %}
+    {# Platform-bus NIC (DPAA) - auto-discovered by dpaa_bus, no explicit dev entry #}
     {# Interface {{ iface }} handed off via /dev/fsl-usdpaa DPAA PMD #}
-{%     endif %}
-{% endfor %}
-{% if has_pci_dpdk %}
+{%         endif %}
+{%     endfor %}
+{%     if ns.has_pci_dpdk %}
     uio-bind-force
-{% endif %}
+{%     endif %}
 }
 {% endif %}"""
 
