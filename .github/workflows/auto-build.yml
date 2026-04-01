@@ -820,14 +820,15 @@ jobs:
               # so the staged file survives. The hook runs AFTER all debs are
               # installed, guaranteeing our DPAA-enabled plugin wins.
               CHROOT=$GITHUB_WORKSPACE/vyos-build/data/live-build-config/includes.chroot
-              mkdir -p "$CHROOT/tmp"
-              cp "$PLUGIN" "$CHROOT/tmp/dpaa-dpdk-plugin.so"
+              mkdir -p "$CHROOT/opt"
+              cp "$PLUGIN" "$CHROOT/opt/dpaa-dpdk-plugin.so"
               HOOKS=$GITHUB_WORKSPACE/vyos-build/data/live-build-config/hooks/live
               cat > "$HOOKS/97-dpaa-dpdk-plugin.chroot" << 'PLUGINHOOK'
           #!/bin/bash
           # Replace upstream dpdk_plugin.so with DPAA1-enabled version.
           # Must run AFTER vpp-plugin-dpdk deb is installed (hence chroot hook).
-          STAGED=/tmp/dpaa-dpdk-plugin.so
+          # NOTE: /tmp is cleaned by live-build before hooks run — use /opt instead.
+          STAGED=/opt/dpaa-dpdk-plugin.so
           TARGET=/usr/lib/aarch64-linux-gnu/vpp_plugins/dpdk_plugin.so
           if [ -f "$STAGED" ] && [ -f "$TARGET" ]; then
             cp "$STAGED" "$TARGET"
