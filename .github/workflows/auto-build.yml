@@ -142,6 +142,11 @@ jobs:
             done
             python3 ../ls1046a-patches/patch-mmcblk-default.py
             python3 ../ls1046a-patches/patch-vpp-platform-bus.py
+            echo "### VERIFY: VPP patches in source tree"
+            grep -c 'fsl_dpa' src/conf_mode/vpp.py || echo "MISSING: fsl_dpa in vpp.py"
+            grep -c 'namespace' data/templates/vpp/startup.conf.j2 || echo "MISSING: namespace in startup.conf.j2"
+            grep -c '1 << 28' python/vyos/vpp/config_verify.py || echo "MISSING: 256M in config_verify.py"
+            grep -c 'min_cpus.*2' python/vyos/vpp/config_resource_checks/resource_defaults.py || echo "MISSING: min_cpus 2 in resource_defaults.py"
             [ $patch_fail -eq 1 ] && echo "WARNING: some patches failed — check build output"
             true
           """
@@ -814,8 +819,9 @@ jobs:
           ninja -j$(nproc) 2>&1 || { echo "ERROR: ninja build failed"; exit 1; }
 
           echo "### Step 3/3: Verify and deploy plugin"
-          # Find the built plugin
-          PLUGIN=$(find "$BUILD_DIR" /vpp_plugins -name 'dpdk_plugin.so' -newer "$BUILD_DIR/CMakeLists.txt" 2>/dev/null | head -1)
+          # Find the built plugin — ONLY search our build dir, NOT /vpp_plugins
+          # (which contains the upstream plugin pre-installed on the runner)
+          PLUGIN=$(find "$BUILD_DIR" -name 'dpdk_plugin.so' 2>/dev/null | head -1)
           if [ -z "$PLUGIN" ]; then
             echo "WARNING: dpdk_plugin.so not found — ISO will use upstream plugin"
           else
