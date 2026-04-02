@@ -114,9 +114,24 @@ if ! grep -q '"net_dpaa"' "$DRIVER" 2>/dev/null; then
 fi
 
 # Patch 2: Add IS_DPAA flag to dpdk.h
+# VPP HEAD may have additional flags after TX_PREPARE (e.g. REPRESENTOR).
+# Find the LAST entry in foreach_dpdk_device_flags (the one without trailing \)
+# and append IS_DPAA after it.
 if ! grep -q 'IS_DPAA' "$DPDK_H" 2>/dev/null; then
-  sed -i 's/_ (15, TX_PREPARE, "tx-prepare")/_ (15, TX_PREPARE, "tx-prepare")                                              \\/' "$DPDK_H"
-  sed -i '/_ (15, TX_PREPARE, "tx-prepare")/a\  _ (2, IS_DPAA, "dpaa-device")' "$DPDK_H"
+  awk '
+    /^#define foreach_dpdk_device_flags/ { in_macro=1 }
+    in_macro && /^  _ \(/ { last_flag_line=NR; last_flag=$0 }
+    in_macro && !/\\$/ && /^  _ \(/ {
+      # This is the last entry (no trailing backslash)
+      in_macro=0
+      # Add trailing \ to this line and append IS_DPAA after it
+      sub(/$/, "                                              \\\\")
+      print
+      print "  _ (2, IS_DPAA, \"dpaa-device\")"
+      next
+    }
+    { print }
+  ' "$DPDK_H" > "$DPDK_H.tmp" && mv "$DPDK_H.tmp" "$DPDK_H"
 fi
 
 # Patch 3: Add dpaa_mempool to dpdk_main_t
