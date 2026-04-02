@@ -242,7 +242,7 @@ cmake .. \
   -DVPP_APIGEN="$VPP_DEV_DIR/usr/bin/vppapigen" \
   -DDPDK_INCLUDE_DIR="$DPDK_INC" \
   -DDPDK_LIB="$DPDK_LIB" \
-  -DCMAKE_SHARED_LINKER_FLAGS="-lz -latomic -lfdt -lnuma" \
+  -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-Bstatic -lz -lfdt -lnuma -Wl,-Bdynamic -latomic" \
   2>&1 || { echo "ERROR: cmake configuration failed"; exit 1; }
 ninja -j$(nproc) 2>&1 || { echo "ERROR: ninja build failed"; exit 1; }
 
