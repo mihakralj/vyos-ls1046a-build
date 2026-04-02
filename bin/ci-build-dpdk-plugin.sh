@@ -191,6 +191,10 @@ if ! grep -q 'rte_mbuf.h' "$INIT" 2>/dev/null; then
 }' "$INIT"
 fi
 
+# Compile strlcpy/strlcat shim for glibc cross-compat (CI glibc 2.38 → target glibc 2.36)
+echo "### Compiling strlcpy shim for glibc cross-compatibility"
+cc -c -fPIC -O2 -o /tmp/strlcpy-shim.o "$GITHUB_WORKSPACE/data/strlcpy-shim.c"
+
 # Remove cryptodev plugin — VPP HEAD uses APIs not in VyOS mirror headers
 rm -rf "$DPDK_PLUGIN/cryptodev"
 sed -i '/cryptodev\/cryptodev\.h/d' "$DPDK_PLUGIN/device/init.c"
@@ -249,7 +253,7 @@ cmake .. \
   -DVPP_APIGEN="$VPP_DEV_DIR/usr/bin/vppapigen" \
   -DDPDK_INCLUDE_DIR="$DPDK_INC" \
   -DDPDK_LIB="$DPDK_LIB" \
-  -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-Bstatic -lfdt -lnuma -Wl,-Bdynamic -latomic" \
+  -DCMAKE_SHARED_LINKER_FLAGS="/tmp/strlcpy-shim.o -Wl,-Bstatic -lfdt -lnuma -Wl,-Bdynamic -latomic" \
   2>&1 || { echo "ERROR: cmake configuration failed"; exit 1; }
 ninja -j$(nproc) 2>&1 || { echo "ERROR: ninja build failed"; exit 1; }
 
