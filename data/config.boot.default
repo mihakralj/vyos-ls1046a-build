@@ -314,6 +314,13 @@ system {
     name-server eth3
     name-server eth4
     option {
+        kernel {
+            memory {
+                hugepage-size 2M {
+                    hugepage-count 1700
+                }
+            }
+        }
         performance network-latency
         reboot-on-panic
         reboot-on-upgrade-failure 5

@@ -47,6 +47,9 @@ rm -rf packages/linux-headers-*
   --custom-package tmux \
   --custom-package jq \
   --custom-package sysstat \
+  --custom-package netperf \
+  --custom-package nuttcp \
+  --custom-package flent \
   --custom-package skopeo \
   --custom-package catatonit \
   --custom-package uidmap \
