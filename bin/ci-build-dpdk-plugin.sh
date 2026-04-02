@@ -37,7 +37,14 @@ meson setup build \
   -Denable_driver_sdk=true \
   -Dtests=false \
   -Dexamples= \
-  -Ddisable_drivers="net/mlx*,net/bnxt,net/ixg*,net/ice,net/i40e,net/e1000,crypto/qat,net/virtio,net/vmxnet*,net/ena,net/hns*,net/hinic,net/octeontx*,net/cnxk,net/thunderx"
+  -Ddisable_drivers="net/mlx*,net/bnxt,net/ixg*,net/ice,net/i40e,net/e1000,crypto/qat,net/virtio,net/vmxnet*,net/ena,net/hns*,net/hinic,net/octeontx*,net/cnxk,net/thunderx,compress/zlib"
+
+# Fix cross-glibc mismatch: CI runner has glibc 2.38+ (strlcpy available),
+# but target VyOS/bookworm has glibc 2.36 (no strlcpy). Force DPDK's own
+# fallback implementations to compile regardless of host detection.
+echo "### Stripping RTE_HAS_STRLCPY/STRLCAT from rte_build_config.h (glibc cross-compat fix)"
+sed -i '/#define RTE_HAS_STRLCPY/d; /#define RTE_HAS_STRLCAT/d' build/rte_build_config.h
+
 ninja -C build -j$(nproc)
 ninja -C build install
 
@@ -242,7 +249,7 @@ cmake .. \
   -DVPP_APIGEN="$VPP_DEV_DIR/usr/bin/vppapigen" \
   -DDPDK_INCLUDE_DIR="$DPDK_INC" \
   -DDPDK_LIB="$DPDK_LIB" \
-  -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-Bstatic -lz -lfdt -lnuma -Wl,-Bdynamic -latomic" \
+  -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-Bstatic -lfdt -lnuma -Wl,-Bdynamic -latomic" \
   2>&1 || { echo "ERROR: cmake configuration failed"; exit 1; }
 ninja -j$(nproc) 2>&1 || { echo "ERROR: ninja build failed"; exit 1; }
 
