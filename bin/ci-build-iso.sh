@@ -50,6 +50,10 @@ rm -rf packages/linux-headers-*
   --custom-package netperf \
   --custom-package nuttcp \
   --custom-package flent \
+  --custom-package nftables \
+  --custom-package iproute2 \
+  --custom-package fping \
+  --custom-package ngrep \
   --custom-package skopeo \
   --custom-package catatonit \
   --custom-package uidmap \

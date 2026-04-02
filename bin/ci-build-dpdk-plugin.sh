@@ -1,4 +1,4 @@
-#!/bin/bash
+a#!/bin/bash
 # ci-build-dpdk-plugin.sh — Build DPDK 24.11 with DPAA1 PMD + VPP DPDK plugin
 # Called by: .github/workflows/auto-build.yml "Build DPDK + VPP DPAA Plugin" step
 # Expects: GITHUB_WORKSPACE set, VYOS_MIRROR in env
@@ -54,8 +54,10 @@ if [ -z "$DPDK_LIB" ]; then
   DPDK_LIBDIR=$(find "$DPDK_OUTPUT" -name 'librte_eal.a' -printf '%h\n' | head -1)
   if [ -n "$DPDK_LIBDIR" ]; then
     echo "### libdpdk.a not found, creating merged archive in $DPDK_LIBDIR"
-    # Merge all librte_*.a into a single archive so --whole-archive works.
-    # GROUP linker scripts don't properly support --whole-archive.
+    # Merge all librte_*.a into a single archive for --whole-archive linking.
+    # DPDK has overlapping .o files across archives (e.g. vhost objects
+    # appear in both librte_vhost.a and the PMD wrapper). The linker flag
+    # --allow-multiple-definition handles this safely at link time.
     MERGE_DIR=$(mktemp -d)
     for lib in "$DPDK_LIBDIR"/librte_*.a; do
       # Extract into per-library subdirs to avoid .o name collisions
@@ -235,7 +237,7 @@ cmake .. \
   -DVPP_APIGEN="$VPP_DEV_DIR/usr/bin/vppapigen" \
   -DDPDK_INCLUDE_DIR="$DPDK_INC" \
   -DDPDK_LIB="$DPDK_LIB" \
-  -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--whole-archive $DPDK_LIB -Wl,--no-whole-archive -lz -latomic -lfdt -lnuma" \
+  -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--whole-archive $DPDK_LIB -Wl,--no-whole-archive -Wl,--allow-multiple-definition -lz -latomic -lfdt -lnuma" \
   2>&1 || { echo "ERROR: cmake configuration failed"; exit 1; }
 ninja -j$(nproc) 2>&1 || { echo "ERROR: ninja build failed"; exit 1; }
 
