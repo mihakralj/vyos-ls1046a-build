@@ -1,5 +1,7 @@
 # FMD Shim Kernel Module — Implementation Specification
 
+> **Status (2026-04-02):** 📋 **NOT YET IMPLEMENTED.** 8-ioctl kernel module design for runtime RSS on DPAA1 FMan. Pending Phase 0 (VPP DPAA PMD single-queue) validation before implementation begins.
+
 ## Overview
 
 A minimal kernel module (`fsl_fmd_shim`) that creates `/dev/fm0*` character devices
@@ -14,11 +16,11 @@ the full NXP SDK `fmd` driver (~30K LOC).
 ## Architecture
 
 ```
-┌─────────────┐        ┌──────────────────┐        ┌─────────────────┐
-│  DPDK fmlib  │──ioctl──▶  fsl_fmd_shim   │──MMIO──▶  FMan CCSR Regs  │
-│  (userspace) │        │  (kernel module) │        │  (0x1a00000)    │
-└─────────────┘        └──────────────────┘        └─────────────────┘
-       │                        │
+┌──────────────┐          ┌──────────────────┐        ┌──────────────────┐
+│  DPDK fmlib  │──ioctl──▶  fsl_fmd_shim     │──MMIO──▶  FMan CCSR Regs │
+│  (userspace) │          │  (kernel module) │        │  (0x1a00000)     │
+└──────────────┘          └──────────────────┘        └──────────────────┘
+       │                           │
   open("/dev/fm0")       ioremap(0x1a00000)
   open("/dev/fm0-pcd")   Program KG/Parser/CC
   open("/dev/fm0-port-rx0")

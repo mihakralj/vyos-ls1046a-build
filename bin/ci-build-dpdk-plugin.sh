@@ -1,4 +1,4 @@
-a#!/bin/bash
+#!/bin/bash
 # ci-build-dpdk-plugin.sh — Build DPDK 24.11 with DPAA1 PMD + VPP DPDK plugin
 # Called by: .github/workflows/auto-build.yml "Build DPDK + VPP DPAA Plugin" step
 # Expects: GITHUB_WORKSPACE set, VYOS_MIRROR in env
