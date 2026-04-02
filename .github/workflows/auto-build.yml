@@ -97,6 +97,9 @@ jobs:
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
           bin/ci-pick-packages.sh
 
+      - name: Install extra packages (non-Debian)
+        run: bin/ci-install-extra-packages.sh
+
       - name: Build DPDK + VPP DPAA Plugin
         run: bin/ci-build-dpdk-plugin.sh
 
