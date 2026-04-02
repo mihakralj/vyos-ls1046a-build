@@ -107,6 +107,35 @@ else
 fi
 
 ###############################################################################
+# doggo — DNS client (dig alternative)
+###############################################################################
+echo "### Installing doggo"
+DOGGO_VERSION=$(curl -sI https://github.com/mr-karan/doggo/releases/latest \
+  | grep -i '^location:' | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+')
+
+if [ -z "$DOGGO_VERSION" ]; then
+  echo "WARNING: Could not determine doggo version, skipping" >&2
+else
+  DOGGO_URL="https://github.com/mr-karan/doggo/releases/download/v${DOGGO_VERSION}/doggo_${DOGGO_VERSION}_Linux_arm64.tar.gz"
+  echo "Downloading doggo ${DOGGO_VERSION} from ${DOGGO_URL}"
+  if curl -fSL -o "${TMP_DIR}/doggo.tar.gz" "$DOGGO_URL"; then
+    tar xzf "${TMP_DIR}/doggo.tar.gz" -C "$TMP_DIR"
+    DOGGO_BIN=$(find "$TMP_DIR" -name 'doggo' -type f -executable | head -1)
+    if [ -z "$DOGGO_BIN" ]; then
+      DOGGO_BIN=$(find "$TMP_DIR" -name 'doggo' -type f | head -1)
+    fi
+    if [ -n "$DOGGO_BIN" ]; then
+      install -m 755 "$DOGGO_BIN" "$CHROOT/usr/local/bin/doggo"
+      echo "### doggo ${DOGGO_VERSION} staged to includes.chroot/usr/local/bin/"
+    else
+      echo "WARNING: doggo binary not found in archive" >&2
+    fi
+  else
+    echo "WARNING: Failed to download doggo, skipping" >&2
+  fi
+fi
+
+###############################################################################
 # Add more third-party packages below using the same pattern:
 #   1. Download binary/archive to $TMP_DIR
 #   2. Extract if needed
