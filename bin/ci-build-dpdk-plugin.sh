@@ -53,24 +53,14 @@ DPDK_LIB=$(find "$DPDK_OUTPUT" -name 'libdpdk.a' | head -1)
 if [ -z "$DPDK_LIB" ]; then
   DPDK_LIBDIR=$(find "$DPDK_OUTPUT" -name 'librte_eal.a' -printf '%h\n' | head -1)
   if [ -n "$DPDK_LIBDIR" ]; then
-    echo "### libdpdk.a not found, creating merged archive in $DPDK_LIBDIR"
-    # Merge all librte_*.a into a single archive for --whole-archive linking.
-    # DPDK has overlapping .o files across archives (e.g. vhost objects
-    # appear in both librte_vhost.a and the PMD wrapper). The linker flag
-    # --allow-multiple-definition handles this safely at link time.
-    MERGE_DIR=$(mktemp -d)
-    for lib in "$DPDK_LIBDIR"/librte_*.a; do
-      # Extract into per-library subdirs to avoid .o name collisions
-      SUBDIR="$MERGE_DIR/$(basename "$lib" .a)"
-      mkdir -p "$SUBDIR"
-      (cd "$SUBDIR" && ar x "$lib")
-    done
-    # Collect all .o files and create a single archive
-    find "$MERGE_DIR" -name '*.o' | sort > "$MERGE_DIR/objects.txt"
-    ar rcs "$DPDK_LIBDIR/libdpdk.a" $(cat "$MERGE_DIR/objects.txt")
-    rm -rf "$MERGE_DIR"
+    echo "### libdpdk.a not found, creating GROUP linker script in $DPDK_LIBDIR"
+    # Create a GROUP linker script referencing all librte_*.a archives.
+    # The linker resolves cross-archive symbols naturally with this approach.
+    # This is the same method used by Debian/meson for DPDK packaging.
+    LIBS=$(cd "$DPDK_LIBDIR" && ls librte_*.a | sed 's/^/-l:/' | tr '\n' ' ')
+    echo "GROUP ( $LIBS )" > "$DPDK_LIBDIR/libdpdk.a"
     DPDK_LIB="$DPDK_LIBDIR/libdpdk.a"
-    echo "### Merged archive: $(du -h "$DPDK_LIB" | cut -f1), $(ar t "$DPDK_LIB" | wc -l) objects"
+    echo "### GROUP linker script: $(wc -w < "$DPDK_LIB") entries"
   fi
 fi
 # Headers may be at include/dpdk/ or include/ depending on meson version
@@ -237,7 +227,7 @@ cmake .. \
   -DVPP_APIGEN="$VPP_DEV_DIR/usr/bin/vppapigen" \
   -DDPDK_INCLUDE_DIR="$DPDK_INC" \
   -DDPDK_LIB="$DPDK_LIB" \
-  -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--whole-archive $DPDK_LIB -Wl,--no-whole-archive -Wl,--allow-multiple-definition -lz -latomic -lfdt -lnuma" \
+  -DCMAKE_SHARED_LINKER_FLAGS="-lz -latomic -lfdt -lnuma" \
   2>&1 || { echo "ERROR: cmake configuration failed"; exit 1; }
 ninja -j$(nproc) 2>&1 || { echo "ERROR: ninja build failed"; exit 1; }
 
