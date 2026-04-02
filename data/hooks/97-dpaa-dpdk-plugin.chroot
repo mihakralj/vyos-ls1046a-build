@@ -1,0 +1,14 @@
+#!/bin/bash
+# Replace upstream dpdk_plugin.so with DPAA1-enabled version.
+# Must run AFTER vpp-plugin-dpdk deb is installed (hence chroot hook).
+# NOTE: /tmp is cleaned by live-build before hooks run — use /opt instead.
+STAGED=/opt/dpaa-dpdk-plugin.so
+TARGET=/usr/lib/aarch64-linux-gnu/vpp_plugins/dpdk_plugin.so
+if [ -f "$STAGED" ] && [ -f "$TARGET" ]; then
+  cp "$STAGED" "$TARGET"
+  rm -f "$STAGED"
+  echo "### DPAA dpdk_plugin.so installed over upstream ($(stat -c%s $TARGET) bytes)"
+else
+  echo "WARNING: staged DPAA plugin or target not found"
+  ls -la "$STAGED" "$TARGET" 2>&1 || true
+fi

@@ -1,0 +1,10 @@
+[Unit]
+Description=Sync /boot/vyos.env with running VyOS image (LS1046A)
+After=local-fs.target
+ConditionPathExists=/proc/device-tree/compatible
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vyos-postinstall
+RemainAfterExit=yes
+StandardOutput=journal
