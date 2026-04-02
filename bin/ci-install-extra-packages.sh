@@ -60,6 +60,32 @@ else
 fi
 
 ###############################################################################
+# trippy — network diagnostic tool (mtr alternative)
+###############################################################################
+echo "### Installing trippy"
+TRIPPY_VERSION=$(curl -sI https://github.com/fujiapple852/trippy/releases/latest \
+  | grep -i '^location:' | grep -oP 'v?\K[0-9]+\.[0-9]+\.[0-9]+')
+
+if [ -z "$TRIPPY_VERSION" ]; then
+  echo "WARNING: Could not determine trippy version, skipping" >&2
+else
+  TRIPPY_URL="https://github.com/fujiapple852/trippy/releases/download/${TRIPPY_VERSION}/trippy-${TRIPPY_VERSION}-aarch64-unknown-linux-musl.tar.gz"
+  echo "Downloading trippy ${TRIPPY_VERSION} from ${TRIPPY_URL}"
+  if curl -fSL -o "${TMP_DIR}/trippy.tar.gz" "$TRIPPY_URL"; then
+    tar xzf "${TMP_DIR}/trippy.tar.gz" -C "$TMP_DIR"
+    TRIPPY_BIN=$(find "$TMP_DIR" -name 'trip' -type f | head -1)
+    if [ -n "$TRIPPY_BIN" ]; then
+      install -m 755 "$TRIPPY_BIN" "$CHROOT/usr/local/bin/trip"
+      echo "### trippy ${TRIPPY_VERSION} staged to includes.chroot/usr/local/bin/"
+    else
+      echo "WARNING: trip binary not found in archive" >&2
+    fi
+  else
+    echo "WARNING: Failed to download trippy, skipping" >&2
+  fi
+fi
+
+###############################################################################
 # Add more third-party packages below using the same pattern:
 #   1. Download binary/archive to $TMP_DIR
 #   2. Extract if needed
