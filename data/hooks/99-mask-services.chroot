@@ -1,0 +1,13 @@
+#!/bin/bash
+# kexec services: NOT masked — mainline 6.6 has QBMan kexec fix
+# (bman_requires_cleanup() / qman_requires_cleanup() detect prior init
+# and clean up BMan/QMan state, allowing kexec to work on DPAA1).
+# kexec enables VyOS managed-params self-healing (hugepages, panic, etc.)
+# via system_option.py without requiring SPI NOR writes or cold reboot.
+# SysV init scripts removed to prevent duplicate systemd unit generation,
+# but the systemd units themselves remain active (not masked).
+rm -f /etc/init.d/kexec-load /etc/init.d/kexec
+# ACPI daemon is useless on ARM64/DeviceTree platforms
+ln -sf /dev/null /etc/systemd/system/acpid.service
+ln -sf /dev/null /etc/systemd/system/acpid.socket
+ln -sf /dev/null /etc/systemd/system/acpid.path

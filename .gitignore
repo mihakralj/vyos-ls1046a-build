@@ -17,3 +17,4 @@ package-lock.json
 
 # Firmware binaries (too large for git)
 firmware/
+linux-source-*.deb
