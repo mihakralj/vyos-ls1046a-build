@@ -892,7 +892,6 @@ jobs:
             --version ${{ steps.set_env_variables.outputs.build_version }} \
             --vyos-mirror $VYOS_MIRROR \
             --custom-package vim-tiny \
-            --custom-package neofetch \
             --custom-package tree \
             --custom-package btop \
             --custom-package ripgrep \
@@ -900,11 +899,26 @@ jobs:
             --custom-package ncdu \
             --custom-package fastnetmon \
             --custom-package containernetworking-plugins \
-            --custom-package mokutil \
             --custom-package grub-efi-arm64-signed \
             --custom-package u-boot-tools \
             --custom-package libubootenv-tool \
             --custom-package binutils \
+            --custom-package mtr-tiny \
+            --custom-package iperf3 \
+            --custom-package ethtool \
+            --custom-package iftop \
+            --custom-package socat \
+            --custom-package hping3 \
+            --custom-package conntrack \
+            --custom-package strace \
+            --custom-package lsof \
+            --custom-package tmux \
+            --custom-package jq \
+            --custom-package sysstat \
+            --custom-package skopeo \
+            --custom-package catatonit \
+            --custom-package uidmap \
+            --custom-package fuse-overlayfs \
             generic
           cd build
           # Rename generic -> LS1046A in artifact filenames
