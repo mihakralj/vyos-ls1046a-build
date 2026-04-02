@@ -12,3 +12,7 @@ else
   echo "WARNING: staged DPAA plugin or target not found"
   ls -la "$STAGED" "$TARGET" 2>&1 || true
 fi
+
+# Reinstall binutils — VyOS cleanup strips binaries then auto-removes binutils.
+# We need nm/objdump/readelf on the target for DPAA plugin diagnostics.
+apt-get install -y --no-install-recommends binutils 2>&1 | tail -3
