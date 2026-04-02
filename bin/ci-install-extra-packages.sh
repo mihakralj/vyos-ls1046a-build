@@ -39,7 +39,28 @@ else
 fi
 
 ###############################################################################
-# We can add more third-party packages below using the same pattern:
+# bandwhich — terminal bandwidth utilization tool
+###############################################################################
+echo "### Installing bandwhich"
+BANDWHICH_VERSION=$(curl -sI https://github.com/imsnif/bandwhich/releases/latest \
+  | grep -i '^location:' | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+')
+
+if [ -z "$BANDWHICH_VERSION" ]; then
+  echo "WARNING: Could not determine bandwhich version, skipping" >&2
+else
+  BANDWHICH_URL="https://github.com/imsnif/bandwhich/releases/download/v${BANDWHICH_VERSION}/bandwhich-v${BANDWHICH_VERSION}-aarch64-unknown-linux-musl.tar.gz"
+  echo "Downloading bandwhich ${BANDWHICH_VERSION} from ${BANDWHICH_URL}"
+  if curl -fSL -o "${TMP_DIR}/bandwhich.tar.gz" "$BANDWHICH_URL"; then
+    tar xzf "${TMP_DIR}/bandwhich.tar.gz" -C "$TMP_DIR"
+    install -m 755 "${TMP_DIR}/bandwhich" "$CHROOT/usr/local/bin/bandwhich"
+    echo "### bandwhich ${BANDWHICH_VERSION} staged to includes.chroot/usr/local/bin/"
+  else
+    echo "WARNING: Failed to download bandwhich, skipping" >&2
+  fi
+fi
+
+###############################################################################
+# Add more third-party packages below using the same pattern:
 #   1. Download binary/archive to $TMP_DIR
 #   2. Extract if needed
 #   3. Install to $CHROOT/usr/local/bin/ (or other appropriate path)
