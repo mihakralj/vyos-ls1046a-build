@@ -15,7 +15,7 @@ mkdir -p $DPDK_WORK $DPDK_OUTPUT
 apt-get update -qq
 apt-get install -y --no-install-recommends \
   meson ninja-build pkg-config python3-pyelftools \
-  libelf-dev libnuma-dev libfdt-dev 2>&1 | tail -5
+  libelf-dev libnuma-dev libfdt-dev zlib1g-dev 2>&1 | tail -5
 
 # Clone DPDK v24.11 (shallow)
 git clone --depth=1 -b v24.11 https://github.com/DPDK/dpdk.git $DPDK_WORK/dpdk
@@ -53,10 +53,22 @@ DPDK_LIB=$(find "$DPDK_OUTPUT" -name 'libdpdk.a' | head -1)
 if [ -z "$DPDK_LIB" ]; then
   DPDK_LIBDIR=$(find "$DPDK_OUTPUT" -name 'librte_eal.a' -printf '%h\n' | head -1)
   if [ -n "$DPDK_LIBDIR" ]; then
-    echo "### libdpdk.a not found, creating GROUP linker script in $DPDK_LIBDIR"
-    LIBS=$(cd "$DPDK_LIBDIR" && ls librte_*.a | sed 's/^/-l:/' | tr '\n' ' ')
-    echo "GROUP ( $LIBS )" > "$DPDK_LIBDIR/libdpdk.a"
+    echo "### libdpdk.a not found, creating merged archive in $DPDK_LIBDIR"
+    # Merge all librte_*.a into a single archive so --whole-archive works.
+    # GROUP linker scripts don't properly support --whole-archive.
+    MERGE_DIR=$(mktemp -d)
+    for lib in "$DPDK_LIBDIR"/librte_*.a; do
+      # Extract into per-library subdirs to avoid .o name collisions
+      SUBDIR="$MERGE_DIR/$(basename "$lib" .a)"
+      mkdir -p "$SUBDIR"
+      (cd "$SUBDIR" && ar x "$lib")
+    done
+    # Collect all .o files and create a single archive
+    find "$MERGE_DIR" -name '*.o' | sort > "$MERGE_DIR/objects.txt"
+    ar rcs "$DPDK_LIBDIR/libdpdk.a" $(cat "$MERGE_DIR/objects.txt")
+    rm -rf "$MERGE_DIR"
     DPDK_LIB="$DPDK_LIBDIR/libdpdk.a"
+    echo "### Merged archive: $(du -h "$DPDK_LIB" | cut -f1), $(ar t "$DPDK_LIB" | wc -l) objects"
   fi
 fi
 # Headers may be at include/dpdk/ or include/ depending on meson version
@@ -223,7 +235,7 @@ cmake .. \
   -DVPP_APIGEN="$VPP_DEV_DIR/usr/bin/vppapigen" \
   -DDPDK_INCLUDE_DIR="$DPDK_INC" \
   -DDPDK_LIB="$DPDK_LIB" \
-  -DCMAKE_SHARED_LINKER_FLAGS="-lz -latomic -lfdt -lnuma" \
+  -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--whole-archive $DPDK_LIB -Wl,--no-whole-archive -lz -latomic -lfdt -lnuma" \
   2>&1 || { echo "ERROR: cmake configuration failed"; exit 1; }
 ninja -j$(nproc) 2>&1 || { echo "ERROR: ninja build failed"; exit 1; }
 
@@ -236,6 +248,14 @@ else
   DPAA_SYMS=$(nm -D "$PLUGIN" 2>/dev/null | grep -ci dpaa || true)
   PMD_INIT=$(nm "$PLUGIN" 2>/dev/null | grep -c 'dpaainitfn_net_dpaa' || true)
   echo "### Plugin: $(du -h $PLUGIN | cut -f1), DPAA symbols: $DPAA_SYMS, PMD constructor: $PMD_INIT"
+
+  # Verify no critical undefined symbols (zlib, strlcpy, etc.)
+  UNDEF_CRITICAL=$(nm -D "$PLUGIN" 2>/dev/null | grep ' U ' | grep -cE 'inflateEnd|strlcpy|strlcat|rte_' || true)
+  echo "### Critical undefined symbols: $UNDEF_CRITICAL"
+  if [ "$UNDEF_CRITICAL" -gt 0 ]; then
+    echo "WARNING: Plugin has unresolved DPDK/zlib symbols:"
+    nm -D "$PLUGIN" 2>/dev/null | grep ' U ' | grep -E 'inflateEnd|strlcpy|strlcat|rte_' | head -20
+  fi
 
   if [ "$PLUGIN_SIZE" -gt 5000000 ] && [ "$PMD_INIT" -ge 1 ]; then
     # Stage plugin inside includes.chroot at a temp path, then use a
