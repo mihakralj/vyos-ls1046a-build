@@ -95,7 +95,7 @@ GPING_VERSION=$(curl -sI https://github.com/orf/gping/releases/latest \
 if [ -z "$GPING_VERSION" ]; then
   echo "WARNING: Could not determine gping version, skipping" >&2
 else
-  GPING_URL="https://github.com/orf/gping/releases/download/gping-v${GPING_VERSION}/gping-aarch64-unknown-linux-musl.tar.gz"
+  GPING_URL="https://github.com/orf/gping/releases/download/gping-v${GPING_VERSION}/gping-Linux-musl-arm64.tar.gz"
   echo "Downloading gping ${GPING_VERSION} from ${GPING_URL}"
   if curl -fSL -o "${TMP_DIR}/gping.tar.gz" "$GPING_URL"; then
     tar xzf "${TMP_DIR}/gping.tar.gz" -C "$TMP_DIR"
