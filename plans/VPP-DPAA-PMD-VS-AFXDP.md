@@ -2,8 +2,7 @@
 
 > **Status (2026-04-03):** 🔴 **DPAA PMD BLOCKED by RC#31.** AF_XDP is the active production path.
 > Hardware-confirmed 2026-04-03 on .153 and .157. This document provides the deep technical
-> analysis requested for the architectural decision on whether to retain or remove DPAA PMD
-> infrastructure.
+> analysis for the architectural decision on whether to retain or remove DPAA PMD infrastructure.
 
 ---
 
