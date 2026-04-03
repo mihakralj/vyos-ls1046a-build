@@ -3,12 +3,17 @@
 # Called by udev rule 10-fman-port-order.rules via PROGRAM=.
 # Outputs the desired interface name; udev uses it via NAME="%c".
 #
-# Mapping (SoC-fixed FMan MAC addresses → physical port positions):
-#   ethernet@ea000  (MAC6)  → eth0  left RJ45
-#   ethernet@e8000  (MAC5)  → eth1  center RJ45
-#   ethernet@e2000  (MAC2)  → eth2  right RJ45
-#   ethernet@f0000  (MAC9)  → eth3  left SFP+
-#   ethernet@f2000  (MAC10) → eth4  right SFP+
+# NOTE: On installed systems, VyOS's vyos_net_name (hw-id matching from
+# config.boot) takes precedence over this udev rule. This script is
+# primarily effective during live boot (no config.boot) and serves as
+# documentation of the correct physical mapping.
+#
+# DT MAC addresses confirmed via /sys/firmware/devicetree/base/soc/fman@.../local-mac-address:
+#   ethernet@e8000  (MAC5, 16:00)  → eth0  left RJ45
+#   ethernet@ea000  (MAC6, 16:01)  → eth1  center RJ45
+#   ethernet@e2000  (MAC2, 15:ff)  → eth2  right RJ45
+#   ethernet@f0000  (MAC9, 16:02)  → eth3  left SFP+
+#   ethernet@f2000  (MAC10, 16:03) → eth4  right SFP+
 
 IFACE="$1"
 [ -z "$IFACE" ] && exit 1
@@ -26,8 +31,8 @@ fi
 
 # Extract the ethernet@XXXXX node name from the path
 case "$OF_NODE" in
-    *ethernet@ea000)  echo "eth0" ;;  # MAC6  - left RJ45
-    *ethernet@e8000)  echo "eth1" ;;  # MAC5  - center RJ45
+    *ethernet@e8000)  echo "eth0" ;;  # MAC5  - left RJ45
+    *ethernet@ea000)  echo "eth1" ;;  # MAC6  - center RJ45
     *ethernet@e2000)  echo "eth2" ;;  # MAC2  - right RJ45
     *ethernet@f0000)  echo "eth3" ;;  # MAC9  - left SFP+
     *ethernet@f2000)  echo "eth4" ;;  # MAC10 - right SFP+

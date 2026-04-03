@@ -123,7 +123,7 @@ interfaces {
     ethernet eth1 {
         address dhcp
         description "Center RJ45"
-        hw-id e8:f6:d7:00:15:ff
+        hw-id e8:f6:d7:00:16:01
         ipv6 {
             address {
                 autoconf
@@ -140,7 +140,7 @@ interfaces {
     ethernet eth2 {
         address dhcp
         description "Right RJ45"
-        hw-id e8:f6:d7:00:16:01
+        hw-id e8:f6:d7:00:15:ff
         ipv6 {
             address {
                 autoconf
