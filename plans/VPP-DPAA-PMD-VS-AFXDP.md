@@ -340,14 +340,175 @@ Instead of mixed kernel+DPDK (blocked by RC#31), put **ALL 5 interfaces** under 
 | **kexec reboots lose networking** | VPP stops during kexec → ~10s gap | Already happens with current VPP; managed-params self-healing works |
 | **More hugepages needed** | 5 interfaces vs 2 under DPDK | Increase from 512 to 768 2M pages (1.5GB of 8GB) |
 
+### Detailed Operational Walkthrough
+
+#### Boot Sequence
+
+```
+T=0s    Power on → U-Boot → kernel boots from eMMC squashfs
+T=~40s  Kernel up. fsl_dpa binds ALL dpaa-ethernet.N → eth0-eth4 exist as kernel netdevs
+T=~45s  vyos-postinstall.service: writes /boot/vyos.env, fw_setenv (if needed)
+T=~50s  vpp.service starts (Before=vyos-router.service):
+          1. _dpaa_unbind_ifaces() unbinds ALL 5 dpaa-ethernet.N from fsl_dpa
+             → eth0-eth4 kernel netdevs DISAPPEAR
+          2. VPP process starts with DPDK DPAA PMD
+             → dpaa_bus_probe() initializes ALL BMan/QMan (RC#31 is SAFE — no kernel FMan left)
+             → DPDK discovers 5 FMan MACs
+          3. VPP creates LCP TAP interfaces:
+             tap-eth0 (mirrors DPDK eth0, MAC copied)
+             tap-eth1 (mirrors DPDK eth1, MAC copied)
+             tap-eth2 (mirrors DPDK eth2, MAC copied)
+             tap-eth3 (mirrors DPDK eth3, MAC copied)
+             tap-eth4 (mirrors DPDK eth4, MAC copied)
+          4. Default punt rule: ALL unmatched traffic → LCP TAP → Linux
+T=~55s  vyos-router.service starts:
+          → VyOS reads config.boot
+          → Applies IP addresses to tap-ethN interfaces (NOT original ethN — those are gone)
+          → Applies firewall rules, NAT, DHCP, BGP, OSPF to tap interfaces
+          → VPP-specific config: L3 forwarding rules for SFP+ ports
+T=~60s  SSH available on tap-eth0 at 192.168.1.157
+```
+
+Key: During T=50-55s (~5 seconds), there is **no networking**. Serial console works throughout.
+
+#### Interface Naming
+
+VyOS config sees TAP interfaces, but they can be named to match original ethN:
+
+| Hardware Port | DPDK Interface | LCP TAP | VyOS Config Name |
+|--------------|---------------|---------|-----------------|
+| Left RJ45 | dpaa-eth0 (DPDK) | tap-eth0 | `eth0` (via LCP naming) |
+| Center RJ45 | dpaa-eth1 (DPDK) | tap-eth1 | `eth1` |
+| Right RJ45 | dpaa-eth2 (DPDK) | tap-eth2 | `eth2` |
+| Left SFP+ | dpaa-eth3 (DPDK) | tap-eth3 | `eth3` |
+| Right SFP+ | dpaa-eth4 (DPDK) | tap-eth4 | `eth4` |
+
+VPP's LCP plugin supports `lcp create <hw-iface> host-if <name>` — TAPs can be named `eth0`, `eth1`, etc. From VyOS CLI perspective, **nothing changes** — the user sees the same interface names.
+
+#### Data Flow by Port Role
+
+**RJ45 Management Ports (eth0/eth1/eth2) — "passthrough" to Linux:**
+
+```
+   Incoming packet on RJ45
+          │
+    FMan hardware receives
+          │
+    BMan buffer allocation
+          │
+    QMan enqueues to DPDK RX ring
+          │
+    DPDK DPAA PMD polls (VPP main loop)
+          │
+    VPP graph: classify → no VPP route match
+          │
+    VPP LCP punt → memcpy to TAP fd
+          │
+    Linux kernel: tap-eth0 → IP stack → VyOS
+          │
+    (SSH session, BGP update, DHCP reply, etc.)
+```
+
+For outgoing traffic (Linux → wire):
+```
+    Linux generates packet (SSH response, BGP, etc.)
+          │
+    Writes to tap-eth0
+          │
+    VPP LCP inject → VPP TX ring
+          │
+    DPDK DPAA PMD TX → QMan → FMan → wire
+```
+
+**Performance impact on RJ45**: Extra TAP copy adds ~50µs latency and ~5% CPU overhead. At 1 Gbps this is invisible — the RJ45 PHY is the bottleneck, not the TAP.
+
+**SFP+ Forwarding Ports (eth3/eth4) — VPP wire-speed:**
+
+```
+   Incoming packet on SFP+ (10G)
+          │
+    FMan hardware receives
+          │
+    BMan buffer → QMan → DPDK PMD polls
+          │
+    VPP graph: classify → IP lookup in VPP FIB
+          │
+    ┌─────┴──────────────┐
+    │                     │
+    Match: forward        No match: punt to Linux
+    via VPP L3 route      via LCP TAP (control plane)
+    │                     │
+    DPDK PMD TX           tap-eth3 → Linux
+    → FMan → wire         (BGP, OSPF, ARP, ICMP)
+    (~9.4 Gbps)           (low bandwidth)
+```
+
+**The selective part**: VPP only does high-speed forwarding for traffic matching VPP FIB entries. Everything else (ARP, ICMP, BGP, OSPF, SSH-to-router) is punted to Linux through the TAP. This is automatic — no per-packet classification needed. VPP's L3 FIB is synced from Linux routing table via LCP.
+
+#### VyOS Configuration Example
+
+```
+# === Management ports — normal VyOS routing through LCP TAPs ===
+set interfaces ethernet eth0 address 192.168.1.157/24
+set interfaces ethernet eth0 description 'Management LAN'
+set interfaces ethernet eth1 address 10.1.1.1/24
+set interfaces ethernet eth2 address 10.2.2.1/24
+
+# === SFP+ ports — VPP wire-speed forwarding + LCP control plane ===
+set interfaces ethernet eth3 address 10.10.0.1/24
+set interfaces ethernet eth3 mtu 9000
+set interfaces ethernet eth4 address 10.20.0.1/24
+set interfaces ethernet eth4 mtu 9000
+
+# === VPP settings — ALL interfaces under DPDK, forwarding on SFP+ ===
+set vpp settings mode all-dpdk
+set vpp settings poll-sleep-usec 100
+set vpp settings interface eth3
+set vpp settings interface eth4
+
+# === Normal VyOS features work on all ports ===
+set firewall name WAN rule 10 action accept
+set nat source rule 100 outbound-interface eth3
+set protocols bgp neighbor 10.10.0.2
+set service ssh listen-address 192.168.1.157
+```
+
+The `set vpp settings mode all-dpdk` flag is what triggers:
+1. Unbind ALL fsl_dpa (not just configured interfaces)
+2. Enable LCP plugin for TAP creation on ALL ports  
+3. DPDK uses DPAA PMD for all ports (10G wire-speed capable)
+
+The `set vpp settings interface eth3/eth4` specifies which ports get VPP L3 fast-path forwarding. Ports NOT listed (eth0/eth1/eth2) are pure LCP passthrough — Linux handles all their routing.
+
+#### Failsafe Mechanism
+
+If VPP fails to start (config error, crash, etc.):
+
+```
+vpp.service ExecStartPre:
+  1. Unbind all fsl_dpa
+
+vpp.service ExecStart:
+  2. Start VPP → FAILS
+
+vpp.service ExecStopPost (on failure):
+  3. Rebind dpaa-ethernet.0 to fsl_dpa → eth0 kernel netdev restored
+  4. Apply emergency IP: ip addr add 192.168.1.157/24 dev eth0
+  5. SSH management restored on eth0 (kernel-direct, no VPP)
+  6. Log error, alert via serial console
+```
+
+This ensures that even a completely broken VPP config doesn't permanently lock out SSH access.
+
 ### Implementation Estimate (~1-2 weeks)
 
 1. **Patch-010 all-DPDK mode** (~200 LOC): Unbind ALL fsl_dpa before VPP, configure LCP TAPs
-2. **startup.conf.j2 LCP section** (~50 LOC): Enable lcp_plugin.so, configure punt/inject
+2. **startup.conf.j2 LCP section** (~50 LOC): Enable lcp_plugin.so, configure punt/inject, TAP naming
 3. **Service ordering** (~20 LOC): VPP Before= VyOS router service
 4. **Failsafe rebind** (~50 LOC): If VPP fails to start, rebind fsl_dpa to eth0 for emergency access
-5. **Hugepage tuning**: Increase default count
-6. **Testing**: Full regression on all 5 interfaces, management through LCP, crash recovery
+5. **TAP naming integration** (~30 LOC): Map LCP TAPs to ethN names for VyOS compatibility
+6. **Hugepage tuning**: Increase default from 512 to 768 2M pages
+7. **Testing**: Full regression on all 5 interfaces, management through LCP, crash recovery, failsafe
 
 ### Why This Changes the DPAA PMD Decision
 
