@@ -59,7 +59,7 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 - **DPAA1 offloads are limited:** TSO/LRO/hw-tc-offload are hardware-impossible (`[fixed]` off). Maximum VyOS offloads: `gro gso sg rfs rps`. Do not attempt to enable TSO.
 - **Jumbo frame module parameter is `fsl_dpaa_fman`:** The FMan driver's `KBUILD_MODNAME` is `fsl_dpaa_fman`, NOT `fman`. Use `fsl_dpaa_fman.fsl_fm_max_frm=9600` in bootargs. The wrong name silently has no effect (max MTU stays at 1500).
 - **Watchdog is IMX2 WDT, not SP805:** The LS1046A watchdog at `0x2ad0000` has compatible `"fsl,ls1046a-wdt", "fsl,imx21-wdt"`. The correct kernel driver is `CONFIG_IMX2_WDT=y` (driver: `imx2_wdt.c`). SP805 and SBSA watchdog drivers are for different ARM platforms. The node is defined in `fsl-ls1046a.dtsi` (inherited via `#include`) with no `status = "disabled"`, so it's always present — only the driver was missing. After adding `CONFIG_IMX2_WDT=y`, `/sys/class/watchdog/watchdog0` appears at boot.
-- **QSPI flash needs `CONFIG_SPI_FSL_QSPI=y`:** Without it, `/dev/mtd*` devices don't appear and `fw_setenv` cannot modify U-Boot environment. The DTS defines 9 partitions on the 64MB QSPI NOR flash. U-Boot env is at `/dev/mtd3` ("uboot-env", 1MB partition, 4KB erase sector). CONFIG_ENV_SIZE = 0x2000 (8KB).
+- **QSPI flash needs `CONFIG_SPI_FSL_QUADSPI=y`:** Without it, `/dev/mtd*` devices don't appear and `fw_setenv` cannot modify U-Boot environment. The DTS defines 9 partitions on the 64MB QSPI NOR flash. U-Boot env is at `/dev/mtd3` ("uboot-env", 1MB partition, 4KB erase sector). CONFIG_ENV_SIZE = 0x2000 (8KB).
 - **`libubootenv-tool` config format:** VyOS ships `libubootenv-tool` which provides `/usr/bin/fw_setenv`. It accepts the classic `fw_env.config` legacy format: `Device Offset Env_size Sector_size`. The `/etc/fw_env.config` must point to `/dev/mtd3 0x0 0x2000 0x1000`. Env_size 0x2000 (8KB) and sector 0x1000 (4KB) were confirmed by brute-force CRC test on live hardware.
 - **`vyos-postinstall` Phase 1 always runs on `install image`, is idempotent on boot service:** Phase 1 (`setup_uboot_env_once`) is called with `force=1` when invoked from `install image` (detected by presence of `--root` flag) — it **always** rewrites `vyos`, `usb_vyos`, and `bootcmd` in SPI flash regardless of current state. When called from `vyos-postinstall.service` on every boot (no `--root`), it checks `fw_printenv -n vyos` for "vyos.env" and skips if already correct. Boot order written: USB first (`usb start; if fatload usb 0:0 ${load_addr} boot.scr; then source ${load_addr}; fi`) → eMMC (`run vyos`) → SPI recovery. Manual U-Boot console setup (INSTALL.md Step 4) is the fallback if `fw_setenv` fails.
 - **Transient U-Boot ext4 failure on first boot after fresh eMMC format:** After `install image` on a freshly wiped eMMC, the first boot may print `Failed to load '/boot/vyos.env'` and fall through to SPI recovery. This is a known U-Boot ext4 driver quirk: the driver cannot reliably read a freshly-formatted ext4 partition on first access. `/boot/vyos.env` was written correctly by the installer (via grub.py hook). Just reboot from the recovery shell (`reboot`) and the second boot will load eMMC correctly. This is not a bug in postinstall or the installer.
@@ -146,9 +146,6 @@ A 6-patch series adds `/dev/fsl-usdpaa` chardev support to **mainline** kernel 6
 | `data/dtb/mono-gateway-dk.dts` | Custom DTS source — compiled during kernel build, includes ethernet aliases + SFP nodes |
 | `data/scripts/vyos-postinstall` | Post-install helper: Phase 1 = `fw_setenv` for `vyos`/`usb_vyos`/`bootcmd` (forced on `install image` via `--root`, idempotent on boot service); Phase 2 = writes `/boot/vyos.env` on every boot to sync running image |
 | `data/scripts/fw_env.config` | U-Boot env access config for fw_printenv/fw_setenv (/dev/mtd3) — only used once during first install |
-| `data/scripts/vpp-setup-interfaces.sh` | Legacy VPP AF_XDP setup script (superseded by VyOS native `set vpp` CLI via patch 010) |
-| `data/scripts/vpp-setup.service` | Legacy systemd oneshot for VPP interface setup (superseded by VyOS native VPP service) |
-| `data/scripts/startup.conf` | Legacy VPP startup config (superseded by VyOS-generated `/etc/vpp/startup.conf`) |
 | `data/scripts/fancontrol.conf` | Standard Linux fancontrol config: EMC2305 PWM → core-cluster thermal zone (installed as `/etc/fancontrol`) |
 | `data/reftree.cache` | Required vyos-1x build artifact missing from upstream — must copy manually |
 | `data/vyos-1x-*.patch` | Patches applied to vyos-1x during build (11 patches: console, vyshim timeout, podman, install gap, eMMC default, U-Boot live-boot detection, VPP platform-bus, vyos.env boot, LS1046A MOTD, hide live-boot disk from install) |
@@ -169,13 +166,22 @@ A 6-patch series adds `/dev/fsl-usdpaa` chardev support to **mainline** kernel 6
 | `data/kernel-patches/fsl_usdpaa_mainline.c` | Clean `/dev/fsl-usdpaa` + `/dev/fsl-usdpaa-irq` chardevs (1453 lines, 20 ioctls, NXP ABI-compatible, allocator-only cleanup) — copied to kernel tree during build |
 | `data/kernel-patches/0006-*.patch` | DTS reserved-memory reference (already applied in `mono-gateway-dk.dts`) |
 | `data/dpdk-portal-mmap.patch` | DPDK `process.c` patch: adds portal mmap after PORTAL_MAP ioctl (CE=16KB WB-NS, CI=16KB Device-nGnRnE) |
-| `bin/build-dpdk-plugin.sh` | Out-of-tree VPP DPDK plugin build: extracts vpp-dev headers from upstream debs, builds against static libdpdk.a with DPAA PMD (12MB output, 173 DPAA symbols). Used locally on LXC 200 and adapted inline in CI. |
-| `bin/patch-vpp-dpaa-mempool.sh` | 7 patches across 4 VPP plugin files (driver.c, dpdk.h, init.c, common.c): adds net_dpaa driver, IS_DPAA flag, BMan mempool creation + routing |
 | `data/scripts/fman-port-name` | Script called by udev: reads `/sys/class/net/<iface>/device/of_node` to map FMan MAC DT address → physical port name (eth0-eth4) |
 | `data/scripts/10-fman-port-order.rules` | Udev rule: calls `fman-port-name` on net device add, sets `NAME=` to correct ethN (installed to `/etc/udev/rules.d/`) |
 | `data/scripts/00-fman.link` | Systemd .link file: `NamePolicy=keep` for `dpaa_eth` driver — prevents predictable naming override (installed to `/etc/systemd/network/`) |
-| `data/scripts/run-testpmd.sh` | Safe testpmd launcher: takes all interfaces DOWN, runs testpmd with timeout, reboots (no interface restore) |
-| `data/dtb/mono-gateway-dk-sdk.dts` | NXP SDK DTS variant (reference only — not used in mainline builds) |
+
+| `bin/ci-setup-kernel.sh` | Kernel config: removes conflicting defconfig entries, appends `data/kernel-config/ls1046a-*.config` fragments, copies kernel patches, injects USDPAA source copy into build-kernel.sh |
+| `bin/ci-build-dpdk-plugin.sh` | Builds DPDK 24.11 static with DPAA1 PMD, applies portal mmap patch, builds VPP dpdk_plugin.so with DPAA mempool patches + strlcpy shim |
+| `bin/ci-setup-vyos1x.sh` | Applies vyos-1x patches, copies reftree.cache, sets up vyos-1x build |
+| `bin/ci-setup-vyos-build.sh` | Applies vyos-build patches, configures live-build for ARM64 |
+| `bin/ci-build-packages.sh` | Builds linux-kernel and vyos-1x packages |
+| `bin/ci-build-iso.sh` | Final ISO assembly with live-build |
+| `data/kernel-config/` | Modular kernel config fragments (ls1046a-board, dpaa1, i2c-gpio, sfp, usb, usdpaa, watchdog) — appended to vyos_defconfig |
+| `data/strlcpy-shim.c` | BSD strlcpy/strlcat for glibc 2.36 target (CI builds on 2.38+) — linked into dpdk_plugin.so |
+| `data/cmake/CMakeLists.txt` | Out-of-tree CMake for VPP DPDK plugin build against vpp-dev headers |
+| `data/hooks/97-dpaa-dpdk-plugin.chroot` | Live-build hook: moves DPAA dpdk_plugin.so from /opt to VPP plugins dir after vpp-plugin-dpdk deb installs |
+| `data/hooks/98-fancontrol.chroot` | Live-build hook: installs fancontrol config for EMC2305 thermal management |
+| `data/hooks/99-mask-services.chroot` | Live-build hook: masks acpid services, removes SysV kexec scripts |
 
 ## Commands
 

@@ -22,7 +22,7 @@ git clone --depth=1 -b v24.11 https://github.com/DPDK/dpdk.git $DPDK_WORK/dpdk
 
 # Apply portal mmap patch (DPDK userspace must mmap portal windows via usdpaa fd)
 cd $DPDK_WORK/dpdk
-patch -p1 < "$GITHUB_WORKSPACE/data/dpdk-portal-mmap.patch" || true
+patch -p1 < "$GITHUB_WORKSPACE/data/dpdk-portal-mmap.patch"
 
 # Meson setup — native ARM64, static build, DPAA enabled
 export PKG_CONFIG_LIBDIR="/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
