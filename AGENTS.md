@@ -93,20 +93,13 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 - **vyos-postinstall is board-gated** — the script checks `/proc/device-tree/compatible` for `fsl,ls1046a` and exits early on non-matching hardware. Safe to include in every ISO.
 - **vyos-postinstall Phase 1 runs on every `install image`** — forced (`force=1`) when `--root` is provided by the installer. On boot service calls (no `--root`), Phase 1 skips if SPI already has correct config. Phase 2 (writing `/boot/vyos.env`) runs on every boot of the installed system to keep it in sync with the running image.
 
-## DPAA1 DPDK PMD Kernel Patches (data/kernel-patches/)
+## DPAA1 DPDK PMD (ARCHIVED — see `archive/dpaa-pmd/`)
 
-A 6-patch series adds `/dev/fsl-usdpaa` chardev support to **mainline** kernel 6.6, enabling DPDK DPAA1 PMD userspace drivers for 10G wire-speed. This is a clean rewrite — NOT the NXP SDK kernel fork (which was evaluated and rejected for code quality/maintainability reasons). The NXP ioctl ABI is preserved for binary compatibility with DPDK `process.c`.
+The DPDK DPAA1 PMD infrastructure has been **archived** (2026-04-03) due to RC#31: `dpaa_bus` probe kills all kernel FMan interfaces globally. See `plans/VPP-DPAA-PMD-VS-AFXDP.md` for full analysis.
 
-- **Patch application order matters:** Patches 0001–0004 export kernel symbols; Patch 0005 is the new module that depends on those exports; Patch 0006 adds DTS reserved-memory. Apply in numeric order.
-- **Kernel config required:** `CONFIG_FSL_USDPAA_MAINLINE=y` (built-in, not module — needed before rootfs). Add to the `printf` block in `auto-build.yml` alongside other DPAA1 configs.
-- **Portal budget:** LS1046A has 10 BMan + 10 QMan portals. Kernel claims 4 (one per CPU). The remaining 6 sit idle and are available for DPDK userspace via the reservation API added in patches 0002/0003.
-- **Reserved memory:** Patch 0006 adds a 256MB CMA region at `0xc0000000` in the DTS. DPDK allocates DMA-safe buffers from this pool via `USDPAA_IOCTL_DMA_MAP`. U-Boot `mem=` parameter may need adjustment if it conflicts.
-- **ioctl ABI:** The module implements 20 ioctls matching NXP's `fsl_usdpaa.h` numbering (`0x01`–`0x14`). CEETM ioctls (unused on LS1046A) return `-ENOSYS`. Full ABI spec: `plans/USDPAA-IOCTL-SPEC.md`.
-- **Portal physical addresses:** Mainline kernel discards phys addrs after `ioremap()` during probe. Patches 0002/0003 store `addr_phys_ce/ci` + `size_ce/ci` in portal config structs and expose reservation functions (`bman_portal_reserve()`/`qman_portal_reserve()`).
-- **`bm_alloc_bpid_range()` was static:** Patch 0001 removes `static` and adds `EXPORT_SYMBOL()`. Without this, DPDK cannot allocate buffer pool IDs.
-- **`qman_set_sdest()` not exported:** Patch 0004 adds `EXPORT_SYMBOL()`. DPDK uses this to set stashing destination (CPU affinity) for QMan portals.
-- **Per-FD cleanup:** The module tracks all resources (portals, DMA maps, BPID/FQID/CGRID ranges) per file descriptor. `usdpaa_release()` frees everything on close — no resource leaks even if DPDK crashes.
-- **NXP SDK kernel approach was discarded:** The NXP `lf-6.6.36-2.1.0` fork was built and TFTP-tested but rejected due to: 2,623-line monolithic driver, `#ifdef` spaghetti for 15+ SoC variants, `CONFIG_FSL_SDK_*` symbols conflicting with mainline `CONFIG_FSL_DPAA_*`, and poor separation of concerns. See `plans/DPAA1-DPDK-PMD.md` for the original (now superseded) NXP approach.
+**Current production path:** AF_XDP via `vyos-1x-010-vpp-platform-bus.patch` (~3.5 Gbps on 10G SFP+).
+
+All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `archive/dpaa-pmd/RESTORE.md`. Future paths: all-DPDK+LCP mode, CDX-assisted DPAA PMD, or upstream DPDK fix to scope `dpaa_bus` init.
 
 ## Workflow-Specific Gotchas
 
@@ -116,7 +109,7 @@ A 6-patch series adds `/dev/fsl-usdpaa` chardev support to **mainline** kernel 6
 - **linux-headers stripped:** `rm -rf packages/linux-headers-*` before ISO build to save space on the runner
 - **Secure Boot chain:** MOK.pem/MOK.key for kernel module signing, minisign for ISO signing, `grub-efi-arm64-signed` + `shim-signed` packages included
 - **Weekly schedule:** Cron runs daily 05:00 UTC. Also triggered manually via `workflow_dispatch`
-- **DPDK + VPP plugin built in CI:** The "Build DPDK + VPP DPAA Plugin" step clones DPDK v24.11 + VPP, applies DPAA patches, builds static `libdpdk.a`, then builds `dpdk_plugin.so` against vpp-dev headers from VyOS mirror. Plugin is deployed to `includes.chroot/usr/lib/aarch64-linux-gnu/vpp_plugins/` overriding the upstream `vpp-plugin-dpdk` deb's copy. If the build fails, the ISO falls back to the upstream plugin (no DPAA1 support).
+- **DPDK PMD build archived:** The "Build DPDK + VPP DPAA Plugin" CI step has been removed (RC#31). Infrastructure preserved in `archive/dpaa-pmd/` — see `archive/dpaa-pmd/RESTORE.md` to re-enable.
 - **Boot optimizations:** `acpid.service`, `acpid.socket`, `acpid.path` are masked in the ISO via `99-mask-services.chroot`. `kexec-load.service` and `kexec.service` are NOT masked — mainline 6.6 QBMan kexec fix enables VyOS managed-params self-healing on DPAA1. SysV init scripts (`/etc/init.d/kexec-load`, `/etc/init.d/kexec`) are removed to prevent `systemd-sysv-generator` from creating duplicate units that would bypass systemd. The old `ln -sf /dev/null` in `includes.chroot` approach was broken — live-build dereferences absolute symlinks to paths outside the chroot, producing empty files instead. ACPI masking saves ~2s. `CONFIG_DEBUG_PREEMPT` suppression saves ~20s. Installed system boot time: ~82s to login prompt.
 
 ## Boot Diagnostics (Ignore These)
@@ -167,24 +160,17 @@ A 6-patch series adds `/dev/fsl-usdpaa` chardev support to **mainline** kernel 6
 | `plans/USDPAA-IOCTL-SPEC.md` | Complete NXP USDPAA ioctl ABI spec (20 ioctls, all structs, mmap, cleanup) |
 | `plans/fsl_usdpaa.c` | NXP SDK reference source (2,623 lines — read-only reference, not used in build) |
 | `plans/fsl_usdpaa.h` | NXP SDK ioctl header (read-only reference for ABI compatibility verification) |
-| `data/kernel-patches/9001-usdpaa-bman-qman-exports-and-driver.patch` | Combined kernel patch: BMan/QMan symbol exports, portal phys addr + reservation, allocator-only frees, Kconfig+Makefile for `CONFIG_FSL_USDPAA_MAINLINE` |
-| `data/kernel-patches/fsl_usdpaa_mainline.c` | Clean `/dev/fsl-usdpaa` + `/dev/fsl-usdpaa-irq` chardevs (1453 lines, 20 ioctls, NXP ABI-compatible, allocator-only cleanup) — copied to kernel tree during build |
-| `data/kernel-patches/0006-*.patch` | DTS reserved-memory reference (already applied in `mono-gateway-dk.dts`) |
-| `data/dpdk-portal-mmap.patch` | DPDK `process.c` patch: adds portal mmap after PORTAL_MAP ioctl (CE=16KB WB-NS, CI=16KB Device-nGnRnE) |
 | `data/scripts/fman-port-name` | Script called by udev: reads `/sys/class/net/<iface>/device/of_node` to map FMan MAC DT address → physical port name (eth0-eth4) |
 | `data/scripts/10-fman-port-order.rules` | Udev rule: calls `fman-port-name` on net device add, sets `NAME=` to correct ethN (installed to `/etc/udev/rules.d/`) |
 | `data/scripts/00-fman.link` | Systemd .link file: `NamePolicy=keep` for `dpaa_eth` driver — prevents predictable naming override (installed to `/etc/systemd/network/`) |
 
-| `bin/ci-setup-kernel.sh` | Kernel config: removes conflicting defconfig entries, appends `data/kernel-config/ls1046a-*.config` fragments, copies kernel patches, injects USDPAA source copy into build-kernel.sh |
-| `bin/ci-build-dpdk-plugin.sh` | Builds DPDK 24.11 static with DPAA1 PMD, applies portal mmap patch, builds VPP dpdk_plugin.so with DPAA mempool patches + strlcpy shim |
+| `bin/ci-setup-kernel.sh` | Kernel config: removes conflicting defconfig entries, appends `data/kernel-config/ls1046a-*.config` fragments, copies kernel patches, injects phylink patch into build-kernel.sh |
 | `bin/ci-setup-vyos1x.sh` | Applies vyos-1x patches, copies reftree.cache, sets up vyos-1x build |
 | `bin/ci-setup-vyos-build.sh` | Applies vyos-build patches, configures live-build for ARM64 |
 | `bin/ci-build-packages.sh` | Builds linux-kernel and vyos-1x packages |
 | `bin/ci-build-iso.sh` | Final ISO assembly with live-build |
-| `data/kernel-config/` | Modular kernel config fragments (ls1046a-board, dpaa1, i2c-gpio, sfp, usb, usdpaa, watchdog) — appended to vyos_defconfig |
-| `data/strlcpy-shim.c` | BSD strlcpy/strlcat for glibc 2.36 target (CI builds on 2.38+) — linked into dpdk_plugin.so |
-| `data/cmake/CMakeLists.txt` | Out-of-tree CMake for VPP DPDK plugin build against vpp-dev headers |
-| `data/hooks/97-dpaa-dpdk-plugin.chroot` | Live-build hook: moves DPAA dpdk_plugin.so from /opt to VPP plugins dir after vpp-plugin-dpdk deb installs |
+| `data/kernel-config/` | Modular kernel config fragments (ls1046a-board, dpaa1, i2c-gpio, sfp, usb, watchdog) — appended to vyos_defconfig |
+| `archive/dpaa-pmd/` | Archived DPDK DPAA1 PMD infrastructure (RC#31) — see `archive/dpaa-pmd/RESTORE.md` |
 | `data/hooks/98-fancontrol.chroot` | Live-build hook: installs fancontrol config for EMC2305 thermal management |
 | `data/hooks/99-mask-services.chroot` | Live-build hook: masks acpid services, removes SysV kexec scripts |
 

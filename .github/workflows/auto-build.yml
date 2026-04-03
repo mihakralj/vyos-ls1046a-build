@@ -100,9 +100,6 @@ jobs:
       - name: Install extra packages (non-Debian)
         run: bin/ci-install-extra-packages.sh
 
-      - name: Build DPDK + VPP DPAA Plugin
-        run: bin/ci-build-dpdk-plugin.sh
-
       - name: Build VyOS ISO
         id: build_iso
         env:
