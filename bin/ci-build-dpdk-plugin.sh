@@ -55,19 +55,36 @@ echo "### DPDK built: $(du -sh $DPDK_OUTPUT | cut -f1), DPAA1 libs: $DPAA_LIBS, 
 
 # Find actual libdpdk.a path (may be lib/ or lib/aarch64-linux-gnu/)
 # Meson static builds may not create libdpdk.a — only individual librte_*.a files.
-# If missing, create a GROUP linker script referencing all rte_ archives.
+# If missing, create a fat archive from all librte_*.a with constructors preserved.
+#
+# CRITICAL: DPDK uses __attribute__((constructor)) functions to register buses
+# and PMDs (RTE_REGISTER_BUS, RTE_PMD_REGISTER_*). A GROUP linker script does
+# NOT preserve these — the linker only pulls in .o files that satisfy unresolved
+# symbols, silently discarding self-registering constructors. Without them,
+# DPDK EAL has no buses → no device scan → zero interfaces in VPP.
+#
+# Fix: use "ld -r --whole-archive" to pre-link ALL .o from ALL librte_*.a into
+# a single relocatable object. Wrap it in a .a archive. When the final linker
+# links dpdk_plugin.so, it includes the entire .o (all constructors survive).
 DPDK_LIB=$(find "$DPDK_OUTPUT" -name 'libdpdk.a' | head -1)
 if [ -z "$DPDK_LIB" ]; then
   DPDK_LIBDIR=$(find "$DPDK_OUTPUT" -name 'librte_eal.a' -printf '%h\n' | head -1)
   if [ -n "$DPDK_LIBDIR" ]; then
-    echo "### libdpdk.a not found, creating GROUP linker script in $DPDK_LIBDIR"
-    # Create a GROUP linker script referencing all librte_*.a archives.
-    # The linker resolves cross-archive symbols naturally with this approach.
-    # This is the same method used by Debian/meson for DPDK packaging.
-    LIBS=$(cd "$DPDK_LIBDIR" && ls librte_*.a | sed 's/^/-l:/' | tr '\n' ' ')
-    echo "GROUP ( $LIBS )" > "$DPDK_LIBDIR/libdpdk.a"
+    echo "### libdpdk.a not found, creating fat archive with constructors preserved"
+    # Pre-link all DPDK archives into a single relocatable .o with --whole-archive
+    # This forces ALL object files (including constructor-only ones) into the output
+    RTE_ARCHIVES=$(ls "$DPDK_LIBDIR"/librte_*.a)
+    RTE_COUNT=$(echo "$RTE_ARCHIVES" | wc -l)
+    echo "### Combining $RTE_COUNT librte_*.a archives via ld -r --whole-archive"
+    ld -r --whole-archive -o "$DPDK_LIBDIR/libdpdk_all.o" $RTE_ARCHIVES
+    # Wrap in a .a archive — cmake/VPP expect a .a file for DPDK_LIB
+    ar rcs "$DPDK_LIBDIR/libdpdk.a" "$DPDK_LIBDIR/libdpdk_all.o"
+    rm -f "$DPDK_LIBDIR/libdpdk_all.o"
     DPDK_LIB="$DPDK_LIBDIR/libdpdk.a"
-    echo "### GROUP linker script: $(wc -w < "$DPDK_LIB") entries"
+    echo "### Fat archive: $(du -h $DPDK_LIB | cut -f1), constructors preserved"
+    # Verify critical DPAA constructors are in the archive
+    DPAA_CTORS=$(nm "$DPDK_LIB" 2>/dev/null | grep -c 'dpaa_bus\|net_dpaa_init\|mempool_dpaa' || true)
+    echo "### DPAA constructor symbols in fat archive: $DPAA_CTORS"
   fi
 fi
 # Headers may be at include/dpdk/ or include/ depending on meson version
