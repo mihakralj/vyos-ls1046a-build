@@ -13,6 +13,8 @@ else
   ls -la "$STAGED" "$TARGET" 2>&1 || true
 fi
 
-# Reinstall binutils — VyOS cleanup strips binaries then auto-removes binutils.
+# Ensure binutils persists — VyOS live-build cleanup auto-removes it.
+# apt-mark manual prevents autoremove from touching the package.
 # We need nm/objdump/readelf on the target for DPAA plugin diagnostics.
 apt-get install -y --no-install-recommends binutils 2>&1 | tail -3
+apt-mark manual binutils 2>/dev/null || true
