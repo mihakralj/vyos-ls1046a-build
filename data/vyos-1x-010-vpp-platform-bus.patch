@@ -1,47 +1,44 @@
-Add platform-bus NIC support for VPP via DPDK DPAA PMD with kernel handoff.
+Add platform-bus NIC support for VPP via AF_XDP on NXP DPAA1 FMan.
 
 NXP DPAA1 FMan Ethernet NICs (driver: fsl_dpa) are on the platform bus,
 not PCI. At boot ALL ports (eth0-eth4) are owned by the kernel via:
   fsl_dpaa_mac  — MAC hardware control (PHY, link state)
   fsl_dpa       — Linux netdev (creates ethN)
 
-This patch enables VPP to take ownership of selected ports when the user
-configures them with 'set vpp settings interface ethX':
+DPDK DPAA PMD is BLOCKED for mixed kernel+VPP mode (RC#31): dpaa_bus
+probe initializes ALL BMan/QMan hardware globally, killing kernel-managed
+interfaces within seconds. AF_XDP is the only viable path for mixed mode
+(~3.5 Gbps on 10G SFP+).
+
+This patch enables VPP to use AF_XDP on selected DPAA1 ports when the
+user configures them with 'set vpp settings interface ethX':
 
 1. Adds fsl_dpa to SUPPORTED_DRIVERS and not_pci_drv lists
-2. All VPP-configured interfaces use driver='dpdk' — DPAA PMD for fsl_dpa
-   platform-bus NICs, standard DPDK for PCI NICs
-3. Injects original_driver into iface_config so startup.conf.j2 can
-   distinguish platform-bus from PCI NICs
-4. Adds _dpaa_unbind_ifaces() that unbinds fsl_dpa from VPP-assigned
-   interfaces before DPDK starts, preventing FMan FQ conflicts
-   (kernel panic if both fsl_dpa and DPDK DPAA PMD control same FQ)
-5. Persists unbound state to /run/vpp-dpaa-unbound.json for ExecStopPost
-   rebind (see vpp.service.d/dpaa-rebind.conf added via auto-build.yml)
-6. startup.conf.j2: enables dpdk_plugin.so and af_xdp_plugin.so,
-   skips PCI dev entries for DPAA NICs (bus auto-discovers), adds no-pci
-   when only platform-bus NICs are present
+2. DPAA1 interfaces (fsl_dpa) use driver='xdp' — AF_XDP works WITH the
+   kernel driver, no unbind needed, no RC#31 bus conflict
+3. PCI NICs continue to use driver='dpdk' as before
+4. Injects original_driver into iface_config for template use
+5. Injects default xdp_options (rx_queue_size=4096, tx_queue_size=4096,
+   num_rx_queues=1) when not provided by CLI for fsl_dpa interfaces
+6. startup.conf.j2: enables af_xdp_plugin.so, keeps dpdk {} block for
+   PCI NICs only (DPAA interfaces use VPP's host-interface AF_XDP path)
 7. Lowers resource minimums for embedded ARM64 boards (2 CPUs, 256M heap)
 8. Removes SSE4.2 CPU check (irrelevant on ARM64)
 
-Port ownership lifecycle:
-  boot               → all eth0-eth4 under kernel (fsl_dpa creates netdevs)
-  set vpp ... eth3   → apply() unbinds eth3 from fsl_dpa, VPP/DPDK claims it
-  delete vpp ... eth3→ ExecStopPost rebinds eth3 to fsl_dpa (no reboot needed)
+DPAA1 XDP MTU constraint: fsl_dpaa_mac enforces max MTU 3290 for XDP.
+AF_XDP socket creation fails with EINVAL if MTU exceeds 3290. SFP+ ports
+under VPP are limited to ~3304-byte max frame (3290 + 14 Ethernet header).
 
-Tested on NXP LS1046A Mono Gateway with VPP v25.10.0-48 DPAA PMD on
+Port ownership lifecycle (AF_XDP — no unbind/rebind needed):
+  boot               → all eth0-eth4 under kernel (fsl_dpa creates netdevs)
+  set vpp ... eth3   → VPP creates AF_XDP socket on eth3 (kernel keeps netdev)
+  delete vpp ... eth3→ VPP releases AF_XDP socket, kernel retains full control
+
+Tested on NXP LS1046A Mono Gateway with VPP v25.10.0-48 AF_XDP on
 eth3/eth4 (10G SFP+).
 
 --- a/src/conf_mode/vpp.py
 +++ b/src/conf_mode/vpp.py
-@@ -17,6 +17,7 @@
- 
- import os
- import re
-+import json
- 
- from pathlib import Path
- from shutil import rmtree
 @@ -94,7 +95,8 @@
  }
  
@@ -52,107 +49,41 @@ eth3/eth4 (10G SFP+).
  
  # drivers that support interrupt RX mode for DPDK and XDP
  drivers_support_interrupt: dict[str, list] = {
-@@ -129,7 +131,76 @@
++    'fsl_dpa': ['xdp'],
+ 
+ @@ -129,7 +131,10 @@
  SUPPORTED_DRIVERS = (
      'hv_netvsc',  # Microsoft Hyper-V network interface card
-+    'fsl_dpa',    # NXP DPAA1 FMan Ethernet (platform bus, DPDK DPAA PMD)
++    'fsl_dpa',    # NXP DPAA1 FMan Ethernet (platform bus, AF_XDP)
  )
  
-+# ---------------------------------------------------------------------------
-+# DPAA1 kernel-to-DPDK handoff helpers
-+#
-+# At boot ALL FMan MACs are owned by the kernel:
-+#   fsl_dpaa_mac → hardware MAC (PHY, link, PHYLINK)
-+#   fsl_dpa      → Linux netdevs (dpaa-ethernet.N → ethN)
-+#
-+# DPDK DPAA PMD accesses FMan frame queues directly via /dev/mem and
-+# /dev/fsl-usdpaa. If fsl_dpa is still bound to the same MAC when DPDK
-+# initialises, both drivers drain the same FQs → kernel panic.
-+#
-+# Solution: unbind the dpaa-ethernet.N sysfs device from fsl_dpa before
-+# starting VPP. On VPP stop a systemd ExecStopPost (dpaa-rebind.conf)
-+# reads the persisted state and rebinds, restoring kernel ownership
-+# without requiring a reboot.
-+# ---------------------------------------------------------------------------
-+
-+_DPAA_DRIVER_PATH = '/sys/bus/platform/drivers/fsl_dpa'
-+_DPAA_UNBOUND_STATE = '/run/vpp-dpaa-unbound.json'
-+
-+
-+def _dpaa_find_platform_dev(iface: str):
-+    """Return the dpaa-ethernet.N sysfs device name backing a netdev.
-+
-+    The netdev's sysfs 'device' link points to the MAC device
-+    (fsl_dpaa_mac at e.g. 1af0000.ethernet).  The dpaa-ethernet.N
-+    child device (bound to fsl_dpa) is a subdirectory of that MAC
-+    device.  We find it there instead of walking the driver's device
-+    list, because the net/ symlink lives on the MAC, not on the
-+    dpaa-ethernet child.
-+
-+    Returns None on non-DPAA1 hardware or if the interface has no
-+    dpaa-ethernet child.
-+    """
-+    mac_dev = f'/sys/class/net/{iface}/device'
-+    if not os.path.isdir(mac_dev):
-+        return None
-+    try:
-+        for entry in sorted(os.listdir(mac_dev)):
-+            if entry.startswith('dpaa-ethernet.'):
-+                return entry
-+    except OSError:
-+        pass
-+    return None
-+
-+
-+def _dpaa_unbind_ifaces(ifaces):
-+    """Unbind interfaces from fsl_dpa so DPDK DPAA PMD can claim them.
-+
-+    Iterates the given interface names, finds each one's dpaa-ethernet.N
-+    platform device, and writes it to the fsl_dpa 'unbind' sysfs file.
-+    The resulting {iface: device} mapping is persisted to
-+    _DPAA_UNBOUND_STATE so the companion rebind script can restore
-+    kernel ownership when VPP stops.
-+
-+    Silently skips interfaces that are not DPAA (no fsl_dpa binding),
-+    making this safe to call on any VyOS platform.
-+    """
-+    unbound = {}
-+    unbind_path = os.path.join(_DPAA_DRIVER_PATH, 'unbind')
-+    for iface in ifaces:
-+        dev = _dpaa_find_platform_dev(iface)
-+        if not dev:
-+            continue
-+        try:
-+            with open(unbind_path, 'w') as fh:
-+                fh.write(dev)
-+            unbound[iface] = dev
-+        except OSError as exc:
-+            print(f'W: vpp: could not unbind {iface} ({dev}) from fsl_dpa: {exc}')
-+    # Persist so the systemd ExecStopPost can rebind without reboot.
-+    try:
-+        with open(_DPAA_UNBOUND_STATE, 'w') as fh:
-+            json.dump(unbound, fh)
-+    except OSError as exc:
-+        print(f'W: vpp: could not write DPAA unbound state: {exc}')
-+    return unbound
-+
-+
- @@ -376,9 +449,17 @@
+ @@ -376,9 +449,25 @@
          # Buffer normalization (auto  computed)
          _normalize_buffers(effective_config)
 -        for iface_config in effective_config['settings']['interface'].values():
 +        for _ename, iface_config in effective_config['settings']['interface'].items():
-             iface_config['driver'] = 'dpdk'
-+            # Inject original_driver into iface_config for template use
+-            iface_config['driver'] = 'dpdk'
++            # DPAA1 platform-bus NICs use AF_XDP (RC#31 blocks DPAA PMD);
++            # PCI NICs use standard DPDK.
 +            _edrv = eth_ifaces_persist.get(_ename, {}).get('original_driver', '')
 +            iface_config['original_driver'] = _edrv
++            if _edrv == 'fsl_dpa':
++                iface_config['driver'] = 'xdp'
++                # Inject default xdp_options when CLI doesn't provide them
++                if 'xdp_options' not in iface_config or not iface_config['xdp_options']:
++                    iface_config['xdp_options'] = {
++                        'rx_queue_size': 4096,
++                        'tx_queue_size': 4096,
++                        'num_rx_queues': 1,
++                    }
++            else:
++                iface_config['driver'] = 'dpdk'
          config['effective'] = effective_config
-@@ -399,4 +480,23 @@
+@@ -399,4 +480,28 @@
  
              for iface, iface_config in config['settings']['interface'].items():
-                 iface_config['driver'] = 'dpdk'
-+                # Inject original_driver so startup.conf.j2 distinguishes
-+                # platform-bus (DPAA) from PCI NICs.
+-                iface_config['driver'] = 'dpdk'
++                # Inject original_driver so we can select AF_XDP vs DPDK.
 +                _orig_drv = eth_ifaces_persist.get(iface, {}).get('original_driver', '')
 +                if not _orig_drv:
 +                    try:
@@ -160,19 +91,22 @@ eth3/eth4 (10G SFP+).
 +                    except Exception:
 +                        _orig_drv = ''
 +                iface_config['original_driver'] = _orig_drv
++
++                # DPAA1 platform-bus NICs use AF_XDP (RC#31 blocks DPAA PMD);
++                # PCI NICs use standard DPDK.
++                if _orig_drv == 'fsl_dpa':
++                    iface_config['driver'] = 'xdp'
++                    # Inject default xdp_options when CLI doesn't provide them
++                    if 'xdp_options' not in iface_config or not iface_config['xdp_options']:
++                        iface_config['xdp_options'] = {
++                            'rx_queue_size': 4096,
++                            'tx_queue_size': 4096,
++                            'num_rx_queues': 1,
++                        }
++                else:
++                    iface_config['driver'] = 'dpdk'
  
                  # old_driver = leaf_node_changed(
-+
-+            # Unbind fsl_dpa from any DPAA interfaces assigned to VPP.
-+            # Must happen before systemctl start vpp so DPDK DPAA PMD can
-+            # claim the FMan frame queues without conflicting with fsl_dpa.
-+            _dpaa_ifaces = [
-+                iface
-+                for iface, icfg in config['settings']['interface'].items()
-+                if icfg.get('original_driver') == 'fsl_dpa'
-+            ]
-+            if _dpaa_ifaces:
-+                _dpaa_unbind_ifaces(_dpaa_ifaces)
 +
 --- a/data/templates/vpp/startup.conf.j2
 +++ b/data/templates/vpp/startup.conf.j2
@@ -185,67 +119,6 @@ eth3/eth4 (10G SFP+).
 +    plugin avf_plugin.so { enable }
 +    plugin dpdk_plugin.so { enable }
      plugin vmxnet3_plugin.so { enable }
-@@ -158,29 +162,51 @@
- {% endif %}
- 
-+{# Classify interfaces: PCI-based DPDK vs platform-bus DPDK (DPAA auto-discovers) #}
-+{% set has_pci_dpdk = [] %}
-+{% set has_platform_dpdk = [] %}
-+{% for iface, iface_config in interface.items() %}
-+{%     if iface_config.driver == 'dpdk' %}
-+{%         if iface_config.original_driver is defined and iface_config.original_driver in ['fsl_dpa'] %}
-+{%             if has_platform_dpdk.append(1) %}{% endif %}
-+{%         else %}
-+{%             if has_pci_dpdk.append(1) %}{% endif %}
-+{%         endif %}
-+{%     endif %}
-+{% endfor %}
-+{% if has_pci_dpdk or has_platform_dpdk %}
- dpdk {
--    # Whitelist the fake PCI address 0000:00:00.0
--    # This prevents all devices from being added to VPP-DPDK by default
--    dev 0000:00:00.0
-+{% if not has_pci_dpdk %}
-+    {# Platform-bus only (DPAA) — skip PCI scan entirely #}
-+    no-pci
-+{% else %}
-+    {# PCI whitelist anchor — prevents auto-claiming all PCI devices #}
-+    dev 0000:00:00.0
-+{% endif %}
-+    log-level dpaa.bus:notice
-+    log-level dpaa.pmd:notice
- {% for iface, iface_config in interface.items() %}
--{%     if iface_config.driver == 'dpdk' %}
-+{%     if iface_config.driver == 'dpdk' and (iface_config.original_driver is not defined or iface_config.original_driver not in ['fsl_dpa']) %}
-+    {# PCI NIC — whitelist by PCI address #}
-     dev {{ iface_config.dpdk_options.dev_id }} {
-         name {{ iface }}
- {%         if iface_config.num_rx_desc is vyos_defined %}
-         num-rx-desc {{ iface_config.num_rx_desc }}
- {%         endif %}
- {%         if iface_config.num_tx_desc is vyos_defined %}
-         num-tx-desc {{ iface_config.num_tx_desc }}
- {%         endif %}
- {%         if iface_config.num_rx_queues is vyos_defined %}
-         num-rx-queues {{ iface_config.num_rx_queues }}
- {%         endif %}
- {%         if iface_config.num_tx_queues is vyos_defined %}
-         num-tx-queues {{ iface_config.num_tx_queues }}
- {%         endif %}
-         }
- {%     endif %}
-+{%     if iface_config.driver == 'dpdk' and iface_config.original_driver is defined and iface_config.original_driver in ['fsl_dpa'] %}
-+    {# Platform-bus NIC (DPAA) — auto-discovered by dpaa_bus, no explicit dev entry #}
-+    {# Interface {{ iface }} handed off via /dev/fsl-usdpaa DPAA PMD #}
-+{%     endif %}
- {% endfor %}
-+{% if has_pci_dpdk %}
-     uio-bind-force
-+{% endif %}
- }
-+{% endif %}
- 
- {% if ipsec_acceleration is vyos_defined %}
 --- a/python/vyos/vpp/config_verify.py
 +++ b/python/vyos/vpp/config_verify.py
 @@ -134,8 +134,8 @@
