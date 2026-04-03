@@ -82,17 +82,25 @@ eth3/eth4 (10G SFP+).
 +def _dpaa_find_platform_dev(iface: str):
 +    """Return the dpaa-ethernet.N sysfs device name backing a netdev.
 +
-+    Walks /sys/bus/platform/drivers/fsl_dpa/dpaa-ethernet.*/net/<iface>
-+    to identify which platform device belongs to the named interface.
-+    Returns None on non-DPAA1 hardware (fsl_dpa driver absent).
++    The netdev's sysfs 'device' link points to the MAC device
++    (fsl_dpaa_mac at e.g. 1af0000.ethernet).  The dpaa-ethernet.N
++    child device (bound to fsl_dpa) is a subdirectory of that MAC
++    device.  We find it there instead of walking the driver's device
++    list, because the net/ symlink lives on the MAC, not on the
++    dpaa-ethernet child.
++
++    Returns None on non-DPAA1 hardware or if the interface has no
++    dpaa-ethernet child.
 +    """
-+    if not os.path.isdir(_DPAA_DRIVER_PATH):
++    mac_dev = f'/sys/class/net/{iface}/device'
++    if not os.path.isdir(mac_dev):
 +        return None
-+    for dev in sorted(os.listdir(_DPAA_DRIVER_PATH)):
-+        if not dev.startswith('dpaa-ethernet.'):
-+            continue
-+        if os.path.exists(os.path.join(_DPAA_DRIVER_PATH, dev, 'net', iface)):
-+            return dev
++    try:
++        for entry in sorted(os.listdir(mac_dev)):
++            if entry.startswith('dpaa-ethernet.'):
++                return entry
++    except OSError:
++        pass
 +    return None
 +
 +
@@ -204,6 +212,8 @@ eth3/eth4 (10G SFP+).
 +    {# PCI whitelist anchor — prevents auto-claiming all PCI devices #}
 +    dev 0000:00:00.0
 +{% endif %}
++    log-level dpaa.bus:notice
++    log-level dpaa.pmd:notice
  {% for iface, iface_config in interface.items() %}
 -{%     if iface_config.driver == 'dpdk' %}
 +{%     if iface_config.driver == 'dpdk' and (iface_config.original_driver is not defined or iface_config.original_driver not in ['fsl_dpa']) %}
