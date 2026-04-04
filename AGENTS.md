@@ -64,6 +64,7 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 - **Git on Windows:** `core.filemode=false` required — NTFS can't represent Unix permissions
 - **Don't push during builds:** The workflow updates `version.json` — pushing while a build is running causes merge conflicts. Use `git pull --rebase` if this happens.
 - **NEVER `install image` from an installed system:** Use `add system image <url>` instead. `install image` is for USB live boot ONLY — it repartitions the eMMC and looks for `/usr/lib/live/mount/medium/live/filesystem.squashfs` which doesn't exist on installed systems. Running it from eMMC DESTROYS the existing installation.
+- **DPAA1 XDP queue_index uses FQID (breaks AF_XDP):** The DPAA driver's `xdp_rxq_info_reg()` passes `dpaa_fq->fqid` (QMan Frame Queue ID, typically 32768+) as `queue_index`. XSKMAP `max_entries` is 1024. `bpf_redirect_map(&xsks_map, ctx->rx_queue_index, XDP_PASS)` always fails because FQID >= max_entries → XDP_PASS fallback → AF_XDP RX receives 0 packets. Fix: `patch-dpaa-xdp-queue-index.py` replaces `dpaa_fq->fqid` with `0` in the `xdp_rxq_info_reg()` call, mapping all RX FQs to queue 0 (matching VPP's single XSK socket). This is correct because DPAA reports 1 combined channel.
 - **DPAA1 offloads are limited:** TSO/LRO/hw-tc-offload are hardware-impossible (`[fixed]` off). Maximum VyOS offloads: `gro gso sg rfs rps`. Do not attempt to enable TSO.
 - **Jumbo frame module parameter is `fsl_dpaa_fman`:** The FMan driver's `KBUILD_MODNAME` is `fsl_dpaa_fman`, NOT `fman`. Use `fsl_dpaa_fman.fsl_fm_max_frm=9600` in bootargs. The wrong name silently has no effect (max MTU stays at 1500).
 - **Watchdog is IMX2 WDT, not SP805:** The LS1046A watchdog at `0x2ad0000` has compatible `"fsl,ls1046a-wdt", "fsl,imx21-wdt"`. The correct kernel driver is `CONFIG_IMX2_WDT=y` (driver: `imx2_wdt.c`). SP805 and SBSA watchdog drivers are for different ARM platforms. The node is defined in `fsl-ls1046a.dtsi` (inherited via `#include`) with no `status = "disabled"`, so it's always present — only the driver was missing. After adding `CONFIG_IMX2_WDT=y`, `/sys/class/watchdog/watchdog0` appears at boot.
@@ -156,6 +157,7 @@ All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `ar
 | `version.json` | Update-check version file (served via GitHub raw, auto-updated by CI) |
 | `bin/build-local.sh` | Fast local build: `kernel`, `dtb`, `extract`, `vyos1x`, `iso` modes |
 | `VPP.md` | VPP native integration: VyOS `set vpp` CLI with AF_XDP on SFP+ (eth3/eth4), thermal management, DPAA1 PMD roadmap |
+| `VPP-VS-ASK.md` | VPP vs ASK comparison essay: architectural differences, memory/core budgets, 2GB/2-core production viability |
 | `VPP-SETUP.md` | User-facing VPP setup guide: step-by-step enablement, configuration reference, troubleshooting, hardware constraints |
 | `plans/DEV-LOOP.md` | Dev-test loop architecture doc — TFTP boot procedure, lessons learned |
 | `plans/VPP-DPAA-PMD-VS-AFXDP.md` | DPAA1 DPDK PMD vs AF_XDP technical assessment: RC#31 analysis, cost-benefit, infrastructure inventory, recommendation |
@@ -174,6 +176,7 @@ All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `ar
 | `bin/ci-build-packages.sh` | Builds linux-kernel and vyos-1x packages |
 | `bin/ci-build-iso.sh` | Final ISO assembly with live-build |
 | `data/kernel-config/` | Modular kernel config fragments (ls1046a-board, dpaa1, fmd-shim, i2c-gpio, sfp, usb, watchdog) — appended to vyos_defconfig |
+| `data/kernel-patches/patch-dpaa-xdp-queue-index.py` | Python patcher: fixes `xdp_rxq_info_reg()` in `dpaa_eth.c` — replaces FQID with 0 as queue_index so AF_XDP XSKMAP lookup succeeds. Injected into kernel tree by `ci-setup-kernel.sh` |
 | `data/kernel-patches/fsl_fmd_shim.c` | FMD Shim kernel module source: `/dev/fm0*` chardevs for DPDK fmlib FMan KeyGen RSS (skeleton — GET_API_VERSION only, dormant until ioctls called). Injected into kernel tree by `ci-setup-kernel.sh` |
 | `archive/dpaa-pmd/` | Archived DPDK DPAA1 PMD infrastructure (RC#31) — see `archive/dpaa-pmd/RESTORE.md` |
 | `data/hooks/98-fancontrol.chroot` | Live-build hook: installs fancontrol config for EMC2305 thermal management |
