@@ -1,6 +1,6 @@
 # FMD Shim Kernel Module — Implementation Specification
 
-> **Status (2026-04-02):** 📋 **NOT YET IMPLEMENTED.** 8-ioctl kernel module design for runtime RSS on DPAA1 FMan. Pending Phase 0 (VPP DPAA PMD single-queue) validation before implementation begins.
+> **Status (2026-04-04):** 🚧 **SKELETON IMPLEMENTED.** Chardevs + GET_API_VERSION ioctl built into kernel via `data/kernel-patches/fsl_fmd_shim.c` + `data/kernel-config/ls1046a-fmd-shim.config` + `bin/ci-setup-kernel.sh` injection. PCD/PORT ioctls return -ENOSYS (pending KG register programming). Full 8-ioctl spec below is the target for Phase 3.
 
 ## Overview
 

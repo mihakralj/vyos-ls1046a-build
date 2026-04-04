@@ -1,5 +1,11 @@
 Add platform-bus NIC support for VPP via AF_XDP on NXP DPAA1 FMan.
 
+NOTE: This file is a DESCRIPTION ONLY. The actual patching is performed
+by data/scripts/patch-vpp-platform-bus.py (a Python-based patcher that
+uses pattern matching instead of fragile unified diffs). The .patch file
+is skipped by bin/ci-setup-vyos1x.sh — see line "vyos-1x-010-*) echo
+Skipping ...".
+
 NXP DPAA1 FMan Ethernet NICs (driver: fsl_dpa) are on the platform bus,
 not PCI. At boot ALL ports (eth0-eth4) are owned by the kernel via:
   fsl_dpaa_mac  — MAC hardware control (PHY, link state)
@@ -13,17 +19,34 @@ interfaces within seconds. AF_XDP is the only viable path for mixed mode
 This patch enables VPP to use AF_XDP on selected DPAA1 ports when the
 user configures them with 'set vpp settings interface ethX':
 
-1. Adds fsl_dpa to SUPPORTED_DRIVERS and not_pci_drv lists
-2. DPAA1 interfaces (fsl_dpa) use driver='xdp' — AF_XDP works WITH the
-   kernel driver, no unbind needed, no RC#31 bus conflict
-3. PCI NICs continue to use driver='dpdk' as before
-4. Injects original_driver into iface_config for template use
-5. Injects default xdp_options (rx_queue_size=4096, tx_queue_size=4096,
-   num_rx_queues=1) when not provided by CLI for fsl_dpa interfaces
-6. startup.conf.j2: enables af_xdp_plugin.so, keeps dpdk {} block for
-   PCI NICs only (DPAA interfaces use VPP's host-interface AF_XDP path)
-7. Lowers resource minimums for embedded ARM64 boards (2 CPUs, 256M heap)
-8. Removes SSE4.2 CPU check (irrelevant on ARM64)
+Modifications to src/conf_mode/vpp.py:
+  1. Add 'import json' and 'import os' for DPAA helper functions
+  2. Add 'fsl_dpa' to not_pci_drv list (platform bus, not PCI)
+  3. Add 'fsl_dpa' to SUPPORTED_DRIVERS tuple
+  4. Add DPAA1 helper functions (_dpaa_find_platform_dev, _dpaa_unbind_ifaces)
+  5. CRITICAL: Replace unconditional driver='dpdk' with conditional:
+     - In effective_config loop: detect original_driver via persist config,
+       set driver='xdp' for fsl_dpa, driver='dpdk' for PCI NICs
+     - In main config loop: same conditional + EthtoolGDrvinfo fallback
+     Both paths inject default xdp_options (rx_queue_size=4096,
+     tx_queue_size=4096, num_rx_queues=1) for fsl_dpa interfaces when
+     CLI doesn't provide them
+  6. Add _dpaa_unbind_ifaces() call before VPP start (currently a no-op
+     because dpaa-ethernet.N/net/ is empty on DPAA1 — net/ lives on the
+     parent fsl_dpaa_mac device, not the child fsl_dpa device)
+
+Modifications to data/templates/vpp/startup.conf.j2:
+  7. Enable af_xdp_plugin.so in plugins block
+  8. Replace dpdk{} block with platform-bus-aware version (no-pci when
+     only DPAA interfaces, PCI whitelist when PCI NICs present)
+
+Modifications to python/vyos/vpp/config_verify.py:
+  9. Lower main heap minimum from 1G to 256M (embedded ARM64)
+
+Modifications to python/vyos/vpp/config_resource_checks/resource_defaults.py:
+  10. Lower min_memory from 8G to 7G
+  11. Lower min_cpus from 4 to 2
+  12. Lower reserved_cpu_cores from 2 to 1
 
 DPAA1 XDP MTU constraint: fsl_dpaa_mac enforces max MTU 3290 for XDP.
 AF_XDP socket creation fails with EINVAL if MTU exceeds 3290. SFP+ ports
@@ -34,114 +57,7 @@ Port ownership lifecycle (AF_XDP — no unbind/rebind needed):
   set vpp ... eth3   → VPP creates AF_XDP socket on eth3 (kernel keeps netdev)
   delete vpp ... eth3→ VPP releases AF_XDP socket, kernel retains full control
 
-Tested on NXP LS1046A Mono Gateway with VPP v25.10.0-48 AF_XDP on
-eth3/eth4 (10G SFP+).
-
---- a/src/conf_mode/vpp.py
-+++ b/src/conf_mode/vpp.py
-@@ -94,7 +95,8 @@
- }
- 
- # drivers that does not use PCIe addresses
--not_pci_drv: list[str] = ['hv_netvsc']
-+not_pci_drv: list[str] = ['hv_netvsc', 'fsl_dpa']
-+
- 
- # drivers that support interrupt RX mode for DPDK and XDP
- drivers_support_interrupt: dict[str, list] = {
-+    'fsl_dpa': ['xdp'],
- 
- @@ -129,7 +131,10 @@
- SUPPORTED_DRIVERS = (
-     'hv_netvsc',  # Microsoft Hyper-V network interface card
-+    'fsl_dpa',    # NXP DPAA1 FMan Ethernet (platform bus, AF_XDP)
- )
- 
- @@ -376,9 +449,25 @@
-         # Buffer normalization (auto  computed)
-         _normalize_buffers(effective_config)
--        for iface_config in effective_config['settings']['interface'].values():
-+        for _ename, iface_config in effective_config['settings']['interface'].items():
--            iface_config['driver'] = 'dpdk'
-+            # DPAA1 platform-bus NICs use AF_XDP (RC#31 blocks DPAA PMD);
-+            # PCI NICs use standard DPDK.
-+            _edrv = eth_ifaces_persist.get(_ename, {}).get('original_driver', '')
-+            iface_config['original_driver'] = _edrv
-+            if _edrv == 'fsl_dpa':
-+                iface_config['driver'] = 'xdp'
-+                # Inject default xdp_options when CLI doesn't provide them
-+                if 'xdp_options' not in iface_config or not iface_config['xdp_options']:
-+                    iface_config['xdp_options'] = {
-+                        'rx_queue_size': 4096,
-+                        'tx_queue_size': 4096,
-+                        'num_rx_queues': 1,
-+                    }
-+            else:
-+                iface_config['driver'] = 'dpdk'
-         config['effective'] = effective_config
-@@ -399,4 +480,28 @@
- 
-             for iface, iface_config in config['settings']['interface'].items():
--                iface_config['driver'] = 'dpdk'
-+                # Inject original_driver so we can select AF_XDP vs DPDK.
-+                _orig_drv = eth_ifaces_persist.get(iface, {}).get('original_driver', '')
-+                if not _orig_drv:
-+                    try:
-+                        _orig_drv = EthtoolGDrvinfo(iface).driver
-+                    except Exception:
-+                        _orig_drv = ''
-+                iface_config['original_driver'] = _orig_drv
-+
-+                # DPAA1 platform-bus NICs use AF_XDP (RC#31 blocks DPAA PMD);
-+                # PCI NICs use standard DPDK.
-+                if _orig_drv == 'fsl_dpa':
-+                    iface_config['driver'] = 'xdp'
-+                    # Inject default xdp_options when CLI doesn't provide them
-+                    if 'xdp_options' not in iface_config or not iface_config['xdp_options']:
-+                        iface_config['xdp_options'] = {
-+                            'rx_queue_size': 4096,
-+                            'tx_queue_size': 4096,
-+                            'num_rx_queues': 1,
-+                        }
-+                else:
-+                    iface_config['driver'] = 'dpdk'
- 
-                 # old_driver = leaf_node_changed(
-+
---- a/data/templates/vpp/startup.conf.j2
-+++ b/data/templates/vpp/startup.conf.j2
-@@ -76,4 +76,6 @@
- plugins {
-     plugin default { disable }
--    plugin avf_plugin.so { enable }
--    plugin dpdk_plugin.so { enable }
-+    plugin af_xdp_plugin.so { enable }
-+    plugin avf_plugin.so { enable }
-+    plugin dpdk_plugin.so { enable }
-     plugin vmxnet3_plugin.so { enable }
---- a/python/vyos/vpp/config_verify.py
-+++ b/python/vyos/vpp/config_verify.py
-@@ -134,8 +134,8 @@
-     main_heap_size = mem_checks.memory_main_heap(settings)
-     main_heap_page_size = mem_checks.main_heap_page_size(settings)
- 
--    if main_heap_size < 1 << 30:
--        raise ConfigError('The main heap size must be greater than or equal to 1G')
-+    if main_heap_size < 1 << 28:
-+        raise ConfigError('The main heap size must be greater than or equal to 256M')
- 
-     readable_heap_page = bytes_to_human_memory(main_heap_page_size, 'K')
- 
---- a/python/vyos/vpp/config_resource_checks/resource_defaults.py
-+++ b/python/vyos/vpp/config_resource_checks/resource_defaults.py
-@@ -23,9 +23,9 @@
-     # Minimal amount of memory required to start VPP
--    'min_memory': '8G',
-+    'min_memory': '7G',
-     # Minimal number of physical CPU cores required to start VPP
--    'min_cpus': 4,
-+    'min_cpus': 2,
-     # Reserve at least 2 physical cores
--    'reserved_cpu_cores': 2,
-+    'reserved_cpu_cores': 1,
- }
+Tested on NXP LS1046A Mono Gateway with VPP v25.10.0-52 AF_XDP on
+eth3/eth4 (10G SFP+). Confirmed: automated AF_XDP creation via vpp.py,
+LCP tap mirrors, correct MAC addresses, poll-sleep-usec 100 thermal
+protection (49°C), ~5890 loops/sec.
