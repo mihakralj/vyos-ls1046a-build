@@ -44,7 +44,7 @@
  
  
  def find_persistence() -> str:
-@@ -61,11 +80,19 @@
+@@ -61,11 +80,25 @@
  
  def parttable_create(drive_path: str, root_size: int) -> None:
      """Create a hybrid MBR/GPT partition table
@@ -69,20 +69,28 @@
  
      Args:
          drive_path (str): path to a drive
-@@ -74,8 +101,14 @@
+@@ -74,8 +107,20 @@
          root_size_text: str = '+100%'
      else:
          root_size_text: str = str(root_size)
 -    command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:36864:+256M -t2:EF00 \
 -        -n3:0:+{root_size_text}K -t3:8300 {drive_path}'
++    # Build partition 3 argument: sgdisk end=0 means "rest of disk",
++    # +NNK means "NN kilobytes from start".  The upstream root_size_text
++    # of '+100%' produces invalid '++100%K' when naively interpolated,
++    # so we construct the arg explicitly.
++    if root_size == 0:
++        p3_end = '0'              # sgdisk: 0 = end of disk
++    else:
++        p3_end = f'+{root_size}K'
 +    if _is_emmc(drive_path):
 +        # LS1046A eMMC: partitions start after 32 MiB firmware zone
 +        command = f'sgdisk -a1 -n1:{_BIOS_BOOT_START}:{_BIOS_BOOT_END} -t1:EF02 \
 +            -n2:{_EFI_START}:+256M -t2:EF00 \
-+            -n3:0:+{root_size_text}K -t3:8300 {drive_path}'
++            -n3:0:{p3_end} -t3:8300 {drive_path}'
 +    else:
 +        command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:36864:+256M -t2:EF00 \
-+            -n3:0:+{root_size_text}K -t3:8300 {drive_path}'
++            -n3:0:{p3_end} -t3:8300 {drive_path}'
  
      run(command)
      # update partitions in kernel
