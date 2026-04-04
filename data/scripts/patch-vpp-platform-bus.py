@@ -221,9 +221,8 @@ def patch_vpp_py(content):
             content = content[:insert_pos] + DPAA_HELPERS + content[insert_pos:]
             changes += 1
 
-    # 5. Inject original_driver into effective_config loop
-    # Find: "for iface_config in effective_config['settings']['interface'].values():"
-    # Replace with items() and add original_driver injection
+    # 5. Fix effective_config loop: replace values() with items() and
+    #    replace unconditional driver='dpdk' with conditional driver selection
     eff_loop_pat = re.search(
         r"( +)(for )(iface_config)( in effective_config\['settings'\]\['interface'\]\.)(values)\(\):",
         content
@@ -233,26 +232,42 @@ def patch_vpp_py(content):
         old_line = eff_loop_pat.group(0)
         new_line = f"{indent}for _ename, iface_config in effective_config['settings']['interface'].items():"
         content = content.replace(old_line, new_line, 1)
-        # After "iface_config['driver'] = 'dpdk'" in this block, add original_driver
-        # Find the driver assignment that follows
-        driver_assign = f"{indent}    iface_config['driver'] = 'dpdk'"
-        # We need to find the one right after our modified line
+        # Replace the unconditional driver='dpdk' with conditional + original_driver + xdp_options
         pos = content.find(new_line)
         next_driver = content.find("iface_config['driver'] = 'dpdk'", pos)
         if next_driver >= 0:
+            line_start = content.rfind('\n', 0, next_driver) + 1
             end_of_line = content.find('\n', next_driver)
-            inject = (
-                f"\n{indent}    # Inject original_driver into iface_config for template use\n"
-                f"{indent}    _edrv = eth_ifaces_persist.get(_ename, {{}}).get('original_driver', '')\n"
-                f"{indent}    iface_config['original_driver'] = _edrv"
+            old_assign = content[line_start:end_of_line]
+            # Detect indentation from the original line
+            ind = ''
+            for ch in old_assign:
+                if ch in ' \t':
+                    ind += ch
+                else:
+                    break
+            new_assign = (
+                f"{ind}# Inject original_driver and select AF_XDP vs DPDK\n"
+                f"{ind}_edrv = eth_ifaces_persist.get(_ename, {{}}).get('original_driver', '')\n"
+                f"{ind}iface_config['original_driver'] = _edrv\n"
+                f"{ind}if _edrv == 'fsl_dpa':\n"
+                f"{ind}    iface_config['driver'] = 'xdp'\n"
+                f"{ind}    if 'xdp_options' not in iface_config or not iface_config['xdp_options']:\n"
+                f"{ind}        iface_config['xdp_options'] = {{\n"
+                f"{ind}            'rx_queue_size': 4096,\n"
+                f"{ind}            'tx_queue_size': 4096,\n"
+                f"{ind}            'num_rx_queues': 1,\n"
+                f"{ind}        }}\n"
+                f"{ind}else:\n"
+                f"{ind}    iface_config['driver'] = 'dpdk'"
             )
-            content = content[:end_of_line] + inject + content[end_of_line:]
+            content = content[:line_start] + new_assign + content[end_of_line:]
             changes += 1
 
-    # 6. Inject original_driver into the main interface loop in get_config()
+    # 6. Fix main interface loop: replace unconditional driver='dpdk' with
+    #    conditional driver selection based on original_driver
     # Find the block: "for iface, iface_config in config['settings']['interface'].items():"
     #                  "    iface_config['driver'] = 'dpdk'"
-    # This is in the 'if settings in config:' block
     main_loop_pat = re.search(
         r"( +)(for iface, iface_config in config\['settings'\]\['interface'\]\.items\(\):)\n"
         r"(\s+)(iface_config\['driver'\] = 'dpdk')\n"
@@ -263,9 +278,9 @@ def patch_vpp_py(content):
     if main_loop_pat:
         indent2 = main_loop_pat.group(3)
         old_block = main_loop_pat.group(0)
-        inject_orig_drv = (
-            f"\n{indent2}# Inject original_driver so startup.conf.j2 distinguishes\n"
-            f"{indent2}# platform-bus (DPAA) from PCI NICs.\n"
+        # Build the replacement: inject original_driver detection + conditional driver
+        replacement_driver = (
+            f"{indent2}# Inject original_driver so we can select AF_XDP vs DPDK.\n"
             f"{indent2}_orig_drv = eth_ifaces_persist.get(iface, {{}}).get('original_driver', '')\n"
             f"{indent2}if not _orig_drv:\n"
             f"{indent2}    try:\n"
@@ -273,11 +288,22 @@ def patch_vpp_py(content):
             f"{indent2}    except Exception:\n"
             f"{indent2}        _orig_drv = ''\n"
             f"{indent2}iface_config['original_driver'] = _orig_drv\n"
+            f"{indent2}# DPAA1 platform-bus NICs use AF_XDP; PCI NICs use DPDK\n"
+            f"{indent2}if _orig_drv == 'fsl_dpa':\n"
+            f"{indent2}    iface_config['driver'] = 'xdp'\n"
+            f"{indent2}    if 'xdp_options' not in iface_config or not iface_config['xdp_options']:\n"
+            f"{indent2}        iface_config['xdp_options'] = {{\n"
+            f"{indent2}            'rx_queue_size': 4096,\n"
+            f"{indent2}            'tx_queue_size': 4096,\n"
+            f"{indent2}            'num_rx_queues': 1,\n"
+            f"{indent2}        }}\n"
+            f"{indent2}else:\n"
+            f"{indent2}    iface_config['driver'] = 'dpdk'\n"
         )
-        new_block = old_block.replace(
-            f"{main_loop_pat.group(4)}\n\n{main_loop_pat.group(5)}{main_loop_pat.group(6)}",
-            f"{main_loop_pat.group(4)}{inject_orig_drv}\n{main_loop_pat.group(5)}{main_loop_pat.group(6)}",
-            1
+        new_block = (
+            f"{main_loop_pat.group(1)}{main_loop_pat.group(2)}\n"
+            f"{replacement_driver}\n"
+            f"{main_loop_pat.group(5)}{main_loop_pat.group(6)}"
         )
         content = content.replace(old_block, new_block, 1)
         changes += 1

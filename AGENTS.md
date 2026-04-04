@@ -2,6 +2,10 @@
 
 This file provides guidance to agents when working with code in this repository.
 
+## Documentation Style
+
+- **Use Mermaid diagrams, not ASCII art**, to visualize concepts in `.md` documents. All architecture diagrams, flowcharts, sequence diagrams, and component relationship visualizations must use ` ```mermaid ` fenced code blocks — never ASCII box-drawing characters.
+
 ## Project
 
 VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two build paths:
@@ -169,7 +173,8 @@ All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `ar
 | `bin/ci-setup-vyos-build.sh` | Applies vyos-build patches, configures live-build for ARM64 |
 | `bin/ci-build-packages.sh` | Builds linux-kernel and vyos-1x packages |
 | `bin/ci-build-iso.sh` | Final ISO assembly with live-build |
-| `data/kernel-config/` | Modular kernel config fragments (ls1046a-board, dpaa1, i2c-gpio, sfp, usb, watchdog) — appended to vyos_defconfig |
+| `data/kernel-config/` | Modular kernel config fragments (ls1046a-board, dpaa1, fmd-shim, i2c-gpio, sfp, usb, watchdog) — appended to vyos_defconfig |
+| `data/kernel-patches/fsl_fmd_shim.c` | FMD Shim kernel module source: `/dev/fm0*` chardevs for DPDK fmlib FMan KeyGen RSS (skeleton — GET_API_VERSION only, dormant until ioctls called). Injected into kernel tree by `ci-setup-kernel.sh` |
 | `archive/dpaa-pmd/` | Archived DPDK DPAA1 PMD infrastructure (RC#31) — see `archive/dpaa-pmd/RESTORE.md` |
 | `data/hooks/98-fancontrol.chroot` | Live-build hook: installs fancontrol config for EMC2305 thermal management |
 | `data/hooks/99-mask-services.chroot` | Live-build hook: masks acpid services, removes SysV kexec scripts |
