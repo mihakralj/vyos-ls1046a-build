@@ -33,6 +33,9 @@ cp data/kernel-patches/4003-sfp-rollball-phylink-einval-fallback.patch "$KERNEL_
 # Stage phylink patch script for injection into build-kernel.sh
 cp data/kernel-patches/patch-phylink.py "$KERNEL_BUILD/"
 
+# Stage DPAA XDP queue_index fix for AF_XDP socket lookup
+cp data/kernel-patches/patch-dpaa-xdp-queue-index.py "$KERNEL_BUILD/"
+
 # Stage FMD Shim source for injection into build-kernel.sh
 cp data/kernel-patches/fsl_fmd_shim.c "$KERNEL_BUILD/"
 
@@ -43,6 +46,13 @@ cat > /tmp/kernel-inject.sh << 'INJECT_EOF'
 PHYLINK_C=$(find . -path "*/net/phylink.c" -maxdepth 4 | head -1)
 if [ -n "$PHYLINK_C" ] && [ -f "${CWD}/patch-phylink.py" ]; then
   python3 "${CWD}/patch-phylink.py" "$PHYLINK_C"
+fi
+
+# Fix DPAA xdp_rxq_info queue_index: FQID (32768+) exceeds XSKMAP max_entries
+# Without this, AF_XDP RX is completely non-functional on DPAA interfaces
+DPAA_ETH_C=$(find . -path "*/freescale/dpaa/dpaa_eth.c" -maxdepth 6 | head -1)
+if [ -n "$DPAA_ETH_C" ] && [ -f "${CWD}/patch-dpaa-xdp-queue-index.py" ]; then
+  python3 "${CWD}/patch-dpaa-xdp-queue-index.py" "$DPAA_ETH_C"
 fi
 
 # FMD Shim: inject /dev/fm0* chardev module for DPDK fmlib RSS
