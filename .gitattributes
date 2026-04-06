@@ -1,1 +1,2 @@
 data/reftree.cache filter=lfs diff=lfs merge=lfs -text
+data/sdk-drivers.tar.zst filter=lfs diff=lfs merge=lfs -text

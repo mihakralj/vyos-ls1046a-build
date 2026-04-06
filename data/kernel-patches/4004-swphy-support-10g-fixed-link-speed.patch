@@ -1,0 +1,52 @@
+From: VyOS LS1046A Build <build@vyos.io>
+Subject: [PATCH] net: phy: swphy: support 10G/5G/2.5G speeds in fixed-link
+
+The NXP SDK DPAA fsl_mac driver does not use the mainline phylink/SFP
+framework. When a 10G MAC has no phy-handle and no managed/sfp DTS
+properties, the driver falls back to of_phy_register_fixed_link() which
+creates a software PHY via fixed_phy_register().
+
+However, swphy_decode_speed() only handles 10/100/1000 and returns
+-EINVAL for higher speeds. This causes fixed_phy_register() to fail
+for 10G MACs with fixed-link DTS nodes, resulting in:
+  swphy: unknown speed
+  fsl_mac: probe of 1af0000.ethernet failed with error -22
+
+MII registers cannot represent speeds above 1G, but the actual link
+speed is communicated via fixed_phy_status (the fixed_phy_update()
+callback), not MII register reads. Map 10000/5000/2500 to
+SWMII_SPEED_1000 so that fixed_phy_register() succeeds and the MAC
+driver can use the fixed-link PHY for link management.
+
+This is required for NXP LS1046A SDK kernel builds where the 10G SFP+
+MACs (MAC9/MAC10) use fixed-link instead of phylink.
+
+Signed-off-by: VyOS LS1046A Build <build@vyos.io>
+---
+ drivers/net/phy/swphy.c | 22 ++++++++++++++++++----
+ 1 file changed, 18 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/net/phy/swphy.c b/drivers/net/phy/swphy.c
+index 59f1ba4d49bc..4459df30e2c1 100644
+--- a/drivers/net/phy/swphy.c
++++ b/drivers/net/phy/swphy.c
+@@ -72,6 +72,20 @@ static int swphy_decode_speed(int speed)
+ {
+ 	switch (speed) {
++	case 10000:
++	case 5000:
++	case 2500:
++		/*
++		 * MII registers cannot represent speeds above 1G, but we
++		 * return SWMII_SPEED_1000 to allow fixed_phy_register() to
++		 * succeed. The actual link speed is communicated via
++		 * fixed_phy_status, not MII register reads. This enables
++		 * SDK DPAA 10G MACs to use fixed-link without swphy_read_reg
++		 * warnings for unrepresentable speeds.
++		 */
++		return SWMII_SPEED_1000;
+ 	case 1000:
+ 		return SWMII_SPEED_1000;
+ 	case 100:
+-- 
+2.39.5

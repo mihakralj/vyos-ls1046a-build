@@ -11,7 +11,7 @@ Reduces a one-hour CI cycle to **~2 minutes** for incremental kernel changes.
 
 ```
 LXC 200 "vyos-builder" (Ubuntu 22.04, 192.168.1.137)
-  ├── VS Code Remote / SSH    ← edit + build here
+  ├── VS Code Remote           ← edit + build here (we run directly on LXC 200)
   ├── /srv/tftp/              ← vmlinuz · mono-gw.dtb · initrd.img (tftpd-hpa)
   ├── /opt/vyos-dev/          ← linux-6.6.y · vyos-build · vyos-ls1046a-build
   └── aarch64-linux-gnu-gcc 12+ (cross-toolchain)
@@ -22,7 +22,7 @@ Mono Gateway DK (LS1046A, 4× Cortex-A72, 8 GB DDR4)
   └── U-Boot 2025.04            ← dev_boot → TFTP from LXC 200
 ```
 
-All development happens directly on **LXC 200**. SSH in or use VS Code Remote-SSH.
+All development happens directly on **LXC 200**. VS Code is connected directly to this container — no SSH needed.
 Serial console to the Mono Gateway is via PuTTY/minicom (115200 8N1) from any machine with USB access.
 
 ---
@@ -155,10 +155,9 @@ saveenv
 
 ### 4a. Edit code on LXC 200
 
-SSH into LXC 200 (or use VS Code Remote-SSH) and make your kernel config or DTS changes directly:
+Make your kernel config or DTS changes directly (we're already on LXC 200):
 
 ```bash
-ssh root@192.168.1.137
 cd /opt/vyos-dev/vyos-ls1046a-build
 # edit files...
 ```

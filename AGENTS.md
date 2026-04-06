@@ -56,6 +56,7 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 - **Port order requires udev remap + VyOS hw-id:** FMan MACs probe by DT unit-address order (e2000→first, e8000→second, ea000→third, f0000→fourth, f2000→fifth) which does NOT match physical port positions. Additionally, systemd predictable naming renames interfaces to e2-e6 (based on FMan MAC cell-index). Fix: `10-fman-port-order.rules` udev rule calls `/usr/local/bin/fman-port-name` which reads each interface's `/sys/class/net/<iface>/device/of_node` to map the FMan MAC DT address to the correct physical port name. `00-fman.link` systemd .link file prevents systemd from overriding the udev-assigned name. **On installed systems, VyOS's `vyos_net_name` (hw-id matching from config.boot) takes precedence over the udev rule** — the fman-port-name script is primarily effective during live boot and serves as documentation. Physical mapping (confirmed via DT local-mac-address): eth0=left RJ45 (MAC5/e8000/`16:00`), eth1=center RJ45 (MAC6/ea000/`16:01`), eth2=right RJ45 (MAC2/e2000/`15:ff`), eth3=left SFP+ (MAC9/f0000/`16:02`), eth4=right SFP+ (MAC10/f2000/`16:03`).
 - **DPDK DPAA PMD requires `STRICT_DEVMEM` disabled:** DPDK's `fman_init()` mmaps FMan CCSR registers via `/dev/mem`. With `CONFIG_STRICT_DEVMEM=y` the mmap gets `EPERM` → "FMAN driver init failed". Both `CONFIG_STRICT_DEVMEM` and `CONFIG_IO_STRICT_DEVMEM` must be `is not set` in the kernel config.
 - **RJ45 PHYs are Maxlinear GPY115C:** PHY ID `0x67C9DF10`. Requires `CONFIG_MAXLINEAR_GPHY=y` (driver: `mxl-gpy.c`). Without it, "Generic PHY" is used and SGMII AN re-trigger fails — eth2 (center RJ45) never gets link. The GPY2xx has a hardware constraint where SGMII AN only triggers on speed *change*; the proper driver works around this.
+- **SDK `fsl_mac` driver does NOT use phylink/SFP:** The NXP SDK `fsl_mac` driver (in `sdk_fman/`) ignores `managed = "in-band-status"` and `sfp = <&sfp_xfi0>` DTS properties. It falls back to `of_phy_register_fixed_link()` which creates a swphy that can't represent 10G → `swphy_read_reg` WARNINGs → eth3/eth4 permanently DOWN. Two-part fix: (1) `mono-gateway-dk-sdk.dts` must `/delete-property/ managed; /delete-property/ sfp;` and add `fixed-link { speed = <10000>; full-duplex; };` on 10G MACs; (2) kernel patch `4004-swphy-support-10g-fixed-link-speed.patch` maps 10000/5000/2500 → `SWMII_SPEED_1000` in `swphy_decode_speed()` so `fixed_phy_register()` succeeds (MII registers can't represent >1G but actual speed is via `fixed_phy_status`). Trade-off: no SFP hot-plug or DOM monitoring in SDK mode — modules must be inserted before boot. Mainline kernel with phylink handles SFP properly. Validated in Boot #10 (2026-04-05).
 - **DTS must match nix reference:** The data/dtb/mono-gateway-dk.dts must have compatible = "mono,gateway-dk", "fsl,ls1046a" (not just "fsl,ls1046a") and ethernet aliases. The canonical DTS source is nix/pkgs/kernel/dts/mono-gateway-dk.dts.
 - **INA234 power sensors kernel patch included:** The 8x INA234 power sensors are supported via `data/kernel-patches/4002-hwmon-ina2xx-add-INA234-support.patch`. INA234 is register-compatible with INA226 but uses different scaling: bus voltage LSB 1600 µV (not 1250 µV), power coefficient 32 (not 25). Without the patch, sensors don't bind at all (no `ti,ina234` in upstream OF match table). The patch adds `ti,ina234` to the kernel 6.6 ina2xx driver enum, config table, i2c_device_id, and of_device_id. `CONFIG_SENSORS_INA2XX=y` is appended to the defconfig in `auto-build.yml`. Patch prefix `4002-` avoids collision with upstream VyOS `0002-inotify` kernel patch.
 - **FMan firmware:** U-Boot injects from SPI flash `mtd4` into DTB before kernel boot. Not loaded via `request_firmware()`, no `/lib/firmware/` files needed
@@ -177,10 +178,20 @@ All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `ar
 | `bin/ci-build-iso.sh` | Final ISO assembly with live-build |
 | `data/kernel-config/` | Modular kernel config fragments (ls1046a-board, dpaa1, fmd-shim, i2c-gpio, sfp, usb, watchdog) — appended to vyos_defconfig |
 | `data/kernel-patches/patch-dpaa-xdp-queue-index.py` | Python patcher: fixes `xdp_rxq_info_reg()` in `dpaa_eth.c` — replaces FQID with 0 as queue_index so AF_XDP XSKMAP lookup succeeds. Injected into kernel tree by `ci-setup-kernel.sh` |
+| `data/kernel-patches/4004-swphy-support-10g-fixed-link-speed.patch` | Kernel patch: `swphy_decode_speed()` maps 10G/5G/2.5G → SWMII_SPEED_1000 so SDK fixed-link 10G MACs probe successfully. Required for SDK kernel only (mainline uses phylink, not swphy). |
 | `data/kernel-patches/fsl_fmd_shim.c` | FMD Shim kernel module source: `/dev/fm0*` chardevs for DPDK fmlib FMan KeyGen RSS (skeleton — GET_API_VERSION only, dormant until ioctls called). Injected into kernel tree by `ci-setup-kernel.sh` |
 | `archive/dpaa-pmd/` | Archived DPDK DPAA1 PMD infrastructure (RC#31) — see `archive/dpaa-pmd/RESTORE.md` |
 | `data/hooks/98-fancontrol.chroot` | Live-build hook: installs fancontrol config for EMC2305 thermal management |
 | `data/hooks/99-mask-services.chroot` | Live-build hook: masks acpid services, removes SysV kexec scripts |
+| `data/scripts/sfp-tx-enable-sdk.sh` | SDK SFP TX_DISABLE deassert: unbinds SFP driver, exports GPIO 590/591, sets HIGH to enable TX (SDK kernel only — mainline uses phylink) |
+| `data/scripts/ask-conntrack-fix.sh` | Removes VyOS notrack rules from `vyos_conntrack` table so ASK `fp_netfilter` can track flows for fast-path offload |
+| `data/systemd/sfp-tx-enable-sdk.service` | Systemd oneshot: runs `sfp-tx-enable-sdk.sh` before `vyos-router.service` (guarded by `ConditionPathExists=/sys/bus/platform/drivers/fsl_dpa`) |
+| `data/systemd/ask-conntrack-fix.service` | Systemd oneshot: runs `ask-conntrack-fix.sh` after `vyos-router.service` (guarded by ASK dmesg check) |
+| `bin/ci-setup-kernel-sdk.sh` | SDK+ASK kernel setup: injects NXP SDK drivers, ASK hooks, SDK DTS into kernel tree (alternative to `ci-setup-kernel.sh`) |
+| `data/kernel-config/ls1046a-sdk.config` | Kernel config fragment: disables mainline DPAA1, enables SDK `fsl_mac`/`fsl_dpa`/BMan/QMan drivers |
+| `data/kernel-config/ls1046a-ask.config` | Kernel config fragment: enables ASK fast-path netfilter hooks (`CONFIG_COMCERTO_FP=y`) |
+| `data/kernel-patches/ask/` | ASK fast-path kernel patches: SDK driver injector, hook injector, `comcerto_fp_netfilter.c`, xtables QoS modules |
+| `data/dtb/mono-gateway-dk-sdk.dts` | SDK DTS: fixed-link 10G MACs, deleted SFP/managed properties (SDK `fsl_mac` has no phylink) |
 
 ## Commands
 
@@ -196,8 +207,8 @@ gh run list --limit 3
 git push  # then manually trigger build
 
 # === Local dev loop (fast iteration) ===
-# Build kernel on LXC 200 (SSH in or use VS Code Remote-SSH)
-ssh root@192.168.1.137 "cd /opt/vyos-dev && ./build-local.sh kernel 2>&1"
+# Build kernel on LXC 200 (we're already on it — run directly)
+cd /opt/vyos-dev && ./build-local.sh kernel 2>&1
 
 # From U-Boot serial (PuTTY 115200 8N1): TFTP boot
 run dev_boot

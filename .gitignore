@@ -19,5 +19,9 @@ package-lock.json
 firmware/
 linux-source-*.deb
 
-# Forked repos (separate git repos, not part of this build)
+# External repos (separate git repos, not part of this build)
 ASK/
+nxp-linux/
+nxp-fmlib/
+nxp-fmc/
+libcli/

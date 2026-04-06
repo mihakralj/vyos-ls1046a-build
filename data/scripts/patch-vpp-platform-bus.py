@@ -337,6 +337,55 @@ def patch_vpp_py(content):
             ) + content[line_start:]
             changes += 1
 
+    # 8. Fix persist_config KeyError in removed_ifaces loop (apply() function).
+    #    When VPP is force-stopped or interfaces renamed to defunct_ethN, the
+    #    persist_config dict may not contain the interface key. Replace unsafe
+    #    direct dict access with .get() and del with .pop().
+    #
+    #    Before:
+    #      initialize_interface(
+    #          iface['iface_name'], iface['driver'],
+    #          config['persist_config'][iface['iface_name']],
+    #      )
+    #      ...
+    #      del config['persist_config'][iface['iface_name']]
+    #
+    #    After:
+    #      _persist = config.get('persist_config', {}).get(iface['iface_name'], {})
+    #      if _persist:
+    #          initialize_interface(iface['iface_name'], iface['driver'], _persist)
+    #      ...
+    #      config.get('persist_config', {}).pop(iface['iface_name'], None)
+    OLD_REMOVED_IFACES = (
+        "    for iface in config.get('removed_ifaces', []):\n"
+        "        initialize_interface(\n"
+        "            iface['iface_name'],\n"
+        "            iface['driver'],\n"
+        "            config['persist_config'][iface['iface_name']],\n"
+        "        )\n"
+        "\n"
+        "        # Remove what is not in the config anymore\n"
+        "        if iface['iface_name'] not in config.get('settings', {}).get('interface', {}):\n"
+        "            del config['persist_config'][iface['iface_name']]"
+    )
+    NEW_REMOVED_IFACES = (
+        "    for iface in config.get('removed_ifaces', []):\n"
+        "        _persist = config.get('persist_config', {}).get(iface['iface_name'], {})\n"
+        "        if _persist:\n"
+        "            initialize_interface(\n"
+        "                iface['iface_name'],\n"
+        "                iface['driver'],\n"
+        "                _persist,\n"
+        "            )\n"
+        "\n"
+        "        # Remove what is not in the config anymore\n"
+        "        if iface['iface_name'] not in config.get('settings', {}).get('interface', {}):\n"
+        "            config.get('persist_config', {}).pop(iface['iface_name'], None)"
+    )
+    if OLD_REMOVED_IFACES in content:
+        content = content.replace(OLD_REMOVED_IFACES, NEW_REMOVED_IFACES, 1)
+        changes += 1
+
     if changes == 0:
         print('  (all vpp.py changes appear to be already applied)')
     else:

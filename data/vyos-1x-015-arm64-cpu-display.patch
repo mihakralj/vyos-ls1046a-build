@@ -1,7 +1,41 @@
 --- a/src/op_mode/cpu.py
 +++ b/src/op_mode/cpu.py
-@@ -24,11 +24,20 @@
+@@ -22,13 +22,53 @@
  
+ from jinja2 import Template
+ 
++# ARM CPU implementer IDs → vendor names
++_ARM_IMPLEMENTERS = {
++    '0x41': 'ARM', '0x42': 'Broadcom', '0x43': 'Cavium',
++    '0x44': 'DEC', '0x46': 'Fujitsu', '0x48': 'HiSilicon',
++    '0x4e': 'NVIDIA', '0x50': 'APM', '0x51': 'Qualcomm',
++    '0x53': 'Samsung', '0x56': 'Marvell', '0x61': 'Apple',
++    '0x69': 'Intel', '0xc0': 'Ampere',
++}
++
++# ARM CPU part numbers → core names (implementer 0x41 = ARM)
++_ARM_PARTS = {
++    '0xd03': 'Cortex-A53', '0xd04': 'Cortex-A35',
++    '0xd05': 'Cortex-A55', '0xd07': 'Cortex-A57',
++    '0xd08': 'Cortex-A72', '0xd09': 'Cortex-A73',
++    '0xd0a': 'Cortex-A75', '0xd0b': 'Cortex-A76',
++    '0xd0c': 'Neoverse-N1', '0xd0d': 'Cortex-A77',
++    '0xd40': 'Neoverse-V1', '0xd41': 'Cortex-A78',
++    '0xd44': 'Cortex-X1', '0xd46': 'Cortex-A510',
++    '0xd47': 'Cortex-A710', '0xd48': 'Cortex-X2',
++    '0xd49': 'Neoverse-N2', '0xd4d': 'Cortex-A715',
++}
++
++def _arm_model_name(cpu):
++    """Derive a human-readable model name for an ARM CPU entry."""
++    part = cpu.get('CPU part', '')
++    name = _ARM_PARTS.get(part, part if part else 'unknown')
++    impl = cpu.get('CPU implementer', '')
++    vendor = _ARM_IMPLEMENTERS.get(impl, '')
++    if vendor:
++        return f'{vendor} {name}'
++    return name
++
  cpu_template = Template("""
  {% for cpu in cpus %}
 -{% if 'physical id' in cpu %}CPU socket: {{cpu['physical id']}}{% endif %}
@@ -13,12 +47,11 @@
 +{% endif %}
 +{% if 'vendor_id' in cpu %}CPU Vendor:       {{cpu['vendor_id']}}
 +{% endif %}
-+{% if 'CPU implementer' in cpu %}CPU Implementer:  {{cpu['CPU implementer']}}
-+{% endif %}
 +{% if 'model name' in cpu %}Model:            {{cpu['model name']}}
-+{% elif 'CPU part' in cpu %}CPU Part:         {{cpu['CPU part']}}
++{% elif '_arm_model' in cpu %}Model:            {{cpu['_arm_model']}}
 +{% endif %}
 +{% if 'cpu cores' in cpu %}Cores:            {{cpu['cpu cores']}}
++{% elif '_core_count' in cpu %}Cores:            {{cpu['_core_count']}}
 +{% endif %}
 +{% if 'cpu MHz' in cpu %}Current MHz:      {{cpu['cpu MHz']}}
 +{% elif 'BogoMIPS' in cpu %}BogoMIPS:         {{cpu['BogoMIPS']}}
@@ -26,13 +59,56 @@
  {% endfor %}
  """)
  
-@@ -42,7 +51,7 @@
- 
+@@ -47,8 +87,22 @@
  def _get_summary_data():
      count = get_core_count()
      cpu_data = get_cpus()
 -    models = [c.get('model name', 'unknown') for c in cpu_data]
-+    models = [c.get('model name', c.get('CPU part', 'unknown')) for c in cpu_data]
-     env = {'count': count, "models": models}
+-    env = {'count': count, "models": models}
++    models = []
++    for c in cpu_data:
++        if 'model name' in c:
++            models.append(c['model name'])
++        elif 'CPU part' in c:
++            models.append(_arm_model_name(c))
++        else:
++            models.append('unknown')
++    # Deduplicate model list while preserving order
++    seen = set()
++    unique_models = []
++    for m in models:
++        if m not in seen:
++            seen.add(m)
++            unique_models.append(m)
++    env = {'count': count, "models": unique_models}
  
      return env
+ 
+@@ -61,7 +115,26 @@
+     if raw:
+         return cpu_data
+     else:
+-        return _format_cpus(cpu_data)
++        # Deduplicate identical CPUs (ARM64: all cores report same fields)
++        seen = []
++        unique = []
++        for cpu in cpu_data:
++            key = tuple(sorted(cpu.items()))
++            if key not in seen:
++                seen.append(key)
++                unique.append(dict(cpu))
++        # Add core count and ARM model name for deduplicated entries
++        if len(unique) < len(cpu_data):
++            for u in unique:
++                orig_key = tuple(sorted(u.items()))
++                u['_core_count'] = str(sum(
++                    1 for c in cpu_data
++                    if tuple(sorted(c.items())) == orig_key
++                ))
++        for u in unique:
++            if 'CPU part' in u and 'model name' not in u:
++                u['_arm_model'] = _arm_model_name(u)
++        return _format_cpus(unique)
+ 
+ def show_summary(raw: bool):
+     cpu_summary_data = _get_summary_data()

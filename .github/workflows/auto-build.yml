@@ -15,6 +15,13 @@ on:
       builder_image:
         description: 'Builder Docker image'
         default: 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64'
+      build_mode:
+        description: 'Kernel build mode: mainline (VPP/AF_XDP) or sdk-ask (SDK DPAA1 + ASK fast-path)'
+        type: choice
+        options:
+          - mainline
+          - sdk-ask
+        default: 'mainline'
 
 env:
   DEBIAN_MIRROR: http://deb.debian.org/debian/
@@ -82,7 +89,14 @@ jobs:
         run: bin/ci-setup-vyos1x.sh
 
       - name: Setup kernel config and patches
-        run: bin/ci-setup-kernel.sh
+        run: |
+          if [ "${{ github.event.inputs.build_mode }}" = "sdk-ask" ]; then
+            echo "### Build mode: SDK + ASK fast-path"
+            bin/ci-setup-kernel-sdk.sh
+          else
+            echo "### Build mode: mainline (VPP/AF_XDP)"
+            bin/ci-setup-kernel.sh
+          fi
 
       - name: Setup vyos-build (config, chroot files, hooks)
         run: bin/ci-setup-vyos-build.sh
@@ -190,9 +204,29 @@ jobs:
               "pr_template": "- #{{TITLE}}\n   - PR: vyos/vyos-build##{{NUMBER}}"
             }
 
+      - name: "Release publishing: gather local repo changes"
+        id: local_changes
+        run: |
+          set -e
+          SINCE="${{ needs.build_iso.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}"
+          # Get commits in THIS repo since last build, excluding CI auto-commits (version bumps)
+          LOCAL_LOG=$(git log --since "$SINCE" --format="- %s" --no-merges \
+            --invert-grep --grep="^[0-9]\{4\}\.[0-9]\{2\}\.[0-9]\{2\}-[0-9]\{4\}-rolling$" \
+            HEAD 2>/dev/null || true)
+          if [ -z "$LOCAL_LOG" ]; then
+            LOCAL_LOG="_No local changes since last build._"
+          fi
+          # Write to file to avoid shell quoting issues with multiline output
+          echo "$LOCAL_LOG" > /tmp/local_changes.md
+
       - name: "Release publishing: generate release notes"
         run: |
+          LOCAL_CHANGES=$(cat /tmp/local_changes.md)
           cat <<EOF > /tmp/release_notes.md
+          ## LS1046A Build Changes
+
+          ${LOCAL_CHANGES}
+
           ## Upstream changes since last build
 
           ### vyos-1x

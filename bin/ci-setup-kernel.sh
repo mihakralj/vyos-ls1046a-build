@@ -18,7 +18,11 @@ sed -i '/CONFIG_DEBUG_PREEMPT/d'            "$DEFCONFIG"
 
 # Append all LS1046A kernel config fragments
 # NOTE: ls1046a-usdpaa.config moved to archive/dpaa-pmd/ (DPDK PMD archived)
+# NOTE: ls1046a-sdk.config and ls1046a-ask.config are SDK+ASK only (ci-setup-kernel-sdk.sh)
 for frag in data/kernel-config/ls1046a-*.config; do
+  case "$(basename "$frag")" in
+    ls1046a-sdk.config|ls1046a-ask.config) continue ;;
+  esac
   echo "### Appending kernel config fragment: $(basename "$frag")"
   cat "$frag" >> "$DEFCONFIG"
 done
