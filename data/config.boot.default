@@ -12,14 +12,8 @@ firewall {
         send-redirects disable
         source-validation loose
         state-policy {
-            established {
-                action accept
-            }
             invalid {
                 action drop
-            }
-            related {
-                action accept
             }
         }
     }
