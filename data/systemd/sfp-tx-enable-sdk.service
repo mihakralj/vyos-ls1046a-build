@@ -1,0 +1,14 @@
+[Unit]
+Description=SDK SFP+ TX_DISABLE deassert via GPIO
+After=systemd-modules-load.service
+Before=vyos-router.service
+ConditionPathExists=/sys/bus/platform/drivers/fsl_dpa
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/sfp-tx-enable-sdk.sh
+RemainAfterExit=yes
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target

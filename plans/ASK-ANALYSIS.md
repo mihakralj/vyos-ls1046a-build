@@ -1,429 +1,296 @@
-# NXP ASK (Application Solutions Kit) — Analysis for VPP Alternative
+# ASK Fast-Path Gap Analysis — What's Working, What's Missing
 
-> **Status (2026-04-03):** 📋 **ANALYSIS ONLY.** Evaluating ASK as a potential replacement
-> or complement to VPP for high-speed forwarding on the Mono Gateway LS1046A.
-> Source: https://github.com/we-are-mono/ASK
+> **Status (2026-04-06):** Comprehensive analysis after 14 TFTP boots. SDK+ASK kernel
+> running with full networking. All conntrack fp_info infrastructure working.
+> **Forwarding tested!** NAT forwarding (eth3→eth4) with nftables software flow offload
+> achieves **4.39 Gbps** average (**4.80 Gbps peak**) — a 78% improvement over 2.46 Gbps
+> slow-path baseline. Direct LXC→peer link: 7.09 Gbps (ceiling).
 
----
+## Executive Summary
 
-## 1. What ASK Is
+The ASK kernel patches provide **three tiers of acceleration**, not one. Only Tier 0
+(baseline) is currently measured. Tiers 1-3 each require specific activation steps.
+The highest-impact immediate action is **Tier 1: nftables software flow offload** —
+it's built into the kernel and requires zero code changes, just nft rules + forwarded
+traffic test.
 
-ASK provides **FMan hardware flow offloading** — the FMan silicon's built-in packet
-classification engine forwards matching flows entirely in hardware, bypassing both
-the Linux network stack AND any userspace data plane (VPP/DPDK).
+```mermaid
+graph LR
+    subgraph "Tier 0 — Current (3.6 Gbps local)"
+        A[Packet RX] --> B[Full Linux Stack]
+        B --> C[conntrack + fp_info]
+        C --> D[Packet TX]
+    end
 
-```
-WITHOUT ASK (current — all packets through Linux kernel):
+    subgraph "Tier 1 — SW Flow Offload (target: 5-7 Gbps)"
+        E[Packet RX] --> F{flow table<br>lookup}
+        F -->|hit| G[Direct forward<br>skip netfilter]
+        F -->|miss| H[Full Linux Stack]
+    end
 
-  Wire → FMan → BMan → QMan → fsl_dpa → Linux IP stack → fsl_dpa → QMan → FMan → Wire
-                                    ↑
-                              Every packet traverses
-                              the full kernel stack
+    subgraph "Tier 2 — CEETM QoS (not throughput)"
+        I[TX queue] --> J{qosconnmark?}
+        J -->|yes| K[CEETM priority queue]
+        J -->|no| L[Default queue]
+    end
 
-WITH ASK (hardware offload for established flows):
-
-  Wire → FMan classifier ──┬── Match: FMan forwards directly → Wire
-                            │         (ZERO software involvement)
-                            │
-                            └── No match: → BMan → QMan → fsl_dpa → Linux → ...
-                                           (new connections, control plane, management)
-```
-
-This is **hardware-level forwarding** — no CPU cycles consumed for offloaded flows.
-Theoretical throughput: full FMan wire-rate (10G per interface, aggregate limited
-by FMan internal bandwidth).
-
-## 2. ASK Components
-
-| Component | Type | LOC (est.) | Purpose |
-|-----------|------|-----------|---------|
-| **CDX** | Kernel module | ~15K | Core fast-path engine. Programs FMan hardware flow tables. Manages IPsec offload, QoS, CEETM |
-| **CMM** | Userspace daemon | ~8K | Monitors `nf_conntrack`, offloads eligible flows to CDX. L3/L4/bridge/IPsec/PPPoE |
-| **dpa_app** | Userspace tool | ~1K | Programs FMan classification rules via FMC library + XML policy files |
-| **FCI** | Kernel module | ~2K | Communication channel between CDX kernel module and CMM |
-| **auto_bridge** | Kernel module | ~1K | L2 bridge flow detection, notifies CDX of offloadable bridge flows |
-| **libfci** | Userspace library | ~1K | CMM↔FCI communication API |
-| **Kernel patch** | Patch | ~2K | Adds `CONFIG_CPE_FAST_PATH` hooks to `dpaa_eth`, CEETM, IPsec, conntrack |
-
-**External dependencies** (not in ASK repo):
-- **FMC** (FMan Configuration tool) — NXP userspace tool for programming FMan classifier
-- **fmlib** — FMan userspace library
-- **ASK-enabled FMan microcode v210.10.1** — proprietary NXP binary loaded by U-Boot
-
-## 3. How ASK Avoids RC#31
-
-ASK does not use DPDK at all. It operates entirely through the kernel's `fsl_dpa` driver:
-
-| Aspect | DPDK DPAA PMD | ASK/CDX |
-|--------|--------------|---------|
-| BMan control | DPDK takes over ALL buffer pools | Kernel retains ALL pools; CDX reads pool IDs from kernel |
-| QMan control | DPDK initializes ALL frame queues | Kernel retains ALL FQs; CDX uses kernel's existing FQs |
-| FMan control | DPDK accesses FMan CCSR via `/dev/mem` | CDX programs via FMC library (ioctl to kernel fman driver) |
-| Driver | fsl_dpa UNBOUND, DPDK PMD replaces it | fsl_dpa STAYS BOUND, CDX hooks into it |
-| RC#31 | 🔴 Global bus init corrupts everything | ✅ No bus-level init — kernel stays in control |
-
-**The fundamental difference**: ASK programs FMan's hardware classifier to create a
-"fast path" for specific flows, while the kernel's `fsl_dpa` driver remains the owner
-of all BMan/QMan/FMan resources. CDX just teaches FMan which packets to forward in
-hardware vs which to deliver to the kernel.
-
-## 4. ASK vs VPP — Feature Comparison
-
-| Feature | VPP (AF_XDP) | VPP (All-DPDK+LCP) | ASK/CDX |
-|---------|-------------|-------------------|---------|
-| **Forwarding throughput** | ~3.5 Gbps | ~9.4 Gbps | ~9.4 Gbps (FMan hardware) |
-| **Forwarding path** | Software (VPP graph) | Software (VPP graph) | Hardware (FMan silicon) |
-| **CPU usage for forwarding** | High (poll-mode) | High (poll-mode) | **Zero** (hardware) |
-| **Management port safety** | ✅ Kernel (safe) | ⚠️ Through VPP LCP TAPs | ✅ Kernel (safe) |
-| **Thermal impact** | ⚠️ poll-sleep-usec needed | ⚠️ poll-sleep-usec needed | ✅ None (no poll-mode) |
-| **L2 bridge offload** | ❌ Not in VPP graph | ❌ Would need VPP L2 config | ✅ auto_bridge module |
-| **L3 IPv4 forwarding** | ✅ VPP FIB | ✅ VPP FIB | ✅ CDX via conntrack |
-| **L3 IPv6 forwarding** | ✅ VPP FIB | ✅ VPP FIB | ✅ CDX via conntrack |
-| **NAT offload** | ⚠️ VPP NAT plugin | ⚠️ VPP NAT plugin | ✅ CMM tracks NAT conntrack |
-| **IPsec offload** | ❌ Not supported on DPAA1 | ❌ Not supported on DPAA1 | ✅ CAAM + FMan integration |
-| **Firewall/ACL** | ✅ VPP ACL plugin | ✅ VPP ACL plugin | ⚠️ FMan classifier rules (limited) |
-| **QoS/Traffic shaping** | ⚠️ VPP policer | ⚠️ VPP policer | ✅ CEETM hardware QoS |
-| **PPPoE offload** | ❌ | ❌ | ✅ Built-in |
-| **VyOS CLI integration** | ✅ `set vpp settings` | ✅ `set vpp settings` | ❌ Needs new VyOS integration |
-| **First packet latency** | Low (immediate VPP graph) | Low (immediate VPP graph) | Higher (conntrack must establish first) |
-| **Stateless forwarding** | ✅ Works for any packet | ✅ Works for any packet | ❌ Only established connections |
-| **New connection handling** | VPP or Linux | VPP or Linux | **Linux only** (first packets always through kernel) |
-| **Microcode dependency** | None | None | 🔴 Proprietary NXP FMan microcode v210.10.1 |
-| **Kernel patch required** | Minimal (AF_XDP exists) | Our USDPAA patches | ~2K lines `CONFIG_CPE_FAST_PATH` |
-| **Boot networking** | ✅ Always (kernel) | ⚠️ After VPP starts | ✅ Always (kernel) |
-
-## 5. Critical Evaluation — Can ASK Replace VPP?
-
-### What ASK Does Better
-
-1. **Zero CPU forwarding**: Offloaded flows consume no CPU cycles. VPP poll-mode
-   uses 100% of at least one core continuously.
-
-2. **No thermal issues**: No poll-mode = no thermal shutdown risk. The fan/thermal
-   management complexity goes away entirely for forwarding workloads.
-
-3. **Kernel stays in control**: All interfaces remain as kernel netdevs. VyOS CLI
-   for interfaces, firewall, routing, SSH — everything works normally.
-
-4. **IPsec in hardware**: CAAM crypto engine + FMan offload = wire-speed IPsec.
-   VPP on DPAA1 has no IPsec offload path.
-
-5. **NAT offload via conntrack**: CMM watches `nf_conntrack` and offloads NAT'd
-   connections. VPP NAT is software-only.
-
-6. **No RC#31**: Fundamentally impossible — ASK works WITH the kernel driver.
-
-### What ASK Does Worse
-
-1. **Only established connections**: ASK offloads flows AFTER they're established
-   in Linux conntrack. First packet(s) of every connection go through the full
-   kernel stack. For short-lived connections (DNS, HTTP/3), offload benefit is limited.
-
-2. **Proprietary microcode dependency**: ASK requires NXP FMan microcode v210.10.1
-   (the "ASK-enabled" variant). This is a proprietary binary not included in the
-   repository. Without it, CDX cannot initialize and hardware offloading is unavailable.
-   **We would need to verify we have or can obtain this microcode.**
-
-3. **No VyOS CLI integration**: VPP has `set vpp settings` in VyOS. ASK has no
-   VyOS integration — CMM/CDX are standalone daemons. Would need custom VyOS
-   CLI nodes (`set system offload ...`?) and Python conf_mode scripts.
-
-4. **Kernel patch compatibility**: The ASK patch targets kernel 6.12. Our VyOS
-   kernel is 6.6. The patch would need porting — the `dpaa_eth` hooks API may
-   differ between 6.6 and 6.12. The 5.4 patch also exists as reference.
-
-5. **FMC/fmlib dependencies**: `dpa_app` needs FMC (FMan Configuration) tool and
-   fmlib library. These are separate NXP packages that must be cross-compiled for
-   ARM64 and integrated into the build.
-
-6. **Less flexible than VPP**: VPP can do arbitrary packet processing (custom graphs,
-   GTP/VXLAN tunnels, segment routing, etc.). ASK is limited to what FMan's hardware
-   classifier supports: L2/L3 forwarding, NAT, IPsec, QoS, PPPoE.
-
-7. **XML-based configuration**: FMan classification rules are defined in XML policy
-   files (`cdx_cfg.xml`, `cdx_pcd.xml`). Changes require regenerating and reloading
-   rules. Not as dynamic as VPP's API.
-
-## 6. The Hybrid Path — ASK + VPP
-
-The most interesting option: **use both**.
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Linux Kernel                          │
-│  ┌───────┐ ┌───────┐ ┌───────┐ ┌───────┐ ┌───────┐     │
-│  │ eth0  │ │ eth1  │ │ eth2  │ │ eth3  │ │ eth4  │     │  All kernel netdevs (fsl_dpa)
-│  └───┬───┘ └───┬───┘ └───┬───┘ └───┬───┘ └───┬───┘     │
-│      │         │         │         │         │           │
-│  ┌───▼─────────▼─────────▼─────────▼─────────▼───┐      │
-│  │              CDX Fast-Path Engine               │      │  Hardware flow offload
-│  │  (conntrack → FMan classifier → wire-speed)     │      │
-│  └───┬─────────────────────────────────────────────┘      │
-│      │ Flows not offloaded                                │
-│  ┌───▼───────────────────────────────────────────┐        │
-│  │          Linux IP Stack / VyOS Routing          │        │  Normal routing, firewall
-│  └───┬───────────────────────────────────────────┘        │
-│      │ VPP AF_XDP for additional processing               │
-│  ┌───▼───────────────────────────────────────────┐        │
-│  │     VPP (AF_XDP) — complex packet processing    │        │  Optional: custom graphs
-│  └─────────────────────────────────────────────────┘        │
-└─────────────────────────────────────────────────────────────┘
+    subgraph "Tier 3 — FMan PCD HW Offload (target: 9+ Gbps)"
+        M[FMan RX] --> N{PCD classifier<br>5-tuple match}
+        N -->|hit| O[OH port → TX<br>zero CPU]
+        N -->|miss| P[Normal RX → CPU]
+    end
 ```
 
-In this model:
-- **ASK/CDX handles 90%+ of traffic** in FMan hardware (established L3/L4 flows, NAT, IPsec)
-- **Linux kernel handles new connections**, control plane, management (SSH, BGP, OSPF)
-- **VPP (optional) handles special workloads** that neither FMan nor Linux do well (DPI, custom classifiers, GTP tunnels, etc.)
-- **All interfaces stay as kernel netdevs** — VyOS works perfectly
-- **No RC#31** — no DPDK, no bus conflict
-- **Zero thermal concern** for standard forwarding (FMan hardware, not poll-mode)
-- VPP AF_XDP can be layered on top for specific ports/flows that need software processing
+## What's Built and Working ✅
 
-## 7. Implementation Assessment
+| Component | Config / File | Status | Evidence |
+|-----------|--------------|--------|----------|
+| SDK DPAA stack | `fsl_dpa` driver | ✅ Running | 5 interfaces, all probed |
+| 4-way RX distribution | QMan portals | ✅ Active | ~1.34M pkts/CPU on eth3 (equal) |
+| QMan NAPI polling | `CONFIG_FSL_ASK_QMAN_PORTAL_NAPI=y` | ✅ Active | Zero eth interrupts, QMan portal IRQs only |
+| Conntrack fp_info | `comcerto_fp_netfilter.c` | ✅ Active | `fp[0]={if=3 mark=0x0 iif=3}` in /proc |
+| Conntrack force-enable | `nf_ct_netns_get()` | ✅ Active | dmesg: "conntrack force-enabled" |
+| ctnetlink fp_info export | `ctnetlink_dump_comcerto_fp()` | ✅ Built-in | Netlink attr `CTA_COMCERTO_FP` |
+| Software flow offload | `CONFIG_NFT_FLOW_OFFLOAD=y` | ✅ Built-in | `CONFIG_NF_FLOW_TABLE=y` |
+| OH ports | FQ 96-99 | ✅ Probed | OH ports 1+2, QMan channels 0x809/0x80A |
+| FMan PCD chardevs | `/dev/fm0-pcd` | ✅ Present | 24 chardevs total |
+| USDPAA driver | `/dev/fsl-usdpaa` | ✅ Loaded | misc dev 10:257 |
+| CEETM TX path | `cpe_fp_tx()` | ✅ Compiled | In dpaa_eth_sg.c, calls ceetm_fqget_func |
+| IPSec xfrm tracking | fp_info xfrm_handle[4] | ✅ Compiled | xfrm_state.c hooks |
+| Bridge FDB hooks | br_fdb.c, br_input.c | ✅ Compiled | Bridge fast-path notifications |
+| xt_qosmark | `CONFIG_NETFILTER_XT_QOSMARK=y` | ✅ Built-in | xtables kernel modules |
+| xt_qosconnmark | `CONFIG_NETFILTER_XT_QOSCONNMARK=y` | ✅ Built-in | xtables kernel modules |
+| notrack removal | ask-conntrack-fix.sh | ✅ Script ready | Removes VyOS default notrack rules |
+| SFP TX_DISABLE fix | sfp-tx-enable-sdk.sh | ✅ Script ready | GPIO-based TX enable for SDK kernel |
 
-### What We Need
+## What's Missing ❌
 
-1. **FMan microcode v210.10.1**: Check if this is already on the Mono Gateway's
-   SPI flash, or if we need to obtain and flash it. This is the hard dependency.
+### Tier 1: Software Flow Offload (IMMEDIATE — no code changes needed)
 
-2. **Port kernel patch 6.12→6.6**: The `002-mono-gateway-ask-kernel_linux_6_12.patch`
-   adds `CONFIG_CPE_FAST_PATH` hooks to `dpaa_eth`. The 5.4 patch exists as reference.
-   Our kernel is 6.6 — `dpaa_eth` API is between these two. Estimated effort: ~1-2 days.
+| Missing | Details | Fix |
+|---------|---------|-----|
+| Forwarded traffic | All tests are local (to/from device). No L3 forwarding. | Set up routing between two interfaces on different subnets |
+| nft flowtable rules | `nft_flow_offload` is built-in but no rules activate it | Add nft flowtable + flow offload rules |
+| Notrack still active after reboot | `ask-conntrack-fix.sh` not integrated into boot | Add systemd service or live-build hook |
 
-3. **Build CDX/FCI/auto_bridge kernel modules**: Out-of-tree modules, need cross-compile
-   for ARM64 against our 6.6 kernel headers. The Makefile infrastructure exists in ASK.
+**Expected improvement:** For forwarded traffic, software flow offload bypasses the
+entire netfilter stack on ESTABLISHED flows. Typical improvement: 2-4x over slow-path
+forwarding. On 4-core Cortex-A72 @ 1.6 GHz with NAPI, target: **5-7 Gbps** on 10G.
 
-4. **Build CMM daemon + dpa_app**: Userspace programs, straightforward cross-compile.
-   CMM needs libfci, libnetfilter-conntrack, libnfnetlink (patched versions in ASK).
-
-5. **Build FMC + fmlib**: External NXP tools. Need to find ARM64 cross-compile recipes.
-   These may already exist in the NXP LSDK.
-
-6. **Write XML policy files**: `cdx_cfg.xml` and `cdx_pcd.xml` for our specific port
-   layout (3x RJ45 1G + 2x SFP+ 10G). ASK repo may have reference configs.
-
-7. **VyOS integration**: Create `set system offload` CLI nodes, service files for
-   CMM daemon, module loading. ~200-400 LOC estimated.
-
-### Effort Estimate
-
-| Task | Effort | Risk |
-|------|--------|------|
-| Verify/obtain ASK FMan microcode | 1 day | 🔴 Blocker if not available |
-| Port kernel patch 6.12→6.6 | 1-2 days | Medium (API changes) |
-| Cross-compile ASK kernel modules | 1 day | Low |
-| Cross-compile CMM + dpa_app + deps | 1-2 days | Medium (fmlib/FMC deps) |
-| Write FMan XML policy files | 1 day | Medium (need FMan expertise) |
-| VyOS CLI integration | 2-3 days | Low |
-| Integration testing | 2-3 days | Medium |
-| **Total** | **~1.5-2 weeks** | **Blocked by microcode** |
-
-## 8. Recommendation
-
-### Path Comparison (Updated)
-
-| Path | Throughput | CPU Usage | Thermal | Complexity | Timeline | Blocker |
-|------|-----------|-----------|---------|------------|----------|---------|
-| **AF_XDP (Phase 1)** | 3.5 Gbps | High (poll) | ⚠️ Needs fan | Low | ✅ Now | None |
-| **All-DPDK+LCP** | 9.4 Gbps | High (poll) | ⚠️ Needs fan | Medium | 1-2 weeks | None |
-| **ASK/CDX** | 9.4 Gbps | **Zero** | ✅ None | Medium-High | 1.5-2 weeks | 🔴 Microcode |
-| **ASK + VPP hybrid** | 9.4 Gbps + software | Minimal | ✅ Mostly none | High | 2-3 weeks | 🔴 Microcode |
-
-### Decision Tree
-
-```
-Do we have ASK FMan microcode v210.10.1?
-  │
-  ├── YES → ASK/CDX is the superior path:
-  │         - Wire-speed forwarding with zero CPU
-  │         - No thermal issues
-  │         - Kernel stays in control (no RC#31)
-  │         - IPsec + NAT + QoS in hardware
-  │         - VPP optional for advanced use cases
-  │
-  └── NO → Is it obtainable from NXP/Mono?
-            │
-            ├── YES (with timeframe) → Pursue ASK, keep AF_XDP as interim
-            │
-            └── NO → All-DPDK+LCP is the best available path
-                     - 9.4 Gbps with VPP poll-mode
-                     - Thermal management required
-                     - VPP crash = temporary network outage
-```
-
-### Immediate Next Step
-
-**Check the Mono Gateway's SPI flash for the FMan microcode version.** On a running device:
-
+**Activation (on live device):**
 ```bash
-# Check FMan microcode version loaded by U-Boot
-cat /sys/class/firmware/fsl_fman-0/firmware_rev 2>/dev/null || \
-  dmesg | grep -i "fman.*microcode\|fman.*firmware"
+# 1. Put interfaces on different subnets for routing
+sudo ip addr flush dev eth3
+sudo ip addr add 10.0.3.1/24 dev eth3
+sudo ip addr flush dev eth4  
+sudo ip addr add 10.0.4.1/24 dev eth4
 
-# Check U-Boot env for microcode reference  
-fw_printenv | grep -i fman
+# 2. Enable software flow offload
+sudo nft add table inet flow_offload
+sudo nft add flowtable inet flow_offload fast_offload \
+  '{ hook ingress priority 0; devices = { eth0, eth3, eth4 }; }'
+sudo nft add chain inet flow_offload forward \
+  '{ type filter hook forward priority 0; }'
+sudo nft add rule inet flow_offload forward \
+  ct state established flow offload @fast_offload counter accept
+sudo nft add rule inet flow_offload forward counter accept
+
+# 3. Remove notrack (if VyOS reloaded it)
+sudo bash /path/to/ask-conntrack-fix.sh
+
+# 4. Test: iperf3 from host behind eth3 → host behind eth4
+#    (requires configuring those hosts with correct gateway)
 ```
 
-If the ASK-enabled microcode (v210.10.1) is already present, ASK becomes the
-clear winner. If not, we need to determine if Mono has access to it from NXP.
+### Tier 2: CEETM QoS (Not throughput — quality of service)
 
----
+| Missing | Details | Fix |
+|---------|---------|-----|
+| CEETM not configured | `priv->ceetm_en = 0` in SDK driver | Configure CEETM via sysfs/ioctl |
+| qosconnmark not set | No nft rules set conntrack marks | Add nft mark rules for QoS classes |
+| ceetm_fqget_func NULL | No CEETM scheduler registered | Load CEETM module + configure queues |
 
-## 9. Using ASK Primitives to Enable DPAA PMD + VPP (Solving RC#31)
+**Impact:** CEETM provides hardware-assisted QoS scheduling — different traffic
+classes get different TX queue priorities. Does NOT improve raw throughput but ensures
+latency-sensitive flows (VoIP, gaming) get priority over bulk transfers.
 
-### The Core Problem (Recap)
+**Not a priority for throughput testing.**
 
-RC#31: DPDK's `dpaa_bus_probe()` does a **global** BMan/QMan initialization that
-overwrites kernel-managed state for ALL ports, killing management interfaces.
+### Tier 3: FMan PCD Hardware Classification (LONG-TERM — maximum throughput)
 
-### The Key Insight
+| Missing | Details | Fix |
+|---------|---------|-----|
+| CMM daemon | NXP proprietary, not open-source | Write custom flow learning daemon |
+| PCD classification rules | `/dev/fm0-pcd` ioctls never called | Implement FMan ioctls or use `fmc` tool |
+| OH port forwarding paths | OH ports probed but no packet routing | Configure PCD → OH → TX port pipeline |
+| FMan KeyGen programming | Hash schemes not installed | Program CCSR registers via PCD ioctls |
 
-ASK's CDX module knows how to **program FMan's hardware classifier** to route
-traffic from specific ports to specific QMan frame queues. It also knows how to
-**create and manage BMan buffer pools** independently of the kernel's default pools.
+**Expected improvement:** Matched flows forwarded entirely in FMan hardware. Zero
+CPU cycles per packet. Target: **9.5+ Gbps** on 10G SFP+ (near line rate).
 
-What if CDX acts as the **traffic splitter at the hardware level**:
-- SFP+ traffic → dedicated DPDK buffer pools and frame queues
-- RJ45 traffic → kernel's existing buffer pools and frame queues
+**This is a multi-week engineering effort.** Requires:
+1. Understanding FMan CCSR KeyGen register layout (partially documented in FMD-SHIM-SPEC.md)
+2. Writing a daemon that listens to conntrack events (ctnetlink)
+3. For each ESTABLISHED flow, program a 5-tuple PCD rule via `/dev/fm0-pcd`
+4. Configure OH ports to do header modification (NAT) and forward to TX port
+5. Handle flow expiry (remove PCD rules when conntrack entry dies)
 
-Then DPDK doesn't need to do global BMan/QMan init at all — CDX has
-already prepared isolated resources for it.
+## Why Current Throughput is 3.6 Gbps (Not 10G)
 
-### Architecture: CDX as Bus Orchestrator
+The 3.6 Gbps measured on eth3 (SFP-10G-T copper) is **NOT forwarding throughput** — it's
+**local endpoint throughput** (iperf3 running on the Mono Gateway itself).
 
-```
-BOOT (T=0 to T=50s):
-  All 5 ports owned by kernel via fsl_dpa (normal)
+```mermaid
+sequenceDiagram
+    participant P as 10G Peer (.2)
+    participant E as eth3 (SFP+)
+    participant K as Linux Kernel Stack
+    participant I as iperf3 (on Mono)
 
-VPP CONFIGURED (T=50s):
-  ┌──────────────────────────────────────────────────┐
-  │ Step 1: CDX kernel module loaded                  │
-  │   - Reads current BMan pool layout from kernel    │
-  │   - Creates NEW dedicated BMan pools for DPDK     │
-  │     (separate pool IDs, separate buffers)          │
-  │   - Creates NEW QMan frame queues for SFP+ ports   │
-  │     (separate FQIDs, not overlapping kernel FQIDs) │
-  ├──────────────────────────────────────────────────┤
-  │ Step 2: dpa_app programs FMan classifier           │
-  │   - MAC9 (eth3 SFP+): route RX to DPDK FQs        │
-  │   - MAC10 (eth4 SFP+): route RX to DPDK FQs       │
-  │   - MAC2/5/6 (RJ45): UNCHANGED, still to kernel FQs│
-  │   - FMan now splits traffic at the HARDWARE level   │
-  ├──────────────────────────────────────────────────┤
-  │ Step 3: Unbind fsl_dpa from SFP+ only              │
-  │   - echo dpaa-ethernet.3 > fsl_dpa/unbind          │
-  │   - echo dpaa-ethernet.4 > fsl_dpa/unbind          │
-  │   - RJ45 ports stay bound to fsl_dpa               │
-  ├──────────────────────────────────────────────────┤
-  │ Step 4: VPP starts with MODIFIED dpaa_bus           │
-  │   - dpaa_bus reads CDX-prepared portal/pool/FQ map  │
-  │   - Attaches ONLY to DPDK-dedicated resources       │
-  │   - Does NOT touch kernel's BMan pools or QMan FQs  │
-  │   - No global init = no RC#31                       │
-  └──────────────────────────────────────────────────┘
-
-RESULT:
-  eth0/eth1/eth2 (RJ45) → kernel fsl_dpa → Linux IP stack (UNTOUCHED)
-  eth3/eth4 (SFP+) → CDX-routed → DPDK pools → VPP (WIRE SPEED)
+    P->>E: TCP data (10G link)
+    E->>K: DMA → QMan FQ → NAPI poll
+    K->>K: IP input → TCP → socket buffer
+    K->>I: read() from socket
+    Note over K,I: THIS is the bottleneck:<br>full stack processing per packet
 ```
 
-### Which ASK Primitives Are Needed
+The bottleneck is the Linux TCP/IP stack processing on the ARM CPU. Even with 4 CPUs
+doing NAPI RX, the TCP stack (checksums, ACK generation, socket buffer management,
+memory copies) limits single-flow throughput to ~3.6 Gbps.
 
-| Primitive | From | What It Does for Us |
-|-----------|------|-------------------|
-| **CDX dpaa_eth hooks** | Kernel patch | Exposes BMan pool IDs and QMan FQ creation API to CDX module |
-| **BMan pool management** | CDX kernel module | Creates dedicated buffer pools for DPDK, isolated from kernel pools |
-| **QMan FQ management** | CDX kernel module | Creates dedicated frame queues for DPDK-bound ports |
-| **FMan classifier programming** | dpa_app + FMC | Routes SFP+ MAC traffic to DPDK FQs instead of kernel FQs |
-| **FCI interface** | FCI kernel module | Allows VPP startup script to query CDX for prepared resource map |
+**This is NORMAL for ARM64 @ 1.6 GHz.** Compare:
+- x86 server (4 GHz Xeon): ~25-40 Gbps single-flow TCP
+- ARM64 server (3.0 GHz Ampere): ~15-20 Gbps
+- ARM64 embedded (1.6 GHz A72): ~3-5 Gbps ← **we are here**
 
-We do NOT need:
-- CMM (connection tracking offload — that's for ASK's own flow offload, not for VPP)
-- auto_bridge (L2 bridge detection — not relevant to VPP port split)
-- Full ASK flow offload logic (CDX's hash tables, conntrack tracking, etc.)
+**Forwarded traffic will be different:** When packets enter eth3 and exit eth4 (routing),
+the stack overhead is less (no TCP state, just IP forward + NAT). Expected slow-path
+forwarding: ~4-5 Gbps. With software flow offload: ~5-7 Gbps. With FMan PCD: ~9.5 Gbps.
 
-### What We'd Need to Build/Modify
+## Forwarding Test Plan
 
-**1. Minimal CDX "port splitter" module** (~500 LOC estimated):
-   - Strip CDX down to ONLY the BMan/QMan resource management code
-   - Remove flow offload, IPsec, QoS, conntrack — not needed
-   - Keep: BMan pool creation, QMan FQ creation, FMan classifier hooks
-   - Export a simple API: `cdx_prepare_dpdk_port(mac_id, &pool_id, &fqid)`
+### Network Topology for Forwarding Test
 
-**2. FMan classifier rules** (XML policy + dpa_app):
-   - Route MAC9/MAC10 (SFP+) RX traffic to DPDK-dedicated FQs
-   - Keep MAC2/5/6 (RJ45) routing unchanged
-   - This is the key split — happens in FMan hardware, before any software touches packets
-
-**3. Modified DPDK dpaa_bus** (~200 LOC DPDK patch):
-   - Read the CDX-prepared portal/pool/FQ assignments via `/dev/fsl-usdpaa` ioctls
-   - Skip global BMan/QMan init (the RC#31 trigger)
-   - Only initialize the resources CDX has allocated for DPDK
-   - This is a MUCH simpler DPDK patch than full "bus scoping" because CDX handles the complexity
-
-**4. VPP startup integration** (~100 LOC):
-   - Before VPP starts: load CDX module, run dpa_app
-   - CDX prepares resources, dpa_app programs FMan
-   - Then VPP starts with DPDK attaching to pre-prepared resources
-
-### Why This Works Where Raw DPDK Scoping Fails
-
-Option 1 from Section 2 (DPDK bus scoping) requires DPDK to understand BMan/QMan
-internals well enough to partition them. That's ~2000 LOC of DPDK changes and deep
-QBMan expertise.
-
-The CDX approach flips this: **CDX already understands BMan/QMan** (it's the whole
-point of the ASK kernel patch). We leverage that expertise and only ask DPDK to
-"use what CDX prepared" rather than "figure out partitioning yourself."
-
-```
-Without CDX:
-  DPDK must learn: "which pools are kernel's? which FQs are safe to touch?"
-  → 2000 LOC DPDK changes, fragile, deep QBMan expertise needed
-
-With CDX:
-  CDX says: "here are your pools (IDs 8-11), your FQs (0x400-0x4FF), your portals (6-9)"
-  DPDK says: "ok, I'll only use those"
-  → 200 LOC DPDK patch, robust, CDX handles the hard part
+```mermaid
+graph LR
+    A["Host A<br>10.0.3.2/24<br>(via RJ45/1G)"] -->|eth0| M["Mono Gateway<br>10.0.3.1 (eth0/RJ45)<br>10.0.4.1 (eth4/SFP+)"]
+    M -->|eth4| B["Host B<br>10.0.4.2/24<br>(10G peer .2)"]
+    
+    style M fill:#f96,stroke:#333,stroke-width:2px
 ```
 
-### Effort Estimate (CDX-Assisted DPAA PMD)
+**Option A (ideal but needs .2 access):**
+- Reconfigure eth4 to 10.0.4.1/24
+- Configure 10G peer (.2) as 10.0.4.2/24 with gateway 10.0.4.1
+- iperf3 from LXC200 (via eth0, 1G) to .2 (via eth4, 10G) — 1G-capped but tests forwarding
+- iperf3 from .2 (via eth4, 10G) to .3 (via eth3, 10G) — full 10G forwarding path
 
-| Task | Effort | Risk |
-|------|--------|------|
-| Verify ASK microcode availability | 1 day | 🔴 Blocker |
-| Port CDX kernel hooks to 6.6 (minimal subset) | 2-3 days | Medium |
-| Build minimal "port splitter" CDX module | 2-3 days | Medium |
-| FMan classifier rules for port split | 1 day | Low (dpa_app reference exists) |
-| DPDK dpaa_bus "use prepared resources" patch | 2-3 days | Medium |
-| VPP startup integration | 1 day | Low |
-| Integration testing on hardware | 2-3 days | Medium |
-| **Total** | **~2-3 weeks** | **Blocked by microcode** |
+**Option B (self-contained, uses network namespaces):**
+- Create veth pairs or use existing interfaces
+- Test forwarding between subnets entirely on the Mono Gateway
+- Limited by local CPU, not a true end-to-end test
 
-### Comparison: CDX-Assisted vs All-DPDK+LCP
+**Option C (easiest, 1G-capped):**
+- LXC200 (.137) connected to eth0 (RJ45 1G) 
+- Put eth0 on 10.0.0.0/24, keep eth3 on 192.168.1.0/24
+- LXC200 routes to 192.168.1.0/24 via 10.0.0.1 (Mono eth0)
+- Traffic from LXC200 to .2 is FORWARDED through Mono (enter eth0, exit eth3)
+- Limited to 1G by RJ45 link, but proves forwarding path works
 
-| Dimension | CDX-Assisted (mixed mode) | All-DPDK+LCP |
-|-----------|--------------------------|-------------|
-| SFP+ throughput | ~9.4 Gbps (DPDK PMD) | ~9.4 Gbps (DPDK PMD) |
-| Management safety | ✅ Kernel (always safe) | ⚠️ Through VPP LCP TAPs |
-| VPP crash impact | Only SFP+ ports affected | ALL ports down |
-| Boot networking | ✅ Always | ⚠️ After VPP starts |
-| Thermal | ⚠️ VPP poll-mode on SFP+ | ⚠️ VPP poll-mode on all |
-| CPU usage | VPP only for SFP+ traffic | VPP for ALL traffic |
-| Complexity | Higher (CDX + DPDK patch) | Lower (standard VPP LCP) |
-| Microcode dependency | 🔴 Yes | ✅ No |
-| DPDK patch needed | Yes (~200 LOC) | No |
+## Forwarding Test Results (2026-04-06, Boot #14)
 
-**CDX-assisted is architecturally superior** (management always safe, less CPU, VPP
-crash only affects SFP+) but has the microcode dependency and more implementation
-complexity. All-DPDK+LCP is simpler but less resilient.
+### Test Setup
 
-### This Is What the FMD Shim Was Supposed to Be
+```mermaid
+graph LR
+    L["LXC200<br>192.168.1.137<br>(10G veth)"] -->|"eth3 (SFP+ 10G)"| M["Mono Gateway<br>DNAT 10.88.0.2→.2<br>MASQUERADE on eth4"]
+    M -->|"eth4 (SFP+ 10G DAC)"| P["Peer .2<br>192.168.1.2<br>(iperf3 server)"]
+    
+    style M fill:#f96,stroke:#333,stroke-width:2px
+```
 
-The `plans/FMD-SHIM-SPEC.md` spec proposed a new kernel module to intercept FMan
-configuration. The CDX approach is essentially that concept, but instead of writing
-a new module from scratch, we use NXP's proven CDX code that already knows how to
-manage FMan/BMan/QMan resources.
+NAT forwarding via `ip fwd_test` nft table: DNAT `10.88.0.2` → `192.168.1.2`,
+masquerade on eth4. Host route forces `.2` via eth4 (`ip route add 192.168.1.2/32 dev eth4`).
+Cross-interface: packets enter eth3, exit eth4.
 
-CDX IS the FMD shim — but battle-tested, maintained, and with a 6.12 kernel port
-already available.
+### Results
+
+| Test | Direction | Bitrate | Retransmits | Notes |
+|------|-----------|---------|-------------|-------|
+| Direct LXC→.2 (no Mono) | TX | **7.09 Gbps** | 0 | Link ceiling (veth+10G) |
+| Local Mono→.2 | TX | **3.41 Gbps** | 0 | Mono CPU-limited (Boot #14) |
+| **Forwarded slow-path** | TX | **2.46 Gbps** | 100 | NAT, no flow offload |
+| **Forwarded + flow offload** | TX | **4.39 Gbps** | 89 | **+78%** over slow-path |
+| Forwarded + offload (peak) | TX | **4.80 Gbps** | — | Sustained for 5+ seconds |
+| Forwarded + offload (4-stream) | TX | 2.72 Gbps | 26 | Limited by NAT single-flow? |
+| Forwarded + offload (RX) | RX | 0.94 Gbps | 116 | Return path bottleneck |
+
+### Key Findings
+
+1. **Software flow offload works:** 4.39 Gbps average, 4.80 Gbps peak — nearly doubles
+   slow-path forwarding (2.46 → 4.39 Gbps = +78%)
+2. **Flow offload already exceeds VPP/AF_XDP:** 4.39 Gbps forwarded > 3.5 Gbps AF_XDP local
+3. **fp_info correctly tracks both directions:**
+   ```
+   fp[0]={if=3 mark=0x0 iif=3}  ← original: enters eth3
+   fp[1]={if=4 mark=0x0 iif=4}  ← reply: enters eth4
+   ```
+4. **RX distribution balanced:** ~530K NET_RX softirqs per CPU (4-way equal)
+5. **4-stream forwarding is slower** than single-stream — likely NAT masquerade
+   serialization or LXC200 TCP stack overhead with multiplexed connections
+6. **RX direction capped at 1 Gbps** — return path bottleneck (likely `.2`'s link
+   to switch or NAT masquerade reply processing)
+
+### Forwarding Throughput Tiers (Measured vs Target)
+
+```mermaid
+graph LR
+    subgraph Measured
+        A["Slow-path<br>2.46 Gbps"] --> B["SW Offload<br>4.39 Gbps"]
+    end
+    subgraph Target
+        B --> C["FMan PCD<br>~9 Gbps"]
+        C --> D["Line Rate<br>9.41 Gbps"]
+    end
+    
+    style A fill:#f66
+    style B fill:#fa0
+    style C fill:#6f6
+    style D fill:#6cf
+```
+
+## Recommended Next Steps (Priority Order)
+
+### Step 1: ✅ Forwarding Test — DONE
+NAT forwarding (eth3→eth4) working. Slow-path baseline: 2.46 Gbps.
+
+### Step 2: ✅ Software Flow Offload — DONE
+`nft_flow_offload` enabled. Measured: 4.39 Gbps avg, 4.80 Gbps peak.
+
+### Step 3: Integrate Flow Offload into VyOS Config
+Add `set firewall flowtable` equivalent to `data/config.boot.default` so flow offload
+is active on every boot. Also integrate `ask-conntrack-fix.sh` as a systemd service.
+
+### Step 4: 10G↔10G Forwarding Test (requires .2 + .3 on separate subnets)
+Set up eth3↔eth4 forwarding with two 10G hosts on different subnets.
+This removes the LXC200 veth bottleneck and measures true 10G forwarding.
+
+### Step 5: Plan Hardware Offload Prototype
+Based on measured 4.39 Gbps with software offload, the gap to line rate (9.41 Gbps)
+requires FMan PCD hardware classification. Write a minimal flow-learning daemon:
+1. Listen to conntrack ESTABLISHED events via ctnetlink
+2. Program FMan KeyGen scheme via `/dev/fm0-pcd` ioctl
+3. Configure OH port forwarding for matched flows
+
+## Architecture Comparison
+
+| Feature | VPP/AF_XDP (mainline) | ASK Tier 1 (SW offload) | ASK Tier 3 (HW offload) |
+|---------|----------------------|------------------------|------------------------|
+| Kernel | Mainline DPAA1 | SDK DPAA1 | SDK DPAA1 |
+| RX distribution | AF_XDP + XDP redirect | QMan 4-way NAPI | FMan PCD 5-tuple hash |
+| Fast-path mechanism | VPP graph nodes | nft_flow_offload | FMan HW classify + OH fwd |
+| Linux stack bypass | Partial (AF_XDP) | ESTABLISHED flows only | Matched flows entirely |
+| NAT support | VPP NAT plugin | Kernel conntrack NAT | OH port header rewrite |
+| **Measured throughput** | **~3.5 Gbps** | **4.39 Gbps (+25%)** | TBD (~9 Gbps target) |
+| Implementation effort | Done | Done (1 hour) | Multi-week (custom daemon) |
+| Blocking issues | RC#31 (bus init) | None ✅ | CMM daemon needed |

@@ -7,7 +7,7 @@
 
 ```
 LXC 200 "vyos-builder" (Ubuntu 22.04, 192.168.1.137, 12 cores, 16GB RAM, 80GB disk)
-  ├── VS Code Remote / SSH   ← edit + build here
+  ├── VS Code Remote          ← edit + build here (we run directly on LXC 200)
   ├── /srv/tftp/             → vmlinuz (27MB), mono-gw.dtb (92KB), initrd.img (32MB)
   ├── /opt/vyos-dev/         → linux-6.6.y source, vyos-build, build-scripts
   ├── aarch64-linux-gnu-gcc 12.2.0 (cross-toolchain)
@@ -19,7 +19,7 @@ Mono Gateway (LS1046A, 4× Cortex-A72, 8GB DDR4)
   └── U-Boot 2025.04: dev_boot → TFTP from LXC 200
 ```
 
-All development happens directly on **LXC 200**. SSH in or use VS Code Remote-SSH.
+All development happens directly on **LXC 200**. VS Code is connected directly to this container — no SSH needed.
 Serial console to the Mono Gateway is via PuTTY/minicom (115200 8N1) from any machine with USB access.
 
 ## Verified Iteration Times

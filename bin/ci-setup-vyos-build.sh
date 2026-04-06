@@ -73,6 +73,11 @@ chmod +x "$CHROOT/usr/local/bin/vpp-dpaa-rebind"
 mkdir -p "$CHROOT/etc/systemd/system/vpp.service.d"
 cp data/systemd/vpp-dpaa-rebind.conf "$CHROOT/etc/systemd/system/vpp.service.d/dpaa-rebind.conf"
 
+### VPP/DPAA1 post-start: fix defunct interface MTU for AF_XDP TX
+cp data/scripts/vpp-post-start.sh "$CHROOT/usr/local/bin/vpp-post-start.sh"
+chmod +x "$CHROOT/usr/local/bin/vpp-post-start.sh"
+cp data/systemd/vpp-post-start.conf "$CHROOT/etc/systemd/system/vpp.service.d/post-start.conf"
+
 ### Chroot hooks (from extracted data files)
 cp data/hooks/98-fancontrol.chroot "$HOOKS/98-fancontrol.chroot"
 chmod +x "$HOOKS/98-fancontrol.chroot"
@@ -87,5 +92,23 @@ mkdir -p "$CHROOT/etc/udev/rules.d"
 cp data/scripts/10-fman-port-order.rules "$CHROOT/etc/udev/rules.d/10-fman-port-order.rules"
 mkdir -p "$CHROOT/etc/systemd/network"
 cp data/scripts/00-fman.link "$CHROOT/etc/systemd/network/00-fman.link"
+
+### SDK+ASK: SFP TX_DISABLE deassert via GPIO (SDK kernel only — guarded by ConditionPathExists)
+cp data/scripts/sfp-tx-enable-sdk.sh "$CHROOT/usr/local/bin/sfp-tx-enable-sdk.sh"
+chmod +x "$CHROOT/usr/local/bin/sfp-tx-enable-sdk.sh"
+cp data/systemd/sfp-tx-enable-sdk.service "$CHROOT/etc/systemd/system/sfp-tx-enable-sdk.service"
+cp data/systemd/sfp-tx-enable-sdk.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/sfp-tx-enable-sdk.conf"
+
+### SDK+ASK: conntrack notrack removal for ASK fast-path (SDK kernel only — guarded by dmesg check)
+cp data/scripts/ask-conntrack-fix.sh "$CHROOT/usr/local/bin/ask-conntrack-fix.sh"
+chmod +x "$CHROOT/usr/local/bin/ask-conntrack-fix.sh"
+cp data/systemd/ask-conntrack-fix.service "$CHROOT/etc/systemd/system/ask-conntrack-fix.service"
+cp data/systemd/ask-conntrack-fix.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/ask-conntrack-fix.conf"
+
+### FQ qdisc for BBR pacing on 10G SFP+ interfaces
+cp data/scripts/fman-fq-qdisc "$CHROOT/usr/local/bin/fman-fq-qdisc"
+chmod +x "$CHROOT/usr/local/bin/fman-fq-qdisc"
+cp data/systemd/fman-fq-qdisc.service "$CHROOT/etc/systemd/system/fman-fq-qdisc.service"
+cp data/systemd/fman-fq-qdisc.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fman-fq-qdisc.conf"
 
 echo "### vyos-build setup complete"

@@ -1,0 +1,51 @@
+#!/bin/bash
+# fman-fq-qdisc — Apply fq qdisc on 10G FMan interfaces (LS1046A)
+#
+# BBR congestion control requires the fq (Fair Queue) qdisc for proper pacing.
+# VyOS applies sysctl (net.core.default_qdisc=fq) AFTER interfaces are brought
+# UP, so the mq parent creates fq_codel children at interface open time.
+#
+# For DPAA1 10G SFP+ interfaces, single-queue fq root provides the most stable
+# pacing (~6 Gbps sustained, 0 retransmits). Multi-queue mq+fq children cause
+# burst amplification that overwhelms receiver RX buffers (Intel 82599ES PAUSE
+# frame storm at ~8s mark).
+#
+# Method: replace root qdisc with fq on 10G interfaces. Since DPAA1 FMan uses
+# QMan frame queues (not Linux TX queues) for hardware scheduling, the single
+# fq root doesn't limit hardware parallelism — it only paces the kernel TX path.
+#
+# Idempotent — if fq is already root, this is a no-op.
+# Only runs on LS1046A boards (DeviceTree compatible check).
+
+set -euo pipefail
+
+# Board check
+compat="/proc/device-tree/compatible"
+if [ ! -f "$compat" ] || ! tr '\0' '\n' < "$compat" | grep -q "fsl,ls1046a"; then
+    exit 0
+fi
+
+if ! command -v tc >/dev/null 2>&1; then
+    echo "tc not found — skipping fq qdisc setup"
+    exit 0
+fi
+
+for iface_path in /sys/class/net/eth*; do
+    [ -d "$iface_path" ] || continue
+    iface=$(basename "$iface_path")
+    speed=$(cat "${iface_path}/speed" 2>/dev/null || echo 0)
+
+    # Only apply to 10G interfaces (SFP+ ports)
+    if [ "$speed" -ge 10000 ] 2>/dev/null; then
+        current=$(tc qdisc show dev "$iface" root 2>/dev/null | head -1)
+        if echo "$current" | grep -q "^qdisc fq "; then
+            echo "${iface}: fq qdisc already active (${speed} Mbps)"
+        else
+            if tc qdisc replace dev "$iface" root fq; then
+                echo "${iface}: replaced qdisc with fq (${speed} Mbps)"
+            else
+                echo "${iface}: FAILED to set fq qdisc (${speed} Mbps)" >&2
+            fi
+        fi
+    fi
+done

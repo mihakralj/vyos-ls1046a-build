@@ -1,0 +1,14 @@
+[Unit]
+Description=Apply fq qdisc on 10G FMan interfaces (LS1046A BBR pacing)
+After=network-online.target vyos-router.service
+Wants=network-online.target
+ConditionPathExists=/proc/device-tree/compatible
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fman-fq-qdisc
+RemainAfterExit=yes
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target

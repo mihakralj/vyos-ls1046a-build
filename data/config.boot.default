@@ -163,7 +163,7 @@ interfaces {
                 autoconf
             }
         }
-        mtu 3290
+        mtu 9000
         offload {
             gro
             gso
@@ -181,7 +181,7 @@ interfaces {
                 autoconf
             }
         }
-        mtu 3290
+        mtu 9000
         offload {
             gro
             gso
@@ -315,12 +315,6 @@ system {
     name-server eth4
     option {
         kernel {
-            memory {
-                default-hugepage-size 2M
-                hugepage-size 2M {
-                    hugepage-count 256
-                }
-            }
         }
         performance network-latency
         reboot-on-panic
@@ -328,11 +322,17 @@ system {
         time-format 24-hour
     }
     sysctl {
+        parameter net.core.default_qdisc {
+            value fq
+        }
         parameter net.core.netdev_max_backlog {
             value 5000
         }
         parameter net.ipv4.ip_local_port_range {
             value "1024 65001"
+        }
+        parameter net.ipv4.tcp_congestion_control {
+            value bbr
         }
         parameter net.netfilter.nf_conntrack_tcp_timeout_close_wait {
             value 20
