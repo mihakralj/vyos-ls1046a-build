@@ -4,13 +4,16 @@ on:
   schedule:
     - cron: "0 5 * * *"
 
+  push:
+    branches: [dev]
+
   workflow_dispatch:
     inputs:
       BUILD_BY:
         description: 'Builder identifier (auto: mihakralj@users.noreply.github.com)'
         default: ''
       build_version:
-        description: 'Version number (auto: YYYY.MM.DD-HHMM-rolling)'
+        description: 'Version number (auto: YYYY.MM.DD-HHMM-rolling or -dev)'
         default: ''
       builder_image:
         description: 'Builder Docker image'
@@ -141,16 +144,18 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-    if: github.ref_name == 'main'
+    if: github.ref_name == 'main' || github.ref_name == 'dev'
     steps:
       - uses: actions/checkout@v6
       - name: Clone vyos-build repo
+        if: github.ref_name == 'main'
         uses: actions/checkout@v6
         with:
           repository: vyos/vyos-build
           path: vyos-build
           fetch-depth: 0
       - name: Clone vyos-1x source code
+        if: github.ref_name == 'main'
         uses: actions/checkout@v6
         with:
           repository: vyos/vyos-1x
@@ -158,6 +163,7 @@ jobs:
           fetch-depth: 0
 
       - id: commit_ids
+        if: github.ref_name == 'main'
         name: Get commit IDs for changelog
         run: |
           set -ex
@@ -173,6 +179,7 @@ jobs:
           echo "CHANGELOG_COMMIT_VYOS_1X=${CHANGELOG_COMMIT_VYOS_1X}" >> $GITHUB_OUTPUT
 
       - name: "Release publishing: generate changelog for vyos-1x"
+        if: github.ref_name == 'main'
         id: generate_changelog_for_vyos-1x
         uses: mikepenz/release-changelog-builder-action@v6.1.1
         with:
@@ -189,6 +196,7 @@ jobs:
             }
 
       - name: "Release publishing: generate changelog for vyos-build"
+        if: github.ref_name == 'main'
         id: generate_changelog_for_vyos-build
         uses: mikepenz/release-changelog-builder-action@v6.1.1
         with:
@@ -205,6 +213,7 @@ jobs:
             }
 
       - name: "Release publishing: gather local repo changes"
+        if: github.ref_name == 'main'
         id: local_changes
         run: |
           set -e
@@ -220,6 +229,7 @@ jobs:
           echo "$LOCAL_LOG" > /tmp/local_changes.md
 
       - name: "Release publishing: generate release notes"
+        if: github.ref_name == 'main'
         run: |
           LOCAL_CHANGES=$(cat /tmp/local_changes.md)
           cat <<EOF > /tmp/release_notes.md
@@ -237,6 +247,7 @@ jobs:
           cat /tmp/release_notes.md
 
       - name: "Release publishing: create version.json"
+        if: github.ref_name == 'main'
         uses: jsdaniell/create-json@v1.2.3
         with:
           name: "version.json"
@@ -250,6 +261,7 @@ jobs:
             ]
 
       - name: "Release publishing: check if the repository was modified during runtime to prevent autocommit failure"
+        if: github.ref_name == 'main'
         id: check_if_the_repository_was_modified_during_runtime
         run: |
           sudo chown -R $(whoami):$(whoami) ./*
@@ -259,6 +271,7 @@ jobs:
           cp /tmp/version.json.new version.json
 
       - name: "Release publishing: create autocommit and tag"
+        if: github.ref_name == 'main'
         uses: stefanzweifel/git-auto-commit-action@v7
         with:
           tagging_message: ${{ needs.build_iso.outputs.build_version }}
@@ -269,7 +282,9 @@ jobs:
         with:
           name: ${{ needs.build_iso.outputs.image_name }}
 
+      # ── Production release (main branch) ──
       - name: "Release publishing: publish release"
+        if: github.ref_name == 'main'
         uses: softprops/action-gh-release@v2
         with:
           body_path: /tmp/release_notes.md
@@ -282,8 +297,48 @@ jobs:
             vyos-*-usb.img.zst.minisig
 
       - uses: dev-drprasad/delete-older-releases@v0.3.4
+        if: github.ref_name == 'main'
         with:
           keep_latest: 10
           delete_tags: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Dev pre-release (dev branch) ──
+      - name: "Dev release: publish pre-release"
+        if: github.ref_name == 'dev'
+        uses: softprops/action-gh-release@v2
+        with:
+          body: |
+            ## ⚠️ Dev Build — Unstable
+
+            **Version:** `${{ needs.build_iso.outputs.build_version }}`
+            **Branch:** `dev`
+
+            This is an **unstable dev build** for hardware validation.
+            Once confirmed stable (no kernel panic), promote to `main` via merge.
+
+            ### Test checklist
+            - [ ] Boots without kernel panic
+            - [ ] All 5 ethernet ports appear (eth0–eth4)
+            - [ ] SSH accessible
+            - [ ] SFP+ link up (if modules inserted)
+            - [ ] Fan control active
+          tag_name: ${{ needs.build_iso.outputs.build_version }}
+          prerelease: true
+          fail_on_unmatched_files: false
+          files: |
+            ${{ needs.build_iso.outputs.image_iso }}
+            ${{ needs.build_iso.outputs.image_iso }}.minisig
+            vyos-*-usb.img.zst
+            vyos-*-usb.img.zst.minisig
+
+      - name: "Dev release: clean old dev releases"
+        if: github.ref_name == 'dev'
+        uses: dev-drprasad/delete-older-releases@v0.3.4
+        with:
+          keep_latest: 5
+          delete_tags: true
+          delete_tag_pattern: ".*-dev$"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

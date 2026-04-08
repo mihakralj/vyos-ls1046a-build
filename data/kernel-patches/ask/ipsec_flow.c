@@ -3,7 +3,7 @@
  *
  * Copyright 2019 NXP
  */
-#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
+#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET_IPSEC_OFFLOAD_MODULE) || defined(CONFIG_INET6_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD_MODULE)
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/list.h>
@@ -217,5 +217,7 @@ void ipsec_flow_fini(struct net *net)
 	kfree(ft->hash_table);
 }
 EXPORT_SYMBOL(ipsec_flow_fini);
+
+MODULE_LICENSE("GPL");
 #endif
 

@@ -1,0 +1,88 @@
+From: VyOS ARM64 Build <build@vyos.io>
+Subject: [PATCH] Fix fmlib/kernel ABI mismatch in t_FmPcdHashTableParams
+
+The ASK kernel patch added agingSupport, externalHash, and
+externalHashParams fields to t_FmPcdHashTableParams in the kernel header.
+However, the ASK fmlib patch does NOT add these fields to its copy of
+the struct. This creates an ABI mismatch:
+
+  Kernel struct: {base, ccNextEngineParamsForMiss, agingSupport,
+                  externalHash, externalHashParams, table_type, IPR}
+  Fmlib struct:  {base, ccNextEngineParamsForMiss, table_type, IPR}
+
+The ioctl handler's copy_to_user() writes the larger kernel struct back
+to fmlib's smaller buffer, overflowing into heap metadata and causing:
+  malloc_consolidate(): invalid chunk size (SIGABRT)
+
+Additionally, the IOC wrapper struct (ioc_fm_pcd_hash_table_params_t in
+fm_pcd_ioctls.h) and the compat struct (ioc_compat_fm_pcd_hash_table_params_t
+in lnxwrp_ioctls_fm_compat.h) must also have these fields removed to
+satisfy the ASSERT_COND in LnxWrpPCDIOCTLTypeChecking (line 380):
+  sizeof(ioc_fm_pcd_hash_table_params_t) == sizeof(t_FmPcdHashTableParams) + sizeof(void *)
+
+Without fixing the IOC struct, the kernel panics at boot with ASSERT_COND
+failure in lnxwrp_ioctls_fm.c:380.
+
+Fix: Remove the three unused fields from all three structs. They are
+dead code because:
+- agingSupport: ExternalHashTableSet always enables timestamps
+  (the check is commented out in fm_ehash.c:886)
+- externalHash: The redirect uses #ifdef USE_ENHANCED_EHASH, not this
+  runtime field
+- externalHashParams: dataMemId/dataLiodnOffs are commented out in
+  ExternalHashTableSet (fm_ehash.c:883-884)
+
+Files modified:
+- drivers/net/ethernet/freescale/sdk_fman/inc/Peripherals/fm_pcd_ext.h
+  (t_FmPcdHashTableParams — kernel internal struct)
+- include/uapi/linux/fmd/Peripherals/fm_pcd_ioctls.h
+  (ioc_fm_pcd_hash_table_params_t — UAPI ioctl struct)
+- drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_ioctls_fm_compat.h
+  (ioc_compat_fm_pcd_hash_table_params_t — 32-bit compat struct)
+
+--- a/drivers/net/ethernet/freescale/sdk_fman/inc/Peripherals/fm_pcd_ext.h
++++ b/drivers/net/ethernet/freescale/sdk_fman/inc/Peripherals/fm_pcd_ext.h
+@@ (t_FmPcdHashTableParams struct)
+ 
+-    bool                                agingSupport;
+-    bool                                externalHash;
+-    struct {
+-        uint8_t                         dataMemId;
+-        uint32_t                        dataLiodnOffs;
+-    }                                   externalHashParams;
+     e_FmPcdHashTableType                table_type;
+
+--- a/include/uapi/linux/fmd/Peripherals/fm_pcd_ioctls.h
++++ b/include/uapi/linux/fmd/Peripherals/fm_pcd_ioctls.h
+@@ (ioc_fm_pcd_hash_table_params_t struct)
+ 
+-boolaging_support;
+-(multiline comment block removed)
+-
+-#if (DPAA_VERSION >= 11)
+-boolexternal_hash;
++(comment noting fields removed)
+ #ifndef EXCLUDE_FMAN_IPR_OFFLOAD
+  ... (table_type and IPR fields kept)
+ #endif
+-
+-struct {
+-uint8_tdata_mem_id;
+-uint16_tdata_liodn_offs;
+-uintptr_tmiss_monitor_addr;
+-} external_hash_params;
+ #endif /* (DPAA_VERSION >= 11) */
+
+--- a/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_ioctls_fm_compat.h
++++ b/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_ioctls_fm_compat.h
+@@ (ioc_compat_fm_pcd_hash_table_params_t struct)
+ 
+-boolaging_support;
+-boolexternal_hash;
+-struct {
+-uint8_tdata_mem_id;
+-uint16_tdata_liodn_offs;
+-compat_uptr_tmiss_monitor_addr;
+-} external_hash_params;
++(comment noting fields removed)
+     compat_uptr_t               id;

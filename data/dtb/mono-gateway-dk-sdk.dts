@@ -312,6 +312,35 @@ full-duplex;
  */
 &fman0 {
 compatible = "fsl,fman", "simple-bus";
+
+/*
+ * PCD (Packet Classification & Distribution) sub-engine nodes.
+ * The SDK FMan wrapper (lnxwrp_fm.c) searches for these child nodes
+ * via HasFmPcdOfNode() to determine whether to initialize the PCD
+ * hardware. Without ALL FOUR nodes, pcdActive stays FALSE and the
+ * PCD device handle (h_PcdDev) is never created — causing all PCD
+ * ioctls from dpa_app/fmc to return EFAULT ("Invalid Handle").
+ *
+ * Reference: qoriq-fman3-0-sdk.dtsi (NXP lf-6.6.y)
+ */
+cc {
+	compatible = "fsl,fman-cc";
+};
+
+policer@c0000 {
+	compatible = "fsl,fman-policer";
+	reg = <0xc0000 0x1000>;
+};
+
+keygen@c1000 {
+	compatible = "fsl,fman-keygen";
+	reg = <0xc1000 0x1000>;
+};
+
+parser@c7000 {
+	compatible = "fsl,fman-parser";
+	reg = <0xc7000 0x1000>;
+};
 };
 
 /*
@@ -331,17 +360,30 @@ compatible = "fsl,fman", "simple-bus";
  * FQIDs: auto-allocated by SDK driver (no explicit fsl,qman-frame-queues-rx/tx).
  */
 / {
-	/* Delete the old DPDK container and replace with SDK */
-	/delete-node/ dpaa-bpool;
+/* Delete the old DPDK container and replace with SDK */
+/delete-node/ dpaa-bpool;
 };
 
 &soc {
-	/delete-node/ fsl,dpaa;
+/delete-node/ fsl,dpaa;
 
-	fsldpaa: fsl,dpaa {
-		compatible = "fsl,ls1046a", "simple-bus", "fsl,dpaa";
-		fsl,bman = <&bman>;
-		fsl,qman = <&qman>;
+fsldpaa: fsl,dpaa {
+compatible = "fsl,ls1046a", "simple-bus", "fsl,dpaa";
+fsl,bman = <&bman>;
+fsl,qman = <&qman>;
+
+/*
+ * Buffer pool for OH ports — required for CC tree classification.
+ * Without a buffer pool, FM_PCD_CcRootBuild() hangs forever because
+ * the OH port cannot allocate buffers for incoming classified frames.
+ * Uses BPID 16 (outside the 32-63 range used by ethernet ports).
+ * Buffer size 1728 = 1536 (max frame) + 128 (headroom) + 64 (align).
+ */
+bp_oh: buffer-pool@16 {
+compatible = "fsl,ls1046a-oh-bpool", "fsl,oh-bpool";
+fsl,bpid = <16>;
+fsl,bpool-ethernet-cfg = <0 0 0 1728 0 0>;
+};
 
 		/* MAC2 — left RJ45 (1G SGMII) */
 		ethernet@1 {
@@ -375,7 +417,8 @@ compatible = "fsl,fman", "simple-bus";
 
 /*
  * OH port DPA nodes — for ASK PCD classifier flow re-injection.
- * Each OH port needs: fsl,fman-oh-port phandle + FQ pairs.
+ * Each OH port needs: fsl,fman-oh-port phandle + FQ pairs +
+ * fsl,bman-buffer-pools for CC tree classification buffers.
  * FQ pairs: <rx_fqid count tx_fqid count> — rx receives from
  * PCD classifier, tx re-injects into forwarding path.
  * Using OH ports 1 and 2 (cell-index 1,2 = hardware 0x3,0x4).
@@ -384,11 +427,13 @@ dpa-fman0-oh@2 {
 compatible = "fsl,dpa-oh";
 fsl,qman-frame-queues-oh = <0x60 1 0x61 1>;
 fsl,fman-oh-port = <&fman0_oh_0x3>;
+fsl,bman-buffer-pools = <&bp_oh>;
 };
 dpa-fman0-oh@3 {
 compatible = "fsl,dpa-oh";
 fsl,qman-frame-queues-oh = <0x62 1 0x63 1>;
 fsl,fman-oh-port = <&fman0_oh_0x4>;
+fsl,bman-buffer-pools = <&bp_oh>;
 };
 	};
 };

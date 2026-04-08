@@ -6,7 +6,81 @@ Entries are factual. The humor is in the bugs.
 
 ## Unreleased
 
+### Added
+- **CDX 7-port registration with both SFP+ modules** (`data/scripts/cdx_init.c`):
+  Added MAC10/eth4 (right SFP+ DAC, SDK cell-index=9→1, 10G, portid=7) to the CDX port table.
+  NUM_PORTS bumped 6→7. Full port map: OH@2(portid=8), OH@3(portid=9), MAC2/eth1(1G,portid=1),
+  MAC5/eth2(1G,portid=4), MAC6/eth0(1G,portid=5), MAC9/eth3(10G,portid=6), MAC10/eth4(10G,portid=7).
+  All 7 ports register successfully on clean boot. Verified: eth3 copper 10G SFP-10G-T at 10Gbps,
+  eth4 DAC at 10Gbps, both with DHCP IPs from 10G switch.
+- **Stale procfs cleanup module** (`data/scripts/proc_cleanup.c`):
+  Kernel module to remove orphaned `/proc/fqid_stats/*`, `/proc/oh1`, and `/proc/oh2` entries
+  left behind after `rmmod cdx`. CDX creates these during `cdx_init` but doesn't remove them
+  on unload. Module loads, cleans, and auto-unloads (`-ECANCELED`).
+- **ASK activation script rewrite** (`data/scripts/ask-activate.sh`):
+  Complete 8-phase activation sequence replacing broken FMC-based approach:
+  Phase 1: Install ASK binaries, Phase 2: Fix conntrack (flush VyOS notrack),
+  Phase 3: Load CDX+FCI modules, Phase 4: SFP TX_DISABLE deassert (unbind sfp.c driver,
+  export GPIO 590/591, set HIGH), Phase 5: Bring up interfaces + DHCP on SFP+ ports,
+  Phase 6: CDX port registration via cdx_init, Phase 7: WAN/LAN forwarding topology,
+  Phase 8: Start CMM daemon. Removed dead FMC code (orphaned `$FMC_RC` references).
+
 ### Fixed
+- **FMan CC hash table creation — 12 bugs fixed** (`fm_cc.c`, `fm_pcd_ext.h`, `fm_pcd_ioctls.h`, `lnxwrp_ioctls_fm_compat.h`, `nf_conntrack.h`, `Kconfig`, `cdx_pcd.xml`, `dpa.c`, `ls1043_dflags.h`):
+  ROOT CAUSE chain of `FM_PCD_HashTableSet` failures that crashed the device during FMC error rollback.
+  (1) ASK kernel patch `002-mono-gateway-ask-kernel_linux_6_12.patch` was PARTIALLY applied — the
+  `FM_PCD_HashTableSet → ExternalHashTableSet` redirect hunk failed (1486-line .rej file). Without this,
+  `FM_PCD_HashTableSet` returns `t_FmPcdCcNode *` but `copy_td_to_ccbase` expects `en_exthash_info *` — fatal
+  type mismatch. **Fix:** manual redirect added in `fm_cc.c:7632` (`#ifdef USE_ENHANCED_EHASH return
+  ExternalHashTableSet(h_FmPcd, p_Param);`). (2) `ExternalHashTableSet` in `fm_ehash.c` has its OWN mask
+  validation: `(mask + 1)` must be a power of 2, `mask <= 0x7fff`. The `0xf0` masks (from the earlier
+  nibble-0 fix attempt) fail because `0xf0 + 1 = 0xf1` is not a power of 2. **Fix:** reverted masks to
+  original NXP ASK values: `0x7fff` (UDP/TCP 4-tuple), `0xff` (ESP/multicast/ethernet), `0xf`
+  (PPPoE/3-tuple/fragments). These all pass ExternalHashTableSet validation. Reverted `dpa.c` `num_sets`
+  back to `(hashResMask + 1)` (no shift needed). The `IcHashIndexedCheckParams` nibble-0 constraint is
+  IRRELEVANT — ExternalHashTableSet bypasses it entirely, creating hash tables in DDR memory instead
+  of FMan MURAM indexed CC nodes. (3) **fmlib/kernel ABI mismatch** (`fm_pcd_ext.h`): kernel
+  `t_FmPcdHashTableParams` had 3 extra fields (`agingSupport`, `externalHash`, `externalHashParams`)
+  not present in fmlib's copy. The ioctl `copy_to_user()` wrote the larger kernel struct back to
+  fmlib's smaller buffer → heap metadata corruption → `malloc_consolidate(): invalid chunk size`
+  (SIGABRT). **Fix:** removed the 3 unused fields from the kernel struct (patch `5010`). (4) **ASK
+  Kconfig deps broken on mainline** (`Kconfig`, `net/Kconfig`): `ARCH_LAYERSCAPE` doesn't exist in
+  mainline 6.6 → `NET_VENDOR_FREESCALE` and `CPE_FAST_PATH` silently stripped by `olddefconfig` →
+  SDK FMan driver not compiled, ASK xtables modules fail. **Fix:** added `ARM64` to
+  `NET_VENDOR_FREESCALE` deps, removed `ARCH_LAYERSCAPE` dep from `CPE_FAST_PATH` (patch `5009`).
+  (5) **nf_conn->mark regression** (`nf_conntrack.h`): ASK patch moved `mark` from
+  `CONFIG_NF_CONNTRACK_MARK` to `CONFIG_CPE_FAST_PATH` block but left original block empty → compile
+  error. **Fix:** restored `mark` in `CONFIG_NF_CONNTRACK_MARK` when `CPE_FAST_PATH` not defined
+  (patch `5009`). (6) **CLK_QORIQ boot failure** (`Kconfig`): `CONFIG_CLK_QORIQ` depended on
+  `ARCH_LAYERSCAPE` (doesn't exist in mainline 6.6) → QorIQ clock driver missing → FMan probe fails
+  with "Failed to get FM clock structure" error -5 → system freezes with no network. Same for
+  `QORIQ_CPUFREQ` (CPU stuck at 700 MHz). **Fix:** added `ARM64` to both Kconfig deps (patch `5009`).
+  Confirmed on hardware: boot #51 FMan probes successfully. (7) **IOC struct ASSERT_COND failure**
+  (`fm_pcd_ioctls.h`, `lnxwrp_ioctls_fm_compat.h`): After removing 3 fields from kernel
+  `t_FmPcdHashTableParams` (bug 3), the IOC wrapper struct still had them. ASSERT at
+  `lnxwrp_ioctls_fm.c:380` fires on boot because `sizeof(ioc) != sizeof(kernel) + sizeof(void *)`.
+   **Fix:** removed `aging_support`, `external_hash`, `external_hash_params` from both
+   `ioc_fm_pcd_hash_table_params_t` and `ioc_compat_fm_pcd_hash_table_params_t` (patch `5010`).
+   (8) **MMC_SDHCI_OF_ESDHC missing** (`drivers/mmc/host/Kconfig`): eMMC controller driver depends on
+   `ARCH_LAYERSCAPE` (doesn't exist in mainline 6.6) → rootfs can't mount → system hangs at
+   "Mounting root file system". **Fix:** added `ARM64` to dependency list (patch `5009`). Confirmed
+   on hardware: boot #53 had all subsystems working except rootfs mount. (9) **`USE_ENHANCED_EHASH
+- **CDX policer profile failure blocking port registration** (`ASK/cdx/devman.c`):
+  `dpa_add_ethport_ff_policier_profile()` returns error when FMan PCD policer profiles are
+  already allocated (stale state from built-in FMan) or when no PCD is programmed. Was `goto err_ret4`
+  which aborted port registration entirely. Changed to `pr_warn()` + continue — policer only
+  controls rate-limiting on HW-offloaded traffic, which requires PCD/CC hash tables not yet available.
+- **SFP TX_DISABLE not deasserted on SDK kernel** (`data/scripts/ask-activate.sh`):
+  `sfp-tx-enable-sdk.service` runs before SDK interfaces exist on TFTP boot (reported
+  "interface not found, skipping" for both sfp-xfi0 and sfp-xfi1). Copper SFP-10G-T (eth3)
+  requires manual TX_DISABLE deassert: unbind sfp.c driver from sfp-xfi0 platform device
+  (releases GPIO claim), export GPIO 590 (gpiochip576+14), set output HIGH. DAC (eth4) works
+  without deassert (passive cable). GPIO 591 (gpiochip576+15) for eth4.
+- **Stale QMan FQ state blocks CDX reload** (`data/scripts/proc_cleanup.c`):
+  After `rmmod cdx` + `insmod cdx`, QMan Frame Queue hardware state (e.g., fqid 99 for OH@3)
+  persists because QMan is built-in. `qman_init_fq` fails on already-scheduled FQs.
+  `proc_cleanup.ko` handles procfs entries but full reboot is required for clean QMan state.
+
 - **eMMC partition layout now past 32 MiB firmware boundary** (`vyos-1x-006-install-image-reserve-gap.patch`):
   All partitions moved beyond the NXP 32 MiB firmware zone. p1 (BIOS boot) at sector 65536 (32 MiB),
   p2 (EFI) at sector 67584 (33 MiB), p3 (VyOS root) at ~289 MiB. Firmware re-flash via `dd` to first

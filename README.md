@@ -51,6 +51,7 @@ This is, as far as anyone can tell, the only VyOS build targeting bare-metal ARM
 - **U-Boot direct boot.** `vyos.env` on the ext4 partition selects the active image. No GRUB, no OOM, no overhead. Image upgrades write the file automatically.
 - **~80s cold boot to login prompt.** Single boot, no kexec double-reboot. `CONFIG_DEBUG_PREEMPT` suppressed saves ~20s of cosmetic scheduler spam.
 - **USDPAA chardev for DPDK.** Six kernel patches (1,453 lines) add `/dev/fsl-usdpaa` to mainline 6.6, enabling the DPAA1 DPDK PMD path to 10G wire-speed. Phase C (VPP integration) is tracked in [plans/DPAA1-DPDK-PMD.md](plans/DPAA1-DPDK-PMD.md).
+- **ASK hardware flow offload (experimental).** NXP Application Services Kit programs FMan CC hash tables in DDR via `ExternalHashTableSet`, enabling the hardware to forward matching flows at line rate with zero CPU involvement. CDX 7-port registration, FCI netlink bridge, and CMM conntrack daemon all operational. Seven kernel bugs fixed to enable PCD hash table programming on mainline 6.6. See [plans/ASK-ANALYSIS.md](plans/ASK-ANALYSIS.md).
 
 ## Why VyOS?
 

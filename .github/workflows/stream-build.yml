@@ -1,0 +1,242 @@
+name: VyOS Stream LS1046A build
+
+on:
+  workflow_dispatch:
+    inputs:
+      stream_version:
+        description: 'VyOS Stream version (e.g. 2025.11, 1.5-stream-2025-Q2)'
+        required: true
+        default: '2025.11'
+      release_tag:
+        description: 'GitHub release tag (default: Stream_<stream_version>)'
+        default: ''
+      BUILD_BY:
+        description: 'Builder identifier (auto: mihakralj@users.noreply.github.com)'
+        default: ''
+      build_mode:
+        description: 'Kernel build mode: mainline (VPP/AF_XDP) or sdk-ask (SDK DPAA1 + ASK fast-path)'
+        type: choice
+        options:
+          - mainline
+          - sdk-ask
+        default: 'mainline'
+
+env:
+  DEBIAN_MIRROR: http://deb.debian.org/debian/
+  DEBIAN_SECURITY_MIRROR: http://deb.debian.org/debian-security
+  VYOS_MIRROR: https://packages.vyos.net/repositories/stream/
+
+jobs:
+  build_iso:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    container:
+      image: ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64
+      options: --sysctl net.ipv6.conf.lo.disable_ipv6=0 --privileged --user root
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      BUILD_BY: ${{ steps.set_env_variables.outputs.BUILD_BY }}
+      build_version: ${{ steps.set_env_variables.outputs.build_version }}
+      TIMESTAMP: ${{ steps.set_env_variables.outputs.TIMESTAMP }}
+      release_tag: ${{ steps.set_env_variables.outputs.release_tag }}
+      image_iso: ${{ steps.build_iso.outputs.image_iso }}
+      image_name: ${{ steps.build_iso.outputs.image_name }}
+      usb_img: ${{ steps.build_iso.outputs.usb_img }}
+
+    steps:
+      - name: Install Dependencies
+        run: |
+          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
+          apt-get update -qq
+          apt-get install -y \
+            libsystemd-dev libglib2.0-dev libip4tc-dev libipset-dev libnfnetlink-dev \
+            libnftnl-dev libnl-nf-3-dev libpopt-dev libpcap-dev libbpf-dev \
+            bubblewrap git-lfs kpartx clang llvm cmake \
+            protobuf-compiler python3-cracklib python3-protobuf \
+            libreadline-dev liblua5.3-dev byacc flex \
+            dosfstools mtools zstd u-boot-tools
+          apt-get upgrade -y
+
+      - uses: actions/checkout@v6
+        with:
+          lfs: true
+
+      - name: "Initialization: set env variables"
+        id: set_env_variables
+        env:
+          INPUT_BUILD_BY: ${{ github.event.inputs.BUILD_BY }}
+          INPUT_STREAM_VERSION: ${{ github.event.inputs.stream_version }}
+          INPUT_RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+          REPO_OWNER_ID: ${{ github.repository_owner_id }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -ex
+          # Builder identity
+          if [ -n "$INPUT_BUILD_BY" ]; then
+            echo "BUILD_BY=$INPUT_BUILD_BY" >> "$GITHUB_ENV"
+            echo "BUILD_BY=$INPUT_BUILD_BY" >> "$GITHUB_OUTPUT"
+          else
+            echo "BUILD_BY=${REPO_OWNER_ID}+${REPO_OWNER}@users.noreply.github.com" >> "$GITHUB_ENV"
+            echo "BUILD_BY=${REPO_OWNER_ID}+${REPO_OWNER}@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Version: Stream_<stream_version>-LS1046A
+          BUILD_VERSION="Stream_${INPUT_STREAM_VERSION}-LS1046A"
+          echo "build_version=${BUILD_VERSION}" >> "$GITHUB_OUTPUT"
+
+          # Release tag
+          if [ -n "$INPUT_RELEASE_TAG" ]; then
+            echo "release_tag=${INPUT_RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_tag=Stream_${INPUT_STREAM_VERSION}" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Download and extract VyOS Stream source tarball
+        env:
+          STREAM_VERSION: ${{ github.event.inputs.stream_version }}
+        run: bin/ci-setup-stream.sh
+
+      - name: Setup vyos-1x patches (stream)
+        env:
+          MOK_KEY: ${{ secrets.MOK_KEY }}
+          MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
+        run: bin/ci-setup-vyos1x-stream.sh
+
+      - name: Setup kernel config and patches
+        run: |
+          if [ "${{ github.event.inputs.build_mode }}" = "sdk-ask" ]; then
+            echo "### Build mode: SDK + ASK fast-path"
+            bin/ci-setup-kernel-sdk.sh
+          else
+            echo "### Build mode: mainline (VPP/AF_XDP)"
+            bin/ci-setup-kernel.sh
+          fi
+
+      - name: Setup vyos-build (config, chroot files, hooks)
+        run: bin/ci-setup-vyos-build.sh
+
+      - name: Build Image Packages
+        run: |
+          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
+          bin/ci-build-packages.sh
+
+      - name: Pick Packages
+        run: |
+          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
+          bin/ci-pick-packages.sh
+
+      - name: Install extra packages (non-Debian)
+        run: bin/ci-install-extra-packages.sh
+
+      - name: Build VyOS Stream ISO
+        id: build_iso
+        env:
+          BUILD_VERSION: ${{ steps.set_env_variables.outputs.build_version }}
+          STREAM_VERSION: ${{ github.event.inputs.stream_version }}
+          VYOS_MIRROR: https://packages.vyos.net/repositories/stream/
+        run: |
+          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
+          bin/ci-build-iso-stream.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.build_iso.outputs.image_name }}
+          path: |
+            manifest.json
+            ${{ steps.build_iso.outputs.image_iso }}
+            ${{ steps.build_iso.outputs.image_iso }}.minisig
+            ${{ steps.build_iso.outputs.usb_img }}
+            ${{ steps.build_iso.outputs.usb_img }}.minisig
+          retention-days: 15
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    needs:
+      - build_iso
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    if: github.ref_name == 'main'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: "Release publishing: generate release notes"
+        env:
+          STREAM_VERSION: ${{ github.event.inputs.stream_version }}
+          BUILD_VERSION: ${{ needs.build_iso.outputs.build_version }}
+        run: |
+          cat <<EOF > /tmp/release_notes.md
+          ## LS1046A Stream Build
+
+          **VyOS Stream ${STREAM_VERSION}** with LS1046A Mono Gateway hardware support patches.
+
+          - Build version: \`${BUILD_VERSION}\`
+          - Source: [circinus-${STREAM_VERSION}.tar.gz](https://community-downloads.vyos.dev/stream/${STREAM_VERSION}/circinus-${STREAM_VERSION}.tar.gz)
+          - VyOS Stream info: https://vyos.net/get/stream/
+
+          ### LS1046A-specific changes
+          - Kernel: LS1046A DPAA1/FMan networking, SFP+ 10G, INA234 power sensors
+          - Board: EMC2305 fan control, eMMC, QSPI flash, U-Boot env
+          - VPP: AF_XDP on SFP+ ports (eth3/eth4)
+          - DTB: Mono Gateway custom device tree
+          - Console: ttyS0 (8250 UART)
+          EOF
+          cat /tmp/release_notes.md
+
+      - name: "Release publishing: create version.json"
+        uses: jsdaniell/create-json@v1.2.3
+        with:
+          name: "version.json"
+          json: |
+            [
+              {
+                "url": "https://github.com/${{ github.repository }}/releases/download/${{ needs.build_iso.outputs.release_tag }}/${{ needs.build_iso.outputs.image_iso }}",
+                "version": "${{ needs.build_iso.outputs.build_version }}",
+                "timestamp": "${{ needs.build_iso.outputs.TIMESTAMP }}"
+              }
+            ]
+
+      - name: "Release publishing: check if the repository was modified during runtime"
+        run: |
+          sudo chown -R $(whoami):$(whoami) ./*
+          cp version.json /tmp/version.json.new
+          git checkout -- version.json 2>/dev/null || true
+          git pull --rebase || true
+          cp /tmp/version.json.new version.json
+
+      - name: "Release publishing: create autocommit and tag"
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          tagging_message: ${{ needs.build_iso.outputs.release_tag }}
+          commit_message: ${{ needs.build_iso.outputs.release_tag }}
+          commit_author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.build_iso.outputs.image_name }}
+
+      - name: "Release publishing: publish release"
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: /tmp/release_notes.md
+          tag_name: ${{ needs.build_iso.outputs.release_tag }}
+          name: "VyOS Stream ${{ github.event.inputs.stream_version }} — LS1046A"
+          fail_on_unmatched_files: false
+          files: |
+            ${{ needs.build_iso.outputs.image_iso }}
+            ${{ needs.build_iso.outputs.image_iso }}.minisig
+            vyos-*-usb.img.zst
+            vyos-*-usb.img.zst.minisig
+
+      - uses: dev-drprasad/delete-older-releases@v0.3.4
+        with:
+          keep_latest: 10
+          delete_tags: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,296 +1,364 @@
-# ASK Fast-Path Gap Analysis — What's Working, What's Missing
+# VPP & ASK Analysis — Mono Gateway LS1046A
 
-> **Status (2026-04-06):** Comprehensive analysis after 14 TFTP boots. SDK+ASK kernel
-> running with full networking. All conntrack fp_info infrastructure working.
-> **Forwarding tested!** NAT forwarding (eth3→eth4) with nftables software flow offload
-> achieves **4.39 Gbps** average (**4.80 Gbps peak**) — a 78% improvement over 2.46 Gbps
-> slow-path baseline. Direct LXC→peer link: 7.09 Gbps (ceiling).
+> **Status (2026-04-08):** ASK kernel fully fixed — 7 root causes resolved (ExternalHashTableSet redirect, ABI mismatch, Kconfig ARM64 deps, nf_conn->mark regression). Kernel rebuilt clean, deployed to TFTP. CDX 7-port registration, FCI, and CMM all running. Awaiting device reboot for PCD hash table programming test (`fmc -a` + `dpa_app`). See `plans/PCD-DEBUG-PLAN.md` for full root cause analysis.
 
 ## Executive Summary
 
-The ASK kernel patches provide **three tiers of acceleration**, not one. Only Tier 0
-(baseline) is currently measured. Tiers 1-3 each require specific activation steps.
-The highest-impact immediate action is **Tier 1: nftables software flow offload** —
-it's built into the kernel and requires zero code changes, just nft rules + forwarded
-traffic test.
+The Mono Gateway (NXP LS1046A, 4× Cortex-A72 @ 1.6 GHz, 2 GB RAM) runs VyOS with three possible packet acceleration paths. This document analyzes the repo structure, ASK stack, and the plan forward for high-performance forwarding.
+
+| Path | Throughput | Status | Blockers |
+|------|-----------|--------|----------|
+| **AF_XDP** (current) | ~3.5 Gbps | ✅ Production | MTU ≤3290, no RSS multi-worker |
+| **DPAA PMD** (DPDK) | ~9.5 Gbps (theoretical) | 🚫 Blocked | RC#31: `dpaa_bus` kills kernel interfaces |
+| **ASK** (NXP fast-path) | ~4–6 Gbps (estimated) | 🧪 Kernel fixed | 7 kernel bugs fixed; awaiting device test of PCD hash table programming |
+
+---
+
+## 1. Repository Structure
 
 ```mermaid
-graph LR
-    subgraph "Tier 0 — Current (3.6 Gbps local)"
-        A[Packet RX] --> B[Full Linux Stack]
-        B --> C[conntrack + fp_info]
-        C --> D[Packet TX]
+graph TD
+    subgraph "vyos-ls1046a-build repo"
+        CI[".github/workflows/auto-build.yml<br/>Single CI workflow"]
+        BIN["bin/<br/>ci-setup-kernel.sh, ci-build-iso.sh, etc."]
+        DATA["data/<br/>kernel-config/, kernel-patches/,<br/>vyos-1x-*.patch, vyos-build-*.patch,<br/>scripts/, hooks/, dtb/"]
+        PLANS["plans/<br/>DEV-LOOP, FMD-SHIM-SPEC,<br/>VPP-DPAA-PMD-VS-AFXDP"]
+        ARCHIVE["archive/<br/>dpaa-pmd/ (RC#31 blocked)"]
     end
-
-    subgraph "Tier 1 — SW Flow Offload (target: 5-7 Gbps)"
-        E[Packet RX] --> F{flow table<br>lookup}
-        F -->|hit| G[Direct forward<br>skip netfilter]
-        F -->|miss| H[Full Linux Stack]
+    subgraph "ASK repo (submodule/external)"
+        CDX["cdx/<br/>557KB kernel module<br/>Fast-path engine"]
+        FCI["fci/<br/>12KB kernel module<br/>Netlink bridge"]
+        CMM["cmm/<br/>Userspace daemon<br/>Conntrack offload manager"]
+        DPAAPP["dpa_app/<br/>FMC-based data plane<br/>SDK-dependent binary"]
+        LIBFCI["fci/lib/<br/>libfci.so userspace library"]
     end
-
-    subgraph "Tier 2 — CEETM QoS (not throughput)"
-        I[TX queue] --> J{qosconnmark?}
-        J -->|yes| K[CEETM priority queue]
-        J -->|no| L[Default queue]
-    end
-
-    subgraph "Tier 3 — FMan PCD HW Offload (target: 9+ Gbps)"
-        M[FMan RX] --> N{PCD classifier<br>5-tuple match}
-        N -->|hit| O[OH port → TX<br>zero CPU]
-        N -->|miss| P[Normal RX → CPU]
-    end
+    CI --> BIN
+    BIN --> DATA
+    DATA --> |kernel patches| CDX
+    CDX --> FCI
+    FCI --> CMM
+    CMM --> LIBFCI
+    DPAAPP -.-> |"SDK ABI (broken)"| CMM
 ```
 
-## What's Built and Working ✅
+---
 
-| Component | Config / File | Status | Evidence |
-|-----------|--------------|--------|----------|
-| SDK DPAA stack | `fsl_dpa` driver | ✅ Running | 5 interfaces, all probed |
-| 4-way RX distribution | QMan portals | ✅ Active | ~1.34M pkts/CPU on eth3 (equal) |
-| QMan NAPI polling | `CONFIG_FSL_ASK_QMAN_PORTAL_NAPI=y` | ✅ Active | Zero eth interrupts, QMan portal IRQs only |
-| Conntrack fp_info | `comcerto_fp_netfilter.c` | ✅ Active | `fp[0]={if=3 mark=0x0 iif=3}` in /proc |
-| Conntrack force-enable | `nf_ct_netns_get()` | ✅ Active | dmesg: "conntrack force-enabled" |
-| ctnetlink fp_info export | `ctnetlink_dump_comcerto_fp()` | ✅ Built-in | Netlink attr `CTA_COMCERTO_FP` |
-| Software flow offload | `CONFIG_NFT_FLOW_OFFLOAD=y` | ✅ Built-in | `CONFIG_NF_FLOW_TABLE=y` |
-| OH ports | FQ 96-99 | ✅ Probed | OH ports 1+2, QMan channels 0x809/0x80A |
-| FMan PCD chardevs | `/dev/fm0-pcd` | ✅ Present | 24 chardevs total |
-| USDPAA driver | `/dev/fsl-usdpaa` | ✅ Loaded | misc dev 10:257 |
-| CEETM TX path | `cpe_fp_tx()` | ✅ Compiled | In dpaa_eth_sg.c, calls ceetm_fqget_func |
-| IPSec xfrm tracking | fp_info xfrm_handle[4] | ✅ Compiled | xfrm_state.c hooks |
-| Bridge FDB hooks | br_fdb.c, br_input.c | ✅ Compiled | Bridge fast-path notifications |
-| xt_qosmark | `CONFIG_NETFILTER_XT_QOSMARK=y` | ✅ Built-in | xtables kernel modules |
-| xt_qosconnmark | `CONFIG_NETFILTER_XT_QOSCONNMARK=y` | ✅ Built-in | xtables kernel modules |
-| notrack removal | ask-conntrack-fix.sh | ✅ Script ready | Removes VyOS default notrack rules |
-| SFP TX_DISABLE fix | sfp-tx-enable-sdk.sh | ✅ Script ready | GPIO-based TX enable for SDK kernel |
+## 2. Current Production Path: VPP + AF_XDP
 
-## What's Missing ❌
-
-### Tier 1: Software Flow Offload (IMMEDIATE — no code changes needed)
-
-| Missing | Details | Fix |
-|---------|---------|-----|
-| Forwarded traffic | All tests are local (to/from device). No L3 forwarding. | Set up routing between two interfaces on different subnets |
-| nft flowtable rules | `nft_flow_offload` is built-in but no rules activate it | Add nft flowtable + flow offload rules |
-| Notrack still active after reboot | `ask-conntrack-fix.sh` not integrated into boot | Add systemd service or live-build hook |
-
-**Expected improvement:** For forwarded traffic, software flow offload bypasses the
-entire netfilter stack on ESTABLISHED flows. Typical improvement: 2-4x over slow-path
-forwarding. On 4-core Cortex-A72 @ 1.6 GHz with NAPI, target: **5-7 Gbps** on 10G.
-
-**Activation (on live device):**
-```bash
-# 1. Put interfaces on different subnets for routing
-sudo ip addr flush dev eth3
-sudo ip addr add 10.0.3.1/24 dev eth3
-sudo ip addr flush dev eth4  
-sudo ip addr add 10.0.4.1/24 dev eth4
-
-# 2. Enable software flow offload
-sudo nft add table inet flow_offload
-sudo nft add flowtable inet flow_offload fast_offload \
-  '{ hook ingress priority 0; devices = { eth0, eth3, eth4 }; }'
-sudo nft add chain inet flow_offload forward \
-  '{ type filter hook forward priority 0; }'
-sudo nft add rule inet flow_offload forward \
-  ct state established flow offload @fast_offload counter accept
-sudo nft add rule inet flow_offload forward counter accept
-
-# 3. Remove notrack (if VyOS reloaded it)
-sudo bash /path/to/ask-conntrack-fix.sh
-
-# 4. Test: iperf3 from host behind eth3 → host behind eth4
-#    (requires configuring those hosts with correct gateway)
-```
-
-### Tier 2: CEETM QoS (Not throughput — quality of service)
-
-| Missing | Details | Fix |
-|---------|---------|-----|
-| CEETM not configured | `priv->ceetm_en = 0` in SDK driver | Configure CEETM via sysfs/ioctl |
-| qosconnmark not set | No nft rules set conntrack marks | Add nft mark rules for QoS classes |
-| ceetm_fqget_func NULL | No CEETM scheduler registered | Load CEETM module + configure queues |
-
-**Impact:** CEETM provides hardware-assisted QoS scheduling — different traffic
-classes get different TX queue priorities. Does NOT improve raw throughput but ensures
-latency-sensitive flows (VoIP, gaming) get priority over bulk transfers.
-
-**Not a priority for throughput testing.**
-
-### Tier 3: FMan PCD Hardware Classification (LONG-TERM — maximum throughput)
-
-| Missing | Details | Fix |
-|---------|---------|-----|
-| CMM daemon | NXP proprietary, not open-source | Write custom flow learning daemon |
-| PCD classification rules | `/dev/fm0-pcd` ioctls never called | Implement FMan ioctls or use `fmc` tool |
-| OH port forwarding paths | OH ports probed but no packet routing | Configure PCD → OH → TX port pipeline |
-| FMan KeyGen programming | Hash schemes not installed | Program CCSR registers via PCD ioctls |
-
-**Expected improvement:** Matched flows forwarded entirely in FMan hardware. Zero
-CPU cycles per packet. Target: **9.5+ Gbps** on 10G SFP+ (near line rate).
-
-**This is a multi-week engineering effort.** Requires:
-1. Understanding FMan CCSR KeyGen register layout (partially documented in FMD-SHIM-SPEC.md)
-2. Writing a daemon that listens to conntrack events (ctnetlink)
-3. For each ESTABLISHED flow, program a 5-tuple PCD rule via `/dev/fm0-pcd`
-4. Configure OH ports to do header modification (NAT) and forward to TX port
-5. Handle flow expiry (remove PCD rules when conntrack entry dies)
-
-## Why Current Throughput is 3.6 Gbps (Not 10G)
-
-The 3.6 Gbps measured on eth3 (SFP-10G-T copper) is **NOT forwarding throughput** — it's
-**local endpoint throughput** (iperf3 running on the Mono Gateway itself).
+Implemented via `data/vyos-1x-010-vpp-platform-bus.patch`. VPP creates AF_XDP sockets on DPAA1 `fsl_dpa` netdevs without unbinding the kernel driver.
 
 ```mermaid
 sequenceDiagram
-    participant P as 10G Peer (.2)
-    participant E as eth3 (SFP+)
-    participant K as Linux Kernel Stack
-    participant I as iperf3 (on Mono)
+    participant VyOS as VyOS Config
+    participant VPP as VPP Process
+    participant Kernel as Kernel (fsl_dpa)
+    participant FMan as FMan Hardware
 
-    P->>E: TCP data (10G link)
-    E->>K: DMA → QMan FQ → NAPI poll
-    K->>K: IP input → TCP → socket buffer
-    K->>I: read() from socket
-    Note over K,I: THIS is the bottleneck:<br>full stack processing per packet
+    VyOS->>VPP: set vpp settings interface eth3
+    VPP->>Kernel: AF_XDP socket on eth3
+    FMan->>Kernel: RX packets → XDP program
+    Kernel->>VPP: XSK redirect → VPP RX ring
+    VPP->>Kernel: XSK TX → eth4
+    Kernel->>FMan: TX packets out
 ```
 
-The bottleneck is the Linux TCP/IP stack processing on the ARM CPU. Even with 4 CPUs
-doing NAPI RX, the TCP stack (checksums, ACK generation, socket buffer management,
-memory copies) limits single-flow throughput to ~3.6 Gbps.
+**Strengths:**
+- Kernel retains full interface ownership (SSH management works)
+- VyOS native CLI integration (`set vpp settings ...`)
+- No kernel module signing issues
+- Thermal protection via `poll-sleep-usec 100`
 
-**This is NORMAL for ARM64 @ 1.6 GHz.** Compare:
-- x86 server (4 GHz Xeon): ~25-40 Gbps single-flow TCP
-- ARM64 server (3.0 GHz Ampere): ~15-20 Gbps
-- ARM64 embedded (1.6 GHz A72): ~3-5 Gbps ← **we are here**
+**Limitations:**
+- ~3.5 Gbps on 10G SFP+ (single queue, no RSS)
+- MTU capped at 3290 (DPAA1 XDP hard limit)
+- FQID-as-queue_index bug requires kernel patch (`patch-dpaa-xdp-queue-index.py`)
+- No multi-worker: DPAA1 reports 1 combined channel
 
-**Forwarded traffic will be different:** When packets enter eth3 and exit eth4 (routing),
-the stack overhead is less (no TCP state, just IP forward + NAT). Expected slow-path
-forwarding: ~4-5 Gbps. With software flow offload: ~5-7 Gbps. With FMan PCD: ~9.5 Gbps.
+---
 
-## Forwarding Test Plan
+## 3. Blocked Path: VPP + DPDK DPAA PMD
 
-### Network Topology for Forwarding Test
+**RC#31 — FATAL:** DPDK's `dpaa_bus` probe (`rte_bus_probe()`) initializes ALL BMan/QMan resources globally, killing kernel-managed interfaces. Confirmed on hardware 2026-04-03.
 
 ```mermaid
 graph LR
-    A["Host A<br>10.0.3.2/24<br>(via RJ45/1G)"] -->|eth0| M["Mono Gateway<br>10.0.3.1 (eth0/RJ45)<br>10.0.4.1 (eth4/SFP+)"]
-    M -->|eth4| B["Host B<br>10.0.4.2/24<br>(10G peer .2)"]
-    
-    style M fill:#f96,stroke:#333,stroke-width:2px
-```
-
-**Option A (ideal but needs .2 access):**
-- Reconfigure eth4 to 10.0.4.1/24
-- Configure 10G peer (.2) as 10.0.4.2/24 with gateway 10.0.4.1
-- iperf3 from LXC200 (via eth0, 1G) to .2 (via eth4, 10G) — 1G-capped but tests forwarding
-- iperf3 from .2 (via eth4, 10G) to .3 (via eth3, 10G) — full 10G forwarding path
-
-**Option B (self-contained, uses network namespaces):**
-- Create veth pairs or use existing interfaces
-- Test forwarding between subnets entirely on the Mono Gateway
-- Limited by local CPU, not a true end-to-end test
-
-**Option C (easiest, 1G-capped):**
-- LXC200 (.137) connected to eth0 (RJ45 1G) 
-- Put eth0 on 10.0.0.0/24, keep eth3 on 192.168.1.0/24
-- LXC200 routes to 192.168.1.0/24 via 10.0.0.1 (Mono eth0)
-- Traffic from LXC200 to .2 is FORWARDED through Mono (enter eth0, exit eth3)
-- Limited to 1G by RJ45 link, but proves forwarding path works
-
-## Forwarding Test Results (2026-04-06, Boot #14)
-
-### Test Setup
-
-```mermaid
-graph LR
-    L["LXC200<br>192.168.1.137<br>(10G veth)"] -->|"eth3 (SFP+ 10G)"| M["Mono Gateway<br>DNAT 10.88.0.2→.2<br>MASQUERADE on eth4"]
-    M -->|"eth4 (SFP+ 10G DAC)"| P["Peer .2<br>192.168.1.2<br>(iperf3 server)"]
-    
-    style M fill:#f96,stroke:#333,stroke-width:2px
-```
-
-NAT forwarding via `ip fwd_test` nft table: DNAT `10.88.0.2` → `192.168.1.2`,
-masquerade on eth4. Host route forces `.2` via eth4 (`ip route add 192.168.1.2/32 dev eth4`).
-Cross-interface: packets enter eth3, exit eth4.
-
-### Results
-
-| Test | Direction | Bitrate | Retransmits | Notes |
-|------|-----------|---------|-------------|-------|
-| Direct LXC→.2 (no Mono) | TX | **7.09 Gbps** | 0 | Link ceiling (veth+10G) |
-| Local Mono→.2 | TX | **3.41 Gbps** | 0 | Mono CPU-limited (Boot #14) |
-| **Forwarded slow-path** | TX | **2.46 Gbps** | 100 | NAT, no flow offload |
-| **Forwarded + flow offload** | TX | **4.39 Gbps** | 89 | **+78%** over slow-path |
-| Forwarded + offload (peak) | TX | **4.80 Gbps** | — | Sustained for 5+ seconds |
-| Forwarded + offload (4-stream) | TX | 2.72 Gbps | 26 | Limited by NAT single-flow? |
-| Forwarded + offload (RX) | RX | 0.94 Gbps | 116 | Return path bottleneck |
-
-### Key Findings
-
-1. **Software flow offload works:** 4.39 Gbps average, 4.80 Gbps peak — nearly doubles
-   slow-path forwarding (2.46 → 4.39 Gbps = +78%)
-2. **Flow offload already exceeds VPP/AF_XDP:** 4.39 Gbps forwarded > 3.5 Gbps AF_XDP local
-3. **fp_info correctly tracks both directions:**
-   ```
-   fp[0]={if=3 mark=0x0 iif=3}  ← original: enters eth3
-   fp[1]={if=4 mark=0x0 iif=4}  ← reply: enters eth4
-   ```
-4. **RX distribution balanced:** ~530K NET_RX softirqs per CPU (4-way equal)
-5. **4-stream forwarding is slower** than single-stream — likely NAT masquerade
-   serialization or LXC200 TCP stack overhead with multiplexed connections
-6. **RX direction capped at 1 Gbps** — return path bottleneck (likely `.2`'s link
-   to switch or NAT masquerade reply processing)
-
-### Forwarding Throughput Tiers (Measured vs Target)
-
-```mermaid
-graph LR
-    subgraph Measured
-        A["Slow-path<br>2.46 Gbps"] --> B["SW Offload<br>4.39 Gbps"]
+    subgraph "What happens"
+        VPP_START["VPP starts"] --> BUS["dpaa_bus_probe()"]
+        BUS --> BMAN["BMan: init ALL pools"]
+        BUS --> QMAN["QMan: init ALL FQs"]
+        BMAN --> KILL["Kernel eth0 dead<br/>SSH unreachable"]
+        QMAN --> KILL
     end
-    subgraph Target
-        B --> C["FMan PCD<br>~9 Gbps"]
-        C --> D["Line Rate<br>9.41 Gbps"]
-    end
-    
-    style A fill:#f66
-    style B fill:#fa0
-    style C fill:#6f6
-    style D fill:#6cf
 ```
 
-## Recommended Next Steps (Priority Order)
+The `plans/FMD-SHIM-SPEC.md` documents the partial infrastructure built:
+- FMD shim skeleton: `/dev/fm0*` chardevs + `GET_API_VERSION` ioctl ✅
+- KG scheme programming (RSS): specified but not yet coded
+- DPDK `fmc_q=0` patch: specified but moot until RC#31 resolved
 
-### Step 1: ✅ Forwarding Test — DONE
-NAT forwarding (eth3→eth4) working. Slow-path baseline: 2.46 Gbps.
+**Unblocking requires:** Scoped `dpaa_bus` init in DPDK (upstream code change) or all-DPDK mode with LCP (Linux Control Plane) for management.
 
-### Step 2: ✅ Software Flow Offload — DONE
-`nft_flow_offload` enabled. Measured: 4.39 Gbps avg, 4.80 Gbps peak.
+---
 
-### Step 3: Integrate Flow Offload into VyOS Config
-Add `set firewall flowtable` equivalent to `data/config.boot.default` so flow offload
-is active on every boot. Also integrate `ask-conntrack-fix.sh` as a systemd service.
+## 4. ASK Stack — Hardware Validation Results
 
-### Step 4: 10G↔10G Forwarding Test (requires .2 + .3 on separate subnets)
-Set up eth3↔eth4 forwarding with two 10G hosts on different subnets.
-This removes the LXC200 veth bottleneck and measures true 10G forwarding.
+### 4.1 What is ASK?
 
-### Step 5: Plan Hardware Offload Prototype
-Based on measured 4.39 Gbps with software offload, the gap to line rate (9.41 Gbps)
-requires FMan PCD hardware classification. Write a minimal flow-learning daemon:
-1. Listen to conntrack ESTABLISHED events via ctnetlink
-2. Program FMan KeyGen scheme via `/dev/fm0-pcd` ioctl
-3. Configure OH port forwarding for matched flows
+NXP Application Services Kit — a hardware flow offload engine for DPAA1. Unlike VPP (which processes every packet in userspace), ASK programs FMan hardware to forward matching flows at line rate without CPU involvement.
 
-## Architecture Comparison
+```mermaid
+graph TD
+    subgraph "Control Plane"
+        CMM_D["CMM daemon<br/>(conntrack monitor)"]
+        LIBFCI_D["libfci.so<br/>NETLINK_FF(30) + NETLINK_KEY(32)"]
+        FCI_K["fci.ko<br/>Kernel netlink bridge"]
+    end
+    subgraph "Data Plane"
+        CDX_K["cdx.ko (557KB)<br/>Fast-path engine"]
+        FMAN["FMan Hardware<br/>KeyGen + Classifier"]
+    end
+    subgraph "Linux Kernel"
+        CT["nf_conntrack<br/>Connection tracking"]
+        DPAA["fsl_dpa + fsl_dpaa_mac<br/>Network drivers"]
+    end
 
-| Feature | VPP/AF_XDP (mainline) | ASK Tier 1 (SW offload) | ASK Tier 3 (HW offload) |
-|---------|----------------------|------------------------|------------------------|
-| Kernel | Mainline DPAA1 | SDK DPAA1 | SDK DPAA1 |
-| RX distribution | AF_XDP + XDP redirect | QMan 4-way NAPI | FMan PCD 5-tuple hash |
-| Fast-path mechanism | VPP graph nodes | nft_flow_offload | FMan HW classify + OH fwd |
-| Linux stack bypass | Partial (AF_XDP) | ESTABLISHED flows only | Matched flows entirely |
-| NAT support | VPP NAT plugin | Kernel conntrack NAT | OH port header rewrite |
-| **Measured throughput** | **~3.5 Gbps** | **4.39 Gbps (+25%)** | TBD (~9 Gbps target) |
-| Implementation effort | Done | Done (1 hour) | Multi-week (custom daemon) |
-| Blocking issues | RC#31 (bus init) | None ✅ | CMM daemon needed |
+    CMM_D -->|"FCI netlink"| FCI_K
+    FCI_K -->|"comcerto_fpp_send_command()"| CDX_K
+    CDX_K -->|"CCSR register writes"| FMAN
+    CT -->|"conntrack events"| CMM_D
+    DPAA -->|"first packet (slow path)"| CT
+    FMAN -->|"subsequent packets (fast path)"| FMAN
+```
+
+### 4.2 Live Test Results (2026-04-07)
+
+All three components running on device at 192.168.1.189:
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| `cdx.ko` | ✅ Loaded | 557KB, `/dev/cdx_ctrl` major 243, `qm_init` successful |
+| `fci.ko` | ✅ Loaded | Refcount 9, 17 msgs sent/received, 0 errors |
+| `cmm` | ✅ Running | PID 11085, stable, 65536 max connections |
+
+**FCI Netlink Sockets:**
+- Protocol 30 (NETLINK_FF): kernel listener + 5 CMM worker sockets
+- Protocol 32 (NETLINK_KEY): kernel listener + 4 CMM worker sockets
+
+**Network Interfaces (all UP under kernel):**
+- eth0: RJ45 1G — 10.99.0.1/24 (LAN)
+- eth1: RJ45 1G — 192.168.1.190/16 (mgmt)
+- eth2: RJ45 1G — 192.168.1.185/16 (WAN+NAT)
+- eth3: SFP+ 10G copper (SFP-10G-T) — 192.168.1.182/16, 10Gbps carrier, DHCP (after TX_DISABLE GPIO fix)
+- eth4: SFP+ 10G DAC (SFP-H10GB-CU1M) — 192.168.1.192/16, 10Gbps carrier, DHCP
+
+**Conntrack (after `notrack` fix):**
+- 8+ flow entries tracked (SSH, NTP, broadcast)
+- `fp_netfilter: hooks registered + conntrack force-enabled` at T+2.3s
+
+### 4.3 Issues Encountered & Fixed
+
+| Issue | Root Cause | Fix |
+|-------|-----------|-----|
+| CDX crash on load | `DPA_IPSEC_OFFLOAD` code + `cdx_init_frag_module()` FMan MURAM corruption | Disabled in Makefile + `#if 0` wrapper |
+| CDX crash (WiFi/timer) | `CFG_WIFI_OFFLOAD` + NULL timer deref | Disabled WiFi + timestamp NULL guard |
+| `MODULE_SIG_FORCE` rejection | Unsigned module | Sign with `scripts/sign-file sha512` |
+| FCI NETLINK_KEY=31 vs kernel=32 | Kernel header `uapi/linux/netlink.h` defines `NETLINK_KEY 32`, `MAX_LINKS 64` | Reverted libfci.so to 32 |
+| CMM `nfnl_set_nonblocking_mode` missing | `libnfnetlink.so.0` symlink pointed to `.orig` Debian lib (30KB) not NXP lib (137KB) | Fixed symlink to NXP version |
+| CMM `ctnetlink ABI broken` crash | NXP `libnetfilter_conntrack.so` has `parse_mnl.c` attribute table with lower `CTA_MAX` than kernel 6.6 | **Don't install NXP lib; use system Debian `libnetfilter_conntrack` 1.0.9** |
+| VyOS `notrack` kills conntrack | `vyos_conntrack` nftables table has `notrack` rule at end of PREROUTING/OUTPUT chains | Delete `notrack` handles via `nft delete rule` (see `ask-conntrack-fix.sh`) |
+| SFP-10G-T copper no link (SDK) | SDK `fsl_mac` driver has no phylink — TX_DISABLE stays asserted (sfp.c binds but state machine never starts) | Unbind sfp.c, export GPIO 590, set HIGH. Board inverter: HIGH → TX enabled. Copper link UP at 10Gbps |
+| `dpa_app` segfault | 40MB BSS, SDK Yocto ABI incompatible | **Replaced by `cdx_init`** — custom 7-port initializer using `/dev/cdx_ctrl` ioctl |
+| FPP tables empty | CDX interface table not populated — `dpa_app` never ran to map FMan ports | **Fixed by `cdx_init`** — all 7 ports registered (2×OH + 3×1G + 2×10G) |
+| CDX policer profile failure | `dpa_add_ethport_ff_policier_profile()` aborted port registration (`goto err_ret4`) | Changed to `pr_warn()` + continue in `devman.c` — policer non-essential without PCD |
+| SDK cell-index collision | MAC2 (1G, ci=1) collides with MAC10 (10G, ci=9→1) due to SDK remap | Added 1G speed filter in `find_osdev_by_fman_params()` in `devman.c` |
+| Stale procfs blocks CDX reload | `/proc/fqid_stats/*`, `/proc/oh1`, `/proc/oh2` survive `rmmod cdx` | `proc_cleanup.ko` removes orphaned entries. QMan FQ state still requires full reboot |
+
+### 4.4 What ASK Still Needs
+
+1. **`dpa_app` replacement:** ✅ **DONE** — `cdx_init` (custom C tool) registers all 7 ports via `/dev/cdx_ctrl` ioctl: OH@2(portid=8), OH@3(portid=9), MAC2(1), MAC5(4), MAC6(5), MAC9(6), MAC10(7). Replaces segfaulting `dpa_app`.
+
+2. **Conntrack hook integration:** ✅ **DONE** — `ASK fp_netfilter: hooks registered + conntrack force-enabled` confirms the kernel hooks are active. The `ask-conntrack-fix.sh` removes VyOS `notrack` rules so conntrack entries are visible to CMM.
+
+3. **Forwarding topology:** ✅ **DONE** — `ask-activate.sh` Phase 7 configures WAN→LAN forwarding: eth4 (SFP+ WAN), eth0 (LAN), with ip_forward and NAT masquerade.
+
+4. **FMC PCD programming (the actual HW offload gap):** ❌ **REMAINING** — Without PCD hash tables programmed into FMan, CDX operates in **software fast-path mode only**: CMM tracks conntrack flows and CDX forwards them via the kernel fast-path (bypassing netfilter on subsequent packets), but FMan hardware cannot autonomously steer packets — every packet still hits the CPU. For true hardware offload (FMan forwards matching flows at line rate, zero CPU), FMan's Coarse Classifier (CC) tables must be programmed with flow-match rules that CDX can reference. Two blockers:
+   - **`fmc` tool incompatible:** The standard NXP FMC binary doesn't support ASK's `external="yes"` PCD XML attributes (CDX requires external FQ references for its fast-path steering). FMC rejects the XML or produces configs CDX can't consume.
+   - **`dpa_app` segfaults:** The SDK-built `dpa_app` (which integrates FMC+CDX PCD setup) has 40MB BSS and ABI-incompatible SDK assumptions — replaced by `cdx_init` for port registration, but PCD programming was `dpa_app`'s other role.
+   - **CC tree hang:** Even with standalone FMC, `FM_PCD_CcRootBuild` blocks forever because OH ports lack ingress FQs/buffer pools in DTS (`bpool-ethernet-cfg` missing from `dpa-fman0-oh@2/3` nodes).
+   - **Next step:** Custom PCD programmer (using fmlib directly via `/dev/fm0*` ioctls, ~500 LOC) or patch FMC to support `external="yes"` attributes. KG-only PCD (RSS distribution) is proven working — the gap is CC table programming specifically.
+
+5. **Hardware offload throughput verification:** ❌ **BLOCKED by #4** — Cannot verify line-rate hardware offload until PCD CC tables are programmed. Software fast-path (current state) should still show improvement over pure kernel forwarding but won't reach line-rate 10G.
+
+---
+
+## 5. FMC PCD Breakthrough (2026-04-07)
+
+### 5.1 FMC Works Without `dpa_app`
+
+Today's live testing on the Mono Gateway proved that the standalone **FMC binary** (statically-linked fmlib) can program FMan PCD directly via SDK `/dev/fm0*` chardevs — bypassing the broken `dpa_app` entirely.
+
+**Successful operations (EXIT=0, device stable):**
+```
+FM_Open → FM_PCD_Open → FM_PCD_Enable → FM_PORT_Open →
+FM_PCD_NetEnvCharacteristicsSet → FM_PCD_KgSchemeSet →
+FM_PORT_Disable → FM_PORT_SetPCD → FM_PORT_Enable
+```
+
+**Key discoveries:**
+
+| Finding | Detail |
+|---------|--------|
+| **KG-only PCD works** | KeyGen scheme programming via direct MMIO — no HC port needed |
+| **PDL file is mandatory** | `-d hxs_pdl_v3.xml` required or FMC crashes device |
+| **CC trees hang** | `FM_PCD_CcRootBuild` blocks forever — OH ports have zero ingress FQs |
+| **Device survives** | Port disable→SetPCD→re-enable is atomic, network stays up |
+| **FMD shim unnecessary** | SDK kernel provides full `/dev/fm0*` (24 chardevs, major 245) |
+
+### 5.2 Implications for ASK
+
+This changes the `dpa_app` blocker from "rebuild from Yocto" to "use FMC with KG-only configs":
+
+1. **FMC is already cross-compiled** — aarch64 ELF, statically-linked fmlib, only needs `libxml2`
+2. **KG distribution = RSS** — FMan KeyGen hashes on 5-tuple fields and distributes to multiple FQs
+3. **CC tables are NOT needed** for basic flow distribution — only for exact-match flow classification
+4. **CDX interface table population** — the missing piece is mapping FMC-programmed KG schemes to CDX's internal interface table. This may work via FCI netlink commands or by CDX reading FMan state directly
+
+### 5.3 Remaining ASK Blockers
+
+```mermaid
+graph TD
+    FMC_OK["✅ FMC KG Scheme<br/>Programming Works"]
+    CDX_OK["✅ CDX/FCI/CMM<br/>All Running"]
+    CT_OK["✅ Conntrack Hooks<br/>Active"]
+    
+    BLOCKER1["❌ CDX Interface Table<br/>Empty (FPP rc:044c)"]
+    BLOCKER2["❌ CC Trees Need<br/>HC Port Fix"]
+    BLOCKER3["❌ Forwarding Topology<br/>Same-subnet, no L3"]
+    
+    FMC_OK --> DONE1["✅ CDX Interface Table<br/>7 ports registered<br/>(cdx_init)"]
+    CDX_OK --> DONE1
+    BLOCKER2 --> |"Need: OH port<br/>buffer pools in DTS"| FIX2["Add bpool-ethernet-cfg<br/>to dpa-fman0-oh@2/3"]
+    CT_OK --> DONE3["✅ Forwarding Topology<br/>WAN/LAN configured<br/>(ask-activate.sh)"]
+    
+    DONE1 --> BLOCKER4["❌ Flow Offload<br/>Verification Needed"]
+    DONE3 --> BLOCKER4
+    BLOCKER4 --> |"Need: iperf3 test<br/>through offload path"| FIX4["Benchmark CDX<br/>forwarded flows"]
+```
+
+---
+
+## 6. Comparison: Three Paths Forward
+
+```mermaid
+graph TD
+    subgraph "Path A: VPP + AF_XDP (Current)"
+        A1["Every packet through VPP userspace"]
+        A2["~3.5 Gbps, single queue"]
+        A3["Works NOW, VyOS CLI integrated"]
+    end
+    subgraph "Path B: VPP + DPDK DPAA PMD"
+        B1["DPDK kernel bypass (zero-copy)"]
+        B2["~9.5 Gbps theoretical, RSS multi-worker"]
+        B3["BLOCKED: RC#31 dpaa_bus kills kernel"]
+    end
+    subgraph "Path C: ASK Hardware Offload"
+        C1["FMan hardware forwards matched flows"]
+        C2["Line-rate 10G, zero CPU for offloaded flows"]
+        C3["Needs dpa_app rebuild + conntrack hooks"]
+    end
+```
+
+| Criterion | AF_XDP | DPAA PMD | ASK |
+|-----------|--------|----------|-----|
+| **Throughput** | ~3.5 Gbps | ~9.5 Gbps | 10 Gbps line-rate (offloaded) |
+| **CPU usage** | High (poll-mode) | Medium (poll-mode) | Near-zero (hardware) |
+| **Kernel coexistence** | ✅ Full | ❌ Breaks all interfaces | ✅ Full |
+| **VyOS CLI** | ✅ Native | ⚠️ Needs LCP | ❌ Separate CMM daemon |
+| **Feature coverage** | Full VPP graph | Full VPP graph | L2–L4 forwarding only |
+| **RSS / multi-worker** | ❌ Single queue | ✅ 4+ queues | ✅ Hardware hashing |
+| **Maturity** | Production | Blocked | Operational (CDX+FCI+CMM), needs CC trees |
+| **Jumbo frames** | ❌ MTU ≤3290 | ✅ Full | ✅ Full |
+
+---
+
+## 6. Recommended Plan
+
+### Phase 1: Keep AF_XDP as Production (NOW)
+- AF_XDP works at 3.5 Gbps — sufficient for most deployments
+- Continue improving VyOS integration (thermal, monitoring)
+
+### Phase 2: Develop ASK Integration (2–4 weeks)
+ASK provides the best cost/benefit for the LS1046A platform:
+
+1. **Week 1:** Rebuild FMC/`dpa_app` from NXP Yocto source against Debian arm64
+   - Extract FMC library from `meta-freescale` layer
+   - Cross-compile with VyOS kernel headers
+   - Target: `dpa_app` runs without segfault, configures FMan RSS
+
+2. **Week 2:** Add `comcerto_fp_netfilter` to mainline kernel build
+   - Move ASK kernel patches from `data/kernel-patches/ask/` to CI pipeline
+   - Add `CONFIG_COMCERTO_FP=y` to kernel config
+   - Target: CDX can receive conntrack flow offload requests
+
+3. **Week 3:** Create VyOS integration service
+   - Systemd service: loads CDX → FCI → starts CMM
+   - VyOS config node: `set system fast-path enable`
+   - Target: ASK starts automatically on boot
+
+4. **Week 4:** Benchmark and tune
+   - Measure offloaded flow throughput (expect line-rate 10G)
+   - Tune CDX conntrack aging timers
+   - Document in VPP-SETUP.md
+
+### Phase 3: Revisit DPAA PMD (Future)
+Only if upstream DPDK scopes `dpaa_bus` init:
+- Monitor DPDK mailing list for DPAA bus changes
+- Alternative: all-DPDK mode with LCP (requires VPP managing all interfaces)
+- FMD shim (plans/FMD-SHIM-SPEC.md) remains ready for RSS when PMD unblocks
+
+### Hybrid Architecture (Target)
+
+```mermaid
+graph LR
+    subgraph "Management (kernel)"
+        ETH0["eth0 RJ45<br/>SSH/MGMT"]
+        ETH1["eth1 RJ45"]
+        ETH2["eth2 RJ45"]
+    end
+    subgraph "ASK Hardware Offload"
+        ETH3["eth3 SFP+ 10G<br/>WAN"]
+        ETH4["eth4 SFP+ 10G<br/>LAN"]
+        CDX_HW["CDX → FMan<br/>Offloaded flows:<br/>10 Gbps line-rate"]
+    end
+    subgraph "Slow Path"
+        KERNEL["Linux kernel stack<br/>First packet + control"]
+        CMM_SP["CMM<br/>Conntrack → CDX offload"]
+    end
+
+    ETH3 --> CDX_HW
+    CDX_HW --> ETH4
+    ETH3 -.-> |"first packet"| KERNEL
+    KERNEL --> CMM_SP
+    CMM_SP --> |"program flow"| CDX_HW
+    ETH0 --> KERNEL
+```
+
+---
+
+## 7. Key Files Reference
+
+| Category | File | Purpose |
+|----------|------|---------|
+| **VPP AF_XDP** | `data/vyos-1x-010-vpp-platform-bus.patch` | Maps `fsl_dpa` to AF_XDP in VyOS VPP |
+| **VPP AF_XDP** | `data/kernel-patches/patch-dpaa-xdp-queue-index.py` | Fixes FQID→queue_index for XSKMAP |
+| **DPAA PMD** | `archive/dpaa-pmd/` | Archived DPDK infrastructure (RC#31) |
+| **DPAA PMD** | `plans/FMD-SHIM-SPEC.md` | FMan chardev shim for DPDK fmlib |
+| **ASK CDX** | `ASK/cdx/cdx_main.c` | Fast-path engine module entry |
+| **ASK FCI** | `ASK/fci/fci.c` | Netlink bridge (NETLINK_FF=30, KEY=32) |
+| **ASK CMM** | `ASK/cmm/` | Conntrack offload daemon |
+| **ASK Library** | `ASK/fci/lib/` | libfci.so userspace netlink client |
+| **ASK Init** | `data/scripts/cdx_init.c` | 7-port CDX initializer (replaces `dpa_app`) |
+| **ASK Cleanup** | `data/scripts/proc_cleanup.c` | Stale procfs cleanup module |
+| **ASK Activate** | `data/scripts/ask-activate.sh` | 8-phase activation script |
+| **Analysis** | `plans/VPP-DPAA-PMD-VS-AFXDP.md` | DPAA PMD vs AF_XDP technical comparison |
+| **Kernel ASK** | `data/kernel-patches/ask/` | Conntrack fast-path hooks for CDX |

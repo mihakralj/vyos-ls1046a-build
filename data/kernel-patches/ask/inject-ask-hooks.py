@@ -306,7 +306,7 @@ int original_dev_queue_xmit(struct sk_buff *skb);
 typedef int (*dpaa_wifi_xmit_local_hook_t)(struct sk_buff *skb);
 int dpa_register_wifi_xmit_local_hook(dpaa_wifi_xmit_local_hook_t hookfn);
 void dpa_unregister_wifi_xmit_local_hook(void);
-int dpa_add_dummy_eth_hdr(struct sk_buff** skb_in, int headroom, void *data, int len);
+int dpa_add_dummy_eth_hdr(struct sk_buff** skb_in, int priv_headroom, unsigned char *hdroom_realloc);
 #endif
 
 """,
@@ -497,21 +497,9 @@ void dpa_unregister_wifi_xmit_local_hook(void)
 }
 EXPORT_SYMBOL(dpa_unregister_wifi_xmit_local_hook);
 
-int dpa_add_dummy_eth_hdr(struct sk_buff **skb_in, int headroom, void *data, int len)
-{
-\tstruct sk_buff *skb = *skb_in;
-\tif (skb_headroom(skb) < headroom) {
-\t\tstruct sk_buff *skb2 = skb_realloc_headroom(skb, headroom);
-\t\tif (!skb2) return -ENOMEM;
-\t\tif (skb->sk) skb_set_owner_w(skb2, skb->sk);
-\t\tkfree_skb(skb);
-\t\t*skb_in = skb2;
-\t\tskb = skb2;
-\t}
-\tmemcpy(skb_push(skb, len), data, len);
-\treturn 0;
-}
-EXPORT_SYMBOL(dpa_add_dummy_eth_hdr);
+/* NOTE: dpa_add_dummy_eth_hdr implementation is in sdk_dpaa/dpaa_eth_sg.c
+ * (3-param version: skb_in, priv_headroom, hdroom_realloc).
+ * Do NOT duplicate it here — it causes conflicting types. */
 
 int original_dev_queue_xmit(struct sk_buff *skb)
 {

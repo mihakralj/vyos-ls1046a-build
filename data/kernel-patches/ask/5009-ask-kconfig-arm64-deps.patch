@@ -1,0 +1,81 @@
+From: VyOS ARM64 Build <build@vyos.io>
+Subject: [PATCH] Fix ASK and SoC Kconfig dependencies for mainline ARM64 kernel
+
+The ASK patches and several critical SoC drivers reference ARCH_LAYERSCAPE
+which only exists in NXP BSP kernels, not mainline. This causes configs to
+be silently stripped by olddefconfig/syncconfig.
+
+Fixes:
+- NET_VENDOR_FREESCALE: Add ARM64 to dependency list (alongside
+  ARCH_LAYERSCAPE) so Freescale network drivers are visible on ARM64
+- CPE_FAST_PATH: Remove 'depends on ARCH_LAYERSCAPE' entirely since
+  the fast-path code is architecture-independent
+- CLK_QORIQ: Add ARM64 to dependency list so the QorIQ clock driver
+  is visible. Without it, FMan cannot get its clock reference and
+  probe fails with "Failed to get FM clock structure" (error -5)
+- QORIQ_CPUFREQ: Add ARM64 to dependency list so CPU frequency
+  scaling works (selects CLK_QORIQ). Without it, CPU stays at 700 MHz
+- MMC_SDHCI_OF_ESDHC: Add ARM64 to dependency list so the eMMC
+  controller driver is visible. Without it, rootfs cannot mount and
+  the system hangs at "Mounting root file system"
+
+Also fixes the nf_conn->mark regression: the ASK patch moved the 'mark'
+field from CONFIG_NF_CONNTRACK_MARK to CONFIG_CPE_FAST_PATH but left the
+original block empty. When CPE_FAST_PATH is not yet enabled (e.g. during
+initial config), code referencing ct->mark fails to compile. Fix: restore
+mark in CONFIG_NF_CONNTRACK_MARK when CPE_FAST_PATH is not enabled.
+
+--- a/drivers/net/ethernet/freescale/Kconfig
++++ b/drivers/net/ethernet/freescale/Kconfig
+@@ -5,7 +5,7 @@
+ depends on FSL_SOC || QUICC_ENGINE || CPM1 || CPM2 || PPC_MPC512x || \
+    M523x || M527x || M5272 || M528x || M520x || M532x || \
+    ARCH_MXC || ARCH_MXS || (PPC_MPC52xx && PPC_BESTCOMM) || \
+-   ARCH_LAYERSCAPE || ARCH_S32 || COMPILE_TEST
++   ARCH_LAYERSCAPE || ARCH_S32 || ARM64 || COMPILE_TEST
+
+--- a/net/Kconfig
++++ b/net/Kconfig
+@@ -120,7 +120,6 @@
+ config CPE_FAST_PATH
+ bool "Fast Path Processing offload"
+-depends on ARCH_LAYERSCAPE
+ depends on NETFILTER
+
+--- a/include/net/netfilter/nf_conntrack.h
++++ b/include/net/netfilter/nf_conntrack.h
+@@ -126,6 +126,9 @@
+
+ #if defined(CONFIG_NF_CONNTRACK_MARK)
++#if !defined(CONFIG_CPE_FAST_PATH)
++u_int32_t mark;
++#endif
+ #endif
+ #if defined(CONFIG_CPE_FAST_PATH)
+
+--- a/drivers/clk/Kconfig
++++ b/drivers/clk/Kconfig
+@@ -215,7 +215,7 @@
+ config CLK_QORIQ
+ bool "Clock driver for Freescale QorIQ platforms"
+ depends on OF
+-depends on PPC_E500MC || SOC_LS1021A || ARCH_LAYERSCAPE || COMPILE_TEST
++depends on PPC_E500MC || SOC_LS1021A || ARCH_LAYERSCAPE || ARM64 || COMPILE_TEST
+
+--- a/drivers/cpufreq/Kconfig
++++ b/drivers/cpufreq/Kconfig
+@@ -215,7 +215,7 @@
+ config QORIQ_CPUFREQ
+ tristate "CPU frequency scaling driver for Freescale QorIQ SoCs"
+ depends on OF && COMMON_CLK
+-depends on PPC_E500MC || SOC_LS1021A || ARCH_LAYERSCAPE || COMPILE_TEST
++depends on PPC_E500MC || SOC_LS1021A || ARCH_LAYERSCAPE || ARM64 || COMPILE_TEST
+ select CLK_QORIQ
+
+--- a/drivers/mmc/host/Kconfig
++++ b/drivers/mmc/host/Kconfig
+@@ -204,7 +204,7 @@
+ config MMC_SDHCI_OF_ESDHC
+ tristate "SDHCI OF support for the Freescale eSDHC controller"
+-depends on PPC || ARCH_MXC || ARCH_LAYERSCAPE || COMPILE_TEST
++depends on PPC || ARCH_MXC || ARCH_LAYERSCAPE || ARM64 || COMPILE_TEST

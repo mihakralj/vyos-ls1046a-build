@@ -1,0 +1,42 @@
+From: VyOS LS1046A Build <build@vyos.io>
+Subject: [PATCH] net: fman: fix uninitialized onesCount in FM_PCD_HashTableSet
+
+The onesCount local variable in FM_PCD_HashTableSet() is declared but
+never initialized to zero before being incremented in the while loop
+that counts set bits of the hash result mask. This causes onesCount
+to start from whatever garbage value is on the kernel stack, producing
+a wrong numOfSets value (1 << (garbage + actual_count)). The resulting
+overflow cascades into invalid parameters for FM_PCD_MatchTableSet,
+ultimately causing a kernel NULL pointer dereference.
+
+Initialize onesCount = 0 to fix hash table creation on DPAA1 platforms.
+
+Also initialize countOnes in IcHashIndexedCheckParams for the same
+reason (cosmetic — that function also relies on incrementing from an
+uninitialized value).
+
+Signed-off-by: VyOS LS1046A Build <build@vyos.io>
+---
+ .../freescale/sdk_fman/Peripherals/FM/Pcd/fm_cc.c      | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+--- a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_cc.c
++++ b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_cc.c
+@@ -4059,7 +4059,7 @@ static t_Error IcHashIndexedCheckParams(
+ {
+     int         i;
+     uint16_t    glblMask;
+-    uint8_t     countOnes;
++    uint8_t     countOnes = 0;
+     uint16_t    numOfKeys;
+ 
+     glblMask = p_CcNodeParam->extractCcParams.extractNonHdr.icIndxMask;
+@@ -7589,7 +7589,7 @@ t_Handle FM_PCD_HashTableSet(t_Handle h_
+     t_FmPcdCcNode           *p_CcNodeHashTbl = NULL;
+     t_Handle                h_MissStatsCounters = NULL;
+     uint32_t                countMask;
+-    uint8_t                 onesCount;
++    uint8_t                 onesCount = 0;
+     uint16_t                numOfSets, numOfWays;
+     int                     i;
+     t_Error                 err;

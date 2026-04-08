@@ -10,7 +10,7 @@ HOOKS=vyos-build/data/live-build-config/hooks/live
 
 ### vyos-build patches
 cp data/config.boot.default "$CHROOT/opt/vyatta/etc/"
-cp data/config.boot.dhcp "$CHROOT/opt/vyatta/etc/"
+[ -f data/config.boot.dhcp ] && cp data/config.boot.dhcp "$CHROOT/opt/vyatta/etc/"
 patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-005-add_vim_link.patch
 patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-007-no_sbsign.patch
 

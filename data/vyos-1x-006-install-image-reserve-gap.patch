@@ -44,21 +44,19 @@
  
  
  def find_persistence() -> str:
-@@ -61,11 +80,25 @@
+@@ -59,10 +78,24 @@
  
  def parttable_create(drive_path: str, root_size: int) -> None:
      """Create a hybrid MBR/GPT partition table
 -    0-2047 first sectors are free
 -    2048-4095 sectors - BIOS Boot Partition
--    4096-36863 sectors - reserved for bootloader payload (16 MiB gap)
--    36864 + 256 MB - EFI system partition
+-    4096 + 256 MB - EFI system partition
 -    Everything else till the end of a drive - Linux partition
 +
 +    Standard x86 layout:
 +        0-2047 first sectors are free
 +        2048-4095 sectors - BIOS Boot Partition
-+        4096-36863 sectors - reserved for bootloader payload (16 MiB gap)
-+        36864 + 256 MB - EFI system partition
++        4096 + 256 MB - EFI system partition
 +        Everything else till the end of a drive - Linux partition
 +
 +    LS1046A eMMC layout (32 MiB firmware reservation):
@@ -69,11 +67,11 @@
  
      Args:
          drive_path (str): path to a drive
-@@ -74,8 +107,20 @@
+@@ -71,8 +104,20 @@
          root_size_text: str = '+100%'
      else:
          root_size_text: str = str(root_size)
--    command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:36864:+256M -t2:EF00 \
+-    command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:4096:+256M -t2:EF00 \
 -        -n3:0:+{root_size_text}K -t3:8300 {drive_path}'
 +    # Build partition 3 argument: sgdisk end=0 means "rest of disk",
 +    # +NNK means "NN kilobytes from start".  The upstream root_size_text
@@ -89,7 +87,7 @@
 +            -n2:{_EFI_START}:+256M -t2:EF00 \
 +            -n3:0:{p3_end} -t3:8300 {drive_path}'
 +    else:
-+        command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:36864:+256M -t2:EF00 \
++        command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:4096:+256M -t2:EF00 \
 +            -n3:0:{p3_end} -t3:8300 {drive_path}'
  
      run(command)
