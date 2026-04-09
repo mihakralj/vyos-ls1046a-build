@@ -93,17 +93,6 @@ cp data/scripts/10-fman-port-order.rules "$CHROOT/etc/udev/rules.d/10-fman-port-
 mkdir -p "$CHROOT/etc/systemd/network"
 cp data/scripts/00-fman.link "$CHROOT/etc/systemd/network/00-fman.link"
 
-### SDK+ASK: SFP TX_DISABLE deassert via GPIO (SDK kernel only — guarded by ConditionPathExists)
-cp data/scripts/sfp-tx-enable-sdk.sh "$CHROOT/usr/local/bin/sfp-tx-enable-sdk.sh"
-chmod +x "$CHROOT/usr/local/bin/sfp-tx-enable-sdk.sh"
-cp data/systemd/sfp-tx-enable-sdk.service "$CHROOT/etc/systemd/system/sfp-tx-enable-sdk.service"
-cp data/systemd/sfp-tx-enable-sdk.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/sfp-tx-enable-sdk.conf"
-
-### SDK+ASK: conntrack notrack removal for ASK fast-path (SDK kernel only — guarded by dmesg check)
-cp data/scripts/ask-conntrack-fix.sh "$CHROOT/usr/local/bin/ask-conntrack-fix.sh"
-chmod +x "$CHROOT/usr/local/bin/ask-conntrack-fix.sh"
-cp data/systemd/ask-conntrack-fix.service "$CHROOT/etc/systemd/system/ask-conntrack-fix.service"
-cp data/systemd/ask-conntrack-fix.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/ask-conntrack-fix.conf"
 
 ### FQ qdisc for BBR pacing on 10G SFP+ interfaces
 cp data/scripts/fman-fq-qdisc "$CHROOT/usr/local/bin/fman-fq-qdisc"

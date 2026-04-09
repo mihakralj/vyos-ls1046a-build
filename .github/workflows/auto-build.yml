@@ -15,13 +15,6 @@ on:
       builder_image:
         description: 'Builder Docker image'
         default: 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64'
-      build_mode:
-        description: 'Kernel build mode: mainline (VPP/AF_XDP) or sdk-ask (SDK DPAA1 + ASK fast-path)'
-        type: choice
-        options:
-          - mainline
-          - sdk-ask
-        default: 'mainline'
 
 env:
   DEBIAN_MIRROR: http://deb.debian.org/debian/
@@ -89,14 +82,7 @@ jobs:
         run: bin/ci-setup-vyos1x.sh
 
       - name: Setup kernel config and patches
-        run: |
-          if [ "${{ github.event.inputs.build_mode }}" = "sdk-ask" ]; then
-            echo "### Build mode: SDK + ASK fast-path"
-            bin/ci-setup-kernel-sdk.sh
-          else
-            echo "### Build mode: mainline (VPP/AF_XDP)"
-            bin/ci-setup-kernel.sh
-          fi
+        run: bin/ci-setup-kernel.sh
 
       - name: Setup vyos-build (config, chroot files, hooks)
         run: bin/ci-setup-vyos-build.sh
