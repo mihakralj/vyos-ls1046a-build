@@ -6,7 +6,87 @@ Entries are factual. The humor is in the bugs.
 
 ## Unreleased
 
+### Fixed
+- **SDK kernel missing SPI_FSL_QUADSPI, I2C_IMX, and other ARCH_LAYERSCAPE-gated drivers** (`data/kernel-config/ls1046a-board.config`, `bin/ci-setup-kernel-sdk.sh`):
+  VyOS generic ARM64 defconfig doesn't set `CONFIG_ARCH_LAYERSCAPE=y`, but the LS1046A IS a
+  Layerscape SoC. Without it, `make olddefconfig` silently strips ALL drivers that have
+  `depends on ARCH_LAYERSCAPE` in Kconfig: `SPI_FSL_QUADSPI` (no `/dev/mtd*` → `fw_setenv`
+  broken → `vyos-postinstall` Phase 1 fails), `I2C_IMX` (no I2C buses → no EMC2305 fan
+  controller → no INA234 power sensors → no RTC → `fancontrol` fails), `IMX2_WDT`, and others.
+  Fix: added `CONFIG_ARCH_LAYERSCAPE=y` to `ls1046a-board.config` (applies to both mainline
+  and SDK kernel builds). Also added Kconfig patching in `ci-setup-kernel-sdk.sh` as
+  belt-and-suspenders fallback (adds `|| ARM64` to SPI_FSL_QUADSPI and I2C_IMX deps).
+
+- **SDK kernel ASK patches 5009+5010 never applied** (`bin/ci-setup-kernel-sdk.sh`):
+  The injection block only applied patches 5007 and 5008. Patches 5009 (Kconfig ARM64 deps:
+  NET_VENDOR_FREESCALE, CLK_QORIQ, QORIQ_CPUFREQ, MMC_SDHCI_OF_ESDHC, CPE_FAST_PATH;
+  nf_conn->mark regression fix) and 5010 (fmlib/kernel ABI match for fmc binary) existed in
+  `data/kernel-patches/ask/` but were never applied during the kernel build. Without 5009,
+  `CPE_FAST_PATH` stayed gated behind `ARCH_LAYERSCAPE` (before the board config fix above),
+  and `nf_conn->mark` compile regression would fail the build. Without 5010, fmlib ioctl
+  struct sizes wouldn't match the pre-built `fmc` binary → `-ENOTTY` on all PCD ioctls.
+  Fix: added steps 5a and 5b in the injection block to apply both patches.
+
+- **SDK kernel missing XGMAC_MDIO → RJ45 PHYs not discovered** (`data/kernel-config/ls1046a-sdk.config`, `bin/ci-setup-kernel-sdk.sh`):
+  `CONFIG_FSL_XGMAC_MDIO` depends on `CONFIG_FSL_FMAN` in mainline Kconfig, but the SDK
+  config disables `FSL_FMAN` (replaced by `FSL_SDK_FMAN`). `make olddefconfig` silently
+  stripped `XGMAC_MDIO=y` → no MDIO bus driver probed → GPY115C RJ45 PHYs never discovered
+  → eth0/eth1/eth2 permanently DOWN with "phy device not initialized" and "Could not connect
+  to PHY ethernet-phy@N" (error -19 ENODEV). Fix: `ci-setup-kernel-sdk.sh` now patches the
+  `FSL_XGMAC_MDIO` Kconfig `depends on` line to also accept `FSL_SDK_FMAN`, and forces
+  `CONFIG_FSL_XGMAC_MDIO=y` via `scripts/config`. The `xgmac_mdio.c` driver is a standalone
+  MDIO bus controller with no runtime dependency on mainline FMan — the Kconfig gate was
+  purely a "usually used with" hint.
+
+- **config.boot.default hw-id mismatch** (`data/config.boot.default`):
+  Fixed hw-ids that didn't match actual U-Boot MAC assignment from FMan hardware registers.
+  U-Boot's `ft_fixup_port()` writes `local-mac-address` from FMan MAC hardware registers
+  (programmed from env based on fm1-macN device index), NOT from DTS aliases. Old config
+  assumed MAC5=`16:00` but actual is MAC5=`15:ff`. Corrected mapping:
+  eth0 (left RJ45, MAC5/e8000) = `e8:f6:d7:00:15:ff`,
+  eth1 (center RJ45, MAC6/ea000) = `e8:f6:d7:00:16:00`,
+  eth2 (right RJ45, MAC2/e2000) = `e8:f6:d7:00:16:01`.
+  Without this fix, VyOS `vyos_net_name` couldn't match hw-ids to kernel-reported MACs →
+  circular rename failures → eth0/eth1 missing on installed systems.
+
+- **DTS ethernet alias reorder + duplicate deletion + BMan portal fix** (`data/dtb/mono-gateway-dk.dts`):
+  Reordered ethernet aliases to match physical port positions: ethernet0→MAC5/e8000 (left
+  RJ45), ethernet1→MAC6/ea000 (center RJ45), ethernet2→MAC2/e2000 (right RJ45),
+  ethernet3→MAC9/f0000 (left SFP+), ethernet4→MAC10/f2000 (right SFP+). U-Boot's
+  `ft_fixup_port()` assigns MACs from FMan hardware registers (NOT alias order), so alias
+  reordering only controls kernel's initial ethN numbering — it does not change MAC addresses.
+  Deleted inherited ethernet5/6/7 from base `fsl-ls1046a.dtsi` that created duplicate alias
+  indices for MAC5, MAC9, MAC10 → circular udev rename failures.
+  Also added BMan portal `cell-index` properties (0–9) — mainline `qoriq-bman-portals.dtsi`
+  omits them, but our compiled DTB needs them statically. Without them: "No BMan portals
+  available!" → no DPAA1 buffer pools → no FMan → zero interfaces.
+
+- **systemd .link file SDK driver match** (`data/scripts/00-fman.link`):
+  Added `fsl_dpa` to the `Driver=` match list alongside `dpaa_eth`. SDK kernel uses `fsl_dpa`
+  driver; without matching it, systemd applies predictable naming (e3-e7) which conflicts
+  with udev fman-port-name script → circular rename failures.
+
+- **RC#14 — fmc heap corruption after hash tables** (`nxp-fmc/source/FMCPCDModel.cpp`):
+  Root cause: `std::vector` use-after-free in ASK's `replicateHtNodes()` and `replicateCCNodes()`.
+  Both functions took `HTNode&`/`CCNode&` references into `all_htnodes`/`all_ccnodes` vectors,
+  then called `assignIndex()` which does `push_back()` — vector reallocation invalidates the
+  reference, subsequent reads from the dangling reference corrupt heap metadata → glibc
+  `malloc_consolidate(): invalid chunk size` → SIGABRT exit 134. Fix: changed both functions to
+  take `unsigned int refIndex` instead of a reference, snapshot the node BEFORE `assignIndex()`.
+  Also fixed duplicate-check bug in `replicateHtNodes` returning global vs port-local index.
+  Rebuilt fmc from source against ASK sysroot FMD headers (`/opt/vyos-dev/ask-sysroot/usr/include/fmd/`).
+  Build: `make CXX=aarch64-linux-gnu-g++ ... FMD_USPACE_HEADER_PATH=... MACHINE=ls1046 PLATFORM_FLAG="-DLS1043 -DDPAA_VERSION=11"`.
+  Binary at `nxp-fmc/source/fmc` (aarch64, 1.4MB, dynamically linked against libxml2/libstdc++).
+
 ### Added
+- **FMC-TRACE ioctl diagnostics** (`lnxwrp_ioctls_fm.c`):
+  Added `printk(KERN_INFO "FMC-TRACE: ...")` to both PCD and PORT ioctl dispatchers in
+  `LnxwrpFmPcdIOCTL()` and `LnxwrpFmPortIOCTL()`. Logs every ioctl cmd/nr/size to dmesg.
+  After TFTP boot: `dmesg | grep FMC-TRACE | tail -50` reveals the last ioctl before fmc
+  crashes with `malloc_consolidate(): invalid chunk size`. Key nr→operation mapping:
+  27=NET_ENV, 28=KG_SCHEME, 30=MATCH_TABLE, 33=CC_ROOT_BUILD, 49=MANIP_NODE,
+  57=HASH_TABLE, 76=PORT_SET_PCD, 80=KG_BIND_SCHEMES. RC#13 confirmed FIXED on hardware
+  (112/112 hash tables succeed). Used to diagnose RC#14 (userspace crash between ioctls).
 - **CDX 7-port registration with both SFP+ modules** (`data/scripts/cdx_init.c`):
   Added MAC10/eth4 (right SFP+ DAC, SDK cell-index=9→1, 10G, portid=7) to the CDX port table.
   NUM_PORTS bumped 6→7. Full port map: OH@2(portid=8), OH@3(portid=9), MAC2/eth1(1G,portid=1),
@@ -26,8 +106,13 @@ Entries are factual. The humor is in the bugs.
   Phase 8: Start CMM daemon. Removed dead FMC code (orphaned `$FMC_RC` references).
 
 ### Fixed
-- **FMan CC hash table creation — 12 bugs fixed** (`fm_cc.c`, `fm_pcd_ext.h`, `fm_pcd_ioctls.h`, `lnxwrp_ioctls_fm_compat.h`, `nf_conntrack.h`, `Kconfig`, `cdx_pcd.xml`, `dpa.c`, `ls1043_dflags.h`):
+- **FMan CC hash table creation — 13 bugs fixed** (`fm_cc.c`, `fm_pcd_ext.h`, `fm_pcd_ioctls.h`, `lnxwrp_ioctls_fm_compat.h`, `lnxwrp_ioctls_fm.c`, `nf_conntrack.h`, `Kconfig`, `cdx_pcd.xml`, `dpa.c`, `ls1043_dflags.h`):
   ROOT CAUSE chain of `FM_PCD_HashTableSet` failures that crashed the device during FMC error rollback.
+  - RC#13: fmc doesn't initialize ASK-added struct fields (`table_type`, IPR params, `externalHash`,
+    `agingSupport`, `externalHashParams`). Stack garbage in `table_type` (masked to 0–15) hits
+    reassembly code path (values 14/15) which overrides `hashResMask` to 0xf, skips spinlock
+    allocation, writes garbage IPR params → heap corruption in fmc userspace. Fix: `lnxwrp_ioctls_fm.c`
+    sanitizes ALL ASK-added fields to safe defaults after `copy_from_user`.
   (1) ASK kernel patch `002-mono-gateway-ask-kernel_linux_6_12.patch` was PARTIALLY applied — the
   `FM_PCD_HashTableSet → ExternalHashTableSet` redirect hunk failed (1486-line .rej file). Without this,
   `FM_PCD_HashTableSet` returns `t_FmPcdCcNode *` but `copy_td_to_ccbase` expects `en_exthash_info *` — fatal

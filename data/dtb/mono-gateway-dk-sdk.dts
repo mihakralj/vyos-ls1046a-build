@@ -350,12 +350,12 @@ parser@c7000 {
  * kernel netdevs for each port. Each node references its FMan MAC
  * via fsl,fman-mac phandle.
  *
- * Port mapping (same as aliases in mainline DTS):
- *   ethernet@1 = enet1 = MAC2 (e2000) = left RJ45   (eth0 after udev)
- *   ethernet@4 = enet4 = MAC5 (e8000) = center RJ45  (eth1 after udev)
- *   ethernet@5 = enet5 = MAC6 (ea000) = right RJ45   (eth2 after udev)
- *   ethernet@8 = enet6 = MAC9 (f0000) = left SFP+ 10G  (eth3 after udev)
- *   ethernet@9 = enet7 = MAC10(f2000) = right SFP+ 10G (eth4 after udev)
+ * Port mapping (physical naming via udev fman-port-name + VyOS hw-id):
+ *   ethernet@1 = enet1 = MAC2 (e2000) = right RJ45     (eth2, hw-id 16:01)
+ *   ethernet@4 = enet4 = MAC5 (e8000) = left RJ45      (eth0, hw-id 15:ff)
+ *   ethernet@5 = enet5 = MAC6 (ea000) = center RJ45    (eth1, hw-id 16:00)
+ *   ethernet@8 = enet6 = MAC9 (f0000) = left SFP+ 10G  (eth3, hw-id 16:02)
+ *   ethernet@9 = enet7 = MAC10(f2000) = right SFP+ 10G (eth4, hw-id 16:03)
  *
  * FQIDs: auto-allocated by SDK driver (no explicit fsl,qman-frame-queues-rx/tx).
  */
@@ -385,23 +385,23 @@ fsl,bpid = <16>;
 fsl,bpool-ethernet-cfg = <0 0 0 1728 0 0>;
 };
 
-		/* MAC2 — left RJ45 (1G SGMII) */
-		ethernet@1 {
-			compatible = "fsl,dpa-ethernet";
-			fsl,fman-mac = <&enet1>;
-		};
+/* MAC2 — right RJ45 (1G SGMII, eth2) */
+ethernet@1 {
+compatible = "fsl,dpa-ethernet";
+fsl,fman-mac = <&enet1>;
+};
 
-		/* MAC5 — center RJ45 (1G SGMII) */
-		ethernet@4 {
-			compatible = "fsl,dpa-ethernet";
-			fsl,fman-mac = <&enet4>;
-		};
+/* MAC5 — left RJ45 (1G SGMII, eth0) */
+ethernet@4 {
+compatible = "fsl,dpa-ethernet";
+fsl,fman-mac = <&enet4>;
+};
 
-		/* MAC6 — right RJ45 (1G SGMII) */
-		ethernet@5 {
-			compatible = "fsl,dpa-ethernet";
-			fsl,fman-mac = <&enet5>;
-		};
+/* MAC6 — center RJ45 (1G SGMII, eth1) */
+ethernet@5 {
+compatible = "fsl,dpa-ethernet";
+fsl,fman-mac = <&enet5>;
+};
 
 		/* MAC9 — left SFP+ (10G XFI) */
 		ethernet@8 {

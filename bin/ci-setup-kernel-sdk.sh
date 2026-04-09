@@ -107,6 +107,27 @@ if [ -f "${CWD}/ask/5008-ask-remaining-hooks.patch" ]; then
     }
 fi
 
+# 5a. Fix Kconfig ARM64 dependencies (ARCH_LAYERSCAPE doesn't exist in some configs)
+# Patch 5009 adds ARM64 as alternative to ARCH_LAYERSCAPE for critical drivers:
+# NET_VENDOR_FREESCALE, CLK_QORIQ, QORIQ_CPUFREQ, MMC_SDHCI_OF_ESDHC, CPE_FAST_PATH
+# Also fixes nf_conn->mark regression from ASK patch
+if [ -f "${CWD}/ask/5009-ask-kconfig-arm64-deps.patch" ]; then
+  echo "ASK: Applying Kconfig ARM64 dependency fixes..."
+  grep -v '^#' "${CWD}/ask/5009-ask-kconfig-arm64-deps.patch" | \
+    patch --no-backup-if-mismatch -p1 --fuzz=3 || {
+      echo "WARNING: Some 5009 Kconfig ARM64 dep fixes failed — may be pre-applied"
+    }
+fi
+
+# 5b. Fix fmlib/kernel ABI to match pre-built fmc binary
+if [ -f "${CWD}/ask/5010-ask-fmlib-abi-match.patch" ]; then
+  echo "ASK: Applying fmlib ABI match patch..."
+  grep -v '^#' "${CWD}/ask/5010-ask-fmlib-abi-match.patch" | \
+    patch --no-backup-if-mismatch -p1 --fuzz=3 || {
+      echo "WARNING: Some 5010 fmlib ABI hunks failed — may be pre-applied"
+    }
+fi
+
 # 6. Copy SDK DTS + base board DTS into kernel tree and register for compilation
 DTS_DIR=arch/arm64/boot/dts/freescale
 if [ -f "${CWD}/mono-gateway-dk-sdk.dts" ]; then
@@ -141,10 +162,44 @@ if [ -n "$PHYLINK_KC" ]; then
   fi
 fi
 
-# 8. Force SFP/PHYLINK built-in after all patches (re-resolve dependencies)
+# 8. Fix XGMAC_MDIO Kconfig — depends on FSL_FMAN which SDK disables.
+# The xgmac_mdio.c driver is a standalone MDIO bus controller that probes
+# fsl,fman-memac-mdio DT nodes. It has NO runtime dependency on mainline
+# FSL_FMAN, but Kconfig gates it. Add FSL_SDK_FMAN as alternative dep.
+XGMAC_KC=$(find . -path "*/ethernet/freescale/Kconfig" -maxdepth 5 | head -1)
+if [ -n "$XGMAC_KC" ] && grep -q 'FSL_XGMAC_MDIO' "$XGMAC_KC"; then
+  sed -i '/config FSL_XGMAC_MDIO/,/depends on/{s/depends on FSL_FMAN/depends on FSL_FMAN || FSL_SDK_FMAN/}' "$XGMAC_KC"
+  echo "ASK: XGMAC_MDIO Kconfig — added FSL_SDK_FMAN as alternative dependency"
+fi
+
+# 10. Fix SPI_FSL_QUADSPI Kconfig — depends on ARCH_LAYERSCAPE (belt-and-suspenders
+# with CONFIG_ARCH_LAYERSCAPE=y in board config, but patch as fallback)
+SPI_KC=$(find . -path "*/spi/Kconfig" -maxdepth 4 | head -1)
+if [ -n "$SPI_KC" ] && grep -q 'SPI_FSL_QUADSPI' "$SPI_KC"; then
+  if grep -A2 'config SPI_FSL_QUADSPI' "$SPI_KC" | grep -q 'ARCH_LAYERSCAPE'; then
+    sed -i '/config SPI_FSL_QUADSPI/,/depends on/{s/ARCH_LAYERSCAPE/ARCH_LAYERSCAPE || ARM64/}' "$SPI_KC"
+    echo "ASK: SPI_FSL_QUADSPI Kconfig — added ARM64 as alternative dependency"
+  fi
+fi
+
+# 11. Fix I2C_IMX Kconfig — depends on ARCH_MXC || ARCH_LAYERSCAPE (no COMPILE_TEST!)
+I2C_KC=$(find . -path "*/i2c/busses/Kconfig" -maxdepth 5 | head -1)
+if [ -n "$I2C_KC" ] && grep -q 'I2C_IMX' "$I2C_KC"; then
+  if grep -A2 'config I2C_IMX' "$I2C_KC" | grep -q 'ARCH_LAYERSCAPE'; then
+    sed -i '/config I2C_IMX/,/depends on/{s/ARCH_LAYERSCAPE/ARCH_LAYERSCAPE || ARM64/}' "$I2C_KC"
+    echo "ASK: I2C_IMX Kconfig — added ARM64 as alternative dependency"
+  fi
+fi
+
+# 12. Force SFP/PHYLINK/MDIO/SPI/I2C built-in after all patches (re-resolve dependencies)
+scripts/config --set-val CONFIG_ARCH_LAYERSCAPE y
 scripts/config --set-val CONFIG_PHYLINK y
 scripts/config --set-val CONFIG_SFP y
 scripts/config --set-val CONFIG_MDIO_I2C y
+scripts/config --set-val CONFIG_FSL_XGMAC_MDIO y
+scripts/config --set-val CONFIG_SPI_FSL_QUADSPI y
+scripts/config --set-val CONFIG_I2C_IMX y
+scripts/config --set-val CONFIG_GPIO_MPC8XXX y
 
 echo "=== SDK + ASK kernel injection complete ==="
 INJECT_EOF

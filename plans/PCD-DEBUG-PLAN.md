@@ -1,6 +1,6 @@
 # PCD Programming Debug Plan — ASK Hardware Offload
 
-> **Status (2026-04-08 15:35 UTC):** TWELVE root causes fixed. Kernel build #59 deployed to TFTP. Awaiting device `run dev_boot` for testing.
+> **Status (2026-04-08 22:59 UTC):** R1–R13 FIXED. RC#14 hypothesis (vector use-after-free) DISPROVEN — `CFMCModel` constructor does `reserve(512)`, preventing vector reallocation; references are always valid. The "fix" was REVERTED. Real root cause: **unknown heap corruption during `fmc_execute()`** — compile phase verified CLEAN under AddressSanitizer (QEMU). ASAN-instrumented fmc binary built (`/srv/tftp/fmc-asan`, 6.6MB, static libasan) to pinpoint exact corruption. Non-ASAN baseline binary also ready (`/srv/tftp/fmc-fixed`, 1.4MB). **BLOCKED on device power cycle** (crashed from previous FMC abort).
 >
 > 1. ~~`icIndxMask` nibble-0 constraint~~ — bypassed by ExternalHashTableSet redirect
 > 2. ~~Uninitialized `onesCount`~~ — now in dead code path
@@ -14,6 +14,8 @@
 > 10. ~~MMC_SDHCI_OF_ESDHC missing~~ — added `ARM64` to eMMC controller Kconfig dep (patch 5009), without it rootfs can't mount
 > 11. ~~`USE_ENHANCED_EHASH` not defined~~ — was never `#define`d in `ls1043_dflags.h`, so ExternalHashTableSet code was excluded; hash tables fell through to normal path with nibble-0 constraint
 > 12. ~~Ioctl ABI mismatch~~ — patch 5010 removed struct fields, changing `sizeof(ioc_fm_pcd_hash_table_params_t)` which changes the `_IOWR` ioctl command number; pre-built fmc sends `0xc078e139` (120 bytes) but kernel expected smaller → "Invalid Selection"
+> 13. ~~Garbage `table_type` in hash table ioctl~~ — fmc doesn't initialize ASK-added fields (`table_type`, IPR params, `externalHash`, `externalHashParams`); stack garbage in `table_type` (masked to 0–15) triggers reassembly code path (values 14/15) which overrides `hashResMask` to 0xf, skips spinlock allocation, and writes garbage IPR params → heap corruption in fmc userspace after ioctl return
+> 14. **fmc userspace heap corruption — UNDER INVESTIGATION** — glibc detects `malloc_consolidate(): invalid chunk size` during `fmc_execute()` after all hash tables succeed. Previous hypothesis (RC#14: vector use-after-free) DISPROVEN — `reserve(512)` prevents reallocation, references are stable. The "fix" was reverted. fmc compile phase is CLEAN under ASAN (verified via QEMU). Crash only occurs during ioctl interaction with kernel. ASAN-instrumented binary deployed to pinpoint exact heap corruption source in `libfm.a` or `fmc_exec.c`.
 
 ## 1. What We Proved
 
@@ -198,7 +200,43 @@ The original RC#5 concern (fmlib struct mismatch causing `copy_to_user` overflow
 
 **Note:** RC#5 and RC#9 are now superseded — with fields restored in all structs, both the ABI and ASSERT_COND issues are resolved simultaneously.
 
-### RC#5 (original): fmc userspace heap corruption (SUPERSEDED — fixed by RC#11+RC#12)
+### RC#13: Garbage `table_type` in hash table ioctl (FIXED)
+
+The pre-built `fmc` binary (NXP SDK, 64-bit ARM64) sends `FM_PCD_IOC_HASH_TABLE_SET` ioctl with a 120-byte struct. The ASK patches added fields to this struct (`table_type`, IPR params, `externalHash`, `agingSupport`, `externalHashParams`) that fmc doesn't initialize — they contain stack garbage.
+
+**Critical field:** `table_type` (line 753 of `fm_ehash.c`) is masked by `TABLE_TYPE_MASK` (0xf) and used in a switch to select the hash table type:
+- Values 0–13: Safe paths (L4_TABLE, L3_TABLE, L2_TABLE) with `gpp=1`
+- Value 14 (`IPV4_REASSM_TABLE`): Overrides `hashResMask` to `MAX_REASSM_BUCKETS - 1` (0xf = 16 buckets), skips spinlock allocation, allocates IPR info struct with garbage fields
+- Value 15 (`IPV6_REASSM_TABLE`): Same as 14
+
+With garbage `table_type`, there's a 2/16 (12.5%) chance per hash table of hitting the reassembly path. With 16 hash tables, probability of at least one hitting reassembly ≈ 88%.
+
+**Consequences of hitting reassembly path:**
+1. `hashResMask` forced to 0xf (16 buckets instead of 32768)
+2. Spinlock array allocation skipped
+3. `ip_reassem_info` allocated and filled with garbage `timeout_val`, `timeout_fqid`, `max_frags`, `min_frag_size`, `max_sessions`
+4. Corrupted internal state → heap corruption in fmc userspace after ioctl returns
+
+**Fix applied in `lnxwrp_ioctls_fm.c`** (after `copy_from_user`, before `FM_PCD_HashTableSet`):
+```c
+/* RC#13: Sanitize ALL ASK-specific fields after copy_from_user */
+t_FmPcdHashTableParams *p = (t_FmPcdHashTableParams *)param;
+p->agingSupport = FALSE;
+p->externalHash = FALSE;
+p->table_type = 0;       /* IPV4_UDP_TABLE → L4_TABLE, gpp=1 */
+p->timeout_val = 0;
+p->timeout_fqid = 0;
+p->max_frags = 0;
+p->min_frag_size = 0;
+p->max_sessions = 0;
+p->externalHashParams.dataMemId = 0;
+p->externalHashParams.dataLiodnOffs = 0;
+p->externalHashParams.missMonitorAddr = 0;
+```
+
+Also added diagnostic `printk` logging mask, keys, keysize, and struct sizes for each hash table ioctl.
+
+### RC#5 (original): fmc userspace heap corruption (SUPERSEDED — fixed by RC#11+RC#12+RC#13)
 
 After deploying reverted masks and running `fmc -a`, fmc crashes with:
 ```
@@ -377,3 +415,101 @@ The ASK kernel patch creates a COMPLETELY SEPARATE hash table implementation (`E
 5. **Requires** masks to be `(power_of_2 - 1)` values ≤ `0x7fff`
 
 The partial patch application left `FM_PCD_HashTableSet` going through the INTERNAL path while `copy_td_to_ccbase` expected EXTERNAL handles — a fatal type mismatch. The redirect fix resolves this completely.
+
+## 11. RC#14: fmc Userspace Heap Corruption (UNDER INVESTIGATION — 2026-04-08)
+
+### Symptom
+
+After all hash tables succeed (84 for `cdx_cfg_gw.xml` config: 7 ports × 12 tables, confirmed by `EHASH ioctl:` printk lines in dmesg), fmc crashes:
+
+```
+malloc_consolidate(): invalid chunk size
+fmc: Aborted (exit 134)
+```
+
+### Previous Hypothesis (DISPROVEN)
+
+**`std::vector` use-after-free in `replicateHtNodes()`/`replicateCCNodes()`** — was thought to be the root cause because `HTNode&`/`CCNode&` references could become dangling after `push_back()` reallocates the vector.
+
+**Why it's WRONG:** The `CFMCModel` constructor at `FMCPCDModel.cpp:121-131` calls `all_ccnodes.reserve(MAX_ENGINES * MAX_CCNODES)` = `reserve(2 * 256 = 512)`. Similarly `all_htnodes.reserve(512)`. With only ~84 nodes needed (7 ports × 12 tables), reallocation NEVER happens. References are always valid.
+
+**Evidence:** The "fix" (changing `HTNode&` to `unsigned int refIndex` + snapshot) actually made things WORSE — the rebuilt binary crashed BEFORE any hash tables (during `fmc_compile`), not after. This proves the original code was correct and the "fix" introduced a new bug. The fix was **REVERTED** to original ASK code on 2026-04-08.
+
+### What We Know
+
+1. **Compile phase is CLEAN under AddressSanitizer** — verified by running `fmc-asan` under QEMU with `cdx_pcd.xml` + `cdx_cfg_gw.xml`. Zero ASAN errors, exit code 0. All 84 hash table nodes and 7 CC trees created without heap corruption.
+
+2. **Crash is exclusively in `fmc_execute()`** — the ioctl interaction phase. The compile-only mode (no `-a` flag) completes cleanly.
+
+3. **Execution sequence** (119 apply_order steps): For each of 7 ports:
+   - PortStart
+   - 12 × `FM_PCD_HashTableSet` (ioctl to kernel)  
+   - `FM_PCD_CcRootBuild` (CC tree)
+   - 12 × `FM_PCD_KgSchemeSet` (schemes) — ethernet ports only
+   - PortEnd (key addition, FM_PORT_SetPCD, FM_PORT_Enable)
+
+4. **`libfm.a` (pre-built from ASK sysroot) is not ASAN-instrumented**, but ASAN replaces malloc/free globally → any heap buffer overflow from `libfm.a` into ASAN redzones WILL be detected.
+
+5. **Kernel-side ABI is correct:** `ioc_fm_pcd_hash_table_params_t` = `t_FmPcdHashTableParams` + `sizeof(void *)` = 120 bytes. Kernel zeroes uninitialized ASK fields (RC#13). `copy_to_user` writes 120 bytes back to `libfm.a`'s 120-byte stack buffer — no overflow.
+
+6. **`FM_PCD_HashTableSet` in libfm.a** allocates only 32 bytes per hash table handle via `malloc(32)`. `FM_PCD_HashTableAddKey` does zero heap operations (stack-only ioctl).
+
+### Current Approach
+
+ASAN-instrumented binary (`/srv/tftp/fmc-asan`, 6.6MB, static libasan) will be run ON HARDWARE to detect the exact heap corruption during `fmc_execute()`. ASAN's redzone-based detection catches:
+- Out-of-bounds writes from `libfm.a` into surrounding heap metadata
+- Use-after-free if any FM_PCD handle is freed and reused
+- Stack buffer overflows in `fmc_exec.c` functions
+
+### Deployed
+
+- **Original binary (reverted):** `/srv/tftp/fmc-fixed` (1.4MB, aarch64) — baseline test, no tracing
+- **Traced binary:** `/srv/tftp/fmc-traced` (1.4MB, aarch64) — step-level `[FMC]` trace + heap canary after every ioctl. Set `FMC_TRACE=1` env var to enable
+- **ASAN+traced binary:** `/srv/tftp/fmc-asan` (6.6MB, aarch64, static libasan) — ASAN + tracing combined
+- **Test script:** `/srv/tftp/test-fmc-asan.sh` — runs baseline, then traced (or ASAN via `TEST_PHASE=3`)
+- **PDL file:** `/srv/tftp/hxs_pdl_v3.xml` — required for fmc compile phase
+
+### Tracing approach
+
+The `FMC_TRACE` instrumentation in `fmc_exec.c` adds:
+1. **Step-level trace**: Prints step number, type (EngineStart/HTNode/CCTree/Scheme/PortEnd), and index before+after each apply_order step
+2. **Heap canary**: `malloc(64) + memset(0xAA) + free()` after EVERY ioctl call. If heap metadata is already corrupted, glibc will crash at an earlier, more diagnostic point (the canary `free()`) rather than at a random later `malloc()`.
+3. **Handle values**: Prints returned handle pointers from `FM_PCD_HashTableSet`, `FM_PCD_CcRootBuild`, `FM_PCD_KgSchemeSet`, and `GetDeviceId`
+
+**Key insight**: ASAN may NOT catch the root cause if corruption is from `copy_to_user` (kernel writes to userspace memory bypassing ASAN shadow checks). The heap canary approach detects corruption regardless of source by probing after each step.
+
+### Expected diagnostic output
+
+When run with `FMC_TRACE=1`, the trace will show:
+```
+[FMC] fmc_execute: 119 steps
+[FMC] step 0/119 type=0 idx=0       # EngineStart
+[FMC] step 0 ret=0
+[FMC] step 1/119 type=2 idx=0       # PortStart (OH port)
+...
+[FMC] step N/119 type=6 idx=K       # HTNode
+[FMC]   htnode[K] 'ht_name' keySize=12 mask=0x7fff maxKeys=32768
+[FMC]   htnode[K] handle=0xffff12345678
+[FMC] step N ret=0
+...
+```
+The LAST `[FMC]` line before the crash reveals exactly which ioctl corrupted the heap.
+
+### Hardware validation pending
+
+Device at 192.168.1.192 is offline (crashed from previous FMC abort). To test after power cycle:
+
+1. TFTP boot from U-Boot serial: `run dev_boot`
+2. On device — quick test (traced, runs immediately after baseline):
+   ```bash
+   bash <(wget -qO- http://192.168.1.137:8080/test-fmc-asan.sh)
+   ```
+3. For clean traced run after reboot:
+   ```bash
+   TEST_PHASE=2 bash <(wget -qO- http://192.168.1.137:8080/test-fmc-asan.sh)
+   ```
+4. For ASAN run after reboot:
+   ```bash
+   TEST_PHASE=3 bash <(wget -qO- http://192.168.1.137:8080/test-fmc-asan.sh)
+   ```
+5. Expected: Trace output narrows corruption to a specific ioctl step. ASAN may additionally report exact allocation/overflow details.

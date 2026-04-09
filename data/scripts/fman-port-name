@@ -8,10 +8,10 @@
 # primarily effective during live boot (no config.boot) and serves as
 # documentation of the correct physical mapping.
 #
-# DT MAC addresses confirmed via /sys/firmware/devicetree/base/soc/fman@.../local-mac-address:
-#   ethernet@e8000  (MAC5, 16:00)  → eth0  left RJ45
-#   ethernet@ea000  (MAC6, 16:01)  → eth1  center RJ45
-#   ethernet@e2000  (MAC2, 15:ff)  → eth2  right RJ45
+# U-Boot MAC assignment (from FMan hardware registers via ft_fixup_port):
+#   ethernet@e8000  (MAC5, 15:ff)  → eth0  left RJ45
+#   ethernet@ea000  (MAC6, 16:00)  → eth1  center RJ45
+#   ethernet@e2000  (MAC2, 16:01)  → eth2  right RJ45
 #   ethernet@f0000  (MAC9, 16:02)  → eth3  left SFP+
 #   ethernet@f2000  (MAC10, 16:03) → eth4  right SFP+
 

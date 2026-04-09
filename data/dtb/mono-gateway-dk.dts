@@ -18,15 +18,24 @@
 	model = "Mono Gateway Development Kit";
 	compatible = "mono,gateway-dk", "fsl,ls1046a";
 
-	aliases {
-		serial0 = &duart0;
-		serial1 = &duart1;
-		ethernet0 = &enet1;  /* MAC2 - left RJ45 */
-ethernet1 = &enet4;  /* MAC5 - center RJ45 */
-ethernet2 = &enet5;  /* MAC6 - right RJ45 */
-		ethernet3 = &enet6;  /* MAC9 - 10G left SFP */
-		ethernet4 = &enet7;  /* MAC10 - 10G right SFP */
-	};
+aliases {
+serial0 = &duart0;
+serial1 = &duart1;
+/* Aliases match PHYSICAL port order so kernel assigns eth0-eth4 correctly
+ * at probe time without udev renames. U-Boot's ft_fixup_port() writes
+ * local-mac-address from FMan hardware registers (programmed from env
+ * based on fm1-macN device index), NOT from alias order.
+ * Delete inherited ethernet5-7 from fsl-ls1046a.dtsi — they duplicate
+ * enet4/enet6/enet7 already covered by ethernet0/3/4. */
+ethernet0 = &enet4;  /* MAC5/e8000 — left RJ45 (eth0) */
+ethernet1 = &enet5;  /* MAC6/ea000 — center RJ45 (eth1) */
+ethernet2 = &enet1;  /* MAC2/e2000 — right RJ45 (eth2) */
+ethernet3 = &enet6;  /* MAC9/f0000 — left SFP+ (eth3) */
+ethernet4 = &enet7;  /* MAC10/f2000 — right SFP+ (eth4) */
+/delete-property/ ethernet5;
+/delete-property/ ethernet6;
+/delete-property/ ethernet7;
+};
 
 	chosen {
 		stdout-path = "serial0:115200n8";
@@ -488,6 +497,25 @@ maximum-power-milliwatt = <3000>;
 };
 
 #include "fsl-ls1046-post.dtsi"
+
+/*
+ * BMan portals need cell-index for the mainline BMan driver.
+ * Mainline qoriq-bman-portals.dtsi omits this property.
+ * Without it: "Can't get bman-portal property 'cell-index'"
+ * → "No BMan portals available!" → no DPAA1 networking.
+ */
+&bportals {
+bman-portal@0     { cell-index = <0x0>; };
+bman-portal@10000 { cell-index = <0x1>; };
+bman-portal@20000 { cell-index = <0x2>; };
+bman-portal@30000 { cell-index = <0x3>; };
+bman-portal@40000 { cell-index = <0x4>; };
+bman-portal@50000 { cell-index = <0x5>; };
+bman-portal@60000 { cell-index = <0x6>; };
+bman-portal@70000 { cell-index = <0x7>; };
+bman-portal@80000 { cell-index = <0x8>; };
+bman-portal@90000 { cell-index = <0x9>; };
+};
 
 &fman0 {
 	ethernet@e0000 {
