@@ -1,2 +1,0 @@
-# Create .wants symlink at boot — live-build breaks systemctl enable
-L /etc/systemd/system/multi-user.target.wants/sfp-tx-enable-sdk.service - - - - /etc/systemd/system/sfp-tx-enable-sdk.service

@@ -25,3 +25,4 @@ nxp-linux/
 nxp-fmlib/
 nxp-fmc/
 libcli/
+fmc_config_data.c
