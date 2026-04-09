@@ -191,21 +191,76 @@ if [ -n "$I2C_KC" ] && grep -q 'I2C_IMX' "$I2C_KC"; then
   fi
 fi
 
-# 12. Force SFP/PHYLINK/MDIO/SPI/I2C built-in after all patches (re-resolve dependencies)
+echo "=== SDK + ASK kernel source injection complete ==="
+INJECT_EOF
+
+# Insert source injection block before "# Change name of Signing Cert" in build-kernel.sh
+# This runs BEFORE make vyos_defconfig — correct for source/Kconfig modifications
+sed -i '/# Change name of Signing Cert/r /tmp/kernel-inject.sh' "$KERNEL_BUILD/build-kernel.sh"
+rm -f /tmp/kernel-inject.sh
+
+### Second injection: config overrides AFTER make vyos_defconfig
+# The first injection runs before .config exists (only source/Kconfig mods).
+# This second injection runs after "make vyos_defconfig" creates .config,
+# so scripts/config --set-val actually works.
+cat > /tmp/kernel-config-override.sh << 'CONFIG_OVERRIDE_EOF'
+
+# === Post-defconfig config overrides (runs after make vyos_defconfig) ===
+echo "=== SDK+ASK: Forcing critical kernel configs after defconfig ==="
+
+# Boot-critical: without these the kernel can't mount rootfs or open console
+scripts/config --set-val CONFIG_DEVTMPFS y
+scripts/config --set-val CONFIG_DEVTMPFS_MOUNT y
+scripts/config --set-val CONFIG_MMC y
+scripts/config --set-val CONFIG_MMC_BLOCK y
+scripts/config --set-val CONFIG_MMC_SDHCI y
+scripts/config --set-val CONFIG_MMC_SDHCI_PLTFM y
+scripts/config --set-val CONFIG_MMC_SDHCI_OF_ESDHC y
+scripts/config --set-val CONFIG_EXT4_FS y
+scripts/config --set-val CONFIG_SQUASHFS y
+scripts/config --set-val CONFIG_OVERLAY_FS y
+
+# Platform: LS1046A is a Layerscape SoC
 scripts/config --set-val CONFIG_ARCH_LAYERSCAPE y
+scripts/config --set-val CONFIG_CLK_QORIQ y
+scripts/config --set-val CONFIG_QORIQ_CPUFREQ y
+
+# Network: SFP/PHYLINK/MDIO must be =y (not =m) for TFTP dev boot
 scripts/config --set-val CONFIG_PHYLINK y
 scripts/config --set-val CONFIG_SFP y
 scripts/config --set-val CONFIG_MDIO_I2C y
 scripts/config --set-val CONFIG_FSL_XGMAC_MDIO y
+
+# Peripherals
 scripts/config --set-val CONFIG_SPI_FSL_QUADSPI y
 scripts/config --set-val CONFIG_I2C_IMX y
 scripts/config --set-val CONFIG_GPIO_MPC8XXX y
+scripts/config --set-val CONFIG_IMX2_WDT y
+scripts/config --set-val CONFIG_SERIAL_OF_PLATFORM y
 
-echo "=== SDK + ASK kernel injection complete ==="
-INJECT_EOF
+# SDK DPAA1 drivers (ensure they survived defconfig processing)
+scripts/config --set-val CONFIG_FSL_SDK_DPA y
+scripts/config --set-val CONFIG_FSL_SDK_BMAN y
+scripts/config --set-val CONFIG_FSL_SDK_QMAN y
+scripts/config --set-val CONFIG_FSL_SDK_FMAN y
+scripts/config --set-val CONFIG_FSL_SDK_DPAA_ETH y
+scripts/config --set-val CONFIG_STAGING y
 
-# Insert injection block before "# Change name of Signing Cert" in build-kernel.sh
-sed -i '/# Change name of Signing Cert/r /tmp/kernel-inject.sh' "$KERNEL_BUILD/build-kernel.sh"
-rm -f /tmp/kernel-inject.sh
+# Diagnostic: dump critical config values
+echo "=== SDK+ASK: Critical config check ==="
+for sym in DEVTMPFS DEVTMPFS_MOUNT MMC MMC_SDHCI MMC_SDHCI_OF_ESDHC \
+           EXT4_FS SQUASHFS OVERLAY_FS ARCH_LAYERSCAPE CLK_QORIQ \
+           FSL_SDK_FMAN FSL_SDK_DPAA_ETH FSL_FMAN FSL_DPAA PHYLINK SFP \
+           SERIAL_OF_PLATFORM FORTIFY_SOURCE; do
+  val=$(grep "^CONFIG_${sym}=\|^# CONFIG_${sym} is not set" .config 2>/dev/null || echo "  NOT FOUND")
+  echo "  CONFIG_${sym}: ${val}"
+done
+echo "=== SDK+ASK: Config override complete ==="
+CONFIG_OVERRIDE_EOF
+
+# Insert config overrides after "Generate environment file" in build-kernel.sh
+# This line runs immediately after "make vyos_defconfig" writes .config
+sed -i '/Generate environment file/r /tmp/kernel-config-override.sh' "$KERNEL_BUILD/build-kernel.sh"
+rm -f /tmp/kernel-config-override.sh
 
 echo "### SDK+ASK kernel setup complete"
