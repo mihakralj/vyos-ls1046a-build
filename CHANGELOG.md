@@ -6,6 +6,29 @@ Entries are factual. The humor is in the bugs.
 
 ## Unreleased
 
+### Added
+- **ASK (Application Solutions Kit) SDK kernel integration** — NXP SDK FMan/QBMan/DPAA drivers ported to mainline kernel 6.6 for ASK hardware offload support. Split into two artifacts: `ask-nxp-sdk-sources.tar.gz` (67 files, static) and `003-ask-kernel-hooks.patch` (75 files, adapts to kernel updates). All verified against mainline v6.6 with zero patch failures.
+
+### Improved
+- **SDK driver modernization — BUG_ON → WARN_ON_ONCE** across all runtime code:
+  - `sdk_dpaa/dpaa_eth.h`: `DPA_BUG_ON` macro now uses `WARN_ON_ONCE` (affects 21 call sites)
+  - `sdk_dpaa/offline_port.c`: 4× `BUG_ON` converted to `WARN_ON_ONCE` + graceful error returns
+  - `sdk_dpaa/dpaa_eth_common.c`: 7× `BUG_ON` → `WARN_ON_ONCE` + `continue` in FQ init loop
+  - `sdk_dpaa/dpaa_debugfs.c`: `BUG_ON` → `WARN_ON_ONCE` + `return -EINVAL`
+  - `sdk_dpaa/mac.c`: `BUG_ON` → `WARN_ON_ONCE` + `break`
+  - `fsl_qbman/` (6 files): ~30× runtime `BUG_ON` → `WARN_ON_ONCE`
+  - `sdk_dpaa/offline_port.c`: 2× `BUG()` stubs → `return -ENOSYS`
+- **SDK dead code removal**: duplicate `oh_port_driver_get_port_info()` function + `EXPORT_SYMBOL` (28 lines) and duplicate `offline_port_info` static array removed from `offline_port.c`
+- **SDK deprecated API cleanup**: `__devinit`/`__devexit` comment artifacts removed from `lnxwrp_fm.c`/`lnxwrp_fm_port.c`; bare `printk()` → `dev_dbg()`/`dev_info()`/`dev_warn()`/`pr_err()` in `offline_port.c`
+- **All 3 SDK components build with 0 errors + 0 warnings**: `sdk_fman/` (56 C files, 74K lines), `sdk_dpaa/` (13 files), `fsl_qbman/` (19 files)
+- **SDK legacy printk modernization** — all `printk(KERN_*)` calls replaced with `pr_*()` macros across 13 files (24 instances: `KERN_ERR`→`pr_err`, `KERN_WARNING`→`pr_warn`, `KERN_INFO`→`pr_info`, `KERN_DEBUG`→`pr_debug`, `KERN_CRIT`→`pr_crit`)
+- **`__FUNCTION__` → `__func__`** — deprecated GCC extension replaced with C99 standard across 8 files (35 instances in `sdk_dpaa/`, `fsl_qbman/`, `sdk_fman/`, `comcerto_fp_netfilter.c`)
+- **Dead version guards removed** — 14× `LINUX_VERSION_CODE >= KERNEL_VERSION(4,x,0)` blocks stripped from `comcerto_fp_netfilter.c` (always true on 6.6, 72 dead lines removed)
+- **Dead function/debug code removed** — `FM_Get_Api_Version()` orphaned definition (8 lines), 3× FMC-TRACE/FMC-SIZES debug print blocks (~30 lines), stale 3.1MB `lnxwrp_ioctls_fm.i` preprocessor artifact deleted
+- **EHASH debug diagnostic demoted** — `pr_err("EHASH ioctl:")` → `pr_debug()` (only emits when `CONFIG_DYNAMIC_DEBUG` or `DEBUG` is set)
+- **Unused variable/function warnings suppressed** — `__maybe_unused` added to `cdx_get_ipsec_fq_hookfn`, `ipsec_offload_pkt_cnt`, `percpu_priv` in `dpaa_eth_sg.c` and `LnxwrpFmPcdIOCTL` in `lnxwrp_ioctls_fm.c` (all used only under `CONFIG_INET_IPSEC_OFFLOAD` which is disabled)
+- **Zero warnings achieved** — full `make ARCH=arm64 Image` produces 0 warnings, 0 errors after all optimizations
+
 ### Fixed
 - **eMMC partition layout now past 32 MiB firmware boundary** (`vyos-1x-006-install-image-reserve-gap.patch`):
   All partitions moved beyond the NXP 32 MiB firmware zone. p1 (BIOS boot) at sector 65536 (32 MiB),
