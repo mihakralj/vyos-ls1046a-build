@@ -100,4 +100,10 @@ chmod +x "$CHROOT/usr/local/bin/fman-fq-qdisc"
 cp data/systemd/fman-fq-qdisc.service "$CHROOT/etc/systemd/system/fman-fq-qdisc.service"
 cp data/systemd/fman-fq-qdisc.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fman-fq-qdisc.conf"
 
+### SFP TX_DISABLE deassert for SDK kernel (no phylink SFP state machine)
+cp data/scripts/sfp-tx-enable-sdk.sh "$CHROOT/usr/local/bin/sfp-tx-enable-sdk.sh"
+chmod +x "$CHROOT/usr/local/bin/sfp-tx-enable-sdk.sh"
+cp data/systemd/sfp-tx-enable-sdk.service "$CHROOT/etc/systemd/system/sfp-tx-enable-sdk.service"
+cp data/systemd/sfp-tx-enable-sdk.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/sfp-tx-enable-sdk.conf"
+
 echo "### vyos-build setup complete"
