@@ -86,6 +86,13 @@ if [ -f "${CWD}/ask-nxp-sdk-sources.tar.gz" ]; then
   grep -q 'sdk_dpaa/' drivers/net/ethernet/freescale/Makefile 2>/dev/null || \
     echo 'obj-$(CONFIG_FSL_SDK_DPAA_ETH) += sdk_dpaa/' >> drivers/net/ethernet/freescale/Makefile
 
+  # Enable enhanced ehash PCD ioctl handlers (required for dpa_app/FMC to program FMan)
+  # Without this, LnxwrpFmIOCTL only handles basic FM ioctls — all PCD ioctls
+  # (NetEnvSet, KgSchemeSet, CcRootBuild, etc.) silently return success with NULL handles.
+  sed -i 's/ccflags-y.*+= -DVERSION=\\"\\"/& -DUSE_ENHANCED_EHASH/' \
+    drivers/net/ethernet/freescale/sdk_fman/Makefile
+  echo "I: ASK — USE_ENHANCED_EHASH enabled in sdk_fman Makefile"
+
   echo "I: ASK — SDK sources + build integration injected into kernel tree"
 fi
 
