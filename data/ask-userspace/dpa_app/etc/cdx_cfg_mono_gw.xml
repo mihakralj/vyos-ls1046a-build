@@ -1,0 +1,11 @@
+<cfgdata>
+<config>
+  <engine name="fm0">
+    <port type="1G" number="1" policy="cdx_ethport_1_policy" portid="1"/>
+    <port type="1G" number="4" policy="cdx_ethport_4_policy" portid="4"/>
+    <port type="1G" number="5" policy="cdx_ethport_5_policy" portid="5"/>
+    <port type="OFFLINE" number="1" policy="cdx_port_of2_policy" portid="9"/>
+    <port type="OFFLINE" number="2" policy="cdx_port_of3_policy" portid="10"/>
+  </engine>
+</config>
+</cfgdata>
