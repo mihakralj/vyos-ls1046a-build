@@ -119,8 +119,9 @@ cp data/systemd/sfp-tx-enable-sdk.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/sfp-tx-en
 # Here we install userspace binaries, libraries, configs, and services.
 
 ### ASK userspace binaries
-cp data/ask-userspace/dpa_app/dpa_app "$CHROOT/usr/local/bin/dpa_app"
-chmod +x "$CHROOT/usr/local/bin/dpa_app"
+# CDX module calls /usr/bin/dpa_app via call_usermodehelper (hardcoded path)
+cp data/ask-userspace/dpa_app/dpa_app "$CHROOT/usr/bin/dpa_app"
+chmod +x "$CHROOT/usr/bin/dpa_app"
 mkdir -p "$CHROOT/usr/bin"
 cp data/ask-userspace/cmm/cmm "$CHROOT/usr/bin/cmm"
 chmod +x "$CHROOT/usr/bin/cmm"

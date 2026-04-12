@@ -29,6 +29,7 @@ ldconfig
 # ASK kernel modules installed to /usr/local/lib/ask-modules/
 # Create depmod config so modprobe can find them
 if [ -d /usr/local/lib/ask-modules ]; then
+  mkdir -p /etc/depmod.d
   echo "search ask-modules" > /etc/depmod.d/ask.conf
   # Create module directory under kernel version (resolved at boot by ask-modules.conf)
   # For now, just ensure the directory is findable
