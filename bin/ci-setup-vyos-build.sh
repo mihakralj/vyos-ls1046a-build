@@ -128,6 +128,8 @@ cp data/ask-userspace/fmc/fmc "$CHROOT/usr/local/bin/fmc"
 chmod +x "$CHROOT/usr/local/bin/fmc"
 
 ### ASK shared libraries → /usr/local/lib/
+mkdir -p "$CHROOT/usr/local/lib"
+
 # libcli (CLI library for dpa_app)
 cp data/ask-userspace/libcli/libcli.so.1.10.8  "$CHROOT/usr/local/lib/"
 ln -sf libcli.so.1.10.8  "$CHROOT/usr/local/lib/libcli.so.1.10"
