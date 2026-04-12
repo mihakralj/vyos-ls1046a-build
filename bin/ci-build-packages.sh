@@ -30,7 +30,17 @@ for package in $packages; do
       # Always ensure base DTS is in the kernel tree
       cp "$GITHUB_WORKSPACE/data/dtb/mono-gateway-dk.dts" "$DTS_DIR/mono-gateway-dk.dts"
 
-      # Check if SDK DTS exists (injected by ci-setup-kernel-sdk.sh)
+      # Copy SDK DTS if present (injected by ci-setup-kernel-ask.sh from archive/)
+      if [ -f "$GITHUB_WORKSPACE/data/dtb/mono-gateway-dk-sdk.dts" ]; then
+        cp "$GITHUB_WORKSPACE/data/dtb/mono-gateway-dk-sdk.dts" "$DTS_DIR/mono-gateway-dk-sdk.dts"
+        # Add to Makefile if not already present
+        FMAKEFILE="$DTS_DIR/Makefile"
+        if ! grep -q 'mono-gateway-dk-sdk' "$FMAKEFILE" 2>/dev/null; then
+          echo 'dtb-$(CONFIG_ARCH_LAYERSCAPE) += mono-gateway-dk-sdk.dtb' >> "$FMAKEFILE"
+        fi
+      fi
+
+      # Check if SDK DTS exists (injected by ci-setup-kernel-ask.sh)
       SDK_DTS="$DTS_DIR/mono-gateway-dk-sdk.dts"
       if [ -f "$SDK_DTS" ]; then
         echo "### Building SDK+ASK DTB from kernel source"
@@ -64,6 +74,76 @@ for package in $packages; do
       else
         echo "WARNING: mono-gateway-dk.dtb build failed, keeping pre-built DTB"
       fi
+    fi
+
+    ### Build ASK out-of-tree kernel modules (cdx, fci, auto_bridge)
+    # Must happen while kernel source tree ($KSRC) still exists (before cleanup)
+    ASK_SRC="$GITHUB_WORKSPACE/ask-ls1046a-6.6"
+    ASK_DST="$GITHUB_WORKSPACE/vyos-build/data/live-build-config/includes.chroot/usr/local/lib/ask-modules"
+
+    # Apply CDX bugfixes to ASK source (fixes from dev_boot testing)
+    # The ask-ls1046a-6.6 repo may not have all fixes yet — apply patch
+    ASK_PATCH="$GITHUB_WORKSPACE/data/kernel-patches/ask-cdx-bugfixes.patch"
+    if [ -d "$ASK_SRC/cdx" ] && [ -f "$ASK_PATCH" ]; then
+      echo "### Applying ASK CDX bugfixes patch to ask-ls1046a-6.6"
+      patch --no-backup-if-mismatch -p1 -d "$ASK_SRC" < "$ASK_PATCH" || \
+        echo "WARNING: ASK CDX patch partially failed — some fixes may be missing"
+    fi
+
+    if [ -n "$KSRC" ] && [ -d "$ASK_SRC/cdx" ]; then
+      KSRC_ABS="$(cd "$KSRC" && pwd)"
+      echo "### Building ASK kernel modules against $KSRC_ABS"
+      mkdir -p "$ASK_DST"
+
+      # cdx.ko — main ASK control-plane module
+      echo "I: Building cdx.ko..."
+      make -C "$ASK_SRC/cdx" clean 2>/dev/null || true
+      make -C "$KSRC_ABS" M="$ASK_SRC/cdx" \
+        PLATFORM=LS1043A ARCH=arm64 modules 2>&1 | tail -20
+      if [ -f "$ASK_SRC/cdx/cdx.ko" ]; then
+        cp "$ASK_SRC/cdx/cdx.ko" "$ASK_DST/"
+        cp "$ASK_SRC/cdx/Module.symvers" "$ASK_DST/cdx.symvers"
+        echo "### cdx.ko built: $(stat -c '%s bytes' "$ASK_DST/cdx.ko")"
+      else
+        echo "WARNING: cdx.ko build failed — using pre-built from data/ask-userspace/"
+        cp "$GITHUB_WORKSPACE/data/ask-userspace/cdx/cdx.ko" "$ASK_DST/" || true
+      fi
+
+      # auto_bridge.ko — bridge fast-path offload
+      echo "I: Building auto_bridge.ko..."
+      make -C "$ASK_SRC/auto_bridge" clean 2>/dev/null || true
+      make -C "$KSRC_ABS" M="$ASK_SRC/auto_bridge" \
+        PLATFORM=LS1043A ARCH=arm64 modules 2>&1 | tail -20
+      if [ -f "$ASK_SRC/auto_bridge/auto_bridge.ko" ]; then
+        cp "$ASK_SRC/auto_bridge/auto_bridge.ko" "$ASK_DST/"
+        echo "### auto_bridge.ko built: $(stat -c '%s bytes' "$ASK_DST/auto_bridge.ko")"
+      else
+        echo "WARNING: auto_bridge.ko build failed — using pre-built"
+        cp "$GITHUB_WORKSPACE/data/ask-userspace/auto_bridge/auto_bridge.ko" "$ASK_DST/" || true
+      fi
+
+      # fci.ko — fast-path conntrack interface (depends on cdx symbols)
+      echo "I: Building fci.ko..."
+      make -C "$ASK_SRC/fci" clean 2>/dev/null || true
+      CDX_SYMVERS="$ASK_DST/cdx.symvers"
+      make -C "$KSRC_ABS" M="$ASK_SRC/fci" \
+        KBUILD_EXTRA_SYMBOLS="$CDX_SYMVERS" \
+        ARCH=arm64 modules 2>&1 | tail -20
+      if [ -f "$ASK_SRC/fci/fci.ko" ]; then
+        cp "$ASK_SRC/fci/fci.ko" "$ASK_DST/"
+        echo "### fci.ko built: $(stat -c '%s bytes' "$ASK_DST/fci.ko")"
+      else
+        echo "WARNING: fci.ko build failed — using pre-built"
+        cp "$GITHUB_WORKSPACE/data/ask-userspace/fci/fci.ko" "$ASK_DST/" || true
+      fi
+
+      echo "### ASK kernel modules: $(ls -la "$ASK_DST/"*.ko 2>/dev/null | wc -l) modules installed"
+    elif [ -d "$GITHUB_WORKSPACE/data/ask-userspace/cdx" ]; then
+      echo "### ASK source not available — installing pre-built modules"
+      mkdir -p "$ASK_DST"
+      cp "$GITHUB_WORKSPACE/data/ask-userspace/cdx/cdx.ko" "$ASK_DST/" || true
+      cp "$GITHUB_WORKSPACE/data/ask-userspace/auto_bridge/auto_bridge.ko" "$ASK_DST/" || true
+      cp "$GITHUB_WORKSPACE/data/ask-userspace/fci/fci.ko" "$ASK_DST/" || true
     fi
   fi
 
