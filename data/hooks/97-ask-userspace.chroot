@@ -12,10 +12,14 @@
 set -ex
 
 # Runtime deps — libatomic1 for aarch64 atomic builtins used by ASK libs
-# (may already be installed by 98-fancontrol.chroot, but ensure it)
-apt-get update -qq
-apt-get install -y --no-install-recommends libatomic1
-apt-get clean
+# May already be present as a gcc-12 dependency. Don't fail the build
+# if APT sources are unavailable in the chroot at this stage.
+if ! dpkg -s libatomic1 >/dev/null 2>&1; then
+  apt-get update -qq 2>/dev/null || true
+  apt-get install -y --no-install-recommends libatomic1 2>/dev/null || \
+    echo "WARNING: libatomic1 not available — ASK binaries may fail if they need atomic builtins"
+  apt-get clean 2>/dev/null || true
+fi
 
 # ldconfig: ASK shared libraries live in /usr/local/lib
 # (libcli, libfci, libcmm, libnfnetlink, libnetfilter_conntrack)
