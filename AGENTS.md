@@ -176,10 +176,12 @@ All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `ar
 | `bin/ci-setup-vyos-build.sh` | Applies vyos-build patches, configures live-build for ARM64 |
 | `bin/ci-build-packages.sh` | Builds linux-kernel and vyos-1x packages |
 | `bin/ci-build-iso.sh` | Final ISO assembly with live-build |
-| `data/kernel-config/` | Modular kernel config fragments (ls1046a-board, dpaa1, fmd-shim, i2c-gpio, sfp, usb, watchdog) — appended to vyos_defconfig |
+| `data/kernel-config/` | Modular kernel config fragments (ls1046a-board, dpaa1, fmd-shim, i2c-gpio, leds, sfp, usb, watchdog) — appended to vyos_defconfig |
+| `data/kernel-config/ls1046a-leds.config` | Kernel config fragment: LED subsystem (`NEW_LEDS`, `LEDS_CLASS`, `LEDS_CLASS_MULTICOLOR`, `LEDS_GPIO`, `LEDS_LP5812`, `LEDS_TRIGGERS`, `LEDS_TRIGGER_NETDEV`) |
 | `data/kernel-patches/patch-dpaa-xdp-queue-index.py` | Python patcher: fixes `xdp_rxq_info_reg()` in `dpaa_eth.c` — replaces FQID with 0 as queue_index so AF_XDP XSKMAP lookup succeeds. Injected into kernel tree by `ci-setup-kernel.sh` |
 | `data/kernel-patches/4004-swphy-support-10g-fixed-link-speed.patch` | Kernel patch: `swphy_decode_speed()` maps 10G/5G/2.5G → SWMII_SPEED_1000 so SDK fixed-link 10G MACs probe successfully. Required for SDK kernel only (mainline uses phylink, not swphy). |
 | `data/kernel-patches/fsl_fmd_shim.c` | FMD Shim kernel module source: `/dev/fm0*` chardevs for DPDK fmlib FMan KeyGen RSS (skeleton — GET_API_VERSION only, dormant until ioctls called). Injected into kernel tree by `ci-setup-kernel.sh` |
+| `data/kernel-patches/lp5812/` | TI LP5812 I2C LED controller driver source (`leds-lp5812.c`, `leds-lp5812.h`) — out-of-tree, not in mainline 6.6. Injected into `drivers/leds/lp5812/` by `ci-setup-kernel.sh` |
 | `archive/dpaa-pmd/` | Archived DPDK DPAA1 PMD infrastructure (RC#31) — see `archive/dpaa-pmd/RESTORE.md` |
 | `data/hooks/98-fancontrol.chroot` | Live-build hook: installs fancontrol config for EMC2305 thermal management |
 | `data/hooks/99-mask-services.chroot` | Live-build hook: masks acpid services, removes SysV kexec scripts |
