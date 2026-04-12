@@ -1,0 +1,180 @@
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Mon, 12 Jan 2026 12:00:00 +0100
+Subject: [PATCH] fmlib: Add ASK timestamp and hash table extensions
+
+Add FM_ReadTimeStamp() and FM_GetTimeStampIncrementPerUsec() functions
+for timestamp reading from FMan engine.
+
+Add hash table type enumeration and extended t_FmPcdHashTableParams
+structure fields for IP reassembly table support.
+
+Add FM_PCD_Get_Sch_handle() function for scheme handle access.
+
+Add 'shared' field to t_FmPcdKgSchemeParams for shared scheme support.
+
+These extensions are required for the CMM daemon and fast path offload
+functionality on the Mono Gateway.
+
+Upstream-Status: Inappropriate [vendor-specific extension]
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+diff --git a/include/fmd/Peripherals/fm_ext.h b/include/fmd/Peripherals/fm_ext.h
+index 3607b86..e6db99a 100644
+--- a/include/fmd/Peripherals/fm_ext.h
++++ b/include/fmd/Peripherals/fm_ext.h
+@@ -581,6 +581,38 @@ t_Error FM_CtrlMonGetCounters(t_Handle h_Fm, uint8_t fmCtrlIndex, t_FmCtrlMon *p
+ *//***************************************************************************/
+ t_Error FM_ForceIntr (t_Handle h_Fm, e_FmExceptions exception);
+
++/**************************************************************************//*
++ @Function      FM_ReadTimeStamp
++
++ @Description   Reads the FMan engine's timestamp.
++
++ @Param[in]     h_Fm                A handle to an FM Module.
++
++ @Return        The indicated engine's timestamp on success; zero otherwise.
++
++ @Cautions      Allowed only following FM_Init().
++                This routine should NOT be called from guest-partition
++                (i.e. guestId != NCSW_MASTER_ID)
++*//***************************************************************************/
++uint32_t FM_ReadTimeStamp(t_Handle h_Fm);
++
++/**************************************************************************//*
++ @Function      FM_GetTimeStampIncrementPerUsec
++
++ @Description   Provides the value of the FMan engine's timestamp increment
++                per microsecond.
++
++ @Param[in]     h_Fm                A handle to an FM Module.
++
++ @Return        The value the timestamp is incremented with each microsecond
++                on success; zero otherwise.
++
++ @Cautions      Allowed only following FM_Init().
++                This routine should NOT be called from guest-partition
++                (i.e. guestId != NCSW_MASTER_ID)
++*//***************************************************************************/
++uint32_t FM_GetTimeStampIncrementPerUsec(t_Handle h_Fm);
++
+ /** @} */ /* end of lnx_usr_FM_runtime_control_grp group */
+ /** @} */ /* end of lnx_usr_FM_lib_grp group */
+ /** @} */ /* end of lnx_usr_FM_grp group */
+diff --git a/include/fmd/Peripherals/fm_pcd_ext.h b/include/fmd/Peripherals/fm_pcd_ext.h
+index 7f32680..81d2186 100644
+--- a/include/fmd/Peripherals/fm_pcd_ext.h
++++ b/include/fmd/Peripherals/fm_pcd_ext.h
+@@ -1717,6 +1717,7 @@ typedef struct t_FmPcdKgSchemeParams {
+         uint8_t                         relativeSchemeId;       /**< if modify=FALSE:Partition relative scheme id */
+         t_Handle                        h_Scheme;               /**< if modify=TRUE: a handle of the existing scheme */
+     } id;
++    bool                                shared;           	/**< This scheme is  shared */
+     bool                                alwaysDirect;           /**< This scheme is reached only directly, i.e. no need
+                                                                      for match vector; KeyGen will ignore it when matching */
+     struct {                                                    /**< HL Relevant only if alwaysDirect = FALSE */
+@@ -1974,6 +1975,27 @@ typedef struct t_FmPcdCcNodeParams {
+ /**************************************************************************//**
+  @Description   Parameters for defining a hash table
+ *//***************************************************************************/
++//sync with fm_eh_types.h
++enum {
++        IPV4_UDP_TABLE,
++        IPV4_TCP_TABLE,
++        IPV6_UDP_TABLE,
++        IPV6_TCP_TABLE,
++        ESP_IPV4_TABLE,
++        ESP_IPV6_TABLE,
++        IPV4_MULTICAST_TABLE,
++        IPV6_MULTICAST_TABLE,
++        PPPOE_RELAY_TABLE,
++        ETHERNET_TABLE,
++        IPV4_3TUPLE_UDP_TABLE,
++        IPV4_3TUPLE_TCP_TABLE,
++        IPV6_3TUPLE_UDP_TABLE,
++        IPV6_3TUPLE_TCP_TABLE,
++        IPV4_REASSM_TABLE,
++        IPV6_REASSM_TABLE,
++        MAX_MATCH_TABLES
++};
++
+ typedef struct t_FmPcdHashTableParams {
+     uint16_t                    maxNumOfKeys;               /**< Maximum Number Of Keys that will (ever) be used in this Hash-table */
+     e_FmPcdCcStatsMode          statisticsMode;             /**< If not e_FM_PCD_CC_STATS_MODE_NONE, the required structures for the
+@@ -1989,6 +2011,14 @@ typedef struct t_FmPcdHashTableParams {
+     uint8_t                     matchKeySize;               /**< Size of the exact match keys held by the hash buckets */
+
+     t_FmPcdCcNextEngineParams   ccNextEngineParamsForMiss;  /**< Parameters for defining the next engine when a key is not matched */
++    uint32_t    table_type;     /* ip reassembly table */
++    struct {
++        uint32_t timeout_val;   //reassembly timeout
++        uint32_t timeout_fqid;  //fqid for reassmebly failures
++        uint32_t max_frags;     //max allowed fragments
++        uint32_t min_frag_size; //min allowed frag size except last frag
++        uint32_t max_sessions;  //max conn reassembly sessions
++    };
+
+ } t_FmPcdHashTableParams;
+
+diff --git a/src/fm_lib.c b/src/fm_lib.c
+index 4de5168..907d5d4 100644
+--- a/src/fm_lib.c
++++ b/src/fm_lib.c
+@@ -317,6 +317,44 @@ t_Error  FM_GetApiVersion(t_Handle h_Fm, ioc_fm_api_version_t *p_version)
+     return E_OK;
+ }
+
++uint32_t FM_ReadTimeStamp(t_Handle h_Fm)
++{
++    t_Device    *p_Dev = (t_Device*) h_Fm;
++    uint32_t    ts = 0;
++
++    SANITY_CHECK_RETURN_ERROR(p_Dev, E_INVALID_HANDLE);
++
++    _fml_dbg("Calling...\n");
++
++    if (ioctl(p_Dev->fd, FM_IOC_READ_TIMESTAMP, &ts)) {
++        REPORT_ERROR(MAJOR, E_INVALID_OPERATION, NO_MSG);
++        return 0;
++    }
++
++    _fml_dbg("Called.\n");
++
++    return ts;
++}
++
++uint32_t FM_GetTimeStampIncrementPerUsec(t_Handle h_Fm)
++{
++    t_Device    *p_Dev = (t_Device*) h_Fm;
++    uint32_t    ts_inc = 0;
++
++    SANITY_CHECK_RETURN_ERROR(p_Dev, E_INVALID_HANDLE);
++
++    _fml_dbg("Calling...\n");
++
++    if (ioctl(p_Dev->fd, FM_IOC_GET_TIMESTAMP_INCREMENT, &ts_inc)) {
++        REPORT_ERROR(MAJOR, E_INVALID_OPERATION, NO_MSG);
++        return 0;
++    }
++
++    _fml_dbg("Called.\n");
++
++    return ts_inc;
++}
++
+ /********************************************************************************************/
+ /*  FM_PCD FUNCTIONS                                                                        */
+ /********************************************************************************************/
+@@ -624,6 +662,12 @@ t_Error FM_PCD_AllowHcUsage(t_Handle h_FmPcd, bool allow)
+     return E_OK;
+ }
+
++void *FM_PCD_Get_Sch_handle(t_Handle h_Scheme)
++{
++    t_Device *p_Dev = (t_Device*) h_Scheme;
++    return(UINT_TO_PTR(p_Dev->id));
++}
++
+ t_Handle FM_PCD_KgSchemeSet (t_Handle h_FmPcd, t_FmPcdKgSchemeParams *p_Scheme)
+ {
+     t_Device *p_PcdDev = (t_Device*) h_FmPcd;

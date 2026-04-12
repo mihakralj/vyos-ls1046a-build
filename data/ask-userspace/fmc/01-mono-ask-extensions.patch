@@ -1,0 +1,279 @@
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Mon, 12 Jan 2026 12:00:00 +0100
+Subject: [PATCH] fmc: Add ASK extensions for shared schemes and port ID
+
+Add support for:
+- Port ID (portid) field in port configuration output
+- Shared scheme support with CC/HT node replication
+- Fix PPPoE nextp field name (NET_HEADER_FIELD_PPPoE_PID)
+
+These extensions are required for the CMM daemon and fast path offload
+functionality on the Mono Gateway.
+
+Upstream-Status: Inappropriate [vendor-specific extension]
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+diff --git a/source/FMCCModelOutput.cpp b/source/FMCCModelOutput.cpp
+index 2a3d257..54b6f21 100644
+--- a/source/FMCCModelOutput.cpp
++++ b/source/FMCCModelOutput.cpp
+@@ -725,6 +725,7 @@ CFMCCModelOutput::output_fmc_port( const CFMCModel& model, fmc_model_t* cmodel,
+
+     EMIT4STR( port[, index, ].type =, model.all_ports[index].type );
+     EMIT4( port[, index, ].number  = ,  model.all_ports[index].number );
++    EMIT4( port[, index, ].portid  = ,  model.all_ports[index].portid );
+
+     EMIT4( port[, index, ].schemes_count =, model.all_ports[index].schemes.size() );
+     for ( unsigned int i = 0; i < cmodel->port[index].schemes_count; ++i ) {
+@@ -952,6 +953,7 @@ CFMCCModelOutput::output_fmc_scheme( const CFMCModel& model, fmc_model_t* cmodel
+     unsigned int useHash = sch.key.empty() ? 0 : 1;
+     EMIT4( scheme[, index, ].useHash =,  useHash );
+     EMIT4( scheme[, index, ].baseFqid =, sch.qbase );
++    EMIT4( scheme[, index, ].shared =, sch.shared );
+     if (sch.bypass) {
+         EMIT4( scheme[, index, ].bypassFqidGeneration =, sch.bypass );
+     }
+diff --git a/source/FMCPCDModel.cpp b/source/FMCPCDModel.cpp
+index d785eee..bea0cac 100755
+--- a/source/FMCPCDModel.cpp
++++ b/source/FMCPCDModel.cpp
+@@ -133,12 +133,131 @@ CFMCModel::CFMCModel()
+ }
+
+
++HTNode&
++CFMCModel::replicateHtNodes(const CTaskDef* pTaskDef, Port& port, HTNode& refnode)
++{
++    uint32_t ii;
++    uint32_t index;
++
++    for( ii = 0; ii < port.htnodes.size(); ii++) {
++	if (all_htnodes[port.htnodes[ii]].name == refnode.name) {
++		return all_htnodes[ii];
++	}
++    }
++
++    HTNode& htNode = all_htnodes[FMBlock::assignIndex( all_htnodes )];
++    ApplyOrder::Entry n1( ApplyOrder::HTNode, htNode.getIndex() );
++    applier.add_edge( n1, ApplyOrder::Entry( ApplyOrder::None, 0 ) );
++    port.htnodes.push_back(htNode.getIndex() );
++
++    htNode.name = refnode.name;
++    htNode.maxNumOfKeys = refnode.maxNumOfKeys;
++    htNode.statistics = refnode.statistics;
++    htNode.hashResMask = refnode.hashResMask;
++    htNode.matchKeySize = refnode.matchKeySize;
++    htNode.hashShift = refnode.hashShift;
++    htNode.kgHashShift = refnode.kgHashShift;
++    for (ii = 0; ii < refnode.keys.size(); ii++) {
++    	htNode.keys.push_back(HTNode::CCData());
++    }
++    for (ii = 0; ii < refnode.masks.size(); ii++) {
++    	htNode.masks.push_back(HTNode::CCData());
++    }
++    for (ii = 0; ii < refnode.nextEngines.size(); ii++) {
++    	htNode.nextEngines.push_back(HTNode::CCNextEngine());
++    }
++
++    for (ii = 0; ii < refnode.frag.size(); ii++) {
++	index = refnode.frag[ii];
++	htNode.frag.push_back(index);
++    }
++    for (ii = 0; ii < refnode.header.size(); ii++) {
++	index = refnode.header[ii];
++    	htNode.header.push_back(index);
++    }
++    for (ii = 0; ii < refnode.indices.size(); ii++) {
++	index = refnode.indices[ii];
++    	htNode.indices.push_back(index);
++    }
++
++    htNode.nextEngineOnMiss = refnode.nextEngineOnMiss;
++    htNode.fragOnMiss = refnode.fragOnMiss;
++    htNode.headerOnMiss = refnode.headerOnMiss;
++    htNode.port_signature = port.name;
++
++    ApplyOrder::Entry root( ApplyOrder::CCTree, port.getIndex() );
++
++    port.cctrees.push_back( htNode.getIndex() );
++    port.cctrees_type.push_back( e_FM_PCD_HASH );
++    port.hdrmanips.push_back( 0 );
++    return htNode;
++}
++
++CCNode&
++CFMCModel::replicateCCNodes(const CTaskDef* pTaskDef, Port& port, CCNode& refnode)
++{
++    uint32_t ii;
++    uint32_t index;
++
++    CCNode& ccNode = all_ccnodes[FMBlock::assignIndex( all_ccnodes )];
++
++    ApplyOrder::Entry n1( ApplyOrder::CCNode, ccNode.getIndex() );
++    applier.add_edge( n1, ApplyOrder::Entry( ApplyOrder::None, 0 ) );
++
++    port.ccnodes.push_back(ccNode.getIndex() );
++
++    ccNode.name = refnode.name;
++    ccNode.maxNumOfKeys = refnode.maxNumOfKeys;
++    ccNode.statistics = refnode.statistics;
++    ccNode.maskSupport = refnode.maskSupport;
++    ccNode.shared = 0;
++    ccNode.extract = refnode.extract;
++    ccNode.keySize = refnode.keySize;
++    ccNode.used_protocols.insert(refnode.used_protocols.begin(), refnode.used_protocols.end());
++    for (ii = 0; ii < refnode.keys.size(); ii++) {
++    	ccNode.keys.push_back(CCNode::CCData());
++    }
++    for (ii = 0; ii < refnode.masks.size(); ii++) {
++    	ccNode.masks.push_back(CCNode::CCData());
++    }
++    for (ii = 0; ii < refnode.nextEngines.size(); ii++) {
++    	ccNode.nextEngines.push_back(CCNode::CCNextEngine());
++    }
++    for (ii = 0; ii < refnode.frag.size(); ii++) {
++	index = refnode.frag[ii];
++	ccNode.frag.push_back(index);
++    }
++    for (ii = 0; ii < refnode.header.size(); ii++) {
++	index = refnode.header[ii];
++    	ccNode.header.push_back(index);
++    }
++    for (ii = 0; ii < refnode.indices.size(); ii++) {
++	index = refnode.indices[ii];
++    	ccNode.indices.push_back(index);
++    }
++    for (ii = 0; ii < refnode.frameLength.size(); ii++) {
++	index = refnode.frameLength[ii];
++    	ccNode.frameLength.push_back(index);
++    }
++    ccNode.nextEngineOnMiss = refnode.nextEngineOnMiss;
++    ccNode.fragOnMiss = refnode.fragOnMiss;
++    ccNode.headerOnMiss = refnode.headerOnMiss;
++    ccNode.port_signature = port.name;
++    port.cctrees.push_back( ccNode.getIndex() );
++    port.cctrees_type.push_back( e_FM_PCD_CC );
++    port.hdrmanips.push_back( 0 );
++    return ccNode;
++}
++
++
+ ////////////////////////////////////////////////////////////////////////////////
+ /// Create model by building the internal database
+ ////////////////////////////////////////////////////////////////////////////////
+ bool
+ CFMCModel::createModel( CTaskDef* pTaskDef )
+ {
++    uint32_t ii;
++    uint32_t jj;
+     assert( pTaskDef );
+
+     // For all engines
+@@ -192,6 +311,23 @@ CFMCModel::createModel( CTaskDef* pTaskDef )
+
+                 Scheme& scheme = all_schemes[index];
+                 scheme.scheme_index_per_port = scheme_index;
++		if (scheme.shared && (port.name != scheme.port_signature)) {
++			 if (scheme.nextEngine == e_FM_PCD_CC) {
++                         	std::map< std::string, CClassification >::const_iterator nodeIt;
++                                nodeIt = pTaskDef->classifications.find(scheme.nextActionName);
++                                if ( nodeIt == pTaskDef->classifications.end() ) {
++                        	        throw CGenericError( ERR_CC_NOT_FOUND, scheme.nextActionName,
++                                		scheme.name );
++                                }
++                                if ( nodeIt->second.key.hashTable ) {
++                                	HTNode& refnode = all_htnodes[scheme.actionHandleIndex];
++                                	CFMCModel::replicateHtNodes(pTaskDef, port, refnode);
++                                } else {
++                                	CCNode& refnode = all_ccnodes[scheme.actionHandleIndex];
++                                	CFMCModel::replicateCCNodes(pTaskDef, port, refnode);
++                                }
++                	}
++		}
+
+                 // Add scheme's protocols to the port's protocol list
+                 std::set< Protocol >::iterator protoIt;
+@@ -1011,6 +1147,7 @@ CFMCModel::createScheme( const CTaskDef* pTaskDef, Port& port, const CDistributi
+     // Add next engine entry
+     scheme.nextEngine        = getEngineByType( xmlDist.action );
+     scheme.nextEngineStr     = getEngineByTypeStr( xmlDist.action );
++    scheme.nextActionName    = xmlDist.actionName;
+     scheme.doneAction        = e_FM_PCD_ENQ_FRAME;
+     scheme.doneActionStr     = "e_FM_PCD_ENQ_FRAME";
+     scheme.actionHandleIndex = 0xFFFFFFFF;
+@@ -2920,7 +3057,7 @@ CFMCModel::getNetCommFieldType( std::string fieldname )
+     fields["pppoe.code"]          = NET_HEADER_FIELD_PPPoE_CODE;
+     fields["pppoe.session_ID"]    = NET_HEADER_FIELD_PPPoE_SID;
+     fields["pppoe.hlen"]          = NET_HEADER_FIELD_PPPoE_LEN;
+-    fields["pppoe.nextp"]         = NET_HEADER_FIELD_PPP_PID;
++    fields["pppoe.nextp"]         = NET_HEADER_FIELD_PPPoE_PID;
+     fields["minencap.dst"]        = NET_HEADER_FIELD_MINENCAP_DST_IP;
+     fields["sctp.sport"]          = NET_HEADER_FIELD_SCTP_PORT_SRC;
+     fields["sctp.dport"]          = NET_HEADER_FIELD_SCTP_PORT_DST;
+@@ -3007,7 +3144,7 @@ CFMCModel::getNetCommFieldTypeStr( std::string fieldname )
+     fields["pppoe.code"]          = "NET_HEADER_FIELD_PPPoE_CODE";
+     fields["pppoe.session_ID"]    = "NET_HEADER_FIELD_PPPoE_SID";
+     fields["pppoe.hlen"]          = "NET_HEADER_FIELD_PPPoE_LEN";
+-    fields["pppoe.nextp"]         = "NET_HEADER_FIELD_PPP_PID";
++    fields["pppoe.nextp"]         = "NET_HEADER_FIELD_PPPoE_PID";
+     fields["minencap.dst"]        = "NET_HEADER_FIELD_MINENCAP_DST_IP";
+     fields["sctp.sport"]          = "NET_HEADER_FIELD_SCTP_PORT_SRC";
+     fields["sctp.dport"]          = "NET_HEADER_FIELD_SCTP_PORT_DST";
+diff --git a/source/FMCPCDModel.h b/source/FMCPCDModel.h
+index 696eb79..2789d52 100755
+--- a/source/FMCPCDModel.h
++++ b/source/FMCPCDModel.h
+@@ -192,6 +192,7 @@ public:
+
+     e_FmPcdEngine     nextEngine;
+     std::string       nextEngineStr;
++    std::string       nextActionName;
+     e_FmPcdDoneAction doneAction;
+     std::string       doneActionStr;
+     unsigned int      actionHandleIndex;
+@@ -604,6 +605,8 @@ private:
+ #endif /* (DPAA_VERSION >= 11) */
+     unsigned int get_policer_index( const CTaskDef* pTaskDef, std::string name,
+                                     std::string from, Port& port );
++    CCNode&  replicateCCNodes(const CTaskDef* pTaskDef, Port& port, CCNode& refnode);
++    HTNode&  replicateHtNodes(const CTaskDef* pTaskDef, Port& port, HTNode& refnode);
+ };
+
+ #endif // FMCMODEL_H
+diff --git a/source/fmc.h b/source/fmc.h
+index 700ce41..0657530 100644
+--- a/source/fmc.h
++++ b/source/fmc.h
+@@ -102,6 +102,7 @@ typedef struct fmc_fman_t {
+ typedef struct fmc_port_t {
+     e_FmPortType         type;                      ///< Port type
+     unsigned int         number;                    ///< Port number
++    unsigned int         portid;                    ///< Port identification from xml file
+     t_FmPcdNetEnvParams  distinctionUnits;          ///< Port's network env
+     t_FmPortPcdParams    pcdParam;
+     t_FmPortPcdPrsParams prsParam;
+diff --git a/source/FMCGenericError.cpp b/source/FMCGenericError.cpp
+index 1111111..2222222 100644
+--- a/source/FMCGenericError.cpp
++++ b/source/FMCGenericError.cpp
+@@ -33,7 +33,7 @@ std::string CGenericError::lastErrors;
+ std::string CGenericError::lastWarnings;
+ std::string CGenericError::lastNotes;
+ 
+-void errorFuncHandler( void * ctx, const xmlError * error )
++void errorFuncHandler( void * ctx, xmlError * error )
+ {
+     CGenericError::lastErrors = "";
+     CGenericError::lastWarnings = "";
+diff --git a/source/FMCGenericError.h b/source/FMCGenericError.h
+index 3333333..4444444 100644
+--- a/source/FMCGenericError.h
++++ b/source/FMCGenericError.h
+@@ -35,7 +35,7 @@ public:
+     static std::string lastNotes;
+ };
+ 
+-void errorFuncHandler( void * ctx, const xmlError * error );
++void errorFuncHandler( void * ctx, xmlError * error );
+ 
+ #endif // FMCGENERICERROR_H
