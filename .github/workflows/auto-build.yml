@@ -84,6 +84,15 @@ jobs:
       - name: Setup kernel config and patches
         run: bin/ci-setup-kernel.sh
 
+      - name: Checkout ASK repo (NXP Application Solutions Kit)
+        uses: actions/checkout@v6
+        with:
+          repository: mihakralj/ask-ls1046a-6.6
+          path: ask-ls1046a-6.6
+
+      - name: Setup ASK fast-path kernel (SDK DPAA + hooks)
+        run: bin/ci-setup-kernel-ask.sh
+
       - name: Setup vyos-build (config, chroot files, hooks)
         run: bin/ci-setup-vyos-build.sh
 

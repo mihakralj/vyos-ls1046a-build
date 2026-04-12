@@ -112,6 +112,15 @@ fi
 
 rm -f /tmp/ask-inject.sh
 
+### 4. SDK DTS — copy to data/dtb/ so ci-build-packages.sh can find and build it
+# The SDK DTS uses fixed-link for 10G MACs (SDK fsl_mac has no phylink/SFP support)
+# and deletes managed/sfp properties. ci-build-packages.sh checks for this file
+# at $DTS_DIR/mono-gateway-dk-sdk.dts and builds the SDK DTB if present.
+if [ -f archive/data/dtb/mono-gateway-dk-sdk.dts ]; then
+  cp archive/data/dtb/mono-gateway-dk-sdk.dts data/dtb/mono-gateway-dk-sdk.dts
+  echo "### SDK DTS copied to data/dtb/ for kernel DTB build"
+fi
+
 echo ""
 echo "### ASK kernel setup complete"
 echo "###"
