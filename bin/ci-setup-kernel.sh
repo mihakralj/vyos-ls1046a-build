@@ -113,7 +113,12 @@ if [ -d "${CWD}/lp5812" ]; then
   if ! grep -q lp5812 drivers/leds/Makefile 2>/dev/null; then
     echo 'obj-$(CONFIG_LEDS_LP5812) += lp5812/' >> drivers/leds/Makefile
   fi
-  echo "LP5812: injected into $LP5812_DIR"
+  # Force-enable now that Kconfig is wired up.
+  # The post-defconfig olddefconfig ran BEFORE LP5812 was injected,
+  # so CONFIG_LEDS_LP5812=y was silently dropped. Re-apply and resolve.
+  scripts/config --set-val CONFIG_LEDS_LP5812 y
+  make olddefconfig
+  echo "LP5812: injected into $LP5812_DIR (config forced)"
 fi
 INJECT_EOF
 
