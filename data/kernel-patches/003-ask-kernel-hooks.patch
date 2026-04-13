@@ -1375,7 +1375,14 @@ index 161356313203..0402bdc6bae8 100644
 +#endif	
  	}
  
- 	if (!valid) {
+ if (!valid) {
+@@ -4118,6 +4129,7 @@ void rtmsg_ifinfo(int type, struct net_device *dev, unsigned int change,
+    NULL, 0, portid, nlh);
+ }
++EXPORT_SYMBOL(rtmsg_ifinfo);
+ 
+ void rtmsg_ifinfo_newnet(int type, struct net_device *dev, unsigned int change,
+  gfp_t flags, int *new_nsid, int new_ifindex)
 diff --git a/net/core/skbuff.c b/net/core/skbuff.c
 index 4c28954f915f..d8b17b5fe2d2 100644
 --- a/net/core/skbuff.c
@@ -5706,8 +5713,9 @@ index 000000000000..d982bfbb6c72
 +       unsigned short dir)
 +{
 +
-+	ipsec_flow_remove(key, family, dir);
++ipsec_flow_remove(key, family, dir);
 +}
++EXPORT_SYMBOL(flow_cache_remove);
 +
 +int ipsec_flow_init(struct net *net)
 +{
