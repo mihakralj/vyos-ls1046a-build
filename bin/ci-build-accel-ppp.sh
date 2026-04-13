@@ -12,7 +12,7 @@
 #   github.com/vyos/vyos-accel-ppp         — Debian packaging overlay (-ng rename)
 #
 # Reference: plans/ACCEL-PPP-ARM64.md
-set -ex
+set -exo pipefail
 
 KSRC_ABS="${1:?Usage: ci-build-accel-ppp.sh /path/to/kernel-source}"
 DEST_DIR="${2:-$(pwd)}"
@@ -119,7 +119,11 @@ cd "$BUILD_DIR"
 # Set KERNELDIR for cmake (picked up by debian/rules or CMakeLists.txt)
 export KERNELDIR="$KSRC_ABS"
 
-dpkg-buildpackage -b -us -uc -tc -j$(nproc) 2>&1 | tail -50
+dpkg-buildpackage -b -us -uc -tc -j$(nproc) 2>&1 || {
+  echo "### dpkg-buildpackage failed — check output above"
+  # Debs may have been partially produced, continue to collection
+  true
+}
 
 ### Collect output .debs
 echo "### Collecting accel-ppp-ng .deb packages"
