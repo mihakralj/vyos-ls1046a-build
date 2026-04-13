@@ -43,6 +43,9 @@ cp data/kernel-patches/patch-dpaa-xdp-queue-index.py "$KERNEL_BUILD/"
 # Stage FMD Shim source for injection into build-kernel.sh
 cp data/kernel-patches/fsl_fmd_shim.c "$KERNEL_BUILD/"
 
+# Stage LP5812 LED driver source for injection into build-kernel.sh
+cp -r data/kernel-patches/lp5812 "$KERNEL_BUILD/"
+
 # Write injection block to temp file (heredoc avoids all quoting issues)
 cat > /tmp/kernel-inject.sh << 'INJECT_EOF'
 
@@ -85,10 +88,78 @@ if [ -f "${CWD}/fsl_fmd_shim.c" ]; then
   fi
   echo "FMD Shim: injected into $FMD_DIR"
 fi
+
+# LP5812: inject TI LP5812 I2C LED controller driver (out-of-tree, not in mainline 6.6)
+if [ -d "${CWD}/lp5812" ]; then
+  LP5812_DIR=drivers/leds/lp5812
+  mkdir -p "$LP5812_DIR"
+  cp "${CWD}/lp5812/leds-lp5812.c" "$LP5812_DIR/"
+  cp "${CWD}/lp5812/leds-lp5812.h" "$LP5812_DIR/"
+  cat > "$LP5812_DIR/Kconfig" <<-KEOF
+	config LEDS_LP5812
+		bool "LED Support for TI LP5812 I2C LED controller"
+		depends on LEDS_CLASS && I2C && LEDS_CLASS_MULTICOLOR
+		default y
+		help
+		  TI LP5812 12-channel I2C LED controller with per-LED
+		  analog and PWM dimming. Used on Mono Gateway DK for
+		  4 status indicator LEDs (white/blue/green/red).
+	KEOF
+  echo 'obj-$(CONFIG_LEDS_LP5812) += leds-lp5812.o' > "$LP5812_DIR/Makefile"
+  # Hook into parent Kconfig and Makefile
+  if ! grep -q lp5812 drivers/leds/Kconfig 2>/dev/null; then
+    echo 'source "drivers/leds/lp5812/Kconfig"' >> drivers/leds/Kconfig
+  fi
+  if ! grep -q lp5812 drivers/leds/Makefile 2>/dev/null; then
+    echo 'obj-$(CONFIG_LEDS_LP5812) += lp5812/' >> drivers/leds/Makefile
+  fi
+  echo "LP5812: injected into $LP5812_DIR"
+fi
 INJECT_EOF
 
 # Insert injection block before "# Change name of Signing Cert" in build-kernel.sh
 sed -i '/# Change name of Signing Cert/r /tmp/kernel-inject.sh' "$KERNEL_BUILD/build-kernel.sh"
 rm -f /tmp/kernel-inject.sh
+
+### Post-defconfig: force LS1046A built-in configs after VyOS snippets
+#
+# VyOS config/*.config snippets are appended to the defconfig AFTER our
+# LS1046A fragments in build-kernel.sh. These snippets may override critical
+# built-in settings (e.g., USB_STORAGE=y→m, DEVTMPFS_MOUNT=y→n).
+# Fix: inject scripts/config overrides AFTER make vyos_defconfig.
+#
+cat > /tmp/ls1046a-post-defconfig.sh << 'LS1046A_POSTDEFCONFIG_EOF'
+
+# LS1046A: Force built-in configs that VyOS snippets may have overridden
+echo "I: LS1046A — Forcing built-in kernel configs after vyos_defconfig"
+scripts/config --enable CONFIG_DEVTMPFS_MOUNT
+scripts/config --set-val CONFIG_USB_STORAGE y
+scripts/config --set-val CONFIG_VFAT_FS y
+scripts/config --set-val CONFIG_FAT_FS y
+scripts/config --set-val CONFIG_NLS_CODEPAGE_437 y
+scripts/config --set-val CONFIG_NLS_ISO8859_1 y
+scripts/config --set-val CONFIG_NLS_UTF8 y
+scripts/config --set-val CONFIG_SQUASHFS y
+scripts/config --set-val CONFIG_OVERLAY_FS y
+scripts/config --set-val CONFIG_QORIQ_CPUFREQ y
+scripts/config --set-val CONFIG_FSL_EDMA y
+scripts/config --set-val CONFIG_SERIAL_OF_PLATFORM y
+scripts/config --set-val CONFIG_MAXLINEAR_GPHY y
+scripts/config --set-val CONFIG_IMX2_WDT y
+scripts/config --set-val CONFIG_SPI_FSL_QUADSPI y
+scripts/config --disable CONFIG_DEBUG_PREEMPT
+scripts/config --set-val CONFIG_NEW_LEDS y
+scripts/config --set-val CONFIG_LEDS_CLASS y
+scripts/config --set-val CONFIG_LEDS_CLASS_MULTICOLOR y
+scripts/config --set-val CONFIG_LEDS_GPIO y
+scripts/config --set-val CONFIG_LEDS_LP5812 y
+scripts/config --set-val CONFIG_LEDS_TRIGGERS y
+scripts/config --set-val CONFIG_LEDS_TRIGGER_NETDEV y
+make olddefconfig
+
+LS1046A_POSTDEFCONFIG_EOF
+
+sed -i '/^make vyos_defconfig$/r /tmp/ls1046a-post-defconfig.sh' "$KERNEL_BUILD/build-kernel.sh"
+rm -f /tmp/ls1046a-post-defconfig.sh
 
 echo "### Kernel setup complete"
