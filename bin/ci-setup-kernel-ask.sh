@@ -143,10 +143,15 @@ scripts/config --disable CONFIG_FSL_FMAN
 scripts/config --disable CONFIG_FSL_DPAA_ETH
 scripts/config --disable CONFIG_FSL_XGMAC_MDIO
 
+# --- Staging drivers (SDK QBMan is in drivers/staging/fsl_qbman/) ---
+scripts/config --enable CONFIG_STAGING
+
 # --- Enable SDK DPAA stack (order matters: DPA first, then BMAN/QMAN, then FMAN, then ETH) ---
 scripts/config --enable CONFIG_FSL_SDK_DPA
 scripts/config --enable CONFIG_FSL_SDK_BMAN
 scripts/config --enable CONFIG_FSL_SDK_QMAN
+scripts/config --enable CONFIG_FSL_BMAN_CONFIG
+scripts/config --enable CONFIG_FSL_QMAN_CONFIG
 scripts/config --enable CONFIG_FSL_SDK_FMAN
 scripts/config --set-val CONFIG_FSL_SDK_DPAA_ETH y
 scripts/config --enable CONFIG_FSL_DPAA_HOOKS
@@ -206,7 +211,8 @@ make olddefconfig
 
 # --- Verify critical configs ---
 echo "I: ASK — Verifying critical kernel configs:"
-for sym in FSL_SDK_DPA FSL_SDK_FMAN FSL_SDK_DPAA_ETH CPE_FAST_PATH \
+for sym in STAGING FSL_SDK_DPA FSL_SDK_BMAN FSL_SDK_QMAN FSL_BMAN_CONFIG \
+           FSL_QMAN_CONFIG FSL_SDK_FMAN FSL_SDK_DPAA_ETH CPE_FAST_PATH \
            DEVTMPFS_MOUNT USB_STORAGE SQUASHFS OVERLAY_FS LEDS_LP5812; do
   val=$(scripts/config --state "CONFIG_${sym}" 2>/dev/null || echo "UNKNOWN")
   echo "   CONFIG_${sym}=${val}"
