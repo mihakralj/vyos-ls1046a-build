@@ -39,7 +39,6 @@ jobs:
       PREVIOUS_SUCCESS_BUILD_TIMESTAMP: ${{ steps.set_env_variables.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}
       image_iso: ${{ steps.build_iso.outputs.image_iso }}
       image_name: ${{ steps.build_iso.outputs.image_name }}
-      usb_img: ${{ steps.build_iso.outputs.usb_img }}
 
     steps:
       - name: Install Dependencies
@@ -124,8 +123,6 @@ jobs:
             manifest.json
             ${{ steps.build_iso.outputs.image_iso }}
             ${{ steps.build_iso.outputs.image_iso }}.minisig
-            ${{ steps.build_iso.outputs.usb_img }}
-            ${{ steps.build_iso.outputs.usb_img }}.minisig
           retention-days: 15
           if-no-files-found: error
           compression-level: 0
@@ -273,8 +270,6 @@ jobs:
           files: |
             ${{ needs.build_iso.outputs.image_iso }}
             ${{ needs.build_iso.outputs.image_iso }}.minisig
-            vyos-*-usb.img.zst
-            vyos-*-usb.img.zst.minisig
 
       - uses: dev-drprasad/delete-older-releases@v0.3.4
         with:
