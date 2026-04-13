@@ -1376,7 +1376,7 @@ index 161356313203..0402bdc6bae8 100644
  	}
  
  if (!valid) {
-@@ -4118,6 +4129,7 @@ void rtmsg_ifinfo(int type, struct net_device *dev, unsigned int change,
+@@ -4118,5 +4129,6 @@ void rtmsg_ifinfo(int type, struct net_device *dev, unsigned int change,
     NULL, 0, portid, nlh);
  }
 +EXPORT_SYMBOL(rtmsg_ifinfo);
