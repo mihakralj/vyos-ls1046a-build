@@ -165,6 +165,9 @@ scripts/config --enable CONFIG_CPE_FAST_PATH
 # --- IPsec offload ---
 scripts/config --enable CONFIG_INET_IPSEC_OFFLOAD
 scripts/config --enable CONFIG_INET6_IPSEC_OFFLOAD
+# ipsec_nlkey_flow() is defined in net/key/af_key.c (CONFIG_NET_KEY) but called
+# from built-in xfrm_policy.c — must be =y, not =m, to avoid linker error
+scripts/config --set-val CONFIG_NET_KEY y
 
 # --- ASK netfilter extensions ---
 scripts/config --enable CONFIG_NETFILTER_XT_QOSMARK
@@ -213,6 +216,7 @@ make olddefconfig
 echo "I: ASK — Verifying critical kernel configs:"
 for sym in STAGING FSL_SDK_DPA FSL_SDK_BMAN FSL_SDK_QMAN FSL_BMAN_CONFIG \
            FSL_QMAN_CONFIG FSL_SDK_FMAN FSL_SDK_DPAA_ETH CPE_FAST_PATH \
+           NET_KEY INET_IPSEC_OFFLOAD INET6_IPSEC_OFFLOAD \
            DEVTMPFS_MOUNT USB_STORAGE SQUASHFS OVERLAY_FS LEDS_LP5812; do
   val=$(scripts/config --state "CONFIG_${sym}" 2>/dev/null || echo "UNKNOWN")
   echo "   CONFIG_${sym}=${val}"
