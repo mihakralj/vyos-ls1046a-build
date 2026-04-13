@@ -6,6 +6,10 @@ Entries are factual. The humor is in the bugs.
 
 ## Unreleased
 
+### Fixed
+- **ASK `fp_netfilter_init` boot crash** — `comcerto_fp_netfilter.c` used `module_init()` which runs at `device_initcall` level 6, but was linked before `nf_conntrack` in the Makefile. `nf_ct_netns_get(&init_net)` called before conntrack per-net data existed → NULL pointer dereference. Fixed by changing to `late_initcall()`.
+- **`accel-ppp-ng` ARM64 dependency failure** — VyOS upstream added `accel-ppp-ng` as a `vyos-1x` dependency, but no ARM64 build exists. `ci-setup-vyos1x.sh` now strips it from `debian/control` via sed. **TODO:** re-add when ARM64 package becomes available.
+
 ### Added
 - **ASK (Application Solutions Kit) SDK kernel integration** — NXP SDK FMan/QBMan/DPAA drivers ported to mainline kernel 6.6 for ASK hardware offload support. Split into two artifacts: `ask-nxp-sdk-sources.tar.gz` (67 files, static) and `003-ask-kernel-hooks.patch` (75 files, adapts to kernel updates). All verified against mainline v6.6 with zero patch failures.
 
