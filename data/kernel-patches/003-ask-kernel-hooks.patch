@@ -5251,9 +5251,8 @@ index 000000000000..a339458146e2
 +	nf_ct_netns_put(&init_net, NFPROTO_INET);
 +}
 +
-+module_init(fp_netfilter_init);
++late_initcall(fp_netfilter_init);
 +module_exit(fp_netfilter_exit);
-\ No newline at end of file
 diff --git a/net/netfilter/xt_qosconnmark.c b/net/netfilter/xt_qosconnmark.c
 new file mode 100644
 index 000000000000..a47f1ad05168
