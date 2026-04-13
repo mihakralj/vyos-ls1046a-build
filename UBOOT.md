@@ -269,7 +269,7 @@ booti ${kernel_addr_r} - ${fdt_addr_r}
 ## Ethernet Interfaces
 
 > ⚠️ Physical RJ45 port order differs from DT node address order.
-> Port remapping is handled by udev rule `64-fman-port-order.rules` setting `VYOS_IFNAME`.
+> Port remapping is handled by udev rule `10-fman-port-order.rules` which calls `fman-port-name` to set FMan MAC DT address → physical port name. On installed systems, VyOS `vyos_net_name` (hw-id matching) takes precedence.
 
 | Physical Position | DT Node | MAC Address | PHY Addr | VyOS Name | Type |
 |-------------------|---------|-------------|----------|-----------|------|
