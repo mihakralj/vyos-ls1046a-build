@@ -6,6 +6,22 @@
 set -ex
 cd "${GITHUB_WORKSPACE:-.}/vyos-build"
 
+### Pre-flight: verify custom kernel is present (defense-in-depth)
+KERNEL_IN_PACKAGES=$(find packages -name 'linux-image-*.deb' ! -name '*-dbg*' 2>/dev/null | wc -l)
+if [ "$KERNEL_IN_PACKAGES" -eq 0 ]; then
+  echo ""
+  echo "###############################################################"
+  echo "### FATAL: No custom kernel .deb in packages/               ###"
+  echo "### Refusing to build ISO with upstream fallback kernel.    ###"
+  echo "###############################################################"
+  echo ""
+  echo "This check prevents shipping an ISO without ASK/SDK drivers."
+  echo "The kernel build likely failed silently in a previous step."
+  echo ""
+  exit 1
+fi
+echo "### Pre-flight OK: custom kernel present ($KERNEL_IN_PACKAGES .deb)"
+
 ### Copy mainline RDB DTB if built during kernel step
 if [ -f "$GITHUB_WORKSPACE/data/dtb/fsl-ls1046a-rdb.dtb" ]; then
   cp "$GITHUB_WORKSPACE/data/dtb/fsl-ls1046a-rdb.dtb" \
