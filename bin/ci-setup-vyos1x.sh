@@ -37,6 +37,8 @@ pre_build_hook = """
   set -ex
   cp ../ls1046a-patches/reftree.cache data/reftree.cache
   sed -i 's/all: clean copyright/all: clean/' Makefile
+  # Remove packages not available for ARM64 from dependencies
+  sed -i 's/,\\s*accel-ppp-ng//g; s/accel-ppp-ng,\\s*//g; s/accel-ppp-ng//g' debian/control
   patch_fail=0
   for p in ../ls1046a-patches/vyos-1x-*.patch; do
     if ! patch --no-backup-if-mismatch -p1 < "$p"; then
