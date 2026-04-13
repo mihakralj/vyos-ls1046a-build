@@ -19,6 +19,30 @@ for package in $packages; do
 
   [ "$package" == "keepalived" ] && apt-get remove -y libsnmp-dev
 
+  ### Kernel build validation — fail fast on silent failures
+  if [ "$package" == "linux-kernel" ]; then
+    KERNEL_DEB_COUNT=$(find . -maxdepth 1 -name 'linux-image-*.deb' ! -name '*-dbg*' | wc -l)
+    if [ "$KERNEL_DEB_COUNT" -eq 0 ]; then
+      echo ""
+      echo "###############################################################"
+      echo "### FATAL: Kernel build produced NO linux-image .deb files! ###"
+      echo "###############################################################"
+      echo ""
+      echo "The VyOS build.py swallowed the kernel build failure."
+      echo "Check build-kernel.sh output above for the actual error."
+      echo ""
+      echo "Common causes:"
+      echo "  - Patch failed to apply (check 003-ask-kernel-hooks.patch)"
+      echo "  - SDK source extraction failed (ask-nxp-sdk-sources.tar.gz)"
+      echo "  - Kconfig symbol conflict (mainline vs SDK DPAA)"
+      echo "  - Missing kernel dependency"
+      echo ""
+      exit 1
+    fi
+    echo "### Kernel build OK: found $KERNEL_DEB_COUNT .deb file(s)"
+    ls -lh linux-image-*.deb 2>/dev/null || true
+  fi
+
   ### Build Mono Gateway DTB from kernel source (before cleanup)
   if [ "$package" == "linux-kernel" ]; then
     KSRC=$(find . -maxdepth 1 -type d -name 'linux-*' | head -1)
