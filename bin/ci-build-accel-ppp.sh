@@ -117,8 +117,8 @@ rm -rf "$BUILD_DIR"
 
 if [ "$DEBS_FOUND" -eq 0 ]; then
   echo "WARNING: accel-ppp-ng build produced no .deb files"
-  echo "The ISO will still build (sed strips the dependency), but PPPoE/L2TP will be unavailable"
-  exit 0  # Non-fatal — sed workaround in ci-setup-vyos1x.sh handles missing package
+  echo "ISO build will fail on unmet vyos-1x dependency — fix the build or strip the dep manually"
+  exit 1
 fi
 
 echo "### accel-ppp-ng ARM64 build complete: $DEBS_FOUND package(s)"
