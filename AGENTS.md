@@ -167,11 +167,23 @@ All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `ar
 | `VPP-SETUP.md` | User-facing VPP setup guide: step-by-step enablement, configuration reference, troubleshooting, hardware constraints |
 | `plans/DEV-LOOP.md` | Dev-test loop architecture doc — TFTP boot procedure, lessons learned |
 | `plans/VPP-DPAA-PMD-VS-AFXDP.md` | DPAA1 DPDK PMD vs AF_XDP technical assessment: RC#31 analysis, cost-benefit, infrastructure inventory, recommendation |
-| `plans/DPAA1-DPDK-PMD.md` | Original NXP SDK PMD build plan (superseded by mainline rewrite — kept for reference) |
-| `plans/MAINLINE-PATCH-SPEC.md` | Mainline kernel patch specification: export audit, DPDK call trace, 6-patch design |
-| `plans/USDPAA-IOCTL-SPEC.md` | Complete NXP USDPAA ioctl ABI spec (20 ioctls, all structs, mmap, cleanup) |
-| `plans/fsl_usdpaa.c` | NXP SDK reference source (2,623 lines — read-only reference, not used in build) |
-| `plans/fsl_usdpaa.h` | NXP SDK ioctl header (read-only reference for ABI compatibility verification) |
+| `plans/ASK-USERSPACE.md` | ASK userspace build & integration plan: libcli, fmlib, fmc, dpa_app, cdx, fci, auto_bridge, cmm — all steps complete |
+| `plans/ASK-ANALYSIS.md` | ASK fast-path gap analysis: measured 4.39 Gbps SW flow offload, tier comparison vs VPP |
+| `plans/ASK-BOOTSTRAP.md` | ASK kernel bootstrap plan: SDK driver injection, config, DTS — completed |
+| `plans/ASK-FIX-PLAN.md` | ASK build fix plan: kernel config override strategy, USB boot panic fix |
+| `plans/ASK-CODE-QUALITY.md` | ASK code quality audit: SDK driver warnings, compiler fixes, struct alignment |
+| `plans/NETWORKING-DEEP-DIVE.md` | DPAA1 networking deep-dive: FMan architecture, QBMan, portal allocation, driver split |
+| `plans/FMD-SHIM-SPEC.md` | FMD Shim spec for `/dev/fm0*` chardevs (skeleton implemented, PCD ioctls dormant) |
+| `plans/NEXT-STEPS.md` | Project next steps and prioritized task list |
+| `archive/plans/DPAA1-DPDK-PMD.md` | ARCHIVED: Original NXP SDK PMD build plan (superseded — RC#31) |
+| `archive/plans/MAINLINE-PATCH-SPEC.md` | ARCHIVED: Mainline kernel patch spec for DPDK (superseded) |
+| `archive/plans/USDPAA-IOCTL-SPEC.md` | ARCHIVED: NXP USDPAA ioctl ABI spec (superseded) |
+| `archive/plans/VPP-LINE-RATE-PLAN.md` | ARCHIVED: VPP 10G line-rate plan via DPDK PMD (superseded by ASK) |
+| `archive/plans/VPP-PROGRESS-PLAN.md` | ARCHIVED: VPP development progress tracker (completed milestones) |
+| `archive/plans/ASK-INTEGRATION-PLAN.md` | ARCHIVED: ASK integration plan (superseded by ASK-USERSPACE.md) |
+| `archive/plans/ASK-PORTING-PLAN.md` | ARCHIVED: ASK porting plan (completed) |
+| `archive/plans/ASK-VS-VPP-EFFORT.md` | ARCHIVED: ASK vs VPP effort comparison (decision made — ASK chosen) |
+| `archive/plans/ASK-6.12-VS-6.6-COMPARISON.md` | ARCHIVED: Duplicate of ask-ls1046a-6.6/ version |
 | `data/scripts/fman-port-name` | Script called by udev: reads `/sys/class/net/<iface>/device/of_node` to map FMan MAC DT address → physical port name (eth0-eth4) |
 | `data/scripts/10-fman-port-order.rules` | Udev rule: calls `fman-port-name` on net device add, sets `NAME=` to correct ethN (installed to `/etc/udev/rules.d/`) |
 | `data/scripts/00-fman.link` | Systemd .link file: `NamePolicy=keep` for `dpaa_eth` driver — prevents predictable naming override (installed to `/etc/systemd/network/`) |
