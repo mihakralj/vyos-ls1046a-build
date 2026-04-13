@@ -48,7 +48,9 @@ KERNEL_BUILD=vyos-build/scripts/package-build/linux-kernel
 KERNEL_PATCHES="$KERNEL_BUILD/patches/kernel"
 mkdir -p "$KERNEL_PATCHES"
 
-cp "$ASK_REPO/patches/kernel/003-ask-kernel-hooks.patch" "$KERNEL_PATCHES/"
+# Use our local fixed copy (has curr_time declaration in struct xfrm_state)
+# NOT the ASK repo copy which is missing this field
+cp data/kernel-patches/003-ask-kernel-hooks.patch "$KERNEL_PATCHES/"
 # swphy patch: maps 10G/5G/2.5G to SWMII_SPEED_1000 for SDK fixed-link 10G MACs
 cp data/kernel-patches/4004-swphy-support-10g-fixed-link-speed.patch "$KERNEL_PATCHES/"
 echo "### ASK hooks + swphy patches staged at $KERNEL_PATCHES/"
