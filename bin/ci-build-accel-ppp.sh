@@ -58,10 +58,13 @@ make -C "$KSRC_ABS" modules_prepare ARCH=arm64 2>&1 | tail -5 || true
 echo "### Installing accel-ppp build dependencies"
 apt-get update -qq 2>/dev/null || true
 apt-get install -y --no-install-recommends \
+  cdbs \
   cmake \
-  liblua5.3-dev \
+  debhelper \
+  liblua5.1-dev \
   libpcre3-dev \
   libssl-dev \
+  libsnmp-dev \
   libnl-3-dev \
   libnl-route-3-dev \
   libnl-genl-3-dev \
@@ -84,6 +87,22 @@ if [ -f "$BUILD_DIR/debian/rules" ]; then
   sed -i "s|KERNELDIR :=.*|KERNELDIR := $KSRC_ABS|g" "$BUILD_DIR/debian/rules"
   # Replace any hardcoded kernel version references
   sed -i "s|KVER :=.*|KVER := $KVER|g" "$BUILD_DIR/debian/rules"
+fi
+
+### Patch debian/control: vyos-accel-ppp must satisfy Depends: accel-ppp-ng
+# VyOS vyos-1x depends on "accel-ppp-ng" but this packaging produces "vyos-accel-ppp"
+# Add Provides/Conflicts/Replaces so the .deb satisfies the dependency
+if [ -f "$BUILD_DIR/debian/control" ]; then
+  echo "### Patching debian/control: adding Provides: accel-ppp-ng"
+  sed -i '/^Package: vyos-accel-ppp$/,/^Package:\|^$/{
+    /^Depends:/{
+      a Provides: accel-ppp-ng
+      a Conflicts: accel-ppp-ng
+      a Replaces: accel-ppp-ng
+    }
+  }' "$BUILD_DIR/debian/control"
+  echo "### debian/control after patch:"
+  head -20 "$BUILD_DIR/debian/control"
 fi
 
 # Patch kmod .install files if they reference kernel version paths
