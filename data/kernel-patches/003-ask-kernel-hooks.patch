@@ -507,7 +507,7 @@ index 892fb8c31c32..8b69ea190561 100644
  	struct hlist_node	byseq;
  
  	refcount_t		refcnt;
-@@ -264,6 +271,10 @@ struct xfrm_state {
+@@ -264,6 +271,11 @@ struct xfrm_state {
  	struct xfrm_stats	stats;
  
  	struct xfrm_lifetime_cur curlft;
@@ -515,10 +515,11 @@ index 892fb8c31c32..8b69ea190561 100644
 +	/* ASK IPsec flow offload */
 +	struct ipsec_flow_info	*ipsec_flow;
 +	u32			ipsec_flow_serial;
++time64_t	curr_time;
  	struct hrtimer		mtimer;
  
  	struct xfrm_dev_offload xso;
-@@ -310,6 +321,13 @@ enum {
+@@ -310,6 +322,13 @@ enum {
  	XFRM_STATE_EXPIRED,
  	XFRM_STATE_DEAD
  };
@@ -532,7 +533,7 @@ index 892fb8c31c32..8b69ea190561 100644
  
  /* callback structure passed from either netlink or pfkey */
  struct km_event {
-@@ -542,6 +560,10 @@ struct xfrm_policy {
+@@ -542,6 +561,10 @@ struct xfrm_policy {
  	struct xfrm_selector	selector;
  	struct xfrm_lifetime_cfg lft;
  	struct xfrm_lifetime_cur curlft;
@@ -543,7 +544,7 @@ index 892fb8c31c32..8b69ea190561 100644
  	struct xfrm_policy_walk_entry walk;
  	struct xfrm_policy_queue polq;
  	bool                    bydst_reinsert;
-@@ -1066,6 +1088,35 @@ struct sec_path {
+@@ -1066,6 +1089,35 @@ struct sec_path {
  
  struct sec_path *secpath_set(struct sk_buff *skb);
  
