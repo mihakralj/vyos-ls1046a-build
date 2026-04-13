@@ -94,6 +94,12 @@ mkdir -p "$CHROOT/etc/systemd/network"
 cp data/scripts/00-fman.link "$CHROOT/etc/systemd/network/00-fman.link"
 
 
+### Boot-complete fan notification: whistle fans to alert admin
+cp data/scripts/boot-complete-notify.sh "$CHROOT/usr/local/bin/boot-complete-notify.sh"
+chmod +x "$CHROOT/usr/local/bin/boot-complete-notify.sh"
+cp data/systemd/boot-complete-notify.service "$CHROOT/etc/systemd/system/boot-complete-notify.service"
+cp data/systemd/boot-complete-notify.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/boot-complete-notify.conf"
+
 ### FQ qdisc for BBR pacing on 10G SFP+ interfaces
 cp data/scripts/fman-fq-qdisc "$CHROOT/usr/local/bin/fman-fq-qdisc"
 chmod +x "$CHROOT/usr/local/bin/fman-fq-qdisc"

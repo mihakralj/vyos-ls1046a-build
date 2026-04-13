@@ -1,0 +1,9 @@
+[Unit]
+Description=Fan whistle notification on boot complete
+After=multi-user.target vyos-router.service fancontrol.service
+ConditionPathExists=/sys/firmware/devicetree/base/compatible
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/boot-complete-notify.sh
+RemainAfterExit=no
