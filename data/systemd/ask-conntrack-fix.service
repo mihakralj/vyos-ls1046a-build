@@ -1,0 +1,13 @@
+[Unit]
+Description=ASK fast-path conntrack fix (remove VyOS notrack rules)
+After=vyos-router.service
+Requires=vyos-router.service
+ConditionPathExists=/dev/cdx_ctrl
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ask-conntrack-fix.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

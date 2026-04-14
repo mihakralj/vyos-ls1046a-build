@@ -2,14 +2,14 @@
 
 ## Overview
 
-The install process uses two separate artifacts:
+A single hybrid ISO serves both purposes:
 
-| Artifact | Use case |
-|----------|---------|
-| `vyos-...-LS1046A-arm64-usb.img.zst` | **Initial install** — decompress, write to USB, boot, run `install image` |
-| `vyos-...-LS1046A-arm64.iso` | **Upgrade only** — passed to `add system image <url>` |
+| Use case | How |
+|----------|-----|
+| **Initial install** | `dd` the ISO to USB → boot → `install image` |
+| **Upgrade** | `add system image <url>` from a running VyOS system |
 
-U-Boot reads FAT32. The USB image is a zstd-compressed raw FAT32 filesystem — decompress it first, then write with `dd`. U-Boot reads it directly. Never use the ISO for USB boot.
+The ISO is a hybrid image: valid ISO9660 (for VyOS image upgrades) with an appended FAT32 boot partition and MBR (for U-Boot USB boot). One file, two boot paths.
 
 ---
 
@@ -21,19 +21,19 @@ Review the [open issues](https://github.com/mihakralj/vyos-ls1046a-build/issues)
 
 ## Requirements
 
-- USB flash drive ≥ 4 GB
+- USB flash drive ≥ 2 GB
 - Serial console access: USB-to-serial adapter, **115200 8N1**, connected to the Mono Gateway's RJ45 console port
-- Linux, macOS, or Windows (Rufus) host
+- Linux, macOS, or Windows host
 
 ---
 
-## Step 1 — Write USB boot image
+## Step 1 — Write ISO to USB
 
-Download the latest `vyos-...-LS1046A-arm64-usb.img.zst` from [Releases](https://github.com/mihakralj/vyos-ls1046a-build/releases).
+Download the latest `vyos-...-LS1046A-arm64.iso` from [Releases](https://github.com/mihakralj/vyos-ls1046a-build/releases).
 
-> **Important:** The `.img.zst` file is a zstd-compressed raw FAT32 disk image. Decompress it first, then write with `dd`. Do **not** use the `.iso` file for USB boot — U-Boot cannot read ISO 9660.
+> **Note:** The ISO is a hybrid image — write it as a raw disk image, not as extracted files. No decompression or FAT32 formatting needed.
 
-### Linux — decompress + write (one pipeline)
+### Linux
 
 ```bash
 # Identify USB device (look for your USB drive size — NOT a partition like sdb1)
@@ -42,18 +42,11 @@ lsblk
 # Unmount any auto-mounted partitions
 sudo umount /dev/sdX* 2>/dev/null
 
-# Decompress and write in one pipeline (replace /dev/sdX with your USB device)
-zstd -d vyos-*-LS1046A-arm64-usb.img.zst --stdout | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync
+# Write ISO directly to USB (replace /dev/sdX with your USB device)
+sudo dd if=vyos-*-LS1046A-arm64.iso of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
-Or decompress first, then write separately:
-
-```bash
-zstd -d vyos-*-LS1046A-arm64-usb.img.zst   # produces .img file
-sudo dd if=vyos-*-LS1046A-arm64-usb.img of=/dev/sdX bs=4M status=progress conv=fsync
-```
-
-### macOS — decompress + write (one pipeline)
+### macOS
 
 ```bash
 # Identify USB device
@@ -62,19 +55,17 @@ diskutil list    # Look for your USB (e.g., /dev/disk2)
 # Unmount (do NOT eject — just unmount)
 diskutil unmountDisk /dev/diskN
 
-# Decompress and write in one pipeline (use rdiskN — 10x faster than diskN)
-zstd -d vyos-*-LS1046A-arm64-usb.img.zst --stdout | sudo dd of=/dev/rdiskN bs=4m
+# Write ISO directly (use rdiskN — 10x faster than diskN)
+sudo dd if=vyos-*-LS1046A-arm64.iso of=/dev/rdiskN bs=4m
 ```
 
-> macOS ships without `zstd`. Install with `brew install zstd` or download from [zstd releases](https://github.com/facebook/zstd/releases).
+### Windows
 
-### Windows — Rufus
-
-1. Decompress with [zstd for Windows](https://github.com/facebook/zstd/releases) or [7-Zip](https://www.7-zip.org/) (supports `.zst`):
-   - **7-Zip:** right-click the `.zst` file → 7-Zip → Extract Here → produces `.img`
-   - **Command line:** `zstd -d vyos-...-usb.img.zst`
-2. Download [Rufus](https://rufus.ie/)
-3. Select the extracted `.img` file — Rufus detects DD Image mode automatically — click **Start**
+1. Download [Rufus](https://rufus.ie/)
+2. Select the `.iso` file and your USB drive
+3. Click **START**
+4. **When Rufus asks how to write** — select **"Write in DD Image mode"**, NOT "Write in ISO Image mode"
+5. Wait for completion
 
 ---
 
@@ -89,16 +80,16 @@ Factory U-Boot boots OpenWrt from eMMC. It has no USB boot command, so you must 
 At the `=>` prompt, paste this single line:
 
 ```
-usb start; fatload usb 0:0 ${load_addr} boot.scr; source ${load_addr}
+usb start; fatload usb 0:2 ${load_addr} boot.scr; source ${load_addr}
 ```
 
-This loads `boot.scr` from the USB, which loads the kernel, DTB, and initrd from USB FAT32, sets temporary bootargs, and boots VyOS live via `booti`.
+This loads `boot.scr` from the USB FAT32 partition, which loads the kernel, DTB, and initrd, sets temporary bootargs, and boots VyOS live via `booti`.
 
 Watch the boot log for 60–90 seconds until the VyOS login prompt appears.
 
 > **If `usb start` hangs or shows no devices:** Try a USB 2.0 drive. Some USB 3.0 drives aren't detected by the LS1046A USB controller.
 
-> **USB addressing:** The USB image is whole-disk FAT32 with no MBR partition table. U-Boot accesses it as `usb 0:0` (whole disk), not `usb 0:1` (first partition). The kernel sees it as `/dev/sda` (not `/dev/sda1`).
+> **USB layout:** The hybrid ISO has two partitions when written to USB: partition 1 (ISO9660 with squashfs) and partition 2 (FAT32 with boot files). U-Boot loads from partition 2 explicitly via `fatload usb 0:2`. After kernel boot, live-boot finds the squashfs on the ISO9660 partition.
 
 ---
 
@@ -214,9 +205,7 @@ setenv vyos 'ext4load mmc 0:3 ${load_addr} /boot/vyos.env; env import -t ${load_
     setenv bootargs "BOOT_IMAGE=/boot/${vyos_image}/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 vyos-union=/boot/${vyos_image}"; \
     booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
 
-setenv usb_vyos 'usb start; if fatload usb 0:0 ${kernel_addr_r} live/vmlinuz; then fatload usb 0:0 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:0 ${ramdisk_addr_r} live/initrd.img; \
-    setenv bootargs "BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda rootdelay=5 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60"; \
-    booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}; fi'
+setenv usb_vyos 'usb start; if fatload usb 0:2 ${kernel_addr_r} live/vmlinuz; then fatload usb 0:2 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:2 ${ramdisk_addr_r} live/initrd.img; setenv bootargs "BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda rootdelay=5 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}; fi'
 
 setenv bootcmd 'run usb_vyos || run vyos || run recovery'
 

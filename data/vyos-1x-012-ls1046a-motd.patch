@@ -11,7 +11,7 @@
   * Support portal: {{ version_data.support_url }}
  {% endif %}
 +   Architecture:  {{ version_data.architecture }} - NXP LS1046A
-+   Patches:       DPAA1 FMan, CAAM/SEC5, custom DTB
++   Patches:       NXP SDK DPAA, ASK fast-path, CAAM IPsec, FMD Shim, SFP+
 +
   * Documentation:  {{ version_data.documentation_url }}
   * Project news:   {{ version_data.project_news_url }}

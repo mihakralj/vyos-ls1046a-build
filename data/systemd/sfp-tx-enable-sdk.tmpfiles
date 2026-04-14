@@ -1,0 +1,4 @@
+# Create systemd .wants symlink for sfp-tx-enable-sdk at boot.
+# Cannot use systemctl enable — live-build squashfs converts the
+# symlink to a regular file, which systemd ignores.
+L+ /etc/systemd/system/multi-user.target.wants/sfp-tx-enable-sdk.service - - - - /etc/systemd/system/sfp-tx-enable-sdk.service

@@ -1,0 +1,2 @@
+# Enable boot-complete-notify service
+L+ /etc/systemd/system/multi-user.target.wants/boot-complete-notify.service - - - - /etc/systemd/system/boot-complete-notify.service

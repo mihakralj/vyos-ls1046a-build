@@ -133,7 +133,7 @@ setup_uboot_env_once() {
     # cleanly to the next || branch in bootcmd without executing 'source'
     # on garbage data at ${load_addr}.
     local usb_vyos_val
-    usb_vyos_val='usb start; if fatload usb 0:0 ${load_addr} boot.scr; then source ${load_addr}; fi'
+    usb_vyos_val='usb start; if fatload usb 0:2 ${load_addr} boot.scr; then source ${load_addr}; fi'
 
     # Boot priority: USB → eMMC → SPI recovery
     local bootcmd_val='run usb_vyos || run vyos || run recovery'

@@ -427,22 +427,24 @@ sudo cat /var/log/vpp/vpp.log
 - [ ] Benchmark WireGuard throughput (ChaCha20-Poly1305, CPU-only via NEON SIMD, ~1 Gbps)
 - [ ] Target: 2.5+ Gbps IPsec encrypted tunnel throughput
 
-### Milestone 5: DPAA1 PMD (Full Line Rate) 🔶 IN PROGRESS
+### Milestone 5: DPAA1 PMD (Full Line Rate) ⬛ ARCHIVED
 
-The path to 10G wire-speed. **Phase A (kernel patches) and Phase B (DPDK cross-compile) are complete.** Phase C (VPP DPDK plugin integration) is next.
+> **Archived 2026-04-03:** DPDK DPAA1 PMD blocked by RC#31 — `dpaa_bus` probe kills all kernel FMan interfaces globally. Infrastructure moved to `archive/dpaa-pmd/`. See [VPP-DPAA-PMD-VS-AFXDP.md](plans/VPP-DPAA-PMD-VS-AFXDP.md) for analysis. Current production path: AF_XDP (~3.5 Gbps on 10G SFP+). **ASK hardware flow offload is being evaluated as the alternative path to line rate** — see [ASK-ANALYSIS.md](plans/ASK-ANALYSIS.md).
 
-- [x] Clean mainline USDPAA kernel module (6 patches, 1453 lines) — [DPAA1-DPDK-PMD.md](plans/DPAA1-DPDK-PMD.md)
+- [x] Clean mainline USDPAA kernel module (6 patches, 1453 lines)
 - [x] Build DPDK 24.11 with DPAA PMD (cross-compiled, shared libs)
 - [x] Create USDPAA DTB variant for Mono Gateway
-- [ ] VPP DPDK plugin integration (Phase C — Option A/B evaluation)
-- [ ] Build FMlib + FMC from NXP LSDK
-- [ ] Benchmark: target 9.4+ Gbps
+- [ ] ~~VPP DPDK plugin integration~~ — blocked by RC#31
+- [ ] ~~Build FMlib + FMC from NXP LSDK~~ — blocked by RC#31
+- [ ] ~~Benchmark: target 9.4+ Gbps~~ — blocked by RC#31
 
 ---
 
-## Future: DPAA1 PMD Path (10G Line Rate)
+## Future: DPAA1 PMD Path (10G Line Rate) — ARCHIVED
 
-The current AF_XDP approach achieves ~60–70% of line rate. For full 10G wire-speed, the DPAA1 PMD (Poll Mode Driver) path provides hardware-level packet processing. This section documents the components and build process for future implementation.
+> **Note:** This section is preserved for reference. The DPAA1 PMD approach was archived on 2026-04-03 due to RC#31 (see above). All code moved to `archive/dpaa-pmd/` with restoration guide at `archive/dpaa-pmd/RESTORE.md`.
+
+The current AF_XDP approach achieves ~3.5 Gbps on 10G SFP+. The DPAA1 PMD (Poll Mode Driver) path was intended to provide hardware-level packet processing for full 10G wire-speed, but is blocked by a fundamental bus initialization conflict (RC#31).
 
 ### The Four Components Required
 
