@@ -64,6 +64,14 @@ for package in $packages; do
         fi
       fi
 
+      # Copy SDK dtsi files required by mono-gateway-dk-sdk.dts
+      # These are NXP SDK-specific includes not present in the mainline kernel tree
+      SDK_DTSI_DIR="$GITHUB_WORKSPACE/data/dtb/sdk-dtsi"
+      if [ -d "$SDK_DTSI_DIR" ]; then
+        echo "### Installing SDK dtsi files into kernel DTS directory"
+        cp -v "$SDK_DTSI_DIR"/*.dtsi "$DTS_DIR/" 2>/dev/null || true
+      fi
+
       # Check if SDK DTS exists (injected by ci-setup-kernel-ask.sh)
       SDK_DTS="$DTS_DIR/mono-gateway-dk-sdk.dts"
       if [ -f "$SDK_DTS" ]; then
@@ -187,6 +195,15 @@ for package in $packages; do
       cp "$GITHUB_WORKSPACE/data/ask-userspace/cdx/cdx.ko" "$ASK_DST/" || true
       cp "$GITHUB_WORKSPACE/data/ask-userspace/auto_bridge/auto_bridge.ko" "$ASK_DST/" || true
       cp "$GITHUB_WORKSPACE/data/ask-userspace/fci/fci.ko" "$ASK_DST/" || true
+    fi
+
+    ### Build ASK userspace binaries from source (cmm, dpa_app, libcli, libfci)
+    # Overwrites pre-built binaries installed by ci-setup-vyos-build.sh with source-built versions
+    if [ -n "$KSRC" ] && [ -x "$GITHUB_WORKSPACE/bin/ci-build-ask-userspace.sh" ]; then
+      KSRC_ABS_ASK="$(cd "$KSRC" && pwd)"
+      echo "### Building ASK userspace from source"
+      "$GITHUB_WORKSPACE/bin/ci-build-ask-userspace.sh" "$KSRC_ABS_ASK" "$INCLUDES_CHR" || \
+        echo "WARNING: ASK userspace build failed (non-fatal) — using pre-built binaries"
     fi
 
     ### Build accel-ppp-ng ARM64 packages (daemon + kernel modules)

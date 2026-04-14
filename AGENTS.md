@@ -76,6 +76,7 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 - **`libubootenv-tool` config format:** VyOS ships `libubootenv-tool` which provides `/usr/bin/fw_setenv`. It accepts the classic `fw_env.config` legacy format: `Device Offset Env_size Sector_size`. The `/etc/fw_env.config` must point to `/dev/mtd2 0x0 0x2000 0x1000`. Env_size 0x2000 (8KB) and sector 0x1000 (4KB) were confirmed by brute-force CRC test on live hardware. Previous versions incorrectly pointed to `/dev/mtd3` — fixed 2026-04-03.
 - **`vyos-postinstall` Phase 1 always runs on `install image`, is idempotent on boot service:** Phase 1 (`setup_uboot_env_once`) is called with `force=1` when invoked from `install image` (detected by presence of `--root` flag) — it **always** rewrites `vyos`, `usb_vyos`, and `bootcmd` in SPI flash regardless of current state. When called from `vyos-postinstall.service` on every boot (no `--root`), it checks `fw_printenv -n vyos` for "vyos.env" and skips if already correct. Boot order written: USB first (`usb start; if fatload usb 0:2 ${load_addr} boot.scr; then source ${load_addr}; fi`) → eMMC (`run vyos`) → SPI recovery. Manual U-Boot console setup (INSTALL.md Step 4) is the fallback if `fw_setenv` fails.
 - **Transient U-Boot ext4 failure on first boot after fresh eMMC format:** After `install image` on a freshly wiped eMMC, the first boot may print `Failed to load '/boot/vyos.env'` and fall through to SPI recovery. This is a known U-Boot ext4 driver quirk: the driver cannot reliably read a freshly-formatted ext4 partition on first access. `/boot/vyos.env` was written correctly by the installer (via grub.py hook). Just reboot from the recovery shell (`reboot`) and the second boot will load eMMC correctly. This is not a bug in postinstall or the installer.
+- **VyOS migration scripts assume GRUB:** VyOS migration scripts (e.g., `system/31-to-32` from T8375) call `disk.find_persistence()` and read `CFG_VYOS_VARS` (GRUB vars file) with dict key access (`vars_current['console_type']`). On U-Boot systems, this file may not exist or lack expected keys → `KeyError` → "Configuration error" → hostname stays `localhost.localdomain`. Fix: patch `vyos-1x-017` wraps persistence lookup in try/except, checks file existence with `os.path.exists()`, and uses `.get()` for safe key access. **Watch for new migration scripts that assume GRUB** — any new `vars_read()` + `['key']` pattern in `src/migration-scripts/` will need the same treatment.
 
 ## Local Dev Loop Rules
 
@@ -159,7 +160,7 @@ All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `ar
 | `data/scripts/fw_env.config` | U-Boot env access config for fw_printenv/fw_setenv (/dev/mtd2) — only used once during first install |
 | `data/scripts/fancontrol.conf` | Standard Linux fancontrol config: EMC2305 PWM → core-cluster thermal zone (installed as `/etc/fancontrol`) |
 | `data/reftree.cache` | Required vyos-1x build artifact missing from upstream — must copy manually |
-| `data/vyos-1x-*.patch` | Patches applied to vyos-1x during build (11 patches: console, vyshim timeout, podman, install gap, eMMC default, U-Boot live-boot detection, VPP platform-bus, vyos.env boot, LS1046A MOTD, hide live-boot disk from install) |
+| `data/vyos-1x-*.patch` | Patches applied to vyos-1x during build (12 patches: console, vyshim timeout, podman, install gap, eMMC default, U-Boot live-boot detection, VPP platform-bus, vyos.env boot, LS1046A MOTD, hide live-boot disk from install, migration 31-to-32 U-Boot fix) |
 | `data/vyos-build-*.patch` | Patches applied to vyos-build during build (2 patches: vim link, no sbsign) |
 | `data/mok/MOK.pem` | Machine Owner Key certificate for Secure Boot kernel signing |
 | `data/vyos-ls1046a.minisign.pub` | Public key for ISO signature verification |
@@ -170,12 +171,12 @@ All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `ar
 | `VPP-SETUP.md` | User-facing VPP setup guide: step-by-step enablement, configuration reference, troubleshooting, hardware constraints |
 | `plans/DEV-LOOP.md` | Dev-test loop architecture doc — TFTP boot procedure, lessons learned |
 | `plans/VPP-DPAA-PMD-VS-AFXDP.md` | DPAA1 DPDK PMD vs AF_XDP technical assessment: RC#31 analysis, cost-benefit, infrastructure inventory, recommendation |
-| `plans/ASK-USERSPACE.md` | ASK userspace build & integration plan: libcli, fmlib, fmc, dpa_app, cdx, fci, auto_bridge, cmm — all steps complete |
-| `plans/ASK-ANALYSIS.md` | ASK fast-path gap analysis: measured 4.39 Gbps SW flow offload, tier comparison vs VPP |
-| `plans/ASK-BOOTSTRAP.md` | ASK kernel bootstrap plan: SDK driver injection, config, DTS — completed |
+| `ask-ls1046a-6.6/ASK-USERSPACE.md` | ASK userspace build & integration plan: libcli, fmlib, fmc, dpa_app, cdx, fci, auto_bridge, cmm — all steps complete |
+| `ask-ls1046a-6.6/ASK-ANALYSIS.md` | ASK fast-path gap analysis: measured 4.39 Gbps SW flow offload, tier comparison vs VPP |
+| `ask-ls1046a-6.6/ASK-BOOTSTRAP.md` | ASK kernel bootstrap plan: SDK driver injection, config, DTS — completed |
 | `plans/ACCEL-PPP-ARM64.md` | accel-ppp-ng ARM64 build plan: effort estimate, integration into CI pipeline, kmod ABI matching |
-| `plans/ASK-FIX-PLAN.md` | ASK build fix plan: kernel config override strategy, USB boot panic fix |
-| `plans/ASK-CODE-QUALITY.md` | ASK code quality audit: SDK driver warnings, compiler fixes, struct alignment |
+| `ask-ls1046a-6.6/ASK-FIX-PLAN.md` | ASK build fix plan: kernel config override strategy, USB boot panic fix |
+| `ask-ls1046a-6.6/ASK-CODE-QUALITY.md` | ASK code quality audit: SDK driver warnings, compiler fixes, struct alignment |
 | `plans/NETWORKING-DEEP-DIVE.md` | DPAA1 networking deep-dive: FMan architecture, QBMan, portal allocation, driver split |
 | `plans/FMD-SHIM-SPEC.md` | FMD Shim spec for `/dev/fm0*` chardevs (skeleton implemented, PCD ioctls dormant) |
 | `plans/NEXT-STEPS.md` | Project next steps and prioritized task list |
@@ -200,6 +201,7 @@ All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `ar
 | `bin/ci-build-iso.sh` | Final ISO assembly with live-build + hybrid isohybrid creation (appends FAT32 boot partition + MBR for USB `dd` boot) |
 | `data/kernel-config/` | Modular kernel config fragments (ls1046a-board, dpaa1, fmd-shim, i2c-gpio, leds, sfp, usb, watchdog) — appended to vyos_defconfig |
 | `data/kernel-config/ls1046a-leds.config` | Kernel config fragment: LED subsystem (`NEW_LEDS`, `LEDS_CLASS`, `LEDS_CLASS_MULTICOLOR`, `LEDS_GPIO`, `LEDS_LP5812`, `LEDS_TRIGGERS`, `LEDS_TRIGGER_NETDEV`) |
+| `data/dtb/sdk-dtsi/` | NXP SDK-specific dtsi files (qoriq-qman-portals-sdk, qoriq-bman-portals-sdk, qoriq-dpaa-eth, qoriq-fman3-0-6oh) — copied to kernel DTS directory before SDK DTB compilation. Without these, SDK DTS fails to compile and falls back to pre-built mono-gw.dtb (no USDPAA node) |
 | `data/kernel-patches/patch-dpaa-xdp-queue-index.py` | Python patcher: fixes `xdp_rxq_info_reg()` in `dpaa_eth.c` — replaces FQID with 0 as queue_index so AF_XDP XSKMAP lookup succeeds. Injected into kernel tree by `ci-setup-kernel.sh` |
 | `data/kernel-patches/4004-swphy-support-10g-fixed-link-speed.patch` | Kernel patch: `swphy_decode_speed()` maps 10G/5G/2.5G → SWMII_SPEED_1000 so SDK fixed-link 10G MACs probe successfully. Required for SDK kernel only (mainline uses phylink, not swphy). |
 | `data/kernel-patches/fsl_fmd_shim.c` | FMD Shim kernel module source: `/dev/fm0*` chardevs for DPDK fmlib FMan KeyGen RSS (skeleton — GET_API_VERSION only, dormant until ioctls called). Injected into kernel tree by `ci-setup-kernel.sh` |
@@ -216,7 +218,7 @@ All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `ar
 | `data/kernel-config/ls1046a-sdk.config` | Kernel config fragment: disables mainline DPAA1, enables SDK `fsl_mac`/`fsl_dpa`/BMan/QMan drivers |
 | `data/kernel-config/ls1046a-ask.config` | Kernel config fragment: disables mainline DPAA, enables SDK DPAA + ASK fast-path + CAAM IPsec offload |
 | `data/kernel-patches/003-ask-kernel-hooks.patch` | ASK fast-path kernel hooks: netfilter, bridge, xfrm, net/core (copied from `ask-ls1046a-6.6/patches/kernel/`) |
-| `data/kernel-patches/ask-nxp-sdk-sources.tar.gz` | NXP SDK DPAA driver sources (sdk_dpaa, sdk_fman, fsl_qbman — 67 files, 612KB) extracted into kernel tree by `ci-setup-kernel-ask.sh` |
+o| `data/kernel-patches/ask-nxp-sdk-sources.tar.gz` | NXP SDK DPAA driver sources (sdk_dpaa, sdk_fman, fsl_qbman — 67 files, 612KB) extracted into kernel tree by `ci-setup-kernel-ask.sh` |
 | `archive/data/dtb/mono-gateway-dk-sdk.dts` | SDK DTS: fixed-link 10G MACs, deleted SFP/managed properties (SDK `fsl_mac` has no phylink) |
 
 ## Commands
