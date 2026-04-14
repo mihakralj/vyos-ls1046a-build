@@ -99,8 +99,7 @@ firewall {
 interfaces {
     ethernet eth0 {
         address dhcp
-        description "Left RJ45"
-        hw-id e8:f6:d7:00:16:00
+        description "RJ45 port 1"
         ipv6 {
             address {
                 autoconf
@@ -116,8 +115,7 @@ interfaces {
     }
     ethernet eth1 {
         address dhcp
-        description "Center RJ45"
-        hw-id e8:f6:d7:00:16:01
+        description "RJ45 port 2"
         ipv6 {
             address {
                 autoconf
@@ -133,8 +131,7 @@ interfaces {
     }
     ethernet eth2 {
         address dhcp
-        description "Right RJ45"
-        hw-id e8:f6:d7:00:15:ff
+        description "RJ45 port 3"
         ipv6 {
             address {
                 autoconf
@@ -150,14 +147,12 @@ interfaces {
     }
     ethernet eth3 {
         address dhcp
-        description "SFP+ Left"
-        hw-id e8:f6:d7:00:16:02
+        description "SFP+ port 1"
         ipv6 {
             address {
                 autoconf
             }
         }
-        mtu 9000
         offload {
             gro
             gso
@@ -168,14 +163,12 @@ interfaces {
     }
     ethernet eth4 {
         address dhcp
-        description "SFP+ Right"
-        hw-id e8:f6:d7:00:16:03
+        description "SFP+ port 2"
         ipv6 {
             address {
                 autoconf
             }
         }
-        mtu 9000
         offload {
             gro
             gso
@@ -352,4 +345,4 @@ system {
         auto-check
         url https://raw.githubusercontent.com/mihakralj/vyos-ls1046a-build/refs/heads/main/version.json
     }
-}
+}remove all hw-id - this needs to work on all devices
