@@ -84,7 +84,7 @@ bootcmd=run usb_vyos || run vyos || run recovery
 
 # USB live boot — split into 3 vars (same pattern as eMMC)
 # Uses && chains so failure aborts cleanly (no booti with bad addrs)
-usb_vyos_load=usb start && fatload usb 0:0 ${kernel_addr_r} live/vmlinuz && fatload usb 0:0 ${fdt_addr_r} mono-gw.dtb && fatload usb 0:0 ${ramdisk_addr_r} live/initrd.img
+usb_vyos_load=usb start && fatload usb 0:2 ${kernel_addr_r} live/vmlinuz && fatload usb 0:2 ${fdt_addr_r} mono-gw.dtb && fatload usb 0:2 ${ramdisk_addr_r} live/initrd.img
 usb_vyos_args=setenv bootargs BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 hugepagesz=2M hugepages=512 panic=60 quiet
 usb_vyos=run usb_vyos_load && run usb_vyos_args && booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
 
@@ -168,7 +168,7 @@ setenv vyos 'run vyos_load; run vyos_args; booti ${kernel_addr_r} ${ramdisk_addr
 
 # 4. USB live boot — split into 3 vars (same pattern as eMMC)
 # Uses && chains so failure at any step aborts (no booti with bad addrs)
-setenv usb_vyos_load 'usb start && fatload usb 0:0 ${kernel_addr_r} live/vmlinuz && fatload usb 0:0 ${fdt_addr_r} mono-gw.dtb && fatload usb 0:0 ${ramdisk_addr_r} live/initrd.img'
+setenv usb_vyos_load 'usb start && fatload usb 0:2 ${kernel_addr_r} live/vmlinuz && fatload usb 0:2 ${fdt_addr_r} mono-gw.dtb && fatload usb 0:2 ${ramdisk_addr_r} live/initrd.img'
 setenv usb_vyos_args 'setenv bootargs BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 hugepagesz=2M hugepages=512 panic=60 quiet'
 setenv usb_vyos 'run usb_vyos_load && run usb_vyos_args && booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
 
@@ -202,13 +202,13 @@ After `saveenv`, the board auto-boots from eMMC via `/boot/vyos.env` on every po
 The USB image is whole-disk FAT32 (no MBR partition table). Use `boot.scr` for a one-liner:
 
 ```bash
-usb start; fatload usb 0:0 ${load_addr} boot.scr; source ${load_addr}
+usb start; fatload usb 0:2 ${load_addr} boot.scr; source ${load_addr}
 ```
 
 Or manually:
 
 ```bash
-usb start; fatload usb 0:0 ${kernel_addr_r} live/vmlinuz; fatload usb 0:0 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:0 ${ramdisk_addr_r} live/initrd.img; setenv bootargs "BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 hugepagesz=2M hugepages=512 panic=60 quiet"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
+usb start; fatload usb 0:2 ${kernel_addr_r} live/vmlinuz; fatload usb 0:2 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:2 ${ramdisk_addr_r} live/initrd.img; setenv bootargs "BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 hugepagesz=2M hugepages=512 panic=60 quiet"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
 ```
 
 > USB live boot triggers a kexec double-boot (~70s penalty). Normal for VyOS live-boot,

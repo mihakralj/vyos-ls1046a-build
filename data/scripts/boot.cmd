@@ -16,9 +16,9 @@ echo ""
 # --- Load kernel, DTB, initrd from FAT32 USB ---
 
 usb start
-fatload usb 0:0 ${kernel_addr_r} live/vmlinuz
-fatload usb 0:0 ${fdt_addr_r} mono-gw.dtb
-fatload usb 0:0 ${ramdisk_addr_r} live/initrd.img
+fatload usb 0:2 ${kernel_addr_r} live/vmlinuz
+fatload usb 0:2 ${fdt_addr_r} mono-gw.dtb
+fatload usb 0:2 ${ramdisk_addr_r} live/initrd.img
 
 # --- Set bootargs for live session ---
 
