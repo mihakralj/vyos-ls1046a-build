@@ -31,7 +31,7 @@ Review the [open issues](https://github.com/mihakralj/vyos-ls1046a-build/issues)
 
 Download the latest `vyos-...-LS1046A-arm64.iso` from [Releases](https://github.com/mihakralj/vyos-ls1046a-build/releases).
 
-> **Note:** The ISO is a hybrid image — write it directly with `dd`. No decompression, no Rufus, no FAT32 formatting needed.
+> **Note:** The ISO is a hybrid image — write it as a raw disk image, not as extracted files. No decompression or FAT32 formatting needed.
 
 ### Linux
 
@@ -62,8 +62,10 @@ sudo dd if=vyos-*-LS1046A-arm64.iso of=/dev/rdiskN bs=4m
 ### Windows
 
 1. Download [Rufus](https://rufus.ie/)
-2. Select the `.iso` file
-3. Choose **DD Image** mode (not ISO Image) — click **Start**
+2. Select the `.iso` file and your USB drive
+3. Click **START**
+4. **When Rufus asks how to write** — select **"Write in DD Image mode"**, NOT "Write in ISO Image mode"
+5. Wait for completion
 
 ---
 
