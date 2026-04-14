@@ -52,7 +52,8 @@ jobs:
             bubblewrap git-lfs kpartx clang llvm cmake \
             protobuf-compiler python3-cracklib python3-protobuf \
             libreadline-dev liblua5.3-dev byacc flex \
-            dosfstools mtools zstd u-boot-tools
+            dosfstools mtools zstd u-boot-tools \
+            libpcre2-dev xorriso
           apt-get upgrade -y
 
       - uses: actions/checkout@v6
