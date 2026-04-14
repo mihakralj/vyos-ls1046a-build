@@ -119,6 +119,22 @@ for package in $packages; do
       echo "### Building ASK kernel modules against $KSRC_ABS"
       mkdir -p "$ASK_DST"
 
+      # Module signing helper — CONFIG_MODULE_SIG_FORCE=y requires all modules signed
+      # The kernel auto-generates certs/signing_key.pem during build; sign-file uses it
+      sign_module() {
+        local mod="$1"
+        if [ -f "$KSRC_ABS/scripts/sign-file" ] && [ -f "$KSRC_ABS/certs/signing_key.pem" ]; then
+          "$KSRC_ABS/scripts/sign-file" sha512 \
+            "$KSRC_ABS/certs/signing_key.pem" \
+            "$KSRC_ABS/certs/signing_key.x509" \
+            "$mod"
+          echo "   Signed: $(basename "$mod")"
+        else
+          echo "   WARNING: Cannot sign $(basename "$mod") — signing key not found"
+          echo "   Module will be rejected by CONFIG_MODULE_SIG_FORCE=y kernel"
+        fi
+      }
+
       # cdx.ko — main ASK control-plane module
       echo "I: Building cdx.ko..."
       make -C "$ASK_SRC/cdx" clean 2>/dev/null || true
@@ -127,6 +143,7 @@ for package in $packages; do
       if [ -f "$ASK_SRC/cdx/cdx.ko" ]; then
         cp "$ASK_SRC/cdx/cdx.ko" "$ASK_DST/"
         cp "$ASK_SRC/cdx/Module.symvers" "$ASK_DST/cdx.symvers"
+        sign_module "$ASK_DST/cdx.ko"
         echo "### cdx.ko built: $(stat -c '%s bytes' "$ASK_DST/cdx.ko")"
       else
         echo "WARNING: cdx.ko build failed — using pre-built from data/ask-userspace/"
@@ -140,6 +157,7 @@ for package in $packages; do
         PLATFORM=LS1043A ARCH=arm64 modules 2>&1 | tail -20
       if [ -f "$ASK_SRC/auto_bridge/auto_bridge.ko" ]; then
         cp "$ASK_SRC/auto_bridge/auto_bridge.ko" "$ASK_DST/"
+        sign_module "$ASK_DST/auto_bridge.ko"
         echo "### auto_bridge.ko built: $(stat -c '%s bytes' "$ASK_DST/auto_bridge.ko")"
       else
         echo "WARNING: auto_bridge.ko build failed — using pre-built"
@@ -155,6 +173,7 @@ for package in $packages; do
         ARCH=arm64 modules 2>&1 | tail -20
       if [ -f "$ASK_SRC/fci/fci.ko" ]; then
         cp "$ASK_SRC/fci/fci.ko" "$ASK_DST/"
+        sign_module "$ASK_DST/fci.ko"
         echo "### fci.ko built: $(stat -c '%s bytes' "$ASK_DST/fci.ko")"
       else
         echo "WARNING: fci.ko build failed — using pre-built"
