@@ -5526,7 +5526,7 @@ new file mode 100644
 index 000000000000..d982bfbb6c72
 --- /dev/null
 +++ b/net/xfrm/ipsec_flow.c
-@@ -0,0 +1,223 @@
+@@ -0,0 +1,227 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/* Maintain IPSec flow table for ASK fast path
 + *
