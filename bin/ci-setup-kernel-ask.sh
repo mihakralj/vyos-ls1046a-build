@@ -141,7 +141,7 @@ echo "I: ASK — Forcing critical kernel configs after vyos_defconfig"
 scripts/config --disable CONFIG_FSL_DPAA
 scripts/config --disable CONFIG_FSL_FMAN
 scripts/config --disable CONFIG_FSL_DPAA_ETH
-scripts/config --disable CONFIG_FSL_XGMAC_MDIO
+scripts/config --enable CONFIG_FSL_XGMAC_MDIO
 
 # --- Staging drivers (SDK QBMan is in drivers/staging/fsl_qbman/) ---
 scripts/config --enable CONFIG_STAGING
@@ -215,9 +215,9 @@ make olddefconfig
 # --- Verify critical configs ---
 echo "I: ASK — Verifying critical kernel configs:"
 for sym in STAGING FSL_SDK_DPA FSL_SDK_BMAN FSL_SDK_QMAN FSL_BMAN_CONFIG \
-           FSL_QMAN_CONFIG FSL_SDK_FMAN FSL_SDK_DPAA_ETH CPE_FAST_PATH \
-           NET_KEY INET_IPSEC_OFFLOAD INET6_IPSEC_OFFLOAD \
-           DEVTMPFS_MOUNT USB_STORAGE SQUASHFS OVERLAY_FS LEDS_LP5812; do
+           FSL_QMAN_CONFIG FSL_SDK_FMAN FSL_SDK_DPAA_ETH FSL_XGMAC_MDIO \
+           CPE_FAST_PATH NET_KEY INET_IPSEC_OFFLOAD INET6_IPSEC_OFFLOAD \
+           DEVTMPFS_MOUNT USB_STORAGE SQUASHFS OVERLAY_FS LEDS_LP5812 MAXLINEAR_GPHY; do
   val=$(scripts/config --state "CONFIG_${sym}" 2>/dev/null || echo "UNKNOWN")
   echo "   CONFIG_${sym}=${val}"
 done
