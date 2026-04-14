@@ -79,10 +79,11 @@ for package in $packages; do
         make -C "$KSRC" freescale/mono-gateway-dk-sdk.dtb 2>&1 | tail -10 || true
         SDK_DTB="$DTS_DIR/mono-gateway-dk-sdk.dtb"
         if [ -f "$SDK_DTB" ]; then
-          # SDK DTB is the primary DTB for U-Boot (replaces mono-gw.dtb)
-          cp "$SDK_DTB" "$INCLUDES_BIN/mono-gw.dtb"
-          cp "$SDK_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
-          echo "### SDK DTB compiled and installed as mono-gw.dtb: $(stat -c '%s bytes' "$SDK_DTB")"
+          # SDK DTB kept as secondary — pre-built mono-gw.dtb (from OpenWrt) is primary.
+          # SDK DTB OH ports lack fsl,qman-channel-id → fsl-fman-port probe -5 → no NICs.
+          cp "$SDK_DTB" "$INCLUDES_BIN/mono-gw-sdk.dtb"
+          cp "$SDK_DTB" "$INCLUDES_CHR/boot/mono-gw-sdk.dtb"
+          echo "### SDK DTB compiled as mono-gw-sdk.dtb (secondary): $(stat -c '%s bytes' "$SDK_DTB")"
         else
           echo "WARNING: mono-gateway-dk-sdk.dtb build failed — falling back to mainline DTB"
         fi
