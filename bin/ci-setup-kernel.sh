@@ -15,6 +15,13 @@ DEFCONFIG=vyos-build/scripts/package-build/linux-kernel/config/arm64/vyos_defcon
 sed -i '/CONFIG_DEVTMPFS_MOUNT/d'          "$DEFCONFIG"
 sed -i '/CONFIG_CPU_FREQ_DEFAULT_GOV/d'     "$DEFCONFIG"
 sed -i '/CONFIG_DEBUG_PREEMPT/d'            "$DEFCONFIG"
+sed -i '/CONFIG_THERMAL_GOV_FAIR_SHARE/d'   "$DEFCONFIG"
+sed -i '/CONFIG_THERMAL_GOV_BANG_BANG/d'     "$DEFCONFIG"
+sed -i '/CONFIG_CPU_IDLE_GOV_LADDER/d'       "$DEFCONFIG"
+sed -i '/CONFIG_STRICT_DEVMEM/d'            "$DEFCONFIG"
+sed -i '/CONFIG_IO_STRICT_DEVMEM/d'         "$DEFCONFIG"
+sed -i '/CONFIG_CMA/d'                      "$DEFCONFIG"
+sed -i '/CONFIG_DMA_CMA/d'                  "$DEFCONFIG"
 
 # Append all LS1046A kernel config fragments
 # NOTE: ls1046a-usdpaa.config moved to archive/dpaa-pmd/ (DPDK PMD archived)
@@ -113,12 +120,74 @@ if [ -d "${CWD}/lp5812" ]; then
   if ! grep -q lp5812 drivers/leds/Makefile 2>/dev/null; then
     echo 'obj-$(CONFIG_LEDS_LP5812) += lp5812/' >> drivers/leds/Makefile
   fi
-  echo "LP5812: injected into $LP5812_DIR"
+  # Force-enable now that Kconfig is wired up.
+  # The post-defconfig olddefconfig ran BEFORE LP5812 was injected,
+  # so CONFIG_LEDS_LP5812=y was silently dropped. Re-apply and resolve.
+  scripts/config --set-val CONFIG_LEDS_LP5812 y
+  make olddefconfig
+  echo "LP5812: injected into $LP5812_DIR (config forced)"
 fi
 INJECT_EOF
 
 # Insert injection block before "# Change name of Signing Cert" in build-kernel.sh
 sed -i '/# Change name of Signing Cert/r /tmp/kernel-inject.sh' "$KERNEL_BUILD/build-kernel.sh"
 rm -f /tmp/kernel-inject.sh
+
+### Post-defconfig: force LS1046A built-in configs after VyOS snippets
+#
+# VyOS config/*.config snippets are appended to the defconfig AFTER our
+# LS1046A fragments in build-kernel.sh. These snippets may override critical
+# built-in settings (e.g., USB_STORAGE=y→m, DEVTMPFS_MOUNT=y→n).
+# Fix: inject scripts/config overrides AFTER make vyos_defconfig.
+#
+cat > /tmp/ls1046a-post-defconfig.sh << 'LS1046A_POSTDEFCONFIG_EOF'
+
+# LS1046A: Force built-in configs that VyOS snippets may have overridden
+echo "I: LS1046A — Forcing built-in kernel configs after vyos_defconfig"
+scripts/config --enable CONFIG_DEVTMPFS_MOUNT
+scripts/config --set-val CONFIG_USB_STORAGE y
+scripts/config --set-val CONFIG_VFAT_FS y
+scripts/config --set-val CONFIG_FAT_FS y
+scripts/config --set-val CONFIG_NLS_CODEPAGE_437 y
+scripts/config --set-val CONFIG_NLS_ISO8859_1 y
+scripts/config --set-val CONFIG_NLS_UTF8 y
+scripts/config --set-val CONFIG_SQUASHFS y
+scripts/config --set-val CONFIG_OVERLAY_FS y
+scripts/config --set-val CONFIG_QORIQ_CPUFREQ y
+scripts/config --set-val CONFIG_FSL_EDMA y
+scripts/config --set-val CONFIG_SERIAL_OF_PLATFORM y
+scripts/config --set-val CONFIG_MAXLINEAR_GPHY y
+scripts/config --set-val CONFIG_IMX2_WDT y
+scripts/config --set-val CONFIG_SPI_FSL_QUADSPI y
+scripts/config --disable CONFIG_DEBUG_PREEMPT
+scripts/config --set-val CONFIG_NEW_LEDS y
+scripts/config --set-val CONFIG_LEDS_CLASS y
+scripts/config --set-val CONFIG_LEDS_CLASS_MULTICOLOR y
+scripts/config --set-val CONFIG_LEDS_GPIO y
+scripts/config --set-val CONFIG_LEDS_LP5812 y
+scripts/config --set-val CONFIG_LEDS_TRIGGERS y
+scripts/config --set-val CONFIG_LEDS_TRIGGER_NETDEV y
+# KVM, NFS, VFIO, CMA, thermal (match dev kernel)
+scripts/config --set-val CONFIG_KVM y
+scripts/config --set-val CONFIG_NFS_FS y
+scripts/config --set-val CONFIG_NFS_V4 y
+scripts/config --set-val CONFIG_NFS_V4_1 y
+scripts/config --set-val CONFIG_SUNRPC y
+scripts/config --set-val CONFIG_VFIO y
+scripts/config --set-val CONFIG_CMA y
+scripts/config --set-val CONFIG_DMA_CMA y
+scripts/config --set-val CONFIG_CMA_SIZE_MBYTES 32
+scripts/config --enable CONFIG_THERMAL_GOV_POWER_ALLOCATOR
+scripts/config --disable CONFIG_THERMAL_GOV_FAIR_SHARE
+scripts/config --disable CONFIG_THERMAL_GOV_BANG_BANG
+scripts/config --disable CONFIG_CPU_IDLE_GOV_LADDER
+scripts/config --disable CONFIG_STRICT_DEVMEM
+scripts/config --disable CONFIG_IO_STRICT_DEVMEM
+make olddefconfig
+
+LS1046A_POSTDEFCONFIG_EOF
+
+sed -i '/^make vyos_defconfig$/r /tmp/ls1046a-post-defconfig.sh' "$KERNEL_BUILD/build-kernel.sh"
+rm -f /tmp/ls1046a-post-defconfig.sh
 
 echo "### Kernel setup complete"

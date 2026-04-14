@@ -39,7 +39,6 @@ jobs:
       PREVIOUS_SUCCESS_BUILD_TIMESTAMP: ${{ steps.set_env_variables.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}
       image_iso: ${{ steps.build_iso.outputs.image_iso }}
       image_name: ${{ steps.build_iso.outputs.image_name }}
-      usb_img: ${{ steps.build_iso.outputs.usb_img }}
 
     steps:
       - name: Install Dependencies
@@ -53,7 +52,8 @@ jobs:
             bubblewrap git-lfs kpartx clang llvm cmake \
             protobuf-compiler python3-cracklib python3-protobuf \
             libreadline-dev liblua5.3-dev byacc flex \
-            dosfstools mtools zstd u-boot-tools
+            dosfstools mtools zstd u-boot-tools \
+            libpcre2-dev xorriso
           apt-get upgrade -y
 
       - uses: actions/checkout@v6
@@ -83,6 +83,15 @@ jobs:
 
       - name: Setup kernel config and patches
         run: bin/ci-setup-kernel.sh
+
+      - name: Checkout ASK repo (NXP Application Solutions Kit)
+        uses: actions/checkout@v6
+        with:
+          repository: mihakralj/ask-ls1046a-6.6
+          path: ask-ls1046a-6.6
+
+      - name: Setup ASK fast-path kernel (SDK DPAA + hooks)
+        run: bin/ci-setup-kernel-ask.sh
 
       - name: Setup vyos-build (config, chroot files, hooks)
         run: bin/ci-setup-vyos-build.sh
@@ -115,8 +124,6 @@ jobs:
             manifest.json
             ${{ steps.build_iso.outputs.image_iso }}
             ${{ steps.build_iso.outputs.image_iso }}.minisig
-            ${{ steps.build_iso.outputs.usb_img }}
-            ${{ steps.build_iso.outputs.usb_img }}.minisig
           retention-days: 15
           if-no-files-found: error
           compression-level: 0
@@ -264,8 +271,6 @@ jobs:
           files: |
             ${{ needs.build_iso.outputs.image_iso }}
             ${{ needs.build_iso.outputs.image_iso }}.minisig
-            vyos-*-usb.img.zst
-            vyos-*-usb.img.zst.minisig
 
       - uses: dev-drprasad/delete-older-releases@v0.3.4
         with:

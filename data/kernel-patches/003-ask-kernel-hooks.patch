@@ -1,0 +1,5797 @@
+diff --git a/Makefile b/Makefile
+index 022aed903173..a910077338da 100644
+--- a/Makefile
++++ b/Makefile
+@@ -138,6 +138,11 @@ export KBUILD_CLIPPY
+ 
+ # Use make M=dir or set the environment variable KBUILD_EXTMOD to specify the
+ # directory of external module to build. Setting M= takes precedence.
++
++ifdef SUBDIRS
++  KBUILD_EXTMOD ?= $(SUBDIRS)
++endif
++
+ ifeq ("$(origin M)", "command line")
+   KBUILD_EXTMOD := $(M)
+ endif
+diff --git a/drivers/crypto/caam/pdb.h b/drivers/crypto/caam/pdb.h
+index 4b1bcf53f7ac..1669e0d267e3 100644
+--- a/drivers/crypto/caam/pdb.h
++++ b/drivers/crypto/caam/pdb.h
+@@ -145,7 +145,7 @@ struct ipsec_encap_pdb {
+ 	u32 spi;
+ 	u32 ip_hdr_len;
+ 	u32 ip_hdr[];
+-};
++}__attribute__((packed));
+ 
+ /**
+  * ipsec_decap_cbc - PDB part for IPsec CBC decapsulation
+@@ -153,7 +153,7 @@ struct ipsec_encap_pdb {
+  */
+ struct ipsec_decap_cbc {
+ 	u32 rsvd[2];
+-};
++}__attribute__((packed));
+ 
+ /**
+  * ipsec_decap_ctr - PDB part for IPsec CTR decapsulation
+@@ -163,7 +163,7 @@ struct ipsec_decap_cbc {
+ struct ipsec_decap_ctr {
+ 	u8 ctr_nonce[4];
+ 	u32 ctr_initial;
+-};
++}__attribute__((packed));
+ 
+ /**
+  * ipsec_decap_ccm - PDB part for IPsec CCM decapsulation
+@@ -177,7 +177,7 @@ struct ipsec_decap_ctr {
+ struct ipsec_decap_ccm {
+ 	u8 salt[4];
+ 	u32 ccm_opt;
+-};
++}__attribute__((packed));
+ 
+ /**
+  * ipsec_decap_gcm - PDB part for IPsec GCN decapsulation
+@@ -187,7 +187,7 @@ struct ipsec_decap_ccm {
+ struct ipsec_decap_gcm {
+ 	u8 salt[4];
+ 	u32 resvd;
+-};
++}__attribute__((packed));
+ 
+ /**
+  * ipsec_decap_pdb - PDB for IPsec decapsulation
+@@ -211,7 +211,7 @@ struct ipsec_decap_pdb {
+ 	u32 seq_num_ext_hi;
+ 	u32 seq_num;
+ 	__be32 anti_replay[4];
+-};
++}__attribute__((packed));
+ 
+ /*
+  * IPSec ESP Datapath Protocol Override Register (DPOVRD)
+diff --git a/drivers/net/ppp/ppp_generic.c b/drivers/net/ppp/ppp_generic.c
+index 46ac51217114..61ef6314badd 100644
+--- a/drivers/net/ppp/ppp_generic.c
++++ b/drivers/net/ppp/ppp_generic.c
+@@ -54,6 +54,10 @@
+ #include <net/net_namespace.h>
+ #include <net/netns/generic.h>
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++#include <linux/jiffies.h>
++#endif
++
+ #define PPP_VERSION	"2.4.2"
+ 
+ /*
+@@ -3519,6 +3523,14 @@ ppp_connect_channel(struct channel *pch, int unit)
+ 
+  outl:
+ 	write_unlock_bh(&pch->upl);
++#if defined(CONFIG_CPE_FAST_PATH)
++	if ((ppp->dev) && (!ppp->closing)) {
++		rtnl_lock();
++		rtmsg_ifinfo(RTM_NEWLINK, ppp->dev, 0, GFP_KERNEL, 0, NULL);
++		rtnl_unlock();
++	}
++#endif
++
+  out:
+ 	mutex_unlock(&pn->all_ppp_mutex);
+ 	return ret;
+diff --git a/drivers/net/ppp/pppoe.c b/drivers/net/ppp/pppoe.c
+index 96cca4ee470a..0278097a08d2 100644
+--- a/drivers/net/ppp/pppoe.c
++++ b/drivers/net/ppp/pppoe.c
+@@ -948,6 +948,14 @@ static int __pppoe_xmit(struct sock *sk, struct sk_buff *skb)
+ 
+ 	skb->protocol = cpu_to_be16(ETH_P_PPP_SES);
+ 	skb->dev = dev;
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)  
++	if((skb->ipsec_offload == 1) && (!secpath_exists(skb)))
++	{
++		dev_hard_header(skb, dev, ETH_P_PPP_SES,
++				dev->dev_addr, po->pppoe_pa.remote, data_len);
++	}
++	else
++#endif
+ 
+ 	dev_hard_header(skb, dev, ETH_P_PPP_SES,
+ 			po->pppoe_pa.remote, NULL, data_len);
+@@ -1030,17 +1038,32 @@ static int pppoe_seq_show(struct seq_file *seq, void *v)
+ {
+ 	struct pppox_sock *po;
+ 	char *dev_name;
++#if defined(CONFIG_CPE_FAST_PATH)
++	char *ppp_name;
++#endif
+ 
+ 	if (v == SEQ_START_TOKEN) {
++#if defined(CONFIG_CPE_FAST_PATH)
++		seq_puts(seq, "Id   Address           Device     PPPDevice  Unit\n");
++#else
+ 		seq_puts(seq, "Id       Address              Device\n");
++#endif
+ 		goto out;
+ 	}
+ 
+ 	po = v;
+ 	dev_name = po->pppoe_pa.dev;
++#if defined(CONFIG_CPE_FAST_PATH)
++	ppp_name = ppp_dev_name(&po->chan);
++	if (!ppp_name)
++		goto out;
+ 
++	seq_printf(seq, "%04X %pM %-10s %-10s %d\n",
++	ntohs(po->pppoe_pa.sid), po->pppoe_pa.remote, dev_name, ppp_name, ppp_unit_number(&po->chan));
++#else
+ 	seq_printf(seq, "%08X %pM %8s\n",
+ 		po->pppoe_pa.sid, po->pppoe_pa.remote, dev_name);
++#endif
+ out:
+ 	return 0;
+ }
+diff --git a/drivers/net/usb/usbnet.c b/drivers/net/usb/usbnet.c
+index a26a7435d84b..f9fb7d776ec9 100644
+--- a/drivers/net/usb/usbnet.c
++++ b/drivers/net/usb/usbnet.c
+@@ -31,6 +31,15 @@
+ #include <linux/kernel.h>
+ #include <linux/pm_runtime.h>
+ 
++#ifdef CONFIG_CPE_FAST_PATH
++/*
++ * We alllocate extra 64 Bytes to reserve headroom in the sk_buff
++ * To be used by Fast Path (Head Room must be 4 Byte aligned
++ * because USB 2.0 controller doesn't support 2 byte alignment
++ */
++#define C2K_USBNET_SKB_HEADROOM_FAST_PATH 64
++#endif
++
+ /*-------------------------------------------------------------------------*/
+ 
+ /*
+@@ -504,11 +513,19 @@ static int rx_submit (struct usbnet *dev, struct urb *urb, gfp_t flags)
+ 		usb_free_urb(urb);
+ 		return -ENOLINK;
+ 	}
+-
++#ifdef CONFIG_CPE_FAST_PATH
++	/* 
++	* We alllocate extra 64 Bytes to reserve headroom in the sk_buff 
++	* To be used by Fast Path (Head Room must be 4 Byte aligned 
++	* because USB 2.0 controller doesn't support 2 byte alignment
++	*/
++	skb = __netdev_alloc_skb(dev->net, size + C2K_USBNET_SKB_HEADROOM_FAST_PATH, GFP_ATOMIC);
++#else
+ 	if (test_bit(EVENT_NO_IP_ALIGN, &dev->flags))
+ 		skb = __netdev_alloc_skb(dev->net, size, flags);
+ 	else
+ 		skb = __netdev_alloc_skb_ip_align(dev->net, size, flags);
++#endif
+ 	if (!skb) {
+ 		netif_dbg(dev, rx_err, dev->net, "no rx skb\n");
+ 		usbnet_defer_kevent (dev, EVENT_RX_MEMORY);
+@@ -516,6 +533,10 @@ static int rx_submit (struct usbnet *dev, struct urb *urb, gfp_t flags)
+ 		return -ENOMEM;
+ 	}
+ 
++#ifdef CONFIG_CPE_FAST_PATH
++	skb_reserve (skb, C2K_USBNET_SKB_HEADROOM_FAST_PATH);
++#endif    
++
+ 	entry = (struct skb_data *) skb->cb;
+ 	entry->urb = urb;
+ 	entry->dev = dev;
+diff --git a/include/linux/if_bridge.h b/include/linux/if_bridge.h
+index c5fe3b2a53e8..13f4363917da 100644
+--- a/include/linux/if_bridge.h
++++ b/include/linux/if_bridge.h
+@@ -69,6 +69,23 @@ void brioctl_set(int (*hook)(struct net *net, unsigned int cmd,
+ 			     void __user *uarg));
+ int br_ioctl_call(struct net *net, unsigned int cmd, void __user *uarg);
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++struct brevent_fdb_update{
++	char * mac_addr;
++	struct net_device * dev;
++	struct net_device * brdev;
++};
++
++enum brevent_notif_type {
++	BREVENT_PORT_DOWN = 1,  /* arg is struct net_device ptr */
++	BREVENT_FDB_UPDATE  /* arg is struct brevent_fdb_update ptr */
++};
++
++int register_brevent_notifier(struct notifier_block *nb);
++int unregister_brevent_notifier(struct notifier_block *nb);
++int call_brevent_notifiers(unsigned long val, void *v);
++#endif
++
+ #if IS_ENABLED(CONFIG_BRIDGE) && IS_ENABLED(CONFIG_BRIDGE_IGMP_SNOOPING)
+ int br_multicast_list_adjacent(struct net_device *dev,
+ 			       struct list_head *br_ip_list);
+diff --git a/include/linux/netdevice.h b/include/linux/netdevice.h
+index 202e557496fb..34092cceec20 100644
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -2417,6 +2417,10 @@ struct net_device {
+ 	struct rtnl_hw_stats64	*offload_xstats_l3;
+ 
+ 	struct devlink_port	*devlink_port;
++
++#if defined(CONFIG_CPE_FAST_PATH)
++	bool				wifi_offload_dev;
++#endif
+ };
+ #define to_net_dev(d) container_of(d, struct net_device, dev)
+ 
+@@ -3108,10 +3112,27 @@ u16 dev_pick_tx_cpu_id(struct net_device *dev, struct sk_buff *skb,
+ int __dev_queue_xmit(struct sk_buff *skb, struct net_device *sb_dev);
+ int __dev_direct_xmit(struct sk_buff *skb, u16 queue_id);
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++int original_dev_queue_xmit(struct sk_buff *skb);
++typedef int (*dpaa_wifi_xmit_local_hook_t)(struct sk_buff *skb);
++int dpa_register_wifi_xmit_local_hook(dpaa_wifi_xmit_local_hook_t hookfn);
++void dpa_unregister_wifi_xmit_local_hook(void);
++int dpa_add_dummy_eth_hdr(struct sk_buff** skb_in, int priv_headroom, unsigned char *hdroom_realloc);
++extern dpaa_wifi_xmit_local_hook_t dpaa_wifi_xmit_local_ipsec_handler;
++
++static inline int dev_queue_xmit(struct sk_buff *skb)
++{
++	if (dpaa_wifi_xmit_local_ipsec_handler && skb->ipsec_offload &&
++	    skb->dev->wifi_offload_dev)
++		return dpaa_wifi_xmit_local_ipsec_handler(skb);
++	return original_dev_queue_xmit(skb);
++}
++#else
+ static inline int dev_queue_xmit(struct sk_buff *skb)
+ {
+ 	return __dev_queue_xmit(skb, NULL);
+ }
++#endif
+ 
+ static inline int dev_queue_xmit_accel(struct sk_buff *skb,
+ 				       struct net_device *sb_dev)
+@@ -5283,6 +5304,14 @@ extern struct list_head ptype_base[PTYPE_HASH_SIZE] __read_mostly;
+ 
+ extern struct net_device *blackhole_netdev;
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++/* hook function for getting statistics from offloaded interfaces */
++typedef void (*fp_iface_stats_get)(struct net_device *device, struct rtnl_link_stats64 *tot);
++
++void dev_fp_stats_get_register(fp_iface_stats_get func);
++void dev_fp_stats_get_deregister(void);
++#endif
++
+ /* Note: Avoid these macros in fast path, prefer per-cpu or per-queue counters. */
+ #define DEV_STATS_INC(DEV, FIELD) atomic_long_inc(&(DEV)->stats.__##FIELD)
+ #define DEV_STATS_ADD(DEV, FIELD, VAL) 	\
+diff --git a/include/linux/poll.h b/include/linux/poll.h
+index fc641b50f129..2b1f63e79be8 100644
+--- a/include/linux/poll.h
++++ b/include/linux/poll.h
+@@ -126,7 +126,6 @@ extern int poll_select_set_timeout(struct timespec64 *to, time64_t sec,
+ 
+ #define __MAP(v, from, to) \
+ 	(from < to ? (v & from) * (to/from) : (v & from) / (from/to))
+-
+ static inline __u16 mangle_poll(__poll_t val)
+ {
+ 	__u16 v = (__force __u16)val;
+diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
+index 1a91645fa249..9b7ba899e2aa 100644
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -1003,6 +1003,13 @@ struct sk_buff {
+ 	};
+ 	__u32			priority;
+ 	int			skb_iif;
++#ifdef CONFIG_CPE_FAST_PATH
++	unsigned char		abm_ff;
++	unsigned char		expt_pkt;
++	int			iif_index;
++	int			underlying_iif;
++	__u16			underlying_vlan_tci;
++#endif
+ 	__u32			hash;
+ 	union {
+ 		u32		vlan_all;
+@@ -1026,6 +1033,14 @@ struct sk_buff {
+ 		__u32		reserved_tailroom;
+ 	};
+ 
++#ifdef CONFIG_CPE_FAST_PATH
++	__u64			qosmark;
++#endif
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	__u16			ipsec_offload;
++	__u16			ipsec_xfrm_dir;
++#endif
++
+ 	union {
+ 		__be16		inner_protocol;
+ 		__u8		inner_ipproto;
+diff --git a/include/net/ip.h b/include/net/ip.h
+index bacdb4fecc89..20c4b49481fc 100644
+--- a/include/net/ip.h
++++ b/include/net/ip.h
+@@ -704,6 +704,9 @@ enum ip_defrag_users {
+ 	IP_DEFRAG_VS_FWD,
+ 	IP_DEFRAG_AF_PACKET,
+ 	IP_DEFRAG_MACVLAN,
++#ifdef CONFIG_CPE_TNL_4RD
++	IP_DEFRAG_IP6_TNL_4RD /* Used to support Post Fragmentation for 4o6 tunnels */
++#endif
+ };
+ 
+ /* Return true if the value of 'user' is between 'lower_bond'
+diff --git a/include/net/ip6_tunnel.h b/include/net/ip6_tunnel.h
+index 74b369bddf49..2296d6ebb748 100644
+--- a/include/net/ip6_tunnel.h
++++ b/include/net/ip6_tunnel.h
+@@ -52,7 +52,12 @@ struct ip6_tnl {
+ 	struct flowi fl;	/* flowi template for xmit */
+ 	struct dst_cache dst_cache;	/* cached dst */
+ 	struct gro_cells gro_cells;
+-
++#if defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	u32 genid;
++#endif
++#ifdef CONFIG_CPE_4RD_TUNNEL
++	struct ip6_tnl_4rd_parm ip4rd; /* 4rd parameters for the tunnel */
++#endif
+ 	int err_count;
+ 	unsigned long err_time;
+ 
+diff --git a/include/net/netfilter/nf_conntrack.h b/include/net/netfilter/nf_conntrack.h
+index a2c987289401..3c83aef52ab1 100644
+--- a/include/net/netfilter/nf_conntrack.h
++++ b/include/net/netfilter/nf_conntrack.h
+@@ -24,6 +24,11 @@
+ 
+ #include <net/netfilter/nf_conntrack_tuple.h>
+ 
++#ifdef CONFIG_CPE_FAST_PATH
++#define LAYERSCAPE_PERMANENT_TIMEOUT  1000
++#endif
++
++
+ struct nf_ct_udp {
+ 	unsigned long	stream_ts;
+ };
+@@ -68,10 +73,31 @@ struct nf_conntrack_net {
+ 
+ #include <linux/types.h>
+ #include <linux/skbuff.h>
++#if defined(CONFIG_CPE_FAST_PATH)
++#ifndef IPSEC_FLOW_CACHE
++#include <net/xfrm.h>
++#endif
++#endif
+ 
+ #include <net/netfilter/ipv4/nf_conntrack_ipv4.h>
+ #include <net/netfilter/ipv6/nf_conntrack_ipv6.h>
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++#ifndef IPSEC_FLOW_CACHE
++#define MAX_SUPPORTED_XFRMS_PER_DIR 2
++#endif
++struct comcerto_fp_info {
++	int ifindex;
++	int iif;
++	int underlying_iif;
++	u32 mark;
++#ifndef IPSEC_FLOW_CACHE
++	u16 xfrm_handle[MAX_SUPPORTED_XFRMS_PER_DIR*2];
++#endif
++	u16 underlying_vlan_id;
++};
++#endif
++
+ struct nf_conn {
+ 	/* Usage count in here is 1 for hash table, 1 per skb,
+ 	 * plus 1 for any connection(s) we are `master' for
+@@ -118,6 +144,11 @@ struct nf_conn {
+ 	u_int32_t secmark;
+ #endif
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++	u_int64_t qosconnmark;
++	struct comcerto_fp_info fp_info[IP_CT_DIR_MAX];
++#endif
++
+ 	/* Extensions */
+ 	struct nf_ct_ext *ext;
+ 
+@@ -277,6 +308,12 @@ static inline int nf_ct_is_dying(const struct nf_conn *ct)
+ {
+ 	return test_bit(IPS_DYING_BIT, &ct->status);
+ }
++#ifdef CONFIG_CPE_FAST_PATH
++static inline int nf_ct_is_permanent(const struct nf_conn *ct)
++{
++	return test_bit(IPS_PERMANENT_BIT, &ct->status);
++}
++#endif
+ 
+ /* Packet is received from loopback */
+ static inline bool nf_is_loopback_packet(const struct sk_buff *skb)
+@@ -290,11 +327,19 @@ static inline bool nf_is_loopback_packet(const struct sk_buff *skb)
+ static inline unsigned long nf_ct_expires(const struct nf_conn *ct)
+ {
+ 	s32 timeout = READ_ONCE(ct->timeout) - nfct_time_stamp;
+-
++#ifdef CONFIG_CPE_FAST_PATH
++	return (nf_ct_is_permanent(ct))? LAYERSCAPE_PERMANENT_TIMEOUT : max(timeout, 0);
++#else
+ 	return max(timeout, 0);
++#endif
+ }
+ 
++#ifdef CONFIG_CPE_FAST_PATH
++bool nf_ct_is_expired(const struct nf_conn *ct);
++static inline bool __nf_ct_is_expired(const struct nf_conn *ct)
++#else
+ static inline bool nf_ct_is_expired(const struct nf_conn *ct)
++#endif
+ {
+ 	return (__s32)(READ_ONCE(ct->timeout) - nfct_time_stamp) <= 0;
+ }
+@@ -331,6 +376,11 @@ static inline void nf_ct_offload_timeout(struct nf_conn *ct)
+ 
+ struct kernel_param;
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++extern int nf_conntrack_set_dpi_allow_report(struct sk_buff *skb);
++extern int nf_conntrack_set_dpi_allow_and_mark(struct sk_buff *skb, int mark);
++#endif
++
+ int nf_conntrack_set_hashsize(const char *val, const struct kernel_param *kp);
+ int nf_conntrack_hash_resize(unsigned int hashsize);
+ 
+diff --git a/include/net/netns/xfrm.h b/include/net/netns/xfrm.h
+index 423b52eca908..5fe99a087d1b 100644
+--- a/include/net/netns/xfrm.h
++++ b/include/net/netns/xfrm.h
+@@ -42,6 +42,9 @@ struct netns_xfrm {
+ 	struct hlist_head	__rcu *state_bydst;
+ 	struct hlist_head	__rcu *state_bysrc;
+ 	struct hlist_head	__rcu *state_byspi;
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	struct hlist_head	__rcu *state_byh;
++#endif
+ 	struct hlist_head	__rcu *state_byseq;
+ 	unsigned int		state_hmask;
+ 	unsigned int		state_num;
+diff --git a/include/net/xfrm.h b/include/net/xfrm.h
+index 892fb8c31c32..8b69ea190561 100644
+--- a/include/net/xfrm.h
++++ b/include/net/xfrm.h
+@@ -181,6 +181,13 @@ struct xfrm_state {
+ 		struct hlist_node	bysrc;
+ 	};
+ 	struct hlist_node	byspi;
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	struct hlist_node	byh;
++	u16			handle;
++	u16			in_byh_hash;
++	u16			parent_sa_handle; /*handle of the old SA from which this SA is created using rekey*/
++	u8				offloaded;
++#endif
+ 	struct hlist_node	byseq;
+ 
+ 	refcount_t		refcnt;
+@@ -264,6 +271,11 @@ struct xfrm_state {
+ 	struct xfrm_stats	stats;
+ 
+ 	struct xfrm_lifetime_cur curlft;
++
++	/* ASK IPsec flow offload */
++	struct ipsec_flow_info	*ipsec_flow;
++	u32			ipsec_flow_serial;
++time64_t	curr_time;
+ 	struct hrtimer		mtimer;
+ 
+ 	struct xfrm_dev_offload xso;
+@@ -310,6 +322,13 @@ enum {
+ 	XFRM_STATE_EXPIRED,
+ 	XFRM_STATE_DEAD
+ };
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++enum {
++	 XFRM_STATE_DIR_UNKNOWN,
++	 XFRM_STATE_DIR_IN,
++	 XFRM_STATE_DIR_OUT,
++};
++#endif
+ 
+ /* callback structure passed from either netlink or pfkey */
+ struct km_event {
+@@ -542,6 +561,10 @@ struct xfrm_policy {
+ 	struct xfrm_selector	selector;
+ 	struct xfrm_lifetime_cfg lft;
+ 	struct xfrm_lifetime_cur curlft;
++
++	/* ASK IPsec flow offload */
++	struct ipsec_flow_info	*ipsec_flow;
++	u32			ipsec_flow_serial;
+ 	struct xfrm_policy_walk_entry walk;
+ 	struct xfrm_policy_queue polq;
+ 	bool                    bydst_reinsert;
+@@ -1066,6 +1089,35 @@ struct sec_path {
+ 
+ struct sec_path *secpath_set(struct sk_buff *skb);
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++struct xfrm_input_shared
++{
++	struct sk_buff 		*skb;
++	int 			xfrm_nr, first, xfrm_encap;
++	struct xfrm_state 	*xfrm_vec[XFRM_MAX_DEPTH];
++	__u16 			encap_type;
++	int 			decaps;
++	u32			seq, spi;
++	unsigned int   nhoff;
++	int 			nexthdr;
++	int 			(*callback)(struct xfrm_input_shared *sh);
++	atomic_t		refcnt;
++};
++
++
++static inline void xfrm_shared_get(struct xfrm_input_shared *sh)
++{
++	atomic_inc(&sh->refcnt);
++}
++
++static inline void xfrm_shared_put(struct xfrm_input_shared *sh)
++{
++	if (atomic_dec_and_test(&sh->refcnt)) {
++		kfree(sh);
++	}
++}
++#endif
++
+ static inline void
+ secpath_reset(struct sk_buff *skb)
+ {
+diff --git a/include/uapi/linux/if.h b/include/uapi/linux/if.h
+index 797ba2c1562a..ba46e4f8b021 100644
+--- a/include/uapi/linux/if.h
++++ b/include/uapi/linux/if.h
+@@ -104,6 +104,7 @@ enum net_device_flags {
+ 	IFF_DORMANT			= 1<<17, /* volatile */
+ 	IFF_ECHO			= 1<<18, /* volatile */
+ #endif /* __UAPI_DEF_IF_NET_DEVICE_FLAGS_LOWER_UP_DORMANT_ECHO */
++	IFF_WIFI_OFLD		= 1<<19, /*Offload interface */
+ };
+ #endif /* __UAPI_DEF_IF_NET_DEVICE_FLAGS_LOWER_UP_DORMANT_ECHO != 0 || __UAPI_DEF_IF_NET_DEVICE_FLAGS != 0 */
+ 
+@@ -133,6 +134,8 @@ enum net_device_flags {
+ #define IFF_ECHO			IFF_ECHO
+ #endif /* __UAPI_DEF_IF_NET_DEVICE_FLAGS_LOWER_UP_DORMANT_ECHO */
+ 
++#define IFF_WIFI_OFLD		IFF_WIFI_OFLD
++
+ #define IFF_VOLATILE	(IFF_LOOPBACK|IFF_POINTOPOINT|IFF_BROADCAST|IFF_ECHO|\
+ 		IFF_MASTER|IFF_SLAVE|IFF_RUNNING|IFF_LOWER_UP|IFF_DORMANT)
+ 
+diff --git a/include/uapi/linux/if_arp.h b/include/uapi/linux/if_arp.h
+index 4783af9fe520..822e21ba5ebb 100644
+--- a/include/uapi/linux/if_arp.h
++++ b/include/uapi/linux/if_arp.h
+@@ -29,6 +29,7 @@
+ /* ARP protocol HARDWARE identifiers. */
+ #define ARPHRD_NETROM	0		/* from KA9Q: NET/ROM pseudo	*/
+ #define ARPHRD_ETHER 	1		/* Ethernet 10Mbps		*/
++#define ARPHRD_IPV6_IPV6_TUNNEL		ARPHRD_ETHER
+ #define	ARPHRD_EETHER	2		/* Experimental Ethernet	*/
+ #define	ARPHRD_AX25	3		/* AX.25 Level 2		*/
+ #define	ARPHRD_PRONET	4		/* PROnet token ring		*/
+diff --git a/include/uapi/linux/if_tunnel.h b/include/uapi/linux/if_tunnel.h
+index 102119628ff5..bbde64ac683c 100644
+--- a/include/uapi/linux/if_tunnel.h
++++ b/include/uapi/linux/if_tunnel.h
+@@ -22,6 +22,16 @@
+ #define SIOCDEL6RD      (SIOCDEVPRIVATE + 10)
+ #define SIOCCHG6RD      (SIOCDEVPRIVATE + 11)
+ 
++#define SIOCGET4RD		(SIOCDEVPRIVATE + 12)
++#define SIOCADD4RD		(SIOCDEVPRIVATE + 13)
++#define SIOCDEL4RD		(SIOCDEVPRIVATE + 14)
++#define SIOCCHG4RD		(SIOCDEVPRIVATE + 15)
++//#define COMCERTO_ETHERIPV4
++
++/* SIOCCHG4RD is currently not used and even if it were, these two tunnels would never co-inside*/
++/* MSPD Added */
++#define SIOCISETHIPV4TUNNEL  (SIOCDEVPRIVATE + 15)
++
+ #define GRE_CSUM	__cpu_to_be16(0x8000)
+ #define GRE_ROUTING	__cpu_to_be16(0x4000)
+ #define GRE_KEY		__cpu_to_be16(0x2000)
+@@ -114,6 +124,21 @@ struct ip_tunnel_6rd {
+ 	__u16			relay_prefixlen;
+ };
+ 
++
++/* ip6 tnl 4rd parm -start  */
++struct ip6_tnl_4rd {
++	__be32                  prefix;
++	struct in6_addr         relay_prefix;
++	struct in6_addr         relay_suffix;
++	__u16                   prefixlen;
++	__u16                   relay_prefixlen;
++	__u16                   relay_suffixlen;
++	__u16                   psid_offsetlen;
++	__u16                   eabit_len;
++	__u16                   entry_num;
++};
++/* ip6 tnl 4rd parm -end  */
++
+ enum {
+ 	IFLA_GRE_UNSPEC,
+ 	IFLA_GRE_LINK,
+diff --git a/include/uapi/linux/ip6_tunnel.h b/include/uapi/linux/ip6_tunnel.h
+index 0245269b037c..3fb6f7cda3bc 100644
+--- a/include/uapi/linux/ip6_tunnel.h
++++ b/include/uapi/linux/ip6_tunnel.h
+@@ -53,4 +53,50 @@ struct ip6_tnl_parm2 {
+ 	__be32			o_key;
+ };
+ 
++struct ip6_4rd_map_msg {
++	__u32 reset;
++	__u32 ifindex;
++	__be32 prefix;
++	__u16 prefixlen;
++	struct in6_addr relay_prefix;
++	struct in6_addr relay_suffix;
++	__u16 relay_prefixlen;
++	__u16 relay_suffixlen;
++	__u16 psid_offsetlen;
++	__u16 eabit_len;
++	__u16 entry_num;
++};
++
++struct ip6_tnl_4rd_map_rule {
++	__be32 prefix;
++	__u16 prefixlen;
++	struct in6_addr relay_prefix;
++	struct in6_addr relay_suffix;
++	__u16 relay_prefixlen;
++	__u16 relay_suffixlen;
++	__u16 psid_offsetlen;
++	__u16 eabit_len;
++	__u16 entry_num;
++	struct list_head mr_list;
++};
++
++#ifdef __KERNEL__
++struct ip6_tnl_4rd_parm {
++	__be32 prefix;
++	struct in6_addr relay_prefix;
++	struct in6_addr relay_suffix;
++	__u16 prefixlen;
++	__u16 relay_prefixlen;
++	__u16 relay_suffixlen;
++	__be32 laddr4;
++	__u16 port_set_id;
++	__u16 port_set_id_len;
++	__u16 psid_offsetlen;
++	__u16 eabit_len;
++
++	struct list_head map_list;
++	rwlock_t map_lock;
++};
+ #endif
++#endif
++
+diff --git a/include/uapi/linux/netfilter/nf_conntrack_common.h b/include/uapi/linux/netfilter/nf_conntrack_common.h
+index 26071021e986..8dd5f5dd842d 100644
+--- a/include/uapi/linux/netfilter/nf_conntrack_common.h
++++ b/include/uapi/linux/netfilter/nf_conntrack_common.h
+@@ -118,6 +118,14 @@ enum ip_conntrack_status {
+ 	IPS_HW_OFFLOAD_BIT = 15,
+ 	IPS_HW_OFFLOAD = (1 << IPS_HW_OFFLOAD_BIT),
+ 
++	/* Connection cannot expire */
++	IPS_PERMANENT_BIT = 16,
++	IPS_PERMANENT = (1 << IPS_PERMANENT_BIT),
++
++	/* Connection is assured by DPI application */
++	IPS_DPI_ALLOWED_BIT = 17,
++	IPS_DPI_ALLOWED = (1 << IPS_DPI_ALLOWED_BIT),
++
+ 	/* Be careful here, modifying these bits can make things messy,
+ 	 * so don't let users modify them directly.
+ 	 */
+@@ -126,7 +134,7 @@ enum ip_conntrack_status {
+ 				 IPS_SEQ_ADJUST | IPS_TEMPLATE | IPS_UNTRACKED |
+ 				 IPS_OFFLOAD | IPS_HW_OFFLOAD),
+ 
+-	__IPS_MAX_BIT = 16,
++	__IPS_MAX_BIT = 18,
+ };
+ 
+ /* Connection tracking event types */
+@@ -143,6 +151,7 @@ enum ip_conntrack_events {
+ 	IPCT_NATSEQADJ = IPCT_SEQADJ,
+ 	IPCT_SECMARK,		/* new security mark has been set */
+ 	IPCT_LABEL,		/* new connlabel has been set */
++	IPCT_QOSCONNMARK,   /* new qosconnmark has been set */
+ 	IPCT_SYNPROXY,		/* synproxy has been set */
+ #ifdef __KERNEL__
+ 	__IPCT_MAX
+diff --git a/include/uapi/linux/netfilter/nf_conntrack_tuple_common.h b/include/uapi/linux/netfilter/nf_conntrack_tuple_common.h
+index 64390fac6f7e..a928825586a8 100644
+--- a/include/uapi/linux/netfilter/nf_conntrack_tuple_common.h
++++ b/include/uapi/linux/netfilter/nf_conntrack_tuple_common.h
+@@ -14,6 +14,7 @@ enum ip_conntrack_dir {
+ 	IP_CT_DIR_MAX
+ };
+ 
++#define IP_NAT_RANGE_4RD_NAPT 16
+ /* The protocol-specific manipulable parts of the tuple: always in
+  * network order
+  */
+diff --git a/include/uapi/linux/netfilter/nfnetlink_conntrack.h b/include/uapi/linux/netfilter/nfnetlink_conntrack.h
+index c2ac7269acf7..977b7ba64b7c 100644
+--- a/include/uapi/linux/netfilter/nfnetlink_conntrack.h
++++ b/include/uapi/linux/netfilter/nfnetlink_conntrack.h
+@@ -57,6 +57,10 @@ enum ctattr_type {
+ 	CTA_SYNPROXY,
+ 	CTA_FILTER,
+ 	CTA_STATUS_MASK,
++	CTA_LAYERSCAPE_FP_ORIG,
++	CTA_LAYERSCAPE_FP_REPLY,
++	CTA_QOSCONNMARK,
++	CTA_QOSCONNMARK_PAD,
+ 	__CTA_MAX
+ };
+ #define CTA_MAX (__CTA_MAX - 1)
+@@ -242,6 +246,20 @@ enum ctattr_secctx {
+ };
+ #define CTA_SECCTX_MAX (__CTA_SECCTX_MAX - 1)
+ 
++enum ctattr_comcerto_fp {
++	CTA_COMCERTO_FP_UNSPEC,
++	CTA_COMCERTO_FP_MARK,
++	CTA_COMCERTO_FP_IFINDEX,
++	CTA_COMCERTO_FP_IIF,
++	CTA_COMCERTO_FP_UNDERLYING_IIF,
++	CTA_COMCERTO_FP_UNDERLYING_VID,
++#ifndef IPSEC_FLOW_CACHE
++	CTA_COMCERTO_FP_XFRM_HANDLE,
++#endif
++	__CTA_COMCERTO_FP_MAX
++};
++#define CTA_COMCERTO_FP_MAX (__CTA_COMCERTO_FP_MAX - 1)
++
+ enum ctattr_stats_cpu {
+ 	CTA_STATS_UNSPEC,
+ 	CTA_STATS_SEARCHED,	/* no longer used */
+diff --git a/include/uapi/linux/netlink.h b/include/uapi/linux/netlink.h
+index f87aaf28a649..b21fa5669175 100644
+--- a/include/uapi/linux/netlink.h
++++ b/include/uapi/linux/netlink.h
+@@ -30,9 +30,13 @@
+ #define NETLINK_CRYPTO		21	/* Crypto layer */
+ #define NETLINK_SMC		22	/* SMC monitoring */
+ 
++#define NETLINK_FF              30
++#define NETLINK_KEY             32
++#define NETLINK_L2FLOW          33
++#define MAX_LINKS 64
++
+ #define NETLINK_INET_DIAG	NETLINK_SOCK_DIAG
+ 
+-#define MAX_LINKS 32		
+ 
+ struct sockaddr_nl {
+ 	__kernel_sa_family_t	nl_family;	/* AF_NETLINK	*/
+diff --git a/include/uapi/linux/pfkeyv2.h b/include/uapi/linux/pfkeyv2.h
+index 8abae1f6749c..e92494a1ac99 100644
+--- a/include/uapi/linux/pfkeyv2.h
++++ b/include/uapi/linux/pfkeyv2.h
+@@ -281,6 +281,7 @@ struct sadb_x_filter {
+ #define SADB_SAFLAGS_NOPMTUDISC	0x20000000
+ #define SADB_SAFLAGS_DECAP_DSCP	0x40000000
+ #define SADB_SAFLAGS_NOECN	0x80000000
++#define SADB_SAFLAGS_ESN	0x01000000
+ 
+ /* Security Association states */
+ #define SADB_SASTATE_LARVAL	0
+diff --git a/include/uapi/linux/ppp-ioctl.h b/include/uapi/linux/ppp-ioctl.h
+index 1cc5ce0ae062..d1869d3f1bd4 100644
+--- a/include/uapi/linux/ppp-ioctl.h
++++ b/include/uapi/linux/ppp-ioctl.h
+@@ -117,6 +117,7 @@ struct pppol2tp_ioc_stats {
+ #define PPPIOCGL2TPSTATS _IOR('t', 54, struct pppol2tp_ioc_stats)
+ #define PPPIOCBRIDGECHAN _IOW('t', 53, int)	/* bridge one channel to another */
+ #define PPPIOCUNBRIDGECHAN _IO('t', 52)	/* unbridge channel */
++#define PPPIOCSFPPIDLE	_IOW('t', 51, struct ppp_idle)	/* Set the FPP stats */
+ 
+ #define SIOCGPPPSTATS   (SIOCDEVPRIVATE + 0)
+ #define SIOCGPPPVER     (SIOCDEVPRIVATE + 1)	/* NEVER change this!! */
+diff --git a/include/uapi/linux/rtnetlink.h b/include/uapi/linux/rtnetlink.h
+index 63a0922937e7..33115c765e37 100644
+--- a/include/uapi/linux/rtnetlink.h
++++ b/include/uapi/linux/rtnetlink.h
+@@ -151,6 +151,14 @@ enum {
+ 
+ 	RTM_NEWCACHEREPORT = 96,
+ #define RTM_NEWCACHEREPORT RTM_NEWCACHEREPORT
++/* 4RD tunnel support */
++	RTM_NEW4RD = 97,
++#define RTM_NEW4RD		RTM_NEW4RD
++	RTM_DEL4RD,
++#define RTM_DEL4RD		RTM_DEL4RD
++	RTM_GET4RD,
++#define RTM_GET4RD		RTM_GET4RD
++
+ 
+ 	RTM_NEWCHAIN = 100,
+ #define RTM_NEWCHAIN RTM_NEWCHAIN
+diff --git a/net/Kconfig b/net/Kconfig
+index d532ec33f1fe..dd65935f4d89 100644
+--- a/net/Kconfig
++++ b/net/Kconfig
+@@ -116,6 +116,15 @@ config INET
+ 	  Short answer: say Y.
+ 
+ if INET
++
++config CPE_FAST_PATH
++	bool "Fast Path Processing offload"
++	depends on ARCH_LAYERSCAPE
++	depends on NETFILTER
++	select NF_CONNTRACK
++	help
++	  Support for Fast Path offload.
++
+ source "net/ipv4/Kconfig"
+ source "net/ipv6/Kconfig"
+ source "net/netlabel/Kconfig"
+diff --git a/net/bridge/br.c b/net/bridge/br.c
+index d466febcf9ab..be84fd985edb 100644
+--- a/net/bridge/br.c
++++ b/net/bridge/br.c
+@@ -484,6 +484,60 @@ static void __exit br_deinit(void)
+ 	br_fdb_fini();
+ }
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++static ATOMIC_NOTIFIER_HEAD(brevent_notif_chain);
++
++/**
++ * register_brevent_notifier - register a netevent notifier block
++ * @nb: notifier
++ *
++ * Register a notifier to be called when a bridge event occurs.
++ * The notifier passed is linked into the kernel structures and must
++ * not be reused until it has been unregistered. A negative errno code
++ * is returned on a failure.
++ */
++int register_brevent_notifier(struct notifier_block *nb)
++{
++	int err;
++
++	err = atomic_notifier_chain_register(&brevent_notif_chain, nb);
++	return err;
++}
++
++/**
++ * unregister_brevent_notifier - unregister a netevent notifier block
++ * @nb: notifier
++ *
++ * Unregister a notifier previously registered by
++ * register_neigh_notifier(). The notifier is unlinked into the
++ * kernel structures and may then be reused. A negative errno code
++ * is returned on a failure.
++ */
++
++int unregister_brevent_notifier(struct notifier_block *nb)
++{
++	return atomic_notifier_chain_unregister(&brevent_notif_chain, nb);
++}
++
++/**
++ * call_brevent_notifiers - call all netevent notifier blocks
++ *		@val: value passed unmodified to notifier function
++ *		@v:   pointer passed unmodified to notifier function
++ *
++ * Call all neighbour notifier blocks.  Parameters and return value
++ * are as for notifier_call_chain().
++ */
++
++int call_brevent_notifiers(unsigned long val, void *v)
++{
++	return atomic_notifier_call_chain(&brevent_notif_chain, val, v);
++}
++
++EXPORT_SYMBOL_GPL(register_brevent_notifier);
++EXPORT_SYMBOL_GPL(unregister_brevent_notifier);
++EXPORT_SYMBOL_GPL(call_brevent_notifiers);
++#endif
++
+ module_init(br_init)
+ module_exit(br_deinit)
+ MODULE_LICENSE("GPL");
+diff --git a/net/bridge/br_fdb.c b/net/bridge/br_fdb.c
+index fa2970db2130..98c85d5849f0 100644
+--- a/net/bridge/br_fdb.c
++++ b/net/bridge/br_fdb.c
+@@ -14,6 +14,10 @@
+ #include <linux/times.h>
+ #include <linux/netdevice.h>
+ #include <linux/etherdevice.h>
++#if defined(CONFIG_CPE_FAST_PATH)
++#include <linux/rtnetlink.h>
++#include <linux/module.h>
++#endif
+ #include <linux/jhash.h>
+ #include <linux/random.h>
+ #include <linux/slab.h>
+@@ -33,6 +37,11 @@ static const struct rhashtable_params br_fdb_rht_params = {
+ 
+ static struct kmem_cache *br_fdb_cache __read_mostly;
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++int(*br_fdb_can_expire)(unsigned char *mac_addr, struct net_device *dev) = NULL;
++DEFINE_SPINLOCK(br_fdb_cb_lock);
++#endif
++
+ int __init br_fdb_init(void)
+ {
+ 	br_fdb_cache = kmem_cache_create("bridge_fdb_cache",
+@@ -437,6 +446,20 @@ static int fdb_add_local(struct net_bridge *br, struct net_bridge_port *source,
+ 	if (!fdb)
+ 		return -ENOMEM;
+ 
++//#if defined(CONFIG_CPE_FAST_PATH)
++/*
++ * Below commented code is specific to LS1024 device unicast list.
++ * It is not applicable to other architectures.
++ */
++#if 0
++	list_for_each_entry(p, &br->port_list, list) {
++		if (source == p)
++			continue;
++
++		dev_uc_add(source->dev, p->dev->dev_addr);
++		dev_uc_add(p->dev, addr);
++	}
++#endif
+ 	fdb_add_hw_addr(br, addr);
+ 	fdb_notify(br, fdb, RTM_NEWNEIGH, true);
+ 	return 0;
+@@ -549,6 +572,17 @@ void br_fdb_cleanup(struct work_struct *work)
+ 			continue;
+ 		}
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++		spin_lock(&br_fdb_cb_lock);
++		if (br_fdb_can_expire && f->dst &&
++		    !(*br_fdb_can_expire)(f->key.addr.addr, f->dst->dev)) {
++			f->updated = jiffies;
++			spin_unlock(&br_fdb_cb_lock);
++			continue;
++		}
++		spin_unlock(&br_fdb_cb_lock);
++#endif
++
+ 		if (time_after(this_timer, now)) {
+ 			work_delay = min(work_delay, this_timer - now);
+ 		} else {
+@@ -882,6 +916,14 @@ void br_fdb_update(struct net_bridge *br, struct net_bridge_port *source,
+ 			/* fastpath: update of existing entry */
+ 			if (unlikely(source != READ_ONCE(fdb->dst) &&
+ 				     !test_bit(BR_FDB_STICKY, &fdb->flags))) {
++#if defined(CONFIG_CPE_FAST_PATH)
++				struct brevent_fdb_update fdb_update;
++
++				fdb_update.dev = source->dev;
++				fdb_update.mac_addr = fdb->key.addr.addr;
++				fdb_update.brdev = br->dev;
++				call_brevent_notifiers(BREVENT_FDB_UPDATE, &fdb_update);
++#endif
+ 				br_switchdev_fdb_notify(br, fdb, RTM_DELNEIGH);
+ 				WRITE_ONCE(fdb->dst, source);
+ 				fdb_modified = true;
+@@ -1511,3 +1553,21 @@ void br_fdb_clear_offload(const struct net_device *dev, u16 vid)
+ 	spin_unlock_bh(&p->br->hash_lock);
+ }
+ EXPORT_SYMBOL_GPL(br_fdb_clear_offload);
++
++#if defined(CONFIG_CPE_FAST_PATH)
++void br_fdb_register_can_expire_cb(int(*cb)(unsigned char *mac_addr, struct net_device *dev))
++{
++	spin_lock_bh(&br_fdb_cb_lock);
++	br_fdb_can_expire = cb;
++	spin_unlock_bh(&br_fdb_cb_lock);
++}
++EXPORT_SYMBOL(br_fdb_register_can_expire_cb);
++
++void br_fdb_deregister_can_expire_cb(void)
++{
++	spin_lock_bh(&br_fdb_cb_lock);
++	br_fdb_can_expire = NULL;
++	spin_unlock_bh(&br_fdb_cb_lock);
++}
++EXPORT_SYMBOL(br_fdb_deregister_can_expire_cb);
++#endif
+diff --git a/net/bridge/br_forward.c b/net/bridge/br_forward.c
+index e9f09cdb9848..53eafbc8bccd 100644
+--- a/net/bridge/br_forward.c
++++ b/net/bridge/br_forward.c
+@@ -33,7 +33,11 @@ static inline int should_deliver(const struct net_bridge_port *p,
+ int br_dev_queue_push_xmit(struct net *net, struct sock *sk, struct sk_buff *skb)
+ {
+ 	skb_push(skb, ETH_HLEN);
+-	if (!is_skb_forwardable(skb->dev, skb))
++	if (
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++		(!skb->ipsec_offload) && 
++#endif
++		!is_skb_forwardable(skb->dev, skb))
+ 		goto drop;
+ 
+ 	br_drop_fake_rtable(skb);
+diff --git a/net/bridge/br_input.c b/net/bridge/br_input.c
+index 847fe03a08ee..b177824019a4 100644
+--- a/net/bridge/br_input.c
++++ b/net/bridge/br_input.c
+@@ -67,6 +67,10 @@ static int br_pass_frame_up(struct sk_buff *skb, bool promisc)
+ 
+ 	BR_INPUT_SKB_CB(skb)->promisc = promisc;
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++	skb->underlying_iif = indev->ifindex;
++#endif
++
+ 	return NF_HOOK(NFPROTO_BRIDGE, NF_BR_LOCAL_IN,
+ 		       dev_net(indev), NULL, skb, indev, NULL,
+ 		       br_netif_receive_skb);
+@@ -161,6 +165,10 @@ int br_handle_frame_finish(struct net *net, struct sock *sk, struct sk_buff *skb
+ 	BR_INPUT_SKB_CB(skb)->brdev = br->dev;
+ 	BR_INPUT_SKB_CB(skb)->src_port_isolated = !!(p->flags & BR_ISOLATED);
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++	skb->abm_ff = 0;
++#endif
++
+ 	if (IS_ENABLED(CONFIG_INET) &&
+ 	    (skb->protocol == htons(ETH_P_ARP) ||
+ 	     skb->protocol == htons(ETH_P_RARP))) {
+@@ -209,6 +217,10 @@ int br_handle_frame_finish(struct net *net, struct sock *sk, struct sk_buff *skb
+ 
+ 		if (now != READ_ONCE(dst->used))
+ 			WRITE_ONCE(dst->used, now);
++#if defined(CONFIG_CPE_FAST_PATH)
++		/* Used by ABM module */
++		skb->abm_ff = 1;
++#endif
+ 		br_forward(dst->dst, skb, local_rcv, false);
+ 	} else {
+ 		if (!mcast_hit)
+diff --git a/net/bridge/br_private.h b/net/bridge/br_private.h
+index f0d8edc378a0..7427561286c0 100644
+--- a/net/bridge/br_private.h
++++ b/net/bridge/br_private.h
+@@ -613,6 +613,11 @@ struct br_input_skb_cb {
+ #endif
+ 
+ 	u32 backup_nhid;
++
++#ifdef CONFIG_CPE_FAST_PATH
++	u16 vid;
++	u8 untagged:1;
++#endif
+ };
+ 
+ #define BR_INPUT_SKB_CB(__skb)	((struct br_input_skb_cb *)(__skb)->cb)
+@@ -849,6 +854,11 @@ int br_fdb_add_local(struct net_bridge *br, struct net_bridge_port *source,
+ void br_fdb_update(struct net_bridge *br, struct net_bridge_port *source,
+ 		   const unsigned char *addr, u16 vid, unsigned long flags);
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++extern void br_fdb_register_can_expire_cb(int(*cb)(unsigned char *mac_addr, struct net_device *dev));
++extern void br_fdb_deregister_can_expire_cb(void);
++#endif
++
+ int br_fdb_delete(struct ndmsg *ndm, struct nlattr *tb[],
+ 		  struct net_device *dev, const unsigned char *addr, u16 vid,
+ 		  struct netlink_ext_ack *extack);
+diff --git a/net/bridge/br_stp_if.c b/net/bridge/br_stp_if.c
+index 75204d36d7f9..0ee39d723422 100644
+--- a/net/bridge/br_stp_if.c
++++ b/net/bridge/br_stp_if.c
+@@ -123,6 +123,10 @@ void br_stp_disable_port(struct net_bridge_port *p)
+ 
+ 	if (br_is_root_bridge(br) && !wasroot)
+ 		br_become_root_bridge(br);
++
++#if defined(CONFIG_CPE_FAST_PATH)
++	call_brevent_notifiers(BREVENT_PORT_DOWN, p->dev);
++#endif
+ }
+ 
+ static int br_stp_call_user(struct net_bridge *br, char *arg)
+diff --git a/net/bridge/br_vlan.c b/net/bridge/br_vlan.c
+index cc54b8267bcc..7bbf9f40a055 100644
+--- a/net/bridge/br_vlan.c
++++ b/net/bridge/br_vlan.c
+@@ -517,9 +517,21 @@ struct sk_buff *br_handle_vlan(struct net_bridge *br,
+ 	 * hardware on each egress port as appropriate. So only strip the VLAN
+ 	 * header if forwarding offload is not being used.
+ 	 */
++#ifdef CONFIG_CPE_FAST_PATH
++	BR_INPUT_SKB_CB(skb)->vid = vid;
++#endif
+ 	if (v->flags & BRIDGE_VLAN_INFO_UNTAGGED &&
+-	    !br_switchdev_frame_uses_tx_fwd_offload(skb))
++	    !br_switchdev_frame_uses_tx_fwd_offload(skb)) {
++#ifdef CONFIG_CPE_FAST_PATH
++		BR_INPUT_SKB_CB(skb)->untagged = true;
++#endif
+ 		__vlan_hwaccel_clear_tag(skb);
++	}
++#ifdef CONFIG_CPE_FAST_PATH
++	else {
++		BR_INPUT_SKB_CB(skb)->untagged = false;
++	}
++#endif
+ 
+ 	if (p && (p->flags & BR_VLAN_TUNNEL) &&
+ 	    br_handle_egress_vlan_tunnel(skb, v)) {
+@@ -600,6 +612,9 @@ static bool __allowed_ingress(const struct net_bridge *br,
+ 			 */
+ 			skb->vlan_tci |= pvid;
+ 
++		if(!skb->underlying_vlan_tci)
++			skb->underlying_vlan_tci = skb_vlan_tag_get(skb);
++
+ 		/* if snooping and stats are disabled we can avoid the lookup */
+ 		if (!br_opt_get(br, BROPT_MCAST_VLAN_SNOOPING_ENABLED) &&
+ 		    !br_opt_get(br, BROPT_VLAN_STATS_ENABLED)) {
+@@ -629,6 +644,9 @@ static bool __allowed_ingress(const struct net_bridge *br,
+ 		u64_stats_update_end(&stats->syncp);
+ 	}
+ 
++	if(!skb->underlying_vlan_tci)
++		skb->underlying_vlan_tci = skb_vlan_tag_get(skb);
++
+ 	*vlan = v;
+ 
+ 	return true;
+diff --git a/net/core/dev.c b/net/core/dev.c
+index 56b6797589f5..4612c083086c 100644
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -189,6 +189,10 @@ static struct napi_struct *napi_by_id(unsigned int napi_id);
+ DEFINE_RWLOCK(dev_base_lock);
+ EXPORT_SYMBOL(dev_base_lock);
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++static fp_iface_stats_get fast_path_stats_get;
++#endif
++
+ static DEFINE_MUTEX(ifalias_mutex);
+ 
+ /* protects napi_hash addition/deletion and napi_gen_id */
+@@ -3724,10 +3728,17 @@ static struct sk_buff *validate_xmit_skb(struct sk_buff *skb, struct net_device
+ 			skb = segs;
+ 		}
+ 	} else {
+-		if (skb_needs_linearize(skb, features) &&
+-		    __skb_linearize(skb))
+-			goto out_kfree_skb;
+-
++		// linearise only if ipsec policy is not selected
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++		if(!(skb->ipsec_offload))
++#endif // defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++		{
++			if (skb_needs_linearize(skb, features))
++			{
++				if (__skb_linearize(skb))
++					goto out_kfree_skb;
++			}
++		}
+ 		/* If packet is not checksummed and device does not
+ 		 * support checksumming for this protocol, complete
+ 		 * checksumming here.
+@@ -4480,6 +4491,40 @@ int __dev_queue_xmit(struct sk_buff *skb, struct net_device *sb_dev)
+ }
+ EXPORT_SYMBOL(__dev_queue_xmit);
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++/* WiFi IPSEC offload hook - allows cdx to intercept packets for IPSEC
++ * processing when the packet is transmitted on a wifi interface.
++ */
++dpaa_wifi_xmit_local_hook_t dpaa_wifi_xmit_local_ipsec_handler;
++EXPORT_SYMBOL(dpaa_wifi_xmit_local_ipsec_handler);
++
++/* Register a hook function for IPSEC offload on wifi interfaces */
++int dpa_register_wifi_xmit_local_hook(dpaa_wifi_xmit_local_hook_t hookfn)
++{
++	if (dpaa_wifi_xmit_local_ipsec_handler) {
++		pr_warn("%s: hook already registered\n", __func__);
++		return -1;
++	}
++	dpaa_wifi_xmit_local_ipsec_handler = hookfn;
++	return 0;
++}
++EXPORT_SYMBOL(dpa_register_wifi_xmit_local_hook);
++
++/* Unregister the IPSEC offload hook */
++void dpa_unregister_wifi_xmit_local_hook(void)
++{
++	dpaa_wifi_xmit_local_ipsec_handler = NULL;
++}
++EXPORT_SYMBOL(dpa_unregister_wifi_xmit_local_hook);
++
++/* Original dev_queue_xmit - called when wifi hook is not applicable */
++int original_dev_queue_xmit(struct sk_buff *skb)
++{
++	return __dev_queue_xmit(skb, NULL);
++}
++EXPORT_SYMBOL(original_dev_queue_xmit);
++#endif
++
+ int __dev_direct_xmit(struct sk_buff *skb, u16 queue_id)
+ {
+ 	struct net_device *dev = skb->dev;
+@@ -5434,6 +5479,14 @@ static int __netif_receive_skb_core(struct sk_buff **pskb, bool pfmemalloc,
+ 
+ 	trace_netif_receive_skb(skb);
+ 
++#ifdef CONFIG_CPE_FAST_PATH
++	/* ifindex of device we arrived on,now skb->skb_iif
++	always tracks skb->dev */
++	if (!skb->iif_index)
++		skb->iif_index = skb->dev->ifindex;
++	if(!skb->underlying_iif)
++		skb->underlying_iif = skb->dev->ifindex;
++#endif
+ 	orig_dev = skb->dev;
+ 
+ 	skb_reset_network_header(skb);
+@@ -6676,8 +6729,6 @@ static int __napi_poll(struct napi_struct *n, bool *repoll)
+ 		napi_gro_flush(n, HZ >= 1000);
+ 	}
+ 
+-	gro_normal_list(n);
+-
+ 	/* Some drivers may have called napi_schedule
+ 	 * prior to exhausting their budget.
+ 	 */
+@@ -10703,10 +10754,28 @@ struct rtnl_link_stats64 *dev_get_stats(struct net_device *dev,
+ 			storage->rx_otherhost_dropped += READ_ONCE(core_stats->rx_otherhost_dropped);
+ 		}
+ 	}
++#if defined(CONFIG_CPE_FAST_PATH)
++	if (fast_path_stats_get)
++		fast_path_stats_get(dev, storage);
++#endif
+ 	return storage;
+ }
+ EXPORT_SYMBOL(dev_get_stats);
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++void dev_fp_stats_get_register(fp_iface_stats_get func)
++{
++	fast_path_stats_get = func;
++}
++EXPORT_SYMBOL(dev_fp_stats_get_register);
++
++void dev_fp_stats_get_deregister(void)
++{
++	fast_path_stats_get = NULL;
++}
++EXPORT_SYMBOL(dev_fp_stats_get_deregister);
++#endif
++
+ /**
+  *	dev_fetch_sw_netstats - get per-cpu network device statistics
+  *	@s: place to store stats
+diff --git a/net/core/gro.c b/net/core/gro.c
+index 92cb86d4ce50..e4f60c064a09 100644
+--- a/net/core/gro.c
++++ b/net/core/gro.c
+@@ -621,6 +621,11 @@ static void napi_reuse_skb(struct napi_struct *napi, struct sk_buff *skb)
+ 	__vlan_hwaccel_clear_tag(skb);
+ 	skb->dev = napi->dev;
+ 	skb->skb_iif = 0;
++#ifdef CONFIG_CPE_FAST_PATH
++	skb->iif_index = 0;
++	skb->underlying_iif = 0;
++	skb->underlying_vlan_tci = 0;
++#endif
+ 
+ 	/* eth_type_trans() assumes pkt_type is PACKET_HOST */
+ 	skb->pkt_type = PACKET_HOST;
+diff --git a/net/core/rtnetlink.c b/net/core/rtnetlink.c
+index 161356313203..0402bdc6bae8 100644
+--- a/net/core/rtnetlink.c
++++ b/net/core/rtnetlink.c
+@@ -814,9 +814,17 @@ int rtnetlink_put_metrics(struct sk_buff *skb, u32 *metrics)
+ 	struct nlattr *mx;
+ 	int i, valid = 0;
+ 
++#ifndef CONFIG_CPE_FAST_PATH
++	/*By default this metric is zero for all routes unless mtu is 
++		included while adding route.Due to this mtu is coming as zero 
++		when cmm gets the route through netlink messge.So Added condtion 
++		to bypass this code so that cmm gets right mtu value even if route
++		is added without including mtu
++					*/
+ 	/* nothing is dumped for dst_default_metrics, so just skip the loop */
+ 	if (metrics == dst_default_metrics.metrics)
+ 		return 0;
++#endif
+ 
+ 	mx = nla_nest_start_noflag(skb, RTA_METRICS);
+ 	if (mx == NULL)
+@@ -846,6 +854,17 @@ int rtnetlink_put_metrics(struct sk_buff *skb, u32 *metrics)
+ 			}
+ 			valid++;
+ 		}
++#ifdef CONFIG_CPE_FAST_PATH
++		else if (i  == RTAX_MTU - 1){
++			struct dst_entry *dst = skb_dst(skb);
++			if(dst)
++			{
++				if (nla_put_u32(skb, i + 1, dst_mtu(dst)))
++					goto nla_put_failure;
++					valid++;
++			}
++		}
++#endif	
+ 	}
+ 
+ if (!valid) {
+@@ -4118,5 +4129,6 @@ void rtmsg_ifinfo(int type, struct net_device *dev, unsigned int change,
+    NULL, 0, portid, nlh);
+ }
++EXPORT_SYMBOL(rtmsg_ifinfo);
+ 
+ void rtmsg_ifinfo_newnet(int type, struct net_device *dev, unsigned int change,
+  gfp_t flags, int *new_nsid, int new_ifindex)
+diff --git a/net/core/skbuff.c b/net/core/skbuff.c
+index 4c28954f915f..d8b17b5fe2d2 100644
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -1381,18 +1381,32 @@ static void __copy_skb_header(struct sk_buff *new, const struct sk_buff *old)
+ 	skb_dst_copy(new, old);
+ 	__skb_ext_copy(new, old);
+ 	__nf_copy(new, old, false);
++#if defined(CONFIG_CPE_FAST_PATH)
++	new->qosmark    = old->qosmark;
++#endif
+ 
+ 	/* Note : this field could be in the headers group.
+ 	 * It is not yet because we do not want to have a 16 bit hole
+ 	 */
+ 	new->queue_mapping = old->queue_mapping;
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	new->ipsec_offload       = old->ipsec_offload;
++	new->ipsec_xfrm_dir      = old->ipsec_xfrm_dir;
++#endif
+ 	memcpy(&new->headers, &old->headers, sizeof(new->headers));
+ 	CHECK_SKB_FIELD(protocol);
+ 	CHECK_SKB_FIELD(csum);
+ 	CHECK_SKB_FIELD(hash);
+ 	CHECK_SKB_FIELD(priority);
+ 	CHECK_SKB_FIELD(skb_iif);
++#ifdef CONFIG_CPE_FAST_PATH
++	CHECK_SKB_FIELD(abm_ff);
++	CHECK_SKB_FIELD(expt_pkt);
++	CHECK_SKB_FIELD(iif_index);
++	CHECK_SKB_FIELD(underlying_iif);
++	CHECK_SKB_FIELD(underlying_vlan_tci);
++#endif
+ 	CHECK_SKB_FIELD(vlan_proto);
+ 	CHECK_SKB_FIELD(vlan_tci);
+ 	CHECK_SKB_FIELD(transport_header);
+@@ -1427,6 +1441,24 @@ static struct sk_buff *__skb_clone(struct sk_buff *n, struct sk_buff *skb)
+ {
+ #define C(x) n->x = skb->x
+ 
++#if defined(CONFIG_COMCERTO_CUSTOM_SKB_LAYOUT)
++	if (skb->mspd_data) {
++		if (skb->mspd_len) {
++			int ofst = skb->len - skb->mspd_len;
++
++			memcpy(skb->data + ofst, skb->mspd_data + skb->mspd_ofst, skb->mspd_len);
++			skb->mspd_len = 0;
++		}
++
++		WARN_ON(skb_shared(skb));
++
++		if (!skb_shared(skb)) {
++			kfree(skb->mspd_data);
++			skb->mspd_data = NULL;
++		}
++	}
++#endif
++
+ 	n->next = n->prev = NULL;
+ 	n->sk = NULL;
+ 	__copy_skb_header(n, skb);
+@@ -1449,6 +1481,13 @@ static struct sk_buff *__skb_clone(struct sk_buff *n, struct sk_buff *skb)
+ 	C(truesize);
+ 	refcount_set(&n->users, 1);
+ 
++#if defined(CONFIG_COMCERTO_CUSTOM_SKB_LAYOUT)
++	WARN_ON(skb->mspd_data);
++	C(mspd_data);
++	C(mspd_len);
++	C(mspd_ofst);
++#endif
++
+ 	atomic_inc(&(skb_shinfo(skb)->dataref));
+ 	skb->cloned = 1;
+ 
+@@ -2025,6 +2064,9 @@ struct sk_buff *__pskb_copy_fclone(struct sk_buff *skb, int headroom,
+ 	int flags = skb_alloc_rx_flag(skb) | (fclone ? SKB_ALLOC_FCLONE : 0);
+ 	struct sk_buff *n = __alloc_skb(size, gfp_mask, flags, NUMA_NO_NODE);
+ 
++#if defined(CONFIG_COMCERTO_CUSTOM_SKB_LAYOUT)
++	WARN_ON(skb->mspd_len);
++#endif
+ 	if (!n)
+ 		goto out;
+ 
+@@ -5865,7 +5907,15 @@ void skb_scrub_packet(struct sk_buff *skb, bool xnet)
+ 	skb->skb_iif = 0;
+ 	skb->ignore_df = 0;
+ 	skb_dst_drop(skb);
+-	skb_ext_reset(skb);
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	/* TODO ***
++	skb->sp is getting initialized to NULL, which is getting used in ethernet driver
++	for ipsec_offload cases. 
++	Need to revisit for a proper fix.
++	*/
++	if (!skb->ipsec_offload)
++#endif
++		skb_ext_reset(skb);
+ 	nf_reset_ct(skb);
+ 	nf_reset_trace(skb);
+ 
+diff --git a/net/ipv4/Kconfig b/net/ipv4/Kconfig
+index 2dfb12230f08..79900616505f 100644
+--- a/net/ipv4/Kconfig
++++ b/net/ipv4/Kconfig
+@@ -392,6 +392,12 @@ config INET_ESPINTCP
+ 
+ 	  If unsure, say N.
+ 
++config INET_IPSEC_OFFLOAD
++	bool "IPsec Fast Path Processing offload"
++	depends on (INET_ESP || INET_AH) && CPE_FAST_PATH
++	help
++	  Support for IPsec Fast Path offload.
++
+ config INET_IPCOMP
+ 	tristate "IP: IPComp transformation"
+ 	select INET_XFRM_TUNNEL
+diff --git a/net/ipv4/ip_output.c b/net/ipv4/ip_output.c
+index ff8040101193..4032b9d6e461 100644
+--- a/net/ipv4/ip_output.c
++++ b/net/ipv4/ip_output.c
+@@ -103,6 +103,17 @@ int __ip_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
+ 
+ 	IP_INC_STATS(net, IPSTATS_MIB_OUTREQUESTS);
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD)
++	/*
++	 * The tunnel header is not added in slow path and packet may be ipv6
++	 * (IPv6 traffic and IPv4 IPSec tunnel) in case IPv6 over IPv4 IPsec
++	 * tunnel. When it assumes as IPv4 and accessing IP header from SKB
++	 * causing invalid accesses it leading to kernel panic.
++	 * Avoiding ip header checks.
++	 */
++	if((skb->ipsec_offload) && (iph->version == 6))
++		goto sendout;
++#endif /* endif for CONFIG_INET_IPSEC_OFFLOAD */
+ 	iph_set_totlen(iph, skb->len);
+ 	ip_send_check(iph);
+ 
+@@ -113,8 +124,19 @@ int __ip_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
+ 	if (unlikely(!skb))
+ 		return 0;
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD)
++sendout:
++#endif
+ 	skb->protocol = htons(ETH_P_IP);
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD)
++	if(skb->ipsec_offload)
++	{
++		dst_output(net, sk, skb);
++		return 0;
++	}
++	else
++#endif /* endif for CONFIG_INET_IPSEC_OFFLOAD */
+ 	return nf_hook(NFPROTO_IPV4, NF_INET_LOCAL_OUT,
+ 		       net, sk, skb, NULL, skb_dst(skb)->dev,
+ 		       dst_output);
+@@ -307,7 +329,11 @@ static int __ip_finish_output(struct net *net, struct sock *sk, struct sk_buff *
+ 	if (skb_is_gso(skb))
+ 		return ip_finish_output_gso(net, sk, skb, mtu);
+ 
+-	if (skb->len > mtu || IPCB(skb)->frag_max_size)
++	if (
++#if defined(CONFIG_INET_IPSEC_OFFLOAD)
++		(skb->ipsec_offload == 0) &&
++#endif
++		(skb->len > mtu || IPCB(skb)->frag_max_size))
+ 		return ip_fragment(net, sk, skb, mtu, ip_finish_output2);
+ 
+ 	return ip_finish_output2(net, sk, skb);
+@@ -417,6 +443,13 @@ int ip_mc_output(struct net *net, struct sock *sk, struct sk_buff *skb)
+ 				ip_mc_finish_output);
+ 	}
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD)
++	/* Bypass invoking post routing hooks since the tunnel header and ESP
++	 * processing is not done in slow path for IPSec offloaded cases
++	 */
++	if (skb->ipsec_offload)
++		return ip_finish_output(net, sk, skb);
++#endif
+ 	return NF_HOOK_COND(NFPROTO_IPV4, NF_INET_POST_ROUTING,
+ 			    net, sk, skb, NULL, skb->dev,
+ 			    ip_finish_output,
+@@ -565,6 +598,9 @@ static void ip_copy_metadata(struct sk_buff *to, struct sk_buff *from)
+ 	skb_dst_copy(to, from);
+ 	to->dev = from->dev;
+ 	to->mark = from->mark;
++#if defined(CONFIG_CPE_FAST_PATH)
++	to->qosmark = from->qosmark;
++#endif
+ 
+ 	skb_copy_hash(to, from);
+ 
+diff --git a/net/ipv4/ip_tunnel.c b/net/ipv4/ip_tunnel.c
+index 090403c8cc6c..afa658c812ff 100644
+--- a/net/ipv4/ip_tunnel.c
++++ b/net/ipv4/ip_tunnel.c
+@@ -438,6 +438,9 @@ int ip_tunnel_rcv(struct ip_tunnel *tunnel, struct sk_buff *skb,
+ 		skb->protocol = eth_type_trans(skb, tunnel->dev);
+ 		skb_postpull_rcsum(skb, eth_hdr(skb), ETH_HLEN);
+ 	} else {
++#ifdef CONFIG_CPE_FAST_PATH
++		skb->underlying_iif = skb->dev->ifindex;
++#endif
+ 		skb->dev = tunnel->dev;
+ 	}
+ 
+diff --git a/net/ipv4/xfrm4_policy.c b/net/ipv4/xfrm4_policy.c
+index 63bbc7f6a5a8..7e7531fd0cf5 100644
+--- a/net/ipv4/xfrm4_policy.c
++++ b/net/ipv4/xfrm4_policy.c
+@@ -13,6 +13,7 @@
+ #include <linux/kernel.h>
+ #include <linux/inetdevice.h>
+ #include <net/dst.h>
++#include "../xfrm/ipsec_flow.h"
+ #include <net/xfrm.h>
+ #include <net/ip.h>
+ #include <net/l3mdev.h>
+diff --git a/net/ipv6/Kconfig b/net/ipv6/Kconfig
+index 1c9c686d9522..396a081a12b9 100644
+--- a/net/ipv6/Kconfig
++++ b/net/ipv6/Kconfig
+@@ -103,6 +103,12 @@ config INET6_ESPINTCP
+ 
+ 	  If unsure, say N.
+ 
++config INET6_IPSEC_OFFLOAD
++	bool "IPsec IPv6 Fast Path Processing offload"
++	depends on (INET6_ESP && CPE_FAST_PATH)
++	help
++	  Support for IPsec IPv6 Fast Path offload.
++
+ config INET6_IPCOMP
+ 	tristate "IPv6: IPComp transformation"
+ 	select INET6_XFRM_TUNNEL
+diff --git a/net/ipv6/ip6_output.c b/net/ipv6/ip6_output.c
+index c86d5dca29df..005642c7007d 100644
+--- a/net/ipv6/ip6_output.c
++++ b/net/ipv6/ip6_output.c
+@@ -83,6 +83,13 @@ static int ip6_finish_output2(struct net *net, struct sock *sk, struct sk_buff *
+ 
+ 	hdr = ipv6_hdr(skb);
+ 	daddr = &hdr->daddr;
++#if defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	/* For IPv4 over IPv6 IPsec tunnel cases, just send the packet out
++	 * since the packet is IPv4
++	 */
++	if((skb->ipsec_offload) && (hdr->version == 4))
++		goto sendout;
++#endif /* endif for CONFIG_INET6_IPSEC_OFFLOAD */
+ 	if (ipv6_addr_is_multicast(daddr)) {
+ 		if (!(dev->flags & IFF_LOOPBACK) && sk_mc_loop(sk) &&
+ 		    ((mroute6_is_socket(net, skb) &&
+@@ -114,6 +121,9 @@ static int ip6_finish_output2(struct net *net, struct sock *sk, struct sk_buff *
+ 		}
+ 	}
+ 
++#if defined(CONFIG_INET6_IPSEC_OFFLOAD)
++sendout:
++#endif /* endif for CONFIG_INET6_IPSEC_OFFLOAD */
+ 	if (lwtunnel_xmit_redirect(dst->lwtstate)) {
+ 		int res = lwtunnel_xmit(skb);
+ 
+@@ -237,6 +247,13 @@ int ip6_output(struct net *net, struct sock *sk, struct sk_buff *skb)
+ 		return 0;
+ 	}
+ 
++#if defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	/* Bypass invoking post routing hooks since the tunnel header and ESP
++	 * processing is not done in slow path for IPSec offloaded cases
++	 */
++	if (skb->ipsec_offload)
++		return ip6_finish_output(net, sk, skb);
++#endif
+ 	return NF_HOOK_COND(NFPROTO_IPV6, NF_INET_POST_ROUTING,
+ 			    net, sk, skb, indev, dev,
+ 			    ip6_finish_output,
+@@ -683,6 +700,9 @@ static void ip6_copy_metadata(struct sk_buff *to, struct sk_buff *from)
+ 	skb_dst_set(to, dst_clone(skb_dst(from)));
+ 	to->dev = from->dev;
+ 	to->mark = from->mark;
++#if defined(CONFIG_CPE_FAST_PATH)
++	to->qosmark = from->qosmark;
++#endif
+ 
+ 	skb_copy_hash(to, from);
+ 
+diff --git a/net/ipv6/ip6_tunnel.c b/net/ipv6/ip6_tunnel.c
+index 69cace90ece1..9a5668bee940 100644
+--- a/net/ipv6/ip6_tunnel.c
++++ b/net/ipv6/ip6_tunnel.c
+@@ -19,6 +19,7 @@
+ #include <linux/capability.h>
+ #include <linux/errno.h>
+ #include <linux/types.h>
++#include <linux/version.h>
+ #include <linux/sockios.h>
+ #include <linux/icmp.h>
+ #include <linux/if.h>
+@@ -74,6 +75,505 @@ static u32 HASH(const struct in6_addr *addr1, const struct in6_addr *addr2)
+ 	return hash_32(hash, IP6_TUNNEL_HASH_SIZE_SHIFT);
+ }
+ 
++#ifdef CONFIG_CPE_4RD_TUNNEL
++#define for_each_ip6_tunnel_rcu(start) \
++	for (t = rcu_dereference(start); t; t = rcu_dereference(t->next))
++
++/*
++ * 4RD Tunnel Support Functions
++ * Locking: hash tables are protected by RCU and RTNL
++ */
++static struct kmem_cache *mr_kmem __read_mostly;
++int mr_kmem_alloced = 0;
++
++static inline size_t ip6_4rd_nlmsg_size(void)
++{
++	return NLMSG_ALIGN(sizeof(struct ip6_4rd_map_msg));
++}
++
++static int ip6_4rd_fill_node(struct sk_buff *skb, struct ip6_tnl_4rd_map_rule *mr,
++		u32 pid, u32 seq, int type, unsigned int flags, int reset,
++		unsigned int ifindex)
++{
++	struct ip6_4rd_map_msg *mr_msg;
++	struct nlmsghdr *nlh;
++
++	nlh = nlmsg_put(skb, pid, seq, type, sizeof(*mr_msg), flags);
++	if (nlh == NULL)
++		return -EMSGSIZE;
++
++	mr_msg = nlmsg_data(nlh);
++	if (reset) {
++		memset(mr_msg, 0, sizeof(*mr_msg));
++		mr_msg->reset = 1;
++		mr_msg->ifindex = ifindex;
++	} else {
++		memset(mr_msg, 0, sizeof(*mr_msg));
++		mr_msg->prefix = mr->prefix;
++		mr_msg->prefixlen = mr->prefixlen;
++		mr_msg->relay_prefix = mr->relay_prefix;
++		mr_msg->relay_suffix = mr->relay_suffix;
++		mr_msg->relay_prefixlen = mr->relay_prefixlen;
++		mr_msg->relay_suffixlen = mr->relay_suffixlen;
++		mr_msg->psid_offsetlen = mr->psid_offsetlen;
++		mr_msg->eabit_len = mr->eabit_len;
++		mr_msg->entry_num = mr->entry_num;
++		mr_msg->ifindex = ifindex;
++	}
++	nlmsg_end(skb, nlh);
++	return nlh->nlmsg_len;
++}
++
++static void ip6_4rd_notify(int event, struct ip6_tnl_4rd_map_rule *mr,
++		struct net_device *dev, int reset)
++{
++	struct sk_buff *skb;
++	struct net *net = dev_net(dev);
++	int err;
++
++	err = -ENOBUFS;
++	skb = nlmsg_new(ip6_4rd_nlmsg_size(), gfp_any());
++	if (skb == NULL)
++		goto errout;
++
++	err = ip6_4rd_fill_node(skb, mr, 0, 0, event, 0, reset, dev->ifindex);
++	if (err < 0) {
++		WARN_ON(err == -EMSGSIZE);
++		kfree_skb(skb);
++		goto errout;
++	}
++	rtnl_notify(skb, net, 0, RTNLGRP_IPV6_IFADDR, NULL, gfp_any());
++	return;
++errout:
++	if (err < 0)
++		rtnl_set_sk_err(net, RTNLGRP_IPV6_IFADDR, err);
++}
++
++static inline void
++ip6_tnl_4rd_mr_destroy(char *f, struct ip6_tnl_4rd_map_rule *mr)
++{
++	list_del(&mr->mr_list);
++	kmem_cache_free(mr_kmem, mr);
++	--mr_kmem_alloced;
++}
++
++static int
++ip6_tnl_4rd_mr_create(struct ip6_tnl_4rd *ip4rd, struct ip6_tnl_4rd_parm *parm,
++		struct net_device *dev)
++{
++	struct ip6_tnl_4rd_map_rule *mr;
++	int err = 0;
++
++	write_lock_bh(&parm->map_lock);
++	list_for_each_entry(mr, &parm->map_list, mr_list) {
++		if (mr->entry_num == ip4rd->entry_num) {
++			pr_debug("ip6_tnl_4rd_mr_create: map rule found update\n");
++			mr->prefix = ip4rd->prefix;
++			mr->relay_prefix = ip4rd->relay_prefix;
++			mr->relay_suffix = ip4rd->relay_suffix;
++			mr->prefixlen = ip4rd->prefixlen;
++			mr->relay_prefixlen = ip4rd->relay_prefixlen;
++			mr->relay_suffixlen = ip4rd->relay_suffixlen;
++			mr->psid_offsetlen = ip4rd->psid_offsetlen;
++			mr->eabit_len = ip4rd->eabit_len;
++			mr->entry_num = ip4rd->entry_num;
++			goto out;
++		}
++	}
++
++	mr = kmem_cache_alloc(mr_kmem, GFP_KERNEL);
++	if (!mr) {
++		pr_info("ip6_tnl_4rd_mr_create: kmem_cache_alloc fail\n");
++		err = -1;
++		goto out;
++	}
++
++	mr->prefix = ip4rd->prefix;
++	mr->relay_prefix = ip4rd->relay_prefix;
++	mr->relay_suffix = ip4rd->relay_suffix;
++	mr->prefixlen = ip4rd->prefixlen;
++	mr->relay_prefixlen = ip4rd->relay_prefixlen;
++	mr->relay_suffixlen = ip4rd->relay_suffixlen;
++	mr->psid_offsetlen = ip4rd->psid_offsetlen;
++	mr->eabit_len = ip4rd->eabit_len;
++	mr->entry_num = ip4rd->entry_num;
++
++	++mr_kmem_alloced;
++	list_add_tail(&mr->mr_list, &parm->map_list);
++
++out:
++	ip6_4rd_notify(RTM_NEW4RD, mr, dev, 0);
++	write_unlock_bh(&parm->map_lock);
++	return err;
++}
++
++static void
++ip6_tnl_4rd_mr_delete_all(struct ip6_tnl_4rd_parm *parm, struct net_device *dev)
++{
++	struct ip6_tnl_4rd_map_rule *mr, *mr_rule;
++
++	write_lock_bh(&parm->map_lock);
++	list_for_each_entry_safe(mr, mr_rule, &parm->map_list, mr_list) {
++		ip6_tnl_4rd_mr_destroy("all", mr);
++	}
++	ip6_4rd_notify(RTM_DEL4RD, mr, dev, 1);
++	write_unlock_bh(&parm->map_lock);
++}
++
++static int
++ip6_tnl_4rd_mr_delete(__u16 entry_num, struct ip6_tnl_4rd_parm *parm,
++		struct net_device *dev)
++{
++	struct ip6_tnl_4rd_map_rule *mr, *mr_rule;
++	int err = -1;
++
++	write_lock_bh(&parm->map_lock);
++	list_for_each_entry_safe(mr, mr_rule, &parm->map_list, mr_list) {
++		if (mr->entry_num == entry_num) {
++			pr_debug("ip6_tnl_4rd_mr_delete: map rule found delete\n");
++			ip6_tnl_4rd_mr_destroy("one", mr);
++			err = 0;
++			break;
++		}
++	}
++	ip6_4rd_notify(RTM_DEL4RD, mr, dev, 0);
++	write_unlock_bh(&parm->map_lock);
++	return err;
++}
++
++static void
++ip6_tnl_4rd_mr_show(struct ip6_tnl_4rd_parm *parm)
++{
++	struct ip6_tnl_4rd_map_rule *mr;
++
++	pr_debug("-- 4rd mapping rule list\n");
++	pr_debug("-- entry num = %d\n", mr_kmem_alloced);
++
++	read_lock(&parm->map_lock);
++	list_for_each_entry(mr, &parm->map_list, mr_list) {
++		pr_debug("%03d : %pI4/%02d %pI6c/%03d %pI6c/%03d eabit:%03d offset:%03d\n",
++			mr->entry_num,
++			&mr->prefix,
++			mr->prefixlen,
++			&mr->relay_prefix,
++			mr->relay_prefixlen,
++			&mr->relay_suffix,
++			mr->relay_suffixlen,
++			mr->eabit_len,
++			mr->psid_offsetlen);
++	}
++	read_unlock(&parm->map_lock);
++}
++
++static int
++ip6_tnl_4rd_modify_daddr(struct in6_addr *daddr6, __be32 daddr4, __be16 dport4,
++		struct ip6_tnl_4rd_map_rule *mr)
++{
++	int i, pbw0, pbi0, pbi1;
++	__u32 daddr[4];
++	__u32 port_set_id = 0;
++	__u32 mask;
++	__u32 da = ntohl(daddr4);
++	__u16 dp = ntohs(dport4);
++	__u32 diaddr[4];
++	int port_set_id_len = (mr->eabit_len) - (32 - mr->prefixlen);
++
++	if (port_set_id_len < 0) {
++		pr_debug("ip6_tnl_4rd_modify_daddr: PSID length ERROR %d\n",
++			port_set_id_len);
++		return -1;
++	}
++
++	if (port_set_id_len > 0) {
++		mask = 0xffffffff >> (32 - port_set_id_len);
++		port_set_id = (dp >> (16 - mr->psid_offsetlen - port_set_id_len) & mask);
++	}
++
++	for (i = 0; i < 4; ++i)
++		daddr[i] = ntohl(mr->relay_prefix.s6_addr32[i])
++			| ntohl(mr->relay_suffix.s6_addr32[i]);
++
++	if (mr->prefixlen < 32) {
++		pbw0 = mr->relay_prefixlen >> 5;
++		pbi0 = mr->relay_prefixlen & 0x1f;
++		daddr[pbw0] |= (da << mr->prefixlen) >> pbi0;
++		pbi1 = pbi0 - mr->prefixlen;
++		if (pbi1 > 0)
++			daddr[pbw0+1] |= da << (32 - pbi1);
++	}
++	if (port_set_id_len > 0) {
++		pbw0 = (mr->relay_prefixlen + 32 - mr->prefixlen) >> 5;
++		pbi0 = (mr->relay_prefixlen + 32 - mr->prefixlen) & 0x1f;
++		daddr[pbw0] |= (port_set_id << (32 - port_set_id_len)) >> pbi0;
++		pbi1 = pbi0 - (32 - port_set_id_len);
++		if (pbi1 > 0)
++			daddr[pbw0+1] |= port_set_id << (32 - pbi1);
++	}
++
++	memset(diaddr, 0, sizeof(diaddr));
++	diaddr[2] = (da >> 8);
++	diaddr[3] = (da << 24);
++	diaddr[3] |= (port_set_id << 8);
++
++	for (i = 0; i < 4; ++i)
++		daddr[i] = daddr[i] | diaddr[i];
++
++	for (i = 0; i < 4; ++i)
++		daddr6->s6_addr32[i] = htonl(daddr[i]);
++
++	pr_debug("ip6_tnl_4rd_modify_daddr: %08x %08x %08x %08x  PSID:%04x\n",
++		daddr[0], daddr[1], daddr[2], daddr[3], port_set_id);
++
++	return 0;
++}
++
++/**
++ * ip6_tnl_4rd_rcv_helper - validate received 4RD packet
++ *   @skb: received socket buffer
++ *   @t: tunnel device
++ **/
++static int
++ip6_tnl_4rd_rcv_helper(struct sk_buff *skb, struct ip6_tnl *t)
++{
++	int err = 0;
++	struct iphdr *iph;
++
++	iph = ip_hdr(skb);
++
++	switch (iph->protocol) {
++	case IPPROTO_TCP:
++	case IPPROTO_UDP:
++	case IPPROTO_ICMP:
++	case IPPROTO_GRE:
++		break;
++	default:
++		err = -1;
++		break;
++	}
++
++	return err;
++}
++
++static int
++ip6_tnl_4rd_xmit_helper(struct sk_buff *skb, struct flowi6 *fl6,
++		struct ip6_tnl *t)
++{
++	int err = 0;
++	struct iphdr *iph, *icmpiph;
++	__be16 *idp;
++	struct tcphdr *tcph, *icmptcph;
++	struct udphdr *udph, *icmpudph;
++	struct icmphdr *icmph;
++	__u32 mask;
++	__be16 *sportp = NULL;
++	__be32 daddr;
++	__be16 dport;
++	u8 *ptr;
++	int no_dst_chg = 0;
++	struct ip6_tnl_4rd_map_rule *mr, *mr_tmp;
++	int mr_prefixlen;
++	int count;
++
++	iph = ip_hdr(skb);
++
++	daddr = iph->daddr;
++	idp = &iph->id;
++
++	ptr = (u8 *)iph;
++	ptr += iph->ihl * 4;
++	switch (iph->protocol) {
++	case IPPROTO_TCP:
++		tcph = (struct tcphdr *)ptr;
++		sportp = &tcph->source;
++		dport = tcph->dest;
++		break;
++	case IPPROTO_UDP:
++		udph = (struct udphdr *)ptr;
++		sportp = &udph->source;
++		dport = udph->dest;
++		break;
++	case IPPROTO_ICMP:
++		icmph = (struct icmphdr *)ptr;
++		switch (icmph->type) {
++		case ICMP_DEST_UNREACH:
++		case ICMP_SOURCE_QUENCH:
++		case ICMP_REDIRECT:
++		case ICMP_TIME_EXCEEDED:
++		case ICMP_PARAMETERPROB:
++			ptr = (u8 *)icmph;
++			ptr += sizeof(struct icmphdr);
++			icmpiph = (struct iphdr *)ptr;
++			if (ntohs(iph->tot_len) < icmpiph->ihl * 4 + 12) {
++				err = -1;
++				goto out;
++			}
++			daddr = icmpiph->saddr;
++			ptr += icmpiph->ihl * 4;
++			switch (icmpiph->protocol) {
++			case IPPROTO_TCP:
++				icmptcph = (struct tcphdr *)ptr;
++				sportp = &icmptcph->dest;
++				dport = icmptcph->source;
++				break;
++			case IPPROTO_UDP:
++				icmpudph = (struct udphdr *)ptr;
++				sportp = &icmpudph->dest;
++				dport = icmpudph->source;
++				break;
++			default:
++				err = -1;
++				goto out;
++			}
++			break;
++		default:
++			no_dst_chg = 1;
++			break;
++		}
++		break;
++	default:
++		err = -1;
++		goto out;
++	}
++
++	if (no_dst_chg == 0) {
++		count = 0;
++		mr_prefixlen = 0;
++
++		read_lock(&t->ip4rd.map_lock);
++		list_for_each_entry(mr, &t->ip4rd.map_list, mr_list) {
++			mask = 0xffffffff << (32 - mr->prefixlen);
++			if ((htonl(daddr) & mask) == htonl(mr->prefix)) {
++				if (mr->prefixlen >= mr_prefixlen) {
++					mr_prefixlen = mr->prefixlen;
++					mr_tmp = mr;
++					count++;
++				}
++			}
++		}
++
++		if (count) {
++			err = ip6_tnl_4rd_modify_daddr(&fl6->daddr, daddr, dport, mr_tmp);
++			if (err) {
++				read_unlock(&t->ip4rd.map_lock);
++				goto out;
++			}
++		}
++		read_unlock(&t->ip4rd.map_lock);
++
++		if (sportp && idp)
++			*idp = *sportp;
++	}
++
++	iph->check = 0;
++	iph->check = ip_fast_csum((unsigned char *)iph, iph->ihl);
++
++out:
++	return err;
++}
++
++/**
++ * ip6_tnl_4rd_update_parms - update 4rd parameters
++ *   @t: tunnel to be updated
++ *
++ * Description:
++ *   ip6_tnl_4rd_update_parms() updates 4rd parameters
++ **/
++static void
++ip6_tnl_4rd_update_parms(struct ip6_tnl *t)
++{
++	int pbw0, pbi0, pbi1;
++	__u32 d;
++
++	t->ip4rd.port_set_id_len = t->ip4rd.relay_suffixlen
++		- t->ip4rd.relay_prefixlen
++		- (32 - t->ip4rd.prefixlen);
++	pbw0 = (t->ip4rd.relay_suffixlen - t->ip4rd.port_set_id_len) >> 5;
++	pbi0 = (t->ip4rd.relay_suffixlen - t->ip4rd.port_set_id_len) & 0x1f;
++	d = (ntohl(t->parms.laddr.s6_addr32[pbw0]) << pbi0)
++		>> (32 - t->ip4rd.port_set_id_len);
++	pbi1 = pbi0 - (32 - t->ip4rd.port_set_id_len);
++
++	if (pbi1 > 0)
++		d |= ntohl(t->parms.laddr.s6_addr32[pbw0+1]) >> (32 - pbi1);
++	t->ip4rd.port_set_id = d;
++
++	/* local v4 address */
++	t->ip4rd.laddr4 = t->ip4rd.prefix;
++	pbw0 = t->ip4rd.relay_prefixlen >> 5;
++	pbi0 = t->ip4rd.relay_prefixlen & 0x1f;
++	d = (ntohl(t->parms.laddr.s6_addr32[pbw0]) << pbi0)
++		>> t->ip4rd.prefixlen;
++	pbi1 = pbi0 - t->ip4rd.prefixlen;
++	if (pbi1 > 0)
++		d |= ntohl(t->parms.laddr.s6_addr32[pbw0+1]) >> (32 - pbi1);
++	t->ip4rd.laddr4 |= htonl(d);
++	if (t->ip4rd.port_set_id_len < 0) {
++		d = ntohl(t->ip4rd.laddr4);
++		d &= 0xffffffff << -t->ip4rd.port_set_id_len;
++		t->ip4rd.laddr4 = htonl(d);
++	}
++}
++
++static int inet6_dump4rd_mrule(struct sk_buff *skb, struct netlink_callback *cb)
++{
++	struct net *net = sock_net(skb->sk);
++	unsigned int h, s_h;
++	int s_idx, s_ip_idx;
++	int idx, ip_idx;
++	struct ip6_tnl_4rd_map_rule *mr;
++	int err = 0;
++	struct ip6_tnl *t;
++	struct ip6_tnl_net *ip6n = net_generic(net, ip6_tnl_net_id);
++
++	s_h = cb->args[0];
++	s_idx = idx = cb->args[1];
++	s_ip_idx = ip_idx = cb->args[2];
++
++	rcu_read_lock();
++
++	for (h = s_h; h < IP6_TUNNEL_HASH_SIZE; h++, s_idx = 0) {
++		idx = 0;
++		for_each_ip6_tunnel_rcu(ip6n->tnls_r_l[h]) {
++			if (idx < s_idx)
++				goto cont_tunnel;
++			if (idx > s_idx)
++				s_ip_idx = 0;
++			ip_idx = 0;
++			read_lock(&t->ip4rd.map_lock);
++			list_for_each_entry(mr, &t->ip4rd.map_list, mr_list) {
++				if (ip_idx < s_ip_idx)
++					goto cont_mr;
++
++				err = ip6_4rd_fill_node(skb, mr,
++					NETLINK_CB(cb->skb).portid,
++					cb->nlh->nlmsg_seq, RTM_NEW4RD,
++					NLM_F_MULTI, 0, t->dev->ifindex);
++				if (err < 0) {
++					WARN_ON(err == -EMSGSIZE);
++					kfree_skb(skb);
++					read_unlock(&t->ip4rd.map_lock);
++					goto out;
++				}
++cont_mr:
++				ip_idx++;
++			}
++			read_unlock(&t->ip4rd.map_lock);
++cont_tunnel:
++			idx++;
++		}
++	}
++out:
++	rcu_read_unlock();
++
++	cb->args[0] = h;
++	cb->args[1] = idx;
++	cb->args[2] = ip_idx;
++
++	return skb->len;
++}
++
++#endif /* CONFIG_CPE_4RD_TUNNEL */
++
+ static int ip6_tnl_dev_init(struct net_device *dev);
+ static void ip6_tnl_dev_setup(struct net_device *dev);
+ static struct rtnl_link_ops ip6_link_ops __read_mostly;
+@@ -94,8 +594,10 @@ static inline int ip6_tnl_mpls_supported(void)
+ 	return IS_ENABLED(CONFIG_MPLS);
+ }
+ 
++#ifndef CONFIG_CPE_4RD_TUNNEL
+ #define for_each_ip6_tunnel_rcu(start) \
+ 	for (t = rcu_dereference(start); t; t = rcu_dereference(t->next))
++#endif
+ 
+ /**
+  * ip6_tnl_lookup - fetch tunnel matching the end-point addresses
+@@ -870,6 +1372,11 @@ static int __ip6_tnl_rcv(struct ip6_tnl *tunnel, struct sk_buff *skb,
+ 		}
+ 	}
+ 
++#ifdef CONFIG_CPE_4RD_TUNNEL
++	if (ip6_tnl_4rd_rcv_helper(skb, tunnel))
++		goto drop;
++#endif
++
+ 	dev_sw_netstats_rx_add(tunnel->dev, skb->len);
+ 
+ 	skb_scrub_packet(skb, !net_eq(tunnel->net, dev_net(tunnel->dev)));
+@@ -1194,10 +1701,27 @@ int ip6_tnl_xmit(struct sk_buff *skb, struct net_device *dev, __u8 dsfield,
+ 		       IPV6_MIN_MTU : IPV4_MIN_MTU);
+ 
+ 	skb_dst_update_pmtu_no_confirm(skb, mtu);
+-	if (skb->len - t->tun_hlen - eth_hlen > mtu && !skb_is_gso(skb)) {
+-		*pmtu = mtu;
+-		err = -EMSGSIZE;
+-		goto tx_err_dst_release;
++
++#ifdef CONFIG_CPE_4RD_TUNNEL
++		if (!t->ip4rd.prefix) {   /* 4rd support requires Post Fragmentation, so skb->len could be greater than MTU */ 
++#endif
++			if (skb->len - t->tun_hlen - eth_hlen > mtu && !skb_is_gso(skb)) {
++				*pmtu = mtu;
++				err = -EMSGSIZE;
++				goto tx_err_dst_release;
++			}
++#ifdef CONFIG_CPE_4RD_TUNNEL
++		}                         
++
++	if (t->ip4rd.prefix) {
++		struct iphdr *iph;
++		iph = ip_hdr(skb);
++		hop_limit = iph->ttl;
++	}
++	else
++#endif
++	{
++		hop_limit = t->parms.hop_limit;
+ 	}
+ 
+ 	if (t->err_count > 0) {
+@@ -1395,6 +1919,12 @@ ipxip6_tnl_xmit(struct sk_buff *skb, struct net_device *dev,
+ 
+ 	skb_set_inner_ipproto(skb, protocol);
+ 
++#ifdef CONFIG_CPE_4RD_TUNNEL
++	if (protocol == IPPROTO_IPIP &&
++	    t->ip4rd.prefix && ip6_tnl_4rd_xmit_helper(skb, &fl6, t))
++		return -1;
++#endif
++
+ 	err = ip6_tnl_xmit(skb, dev, dsfield, &fl6, encap_limit, &mtu,
+ 			   protocol);
+ 	if (err != 0) {
+@@ -1429,6 +1959,10 @@ ip6_tnl_start_xmit(struct sk_buff *skb, struct net_device *dev)
+ 
+ 	switch (skb->protocol) {
+ 	case htons(ETH_P_IP):
++#ifdef CONFIG_CPE_4RD_TUNNEL
++		if (t->ip4rd.prefix && ip_defrag(skb, IP_DEFRAG_IP6_TNL_4RD))
++			return NETDEV_TX_OK;
++#endif
+ 		ipproto = IPPROTO_IPIP;
+ 		break;
+ 	case htons(ETH_P_IPV6):
+@@ -1633,6 +2167,10 @@ ip6_tnl_siocdevprivate(struct net_device *dev, struct ifreq *ifr,
+ 	struct ip6_tnl *t = netdev_priv(dev);
+ 	struct net *net = t->net;
+ 	struct ip6_tnl_net *ip6n = net_generic(net, ip6_tnl_net_id);
++#ifdef CONFIG_CPE_4RD_TUNNEL
++	struct ip6_tnl_4rd ip4rd, *ip4rdp;  
++	struct ip6_tnl_4rd_map_rule *mr;   
++#endif
+ 
+ 	memset(&p1, 0, sizeof(p1));
+ 
+@@ -1713,9 +2251,120 @@ ip6_tnl_siocdevprivate(struct net_device *dev, struct ifreq *ifr,
+ 		err = 0;
+ 		unregister_netdevice(dev);
+ 		break;
++#ifdef CONFIG_CPE_4RD_TUNNEL
++	case SIOCADD4RD:
++	case SIOCDEL4RD:
++		err = -EPERM;
++		if (!capable(CAP_NET_ADMIN))
++			goto done;
++
++		err = -EFAULT;
++		if (copy_from_user(&ip4rd, ifr->ifr_ifru.ifru_data, sizeof(ip4rd)))
++			goto done;
++
++		t = netdev_priv(dev);
++
++		if (cmd == SIOCADD4RD) {
++
++			__be32 prefix;
++			struct in6_addr relay_prefix, relay_suffix;
++
++			err = -EINVAL;
++
++			if (ip4rd.relay_suffixlen > 64)
++				goto done;
++
++			if (ip4rd.relay_suffixlen <= ip4rd.relay_prefixlen)
++				goto done;
++
++			prefix = ip4rd.prefix & htonl(0xffffffffUL << (32 - ip4rd.prefixlen));
++			if (prefix != ip4rd.prefix)
++				goto done;
++
++			ipv6_addr_prefix(&relay_prefix, &ip4rd.relay_prefix, ip4rd.relay_prefixlen);
++			if (!ipv6_addr_equal(&relay_prefix, &ip4rd.relay_prefix))
++				goto done;
++
++			ipv6_addr_prefix(&relay_suffix, &ip4rd.relay_suffix, ip4rd.relay_suffixlen);
++			if (!ipv6_addr_equal(&relay_suffix, &ip4rd.relay_suffix))
++				goto done;
++
++
++			err = ip6_tnl_4rd_mr_create(&ip4rd, &t->ip4rd, t->dev); /* modified by MSPD */
++
++			if ( ip4rd.entry_num == 0 ){
++
++				t->ip4rd.prefix = prefix;
++				t->ip4rd.relay_prefix = relay_prefix;
++				t->ip4rd.relay_suffix = relay_suffix;
++				t->ip4rd.prefixlen = ip4rd.prefixlen;
++				t->ip4rd.relay_prefixlen = ip4rd.relay_prefixlen;
++				t->ip4rd.relay_suffixlen = ip4rd.relay_suffixlen;
++				t->ip4rd.psid_offsetlen = ip4rd.psid_offsetlen;
++
++				ip6_tnl_4rd_update_parms(t);
++				ip6_tnl_dst_reset(t);
++				ip6_tnl_link_config(t);
++			}
++			/* DBG */
++			ip6_tnl_4rd_mr_show(&t->ip4rd);
++		}else if(cmd == SIOCDEL4RD){
++			if ( ip4rd.entry_num == 0 ){
++				ip6_tnl_4rd_mr_delete_all(&t->ip4rd, t->dev);
++				t->ip4rd.prefix = 0;
++				memset(&t->ip4rd.relay_prefix, 0, sizeof(t->ip4rd.relay_prefix));
++				memset(&t->ip4rd.relay_suffix, 0, sizeof(t->ip4rd.relay_suffix));
++				t->ip4rd.prefixlen = 0;
++				t->ip4rd.relay_prefixlen = 0;
++				t->ip4rd.relay_suffixlen = 0;
++				t->ip4rd.psid_offsetlen = 0;
++				t->ip4rd.laddr4 = 0;
++				t->ip4rd.port_set_id = t->ip4rd.port_set_id_len = 0;
++
++				ip6_tnl_dst_reset(t);
++				ip6_tnl_link_config(t);
++			}else{
++				err = ip6_tnl_4rd_mr_delete( ip4rd.entry_num , &t->ip4rd, t->dev);  /* modified by MSPD */
++			}
++			/* DBG */
++			ip6_tnl_4rd_mr_show(&t->ip4rd);
++		}else{
++			printk(KERN_ERR "=== ioctl_cmd 0x%x \n",cmd );
++		}
++		err = 0;
++		break;
++	case SIOCGET4RD:
++		t = netdev_priv(dev);
++		ip4rdp = (struct ip6_tnl_4rd *)ifr->ifr_ifru.ifru_data;
++
++		read_lock(&t->ip4rd.map_lock);
++		list_for_each_entry (mr, &t->ip4rd.map_list, mr_list){
++			ip4rd.relay_prefix = mr->relay_prefix;
++			ip4rd.relay_suffix = mr->relay_suffix;
++			ip4rd.prefix = mr->prefix;
++			ip4rd.relay_prefixlen = mr->relay_prefixlen;
++			ip4rd.relay_suffixlen = mr->relay_suffixlen;
++			ip4rd.prefixlen = mr->prefixlen;
++			ip4rd.eabit_len = mr->eabit_len;
++			ip4rd.psid_offsetlen = mr->psid_offsetlen;
++			ip4rd.entry_num = mr->entry_num;
++
++			if (copy_to_user(ip4rdp, &ip4rd, sizeof(ip4rd))) {
++				read_unlock(&t->ip4rd.map_lock);
++				err = -EFAULT;
++			}
++			ip4rdp++;
++		}
++		read_unlock(&t->ip4rd.map_lock);
++		break;
++#endif
++
+ 	default:
+ 		err = -EINVAL;
+ 	}
++#ifdef CONFIG_CPE_4RD_TUNNEL
++done:
++#endif
+ 	return err;
+ }
+ 
+@@ -2316,9 +2965,24 @@ static int __init ip6_tunnel_init(void)
+ 	if (!ipv6_mod_enabled())
+ 		return -EOPNOTSUPP;
+ 
++#ifdef CONFIG_CPE_4RD_TUNNEL
++	mr_kmem = kmem_cache_create("ip6_tnl_4rd_map_rule",
++				sizeof(struct ip6_tnl_4rd_map_rule), 0, SLAB_HWCACHE_ALIGN,
++				NULL);
++	if (!mr_kmem)
++	{
++		err= -ENOMEM; 
++		goto out_pernet;
++	}
++#endif
++
+ 	err = register_pernet_device(&ip6_tnl_net_ops);
+ 	if (err < 0)
++#ifdef CONFIG_CPE_4RD_TUNNEL
++		goto out_kmem;
++#else
+ 		goto out_pernet;
++#endif
+ 
+ 	err = xfrm6_tunnel_register(&ip4ip6_handler, AF_INET);
+ 	if (err < 0) {
+@@ -2355,6 +3019,10 @@ static int __init ip6_tunnel_init(void)
+ 	xfrm6_tunnel_deregister(&ip4ip6_handler, AF_INET);
+ out_ip4ip6:
+ 	unregister_pernet_device(&ip6_tnl_net_ops);
++#ifdef CONFIG_CPE_4RD_TUNNEL
++out_kmem:
++	kmem_cache_destroy(mr_kmem);
++#endif
+ out_pernet:
+ 	return err;
+ }
+diff --git a/net/ipv6/netfilter/ip6t_NPT.c b/net/ipv6/netfilter/ip6t_NPT.c
+index 787c74aa85e3..f523f471722a 100644
+--- a/net/ipv6/netfilter/ip6t_NPT.c
++++ b/net/ipv6/netfilter/ip6t_NPT.c
+@@ -11,6 +11,9 @@
+ #include <linux/netfilter_ipv6.h>
+ #include <linux/netfilter_ipv6/ip6t_NPT.h>
+ #include <linux/netfilter/x_tables.h>
++#ifdef CONFIG_CPE_FAST_PATH
++#include <net/netfilter/nf_conntrack.h>
++#endif
+ 
+ static int ip6t_npt_checkentry(const struct xt_tgchk_param *par)
+ {
+@@ -114,6 +117,19 @@ ip6t_snpt_tg(struct sk_buff *skb, const struct xt_action_param *par)
+ 			ip6t_npt_map_pfx(npt, &bounced_hdr->daddr);
+ 	}
+ 
++#ifdef CONFIG_CPE_FAST_PATH
++	{
++		struct nf_conn *ct;
++		enum ip_conntrack_info ctinfo;
++		rcu_read_lock();
++		ct = nf_ct_get(skb, &ctinfo);
++		if (ct && ((ctinfo == IP_CT_NEW) || (ctinfo == IP_CT_RELATED))) {
++			memcpy(&ct->tuplehash[IP_CT_DIR_REPLY].tuple.dst.u3.in6,
++			       &ipv6_hdr(skb)->saddr, sizeof(struct in6_addr));
++		}
++		rcu_read_unlock();
++	}
++#endif
+ 	return XT_CONTINUE;
+ }
+ 
+@@ -139,6 +155,19 @@ ip6t_dnpt_tg(struct sk_buff *skb, const struct xt_action_param *par)
+ 			ip6t_npt_map_pfx(npt, &bounced_hdr->saddr);
+ 	}
+ 
++#ifdef CONFIG_CPE_FAST_PATH
++	{
++		struct nf_conn *ct;
++		enum ip_conntrack_info ctinfo;
++		rcu_read_lock();
++		ct = nf_ct_get(skb, &ctinfo);
++		if (ct && ((ctinfo == IP_CT_NEW) || (ctinfo == IP_CT_RELATED))) {
++			memcpy(&ct->tuplehash[IP_CT_DIR_REPLY].tuple.src.u3.in6,
++			       &ipv6_hdr(skb)->daddr, sizeof(struct in6_addr));
++		}
++		rcu_read_unlock();
++	}
++#endif
+ 	return XT_CONTINUE;
+ }
+ 
+diff --git a/net/ipv6/output_core.c b/net/ipv6/output_core.c
+index b5205311f372..a63725d4d294 100644
+--- a/net/ipv6/output_core.c
++++ b/net/ipv6/output_core.c
+@@ -128,7 +128,18 @@ int __ip6_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
+ 	len = skb->len - sizeof(struct ipv6hdr);
+ 	if (len > IPV6_MAXPLEN)
+ 		len = 0;
++
++#if defined(CONFIG_INET6_IPSEC_OFFLOAD)
++/* Since tunnel header is not added in slow path and route cache entry lookup is changed to perform
++   lookup on tunnel header, for Ipv4 over Ipv6 IPsec tunnel cases,dst_output will be ip6 output 
++   but packet will be IPv4 type. So,this check is introduced to update ipv6 pay_load for the following cases
++   1.IPv6 over Ipv6 IPsec tunnel.
++   2.IPv4 over Ipv6 Ipsec tunnel when software encryption come into play(i.e for packets > 1782 bytes) */
++        if((ipv6_hdr(skb)->version) == 6)
++                ipv6_hdr(skb)->payload_len = htons(len);
++#else
+ 	ipv6_hdr(skb)->payload_len = htons(len);
++#endif
+ 	IP6CB(skb)->nhoff = offsetof(struct ipv6hdr, nexthdr);
+ 
+ 	/* if egress device is enslaved to an L3 master device pass the
+@@ -140,6 +151,14 @@ int __ip6_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
+ 
+ 	skb->protocol = htons(ETH_P_IPV6);
+ 
++#if defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	if(skb->ipsec_offload)
++	{
++		dst_output(net, sk, skb);
++		return 0;
++	}
++	else
++#endif
+ 	return nf_hook(NFPROTO_IPV6, NF_INET_LOCAL_OUT,
+ 		       net, sk, skb, NULL, skb_dst(skb)->dev,
+ 		       dst_output);
+diff --git a/net/ipv6/sit.c b/net/ipv6/sit.c
+index eb4c8e2a2b12..941dbcdb6bd3 100644
+--- a/net/ipv6/sit.c
++++ b/net/ipv6/sit.c
+@@ -691,6 +691,9 @@ static int ipip6_rcv(struct sk_buff *skb)
+ 		skb->mac_header = skb->network_header;
+ 		skb_reset_network_header(skb);
+ 		IPCB(skb)->flags = 0;
++#ifdef CONFIG_CPE_FAST_PATH
++		skb->underlying_iif = skb->dev->ifindex;
++#endif
+ 		skb->dev = tunnel->dev;
+ 
+ 		if (packet_is_spoofed(skb, iph, tunnel)) {
+diff --git a/net/ipv6/udp.c b/net/ipv6/udp.c
+index 6df2459f2561..5c8f7c4c306e 100644
+--- a/net/ipv6/udp.c
++++ b/net/ipv6/udp.c
+@@ -737,7 +737,6 @@ static int udpv6_queue_rcv_one_skb(struct sock *sk, struct sk_buff *skb)
+ 
+ 		/* FALLTHROUGH -- it's a UDP Packet */
+ 	}
+-
+ 	/*
+ 	 * UDP-Lite specific tests, ignored on UDP sockets (see net/ipv4/udp.c).
+ 	 */
+diff --git a/net/ipv6/xfrm6_policy.c b/net/ipv6/xfrm6_policy.c
+index e5d76e782b96..b05c82704a90 100644
+--- a/net/ipv6/xfrm6_policy.c
++++ b/net/ipv6/xfrm6_policy.c
+@@ -17,6 +17,7 @@
+ #include <linux/netdevice.h>
+ #include <net/addrconf.h>
+ #include <net/dst.h>
++#include "../xfrm/ipsec_flow.h"
+ #include <net/xfrm.h>
+ #include <net/ip.h>
+ #include <net/ipv6.h>
+diff --git a/net/key/af_key.c b/net/key/af_key.c
+index 6c4448908afe..70782de55625 100644
+--- a/net/key/af_key.c
++++ b/net/key/af_key.c
+@@ -26,8 +26,183 @@
+ #include <net/net_namespace.h>
+ #include <net/netns/generic.h>
+ #include <net/xfrm.h>
++#if defined(CONFIG_INET_IPSEC_OFFLOAD)|| defined(CONFIG_INET6_IPSEC_OFFLOAD)
++#include <net/netlink.h>
++#endif
+ 
+ #include <net/sock.h>
++#if defined(CONFIG_INET_IPSEC_OFFLOAD)|| defined(CONFIG_INET6_IPSEC_OFFLOAD)
++#include <net/ip6_route.h>
++#define NLKEY_SUPPORT 1
++#else 
++#undef NLKEY_SUPPORT
++#endif 
++
++#ifdef NLKEY_SUPPORT
++#include <net/dsfield.h>
++#include <net/inet_ecn.h>
++#include <net/ipv6.h>
++
++
++extern int xfrm_get_tos(struct flowi *fl, int family);
++
++
++#define	NLKEY_SA_CREATE		0x0A01
++#define NLKEY_SA_DELETE		0x0A02
++#define NLKEY_SA_FLUSH 		0x0A03
++#define NLKEY_SA_SET_KEYS	0x0A04
++#define NLKEY_SA_SET_TUNNEL	0x0A05
++#define NLKEY_SA_SET_NATT	0x0A06
++#define	NLKEY_SA_SET_STATE	0x0A07
++#define	NLKEY_SA_SET_LIFETIME	0x0A08
++#define	NLKEY_SA_NOTIFY		0x0A09
++#define NLKEY_SA_INFO_UPDATE	0x0A0C
++#define NLKEY_SA_SET_OFFLOAD	0x0A0D
++#define	NLKEY_FLOW_ADD		0x0A11
++#define NLKEY_FLOW_REMOVE	0x0A12
++#define NLKEY_FLOW_NOTIFY	0x0A13
++#define NLKEY_NULL_MSG		0x0000
++
++#define NLKEY_HDR_LEN		4
++#define NLKEY_MSG_LEN 		256
++
++#define NLKEY_MAX_NUM_KEYS	2
++#define NLKEY_MAX_KEY_LEN	(512 / 8)
++
++struct nlkey_msg {
++	/* message data */
++	unsigned short fcode;
++	unsigned short length;
++	unsigned short payload[(NLKEY_MSG_LEN /sizeof(unsigned short))];
++};
++/* sizeof(nlkey_msg) = 4 + 256 */
++
++struct nlkey_sa_id {
++	unsigned int spi;
++	unsigned char sa_type;
++	unsigned char proto_family;
++	unsigned char replay_window;
++#define NLKEY_SAFLAGS_ESN	0x1
++#define NLKEY_SAFLAGS_INBOUND	0x2
++	unsigned char flags;
++	unsigned int dst_ip[4];
++	unsigned int src_ip[4];
++	unsigned short mtu;
++	unsigned short dev_mtu;
++
++};
++/* sizeof(nlkey_sa_id) = 24 */
++
++struct nlkey_sa_create {
++	unsigned short sagd;
++	unsigned short parent_sa_sagd; /*sagd value of old SA from which this SA is rekeyed.*/
++	struct nlkey_sa_id said;
++};
++/* sizeof(nlkey_sa_delete) = 28 */
++
++struct nlkey_sa_delete {
++	unsigned short sagd;
++	unsigned short rsvd;
++};
++/* sizeof(nlkey_sa_delete) = 4 */
++
++struct nlkey_sa_set_tunnel {
++	unsigned short sagd;
++	unsigned char rsvd;
++	unsigned char proto_family;
++	union {
++		struct iphdr 	 ipv4h;
++		struct ipv6hdr ipv6h;
++	} h;
++};
++/* sizeof(nlkey_sa_set_tunnel) = 36 */
++
++struct nlkey_sa_set_natt {
++	unsigned short sagd;
++	unsigned short sport;
++	unsigned short dport;
++	unsigned short rsvd;
++};
++/* sizeof(nlkey_sa_set_natt) = 4 */
++
++struct nlkey_sa_set_state {
++	unsigned short sagd;
++	unsigned short parent_sa_sagd;
++	unsigned short state;
++	unsigned short rsvd2;
++};
++/* sizeof(nlkey_sa_set_natt) = 8 */
++
++struct nlkey_key_desc {
++	unsigned short key_bits;
++	unsigned char key_alg;
++	unsigned char  key_type;
++	unsigned char key[NLKEY_MAX_KEY_LEN]; 
++};
++/* sizeof(nlkey_key_desc) =  36 */
++
++struct nlkey_sa_set_keys {
++	unsigned short sagd;
++	unsigned short rsvd;	
++	unsigned short num_keys;
++	unsigned short rsvd2;
++	struct nlkey_key_desc keys[NLKEY_MAX_NUM_KEYS];
++};
++/* sizeof(nlkey_sa_set_keys) =  80 */
++
++struct nlkey_lifetime_desc {
++	unsigned int allocations;
++	unsigned int bytes[2];
++};
++/* sizeof(nlkey_sa_set_lifetime) =  12 */
++
++struct nlkey_sa_set_lifetime {
++	unsigned short sagd;
++	unsigned short rsvd;
++	struct nlkey_lifetime_desc hard_time;
++	struct nlkey_lifetime_desc soft_time;
++	struct nlkey_lifetime_desc current_time;
++};
++/* sizeof(nlkey_sa_set_lifetime) =  40 */
++
++/* SA notifications */
++#define IPSEC_SOFT_EXPIRE 0
++#define IPSEC_HARD_EXPIRE 1
++
++struct nlkey_sa_notify {
++	unsigned short sagd;
++	unsigned short rsvd;
++	unsigned int  action;
++};
++/* sizeof(nlkey_sa_notify) = 8 */
++
++/* SA Info update */
++
++struct nlkey_sa_info {
++        unsigned short sagd;
++        unsigned short rsvd;
++        unsigned long long bytes;
++        unsigned long long packets;
++};
++/* sizeof(nlkey_sa_info) =  */
++
++
++static int ipsec_nlkey_send(struct net *net, struct xfrm_state *x, const struct km_event *c);
++static void ipsec_nlkey_rcv(struct sk_buff *skb);
++static void ipsec_nlkey_init(void);
++static unsigned short ipsec_sacode_to_nlkeycode(unsigned short sa_code);
++static struct sk_buff * ipsec_xfrm2nlkey (struct net *net, struct xfrm_state *x, 
++					const struct km_event *c, unsigned short *msg_id);
++static int ipsec_nlkey_set_said(struct net *net, struct xfrm_state *x, const struct km_event *c, struct nlkey_sa_id *said);
++
++void flow_cache_remove(const struct flowi *fl, unsigned short family,
++		unsigned short dir);
++/* netlink NETLINK_KEY socket */
++struct sock *nlkey_socket = NULL;
++
++#endif
++/************************************************************************************/
++
+ 
+ #define _X2KEY(x) ((x) == XFRM_INF ? 0 : (x))
+ #define _KEY2X(x) ((x) == 0 ? XFRM_INF : (x))
+@@ -876,6 +1051,10 @@ static struct sk_buff *__pfkey_xfrm_state2msg(const struct xfrm_state *x,
+ 		sa->sadb_sa_flags |= SADB_SAFLAGS_DECAP_DSCP;
+ 	if (x->props.flags & XFRM_STATE_NOPMTUDISC)
+ 		sa->sadb_sa_flags |= SADB_SAFLAGS_NOPMTUDISC;
++#ifdef NLKEY_SUPPORT
++	if (x->props.flags & XFRM_STATE_ESN)
++		sa->sadb_sa_flags |= SADB_SAFLAGS_ESN;
++#endif
+ 
+ 	/* hard time */
+ 	if (hsc & 2) {
+@@ -908,6 +1087,11 @@ static struct sk_buff *__pfkey_xfrm_state2msg(const struct xfrm_state *x,
+ 	lifetime->sadb_lifetime_bytes = x->curlft.bytes;
+ 	lifetime->sadb_lifetime_addtime = x->curlft.add_time;
+ 	lifetime->sadb_lifetime_usetime = x->curlft.use_time;
++
++#if defined(CONFIG_INET_IPSEC_OFFLOAD)|| defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	lifetime->sadb_lifetime_usetime = x->curr_time;
++#endif
++
+ 	/* src address */
+ 	addr = skb_put(skb, sizeof(struct sadb_address) + sockaddr_size);
+ 	addr->sadb_address_len =
+@@ -1133,6 +1317,10 @@ static struct xfrm_state * pfkey_msg2xfrm_state(struct net *net,
+ 		x->props.flags |= XFRM_STATE_DECAP_DSCP;
+ 	if (sa->sadb_sa_flags & SADB_SAFLAGS_NOPMTUDISC)
+ 		x->props.flags |= XFRM_STATE_NOPMTUDISC;
++#ifdef NLKEY_SUPPORT
++	if (sa->sadb_sa_flags & SADB_SAFLAGS_ESN)
++		x->props.flags |= XFRM_STATE_ESN;
++#endif
+ 
+ 	lifetime = ext_hdrs[SADB_EXT_LIFETIME_HARD - 1];
+ 	if (lifetime != NULL) {
+@@ -3075,6 +3263,12 @@ static int pfkey_send_notify(struct xfrm_state *x, const struct km_event *c)
+ 	struct net *net = x ? xs_net(x) : c->net;
+ 	struct netns_pfkey *net_pfkey = net_generic(net, pfkey_net_id);
+ 
++
++#ifdef NLKEY_SUPPORT
++	/* send message to the user space through NETLINK_KEY socket*/
++	ipsec_nlkey_send(net, x, c);
++#endif
++
+ 	if (atomic_read(&net_pfkey->socks_nr) == 0)
+ 		return 0;
+ 
+@@ -3862,6 +4056,687 @@ static struct xfrm_mgr pfkeyv2_mgr =
+ 	.is_alive	= pfkey_is_alive,
+ };
+ 
++
++#ifdef NLKEY_SUPPORT
++extern struct xfrm_state *xfrm_state_lookup_byhandle(struct net *net, u16 handle);
++
++static unsigned short ipsec_sacode_to_nlkeycode(unsigned short sa_code)
++{
++	unsigned nlkey_code;
++
++	switch (sa_code) 
++	{
++		case XFRM_MSG_DELSA:
++			nlkey_code = NLKEY_SA_DELETE;
++			break;
++		case XFRM_MSG_NEWSA:
++		case XFRM_MSG_UPDSA:
++			nlkey_code = NLKEY_SA_CREATE;
++			break;
++		case XFRM_MSG_FLUSHSA:
++			nlkey_code = NLKEY_SA_FLUSH;
++			break;
++		case XFRM_MSG_EXPIRE:
++			nlkey_code = NLKEY_SA_SET_STATE;
++			break;
++		default:
++			nlkey_code = NLKEY_NULL_MSG;
++			break;
++	}
++
++	return nlkey_code;
++}
++
++static void ipsec_nlkey_rcv(struct sk_buff *skb)
++{
++	struct nlmsghdr *nlh = NULL;
++	struct nlkey_msg *msg = NULL;
++	struct flowi flow;
++	unsigned short *p;
++	unsigned short family, dir;
++	struct xfrm_state *x;
++	struct nlkey_sa_notify sa_notify_msg;
++	struct nlkey_sa_info sa_info_msg;
++
++	/* extract message from skb */
++	nlh = (struct nlmsghdr *)skb->data;
++
++	msg = (struct nlkey_msg *)NLMSG_DATA(nlh);
++
++	//printk(KERN_INFO "ipsec_nlkey_rcv fcode: 0x%x length: %d bytes\n",msg->fcode,msg->length);
++
++	/* process command received from user space */
++	switch(msg->fcode)
++	{
++		case NLKEY_FLOW_REMOVE:
++			//printk(KERN_INFO "ipsec_nlkey_rcv NLKEY_FLOW_REMOVE\n");
++			p = msg->payload;
++			memcpy(&flow, p, sizeof(struct flowi)); p += sizeof(struct flowi)/2;
++			family = *p; p++;
++			dir = *p; p++;
++			flow_cache_remove(&flow, family, dir);
++			break;
++
++		case NLKEY_SA_NOTIFY:
++			//printk(KERN_INFO "ipsec_nlkey_rcv NLKEY_SA_NOTIFY\n");
++			memcpy(&sa_notify_msg, msg->payload, sizeof(struct nlkey_sa_notify));
++			x = xfrm_state_lookup_byhandle(&init_net, sa_notify_msg.sagd);
++			if (x) {
++				spin_lock(&x->lock);
++
++				if (sa_notify_msg.action) { 
++					// hard expired
++					x->km.state = XFRM_STATE_EXPIRED;
++					hrtimer_start(&x->mtimer, ktime_set(0,0), HRTIMER_MODE_REL_SOFT);
++				}
++				else if (!x->km.dying) {
++					 x->km.dying = 1;
++					 km_state_expired(x, 0, 0);
++				}
++
++				spin_unlock(&x->lock);
++				xfrm_state_put(x);
++			}
++			break;
++
++		case NLKEY_SA_INFO_UPDATE:
++			memcpy(&sa_info_msg, msg->payload, sizeof(struct nlkey_sa_info));
++
++			x = xfrm_state_lookup_byhandle(&init_net,sa_info_msg.sagd);
++			if (x) {
++				spin_lock(&x->lock);
++
++				if (x->curlft.bytes != sa_info_msg.bytes)
++					x->curr_time = ktime_get_real_seconds();
++
++				x->curlft.bytes = sa_info_msg.bytes;
++				x->curlft.packets = sa_info_msg.packets;
++
++				spin_unlock(&x->lock);
++				xfrm_state_put(x);
++			}
++			break;
++
++		case NLKEY_SA_SET_OFFLOAD:
++			memcpy(&sa_notify_msg, msg->payload, sizeof(struct nlkey_sa_notify));
++			x = xfrm_state_lookup_byhandle(&init_net,sa_notify_msg.sagd);
++			if (x) {
++				spin_lock(&x->lock);
++				if(sa_notify_msg.action)
++					x->offloaded = 	1;
++				else
++					x->offloaded = 	0;
++				spin_unlock(&x->lock);
++				xfrm_state_put(x);
++			}
++			break;
++		default:
++			//printk(KERN_INFO "ipsec_nlkey_rcv fcode 0x%x not supported\n", msg->fcode);
++			break;
++	}
++
++}
++static int ipsec_nlkey_set_said(struct net *net, struct xfrm_state *x, 
++				const struct km_event *c, struct nlkey_sa_id *said)
++{
++
++	struct flowi fl;
++	int tos;
++	xfrm_address_t saddr, daddr;
++	struct dst_entry *dst;
++	struct rt6_info  *rt;
++	int rc = 0;
++	int oif = 0;
++
++	memset(&fl, 0, sizeof(struct flowi));
++
++	/* SPI */
++	said->spi = x->id.spi;
++	/* SA Type (AH or ESP) */
++	said->sa_type = x->id.proto;
++	/* Protocol Family (IPv4 or IPv6) */
++	said->proto_family = x->props.family;
++	/* Replay window */
++	said->replay_window = x->props.replay_window;
++	/* Destination IP Address */
++	if(x->props.family == AF_INET6) {
++		memcpy(&said->dst_ip, x->id.daddr.a6, sizeof(struct in6_addr));
++		fl.u.ip6.daddr = *(struct in6_addr *)x->id.daddr.a6;
++		memcpy(&said->src_ip, x->props.saddr.a6, sizeof(struct in6_addr));
++	}
++	else {
++		said->dst_ip[0] = x->id.daddr.a4;
++		fl.u.ip4.daddr = x->id.daddr.a4;
++		said->src_ip[0] = x->props.saddr.a4;
++	}
++	said->mtu = 0;
++
++	if(x->props.flags & XFRM_STATE_ESN)
++		said->flags = NLKEY_SAFLAGS_ESN;
++	xfrm_flowi_addr_get(&fl, &saddr, &daddr, x->props.family);
++
++	tos = xfrm_get_tos(&fl, x->props.family);
++	if (tos < 0) {
++		printk(KERN_ERR "%s:%d: FIXME\n",__FUNCTION__,__LINE__);	
++		rc = -1;
++		goto error;
++	}
++	
++	switch (x->props.family)
++	{
++		case AF_INET:
++			if (!__ip_route_output_key(net, &(fl.u.ip4)))
++			{
++				printk(KERN_ERR "%s:%d:  FIXME\n",__FUNCTION__,__LINE__);
++				rc = -1;
++				goto error;
++			}
++			oif = fl.u.ip4.flowi4_oif;
++			break;
++
++		case AF_INET6:
++			rt = rt6_lookup(net, &fl.u.ip6.daddr, NULL, 0, NULL, 0);
++			if ((!rt) || (!rt->dst.dev))
++			{
++				printk(KERN_ERR "%s:%d: FIXME\n",__FUNCTION__,__LINE__);
++				rc = -1;
++				goto error;
++			}
++			oif = rt->dst.dev->ifindex;
++			break;
++	}
++
++	{
++		struct xfrm_dst_lookup_params params = {
++			.net = net,
++			.tos = tos,
++			.oif = oif,
++			.saddr = NULL,
++			.daddr = &daddr,
++			.mark = xfrm_smark_get(0, x),
++		};
++		dst = __xfrm_dst_lookup(x->props.family, &params);
++	}
++	if (IS_ERR(dst)) {
++		printk(KERN_ERR "%s:%d: FIXME\n",__FUNCTION__,__LINE__);
++		rc = -1;
++		goto error;
++	}
++
++	if (strcmp(dst->dev->name, "lo") == 0)
++		said->flags |= NLKEY_SAFLAGS_INBOUND;
++
++	said->dev_mtu = dst_mtu(dst);
++	said->mtu = xfrm_state_mtu(x,dst_mtu(dst));	
++
++	dst_release(dst);
++error:
++	return rc;
++}
++
++static struct sk_buff * ipsec_xfrm2nlkey (struct net *net, struct xfrm_state *x, 
++					const struct km_event *c, unsigned short *msg_id)
++{
++	struct nlkey_sa_id sa_id_msg;
++	struct nlkey_sa_create sa_create_msg;
++	struct nlkey_sa_delete sa_delete_msg;
++	struct nlkey_sa_set_keys sa_set_keys_msg;
++	struct nlkey_sa_set_tunnel sa_set_tunnel_msg;
++	struct nlkey_sa_set_natt sa_set_natt_msg;
++	struct nlkey_sa_set_state sa_set_state_msg;
++	struct nlkey_sa_set_lifetime sa_set_lifetime_msg;
++	struct nlkey_msg msg;
++	struct sk_buff *skb = NULL;
++	struct nlmsghdr *nlh = NULL;
++	gfp_t allocation = GFP_ATOMIC; //This may called from atomic context
++	unsigned char tunnel, keys, natt, state, lifetime;
++
++	/* supported SA informations */
++	keys = 1; state = 1; tunnel = 1; lifetime = 1; natt = 1; 
++
++	/* next message to build */
++	memset(&msg, 0, sizeof(struct nlkey_msg));
++	msg.fcode = *msg_id;
++	
++	//printk(KERN_INFO "\n\nipsec_xfrm2nlkey: processing event 0x%x\n", msg.fcode);
++
++	switch (msg.fcode)
++	{
++		case NLKEY_SA_CREATE:
++			//printk(KERN_INFO "ipsec_xfrm2nlkey: NLKEY_SA_CREATE\n");
++			if(x) {
++				/* some check before builing message */
++				if(x->id.proto != IPPROTO_ESP) {
++					printk(KERN_ERR "protocol %d not supported in fast path.\n", x->id.proto);
++					*msg_id = NLKEY_NULL_MSG;
++					goto exit;
++				}	
++
++				memset(&sa_create_msg, 0, sizeof(struct nlkey_sa_create));
++
++				/* SA global handler */
++				sa_create_msg.sagd = x->handle;
++
++				sa_create_msg.parent_sa_sagd = x->parent_sa_handle;
++
++				/* SA identifier */
++				if(ipsec_nlkey_set_said(net, x, c, &sa_create_msg.said) < 0)
++				{
++					printk(KERN_ERR "%s: set sa ID failed\n", __func__);
++					*msg_id = NLKEY_NULL_MSG; /* next message */
++					goto exit;
++				}
++				memcpy(msg.payload, &sa_create_msg, sizeof(struct nlkey_sa_create));
++				msg.length = sizeof(struct nlkey_sa_create);
++				*msg_id = NLKEY_SA_SET_KEYS; /* next message */
++			} else {
++				*msg_id = NLKEY_NULL_MSG; /* next message */
++				goto exit;
++			}
++			
++			break;
++
++		case NLKEY_SA_SET_KEYS:
++			//printk(KERN_INFO "ipsec_xfrm2nlkey: NLKEY_SA_SET_KEYS\n");
++			if(keys) {
++				memset(&sa_set_keys_msg, 0, sizeof(struct nlkey_sa_set_keys));
++
++				/* SA global handler */
++				sa_set_keys_msg.sagd = x->handle; 
++				
++				/* auth key */
++				if(x->aalg) {
++					if (x->aalg->alg_key_len) {
++						sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_bits = x->aalg->alg_key_len;
++						sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_alg = x->props.aalgo;
++						sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_type = 0;
++						memcpy(sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key, x->aalg->alg_key,(sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_bits / 8));
++						//printk(KERN_INFO "ipsec_xfrm2nlkey: AUTH - algo %d key %d bits\n", sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_alg, sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_bits);
++						sa_set_keys_msg.num_keys++;
++					}
++				}
++				/* encrypt key */
++				if(x->ealg) {
++					if (x->ealg->alg_key_len) {
++
++						sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_bits = x->ealg->alg_key_len;
++						sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_alg = x->props.ealgo;
++						sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_type = 1;
++						memcpy(sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key, x->ealg->alg_key,(sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_bits / 8));
++						//printk(KERN_INFO "ipsec_xfrm2nlkey: ENCRYPT - algo %d key %d bits\n", sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_alg, sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_bits);
++						sa_set_keys_msg.num_keys++;
++					}
++				}
++				/* combined key */
++				if (x->aead) {
++					if (x->aead->alg_key_len) {
++						sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_bits = x->aead->alg_key_len;
++						if (strstr(x->aead->alg_name, "rfc4106(gcm"))	/* AES GCM support */
++						{
++							if (x->aead->alg_icv_len == 64)
++								sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_alg = SADB_X_EALG_AES_GCM_ICV8;
++							else if (x->aead->alg_icv_len == 96)
++								sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_alg = SADB_X_EALG_AES_GCM_ICV12;
++							else if (x->aead->alg_icv_len == 128)
++								sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_alg = SADB_X_EALG_AES_GCM_ICV16;
++						}
++						else if (strstr(x->aead->alg_name, "ccm")) /* AES CCM */
++						{
++							if (x->aead->alg_icv_len == 64)
++								sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_alg = SADB_X_EALG_AES_CCM_ICV8;
++							else if (x->aead->alg_icv_len == 96)
++								sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_alg = SADB_X_EALG_AES_CCM_ICV12;
++							else if (x->aead->alg_icv_len == 128)
++								sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_alg = SADB_X_EALG_AES_CCM_ICV16;
++						}
++						else if (strstr(x->aead->alg_name, "rfc4543(gcm"))	/* AES GMAC defined in RFC 4543 derived from AES GCM */
++						{
++							sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_alg = SADB_X_EALG_NULL_AES_GMAC;
++						}
++						
++						sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_type = 1;
++						memcpy(sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key, x->aead->alg_key,(sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_bits/ 8));
++						/*
++						printk(KERN_INFO "ipsec_xfrm2nlkey: ENCRYPT -alg name %s algo %d key %d bits\n",
++							x->aead->alg_name, sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_alg, sa_set_keys_msg.keys[sa_set_keys_msg.num_keys].key_bits); 
++						*/
++						sa_set_keys_msg.num_keys++;
++					}
++				}
++	
++				memcpy(msg.payload, &sa_set_keys_msg, sizeof(struct nlkey_sa_set_keys));
++				msg.length = sizeof(struct nlkey_sa_set_keys);
++				*msg_id = NLKEY_SA_SET_TUNNEL; /* next message */
++			} else {
++				*msg_id = NLKEY_SA_SET_TUNNEL; /* next message */
++				goto exit;
++			}
++			break;
++
++		case NLKEY_SA_SET_TUNNEL:
++			//printk(KERN_INFO "ipsec_xfrm2nlkey: NLKEY_SA_SET_TUNNEL\n");
++			if(tunnel && (x->props.mode == XFRM_MODE_TUNNEL)) {
++				memset(&sa_set_tunnel_msg, 0, sizeof(struct nlkey_sa_set_tunnel));
++
++				/* SA global handler */
++				sa_set_tunnel_msg.sagd = x->handle; 
++
++				/* Tunnel */
++				sa_set_tunnel_msg.proto_family = x->props.family;
++				if(x->props.family == AF_INET6) {
++					struct ipv6hdr *top_iph = &sa_set_tunnel_msg.h.ipv6h;
++					int dsfield;
++					top_iph->version = 6;
++					top_iph->priority = 0;
++					top_iph->flow_lbl[0] = 0;
++					top_iph->flow_lbl[1] = 0;
++					top_iph->flow_lbl[2] = 0;
++					top_iph->nexthdr = IPPROTO_IPIP;	
++					dsfield = ipv6_get_dsfield(top_iph);
++					dsfield = INET_ECN_encapsulate(dsfield, dsfield);
++					if (x->props.flags & XFRM_STATE_NOECN)
++						dsfield &= ~INET_ECN_MASK;
++					ipv6_change_dsfield(top_iph, 0, dsfield);
++					top_iph->hop_limit = 64;
++					memcpy(&top_iph->daddr, x->id.daddr.a6, sizeof(struct in6_addr));
++					memcpy(&top_iph->saddr, x->props.saddr.a6, sizeof(struct in6_addr));
++					//printk(KERN_INFO "ipsec_xfrm2nlkey: IPv6 tunnel\n");
++					//printk(KERN_INFO "dst: %x %x %x %x\n", x->id.daddr.a6[0], x->id.daddr.a6[1], x->id.daddr.a6[2], x->id.daddr.a6[3]);
++					//(KERN_INFO "src: %x %x %x %x\n", x->props.saddr.a6[0], x->props.saddr.a6[1], x->props.saddr.a6[2], x->props.saddr.a6[3]);
++				}
++				else {
++					struct iphdr *top_iph = &sa_set_tunnel_msg.h.ipv4h;
++					top_iph->ihl = 5;
++					top_iph->version = 4;
++					top_iph->tos = 0;
++					top_iph->frag_off = 0; 
++					top_iph->ttl = 64;
++					top_iph->saddr = x->props.saddr.a4;
++					top_iph->daddr = x->id.daddr.a4;
++					//printk(KERN_INFO "ipsec_xfrm2nlkey: IPv4 tunnel dst:%x - src:%x \n", x->id.daddr.a4, x->props.saddr.a4);
++				}
++				memcpy(msg.payload, &sa_set_tunnel_msg, sizeof(struct nlkey_sa_set_tunnel));
++				msg.length = sizeof(struct nlkey_sa_set_tunnel);
++				*msg_id = NLKEY_SA_SET_NATT; /* next message */
++			} else {
++				*msg_id = NLKEY_SA_SET_NATT; /* next message */
++				goto exit;	
++			} 
++			break;
++
++		case NLKEY_SA_SET_NATT:
++			//printk(KERN_INFO "ipsec_xfrm2nlkey: NLKEY_SA_SET_NATT\n");
++			if((natt) && (x->encap)){
++				memset(&sa_set_natt_msg, 0, sizeof(struct nlkey_sa_set_natt));
++
++				/* SA global handler */
++				sa_set_natt_msg.sagd = x->handle; 
++				sa_set_natt_msg.sport = x->encap->encap_sport;
++				sa_set_natt_msg.dport = x->encap->encap_dport;
++				//printk(KERN_INFO "src port: %d  dst port: %d \n", ntohs(sa_set_natt_msg.sport), ntohs( sa_set_natt_msg.dport));
++				memcpy(msg.payload, &sa_set_natt_msg, sizeof(struct nlkey_sa_set_natt));
++				msg.length = sizeof(struct nlkey_sa_set_natt);
++				*msg_id = NLKEY_SA_SET_LIFETIME; /* next message */
++			} else {
++				*msg_id = NLKEY_SA_SET_LIFETIME; /* next message */
++				goto exit;	
++			}
++			break;
++
++		case NLKEY_SA_SET_LIFETIME:
++			//printk(KERN_INFO "ipsec_xfrm2nlkey: NLKEY_SA_SET_LIFETIME\n");
++			if(lifetime) {
++				memset(&sa_set_lifetime_msg, 0, sizeof(struct nlkey_sa_set_lifetime));
++
++				/* SA global handler */
++				sa_set_lifetime_msg.sagd = x->handle;
++
++				/* hard time */
++				sa_set_lifetime_msg.hard_time.allocations =  _X2KEY(x->lft.hard_packet_limit);
++				if(_X2KEY(x->lft.hard_byte_limit))
++					memcpy(sa_set_lifetime_msg.hard_time.bytes, &x->lft.hard_byte_limit, sizeof(uint64_t));
++
++				/* soft time */
++				sa_set_lifetime_msg.soft_time.allocations =  _X2KEY(x->lft.soft_packet_limit);
++				if(_X2KEY(x->lft.soft_byte_limit))
++					memcpy(sa_set_lifetime_msg.soft_time.bytes, &x->lft.soft_byte_limit, sizeof(uint64_t));
++
++				/* current time */
++				sa_set_lifetime_msg.current_time.allocations = x->curlft.packets;
++				memcpy(sa_set_lifetime_msg.current_time.bytes, &x->curlft.bytes, sizeof(uint64_t));
++
++				memcpy(msg.payload, &sa_set_lifetime_msg, sizeof(struct nlkey_sa_set_lifetime));
++				msg.length = sizeof(struct nlkey_sa_set_lifetime);
++				*msg_id = NLKEY_SA_SET_STATE; /* next message */
++			} else {
++				*msg_id = NLKEY_SA_SET_STATE; /* next message */
++				goto exit;	
++			}
++			break;
++
++		case NLKEY_SA_SET_STATE:
++			//printk(KERN_INFO "ipsec_xfrm2nlkey: NLKEY_SET_STATE\n");
++			if(state) {
++				memset(&sa_set_state_msg, 0, sizeof(struct nlkey_sa_set_state));
++				memset(&sa_id_msg, 0, sizeof(struct nlkey_sa_id));
++
++				/* SA global handler */
++				sa_set_state_msg.sagd = x->handle; 
++				sa_set_state_msg.parent_sa_sagd = x->parent_sa_handle;
++				/* State */
++				sa_set_state_msg.state = x->km.state;
++				// TODO: set the offloaded state once ack received !
++
++				memcpy(msg.payload, &sa_set_state_msg, sizeof(struct nlkey_sa_set_state));
++				msg.length = sizeof(struct nlkey_sa_set_state);
++				*msg_id = NLKEY_NULL_MSG; /* next message */
++			} else {
++				*msg_id = NLKEY_NULL_MSG; /* next message */
++				goto exit;
++			}
++			break;
++		
++		case NLKEY_SA_DELETE:
++			//printk(KERN_INFO "ipsec_xfrm2nlkey: NLKEY_SA_DELETE\n");
++			memset(&sa_delete_msg, 0, sizeof(struct nlkey_sa_delete));
++			
++			/* SA global handler */
++			sa_delete_msg.sagd = x->handle;
++			memcpy(msg.payload, &sa_delete_msg, sizeof(struct nlkey_sa_delete));
++			msg.length = sizeof(struct nlkey_sa_delete);
++
++
++			*msg_id = NLKEY_NULL_MSG; /* next message */
++			break;
++
++		case NLKEY_SA_FLUSH:
++			//printk(KERN_INFO "ipsec_xfrm2nlkey: NLKEY_SA_FLUSH\n");
++			/* No data required for flush SA command */
++
++			*msg_id = NLKEY_NULL_MSG; /* next message */
++			break;
++
++		default:
++			printk(KERN_ERR "ipsec_xfrm2nlkey: event 0x%x not supported\n", c->event);
++			*msg_id = NLKEY_NULL_MSG; /* next message */
++			break;
++	}
++
++	/* prepare netlink message for kernel to user space direction */
++	if(msg.length > NLKEY_MSG_LEN)
++	{
++		printk(KERN_ERR "ipsec_xfrm2nlkey: maximum message size reached (%d bytes)\n", msg.length);
++		goto exit;
++	}
++
++	skb = alloc_skb(NLMSG_SPACE(NLKEY_MSG_LEN + NLKEY_HDR_LEN), allocation);
++	if (skb == NULL)
++		goto exit;
++		
++	nlh = (struct nlmsghdr *)skb_put(skb, NLMSG_SPACE(NLKEY_HDR_LEN + msg.length));
++	memcpy(NLMSG_DATA(nlh), (unsigned char *)&msg, (NLKEY_HDR_LEN + msg.length));
++	
++	/* whole length of the message i.e. header + payload */
++	nlh->nlmsg_len = NLMSG_SPACE(NLKEY_HDR_LEN + msg.length);
++
++	/* from kernel */
++	nlh->nlmsg_pid = 0;
++	nlh->nlmsg_flags = 0;
++        nlh->nlmsg_type = 0;
++	NETLINK_CB(skb).portid = 0;
++	NETLINK_CB(skb).dst_group = 1;
++exit:
++	return skb;
++}
++
++static int ipsec_nlkey_send(struct net *net, struct xfrm_state *x, const struct km_event *c)
++{
++	struct sk_buff *skb;
++	unsigned short msg_type;
++	int rc = 0;
++
++	/* We may generate more than one message when adding new SA (sa_create + sa_set_state + sa_set_tunnel...) */
++	msg_type = ipsec_sacode_to_nlkeycode((unsigned short)c->event);
++
++	while(msg_type != NLKEY_NULL_MSG)
++	{
++		/* build nlkey message */
++		skb = ipsec_xfrm2nlkey(net, x, c, &msg_type);
++
++		if(skb != NULL)
++			if((rc = netlink_broadcast(nlkey_socket, skb, 0, 1, GFP_ATOMIC)) < 0)
++				return rc;
++	}
++
++	return rc;
++}
++
++
++int ipsec_nlkey_flow(u16 xfrm_nr, u16 *xfrm_handle, const struct flowi *fl, u16 family, u16 dir, u16 ignore_neigh)
++{
++	struct sk_buff *skb;
++	struct nlkey_msg msg;
++	struct nlmsghdr *nlh = NULL;
++	unsigned short *p;
++	gfp_t allocation = GFP_ATOMIC; //This may called from atomic context
++
++	//printk(KERN_INFO "ipsec_nlkey_flow \n");
++
++	/* next message to build */
++	memset(&msg, 0, sizeof(struct nlkey_msg));
++	msg.fcode = NLKEY_FLOW_ADD;
++
++	// Number of SA for this flow
++	p = msg.payload;
++	*p++ = xfrm_nr;
++	msg.length += sizeof(unsigned short);
++	// SA handles list
++	memcpy(p, xfrm_handle, xfrm_nr*sizeof(unsigned short));
++	msg.length += xfrm_nr*sizeof(unsigned short);
++	p+=xfrm_nr;
++	// flow family
++	*p++ = family;
++	msg.length += sizeof(unsigned short);
++	// flow family
++	*p++ = dir;
++	msg.length += sizeof(unsigned short);
++	// flow mode
++	*p++ = ignore_neigh;
++	msg.length += sizeof(unsigned short);
++	// flow descriptor
++	memcpy(p, fl, sizeof(struct flowi));
++	msg.length +=sizeof(struct flowi);
++	p+=sizeof(struct flowi) / sizeof(u16);
++
++	skb = alloc_skb(NLMSG_SPACE(NLKEY_MSG_LEN + NLKEY_HDR_LEN), allocation);
++	if (skb == NULL)
++		return -ENOMEM;
++
++	/* prepare netlink message for kernel to user space direction */
++	nlh = (struct nlmsghdr *)skb_put(skb, NLMSG_SPACE(NLKEY_HDR_LEN + msg.length));
++	memcpy(NLMSG_DATA(nlh), (unsigned char *)&msg, (NLKEY_HDR_LEN + msg.length));
++
++	/* whole length of the message i.e. header + payload */
++	nlh->nlmsg_len = NLMSG_SPACE(NLKEY_HDR_LEN + msg.length);
++
++	/* from kernel */
++	nlh->nlmsg_pid = 0; 
++	nlh->nlmsg_flags = 0;
++        nlh->nlmsg_type = 0;
++	NETLINK_CB(skb).portid = 0;
++	NETLINK_CB(skb).dst_group = 1;
++
++	return(netlink_broadcast(nlkey_socket, skb, 0, 1, allocation));
++}
++EXPORT_SYMBOL(ipsec_nlkey_flow);
++
++
++int ipsec_nlkey_flow_remove(struct flowi *fl, u16 family, u16 dir)
++{
++	struct sk_buff *skb;
++	struct nlkey_msg msg;
++	struct nlmsghdr *nlh = NULL;
++	unsigned short *p;
++	gfp_t allocation = GFP_ATOMIC; //This may called from atomic context
++
++	
++	//printk(KERN_INFO "ipsec_nlkey_flow_remove\n");
++
++	/* next message to build */
++	memset(&msg, 0, sizeof(struct nlkey_msg));
++	msg.fcode = NLKEY_FLOW_REMOVE;
++
++	p = msg.payload;
++	// flow family
++	*p++ = family;
++	msg.length += sizeof(unsigned short);
++	// flow family
++	*p++ = dir;
++	msg.length += sizeof(unsigned short);
++	// flow descriptor
++	memcpy(p, fl, sizeof(struct flowi));
++	msg.length +=sizeof(struct flowi);
++	p+=sizeof(struct flowi) / sizeof(u16);
++
++	skb = alloc_skb(NLMSG_SPACE(NLKEY_MSG_LEN + NLKEY_HDR_LEN), allocation);
++	if (skb == NULL)
++		return -ENOMEM;
++
++	/* prepare netlink message for kernel to user space direction */
++	nlh = (struct nlmsghdr *)skb_put(skb, NLMSG_SPACE(NLKEY_HDR_LEN + msg.length));
++	memcpy(NLMSG_DATA(nlh), (unsigned char *)&msg, (NLKEY_HDR_LEN + msg.length));
++	
++	/* whole length of the message i.e. header + payload */
++	nlh->nlmsg_len = NLMSG_SPACE(NLKEY_HDR_LEN + msg.length);
++
++	/* from kernel */
++	nlh->nlmsg_pid = 0; 
++	nlh->nlmsg_flags = 0;
++        nlh->nlmsg_type = 0;
++	NETLINK_CB(skb).portid = 0;
++	NETLINK_CB(skb).dst_group = 1;	
++
++		
++        return(netlink_broadcast(nlkey_socket, skb, 0, 1, allocation));
++
++	
++}
++EXPORT_SYMBOL(ipsec_nlkey_flow_remove);
++
++
++
++static void ipsec_nlkey_init(void)
++{
++	struct netlink_kernel_cfg cfg = {
++		.groups	  = 1,
++		.input	  = ipsec_nlkey_rcv,
++	};
++	printk(KERN_INFO "Initializing NETLINK_KEY socket\n");
++	nlkey_socket = netlink_kernel_create(&init_net, NETLINK_KEY, &cfg);
++}
++#endif
++
++
+ static int __net_init pfkey_net_init(struct net *net)
+ {
+ 	struct netns_pfkey *net_pfkey = net_generic(net, pfkey_net_id);
+@@ -3896,6 +4771,11 @@ static void __exit ipsec_pfkey_exit(void)
+ 	sock_unregister(PF_KEY);
+ 	unregister_pernet_subsys(&pfkey_net_ops);
+ 	proto_unregister(&key_proto);
++
++#ifdef NLKEY_SUPPORT
++	/* release NETLINK_KEY socket */
++	sock_release(nlkey_socket->sk_socket);
++#endif
+ }
+ 
+ static int __init ipsec_pfkey_init(void)
+@@ -3912,6 +4792,12 @@ static int __init ipsec_pfkey_init(void)
+ 	if (err != 0)
+ 		goto out_unregister_pernet;
+ 	xfrm_register_km(&pfkeyv2_mgr);
++
++#ifdef NLKEY_SUPPORT
++	/* create NETLINK_KEY socket for IPSec offload on Comcerto */
++	ipsec_nlkey_init();
++#endif
++
+ out:
+ 	return err;
+ 
+diff --git a/net/netfilter/Kconfig b/net/netfilter/Kconfig
+index 441d1f134110..33f23d7e0d15 100644
+--- a/net/netfilter/Kconfig
++++ b/net/netfilter/Kconfig
+@@ -790,6 +790,30 @@ config NETFILTER_XT_CONNMARK
+ 	ctmark), similarly to the packet mark (nfmark). Using this
+ 	target and match, you can set and match on this mark.
+ 
++config NETFILTER_XT_QOSMARK
++	tristate 'qosmark target and match support'
++	default m if NETFILTER_ADVANCED=n
++	help
++	  This option adds the "QOSMARK" target and "qosmark" match.
++
++	  Netfilter qosmark matching allows you to match packets based on the
++	  "qosmark" value in the packet.
++	  The target allows you to create rules in the "mangle" table which alter
++	  the netfilter qosmark field associated with the packet.
++
++config NETFILTER_XT_QOSCONNMARK
++	tristate 'qosconnmark target and match support'
++	depends on NF_CONNTRACK
++	depends on NETFILTER_ADVANCED
++	select NF_CONNTRACK_MARK
++	help
++	  This option adds the "QOSCONNMARK" target and "qosconnmark" match.
++
++	  Netfilter allows you to store a qosmark value per connection (a.k.a.
++	  qosconnmark), similarly to the qos mark (qosmark). Using this
++	  target and match, you can set and match on this mark.
++
++
+ config NETFILTER_XT_SET
+ 	tristate 'set target and match support'
+ 	depends on IP_SET
+diff --git a/net/netfilter/Makefile b/net/netfilter/Makefile
+index d4958e7e7631..d2b32a9c1079 100644
+--- a/net/netfilter/Makefile
++++ b/net/netfilter/Makefile
+@@ -22,6 +22,7 @@ nf_conntrack-$(CONFIG_DEBUG_INFO_BTF) += nf_conntrack_bpf.o
+ endif
+ 
+ obj-$(CONFIG_NETFILTER) = netfilter.o
++obj-$(CONFIG_CPE_FAST_PATH) += comcerto_fp_netfilter.o
+ obj-$(CONFIG_NETFILTER_BPF_LINK) += nf_bpf_link.o
+ 
+ obj-$(CONFIG_NETFILTER_NETLINK) += nfnetlink.o
+@@ -153,6 +154,8 @@ obj-$(CONFIG_NETFILTER_XTABLES) += x_tables.o xt_tcpudp.o
+ # combos
+ obj-$(CONFIG_NETFILTER_XT_MARK) += xt_mark.o
+ obj-$(CONFIG_NETFILTER_XT_CONNMARK) += xt_connmark.o
++obj-$(CONFIG_NETFILTER_XT_QOSMARK) += xt_qosmark.o
++obj-$(CONFIG_NETFILTER_XT_QOSCONNMARK) += xt_qosconnmark.o
+ obj-$(CONFIG_NETFILTER_XT_SET) += xt_set.o
+ obj-$(CONFIG_NETFILTER_XT_NAT) += xt_nat.o
+ 
+diff --git a/net/netfilter/nf_conntrack_core.c b/net/netfilter/nf_conntrack_core.c
+index 0081c1a0d5e5..f523bcfd5f5e 100644
+--- a/net/netfilter/nf_conntrack_core.c
++++ b/net/netfilter/nf_conntrack_core.c
+@@ -10,7 +10,7 @@
+  */
+ 
+ #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+-
++#include <linux/version.h>
+ #include <linux/types.h>
+ #include <linux/netfilter.h>
+ #include <linux/module.h>
+@@ -1652,6 +1652,14 @@ __nf_conntrack_alloc(struct net *net,
+ 	ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple = *orig;
+ 	ct->tuplehash[IP_CT_DIR_ORIGINAL].hnnode.pprev = NULL;
+ 	ct->tuplehash[IP_CT_DIR_REPLY].tuple = *repl;
++#if defined(CONFIG_CPE_FAST_PATH)
++#ifndef IPSEC_FLOW_CACHE
++	memset(ct->fp_info[IP_CT_DIR_ORIGINAL].xfrm_handle, 0,
++		 	sizeof(ct->fp_info[IP_CT_DIR_ORIGINAL].xfrm_handle));
++	memset(ct->fp_info[IP_CT_DIR_REPLY].xfrm_handle, 0,
++		 	sizeof(ct->fp_info[IP_CT_DIR_REPLY].xfrm_handle));
++#endif
++#endif
+ 	/* save hash for reusing when confirming */
+ 	*(unsigned long *)(&ct->tuplehash[IP_CT_DIR_REPLY].hnnode.pprev) = hash;
+ 	ct->status = 0;
+@@ -1785,6 +1793,9 @@ init_conntrack(struct net *net, struct nf_conn *tmpl,
+ #ifdef CONFIG_NF_CONNTRACK_MARK
+ 			ct->mark = READ_ONCE(exp->master->mark);
+ #endif
++#if defined(CONFIG_CPE_FAST_PATH)
++			ct->qosconnmark = exp->master->qosconnmark;
++#endif
+ #ifdef CONFIG_NF_CONNTRACK_SECMARK
+ 			ct->secmark = exp->master->secmark;
+ #endif
+@@ -2601,6 +2612,52 @@ void *nf_ct_alloc_hashtable(unsigned int *sizep, int nulls)
+ }
+ EXPORT_SYMBOL_GPL(nf_ct_alloc_hashtable);
+ 
++#ifdef CONFIG_CPE_FAST_PATH
++int nf_conntrack_set_dpi_allow_report(struct sk_buff *skb)
++{
++	int err = 0;
++	struct nf_conn *ct;
++	enum ip_conntrack_info ctinfo;
++
++	ct = nf_ct_get(skb, &ctinfo);
++	/*TODO: Dow we need to add any checks here? */
++
++	nf_conntrack_get(skb_nfct(skb));
++
++	set_bit(IPS_DPI_ALLOWED_BIT, &ct->status);
++
++	nf_conntrack_event_cache(IPCT_PROTOINFO, ct);
++
++	nf_conntrack_put(skb_nfct(skb));
++
++	return err;
++}
++EXPORT_SYMBOL(nf_conntrack_set_dpi_allow_report);
++
++int nf_conntrack_set_dpi_allow_and_mark(struct sk_buff *skb, int mark)
++{
++	int err = 0;
++	struct nf_conn *ct;
++	enum ip_conntrack_info ctinfo;
++
++	ct = nf_ct_get(skb, &ctinfo);
++	nf_conntrack_get(skb_nfct(skb));
++
++	set_bit(IPS_DPI_ALLOWED_BIT, &ct->status);
++
++#ifdef CONFIG_NF_CONNTRACK_MARK
++	ct->mark = mark;
++#endif
++
++	nf_conntrack_event_cache(IPCT_PROTOINFO, ct);
++
++	nf_conntrack_put(skb_nfct(skb));
++
++	return err;
++}
++EXPORT_SYMBOL(nf_conntrack_set_dpi_allow_and_mark);
++#endif
++
+ int nf_conntrack_hash_resize(unsigned int hashsize)
+ {
+ 	int i, bucket;
+@@ -2880,3 +2937,19 @@ int nf_ct_change_status_common(struct nf_conn *ct, unsigned int status)
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(nf_ct_change_status_common);
++
++#ifdef CONFIG_CPE_FAST_PATH
++bool nf_ct_is_expired(const struct nf_conn *ct)
++{
++	const struct nf_conntrack_l4proto *l4proto;
++
++	l4proto = nf_ct_l4proto_find(nf_ct_protonum(ct));
++	if ((!nf_ct_is_permanent(ct)) ||
++	    ((l4proto->l4proto == IPPROTO_TCP) &&
++	     (ct->proto.tcp.state != TCP_CONNTRACK_ESTABLISHED)))
++		return (__nf_ct_is_expired(ct));
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(nf_ct_is_expired);
++#endif
+diff --git a/net/netfilter/nf_conntrack_netlink.c b/net/netfilter/nf_conntrack_netlink.c
+index 928bd2013289..bc48dbec992f 100644
+--- a/net/netfilter/nf_conntrack_netlink.c
++++ b/net/netfilter/nf_conntrack_netlink.c
+@@ -28,6 +28,11 @@
+ #include <linux/netlink.h>
+ #include <linux/spinlock.h>
+ #include <linux/interrupt.h>
++#if defined(CONFIG_CPE_FAST_PATH)
++#ifndef IPSEC_FLOW_CACHE
++#include <net/xfrm.h>
++#endif
++#endif
+ #include <linux/slab.h>
+ #include <linux/siphash.h>
+ 
+@@ -201,9 +206,16 @@ static int ctnetlink_dump_protoinfo(struct sk_buff *skb, struct nf_conn *ct,
+ 	struct nlattr *nest_proto;
+ 	int ret;
+ 
++#ifdef CONFIG_CPE_FAST_PATH
++	rcu_read_lock();
++#endif
+ 	l4proto = nf_ct_l4proto_find(nf_ct_protonum(ct));
+-	if (!l4proto->to_nlattr)
++	if (!l4proto->to_nlattr) {
++#ifdef CONFIG_CPE_FAST_PATH
++		rcu_read_unlock();
++#endif
+ 		return 0;
++	}
+ 
+ 	nest_proto = nla_nest_start(skb, CTA_PROTOINFO);
+ 	if (!nest_proto)
+@@ -213,9 +225,15 @@ static int ctnetlink_dump_protoinfo(struct sk_buff *skb, struct nf_conn *ct,
+ 
+ 	nla_nest_end(skb, nest_proto);
+ 
++#ifdef CONFIG_CPE_FAST_PATH
++	rcu_read_unlock();
++#endif
+ 	return ret;
+ 
+ nla_put_failure:
++#ifdef CONFIG_CPE_FAST_PATH
++	rcu_read_unlock();
++#endif
+ 	return -1;
+ }
+ 
+@@ -352,6 +370,18 @@ static int ctnetlink_dump_mark(struct sk_buff *skb, const struct nf_conn *ct,
+ #define ctnetlink_dump_mark(a, b, c) (0)
+ #endif
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++static inline int
++ctnetlink_dump_qosconnmark(struct sk_buff *skb, const struct nf_conn *ct)
++{
++	nla_put_be64(skb, CTA_QOSCONNMARK, cpu_to_be64(ct->qosconnmark),
++		     CTA_QOSCONNMARK_PAD);
++	return 0;
++}
++#else
++#define ctnetlink_dump_qosconnmark(a, b) (0)
++#endif
++
+ #ifdef CONFIG_NF_CONNTRACK_SECMARK
+ static int ctnetlink_dump_secctx(struct sk_buff *skb, const struct nf_conn *ct)
+ {
+@@ -412,6 +442,59 @@ ctnetlink_dump_labels(struct sk_buff *skb, const struct nf_conn *ct)
+ 	return 0;
+ }
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++static int
++ctnetlink_dump_comcerto_fp(struct sk_buff *skb, const struct nf_conn *ct)
++{
++	struct nlattr *nest_count;
++
++	nest_count = nla_nest_start(skb, CTA_LAYERSCAPE_FP_ORIG | NLA_F_NESTED);
++	if (!nest_count)
++		goto nla_put_failure;
++
++	nla_put_u32(skb, CTA_COMCERTO_FP_MARK, ct->fp_info[IP_CT_DIR_ORIGINAL].mark);
++	nla_put_u32(skb, CTA_COMCERTO_FP_IFINDEX, ct->fp_info[IP_CT_DIR_ORIGINAL].ifindex);
++	nla_put_u32(skb, CTA_COMCERTO_FP_IIF, ct->fp_info[IP_CT_DIR_ORIGINAL].iif);
++	nla_put_u32(skb, CTA_COMCERTO_FP_UNDERLYING_IIF, ct->fp_info[IP_CT_DIR_ORIGINAL].underlying_iif);
++	nla_put_u16(skb, CTA_COMCERTO_FP_UNDERLYING_VID, ct->fp_info[IP_CT_DIR_ORIGINAL].underlying_vlan_id);
++#ifndef IPSEC_FLOW_CACHE
++	if ((ct->fp_info[IP_CT_DIR_ORIGINAL].xfrm_handle[0]) ||
++	    (ct->fp_info[IP_CT_DIR_ORIGINAL].xfrm_handle[MAX_SUPPORTED_XFRMS_PER_DIR]))
++	{
++		nla_put(skb, CTA_COMCERTO_FP_XFRM_HANDLE, sizeof(ct->fp_info[IP_CT_DIR_ORIGINAL].xfrm_handle),
++				ct->fp_info[IP_CT_DIR_ORIGINAL].xfrm_handle);
++	}
++#endif /* IPSEC_FLOW_CACHE */
++	nla_nest_end(skb, nest_count);
++
++	nest_count = nla_nest_start(skb, CTA_LAYERSCAPE_FP_REPLY | NLA_F_NESTED);
++	if (!nest_count)
++		goto nla_put_failure;
++
++	nla_put_u32(skb, CTA_COMCERTO_FP_MARK, ct->fp_info[IP_CT_DIR_REPLY].mark);
++	nla_put_u32(skb, CTA_COMCERTO_FP_IFINDEX, ct->fp_info[IP_CT_DIR_REPLY].ifindex);
++	nla_put_u32(skb, CTA_COMCERTO_FP_IIF, ct->fp_info[IP_CT_DIR_REPLY].iif);
++	nla_put_u32(skb, CTA_COMCERTO_FP_UNDERLYING_IIF, ct->fp_info[IP_CT_DIR_REPLY].underlying_iif);
++	nla_put_u16(skb, CTA_COMCERTO_FP_UNDERLYING_VID, ct->fp_info[IP_CT_DIR_REPLY].underlying_vlan_id);
++#ifndef IPSEC_FLOW_CACHE
++	if ((ct->fp_info[IP_CT_DIR_REPLY].xfrm_handle[0]) ||
++	    (ct->fp_info[IP_CT_DIR_REPLY].xfrm_handle[MAX_SUPPORTED_XFRMS_PER_DIR]))
++	{
++		nla_put(skb, CTA_COMCERTO_FP_XFRM_HANDLE, sizeof(ct->fp_info[IP_CT_DIR_REPLY].xfrm_handle),
++			ct->fp_info[IP_CT_DIR_REPLY].xfrm_handle);
++	}
++#endif /* IPSEC_FLOW_CACHE */
++	nla_nest_end(skb, nest_count);
++
++	return 0;
++
++nla_put_failure:
++	return -1;
++}
++#else
++#define ctnetlink_dump_comcerto_fp(a, b) (0)
++#endif
++
+ #define master_tuple(ct) &(ct->master->tuplehash[IP_CT_DIR_ORIGINAL].tuple)
+ 
+ static int ctnetlink_dump_master(struct sk_buff *skb, const struct nf_conn *ct)
+@@ -552,7 +635,11 @@ static int ctnetlink_dump_info(struct sk_buff *skb, struct nf_conn *ct)
+ {
+ 	if (ctnetlink_dump_status(skb, ct) < 0 ||
+ 	    ctnetlink_dump_mark(skb, ct, true) < 0 ||
++	    ctnetlink_dump_qosconnmark(skb, ct) < 0 ||
+ 	    ctnetlink_dump_secctx(skb, ct) < 0 ||
++#ifdef CONFIG_CPE_FAST_PATH
++	    ctnetlink_dump_comcerto_fp(skb, ct) < 0 ||
++#endif
+ 	    ctnetlink_dump_id(skb, ct) < 0 ||
+ 	    ctnetlink_dump_use(skb, ct) < 0 ||
+ 	    ctnetlink_dump_master(skb, ct) < 0)
+@@ -704,6 +791,13 @@ static size_t ctnetlink_nlmsg_size(const struct nf_conn *ct)
+ 	       + nla_total_size(0) /* CTA_HELP */
+ 	       + nla_total_size(NF_CT_HELPER_NAME_LEN) /* CTA_HELP_NAME */
+ 	       + ctnetlink_secctx_size(ct)
++#ifdef CONFIG_CPE_FAST_PATH
++			+ 2 * nla_total_size(0) /* CTA_LAYERSCAPE_FP_ORIG|REPL */
++			+ 2 * nla_total_size(sizeof(uint32_t)) /* CTA_COMCERTO_FP_MARK */
++			+ 2 * nla_total_size(sizeof(uint32_t)) /* CTA_COMCERTO_FP_IFINDEX */
++			+ 2 * nla_total_size(sizeof(uint32_t)) /* CTA_COMCERTO_FP_IIF */
++			+ 2 * nla_total_size(sizeof(uint32_t)) /* CTA_COMCERTO_FP_UNDERLYING_IIF */
++#endif
+ #if IS_ENABLED(CONFIG_NF_NAT)
+ 	       + 2 * nla_total_size(0) /* CTA_NAT_SEQ_ADJ_ORIG|REPL */
+ 	       + 6 * nla_total_size(sizeof(u_int32_t)) /* CTA_NAT_SEQ_OFFSET */
+@@ -711,6 +805,9 @@ static size_t ctnetlink_nlmsg_size(const struct nf_conn *ct)
+ #ifdef CONFIG_NF_CONNTRACK_MARK
+ 	       + nla_total_size(sizeof(u_int32_t)) /* CTA_MARK */
+ #endif
++#if defined(CONFIG_CPE_FAST_PATH)
++			+ nla_total_size(sizeof(u_int64_t)) /* CTA_QOSCONNMARK */
++#endif
+ #ifdef CONFIG_NF_CONNTRACK_ZONES
+ 	       + nla_total_size(sizeof(u_int16_t)) /* CTA_ZONE|CTA_TUPLE_ZONE */
+ #endif
+@@ -785,6 +882,11 @@ ctnetlink_conntrack_event(unsigned int events, const struct nf_ct_event *item)
+ 				   NF_CT_DEFAULT_ZONE_DIR) < 0)
+ 		goto nla_put_failure;
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++	if (ctnetlink_dump_comcerto_fp(skb, ct) < 0)
++		goto nla_put_failure;
++#endif
++
+ 	if (ctnetlink_dump_id(skb, ct) < 0)
+ 		goto nla_put_failure;
+ 
+@@ -836,6 +938,11 @@ ctnetlink_conntrack_event(unsigned int events, const struct nf_ct_event *item)
+ #ifdef CONFIG_NF_CONNTRACK_MARK
+ 	if (ctnetlink_dump_mark(skb, ct, events & (1 << IPCT_MARK)))
+ 		goto nla_put_failure;
++#endif
++#if defined(CONFIG_CPE_FAST_PATH)
++	if ((events & (1 << IPCT_QOSCONNMARK) || ct->qosconnmark)
++		&& ctnetlink_dump_qosconnmark(skb, ct) < 0)
++		goto nla_put_failure;
+ #endif
+ 	nlmsg_end(skb, nlh);
+ 	err = nfnetlink_send(skb, net, item->portid, group, item->report,
+@@ -1537,6 +1644,9 @@ static const struct nla_policy ct_nla_policy[CTA_MAX+1] = {
+ 	[CTA_NAT_SRC]		= { .type = NLA_NESTED },
+ 	[CTA_TIMEOUT] 		= { .type = NLA_U32 },
+ 	[CTA_MARK]		= { .type = NLA_U32 },
++#if defined(CONFIG_CPE_FAST_PATH)
++	[CTA_QOSCONNMARK]		= { .type = NLA_U64 },
++#endif
+ 	[CTA_ID]		= { .type = NLA_U32 },
+ 	[CTA_NAT_DST]		= { .type = NLA_NESTED },
+ 	[CTA_TUPLE_MASTER]	= { .type = NLA_NESTED },
+@@ -1894,6 +2004,48 @@ ctnetlink_change_status(struct nf_conn *ct, const struct nlattr * const cda[])
+ 	return nf_ct_change_status_common(ct, ntohl(nla_get_be32(cda[CTA_STATUS])));
+ }
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++/*
++ * This function detects ctnetlink messages that require
++ * to set the conntrack status to IPS_PERMANENT.
++ * It updates only this bit regardless of other possible
++ * changes.
++ * Return 0 if succesfull
++ */
++static int
++ctnetlink_change_permanent(struct nf_conn *ct, const struct nlattr * const cda[])
++{
++	unsigned int status;
++	u_int32_t id;
++	__be32 conntrack_id = ntohl((__force __be32)nf_ct_get_id(ct));
++
++	if (cda[CTA_STATUS] && cda[CTA_ID]) {
++		status = ntohl(nla_get_be32(cda[CTA_STATUS]));
++		id = ntohl(nla_get_be32(cda[CTA_ID]));
++
++		if (status & IPS_PERMANENT) {
++			if (conntrack_id == id) {
++				ct->status |= IPS_PERMANENT;
++				return 0;
++			}
++			else
++				return -ENOENT;
++		}
++		else if (nf_ct_is_permanent(ct))
++		{
++			/* Clear the PERMANENT bit. */
++			if (conntrack_id == id) {
++				clear_bit(IPS_PERMANENT_BIT, &ct->status);
++				return 0;
++			}
++			else
++				return -ENOENT;
++		}
++	}
++	return -1;
++}
++#endif
++
+ static int
+ ctnetlink_setup_nat(struct nf_conn *ct, const struct nlattr * const cda[])
+ {
+@@ -2198,6 +2350,11 @@ ctnetlink_change_conntrack(struct nf_conn *ct,
+ 			return err;
+ 	}
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++	if (cda[CTA_QOSCONNMARK])
++		ct->qosconnmark = be64_to_cpu(nla_get_be64(cda[CTA_QOSCONNMARK]));
++#endif
++
+ #if defined(CONFIG_NF_CONNTRACK_MARK)
+ 	if (cda[CTA_MARK])
+ 		ctnetlink_change_mark(ct, cda);
+@@ -2336,6 +2493,11 @@ ctnetlink_create_conntrack(struct net *net,
+ 			goto err2;
+ 	}
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++	if (cda[CTA_QOSCONNMARK])
++		ct->qosconnmark = be64_to_cpu(nla_get_be64(cda[CTA_QOSCONNMARK]));
++#endif
++
+ #if defined(CONFIG_NF_CONNTRACK_MARK)
+ 	if (cda[CTA_MARK])
+ 		ctnetlink_change_mark(ct, cda);
+@@ -2462,6 +2624,15 @@ static int ctnetlink_new_conntrack(struct sk_buff *skb,
+ 	err = -EEXIST;
+ 	ct = nf_ct_tuplehash_to_ctrack(h);
+ 	if (!(info->nlh->nlmsg_flags & NLM_F_EXCL)) {
++#if defined(CONFIG_CPE_FAST_PATH)
++		/* If the permanent status has been set, this is a specific
++		 * message. Don't broadcast the event and don't update the ct */
++		err = ctnetlink_change_permanent(ct, cda);
++		if ((err == 0) || (err == -ENOENT)) {
++			nf_ct_put(ct);
++			return err;
++		}
++#endif
+ 		err = ctnetlink_change_conntrack(ct, cda);
+ 		if (err == 0) {
+ 			nf_conntrack_eventmask_report((1 << IPCT_REPLY) |
+diff --git a/net/netfilter/nf_conntrack_proto_tcp.c b/net/netfilter/nf_conntrack_proto_tcp.c
+index 53d46ebcb5f7..fe9f0d999734 100644
+--- a/net/netfilter/nf_conntrack_proto_tcp.c
++++ b/net/netfilter/nf_conntrack_proto_tcp.c
+@@ -1329,6 +1329,10 @@ int nf_conntrack_tcp_packet(struct nf_conn *ct,
+ 		   connection. */
+ 		set_bit(IPS_ASSURED_BIT, &ct->status);
+ 		nf_conntrack_event_cache(IPCT_ASSURED, ct);
++#ifdef CONFIG_CPE_FAST_PATH
++		if (old_state == TCP_CONNTRACK_ESTABLISHED && new_state == TCP_CONNTRACK_ESTABLISHED)
++			nf_conntrack_event_cache(IPCT_PROTOINFO, ct);
++#endif
+ 	}
+ 	nf_ct_refresh_acct(ct, ctinfo, skb, timeout);
+ 
+diff --git a/net/netfilter/nf_conntrack_standalone.c b/net/netfilter/nf_conntrack_standalone.c
+index 1d5de1d9f008..c3c954d26f3e 100644
+--- a/net/netfilter/nf_conntrack_standalone.c
++++ b/net/netfilter/nf_conntrack_standalone.c
+@@ -336,6 +336,13 @@ static int ct_seq_show(struct seq_file *s, void *v)
+ 
+ 	if (seq_has_overflowed(s))
+ 		goto release;
++#ifdef CONFIG_CPE_FAST_PATH
++	if (test_bit(IPS_PERMANENT_BIT, &ct->status))
++		seq_printf(s, "[PERMANENT] ");
++
++	if (seq_has_overflowed(s))
++		goto release;
++#endif
+ 
+ 	seq_print_acct(s, ct, IP_CT_DIR_ORIGINAL);
+ 
+@@ -361,6 +368,12 @@ static int ct_seq_show(struct seq_file *s, void *v)
+ #if defined(CONFIG_NF_CONNTRACK_MARK)
+ 	seq_printf(s, "mark=%u ", READ_ONCE(ct->mark));
+ #endif
++#if defined(CONFIG_CPE_FAST_PATH)
++	if (ct->qosconnmark != 0)
++		seq_printf(s, "qosconnmark=0x%llx ", (unsigned long long)ct->qosconnmark);
++	if (seq_has_overflowed(s))
++		goto release;
++#endif
+ 
+ 	ct_show_secctx(s, ct);
+ 	ct_show_zone(s, ct, NF_CT_DEFAULT_ZONE_DIR);
+diff --git a/net/wireless/Kconfig b/net/wireless/Kconfig
+index f620acd2a0f5..3d3c91ed1932 100644
+--- a/net/wireless/Kconfig
++++ b/net/wireless/Kconfig
+@@ -1,6 +1,6 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ config WIRELESS_EXT
+-	bool
++	def_bool y
+ 
+ config WEXT_CORE
+ 	def_bool y
+@@ -12,10 +12,10 @@ config WEXT_PROC
+ 	depends on WEXT_CORE
+ 
+ config WEXT_SPY
+-	bool
++	def_bool y
+ 
+ config WEXT_PRIV
+-	bool
++	def_bool y
+ 
+ config CFG80211
+ 	tristate "cfg80211 - wireless configuration API"
+diff --git a/net/wireless/wext-core.c b/net/wireless/wext-core.c
+index 73a29ee3eff2..df9477c05485 100644
+--- a/net/wireless/wext-core.c
++++ b/net/wireless/wext-core.c
+@@ -984,6 +984,9 @@ static int wireless_process_ioctl(struct net *net, struct iwreq *iwr,
+ 		else if (private)
+ 			return private(dev, iwr, cmd, info, handler);
+ 	}
++	/* Old driver API : call driver ioctl handler */
++	if (dev->netdev_ops->ndo_do_ioctl)
++		return dev->netdev_ops->ndo_do_ioctl(dev, (struct ifreq *)iwr, cmd);
+ 	return -EOPNOTSUPP;
+ }
+ 
+diff --git a/net/xfrm/Makefile b/net/xfrm/Makefile
+index cd47f88921f5..5a92bcedb420 100644
+--- a/net/xfrm/Makefile
++++ b/net/xfrm/Makefile
+@@ -21,3 +21,4 @@ obj-$(CONFIG_XFRM_USER_COMPAT) += xfrm_compat.o
+ obj-$(CONFIG_XFRM_IPCOMP) += xfrm_ipcomp.o
+ obj-$(CONFIG_XFRM_INTERFACE) += xfrm_interface.o
+ obj-$(CONFIG_XFRM_ESPINTCP) += espintcp.o
++obj-$(CONFIG_INET_IPSEC_OFFLOAD) += ipsec_flow.o
+diff --git a/net/xfrm/xfrm_input.c b/net/xfrm/xfrm_input.c
+index 0c08bac3ed26..2bc22d0fa4de 100644
+--- a/net/xfrm/xfrm_input.c
++++ b/net/xfrm/xfrm_input.c
+@@ -43,6 +43,10 @@ struct xfrm_trans_cb {
+ 
+ #define XFRM_TRANS_SKB_CB(__skb) ((struct xfrm_trans_cb *)&((__skb)->cb[0]))
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++extern int dpaa_submit_inb_pkt_to_SEC(struct sk_buff *skb, uint16_t sagd);
++#endif /* IPSEC */
++
+ static DEFINE_SPINLOCK(xfrm_input_afinfo_lock);
+ static struct xfrm_input_afinfo const __rcu *xfrm_input_afinfo[2][AF_INET6 + 1];
+ 
+@@ -590,6 +594,16 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
+ 			goto drop;
+ 		}
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++		/*net_crit_ratelimited("%s(%d) x->handle %d, mac hdr %p, data %p\n",
++			__FUNCTION__,__LINE__, x->handle, skb_mac_header(skb), skb->data);  */
++		/* check if the corresponding SA is offloaded,
++		   then submit the packet to SEC engine */
++
++		if ((x->offloaded) && 
++		    !(dpaa_submit_inb_pkt_to_SEC(skb, x->handle)))
++			return 0;
++#endif /* IPSEC offload end */
+ lock:
+ 		spin_lock(&x->lock);
+ 
+diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
+index 9277dd4ed541..69a3c8dc324e 100644
+--- a/net/xfrm/xfrm_output.c
++++ b/net/xfrm/xfrm_output.c
+@@ -67,6 +67,10 @@ static int xfrm4_transport_output(struct xfrm_state *x, struct sk_buff *skb)
+ 	struct iphdr *iph = ip_hdr(skb);
+ 	int ihl = iph->ihl * 4;
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD)
++	if(skb->ipsec_offload)
++		return 0;
++#endif
+ 	skb_set_inner_transport_header(skb, skb_transport_offset(skb));
+ 
+ 	skb_set_network_header(skb, -x->props.header_len);
+@@ -167,6 +171,10 @@ static int xfrm6_transport_output(struct xfrm_state *x, struct sk_buff *skb)
+ 	u8 *prevhdr;
+ 	int hdr_len;
+ 
++#if defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	if(skb->ipsec_offload)
++		return 0;
++#endif
+ 	iph = ipv6_hdr(skb);
+ 	skb_set_inner_transport_header(skb, skb_transport_offset(skb));
+ 
+@@ -413,6 +421,10 @@ static int xfrm4_prepare_output(struct xfrm_state *x, struct sk_buff *skb)
+ 	IPCB(skb)->flags |= IPSKB_XFRM_TUNNEL_SIZE;
+ 	skb->protocol = htons(ETH_P_IP);
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	if (skb->ipsec_offload)
++		return 0;
++#endif
+ 	switch (x->props.mode) {
+ 	case XFRM_MODE_BEET:
+ 		return xfrm4_beet_encap_add(x, skb);
+@@ -436,6 +448,10 @@ static int xfrm6_prepare_output(struct xfrm_state *x, struct sk_buff *skb)
+ 	skb->ignore_df = 1;
+ 	skb->protocol = htons(ETH_P_IPV6);
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	if (skb->ipsec_offload)
++		return 0;
++#endif
+ 	switch (x->props.mode) {
+ 	case XFRM_MODE_BEET:
+ 		return xfrm6_beet_encap_add(x, skb);
+@@ -492,11 +508,40 @@ static int xfrm_output_one(struct sk_buff *skb, int err)
+ 	struct dst_entry *dst = skb_dst(skb);
+ 	struct xfrm_state *x = dst->xfrm;
+ 	struct net *net = xs_net(x);
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	struct xfrm_state *xfrm_vec[XFRM_MAX_DEPTH];
++	int xfrm_nr = 0;
++	int i;
++	struct sec_path *sp;
++#endif
+ 
+ 	if (err <= 0 || x->xso.type == XFRM_DEV_OFFLOAD_PACKET)
+ 		goto resume;
+ 
+ 	do {
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++		if (x->offloaded) {
++			if (xfrm_nr == XFRM_MAX_DEPTH) {
++				err = -ENOBUFS;
++				goto out;
++			}
++
++			if (!x->curlft.use_time)
++				x->curlft.use_time = ktime_get_real_seconds();
++
++			xfrm_state_hold(x);
++			xfrm_vec[xfrm_nr++] = x;
++			skb->ipsec_offload = 1;
++
++			err = xfrm_outer_mode_output(x, skb);
++			if (err) {
++				XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTSTATEMODEERROR);
++				goto error_nolock;
++			}
++			goto next_dst;
++		}
++#endif
++
+ 		err = xfrm_skb_check_space(skb);
+ 		if (err) {
+ 			XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTERROR);
+@@ -561,6 +606,9 @@ static int xfrm_output_one(struct sk_buff *skb, int err)
+ 			goto error_nolock;
+ 		}
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++next_dst:
++#endif
+ 		dst = skb_dst_pop(skb);
+ 		if (!dst) {
+ 			XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTERROR);
+@@ -571,11 +619,40 @@ static int xfrm_output_one(struct sk_buff *skb, int err)
+ 		x = dst->xfrm;
+ 	} while (x && !(x->outer_mode.flags & XFRM_MODE_FLAG_TUNNEL));
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	if (!(sp = skb_sec_path(skb))) {
++
++		sp = secpath_set(skb);
++		if (!sp)
++			goto error_nolock;
++	}
++
++	/* Hub and spoke changes: Resetting the POLICY_IN SA and setting only the 
++	   POLICY_OUT SA */
++	if (skb->ipsec_xfrm_dir & ( 1 << XFRM_POLICY_IN))
++	{
++		sp->len = 0;
++		skb->ipsec_xfrm_dir &= ~ ( 1 << XFRM_POLICY_IN);
++	}
++
++	if (xfrm_nr + sp->len > XFRM_MAX_DEPTH)
++		goto error_nolock;
++
++	memcpy(sp->xvec + sp->len, xfrm_vec,
++			xfrm_nr * sizeof(xfrm_vec[0]));
++	sp->len += xfrm_nr;
++#endif
++
++
+ 	return 0;
+ 
+ error:
+ 	spin_unlock_bh(&x->lock);
+ error_nolock:
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	for (i = 0; i < xfrm_nr; i++)
++		xfrm_state_put(xfrm_vec[i]);
++#endif
+ 	kfree_skb(skb);
+ out:
+ 	return err;
+@@ -866,10 +943,20 @@ static int xfrm4_extract_output(struct xfrm_state *x, struct sk_buff *skb)
+ 	if (err)
+ 		return err;
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	if (skb->ipsec_offload == 0) {
++		XFRM_MODE_SKB_CB(skb)->protocol = ip_hdr(skb)->protocol;
++		xfrm4_extract_header(skb);
++		return 0;
++	} else {
++		return 0;
++	}
++#else
+ 	XFRM_MODE_SKB_CB(skb)->protocol = ip_hdr(skb)->protocol;
+ 
+ 	xfrm4_extract_header(skb);
+ 	return 0;
++#endif
+ }
+ 
+ #if IS_ENABLED(CONFIG_IPV6)
+@@ -913,10 +1000,18 @@ static int xfrm6_extract_output(struct xfrm_state *x, struct sk_buff *skb)
+ 	if (err)
+ 		return err;
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	if (skb->ipsec_offload == 0) {
++		XFRM_MODE_SKB_CB(skb)->protocol = ipv6_hdr(skb)->nexthdr;
++		xfrm6_extract_header(skb);
++	}
++	return 0;
++#else
+ 	XFRM_MODE_SKB_CB(skb)->protocol = ipv6_hdr(skb)->nexthdr;
+ 
+ 	xfrm6_extract_header(skb);
+ 	return 0;
++#endif
+ #else
+ 	WARN_ON_ONCE(1);
+ 	return -EAFNOSUPPORT;
+diff --git a/net/xfrm/xfrm_policy.c b/net/xfrm/xfrm_policy.c
+index b516dd15113e..58add72fd448 100644
+--- a/net/xfrm/xfrm_policy.c
++++ b/net/xfrm/xfrm_policy.c
+@@ -46,6 +46,11 @@
+ #endif
+ 
+ #include "xfrm_hash.h"
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++#include "ipsec_flow.h"
++#endif
++#endif
+ 
+ #define XFRM_QUEUE_TMO_MIN ((unsigned)(HZ/10))
+ #define XFRM_QUEUE_TMO_MAX ((unsigned)(60*HZ))
+@@ -158,6 +163,15 @@ static struct xfrm_policy_afinfo const __rcu *xfrm_policy_afinfo[AF_INET6 + 1]
+ 
+ static struct kmem_cache *xfrm_dst_cache __ro_after_init;
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++extern int ipsec_nlkey_flow(u16 xfrm_nr, u16 *xfrm_handle,
++		const struct flowi *fl, u16 family, u16 dir, u16 ignore_neigh);
++int ipsec_flow_init(struct net *net);
++void ipsec_flow_fini(struct net *net);
++#endif
++#endif
++
+ static struct rhashtable xfrm_policy_inexact_table;
+ static const struct rhashtable_params xfrm_pol_inexact_params;
+ 
+@@ -2565,7 +2579,11 @@ xfrm_tmpl_resolve(struct xfrm_policy **pols, int npols, const struct flowi *fl,
+ 
+ }
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++int xfrm_get_tos(const struct flowi *fl, int family)
++#else
+ static int xfrm_get_tos(const struct flowi *fl, int family)
++#endif
+ {
+ 	if (family == AF_INET)
+ 		return IPTOS_RT_MASK & fl->u.ip4.flowi4_tos;
+@@ -2631,6 +2649,9 @@ static inline int xfrm_fill_dst(struct xfrm_dst *xdst, struct net_device *dev,
+ 
+ 	return err;
+ }
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++EXPORT_SYMBOL(xfrm_get_tos);
++#endif
+ 
+ 
+ /* Allocate chain of dst_entry's, attach known xfrm's, calculate
+@@ -3264,6 +3285,10 @@ struct dst_entry *xfrm_lookup_with_ifid(struct net *net,
+ 		dst_release(dst);
+ 		dst = dst_orig;
+ 	}
++
++#ifdef CONFIG_INET_IPSEC_OFFLOAD
++	ipsec_flow_cache_resolve(net, fl, dst, family);
++#endif
+ ok:
+ 	xfrm_pols_put(pols, drop_pols);
+ 	if (dst && dst->xfrm &&
+@@ -3787,14 +3812,39 @@ int __xfrm_policy_check(struct sock *sk, int dir, struct sk_buff *skb,
+ 			}
+ 		}
+ 
+-		if (secpath_has_nontransport(sp, k, &xerr_idx)) {
+-			XFRM_INC_STATS(net, LINUX_MIB_XFRMINTMPLMISMATCH);
+-			goto reject;
++	if (secpath_has_nontransport(sp, k, &xerr_idx)) {
++		XFRM_INC_STATS(net, LINUX_MIB_XFRMINTMPLMISMATCH);
++		goto reject;
++	}
++
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	{
++		struct xfrm_state *x;
++		u16 xfrm_handle[XFRM_POLICY_TYPE_MAX];
++
++		xfrm_nr = 0;
++		memset(xfrm_handle, 0, XFRM_POLICY_TYPE_MAX * sizeof(u16));
++		for (i = sp->len - 1; (i >= 0) && (xfrm_nr < XFRM_POLICY_TYPE_MAX); i--) {
++			x = sp->xvec[i];
++			xfrm_handle[xfrm_nr++] = x->handle;
++		}
++		if (ipsec_flow_add(net, (const struct flowi *)&fl, family, dir, xfrm_handle)) {
++			/* sent flow notification to cmm with sa_handle */
++			ipsec_nlkey_flow(xfrm_nr, xfrm_handle, (const struct flowi *)&fl, family, dir, 0);
+ 		}
++	}
++
++	/* Hub and spoke changes: Setting the POLICY_IN direction in the packet */
++	skb->ipsec_xfrm_dir |= (1 << XFRM_POLICY_IN);
++
++std_path:
++#endif
++#endif
+ 
+ out:
+-		xfrm_pols_put(pols, npols);
+-		sp->verified_cnt = k;
++	xfrm_pols_put(pols, npols);
++	sp->verified_cnt = k;
+ 
+ 		return 1;
+ 	}
+@@ -4261,11 +4311,18 @@ static int __net_init xfrm_net_init(struct net *net)
+ 	if (rv < 0)
+ 		goto out_policy;
+ 	rv = xfrm_sysctl_init(net);
++
++	rv = ipsec_flow_init(net);
++	if (rv < 0)
++		goto out_ipsec_flow;
+ 	if (rv < 0)
+ 		goto out_sysctl;
+ 
+ 	return 0;
+ 
++out_ipsec_flow:
++	ipsec_flow_fini(net);
++	xfrm_sysctl_fini(net);
+ out_sysctl:
+ 	xfrm_policy_fini(net);
+ out_policy:
+@@ -4278,6 +4335,7 @@ static int __net_init xfrm_net_init(struct net *net)
+ 
+ static void __net_exit xfrm_net_exit(struct net *net)
+ {
++	ipsec_flow_fini(net);
+ 	xfrm_sysctl_fini(net);
+ 	xfrm_policy_fini(net);
+ 	xfrm_state_fini(net);
+diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
+index 81e01cdc7a7d..b8fa61003522 100644
+--- a/net/xfrm/xfrm_state.c
++++ b/net/xfrm/xfrm_state.c
+@@ -17,6 +17,7 @@
+ #include <linux/compat.h>
+ #include <linux/workqueue.h>
+ #include <net/xfrm.h>
++#include "ipsec_flow.h"
+ #include <linux/pfkeyv2.h>
+ #include <linux/ipsec.h>
+ #include <linux/module.h>
+@@ -58,6 +59,9 @@ static inline bool xfrm_state_hold_rcu(struct xfrm_state __rcu *x)
+ 	return refcount_inc_not_zero(&x->refcnt);
+ }
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++static unsigned short xfrm_state_handle;
++#endif
+ static inline unsigned int xfrm_dst_hash(struct net *net,
+ 					 const xfrm_address_t *daddr,
+ 					 const xfrm_address_t *saddr,
+@@ -114,12 +118,22 @@ static unsigned int xfrm_seq_hash(struct net *net, u32 seq)
+ 			hlist_add_before_rcu(_n, &_x->by);                 \
+ 	}
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++static void xfrm_hash_transfer(struct hlist_head *list,
++			       struct hlist_head *ndsttable,
++			       struct hlist_head *nsrctable,
++			       struct hlist_head *nspitable,
++			       struct hlist_head *nseqtable,
++			       struct hlist_head *nhtable,
++			       unsigned int nhashmask)
++#else
+ static void xfrm_hash_transfer(struct hlist_head *list,
+ 			       struct hlist_head *ndsttable,
+ 			       struct hlist_head *nsrctable,
+ 			       struct hlist_head *nspitable,
+ 			       struct hlist_head *nseqtable,
+ 			       unsigned int nhashmask)
++#endif
+ {
+ 	struct hlist_node *tmp;
+ 	struct xfrm_state *x;
+@@ -150,6 +164,13 @@ static void xfrm_hash_transfer(struct hlist_head *list,
+ 			XFRM_STATE_INSERT(byseq, &x->byseq, nseqtable + h,
+ 					  x->xso.type);
+ 		}
++
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++		if (x->handle && x->in_byh_hash) {
++			h = (x->handle & nhashmask);
++			hlist_add_head_rcu(&x->byh, nhtable + h);
++		}
++#endif
+ 	}
+ }
+ 
+@@ -162,6 +183,9 @@ static void xfrm_hash_resize(struct work_struct *work)
+ {
+ 	struct net *net = container_of(work, struct net, xfrm.state_hash_work);
+ 	struct hlist_head *ndst, *nsrc, *nspi, *nseq, *odst, *osrc, *ospi, *oseq;
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	struct hlist_head *nh, *oh;
++#endif
+ 	unsigned long nsize, osize;
+ 	unsigned int nhashmask, ohashmask;
+ 	int i;
+@@ -188,6 +212,16 @@ static void xfrm_hash_resize(struct work_struct *work)
+ 		xfrm_hash_free(nspi, nsize);
+ 		return;
+ 	}
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	nh = xfrm_hash_alloc(nsize);
++	if (!nh) {
++		xfrm_hash_free(ndst, nsize);
++		xfrm_hash_free(nsrc, nsize);
++		xfrm_hash_free(nspi, nsize);
++		xfrm_hash_free(nseq, nsize);
++		return;
++	}
++#endif
+ 
+ 	spin_lock_bh(&net->xfrm.xfrm_state_lock);
+ 	write_seqcount_begin(&net->xfrm.xfrm_state_hash_generation);
+@@ -195,17 +229,27 @@ static void xfrm_hash_resize(struct work_struct *work)
+ 	nhashmask = (nsize / sizeof(struct hlist_head)) - 1U;
+ 	odst = xfrm_state_deref_prot(net->xfrm.state_bydst, net);
+ 	for (i = net->xfrm.state_hmask; i >= 0; i--)
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++		xfrm_hash_transfer(odst + i, ndst, nsrc, nspi, nseq, nh, nhashmask);
++#else
+ 		xfrm_hash_transfer(odst + i, ndst, nsrc, nspi, nseq, nhashmask);
++#endif
+ 
+ 	osrc = xfrm_state_deref_prot(net->xfrm.state_bysrc, net);
+ 	ospi = xfrm_state_deref_prot(net->xfrm.state_byspi, net);
+ 	oseq = xfrm_state_deref_prot(net->xfrm.state_byseq, net);
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	oh = xfrm_state_deref_prot(net->xfrm.state_byh, net);
++#endif
+ 	ohashmask = net->xfrm.state_hmask;
+ 
+ 	rcu_assign_pointer(net->xfrm.state_bydst, ndst);
+ 	rcu_assign_pointer(net->xfrm.state_bysrc, nsrc);
+ 	rcu_assign_pointer(net->xfrm.state_byspi, nspi);
+ 	rcu_assign_pointer(net->xfrm.state_byseq, nseq);
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	rcu_assign_pointer(net->xfrm.state_byh, nh);
++#endif
+ 	net->xfrm.state_hmask = nhashmask;
+ 
+ 	write_seqcount_end(&net->xfrm.xfrm_state_hash_generation);
+@@ -219,6 +263,9 @@ static void xfrm_hash_resize(struct work_struct *work)
+ 	xfrm_hash_free(osrc, osize);
+ 	xfrm_hash_free(ospi, osize);
+ 	xfrm_hash_free(oseq, osize);
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	xfrm_hash_free(oh, osize);
++#endif
+ }
+ 
+ static DEFINE_SPINLOCK(xfrm_state_afinfo_lock);
+@@ -681,6 +728,9 @@ struct xfrm_state *xfrm_state_alloc(struct net *net)
+ 		INIT_HLIST_NODE(&x->bysrc);
+ 		INIT_HLIST_NODE(&x->byspi);
+ 		INIT_HLIST_NODE(&x->byseq);
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++		INIT_HLIST_NODE(&x->byh);
++#endif
+ 		hrtimer_init(&x->mtimer, CLOCK_BOOTTIME, HRTIMER_MODE_ABS_SOFT);
+ 		x->mtimer.function = xfrm_timer_handler;
+ 		timer_setup(&x->rtimer, xfrm_replay_timer_handler, 0);
+@@ -758,6 +808,17 @@ int __xfrm_state_delete(struct xfrm_state *x)
+ 			hlist_del_rcu(&x->byseq);
+ 		if (x->id.spi)
+ 			hlist_del_rcu(&x->byspi);
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++		/*
++		 * if 'handle' value is assigned and xfrm_state is inserted
++		 * into 'byh' hash table, remove it now and reset 'in_byh_hash'
++		 * to zero.
++		 */
++		if (x->handle && x->in_byh_hash) {
++			hlist_del_rcu(&x->byh);
++			x->in_byh_hash = 0;
++		}
++#endif
+ 		net->xfrm.state_num--;
+ 		spin_unlock(&net->xfrm.xfrm_state_lock);
+ 
+@@ -1401,6 +1462,19 @@ xfrm_state_find(const xfrm_address_t *daddr, const xfrm_address_t *saddr,
+ 						  net->xfrm.state_byseq + h,
+ 						  x->xso.type);
+ 			}
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++			/*
++			 * at this point, xfrm_state is activated because it
++			 * has been inserted into other linux original hash
++			 * tables.  it must be inserted into 'byh' hash table
++			 * too if it is not yet inserted.
++			 */
++			if (x->handle && !x->in_byh_hash) {
++				h = (x->handle & net->xfrm.state_hmask);
++				hlist_add_head_rcu(&x->byh, net->xfrm.state_byh + h);
++				x->in_byh_hash = 1;
++			}
++#endif
+ 			x->lft.hard_add_expires_seconds = net->xfrm.sysctl_acq_expires;
+ 			hrtimer_start(&x->mtimer,
+ 				      ktime_set(net->xfrm.sysctl_acq_expires, 0),
+@@ -1557,6 +1631,19 @@ static void __xfrm_state_insert(struct xfrm_state *x)
+ 				  x->xso.type);
+ 	}
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	/*
++	 * at this point, xfrm_state is activated because it has been inserted
++	 * into other linux original hash tables.  it must also be inserted
++	 * into 'byh' hash table if it is not yet inserted.
++	 */
++	if (x->handle && !x->in_byh_hash) {
++		h = (x->handle & net->xfrm.state_hmask);
++		hlist_add_head_rcu(&x->byh, net->xfrm.state_byh + h);
++		x->in_byh_hash = 1;
++	}
++#endif
++
+ 	hrtimer_start(&x->mtimer, ktime_set(1, 0), HRTIMER_MODE_REL_SOFT);
+ 	if (x->replay_maxage)
+ 		mod_timer(&x->rtimer, jiffies + x->replay_maxage);
+@@ -1577,6 +1664,10 @@ static void __xfrm_state_bump_genids(struct xfrm_state *xnew)
+ 	u32 mark = xnew->mark.v & xnew->mark.m;
+ 	u32 if_id = xnew->if_id;
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	u32 parent_sa_handle = 0;
++#endif
++
+ 	h = xfrm_dst_hash(net, &xnew->id.daddr, &xnew->props.saddr, reqid, family);
+ 	hlist_for_each_entry(x, net->xfrm.state_bydst+h, bydst) {
+ 		if (x->props.family	== family &&
+@@ -1585,8 +1676,19 @@ static void __xfrm_state_bump_genids(struct xfrm_state *xnew)
+ 		    (mark & x->mark.m) == x->mark.v &&
+ 		    xfrm_addr_equal(&x->id.daddr, &xnew->id.daddr, family) &&
+ 		    xfrm_addr_equal(&x->props.saddr, &xnew->props.saddr, family))
++		{
+ 			x->genid++;
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++			if (!parent_sa_handle)
++			{
++				parent_sa_handle = x->handle;
++			}
++#endif
++		}
+ 	}
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	xnew->parent_sa_handle = parent_sa_handle;
++#endif
+ }
+ 
+ void xfrm_state_insert(struct xfrm_state *x)
+@@ -2103,6 +2205,36 @@ xfrm_state_lookup_byaddr(struct net *net, u32 mark,
+ }
+ EXPORT_SYMBOL(xfrm_state_lookup_byaddr);
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++struct xfrm_state *__xfrm_state_lookup_byhandle(struct net *net, u16 handle)
++{
++	unsigned int h = (handle & net->xfrm.state_hmask);
++	struct xfrm_state *x;
++
++	hlist_for_each_entry(x, net->xfrm.state_byh + h, byh) {
++		if (x->handle != handle)
++			continue;
++
++		xfrm_state_hold(x);
++		return x;
++	}
++
++	return NULL;
++}
++
++struct xfrm_state *
++xfrm_state_lookup_byhandle(struct net *net, u16 handle)
++{
++	struct xfrm_state *x;
++
++	spin_lock_bh(&net->xfrm.xfrm_state_lock);
++	x = __xfrm_state_lookup_byhandle(net, handle);
++	spin_unlock_bh(&net->xfrm.xfrm_state_lock);
++	return x;
++}
++EXPORT_SYMBOL(xfrm_state_lookup_byhandle);
++#endif
++
+ struct xfrm_state *
+ xfrm_find_acq(struct net *net, const struct xfrm_mark *mark, u8 mode, u32 reqid,
+ 	      u32 if_id, u8 proto, const xfrm_address_t *daddr,
+diff --git a/net/xfrm/xfrm_user.c b/net/xfrm/xfrm_user.c
+index 5b3ab4532aec..58cbbfea1094 100644
+--- a/net/xfrm/xfrm_user.c
++++ b/net/xfrm/xfrm_user.c
+@@ -908,6 +908,10 @@ static void copy_to_user_state(struct xfrm_state *x, struct xfrm_usersa_info *p)
+ 	if (x->xso.dev)
+ 		xfrm_dev_state_update_curlft(x);
+ 	memcpy(&p->curlft, &x->curlft, sizeof(p->curlft));
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	if (x->curr_time)
++		p->curlft.use_time = x->curr_time;
++#endif
+ 	put_unaligned(x->stats.replay_window, &p->stats.replay_window);
+ 	put_unaligned(x->stats.replay, &p->stats.replay);
+ 	put_unaligned(x->stats.integrity_failed, &p->stats.integrity_failed);
+diff --git a/tools/perf/.gitignore b/tools/perf/.gitignore
+index 5a8617eb5419..6ff95fb6267a 100644
+--- a/tools/perf/.gitignore
++++ b/tools/perf/.gitignore
+@@ -3,7 +3,6 @@ PERF-CFLAGS
+ PERF-GUI-VARS
+ PERF-VERSION-FILE
+ FEATURE-DUMP
+-perf
+ !include/perf/
+ perf-read-vdso32
+ perf-read-vdsox32
+diff --git a/include/uapi/linux/netfilter/xt_QOSCONNMARK.h b/include/uapi/linux/netfilter/xt_QOSCONNMARK.h
+new file mode 100644
+index 000000000000..8a0821856c32
+--- /dev/null
++++ b/include/uapi/linux/netfilter/xt_QOSCONNMARK.h
+@@ -0,0 +1,10 @@
++#ifndef _XT_QOSCONNMARK_H_target
++#define _XT_QOSCONNMARK_H_target
++
++#include <linux/netfilter/xt_qosconnmark.h>
++
++#endif /*_XT_QOSCONNMARK_H_target*/
++
++
++
++
+diff --git a/include/uapi/linux/netfilter/xt_QOSMARK.h b/include/uapi/linux/netfilter/xt_QOSMARK.h
+new file mode 100644
+index 000000000000..45c4795aac12
+--- /dev/null
++++ b/include/uapi/linux/netfilter/xt_QOSMARK.h
+@@ -0,0 +1,6 @@
++#ifndef _XT_QOSMARK_H_target
++#define _XT_QOSMARK_H_target
++
++#include <linux/netfilter/xt_qosmark.h>
++
++#endif /*_XT_QOSMARK_H_target */
+diff --git a/include/uapi/linux/netfilter/xt_qosconnmark.h b/include/uapi/linux/netfilter/xt_qosconnmark.h
+new file mode 100644
+index 000000000000..d9901a9bd4fd
+--- /dev/null
++++ b/include/uapi/linux/netfilter/xt_qosconnmark.h
+@@ -0,0 +1,35 @@
++#ifndef _XT_QOSCONNMARK_H
++#define _XT_QOSCONNMARK_H
++
++#include <linux/types.h>
++
++/* Copyright (C) 2002,2004 MARA Systems AB <http://www.marasystems.com>
++    + * by Henrik Nordstrom <hno@marasystems.com>
++    + *
++    + * This program is free software; you can redistribute it and/or modify
++    + * it under the terms of the GNU General Public License as published by
++    + * the Free Software Foundation; either version 2 of the License, or
++    + * (at your option) any later version.
++    + */
++
++enum {
++    XT_QOSCONNMARK_SET = 0,
++    XT_QOSCONNMARK_SAVE_QOSMARK,
++    XT_QOSCONNMARK_RESTORE_QOSMARK
++};
++
++struct xt_qosconnmark_tginfo1 {
++    __u64 mark, ctmask, nfmask;
++    __u8 mode;
++};
++
++struct xt_qosconnmark_mtinfo1 {
++    __u64 mark, mask;
++     __u8 invert;
++};
++
++#endif /*_XT_QOSCONNMARK_H*/
++
++
++
++
+diff --git a/include/uapi/linux/netfilter/xt_qosmark.h b/include/uapi/linux/netfilter/xt_qosmark.h
+new file mode 100644
+index 000000000000..6f80bd016c40
+--- /dev/null
++++ b/include/uapi/linux/netfilter/xt_qosmark.h
+@@ -0,0 +1,19 @@
++#ifndef _XT_QOSMARK_H
++#define _XT_QOSMARK_H
++
++#include <linux/types.h>
++
++struct xt_qosmark_tginfo2 {
++    __u64 mark, mask;
++};
++
++struct xt_qosmark_mtinfo1 {
++    __u64 mark, mask;
++    __u8 invert;
++};
++
++#endif /*_XT_QOSMARK_H*/
++
++
++
++
+diff --git a/net/netfilter/comcerto_fp_netfilter.c b/net/netfilter/comcerto_fp_netfilter.c
+new file mode 100644
+index 000000000000..a339458146e2
+--- /dev/null
++++ b/net/netfilter/comcerto_fp_netfilter.c
+@@ -0,0 +1,448 @@
++/* Copyright (C) 2015 Freescale Semiconductor, Inc.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *     * Redistributions of source code must retain the above copyright
++ *       notice, this list of conditions and the following disclaimer.
++ *     * Redistributions in binary form must reproduce the above copyright
++ *       notice, this list of conditions and the following disclaimer in the
++ *       documentation and/or other materials provided with the distribution.
++ *     * Neither the name of Freescale Semiconductor nor the
++ *       names of its contributors may be used to endorse or promote products
++ *       derived from this software without specific prior written permission.
++ *
++ *
++ * ALTERNATIVELY, this software may be distributed under the terms of the
++ * GNU General Public License ("GPL") as published by the Free Software
++ * Foundation, either version 2 of that License or (at your option) any
++ * later version.
++ *
++ * THIS SOFTWARE IS PROVIDED BY Freescale Semiconductor ``AS IS'' AND ANY
++ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++ * DISCLAIMED. IN NO EVENT SHALL Freescale Semiconductor BE LIABLE FOR ANY
++ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
++ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
++ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
++ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <linux/module.h>
++#include <linux/version.h>
++#include <linux/kernel.h>
++#include <linux/skbuff.h>
++#include <linux/netfilter.h>
++#include <net/netfilter/nf_conntrack.h>
++#include <net/netfilter/nf_conntrack_ecache.h>
++#include <net/xfrm.h>
++
++#ifndef IPSEC_FLOW_CACHE
++/* this function is used to fill the xfrm info in conntrack structure */
++static void nf_ct_set_xfrm_in_fp(struct sk_buff *skb, struct xfrm_state *xfrm[MAX_SUPPORTED_XFRMS_PER_DIR],
++	int num_xfrm, int xfrm_dir, int *rekey)
++{
++	struct nf_conn *ct;
++	enum ip_conntrack_info ctinfo;
++	struct comcerto_fp_info *fp_info;
++	int dir, xfrm_ind, ii;
++
++	if (num_xfrm > MAX_SUPPORTED_XFRMS_PER_DIR) {
++		printk(KERN_ERR "%s(%d) num_xfrm %d > %d(MAX supported)\n",
++			__FUNCTION__, __LINE__, num_xfrm, MAX_SUPPORTED_XFRMS_PER_DIR);
++		return;
++	}
++
++	/* get ct info */
++	ct = nf_ct_get(skb, &ctinfo);
++	if (!ct)
++		return;
++
++	dir = CTINFO2DIR(ctinfo);
++	if (dir == IP_CT_DIR_ORIGINAL)
++		fp_info = &ct->fp_info[IP_CT_DIR_ORIGINAL];
++	else
++		fp_info = &ct->fp_info[IP_CT_DIR_REPLY];
++
++	if (xfrm_dir == XFRM_POLICY_FWD)
++		xfrm_dir = 0;
++	/* xfrm_dir can be XFRM_POLICY_IN, XFRM_POLICY_OUT, XFRM_POLICY_FWD */
++	/* fp_info->xfrm_id[4] has 4 instances, first 2 instances reserved for direction IN/FWD
++	   next 2 instances for OUT direction */
++	xfrm_ind = xfrm_dir << 1;
++
++	for (ii = 0; ii < num_xfrm; ii++) {
++		if (fp_info->xfrm_handle[xfrm_ind + ii] &&
++		    fp_info->xfrm_handle[xfrm_ind + ii] != xfrm[ii]->handle)
++			*rekey = 1;
++
++		/* filling SA info and xfrm handle */
++		fp_info->xfrm_handle[xfrm_ind + ii] = xfrm[ii]->handle;
++	}
++}
++
++/* this function is used to get the inbound and outbound xfrm info corresponding to
++ * skb, if exist fill in conntrack structure */
++static unsigned int fp_netfilter_get_xfrm_info(struct sk_buff *skb)
++{
++	struct nf_conn *ct;
++	enum ip_conntrack_info ctinfo;
++	struct sec_path *sp;
++	struct xfrm_state *x[2] = {}, *tmp;
++	int num_xfrms = 0, i, dir, rekey = 0;
++	struct dst_entry *dst1 = skb_dst(skb);
++
++	/* get ct info */
++	ct = nf_ct_get(skb, &ctinfo);
++	if (!ct)
++		return NF_ACCEPT;
++
++	/* ctinfo direction [originator/replier] */
++	dir = CTINFO2DIR(ctinfo);
++
++	/* extract the inbound IPSec information if exist */
++	sp = skb_sec_path(skb);
++	if (sp) {
++		for (i = sp->len - 1; (i >= 0) && (num_xfrms < MAX_SUPPORTED_XFRMS_PER_DIR); i--) {
++			x[num_xfrms] = sp->xvec[i];
++			num_xfrms++;
++		}
++		if (num_xfrms)
++			nf_ct_set_xfrm_in_fp(skb, x, num_xfrms, XFRM_POLICY_FWD, &rekey);
++	}
++
++	/* extract the outbound IPSec information if exist */
++	if (dst1 && dst1->xfrm) {
++		for (i = 0; i < MAX_SUPPORTED_XFRMS_PER_DIR; i++)
++			x[i] = 0;
++		num_xfrms = 0;
++
++		while (((tmp = dst1->xfrm) != NULL) && (num_xfrms < MAX_SUPPORTED_XFRMS_PER_DIR)) {
++			x[num_xfrms] = tmp;
++			dst1 = xfrm_dst_child(dst1);
++			num_xfrms++;
++			if (dst1 == NULL) {
++				pr_warn("%s(%d) DST is null\n", __FUNCTION__, __LINE__);
++				break;
++			}
++		}
++		if (num_xfrms)
++			nf_ct_set_xfrm_in_fp(skb, x, num_xfrms, XFRM_POLICY_OUT, &rekey);
++	}
++
++	/* if there is a change in ipsec info, send rekey conntrack event */
++	if (rekey)
++		nf_conntrack_event_cache(IPCT_PROTOINFO, ct);
++
++	return NF_ACCEPT;
++}
++#endif /* IPSEC_FLOW_CACHE */
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
++static unsigned int fp_netfilter_pre_routing(int family, const struct nf_hook_state *state, struct sk_buff *skb)
++#else
++static unsigned int fp_netfilter_pre_routing(int family, const struct nf_hook_ops *ops, struct sk_buff *skb)
++#endif
++{
++	struct nf_conn *ct;
++	u_int8_t protonum;
++	enum ip_conntrack_info ctinfo;
++	struct comcerto_fp_info *fp_info;
++	int dir;
++
++	ct = nf_ct_get(skb, &ctinfo);
++	if (!ct)
++		goto done;
++
++	protonum = nf_ct_protonum(ct);
++	if ((protonum != IPPROTO_TCP) && (protonum != IPPROTO_UDP) &&
++	    (protonum != IPPROTO_IPIP) && (protonum != IPPROTO_IPV6) &&
++#ifdef CONFIG_CPE_ETHERIP
++	    (protonum != IPPROTO_ETHERIP) &&
++#endif
++	    (protonum != IPPROTO_GRE) && (protonum != IPPROTO_ESP) && (protonum != IPPROTO_AH))
++		goto done;
++
++	dir = CTINFO2DIR(ctinfo);
++
++	if (dir == IP_CT_DIR_ORIGINAL)
++		fp_info = &ct->fp_info[IP_CT_DIR_ORIGINAL];
++	else
++		fp_info = &ct->fp_info[IP_CT_DIR_REPLY];
++
++	/* Log changes via dynamic debug (enable with dyndbg) */
++	if (fp_info->mark && (fp_info->mark != skb->mark))
++		pr_debug("fp_pre: mark changed %x -> %x\n", fp_info->mark, skb->mark);
++
++	if (fp_info->ifindex && (fp_info->ifindex != skb->dev->ifindex))
++		pr_debug("fp_pre: ifindex changed %d -> %d\n", fp_info->ifindex, skb->dev->ifindex);
++
++if (fp_info->ifindex && (fp_info->ifindex != skb->skb_iif))
++pr_debug("fp_pre: iif changed %d -> %d\n", fp_info->ifindex, skb->skb_iif);
++
++fp_info->mark = skb->mark;
++fp_info->ifindex = skb->dev->ifindex;
++/* skb->skb_iif is set by netif_receive_skb() to the original input interface.
++ * For forwarded packets iif_index != 0; for locally generated packets it's 0 or
++ * equals the output device depending on routing, but local_out hook forces it to 0. */
++fp_info->ifindex = skb->skb_iif;
++
++done:
++	return NF_ACCEPT;
++}
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
++static unsigned int fp_netfilter_local_out(int family, const struct nf_hook_state *state, struct sk_buff *skb)
++#else
++static unsigned int fp_netfilter_local_out(int family, const struct nf_hook_ops *ops, struct sk_buff *skb)
++#endif
++{
++	struct nf_conn *ct;
++	u_int8_t protonum;
++	enum ip_conntrack_info ctinfo;
++	struct comcerto_fp_info *fp_info;
++	int dir, update_event = 0;
++
++	ct = nf_ct_get(skb, &ctinfo);
++	if (!ct)
++		goto done;
++
++	protonum = nf_ct_protonum(ct);
++#ifdef CONFIG_CPE_ETHERIP
++	if ((protonum != IPPROTO_ETHERIP) && (protonum != IPPROTO_IPIP) &&
++	    (protonum != IPPROTO_IPV6) && (protonum != IPPROTO_GRE))
++#else
++	if ((protonum != IPPROTO_IPIP) && (protonum != IPPROTO_IPV6) && (protonum != IPPROTO_GRE))
++		goto done;
++#endif
++
++	dir = CTINFO2DIR(ctinfo);
++
++	if (dir == IP_CT_DIR_ORIGINAL)
++		fp_info = &ct->fp_info[IP_CT_DIR_ORIGINAL];
++	else
++		fp_info = &ct->fp_info[IP_CT_DIR_REPLY];
++
++	if (fp_info->mark && (fp_info->mark != skb->mark))
++		pr_debug("fp_out: mark changed %x -> %x\n", fp_info->mark, skb->mark);
++
++	if ((fp_info->ifindex) && (skb->dev) && (fp_info->ifindex != skb->dev->ifindex)) {
++		pr_debug("fp_out: ifindex changed %d -> %d\n", fp_info->ifindex, skb->dev->ifindex);
++		update_event = 1;
++	}
++
++	fp_info->mark = skb->mark;
++	if (skb->dev)
++		fp_info->ifindex = skb->dev->ifindex;
++
++	if (update_event == 1)
++		nf_conntrack_event_cache(IPCT_PROTOINFO, ct);
++
++	fp_info->ifindex = 0; /* To identify the connection as local connection */
++
++#ifndef IPSEC_FLOW_CACHE
++	/* fill xfrm info in conntrack structure */
++	return (fp_netfilter_get_xfrm_info(skb));
++#endif /* IPSEC_FLOW_CACHE */
++done:
++	return NF_ACCEPT;
++}
++
++#ifndef IPSEC_FLOW_CACHE
++/* this post routing hook is introduced to gather the xfrm information
++ * corresponding to ctinfo of skb and fill it in conntrack structure.
++ * This is required to take the xfrm info of ctinfo part of conntrack message
++ * to user space
++ */
++static unsigned int fp_ip_netfilter_post_routing(void *priv,
++	struct sk_buff *skb,
++	const struct nf_hook_state *state)
++{
++	return (fp_netfilter_get_xfrm_info(skb));
++}
++#endif /* IPSEC_FLOW_CACHE */
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
++static unsigned int fp_ipv4_netfilter_pre_routing(void *priv,
++	struct sk_buff *skb,
++	const struct nf_hook_state *state)
++#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
++static unsigned int fp_ipv4_netfilter_pre_routing(const struct nf_hook_ops *ops,
++	struct sk_buff *skb,
++	const struct nf_hook_state *state)
++#else
++static unsigned int fp_ipv4_netfilter_pre_routing(const struct nf_hook_ops *ops,
++	struct sk_buff *skb,
++	const struct net_device *in,
++	const struct net_device *out,
++	int (*okfn)(struct sk_buff *))
++#endif
++{
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
++	return fp_netfilter_pre_routing(PF_INET, state, skb);
++#else
++	return fp_netfilter_pre_routing(PF_INET, ops, skb);
++#endif
++}
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
++static unsigned int fp_ipv6_netfilter_pre_routing(void *priv,
++	struct sk_buff *skb,
++	const struct nf_hook_state *state)
++#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
++static unsigned int fp_ipv6_netfilter_pre_routing(const struct nf_hook_ops *ops,
++	struct sk_buff *skb,
++	const struct nf_hook_state *state)
++#else
++static unsigned int fp_ipv6_netfilter_pre_routing(const struct nf_hook_ops *ops,
++	struct sk_buff *skb,
++	const struct net_device *in,
++	const struct net_device *out,
++	int (*okfn)(struct sk_buff *))
++#endif
++{
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
++	return fp_netfilter_pre_routing(PF_INET6, state, skb);
++#else
++	return fp_netfilter_pre_routing(PF_INET6, ops, skb);
++#endif
++}
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
++static unsigned int fp_ipv4_netfilter_local_out(void *priv,
++	struct sk_buff *skb,
++	const struct nf_hook_state *state)
++#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
++static unsigned int fp_ipv4_netfilter_local_out(const struct nf_hook_ops *ops,
++	struct sk_buff *skb,
++	const struct nf_hook_state *state)
++#else
++static unsigned int fp_ipv4_netfilter_local_out(const struct nf_hook_ops *ops,
++	struct sk_buff *skb,
++	const struct net_device *in,
++	const struct net_device *out,
++	int (*okfn)(struct sk_buff *))
++#endif
++{
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
++	return fp_netfilter_local_out(PF_INET, state, skb);
++#else
++	return fp_netfilter_local_out(PF_INET, ops, skb);
++#endif
++}
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
++static unsigned int fp_ipv6_netfilter_local_out(void *priv,
++	struct sk_buff *skb,
++	const struct nf_hook_state *state)
++#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
++static unsigned int fp_ipv6_netfilter_local_out(const struct nf_hook_ops *ops,
++	struct sk_buff *skb,
++	const struct nf_hook_state *state)
++#else
++static unsigned int fp_ipv6_netfilter_local_out(const struct nf_hook_ops *ops,
++	struct sk_buff *skb,
++	const struct net_device *in,
++	const struct net_device *out,
++	int (*okfn)(struct sk_buff *))
++#endif
++{
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
++	return fp_netfilter_local_out(PF_INET6, state, skb);
++#else
++	return fp_netfilter_local_out(PF_INET6, ops, skb);
++#endif
++}
++
++static struct nf_hook_ops fp_netfilter_ops[] __read_mostly = {
++	{
++		.hook		= fp_ipv4_netfilter_pre_routing,
++		.pf		= NFPROTO_IPV4,
++		.hooknum	= NF_INET_PRE_ROUTING,
++		.priority	= NF_IP_PRI_LAST,
++	},
++	{
++		.hook		= fp_ipv6_netfilter_pre_routing,
++		.pf		= NFPROTO_IPV6,
++		.hooknum	= NF_INET_PRE_ROUTING,
++		.priority	= NF_IP_PRI_LAST,
++	},
++	/* For local_out packets, routing will be done
++	   1. before entering the LOCAL_OUT hook
++	   2. and at the completion of all mangle rules,
++	   if there are changes to the packet like mark etc
++
++	   So NF_IP_PRI_LAST priority is used here to receive
++	   the mark value of the packet, at the end of all changes.
++	 */
++	{
++		.hook		= fp_ipv4_netfilter_local_out,
++		.pf		= NFPROTO_IPV4,
++		.hooknum	= NF_INET_LOCAL_OUT,
++		.priority	= NF_IP_PRI_LAST - 1,
++	},
++	{
++		.hook		= fp_ipv6_netfilter_local_out,
++		.pf		= NFPROTO_IPV6,
++		.hooknum	= NF_INET_LOCAL_OUT,
++		.priority	= NF_IP_PRI_LAST - 1,
++	},
++#ifndef IPSEC_FLOW_CACHE
++	{
++		.hook		= fp_ip_netfilter_post_routing,
++		.pf		= NFPROTO_IPV4,
++		.hooknum	= NF_INET_POST_ROUTING,
++		.priority	= NF_IP_PRI_LAST - 1,
++	},
++	{
++		.hook		= fp_ip_netfilter_post_routing,
++		.pf		= NFPROTO_IPV6,
++		.hooknum	= NF_INET_POST_ROUTING,
++		.priority	= NF_IP_PRI_LAST - 1,
++	},
++#endif
++};
++
++static int __init fp_netfilter_init(void)
++{
++	int rc;
++
++	/*
++	 * Force-register conntrack hooks in init_net.
++	 * Kernel 6.6 lazy-loads conntrack hooks — they only activate when an
++	 * nftables chain uses a 'ct' expression (e.g., ct state new).  ASK
++	 * needs conntrack active to populate fp_info on every tracked flow.
++	 * Calling nf_ct_netns_get() increments the conntrack refcount for this
++	 * netns, which registers the PREROUTING/OUTPUT conntrack hooks if they
++	 * haven't been registered yet.  This ensures conntrack tracking works
++	 * even on TFTP dev boot where nftables modules may not be available.
++	 */
++	rc = nf_ct_netns_get(&init_net, NFPROTO_INET);
++	if (rc < 0) {
++		pr_warn("ASK fp_netfilter: nf_ct_netns_get failed (%d), conntrack may not track\n", rc);
++		/* Non-fatal: continue with hook registration */
++	}
++
++	rc = nf_register_net_hooks(&init_net, fp_netfilter_ops, ARRAY_SIZE(fp_netfilter_ops));
++	if (rc < 0) {
++		printk(KERN_ERR "fp_netfilter_ops: can't register hooks.\n");
++		nf_ct_netns_put(&init_net, NFPROTO_INET);
++		goto err0;
++	}
++
++	pr_info("ASK fp_netfilter: hooks registered + conntrack force-enabled\n");
++	return 0;
++
++err0:
++	return rc;
++}
++
++static void __exit fp_netfilter_exit(void)
++{
++	nf_unregister_net_hooks(&init_net, fp_netfilter_ops, ARRAY_SIZE(fp_netfilter_ops));
++	nf_ct_netns_put(&init_net, NFPROTO_INET);
++}
++
++late_initcall(fp_netfilter_init);
++module_exit(fp_netfilter_exit);
+diff --git a/net/netfilter/xt_qosconnmark.c b/net/netfilter/xt_qosconnmark.c
+new file mode 100644
+index 000000000000..a47f1ad05168
+--- /dev/null
++++ b/net/netfilter/xt_qosconnmark.c
+@@ -0,0 +1,171 @@
++/* xt_connmark - Netfilter module to operate on connection marks
++ *
++ * Copyright (C) 2002,2004 MARA Systems AB <http://www.marasystems.com>
++ * by Henrik Nordstrom <hno@marasystems.com>
++ * Copyright © CC Computer Consultants GmbH, 2007 - 2008
++ * Jan Engelhardt <jengelh@medozas.de>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ */
++
++#include <linux/module.h>
++#include <linux/skbuff.h>
++#include <net/netfilter/nf_conntrack.h>
++#include <net/netfilter/nf_conntrack_ecache.h>
++#include <linux/netfilter/x_tables.h>
++#include <linux/netfilter/xt_qosconnmark.h>
++
++MODULE_AUTHOR("Henrik Nordstrom <hno@marasystems.com>");
++MODULE_DESCRIPTION("Xtables: QOS connection mark operations");
++MODULE_LICENSE("GPL");
++MODULE_ALIAS("ipt_QOSCONNMARK");
++MODULE_ALIAS("ip6t_QOSCONNMARK");
++MODULE_ALIAS("ipt_qosconnmark");
++MODULE_ALIAS("ip6t_qosconnmark");
++
++static unsigned int
++qosconnmark_tg(struct sk_buff *skb, const struct xt_action_param *par)
++{
++	const struct xt_qosconnmark_tginfo1 *info = par->targinfo;
++	enum ip_conntrack_info ctinfo;
++	struct nf_conn *ct;
++	u_int64_t newmark;
++
++	ct = nf_ct_get(skb, &ctinfo);
++	if (ct == NULL)
++		return XT_CONTINUE;
++
++	switch (info->mode) {
++		case XT_QOSCONNMARK_SET:
++			newmark = (ct->qosconnmark & ~info->ctmask) ^ info->mark;
++			if (ct->qosconnmark != newmark) {
++				ct->qosconnmark = newmark;
++				nf_conntrack_event_cache(IPCT_QOSCONNMARK, ct);
++			}
++			break;
++		case XT_QOSCONNMARK_SAVE_QOSMARK:
++			newmark = (ct->qosconnmark & ~info->ctmask) ^
++				(skb->qosmark & info->nfmask);
++			if (ct->qosconnmark != newmark) {
++				ct->qosconnmark = newmark;
++				nf_conntrack_event_cache(IPCT_QOSCONNMARK, ct);
++			}
++			break;
++		case XT_QOSCONNMARK_RESTORE_QOSMARK:
++			newmark = (skb->qosmark & ~info->nfmask) ^
++				(ct->qosconnmark & info->ctmask);
++			skb->qosmark = newmark;
++			break;
++	}
++
++	return XT_CONTINUE;
++}
++
++static int qosconnmark_tg_check(const struct xt_tgchk_param *par)
++{
++	int ret;
++
++	ret = nf_ct_netns_get(par->net, par->family);
++	if (ret < 0)
++		pr_info("cannot load conntrack support for proto=%u\n",
++			par->family);
++	return ret;
++}
++
++ 
++static void qosconnmark_tg_destroy(const struct xt_tgdtor_param *par)
++{
++	nf_ct_netns_put(par->net, par->family);
++}
++
++static bool
++qosconnmark_mt(const struct sk_buff *skb, struct xt_action_param *par)
++{
++	const struct xt_qosconnmark_mtinfo1 *info = par->matchinfo;
++	enum ip_conntrack_info ctinfo;
++	const struct nf_conn *ct;
++
++	ct = nf_ct_get(skb, &ctinfo);
++	if (ct == NULL)
++		return false;
++
++	return ((ct->qosconnmark & info->mask) == info->mark) ^ info->invert;
++}
++
++static int qosconnmark_mt_check(const struct xt_mtchk_param *par)
++{
++	int ret;
++
++	ret = nf_ct_netns_get(par->net, par->family);
++	if (ret < 0)
++		pr_info("cannot load conntrack support for proto=%u\n",
++			par->family);
++	return ret;
++}
++
++static void qosconnmark_mt_destroy(const struct xt_mtdtor_param *par)
++{
++	nf_ct_netns_put(par->net, par->family);
++}
++
++static struct xt_target qosconnmark_tg_reg __read_mostly = {
++	.name           = "QOSCONNMARK",
++	.revision       = 1,
++	.family         = NFPROTO_UNSPEC,
++	.checkentry     = qosconnmark_tg_check,
++	.target         = qosconnmark_tg,
++	.targetsize     = sizeof(struct xt_qosconnmark_tginfo1),
++	.destroy        = qosconnmark_tg_destroy,
++	.me             = THIS_MODULE,
++};
++
++static struct xt_match qosconnmark_mt_reg __read_mostly = {
++	.name           = "qosconnmark",
++	.revision       = 1,
++	.family         = NFPROTO_UNSPEC,
++	.checkentry     = qosconnmark_mt_check,
++	.match          = qosconnmark_mt,
++	.matchsize      = sizeof(struct xt_qosconnmark_mtinfo1),
++	.destroy        = qosconnmark_mt_destroy,
++	.me             = THIS_MODULE,
++};
++
++static int __init qosconnmark_mt_init(void)
++{
++	int ret;
++
++	ret = xt_register_target(&qosconnmark_tg_reg);
++	if (ret < 0)
++		return ret;
++	ret = xt_register_match(&qosconnmark_mt_reg);
++	if (ret < 0) {
++		xt_unregister_target(&qosconnmark_tg_reg);
++		return ret;
++	}
++	return 0;
++}
++
++static void __exit qosconnmark_mt_exit(void)
++{
++	xt_unregister_match(&qosconnmark_mt_reg);
++	xt_unregister_target(&qosconnmark_tg_reg);
++}
++
++module_init(qosconnmark_mt_init);
++module_exit(qosconnmark_mt_exit);
++
++             
++
++
+diff --git a/net/netfilter/xt_qosmark.c b/net/netfilter/xt_qosmark.c
+new file mode 100644
+index 000000000000..771edb1f812f
+--- /dev/null
++++ b/net/netfilter/xt_qosmark.c
+@@ -0,0 +1,85 @@
++/*
++ * xt_mark - Netfilter module to match NFMARK value
++ *
++ * (C) 1999-2001 Marc Boucher <marc@mbsi.ca>
++ * Copyright © CC Computer Consultants GmbH, 2007 - 2008
++ * Jan Engelhardt <jengelh@medozas.de>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ */
++
++#include <linux/module.h>
++#include <linux/skbuff.h>
++
++#include <linux/netfilter/xt_qosmark.h>
++#include <linux/netfilter/x_tables.h>
++
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("Marc Boucher <marc@mbsi.ca>");
++MODULE_DESCRIPTION("Xtables: packet qosmark operations");
++MODULE_ALIAS("ipt_qosmark");
++MODULE_ALIAS("ip6t_qosmark");
++MODULE_ALIAS("ipt_QOSMARK");
++MODULE_ALIAS("ip6t_QOSMARK");
++
++static unsigned int
++qosmark_tg(struct sk_buff *skb, const struct xt_action_param *par)
++{
++	const struct xt_qosmark_tginfo2 *info = par->targinfo;
++
++	skb->qosmark = (skb->qosmark & ~info->mask) ^ info->mark;
++	return XT_CONTINUE;
++}
++
++static bool
++qosmark_mt(const struct sk_buff *skb, struct xt_action_param *par)
++{
++	const struct xt_qosmark_mtinfo1 *info = par->matchinfo;
++
++	return ((skb->qosmark & info->mask) == info->mark) ^ info->invert;
++}
++static struct xt_target qosmark_tg_reg __read_mostly = {
++	.name           = "QOSMARK",
++	.revision       = 2,
++	.family         = NFPROTO_UNSPEC,
++	.target         = qosmark_tg,
++	.targetsize     = sizeof(struct xt_qosmark_tginfo2),
++	.me             = THIS_MODULE,
++};
++
++static struct xt_match qosmark_mt_reg __read_mostly = {
++	.name           = "qosmark",
++	.revision       = 1,
++	.family         = NFPROTO_UNSPEC,
++	.match          = qosmark_mt,
++	.matchsize      = sizeof(struct xt_qosmark_mtinfo1),
++	.me             = THIS_MODULE,
++};
++
++static int __init qosmark_mt_init(void)
++{
++	int ret;
++
++	ret = xt_register_target(&qosmark_tg_reg);
++	if (ret < 0)
++		return ret;
++	ret = xt_register_match(&qosmark_mt_reg);
++	if (ret < 0) {
++		xt_unregister_target(&qosmark_tg_reg);
++		return ret;
++	}
++	return 0;
++}
++
++static void __exit qosmark_mt_exit(void)
++{
++	xt_unregister_match(&qosmark_mt_reg);
++	xt_unregister_target(&qosmark_tg_reg);
++}
++
++module_init(qosmark_mt_init);
++module_exit(qosmark_mt_exit);
++
++
+diff --git a/net/xfrm/ipsec_flow.c b/net/xfrm/ipsec_flow.c
+new file mode 100644
+index 000000000000..d982bfbb6c72
+--- /dev/null
++++ b/net/xfrm/ipsec_flow.c
+@@ -0,0 +1,223 @@
++// SPDX-License-Identifier: GPL-2.0+
++/* Maintain IPSec flow table for ASK fast path
++ *
++ * Copyright 2019 NXP
++ */
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET_IPSEC_OFFLOAD_MODULE) || defined(CONFIG_INET6_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD_MODULE)
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/list.h>
++#include <linux/jhash.h>
++#include <linux/interrupt.h>
++#include <linux/mm.h>
++#include <linux/random.h>
++#include <linux/init.h>
++#include <linux/slab.h>
++#include <linux/smp.h>
++#include <linux/completion.h>
++#include <linux/percpu.h>
++#include <linux/bitops.h>
++#include <linux/notifier.h>
++#include <linux/cpu.h>
++#include <linux/cpumask.h>
++#include <linux/mutex.h>
++#include <net/xfrm.h>
++#include <linux/atomic.h>
++#include <linux/security.h>
++#include <net/net_namespace.h>
++#include "ipsec_flow.h"
++
++/* Type for flow comparison (from removed flow cache) */
++typedef unsigned long flow_compare_t;
++
++/* Return the flow key size in units of flow_compare_t for a given address family */
++static inline size_t flow_key_size(unsigned short family)
++{
++	switch (family) {
++	case AF_INET:
++		return sizeof(struct flowi4) / sizeof(flow_compare_t);
++	case AF_INET6:
++		return sizeof(struct flowi6) / sizeof(flow_compare_t);
++	}
++	return 0;
++}
++
++#define IPSEC_FLOW_TABLE_SIZE  1024
++static struct kmem_cache *ipsec_flow_cachep __read_mostly;
++struct flow_table ipsec_flow_table_global;
++
++static u32 flow_hash_code(const struct flowi *flow, size_t keysize)
++{
++	const u32 *k = (const u32 *)flow;
++	const u32 length = keysize * sizeof(flow_compare_t) / sizeof(u32);
++	const u32 hash_random = 0; /*FIXME */
++
++
++	return jhash2(k, length, hash_random);
++}
++
++static int ipsec_flow_compare(const struct flowi *key1, const struct flowi *key2,
++       size_t keysize)
++{
++	const flow_compare_t *k1, *k1_lim, *k2;
++
++	k1 = (const flow_compare_t *) key1;
++	k1_lim = k1 + keysize;
++
++	k2 = (const flow_compare_t *) key2;
++
++	do {
++		if (*k1++ != *k2++)
++			return 1;
++	} while (k1 < k1_lim);
++
++	return 0;
++}
++
++/*
+++* return 1 for new flow 0 for existing flow
+++*/
++int ipsec_flow_add(struct net *net, const struct flowi *flow, u16 family, u8 dir, u16 *xfrm_handle)
++{
++	size_t keysize;
++	struct flow_entry *tfle, *fle;
++	struct flow_table *ft;
++	u32 hash;
++	u16 index, update = 0;
++
++	ft = &ipsec_flow_table_global;
++
++
++	keysize = flow_key_size(family);
++	if(!keysize)
++		return 0;
++
++	hash = (flow_hash_code(flow, keysize) &  (IPSEC_FLOW_TABLE_SIZE - 1));
++
++	spin_lock_bh(&ft->ipsec_flow_lock);
++	hlist_for_each_entry(tfle, &ft->hash_table[hash], hlist) {
++		if(tfle->net ==  net &&
++				tfle->family == family &&
++				tfle->dir == dir &&
++				(ipsec_flow_compare(flow, &tfle->flow, keysize) == 0)) {
++			/*Flow found */
++			for (index = 0; index < XFRM_POLICY_TYPE_MAX; index++) {
++				if (tfle->xfrm_handle[index] != xfrm_handle[index]) {
++					/*pr_info("%s()::%d flow handle updating from 0x%x to 0x%x\n",
++					  __func__, __LINE__, tfle->xfrm_handle[index], xfrm_handle[index]);*/
++					tfle->xfrm_handle[index] = xfrm_handle[index];
++					update = 1;
++				}
++			}
++			spin_unlock_bh(&ft->ipsec_flow_lock);
++			if (update) {
++				return 1;
++			}
++			else
++				return 0;
++
++		}
++	}
++	spin_unlock_bh(&ft->ipsec_flow_lock);
++	/* Insert flow into flow table */
++	fle = kmem_cache_alloc(ipsec_flow_cachep, GFP_ATOMIC);
++	if(fle) {
++		fle->net = net;
++		fle->family = family;
++		fle->dir = dir;
++		memcpy(&fle->flow, flow, keysize * sizeof(flow_compare_t));
++		memcpy(fle->xfrm_handle, xfrm_handle, XFRM_POLICY_TYPE_MAX*sizeof(u16));
++		spin_lock_bh(&ft->ipsec_flow_lock);
++		hlist_add_head(&fle->hlist, &ft->hash_table[hash]);
++		ft->flow_cnt++;
++		spin_unlock_bh(&ft->ipsec_flow_lock);
++		/*pr_info("%s flow added, xfrm_handle <0x%x 0x%x> fle->xfrm_handle <0x%x 0x%x>\n",
++		  __func__, xfrm_handle[0], xfrm_handle[1], fle->xfrm_handle[0], fle->xfrm_handle[1]);*/
++
++	}else {
++		pr_err("%s:  Failed to alloc memory, flow is not pushed\n", __func__);
++		return 0;
++	}
++
++	return 1;
++}
++EXPORT_SYMBOL(ipsec_flow_add);
++
++static int ipsec_flow_remove(const struct flowi *flow, u16 family, u8 dir)
++{
++	size_t keysize;
++	struct flow_entry *tfle;
++	struct flow_table *ft;
++	u32 hash;
++
++	ft = &ipsec_flow_table_global;
++
++
++	keysize = flow_key_size(family);
++	if(!keysize)
++		goto ignore_flow;
++
++	hash = (flow_hash_code(flow, keysize) &  (IPSEC_FLOW_TABLE_SIZE - 1));
++
++	spin_lock_bh(&ft->ipsec_flow_lock);
++	hlist_for_each_entry(tfle, &ft->hash_table[hash], hlist) {
++		if(tfle->family == family &&
++				tfle->dir == dir &&
++				(ipsec_flow_compare(flow, &tfle->flow, keysize) == 0)) {
++			/*Flow found */
++			hlist_del(&tfle->hlist);
++			kmem_cache_free(ipsec_flow_cachep, tfle);
++			ft->flow_cnt--;
++			spin_unlock_bh(&ft->ipsec_flow_lock);
++			return 1;
++		}
++	}
++
++	spin_unlock_bh(&ft->ipsec_flow_lock);
++ignore_flow:
++	pr_err("%s: Failed to remove flow\n", __func__);
++	return 0;
++}
++
++void flow_cache_remove(const struct flowi *key,    unsigned short family,
++       unsigned short dir)
++{
++
++ipsec_flow_remove(key, family, dir);
++}
++EXPORT_SYMBOL(flow_cache_remove);
++
++int ipsec_flow_init(struct net *net)
++{
++	struct flow_table *ft;
++
++	pr_info("%s \n",__func__);
++	ft = &ipsec_flow_table_global;
++
++	if (!ipsec_flow_cachep)
++		ipsec_flow_cachep = kmem_cache_create("ipsec_flow_cache",
++				sizeof(struct flow_entry),
++				0, SLAB_PANIC, NULL);
++	ft->hash_table = kzalloc(sizeof(struct hlist_head) * IPSEC_FLOW_TABLE_SIZE, GFP_KERNEL);
++	if(!ft->hash_table) {
++		pr_err("%s: failed to allocate memory\n", __func__);
++		return -ENOMEM;
++	}
++	ft->flow_cnt = 0;
++	spin_lock_init(&ft->ipsec_flow_lock);
++	return 0;
++}
++EXPORT_SYMBOL(ipsec_flow_init);
++
++void ipsec_flow_fini(struct net *net)
++{
++struct flow_table *ft;
++
++pr_info("%s \n",__func__);
++ft = &ipsec_flow_table_global;
++if (ft->hash_table) {
++kfree(ft->hash_table);
++ft->hash_table = NULL;
++}
++}
++EXPORT_SYMBOL(ipsec_flow_fini);
++
++MODULE_LICENSE("GPL");
++#endif
++
+diff --git a/net/xfrm/ipsec_flow.h b/net/xfrm/ipsec_flow.h
+new file mode 100644
+index 000000000000..846d995c3813
+--- /dev/null
++++ b/net/xfrm/ipsec_flow.h
+@@ -0,0 +1,35 @@
++// SPDX-License-Identifier: GPL-2.0+
++/* Maintain IPSec flow table for ASK fast path
++ *
++ * Copyright 2019 NXP
++ */
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET_IPSEC_OFFLOAD_MODULE) || defined(CONFIG_INET6_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD_MODULE)
++#include <linux/kernel.h>
++#include <linux/list.h>
++#include <linux/mutex.h>
++#include <net/xfrm.h>
++#include <net/net_namespace.h>
++
++struct flow_table {
++	struct hlist_head   *hash_table;
++	spinlock_t      ipsec_flow_lock;
++	int             flow_cnt;
++};
++
++struct flow_entry {
++	struct hlist_node   hlist;
++	struct flowi        flow;
++	struct net      *net;
++	u16         family;
++	u16             xfrm_handle[XFRM_POLICY_TYPE_MAX];
++	u8          dir;
++
++};
++
++int ipsec_flow_init(struct net *net);
++void ipsec_flow_fini(struct net *net);
++static inline void ipsec_flow_cache_resolve(struct net *net, const struct flowi *fl,
++					    struct dst_entry *dst, u16 family) { }
++int ipsec_flow_add(struct net *net, const struct flowi *flow, u16 family, u8 dir, u16 *xfrm_handle);
++#endif
++

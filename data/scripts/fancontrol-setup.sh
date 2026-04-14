@@ -4,8 +4,8 @@
 # and writes the config before fancontrol.service starts.
 #
 # Temperature source priority:
-#   1. core_cluster (mainline kernel thermal zone — most accurate)
-#   2. GPY115C PHY hwmon (SDK kernel — no thermal zones, PHY temp is a good proxy)
+#   1. core_cluster or cluster_thermal (thermal zone — mainline vs SDK naming)
+#   2. GPY115C PHY hwmon (SDK kernel fallback — PHY on-die temp is a good proxy)
 #
 # Runs as ExecStartPre= in fancontrol.service override.
 
@@ -49,11 +49,13 @@ fi
 
 EMC=$(find_hwmon "emc2305") || { echo "ERROR: EMC2305 fan controller not found" >&2; exit 1; }
 
-# Try core_cluster first (mainline kernel), fall back to PHY temp (SDK kernel)
+# Try core_cluster / cluster_thermal first, fall back to PHY temp (SDK kernel)
 TEMP_SRC=""
 TEMP_NAME=""
 if TEMP_SRC=$(find_hwmon "core_cluster"); then
     TEMP_NAME="core_cluster"
+elif TEMP_SRC=$(find_hwmon "cluster_thermal"); then
+    TEMP_NAME="cluster_thermal"
 elif TEMP_SRC=$(find_phy_hwmon); then
     TEMP_NAME=$(cat "/sys/class/hwmon/$TEMP_SRC/name" 2>/dev/null || echo "phy")
 else

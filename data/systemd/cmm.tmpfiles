@@ -1,0 +1,2 @@
+# Enable CMM service via tmpfiles.d (live-build breaks systemctl enable)
+L /etc/systemd/system/multi-user.target.wants/cmm.service - - - - /etc/systemd/system/cmm.service
