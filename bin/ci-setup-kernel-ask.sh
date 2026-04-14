@@ -208,6 +208,23 @@ scripts/config --set-val CONFIG_LEDS_LP5812 y
 scripts/config --set-val CONFIG_LEDS_TRIGGERS y
 scripts/config --set-val CONFIG_LEDS_TRIGGER_NETDEV y
 
+# --- KVM, NFS, VFIO, CMA, thermal (match dev kernel) ---
+scripts/config --set-val CONFIG_KVM y
+scripts/config --set-val CONFIG_NFS_FS y
+scripts/config --set-val CONFIG_NFS_V4 y
+scripts/config --set-val CONFIG_NFS_V4_1 y
+scripts/config --set-val CONFIG_SUNRPC y
+scripts/config --set-val CONFIG_VFIO y
+scripts/config --set-val CONFIG_CMA y
+scripts/config --set-val CONFIG_DMA_CMA y
+scripts/config --set-val CONFIG_CMA_SIZE_MBYTES 32
+scripts/config --enable CONFIG_THERMAL_GOV_POWER_ALLOCATOR
+scripts/config --disable CONFIG_THERMAL_GOV_FAIR_SHARE
+scripts/config --disable CONFIG_THERMAL_GOV_BANG_BANG
+scripts/config --disable CONFIG_CPU_IDLE_GOV_LADDER
+scripts/config --disable CONFIG_STRICT_DEVMEM
+scripts/config --disable CONFIG_IO_STRICT_DEVMEM
+
 # --- Resolve dependencies after forced overrides ---
 echo "I: ASK — Re-running olddefconfig to resolve dependencies"
 make olddefconfig

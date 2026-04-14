@@ -7,10 +7,12 @@ Entries are factual. The humor is in the bugs.
 ## Unreleased
 
 ### Fixed
+- **`ipsec_flow_fini` kernel panic on reboot** — ASK `ipsec_flow_fini()` operates on a global table (`ipsec_flow_table_global`) but is called per-network-namespace via `xfrm_net_exit()`. When init_net and Docker namespaces both call fini, the second call does `kfree()` on already-freed `hash_table` pointer → BUG at `mm/slub.c:448`. Fixed by NULLing the pointer after free and guarding against double-free.
 - **ASK `fp_netfilter_init` boot crash** — `comcerto_fp_netfilter.c` used `module_init()` which runs at `device_initcall` level 6, but was linked before `nf_conntrack` in the Makefile. `nf_ct_netns_get(&init_net)` called before conntrack per-net data existed → NULL pointer dereference. Fixed by changing to `late_initcall()`.
 - **`accel-ppp-ng` ARM64 dependency failure** — VyOS upstream added `accel-ppp-ng` as a `vyos-1x` dependency, but no ARM64 build exists. `ci-setup-vyos1x.sh` now strips it from `debian/control` via sed. **TODO:** re-add when ARM64 package becomes available.
 
 ### Added
+- **Kernel config: KVM, NFS, VFIO, CMA, thermal** — New `ls1046a-extras.config` fragment brings CI build kernel in line with dev kernel: KVM virtualization, NFSv4.1 client, VFIO framework, 32MB CMA for DMA/USDPAA, `power_allocator` thermal governor. Removes unnecessary `fair_share`/`bang_bang` thermal governors and `ladder` cpuidle governor. Disables `STRICT_DEVMEM` for DPDK DPAA PMD `/dev/mem` access.
 - **ASK (Application Solutions Kit) SDK kernel integration** — NXP SDK FMan/QBMan/DPAA drivers ported to mainline kernel 6.6 for ASK hardware offload support. Split into two artifacts: `ask-nxp-sdk-sources.tar.gz` (67 files, static) and `003-ask-kernel-hooks.patch` (75 files, adapts to kernel updates). All verified against mainline v6.6 with zero patch failures.
 
 ### Improved
