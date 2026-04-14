@@ -197,4 +197,30 @@ mkdir -p "$CHROOT/usr/local/lib/ask-modules"
 cp data/hooks/97-ask-userspace.chroot "$HOOKS/97-ask-userspace.chroot"
 chmod +x "$HOOKS/97-ask-userspace.chroot"
 
+### ====================================================================
+### Enable all custom services via direct symlinks
+### ====================================================================
+# tmpfiles.d creates symlinks at boot, but may run too late for sysinit.target
+# services or may not work on every live-build variant. Direct symlinks in
+# the chroot are baked into the squashfs and always work.
+mkdir -p "$CHROOT/etc/systemd/system/multi-user.target.wants"
+mkdir -p "$CHROOT/etc/systemd/system/sysinit.target.wants"
+
+# multi-user.target services
+for svc in vyos-postinstall fman-fq-qdisc boot-complete-notify sfp-tx-enable-sdk \
+           ask-conntrack-fix cmm; do
+  if [ -f "$CHROOT/etc/systemd/system/${svc}.service" ]; then
+    ln -sf "/etc/systemd/system/${svc}.service" \
+      "$CHROOT/etc/systemd/system/multi-user.target.wants/${svc}.service"
+  fi
+done
+
+# sysinit.target services
+for svc in ask-modules-load; do
+  if [ -f "$CHROOT/etc/systemd/system/${svc}.service" ]; then
+    ln -sf "/etc/systemd/system/${svc}.service" \
+      "$CHROOT/etc/systemd/system/sysinit.target.wants/${svc}.service"
+  fi
+done
+
 echo "### vyos-build setup complete (with ASK fast-path userspace)"
