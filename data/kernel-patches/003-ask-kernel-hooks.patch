@@ -5740,11 +5740,14 @@ index 000000000000..d982bfbb6c72
 +
 +void ipsec_flow_fini(struct net *net)
 +{
-+	struct flow_table *ft;
++struct flow_table *ft;
 +
-+	pr_info("%s \n",__func__);
-+	ft = &ipsec_flow_table_global;
-+	kfree(ft->hash_table);
++pr_info("%s \n",__func__);
++ft = &ipsec_flow_table_global;
++if (ft->hash_table) {
++kfree(ft->hash_table);
++ft->hash_table = NULL;
++}
 +}
 +EXPORT_SYMBOL(ipsec_flow_fini);
 +

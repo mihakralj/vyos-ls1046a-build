@@ -15,6 +15,13 @@ DEFCONFIG=vyos-build/scripts/package-build/linux-kernel/config/arm64/vyos_defcon
 sed -i '/CONFIG_DEVTMPFS_MOUNT/d'          "$DEFCONFIG"
 sed -i '/CONFIG_CPU_FREQ_DEFAULT_GOV/d'     "$DEFCONFIG"
 sed -i '/CONFIG_DEBUG_PREEMPT/d'            "$DEFCONFIG"
+sed -i '/CONFIG_THERMAL_GOV_FAIR_SHARE/d'   "$DEFCONFIG"
+sed -i '/CONFIG_THERMAL_GOV_BANG_BANG/d'     "$DEFCONFIG"
+sed -i '/CONFIG_CPU_IDLE_GOV_LADDER/d'       "$DEFCONFIG"
+sed -i '/CONFIG_STRICT_DEVMEM/d'            "$DEFCONFIG"
+sed -i '/CONFIG_IO_STRICT_DEVMEM/d'         "$DEFCONFIG"
+sed -i '/CONFIG_CMA/d'                      "$DEFCONFIG"
+sed -i '/CONFIG_DMA_CMA/d'                  "$DEFCONFIG"
 
 # Append all LS1046A kernel config fragments
 # NOTE: ls1046a-usdpaa.config moved to archive/dpaa-pmd/ (DPDK PMD archived)
@@ -160,6 +167,22 @@ scripts/config --set-val CONFIG_LEDS_GPIO y
 scripts/config --set-val CONFIG_LEDS_LP5812 y
 scripts/config --set-val CONFIG_LEDS_TRIGGERS y
 scripts/config --set-val CONFIG_LEDS_TRIGGER_NETDEV y
+# KVM, NFS, VFIO, CMA, thermal (match dev kernel)
+scripts/config --set-val CONFIG_KVM y
+scripts/config --set-val CONFIG_NFS_FS y
+scripts/config --set-val CONFIG_NFS_V4 y
+scripts/config --set-val CONFIG_NFS_V4_1 y
+scripts/config --set-val CONFIG_SUNRPC y
+scripts/config --set-val CONFIG_VFIO y
+scripts/config --set-val CONFIG_CMA y
+scripts/config --set-val CONFIG_DMA_CMA y
+scripts/config --set-val CONFIG_CMA_SIZE_MBYTES 32
+scripts/config --enable CONFIG_THERMAL_GOV_POWER_ALLOCATOR
+scripts/config --disable CONFIG_THERMAL_GOV_FAIR_SHARE
+scripts/config --disable CONFIG_THERMAL_GOV_BANG_BANG
+scripts/config --disable CONFIG_CPU_IDLE_GOV_LADDER
+scripts/config --disable CONFIG_STRICT_DEVMEM
+scripts/config --disable CONFIG_IO_STRICT_DEVMEM
 make olddefconfig
 
 LS1046A_POSTDEFCONFIG_EOF
