@@ -1,0 +1,36 @@
+#!/bin/bash
+# 96-enable-services.chroot — Enable custom systemd services via symlinks
+#
+# Why a chroot hook instead of includes.chroot symlinks?
+# VyOS build-vyos-image uses shutil.copytree() to copy includes.chroot into
+# the build config. copytree follows symlinks by default (symlinks=False),
+# converting them to regular file copies. systemd ignores non-symlink files
+# in .wants/ directories → services never start.
+#
+# This hook runs INSIDE the chroot after all files are installed,
+# creating proper symlinks that are baked into the squashfs.
+
+set -e
+
+echo "I: Enabling custom LS1046A services..."
+
+# multi-user.target services
+for svc in vyos-postinstall fman-fq-qdisc boot-complete-notify sfp-tx-enable-sdk \
+           ask-conntrack-fix cmm; do
+  if [ -f "/etc/systemd/system/${svc}.service" ]; then
+    mkdir -p /etc/systemd/system/multi-user.target.wants
+    ln -sf "../${svc}.service" "/etc/systemd/system/multi-user.target.wants/${svc}.service"
+    echo "  enabled: ${svc}.service → multi-user.target"
+  fi
+done
+
+# sysinit.target services
+for svc in ask-modules-load; do
+  if [ -f "/etc/systemd/system/${svc}.service" ]; then
+    mkdir -p /etc/systemd/system/sysinit.target.wants
+    ln -sf "../${svc}.service" "/etc/systemd/system/sysinit.target.wants/${svc}.service"
+    echo "  enabled: ${svc}.service → sysinit.target"
+  fi
+done
+
+echo "I: Custom LS1046A services enabled."
