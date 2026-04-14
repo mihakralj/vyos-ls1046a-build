@@ -127,8 +127,10 @@ done
 mkimage -A arm64 -T script -C none -n "VyOS LS1046A USB Boot" \
   -d "$GITHUB_WORKSPACE/data/scripts/boot.cmd" "$ISO_CONTENT/boot.scr"
 
-# Collect DTBs
-cp "$GITHUB_WORKSPACE/data/dtb/mono-gw.dtb" "$ISO_CONTENT/mono-gw.dtb"
+# Collect DTBs (use includes.binary version — may have been updated by ci-build-packages.sh)
+MONO_DTB_SRC="$GITHUB_WORKSPACE/vyos-build/data/live-build-config/includes.binary/mono-gw.dtb"
+[ ! -f "$MONO_DTB_SRC" ] && MONO_DTB_SRC="$GITHUB_WORKSPACE/data/dtb/mono-gw.dtb"
+cp "$MONO_DTB_SRC" "$ISO_CONTENT/mono-gw.dtb"
 if [ -f "$GITHUB_WORKSPACE/data/dtb/fsl-ls1046a-rdb.dtb" ]; then
   cp "$GITHUB_WORKSPACE/data/dtb/fsl-ls1046a-rdb.dtb" "$ISO_CONTENT/fsl-ls1046a-rdb.dtb"
 fi

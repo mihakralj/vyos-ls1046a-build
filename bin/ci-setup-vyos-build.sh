@@ -197,30 +197,11 @@ mkdir -p "$CHROOT/usr/local/lib/ask-modules"
 cp data/hooks/97-ask-userspace.chroot "$HOOKS/97-ask-userspace.chroot"
 chmod +x "$HOOKS/97-ask-userspace.chroot"
 
-### ====================================================================
-### Enable all custom services via direct symlinks
-### ====================================================================
-# tmpfiles.d creates symlinks at boot, but may run too late for sysinit.target
-# services or may not work on every live-build variant. Direct symlinks in
-# the chroot are baked into the squashfs and always work.
-mkdir -p "$CHROOT/etc/systemd/system/multi-user.target.wants"
-mkdir -p "$CHROOT/etc/systemd/system/sysinit.target.wants"
-
-# multi-user.target services (relative symlinks so shutil.copytree can follow them)
-for svc in vyos-postinstall fman-fq-qdisc boot-complete-notify sfp-tx-enable-sdk \
-           ask-conntrack-fix cmm; do
-  if [ -f "$CHROOT/etc/systemd/system/${svc}.service" ]; then
-    ln -sf "../${svc}.service" \
-      "$CHROOT/etc/systemd/system/multi-user.target.wants/${svc}.service"
-  fi
-done
-
-# sysinit.target services (relative symlinks so shutil.copytree can follow them)
-for svc in ask-modules-load; do
-  if [ -f "$CHROOT/etc/systemd/system/${svc}.service" ]; then
-    ln -sf "../${svc}.service" \
-      "$CHROOT/etc/systemd/system/sysinit.target.wants/${svc}.service"
-  fi
-done
+### Service enablement chroot hook
+# Must be a chroot hook (not includes.chroot symlinks) because build-vyos-image
+# uses shutil.copytree() which follows symlinks → converts to regular files →
+# systemd ignores non-symlink files in .wants/ directories.
+cp data/hooks/96-enable-services.chroot "$HOOKS/96-enable-services.chroot"
+chmod +x "$HOOKS/96-enable-services.chroot"
 
 echo "### vyos-build setup complete (with ASK fast-path userspace)"
