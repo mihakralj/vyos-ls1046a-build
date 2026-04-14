@@ -206,19 +206,19 @@ chmod +x "$HOOKS/97-ask-userspace.chroot"
 mkdir -p "$CHROOT/etc/systemd/system/multi-user.target.wants"
 mkdir -p "$CHROOT/etc/systemd/system/sysinit.target.wants"
 
-# multi-user.target services
+# multi-user.target services (relative symlinks so shutil.copytree can follow them)
 for svc in vyos-postinstall fman-fq-qdisc boot-complete-notify sfp-tx-enable-sdk \
            ask-conntrack-fix cmm; do
   if [ -f "$CHROOT/etc/systemd/system/${svc}.service" ]; then
-    ln -sf "/etc/systemd/system/${svc}.service" \
+    ln -sf "../${svc}.service" \
       "$CHROOT/etc/systemd/system/multi-user.target.wants/${svc}.service"
   fi
 done
 
-# sysinit.target services
+# sysinit.target services (relative symlinks so shutil.copytree can follow them)
 for svc in ask-modules-load; do
   if [ -f "$CHROOT/etc/systemd/system/${svc}.service" ]; then
-    ln -sf "/etc/systemd/system/${svc}.service" \
+    ln -sf "../${svc}.service" \
       "$CHROOT/etc/systemd/system/sysinit.target.wants/${svc}.service"
   fi
 done
