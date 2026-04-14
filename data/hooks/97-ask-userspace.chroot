@@ -36,4 +36,12 @@ if [ -d /usr/local/lib/ask-modules ]; then
   mkdir -p /usr/local/lib/ask-modules
 fi
 
+### SDK kernel services: create .wants symlinks directly in squashfs
+# These services use tmpfiles.d as backup, but creating the symlink here
+# is more reliable (tmpfiles may race with systemd unit scanning).
+# Services have ConditionPathExists guards so they're harmless on non-SDK kernels.
+mkdir -p /etc/systemd/system/multi-user.target.wants
+ln -sf /etc/systemd/system/sfp-tx-enable-sdk.service \
+  /etc/systemd/system/multi-user.target.wants/sfp-tx-enable-sdk.service
+
 echo "### ASK userspace chroot hook complete"

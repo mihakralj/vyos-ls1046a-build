@@ -1,8 +1,7 @@
 [Unit]
 Description=Deassert SFP+ TX_DISABLE for SDK kernel (no phylink)
 Documentation=file:///usr/local/bin/sfp-tx-enable-sdk.sh
-DefaultDependencies=no
-After=systemd-modules-load.service
+After=systemd-tmpfiles-setup.service
 Before=vyos-router.service
 ConditionPathExists=/sys/bus/platform/drivers/fsl_dpa
 
