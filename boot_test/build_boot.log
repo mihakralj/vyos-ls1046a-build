@@ -1,0 +1,686 @@
+=> run vyos
+35 bytes read in 1 ms (34.2 KiB/s)
+10316802 bytes read in 426 ms (23.1 MiB/s)
+92452 bytes read in 5 ms (17.6 MiB/s)
+33133109 bytes read in 1367 ms (23.1 MiB/s)
+   Uncompressing Kernel Image to 0
+## Flattened Device Tree blob at 88000000
+   Booting using the fdt blob at 0x88000000
+Working FDT set to 88000000
+   Loading Ramdisk to f8c67000, end fac00235 ... OK
+   Loading Device Tree to 00000000f8c3d000, end 00000000f8c66923 ... OK
+Working FDT set to f8c3d000
+PCIe1: pcie@3400000 Root Complex: no link
+PCIe2: pcie@3500000 disabled
+PCIe3: pcie@3600000 Root Complex: no link
+WARNING failed to get smmu node: FDT_ERR_NOTFOUND
+WARNING failed to get smmu node: FDT_ERR_NOTFOUND
+
+Starting kernel ...
+
+[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x410fd082]
+[    0.000000] Linux version 6.6.133-vyos (root@f231a2a7fc73) (gcc (Debian 12.2.0-14+deb12u1) 12.2.0, GNU ld (GNU Binutils for Debian) 2.40) #1 SMP PREEMPT_DYNAMIC Tue Apr 14 17:29:03 UTC 2026
+[    0.000000] KASLR enabled
+[    0.000000] Machine model: Mono Gateway Development Kit
+[    0.000000] earlycon: uart8250 at MMIO 0x00000000021c0500 (options '')
+[    0.000000] printk: bootconsole [uart8250] enabled
+[    0.000000] efi: UEFI not found.
+[    0.000000] OF: reserved mem: initialized node qman-pfdr, compatible id fsl,qman-pfdr
+[    0.000000] OF: reserved mem: 0x00000009fc000000..0x00000009fdffffff (32768 KiB) nomap non-reusable qman-pfdr
+[    0.000000] OF: reserved mem: initialized node qman-fqd, compatible id fsl,qman-fqd
+[    0.000000] OF: reserved mem: 0x00000009fe800000..0x00000009feffffff (8192 KiB) nomap non-reusable qman-fqd
+[    0.000000] OF: reserved mem: initialized node bman-fbpr, compatible id fsl,bman-fbpr
+[    0.000000] OF: reserved mem: 0x00000009ff000000..0x00000009ffffffff (16384 KiB) nomap non-reusable bman-fbpr
+[    0.000000] NUMA: No NUMA configuration found
+[    0.000000] NUMA: Faking a node at [mem 0x0000000080000000-0x00000009ffffffff]
+[    0.000000] NUMA: NODE_DATA [mem 0x9fb7f41c0-0x9fb7f7fff]
+[    0.000000] Zone ranges:
+[    0.000000]   DMA      [mem 0x0000000080000000-0x00000000ffffffff]
+[    0.000000]   DMA32    empty
+[    0.000000]   Normal   [mem 0x0000000100000000-0x00000009ffffffff]
+[    0.000000] Movable zone start for each node
+[    0.000000] Early memory node ranges
+[    0.000000]   node   0: [mem 0x0000000080000000-0x00000000fbdfffff]
+[    0.000000]   node   0: [mem 0x0000000880000000-0x00000009fbffffff]
+[    0.000000]   node   0: [mem 0x00000009fc000000-0x00000009fdffffff]
+[    0.000000]   node   0: [mem 0x00000009fe000000-0x00000009fe7fffff]
+[    0.000000]   node   0: [mem 0x00000009fe800000-0x00000009ffffffff]
+[    0.000000] Initmem setup node 0 [mem 0x0000000080000000-0x00000009ffffffff]
+[    0.000000] On node 0, zone Normal: 16896 pages in unavailable ranges
+[    0.000000] cma: Reserved 32 MiB at 0x00000000f6c00000 on node -1
+[    0.000000] psci: probing for conduit method from DT.
+[    0.000000] psci: PSCIv1.1 detected in firmware.
+[    0.000000] psci: Using standard PSCI v0.2 function IDs
+[    0.000000] psci: MIGRATE_INFO_TYPE not supported.
+[    0.000000] psci: SMC Calling Convention v1.5
+[    0.000000] percpu: Embedded 32 pages/cpu s93736 r8192 d29144 u131072
+[    0.000000] Detected PIPT I-cache on CPU0
+[    0.000000] CPU features: detected: Spectre-v2
+[    0.000000] CPU features: detected: Spectre-v3a
+[    0.000000] CPU features: detected: Spectre-BHB
+[    0.000000] CPU features: kernel page table isolation forced ON by KASLR
+[    0.000000] CPU features: detected: Kernel page table isolation (KPTI)
+[    0.000000] CPU features: detected: ARM erratum 1742098
+[    0.000000] CPU features: detected: ARM errata 1165522, 1319367, or 1530923
+[    0.000000] alternatives: applying boot alternatives
+[    0.000000] Kernel command line: BOOT_IMAGE=/boot/2026.04.14-1703-rolling/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 vyos-union=/boot/2026.04.14-1703-rolling
+[    0.000000] Unknown kernel command line parameters "noautologin boot=live vyos-union=/boot/2026.04.14-1703-rolling", will be passed to user space.
+[    0.000000] Dentry cache hash table entries: 1048576 (order: 11, 8388608 bytes, linear)
+[    0.000000] Inode-cache hash table entries: 524288 (order: 10, 4194304 bytes, linear)
+[    0.000000] Fallback order for Node 0: 0 
+[    0.000000] Built 1 zonelists, mobility grouping on.  Total pages: 2047488
+[    0.000000] Policy zone: Normal
+[    0.000000] mem auto-init: stack:off, heap alloc:off, heap free:off
+[    0.000000] software IO TLB: area num 4.
+[    0.000000] software IO TLB: mapped [mem 0x00000000f2c00000-0x00000000f6c00000] (64MB)
+[    0.000000] Memory: 7943416K/8321024K available (13568K kernel code, 2576K rwdata, 5820K rodata, 4992K init, 1139K bss, 344840K reserved, 32768K cma-reserved)
+[    0.000000] SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=4, Nodes=1
+[    0.000000] Dynamic Preempt: none
+[    0.000000] rcu: Preemptible hierarchical RCU implementation.
+[    0.000000] rcu:     RCU restricting CPUs from NR_CPUS=256 to nr_cpu_ids=4.
+[    0.000000]  Trampoline variant of Tasks RCU enabled.
+[    0.000000]  Tracing variant of Tasks RCU enabled.
+[    0.000000] rcu: RCU calculated value of scheduler-enlistment delay is 100 jiffies.
+[    0.000000] rcu: Adjusting geometry for rcu_fanout_leaf=16, nr_cpu_ids=4
+[    0.000000] NR_IRQS: 64, nr_irqs: 64, preallocated irqs: 0
+[    0.000000] GIC: Adjusting CPU interface base to 0x000000000142f000
+[    0.000000] Root IRQ handler: gic_handle_irq
+[    0.000000] GIC: Using split EOI/Deactivate mode
+[    0.000000] rcu: srcu_init: Setting srcu_struct sizes based on contention.
+[    0.000000] arch_timer: cp15 timer(s) running at 25.00MHz (phys).
+[    0.000000] clocksource: arch_sys_counter: mask: 0xffffffffffffff max_cycles: 0x5c40939b5, max_idle_ns: 440795202646 ns
+[    0.000000] sched_clock: 56 bits at 25MHz, resolution 40ns, wraps every 4398046511100ns
+[    0.008532] Console: colour dummy device 80x25
+[    0.013846] Calibrating delay loop (skipped), value calculated using timer frequency.. 50.00 BogoMIPS (lpj=25000)
+[    0.024183] pid_max: default: 32768 minimum: 301
+[    0.030889] Mount-cache hash table entries: 16384 (order: 5, 131072 bytes, linear)
+[    0.038529] Mountpoint-cache hash table entries: 16384 (order: 5, 131072 bytes, linear)
+[    0.048679] RCU Tasks: Setting shift to 2 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=4.
+[    0.057492] RCU Tasks Trace: Setting shift to 2 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=4.
+[    0.066892] rcu: Hierarchical SRCU implementation.
+[    0.071713] rcu:     Max phase no-delay instances is 400.
+[    0.077444] EFI services will not be available.
+[    0.082162] smp: Bringing up secondary CPUs ...
+[    0.087064] Detected PIPT I-cache on CPU1
+[    0.087112] CPU1: Booted secondary processor 0x0000000001 [0x410fd082]
+[    0.087468] Detected PIPT I-cache on CPU2
+[    0.087501] CPU2: Booted secondary processor 0x0000000002 [0x410fd082]
+[    0.087865] Detected PIPT I-cache on CPU3
+[    0.087898] CPU3: Booted secondary processor 0x0000000003 [0x410fd082]
+[    0.087943] smp: Brought up 1 node, 4 CPUs
+[    0.123850] SMP: Total of 4 processors activated.
+[    0.128581] CPU features: detected: 32-bit EL0 Support
+[    0.133749] CPU features: detected: 32-bit EL1 Support
+[    0.138918] CPU features: detected: CRC32 instructions
+[    0.144125] CPU: All CPU(s) started at EL2
+[    0.148257] alternatives: applying system-wide alternatives
+[    0.155023] devtmpfs: initialized
+[    0.163802] clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 1911260446275000 ns
+[    0.173621] futex hash table entries: 1024 (order: 4, 65536 bytes, linear)
+[    0.181059] pinctrl core: initialized pinctrl subsystem
+[    0.186773] Machine: Mono Gateway Development Kit
+[    0.191507] SoC family: QorIQ LS1046A
+[    0.195187] SoC ID: svr:0x87070010, Revision: 1.0
+[    0.200154] DMI not present or invalid.
+[    0.204772] NET: Registered PF_NETLINK/PF_ROUTE protocol family
+[    0.211241] DMA: preallocated 1024 KiB GFP_KERNEL pool for atomic allocations
+[    0.218579] DMA: preallocated 1024 KiB GFP_KERNEL|GFP_DMA pool for atomic allocations
+[    0.226690] DMA: preallocated 1024 KiB GFP_KERNEL|GFP_DMA32 pool for atomic allocations
+[    0.235307] audit: initializing netlink subsys (disabled)
+[    0.240829] audit: type=2000 audit(0.049:1): state=initialized audit_enabled=0 res=1
+[    0.241359] thermal_sys: Registered thermal governor 'step_wise'
+[    0.248630] thermal_sys: Registered thermal governor 'user_space'
+[    0.254692] cpuidle: using governor menu
+[    0.264825] Bman ver:0a02,02,01
+[    0.269394] qman-fqd addr 0x00000009fe800000 size 0x800000
+[    0.274915] qman-pfdr addr 0x00000009fc000000 size 0x2000000
+[    0.280612] Qman ver:0a01,03,02,01
+[    0.284132] hw-breakpoint: found 6 breakpoint and 4 watchpoint registers.
+[    0.291011] ASID allocator initialised with 32768 entries
+[    0.296972] Serial: AMBA PL011 UART driver
+[    0.314512] Modules: 2G module region forced by RANDOMIZE_MODULE_REGION_FULL
+[    0.321619] Modules: 0 pages in range for non-PLT usage
+[    0.321621] Modules: 517216 pages in range for PLT usage
+[    0.327482] HugeTLB: registered 1.00 GiB page size, pre-allocated 0 pages
+[    0.339668] HugeTLB: 0 KiB vmemmap can be freed for a 1.00 GiB page
+[    0.345975] HugeTLB: registered 32.0 MiB page size, pre-allocated 0 pages
+[    0.352805] HugeTLB: 0 KiB vmemmap can be freed for a 32.0 MiB page
+[    0.359111] HugeTLB: registered 2.00 MiB page size, pre-allocated 0 pages
+[    0.365941] HugeTLB: 0 KiB vmemmap can be freed for a 2.00 MiB page
+[    0.372247] HugeTLB: registered 64.0 KiB page size, pre-allocated 0 pages
+[    0.379076] HugeTLB: 0 KiB vmemmap can be freed for a 64.0 KiB page
+[    0.403427] raid6: neonx8   gen()  4754 MB/s
+[    0.424759] raid6: neonx4   gen()  4631 MB/s
+[    0.446089] raid6: neonx2   gen()  3829 MB/s
+[    0.467417] raid6: neonx1   gen()  2784 MB/s
+[    0.488746] raid6: int64x8  gen()  2683 MB/s
+[    0.510082] raid6: int64x4  gen()  2616 MB/s
+[    0.531414] raid6: int64x2  gen()  2529 MB/s
+[    0.552751] raid6: int64x1  gen()  1954 MB/s
+[    0.557044] raid6: using algorithm neonx8 gen() 4754 MB/s
+[    0.579511] raid6: .... xor() 3435 MB/s, rmw enabled
+[    0.584504] raid6: using neon recovery algorithm
+[    0.589542] ACPI: Interpreter disabled.
+[    0.594830] iommu: Default domain type: Translated
+[    0.599652] iommu: DMA domain TLB invalidation policy: lazy mode
+[    0.605959] usbcore: registered new interface driver usbfs
+[    0.611496] usbcore: registered new interface driver hub
+[    0.616856] usbcore: registered new device driver usb
+[    0.622285] imx-i2c 2180000.i2c: can't get pinctrl, bus recovery not supported
+[    0.629672] i2c i2c-0: IMX I2C adapter registered
+[    0.634433] i2c i2c-0: using dma0chan16 (tx) and dma0chan17 (rx) for DMA transfers
+[    0.642148] imx-i2c 2190000.i2c: can't get pinctrl, bus recovery not supported
+[    0.649507] i2c i2c-1: IMX I2C adapter registered
+[    0.654332] imx-i2c 21a0000.i2c: can't get pinctrl, bus recovery not supported
+[    0.661712] i2c i2c-2: IMX I2C adapter registered
+[    0.666568] imx-i2c 21b0000.i2c: can't get pinctrl, bus recovery not supported
+[    0.673890] i2c i2c-3: IMX I2C adapter registered
+[    0.678810] pps_core: LinuxPPS API ver. 1 registered
+[    0.683805] pps_core: Software ver. 5.3.6 - Copyright 2005-2007 Rodolfo Giometti <giometti@linux.it>
+[    0.693009] PTP clock support registered
+[    0.697110] EDAC MC: Ver: 3.0.0
+[    0.700645] scmi_core: SCMI protocol bus registered
+[    0.705611] bman-fbpr addr 0x00000009ff000000 size 0x1000000
+[    0.711345] Bman err interrupt handler present
+[    0.716527] Bman portal initialised, cpu 0
+[    0.720702] Bman portal initialised, cpu 1
+[    0.724883] Bman portal initialised, cpu 2
+[    0.729063] Bman portal initialised, cpu 3
+[    0.733184] Bman portals initialised
+[    0.743060] Qman err interrupt handler present
+[    0.747901] QMan: Allocated lookup table at (____ptrval____), entry count 131073
+[    0.755995] QMan doesn't need cleanup, uninhibiting IRQs
+[    0.761346] Qman portal initialised, cpu 0
+[    0.765528] QMan doesn't need cleanup, uninhibiting IRQs
+[    0.770873] Qman portal initialised, cpu 1
+[    0.775037] QMan doesn't need cleanup, uninhibiting IRQs
+[    0.780381] Qman portal initialised, cpu 2
+[    0.784554] QMan doesn't need cleanup, uninhibiting IRQs
+[    0.789899] Qman portal initialised, cpu 3
+[    0.794017] Qman portals initialised
+[    0.797674] Bman: BPID allocator includes range 32:32
+[    0.802794] Qman: FQID allocator includes range 256:256
+[    0.808051] Qman: FQID allocator includes range 32768:32768
+[    0.813699] Qman: CGRID allocator includes range 0:256
+[    0.819002] Qman: pool channel allocator includes range 1025:15
+[    0.825039] No USDPAA memory, no 'fsl,usdpaa-mem' in device-tree
+[    0.831892] clocksource: Switched to clocksource arch_sys_counter
+[    0.839381] pnp: PnP ACPI: disabled
+[    0.847172] NET: Registered PF_INET protocol family
+[    0.852286] IP idents hash table entries: 131072 (order: 8, 1048576 bytes, linear)
+[    0.863626] ipsec_flow_init 
+[    0.866702] tcp_listen_portaddr_hash hash table entries: 4096 (order: 4, 65536 bytes, linear)
+[    0.875323] Table-perturb hash table entries: 65536 (order: 6, 262144 bytes, linear)
+[    0.883132] TCP established hash table entries: 65536 (order: 7, 524288 bytes, linear)
+[    0.891366] TCP bind hash table entries: 65536 (order: 9, 2097152 bytes, linear)
+[    0.899989] TCP: Hash tables configured (established 65536 bind 65536)
+[    0.906902] MPTCP token hash table entries: 8192 (order: 6, 196608 bytes, linear)
+[    0.914672] UDP hash table entries: 4096 (order: 5, 131072 bytes, linear)
+[    0.921603] UDP-Lite hash table entries: 4096 (order: 5, 131072 bytes, linear)
+[    0.929132] NET: Registered PF_UNIX/PF_LOCAL protocol family
+[    0.934846] NET: Registered PF_XDP protocol family
+[    0.939675] PCI: CLS 0 bytes, default 64
+[    0.943775] Trying to unpack rootfs image as initramfs...
+[    0.952031] kvm [1]: IPA Size Limit: 44 bits
+[    0.957005] kvm [1]: vgic interrupt IRQ9
+[    0.960992] kvm [1]: Hyp mode initialized successfully
+[    0.966980] Initialise system trusted keyrings
+[    0.971603] workingset: timestamp_bits=40 max_order=21 bucket_order=0
+[    0.978993] squashfs: version 4.0 (2009/01/31) Phillip Lougher
+[    1.003063] xor: measuring software checksum speed
+[    1.008323]    8regs           :  7653 MB/sec
+[    1.013109]    32regs          :  8290 MB/sec
+[    1.017985]    arm64_neon      :  6684 MB/sec
+[    1.022369] xor: using function: 32regs (8290 MB/sec)
+[    1.027459] async_tx: api initialized (async)
+[    1.031849] Key type asymmetric registered
+[    1.035973] Asymmetric key parser 'x509' registered
+[    1.040956] Block layer SCSI generic (bsg) driver version 0.4 loaded (major 248)
+[    1.048412] io scheduler mq-deadline registered
+[    1.052973] io scheduler kyber registered
+[    1.057113] io scheduler bfq registered
+[    1.068520] shpchp: Standard Hot Plug PCI Controller Driver version: 0.4
+[    1.083256] Serial: 8250/16550 driver, 4 ports, IRQ sharing enabled
+[    1.091374] printk: console [ttyS0] disabled
+[    1.095903] 21c0500.serial: ttyS0 at MMIO 0x21c0500 (irq = 56, base_baud = 18750000) is a 16550A
+[    1.104778] printk: console [ttyS0] enabled
+[    1.104778] printk: console [ttyS0] enabled
+[    1.113173] printk: bootconsole [uart8250] disabled
+[    1.113173] printk: bootconsole [uart8250] disabled
+[    1.123575] 21c0600.serial: ttyS1 at MMIO 0x21c0600 (irq = 56, base_baud = 18750000) is a 16550A
+[    1.132496] serial serial0: tty port ttyS1 registered
+[    1.141066] spi-nor spi1.0: n25q512a (65536 Kbytes)
+[    1.462598] Freeing initrd memory: 32356K
+[    1.473002] 9 fixed-partitions partitions found on MTD device 1550000.spi
+[    1.479837] Creating 9 MTD partitions on "1550000.spi":
+[    1.485067] 0x000000000000-0x000004000000 : "flash"
+[    1.490188] 0x000000000000-0x000000100000 : "rcw-bl2"
+[    1.495430] 0x000000100000-0x000000300000 : "uboot"
+[    1.500480] 0x000000300000-0x000000400000 : "uboot-env"
+[    1.505896] 0x000000400000-0x000000500000 : "fman-ucode"
+[    1.511375] 0x000000500000-0x000000600000 : "recovery-dtb"
+[    1.517045] 0x000000600000-0x000000a00000 : "backup"
+[    1.522192] 0x000000a00000-0x000002000000 : "kernel-initramfs"
+[    1.528190] 0x000002000000-0x000004000000 : "unallocated"
+[    1.541695] Maxlinear Ethernet GPY115C 0x0000000001afd000:00: Firmware Version: 8.111 (0x886F)
+[    1.557519] Maxlinear Ethernet GPY115C 0x0000000001afd000:01: Firmware Version: 8.111 (0x886F)
+[    1.573405] Maxlinear Ethernet GPY115C 0x0000000001afd000:02: Firmware Version: 8.111 (0x886F)
+[    1.634722] FM_Config(3449) FMan-Controller code (ver 210.10.1) (0xd20a01)
+[    1.648068] FM_Init(3616) FMan-Controller code (ver 210.10.1) (0xd20a01)
+[    1.657998] Freescale FM module, FMD API version 21.1.0
+[    1.663542] FM_PCD_Init::ext timers 4, base ptr (____ptrval____), muram base (____ptrval____), offset 3f508
+[    1.673620] FM_PCD_Init(1292) pIntMuramPtr (____ptrval____) InternalBufMgmtMuramArea 40200, size 0x8100 
+[    1.683109] FM_PCD_Init(1302) pIntMuramPtr (____ptrval____) InternalBufMgmtMuramArea 402 
+[    1.693827] Freescale FM Ports module
+[    1.697496] fsl_mac: fsl_mac: FSL FMan MAC API based driver
+[    1.703309] fsl_mac 1ae2000.ethernet: FMan MEMAC
+[    1.707933] fsl_mac 1ae2000.ethernet: FMan MAC address: e8:f6:d7:00:16:01
+[    1.714909] fsl_mac 1ae8000.ethernet: FMan MEMAC
+[    1.719530] fsl_mac 1ae8000.ethernet: FMan MAC address: e8:f6:d7:00:15:ff
+[    1.726497] fsl_mac 1aea000.ethernet: FMan MEMAC
+[    1.731119] fsl_mac 1aea000.ethernet: FMan MAC address: e8:f6:d7:00:16:00
+[    1.743180] fsl_mac 1af0000.ethernet: FMan MEMAC
+[    1.747814] fsl_mac 1af0000.ethernet: FMan MAC address: e8:f6:d7:00:16:02
+[    1.759737] fsl_mac 1af2000.ethernet: FMan MEMAC
+[    1.764371] fsl_mac 1af2000.ethernet: FMan MAC address: e8:f6:d7:00:16:03
+[    1.771223] fsl_dpa: FSL DPAA Ethernet driver
+[    1.775922] *********dpa_set_buffers_layout(677) internal buffer offset 96
+[    1.782866] dpaa_eth_priv_probe::bpid 0, count 640 
+[    1.782870] adj count 640
+[    1.799708] fsl_dpa: fsl_dpa: Probed interface eth0
+[    1.804862] *********dpa_set_buffers_layout(677) internal buffer offset 96
+[    1.811808] dpaa_eth_priv_probe::bpid 32, count 640 
+[    1.811811] adj count 640
+[    1.829614] fsl_dpa: fsl_dpa: Probed interface eth1
+[    1.834771] *********dpa_set_buffers_layout(677) internal buffer offset 96
+[    1.841734] dpaa_eth_priv_probe::bpid 32, count 640 
+[    1.841738] adj count 640
+[    1.860389] fsl_dpa: fsl_dpa: Probed interface eth2
+[    1.865504] *********dpa_set_buffers_layout(677) internal buffer offset 96
+[    1.872465] dpaa_eth_priv_probe::bpid 32, count 640 
+[    1.872469] adj count 640
+[    1.892006] fsl_dpa: fsl_dpa: Probed interface eth3
+[    1.897129] *********dpa_set_buffers_layout(677) internal buffer offset 96
+[    1.904089] dpaa_eth_priv_probe::bpid 32, count 640 
+[    1.904092] adj count 640
+[    1.924544] fsl_dpa: fsl_dpa: Probed interface eth4
+[    1.929480] fsl_advanced: FSL DPAA Advanced drivers:
+[    1.934454] fsl_proxy: FSL DPAA Proxy initialization driver
+[    1.940224] fsl_oh: FSL FMan Offline Parsing port driver
+[    1.945659] fsl_oh 1a00000.fman:dpa-fman0-oh@2: Found OH node handle compatible with fsl,dpa-oh
+[    1.954384] fsl_oh 1a00000.fman:dpa-fman0-oh@2: Allocating 0 ingress frame queues duples
+[    1.962491] fsl_oh 1a00000.fman:dpa-fman0-oh@2: OH port port@83000 has no buffer pool. Fragmentation will not be enabled
+[    1.973387] InitLowLevelDriver::of port FM-0-port-OH-1 id 1, handle (____ptrval____)
+[    1.981173] fsl_oh 1a00000.fman:dpa-fman0-oh@2: OH port port@83000 enabled.
+[    1.988142] fsl_oh 1a00000.fman:dpa-fman0-oh@2: found OH port dpa-fman0-oh@2, fman 0, port 2
+[    1.996586] fsl_oh 1a00000.fman:dpa-fman0-oh@2: Default egress frame queue: 97
+[    2.003812] fsl_oh 1a00000.fman:dpa-fman0-oh@2: Default error frame queue: 96
+[    2.010957] fsl_oh 1a00000.fman:dpa-fman0-oh@2: Initialized queues:
+[    2.017267] fsl_oh 1a00000.fman:dpa-fman0-oh@3: Found OH node handle compatible with fsl,dpa-oh
+[    2.025990] fsl_oh 1a00000.fman:dpa-fman0-oh@3: Allocating 0 ingress frame queues duples
+[    2.034090] fsl_oh 1a00000.fman:dpa-fman0-oh@3: OH port port@84000 has no buffer pool. Fragmentation will not be enabled
+[    2.044990] InitLowLevelDriver::of port FM-0-port-OH-2 id 2, handle (____ptrval____)
+[    2.052756] fsl_oh 1a00000.fman:dpa-fman0-oh@3: OH port port@84000 enabled.
+[    2.059724] fsl_oh 1a00000.fman:dpa-fman0-oh@3: found OH port dpa-fman0-oh@3, fman 0, port 3
+[    2.068167] fsl_oh 1a00000.fman:dpa-fman0-oh@3: Default egress frame queue: 99
+[    2.075393] fsl_oh 1a00000.fman:dpa-fman0-oh@3: Default error frame queue: 98
+[    2.082531] fsl_oh 1a00000.fman:dpa-fman0-oh@3: Initialized queues:
+[    2.089109] VFIO - User Level meta-driver version: 0.3
+[    2.094486] pca954x 0-0070: supply vdd not found, using dummy regulator
+[    2.101902] i2c i2c-0: Added multiplexed i2c bus 4
+[    2.106796] i2c i2c-0: Added multiplexed i2c bus 5
+[    2.111685] i2c i2c-0: Added multiplexed i2c bus 6
+[    2.116588] i2c i2c-0: Added multiplexed i2c bus 7
+[    2.121385] pca954x 0-0070: registered 4 multiplexed busses for I2C switch pca9545
+[    2.129019] pca954x 1-0070: supply vdd not found, using dummy regulator
+[    2.136335] i2c i2c-1: Added multiplexed i2c bus 8
+[    2.141189] i2c i2c-1: Added multiplexed i2c bus 9
+[    2.146035] i2c i2c-1: Added multiplexed i2c bus 10
+[    2.150964] i2c i2c-1: Added multiplexed i2c bus 11
+[    2.155847] pca954x 1-0070: registered 4 multiplexed busses for I2C switch pca9545
+[    2.163494] pca954x 2-0070: supply vdd not found, using dummy regulator
+[    2.170985] i2c i2c-2: Added multiplexed i2c bus 12
+[    2.176100] i2c i2c-2: Added multiplexed i2c bus 13
+[    2.199276] rtc-pcf2127-i2c 14-0053: registered as rtc0
+[    2.206820] rtc-pcf2127-i2c 14-0053: setting system clock to 2026-04-14T18:10:53 UTC (1776190253)
+[    2.215778] i2c i2c-2: Added multiplexed i2c bus 14
+[    2.220763] i2c i2c-2: Added multiplexed i2c bus 15
+[    2.225649] pca954x 2-0070: registered 4 multiplexed busses for I2C switch pca9545
+[    2.239134] ina2xx 12-0040: supply vs not found, using dummy regulator
+[    2.248286] ina2xx 12-0040: power monitor ina234 (Rshunt = 1000 uOhm)
+[    2.254790] ina2xx 12-0041: supply vs not found, using dummy regulator
+[    2.263365] ina2xx 12-0041: power monitor ina234 (Rshunt = 1000 uOhm)
+[    2.269865] ina2xx 12-0042: supply vs not found, using dummy regulator
+[    2.278439] ina2xx 12-0042: power monitor ina234 (Rshunt = 1000 uOhm)
+[    2.284948] ina2xx 12-0043: supply vs not found, using dummy regulator
+[    2.293517] ina2xx 12-0043: power monitor ina234 (Rshunt = 5000 uOhm)
+[    2.300019] ina2xx 13-0040: supply vs not found, using dummy regulator
+[    2.309162] ina2xx 13-0040: power monitor ina234 (Rshunt = 5000 uOhm)
+[    2.315683] ina2xx 13-0041: supply vs not found, using dummy regulator
+[    2.324249] ina2xx 13-0041: power monitor ina234 (Rshunt = 5000 uOhm)
+[    2.330748] ina2xx 13-0042: supply vs not found, using dummy regulator
+[    2.339312] ina2xx 13-0042: power monitor ina234 (Rshunt = 5000 uOhm)
+[    2.345811] ina2xx 13-0043: supply vs not found, using dummy regulator
+[    2.354389] ina2xx 13-0043: power monitor ina234 (Rshunt = 1000 uOhm)
+[    2.362151] device-mapper: uevent: version 1.0.3
+[    2.366904] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-devel@redhat.com
+[    2.375951] qoriq-cpufreq qoriq-cpufreq: Freescale QorIQ CPU frequency scaling driver
+[    2.384645] ledtrig-cpu: registered to indicate activity on CPUs
+[    2.425947] SMCCC: SOC_ID: ARCH_SOC_ID not implemented, skipping ....
+[    2.432650] caam 1700000.crypto: device ID = 0x0a11030100000000 (Era 8)
+[    2.439277] caam 1700000.crypto: job rings = 3, qi = 1
+[    2.446097] caam algorithms registered in /proc/crypto
+[    2.451340] caam 1700000.crypto: caam pkc algorithms registered in /proc/crypto
+[    2.458657] caam 1700000.crypto: registering rng-caam
+[    2.463801] caam 1700000.crypto: rng crypto API alg registered prng-caam
+[    2.471898] Freescale USDPAA process driver
+[    2.476086] Freescale USDPAA process driver
+[    2.480268] fsl-usdpaa: no region found
+[    2.484103] Freescale USDPAA process IRQ driver
+[    2.489321] hw perfevents: enabled with armv8_cortex_a72 PMU driver, 7 counters available
+[    2.490482] random: crng init done
+[    2.501363] drop_monitor: Initializing network drop monitor service
+[    2.508647] NET: Registered PF_INET6 protocol family
+[    2.533936] Segment Routing with IPv6
+[    2.537631] In-situ OAM (IOAM) with IPv6
+[    2.541602] mip6: Mobile IPv6
+[    2.544602] NET: Registered PF_KEY protocol family
+[    2.549396] Initializing NETLINK_KEY socket
+[    2.553653] Key type dns_resolver registered
+[    2.557942] mpls_gso: MPLS GSO support
+[    2.565497] registered taskstats version 1
+[    2.569703] Loading compiled-in X.509 certificates
+[    2.586546] Loaded X.509 cert 'VyOS Networks build time autogenerated Kernel key: 1bec8396ba6d3bee57671d6be039c1e9918c074f'
+[    2.609636] Loaded X.509 cert 'VyOS LS1046A Secure Boot CA: ed9ff86ac8d3dc1144144291a885ffd7bcd198db'
+[    2.624785] sfp sfp-xfi0: Host maximum power 3.0W
+[    2.629978] sfp sfp-xfi1: Host maximum power 3.0W
+[    2.635029] ASK fp_netfilter: hooks registered + conntrack force-enabled
+[    2.641795] clk: Disabling unused clocks
+[    2.647293] Freeing unused kernel memory: 4992K
+[    2.691010] Checked W+X mappings: passed, no W+X pages found
+[    2.696693] Run /init as init process
+Loading, please wait...
+Starting systemd-udevd version 252.39-1~deb12u1
+[    2.956551] sfp sfp-xfi0: module OEM              SFP-10G-T        rev 02   sn CSY101OB0963     dc 241012  
+[    3.037276] sdhci: Secure Digital Host Controller Interface driver
+[    3.043490] sdhci: Copyright(c) Pierre Ossman
+[    3.053146] sdhci-pltfm: SDHCI platform and OF driver helper
+[    3.058336] sfp sfp-xfi1: module OEM              SFP-H10GB-CU1M   rev R    sn CSC240509160290  dc 240527  
+[    3.082093] hwmon hwmon12: temp1_input not attached to any thermal zone
+[    3.115874] fsl_dpa soc:fsl,dpaa:ethernet@8 e5: renamed from eth3
+[    3.129748] fsl_dpa soc:fsl,dpaa:ethernet@1 e2: renamed from eth0
+[    3.133899] mmc0: SDHCI controller on 1560000.mmc [1560000.mmc] using ADMA 64-bit
+[    3.150610] fsl_dpa soc:fsl,dpaa:ethernet@5 e4: renamed from eth2
+[    3.162477] xhci-hcd xhci-hcd.0.auto: xHCI Host Controller
+[    3.163478] fsl_dpa soc:fsl,dpaa:ethernet@9 e6: renamed from eth4
+[    3.168007] xhci-hcd xhci-hcd.0.auto: new USB bus registered, assigned bus number 1
+[    3.181817] xhci-hcd xhci-hcd.0.auto: hcc params 0x0220f66d hci version 0x100 quirks 0x0000008002000810
+[    3.191247] xhci-hcd xhci-hcd.0.auto: irq 74, io mem 0x02f00000
+[    3.197253] xhci-hcd xhci-hcd.0.auto: xHCI Host Controller
+[    3.202745] xhci-hcd xhci-hcd.0.auto: new USB bus registered, assigned bus number 2
+[    3.210410] xhci-hcd xhci-hcd.0.auto: Host supports USB 3.0 SuperSpeed
+[    3.217132] usb usb1: New USB device found, idVendor=1d6b, idProduct=0002, bcdDevice= 6.06
+[    3.222391] fsl_dpa soc:fsl,dpaa:ethernet@4 e3: renamed from eth1
+[    3.225421] usb usb1: New USB device strings: Mfr=3, Product=2, SerialNumber=1
+[    3.238735] usb usb1: Product: xHCI Host Controller
+[    3.243619] usb usb1: Manufacturer: Linux 6.6.133-vyos xhci-hcd
+[    3.249542] usb usb1: SerialNumber: xhci-hcd.0.auto
+[    3.254725] hub 1-0:1.0: USB hub found
+[    3.258508] hub 1-0:1.0: 1 port detected
+[    3.262552] mmc0: new HS200 MMC card at address 0001
+[    3.262781] usb usb2: New USB device found, idVendor=1d6b, idProduct=0003, bcdDevice= 6.06
+[    3.275803] usb usb2: New USB device strings: Mfr=3, Product=2, SerialNumber=1
+[    3.283034] usb usb2: Product: xHCI Host Controller
+[    3.283512] mmcblk0: mmc0:0001 0IM20E 29.6 GiB
+[    3.287912] usb usb2: Manufacturer: Linux 6.6.133-vyos xhci-hcd
+[    3.287916] usb usb2: SerialNumber: xhci-hcd.0.auto
+[    3.288212] hub 2-0:1.0: USB hub found
+[    3.295694]  mmcblk0: p1 p2 p3
+[    3.298312] hub 2-0:1.0: 1 port detected
+[    3.303613] mmcblk0boot0: mmc0:0001 0IM20E 31.5 MiB
+[    3.319608] mmcblk0boot1: mmc0:0001 0IM20E 31.5 MiB
+[    3.325435] mmcblk0rpmb: mmc0:0001 0IM20E 4.00 MiB, chardev (243:0)
+Begin: Loading essential drivers ... done.
+Begin: Running /scripts/init-premount ... done.
+Begin: Mounting root file system ... [    8.785914] EXT4-fs (mmcblk0p3): mounted filesystem 26ea22c5-3485-4ba8-8065-105ddeb9ade4 ro with ordered data mode. Quota mode: disabled.
+[    8.853655] loop: module loaded
+[    8.883646] loop0: detected capacity change from 0 to 1054896
+[    8.923549] SCSI subsystem initialized
+[    8.969078] usbcore: registered new interface driver usb-storage
+Begin: Running /scripts/live-realpremount ... done.
+Begin: Mounting "/live/medium//boot/2026.04.14-1703-rolling/2026.04.14-1703-rolling.squashfs" on "//2026.04.14-1703-rolling.squashfs" via "/dev/loop0" ... done.
+[   15.179461] EXT4-fs (mmcblk0p3): re-mounted 26ea22c5-3485-4ba8-8065-105ddeb9ade4 r/w.
+mount: mounting /dev/mmcblk0boot0 on /live/persistence/ failed: No such device
+mount: mounting /dev/mmcblk0boot1 on /live/persistence/ failed: No such device
+mount: mounting /dev/mmcblk0p1 on /live/persistence/ failed: No such device
+mount: mounting /dev/mmcblk0 on /live/persistence/ failed: No such device
+mount: mounting /dev/mmcblk0 on /live/persistence/ failed: No such device
+mount: mounting /dev/mmcblk0boot0 on /live/persistence/ failed: No such device
+mount: mounting /dev/mmcblk0 on /live/persistence/ failed: No such device
+mount: mounting /dev/mmcblk0boot1 on /live/persistence/ failed: No such device
+umount: /root: target is busy.
+done.
+done.
+Begin: Running /scripts/init-bottom ... done.
+[   16.782277] systemd[1]: Inserted module 'autofs4'
+[   16.921482] systemd[1]: systemd 252.39-1~deb12u1 running in system mode (+PAM +AUDIT +SELINUX +APPARMOR +IMA +SMACK +SECCOMP +GCRYPT -GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 -IDN +IPTC +KMOD +LIBCRYPTSETUP +LIBFDISK +PCRE2 -PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD -BPF_FRAMEWORK -XKBCOMMON +UTMP +SYSVINIT default-hierarchy=unified)
+[   16.954212] systemd[1]: Detected architecture arm64.
+
+Welcome to VyOS 2026.04.14-1703-rolling (current)!
+
+[   16.983905] systemd[1]: Hostname set to <localhost.localdomain>.
+[   17.007427] systemd[1]: Initializing machine ID from random generator.
+[   17.047396] systemd[1]: memfd_create() called without MFD_EXEC or MFD_NOEXEC_SEAL set
+[   18.134696] systemd[1]: Queued start job for default target Multi-User System.
+[   18.150319] systemd[1]: Created slice Slice /system/getty.
+[  OK  ] Created slice Slice /system/getty.
+[   18.164761] systemd[1]: Created slice Slice /system/modprobe.
+[  OK  ] Created slice Slice /system/modprobe.
+[   18.179707] systemd[1]: Created slice Slice /system/serial-getty.
+[  OK  ] Created slice Slice /system/serial-getty.
+[   18.194565] systemd[1]: Created slice User and Session Slice.
+[  OK  ] Created slice User and Session Slice.
+[   18.208055] systemd[1]: Started Dispatch Password Requests to Console Directory Watch.
+[  OK  ] Started Dispatch Password …ts to Console Directory Watch.
+[   18.226041] systemd[1]: Started Forward Password Requests to Wall Directory Watch.
+[  OK  ] Started Forward Password R…uests to Wall Directory Watch.
+[   18.243257] systemd[1]: Set up automount Arbitrary Executable File Formats File System Automount Point.
+[  OK  ] Set up automount Arbitrary…s File System Automount Point.
+[   18.261967] systemd[1]: Reached target Local Encrypted Volumes.
+[  OK  ] Reached target Local Encrypted Volumes.
+[   18.275954] systemd[1]: Reached target Local Integrity Protected Volumes.
+[  OK  ] Reached target Local Integrity Protected Volumes.
+[   18.291970] systemd[1]: Reached target Network is Online.
+[  OK  ] Reached target Network is Online.
+[   18.305942] systemd[1]: Reached target Path Units.
+[  OK  ] Reached target Path Units.
+[   18.317959] systemd[1]: Reached target Remote File Systems.
+[  OK  ] Reached target Remote File Systems.
+[   18.331941] systemd[1]: Reached target Slice Units.
+[  OK  ] Reached target Slice Units.
+[   18.343955] systemd[1]: Reached target TLS tunnels for network services - per-config-file target.
+[  OK  ] Reached target TLS tunnels…ices - per-config-file target.
+[   18.361949] systemd[1]: Reached target Swaps.
+[  OK  ] Reached target Swaps.
+[   18.372955] systemd[1]: Reached target Local Verity Protected Volumes.
+[  OK  ] Reached target Local Verity Protected Volumes.
+[   18.389084] systemd[1]: Listening on initctl Compatibility Named Pipe.
+[  OK  ] Listening on initctl Compatibility Named Pipe.
+[   18.406469] systemd[1]: Listening on Journal Socket (/dev/log).
+[  OK  ] Listening on Journal Socket (/dev/log).
+[   18.421195] systemd[1]: Listening on Journal Socket.
+[  OK  ] Listening on Journal Socket.
+[   18.433671] systemd[1]: Listening on udev Control Socket.
+[  OK  ] Listening on udev Control Socket.
+[   18.447120] systemd[1]: Listening on udev Kernel Socket.
+[  OK  ] Listening on udev Kernel Socket.
+[   18.471034] systemd[1]: Mounting Huge Pages File System...
+         Mounting Huge Pages File System...
+[   18.485172] systemd[1]: Mounting POSIX Message Queue File System...
+         Mounting POSIX Message Queue File System...
+[   18.502233] systemd[1]: Mounting Kernel Debug File System...
+         Mounting Kernel Debug File System...
+[   18.527093] systemd[1]: Mounting Kernel Trace File System...
+         Mounting Kernel Trace File System...
+[   18.543825] systemd[1]: Starting Create List of Static Device Nodes...
+         Starting Create List of Static Device Nodes...
+[   18.572243] systemd[1]: Starting Load Kernel Module configfs...
+         Starting Load Kernel Module configfs...
+[   18.587417] systemd[1]: Starting Load Kernel Module dm_mod...
+         Starting Load Kernel Module dm_mod...
+[   18.602353] systemd[1]: Starting Load Kernel Module drm...
+         Starting Load Kernel Module drm...
+[   18.629222] systemd[1]: Starting Load Kernel Module efi_pstore...
+         Starting Load Kernel Module efi_pstore...
+[   18.646374] systemd[1]: Starting Load Kernel Module fuse...
+         Starting Load Kernel Module fuse...
+[   18.670248] systemd[1]: Starting Load Kernel Module loop...
+         Starting Load Kernel Module lo[   18.679336] fuse: init (API version 7.39)
+op...
+[   18.691765] systemd[1]: Starting Journal Service...
+         Starting Journal Service...
+[   18.714289] systemd[1]: Starting Load Kernel Modules...
+         Starting Load Kernel Modules...
+[   18.728485] systemd[1]: Starting Remount Root and Kernel File Systems...
+         Starting Remount Root and Kernel File Systems...
+[   18.746641] systemd[1]: Starting Coldplug All udev Devices...
+         Starting Coldplug All udev Devices...
+[   18.764409] systemd[1]: Mounted Huge Pages File System.
+[  OK  ] Mounted Huge Pages File System.
+[   18.782727] systemd[1]: Mounted POSIX Message Queue File System.
+[  OK  ] Mounted POSIX Message Queue File System.
+[   18.799366] systemd[1]: Mounted Kernel Debug File System.
+[  OK  ] Mounted Kernel Debug File System.
+[   18.813258] systemd[1]: Mounted Kernel Trace File System.
+[  OK  ] Mounted Kernel Trace File System.
+[   18.828185] systemd[1]: Started Journal Service.
+[  OK  ] Started Journal Service.
+[  OK  ] Finished    18.843468] bridge: filtering via arp/ip/ip6tables is no longer available by default. Update your scripts to load br_netfilter if you need this.
+;1;39mCreate List of Static Device Nodes.
+[   18.861223] Bridge firewalling registered
+[  OK  ] Finished Load Kernel Module configfs.
+[  OK  ] Finished Load Kernel Module dm_mod.
+[  OK  ] Finished Load Kernel Module drm.
+[  OK  ] Finished Load Kernel Module efi_pstore.
+[  OK  ] Finished Load Kernel Module fuse.
+[  OK  ] Finished Load Kernel Module loop.
+[  OK  ] Finished Load Kernel Modules.
+[  OK  ] Finished Remount Root and Kernel File Systems.
+         Mounting FUSE Control File System...
+         Mounting Kernel Configuration File System...
+         Starting Flush Journal to Persistent Storage...
+         Starting Load/Save Random Seed...
+[   19.014337] systemd-journald[963]: Received client request to flush runtime journal.
+         Starting Apply Kernel Variables...
+         Starting Create System Users...
+[  OK  ] Started VyOS commit daemon.
+[  OK  ] Started VyOS configuration daemon.
+[  OK  ] Started VyOS DNS configuration keeper.
+[  OK  ] Finished Coldplug All udev Devices.
+[  OK  ] Mounted FUSE Control File System.
+[  OK  ] Mounted Kernel Configuration File System.
+[  OK  ] Finished Load/Save Random Seed.
+[  OK  ] Finished Flush Journal to Persistent Storage.
+[  OK  ] Finished Create System Users.
+         Starting Create Static Device Nodes in /dev...
+[  OK  ] Finished Apply Kernel Variables.
+[  OK  ] Finished Create Static Device Nodes in /dev.
+[  OK  ] Reached target Preparation for Local File Systems.
+         Mounting /tmp...
+         Mounting /var/tmp...
+         Starting Rule-based Manage…for Device Events and Files...
+[  OK  ] Mounted /tmp.
+[  OK  ] Mounted /var/tmp.
+[  OK  ] Reached target Local File Systems.
+         Starting Set Up Additional Binary Formats...
+         Starting Create System Files and Directories...
+[  OK  ] Finished Create System Files and Directories.
+         Starting Security Auditing Service...
+[  OK  ] Started Entropy Daemon based on the HAVEGE algorithm.
+         Starting live-config conta…t process (late userspace)....
+[  OK  ] Started Rule-based Manager for Device Events and Files.
+         Mounting Arbitrary Executable File Formats File System...
+[  OK  ] Mounted Arbitrary Executable File Formats File System.
+[  OK  ] Finished Set Up Additional Binary Formats.
+[  OK  ] Started Security Auditing Service.
+         Starting Record System Boot/Shutdown in UTMP...
+[  OK  ] Finished Record System Boot/Shutdown in UTMP.
+[  OK  ] Reached target System Initialization.
+[  OK  ] Started Periodic ext4 Onli…ata Check for All Filesystems.
+[  OK  ] Started Discard unused blocks once a week.
+[  OK  ] Started Daily rotation of log files.
+[  OK  ] Started Run system activit…ounting tool every 10 minutes.
+[  OK  ] Started Generate summary o…esterday's process accounting.
+[  OK  ] Started Daily Cleanup of Temporary Directories.
+[  OK  ] Reached target Timer Units.
+[  OK  ] Listening on D-Bus System Message Bus Socket.
+[  OK  ] Listening on Podman API Socket.
+[  OK  ] Listening on UUID daemon activation socket.
+[  OK  ] Reached target Socket Units.
+[  OK  ] Finished live-config conta…oot process (late userspace)..
+[  OK  ] Reached target Basic System.
+         Starting Deferred execution scheduler...
+         Starting Atop process accounting daemon...
+[  OK  ] Started Regular background program processing daemon.
+         Starting D-Bus System Message Bus...
+         Starting Remove Stale Onli…t4 Metadata Check Snapshots...
+         Starting fan speed regulator...
+         Starting FastNetMon - DoS/…Flow/Netflow/mirror support...
+         Starting LSB: network benchmark...
+         Starting Podman API Service...
+         Starting Resets System Activity Logs...
+         Starting User Login Management...
+         Starting LSB: Start vmtouch daemon...
+         Starting Update GRUB loader configuration structure...
+[  OK  ] Started Deferred execution scheduler.
+[  OK  ] Finished Remove Stale Onli…ext4 Metadata Check Snapshots.
+[  OK  ] Started Podman API Service.
+[  OK  ] Finished Update GRUB loader configuration structure.
+[  OK  ] Started VyOS Router.
+         Starting Permit User Sessions...
+[  OK  ] Finished Permit User Sessions.
+[  OK  ] Started Getty on tty1.
+[  OK  ] Started Serial Getty on ttyS0.
+[  OK  ] Reached target Login Prompts.
+[   38.067911] vyos-router[1821]: Starting VyOS router.
+[  OK  ] Started FastNetMon - DoS/D… sFlow/Netflow/mirror support.
+[  OK  ] Reached target Multi-User System.
+[  OK  ] Reached target VyOS target.
+         Starting Record Runlevel Change in UTMP...
+[  OK  ] Finished Record Runlevel Change in UTMP.
+[   40.999115] vyos-router[1821]: Waiting for NICs to settle down: settled in 0sec..
+[   41.010756] vyos-router[1821]: could not generate DUID ... failed!
+[   54.967083] vyos-router[1821]: Mounting VyOS Config...done.
+[   61.369034] fsl_dpa soc:fsl,dpaa:ethernet@1 eth0: phy device not initialized
+[   61.411251] fsl_dpa soc:fsl,dpaa:ethernet@4 eth1: phy device not initialized
+[   61.452438] fsl_dpa soc:fsl,dpaa:ethernet@5 eth2: phy device not initialized
+[   61.493443] fsl_dpa soc:fsl,dpaa:ethernet@8 eth3: phy device not initialized
+[   61.534415] fsl_dpa soc:fsl,dpaa:ethernet@9 eth4: phy device not initialized
+[   63.048815] fsl_dpa soc:fsl,dpaa:ethernet@1 eth0: phy device not initialized
+[   63.092000] fsl_dpa soc:fsl,dpaa:ethernet@4 eth1: phy device not initialized
+[   63.134599] fsl_dpa soc:fsl,dpaa:ethernet@5 eth2: phy device not initialized
+[   63.176723] fsl_dpa soc:fsl,dpaa:ethernet@8 eth3: phy device not initialized
+[   63.218678] fsl_dpa soc:fsl,dpaa:ethernet@9 eth4: phy device not initialized
+[   69.954221] fsl_dpa soc:fsl,dpaa:ethernet@1 eth0: phy device not initialized
+[   70.002907] fsl_dpa soc:fsl,dpaa:ethernet@1 eth0: phy device not initialized
+[   70.070388] fsl_dpa soc:fsl,dpaa:ethernet@1 eth0: phy device not initialized
+[   70.089054] fsl_dpa soc:fsl,dpaa:ethernet@1 eth0: phy device not initialized
+[   70.096128] fsl_dpa soc:fsl,dpaa:ethernet@1 eth0: phy device not initialized
+[   71.296441] fsl_dpa soc:fsl,dpaa:ethernet@9 eth4: phy device not initialized
+[   71.467954] fsl_dpa soc:fsl,dpaa:ethernet@8 eth3: phy device not initialized
+[   71.632557] fsl_dpa soc:fsl,dpaa:ethernet@5 eth2: phy device not initialized
+[   71.684409] fsl_dpa soc:fsl,dpaa:ethernet@5 eth2: phy device not initialized
+[   71.756900] fsl_dpa soc:fsl,dpaa:ethernet@5 eth2: phy device not initialized
+[   71.776991] fsl_dpa soc:fsl,dpaa:ethernet@5 eth2: phy device not initialized
+[   71.784066] fsl_dpa soc:fsl,dpaa:ethernet@5 eth2: phy device not initialized
+[   73.832389] fsl_dpa soc:fsl,dpaa:ethernet@4 eth1: phy device not initialized
+[   73.883926] fsl_dpa soc:fsl,dpaa:ethernet@4 eth1: phy device not initialized
+[   73.958056] fsl_dpa soc:fsl,dpaa:ethernet@4 eth1: phy device not initialized
+[   73.977119] fsl_dpa soc:fsl,dpaa:ethernet@4 eth1: phy device not initialized
+[   73.984191] fsl_dpa soc:fsl,dpaa:ethernet@4 eth1: phy device not initialized
+[  106.433060] vyos-router[1821]:  migrate activate configure.
+[  107.055370] vyos-config[1832]: Configuration error
+
+Welcome to VyOS - vyos ttyS0
+
+vyos login: 
