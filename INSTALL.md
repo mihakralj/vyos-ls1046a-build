@@ -80,7 +80,7 @@ Factory U-Boot boots OpenWrt from eMMC. It has no USB boot command, so you must 
 At the `=>` prompt, paste this single line:
 
 ```
-usb start; fatload usb 0:0 ${load_addr} boot.scr; source ${load_addr}
+usb start; fatload usb 0:2 ${load_addr} boot.scr; source ${load_addr}
 ```
 
 This loads `boot.scr` from the USB FAT32 partition, which loads the kernel, DTB, and initrd, sets temporary bootargs, and boots VyOS live via `booti`.
@@ -89,7 +89,7 @@ Watch the boot log for 60–90 seconds until the VyOS login prompt appears.
 
 > **If `usb start` hangs or shows no devices:** Try a USB 2.0 drive. Some USB 3.0 drives aren't detected by the LS1046A USB controller.
 
-> **USB layout:** The hybrid ISO has two partitions when written to USB: partition 1 (ISO9660 with squashfs) and partition 2 (FAT32 with boot files). U-Boot auto-detects the FAT32 partition via `fatload usb 0:0`. After kernel boot, live-boot finds the squashfs on the ISO9660 partition.
+> **USB layout:** The hybrid ISO has two partitions when written to USB: partition 1 (ISO9660 with squashfs) and partition 2 (FAT32 with boot files). U-Boot loads from partition 2 explicitly via `fatload usb 0:2`. After kernel boot, live-boot finds the squashfs on the ISO9660 partition.
 
 ---
 
@@ -203,7 +203,7 @@ If `fw_setenv` failed during install (e.g., `/dev/mtd3` not accessible), you can
 ```
 setenv vyos 'ext4load mmc 0:3 ${load_addr} /boot/vyos.env; env import -t ${load_addr} ${filesize}; ext4load mmc 0:3 ${kernel_addr_r} /boot/${vyos_image}/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/${vyos_image}/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/${vyos_image}/initrd.img; setenv bootargs "BOOT_IMAGE=/boot/${vyos_image}/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 vyos-union=/boot/${vyos_image}"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
 
-setenv usb_vyos 'usb start; if fatload usb 0:0 ${kernel_addr_r} live/vmlinuz; then fatload usb 0:0 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:0 ${ramdisk_addr_r} live/initrd.img; setenv bootargs "BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda rootdelay=5 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}; fi'
+setenv usb_vyos 'usb start; if fatload usb 0:2 ${kernel_addr_r} live/vmlinuz; then fatload usb 0:2 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:2 ${ramdisk_addr_r} live/initrd.img; setenv bootargs "BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda rootdelay=5 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}; fi'
 
 setenv bootcmd 'run usb_vyos || run vyos || run recovery'
 
