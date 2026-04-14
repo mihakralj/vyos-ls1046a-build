@@ -1,23 +1,22 @@
 diff --git a/src/migration-scripts/system/31-to-32 b/src/migration-scripts/system/31-to-32
-index 1234567..abcdef0 100755
 --- a/src/migration-scripts/system/31-to-32
 +++ b/src/migration-scripts/system/31-to-32
-@@ -16,6 +16,7 @@
+@@ -17,6 +17,7 @@
+ 
  # Serial
  
 +import os
  from vyos.configtree import ConfigTree
  from vyos.system import disk
  from vyos.system.grub import CFG_VYOS_VARS
-@@ -26,12 +27,20 @@ base = ['system', 'console']
- def migrate(config: ConfigTree) -> None:
+@@ -28,10 +29,18 @@ def migrate(config: ConfigTree) -> None:
      if not base:
          return
--
+ 
 -    root_dir = disk.find_persistence()
 -    vars_file: str = f'{root_dir}/{CFG_VYOS_VARS}'
 -    vars_current: dict[str, str] = vars_read(vars_file)
-     # Check if VyOS installation uses serial boot console
+-    # Check if VyOS installation uses serial boot console
 -    if vars_current['console_type'] == 'ttyS':
 +    try:
 +        root_dir = disk.find_persistence()
