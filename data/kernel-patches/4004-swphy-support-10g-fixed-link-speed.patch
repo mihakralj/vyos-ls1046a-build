@@ -23,14 +23,14 @@ MACs (MAC9/MAC10) use fixed-link instead of phylink.
 
 Signed-off-by: VyOS LS1046A Build <build@vyos.io>
 ---
- drivers/net/phy/swphy.c | 22 ++++++++++++++++++----
- 1 file changed, 18 insertions(+), 4 deletions(-)
+ drivers/net/phy/swphy.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
 
 diff --git a/drivers/net/phy/swphy.c b/drivers/net/phy/swphy.c
 index 59f1ba4d49bc..4459df30e2c1 100644
 --- a/drivers/net/phy/swphy.c
 +++ b/drivers/net/phy/swphy.c
-@@ -72,6 +72,20 @@ static int swphy_decode_speed(int speed)
+@@ -72,6 +72,18 @@ static int swphy_decode_speed(int speed)
  {
  	switch (speed) {
 +	case 10000:
@@ -48,5 +48,6 @@ index 59f1ba4d49bc..4459df30e2c1 100644
  	case 1000:
  		return SWMII_SPEED_1000;
  	case 100:
+ 		return SWMII_SPEED_100;
 -- 
 2.39.5

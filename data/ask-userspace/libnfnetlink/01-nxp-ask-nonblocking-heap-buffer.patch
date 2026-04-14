@@ -1,0 +1,190 @@
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Mon, 12 Jan 2026 12:00:00 +0100
+Subject: [PATCH] libnfnetlink: Add non-blocking mode and heap buffer management
+
+NXP ASK (Applications Solutions Kit) extensions for libnfnetlink:
+- Add nfnl_set_nonblocking_mode() and nfnl_unset_nonblocking_mode() APIs
+- Move receive buffer from stack to heap to prevent stack overflow with large buffers
+- Required for CMM daemon high-throughput netlink communication
+
+Upstream-Status: Inappropriate [NXP vendor-specific extension]
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+diff --git a/include/libnfnetlink/libnfnetlink.h b/include/libnfnetlink/libnfnetlink.h
+index 49ce878..03d6c1d 100644
+--- a/include/libnfnetlink/libnfnetlink.h
++++ b/include/libnfnetlink/libnfnetlink.h
+@@ -66,6 +66,9 @@ struct nfnl_callback {
+ struct nfnl_handle;
+ struct nfnl_subsys_handle;
+ 
++extern NFNL_EXPORT int nfnl_set_nonblocking_mode(struct nfnl_handle *h);
++extern NFNL_EXPORT int nfnl_unset_nonblocking_mode(struct nfnl_handle *h);
++
+ extern NFNL_EXPORT int nfnl_fd(struct nfnl_handle *h);
+ extern NFNL_EXPORT unsigned int nfnl_portid(const struct nfnl_handle *h);
+ 
+diff --git a/src/libnfnetlink.c b/src/libnfnetlink.c
+index 667e5ef..96ecbbb 100644
+--- a/src/libnfnetlink.c
++++ b/src/libnfnetlink.c
+@@ -42,6 +42,7 @@
+ #include <errno.h>
+ #include <string.h>
+ #include <time.h>
++#include <fcntl.h>
+ #include <netinet/in.h>
+ #include <assert.h>
+ #include <linux/types.h>
+@@ -103,6 +104,10 @@ struct nfnl_subsys_handle {
+ #define		NFNL_MAX_SUBSYS			16 /* enough for now */
+ 
+ #define NFNL_F_SEQTRACK_ENABLED		(1 << 0)
++#define NFNL_F_NONBLOCKING_MODE		(1 << 1)
++#define NFNL_F_ALIGN_SIZE		64
++
++#define NFNL_F_ALIGN(buf, sz) (uint8_t *)(((unsigned long)buf + sz - 1) & (~(sz - 1)))
+ 
+ struct nfnl_handle {
+ 	int			fd;
+@@ -112,6 +117,8 @@ struct nfnl_handle {
+ 	uint32_t		seq;
+ 	uint32_t		dump;
+ 	uint32_t		rcv_buffer_size;	/* for nfnl_catch */
++	uint8_t			*rcv_buff;
++	uint8_t			*rcv_buff_aligned;
+ 	uint32_t		flags;
+ 	struct nlmsghdr 	*last_nlhdr;
+ 	struct nfnl_subsys_handle subsys[NFNL_MAX_SUBSYS+1];
+@@ -222,8 +229,13 @@ struct nfnl_handle *nfnl_open(void)
+ 	}
+ 	nfnlh->seq = time(NULL);
+ 	nfnlh->rcv_buffer_size = NFNL_BUFFSIZE;
++	/* allocate a buffer which can be used to receive data */
++	nfnlh->rcv_buff = (uint8_t *)calloc(nfnlh->rcv_buffer_size + NFNL_F_ALIGN_SIZE, sizeof(uint8_t));
++	if (!nfnlh->rcv_buff)
++		goto err_close;
++	nfnlh->rcv_buff_aligned = NFNL_F_ALIGN(nfnlh->rcv_buff, NFNL_F_ALIGN_SIZE);
+ 
+-	/* don't set pid here, only first socket of process has real pid !!! 
++	/* don't set pid here, only first socket of process has real pid !!!
+ 	 * binding to pid '0' will default */
+ 
+ 	/* let us do the initial bind */
+@@ -279,6 +291,58 @@ void nfnl_unset_sequence_tracking(struct nfnl_handle *h)
+ void nfnl_set_rcv_buffer_size(struct nfnl_handle *h, unsigned int size)
+ {
+ 	h->rcv_buffer_size = size;
++	/* free existing rcv_buff as there is a change in size */
++	if (h->rcv_buff)
++		free(h->rcv_buff);
++	/* allocate a buffer which can be used to receive data */
++	h->rcv_buff = (uint8_t *)calloc(h->rcv_buffer_size + NFNL_F_ALIGN_SIZE, 1);
++	if (!h->rcv_buff) {
++		fprintf(stderr, "%s :: calloc failed\n", __func__);
++		return;
++	}
++	h->rcv_buff_aligned = NFNL_F_ALIGN(h->rcv_buff, NFNL_F_ALIGN_SIZE);
++}
++
++/**
++ * nfnl_set_nonblocking_mode - set non blocking mode for netlink socket
++ * @h: nfnetlink handler
++ */
++int nfnl_set_nonblocking_mode(struct nfnl_handle *h)
++{
++	int ret;
++
++	ret = fcntl(h->fd, F_GETFL);
++	if (ret < 0)
++		return ret;
++
++	ret = fcntl(h->fd, F_SETFL, ret | O_NONBLOCK);
++	if (ret < 0)
++		return ret;
++
++	h->flags |= NFNL_F_NONBLOCKING_MODE;
++
++	return 0;
++}
++
++/**
++ * nfnl_unset_nonblocking_mode - unset non blocking mode for netlink socket
++ * @h: nfnetlink handler
++ */
++int nfnl_unset_nonblocking_mode(struct nfnl_handle *h)
++{
++	int ret;
++
++	ret = fcntl(h->fd, F_GETFL);
++	if (ret < 0)
++		return ret;
++
++	ret = fcntl(h->fd, F_SETFL, ret & ~O_NONBLOCK);
++	if (ret < 0)
++		return ret;
++
++	h->flags &= ~NFNL_F_NONBLOCKING_MODE;
++
++	return 0;
+ }
+ 
+ /**
+@@ -369,6 +433,9 @@ int nfnl_close(struct nfnl_handle *nfnlh)
+ 	for (i = 0; i < NFNL_MAX_SUBSYS; i++)
+ 		nfnl_subsys_close(&nfnlh->subsys[i]);
+ 
++	if (nfnlh->rcv_buff)
++		free(nfnlh->rcv_buff);
++
+ 	ret = close(nfnlh->fd);
+ 	if (ret < 0)
+ 		return ret;
+@@ -1549,11 +1616,18 @@ int nfnl_catch(struct nfnl_handle *h)
+ 
+ 	assert(h);
+ 
+-	while (1) {
+-		unsigned char buf[h->rcv_buffer_size]
+-			__attribute__ ((aligned));
++	unsigned char *buf = h->rcv_buff_aligned;
++	if (!buf) {
++		h->rcv_buff = (unsigned char *)calloc(1, h->rcv_buffer_size);
++		if (!h->rcv_buff) {
++			return -1;
++		}
++		h->rcv_buff_aligned = NFNL_F_ALIGN(h->rcv_buff, NFNL_F_ALIGN_SIZE);
++		buf = h->rcv_buff_aligned;
++	}
++	do {
+ 
+-		ret = nfnl_recv(h, buf, sizeof(buf));
++		ret = nfnl_recv(h, buf, h->rcv_buffer_size);
+ 		if (ret == -1) {
+ 			/* interrupted syscall must retry */
+ 			if (errno == EINTR)
+@@ -1563,8 +1637,9 @@ int nfnl_catch(struct nfnl_handle *h)
+ 
+ 		ret = nfnl_process(h, buf, ret);
+ 		if (ret <= NFNL_CB_STOP)
+-			break; 
+-	}
++			break;
++
++	} while (!(h->flags & NFNL_F_NONBLOCKING_MODE));
+
+ 	return ret;
+ }
+diff --git a/src/nfnl.version b/src/nfnl.version
+index d123456..e789abc 100644
+--- a/src/nfnl.version
++++ b/src/nfnl.version
+@@ -8,6 +8,8 @@ NFNETLINK_1.0.1 {
+     nfnl_set_sequence_tracking;
+     nfnl_unset_sequence_tracking;
+     nfnl_set_rcv_buffer_size;
++    nfnl_set_nonblocking_mode;
++    nfnl_unset_nonblocking_mode;
+     nfnl_send;
+     nfnl_sendmsg;
+     nfnl_sendiov;

@@ -1,0 +1,39 @@
+#!/bin/bash
+# 97-ask-userspace.chroot — Configure ASK fast-path runtime environment
+#
+# This chroot hook runs during ISO build (live-build) to:
+#   1. Install runtime dependencies for ASK shared libraries
+#   2. Configure ldconfig for /usr/local/lib (ASK shared libs)
+#   3. Set up ASK kernel module autoloading via depmod trigger
+#
+# ASK binaries/libs/modules are already copied into the chroot by
+# ci-setup-vyos-build.sh before this hook runs.
+
+set -ex
+
+# Runtime deps — libatomic1 for aarch64 atomic builtins used by ASK libs
+# May already be present as a gcc-12 dependency. Don't fail the build
+# if APT sources are unavailable in the chroot at this stage.
+if ! dpkg -s libatomic1 >/dev/null 2>&1; then
+  apt-get update -qq 2>/dev/null || true
+  apt-get install -y --no-install-recommends libatomic1 2>/dev/null || \
+    echo "WARNING: libatomic1 not available — ASK binaries may fail if they need atomic builtins"
+  apt-get clean 2>/dev/null || true
+fi
+
+# ldconfig: ASK shared libraries live in /usr/local/lib
+# (libcli, libfci, libcmm, libnfnetlink, libnetfilter_conntrack)
+echo "/usr/local/lib" > /etc/ld.so.conf.d/ask.conf
+ldconfig
+
+# ASK kernel modules installed to /usr/local/lib/ask-modules/
+# Create depmod config so modprobe can find them
+if [ -d /usr/local/lib/ask-modules ]; then
+  mkdir -p /etc/depmod.d
+  echo "search ask-modules" > /etc/depmod.d/ask.conf
+  # Create module directory under kernel version (resolved at boot by ask-modules.conf)
+  # For now, just ensure the directory is findable
+  mkdir -p /usr/local/lib/ask-modules
+fi
+
+echo "### ASK userspace chroot hook complete"

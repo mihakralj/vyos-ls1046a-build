@@ -315,6 +315,13 @@ system {
         reboot-on-upgrade-failure 5
         time-format 24-hour
     }
+    syslog {
+        global {
+            facility all {
+                level info
+            }
+        }
+    }
     sysctl {
         parameter net.core.default_qdisc {
             value fq
