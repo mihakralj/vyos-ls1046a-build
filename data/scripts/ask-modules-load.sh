@@ -34,6 +34,12 @@ load_mod() {
 
 # Load in dependency order
 load_mod cdx.ko
+
+# auto_bridge.ko depends on symbols exported by the 'bridge' module
+# (br_fdb_register_can_expire_cb, register_brevent_notifier, etc.)
+# Load bridge before auto_bridge to satisfy these dependencies
+modprobe bridge 2>/dev/null || true
+
 load_mod auto_bridge.ko
 
 # Ensure in-tree conntrack modules are loaded before fci
