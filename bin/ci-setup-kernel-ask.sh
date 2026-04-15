@@ -137,6 +137,9 @@ cat > /tmp/ask-post-defconfig.sh << 'ASK_POSTDEFCONFIG_EOF'
 # VyOS config snippets override our defconfig settings — re-apply them here.
 echo "I: ASK — Forcing critical kernel configs after vyos_defconfig"
 
+# --- LS1046A has 4 cores; NR_CPUS=256 causes SDK to allocate 256 TX FQs/port ---
+scripts/config --set-val CONFIG_NR_CPUS 4
+
 # --- Disable mainline DPAA (mutual exclusion with SDK) ---
 scripts/config --disable CONFIG_FSL_DPAA
 scripts/config --disable CONFIG_FSL_FMAN
