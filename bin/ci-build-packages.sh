@@ -74,35 +74,41 @@ for package in $packages; do
 
       # Check if SDK DTS exists (injected by ci-setup-kernel-ask.sh)
       SDK_DTS="$DTS_DIR/mono-gateway-dk-sdk.dts"
+      SDK_DTB_OK=false
       if [ -f "$SDK_DTS" ]; then
         echo "### Building SDK+ASK DTB from kernel source"
         make -C "$KSRC" freescale/mono-gateway-dk-sdk.dtb 2>&1 | tail -10 || true
         SDK_DTB="$DTS_DIR/mono-gateway-dk-sdk.dtb"
         if [ -f "$SDK_DTB" ]; then
-          # SDK DTB kept as secondary — pre-built mono-gw.dtb (from OpenWrt) is primary.
-          # SDK DTB OH ports lack fsl,qman-channel-id → fsl-fman-port probe -5 → no NICs.
+          # SDK DTB is PRIMARY — SDK fsl_mac driver needs fixed-link properties
+          # (not mainline phylink/SFP which causes "phy device not initialized").
+          # Previous working build used 35KB SDK DTB; OpenWrt 92KB DTB breaks SDK kernel.
+          cp "$SDK_DTB" "$INCLUDES_BIN/mono-gw.dtb"
+          cp "$SDK_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
+          # Also keep a named copy for reference
           cp "$SDK_DTB" "$INCLUDES_BIN/mono-gw-sdk.dtb"
           cp "$SDK_DTB" "$INCLUDES_CHR/boot/mono-gw-sdk.dtb"
-          echo "### SDK DTB compiled as mono-gw-sdk.dtb (secondary): $(stat -c '%s bytes' "$SDK_DTB")"
+          SDK_DTB_OK=true
+          echo "### SDK DTB compiled as PRIMARY mono-gw.dtb: $(stat -c '%s bytes' "$SDK_DTB")"
         else
           echo "WARNING: mono-gateway-dk-sdk.dtb build failed — falling back to mainline DTB"
         fi
       fi
 
-      # Build mainline DTB (primary in mainline mode, fallback in SDK mode)
+      # Build mainline DTB (primary only if SDK DTB not available)
       echo "### Building mainline DTB from kernel source"
       make -C "$KSRC" freescale/mono-gateway-dk.dtb 2>&1 | tail -10 || true
       MONO_DTB="$DTS_DIR/mono-gateway-dk.dtb"
       if [ -f "$MONO_DTB" ]; then
-        if [ ! -f "$SDK_DTS" ]; then
-          # Mainline mode: use mainline DTB as primary
-          cp "$MONO_DTB" "$INCLUDES_BIN/mono-gw.dtb"
-          cp "$MONO_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
-          echo "### Mainline DTB compiled: $(stat -c '%s bytes' "$MONO_DTB")"
-        else
-          # SDK mode: keep mainline DTB as secondary (for reference/fallback)
+        if [ "$SDK_DTB_OK" = true ]; then
+          # SDK mode: mainline DTB is secondary (for reference/fallback only)
           cp "$MONO_DTB" "$INCLUDES_BIN/mono-gw-mainline.dtb"
           echo "### Mainline DTB saved as mono-gw-mainline.dtb (SDK DTB is primary)"
+        else
+          # Mainline mode (or SDK build failed): use mainline DTB as primary
+          cp "$MONO_DTB" "$INCLUDES_BIN/mono-gw.dtb"
+          cp "$MONO_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
+          echo "### Mainline DTB compiled as primary: $(stat -c '%s bytes' "$MONO_DTB")"
         fi
       else
         echo "WARNING: mono-gateway-dk.dtb build failed, keeping pre-built DTB"
