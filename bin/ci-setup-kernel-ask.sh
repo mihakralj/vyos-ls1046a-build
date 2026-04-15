@@ -120,6 +120,24 @@ if [ -f "${CWD}/ask-nxp-sdk-sources.tar.gz" ]; then
     echo "I: ASK — cond_resched() added to dpa_fq_setup + dpa_fqs_init"
   fi
 
+  # Debug: add probe progress tracing to identify which function hangs
+  SDK_ETH_C="drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c"
+  if [ -f "$SDK_ETH_C" ]; then
+    # After dpa_priv_bp_create
+    sed -i '/err = dpa_priv_bp_create/a\\tprintk("DPAA_PROBE: bp_create done\\n");' "$SDK_ETH_C"
+    # After dpa_get_channel
+    sed -i '/channel = dpa_get_channel/a\\tprintk("DPAA_PROBE: get_channel=%d\\n", channel);' "$SDK_ETH_C"
+    # After dpaa_eth_add_channel
+    sed -i '/dpaa_eth_add_channel(priv->channel)/a\\tprintk("DPAA_PROBE: add_channel done\\n");' "$SDK_ETH_C"
+    # After dpa_fq_setup
+    sed -i '/dpa_fq_setup(priv, \&private_fq_cbs/a\\tprintk("DPAA_PROBE: fq_setup done\\n");' "$SDK_ETH_C"
+    # After dpaa_eth_cgr_init
+    sed -i '/err = dpaa_eth_cgr_init/a\\tprintk("DPAA_PROBE: cgr_init done\\n");' "$SDK_ETH_C"
+    # After dpa_fqs_init
+    sed -i '/err = dpa_fqs_init/a\\tprintk("DPAA_PROBE: fqs_init done\\n");' "$SDK_ETH_C"
+    echo "I: ASK — probe progress tracing added to dpaa_eth.c"
+  fi
+
   echo "I: ASK — SDK sources + build integration injected into kernel tree"
 fi
 
