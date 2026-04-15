@@ -120,19 +120,25 @@ if [ -f "${CWD}/ask-nxp-sdk-sources.tar.gz" ]; then
     echo "I: ASK — cond_resched() added to dpa_fq_setup + dpa_fqs_init"
   fi
 
-  # Debug: add iteration counter inside dpa_fq_setup() to detect infinite loop
+  # Debug + fix: instrument dpa_fq_setup() and protect against infinite while-loop
   if [ -f "$SDK_ETH_COMMON" ]; then
-    # Add entry printk + loop counter to dpa_fq_setup
+    # Add entry printk + loop counter to dpa_fq_setup (print ALL FQs, not just first 5)
     sed -i '/^void dpa_fq_setup(/,/list_for_each_entry(fq,/ {
-      /int egress_cnt = 0/a\\tint __fq_dbg_cnt = 0;\n\tprintk("DPAA_FQ_SETUP: enter, num_portals will be counted\\n");
-      /list_for_each_entry(fq, \&priv->dpa_fq_list, list) {/{n;s/^/\t__fq_dbg_cnt++;\n\tif (__fq_dbg_cnt <= 5 || __fq_dbg_cnt % 100 == 0)\n\t\tprintk("DPAA_FQ_SETUP: fq #%d type=%d\\n", __fq_dbg_cnt, fq->fq_type);\n/}
+      /int egress_cnt = 0/a\\tint __fq_dbg_cnt = 0;\n\tprintk("DPAA_FQ_SETUP: enter\\n");
+      /list_for_each_entry(fq, \&priv->dpa_fq_list, list) {/{n;s/^/\t__fq_dbg_cnt++;\n\tprintk("DPAA_FQ_SETUP: fq #%d type=%d\\n", __fq_dbg_cnt, fq->fq_type);\n/}
     }' "$SDK_ETH_COMMON"
-    # Add exit printk after the loop ends (before return)
-    sed -i '/^void dpa_fq_setup/,/^}/ {
-      /^}/ {i\\tprintk("DPAA_FQ_SETUP: done, processed %d FQs\\n", __fq_dbg_cnt);
+    # Add safety break to the while(egress_cnt) loop to prevent infinite loop
+    # if no TX FQs exist in the list. Also add debug printk.
+    sed -i '/while (egress_cnt < DPAA_ETH_TX_QUEUES) {/a\\tint __prev_egress = egress_cnt;' "$SDK_ETH_COMMON"
+    sed -i '/while (egress_cnt < DPAA_ETH_TX_QUEUES)/,/^}/ {
+      /if (egress_cnt == DPAA_ETH_TX_QUEUES)/{
+        n
+        /break;/a\\t}\n\tif (egress_cnt == __prev_egress) {\n\t\tprintk("DPAA_FQ_SETUP: WARN no TX FQs, egress_cnt=%d/%d\\n", egress_cnt, DPAA_ETH_TX_QUEUES);\n\t\tbreak;\n\t}
       }
     }' "$SDK_ETH_COMMON"
-    echo "I: ASK — dpa_fq_setup debug tracing added"
+    # Note: "done" printk omitted — EXPORT_SYMBOL is outside function scope.
+    # We rely on "DPAA_PROBE: fq_setup done" in dpaa_eth.c to confirm completion.
+    echo "I: ASK — dpa_fq_setup debug + while-loop safety break added"
   fi
 
   # Debug: add probe progress tracing to identify which function hangs
