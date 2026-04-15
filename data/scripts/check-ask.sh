@@ -138,7 +138,11 @@ echo ""
 echo "DPA App (FMan PCD):"
 if echo "$DMESG" | grep -q "start_dpa_app.*failed"; then
   rc=$(echo "$DMESG" | grep "start_dpa_app.*failed" | head -1 | sed 's/.*rc \([0-9]*\).*/\1/')
-  fail "dpa_app failed (rc=$rc)"
+  if [ "$rc" = "11" ]; then
+    fail "dpa_app SIGSEGV (rc=11) — pre-built binary ABI mismatch, needs rebuild from source"
+  else
+    fail "dpa_app failed (rc=$rc)"
+  fi
 elif echo "$DMESG" | grep -q "start_dpa_app"; then
   ok "dpa_app executed"
 else
@@ -161,6 +165,12 @@ if [ -f /etc/cdx_sp.xml ]; then
   ok "Soft parser /etc/cdx_sp.xml present"
 else
   fail "Soft parser /etc/cdx_sp.xml missing"
+fi
+
+if [ -f /etc/fmc/config/hxs_pdl_v3.xml ]; then
+  ok "FMC NetPDL /etc/fmc/config/hxs_pdl_v3.xml present"
+else
+  fail "FMC NetPDL /etc/fmc/config/hxs_pdl_v3.xml missing (dpa_app needs this)"
 fi
 
 if echo "$DMESG" | grep -q "failed to locate eth bman pool"; then

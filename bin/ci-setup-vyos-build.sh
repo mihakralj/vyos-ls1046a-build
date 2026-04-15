@@ -174,6 +174,14 @@ cp data/ask-userspace/dpa_app/etc/cdx_cfg_mono_gw.xml "$CHROOT/etc/cdx/"
 cp data/ask-userspace/dpa_app/etc/cdx_pcd.xml         "$CHROOT/etc/cdx/"
 cp data/ask-userspace/dpa_app/etc/cdx_sp.xml          "$CHROOT/etc/cdx/"
 
+### FMC config: hxs_pdl_v3.xml (NetPDL protocol definitions for soft parser)
+# dpa_app / libfmc statically links to FMC which reads /etc/fmc/config/hxs_pdl_v3.xml
+# at init time. Without this file, dpa_app SIGSEGV (null pointer in XML parse).
+mkdir -p "$CHROOT/etc/fmc/config"
+cp data/ask-userspace/fmc/config/hxs_pdl_v3.xml "$CHROOT/etc/fmc/config/"
+cp data/ask-userspace/fmc/config/netpcd.xsd     "$CHROOT/etc/fmc/config/"
+cp data/ask-userspace/fmc/config/cfgdata.xsd    "$CHROOT/etc/fmc/config/"
+
 ### ASK kernel module loader service (insmod for out-of-tree .ko files)
 cp data/scripts/ask-modules-load.sh "$CHROOT/usr/local/bin/ask-modules-load.sh"
 chmod +x "$CHROOT/usr/local/bin/ask-modules-load.sh"

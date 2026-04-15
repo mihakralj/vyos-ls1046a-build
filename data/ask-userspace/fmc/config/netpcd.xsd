@@ -1,0 +1,722 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+/*
+ * The MIT License (MIT)
+ * Copyright 2009-2012, Freescale Semiconductor, Inc., All Rights Reserved.
+ * Copyright 2020 NXP
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ *
+ * Special Notes on Selected Files
+ *
+ * Some files in the Freescale FMC package are generated from skeleton files
+ * associated with the Flex and Bison programs.
+ *
+ * The Bison skeleton files are distributed under GPLv2 but with the following
+ * special exception (which applies to the Freescale FMC package):
+ *
+ *  As a special exception, you may create a larger work that contains
+ * part or all of the Bison parser skeleton and distribute that work
+ * under terms of your choice, so long as that work isn't itself a
+ * parser generator using the skeleton or a modified version thereof
+ * as a parser skeleton.  Alternatively, if you modify or redistribute
+ * the parser skeleton itself, you may (at your option) remove this
+ * special exception, which will cause the skeleton and the resulting
+ * Bison output files to be licensed under the GNU General Public
+ * License without this special exception.
+ *
+ * The Flex skeleton file is unrestricted.  It's License statement states,
+ * in reference to the license of the flex tool itself (which is 2-clause BSD):
+ *
+ * Note that the "flex.skl" scanner skeleton carries no copyright notice.
+ * You are free to do whatever you please with scanners generated using
+ * flex; for them, you are not even bound by the above copyright.
+ *
+ * Only the generated scanner is contained in the Freescale FMC package.
+ *
+ * Author    : Serge Lamikhov-Center
+ */
+-->
+
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+
+  <xs:element name="netpcd">
+    <xs:complexType>
+      <xs:choice maxOccurs="unbounded">
+		<xs:element name="vsp"            type="vsp"            />
+        <xs:element name="manipulations"  type="manipulations"  />
+        <xs:element name="policer"        type="policer"        />
+        <xs:element name="classification" type="classification" />
+		<xs:element name="replicator"     type="replicator" 	/>
+        <xs:element name="distribution"   type="distribution"   />
+        <xs:element name="policy"         type="policy"         />
+      </xs:choice>
+      <xs:attribute name="name"        type="xs:string" use="optional" />
+      <xs:attribute name="description" type="xs:string" use="optional" />
+      <xs:attribute name="comment"     type="xs:string" use="optional" />
+      <xs:attribute name="version"     type="xs:string" use="optional" />
+      <xs:attribute name="creator"     type="xs:string" use="optional" />
+      <xs:attribute name="date"        type="xs:date"   use="optional" />
+    </xs:complexType>
+	
+	<!-- Check reassembly refs --> 
+	<xs:key name="pReassKey">
+		<xs:selector xpath="./manipulations/reassembly"/>
+		<xs:field xpath="@name"/>
+	</xs:key>
+	<xs:keyref name="pReassKeyRef" refer="pReassKey">
+	    <xs:selector xpath="./policy/reassembly"/>
+		<xs:field xpath="@name"/>
+	</xs:keyref>
+		
+	<!-- Check distribution order --> 
+	<xs:key name="pDistrefKey">
+		<xs:selector xpath="distribution"/>
+		<xs:field xpath="@name"/>
+	</xs:key>
+	<xs:keyref name="pDistrefKeyRef" refer="pDistrefKey">
+		<xs:selector xpath="policy/dist_order/distributionref"/>
+		<xs:field xpath="@name"/>
+	</xs:keyref>
+		
+	<!-- Check header entry refs --> 
+	<xs:key name="pHeaderEntryKey">
+		<xs:selector xpath="./manipulations/header"/>
+		<xs:field xpath="@name"/>
+	</xs:key>
+	<xs:keyref name="pHeaderEntryKeyRef" refer="pHeaderEntryKey">
+	    <xs:selector xpath="./classification/entry/header"/>
+		<xs:field xpath="@name"/>
+	</xs:keyref>
+	
+	<!-- Check frag entry refs --> 
+	<xs:key name="pFragEntryKey">
+		<xs:selector xpath="./manipulations/fragmentation"/>
+		<xs:field xpath="@name"/>
+	</xs:key>
+	<xs:keyref name="pFragEntryKeyRef" refer="pFragEntryKey">
+	    <xs:selector xpath="./classification/entry/fragmentation"/>
+		<xs:field xpath="@name"/>
+	</xs:keyref>
+	
+	<!-- Check header nextmanip refs --> 
+	<xs:key name="pHeaderNextKey">
+		<xs:selector xpath="./manipulations/header"/>
+		<xs:field xpath="@name"/>
+	</xs:key>
+	<xs:keyref name="pHeaderNextKeyRef" refer="pHeaderNextKey">
+	    <xs:selector xpath="./manipulations/header/nextmanip"/>
+		<xs:field xpath="@name"/>
+	</xs:keyref>
+  </xs:element>
+
+  <xs:complexType name="policy">
+    <xs:sequence>
+      <xs:element name="dist_order">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="distributionref" maxOccurs="unbounded">
+              <xs:complexType>
+                <xs:attribute name="name" type="xs:string" use="required" />
+              </xs:complexType>	
+            </xs:element>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="reassembly" minOccurs="0" >
+        <xs:complexType>
+          <xs:attribute name="name" type="xs:string" use="optional" />
+        </xs:complexType>
+				
+      </xs:element>
+    </xs:sequence>
+    <xs:attribute name="name"        type="xs:string" use="required" />
+    <xs:attribute name="description" type="xs:string" use="optional" />
+    <xs:attribute name="comment"     type="xs:string" use="optional" />
+  </xs:complexType>
+
+  <xs:complexType name="distribution">
+    <xs:sequence>
+      <xs:choice maxOccurs="unbounded">
+        <xs:element name="queue"     type="queue"     minOccurs="0" />
+        <xs:element name="key"       type="key"       minOccurs="0" maxOccurs="unbounded" />
+        <xs:element name="protocols" type="protocols" minOccurs="0" />
+        <xs:element name="defaults"  type="defaults"  minOccurs="0" />
+        <xs:element name="combine"   type="combine"   minOccurs="0" maxOccurs="4"/>
+        <xs:element name="action"    type="action"    minOccurs="0" />
+		<xs:element name="vsp"       type="vsp"       minOccurs="0" maxOccurs="1"/>
+      </xs:choice>
+    </xs:sequence>
+    <xs:attribute name="name"        type="xs:string" use="required" />
+    <xs:attribute name="description" type="xs:string" use="optional" />
+    <xs:attribute name="comment"     type="xs:string" use="optional" />
+  </xs:complexType>
+
+  <xs:complexType name="queue">
+    <xs:attribute name="base"  type="dec_or_hex" use="required" />
+    <xs:attribute name="count" type="dec_or_hex" use="optional" />
+  </xs:complexType>
+
+  <xs:complexType name="combine">
+    <xs:attribute name="portid"         type="yes_no"     use="optional" />
+    <xs:attribute name="frame"          type="dec_or_hex" use="optional"/>
+    <xs:attribute name="fieldref"       type="xs:string"  use="optional"/>
+    <xs:attribute name="offset"         type="dec_or_hex" use="optional" />
+    <xs:attribute name="extract_offset" type="dec_or_hex" use="optional" />
+    <xs:attribute name="mask"           type="dec_or_hex" use="optional" />
+  </xs:complexType>
+
+  <xs:complexType name="protocols">
+    <xs:sequence>
+      <xs:element name="protocolref" maxOccurs="unbounded">
+        <xs:complexType>
+          <xs:attribute name="name" type="xs:string" use="required" />
+          <xs:attribute name="opt"  type="xs:string" use="optional" />
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType name="dec_or_hex">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="0x[0-9a-fA-F]+|[0-9]+"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="yes_no">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="yes"/>
+      <xs:enumeration value="no"/>
+      <xs:enumeration value="true"/>
+      <xs:enumeration value="false"/>
+    </xs:restriction>
+  </xs:simpleType>
+  
+  <xs:simpleType name="statistics">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="none"/>
+      <xs:enumeration value="frame"/>
+      <xs:enumeration value="byteframe"/>
+      <xs:enumeration value="rmon"/>
+    </xs:restriction>
+  </xs:simpleType>
+  
+  <xs:simpleType name="yes_no_en">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="yes"/>
+      <xs:enumeration value="no"/>
+      <xs:enumeration value="true"/>
+      <xs:enumeration value="false"/>
+	  <xs:enumeration value="enable"/>
+      <xs:enumeration value="disable"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="key">
+    <xs:choice maxOccurs="unbounded">
+      <xs:element name="fieldref"  type="fieldref" maxOccurs="unbounded" />
+      <xs:element name="nonheader" type="nonheader" />
+	  <xs:element name="hashtable" type="hashtable" />
+    </xs:choice>
+    <xs:attribute name="shift"     type="dec_or_hex" use="optional" />
+    <xs:attribute name="symmetric" type="yes_no"     use="optional" />
+  </xs:complexType>
+
+  <xs:complexType name="fieldref">
+    <xs:attribute name="name"         type="xs:string"  use="required" />
+    <xs:attribute name="header_index" type="xs:string"  use="optional" />
+    <xs:attribute name="offset"       type="dec_or_hex" use="optional" />
+    <xs:attribute name="size"         type="dec_or_hex" use="optional" />
+  </xs:complexType>
+
+  <xs:complexType name="nonheader">
+    <xs:attribute name="source" use="required">
+      <xs:simpleType>
+        <xs:restriction base="xs:string">
+          <xs:enumeration value="frame_start" />
+          <xs:enumeration value="key"         />
+          <xs:enumeration value="hash"        />
+          <xs:enumeration value="parser"      />
+          <xs:enumeration value="fqid"        />
+          <xs:enumeration value="flowid"      />
+          <xs:enumeration value="default"     />
+          <xs:enumeration value="endofparse"  />
+        </xs:restriction>
+      </xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="action" use="optional">
+      <xs:simpleType>
+        <xs:restriction base="xs:string">
+          <xs:enumeration value="indexed_lookup" />
+          <xs:enumeration value="exact_match"    />
+        </xs:restriction>
+      </xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="offset"        type="dec_or_hex" use="optional" /> <!--default 0-->
+    <xs:attribute name="size"          type="dec_or_hex" use="required" />
+    <xs:attribute name="ic_index_mask" type="dec_or_hex" use="optional" />
+  </xs:complexType>
+  
+  <xs:complexType name="hashtable">
+    <xs:attribute name="mask"          type="dec_or_hex" use="optional" />
+    <xs:attribute name="hashshift"     type="dec_or_hex" use="optional" />
+    <xs:attribute name="keysize"       type="dec_or_hex" use="required" />
+  </xs:complexType>
+
+  <xs:complexType name="action">
+    <xs:attribute name="type" use="optional">
+      <xs:simpleType>
+        <xs:restriction base="xs:string">
+          <xs:enumeration value="classification"  />
+          <xs:enumeration value="distribution" />
+          <xs:enumeration value="policer"    />
+		  <xs:enumeration value="replicator"    />
+          <xs:enumeration value="drop"   />
+        </xs:restriction>
+      </xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="name" type="xs:string" use="optional"/>
+	<xs:attribute name="statistics" type="yes_no_en" use="optional"/>
+    <xs:attribute name="condition"             use="optional">
+      <xs:simpleType>
+        <xs:restriction base="xs:string">
+          <xs:enumeration value="on-green"  />
+          <xs:enumeration value="on-yellow" />
+          <xs:enumeration value="on-red"    />
+          <xs:enumeration value="on-miss"   />
+        </xs:restriction>
+      </xs:simpleType>
+    </xs:attribute>
+  </xs:complexType>
+
+  <xs:complexType name="classification">
+    <xs:sequence>
+	<xs:choice maxOccurs="unbounded">
+	  <xs:element name="framelength" type="rmon" minOccurs="0" maxOccurs="10" />
+	  <xs:element name="key" type="key" minOccurs="0"/>
+      <xs:element name="may-use" minOccurs="0" maxOccurs="1">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="action" type="action" maxOccurs="unbounded" />
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="entry"  type="entry"  minOccurs="0" maxOccurs="unbounded" />
+      <xs:sequence>
+		<xs:choice maxOccurs="unbounded">
+          <xs:element name="queue"  type="queue"     minOccurs="0" />
+          <xs:element name="action" type="action"    minOccurs="0" />
+		  <xs:element name="vsp"    type="vsp"       minOccurs="0" maxOccurs="1"/>
+		</xs:choice>
+      </xs:sequence>
+	</xs:choice>
+    </xs:sequence>     	
+    <xs:attribute name="name"        type="xs:string"  use="required" />
+    <xs:attribute name="max"         type="dec_or_hex" use="optional" />
+    <xs:attribute name="masks"       type="yes_no"     use="optional" />
+    <xs:attribute name="shared"      type="yes_no"     use="optional" />
+	<xs:attribute name="statistics"  type="statistics" use="optional" />
+    <xs:attribute name="description" type="xs:string"  use="optional" />
+    <xs:attribute name="comment"     type="xs:string"  use="optional" />
+  </xs:complexType>
+
+  <xs:complexType name="rmon">
+          <xs:attribute name="index" type="dec_or_hex" use="required"/>
+		  <xs:attribute name="value" type="dec_or_hex" use="required"/>
+  </xs:complexType>
+  
+  <xs:complexType name="entry">
+    <xs:sequence>
+	<xs:choice maxOccurs="unbounded">
+      <xs:element name="data"   type="xs:string" minOccurs="0" />
+      <xs:element name="mask"   type="xs:string" minOccurs="0" />
+      <xs:element name="queue"  type="queue"     minOccurs="0" />
+      <xs:element name="action" type="action"    minOccurs="0" />
+      <xs:element name="fragmentation"           minOccurs="0">
+        <xs:complexType>
+          <xs:attribute name="name" type="xs:string" use="required"/>
+        </xs:complexType>
+      </xs:element>
+	  <xs:element name="header"                  minOccurs="0">
+        <xs:complexType>
+          <xs:attribute name="name" type="xs:string" use="required"/>
+        </xs:complexType>
+      </xs:element>
+	  <xs:element name="vsp"    type="vsp"       minOccurs="0" maxOccurs="1"/>
+	</xs:choice>
+    </xs:sequence>
+  </xs:complexType>
+  
+    <xs:complexType name="replicator">
+    <xs:sequence>
+	<xs:choice maxOccurs="unbounded">
+      <xs:element name="may-use" minOccurs="0" maxOccurs="1">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="action" type="action" maxOccurs="unbounded" />
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="entry"  type="repl_entry"  minOccurs="0" maxOccurs="unbounded" />
+      <xs:sequence>
+	  <xs:choice maxOccurs="unbounded">
+        <xs:element name="queue"  type="queue"     minOccurs="0" />
+        <xs:element name="action" type="action"    minOccurs="0" />
+	  </xs:choice>
+      </xs:sequence>
+	 </xs:choice>
+    </xs:sequence>
+    <xs:attribute name="name"        type="xs:string"  use="required" />
+    <xs:attribute name="max"         type="dec_or_hex" use="optional" />
+    <xs:attribute name="masks"       type="yes_no"     use="optional" />
+    <xs:attribute name="description" type="xs:string"  use="optional" />
+    <xs:attribute name="comment"     type="xs:string"  use="optional" />
+  </xs:complexType>
+  
+  <xs:complexType name="repl_entry">
+    <xs:sequence>
+	<xs:choice maxOccurs="unbounded">
+      <xs:element name="queue"  type="queue"     minOccurs="0" />
+      <xs:element name="action" type="action"    minOccurs="0" />
+      <xs:element name="fragmentation"           minOccurs="0">
+        <xs:complexType>
+          <xs:attribute name="name" type="xs:string" use="required"/>
+        </xs:complexType>
+      </xs:element>
+	  <xs:element name="header"                  minOccurs="0">
+        <xs:complexType>
+          <xs:attribute name="name" type="xs:string" use="required"/>
+        </xs:complexType>
+      </xs:element>
+	  <xs:element name="vsp"    type="vsp"       minOccurs="0" maxOccurs="1"/>
+	</xs:choice>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="policer">
+    <xs:sequence>
+      <xs:choice maxOccurs="unbounded">
+		  <xs:element name="algorithm" minOccurs="1">
+			<xs:simpleType>
+			  <xs:restriction base="xs:string">
+				<xs:enumeration value="rfc2698"      />
+				<xs:enumeration value="rfc4115"      />
+				<xs:enumeration value="pass_through" />
+			  </xs:restriction>
+			</xs:simpleType>
+		  </xs:element>
+		  <xs:element name="color_mode" minOccurs="1">
+			<xs:simpleType>
+			  <xs:restriction base="xs:string">
+				<xs:enumeration value="color_aware" />
+				<xs:enumeration value="color_blind" />
+			  </xs:restriction>
+			</xs:simpleType>
+		  </xs:element>
+		  <xs:element name="default_color" minOccurs="0">
+			<xs:simpleType>
+			  <xs:restriction base="xs:string">
+				<xs:enumeration value="red"      />
+				<xs:enumeration value="yellow"   />
+				<xs:enumeration value="green"    />
+				<xs:enumeration value="override" />
+			  </xs:restriction>
+			</xs:simpleType>
+		  </xs:element>
+		  <xs:element name="unit" minOccurs="0">
+			<xs:simpleType>
+			  <xs:restriction base="xs:string">
+				<xs:enumeration value="packet" />
+				<xs:enumeration value="byte"   />
+			  </xs:restriction>
+			</xs:simpleType>
+		  </xs:element>
+		  <xs:element name="CIR"    minOccurs="0" type="dec_or_hex" />
+		  <xs:element name="PIR"    minOccurs="0" type="dec_or_hex" />
+		  <xs:element name="EIR"    minOccurs="0" type="dec_or_hex" />
+		  <xs:element name="CBS"    minOccurs="0" type="dec_or_hex" />
+		  <xs:element name="PBS"    minOccurs="0" type="dec_or_hex" />
+		  <xs:element name="EBS"    minOccurs="0" type="dec_or_hex" />
+		  <xs:element name="action"  type="action" minOccurs="0"/>
+		</xs:choice>
+    </xs:sequence>
+      
+    <xs:attribute name="name"        type="xs:string"  use="required" />
+    <xs:attribute name="description" type="xs:string"  use="optional" />
+    <xs:attribute name="comment"     type="xs:string"  use="optional" />
+  </xs:complexType>
+  
+  <xs:complexType name="vsp">
+	<xs:attribute name="name"        type="xs:string"  use="required" />
+	<xs:attribute name="base"        type="dec_or_hex" use="optional" />
+	<xs:attribute name="fqshift"     type="dec_or_hex" use="optional" />
+	<xs:attribute name="vspoffset"   type="dec_or_hex" use="optional" />
+	<xs:attribute name="vspcount"    type="dec_or_hex" use="optional" />
+    <xs:attribute name="description" type="xs:string"  use="optional" />
+    <xs:attribute name="comment"     type="xs:string"  use="optional" />
+  </xs:complexType>
+
+  <xs:complexType name="manipulations">
+    <xs:sequence>
+      <xs:choice maxOccurs="unbounded">
+        <xs:element name="fragmentation" type="fragmentation" />
+        <xs:element name="reassembly"    type="reassembly" />
+		<xs:element name="header"        type="header" />
+      </xs:choice>
+    </xs:sequence>
+    <xs:attribute name="description" type="xs:string" use="optional" />
+    <xs:attribute name="comment"     type="xs:string" use="optional" />
+  </xs:complexType>
+  
+  <xs:complexType name="header">
+    <xs:sequence>
+      <xs:choice maxOccurs="unbounded">
+        <xs:element name="insert"        type="insert"/>
+		<xs:element name="remove"        type="remove"/>
+		<xs:element name="insert_header" type="insert_header"/>
+		<xs:element name="remove_header" type="remove_header"/>
+		<xs:element name="update"        type="update"/>
+		<xs:element name="custom"        type="custom"/>
+		<xs:element name="nextmanip">
+		    <xs:complexType>
+                <xs:attribute name="name" type="xs:string" use="required"/>
+            </xs:complexType>
+        </xs:element>
+		<xs:element name="comment"       type="xs:string"/>
+      </xs:choice>
+    </xs:sequence>
+	<xs:attribute name="name" type="xs:string" use="required" />
+	<xs:attribute name="parse" type="yes_no" use="optional" />
+	<xs:attribute name="duplicate" type="dec_or_hex" use="optional" />
+  </xs:complexType>
+  
+  <xs:complexType name="insert">
+    <xs:sequence>
+      <xs:choice maxOccurs="unbounded">
+        <xs:element name="size"          type="dec_or_hex" />
+        <xs:element name="offset"        type="dec_or_hex" />
+		<xs:element name="replace"       type="yes_no" />
+		<xs:element name="data"          type="dec_or_hex" />
+		<xs:element name="comment"       type="xs:string" />
+      </xs:choice>
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:complexType name="remove">
+    <xs:sequence>
+      <xs:choice maxOccurs="unbounded">
+        <xs:element name="size"          type="dec_or_hex" />
+        <xs:element name="offset"        type="dec_or_hex" />
+		<xs:element name="comment"       type="xs:string" />
+      </xs:choice>
+    </xs:sequence>
+  </xs:complexType>
+  
+  <xs:complexType name="insert_header">
+    <xs:sequence>
+      <xs:choice maxOccurs="unbounded">
+		<xs:element name="replace"       type="yes_no" />
+		<xs:element name="data"          type="dec_or_hex" />
+		<xs:element name="comment"       type="xs:string" />
+      </xs:choice>
+    </xs:sequence>
+	<xs:attribute name="type" use="required">
+        <xs:simpleType>
+            <xs:restriction base="xs:string">
+				<xs:enumeration value="mpls" />
+            </xs:restriction>
+        </xs:simpleType>
+    </xs:attribute>
+	<xs:attribute name="header_index" type="dec_or_hex" use="optional" />
+  </xs:complexType>
+  
+  <xs:complexType name="remove_header">
+    <xs:attribute name="type" use="required">
+        <xs:simpleType>
+            <xs:restriction base="xs:string">
+                <xs:enumeration value="eth" />
+                <xs:enumeration value="ethernet" />
+				<xs:enumeration value="qtags" />
+                <xs:enumeration value="ethmpls" />
+				<xs:enumeration value="ethernet_mpls" />
+				<xs:enumeration value="mpls" />
+            </xs:restriction>
+        </xs:simpleType>
+    </xs:attribute>
+  </xs:complexType>
+  
+  <xs:complexType name="update">
+    <xs:sequence>
+      <xs:choice maxOccurs="unbounded">
+		<xs:element name="field"         minOccurs="1" >
+		    <xs:complexType>
+            <xs:attribute name="type" use="required">
+              <xs:simpleType>
+                <xs:restriction base="xs:string">
+                  <xs:enumeration value="dscp" />
+                  <xs:enumeration value="vpri" />
+                  <xs:enumeration value="tos" />
+                  <xs:enumeration value="id" />
+                  <xs:enumeration value="ttl" />
+                  <xs:enumeration value="src" />
+                  <xs:enumeration value="dst" />
+                  <xs:enumeration value="tc" />
+                  <xs:enumeration value="hl" />
+                  <xs:enumeration value="checksum" />
+                </xs:restriction>
+              </xs:simpleType>
+            </xs:attribute>
+			<xs:attribute name="value" type="dec_or_hex" use="optional" />
+			<xs:attribute name="fill" type="yes_no" use="optional" />
+			<xs:attribute name="index" type="dec_or_hex" use="optional" />
+			</xs:complexType>
+		</xs:element>
+		<xs:element name="comment"       type="xs:string" />
+      </xs:choice>
+    </xs:sequence>
+	<xs:attribute name="type" use="required">
+        <xs:simpleType>
+            <xs:restriction base="xs:string">
+                <xs:enumeration value="vlan" />
+                <xs:enumeration value="ipv4" />
+				<xs:enumeration value="ipv6" />
+                <xs:enumeration value="tcpudp" />
+            </xs:restriction>
+        </xs:simpleType>
+    </xs:attribute>
+  </xs:complexType>
+  
+  <xs:complexType name="custom">
+    <xs:sequence>
+      <xs:choice maxOccurs="unbounded">
+		<xs:element name="decttl"        type="yes_no" />
+		<xs:element name="id"            type="dec_or_hex" />
+		<xs:element name="size"          type="dec_or_hex" />
+		<xs:element name="data"          type="dec_or_hex" />
+		<xs:element name="comment"       type="xs:string" />
+      </xs:choice>
+    </xs:sequence>
+	<xs:attribute name="type" use="required">
+        <xs:simpleType>
+            <xs:restriction base="xs:string">
+                <xs:enumeration value="ipv4" />
+                <xs:enumeration value="ipv6" />
+				<xs:enumeration value="ipv4byipv6" />
+                <xs:enumeration value="ipv6byipv4" />
+            </xs:restriction>
+        </xs:simpleType>
+    </xs:attribute>
+  </xs:complexType>
+
+  <xs:complexType name="fragmentation">
+    <xs:sequence>
+	<xs:choice maxOccurs="unbounded">
+      <xs:element name="size" type="dec_or_hex" minOccurs="1" />
+      <xs:element name="dontFragAction"         minOccurs="0" >
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:enumeration value="discard"  />
+            <xs:enumeration value="fragment" />
+            <xs:enumeration value="continue" />
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+      <xs:element name="scratchBpid" type="dec_or_hex" minOccurs="0" />
+	  <xs:element name="sgBpid" type="dec_or_hex" minOccurs="0" />
+	  <xs:element name="optionsCounterEn" type="yes_no_en" minOccurs="0" />
+	</xs:choice>
+    </xs:sequence>
+    <xs:attribute name="name" type="xs:string" use="required" />
+  </xs:complexType>
+
+  <xs:complexType name="reassembly">
+    <xs:sequence>
+      <xs:choice maxOccurs="unbounded">
+        <xs:element name="sgBpid"                   type="dec_or_hex" minOccurs="0" />
+		<xs:element name="nonConsistentSpFqid"      type="dec_or_hex" minOccurs="0" />
+		<xs:element name="maxInProcess"             type="dec_or_hex" minOccurs="0" />
+        <xs:element name="dataLiodnOffset"          type="dec_or_hex" minOccurs="0" />
+        <xs:element name="dataMemId"                type="dec_or_hex" minOccurs="0" />
+        <xs:element name="ipv4minFragSize"          type="dec_or_hex" minOccurs="0" />
+        <xs:element name="ipv6minFragSize"          type="dec_or_hex" minOccurs="0" />
+        <xs:element name="timeOutMode"                                minOccurs="0">
+          <xs:simpleType>
+            <xs:restriction base="xs:string">
+              <xs:enumeration value="frame"    />
+              <xs:enumeration value="fragment" />
+            </xs:restriction>
+          </xs:simpleType>
+        </xs:element>
+        <xs:element name="fqidForTimeOutFrames"     type="dec_or_hex" minOccurs="0" />
+        <xs:element name="numOfFramesPerHashEntry"  type="dec_or_hex" minOccurs="0" />
+		<xs:element name="numOfFramesPerHashEntry1" type="dec_or_hex" minOccurs="0" />
+		<xs:element name="numOfFramesPerHashEntry2" type="dec_or_hex" minOccurs="0" />
+        <xs:element name="timeoutThreshold"         type="dec_or_hex" minOccurs="0" />
+      </xs:choice>
+    </xs:sequence>
+    <xs:attribute name="name" type="xs:string" use="required" />
+  </xs:complexType>
+
+  <xs:complexType name="defaults">
+    <xs:sequence minOccurs="1">
+      <xs:choice minOccurs="1" maxOccurs="unbounded">
+        <xs:element name="default" minOccurs="1">
+          <xs:complexType>
+            <xs:attribute name="type">
+              <xs:simpleType>
+                <xs:restriction base="xs:string">
+                  <xs:enumeration value="from_data"       />
+                  <xs:enumeration value="from_data_no_v"  />
+                  <xs:enumeration value="not_from_data"   />
+                  <xs:enumeration value="mac_addr"        />
+                  <xs:enumeration value="tci"             />
+                  <xs:enumeration value="enet_type"       />
+                  <xs:enumeration value="ppp_session_id"  />
+                  <xs:enumeration value="ppp_protocol_id" />
+                  <xs:enumeration value="mpls_label"      />
+                  <xs:enumeration value="ip_addr"         />
+                  <xs:enumeration value="protocol_type"   />
+                  <xs:enumeration value="ip_tos_tc"       />
+                  <xs:enumeration value="ipv6_flow_label" />
+                  <xs:enumeration value="ipsec_spi"       />
+                  <xs:enumeration value="l4_port"         />
+                  <xs:enumeration value="tcp_flag"        />
+                </xs:restriction>
+              </xs:simpleType>
+            </xs:attribute>
+            <xs:attribute name="select">
+              <xs:simpleType>
+                <xs:restriction base="xs:string">
+                  <xs:enumeration value="gbl0"     />
+                  <xs:enumeration value="gbl1"     />
+                  <xs:enumeration value="private0" />
+                  <xs:enumeration value="private1" />
+                </xs:restriction>
+              </xs:simpleType>
+            </xs:attribute>
+          </xs:complexType>
+        </xs:element>
+      </xs:choice>
+    </xs:sequence>
+    <xs:attribute name="private0" type="dec_or_hex" use="optional" />
+    <xs:attribute name="private1" type="dec_or_hex" use="optional" />
+  </xs:complexType>
+
+</xs:schema>
