@@ -97,6 +97,29 @@ if [ -f "${CWD}/ask-nxp-sdk-sources.tar.gz" ]; then
     drivers/net/ethernet/freescale/sdk_fman/Makefile
   echo "I: ASK — USE_ENHANCED_EHASH enabled in sdk_fman Makefile"
 
+  # Fix soft lockup in dpaa_eth_priv_probe():
+  # 1. Reduce DPAA_ETH_RX_QUEUES from 128 to 16 — without FMC PCD programming,
+  #    128 PCD + 128 HI_PRIO_PCD = 256 unused FQs per port cause excessive
+  #    iteration in dpa_fq_setup() and dpa_fqs_init()
+  # 2. Add cond_resched() in dpa_fq_setup() main loop to yield CPU
+  # 3. Add cond_resched() in dpa_fqs_init() loop to yield between HW ops
+  SDK_ETH_H="drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.h"
+  SDK_ETH_COMMON="drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c"
+  if [ -f "$SDK_ETH_H" ]; then
+    sed -i 's/#define DPAA_ETH_RX_QUEUES.*128/#define DPAA_ETH_RX_QUEUES\t16/' "$SDK_ETH_H"
+    echo "I: ASK — DPAA_ETH_RX_QUEUES reduced to 16 (was 128)"
+  fi
+  if [ -f "$SDK_ETH_COMMON" ]; then
+    # Add cond_resched() at start of dpa_fq_setup main loop body
+    sed -i '/list_for_each_entry(fq, \&priv->dpa_fq_list, list) {/{n;s/^/\tcond_resched();\n/}' "$SDK_ETH_COMMON"
+    # Add cond_resched() every 32 FQs in dpa_fqs_init
+    sed -i '/^int dpa_fqs_init/,/^}/ {
+      /struct dpa_fq \*dpa_fq;/a\\tint __fq_resched_cnt = 0;
+      /list_for_each_entry(dpa_fq, list, list) {/{n;s/^/\tif (++__fq_resched_cnt \% 32 == 0) cond_resched();\n/}
+    }' "$SDK_ETH_COMMON"
+    echo "I: ASK — cond_resched() added to dpa_fq_setup + dpa_fqs_init"
+  fi
+
   echo "I: ASK — SDK sources + build integration injected into kernel tree"
 fi
 
