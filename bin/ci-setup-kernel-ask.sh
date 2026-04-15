@@ -65,6 +65,7 @@ echo "### ASK hooks + swphy patches staged at $KERNEL_PATCHES/"
 # We insert the tarball extraction immediately BEFORE this line.
 
 cp data/kernel-patches/ask-nxp-sdk-sources.tar.gz "$KERNEL_BUILD/"
+cp data/kernel-patches/patch-dpaa-probe-fix.py "$KERNEL_BUILD/"
 
 cat > /tmp/ask-inject.sh << 'ASK_INJECT_EOF'
 
@@ -97,66 +98,17 @@ if [ -f "${CWD}/ask-nxp-sdk-sources.tar.gz" ]; then
     drivers/net/ethernet/freescale/sdk_fman/Makefile
   echo "I: ASK — USE_ENHANCED_EHASH enabled in sdk_fman Makefile"
 
-  # Fix soft lockup in dpaa_eth_priv_probe():
-  # 1. Reduce DPAA_ETH_RX_QUEUES from 128 to 16 — without FMC PCD programming,
-  #    128 PCD + 128 HI_PRIO_PCD = 256 unused FQs per port cause excessive
-  #    iteration in dpa_fq_setup() and dpa_fqs_init()
-  # 2. Add cond_resched() in dpa_fq_setup() main loop to yield CPU
-  # 3. Add cond_resched() in dpa_fqs_init() loop to yield between HW ops
-  SDK_ETH_H="drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.h"
-  SDK_ETH_COMMON="drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c"
-  if [ -f "$SDK_ETH_H" ]; then
-    sed -i 's/#define DPAA_ETH_RX_QUEUES.*128/#define DPAA_ETH_RX_QUEUES\t16/' "$SDK_ETH_H"
-    echo "I: ASK — DPAA_ETH_RX_QUEUES reduced to 16 (was 128)"
-  fi
-  if [ -f "$SDK_ETH_COMMON" ]; then
-    # Add cond_resched() at start of dpa_fq_setup main loop body
-    sed -i '/list_for_each_entry(fq, \&priv->dpa_fq_list, list) {/{n;s/^/\tcond_resched();\n/}' "$SDK_ETH_COMMON"
-    # Add cond_resched() every 32 FQs in dpa_fqs_init
-    sed -i '/^int dpa_fqs_init/,/^}/ {
-      /struct dpa_fq \*dpa_fq;/a\\tint __fq_resched_cnt = 0;
-      /list_for_each_entry(dpa_fq, list, list) {/{n;s/^/\tif (++__fq_resched_cnt \% 32 == 0) cond_resched();\n/}
-    }' "$SDK_ETH_COMMON"
-    echo "I: ASK — cond_resched() added to dpa_fq_setup + dpa_fqs_init"
-  fi
-
-  # Debug + fix: instrument dpa_fq_setup() and protect against infinite while-loop
-  if [ -f "$SDK_ETH_COMMON" ]; then
-    # Add entry printk + loop counter to dpa_fq_setup (print ALL FQs, not just first 5)
-    sed -i '/^void dpa_fq_setup(/,/list_for_each_entry(fq,/ {
-      /int egress_cnt = 0/a\\tint __fq_dbg_cnt = 0;\n\tprintk("DPAA_FQ_SETUP: enter\\n");
-      /list_for_each_entry(fq, \&priv->dpa_fq_list, list) {/{n;s/^/\t__fq_dbg_cnt++;\n\tprintk("DPAA_FQ_SETUP: fq #%d type=%d\\n", __fq_dbg_cnt, fq->fq_type);\n/}
-    }' "$SDK_ETH_COMMON"
-    # Add safety break to the while(egress_cnt) loop to prevent infinite loop
-    # if no TX FQs exist in the list. Also add debug printk.
-    sed -i '/while (egress_cnt < DPAA_ETH_TX_QUEUES) {/a\\tint __prev_egress = egress_cnt;' "$SDK_ETH_COMMON"
-    sed -i '/while (egress_cnt < DPAA_ETH_TX_QUEUES)/,/^}/ {
-      /if (egress_cnt == DPAA_ETH_TX_QUEUES)/{
-        n
-        /break;/a\\t}\n\tif (egress_cnt == __prev_egress) {\n\t\tprintk("DPAA_FQ_SETUP: WARN no TX FQs, egress_cnt=%d/%d\\n", egress_cnt, DPAA_ETH_TX_QUEUES);\n\t\tbreak;\n\t}
-      }
-    }' "$SDK_ETH_COMMON"
-    # Note: "done" printk omitted — EXPORT_SYMBOL is outside function scope.
-    # We rely on "DPAA_PROBE: fq_setup done" in dpaa_eth.c to confirm completion.
-    echo "I: ASK — dpa_fq_setup debug + while-loop safety break added"
-  fi
-
-  # Debug: add probe progress tracing to identify which function hangs
-  SDK_ETH_C="drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c"
-  if [ -f "$SDK_ETH_C" ]; then
-    # After dpa_priv_bp_create
-    sed -i '/err = dpa_priv_bp_create/a\\tprintk("DPAA_PROBE: bp_create done\\n");' "$SDK_ETH_C"
-    # After dpa_get_channel
-    sed -i '/channel = dpa_get_channel/a\\tprintk("DPAA_PROBE: get_channel=%d\\n", channel);' "$SDK_ETH_C"
-    # After dpaa_eth_add_channel
-    sed -i '/dpaa_eth_add_channel(priv->channel)/a\\tprintk("DPAA_PROBE: add_channel done\\n");' "$SDK_ETH_C"
-    # After dpa_fq_setup
-    sed -i '/dpa_fq_setup(priv, \&private_fq_cbs/a\\tprintk("DPAA_PROBE: fq_setup done\\n");' "$SDK_ETH_C"
-    # After dpaa_eth_cgr_init
-    sed -i '/err = dpaa_eth_cgr_init/a\\tprintk("DPAA_PROBE: cgr_init done\\n");' "$SDK_ETH_C"
-    # After dpa_fqs_init
-    sed -i '/err = dpa_fqs_init/a\\tprintk("DPAA_PROBE: fqs_init done\\n");' "$SDK_ETH_C"
-    echo "I: ASK — probe progress tracing added to dpaa_eth.c"
+  # Fix soft lockup + add diagnostic tracing via Python patcher
+  # (replaces fragile sed injections that produced invalid C code)
+  # The patcher modifies dpaa_eth.h, dpaa_eth_common.c, and dpaa_eth.c:
+  #   - Reduce DPAA_ETH_RX_QUEUES 128 → 16 (unused PCD FQs without FMC)
+  #   - Add cond_resched() in dpa_fq_setup + dpa_fqs_init loops
+  #   - Add while-loop safety break (prevents infinite loop if no TX FQs)
+  #   - Add debug printk for every FQ iteration + probe progress markers
+  if [ -f "${CWD}/patch-dpaa-probe-fix.py" ]; then
+    python3 "${CWD}/patch-dpaa-probe-fix.py" .
+  else
+    echo "WARNING: patch-dpaa-probe-fix.py not found — SDK DPAA probe fix skipped"
   fi
 
   echo "I: ASK — SDK sources + build integration injected into kernel tree"
