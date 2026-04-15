@@ -162,9 +162,14 @@ cp data/ask-userspace/libnetfilter-conntrack/libnetfilter_conntrack.so.3.8.0  "$
 ln -sf libnetfilter_conntrack.so.3.8.0  "$CHROOT/usr/local/lib/libnetfilter_conntrack.so.3"
 ln -sf libnetfilter_conntrack.so.3      "$CHROOT/usr/local/lib/libnetfilter_conntrack.so"
 
-### ASK CDX config XMLs → /etc/cdx/
+### ASK CDX config XMLs → /etc/ (dpa_app expects /etc/cdx_cfg.xml etc.)
+# Use Mono Gateway config as default (3×1G + 2×10G + 2×OH)
+cp data/ask-userspace/dpa_app/etc/cdx_cfg_mono_gw.xml "$CHROOT/etc/cdx_cfg.xml"
+cp data/ask-userspace/dpa_app/etc/cdx_pcd.xml         "$CHROOT/etc/cdx_pcd.xml"
+cp data/ask-userspace/dpa_app/etc/cdx_sp.xml          "$CHROOT/etc/cdx_sp.xml"
+# Keep originals in /etc/cdx/ for reference
 mkdir -p "$CHROOT/etc/cdx"
-cp data/ask-userspace/dpa_app/etc/cdx_cfg.xml        "$CHROOT/etc/cdx/"
+cp data/ask-userspace/dpa_app/etc/cdx_cfg.xml         "$CHROOT/etc/cdx/"
 cp data/ask-userspace/dpa_app/etc/cdx_cfg_mono_gw.xml "$CHROOT/etc/cdx/"
 cp data/ask-userspace/dpa_app/etc/cdx_pcd.xml         "$CHROOT/etc/cdx/"
 cp data/ask-userspace/dpa_app/etc/cdx_sp.xml          "$CHROOT/etc/cdx/"
@@ -182,6 +187,10 @@ cp ask-ls1046a-6.6/config/fastforward "$CHROOT/etc/config/fastforward"
 
 ### CMM service enablement via tmpfiles.d
 cp data/systemd/cmm.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/cmm.conf"
+
+### ASK health check script
+cp data/scripts/check-ask.sh "$CHROOT/usr/local/bin/check-ask"
+chmod +x "$CHROOT/usr/local/bin/check-ask"
 
 ### ASK conntrack fix: flush VyOS notrack rules for fast-path offload
 cp data/scripts/ask-conntrack-fix.sh "$CHROOT/usr/local/bin/ask-conntrack-fix.sh"
