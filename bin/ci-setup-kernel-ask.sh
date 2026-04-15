@@ -120,6 +120,21 @@ if [ -f "${CWD}/ask-nxp-sdk-sources.tar.gz" ]; then
     echo "I: ASK — cond_resched() added to dpa_fq_setup + dpa_fqs_init"
   fi
 
+  # Debug: add iteration counter inside dpa_fq_setup() to detect infinite loop
+  if [ -f "$SDK_ETH_COMMON" ]; then
+    # Add entry printk + loop counter to dpa_fq_setup
+    sed -i '/^void dpa_fq_setup(/,/list_for_each_entry(fq,/ {
+      /int egress_cnt = 0/a\\tint __fq_dbg_cnt = 0;\n\tprintk("DPAA_FQ_SETUP: enter, num_portals will be counted\\n");
+      /list_for_each_entry(fq, \&priv->dpa_fq_list, list) {/{n;s/^/\t__fq_dbg_cnt++;\n\tif (__fq_dbg_cnt <= 5 || __fq_dbg_cnt % 100 == 0)\n\t\tprintk("DPAA_FQ_SETUP: fq #%d type=%d\\n", __fq_dbg_cnt, fq->fq_type);\n/}
+    }' "$SDK_ETH_COMMON"
+    # Add exit printk after the loop ends (before return)
+    sed -i '/^void dpa_fq_setup/,/^}/ {
+      /^}/ {i\\tprintk("DPAA_FQ_SETUP: done, processed %d FQs\\n", __fq_dbg_cnt);
+      }
+    }' "$SDK_ETH_COMMON"
+    echo "I: ASK — dpa_fq_setup debug tracing added"
+  fi
+
   # Debug: add probe progress tracing to identify which function hangs
   SDK_ETH_C="drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c"
   if [ -f "$SDK_ETH_C" ]; then
