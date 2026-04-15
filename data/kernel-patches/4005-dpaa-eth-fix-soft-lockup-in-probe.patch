@@ -1,11 +1,15 @@
 From: VyOS LS1046A Build <build@vyos-ls1046a>
-Subject: [PATCH] sdk_dpaa: fix soft lockup during probe by reducing PCD FQs and adding cond_resched
+Subject: [PATCH] sdk_dpaa: fix soft lockup during probe and add diagnostic tracing
 
 The SDK DPAA ethernet driver triggers a soft lockup (26s+) during
 dpaa_eth_priv_probe() because the entire probe path runs without
 yielding the CPU. The combination of dpa_fq_setup() iterating through
 all FQs and dpa_fqs_init() performing QMan hardware operations for
 each FQ exceeds the soft lockup threshold.
+
+Additionally, the while-loop in dpa_fq_setup() that fills egress_fqs[]
+can loop infinitely if no FQ_TYPE_TX entries exist in the list
+(possible if DTS configuration is wrong or TX FQs weren't allocated).
 
 Fix by:
 1. Reducing DPAA_ETH_RX_QUEUES from 128 to 16. Without FMC PCD
@@ -16,14 +20,20 @@ Fix by:
    CPU during FQ metadata setup.
 3. Adding cond_resched() in dpa_fqs_init() loop to yield between
    qman_create_fq()/qman_init_fq() hardware operations.
+4. Adding a safety break in the while-loop that fills egress_fqs[]
+   to prevent infinite looping when no TX FQs exist.
+5. Adding diagnostic printk in dpaa_eth_priv_probe() to trace probe
+   progress (bp_create, get_channel, fq_setup, cgr_init, fqs_init).
+6. Adding FQ iteration tracing in dpa_fq_setup() to diagnose hangs.
 
 Tested on LS1046A Mono Gateway with NR_CPUS=4 and 5 active MACs.
 
 Signed-off-by: VyOS LS1046A Build <build@vyos-ls1046a>
 ---
- drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.h        | 2 +-
- drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c | 7 +++++++
- 2 files changed, 8 insertions(+), 1 deletion(-)
+ drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.h        |  2 +-
+ drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c | 25 +++++++++++++++-
+ drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c        | 12 ++++++++
+ 3 files changed, 37 insertions(+), 2 deletions(-)
 
 diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.h
 index 1111111..2222222 100644
@@ -42,15 +52,65 @@ diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c b/drivers
 index 3333333..4444444 100644
 --- a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c
 +++ b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c
-@@ -1166,6 +1166,8 @@ void dpa_fq_setup(struct dpa_priv_s *priv, const struct dpa_fq_cbs_t *fq_cbs,
+@@ -1163,9 +1163,14 @@ void dpa_fq_setup(struct dpa_priv_s *priv, const struct dpa_fq_cbs_t *fq_cbs,
+ 	const cpumask_t *affine_cpus = qman_affine_cpus();
+ 	int egress_cnt = 0, conf_cnt = 0;
+ 
++	int __fq_dbg_cnt = 0;
++	printk("DPAA_FQ_SETUP: enter\n");
++
+ 	/* Prepare for PCD FQs init */
+ 	for_each_cpu(cpu, affine_cpus)
+ 		portals[num_portals++] = qman_affine_channel(cpu);
++	printk("DPAA_FQ_SETUP: num_portals=%d\n", num_portals);
++
+ 	if (num_portals == 0)
+ 		dev_err(priv->net_dev->dev.parent,
+ 			"No Qman software (affine) channels found");
+@@ -1178,6 +1183,9 @@ void dpa_fq_setup(struct dpa_priv_s *priv, const struct dpa_fq_cbs_t *fq_cbs,
+ 
  	/* Initialize each FQ in the list */
  	list_for_each_entry(fq, &priv->dpa_fq_list, list) {
 +		cond_resched();
-+
++		__fq_dbg_cnt++;
++		printk("DPAA_FQ_SETUP: fq #%d type=%d\n", __fq_dbg_cnt, fq->fq_type);
  		switch (fq->fq_type) {
  		case FQ_TYPE_RX_DEFAULT:
  			if (WARN_ON_ONCE(!priv->mac_dev)) continue;
-@@ -1432,6 +1434,11 @@ int __cold dpa_fq_init(struct dpa_fq *dpa_fq, bool td_enable)
+@@ -1222,13 +1230,24 @@ void dpa_fq_setup(struct dpa_priv_s *priv, const struct dpa_fq_cbs_t *fq_cbs,
+ 		}
+ 	}
+ 
++	printk("DPAA_FQ_SETUP: main loop done, %d FQs, egress_cnt=%d/%d\n",
++	       __fq_dbg_cnt, egress_cnt, DPAA_ETH_TX_QUEUES);
++
+ 	/* The number of Tx queues may be smaller than the number of cores, if
+ 	 * the Tx queue range is specified in the device tree instead of being
+ 	 * dynamically allocated.
+ 	 * Make sure all CPUs receive a corresponding Tx queue.
+ 	 */
+ 	while (egress_cnt < DPAA_ETH_TX_QUEUES) {
++		int __prev_egress = egress_cnt;
+ 		list_for_each_entry(fq, &priv->dpa_fq_list, list) {
++			cond_resched();
+ 			if (fq->fq_type != FQ_TYPE_TX)
+ 				continue;
+ 			priv->egress_fqs[egress_cnt++] = &fq->fq_base;
+@@ -1236,7 +1247,14 @@ void dpa_fq_setup(struct dpa_priv_s *priv, const struct dpa_fq_cbs_t *fq_cbs,
+ 				break;
+ 		}
++		if (egress_cnt == __prev_egress) {
++			printk("DPAA_FQ_SETUP: WARN no TX FQs found, breaking egress fill loop (egress_cnt=%d/%d)\n",
++			       egress_cnt, DPAA_ETH_TX_QUEUES);
++			break;
++		}
+ 	}
++
++	printk("DPAA_FQ_SETUP: done\n");
+ }
+ EXPORT_SYMBOL(dpa_fq_setup);
+ 
+@@ -1432,8 +1450,13 @@ int __cold dpa_fq_init(struct dpa_fq *dpa_fq, bool td_enable)
  int dpa_fqs_init(struct device *dev, struct list_head *list, bool td_enable)
  {
  	struct dpa_fq *dpa_fq;
@@ -61,3 +121,38 @@ index 3333333..4444444 100644
 +			cond_resched();
 +
  		int _errno = dpa_fq_init(dpa_fq, td_enable);
+diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c
+index 5555555..6666666 100644
+--- a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c
+@@ -1038,6 +1038,8 @@ dpaa_eth_priv_probe(struct platform_device *_of_dev)
+ 	err = dpa_priv_bp_create(net_dev, dpa_bp, count);
+ 	if (err < 0)
+ 		goto bp_create_failed;
++	printk("DPAA_PROBE: bp_create done\n");
++
+ 	priv->mac_dev = mac_dev;
+ 
+ 	channel = dpa_get_channel();
+@@ -1046,14 +1048,24 @@ dpaa_eth_priv_probe(struct platform_device *_of_dev)
+ 		err = channel;
+ 		goto get_channel_failed;
+ 	}
++	printk("DPAA_PROBE: get_channel=%d\n", channel);
+ 
+ 	priv->channel = (uint16_t)channel;
+ 	dpaa_eth_add_channel(priv->channel);
++	printk("DPAA_PROBE: add_channel done\n");
+ 
+ 	dpa_fq_setup(priv, &private_fq_cbs, priv->mac_dev->port_dev[TX]);
++	printk("DPAA_PROBE: fq_setup done\n");
+ 
+ 	err = dpaa_eth_cgr_init(priv);
++	if (err < 0) {
++		dev_err(dev, "Error initializing CGR\n");
++		goto tx_cgr_init_failed;
++	}
++	printk("DPAA_PROBE: cgr_init done\n");
++
+ 	err = dpa_fqs_init(dev, &priv->dpa_fq_list, false);
++	printk("DPAA_PROBE: fqs_init done\n");
