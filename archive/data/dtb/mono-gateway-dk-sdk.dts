@@ -97,19 +97,33 @@
 &fman0 {
 	compatible = "fsl,fman", "simple-bus";
 
-	/* 10GEC1 — SDK FMan handles in-band; remove mainline 'managed' */
-	ethernet@f0000 {
-		/delete-property/ managed;
-		/delete-property/ sfp;
-		phy-connection-type = "xgmii";
-	};
+/* 10GEC1 — SDK fsl_mac has no phylink/SFP support.
+ * Delete mainline properties and add fixed-link so mac.c's
+ * of_phy_register_fixed_link() succeeds. Without fixed-link,
+ * mac_probe() hits "Wrong PHY information" → probe fails.
+ * Kernel patch 4004 maps speed 10000 → SWMII_SPEED_1000
+ * so swphy_decode_speed() in fixed_phy.c doesn't reject it.
+ */
+ethernet@f0000 {
+/delete-property/ managed;
+/delete-property/ sfp;
+phy-connection-type = "xgmii";
+fixed-link {
+	speed = <10000>;
+	full-duplex;
+};
+};
 
-	/* 10GEC2 — same treatment */
-	ethernet@f2000 {
-		/delete-property/ managed;
-		/delete-property/ sfp;
-		phy-connection-type = "xgmii";
-	};
+/* 10GEC2 — same treatment */
+ethernet@f2000 {
+/delete-property/ managed;
+/delete-property/ sfp;
+phy-connection-type = "xgmii";
+fixed-link {
+	speed = <10000>;
+	full-duplex;
+};
+};
 };
 
 /*
