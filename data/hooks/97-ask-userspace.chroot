@@ -24,6 +24,28 @@ fi
 # ldconfig: ASK shared libraries live in /usr/local/lib
 # (libcli, libfci, libcmm, libnfnetlink, libnetfilter_conntrack)
 echo "/usr/local/lib" > /etc/ld.so.conf.d/ask.conf
+
+# Replace system libnfnetlink with NXP-patched version.
+# The system libnfnetlink.so.0 (Debian, 30KB) lacks nfnl_set_nonblocking_mode()
+# which CMM requires. Our patched version (137KB) is a superset — same SONAME,
+# same ABI, plus NXP extensions. The multiarch path /usr/lib/aarch64-linux-gnu/
+# takes priority over /usr/local/lib/ in ldconfig, so we must replace in-place.
+SYSLIB=/usr/lib/aarch64-linux-gnu
+if [ -f "$SYSLIB/libnfnetlink.so.0.2.0" ] && [ -f /usr/local/lib/libnfnetlink.so.0.2.0 ]; then
+  # Back up original
+  cp "$SYSLIB/libnfnetlink.so.0.2.0" "$SYSLIB/libnfnetlink.so.0.2.0.debian-orig" 2>/dev/null || true
+  # Replace with our patched version
+  cp /usr/local/lib/libnfnetlink.so.0.2.0 "$SYSLIB/libnfnetlink.so.0.2.0"
+  echo "Replaced system libnfnetlink with NXP-patched version"
+fi
+
+# Same for libnetfilter_conntrack (NXP-patched with comcerto extensions)
+if [ -f "$SYSLIB/libnetfilter_conntrack.so.3.8.0" ] && [ -f /usr/local/lib/libnetfilter_conntrack.so.3.8.0 ]; then
+  cp "$SYSLIB/libnetfilter_conntrack.so.3.8.0" "$SYSLIB/libnetfilter_conntrack.so.3.8.0.debian-orig" 2>/dev/null || true
+  cp /usr/local/lib/libnetfilter_conntrack.so.3.8.0 "$SYSLIB/libnetfilter_conntrack.so.3.8.0"
+  echo "Replaced system libnetfilter_conntrack with NXP-patched version"
+fi
+
 ldconfig
 
 # ASK kernel modules installed to /usr/local/lib/ask-modules/
