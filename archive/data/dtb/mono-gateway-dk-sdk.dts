@@ -93,9 +93,39 @@
 /*
  * FMan: SDK driver needs compatible = "fsl,fman", "simple-bus"
  * Also remove 'managed' from 10G ports — SDK FMan handles link itself
+ *
+ * CRITICAL: Override port compatible strings from mainline format
+ * ("fsl,fman-v3-port-rx/tx") to SDK format ("fsl,fman-port-{1g,10g}-{rx,tx}").
+ * The SDK fm_port_driver match table does NOT match mainline v3 compat strings.
+ * Without this, fm_port_probe() never runs, dev_set_drvdata() is never called,
+ * and all fsl_mac probes fail with "dev_get_drvdata(port@XXXXX) failed" error -22.
  */
 &fman0 {
-	compatible = "fsl,fman", "simple-bus";
+compatible = "fsl,fman", "simple-bus";
+
+/* 1G RX ports — mainline "fsl,fman-v3-port-rx" → SDK "fsl,fman-port-1g-rx" */
+port@88000 { compatible = "fsl,fman-port-1g-rx"; };
+port@89000 { compatible = "fsl,fman-port-1g-rx"; };
+port@8a000 { compatible = "fsl,fman-port-1g-rx"; };
+port@8b000 { compatible = "fsl,fman-port-1g-rx"; };
+port@8c000 { compatible = "fsl,fman-port-1g-rx"; };
+port@8d000 { compatible = "fsl,fman-port-1g-rx"; };
+
+/* 10G RX ports — mainline "fsl,fman-v3-port-rx" → SDK "fsl,fman-port-10g-rx" */
+port@90000 { compatible = "fsl,fman-port-10g-rx"; };
+port@91000 { compatible = "fsl,fman-port-10g-rx"; };
+
+/* 1G TX ports — mainline "fsl,fman-v3-port-tx" → SDK "fsl,fman-port-1g-tx" */
+port@a8000 { compatible = "fsl,fman-port-1g-tx"; };
+port@a9000 { compatible = "fsl,fman-port-1g-tx"; };
+port@aa000 { compatible = "fsl,fman-port-1g-tx"; };
+port@ab000 { compatible = "fsl,fman-port-1g-tx"; };
+port@ac000 { compatible = "fsl,fman-port-1g-tx"; };
+port@ad000 { compatible = "fsl,fman-port-1g-tx"; };
+
+/* 10G TX ports — mainline "fsl,fman-v3-port-tx" → SDK "fsl,fman-port-10g-tx" */
+port@b0000 { compatible = "fsl,fman-port-10g-tx"; };
+port@b1000 { compatible = "fsl,fman-port-10g-tx"; };
 
 /* 10GEC1 — SDK fsl_mac has no phylink/SFP support.
  * Delete mainline properties and add fixed-link so mac.c's
