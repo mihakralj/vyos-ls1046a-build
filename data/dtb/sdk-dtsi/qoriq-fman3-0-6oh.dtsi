@@ -4,44 +4,55 @@
  * Copyright 2012-2015 Freescale Semiconductor Inc.
  *
  * SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
+ *
+ * SDK fsl-fman-port driver requires fsl,qman-channel-id on ALL port nodes
+ * including OH ports. Without it, ReadFmPortDevTreeNode() returns NULL →
+ * probe fails with -EIO. Channel IDs 0x808-0x80D are the LS1046A QMan
+ * dedicated channels for OH ports (see QCSP channel assignment in RM).
  */
 
 fman@1a00000 {
 
-	fman0_oh1: port@82000 {
-		cell-index = <0>;
-		compatible = "fsl,fman-port-oh";
-		reg = <0x82000 0x1000>;
-	};
+fman0_oh1: port@82000 {
+cell-index = <0>;
+compatible = "fsl,fman-port-oh";
+reg = <0x82000 0x1000>;
+fsl,qman-channel-id = <0x808>;
+};
 
-	fman0_oh2: port@83000 {
-		cell-index = <1>;
-		compatible = "fsl,fman-port-oh";
-		reg = <0x83000 0x1000>;
-	};
+fman0_oh2: port@83000 {
+cell-index = <1>;
+compatible = "fsl,fman-port-oh";
+reg = <0x83000 0x1000>;
+fsl,qman-channel-id = <0x809>;
+};
 
-	fman0_oh3: port@84000 {
-		cell-index = <2>;
-		compatible = "fsl,fman-port-oh";
-		reg = <0x84000 0x1000>;
-	};
+fman0_oh3: port@84000 {
+cell-index = <2>;
+compatible = "fsl,fman-port-oh";
+reg = <0x84000 0x1000>;
+fsl,qman-channel-id = <0x80a>;
+};
 
-	fman0_oh4: port@85000 {
-		cell-index = <3>;
-		compatible = "fsl,fman-port-oh";
-		reg = <0x85000 0x1000>;
-	};
+fman0_oh4: port@85000 {
+cell-index = <3>;
+compatible = "fsl,fman-port-oh";
+reg = <0x85000 0x1000>;
+fsl,qman-channel-id = <0x80b>;
+};
 
-	fman0_oh5: port@86000 {
-		cell-index = <4>;
-		compatible = "fsl,fman-port-oh";
-		reg = <0x86000 0x1000>;
-	};
+fman0_oh5: port@86000 {
+cell-index = <4>;
+compatible = "fsl,fman-port-oh";
+reg = <0x86000 0x1000>;
+fsl,qman-channel-id = <0x80c>;
+};
 
-	fman0_oh6: port@87000 {
-		cell-index = <5>;
-		compatible = "fsl,fman-port-oh";
-		reg = <0x87000 0x1000>;
-	};
+fman0_oh6: port@87000 {
+cell-index = <5>;
+compatible = "fsl,fman-port-oh";
+reg = <0x87000 0x1000>;
+fsl,qman-channel-id = <0x80d>;
+};
 
 };
