@@ -55,8 +55,9 @@
 		/delete-property/ iommu-map;
 	};
 
-	/* No SMMU on this board */
-	/delete-node/ iommu@9000000;
+/* No SMMU on this board */
+/delete-node/ iommu@9000000;
+
 };
 
 /*
@@ -71,23 +72,45 @@
  *   (MAC10 added below as ethernet@9)
  */
 &fsldpaa {
-	/* Disable unused MACs */
-	ethernet@0 {
-		status = "disabled";
-	};
-	ethernet@2 {
-		status = "disabled";
-	};
-	ethernet@3 {
-		status = "disabled";
-	};
+/* Disable unused MACs */
+ethernet@0 {
+status = "disabled";
+};
+ethernet@2 {
+status = "disabled";
+};
+ethernet@3 {
+status = "disabled";
+};
 
-	/* MAC10 — 10G right SFP (not in generic qoriq-dpaa-eth.dtsi) */
-	ethernet@9 {
-		compatible = "fsl,dpa-ethernet";
-		fsl,fman-mac = <&enet7>;
-		dma-coherent;
-	};
+/*
+ * ethernet@8 (MAC9, 10G left SFP) — fix merged DTS conflict.
+ * The mainline mono-gateway-dk.dts adds this node with
+ * compatible = "fsl,dpa-ethernet-init" and static FQIDs (0x40c-0x40f).
+ * qoriq-dpaa-eth.dtsi adds the same node with "fsl,dpa-ethernet".
+ * DTC merges them: the node ends up with BOTH compatible strings
+ * (last wins) AND the static fsl,qman-frame-queues-* properties.
+ * The SDK dpa_fq_probe_mac() sees static FQIDs → allocates only
+ * RX_DEFAULT, RX_ERROR, TX_CONF_MQ, TX_ERROR, TX_CONFIRM (8 FQs,
+ * zero TX) instead of the full dynamic set (44 FQs with PCD + TX).
+ * Fix: force SDK compatible and delete the static FQ properties.
+ */
+ethernet@8 {
+compatible = "fsl,dpa-ethernet";
+/delete-property/ fsl,qman-frame-queues-rx;
+/delete-property/ fsl,qman-frame-queues-tx;
+/delete-property/ fsl,bman-buffer-pools;
+};
+
+/* MAC10 — 10G right SFP. Same merge conflict fix + add node. */
+ethernet@9 {
+compatible = "fsl,dpa-ethernet";
+fsl,fman-mac = <&enet7>;
+dma-coherent;
+/delete-property/ fsl,qman-frame-queues-rx;
+/delete-property/ fsl,qman-frame-queues-tx;
+/delete-property/ fsl,bman-buffer-pools;
+};
 };
 
 /*
