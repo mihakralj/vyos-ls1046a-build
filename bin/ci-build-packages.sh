@@ -122,7 +122,7 @@ for package in $packages; do
 
     # Apply CDX bugfixes to ASK source (fixes from dev_boot testing)
     # The ask-ls1046a-6.6 repo may not have all fixes yet — apply patch
-    ASK_PATCH="$GITHUB_WORKSPACE/data/kernel-patches/ask-cdx-bugfixes.patch"
+    ASK_PATCH="$ASK_SRC/patches/cdx/01-mono-defensive-rewrite.patch"
     if [ -d "$ASK_SRC/cdx" ] && [ -f "$ASK_PATCH" ]; then
       echo "### Applying ASK CDX bugfixes patch to ask-ls1046a-6.6"
       patch --no-backup-if-mismatch -p1 -d "$ASK_SRC" < "$ASK_PATCH" || \
