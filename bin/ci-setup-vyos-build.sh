@@ -63,6 +63,10 @@ cp data/scripts/fancontrol.conf "$CHROOT/etc/fancontrol"
 cp data/scripts/fancontrol-setup.sh "$CHROOT/usr/local/bin/fancontrol-setup"
 chmod +x "$CHROOT/usr/local/bin/fancontrol-setup"
 
+### LED helper: set RGB values on LP5812 multicolor LED
+cp data/scripts/set-led-rgb.sh "$CHROOT/usr/local/bin/set-led-rgb.sh"
+chmod +x "$CHROOT/usr/local/bin/set-led-rgb.sh"
+
 ### Systemd drop-in: run fancontrol-setup before fancontrol starts
 mkdir -p "$CHROOT/etc/systemd/system/fancontrol.service.d"
 cp data/systemd/fancontrol-dropin.conf "$CHROOT/etc/systemd/system/fancontrol.service.d/hwmon-setup.conf"
