@@ -156,16 +156,37 @@ maximum-power-milliwatt = <3000>;
 };
 
 &usb0 {
-	status = "okay";
-	dr_mode = "host";
+status = "okay";
+dr_mode = "host";
+/*
+ * LS1046A DWC3 USB stability quirks.
+ *
+ * Without these, high-speed USB-2 mass storage (live-boot USB stick)
+ * enumerates but cannot sustain bulk transfers during initramfs
+ * filesystem scan — the port resets every ~30s with
+ *   "xhci-hcd: Setup ERROR: setup context command for slot N"
+ *   "usb 1-1: hub failed to enable device, error -22"
+ * and live-boot never finds filesystem.squashfs.
+ *
+ * - dis_u2_susphy_quirk / dis_u3_susphy_quirk: disable suspend PHY.
+ *   LS1046A erratum: PHY exit from suspend corrupts link training.
+ * - dis-u1-entry-quirk / dis-u2-entry-quirk: block LPM U1/U2 transitions.
+ *   LS1046A erratum A-005697: controller mis-handles U1/U2 exit.
+ * - usb3-lpm-capable removed for the same LPM erratum.
+ */
+snps,dis_u2_susphy_quirk;
+snps,dis_u3_susphy_quirk;
+snps,dis-u1-entry-quirk;
+snps,dis-u2-entry-quirk;
+/delete-property/ usb3-lpm-capable;
 };
 
 &usb1 {
-	status = "disabled";
+status = "disabled";
 };
 
 &usb2 {
-	status = "disabled";
+status = "disabled";
 };
 
 &dspi {
