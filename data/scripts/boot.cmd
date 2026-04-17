@@ -47,17 +47,11 @@ usb stop
 # quirks = 0x0000008002008410 (no AVOID_BEI bit) and the xHCI host
 # dying at T+17s mid USB-storage probe.
 #
-# FULL DEBUG MODE — everything logged to ttyS0.
-#   debug                                 — sets console loglevel to 10 (all printk)
-#   ignore_loglevel                       — defeats any later loglevel= silencing
-#   earlyprintk                           — earliest possible kernel console
-#   initcall_debug                        — trace every kernel initcall + timing
-#   systemd.log_level=debug               — systemd itself at debug verbosity
-#   systemd.log_target=console            — systemd writes to /dev/console (ttyS0)
-#   systemd.journald.forward_to_console=1 — journald mirrors to console
-#   systemd.show_status=1                 — show every unit transition
-# NOTE: NO loglevel= or quiet — nothing is suppressed.
-setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 debug ignore_loglevel earlyprintk initcall_debug systemd.log_level=debug systemd.log_target=console systemd.journald.forward_to_console=1 systemd.show_status=1 boot=live rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 usbcore.autosuspend=-1
+# NOTE: Console quieting is NOT done via kernel cmdline `loglevel=` here.
+# Early attempts with loglevel=4 silenced too much — all the useful early
+# boot logs disappeared. Instead, console is quieted AFTER userspace
+# starts via /etc/sysctl.d/99-ls1046a-quiet-console.conf (kernel.printk).
+setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 usbcore.autosuspend=-1
 
 # --- Boot ---
 
