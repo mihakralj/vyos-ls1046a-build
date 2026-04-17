@@ -33,7 +33,7 @@ jobs:
             --name arm64-runner
 
       - name: Wait for runner to register
-        run: sleep 30
+        run: sleep 45
 
   # ── Step 2: Build VyOS on the self-hosted ARM64 runner ───────────
   call-auto-build:
