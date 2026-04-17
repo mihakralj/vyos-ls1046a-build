@@ -51,14 +51,17 @@ usb stop
 #   etc.) stalls for ~30s before xHCI resets the port — boot takes
 #   forever and never finishes mounting root.
 #
-# NOTE: Console quieting is NOT done via kernel cmdline `loglevel=` here.
-# Early attempts with loglevel=4 silenced too much — all the useful early
-# boot logs disappeared. Instead, console is quieted AFTER userspace
-# starts via /etc/sysctl.d/99-ls1046a-quiet-console.conf (kernel.printk).
-# Early boot remains verbose; only the SDK fsl_dpa "phy device not
-# initialized" pr_err spam at T+62s is suppressed before agetty prints
-# the login banner.
-setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 usbcore.autosuspend=-1 xhci_hcd.quirks=0x8400
+# FULL DEBUG MODE — everything logged to ttyS0.
+#   debug                                 — sets console loglevel to 10 (all printk)
+#   ignore_loglevel                       — defeats any later loglevel= silencing
+#   earlyprintk                           — earliest possible kernel console
+#   initcall_debug                        — trace every kernel initcall + timing
+#   systemd.log_level=debug               — systemd itself at debug verbosity
+#   systemd.log_target=console            — systemd writes to /dev/console (ttyS0)
+#   systemd.journald.forward_to_console=1 — journald mirrors to console
+#   systemd.show_status=1                 — show every unit transition
+# NOTE: NO loglevel= or quiet — nothing is suppressed.
+setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 debug ignore_loglevel earlyprintk initcall_debug systemd.log_level=debug systemd.log_target=console systemd.journald.forward_to_console=1 systemd.show_status=1 boot=live rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 usbcore.autosuspend=-1 xhci_hcd.quirks=0x8400
 
 # --- Boot ---
 
