@@ -23,14 +23,17 @@ usb stop
 
 # --- Set bootargs for live session ---
 
+# toram: copy squashfs into tmpfs at early initramfs then umount USB.
+#   Without this, the live FS stays mounted from the USB stick, so every
+#   Python import during vyos-router.service triggers a USB bulk read,
+#   which stalls on LS1046A xHCI (T+89s I/O error → vyos-router hangs
+#   before reaching login prompt). The squashfs is ~680 MiB; with 2 GiB
+#   RAM minus 256 MiB USDPAA reserve, there's ~1.7 GiB free — plenty.
 # usbcore.autosuspend=-1: disable USB autosuspend globally.
-# LS1046A DWC3 xHCI bulk transfers stall when a device auto-suspends
-# during the ~10s rootdelay. On resume, the port enters a reset loop
-# every 30s ("DID_TIME_OUT", "detected capacity change ... to 0").
-# Setting autosuspend=-1 keeps the stick powered through the whole
-# initramfs → squashfs mount sequence. Same fix is shipped on
-# Traverse TEN64 (LS1088A) and NXP LS1046ARDB reference firmware.
-setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 usbcore.autosuspend=-1
+#   LS1046A DWC3 xHCI bulk transfers stall when a device auto-suspends.
+#   Combined with toram, this keeps the stick stable during the ~10s
+#   initramfs copy window; after toram completes, the stick is not used.
+setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live toram rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 usbcore.autosuspend=-1
 
 # --- Boot ---
 
