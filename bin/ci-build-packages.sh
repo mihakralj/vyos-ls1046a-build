@@ -173,6 +173,15 @@ print("   Patched control_qm.c (NR_CPUS=4 CEETM guard)")
 PYEOF
     fi
 
+    # Relax -Werror on CDX Makefile — NXP SDK source has many -Wunused-* warnings
+    # (cdx_ehash.c:359 unused variable 'i', util.c:867 unused parameters, etc).
+    # -Werror makes them fatal. Keep warnings visible but don't fail the build.
+    CDX_MK="$ASK_SRC/cdx/Makefile"
+    if [ -f "$CDX_MK" ] && grep -q "^ccflags-y += -Werror" "$CDX_MK"; then
+      echo "### Relaxing -Werror in $CDX_MK (NXP SDK has many benign warnings)"
+      sed -i 's/^ccflags-y += -Werror /ccflags-y += -Wno-error /' "$CDX_MK"
+    fi
+
     if [ -n "$KSRC" ] && [ -d "$ASK_SRC/cdx" ]; then
       KSRC_ABS="$(cd "$KSRC" && pwd)"
       echo "### Building ASK kernel modules against $KSRC_ABS"
