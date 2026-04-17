@@ -136,72 +136,95 @@ for package in $packages; do
 
       # Module signing helper — CONFIG_MODULE_SIG_FORCE=y requires all modules signed
       # The kernel auto-generates certs/signing_key.pem during build; sign-file uses it
+      # FATAL if signing key is missing — unsigned modules will be rejected at load time.
       sign_module() {
         local mod="$1"
-        if [ -f "$KSRC_ABS/scripts/sign-file" ] && [ -f "$KSRC_ABS/certs/signing_key.pem" ]; then
-          "$KSRC_ABS/scripts/sign-file" sha512 \
-            "$KSRC_ABS/certs/signing_key.pem" \
-            "$KSRC_ABS/certs/signing_key.x509" \
-            "$mod"
-          echo "   Signed: $(basename "$mod")"
-        else
-          echo "   WARNING: Cannot sign $(basename "$mod") — signing key not found"
-          echo "   Module will be rejected by CONFIG_MODULE_SIG_FORCE=y kernel"
+        if [ ! -f "$KSRC_ABS/scripts/sign-file" ] || [ ! -f "$KSRC_ABS/certs/signing_key.pem" ]; then
+          echo ""
+          echo "################################################################"
+          echo "### FATAL: Kernel signing key not found — cannot sign $(basename "$mod")"
+          echo "### CONFIG_MODULE_SIG_FORCE=y will reject unsigned modules at boot."
+          echo "### Expected: $KSRC_ABS/scripts/sign-file"
+          echo "###           $KSRC_ABS/certs/signing_key.pem"
+          echo "################################################################"
+          exit 1
         fi
+        "$KSRC_ABS/scripts/sign-file" sha512 \
+          "$KSRC_ABS/certs/signing_key.pem" \
+          "$KSRC_ABS/certs/signing_key.x509" \
+          "$mod"
+        echo "   Signed: $(basename "$mod")"
       }
+
+      # Fail-fast helper — no stale pre-built fallback.
+      # Pre-built .ko files in data/ask-userspace/ are built against a different
+      # kernel version (6.6.129) and will be rejected by vermagic AND by
+      # CONFIG_MODULE_SIG_FORCE=y. Shipping them guarantees boot-time rejection.
+      fail_build() {
+        local mod="$1"
+        echo ""
+        echo "################################################################"
+        echo "### FATAL: $mod build failed against kernel $KSRC_ABS"
+        echo "### Refusing to ship stale pre-built module (wrong vermagic +"
+        echo "### unsigned → guaranteed rejection by MODULE_SIG_FORCE kernel)."
+        echo "### Fix the in-tree build in ask-ls1046a-6.6/$(dirname "$mod")/"
+        echo "################################################################"
+        exit 1
+      }
+
+      # Aggressive clean: remove ALL stale build artifacts from prior kernels.
+      # `make clean` is not enough — stale .ko/.o from pre-existing 6.6.129 build
+      # in the checked-in ask-ls1046a-6.6/ tree can confuse the build.
+      echo "### Cleaning stale ASK build artifacts"
+      find "$ASK_SRC/cdx" "$ASK_SRC/fci" "$ASK_SRC/auto_bridge" \
+        \( -name '*.ko' -o -name '*.o' -o -name '*.mod' -o -name '*.mod.c' \
+           -o -name '.*.cmd' -o -name 'Module.symvers' -o -name 'modules.order' \) \
+        -delete 2>/dev/null || true
 
       # cdx.ko — main ASK control-plane module
       echo "I: Building cdx.ko..."
-      make -C "$ASK_SRC/cdx" clean 2>/dev/null || true
       make -C "$KSRC_ABS" M="$ASK_SRC/cdx" \
-        PLATFORM=LS1043A ARCH=arm64 modules 2>&1 | tail -20
-      if [ -f "$ASK_SRC/cdx/cdx.ko" ]; then
-        cp "$ASK_SRC/cdx/cdx.ko" "$ASK_DST/"
-        cp "$ASK_SRC/cdx/Module.symvers" "$ASK_DST/cdx.symvers"
-        sign_module "$ASK_DST/cdx.ko"
-        echo "### cdx.ko built: $(stat -c '%s bytes' "$ASK_DST/cdx.ko")"
-      else
-        echo "WARNING: cdx.ko build failed — using pre-built from data/ask-userspace/"
-        cp "$GITHUB_WORKSPACE/data/ask-userspace/cdx/cdx.ko" "$ASK_DST/" || true
+        PLATFORM=LS1043A ARCH=arm64 modules 2>&1 | tail -30
+      if [ ! -f "$ASK_SRC/cdx/cdx.ko" ]; then
+        fail_build "cdx.ko"
       fi
+      cp "$ASK_SRC/cdx/cdx.ko" "$ASK_DST/"
+      cp "$ASK_SRC/cdx/Module.symvers" "$ASK_DST/cdx.symvers"
+      sign_module "$ASK_DST/cdx.ko"
+      echo "### cdx.ko built: $(stat -c '%s bytes' "$ASK_DST/cdx.ko")"
 
       # auto_bridge.ko — bridge fast-path offload
       echo "I: Building auto_bridge.ko..."
-      make -C "$ASK_SRC/auto_bridge" clean 2>/dev/null || true
       make -C "$KSRC_ABS" M="$ASK_SRC/auto_bridge" \
-        PLATFORM=LS1043A ARCH=arm64 modules 2>&1 | tail -20
-      if [ -f "$ASK_SRC/auto_bridge/auto_bridge.ko" ]; then
-        cp "$ASK_SRC/auto_bridge/auto_bridge.ko" "$ASK_DST/"
-        sign_module "$ASK_DST/auto_bridge.ko"
-        echo "### auto_bridge.ko built: $(stat -c '%s bytes' "$ASK_DST/auto_bridge.ko")"
-      else
-        echo "WARNING: auto_bridge.ko build failed — using pre-built"
-        cp "$GITHUB_WORKSPACE/data/ask-userspace/auto_bridge/auto_bridge.ko" "$ASK_DST/" || true
+        PLATFORM=LS1043A ARCH=arm64 modules 2>&1 | tail -30
+      if [ ! -f "$ASK_SRC/auto_bridge/auto_bridge.ko" ]; then
+        fail_build "auto_bridge.ko"
       fi
+      cp "$ASK_SRC/auto_bridge/auto_bridge.ko" "$ASK_DST/"
+      sign_module "$ASK_DST/auto_bridge.ko"
+      echo "### auto_bridge.ko built: $(stat -c '%s bytes' "$ASK_DST/auto_bridge.ko")"
 
       # fci.ko — fast-path conntrack interface (depends on cdx symbols)
       echo "I: Building fci.ko..."
-      make -C "$ASK_SRC/fci" clean 2>/dev/null || true
       CDX_SYMVERS="$ASK_DST/cdx.symvers"
       make -C "$KSRC_ABS" M="$ASK_SRC/fci" \
         KBUILD_EXTRA_SYMBOLS="$CDX_SYMVERS" \
-        ARCH=arm64 modules 2>&1 | tail -20
-      if [ -f "$ASK_SRC/fci/fci.ko" ]; then
-        cp "$ASK_SRC/fci/fci.ko" "$ASK_DST/"
-        sign_module "$ASK_DST/fci.ko"
-        echo "### fci.ko built: $(stat -c '%s bytes' "$ASK_DST/fci.ko")"
-      else
-        echo "WARNING: fci.ko build failed — using pre-built"
-        cp "$GITHUB_WORKSPACE/data/ask-userspace/fci/fci.ko" "$ASK_DST/" || true
+        ARCH=arm64 modules 2>&1 | tail -30
+      if [ ! -f "$ASK_SRC/fci/fci.ko" ]; then
+        fail_build "fci.ko"
       fi
+      cp "$ASK_SRC/fci/fci.ko" "$ASK_DST/"
+      sign_module "$ASK_DST/fci.ko"
+      echo "### fci.ko built: $(stat -c '%s bytes' "$ASK_DST/fci.ko")"
 
-      echo "### ASK kernel modules: $(ls -la "$ASK_DST/"*.ko 2>/dev/null | wc -l) modules installed"
-    elif [ -d "$GITHUB_WORKSPACE/data/ask-userspace/cdx" ]; then
-      echo "### ASK source not available — installing pre-built modules"
-      mkdir -p "$ASK_DST"
-      cp "$GITHUB_WORKSPACE/data/ask-userspace/cdx/cdx.ko" "$ASK_DST/" || true
-      cp "$GITHUB_WORKSPACE/data/ask-userspace/auto_bridge/auto_bridge.ko" "$ASK_DST/" || true
-      cp "$GITHUB_WORKSPACE/data/ask-userspace/fci/fci.ko" "$ASK_DST/" || true
+      echo "### ASK kernel modules: $(ls -la "$ASK_DST/"*.ko 2>/dev/null | wc -l) modules installed and signed"
+    else
+      echo ""
+      echo "################################################################"
+      echo "### FATAL: ASK source tree not found at $ASK_SRC"
+      echo "### Cannot build ASK modules — refusing to use stale pre-built."
+      echo "################################################################"
+      exit 1
     fi
 
     ### Build ASK userspace binaries from source (cmm, dpa_app, libcli, libfci)
