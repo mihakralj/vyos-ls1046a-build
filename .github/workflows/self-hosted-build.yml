@@ -22,7 +22,7 @@ jobs:
     permissions:
       contents: write
     with:
-      runs_on: arm64-runner
+      runs_on: ARM64
       BUILD_BY: ${{ github.event.inputs.BUILD_BY }}
       build_version: ${{ github.event.inputs.build_version }}
       builder_image: ${{ github.event.inputs.builder_image }}
