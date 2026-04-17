@@ -345,4 +345,4 @@ system {
         auto-check
         url https://raw.githubusercontent.com/mihakralj/vyos-ls1046a-build/refs/heads/main/version.json
     }
-}remove all hw-id - this needs to work on all devices
+}
