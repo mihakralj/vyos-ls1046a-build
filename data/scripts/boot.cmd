@@ -51,15 +51,14 @@ usb stop
 #   etc.) stalls for ~30s before xHCI resets the port — boot takes
 #   forever and never finishes mounting root.
 #
-# loglevel=4: suppress KERN_NOTICE and below from console=ttyS0 after boot.
-#   The SDK fsl_dpa driver prints "phy device not initialized" at T+62-64s
-#   (pr_err) when vyos-router's ethtool probes run. Those 5 lines arrive
-#   AFTER serial-getty@ttyS0 has already issued its `vyos login:` banner
-#   at T+37s, visually burying the prompt under kernel noise. agetty only
-#   re-prints the banner on newline, so users see a dead console until
-#   they press Enter. With loglevel=4 only KERN_WARNING and above reach
-#   the console — kernel messages still hit dmesg/journal.
-setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live rootdelay=10 loglevel=4 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 usbcore.autosuspend=-1 xhci_hcd.quirks=0x8400
+# NOTE: Console quieting is NOT done via kernel cmdline `loglevel=` here.
+# Early attempts with loglevel=4 silenced too much — all the useful early
+# boot logs disappeared. Instead, console is quieted AFTER userspace
+# starts via /etc/sysctl.d/99-ls1046a-quiet-console.conf (kernel.printk).
+# Early boot remains verbose; only the SDK fsl_dpa "phy device not
+# initialized" pr_err spam at T+62s is suppressed before agetty prints
+# the login banner.
+setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 usbcore.autosuspend=-1 xhci_hcd.quirks=0x8400
 
 # --- Boot ---
 
