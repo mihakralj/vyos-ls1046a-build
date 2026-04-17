@@ -40,6 +40,7 @@ KERNEL_PATCHES="$KERNEL_BUILD/patches/kernel"
 mkdir -p "$KERNEL_PATCHES"
 cp data/kernel-patches/4002-hwmon-ina2xx-add-INA234-support.patch "$KERNEL_PATCHES/"
 cp data/kernel-patches/4003-sfp-rollball-phylink-einval-fallback.patch "$KERNEL_PATCHES/"
+cp data/kernel-patches/4006-xhci-plat-ls1046a-avoid-bei.patch        "$KERNEL_PATCHES/"
 
 # Stage phylink patch script for injection into build-kernel.sh
 cp data/kernel-patches/patch-phylink.py "$KERNEL_BUILD/"
