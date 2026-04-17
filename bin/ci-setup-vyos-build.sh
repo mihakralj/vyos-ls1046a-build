@@ -9,8 +9,15 @@ CHROOT=vyos-build/data/live-build-config/includes.chroot
 HOOKS=vyos-build/data/live-build-config/hooks/live
 
 ### vyos-build patches
+# config.boot.default = lean live-boot config (eth0 DHCP + SSH + console)
+#   Applied by vyos-router on first boot when /config/config.boot is absent.
+#   Keep minimal — heavy configs (DHCP on 5 ifaces, flowtable, firewall groups,
+#   DNS recursor, HTTPS API) hang `vyos-router configure` at live-boot stage.
+# config.boot.full = rich reference config (routing/firewall/NAT/DNS/API).
+#   Shipped alongside for manual `load` after login or post-install use.
 cp data/config.boot.default "$CHROOT/opt/vyatta/etc/"
-cp data/config.boot.dhcp "$CHROOT/opt/vyatta/etc/"
+cp data/config.boot.dhcp    "$CHROOT/opt/vyatta/etc/"
+cp data/config.boot.full    "$CHROOT/opt/vyatta/etc/"
 patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-005-add_vim_link.patch
 patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-007-no_sbsign.patch
 
