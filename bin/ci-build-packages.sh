@@ -45,7 +45,30 @@ for package in $packages; do
 
   ### Build Mono Gateway DTB from kernel source (before cleanup)
   if [ "$package" == "linux-kernel" ]; then
-    KSRC=$(find . -maxdepth 1 -type d -name 'linux-*' | head -1)
+    # Find the actual kernel source tree (has Makefile + arch/arm64).
+    # `find -name 'linux-*'` matches both linux-6.6.x/ (the kernel) AND
+    # linux-firmware/ (just firmware blobs). We must exclude the latter,
+    # and also require the presence of arch/arm64/ to distinguish.
+    KSRC=""
+    for candidate in $(find . -maxdepth 1 -type d -name 'linux-*' | sort); do
+      case "$(basename "$candidate")" in
+        linux-firmware|linux-headers*|linux-libc-dev*|linux-doc*) continue ;;
+      esac
+      if [ -f "$candidate/Makefile" ] && [ -d "$candidate/arch/arm64" ]; then
+        KSRC="$candidate"
+        break
+      fi
+    done
+    if [ -z "$KSRC" ]; then
+      echo ""
+      echo "################################################################"
+      echo "### FATAL: Could not locate kernel source tree under $(pwd)"
+      echo "### Directories found:"
+      find . -maxdepth 1 -type d -name 'linux-*' | sed 's/^/###   /'
+      echo "################################################################"
+      exit 1
+    fi
+    echo "### Kernel source tree: $KSRC"
     if [ -n "$KSRC" ] && [ -d "$KSRC/arch/arm64/boot/dts/freescale" ]; then
       DTS_DIR="$KSRC/arch/arm64/boot/dts/freescale"
       INCLUDES_BIN="$GITHUB_WORKSPACE/vyos-build/data/live-build-config/includes.binary"
