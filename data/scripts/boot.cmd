@@ -39,17 +39,13 @@ usb stop
 #   Without this, the kernel suspends the stick during the ~10s
 #   rootdelay; on resume, the port enters a 30s reset loop.
 #
-# xhci_hcd.quirks=0x8400: XHCI_TRUST_TX_LENGTH (BIT(10)=0x400) +
-#   XHCI_AVOID_BEI (BIT(15)=0x8000). Required on LS1046A DWC3:
-#   - TRUST_TX_LENGTH suppresses "bad transfer trb length 28 in event trb"
-#     by trusting the controller's reported residue length even when it
-#     looks bogus (DWC3 errata: residue field is unreliable).
-#   - AVOID_BEI disables Block Event Interrupt on transfer TRBs, which
-#     stops the "Event TRB for slot X ep Y with no TDs queued?" warnings
-#     that come from stale events arriving after the TD ring rewinds.
-#   Without these, every bulk-IN command (SCSI INQUIRY, READ_CAPACITY,
-#   etc.) stalls for ~30s before xHCI resets the port — boot takes
-#   forever and never finishes mounting root.
+# XHCI_AVOID_BEI + XHCI_TRUST_TX_LENGTH are applied by kernel patch
+# 4006-xhci-plat-ls1046a-avoid-bei.patch (see drivers/usb/host/xhci-plat.c).
+# The cmdline parameter xhci_hcd.quirks= is NOT consumed by xhci-plat —
+# it only works on the PCI-attached xhci path — which is why it was
+# ineffective for weeks. Diagnosed 2026-04-17 from a boot log showing
+# quirks = 0x0000008002008410 (no AVOID_BEI bit) and the xHCI host
+# dying at T+17s mid USB-storage probe.
 #
 # FULL DEBUG MODE — everything logged to ttyS0.
 #   debug                                 — sets console loglevel to 10 (all printk)
@@ -61,7 +57,7 @@ usb stop
 #   systemd.journald.forward_to_console=1 — journald mirrors to console
 #   systemd.show_status=1                 — show every unit transition
 # NOTE: NO loglevel= or quiet — nothing is suppressed.
-setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 debug ignore_loglevel earlyprintk initcall_debug systemd.log_level=debug systemd.log_target=console systemd.journald.forward_to_console=1 systemd.show_status=1 boot=live rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 usbcore.autosuspend=-1 xhci_hcd.quirks=0x8400
+setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 debug ignore_loglevel earlyprintk initcall_debug systemd.log_level=debug systemd.log_target=console systemd.journald.forward_to_console=1 systemd.show_status=1 boot=live rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 usbcore.autosuspend=-1
 
 # --- Boot ---
 
