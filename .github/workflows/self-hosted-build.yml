@@ -1,0 +1,31 @@
+name: VyOS LS1046A build (self-hosted)
+
+# Thin wrapper that reuses auto-build.yml and pins execution to the
+# self-hosted `arm64-runner`. No schedule — manual dispatch only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      BUILD_BY:
+        description: 'Builder identifier (auto: mihakralj@users.noreply.github.com)'
+        default: ''
+      build_version:
+        description: 'Version number (auto: YYYY.MM.DD-HHMM-rolling)'
+        default: ''
+      builder_image:
+        description: 'Builder Docker image'
+        default: 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64'
+
+jobs:
+  call-auto-build:
+    uses: ./.github/workflows/auto-build.yml
+    permissions:
+      contents: write
+    with:
+      runs_on: arm64-runner
+      BUILD_BY: ${{ github.event.inputs.BUILD_BY }}
+      build_version: ${{ github.event.inputs.build_version }}
+      builder_image: ${{ github.event.inputs.builder_image }}
+    secrets:
+      MOK_KEY: ${{ secrets.MOK_KEY }}
+      MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
