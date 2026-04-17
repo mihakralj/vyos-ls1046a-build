@@ -47,11 +47,11 @@ usb stop
 # quirks = 0x0000008002008410 (no AVOID_BEI bit) and the xHCI host
 # dying at T+17s mid USB-storage probe.
 #
-# NOTE: Console quieting is NOT done via kernel cmdline `loglevel=` here.
-# Early attempts with loglevel=4 silenced too much — all the useful early
-# boot logs disappeared. Instead, console is quieted AFTER userspace
-# starts via /etc/sysctl.d/99-ls1046a-quiet-console.conf (kernel.printk).
-setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 usbcore.autosuspend=-1
+# Console verbosity matches stock VyOS: `quiet` limits kernel console prints
+# to KERN_WARNING+ (effective loglevel 4), identical to GRUB-booted stock
+# VyOS on amd64. Do NOT add `earlycon=` here — stock VyOS does not use it
+# and it adds uart8250 spam to the pre-userspace log.
+setenv bootargs console=ttyS0,115200 quiet boot=live rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 usbcore.autosuspend=-1
 
 # --- Boot ---
 
