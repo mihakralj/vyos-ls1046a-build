@@ -152,6 +152,27 @@ for package in $packages; do
         echo "WARNING: ASK CDX patch partially failed — some fixes may be missing"
     fi
 
+    # NR_CPUS=4 fix: CDX defines MAX_SCHEDULER_QUEUES=16 (NUM_PQS+NUM_WBFQS) but
+    # DPAA_ETH_TX_QUEUES=NR_CPUS=4 on LS1046A. The unconditional #error in
+    # control_qm.c is only meaningful when CEETM (ENABLE_EGRESS_QOS) is enabled —
+    # which it is NOT in our build. Guard the assertion under #ifdef ENABLE_EGRESS_QOS.
+    QM_FILE="$ASK_SRC/cdx/control_qm.c"
+    if [ -f "$QM_FILE" ] && grep -q "^#if MAX_SCHEDULER_QUEUES > DPAA_ETH_TX_QUEUES" "$QM_FILE"; then
+      echo "### Guarding MAX_SCHEDULER_QUEUES #error under ENABLE_EGRESS_QOS in $QM_FILE"
+      python3 - "$QM_FILE" <<'PYEOF'
+import sys, re
+p = sys.argv[1]
+s = open(p).read()
+old = "#if MAX_SCHEDULER_QUEUES > DPAA_ETH_TX_QUEUES\n#error MAX_SCHEDULER_QUEUES exceeds DPAA_ETH_TX_QUEUES\n#endif"
+new = "#ifdef ENABLE_EGRESS_QOS\n#if MAX_SCHEDULER_QUEUES > DPAA_ETH_TX_QUEUES\n#error MAX_SCHEDULER_QUEUES exceeds DPAA_ETH_TX_QUEUES\n#endif\n#endif"
+if old not in s:
+    sys.stderr.write("FATAL: expected #error block not found in control_qm.c\n")
+    sys.exit(1)
+open(p, "w").write(s.replace(old, new, 1))
+print("   Patched control_qm.c (NR_CPUS=4 CEETM guard)")
+PYEOF
+    fi
+
     if [ -n "$KSRC" ] && [ -d "$ASK_SRC/cdx" ]; then
       KSRC_ABS="$(cd "$KSRC" && pwd)"
       echo "### Building ASK kernel modules against $KSRC_ABS"
