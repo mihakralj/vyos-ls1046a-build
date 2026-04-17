@@ -23,17 +23,34 @@ usb stop
 
 # --- Set bootargs for live session ---
 
-# toram: copy squashfs into tmpfs at early initramfs then umount USB.
-#   Without this, the live FS stays mounted from the USB stick, so every
-#   Python import during vyos-router.service triggers a USB bulk read,
-#   which stalls on LS1046A xHCI (T+89s I/O error → vyos-router hangs
-#   before reaching login prompt). The squashfs is ~680 MiB; with 2 GiB
-#   RAM minus 256 MiB USDPAA reserve, there's ~1.7 GiB free — plenty.
+# DO NOT add 'toram' here — it makes things WORSE on LS1046A.
+#   toram triggers a single ~680 MiB sustained sequential read at
+#   initramfs time, which immediately stalls the LS1046A xHCI
+#   ("bad transfer trb length", "Event TRB ... no TDs queued").
+#   Verified by experiment 2026-04-17: toram → reset every 30s
+#   starting at T+35s, never finishes. Without toram → small lazy
+#   reads succeed and boot reaches Multi-User target.
+# USB live boot is intentionally a transient path. Install to eMMC
+# (`install image`) as soon as you reach a usable shell — eMMC boot
+# uses ext4 from mmcblk0p3 and never touches USB after boot.
+#
 # usbcore.autosuspend=-1: disable USB autosuspend globally.
 #   LS1046A DWC3 xHCI bulk transfers stall when a device auto-suspends.
-#   Combined with toram, this keeps the stick stable during the ~10s
-#   initramfs copy window; after toram completes, the stick is not used.
-setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live toram rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 usbcore.autosuspend=-1
+#   Without this, the kernel suspends the stick during the ~10s
+#   rootdelay; on resume, the port enters a 30s reset loop.
+#
+# xhci_hcd.quirks=0x8400: XHCI_TRUST_TX_LENGTH (BIT(10)=0x400) +
+#   XHCI_AVOID_BEI (BIT(15)=0x8000). Required on LS1046A DWC3:
+#   - TRUST_TX_LENGTH suppresses "bad transfer trb length 28 in event trb"
+#     by trusting the controller's reported residue length even when it
+#     looks bogus (DWC3 errata: residue field is unreliable).
+#   - AVOID_BEI disables Block Event Interrupt on transfer TRBs, which
+#     stops the "Event TRB for slot X ep Y with no TDs queued?" warnings
+#     that come from stale events arriving after the TD ring rewinds.
+#   Without these, every bulk-IN command (SCSI INQUIRY, READ_CAPACITY,
+#   etc.) stalls for ~30s before xHCI resets the port — boot takes
+#   forever and never finishes mounting root.
+setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 usbcore.autosuspend=-1 xhci_hcd.quirks=0x8400
 
 # --- Boot ---
 
