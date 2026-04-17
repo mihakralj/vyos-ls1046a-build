@@ -33,4 +33,18 @@ for svc in ask-modules-load; do
   fi
 done
 
+# --- Force-enable serial getty on ttyS0 ---------------------------------
+# systemd-getty-generator SHOULD auto-instantiate serial-getty@ttyS0.service
+# from /proc/consoles at boot, but on LS1046A live-boot USB we observed
+# it never activates (boot log 2026-04-17 shows only 'Getty on tty1'
+# started, no 'Serial Getty on ttyS0' — admin is locked out of serial
+# console even when all other services succeed).
+# Writing an explicit symlink into getty.target.wants/ bypasses the
+# generator entirely and guarantees the login prompt on the physical
+# DB9 serial port, which is the ONLY admin access on this board.
+mkdir -p /etc/systemd/system/getty.target.wants
+ln -sf "/lib/systemd/system/serial-getty@.service" \
+       "/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service"
+echo "  enabled: serial-getty@ttyS0.service → getty.target"
+
 echo "I: Custom LS1046A services enabled."
