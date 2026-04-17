@@ -53,6 +53,13 @@ cp data/dtb/mono-gw.dtb "$CHROOT/boot/mono-gw.dtb"
 ### U-Boot tools: fw_setenv config for updating boot env from Linux
 cp data/scripts/fw_env.config "$CHROOT/etc/fw_env.config"
 
+### sysctl drop-in: quiet the kernel console AFTER userspace is up.
+### Keeps early boot verbose (kernel cmdline has no loglevel=) but silences
+### the NXP SDK fsl_dpa pr_err spam at T+62-64s that otherwise buries
+### the login prompt on ttyS0. Applied by systemd-sysctl.service.
+mkdir -p "$CHROOT/etc/sysctl.d"
+cp data/scripts/99-ls1046a-quiet-console.conf "$CHROOT/etc/sysctl.d/99-ls1046a-quiet-console.conf"
+
 ### Post-install helper: writes /boot/vyos.env + one-time U-Boot env setup
 mkdir -p "$CHROOT/usr/local/bin"
 cp data/scripts/vyos-postinstall "$CHROOT/usr/local/bin/vyos-postinstall"

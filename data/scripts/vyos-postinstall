@@ -32,7 +32,7 @@ FW_ENV_CONFIG="/etc/fw_env.config"
 # usbcore.autosuspend=-1 + xhci_hcd.quirks=0x8400: required on LS1046A
 # DWC3 xHCI to keep USB-attached devices stable — see boot.cmd for full
 # explanation. (Quirks bits: TRUST_TX_LENGTH=0x400 + AVOID_BEI=0x8000.)
-UBOOT_BOOTARGS_TAIL="console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 loglevel=4 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 sysctl.net.core.default_qdisc=fq usbcore.autosuspend=-1 xhci_hcd.quirks=0x8400"
+UBOOT_BOOTARGS_TAIL="console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 sysctl.net.core.default_qdisc=fq usbcore.autosuspend=-1 xhci_hcd.quirks=0x8400"
 
 # Accumulated exit code — set to 1 on any actual error, but script always runs to completion
 RC=0
