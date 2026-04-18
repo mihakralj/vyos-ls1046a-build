@@ -9,7 +9,6 @@ system {
     }
     option {
         performance network-latency
-        reboot-on-panic
         reboot-on-upgrade-failure 5
         time-format 24-hour
     }
@@ -23,24 +22,6 @@ system {
             }
         }
     }
-    ntp {
-        allow-client {
-            address "127.0.0.0/8"
-            address "169.254.0.0/16"
-            address "10.0.0.0/8"
-            address "172.16.0.0/12"
-            address "192.168.0.0/16"
-            address "::1/128"
-            address "fe80::/10"
-            address "fc00::/7"
-        }
-        server time.apple.com {
-        }
-        server time.cloudflare.com {
-        }
-        server time.google.com {
-        }
-    }
     console {
         device ttyS0 {
             speed 115200
@@ -49,19 +30,10 @@ system {
     config-management {
         commit-revisions 100
     }
-    update-check {
-        auto-check
-        url https://raw.githubusercontent.com/mihakralj/vyos-ls1046a-build/refs/heads/main/version.json
-    }
-    watchdog {
-        reboot-timeout 60
-        shutdown-timeout 60
-    }
 }
 
 interfaces {
     ethernet eth0 {
-        address dhcp
         description "MGMT (leftmost RJ45)"
     }
     loopback lo {
@@ -72,3 +44,4 @@ service {
     ssh {
     }
 }
+

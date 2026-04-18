@@ -51,7 +51,7 @@ usb stop
 # diagnostics during USB live boot. USB boot is a one-time install path —
 # verbose output helps diagnose QMan/BMan portal init, FMan MAC probe,
 # and PHY initialization. Re-add `quiet` once USB boot is stable.
-setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 usbcore.autosuspend=-1
+setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 usbcore.autosuspend=-1
 
 # --- Boot ---
 
