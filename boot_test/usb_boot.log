@@ -5,20 +5,20 @@ Starting the controller
 USB XHCI 1.00
 scanning bus usb@2f00000 for devices... 2 USB Device(s) found
        scanning usb for storage devices... 1 Storage Device(s) found
-2908 bytes read in 4 ms (710 KiB/s)
+2899 bytes read in 4 ms (707 KiB/s)
 ## Executing script at a0000000
 === VyOS LS1046A USB Live Boot ===
 
-10473865 bytes read in 266 ms (37.6 MiB/s)
+10473862 bytes read in 266 ms (37.6 MiB/s)
 35633 bytes read in 3 ms (11.3 MiB/s)
-32926620 bytes read in 825 ms (38.1 MiB/s)
+32926657 bytes read in 824 ms (38.1 MiB/s)
 stopping USB..
 Booting VyOS live from USB...
    Uncompressing Kernel Image to 0
 ## Flattened Device Tree blob at 88000000
    Booting using the fdt blob at 0x88000000
 Working FDT set to 88000000
-   Loading Ramdisk to f8c9a000, end fac00b9c ... OK
+   Loading Ramdisk to f8c9a000, end fac00bc1 ... OK
    Loading Device Tree to 00000000f8c7e000, end 00000000f8c99b30 ... OK
 Working FDT set to f8c7e000
 PCIe1: pcie@3400000 Root Complex: no link
@@ -30,7 +30,7 @@ WARNING failed to get smmu node: FDT_ERR_NOTFOUND
 Starting kernel ...
 
 [    0.000000] Booting Linux on physical CPU 0x0000000000 [0x410fd082]
-[    0.000000] Linux version 6.6.133-vyos (root@2c9064283e26) (gcc (Debian 12.2.0-14+deb12u1) 12.2.0, GNU ld (GNU Binutils for Debian) 2.40) #1 SMP PREEMPT_DYNAMIC Sat Apr 18 00:41:51 UTC 2026
+[    0.000000] Linux version 6.6.133-vyos (root@3d9901eb2984) (gcc (Debian 12.2.0-14+deb12u1) 12.2.0, GNU ld (GNU Binutils for Debian) 2.40) #1 SMP PREEMPT_DYNAMIC Sat Apr 18 02:31:19 UTC 2026
 [    0.000000] KASLR enabled
 [    0.000000] Machine model: Mono Gateway Development Kit
 [    0.000000] earlycon: uart8250 at MMIO 0x00000000021c0500 (options '')
@@ -78,7 +78,7 @@ Starting kernel ...
 [    0.000000] CPU features: detected: ARM erratum 1742098
 [    0.000000] CPU features: detected: ARM errata 1165522, 1319367, or 1530923
 [    0.000000] alternatives: applying boot alternatives
-[    0.000000] Kernel command line: console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 usbcore.autosuspend=-1
+[    0.000000] Kernel command line: console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 usbcore.autosuspend=-1
 [    0.000000] Unknown kernel command line parameters "components noeject nopersistence noautologin nonetworking boot=live union=overlay", will be passed to user space.
 [    0.000000] Dentry cache hash table entries: 1048576 (order: 11, 8388608 bytes, linear)
 [    0.000000] Inode-cache hash table entries: 524288 (order: 10, 4194304 bytes, linear)
@@ -103,849 +103,812 @@ Starting kernel ...
 [    0.000000] arch_timer: cp15 timer(s) running at 25.00MHz (phys).
 [    0.000000] clocksource: arch_sys_counter: mask: 0xffffffffffffff max_cycles: 0x5c40939b5, max_idle_ns: 440795202646 ns
 [    0.000000] sched_clock: 56 bits at 25MHz, resolution 40ns, wraps every 4398046511100ns
-[    0.008457] Console: colour dummy device 80x25
-[    0.013779] Calibrating delay loop (skipped), value calculated using timer frequency.. 50.00 BogoMIPS (lpj=25000)
+[    0.008473] Console: colour dummy device 80x25
+[    0.013780] Calibrating delay loop (skipped), value calculated using timer frequency.. 50.00 BogoMIPS (lpj=25000)
 [    0.024115] pid_max: default: 32768 minimum: 301
-[    0.030849] Mount-cache hash table entries: 16384 (order: 5, 131072 bytes, linear)
-[    0.038489] Mountpoint-cache hash table entries: 16384 (order: 5, 131072 bytes, linear)
-[    0.048645] RCU Tasks: Setting shift to 2 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=4.
-[    0.057461] RCU Tasks Trace: Setting shift to 2 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=4.
-[    0.066862] rcu: Hierarchical SRCU implementation.
-[    0.071684] rcu:     Max phase no-delay instances is 400.
-[    0.077375] EFI services will not be available.
-[    0.082096] smp: Bringing up secondary CPUs ...
-[    0.087010] Detected PIPT I-cache on CPU1
-[    0.087057] CPU1: Booted secondary processor 0x0000000001 [0x410fd082]
-[    0.087406] Detected PIPT I-cache on CPU2
-[    0.087438] CPU2: Booted secondary processor 0x0000000002 [0x410fd082]
-[    0.087787] Detected PIPT I-cache on CPU3
-[    0.087820] CPU3: Booted secondary processor 0x0000000003 [0x410fd082]
-[    0.087863] smp: Brought up 1 node, 4 CPUs
-[    0.123771] SMP: Total of 4 processors activated.
-[    0.128502] CPU features: detected: 32-bit EL0 Support
-[    0.133670] CPU features: detected: 32-bit EL1 Support
-[    0.138839] CPU features: detected: CRC32 instructions
-[    0.144046] CPU: All CPU(s) started at EL2
-[    0.148179] alternatives: applying system-wide alternatives
-[    0.154941] devtmpfs: initialized
-[    0.163577] clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 1911260446275000 ns
-[    0.173394] futex hash table entries: 1024 (order: 4, 65536 bytes, linear)
-[    0.180809] pinctrl core: initialized pinctrl subsystem
-[    0.186453] Machine: Mono Gateway Development Kit
-[    0.191187] SoC family: QorIQ LS1046A
-[    0.194868] SoC ID: svr:0x87070010, Revision: 1.0
-[    0.199825] DMI not present or invalid.
-[    0.204449] NET: Registered PF_NETLINK/PF_ROUTE protocol family
-[    0.210935] DMA: preallocated 1024 KiB GFP_KERNEL pool for atomic allocations
-[    0.218273] DMA: preallocated 1024 KiB GFP_KERNEL|GFP_DMA pool for atomic allocations
-[    0.226383] DMA: preallocated 1024 KiB GFP_KERNEL|GFP_DMA32 pool for atomic allocations
-[    0.235007] audit: initializing netlink subsys (disabled)
-[    0.240526] audit: type=2000 audit(0.049:1): state=initialized audit_enabled=0 res=1
-[    0.241007] thermal_sys: Registered thermal governor 'step_wise'
-[    0.248327] thermal_sys: Registered thermal governor 'user_space'
-[    0.254388] cpuidle: using governor menu
-[    0.264510] Bman ver:0a02,02,01
-[    0.269098] qman-fqd addr 0x00000009fe800000 size 0x800000
-[    0.274618] qman-pfdr addr 0x00000009fc000000 size 0x2000000
-[    0.280315] Qman ver:0a01,03,02,01
-[    0.283857] hw-breakpoint: found 6 breakpoint and 4 watchpoint registers.
-[    0.290737] ASID allocator initialised with 32768 entries
-[    0.296716] Serial: AMBA PL011 UART driver
-[    0.312772] Modules: 2G module region forced by RANDOMIZE_MODULE_REGION_FULL
-[    0.319879] Modules: 0 pages in range for non-PLT usage
-[    0.319882] Modules: 517136 pages in range for PLT usage
-[    0.325716] HugeTLB: registered 1.00 GiB page size, pre-allocated 0 pages
-[    0.337892] HugeTLB: 0 KiB vmemmap can be freed for a 1.00 GiB page
-[    0.344200] HugeTLB: registered 32.0 MiB page size, pre-allocated 0 pages
-[    0.351030] HugeTLB: 0 KiB vmemmap can be freed for a 32.0 MiB page
-[    0.357336] HugeTLB: registered 2.00 MiB page size, pre-allocated 0 pages
-[    0.364166] HugeTLB: 0 KiB vmemmap can be freed for a 2.00 MiB page
-[    0.370472] HugeTLB: registered 64.0 KiB page size, pre-allocated 0 pages
-[    0.377301] HugeTLB: 0 KiB vmemmap can be freed for a 64.0 KiB page
-[    0.401655] raid6: neonx8   gen()  4731 MB/s
-[    0.422990] raid6: neonx4   gen()  4623 MB/s
-[    0.444320] raid6: neonx2   gen()  3826 MB/s
-[    0.465654] raid6: neonx1   gen()  2778 MB/s
-[    0.486987] raid6: int64x8  gen()  2682 MB/s
-[    0.508324] raid6: int64x4  gen()  2616 MB/s
-[    0.529656] raid6: int64x2  gen()  2529 MB/s
-[    0.550986] raid6: int64x1  gen()  1954 MB/s
-[    0.555279] raid6: using algorithm neonx8 gen() 4731 MB/s
-[    0.577743] raid6: .... xor() 3459 MB/s, rmw enabled
-[    0.582737] raid6: using neon recovery algorithm
-[    0.587712] ACPI: Interpreter disabled.
-[    0.592958] iommu: Default domain type: Translated
-[    0.597781] iommu: DMA domain TLB invalidation policy: lazy mode
-[    0.604090] usbcore: registered new interface driver usbfs
-[    0.609634] usbcore: registered new interface driver hub
-[    0.614995] usbcore: registered new device driver usb
-[    0.620383] imx-i2c 2180000.i2c: can't get pinctrl, bus recovery not supported
-[    0.627776] i2c i2c-0: IMX I2C adapter registered
-[    0.632530] i2c i2c-0: using dma0chan16 (tx) and dma0chan17 (rx) for DMA transfers
-[    0.640243] imx-i2c 2190000.i2c: can't get pinctrl, bus recovery not supported
-[    0.647609] i2c i2c-1: IMX I2C adapter registered
-[    0.652442] imx-i2c 21a0000.i2c: can't get pinctrl, bus recovery not supported
-[    0.659817] i2c i2c-2: IMX I2C adapter registered
-[    0.664647] imx-i2c 21b0000.i2c: can't get pinctrl, bus recovery not supported
-[    0.671976] i2c i2c-3: IMX I2C adapter registered
-[    0.676853] pps_core: LinuxPPS API ver. 1 registered
-[    0.681848] pps_core: Software ver. 5.3.6 - Copyright 2005-2007 Rodolfo Giometti <giometti@linux.it>
-[    0.691052] PTP clock support registered
-[    0.695144] EDAC MC: Ver: 3.0.0
-[    0.698635] scmi_core: SCMI protocol bus registered
-[    0.703573] bman-fbpr addr 0x00000009ff000000 size 0x1000000
-[    0.709313] Bman err interrupt handler present
-[    0.714458] Bman portal initialised, cpu 0
-[    0.718632] Bman portal initialised, cpu 1
-[    0.722821] Bman portal initialised, cpu 2
-[    0.726993] Bman portal initialised, cpu 3
-[    0.731114] Bman portals initialised
-[    0.740993] Qman err interrupt handler present
-[    0.745827] QMan: Allocated lookup table at (____ptrval____), entry count 131073
-[    0.754006] QMan doesn't need cleanup, uninhibiting IRQs
-[    0.759357] Qman portal initialised, cpu 0
-[    0.763525] QMan doesn't need cleanup, uninhibiting IRQs
-[    0.768870] Qman portal initialised, cpu 1
-[    0.773048] QMan doesn't need cleanup, uninhibiting IRQs
-[    0.778392] Qman portal initialised, cpu 2
-[    0.782558] QMan doesn't need cleanup, uninhibiting IRQs
-[    0.787903] Qman portal initialised, cpu 3
-[    0.792020] Qman portals initialised
-[    0.795666] Bman: BPID allocator includes range 32:32
-[    0.800780] Qman: FQID allocator includes range 256:256
-[    0.806039] Qman: FQID allocator includes range 32768:32768
-[    0.811679] Qman: CGRID allocator includes range 0:256
-[    0.816975] Qman: pool channel allocator includes range 1025:15
-[    0.822998] USDPAA region at c0000000:10000000(c0000:10000), 1 TLB1 entries)
-[    0.830987] clocksource: Switched to clocksource arch_sys_counter
-[    0.838530] pnp: PnP ACPI: disabled
-[    0.846242] NET: Registered PF_INET protocol family
-[    0.851370] IP idents hash table entries: 131072 (order: 8, 1048576 bytes, linear)
-[    0.862749] ipsec_flow_init 
-[    0.865837] tcp_listen_portaddr_hash hash table entries: 4096 (order: 4, 65536 bytes, linear)
-[    0.874466] Table-perturb hash table entries: 65536 (order: 6, 262144 bytes, linear)
-[    0.882270] TCP established hash table entries: 65536 (order: 7, 524288 bytes, linear)
-[    0.890504] TCP bind hash table entries: 65536 (order: 9, 2097152 bytes, linear)
-[    0.899018] TCP: Hash tables configured (established 65536 bind 65536)
-[    0.905924] MPTCP token hash table entries: 8192 (order: 6, 196608 bytes, linear)
-[    0.913685] UDP hash table entries: 4096 (order: 5, 131072 bytes, linear)
-[    0.920616] UDP-Lite hash table entries: 4096 (order: 5, 131072 bytes, linear)
-[    0.928143] NET: Registered PF_UNIX/PF_LOCAL protocol family
-[    0.933857] NET: Registered PF_XDP protocol family
-[    0.938686] PCI: CLS 0 bytes, default 64
-[    0.942782] Trying to unpack rootfs image as initramfs...
-[    0.951110] kvm [1]: IPA Size Limit: 44 bits
-[    0.956082] kvm [1]: vgic interrupt IRQ9
-[    0.960063] kvm [1]: Hyp mode initialized successfully
-[    0.966077] Initialise system trusted keyrings
-[    0.970705] workingset: timestamp_bits=40 max_order=21 bucket_order=0
-[    0.978085] squashfs: version 4.0 (2009/01/31) Phillip Lougher
-[    1.002124] xor: measuring software checksum speed
-[    1.007387]    8regs           :  7601 MB/sec
-[    1.012175]    32regs          :  8196 MB/sec
-[    1.017052]    arm64_neon      :  6682 MB/sec
-[    1.021437] xor: using function: 32regs (8196 MB/sec)
-[    1.026527] async_tx: api initialized (async)
-[    1.030917] Key type asymmetric registered
-[    1.035042] Asymmetric key parser 'x509' registered
-[    1.040016] Block layer SCSI generic (bsg) driver version 0.4 loaded (major 248)
-[    1.047472] io scheduler mq-deadline registered
-[    1.052038] io scheduler kyber registered
-[    1.056185] io scheduler bfq registered
-[    1.066505] shpchp: Standard Hot Plug PCI Controller Driver version: 0.4
-[    1.080243] Serial: 8250/16550 driver, 4 ports, IRQ sharing enabled
-[    1.088222] printk: console [ttyS0] disabled
-[    1.092757] 21c0500.serial: ttyS0 at MMIO 0x21c0500 (irq = 56, base_baud = 18750000) is a 16550A
-[    1.101642] printk: console [ttyS0] enabled
-[    1.101642] printk: console [ttyS0] enabled
-[    1.110040] printk: bootconsole [uart8250] disabled
-[    1.110040] printk: bootconsole [uart8250] disabled
-[    1.120477] 21c0600.serial: ttyS1 at MMIO 0x21c0600 (irq = 56, base_baud = 18750000) is a 16550A
-[    1.129469] serial serial0: tty port ttyS1 registered
-[    1.138007] spi-nor spi1.0: n25q512a (65536 Kbytes)
-[    1.464995] Freeing initrd memory: 32152K
-[    1.475431] 8 fixed-partitions partitions found on MTD device 1550000.spi
-[    1.482243] Creating 8 MTD partitions on "1550000.spi":
-[    1.487481] 0x000000000000-0x000000100000 : "rcw-bl2"
-[    1.492784] 0x000000100000-0x000000300000 : "uboot"
-[    1.497831] 0x000000300000-0x000000400000 : "uboot-env"
-[    1.503224] 0x000000400000-0x000000500000 : "fman-ucode"
-[    1.508719] 0x000000500000-0x000000600000 : "recovery-dtb"
-[    1.514377] 0x000000600000-0x000000a00000 : "backup"
-[    1.519513] 0x000000a00000-0x000002000000 : "kernel-initramfs"
-[    1.525514] 0x000002000000-0x000004000000 : "unallocated"
-[    1.538847] Maxlinear Ethernet GPY115C 0x0000000001afd000:00: Firmware Version: 8.111 (0x886F)
-[    1.554652] Maxlinear Ethernet GPY115C 0x0000000001afd000:01: Firmware Version: 8.111 (0x886F)
-[    1.570554] Maxlinear Ethernet GPY115C 0x0000000001afd000:02: Firmware Version: 8.111 (0x886F)
-[    1.631393] FM_Config(3449) FMan-Controller code (ver 210.10.1) (0xd20a01)
-[    1.644782] FM_Init(3616) FMan-Controller code (ver 210.10.1) (0xd20a01)
-[    1.654676] Freescale FM module, FMD API version 21.1.0
-[    1.662531] Freescale FM Ports module
-[    1.666201] fsl_mac: fsl_mac: FSL FMan MAC API based driver
-[    1.671998] fsl_mac 1ae2000.ethernet: FMan MEMAC
-[    1.676621] fsl_mac 1ae2000.ethernet: FMan MAC address: e8:f6:d7:00:15:ff
-[    1.683575] fsl_mac 1ae8000.ethernet: FMan MEMAC
-[    1.688198] fsl_mac 1ae8000.ethernet: FMan MAC address: e8:f6:d7:00:16:00
-[    1.695155] fsl_mac 1aea000.ethernet: FMan MEMAC
-[    1.699777] fsl_mac 1aea000.ethernet: FMan MAC address: e8:f6:d7:00:16:01
-[    1.711702] fsl_mac 1af0000.ethernet: FMan MEMAC
-[    1.716344] fsl_mac 1af0000.ethernet: FMan MAC address: e8:f6:d7:00:16:02
-[    1.728247] fsl_mac 1af2000.ethernet: FMan MEMAC
-[    1.732887] fsl_mac 1af2000.ethernet: FMan MAC address: e8:f6:d7:00:16:03
-[    1.739752] fsl_dpa: FSL DPAA Ethernet driver
-[    1.744383] *********dpa_set_buffers_layout(677) internal buffer offset 0
-[    1.751220] dpaa_eth_priv_probe::bpid 0, count 640 
-[    1.751224] adj count 640
-[    1.758721] DPAA_PROBE: bp_create done
-[    1.762469] DPAA_PROBE: get_channel=1025
-[    1.766393] DPAA_PROBE: add_channel done
-[    1.770313] DPAA_FQ_SETUP: enter
-[    1.773539] fsl_dpa soc:fsl,dpaa:ethernet@8: No Qman software (affine) channels found
-[    1.781373] DPAA_FQ_SETUP: fq #1 type=2
-[    1.785207] DPAA_FQ_SETUP: fq #2 type=1
-[    1.789042] DPAA_FQ_SETUP: fq #3 type=3
-[    1.792876] DPAA_FQ_SETUP: fq #4 type=3
-[    1.796710] DPAA_FQ_SETUP: fq #5 type=3
-[    1.800545] DPAA_FQ_SETUP: fq #6 type=3
-[    1.804379] DPAA_FQ_SETUP: fq #7 type=3
-[    1.808212] DPAA_FQ_SETUP: fq #8 type=3
-[    1.812046] DPAA_FQ_SETUP: fq #9 type=3
-[    1.815880] DPAA_FQ_SETUP: fq #10 type=3
-[    1.819801] DPAA_FQ_SETUP: fq #11 type=3
-[    1.823722] DPAA_FQ_SETUP: fq #12 type=3
-[    1.827643] DPAA_FQ_SETUP: fq #13 type=3
-[    1.831564] DPAA_FQ_SETUP: fq #14 type=3
-[    1.835485] DPAA_FQ_SETUP: fq #15 type=3
-[    1.839408] DPAA_FQ_SETUP: fq #16 type=3
-[    1.843333] DPAA_FQ_SETUP: fq #17 type=3
-[    1.847254] DPAA_FQ_SETUP: fq #18 type=3
-[    1.851178] DPAA_FQ_SETUP: fq #19 type=8
-[    1.855099] DPAA_FQ_SETUP: fq #20 type=8
-[    1.859020] DPAA_FQ_SETUP: fq #21 type=8
-[    1.862940] DPAA_FQ_SETUP: fq #22 type=8
-[    1.866861] DPAA_FQ_SETUP: fq #23 type=8
-[    1.870783] DPAA_FQ_SETUP: fq #24 type=8
-[    1.874704] DPAA_FQ_SETUP: fq #25 type=8
-[    1.878625] DPAA_FQ_SETUP: fq #26 type=8
-[    1.882546] DPAA_FQ_SETUP: fq #27 type=8
-[    1.886467] DPAA_FQ_SETUP: fq #28 type=8
-[    1.890388] DPAA_FQ_SETUP: fq #29 type=8
-[    1.894309] DPAA_FQ_SETUP: fq #30 type=8
-[    1.898230] DPAA_FQ_SETUP: fq #31 type=8
-[    1.902151] DPAA_FQ_SETUP: fq #32 type=8
-[    1.906072] DPAA_FQ_SETUP: fq #33 type=8
-[    1.909993] DPAA_FQ_SETUP: fq #34 type=8
-[    1.913914] DPAA_FQ_SETUP: fq #35 type=6
-[    1.917835] DPAA_FQ_SETUP: fq #36 type=6
-[    1.921757] DPAA_FQ_SETUP: fq #37 type=6
-[    1.925678] DPAA_FQ_SETUP: fq #38 type=6
-[    1.929599] DPAA_FQ_SETUP: fq #39 type=7
-[    1.933520] DPAA_FQ_SETUP: fq #40 type=5
-[    1.937441] DPAA_FQ_SETUP: fq #41 type=4
-[    1.941363] DPAA_FQ_SETUP: fq #42 type=4
-[    1.945284] DPAA_FQ_SETUP: fq #43 type=4
-[    1.949206] DPAA_FQ_SETUP: fq #44 type=4
-[    1.953130] DPAA_FQ_SETUP: main loop done, 44 FQs, egress_cnt=4/4
-[    1.959228] DPAA_PROBE: fq_setup done
-[    1.962892] DPAA_PROBE: cgr_init done
-[    1.966607] DPAA_PROBE: fqs_init done
-[    1.972138] fsl_dpa: fsl_dpa: Probed interface eth0
-[    1.977169] *********dpa_set_buffers_layout(677) internal buffer offset 0
-[    1.984018] dpaa_eth_priv_probe::bpid 32, count 640 
-[    1.984022] adj count 640
-[    1.991603] DPAA_PROBE: bp_create done
-[    1.995350] DPAA_PROBE: get_channel=1025
-[    1.999273] DPAA_PROBE: add_channel done
-[    2.003193] DPAA_FQ_SETUP: enter
-[    2.006420] fsl_dpa soc:fsl,dpaa:ethernet@9: No Qman software (affine) channels found
-[    2.014256] DPAA_FQ_SETUP: fq #1 type=2
-[    2.018094] DPAA_FQ_SETUP: fq #2 type=1
-[    2.021932] DPAA_FQ_SETUP: fq #3 type=3
-[    2.025766] DPAA_FQ_SETUP: fq #4 type=3
-[    2.029601] DPAA_FQ_SETUP: fq #5 type=3
-[    2.033435] DPAA_FQ_SETUP: fq #6 type=3
-[    2.037269] DPAA_FQ_SETUP: fq #7 type=3
-[    2.041103] DPAA_FQ_SETUP: fq #8 type=3
-[    2.044937] DPAA_FQ_SETUP: fq #9 type=3
-[    2.048771] DPAA_FQ_SETUP: fq #10 type=3
-[    2.052692] DPAA_FQ_SETUP: fq #11 type=3
-[    2.056614] DPAA_FQ_SETUP: fq #12 type=3
-[    2.060535] DPAA_FQ_SETUP: fq #13 type=3
-[    2.064456] DPAA_FQ_SETUP: fq #14 type=3
-[    2.068377] DPAA_FQ_SETUP: fq #15 type=3
-[    2.072298] DPAA_FQ_SETUP: fq #16 type=3
-[    2.076219] DPAA_FQ_SETUP: fq #17 type=3
-[    2.080140] DPAA_FQ_SETUP: fq #18 type=3
-[    2.084061] DPAA_FQ_SETUP: fq #19 type=8
-[    2.087982] DPAA_FQ_SETUP: fq #20 type=8
-[    2.091903] DPAA_FQ_SETUP: fq #21 type=8
-[    2.095824] DPAA_FQ_SETUP: fq #22 type=8
-[    2.099745] DPAA_FQ_SETUP: fq #23 type=8
-[    2.103666] DPAA_FQ_SETUP: fq #24 type=8
-[    2.107586] DPAA_FQ_SETUP: fq #25 type=8
-[    2.111510] DPAA_FQ_SETUP: fq #26 type=8
-[    2.115432] DPAA_FQ_SETUP: fq #27 type=8
-[    2.119353] DPAA_FQ_SETUP: fq #28 type=8
-[    2.123274] DPAA_FQ_SETUP: fq #29 type=8
-[    2.127195] DPAA_FQ_SETUP: fq #30 type=8
-[    2.131116] DPAA_FQ_SETUP: fq #31 type=8
-[    2.135036] DPAA_FQ_SETUP: fq #32 type=8
-[    2.138957] DPAA_FQ_SETUP: fq #33 type=8
-[    2.142878] DPAA_FQ_SETUP: fq #34 type=8
-[    2.146799] DPAA_FQ_SETUP: fq #35 type=6
-[    2.150720] DPAA_FQ_SETUP: fq #36 type=6
-[    2.154641] DPAA_FQ_SETUP: fq #37 type=6
-[    2.158562] DPAA_FQ_SETUP: fq #38 type=6
-[    2.162483] DPAA_FQ_SETUP: fq #39 type=7
-[    2.166404] DPAA_FQ_SETUP: fq #40 type=5
-[    2.170325] DPAA_FQ_SETUP: fq #41 type=4
-[    2.174246] DPAA_FQ_SETUP: fq #42 type=4
-[    2.178167] DPAA_FQ_SETUP: fq #43 type=4
-[    2.182088] DPAA_FQ_SETUP: fq #44 type=4
-[    2.186009] DPAA_FQ_SETUP: main loop done, 44 FQs, egress_cnt=4/4
-[    2.192103] DPAA_PROBE: fq_setup done
-[    2.195767] DPAA_PROBE: cgr_init done
-[    2.199473] DPAA_PROBE: fqs_init done
-[    2.204993] fsl_dpa: fsl_dpa: Probed interface eth1
-[    2.210025] *********dpa_set_buffers_layout(677) internal buffer offset 0
-[    2.216859] dpaa_eth_priv_probe::bpid 32, count 640 
-[    2.216862] adj count 640
-[    2.224443] DPAA_PROBE: bp_create done
-[    2.228190] DPAA_PROBE: get_channel=1025
-[    2.232112] DPAA_PROBE: add_channel done
-[    2.236033] DPAA_FQ_SETUP: enter
-[    2.239263] fsl_dpa soc:fsl,dpaa:ethernet@1: No Qman software (affine) channels found
-[    2.247097] DPAA_FQ_SETUP: fq #1 type=2
-[    2.250931] DPAA_FQ_SETUP: fq #2 type=1
-[    2.254765] DPAA_FQ_SETUP: fq #3 type=3
-[    2.258598] DPAA_FQ_SETUP: fq #4 type=3
-[    2.262431] DPAA_FQ_SETUP: fq #5 type=3
-[    2.266264] DPAA_FQ_SETUP: fq #6 type=3
-[    2.270098] DPAA_FQ_SETUP: fq #7 type=3
-[    2.273932] DPAA_FQ_SETUP: fq #8 type=3
-[    2.277766] DPAA_FQ_SETUP: fq #9 type=3
-[    2.281601] DPAA_FQ_SETUP: fq #10 type=3
-[    2.285522] DPAA_FQ_SETUP: fq #11 type=3
-[    2.289443] DPAA_FQ_SETUP: fq #12 type=3
-[    2.293364] DPAA_FQ_SETUP: fq #13 type=3
-[    2.297285] DPAA_FQ_SETUP: fq #14 type=3
-[    2.301206] DPAA_FQ_SETUP: fq #15 type=3
-[    2.305128] DPAA_FQ_SETUP: fq #16 type=3
-[    2.309049] DPAA_FQ_SETUP: fq #17 type=3
-[    2.312970] DPAA_FQ_SETUP: fq #18 type=3
-[    2.316893] DPAA_FQ_SETUP: fq #19 type=8
-[    2.320818] DPAA_FQ_SETUP: fq #20 type=8
-[    2.324742] DPAA_FQ_SETUP: fq #21 type=8
-[    2.328663] DPAA_FQ_SETUP: fq #22 type=8
-[    2.332584] DPAA_FQ_SETUP: fq #23 type=8
-[    2.336505] DPAA_FQ_SETUP: fq #24 type=8
-[    2.340426] DPAA_FQ_SETUP: fq #25 type=8
-[    2.344349] DPAA_FQ_SETUP: fq #26 type=8
-[    2.348270] DPAA_FQ_SETUP: fq #27 type=8
-[    2.352191] DPAA_FQ_SETUP: fq #28 type=8
-[    2.356112] DPAA_FQ_SETUP: fq #29 type=8
-[    2.360032] DPAA_FQ_SETUP: fq #30 type=8
-[    2.363953] DPAA_FQ_SETUP: fq #31 type=8
-[    2.367877] DPAA_FQ_SETUP: fq #32 type=8
-[    2.371798] DPAA_FQ_SETUP: fq #33 type=8
-[    2.375720] DPAA_FQ_SETUP: fq #34 type=8
-[    2.379641] DPAA_FQ_SETUP: fq #35 type=6
-[    2.383562] DPAA_FQ_SETUP: fq #36 type=6
-[    2.387483] DPAA_FQ_SETUP: fq #37 type=6
-[    2.391404] DPAA_FQ_SETUP: fq #38 type=6
-[    2.395325] DPAA_FQ_SETUP: fq #39 type=7
-[    2.399245] DPAA_FQ_SETUP: fq #40 type=5
-[    2.403166] DPAA_FQ_SETUP: fq #41 type=4
-[    2.407088] DPAA_FQ_SETUP: fq #42 type=4
-[    2.411009] DPAA_FQ_SETUP: fq #43 type=4
-[    2.414930] DPAA_FQ_SETUP: fq #44 type=4
-[    2.418851] DPAA_FQ_SETUP: main loop done, 44 FQs, egress_cnt=4/4
-[    2.424946] DPAA_PROBE: fq_setup done
-[    2.428609] DPAA_PROBE: cgr_init done
-[    2.432320] DPAA_PROBE: fqs_init done
-[    2.437845] fsl_dpa: fsl_dpa: Probed interface eth2
-[    2.442874] *********dpa_set_buffers_layout(677) internal buffer offset 0
-[    2.449714] dpaa_eth_priv_probe::bpid 32, count 640 
-[    2.449718] adj count 640
-[    2.457299] DPAA_PROBE: bp_create done
-[    2.461045] DPAA_PROBE: get_channel=1025
-[    2.464968] DPAA_PROBE: add_channel done
-[    2.468889] DPAA_FQ_SETUP: enter
-[    2.472116] fsl_dpa soc:fsl,dpaa:ethernet@4: No Qman software (affine) channels found
-[    2.479950] DPAA_FQ_SETUP: fq #1 type=2
-[    2.483785] DPAA_FQ_SETUP: fq #2 type=1
-[    2.487619] DPAA_FQ_SETUP: fq #3 type=3
-[    2.491453] DPAA_FQ_SETUP: fq #4 type=3
-[    2.495291] DPAA_FQ_SETUP: fq #5 type=3
-[    2.499126] DPAA_FQ_SETUP: fq #6 type=3
-[    2.502960] DPAA_FQ_SETUP: fq #7 type=3
-[    2.506794] DPAA_FQ_SETUP: fq #8 type=3
-[    2.510628] DPAA_FQ_SETUP: fq #9 type=3
-[    2.514462] DPAA_FQ_SETUP: fq #10 type=3
-[    2.518383] DPAA_FQ_SETUP: fq #11 type=3
-[    2.522305] DPAA_FQ_SETUP: fq #12 type=3
-[    2.526226] DPAA_FQ_SETUP: fq #13 type=3
-[    2.530147] DPAA_FQ_SETUP: fq #14 type=3
-[    2.534068] DPAA_FQ_SETUP: fq #15 type=3
-[    2.537990] DPAA_FQ_SETUP: fq #16 type=3
-[    2.541910] DPAA_FQ_SETUP: fq #17 type=3
-[    2.545830] DPAA_FQ_SETUP: fq #18 type=3
-[    2.549750] DPAA_FQ_SETUP: fq #19 type=8
-[    2.553672] DPAA_FQ_SETUP: fq #20 type=8
-[    2.557596] DPAA_FQ_SETUP: fq #21 type=8
-[    2.561520] DPAA_FQ_SETUP: fq #22 type=8
-[    2.565441] DPAA_FQ_SETUP: fq #23 type=8
-[    2.569362] DPAA_FQ_SETUP: fq #24 type=8
-[    2.573283] DPAA_FQ_SETUP: fq #25 type=8
-[    2.577204] DPAA_FQ_SETUP: fq #26 type=8
-[    2.581125] DPAA_FQ_SETUP: fq #27 type=8
-[    2.585047] DPAA_FQ_SETUP: fq #28 type=8
-[    2.588968] DPAA_FQ_SETUP: fq #29 type=8
-[    2.592889] DPAA_FQ_SETUP: fq #30 type=8
-[    2.596810] DPAA_FQ_SETUP: fq #31 type=8
-[    2.600731] DPAA_FQ_SETUP: fq #32 type=8
-[    2.604652] DPAA_FQ_SETUP: fq #33 type=8
-[    2.608573] DPAA_FQ_SETUP: fq #34 type=8
-[    2.612494] DPAA_FQ_SETUP: fq #35 type=6
-[    2.616415] DPAA_FQ_SETUP: fq #36 type=6
-[    2.620335] DPAA_FQ_SETUP: fq #37 type=6
-[    2.624259] DPAA_FQ_SETUP: fq #38 type=6
-[    2.628180] DPAA_FQ_SETUP: fq #39 type=7
-[    2.632102] DPAA_FQ_SETUP: fq #40 type=5
-[    2.636023] DPAA_FQ_SETUP: fq #41 type=4
-[    2.639944] DPAA_FQ_SETUP: fq #42 type=4
-[    2.643865] DPAA_FQ_SETUP: fq #43 type=4
-[    2.647786] DPAA_FQ_SETUP: fq #44 type=4
-[    2.651707] DPAA_FQ_SETUP: main loop done, 44 FQs, egress_cnt=4/4
-[    2.657801] DPAA_PROBE: fq_setup done
-[    2.661465] DPAA_PROBE: cgr_init done
-[    2.665179] DPAA_PROBE: fqs_init done
-[    2.670712] fsl_dpa: fsl_dpa: Probed interface eth3
-[    2.675744] *********dpa_set_buffers_layout(677) internal buffer offset 0
-[    2.682591] dpaa_eth_priv_probe::bpid 32, count 640 
-[    2.682595] adj count 640
-[    2.690175] DPAA_PROBE: bp_create done
-[    2.693922] DPAA_PROBE: get_channel=1025
-[    2.697845] DPAA_PROBE: add_channel done
-[    2.701766] DPAA_FQ_SETUP: enter
-[    2.704993] fsl_dpa soc:fsl,dpaa:ethernet@5: No Qman software (affine) channels found
-[    2.712826] DPAA_FQ_SETUP: fq #1 type=2
-[    2.716661] DPAA_FQ_SETUP: fq #2 type=1
-[    2.720495] DPAA_FQ_SETUP: fq #3 type=3
-[    2.724330] DPAA_FQ_SETUP: fq #4 type=3
-[    2.728164] DPAA_FQ_SETUP: fq #5 type=3
-[    2.731998] DPAA_FQ_SETUP: fq #6 type=3
-[    2.735832] DPAA_FQ_SETUP: fq #7 type=3
-[    2.739667] DPAA_FQ_SETUP: fq #8 type=3
-[    2.743501] DPAA_FQ_SETUP: fq #9 type=3
-[    2.747335] DPAA_FQ_SETUP: fq #10 type=3
-[    2.751259] DPAA_FQ_SETUP: fq #11 type=3
-[    2.755181] DPAA_FQ_SETUP: fq #12 type=3
-[    2.759102] DPAA_FQ_SETUP: fq #13 type=3
-[    2.763023] DPAA_FQ_SETUP: fq #14 type=3
-[    2.766944] DPAA_FQ_SETUP: fq #15 type=3
-[    2.770864] DPAA_FQ_SETUP: fq #16 type=3
-[    2.774784] DPAA_FQ_SETUP: fq #17 type=3
-[    2.778704] DPAA_FQ_SETUP: fq #18 type=3
-[    2.782625] DPAA_FQ_SETUP: fq #19 type=8
-[    2.786547] DPAA_FQ_SETUP: fq #20 type=8
-[    2.790470] DPAA_FQ_SETUP: fq #21 type=8
-[    2.794394] DPAA_FQ_SETUP: fq #22 type=8
-[    2.798316] DPAA_FQ_SETUP: fq #23 type=8
-[    2.802237] DPAA_FQ_SETUP: fq #24 type=8
-[    2.806158] DPAA_FQ_SETUP: fq #25 type=8
-[    2.810079] DPAA_FQ_SETUP: fq #26 type=8
-[    2.814000] DPAA_FQ_SETUP: fq #27 type=8
-[    2.817921] DPAA_FQ_SETUP: fq #28 type=8
-[    2.821842] DPAA_FQ_SETUP: fq #29 type=8
-[    2.825763] DPAA_FQ_SETUP: fq #30 type=8
-[    2.829684] DPAA_FQ_SETUP: fq #31 type=8
-[    2.833605] DPAA_FQ_SETUP: fq #32 type=8
-[    2.837526] DPAA_FQ_SETUP: fq #33 type=8
-[    2.841447] DPAA_FQ_SETUP: fq #34 type=8
-[    2.845368] DPAA_FQ_SETUP: fq #35 type=6
-[    2.849289] DPAA_FQ_SETUP: fq #36 type=6
-[    2.853210] DPAA_FQ_SETUP: fq #37 type=6
-[    2.857130] DPAA_FQ_SETUP: fq #38 type=6
-[    2.861051] DPAA_FQ_SETUP: fq #39 type=7
-[    2.864972] DPAA_FQ_SETUP: fq #40 type=5
-[    2.868893] DPAA_FQ_SETUP: fq #41 type=4
-[    2.872814] DPAA_FQ_SETUP: fq #42 type=4
-[    2.876735] DPAA_FQ_SETUP: fq #43 type=4
-[    2.880659] DPAA_FQ_SETUP: fq #44 type=4
-[    2.884580] DPAA_FQ_SETUP: main loop done, 44 FQs, egress_cnt=4/4
-[    2.890675] DPAA_PROBE: fq_setup done
-[    2.894338] DPAA_PROBE: cgr_init done
-[    2.898057] DPAA_PROBE: fqs_init done
-[    2.903568] fsl_dpa: fsl_dpa: Probed interface eth4
-[    2.908492] fsl_advanced: FSL DPAA Advanced drivers:
-[    2.913463] fsl_proxy: FSL DPAA Proxy initialization driver
-[    2.919182] fsl_oh: FSL FMan Offline Parsing port driver
-[    2.924853] VFIO - User Level meta-driver version: 0.3
-[    2.931210] xhci-hcd xhci-hcd.0.auto: xHCI Host Controller
-[    2.936712] xhci-hcd xhci-hcd.0.auto: new USB bus registered, assigned bus number 1
-[    2.944453] xhci-hcd xhci-hcd.0.auto: hcc params 0x0220f66d hci version 0x100 quirks 0x0000008002000010
-[    2.953886] xhci-hcd xhci-hcd.0.auto: irq 60, io mem 0x02f00000
-[    2.959892] xhci-hcd xhci-hcd.0.auto: xHCI Host Controller
-[    2.965385] xhci-hcd xhci-hcd.0.auto: new USB bus registered, assigned bus number 2
-[    2.973050] xhci-hcd xhci-hcd.0.auto: Host supports USB 3.0 SuperSpeed
-[    2.979723] usb usb1: New USB device found, idVendor=1d6b, idProduct=0002, bcdDevice= 6.06
-[    2.988006] usb usb1: New USB device strings: Mfr=3, Product=2, SerialNumber=1
-[    2.995234] usb usb1: Product: xHCI Host Controller
-[    3.000115] usb usb1: Manufacturer: Linux 6.6.133-vyos xhci-hcd
-[    3.006037] usb usb1: SerialNumber: xhci-hcd.0.auto
-[    3.011167] hub 1-0:1.0: USB hub found
-[    3.014943] hub 1-0:1.0: 1 port detected
-[    3.019117] usb usb2: We don't know the algorithms for LPM for this host, disabling LPM.
-[    3.027302] usb usb2: New USB device found, idVendor=1d6b, idProduct=0003, bcdDevice= 6.06
-[    3.035577] usb usb2: New USB device strings: Mfr=3, Product=2, SerialNumber=1
-[    3.042805] usb usb2: Product: xHCI Host Controller
-[    3.047683] usb usb2: Manufacturer: Linux 6.6.133-vyos xhci-hcd
-[    3.053607] usb usb2: SerialNumber: xhci-hcd.0.auto
-[    3.058702] hub 2-0:1.0: USB hub found
-[    3.062473] hub 2-0:1.0: 1 port detected
-[    3.066934] pca954x 0-0070: supply vdd not found, using dummy regulator
-[    3.074320] i2c i2c-0: Added multiplexed i2c bus 4
-[    3.079221] i2c i2c-0: Added multiplexed i2c bus 5
-[    3.084121] i2c i2c-0: Added multiplexed i2c bus 6
-[    3.089029] i2c i2c-0: Added multiplexed i2c bus 7
-[    3.093825] pca954x 0-0070: registered 4 multiplexed busses for I2C switch pca9545
-[    3.101448] pca954x 1-0070: supply vdd not found, using dummy regulator
-[    3.108773] i2c i2c-1: Added multiplexed i2c bus 8
-[    3.113621] i2c i2c-1: Added multiplexed i2c bus 9
-[    3.118465] i2c i2c-1: Added multiplexed i2c bus 10
-[    3.123394] i2c i2c-1: Added multiplexed i2c bus 11
-[    3.128277] pca954x 1-0070: registered 4 multiplexed busses for I2C switch pca9545
-[    3.135905] pca954x 2-0070: supply vdd not found, using dummy regulator
-[    3.143396] i2c i2c-2: Added multiplexed i2c bus 12
-[    3.148512] i2c i2c-2: Added multiplexed i2c bus 13
-[    3.171619] rtc-pcf2127-i2c 14-0053: registered as rtc0
-[    3.179128] rtc-pcf2127-i2c 14-0053: setting system clock to 2026-04-18T01:46:28 UTC (1776476788)
-[    3.188040] i2c i2c-2: Added multiplexed i2c bus 14
-[    3.193040] i2c i2c-2: Added multiplexed i2c bus 15
-[    3.197924] pca954x 2-0070: registered 4 multiplexed busses for I2C switch pca9545
-[    3.211430] ina2xx 12-0040: supply vs not found, using dummy regulator
-[    3.220577] ina2xx 12-0040: power monitor ina234 (Rshunt = 1000 uOhm)
-[    3.227089] ina2xx 12-0041: supply vs not found, using dummy regulator
-[    3.235656] ina2xx 12-0041: power monitor ina234 (Rshunt = 1000 uOhm)
-[    3.242158] ina2xx 12-0042: supply vs not found, using dummy regulator
-[    3.250723] ina2xx 12-0042: power monitor ina234 (Rshunt = 1000 uOhm)
-[    3.255991] usb 1-1: new high-speed USB device number 2 using xhci-hcd
-[    3.257223] ina2xx 12-0043: supply vs not found, using dummy regulator
-[    3.272281] ina2xx 12-0043: power monitor ina234 (Rshunt = 5000 uOhm)
-[    3.278779] ina2xx 13-0040: supply vs not found, using dummy regulator
-[    3.287839] ina2xx 13-0040: power monitor ina234 (Rshunt = 5000 uOhm)
-[    3.294340] ina2xx 13-0041: supply vs not found, using dummy regulator
-[    3.302839] ina2xx 13-0041: power monitor ina234 (Rshunt = 5000 uOhm)
-[    3.309338] ina2xx 13-0042: supply vs not found, using dummy regulator
-[    3.317800] ina2xx 13-0042: power monitor ina234 (Rshunt = 5000 uOhm)
-[    3.324327] ina2xx 13-0043: supply vs not found, using dummy regulator
-[    3.332801] ina2xx 13-0043: power monitor ina234 (Rshunt = 1000 uOhm)
-[    3.340400] device-mapper: uevent: version 1.0.3
-[    3.345159] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-devel@redhat.com
-[    3.354138] qoriq-cpufreq qoriq-cpufreq: Freescale QorIQ CPU frequency scaling driver
-[    3.362724] ledtrig-cpu: registered to indicate activity on CPUs
-[    3.396707] usb 1-1: New USB device found, idVendor=0781, idProduct=5581, bcdDevice= 1.00
-[    3.404064] SMCCC: SOC_ID: ARCH_SOC_ID not implemented, skipping ....
-[    3.404898] usb 1-1: New USB device strings: Mfr=1, Product=2, SerialNumber=3
-[    3.411592] caam 1700000.crypto: device ID = 0x0a11030100000000 (Era 8)
-[    3.418466] usb 1-1: Product: Ultra
-[    3.418470] usb 1-1: Manufacturer: SanDisk
-[    3.418473] usb 1-1: SerialNumber: 4C531001600621100051
-[    3.425089] caam 1700000.crypto: job rings = 3, qi = 1
-[    3.444712] caam algorithms registered in /proc/crypto
-[    3.449971] caam 1700000.crypto: caam pkc algorithms registered in /proc/crypto
-[    3.457292] caam 1700000.crypto: registering rng-caam
-[    3.462440] caam 1700000.crypto: rng crypto API alg registered prng-caam
-[    3.470503] Freescale USDPAA process driver
-[    3.474694] Freescale USDPAA process driver
-[    3.478946] Freescale USDPAA process IRQ driver
-[    3.484132] hw perfevents: enabled with armv8_cortex_a72 PMU driver, 7 counters available
-[    3.489117] random: crng init done
-[    3.496064] drop_monitor: Initializing network drop monitor service
-[    3.503322] NET: Registered PF_INET6 protocol family
-[    3.528517] Segment Routing with IPv6
-[    3.532220] In-situ OAM (IOAM) with IPv6
-[    3.536187] mip6: Mobile IPv6
-[    3.539191] NET: Registered PF_KEY protocol family
-[    3.543984] Initializing NETLINK_KEY socket
-[    3.548247] Key type dns_resolver registered
-[    3.552535] mpls_gso: MPLS GSO support
-[    3.560153] registered taskstats version 1
-[    3.564333] Loading compiled-in X.509 certificates
-[    3.581280] Loaded X.509 cert 'VyOS Networks build time autogenerated Kernel key: f7e0a2c38f1206fdb40f6608a75058ebd5d079d7'
-[    3.604340] Loaded X.509 cert 'VyOS LS1046A Secure Boot CA: ed9ff86ac8d3dc1144144291a885ffd7bcd198db'
-[    3.619642] sfp sfp-xfi0: Host maximum power 3.0W
-[    3.624845] sfp sfp-xfi1: Host maximum power 3.0W
-[    3.629897] ASK fp_netfilter: hooks registered + conntrack force-enabled
-[    3.636663] clk: Disabling unused clocks
-[    3.642281] Freeing unused kernel memory: 5056K
-[    3.684950] Checked W+X mappings: passed, no W+X pages found
-[    3.690636] Run /init as init process
+[    0.030819] Mount-cache hash table entries: 16384 (order: 5, 131072 bytes, linear)
+[    0.038458] Mountpoint-cache hash table entries: 16384 (order: 5, 131072 bytes, linear)
+[    0.048596] RCU Tasks: Setting shift to 2 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=4.
+[    0.057410] RCU Tasks Trace: Setting shift to 2 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=4.
+[    0.066809] rcu: Hierarchical SRCU implementation.
+[    0.071630] rcu:     Max phase no-delay instances is 400.
+[    0.077331] EFI services will not be available.
+[    0.082053] smp: Bringing up secondary CPUs ...
+[    0.086965] Detected PIPT I-cache on CPU1
+[    0.087011] CPU1: Booted secondary processor 0x0000000001 [0x410fd082]
+[    0.087359] Detected PIPT I-cache on CPU2
+[    0.087391] CPU2: Booted secondary processor 0x0000000002 [0x410fd082]
+[    0.087737] Detected PIPT I-cache on CPU3
+[    0.087770] CPU3: Booted secondary processor 0x0000000003 [0x410fd082]
+[    0.087809] smp: Brought up 1 node, 4 CPUs
+[    0.123718] SMP: Total of 4 processors activated.
+[    0.128450] CPU features: detected: 32-bit EL0 Support
+[    0.133617] CPU features: detected: 32-bit EL1 Support
+[    0.138786] CPU features: detected: CRC32 instructions
+[    0.143991] CPU: All CPU(s) started at EL2
+[    0.148124] alternatives: applying system-wide alternatives
+[    0.154862] devtmpfs: initialized
+[    0.163411] clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 1911260446275000 ns
+[    0.173227] futex hash table entries: 1024 (order: 4, 65536 bytes, linear)
+[    0.180643] pinctrl core: initialized pinctrl subsystem
+[    0.186295] Machine: Mono Gateway Development Kit
+[    0.191029] SoC family: QorIQ LS1046A
+[    0.194709] SoC ID: svr:0x87070010, Revision: 1.0
+[    0.199664] DMI not present or invalid.
+[    0.204278] NET: Registered PF_NETLINK/PF_ROUTE protocol family
+[    0.210754] DMA: preallocated 1024 KiB GFP_KERNEL pool for atomic allocations
+[    0.218091] DMA: preallocated 1024 KiB GFP_KERNEL|GFP_DMA pool for atomic allocations
+[    0.226201] DMA: preallocated 1024 KiB GFP_KERNEL|GFP_DMA32 pool for atomic allocations
+[    0.234812] audit: initializing netlink subsys (disabled)
+[    0.240331] audit: type=2000 audit(0.049:1): state=initialized audit_enabled=0 res=1
+[    0.240822] thermal_sys: Registered thermal governor 'step_wise'
+[    0.248132] thermal_sys: Registered thermal governor 'user_space'
+[    0.254193] cpuidle: using governor menu
+[    0.264316] Bman ver:0a02,02,01
+[    0.268936] qman-fqd addr 0x00000009fe800000 size 0x800000
+[    0.274456] qman-pfdr addr 0x00000009fc000000 size 0x2000000
+[    0.280152] Qman ver:0a01,03,02,01
+[    0.283683] hw-breakpoint: found 6 breakpoint and 4 watchpoint registers.
+[    0.290561] ASID allocator initialised with 32768 entries
+[    0.296529] Serial: AMBA PL011 UART driver
+[    0.312528] Modules: 2G module region forced by RANDOMIZE_MODULE_REGION_FULL
+[    0.319636] Modules: 0 pages in range for non-PLT usage
+[    0.319639] Modules: 517136 pages in range for PLT usage
+[    0.325475] HugeTLB: registered 1.00 GiB page size, pre-allocated 0 pages
+[    0.337652] HugeTLB: 0 KiB vmemmap can be freed for a 1.00 GiB page
+[    0.343959] HugeTLB: registered 32.0 MiB page size, pre-allocated 0 pages
+[    0.350789] HugeTLB: 0 KiB vmemmap can be freed for a 32.0 MiB page
+[    0.357095] HugeTLB: registered 2.00 MiB page size, pre-allocated 0 pages
+[    0.363925] HugeTLB: 0 KiB vmemmap can be freed for a 2.00 MiB page
+[    0.370231] HugeTLB: registered 64.0 KiB page size, pre-allocated 0 pages
+[    0.377060] HugeTLB: 0 KiB vmemmap can be freed for a 64.0 KiB page
+[    0.401413] raid6: neonx8   gen()  4775 MB/s
+[    0.422747] raid6: neonx4   gen()  4642 MB/s
+[    0.444077] raid6: neonx2   gen()  3837 MB/s
+[    0.465405] raid6: neonx1   gen()  2783 MB/s
+[    0.486734] raid6: int64x8  gen()  2682 MB/s
+[    0.508069] raid6: int64x4  gen()  2616 MB/s
+[    0.529406] raid6: int64x2  gen()  2532 MB/s
+[    0.550744] raid6: int64x1  gen()  1955 MB/s
+[    0.555037] raid6: using algorithm neonx8 gen() 4775 MB/s
+[    0.577502] raid6: .... xor() 3459 MB/s, rmw enabled
+[    0.582495] raid6: using neon recovery algorithm
+[    0.587480] ACPI: Interpreter disabled.
+[    0.592730] iommu: Default domain type: Translated
+[    0.597553] iommu: DMA domain TLB invalidation policy: lazy mode
+[    0.603861] usbcore: registered new interface driver usbfs
+[    0.609406] usbcore: registered new interface driver hub
+[    0.614768] usbcore: registered new device driver usb
+[    0.620160] imx-i2c 2180000.i2c: can't get pinctrl, bus recovery not supported
+[    0.627553] i2c i2c-0: IMX I2C adapter registered
+[    0.632307] i2c i2c-0: using dma0chan16 (tx) and dma0chan17 (rx) for DMA transfers
+[    0.640018] imx-i2c 2190000.i2c: can't get pinctrl, bus recovery not supported
+[    0.647384] i2c i2c-1: IMX I2C adapter registered
+[    0.652215] imx-i2c 21a0000.i2c: can't get pinctrl, bus recovery not supported
+[    0.659591] i2c i2c-2: IMX I2C adapter registered
+[    0.664421] imx-i2c 21b0000.i2c: can't get pinctrl, bus recovery not supported
+[    0.671749] i2c i2c-3: IMX I2C adapter registered
+[    0.676634] pps_core: LinuxPPS API ver. 1 registered
+[    0.681629] pps_core: Software ver. 5.3.6 - Copyright 2005-2007 Rodolfo Giometti <giometti@linux.it>
+[    0.690833] PTP clock support registered
+[    0.694923] EDAC MC: Ver: 3.0.0
+[    0.698416] scmi_core: SCMI protocol bus registered
+[    0.703353] bman-fbpr addr 0x00000009ff000000 size 0x1000000
+[    0.709091] Bman err interrupt handler present
+[    0.714239] Bman portal initialised, cpu 0
+[    0.718413] Bman portal initialised, cpu 1
+[    0.722601] Bman portal initialised, cpu 2
+[    0.726774] Bman portal initialised, cpu 3
+[    0.730894] Bman portals initialised
+[    0.740771] Qman err interrupt handler present
+[    0.745601] QMan: Allocated lookup table at (____ptrval____), entry count 131073
+[    0.753784] QMan doesn't need cleanup, uninhibiting IRQs
+[    0.759135] Qman portal initialised, cpu 0
+[    0.763303] QMan doesn't need cleanup, uninhibiting IRQs
+[    0.768648] Qman portal initialised, cpu 1
+[    0.772825] QMan doesn't need cleanup, uninhibiting IRQs
+[    0.778169] Qman portal initialised, cpu 2
+[    0.782334] QMan doesn't need cleanup, uninhibiting IRQs
+[    0.787678] Qman portal initialised, cpu 3
+[    0.791796] Qman portals initialised
+[    0.795446] Bman: BPID allocator includes range 32:32
+[    0.800561] Qman: FQID allocator includes range 256:256
+[    0.805821] Qman: FQID allocator includes range 32768:32768
+[    0.811464] Qman: CGRID allocator includes range 0:256
+[    0.816762] Qman: pool channel allocator includes range 1025:15
+[    0.822791] USDPAA region at c0000000:10000000(c0000:10000), 1 TLB1 entries)
+[    0.830771] clocksource: Switched to clocksource arch_sys_counter
+[    0.838407] pnp: PnP ACPI: disabled
+[    0.846038] NET: Registered PF_INET protocol family
+[    0.851160] IP idents hash table entries: 131072 (order: 8, 1048576 bytes, linear)
+[    0.862542] ipsec_flow_init 
+[    0.865622] tcp_listen_portaddr_hash hash table entries: 4096 (order: 4, 65536 bytes, linear)
+[    0.874242] Table-perturb hash table entries: 65536 (order: 6, 262144 bytes, linear)
+[    0.882044] TCP established hash table entries: 65536 (order: 7, 524288 bytes, linear)
+[    0.890279] TCP bind hash table entries: 65536 (order: 9, 2097152 bytes, linear)
+[    0.898819] TCP: Hash tables configured (established 65536 bind 65536)
+[    0.905718] MPTCP token hash table entries: 8192 (order: 6, 196608 bytes, linear)
+[    0.913440] UDP hash table entries: 4096 (order: 5, 131072 bytes, linear)
+[    0.920372] UDP-Lite hash table entries: 4096 (order: 5, 131072 bytes, linear)
+[    0.927898] NET: Registered PF_UNIX/PF_LOCAL protocol family
+[    0.933610] NET: Registered PF_XDP protocol family
+[    0.938439] PCI: CLS 0 bytes, default 64
+[    0.942538] Trying to unpack rootfs image as initramfs...
+[    0.949522] kvm [1]: IPA Size Limit: 44 bits
+[    0.954488] kvm [1]: vgic interrupt IRQ9
+[    0.958473] kvm [1]: Hyp mode initialized successfully
+[    0.964469] Initialise system trusted keyrings
+[    0.969119] workingset: timestamp_bits=40 max_order=21 bucket_order=0
+[    0.976472] squashfs: version 4.0 (2009/01/31) Phillip Lougher
+[    1.000522] xor: measuring software checksum speed
+[    1.005785]    8regs           :  7615 MB/sec
+[    1.010564]    32regs          :  8347 MB/sec
+[    1.015442]    arm64_neon      :  6720 MB/sec
+[    1.019827] xor: using function: 32regs (8347 MB/sec)
+[    1.024918] async_tx: api initialized (async)
+[    1.029307] Key type asymmetric registered
+[    1.033432] Asymmetric key parser 'x509' registered
+[    1.038398] Block layer SCSI generic (bsg) driver version 0.4 loaded (major 248)
+[    1.045856] io scheduler mq-deadline registered
+[    1.050420] io scheduler kyber registered
+[    1.054570] io scheduler bfq registered
+[    1.067664] shpchp: Standard Hot Plug PCI Controller Driver version: 0.4
+[    1.081477] Serial: 8250/16550 driver, 4 ports, IRQ sharing enabled
+[    1.089465] printk: console [ttyS0] disabled
+[    1.093995] 21c0500.serial: ttyS0 at MMIO 0x21c0500 (irq = 56, base_baud = 18750000) is a 16550A
+[    1.102868] printk: console [ttyS0] enabled
+[    1.102868] printk: console [ttyS0] enabled
+[    1.111265] printk: bootconsole [uart8250] disabled
+[    1.111265] printk: bootconsole [uart8250] disabled
+[    1.121890] 21c0600.serial: ttyS1 at MMIO 0x21c0600 (irq = 56, base_baud = 18750000) is a 16550A
+[    1.130818] serial serial0: tty port ttyS1 registered
+[    1.138869] spi-nor spi1.0: n25q512a (65536 Kbytes)
+[    1.461189] Freeing initrd memory: 32152K
+[    1.471630] 8 fixed-partitions partitions found on MTD device 1550000.spi
+[    1.478466] Creating 8 MTD partitions on "1550000.spi":
+[    1.483696] 0x000000000000-0x000000100000 : "rcw-bl2"
+[    1.488979] 0x000000100000-0x000000300000 : "uboot"
+[    1.494030] 0x000000300000-0x000000400000 : "uboot-env"
+[    1.499429] 0x000000400000-0x000000500000 : "fman-ucode"
+[    1.504925] 0x000000500000-0x000000600000 : "recovery-dtb"
+[    1.510576] 0x000000600000-0x000000a00000 : "backup"
+[    1.515727] 0x000000a00000-0x000002000000 : "kernel-initramfs"
+[    1.521726] 0x000002000000-0x000004000000 : "unallocated"
+[    1.535166] Maxlinear Ethernet GPY115C 0x0000000001afd000:00: Firmware Version: 8.111 (0x886F)
+[    1.551032] Maxlinear Ethernet GPY115C 0x0000000001afd000:01: Firmware Version: 8.111 (0x886F)
+[    1.566835] Maxlinear Ethernet GPY115C 0x0000000001afd000:02: Firmware Version: 8.111 (0x886F)
+[    1.627685] FM_Config(3449) FMan-Controller code (ver 210.10.1) (0xd20a01)
+[    1.641080] FM_Init(3616) FMan-Controller code (ver 210.10.1) (0xd20a01)
+[    1.650980] Freescale FM module, FMD API version 21.1.0
+[    1.658780] Freescale FM Ports module
+[    1.662448] fsl_mac: fsl_mac: FSL FMan MAC API based driver
+[    1.668237] fsl_mac 1ae2000.ethernet: FMan MEMAC
+[    1.672862] fsl_mac 1ae2000.ethernet: FMan MAC address: e8:f6:d7:00:15:ff
+[    1.679823] fsl_mac 1ae8000.ethernet: FMan MEMAC
+[    1.684443] fsl_mac 1ae8000.ethernet: FMan MAC address: e8:f6:d7:00:16:00
+[    1.691412] fsl_mac 1aea000.ethernet: FMan MEMAC
+[    1.696034] fsl_mac 1aea000.ethernet: FMan MAC address: e8:f6:d7:00:16:01
+[    1.708001] fsl_mac 1af0000.ethernet: FMan MEMAC
+[    1.712642] fsl_mac 1af0000.ethernet: FMan MAC address: e8:f6:d7:00:16:02
+[    1.724508] fsl_mac 1af2000.ethernet: FMan MEMAC
+[    1.729143] fsl_mac 1af2000.ethernet: FMan MAC address: e8:f6:d7:00:16:03
+[    1.735997] fsl_dpa: FSL DPAA Ethernet driver
+[    1.740635] *********dpa_set_buffers_layout(677) internal buffer offset 0
+[    1.747473] dpaa_eth_priv_probe::bpid 0, count 640 
+[    1.747476] adj count 640
+[    1.754972] DPAA_PROBE: bp_create done
+[    1.758721] DPAA_PROBE: get_channel=1025
+[    1.762645] DPAA_PROBE: add_channel done
+[    1.766565] DPAA_FQ_SETUP: enter
+[    1.769791] fsl_dpa soc:fsl,dpaa:ethernet@8: No Qman software (affine) channels found
+[    1.777626] DPAA_FQ_SETUP: fq #1 type=2
+[    1.781461] DPAA_FQ_SETUP: fq #2 type=1
+[    1.785295] DPAA_FQ_SETUP: fq #3 type=3
+[    1.789130] DPAA_FQ_SETUP: fq #4 type=3
+[    1.792964] DPAA_FQ_SETUP: fq #5 type=3
+[    1.796798] DPAA_FQ_SETUP: fq #6 type=3
+[    1.800632] DPAA_FQ_SETUP: fq #7 type=3
+[    1.804466] DPAA_FQ_SETUP: fq #8 type=3
+[    1.808300] DPAA_FQ_SETUP: fq #9 type=3
+[    1.812134] DPAA_FQ_SETUP: fq #10 type=3
+[    1.816055] DPAA_FQ_SETUP: fq #11 type=3
+[    1.819976] DPAA_FQ_SETUP: fq #12 type=3
+[    1.823897] DPAA_FQ_SETUP: fq #13 type=3
+[    1.827819] DPAA_FQ_SETUP: fq #14 type=3
+[    1.831741] DPAA_FQ_SETUP: fq #15 type=3
+[    1.835665] DPAA_FQ_SETUP: fq #16 type=3
+[    1.839588] DPAA_FQ_SETUP: fq #17 type=3
+[    1.843509] DPAA_FQ_SETUP: fq #18 type=3
+[    1.847434] DPAA_FQ_SETUP: fq #19 type=8
+[    1.851355] DPAA_FQ_SETUP: fq #20 type=8
+[    1.855276] DPAA_FQ_SETUP: fq #21 type=8
+[    1.859198] DPAA_FQ_SETUP: fq #22 type=8
+[    1.863119] DPAA_FQ_SETUP: fq #23 type=8
+[    1.867039] DPAA_FQ_SETUP: fq #24 type=8
+[    1.870961] DPAA_FQ_SETUP: fq #25 type=8
+[    1.874882] DPAA_FQ_SETUP: fq #26 type=8
+[    1.878803] DPAA_FQ_SETUP: fq #27 type=8
+[    1.882723] DPAA_FQ_SETUP: fq #28 type=8
+[    1.886645] DPAA_FQ_SETUP: fq #29 type=8
+[    1.890566] DPAA_FQ_SETUP: fq #30 type=8
+[    1.894487] DPAA_FQ_SETUP: fq #31 type=8
+[    1.898407] DPAA_FQ_SETUP: fq #32 type=8
+[    1.902329] DPAA_FQ_SETUP: fq #33 type=8
+[    1.906250] DPAA_FQ_SETUP: fq #34 type=8
+[    1.910171] DPAA_FQ_SETUP: fq #35 type=6
+[    1.914092] DPAA_FQ_SETUP: fq #36 type=6
+[    1.918012] DPAA_FQ_SETUP: fq #37 type=6
+[    1.921933] DPAA_FQ_SETUP: fq #38 type=6
+[    1.925854] DPAA_FQ_SETUP: fq #39 type=7
+[    1.929775] DPAA_FQ_SETUP: fq #40 type=5
+[    1.933695] DPAA_FQ_SETUP: fq #41 type=4
+[    1.937616] DPAA_FQ_SETUP: fq #42 type=4
+[    1.941537] DPAA_FQ_SETUP: fq #43 type=4
+[    1.945462] DPAA_FQ_SETUP: fq #44 type=4
+[    1.949385] DPAA_FQ_SETUP: main loop done, 44 FQs, egress_cnt=4/4
+[    1.955480] DPAA_PROBE: fq_setup done
+[    1.959144] DPAA_PROBE: cgr_init done
+[    1.962849] DPAA_PROBE: fqs_init done
+[    1.968349] fsl_dpa: fsl_dpa: Probed interface eth0
+[    1.973385] *********dpa_set_buffers_layout(677) internal buffer offset 0
+[    1.980242] dpaa_eth_priv_probe::bpid 32, count 640 
+[    1.980245] adj count 640
+[    1.987827] DPAA_PROBE: bp_create done
+[    1.991574] DPAA_PROBE: get_channel=1025
+[    1.995497] DPAA_PROBE: add_channel done
+[    1.999418] DPAA_FQ_SETUP: enter
+[    2.002645] fsl_dpa soc:fsl,dpaa:ethernet@9: No Qman software (affine) channels found
+[    2.010479] DPAA_FQ_SETUP: fq #1 type=2
+[    2.014314] DPAA_FQ_SETUP: fq #2 type=1
+[    2.018148] DPAA_FQ_SETUP: fq #3 type=3
+[    2.021982] DPAA_FQ_SETUP: fq #4 type=3
+[    2.025816] DPAA_FQ_SETUP: fq #5 type=3
+[    2.029650] DPAA_FQ_SETUP: fq #6 type=3
+[    2.033484] DPAA_FQ_SETUP: fq #7 type=3
+[    2.037318] DPAA_FQ_SETUP: fq #8 type=3
+[    2.041151] DPAA_FQ_SETUP: fq #9 type=3
+[    2.044985] DPAA_FQ_SETUP: fq #10 type=3
+[    2.048906] DPAA_FQ_SETUP: fq #11 type=3
+[    2.052828] DPAA_FQ_SETUP: fq #12 type=3
+[    2.056747] DPAA_FQ_SETUP: fq #13 type=3
+[    2.060667] DPAA_FQ_SETUP: fq #14 type=3
+[    2.064586] DPAA_FQ_SETUP: fq #15 type=3
+[    2.068506] DPAA_FQ_SETUP: fq #16 type=3
+[    2.072426] DPAA_FQ_SETUP: fq #17 type=3
+[    2.076345] DPAA_FQ_SETUP: fq #18 type=3
+[    2.080266] DPAA_FQ_SETUP: fq #19 type=8
+[    2.084189] DPAA_FQ_SETUP: fq #20 type=8
+[    2.088112] DPAA_FQ_SETUP: fq #21 type=8
+[    2.092036] DPAA_FQ_SETUP: fq #22 type=8
+[    2.095958] DPAA_FQ_SETUP: fq #23 type=8
+[    2.099879] DPAA_FQ_SETUP: fq #24 type=8
+[    2.103800] DPAA_FQ_SETUP: fq #25 type=8
+[    2.107724] DPAA_FQ_SETUP: fq #26 type=8
+[    2.111644] DPAA_FQ_SETUP: fq #27 type=8
+[    2.115565] DPAA_FQ_SETUP: fq #28 type=8
+[    2.119486] DPAA_FQ_SETUP: fq #29 type=8
+[    2.123407] DPAA_FQ_SETUP: fq #30 type=8
+[    2.127327] DPAA_FQ_SETUP: fq #31 type=8
+[    2.131248] DPAA_FQ_SETUP: fq #32 type=8
+[    2.135169] DPAA_FQ_SETUP: fq #33 type=8
+[    2.139090] DPAA_FQ_SETUP: fq #34 type=8
+[    2.143010] DPAA_FQ_SETUP: fq #35 type=6
+[    2.146932] DPAA_FQ_SETUP: fq #36 type=6
+[    2.150852] DPAA_FQ_SETUP: fq #37 type=6
+[    2.154774] DPAA_FQ_SETUP: fq #38 type=6
+[    2.158694] DPAA_FQ_SETUP: fq #39 type=7
+[    2.162615] DPAA_FQ_SETUP: fq #40 type=5
+[    2.166535] DPAA_FQ_SETUP: fq #41 type=4
+[    2.170457] DPAA_FQ_SETUP: fq #42 type=4
+[    2.174378] DPAA_FQ_SETUP: fq #43 type=4
+[    2.178299] DPAA_FQ_SETUP: fq #44 type=4
+[    2.182220] DPAA_FQ_SETUP: main loop done, 44 FQs, egress_cnt=4/4
+[    2.188315] DPAA_PROBE: fq_setup done
+[    2.191978] DPAA_PROBE: cgr_init done
+[    2.195684] DPAA_PROBE: fqs_init done
+[    2.201203] fsl_dpa: fsl_dpa: Probed interface eth1
+[    2.206230] *********dpa_set_buffers_layout(677) internal buffer offset 0
+[    2.213072] dpaa_eth_priv_probe::bpid 32, count 640 
+[    2.213076] adj count 640
+[    2.220657] DPAA_PROBE: bp_create done
+[    2.224404] DPAA_PROBE: get_channel=1025
+[    2.228327] DPAA_PROBE: add_channel done
+[    2.232248] DPAA_FQ_SETUP: enter
+[    2.235478] fsl_dpa soc:fsl,dpaa:ethernet@1: No Qman software (affine) channels found
+[    2.243313] DPAA_FQ_SETUP: fq #1 type=2
+[    2.247148] DPAA_FQ_SETUP: fq #2 type=1
+[    2.250982] DPAA_FQ_SETUP: fq #3 type=3
+[    2.254816] DPAA_FQ_SETUP: fq #4 type=3
+[    2.258650] DPAA_FQ_SETUP: fq #5 type=3
+[    2.262484] DPAA_FQ_SETUP: fq #6 type=3
+[    2.266318] DPAA_FQ_SETUP: fq #7 type=3
+[    2.270152] DPAA_FQ_SETUP: fq #8 type=3
+[    2.273985] DPAA_FQ_SETUP: fq #9 type=3
+[    2.277819] DPAA_FQ_SETUP: fq #10 type=3
+[    2.281740] DPAA_FQ_SETUP: fq #11 type=3
+[    2.285661] DPAA_FQ_SETUP: fq #12 type=3
+[    2.289582] DPAA_FQ_SETUP: fq #13 type=3
+[    2.293502] DPAA_FQ_SETUP: fq #14 type=3
+[    2.297423] DPAA_FQ_SETUP: fq #15 type=3
+[    2.301343] DPAA_FQ_SETUP: fq #16 type=3
+[    2.305262] DPAA_FQ_SETUP: fq #17 type=3
+[    2.309182] DPAA_FQ_SETUP: fq #18 type=3
+[    2.313101] DPAA_FQ_SETUP: fq #19 type=8
+[    2.317023] DPAA_FQ_SETUP: fq #20 type=8
+[    2.320946] DPAA_FQ_SETUP: fq #21 type=8
+[    2.324869] DPAA_FQ_SETUP: fq #22 type=8
+[    2.328791] DPAA_FQ_SETUP: fq #23 type=8
+[    2.332713] DPAA_FQ_SETUP: fq #24 type=8
+[    2.336635] DPAA_FQ_SETUP: fq #25 type=8
+[    2.340555] DPAA_FQ_SETUP: fq #26 type=8
+[    2.344475] DPAA_FQ_SETUP: fq #27 type=8
+[    2.348397] DPAA_FQ_SETUP: fq #28 type=8
+[    2.352318] DPAA_FQ_SETUP: fq #29 type=8
+[    2.356239] DPAA_FQ_SETUP: fq #30 type=8
+[    2.360159] DPAA_FQ_SETUP: fq #31 type=8
+[    2.364082] DPAA_FQ_SETUP: fq #32 type=8
+[    2.368003] DPAA_FQ_SETUP: fq #33 type=8
+[    2.371923] DPAA_FQ_SETUP: fq #34 type=8
+[    2.375845] DPAA_FQ_SETUP: fq #35 type=6
+[    2.379765] DPAA_FQ_SETUP: fq #36 type=6
+[    2.383687] DPAA_FQ_SETUP: fq #37 type=6
+[    2.387607] DPAA_FQ_SETUP: fq #38 type=6
+[    2.391527] DPAA_FQ_SETUP: fq #39 type=7
+[    2.395447] DPAA_FQ_SETUP: fq #40 type=5
+[    2.399368] DPAA_FQ_SETUP: fq #41 type=4
+[    2.403289] DPAA_FQ_SETUP: fq #42 type=4
+[    2.407209] DPAA_FQ_SETUP: fq #43 type=4
+[    2.411130] DPAA_FQ_SETUP: fq #44 type=4
+[    2.415051] DPAA_FQ_SETUP: main loop done, 44 FQs, egress_cnt=4/4
+[    2.421145] DPAA_PROBE: fq_setup done
+[    2.424808] DPAA_PROBE: cgr_init done
+[    2.428519] DPAA_PROBE: fqs_init done
+[    2.434027] fsl_dpa: fsl_dpa: Probed interface eth2
+[    2.439065] *********dpa_set_buffers_layout(677) internal buffer offset 0
+[    2.445923] dpaa_eth_priv_probe::bpid 32, count 640 
+[    2.445927] adj count 640
+[    2.453510] DPAA_PROBE: bp_create done
+[    2.457257] DPAA_PROBE: get_channel=1025
+[    2.461181] DPAA_PROBE: add_channel done
+[    2.465101] DPAA_FQ_SETUP: enter
+[    2.468327] fsl_dpa soc:fsl,dpaa:ethernet@4: No Qman software (affine) channels found
+[    2.476162] DPAA_FQ_SETUP: fq #1 type=2
+[    2.479996] DPAA_FQ_SETUP: fq #2 type=1
+[    2.483831] DPAA_FQ_SETUP: fq #3 type=3
+[    2.487665] DPAA_FQ_SETUP: fq #4 type=3
+[    2.491502] DPAA_FQ_SETUP: fq #5 type=3
+[    2.495337] DPAA_FQ_SETUP: fq #6 type=3
+[    2.499171] DPAA_FQ_SETUP: fq #7 type=3
+[    2.503004] DPAA_FQ_SETUP: fq #8 type=3
+[    2.506838] DPAA_FQ_SETUP: fq #9 type=3
+[    2.510671] DPAA_FQ_SETUP: fq #10 type=3
+[    2.514591] DPAA_FQ_SETUP: fq #11 type=3
+[    2.518512] DPAA_FQ_SETUP: fq #12 type=3
+[    2.522432] DPAA_FQ_SETUP: fq #13 type=3
+[    2.526352] DPAA_FQ_SETUP: fq #14 type=3
+[    2.530271] DPAA_FQ_SETUP: fq #15 type=3
+[    2.534191] DPAA_FQ_SETUP: fq #16 type=3
+[    2.538110] DPAA_FQ_SETUP: fq #17 type=3
+[    2.542031] DPAA_FQ_SETUP: fq #18 type=3
+[    2.545950] DPAA_FQ_SETUP: fq #19 type=8
+[    2.549873] DPAA_FQ_SETUP: fq #20 type=8
+[    2.553797] DPAA_FQ_SETUP: fq #21 type=8
+[    2.557722] DPAA_FQ_SETUP: fq #22 type=8
+[    2.561643] DPAA_FQ_SETUP: fq #23 type=8
+[    2.565563] DPAA_FQ_SETUP: fq #24 type=8
+[    2.569485] DPAA_FQ_SETUP: fq #25 type=8
+[    2.573405] DPAA_FQ_SETUP: fq #26 type=8
+[    2.577326] DPAA_FQ_SETUP: fq #27 type=8
+[    2.581248] DPAA_FQ_SETUP: fq #28 type=8
+[    2.585168] DPAA_FQ_SETUP: fq #29 type=8
+[    2.589090] DPAA_FQ_SETUP: fq #30 type=8
+[    2.593010] DPAA_FQ_SETUP: fq #31 type=8
+[    2.596930] DPAA_FQ_SETUP: fq #32 type=8
+[    2.600852] DPAA_FQ_SETUP: fq #33 type=8
+[    2.604772] DPAA_FQ_SETUP: fq #34 type=8
+[    2.608692] DPAA_FQ_SETUP: fq #35 type=6
+[    2.612614] DPAA_FQ_SETUP: fq #36 type=6
+[    2.616534] DPAA_FQ_SETUP: fq #37 type=6
+[    2.620456] DPAA_FQ_SETUP: fq #38 type=6
+[    2.624377] DPAA_FQ_SETUP: fq #39 type=7
+[    2.628299] DPAA_FQ_SETUP: fq #40 type=5
+[    2.632220] DPAA_FQ_SETUP: fq #41 type=4
+[    2.636141] DPAA_FQ_SETUP: fq #42 type=4
+[    2.640061] DPAA_FQ_SETUP: fq #43 type=4
+[    2.643982] DPAA_FQ_SETUP: fq #44 type=4
+[    2.647903] DPAA_FQ_SETUP: main loop done, 44 FQs, egress_cnt=4/4
+[    2.653997] DPAA_PROBE: fq_setup done
+[    2.657660] DPAA_PROBE: cgr_init done
+[    2.661375] DPAA_PROBE: fqs_init done
+[    2.666880] fsl_dpa: fsl_dpa: Probed interface eth3
+[    2.671918] *********dpa_set_buffers_layout(677) internal buffer offset 0
+[    2.678760] dpaa_eth_priv_probe::bpid 32, count 640 
+[    2.678769] adj count 640
+[    2.686347] DPAA_PROBE: bp_create done
+[    2.690092] DPAA_PROBE: get_channel=1025
+[    2.694012] DPAA_PROBE: add_channel done
+[    2.697933] DPAA_FQ_SETUP: enter
+[    2.701159] fsl_dpa soc:fsl,dpaa:ethernet@5: No Qman software (affine) channels found
+[    2.708993] DPAA_FQ_SETUP: fq #1 type=2
+[    2.712827] DPAA_FQ_SETUP: fq #2 type=1
+[    2.716662] DPAA_FQ_SETUP: fq #3 type=3
+[    2.720496] DPAA_FQ_SETUP: fq #4 type=3
+[    2.724330] DPAA_FQ_SETUP: fq #5 type=3
+[    2.728164] DPAA_FQ_SETUP: fq #6 type=3
+[    2.731998] DPAA_FQ_SETUP: fq #7 type=3
+[    2.735832] DPAA_FQ_SETUP: fq #8 type=3
+[    2.739666] DPAA_FQ_SETUP: fq #9 type=3
+[    2.743500] DPAA_FQ_SETUP: fq #10 type=3
+[    2.747423] DPAA_FQ_SETUP: fq #11 type=3
+[    2.751346] DPAA_FQ_SETUP: fq #12 type=3
+[    2.755266] DPAA_FQ_SETUP: fq #13 type=3
+[    2.759188] DPAA_FQ_SETUP: fq #14 type=3
+[    2.763108] DPAA_FQ_SETUP: fq #15 type=3
+[    2.767030] DPAA_FQ_SETUP: fq #16 type=3
+[    2.770951] DPAA_FQ_SETUP: fq #17 type=3
+[    2.774872] DPAA_FQ_SETUP: fq #18 type=3
+[    2.778793] DPAA_FQ_SETUP: fq #19 type=8
+[    2.782714] DPAA_FQ_SETUP: fq #20 type=8
+[    2.786637] DPAA_FQ_SETUP: fq #21 type=8
+[    2.790562] DPAA_FQ_SETUP: fq #22 type=8
+[    2.794483] DPAA_FQ_SETUP: fq #23 type=8
+[    2.798404] DPAA_FQ_SETUP: fq #24 type=8
+[    2.802325] DPAA_FQ_SETUP: fq #25 type=8
+[    2.806245] DPAA_FQ_SETUP: fq #26 type=8
+[    2.810165] DPAA_FQ_SETUP: fq #27 type=8
+[    2.814087] DPAA_FQ_SETUP: fq #28 type=8
+[    2.818009] DPAA_FQ_SETUP: fq #29 type=8
+[    2.821929] DPAA_FQ_SETUP: fq #30 type=8
+[    2.825849] DPAA_FQ_SETUP: fq #31 type=8
+[    2.829771] DPAA_FQ_SETUP: fq #32 type=8
+[    2.833691] DPAA_FQ_SETUP: fq #33 type=8
+[    2.837612] DPAA_FQ_SETUP: fq #34 type=8
+[    2.841533] DPAA_FQ_SETUP: fq #35 type=6
+[    2.845453] DPAA_FQ_SETUP: fq #36 type=6
+[    2.849374] DPAA_FQ_SETUP: fq #37 type=6
+[    2.853294] DPAA_FQ_SETUP: fq #38 type=6
+[    2.857214] DPAA_FQ_SETUP: fq #39 type=7
+[    2.861134] DPAA_FQ_SETUP: fq #40 type=5
+[    2.865055] DPAA_FQ_SETUP: fq #41 type=4
+[    2.868975] DPAA_FQ_SETUP: fq #42 type=4
+[    2.872895] DPAA_FQ_SETUP: fq #43 type=4
+[    2.876819] DPAA_FQ_SETUP: fq #44 type=4
+[    2.880741] DPAA_FQ_SETUP: main loop done, 44 FQs, egress_cnt=4/4
+[    2.886835] DPAA_PROBE: fq_setup done
+[    2.890498] DPAA_PROBE: cgr_init done
+[    2.894218] DPAA_PROBE: fqs_init done
+[    2.899717] fsl_dpa: fsl_dpa: Probed interface eth4
+[    2.904642] fsl_advanced: FSL DPAA Advanced drivers:
+[    2.909614] fsl_proxy: FSL DPAA Proxy initialization driver
+[    2.915335] fsl_oh: FSL FMan Offline Parsing port driver
+[    2.920991] VFIO - User Level meta-driver version: 0.3
+[    2.927359] xhci-hcd xhci-hcd.0.auto: xHCI Host Controller
+[    2.932857] xhci-hcd xhci-hcd.0.auto: new USB bus registered, assigned bus number 1
+[    2.940605] xhci-hcd xhci-hcd.0.auto: hcc params 0x0220f66d hci version 0x100 quirks 0x0000008002000010
+[    2.950029] xhci-hcd xhci-hcd.0.auto: irq 60, io mem 0x02f00000
+[    2.956033] xhci-hcd xhci-hcd.0.auto: xHCI Host Controller
+[    2.961526] xhci-hcd xhci-hcd.0.auto: new USB bus registered, assigned bus number 2
+[    2.969191] xhci-hcd xhci-hcd.0.auto: Host supports USB 3.0 SuperSpeed
+[    2.975872] usb usb1: New USB device found, idVendor=1d6b, idProduct=0002, bcdDevice= 6.06
+[    2.984150] usb usb1: New USB device strings: Mfr=3, Product=2, SerialNumber=1
+[    2.991378] usb usb1: Product: xHCI Host Controller
+[    2.996258] usb usb1: Manufacturer: Linux 6.6.133-vyos xhci-hcd
+[    3.002179] usb usb1: SerialNumber: xhci-hcd.0.auto
+[    3.007310] hub 1-0:1.0: USB hub found
+[    3.011086] hub 1-0:1.0: 1 port detected
+[    3.015241] usb usb2: We don't know the algorithms for LPM for this host, disabling LPM.
+[    3.023424] usb usb2: New USB device found, idVendor=1d6b, idProduct=0003, bcdDevice= 6.06
+[    3.031699] usb usb2: New USB device strings: Mfr=3, Product=2, SerialNumber=1
+[    3.038926] usb usb2: Product: xHCI Host Controller
+[    3.043806] usb usb2: Manufacturer: Linux 6.6.133-vyos xhci-hcd
+[    3.049727] usb usb2: SerialNumber: xhci-hcd.0.auto
+[    3.054834] hub 2-0:1.0: USB hub found
+[    3.058605] hub 2-0:1.0: 1 port detected
+[    3.063060] pca954x 0-0070: supply vdd not found, using dummy regulator
+[    3.070451] i2c i2c-0: Added multiplexed i2c bus 4
+[    3.075362] i2c i2c-0: Added multiplexed i2c bus 5
+[    3.080252] i2c i2c-0: Added multiplexed i2c bus 6
+[    3.085155] i2c i2c-0: Added multiplexed i2c bus 7
+[    3.089951] pca954x 0-0070: registered 4 multiplexed busses for I2C switch pca9545
+[    3.097581] pca954x 1-0070: supply vdd not found, using dummy regulator
+[    3.104912] i2c i2c-1: Added multiplexed i2c bus 8
+[    3.109771] i2c i2c-1: Added multiplexed i2c bus 9
+[    3.114606] i2c i2c-1: Added multiplexed i2c bus 10
+[    3.119535] i2c i2c-1: Added multiplexed i2c bus 11
+[    3.124418] pca954x 1-0070: registered 4 multiplexed busses for I2C switch pca9545
+[    3.132046] pca954x 2-0070: supply vdd not found, using dummy regulator
+[    3.139516] i2c i2c-2: Added multiplexed i2c bus 12
+[    3.144623] i2c i2c-2: Added multiplexed i2c bus 13
+[    3.167902] rtc-pcf2127-i2c 14-0053: registered as rtc0
+[    3.175446] rtc-pcf2127-i2c 14-0053: setting system clock to 2026-04-18T02:52:24 UTC (1776480744)
+[    3.184358] i2c i2c-2: Added multiplexed i2c bus 14
+[    3.189363] i2c i2c-2: Added multiplexed i2c bus 15
+[    3.194257] pca954x 2-0070: registered 4 multiplexed busses for I2C switch pca9545
+[    3.207778] ina2xx 12-0040: supply vs not found, using dummy regulator
+[    3.216919] ina2xx 12-0040: power monitor ina234 (Rshunt = 1000 uOhm)
+[    3.223431] ina2xx 12-0041: supply vs not found, using dummy regulator
+[    3.231999] ina2xx 12-0041: power monitor ina234 (Rshunt = 1000 uOhm)
+[    3.238511] ina2xx 12-0042: supply vs not found, using dummy regulator
+[    3.247090] ina2xx 12-0042: power monitor ina234 (Rshunt = 1000 uOhm)
+[    3.253600] ina2xx 12-0043: supply vs not found, using dummy regulator
+[    3.262164] ina2xx 12-0043: power monitor ina234 (Rshunt = 5000 uOhm)
+[    3.263777] usb 1-1: new high-speed USB device number 2 using xhci-hcd
+[    3.268662] ina2xx 13-0040: supply vs not found, using dummy regulator
+[    3.275160] xhci-hcd xhci-hcd.0.auto: Setup ERROR: setup context command for slot 1.
+[    3.284284] ina2xx 13-0040: power monitor ina234 (Rshunt = 5000 uOhm)
+[    3.289427] usb 1-1: hub failed to enable device, error -22
+[    3.301512] ina2xx 13-0041: supply vs not found, using dummy regulator
+[    3.310077] ina2xx 13-0041: power monitor ina234 (Rshunt = 5000 uOhm)
+[    3.316577] ina2xx 13-0042: supply vs not found, using dummy regulator
+[    3.325138] ina2xx 13-0042: power monitor ina234 (Rshunt = 5000 uOhm)
+[    3.331638] ina2xx 13-0043: supply vs not found, using dummy regulator
+[    3.340208] ina2xx 13-0043: power monitor ina234 (Rshunt = 1000 uOhm)
+[    3.347852] device-mapper: uevent: version 1.0.3
+[    3.352589] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-devel@redhat.com
+[    3.361574] qoriq-cpufreq qoriq-cpufreq: Freescale QorIQ CPU frequency scaling driver
+[    3.370198] ledtrig-cpu: registered to indicate activity on CPUs
+[    3.402776] usb 1-1: new high-speed USB device number 3 using xhci-hcd
+[    3.411486] SMCCC: SOC_ID: ARCH_SOC_ID not implemented, skipping ....
+[    3.418171] caam 1700000.crypto: device ID = 0x0a11030100000000 (Era 8)
+[    3.424796] caam 1700000.crypto: job rings = 3, qi = 1
+[    3.431597] caam algorithms registered in /proc/crypto
+[    3.436853] caam 1700000.crypto: caam pkc algorithms registered in /proc/crypto
+[    3.444172] caam 1700000.crypto: registering rng-caam
+[    3.449316] caam 1700000.crypto: rng crypto API alg registered prng-caam
+[    3.457365] Freescale USDPAA process driver
+[    3.461554] Freescale USDPAA process driver
+[    3.465811] Freescale USDPAA process IRQ driver
+[    3.470981] hw perfevents: enabled with armv8_cortex_a72 PMU driver, 7 counters available
+[    3.476003] random: crng init done
+[    3.482920] drop_monitor: Initializing network drop monitor service
+[    3.490143] NET: Registered PF_INET6 protocol family
+[    3.515272] Segment Routing with IPv6
+[    3.518973] In-situ OAM (IOAM) with IPv6
+[    3.522944] mip6: Mobile IPv6
+[    3.525947] NET: Registered PF_KEY protocol family
+[    3.530740] Initializing NETLINK_KEY socket
+[    3.535003] Key type dns_resolver registered
+[    3.537430] usb 1-1: New USB device found, idVendor=0781, idProduct=5581, bcdDevice= 1.00
+[    3.539291] mpls_gso: MPLS GSO support
+[    3.543134] registered taskstats version 1
+[    3.547480] usb 1-1: New USB device strings: Mfr=1, Product=2, SerialNumber=3
+[    3.551303] Loading compiled-in X.509 certificates
+[    3.555317] usb 1-1: Product: Ultra
+[    3.570738] usb 1-1: Manufacturer: SanDisk
+[    3.574317] Loaded X.509 cert 'VyOS Networks build time autogenerated Kernel key: f6a9ecbd0724605e5d28fdad899767d1de1bf42c'
+[    3.574836] usb 1-1: SerialNumber: 4C531001600621100051
+[    3.603102] Loaded X.509 cert 'VyOS LS1046A Secure Boot CA: ed9ff86ac8d3dc1144144291a885ffd7bcd198db'
+[    3.618314] sfp sfp-xfi0: Host maximum power 3.0W
+[    3.623484] sfp sfp-xfi1: Host maximum power 3.0W
+[    3.628535] ASK fp_netfilter: hooks registered + conntrack force-enabled
+[    3.635306] clk: Disabling unused clocks
+[    3.640913] Freeing unused kernel memory: 5056K
+[    3.683471] Checked W+X mappings: passed, no W+X pages found
+[    3.689156] Run /init as init process
 Loading, please wait...
 Starting systemd-udevd version 252.39-1~deb12u1
-[    3.951663] sfp sfp-xfi0: module OEM              SFP-10G-T        rev 02   sn CSY101OB0963     dc 241012  
-[    4.015998] sfp sfp-xfi1: module OEM              SFP-H10GB-CU1M   rev R    sn CSC240509160290  dc 240527  
-[    4.032075] hwmon hwmon12: temp1_input not attached to any thermal zone
-[    4.082413] sdhci: Secure Digital Host Controller Interface driver
-[    4.083975] fsl_dpa soc:fsl,dpaa:ethernet@5 e6: renamed from eth4
-[    4.088616] sdhci: Copyright(c) Pierre Ossman
-[    4.105789] sdhci-pltfm: SDHCI platform and OF driver helper
-[    4.106727] fsl_dpa soc:fsl,dpaa:ethernet@1 e4: renamed from eth2
-[    4.123713] fsl_dpa soc:fsl,dpaa:ethernet@4 e5: renamed from eth3
-[    4.136191] fsl_dpa soc:fsl,dpaa:ethernet@9 e3: renamed from eth1
-[    4.151154] fsl_dpa soc:fsl,dpaa:ethernet@8 e2: renamed from eth0
-[    4.166999] mmc0: SDHCI controller on 1560000.esdhc [1560000.esdhc] using ADMA 64-bit
-[    4.183212] SCSI subsystem initialized
-[    4.191715] usb-storage 1-1:1.0: USB Mass Storage device detected
-[    4.198082] scsi host0: usb-storage 1-1:1.0
-[    4.202487] usbcore: registered new interface driver usb-storage
-Begin: Loading essential drivers ... [    4.251821] mmc0: new HS200 MMC card at address 0001
-[    4.261923] mmcblk0: mmc0:0001 0IM20E 29.6 GiB
-[    4.269657]  mmcblk0: p1 p2 p3
-[    4.273227] mmcblk0boot0: mmc0:0001 0IM20E 31.5 MiB
-[    4.279073] mmcblk0boot1: mmc0:0001 0IM20E 31.5 MiB
+[    3.952633] sfp sfp-xfi0: module OEM              SFP-10G-T        rev 02   sn CSY101OB0963     dc 241012  
+[    3.977444] sdhci: Secure Digital Host Controller Interface driver
+[    3.983647] sdhci: Copyright(c) Pierre Ossman
+[    4.021965] sdhci-pltfm: SDHCI platform and OF driver helper
+[    4.044603] sfp sfp-xfi1: module OEM              SFP-H10GB-CU1M   rev R    sn CSC240509160290  dc 240527  
+[    4.055036] fsl_dpa soc:fsl,dpaa:ethernet@9 e3: renamed from eth1
+[    4.062206] hwmon hwmon12: temp1_input not attached to any thermal zone
+[    4.070446] fsl_dpa soc:fsl,dpaa:ethernet@8 e2: renamed from eth0
+[    4.080780] mmc0: SDHCI controller on 1560000.esdhc [1560000.esdhc] using ADMA 64-bit
+[    4.090384] fsl_dpa soc:fsl,dpaa:ethernet@4 e5: renamed from eth3
+[    4.097244] SCSI subsystem initialized
+[    4.103062] fsl_dpa soc:fsl,dpaa:ethernet@5 e6: renamed from eth4
+[    4.110474] usb-storage 1-1:1.0: USB Mass Storage device detected
+[    4.116823] scsi host0: usb-storage 1-1:1.0
+[    4.119121] fsl_dpa soc:fsl,dpaa:ethernet@1 e4: renamed from eth2
+[    4.121242] usbcore: registered new interface driver usb-storage
+Begin: Loading essential drivers ... [    4.185722] mmc0: new HS200 MMC card at address 0001
+[    4.195825] mmcblk0: mmc0:0001 0IM20E 29.6 GiB
+[    4.203524]  mmcblk0: p1 p2 p3
+[    4.207142] mmcblk0boot0: mmc0:0001 0IM20E 31.5 MiB
+[    4.212868] mmcblk0boot1: mmc0:0001 0IM20E 31.5 MiB
+[    4.218845] mmcblk0rpmb: mmc0:0001 0IM20E 4.00 MiB, chardev (243:0)
 done.
-[    4.284915] mmcblk0rpmb: mmc0:0001 0IM20E 4.00 MiB, chardev (243:0)
-[    5.231273] scsi 0:0:0:0: Direct-Access     SanDisk  Ultra            1.00 PQ: 0 ANSI: 6
-[    5.245767] sd 0:0:0:0: [sda] 121307136 512-byte logical blocks: (62.1 GB/57.8 GiB)
-[    5.254455] sd 0:0:0:0: [sda] Write Protect is off
-[    5.259591] sd 0:0:0:0: [sda] Write cache: disabled, read cache: enabled, doesn't support DPO or FUA
-[    5.272718]  sda: sda1 sda2
-[    5.275718] sd 0:0:0:0: [sda] Attached SCSI removable disk
+[    5.166691] scsi 0:0:0:0: Direct-Access     SanDisk  Ultra            1.00 PQ: 0 ANSI: 6
+[    5.180468] sd 0:0:0:0: [sda] 121307136 512-byte logical blocks: (62.1 GB/57.8 GiB)
+[    5.189168] sd 0:0:0:0: [sda] Write Protect is off
+[    5.194323] sd 0:0:0:0: [sda] Write cache: disabled, read cache: enabled, doesn't support DPO or FUA
+[    5.208006]  sda: sda1 sda2
+[    5.211027] sd 0:0:0:0: [sda] Attached SCSI removable disk
 Begin: Running /scripts/init-premount ... done.
-Begin: Mounting root file system ... [   14.490050] loop: module loaded
-[   14.521893] loop0: detected capacity change from 0 to 1054440
+Begin: Mounting root file system ... [   44.592842] usb 1-1: reset high-speed USB device number 3 using xhci-hcd
+[   70.573838] xhci-hcd xhci-hcd.0.auto: Timeout while waiting for configure endpoint command
+[   70.582130] usb 1-1: Busted HC?  Not enough HCD resources for old configuration.
+[   70.589597] sd 0:0:0:0: [sda] tag#0 FAILED Result: hostbyte=DID_TIME_OUT driverbyte=DRIVER_OK cmd_age=56s
+[   70.589601] usb 1-1: USB disconnect, device number 3
+[   70.599179] sd 0:0:0:0: [sda] tag#0 CDB: Read(10) 28 00 00 00 00 18 00 00 08 00
+[   70.611454] I/O error, dev sda, sector 24 op 0x0:(READ) flags 0x80700 phys_seg 1 prio class 2
+[   70.620096] sd 0:0:0:0: [sda] tag#0 FAILED Result: hostbyte=DID_NO_CONNECT driverbyte=DRIVER_OK cmd_age=0s
+[   70.629771] sd 0:0:0:0: [sda] tag#0 CDB: Read(10) 28 00 00 00 00 18 00 00 08 00
+[   70.637088] I/O error, dev sda, sector 24 op 0x0:(READ) flags 0x0 phys_seg 1 prio class 2
+[   70.645275] Buffer I/O error on dev sda1, logical block 3, async page read
+[   70.652224] sda: detected capacity change from 121307136 to 0
+[   70.801790] usb 1-1: new high-speed USB device number 4 using xhci-hcd
+[   70.938450] usb 1-1: New USB device found, idVendor=0781, idProduct=5581, bcdDevice= 1.00
+[   70.946658] usb 1-1: New USB device strings: Mfr=1, Product=2, SerialNumber=3
+[   70.951925] EXT4-fs (mmcblk0p3): mounted filesystem 6d19adb4-25da-4ded-8a0e-95c33389fff7 ro with ordered data mode. Quota mode: disabled.
+[   70.953803] usb 1-1: Product: Ultra
+[   70.953807] usb 1-1: Manufacturer: SanDisk
+[   70.973739] usb 1-1: SerialNumber: 4C531001600621100051
+[   70.979627] EXT4-fs (mmcblk0p3): unmounting filesystem 6d19adb4-25da-4ded-8a0e-95c33389fff7.
+[   70.979776] usb-storage 1-1:1.0: USB Mass Storage device detected
+[   70.994447] scsi host0: usb-storage 1-1:1.0
+mount: mounting /dev/sda1 on /live/medium failed: No such device or address
+[   72.052449] scsi 0:0:0:0: Direct-Access     SanDisk  Ultra            1.00 PQ: 0 ANSI: 6
+[   72.062841] sd 0:0:0:0: [sda] 121307136 512-byte logical blocks: (62.1 GB/57.8 GiB)
+[   72.071521] sd 0:0:0:0: [sda] Write Protect is off
+[   72.076667] sd 0:0:0:0: [sda] Write cache: disabled, read cache: enabled, doesn't support DPO or FUA
+[   72.089777]  sda: sda1 sda2
+[   72.092793] sd 0:0:0:0: [sda] Attached SCSI removable disk
+[   72.398088] loop: module loaded
+[   72.424273] loop0: detected capacity change from 0 to 1054448
 done.
 Begin: Running /scripts/init-bottom ... done.
-[   16.237796] systemd[1]: Inserted module 'autofs4'
-[   16.384608] systemd[1]: systemd 252.39-1~deb12u1 running in system mode (+PAM +AUDIT +SELINUX +APPARMOR +IMA +SMACK +SECCOMP +GCRYPT -GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 -IDN +IPTC +KMOD +LIBCRYPTSETUP +LIBFDISK +PCRE2 -PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD -BPF_FRAMEWORK -XKBCOMMON +UTMP +SYSVINIT default-hierarchy=unified)
-[   16.417334] systemd[1]: Detected architecture arm64.
+[   74.136564] systemd[1]: Inserted module 'autofs4'
+[  104.497854] usb 1-1: reset high-speed USB device number 4 using xhci-hcd
+[  104.630529] sd 0:0:0:0: [sda] tag#0 FAILED Result: hostbyte=DID_TIME_OUT driverbyte=DRIVER_OK cmd_age=30s
+[  104.640113] sd 0:0:0:0: [sda] tag#0 CDB: Read(10) 28 00 00 03 c2 08 00 00 08 00
+[  104.647428] I/O error, dev sda, sector 246280 op 0x0:(READ) flags 0x80700 phys_seg 1 prio class 2
+[  104.656706] xhci-hcd xhci-hcd.0.auto: WARN Event TRB for slot 1 ep 3 with no TDs queued?
+[  135.216851] usb 1-1: reset high-speed USB device number 4 using xhci-hcd
+[  165.936832] usb 1-1: reset high-speed USB device number 4 using xhci-hcd
+[  196.656851] usb 1-1: reset high-speed USB device number 4 using xhci-hcd
+[  227.371834] usb 1-1: reset high-speed USB device number 4 using xhci-hcd
+[  244.255831] usb 1-1: reset high-speed USB device number 4 using xhci-hcd
+[  244.501831] usb 1-1: reset high-speed USB device number 4 using xhci-hcd
+[  255.007854] usb 1-1: reset high-speed USB device number 4 using xhci-hcd
+[  255.140472] sd 0:0:0:0: Device offlined - not ready after error recovery
+[  255.147197] sd 0:0:0:0: [sda] tag#0 FAILED Result: hostbyte=DID_ABORT driverbyte=DRIVER_OK cmd_age=119s
+[  255.156602] sd 0:0:0:0: [sda] tag#0 CDB: Read(10) 28 00 00 03 c2 08 00 00 08 00
+[  255.163916] I/O error, dev sda, sector 246280 op 0x0:(READ) flags 0x0 phys_seg 1 prio class 2
+[  255.172476] sd 0:0:0:0: rejecting I/O to offline device
+[  255.172475] I/O error, dev loop0, sector 214644 op 0x0:(READ) flags 0x800 phys_seg 17 prio class 2
+[  255.186689] SQUASHFS error: Failed to read block 0x68ce87d: -5
+[  255.192531] SQUASHFS error: Unable to read fragment cache entry [68ce87d]
+[  255.199352] SQUASHFS error: Unable to read fragment cache entry [68ce87d]
+[  255.206145] SQUASHFS error: Unable to read page, block 68ce87d, size f8e4
+[  255.234507] I/O error, dev sda, sector 120760 op 0x0:(READ) flags 0x80700 phys_seg 1 prio class 2
+[  255.243420] I/O error, dev sda, sector 120760 op 0x0:(READ) flags 0x0 phys_seg 1 prio class 2
+[  255.251971] I/O error, dev loop0, sector 89120 op 0x0:(READ) flags 0x800 phys_seg 12 prio class 2
+[  255.260862] SQUASHFS error: Failed to read block 0x2b840d1: -5
+[  255.266708] SQUASHFS error: Unable to read fragment cache entry [2b840d1]
+[  255.273564] SQUASHFS error: Unable to read fragment cache entry [2b840d1]
+[  255.280355] SQUASHFS error: Unable to read page, block 2b840d1, size bb5c
+[  255.287174] systemd[1]: /etc/systemd/system.conf:0: Error while reading configuration file: Input/output error
+[  255.297602] systemd[1]: systemd 252.39-1~deb12u1 running in system mode (+PAM +AUDIT +SELINUX +APPARMOR +IMA +SMACK +SECCOMP +GCRYPT -GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 -IDN +IPTC +KMOD +LIBCRYPTSETUP +LIBFDISK +PCRE2 -PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD -BPF_FRAMEWORK -XKBCOMMON +UTMP +SYSVINIT default-hierarchy=unified)
+[  255.330328] systemd[1]: Detected architecture arm64.
 
-Welcome to VyOS 2026.04.18-0037-rolling (current)!
+Welcome to VyOS 2026.04.18-0227-rolling (current)!
 
-[   16.447020] systemd[1]: Hostname set to <localhost.localdomain>.
-[   16.470239] systemd[1]: Initializing machine ID from random generator.
-[   16.509634] systemd[1]: memfd_create() called without MFD_EXEC or MFD_NOEXEC_SEAL set
-[   17.727517] systemd[1]: Queued start job for default target Multi-User System.
-[   17.746408] systemd[1]: Created slice Slice /system/getty.
-[  OK  ] Created slice Slice /system/getty.
-[   17.760831] systemd[1]: Created slice Slice /system/modprobe.
-[  OK  ] Created slice Slice /system/modprobe.
-[   17.775821] systemd[1]: Created slice Slice /system/serial-getty.
-[  OK  ] Created slice Slice /system/serial-getty.
-[   17.790662] systemd[1]: Created slice User and Session Slice.
-[  OK  ] Created slice User and Session Slice.
-[   17.805151] systemd[1]: Started Dispatch Password Requests to Console Directory Watch.
-[  OK  ] Started Dispatch Password …ts to Console Directory Watch.
-[   17.823127] systemd[1]: Started Forward Password Requests to Wall Directory Watch.
-[  OK  ] Started Forward Password R…uests to Wall Directory Watch.
-[   17.840333] systemd[1]: Set up automount Arbitrary Executable File Formats File System Automount Point.
-[  OK  ] Set up automount Arbitrary…s File System Automount Point.
-[   17.859058] systemd[1]: Reached target Local Encrypted Volumes.
-[  OK  ] Reached target Local Encrypted Volumes.
-[   17.873055] systemd[1]: Reached target Local Integrity Protected Volumes.
-[  OK  ] Reached target Local Integrity Protected Volumes.
-[   17.889063] systemd[1]: Reached target Network is Online.
-[  OK  ] Reached target Network is Online.
-[   17.903038] systemd[1]: Reached target Path Units.
-[  OK  ] Reached target Path Units.
-[   17.915048] systemd[1]: Reached target Remote File Systems.
-[  OK  ] Reached target Remote File Systems.
-[   17.929042] systemd[1]: Reached target Slice Units.
-[  OK  ] Reached target Slice Units.
-[   17.941051] systemd[1]: Reached target TLS tunnels for network services - per-config-file target.
-[  OK  ] Reached target TLS tunnels…ices - per-config-file target.
-[   17.959048] systemd[1]: Reached target Swaps.
-[  OK  ] Reached target Swaps.
-[   17.970053] systemd[1]: Reached target Local Verity Protected Volumes.
-[  OK  ] Reached target Local Verity Protected Volumes.
-[   17.986175] systemd[1]: Listening on initctl Compatibility Named Pipe.
-[  OK  ] Listening on initctl Compatibility Named Pipe.
-[   18.003441] systemd[1]: Listening on Journal Socket (/dev/log).
-[  OK  ] Listening on Journal Socket (/dev/log).
-[   18.017286] systemd[1]: Listening on Journal Socket.
-[  OK  ] Listening on Journal Socket.
-[   18.029320] systemd[1]: Listening on udev Control Socket.
-[  OK  ] Listening on udev Control Socket.
-[   18.043220] systemd[1]: Listening on udev Kernel Socket.
-[  OK  ] Listening on udev Kernel Socket.
-[   18.067159] systemd[1]: Mounting Huge Pages File System...
-         Mounting Huge Pages File System...
-[   18.081275] systemd[1]: Mounting POSIX Message Queue File System...
-         Mounting POSIX Message Queue File System...
-[   18.098368] systemd[1]: Mounting Kernel Debug File System...
-         Mounting Kernel Debug File System...
-[   18.113394] systemd[1]: Mounting Kernel Trace File System...
-         Mounting Kernel Trace File System...
-[   18.138378] systemd[1]: Starting Create List of Static Device Nodes...
-         Starting Create List of Static Device Nodes...
-[   18.155434] systemd[1]: Starting Load Kernel Module configfs...
-         Starting Load Kernel Module configfs...
-[   18.183394] systemd[1]: Starting Load Kernel Module dm_mod...
-         Starting Load Kernel Module dm_mod...
-[   18.198387] systemd[1]: Starting Load Kernel Module drm...
-         Starting Load Kernel Module drm...
-[   18.213442] systemd[1]: Starting Load Kernel Module efi_pstore...
-         Starting Load Kernel Module efi_pstore...
-[   18.240382] systemd[1]: Starting Load Kernel Module fuse...
-         Starting Load Kernel Module fuse...
-[   18.256399] systemd[1]: Starting Load Kernel Module loop...
-         Starting Load Kernel Module loop...
-[   18.270329] fuse: init (API version 7.39)
-[   18.284371] systemd[1]: Starting Journal Service...
-         Starting Journal Service...
-[   18.298720] systemd[1]: Starting Remount Root and Kernel File Systems...
-         Starting Remount Root and Kernel File Systems...
-[   18.325607] systemd[1]: Starting Coldplug All udev Devices...
-         Starting Coldplug All udev Devices...
-[   18.342235] systemd[1]: Mounted Huge Pages File System.
-[  OK  ] Mounted Huge Pages File System.
-[   18.356357] systemd[1]: Mounted POSIX Message Queue File System.
-[  OK  ] Mounted POSIX Message Queue File System.
-[   18.372334] systemd[1]: Mounted Kernel Debug File System.
-[  OK  ] Mounted Kernel Debug File System.
-[   18.386333] systemd[1]: Mounted Kernel Trace File System.
-[  OK  ] Mounted Kernel Trace File System.
-[   18.401614] systemd[1]: Finished Create List of Static Device Nodes.
-[  OK  ] Finished Create List of Static Device Nodes.
-[   18.417843] systemd[1]: modprobe@configfs.service: Deactivated successfully.
-[   18.425357] systemd[1]: Finished Load Kernel Module configfs.
-[  OK  ] Finished Load Kernel Module configfs.
-[   18.440370] systemd[1]: Started Journal Service.
-[  OK  ] Started Journal Service.
-[  OK  ] Finished Load Kernel Module dm_mod.
-[  OK  ] Finished Load Kernel Module drm.
-[  OK  ] Finished Load Kernel Module efi_pstore.
-[  OK  ] Finished Load Kernel Module fuse.
-[  OK  ] Finished Load Kernel Module loop.
-[  OK  ] Finished Remount Root and Kernel File Systems.
-         Mounting FUSE Control File System...
-         Mounting Kernel Configuration File System...
-         Starting Flush Journal to Persistent Storage...
-         Starting Load/Save Random Seed...
-[   18.584160] systemd-journald[398]: Received client request to flush runtime journal.
-         Starting Create System Users...
-[  OK  ] Started VyOS commit daemon.
-[  OK  ] Started VyOS configuration daemon.
-[  OK  ] Started VyOS DNS configuration keeper.
-[  OK  ] Finished Coldplug All udev Devices.
-[  OK  ] Mounted FUSE Control File System.
-[  OK  ] Mounted Kernel Configuration File System.
-[  OK  ] Finished Flush Journal to Persistent Storage.
-[  OK  ] Finished Load/Save Random Seed.
-[  OK  ] Finished Create System Users.
-         Starting Create Static Device Nodes in /dev...
-[  OK  ] Finished Create Static Device Nodes in /dev.
-[  OK  ] Reached target Preparation for Local File Systems.
-         Mounting /tmp...
-         Mounting /var/tmp...
-         Starting Rule-based Manage…for Device Events and Files...
-[  OK  ] Mounted /tmp.
-[  OK  ] Mounted /var/tmp.
-[  OK  ] Reached target Local File Systems.
-         Starting Set Up Additional Binary Formats...
-         Starting Create System Files and Directories...
-         Mounting Arbitrary Executable File Formats File System...
-[  OK  ] Mounted Arbitrary Executable File Formats File System.
-[  OK  ] Finished Set Up Additional Binary Formats.
-[  OK  ] Finished Create System Files and Directories.
-         Starting Security Auditing Service...
-[  OK     19.057910] ipsec_flow_init 
-0m] Started Entropy Daemon based on the HAVEGE algorithm.
-         Starting live-config conta…t process (late userspace)....
-[  OK  ] Started Rule-based Manager for Device Events and Files.
-         Starting Load ASK fast-pat…les (cdx, auto_bridge, fci)...
-[   19.367363] cdx: loading out-of-tree module taints kernel.
-[   19.377012] cdx_module_init
-[   19.380683] qm_init:405
-[   19.383176] cdx_ipsec_init
-[   19.385926] cdx_ipsec_init job ring device= 00000000b44be15b
-[   19.395186] start_dpa_app::calling dpa_app argv 00000000077e2e07
-[   19.845434] tmp401 5-004c: Detected TI TMP431 chip
-[   19.856924] tmp401 6-004c: Detected TI TMP431 chip
-[   20.127219] sd 0:0:0:0: Attached scsi generic sg0 type 0
-[   20.494666] cdx_module_init::start_dpa_app failed rc 11 (continuing anyway)
-[   20.501648] get_phys_port_poolinfo_bysize::failed
-[   20.506359] cdx_create_fragment_bufpool::failed to locate eth bman pool
-[   20.512989] cdx_init_frag_module(3092) create_fragment_bufpool failed
-[   20.519436] cdx_module_init::cdx_init_frag_module failed (continuing anyway)
-[   20.526493] alloc_offline_port::no free of ports
-[   20.531115] ipsec_init_ohport: Error in allocating OH port Channel
-[   20.537308] cdx_module_init::dpa_ipsec start failed
-[   20.969357] bridge: filtering via arp/ip/ip6tables is no longer available by default. Update your scripts to load br_netfilter if you need this.
-[  OK  ] Started Security Auditing Service.
-         Starting Record System Boot/Shutdown in UTMP...
-[  OK  ] Finished Record System Boot/Shutdown in UTMP.
-[  OK  ] Finished Load ASK fast-pat…dules (cdx, auto_bridge, fci).
-         Starting Load Kernel Modules...
-[   21.515302] Bridge firewalling registered
-[  OK  ] Finished Load Kernel Modules.
-         Starting Apply Kernel Variables...
-[  OK  ] Finished Apply Kernel Variables.
-[  OK  ] Reached target System Initialization.
-[  OK  ] Started Periodic ext4 Onli…ata Check for All Filesystems.
-[  OK  ] Started Discard unused blocks once a week.
-[  OK  ] Started Daily rotation of log files.
-[  OK  ] Started Run system activit…ounting tool every 10 minutes.
-[  OK  ] Started Generate summary o…esterday's process accounting.
-[  OK  ] Started Daily Cleanup of Temporary Directories.
-[  OK  ] Reached target Timer Units.
-[  OK  ] Listening on D-Bus System Message Bus Socket.
-[  OK  ] Listening on Podman API Socket.
-[  OK  ] Listening on UUID daemon activation socket.
-[  OK  ] Reached target Socket Units.
-[  OK  ] Finished live-config conta…oot process (late userspace)..
-[  OK  ] Reached target Basic System.
-         Starting Deferred execution scheduler...
-         Starting Atop process accounting daemon...
-         Starting CMM Connection Ma…nt Module for ASK Fast Path...
-[  OK  ] Started Regular background program processing daemon.
-         Starting D-Bus System Message Bus...
-         Starting Remove Stale Onli…t4 Metadata Check Snapshots...
-         Starting fan speed regulator...
-         Starting FastNetMon - DoS/…Flow/Netflow/mirror support...
-         Starting LSB: network benchmark...
-         Starting Podman API Service...
-         Starting Deassert SFP+ TX_…for SDK kernel (no phylink)...
-         Starting Resets System Activity Logs...
-         Starting User Login Management...
-         Starting LSB: Start vmtouch daemon...
-         Starting Update GRUB loader configuration structure...
-         Starting Sync /boot/vyos.e…unning VyOS image (LS1046A)...
-[  OK  ] Started Deferred execution scheduler.
-[  OK  ] Finished Remove Stale Onli…ext4 Metadata Check Snapshots.
-[  OK  ] Started Podman API Service.
-[  OK  ] Finished Update GRUB loader configuration structure.
-[  OK  ] Started VyOS Router.
-         Starting ASK fast-path con…(remove VyOS notrack rules)...
-         Starting Apply fq qdisc on…rfaces (LS1046A BBR pacing)...
-         Starting Permit User Sessions...
-[  OK  ] Finished Permit User Sessions.
-[  OK  ] Started Getty on tty1.
-[  OK  ] Reached target Login Prompts.
-[  OK  ] Finished Apply fq qdisc on…terfaces (LS1046A BBR pacing).
-[   37.868579] vyos-router[1281]: Starting VyOS router.
-[  OK  ] Started D-Bus System Message Bus.
-[  OK  ] Started User Login Management.
-[  OK  ] Finished ASK fast-path con…x (remove VyOS notrack rules).
-[  OK  ] Started FastNetMon - DoS/D… sFlow/Netflow/mirror support.
-[  OK  ] Reached target Multi-User System.
-[  OK  ] Reached target VyOS target.
-         Starting Fan whistle notification on boot complete...
-         Starting Record Runlevel Change in UTMP...
-[  OK  ] Finished Record Runlevel Change in UTMP.
-         Stopping fan speed regulator...
-[  OK  ] Stopped fan speed regulator.
-[   40.653110] vyos-router[1281]: Waiting for NICs to settle down: settled in 0sec..
-[   40.666381] vyos-router[1281]: could not generate DUID ... failed!
-         Starting fan speed regulator...
-[  OK  ] Started fan speed regulator.
-[  OK  ] Finished Fan whistle notification on boot complete.
-[   54.748926] vyos-router[1281]: Mounting VyOS Config...done.
-[   61.058481] fsl_dpa soc:fsl,dpaa:ethernet@8 eth0: phy device not initialized
-[   62.814711] fsl_dpa soc:fsl,dpaa:ethernet@8 eth0: phy device not initialized
-[   62.857202] fsl_dpa soc:fsl,dpaa:ethernet@9 eth1: phy device not initialized
-[   62.899309] fsl_dpa soc:fsl,dpaa:ethernet@1 eth2: phy device not initialized
-[   62.941076] fsl_dpa soc:fsl,dpaa:ethernet@4 eth3: phy device not initialized
-[   62.982446] fsl_dpa soc:fsl,dpaa:ethernet@5 eth4: phy device not initialized
+[  255.359798] systemd[1]: Hostname set to <localhost.localdomain>.
+[  255.383035] systemd[1]: Initializing machine ID from random generator.
+[  255.436681] systemd[1]: memfd_create() called without MFD_EXEC or MFD_NOEXEC_SEAL set
+[  255.454208] I/O error, dev sda, sector 817496 op 0x0:(READ) flags 0x80700 phys_seg 1 prio class 2
+[  255.463162] I/O error, dev sda, sector 817496 op 0x0:(READ) flags 0x0 phys_seg 1 prio class 2
+[  255.471733] I/O error, dev sda, sector 825352 op 0x0:(READ) flags 0x80700 phys_seg 1 prio class 2
+[  255.480618] I/O error, dev loop0, sector 785860 op 0x0:(READ) flags 0x800 phys_seg 9 prio class 2
+[  255.480639] SQUASHFS error: Failed to read block 0x17fb8ba1: -5
+[  255.489522] I/O error, dev sda, sector 825352 op 0x0:(READ) flags 0x0 phys_seg 1 prio class 2
+[  255.495442] SQUASHFS error: Unable to read fragment cache entry [17fb8ba1]
+[  255.495443] SQUASHFS error: Unable to read fragment cache entry [17fb8ba1]
+[  255.495451] SQUASHFS error: Unable to read fragment cache entry [17fb8ba1]
+[  255.495507] SQUASHFS error: Unable to read fragment cache entry [17fb8ba1]
+[  255.495510] SQUASHFS error: Unable to read page, block 17fb8ba1, size 7ce4
+[  255.495516] SQUASHFS error: Unable to read fragment cache entry [17fb8ba1]
+[  255.495519] SQUASHFS error: Unable to read page, block 17fb8ba1, size 7ce4
+[  255.495600] (direxec)[530]: Failed to execute /usr/lib/systemd/system-generators/systemd-fstab-generator: Input/output error
+[  255.495601] (direxec)[529]: Failed to execute /usr/lib/systemd/system-generators/systemd-debug-generator: Input/output error
+[  255.496228] SQUASHFS error: Unable to read fragment cache entry [17fb8ba1]
+[  255.496233] SQUASHFS error: Unable to read fragment cache entry [17fb8ba1]
+[  255.496293] SQUASHFS error: Unable to read fragment cache entry [17fb8ba1]
+[  255.496296] SQUASHFS error: Unable to read page, block 17fb8ba1, size 7ce4
+[  255.496311] SQUASHFS error: Unable to read fragment cache entry [17fb8ba1]
+[  255.496313] SQUASHFS error: Unable to read page, block 17fb8ba1, size 7ce4
+[  255.496362] (direxec)[528]: Failed to execute /usr/lib/systemd/system-generators/systemd-cryptsetup-generator: Input/output error
+[  255.496377] (direxec)[526]: Failed to execute /usr/lib/systemd/system-generators/openvpn-generator: Input/output error
+[  255.504009] SQUASHFS error: Failed to read block 0x1838e9a1: -5
+[  255.504050] SQUASHFS error: Failed to read block 0x17fc0885: -5
+[  255.504060] SQUASHFS error: Unable to read fragment cache entry [17fc0885]
+[  255.504118] SQUASHFS error: Unable to read fragment cache entry [17fc0885]
+[  255.504121] SQUASHFS error: Unable to read page, block 17fc0885, size 382c
+[  255.504183] (direxec)[531]: Failed to execute /usr/lib/systemd/system-generators/systemd-getty-generator: Input/output error
+[  255.504549] SQUASHFS error: Unable to read fragment cache entry [17fc0885]
+[  255.504606] SQUASHFS error: Unable to read fragment cache entry [17fc0885]
+[  255.504608] SQUASHFS error: Unable to read page, block 17fc0885, size 382c
+[  255.504665] (direxec)[532]: Failed to execute /usr/lib/systemd/system-generators/systemd-gpt-auto-generator: Input/output error
+[  255.504782] SQUASHFS error: Unable to read fragment cache entry [17fc0885]
+[  255.504853] SQUASHFS error: Unable to read fragment cache entry [17fc0885]
+[  255.504856] SQUASHFS error: Unable to read page, block 17fc0885, size 382c
+[  255.504922] (direxec)[533]: Failed to execute /usr/lib/systemd/system-generators/systemd-hibernate-resume-generator: Input/output error
+[  255.505012] SQUASHFS error: Failed to read block 0x17fc40b1: -5
+[  255.505023] SQUASHFS error: Unable to read fragment cache entry [17fc40b1]
+[  255.505079] SQUASHFS error: Unable to read fragment cache entry [17fc40b1]
+[  255.505082] SQUASHFS error: Unable to read page, block 17fc40b1, size 23bc
+[  255.505139] (direxec)[534]: Failed to execute /usr/lib/systemd/system-generators/systemd-integritysetup-generator: Input/output error
+[  255.505477] SQUASHFS error: Unable to read fragment cache entry [17fc40b1]
+[  255.505535] SQUASHFS error: Unable to read fragment cache entry [17fc40b1]
+[  255.505537] SQUASHFS error: Unable to read page, block 17fc40b1, size 23bc
+[  255.505592] (direxec)[536]: Failed to execute /usr/lib/systemd/system-generators/systemd-run-generator: Input/output error
+[  255.506090] SQUASHFS error: Failed to read block 0x2b840d1: -5
+[  255.506094] SQUASHFS error: Unable to read fragment cache entry [2b840d1]
+[  255.506096] (sd-execut[524]: /usr/lib/systemd/system-generators/systemd-run-generator failed with exit status 1.
+[  255.506122] (sd-execut[524]: /usr/lib/systemd/system-generators/systemd-hibernate-resume-generator failed with exit status 1.
+[  255.506137] (sd-execut[524]: /usr/lib/systemd/system-generators/systemd-debug-generator failed with exit status 1.
+[  255.506168] SQUASHFS error: Unable to read fragment cache entry [2b840d1]
+[  255.506171] SQUASHFS error: Unable to read page, block 2b840d1, size bb5c
+[  255.506246] (direxec)[540]: Failed to execute /etc/systemd/system-generators/vyos-generator: Input/output error
+[  255.506652] SQUASHFS error: Failed to read block 0x17fc646d: -5
+[  255.506656] SQUASHFS error: Unable to read fragment cache entry [17fc646d]
+[  255.506662] SQUASHFS error: Unable to read fragment cache entry [17fc646d]
+[  255.506715] SQUASHFS error: Unable to read fragment cache entry [17fc646d]
+[  255.506716] SQUASHFS error: Unable to read fragment cache entry [17fc646d]
+[  255.506717] SQUASHFS error: Unable to read page, block 17fc646d, size 42ec
+[  255.506718] SQUASHFS error: Unable to read page, block 17fc646d, size 42ec
+[  255.506791] (direxec)[538]: Failed to execute /usr/lib/systemd/system-generators/systemd-sysv-generator: Input/output error
+[  255.506792] (direxec)[539]: Failed to execute /usr/lib/systemd/system-generators/systemd-veritysetup-generator: Input/output error
+[  255.507146] SQUASHFS error: Unable to read fragment cache entry [17fc646d]
+[  255.507204] SQUASHFS error: Unable to read fragment cache entry [17fc646d]
+[  255.507207] SQUASHFS error: Unable to read page, block 17fc646d, size 42ec
+[  255.507261] (direxec)[537]: Failed to execute /usr/lib/systemd/system-generators/systemd-system-update-generator: Input/output error
+[  255.507783] SQUASHFS error: Unable to read fragment cache entry [17fc40b1]
+[  255.507842] SQUASHFS error: Unable to read fragment cache entry [17fc40b1]
+[  255.507845] SQUASHFS error: Unable to read page, block 17fc40b1, size 23bc
+[  255.507901] (direxec)[535]: Failed to execute /usr/lib/systemd/system-generators/systemd-rc-local-generator: Input/output error
+[  255.510922] SQUASHFS error: Unable to read fragment cache entry [17fb8ba1]
+[  255.517816] SQUASHFS error: Failed to read block 0x1838e9a1: -5
+[  255.524606] SQUASHFS error: Unable to read page, block 17fb8ba1, size 7ce4
+[  255.524679] (direxec)[525]: Failed to execute /usr/lib/systemd/system-generators/live-config-getty-generator: Input/output error
+[  255.531484] SQUASHFS error: Unable to read data cache entry [1838e9a1]
+[  255.531487] SQUASHFS error: Unable to read page, block 1838e9a1, size 17998
+[  255.531552] (direxec)[527]: Failed to execute /usr/lib/systemd/system-generators/podman-system-generator: Input/output error
+[  256.076058] (sd-execut[524]: /usr/lib/systemd/system-generators/podman-system-generator failed with exit status 1.
+[  256.086448] (sd-execut[524]: /usr/lib/systemd/system-generators/systemd-gpt-auto-generator failed with exit status 1.
+[  256.097084] (sd-execut[524]: /usr/lib/systemd/system-generators/systemd-integritysetup-generator failed with exit status 1.
+[  256.108237] (sd-execut[524]: /usr/lib/systemd/system-generators/systemd-system-update-generator failed with exit status 1.
+[  256.119306] (sd-execut[524]: /usr/lib/systemd/system-generators/systemd-veritysetup-generator failed with exit status 1.
+[  256.130203] (sd-execut[524]: /usr/lib/systemd/system-generators/systemd-getty-generator failed with exit status 1.
+[  256.140573] (sd-execut[524]: /usr/lib/systemd/system-generators/systemd-sysv-generator failed with exit status 1.
+[  256.150859] (sd-execut[524]: /etc/systemd/system-generators/vyos-generator failed with exit status 1.
+[  256.160103] (sd-execut[524]: /usr/lib/systemd/system-generators/systemd-rc-local-generator failed with exit status 1.
+[  256.170736] (sd-execut[524]: /usr/lib/systemd/system-generators/openvpn-generator failed with exit status 1.
+[  256.180597] (sd-execut[524]: /usr/lib/systemd/system-generators/live-config-getty-generator failed with exit status 1.
+[  256.191322] (sd-execut[524]: /usr/lib/systemd/system-generators/systemd-cryptsetup-generator failed with exit status 1.
+[  256.202158] (sd-execut[524]: /usr/lib/systemd/system-generators/systemd-fstab-generator failed with exit status 1.
+[  256.306585] SQUASHFS error: Failed to read block 0x17fada4d: -5
+[  256.312521] SQUASHFS error: Unable to read fragment cache entry [17fada4d]
+[  256.319468] SQUASHFS error: Unable to read fragment cache entry [17fada4d]
+[  256.326353] SQUASHFS error: Unable to read page, block 17fada4d, size b154
+[  256.334488] SQUASHFS error: Unable to read fragment cache entry [17fada4d]
+[  256.341436] SQUASHFS error: Unable to read fragment cache entry [17fada4d]
+[  256.348319] SQUASHFS error: Unable to read page, block 17fada4d, size b154
+[  256.355339] SQUASHFS error: Unable to read fragment cache entry [17fada4d]
+[  256.362280] SQUASHFS error: Unable to read fragment cache entry [17fada4d]
+[  256.369159] SQUASHFS error: Unable to read page, block 17fada4d, size b154
+[  256.376181] SQUASHFS error: Unable to read fragment cache entry [17fb8ba1]
+[  256.383127] SQUASHFS error: Unable to read fragment cache entry [17fb8ba1]
+[  256.390005] SQUASHFS error: Unable to read page, block 17fb8ba1, size 7ce4
+[  256.397327] SQUASHFS error: Unable to read fragment cache entry [17fada4d]
+[  256.404211] SQUASHFS error: Unable to read page, block 17fada4d, size b154
+[  256.412616] SQUASHFS error: Unable to read fragment cache entry [17fada4d]
+[  256.419564] SQUASHFS error: Unable to read fragment cache entry [17fada4d]
+[  256.426443] SQUASHFS error: Unable to read page, block 17fada4d, size b154
+[  256.433585] SQUASHFS error: Unable to read fragment cache entry [17fada4d]
+[  256.440530] SQUASHFS error: Unable to read fragment cache entry [17fada4d]
+[  256.447409] SQUASHFS error: Unable to read page, block 17fada4d, size b154
+[  256.558994] SQUASHFS error: Unable to read fragment cache entry [17fada4d]
+[  256.565951] SQUASHFS error: Unable to read fragment cache entry [17fada4d]
+[  256.572831] SQUASHFS error: Unable to read page, block 17fada4d, size b154
+[  256.579744] systemd[1]: Unit default.target failed to load properly, please adjust/correct and reload service manager: Input/output error
+[  256.592107] systemd[1]: Falling back to rescue.target.
+[  256.597372] SQUASHFS error: Unable to read fragment cache entry [17fada4d]
+[  256.604317] SQUASHFS error: Unable to read fragment cache entry [17fada4d]
+[  256.611197] SQUASHFS error: Unable to read page, block 17fada4d, size b154
+[  256.618096] systemd[1]: Unit rescue.target failed to load properly, please adjust/correct and reload service manager: Input/output error
+[!!!!!!] Failed to load rescue.target.
+[  256.639811] systemd[1]: Freezing execution.

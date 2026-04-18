@@ -51,9 +51,18 @@ mkdir -p "$KERNEL_PATCHES"
 # Use our local fixed copy (has curr_time declaration in struct xfrm_state)
 # NOT the ASK repo copy which is missing this field
 cp data/kernel-patches/003-ask-kernel-hooks.patch "$KERNEL_PATCHES/"
+# INA234 hwmon support (8x power sensors on Mono Gateway)
+cp data/kernel-patches/4002-hwmon-ina2xx-add-INA234-support.patch "$KERNEL_PATCHES/"
+# SFP rollball PHY EINVAL fallback (SFP-10G-T copper modules)
+cp data/kernel-patches/4003-sfp-rollball-phylink-einval-fallback.patch "$KERNEL_PATCHES/"
 # swphy patch: maps 10G/5G/2.5G to SWMII_SPEED_1000 for SDK fixed-link 10G MACs
 cp data/kernel-patches/4004-swphy-support-10g-fixed-link-speed.patch "$KERNEL_PATCHES/"
-echo "### ASK hooks + swphy patches staged at $KERNEL_PATCHES/"
+# DPAA probe soft-lockup fix (while-loop safety break)
+cp data/kernel-patches/4005-dpaa-eth-fix-soft-lockup-in-probe.patch "$KERNEL_PATCHES/" 2>/dev/null || true
+# xHCI AVOID_BEI + TRUST_TX_LENGTH quirks — REQUIRED for USB live boot on LS1046A DWC3
+# Without this, USB storage dies during init-bottom squashfs mount → boot never completes
+cp data/kernel-patches/4006-xhci-plat-ls1046a-avoid-bei.patch "$KERNEL_PATCHES/"
+echo "### ASK hooks + swphy + xhci patches staged at $KERNEL_PATCHES/"
 
 ### 3. SDK sources — stage tarball and inject extraction BEFORE patches loop
 #
