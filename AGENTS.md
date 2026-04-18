@@ -237,11 +237,15 @@ o| `data/kernel-patches/ask-nxp-sdk-sources.tar.gz` | NXP SDK DPAA driver source
 
 ```bash
 # === CI (production releases) ===
-# Trigger build
-gh workflow run "VyOS LS1046A build" --ref main
+# ALWAYS use the self-hosted workflow — the hosted "VyOS LS1046A build"
+# workflow is slow/deprecated. If triggered by mistake, cancel and relaunch.
+gh workflow run "VyOS LS1046A build (self-hosted)" --ref main
 
 # Check build status
 gh run list --limit 3
+
+# Cancel an accidental hosted-runner trigger
+gh run cancel <run-id>
 
 # Push triggers nothing — workflow_dispatch only
 git push  # then manually trigger build
