@@ -1,75 +1,52 @@
 From: VyOS LS1046A Build <build@vyos.io>
-Date: Sat, 18 Apr 2026 04:00:00 +0000
+Date: Sat, 18 Apr 2026 04:20:00 +0000
 Subject: [PATCH] usb: host: xhci-plat: force XHCI_AVOID_BEI on LS1046A DWC3
 
-On the NXP LS1046A the Synopsys DesignWare USB3 controller posts Block
-Event Interrupts (BEI) on bulk TRBs in a way the xHCI host state
-machine mishandles when the TRB ring wraps: a genuine transfer event
-that arrives after a BEI-suppressed event is misattributed to a stale
-slot/endpoint and the xHCI internal command timer eventually fires,
-marking the HC dead.
+The LS1046A DWC3 posts BEI on bulk TRBs in a way the xHCI event
+handler mishandles when the ring wraps, causing "xHCI host controller
+not responding, assume dead" during USB-storage probe.
 
-First version of this patch walked the parent chain and matched
-`fsl,ls1046a-dwc3` via `of_device_is_compatible(tmpdev->of_node, ...)`,
-but that match FAILED at runtime on the Mono Gateway: the xhci-hcd
-platform child created by dwc3_host_init() has its of_node unset; only
-its fwnode is populated (via pdevinfo.fwnode = dev_fwnode(dwc->dev)).
-Walking tmpdev->of_node therefore never reached the DT node.
-
-This version:
-  1. Walks parents via both tmpdev->of_node AND tmpdev->fwnode.
-  2. Also accepts `snps,dwc3` (the generic DWC3 compatible) so that
-     we catch the dwc3 core platform device one level up even if
-     the LS1046A-specific compatible is absent from that device's
-     of_node (mainline DTS may only list `snps,dwc3` on the child).
-  3. Emits a one-shot dev_info() so the quirks=... line in the boot
-     log can be correlated with whether the match fired.
-
-Bits added: XHCI_AVOID_BEI (0x8000) + XHCI_TRUST_TX_LENGTH (0x400).
+v1 of this patch walked tmpdev->of_node but the xhci-hcd platform
+child created by dwc3_host_init() has of_node=NULL; only fwnode is
+propagated (via pdevinfo.fwnode = dev_fwnode(dwc->dev)). This version
+walks both of_node AND fwnode, and matches both fsl,ls1046a-dwc3 and
+the generic snps,dwc3 compatible. A dev_info() is emitted so the boot
+log unambiguously shows whether the quirk fired.
 
 Signed-off-by: VyOS LS1046A Build <build@vyos.io>
 ---
- drivers/usb/host/xhci-plat.c | 27 +++++++++++++++++++++++++++
- 1 file changed, 27 insertions(+)
-
 --- a/drivers/usb/host/xhci-plat.c
 +++ b/drivers/usb/host/xhci-plat.c
-@@ -76,8 +76,35 @@ static int xhci_priv_resume_quirk(struct usb_hcd *hcd)
+@@ -76,6 +76,32 @@ static int xhci_priv_resume_quirk(struct usb_hcd *hcd)
  static void xhci_plat_quirks(struct device *dev, struct xhci_hcd *xhci)
  {
  	struct xhci_plat_priv *priv = xhci_to_priv(xhci);
 +	struct device *tmpdev;
-+	bool matched = false;
++	bool ls1046a_dwc3 = false;
  
  	xhci->quirks |= priv->quirks;
 +
 +	/*
-+	 * NXP LS1046A DWC3 errata: the controller posts BEI on bulk TRBs
-+	 * in a way that confuses the xHCI event handler when the ring
-+	 * wraps, leading to "xHCI host controller not responding, assume
-+	 * dead" during USB-storage probe. Force XHCI_AVOID_BEI plus
-+	 * XHCI_TRUST_TX_LENGTH on any xhci whose parent chain reaches a
-+	 * DWC3 / LS1046A DWC3 DT node. dwc3_host_init() propagates fwnode
-+	 * (not of_node) to the xhci platform child, so check both.
++	 * NXP LS1046A DWC3 errata: AVOID_BEI + TRUST_TX_LENGTH.
++	 * dwc3_host_init() sets fwnode (not of_node) on the xhci child,
++	 * so check both. Accept snps,dwc3 too (dwc3 core parent).
 +	 */
 +	for (tmpdev = dev; tmpdev; tmpdev = tmpdev->parent) {
 +		if (tmpdev->of_node &&
 +		    (of_device_is_compatible(tmpdev->of_node, "fsl,ls1046a-dwc3") ||
 +		     of_device_is_compatible(tmpdev->of_node, "snps,dwc3"))) {
-+			matched = true;
++			ls1046a_dwc3 = true;
 +			break;
 +		}
 +		if (tmpdev->fwnode &&
 +		    (fwnode_device_is_compatible(tmpdev->fwnode, "fsl,ls1046a-dwc3") ||
 +		     fwnode_device_is_compatible(tmpdev->fwnode, "snps,dwc3"))) {
-+			matched = true;
++			ls1046a_dwc3 = true;
 +			break;
 +		}
 +	}
-+	if (matched) {
++	if (ls1046a_dwc3) {
 +		xhci->quirks |= XHCI_AVOID_BEI | XHCI_TRUST_TX_LENGTH;
-+		dev_info(dev, "LS1046A DWC3 quirks applied (AVOID_BEI | TRUST_TX_LENGTH)\n");
++		dev_info(dev, "LS1046A DWC3 quirks applied (AVOID_BEI|TRUST_TX_LENGTH)\n");
 +	}
  }
- 
- /* called during probe() after chip reset completes */
