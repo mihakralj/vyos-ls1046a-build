@@ -2,6 +2,16 @@
 
 This file provides guidance to agents when working with code in this repository.
 
+## Agent Memory (qdrant) — use on every task
+
+The **qdrant** MCP server is the authoritative persistent memory for this project. It stores accumulated diagnosis, root causes, failed attempts, and non-obvious gotchas from many prior sessions. **Always** integrate it into your workflow:
+
+1. **Before non-trivial work**, run `qdrant-find` with several focused queries (symptoms, component names, kernel subsystems, file/patch names) **before** reading large numbers of files. Treat hits as authoritative.
+2. **After producing a new insight** (root cause, fix, misdiagnosis, hardware quirk, toolchain gotcha, workaround), call `qdrant-store` with a **dense prose** entry (semantic search — avoid bullet lists). Include: symptom, root cause, fix (file paths + patch numbers), verification, date, tags.
+3. **Prefer `qdrant-store` over expanding this file** for session-specific or dated findings. Reserve `AGENTS.md` for stable, structural rules that apply to *every* future edit.
+4. **Conflict resolution:** if qdrant and AGENTS.md disagree, trust the more recent source (check `metadata.date` in qdrant entries).
+5. **Always run `qdrant-find` first** when continuing a topic across sessions — prior insights may already solve the problem you are investigating.
+
 ## Documentation Style
 
 - **Use Mermaid diagrams, not ASCII art**, to visualize concepts in `.md` documents. All architecture diagrams, flowcharts, sequence diagrams, and component relationship visualizations must use ` ```mermaid ` fenced code blocks — never ASCII box-drawing characters.
