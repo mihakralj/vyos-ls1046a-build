@@ -1,5 +1,5 @@
 From: VyOS LS1046A Build <build@vyos.io>
-Date: Sat, 18 Apr 2026 00:00:00 +0000
+Date: Sat, 18 Apr 2026 04:00:00 +0000
 Subject: [PATCH] usb: host: xhci-plat: force XHCI_AVOID_BEI on LS1046A DWC3
 
 On the NXP LS1046A the Synopsys DesignWare USB3 controller posts Block
@@ -9,52 +9,37 @@ that arrives after a BEI-suppressed event is misattributed to a stale
 slot/endpoint and the xHCI internal command timer eventually fires,
 marking the HC dead.
 
-On our Mono Gateway (fsl,ls1046a-dwc3 controller at 2f00000.usb) the
-reproducer is:
+First version of this patch walked the parent chain and matched
+`fsl,ls1046a-dwc3` via `of_device_is_compatible(tmpdev->of_node, ...)`,
+but that match FAILED at runtime on the Mono Gateway: the xhci-hcd
+platform child created by dwc3_host_init() has its of_node unset; only
+its fwnode is populated (via pdevinfo.fwnode = dev_fwnode(dwc->dev)).
+Walking tmpdev->of_node therefore never reached the DT node.
 
-  [   11.77] usb 1-1: new high-speed USB device number 2 using xhci-hcd
-  [   11.94] usb 1-1: Product: Ultra / Manufacturer: SanDisk
-      (usb-storage begins probe; SCSI INQUIRY bulk-IN stalls)
-  [   17.24] xhci-hcd: xHCI host not responding to stop endpoint command
-  [   17.25] xhci-hcd: xHCI host controller not responding, assume dead
-  [   17.26] xhci-hcd: HC died; cleaning up
-  [   17.26] probe of 1-1 returned 0 after 5301765 usecs
+This version:
+  1. Walks parents via both tmpdev->of_node AND tmpdev->fwnode.
+  2. Also accepts `snps,dwc3` (the generic DWC3 compatible) so that
+     we catch the dwc3 core platform device one level up even if
+     the LS1046A-specific compatible is absent from that device's
+     of_node (mainline DTS may only list `snps,dwc3` on the child).
+  3. Emits a one-shot dev_info() so the quirks=... line in the boot
+     log can be correlated with whether the match fired.
 
-Reading the xHCI quirks word printed during init confirms the bit is
-missing:
-
-  [   11.45] xhci-hcd: hcc params 0x0220f66d hci version 0x100 quirks
-             0x0000008002008410
-
-(XHCI_TRUST_TX_LENGTH 0x400 is present but XHCI_AVOID_BEI 0x8000 is
-not.)
-
-The existing userspace workaround of passing `xhci_hcd.quirks=0x8400`
-on the kernel command line has no effect here because xhci-plat.c does
-not consume the xhci_hcd module parameter (that path is PCI-only). Add
-the quirk at the platform-quirks hook for any xHCI whose parent tree
-contains a fsl,ls1046a-dwc3 node. XHCI_TRUST_TX_LENGTH is already set
-by default on xhci-plat; we add both for safety since the DWC3
-databook documents the same TX-length residue issue addressed by
-TRUST_TX_LENGTH on this SoC.
-
-Reviewed by grepping drivers/usb/host/xhci-plat.c in v6.6 — the hook
-point xhci_plat_quirks() is called from xhci_gen_setup() during host
-reset, before any TRB is queued. No runtime behaviour changes on other
-boards (guarded by of_device_is_compatible()).
+Bits added: XHCI_AVOID_BEI (0x8000) + XHCI_TRUST_TX_LENGTH (0x400).
 
 Signed-off-by: VyOS LS1046A Build <build@vyos.io>
 ---
- drivers/usb/host/xhci-plat.c | 14 ++++++++++++++
- 1 file changed, 14 insertions(+)
+ drivers/usb/host/xhci-plat.c | 27 +++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
 
 --- a/drivers/usb/host/xhci-plat.c
 +++ b/drivers/usb/host/xhci-plat.c
-@@ -76,8 +76,22 @@ static int xhci_priv_resume_quirk(struct usb_hcd *hcd)
+@@ -76,8 +76,35 @@ static int xhci_priv_resume_quirk(struct usb_hcd *hcd)
  static void xhci_plat_quirks(struct device *dev, struct xhci_hcd *xhci)
  {
  	struct xhci_plat_priv *priv = xhci_to_priv(xhci);
 +	struct device *tmpdev;
++	bool matched = false;
  
  	xhci->quirks |= priv->quirks;
 +
@@ -62,13 +47,28 @@ Signed-off-by: VyOS LS1046A Build <build@vyos.io>
 +	 * NXP LS1046A DWC3 errata: the controller posts BEI on bulk TRBs
 +	 * in a way that confuses the xHCI event handler when the ring
 +	 * wraps, leading to "xHCI host controller not responding, assume
-+	 * dead" during USB-storage probe. Force XHCI_AVOID_BEI plus the
-+	 * related XHCI_TRUST_TX_LENGTH which is documented for the SoC.
++	 * dead" during USB-storage probe. Force XHCI_AVOID_BEI plus
++	 * XHCI_TRUST_TX_LENGTH on any xhci whose parent chain reaches a
++	 * DWC3 / LS1046A DWC3 DT node. dwc3_host_init() propagates fwnode
++	 * (not of_node) to the xhci platform child, so check both.
 +	 */
 +	for (tmpdev = dev; tmpdev; tmpdev = tmpdev->parent) {
 +		if (tmpdev->of_node &&
-+		    of_device_is_compatible(tmpdev->of_node, "fsl,ls1046a-dwc3"))
-+			xhci->quirks |= XHCI_AVOID_BEI | XHCI_TRUST_TX_LENGTH;
++		    (of_device_is_compatible(tmpdev->of_node, "fsl,ls1046a-dwc3") ||
++		     of_device_is_compatible(tmpdev->of_node, "snps,dwc3"))) {
++			matched = true;
++			break;
++		}
++		if (tmpdev->fwnode &&
++		    (fwnode_device_is_compatible(tmpdev->fwnode, "fsl,ls1046a-dwc3") ||
++		     fwnode_device_is_compatible(tmpdev->fwnode, "snps,dwc3"))) {
++			matched = true;
++			break;
++		}
++	}
++	if (matched) {
++		xhci->quirks |= XHCI_AVOID_BEI | XHCI_TRUST_TX_LENGTH;
++		dev_info(dev, "LS1046A DWC3 quirks applied (AVOID_BEI | TRUST_TX_LENGTH)\n");
 +	}
  }
  
