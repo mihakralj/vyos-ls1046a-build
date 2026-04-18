@@ -5,22 +5,22 @@ Starting the controller
 USB XHCI 1.00
 scanning bus usb@2f00000 for devices... 2 USB Device(s) found
        scanning usb for storage devices... 1 Storage Device(s) found
-1232 bytes read in 4 ms (300.8 KiB/s)
+2878 bytes read in 4 ms (702.1 KiB/s)
 ## Executing script at a0000000
 === VyOS LS1046A USB Live Boot ===
 
-10311810 bytes read in 262 ms (37.5 MiB/s)
-92452 bytes read in 4 ms (22 MiB/s)
-33131343 bytes read in 830 ms (38.1 MiB/s)
+10473860 bytes read in 266 ms (37.6 MiB/s)
+35633 bytes read in 3 ms (11.3 MiB/s)
+32926800 bytes read in 825 ms (38.1 MiB/s)
 stopping USB..
 Booting VyOS live from USB...
    Uncompressing Kernel Image to 0
 ## Flattened Device Tree blob at 88000000
    Booting using the fdt blob at 0x88000000
 Working FDT set to 88000000
-   Loading Ramdisk to f8c68000, end fac00b4f ... OK
-   Loading Device Tree to 00000000f8c3e000, end 00000000f8c67923 ... OK
-Working FDT set to f8c3e000
+   Loading Ramdisk to f8c9a000, end fac00c50 ... OK
+   Loading Device Tree to 00000000f8c7e000, end 00000000f8c99b30 ... OK
+Working FDT set to f8c7e000
 PCIe1: pcie@3400000 Root Complex: no link
 PCIe2: pcie@3500000 disabled
 PCIe3: pcie@3600000 Root Complex: no link
@@ -29,821 +29,68 @@ WARNING failed to get smmu node: FDT_ERR_NOTFOUND
 
 Starting kernel ...
 
-[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x410fd082]
-[    0.000000] Linux version 6.6.133-vyos (root@b615e8b589b1) (gcc (Debian 12.2.0-14+deb12u1) 12.2.0, GNU ld (GNU Binutils for Debian) 2.40) #1 SMP PREEMPT_DYNAMIC Fri Apr 17 01:06:18 UTC 2026
-[    0.000000] KASLR enabled
-[    0.000000] Machine model: Mono Gateway Development Kit
-[    0.000000] earlycon: uart8250 at MMIO 0x00000000021c0500 (options '')
-[    0.000000] printk: bootconsole [uart8250] enabled
-[    0.000000] efi: UEFI not found.
-[    0.000000] OF: reserved mem: initialized node qman-pfdr, compatible id fsl,qman-pfdr
-[    0.000000] OF: reserved mem: 0x00000009fc000000..0x00000009fdffffff (32768 KiB) nomap non-reusable qman-pfdr
-[    0.000000] OF: reserved mem: initialized node qman-fqd, compatible id fsl,qman-fqd
-[    0.000000] OF: reserved mem: 0x00000009fe800000..0x00000009feffffff (8192 KiB) nomap non-reusable qman-fqd
-[    0.000000] OF: reserved mem: initialized node bman-fbpr, compatible id fsl,bman-fbpr
-[    0.000000] OF: reserved mem: 0x00000009ff000000..0x00000009ffffffff (16384 KiB) nomap non-reusable bman-fbpr
-[    0.000000] NUMA: No NUMA configuration found
-[    0.000000] NUMA: Faking a node at [mem 0x0000000080000000-0x00000009ffffffff]
-[    0.000000] NUMA: NODE_DATA [mem 0x9fb7f41c0-0x9fb7f7fff]
-[    0.000000] Zone ranges:
-[    0.000000]   DMA      [mem 0x0000000080000000-0x00000000ffffffff]
-[    0.000000]   DMA32    empty
-[    0.000000]   Normal   [mem 0x0000000100000000-0x00000009ffffffff]
-[    0.000000] Movable zone start for each node
-[    0.000000] Early memory node ranges
-[    0.000000]   node   0: [mem 0x0000000080000000-0x00000000fbdfffff]
-[    0.000000]   node   0: [mem 0x0000000880000000-0x00000009fbffffff]
-[    0.000000]   node   0: [mem 0x00000009fc000000-0x00000009fdffffff]
-[    0.000000]   node   0: [mem 0x00000009fe000000-0x00000009fe7fffff]
-[    0.000000]   node   0: [mem 0x00000009fe800000-0x00000009ffffffff]
-[    0.000000] Initmem setup node 0 [mem 0x0000000080000000-0x00000009ffffffff]
-[    0.000000] On node 0, zone Normal: 16896 pages in unavailable ranges
-[    0.000000] cma: Reserved 32 MiB at 0x00000000f6c00000 on node -1
-[    0.000000] psci: probing for conduit method from DT.
-[    0.000000] psci: PSCIv1.1 detected in firmware.
-[    0.000000] psci: Using standard PSCI v0.2 function IDs
-[    0.000000] psci: MIGRATE_INFO_TYPE not supported.
-[    0.000000] psci: SMC Calling Convention v1.5
-[    0.000000] percpu: Embedded 32 pages/cpu s93672 r8192 d29208 u131072
-[    0.000000] Detected PIPT I-cache on CPU0
-[    0.000000] CPU features: detected: Spectre-v2
-[    0.000000] CPU features: detected: Spectre-v3a
-[    0.000000] CPU features: detected: Spectre-BHB
-[    0.000000] CPU features: kernel page table isolation forced ON by KASLR
-[    0.000000] CPU features: detected: Kernel page table isolation (KPTI)
-[    0.000000] CPU features: detected: ARM erratum 1742098
-[    0.000000] CPU features: detected: ARM errata 1165522, 1319367, or 1530923
-[    0.000000] alternatives: applying boot alternatives
-[    0.000000] Kernel command line: console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60
-[    0.000000] Unknown kernel command line parameters "components noeject nopersistence noautologin nonetworking boot=live union=overlay", will be passed to user space.
-[    0.000000] Dentry cache hash table entries: 1048576 (order: 11, 8388608 bytes, linear)
-[    0.000000] Inode-cache hash table entries: 524288 (order: 10, 4194304 bytes, linear)
-[    0.000000] Fallback order for Node 0: 0 
-[    0.000000] Built 1 zonelists, mobility grouping on.  Total pages: 2047488
-[    0.000000] Policy zone: Normal
-[    0.000000] mem auto-init: stack:off, heap alloc:off, heap free:off
-[    0.000000] software IO TLB: area num 4.
-[    0.000000] software IO TLB: mapped [mem 0x00000000f2c00000-0x00000000f6c00000] (64MB)
-[    0.000000] Memory: 7943552K/8321024K available (13568K kernel code, 2558K rwdata, 5812K rodata, 4992K init, 1055K bss, 344704K reserved, 32768K cma-reserved)
-[    0.000000] SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=4, Nodes=1
-[    0.000000] Dynamic Preempt: none
-[    0.000000] rcu: Preemptible hierarchical RCU implementation.
-[    0.000000]  Trampoline variant of Tasks RCU enabled.
-[    0.000000]  Tracing variant of Tasks RCU enabled.
-[    0.000000] rcu: RCU calculated value of scheduler-enlistment delay is 100 jiffies.
-[    0.000000] NR_IRQS: 64, nr_irqs: 64, preallocated irqs: 0
-[    0.000000] GIC: Adjusting CPU interface base to 0x000000000142f000
-[    0.000000] Root IRQ handler: gic_handle_irq
-[    0.000000] GIC: Using split EOI/Deactivate mode
-[    0.000000] rcu: srcu_init: Setting srcu_struct sizes based on contention.
-[    0.000000] arch_timer: cp15 timer(s) running at 25.00MHz (phys).
-[    0.000000] clocksource: arch_sys_counter: mask: 0xffffffffffffff max_cycles: 0x5c40939b5, max_idle_ns: 440795202646 ns
-[    0.000000] sched_clock: 56 bits at 25MHz, resolution 40ns, wraps every 4398046511100ns
-[    0.008514] Console: colour dummy device 80x25
-[    0.013824] Calibrating delay loop (skipped), value calculated using timer frequency.. 50.00 BogoMIPS (lpj=25000)
-[    0.024160] pid_max: default: 32768 minimum: 301
-[    0.030872] Mount-cache hash table entries: 16384 (order: 5, 131072 bytes, linear)
-[    0.038511] Mountpoint-cache hash table entries: 16384 (order: 5, 131072 bytes, linear)
-[    0.048654] RCU Tasks: Setting shift to 2 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=4.
-[    0.057468] RCU Tasks Trace: Setting shift to 2 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=4.
-[    0.066865] rcu: Hierarchical SRCU implementation.
-[    0.071687] rcu:     Max phase no-delay instances is 400.
-[    0.077400] EFI services will not be available.
-[    0.082122] smp: Bringing up secondary CPUs ...
-[    0.087024] Detected PIPT I-cache on CPU1
-[    0.087069] CPU1: Booted secondary processor 0x0000000001 [0x410fd082]
-[    0.087425] Detected PIPT I-cache on CPU2
-[    0.087458] CPU2: Booted secondary processor 0x0000000002 [0x410fd082]
-[    0.087806] Detected PIPT I-cache on CPU3
-[    0.087840] CPU3: Booted secondary processor 0x0000000003 [0x410fd082]
-[    0.087883] smp: Brought up 1 node, 4 CPUs
-[    0.123791] SMP: Total of 4 processors activated.
-[    0.128522] CPU features: detected: 32-bit EL0 Support
-[    0.133689] CPU features: detected: 32-bit EL1 Support
-[    0.138857] CPU features: detected: CRC32 instructions
-[    0.144064] CPU: All CPU(s) started at EL2
-[    0.148195] alternatives: applying system-wide alternatives
-[    0.154937] devtmpfs: initialized
-[    0.163750] clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 1911260446275000 ns
-[    0.173568] futex hash table entries: 1024 (order: 4, 65536 bytes, linear)
-[    0.180992] pinctrl core: initialized pinctrl subsystem
-[    0.186709] Machine: Mono Gateway Development Kit
-[    0.191442] SoC family: QorIQ LS1046A
-[    0.195123] SoC ID: svr:0x87070010, Revision: 1.0
-[    0.200080] DMI not present or invalid.
-[    0.204701] NET: Registered PF_NETLINK/PF_ROUTE protocol family
-[    0.211192] DMA: preallocated 1024 KiB GFP_KERNEL pool for atomic allocations
-[    0.218531] DMA: preallocated 1024 KiB GFP_KERNEL|GFP_DMA pool for atomic allocations
-[    0.226643] DMA: preallocated 1024 KiB GFP_KERNEL|GFP_DMA32 pool for atomic allocations
-[    0.235262] audit: initializing netlink subsys (disabled)
-[    0.240783] audit: type=2000 audit(0.049:1): state=initialized audit_enabled=0 res=1
-[    0.241298] thermal_sys: Registered thermal governor 'step_wise'
-[    0.248584] thermal_sys: Registered thermal governor 'user_space'
-[    0.254646] cpuidle: using governor menu
-[    0.264771] Bman ver:0a02,02,01
-[    0.269339] qman-fqd addr 0x00000009fe800000 size 0x800000
-[    0.274858] qman-pfdr addr 0x00000009fc000000 size 0x2000000
-[    0.280555] Qman ver:0a01,03,02,01
-[    0.284084] hw-breakpoint: found 6 breakpoint and 4 watchpoint registers.
-[    0.290963] ASID allocator initialised with 32768 entries
-[    0.296935] Serial: AMBA PL011 UART driver
-[    0.314721] Modules: 2G module region forced by RANDOMIZE_MODULE_REGION_FULL
-[    0.321823] Modules: 0 pages in range for non-PLT usage
-[    0.321826] Modules: 517248 pages in range for PLT usage
-[    0.327669] HugeTLB: registered 1.00 GiB page size, pre-allocated 0 pages
-[    0.339848] HugeTLB: 0 KiB vmemmap can be freed for a 1.00 GiB page
-[    0.346154] HugeTLB: registered 32.0 MiB page size, pre-allocated 0 pages
-[    0.352984] HugeTLB: 0 KiB vmemmap can be freed for a 32.0 MiB page
-[    0.359290] HugeTLB: registered 2.00 MiB page size, pre-allocated 0 pages
-[    0.366119] HugeTLB: 0 KiB vmemmap can be freed for a 2.00 MiB page
-[    0.372424] HugeTLB: registered 64.0 KiB page size, pre-allocated 0 pages
-[    0.379254] HugeTLB: 0 KiB vmemmap can be freed for a 64.0 KiB page
-[    0.403602] raid6: neonx8   gen()  4760 MB/s
-[    0.424930] raid6: neonx4   gen()  4637 MB/s
-[    0.446258] raid6: neonx2   gen()  3836 MB/s
-[    0.467584] raid6: neonx1   gen()  2793 MB/s
-[    0.488914] raid6: int64x8  gen()  2683 MB/s
-[    0.510249] raid6: int64x4  gen()  2616 MB/s
-[    0.531575] raid6: int64x2  gen()  2531 MB/s
-[    0.552903] raid6: int64x1  gen()  1954 MB/s
-[    0.557197] raid6: using algorithm neonx8 gen() 4760 MB/s
-[    0.579662] raid6: .... xor() 3429 MB/s, rmw enabled
-[    0.584655] raid6: using neon recovery algorithm
-[    0.589668] ACPI: Interpreter disabled.
-[    0.594957] iommu: Default domain type: Translated
-[    0.599780] iommu: DMA domain TLB invalidation policy: lazy mode
-[    0.606097] usbcore: registered new interface driver usbfs
-[    0.611633] usbcore: registered new interface driver hub
-[    0.616993] usbcore: registered new device driver usb
-[    0.622409] imx-i2c 2180000.i2c: can't get pinctrl, bus recovery not supported
-[    0.629794] i2c i2c-0: IMX I2C adapter registered
-[    0.634555] i2c i2c-0: using dma0chan16 (tx) and dma0chan17 (rx) for DMA transfers
-[    0.642268] imx-i2c 2190000.i2c: can't get pinctrl, bus recovery not supported
-[    0.649627] i2c i2c-1: IMX I2C adapter registered
-[    0.654455] imx-i2c 21a0000.i2c: can't get pinctrl, bus recovery not supported
-[    0.661836] i2c i2c-2: IMX I2C adapter registered
-[    0.666693] imx-i2c 21b0000.i2c: can't get pinctrl, bus recovery not supported
-[    0.674014] i2c i2c-3: IMX I2C adapter registered
-[    0.678928] pps_core: LinuxPPS API ver. 1 registered
-[    0.683923] pps_core: Software ver. 5.3.6 - Copyright 2005-2007 Rodolfo Giometti <giometti@linux.it>
-[    0.693125] PTP clock support registered
-[    0.697220] EDAC MC: Ver: 3.0.0
-[    0.700751] scmi_core: SCMI protocol bus registered
-[    0.705693] bman-fbpr addr 0x00000009ff000000 size 0x1000000
-[    0.711424] Bman err interrupt handler present
-[    0.716591] Bman portal initialised, cpu 0
-[    0.720767] Bman portal initialised, cpu 1
-[    0.724948] Bman portal initialised, cpu 2
-[    0.729128] Bman portal initialised, cpu 3
-[    0.733248] Bman portals initialised
-[    0.743125] Qman err interrupt handler present
-[    0.747962] QMan: Allocated lookup table at (____ptrval____), entry count 131073
-[    0.756142] QMan doesn't need cleanup, uninhibiting IRQs
-[    0.761492] Qman portal initialised, cpu 0
-[    0.765660] QMan doesn't need cleanup, uninhibiting IRQs
-[    0.771004] Qman portal initialised, cpu 1
-[    0.775182] QMan doesn't need cleanup, uninhibiting IRQs
-[    0.780526] Qman portal initialised, cpu 2
-[    0.784691] QMan doesn't need cleanup, uninhibiting IRQs
-[    0.790036] Qman portal initialised, cpu 3
-[    0.794153] Qman portals initialised
-[    0.797807] Bman: BPID allocator includes range 32:32
-[    0.802926] Qman: FQID allocator includes range 256:256
-[    0.808186] Qman: FQID allocator includes range 32768:32768
-[    0.813831] Qman: CGRID allocator includes range 0:256
-[    0.819133] Qman: pool channel allocator includes range 1025:15
-[    0.825159] No USDPAA memory, no 'fsl,usdpaa-mem' in device-tree
-[    0.832061] clocksource: Switched to clocksource arch_sys_counter
-[    0.839538] pnp: PnP ACPI: disabled
-[    0.847287] NET: Registered PF_INET protocol family
-[    0.852422] IP idents hash table entries: 131072 (order: 8, 1048576 bytes, linear)
-[    0.863781] ipsec_flow_init 
-[    0.866859] tcp_listen_portaddr_hash hash table entries: 4096 (order: 4, 65536 bytes, linear)
-[    0.875478] Table-perturb hash table entries: 65536 (order: 6, 262144 bytes, linear)
-[    0.883283] TCP established hash table entries: 65536 (order: 7, 524288 bytes, linear)
-[    0.891513] TCP bind hash table entries: 65536 (order: 9, 2097152 bytes, linear)
-[    0.900051] TCP: Hash tables configured (established 65536 bind 65536)
-[    0.906954] MPTCP token hash table entries: 8192 (order: 6, 196608 bytes, linear)
-[    0.914720] UDP hash table entries: 4096 (order: 5, 131072 bytes, linear)
-[    0.921650] UDP-Lite hash table entries: 4096 (order: 5, 131072 bytes, linear)
-[    0.929177] NET: Registered PF_UNIX/PF_LOCAL protocol family
-[    0.934890] NET: Registered PF_XDP protocol family
-[    0.939725] PCI: CLS 0 bytes, default 64
-[    0.943882] Trying to unpack rootfs image as initramfs...
-[    0.944050] kvm [1]: IPA Size Limit: 44 bits
-[    0.954293] kvm [1]: vgic interrupt IRQ9
-[    0.958282] kvm [1]: Hyp mode initialized successfully
-[    0.964363] Initialise system trusted keyrings
-[    0.968998] workingset: timestamp_bits=40 max_order=21 bucket_order=0
-[    0.976393] squashfs: version 4.0 (2009/01/31) Phillip Lougher
-[    1.000386] xor: measuring software checksum speed
-[    1.005645]    8regs           :  7668 MB/sec
-[    1.010445]    32regs          :  8245 MB/sec
-[    1.015330]    arm64_neon      :  6654 MB/sec
-[    1.019717] xor: using function: 32regs (8245 MB/sec)
-[    1.024809] async_tx: api initialized (async)
-[    1.029204] Key type asymmetric registered
-[    1.033330] Asymmetric key parser 'x509' registered
-[    1.038299] Block layer SCSI generic (bsg) driver version 0.4 loaded (major 248)
-[    1.045760] io scheduler mq-deadline registered
-[    1.050337] io scheduler kyber registered
-[    1.054488] io scheduler bfq registered
-[    1.065548] shpchp: Standard Hot Plug PCI Controller Driver version: 0.4
-[    1.080278] Serial: 8250/16550 driver, 4 ports, IRQ sharing enabled
-[    1.088327] printk: console [ttyS0] disabled
-[    1.092866] 21c0500.serial: ttyS0 at MMIO 0x21c0500 (irq = 56, base_baud = 18750000) is a 16550A
-[    1.101759] printk: console [ttyS0] enabled
-[    1.101759] printk: console [ttyS0] enabled
-[    1.110173] printk: bootconsole [uart8250] disabled
-[    1.110173] printk: bootconsole [uart8250] disabled
-[    1.120761] 21c0600.serial: ttyS1 at MMIO 0x21c0600 (irq = 56, base_baud = 18750000) is a 16550A
-[    1.129698] serial serial0: tty port ttyS1 registered
-[    1.138256] spi-nor spi1.0: n25q512a (65536 Kbytes)
-[    1.463945] Freeing initrd memory: 32352K
-[    1.474481] 9 fixed-partitions partitions found on MTD device 1550000.spi
-[    1.481294] Creating 9 MTD partitions on "1550000.spi":
-[    1.486544] 0x000000000000-0x000004000000 : "flash"
-[    1.491653] 0x000000000000-0x000000100000 : "rcw-bl2"
-[    1.496898] 0x000000100000-0x000000300000 : "uboot"
-[    1.501946] 0x000000300000-0x000000400000 : "uboot-env"
-[    1.507359] 0x000000400000-0x000000500000 : "fman-ucode"
-[    1.512846] 0x000000500000-0x000000600000 : "recovery-dtb"
-[    1.518499] 0x000000600000-0x000000a00000 : "backup"
-[    1.523635] 0x000000a00000-0x000002000000 : "kernel-initramfs"
-[    1.529647] 0x000002000000-0x000004000000 : "unallocated"
-[    1.543080] Maxlinear Ethernet GPY115C 0x0000000001afd000:00: Firmware Version: 8.111 (0x886F)
-[    1.558944] Maxlinear Ethernet GPY115C 0x0000000001afd000:01: Firmware Version: 8.111 (0x886F)
-[    1.574777] Maxlinear Ethernet GPY115C 0x0000000001afd000:02: Firmware Version: 8.111 (0x886F)
-[    1.636074] FM_Config(3449) FMan-Controller code (ver 210.10.1) (0xd20a01)
-[    1.649428] FM_Init(3616) FMan-Controller code (ver 210.10.1) (0xd20a01)
-[    1.659350] Freescale FM module, FMD API version 21.1.0
-[    1.664889] FM_PCD_Init::ext timers 4, base ptr (____ptrval____), muram base (____ptrval____), offset 3f508
-[    1.674957] FM_PCD_Init(1292) pIntMuramPtr (____ptrval____) InternalBufMgmtMuramArea 40200, size 0x8100 
-[    1.684445] FM_PCD_Init(1302) pIntMuramPtr (____ptrval____) InternalBufMgmtMuramArea 402 
-[    1.695180] Freescale FM Ports module
-[    1.698850] fsl_mac: fsl_mac: FSL FMan MAC API based driver
-[    1.704654] fsl_mac 1ae2000.ethernet: FMan MEMAC
-[    1.709276] fsl_mac 1ae2000.ethernet: FMan MAC address: e8:f6:d7:00:16:01
-[    1.716255] fsl_mac 1ae8000.ethernet: FMan MEMAC
-[    1.720878] fsl_mac 1ae8000.ethernet: FMan MAC address: e8:f6:d7:00:15:ff
-[    1.727838] fsl_mac 1aea000.ethernet: FMan MEMAC
-[    1.732461] fsl_mac 1aea000.ethernet: FMan MAC address: e8:f6:d7:00:16:00
-[    1.744419] fsl_mac 1af0000.ethernet: FMan MEMAC
-[    1.749062] fsl_mac 1af0000.ethernet: FMan MAC address: e8:f6:d7:00:16:02
-[    1.761010] fsl_mac 1af2000.ethernet: FMan MEMAC
-[    1.765645] fsl_mac 1af2000.ethernet: FMan MAC address: e8:f6:d7:00:16:03
-[    1.772496] fsl_dpa: FSL DPAA Ethernet driver
-[    1.777128] *********dpa_set_buffers_layout(677) internal buffer offset 96
-[    1.784031] dpaa_eth_priv_probe::bpid 0, count 640 
-[    1.784034] adj count 640
-[    1.791530] DPAA_PROBE: bp_create done
-[    1.795278] DPAA_PROBE: get_channel=1025
-[    1.799201] DPAA_PROBE: add_channel done
-[    1.803122] DPAA_FQ_SETUP: enter
-[    1.806348] fsl_dpa soc:fsl,dpaa:ethernet@1: No Qman software (affine) channels found
-[    1.814183] DPAA_FQ_SETUP: fq #1 type=2
-[    1.818017] DPAA_FQ_SETUP: fq #2 type=1
-[    1.821852] DPAA_FQ_SETUP: fq #3 type=3
-[    1.825688] DPAA_FQ_SETUP: fq #4 type=3
-[    1.829522] DPAA_FQ_SETUP: fq #5 type=3
-[    1.833356] DPAA_FQ_SETUP: fq #6 type=3
-[    1.837190] DPAA_FQ_SETUP: fq #7 type=3
-[    1.841023] DPAA_FQ_SETUP: fq #8 type=3
-[    1.844856] DPAA_FQ_SETUP: fq #9 type=3
-[    1.848690] DPAA_FQ_SETUP: fq #10 type=3
-[    1.852611] DPAA_FQ_SETUP: fq #11 type=3
-[    1.856532] DPAA_FQ_SETUP: fq #12 type=3
-[    1.860453] DPAA_FQ_SETUP: fq #13 type=3
-[    1.864375] DPAA_FQ_SETUP: fq #14 type=3
-[    1.868300] DPAA_FQ_SETUP: fq #15 type=3
-[    1.872222] DPAA_FQ_SETUP: fq #16 type=3
-[    1.876143] DPAA_FQ_SETUP: fq #17 type=3
-[    1.880064] DPAA_FQ_SETUP: fq #18 type=3
-[    1.883989] DPAA_FQ_SETUP: fq #19 type=8
-[    1.887910] DPAA_FQ_SETUP: fq #20 type=8
-[    1.891831] DPAA_FQ_SETUP: fq #21 type=8
-[    1.895752] DPAA_FQ_SETUP: fq #22 type=8
-[    1.899673] DPAA_FQ_SETUP: fq #23 type=8
-[    1.903594] DPAA_FQ_SETUP: fq #24 type=8
-[    1.907514] DPAA_FQ_SETUP: fq #25 type=8
-[    1.911435] DPAA_FQ_SETUP: fq #26 type=8
-[    1.915357] DPAA_FQ_SETUP: fq #27 type=8
-[    1.919277] DPAA_FQ_SETUP: fq #28 type=8
-[    1.923198] DPAA_FQ_SETUP: fq #29 type=8
-[    1.927119] DPAA_FQ_SETUP: fq #30 type=8
-[    1.931040] DPAA_FQ_SETUP: fq #31 type=8
-[    1.934961] DPAA_FQ_SETUP: fq #32 type=8
-[    1.938882] DPAA_FQ_SETUP: fq #33 type=8
-[    1.942802] DPAA_FQ_SETUP: fq #34 type=8
-[    1.946723] DPAA_FQ_SETUP: fq #35 type=6
-[    1.950644] DPAA_FQ_SETUP: fq #36 type=6
-[    1.954565] DPAA_FQ_SETUP: fq #37 type=6
-[    1.958486] DPAA_FQ_SETUP: fq #38 type=6
-[    1.962407] DPAA_FQ_SETUP: fq #39 type=7
-[    1.966328] DPAA_FQ_SETUP: fq #40 type=5
-[    1.970249] DPAA_FQ_SETUP: fq #41 type=4
-[    1.974170] DPAA_FQ_SETUP: fq #42 type=4
-[    1.978094] DPAA_FQ_SETUP: fq #43 type=4
-[    1.982017] DPAA_FQ_SETUP: fq #44 type=4
-[    1.985938] DPAA_FQ_SETUP: main loop done, 44 FQs, egress_cnt=4/4
-[    1.992034] DPAA_PROBE: fq_setup done
-[    1.995698] DPAA_PROBE: cgr_init done
-[    1.999405] DPAA_PROBE: fqs_init done
-[    2.004812] fsl_dpa: fsl_dpa: Probed interface eth0
-[    2.009816] *********dpa_set_buffers_layout(677) internal buffer offset 96
-[    2.016714] dpaa_eth_priv_probe::bpid 32, count 640 
-[    2.016718] adj count 640
-[    2.024298] DPAA_PROBE: bp_create done
-[    2.028044] DPAA_PROBE: get_channel=1025
-[    2.031967] DPAA_PROBE: add_channel done
-[    2.035888] DPAA_FQ_SETUP: enter
-[    2.039115] fsl_dpa soc:fsl,dpaa:ethernet@4: No Qman software (affine) channels found
-[    2.046949] DPAA_FQ_SETUP: fq #1 type=2
-[    2.050783] DPAA_FQ_SETUP: fq #2 type=1
-[    2.054617] DPAA_FQ_SETUP: fq #3 type=3
-[    2.058451] DPAA_FQ_SETUP: fq #4 type=3
-[    2.062285] DPAA_FQ_SETUP: fq #5 type=3
-[    2.066119] DPAA_FQ_SETUP: fq #6 type=3
-[    2.069952] DPAA_FQ_SETUP: fq #7 type=3
-[    2.073785] DPAA_FQ_SETUP: fq #8 type=3
-[    2.077619] DPAA_FQ_SETUP: fq #9 type=3
-[    2.081452] DPAA_FQ_SETUP: fq #10 type=3
-[    2.085374] DPAA_FQ_SETUP: fq #11 type=3
-[    2.089299] DPAA_FQ_SETUP: fq #12 type=3
-[    2.093221] DPAA_FQ_SETUP: fq #13 type=3
-[    2.097141] DPAA_FQ_SETUP: fq #14 type=3
-[    2.101061] DPAA_FQ_SETUP: fq #15 type=3
-[    2.104982] DPAA_FQ_SETUP: fq #16 type=3
-[    2.108904] DPAA_FQ_SETUP: fq #17 type=3
-[    2.112825] DPAA_FQ_SETUP: fq #18 type=3
-[    2.116746] DPAA_FQ_SETUP: fq #19 type=8
-[    2.120667] DPAA_FQ_SETUP: fq #20 type=8
-[    2.124588] DPAA_FQ_SETUP: fq #21 type=8
-[    2.128509] DPAA_FQ_SETUP: fq #22 type=8
-[    2.132430] DPAA_FQ_SETUP: fq #23 type=8
-[    2.136351] DPAA_FQ_SETUP: fq #24 type=8
-[    2.140273] DPAA_FQ_SETUP: fq #25 type=8
-[    2.144196] DPAA_FQ_SETUP: fq #26 type=8
-[    2.148118] DPAA_FQ_SETUP: fq #27 type=8
-[    2.152039] DPAA_FQ_SETUP: fq #28 type=8
-[    2.155960] DPAA_FQ_SETUP: fq #29 type=8
-[    2.159881] DPAA_FQ_SETUP: fq #30 type=8
-[    2.163802] DPAA_FQ_SETUP: fq #31 type=8
-[    2.167722] DPAA_FQ_SETUP: fq #32 type=8
-[    2.171643] DPAA_FQ_SETUP: fq #33 type=8
-[    2.175564] DPAA_FQ_SETUP: fq #34 type=8
-[    2.179484] DPAA_FQ_SETUP: fq #35 type=6
-[    2.183405] DPAA_FQ_SETUP: fq #36 type=6
-[    2.187326] DPAA_FQ_SETUP: fq #37 type=6
-[    2.191247] DPAA_FQ_SETUP: fq #38 type=6
-[    2.195169] DPAA_FQ_SETUP: fq #39 type=7
-[    2.199093] DPAA_FQ_SETUP: fq #40 type=5
-[    2.203017] DPAA_FQ_SETUP: fq #41 type=4
-[    2.206939] DPAA_FQ_SETUP: fq #42 type=4
-[    2.210860] DPAA_FQ_SETUP: fq #43 type=4
-[    2.214780] DPAA_FQ_SETUP: fq #44 type=4
-[    2.218701] DPAA_FQ_SETUP: main loop done, 44 FQs, egress_cnt=4/4
-[    2.224796] DPAA_PROBE: fq_setup done
-[    2.228459] DPAA_PROBE: cgr_init done
-[    2.232181] DPAA_PROBE: fqs_init done
-[    2.237575] fsl_dpa: fsl_dpa: Probed interface eth1
-[    2.242580] *********dpa_set_buffers_layout(677) internal buffer offset 96
-[    2.249486] dpaa_eth_priv_probe::bpid 32, count 640 
-[    2.249490] adj count 640
-[    2.257072] DPAA_PROBE: bp_create done
-[    2.260819] DPAA_PROBE: get_channel=1025
-[    2.264742] DPAA_PROBE: add_channel done
-[    2.268663] DPAA_FQ_SETUP: enter
-[    2.271893] fsl_dpa soc:fsl,dpaa:ethernet@5: No Qman software (affine) channels found
-[    2.279742] DPAA_FQ_SETUP: fq #1 type=2
-[    2.283583] DPAA_FQ_SETUP: fq #2 type=1
-[    2.287420] DPAA_FQ_SETUP: fq #3 type=3
-[    2.291255] DPAA_FQ_SETUP: fq #4 type=3
-[    2.295088] DPAA_FQ_SETUP: fq #5 type=3
-[    2.298921] DPAA_FQ_SETUP: fq #6 type=3
-[    2.302754] DPAA_FQ_SETUP: fq #7 type=3
-[    2.306589] DPAA_FQ_SETUP: fq #8 type=3
-[    2.310423] DPAA_FQ_SETUP: fq #9 type=3
-[    2.314258] DPAA_FQ_SETUP: fq #10 type=3
-[    2.318178] DPAA_FQ_SETUP: fq #11 type=3
-[    2.322099] DPAA_FQ_SETUP: fq #12 type=3
-[    2.326019] DPAA_FQ_SETUP: fq #13 type=3
-[    2.329939] DPAA_FQ_SETUP: fq #14 type=3
-[    2.333859] DPAA_FQ_SETUP: fq #15 type=3
-[    2.337779] DPAA_FQ_SETUP: fq #16 type=3
-[    2.341700] DPAA_FQ_SETUP: fq #17 type=3
-[    2.345623] DPAA_FQ_SETUP: fq #18 type=3
-[    2.349544] DPAA_FQ_SETUP: fq #19 type=8
-[    2.353468] DPAA_FQ_SETUP: fq #20 type=8
-[    2.357389] DPAA_FQ_SETUP: fq #21 type=8
-[    2.361309] DPAA_FQ_SETUP: fq #22 type=8
-[    2.365229] DPAA_FQ_SETUP: fq #23 type=8
-[    2.369149] DPAA_FQ_SETUP: fq #24 type=8
-[    2.373070] DPAA_FQ_SETUP: fq #25 type=8
-[    2.376990] DPAA_FQ_SETUP: fq #26 type=8
-[    2.380910] DPAA_FQ_SETUP: fq #27 type=8
-[    2.384831] DPAA_FQ_SETUP: fq #28 type=8
-[    2.388751] DPAA_FQ_SETUP: fq #29 type=8
-[    2.392671] DPAA_FQ_SETUP: fq #30 type=8
-[    2.396592] DPAA_FQ_SETUP: fq #31 type=8
-[    2.400513] DPAA_FQ_SETUP: fq #32 type=8
-[    2.404433] DPAA_FQ_SETUP: fq #33 type=8
-[    2.408354] DPAA_FQ_SETUP: fq #34 type=8
-[    2.412274] DPAA_FQ_SETUP: fq #35 type=6
-[    2.416194] DPAA_FQ_SETUP: fq #36 type=6
-[    2.420114] DPAA_FQ_SETUP: fq #37 type=6
-[    2.424035] DPAA_FQ_SETUP: fq #38 type=6
-[    2.427955] DPAA_FQ_SETUP: fq #39 type=7
-[    2.431875] DPAA_FQ_SETUP: fq #40 type=5
-[    2.435797] DPAA_FQ_SETUP: fq #41 type=4
-[    2.439717] DPAA_FQ_SETUP: fq #42 type=4
-[    2.443637] DPAA_FQ_SETUP: fq #43 type=4
-[    2.447557] DPAA_FQ_SETUP: fq #44 type=4
-[    2.451478] DPAA_FQ_SETUP: main loop done, 44 FQs, egress_cnt=4/4
-[    2.457573] DPAA_PROBE: fq_setup done
-[    2.461237] DPAA_PROBE: cgr_init done
-[    2.464960] DPAA_PROBE: fqs_init done
-[    2.470372] fsl_dpa: fsl_dpa: Probed interface eth2
-[    2.475368] *********dpa_set_buffers_layout(677) internal buffer offset 96
-[    2.482271] dpaa_eth_priv_probe::bpid 32, count 640 
-[    2.482274] adj count 640
-[    2.489855] DPAA_PROBE: bp_create done
-[    2.493602] DPAA_PROBE: get_channel=1025
-[    2.497524] DPAA_PROBE: add_channel done
-[    2.501445] DPAA_FQ_SETUP: enter
-[    2.504671] fsl_dpa soc:fsl,dpaa:ethernet@8: No Qman software (affine) channels found
-[    2.512506] DPAA_FQ_SETUP: fq #1 type=2
-[    2.516340] DPAA_FQ_SETUP: fq #2 type=1
-[    2.520174] DPAA_FQ_SETUP: fq #3 type=3
-[    2.524008] DPAA_FQ_SETUP: fq #4 type=3
-[    2.527841] DPAA_FQ_SETUP: fq #5 type=3
-[    2.531675] DPAA_FQ_SETUP: fq #6 type=3
-[    2.535509] DPAA_FQ_SETUP: fq #7 type=3
-[    2.539342] DPAA_FQ_SETUP: fq #8 type=3
-[    2.543176] DPAA_FQ_SETUP: fq #9 type=3
-[    2.547009] DPAA_FQ_SETUP: fq #10 type=3
-[    2.550929] DPAA_FQ_SETUP: fq #11 type=3
-[    2.554849] DPAA_FQ_SETUP: fq #12 type=3
-[    2.558769] DPAA_FQ_SETUP: fq #13 type=3
-[    2.562692] DPAA_FQ_SETUP: fq #14 type=3
-[    2.566612] DPAA_FQ_SETUP: fq #15 type=3
-[    2.570532] DPAA_FQ_SETUP: fq #16 type=3
-[    2.574452] DPAA_FQ_SETUP: fq #17 type=3
-[    2.578372] DPAA_FQ_SETUP: fq #18 type=3
-[    2.582292] DPAA_FQ_SETUP: fq #19 type=8
-[    2.586214] DPAA_FQ_SETUP: fq #20 type=8
-[    2.590138] DPAA_FQ_SETUP: fq #21 type=8
-[    2.594062] DPAA_FQ_SETUP: fq #22 type=8
-[    2.597984] DPAA_FQ_SETUP: fq #23 type=8
-[    2.601905] DPAA_FQ_SETUP: fq #24 type=8
-[    2.605829] DPAA_FQ_SETUP: fq #25 type=8
-[    2.609750] DPAA_FQ_SETUP: fq #26 type=8
-[    2.613671] DPAA_FQ_SETUP: fq #27 type=8
-[    2.617592] DPAA_FQ_SETUP: fq #28 type=8
-[    2.621512] DPAA_FQ_SETUP: fq #29 type=8
-[    2.625434] DPAA_FQ_SETUP: fq #30 type=8
-[    2.629354] DPAA_FQ_SETUP: fq #31 type=8
-[    2.633275] DPAA_FQ_SETUP: fq #32 type=8
-[    2.637196] DPAA_FQ_SETUP: fq #33 type=8
-[    2.641117] DPAA_FQ_SETUP: fq #34 type=8
-[    2.645037] DPAA_FQ_SETUP: fq #35 type=6
-[    2.648958] DPAA_FQ_SETUP: fq #36 type=6
-[    2.652879] DPAA_FQ_SETUP: fq #37 type=6
-[    2.656800] DPAA_FQ_SETUP: fq #38 type=6
-[    2.660721] DPAA_FQ_SETUP: fq #39 type=7
-[    2.664644] DPAA_FQ_SETUP: fq #40 type=5
-[    2.668565] DPAA_FQ_SETUP: fq #41 type=4
-[    2.672485] DPAA_FQ_SETUP: fq #42 type=4
-[    2.676405] DPAA_FQ_SETUP: fq #43 type=4
-[    2.680326] DPAA_FQ_SETUP: fq #44 type=4
-[    2.684247] DPAA_FQ_SETUP: main loop done, 44 FQs, egress_cnt=4/4
-[    2.690341] DPAA_PROBE: fq_setup done
-[    2.694004] DPAA_PROBE: cgr_init done
-[    2.697720] DPAA_PROBE: fqs_init done
-[    2.703115] fsl_dpa: fsl_dpa: Probed interface eth3
-[    2.708108] *********dpa_set_buffers_layout(677) internal buffer offset 96
-[    2.715013] dpaa_eth_priv_probe::bpid 32, count 640 
-[    2.715017] adj count 640
-[    2.722597] DPAA_PROBE: bp_create done
-[    2.726343] DPAA_PROBE: get_channel=1025
-[    2.730265] DPAA_PROBE: add_channel done
-[    2.734189] DPAA_FQ_SETUP: enter
-[    2.737416] fsl_dpa soc:fsl,dpaa:ethernet@9: No Qman software (affine) channels found
-[    2.745250] DPAA_FQ_SETUP: fq #1 type=2
-[    2.749084] DPAA_FQ_SETUP: fq #2 type=1
-[    2.752917] DPAA_FQ_SETUP: fq #3 type=3
-[    2.756750] DPAA_FQ_SETUP: fq #4 type=3
-[    2.760583] DPAA_FQ_SETUP: fq #5 type=3
-[    2.764416] DPAA_FQ_SETUP: fq #6 type=3
-[    2.768252] DPAA_FQ_SETUP: fq #7 type=3
-[    2.772085] DPAA_FQ_SETUP: fq #8 type=3
-[    2.775919] DPAA_FQ_SETUP: fq #9 type=3
-[    2.779753] DPAA_FQ_SETUP: fq #10 type=3
-[    2.783674] DPAA_FQ_SETUP: fq #11 type=3
-[    2.787595] DPAA_FQ_SETUP: fq #12 type=3
-[    2.791516] DPAA_FQ_SETUP: fq #13 type=3
-[    2.795437] DPAA_FQ_SETUP: fq #14 type=3
-[    2.799358] DPAA_FQ_SETUP: fq #15 type=3
-[    2.803280] DPAA_FQ_SETUP: fq #16 type=3
-[    2.807201] DPAA_FQ_SETUP: fq #17 type=3
-[    2.811122] DPAA_FQ_SETUP: fq #18 type=3
-[    2.815044] DPAA_FQ_SETUP: fq #19 type=8
-[    2.818969] DPAA_FQ_SETUP: fq #20 type=8
-[    2.822894] DPAA_FQ_SETUP: fq #21 type=8
-[    2.826814] DPAA_FQ_SETUP: fq #22 type=8
-[    2.830734] DPAA_FQ_SETUP: fq #23 type=8
-[    2.834655] DPAA_FQ_SETUP: fq #24 type=8
-[    2.838575] DPAA_FQ_SETUP: fq #25 type=8
-[    2.842496] DPAA_FQ_SETUP: fq #26 type=8
-[    2.846417] DPAA_FQ_SETUP: fq #27 type=8
-[    2.850337] DPAA_FQ_SETUP: fq #28 type=8
-[    2.854257] DPAA_FQ_SETUP: fq #29 type=8
-[    2.858178] DPAA_FQ_SETUP: fq #30 type=8
-[    2.862101] DPAA_FQ_SETUP: fq #31 type=8
-[    2.866022] DPAA_FQ_SETUP: fq #32 type=8
-[    2.869943] DPAA_FQ_SETUP: fq #33 type=8
-[    2.873865] DPAA_FQ_SETUP: fq #34 type=8
-[    2.877786] DPAA_FQ_SETUP: fq #35 type=6
-[    2.881707] DPAA_FQ_SETUP: fq #36 type=6
-[    2.885628] DPAA_FQ_SETUP: fq #37 type=6
-[    2.889549] DPAA_FQ_SETUP: fq #38 type=6
-[    2.893470] DPAA_FQ_SETUP: fq #39 type=7
-[    2.897391] DPAA_FQ_SETUP: fq #40 type=5
-[    2.901312] DPAA_FQ_SETUP: fq #41 type=4
-[    2.905233] DPAA_FQ_SETUP: fq #42 type=4
-[    2.909154] DPAA_FQ_SETUP: fq #43 type=4
-[    2.913074] DPAA_FQ_SETUP: fq #44 type=4
-[    2.916995] DPAA_FQ_SETUP: main loop done, 44 FQs, egress_cnt=4/4
-[    2.923089] DPAA_PROBE: fq_setup done
-[    2.926752] DPAA_PROBE: cgr_init done
-[    2.930471] DPAA_PROBE: fqs_init done
-[    2.935883] fsl_dpa: fsl_dpa: Probed interface eth4
-[    2.940809] fsl_advanced: FSL DPAA Advanced drivers:
-[    2.945780] fsl_proxy: FSL DPAA Proxy initialization driver
-[    2.951528] fsl_oh: FSL FMan Offline Parsing port driver
-[    2.956952] fsl_oh 1a00000.fman:dpa-fman0-oh@2: Found OH node handle compatible with fsl,dpa-oh
-[    2.965677] fsl_oh 1a00000.fman:dpa-fman0-oh@2: Allocating 0 ingress frame queues duples
-[    2.973780] fsl_oh 1a00000.fman:dpa-fman0-oh@2: OH port port@83000 has no buffer pool. Fragmentation will not be enabled
-[    2.984675] InitLowLevelDriver::of port FM-0-port-OH-1 id 1, handle (____ptrval____)
-[    2.992450] fsl_oh 1a00000.fman:dpa-fman0-oh@2: OH port port@83000 enabled.
-[    2.999418] fsl_oh 1a00000.fman:dpa-fman0-oh@2: found OH port dpa-fman0-oh@2, fman 0, port 2
-[    3.007862] fsl_oh 1a00000.fman:dpa-fman0-oh@2: Default egress frame queue: 97
-[    3.015087] fsl_oh 1a00000.fman:dpa-fman0-oh@2: Default error frame queue: 96
-[    3.022226] fsl_oh 1a00000.fman:dpa-fman0-oh@2: Initialized queues:
-[    3.028534] fsl_oh 1a00000.fman:dpa-fman0-oh@3: Found OH node handle compatible with fsl,dpa-oh
-[    3.037257] fsl_oh 1a00000.fman:dpa-fman0-oh@3: Allocating 0 ingress frame queues duples
-[    3.045357] fsl_oh 1a00000.fman:dpa-fman0-oh@3: OH port port@84000 has no buffer pool. Fragmentation will not be enabled
-[    3.056245] InitLowLevelDriver::of port FM-0-port-OH-2 id 2, handle (____ptrval____)
-[    3.064008] fsl_oh 1a00000.fman:dpa-fman0-oh@3: OH port port@84000 enabled.
-[    3.070974] fsl_oh 1a00000.fman:dpa-fman0-oh@3: found OH port dpa-fman0-oh@3, fman 0, port 3
-[    3.079419] fsl_oh 1a00000.fman:dpa-fman0-oh@3: Default egress frame queue: 99
-[    3.086645] fsl_oh 1a00000.fman:dpa-fman0-oh@3: Default error frame queue: 98
-[    3.093784] fsl_oh 1a00000.fman:dpa-fman0-oh@3: Initialized queues:
-[    3.100337] VFIO - User Level meta-driver version: 0.3
-[    3.105711] pca954x 0-0070: supply vdd not found, using dummy regulator
-[    3.113122] i2c i2c-0: Added multiplexed i2c bus 4
-[    3.118028] i2c i2c-0: Added multiplexed i2c bus 5
-[    3.122938] i2c i2c-0: Added multiplexed i2c bus 6
-[    3.127833] i2c i2c-0: Added multiplexed i2c bus 7
-[    3.132630] pca954x 0-0070: registered 4 multiplexed busses for I2C switch pca9545
-[    3.140252] pca954x 1-0070: supply vdd not found, using dummy regulator
-[    3.147547] i2c i2c-1: Added multiplexed i2c bus 8
-[    3.152405] i2c i2c-1: Added multiplexed i2c bus 9
-[    3.157242] i2c i2c-1: Added multiplexed i2c bus 10
-[    3.162174] i2c i2c-1: Added multiplexed i2c bus 11
-[    3.167060] pca954x 1-0070: registered 4 multiplexed busses for I2C switch pca9545
-[    3.174698] pca954x 2-0070: supply vdd not found, using dummy regulator
-[    3.182200] i2c i2c-2: Added multiplexed i2c bus 12
-[    3.187305] i2c i2c-2: Added multiplexed i2c bus 13
-[    3.210600] rtc-pcf2127-i2c 14-0053: registered as rtc0
-[    3.218145] rtc-pcf2127-i2c 14-0053: setting system clock to 2026-04-17T01:31:45 UTC (1776389505)
-[    3.227103] i2c i2c-2: Added multiplexed i2c bus 14
-[    3.232104] i2c i2c-2: Added multiplexed i2c bus 15
-[    3.236989] pca954x 2-0070: registered 4 multiplexed busses for I2C switch pca9545
-[    3.250524] ina2xx 12-0040: supply vs not found, using dummy regulator
-[    3.259679] ina2xx 12-0040: power monitor ina234 (Rshunt = 1000 uOhm)
-[    3.266194] ina2xx 12-0041: supply vs not found, using dummy regulator
-[    3.274761] ina2xx 12-0041: power monitor ina234 (Rshunt = 1000 uOhm)
-[    3.281262] ina2xx 12-0042: supply vs not found, using dummy regulator
-[    3.289847] ina2xx 12-0042: power monitor ina234 (Rshunt = 1000 uOhm)
-[    3.296350] ina2xx 12-0043: supply vs not found, using dummy regulator
-[    3.304895] ina2xx 12-0043: power monitor ina234 (Rshunt = 5000 uOhm)
-[    3.311417] ina2xx 13-0040: supply vs not found, using dummy regulator
-[    3.320463] ina2xx 13-0040: power monitor ina234 (Rshunt = 5000 uOhm)
-[    3.326969] ina2xx 13-0041: supply vs not found, using dummy regulator
-[    3.335556] ina2xx 13-0041: power monitor ina234 (Rshunt = 5000 uOhm)
-[    3.342053] ina2xx 13-0042: supply vs not found, using dummy regulator
-[    3.350627] ina2xx 13-0042: power monitor ina234 (Rshunt = 5000 uOhm)
-[    3.357124] ina2xx 13-0043: supply vs not found, using dummy regulator
-[    3.365688] ina2xx 13-0043: power monitor ina234 (Rshunt = 1000 uOhm)
-[    3.373442] device-mapper: uevent: version 1.0.3
-[    3.378193] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-devel@redhat.com
-[    3.387225] qoriq-cpufreq qoriq-cpufreq: Freescale QorIQ CPU frequency scaling driver
-[    3.395909] ledtrig-cpu: registered to indicate activity on CPUs
-[    3.437152] SMCCC: SOC_ID: ARCH_SOC_ID not implemented, skipping ....
-[    3.443849] caam 1700000.crypto: device ID = 0x0a11030100000000 (Era 8)
-[    3.450477] caam 1700000.crypto: job rings = 3, qi = 1
-[    3.457289] caam algorithms registered in /proc/crypto
-[    3.462545] caam 1700000.crypto: caam pkc algorithms registered in /proc/crypto
-[    3.469860] caam 1700000.crypto: registering rng-caam
-[    3.475011] caam 1700000.crypto: rng crypto API alg registered prng-caam
-[    3.483121] Freescale USDPAA process driver
-[    3.487310] Freescale USDPAA process driver
-[    3.491491] fsl-usdpaa: no region found
-[    3.495324] Freescale USDPAA process IRQ driver
-[    3.500528] hw perfevents: enabled with armv8_cortex_a72 PMU driver, 7 counters available
-[    3.501686] random: crng init done
-[    3.512533] drop_monitor: Initializing network drop monitor service
-[    3.519784] NET: Registered PF_INET6 protocol family
-[    3.544667] Segment Routing with IPv6
-[    3.548361] In-situ OAM (IOAM) with IPv6
-[    3.552331] mip6: Mobile IPv6
-[    3.555331] NET: Registered PF_KEY protocol family
-[    3.560123] Initializing NETLINK_KEY socket
-[    3.564380] Key type dns_resolver registered
-[    3.568667] mpls_gso: MPLS GSO support
-[    3.576265] registered taskstats version 1
-[    3.580468] Loading compiled-in X.509 certificates
-[    3.597282] Loaded X.509 cert 'VyOS Networks build time autogenerated Kernel key: 3d67e68f1923ffa8ae32a675111f8cad96cb7424'
-[    3.620333] Loaded X.509 cert 'VyOS LS1046A Secure Boot CA: ed9ff86ac8d3dc1144144291a885ffd7bcd198db'
-[    3.635520] sfp sfp-xfi0: Host maximum power 3.0W
-[    3.640697] sfp sfp-xfi1: Host maximum power 3.0W
-[    3.645782] ASK fp_netfilter: hooks registered + conntrack force-enabled
-[    3.652555] clk: Disabling unused clocks
-[    3.658091] Freeing unused kernel memory: 4992K
-[    3.701785] Checked W+X mappings: passed, no W+X pages found
-[    3.707469] Run /init as init process
-Loading, please wait...
-Starting systemd-udevd version 252.39-1~deb12u1
-[    3.971105] sfp sfp-xfi0: module OEM              SFP-10G-T        rev 02   sn CSY101OB0963     dc 241012  
-[    4.025449] sdhci: Secure Digital Host Controller Interface driver
-[    4.031666] sdhci: Copyright(c) Pierre Ossman
-[    4.054214] sfp sfp-xfi1: module OEM              SFP-H10GB-CU1M   rev R    sn CSC240509160290  dc 240527  
-[    4.061287] sdhci-pltfm: SDHCI platform and OF driver helper
-[    4.075797] hwmon hwmon12: temp1_input not attached to any thermal zone
-[    4.081209] fsl_dpa soc:fsl,dpaa:ethernet@4 e3: renamed from eth1
-[    4.101039] fsl_dpa soc:fsl,dpaa:ethernet@1 e2: renamed from eth0
-[    4.137547] fsl_dpa soc:fsl,dpaa:ethernet@9 e6: renamed from eth4
-[    4.139415] mmc0: SDHCI controller on 1560000.mmc [1560000.mmc] using ADMA 64-bit
-[    4.152404] fsl_dpa soc:fsl,dpaa:ethernet@8 e5: renamed from eth3
-[    4.163856] xhci-hcd xhci-hcd.0.auto: xHCI Host Controller
-[    4.169384] xhci-hcd xhci-hcd.0.auto: new USB bus registered, assigned bus number 1
-[    4.177108] xhci-hcd xhci-hcd.0.auto: hcc params 0x0220f66d hci version 0x100 quirks 0x0000008002000810
-[    4.186532] xhci-hcd xhci-hcd.0.auto: irq 74, io mem 0x02f00000
-[    4.192535] xhci-hcd xhci-hcd.0.auto: xHCI Host Controller
-[    4.198026] xhci-hcd xhci-hcd.0.auto: new USB bus registered, assigned bus number 2
-[    4.205689] xhci-hcd xhci-hcd.0.auto: Host supports USB 3.0 SuperSpeed
-[    4.212357] usb usb1: New USB device found, idVendor=1d6b, idProduct=0002, bcdDevice= 6.06
-[    4.215434] fsl_dpa soc:fsl,dpaa:ethernet@5 e4: renamed from eth2
-[    4.220638] usb usb1: New USB device strings: Mfr=3, Product=2, SerialNumber=1
-[    4.229224] mmc0: new HS200 MMC card at address 0001
-[    4.233955] usb usb1: Product: xHCI Host Controller
-[    4.233959] usb usb1: Manufacturer: Linux 6.6.133-vyos xhci-hcd
-[    4.249721] usb usb1: SerialNumber: xhci-hcd.0.auto
-[    4.254956] hub 1-0:1.0: USB hub found
-[    4.255397] mmcblk0: mmc0:0001 0IM20E 29.6 GiB
-[    4.258760] hub 1-0:1.0: 1 port detected
-[    4.267231]  mmcblk0: p1 p2 p3
-[    4.267538] usb usb2: New USB device found, idVendor=1d6b, idProduct=0003, bcdDevice= 6.06
-[    4.270723] mmcblk0boot0: mmc0:0001 0IM20E 31.5 MiB
-[    4.278563] usb usb2: New USB device strings: Mfr=3, Product=2, SerialNumber=1
-[    4.278568] usb usb2: Product: xHCI Host Controller
-[    4.278571] usb usb2: Manufacturer: Linux 6.6.133-vyos xhci-hcd
-[    4.278574] usb usb2: SerialNumber: xhci-hcd.0.auto
-[    4.278879] hub 2-0:1.0: USB hub found
-[    4.284259] mmcblk0boot1: mmc0:0001 0IM20E 31.5 MiB
-[    4.290706] hub 2-0:1.0: 1 port detected
-[    4.296356] mmcblk0rpmb: mmc0:0001 0IM20E 4.00 MiB, chardev (243:0)
-Begin: Loading essential drivers ... done.
-[    4.507084] usb 1-1: new high-speed USB device number 2 using xhci-hcd
-[    4.639731] usb 1-1: New USB device found, idVendor=0781, idProduct=5581, bcdDevice= 1.00
-[    4.647929] usb 1-1: New USB device strings: Mfr=1, Product=2, SerialNumber=3
-[    4.655070] usb 1-1: Product: Ultra
-[    4.658558] usb 1-1: Manufacturer: SanDisk
-[    4.662656] usb 1-1: SerialNumber: 4C531001600621100051
-[    4.681350] SCSI subsystem initialized
-[    4.689820] usb-storage 1-1:1.0: USB Mass Storage device detected
-[    4.696182] scsi host0: usb-storage 1-1:1.0
-[    4.700581] usbcore: registered new interface driver usb-storage
-[    5.743973] scsi 0:0:0:0: Direct-Access     SanDisk  Ultra            1.00 PQ: 0 ANSI: 6
-[    5.758198] sd 0:0:0:0: [sda] 121307136 512-byte logical blocks: (62.1 GB/57.8 GiB)
-[    5.767201] sd 0:0:0:0: [sda] Write Protect is off
-[    5.772366] sd 0:0:0:0: [sda] Write cache: disabled, read cache: enabled, doesn't support DPO or FUA
-[    5.785776]  sda: sda1 sda2
-[    5.788778] sd 0:0:0:0: [sda] Attached SCSI removable disk
-Begin: Running /scripts/init-premount ... done.
-Begin: Mounting root file system ... [   14.674874] loop: module loaded
-[   14.702215] loop0: detected capacity change from 0 to 1055600
-done.
-Begin: Running /scripts/init-bottom ... done.
-[   16.461489] systemd[1]: Inserted module 'autofs4'
-[   16.608978] systemd[1]: systemd 252.39-1~deb12u1 running in system mode (+PAM +AUDIT +SELINUX +APPARMOR +IMA +SMACK +SECCOMP +GCRYPT -GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 -IDN +IPTC +KMOD +LIBCRYPTSETUP +LIBFDISK +PCRE2 -PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD -BPF_FRAMEWORK -XKBCOMMON +UTMP +SYSVINIT default-hierarchy=unified)
-[   16.641715] systemd[1]: Detected architecture arm64.
+[    0.834900] fsl_dpa soc:fsl,dpaa:ethernet@8: No Qman software (affine) channels found
+[    0.845025] fsl_dpa soc:fsl,dpaa:ethernet@9: No Qman software (affine) channels found
+[    0.855120] fsl_dpa soc:fsl,dpaa:ethernet@1: No Qman software (affine) channels found
+[    0.865232] fsl_dpa soc:fsl,dpaa:ethernet@4: No Qman software (affine) channels found
+[    0.875297] fsl_dpa soc:fsl,dpaa:ethernet@5: No Qman software (affine) channels found
+[    0.977546] Freescale USDPAA process driver
 
-Welcome to VyOS 2026.04.17-0102-rolling (current)!
+Welcome to VyOS 2026.04.17-2339-rolling (current)!
 
-[   16.673700] systemd[1]: Hostname set to <localhost.localdomain>.
-[   16.696957] systemd[1]: Initializing machine ID from random generator.
-[   16.726755] systemd[1]: memfd_create() called without MFD_EXEC or MFD_NOEXEC_SEAL set
-[   17.945341] systemd[1]: Queued start job for default target Multi-User System.
-[   17.964481] systemd[1]: Created slice Slice /system/getty.
 [  OK  ] Created slice Slice /system/getty.
-[   17.978928] systemd[1]: Created slice Slice /system/modprobe.
 [  OK  ] Created slice Slice /system/modprobe.
-[   17.993899] systemd[1]: Created slice Slice /system/serial-getty.
 [  OK  ] Created slice Slice /system/serial-getty.
-[   18.008737] systemd[1]: Created slice User and Session Slice.
 [  OK  ] Created slice User and Session Slice.
-[   18.022227] systemd[1]: Started Dispatch Password Requests to Console Directory Watch.
 [  OK  ] Started Dispatch Password …ts to Console Directory Watch.
-[   18.040206] systemd[1]: Started Forward Password Requests to Wall Directory Watch.
 [  OK  ] Started Forward Password R…uests to Wall Directory Watch.
-[   18.057422] systemd[1]: Set up automount Arbitrary Executable File Formats File System Automount Point.
 [  OK  ] Set up automount Arbitrary…s File System Automount Point.
-[   18.076135] systemd[1]: Reached target Local Encrypted Volumes.
 [  OK  ] Reached target Local Encrypted Volumes.
-[   18.090136] systemd[1]: Reached target Local Integrity Protected Volumes.
 [  OK  ] Reached target Local Integrity Protected Volumes.
-[   18.106144] systemd[1]: Reached target Network is Online.
 [  OK  ] Reached target Network is Online.
-[   18.120117] systemd[1]: Reached target Path Units.
 [  OK  ] Reached target Path Units.
-[   18.132125] systemd[1]: Reached target Remote File Systems.
 [  OK  ] Reached target Remote File Systems.
-[   18.146119] systemd[1]: Reached target Slice Units.
 [  OK  ] Reached target Slice Units.
-[   18.158129] systemd[1]: Reached target TLS tunnels for network services - per-config-file target.
 [  OK  ] Reached target TLS tunnels…ices - per-config-file target.
-[   18.176128] systemd[1]: Reached target Swaps.
 [  OK  ] Reached target Swaps.
-[   18.187132] systemd[1]: Reached target Local Verity Protected Volumes.
 [  OK  ] Reached target Local Verity Protected Volumes.
-[   18.203262] systemd[1]: Listening on initctl Compatibility Named Pipe.
 [  OK  ] Listening on initctl Compatibility Named Pipe.
-[   18.220536] systemd[1]: Listening on Journal Socket (/dev/log).
 [  OK  ] Listening on Journal Socket (/dev/log).
-[   18.234361] systemd[1]: Listening on Journal Socket.
 [  OK  ] Listening on Journal Socket.
-[   18.246406] systemd[1]: Listening on udev Control Socket.
 [  OK  ] Listening on udev Control Socket.
-[   18.260294] systemd[1]: Listening on udev Kernel Socket.
 [  OK  ] Listening on udev Kernel Socket.
-[   18.284257] systemd[1]: Mounting Huge Pages File System...
          Mounting Huge Pages File System...
-[   18.298340] systemd[1]: Mounting POSIX Message Queue File System...
          Mounting POSIX Message Queue File System...
-[   18.321277] systemd[1]: Mounting Kernel Debug File System...
          Mounting Kernel Debug File System...
-[   18.336394] systemd[1]: Mounting Kernel Trace File System...
          Mounting Kernel Trace File System...
-[   18.353822] systemd[1]: Starting Create List of Static Device Nodes...
          Starting Create List of Static Device Nodes...
-[   18.370543] systemd[1]: Starting Load Kernel Module configfs...
          Starting Load Kernel Module configfs...
-[   18.391547] systemd[1]: Starting Load Kernel Module dm_mod...
          Starting Load Kernel Module dm_mod...
-[   18.406402] systemd[1]: Starting Load Kernel Module drm...
          Starting Load Kernel Module drm...
-[   18.429407] systemd[1]: Starting Load Kernel Module efi_pstore...
          Starting Load Kernel Module efi_pstore...
-[   18.446581] systemd[1]: Starting Load Kernel Module fuse...
          Starting Load Kernel Module fuse...
-[   18.467443] systemd[1]: Starting Load Kernel Module loop...
          Starting Load Kernel Module loop...
-[   18.479688] fuse: init (API version 7.39)
-[   18.495534] systemd[1]: Starting Journal Service...
          Starting Journal Service...
-[   18.510805] systemd[1]: Starting Remount Root and Kernel File Systems...
          Starting Remount Root and Kernel File Systems...
-[   18.535267] systemd[1]: Starting Coldplug All udev Devices...
          Starting Coldplug All udev Devices...
-[   18.555653] systemd[1]: Mounted Huge Pages File System.
 [  OK  ] Mounted Huge Pages File System.
-[   18.569429] systemd[1]: Mounted POSIX Message Queue File System.
 [  OK  ] Mounted POSIX Message Queue File System.
-[   18.584434] systemd[1]: Mounted Kernel Debug File System.
 [  OK  ] Mounted Kernel Debug File System.
-[   18.599403] systemd[1]: Mounted Kernel Trace File System.
 [  OK  ] Mounted Kernel Trace File System.
-[   18.614694] systemd[1]: Finished Create List of Static Device Nodes.
 [  OK  ] Finished Create List of Static Device Nodes.
-[   18.630928] systemd[1]: modprobe@configfs.service: Deactivated successfully.
-[   18.638404] systemd[1]: Finished Load Kernel Module configfs.
 [  OK  ] Finished Load Kernel Module configfs.
-[   18.652435] systemd[1]: Started Journal Service.
-[  OK  ] Started Journal Service.
 [  OK  ] Finished Load Kernel Module dm_mod.
 [  OK  ] Finished Load Kernel Module drm.
 [  OK  ] Finished Load Kernel Module efi_pstore.
 [  OK  ] Finished Load Kernel Module fuse.
 [  OK  ] Finished Load Kernel Module loop.
+[  OK  ] Started Journal Service.
 [  OK  ] Finished Remount Root and Kernel File Systems.
          Mounting FUSE Control File System...
          Mounting Kernel Configuration File System...
          Starting Flush Journal to Persistent Storage...
          Starting Load/Save Random Seed...
-         Startin[   18.791199] systemd-journald[398]: Received client request to flush runtime journal.
-g Create System Users...
+         Starting Create System Users...
 [  OK  ] Started VyOS commit daemon.
 [  OK  ] Started VyOS configuration daemon.
 [  OK  ] Started VyOS DNS configuration keeper.
@@ -864,30 +111,25 @@ g Create System Users...
 [  OK  ] Reached target Local File Systems.
          Starting Set Up Additional Binary Formats...
          Starting Create System Files and Directories...
-         Mounting Arbitrary Executable File Formats File System...
-[  OK  ] Mounted Arbitrary Executable File Formats File System.
-[  OK  ] Finished Set Up Additional Binary Formats.
 [  OK  ] Finished Create System Files and Directories.
          Starting Security Auditing Service...
-[  OK     19.261810] ipsec_flow_init 
-0m] Started Entropy Daemon based on the HAVEGE algorithm.
+[  OK  ] Started Entropy Daemon based on the HAVEGE algorithm.
          Starting live-config conta…t process (late userspace)....
 [  OK  ] Started Rule-based Manager for Device Events and Files.
          Starting Load ASK fast-pat…les (cdx, auto_bridge, fci)...
-[   19.895092] Loading of unsigned module is rejected
-[   20.024448] sd 0:0:0:0: Attached scsi generic sg0 type 0
-[   20.111206] bridge: filtering via arp/ip/ip6tables is no longer available by default. Update your scripts to load br_netfilter if you need this.
-[   20.182810] Loading of unsigned module is rejected
-[   20.270636] tmp401 5-004c: Detected TI TMP431 chip
-[   20.278448] tmp401 6-004c: Detected TI TMP431 chip
-[   20.753144] Loading of unsigned module is rejected
+         Mounting Arbitrary Executable File Formats File System...
+[  OK  ] Mounted Arbitrary Executable File Formats File System.
+[  OK  ] Finished Set Up Additional Binary Formats.
+[   17.229091] cdx_create_fragment_bufpool::failed to locate eth bman pool
+[   17.235728] cdx_init_frag_module(3092) create_fragment_bufpool failed
+[   17.242199] alloc_offline_port::no free of ports
+[   17.246826] ipsec_init_ohport: Error in allocating OH port Channel
 [  OK  ] Finished Load ASK fast-pat…dules (cdx, auto_bridge, fci).
          Starting Load Kernel Modules...
-[   21.084395] Bridge firewalling registered
-[  OK  ] Finished Load Kernel Modules.
-         Starting Apply Kernel Variables...
 [  OK  ] Started Security Auditing Service.
          Starting Record System Boot/Shutdown in UTMP...
+[  OK  ] Finished Load Kernel Modules.
+         Starting Apply Kernel Variables...
 [  OK  ] Finished Record System Boot/Shutdown in UTMP.
 [  OK  ] Finished Apply Kernel Variables.
 [  OK  ] Reached target System Initialization.
@@ -906,6 +148,7 @@ g Create System Users...
 [  OK  ] Reached target Basic System.
          Starting Deferred execution scheduler...
          Starting Atop process accounting daemon...
+         Starting CMM Connection Ma…nt Module for ASK Fast Path...
 [  OK  ] Started Regular background program processing daemon.
          Starting D-Bus System Message Bus...
          Starting Remove Stale Onli…t4 Metadata Check Snapshots...
@@ -923,18 +166,19 @@ g Create System Users...
 [  OK  ] Finished Remove Stale Onli…ext4 Metadata Check Snapshots.
 [  OK  ] Started Podman API Service.
 [  OK  ] Finished Update GRUB loader configuration structure.
-[  OK  ] Started D-Bus System Message Bus.
-[  OK  ] Started User Login Management.
+[  OK  ] Started CMM Connection Man…ment Module for ASK Fast Path.
 [  OK  ] Finished Deassert SFP+ TX_…E for SDK kernel (no phylink).
 [  OK  ] Started VyOS Router.
+         Starting ASK fast-path con…(remove VyOS notrack rules)...
          Starting Apply fq qdisc on…rfaces (LS1046A BBR pacing)...
          Starting Permit User Sessions...
 [  OK  ] Finished Apply fq qdisc on…terfaces (LS1046A BBR pacing).
 [  OK  ] Finished Permit User Sessions.
-[  OK  ] Started Getty on tty1.
-[  OK  ] Started Serial Getty on ttyS0.
-[  OK  ] Reached target Login Prompts.
-[   38.482627] vyos-router[1307]: Starting VyOS router.
+[  OK  ] Started Getty on tt[  OK  ] Reached target Login Prompts.
+[   38.633973] vyos-router[1274]: Starting VyOS router.
+[  OK  ] Started D-Bus System Message Bus.
+[  OK  ] Started User Login Management.
+[  OK  ] Finished ASK fast-path con…x (remove VyOS notrack rules).
 [  OK  ] Started FastNetMon - DoS/D… sFlow/Netflow/mirror support.
 [  OK  ] Reached target Multi-User System.
 [  OK  ] Reached target VyOS target.
@@ -943,48 +187,15 @@ g Create System Users...
 [  OK  ] Finished Record Runlevel Change in UTMP.
          Stopping fan speed regulator...
 [  OK  ] Stopped fan speed regulator.
-[   41.326181] vyos-router[1307]: Waiting for NICs to settle down: settled in 0sec..
-[   41.339429] vyos-router[1307]: could not generate DUID ... failed!
+[   41.687654] vyos-router[1274]: Waiting for NICs to settle down: settled in 0sec..
+[   41.700979] vyos-router[1274]: could not generate DUID ... failed!
          Starting fan speed regulator...
 [  OK  ] Started fan speed regulator.
 [  OK  ] Finished Fan whistle notification on boot complete.
-[   55.610785] vyos-router[1307]: Mounting VyOS Config...done.
-[   60.627817] vyos-router[1307]:  migrate
-[   60.633474] vyos-router[2211]: Traceback (most recent call last):
-[   60.642149] vyos-router[2211]:   File "/usr/libexec/vyos/run-config-migration.py", line 73, in <module>
-[   60.653197] vyos-router[2211]:     config_migrate.run()
-[   60.661289] vyos-router[2211]:   File "/usr/lib/python3/dist-packages/vyos/migrate.py", line 255, in run
-[   60.673221] vyos-router[2211]:     self.load_config()
-[   60.681210] vyos-router[2211]:   File "/usr/lib/python3/dist-packages/vyos/migrate.py", line 233, in load_config
-[   60.693319] vyos-router[2211]:     self.compose = ComposeConfig(self.file_version.config_body, self.checkpoint_file)
-[   60.706270] vyos-router[2211]:                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[   60.719216] vyos-router[2211]:   File "/usr/lib/python3/dist-packages/vyos/compose_config.py", line 41, in __init__
-[   60.732311] vyos-router[2211]:     self.config_tree = ConfigTree(config_obj)
-[   60.742222] vyos-router[2211]:                        ^^^^^^^^^^^^^^^^^^^^^^
-[   60.752237] vyos-router[2211]:   File "/usr/lib/python3/dist-packages/vyos/configtree.py", line 219, in __init__
-[   60.765313] vyos-router[2211]:     raise ValueError('Failed to parse config: {0}'.format(msg))
-[   60.776230] vyos-router[2211]: ValueError: Failed to parse config: Syntax error on line 348, character 13: Invalid syntax.
-[   61.054256] vyos-router[2214]: Traceback (most recent call last):
-[   61.063253] vyos-router[2214]:   File "/usr/libexec/vyos/vyos-interface-rescan.py", line 206, in <module>
-[   61.075369] vyos-router[2214]:     main()
-[   61.082208] vyos-router[2214]:   File "/usr/libexec/vyos/vyos-interface-rescan.py", line 203, in main
-[   61.094216] vyos-router[2214]:     interface_rescan(configfile)
-[   61.102220] vyos-router[2214]:   File "/usr/libexec/vyos/vyos-interface-rescan.py", line 151, in interface_rescan
-[   61.115166] vyos-router[2214]:     config = ConfigTree(config_file)
-[   61.123160] vyos-router[2214]:              ^^^^^^^^^^^^^^^^^^^^^^^
-[   61.131191] vyos-router[2214]:   File "/usr/lib/python3/dist-packages/vyos/configtree.py", line 219, in __init__
-[   61.143168] vyos-router[2214]:     raise ValueError('Failed to parse config: {0}'.format(msg))
-[   61.154194] vyos-router[2214]: ValueError: Failed to parse config: Syntax error on line 348, character 13: Invalid syntax.
-[   61.325380] vyos-router[1307]:  activate
-[   61.332647] vyos-router[2216]: Traceback (most recent call last):
-[   61.341301] vyos-router[2216]:   File "/usr/libexec/vyos/run-config-activation.py", line 71, in <module>
-[   61.353319] vyos-router[2216]:     compose = ComposeConfig(config_str, checkpoint_file=debug)
-[   61.364284] vyos-router[2216]:               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[   61.376197] vyos-router[2216]:   File "/usr/lib/python3/dist-packages/vyos/compose_config.py", line 41, in __init__
-[   61.388195] vyos-router[2216]:     self.config_tree = ConfigTree(config_obj)
-[   61.399189] vyos-router[2216]:                        ^^^^^^^^^^^^^^^^^^^^^^
-[   61.409207] vyos-router[2216]:   File "/usr/lib/python3/dist-packages/vyos/configtree.py", line 219, in __init__
-[   61.421201] vyos-router[2216]:     raise ValueError('Failed to parse config: {0}'.format(msg))
-[   61.432199] vyos-router[2216]: ValueError: Failed to parse config: Syntax error on line 348, character 13: Invalid syntax.
-[   62.584487] vyos-router[1307]:  configure.
-[   63.355695] vyos-config[1331]: Configuration error
+[   55.779780] vyos-router[1274]: Mounting VyOS Config...done.
+[   61.626522] fsl_dpa soc:fsl,dpaa:ethernet@8 eth0: phy device not initialized
+[   63.377166] fsl_dpa soc:fsl,dpaa:ethernet@8 eth0: phy device not initialized
+[   63.419753] fsl_dpa soc:fsl,dpaa:ethernet@9 eth1: phy device not initialized
+[   63.462079] fsl_dpa soc:fsl,dpaa:ethernet@1 eth2: phy device not initialized
+[   63.504135] fsl_dpa soc:fsl,dpaa:ethernet@4 eth3: phy device not initialized
+[   63.545567] fsl_dpa soc:fsl,dpaa:ethernet@5 eth4: phy device not initialized
