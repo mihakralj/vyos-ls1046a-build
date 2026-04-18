@@ -323,7 +323,7 @@ jobs:
         with:
           body_path: /tmp/release_notes.md
           tag_name: ${{ needs.build_iso.outputs.build_version }}
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: true
           files: |
             ${{ needs.build_iso.outputs.image_iso }}
             ${{ needs.build_iso.outputs.image_iso }}.minisig

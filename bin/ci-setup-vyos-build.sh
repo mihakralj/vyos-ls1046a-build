@@ -27,13 +27,12 @@ patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-007-no_sbsign.
 # when /sys/firmware/efi does not exist.
 find vyos-build -name '*.py' -exec \
   grep -l 'uefi.secure.boot' {} \; | \
-  xargs -r sed -i "s/'--uefi-secure-boot'[,]\?//g" 2>/dev/null || true
+  xargs -r sed -i "s/'--uefi-secure-boot'[,]\?//g"
 
 ### LS1046A console: revert ttyAMA0 -> ttyS0 (8250 UART at 0x21c0500)
 sed -i 's/ttyAMA0/ttyS0/g' \
   vyos-build/data/live-build-config/hooks/live/01-live-serial.binary \
-  vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/grub/default-union-grub-entry \
-  2>/dev/null || true
+  vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/grub/default-union-grub-entry
 
 ### MOK certificate for kernel module signing
 if [ -f data/mok/MOK.key ]; then
