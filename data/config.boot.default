@@ -33,9 +33,6 @@ system {
 }
 
 interfaces {
-    ethernet eth0 {
-        description "MGMT (leftmost RJ45)"
-    }
     loopback lo {
     }
 }
