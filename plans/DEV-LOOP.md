@@ -115,19 +115,25 @@ curl -sI http://192.168.1.137:8080/filesystem.squashfs | head -3
 
 ### 2. Set up `dev_boot_live` U-Boot env (one-time, from serial console)
 
+The cmdline is a **byte-for-byte mirror** of the USB `boot.cmd` in the repo, with exactly two substitutions:
+
+| USB (`boot.cmd`) | TFTP live (`dev_boot_live`) |
+|------------------|-----------------------------|
+| `usb start; fatload usb 0:2 …; usb stop` | `tftp …` (same file contents, same memory addresses) |
+| *(squashfs found on the USB medium by live-boot)* | `fetch=http://192.168.1.137:8080/filesystem.squashfs` (squashfs comes from HTTP instead) |
+
+Everything else — `rootdelay=10`, `usbcore.autosuspend=-1`, `components noeject nopersistence noautologin nonetworking union=overlay`, `fsl_dpaa_fman.fsl_fm_max_frm=9600` — is **identical** so the live-boot initramfs, vyos-router, and every service run the same code path as a real USB boot. This is the whole point: you test USB boot behaviour over TFTP.
+
 ```
-setenv dev_boot_live 'tftp ${kernel_addr_r} vmlinuz; tftp ${fdt_addr_r} mono-gw.dtb; tftp ${ramdisk_addr_r} initrd.img; setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fetch=http://192.168.1.137:8080/filesystem.squashfs fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
+setenv dev_boot_live 'tftp ${kernel_addr_r} vmlinuz; tftp ${fdt_addr_r} mono-gw.dtb; tftp ${ramdisk_addr_r} initrd.img; setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live rootdelay=10 components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 usbcore.autosuspend=-1 fetch=http://192.168.1.137:8080/filesystem.squashfs; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
 saveenv
 ```
 
-Key differences from `dev_boot`:
+The three files pulled over TFTP (`vmlinuz`, `initrd.img`, `mono-gw.dtb`) and the squashfs pulled over HTTP are **the exact same bytes** that live on the ISO and on a `dd`'d USB stick — `build-local.sh iso-live` extracts them directly from `live/` inside the ISO without modification. No synthesis, no repackaging.
 
-- `fetch=http://.../filesystem.squashfs` instead of `vyos-union=/boot/<IMAGE>` — live-boot initramfs downloads the squashfs into tmpfs at mount time.
-- `boot=live components noeject nopersistence noautologin nonetworking union=overlay` — matches `boot.cmd` USB cmdline for identical behaviour.
-- No `rootdelay=` — there is no USB to wait for.
-- No `vyos-union=` — eMMC contents are irrelevant.
-
-> **Why HTTP not TFTP for the squashfs?** live-boot supports `fetch=http://…`, `fetch=ftp://…`, and `fetch=file:…`. It does not speak TFTP. TFTP is also UDP-block-by-block — pulling 515 MB over 512-byte blocks is painful. HTTP on GbE pulls the squashfs in ~5–10 s.
+> **Why HTTP not TFTP for the squashfs?** live-boot's `fetch=` supports only `http://`, `ftp://`, and `file:` — not TFTP. Also, TFTP is UDP block-by-block — 515 MB over 512-byte blocks would be painful. HTTP on GbE pulls the squashfs in ~5–10 s.
+>
+> **Why no `panic=60`?** `boot.cmd` does not set it and we want bit-identical behaviour. If your config.boot adds new MANAGED_PARAMS, add them to both `boot.cmd` and `dev_boot_live` together.
 
 ### 3. Boot
 
@@ -135,14 +141,16 @@ Key differences from `dev_boot`:
 run dev_boot_live
 ```
 
-Boot sequence:
+Boot sequence (same code paths as USB, different medium):
 
-1. U-Boot pulls vmlinuz (10 MB) + DTB (35 KB) + initrd.img (32 MB) over TFTP → ~3 s
-2. `booti` decompresses and jumps into kernel
-3. Kernel mounts initrd.img, runs live-boot init
-4. live-boot `fetch=` pulls the 515 MB squashfs over HTTP into `/run/live/medium/` → ~8 s on GbE
-5. Overlay mounts over tmpfs — full write-capable live system
-6. systemd reaches `multi-user.target`, login prompt on ttyS0
+1. U-Boot pulls `vmlinuz` (10 MB) + `mono-gw.dtb` (35 KB) + `initrd.img` (32 MB) over TFTP → ~3 s (USB `fatload` ≈ 2 s — comparable)
+2. `booti` decompresses and jumps into the kernel — **same kernel binary as USB**
+3. Kernel mounts `initrd.img`, runs live-boot init — **same initrd as USB**
+4. live-boot sees `fetch=` instead of a block-device medium → pulls the 515 MB squashfs over HTTP into `/run/live/medium/` → ~8 s on GbE (USB reads it lazily from sda)
+5. Overlay mounts over tmpfs — **same squashfs contents as USB**, same `/etc`, same vyos-router, same `config.boot.default`
+6. systemd reaches `multi-user.target`, login prompt on ttyS0 — **same services, same timing**
+
+Anything you would see on a real USB boot you will see here: vyos-router messages, migration scripts, DPAA1 probe order, PHY/SFP detection, fan thermal binding, systemd unit failures, everything. The only differences visible in the boot log are the early TFTP/HTTP fetch lines and the absence of `usb-storage`/`sda` probes.
 
 Total: similar to USB live boot (~90 s including DPAA1 init), but every iteration is:
 
