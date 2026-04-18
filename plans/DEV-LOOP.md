@@ -88,6 +88,87 @@ run dev_boot
 # Wait ~26s for first VyOS boot → kexec → ~82s for final login prompt
 ```
 
+## TFTP Live Boot (no USB, no eMMC required)
+
+> **Status:** ✅ WORKING (verified 2026-04-18)
+> **Use when:** iterating on full ISO changes (vyos-1x patches, package selection, initramfs, config defaults) without flashing USB or touching eMMC.
+
+`dev_boot` above mounts the squashfs from eMMC (`vyos-union=/boot/<IMAGE>`) — so it still depends on an `install image` having happened once, and you cannot test changes to the squashfs itself. `dev_boot_live` fixes that: kernel+initrd come via TFTP, the squashfs streams over HTTP into tmpfs at initrd time. Exactly the same boot path as USB live boot, but over the network.
+
+### 1. Deploy the live artifacts (on LXC 200)
+
+```bash
+cd /root/vyos-ls1046a-build
+./bin/build-local.sh iso-live /tmp/vyos-2026.04.18-1752-rolling-LS1046A-arm64.iso
+# or omit the path to auto-pick the newest /tmp/vyos-*-LS1046A-arm64.iso
+```
+
+This extracts `live/filesystem.squashfs` (≈515 MB), `live/vmlinuz`, `live/initrd.img`, and `mono-gw.dtb` from the ISO into `/srv/tftp/`. A Python `http.server` on port 8080 (background process, already running) serves the squashfs over HTTP — `fetch=` does not support TFTP.
+
+Verify:
+
+```bash
+curl -sI http://192.168.1.137:8080/filesystem.squashfs | head -3
+# HTTP/1.0 200 OK
+# Content-Length: 539877376
+```
+
+### 2. Set up `dev_boot_live` U-Boot env (one-time, from serial console)
+
+```
+setenv dev_boot_live 'tftp ${kernel_addr_r} vmlinuz; tftp ${fdt_addr_r} mono-gw.dtb; tftp ${ramdisk_addr_r} initrd.img; setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fetch=http://192.168.1.137:8080/filesystem.squashfs fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
+saveenv
+```
+
+Key differences from `dev_boot`:
+
+- `fetch=http://.../filesystem.squashfs` instead of `vyos-union=/boot/<IMAGE>` — live-boot initramfs downloads the squashfs into tmpfs at mount time.
+- `boot=live components noeject nopersistence noautologin nonetworking union=overlay` — matches `boot.cmd` USB cmdline for identical behaviour.
+- No `rootdelay=` — there is no USB to wait for.
+- No `vyos-union=` — eMMC contents are irrelevant.
+
+> **Why HTTP not TFTP for the squashfs?** live-boot supports `fetch=http://…`, `fetch=ftp://…`, and `fetch=file:…`. It does not speak TFTP. TFTP is also UDP-block-by-block — pulling 515 MB over 512-byte blocks is painful. HTTP on GbE pulls the squashfs in ~5–10 s.
+
+### 3. Boot
+
+```
+run dev_boot_live
+```
+
+Boot sequence:
+
+1. U-Boot pulls vmlinuz (10 MB) + DTB (35 KB) + initrd.img (32 MB) over TFTP → ~3 s
+2. `booti` decompresses and jumps into kernel
+3. Kernel mounts initrd.img, runs live-boot init
+4. live-boot `fetch=` pulls the 515 MB squashfs over HTTP into `/run/live/medium/` → ~8 s on GbE
+5. Overlay mounts over tmpfs — full write-capable live system
+6. systemd reaches `multi-user.target`, login prompt on ttyS0
+
+Total: similar to USB live boot (~90 s including DPAA1 init), but every iteration is:
+
+```bash
+# Edit your change, rebuild ISO in CI or wherever, then:
+./bin/build-local.sh iso-live /tmp/vyos-<new>.iso
+# Power-cycle Mono Gateway, interrupt U-Boot:
+run dev_boot_live
+```
+
+No USB flashing, no `install image`, no `add system image`. Pure network boot.
+
+### When to use which
+
+| Scenario | Use |
+|----------|-----|
+| Kernel / DTB / kernel config change | `dev_boot` (squashfs unchanged, boots in ~26 s + kexec) |
+| ISO content change (vyos-1x patch, package list, initramfs, config.boot.default) | `dev_boot_live` (always picks up latest squashfs) |
+| Post-install behaviour / `install image` / eMMC boot path | USB stick + manual `install image` |
+
+### Limitations
+
+- The Mono Gateway must reach LXC 200 at 192.168.1.137:8080 on the rightmost RJ45 (fm1-mac5) before live-boot runs. If the network cable is unplugged, `fetch=` hangs in initramfs with `wget: download timed out`.
+- tmpfs uses RAM. 515 MB squashfs + overlay scratch fits comfortably in 8 GB DDR4, but don't try `apt install` of gigabytes of packages — you'll run out of tmpfs.
+- `nonetworking` is set (matches USB) so vyos-router will not configure interfaces. Remove `nonetworking` from the cmdline if you need networking to come up automatically.
+
 ## Boot Flow (TFTP dev)
 
 ```
