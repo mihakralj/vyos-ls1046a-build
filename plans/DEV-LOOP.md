@@ -99,11 +99,14 @@ run dev_boot
 
 ```bash
 cd /root/vyos-ls1046a-build
-./bin/build-local.sh iso-live /tmp/vyos-2026.04.18-1752-rolling-LS1046A-arm64.iso
-# or omit the path to auto-pick the newest /tmp/vyos-*-LS1046A-arm64.iso
+./bin/build-local.sh iso-live                # auto-downloads the newest GitHub release
+# or pass an explicit ISO path to use a local build:
+./bin/build-local.sh iso-live /tmp/vyos-<version>-LS1046A-arm64.iso
 ```
 
-This extracts `live/filesystem.squashfs` (≈515 MB), `live/vmlinuz`, `live/initrd.img`, and `mono-gw.dtb` from the ISO into `/srv/tftp/`. A Python `http.server` on port 8080 (background process, already running) serves the squashfs over HTTP — `fetch=` does not support TFTP.
+With no argument, `iso-live` queries `gh release view --repo mihakralj/vyos-ls1046a-build` for the newest `*-LS1046A-arm64.iso` asset and downloads it to `/tmp/` (skipping if the same file is already there — matched by name). This guarantees you are testing the exact ISO that was just published to GitHub, without having to copy or rename anything.
+
+It then extracts `live/filesystem.squashfs` (≈515 MB), `live/vmlinuz`, `live/initrd.img`, and `mono-gw.dtb` from the ISO into `/srv/tftp/`. A Python `http.server` on port 8080 (background process, already running) serves the squashfs over HTTP — `fetch=` does not support TFTP.
 
 Verify:
 
@@ -155,13 +158,13 @@ Anything you would see on a real USB boot you will see here: vyos-router message
 Total: similar to USB live boot (~90 s including DPAA1 init), but every iteration is:
 
 ```bash
-# Edit your change, rebuild ISO in CI or wherever, then:
-./bin/build-local.sh iso-live /tmp/vyos-<new>.iso
+# After CI publishes a new release (watch it with `gh run watch`):
+./bin/build-local.sh iso-live
 # Power-cycle Mono Gateway, interrupt U-Boot:
 run dev_boot_live
 ```
 
-No USB flashing, no `install image`, no `add system image`. Pure network boot.
+No USB flashing, no `install image`, no `add system image`, no manually downloading the ISO. Pure network boot, fetching the latest release straight from GitHub.
 
 ### When to use which
 
