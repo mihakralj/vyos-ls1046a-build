@@ -144,6 +144,9 @@ fi
 INJECT_EOF
 
 # Insert injection block before "# Change name of Signing Cert" in build-kernel.sh
+# Verify the anchor exists before attempting injection
+grep -q '# Change name of Signing Cert' "$KERNEL_BUILD/build-kernel.sh" \
+  || { echo "ERROR: build-kernel.sh anchor '# Change name of Signing Cert' missing"; exit 1; }
 sed -i '/# Change name of Signing Cert/r /tmp/kernel-inject.sh' "$KERNEL_BUILD/build-kernel.sh"
 rm -f /tmp/kernel-inject.sh
 
