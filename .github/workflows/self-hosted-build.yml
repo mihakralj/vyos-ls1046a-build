@@ -16,6 +16,12 @@ on:
         description: 'Builder Docker image'
         default: 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64'
 
+# Opt into Node.js 24 for all JavaScript actions (azure/login@v2 still ships
+# Node 20 as of 2026-04; GitHub is force-migrating runners starting June 2026).
+# Removes the "Node.js 20 actions are deprecated" warning.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   # ── Step 1: Power on the Azure ARM64 VM ──────────────────────────
   start-vm:
@@ -32,8 +38,40 @@ jobs:
             --resource-group arm64-runner-group \
             --name arm64-runner
 
-      - name: Wait for runner to register
-        run: sleep 45
+      - name: Wait for self-hosted runner to come online
+        env:
+          # Prefer a PAT with repo-admin rights if provided; fall back to the
+          # default GITHUB_TOKEN (which may lack admin:actions and return 403).
+          GH_TOKEN: ${{ secrets.RUNNER_PAT || secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUNNER_LABEL: ARM64
+        run: |
+          # Poll the GitHub REST API until a runner with label $RUNNER_LABEL
+          # reports status=online. Listing runners requires repo-admin rights;
+          # if the API is not accessible we log once and fall back to a fixed
+          # sleep so the workflow is never worse than before.
+          probe=$(gh api "repos/${GH_REPO}/actions/runners" 2>&1 || true)
+          if echo "$probe" | grep -q '"runners"'; then
+            echo "Polling runner status via REST API..."
+            deadline=$(( $(date +%s) + 300 ))
+            while [ "$(date +%s)" -lt "$deadline" ]; do
+              status=$(gh api "repos/${GH_REPO}/actions/runners" \
+                --jq ".runners[] | select(.labels[].name==\"${RUNNER_LABEL}\") | .status" \
+                | head -1 || true)
+              echo "runner '${RUNNER_LABEL}' status: ${status:-<not-registered>}"
+              if [ "$status" = "online" ]; then
+                echo "Runner is online."
+                exit 0
+              fi
+              sleep 5
+            done
+            echo "Timed out waiting for runner '${RUNNER_LABEL}' to come online" >&2
+            exit 1
+          else
+            echo "Runner REST API not accessible with current token, falling back to fixed wait"
+            echo "(add a RUNNER_PAT secret with repo-admin rights to enable active polling)"
+            sleep 45
+          fi
 
   # ── Step 2: Build VyOS on the self-hosted ARM64 runner ───────────
   call-auto-build:
