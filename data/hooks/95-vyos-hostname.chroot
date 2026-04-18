@@ -1,0 +1,6 @@
+#!/bin/sh -e
+# Preempt live-config's /lib/live/config/0020-hostname rewriting /etc/hostname
+# to "debian". That script only acts if /etc/hostname is the base-files default
+# "localhost.localdomain". Ship "vyos" instead so the grep fails and
+# getty's /etc/issue \n expands to "vyos" from the first banner.
+echo "vyos" > /etc/hostname
