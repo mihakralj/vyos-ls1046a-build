@@ -40,13 +40,19 @@ KERNEL_PATCHES="$KERNEL_BUILD/patches/kernel"
 mkdir -p "$KERNEL_PATCHES"
 cp data/kernel-patches/4002-hwmon-ina2xx-add-INA234-support.patch "$KERNEL_PATCHES/"
 cp data/kernel-patches/4003-sfp-rollball-phylink-einval-fallback.patch "$KERNEL_PATCHES/"
-cp data/kernel-patches/4006-xhci-plat-ls1046a-avoid-bei.patch        "$KERNEL_PATCHES/"
 
 # Stage phylink patch script for injection into build-kernel.sh
 cp data/kernel-patches/patch-phylink.py "$KERNEL_BUILD/"
 
 # Stage DPAA XDP queue_index fix for AF_XDP socket lookup
 cp data/kernel-patches/patch-dpaa-xdp-queue-index.py "$KERNEL_BUILD/"
+
+# Stage LS1046A DWC3 xHCI quirks (AVOID_BEI + TRUST_TX_LENGTH) — Python
+# patcher rather than unified diff (hand-counted hunk headers proved fragile).
+# Required for USB live boot: dwc3_host_init() creates the xhci platform
+# child with of_node=NULL, so the original unified-diff patch's of_device_is_compatible()
+# never matched at runtime and USB-storage probe killed the host controller.
+cp data/kernel-patches/patch-xhci-ls1046a-quirks.py "$KERNEL_BUILD/"
 
 # Stage FMD Shim source for injection into build-kernel.sh
 cp data/kernel-patches/fsl_fmd_shim.c "$KERNEL_BUILD/"
@@ -68,6 +74,13 @@ fi
 DPAA_ETH_C=$(find . -path "*/freescale/dpaa/dpaa_eth.c" -maxdepth 6 | head -1)
 if [ -n "$DPAA_ETH_C" ] && [ -f "${CWD}/patch-dpaa-xdp-queue-index.py" ]; then
   python3 "${CWD}/patch-dpaa-xdp-queue-index.py" "$DPAA_ETH_C"
+fi
+
+# LS1046A DWC3 xHCI quirks (AVOID_BEI + TRUST_TX_LENGTH).
+# Required for USB live boot; without this, USB-storage probe stalls and
+# the host controller dies during init-bottom squashfs mount.
+if [ -f "${CWD}/patch-xhci-ls1046a-quirks.py" ]; then
+  python3 "${CWD}/patch-xhci-ls1046a-quirks.py" .
 fi
 
 # FMD Shim: inject /dev/fm0* chardev module for DPDK fmlib RSS
