@@ -57,8 +57,9 @@ cp data/kernel-patches/4002-hwmon-ina2xx-add-INA234-support.patch "$KERNEL_PATCH
 cp data/kernel-patches/4003-sfp-rollball-phylink-einval-fallback.patch "$KERNEL_PATCHES/"
 # swphy patch: maps 10G/5G/2.5G to SWMII_SPEED_1000 for SDK fixed-link 10G MACs
 cp data/kernel-patches/4004-swphy-support-10g-fixed-link-speed.patch "$KERNEL_PATCHES/"
-# DPAA probe soft-lockup fix (while-loop safety break)
-cp data/kernel-patches/4005-dpaa-eth-fix-soft-lockup-in-probe.patch "$KERNEL_PATCHES/" 2>/dev/null || true
+# NOTE: 4005-dpaa-eth-fix-soft-lockup-in-probe.patch is NOT used here — it targets
+# the mainline dpaa_eth driver. ASK builds use the SDK sdk_dpaa driver (replaced by
+# patch-dpaa-probe-fix.py which applies the equivalent soft-lockup fix to sdk_dpaa).
 # xHCI AVOID_BEI + TRUST_TX_LENGTH quirks — REQUIRED for USB live boot on LS1046A DWC3
 # Without this, USB storage dies during init-bottom squashfs mount → boot never completes
 cp data/kernel-patches/4006-xhci-plat-ls1046a-avoid-bei.patch "$KERNEL_PATCHES/"
