@@ -61,9 +61,11 @@ cp data/kernel-patches/4004-swphy-support-10g-fixed-link-speed.patch "$KERNEL_PA
 # the mainline dpaa_eth driver. ASK builds use the SDK sdk_dpaa driver (replaced by
 # patch-dpaa-probe-fix.py which applies the equivalent soft-lockup fix to sdk_dpaa).
 # xHCI AVOID_BEI + TRUST_TX_LENGTH quirks — REQUIRED for USB live boot on LS1046A DWC3
-# Without this, USB storage dies during init-bottom squashfs mount → boot never completes
-cp data/kernel-patches/4006-xhci-plat-ls1046a-avoid-bei.patch "$KERNEL_PATCHES/"
-echo "### ASK hooks + swphy + xhci patches staged at $KERNEL_PATCHES/"
+# Without this, USB storage dies during init-bottom squashfs mount → boot never completes.
+# NOTE: applied as a Python patcher rather than a unified-diff patch — hand-counted hunk
+# headers proved fragile and silently broke the build twice (2026-04-18).
+cp data/kernel-patches/patch-xhci-ls1046a-quirks.py "$KERNEL_BUILD/"
+echo "### ASK hooks + swphy + xhci patches staged at $KERNEL_PATCHES/ (xhci via Python patcher)"
 
 ### 3. SDK sources — stage tarball and inject extraction BEFORE patches loop
 #
@@ -119,6 +121,15 @@ if [ -f "${CWD}/ask-nxp-sdk-sources.tar.gz" ]; then
     python3 "${CWD}/patch-dpaa-probe-fix.py" .
   else
     echo "WARNING: patch-dpaa-probe-fix.py not found — SDK DPAA probe fix skipped"
+  fi
+
+  # LS1046A DWC3 xHCI quirks (AVOID_BEI + TRUST_TX_LENGTH).
+  # Without this, USB-storage probe stalls and the host controller dies
+  # during USB live boot; init-bottom hangs trying to mount squashfs.
+  if [ -f "${CWD}/patch-xhci-ls1046a-quirks.py" ]; then
+    python3 "${CWD}/patch-xhci-ls1046a-quirks.py" .
+  else
+    echo "WARNING: patch-xhci-ls1046a-quirks.py not found — xHCI quirks skipped"
   fi
 
   echo "I: ASK — SDK sources + build integration injected into kernel tree"
