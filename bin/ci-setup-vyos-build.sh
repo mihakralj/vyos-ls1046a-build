@@ -92,6 +92,10 @@ chmod +x "$CHROOT/usr/local/bin/vpp-post-start.sh"
 cp data/systemd/vpp-post-start.conf "$CHROOT/etc/systemd/system/vpp.service.d/post-start.conf"
 
 ### Chroot hooks (from extracted data files)
+# 95: set /etc/hostname=vyos + force vyos user password BEFORE live-config runs
+cp data/hooks/95-vyos-hostname.chroot "$HOOKS/95-vyos-hostname.chroot"
+chmod +x "$HOOKS/95-vyos-hostname.chroot"
+
 cp data/hooks/98-fancontrol.chroot "$HOOKS/98-fancontrol.chroot"
 chmod +x "$HOOKS/98-fancontrol.chroot"
 
