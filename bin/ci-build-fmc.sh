@@ -90,13 +90,19 @@ echo "--- building libfmc.a + fmc (aarch64) ---"
 cd "$WORK/fmc/source"
 
 # The fmc Makefile accepts these overrides (see data/ask-userspace/fmc/README.md)
+# NOTE: passing CFLAGS/CXXFLAGS on the command line would fully REPLACE the
+# Makefile's `+= -I$(FMD_USPACE_HEADER_PATH)` additions (make treats cmdline
+# vars as immutable). CPPFLAGS is NOT referenced by this Makefile's CFLAGS
+# block so it is appended by the implicit compile rule only — use it to add
+# -fpermissive (libxml2 API signature changed; fmc targets older API).
 make libfmc.a fmc \
   CC="$CC" CXX="$CXX" AR="$AR" \
   MACHINE=ls1046 \
   FMD_USPACE_HEADER_PATH="$STAGING/include/fmd" \
   FMD_USPACE_LIB_PATH="$STAGING/lib" \
   LIBXML2_HEADER_PATH="$LIBXML2_INC" \
-  TCLAP_HEADER_PATH="$TCLAP_INC" 2>&1 | tail -40
+  TCLAP_HEADER_PATH="$TCLAP_INC" \
+  CPPFLAGS="-fpermissive" 2>&1 | tail -40
 
 [ -f libfmc.a ] || { echo "ERROR: libfmc.a not produced" >&2; exit 1; }
 [ -f fmc ]    || { echo "ERROR: fmc binary not produced" >&2; exit 1; }
