@@ -9,12 +9,24 @@
 # Build order (dependency chain):
 #   1. libcli       (no deps)
 #   2. libfci       (no deps)
-#   3. dpa_app      (libcli + pre-built libfmc/libfm)
-#   4. cmm          (libfci + libcli + pre-built libnfnetlink/libnetfilter-conntrack + libpcap)
+#   3. fmlib        (no deps; needs NXP FMD ioctl headers in $KSRC)
+#   4. fmc          (fmlib)
+#   5. dpa_app      (libcli + fmlib + fmc built in this pipeline)
+#   6. cmm          (libfci + libcli + pre-built libnfnetlink/libnetfilter-conntrack + libpcap)
 #
 # Pre-built dependencies NOT rebuilt here (kept from data/ask-userspace/):
 #   - libnfnetlink, libnetfilter-conntrack (NXP-patched, require upstream download + patch)
-#   - fmlib, fmc (C++ project, complex build — future phase)
+#
+# WHY fmlib + fmc are rebuilt:
+#   The ASK patch adds new fields to t_FmPcdKgSchemeParams (bool shared) and
+#   t_FmPcdHashTableParams. If dpa_app is compiled against patched headers but
+#   linked against a stale libfmc.a built from unpatched sources, struct offsets
+#   diverge → heap corruption → SIGSEGV in libfmc C++ destructors during XML
+#   config processing. The kernel then logs:
+#     cdx_module_init::start_dpa_app failed rc 11
+#     cdx_create_fragment_bufpool::failed to locate eth bman pool
+#     cdx_module_init::dpa_ipsec start failed
+#   Rebuilding both libs with the same patched headers fixes all three.
 
 set -e
 
@@ -86,17 +98,13 @@ if [ -d "$PREBUILT/libnetfilter-conntrack" ]; then
   done
 fi
 
-# libfmc + libfm (pre-built static libs + headers for dpa_app)
-if [ -d "$PREBUILT/fmc" ]; then
-  cp "$PREBUILT/fmc/libfmc.a" "$STAGING/lib/"
-  cp "$PREBUILT/fmc/fmc.h" "$STAGING/include/"
-fi
-if [ -d "$PREBUILT/fmlib" ]; then
-  cp "$PREBUILT/fmlib/libfm.a" "$STAGING/lib/"
-  cp -a "$PREBUILT/fmlib/include/"* "$STAGING/include/" 2>/dev/null || true
-fi
+# NOTE: fmlib (libfm.a) and fmc (libfmc.a) are rebuilt from source below —
+# see Stage 2.5 / Stage 2.6. The prebuilts in $PREBUILT/fmlib and $PREBUILT/fmc
+# are retained as an emergency fallback and are NO LONGER copied into staging
+# here, to guarantee dpa_app links against the freshly-built ABI-consistent
+# libraries.
 
-echo "    Staging populated: $(ls "$STAGING/lib/" | wc -l) libs, $(ls "$STAGING/include/" | wc -l) headers"
+echo "    Staging populated: $(ls "$STAGING/lib/" 2>/dev/null | wc -l) libs, $(ls "$STAGING/include/" 2>/dev/null | wc -l) headers"
 
 ### ====================================================================
 ### Stage 1: Build libcli
@@ -163,6 +171,50 @@ else
   echo "    WARNING: libfci source not found — using pre-built"
   cp "$PREBUILT/fci/libfci.so"* "$STAGING/lib/" 2>/dev/null || true
   cp "$PREBUILT/fci/libfci.h" "$STAGING/include/" 2>/dev/null || true
+fi
+
+### ====================================================================
+### Stage 2.5: Build fmlib (libfm.a) from source with mono ASK extensions
+### ====================================================================
+echo ""
+echo "### Stage 2.5: Building fmlib from source"
+FMLIB_OK=0
+if bash "$SCRIPT_DIR/ci-build-fmlib.sh" "$KSRC" "$STAGING" ; then
+  FMLIB_OK=1
+else
+  echo "    WARNING: fmlib source build failed — falling back to pre-built libfm.a"
+  echo "             dpa_app may crash with SIGSEGV at runtime (ABI mismatch)"
+  if [ -f "$PREBUILT/fmlib/libfm.a" ]; then
+    cp "$PREBUILT/fmlib/libfm.a" "$STAGING/lib/"
+    cp -a "$PREBUILT/fmlib/include/"* "$STAGING/include/" 2>/dev/null || true
+  fi
+fi
+
+### ====================================================================
+### Stage 2.6: Build fmc (libfmc.a + fmc binary) from source with ASK extensions
+### ====================================================================
+echo ""
+echo "### Stage 2.6: Building fmc from source"
+FMC_OK=0
+if [ "$FMLIB_OK" = "1" ] && bash "$SCRIPT_DIR/ci-build-fmc.sh" "$STAGING" ; then
+  FMC_OK=1
+  # Install the fresh fmc binary into the target chroot
+  if [ -f "$STAGING/bin/fmc" ]; then
+    install -m 0755 "$STAGING/bin/fmc" "$CHROOT/usr/bin/fmc"
+    echo "    installed fresh fmc to $CHROOT/usr/bin/fmc"
+  fi
+else
+  echo "    WARNING: fmc source build failed — falling back to pre-built libfmc.a"
+  if [ -f "$PREBUILT/fmc/libfmc.a" ]; then
+    cp "$PREBUILT/fmc/libfmc.a" "$STAGING/lib/"
+    cp "$PREBUILT/fmc/fmc.h" "$STAGING/include/" 2>/dev/null || true
+  fi
+fi
+
+if [ "$FMLIB_OK" = "1" ] && [ "$FMC_OK" = "1" ]; then
+  echo "    fmlib+fmc rebuilt from source — dpa_app ABI will be consistent"
+else
+  echo "    WARNING: one or both of fmlib/fmc fell back to pre-built — ABI may mismatch"
 fi
 
 ### ====================================================================

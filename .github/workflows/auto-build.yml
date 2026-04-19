@@ -109,7 +109,12 @@ jobs:
             protobuf-compiler python3-cracklib python3-protobuf \
             libreadline-dev liblua5.3-dev byacc flex \
             dosfstools mtools zstd u-boot-tools \
-            libpcre2-dev xorriso
+            libpcre2-dev xorriso \
+            libxml2-dev libtclap-dev
+          # libxml2-dev + libtclap-dev: required to build fmc from source
+          # (see bin/ci-build-fmc.sh and bin/ci-build-fmlib.sh). Rebuilding
+          # fmc+fmlib ensures dpa_app links against ABI-consistent libraries
+          # and no longer SIGSEGVs on the mono gateway.
           apt-get upgrade -y
 
       - uses: actions/checkout@v6
