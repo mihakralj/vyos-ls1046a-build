@@ -83,28 +83,26 @@ if [ ! -d "$KSRC/include/uapi/linux/fmd" ]; then
   exit 1
 fi
 
-# 4. Build. fmlib ships Makefiles that honour CROSS_COMPILE and KERNEL_SRC.
+# 4. Build. fmlib ships a single top-level Makefile with targets
+#    libfm-<arch>.a (libfm-arm.a for aarch64/LS1043). Invoke from root.
 echo "--- building libfm-arm.a (aarch64) ---"
 cd "$WORK/fmlib"
-# Some fmlib releases use `make libfm-arm.a`, others `make -C src/wrapper`.
-# Try the documented target first, then fall back.
-if make -C src libfm-arm.a \
-     CROSS_COMPILE="$CROSS" \
-     KERNEL_SRC="$KSRC" \
-     PLATFORM=LS1043 2>&1 | tail -20 ; then
-  :
-else
-  echo "    primary target failed, trying default target..."
-  make -C src \
-     CROSS_COMPILE="$CROSS" \
-     KERNEL_SRC="$KSRC" \
-     PLATFORM=LS1043 2>&1 | tail -20
+set +e
+make libfm-arm.a \
+  CROSS_COMPILE="$CROSS" \
+  KERNEL_SRC="$KSRC" 2>&1 | tee /tmp/fmlib-build.log | tail -40
+MAKE_RC=${PIPESTATUS[0]}
+set -e
+if [ "$MAKE_RC" != "0" ]; then
+  echo "ERROR: make libfm-arm.a exited $MAKE_RC" >&2
+  echo "--- full log ---" >&2
+  tail -80 /tmp/fmlib-build.log >&2 || true
+  exit 1
 fi
 
-# Locate the produced archive (name varies across releases)
+# Locate the produced archive (at repo root per the Makefile's `%.a: %.o` rule)
 LIBFM=""
-for cand in src/libfm-arm.a src/libfm.a libfm-arm.a libfm.a \
-            src/wrapper/libfm-arm.a src/wrapper/libfm.a ; do
+for cand in libfm-arm.a libfm.a src/libfm-arm.a src/libfm.a ; do
   if [ -f "$cand" ]; then LIBFM="$cand"; break; fi
 done
 if [ -z "$LIBFM" ]; then
