@@ -1,0 +1,15 @@
+diff --git a/src/services/vyos-configd b/src/services/vyos-configd
+--- a/src/services/vyos-configd
++++ b/src/services/vyos-configd
+@@ -358,6 +358,11 @@ if __name__ == '__main__':
+ 
+     signal.signal(signal.SIGTERM, sig_handler)
+     signal.signal(signal.SIGINT, sig_handler)
++    # LS1046A: during initial boot commit, system_console.py calls
++    # `systemctl daemon-reload` + `systemctl restart serial-getty@ttyS0.service`.
++    # On serial-console-only boards a stray SIGHUP reaches configd and,
++    # lacking a handler, terminates it -- wedging vyshim in a ZMQ recv forever.
++    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+ 
+     # Define the vyshim environment variable
+     remove_if_file(configd_env_file)
