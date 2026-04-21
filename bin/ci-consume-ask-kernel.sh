@@ -112,12 +112,17 @@ fi
 cp "$STAGE/manifest.json" "packages/.ask-kernel-manifest.json"
 
 # ── Stage kernel/headers into live-build's packages.chroot/ ───────────
-# live-build's apt inside the chroot cannot resolve `linux-image-*-ask`
-# from the Debian/VyOS apt repos — it only exists as a .deb we just
-# downloaded. Dropping matching .debs into
-# `vyos-build/data/live-build-config/packages.chroot/` makes
-# `dpkg -i` run before the apt pass, which satisfies the
-# `linux-image-*-ask` dependency that VyOS' vyos-1x package lists.
+# The ASK kernel is named linux-image-<KVER>-vyos (LOCALVERSION=-vyos),
+# matching the default VyOS kernel_flavor. Dropping the .debs into
+# `vyos-build/data/live-build-config/packages.chroot/` makes `dpkg -i`
+# run before the apt pass, so:
+#   - the kernel + modules are installed from OUR .debs (not re-pulled
+#     from packages.vyos.net by name), and
+#   - every VyOS out-of-tree kernel-module package
+#     (jool, nat-rtsp, openvpn-dco, vyos-ipt-netflow, …) whose control
+#     file carries `Depends: linux-image-<KVER>-vyos` resolves cleanly.
+# ask-modules-<KVER>-vyos ships the cdx/fci/auto_bridge OOT .ko files
+# and must sit next to the kernel in packages.chroot/ (same dpkg pass).
 #
 # vyos-build is checked out at $GITHUB_WORKSPACE/vyos-build by the
 # preceding "Checkout vyos-build repo" step in auto-build.yml.
@@ -126,7 +131,8 @@ if [ -d "vyos-build/data/live-build-config" ]; then
     mkdir -p "$VB_PKG_CHROOT"
     for f in packages/linux-image-*_arm64.deb \
              packages/linux-headers-*_arm64.deb \
-             packages/linux-libc-dev_*_arm64.deb; do
+             packages/linux-libc-dev_*_arm64.deb \
+             packages/ask-modules-*_arm64.deb; do
         [ -f "$f" ] && cp -v "$f" "$VB_PKG_CHROOT/"
     done
     echo "### Staged kernel .debs into $VB_PKG_CHROOT/"

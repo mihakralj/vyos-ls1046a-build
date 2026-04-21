@@ -102,57 +102,10 @@ cp data/systemd/fman-fq-qdisc.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fman-fq-qdisc
 
 echo "### vyos-build setup complete"
 
-### ASK kernel: switch vyos-build's kernel_flavor so live-build picks
-### linux-image-6.6.135-ask (staged into packages/) instead of pulling
-### linux-image-6.6.135-vyos from the VyOS apt repo.
-if [ -n "${ASK_KERNEL_TAG:-}" ]; then
-    echo "### ASK kernel in effect — rewriting vyos-build/data/defaults.toml kernel_flavor to 'ask'"
-    sed -i 's/^kernel_flavor *=.*/kernel_flavor = "ask"/' vyos-build/data/defaults.toml
-    grep -E '^kernel_(version|flavor)' vyos-build/data/defaults.toml
-
-    ### Satisfy out-of-tree kernel-module deps on linux-image-6.6.135-vyos
-    ### (jool, nat-rtsp, openvpn-dco, vyos-ipt-netflow) by shipping a
-    ### transitional empty package named linux-image-6.6.135-vyos that
-    ### Depends on our ASK kernel. dpkg -i runs on packages.chroot/*.deb
-    ### BEFORE apt's install pass, so apt then sees the -vyos name
-    ### already satisfied and never pulls the real VyOS kernel from
-    ### packages.vyos.net. One kernel ends up installed (the ASK one)
-    ### so 17-gen_initramfs.chroot is happy, and the module packages
-    ### resolve cleanly.
-    KVER=$(tr -d '[:space:]' < vyos-build/data/live-build-config/packages.chroot/.kver 2>/dev/null || true)
-    if [ -z "$KVER" ]; then
-        # Derive from the staged linux-image .deb name.
-        IMG=$(ls packages/linux-image-*-ask_*_arm64.deb 2>/dev/null | head -1)
-        if [ -n "$IMG" ]; then
-            # linux-image-6.6.135-ask_6.6.135-1_arm64.deb -> 6.6.135
-            KVER=$(basename "$IMG" | sed -E 's/^linux-image-([0-9.]+)-ask_.*/\1/')
-        fi
-    fi
-    if [ -n "$KVER" ]; then
-        echo "### Building transitional stub: linux-image-${KVER}-vyos → Depends linux-image-${KVER}-ask"
-        STUB=$(mktemp -d)
-        mkdir -p "$STUB/DEBIAN"
-        cat > "$STUB/DEBIAN/control" <<EOF
-Package: linux-image-${KVER}-vyos
-Version: ${KVER}-askstub1
-Architecture: arm64
-Maintainer: ASK CI <mihakralj@users.noreply.github.com>
-Depends: linux-image-${KVER}-ask
-Section: kernel
-Priority: optional
-Multi-Arch: foreign
-Description: Transitional stub mapping linux-image-${KVER}-vyos onto the ASK kernel
- Empty package installed via packages.chroot/ before apt runs so that
- out-of-tree VyOS kernel-module packages (jool, nat-rtsp, openvpn-dco,
- vyos-ipt-netflow) whose control fields hard-depend on
- linux-image-${KVER}-vyos resolve against the ASK kernel.
-EOF
-        STUB_DEB="vyos-build/data/live-build-config/packages.chroot/linux-image-${KVER}-vyos_${KVER}-askstub1_arm64.deb"
-        mkdir -p "$(dirname "$STUB_DEB")"
-        dpkg-deb --build "$STUB" "$STUB_DEB"
-        ls -la "$STUB_DEB"
-        rm -rf "$STUB"
-    else
-        echo "WARN: could not derive KVER for -vyos stub package; out-of-tree modules may fail to install."
-    fi
-fi
+### ASK kernel is now built as linux-image-<KVER>-vyos (LOCALVERSION=-vyos,
+### tag kernel-<KVER>-ask5+), so it is a drop-in replacement for VyOS's
+### own kernel: same package name, same module path, same `uname -r`.
+### No kernel_flavor rewrite, no stub .deb, no apt pin required —
+### ci-consume-ask-kernel.sh drops the real kernel into packages.chroot/
+### and dpkg installs it before apt runs, satisfying every
+### Depends: linux-image-<KVER>-vyos across the VyOS package ecosystem.
