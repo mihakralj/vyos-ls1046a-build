@@ -101,3 +101,12 @@ cp data/systemd/fman-fq-qdisc.service "$CHROOT/etc/systemd/system/fman-fq-qdisc.
 cp data/systemd/fman-fq-qdisc.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fman-fq-qdisc.conf"
 
 echo "### vyos-build setup complete"
+
+### ASK kernel: switch vyos-build's kernel_flavor so live-build picks
+### linux-image-6.6.135-ask (staged into packages/) instead of pulling
+### linux-image-6.6.135-vyos from the VyOS apt repo.
+if [ -n "${ASK_KERNEL_TAG:-}" ]; then
+    echo "### ASK kernel in effect — rewriting vyos-build/data/defaults.toml kernel_flavor to 'ask'"
+    sed -i 's/^kernel_flavor *=.*/kernel_flavor = "ask"/' vyos-build/data/defaults.toml
+    grep -E '^kernel_(version|flavor)' vyos-build/data/defaults.toml
+fi
