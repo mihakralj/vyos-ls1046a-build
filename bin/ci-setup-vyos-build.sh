@@ -109,4 +109,25 @@ if [ -n "${ASK_KERNEL_TAG:-}" ]; then
     echo "### ASK kernel in effect — rewriting vyos-build/data/defaults.toml kernel_flavor to 'ask'"
     sed -i 's/^kernel_flavor *=.*/kernel_flavor = "ask"/' vyos-build/data/defaults.toml
     grep -E '^kernel_(version|flavor)' vyos-build/data/defaults.toml
+
+    ### Block linux-image-*-vyos from being pulled transitively from the
+    ### VyOS apt repo. The 17-gen_initramfs.chroot hook aborts with
+    ###   "there is more than one kernel image file installed!"
+    ### when both linux-image-6.6.135-ask (our staged ASK kernel) and
+    ### linux-image-6.6.135-vyos (pulled as a dep) are installed.
+    ###
+    ### live-build reads config/archives/*.pref.chroot and copies the
+    ### file to /etc/apt/preferences.d/*.pref in the chroot BEFORE any
+    ### apt install step — which is exactly when we need the pin active.
+    ### vyos-build seeds config/ from data/live-build-config/, so dropping
+    ### the file there propagates through `lb config`.
+    LB_ARCHIVES=vyos-build/data/live-build-config/archives
+    mkdir -p "$LB_ARCHIVES"
+    cat > "$LB_ARCHIVES/no-vyos-kernel.pref.chroot" <<'PREF'
+Package: linux-image-*-vyos linux-headers-*-vyos linux-image-vyos linux-headers-vyos
+Pin: release *
+Pin-Priority: -1
+PREF
+    echo "### Wrote apt pin to exclude linux-image-*-vyos:"
+    cat "$LB_ARCHIVES/no-vyos-kernel.pref.chroot"
 fi
