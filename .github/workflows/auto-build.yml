@@ -19,6 +19,35 @@ on:
         description: 'ASK kernel release tag to consume (default: read data/ask-kernel.pin). Set empty string to disable and build kernel locally.'
         default: ''
 
+  workflow_call:
+    inputs:
+      runs_on:
+        description: 'Runner label to execute the build on'
+        type: string
+        required: false
+        default: 'ubuntu-24.04-arm'
+      BUILD_BY:
+        type: string
+        required: false
+        default: ''
+      build_version:
+        type: string
+        required: false
+        default: ''
+      builder_image:
+        type: string
+        required: false
+        default: 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64'
+      ASK_KERNEL_TAG:
+        type: string
+        required: false
+        default: ''
+    secrets:
+      MOK_KEY:
+        required: false
+      MINISIGN_PRIVATE_KEY:
+        required: false
+
 env:
   DEBIAN_MIRROR: http://deb.debian.org/debian/
   DEBIAN_SECURITY_MIRROR: http://deb.debian.org/debian-security
@@ -26,12 +55,14 @@ env:
 
 jobs:
   build_iso:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ inputs.runs_on || 'ubuntu-24.04-arm' }}
     permissions:
       contents: write
     container:
-      image: ${{ github.event.inputs.builder_image || 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64' }}
+      image: ${{ inputs.builder_image || github.event.inputs.builder_image || 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64' }}
       options: --sysctl net.ipv6.conf.lo.disable_ipv6=0 --privileged --user root
+      volumes:
+        - /mnt:/mnt
     defaults:
       run:
         shell: bash
@@ -45,6 +76,32 @@ jobs:
       usb_img: ${{ steps.build_iso.outputs.usb_img }}
 
     steps:
+      - name: Verify Hardware (self-hosted)
+        if: ${{ inputs.runs_on != '' && inputs.runs_on != 'ubuntu-24.04-arm' }}
+        run: |
+          echo "=== Runner Hardware ==="
+          echo "CPU Cores: $(nproc)"
+          lscpu | grep -E "^(Model name|Architecture|CPU\(s\)|Thread|Core)" || true
+          echo ""
+          echo "=== Block Devices ==="
+          lsblk -d -o NAME,SIZE,MODEL 2>/dev/null || true
+          echo ""
+          echo "=== /mnt (NVMe scratch) ==="
+          df -h /mnt || true
+          ls -la /mnt || true
+          echo ""
+          echo "=== Memory ==="
+          free -h
+
+      - name: Relocate workspace to NVMe (self-hosted)
+        if: ${{ inputs.runs_on != '' && inputs.runs_on != 'ubuntu-24.04-arm' }}
+        run: |
+          set -e
+          mkdir -p /mnt/build-workspace
+          rm -rf /mnt/build-workspace/* /mnt/build-workspace/.[!.]* 2>/dev/null || true
+          echo "NVMe scratch ready at /mnt/build-workspace"
+          df -h /mnt
+
       - name: Install Dependencies
         run: |
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
@@ -66,8 +123,8 @@ jobs:
       - name: "Initialization: set env variables"
         id: set_env_variables
         env:
-          INPUT_BUILD_BY: ${{ github.event.inputs.BUILD_BY }}
-          INPUT_BUILD_VERSION: ${{ github.event.inputs.build_version }}
+          INPUT_BUILD_BY: ${{ inputs.BUILD_BY || github.event.inputs.BUILD_BY }}
+          INPUT_BUILD_VERSION: ${{ inputs.build_version || github.event.inputs.build_version }}
           REPO_OWNER_ID: ${{ github.repository_owner_id }}
           REPO_OWNER: ${{ github.repository_owner }}
         run: bin/ci-set-version.sh
@@ -88,7 +145,7 @@ jobs:
         env:
           # Manual override wins; otherwise script reads data/ask-kernel.pin.
           # Setting to empty explicitly disables ASK consume (falls through to local build).
-          ASK_KERNEL_TAG: ${{ github.event.inputs.ASK_KERNEL_TAG }}
+          ASK_KERNEL_TAG: ${{ inputs.ASK_KERNEL_TAG || github.event.inputs.ASK_KERNEL_TAG }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # If scheduled run or input was left blank, use the pin file.
