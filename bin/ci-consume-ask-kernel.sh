@@ -111,5 +111,31 @@ fi
 # Stash provenance so it lands in build artefacts.
 cp "$STAGE/manifest.json" "packages/.ask-kernel-manifest.json"
 
+# ── Stage kernel/headers into live-build's packages.chroot/ ───────────
+# live-build's apt inside the chroot cannot resolve `linux-image-*-ask`
+# from the Debian/VyOS apt repos — it only exists as a .deb we just
+# downloaded. Dropping matching .debs into
+# `vyos-build/data/live-build-config/packages.chroot/` makes
+# `dpkg -i` run before the apt pass, which satisfies the
+# `linux-image-*-ask` dependency that VyOS' vyos-1x package lists.
+#
+# vyos-build is checked out at $GITHUB_WORKSPACE/vyos-build by the
+# preceding "Checkout vyos-build repo" step in auto-build.yml.
+VB_PKG_CHROOT="vyos-build/data/live-build-config/packages.chroot"
+if [ -d "vyos-build/data/live-build-config" ]; then
+    mkdir -p "$VB_PKG_CHROOT"
+    for f in packages/linux-image-*_arm64.deb \
+             packages/linux-headers-*_arm64.deb \
+             packages/linux-libc-dev_*_arm64.deb; do
+        [ -f "$f" ] && cp -v "$f" "$VB_PKG_CHROOT/"
+    done
+    echo "### Staged kernel .debs into $VB_PKG_CHROOT/"
+    ls -la "$VB_PKG_CHROOT/" 2>/dev/null | grep -E '\.deb$' || true
+else
+    echo "WARN: vyos-build/ not present yet — skipping packages.chroot staging."
+    echo "      This should not happen: ci-consume-ask-kernel.sh runs AFTER"
+    echo "      'Checkout vyos-build repo' in auto-build.yml."
+fi
+
 echo "### ASK kernel consumed: $TAG (linux $KVER, ref $REF_SHA)"
 ls -la packages/ | grep -E '\.(deb|json)$' || true
