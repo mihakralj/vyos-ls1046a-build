@@ -9,7 +9,8 @@
 # ASK_KERNEL_TAG or workflow_dispatch input.
 #
 # Called by: .github/workflows/auto-build.yml "Consume prebuilt ASK kernel" step
-# Expects: GITHUB_WORKSPACE set, gh CLI, GH_TOKEN env for rate limit.
+# Expects: GITHUB_WORKSPACE set, curl, jq. (gh CLI not required — uses REST API
+# directly so this works inside minimal builder containers.)
 set -euo pipefail
 cd "${GITHUB_WORKSPACE:-.}"
 
@@ -24,21 +25,56 @@ REPO="mihakralj/lts_6.6_ls1046a"
 STAGE=work/ask-kernel
 mkdir -p "$STAGE" packages
 
+# curl auth header if a token is available (works with public repos without it
+# too, but authenticated requests get higher rate limits).
+AUTH_ARGS=()
+if [ -n "${GH_TOKEN:-}" ]; then
+    AUTH_ARGS=(-H "Authorization: Bearer $GH_TOKEN")
+elif [ -n "${GITHUB_TOKEN:-}" ]; then
+    AUTH_ARGS=(-H "Authorization: Bearer $GITHUB_TOKEN")
+fi
+
 echo "### Fetching ASK kernel release $TAG from $REPO"
-# gh is already authenticated via GITHUB_TOKEN in CI; public repo downloads
-# work without auth too.
-gh release download "$TAG" -R "$REPO" --dir "$STAGE" --clobber \
-    --pattern 'linux-*.deb' \
-    --pattern 'iptables_*_arm64.deb' \
-    --pattern 'libxt*_arm64.deb' \
-    --pattern 'libip[46]tc*_arm64.deb' \
-    --pattern 'libxtables*_arm64.deb' \
-    --pattern 'libiptc*_arm64.deb' \
-    --pattern 'ppp_*_arm64.deb' \
-    --pattern 'ppp-dev_*_all.deb' \
-    --pattern 'pppoe_*_arm64.deb' \
-    --pattern 'SHA256SUMS' \
-    --pattern 'manifest.json'
+API="https://api.github.com/repos/$REPO/releases/tags/$TAG"
+ASSETS_JSON=$(curl -fsSL "${AUTH_ARGS[@]}" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "$API")
+
+# Patterns we want to pull down. BRE globs expanded via `case` below.
+want() {
+    case "$1" in
+        linux-*.deb)                return 0 ;;
+        iptables_*_arm64.deb)       return 0 ;;
+        libxt*_arm64.deb)           return 0 ;;
+        libip4tc*_arm64.deb)        return 0 ;;
+        libip6tc*_arm64.deb)        return 0 ;;
+        libxtables*_arm64.deb)      return 0 ;;
+        libiptc*_arm64.deb)         return 0 ;;
+        ppp_*_arm64.deb)            return 0 ;;
+        ppp-dev_*_all.deb)          return 0 ;;
+        pppoe_*_arm64.deb)          return 0 ;;
+        SHA256SUMS|manifest.json)   return 0 ;;
+    esac
+    return 1
+}
+
+# Asset download URLs use /repos/:owner/:repo/releases/assets/:id with
+# Accept: application/octet-stream so they work inside the API auth flow.
+mapfile -t ASSETS < <(jq -r '.assets[] | "\(.id) \(.name)"' <<<"$ASSETS_JSON")
+[ "${#ASSETS[@]}" -gt 0 ] || { echo "ERROR: no assets in release $TAG"; exit 1; }
+
+for entry in "${ASSETS[@]}"; do
+    id="${entry%% *}"
+    name="${entry#* }"
+    if want "$name"; then
+        echo "  fetching $name"
+        curl -fsSL "${AUTH_ARGS[@]}" \
+            -H "Accept: application/octet-stream" \
+            -o "$STAGE/$name" \
+            "https://api.github.com/repos/$REPO/releases/assets/$id"
+    fi
+done
 
 echo "### Verifying SHA256SUMS"
 (cd "$STAGE" && sha256sum -c SHA256SUMS)
