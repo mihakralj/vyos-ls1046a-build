@@ -76,8 +76,17 @@ for entry in "${ASSETS[@]}"; do
     fi
 done
 
-echo "### Verifying SHA256SUMS"
-(cd "$STAGE" && sha256sum -c SHA256SUMS)
+echo "### Verifying SHA256SUMS (subset we actually downloaded)"
+# The release's SHA256SUMS lists every asset including *.buildinfo / *.changes
+# that we intentionally skip. Narrow it to what we pulled, then verify strictly.
+(
+    cd "$STAGE"
+    mv SHA256SUMS SHA256SUMS.full
+    while read -r sum name; do
+        [ -f "$name" ] && printf '%s  %s\n' "$sum" "$name"
+    done < SHA256SUMS.full > SHA256SUMS
+    sha256sum -c --strict SHA256SUMS
+)
 
 # Ship everything except the dbg kernel (+80 MB, not wanted in the ISO).
 # Skip -dev packages that conflict with Debian base unless actually needed.
