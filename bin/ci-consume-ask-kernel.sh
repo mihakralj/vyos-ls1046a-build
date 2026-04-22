@@ -129,19 +129,73 @@ cp "$STAGE/manifest.json" "packages/.ask-kernel-manifest.json"
 VB_PKG_CHROOT="vyos-build/data/live-build-config/packages.chroot"
 if [ -d "vyos-build/data/live-build-config" ]; then
     mkdir -p "$VB_PKG_CHROOT"
+    # Kernel + OOT modules (always staged — the build depends on them by name).
     for f in packages/linux-image-*_arm64.deb \
              packages/linux-headers-*_arm64.deb \
              packages/linux-libc-dev_*_arm64.deb \
              packages/ask-modules-*_arm64.deb; do
         [ -f "$f" ] && cp -v "$f" "$VB_PKG_CHROOT/"
     done
-    echo "### Staged kernel .debs into $VB_PKG_CHROOT/"
+    # ASK userspace overrides: iptables + xtables libs (QOSMARK/QOSCONNMARK),
+    # ppp/ppp-dev (NXP PPPoE offload / CMM relay), rp-pppoe when ever the
+    # producer ships one. Must be present in packages.chroot/ so live-build's
+    # dpkg pass installs them instead of apt pulling stock Debian. Without
+    # this, Debian bookworm's iptables_1.8.9-2 and ppp_2.4.9-1+1.1+b1 win
+    # over our _1.8.10+ask1 / _+ask1 builds and the ISO ships non-ASK
+    # userspace silently (detected as regression in run 24794085304).
+    shopt -s nullglob
+    _ask_userspace=(
+        packages/iptables_*+ask*_arm64.deb
+        packages/libxt*_*+ask*_arm64.deb
+        packages/libxtables*_*+ask*_arm64.deb
+        packages/libip4tc*_*+ask*_arm64.deb
+        packages/libip6tc*_*+ask*_arm64.deb
+        packages/libiptc*_*+ask*_arm64.deb
+        packages/ppp_*+ask*_arm64.deb
+        packages/ppp-dev_*+ask*_all.deb
+        packages/pppoe_*+ask*_arm64.deb
+        packages/rp-pppoe_*+ask*_arm64.deb
+    )
+    for f in "${_ask_userspace[@]}"; do
+        [ -f "$f" ] && cp -v "$f" "$VB_PKG_CHROOT/"
+    done
+    shopt -u nullglob
+    echo "### Staged kernel + ASK userspace .debs into $VB_PKG_CHROOT/"
     ls -la "$VB_PKG_CHROOT/" 2>/dev/null | grep -E '\.deb$' || true
 else
     echo "WARN: vyos-build/ not present yet — skipping packages.chroot staging."
     echo "      This should not happen: ci-consume-ask-kernel.sh runs AFTER"
     echo "      'Checkout vyos-build repo' in auto-build.yml."
 fi
+
+# ── Emit expected-ASK-packages manifest for post-build verification ───
+# ci-verify-ask-iso.sh reads this list and greps live/filesystem.packages
+# for each name to confirm the ASK userspace actually landed in the ISO
+# (guards against live-build dropping packages.chroot/ entries on apt
+# version-compare ties, etc.)
+VERIFY_LIST=packages/.ask-expected-packages.txt
+: > "$VERIFY_LIST"
+echo "linux-image-${KVER}-vyos"   >> "$VERIFY_LIST"
+echo "linux-headers-${KVER}-vyos" >> "$VERIFY_LIST"
+# Derive ASK userspace expectations from what we actually downloaded,
+# so removing or adding a +ask build in the producer repo auto-adjusts
+# the assertion without a corresponding consumer-side edit.
+shopt -s nullglob
+for f in packages/iptables_*+ask*_arm64.deb \
+         packages/libxtables*_*+ask*_arm64.deb \
+         packages/libip4tc*_*+ask*_arm64.deb \
+         packages/libip6tc*_*+ask*_arm64.deb \
+         packages/ppp_*+ask*_arm64.deb \
+         packages/pppoe_*+ask*_arm64.deb \
+         packages/rp-pppoe_*+ask*_arm64.deb \
+         packages/ask-modules-*_arm64.deb; do
+    [ -f "$f" ] && dpkg-deb -f "$f" Package 2>/dev/null >> "$VERIFY_LIST" || true
+done
+shopt -u nullglob
+# Deduplicate while preserving order
+awk 'NF && !seen[$0]++' "$VERIFY_LIST" > "$VERIFY_LIST.tmp" && mv "$VERIFY_LIST.tmp" "$VERIFY_LIST"
+echo "### Expected-in-ISO package names written to $VERIFY_LIST:"
+sed 's/^/    /' "$VERIFY_LIST"
 
 echo "### ASK kernel consumed: $TAG (linux $KVER, ref $REF_SHA)"
 ls -la packages/ | grep -E '\.(deb|json)$' || true

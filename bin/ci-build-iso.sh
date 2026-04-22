@@ -84,6 +84,14 @@ fi
 USB_IMG="${IMAGE_NAME}-usb.img"
 mkdir -p /tmp/iso-mount
 mount -o loop "$IMAGE_ISO" /tmp/iso-mount
+
+# Assert every staged ASK package actually landed in the ISO before we
+# spend another minute building the USB image / signing / uploading.
+# Fails the build loudly if the ASK userspace regressed back to stock
+# Debian (as happened in run 24794085304 before the packages.chroot/
+# staging fix).
+"$GITHUB_WORKSPACE/bin/ci-verify-ask-iso.sh" /tmp/iso-mount
+
 truncate -s 4G "$USB_IMG"
 mkdosfs -F 32 -n VYOSBOOT "$USB_IMG"
 mmd   -i "$USB_IMG" ::/live
