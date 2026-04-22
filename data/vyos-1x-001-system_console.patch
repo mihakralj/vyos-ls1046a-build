@@ -1,40 +1,35 @@
-diff --git a/interface-definitions/system_console.xml.in b/interface-definitions/system_console.xml.in
-index 5acd3e90b..80062a3bb 100644
 --- a/interface-definitions/system_console.xml.in
 +++ b/interface-definitions/system_console.xml.in
-@@ -12,13 +12,21 @@
+@@ -12,7 +12,7 @@
              <properties>
                <help>Serial console device name</help>
                <completionHelp>
--                <script>ls -1 /dev | grep -e ttyS -e hvc</script>
-+                <script>ls -1 /dev | grep -e ttyS -e hvc -e ttyAM -e ttyFIQ</script>
+-                <script>ls -1 /dev | grep -e ttyS -e ttyAMA -e hvc</script>
++                <script>ls -1 /dev | grep -e ttyS -e ttyAMA -e hvc -e ttyFIQ</script>
                  <script>if [ -d /dev/serial/by-bus ]; then ls -1 /dev/serial/by-bus; fi</script>
                </completionHelp>
                <valueHelp>
-                 <format>ttySN</format>
-                 <description>TTY device name, regular serial port</description>
+@@ -24,6 +24,10 @@
+                 <description>TTY device name, ttyAMA based</description>
                </valueHelp>
-+              <valueHelp>
-+                <format>ttyAN</format>
-+                <description>TTY device name, abstract serial port</description>
-+              </valueHelp>
-+              <valueHelp>
-+                <format>ttyFIQ</format>
-+                <description>TTY device name, performance serial port</description>
-+              </valueHelp>
                <valueHelp>
++                <format>ttyFIQN</format>
++                <description>TTY device name, FIQ-based performance serial port</description>
++              </valueHelp>
++              <valueHelp>
                  <format>usbNbXpY</format>
                  <description>TTY device name, USB based</description>
-@@ -28,7 +36,7 @@
+               </valueHelp>
+@@ -32,7 +36,7 @@
                  <description>Xen console</description>
                </valueHelp>
                <constraint>
--                  <regex>(ttyS[0-9]+|ttyAMA[0-9]+|hvc[0-9]+|usb[0-9]+b.*)</regex>
-+                  <regex>(ttyS[0-9]+|ttyAMA?[0-9]+|ttyFIQ[0-9]+|hvc[0-9]+|usb[0-9]+b.*)</regex>
+-                <regex>(ttyS[0-9]+|ttyAMA[0-9]+|hvc[0-9]+|usb[0-9]+b.*)</regex>
++                <regex>(ttyS[0-9]+|ttyAMA[0-9]+|ttyFIQ[0-9]+|hvc[0-9]+|usb[0-9]+b.*)</regex>
                </constraint>
              </properties>
              <children>
-@@ -36,7 +44,7 @@
+@@ -46,7 +50,7 @@
                  <properties>
                    <help>Console baud rate</help>
                    <completionHelp>
@@ -43,7 +38,7 @@ index 5acd3e90b..80062a3bb 100644
                    </completionHelp>
                    <valueHelp>
                      <format>1200</format>
-@@ -70,8 +78,12 @@
+@@ -80,8 +84,12 @@
                      <format>115200</format>
                      <description>115200 bps</description>
                    </valueHelp>
