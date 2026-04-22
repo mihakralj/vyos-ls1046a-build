@@ -189,7 +189,9 @@ for f in packages/iptables_*+ask*_arm64.deb \
          packages/pppoe_*+ask*_arm64.deb \
          packages/rp-pppoe_*+ask*_arm64.deb \
          packages/ask-modules-*_arm64.deb; do
-    [ -f "$f" ] && dpkg-deb -f "$f" Package 2>/dev/null >> "$VERIFY_LIST" || true
+    if [ -f "$f" ]; then
+        dpkg-deb -f "$f" Package >> "$VERIFY_LIST"
+    fi
 done
 shopt -u nullglob
 # Deduplicate while preserving order

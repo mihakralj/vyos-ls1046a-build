@@ -48,31 +48,6 @@ on:
       MINISIGN_PRIVATE_KEY:
         required: false
 
-  workflow_call:
-    inputs:
-      runs_on:
-        description: 'Runner label to execute the build on'
-        type: string
-        required: false
-        default: 'ubuntu-24.04-arm'
-      BUILD_BY:
-        type: string
-        required: false
-        default: ''
-      build_version:
-        type: string
-        required: false
-        default: ''
-      builder_image:
-        type: string
-        required: false
-        default: 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64'
-    secrets:
-      MOK_KEY:
-        required: false
-      MINISIGN_PRIVATE_KEY:
-        required: false
-
 env:
   DEBIAN_MIRROR: http://deb.debian.org/debian/
   DEBIAN_SECURITY_MIRROR: http://deb.debian.org/debian-security
