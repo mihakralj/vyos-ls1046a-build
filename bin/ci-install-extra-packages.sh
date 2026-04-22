@@ -3,137 +3,124 @@
 # not available in default Debian repos into the ISO chroot.
 # Called by: .github/workflows/auto-build.yml after "Pick Packages"
 # Expects: GITHUB_WORKSPACE set in env
-set -euo pipefail
+#
+# All extra packages are optional best-effort: a failure to fetch/install any
+# single package logs a WARNING and the script continues. The script always
+# exits 0 so a flaky upstream release mirror cannot break the ISO build.
+set -uo pipefail
 cd "${GITHUB_WORKSPACE:-.}"
 
 CHROOT=vyos-build/data/live-build-config/includes.chroot
 ARCH="aarch64"
 mkdir -p "$CHROOT/usr/local/bin"
 
-###############################################################################
-# Ookla Speedtest CLI
-###############################################################################
-echo "### Installing Ookla Speedtest CLI"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-BASE_URL="https://install.speedtest.net/app/cli"
-VERSION=$(curl -sL https://packagecloud.io/ookla/speedtest-cli \
-  | grep -oP 'speedtest_\K[0-9]+\.[0-9]+\.[0-9]+' \
-  | sort -V \
-  | tail -1)
-
-if [ -z "$VERSION" ]; then
-  echo "WARNING: Could not determine speedtest version, skipping" >&2
-else
-  FILENAME="ookla-speedtest-${VERSION}-linux-${ARCH}.tgz"
-  URL="${BASE_URL}/${FILENAME}"
-  echo "Downloading speedtest ${VERSION} from ${URL}"
-  if curl -fSL -o "${TMP_DIR}/${FILENAME}" "$URL"; then
-    tar xzf "${TMP_DIR}/${FILENAME}" -C "$TMP_DIR"
-    install -m 755 "${TMP_DIR}/speedtest" "$CHROOT/usr/local/bin/speedtest"
-    echo "### Speedtest ${VERSION} staged to includes.chroot/usr/local/bin/"
-  else
-    echo "WARNING: Failed to download speedtest, skipping" >&2
+# Wrap a single package install block. Any error inside the body is caught and
+# logged; the script keeps going.
+try_install() {
+  local name="$1"
+  shift
+  echo "### Installing $name"
+  if ! ( set -e; "$@" ); then
+    echo "WARNING: $name install failed, skipping" >&2
   fi
-fi
+}
+
+###############################################################################
+# Ookla Speedtest CLI
+###############################################################################
+install_speedtest() {
+  local base="https://install.speedtest.net/app/cli"
+  local version
+  version=$(curl -fsSL --max-time 30 https://packagecloud.io/ookla/speedtest-cli \
+    | grep -oP 'speedtest_\K[0-9]+\.[0-9]+\.[0-9]+' \
+    | sort -V | tail -1 || true)
+  [ -n "$version" ] || { echo "WARNING: Could not determine speedtest version" >&2; return 0; }
+  local file="ookla-speedtest-${version}-linux-${ARCH}.tgz"
+  echo "Downloading speedtest ${version} from ${base}/${file}"
+  curl -fSL --max-time 120 -o "${TMP_DIR}/${file}" "${base}/${file}"
+  tar xzf "${TMP_DIR}/${file}" -C "$TMP_DIR"
+  install -m 755 "${TMP_DIR}/speedtest" "$CHROOT/usr/local/bin/speedtest"
+  echo "### Speedtest ${version} staged to includes.chroot/usr/local/bin/"
+}
+try_install "Ookla Speedtest CLI" install_speedtest
 
 ###############################################################################
 # bandwhich — terminal bandwidth utilization tool
 ###############################################################################
-echo "### Installing bandwhich"
-BANDWHICH_VERSION=$(curl -sI https://github.com/imsnif/bandwhich/releases/latest \
-  | grep -i '^location:' | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+')
-
-if [ -z "$BANDWHICH_VERSION" ]; then
-  echo "WARNING: Could not determine bandwhich version, skipping" >&2
-else
-  BANDWHICH_URL="https://github.com/imsnif/bandwhich/releases/download/v${BANDWHICH_VERSION}/bandwhich-v${BANDWHICH_VERSION}-aarch64-unknown-linux-musl.tar.gz"
-  echo "Downloading bandwhich ${BANDWHICH_VERSION} from ${BANDWHICH_URL}"
-  if curl -fSL -o "${TMP_DIR}/bandwhich.tar.gz" "$BANDWHICH_URL"; then
-    tar xzf "${TMP_DIR}/bandwhich.tar.gz" -C "$TMP_DIR"
-    install -m 755 "${TMP_DIR}/bandwhich" "$CHROOT/usr/local/bin/bandwhich"
-    echo "### bandwhich ${BANDWHICH_VERSION} staged to includes.chroot/usr/local/bin/"
-  else
-    echo "WARNING: Failed to download bandwhich, skipping" >&2
-  fi
-fi
+install_bandwhich() {
+  local v
+  v=$(curl -fsSI --max-time 30 https://github.com/imsnif/bandwhich/releases/latest \
+    | grep -i '^location:' | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+' || true)
+  [ -n "$v" ] || { echo "WARNING: Could not determine bandwhich version" >&2; return 0; }
+  local url="https://github.com/imsnif/bandwhich/releases/download/v${v}/bandwhich-v${v}-aarch64-unknown-linux-musl.tar.gz"
+  echo "Downloading bandwhich ${v} from ${url}"
+  curl -fSL --max-time 120 -o "${TMP_DIR}/bandwhich.tar.gz" "$url"
+  tar xzf "${TMP_DIR}/bandwhich.tar.gz" -C "$TMP_DIR"
+  install -m 755 "${TMP_DIR}/bandwhich" "$CHROOT/usr/local/bin/bandwhich"
+  echo "### bandwhich ${v} staged to includes.chroot/usr/local/bin/"
+}
+try_install "bandwhich" install_bandwhich
 
 ###############################################################################
 # trippy — network diagnostic tool (mtr alternative)
 ###############################################################################
-echo "### Installing trippy"
-TRIPPY_VERSION=$(curl -sI https://github.com/fujiapple852/trippy/releases/latest \
-  | grep -i '^location:' | grep -oP 'v?\K[0-9]+\.[0-9]+\.[0-9]+')
-
-if [ -z "$TRIPPY_VERSION" ]; then
-  echo "WARNING: Could not determine trippy version, skipping" >&2
-else
-  TRIPPY_URL="https://github.com/fujiapple852/trippy/releases/download/${TRIPPY_VERSION}/trippy-${TRIPPY_VERSION}-aarch64-unknown-linux-musl.tar.gz"
-  echo "Downloading trippy ${TRIPPY_VERSION} from ${TRIPPY_URL}"
-  if curl -fSL -o "${TMP_DIR}/trippy.tar.gz" "$TRIPPY_URL"; then
-    tar xzf "${TMP_DIR}/trippy.tar.gz" -C "$TMP_DIR"
-    TRIPPY_BIN=$(find "$TMP_DIR" -name 'trip' -type f | head -1)
-    if [ -n "$TRIPPY_BIN" ]; then
-      install -m 755 "$TRIPPY_BIN" "$CHROOT/usr/local/bin/trip"
-      echo "### trippy ${TRIPPY_VERSION} staged to includes.chroot/usr/local/bin/"
-    else
-      echo "WARNING: trip binary not found in archive" >&2
-    fi
-  else
-    echo "WARNING: Failed to download trippy, skipping" >&2
-  fi
-fi
+install_trippy() {
+  local v
+  v=$(curl -fsSI --max-time 30 https://github.com/fujiapple852/trippy/releases/latest \
+    | grep -i '^location:' | grep -oP 'v?\K[0-9]+\.[0-9]+\.[0-9]+' || true)
+  [ -n "$v" ] || { echo "WARNING: Could not determine trippy version" >&2; return 0; }
+  local url="https://github.com/fujiapple852/trippy/releases/download/${v}/trippy-${v}-aarch64-unknown-linux-musl.tar.gz"
+  echo "Downloading trippy ${v} from ${url}"
+  curl -fSL --max-time 120 -o "${TMP_DIR}/trippy.tar.gz" "$url"
+  tar xzf "${TMP_DIR}/trippy.tar.gz" -C "$TMP_DIR"
+  local bin
+  bin=$(find "$TMP_DIR" -name 'trip' -type f | head -1)
+  [ -n "$bin" ] || { echo "WARNING: trip binary not found in archive" >&2; return 0; }
+  install -m 755 "$bin" "$CHROOT/usr/local/bin/trip"
+  echo "### trippy ${v} staged to includes.chroot/usr/local/bin/"
+}
+try_install "trippy" install_trippy
 
 ###############################################################################
 # gping — ping with a graph
 ###############################################################################
-echo "### Installing gping"
-GPING_VERSION=$(curl -sI https://github.com/orf/gping/releases/latest \
-  | grep -i '^location:' | grep -oP 'gping-v\K[0-9]+\.[0-9]+\.[0-9]+')
-
-if [ -z "$GPING_VERSION" ]; then
-  echo "WARNING: Could not determine gping version, skipping" >&2
-else
-  GPING_URL="https://github.com/orf/gping/releases/download/gping-v${GPING_VERSION}/gping-Linux-musl-arm64.tar.gz"
-  echo "Downloading gping ${GPING_VERSION} from ${GPING_URL}"
-  if curl -fSL -o "${TMP_DIR}/gping.tar.gz" "$GPING_URL"; then
-    tar xzf "${TMP_DIR}/gping.tar.gz" -C "$TMP_DIR"
-    install -m 755 "${TMP_DIR}/gping" "$CHROOT/usr/local/bin/gping"
-    echo "### gping ${GPING_VERSION} staged to includes.chroot/usr/local/bin/"
-  else
-    echo "WARNING: Failed to download gping, skipping" >&2
-  fi
-fi
+install_gping() {
+  local v
+  v=$(curl -fsSI --max-time 30 https://github.com/orf/gping/releases/latest \
+    | grep -i '^location:' | grep -oP 'gping-v\K[0-9]+\.[0-9]+\.[0-9]+' || true)
+  [ -n "$v" ] || { echo "WARNING: Could not determine gping version" >&2; return 0; }
+  local url="https://github.com/orf/gping/releases/download/gping-v${v}/gping-Linux-musl-arm64.tar.gz"
+  echo "Downloading gping ${v} from ${url}"
+  curl -fSL --max-time 120 -o "${TMP_DIR}/gping.tar.gz" "$url"
+  tar xzf "${TMP_DIR}/gping.tar.gz" -C "$TMP_DIR"
+  install -m 755 "${TMP_DIR}/gping" "$CHROOT/usr/local/bin/gping"
+  echo "### gping ${v} staged to includes.chroot/usr/local/bin/"
+}
+try_install "gping" install_gping
 
 ###############################################################################
 # doggo — DNS client (dig alternative)
 ###############################################################################
-echo "### Installing doggo"
-DOGGO_VERSION=$(curl -sI https://github.com/mr-karan/doggo/releases/latest \
-  | grep -i '^location:' | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+')
-
-if [ -z "$DOGGO_VERSION" ]; then
-  echo "WARNING: Could not determine doggo version, skipping" >&2
-else
-  DOGGO_URL="https://github.com/mr-karan/doggo/releases/download/v${DOGGO_VERSION}/doggo_${DOGGO_VERSION}_Linux_arm64.tar.gz"
-  echo "Downloading doggo ${DOGGO_VERSION} from ${DOGGO_URL}"
-  if curl -fSL -o "${TMP_DIR}/doggo.tar.gz" "$DOGGO_URL"; then
-    tar xzf "${TMP_DIR}/doggo.tar.gz" -C "$TMP_DIR"
-    DOGGO_BIN=$(find "$TMP_DIR" -name 'doggo' -type f -executable | head -1)
-    if [ -z "$DOGGO_BIN" ]; then
-      DOGGO_BIN=$(find "$TMP_DIR" -name 'doggo' -type f | head -1)
-    fi
-    if [ -n "$DOGGO_BIN" ]; then
-      install -m 755 "$DOGGO_BIN" "$CHROOT/usr/local/bin/doggo"
-      echo "### doggo ${DOGGO_VERSION} staged to includes.chroot/usr/local/bin/"
-    else
-      echo "WARNING: doggo binary not found in archive" >&2
-    fi
-  else
-    echo "WARNING: Failed to download doggo, skipping" >&2
-  fi
-fi
+install_doggo() {
+  local v
+  v=$(curl -fsSI --max-time 30 https://github.com/mr-karan/doggo/releases/latest \
+    | grep -i '^location:' | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+' || true)
+  [ -n "$v" ] || { echo "WARNING: Could not determine doggo version" >&2; return 0; }
+  local url="https://github.com/mr-karan/doggo/releases/download/v${v}/doggo_${v}_Linux_arm64.tar.gz"
+  echo "Downloading doggo ${v} from ${url}"
+  curl -fSL --max-time 120 -o "${TMP_DIR}/doggo.tar.gz" "$url"
+  tar xzf "${TMP_DIR}/doggo.tar.gz" -C "$TMP_DIR"
+  local bin
+  bin=$(find "$TMP_DIR" -name 'doggo' -type f -executable | head -1)
+  [ -n "$bin" ] || bin=$(find "$TMP_DIR" -name 'doggo' -type f | head -1)
+  [ -n "$bin" ] || { echo "WARNING: doggo binary not found in archive" >&2; return 0; }
+  install -m 755 "$bin" "$CHROOT/usr/local/bin/doggo"
+  echo "### doggo ${v} staged to includes.chroot/usr/local/bin/"
+}
+try_install "doggo" install_doggo
 
 ###############################################################################
 # Add more third-party packages below using the same pattern:

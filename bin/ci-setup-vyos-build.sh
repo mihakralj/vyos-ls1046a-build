@@ -9,8 +9,15 @@ CHROOT=vyos-build/data/live-build-config/includes.chroot
 HOOKS=vyos-build/data/live-build-config/hooks/live
 
 ### vyos-build patches
+# config.boot.default = lean live-boot config (eth0 DHCP + SSH + console)
+#   Applied by vyos-router on first boot when /config/config.boot is absent.
+#   Keep minimal — heavy configs (DHCP on 5 ifaces, flowtable, firewall groups,
+#   DNS recursor, HTTPS API) hang `vyos-router configure` at live-boot stage.
+# config.boot.full = rich reference config (routing/firewall/NAT/DNS/API).
+#   Shipped alongside for manual `load` after login or post-install use.
 cp data/config.boot.default "$CHROOT/opt/vyatta/etc/"
-cp data/config.boot.dhcp "$CHROOT/opt/vyatta/etc/"
+cp data/config.boot.dhcp    "$CHROOT/opt/vyatta/etc/"
+cp data/config.boot.full    "$CHROOT/opt/vyatta/etc/"
 patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-005-add_vim_link.patch
 patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-007-no_sbsign.patch
 
@@ -20,7 +27,7 @@ patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-007-no_sbsign.
 # when /sys/firmware/efi does not exist.
 find vyos-build -name '*.py' -exec \
   grep -l 'uefi.secure.boot' {} \; | \
-  xargs -r sed -i "s/'--uefi-secure-boot'[,]\?//g" 2>/dev/null || true
+  xargs -r sed -i "s/'--uefi-secure-boot'[,]\?//g"
 
 ### LS1046A console: force ttyS0 (8250 UART at 0x21c0500) everywhere.
 #
@@ -54,8 +61,7 @@ if [ -f vyos-build/data/defaults.toml ]; then
 fi
 sed -i 's/ttyAMA0/ttyS0/g' \
   vyos-build/data/live-build-config/hooks/live/01-live-serial.binary \
-  vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/grub/default-union-grub-entry \
-  2>/dev/null || true
+  vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/grub/default-union-grub-entry
 
 ### MOK certificate for kernel module signing
 if [ -f data/mok/MOK.key ]; then
@@ -74,6 +80,13 @@ cp data/dtb/mono-gw.dtb "$CHROOT/boot/mono-gw.dtb"
 
 ### U-Boot tools: fw_setenv config for updating boot env from Linux
 cp data/scripts/fw_env.config "$CHROOT/etc/fw_env.config"
+
+### sysctl drop-in: quiet the kernel console AFTER userspace is up.
+### Keeps early boot verbose (kernel cmdline has no loglevel=) but silences
+### the NXP SDK fsl_dpa pr_err spam at T+62-64s that otherwise buries
+### the login prompt on ttyS0. Applied by systemd-sysctl.service.
+mkdir -p "$CHROOT/etc/sysctl.d"
+cp data/scripts/99-ls1046a-quiet-console.conf "$CHROOT/etc/sysctl.d/99-ls1046a-quiet-console.conf"
 
 ### Post-install helper: writes /boot/vyos.env + one-time U-Boot env setup
 mkdir -p "$CHROOT/usr/local/bin"
@@ -108,6 +121,10 @@ chmod +x "$CHROOT/usr/local/bin/vpp-post-start.sh"
 cp data/systemd/vpp-post-start.conf "$CHROOT/etc/systemd/system/vpp.service.d/post-start.conf"
 
 ### Chroot hooks (from extracted data files)
+# 95: set /etc/hostname=vyos + force vyos user password BEFORE live-config runs
+cp data/hooks/95-vyos-hostname.chroot "$HOOKS/95-vyos-hostname.chroot"
+chmod +x "$HOOKS/95-vyos-hostname.chroot"
+
 cp data/hooks/98-fancontrol.chroot "$HOOKS/98-fancontrol.chroot"
 chmod +x "$HOOKS/98-fancontrol.chroot"
 
@@ -123,18 +140,131 @@ mkdir -p "$CHROOT/etc/systemd/network"
 cp data/scripts/00-fman.link "$CHROOT/etc/systemd/network/00-fman.link"
 
 
+### Boot-complete fan notification: whistle fans to alert admin
+cp data/scripts/boot-complete-notify.sh "$CHROOT/usr/local/bin/boot-complete-notify.sh"
+chmod +x "$CHROOT/usr/local/bin/boot-complete-notify.sh"
+cp data/systemd/boot-complete-notify.service "$CHROOT/etc/systemd/system/boot-complete-notify.service"
+cp data/systemd/boot-complete-notify.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/boot-complete-notify.conf"
+
 ### FQ qdisc for BBR pacing on 10G SFP+ interfaces
 cp data/scripts/fman-fq-qdisc "$CHROOT/usr/local/bin/fman-fq-qdisc"
 chmod +x "$CHROOT/usr/local/bin/fman-fq-qdisc"
 cp data/systemd/fman-fq-qdisc.service "$CHROOT/etc/systemd/system/fman-fq-qdisc.service"
 cp data/systemd/fman-fq-qdisc.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fman-fq-qdisc.conf"
 
-echo "### vyos-build setup complete"
+### SFP TX_DISABLE deassert for SDK kernel (no phylink SFP state machine)
+cp data/scripts/sfp-tx-enable-sdk.sh "$CHROOT/usr/local/bin/sfp-tx-enable-sdk.sh"
+chmod +x "$CHROOT/usr/local/bin/sfp-tx-enable-sdk.sh"
+cp data/systemd/sfp-tx-enable-sdk.service "$CHROOT/etc/systemd/system/sfp-tx-enable-sdk.service"
+cp data/systemd/sfp-tx-enable-sdk.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/sfp-tx-enable-sdk.conf"
 
-### ASK kernel is now built as linux-image-<KVER>-vyos (LOCALVERSION=-vyos,
-### tag kernel-<KVER>-ask5+), so it is a drop-in replacement for VyOS's
-### own kernel: same package name, same module path, same `uname -r`.
-### No kernel_flavor rewrite, no stub .deb, no apt pin required —
-### ci-consume-ask-kernel.sh drops the real kernel into packages.chroot/
-### and dpkg installs it before apt runs, satisfying every
-### Depends: linux-image-<KVER>-vyos across the VyOS package ecosystem.
+### ====================================================================
+### ASK (Application Solutions Kit) fast-path userspace components
+### ====================================================================
+# ASK provides hardware flow offloading via FMan Coarse Classifier on LS1046A.
+# Components: cdx.ko (control plane), fci.ko (conntrack interface),
+# auto_bridge.ko (bridge offload), dpa_app (FMan programmer),
+# cmm (connection manager), fmc (FMan compiler), shared libraries.
+#
+# Kernel modules (.ko) are built from source in ci-build-packages.sh
+# and placed directly into $CHROOT/usr/local/lib/ask-modules/.
+# Here we install userspace binaries, libraries, configs, and services.
+
+### ASK userspace binaries
+# CDX module calls /usr/bin/dpa_app via call_usermodehelper (hardcoded path)
+mkdir -p "$CHROOT/usr/bin"
+cp data/ask-userspace/dpa_app/dpa_app "$CHROOT/usr/bin/dpa_app"
+chmod +x "$CHROOT/usr/bin/dpa_app"
+cp data/ask-userspace/cmm/cmm "$CHROOT/usr/bin/cmm"
+chmod +x "$CHROOT/usr/bin/cmm"
+cp data/ask-userspace/fmc/fmc "$CHROOT/usr/local/bin/fmc"
+chmod +x "$CHROOT/usr/local/bin/fmc"
+
+### ASK shared libraries → /usr/local/lib/
+mkdir -p "$CHROOT/usr/local/lib"
+
+# libcli (CLI library for dpa_app)
+cp data/ask-userspace/libcli/libcli.so.1.10.8  "$CHROOT/usr/local/lib/"
+ln -sf libcli.so.1.10.8  "$CHROOT/usr/local/lib/libcli.so.1.10"
+ln -sf libcli.so.1.10    "$CHROOT/usr/local/lib/libcli.so"
+
+# libfci (fast-path conntrack interface library)
+cp data/ask-userspace/fci/libfci.so.0.1  "$CHROOT/usr/local/lib/"
+ln -sf libfci.so.0.1  "$CHROOT/usr/local/lib/libfci.so.0"
+ln -sf libfci.so.0    "$CHROOT/usr/local/lib/libfci.so"
+
+# libcmm (CMM shared library)
+cp data/ask-userspace/cmm/libcmm.so.0.0.0  "$CHROOT/usr/local/lib/"
+ln -sf libcmm.so.0.0.0  "$CHROOT/usr/local/lib/libcmm.so.0"
+ln -sf libcmm.so.0      "$CHROOT/usr/local/lib/libcmm.so"
+
+# libnfnetlink (NXP-patched: nonblocking + heap buffer extensions)
+cp data/ask-userspace/libnfnetlink/libnfnetlink.so.0.2.0  "$CHROOT/usr/local/lib/"
+ln -sf libnfnetlink.so.0.2.0  "$CHROOT/usr/local/lib/libnfnetlink.so.0"
+ln -sf libnfnetlink.so.0      "$CHROOT/usr/local/lib/libnfnetlink.so"
+
+# libnetfilter_conntrack (NXP-patched: comcerto fast-path extensions)
+cp data/ask-userspace/libnetfilter-conntrack/libnetfilter_conntrack.so.3.8.0  "$CHROOT/usr/local/lib/"
+ln -sf libnetfilter_conntrack.so.3.8.0  "$CHROOT/usr/local/lib/libnetfilter_conntrack.so.3"
+ln -sf libnetfilter_conntrack.so.3      "$CHROOT/usr/local/lib/libnetfilter_conntrack.so"
+
+### ASK CDX config XMLs → /etc/ (dpa_app expects /etc/cdx_cfg.xml etc.)
+# Use Mono Gateway config as default (3×1G + 2×10G + 2×OH)
+cp data/ask-userspace/dpa_app/etc/cdx_cfg_mono_gw.xml "$CHROOT/etc/cdx_cfg.xml"
+cp data/ask-userspace/dpa_app/etc/cdx_pcd.xml         "$CHROOT/etc/cdx_pcd.xml"
+cp data/ask-userspace/dpa_app/etc/cdx_sp.xml          "$CHROOT/etc/cdx_sp.xml"
+# Keep originals in /etc/cdx/ for reference
+mkdir -p "$CHROOT/etc/cdx"
+cp data/ask-userspace/dpa_app/etc/cdx_cfg.xml         "$CHROOT/etc/cdx/"
+cp data/ask-userspace/dpa_app/etc/cdx_cfg_mono_gw.xml "$CHROOT/etc/cdx/"
+cp data/ask-userspace/dpa_app/etc/cdx_pcd.xml         "$CHROOT/etc/cdx/"
+cp data/ask-userspace/dpa_app/etc/cdx_sp.xml          "$CHROOT/etc/cdx/"
+
+### FMC config: hxs_pdl_v3.xml (NetPDL protocol definitions for soft parser)
+# dpa_app / libfmc statically links to FMC which reads /etc/fmc/config/hxs_pdl_v3.xml
+# at init time. Without this file, dpa_app SIGSEGV (null pointer in XML parse).
+mkdir -p "$CHROOT/etc/fmc/config"
+cp data/ask-userspace/fmc/config/hxs_pdl_v3.xml "$CHROOT/etc/fmc/config/"
+cp data/ask-userspace/fmc/config/netpcd.xsd     "$CHROOT/etc/fmc/config/"
+cp data/ask-userspace/fmc/config/cfgdata.xsd    "$CHROOT/etc/fmc/config/"
+
+### ASK kernel module loader service (insmod for out-of-tree .ko files)
+cp data/scripts/ask-modules-load.sh "$CHROOT/usr/local/bin/ask-modules-load.sh"
+chmod +x "$CHROOT/usr/local/bin/ask-modules-load.sh"
+cp data/systemd/ask-modules-load.service "$CHROOT/etc/systemd/system/ask-modules-load.service"
+cp data/systemd/ask-modules-load.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/ask-modules-load.conf"
+
+### CMM service and config
+cp ask-ls1046a-6.6/config/cmm.service "$CHROOT/etc/systemd/system/cmm.service"
+mkdir -p "$CHROOT/etc/config"
+cp ask-ls1046a-6.6/config/fastforward "$CHROOT/etc/config/fastforward"
+
+### CMM service enablement via tmpfiles.d
+cp data/systemd/cmm.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/cmm.conf"
+
+### ASK health check script
+cp data/scripts/check-ask.sh "$CHROOT/usr/local/bin/check-ask"
+chmod +x "$CHROOT/usr/local/bin/check-ask"
+
+### ASK conntrack fix: flush VyOS notrack rules for fast-path offload
+cp data/scripts/ask-conntrack-fix.sh "$CHROOT/usr/local/bin/ask-conntrack-fix.sh"
+chmod +x "$CHROOT/usr/local/bin/ask-conntrack-fix.sh"
+cp data/systemd/ask-conntrack-fix.service "$CHROOT/etc/systemd/system/ask-conntrack-fix.service"
+cp data/systemd/ask-conntrack-fix.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/ask-conntrack-fix.conf"
+
+### ASK kernel modules directory (modules built by ci-build-packages.sh)
+# Pre-create the directory; ci-build-packages.sh populates it with .ko files
+mkdir -p "$CHROOT/usr/local/lib/ask-modules"
+
+### ASK chroot hook (ldconfig, depmod, runtime deps)
+cp data/hooks/97-ask-userspace.chroot "$HOOKS/97-ask-userspace.chroot"
+chmod +x "$HOOKS/97-ask-userspace.chroot"
+
+### Service enablement chroot hook
+# Must be a chroot hook (not includes.chroot symlinks) because build-vyos-image
+# uses shutil.copytree() which follows symlinks → converts to regular files →
+# systemd ignores non-symlink files in .wants/ directories.
+cp data/hooks/96-enable-services.chroot "$HOOKS/96-enable-services.chroot"
+chmod +x "$HOOKS/96-enable-services.chroot"
+
+echo "### vyos-build setup complete (with ASK fast-path userspace)"

@@ -2,7 +2,7 @@
 
 Low-level U-Boot reference and seamless boot specification. The stuff you need when you're staring at a serial console at 115200 baud wondering why nothing happened.
 
-Updated 2026-03-25.
+Updated 2026-04-17.
 
 For boot architecture and kernel config rationale, see [PORTING.md](PORTING.md).
 For install instructions, see [INSTALL.md](INSTALL.md).
@@ -13,7 +13,7 @@ For install instructions, see [INSTALL.md](INSTALL.md).
 
 ### Design: `/boot/vyos.env` Replaces `fw_setenv`
 
-The old approach wrote the image name into U-Boot's SPI flash via `fw_setenv` on every install and upgrade. This required `libubootenv-tool`, `/dev/mtd3`, a QSPI driver, and a helper script. Four moving parts for what is fundamentally a one-line config change.
+The old approach wrote the image name into U-Boot's SPI flash via `fw_setenv` on every install and upgrade. This required `libubootenv-tool`, `/dev/mtd2`, a QSPI driver, and a helper script. Four moving parts for what is fundamentally a one-line config change.
 
 **Current approach:** U-Boot reads the default image name from a text file on the eMMC ext4 partition. VyOS writes this file as part of its normal image management. No SPI flash writes needed after initial setup.
 
@@ -36,7 +36,7 @@ flowchart TD
     PO["Power On"] --> UB["U-Boot 2025.04"]
     UB --> CMD{"bootcmd:\nrun usb_vyos\n|| run vyos\n|| run recovery"}
 
-    CMD -->|"USB inserted"| USB_TRY["usb_vyos:\nusb start\nfatload live/vmlinuz\nif success → booti"]
+    CMD -->|"USB inserted"| USB_TRY["usb_vyos:\nusb start\nfatload boot.scr\nsource → booti"]
     CMD -->|"No USB / fail ~3s"| EMMC["vyos:\next4load /boot/vyos.env\nenv import → vyos_image\nload vmlinuz+dtb+initrd\nbooti"]
     CMD -->|"eMMC fail"| REC["recovery:\nsf read from SPI NOR\nbooti"]
 
@@ -51,12 +51,14 @@ flowchart TD
 
 ### When `fw_setenv` Is Used
 
-Only **once**: during the first `install image` from USB live boot. It sets:
+Only during `install image` from USB live boot (forced every time via `vyos-postinstall --root`). It sets:
 - `bootcmd` = `run usb_vyos || run vyos || run recovery`
-- `vyos` = static command that reads `/boot/vyos.env`
-- `usb_vyos` = auto-detect and boot from USB
+- `vyos` = single combined variable: reads `/boot/vyos.env`, loads kernel/dtb/initrd, sets bootargs, calls `booti`
+- `usb_vyos` = delegates to `boot.scr` on USB FAT32 (`usb start; if fatload usb 0:2 ${load_addr} boot.scr; then source ${load_addr}; fi`)
 
 After this, **all future installs and upgrades only write `/boot/vyos.env`**. No SPI flash writes. No `fw_setenv`. Just a text file.
+
+> `boot.scr` does NOT write any U-Boot env vars. All SPI flash writes are done by `vyos-postinstall` Phase 1 via `fw_setenv`.
 
 ### User Experience
 
@@ -74,28 +76,34 @@ After this, **all future installs and upgrades only write `/boot/vyos.env`**. No
 
 ## U-Boot Environment (Target State)
 
-Set once during first `install image`. Never modified again. If you find yourself running `fw_setenv` more than once, something went wrong.
+Set once during first `install image` by `vyos-postinstall` Phase 1 via `fw_setenv`. Re-written (forced) on every subsequent `install image`. Never modified by `boot.scr`.
 
-All vars are set automatically by `boot.scr` on first USB boot. Every `setenv` line stays under 500 chars to fit U-Boot's `CONFIG_SYS_CBSIZE` input buffer.
+Only **3 variables** are written to SPI flash:
 
 ```bash
 # Boot priority: USB → eMMC → SPI recovery
 bootcmd=run usb_vyos || run vyos || run recovery
 
-# USB live boot — split into 3 vars (same pattern as eMMC)
-# Uses && chains so failure aborts cleanly (no booti with bad addrs)
-usb_vyos_load=usb start && fatload usb 0:0 ${kernel_addr_r} live/vmlinuz && fatload usb 0:0 ${fdt_addr_r} mono-gw.dtb && fatload usb 0:0 ${ramdisk_addr_r} live/initrd.img
-usb_vyos_args=setenv bootargs BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 hugepagesz=2M hugepages=512 panic=60 quiet
-usb_vyos=run usb_vyos_load && run usb_vyos_args && booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
+# USB live boot — delegates to boot.scr on FAT32 partition 2
+# boot.scr handles all file loading, bootargs, and booti.
+# If no USB or no boot.scr, the 'if fatload' fails cleanly and
+# || in bootcmd falls through to 'run vyos'.
+usb_vyos=usb start; if fatload usb 0:2 ${load_addr} boot.scr; then source ${load_addr}; fi
 
-# eMMC boot — split into 3 vars to stay under U-Boot input buffer limit
-vyos_load=ext4load mmc 0:3 ${load_addr} /boot/vyos.env; env import -t ${load_addr} ${filesize}; ext4load mmc 0:3 ${kernel_addr_r} /boot/${vyos_image}/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/${vyos_image}/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/${vyos_image}/initrd.img
-vyos_args=setenv bootargs BOOT_IMAGE=/boot/${vyos_image}/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 hugepagesz=2M hugepages=512 panic=60 vyos-union=/boot/${vyos_image}
-vyos=run vyos_load; run vyos_args; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
+# eMMC boot — single combined variable: load vyos.env, import image name,
+# load kernel/dtb/initrd, set bootargs, booti. Initrd loaded LAST so
+# ${filesize} captures its size for the ramdisk addr:size format.
+vyos=ext4load mmc 0:3 ${load_addr} /boot/vyos.env; env import -t ${load_addr} ${filesize}; ext4load mmc 0:3 ${kernel_addr_r} /boot/${vyos_image}/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/${vyos_image}/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/${vyos_image}/initrd.img; setenv bootargs BOOT_IMAGE=/boot/${vyos_image}/vmlinuz console=ttyS0,115200 quiet net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 sysctl.net.core.default_qdisc=fq usbcore.autosuspend=-1 vyos-union=/boot/${vyos_image}; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
 
 # SPI flash recovery (factory, always available)
 recovery=sf probe 0:0; sf read ${kernel_addr_r} ${kernel_addr} ${kernel_size}; sf read ${fdt_addr_r} ${fdt_addr} ${fdt_size}; booti ${kernel_addr_r} - ${fdt_addr_r}
 ```
+
+> **Hugepages are NOT in default bootargs.** They are added dynamically when VPP is configured
+> via `set vpp settings`, which triggers a one-time kexec to apply `hugepagesz=2M hugepages=512`.
+>
+> **No `earlycon=`.** Stock VyOS does not use it; it adds uart8250 spam to pre-userspace log.
+> `quiet` limits kernel console to KERN_WARNING+ (loglevel 4), matching stock VyOS on amd64.
 
 ### `/boot/vyos.env` Format
 
@@ -108,31 +116,12 @@ Written by VyOS's image installer Python code after every `install image` or `ad
 
 ---
 
-## Implementation Plan
-
-| Task | File | Description |
-|------|------|-------------|
-| 1 | `data/scripts/vyos-postinstall` | Rewrite: write `vyos.env` + one-time `fw_setenv` for static `vyos` |
-| 2 | `data/vyos-1x-011-auto-postinstall.patch` | **NEW** — Hook `vyos.env` write into `install image` and `add system image` |
-| 3 | `.github/workflows/auto-build.yml` | Apply patch 011; fix `vyos-postinstall.service` symlink via chroot hook |
-| 4 | `INSTALL.md` | Simplify to 5 steps |
-| 5 | `AGENTS.md`, `PORTING.md` | Update to reflect new architecture |
-
-### Verified: `env import -t` Works ✅
-
-Tested 2026-03-25 on board #308 (U-Boot 2025.04):
-1. ✅ `env import -t ${load_addr} ${filesize}` correctly parses `vyos_image=2026.03.25-0531-rolling`
-2. ✅ `${vyos_image}` is available for subsequent `ext4load` commands in the same script
-3. ✅ No side effects: only the `vyos_image` variable is imported
-4. ✅ Full boot chain works: `vyos.env`, `env import`, per-image `ext4load`, `booti`, VyOS login in ~97s
-
----
-
 ## Reference: U-Boot Version
 
 ```
-U-Boot 2025.04-g26d27571ac82-dirty (Jan 18 2026 - 17:54:35 +0000)
+U-Boot 2025.04-g9f13d11658f6 (Feb 06 2026 - 09:41:56 +0000)
 aarch64-oe-linux-gcc (GCC) 14.3.0
+GNU ld (GNU Binutils) 2.44.0.20250715
 ```
 
 ## Memory Map
@@ -153,33 +142,26 @@ aarch64-oe-linux-gcc (GCC) 14.3.0
 
 ## Boot Commands (Deployed — vyos.env Architecture)
 
-> **Status:** VERIFIED on board #308 (2026-03-25). Set automatically by `boot.scr` on first USB boot.
-> Manual paste is only needed for recovery. Each `setenv` line stays under 500 chars.
+> **Status:** Set automatically by `vyos-postinstall` Phase 1 via `fw_setenv` during every `install image`.
+> Manual paste is only needed for recovery if `fw_setenv` failed. Each `setenv` line stays under 500 chars.
 
 ```bash
-# 1. eMMC file loader — reads vyos.env then loads kernel+dtb+initrd from per-image dir
-setenv vyos_load 'ext4load mmc 0:3 ${load_addr} /boot/vyos.env; env import -t ${load_addr} ${filesize}; ext4load mmc 0:3 ${kernel_addr_r} /boot/${vyos_image}/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/${vyos_image}/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/${vyos_image}/initrd.img'
+# 1. eMMC boot — single variable: reads vyos.env, loads kernel+dtb+initrd, sets bootargs, boots.
+#    Initrd loaded LAST so ${filesize} captures its size.
+setenv vyos 'ext4load mmc 0:3 ${load_addr} /boot/vyos.env; env import -t ${load_addr} ${filesize}; ext4load mmc 0:3 ${kernel_addr_r} /boot/${vyos_image}/vmlinuz; ext4load mmc 0:3 ${fdt_addr_r} /boot/${vyos_image}/mono-gw.dtb; ext4load mmc 0:3 ${ramdisk_addr_r} /boot/${vyos_image}/initrd.img; setenv bootargs BOOT_IMAGE=/boot/${vyos_image}/vmlinuz console=ttyS0,115200 quiet net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 sysctl.net.core.default_qdisc=fq usbcore.autosuspend=-1 vyos-union=/boot/${vyos_image}; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
 
-# 2. Bootargs builder — ${vyos_image} is expanded at runtime (after env import)
-setenv vyos_args 'setenv bootargs BOOT_IMAGE=/boot/${vyos_image}/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 hugepagesz=2M hugepages=512 panic=60 vyos-union=/boot/${vyos_image}'
+# 2. USB live boot — delegates to boot.scr which handles all file loading and bootargs.
+#    If no USB or no boot.scr, 'if fatload' fails cleanly → falls through via || in bootcmd.
+setenv usb_vyos 'usb start; if fatload usb 0:2 ${load_addr} boot.scr; then source ${load_addr}; fi'
 
-# 3. eMMC boot orchestrator — chains load → args → boot
-setenv vyos 'run vyos_load; run vyos_args; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
-
-# 4. USB live boot — split into 3 vars (same pattern as eMMC)
-# Uses && chains so failure at any step aborts (no booti with bad addrs)
-setenv usb_vyos_load 'usb start && fatload usb 0:0 ${kernel_addr_r} live/vmlinuz && fatload usb 0:0 ${fdt_addr_r} mono-gw.dtb && fatload usb 0:0 ${ramdisk_addr_r} live/initrd.img'
-setenv usb_vyos_args 'setenv bootargs BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 hugepagesz=2M hugepages=512 panic=60 quiet'
-setenv usb_vyos 'run usb_vyos_load && run usb_vyos_args && booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}'
-
-# 5. Boot priority: USB → eMMC → SPI recovery
+# 3. Boot priority: USB → eMMC → SPI recovery
 setenv bootcmd 'run usb_vyos || run vyos || run recovery'
 
-# 6. Save to SPI flash (one-time, never needs changing)
+# 4. Save to SPI flash (one-time, never needs changing after install image)
 saveenv
 ```
 
-After `saveenv`, the board auto-boots from eMMC via `/boot/vyos.env` on every power cycle. No further U-Boot intervention needed. Ever. Future `add system image` upgrades only update `/boot/vyos.env`.
+After `saveenv`, the board auto-boots from eMMC via `/boot/vyos.env` on every power cycle. If a USB with `boot.scr` is inserted, it boots from USB instead (live mode). No further U-Boot intervention needed. Future `add system image` upgrades only update `/boot/vyos.env`.
 
 > **Note on quoting:** `setenv bootargs` does NOT need double quotes around the value. U-Boot's
 > `setenv` treats everything after the variable name as the value. Removing `"..."` avoids nested
@@ -190,7 +172,8 @@ After `saveenv`, the board auto-boots from eMMC via `/boot/vyos.env` on every po
 - `boot=live`: initramfs uses live-boot mode
 - `vyos-union=/boot/${vyos_image}`: squashfs overlay dir on p3 (also used as `is_live_boot()` fallback for U-Boot boards)
 - `fsl_dpaa_fman.fsl_fm_max_frm=9600`: enables jumbo frames (max MTU 9578). Module name is `fsl_dpaa_fman`, NOT `fman`. The wrong name silently has no effect.
-- `hugepagesz=2M hugepages=512 panic=60`: MUST match config.boot.default or `system_option.py` triggers a kexec reboot
+- `panic=60`: MUST match config.boot.default or `system_option.py` triggers a kexec reboot. Hugepages are NOT in default bootargs — added dynamically when VPP is configured.
+- `usbcore.autosuspend=-1`: required on LS1046A DWC3 xHCI to prevent USB autosuspend stalls
 - Missing `boot=live` or `vyos-union=` drops to initramfs BusyBox shell with no explanation
 
 **Critical load order:**
@@ -199,22 +182,17 @@ After `saveenv`, the board auto-boots from eMMC via `/boot/vyos.env` on every po
 
 ## Boot from USB (for initial install)
 
-The USB image is whole-disk FAT32 (no MBR partition table). Use `boot.scr` for a one-liner:
+The USB is a hybrid ISO written via `dd`: partition 1 is ISO9660 (squashfs), partition 2 is FAT32 (boot files). Use `boot.scr` for a one-liner:
 
 ```bash
-usb start; fatload usb 0:0 ${load_addr} boot.scr; source ${load_addr}
+usb start; fatload usb 0:2 ${load_addr} boot.scr; source ${load_addr}
 ```
 
-Or manually:
+`boot.scr` loads vmlinuz, DTB, and initrd from the FAT32 partition, sets bootargs (including `usbcore.autosuspend=-1` for DWC3 xHCI stability), and calls `booti`. See `data/scripts/boot.cmd` for the full source.
 
-```bash
-usb start; fatload usb 0:0 ${kernel_addr_r} live/vmlinuz; fatload usb 0:0 ${fdt_addr_r} mono-gw.dtb; fatload usb 0:0 ${ramdisk_addr_r} live/initrd.img; setenv bootargs "BOOT_IMAGE=/live/vmlinuz console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500 boot=live live-media=/dev/sda components noeject nopersistence noautologin nonetworking union=overlay net.ifnames=0 fsl_dpaa_fman.fsl_fm_max_frm=9600 hugepagesz=2M hugepages=512 panic=60 quiet"; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
-```
+> **Always use `usb 0:2`** — auto-detection (`usb 0:0`) fails on LS1046A U-Boot with the hybrid MBR.
 
-> USB live boot triggers a kexec double-boot (~70s penalty). Normal for VyOS live-boot,
-> only during initial install. eMMC boot is single-pass (~82s).
-
-> **If `fatload` says "File not found":** run `fatls usb 0:0 live` — if the
+> **If `fatload` says "File not found":** run `fatls usb 0:2 live` — if the
 > kernel has a version suffix (e.g. `vmlinuz-6.6.128-vyos`), use the full name.
 
 ## Factory Boot Commands (OpenWrt — Pre-Install)
@@ -235,18 +213,18 @@ recovery=sf probe 0:0; sf read ${kernel_addr_r} ${kernel_addr} ${kernel_size};
     booti ${kernel_addr_r} - ${fdt_addr_r}
 ```
 
-## EFI/GRUB: Permanently Broken
+## EFI/GRUB: Not Available
 
-`bootefi` with GRUB OOMs on this board. The DPAA1 `reserved-memory` nodes in the DTB consume too much of the EFI memory pool:
+U-Boot on this board was compiled **without EFI support** (`CONFIG_CMD_EFIDEBUG` disabled). Confirmed 2026-04-17:
 
 ```
-reserved-memory:
-  qman-pfdr: 0x9fc000000..0x9fdffffff (32 MB) nomap
-  qman-fqd:  0x9fe800000..0x9feffffff (8 MB)  nomap
-  bman-fbpr: 0x9ff000000..0x9ffffffff (16 MB) nomap
+=> efidebug devices
+Unknown command 'efidebug' - try 'help'
 ```
 
-**Use `vyos` (booti) as the permanent boot method.**
+`bootefi` is listed in `help` (command stub exists) but cannot function without the EFI runtime. Even if EFI were compiled in, GRUB would OOM due to DPAA1 `reserved-memory` nodes consuming the EFI memory pool.
+
+**Use `booti` via `boot.scr` as the permanent boot method.**
 
 ## Failed Boot Attempts (Reference)
 
@@ -269,7 +247,7 @@ booti ${kernel_addr_r} - ${fdt_addr_r}
 ## Ethernet Interfaces
 
 > ⚠️ Physical RJ45 port order differs from DT node address order.
-> Port remapping is handled by udev rule `64-fman-port-order.rules` setting `VYOS_IFNAME`.
+> Port remapping is handled by udev rule `10-fman-port-order.rules` which calls `fman-port-name` to set FMan MAC DT address → physical port name. On installed systems, VyOS `vyos_net_name` (hw-id matching) takes precedence.
 
 | Physical Position | DT Node | MAC Address | PHY Addr | VyOS Name | Type |
 |-------------------|---------|-------------|----------|-----------|------|
@@ -326,27 +304,27 @@ MAC addresses are unique per board. Yours will differ.
 
 > **MTD visibility requires `CONFIG_SPI_FSL_QSPI=y`.** Without it, `/proc/mtd` is empty and
 > `fw_setenv` fails with "Configuration file wrong or corrupted." With QSPI enabled,
-> 8 MTD partitions appear (`/dev/mtd0`–`/dev/mtd7`). `fw_setenv` uses `/dev/mtd3`
-> (uboot-env, 1 MB). VyOS ships `libubootenv-tool` (not classic `u-boot-tools`),
-> which requires its own `/etc/fw_env.config` format.
+> MTD partitions appear (`/dev/mtd0`–`/dev/mtdN`). `fw_setenv` uses `/dev/mtd2`
+> (uboot-env). VyOS ships `libubootenv-tool` (not classic `u-boot-tools`),
+> which requires its own `/etc/fw_env.config` format (`/dev/mtd2 0x0 0x2000 0x1000`).
 
 ## USB Device Detection
 
 ```
 SanDisk 3.2Gen1 (USB 2.10 mode on XHCI)
 VID:PID = 0x0781:0x5581
-Partition: usb 0:0 (whole-disk FAT32, no MBR partition table)
+Hybrid ISO: Partition 1 = ISO9660, Partition 2 = FAT32 (boot files)
+Access via: fatload usb 0:2 (auto-detection 0:0 fails on hybrid MBR)
 ```
 
-### USB Contents (from `fatls usb 0:0`)
+### USB Contents (from `fatls usb 0:2`)
 
 ```
-live/vmlinuz-6.6.128-vyos    (9.2 MB)
-live/initrd.img-6.6.128-vyos (33.3 MB)
-live/filesystem.squashfs     (526 MB)
-mono-gw.dtb                  (94 KB)
-EFI/boot/bootaa64.efi        (990 KB)
-EFI/boot/grubaa64.efi        (3.9 MB)
+boot.scr                     (U-Boot boot script)
+live/vmlinuz                  (~10 MB, gzip-compressed Image.gz)
+live/initrd.img               (~33 MB)
+live/filesystem.squashfs      (~526 MB)
+mono-gw.dtb                   (94 KB)
 ```
 
 ## Live System State (2026-03-24, eMMC installed)

@@ -1,272 +1,13 @@
-firewall {
-    flowtable FT01 {
-        interface eth0
-        interface eth1
-        interface eth2
-        interface eth3
-        interface eth4
-        offload software
-    }
-    global-options {
-        all-ping enable
-        send-redirects disable
-        source-validation loose
-        state-policy {
-            invalid {
-                action drop
-            }
-        }
-    }
-    group {
-        interface-group IG-LAN {
-            interface eth0
-            interface eth1
-            interface eth2
-        }
-        interface-group IG-WAN {
-            interface eth3
-            interface eth4
-        }
-    }
-    ipv4 {
-        forward {
-            filter {
-                default-action drop
-                default-log
-                description "Handle traffic being routed THROUGH the device. LOG and DROP by default."
-                rule 10 {
-                    action offload
-                    description "Offload established/related to flowtable."
-                    offload-target FT01
-                    state established
-                    state related
-                }
-                rule 100 {
-                    action accept
-                    description "This WOULD handle established traffic if it didnt enter the flowtable."
-                    state established
-                    state related
-                }
-                rule 110 {
-                    action drop
-                    description "Drops traffic to invalid/closed connections."
-                    protocol all
-                    state invalid
-                }
-                rule 1000 {
-                    action accept
-                    description "Allow ALL traffic in from LAN interfaces to ANY destination."
-                    destination {
-                        address 0.0.0.0/0
-                    }
-                    inbound-interface {
-                        group IG-LAN
-                    }
-                }
-            }
-        }
-        input {
-            filter {
-                default-action drop
-                default-log
-                description "Handle traffic being routed TO the device. LOG and DROP by default."
-                rule 100 {
-                    action accept
-                    description "Allow established traffic."
-                    protocol all
-                    state established
-                    state related
-                }
-                rule 110 {
-                    action drop
-                    description "Drops traffic to invalid/closed connections."
-                    protocol all
-                    state invalid
-                }
-                rule 1000 {
-                    action accept
-                    description "Allow ALL traffic in from LAN interfaces to the device."
-                    inbound-interface {
-                        group IG-LAN
-                    }
-                    log
-                    protocol all
-                }
-            }
-        }
-    }
-}
 interfaces {
     ethernet eth0 {
         address dhcp
-        description "Left RJ45"
-        hw-id e8:f6:d7:00:16:00
-        ipv6 {
-            address {
-                autoconf
-            }
-        }
-        offload {
-            gro
-            gso
-            rfs
-            rps
-            sg
-        }
-    }
-    ethernet eth1 {
-        address dhcp
-        description "Center RJ45"
-        hw-id e8:f6:d7:00:16:01
-        ipv6 {
-            address {
-                autoconf
-            }
-        }
-        offload {
-            gro
-            gso
-            rfs
-            rps
-            sg
-        }
-    }
-    ethernet eth2 {
-        address dhcp
-        description "Right RJ45"
-        hw-id e8:f6:d7:00:15:ff
-        ipv6 {
-            address {
-                autoconf
-            }
-        }
-        offload {
-            gro
-            gso
-            rfs
-            rps
-            sg
-        }
-    }
-    ethernet eth3 {
-        address dhcp
-        description "SFP+ Left"
-        hw-id e8:f6:d7:00:16:02
-        ipv6 {
-            address {
-                autoconf
-            }
-        }
-        mtu 9000
-        offload {
-            gro
-            gso
-            rfs
-            rps
-            sg
-        }
-    }
-    ethernet eth4 {
-        address dhcp
-        description "SFP+ Right"
-        hw-id e8:f6:d7:00:16:03
-        ipv6 {
-            address {
-                autoconf
-            }
-        }
-        mtu 9000
-        offload {
-            gro
-            gso
-            rfs
-            rps
-            sg
-        }
+        description "RJ45 port 1"
     }
     loopback lo {
     }
 }
-nat {
-    source {
-        rule 1 {
-            outbound-interface {
-                group IG-WAN
-            }
-            translation {
-                address masquerade
-            }
-        }
-    }
-}
 service {
-    dns {
-        forwarding {
-            allow-from 127.0.0.0/8
-            allow-from 192.168.0.0/16
-            allow-from 10.0.0.0/8
-            allow-from 172.16.0.0/12
-            allow-from 100.64.0.0/10
-            allow-from ::1/128
-            allow-from fe80::/10
-            allow-from fc00::/7
-            allow-from 2000::/3
-            cache-size 10000
-            dnssec validate
-            listen-address 127.0.0.1
-            listen-address ::1
-            name-server 1.1.1.1 {
-            }
-            name-server 9.9.9.9 {
-            }
-            name-server 2606:4700:4700::1111 {
-            }
-            name-server 2620:fe::fe {
-            }
-            timeout 5000
-        }
-    }
-    https {
-        api {
-            graphql {
-                authentication {
-                    type key
-                }
-            }
-            keys {
-                id vymanager {
-                    key auckland
-                }
-            }
-            rest {
-            }
-        }
-    }
-    ntp {
-        allow-client {
-            address 127.0.0.0/8
-            address 169.254.0.0/16
-            address 10.0.0.0/8
-            address 172.16.0.0/12
-            address 192.168.0.0/16
-            address 100.64.0.0/10
-            address ::1/128
-            address fe80::/10
-            address fc00::/7
-            address 2000::/3
-        }
-        server time.apple.com {
-        }
-        server time.cloudflare.com {
-        }
-        server time.google.com {
-        }
-    }
     ssh {
-        cipher chacha20-poly1305@openssh.com
-        cipher aes256-gcm@openssh.com
-        cipher aes128-gcm@openssh.com
-        client-keepalive-interval 60
         port 22
     }
 }
@@ -274,75 +15,22 @@ system {
     config-management {
         commit-revisions 100
     }
-    conntrack {
-        hash-size 262144
-        modules {
-            ftp
-            h323
-            nfs
-            pptp
-            sip
-            sqlnet
-            tftp
-        }
-        table-size 262144
-    }
     console {
         device ttyS0 {
             speed 115200
         }
     }
-    domain-name internal
     host-name vyos
     login {
         user vyos {
             authentication {
-                encrypted-password $y$j9T$Rq06TVkTBOm.Xw0dNcvvd0$U73QHmRbKcnEQbQU90YTj9TZDDuIvCyakm25928fqn9
+                encrypted-password "$y$j9T$Rq06TVkTBOm.Xw0dNcvvd0$U73QHmRbKcnEQbQU90YTj9TZDDuIvCyakm25928fqn9"
             }
         }
     }
-    name-server 127.0.0.1
-    name-server eth0
-    name-server eth1
-    name-server eth2
-    name-server eth3
-    name-server eth4
     option {
-        kernel {
-        }
         performance network-latency
-        reboot-on-panic
         reboot-on-upgrade-failure 5
         time-format 24-hour
-    }
-    sysctl {
-        parameter net.core.default_qdisc {
-            value fq
-        }
-        parameter net.core.netdev_max_backlog {
-            value 5000
-        }
-        parameter net.ipv4.ip_local_port_range {
-            value "1024 65001"
-        }
-        parameter net.ipv4.tcp_congestion_control {
-            value bbr
-        }
-        parameter net.netfilter.nf_conntrack_tcp_timeout_close_wait {
-            value 20
-        }
-        parameter net.netfilter.nf_conntrack_tcp_timeout_established {
-            value 1800
-        }
-        parameter net.netfilter.nf_conntrack_tcp_timeout_fin_wait {
-            value 30
-        }
-        parameter net.netfilter.nf_conntrack_tcp_timeout_time_wait {
-            value 60
-        }
-    }
-    update-check {
-        auto-check
-        url https://raw.githubusercontent.com/mihakralj/vyos-ls1046a-build/refs/heads/main/version.json
     }
 }

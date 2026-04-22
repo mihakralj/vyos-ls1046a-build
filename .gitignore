@@ -19,10 +19,15 @@ package-lock.json
 firmware/
 linux-source-*.deb
 
+# Ephemeral boot logs captured during dev-test (not part of build)
+boot_test/
+
 # External repos (separate git repos, not part of this build)
 ASK/
 nxp-linux/
 nxp-fmlib/
 nxp-fmc/
 libcli/
+!data/ask-userspace/libcli/
 fmc_config_data.c
+ask-ls1046a-6.6/

@@ -55,8 +55,9 @@
 		/delete-property/ iommu-map;
 	};
 
-	/* No SMMU on this board */
-	/delete-node/ iommu@9000000;
+/* No SMMU on this board */
+/delete-node/ iommu@9000000;
+
 };
 
 /*
@@ -71,45 +72,111 @@
  *   (MAC10 added below as ethernet@9)
  */
 &fsldpaa {
-	/* Disable unused MACs */
-	ethernet@0 {
-		status = "disabled";
-	};
-	ethernet@2 {
-		status = "disabled";
-	};
-	ethernet@3 {
-		status = "disabled";
-	};
+/* Disable unused MACs */
+ethernet@0 {
+status = "disabled";
+};
+ethernet@2 {
+status = "disabled";
+};
+ethernet@3 {
+status = "disabled";
+};
 
-	/* MAC10 — 10G right SFP (not in generic qoriq-dpaa-eth.dtsi) */
-	ethernet@9 {
-		compatible = "fsl,dpa-ethernet";
-		fsl,fman-mac = <&enet7>;
-		dma-coherent;
-	};
+/*
+ * ethernet@8 (MAC9, 10G left SFP) — fix merged DTS conflict.
+ * The mainline mono-gateway-dk.dts adds this node with
+ * compatible = "fsl,dpa-ethernet-init" and static FQIDs (0x40c-0x40f).
+ * qoriq-dpaa-eth.dtsi adds the same node with "fsl,dpa-ethernet".
+ * DTC merges them: the node ends up with BOTH compatible strings
+ * (last wins) AND the static fsl,qman-frame-queues-* properties.
+ * The SDK dpa_fq_probe_mac() sees static FQIDs → allocates only
+ * RX_DEFAULT, RX_ERROR, TX_CONF_MQ, TX_ERROR, TX_CONFIRM (8 FQs,
+ * zero TX) instead of the full dynamic set (44 FQs with PCD + TX).
+ * Fix: force SDK compatible and delete the static FQ properties.
+ */
+ethernet@8 {
+compatible = "fsl,dpa-ethernet";
+/delete-property/ fsl,qman-frame-queues-rx;
+/delete-property/ fsl,qman-frame-queues-tx;
+/delete-property/ fsl,bman-buffer-pools;
+};
+
+/* MAC10 — 10G right SFP. Same merge conflict fix + add node. */
+ethernet@9 {
+compatible = "fsl,dpa-ethernet";
+fsl,fman-mac = <&enet7>;
+dma-coherent;
+/delete-property/ fsl,qman-frame-queues-rx;
+/delete-property/ fsl,qman-frame-queues-tx;
+/delete-property/ fsl,bman-buffer-pools;
+};
 };
 
 /*
  * FMan: SDK driver needs compatible = "fsl,fman", "simple-bus"
  * Also remove 'managed' from 10G ports — SDK FMan handles link itself
+ *
+ * CRITICAL: Override port compatible strings from mainline format
+ * ("fsl,fman-v3-port-rx/tx") to SDK format ("fsl,fman-port-{1g,10g}-{rx,tx}").
+ * The SDK fm_port_driver match table does NOT match mainline v3 compat strings.
+ * Without this, fm_port_probe() never runs, dev_set_drvdata() is never called,
+ * and all fsl_mac probes fail with "dev_get_drvdata(port@XXXXX) failed" error -22.
  */
 &fman0 {
-	compatible = "fsl,fman", "simple-bus";
+compatible = "fsl,fman", "simple-bus";
 
-	/* 10GEC1 — SDK FMan handles in-band; remove mainline 'managed' */
-	ethernet@f0000 {
-		/delete-property/ managed;
-		/delete-property/ sfp;
-		phy-connection-type = "xgmii";
-	};
+/* 1G RX ports — mainline "fsl,fman-v3-port-rx" → SDK "fsl,fman-port-1g-rx" */
+port@88000 { compatible = "fsl,fman-port-1g-rx"; };
+port@89000 { compatible = "fsl,fman-port-1g-rx"; };
+port@8a000 { compatible = "fsl,fman-port-1g-rx"; };
+port@8b000 { compatible = "fsl,fman-port-1g-rx"; };
+port@8c000 { compatible = "fsl,fman-port-1g-rx"; };
+port@8d000 { compatible = "fsl,fman-port-1g-rx"; };
 
-	/* 10GEC2 — same treatment */
-	ethernet@f2000 {
-		/delete-property/ managed;
-		/delete-property/ sfp;
-		phy-connection-type = "xgmii";
-	};
+/* 10G RX ports — mainline "fsl,fman-v3-port-rx" → SDK "fsl,fman-port-10g-rx" */
+port@90000 { compatible = "fsl,fman-port-10g-rx"; };
+port@91000 { compatible = "fsl,fman-port-10g-rx"; };
+
+/* 1G TX ports — mainline "fsl,fman-v3-port-tx" → SDK "fsl,fman-port-1g-tx" */
+port@a8000 { compatible = "fsl,fman-port-1g-tx"; };
+port@a9000 { compatible = "fsl,fman-port-1g-tx"; };
+port@aa000 { compatible = "fsl,fman-port-1g-tx"; };
+port@ab000 { compatible = "fsl,fman-port-1g-tx"; };
+port@ac000 { compatible = "fsl,fman-port-1g-tx"; };
+port@ad000 { compatible = "fsl,fman-port-1g-tx"; };
+
+/* 10G TX ports — mainline "fsl,fman-v3-port-tx" → SDK "fsl,fman-port-10g-tx" */
+port@b0000 { compatible = "fsl,fman-port-10g-tx"; };
+port@b1000 { compatible = "fsl,fman-port-10g-tx"; };
+
+/* 10GEC1 — SDK fsl_mac has no phylink/SFP support.
+ * Delete mainline properties and add fixed-link so mac.c's
+ * of_phy_register_fixed_link() succeeds. Without fixed-link,
+ * mac_probe() hits "Wrong PHY information" → probe fails.
+ * Kernel patch 4004 maps speed 10000 → SWMII_SPEED_1000
+ * so swphy_decode_speed() in fixed_phy.c doesn't reject it.
+ */
+ethernet@f0000 {
+/delete-property/ managed;
+/delete-property/ sfp;
+phy-connection-type = "xgmii";
+fixed-link {
+	speed = <10000>;
+	full-duplex;
+};
+};
+
+/* 10GEC2 — same treatment */
+ethernet@f2000 {
+/delete-property/ managed;
+/delete-property/ sfp;
+phy-connection-type = "xgmii";
+fixed-link {
+	speed = <10000>;
+	full-duplex;
+};
+};
 };
 
 /*

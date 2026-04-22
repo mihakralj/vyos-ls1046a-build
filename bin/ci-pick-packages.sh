@@ -50,3 +50,16 @@ for deb_file in $deb_files; do
 done
 
 ls -alh packages
+
+### Validate critical packages are present — no silent fallback to upstream
+KERNEL_PKGS=$(find packages -name 'linux-image-*.deb' ! -name '*-dbg*' | wc -l)
+if [ "$KERNEL_PKGS" -eq 0 ]; then
+  echo ""
+  echo "###############################################################"
+  echo "### FATAL: No linux-image .deb found in packages/           ###"
+  echo "### The ISO would silently use the upstream VyOS kernel.    ###"
+  echo "###############################################################"
+  echo ""
+  exit 1
+fi
+echo "### Package validation OK: $KERNEL_PKGS kernel image package(s) in packages/"

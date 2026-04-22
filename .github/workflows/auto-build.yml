@@ -1,8 +1,8 @@
 name: VyOS LS1046A build
 
 on:
-  schedule:
-    - cron: "0 5 * * *"
+#  schedule:
+#    - cron: "0 5 * * *"
 
   workflow_dispatch:
     inputs:
@@ -48,6 +48,31 @@ on:
       MINISIGN_PRIVATE_KEY:
         required: false
 
+  workflow_call:
+    inputs:
+      runs_on:
+        description: 'Runner label to execute the build on'
+        type: string
+        required: false
+        default: 'ubuntu-24.04-arm'
+      BUILD_BY:
+        type: string
+        required: false
+        default: ''
+      build_version:
+        type: string
+        required: false
+        default: ''
+      builder_image:
+        type: string
+        required: false
+        default: 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64'
+    secrets:
+      MOK_KEY:
+        required: false
+      MINISIGN_PRIVATE_KEY:
+        required: false
+
 env:
   DEBIAN_MIRROR: http://deb.debian.org/debian/
   DEBIAN_SECURITY_MIRROR: http://deb.debian.org/debian-security
@@ -73,7 +98,6 @@ jobs:
       PREVIOUS_SUCCESS_BUILD_TIMESTAMP: ${{ steps.set_env_variables.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}
       image_iso: ${{ steps.build_iso.outputs.image_iso }}
       image_name: ${{ steps.build_iso.outputs.image_name }}
-      usb_img: ${{ steps.build_iso.outputs.usb_img }}
 
     steps:
       - name: Verify Hardware (self-hosted)
@@ -97,7 +121,10 @@ jobs:
         if: ${{ inputs.runs_on != '' && inputs.runs_on != 'ubuntu-24.04-arm' }}
         run: |
           set -e
+          # The container has /mnt bind-mounted from the host (880 GiB NVMe).
+          # Redirect the build scratch area to NVMe to avoid the slower OS disk.
           mkdir -p /mnt/build-workspace
+          # Clean any stale content from a previous run of the same job
           rm -rf /mnt/build-workspace/* /mnt/build-workspace/.[!.]* 2>/dev/null || true
           echo "NVMe scratch ready at /mnt/build-workspace"
           df -h /mnt
@@ -113,7 +140,13 @@ jobs:
             bubblewrap git-lfs kpartx clang llvm cmake \
             protobuf-compiler python3-cracklib python3-protobuf \
             libreadline-dev liblua5.3-dev byacc flex \
-            dosfstools mtools zstd u-boot-tools
+            dosfstools mtools zstd u-boot-tools \
+            libpcre2-dev xorriso \
+            libxml2-dev libtclap-dev
+          # libxml2-dev + libtclap-dev: required to build fmc from source
+          # (see bin/ci-build-fmc.sh and bin/ci-build-fmlib.sh). Rebuilding
+          # fmc+fmlib ensures dpa_app links against ABI-consistent libraries
+          # and no longer SIGSEGVs on the mono gateway.
           apt-get upgrade -y
 
       - uses: actions/checkout@v6
@@ -162,6 +195,15 @@ jobs:
       - name: Setup kernel config and patches
         run: bin/ci-setup-kernel.sh
 
+      - name: Checkout ASK repo (NXP Application Solutions Kit)
+        uses: actions/checkout@v6
+        with:
+          repository: mihakralj/ask-ls1046a-6.6
+          path: ask-ls1046a-6.6
+
+      - name: Setup ASK fast-path kernel (SDK DPAA + hooks)
+        run: bin/ci-setup-kernel-ask.sh
+
       - name: Setup vyos-build (config, chroot files, hooks)
         run: bin/ci-setup-vyos-build.sh
 
@@ -193,8 +235,6 @@ jobs:
             manifest.json
             ${{ steps.build_iso.outputs.image_iso }}
             ${{ steps.build_iso.outputs.image_iso }}.minisig
-            ${{ steps.build_iso.outputs.usb_img }}
-            ${{ steps.build_iso.outputs.usb_img }}.minisig
           retention-days: 15
           if-no-files-found: error
           compression-level: 0
@@ -338,12 +378,10 @@ jobs:
         with:
           body_path: /tmp/release_notes.md
           tag_name: ${{ needs.build_iso.outputs.build_version }}
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: true
           files: |
             ${{ needs.build_iso.outputs.image_iso }}
             ${{ needs.build_iso.outputs.image_iso }}.minisig
-            vyos-*-usb.img.zst
-            vyos-*-usb.img.zst.minisig
 
       - uses: dev-drprasad/delete-older-releases@v0.3.4
         with:

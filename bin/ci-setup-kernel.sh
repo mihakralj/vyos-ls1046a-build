@@ -24,6 +24,13 @@ DEFCONFIG=vyos-build/scripts/package-build/linux-kernel/config/arm64/vyos_defcon
 sed -i '/CONFIG_DEVTMPFS_MOUNT/d'          "$DEFCONFIG"
 sed -i '/CONFIG_CPU_FREQ_DEFAULT_GOV/d'     "$DEFCONFIG"
 sed -i '/CONFIG_DEBUG_PREEMPT/d'            "$DEFCONFIG"
+sed -i '/CONFIG_THERMAL_GOV_FAIR_SHARE/d'   "$DEFCONFIG"
+sed -i '/CONFIG_THERMAL_GOV_BANG_BANG/d'     "$DEFCONFIG"
+sed -i '/CONFIG_CPU_IDLE_GOV_LADDER/d'       "$DEFCONFIG"
+sed -i '/CONFIG_STRICT_DEVMEM/d'            "$DEFCONFIG"
+sed -i '/CONFIG_IO_STRICT_DEVMEM/d'         "$DEFCONFIG"
+sed -i '/CONFIG_CMA/d'                      "$DEFCONFIG"
+sed -i '/CONFIG_DMA_CMA/d'                  "$DEFCONFIG"
 
 # Append all LS1046A kernel config fragments
 # NOTE: ls1046a-usdpaa.config moved to archive/dpaa-pmd/ (DPDK PMD archived)
@@ -49,6 +56,13 @@ cp data/kernel-patches/patch-phylink.py "$KERNEL_BUILD/"
 # Stage DPAA XDP queue_index fix for AF_XDP socket lookup
 cp data/kernel-patches/patch-dpaa-xdp-queue-index.py "$KERNEL_BUILD/"
 
+# Stage LS1046A DWC3 xHCI quirks (AVOID_BEI + TRUST_TX_LENGTH) — Python
+# patcher rather than unified diff (hand-counted hunk headers proved fragile).
+# Required for USB live boot: dwc3_host_init() creates the xhci platform
+# child with of_node=NULL, so the original unified-diff patch's of_device_is_compatible()
+# never matched at runtime and USB-storage probe killed the host controller.
+cp data/kernel-patches/patch-xhci-ls1046a-quirks.py "$KERNEL_BUILD/"
+
 # Stage FMD Shim source for injection into build-kernel.sh
 cp data/kernel-patches/fsl_fmd_shim.c "$KERNEL_BUILD/"
 
@@ -69,6 +83,13 @@ fi
 DPAA_ETH_C=$(find . -path "*/freescale/dpaa/dpaa_eth.c" -maxdepth 6 | head -1)
 if [ -n "$DPAA_ETH_C" ] && [ -f "${CWD}/patch-dpaa-xdp-queue-index.py" ]; then
   python3 "${CWD}/patch-dpaa-xdp-queue-index.py" "$DPAA_ETH_C"
+fi
+
+# LS1046A DWC3 xHCI quirks (AVOID_BEI + TRUST_TX_LENGTH).
+# Required for USB live boot; without this, USB-storage probe stalls and
+# the host controller dies during init-bottom squashfs mount.
+if [ -f "${CWD}/patch-xhci-ls1046a-quirks.py" ]; then
+  python3 "${CWD}/patch-xhci-ls1046a-quirks.py" .
 fi
 
 # FMD Shim: inject /dev/fm0* chardev module for DPDK fmlib RSS
@@ -122,12 +143,77 @@ if [ -d "${CWD}/lp5812" ]; then
   if ! grep -q lp5812 drivers/leds/Makefile 2>/dev/null; then
     echo 'obj-$(CONFIG_LEDS_LP5812) += lp5812/' >> drivers/leds/Makefile
   fi
-  echo "LP5812: injected into $LP5812_DIR"
+  # Force-enable now that Kconfig is wired up.
+  # The post-defconfig olddefconfig ran BEFORE LP5812 was injected,
+  # so CONFIG_LEDS_LP5812=y was silently dropped. Re-apply and resolve.
+  scripts/config --set-val CONFIG_LEDS_LP5812 y
+  make olddefconfig
+  echo "LP5812: injected into $LP5812_DIR (config forced)"
 fi
 INJECT_EOF
 
 # Insert injection block before "# Change name of Signing Cert" in build-kernel.sh
+# Verify the anchor exists before attempting injection
+grep -q '# Change name of Signing Cert' "$KERNEL_BUILD/build-kernel.sh" \
+  || { echo "ERROR: build-kernel.sh anchor '# Change name of Signing Cert' missing"; exit 1; }
 sed -i '/# Change name of Signing Cert/r /tmp/kernel-inject.sh' "$KERNEL_BUILD/build-kernel.sh"
 rm -f /tmp/kernel-inject.sh
+
+### Post-defconfig: force LS1046A built-in configs after VyOS snippets
+#
+# VyOS config/*.config snippets are appended to the defconfig AFTER our
+# LS1046A fragments in build-kernel.sh. These snippets may override critical
+# built-in settings (e.g., USB_STORAGE=y→m, DEVTMPFS_MOUNT=y→n).
+# Fix: inject scripts/config overrides AFTER make vyos_defconfig.
+#
+cat > /tmp/ls1046a-post-defconfig.sh << 'LS1046A_POSTDEFCONFIG_EOF'
+
+# LS1046A: Force built-in configs that VyOS snippets may have overridden
+echo "I: LS1046A — Forcing built-in kernel configs after vyos_defconfig"
+scripts/config --enable CONFIG_DEVTMPFS_MOUNT
+scripts/config --set-val CONFIG_USB_STORAGE y
+scripts/config --set-val CONFIG_VFAT_FS y
+scripts/config --set-val CONFIG_FAT_FS y
+scripts/config --set-val CONFIG_NLS_CODEPAGE_437 y
+scripts/config --set-val CONFIG_NLS_ISO8859_1 y
+scripts/config --set-val CONFIG_NLS_UTF8 y
+scripts/config --set-val CONFIG_SQUASHFS y
+scripts/config --set-val CONFIG_OVERLAY_FS y
+scripts/config --set-val CONFIG_QORIQ_CPUFREQ y
+scripts/config --set-val CONFIG_FSL_EDMA y
+scripts/config --set-val CONFIG_SERIAL_OF_PLATFORM y
+scripts/config --set-val CONFIG_MAXLINEAR_GPHY y
+scripts/config --set-val CONFIG_IMX2_WDT y
+scripts/config --set-val CONFIG_SPI_FSL_QUADSPI y
+scripts/config --disable CONFIG_DEBUG_PREEMPT
+scripts/config --set-val CONFIG_NEW_LEDS y
+scripts/config --set-val CONFIG_LEDS_CLASS y
+scripts/config --set-val CONFIG_LEDS_CLASS_MULTICOLOR y
+scripts/config --set-val CONFIG_LEDS_GPIO y
+scripts/config --set-val CONFIG_LEDS_LP5812 y
+scripts/config --set-val CONFIG_LEDS_TRIGGERS y
+scripts/config --set-val CONFIG_LEDS_TRIGGER_NETDEV y
+# KVM, NFS, VFIO, CMA, thermal (match dev kernel)
+scripts/config --set-val CONFIG_KVM y
+scripts/config --set-val CONFIG_NFS_FS y
+scripts/config --set-val CONFIG_NFS_V4 y
+scripts/config --set-val CONFIG_NFS_V4_1 y
+scripts/config --set-val CONFIG_SUNRPC y
+scripts/config --set-val CONFIG_VFIO y
+scripts/config --set-val CONFIG_CMA y
+scripts/config --set-val CONFIG_DMA_CMA y
+scripts/config --set-val CONFIG_CMA_SIZE_MBYTES 32
+scripts/config --enable CONFIG_THERMAL_GOV_POWER_ALLOCATOR
+scripts/config --disable CONFIG_THERMAL_GOV_FAIR_SHARE
+scripts/config --disable CONFIG_THERMAL_GOV_BANG_BANG
+scripts/config --disable CONFIG_CPU_IDLE_GOV_LADDER
+scripts/config --disable CONFIG_STRICT_DEVMEM
+scripts/config --disable CONFIG_IO_STRICT_DEVMEM
+make olddefconfig
+
+LS1046A_POSTDEFCONFIG_EOF
+
+sed -i '/^make vyos_defconfig$/r /tmp/ls1046a-post-defconfig.sh' "$KERNEL_BUILD/build-kernel.sh"
+rm -f /tmp/ls1046a-post-defconfig.sh
 
 echo "### Kernel setup complete"

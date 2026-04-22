@@ -1,0 +1,11 @@
+--- a/python/vyos/system/disk.py
++++ b/python/vyos/system/disk.py
+@@ -171,7 +171,7 @@
+     """
+     if fsype in ['squashfs', 'iso9660']:
+         command: str = f'mount -o loop,ro -t {fsype} {partition} {path}'
+-    if fsype == 'overlay' and overlay_params:
++    elif fsype == 'overlay' and overlay_params:
+         command: str = f'mount -t overlay -o noatime,\
+             upperdir={overlay_params["upperdir"]},\
+             lowerdir={overlay_params["lowerdir"]},\

@@ -1,0 +1,99 @@
+#!/bin/bash
+# 97-ask-userspace.chroot — Configure ASK fast-path runtime environment
+#
+# This chroot hook runs during ISO build (live-build) to:
+#   1. Install runtime dependencies for ASK shared libraries
+#   2. Configure ldconfig for /usr/local/lib (ASK shared libs)
+#   3. Set up ASK kernel module autoloading via depmod trigger
+#
+# ASK binaries/libs/modules are already copied into the chroot by
+# ci-setup-vyos-build.sh before this hook runs.
+
+set -ex
+
+# Runtime deps — libatomic1 for aarch64 atomic builtins used by ASK libs
+# May already be present as a gcc-12 dependency. Don't fail the build
+# if APT sources are unavailable in the chroot at this stage.
+if ! dpkg -s libatomic1 >/dev/null 2>&1; then
+  apt-get update -qq 2>/dev/null || true
+  apt-get install -y --no-install-recommends libatomic1 2>/dev/null || \
+    echo "WARNING: libatomic1 not available — ASK binaries may fail if they need atomic builtins"
+  apt-get clean 2>/dev/null || true
+fi
+
+# ldconfig: ASK shared libraries live in /usr/local/lib
+# (libcli, libfci, libcmm, libnfnetlink, libnetfilter_conntrack)
+echo "/usr/local/lib" > /etc/ld.so.conf.d/ask.conf
+
+# Fix ASK library symlinks in /usr/local/lib/.
+# build-vyos-image uses shutil.copytree() which follows symlinks and converts
+# them to regular files. ldconfig warns "X is not a symbolic link" and may
+# create wrong SONAME mappings. Re-create proper symlinks here.
+(
+  cd /usr/local/lib
+  # libcli
+  [ -f libcli.so.1.10.8 ] && { rm -f libcli.so.1.10 libcli.so; ln -sf libcli.so.1.10.8 libcli.so.1.10; ln -sf libcli.so.1.10 libcli.so; }
+  # libfci
+  [ -f libfci.so.0.1 ] && { rm -f libfci.so.0 libfci.so; ln -sf libfci.so.0.1 libfci.so.0; ln -sf libfci.so.0 libfci.so; }
+  # libcmm
+  [ -f libcmm.so.0.0.0 ] && { rm -f libcmm.so.0 libcmm.so; ln -sf libcmm.so.0.0.0 libcmm.so.0; ln -sf libcmm.so.0 libcmm.so; }
+  # libnfnetlink (NXP-patched copy in /usr/local/lib)
+  [ -f libnfnetlink.so.0.2.0 ] && { rm -f libnfnetlink.so.0 libnfnetlink.so; ln -sf libnfnetlink.so.0.2.0 libnfnetlink.so.0; ln -sf libnfnetlink.so.0 libnfnetlink.so; }
+  # libnetfilter_conntrack (NXP-patched copy in /usr/local/lib)
+  [ -f libnetfilter_conntrack.so.3.8.0 ] && { rm -f libnetfilter_conntrack.so.3 libnetfilter_conntrack.so; ln -sf libnetfilter_conntrack.so.3.8.0 libnetfilter_conntrack.so.3; ln -sf libnetfilter_conntrack.so.3 libnetfilter_conntrack.so; }
+)
+
+# Replace system libnfnetlink with NXP-patched version.
+# The system libnfnetlink.so.0 (Debian, 30KB) lacks nfnl_set_nonblocking_mode()
+# which CMM requires. Our patched version (137KB) is a superset — same SONAME,
+# same ABI, plus NXP extensions. The multiarch path /usr/lib/aarch64-linux-gnu/
+# takes priority over /usr/local/lib/ in ldconfig, so we must replace in-place.
+#
+# CRITICAL: Backup files MUST NOT be left in the library directory!
+# ldconfig treats any file matching lib*.so.* as a shared library. A backup
+# named .debian-orig still matches, and ldconfig may create the .so.0 symlink
+# pointing to the backup instead of the replacement → CMM gets the old Debian
+# version and crashes with "undefined symbol: nfnl_set_nonblocking_mode".
+SYSLIB=/usr/lib/aarch64-linux-gnu
+BACKUP_DIR=/usr/share/ask-backup
+mkdir -p "$BACKUP_DIR"
+
+if [ -f "$SYSLIB/libnfnetlink.so.0.2.0" ] && [ -f /usr/local/lib/libnfnetlink.so.0.2.0 ]; then
+  # Back up original to a SEPARATE directory (not in the lib path!)
+  cp "$SYSLIB/libnfnetlink.so.0.2.0" "$BACKUP_DIR/libnfnetlink.so.0.2.0.debian-orig" 2>/dev/null || true
+  # Remove any stale backup that might exist in the lib directory
+  rm -f "$SYSLIB/libnfnetlink.so.0.2.0.debian-orig"
+  # Replace with our patched version
+  cp /usr/local/lib/libnfnetlink.so.0.2.0 "$SYSLIB/libnfnetlink.so.0.2.0"
+  echo "Replaced system libnfnetlink with NXP-patched version (backup in $BACKUP_DIR)"
+fi
+
+# Same for libnetfilter_conntrack (NXP-patched with comcerto extensions)
+if [ -f "$SYSLIB/libnetfilter_conntrack.so.3.8.0" ] && [ -f /usr/local/lib/libnetfilter_conntrack.so.3.8.0 ]; then
+  cp "$SYSLIB/libnetfilter_conntrack.so.3.8.0" "$BACKUP_DIR/libnetfilter_conntrack.so.3.8.0.debian-orig" 2>/dev/null || true
+  rm -f "$SYSLIB/libnetfilter_conntrack.so.3.8.0.debian-orig"
+  cp /usr/local/lib/libnetfilter_conntrack.so.3.8.0 "$SYSLIB/libnetfilter_conntrack.so.3.8.0"
+  echo "Replaced system libnetfilter_conntrack with NXP-patched version (backup in $BACKUP_DIR)"
+fi
+
+ldconfig
+
+# ASK kernel modules installed to /usr/local/lib/ask-modules/
+# Create depmod config so modprobe can find them
+if [ -d /usr/local/lib/ask-modules ]; then
+  mkdir -p /etc/depmod.d
+  echo "search ask-modules" > /etc/depmod.d/ask.conf
+  # Create module directory under kernel version (resolved at boot by ask-modules.conf)
+  # For now, just ensure the directory is findable
+  mkdir -p /usr/local/lib/ask-modules
+fi
+
+### SDK kernel services: create .wants symlinks directly in squashfs
+# These services use tmpfiles.d as backup, but creating the symlink here
+# is more reliable (tmpfiles may race with systemd unit scanning).
+# Services have ConditionPathExists guards so they're harmless on non-SDK kernels.
+mkdir -p /etc/systemd/system/multi-user.target.wants
+ln -sf /etc/systemd/system/sfp-tx-enable-sdk.service \
+  /etc/systemd/system/multi-user.target.wants/sfp-tx-enable-sdk.service
+
+echo "### ASK userspace chroot hook complete"

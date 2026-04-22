@@ -1,0 +1,16 @@
+--- a/src/conf_mode/system_timezone.py
++++ b/src/conf_mode/system_timezone.py
+@@ -47,7 +47,12 @@
+ 
+ def apply(tz):
+     call('/usr/bin/timedatectl set-timezone {}'.format(tz['name']))
+-    call('systemctl restart rsyslog')
++    # Only restart rsyslog if its VyOS-generated config exists
++    # Without 'set system syslog', /run/rsyslog/rsyslog.conf is never created
++    # and rsyslog fails on restart with "file not found" errors in monitor log
++    from pathlib import Path
++    if Path('/run/rsyslog/rsyslog.conf').exists():
++        call('systemctl restart rsyslog')
+ 
+ if __name__ == '__main__':
+     try:

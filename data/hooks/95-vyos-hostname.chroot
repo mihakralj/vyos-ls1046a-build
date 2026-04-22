@@ -1,0 +1,48 @@
+#!/bin/sh -e
+# 95-vyos-hostname.chroot — Fix hostname + default vyos user password
+#
+# Runs INSIDE the live-build chroot AFTER all packages installed but BEFORE
+# the squashfs is finalized. Two jobs:
+#
+# 1. HOSTNAME
+#    live-config's /lib/live/config/0020-hostname overwrites /etc/hostname
+#    with "debian" ONLY when the current value is "localhost.localdomain"
+#    (the base-files default). Shipping "vyos" here makes the grep fail,
+#    so 0020-hostname is a no-op → first boot banner reads "vyos login:"
+#    instead of "debian login:".
+#
+# 2. VYOS USER PASSWORD
+#    On live-boot, vyos-router runs `configure; commit` to load
+#    /opt/vyatta/etc/config.boot.default, which should set the vyos user
+#    password from `system login user vyos authentication encrypted-password`.
+#    Observed on LS1046A 2026.04.19-0002-rolling: commit either fails
+#    silently or runs AFTER getty already shows login, and the vyos user's
+#    /etc/shadow entry keeps its package-default hash → vyos/vyos rejected.
+#
+#    Hardcoding the yescrypt hash for "vyos" directly into /etc/shadow here
+#    guarantees vyos/vyos works from the very first login prompt, even if
+#    vyos-router hasn't finished committing. The subsequent VyOS commit
+#    will overwrite with the identical hash — no conflict.
+#
+#    Hash generated with:
+#      python3 -c "import crypt; print(crypt.crypt('vyos', crypt.mksalt(crypt.METHOD_YESCRYPT)))"
+#    Verified: crypt.crypt('vyos', HASH) == HASH
+
+echo "vyos" > /etc/hostname
+
+# Must match data/config.boot.default `system login user vyos
+# authentication encrypted-password`. Keep in sync.
+VYOS_HASH='$y$j9T$Rq06TVkTBOm.Xw0dNcvvd0$U73QHmRbKcnEQbQU90YTj9TZDDuIvCyakm25928fqn9'
+
+if getent passwd vyos >/dev/null 2>&1; then
+  # User exists — rewrite shadow entry. Use chpasswd -e (encrypted input).
+  echo "vyos:${VYOS_HASH}" | chpasswd -e
+  # Clear any password expiry / aging that might force a change on first login.
+  chage -M 99999 -m 0 -W 7 -I -1 -E -1 vyos 2>/dev/null || true
+  # Make sure account is unlocked.
+  passwd -u vyos 2>/dev/null || true
+else
+  # User doesn't exist yet — create it. vyos-1x postinst normally handles
+  # this, but in case live-build hook ordering changes, be defensive.
+  useradd -m -s /bin/vbash -G sudo,adm,frrvty,vyattacfg,dip -p "${VYOS_HASH}" vyos
+fi
