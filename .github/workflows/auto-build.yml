@@ -15,6 +15,9 @@ on:
       builder_image:
         description: 'Builder Docker image'
         default: 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64'
+      ASK_KERNEL_TAG:
+        description: 'ASK kernel release tag to consume (default: read data/ask-kernel.pin). Set empty string to disable and build kernel locally.'
+        default: ''
 
   workflow_call:
     inputs:
@@ -35,6 +38,10 @@ on:
         type: string
         required: false
         default: 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64'
+      ASK_KERNEL_TAG:
+        type: string
+        required: false
+        default: ''
     secrets:
       MOK_KEY:
         required: false
@@ -141,6 +148,24 @@ jobs:
           MOK_KEY: ${{ secrets.MOK_KEY }}
           MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
         run: bin/ci-setup-vyos1x.sh
+
+      - name: Consume prebuilt ASK kernel
+        env:
+          # Manual override wins; otherwise script reads data/ask-kernel.pin.
+          # Setting to empty explicitly disables ASK consume (falls through to local build).
+          ASK_KERNEL_TAG: ${{ inputs.ASK_KERNEL_TAG || github.event.inputs.ASK_KERNEL_TAG }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # If scheduled run or input was left blank, use the pin file.
+          if [ -z "${ASK_KERNEL_TAG:-}" ] && [ -f data/ask-kernel.pin ]; then
+              export ASK_KERNEL_TAG="$(tr -d '[:space:]' < data/ask-kernel.pin)"
+          fi
+          # Empty literal means "no ASK, build from scratch": skip the consume step.
+          if [ -n "${ASK_KERNEL_TAG:-}" ]; then
+              ASK_KERNEL_TAG="$ASK_KERNEL_TAG" bin/ci-consume-ask-kernel.sh
+          else
+              echo "### ASK_KERNEL_TAG empty — will build kernel locally via ci-setup-kernel.sh"
+          fi
 
       - name: Setup kernel config and patches
         run: bin/ci-setup-kernel.sh

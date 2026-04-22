@@ -214,5 +214,45 @@ else
   echo "fake sign" > "${IMAGE_ISO}.minisig"
 fi
 
+### Create FAT32 USB boot image
+# U-Boot reads FAT32 natively. ISO9660 requires Rufus workarounds.
+USB_IMG="${IMAGE_NAME}-usb.img"
+mkdir -p /tmp/iso-mount
+mount -o loop "$IMAGE_ISO" /tmp/iso-mount
+
+# Assert every staged ASK package actually landed in the ISO before we
+# spend another minute building the USB image / signing / uploading.
+# Fails the build loudly if the ASK userspace regressed back to stock
+# Debian (as happened in run 24794085304 before the packages.chroot/
+# staging fix).
+"$GITHUB_WORKSPACE/bin/ci-verify-ask-iso.sh" /tmp/iso-mount
+
+truncate -s 4G "$USB_IMG"
+mkdosfs -F 32 -n VYOSBOOT "$USB_IMG"
+mmd   -i "$USB_IMG" ::/live
+mcopy -i "$USB_IMG" /tmp/iso-mount/live/vmlinuz             ::/live/vmlinuz
+mcopy -i "$USB_IMG" /tmp/iso-mount/live/initrd.img          ::/live/initrd.img
+mcopy -i "$USB_IMG" /tmp/iso-mount/live/filesystem.squashfs ::/live/filesystem.squashfs
+mcopy -i "$USB_IMG" "$GITHUB_WORKSPACE/data/dtb/mono-gw.dtb" ::mono-gw.dtb
+
+# Generate U-Boot boot script (boot.scr)
+mkimage -A arm64 -T script -C none -n "VyOS LS1046A USB Boot" \
+  -d "$GITHUB_WORKSPACE/data/scripts/boot.cmd" /tmp/boot.scr
+mcopy -i "$USB_IMG" /tmp/boot.scr ::boot.scr
+
+umount /tmp/iso-mount
+
+# Compress USB image — raw 4 GiB FAT32 exceeds GitHub's 2 GiB asset limit
+zstd -T0 -19 --rm "${USB_IMG}"
+USB_IMG="${USB_IMG}.zst"
+
+if [ -f "$MINISIGN_SECKEY_FILE" ]; then
+  "$GITHUB_WORKSPACE/bin/minisign" -s "$MINISIGN_SECKEY_FILE" -Sm "${USB_IMG}"
+  "$GITHUB_WORKSPACE/bin/minisign" -Vm "${USB_IMG}" -x "${USB_IMG}.minisig" -p "$MINISIGN_PUBKEY_FILE"
+else
+  echo "fake sign" > "${USB_IMG}.minisig"
+fi
+echo "usb_img=${USB_IMG}" >> "$GITHUB_OUTPUT"
+
 # Move all artifacts to workspace
 mv manifest.json "${IMAGE_ISO}" "${IMAGE_ISO}.minisig" "$GITHUB_WORKSPACE"

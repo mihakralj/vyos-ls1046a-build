@@ -1,11 +1,22 @@
 #!/bin/bash
-# ci-build-packages.sh — Build linux-kernel and vyos-1x packages
+# ci-build-packages.sh — Build vyos-1x (+ optionally linux-kernel) packages
 # Called by: .github/workflows/auto-build.yml "Build Image Packages" step
 # Expects: GITHUB_WORKSPACE set
+#
+# When ASK_KERNEL_TAG is set, the linux-kernel target is SKIPPED because the
+# prebuilt ASK kernel .debs have already been staged into packages/ by
+# bin/ci-consume-ask-kernel.sh. Building the kernel locally in that mode
+# would just consume 20+ minutes and replace the ASK kernel with a vanilla
+# one that lacks fast-path hooks.
 set -ex
 cd "${GITHUB_WORKSPACE:-.}/vyos-build/scripts/package-build"
 
-packages="linux-kernel vyos-1x"
+if [ -n "${ASK_KERNEL_TAG:-}" ]; then
+    echo "### ASK kernel in effect ($ASK_KERNEL_TAG) — skipping linux-kernel local build"
+    packages="vyos-1x"
+else
+    packages="linux-kernel vyos-1x"
+fi
 ignore_packages=(amazon-cloudwatch-agent amazon-ssm-agent xen-guest-agent)
 
 for package in $packages; do
