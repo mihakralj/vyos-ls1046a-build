@@ -15,6 +15,9 @@ on:
       builder_image:
         description: 'Builder Docker image'
         default: 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64'
+      ASK_KERNEL_TAG:
+        description: 'ASK kernel release tag to consume (default: read data/ask-kernel.pin). Set empty string to disable and build kernel locally.'
+        default: ''
 
 # Opt into Node.js 24 for all JavaScript actions (azure/login@v2 still ships
 # Node 20 as of 2026-04; GitHub is force-migrating runners starting June 2026).
@@ -84,6 +87,7 @@ jobs:
       BUILD_BY: ${{ github.event.inputs.BUILD_BY }}
       build_version: ${{ github.event.inputs.build_version }}
       builder_image: ${{ github.event.inputs.builder_image }}
+      ASK_KERNEL_TAG: ${{ github.event.inputs.ASK_KERNEL_TAG }}
     secrets:
       MOK_KEY: ${{ secrets.MOK_KEY }}
       MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}

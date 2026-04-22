@@ -2,8 +2,17 @@
 # ci-setup-kernel.sh — Kernel config overrides and build-kernel.sh injection
 # Called by: .github/workflows/auto-build.yml "Setup kernel config" step
 # Expects: GITHUB_WORKSPACE set
+#
+# When ASK_KERNEL_TAG is set, this script is a no-op: the kernel is consumed
+# prebuilt from mihakralj/lts_6.6_ls1046a via bin/ci-consume-ask-kernel.sh,
+# so defconfig mutations and build-kernel.sh injections are meaningless.
 set -ex
 cd "${GITHUB_WORKSPACE:-.}"
+
+if [ -n "${ASK_KERNEL_TAG:-}" ]; then
+    echo "### ASK kernel in effect ($ASK_KERNEL_TAG) — skipping kernel defconfig/patches/injection"
+    exit 0
+fi
 
 ### LS1046A kernel config (DPAA1/FMan networking, eMMC, serial, MTD/SPI for FMan firmware)
 DEFCONFIG=vyos-build/scripts/package-build/linux-kernel/config/arm64/vyos_defconfig

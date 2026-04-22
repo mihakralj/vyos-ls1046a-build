@@ -29,7 +29,36 @@ find vyos-build -name '*.py' -exec \
   grep -l 'uefi.secure.boot' {} \; | \
   xargs -r sed -i "s/'--uefi-secure-boot'[,]\?//g"
 
-### LS1046A console: revert ttyAMA0 -> ttyS0 (8250 UART at 0x21c0500)
+### LS1046A console: force ttyS0 (8250 UART at 0x21c0500) everywhere.
+#
+# Three places encode the console type and must all be flipped away from
+# the ARM64 default ttyAMA0:
+#   1. vyos-build/data/defaults.toml              — the build_config source
+#                                                    of truth. live-build
+#                                                    reads it to generate
+#                                                    grub.cfg / isolinux.cfg
+#                                                    and any systemd getty
+#                                                    unit defaults.
+#   2. data/live-build-config/hooks/live/01-live-serial.binary — the live
+#                                                    boot serial hook script.
+#   3. data/live-build-config/includes.chroot/opt/vyatta/etc/grub/default-union-grub-entry
+#                                                  — the installed-system
+#                                                    grub entry used by the
+#                                                    legacy 1.3.x upgrade
+#                                                    path.
+#
+# Without (1) the ISO's live-boot grub.cfg will pin console=ttyAMA0,115200
+# and the first boot on LS1046A hardware is blind — ttyAMA0 is a PL011
+# which does not exist on this SoC (the UART is a Synopsys 8250 at
+# 0x21c0500, exposed as ttyS0).
+if [ -f vyos-build/data/defaults.toml ]; then
+  sed -i \
+    -e 's/^\(\s*console_type\s*=\s*\)"ttyAMA"/\1"ttyS"/' \
+    -e "s/^\\(\\s*console_type\\s*=\\s*\\)'ttyAMA'/\\1'ttyS'/" \
+    vyos-build/data/defaults.toml
+  echo "### defaults.toml console_type after sed:"
+  grep -E '^\s*console_(type|num|speed)\s*=' vyos-build/data/defaults.toml || true
+fi
 sed -i 's/ttyAMA0/ttyS0/g' \
   vyos-build/data/live-build-config/hooks/live/01-live-serial.binary \
   vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/grub/default-union-grub-entry
