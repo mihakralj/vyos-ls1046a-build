@@ -510,6 +510,30 @@ status = "disabled";
 
 #include "fsl-ls1046-post.dtsi"
 
+/*
+ * NXP SDK portal DTSIs — supply the missing DT properties the ASK staging
+ * driver (drivers/staging/fsl_qbman/{bman,qman}_driver.c) requires:
+ *   - bman-portal@N { cell-index = <N>; };  (mainline qoriq-bman-portals.dtsi
+ *     omits cell-index; ASK's parse_pcfg() refuses any portal node without it,
+ *     producing "No BMan portals available!" and a boot freeze after
+ *     "Bman portals initialised".)
+ *   - bman-bpids@0  (fsl,bpid-range) — seeds the BPID allocator so DPDK/USDPAA
+ *     buffer pool allocation can succeed.
+ *   - fsl,fqid-range / fsl,pool-channel-range / fsl,cgrid-range — seed the
+ *     QMan FQID / pool-channel / CGRID allocators.
+ *
+ * NXP's own lf-6.6.y / lf-6.12.y kernel trees include these DTSIs in-tree;
+ * mainline (gregkh/linux) strips them. These files are staged into the kernel
+ * source tree by bin/ci-compile-mono-dtb.sh alongside this board DTS so `dtc`
+ * can resolve the includes.
+ *
+ * Files live under data/dtb/sdk-dtsi/ in this repo, copied verbatim from
+ * the producer (lts_6.6_ls1046a) at:
+ *   release/patches/kernel/sdk-sources/arch/arm64/boot/dts/freescale/
+ */
+#include "qoriq-bman-portals-sdk.dtsi"
+#include "qoriq-qman-portals-sdk.dtsi"
+
 &fman0 {
 	ethernet@e0000 {
 		status = "disabled";
@@ -660,74 +684,10 @@ managed = "in-band-status";
 &fman0_tx_0x31 { fsl,qman-channel-id = <0x801>; }; /* MAC10 10GEC2 */
 
 /*
- * DPDK QMan/BMan resource allocation ranges.
- *
- * These nodes live inside the QMan portals container (&qportals).
- * The mainline kernel ignores them (no driver matches these compatible strings),
- * but DPDK userspace reads them via /proc/device-tree/ for resource allocation.
- *
- * Source: NXP SDK qoriq-qman-portals-sdk.dtsi
- * - fsl,pool-channel-range: REQUIRED by DPDK qman_driver.c:307
- *   of_find_compatible_node(NULL, NULL, "fsl,pool-channel-range")
- * - fsl,fqid-range: Frame Queue ID allocation pools for DPDK
- * - fsl,cgrid-range: Congestion Group ID allocation for DPDK
+ * BMan/QMan portal cell-index + allocator-range nodes are supplied by the
+ * NXP SDK DTSIs (#include'd near the top of this file, right after
+ * fsl-ls1046-post.dtsi). No additional board-level overlays needed.
  */
-&qportals {
-qman-fqids@0 {
-compatible = "fsl,fqid-range";
-fsl,fqid-range = <256 256>;
-};
-
-qman-fqids@1 {
-compatible = "fsl,fqid-range";
-fsl,fqid-range = <32768 32768>;
-};
-
-qman-pools@0 {
-compatible = "fsl,pool-channel-range";
-fsl,pool-channel-range = <0x401 0xf>;
-};
-
-qman-cgrids@0 {
-compatible = "fsl,cgrid-range";
-fsl,cgrid-range = <0 256>;
-};
-};
-
-/*
- * BMan portal cell-index assignments (from NXP SDK qoriq-bman-portals-sdk.dtsi).
- *
- * Required by the ASK fsl_qbman staging driver's bman_driver.c parse_pcfg(),
- * which refuses any bman-portal node without a cell-index property:
- *     "Can't get /soc/bman-portals@.../bman-portal@X property 'cell-index'"
- *     "No BMan portals available!"
- *
- * Upstream arch/arm64/boot/dts/freescale/qoriq-bman-portals.dtsi leaves
- * cell-index unset (its comment says "bootloader fix-ups are expected to
- * provide cell-index"). U-Boot on the Mono Gateway does not patch these,
- * so we must supply them in the board DTS.
- *
- * Also declares the BPID allocation range consumed by fsl_bpid_range_init()
- * (drivers/staging/fsl_qbman/bman_driver.c), needed for DPDK/USDPAA buffer
- * pool allocation.
- */
-&bportals {
-bman-portal@0     { cell-index = <0>; };
-bman-portal@10000 { cell-index = <1>; };
-bman-portal@20000 { cell-index = <2>; };
-bman-portal@30000 { cell-index = <3>; };
-bman-portal@40000 { cell-index = <4>; };
-bman-portal@50000 { cell-index = <5>; };
-bman-portal@60000 { cell-index = <6>; };
-bman-portal@70000 { cell-index = <7>; };
-bman-portal@80000 { cell-index = <8>; };
-bman-portal@90000 { cell-index = <9>; };
-
-bman-bpids@0 {
-compatible = "fsl,bpid-range";
-fsl,bpid-range = <32 32>;
-};
-};
 
 /*
 * DPDK DPAA bus container — SFP+ ports ONLY.
