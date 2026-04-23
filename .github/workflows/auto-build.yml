@@ -179,6 +179,9 @@ jobs:
       - name: Setup ASK fast-path kernel (SDK DPAA + hooks)
         run: bin/ci-setup-kernel-ask.sh
 
+      - name: Compile Mono DTB from DTS (always rebuild from source)
+        run: bin/ci-compile-mono-dtb.sh
+
       - name: Setup vyos-build (config, chroot files, hooks)
         run: bin/ci-setup-vyos-build.sh
 
