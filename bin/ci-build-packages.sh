@@ -129,9 +129,16 @@ for package in $packages; do
         fi
       fi
 
-      # Build mainline DTB (primary only if SDK DTB not available)
+      # Build mainline DTB (primary only if SDK DTB not available).
+      # Failure here is FATAL when SDK DTB is also unavailable, because
+      # the fallback path silently ships the (potentially stale) DTB
+      # committed under data/dtb/.  That is exactly how the missing
+      # DWC3 USB stability quirks slipped past CI: dts gained the
+      # quirks, dtb was never recompiled, and live-boot from USB stick
+      # panicked with "Attempted to kill init!" on the Mono device.
       echo "### Building mainline DTB from kernel source"
-      make -C "$KSRC" freescale/mono-gateway-dk.dtb 2>&1 | tail -10 || true
+      MAKE_RC=0
+      make -C "$KSRC" freescale/mono-gateway-dk.dtb 2>&1 | tail -10 || MAKE_RC=$?
       MONO_DTB="$DTS_DIR/mono-gateway-dk.dtb"
       if [ -f "$MONO_DTB" ]; then
         if [ "$SDK_DTB_OK" = true ]; then
@@ -145,7 +152,13 @@ for package in $packages; do
           echo "### Mainline DTB compiled as primary: $(stat -c '%s bytes' "$MONO_DTB")"
         fi
       else
-        echo "WARNING: mono-gateway-dk.dtb build failed, keeping pre-built DTB"
+        if [ "$SDK_DTB_OK" = true ]; then
+          echo "WARNING: mainline DTB build failed (rc=$MAKE_RC) — SDK DTB will be used as primary"
+        else
+          echo "FATAL: mono-gateway-dk.dtb build failed (rc=$MAKE_RC) and no SDK DTB available."
+          echo "FATAL: refusing to fall back to potentially stale data/dtb/mono-gw.dtb."
+          exit 1
+        fi
       fi
     fi
 
