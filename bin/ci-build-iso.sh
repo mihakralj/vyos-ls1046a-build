@@ -22,20 +22,31 @@ set -ex
 cd "${GITHUB_WORKSPACE:-.}/vyos-build"
 
 ### Pre-flight: verify custom kernel is present (defense-in-depth)
-KERNEL_IN_PACKAGES=$(find packages -name 'linux-image-*.deb' ! -name '*-dbg*' 2>/dev/null | wc -l)
+# In ASK-consume mode (ASK_KERNEL_TAG set) the prebuilt kernel .deb is staged
+# into data/live-build-config/packages.chroot/ by ci-consume-ask-kernel.sh — NOT
+# into vyos-build/packages/ — because that is the directory live-build's dpkg
+# pass picks up during chroot. Check the chroot staging dir in that mode.
+if [ -n "${ASK_KERNEL_TAG:-}" ]; then
+  PKG_CHROOT="data/live-build-config/packages.chroot"
+  KERNEL_IN_PACKAGES=$(find "$PKG_CHROOT" -maxdepth 1 -name 'linux-image-*_arm64.deb' ! -name '*-dbg*' 2>/dev/null | wc -l)
+  SEARCH_DIR="$PKG_CHROOT/"
+else
+  KERNEL_IN_PACKAGES=$(find packages -name 'linux-image-*.deb' ! -name '*-dbg*' 2>/dev/null | wc -l)
+  SEARCH_DIR="packages/"
+fi
 if [ "$KERNEL_IN_PACKAGES" -eq 0 ]; then
   echo ""
   echo "###############################################################"
-  echo "### FATAL: No custom kernel .deb in packages/               ###"
+  echo "### FATAL: No custom kernel .deb in $SEARCH_DIR"
   echo "### Refusing to build ISO with upstream fallback kernel.    ###"
   echo "###############################################################"
   echo ""
   echo "This check prevents shipping an ISO without ASK/SDK drivers."
-  echo "The kernel build likely failed silently in a previous step."
+  echo "The kernel build/consume likely failed silently in a previous step."
   echo ""
   exit 1
 fi
-echo "### Pre-flight OK: custom kernel present ($KERNEL_IN_PACKAGES .deb)"
+echo "### Pre-flight OK: custom kernel present ($KERNEL_IN_PACKAGES .deb in $SEARCH_DIR)"
 
 ### Copy mainline RDB DTB if built during kernel step
 if [ -f "$GITHUB_WORKSPACE/data/dtb/fsl-ls1046a-rdb.dtb" ]; then
