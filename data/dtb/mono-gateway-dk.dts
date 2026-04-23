@@ -673,25 +673,60 @@ managed = "in-band-status";
  * - fsl,cgrid-range: Congestion Group ID allocation for DPDK
  */
 &qportals {
-	qman-fqids@0 {
-		compatible = "fsl,fqid-range";
-		fsl,fqid-range = <256 256>;
-	};
+qman-fqids@0 {
+compatible = "fsl,fqid-range";
+fsl,fqid-range = <256 256>;
+};
 
-	qman-fqids@1 {
-		compatible = "fsl,fqid-range";
-		fsl,fqid-range = <32768 32768>;
-	};
+qman-fqids@1 {
+compatible = "fsl,fqid-range";
+fsl,fqid-range = <32768 32768>;
+};
 
-	qman-pools@0 {
-		compatible = "fsl,pool-channel-range";
-		fsl,pool-channel-range = <0x401 0xf>;
-	};
+qman-pools@0 {
+compatible = "fsl,pool-channel-range";
+fsl,pool-channel-range = <0x401 0xf>;
+};
 
-	qman-cgrids@0 {
-		compatible = "fsl,cgrid-range";
-		fsl,cgrid-range = <0 256>;
-	};
+qman-cgrids@0 {
+compatible = "fsl,cgrid-range";
+fsl,cgrid-range = <0 256>;
+};
+};
+
+/*
+ * BMan portal cell-index assignments (from NXP SDK qoriq-bman-portals-sdk.dtsi).
+ *
+ * Required by the ASK fsl_qbman staging driver's bman_driver.c parse_pcfg(),
+ * which refuses any bman-portal node without a cell-index property:
+ *     "Can't get /soc/bman-portals@.../bman-portal@X property 'cell-index'"
+ *     "No BMan portals available!"
+ *
+ * Upstream arch/arm64/boot/dts/freescale/qoriq-bman-portals.dtsi leaves
+ * cell-index unset (its comment says "bootloader fix-ups are expected to
+ * provide cell-index"). U-Boot on the Mono Gateway does not patch these,
+ * so we must supply them in the board DTS.
+ *
+ * Also declares the BPID allocation range consumed by fsl_bpid_range_init()
+ * (drivers/staging/fsl_qbman/bman_driver.c), needed for DPDK/USDPAA buffer
+ * pool allocation.
+ */
+&bportals {
+bman-portal@0     { cell-index = <0>; };
+bman-portal@10000 { cell-index = <1>; };
+bman-portal@20000 { cell-index = <2>; };
+bman-portal@30000 { cell-index = <3>; };
+bman-portal@40000 { cell-index = <4>; };
+bman-portal@50000 { cell-index = <5>; };
+bman-portal@60000 { cell-index = <6>; };
+bman-portal@70000 { cell-index = <7>; };
+bman-portal@80000 { cell-index = <8>; };
+bman-portal@90000 { cell-index = <9>; };
+
+bman-bpids@0 {
+compatible = "fsl,bpid-range";
+fsl,bpid-range = <32 32>;
+};
 };
 
 /*
