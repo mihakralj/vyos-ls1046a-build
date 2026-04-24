@@ -32,21 +32,53 @@ ethernet2 = &enet5;  /* MAC6 - right RJ45 */
 		stdout-path = "serial0:115200n8";
 	};
 
-	reserved-memory {
-		#address-cells = <2>;
-		#size-cells = <2>;
-		ranges;
+reserved-memory {
+#address-cells = <2>;
+#size-cells = <2>;
+ranges;
 
-		/* DPDK DMA buffer pool — 256MB contiguous
-		 * Used by fsl_usdpaa_mainline driver for DMA_MAP ioctl.
-		 * Address 0xc000_0000 is below 4GB DMA boundary.
-		 */
-		usdpaa_mem: usdpaa-mem@c0000000 {
-			compatible = "fsl,usdpaa-mem";
-			reg = <0x0 0xc0000000 0x0 0x10000000>;
-			no-map;
-		};
-	};
+/* DPDK DMA buffer pool — 256MB contiguous
+ * Used by fsl_usdpaa_mainline driver for DMA_MAP ioctl.
+ * Address 0xc000_0000 is below 4GB DMA boundary.
+ */
+usdpaa_mem: usdpaa-mem@c0000000 {
+compatible = "fsl,usdpaa-mem";
+reg = <0x0 0xc0000000 0x0 0x10000000>;
+no-map;
+};
+};
+};
+
+/*
+ * Override reserved-memory compatibles for ASK/SDK staging drivers.
+ *
+ * Mainline fsl-ls1046a.dtsi declares bman_fbpr / qman_fqd / qman_pfdr with
+ * compatible = "shared-dma-pool". The SDK staging QBMan drivers install
+ * their reservation handlers via RESERVEDMEM_OF_DECLARE() matching on:
+ *   - "fsl,bman-fbpr"
+ *   - "fsl,qman-fqd"
+ *   - "fsl,qman-pfdr"
+ * With only "shared-dma-pool", the SDK handlers never run, bman_fbpr_phys /
+ * qman_fqd_phys / qman_pfdr_phys remain 0 — at init time the driver prints
+ * "bman-fbpr addr 0x0000000000000000" and then qm_init_pfdr() spins forever
+ * on an MCR poll, hanging subsys_initcall qbman_init right after the 4
+ * "Bman portal initialised" lines and before any "Qman portal initialised".
+ *
+ * Reference: ASK-BOOTSTRAP.md Boot #1 root cause (2026-04-05 18:04 UTC).
+ */
+&bman_fbpr {
+compatible = "fsl,bman-fbpr", "shared-dma-pool";
+};
+
+&qman_fqd {
+compatible = "fsl,qman-fqd", "shared-dma-pool";
+};
+
+&qman_pfdr {
+compatible = "fsl,qman-pfdr", "shared-dma-pool";
+};
+
+/ {
 
 	leds {
 		compatible = "gpio-leds";
