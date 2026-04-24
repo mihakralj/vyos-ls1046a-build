@@ -25,12 +25,20 @@
 set -euo pipefail
 cd "${GITHUB_WORKSPACE:-.}"
 
-DTS_SRC="data/dtb/mono-gateway-dk.dts"
+# ask11: ship the SDK DTS, not the DPDK DTS. The SDK DTS #includes the DPDK
+# base DTS and then /delete-node/s the DPDK dpaa container + bpool, replacing
+# them with proper fsl,dpa-ethernet nodes for all 6 MACs (SGMII RJ45 + 10G SFP+)
+# and a bpool with fsl,bpool-ethernet-cfg that the SDK dpaa_eth driver needs.
+# See boot log on ask10: probe of soc:fsl,dpaa:ethernet@{8,9} failed with -22
+# because the DPDK bpool had no fsl,bpool-ethernet-cfg property.
+DTS_SRC="data/dtb/mono-gateway-dk-sdk.dts"
+DTS_BASE="data/dtb/mono-gateway-dk.dts"
 DTB_OUT="data/dtb/mono-gw.dtb"
 WORK="work/dtb-build"
 LINUX_SRC="$WORK/linux-src"
 
-[ -f "$DTS_SRC" ] || { echo "ERROR: $DTS_SRC not found"; exit 1; }
+[ -f "$DTS_SRC" ]  || { echo "ERROR: $DTS_SRC not found";  exit 1; }
+[ -f "$DTS_BASE" ] || { echo "ERROR: $DTS_BASE not found"; exit 1; }
 
 ### 1. Determine kernel version tag.
 # Prefer version from ASK consumed manifest, fall back to data/ask-kernel.pin,
@@ -95,9 +103,15 @@ done
 # data/dtb/sdk-dtsi/ and drop them next to the board DTS so `dtc` resolves
 # the includes via the same `-I $DTS_DIR` search path as the base DTSIs.
 DTS_DIR="$LINUX_SRC/arch/arm64/boot/dts/freescale"
-cp data/dtb/sdk-dtsi/qoriq-bman-portals-sdk.dtsi "$DTS_DIR/"
-cp data/dtb/sdk-dtsi/qoriq-qman-portals-sdk.dtsi "$DTS_DIR/"
-cp "$DTS_SRC" "$DTS_DIR/mono-gateway-dk.dts"
+# ask11: the SDK DTS #includes all four of these — copy them all, not just the
+# two portal dtsi files the DPDK DTS needed.
+for dtsi in data/dtb/sdk-dtsi/*.dtsi; do
+    cp "$dtsi" "$DTS_DIR/"
+done
+# The SDK DTS #includes "mono-gateway-dk.dts" — both must be present together
+# in $DTS_DIR so the preprocessor can resolve the include.
+cp "$DTS_BASE" "$DTS_DIR/mono-gateway-dk.dts"
+cp "$DTS_SRC"  "$DTS_DIR/mono-gateway-dk-sdk.dts"
 
 ### 5. Preprocess + compile.
 PP="$WORK/mono-gateway-dk.preprocessed.dts"
@@ -107,7 +121,7 @@ aarch64-linux-gnu-cpp \
     -I "$LINUX_SRC/include" \
     -undef -D__DTS__ \
     -x assembler-with-cpp \
-    "$DTS_DIR/mono-gateway-dk.dts" \
+    "$DTS_DIR/mono-gateway-dk-sdk.dts" \
     -o "$PP"
 
 dtc -q -I dts -O dtb \
@@ -133,6 +147,14 @@ FAIL=0
 [ "$FQID"     -lt 2  ] && { echo "ERROR: fqid-range count $FQID < 2";                    FAIL=1; }
 [ "$POOLCH"   -lt 1  ] && { echo "ERROR: pool-channel-range count $POOLCH < 1";          FAIL=1; }
 [ "$CGRID"    -lt 1  ] && { echo "ERROR: cgrid-range count $CGRID < 1";                  FAIL=1; }
+
+# ask11: also verify SDK-DTS payload landed — at least one fsl,bpool-ethernet-cfg
+# (SDK bpool property) and 5 fsl,dpa-ethernet nodes (3×SGMII RJ45 + 2×10G SFP+).
+# Mono Gateway has 3 RJ45 SGMII ports (MAC2/MAC5/MAC6) wired to sgmii_phy0..2.
+BPOOL_CFG=$(echo "$DECOMP" | grep -c 'fsl,bpool-ethernet-cfg')
+DPA_ETH=$(echo "$DECOMP"   | grep -c '"fsl,dpa-ethernet"')
+[ "$BPOOL_CFG" -lt 1 ] && { echo "ERROR: fsl,bpool-ethernet-cfg not found — SDK DTS didn't land"; FAIL=1; }
+[ "$DPA_ETH"   -lt 5 ] && { echo "ERROR: fsl,dpa-ethernet count $DPA_ETH < 5 (need 3 SGMII + 2 10G)"; FAIL=1; }
 if [ "$FAIL" -ne 0 ]; then
     echo "ERROR: compiled DTB is missing expected NXP SDK portal DTSI payload"
     echo "       (did bin/ci-compile-mono-dtb.sh copy data/dtb/sdk-dtsi/*.dtsi to $DTS_DIR?"
@@ -143,3 +165,4 @@ fi
 echo "### Mono DTB compiled from DTS:"
 ls -l "$DTB_OUT"
 echo "### cell-index=$CELL_IDX  bpid-range=$BPID  fqid-range=$FQID  pool-channel-range=$POOLCH  cgrid-range=$CGRID"
+echo "### fsl,bpool-ethernet-cfg=$BPOOL_CFG  fsl,dpa-ethernet=$DPA_ETH"
