@@ -18,9 +18,10 @@ The **qdrant** MCP server is the authoritative persistent memory for this projec
 
 ## Project
 
-VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two build paths:
-1. **CI (production):** `auto-build.yml` builds signed VyOS ISO on ARM64 GitHub Actions runner via `workflow_dispatch`
-2. **Local dev loop (iteration):** `bin/build-local.sh` cross-compiles kernel on LXC 200 (192.168.1.137) → TFTP boot on Mono Gateway (~2 min incremental). See `plans/DEV-LOOP.md`
+VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Three build paths:
+1. **CI (default — iteration):** `self-hosted-build.yml` ("VyOS LS1046A build (self-hosted)") on the user's self-hosted runner via `workflow_dispatch`. Warm caches → ~5–10 min. Zero GitHub Actions minutes. **This is the default — use it.**
+2. **CI (hosted, fallback / hermetic releases):** `auto-build.yml` ("VyOS LS1046A build") on `ubuntu-24.04-arm` GitHub-hosted runner via `workflow_dispatch`. Slower (~20–30 min), burns GH minutes. Only use when (a) self-hosted runner is offline or (b) producing a clean tagged release.
+3. **Local dev loop (fastest iteration):** `bin/build-local.sh` cross-compiles kernel on LXC 200 (192.168.1.137) → TFTP boot on Mono Gateway (~2 min incremental). See `plans/DEV-LOOP.md`
 
 ## Critical Non-Obvious Rules
 
@@ -93,8 +94,8 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 
 ## Local Dev Loop Rules
 
-- **Only edit `auto-build.yml` for build changes** — it is the single workflow; there are no other CI files
-- **Kernel config appended, not replaced:** New `CONFIG_*` lines go at the END of the `printf` block in `auto-build.yml` — `vyos_defconfig` is upstream and our additions are appended after checkout
+- **Two CI workflows exist:** `self-hosted-build.yml` (default, fast) and `auto-build.yml` (hosted fallback). Build-logic edits (kernel config, patches, ISO recipe) MUST be applied to BOTH workflows so they stay in sync — drift between them produces non-reproducible ISOs.
+- **Kernel config appended, not replaced:** New `CONFIG_*` lines go at the END of the `printf` block in the workflow — `vyos_defconfig` is upstream and our additions are appended after checkout
 - **`scripts/config --enable` does NOT upgrade `=m` to `=y`:** Use `scripts/config --set-val X y` to force built-in. This is critical for TFTP boot where modules are unavailable.
 - **VyOS kernel requires config fragment merging:** 7 files in `vyos-build/scripts/package-build/linux-kernel/config/*.config` must be `cat`'d into `.config` after `vyos_defconfig` copy. Without them, SQUASHFS/OVERLAY_FS/netfilter rules are missing.
 - **`boot=live` is REQUIRED in bootargs** even for installed eMMC systems. VyOS initramfs scripts depend on this parameter for squashfs overlay mount.
@@ -136,7 +137,7 @@ All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `ar
 - **Only 2 packages rebuilt:** Only `linux-kernel` and `vyos-1x` are built from source; all other packages come from upstream VyOS repos
 - **linux-headers stripped:** `rm -rf packages/linux-headers-*` before ISO build to save space on the runner
 - **Secure Boot chain:** MOK.pem/MOK.key for kernel module signing, minisign for ISO signing, `grub-efi-arm64-signed` + `shim-signed` packages included
-- **Weekly schedule:** Cron runs daily 05:00 UTC. Also triggered manually via `workflow_dispatch`
+- **Trigger model:** Both workflows are `workflow_dispatch` only — no `push`, no `schedule`. ISO builds happen on demand via `gh workflow run`. The default for any iteration is the self-hosted workflow.
 - **DPDK PMD build archived:** The "Build DPDK + VPP DPAA Plugin" CI step has been removed (RC#31). Infrastructure preserved in `archive/dpaa-pmd/` — see `archive/dpaa-pmd/RESTORE.md` to re-enable.
 - **Boot optimizations:** `acpid.service`, `acpid.socket`, `acpid.path` are masked in the ISO via `99-mask-services.chroot`. `kexec-load.service` and `kexec.service` are NOT masked — mainline 6.6 QBMan kexec fix enables VyOS managed-params self-healing on DPAA1. SysV init scripts (`/etc/init.d/kexec-load`, `/etc/init.d/kexec`) are removed to prevent `systemd-sysv-generator` from creating duplicate units that would bypass systemd. The old `ln -sf /dev/null` in `includes.chroot` approach was broken — live-build dereferences absolute symlinks to paths outside the chroot, producing empty files instead. ACPI masking saves ~2s. `CONFIG_DEBUG_PREEMPT` suppression saves ~20s. Installed system boot time: ~82s to login prompt.
 
@@ -157,7 +158,8 @@ All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `ar
 
 | File | Purpose |
 |------|---------|
-| `.github/workflows/auto-build.yml` | THE build — kernel config overrides, ISO creation, release |
+| `.github/workflows/self-hosted-build.yml` | **DEFAULT** build — kernel config overrides, ISO creation, release (self-hosted runner, fast) |
+| `.github/workflows/auto-build.yml` | Fallback hosted-runner build (GitHub `ubuntu-24.04-arm`, slow) — keep in sync with self-hosted-build.yml |
 | `README.md` | Project overview: hardware, fixes, release assets, boot method |
 | `INSTALL.md` | Complete 11-step install guide: USB → serial → U-Boot → install image → GRUB fixes → verify |
 | `PORTING.md` | Deep technical analysis: driver archaeology, DPAA1 architecture, CPU freq, boot flow |
