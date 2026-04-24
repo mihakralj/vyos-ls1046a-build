@@ -185,6 +185,26 @@ if [ "$FAIL" -ne 0 ]; then
     echo "ERROR: compiled DTB is missing expected NXP SDK portal DTSI payload"
     echo "       (did bin/ci-compile-mono-dtb.sh copy data/dtb/sdk-dtsi/*.dtsi to $DTS_DIR?"
     echo "        did mono-gateway-dk.dts #include qoriq-{bman,qman}-portals-sdk.dtsi?)"
+    echo ""
+    echo "=== DIAGNOSTIC: #include line-markers in preprocessed DTS ==="
+    grep -n '^# [0-9]' "$PP" | sed 's#.*/\([^/]*\)"#\1#' | sort -u | head -40 || true
+    echo ""
+    echo "=== DIAGNOSTIC: all fsl,dpa-ethernet nodes + paths in decompiled DTB ==="
+    awk '
+        /^[[:space:]]*[a-zA-Z_][a-zA-Z0-9_,.+-]*@[0-9a-f]+[[:space:]]*{/ {
+            n = match($0, /[a-zA-Z_][a-zA-Z0-9_,.+-]*@[0-9a-f]+/);
+            if (n) { node = substr($0, RSTART, RLENGTH); stack[depth++] = node; }
+        }
+        /^[[:space:]]*};[[:space:]]*$/ { if (depth > 0) depth--; }
+        /fsl,dpa-ethernet|fsl,bpool-ethernet-cfg/ {
+            path = "";
+            for (i = 0; i < depth; i++) path = path "/" stack[i];
+            print path ": " $0;
+        }
+    ' "$DECOMP_FILE" || true
+    echo ""
+    echo "=== DIAGNOSTIC: first 40 lines of preprocessed DTS ==="
+    head -40 "$PP" || true
     exit 1
 fi
 
