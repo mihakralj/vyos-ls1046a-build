@@ -23,6 +23,9 @@
 # Installs dtc + gcc-aarch64-linux-gnu if missing (Debian/Ubuntu runners).
 
 set -euo pipefail
+# Merge stderr into stdout so CI captures preprocessor / dtc diagnostics in the
+# job log (gh action logs tend to drop stderr-only output in some steps).
+exec 2>&1
 cd "${GITHUB_WORKSPACE:-.}"
 
 # ask11: ship the SDK DTS, not the DPDK DTS. The SDK DTS #includes the DPDK
@@ -89,11 +92,13 @@ else
 fi
 
 # Sanity: the base DTSIs the Mono DTS includes must be present.
+echo "### Checking base DTSIs present in kernel source"
 for f in fsl-ls1046a.dtsi fsl-ls1046-post.dtsi; do
     [ -f "$LINUX_SRC/arch/arm64/boot/dts/freescale/$f" ] || {
         echo "ERROR: $f not found in kernel source at $TAG"; exit 1;
     }
 done
+echo "### Base DTSIs OK"
 
 ### 4. Stage the Mono DTS + NXP SDK portal DTSIs into the kernel source tree.
 # The board DTS `#include`s qoriq-bman-portals-sdk.dtsi and
@@ -105,15 +110,25 @@ done
 DTS_DIR="$LINUX_SRC/arch/arm64/boot/dts/freescale"
 # ask11: the SDK DTS #includes all four of these — copy them all, not just the
 # two portal dtsi files the DPDK DTS needed.
-for dtsi in data/dtb/sdk-dtsi/*.dtsi; do
+echo "### Staging SDK DTSIs from data/dtb/sdk-dtsi/ into $DTS_DIR"
+ls -l data/dtb/sdk-dtsi/ || { echo "ERROR: data/dtb/sdk-dtsi/ missing"; exit 1; }
+shopt -s nullglob
+dtsi_list=( data/dtb/sdk-dtsi/*.dtsi )
+shopt -u nullglob
+[ "${#dtsi_list[@]}" -gt 0 ] || { echo "ERROR: no *.dtsi under data/dtb/sdk-dtsi/"; exit 1; }
+for dtsi in "${dtsi_list[@]}"; do
+    echo "###   cp $dtsi -> $DTS_DIR/"
     cp "$dtsi" "$DTS_DIR/"
 done
 # The SDK DTS #includes "mono-gateway-dk.dts" — both must be present together
 # in $DTS_DIR so the preprocessor can resolve the include.
+echo "### Staging $DTS_BASE and $DTS_SRC into $DTS_DIR"
 cp "$DTS_BASE" "$DTS_DIR/mono-gateway-dk.dts"
 cp "$DTS_SRC"  "$DTS_DIR/mono-gateway-dk-sdk.dts"
+ls -l "$DTS_DIR/mono-gateway-dk.dts" "$DTS_DIR/mono-gateway-dk-sdk.dts" "$DTS_DIR"/qoriq-*.dtsi
 
 ### 5. Preprocess + compile.
+echo "### Preprocessing with aarch64-linux-gnu-cpp"
 PP="$WORK/mono-gateway-dk.preprocessed.dts"
 aarch64-linux-gnu-cpp \
     -nostdinc \
@@ -123,10 +138,13 @@ aarch64-linux-gnu-cpp \
     -x assembler-with-cpp \
     "$DTS_DIR/mono-gateway-dk-sdk.dts" \
     -o "$PP"
+echo "### Preprocessed DTS: $(wc -l < "$PP") lines"
 
-dtc -q -I dts -O dtb \
+echo "### Compiling with dtc"
+dtc -I dts -O dtb \
     -o "$DTB_OUT" \
     "$PP"
+echo "### dtc done: $(stat -c%s "$DTB_OUT") bytes"
 
 ### 6. Verify the SDK DTSI payload made it in.
 # Expected (post-#include of qoriq-{bman,qman}-portals-sdk.dtsi):
