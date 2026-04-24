@@ -66,16 +66,39 @@ no-map;
  *
  * Reference: ASK-BOOTSTRAP.md Boot #1 root cause (2026-04-05 18:04 UTC).
  */
+/*
+ * IMPORTANT: compatible list must be fsl,* ONLY — not a two-element list
+ * with "shared-dma-pool" as fallback.
+ *
+ * First attempt used
+ *   compatible = "fsl,bman-fbpr", "shared-dma-pool";
+ * expecting the SDK RESERVEDMEM_OF_DECLARE("fsl,bman-fbpr", ...) to win.
+ * It did not. The of/reserved_mem core walks __reservedmem_of_table and
+ * dispatches to the FIRST registered handler whose of_device_id matches
+ * any compatible string. Link order places the generic "shared-dma-pool"
+ * handler (drivers/of/of_reserved_mem.c:rmem_dma_setup) before the SDK
+ * fsl,* handlers, so the node gets consumed by the generic path, the
+ * SDK's dma_declare_coherent_memory() setup never runs, and the global
+ * bman_fbpr_phys / qman_fqd_phys / qman_pfdr_phys variables stay 0.
+ *
+ * Boot log proof (shared-dma-pool fallback present):
+ *   OF: reserved mem: initialized node bman-fbpr, compatible id shared-dma-pool
+ *   bman-fbpr addr 0x0000000000000000 size 0x1000000
+ *   qman-fqd  addr 0x0000000000000000 size 0x400000
+ *   qman-pfdr addr 0x0000000000000000 size 0x2000000   ← still zero!
+ *
+ * Fix: strip "shared-dma-pool" entirely so only the SDK handlers can match.
+ */
 &bman_fbpr {
-compatible = "fsl,bman-fbpr", "shared-dma-pool";
+compatible = "fsl,bman-fbpr";
 };
 
 &qman_fqd {
-compatible = "fsl,qman-fqd", "shared-dma-pool";
+compatible = "fsl,qman-fqd";
 };
 
 &qman_pfdr {
-compatible = "fsl,qman-pfdr", "shared-dma-pool";
+compatible = "fsl,qman-pfdr";
 };
 
 / {
