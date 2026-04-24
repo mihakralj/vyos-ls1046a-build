@@ -292,14 +292,19 @@ fi
 
 rm -f /tmp/ask-post-defconfig.sh
 
-### 5. SDK DTS — copy to data/dtb/ so ci-build-packages.sh can find and build it
-# The SDK DTS uses fixed-link for 10G MACs (SDK fsl_mac has no phylink/SFP support)
-# and deletes managed/sfp properties. ci-build-packages.sh checks for this file
-# at $DTS_DIR/mono-gateway-dk-sdk.dts and builds the SDK DTB if present.
-if [ -f archive/data/dtb/mono-gateway-dk-sdk.dts ]; then
-  cp archive/data/dtb/mono-gateway-dk-sdk.dts data/dtb/mono-gateway-dk-sdk.dts
-  echo "### SDK DTS copied to data/dtb/ for kernel DTB build"
+### 5. SDK DTS — verify tracked data/dtb/mono-gateway-dk-sdk.dts is present.
+# ask11: the live SDK DTS is committed at data/dtb/mono-gateway-dk-sdk.dts and
+# is the source of truth. Previous versions of this step copied a stale file
+# out of archive/ over it, clobbering the live DTS right before
+# bin/ci-compile-mono-dtb.sh ran — which produced a DTB with
+# `#include "qoriq-dpaa-eth.dtsi"` leaking 6 phantom fsl,dpa-ethernet nodes
+# into /soc/fsl,dpaa and stripping fsl,bpool-ethernet-cfg (ask11 CI run
+# 24886836635). Do NOT touch data/dtb/ here.
+if [ ! -f data/dtb/mono-gateway-dk-sdk.dts ]; then
+  echo "ERROR: data/dtb/mono-gateway-dk-sdk.dts missing — repo checkout incomplete?"
+  exit 1
 fi
+echo "### SDK DTS present at data/dtb/mono-gateway-dk-sdk.dts ($(wc -c < data/dtb/mono-gateway-dk-sdk.dts) bytes)"
 
 echo ""
 echo "### ASK kernel setup complete"
