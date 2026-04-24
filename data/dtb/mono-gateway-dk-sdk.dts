@@ -1,0 +1,450 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * SDK Device Tree for Mono Gateway Development Kit (LS1046A)
+ *
+ * This DTS includes the mainline board DTS and adds SDK-specific
+ * nodes required by the NXP SDK DPAA1 ethernet driver stack
+ * (sdk_dpaa / sdk_fman) and the ASK fast-path.
+ *
+ * Key additions:
+ *   - fsl,dpa-ethernet nodes for all enabled ports (SDK dpaa_eth driver)
+ *   - fsl,dpa-oh offline-port nodes for FMan PCD classifier
+ *   - FMan OH port hardware nodes inside &fman0
+ *   - fman0-extended-args for FMan FIFO/buffer tuning
+ *
+ * Build: this DTS is compiled instead of mono-gateway-dk.dts when
+ * CONFIG_FSL_SDK_DPAA_ETH=y is set in the kernel config.
+ *
+ * Copyright 2025 Mono Technologies Inc.
+ */
+
+#include "mono-gateway-dk.dts"
+
+/*
+ * Reserved-memory compatible strings must match SDK QBMan staging driver.
+ * Mainline uses "shared-dma-pool" but SDK RESERVEDMEM_OF_DECLARE matches
+ * "fsl,bman-fbpr", "fsl,qman-fqd", "fsl,qman-pfdr".
+ * Without these, the SDK driver never gets the memory addresses and
+ * qman_init_ccsr() either writes address 0 or fails the BAR mismatch
+ * check, leading to a silent hang in qm_init_pfdr() poll loop.
+ */
+&bman_fbpr {
+	compatible = "fsl,bman-fbpr";
+};
+
+&qman_fqd {
+	compatible = "fsl,qman-fqd";
+};
+
+&qman_pfdr {
+	compatible = "fsl,qman-pfdr";
+};
+
+/*
+ * FMan RX/TX port overrides.
+ * Mainline uses "fsl,fman-v3-port-rx/tx" only. SDK driver matches
+ * "fsl,fman-port-1g-rx", "fsl,fman-port-10g-rx" etc.
+ * NXP lf-6.6.y has dual compatible + fsl,qman-channel-id on TX ports.
+ * QMan channels: 1G TX = 0x802 + MAC#, 10G TX = 0x800 + 10G#.
+ */
+
+/* 1G RX ports — add SDK compatible */
+&fman0_rx_0x08 { compatible = "fsl,fman-v3-port-rx", "fsl,fman-port-1g-rx"; };
+&fman0_rx_0x09 { compatible = "fsl,fman-v3-port-rx", "fsl,fman-port-1g-rx"; };
+&fman0_rx_0x0a { compatible = "fsl,fman-v3-port-rx", "fsl,fman-port-1g-rx"; };
+&fman0_rx_0x0b { compatible = "fsl,fman-v3-port-rx", "fsl,fman-port-1g-rx"; };
+&fman0_rx_0x0c { compatible = "fsl,fman-v3-port-rx", "fsl,fman-port-1g-rx"; };
+&fman0_rx_0x0d { compatible = "fsl,fman-v3-port-rx", "fsl,fman-port-1g-rx"; };
+
+/* 1G TX ports — add SDK compatible + QMan channel */
+&fman0_tx_0x28 { compatible = "fsl,fman-v3-port-tx", "fsl,fman-port-1g-tx"; fsl,qman-channel-id = <0x802>; };
+&fman0_tx_0x29 { compatible = "fsl,fman-v3-port-tx", "fsl,fman-port-1g-tx"; fsl,qman-channel-id = <0x803>; };
+&fman0_tx_0x2a { compatible = "fsl,fman-v3-port-tx", "fsl,fman-port-1g-tx"; fsl,qman-channel-id = <0x804>; };
+&fman0_tx_0x2b { compatible = "fsl,fman-v3-port-tx", "fsl,fman-port-1g-tx"; fsl,qman-channel-id = <0x805>; };
+&fman0_tx_0x2c { compatible = "fsl,fman-v3-port-tx", "fsl,fman-port-1g-tx"; fsl,qman-channel-id = <0x806>; };
+&fman0_tx_0x2d { compatible = "fsl,fman-v3-port-tx", "fsl,fman-port-1g-tx"; fsl,qman-channel-id = <0x807>; };
+
+/* 10G RX ports — add SDK compatible + 10g flag */
+&fman0_rx_0x10 { compatible = "fsl,fman-v3-port-rx", "fsl,fman-port-10g-rx"; fsl,fman-10g-port; };
+&fman0_rx_0x11 { compatible = "fsl,fman-v3-port-rx", "fsl,fman-port-10g-rx"; fsl,fman-10g-port; };
+
+/* 10G TX ports — add SDK compatible + 10g flag + QMan channel */
+&fman0_tx_0x30 { compatible = "fsl,fman-v3-port-tx", "fsl,fman-port-10g-tx"; fsl,fman-10g-port; fsl,qman-channel-id = <0x800>; };
+&fman0_tx_0x31 { compatible = "fsl,fman-v3-port-tx", "fsl,fman-port-10g-tx"; fsl,fman-10g-port; fsl,qman-channel-id = <0x801>; };
+
+/*
+ * OH port overrides — SDK uses 0-based cell-index (not hardware 2-7).
+ * SDK driver checks cell-index < FM_MAX_NUM_OF_OH_PORTS (4 on FMANV3L).
+ * Mainline cell-index 6,7 → FAIL. Override to SDK 0-based.
+ * Also override compatible from fsl,fman-v3-port-oh to fsl,fman-port-oh.
+ *
+ * QMan channel IDs from dpaa_integration_ext.h:
+ *   FMan0 DCP sub-portals: SP0-SP7 = MACs (0x800-0x807)
+ *   SP8-SP11 = OH ports 0-3 (0x808-0x80B)
+ *   SP12-SP15 = spare (0x80C-0x80F)
+ *
+ * Disable OH ports 86000/87000 to avoid cell-index overflow crash.
+ */
+&fman0_oh_0x2 { cell-index = <0>; compatible = "fsl,fman-port-oh"; fsl,qman-channel-id = <0x808>; };
+&fman0_oh_0x3 { cell-index = <1>; compatible = "fsl,fman-port-oh"; fsl,qman-channel-id = <0x809>; };
+&fman0_oh_0x4 { cell-index = <2>; compatible = "fsl,fman-port-oh"; fsl,qman-channel-id = <0x80a>; };
+&fman0_oh_0x5 { cell-index = <3>; compatible = "fsl,fman-port-oh"; fsl,qman-channel-id = <0x80b>; };
+&fman0_oh_0x6 { status = "disabled"; };
+&fman0_oh_0x7 { status = "disabled"; };
+
+/*
+ * BMan portals need cell-index for SDK QBMan staging driver.
+ * Mainline qoriq-bman-portals.dtsi omits this property.
+ * Also add BPID allocator range — without this, bman_new_pool()
+ * fails because the allocator has no IDs to hand out.
+ * Values from NXP qoriq-bman-portals-sdk.dtsi (lf-6.6.y):
+ *   BPIDs 32-63 for kernel (0-31 reserved for USDPAA/userspace).
+ */
+&bportals {
+bman-portal@0     { cell-index = <0x0>; };
+bman-portal@10000 { cell-index = <0x1>; };
+bman-portal@20000 { cell-index = <0x2>; };
+bman-portal@30000 { cell-index = <0x3>; };
+bman-portal@40000 { cell-index = <0x4>; };
+bman-portal@50000 { cell-index = <0x5>; };
+bman-portal@60000 { cell-index = <0x6>; };
+bman-portal@70000 { cell-index = <0x7>; };
+bman-portal@80000 { cell-index = <0x8>; };
+bman-portal@90000 { cell-index = <0x9>; };
+
+bman-bpids@0 {
+	compatible = "fsl,bpid-range";
+	fsl,bpid-range = <32 32>;
+};
+};
+
+/*
+ * QMan portals need FQID, pool-channel, and CGRID allocator ranges.
+ * Without these, the SDK dpaa_eth driver cannot allocate frame queues
+ * or congestion groups → ethernet probe fails.
+ * Values from NXP qoriq-qman-portals-sdk.dtsi (lf-6.6.y).
+ */
+&qportals {
+qman-portal@0     { cell-index = <0x0>; };
+qman-portal@10000 { cell-index = <0x1>; };
+qman-portal@20000 { cell-index = <0x2>; };
+qman-portal@30000 { cell-index = <0x3>; };
+qman-portal@40000 { cell-index = <0x4>; };
+qman-portal@50000 { cell-index = <0x5>; };
+qman-portal@60000 { cell-index = <0x6>; };
+qman-portal@70000 { cell-index = <0x7>; };
+qman-portal@80000 { cell-index = <0x8>; };
+qman-portal@90000 { cell-index = <0x9>; };
+
+qman-fqids@0 {
+	compatible = "fsl,fqid-range";
+	fsl,fqid-range = <256 256>;
+};
+qman-fqids@1 {
+	compatible = "fsl,fqid-range";
+	fsl,fqid-range = <32768 32768>;
+};
+qman-pools@0 {
+	compatible = "fsl,pool-channel-range";
+	fsl,pool-channel-range = <0x401 0xf>;
+};
+qman-cgrids@0 {
+	compatible = "fsl,cgrid-range";
+	fsl,cgrid-range = <0 256>;
+};
+};
+
+/*
+ * FMan extended-args — FIFO sizes and buffer layouts for each port.
+ * Placed under /cpus per NXP SDK convention (parsed by sdk_fman early init).
+ * The SDK FMan driver reads these to configure port-level FIFO allocation.
+ */
+/ {
+	cpus {
+		fman0-extended-args {
+			cell-index = <0>;
+			compatible = "fsl,fman-extended-args";
+			total-fifo-size = <0x3E500>;
+
+fman0_rx0-extended-args {
+cell-index = <0>;
+compatible = "fsl,fman-port-1g-rx-extended-args";
+fifo-size = <0x3200 0x0>;
+buffer-layout = <96 64>;
+};
+			fman0_tx0-extended-args {
+				cell-index = <0>;
+				compatible = "fsl,fman-port-1g-tx-extended-args";
+				fifo-size = <0x3200 0x0>;
+				buffer-layout = <96 64>;
+			};
+fman0_rx1-extended-args {
+cell-index = <1>;
+compatible = "fsl,fman-port-1g-rx-extended-args";
+fifo-size = <0x3200 0x0>;
+buffer-layout = <96 64>;
+};
+			fman0_tx1-extended-args {
+				cell-index = <1>;
+				compatible = "fsl,fman-port-1g-tx-extended-args";
+				fifo-size = <0x3200 0x0>;
+				buffer-layout = <96 64>;
+			};
+fman0_rx2-extended-args {
+cell-index = <2>;
+compatible = "fsl,fman-port-1g-rx-extended-args";
+fifo-size = <0x3200 0x0>;
+buffer-layout = <96 64>;
+};
+			fman0_tx2-extended-args {
+				cell-index = <2>;
+				compatible = "fsl,fman-port-1g-tx-extended-args";
+				fifo-size = <0x3200 0x0>;
+				buffer-layout = <96 64>;
+			};
+fman0_rx3-extended-args {
+cell-index = <3>;
+compatible = "fsl,fman-port-1g-rx-extended-args";
+fifo-size = <0x3200 0x0>;
+buffer-layout = <96 64>;
+};
+			fman0_tx3-extended-args {
+				cell-index = <3>;
+				compatible = "fsl,fman-port-1g-tx-extended-args";
+				fifo-size = <0x3200 0x0>;
+				buffer-layout = <96 64>;
+			};
+fman0_rx4-extended-args {
+cell-index = <4>;
+compatible = "fsl,fman-port-1g-rx-extended-args";
+fifo-size = <0x3200 0x0>;
+buffer-layout = <96 64>;
+};
+			fman0_tx4-extended-args {
+				cell-index = <4>;
+				compatible = "fsl,fman-port-1g-tx-extended-args";
+				fifo-size = <0x3200 0x0>;
+				buffer-layout = <96 64>;
+			};
+fman0_rx5-extended-args {
+cell-index = <5>;
+compatible = "fsl,fman-port-1g-rx-extended-args";
+fifo-size = <0x3200 0x0>;
+buffer-layout = <96 64>;
+};
+			fman0_tx5-extended-args {
+				cell-index = <5>;
+				compatible = "fsl,fman-port-1g-tx-extended-args";
+				fifo-size = <0x3200 0x0>;
+				buffer-layout = <96 64>;
+			};
+
+fman0_rx6-extended-args {
+cell-index = <0>;
+compatible = "fsl,fman-port-10g-rx-extended-args";
+fifo-size = <0x6000 0x0>;
+buffer-layout = <96 64>;
+};
+			fman0_tx6-extended-args {
+				cell-index = <0>;
+				compatible = "fsl,fman-port-10g-tx-extended-args";
+				fifo-size = <0x4000 0x0>;
+				buffer-layout = <96 64>;
+			};
+fman0_rx7-extended-args {
+cell-index = <1>;
+compatible = "fsl,fman-port-10g-rx-extended-args";
+fifo-size = <0x6000 0x0>;
+buffer-layout = <96 64>;
+};
+			fman0_tx7-extended-args {
+				cell-index = <1>;
+				compatible = "fsl,fman-port-10g-tx-extended-args";
+				fifo-size = <0x4000 0x0>;
+				buffer-layout = <96 64>;
+			};
+
+			fman0_oh1-extended-args {
+				cell-index = <1>;
+				compatible = "fsl,fman-port-op-extended-args";
+				fifo-size = <0x3200 0x0>;
+				buffer-layout = <96 64>;
+			};
+			fman0_oh2-extended-args {
+				cell-index = <2>;
+				compatible = "fsl,fman-port-op-extended-args";
+				fifo-size = <0x3200 0x0>;
+				buffer-layout = <96 64>;
+			};
+		};
+	};
+};
+
+/*
+ * 10G MAC overrides — remove mainline phylink "managed" property.
+ * SDK fsl_mac driver does NOT use the phylink framework. With
+ * managed = "in-band-status" present, the driver falls back to
+ * of_phy_register_fixed_link() which creates a swphy that can't
+ * represent 10G speeds → swphy_read_reg WARNING, PHY never links.
+ *
+ * HYBRID approach: Keep sfp phandle (inherited from mainline DTS)
+ * so the kernel SFP subsystem independently manages the SFP cage
+ * hardware (TX_DISABLE GPIO, I2C for rollball PHY init, LOS GPIO,
+ * MOD_DEF0 presence detection). The SFP driver operates independently
+ * of the MAC driver — it doesn't need phylink callbacks. The MAC
+ * driver sees only the fixed-link PHY at 10G XFI rate.
+ *
+ * This fixes copper SFP-10G-T (rollball PHY) modules which need
+ * the SFP driver to deassert TX_DISABLE and initialize the internal
+ * RTL8261 PHY via I2C before 10GBASE-T copper negotiation can start.
+ * DAC modules work either way (passive, no PHY init needed).
+ */
+&fm1_mac9 {
+/delete-property/ managed;
+/* sfp = <&sfp_xfi0> inherited from mainline DTS — SFP driver manages cage */
+fixed-link {
+speed = <10000>;
+full-duplex;
+};
+};
+
+&fm1_mac10 {
+/delete-property/ managed;
+/* sfp = <&sfp_xfi1> inherited from mainline DTS — SFP driver manages cage */
+fixed-link {
+speed = <10000>;
+full-duplex;
+};
+};
+
+/*
+ * FMan compatible override — add simple-bus so SDK wrapper auto-probes
+ * child nodes. OH port property overrides are above (&fman0_oh_0x2 etc).
+ */
+&fman0 {
+compatible = "fsl,fman", "simple-bus";
+
+/*
+ * PCD (Packet Classification & Distribution) sub-engine nodes.
+ * The SDK FMan wrapper (lnxwrp_fm.c) searches for these child nodes
+ * via HasFmPcdOfNode() to determine whether to initialize the PCD
+ * hardware. Without ALL FOUR nodes, pcdActive stays FALSE and the
+ * PCD device handle (h_PcdDev) is never created — causing all PCD
+ * ioctls from dpa_app/fmc to return EFAULT ("Invalid Handle").
+ *
+ * Reference: qoriq-fman3-0-sdk.dtsi (NXP lf-6.6.y)
+ */
+cc {
+	compatible = "fsl,fman-cc";
+};
+
+policer@c0000 {
+	compatible = "fsl,fman-policer";
+	reg = <0xc0000 0x1000>;
+};
+
+keygen@c1000 {
+	compatible = "fsl,fman-keygen";
+	reg = <0xc1000 0x1000>;
+};
+
+parser@c7000 {
+	compatible = "fsl,fman-parser";
+	reg = <0xc7000 0x1000>;
+};
+};
+
+/*
+ * SDK DPAA ethernet container — replaces the DPDK-only container.
+ *
+ * The SDK dpaa_eth driver matches "fsl,dpa-ethernet" and creates
+ * kernel netdevs for each port. Each node references its FMan MAC
+ * via fsl,fman-mac phandle.
+ *
+ * Port mapping (same as aliases in mainline DTS):
+ *   ethernet@1 = enet1 = MAC2 (e2000) = left RJ45   (eth0 after udev)
+ *   ethernet@4 = enet4 = MAC5 (e8000) = center RJ45  (eth1 after udev)
+ *   ethernet@5 = enet5 = MAC6 (ea000) = right RJ45   (eth2 after udev)
+ *   ethernet@8 = enet6 = MAC9 (f0000) = left SFP+ 10G  (eth3 after udev)
+ *   ethernet@9 = enet7 = MAC10(f2000) = right SFP+ 10G (eth4 after udev)
+ *
+ * FQIDs: auto-allocated by SDK driver (no explicit fsl,qman-frame-queues-rx/tx).
+ */
+/ {
+/* Delete the old DPDK container and replace with SDK */
+/delete-node/ dpaa-bpool;
+};
+
+&soc {
+/delete-node/ fsl,dpaa;
+
+fsldpaa: fsl,dpaa {
+compatible = "fsl,ls1046a", "simple-bus", "fsl,dpaa";
+fsl,bman = <&bman>;
+fsl,qman = <&qman>;
+
+/*
+ * Buffer pool for OH ports — required for CC tree classification.
+ * Without a buffer pool, FM_PCD_CcRootBuild() hangs forever because
+ * the OH port cannot allocate buffers for incoming classified frames.
+ * Uses BPID 16 (outside the 32-63 range used by ethernet ports).
+ * Buffer size 1728 = 1536 (max frame) + 128 (headroom) + 64 (align).
+ */
+bp_oh: buffer-pool@16 {
+compatible = "fsl,ls1046a-oh-bpool", "fsl,oh-bpool";
+fsl,bpid = <16>;
+fsl,bpool-ethernet-cfg = <0 0 0 1728 0 0>;
+};
+
+		/* MAC2 — left RJ45 (1G SGMII) */
+		ethernet@1 {
+			compatible = "fsl,dpa-ethernet";
+			fsl,fman-mac = <&enet1>;
+		};
+
+		/* MAC5 — center RJ45 (1G SGMII) */
+		ethernet@4 {
+			compatible = "fsl,dpa-ethernet";
+			fsl,fman-mac = <&enet4>;
+		};
+
+		/* MAC6 — right RJ45 (1G SGMII) */
+		ethernet@5 {
+			compatible = "fsl,dpa-ethernet";
+			fsl,fman-mac = <&enet5>;
+		};
+
+		/* MAC9 — left SFP+ (10G XFI) */
+		ethernet@8 {
+			compatible = "fsl,dpa-ethernet";
+			fsl,fman-mac = <&enet6>;
+		};
+
+		/* MAC10 — right SFP+ (10G XFI) */
+		ethernet@9 {
+			compatible = "fsl,dpa-ethernet";
+			fsl,fman-mac = <&enet7>;
+		};
+
+/*
+ * OH port DPA nodes — for ASK PCD classifier flow re-injection.
+ * Each OH port needs: fsl,fman-oh-port phandle + FQ pairs +
+ * fsl,bman-buffer-pools for CC tree classification buffers.
+ * FQ pairs: <rx_fqid count tx_fqid count> — rx receives from
+ * PCD classifier, tx re-injects into forwarding path.
+ * Using OH ports 1 and 2 (cell-index 1,2 = hardware 0x3,0x4).
+ */
+dpa-fman0-oh@2 {
+compatible = "fsl,dpa-oh";
+fsl,qman-frame-queues-oh = <0x60 1 0x61 1>;
+fsl,fman-oh-port = <&fman0_oh_0x3>;
+fsl,bman-buffer-pools = <&bp_oh>;
+};
+dpa-fman0-oh@3 {
+compatible = "fsl,dpa-oh";
+fsl,qman-frame-queues-oh = <0x62 1 0x63 1>;
+fsl,fman-oh-port = <&fman0_oh_0x4>;
+fsl,bman-buffer-pools = <&bp_oh>;
+};
+	};
+};
