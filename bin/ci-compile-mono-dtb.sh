@@ -153,12 +153,19 @@ echo "### dtc done: $(stat -c%s "$DTB_OUT") bytes"
 #   fqid-range         >= 2   (qman-fqids@0 and @1)
 #   pool-channel-range >= 1   (qman-pools@0)
 #   cgrid-range        >= 1   (qman-cgrids@0)
-DECOMP=$(dtc -I dtb -O dts "$DTB_OUT" 2>/dev/null)
-CELL_IDX=$(echo "$DECOMP"   | grep -c 'cell-index')
-BPID=$(echo "$DECOMP"       | grep -c 'bpid-range')
-FQID=$(echo "$DECOMP"       | grep -c 'fqid-range')
-POOLCH=$(echo "$DECOMP"     | grep -c 'pool-channel-range')
-CGRID=$(echo "$DECOMP"      | grep -c 'cgrid-range')
+echo "### Verifying DTB payload"
+DECOMP_FILE="$WORK/mono-gw.decompiled.dts"
+dtc -I dtb -O dts -o "$DECOMP_FILE" "$DTB_OUT"
+echo "### Decompiled DTB -> $DECOMP_FILE ($(wc -l < "$DECOMP_FILE") lines)"
+DECOMP=$(cat "$DECOMP_FILE")
+# grep -c returns 1 when there are no matches; protect the assignments from
+# `set -e` by appending `|| true`.
+CELL_IDX=$(echo "$DECOMP"   | grep -c 'cell-index'               || true)
+BPID=$(echo "$DECOMP"       | grep -c 'bpid-range'               || true)
+FQID=$(echo "$DECOMP"       | grep -c 'fqid-range'               || true)
+POOLCH=$(echo "$DECOMP"     | grep -c 'pool-channel-range'       || true)
+CGRID=$(echo "$DECOMP"      | grep -c 'cgrid-range'              || true)
+echo "### counters: cell-index=$CELL_IDX bpid-range=$BPID fqid-range=$FQID pool-channel-range=$POOLCH cgrid-range=$CGRID"
 FAIL=0
 [ "$CELL_IDX" -lt 20 ] && { echo "ERROR: cell-index count $CELL_IDX < 20";               FAIL=1; }
 [ "$BPID"     -lt 1  ] && { echo "ERROR: bpid-range count $BPID < 1";                    FAIL=1; }
@@ -169,8 +176,9 @@ FAIL=0
 # ask11: also verify SDK-DTS payload landed — at least one fsl,bpool-ethernet-cfg
 # (SDK bpool property) and 5 fsl,dpa-ethernet nodes (3×SGMII RJ45 + 2×10G SFP+).
 # Mono Gateway has 3 RJ45 SGMII ports (MAC2/MAC5/MAC6) wired to sgmii_phy0..2.
-BPOOL_CFG=$(echo "$DECOMP" | grep -c 'fsl,bpool-ethernet-cfg')
-DPA_ETH=$(echo "$DECOMP"   | grep -c '"fsl,dpa-ethernet"')
+BPOOL_CFG=$(echo "$DECOMP" | grep -c 'fsl,bpool-ethernet-cfg'    || true)
+DPA_ETH=$(echo "$DECOMP"   | grep -c '"fsl,dpa-ethernet"'        || true)
+echo "### counters: fsl,bpool-ethernet-cfg=$BPOOL_CFG fsl,dpa-ethernet=$DPA_ETH"
 [ "$BPOOL_CFG" -lt 1 ] && { echo "ERROR: fsl,bpool-ethernet-cfg not found — SDK DTS didn't land"; FAIL=1; }
 [ "$DPA_ETH"   -lt 5 ] && { echo "ERROR: fsl,dpa-ethernet count $DPA_ETH < 5 (need 3 SGMII + 2 10G)"; FAIL=1; }
 if [ "$FAIL" -ne 0 ]; then
