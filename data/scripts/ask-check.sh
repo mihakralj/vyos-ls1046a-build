@@ -1,58 +1,73 @@
 #!/bin/bash
-# check-ask.sh -- ASK (Application Solutions Kit) health check for LS1046A.
+# ask-check -- ASK (Application Solutions Kit) health check for LS1046A.
 #
-# VyOS-style streaming output. Each test prints
-#     "         <description>..."
-# followed by either
-#     "[ PASSED ]"  - test succeeded
-#     "[ FAILED ]"  - test failed (counts toward exit code)
-#     "[ SKIPPED ]" - test not applicable in this environment (no exit impact)
+# Output mimics the VyOS / systemd boot log: in-progress lines are
+# rendered as
+#     "         Checking <description>..."
+# and then rewritten in place with one of three left-justified tags:
+#     "[  OK  ]"  - test succeeded                  (green when on TTY)
+#     "[FAILED]"  - test failed (counts as exit)    (red when on TTY)
+#     "[ SKIP ]"  - test not applicable             (yellow when on TTY)
 #
-# When all tests report PASSED the system has a fully working ASK fast-path:
+# When every test reports OK the system has a fully working ASK fast-path:
 # kernel SDK DPAA/FMan/QBMan stack initialised, fast-path netfilter / CDX /
 # auto-bridge modules loaded, FMD shim live, CAAM IPsec attached, dpa_app
 # applied PCD config, CMM running, all 5 NICs probed.
 #
-# Exit code equals the number of [ FAILED ] tests (0 == healthy).
+# Exit code equals the number of [FAILED] tests (0 == healthy).
 
 set -u
 
 # ---------------------------------------------------------------------------
-# Output helpers
+# Output helpers (systemd / VyOS boot-log style)
 # ---------------------------------------------------------------------------
 
-COL=64                     # column at which the [ PASSED ] tag is rendered
 pass=0
 fail=0
 skip=0
 
-# Print the leading "         <desc>..." with VyOS-like indent.
-say() {
-    printf '         %s...' "$1"
+# Colour escapes only when stdout is a real terminal AND we are not in dumb
+# mode. The boot-style log must remain pasteable into bug reports verbatim
+# when piped through tee / journalctl, so colour is opt-in via TTY detect.
+if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]; then
+    C_RST=$'\033[0m'
+    C_OK=$'\033[1;32m'   # bold green
+    C_FAIL=$'\033[1;31m' # bold red
+    C_SKIP=$'\033[1;33m' # bold yellow
+    C_DIM=$'\033[2m'
+    CR=$'\r'
+else
+    C_RST='' C_OK='' C_FAIL='' C_SKIP='' C_DIM=''
+    CR=''
+fi
+
+# On a TTY: emit "         Checking <desc>..." without newline, then
+# overstrike with "[  OK  ] <desc>" using \r and ANSI clear-to-EOL,
+# matching systemd's interactive boot-log behaviour.
+# Off a TTY (pipe, journal, ssh capture): skip the in-progress line
+# entirely so the captured log is linear and clean.
+emit() {
+    local tag=$1 colour=$2 desc=$3
+    if [ -n "$CR" ]; then
+        printf '         Checking %s...' "$desc"
+        printf '\r[%s%s%s] %s\033[K\n' "$colour" "$tag" "$C_RST" "$desc"
+    else
+        printf '[%s] %s\n' "$tag" "$desc"
+    fi
 }
 
-# Pad to column COL, then print the bracketed result tag. We do not use
-# colour escapes -- this script frequently runs over slow serial consoles
-# where ANSI handling is unreliable, and the boot-style log is meant to be
-# copy-pasted into bug reports verbatim.
-result() {
-    local tag=$1 desc_len=${2:-0}
-    local pad=$(( COL - 9 - desc_len - 3 ))   # 9 = leading indent, 3 = "..."
-    [ "$pad" -lt 1 ] && pad=1
-    printf '%*s%s\n' "$pad" '' "$tag"
-}
+# Public test API.
+#   ok   <desc>   -> [  OK  ] <desc>            (green tag)
+#   ko   <desc>   -> [FAILED] <desc>            (red tag)
+#   na   <desc>   -> [ SKIP ] <desc>            (yellow tag)
+ok() { emit '  OK  ' "$C_OK"   "$1"; pass=$((pass+1)); }
+ko() { emit 'FAILED' "$C_FAIL" "$1"; fail=$((fail+1)); }
+na() { emit ' SKIP ' "$C_SKIP" "$1"; skip=$((skip+1)); }
 
-# Run a single check.
-#   ok   <desc>          -> [ PASSED ]
-#   ko   <desc>          -> [ FAILED ]
-#   na   <desc>          -> [ SKIPPED ]
-ok()  { local d=$1; say "$d"; result '[ PASSED ]'  "${#d}"; pass=$((pass+1)); }
-ko()  { local d=$1; say "$d"; result '[ FAILED ]'  "${#d}"; fail=$((fail+1)); }
-na()  { local d=$1; say "$d"; result '[ SKIPPED ]' "${#d}"; skip=$((skip+1)); }
-
+# Section banner: a single dim/bold line + blank line above. No "[ ASK :: ]"
+# boxes (those don't appear in real boot logs).
 section() {
-    echo ""
-    echo "[ ASK :: $1 ]"
+    printf '\n%s-- %s --%s\n' "$C_DIM" "$1" "$C_RST"
 }
 
 # ---------------------------------------------------------------------------

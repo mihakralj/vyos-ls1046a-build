@@ -243,8 +243,8 @@ cp ask-ls1046a-6.6/config/fastforward "$CHROOT/etc/config/fastforward"
 cp data/systemd/cmm.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/cmm.conf"
 
 ### ASK health check script
-cp data/scripts/check-ask.sh "$CHROOT/usr/local/bin/check-ask"
-chmod +x "$CHROOT/usr/local/bin/check-ask"
+cp data/scripts/ask-check.sh "$CHROOT/usr/local/bin/ask-check"
+chmod +x "$CHROOT/usr/local/bin/ask-check"
 
 ### ASK conntrack fix: flush VyOS notrack rules for fast-path offload
 cp data/scripts/ask-conntrack-fix.sh "$CHROOT/usr/local/bin/ask-conntrack-fix.sh"
