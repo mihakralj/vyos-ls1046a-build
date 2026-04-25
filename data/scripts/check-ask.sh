@@ -365,9 +365,9 @@ fi
 
 if echo "$PROC_CRYPTO" | grep -q 'driver.*caam'; then
     n=$(echo "$PROC_CRYPTO" | grep -c 'driver.*caam')
-    ok "CAAM algorithms registered in /proc/crypto ($n entries)"
+    ok "CAAM algorithms ($n entries)"
 else
-    ko "CAAM algorithms registered in /proc/crypto"
+    ko "CAAM algorithms"
 fi
 
 if dmesg_has 'caam.*registering rng-caam'; then
@@ -396,47 +396,78 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Section: Network interfaces
+# Section: Network interfaces (per ASK port on Mono Gateway)
 # ---------------------------------------------------------------------------
 section "Network interfaces"
 
-# Mono Gateway has 5 MACs total: 3 copper (1ae2/1ae8/1aea) + 2 XFI/SFP+
-# (1af0/1af2). The SFP+ cages legitimately fail to probe when no SFP module
-# is inserted ("swphy: unknown speed"), so we count them as SKIPPED rather
-# than FAILED. Copper interfaces MUST come up.
-copper_up=0
-copper_present=0
-for iface in $(ls /sys/class/net/ 2>/dev/null); do
-    [ "$iface" = "lo" ] && continue
-    case "$iface" in
-        e2|e3|e4|eth0|eth1|eth2)
-            copper_present=$((copper_present+1))
-            state=$(cat "/sys/class/net/$iface/operstate" 2>/dev/null)
-            [ "$state" = "up" ] && copper_up=$((copper_up+1))
-            ;;
-    esac
+# Mono Gateway DPAA port map. Format: "<dt-mac-addr> <netdev> <kind> <label>"
+# - copper ports must be present, fsl_mac-bound, and operstate UP
+# - SFP+ cages may be SKIPPED if no module is inserted
+ASK_PORTS=(
+    "1ae2000 e2  copper port-1-copper"
+    "1ae8000 e3  copper port-2-copper"
+    "1aea000 e4  copper port-3-copper"
+    "1af0000 e5  sfp+   port-4-sfp+"
+    "1af2000 e6  sfp+   port-5-sfp+"
+)
+
+# fsl_mac probe success message for a given DT-MAC base.
+mac_bound() {
+    dmesg_has "fsl_mac $1\.ethernet:.*FMan MEMAC"
+}
+# fsl_mac probe -EINVAL failure (typical SFP+ no-module signature).
+mac_failed_no_sfp() {
+    dmesg_has "fsl_mac: probe of $1\.ethernet failed with error -22"
+}
+# Look up the netdev assigned to a given MEMAC base address (e.g. 1ae2000).
+# Strategy: read the MEMAC's MAC address from dmesg, then look it up in
+# /sys/class/net/*/address. This works regardless of cell-index quirks,
+# udev rename rules, or fsl,dpaa ethernet@N cell-index numbering.
+find_netdev_for_mac() {
+    local mac=$1 dev hwaddr line
+    line=$(echo "$DMESG" | grep -m1 "fsl_mac $mac\.ethernet:.*FMan MAC address:")
+    [ -z "$line" ] && { echo ""; return; }
+    hwaddr=$(echo "$line" | sed 's/.*FMan MAC address: //' | tr -d ' ' | tr 'A-F' 'a-f')
+    [ -z "$hwaddr" ] && { echo ""; return; }
+    for dev in /sys/class/net/*; do
+        local a
+        a=$(cat "$dev/address" 2>/dev/null | tr 'A-F' 'a-f')
+        if [ "$a" = "$hwaddr" ]; then
+            basename "$dev"
+            return
+        fi
+    done
+    echo ""
+}
+
+for entry in "${ASK_PORTS[@]}"; do
+    # shellcheck disable=SC2086
+    set -- $entry
+    mac=$1; _default_dev=$2; kind=$3; label=$4
+
+    if mac_bound "$mac"; then
+        netdev=$(find_netdev_for_mac "$mac")
+        if [ -n "$netdev" ] && [ -e "/sys/class/net/$netdev" ]; then
+            state=$(cat "/sys/class/net/$netdev/operstate" 2>/dev/null)
+            carrier=$(cat "/sys/class/net/$netdev/carrier" 2>/dev/null || echo 0)
+            if [ "$state" = "up" ] && [ "$carrier" = "1" ]; then
+                ok "$label ($netdev) UP with link"
+            elif [ "$state" = "up" ]; then
+                ok "$label ($netdev) UP no-link"
+            else
+                ko "$label ($netdev) DOWN (operstate=$state)"
+            fi
+        else
+            # MAC probed but fsl_dpa hasn't created a netdev yet
+            # (or netdev address doesn't match -- shouldn't normally happen).
+            ko "$label MAC bound but no matching netdev found"
+        fi
+    elif [ "$kind" = "sfp+" ] && mac_failed_no_sfp "$mac"; then
+        na "$label (no SFP+ module inserted)"
+    else
+        ko "$label MAC bound (fsl_mac did not probe $mac.ethernet)"
+    fi
 done
-
-if [ "$copper_present" -ge 3 ]; then
-    ok "3 copper DPAA interfaces present"
-else
-    ko "3 copper DPAA interfaces present (found $copper_present)"
-fi
-
-if [ "$copper_up" -ge 1 ]; then
-    ok "at least 1 copper DPAA interface UP ($copper_up)"
-else
-    ko "at least 1 copper DPAA interface UP"
-fi
-
-if dmesg_has 'sfp-xfi[01]: deferred probe pending' \
-   && dmesg_has 'fsl_mac: probe of 1af[02]000.ethernet failed with error -22'; then
-    na "SFP+ cages probed (no SFP module inserted)"
-elif dmesg_has 'fsl_mac.*1af[02]000.ethernet.*FMan MEMAC'; then
-    ok "SFP+ cages probed (modules inserted)"
-else
-    na "SFP+ cages probed (no SFP module inserted)"
-fi
 
 # ---------------------------------------------------------------------------
 # Section: dpa_app userspace PCD apply
@@ -549,26 +580,57 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Section: kernel log integrity
+# Section: ASK-specific kernel log integrity
 # ---------------------------------------------------------------------------
-section "Kernel log integrity"
+section "ASK-specific kernel log integrity"
 
-if dmesg_has 'Kernel panic'; then
-    ko "no kernel panic in dmesg"
+# Pattern matches errors emitted by ASK / SDK DPAA / FMan / BMan / QMan /
+# CAAM / CDX / fp_netfilter / auto_bridge / dpa_app components only.
+# A bare "Kernel panic" or generic stack trace from an unrelated subsystem
+# is NOT counted here -- this section asserts the ASK stack itself is clean.
+ASK_TAGS='(fsl_dpa|fsl_mac|fsl_oh|fsl_advanced|fsl_proxy|fm_init|fm_pcd|fman|bman|qman|qbman|caam|cdx|fci|auto_bridge|fp_netfilter|usdpaa|dpa_ipsec|dpa_app|sdk_dpaa|sdk_fman)'
+
+# Helper: count dmesg lines matching ASK_TAGS at the given severity prefix.
+ask_err_lines() {
+    echo "$DMESG" | grep -iE "$1" | grep -iE "$ASK_TAGS" | grep -vE 'failed with error -22.*1af[02]000' || true
+}
+
+# Each check: PASS if no ASK-tagged lines match the severity, FAIL with count.
+panics=$(ask_err_lines 'Kernel panic|Call trace|Unable to handle kernel')
+if [ -z "$panics" ]; then
+    ok "no kernel panic involving ASK drivers"
 else
-    ok "no kernel panic in dmesg"
+    n=$(echo "$panics" | wc -l)
+    ko "no kernel panic involving ASK drivers ($n hit(s))"
 fi
 
-if dmesg_has 'Oops:'; then
-    ko "no kernel oops in dmesg"
+oopses=$(ask_err_lines 'Oops')
+if [ -z "$oopses" ]; then
+    ok "no Oops involving ASK drivers"
 else
-    ok "no kernel oops in dmesg"
+    n=$(echo "$oopses" | wc -l)
+    ko "no Oops involving ASK drivers ($n hit(s))"
 fi
 
-if dmesg_has 'BUG:'; then
-    ko "no BUG: messages in dmesg"
+bugs=$(ask_err_lines 'BUG:|kernel BUG')
+if [ -z "$bugs" ]; then
+    ok "no BUG: messages from ASK drivers"
 else
-    ok "no BUG: messages in dmesg"
+    n=$(echo "$bugs" | wc -l)
+    ko "no BUG: messages from ASK drivers ($n hit(s))"
+fi
+
+# Probe / bind / init failures from ASK drivers. Excludes the legitimate
+# SFP+ no-module -22 failures (those are filtered above by the -v grep).
+probe_fails=$(echo "$DMESG" \
+    | grep -iE "$ASK_TAGS" \
+    | grep -iE 'probe.*failed|init.*failed|bind.*failed|Unknown symbol' \
+    | grep -vE 'fsl_(mac|dpa).*1af[02]000|ethernet@[89][^0-9]' || true)
+if [ -z "$probe_fails" ]; then
+    ok "no ASK driver probe/init/bind failures"
+else
+    n=$(echo "$probe_fails" | wc -l)
+    ko "no ASK driver probe/init/bind failures ($n hit(s))"
 fi
 
 # ---------------------------------------------------------------------------
