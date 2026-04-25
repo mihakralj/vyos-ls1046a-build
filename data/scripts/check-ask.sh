@@ -246,11 +246,17 @@ else
     ko "fsl_dpa driver registered on platform bus"
 fi
 
-# Negative check: no -EINVAL -22 errors from probe.
-if dmesg_has 'fsl_dpa.*probe.*failed with error -22'; then
-    ko "no fsl_dpa probe -EINVAL failures"
+# Negative check: no -EINVAL -22 errors from probe, EXCEPT for the two
+# fsl_dpa nodes that hang off the SFP+ MACs (typically ethernet@8 and
+# ethernet@9 on Mono Gateway). Those cascade-fail when no SFP module is
+# inserted -- expected hardware state, not a regression.
+spurious=$(echo "$DMESG" \
+    | grep -E 'fsl_dpa.*probe.*failed with error -22' \
+    | grep -vE 'ethernet@[89][^0-9]' || true)
+if [ -n "$spurious" ]; then
+    ko "no unexpected fsl_dpa probe -EINVAL failures"
 else
-    ok "no fsl_dpa probe -EINVAL failures"
+    ok "no unexpected fsl_dpa probe -EINVAL failures"
 fi
 
 # ---------------------------------------------------------------------------
