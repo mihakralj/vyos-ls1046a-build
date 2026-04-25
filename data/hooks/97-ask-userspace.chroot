@@ -78,15 +78,10 @@ fi
 
 ldconfig
 
-# ASK kernel modules installed to /usr/local/lib/ask-modules/
-# Create depmod config so modprobe can find them
-if [ -d /usr/local/lib/ask-modules ]; then
-  mkdir -p /etc/depmod.d
-  echo "search ask-modules" > /etc/depmod.d/ask.conf
-  # Create module directory under kernel version (resolved at boot by ask-modules.conf)
-  # For now, just ensure the directory is findable
-  mkdir -p /usr/local/lib/ask-modules
-fi
+# ASK kernel modules are shipped via the producer's ask-modules .deb,
+# which installs them to /lib/modules/<KVER>/extra/ask/ and runs depmod
+# in its postinst. The runtime loader (ask-modules-load.sh) modprobes
+# them from that path. No additional depmod config is needed here.
 
 ### SDK kernel services: create .wants symlinks directly in squashfs
 # These services use tmpfiles.d as backup, but creating the symlink here
