@@ -478,7 +478,7 @@ for entry in "${ASK_PORTS[@]}"; do
             ko "$label MAC bound but no matching netdev found"
         fi
     elif [ "$kind" = "sfp+" ] && mac_failed_no_sfp "$mac"; then
-        na "$label (no SFP+ module inserted)"
+        na "$label (no SFP+ module detected)"
     else
         ko "$label MAC bound (fsl_mac did not probe $mac.ethernet)"
     fi
