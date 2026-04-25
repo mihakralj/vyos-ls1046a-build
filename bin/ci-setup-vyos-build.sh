@@ -252,9 +252,10 @@ chmod +x "$CHROOT/usr/local/bin/ask-conntrack-fix.sh"
 cp data/systemd/ask-conntrack-fix.service "$CHROOT/etc/systemd/system/ask-conntrack-fix.service"
 cp data/systemd/ask-conntrack-fix.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/ask-conntrack-fix.conf"
 
-### ASK kernel modules directory (modules built by ci-build-packages.sh)
-# Pre-create the directory; ci-build-packages.sh populates it with .ko files
-mkdir -p "$CHROOT/usr/local/lib/ask-modules"
+### ASK kernel modules — shipped by the producer's ask-modules deb
+# (consumed via ci-consume-ask-kernel.sh, installed under
+#  /lib/modules/<KVER>/extra/ask/). No staging needed here; the loader
+#  ask-modules-load.sh now reads from /lib/modules/$(uname -r)/extra/ask.
 
 ### ASK chroot hook (ldconfig, depmod, runtime deps)
 cp data/hooks/97-ask-userspace.chroot "$HOOKS/97-ask-userspace.chroot"
