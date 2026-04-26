@@ -18,10 +18,11 @@ The **qdrant** MCP server is the authoritative persistent memory for this projec
 
 ## Project
 
-VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Three build paths:
-1. **CI (default — iteration):** `self-hosted-build.yml` ("VyOS LS1046A build (self-hosted)") on the user's self-hosted runner via `workflow_dispatch`. Warm caches → ~5–10 min. Zero GitHub Actions minutes. **This is the default — use it.**
-2. **CI (hosted, fallback / hermetic releases):** `auto-build.yml` ("VyOS LS1046A build") on `ubuntu-24.04-arm` GitHub-hosted runner via `workflow_dispatch`. Slower (~20–30 min), burns GH minutes. Only use when (a) self-hosted runner is offline or (b) producing a clean tagged release.
-3. **Local dev loop (fastest iteration):** `bin/build-local.sh` cross-compiles kernel on LXC 200 (192.168.1.137) → TFTP boot on Mono Gateway (~2 min incremental). See `plans/DEV-LOOP.md`
+VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two build paths:
+1. **CI (the only CI path):** `self-hosted-build.yml` ("VyOS LS1046A build (self-hosted)") via `workflow_dispatch`. Spins up Azure ARM64 VM → runs the build on the self-hosted runner → deallocates VM. Warm caches → ~5–10 min. **Always use this for CI builds.**
+2. **Local dev loop (fastest iteration):** `bin/build-local.sh` cross-compiles kernel on LXC 200 (192.168.1.137) → TFTP boot on Mono Gateway (~2 min incremental). See `plans/DEV-LOOP.md`
+
+`auto-build.yml` ("VyOS LS1046A build (reusable)") is **reusable-only** — it has no `workflow_dispatch:` trigger and does NOT appear in the Actions "Run workflow" dropdown. It is invoked exclusively by `self-hosted-build.yml` via `uses: ./.github/workflows/auto-build.yml`. **Do NOT** re-add `workflow_dispatch:` to `auto-build.yml` — that would silently re-enable hosted-runner (`ubuntu-24.04-arm`) builds that burn our public Actions minutes quota. If you need to run a build, dispatch `self-hosted-build.yml`.
 
 ## Critical Non-Obvious Rules
 
@@ -94,7 +95,7 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Three b
 
 ## Local Dev Loop Rules
 
-- **Two CI workflows exist:** `self-hosted-build.yml` (default, fast) and `auto-build.yml` (hosted fallback). Build-logic edits (kernel config, patches, ISO recipe) MUST be applied to BOTH workflows so they stay in sync — drift between them produces non-reproducible ISOs.
+- **Single CI workflow:** all CI builds run through `self-hosted-build.yml`, which delegates the heavy lifting to `auto-build.yml` via `workflow_call` (reusable workflow). All build-logic edits (kernel config, patches, ISO recipe) live in **`auto-build.yml`** — the self-hosted wrapper only handles VM lifecycle (start/stop Azure ARM64 VM) and dispatch. Do **not** re-add `workflow_dispatch:` to `auto-build.yml` to "test on hosted runners"; that re-introduces hosted-runner builds and burns Actions minutes.
 - **Kernel config appended, not replaced:** New `CONFIG_*` lines go at the END of the `printf` block in the workflow — `vyos_defconfig` is upstream and our additions are appended after checkout
 - **`scripts/config --enable` does NOT upgrade `=m` to `=y`:** Use `scripts/config --set-val X y` to force built-in. This is critical for TFTP boot where modules are unavailable.
 - **VyOS kernel requires config fragment merging:** 7 files in `vyos-build/scripts/package-build/linux-kernel/config/*.config` must be `cat`'d into `.config` after `vyos_defconfig` copy. Without them, SQUASHFS/OVERLAY_FS/netfilter rules are missing.
@@ -137,7 +138,7 @@ All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `ar
 - **Only 2 packages rebuilt:** Only `linux-kernel` and `vyos-1x` are built from source; all other packages come from upstream VyOS repos
 - **linux-headers stripped:** `rm -rf packages/linux-headers-*` before ISO build to save space on the runner
 - **Secure Boot chain:** MOK.pem/MOK.key for kernel module signing, minisign for ISO signing, `grub-efi-arm64-signed` + `shim-signed` packages included
-- **Trigger model:** Both workflows are `workflow_dispatch` only — no `push`, no `schedule`. ISO builds happen on demand via `gh workflow run`. The default for any iteration is the self-hosted workflow.
+- **Trigger model:** Only `self-hosted-build.yml` is dispatchable (`workflow_dispatch` only — no `push`, no `schedule`). `auto-build.yml` has only a `workflow_call:` trigger and is invoked from `self-hosted-build.yml`. ISO builds happen on demand via `gh workflow run "VyOS LS1046A build (self-hosted)"`.
 - **DPDK PMD build archived:** The "Build DPDK + VPP DPAA Plugin" CI step has been removed (RC#31). Infrastructure preserved in `archive/dpaa-pmd/` — see `archive/dpaa-pmd/RESTORE.md` to re-enable.
 - **Boot optimizations:** `acpid.service`, `acpid.socket`, `acpid.path` are masked in the ISO via `99-mask-services.chroot`. `kexec-load.service` and `kexec.service` are NOT masked — mainline 6.6 QBMan kexec fix enables VyOS managed-params self-healing on DPAA1. SysV init scripts (`/etc/init.d/kexec-load`, `/etc/init.d/kexec`) are removed to prevent `systemd-sysv-generator` from creating duplicate units that would bypass systemd. The old `ln -sf /dev/null` in `includes.chroot` approach was broken — live-build dereferences absolute symlinks to paths outside the chroot, producing empty files instead. ACPI masking saves ~2s. `CONFIG_DEBUG_PREEMPT` suppression saves ~20s. Installed system boot time: ~82s to login prompt.
 
@@ -158,8 +159,8 @@ All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `ar
 
 | File | Purpose |
 |------|---------|
-| `.github/workflows/self-hosted-build.yml` | **DEFAULT** build — kernel config overrides, ISO creation, release (self-hosted runner, fast) |
-| `.github/workflows/auto-build.yml` | Fallback hosted-runner build (GitHub `ubuntu-24.04-arm`, slow) — keep in sync with self-hosted-build.yml |
+| `.github/workflows/self-hosted-build.yml` | **The CI entry point** — `workflow_dispatch` only. Spins up Azure ARM64 VM, calls `auto-build.yml` as a reusable workflow on the self-hosted runner, then deallocates the VM |
+| `.github/workflows/auto-build.yml` | Reusable workflow (`workflow_call` only — NO `workflow_dispatch`). Contains all build logic: kernel config, patches, package builds, ISO assembly, release publishing. Invoked exclusively by `self-hosted-build.yml` |
 | `README.md` | Project overview: hardware, fixes, release assets, boot method |
 | `INSTALL.md` | Complete 11-step install guide: USB → serial → U-Boot → install image → GRUB fixes → verify |
 | `PORTING.md` | Deep technical analysis: driver archaeology, DPAA1 architecture, CPU freq, boot flow |
@@ -240,15 +241,12 @@ o| `data/kernel-patches/ask-nxp-sdk-sources.tar.gz` | NXP SDK DPAA driver source
 
 ```bash
 # === CI (production releases) ===
-# ALWAYS use the self-hosted workflow — the hosted "VyOS LS1046A build"
-# workflow is slow/deprecated. If triggered by mistake, cancel and relaunch.
+# Only ONE dispatchable workflow exists. `auto-build.yml` is reusable-only
+# (no workflow_dispatch trigger) and cannot be launched standalone.
 gh workflow run "VyOS LS1046A build (self-hosted)" --ref main
 
 # Check build status
 gh run list --limit 3
-
-# Cancel an accidental hosted-runner trigger
-gh run cancel <run-id>
 
 # Push triggers nothing — workflow_dispatch only
 git push  # then manually trigger build

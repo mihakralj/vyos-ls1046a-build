@@ -1,24 +1,20 @@
-name: VyOS LS1046A build
+name: VyOS LS1046A build (reusable)
+
+# This workflow is INTENTIONALLY reusable-only — it has no `workflow_dispatch:`
+# trigger and therefore does NOT appear in the Actions "Run workflow" dropdown.
+#
+# Why: builds on GitHub-hosted `ubuntu-24.04-arm` runners consume our public
+# Actions minutes quota and lack the on-host caches / NAT routing the
+# self-hosted Azure ARM64 runner provides. We standardised on running every
+# ISO build through `self-hosted-build.yml`, which spins up the Azure VM,
+# delegates the heavy work here via `uses: ./.github/workflows/auto-build.yml`,
+# then deallocates the VM. Re-introducing `workflow_dispatch:` here would
+# silently re-enable hosted-runner builds — please don't.
+#
+# To run a build manually, dispatch `self-hosted-build.yml` (named
+# "VyOS LS1046A build (self-hosted)" in the Actions UI).
 
 on:
-#  schedule:
-#    - cron: "0 5 * * *"
-
-  workflow_dispatch:
-    inputs:
-      BUILD_BY:
-        description: 'Builder identifier (auto: mihakralj@users.noreply.github.com)'
-        default: ''
-      build_version:
-        description: 'Version number (auto: YYYY.MM.DD-HHMM-rolling)'
-        default: ''
-      builder_image:
-        description: 'Builder Docker image'
-        default: 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64'
-      ASK_KERNEL_TAG:
-        description: 'ASK kernel release tag to consume (default: read data/ask-kernel.pin). Set empty string to disable and build kernel locally.'
-        default: ''
-
   workflow_call:
     inputs:
       runs_on:
