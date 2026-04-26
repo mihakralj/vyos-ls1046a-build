@@ -3,7 +3,6 @@ Description=Load ASK fast-path kernel modules (cdx, auto_bridge, fci)
 DefaultDependencies=no
 Before=systemd-modules-load.service cmm.service
 After=systemd-udevd.service
-ConditionPathExists=/usr/local/lib/ask-modules/cdx.ko
 
 [Service]
 Type=oneshot
