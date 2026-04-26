@@ -57,6 +57,35 @@ fi
 
 rm -rf packages/linux-headers-*
 
+### Force live-build to install ASK-specific .debs from packages.chroot/.
+#
+# live-build only invokes `dpkg -i` against packages.chroot/ for packages
+# that are explicitly named (via package-lists or --custom-package) OR that
+# are pulled in as a Depends: of something else that is installed.
+#
+# linux-image-<KVER>-vyos is depended on by vyos-1x via the kernel ABI
+# pin, so it lands automatically. ask-modules-<KVER>-vyos has NO reverse
+# dependency in the VyOS stack — it sits in packages.chroot/ as a
+# stand-alone deb and gets ignored by apt unless we name it explicitly.
+#
+# Derive the package name by reading the actual .deb file we staged, so
+# this self-adjusts when the kernel version bumps.
+ASK_CUSTOM_ARGS=()
+if [ -n "${ASK_KERNEL_TAG:-}" ]; then
+    PKG_CHROOT="data/live-build-config/packages.chroot"
+    shopt -s nullglob
+    for deb in "$PKG_CHROOT"/ask-modules-*_arm64.deb; do
+        pkg=$(dpkg-deb -f "$deb" Package)
+        ASK_CUSTOM_ARGS+=(--custom-package "$pkg")
+        echo "### Forcing install of ASK package: $pkg (from $(basename "$deb"))"
+    done
+    shopt -u nullglob
+    if [ ${#ASK_CUSTOM_ARGS[@]} -eq 0 ]; then
+        echo "WARN: ASK_KERNEL_TAG set but no ask-modules-*.deb in $PKG_CHROOT/"
+        echo "      The ISO will boot without OOT fast-path modules (cdx/fci)."
+    fi
+fi
+
 ./build-vyos-image \
   --architecture arm64 \
   --build-by "$BUILD_BY" \
@@ -100,6 +129,7 @@ rm -rf packages/linux-headers-*
   --custom-package catatonit \
   --custom-package uidmap \
   --custom-package fuse-overlayfs \
+  "${ASK_CUSTOM_ARGS[@]}" \
   generic
 
 cd build
