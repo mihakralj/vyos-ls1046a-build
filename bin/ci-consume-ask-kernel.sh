@@ -45,6 +45,7 @@ ASSETS_JSON=$(curl -fsSL "${AUTH_ARGS[@]}" \
 want() {
     case "$1" in
         linux-*.deb)                return 0 ;;
+        ask-modules-*_arm64.deb)    return 0 ;;
         iptables_*_arm64.deb)       return 0 ;;
         libxt*_arm64.deb)           return 0 ;;
         libip4tc*_arm64.deb)        return 0 ;;
