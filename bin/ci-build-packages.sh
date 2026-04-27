@@ -332,3 +332,52 @@ PYEOF
   df -Th
   cd ..
 done
+
+### ASK userspace rebuild in ASK-consume mode ##########################
+#
+# In ASK-consume mode the linux-kernel package is skipped, so the entire
+# `if [ "$package" == "linux-kernel" ]` block above (which contains the
+# DTB build, ASK kernel-module build, AND the ASK userspace rebuild) is
+# never entered. That left dpa_app/cmm/fmlib/fmc shipping as the stale
+# prebuilt blobs from data/ask-userspace/ -- they were compiled against
+# an older kernel ABI and SIGSEGV at runtime under cdx_module_init's
+# call_usermodehelper, producing the cascade:
+#
+#   cdx_module_init::start_dpa_app failed rc 11
+#   get_phys_port_poolinfo_bysize::failed
+#   cdx_create_fragment_bufpool::failed to locate eth bman pool
+#
+# Fix: extract the producer's pinned linux-headers-*.deb (which already
+# ships the FMD UAPI under usr/src/linux-headers-*/include/uapi/linux/fmd/)
+# and re-run ci-build-ask-userspace.sh against it. dpa_app, libfm.a,
+# libfmc.a, libcli, libfci, and cmm get rebuilt against the same kernel
+# headers we are about to ship, killing the ABI drift.
+if [ -n "${ASK_KERNEL_TAG:-}" ]; then
+  echo ""
+  echo "### ASK-consume mode: rebuilding ASK userspace against pinned kernel-headers .deb"
+  VB_PKG_CHROOT="$GITHUB_WORKSPACE/vyos-build/data/live-build-config/packages.chroot"
+  INCLUDES_CHR="$GITHUB_WORKSPACE/vyos-build/data/live-build-config/includes.chroot"
+  HDR_DEB=$(ls "$VB_PKG_CHROOT"/linux-headers-*_arm64.deb 2>/dev/null | head -1)
+  if [ -z "$HDR_DEB" ]; then
+    echo "WARNING: no linux-headers-*_arm64.deb in $VB_PKG_CHROOT/ — ASK userspace will NOT be rebuilt"
+    echo "         (ci-consume-ask-kernel.sh must have run first)"
+  elif [ ! -x "$GITHUB_WORKSPACE/bin/ci-build-ask-userspace.sh" ]; then
+    echo "WARNING: bin/ci-build-ask-userspace.sh missing or not executable — skipping userspace rebuild"
+  else
+    KHDR_EXTRACT="/tmp/ask-khdr"
+    rm -rf "$KHDR_EXTRACT"
+    mkdir -p "$KHDR_EXTRACT"
+    dpkg-deb -x "$HDR_DEB" "$KHDR_EXTRACT"
+    KSRC_ASK=$(find "$KHDR_EXTRACT/usr/src" -maxdepth 1 -type d -name 'linux-headers-*' | head -1)
+    if [ -z "$KSRC_ASK" ] || [ ! -d "$KSRC_ASK/include/uapi/linux/fmd" ]; then
+      echo "WARNING: extracted headers missing FMD UAPI tree at $KSRC_ASK/include/uapi/linux/fmd"
+      echo "         — ASK userspace will NOT be rebuilt"
+    else
+      echo "### KSRC_ASK=$KSRC_ASK (FMD UAPI present)"
+      echo "### INCLUDES_CHR=$INCLUDES_CHR"
+      "$GITHUB_WORKSPACE/bin/ci-build-ask-userspace.sh" "$KSRC_ASK" "$INCLUDES_CHR" || \
+        echo "WARNING: ASK userspace rebuild failed — falling back to prebuilt blobs (dpa_app likely SIGSEGV)"
+    fi
+    rm -rf "$KHDR_EXTRACT"
+  fi
+fi
