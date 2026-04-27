@@ -60,7 +60,7 @@
 +        # LS1046A eMMC: partitions start after 32 MiB firmware zone.
 +        command = f'sgdisk -a1 -n1:{_BIOS_BOOT_START}:{_BIOS_BOOT_END} -t1:EF02 \
 +            -n2:{_EFI_START}:+256M -t2:EF00 \
-+            -n3:0:{p3_end} -t3:8300 {drive_path}'
++            -n3:0:0 -t3:8300 {drive_path}'
      else:
 -        root_size_text: str = str(root_size)
 -    command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:4096:+256M -t2:EF00 \
@@ -70,3 +70,228 @@
  
      run(command)
      # update partitions in kernel
+@@ -171,7 +198,7 @@
+     """
+     if fsype in ['squashfs', 'iso9660']:
+         command: str = f'mount -o loop,ro -t {fsype} {partition} {path}'
+-    if fsype == 'overlay' and overlay_params:
++    elif fsype == 'overlay' and overlay_params:
+         command: str = f'mount -t overlay -o noatime,\
+             upperdir={overlay_params["upperdir"]},\
+             lowerdir={overlay_params["lowerdir"]},\
+--- a/src/op_mode/image_installer.py
++++ b/src/op_mode/image_installer.py
+@@ -130,7 +130,7 @@
+ CONST_MIN_DISK_SIZE: int = 2147483648  # 2 GB
+ CONST_MIN_ROOT_SIZE: int = 1610612736  # 1.5 GB
+ # a reserved space: 2MB for header, 1 MB for BIOS partition, 256 MB for EFI
+-CONST_RESERVED_SPACE: int = (2 + 1 + 256) * 1024**2
++CONST_RESERVED_SPACE: int = (32 + 1 + 256) * 1024**2
+ 
+ # define directories and paths
+ DIR_CONFIG: str = directories['config']
+@@ -194,6 +194,41 @@
+     for disk_name, disk_size in disks_available.copy().items():
+         if disk_size < CONST_MIN_DISK_SIZE:
+             del disks_available[disk_name]
++
++    # Hide USB-attached drives — they are typically install media or
++    # removable storage, not legitimate install targets on this platform.
++    for disk_name in list(disks_available):
++        try:
++            transport = cmd(f"lsblk -ndo TRAN {disk_name}").strip()
++        except Exception:
++            transport = ""
++        if transport == "usb":
++            del disks_available[disk_name]
++
++    # Exclude the live boot media so it cannot be chosen as install
++    # target and does not inflate the disk count (which triggers the
++    # RAID-1 prompt).  Try well-known live-boot mount points
++    # (VyOS / Debian bookworm / older Debian) until one resolves.
++    live_src: str = ''
++    for _mnt in ('/usr/lib/live/mount/medium',
++                 '/run/live/medium',
++                 '/lib/live/mount/medium'):
++        try:
++            live_src = cmd(f'findmnt -n -o SOURCE {_mnt}').strip()
++            if live_src:
++                break
++        except Exception:
++            continue
++
++    if live_src:
++        try:
++            pkname = cmd(f'lsblk -n -o PKNAME {live_src}').strip()
++            live_disk = f'/dev/{pkname}' if pkname else live_src
++            if live_disk in disks_available:
++                del disks_available[live_disk]
++        except Exception:
++            pass  # lsblk failed — keep all disks (safe fallback)
++
+     if not disks_available:
+         print(MSG_ERR_NO_DISK)
+         exit(MSG_INFO_INSTALL_EXIT)
+@@ -208,17 +243,30 @@
+     """Define a size of root partition
+ 
+     Args:
+-        available_space (int): available space in bytes for a root partition
++        available_space (int): available space in KB for a root partition
+ 
+     Returns:
+-        int: defined size
++        int: defined size in KB
+     """
+     if ask_yes_no(MSG_INPUT_ROOT_SIZE_ALL, default=True):
+         return available_space
+ 
++    min_gb: float = CONST_MIN_ROOT_SIZE / 1024**3
++    max_gb: float = (available_space * 1024) / 1024**3
++    prompt: str = (
++        f"Please specify the size (in GB) of the root partition "
++        f"(min {min_gb:.1f} GB, max {max_gb:.2f} GB; press Enter for max)?"
++    )
++
+     while True:
+-        root_size_gb: str = ask_input(MSG_INPUT_ROOT_SIZE_SET)
+-        root_size_kbytes: int = (gb_to_bytes(float(root_size_gb))) // 1024
++        root_size_gb: str = ask_input(prompt)
++        if root_size_gb.strip() == "":
++            return available_space
++        try:
++            root_size_kbytes: int = (gb_to_bytes(float(root_size_gb))) // 1024
++        except ValueError:
++            print("Please enter a number, or press Enter to use the full disk.")
++            continue
+ 
+         if root_size_kbytes > available_space:
+             print(MSG_WARN_ROOT_SIZE_TOOBIG)
+@@ -396,6 +444,11 @@
+     """
+     print(MSG_INFO_INSTALL_DISKS_LIST)
+     default_disk: str = list(disks_available)[0]
++    # Prefer eMMC/SD card (mmcblk) as default on embedded/ARM hardware.
++    for _d in disks_available:
++        if 'mmcblk' in _d:
++            default_disk = _d
++            break
+     for disk_name, disk_size in disks_available.items():
+         disk_size_human: str = bytes_to_gb(disk_size)
+         print(f'Drive: {disk_name} ({disk_size_human} GB)')
+@@ -1058,6 +1111,94 @@
+         grub.set_default(image_name, DIR_DST_ROOT)
+         grub.set_console_type(console_dict[console_type], DIR_DST_ROOT)
+ 
++        # ------------------------------------------------------------
++        # U-Boot / eMMC boot configuration (LS1046A Mono Gateway)
++        # ------------------------------------------------------------
++        # Boot chain on this board:
++        #   1. SoC ROM loads U-Boot from QSPI NOR flash
++        #   2. U-Boot reads its environment from QSPI NOR ("uboot-env"
++        #      MTD partition).  The env var `bootcmd` selects what to
++        #      load; `vyos_image` selects which installed image dir.
++        #   3. U-Boot reads /boot/vyos.env from eMMC partition 3 to learn
++        #      the active image name (written here, below).
++        #   4. U-Boot loads vmlinuz/initrd/dtb from
++        #      /boot/<image>/  on eMMC and jumps to the kernel.
++        #
++        # Two things therefore have to be configured at install time:
++        #   (a) /boot/vyos.env  on the eMMC root partition  -- always
++        #       writable, this script writes it directly.
++        #   (b) U-Boot env vars in QSPI NOR (`bootcmd`, `vyos_image`,
++        #       `usb_vyos`) -- requires CONFIG_MTD + CONFIG_SPI in the
++        #       running kernel so /dev/mtd2 exists for fw_setenv.
++        #       If absent, the user must set them once from the U-Boot
++        #       prompt; see vyos-ls1046a-build/INSTALL.md.
++        # ------------------------------------------------------------
++        print()
++        print('=' * 60)
++        print('Boot configuration')
++        print('=' * 60)
++
++        # (a) Always write /boot/vyos.env to eMMC.
++        vyos_env_ok = False
++        vyos_env_err = ''
++        try:
++            vyos_env = Path(f'{DIR_DST_ROOT}/boot/vyos.env')
++            vyos_env.write_text(f'vyos_image={image_name}\n')
++            vyos_env_ok = True
++        except Exception as e:
++            vyos_env_err = f'{type(e).__name__}: {e}'
++
++        if vyos_env_ok:
++            print(f'  [OK]   eMMC : /boot/vyos.env  -> vyos_image={image_name}')
++        else:
++            print(f'  [FAIL] eMMC : /boot/vyos.env  ({vyos_env_err})')
++
++        # (b) Try to set U-Boot env vars in QSPI NOR via fw_setenv.
++        uboot_ok = False
++        uboot_reason = ''
++        postinstall = Path('/usr/local/bin/vyos-postinstall')
++        mtd_present = Path('/dev/mtd2').exists()
++        if not postinstall.exists():
++            uboot_reason = 'vyos-postinstall helper not installed'
++        elif not mtd_present:
++            uboot_reason = ('kernel has no MTD/SPI support -- /dev/mtd2 '
++                            'absent (need CONFIG_MTD=y, CONFIG_SPI=y, '
++                            'CONFIG_SPI_FSL_QUADSPI=y)')
++        else:
++            try:
++                rc = run(f'{postinstall} --root {DIR_DST_ROOT} {image_name}')
++                if rc == 0:
++                    uboot_ok = True
++                else:
++                    uboot_reason = f'vyos-postinstall exited with code {rc}'
++            except Exception as e:
++                uboot_reason = f'{type(e).__name__}: {e}'
++
++        if uboot_ok:
++            print('  [OK]   QSPI : U-Boot env (bootcmd, vyos_image, usb_vyos)')
++        else:
++            print(f'  [SKIP] QSPI : U-Boot env NOT updated')
++            print(f'         reason: {uboot_reason}')
++
++        # Summary line + manual recovery hint when QSPI step skipped.
++        print()
++        if vyos_env_ok and uboot_ok:
++            print(f'Boot path ready: U-Boot (QSPI) -> eMMC p3 '
++                  f'/boot/{image_name}/  (vmlinuz, initrd, dtb)')
++        elif vyos_env_ok and not uboot_ok:
++            print('eMMC payload written, but U-Boot env was NOT updated.')
++            print('To boot the new image, run ONCE at the U-Boot prompt:')
++            print(f'    setenv vyos_image {image_name}')
++            print('    saveenv')
++            print('    boot')
++            print('See vyos-ls1046a-build/INSTALL.md for the full bootcmd.')
++        else:
++            print('WARNING: install incomplete -- /boot/vyos.env was not')
++            print('         written; the board will not autoboot the new')
++            print('         image until that file is created manually.')
++        print('=' * 60)
++        print()
++
+         if is_raid_install(install_target):
+             # add RAID specific modules
+             grub.modules_write(f'{DIR_DST_ROOT}/{grub.CFG_VYOS_MODULES}',
+@@ -1095,7 +1236,7 @@
+         exit()
+ 
+     except Exception as err:
+-        print(f'Unable to install VyOS: {err}')
++        print(f"Unable to install VyOS: {type(err).__name__}: {err}")
+         # unmount filesystems and cleanup
+         try:
+             if install_target is not None:
+@@ -1307,6 +1448,11 @@
+         copy(f'{DIR_ISO_MOUNT}/live/filesystem.squashfs',
+              f'{root_dir}/boot/{image_name}/{image_name}.squashfs')
+ 
++        # Copy device tree blobs for U-Boot boards (e.g., LS1046A)
++        for file in Path(DIR_ISO_MOUNT).iterdir():
++            if file.is_file() and file.suffix == '.dtb':
++                copy(file, f'{root_dir}/boot/{image_name}/')
++
+         # unmount an ISO and cleanup
+         cleanup([str(iso_path)])
+ 
