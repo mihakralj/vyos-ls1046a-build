@@ -19,19 +19,13 @@ on:
         description: 'ASK kernel release tag to consume (default: read data/ask-kernel.pin). Set empty string to disable and build kernel locally.'
         default: ''
 
-# Opt into Node.js 24 for all JavaScript actions (azure/login@v2 still ships
-# Node 20 as of 2026-04; GitHub is force-migrating runners starting June 2026).
-# Removes the "Node.js 20 actions are deprecated" warning.
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
 jobs:
   # ── Step 1: Power on the Azure ARM64 VM ──────────────────────────
   start-vm:
     runs-on: ubuntu-latest
     steps:
       - name: Azure Login
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
@@ -99,7 +93,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Azure Login
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
