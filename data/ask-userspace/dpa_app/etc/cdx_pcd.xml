@@ -4,97 +4,97 @@
 <netpcd>
 <classification name="cdx_udp4_cc" max="512" masks="yes" shared="true" statistics="byteframe">
   <key>
-     <hashtable external="yes" mask="0x7fff" hashshift="0" keysize="14" aging="yes"/>
+     <hashtable external="yes" mask="0x7ff0" hashshift="0" keysize="14" aging="yes"/>
   </key>
 </classification>
 
 <classification name="cdx_tcp4_cc" max="512" masks="yes" shared="true" statistics="byteframe">
   <key>
-     <hashtable external="yes" mask="0x7fff" hashshift="0" keysize="14" aging="yes"/>
+     <hashtable external="yes" mask="0x7ff0" hashshift="0" keysize="14" aging="yes"/>
   </key>
 </classification>
 
 <classification name="cdx_udp6_cc" max="512" masks="yes" shared="true" statistics="byteframe">
   <key>
-     <hashtable external="yes" mask="0x7fff" hashshift="0" keysize="38" aging="yes"/>
+     <hashtable external="yes" mask="0x7ff0" hashshift="0" keysize="38" aging="yes"/>
   </key>
 </classification>
 
 <classification name="cdx_tcp6_cc" max="512" masks="yes" shared="true" statistics="byteframe">
   <key>
-     <hashtable external="yes" mask="0x7fff" hashshift="0" keysize="38" aging="yes"/>
+     <hashtable external="yes" mask="0x7ff0" hashshift="0" keysize="38" aging="yes"/>
   </key>
 </classification>
 
 <classification name="cdx_esp4_cc" max="512" masks="yes" shared="true" statistics="byteframe">
   <key>
-     <hashtable external="yes" mask="0xff" hashshift="0" keysize="10" aging="yes"/>
+     <hashtable external="yes" mask="0xff0" hashshift="0" keysize="10" aging="yes"/>
   </key>
 </classification>
 
 <classification name="cdx_esp6_cc" max="512" masks="yes" shared="true" statistics="byteframe">
   <key>
-     <hashtable external="yes" mask="0xff" hashshift="0" keysize="22" aging="yes"/>
+     <hashtable external="yes" mask="0xff0" hashshift="0" keysize="22" aging="yes"/>
   </key>
 </classification>
 
 <classification name="cdx_multicast4_cc" max="512" masks="yes" shared="true" statistics="byteframe">
   <key>
-     <hashtable external="yes" mask="0xff" hashshift="0" keysize="10" aging="no"/>
+     <hashtable external="yes" mask="0xff0" hashshift="0" keysize="10" aging="no"/>
   </key>
 </classification>
 
 <classification name="cdx_multicast6_cc" max="512" masks="yes" shared="true" statistics="byteframe">
   <key>
-     <hashtable external="yes" mask="0xff" hashshift="0" keysize="34" aging="no"/>
+     <hashtable external="yes" mask="0xff0" hashshift="0" keysize="34" aging="no"/>
   </key>
 </classification>
 
 <classification name="cdx_ethernet_cc" max="512" masks="yes" shared="true" statistics="byteframe">
   <key>
-     <hashtable external="yes" mask="0xff" hashshift="0" keysize="15" aging="yes"/>
+     <hashtable external="yes" mask="0xff0" hashshift="0" keysize="15" aging="yes"/>
   </key>
 </classification>
 
 <classification name="cdx_pppoe_cc" max="512" masks="yes" shared="true" statistics="byteframe">
   <key>
-     <hashtable external="yes" mask="0xf" hashshift="0" keysize="11" aging="yes"/>
+     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="11" aging="yes"/>
   </key>
 </classification>
 
 <classification name="cdx_tuple3udp4_cc" max="512" masks="yes" shared="true" statistics="byteframe">
   <key>
-     <hashtable external="yes" mask="0xff" hashshift="0" keysize="8" aging="yes"/>
+     <hashtable external="yes" mask="0xff0" hashshift="0" keysize="8" aging="yes"/>
   </key>
 </classification>
 
 <classification name="cdx_tuple3tcp4_cc" max="512" masks="yes" shared="true" statistics="byteframe">
   <key>
-     <hashtable external="yes" mask="0xf" hashshift="0" keysize="8" aging="yes"/>
+     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="8" aging="yes"/>
   </key>
 </classification>
 
 <classification name="cdx_tuple3udp6_cc" max="512" masks="yes" shared="true" statistics="byteframe">
   <key>
-     <hashtable external="yes" mask="0xff" hashshift="0" keysize="20" aging="yes"/>
+     <hashtable external="yes" mask="0xff0" hashshift="0" keysize="20" aging="yes"/>
   </key>
 </classification>
 
 <classification name="cdx_tuple3tcp6_cc" max="512" masks="yes" shared="true" statistics="byteframe">
   <key>
-     <hashtable external="yes" mask="0xf" hashshift="0" keysize="20" aging="yes"/>
+     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="20" aging="yes"/>
   </key>
 </classification>
 
 <classification name="cdx_frag4_cc" max="512" masks="yes" shared="true" statistics="byteframe">
   <key>
-     <hashtable external="yes" mask="0xf" hashshift="0" keysize="12" aging="no"/>
+     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="12" aging="no"/>
   </key>
 </classification>
 
 <classification name="cdx_frag6_cc" max="512" masks="yes" shared="true" statistics="byteframe">
   <key>
-     <hashtable external="yes" mask="0xf" hashshift="0" keysize="38" aging="no"/>
+     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="38" aging="no"/>
   </key>
 </classification>
 
