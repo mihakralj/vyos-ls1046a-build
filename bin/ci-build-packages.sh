@@ -88,7 +88,7 @@ for package in $packages; do
       # Always ensure base DTS is in the kernel tree
       cp "$GITHUB_WORKSPACE/data/dtb/mono-gateway-dk.dts" "$DTS_DIR/mono-gateway-dk.dts"
 
-      # Copy SDK DTS if present (injected by ci-setup-kernel-ask.sh from archive/)
+      # Copy SDK DTS if present (sourced from data/dtb/mono-gateway-dk-sdk.dts)
       if [ -f "$GITHUB_WORKSPACE/data/dtb/mono-gateway-dk-sdk.dts" ]; then
         cp "$GITHUB_WORKSPACE/data/dtb/mono-gateway-dk-sdk.dts" "$DTS_DIR/mono-gateway-dk-sdk.dts"
         # Add to Makefile if not already present
