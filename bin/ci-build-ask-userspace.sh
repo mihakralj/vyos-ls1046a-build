@@ -229,8 +229,14 @@ if [ -d "$DPA_SRC" ] && [ -f "$DPA_SRC/Makefile" ]; then
   # cdx_ioctl.h hides CDX_CTRL_DPA_GET_MURAM_DATA and testapp.c won't compile.
   # Setting CFLAGS= on the make cmdline beats the Makefile's `CFLAGS +=`, so
   # we must add the define explicitly here.
-  DPA_CFLAGS="$COMMON_CFLAGS -Wall -DDPAA_DEBUG_ENABLE"
+  # FMD subdir includes match what ci-build-fmc.sh uses to compile libfmc.a;
+  # fmc.h transitively pulls in <std_ext.h> and friends from fmd/etc.
+  DPA_CFLAGS="$COMMON_CFLAGS -Wall -DDPAA_DEBUG_ENABLE -DNCSW_LINUX -D__STDC_LIMIT_MACROS"
   DPA_CFLAGS="$DPA_CFLAGS -I$STAGING/include"
+  DPA_CFLAGS="$DPA_CFLAGS -I$STAGING/include/fmd"
+  DPA_CFLAGS="$DPA_CFLAGS -I$STAGING/include/fmd/etc"
+  DPA_CFLAGS="$DPA_CFLAGS -I$STAGING/include/fmd/Peripherals"
+  DPA_CFLAGS="$DPA_CFLAGS -I$STAGING/include/fmd/integrations"
   DPA_CFLAGS="$DPA_CFLAGS -I$ASK_SRC/cdx"
   DPA_CFLAGS="$DPA_CFLAGS $(pkg-config --cflags libxml-2.0 2>/dev/null || echo -I/usr/include/libxml2)"
 
