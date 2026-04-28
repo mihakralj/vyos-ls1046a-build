@@ -225,7 +225,11 @@ echo "### Stage 3: Building dpa_app"
 DPA_SRC="$ASK_SRC/dpa_app"
 if [ -d "$DPA_SRC" ] && [ -f "$DPA_SRC/Makefile" ]; then
   # dpa_app needs: fmc.h, cdx_ioctl.h, libcli, libfmc.a, libfm.a, libxml2
-  DPA_CFLAGS="$COMMON_CFLAGS -Wall"
+  # NOTE: -DDPAA_DEBUG_ENABLE matches dpa_app/Makefile's default; without it,
+  # cdx_ioctl.h hides CDX_CTRL_DPA_GET_MURAM_DATA and testapp.c won't compile.
+  # Setting CFLAGS= on the make cmdline beats the Makefile's `CFLAGS +=`, so
+  # we must add the define explicitly here.
+  DPA_CFLAGS="$COMMON_CFLAGS -Wall -DDPAA_DEBUG_ENABLE"
   DPA_CFLAGS="$DPA_CFLAGS -I$STAGING/include"
   DPA_CFLAGS="$DPA_CFLAGS -I$ASK_SRC/cdx"
   DPA_CFLAGS="$DPA_CFLAGS $(pkg-config --cflags libxml-2.0 2>/dev/null || echo -I/usr/include/libxml2)"
