@@ -1,0 +1,59 @@
+From: vyos-ls1046a-build maintainers
+Subject: [PATCH] system_option: skip kexec on LS1046A (SDK QBMan cannot survive kexec)
+
+The LS1046A Mono Gateway uses the NXP SDK staging DPAA1 stack
+(drivers/staging/fsl_qbman + drivers/net/ethernet/freescale/sdk_dpaa).
+Unlike mainline drivers/soc/fsl/qbman, the SDK driver has no
+bman_requires_cleanup() / qman_requires_cleanup() reset path. After a
+kexec, the second kernel finds BMan/QMan frame queues still configured
+in CCSR from the first kernel and qman_init_fq() returns -EIO for the
+first three FQs it touches, leaving 3 of 5 DPAA ports unusable
+(symptom: "fsl_dpa soc:fsl,dpaa:ethernet@N: qman_init_fq(...) = -5",
+"probe of soc:fsl,dpaa:ethernet@N failed with error -5").
+
+system_option.py uses kexec to apply MANAGED_PARAM kernel cmdline
+changes (hugepages, panic, mitigations, isolcpus, ...) without a cold
+reboot. On LS1046A this workflow is incompatible with the SDK driver,
+so we neuter the kexec branch and emit the same "save and reboot"
+warning that's used post-boot. The user can still apply the change —
+it just requires a cold reboot, which the SDK does support.
+
+This is a defensive guard: even if /config/config.boot ends up
+requesting a MANAGED_PARAM that doesn't match /proc/cmdline (whether
+from a fresh install, a config restore, or a future upstream change to
+the seed config), the boot will not auto-trigger systemctl kexec and
+the SDK DPAA stack will stay healthy.
+
+--- a/src/conf_mode/system_option.py
++++ b/src/conf_mode/system_option.py
+@@ -453,9 +453,29 @@
+ 
+ 
+ def apply(options):
++    # LS1046A SDK DPAA1 cannot survive kexec: drivers/staging/fsl_qbman has
++    # no bman_requires_cleanup() / qman_requires_cleanup() equivalent of
++    # mainline drivers/soc/fsl/qbman, so the second kernel finds frame
++    # queues already configured in CCSR and qman_init_fq() returns -EIO,
++    # disabling 3 of 5 DPAA Ethernet ports. Detect this platform via the
++    # device-tree compatible string and downgrade the kexec branch to the
++    # same "save and reboot" warning emitted after boot is complete.
++    _ls1046a = False
++    try:
++        with open('/proc/device-tree/compatible', 'rb') as _f:
++            _ls1046a = b'fsl,ls1046a' in _f.read()
++    except OSError:
++        pass
++
+     kexec_required, cmdline_new = generate_cmdline_for_kexec(options)
+     if kexec_required:
+-        if not boot_configuration_complete() and os.getenv('VYOS_CONFIGD'):
++        if _ls1046a:
++            Warning(
++                'Kernel configuration options have changed. '
++                'On LS1046A the SDK DPAA1 stack cannot survive kexec; '
++                'save the configuration and cold-reboot to apply.'
++            )
++        elif not boot_configuration_complete() and os.getenv('VYOS_CONFIGD'):
+             cmd(
+                 'kexec -l /boot/vmlinuz --initrd=/boot/initrd.img '
+                 f'--command-line="{cmdline_new}" --kexec-file-syscall'
