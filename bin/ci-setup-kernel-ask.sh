@@ -57,9 +57,7 @@ cp data/kernel-patches/4002-hwmon-ina2xx-add-INA234-support.patch "$KERNEL_PATCH
 cp data/kernel-patches/4003-sfp-rollball-phylink-einval-fallback.patch "$KERNEL_PATCHES/"
 # swphy patch: maps 10G/5G/2.5G to SWMII_SPEED_1000 for SDK fixed-link 10G MACs
 cp data/kernel-patches/4004-swphy-support-10g-fixed-link-speed.patch "$KERNEL_PATCHES/"
-# NOTE: 4005-dpaa-eth-fix-soft-lockup-in-probe.patch is NOT used here — it targets
-# the mainline dpaa_eth driver. ASK builds use the SDK sdk_dpaa driver (replaced by
-# patch-dpaa-probe-fix.py which applies the equivalent soft-lockup fix to sdk_dpaa).
+# NOTE: SDK sdk_dpaa soft-lockup fix is applied by patch-dpaa-probe-fix.py (below).
 # xHCI AVOID_BEI + TRUST_TX_LENGTH quirks — REQUIRED for USB live boot on LS1046A DWC3
 # Without this, USB storage dies during init-bottom squashfs mount → boot never completes.
 # NOTE: applied as a Python patcher rather than a unified-diff patch — hand-counted hunk
@@ -293,13 +291,8 @@ fi
 rm -f /tmp/ask-post-defconfig.sh
 
 ### 5. SDK DTS — verify tracked data/dtb/mono-gateway-dk-sdk.dts is present.
-# ask11: the live SDK DTS is committed at data/dtb/mono-gateway-dk-sdk.dts and
-# is the source of truth. Previous versions of this step copied a stale file
-# out of archive/ over it, clobbering the live DTS right before
-# bin/ci-compile-mono-dtb.sh ran — which produced a DTB with
-# `#include "qoriq-dpaa-eth.dtsi"` leaking 6 phantom fsl,dpa-ethernet nodes
-# into /soc/fsl,dpaa and stripping fsl,bpool-ethernet-cfg (ask11 CI run
-# 24886836635). Do NOT touch data/dtb/ here.
+# The live SDK DTS at data/dtb/mono-gateway-dk-sdk.dts is the source of truth.
+# Do NOT overwrite it here — bin/ci-compile-mono-dtb.sh consumes it directly.
 if [ ! -f data/dtb/mono-gateway-dk-sdk.dts ]; then
   echo "ERROR: data/dtb/mono-gateway-dk-sdk.dts missing — repo checkout incomplete?"
   exit 1
