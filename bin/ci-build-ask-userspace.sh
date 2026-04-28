@@ -51,7 +51,10 @@ if [ "$ARCH_NATIVE" = "aarch64" ]; then
   AR="${AR:-ar}"
   RANLIB="${RANLIB:-ranlib}"
   STRIP="${STRIP:-strip}"
-  HOST_TRIPLET=""
+  # Always pass --build/--host even for native arm64 builds so autoconf
+  # doesn't run its own cross-detection (cmm's configure.in fails when
+  # they're absent on ubuntu-24.04-arm). ASK41.
+  HOST_TRIPLET="--host=aarch64-linux-gnu --build=aarch64-linux-gnu"
 else
   CROSS="${CROSS_COMPILE:-aarch64-linux-gnu-}"
   CC="${CC:-${CROSS}gcc}"
