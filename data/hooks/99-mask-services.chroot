@@ -1,11 +1,22 @@
 #!/bin/bash
-# kexec services: NOT masked — mainline 6.6 has QBMan kexec fix
-# (bman_requires_cleanup() / qman_requires_cleanup() detect prior init
-# and clean up BMan/QMan state, allowing kexec to work on DPAA1).
-# kexec enables VyOS managed-params self-healing (hugepages, panic, etc.)
-# via system_option.py without requiring SPI NOR writes or cold reboot.
-# SysV init scripts removed to prevent duplicate systemd unit generation,
-# but the systemd units themselves remain active (not masked).
+# kexec services: SysV init scripts removed to prevent duplicate systemd
+# unit generation. The Debian kexec.service / kexec-load.service systemd
+# units remain installed but inert by default (only fire if `kexec -l` was
+# explicitly issued, which we never do on LS1046A — see vyos-1x-019 patch).
+#
+# WHY kexec is unsafe on this platform:
+#   The LS1046A build ships the NXP SDK DPAA1 staging stack
+#   (drivers/staging/fsl_qbman + drivers/net/ethernet/freescale/sdk_dpaa).
+#   Unlike mainline drivers/soc/fsl/qbman, the SDK driver has no
+#   bman_requires_cleanup() / qman_requires_cleanup() reset path. After a
+#   kexec the second kernel finds BMan/QMan frame queues already
+#   configured in CCSR and qman_init_fq() returns -EIO for the first three
+#   FQs it touches, killing 3 of 5 DPAA Ethernet ports.
+#
+#   data/vyos-1x-019-disable-kexec-on-ls1046a.patch makes
+#   system_option.py downgrade its kexec self-heal to a "save & reboot"
+#   warning when /proc/device-tree/compatible contains 'fsl,ls1046a',
+#   so this is the belt-and-braces removal of the SysV side.
 rm -f /etc/init.d/kexec-load /etc/init.d/kexec
 # ACPI daemon is useless on ARM64/DeviceTree platforms
 ln -sf /dev/null /etc/systemd/system/acpid.service
