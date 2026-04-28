@@ -2011,6 +2011,17 @@ typedef struct t_FmPcdHashTableParams {
     uint8_t                     matchKeySize;               /**< Size of the exact match keys held by the hash buckets */
 
     t_FmPcdCcNextEngineParams   ccNextEngineParamsForMiss;  /**< Parameters for defining the next engine when a key is not matched */
+
+    bool                        agingSupport;               /**< TRUE to enable aging support for all keys of this hash table.
+                                                                 Aging status of a key enables the application to monitor if the
+                                                                 key was accessed for a certain period of time. */
+
+#if (DPAA_VERSION >= 11)
+    bool                        externalHash;               /**< TRUE to allocate the hash bucket array in DDR via USDPAA instead
+                                                                 of the on-chip MURAM. Required when the table size exceeds the
+                                                                 available MURAM. */
+#endif /* (DPAA_VERSION >= 11) */
+
     uint32_t    table_type;     /* ip reassembly table */
     struct {
         uint32_t timeout_val;   //reassembly timeout
@@ -2019,6 +2030,14 @@ typedef struct t_FmPcdHashTableParams {
         uint32_t min_frag_size; //min allowed frag size except last frag
         uint32_t max_sessions;  //max conn reassembly sessions
     };
+
+#if (DPAA_VERSION >= 11)
+    struct {
+        uint8_t                 dataMemId;                  /**< Memory partition ID for the external hash table buckets and contexts. */
+        uint16_t                dataLiodnOffs;              /**< LIODN offset for accessing the external hash table buckets and contexts. */
+        uintptr_t               missMonitorAddr;            /**< User-allocated miss monitor address. */
+    } externalHashParams;
+#endif /* (DPAA_VERSION >= 11) */
 
 } t_FmPcdHashTableParams;
 
