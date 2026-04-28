@@ -123,13 +123,9 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 - **vyos-postinstall is board-gated** — the script checks `/proc/device-tree/compatible` for `fsl,ls1046a` and exits early on non-matching hardware. Safe to include in every ISO.
 - **vyos-postinstall Phase 1 runs on every `install image`** — forced (`force=1`) when `--root` is provided by the installer. On boot service calls (no `--root`), Phase 1 skips if SPI already has correct config. Phase 2 (writing `/boot/vyos.env`) runs on every boot of the installed system to keep it in sync with the running image.
 
-## DPAA1 DPDK PMD (ARCHIVED — see `archive/dpaa-pmd/`)
+## DPAA1 DPDK PMD (REMOVED)
 
-The DPDK DPAA1 PMD infrastructure has been **archived** (2026-04-03) due to RC#31: `dpaa_bus` probe kills all kernel FMan interfaces globally. See `plans/VPP-DPAA-PMD-VS-AFXDP.md` for full analysis.
-
-**Current production path:** AF_XDP via `vyos-1x-010-vpp-platform-bus.patch` (~3.5 Gbps on 10G SFP+).
-
-All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `archive/dpaa-pmd/RESTORE.md`. Future paths: all-DPDK+LCP mode, CDX-assisted DPAA PMD, or upstream DPDK fix to scope `dpaa_bus` init.
+The DPDK DPAA1 PMD path was abandoned on 2026-04-03 (RC#31: `dpaa_bus` probe kills all kernel FMan interfaces globally). See `plans/VPP-DPAA-PMD-VS-AFXDP.md` for full analysis. Production uses AF_XDP via `vyos-1x-010-vpp-platform-bus.patch` (~3.5 Gbps on 10G SFP+). All DPDK/USDPAA infrastructure was deleted from the repo on 2026-04-28 (previously preserved under `archive/dpaa-pmd/`).
 
 ## Workflow-Specific Gotchas
 
@@ -139,7 +135,7 @@ All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `ar
 - **linux-headers stripped:** `rm -rf packages/linux-headers-*` before ISO build to save space on the runner
 - **Secure Boot chain:** MOK.pem/MOK.key for kernel module signing, minisign for ISO signing, `grub-efi-arm64-signed` + `shim-signed` packages included
 - **Trigger model:** Only `self-hosted-build.yml` is dispatchable (`workflow_dispatch` only — no `push`, no `schedule`). `auto-build.yml` has only a `workflow_call:` trigger and is invoked from `self-hosted-build.yml`. ISO builds happen on demand via `gh workflow run "VyOS LS1046A build (self-hosted)"`.
-- **DPDK PMD build archived:** The "Build DPDK + VPP DPAA Plugin" CI step has been removed (RC#31). Infrastructure preserved in `archive/dpaa-pmd/` — see `archive/dpaa-pmd/RESTORE.md` to re-enable.
+- **DPDK PMD build removed:** The "Build DPDK + VPP DPAA Plugin" CI step was removed (RC#31). Historical infrastructure was deleted in 2026-04-28 cleanup. See git history for last archive snapshot.
 - **Boot optimizations:** `acpid.service`, `acpid.socket`, `acpid.path` are masked in the ISO via `99-mask-services.chroot`. `kexec-load.service` and `kexec.service` are NOT masked — mainline 6.6 QBMan kexec fix enables VyOS managed-params self-healing on DPAA1. SysV init scripts (`/etc/init.d/kexec-load`, `/etc/init.d/kexec`) are removed to prevent `systemd-sysv-generator` from creating duplicate units that would bypass systemd. The old `ln -sf /dev/null` in `includes.chroot` approach was broken — live-build dereferences absolute symlinks to paths outside the chroot, producing empty files instead. ACPI masking saves ~2s. `CONFIG_DEBUG_PREEMPT` suppression saves ~20s. Installed system boot time: ~82s to login prompt.
 
 ## Boot Diagnostics (Ignore These)
@@ -196,15 +192,6 @@ All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `ar
 | `plans/NETWORKING-DEEP-DIVE.md` | DPAA1 networking deep-dive: FMan architecture, QBMan, portal allocation, driver split |
 | `plans/FMD-SHIM-SPEC.md` | FMD Shim spec for `/dev/fm0*` chardevs (skeleton implemented, PCD ioctls dormant) |
 | `plans/NEXT-STEPS.md` | Project next steps and prioritized task list |
-| `archive/plans/DPAA1-DPDK-PMD.md` | ARCHIVED: Original NXP SDK PMD build plan (superseded — RC#31) |
-| `archive/plans/MAINLINE-PATCH-SPEC.md` | ARCHIVED: Mainline kernel patch spec for DPDK (superseded) |
-| `archive/plans/USDPAA-IOCTL-SPEC.md` | ARCHIVED: NXP USDPAA ioctl ABI spec (superseded) |
-| `archive/plans/VPP-LINE-RATE-PLAN.md` | ARCHIVED: VPP 10G line-rate plan via DPDK PMD (superseded by ASK) |
-| `archive/plans/VPP-PROGRESS-PLAN.md` | ARCHIVED: VPP development progress tracker (completed milestones) |
-| `archive/plans/ASK-INTEGRATION-PLAN.md` | ARCHIVED: ASK integration plan (superseded by ASK-USERSPACE.md) |
-| `archive/plans/ASK-PORTING-PLAN.md` | ARCHIVED: ASK porting plan (completed) |
-| `archive/plans/ASK-VS-VPP-EFFORT.md` | ARCHIVED: ASK vs VPP effort comparison (decision made — ASK chosen) |
-| `archive/plans/ASK-6.12-VS-6.6-COMPARISON.md` | ARCHIVED: Duplicate of ask-ls1046a-6.6/ version |
 | `data/scripts/fman-port-name` | Script called by udev: reads `/sys/class/net/<iface>/device/of_node` to map FMan MAC DT address → physical port name (eth0-eth4) |
 | `data/scripts/10-fman-port-order.rules` | Udev rule: calls `fman-port-name` on net device add, sets `NAME=` to correct ethN (installed to `/etc/udev/rules.d/`) |
 | `data/scripts/00-fman.link` | Systemd .link file: `NamePolicy=keep` for `dpaa_eth` driver — prevents predictable naming override (installed to `/etc/systemd/network/`) |
@@ -222,7 +209,6 @@ All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `ar
 | `data/kernel-patches/4004-swphy-support-10g-fixed-link-speed.patch` | Kernel patch: `swphy_decode_speed()` maps 10G/5G/2.5G → SWMII_SPEED_1000 so SDK fixed-link 10G MACs probe successfully. Required for SDK kernel only (mainline uses phylink, not swphy). |
 | `data/kernel-patches/fsl_fmd_shim.c` | FMD Shim kernel module source: `/dev/fm0*` chardevs for DPDK fmlib FMan KeyGen RSS (skeleton — GET_API_VERSION only, dormant until ioctls called). Injected into kernel tree by `ci-setup-kernel.sh` |
 | `data/kernel-patches/lp5812/` | TI LP5812 I2C LED controller driver source (`leds-lp5812.c`, `leds-lp5812.h`) — out-of-tree, not in mainline 6.6. Injected into `drivers/leds/lp5812/` by `ci-setup-kernel.sh` |
-| `archive/dpaa-pmd/` | Archived DPDK DPAA1 PMD infrastructure (RC#31) — see `archive/dpaa-pmd/RESTORE.md` |
 | `data/hooks/98-fancontrol.chroot` | Live-build hook: installs fancontrol config for EMC2305 thermal management |
 | `data/hooks/99-mask-services.chroot` | Live-build hook: masks acpid services, removes SysV kexec scripts |
 | `data/scripts/sfp-tx-enable-sdk.sh` | SDK SFP TX_DISABLE deassert: unbinds SFP driver, sets gpiochip2 lines 14/13 (sfp-xfi0/xfi1) HIGH via chardev ioctl to enable TX. Background Python process holds GPIO fd. SDK kernel only — mainline uses phylink SFP state machine |
@@ -235,7 +221,6 @@ All DPDK/USDPAA files moved to `archive/dpaa-pmd/` with restoration guide in `ar
 | `data/kernel-config/ls1046a-ask.config` | Kernel config fragment: disables mainline DPAA, enables SDK DPAA + ASK fast-path + CAAM IPsec offload |
 | `data/kernel-patches/003-ask-kernel-hooks.patch` | ASK fast-path kernel hooks: netfilter, bridge, xfrm, net/core (copied from `ask-ls1046a-6.6/patches/kernel/`) |
 o| `data/kernel-patches/ask-nxp-sdk-sources.tar.gz` | NXP SDK DPAA driver sources (sdk_dpaa, sdk_fman, fsl_qbman — 67 files, 612KB) extracted into kernel tree by `ci-setup-kernel-ask.sh` |
-| `archive/data/dtb/mono-gateway-dk-sdk.dts` | SDK DTS: fixed-link 10G MACs, deleted SFP/managed properties (SDK `fsl_mac` has no phylink) |
 
 ## Commands
 

@@ -33,7 +33,7 @@ sed -i '/CONFIG_CMA/d'                      "$DEFCONFIG"
 sed -i '/CONFIG_DMA_CMA/d'                  "$DEFCONFIG"
 
 # Append all LS1046A kernel config fragments
-# NOTE: ls1046a-usdpaa.config moved to archive/dpaa-pmd/ (DPDK PMD archived)
+# NOTE: DPDK PMD support has been removed (RC#31 — bus-level init kills kernel interfaces)
 # NOTE: ls1046a-sdk.config and ls1046a-ask.config are SDK+ASK only (ci-setup-kernel-sdk.sh)
 for frag in data/kernel-config/ls1046a-*.config; do
   case "$(basename "$frag")" in
