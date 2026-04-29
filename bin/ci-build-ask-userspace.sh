@@ -201,10 +201,19 @@ echo "### Stage 2.6: Building fmc from source"
 FMC_OK=0
 if [ "$FMLIB_OK" = "1" ] && bash "$SCRIPT_DIR/ci-build-fmc.sh" "$STAGING" ; then
   FMC_OK=1
-  # Install the fresh fmc binary into the target chroot
+  # Install the fresh fmc binary into the target chroot.
+  #
+  # IMPORTANT: bin/ci-setup-vyos-build.sh drops the stale pre-built fmc at
+  # $CHROOT/usr/local/bin/fmc (per dpa_app expectations and historical PATH).
+  # We MUST overwrite that exact path here, otherwise /usr/local/bin precedes
+  # /usr/bin on $PATH and dpa_app's popen("fmc ...") keeps invoking the stale
+  # binary — which silently drops the external="yes" / aging="yes" hashtable
+  # attributes and causes FMan MURAM exhaustion (PCD apply rc=65280).
+  # Install to BOTH paths to leave no stale copy behind.
   if [ -f "$STAGING/bin/fmc" ]; then
+    install -m 0755 "$STAGING/bin/fmc" "$CHROOT/usr/local/bin/fmc"
     install -m 0755 "$STAGING/bin/fmc" "$CHROOT/usr/bin/fmc"
-    echo "    installed fresh fmc to $CHROOT/usr/bin/fmc"
+    echo "    installed fresh fmc to $CHROOT/usr/local/bin/fmc and $CHROOT/usr/bin/fmc"
   fi
 else
   echo "    WARNING: fmc source build failed — falling back to pre-built libfmc.a"
@@ -287,6 +296,18 @@ if [ -d "$CMM_SRC" ] && [ -f "$CMM_SRC/configure.in" ]; then
     CMM_CFLAGS="$CMM_CFLAGS -Wno-use-after-free -Wno-unused-label"
     CMM_CFLAGS="$CMM_CFLAGS -I$STAGING/include"
     CMM_CFLAGS="$CMM_CFLAGS -I$ASK_SRC/fci/lib/include"
+    # Disable IPsec/NETLINK_KEY paths in cmm.
+    #
+    # cmm/src/conntrack.c calls fci_open(FCILIB_KEY_TYPE, ...) which translates
+    # to socket(AF_NETLINK, SOCK_RAW, NETLINK_KEY=32). On the LS1046A ASK kernel
+    # NETLINK_KEY is registered by the dpa_ipsec module — but dpa_ipsec is
+    # gated off on Mono Gateway (ask-check reports "[SKIP] dpa_ipsec started").
+    # Without dpa_ipsec, the NETLINK_KEY socket() returns EPROTONOSUPPORT and
+    # cmmCtInit aborts: "fci_open() failed, Protocol not supported", so cmm
+    # crashes at boot and the cmm.service systemd unit flaps. Defining
+    # IPSEC_SUPPORT_DISABLED removes the NETLINK_KEY code paths in conntrack.c
+    # (10 #if guards) and lets cmm initialise normally.
+    CMM_CFLAGS="$CMM_CFLAGS -DIPSEC_SUPPORT_DISABLED"
 
     CMM_LDFLAGS="-L$STAGING/lib"
     CMM_PKG="$STAGING/share/pkgconfig"
