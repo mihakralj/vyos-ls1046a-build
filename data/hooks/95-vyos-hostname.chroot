@@ -20,9 +20,15 @@
 #    /etc/shadow entry keeps its package-default hash → vyos/vyos rejected.
 #
 #    Hardcoding the yescrypt hash for "vyos" directly into /etc/shadow here
-#    guarantees vyos/vyos works from the very first login prompt, even if
-#    vyos-router hasn't finished committing. The subsequent VyOS commit
-#    will overwrite with the identical hash — no conflict.
+#    guarantees vyos/vyos works from the very first login prompt as a
+#    rescue credential, even if vyos-router hasn't finished committing.
+#
+#    NOTE: the active default config (now config.boot.dhcp, see
+#    bin/ci-setup-vyos-build.sh) carries a different SHA-512 password hash
+#    that is NOT for "vyos". After vyos-router's first commit completes,
+#    /etc/shadow will be overwritten with that hash, so the operator-chosen
+#    password from config.boot.dhcp takes over. The vyos/vyos hardcoded
+#    here is a transient rescue window only — typically a few seconds.
 #
 #    Hash generated with:
 #      python3 -c "import crypt; print(crypt.crypt('vyos', crypt.mksalt(crypt.METHOD_YESCRYPT)))"

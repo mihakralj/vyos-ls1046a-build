@@ -9,15 +9,26 @@ CHROOT=vyos-build/data/live-build-config/includes.chroot
 HOOKS=vyos-build/data/live-build-config/hooks/live
 
 ### vyos-build patches
-# config.boot.default = lean live-boot config (eth0 DHCP + SSH + console)
-#   Applied by vyos-router on first boot when /config/config.boot is absent.
-#   Keep minimal — heavy configs (DHCP on 5 ifaces, flowtable, firewall groups,
-#   DNS recursor, HTTPS API) hang `vyos-router configure` at live-boot stage.
-# config.boot.full = rich reference config (routing/firewall/NAT/DNS/API).
-#   Shipped alongside for manual `load` after login or post-install use.
-cp data/config.boot.default "$CHROOT/opt/vyatta/etc/"
-cp data/config.boot.dhcp    "$CHROOT/opt/vyatta/etc/"
-cp data/config.boot.full    "$CHROOT/opt/vyatta/etc/"
+# Default config selection:
+#   The active default config that vyos-router applies on first boot when
+#   /config/config.boot is absent is the one shipped at
+#       /opt/vyatta/etc/config.boot.default
+#   The legacy install tool (`install image`) also copies this file to
+#       /config/config.boot
+#   on the target disk after install, so the same content is the default
+#   for live/USB/TFTP boot AND for the installed system on first boot.
+#
+#   We ship `config.boot.dhcp` (DHCP on all 5 LS1046A ports, SSH, NTP,
+#   syslog, watchdog, update-check) as that active default by copying it
+#   into the chroot under the canonical name `config.boot.default`.
+#   The other two variants are kept alongside under their original names
+#   for reference / `load` after login.
+#     config.boot.default = lean reference (eth0 DHCP + SSH + console)
+#     config.boot.full    = rich reference (routing/firewall/NAT/DNS/API)
+cp data/config.boot.dhcp    "$CHROOT/opt/vyatta/etc/config.boot.default"
+cp data/config.boot.default "$CHROOT/opt/vyatta/etc/config.boot.minimal"
+cp data/config.boot.dhcp    "$CHROOT/opt/vyatta/etc/config.boot.dhcp"
+cp data/config.boot.full    "$CHROOT/opt/vyatta/etc/config.boot.full"
 patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-005-add_vim_link.patch
 patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-007-no_sbsign.patch
 
