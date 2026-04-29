@@ -3,7 +3,7 @@ system {
     login {
         user vyos {
             authentication {
-                encrypted-password "$6$rounds=656000$Uh9Fx/JsPWFTpfIO$DPQOFL8ThwtckZOrIEbGMwj6WNZnxV3ZfS/UuxuONg0oMpEDR350YkkYOdjcZWpsB9K1XHrOmBFtI34usaqvs."
+                encrypted-password "$6$rounds=656000$ypOI6W4mMxT1AEUs$dwrNWa2uPRkwNnFWdsQg9Lr0zRBujQisD6zmS0rAAH2qSjoCbvi84uEGdMLC5H6W60kQSeZu2KhFmguvYK7HJ0"
             }
         }
     }
@@ -60,11 +60,27 @@ system {
 }
 
 interfaces {
+    loopback lo {
+    }
     ethernet eth0 {
         address dhcp
-        description "MGMT (leftmost RJ45)"
+        description "MGMT (left RJ45)"
     }
-    loopback lo {
+    ethernet eth1 {
+        address dhcp
+        description "MGMT (center RJ45)"
+    }
+    ethernet eth2 {
+        address dhcp
+        description "MGMT (right RJ45)"
+    }
+    ethernet eth3 {
+        address dhcp
+        description "MGMT (left SFP+)"
+    }
+    ethernet eth4 {
+        address dhcp
+        description "MGMT (right SFP+)"
     }
 }
 
