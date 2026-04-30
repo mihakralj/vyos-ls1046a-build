@@ -45,6 +45,11 @@ modprobe bridge               2>/dev/null || true
 modprobe nf_conntrack         2>/dev/null || true
 modprobe nf_conntrack_netlink 2>/dev/null || true
 modprobe xt_conntrack         2>/dev/null || true
+# af_key (CONFIG_NET_KEY=m) carries the NETLINK_KEY=32 socket registration
+# that the ASK kernel uses for IPsec offload (kernel-6.6.135-ask48+).
+# cmm.service opens NETLINK_KEY in fci_open(FCILIB_KEY_TYPE,…) — without
+# this modprobe the socket() call returns EPROTONOSUPPORT and cmm fails.
+modprobe af_key               2>/dev/null || true
 
 load_required() {
     local mod="$1"
