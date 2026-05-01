@@ -61,10 +61,55 @@ else
   chage -d 1970-01-01 vyos 2>/dev/null || true
 fi
 
-# Same treatment for root. vyos-configd shells out via sudo for tuned-adm,
-# systemctl, etc. PAM's account stack rejects sudo when /etc/shadow's
-# lastchg for root > today. With LS1046A's stale RTC this kills the first
-# `commit` in vyos-router and surfaces as "Configuration error" at T+110s.
-# Pin lastchg to epoch so the comparison can never go negative.
-chage -d 1970-01-01 root 2>/dev/null || true
-passwd -u root 2>/dev/null || true
+# IMPORTANT: do NOT touch root with `passwd -u` here. Debian's live-build chroot
+# leaves root locked (`!` in /etc/shadow). `passwd -u root` on an account whose
+# only shadow entry is `!` produces an empty password (`root::...`), which
+# breaks PAM in subtle ways:
+#   * vyos-router's first `commit` reports "Configuration error" (system_login
+#     does not expect an empty-password root) and aborts the rest of the
+#     dependency graph -> sshd is never configured -> port 22 refused.
+#   * Several VyOS Python helpers rely on `subprocess.run(['sudo', '-n', ...])`
+#     working under PAM session+auth stacks that probe root's shadow.
+# Instead, address root's lastchg via a runtime clock-forward helper that
+# advances the system clock past the squashfs build epoch BEFORE PAM evaluates
+# the account stack on the first vyos-router commit, so a future-dated root
+# lastchg can never trigger pam_unix(account) "password changed in future".
+
+# --- Install /usr/local/bin/clock-forward ---
+# Reads its own mtime (set during build to the squashfs build epoch) and,
+# if the running system clock is earlier, fast-forwards `date` to that epoch.
+# Idempotent. Requires no network. Runs once before vyos-router commits.
+cat > /usr/local/bin/clock-forward <<'EOF'
+#!/bin/sh
+# Advance system clock to at least the squashfs build epoch when the RTC is
+# stale (LS1046A has no battery-backed RTC). PAM's pam_unix(account) module
+# uses this clock to compare against /etc/shadow's lastchg field; without
+# this advance, a future-dated lastchg (set to today's date when the squashfs
+# was built) is rejected as "password changed in future" and every sudo from
+# vyos-configd fails -> first commit hits "Configuration error".
+# Self-anchors via the script's own mtime (preserved through squashfs build).
+build_epoch=$(stat -c %Y "$0" 2>/dev/null || echo 0)
+now_epoch=$(date +%s 2>/dev/null || echo 0)
+if [ "$now_epoch" -lt "$build_epoch" ] 2>/dev/null; then
+    date -s "@$build_epoch" >/dev/null 2>&1 || true
+fi
+exit 0
+EOF
+chmod 0755 /usr/local/bin/clock-forward
+
+# --- Install vyos-router.service drop-in to call clock-forward first ---
+# ExecStartPre runs before the unit's main ExecStart (the vyos-router
+# `commit`). systemd merges drop-ins from .service.d/ at unit-load time.
+mkdir -p /etc/systemd/system/vyos-router.service.d
+cat > /etc/systemd/system/vyos-router.service.d/10-clock-forward.conf <<'EOF'
+[Service]
+# Advance the clock past the squashfs build epoch before vyos-router runs
+# its first `commit` (which exec's many sudo'd helpers). Without this, on
+# devices with a stale RTC, PAM rejects every sudo with "password changed
+# in future" and the commit fails. See 95-vyos-hostname.chroot.
+ExecStartPre=-/usr/local/bin/clock-forward
+EOF
+
+# Force the script's mtime to the build epoch (now). The squashfs preserves
+# mtime, so at first boot the script can recover its own build timestamp.
+touch /usr/local/bin/clock-forward
