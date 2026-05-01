@@ -41,11 +41,6 @@ system {
         server time.google.com {
         }
     }
-    console {
-        device ttyS0 {
-            speed 115200
-        }
-    }
     config-management {
         commit-revisions 100
     }
