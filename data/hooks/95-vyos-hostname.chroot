@@ -138,4 +138,3 @@ cat > /etc/systemd/system/vyos-router.service.d/20-silence-console.conf <<'EOF'
 StandardOutput=journal
 StandardError=journal
 EOF
-</content>
