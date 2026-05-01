@@ -44,11 +44,27 @@ if getent passwd vyos >/dev/null 2>&1; then
   # User exists — rewrite shadow entry. Use chpasswd -e (encrypted input).
   echo "vyos:${VYOS_HASH}" | chpasswd -e
   # Clear any password expiry / aging that might force a change on first login.
-  chage -M 99999 -m 0 -W 7 -I -1 -E -1 vyos 2>/dev/null || true
+  # IMPORTANT: -d 1970-01-01 sets lastchg to epoch (day 0). LS1046A has no
+  # battery-backed RTC, so on cold boot the kernel time is whatever the U-Boot
+  # last left it (often years stale). PAM's pam_unix(account) rejects sudo
+  # when /etc/shadow lastchg > today's date — and the squashfs build date
+  # IS in the future relative to a stale RTC. That kills every sudo from
+  # vyos-configd and produces "Configuration error" on first commit.
+  # Pinning lastchg to the epoch makes the test always-in-the-past.
+  chage -d 1970-01-01 -M 99999 -m 0 -W 7 -I -1 -E -1 vyos 2>/dev/null || true
   # Make sure account is unlocked.
   passwd -u vyos 2>/dev/null || true
 else
   # User doesn't exist yet — create it. vyos-1x postinst normally handles
   # this, but in case live-build hook ordering changes, be defensive.
   useradd -m -s /bin/vbash -G sudo,adm,frrvty,vyattacfg,dip -p "${VYOS_HASH}" vyos
+  chage -d 1970-01-01 vyos 2>/dev/null || true
 fi
+
+# Same treatment for root. vyos-configd shells out via sudo for tuned-adm,
+# systemctl, etc. PAM's account stack rejects sudo when /etc/shadow's
+# lastchg for root > today. With LS1046A's stale RTC this kills the first
+# `commit` in vyos-router and surfaces as "Configuration error" at T+110s.
+# Pin lastchg to epoch so the comparison can never go negative.
+chage -d 1970-01-01 root 2>/dev/null || true
+passwd -u root 2>/dev/null || true
