@@ -113,3 +113,29 @@ EOF
 # Force the script's mtime to the build epoch (now). The squashfs preserves
 # mtime, so at first boot the script can recover its own build timestamp.
 touch /usr/local/bin/clock-forward
+
+# --- Silence vyos-router console echo on ttyS0 (cosmetic serial-console fix) ---
+# Upstream vyos-router.service ships `StandardOutput=journal+console`, which
+# duplicates every status line ("Starting VyOS router.", "Mounting VyOS Config
+# ...done.", "migrate activate configure.", "Configuration success" — plus
+# everything emitted by Python helpers under the commit) onto /dev/console
+# (= ttyS0 on LS1046A). Because the unit takes ~60 s to finish, this output
+# stream continues firing AFTER agetty has already opened ttyS0 for the
+# `vyos login:` prompt, racing the user's keystrokes — chars echo at the
+# UART but never reach agetty as a complete line, producing the "console
+# wedged" symptom on serial. SSH is unaffected.
+#
+# Override to `StandardOutput=journal` only. Boot diagnostics remain fully
+# captured (visible via `journalctl -b -u vyos-router.service`); kernel
+# printk continues to use ttyS0 (`console=ttyS0,115200` on the cmdline) so
+# early boot is still observable. The only thing we lose is duplicated
+# userspace status lines on the serial console once agetty is up.
+cat > /etc/systemd/system/vyos-router.service.d/20-silence-console.conf <<'EOF'
+[Service]
+# Drop "+console" from upstream's StandardOutput=journal+console.
+# Keystrokes on ttyS0 are no longer eaten by interleaving status prints;
+# `journalctl -b -u vyos-router.service` still has the full trace.
+StandardOutput=journal
+StandardError=journal
+EOF
+</content>
