@@ -65,7 +65,21 @@ else
   HOST_TRIPLET="--host=aarch64-linux-gnu --build=$(uname -m)-linux-gnu"
 fi
 
-COMMON_CFLAGS="-O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong -DLS1043"
+# DPAA_VERSION=11 is REQUIRED for dpa_app (and any other consumer that
+# includes <fm_pcd_ext.h>). Without it, t_FmPcdHashTableParams omits
+# the externalHash / externalHashParams fields, so dpa_app silently
+# constructs the struct without them — even though libfm.a (built with
+# DPAA_VERSION=11) and libfmc.a both expect them. The result is that
+# external="yes" / aging="yes" attributes in /etc/cdx_pcd.xml are parsed
+# and emitted by fmc but lost across the dpa_app→fmlib boundary, hash
+# buckets fall back to on-chip MURAM (384 KiB), MURAM is exhausted, and
+# the kernel logs:
+#   fm_cc.c:4830 MatchTableSet Memory Allocation Failed
+#   fm_cc.c:7743 FM_PCD_HashTableSet Unexpected NULL Pointer
+#   dpa_app applied PCD configuration (failed rc=65280)
+# fmlib's Makefile already pins DPAA_VERSION=11 via ci-build-fmlib.sh;
+# fmc via ci-build-fmc.sh. dpa_app inherits this from COMMON_CFLAGS.
+COMMON_CFLAGS="-O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong -DLS1043 -DDPAA_VERSION=11"
 NPROC=$(nproc 2>/dev/null || echo 2)
 
 echo "=== ASK Userspace Build ==="
