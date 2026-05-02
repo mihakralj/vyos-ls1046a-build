@@ -92,6 +92,13 @@ cp data/dtb/mono-gw.dtb "$CHROOT/boot/mono-gw.dtb"
 ### U-Boot tools: fw_setenv config for updating boot env from Linux
 cp data/scripts/fw_env.config "$CHROOT/etc/fw_env.config"
 
+### LS1046A independent serial console (ls1046a-console.service)
+# Bypasses VyOS's system_console.py policy on serial-getty@ttyS0.service so
+# the login prompt on /dev/ttyS0 stays alive even when the seed config has
+# no `system { console { ... } }` stanza (commit 1876cff1). Enabled in
+# 96-enable-services.chroot.
+cp data/systemd/ls1046a-console.service "$CHROOT/etc/systemd/system/ls1046a-console.service"
+
 ### sysctl drop-in: quiet the kernel console AFTER userspace is up.
 ### Keeps early boot verbose (kernel cmdline has no loglevel=) but silences
 ### the NXP SDK fsl_dpa pr_err spam at T+62-64s that otherwise buries
