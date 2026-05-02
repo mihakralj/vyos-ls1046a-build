@@ -88,8 +88,22 @@ fi
 echo "--- building libfm-arm.a (aarch64) ---"
 cd "$WORK/fmlib"
 set +e
+# IMPORTANT: pass -DDPAA_VERSION=11 in addition to upstream's -DLS1043.
+# fmlib's include/Peripherals/fm_pcd_ext.h gates the externalHash /
+# externalHashParams fields of t_FmPcdHashTableParams on
+# `#if (DPAA_VERSION >= 11)`. The kernel SDK driver for LS1046A
+# (drivers/net/ethernet/freescale/sdk_fman) builds with DPAA_VERSION=11
+# (set in inc/integrations/LS1043/dpaa_integration_ext.h:46 and ls1043_dflags.h),
+# so the kernel struct contains those fields. Without -DDPAA_VERSION=11
+# in userspace, libfm.a's struct layout omits them and dpa_app's
+# FM_PCD_HashTableSet IOCTL passes a struct that the kernel reads as
+# externalHash=false → the bucket array stays in MURAM → MURAM exhausts
+# at the 9th-10th classification → dpa_app rc=65280 / BMan fragment pool
+# fails (cascade). EXTRA_CFLAGS uses += in fmlib's Makefile, so we must
+# preserve the -DLS1043 the Makefile already adds when MACHINE=ls1046.
 make libfm-arm.a \
   CROSS_COMPILE="$CROSS" \
+  EXTRA_CFLAGS="-DLS1043 -DDPAA_VERSION=11" \
   KERNEL_SRC="$KSRC" 2>&1 | tee /tmp/fmlib-build.log | tail -40
 MAKE_RC=${PIPESTATUS[0]}
 set -e
