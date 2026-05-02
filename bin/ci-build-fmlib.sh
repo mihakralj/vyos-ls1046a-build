@@ -99,11 +99,20 @@ set +e
 # FM_PCD_HashTableSet IOCTL passes a struct that the kernel reads as
 # externalHash=false → the bucket array stays in MURAM → MURAM exhausts
 # at the 9th-10th classification → dpa_app rc=65280 / BMan fragment pool
-# fails (cascade). EXTRA_CFLAGS uses += in fmlib's Makefile, so we must
-# preserve the -DLS1043 the Makefile already adds when MACHINE=ls1046.
+# fails (cascade).
+#
+# fmlib's Makefile defines `EXTRA_CFLAGS=-DNCSW_LINUX -fPIC -shared` with `=`
+# (not `?=`), so a command-line override REPLACES it (make treats command-line
+# vars as immutable). The target-specific `+=` rule for libfm-arm.o then
+# fails to add -DLS1043 because target-specific overrides don't append to
+# command-line overrides — the result is that NCSW_LINUX is silently dropped,
+# which causes types_ext.h to fall through to the `__GNUC__` branch and
+# `#include "types_bb_gcc.h"` (a non-existent header), breaking the build.
+# We must therefore re-state ALL three flags (NCSW_LINUX, fPIC, shared) plus
+# our additions (LS1043, DPAA_VERSION=11) in the override.
 make libfm-arm.a \
   CROSS_COMPILE="$CROSS" \
-  EXTRA_CFLAGS="-DLS1043 -DDPAA_VERSION=11" \
+  EXTRA_CFLAGS="-DNCSW_LINUX -fPIC -shared -DLS1043 -DDPAA_VERSION=11" \
   KERNEL_SRC="$KSRC" 2>&1 | tee /tmp/fmlib-build.log | tail -40
 MAKE_RC=${PIPESTATUS[0]}
 set -e
