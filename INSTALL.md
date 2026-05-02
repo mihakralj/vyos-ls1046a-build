@@ -233,6 +233,53 @@ This is the same configuration that `vyos-postinstall` writes automatically — 
 
 ---
 
+## SSH Access — Vanity Key
+
+The default `vyos` user in the shipped images (`config.boot.default`, `config.boot.dhcp`, `config.boot.full`) is preconfigured with a vanity Ed25519 public key:
+
+```
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBTFXhL3cM7V4TqClTrl2AEI80Jcv6Fuyimm++VyOS++ vanityssh
+```
+
+Fingerprint: `SHA256:+8PobIf9Dm2l6mlBOy9LViwmwXa2ir/XWU7sng3CHEM`
+
+The matching private key is below. Save it as `~/.ssh/id_vyos_vanity` (mode `0600`) and connect with:
+
+```
+ssh -i ~/.ssh/id_vyos_vanity vyos@<device-ip>
+```
+
+```
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACAUxV4S93DO1eE6gpU65dgBCPNCXL+hbsoppvvlcjkvvgAAAJC7gMgMu4DI
+DAAAAAtzc2gtZWQyNTUxOQAAACAUxV4S93DO1eE6gpU65dgBCPNCXL+hbsoppvvlcjkvvg
+AAAEBMf+734op8SvJgkY7PInZe8G0I86j1g6qVwN1q5W/rUhTFXhL3cM7V4TqClTrl2AEI
+80Jcv6Fuyimm++VyOS++AAAACXZhbml0eXNzaAECAwQ=
+-----END OPENSSH PRIVATE KEY-----
+```
+
+Quick install on a Linux/macOS workstation:
+
+```bash
+umask 077
+cat > ~/.ssh/id_vyos_vanity <<'EOF'
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACAUxV4S93DO1eE6gpU65dgBCPNCXL+hbsoppvvlcjkvvgAAAJC7gMgMu4DI
+DAAAAAtzc2gtZWQyNTUxOQAAACAUxV4S93DO1eE6gpU65dgBCPNCXL+hbsoppvvlcjkvvg
+AAAEBMf+734op8SvJgkY7PInZe8G0I86j1g6qVwN1q5W/rUhTFXhL3cM7V4TqClTrl2AEI
+80Jcv6Fuyimm++VyOS++AAAACXZhbml0eXNzaAECAwQ=
+-----END OPENSSH PRIVATE KEY-----
+EOF
+chmod 600 ~/.ssh/id_vyos_vanity
+ssh-keygen -y -f ~/.ssh/id_vyos_vanity > ~/.ssh/id_vyos_vanity.pub
+```
+
+> **Note:** This key is shipped openly with the image as a convenience credential for first-boot and recovery access. Treat any device exposed to an untrusted network as compromised until you replace this key with your own and remove the vanity entry from `system login user vyos authentication public-keys`.
+
+---
+
 ## See Also
 
 - **[FIRMWARE.md](FIRMWARE.md)** — Board firmware update (NOR + eMMC flash procedure, partition offset details, recovery)
