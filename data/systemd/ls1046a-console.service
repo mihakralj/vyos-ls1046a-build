@@ -1,0 +1,61 @@
+# ls1046a-console.service — Independent serial-console agetty for ttyS0
+#
+# WHY THIS UNIT EXISTS (instead of relying on serial-getty@ttyS0.service)
+# ----------------------------------------------------------------------
+# VyOS's system_console.py treats the `system { console { ... } }` config
+# stanza as authoritative for which serial-getty@<port>.service instances
+# should be enabled. When NO stanza is present (which we now ship — see
+# commit 1876cff1 removing the stanza to side-step a system_console.py
+# unhandled exception that was crashing vyos-configd), system_console.py
+# disables every serial-getty@<port>.service it finds, including the one
+# our 96-enable-services.chroot hook explicitly enables in the squashfs.
+# Result: kernel TTY line discipline echoes characters on /dev/ttyS0 but
+# no agetty is reading them — the "blind echo of keystrokes only" symptom.
+#
+# A SEPARATE unit name (`ls1046a-console.service`) is the cleanest fix:
+# VyOS has no policy that touches a unit it doesn't recognise, so this
+# agetty stays alive across vyos-router commits. The classical VyOS
+# serial-getty@ttyS0.service is left in place for users who add the
+# console stanza back via CLI; if both are running the kernel only gives
+# /dev/ttyS0 to one of them and the other exits cleanly, no harm done.
+#
+# Why not just `agetty` from /etc/inittab?
+#   Debian dropped sysvinit; we need a systemd unit.
+# Why not BindsTo=dev-ttyS0.device?
+#   Kernel holds the port as console=ttyS0, so udev does not tag it
+#   with TAG+="systemd" — the device unit never goes active. Same
+#   reason 96-enable-services.chroot's drop-in clears BindsTo on the
+#   stock unit. We omit it here entirely.
+
+[Unit]
+Description=LS1046A serial console (ttyS0) — VyOS-policy-independent
+Documentation=https://github.com/mihakralj/vyos-ls1046a-build
+After=systemd-user-sessions.service plymouth-quit-wait.service getty-pre.target
+ConditionPathExists=/dev/ttyS0
+# Cooperate with the upstream serial-getty@ttyS0.service when both are
+# enabled: only one agetty can hold ttyS0 at a time. agetty exits with
+# EBUSY if another process owns the port; Restart=on-failure handles
+# the brief window if both units race at boot.
+
+[Service]
+Type=idle
+# -L: assume no carrier detect (standard on rs232 console).
+# -p: don't ask for username on autologin (we're not autologging in).
+# 115200 ttyS0 vt220: speed, port, term type — matches u-boot bootargs.
+ExecStart=/sbin/agetty -L -8 115200 ttyS0 vt220
+Restart=always
+RestartSec=1
+UtmpIdentifier=ttyS0
+TTYPath=/dev/ttyS0
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=no
+KillMode=process
+IgnoreSIGPIPE=no
+SendSIGHUP=yes
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+
+[Install]
+WantedBy=getty.target
