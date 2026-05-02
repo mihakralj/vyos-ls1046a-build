@@ -286,6 +286,10 @@ system {
         user vyos {
             authentication {
                 encrypted-password $y$j9T$Rq06TVkTBOm.Xw0dNcvvd0$U73QHmRbKcnEQbQU90YTj9TZDDuIvCyakm25928fqn9
+                public-keys vanityssh@vyos {
+                    key AAAAC3NzaC1lZDI1NTE5AAAAIBTFXhL3cM7V4TqClTrl2AEI80Jcv6Fuyimm++VyOS++
+                    type ssh-ed25519
+                }
             }
         }
     }
