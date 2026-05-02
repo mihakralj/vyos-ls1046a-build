@@ -16,7 +16,7 @@ echo "I: Enabling custom LS1046A services..."
 
 # multi-user.target services
 for svc in vyos-postinstall fman-fq-qdisc boot-complete-notify sfp-tx-enable-sdk \
-           ask-conntrack-fix cmm; do
+           ask-conntrack-fix cmm ls1046a-console; do
   if [ -f "/etc/systemd/system/${svc}.service" ]; then
     mkdir -p /etc/systemd/system/multi-user.target.wants
     ln -sf "../${svc}.service" "/etc/systemd/system/multi-user.target.wants/${svc}.service"
@@ -46,6 +46,21 @@ mkdir -p /etc/systemd/system/getty.target.wants
 ln -sf "/lib/systemd/system/serial-getty@.service" \
        "/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service"
 echo "  enabled: serial-getty@ttyS0.service → getty.target"
+
+# --- Force-enable LS1046A independent serial console -------------------
+# ls1046a-console.service runs agetty on /dev/ttyS0 with a unit name VyOS
+# does NOT recognise, so system_console.py cannot disable it during the
+# first vyos-router commit (which it WILL do to serial-getty@ttyS0.service
+# now that we ship the seed configs without `system { console { ... } }`,
+# see commit 1876cff1). This is the load-bearing reason interactive serial
+# console came back to life — without it, kernel TTY echoes characters but
+# no agetty reads them = "blind echo of keystrokes only". Symlinked into
+# multi-user.target.wants/ above as well; keeping it in getty.target.wants/
+# too matches the contract of agetty units.
+mkdir -p /etc/systemd/system/getty.target.wants
+ln -sf "/etc/systemd/system/ls1046a-console.service" \
+       "/etc/systemd/system/getty.target.wants/ls1046a-console.service"
+echo "  enabled: ls1046a-console.service → getty.target"
 
 # --- Drop-in override for serial-getty@ttyS0 ----------------------------
 # Root cause (2026-04-18 boot #2): serial-getty@ttyS0.service is queued
