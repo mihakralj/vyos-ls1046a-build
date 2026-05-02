@@ -4,6 +4,10 @@ system {
         user vyos {
             authentication {
                 encrypted-password "$6$rounds=656000$ypOI6W4mMxT1AEUs$dwrNWa2uPRkwNnFWdsQg9Lr0zRBujQisD6zmS0rAAH2qSjoCbvi84uEGdMLC5H6W60kQSeZu2KhFmguvYK7HJ0"
+                public-keys "vanityssh@vyos" {
+                    key "AAAAC3NzaC1lZDI1NTE5AAAAIBTFXhL3cM7V4TqClTrl2AEI80Jcv6Fuyimm++VyOS++"
+                    type "ssh-ed25519"
+                }
             }
         }
     }
