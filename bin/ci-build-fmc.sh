@@ -95,9 +95,23 @@ cd "$WORK/fmc/source"
 # vars as immutable). CPPFLAGS is NOT referenced by this Makefile's CFLAGS
 # block so it is appended by the implicit compile rule only — use it to add
 # -fpermissive (libxml2 API signature changed; fmc targets older API).
+# IMPORTANT: override PLATFORM_FLAG to add -DDPAA_VERSION=11 alongside
+# the -DLS1043 the upstream Makefile sets for MACHINE=ls1046. Without it,
+# the userspace fm_pcd_ext.h's `#if (DPAA_VERSION >= 11)` guards drop the
+# externalHash / externalHashParams fields from t_FmPcdHashTableParams,
+# AND the fmc patch's emit-`externalHash` block is preprocessed away. The
+# kernel SDK driver for LS1046A defines DPAA_VERSION=11, so this aligns
+# userspace with kernel. Without this fix, fmc parses external="yes" from
+# cdx_pcd.xml, sets node.external in memory, but never emits
+# `htnode[].externalHash = 1` to dpa_app's binary config object — so the
+# kernel allocates the bucket array in 384 KiB MURAM and exhausts it at
+# the 9th-10th classification (rc=65280, MURAM allocation failures, BMan
+# fragment buffer pool fails to be created — Chain-2 PCD/MURAM cluster).
+# Must also be passed to ci-build-fmlib.sh — see EXTRA_CFLAGS there.
 make libfmc.a fmc \
   CC="$CC" CXX="$CXX" AR="$AR" \
   MACHINE=ls1046 \
+  PLATFORM_FLAG="-DLS1043 -DDPAA_VERSION=11" \
   FMD_USPACE_HEADER_PATH="$STAGING/include/fmd" \
   FMD_USPACE_LIB_PATH="$STAGING/lib" \
   LIBXML2_HEADER_PATH="$LIBXML2_INC" \
