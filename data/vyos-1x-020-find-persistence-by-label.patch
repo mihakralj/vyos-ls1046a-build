@@ -1,13 +1,17 @@
 --- a/python/vyos/system/disk.py
 +++ b/python/vyos/system/disk.py
-@@ -16,5 +16,6 @@
+@@ -15,7 +15,7 @@
+ 
  from json import loads as json_loads
  from os import sync
-+from os.path import realpath as _realpath
+-from os.path import basename as _basename
++from os.path import basename as _basename, realpath as _realpath
  from dataclasses import dataclass
  from time import sleep
  
-@@ -49,13 +50,37 @@
+@@ -65,17 +65,42 @@
+ 
+ 
  def find_persistence() -> str:
 -    """Find a mountpoint for persistence storage
 +    """Find the mountpoint for persistence storage.
@@ -47,4 +51,7 @@
 +
      return ''
  
++
  def parttable_create(drive_path: str, root_size: int) -> None:
+     """Create a hybrid MBR/GPT partition table
+     0-2047 first sectors are free
