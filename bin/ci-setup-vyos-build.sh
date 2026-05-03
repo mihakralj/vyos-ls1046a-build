@@ -80,6 +80,35 @@ if [ -f data/mok/MOK.key ]; then
   cp data/mok/MOK.pem vyos-build/data/certificates/vyos-dev-2025-linux.pem
 fi
 
+### Apt preferences pin: block upstream linux-image-*-vyos.
+#
+# When VyOS upstream rebuilds vyos-1x against a newer kernel ABI than
+# the one we vendor (e.g. 6.6.137 vs our 6.6.135), apt's resolver will
+# pull `linux-image-<NEWER>-vyos` from packages.vyos.net to satisfy
+# vyos-1x's dependency, AND keep our locally-staged
+# `linux-image-6.6.135-vyos` from packages.chroot/. Two kernels in
+# the chroot make `live-build`'s `17-gen_initramfs.chroot` hook abort
+# with `E: there is more than one kernel image file installed!` and
+# the build dies.
+#
+# Block any linux-image-*-vyos / linux-headers-*-vyos coming from
+# `packages.vyos.net` so the ONLY candidate apt sees is the local
+# .deb staged in packages.chroot/. vyos-1x's dependency on the kernel
+# ABI then resolves against our 6.6.135 deb, single-kernel chroot,
+# initramfs hook succeeds.
+#
+# This survives apt updates because Pin-Priority -1 means NotInstall
+# regardless of version. The local `file:` repo (which holds the
+# packages.chroot/ contents during live-build) is unaffected.
+mkdir -p vyos-build/data/live-build-config/archives
+cat > vyos-build/data/live-build-config/archives/00-pin-ask-kernel.pref.chroot <<'PREF'
+Package: linux-image-*-vyos linux-headers-*-vyos
+Pin: origin packages.vyos.net
+Pin-Priority: -1
+PREF
+echo "### Pinned upstream linux-image-*-vyos from packages.vyos.net to NotInstall:"
+cat vyos-build/data/live-build-config/archives/00-pin-ask-kernel.pref.chroot
+
 ### Minisign public key + DTB for ISO
 cp data/vyos-ls1046a.minisign.pub vyos-build/data/live-build-config/includes.chroot/usr/share/vyos/keys/
 mkdir -p vyos-build/data/live-build-config/includes.binary
