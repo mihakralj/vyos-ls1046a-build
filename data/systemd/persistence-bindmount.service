@@ -1,0 +1,61 @@
+[Unit]
+# persistence-bindmount.service — LS1046A
+#
+# Bind-mount /usr/lib/live/mount/medium → /usr/lib/live/mount/persistence (rw)
+# at very early boot, BEFORE local-fs.target completes.
+#
+# Why we need this:
+#   VyOS upstream `vyos.system.disk.find_persistence()` only matches
+#   mountpoints whose path ends in '/persistence'. On LS1046A the
+#   live-boot stack mounts the persistence partition (LABEL=persistence,
+#   /dev/mmcblk0p3) at /usr/lib/live/mount/medium and *never* at
+#   /usr/lib/live/mount/persistence. So upstream callers get '' from
+#   find_persistence() and concatenate that with absolute paths
+#   producing '//boot/grub/grub.cfg', which fails with FileNotFoundError.
+#   This breaks at minimum:
+#     - vyos-grub-update.service at every boot
+#     - `add system image` at the final grub default-bump step
+#
+# Patch data/vyos-1x-020-find-persistence-by-label.patch fixes the python
+# layer, but the *running* image during an `add system image` is whatever
+# is currently installed (often an older / unpatched VyOS image). Shipping
+# THIS service baked into the new ISO guarantees the workaround mountpoint
+# exists from the very first boot, so unpatched callers — including the
+# previously-installed VyOS that runs the next `add system image` — find
+# the persistence partition correctly via the upstream code path.
+#
+# Why a bind mount instead of a second device-level mount?
+#   /dev/mmcblk0p3 is already mounted at /usr/lib/live/mount/medium by
+#   live-boot's initramfs scripts. A second device-level mount would race
+#   with live-boot's bookkeeping. A bind mount of an already-mounted
+#   directory is fully supported by the kernel and is identical in spirit
+#   to the upstream `/persistence` convention.
+#
+# Why two ExecStart lines?
+#   `mount --bind` inherits ro from the source. `add system image` and
+#   `vyos-grub-update.service` need to write boot/grub/, so we explicitly
+#   `mount -o remount,rw` after the bind. Both calls are idempotent (the
+#   ConditionPathIsMountPoint= guard prevents double-binding).
+#
+# Apply order:
+#   sysinit.target.wants/ — runs before local-fs.target, before
+#   vyos-router.service, before vyos-grub-update.service.
+Description=Bind-mount live-boot medium as persistence (LS1046A workaround)
+DefaultDependencies=no
+ConditionPathIsDirectory=/usr/lib/live/mount/medium
+ConditionPathIsMountPoint=!/usr/lib/live/mount/persistence
+Before=local-fs.target vyos-grub-update.service vyos-router.service
+After=systemd-remount-fs.service
+RequiresMountsFor=/usr/lib/live/mount/medium
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/mkdir -p /usr/lib/live/mount/persistence
+ExecStart=/bin/mount --bind /usr/lib/live/mount/medium /usr/lib/live/mount/persistence
+ExecStart=/bin/mount -o remount,rw /usr/lib/live/mount/persistence
+ExecStop=/bin/umount /usr/lib/live/mount/persistence
+StandardOutput=journal
+
+[Install]
+WantedBy=sysinit.target
