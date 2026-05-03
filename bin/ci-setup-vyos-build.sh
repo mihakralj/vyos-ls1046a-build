@@ -209,6 +209,14 @@ chmod +x "$CHROOT/usr/local/bin/sfp-tx-enable-sdk.sh"
 cp data/systemd/sfp-tx-enable-sdk.service "$CHROOT/etc/systemd/system/sfp-tx-enable-sdk.service"
 cp data/systemd/sfp-tx-enable-sdk.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/sfp-tx-enable-sdk.conf"
 
+### Bind-mount /usr/lib/live/mount/medium → /usr/lib/live/mount/persistence (rw)
+### Restores upstream find_persistence() semantics for LS1046A live-boot.
+### See data/systemd/persistence-bindmount.service header comment for the
+### full root cause (vyos-grub-update.service FileNotFoundError, broken
+### `add system image`). Pairs with data/vyos-1x-020-find-persistence-by-label.patch
+### which fixes the python layer for forward compatibility.
+cp data/systemd/persistence-bindmount.service "$CHROOT/etc/systemd/system/persistence-bindmount.service"
+
 ### ====================================================================
 ### ASK (Application Solutions Kit) fast-path userspace components
 ### ====================================================================

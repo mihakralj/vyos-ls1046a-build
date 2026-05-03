@@ -25,7 +25,11 @@ for svc in vyos-postinstall fman-fq-qdisc boot-complete-notify sfp-tx-enable-sdk
 done
 
 # sysinit.target services
-for svc in ask-modules-load; do
+# Note: persistence-bindmount must run before any consumer of
+# vyos.system.disk.find_persistence() (vyos-grub-update.service,
+# image installer's grub default-bump). sysinit.target.wants/ ensures
+# it activates before local-fs.target.
+for svc in ask-modules-load persistence-bindmount; do
   if [ -f "/etc/systemd/system/${svc}.service" ]; then
     mkdir -p /etc/systemd/system/sysinit.target.wants
     ln -sf "../${svc}.service" "/etc/systemd/system/sysinit.target.wants/${svc}.service"
