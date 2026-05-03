@@ -4,97 +4,97 @@
 <netpcd>
 <classification name="cdx_udp4_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="14" aging="yes"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="14"/>
   </key>
 </classification>
 
 <classification name="cdx_tcp4_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="14" aging="yes"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="14"/>
   </key>
 </classification>
 
 <classification name="cdx_udp6_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="38" aging="yes"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="38"/>
   </key>
 </classification>
 
 <classification name="cdx_tcp6_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="38" aging="yes"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="38"/>
   </key>
 </classification>
 
 <classification name="cdx_esp4_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="10" aging="yes"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="10"/>
   </key>
 </classification>
 
 <classification name="cdx_esp6_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="22" aging="yes"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="22"/>
   </key>
 </classification>
 
 <classification name="cdx_multicast4_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="10" aging="no"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="10"/>
   </key>
 </classification>
 
 <classification name="cdx_multicast6_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="34" aging="no"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="34"/>
   </key>
 </classification>
 
 <classification name="cdx_ethernet_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="15" aging="yes"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="15"/>
   </key>
 </classification>
 
 <classification name="cdx_pppoe_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="11" aging="yes"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="11"/>
   </key>
 </classification>
 
 <classification name="cdx_tuple3udp4_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="8" aging="yes"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="8"/>
   </key>
 </classification>
 
 <classification name="cdx_tuple3tcp4_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="8" aging="yes"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="8"/>
   </key>
 </classification>
 
 <classification name="cdx_tuple3udp6_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="20" aging="yes"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="20"/>
   </key>
 </classification>
 
 <classification name="cdx_tuple3tcp6_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="20" aging="yes"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="20"/>
   </key>
 </classification>
 
 <classification name="cdx_frag4_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="12" aging="no"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="12"/>
   </key>
 </classification>
 
 <classification name="cdx_frag6_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable external="yes" mask="0xf0" hashshift="0" keysize="38" aging="no"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="38"/>
   </key>
 </classification>
 
