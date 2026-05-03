@@ -1,15 +1,14 @@
 --- a/python/vyos/system/disk.py
 +++ b/python/vyos/system/disk.py
-@@ -15,7 +15,7 @@
+@@ -15,6 +15,7 @@
  
  from json import loads as json_loads
  from os import sync
--from os.path import basename as _basename
-+from os.path import basename as _basename, realpath as _realpath
++from os.path import realpath as _realpath
  from dataclasses import dataclass
  from time import sleep
  
-@@ -65,17 +65,42 @@
+@@ -47,15 +48,35 @@
  
  
  def find_persistence() -> str:
@@ -33,25 +32,16 @@
          if partition.mountpoint.endswith('/persistence'):
              return partition.mountpoint
 +
-+    # Fallback: resolve LABEL=persistence to a real device, then match
-+    # it against any currently-mounted partition.
++    # Fallback: match by backing device of /dev/disk/by-label/persistence
 +    try:
-+        label_dev = _realpath('/dev/disk/by-label/persistence')
-+    except OSError:
-+        return ''
-+    if not label_dev or label_dev == '/dev/disk/by-label/persistence':
-+        return ''
-+    for partition in mounted_partitions:
-+        try:
-+            part_dev = _realpath(partition.device)
-+        except OSError:
-+            continue
-+        if part_dev == label_dev:
-+            return partition.mountpoint
-+
++        target = _realpath('/dev/disk/by-label/persistence')
++    except Exception:
++        target = ''
++    if target:
++        for partition in mounted_partitions:
++            try:
++                if _realpath(partition.device) == target:
++                    return partition.mountpoint
++            except Exception:
++                continue
      return ''
- 
-+
- def parttable_create(drive_path: str, root_size: int) -> None:
-     """Create a hybrid MBR/GPT partition table
-     0-2047 first sectors are free
