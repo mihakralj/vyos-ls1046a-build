@@ -1,0 +1,119 @@
+#!/bin/bash
+# 91-strip-persistence-prober.chroot — silence live-boot persistence prober.
+#
+# Symptom (post-ask kernel boot, eMMC):
+#   mount: mounting /dev/mmcblk0boot0 on /live/persistence/ failed: No such device
+#   mount: mounting /dev/mmcblk0boot1 on /live/persistence/ failed: No such device
+#   mount: mounting /dev/mmcblk0p1   on /live/persistence/ failed: No such device
+#   mount: mounting /dev/mmcblk0     on /live/persistence/ failed: No such device
+#   ... ×8 candidates, then:
+#   umount: /root: target is busy.
+#
+# Root cause:
+#   live-boot's /lib/live/boot/9990-misc-helpers.sh::find_persistence_media()
+#   walks every block device in /sys/block and tries to mount each on
+#   /live/persistence/ to probe for an overlay label. Each failed candidate
+#   prints `mount: mounting <dev> on /live/persistence/ failed: ...` to the
+#   console. We always boot with `nopersistence` in bootargs (live-build
+#   recipe in build-local.sh / TFTP grub.cfg) — the prober is dead code.
+#
+# Why `nopersistence` alone is not enough:
+#   `nopersistence` only suppresses the OUTCOME (the discovered overlay is
+#   not adopted). The PROBE LOOP itself runs unconditionally inside
+#   find_persistence_media() in current live-boot (1:20231030+...), so the
+#   noise + per-device timeout is incurred regardless.
+#
+# Fix:
+#   Replace find_persistence_media()'s body with `return 0` (empty result
+#   list). Callers iterate over the (empty) output and become no-ops. The
+#   function definition still exists, so any future caller chain remains
+#   syntactically intact — only the loop is bypassed.
+#
+# Scope:
+#   Pure cosmetic / boot-time cleanup. No functional change because we
+#   already pass `nopersistence` and have no `/live/persistence/*` use case
+#   on this image. If a future image needs persistence, drop this hook (or
+#   gate it on an env-var) and re-build the ISO.
+#
+# Apply order:
+#   This is a chroot hook — it runs BEFORE the binary stage's
+#   `update-initramfs`, so the patched 9990-misc-helpers.sh is what actually
+#   ships in initrd.img.
+
+set -euo pipefail
+
+TARGET="/lib/live/boot/9990-misc-helpers.sh"
+
+if [[ ! -f "$TARGET" ]]; then
+    echo "[91-strip-persistence-prober] $TARGET not present — skipping (no live-boot in chroot?)"
+    exit 0
+fi
+
+# Idempotence guard: bail if our marker is already present.
+if grep -q '# ASK-LS1046A: persistence prober disabled' "$TARGET"; then
+    echo "[91-strip-persistence-prober] already patched — skipping"
+    exit 0
+fi
+
+# Sanity: the function must exist verbatim where we expect it.
+if ! grep -qE '^find_persistence_media \(\)$' "$TARGET"; then
+    echo "[91-strip-persistence-prober] find_persistence_media() not found in $TARGET"
+    echo "[91-strip-persistence-prober] live-boot upstream layout changed — refusing to patch"
+    exit 1
+fi
+
+# Replace the function body. The function header line is left intact so
+# any tooling that greps for it still finds it.
+#
+# sed strategy: find `find_persistence_media ()` then the next `{` (start
+# of body), then walk to the matching `}` (end of body). Because shell
+# functions in 9990-misc-helpers.sh use a fixed style ("opening { on its
+# own line, closing } on its own line, no nested top-level braces inside
+# the function") we can match the closing brace as `^}$`.
+python3 - "$TARGET" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8') as f:
+    src = f.read()
+
+# Match:  find_persistence_media ()\n{ <body> \n}
+pattern = re.compile(
+    r'^(find_persistence_media \(\))\n\{\n(.*?)\n\}\n',
+    flags=re.MULTILINE | re.DOTALL,
+)
+m = pattern.search(src)
+if not m:
+    print('[91-strip-persistence-prober] could not locate function body — '
+          'leaving file untouched', file=sys.stderr)
+    sys.exit(1)
+
+replacement = (
+    'find_persistence_media ()\n'
+    '{\n'
+    '\t# ASK-LS1046A: persistence prober disabled by\n'
+    '\t# data/hooks/91-strip-persistence-prober.chroot.\n'
+    '\t# We always boot with `nopersistence`; the upstream loop\n'
+    '\t# walks every /sys/block device and prints\n'
+    '\t#   mount: mounting <dev> on /live/persistence/ failed\n'
+    '\t# for each one, plus per-device timeouts. Short-circuit\n'
+    '\t# to an empty result list.\n'
+    '\treturn 0\n'
+    '}\n'
+)
+
+new_src = src[:m.start()] + replacement + src[m.end():]
+with open(path, 'w', encoding='utf-8') as f:
+    f.write(new_src)
+print('[91-strip-persistence-prober] patched', path)
+PY
+
+# Confirm marker is now present (defensive: python3 should have exited
+# non-zero on failure, but double-check).
+if ! grep -q '# ASK-LS1046A: persistence prober disabled' "$TARGET"; then
+    echo "[91-strip-persistence-prober] post-patch marker missing — bailing"
+    exit 1
+fi
+
+echo "[91-strip-persistence-prober] $TARGET patched (find_persistence_media → no-op)"
