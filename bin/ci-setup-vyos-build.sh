@@ -172,6 +172,10 @@ cp data/systemd/vpp-post-start.conf "$CHROOT/etc/systemd/system/vpp.service.d/po
 cp data/hooks/95-vyos-hostname.chroot "$HOOKS/95-vyos-hostname.chroot"
 chmod +x "$HOOKS/95-vyos-hostname.chroot"
 
+# 91: silence live-boot persistence prober (find_persistence_media() → return 0)
+cp data/hooks/91-strip-persistence-prober.chroot "$HOOKS/91-strip-persistence-prober.chroot"
+chmod +x "$HOOKS/91-strip-persistence-prober.chroot"
+
 cp data/hooks/98-fancontrol.chroot "$HOOKS/98-fancontrol.chroot"
 chmod +x "$HOOKS/98-fancontrol.chroot"
 
