@@ -1,0 +1,50 @@
+--- a/python/vyos/system/disk.py
++++ b/python/vyos/system/disk.py
+@@ -16,5 +16,6 @@
+ from json import loads as json_loads
+ from os import sync
++from os.path import realpath as _realpath
+ from dataclasses import dataclass
+ from time import sleep
+ 
+@@ -49,13 +50,37 @@
+ def find_persistence() -> str:
+-    """Find a mountpoint for persistence storage
++    """Find the mountpoint for persistence storage.
+ 
+-    Returns:
+-        str: Path where 'persistence' pertition is mounted, Empty if not found
++    Primary lookup: any mounted partition whose mountpoint ends in
++    ``/persistence`` (the upstream VyOS convention).
++
++    Fallback: on systems booted via U-Boot + live-boot (e.g. LS1046A) the
++    persistence partition is mounted at ``/usr/lib/live/mount/medium``
++    instead of ``.../persistence``. We accept any mountpoint whose backing
++    device is the same as ``/dev/disk/by-label/persistence``.
++
++    Returns the mountpoint, or ``''`` if no candidate is found.
+     """
+     mounted_partitions = disk_partitions()
+     for partition in mounted_partitions:
+         if partition.mountpoint.endswith('/persistence'):
+             return partition.mountpoint
++
++    # Fallback: resolve LABEL=persistence to a real device, then match
++    # it against any currently-mounted partition.
++    try:
++        label_dev = _realpath('/dev/disk/by-label/persistence')
++    except OSError:
++        return ''
++    if not label_dev or label_dev == '/dev/disk/by-label/persistence':
++        return ''
++    for partition in mounted_partitions:
++        try:
++            part_dev = _realpath(partition.device)
++        except OSError:
++            continue
++        if part_dev == label_dev:
++            return partition.mountpoint
++
+     return ''
+ 
+ def parttable_create(drive_path: str, root_size: int) -> None:
