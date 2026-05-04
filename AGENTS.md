@@ -190,7 +190,6 @@ The DPDK DPAA1 PMD path was abandoned on 2026-04-03 (RC#31: `dpaa_bus` probe kil
 | `ask-ls1046a-6.6/ASK-USERSPACE.md` | ASK userspace build & integration plan: libcli, fmlib, fmc, dpa_app, cdx, fci, auto_bridge, cmm — all steps complete |
 | `ask-ls1046a-6.6/ASK-ANALYSIS.md` | ASK fast-path gap analysis: measured 4.39 Gbps SW flow offload, tier comparison vs VPP |
 | `ask-ls1046a-6.6/ASK-BOOTSTRAP.md` | ASK kernel bootstrap plan: SDK driver injection, config, DTS — completed |
-| `plans/ACCEL-PPP-ARM64.md` | accel-ppp-ng ARM64 build plan: effort estimate, integration into CI pipeline, kmod ABI matching |
 | `ask-ls1046a-6.6/ASK-FIX-PLAN.md` | ASK build fix plan: kernel config override strategy, USB boot panic fix |
 | `ask-ls1046a-6.6/ASK-CODE-QUALITY.md` | ASK code quality audit: SDK driver warnings, compiler fixes, struct alignment |
 | `plans/NETWORKING-DEEP-DIVE.md` | DPAA1 networking deep-dive: FMan architecture, QBMan, portal allocation, driver split |
