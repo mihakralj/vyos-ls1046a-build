@@ -120,6 +120,16 @@ if [ "$MAKE_RC" != "0" ]; then
   echo "ERROR: make libfm-arm.a exited $MAKE_RC" >&2
   echo "--- full log ---" >&2
   tail -80 /tmp/fmlib-build.log >&2 || true
+  echo "" >&2
+  echo "*** fmlib source build FAILED ***" >&2
+  echo "*** Falling back to a stale pre-built libfm.a would create an ABI" >&2
+  echo "*** mismatch with the kernel UAPI and dpa_app would SIGSEGV (rc=11)" >&2
+  echo "*** at FM_PCD_HashTableSet during cmm/dpa_app startup. Aborting." >&2
+  echo "*** (Set ASK_USERSPACE_STRICT=0 to override, but this is unsafe.)" >&2
+  if [ "${ASK_USERSPACE_STRICT:-1}" = "1" ]; then
+    exit 1
+  fi
+  echo "*** ASK_USERSPACE_STRICT=0 — continuing with stale pre-built libfm.a" >&2
   exit 1
 fi
 
