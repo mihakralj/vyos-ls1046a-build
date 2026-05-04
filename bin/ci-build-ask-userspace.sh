@@ -199,8 +199,17 @@ FMLIB_OK=0
 if bash "$SCRIPT_DIR/ci-build-fmlib.sh" "$KSRC" "$STAGING" ; then
   FMLIB_OK=1
 else
-  echo "    WARNING: fmlib source build failed — falling back to pre-built libfm.a"
-  echo "             dpa_app may crash with SIGSEGV at runtime (ABI mismatch)"
+  echo "    ERROR: fmlib source build failed." >&2
+  echo "    Falling back to a stale pre-built libfm.a creates an ABI mismatch with" >&2
+  echo "    the kernel UAPI: dpa_app's t_FmPcdHashTableParams struct will not match" >&2
+  echo "    the kernel's ioc_fm_pcd_hash_table_params_t, the kernel reads garbage" >&2
+  echo "    statisticsMode, ValidateAndCalcStatsParams returns Invalid Value, and" >&2
+  echo "    dpa_app SIGSEGVs (rc=11) during cmm/dpa_app PCD apply." >&2
+  if [ "${ASK_USERSPACE_STRICT:-1}" = "1" ]; then
+    echo "    ASK_USERSPACE_STRICT=1 — aborting build (set =0 to override; unsafe)." >&2
+    exit 1
+  fi
+  echo "    WARNING: ASK_USERSPACE_STRICT=0 — using pre-built libfm.a (UNSAFE)." >&2
   if [ -f "$PREBUILT/fmlib/libfm.a" ]; then
     cp "$PREBUILT/fmlib/libfm.a" "$STAGING/lib/"
     cp -a "$PREBUILT/fmlib/include/"* "$STAGING/include/" 2>/dev/null || true
@@ -230,7 +239,14 @@ if [ "$FMLIB_OK" = "1" ] && bash "$SCRIPT_DIR/ci-build-fmc.sh" "$STAGING" ; then
     echo "    installed fresh fmc to $CHROOT/usr/local/bin/fmc and $CHROOT/usr/bin/fmc"
   fi
 else
-  echo "    WARNING: fmc source build failed — falling back to pre-built libfmc.a"
+  echo "    ERROR: fmc source build failed (or skipped due to fmlib failure)." >&2
+  echo "    Falling back to a stale pre-built libfmc.a creates the same ABI" >&2
+  echo "    mismatch described above; dpa_app would SIGSEGV at runtime." >&2
+  if [ "${ASK_USERSPACE_STRICT:-1}" = "1" ]; then
+    echo "    ASK_USERSPACE_STRICT=1 — aborting build (set =0 to override; unsafe)." >&2
+    exit 1
+  fi
+  echo "    WARNING: ASK_USERSPACE_STRICT=0 — using pre-built libfmc.a (UNSAFE)." >&2
   if [ -f "$PREBUILT/fmc/libfmc.a" ]; then
     cp "$PREBUILT/fmc/libfmc.a" "$STAGING/lib/"
     cp "$PREBUILT/fmc/fmc.h" "$STAGING/include/" 2>/dev/null || true
