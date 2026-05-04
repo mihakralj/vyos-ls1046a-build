@@ -28,6 +28,8 @@ nxp-linux/
 nxp-fmlib/
 nxp-fmc/
 libcli/
+artifacts/
+work/
 !data/ask-userspace/libcli/
 fmc_config_data.c
 ask-ls1046a-6.6/
