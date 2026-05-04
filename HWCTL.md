@@ -11,7 +11,15 @@ Both devices are exposed through standard Linux sysfs interfaces:
 | EMC2305  | hwmon     | `/sys/class/hwmon/hwmonN/`        |
 | TMU temp | thermal   | `/sys/class/thermal/thermal_zone3/` |
 
-Run all commands as `root` (`sudo -i` from the `vyos` account).
+Reads from sysfs work as the `vyos` user. Writes need root: every
+`echo … > /sys/…` below is shown as `echo … | sudo tee /sys/…` so the
+redirection happens in a privileged process. (Plain `sudo echo … > …`
+does **not** work — the redirection is performed by your unprivileged
+shell before `sudo` runs.) If you prefer, drop into a root shell once
+with `sudo -i` and use the bare `echo … > …` form.
+
+`tee` echoes the written value to stdout; append `> /dev/null` to silence
+it when scripting.
 
 ---
 
@@ -44,20 +52,20 @@ cat $LED/trigger               # available + active trigger (active is in [brack
 
 ```bash
 # Solid green at full brightness
-echo 255 > /sys/class/leds/status:green/brightness
+echo 255 | sudo tee /sys/class/leds/status:green/brightness
 
 # Dim red (~25%)
-echo 64  > /sys/class/leds/status:red/brightness
+echo 64  | sudo tee /sys/class/leds/status:red/brightness
 
 # All off
 for c in white blue green red; do
-    echo 0 > /sys/class/leds/status:$c/brightness
+    echo 0 | sudo tee /sys/class/leds/status:$c/brightness
 done
 ```
 
 > A trigger must be `none` for manual writes to stick. If a trigger is
 > active, set it back to `none` first:
-> `echo none > /sys/class/leds/status:green/trigger`.
+> `echo none | sudo tee /sys/class/leds/status:green/trigger`.
 
 ### 1.3 Heartbeat / timer / oneshot triggers
 
@@ -65,23 +73,23 @@ done
 LED=/sys/class/leds/status:blue
 
 # CPU heartbeat (double-blink, rate = load average)
-echo heartbeat > $LED/trigger
+echo heartbeat | sudo tee $LED/trigger
 
 # Custom timer blink: 200 ms on / 800 ms off
-echo timer    > $LED/trigger
-echo 200      > $LED/delay_on
-echo 800      > $LED/delay_off
+echo timer | sudo tee $LED/trigger
+echo 200   | sudo tee $LED/delay_on
+echo 800   | sudo tee $LED/delay_off
 
 # Oneshot pulse (manual “invert” fires a single blink)
-echo oneshot  > $LED/trigger
-echo 100      > $LED/delay_on
-echo 100      > $LED/delay_off
-echo 1        > $LED/invert     # arm
-echo 1        > $LED/shot       # fire
+echo oneshot | sudo tee $LED/trigger
+echo 100     | sudo tee $LED/delay_on
+echo 100     | sudo tee $LED/delay_off
+echo 1       | sudo tee $LED/invert     # arm
+echo 1       | sudo tee $LED/shot       # fire
 
 # Disarm / return to manual control
-echo none     > $LED/trigger
-echo 0        > $LED/brightness
+echo none | sudo tee $LED/trigger
+echo 0    | sudo tee $LED/brightness
 ```
 
 ### 1.4 Network activity (LEDS_TRIGGER_NETDEV)
@@ -92,12 +100,12 @@ interface's link / TX / RX state.
 ```bash
 LED=/sys/class/leds/status:blue
 
-echo netdev > $LED/trigger
-echo eth0   > $LED/device_name
-echo 1      > $LED/link          # solid on while link is up
-echo 1      > $LED/tx            # blink on TX
-echo 1      > $LED/rx            # blink on RX
-echo 50     > $LED/interval      # blink interval (ms)
+echo netdev | sudo tee $LED/trigger
+echo eth0   | sudo tee $LED/device_name
+echo 1      | sudo tee $LED/link          # solid on while link is up
+echo 1      | sudo tee $LED/tx            # blink on TX
+echo 1      | sudo tee $LED/rx            # blink on RX
+echo 50     | sudo tee $LED/interval      # blink interval (ms)
 ```
 
 Use this to wire WAN-link, VPN-up, or per-port indicators without any
@@ -186,19 +194,19 @@ journalctl -u fancontrol -n 30 --no-pager
 ```bash
 H=$(dirname "$(grep -l '^emc2305$' /sys/class/hwmon/*/name)")
 
-systemctl stop fancontrol
+sudo systemctl stop fancontrol
 
-echo 1   > $H/pwm1_enable    # switch to manual mode
-echo 51  > $H/pwm1           # spin-up minimum (~1700 RPM, EMC2305 floor)
+echo 1   | sudo tee $H/pwm1_enable    # switch to manual mode
+echo 51  | sudo tee $H/pwm1           # spin-up minimum (~1700 RPM, EMC2305 floor)
 sleep 3; cat $H/fan1_input
 
-echo 128 > $H/pwm1           # ~50%
+echo 128 | sudo tee $H/pwm1           # ~50%
 sleep 3; cat $H/fan1_input
 
-echo 255 > $H/pwm1           # full speed
+echo 255 | sudo tee $H/pwm1           # full speed
 sleep 3; cat $H/fan1_input
 
-echo 0   > $H/pwm1           # off (fan will coast then stop)
+echo 0   | sudo tee $H/pwm1           # off (fan will coast then stop)
 ```
 
 > **Note**: PWM values below ~51 are quantized to off by the EMC2305;
@@ -207,8 +215,8 @@ echo 0   > $H/pwm1           # off (fan will coast then stop)
 Hand control back to the daemon:
 
 ```bash
-echo 2 > $H/pwm1_enable
-systemctl start fancontrol
+echo 2 | sudo tee $H/pwm1_enable
+sudo systemctl start fancontrol
 ```
 
 ### 2.4 Tweaking the curve permanently
@@ -238,17 +246,17 @@ cat $H/fan1_alarm           # 1 = alarm asserted
 cat $H/fan1_fault           # 1 = no tach pulses
 
 # Temperature cooling check (full ramp)
-systemctl stop fancontrol
-echo 1   > $H/pwm1_enable
-echo 255 > $H/pwm1
+sudo systemctl stop fancontrol
+echo 1   | sudo tee $H/pwm1_enable
+echo 255 | sudo tee $H/pwm1
 for i in $(seq 1 12); do
     awk -v p="$(cat $H/pwm1)" -v r="$(cat $H/fan1_input)" \
         -v t="$(cat /sys/class/thermal/thermal_zone3/temp)" \
         'BEGIN{printf "pwm=%s rpm=%s temp=%.1fC\n", p, r, t/1000}'
     sleep 5
 done
-echo 2 > $H/pwm1_enable
-systemctl start fancontrol
+echo 2 | sudo tee $H/pwm1_enable
+sudo systemctl start fancontrol
 ```
 
 ---
@@ -257,18 +265,18 @@ systemctl start fancontrol
 
 ```bash
 # LED on
-echo 255 > /sys/class/leds/status:red/brightness
+echo 255 | sudo tee /sys/class/leds/status:red/brightness
 
 # LED off
-echo 0   > /sys/class/leds/status:red/brightness
+echo 0   | sudo tee /sys/class/leds/status:red/brightness
 
 # Fan full
 H=$(dirname "$(grep -l '^emc2305$' /sys/class/hwmon/*/name)")
-systemctl stop fancontrol
-echo 1   > $H/pwm1_enable
-echo 255 > $H/pwm1
+sudo systemctl stop fancontrol
+echo 1   | sudo tee $H/pwm1_enable
+echo 255 | sudo tee $H/pwm1
 
 # Fan back to automatic
-echo 2   > $H/pwm1_enable
-systemctl start fancontrol
+echo 2   | sudo tee $H/pwm1_enable
+sudo systemctl start fancontrol
 ```
