@@ -35,16 +35,36 @@ FW_ENV_CONFIG="/etc/fw_env.config"
 # the serial console — otherwise the operator sees ~30s of dead air between
 # "Starting kernel ..." and the VyOS login banner. Do NOT add `earlycon=` —
 # stock does not use it.
-# nopersistence: skip live-boot's overlay/persistence block. Without this,
-# 9990-overlay.sh enters its persistence branch (PERSISTENCE defaults on),
-# get_custom_mounts produces an empty list, and activate_custom_mounts then
-# fails to read it: `/init: line 1365: can't open /tmp/custom_mounts.list`.
-# nopersistence is NOT a MANAGED_PARAMS value → no kexec double-boot risk.
+#
+# Persistence (eMMC config retention) — DO NOT re-add `nopersistence` here:
+#   The eMMC boot path below uses `vyos-union=/boot/${vyos_image}` to anchor
+#   the writable overlay (/config, /home, /opt, /var, /etc, /usr) on the
+#   ext4 root partition (mmcblk0p3). VyOS's vyos-union= patch to live-boot's
+#   9990-overlay.sh lives INSIDE the persistence branch and reuses
+#   find_persistence_media() + get_custom_mounts() + activate_custom_mounts()
+#   to discover the device and bind-mount the overlay dirs. Adding
+#   `nopersistence` short-circuits that whole branch — the overlay falls
+#   back to tmpfs, `commit save` writes config.boot to RAM, and the next
+#   reboot wipes it. (Symptom: "could not generate DUID" on every boot
+#   because /etc/machine-id is also volatile.)
+#
+#   The `/init: line 1365: can't open /tmp/custom_mounts.list` console
+#   error that previously motivated `nopersistence` was a SYMPTOM of
+#   data/hooks/91-strip-persistence-prober.chroot stubbing
+#   find_persistence_media() to return 0 — get_custom_mounts() then
+#   produced no list file, and activate_custom_mounts() ran
+#   `done < $custom_mounts` against a non-existent path. Removing that
+#   chroot hook (done in this same change) restores the prober and the
+#   list file is created normally.
+#
+#   nopersistence is NOT a MANAGED_PARAMS value → no kexec double-boot risk
+#   from removing it.
+#
 # usbcore.autosuspend=-1: required on LS1046A DWC3 xHCI to keep USB-attached
 # devices stable. XHCI_AVOID_BEI + XHCI_TRUST_TX_LENGTH are set by kernel
 # patch 4006-xhci-plat-ls1046a-avoid-bei.patch (xhci-plat does NOT consume
 # xhci_hcd.quirks= cmdline — PCI-only).
-UBOOT_BOOTARGS_TAIL="console=ttyS0,115200 loglevel=4 systemd.show_status=true net.ifnames=0 boot=live rootdelay=5 noautologin nopersistence fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 sysctl.net.core.default_qdisc=fq usbcore.autosuspend=-1"
+UBOOT_BOOTARGS_TAIL="console=ttyS0,115200 loglevel=4 systemd.show_status=true net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 sysctl.net.core.default_qdisc=fq usbcore.autosuspend=-1"
 
 # Accumulated exit code — set to 1 on any actual error, but script always runs to completion
 RC=0
