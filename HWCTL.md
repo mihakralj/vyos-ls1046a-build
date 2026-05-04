@@ -25,8 +25,18 @@ it when scripting.
 
 ## 1. Front-panel LEDs (TI LP5812)
 
-The LP5812 is a 12-channel I²C LED controller at `i2c3 / 0x6c`. The DTS
-currently wires up four of its channels as a single RGBW status indicator.
+The LP5812 is a 12-channel I²C LED controller at `0x6c`, reached through
+the SoC i2c2 controller (`21a0000.i2c`) and the on-board i2c mux (it
+shows up as bus `15-006c` once the mux is enumerated). The DTS wires up
+four of its channels as a single RGBW status indicator. In addition to
+those, the kernel exposes `mmc0::` and the SFP cage LEDs
+(`sfp{0,1}:link`, `sfp{0,1}:activity`).
+
+The LED triggers `heartbeat`, `timer`, `oneshot`, `netdev`, etc. are
+built as **loadable modules** in this kernel — only `none`,
+`disk-activity`, `disk-{read,write}`, `cpu`, `cpu0..3`, `panic`, and
+`mmc0` are visible by default. Load the rest on demand with
+`sudo modprobe ledtrig-<name>` before using sections 1.3 / 1.4.
 
 ### 1.1 Discovery
 
@@ -69,6 +79,14 @@ done
 
 ### 1.3 Heartbeat / timer / oneshot triggers
 
+Load the trigger modules first (they are not auto-loaded):
+
+```bash
+sudo modprobe ledtrig-heartbeat
+sudo modprobe ledtrig-timer
+sudo modprobe ledtrig-oneshot
+```
+
 ```bash
 LED=/sys/class/leds/status:blue
 
@@ -94,8 +112,12 @@ echo 0    | sudo tee $LED/brightness
 
 ### 1.4 Network activity (LEDS_TRIGGER_NETDEV)
 
-`CONFIG_LEDS_TRIGGER_NETDEV=y` is enabled, so any LED can mirror an
-interface's link / TX / RX state.
+`CONFIG_LEDS_TRIGGER_NETDEV=m` is enabled, so any LED can mirror an
+interface's link / TX / RX state once the module is loaded:
+
+```bash
+sudo modprobe ledtrig-netdev
+```
 
 ```bash
 LED=/sys/class/leds/status:blue
@@ -143,8 +165,18 @@ systemctl enable --now mono-leds.service
 
 ## 2. Chassis fan (Microchip EMC2305)
 
-The EMC2305 is a 5-channel PWM fan controller on `i2c-7` at `0x2e`.
-Channel 1 (`pwm1` / `fan1`) drives the chassis fan.
+The EMC2305 is a 5-channel PWM fan controller at `0x2e`, reached via the
+SoC i2c0 controller (`2180000.i2c`) and the on-board mux (visible as
+bus `7-002e`). Channel 1 (`pwm1` / `fan1_input`) drives the chassis
+fan; channel 2 (`pwm2` / `fan2_input`) is wired but currently unused
+(reads `fan2_input = 0`). The other three channels are not exported by
+the DTS.
+
+The in-kernel `emc2305` driver in this build only exposes the raw `pwmN`
+and `fanN_input` / `fanN_fault` attributes — there is **no
+`pwmN_enable`**, **no `fanN_alarm`**, **no `fanN_min`**, and **no
+`temp*`** node on this hwmon. "Manual mode" therefore just means
+*stopping the userspace daemon and writing pwm1 yourself*.
 
 In normal operation the **`fancontrol` daemon owns the fan** —
 configuration lives in `/etc/fancontrol`, regenerated on each boot by
@@ -173,9 +205,10 @@ done
 ```bash
 H=$(dirname "$(grep -l '^emc2305$' /sys/class/hwmon/*/name)")
 
-cat $H/fan1_input          # tachometer RPM
+cat $H/fan1_input          # tachometer RPM (channel 1, chassis fan)
+cat $H/fan2_input          # channel 2 (unused, reads 0)
 cat $H/pwm1                # current duty cycle (0–255)
-cat $H/pwm1_enable         # 0=off, 1=manual, 2=automatic
+cat $H/fan1_fault          # 1 = no tach pulses
 
 # CPU temp the daemon is reacting to (millidegrees C)
 awk '{printf "%.1f °C\n", $1/1000}' \
@@ -196,7 +229,6 @@ H=$(dirname "$(grep -l '^emc2305$' /sys/class/hwmon/*/name)")
 
 sudo systemctl stop fancontrol
 
-echo 1   | sudo tee $H/pwm1_enable    # switch to manual mode
 echo 51  | sudo tee $H/pwm1           # spin-up minimum (~1700 RPM, EMC2305 floor)
 sleep 3; cat $H/fan1_input
 
@@ -212,10 +244,9 @@ echo 0   | sudo tee $H/pwm1           # off (fan will coast then stop)
 > **Note**: PWM values below ~51 are quantized to off by the EMC2305;
 > there is no smooth ramp from 0. The minimum *running* duty is 51.
 
-Hand control back to the daemon:
+Hand control back to the daemon (it re-asserts `pwm1` on the next tick):
 
 ```bash
-echo 2 | sudo tee $H/pwm1_enable
 sudo systemctl start fancontrol
 ```
 
@@ -242,12 +273,10 @@ the ISO — otherwise your tweaks survive only until the next reboot.
 H=$(dirname "$(grep -l '^emc2305$' /sys/class/hwmon/*/name)")
 
 # Fan stalled / unplugged?
-cat $H/fan1_alarm           # 1 = alarm asserted
 cat $H/fan1_fault           # 1 = no tach pulses
 
 # Temperature cooling check (full ramp)
 sudo systemctl stop fancontrol
-echo 1   | sudo tee $H/pwm1_enable
 echo 255 | sudo tee $H/pwm1
 for i in $(seq 1 12); do
     awk -v p="$(cat $H/pwm1)" -v r="$(cat $H/fan1_input)" \
@@ -255,7 +284,6 @@ for i in $(seq 1 12); do
         'BEGIN{printf "pwm=%s rpm=%s temp=%.1fC\n", p, r, t/1000}'
     sleep 5
 done
-echo 2 | sudo tee $H/pwm1_enable
 sudo systemctl start fancontrol
 ```
 
@@ -273,10 +301,8 @@ echo 0   | sudo tee /sys/class/leds/status:red/brightness
 # Fan full
 H=$(dirname "$(grep -l '^emc2305$' /sys/class/hwmon/*/name)")
 sudo systemctl stop fancontrol
-echo 1   | sudo tee $H/pwm1_enable
 echo 255 | sudo tee $H/pwm1
 
 # Fan back to automatic
-echo 2   | sudo tee $H/pwm1_enable
 sudo systemctl start fancontrol
 ```
