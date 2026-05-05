@@ -172,9 +172,13 @@ cp data/systemd/vpp-post-start.conf "$CHROOT/etc/systemd/system/vpp.service.d/po
 cp data/hooks/95-vyos-hostname.chroot "$HOOKS/95-vyos-hostname.chroot"
 chmod +x "$HOOKS/95-vyos-hostname.chroot"
 
-# 91: silence live-boot persistence prober (find_persistence_media() → return 0)
-cp data/hooks/91-strip-persistence-prober.chroot "$HOOKS/91-strip-persistence-prober.chroot"
-chmod +x "$HOOKS/91-strip-persistence-prober.chroot"
+# 92: defense-in-depth — pre-create /tmp/custom_mounts.list inside live-boot's
+#     activate_custom_mounts() so the `done < $custom_mounts` redirection
+#     never fires the `/init: line 1365: can't open /tmp/custom_mounts.list`
+#     error if find_persistence_media() legitimately returns no candidates
+#     (TFTP boot, nopersistence boot, fresh device pre-partition).
+cp data/hooks/92-livescripts-defensive-mount-list.chroot "$HOOKS/92-livescripts-defensive-mount-list.chroot"
+chmod +x "$HOOKS/92-livescripts-defensive-mount-list.chroot"
 
 cp data/hooks/98-fancontrol.chroot "$HOOKS/98-fancontrol.chroot"
 chmod +x "$HOOKS/98-fancontrol.chroot"
