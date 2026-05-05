@@ -1,0 +1,72 @@
+diff --git a/src/fm_lib.c b/src/fm_lib.c
+index 907d5d4..bfa5f10 100644
+--- a/src/fm_lib.c
++++ b/src/fm_lib.c
+@@ -42,6 +42,7 @@
+ #include <termios.h>
+ #include <sys/ioctl.h>
+ #include <stdbool.h>
++#include <stddef.h>     /* offsetof, for ASK B1 ABI bracketed-memcpy */
+ 
+ #include "fm_ext.h"
+ #include "fm_pcd_ext.h"
+@@ -678,7 +679,37 @@ t_Handle FM_PCD_KgSchemeSet (t_Handle h_FmPcd, t_FmPcdKgSchemeParams *p_Scheme)
+ 
+     _fml_dbg("Calling...\n");
+ 
+-    memcpy(&params, p_Scheme, sizeof(t_FmPcdKgSchemeParams));
++    /* ASK B1 (F01): the userspace t_FmPcdKgSchemeParams (post mono-ASK
++     * extensions) carries an extra `bool shared` between `id` (union) and
++     * `alwaysDirect`; the kernel UAPI ioc_fm_pcd_kg_scheme_params_t has no
++     * such field. A flat memcpy(sizeof t_FmPcdKgSchemeParams) overruns the
++     * destination AND shifts every field after `id`, silently corrupting
++     * `next_engine` (the kernel's dispatch enum) and the rest. Fix: zero
++     * the destination, then copy in two halves — head up to `shared`, tail
++     * from kernel `always_direct` / userspace `alwaysDirect` to end of the
++     * SHORTER of the two structs (defensive against future drift). */
++    _Static_assert(offsetof(ioc_fm_pcd_kg_scheme_params_t, scm_id) ==
++                       offsetof(t_FmPcdKgSchemeParams, id),
++                   "ASK B1: id/scm_id offset mismatch fmlib vs kernel UAPI");
++    {
++        const size_t head_sz = offsetof(t_FmPcdKgSchemeParams, shared);
++        const size_t ioc_tail_off = offsetof(ioc_fm_pcd_kg_scheme_params_t,
++                                             always_direct);
++        const size_t fml_tail_off = offsetof(t_FmPcdKgSchemeParams,
++                                             alwaysDirect);
++        const size_t ioc_tail_sz = sizeof(ioc_fm_pcd_kg_scheme_params_t) -
++                                    ioc_tail_off;
++        const size_t fml_tail_sz = sizeof(t_FmPcdKgSchemeParams) -
++                                    fml_tail_off;
++        const size_t tail_sz = (ioc_tail_sz < fml_tail_sz) ?
++                                ioc_tail_sz : fml_tail_sz;
++
++        memset(&params, 0, sizeof(params));
++        memcpy(&params, p_Scheme, head_sz);
++        memcpy((char*)&params + ioc_tail_off,
++               (const char*)p_Scheme + fml_tail_off,
++               tail_sz);
++    }
+     params.id = NULL;
+ 
+     if (params.modify)
+@@ -1245,7 +1276,19 @@ t_Handle FM_PCD_HashTableSet(t_Handle h_FmPcd, t_FmPcdHashTableParams *p_Param)
+ 
+     _fml_dbg("Calling...\n");
+ 
+-    memcpy(&params, p_Param, sizeof(t_FmPcdHashTableParams));
++    /* ASK B1 (F02): defensive memset+min(sizes) copy. The original
++     * memcpy(sizeof t_FmPcdHashTableParams) overruns the destination if
++     * userspace t_FmPcdHashTableParams is larger than kernel UAPI
++     * ioc_fm_pcd_hash_table_params_t (it currently is, due to mono-ASK
++     * extensions). zero-init then copy only the smaller of the two sizes;
++     * the head fields share layout up to the divergence point. */
++    {
++        const size_t copy_sz =
++            sizeof(params) < sizeof(t_FmPcdHashTableParams) ?
++            sizeof(params) : sizeof(t_FmPcdHashTableParams);
++        memset(&params, 0, sizeof(params));
++        memcpy(&params, p_Param, copy_sz);
++    }
+     params.id = NULL;
+ 
+     if (params.cc_next_engine_params_for_miss.next_engine == e_IOC_FM_PCD_CC &&
