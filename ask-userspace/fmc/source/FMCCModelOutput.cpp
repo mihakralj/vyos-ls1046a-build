@@ -199,6 +199,14 @@ void
 CFMCCModelOutput::output( const CFMCModel& model, fmc_model_t* cmodel, std::ostream& oss,
                           size_t indent )
 {
+    /* ASK-edit (defensive P0-6): zero-initialize caller-supplied cmodel before
+     * conditional-emit branches leave fields uninitialized. The kernel reads
+     * struct fields like externalHash / agingSupport whose population depends
+     * on DPAA_VERSION>=11 branches; without this, untaken branches leave the
+     * field at whatever was on the caller's stack, leading to silent PCD
+     * misconfig (Chain-2 hash-buckets-in-MURAM cluster). */
+    memset(cmodel, 0, sizeof(*cmodel));
+
     if ( model.spEnable ) {
         oss << "#include \"softparse.h\"" << std::endl;
     }

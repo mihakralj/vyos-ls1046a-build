@@ -850,10 +850,14 @@ void CIR::checkExprValue (CENode* eNode, int line) const
     }
     else if (eNode->type == ECHECKSUM_LOC)
     {
-        if (eNode->dyadic.left->type   == EINTCONST &&
-            eNode->dyadic.right->type  == EINTCONST &&
-            eNode->dyadic.left->intval  > 256 ||
-            eNode->dyadic.right->intval > 256)
+        /* ASK-edit (defensive P1-5): parenthesize precedence — was reading
+         * intval from a non-EINTCONST union member when right child wasn't
+         * a const (&& binds tighter than ||, so the right disjunct evaluated
+         * unconditionally). */
+        if ((eNode->dyadic.left->type   == EINTCONST &&
+             eNode->dyadic.right->type  == EINTCONST) &&
+            (eNode->dyadic.left->intval  > 256 ||
+             eNode->dyadic.right->intval > 256))
                throw CGenericErrorLine(ERR_CHECKSUM_SECOND_THIRD, line);
     }
     else if (eNode->type == ECHECKSUM)

@@ -100,7 +100,11 @@ CCFGReader::parseCfgData( std::string filename )
 
     // Parse the XML file
     LOG( DBG1 ) << ind(2) << "Start XML parsing of config file: " << filename << std::endl;
-    xmlDocPtr doc = xmlParseFile( filename.c_str() );
+    /* ASK-edit (defensive P0-3): use xmlReadFile with XML_PARSE_NONET |
+     * XML_PARSE_NOCDATA instead of xmlParseFile to disable network fetches and
+     * external-entity expansion (XXE). */
+    xmlDocPtr doc = xmlReadFile( filename.c_str(), NULL,
+                                 XML_PARSE_NONET | XML_PARSE_NOCDATA );
 
     if ( !error.getErrorMsg().empty() ) {
         throw CGenericError( ERR_XML_PARSE_ERROR1, error.getErrorMsg() );

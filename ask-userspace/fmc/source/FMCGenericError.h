@@ -155,6 +155,11 @@ const std::string ERR_REAS_NUMFRAMESHASH     = "The number of frames per hash en
 
 const std::string ERR_HDR_INSERTPROTOCOL     = "Unsupported protocol used insert_header in the header manipulation: '%1'";
 const std::string ERR_HT_SHIFT               = "The hash is table linked from more distributions with hash shifts setup: '%1'";
+/* ASK-edit (defensive P0-5/P1-1): bounds-check error symbols added by ASK
+ * to support input-validation guards in FMCPCDModel.cpp. */
+const std::string ERR_HDR_INSERT_SIZE        = "Header-insert size out of range in manipulation '%1'";
+const std::string ERR_KEY_SIZE_OOR           = "Classification key size out of range in node '%1'";
+const std::string ERR_DSCP_INDEX_OOR         = "DSCP index out of range in vlan-update manipulation '%1'";
 
 /*-------------------------Soft parser errors--------------------------*/
 const std::string ERR_INTERNAL_SP_ERROR      = "Soft parser internal error: %1";

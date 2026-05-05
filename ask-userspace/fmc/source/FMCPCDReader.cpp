@@ -115,7 +115,11 @@ CPCDReader::parseNetPCD( std::string filename )
 
     // Parse the XML file
     LOG( DBG1 ) << ind(2) << "Start XML parsing of PCD file: " << filename << std::endl;
-    xmlDocPtr doc = xmlParseFile( filename.c_str() );
+    /* ASK-edit (defensive P0-1): use xmlReadFile with XML_PARSE_NONET |
+     * XML_PARSE_NOCDATA instead of xmlParseFile to disable network fetches and
+     * external-entity expansion (XXE) on attacker-influenced /etc/cdx_pcd.xml. */
+    xmlDocPtr doc = xmlReadFile( filename.c_str(), NULL,
+                                 XML_PARSE_NONET | XML_PARSE_NOCDATA );
 
     // In case reader has stored something for reporting
     if ( !error.getErrorMsg().empty() ) {
