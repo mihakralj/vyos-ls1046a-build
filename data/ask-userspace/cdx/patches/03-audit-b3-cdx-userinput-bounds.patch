@@ -1,0 +1,97 @@
+From: Cline (audit B3) <audit@ask>
+Date: Tue, 05 May 2026 11:00:00 +0000
+Subject: [PATCH] cdx: bound user-controlled allocation sizes (audit B3)
+
+Audit findings cdx-P0.01, cdx-P0.02 (plans/audit/AUDIT-cdx.md).
+
+Two kzalloc() calls compute their size as `sizeof(struct ...) * N` where
+N is read directly from userspace via copy_from_user, with no upper
+bound and no integer-overflow guard:
+
+  cdx/dpa_test.c::cdx_ioc_dpa_connadd     N = add_conn.num_conn
+  cdx/dpa_cfg.c::cdx_ioc_set_dpa_params   N = params.num_fmans
+
+cdx-P0.01 — `num_conn` is uint32_t. On a 64-bit kernel:
+  sizeof(struct test_conn_info) ≈ 200 bytes
+  num_conn = 0x40000000 → mul wraps in size_t computation
+  → kzalloc(small) returns small buffer
+  → followed by copy_from_user(conn_info, user_ptr, BIG)
+  → kernel heap OOB write of attacker-controlled length
+
+cdx-P0.02 — `num_fmans` is uint32_t. LS1046A has at most 1 FMan; even
+  speculative future SoCs are <8. An attacker setting num_fmans to a
+  large value (a) wastes kernel memory or (b) wraps size_t and triggers
+  the same OOB-write pattern.
+
+This patch:
+
+1. Caps `num_conn` at CDX_MAX_TEST_CONN = 1024 — well above any
+   realistic test workload (the per-conn struct carries a CT entry
+   plus a route entry; 1024 is 200 KB of hot kernel memory).
+2. Caps `num_fmans` at CDX_MAX_FMANS = 8 — strict upper bound for any
+   conceivable LS-series SoC (LS1046A has 1, LS2088A has 2, no part
+   in the family has >2).
+3. Switches both kzalloc(size, 0) → kzalloc(size, GFP_KERNEL). The 0
+   flag is undefined behaviour (it equals __GFP_DMA on some configs);
+   use the explicit kernel-allocation flag. (Out-of-scope for this
+   batch; tracked under B8 for the broader sweep, but co-located here
+   because the SAME kzalloc call sites are being touched.)
+
+EFAULT/EINVAL is the correct return per the existing return-code
+pattern in these handlers (-EBUSY/-EIO/-ENOMEM are already used for
+the surrounding errors).
+
+Audit reference: plans/audit/AUDIT-cdx.md cdx-P0.01, cdx-P0.02
+Signed-off-by: Cline <audit@ask>
+---
+diff --git a/cdx/dpa_test.c b/cdx/dpa_test.c
+--- a/cdx/dpa_test.c
++++ b/cdx/dpa_test.c
+@@ -60,6 +60,9 @@ int cdx_ioc_dpa_connadd(unsigned long args)
+ RouteEntry *rt;
+ struct _tCtEntry *ct_entry;
+ RouteEntry *rt_entry;
++
++/* B3/cdx-P0.01: cap test-only conn count to a sane upper bound. */
++#define CDX_MAX_TEST_CONN 1024
+ 
+ if (copy_from_user(&add_conn, (void *)args,
+ sizeof(struct add_conn_info))) {
+@@ -69,6 +72,16 @@ int cdx_ioc_dpa_connadd(unsigned long args)
+ retval = 0;
+ ct = NULL;
+ rt = NULL;
++
++/* B3/cdx-P0.01: bound num_conn before using it as a multiplier in
++ * kzalloc/copy_from_user. Without this, an attacker could pass
++ * num_conn = 0x40000000 and (a) wrap size_t in the multiplication,
++ * (b) get a small kzalloc, then (c) heap-OOB-write via the larger
++ * copy_from_user. 1024 covers any plausible test workload. */
++if (add_conn.num_conn == 0 || add_conn.num_conn > CDX_MAX_TEST_CONN) {
++DPA_ERROR("%s::num_conn %u out of range\n", __FUNCTION__, add_conn.num_conn);
++return -EINVAL;
++}
+ conn_info = (struct test_conn_info *) 
+ kzalloc ((sizeof(struct test_conn_info) * add_conn.num_conn),
+ 0);
+diff --git a/cdx/dpa_cfg.c b/cdx/dpa_cfg.c
+--- a/cdx/dpa_cfg.c
++++ b/cdx/dpa_cfg.c
+@@ -640,6 +640,17 @@ int cdx_ioc_set_dpa_params(unsigned long args)
+ __FUNCTION__);
+ return -EBUSY;
+ }
++
++/* B3/cdx-P0.02: bound num_fmans before using it as a multiplier in
++ * kzalloc/copy_from_user. The largest LS-series SoC in this family
++ * has 2 FMan instances; a hard cap of 8 leaves headroom while
++ * preventing both (a) heap exhaustion via huge allocs and (b)
++ * size_t multiplication wrap into a small alloc followed by a large
++ * copy_from_user. */
++if (params.num_fmans == 0 || params.num_fmans > 8) {
++DPA_ERROR("%s::num_fmans %u out of range\n", __FUNCTION__, params.num_fmans);
++return -EINVAL;
++}
+ mem_size = (sizeof(struct cdx_fman_info) * params.num_fmans);
+ fman_info = kzalloc(mem_size, 0);
+ if (!fman_info) {
