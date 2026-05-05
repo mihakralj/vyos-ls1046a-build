@@ -6,6 +6,12 @@ After=systemd-udevd.service
 
 [Service]
 Type=oneshot
+# Clear any stale failed-state ledger entry from a previous boot of an
+# older image (e.g. June-2025 record where an older cdx.ko had unresolved
+# symbols). Today's cdx.ko ships in the kernel-headers .deb's signed-modules
+# pass and loads clean, but `systemctl status` still reports failed unless
+# the persisted state is reset before the next ExecStart attempt.
+ExecStartPre=-/bin/systemctl reset-failed ask-modules-load.service
 ExecStart=/usr/local/bin/ask-modules-load.sh
 RemainAfterExit=yes
 
