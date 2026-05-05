@@ -35,6 +35,8 @@ PATCH="$REPO_ROOT/ASK/patches/fmlib/01-mono-ask-extensions.patch"
 [ -f "$PATCH" ] || { echo "ERROR: fmlib patch not found: $PATCH" >&2; exit 1; }
 PATCH_B1="$REPO_ROOT/ASK/patches/fmlib/02-abi-alignment-b1.patch"
 [ -f "$PATCH_B1" ] || { echo "ERROR: fmlib B1 patch not found: $PATCH_B1" >&2; exit 1; }
+PATCH_B3="$REPO_ROOT/ASK/patches/fmlib/03-bounds-f08-b3.patch"
+[ -f "$PATCH_B3" ] || { echo "ERROR: fmlib B3 patch not found: $PATCH_B3" >&2; exit 1; }
 
 # Cross-compile detection (matches ci-build-ask-userspace.sh)
 if [ "$(uname -m)" = "aarch64" ]; then
@@ -71,6 +73,9 @@ echo "    patch applied OK"
 echo "--- applying $PATCH_B1 (F01/F02 ABI alignment with kernel UAPI) ---"
 (cd "$WORK/fmlib" && patch --no-backup-if-mismatch -p1 < "$PATCH_B1")
 echo "    B1 patch applied OK"
+echo "--- applying $PATCH_B3 (F08 bounds on num_of_keys / num_of_schemes) ---"
+(cd "$WORK/fmlib" && patch --no-backup-if-mismatch -p1 < "$PATCH_B3")
+echo "    B3 patch applied OK"
 
 # Sanity: verify the critical struct field is present after patch
 if ! grep -q "bool.*shared" "$WORK/fmlib/include/fmd/Peripherals/fm_pcd_ext.h"; then
