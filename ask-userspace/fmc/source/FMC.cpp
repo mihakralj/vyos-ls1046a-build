@@ -101,8 +101,14 @@ int main( int argc, char* argv[] )
     // because exceptions will be thrown for problems.
     try {
         // Get directory name
-        std::string appDir( argv[0] );
-        const unsigned int pos = appDir.find_last_of( "\\/" );
+        /* ASK-edit (defensive P1-4): guard against argc==0 (POSIX-permitted)
+         * before constructing std::string from argv[0] — UB on NULL. */
+        std::string appDir = ( argc < 1 || argv[0] == NULL ) ? std::string(".")
+                                                             : std::string(argv[0]);
+        /* ASK-edit (defensive P1-3): use std::string::size_type for pos so the
+         * std::string::npos sentinel compares correctly on 64-bit (truncating to
+         * unsigned int yielded 0xFFFFFFFF, never matching size_t(npos)). */
+        const std::string::size_type pos = appDir.find_last_of( "\\/" );
         if ( std::string::npos == pos ) {
             appDir = ".";
         }

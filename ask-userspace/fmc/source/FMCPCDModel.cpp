@@ -514,7 +514,17 @@ CFMCModel::createEngine( const CEngine& xmlEngine, const CTaskDef* pTaskDef )
                 hdr.u.hdr.insrtParams.u.byHdr.u.specificL2Params.update = headerit->second.hdrInsertHeader[0].update || headerit->second.hdrInsertHeader[1].update;
 
                 hdr.u.hdr.insrtParams.u.byHdr.u.specificL2Params.size = headerit->second.hdrInsertHeader[0].size + headerit->second.hdrInsertHeader[1].size;
-                
+
+                /* ASK-edit (defensive P0-5): bound hdrInsertHeader sizes BEFORE the
+                 * subtraction below; an attacker-supplied size > FM_PCD_MAX_SIZE_OF_KEY
+                 * would underflow the unsigned expression FM_PCD_MAX_SIZE_OF_KEY - size
+                 * and OOB-index into the data[] array (~4 GiB read). */
+                if ( headerit->second.hdrInsertHeader[0].size > FM_PCD_MAX_SIZE_OF_KEY ||
+                     headerit->second.hdrInsertHeader[1].size > FM_PCD_MAX_SIZE_OF_KEY ||
+                     headerit->second.hdrInsertHeader[0].size + headerit->second.hdrInsertHeader[1].size > FM_PCD_MAX_SIZE_OF_KEY ) {
+                    throw CGenericError( ERR_HDR_INSERT_SIZE, headerit->second.name );
+                }
+
                 for ( unsigned int j = 0; j < headerit->second.hdrInsertHeader[0].size; ++j ) {
                     insertData.data[j] =
                         headerit->second.hdrInsertHeader[0].data[FM_PCD_MAX_SIZE_OF_KEY - ( headerit->second.hdrInsertHeader[0].size ) + j];
@@ -538,6 +548,12 @@ CFMCModel::createEngine( const CEngine& xmlEngine, const CTaskDef* pTaskDef )
                 hdr.u.hdr.insrtParams.u.generic.size    = headerit->second.hdrInsert.size;
                 hdr.u.hdr.insrtParams.u.generic.offset  = headerit->second.hdrInsert.offset;
                 hdr.u.hdr.insrtParams.u.generic.replace = headerit->second.hdrInsert.replace;
+
+                /* ASK-edit (defensive P0-5): bound hdrInsert.size against MAX_INSERT_SIZE
+                 * before the unsigned subtraction below to avoid ~4 GiB OOB read. */
+                if ( headerit->second.hdrInsert.size > MAX_INSERT_SIZE ) {
+                    throw CGenericError( ERR_HDR_INSERT_SIZE, headerit->second.name );
+                }
 
                 for ( unsigned int j = 0; j < headerit->second.hdrInsert.size; ++j ) {
                     insertData.data[j] =
@@ -643,6 +659,13 @@ CFMCModel::createEngine( const CEngine& xmlEngine, const CTaskDef* pTaskDef )
                         {
                             if (!headerit->second.hdrUpdate.fields[i].fill)
                             {
+                                /* ASK-edit (defensive P1-1): bound the dscp index
+                                 * against the dscpToVpriTable size (FM_PCD_MANIP_DSCP_TO_VLAN_TRANS = 64).
+                                 * Without this guard a malformed XML <dscp index="..."/>
+                                 * value > 63 produced an OOB write of up to ~192 bytes past the table. */
+                                if ( headerit->second.hdrUpdate.fields[i].index >= FM_PCD_MANIP_DSCP_TO_VLAN_TRANS ) {
+                                    throw CGenericError( ERR_DSCP_INDEX_OOR, headerit->second.name );
+                                }
                                 hdr.u.hdr.fieldUpdateParams.u.vlan.u.dscpToVpri.dscpToVpriTable[headerit->second.hdrUpdate.fields[i].index] = (uint8_t)std::strtoul( headerit->second.hdrUpdate.fields[i].value.c_str(), 0, 0 );
                             }
                         }
@@ -655,16 +678,19 @@ CFMCModel::createEngine( const CEngine& xmlEngine, const CTaskDef* pTaskDef )
                 hdr.u.hdr.fieldUpdateParams.u.ipv4.validUpdates = 0;
                 for (unsigned int i = 0; i < headerit->second.hdrUpdate.fields.size();i++)
                 {
+                    /* ASK-edit (defensive P0-4): use loop index i instead of literal [0]; the
+                     * original code read the value of field 0 regardless of which field type
+                     * matched, dropping all but the first field's value. */
                     if (headerit->second.hdrUpdate.fields[i].type == "tos")
                     {
                         hdr.u.hdr.fieldUpdateParams.u.ipv4.validUpdates |= HDR_MANIP_IPV4_TOS;
-                        hdr.u.hdr.fieldUpdateParams.u.ipv4.tos = (uint8_t)std::strtoul( headerit->second.hdrUpdate.fields[0].value.c_str(), 0, 0 );
+                        hdr.u.hdr.fieldUpdateParams.u.ipv4.tos = (uint8_t)std::strtoul( headerit->second.hdrUpdate.fields[i].value.c_str(), 0, 0 );
                     }
                     
                     if (headerit->second.hdrUpdate.fields[i].type == "id")
                     {
                         hdr.u.hdr.fieldUpdateParams.u.ipv4.validUpdates |= HDR_MANIP_IPV4_ID;
-                        hdr.u.hdr.fieldUpdateParams.u.ipv4.id = (uint16_t)std::strtoul( headerit->second.hdrUpdate.fields[0].value.c_str(), 0, 0 );
+                        hdr.u.hdr.fieldUpdateParams.u.ipv4.id = (uint16_t)std::strtoul( headerit->second.hdrUpdate.fields[i].value.c_str(), 0, 0 );
                     }
 
                     if (headerit->second.hdrUpdate.fields[i].type == "ttl")
@@ -676,13 +702,13 @@ CFMCModel::createEngine( const CEngine& xmlEngine, const CTaskDef* pTaskDef )
                     if (headerit->second.hdrUpdate.fields[i].type == "src")
                     {
                         hdr.u.hdr.fieldUpdateParams.u.ipv4.validUpdates |= HDR_MANIP_IPV4_SRC;
-                        hdr.u.hdr.fieldUpdateParams.u.ipv4.src = (uint32_t)std::strtoul( headerit->second.hdrUpdate.fields[0].value.c_str(), 0, 0 );
+                        hdr.u.hdr.fieldUpdateParams.u.ipv4.src = (uint32_t)std::strtoul( headerit->second.hdrUpdate.fields[i].value.c_str(), 0, 0 );
                     }
 
                     if (headerit->second.hdrUpdate.fields[i].type == "dst")
                     {
                         hdr.u.hdr.fieldUpdateParams.u.ipv4.validUpdates |= HDR_MANIP_IPV4_DST;
-                        hdr.u.hdr.fieldUpdateParams.u.ipv4.dst = (uint32_t)std::strtoul( headerit->second.hdrUpdate.fields[0].value.c_str(), 0, 0 );
+                        hdr.u.hdr.fieldUpdateParams.u.ipv4.dst = (uint32_t)std::strtoul( headerit->second.hdrUpdate.fields[i].value.c_str(), 0, 0 );
                     }
                 }
             }
@@ -695,7 +721,7 @@ CFMCModel::createEngine( const CEngine& xmlEngine, const CTaskDef* pTaskDef )
                     if (headerit->second.hdrUpdate.fields[i].type == "tc")
                     {
                         hdr.u.hdr.fieldUpdateParams.u.ipv6.validUpdates |= HDR_MANIP_IPV6_TC;
-                        hdr.u.hdr.fieldUpdateParams.u.ipv6.trafficClass = (uint8_t)std::strtoul( headerit->second.hdrUpdate.fields[0].value.c_str(), 0, 0 );
+                        hdr.u.hdr.fieldUpdateParams.u.ipv6.trafficClass = (uint8_t)std::strtoul( headerit->second.hdrUpdate.fields[i].value.c_str(), 0, 0 );
                     }
                     
                     if (headerit->second.hdrUpdate.fields[i].type == "hl")
@@ -774,13 +800,13 @@ CFMCModel::createEngine( const CEngine& xmlEngine, const CTaskDef* pTaskDef )
                     if (headerit->second.hdrUpdate.fields[i].type == "src")
                     {
                         hdr.u.hdr.fieldUpdateParams.u.tcpUdp.validUpdates |= HDR_MANIP_TCP_UDP_SRC;
-                        hdr.u.hdr.fieldUpdateParams.u.tcpUdp.src = (uint16_t)std::strtoul( headerit->second.hdrUpdate.fields[0].value.c_str(), 0, 0 );
+                        hdr.u.hdr.fieldUpdateParams.u.tcpUdp.src = (uint16_t)std::strtoul( headerit->second.hdrUpdate.fields[i].value.c_str(), 0, 0 );
                     }
 
                     if (headerit->second.hdrUpdate.fields[i].type == "dst")
                     {
                         hdr.u.hdr.fieldUpdateParams.u.tcpUdp.validUpdates |= HDR_MANIP_TCP_UDP_DST;
-                        hdr.u.hdr.fieldUpdateParams.u.tcpUdp.dst = (uint16_t)std::strtoul( headerit->second.hdrUpdate.fields[0].value.c_str(), 0, 0 );
+                        hdr.u.hdr.fieldUpdateParams.u.tcpUdp.dst = (uint16_t)std::strtoul( headerit->second.hdrUpdate.fields[i].value.c_str(), 0, 0 );
                     }
                 }
             }
@@ -1537,6 +1563,15 @@ CFMCModel::createCCNode( const CTaskDef* pTaskDef, Port& port, const CClassifica
             }
         }
 
+        /* ASK-edit (defensive P0-5): bound ccNode.keySize against
+         * FM_PCD_MAX_SIZE_OF_KEY before the unsigned subtraction in the j-loop.
+         * Without this guard an attacker-supplied key spec producing a keySize
+         * > FM_PCD_MAX_SIZE_OF_KEY underflows the index expression
+         * "FM_PCD_MAX_SIZE_OF_KEY - keySize + j" to ~4 GiB and OOB-reads
+         * xmlCCNode.entries[i].data[] / .mask[]. */
+        if ( ccNode.keySize > FM_PCD_MAX_SIZE_OF_KEY ) {
+            throw CGenericError( ERR_KEY_SIZE_OOR, xmlCCNode.name );
+        }
         for ( unsigned int j = 0; j < ccNode.keySize; ++j ) {
             ccNode.keys[i].data[j] =
                 xmlCCNode.entries[i].data[FM_PCD_MAX_SIZE_OF_KEY - ccNode.keySize + j];
@@ -1894,6 +1929,12 @@ CFMCModel::createHTNode( const CTaskDef* pTaskDef, Port& port, const CClassifica
             }
         }
 
+        /* ASK-edit (defensive P0-5): bound htNode.matchKeySize against
+         * FM_PCD_MAX_SIZE_OF_KEY before the unsigned subtraction in the j-loop.
+         * Same underflow-as-bounds-check defect as the ccNode block above. */
+        if ( htNode.matchKeySize > FM_PCD_MAX_SIZE_OF_KEY ) {
+            throw CGenericError( ERR_KEY_SIZE_OOR, xmlCCNode.name );
+        }
         for ( unsigned int j = 0; j < htNode.matchKeySize; ++j ) {
             htNode.keys[i].data[j] =
                 xmlCCNode.entries[i].data[FM_PCD_MAX_SIZE_OF_KEY - htNode.matchKeySize + j];
