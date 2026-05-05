@@ -27,6 +27,7 @@ nxp-linux/
 nxp-fmlib/
 nxp-fmc/
 libcli/
+!patches/libcli/
 artifacts/
 work/
 !data/ask-userspace/libcli/

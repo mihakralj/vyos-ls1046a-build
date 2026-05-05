@@ -130,6 +130,22 @@ echo ""
 echo "### Stage 1: Building libcli"
 LIBCLI_SRC="$REPO_ROOT/libcli"
 if [ -d "$LIBCLI_SRC" ] && [ -f "$LIBCLI_SRC/Makefile" ]; then
+  # C3 B6 P0.3: apply consumer-tracked libcli patches (idempotent)
+  LIBCLI_PATCHES="$REPO_ROOT/patches/libcli"
+  if [ -d "$LIBCLI_PATCHES" ]; then
+    for _p in "$LIBCLI_PATCHES"/*.patch; do
+      [ -e "$_p" ] || continue
+      if (cd "$LIBCLI_SRC" && git apply --check --reverse "$_p" >/dev/null 2>&1); then
+        echo "    libcli patch already applied: $(basename "$_p")"
+      elif (cd "$LIBCLI_SRC" && git apply --check "$_p" >/dev/null 2>&1); then
+        (cd "$LIBCLI_SRC" && git apply "$_p")
+        echo "    libcli patch applied: $(basename "$_p")"
+      else
+        echo "    libcli patch FAILED check: $(basename "$_p")" >&2
+        exit 1
+      fi
+    done
+  fi
   make -C "$LIBCLI_SRC" clean 2>/dev/null || true
   make -C "$LIBCLI_SRC" -j"$NPROC" \
     CC="$CC" AR="$AR" \

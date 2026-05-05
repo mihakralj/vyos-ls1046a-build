@@ -1,0 +1,24 @@
+diff --git a/libcli.c b/libcli.c
+index 88c23d8..796333e 100644
+--- a/libcli.c
++++ b/libcli.c
+@@ -1469,9 +1469,16 @@ int cli_loop(struct cli_def *cli, int sockfd) {
+               if (cmd[l - 1] == ' ' || cmd[l - 1] == '|' || (comphelp.comma_separated && cmd[l - 1] == ',')) break;
+               _write(sockfd, "\b", 1);
+             }
+-            strcpy((cmd + l), comphelp.entries[0]);
+-            l += strlen(comphelp.entries[0]);
+-            cmd[l++] = ' ';
++            /* C3 B6 P0.3: bound completion copy by remaining buffer space */
++            {
++              size_t remaining_xx = (l < CLI_MAX_LINE_LENGTH) ? (CLI_MAX_LINE_LENGTH - l - 1) : 0;
++              size_t entlen_xx = strlen(comphelp.entries[0]);
++              if (entlen_xx > remaining_xx) entlen_xx = remaining_xx;
++              memcpy(cmd + l, comphelp.entries[0], entlen_xx);
++              l += entlen_xx;
++              cmd[l] = 0;
++            }
++            if (l < CLI_MAX_LINE_LENGTH - 1) cmd[l++] = ' ';
+             cursor = l;
+             _write(sockfd, comphelp.entries[0], strlen(comphelp.entries[0]));
+             _write(sockfd, " ", 1);
