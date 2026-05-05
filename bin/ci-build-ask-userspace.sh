@@ -35,7 +35,7 @@ CHROOT="${2:?Usage: ci-build-ask-userspace.sh <kernel-src-dir> <output-chroot-di
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-ASK_SRC="$REPO_ROOT/ask-ls1046a-6.6"
+ASK_SRC="$REPO_ROOT/ASK"
 PREBUILT="$REPO_ROOT/data/ask-userspace"
 
 # Build staging area — holds compiled libs/headers for inter-component linking
