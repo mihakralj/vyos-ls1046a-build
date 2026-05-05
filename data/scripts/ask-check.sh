@@ -203,7 +203,7 @@ fi
 # ---------------------------------------------------------------------------
 section "SDK FMan controller"
 
-if dmesg_has 'FM_Init.*FMan-Controller code'; then
+if dmesg_has 'FM_(Init|Config).*FMan-Controller code'; then
     ok "FMan controller code loaded"
 else
     ko "FMan controller code loaded"
