@@ -248,8 +248,13 @@ if [ -n "${ASK_KERNEL_TAG:-}" ]; then
     else
       echo "### KSRC_ASK=$KSRC_ASK (FMD UAPI present)"
       echo "### INCLUDES_CHR=$INCLUDES_CHR"
-      "$GITHUB_WORKSPACE/bin/ci-build-ask-userspace.sh" "$KSRC_ASK" "$INCLUDES_CHR" || \
+      if ! "$GITHUB_WORKSPACE/bin/ci-build-ask-userspace.sh" "$KSRC_ASK" "$INCLUDES_CHR"; then
+        if [ "${ASK_USERSPACE_STRICT:-1}" = "1" ]; then
+          echo "ERROR: ASK userspace rebuild failed — aborting (set ASK_USERSPACE_STRICT=0 to override; ships stale prebuilt dpa_app → SIGSEGV)" >&2
+          exit 1
+        fi
         echo "WARNING: ASK userspace rebuild failed — falling back to prebuilt blobs (dpa_app likely SIGSEGV)"
+      fi
     fi
     rm -rf "$KHDR_EXTRACT"
   fi
