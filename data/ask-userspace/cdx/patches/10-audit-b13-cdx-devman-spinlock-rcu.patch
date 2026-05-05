@@ -1,0 +1,49 @@
+audit-b13: cdx P1.01 — fix sleep-in-atomic in dpa_get_iface_by_addr
+
+AUDIT-cdx.md P1.01: devman.c::dpa_get_iface_by_addr() takes
+dpa_devlist_lock (a spinlock) at L976 to walk dpa_interface_info,
+then calls dev_get_by_name(&init_net, iface_info->name) at L981.
+dev_get_by_name() acquires dev_base_lock and may take rtnl_mutex
+on alias resolution — both can sleep, which is illegal while
+holding a spinlock. Surfaces under CONFIG_DEBUG_ATOMIC_SLEEP as
+"BUG: sleeping function called from invalid context" any time the
+ASK fast-path resolves a route to an interface (every
+dpa_get_tx_fqid_by_route / dpa_create_l3_route call).
+
+Fix: replace dev_get_by_name() with dev_get_by_name_rcu() inside
+an rcu_read_lock()/unlock() pair, and call dev_hold() while still
+under RCU so the caller's existing dev_put() pairing is preserved.
+dev_get_by_name_rcu() is non-sleeping by contract; dev_hold() is
+safe under both rcu_read_lock and spinlock. The list iteration
+itself remains under dpa_devlist_lock — only the netdev lookup
+moves to RCU.
+
+The other dev_get_by_name() callsites in devman.c (L498
+get_eth_iface_info, L2324 get_wlan_iface_info, L2920) are NOT
+under dpa_devlist_lock (verified by walking caller chains and
+spinlock pairing) and are left untouched.
+
+No ABI change; no behaviour change for valid lookups; the only
+visible difference is that the previous "may sleep" splat
+disappears.
+
+--- a/cdx/devman.c
++++ b/cdx/devman.c
+@@ -978,7 +978,15 @@
+ 	while(iface_info) {
+ 		if (iface_info->if_flags & (IF_TYPE_ETHERNET | IF_TYPE_PPPOE | IF_TYPE_VLAN | IF_TYPE_WLAN)){
+ 
+-			device = dev_get_by_name(&init_net, iface_info->name);
++			/* ASK audit P1.01 (B13): dpa_devlist_lock is held here;
++			 * dev_get_by_name() may sleep (rtnl/dev_base_lock), which
++			 * is illegal in atomic context. Use the RCU variant and
++			 * mirror the original refcounted semantics via dev_hold(). */
++			rcu_read_lock();
++			device = dev_get_by_name_rcu(&init_net, iface_info->name);
++			if (device)
++				dev_hold(device);
++			rcu_read_unlock();
+ 			if (!device)
+ 			{
+ 				printk("%s:: Could not find device : %s\n",__FUNCTION__, iface_info->name);
+
