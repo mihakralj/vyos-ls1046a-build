@@ -176,6 +176,33 @@ for package in $packages; do
         echo "WARNING: ASK CDX patch partially failed — some fixes may be missing"
     fi
 
+    # Apply tracked audit-batch patches from data/ask-userspace/<module>/patches/
+    # These are the canonical, version-controlled fixes derived from the
+    # audit reports under plans/audit/. They live in this repo (NOT in the
+    # gitignored ask-ls1046a-6.6 sibling) so the audit history is preserved
+    # in git. Applied AFTER the mono defensive-rewrite patch so they layer
+    # on top of NXP/mono base + mono fixups. Naming convention:
+    #   data/ask-userspace/<module>/patches/02-audit-b<N>-*.patch
+    # Sorted alphabetically => batch number ordering (B2 before B3, etc).
+    AUDIT_PATCH_ROOT="$GITHUB_WORKSPACE/data/ask-userspace"
+    for module_dir in cdx fci auto_bridge; do
+      patch_dir="$AUDIT_PATCH_ROOT/$module_dir/patches"
+      [ -d "$patch_dir" ] || continue
+      # Iterate audit-batch unified-diff patches (skip non-patch files like
+      # the orphaned full-file copies devman.c / dpa_cfg.c that pre-date
+      # this convention).
+      for p in "$patch_dir"/[0-9][0-9]-audit-*.patch; do
+        [ -f "$p" ] || continue
+        echo "### Applying audit patch: $(basename "$p") to ask-ls1046a-6.6"
+        patch --no-backup-if-mismatch -p1 -d "$ASK_SRC" < "$p" || {
+          echo "FATAL: audit patch $(basename "$p") failed to apply cleanly."
+          echo "       Audit patches MUST apply cleanly — they encode security"
+          echo "       and ABI invariants. Refusing to ship the build."
+          exit 1
+        }
+      done
+    done
+
     # NR_CPUS=4 fix: CDX defines MAX_SCHEDULER_QUEUES=16 (NUM_PQS+NUM_WBFQS) but
     # DPAA_ETH_TX_QUEUES=NR_CPUS=4 on LS1046A. The unconditional #error in
     # control_qm.c is only meaningful when CEETM (ENABLE_EGRESS_QOS) is enabled —
