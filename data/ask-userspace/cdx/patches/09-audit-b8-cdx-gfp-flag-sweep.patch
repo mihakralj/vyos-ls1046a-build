@@ -1,0 +1,454 @@
+audit-b8: cdx: replace numeric kzalloc flags with named GFP constants
+
+The cdx OOT module has 41 call sites passing a literal `0` and 2 sites passing
+a literal `1` as the GFP flags argument to kzalloc(). Both are wrong:
+
+- `kzalloc(size, 0)` is equivalent to GFP_NOWAIT (no __GFP_RECLAIM). On any
+  memory pressure the allocation silently returns NULL; the calling fast-path
+  (flow-add, FQ creation, BPool registration, hash-table grow, IPsec SA
+  install, etc.) hits an early `if (!p) return -ENOMEM` and forwarding falls
+  back to the slow path with no observability. The audit (B8) flagged this
+  across ten cdx TUs.
+- `kzalloc(size, 1)` is meaningless: `1` is not a valid GFP flag mask. The
+  two occurrences (dpa_wifi.c WLAN-exception FQ array and dpa_ipsec.c PCD FQ)
+  were almost certainly typos for what should have been GFP_KERNEL/GFP_ATOMIC.
+
+This patch is a mechanical sweep:
+
+  kzalloc(<args>, 0)  ->  kzalloc(<args>, GFP_KERNEL)
+  kzalloc(<args>, 1)  ->  kzalloc(<args>, GFP_ATOMIC)
+
+GFP_KERNEL is correct for every `, 0)` site in cdx: all are reached from
+process context (module-init, ioctl handlers, sysfs writers, FPP command
+channel which is a workqueue). The two `, 1)` sites likewise run in
+process context (FQ allocation during config), but the audit recommends
+GFP_ATOMIC as the conservative replacement for the typo because there is
+no positive evidence the original author intended sleep-capable behavior;
+GFP_ATOMIC preserves the original "non-sleeping" semantics if any caller
+later moves to softirq, while still using a real flag rather than `1`.
+
+Files touched (TU: zero->GFP_KERNEL, one->GFP_ATOMIC):
+  cdx_dpa_ipsec.c    1, 0
+  cdx_ehash.c        7, 0
+  cdx_ifstats.c      1, 0
+  cdx_reassm.c       2, 0
+  devman.c           6, 0
+  devoh.c            2, 0
+  dpa_cfg.c          4, 0
+  dpa_control_mc.c   7, 0
+  dpa_ipsec.c        3, 1
+  dpa_test.c         3, 0
+  dpa_wifi.c         4, 1
+  voip.c             1, 0
+
+Total: 41 + 2 = 43 sites across 12 .c files.
+
+No behavior change on a healthy system; under memory pressure, the
+GFP_KERNEL paths now correctly enter direct reclaim instead of returning
+NULL on the first failed slab refill.
+
+Audit reference: AUDIT-cdx.md (B8, GFP-flag hygiene).
+
+--- a/cdx/cdx_dpa_ipsec.c	2026-05-05 12:59:00.352030458 +0000
++++ b/cdx/cdx_dpa_ipsec.c	2026-05-05 13:00:54.585854211 +0000
+@@ -2476,7 +2476,7 @@
+ 	printk("%s:: direction %d\n", __FUNCTION__, sa->direction);
+ #endif
+ 
+-	info = kzalloc(sizeof(struct ins_entry_info), 0);
++	info = kzalloc(sizeof(struct ins_entry_info), GFP_KERNEL);
+ 	if (!info) {
+ 		DPA_ERROR("%s::unable to alloc mem for ins_info\n", __FUNCTION__);
+ 		//remove shared desc here??? TBD
+--- a/cdx/cdx_ehash.c	2026-05-05 12:59:00.352030458 +0000
++++ b/cdx/cdx_ehash.c	2026-05-05 13:00:54.586854218 +0000
+@@ -846,7 +846,7 @@
+ 	entry->ct = NULL;
+ 	tbl_entry = NULL;	
+ 
+-	info = kzalloc(sizeof(struct ins_entry_info), 0);
++	info = kzalloc(sizeof(struct ins_entry_info), GFP_KERNEL);
+ 	if (!info)
+ 		return FAILURE;
+ 	info->entry = entry;
+@@ -1050,7 +1050,7 @@
+ 	entry->ct = NULL;
+ 	tbl_entry = NULL;	
+ 	
+-	info = kzalloc(sizeof(struct ins_entry_info), 0);
++	info = kzalloc(sizeof(struct ins_entry_info), GFP_KERNEL);
+ 	if (!info)
+ 		return FAILURE;
+ 	
+@@ -1320,7 +1320,7 @@
+ 	struct hw_ct *ct = NULL;
+ 	int retval;
+ 
+-	info = kzalloc(sizeof(struct ins_entry_info), 0);
++	info = kzalloc(sizeof(struct ins_entry_info), GFP_KERNEL);
+ 	if(!info)
+ 	{
+ 		DPA_ERROR("%s::unable to allocate mem for info\n", __FUNCTION__);
+@@ -1544,7 +1544,7 @@
+ 		return FAILURE;
+ 	}
+ 
+-	info = kzalloc(sizeof(struct ins_entry_info), 0);
++	info = kzalloc(sizeof(struct ins_entry_info), GFP_KERNEL);
+ 	if (!info) {
+ 		DPA_ERROR("%s::unable to allocate mem for info\n",
+ 				__FUNCTION__);
+@@ -3264,7 +3264,7 @@
+ 	struct dpa_bp *bp, *bp_parent;
+ 	int buffer_count = 0, ret = 0, refill_cnt ;
+ 
+-	bp = kzalloc(sizeof(struct dpa_bp), 0);
++	bp = kzalloc(sizeof(struct dpa_bp), GFP_KERNEL);
+ 	if (unlikely(bp == NULL)) {
+ 		DPA_ERROR("%s::failed to allocate mem for bman pool \n",
+ 				__FUNCTION__);
+@@ -3728,7 +3728,7 @@
+ 
+ 	tbl_entry = NULL;	
+ 
+-	info = kzalloc(sizeof(struct ins_entry_info), 0);
++	info = kzalloc(sizeof(struct ins_entry_info), GFP_KERNEL);
+ 	if (!info)
+ 	{
+ 		DPA_ERROR("%s(%d)::unable to create memory.\n",__FUNCTION__, __LINE__);
+@@ -3881,7 +3881,7 @@
+ 		return FAILURE;
+ 	}
+ 
+-	info = kzalloc(sizeof(struct ins_entry_info), 0);
++	info = kzalloc(sizeof(struct ins_entry_info), GFP_KERNEL);
+ 	if (!info)
+ 		return FAILURE;
+ 
+--- a/cdx/cdx_ifstats.c	2026-05-05 12:59:00.352030458 +0000
++++ b/cdx/cdx_ifstats.c	2026-05-05 13:00:54.586854218 +0000
+@@ -95,7 +95,7 @@
+ 
+ int alloc_iface_stats(uint32_t dev_type, struct dpa_iface_info *iface)
+ {
+-	iface->last_stats = (struct iface_stats *)kzalloc(sizeof(struct iface_stats), 0);  
++	iface->last_stats = (struct iface_stats *)kzalloc(sizeof(struct iface_stats), GFP_KERNEL);  
+ 	if (!iface->last_stats) {
+ 		DPA_ERROR("%s:: memory alloc failed for iface last stats\n", __FUNCTION__);
+ 		return FAILURE;
+--- a/cdx/cdx_reassm.c	2026-05-05 12:59:00.352030458 +0000
++++ b/cdx/cdx_reassm.c	2026-05-05 13:00:54.586854218 +0000
+@@ -235,7 +235,7 @@
+ 	fqid = fqid_base;
+ 	for (ii = 0; ii < num_portals; ii++) {
+ 		if (find_pcd_fq_info(fqid)) {
+-			dpa_fq = kzalloc(sizeof(struct dpa_fq), 0);
++			dpa_fq = kzalloc(sizeof(struct dpa_fq), GFP_KERNEL);
+ 			if (!dpa_fq) {
+ 				DPA_ERROR("%s::unable to alloc mem for "
+ 						"fqid %d\n", __FUNCTION__, fqid);
+@@ -308,7 +308,7 @@
+ 	struct dpa_bp *bp;
+ 	uint32_t buffer_count;
+ 
+-	bp = kzalloc(sizeof(struct dpa_bp), 0);
++	bp = kzalloc(sizeof(struct dpa_bp), GFP_KERNEL);
+ 	if (unlikely(bp == NULL)) {
+ 		DPA_ERROR("%s::failed to allocate mem for bman pool for reassly\n", 
+ 				__FUNCTION__);
+--- a/cdx/devman.c	2026-05-05 12:59:00.342030386 +0000
++++ b/cdx/devman.c	2026-05-05 13:00:54.587854225 +0000
+@@ -2021,7 +2021,7 @@
+ 	}
+ 	//ethernet/physical iface type
+ 	iface_info = (struct dpa_iface_info *)
+-		kzalloc(sizeof(struct dpa_iface_info), 0);  
++		kzalloc(sizeof(struct dpa_iface_info), GFP_KERNEL);  
+ 	if (!iface_info) {
+ 		DPA_ERROR("%s::no mem for eth dev info size %d\n", 
+ 				__FUNCTION__, 
+@@ -2178,7 +2178,7 @@
+ 	}
+ 
+ 	iface_info = (struct dpa_iface_info *)
+-		kzalloc(sizeof(struct dpa_iface_info), 0);  
++		kzalloc(sizeof(struct dpa_iface_info), GFP_KERNEL);  
+ 	if (!iface_info) {
+ 		DPA_ERROR("%s::no mem for pppoe dev info size %d\n", 
+ 				__FUNCTION__, 
+@@ -2264,7 +2264,7 @@
+ 
+ 	//ethernet/physical iface type
+ 	iface_info = (struct dpa_iface_info *)
+-		kzalloc(sizeof(struct dpa_iface_info), 0);  
++		kzalloc(sizeof(struct dpa_iface_info), GFP_KERNEL);  
+ 	if (!iface_info) {
+ 		DPA_ERROR("%s::no mem for eth dev info size %d\n", 
+ 				__FUNCTION__, 
+@@ -2349,7 +2349,7 @@
+ 
+ 	//ethernet/physical iface type
+ 	iface_info = (struct dpa_iface_info *)
+-		kzalloc(sizeof(struct dpa_iface_info), 0);
++		kzalloc(sizeof(struct dpa_iface_info), GFP_KERNEL);
+ 	if (!iface_info) {
+ 		DPA_ERROR("%s::no mem for eth dev info size %d\n",
+ 				__FUNCTION__,
+@@ -2602,7 +2602,7 @@
+ 	}
+ #endif
+ 	iface_info = (struct dpa_iface_info *)
+-		kzalloc(sizeof(struct dpa_iface_info), 0);  
++		kzalloc(sizeof(struct dpa_iface_info), GFP_KERNEL);  
+ 	if (!iface_info) {
+ 		DPA_ERROR("%s::no mem for tunnel dev info size %d\n", 
+ 				__FUNCTION__, 
+@@ -2805,7 +2805,7 @@
+ #endif
+ 		for (jj = 0; jj < dist_info->count; jj++) {
+ 			if (find_pcd_fq_info(fqid)) {
+-				dpa_fq = kzalloc(sizeof(struct dpa_fq), 0);
++				dpa_fq = kzalloc(sizeof(struct dpa_fq), GFP_KERNEL);
+ 				if (!dpa_fq) {
+ 					DPA_ERROR("%s::unable to alloc mem for fqid %d\n",
+ 							__FUNCTION__, fqid);
+--- a/cdx/devoh.c	2026-05-05 12:59:00.353030465 +0000
++++ b/cdx/devoh.c	2026-05-05 13:00:54.587854225 +0000
+@@ -336,7 +336,7 @@
+ 	}
+ 	//ethernet/physical iface type
+ 	iface_info = (struct dpa_iface_info *)
+-		kzalloc(sizeof(struct dpa_iface_info), 0);
++		kzalloc(sizeof(struct dpa_iface_info), GFP_KERNEL);
+ 	if (!iface_info) {
+ 		DPA_ERROR("%s::no mem for eth dev info size %d\n",
+ 				__FUNCTION__,
+@@ -536,7 +536,7 @@
+ 	for (ii = 0; ii < 2; ii++) {
+ 		struct qman_fq *fq;
+ 
+-		dpa_fq = kzalloc(sizeof(struct dpa_fq), 0);
++		dpa_fq = kzalloc(sizeof(struct dpa_fq), GFP_KERNEL);
+ 		if (!dpa_fq) {
+ 			DPA_ERROR("%s::unable to alloc mem for defa or err fqid\n",
+ 					__FUNCTION__);
+--- a/cdx/dpa_cfg.c	2026-05-05 12:59:00.368030573 +0000
++++ b/cdx/dpa_cfg.c	2026-05-05 13:00:54.587854225 +0000
+@@ -192,7 +192,7 @@
+ 			port_info->name, port_info->max_dist);
+ #endif
+ 	mem_size = (sizeof(struct cdx_dist_info) * port_info->max_dist);
+-	dist_info = kzalloc(mem_size, 0);
++	dist_info = kzalloc(mem_size, GFP_KERNEL);
+ 	if (!dist_info) {
+ 		DPA_ERROR("%s::memalloc for dist_info failed\n",
+ 				__FUNCTION__);
+@@ -298,7 +298,7 @@
+ DPA_INFO("%s::fm %d num ports %d\n", __FUNCTION__, 
+ finfo->index, finfo->max_ports);
+ #endif
+-port_info = kzalloc(mem_size, 0); 
++port_info = kzalloc(mem_size, GFP_KERNEL); 
+ if (!port_info) {
+ DPA_ERROR("%s::memalloc for port_info failed\n",
+ __FUNCTION__);
+@@ -377,7 +377,7 @@
+ 
+ 	//allocate table information area
+ 	mem_size = (sizeof(struct table_info) * finfo->num_tables);
+-	tbl_info = kzalloc(mem_size, 0); 
++	tbl_info = kzalloc(mem_size, GFP_KERNEL); 
+ 	if (!tbl_info) {
+ 		DPA_ERROR("%s::memalloc for table_info failed\n",
+ 				__FUNCTION__);
+@@ -643,7 +643,7 @@
+ return -EBUSY;
+ }
+ mem_size = (sizeof(struct cdx_fman_info) * params.num_fmans);
+-fman_info = kzalloc(mem_size, 0);
++fman_info = kzalloc(mem_size, GFP_KERNEL);
+ if (!fman_info) {
+ DPA_ERROR("%s::unable to allocate mem for fman_info\n",
+ __FUNCTION__);
+--- a/cdx/dpa_control_mc.c	2026-05-05 12:59:00.353030465 +0000
++++ b/cdx/dpa_control_mc.c	2026-05-05 13:00:54.592854261 +0000
+@@ -338,13 +338,13 @@
+ 		strncpy(ucInterface,mcast6_group->input_device_str,IF_NAME_SIZE-1);
+ 	}
+ 
+-	pRtEntry = kzalloc((sizeof(RouteEntry)), 0);
++	pRtEntry = kzalloc((sizeof(RouteEntry)), GFP_KERNEL);
+ 	if (!pRtEntry)
+ 	{
+ 		return -ENOMEM;	
+ 	}
+ 
+-	pCtEntry = kzalloc((sizeof(struct _tCtEntry)), 0);
++	pCtEntry = kzalloc((sizeof(struct _tCtEntry)), GFP_KERNEL);
+ 	if (!pCtEntry)
+ 	{
+ 		retval = -ENOMEM;	
+@@ -437,7 +437,7 @@
+ 	uint32_t tbl_type;
+ 
+ 	// memory allocation for multicast group
+-	pMcastGrpInfo = (struct mcast_group_info *)kzalloc((sizeof(struct mcast_group_info)), 0);
++	pMcastGrpInfo = (struct mcast_group_info *)kzalloc((sizeof(struct mcast_group_info)), GFP_KERNEL);
+ 	if(!pMcastGrpInfo)
+ 	{
+ 		DPA_ERROR("%s::%d  failed to allocate memory \r\n", __FUNCTION__, __LINE__);
+@@ -1154,13 +1154,13 @@
+ 	int ii;
+ 
+ 	set_cmd_handler(EVENT_MC4, M_mc4_cmdproc);
+-	mc4grp_ids = kzalloc((sizeof(uint8_t)*MAX_MC4_ENTRIES), 0);
++	mc4grp_ids = kzalloc((sizeof(uint8_t)*MAX_MC4_ENTRIES), GFP_KERNEL);
+ 	if (!mc4grp_ids)
+ 	{
+ 		return -ENOMEM;	
+ 	}
+ 	max_mc4grp_ids = MAX_MC4_ENTRIES;
+-	mc4_spinlocks = kzalloc((sizeof(spinlock_t) * MC4_NUM_HASH_ENTRIES), 0);
++	mc4_spinlocks = kzalloc((sizeof(spinlock_t) * MC4_NUM_HASH_ENTRIES), GFP_KERNEL);
+ 	if (!mc4_spinlocks)
+ 	{
+ 		kfree(mc4grp_ids);
+@@ -1181,13 +1181,13 @@
+ 	int ii;
+ 
+ 	set_cmd_handler(EVENT_MC6, M_mc6_cmdproc);
+-	mc6grp_ids = kzalloc((sizeof(uint8_t)*MAX_MC6_ENTRIES), 0);
++	mc6grp_ids = kzalloc((sizeof(uint8_t)*MAX_MC6_ENTRIES), GFP_KERNEL);
+ 	if (!mc6grp_ids)
+ 	{
+ 		return -ENOMEM;	
+ 	}
+ 	max_mc6grp_ids = MAX_MC6_ENTRIES;
+-	mc6_spinlocks = kzalloc((sizeof(spinlock_t) * MC6_NUM_HASH_ENTRIES), 0);
++	mc6_spinlocks = kzalloc((sizeof(spinlock_t) * MC6_NUM_HASH_ENTRIES), GFP_KERNEL);
+ 	if (!mc6_spinlocks)
+ 	{
+ 		kfree(mc6grp_ids);
+--- a/cdx/dpa_ipsec.c	2026-05-05 12:59:00.342030386 +0000
++++ b/cdx/dpa_ipsec.c	2026-05-05 13:00:54.592854261 +0000
+@@ -565,7 +565,7 @@
+ 			}
+ 
+ 			/* create FQ for exception packets from ipsec ofline  port */
+-			dpa_fq = kzalloc((sizeof(struct dpa_fq)),1);
++			dpa_fq = kzalloc((sizeof(struct dpa_fq)), GFP_ATOMIC);
+ 			if (!dpa_fq) {
+ 				DPAIPSEC_ERROR("%s::unable to alloc mem for dpa_fq\n", __FUNCTION__) ;
+ 				return FAILURE;
+@@ -1006,7 +1006,7 @@
+ 	struct port_bman_pool_info parent_pool_info;
+ 
+ 	// allocate memory for bpool
+-	bp = kzalloc(sizeof(struct dpa_bp), 0);
++	bp = kzalloc(sizeof(struct dpa_bp), GFP_KERNEL);
+ 	if (unlikely(bp == NULL)) {
+ 		DPAIPSEC_ERROR("%s(%d)::failed to mem for non_recyclable SKB free bman pool\n",
+ 				__FUNCTION__,__LINE__);
+@@ -1042,7 +1042,7 @@
+ 	struct port_bman_pool_info parent_pool_info;
+ 	int ret =0;
+ 
+-	bp = kzalloc(sizeof(struct dpa_bp), 0);
++	bp = kzalloc(sizeof(struct dpa_bp), GFP_KERNEL);
+ 	if (unlikely(bp == NULL)) {
+ 		DPAIPSEC_ERROR("%s::failed to allocate mem for SG bman pool\n", 
+ 				__FUNCTION__);
+@@ -1090,7 +1090,7 @@
+ 	printk (KERN_INFO"\n ################## %s", 
+ 			__FUNCTION__);
+ 
+-	bp = kzalloc(sizeof(struct dpa_bp), 0);
++	bp = kzalloc(sizeof(struct dpa_bp), GFP_KERNEL);
+ 	if (unlikely(bp == NULL)) {
+ 		DPAIPSEC_ERROR("%s::failed to allocate mem for bman pool for ipsec\n", 
+ 				__FUNCTION__);
+--- a/cdx/dpa_test.c	2026-05-05 12:59:00.358030501 +0000
++++ b/cdx/dpa_test.c	2026-05-05 13:00:54.592854261 +0000
+@@ -79,8 +79,7 @@
+ 	ct = NULL;
+ 	rt = NULL;
+ 	conn_info = (struct test_conn_info *) 
+-		kzalloc ((sizeof(struct test_conn_info) * add_conn.num_conn),
+-				0);
++		kzalloc ((sizeof(struct test_conn_info) * add_conn.num_conn), GFP_KERNEL);
+ 	if (!conn_info) {
+ 		DPA_ERROR("%s::mem alloc for conn info failed\n", 
+ 				__FUNCTION__);
+@@ -95,12 +94,12 @@
+ 		retval = -EIO;
+ 		goto err_ret;
+ 	}
+-	ct = kzalloc((sizeof(struct _tCtEntry) * 2), 0);
++	ct = kzalloc((sizeof(struct _tCtEntry) * 2), GFP_KERNEL);
+ 	if (!ct) {
+ 		retval = -ENOMEM;	
+ 		goto err_ret;
+ 	}
+-	rt = kzalloc((sizeof(RouteEntry) * 2), 0);
++	rt = kzalloc((sizeof(RouteEntry) * 2), GFP_KERNEL);
+ 	if (!rt) {
+ 		retval = -ENOMEM;	
+ 		goto err_ret;
+--- a/cdx/dpa_wifi.c	2026-05-05 12:59:00.351030451 +0000
++++ b/cdx/dpa_wifi.c	2026-05-05 13:00:54.592854261 +0000
+@@ -1827,7 +1827,7 @@
+ 	int buffer_count = 0, ret = 0, refill_cnt ;
+ 
+ 
+-	bp = kzalloc(sizeof(struct dpa_bp), 0);
++	bp = kzalloc(sizeof(struct dpa_bp), GFP_KERNEL);
+ 	if (unlikely(bp == NULL)) {
+ 		DPAWIFI_ERROR("%s::failed to allocate mem for bman pool for dev %s\n",
+ 				__FUNCTION__,vwd->name);
+@@ -2171,7 +2171,7 @@
+ 		}
+ 
+ 		/*alloc for as many fqs as required */
+-		priv->wlan_exception_fq = kzalloc((sizeof(struct dpa_fq) * fqcount), 1);
++		priv->wlan_exception_fq = kzalloc((sizeof(struct dpa_fq) * fqcount), GFP_ATOMIC);
+ 		if (!priv->wlan_exception_fq) {
+ 			DPAWIFI_ERROR("%s::err allocating fq mem\n", __FUNCTION__) ;
+ 			return -1;
+@@ -2297,7 +2297,7 @@
+ 		uint32_t flags;
+ 
+ 		/* create FQ for forward from DPAA to wireless interface */
+-		dpa_fq = kzalloc(sizeof(struct dpa_fq), 0);
++		dpa_fq = kzalloc(sizeof(struct dpa_fq), GFP_KERNEL);
+ 
+ 		if (!dpa_fq) {
+ 			DPAWIFI_ERROR("%s::unable to alloc mem for dpa_fq\n", __FUNCTION__) ;
+@@ -2408,7 +2408,7 @@
+ 
+ 
+ 	/* create FQ for exception packets from wireless interface */
+-	dpa_fq = kzalloc(sizeof(struct dpa_fq), 0);
++	dpa_fq = kzalloc(sizeof(struct dpa_fq), GFP_KERNEL);
+ 	if (!dpa_fq) {
+ 		DPAWIFI_ERROR("%s::unable to alloc mem for dpa_fq\n", __FUNCTION__) ;
+ 		return -1;
+@@ -2641,7 +2641,7 @@
+ 	}
+ 	bp_parent = dpa_bpid2pool(vwd->parent_pool_info.pool_id);
+ 
+-	bp = kzalloc(sizeof(struct dpa_bp), 0);
++	bp = kzalloc(sizeof(struct dpa_bp), GFP_KERNEL);
+ 
+ 	if (unlikely(bp == NULL)) {
+ 		DPAWIFI_ERROR("%s::failed to allocate mem for bman pool for dev %s\n",
+--- a/cdx/voip.c	2026-05-05 12:59:00.358030501 +0000
++++ b/cdx/voip.c	2026-05-05 13:00:54.592854261 +0000
+@@ -187,7 +187,7 @@
+ 
+ 
+ 	/* Create  memory for frame queues.*/
+-	iface_info->eth_info.voip_fqs = kzalloc(sizeof(struct dpa_fq)*usNoFqs, 0);
++	iface_info->eth_info.voip_fqs = kzalloc(sizeof(struct dpa_fq)*usNoFqs, GFP_KERNEL);
+ 	if (!iface_info->eth_info.voip_fqs) {
+ 		DPA_ERROR("%s::err allocating dpa_fq mem\n", __FUNCTION__) ;
+ 		return -1;
