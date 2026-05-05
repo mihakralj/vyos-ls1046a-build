@@ -24,7 +24,7 @@ FMC_REPO="https://github.com/nxp-qoriq/fmc.git"
 FMC_REF="lf-6.18.2-1.0.0"
 FMC_COMMIT="5b9f4b1"
 
-PATCH="$REPO_ROOT/ask-ls1046a-6.6/patches/fmc/01-mono-ask-extensions.patch"
+PATCH="$REPO_ROOT/ASK/patches/fmc/01-mono-ask-extensions.patch"
 [ -f "$PATCH" ] || { echo "ERROR: fmc patch not found: $PATCH" >&2; exit 1; }
 [ -f "$STAGING/lib/libfm.a" ] || { echo "ERROR: libfm.a missing from staging; run ci-build-fmlib.sh first" >&2; exit 1; }
 [ -d "$STAGING/include/fmd" ] || { echo "ERROR: fmd headers missing from staging" >&2; exit 1; }
