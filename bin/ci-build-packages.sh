@@ -167,41 +167,18 @@ for package in $packages; do
     ASK_SRC="$GITHUB_WORKSPACE/ask-ls1046a-6.6"
     ASK_DST="$GITHUB_WORKSPACE/vyos-build/data/live-build-config/includes.chroot/usr/local/lib/ask-modules"
 
-    # Apply CDX bugfixes to ASK source (fixes from dev_boot testing)
-    # The ask-ls1046a-6.6 repo may not have all fixes yet — apply patch
-    ASK_PATCH="$ASK_SRC/patches/cdx/01-mono-defensive-rewrite.patch"
-    if [ -d "$ASK_SRC/cdx" ] && [ -f "$ASK_PATCH" ]; then
-      echo "### Applying ASK CDX bugfixes patch to ask-ls1046a-6.6"
-      patch --no-backup-if-mismatch -p1 -d "$ASK_SRC" < "$ASK_PATCH" || \
-        echo "WARNING: ASK CDX patch partially failed — some fixes may be missing"
-    fi
-
-    # Apply tracked audit-batch patches from data/ask-userspace/<module>/patches/
-    # These are the canonical, version-controlled fixes derived from the
-    # audit reports under plans/audit/. They live in this repo (NOT in the
-    # gitignored ask-ls1046a-6.6 sibling) so the audit history is preserved
-    # in git. Applied AFTER the mono defensive-rewrite patch so they layer
-    # on top of NXP/mono base + mono fixups. Naming convention:
-    #   data/ask-userspace/<module>/patches/02-audit-b<N>-*.patch
-    # Sorted alphabetically => batch number ordering (B2 before B3, etc).
-    AUDIT_PATCH_ROOT="$GITHUB_WORKSPACE/data/ask-userspace"
-    for module_dir in cdx fci auto_bridge dpa_app cmm; do
-      patch_dir="$AUDIT_PATCH_ROOT/$module_dir/patches"
-      [ -d "$patch_dir" ] || continue
-      # Iterate audit-batch unified-diff patches (skip non-patch files like
-      # the orphaned full-file copies devman.c / dpa_cfg.c that pre-date
-      # this convention).
-      for p in "$patch_dir"/[0-9][0-9]-audit-*.patch; do
-        [ -f "$p" ] || continue
-        echo "### Applying audit patch: $(basename "$p") to ask-ls1046a-6.6"
-        patch --no-backup-if-mismatch -p1 -d "$ASK_SRC" < "$p" || {
-          echo "FATAL: audit patch $(basename "$p") failed to apply cleanly."
-          echo "       Audit patches MUST apply cleanly — they encode security"
-          echo "       and ABI invariants. Refusing to ship the build."
-          exit 1
-        }
-      done
-    done
+    # NOTE: As of ask-userspace-audit-v1 (tag in mihakralj/ask-ls1046a-6.6),
+    # the consumer-side patch stack under data/ask-userspace/<module>/patches/
+    # has been retired and folded into the source tree as direct edits with
+    # /* ASK-edit (audit-bN / FINDING) */ marker comments. Rationale: the
+    # ask-ls1046a-6.6 tree is a one-shot port of a frozen NXP source — there
+    # will be no upstream rebase, so a parallel patch stack adds the
+    # malformed-hunk failure mode (see producer-side ask13->14 incident) for
+    # zero rebase safety. This mirrors the producer's ask26+ direct-edit
+    # policy. To audit deltas vs the upstream NXP source, run:
+    #   git -C "$ASK_SRC" log --grep '^audit-b' --oneline
+    #   grep -rn 'ASK-edit' "$ASK_SRC"
+    # Apply tracked audit-batch patches: REMOVED — see note above.
 
     # NR_CPUS=4 fix: CDX defines MAX_SCHEDULER_QUEUES=16 (NUM_PQS+NUM_WBFQS) but
     # DPAA_ETH_TX_QUEUES=NR_CPUS=4 on LS1046A. The unconditional #error in
