@@ -185,7 +185,7 @@ for package in $packages; do
     #   data/ask-userspace/<module>/patches/02-audit-b<N>-*.patch
     # Sorted alphabetically => batch number ordering (B2 before B3, etc).
     AUDIT_PATCH_ROOT="$GITHUB_WORKSPACE/data/ask-userspace"
-    for module_dir in cdx fci auto_bridge dpa_app; do
+    for module_dir in cdx fci auto_bridge dpa_app cmm; do
       patch_dir="$AUDIT_PATCH_ROOT/$module_dir/patches"
       [ -d "$patch_dir" ] || continue
       # Iterate audit-batch unified-diff patches (skip non-patch files like
