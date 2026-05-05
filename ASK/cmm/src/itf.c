@@ -1717,10 +1717,18 @@ int itf_table_init(struct interface_table *ctx)
 
 	return 0;
 
-#if !defined(IPSEC_SUPPORT_DISABLED)
+	/*
+	 * err4 must be reachable from BOTH builds: the goto above (after
+	 * itf_table_update) is unconditional, and at that point fci_handle
+	 * is open in either compilation. Closing fci_key_handle is gated
+	 * because the open at L1702 is gated.
+	 */
 err4:
-	fci_close(ctx->fci_handle);
+#if !defined(IPSEC_SUPPORT_DISABLED)
+	if (ctx->fci_key_handle)
+		fci_close(ctx->fci_key_handle);
 #endif
+	fci_close(ctx->fci_handle);
 
 err3:
 	cmm_rtnl_close(&ctx->rth);
