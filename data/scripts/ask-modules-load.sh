@@ -50,6 +50,17 @@ modprobe xt_conntrack         2>/dev/null || true
 # cmm.service opens NETLINK_KEY in fci_open(FCILIB_KEY_TYPE,…) — without
 # this modprobe the socket() call returns EPROTONOSUPPORT and cmm fails.
 modprobe af_key               2>/dev/null || true
+# caam_jr exports caam_jr_alloc / caam_jr_enqueue, which cdx.ko's IPsec offload
+# path links against (cdx_ipsec_init() pulls a job-ring at module init). The
+# caam platform driver registers its job rings during a deferred-probe pass
+# that races our After=systemd-udevd.service ordering — without an explicit
+# modprobe here, insmod cdx fails with "Unknown symbol caam_jr_{alloc,enqueue}
+# (err -2)" on the first attempt and only succeeds when systemd-modules-load
+# retries seconds later, leaving this unit permanently in failed state for
+# the boot. modprobe blocks until the module's init() returns, so once it
+# returns success the symbols are guaranteed visible.
+modprobe caam                 2>/dev/null || true
+modprobe caam_jr              2>/dev/null || true
 
 load_required() {
     local mod="$1"
