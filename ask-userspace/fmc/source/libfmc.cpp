@@ -57,6 +57,19 @@ const char* TMPFILENAME = "/tmp/fmc.bin";
 #endif
 
 
+/* ASK-edit (defensive P2-7): the public C API below uses file-scope statics
+ * (error_text, compile_dump) and a global logger sink installed by
+ * fmc_log()/fmc_log_write(). The library is therefore NOT thread-safe:
+ *  - calling fmc_compile() from two threads concurrently will race on
+ *    error_text / compile_dump and on the libxml2 default error handler
+ *    that fmc_compile()'s readers install during parsing;
+ *  - fmc_get_error() returns a pointer into shared state and is invalidated
+ *    by the next fmc_compile() call from any thread;
+ *  - fmc_log()/fmc_log_write() target a single global logger sink.
+ * Single-threaded callers (current dpa_app, fmc CLI) are unaffected.
+ * If a future caller needs concurrent compiles, the state must be made
+ * per-handle (e.g., move error_text/compile_dump into fmc_model or a new
+ * fmc_handle context). */
 std::string error_text;
 std::string compile_dump;
 
@@ -213,7 +226,19 @@ fmc_log_write( int32_t level, const char* format, ... )
 
     if ( level <= LOG_GET_LEVEL() ) {
         char buffer[256];
-        vsprintf( buffer, format, args );
+        /* ASK-edit (defensive P1-6/P2-6): vsprintf has no length cap and the
+         * 256-byte buffer is fixed; long error messages with embedded XML
+         * attribute strings (which can be operator-controlled) overflowed.
+         * Use vsnprintf and append a truncation marker if the message did
+         * not fit. */
+        int n = vsnprintf( buffer, sizeof(buffer), format, args );
+        if ( n >= (int)sizeof(buffer) ) {
+            // ensure trailing '...' marker is visible
+            const char marker[] = "...";
+            const size_t mlen = sizeof(marker) - 1;
+            memcpy( buffer + sizeof(buffer) - mlen - 1, marker, mlen );
+            buffer[sizeof(buffer) - 1] = '\0';
+        }
         LOG( (log_level_t)level ) << (const char*)buffer << std::endl;
     }
 
