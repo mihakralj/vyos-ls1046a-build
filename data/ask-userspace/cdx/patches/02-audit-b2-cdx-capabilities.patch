@@ -1,0 +1,63 @@
+From: Cline (audit B2) <audit@ask>
+Date: Tue, 05 May 2026 10:30:00 +0000
+Subject: [PATCH] cdx: gate /dev/cdx_ctrl ioctls on CAP_NET_ADMIN
+
+Audit finding cdx-P0.04 (plans/audit/AUDIT-cdx.md).
+
+Every CDX_CTRL_* ioctl writes hardware: FMan PCD classification rules,
+mcast/QoS tables, conntrack offload entries, DPA params. Without a
+capability check, any local user holding an open fd on /dev/cdx_ctrl
+can reconfigure the entire fast-path.
+
+/dev/cdx_ctrl is single-open and 0660 root:root by udev today, so the
+common operational case already requires root. This patch is
+defense-in-depth: hardens against (a) udev mis-config that could
+broaden the device mode, (b) a process that has already inherited a
+root-opened fd via setuid drop, and (c) future chrdev-permission bugs.
+
+Both unlocked_ioctl and compat_ioctl paths are gated. EPERM is the
+correct return per Documentation/security/credentials.rst — userspace
+expects -1/EPERM, not -1/EINVAL, when a privileged operation is
+denied.
+
+Audit reference: plans/audit/AUDIT-cdx.md cdx-P0.04
+Signed-off-by: Cline <audit@ask>
+---
+diff --git a/cdx/cdx_dev.c b/cdx/cdx_dev.c
+--- a/cdx/cdx_dev.c
++++ b/cdx/cdx_dev.c
+@@ -19,6 +19,7 @@
+ #include <linux/uaccess.h>
+ #include <linux/slab.h>
+ #include <linux/fdtable.h>
++#include <linux/capability.h>
+ 
+ #include "portdefs.h"
+ #include "misc.h"
+@@ -147,6 +148,16 @@ long cdx_ctrl_ioctl(struct file *filp, unsigned int cmd,
+                 unsigned long args) 
+ {
+ int retval;
++
++/* B2/cdx-P0.04: every CDX_CTRL_* ioctl writes hardware (FMan PCD,
++ * mcast/QoS tables, conntrack offload entries). Without
++ * CAP_NET_ADMIN any local user holding an open fd on
++ * /dev/cdx_ctrl can reconfigure the fast-path. The chrdev is
++ * single-open and 0660 root:root by udev, so this is
++ * defense-in-depth against udev mis-config, fd-inherit-then-
++ * setuid-drop, and chrdev-permission bugs. */
++if (!capable(CAP_NET_ADMIN))
++return -EPERM;
+ 
+ //DPA_INFO("%s::cmd %d\n", __FUNCTION__, cmd);
+ switch (cmd) {
+@@ -193,6 +204,9 @@ long cdx_ctrl_ioctl(struct file *filp, unsigned int cmd,
+ long cdx_ctrl_compat_ioctl(struct file *filp, unsigned int cmd,
+                 unsigned long args)
+ {
++/* B2/cdx-P0.04: same gate as the native ioctl path. */
++if (!capable(CAP_NET_ADMIN))
++return -EPERM;
+ DPA_INFO("%s::\n", __FUNCTION__);
+ return 0;
+ }
