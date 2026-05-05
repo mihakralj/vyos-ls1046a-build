@@ -4,25 +4,25 @@
 <netpcd>
 <classification name="cdx_udp4_cc" max="512" masks="yes" shared="true">
   <key>
-     <hashtable mask="0x3ff0" hashshift="0" keysize="14"/>
+     <hashtable mask="0x1ff0" hashshift="0" keysize="14"/>
   </key>
 </classification>
 
 <classification name="cdx_tcp4_cc" max="512" masks="yes" shared="true">
   <key>
-     <hashtable mask="0x3ff0" hashshift="0" keysize="14"/>
+     <hashtable mask="0x1ff0" hashshift="0" keysize="14"/>
   </key>
 </classification>
 
 <classification name="cdx_udp6_cc" max="512" masks="yes" shared="true">
   <key>
-     <hashtable mask="0x3ff0" hashshift="0" keysize="38"/>
+     <hashtable mask="0x1ff0" hashshift="0" keysize="38"/>
   </key>
 </classification>
 
 <classification name="cdx_tcp6_cc" max="512" masks="yes" shared="true">
   <key>
-     <hashtable mask="0x3ff0" hashshift="0" keysize="38"/>
+     <hashtable mask="0x1ff0" hashshift="0" keysize="38"/>
   </key>
 </classification>
 
