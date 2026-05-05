@@ -24,12 +24,13 @@
 set -ex
 cd "${GITHUB_WORKSPACE:-.}"
 
-ASK_REPO="${ASK_REPO:-ask-ls1046a-6.6}"
+ASK_REPO="${ASK_REPO:-ASK}"
 
-# Verify ASK repo is present (submodule or cloned)
-if [ ! -d "$ASK_REPO/patches/kernel" ]; then
-  echo "ERROR: ASK repo not found at $ASK_REPO/"
-  echo "       Clone it: git clone https://github.com/mihakralj/ask-ls1046a-6.6.git"
+# Verify in-tree ASK userspace tree is present (folded in May 2026 from
+# the now-archived mihakralj/ask-ls1046a-6.6 repo).
+if [ ! -d "$ASK_REPO/patches/fmlib" ]; then
+  echo "ERROR: in-tree ASK userspace tree not found at $ASK_REPO/"
+  echo "       Expected: $ASK_REPO/{cmm,dpa_app,fci/lib,patches/{fmc,fmlib}}"
   exit 1
 fi
 
@@ -308,7 +309,6 @@ echo "###   - ASK fast-path hooks in netfilter, bridge, xfrm, net/core (74 files
 echo "###   - CONFIG_CPE_FAST_PATH=y, CONFIG_FSL_SDK_DPA=y"
 echo "###   - IPsec hardware offload, CEETM QoS, xt_QOSMARK"
 echo "###"
-echo "### After ISO build, also compile out-of-tree ASK modules:"
-echo "###   cd $ASK_REPO && make -C cdx KDIR=/path/to/kernel-headers"
-echo "###   cd $ASK_REPO && make -C fci KDIR=/path/to/kernel-headers"
-echo "###   cd $ASK_REPO && make -C auto_bridge KDIR=/path/to/kernel-headers"
+echo "### Out-of-tree ASK modules (cdx, fci, auto_bridge) are built by the"
+echo "### producer (lts_6.6_ls1046a) and shipped in the kernel-6.6.137-askN"
+echo "### release tarball pinned by data/ask-kernel.pin — no longer built here."

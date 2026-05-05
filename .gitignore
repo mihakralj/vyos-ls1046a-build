@@ -23,7 +23,6 @@ linux-source-*.deb
 boot_test/
 
 # External repos (separate git repos, not part of this build)
-ASK/
 nxp-linux/
 nxp-fmlib/
 nxp-fmc/
@@ -32,4 +31,3 @@ artifacts/
 work/
 !data/ask-userspace/libcli/
 fmc_config_data.c
-ask-ls1046a-6.6/

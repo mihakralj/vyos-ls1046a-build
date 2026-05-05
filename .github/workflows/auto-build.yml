@@ -166,11 +166,12 @@ jobs:
       - name: Setup kernel config and patches
         run: bin/ci-setup-kernel.sh
 
-      - name: Checkout ASK repo (NXP Application Solutions Kit)
-        uses: actions/checkout@v6
-        with:
-          repository: mihakralj/ask-ls1046a-6.6
-          path: ask-ls1046a-6.6
+      # NOTE: The previously-archived mihakralj/ask-ls1046a-6.6 repo is no
+      # longer cloned here. Its userspace contents (cmm/, dpa_app/, fci/lib/,
+      # patches/{fmc,fmlib}/, config/) were folded in-tree under ASK/ in May
+      # 2026, and its OOT kernel modules (cdx, fci, auto_bridge,
+      # iptables-extensions) moved to the producer (lts_6.6_ls1046a) and ship
+      # prebuilt in the kernel-6.6.137-askN release tarball.
 
       - name: Setup ASK fast-path kernel (SDK DPAA + hooks)
         run: bin/ci-setup-kernel-ask.sh

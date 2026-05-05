@@ -31,7 +31,7 @@ FMLIB_REPO="https://github.com/nxp-qoriq/fmlib.git"
 FMLIB_REF="lf-6.18.2-1.0.0"
 FMLIB_COMMIT="7a58eca"   # expected HEAD for lf-6.18.2-1.0.0 (informational)
 
-PATCH="$REPO_ROOT/ask-ls1046a-6.6/patches/fmlib/01-mono-ask-extensions.patch"
+PATCH="$REPO_ROOT/ASK/patches/fmlib/01-mono-ask-extensions.patch"
 [ -f "$PATCH" ] || { echo "ERROR: fmlib patch not found: $PATCH" >&2; exit 1; }
 
 # Cross-compile detection (matches ci-build-ask-userspace.sh)

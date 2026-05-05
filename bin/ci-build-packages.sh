@@ -162,151 +162,20 @@ for package in $packages; do
       fi
     fi
 
-    ### Build ASK out-of-tree kernel modules (cdx, fci, auto_bridge)
-    # Must happen while kernel source tree ($KSRC) still exists (before cleanup)
-    ASK_SRC="$GITHUB_WORKSPACE/ask-ls1046a-6.6"
-    ASK_DST="$GITHUB_WORKSPACE/vyos-build/data/live-build-config/includes.chroot/usr/local/lib/ask-modules"
-
-    # NOTE: As of ask-userspace-audit-v1 (tag in mihakralj/ask-ls1046a-6.6),
-    # the consumer-side patch stack under data/ask-userspace/<module>/patches/
-    # has been retired and folded into the source tree as direct edits with
-    # /* ASK-edit (audit-bN / FINDING) */ marker comments. Rationale: the
-    # ask-ls1046a-6.6 tree is a one-shot port of a frozen NXP source — there
-    # will be no upstream rebase, so a parallel patch stack adds the
-    # malformed-hunk failure mode (see producer-side ask13->14 incident) for
-    # zero rebase safety. This mirrors the producer's ask26+ direct-edit
-    # policy. To audit deltas vs the upstream NXP source, run:
-    #   git -C "$ASK_SRC" log --grep '^audit-b' --oneline
-    #   grep -rn 'ASK-edit' "$ASK_SRC"
-    # Apply tracked audit-batch patches: REMOVED — see note above.
-
-    # NR_CPUS=4 fix: CDX defines MAX_SCHEDULER_QUEUES=16 (NUM_PQS+NUM_WBFQS) but
-    # DPAA_ETH_TX_QUEUES=NR_CPUS=4 on LS1046A. The unconditional #error in
-    # control_qm.c is only meaningful when CEETM (ENABLE_EGRESS_QOS) is enabled —
-    # which it is NOT in our build. Guard the assertion under #ifdef ENABLE_EGRESS_QOS.
-    QM_FILE="$ASK_SRC/cdx/control_qm.c"
-    if [ -f "$QM_FILE" ] && grep -q "^#if MAX_SCHEDULER_QUEUES > DPAA_ETH_TX_QUEUES" "$QM_FILE"; then
-      echo "### Guarding MAX_SCHEDULER_QUEUES #error under ENABLE_EGRESS_QOS in $QM_FILE"
-      python3 - "$QM_FILE" <<'PYEOF'
-import sys, re
-p = sys.argv[1]
-s = open(p).read()
-old = "#if MAX_SCHEDULER_QUEUES > DPAA_ETH_TX_QUEUES\n#error MAX_SCHEDULER_QUEUES exceeds DPAA_ETH_TX_QUEUES\n#endif"
-new = "#ifdef ENABLE_EGRESS_QOS\n#if MAX_SCHEDULER_QUEUES > DPAA_ETH_TX_QUEUES\n#error MAX_SCHEDULER_QUEUES exceeds DPAA_ETH_TX_QUEUES\n#endif\n#endif"
-if old not in s:
-    sys.stderr.write("FATAL: expected #error block not found in control_qm.c\n")
-    sys.exit(1)
-open(p, "w").write(s.replace(old, new, 1))
-print("   Patched control_qm.c (NR_CPUS=4 CEETM guard)")
-PYEOF
-    fi
-
-    # Relax -Werror on CDX Makefile — NXP SDK source has many -Wunused-* warnings
-    # (cdx_ehash.c:359 unused variable 'i', util.c:867 unused parameters, etc).
-    # -Werror makes them fatal. Keep warnings visible but don't fail the build.
-    CDX_MK="$ASK_SRC/cdx/Makefile"
-    if [ -f "$CDX_MK" ] && grep -q "^ccflags-y += -Werror" "$CDX_MK"; then
-      echo "### Relaxing -Werror in $CDX_MK (NXP SDK has many benign warnings)"
-      sed -i 's/^ccflags-y += -Werror /ccflags-y += -Wno-error /' "$CDX_MK"
-    fi
-
-    if [ -n "$KSRC" ] && [ -d "$ASK_SRC/cdx" ]; then
-      KSRC_ABS="$(cd "$KSRC" && pwd)"
-      echo "### Building ASK kernel modules against $KSRC_ABS"
-      mkdir -p "$ASK_DST"
-
-      # Module signing helper — CONFIG_MODULE_SIG_FORCE=y requires all modules signed
-      # The kernel auto-generates certs/signing_key.pem during build; sign-file uses it
-      # FATAL if signing key is missing — unsigned modules will be rejected at load time.
-      sign_module() {
-        local mod="$1"
-        if [ ! -f "$KSRC_ABS/scripts/sign-file" ] || [ ! -f "$KSRC_ABS/certs/signing_key.pem" ]; then
-          echo ""
-          echo "################################################################"
-          echo "### FATAL: Kernel signing key not found — cannot sign $(basename "$mod")"
-          echo "### CONFIG_MODULE_SIG_FORCE=y will reject unsigned modules at boot."
-          echo "### Expected: $KSRC_ABS/scripts/sign-file"
-          echo "###           $KSRC_ABS/certs/signing_key.pem"
-          echo "################################################################"
-          exit 1
-        fi
-        "$KSRC_ABS/scripts/sign-file" sha512 \
-          "$KSRC_ABS/certs/signing_key.pem" \
-          "$KSRC_ABS/certs/signing_key.x509" \
-          "$mod"
-        echo "   Signed: $(basename "$mod")"
-      }
-
-      # Fail-fast helper — no stale pre-built fallback.
-      # Pre-built .ko files in data/ask-userspace/ are built against a different
-      # kernel version (6.6.129) and will be rejected by vermagic AND by
-      # CONFIG_MODULE_SIG_FORCE=y. Shipping them guarantees boot-time rejection.
-      fail_build() {
-        local mod="$1"
-        echo ""
-        echo "################################################################"
-        echo "### FATAL: $mod build failed against kernel $KSRC_ABS"
-        echo "### Refusing to ship stale pre-built module (wrong vermagic +"
-        echo "### unsigned → guaranteed rejection by MODULE_SIG_FORCE kernel)."
-        echo "### Fix the in-tree build in ask-ls1046a-6.6/$(dirname "$mod")/"
-        echo "################################################################"
-        exit 1
-      }
-
-      # Aggressive clean: remove ALL stale build artifacts from prior kernels.
-      # `make clean` is not enough — stale .ko/.o from pre-existing 6.6.129 build
-      # in the checked-in ask-ls1046a-6.6/ tree can confuse the build.
-      echo "### Cleaning stale ASK build artifacts"
-      find "$ASK_SRC/cdx" "$ASK_SRC/fci" "$ASK_SRC/auto_bridge" \
-        \( -name '*.ko' -o -name '*.o' -o -name '*.mod' -o -name '*.mod.c' \
-           -o -name '.*.cmd' -o -name 'Module.symvers' -o -name 'modules.order' \) \
-        -delete 2>/dev/null || true
-
-      # cdx.ko — main ASK control-plane module
-      echo "I: Building cdx.ko..."
-      make -C "$KSRC_ABS" M="$ASK_SRC/cdx" \
-        PLATFORM=LS1043A ARCH=arm64 modules 2>&1 | tail -30
-      if [ ! -f "$ASK_SRC/cdx/cdx.ko" ]; then
-        fail_build "cdx.ko"
-      fi
-      cp "$ASK_SRC/cdx/cdx.ko" "$ASK_DST/"
-      cp "$ASK_SRC/cdx/Module.symvers" "$ASK_DST/cdx.symvers"
-      sign_module "$ASK_DST/cdx.ko"
-      echo "### cdx.ko built: $(stat -c '%s bytes' "$ASK_DST/cdx.ko")"
-
-      # auto_bridge.ko — bridge fast-path offload
-      echo "I: Building auto_bridge.ko..."
-      make -C "$KSRC_ABS" M="$ASK_SRC/auto_bridge" \
-        PLATFORM=LS1043A ARCH=arm64 modules 2>&1 | tail -30
-      if [ ! -f "$ASK_SRC/auto_bridge/auto_bridge.ko" ]; then
-        fail_build "auto_bridge.ko"
-      fi
-      cp "$ASK_SRC/auto_bridge/auto_bridge.ko" "$ASK_DST/"
-      sign_module "$ASK_DST/auto_bridge.ko"
-      echo "### auto_bridge.ko built: $(stat -c '%s bytes' "$ASK_DST/auto_bridge.ko")"
-
-      # fci.ko — fast-path conntrack interface (depends on cdx symbols)
-      echo "I: Building fci.ko..."
-      CDX_SYMVERS="$ASK_DST/cdx.symvers"
-      make -C "$KSRC_ABS" M="$ASK_SRC/fci" \
-        KBUILD_EXTRA_SYMBOLS="$CDX_SYMVERS" \
-        ARCH=arm64 modules 2>&1 | tail -30
-      if [ ! -f "$ASK_SRC/fci/fci.ko" ]; then
-        fail_build "fci.ko"
-      fi
-      cp "$ASK_SRC/fci/fci.ko" "$ASK_DST/"
-      sign_module "$ASK_DST/fci.ko"
-      echo "### fci.ko built: $(stat -c '%s bytes' "$ASK_DST/fci.ko")"
-
-      echo "### ASK kernel modules: $(ls -la "$ASK_DST/"*.ko 2>/dev/null | wc -l) modules installed and signed"
-    else
-      echo ""
-      echo "################################################################"
-      echo "### FATAL: ASK source tree not found at $ASK_SRC"
-      echo "### Cannot build ASK modules — refusing to use stale pre-built."
-      echo "################################################################"
-      exit 1
-    fi
+    ### ASK out-of-tree kernel modules (cdx, fci, auto_bridge, iptables-extensions)
+    #
+    # As of the May 2026 redistribution, OOT module SOURCES live in the producer
+    # repo (lts_6.6_ls1046a/release/oot-modules/) and are BUILT BY THE PRODUCER's
+    # build-and-release.yml. The producer ships them as signed .ko inside the
+    # kernel-6.6.137-askN release tarball, alongside the kernel image and
+    # linux-headers .deb. The consumer consumes them via ci-consume-ask-kernel.sh,
+    # which is the canonical (ASK_KERNEL_TAG-driven) path.
+    #
+    # The legacy local-build path that compiled cdx/fci/auto_bridge here from
+    # a sibling clone of mihakralj/ask-ls1046a-6.6 has been removed: the source
+    # is no longer present (it was redistributed to the producer's
+    # release/oot-modules/ tree), and the archived ask-ls1046a-6.6 repo is no
+    # longer cloned by auto-build.yml.
 
     ### Build ASK userspace binaries from source (cmm, dpa_app, libcli, libfci)
     # Overwrites pre-built binaries installed by ci-setup-vyos-build.sh with source-built versions

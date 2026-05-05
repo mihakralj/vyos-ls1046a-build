@@ -298,9 +298,9 @@ cp data/systemd/ask-modules-load.service "$CHROOT/etc/systemd/system/ask-modules
 cp data/systemd/ask-modules-load.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/ask-modules-load.conf"
 
 ### CMM service and config
-cp ask-ls1046a-6.6/config/cmm.service "$CHROOT/etc/systemd/system/cmm.service"
+cp ASK/config/cmm.service "$CHROOT/etc/systemd/system/cmm.service"
 mkdir -p "$CHROOT/etc/config"
-cp ask-ls1046a-6.6/config/fastforward "$CHROOT/etc/config/fastforward"
+cp ASK/config/fastforward "$CHROOT/etc/config/fastforward"
 
 ### CMM service enablement via tmpfiles.d
 cp data/systemd/cmm.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/cmm.conf"
