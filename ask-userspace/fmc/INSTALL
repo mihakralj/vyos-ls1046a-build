@@ -1,0 +1,37 @@
+# The MIT License (MIT)                                                   #
+# Copyright 2009-2012, Freescale Semiconductor, Inc.                      #
+###########################################################################
+
+Build steps for FMC:
+   - The package is dependent on the following external packages that should
+     be installed on your system:
+       - xmllib2
+       - tclap
+       - fmd user space library
+
+   - Set environment variables or modify Makefile with the following entries:
+       - FMD_USPACE_HEADER_PATH - path to fmd user space package headers location
+       - FMD_USPACE_LIB_PATH    - path to fmd user space package library location
+       - LIBXML2_HEADER_PATH    - path to libxml2 include files
+       - TCLAP_HEADER_PATH      - path to TCLAP include files
+
+   - Issue 'make' command
+   
+   - For host side compilation (the mode in which FMC doesn't use
+     direct libfm API calls), use 'make FMCHOSTMODE=1' command
+
+Install steps for FMC:
+   - After successful compilation, put 'fmc' application to
+     /usr/bin folder of your target
+   - Copy 'etc' folder to /etc folder of your target
+
+Install verification:
+    fmc --help
+    command should provide list of command line options available
+
+    fmc -p sample.xml -c config.xml
+    command will produce an example configuration source code
+
+    fmc -p sample.xml -c config.xml -a
+    command will apply the configuration to Frame Manager hardware block
+    (when running on a target system)
