@@ -1,0 +1,117 @@
+#!/bin/bash
+# 92-livescripts-defensive-mount-list.chroot — defense-in-depth for the
+# `/init: line 1365: can't open /tmp/custom_mounts.list: no such file`
+# console error from live-boot's activate_custom_mounts().
+#
+# Symptom (not a functional bug, but loud):
+#   /init: line 1365: can't open /tmp/custom_mounts.list: no such file or directory
+#
+# Trigger:
+#   live-boot's /lib/live/boot/9990-misc-helpers.sh::activate_custom_mounts()
+#   reads its argument as a here-doc:
+#       while read line
+#       do ...
+#       done < ${custom_mounts}
+#   The path is /tmp/custom_mounts.list, which get_custom_mounts() is
+#   supposed to populate. If get_custom_mounts() finds no candidates
+#   (find_persistence_media() returned an empty list because there is no
+#   eMMC/USB partition labelled `persistence`, OR because nopersistence is
+#   set in bootargs and the persistence branch was short-circuited), the
+#   list file is never created and the redirection at line 1365 fails with
+#   the message above.
+#
+# Why we still want the message gone after dropping the prober-stub hook:
+#   The prober-stub hook (91-strip-persistence-prober.chroot, deleted in
+#   commit c689b96e) was the historical workaround. It silenced the
+#   per-device `mount: ... /live/persistence/ failed` spam by stubbing
+#   find_persistence_media() to `return 0`, which ALSO suppressed the
+#   /tmp/custom_mounts.list error as a side-effect. Restoring stock VyOS
+#   persistence (commit c689b96e) un-stubs the prober, so on the eMMC
+#   boot path with vyos-union= the list file is created normally and
+#   there is no error. BUT:
+#     - TFTP dev-loop (bin/build-local.sh) and USB live-boot
+#       (data/scripts/boot.cmd) deliberately keep `nopersistence` because
+#       they have no vyos-union anchor.
+#     - First boot on a freshly-flashed device, before mmcblk0p3 has the
+#       persistence label, also produces an empty mount list.
+#   In both cases the persistence branch is entered (or the legacy code
+#   path is entered) and the error fires. Pre-creating the list file
+#   eliminates the error without touching the persistence/overlay logic.
+#
+# Fix:
+#   Patch /lib/live/boot/9990-misc-helpers.sh::activate_custom_mounts() so
+#   that immediately on entry it does:
+#       : > "${custom_mounts}" 2>/dev/null || true
+#   if ${custom_mounts} does not exist. The `done < ${custom_mounts}`
+#   redirection then opens an empty file, the `while read` loop iterates
+#   zero times, and the function returns normally — same observable
+#   behaviour as the old prober-stub hook for the no-candidates case, but
+#   without affecting find_persistence_media().
+#
+# Idempotence: marker `# ASK-LS1046A: defensive empty mount list` lets us
+# detect a previous apply.
+#
+# Apply order: chroot hook, runs before binary stage's update-initramfs
+# so the patched 9990-misc-helpers.sh is what ships in initrd.img.
+
+set -euo pipefail
+
+TARGET="/lib/live/boot/9990-misc-helpers.sh"
+
+if [[ ! -f "$TARGET" ]]; then
+    echo "[92-livescripts-defensive-mount-list] $TARGET not present — skipping (no live-boot in chroot?)"
+    exit 0
+fi
+
+if grep -q '# ASK-LS1046A: defensive empty mount list' "$TARGET"; then
+    echo "[92-livescripts-defensive-mount-list] already patched — skipping"
+    exit 0
+fi
+
+if ! grep -qE '^activate_custom_mounts \(\)$' "$TARGET"; then
+    echo "[92-livescripts-defensive-mount-list] activate_custom_mounts() not found in $TARGET"
+    echo "[92-livescripts-defensive-mount-list] live-boot upstream layout changed — refusing to patch"
+    exit 1
+fi
+
+python3 - "$TARGET" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    src = f.read()
+
+# Match the activate_custom_mounts() function header + opening brace and
+# inject a guard immediately after the brace. The function uses the fixed
+# style of 9990-misc-helpers.sh: header on its own line, `{` on its own
+# line, body indented with tabs.
+pattern = re.compile(
+    r"^(activate_custom_mounts \(\)\n\{\n)",
+    re.MULTILINE,
+)
+
+guard = (
+    "\t# ASK-LS1046A: defensive empty mount list\n"
+    "\t# Pre-create the mount-list file if get_custom_mounts() did not\n"
+    "\t# (no persistence candidates / nopersistence in bootargs / fresh\n"
+    "\t# device). This makes the `done < ${custom_mounts}` redirection at\n"
+    "\t# the bottom of this function a no-op instead of an init-time error.\n"
+    "\tif [ -n \"${custom_mounts:-}\" ] && [ ! -e \"${custom_mounts}\" ]\n"
+    "\tthen\n"
+    "\t\t: > \"${custom_mounts}\" 2>/dev/null || true\n"
+    "\tfi\n"
+)
+
+new_src, n = pattern.subn(r"\1" + guard, src, count=1)
+if n != 1:
+    sys.stderr.write(
+        "[92-livescripts-defensive-mount-list] failed to locate activate_custom_mounts() body insertion point\n"
+    )
+    sys.exit(1)
+
+with open(path, "w", encoding="utf-8") as f:
+    f.write(new_src)
+PY
+
+echo "[92-livescripts-defensive-mount-list] patched $TARGET"
