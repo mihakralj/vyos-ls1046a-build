@@ -279,7 +279,33 @@ if [ -d "$DPA_SRC" ] && [ -f "$DPA_SRC/Makefile" ]; then
   DPA_CFLAGS="$DPA_CFLAGS -I$STAGING/include/fmd/etc"
   DPA_CFLAGS="$DPA_CFLAGS -I$STAGING/include/fmd/Peripherals"
   DPA_CFLAGS="$DPA_CFLAGS -I$STAGING/include/fmd/integrations"
-  DPA_CFLAGS="$DPA_CFLAGS -I$ASK_SRC/cdx"
+  # Locate cdx headers (cdx_ioctl.h, cdx_ctrl.h). The cdx OOT module
+  # was folded into the producer repo (lts_6.6_ls1046a) under
+  # release/oot-modules/cdx/ in commit bc38d90 (2026-05); $ASK_SRC/cdx
+  # no longer exists in this tree. Fall back through plausible
+  # locations so both local-checkout and CI staged-sysroot paths work.
+  CDX_INC=""
+  for cand in \
+      "$STAGING/include/cdx" \
+      "$ASK_SRC/cdx" \
+      "$KSRC/../../release/oot-modules/cdx" \
+      "/root/lts_6.6_ls1046a/release/oot-modules/cdx"; do
+    if [ -f "$cand/cdx_ioctl.h" ]; then
+      CDX_INC="$cand"
+      break
+    fi
+  done
+  if [ -z "$CDX_INC" ]; then
+    echo "    ERROR: cdx_ioctl.h not found; tried STAGING, ASK_SRC,"
+    echo "           \$KSRC/../../release/oot-modules/cdx, and"
+    echo "           /root/lts_6.6_ls1046a/release/oot-modules/cdx" >&2
+    echo "    Hint: ensure the producer repo (lts_6.6_ls1046a) is" >&2
+    echo "          checked out, or stage cdx headers into" >&2
+    echo "          \$STAGING/include/cdx via ci-consume-ask-kernel.sh." >&2
+    exit 1
+  fi
+  echo "    cdx headers: $CDX_INC"
+  DPA_CFLAGS="$DPA_CFLAGS -I$CDX_INC"
   DPA_CFLAGS="$DPA_CFLAGS $(pkg-config --cflags libxml-2.0 2>/dev/null || echo -I/usr/include/libxml2)"
 
   DPA_LDFLAGS="-L$STAGING/lib"
@@ -349,7 +375,12 @@ if [ -d "$CMM_SRC" ] && [ -f "$CMM_SRC/configure.in" ]; then
       PKG_CONFIG_PATH="$CMM_PKG" 2>&1 | tail -10
 
     make clean 2>/dev/null || true
-    make -j"$NPROC" 2>&1 | tail -20
+    # Build only the cmm binary and libcmm shared library; skip
+    # libcmm_sample (a demo target listed in src/Makefile.am
+    # bin_PROGRAMS that links -lcmm and fails because libcmm hasn't
+    # been installed into the staging sysroot yet at this point).
+    # The sample is not shipped and not on the runtime path.
+    make -j"$NPROC" -C src libcmm.la cmm 2>&1 | tail -20
 
     if [ -f "src/cmm" ]; then
       cp "src/cmm" "$CHROOT/usr/bin/cmm"
