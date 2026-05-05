@@ -1,0 +1,49 @@
+The MIT License (MIT)
+Copyright (c) 2009-2012 Freescale Semiconductor, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Special Notes on Selected Files
+-------------------------------
+
+Some files in the Freescale FMC package are generated from skeleton files
+associated with the Flex and Bison programs.
+
+The Bison skeleton files are distributed under GPLv2 but with the following
+special exception (which applies to the Freescale FMC package):
+
+   As a special exception, you may create a larger work that contains
+   part or all of the Bison parser skeleton and distribute that work
+   under terms of your choice, so long as that work isn't itself a
+   parser generator using the skeleton or a modified version thereof
+   as a parser skeleton.  Alternatively, if you modify or redistribute
+   the parser skeleton itself, you may (at your option) remove this
+   special exception, which will cause the skeleton and the resulting
+   Bison output files to be licensed under the GNU General Public
+   License without this special exception.
+
+The Flex skeleton file is unrestricted.  It's License statement states,
+in reference to the license of the flex tool itself (which is 2-clause BSD):
+
+  Note that the "flex.skl" scanner skeleton carries no copyright notice.
+  You are free to do whatever you please with scanners generated using
+  flex; for them, you are not even bound by the above copyright.
+
+Only the generated scanner is contained in the Freescale FMC package.
