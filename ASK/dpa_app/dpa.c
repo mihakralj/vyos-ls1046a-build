@@ -325,7 +325,7 @@ static int get_port_info(struct cdx_fman_info *finfo)
 				cmodel.port[ii].name);
 #endif
 		//FM  name would be fm0, fm1 etc
-		sprintf(name, "fm%d", finfo->index);
+		snprintf(name, sizeof(name), "fm%d", finfo->index); /* C3 B6 DA-01 */
 		//look for fm name in the port name
 		if (strstr(cmodel.port[ii].name, name) == 0)
 			continue;
@@ -350,7 +350,7 @@ static int get_port_info(struct cdx_fman_info *finfo)
 	dist_info = (struct cdx_dist_info *)(port_info + ports);
 	//scan all ports associated with this fman
 	for (ii = 0; ii < cmodel.port_count; ii++) {
-		sprintf(name, "fm%d", finfo->index);
+		snprintf(name, sizeof(name), "fm%d", finfo->index); /* C3 B6 DA-01 */
 		if (strstr(cmodel.port[ii].name, name) == 0)
                         continue;
 		//fill all port related infor from model into cdx structures
@@ -362,17 +362,17 @@ static int get_port_info(struct cdx_fman_info *finfo)
 		//encode the type, speed, fm index and port index in device name
 		switch (cmodel.port[ii].type) {
 			case 0:
-				sprintf(port_info->name, "dpa-fman%d-oh@%d", 
+				snprintf(port_info->name, sizeof(port_info->name), "dpa-fman%d-oh@%d", /* C3 B6 DA-01 */ 
 					port_info->fm_index, (port_info->index + 1));
 				port_info->type = 0;
 				break;
 			case 1:
-				sprintf(port_info->name, "dpa-fm%d-1G-eth%d", 
+				snprintf(port_info->name, sizeof(port_info->name), "dpa-fm%d-1G-eth%d", /* C3 B6 DA-01 */ 
 					port_info->fm_index, port_info->index);
 				port_info->type = 1;
 				break;
 			case 2:
-				sprintf(port_info->name, "dpa-fm%d-10G-eth%d", 
+				snprintf(port_info->name, sizeof(port_info->name), "dpa-fm%d-10G-eth%d", /* C3 B6 DA-01 */ 
 					port_info->fm_index, port_info->index);
 				port_info->type = 10;
 				break;
@@ -421,7 +421,7 @@ static int update_port_dist_info(struct cdx_fman_info *finfo)
 	port_info = finfo->portinfo;
 	//update all ports associated with this fman
 	for (ii = 0; ii < cmodel.port_count; ii++) {
-		sprintf(name, "fm%d", finfo->index);
+		snprintf(name, sizeof(name), "fm%d", finfo->index); /* C3 B6 DA-01 */
 		if (strstr(cmodel.port[ii].name, name) == 0)
 			continue;
 		dist_info = port_info->dist_info;
@@ -757,7 +757,7 @@ int dpa_init(void)
 	int retval;
 
 	//open cdx control device
-        sprintf(devname, "/dev/%s", CDX_CTRL_CDEVNAME);
+        snprintf(devname, sizeof(devname), "/dev/%s", CDX_CTRL_CDEVNAME); /* C3 B6 DA-01 */
         cdx_dev_handle = open(devname, O_RDWR);
         if (cdx_dev_handle < 0) {
                 printf("%s:unable to open dev %s\n", __FUNCTION__,
