@@ -2,97 +2,120 @@
  <!-- this pppoe relay table is allocated dynamically by FMC while pushing tables from cdx_pcd.xml -->
  <!-- If any new table gets added ccbase value of ppoe relay table should be checked and updated accordingly -->
 <netpcd>
-<classification name="cdx_udp4_cc" max="512" masks="yes" shared="true">
+<!--
+  ASK PCD hash tables (MURAM-only allocation; fmc lf-6.18.2-1.0.0 has no
+  external="yes" / aging="yes" XML attribute support, so all hash buckets
+  and CC node action descriptors must fit in the 384 KiB FMan internal
+  MURAM. Previous attempts at mask=0x3ff0 / 0x1ff0 + max=512 produced
+  fm_cc.c:4842 MatchTableSet allocation failures because the cumulative
+  budget across 16 tables exceeds MURAM once kernel-side overhead and
+  the four big tables' large keys (38B keysize for IPv6) are factored in.
+
+  Sizing target: keep total well under 256 KiB MURAM (leaving >=128 KiB
+  for FMan's own structures: KeyGen schemes, parser internal RAM, policer
+  profiles, parser scratch). Do this by:
+    - mask=0xff0  (256 buckets)  on the 4 four-tuple v4/v6 UDP/TCP tables
+    - max=128                    on the 4 big tables (was 512 → 4×
+                                  reduction in CC action descriptors,
+                                  key+mask storage, and stats objects)
+    - keep mask=0xff0 / 0xf0 + max=128 on the rest
+
+  At ~128 active runtime keys per protocol, total is 16×128 = 2048
+  flow rules, which is more than enough for SOHO/branch traffic.
+  CMM populates these at runtime via FCI; the static "max" is just
+  the ceiling.
+-->
+<classification name="cdx_udp4_cc" max="128" masks="yes" shared="true">
   <key>
-     <hashtable mask="0x1ff0" hashshift="0" keysize="14"/>
+     <hashtable mask="0xff0" hashshift="0" keysize="14"/>
   </key>
 </classification>
 
-<classification name="cdx_tcp4_cc" max="512" masks="yes" shared="true">
+<classification name="cdx_tcp4_cc" max="128" masks="yes" shared="true">
   <key>
-     <hashtable mask="0x1ff0" hashshift="0" keysize="14"/>
+     <hashtable mask="0xff0" hashshift="0" keysize="14"/>
   </key>
 </classification>
 
-<classification name="cdx_udp6_cc" max="512" masks="yes" shared="true">
+<classification name="cdx_udp6_cc" max="128" masks="yes" shared="true">
   <key>
-     <hashtable mask="0x1ff0" hashshift="0" keysize="38"/>
+     <hashtable mask="0xff0" hashshift="0" keysize="38"/>
   </key>
 </classification>
 
-<classification name="cdx_tcp6_cc" max="512" masks="yes" shared="true">
+<classification name="cdx_tcp6_cc" max="128" masks="yes" shared="true">
   <key>
-     <hashtable mask="0x1ff0" hashshift="0" keysize="38"/>
+     <hashtable mask="0xff0" hashshift="0" keysize="38"/>
   </key>
 </classification>
 
-<classification name="cdx_esp4_cc" max="512" masks="yes" shared="true">
+<classification name="cdx_esp4_cc" max="128" masks="yes" shared="true">
   <key>
      <hashtable mask="0xff0" hashshift="0" keysize="10"/>
   </key>
 </classification>
 
-<classification name="cdx_esp6_cc" max="512" masks="yes" shared="true">
+<classification name="cdx_esp6_cc" max="128" masks="yes" shared="true">
   <key>
      <hashtable mask="0xff0" hashshift="0" keysize="22"/>
   </key>
 </classification>
 
-<classification name="cdx_multicast4_cc" max="512" masks="yes" shared="true">
+<classification name="cdx_multicast4_cc" max="128" masks="yes" shared="true">
   <key>
      <hashtable mask="0xff0" hashshift="0" keysize="10"/>
   </key>
 </classification>
 
-<classification name="cdx_multicast6_cc" max="512" masks="yes" shared="true">
+<classification name="cdx_multicast6_cc" max="128" masks="yes" shared="true">
   <key>
      <hashtable mask="0xff0" hashshift="0" keysize="34"/>
   </key>
 </classification>
 
-<classification name="cdx_ethernet_cc" max="512" masks="yes" shared="true">
+<classification name="cdx_ethernet_cc" max="128" masks="yes" shared="true">
   <key>
      <hashtable mask="0xff0" hashshift="0" keysize="15"/>
   </key>
 </classification>
 
-<classification name="cdx_pppoe_cc" max="512" masks="yes" shared="true">
+<classification name="cdx_pppoe_cc" max="128" masks="yes" shared="true">
   <key>
      <hashtable mask="0xf0" hashshift="0" keysize="11"/>
   </key>
 </classification>
 
-<classification name="cdx_tuple3udp4_cc" max="512" masks="yes" shared="true">
+<classification name="cdx_tuple3udp4_cc" max="128" masks="yes" shared="true">
   <key>
      <hashtable mask="0xff0" hashshift="0" keysize="8"/>
   </key>
 </classification>
 
-<classification name="cdx_tuple3tcp4_cc" max="512" masks="yes" shared="true">
+<classification name="cdx_tuple3tcp4_cc" max="128" masks="yes" shared="true">
   <key>
      <hashtable mask="0xf0" hashshift="0" keysize="8"/>
   </key>
 </classification>
 
-<classification name="cdx_tuple3udp6_cc" max="512" masks="yes" shared="true">
+<classification name="cdx_tuple3udp6_cc" max="128" masks="yes" shared="true">
   <key>
      <hashtable mask="0xff0" hashshift="0" keysize="20"/>
   </key>
 </classification>
 
-<classification name="cdx_tuple3tcp6_cc" max="512" masks="yes" shared="true">
+<classification name="cdx_tuple3tcp6_cc" max="128" masks="yes" shared="true">
   <key>
      <hashtable mask="0xf0" hashshift="0" keysize="20"/>
   </key>
 </classification>
 
-<classification name="cdx_frag4_cc" max="512" masks="yes" shared="true">
+<classification name="cdx_frag4_cc" max="128" masks="yes" shared="true">
   <key>
      <hashtable mask="0xf0" hashshift="0" keysize="12"/>
   </key>
 </classification>
 
-<classification name="cdx_frag6_cc" max="512" masks="yes" shared="true">
+<classification name="cdx_frag6_cc" max="128" masks="yes" shared="true">
   <key>
      <hashtable mask="0xf0" hashshift="0" keysize="38"/>
   </key>
