@@ -1,0 +1,16 @@
+# The MIT License (MIT)                                                   #
+# Copyright 2009-2012, Freescale Semiconductor, Inc.                      #
+###########################################################################
+
+This package is a source code for Frame Manager Configuration tool.
+
+The Frame Manager Configuration tool is a software package whose primary
+purpose is converting Parse-Classify-Police-Distribute (PCD) descriptions of
+network packets flow into hardware configuration. The tool provides an
+abstraction layer between the end customer's vision of the PCD task definition
+and real hardware implementation.
+Trying to achieve this aim, the tool frees customers from the need to learn new
+hardware implementations details, gives a quick start for new customers
+and simplifies the work for experienced users. In addition, the tool can be used
+for hardware verification, permitting a wide range of input parameters
+in fast and convenient form.

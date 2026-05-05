@@ -1,0 +1,403 @@
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Tue, 28 Apr 2026 21:00:00 +0000
+Subject: [PATCH] fmc: ASK extensions (shared schemes, port ID, external/aging hashtables)
+
+Add support for:
+- Port ID (portid) field in port configuration output
+- Shared scheme support with CC/HT node replication
+- Fix PPPoE nextp field name (NET_HEADER_FIELD_PPPoE_PID)
+- external="yes" attribute on <hashtable> XML nodes
+  (pushes hash buckets off MURAM into DDR-backed USDPAA memory)
+- aging="yes" attribute on <hashtable> XML nodes
+- data_mem_id / data_liodn_offs hashtable attributes
+  (gated DPAA_VERSION>=11; LS1046A: -DLS1043 path)
+
+These extensions are required for the CMM daemon and fast path offload
+functionality on the Mono Gateway. The external/aging additions resolve
+PCD apply rc=65280 caused by FMan internal MURAM (384 KiB) being too
+small to host all hash buckets for typical Mono PCD configurations.
+
+Upstream-Status: Inappropriate [vendor-specific extension]
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+diff -urN a/source/FMCCModelOutput.cpp b/source/FMCCModelOutput.cpp
+--- a/source/FMCCModelOutput.cpp	2026-04-28 21:11:18.836705466 +0000
++++ b/source/FMCCModelOutput.cpp	2026-04-28 21:11:18.913706007 +0000
+@@ -725,6 +725,7 @@
+ 
+     EMIT4STR( port[, index, ].type =, model.all_ports[index].type );
+     EMIT4( port[, index, ].number  = ,  model.all_ports[index].number );
++    EMIT4( port[, index, ].portid  = ,  model.all_ports[index].portid );
+ 
+     EMIT4( port[, index, ].schemes_count =, model.all_ports[index].schemes.size() );
+     for ( unsigned int i = 0; i < cmodel->port[index].schemes_count; ++i ) {
+@@ -952,6 +953,7 @@
+     unsigned int useHash = sch.key.empty() ? 0 : 1;
+     EMIT4( scheme[, index, ].useHash =,  useHash );
+     EMIT4( scheme[, index, ].baseFqid =, sch.qbase );
++    EMIT4( scheme[, index, ].shared =, sch.shared );
+     if (sch.bypass) {
+         EMIT4( scheme[, index, ].bypassFqidGeneration =, sch.bypass );
+     }
+@@ -1626,6 +1628,15 @@
+     EMIT4( htnode[, index, ].hashResMask =, node.hashResMask );
+     EMIT4( htnode[, index, ].hashShift =, node.hashShift );
+     EMIT4( htnode[, index, ].kgHashShift =, node.kgHashShift );
++    /* ASK extension: aging is unconditional in t_FmPcdHashTableParams. */
++    EMIT4( htnode[, index, ].agingSupport =, node.aging );
++    /* ASK extension: external hash and its parameters are gated on
++     * DPAA_VERSION >= 11 in t_FmPcdHashTableParams; emit accordingly. */
++    oss << "#if (DPAA_VERSION >= 11)" << std::endl;
++    EMIT4( htnode[, index, ].externalHash =, node.external );
++    EMIT4( htnode[, index, ].externalHashParams.dataMemId =, node.dataMemId );
++    EMIT4( htnode[, index, ].externalHashParams.dataLiodnOffs =, node.dataLiodnOffs );
++    oss << "#endif /* (DPAA_VERSION >= 11) */" << std::endl;
+ 
+    
+     EMIT4STR( htnode[, index, ].ccNextEngineParamsForMiss.nextEngine =, node.nextEngineOnMiss.nextEngine );
+diff -urN a/source/FMCGenericError.cpp b/source/FMCGenericError.cpp
+--- a/source/FMCGenericError.cpp	2026-04-28 21:11:18.801705220 +0000
++++ b/source/FMCGenericError.cpp	2026-04-28 21:11:18.907705964 +0000
+@@ -33,7 +33,7 @@
+ #include "FMCUtils.h"
+ #include "logger.hpp"
+ 
+-void errorFuncHandler( void * ctx, const xmlError * error )
++void errorFuncHandler( void * ctx, xmlError * error )
+ {
+     char *filestr = (char*)"";
+     char *msgstr  = (char*)"";
+diff -urN a/source/FMCGenericError.h b/source/FMCGenericError.h
+--- a/source/FMCGenericError.h	2026-04-28 21:11:18.821705360 +0000
++++ b/source/FMCGenericError.h	2026-04-28 21:11:18.907705964 +0000
+@@ -35,7 +35,7 @@
+ 
+ const int NO_LINE = -1;
+ 
+-void errorFuncHandler( void * ctx, const xmlError * error );
++void errorFuncHandler( void * ctx, xmlError * error );
+ 
+ 
+ class CGenericError {
+diff -urN a/source/FMCPCDModel.cpp b/source/FMCPCDModel.cpp
+--- a/source/FMCPCDModel.cpp	2026-04-28 21:11:18.801705220 +0000
++++ b/source/FMCPCDModel.cpp	2026-04-28 21:11:18.912706000 +0000
+@@ -133,12 +133,141 @@
+ }
+ 
+ 
++HTNode&
++CFMCModel::replicateHtNodes(const CTaskDef* pTaskDef, Port& port, HTNode& ref)
++{
++    uint32_t ii;
++    uint32_t index;
++
++    for( ii = 0; ii < port.htnodes.size(); ii++) {
++	if (all_htnodes[port.htnodes[ii]].name == ref.name) {
++	    return all_htnodes[port.htnodes[ii]];
++	}
++    }
++
++    unsigned int newIdx = FMBlock::assignIndex( all_htnodes );
++
++    HTNode& htNode = all_htnodes[newIdx];
++    ApplyOrder::Entry n1( ApplyOrder::HTNode, htNode.getIndex() );
++    applier.add_edge( n1, ApplyOrder::Entry( ApplyOrder::None, 0 ) );
++    port.htnodes.push_back(htNode.getIndex() );
++
++    htNode.name = ref.name;
++    htNode.maxNumOfKeys = ref.maxNumOfKeys;
++    htNode.statistics = ref.statistics;
++    htNode.hashResMask = ref.hashResMask;
++    htNode.matchKeySize = ref.matchKeySize;
++    htNode.hashShift = ref.hashShift;
++    htNode.kgHashShift = ref.kgHashShift;
++    for (ii = 0; ii < ref.keys.size(); ii++) {
++    htNode.keys.push_back(HTNode::CCData());
++    }
++    for (ii = 0; ii < ref.masks.size(); ii++) {
++    htNode.masks.push_back(HTNode::CCData());
++    }
++    for (ii = 0; ii < ref.nextEngines.size(); ii++) {
++    htNode.nextEngines.push_back(HTNode::CCNextEngine());
++    }
++
++    for (ii = 0; ii < ref.frag.size(); ii++) {
++	index = ref.frag[ii];
++	htNode.frag.push_back(index);
++    }
++    for (ii = 0; ii < ref.header.size(); ii++) {
++	index = ref.header[ii];
++    htNode.header.push_back(index);
++    }
++    for (ii = 0; ii < ref.indices.size(); ii++) {
++	index = ref.indices[ii];
++    htNode.indices.push_back(index);
++    }
++
++    htNode.nextEngineOnMiss = ref.nextEngineOnMiss;
++    htNode.fragOnMiss = ref.fragOnMiss;
++    htNode.headerOnMiss = ref.headerOnMiss;
++    htNode.port_signature = port.name;
++
++    ApplyOrder::Entry root( ApplyOrder::CCTree, port.getIndex() );
++
++    port.cctrees.push_back( htNode.getIndex() );
++    port.cctrees_type.push_back( e_FM_PCD_HASH );
++    port.hdrmanips.push_back( 0 );
++    return htNode;
++}
++
++CCNode&
++CFMCModel::replicateCCNodes(const CTaskDef* pTaskDef, Port& port, CCNode& ref)
++{
++    uint32_t ii;
++    uint32_t index;
++
++    for( ii = 0; ii < port.ccnodes.size(); ii++) {
++	if (all_ccnodes[port.ccnodes[ii]].name == ref.name) {
++	    return all_ccnodes[port.ccnodes[ii]];
++	}
++    }
++
++    unsigned int newIdx = FMBlock::assignIndex( all_ccnodes );
++
++    CCNode& ccNode = all_ccnodes[newIdx];
++
++    ApplyOrder::Entry n1( ApplyOrder::CCNode, ccNode.getIndex() );
++    applier.add_edge( n1, ApplyOrder::Entry( ApplyOrder::None, 0 ) );
++
++    port.ccnodes.push_back(ccNode.getIndex() );
++
++    ccNode.name = ref.name;
++    ccNode.maxNumOfKeys = ref.maxNumOfKeys;
++    ccNode.statistics = ref.statistics;
++    ccNode.maskSupport = ref.maskSupport;
++    ccNode.shared = 0;
++    ccNode.extract = ref.extract;
++    ccNode.keySize = ref.keySize;
++    ccNode.used_protocols.insert(ref.used_protocols.begin(), ref.used_protocols.end());
++    for (ii = 0; ii < ref.keys.size(); ii++) {
++    ccNode.keys.push_back(CCNode::CCData());
++    }
++    for (ii = 0; ii < ref.masks.size(); ii++) {
++    ccNode.masks.push_back(CCNode::CCData());
++    }
++    for (ii = 0; ii < ref.nextEngines.size(); ii++) {
++    ccNode.nextEngines.push_back(CCNode::CCNextEngine());
++    }
++    for (ii = 0; ii < ref.frag.size(); ii++) {
++	index = ref.frag[ii];
++	ccNode.frag.push_back(index);
++    }
++    for (ii = 0; ii < ref.header.size(); ii++) {
++	index = ref.header[ii];
++    ccNode.header.push_back(index);
++    }
++    for (ii = 0; ii < ref.indices.size(); ii++) {
++	index = ref.indices[ii];
++    ccNode.indices.push_back(index);
++    }
++    for (ii = 0; ii < ref.frameLength.size(); ii++) {
++	index = ref.frameLength[ii];
++    ccNode.frameLength.push_back(index);
++    }
++    ccNode.nextEngineOnMiss = ref.nextEngineOnMiss;
++    ccNode.fragOnMiss = ref.fragOnMiss;
++    ccNode.headerOnMiss = ref.headerOnMiss;
++    ccNode.port_signature = port.name;
++    port.cctrees.push_back( ccNode.getIndex() );
++    port.cctrees_type.push_back( e_FM_PCD_CC );
++    port.hdrmanips.push_back( 0 );
++    return ccNode;
++}
++
++
+ ////////////////////////////////////////////////////////////////////////////////
+ /// Create model by building the internal database
+ ////////////////////////////////////////////////////////////////////////////////
+ bool
+ CFMCModel::createModel( CTaskDef* pTaskDef )
+ {
++    uint32_t ii;
++    uint32_t jj;
+     assert( pTaskDef );
+ 
+     // For all engines
+@@ -192,6 +321,21 @@
+ 
+                 Scheme& scheme = all_schemes[index];
+                 scheme.scheme_index_per_port = scheme_index;
++		if (scheme.shared && (port.name != scheme.port_signature)) {
++			 if (scheme.nextEngine == e_FM_PCD_CC) {
++                         	std::map< std::string, CClassification >::const_iterator nodeIt;
++                                nodeIt = pTaskDef->classifications.find(scheme.nextActionName);
++                                if ( nodeIt == pTaskDef->classifications.end() ) {
++                        	        throw CGenericError( ERR_CC_NOT_FOUND, scheme.nextActionName,
++                                		scheme.name );
++                                }
++                                if ( nodeIt->second.key.hashTable ) {
++                                CFMCModel::replicateHtNodes(pTaskDef, port, all_htnodes[scheme.actionHandleIndex]);
++                                } else {
++                                CFMCModel::replicateCCNodes(pTaskDef, port, all_ccnodes[scheme.actionHandleIndex]);
++                                }
++                	}
++		}
+ 
+                 // Add scheme's protocols to the port's protocol list
+                 std::set< Protocol >::iterator protoIt;
+@@ -1011,6 +1155,7 @@
+     // Add next engine entry
+     scheme.nextEngine        = getEngineByType( xmlDist.action );
+     scheme.nextEngineStr     = getEngineByTypeStr( xmlDist.action );
++    scheme.nextActionName    = xmlDist.actionName;
+     scheme.doneAction        = e_FM_PCD_ENQ_FRAME;
+     scheme.doneActionStr     = "e_FM_PCD_ENQ_FRAME";
+     scheme.actionHandleIndex = 0xFFFFFFFF;
+@@ -1694,6 +1839,10 @@
+     htNode.hashShift                   = xmlCCNode.key.hashTableEntry.hashShift;
+     htNode.kgHashShift                 = kgHashShift;
+     htNode.matchKeySize                = xmlCCNode.key.hashTableEntry.keySize;
++    htNode.external                    = xmlCCNode.key.hashTableEntry.external;
++    htNode.aging                       = xmlCCNode.key.hashTableEntry.aging;
++    htNode.dataMemId                   = xmlCCNode.key.hashTableEntry.dataMemId;
++    htNode.dataLiodnOffs               = xmlCCNode.key.hashTableEntry.dataLiodnOffs;
+     htNode.port_signature              = port.name;
+ 
+     //entries for prefilled ht
+@@ -2920,7 +3069,7 @@
+     fields["pppoe.code"]          = NET_HEADER_FIELD_PPPoE_CODE;
+     fields["pppoe.session_ID"]    = NET_HEADER_FIELD_PPPoE_SID;
+     fields["pppoe.hlen"]          = NET_HEADER_FIELD_PPPoE_LEN;
+-    fields["pppoe.nextp"]         = NET_HEADER_FIELD_PPP_PID;
++    fields["pppoe.nextp"]         = NET_HEADER_FIELD_PPPoE_PID;
+     fields["minencap.dst"]        = NET_HEADER_FIELD_MINENCAP_DST_IP;
+     fields["sctp.sport"]          = NET_HEADER_FIELD_SCTP_PORT_SRC;
+     fields["sctp.dport"]          = NET_HEADER_FIELD_SCTP_PORT_DST;
+@@ -3007,7 +3156,7 @@
+     fields["pppoe.code"]          = "NET_HEADER_FIELD_PPPoE_CODE";
+     fields["pppoe.session_ID"]    = "NET_HEADER_FIELD_PPPoE_SID";
+     fields["pppoe.hlen"]          = "NET_HEADER_FIELD_PPPoE_LEN";
+-    fields["pppoe.nextp"]         = "NET_HEADER_FIELD_PPP_PID";
++    fields["pppoe.nextp"]         = "NET_HEADER_FIELD_PPPoE_PID";
+     fields["minencap.dst"]        = "NET_HEADER_FIELD_MINENCAP_DST_IP";
+     fields["sctp.sport"]          = "NET_HEADER_FIELD_SCTP_PORT_SRC";
+     fields["sctp.dport"]          = "NET_HEADER_FIELD_SCTP_PORT_DST";
+diff -urN a/source/FMCPCDModel.h b/source/FMCPCDModel.h
+--- a/source/FMCPCDModel.h	2026-04-28 21:11:18.782705086 +0000
++++ b/source/FMCPCDModel.h	2026-04-28 21:11:18.910705986 +0000
+@@ -192,6 +192,7 @@
+ 
+     e_FmPcdEngine     nextEngine;
+     std::string       nextEngineStr;
++    std::string       nextActionName;
+     e_FmPcdDoneAction doneAction;
+     std::string       doneActionStr;
+     unsigned int      actionHandleIndex;
+@@ -317,6 +318,15 @@
+     unsigned int hashShift;             ///< Byte offset from the beginning of the KeyGen hash result to the 2-bytes to be used as hash index.
+     unsigned int kgHashShift;           ///< KG-Hash-shift as it was configured in the KG-scheme that leads to this hash-table.
+ 
++    // ASK extensions: external/aging hashtable support. When external is true,
++    // the FMan PCD allocates the bucket array in DDR via USDPAA at the offset
++    // specified by dataLiodnOffs in memory partition dataMemId, instead of in
++    // on-chip MURAM (default). aging enables per-bucket aging metadata.
++    bool         external;
++    bool         aging;
++    unsigned int dataMemId;
++    unsigned int dataLiodnOffs;
++
+     std::vector< CCData >       keys;   ///< The list of data entries
+     std::vector< CCData >       masks;  ///< The list of masks corresponding to data entries
+     std::vector< CCNextEngine > nextEngines;
+@@ -604,6 +614,8 @@
+ #endif /* (DPAA_VERSION >= 11) */
+     unsigned int get_policer_index( const CTaskDef* pTaskDef, std::string name,
+                                     std::string from, Port& port );
++    CCNode&  replicateCCNodes(const CTaskDef* pTaskDef, Port& port, CCNode& ref);
++    HTNode&  replicateHtNodes(const CTaskDef* pTaskDef, Port& port, HTNode& ref);
+ };
+ 
+ #endif // FMCMODEL_H
+diff -urN a/source/FMCPCDReader.cpp b/source/FMCPCDReader.cpp
+--- a/source/FMCPCDReader.cpp	2026-04-28 21:11:18.780705072 +0000
++++ b/source/FMCPCDReader.cpp	2026-04-28 21:11:18.909705979 +0000
+@@ -1035,12 +1035,45 @@
+     LOG( DBG1 ) << ind(2) << "Parsing of XML node 'hashtable'"
+                 << " ... " << std::endl;
+     
+-    checkUnknownAttr( pNode, 3, "mask", "hashshift", "keysize" );
++    checkUnknownAttr( pNode, 7, "mask", "hashshift", "keysize",
++                      "external", "aging", "data_mem_id", "data_liodn_offs" );
+ 
+     hashTable->mask      = std::strtoul( getAttr( pNode, "mask" ).c_str(), 0, 0 );
+     hashTable->hashShift = std::strtoul( getAttr( pNode, "hashshift" ).c_str(), 0, 0 );
+     hashTable->keySize   = std::strtoul( getAttr( pNode, "keysize" ).c_str(), 0, 0 );
+ 
++    // ASK extension: external/aging/data_mem_id/data_liodn_offs are optional.
++    // Defaults preserve the legacy MURAM-internal hashtable behavior.
++    hashTable->external      = false;
++    hashTable->aging         = false;
++    hashTable->dataMemId     = 0;
++    hashTable->dataLiodnOffs = 0;
++
++    {
++        std::string s = getAttr( pNode, "external" );
++        if ( !s.empty() ) {
++            hashTable->external = ( s == "yes" || s == "true" || s == "1" );
++        }
++    }
++    {
++        std::string s = getAttr( pNode, "aging" );
++        if ( !s.empty() ) {
++            hashTable->aging = ( s == "yes" || s == "true" || s == "1" );
++        }
++    }
++    {
++        std::string s = getAttr( pNode, "data_mem_id" );
++        if ( !s.empty() ) {
++            hashTable->dataMemId = std::strtoul( s.c_str(), 0, 0 );
++        }
++    }
++    {
++        std::string s = getAttr( pNode, "data_liodn_offs" );
++        if ( !s.empty() ) {
++            hashTable->dataLiodnOffs = std::strtoul( s.c_str(), 0, 0 );
++        }
++    }
++
+     LOG( DBG1 ) << ind(-2) << "Done" << std::endl;
+ 
+     return;
+diff -urN a/source/FMCTaskDef.h b/source/FMCTaskDef.h
+--- a/source/FMCTaskDef.h	2026-04-28 21:11:18.780705072 +0000
++++ b/source/FMCTaskDef.h	2026-04-28 21:11:18.908705972 +0000
+@@ -424,6 +424,17 @@
+     unsigned int mask;
+     unsigned int hashShift;
+     unsigned int keySize;
++    /* Mono Gateway extensions: push hash buckets/contexts off-MURAM into
++     * DDR-backed USDPAA memory (kernel UAPI: ioc_fm_pcd_hash_table_params_t
++     * external_hash + external_hash_params, fm_pcd_ioctls.h:1530+).  Also
++     * enables key aging support (aging_support).  Without these, every
++     * hashtable falls back to the 384 KiB FMan internal MURAM and large
++     * PCD configs hit AllocStatsObjs / MatchTableSet allocation failures.
++     */
++    bool         external;       ///< true if hash buckets live in DDR (off-MURAM)
++    bool         aging;          ///< true to enable per-key aging tracking
++    unsigned int dataMemId;      ///< Memory partition ID for external hash buckets
++    unsigned int dataLiodnOffs;  ///< LIODN offset for external hash buckets
+ };
+ 
+ class CAction
+diff -urN a/source/fmc.h b/source/fmc.h
+--- a/source/fmc.h	2026-04-28 21:11:18.781705079 +0000
++++ b/source/fmc.h	2026-04-28 21:11:18.907705964 +0000
+@@ -102,6 +102,7 @@
+ typedef struct fmc_port_t {
+     e_FmPortType         type;                      ///< Port type
+     unsigned int         number;                    ///< Port number
++    unsigned int         portid;                    ///< Port identification from xml file
+     t_FmPcdNetEnvParams  distinctionUnits;          ///< Port's network env
+     t_FmPortPcdParams    pcdParam;
+     t_FmPortPcdPrsParams prsParam;
