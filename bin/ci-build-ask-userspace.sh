@@ -423,16 +423,26 @@ if [ -d "$CMM_SRC" ] && [ -f "$CMM_SRC/configure.in" ]; then
     # The sample is not shipped and not on the runtime path.
     make -j"$NPROC" -C src libcmm.la cmm 2>&1 | tail -20
 
-    if [ -f "src/cmm" ]; then
-      cp "src/cmm" "$CHROOT/usr/bin/cmm"
-      chmod +x "$CHROOT/usr/bin/cmm"
-      echo "    cmm built: $(stat -c '%s bytes' src/cmm)"
-    elif [ -f "src/.libs/cmm" ]; then
+    # libtool produces TWO files named "cmm" after a successful build:
+    #   src/cmm          — a 6 KiB Bourne shell wrapper that re-exec's the
+    #                      real binary in src/.libs/ via $progdir, intended
+    #                      for in-tree testing on the build host. Hard-coded
+    #                      build paths like /__w/vyos-ls1046a-build/.../ASK/cmm/src
+    #                      are baked in.
+    #   src/.libs/cmm    — the actual aarch64 ELF executable.
+    # `[ -f src/cmm ]` is true for BOTH cases. Always prefer the .libs ELF;
+    # fall back to src/cmm only if .libs/cmm is absent (which would mean the
+    # build was static/non-libtool and src/cmm is itself the ELF).
+    if [ -f "src/.libs/cmm" ]; then
       cp "src/.libs/cmm" "$CHROOT/usr/bin/cmm"
       chmod +x "$CHROOT/usr/bin/cmm"
-      echo "    cmm built: $(stat -c '%s bytes' src/.libs/cmm)"
+      echo "    cmm built (ELF from .libs/): $(stat -c '%s bytes' src/.libs/cmm)"
+    elif [ -f "src/cmm" ] && file "src/cmm" 2>/dev/null | grep -q ELF; then
+      cp "src/cmm" "$CHROOT/usr/bin/cmm"
+      chmod +x "$CHROOT/usr/bin/cmm"
+      echo "    cmm built (ELF from src/): $(stat -c '%s bytes' src/cmm)"
     else
-      echo "    WARNING: cmm build failed — keeping pre-built"
+      echo "    WARNING: cmm build failed (no ELF found) — keeping pre-built"
     fi
 
     # libcmm shared library
