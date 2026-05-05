@@ -1,0 +1,66 @@
+--- a/src/fm_lib.c
++++ b/src/fm_lib.c
+@@ -902,6 +902,17 @@
+     memcpy(&params, p_CcNodeParam, sizeof(t_FmPcdCcNodeParams));
+     params.id = NULL;
+ 
++    /* ASK B3/F08: bound caller-supplied num_of_keys against the fixed
++     * stack-array size in ioc_fm_pcd_cc_node_params_t before iterating;
++     * an out-of-range value otherwise walks past key_params[] end and
++     * corrupts the wrapper's stack. */
++    if (params.keys_params.num_of_keys > FM_PCD_MAX_NUM_OF_KEYS) {
++        REPORT_ERROR(MINOR, E_INVALID_VALUE,
++                     ("num_of_keys %u > FM_PCD_MAX_NUM_OF_KEYS",
++                      (unsigned)params.keys_params.num_of_keys));
++        return NULL;
++    }
++
+     /*correct*/
+     for(i = 0; i < params.keys_params.num_of_keys;i++){
+         if (params.keys_params.key_params[i].cc_next_engine_params.next_engine == e_IOC_FM_PCD_CC &&
+@@ -1942,6 +1953,13 @@
+ 
+         if (params.p_kg_params){
+             uint32_t i;
++            /* ASK B3/F08: bound num_of_schemes against fixed
++             * scheme_ids[] array size before iterating. */
++            if (params.p_kg_params->num_of_schemes > FM_PCD_KG_NUM_OF_SCHEMES) {
++                RETURN_ERROR(MINOR, E_INVALID_VALUE,
++                             ("kg num_of_schemes %u > FM_PCD_KG_NUM_OF_SCHEMES",
++                              (unsigned)params.p_kg_params->num_of_schemes));
++            }
+             for (i = 0; i < params.p_kg_params->num_of_schemes; i++)
+                 if (params.p_kg_params->scheme_ids[i])
+                     DEV_TO_ID(params.p_kg_params->scheme_ids[i]);
+@@ -2131,8 +2149,14 @@
+     _fml_dbg("Calling...\n");
+ 
+     memcpy(&params, p_PortScheme, sizeof(t_FmPcdPortSchemesParams));
++    /* ASK B3/F08: bound num_of_schemes against fixed scheme_ids[] size. */
++    if (params.num_of_schemes > FM_PCD_KG_NUM_OF_SCHEMES) {
++        RETURN_ERROR(MINOR, E_INVALID_VALUE,
++                     ("bind num_of_schemes %u > FM_PCD_KG_NUM_OF_SCHEMES",
++                      (unsigned)params.num_of_schemes));
++    }
+     for (i = 0; i < params.num_of_schemes; i++)
+-	    DEV_TO_ID(params.scheme_ids[i]);
++    DEV_TO_ID(params.scheme_ids[i]);
+ 
+     if (ioctl(p_Dev->fd, FM_PORT_IOC_PCD_KG_BIND_SCHEMES, &params))
+         RETURN_ERROR(MINOR, E_INVALID_OPERATION, NO_MSG);
+@@ -2154,8 +2178,14 @@
+     _fml_dbg("Calling...\n");
+ 
+     memcpy(&params, p_PortScheme, sizeof(t_FmPcdPortSchemesParams));
++    /* ASK B3/F08: bound num_of_schemes against fixed scheme_ids[] size. */
++    if (params.num_of_schemes > FM_PCD_KG_NUM_OF_SCHEMES) {
++        RETURN_ERROR(MINOR, E_INVALID_VALUE,
++                     ("unbind num_of_schemes %u > FM_PCD_KG_NUM_OF_SCHEMES",
++                      (unsigned)params.num_of_schemes));
++    }
+     for (i = 0; i < params.num_of_schemes; i++)
+-	    DEV_TO_ID(params.scheme_ids[i]);
++    DEV_TO_ID(params.scheme_ids[i]);
+ 
+     if (ioctl(p_Dev->fd, FM_PORT_IOC_PCD_KG_UNBIND_SCHEMES, &params))
+         RETURN_ERROR(MINOR, E_INVALID_OPERATION, NO_MSG);
