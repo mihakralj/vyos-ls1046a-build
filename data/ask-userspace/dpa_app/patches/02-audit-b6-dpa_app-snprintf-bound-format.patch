@@ -1,0 +1,103 @@
+ask: dpa_app sscanf %s width + sprintf -> snprintf (audit B6 / DA-01, DA-02)
+
+AUDIT-dpa_app DA-01 + DA-02: dpa.c parses cdx_pcd.xml table names and
+formats DPAA port names into bounded buffers using unsafe primitives.
+
+DA-01 — sscanf("%s", ...) with no width specifier into info->name[64]:
+
+  sscanf(tblname, "fm%d/port/%dG/%d/ccnode/%s",     ...)
+  sscanf(tblname, "fm%d/port/OFFLINE/%d/ccnode/%s", ...)
+
+`info->name` is char[64] (TABLE_NAME_SIZE in cdx_ioctl.h). The %s
+specifier reads until whitespace with no length cap, so a hostile
+or buggy PCD authoring tool emitting a >63-char ccnode tail
+overflows the surrounding info struct on the stack of the dpa_app
+caller. Fix: %s -> %63s on both call sites; the trailing NUL is
+written by sscanf at offset 63, which exactly matches char[64].
+
+DA-02 — sprintf into bounded port-name buffers:
+
+  sprintf(port_info->name, "dpa-fman%d-oh@%d",   ...);   /* case 0 */
+  sprintf(port_info->name, "dpa-fm%d-1G-eth%d",  ...);   /* case 1 */
+  sprintf(port_info->name, "dpa-fm%d-10G-eth%d", ...);   /* case 2 */
+  sprintf(name, "fm%d", finfo->index);                   /* x3 sites */
+
+`port_info->name` is CDX_CTRL_PORT_NAME_LEN bytes (32 per the prior
+audit) and `name` is char[256] local. With pathological u32 input
+(`fm_index`/`port_id` near UINT_MAX), the rendered string can
+exceed the destination — overflow by 1 byte in the worst case.
+Fix: replace every sprintf(buf, ...) with snprintf(buf, sizeof(buf), ...).
+
+This converts both classes mechanically; no behaviour change on
+the well-formed-input path. Truncation on hostile input is the
+new safe failure mode.
+
+Userspace-only — no kernel-side delta, no ABI/UAPI change.
+
+Audit-batch: B6
+Audit-findings: AUDIT-dpa_app DA-01, DA-02--- a/dpa_app/dpa.c
++++ b/dpa_app/dpa.c
+@@ -325,7 +325,7 @@
+ 				cmodel.port[ii].name);
+ #endif
+ 		//FM  name would be fm0, fm1 etc
+-		sprintf(name, "fm%d", finfo->index);
++		snprintf(name, sizeof(name), "fm%d", finfo->index);
+ 		//look for fm name in the port name
+ 		if (strstr(cmodel.port[ii].name, name) == 0)
+ 			continue;
+@@ -350,7 +350,7 @@
+ 	dist_info = (struct cdx_dist_info *)(port_info + ports);
+ 	//scan all ports associated with this fman
+ 	for (ii = 0; ii < cmodel.port_count; ii++) {
+-		sprintf(name, "fm%d", finfo->index);
++		snprintf(name, sizeof(name), "fm%d", finfo->index);
+ 		if (strstr(cmodel.port[ii].name, name) == 0)
+                         continue;
+ 		//fill all port related infor from model into cdx structures
+@@ -362,17 +362,17 @@
+ 		//encode the type, speed, fm index and port index in device name
+ 		switch (cmodel.port[ii].type) {
+ 			case 0:
+-				sprintf(port_info->name, "dpa-fman%d-oh@%d", 
++				snprintf(port_info->name, sizeof(port_info->name), "dpa-fman%d-oh@%d", 
+ 					port_info->fm_index, (port_info->index + 1));
+ 				port_info->type = 0;
+ 				break;
+ 			case 1:
+-				sprintf(port_info->name, "dpa-fm%d-1G-eth%d", 
++				snprintf(port_info->name, sizeof(port_info->name), "dpa-fm%d-1G-eth%d", 
+ 					port_info->fm_index, port_info->index);
+ 				port_info->type = 1;
+ 				break;
+ 			case 2:
+-				sprintf(port_info->name, "dpa-fm%d-10G-eth%d", 
++				snprintf(port_info->name, sizeof(port_info->name), "dpa-fm%d-10G-eth%d", 
+ 					port_info->fm_index, port_info->index);
+ 				port_info->type = 10;
+ 				break;
+@@ -421,7 +421,7 @@
+ 	port_info = finfo->portinfo;
+ 	//update all ports associated with this fman
+ 	for (ii = 0; ii < cmodel.port_count; ii++) {
+-		sprintf(name, "fm%d", finfo->index);
++		snprintf(name, sizeof(name), "fm%d", finfo->index);
+ 		if (strstr(cmodel.port[ii].name, name) == 0)
+ 			continue;
+ 		dist_info = port_info->dist_info;
+@@ -532,13 +532,13 @@
+ 				tblname = cmodel.htnode_name[ii];
+ 			/* parse table name assuming it is for a physical port
+ 			get fman instance, port speed and index & name */
+-			if (sscanf(tblname, "fm%d/port/%dG/%d/ccnode/%s",
++			if (sscanf(tblname, "fm%d/port/%dG/%d/ccnode/%63s",
+                         	&fm_idx, &speed, &port_id,
+                                 &info->name[0]) != 4) {
+ 				/* parse table name assuming it is for an offline port
+ 				get fman instance, index & name */
+                         	if (sscanf(tblname,
+-                                	"fm%d/port/OFFLINE/%d/ccnode/%s",
++                                	"fm%d/port/OFFLINE/%d/ccnode/%63s",
+                                        	&fm_idx, &port_id,
+                                        	&info->name[0]) != 3) {
+ 					//neither of the two....	
