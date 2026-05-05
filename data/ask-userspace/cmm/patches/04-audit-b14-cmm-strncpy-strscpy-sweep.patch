@@ -1,0 +1,243 @@
+audit-b14: cmm defensive sweep — strncpy -> strscpy
+
+Mechanical rewrite across 10 cmm/src TUs converting all strncpy()
+callsites to strscpy(). cmm is userspace; strscpy is provided by libbsd
+(already linked, used by B6/B7/B12).
+
+Coverage (23 sites total):
+
+  module_vlan.c   2 sites
+  module_tunnel.c 4 sites
+  module_rx.c     7 sites
+  module_lro.c    1 site
+  module_qm.c     2 sites
+  module_relay.c  2 sites
+  cmm.c           1 site
+  module_stat.c   1 site
+  itf.c           2 sites
+  voicebuf.c      1 site
+
+All destinations are stack/struct char arrays for interface names or
+config tokens. None depend on NUL-padding behaviour.
+
+No behaviour change on the well-formed input path. Truncation now
+always NUL-terminates within the dst bound instead of potentially
+emitting a non-terminated string.
+
+--- a/cmm/src/cmm.c
++++ b/cmm/src/cmm.c
+@@ -430,7 +430,7 @@
+ 
+ 			case 'f':	// Specify configuration file
+ 				//Get the argument
+-				strncpy(confFilePath, optarg, 512);
++				strscpy(confFilePath, optarg, 512);
+ 				confFilePath[512] = '\0';
+ 				break;
+ 
+--- a/cmm/src/itf.c
++++ b/cmm/src/itf.c
+@@ -601,7 +601,7 @@
+ 		attr = cmm_get_rtattr(RTA_DATA(attr), RTA_PAYLOAD(attr), IFLA_INFO_KIND);
+ 		if (attr)
+ 		{
+-			strncpy(itf->link_kind, RTA_DATA(attr), sizeof(itf->link_kind) - 1);
++			strscpy(itf->link_kind, RTA_DATA(attr), sizeof(itf->link_kind) - 1);
+ 			itf->link_kind[sizeof(itf->link_kind) - 1] = '\0';
+ 		}
+ #ifdef VLAN_FILTER
+@@ -1640,7 +1640,7 @@
+ 	int ret;
+ 
+ 	cmd.port_id = port->port_id;
+-	strncpy(cmd.ifname, port->ifname, sizeof(cmd.ifname));
++	strscpy(cmd.ifname, port->ifname, sizeof(cmd.ifname));
+ 	cmd.ifname[sizeof(cmd.ifname) - 1] = '\0';
+ 
+ 	cmm_print(DEBUG_INFO, "%s: port mapping %d <=> %s\n", __func__, cmd.port_id, cmd.ifname);
+--- a/cmm/src/module_lro.c
++++ b/cmm/src/module_lro.c
+@@ -37,7 +37,7 @@
+ 
+ 		cmm_print(DEBUG_INFO, "%s: lro interface added\n", ifname);
+ 
+-		strncpy(lro_itf[i].ifname, ifname, IFNAMSIZ);
++		strscpy(lro_itf[i].ifname, ifname, IFNAMSIZ);
+ 		STR_TRUNC_END(lro_itf[i].ifname, IFNAMSIZ);
+ 
+ 		lro_itf[i].used = 1;
+--- a/cmm/src/module_qm.c
++++ b/cmm/src/module_qm.c
+@@ -170,7 +170,7 @@
+                 goto help;
+ 
+ 	memset(pFFRateCmd, 0, sizeof(fpp_qm_ff_rate_cmd_t));
+-	strncpy((char *)(&pFFRateCmd->interface[0]),(keywords[cpt]), IFNAMSIZ);
++	strscpy((char *)(&pFFRateCmd->interface[0]),(keywords[cpt]), IFNAMSIZ);
+ 	if (keywords[++cpt]) {
+ 		if (strcmp(keywords[cpt], "reset") == 0) {
+ 			pFFRateCmd->clear = 1;		
+@@ -1404,7 +1404,7 @@
+ 		cmm_print(DEBUG_STDERR, "Error : invalid interface name %s \n", keywords[cpt]);
+ 		return QM_ERROR;
+ 	}
+-	strncpy((char *)&ffRateCmd.interface[0], keywords[cpt], IFNAMSIZ);
++	strscpy((char *)&ffRateCmd.interface[0], keywords[cpt], IFNAMSIZ);
+ 
+ 	if((!keywords[cpt + 1]) || (strcasecmp(keywords[++cpt], "cir") != 0))  {
+ 		cmm_print(DEBUG_STDERR, "Error : invalid keyword. It expects cir parameter and its value.\n");
+--- a/cmm/src/module_relay.c
++++ b/cmm/src/module_relay.c
+@@ -437,11 +437,11 @@
+ 		return relay_print_usage();
+ 	
+ 	keywords++;
+-	strncpy(cmd.ipifname, *keywords, sizeof(cmd.ipifname));
++	strscpy(cmd.ipifname, *keywords, sizeof(cmd.ipifname));
+ 	STR_TRUNC_END(cmd.ipifname, sizeof(cmd.ipifname));
+ 
+ 	keywords++;
+-	strncpy(cmd.opifname, *keywords, sizeof(cmd.opifname));
++	strscpy(cmd.opifname, *keywords, sizeof(cmd.opifname));
+ 	STR_TRUNC_END(cmd.opifname, sizeof(cmd.opifname));
+ 
+ 	keywords++;
+--- a/cmm/src/module_rx.c
++++ b/cmm/src/module_rx.c
+@@ -1213,7 +1213,7 @@
+ 			bridgeEnableCmd.enable_flag = 1;
+ 			bridgeEnableCmd.interface = 0xffff;
+ 		
+-			strncpy (&bridgeEnableCmd.input_name[0], pinterface, sizeof(bridgeEnableCmd.input_name));
++			strscpy(&bridgeEnableCmd.input_name[0], pinterface, sizeof(bridgeEnableCmd.input_name));
+ 			STR_TRUNC_END(bridgeEnableCmd.input_name, sizeof(bridgeEnableCmd.input_name));
+ 		}
+ 		else if(strcasecmp(keywords[cpt], "off") == 0)
+@@ -1224,14 +1224,14 @@
+ 			memset(&bridgeEnableCmd, 0, sizeof(bridgeEnableCmd));
+ 			bridgeEnableCmd.enable_flag = 0;
+ 			bridgeEnableCmd.interface = 0xffff;
+-			strncpy (&bridgeEnableCmd.input_name[0], pinterface, sizeof(bridgeEnableCmd.input_name));
++			strscpy(&bridgeEnableCmd.input_name[0], pinterface, sizeof(bridgeEnableCmd.input_name));
+ 			STR_TRUNC_END(bridgeEnableCmd.input_name, sizeof(bridgeEnableCmd.input_name));
+ 		}
+ 		else if(strcasecmp(keywords[cpt], "add") == 0)
+ 		{
+ 			cmdToSend |= CMD_BIT(FPP_CMD_RX_L2BRIDGE_ADD);
+ 			memset(&bridgeAddCmd, 0, sizeof(bridgeAddCmd));
+-			strncpy(bridgeAddCmd.input_name, pinterface, sizeof(bridgeAddCmd.input_name));
++			strscpy(bridgeAddCmd.input_name, pinterface, sizeof(bridgeAddCmd.input_name));
+ 			STR_TRUNC_END(bridgeAddCmd.input_name, sizeof(bridgeAddCmd.input_name));
+ 			bridgeAddCmd.input_interface = 0xffff;
+ 			bridgeAddCmd.input_svlan = 0xffff;
+@@ -1361,9 +1361,9 @@
+ 					bridgeAddCmd.input_interface  = 0xFFFF;
+ 					bridgeAddCmd.output_svlan = 0xFFFF;
+ 					bridgeAddCmd.output_cvlan = 0xFFFF;
+-					strncpy(bridgeAddCmd.output_name, keywords[cpt], sizeof(bridgeAddCmd.output_name));
++					strscpy(bridgeAddCmd.output_name, keywords[cpt], sizeof(bridgeAddCmd.output_name));
+ 					STR_TRUNC_END(bridgeAddCmd.output_name,sizeof(bridgeAddCmd.output_name));
+-					strncpy(bridgeAddCmd.input_name, pinterface, sizeof(bridgeAddCmd.input_name));
++					strscpy(bridgeAddCmd.input_name, pinterface, sizeof(bridgeAddCmd.input_name));
+ 					STR_TRUNC_END(bridgeAddCmd.input_name,sizeof(bridgeAddCmd.input_name));
+ 				}
+ 				else if(strcasecmp(keywords[cpt], "qmod") == 0)
+@@ -1388,7 +1388,7 @@
+ 		{
+ 			cmdToSend |= CMD_BIT(FPP_CMD_RX_L2BRIDGE_REMOVE);
+ 			memset(&bridgeRemoveCmd, 0, sizeof(bridgeRemoveCmd));
+-			strncpy(bridgeRemoveCmd.input_name, pinterface, sizeof(bridgeRemoveCmd.input_name));
++			strscpy(bridgeRemoveCmd.input_name, pinterface, sizeof(bridgeRemoveCmd.input_name));
+ 			STR_TRUNC_END(bridgeRemoveCmd.input_name,sizeof(bridgeRemoveCmd.input_name));
+ 			bridgeRemoveCmd.input_interface = 0xffff;
+ 			bridgeRemoveCmd.input_svlan = 0xffff;
+@@ -1674,7 +1674,7 @@
+ 
+ 	*psvlan_id = 0xFFFF;
+ 	*pcvlan_id = 0xFFFF;
+-	strncpy(interface, pstring, sizeof(interface) - 1);
++	strscpy(interface, pstring, sizeof(interface) - 1);
+ 	STR_TRUNC_END(interface, sizeof(interface));
+ 
+ 	pperiod = strchr(interface, '.');
+--- a/cmm/src/module_stat.c
++++ b/cmm/src/module_stat.c
+@@ -398,7 +398,7 @@
+ 		{
+ 			if(!keywords[++cpt])
+ 				goto help;
+-			strncpy(tunnelStatusCmd.if_name, keywords[cpt], sizeof(tunnelStatusCmd.if_name) - 1);
++			strscpy(tunnelStatusCmd.if_name, keywords[cpt], sizeof(tunnelStatusCmd.if_name) - 1);
+ 			if(!keywords[++cpt])
+ 				goto help;
+ 		}
+--- a/cmm/src/module_tunnel.c
++++ b/cmm/src/module_tunnel.c
+@@ -201,7 +201,7 @@
+ 				return tunnel_print_usage();
+ 			}
+ 		}
+-		strncpy(cmmtd_cmd.name, tnl_name, sizeof(cmmtd_cmd.name));
++		strscpy(cmmtd_cmd.name, tnl_name, sizeof(cmmtd_cmd.name));
+ 		STR_TRUNC_END(cmmtd_cmd.name, sizeof(cmmtd_cmd.name));
+ 		cmmtd_cmd.ipsec = ipsec;
+ 		cmmtd_cmd.tunnel_type = tnl_type;
+@@ -231,7 +231,7 @@
+ 			struct tunnel_info *pInfo;
+ 
+  			cmm_print(DEBUG_STDOUT, "Details for tunnel %s\n", tnl_name);
+-			strncpy(cmmtd_cmd.name, tnl_name, sizeof(cmmtd_cmd.name));
++			strscpy(cmmtd_cmd.name, tnl_name, sizeof(cmmtd_cmd.name));
+ 			STR_TRUNC_END(cmmtd_cmd.name, sizeof(cmmtd_cmd.name));
+ 
+ 			/* Send CMD_CMMTD_TUNNEL_SHOW to Deamon !*/
+@@ -262,7 +262,7 @@
+ 			return tunnel_print_usage();
+ 		else
+ 		{
+-			strncpy(cmmtd_cmd.name, tnl_name, sizeof(cmmtd_cmd.name));
++			strscpy(cmmtd_cmd.name, tnl_name, sizeof(cmmtd_cmd.name));
+ 			STR_TRUNC_END(cmmtd_cmd.name, sizeof(cmmtd_cmd.name));
+ 
+ 			/* Send CMD_CMMTD_TUNNEL_DEL to Deamon !*/
+@@ -1658,7 +1658,7 @@
+ 	if(strcasecmp(keywords[tabStart++],"interface") != 0)
+ 		goto usage;
+ 
+-	strncpy((char*)pIdConvCmd->name, keywords[tabStart++],IFNAMSIZ);
++	strscpy((char*)pIdConvCmd->name, keywords[tabStart++],IFNAMSIZ);
+ 	if(strcasecmp(keywords[tabStart++],"enable") == 0)
+ 		 pIdConvCmd->IdConvStatus = 1;
+ 	
+--- a/cmm/src/module_vlan.c
++++ b/cmm/src/module_vlan.c
+@@ -284,7 +284,7 @@
+ 
+ 	cmd.action = CMMD_ACTION_REGISTER;
+ 	cmd.vlan_id = 0;
+-	strncpy(cmd.vlan_ifname, argv[0], IFNAMSIZ);
++	strscpy(cmd.vlan_ifname, argv[0], IFNAMSIZ);
+ 	STR_TRUNC_END(cmd.vlan_ifname, IFNAMSIZ);
+ 	cmd.vlan_phy_ifname[0] = 0;
+ 
+@@ -313,7 +313,7 @@
+ 
+ 	cmd.action = CMMD_ACTION_DEREGISTER;
+ 	cmd.vlan_id = 0;
+-	strncpy(cmd.vlan_ifname, argv[0], IFNAMSIZ);
++	strscpy(cmd.vlan_ifname, argv[0], IFNAMSIZ);
+ 	STR_TRUNC_END(cmd.vlan_ifname, IFNAMSIZ);
+ 	cmd.vlan_phy_ifname[0] = 0;
+ 
+--- a/cmm/src/voicebuf.c
++++ b/cmm/src/voicebuf.c
+@@ -307,7 +307,7 @@
+ 		cmd.frame_size = tmp;
+ 
+ 		i++;
+-		strncpy(cmd.filename, argv[i], CMMD_VOICE_FILE_MAX_NAMESIZE);
++		strscpy(cmd.filename, argv[i], CMMD_VOICE_FILE_MAX_NAMESIZE);
+ 		STR_TRUNC_END(cmd.filename, CMMD_VOICE_FILE_MAX_NAMESIZE);
+ 
+ 		rc = cmmSendToDaemon(daemon_handle, CMMD_CMD_VOICE_FILE_LOAD, &cmd, sizeof(cmd), rxbuf.rcvBuffer);
+
