@@ -6,116 +6,132 @@
   ASK PCD hash tables (MURAM-only allocation; fmc lf-6.18.2-1.0.0 has no
   external="yes" / aging="yes" XML attribute support, so all hash buckets
   and CC node action descriptors must fit in the 384 KiB FMan internal
-  MURAM. Previous attempts at mask=0x3ff0 / 0x1ff0 + max=512 produced
-  fm_cc.c:4842 MatchTableSet allocation failures because the cumulative
-  budget across 16 tables exceeds MURAM once kernel-side overhead and
-  the four big tables' large keys (38B keysize for IPv6) are factored in.
+  MURAM.
 
-  Sizing target: keep total well under 256 KiB MURAM (leaving >=128 KiB
-  for FMan's own structures: KeyGen schemes, parser internal RAM, policer
-  profiles, parser scratch). Do this by:
-    - mask=0xff0  (256 buckets)  on the 4 four-tuple v4/v6 UDP/TCP tables
-    - max=128                    on the 4 big tables (was 512 → 4×
-                                  reduction in CC action descriptors,
-                                  key+mask storage, and stats objects)
-    - keep mask=0xff0 / 0xf0 + max=128 on the rest
+  Critical scaling factor: each <classification> below is referenced
+  from 10 <policy> blocks (8 ethport + 2 of_port). Despite shared="true"
+  the SDK still instantiates separate MURAM-backed CC node copies per
+  policy reference. Effective consumption is therefore:
 
-  At ~128 active runtime keys per protocol, total is 16×128 = 2048
-  flow rules, which is more than enough for SOHO/branch traffic.
-  CMM populates these at runtime via FCI; the static "max" is just
-  the ceiling.
+      max × keysize × num_policies  (action descriptors + key storage)
+    + buckets × bucket_entry_size   (hashtable bucket arrays)
+
+  summed across all 16 tables. Previous trims (max=512, mask=0x1ff0;
+  then max=128, mask=0xff0 on big-4) still produced
+  fm_cc.c:4842 MatchTableSet "MURAM allocation for CC node action
+  descriptors table" because the per-policy multiplier was not factored
+  in. With 10 policies × 16 tables × max=128 × ~64 B/entry ≈ 1.3 MiB,
+  far exceeding the 384 KiB MURAM ceiling.
+
+  This iteration drops:
+    - max=128 → 32 across all 16 tables   (4× cut to action descriptors)
+    - mask=0xff0 → 0xf0 on the four big   (256 → 16 buckets, 16× cut)
+      tables (cdx_udp4_cc, cdx_tcp4_cc,
+      cdx_udp6_cc, cdx_tcp6_cc)
+
+  Estimated MURAM at this setting: ~110 KiB (16 × 32 × ~60 B for CC
+  descriptors+keys+masks across all policy refs, plus ~16 KiB for
+  bucket arrays). Leaves comfortable headroom for FMan KeyGen schemes,
+  parser internal RAM, policer profiles, and parser scratch.
+
+  Runtime ceiling: 16 tables × max=32 = 512 simultaneous flow rules
+  per policy. CMM populates entries dynamically via FCI; max is only
+  the upper bound, not the working set. 512 flows easily covers
+  SOHO/branch traffic patterns. If a deployment needs more, the
+  proper fix is patching fmc to honor external="yes" aging="yes"
+  so buckets land in DDR via USDPAA — separate work item.
 -->
-<classification name="cdx_udp4_cc" max="128" masks="yes" shared="true">
+<classification name="cdx_udp4_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable mask="0xff0" hashshift="0" keysize="14"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="14"/>
   </key>
 </classification>
 
-<classification name="cdx_tcp4_cc" max="128" masks="yes" shared="true">
+<classification name="cdx_tcp4_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable mask="0xff0" hashshift="0" keysize="14"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="14"/>
   </key>
 </classification>
 
-<classification name="cdx_udp6_cc" max="128" masks="yes" shared="true">
+<classification name="cdx_udp6_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable mask="0xff0" hashshift="0" keysize="38"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="38"/>
   </key>
 </classification>
 
-<classification name="cdx_tcp6_cc" max="128" masks="yes" shared="true">
+<classification name="cdx_tcp6_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable mask="0xff0" hashshift="0" keysize="38"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="38"/>
   </key>
 </classification>
 
-<classification name="cdx_esp4_cc" max="128" masks="yes" shared="true">
+<classification name="cdx_esp4_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable mask="0xff0" hashshift="0" keysize="10"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="10"/>
   </key>
 </classification>
 
-<classification name="cdx_esp6_cc" max="128" masks="yes" shared="true">
+<classification name="cdx_esp6_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable mask="0xff0" hashshift="0" keysize="22"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="22"/>
   </key>
 </classification>
 
-<classification name="cdx_multicast4_cc" max="128" masks="yes" shared="true">
+<classification name="cdx_multicast4_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable mask="0xff0" hashshift="0" keysize="10"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="10"/>
   </key>
 </classification>
 
-<classification name="cdx_multicast6_cc" max="128" masks="yes" shared="true">
+<classification name="cdx_multicast6_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable mask="0xff0" hashshift="0" keysize="34"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="34"/>
   </key>
 </classification>
 
-<classification name="cdx_ethernet_cc" max="128" masks="yes" shared="true">
+<classification name="cdx_ethernet_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable mask="0xff0" hashshift="0" keysize="15"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="15"/>
   </key>
 </classification>
 
-<classification name="cdx_pppoe_cc" max="128" masks="yes" shared="true">
+<classification name="cdx_pppoe_cc" max="32" masks="yes" shared="true">
   <key>
      <hashtable mask="0xf0" hashshift="0" keysize="11"/>
   </key>
 </classification>
 
-<classification name="cdx_tuple3udp4_cc" max="128" masks="yes" shared="true">
-  <key>
-     <hashtable mask="0xff0" hashshift="0" keysize="8"/>
-  </key>
-</classification>
-
-<classification name="cdx_tuple3tcp4_cc" max="128" masks="yes" shared="true">
+<classification name="cdx_tuple3udp4_cc" max="32" masks="yes" shared="true">
   <key>
      <hashtable mask="0xf0" hashshift="0" keysize="8"/>
   </key>
 </classification>
 
-<classification name="cdx_tuple3udp6_cc" max="128" masks="yes" shared="true">
+<classification name="cdx_tuple3tcp4_cc" max="32" masks="yes" shared="true">
   <key>
-     <hashtable mask="0xff0" hashshift="0" keysize="20"/>
+     <hashtable mask="0xf0" hashshift="0" keysize="8"/>
   </key>
 </classification>
 
-<classification name="cdx_tuple3tcp6_cc" max="128" masks="yes" shared="true">
+<classification name="cdx_tuple3udp6_cc" max="32" masks="yes" shared="true">
   <key>
      <hashtable mask="0xf0" hashshift="0" keysize="20"/>
   </key>
 </classification>
 
-<classification name="cdx_frag4_cc" max="128" masks="yes" shared="true">
+<classification name="cdx_tuple3tcp6_cc" max="32" masks="yes" shared="true">
+  <key>
+     <hashtable mask="0xf0" hashshift="0" keysize="20"/>
+  </key>
+</classification>
+
+<classification name="cdx_frag4_cc" max="32" masks="yes" shared="true">
   <key>
      <hashtable mask="0xf0" hashshift="0" keysize="12"/>
   </key>
 </classification>
 
-<classification name="cdx_frag6_cc" max="128" masks="yes" shared="true">
+<classification name="cdx_frag6_cc" max="32" masks="yes" shared="true">
   <key>
      <hashtable mask="0xf0" hashshift="0" keysize="38"/>
   </key>
