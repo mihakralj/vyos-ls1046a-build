@@ -171,7 +171,6 @@ cell-index = <0>;
 compatible = "fsl,fman-port-1g-rx-extended-args";
 fifo-size = <0x3200 0x0>;
 buffer-layout = <96 64>;
-vsp-window = <2 0>;
 };
 			fman0_tx0-extended-args {
 				cell-index = <0>;
@@ -184,7 +183,6 @@ cell-index = <1>;
 compatible = "fsl,fman-port-1g-rx-extended-args";
 fifo-size = <0x3200 0x0>;
 buffer-layout = <96 64>;
-vsp-window = <2 0>;
 };
 			fman0_tx1-extended-args {
 				cell-index = <1>;
@@ -197,7 +195,6 @@ cell-index = <2>;
 compatible = "fsl,fman-port-1g-rx-extended-args";
 fifo-size = <0x3200 0x0>;
 buffer-layout = <96 64>;
-vsp-window = <2 0>;
 };
 			fman0_tx2-extended-args {
 				cell-index = <2>;
@@ -210,7 +207,6 @@ cell-index = <3>;
 compatible = "fsl,fman-port-1g-rx-extended-args";
 fifo-size = <0x3200 0x0>;
 buffer-layout = <96 64>;
-vsp-window = <2 0>;
 };
 			fman0_tx3-extended-args {
 				cell-index = <3>;
@@ -223,7 +219,6 @@ cell-index = <4>;
 compatible = "fsl,fman-port-1g-rx-extended-args";
 fifo-size = <0x3200 0x0>;
 buffer-layout = <96 64>;
-vsp-window = <2 0>;
 };
 			fman0_tx4-extended-args {
 				cell-index = <4>;
@@ -236,7 +231,6 @@ cell-index = <5>;
 compatible = "fsl,fman-port-1g-rx-extended-args";
 fifo-size = <0x3200 0x0>;
 buffer-layout = <96 64>;
-vsp-window = <2 0>;
 };
 			fman0_tx5-extended-args {
 				cell-index = <5>;
@@ -250,7 +244,6 @@ cell-index = <0>;
 compatible = "fsl,fman-port-10g-rx-extended-args";
 fifo-size = <0x6000 0x0>;
 buffer-layout = <96 64>;
-vsp-window = <2 0>;
 };
 			fman0_tx6-extended-args {
 				cell-index = <0>;
@@ -263,7 +256,6 @@ cell-index = <1>;
 compatible = "fsl,fman-port-10g-rx-extended-args";
 fifo-size = <0x6000 0x0>;
 buffer-layout = <96 64>;
-vsp-window = <2 0>;
 };
 			fman0_tx7-extended-args {
 				cell-index = <1>;
