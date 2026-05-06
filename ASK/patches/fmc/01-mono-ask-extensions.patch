@@ -390,8 +390,9 @@ index bbbbbbb..ccccccc 100644
 +        else if (t == "IPV6_3TUPLE_TCP_TABLE")   htNode.tableType = 13;
 +        else if (t == "IPV4_REASSM_TABLE")       htNode.tableType = 14;
 +        else if (t == "IPV6_REASSM_TABLE")       htNode.tableType = 15;
-+        else throw CGenericError( ERR_UNKNOWN_ATTR, t,
-+                                  "table_type on classification " + xmlCCNode.name );
++        else throw CGenericError( "Unknown table_type '" + t +
++                                  "' on classification '" + xmlCCNode.name +
++                                  "' (expected en_exthash_type enum name from fm_eh_types.h)" );
 +    }
 +
      //entries for prefilled ht
