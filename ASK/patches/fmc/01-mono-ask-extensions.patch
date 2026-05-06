@@ -358,7 +358,7 @@ diff --git a/source/FMCPCDModel.cpp b/source/FMCPCDModel.cpp
 index bbbbbbb..ccccccc 100644
 --- a/source/FMCPCDModel.cpp
 +++ b/source/FMCPCDModel.cpp
-@@ -1696,6 +1696,40 @@ CFMCModel::createHTNode( const CTaskDef* pTaskDef, Port& port, const CClassifica
+@@ -1696,6 +1696,39 @@ CFMCModel::createHTNode( const CTaskDef* pTaskDef, Port& port, const CClassifica
      htNode.matchKeySize                = xmlCCNode.key.hashTableEntry.keySize;
      htNode.port_signature              = port.name;
  
