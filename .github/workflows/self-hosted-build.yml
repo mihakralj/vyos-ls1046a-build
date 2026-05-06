@@ -1,7 +1,10 @@
 name: VyOS LS1046A build (self-hosted)
 
-# Start Azure ARM64 VM → build on self-hosted runner → deallocate VM.
-# VM costs ~$1.47/hr — always deallocated after build (even on failure).
+# Start Azure ARM64 VM (idempotent) → build on self-hosted runner.
+# VM deallocation is handled by an idle-deallocate systemd timer on the
+# VM itself (10 min idle threshold). See .clinerules/01-shared-vm-runtime.md
+# in the producer repo (and the matching section in this repo's AGENTS.md)
+# for the full A+B pattern. CI must NOT call `az vm deallocate`.
 
 on:
   workflow_dispatch:
@@ -86,19 +89,8 @@ jobs:
       MOK_KEY: ${{ secrets.MOK_KEY }}
       MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
 
-  # ── Step 3: Deallocate VM to stop billing ────────────────────────
-  stop-vm:
-    needs: call-auto-build
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Azure Login
-        uses: azure/login@v3
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Deallocate VM
-        run: |
-          az vm deallocate \
-            --resource-group arm64-runner-group \
-            --name arm64-runner
+  # NOTE: VM deallocation is intentionally NOT a CI step. The VM runs a
+  # systemd timer (idle-deallocate.service) that self-deallocates after 10
+  # min of runner idleness. Adding a stop-vm step here would re-introduce
+  # the cross-workflow VM race (producer's stop killing this consumer build
+  # mid-flight, or vice versa) that was observed in production 2026-05-06.
