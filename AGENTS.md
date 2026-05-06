@@ -197,7 +197,6 @@ The DPDK DPAA1 PMD path was abandoned on 2026-04-03 (RC#31: `dpaa_bus` probe kil
 | `ask-ls1046a-6.6/ASK-CODE-QUALITY.md` | ASK code quality audit: SDK driver warnings, compiler fixes, struct alignment |
 | `plans/NETWORKING-DEEP-DIVE.md` | DPAA1 networking deep-dive: FMan architecture, QBMan, portal allocation, driver split |
 | `plans/FMD-SHIM-SPEC.md` | FMD Shim spec for `/dev/fm0*` chardevs (skeleton implemented, PCD ioctls dormant) |
-| `plans/NEXT-STEPS.md` | Project next steps and prioritized task list |
 | `data/scripts/fman-port-name` | Script called by udev: reads `/sys/class/net/<iface>/device/of_node` to map FMan MAC DT address → physical port name (eth0-eth4) |
 | `data/scripts/10-fman-port-order.rules` | Udev rule: calls `fman-port-name` on net device add, sets `NAME=` to correct ethN (installed to `/etc/udev/rules.d/`) |
 | `data/scripts/00-fman.link` | Systemd .link file: `NamePolicy=keep` for `dpaa_eth` driver — prevents predictable naming override (installed to `/etc/systemd/network/`) |
