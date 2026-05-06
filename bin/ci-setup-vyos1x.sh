@@ -41,6 +41,12 @@ pre_build_hook = """
   sed -i '/accel-ppp-ng/d' debian/control
   patch_fail=0
   for p in ../ls1046a-patches/vyos-1x-*.patch; do
+    # Skip if already applied (idempotent across pre_build_hook re-invocations
+    # and forward-compatible if upstream lands an equivalent change).
+    if patch --no-backup-if-mismatch -p1 --dry-run -R < "$p" >/dev/null 2>&1; then
+      echo "SKIP: $(basename $p) — already applied (reverse-applies cleanly)"
+      continue
+    fi
     if ! patch --no-backup-if-mismatch -p1 < "$p"; then
       echo "WARNING: $(basename $p) failed to apply (continuing)"
       patch_fail=1

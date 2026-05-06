@@ -70,6 +70,45 @@ if [ -f vyos-build/data/defaults.toml ]; then
   echo "### defaults.toml console_type after sed:"
   grep -E '^\s*console_(type|num|speed)\s*=' vyos-build/data/defaults.toml || true
 fi
+
+### Pin kernel_version to the ASK kernel.
+#
+# vyos-build/data/defaults.toml carries upstream VyOS's current kernel
+# choice (as of 2026-05-06: 6.18.26). The default is consumed by
+# scripts/image-build/build-vyos-image which renders
+#   --linux-packages "linux-image-{{kernel_version}}"
+# into the `lb config` invocation. live-build then asks apt for
+# `linux-image-<kernel_version>-<flavour>` (i.e. linux-image-6.18.26-vyos)
+# from the configured mirrors during `lb chroot_linux-image`.
+#
+# We ship the ASK kernel (6.6.137-askN) as a prebuilt .deb staged into
+# packages.chroot/ by ci-consume-ask-kernel.sh. The flavour suffix on
+# our .deb is `-vyos` to match what build-vyos-image expects, so the
+# only mismatch is the version number in the template.
+#
+# Read the kernel version from the staged .deb (this self-adjusts when
+# the producer cuts a new askN) and rewrite kernel_version in
+# defaults.toml so build-vyos-image renders
+# `linux-image-6.6.137` and live-build resolves
+# `linux-image-6.6.137-vyos` against our packages.chroot/ .deb instead
+# of asking the Debian/VyOS mirrors for 6.18.26-vyos (which doesn't
+# exist there).
+PKG_CHROOT="vyos-build/data/live-build-config/packages.chroot"
+ASK_KERNEL_DEB=$(find "$PKG_CHROOT" -maxdepth 1 -name 'linux-image-*-vyos_*_arm64.deb' ! -name '*-dbg*' 2>/dev/null | head -1)
+if [ -n "$ASK_KERNEL_DEB" ]; then
+  # linux-image-6.6.137-vyos_6.6.137-1_arm64.deb -> 6.6.137
+  ASK_KVER=$(basename "$ASK_KERNEL_DEB" | sed -E 's/^linux-image-([0-9]+\.[0-9]+\.[0-9]+)-vyos_.*$/\1/')
+  if [ -n "$ASK_KVER" ] && [ "$ASK_KVER" != "$(basename "$ASK_KERNEL_DEB")" ]; then
+    echo "### Pinning defaults.toml kernel_version -> $ASK_KVER (from $(basename "$ASK_KERNEL_DEB"))"
+    sed -i -E "s/^(\\s*kernel_version\\s*=\\s*)\"[^\"]+\"/\\1\"$ASK_KVER\"/" \
+      vyos-build/data/defaults.toml
+    grep -E '^\s*kernel_version\s*=' vyos-build/data/defaults.toml || true
+  else
+    echo "WARN: Could not parse kernel version from $(basename "$ASK_KERNEL_DEB"); leaving defaults.toml alone"
+  fi
+else
+  echo "### No ASK kernel .deb staged in $PKG_CHROOT — leaving defaults.toml kernel_version untouched"
+fi
 sed -i 's/ttyAMA0/ttyS0/g' \
   vyos-build/data/live-build-config/hooks/live/01-live-serial.binary \
   vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/grub/default-union-grub-entry
