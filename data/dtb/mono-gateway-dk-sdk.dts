@@ -171,6 +171,7 @@ cell-index = <0>;
 compatible = "fsl,fman-port-1g-rx-extended-args";
 fifo-size = <0x3200 0x0>;
 buffer-layout = <96 64>;
+vsp-window = <2 0>;
 };
 			fman0_tx0-extended-args {
 				cell-index = <0>;
@@ -183,6 +184,7 @@ cell-index = <1>;
 compatible = "fsl,fman-port-1g-rx-extended-args";
 fifo-size = <0x3200 0x0>;
 buffer-layout = <96 64>;
+vsp-window = <2 0>;
 };
 			fman0_tx1-extended-args {
 				cell-index = <1>;
@@ -195,6 +197,7 @@ cell-index = <2>;
 compatible = "fsl,fman-port-1g-rx-extended-args";
 fifo-size = <0x3200 0x0>;
 buffer-layout = <96 64>;
+vsp-window = <2 0>;
 };
 			fman0_tx2-extended-args {
 				cell-index = <2>;
@@ -207,6 +210,7 @@ cell-index = <3>;
 compatible = "fsl,fman-port-1g-rx-extended-args";
 fifo-size = <0x3200 0x0>;
 buffer-layout = <96 64>;
+vsp-window = <2 0>;
 };
 			fman0_tx3-extended-args {
 				cell-index = <3>;
@@ -219,6 +223,7 @@ cell-index = <4>;
 compatible = "fsl,fman-port-1g-rx-extended-args";
 fifo-size = <0x3200 0x0>;
 buffer-layout = <96 64>;
+vsp-window = <2 0>;
 };
 			fman0_tx4-extended-args {
 				cell-index = <4>;
@@ -231,6 +236,7 @@ cell-index = <5>;
 compatible = "fsl,fman-port-1g-rx-extended-args";
 fifo-size = <0x3200 0x0>;
 buffer-layout = <96 64>;
+vsp-window = <2 0>;
 };
 			fman0_tx5-extended-args {
 				cell-index = <5>;
@@ -244,6 +250,7 @@ cell-index = <0>;
 compatible = "fsl,fman-port-10g-rx-extended-args";
 fifo-size = <0x6000 0x0>;
 buffer-layout = <96 64>;
+vsp-window = <2 0>;
 };
 			fman0_tx6-extended-args {
 				cell-index = <0>;
@@ -256,6 +263,7 @@ cell-index = <1>;
 compatible = "fsl,fman-port-10g-rx-extended-args";
 fifo-size = <0x6000 0x0>;
 buffer-layout = <96 64>;
+vsp-window = <2 0>;
 };
 			fman0_tx7-extended-args {
 				cell-index = <1>;
@@ -349,8 +357,25 @@ keygen@c1000 {
 };
 
 parser@c7000 {
-	compatible = "fsl,fman-parser";
-	reg = <0xc7000 0x1000>;
+compatible = "fsl,fman-parser";
+reg = <0xc7000 0x1000>;
+};
+
+/*
+ * VSP (Virtual Storage Profile) MMIO window — required for the
+ * SDK FMan wrapper to discover via for_each_child_of_node() in
+ * lnxwrp_fm.c:719. Without this child node, fmVspPhysBaseAddr
+ * stays 0, fmVspBaseAddr stays 0, and the partVSPBase /
+ * partNumOfVSPs init at lnxwrp_fm.c:1108 is skipped — leaving both
+ * 0/0. FmVSPAllocForPort() then fails the
+ * (first + numOfVSPs) > (partVSPBase + partNumOfVSPs)
+ * check (fm.c:1512) for any port that has a vsp-window property,
+ * because (0 + N) > (0 + 0) for any N>=1. Reg offset/size from
+ * NXP's qoriq-fman3-0.dtsi (lf-6.6.y, FMANV3L variant).
+ */
+vsps@dc000 {
+compatible = "fsl,fman-vsps";
+reg = <0xdc000 0x1000>;
 };
 };
 
