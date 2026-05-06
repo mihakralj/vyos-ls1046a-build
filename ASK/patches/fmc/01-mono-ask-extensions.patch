@@ -37,7 +37,7 @@ diff --git a/source/FMCPCDModel.cpp b/source/FMCPCDModel.cpp
 index d785eee..bea0cac 100755
 --- a/source/FMCPCDModel.cpp
 +++ b/source/FMCPCDModel.cpp
-@@ -133,12 +133,131 @@ CFMCModel::CFMCModel()
+@@ -133,12 +133,140 @@ CFMCModel::CFMCModel()
  }
 
 
@@ -65,6 +65,15 @@ index d785eee..bea0cac 100755
 +    htNode.matchKeySize = refnode.matchKeySize;
 +    htNode.hashShift = refnode.hashShift;
 +    htNode.kgHashShift = refnode.kgHashShift;
++    /* ASK B4: propagate EHASH (DDR-backed external hash) opt-in from
++     * the reference HTNode. Without this, replicated copies created by
++     * the shared-CC path fall back to externalHash=false and route
++     * through the MURAM allocator + IcHashIndexedCheckParams (which
++     * requires last nibble 0), conflicting with EHASH masks (which
++     * require mask+1 to be a power of 2). */
++    htNode.externalHash = refnode.externalHash;
++    htNode.agingSupport = refnode.agingSupport;
++    htNode.tableType = refnode.tableType;
 +    for (ii = 0; ii < refnode.keys.size(); ii++) {
 +    	htNode.keys.push_back(HTNode::CCData());
 +    }
