@@ -101,11 +101,13 @@ index 7f32680..81d2186 100644
  typedef struct t_FmPcdHashTableParams {
      uint16_t                    maxNumOfKeys;               /**< Maximum Number Of Keys that will (ever) be used in this Hash-table */
      e_FmPcdCcStatsMode          statisticsMode;             /**< If not e_FM_PCD_CC_STATS_MODE_NONE, the required structures for the
-@@ -1989,6 +2011,14 @@ typedef struct t_FmPcdHashTableParams {
+@@ -1989,6 +2011,21 @@ typedef struct t_FmPcdHashTableParams {
      uint8_t                     matchKeySize;               /**< Size of the exact match keys held by the hash buckets */
 
      t_FmPcdCcNextEngineParams   ccNextEngineParamsForMiss;  /**< Parameters for defining the next engine when a key is not matched */
-+    uint32_t    table_type;     /* ip reassembly table */
++    bool        agingSupport;   /* ASK B2: matches kernel UAPI ioc_fm_pcd_hash_table_params_t.aging_support; was missing pre-B2 so layout slid by 1 byte and ask40 EHASH dispatch was unreachable */
++    bool        externalHash;   /* ASK B2: matches kernel UAPI .external_hash; setting TRUE in fmc -> kernel ask40 dispatch routes to ExternalHashTableSet (DDR-backed) instead of MURAM */
++    uint32_t    table_type;     /* ip reassembly table; also non-zero for ipv4/ipv6 hash tables under EHASH (see fm_ehash.c::ExternalHashTableSet switch) */
 +    struct {
 +        uint32_t timeout_val;   //reassembly timeout
 +        uint32_t timeout_fqid;  //fqid for reassmebly failures
@@ -113,6 +115,11 @@ index 7f32680..81d2186 100644
 +        uint32_t min_frag_size; //min allowed frag size except last frag
 +        uint32_t max_sessions;  //max conn reassembly sessions
 +    };
++    struct {
++        uint8_t   data_mem_id;        /**< Memory partition ID for the external hash table buckets and contexts */
++        uint16_t  data_liodn_offs;    /**< LIODN offset for access the external hash table buckets and contexts */
++        uintptr_t miss_monitor_addr;  /**< user allocated miss monitor address */
++    } externalHashParams;        /* ASK B2: matches kernel UAPI .external_hash_params */
 
  } t_FmPcdHashTableParams;
 
