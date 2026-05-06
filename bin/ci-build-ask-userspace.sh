@@ -51,6 +51,7 @@ if [ "$ARCH_NATIVE" = "aarch64" ]; then
   AR="${AR:-ar}"
   RANLIB="${RANLIB:-ranlib}"
   STRIP="${STRIP:-strip}"
+  OBJCOPY="${OBJCOPY:-objcopy}"
   # Always pass --build/--host even for native arm64 builds so autoconf
   # doesn't run its own cross-detection (cmm's configure.in fails when
   # they're absent on ubuntu-24.04-arm). ASK41.
@@ -62,6 +63,7 @@ else
   AR="${AR:-${CROSS}ar}"
   RANLIB="${RANLIB:-${CROSS}ranlib}"
   STRIP="${STRIP:-${CROSS}strip}"
+  OBJCOPY="${OBJCOPY:-${CROSS}objcopy}"
   HOST_TRIPLET="--host=aarch64-linux-gnu --build=$(uname -m)-linux-gnu"
 fi
 
@@ -79,7 +81,12 @@ fi
 #   dpa_app applied PCD configuration (failed rc=65280)
 # fmlib's Makefile already pins DPAA_VERSION=11 via ci-build-fmlib.sh;
 # fmc via ci-build-fmc.sh. dpa_app inherits this from COMMON_CFLAGS.
-COMMON_CFLAGS="-O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong -DLS1043 -DDPAA_VERSION=11"
+# -g retained for Chain-2-C diagnosis: dpa_app SIGSEGV (rc=11) where the
+# stripped binary blocked symbolic gdb backtrace. Debug info is split out
+# below into /usr/lib/debug/usr/bin/dpa_app.debug via objcopy --only-keep-debug
+# so the live image still ships a stripped /usr/bin/dpa_app while gdb can
+# auto-resolve symbols via the .gnu_debuglink.
+COMMON_CFLAGS="-O2 -g -D_FORTIFY_SOURCE=2 -fstack-protector-strong -DLS1043 -DDPAA_VERSION=11"
 NPROC=$(nproc 2>/dev/null || echo 2)
 
 echo "=== ASK Userspace Build ==="
@@ -361,8 +368,19 @@ if [ -d "$DPA_SRC" ] && [ -f "$DPA_SRC/Makefile" ]; then
     LDFLAGS="$DPA_LDFLAGS" 2>&1 | tail -10
 
   if [ -f "$DPA_SRC/dpa_app" ]; then
+    # Chain-2-C: split debug info into /usr/lib/debug/usr/bin/dpa_app.debug
+    # before installing, so live-build/lintian can strip /usr/bin/dpa_app
+    # without losing the symbols needed for post-mortem gdb on coredumps.
+    # /usr/lib/debug/ is excluded from dh_strip's reach.
+    mkdir -p "$CHROOT/usr/lib/debug/usr/bin"
+    "$OBJCOPY" --only-keep-debug "$DPA_SRC/dpa_app" "$DPA_SRC/dpa_app.debug" || true
+    "$OBJCOPY" --add-gnu-debuglink="$DPA_SRC/dpa_app.debug" "$DPA_SRC/dpa_app" || true
     cp "$DPA_SRC/dpa_app" "$CHROOT/usr/bin/dpa_app"
     chmod +x "$CHROOT/usr/bin/dpa_app"
+    if [ -f "$DPA_SRC/dpa_app.debug" ]; then
+      cp "$DPA_SRC/dpa_app.debug" "$CHROOT/usr/lib/debug/usr/bin/dpa_app.debug"
+      echo "    dpa_app debug:  $(stat -c '%s bytes' "$DPA_SRC/dpa_app.debug")"
+    fi
     echo "    dpa_app built: $(stat -c '%s bytes' "$DPA_SRC/dpa_app")"
   else
     echo "    WARNING: dpa_app build failed — keeping pre-built"
