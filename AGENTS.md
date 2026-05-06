@@ -24,20 +24,21 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 
 `auto-build.yml` ("VyOS LS1046A build (reusable)") is **reusable-only** — it has no `workflow_dispatch:` trigger and does NOT appear in the Actions "Run workflow" dropdown. It is invoked exclusively by `self-hosted-build.yml` via `uses: ./.github/workflows/auto-build.yml`. **Do NOT** re-add `workflow_dispatch:` to `auto-build.yml` — that would silently re-enable hosted-runner (`ubuntu-24.04-arm`) builds that burn our public Actions minutes quota. If you need to run a build, dispatch `self-hosted-build.yml`.
 
-### Producer / consumer builds are mutually exclusive on the shared VM
+### Shared Cobalt 100 VM — A+B pattern (no operator mutex)
 
-The consumer `self-hosted-build.yml` and the producer `build-and-release.yml` (in `mihakralj/lts_6.6_ls1046a`) **share a single Azure ARM64 self-hosted runner VM**. Each wraps its build job between a `start-vm` step (deallocated → running) and a `stop-vm` step (running → deallocated). The VM cannot be in two states at once.
+The consumer `self-hosted-build.yml` and the producer `build-and-release.yml` (in `mihakralj/lts_6.6_ls1046a`) share **one** Azure ARM64 Cobalt 100 VM. The earlier "never run both simultaneously" mutex has been retired. Two cooperating mechanisms now solve the cost / coordination problem with zero operator action.
 
-**Hard rule: never have both in flight simultaneously.** Always wait for one to reach a terminal state (`success`, `failure`, or `cancelled`) before dispatching/pushing/rerunning the other. Symptom of a violation is a "build in progress / canceled" at 1–2 min with no useful log content (the runner gets disconnected by the other workflow's `stop-vm`). Confirmed in production 2026-05-06: producer branch-push run was cancelled at 1m12s while a consumer ISO build was in progress on the same VM.
+**Pattern A — idle-deallocator on the VM (NOT in CI).** Workflows only ever call `az vm start` (idempotent — no-op if already running) and **never** call `az vm deallocate`. A systemd timer on the VM (`idle-deallocate.timer`, threshold 10 min) checks every 2 min for any active `Runner.Worker` process and self-deallocates only when both runners have been idle long enough. Standing cost on Cobalt 100 ≈ ~$0.20/day.
 
-Pre-dispatch checklist — run **both** of these and require empty / completed-only output before any push, dispatch, or rerun:
+**Pattern B — two registered runners on the same VM.** Two `actions-runner` services run on the VM (`vm-runner-1` for `lts_6.6_ls1046a`, `vm-runner-2` for this repo) with separate `_work` dirs. GitHub schedules producer and consumer to *different* runners; both execute in parallel on the shared cores. There is no cross-repo serialization.
 
-```bash
-gh run list --workflow=self-hosted-build.yml -R mihakralj/vyos-ls1046a-build --limit 5
-gh run list --workflow=build-and-release.yml -R mihakralj/lts_6.6_ls1046a --limit 5
-```
+**Hard rules:**
 
-If either lists a run with status `queued` or `in_progress`, **wait** (or `gh run cancel <id>` it intentionally) before proceeding. GitHub's `concurrency:` primitive cannot help here — it is scoped per-workflow per-repo, not per-VM. Cross-repo / cross-workflow mutual exclusion has to be enforced manually by the operator. The producer-side rule lives at `lts_6.6_ls1046a/.clinerules/01-mutex-vm-builds.md`.
+1. **Never re-add a `stop-vm` step to either workflow.** Adding `az vm deallocate` from CI re-introduces the cross-workflow VM race that was observed in production 2026-05-06 (producer branch-push cancelled at 1m12s while a consumer ISO build was in flight). The deallocate is the daemon's job.
+2. **Never block on the other repo's runs from inside a build script.** Pattern B's whole point is that they don't have to.
+3. **Build scripts must namespace any fixed absolute disk path on `${RUNNER_NAME}`** (or live under `${GITHUB_WORKSPACE}`, which is already runner-local). Adding a non-namespaced `/build/...` or `/work/...` reintroduces contention.
+
+Producer-side authoritative reference: `lts_6.6_ls1046a/.clinerules/01-shared-vm-runtime.md` (idle-deallocate script, systemd unit files, Managed Identity role assignment, failure-mode operator playbook).
 
 ## Critical Non-Obvious Rules
 
