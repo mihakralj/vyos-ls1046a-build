@@ -269,7 +269,7 @@ diff --git a/source/FMCGenericError.h b/source/FMCGenericError.h
 index 3333333..4444444 100644
 --- a/source/FMCGenericError.h
 +++ b/source/FMCGenericError.h
-@@ -35,7 +35,7 @@ public:
+@@ -35,6 +35,6 @@ public:
      static std::string lastNotes;
  };
  
@@ -277,3 +277,144 @@ index 3333333..4444444 100644
 +void errorFuncHandler( void * ctx, xmlError * error );
  
  #endif // FMCGENERICERROR_H
+diff --git a/source/FMCTaskDef.h b/source/FMCTaskDef.h
+index 5555555..6666666 100644
+--- a/source/FMCTaskDef.h
++++ b/source/FMCTaskDef.h
+@@ -693,6 +693,11 @@ class CClassification
+     bool                        statisticsOnMiss;
+     bool                        shared;
+     unsigned int                vspBaseOnMiss;
++    /* ASK B4: optional EHASH (DDR-backed external hash) opt-in attrs */
++    /* parsed from cdx_pcd.xml: external="yes" aging="yes" table_type="..." */
++    bool                        externalHash;
++    bool                        agingSupport;
++    std::string                 tableType;
+     unsigned int                qbase;
+     //Pre-allocation
+     unsigned int                max;
+diff --git a/source/FMCPCDReader.cpp b/source/FMCPCDReader.cpp
+index 7777777..8888888 100644
+--- a/source/FMCPCDReader.cpp
++++ b/source/FMCPCDReader.cpp
+@@ -537,7 +537,8 @@ CPCDReader::parseClassification( CClassification* classification, xmlNodePtr pNo
+                 << getAttr( pNode, "name" )
+                 << "' ... " << std::endl;
+                 
+-    checkUnknownAttr( pNode, 5, "name", "max", "masks", "statistics", "shared" );
++    checkUnknownAttr( pNode, 8, "name", "max", "masks", "statistics", "shared",
++                      "external", "aging", "table_type" );
+ 
+     classification->actionOnMiss            = "";
+     classification->actionNameOnMiss        = "";
+@@ -554,6 +555,10 @@ CPCDReader::parseClassification( CClassification* classification, xmlNodePtr pNo
+     classification->vspBaseOnMiss           = 0;
+     classification->statisticsOnMiss        = false;
+     classification->shared                  = false;
++    /* ASK B4: EHASH opt-in defaults */
++    classification->externalHash            = false;
++    classification->agingSupport            = false;
++    classification->tableType               = "";
+ 
+     for (unsigned int i = 0; i < 10; i++)
+         classification->frameLength.push_back(i+1);
+@@ -578,6 +583,19 @@ CPCDReader::parseClassification( CClassification* classification, xmlNodePtr pNo
+         classification->shared = true;
+     }
+ 
++    /* ASK B4: external="yes" routes hash table allocation through EHASH
++     * (DDR-backed via ExternalHashTableSet) instead of MURAM, fixing the
++     * Chain-2-A MURAM exhaustion (fm_cc.c:4842 AllocStatsObjs / :7751
++     * Unexpected NULL Pointer). aging="yes" enables hash entry aging.
++     * table_type names the en_exthash_type enum value (see fm_eh_types.h). */
++    if ( getAttr( pNode, "external" ) == "true" || getAttr( pNode, "external" ) == "yes" ) {
++        classification->externalHash = true;
++    }
++    if ( getAttr( pNode, "aging" ) == "true" || getAttr( pNode, "aging" ) == "yes" ) {
++        classification->agingSupport = true;
++    }
++    classification->tableType = getAttr( pNode, "table_type" );
++
+     // 'Key presents' flags
+     bool nonHeaderFound = false;
+     bool fielrefFound   = false;
+diff --git a/source/FMCPCDModel.h b/source/FMCPCDModel.h
+index 9999999..aaaaaaa 100755
+--- a/source/FMCPCDModel.h
++++ b/source/FMCPCDModel.h
+@@ -329,6 +329,11 @@ public:
+     unsigned int headerOnMiss;
+ 
+     std::string   port_signature;
++    /* ASK B4: EHASH (DDR-backed external hash) opt-in plumbed from
++     * CClassification through createHTNode into output_fmc_htnode. */
++    bool          externalHash;
++    bool          agingSupport;
++    unsigned int  tableType;
+ };
+ 
+ ////////////////////////////////////////////////////////////////////////////////
+diff --git a/source/FMCPCDModel.cpp b/source/FMCPCDModel.cpp
+index bbbbbbb..ccccccc 100644
+--- a/source/FMCPCDModel.cpp
++++ b/source/FMCPCDModel.cpp
+@@ -1696,6 +1696,38 @@ CFMCModel::createHTNode( const CTaskDef* pTaskDef, Port& port, const CClassifica
+     htNode.matchKeySize                = xmlCCNode.key.hashTableEntry.keySize;
+     htNode.port_signature              = port.name;
+ 
++    /* ASK B4: propagate EHASH opt-in from CClassification (parsed from
++     * cdx_pcd.xml external="yes" aging="yes" table_type="...") to HTNode.
++     * Map the table_type string to the en_exthash_type enum value
++     * defined in sdk_fman/inc/Peripherals/fm_eh_types.h. The kernel's
++     * ask40 EHASH dispatch in FM_PCD_HashTableSet() routes any hash
++     * table with externalHash=TRUE through ExternalHashTableSet (DDR-
++     * backed) instead of the MURAM-bound default allocator. */
++    htNode.externalHash = xmlCCNode.externalHash;
++    htNode.agingSupport = xmlCCNode.agingSupport;
++    htNode.tableType    = 0;
++    if ( !xmlCCNode.tableType.empty() ) {
++        const std::string& t = xmlCCNode.tableType;
++        if      (t == "IPV4_UDP_TABLE")          htNode.tableType = 0;
++        else if (t == "IPV4_TCP_TABLE")          htNode.tableType = 1;
++        else if (t == "IPV6_UDP_TABLE")          htNode.tableType = 2;
++        else if (t == "IPV6_TCP_TABLE")          htNode.tableType = 3;
++        else if (t == "ESP_IPV4_TABLE")          htNode.tableType = 4;
++        else if (t == "ESP_IPV6_TABLE")          htNode.tableType = 5;
++        else if (t == "IPV4_MULTICAST_TABLE")    htNode.tableType = 6;
++        else if (t == "IPV6_MULTICAST_TABLE")    htNode.tableType = 7;
++        else if (t == "PPPOE_RELAY_TABLE")       htNode.tableType = 8;
++        else if (t == "ETHERNET_TABLE")          htNode.tableType = 9;
++        else if (t == "IPV4_3TUPLE_UDP_TABLE")   htNode.tableType = 10;
++        else if (t == "IPV4_3TUPLE_TCP_TABLE")   htNode.tableType = 11;
++        else if (t == "IPV6_3TUPLE_UDP_TABLE")   htNode.tableType = 12;
++        else if (t == "IPV6_3TUPLE_TCP_TABLE")   htNode.tableType = 13;
++        else if (t == "IPV4_REASSM_TABLE")       htNode.tableType = 14;
++        else if (t == "IPV6_REASSM_TABLE")       htNode.tableType = 15;
++        else throw CGenericError( ERR_UNKNOWN_ATTR, t,
++                                  "table_type on classification " + xmlCCNode.name );
++    }
++
+     //entries for prefilled ht
+     // For each entry ...
+     for ( unsigned int i = 0; i < xmlCCNode.entries.size(); ++i ) {
+diff --git a/source/FMCCModelOutput.cpp b/source/FMCCModelOutput.cpp
+index ddddddd..eeeeeee 100644
+--- a/source/FMCCModelOutput.cpp
++++ b/source/FMCCModelOutput.cpp
+@@ -1628,6 +1628,16 @@ CFMCCModelOutput::output_fmc_htnode( const CFMCModel& model, fmc_model_t* cmodel
+     EMIT4( htnode[, index, ].kgHashShift =, node.kgHashShift );
+ 
+    
++    /* ASK B4: EHASH (DDR-backed external hash) opt-in. When externalHash=TRUE
++     * the kernel's ask40 dispatch in FM_PCD_HashTableSet() routes the call
++     * through ExternalHashTableSet (DDR allocation), eliminating the MURAM
++     * exhaustion that surfaces as fm_cc.c:4842 AllocStatsObjs / :7751
++     * Unexpected NULL Pointer for ~16K stats objects in 384 KiB MURAM.
++     * Field layout depends on the fmlib B2 t_FmPcdHashTableParams extension. */
++    EMIT4( htnode[, index, ].agingSupport =, node.agingSupport );
++    EMIT4( htnode[, index, ].externalHash =, node.externalHash );
++    EMIT4( htnode[, index, ].table_type =, node.tableType );
++
+     EMIT4STR( htnode[, index, ].ccNextEngineParamsForMiss.nextEngine =, node.nextEngineOnMiss.nextEngine );
+     EMIT4( htnode[, index, ].ccNextEngineParamsForMiss.statisticsEn =, node.nextEngineOnMiss.statistics );
+     if ( node.nextEngineOnMiss.nextEngine == e_FM_PCD_PLCR ) {
