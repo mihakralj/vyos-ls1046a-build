@@ -65,18 +65,28 @@ index 907d5d4..305dcee 100644
      params.id = NULL;
  
      if (params.modify)
-@@ -1245,7 +1292,20 @@ t_Handle FM_PCD_HashTableSet(t_Handle h_FmPcd, t_FmPcdHashTableParams *p_Param)
+@@ -1245,7 +1292,30 @@ t_Handle FM_PCD_HashTableSet(t_Handle h_FmPcd, t_FmPcdHashTableParams *p_Param)
  
      _fml_dbg("Calling...\n");
  
 -    memcpy(&params, p_Param, sizeof(t_FmPcdHashTableParams));
-+    /* ASK B1 (F02): defensive memset+min(sizes) copy. Userspace
-+     * t_FmPcdHashTableParams has ASK extensions appended after
-+     * ccNextEngineParamsForMiss (table_type + reassembly substruct);
-+     * kernel ioc_fm_pcd_hash_table_params_t has none. Truncate to the
-+     * shorter of the two. The mono-ASK extension fields are appended
-+     * AT THE END of the userspace struct, so the head is layout-identical
-+     * and a single min(sizes) memcpy is correct. */
++    /* ASK B1 (F02) v2: defensive memset+min(sizes) copy. Post-B2 (which
++     * extended the userspace t_FmPcdHashTableParams with agingSupport,
++     * externalHash, externalHashParams to mirror the kernel UAPI), the
++     * field offsets 0..79 are layout-identical between userspace
++     * t_FmPcdHashTableParams (80 B) and kernel
++     * ioc_fm_pcd_hash_table_params_t (88 B). The kernel struct is 8 B
++     * longer because it carries a trailing `void *id` output field that
++     * userspace does not need (the `params.id = NULL` line below is the
++     * canonical zero-init for that slot). min(sizes) = 80 -> we copy the
++     * common prefix and the post-memset zero-init keeps `id` clean.
++     *
++     * NOTE: pre-B2 history. Before B2 the comment claimed "kernel has
++     * none [of the ASK ext fields]" which was wrong — the kernel had
++     * MORE fields (aging_support, external_hash, external_hash_params)
++     * than userspace, in slots that userspace had no symbol to write
++     * into, so fmc could not opt the kernel into ask40's EHASH dispatch.
++     * B2 closed that gap. */
 +    {
 +        const size_t copy_sz =
 +            sizeof(params) < sizeof(t_FmPcdHashTableParams) ?
