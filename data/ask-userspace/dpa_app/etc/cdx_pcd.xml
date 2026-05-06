@@ -3,137 +3,131 @@
  <!-- If any new table gets added ccbase value of ppoe relay table should be checked and updated accordingly -->
 <netpcd>
 <!--
-  ASK PCD hash tables (MURAM-only allocation; fmc lf-6.18.2-1.0.0 has no
-  external="yes" / aging="yes" XML attribute support, so all hash buckets
-  and CC node action descriptors must fit in the 384 KiB FMan internal
-  MURAM.
+  ASK PCD hash tables (DDR-backed EHASH allocation, ask40+ kernel +
+  fmlib B2 ABI extension + fmc B4 parser/emitter).
 
-  Critical scaling factor: each <classification> below is referenced
-  from 10 <policy> blocks (8 ethport + 2 of_port). Despite shared="true"
-  the SDK still instantiates separate MURAM-backed CC node copies per
-  policy reference. Effective consumption is therefore:
+  external="yes" routes FM_PCD_HashTableSet() through ExternalHashTableSet
+  (DDR allocation) instead of the MURAM-bound default allocator,
+  eliminating the previous Chain-2-A MURAM exhaustion (fm_cc.c:4842
+  AllocStatsObjs / :7751 Unexpected NULL Pointer for ~16K stats objects
+  in the 384 KiB FMan internal MURAM).
 
-      max × keysize × num_policies  (action descriptors + key storage)
-    + buckets × bucket_entry_size   (hashtable bucket arrays)
+  Hash bucket count constraint: ExternalHashTableSet (fm_ehash.c:925)
+  requires (hashResMask + 1) to be a power of 2, ≤ 32768. The mask
+  attribute on <hashtable> is emitted verbatim into htNode.hashResMask,
+  so it MUST be one of: 0x1, 0x3, 0x7, 0xf, 0x1f, 0x3f, 0x7f, 0xff,
+  0x1ff, 0x3ff, 0x7ff, 0xfff, 0x1fff, 0x3fff, 0x7fff. Previous
+  MURAM-era values (0x1ff0, 0xff0, 0xf0) violated this and caused
+  fm_ehash.c:925 "unsupported hash mask value" once EHASH dispatch
+  went live in ask40.
 
-  summed across all 16 tables. Previous trims (max=512, mask=0x1ff0;
-  then max=128, mask=0xff0 on big-4) still produced
-  fm_cc.c:4842 MatchTableSet "MURAM allocation for CC node action
-  descriptors table" because the per-policy multiplier was not factored
-  in. With 10 policies × 16 tables × max=128 × ~64 B/entry ≈ 1.3 MiB,
-  far exceeding the 384 KiB MURAM ceiling.
+  Current sizing: mask=0xff (256 buckets) × 16 tables ≈ 4096 buckets in
+  DDR — trivial vs the previous MURAM ceiling. max=8 keeps prefilled
+  entries small; CMM populates the working set dynamically via FCI.
 
-  Iteration history:
-    - max=512 → 128 (mask=0x1ff0 → 0xff0): still failed
-    - max=128 → 32 (mask=0xff0 → 0xf0 on big-4): boot got further but
-      still failed at fm_cc.c:4842 MatchTableSet (MURAM exhaustion on
-      CC node action descriptors table) — the 10× per-policy multiplier
-      means 10 × 16 × 32 × ~64 B ≈ 327 KiB AD storage alone, leaving
-      < 60 KiB headroom for KeyGen / parser / policer / scratch.
-    - max=32 → 8 (this iteration): 10 × 16 × 8 × ~64 B ≈ 82 KiB AD,
-      plus ~16 KiB bucket arrays = ~98 KiB total, ~285 KiB MURAM
-      headroom. Fits comfortably.
-
-  Runtime ceiling: 16 tables × max=8 = 128 simultaneous flow rules
-  per policy. CMM populates entries dynamically via FCI; max is only
-  the upper bound, not the working set. 512 flows easily covers
-  SOHO/branch traffic patterns. If a deployment needs more, the
-  proper fix is patching fmc to honor external="yes" aging="yes"
-  so buckets land in DDR via USDPAA — separate work item.
+  Iteration history (kept for archival reference):
+    - max=512, mask=0x1ff0  : MURAM exhaustion at AllocStatsObjs
+    - max=128, mask=0xff0   : MURAM exhaustion at AllocStatsObjs
+    - max=32,  mask=0xf0    : MURAM exhaustion at MatchTableSet
+    - max=8,   mask=0xf0    : MURAM exhaustion at MatchTableSet
+    - max=8,   mask=0xf0 + external/aging (ask40) : EHASH dispatch
+                              works but rejects mask (not 2^N - 1)
+    - max=8,   mask=0xff + external/aging (current) : DDR allocation
+                              succeeds, ample headroom.
 -->
 <classification name="cdx_udp4_cc" max="8" masks="yes" shared="true" external="yes" aging="yes" table_type="IPV4_UDP_TABLE">
   <key>
-     <hashtable mask="0xf0" hashshift="0" keysize="14"/>
+     <hashtable mask="0xff" hashshift="0" keysize="14"/>
   </key>
 </classification>
 
 <classification name="cdx_tcp4_cc" max="8" masks="yes" shared="true" external="yes" aging="yes" table_type="IPV4_TCP_TABLE">
   <key>
-     <hashtable mask="0xf0" hashshift="0" keysize="14"/>
+     <hashtable mask="0xff" hashshift="0" keysize="14"/>
   </key>
 </classification>
 
 <classification name="cdx_udp6_cc" max="8" masks="yes" shared="true" external="yes" aging="yes" table_type="IPV6_UDP_TABLE">
   <key>
-     <hashtable mask="0xf0" hashshift="0" keysize="38"/>
+     <hashtable mask="0xff" hashshift="0" keysize="38"/>
   </key>
 </classification>
 
 <classification name="cdx_tcp6_cc" max="8" masks="yes" shared="true" external="yes" aging="yes" table_type="IPV6_TCP_TABLE">
   <key>
-     <hashtable mask="0xf0" hashshift="0" keysize="38"/>
+     <hashtable mask="0xff" hashshift="0" keysize="38"/>
   </key>
 </classification>
 
 <classification name="cdx_esp4_cc" max="8" masks="yes" shared="true" external="yes" aging="yes" table_type="ESP_IPV4_TABLE">
   <key>
-     <hashtable mask="0xf0" hashshift="0" keysize="10"/>
+     <hashtable mask="0xff" hashshift="0" keysize="10"/>
   </key>
 </classification>
 
 <classification name="cdx_esp6_cc" max="8" masks="yes" shared="true" external="yes" aging="yes" table_type="ESP_IPV6_TABLE">
   <key>
-     <hashtable mask="0xf0" hashshift="0" keysize="22"/>
+     <hashtable mask="0xff" hashshift="0" keysize="22"/>
   </key>
 </classification>
 
 <classification name="cdx_multicast4_cc" max="8" masks="yes" shared="true" external="yes" aging="yes" table_type="IPV4_MULTICAST_TABLE">
   <key>
-     <hashtable mask="0xf0" hashshift="0" keysize="10"/>
+     <hashtable mask="0xff" hashshift="0" keysize="10"/>
   </key>
 </classification>
 
 <classification name="cdx_multicast6_cc" max="8" masks="yes" shared="true" external="yes" aging="yes" table_type="IPV6_MULTICAST_TABLE">
   <key>
-     <hashtable mask="0xf0" hashshift="0" keysize="34"/>
+     <hashtable mask="0xff" hashshift="0" keysize="34"/>
   </key>
 </classification>
 
 <classification name="cdx_ethernet_cc" max="8" masks="yes" shared="true" external="yes" aging="yes" table_type="ETHERNET_TABLE">
   <key>
-     <hashtable mask="0xf0" hashshift="0" keysize="15"/>
+     <hashtable mask="0xff" hashshift="0" keysize="15"/>
   </key>
 </classification>
 
 <classification name="cdx_pppoe_cc" max="8" masks="yes" shared="true" external="yes" aging="yes" table_type="PPPOE_RELAY_TABLE">
   <key>
-     <hashtable mask="0xf0" hashshift="0" keysize="11"/>
+     <hashtable mask="0xff" hashshift="0" keysize="11"/>
   </key>
 </classification>
 
 <classification name="cdx_tuple3udp4_cc" max="8" masks="yes" shared="true" external="yes" aging="yes" table_type="IPV4_3TUPLE_UDP_TABLE">
   <key>
-     <hashtable mask="0xf0" hashshift="0" keysize="8"/>
+     <hashtable mask="0xff" hashshift="0" keysize="8"/>
   </key>
 </classification>
 
 <classification name="cdx_tuple3tcp4_cc" max="8" masks="yes" shared="true" external="yes" aging="yes" table_type="IPV4_3TUPLE_TCP_TABLE">
   <key>
-     <hashtable mask="0xf0" hashshift="0" keysize="8"/>
+     <hashtable mask="0xff" hashshift="0" keysize="8"/>
   </key>
 </classification>
 
 <classification name="cdx_tuple3udp6_cc" max="8" masks="yes" shared="true" external="yes" aging="yes" table_type="IPV6_3TUPLE_UDP_TABLE">
   <key>
-     <hashtable mask="0xf0" hashshift="0" keysize="20"/>
+     <hashtable mask="0xff" hashshift="0" keysize="20"/>
   </key>
 </classification>
 
 <classification name="cdx_tuple3tcp6_cc" max="8" masks="yes" shared="true" external="yes" aging="yes" table_type="IPV6_3TUPLE_TCP_TABLE">
   <key>
-     <hashtable mask="0xf0" hashshift="0" keysize="20"/>
+     <hashtable mask="0xff" hashshift="0" keysize="20"/>
   </key>
 </classification>
 
 <classification name="cdx_frag4_cc" max="8" masks="yes" shared="true" external="yes" aging="yes" table_type="IPV4_REASSM_TABLE">
   <key>
-     <hashtable mask="0xf0" hashshift="0" keysize="12"/>
+     <hashtable mask="0xff" hashshift="0" keysize="12"/>
   </key>
 </classification>
 
 <classification name="cdx_frag6_cc" max="8" masks="yes" shared="true" external="yes" aging="yes" table_type="IPV6_REASSM_TABLE">
   <key>
-     <hashtable mask="0xf0" hashshift="0" keysize="38"/>
+     <hashtable mask="0xff" hashshift="0" keysize="38"/>
   </key>
 </classification>
 
