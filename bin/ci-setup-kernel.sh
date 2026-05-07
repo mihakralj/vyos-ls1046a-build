@@ -4,7 +4,7 @@
 # Expects: GITHUB_WORKSPACE set
 #
 # When ASK_KERNEL_TAG is set, this script is a no-op: the kernel is consumed
-# prebuilt from mihakralj/lts_6.6_ls1046a via bin/ci-consume-ask-kernel.sh,
+# prebuilt from mihakralj/kernel-ls1046a-build via bin/ci-consume-ask-kernel.sh,
 # so defconfig mutations and build-kernel.sh injections are meaningless.
 set -ex
 cd "${GITHUB_WORKSPACE:-.}"

@@ -165,7 +165,7 @@ for package in $packages; do
     ### ASK out-of-tree kernel modules (cdx, fci, auto_bridge, iptables-extensions)
     #
     # As of the May 2026 redistribution, OOT module SOURCES live in the producer
-    # repo (lts_6.6_ls1046a/release/oot-modules/) and are BUILT BY THE PRODUCER's
+    # repo (kernel-ls1046a-build/release/oot-modules/) and are BUILT BY THE PRODUCER's
     # build-and-release.yml. The producer ships them as signed .ko inside the
     # kernel-6.6.137-askN release tarball, alongside the kernel image and
     # linux-headers .deb. The consumer consumes them via ci-consume-ask-kernel.sh,

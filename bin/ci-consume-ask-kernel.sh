@@ -1,6 +1,6 @@
 #!/bin/bash
 # ci-consume-ask-kernel.sh — download prebuilt ASK kernel + userspace .debs
-# from mihakralj/lts_6.6_ls1046a and stage them for live-build.
+# from mihakralj/kernel-ls1046a-build and stage them for live-build.
 #
 # Replaces the from-scratch kernel compile previously driven by
 # ci-setup-kernel.sh + ci-build-packages.sh (linux-kernel target).
@@ -21,7 +21,7 @@ if [ -z "$TAG" ] && [ -f "$PIN_FILE" ]; then
 fi
 [ -n "$TAG" ] || { echo "ERROR: no ASK kernel tag (set ASK_KERNEL_TAG or populate $PIN_FILE)"; exit 1; }
 
-REPO="mihakralj/lts_6.6_ls1046a"
+REPO="mihakralj/kernel-ls1046a-build"
 STAGE=work/ask-kernel
 mkdir -p "$STAGE" packages
 
