@@ -303,7 +303,7 @@ if [ -d "$DPA_SRC" ] && [ -f "$DPA_SRC/Makefile" ]; then
   DPA_CFLAGS="$DPA_CFLAGS -I$STAGING/include/fmd/Peripherals"
   DPA_CFLAGS="$DPA_CFLAGS -I$STAGING/include/fmd/integrations"
   # Locate cdx headers (cdx_ioctl.h, cdx_ctrl.h). The cdx OOT module
-  # was folded into the producer repo (lts_6.6_ls1046a) under
+  # was folded into the producer repo (kernel-ls1046a-build) under
   # release/oot-modules/cdx/ in commit bc38d90 (2026-05); $ASK_SRC/cdx
   # no longer exists in this tree. Fall back through plausible
   # locations so both local-checkout and CI staged-sysroot paths work.
@@ -312,7 +312,7 @@ if [ -d "$DPA_SRC" ] && [ -f "$DPA_SRC/Makefile" ]; then
       "$STAGING/include/cdx" \
       "$ASK_SRC/cdx" \
       "$KSRC/../../release/oot-modules/cdx" \
-      "/root/lts_6.6_ls1046a/release/oot-modules/cdx"; do
+      "/root/kernel-ls1046a-build/release/oot-modules/cdx"; do
     if [ -f "$cand/cdx_ioctl.h" ]; then
       CDX_INC="$cand"
       break
@@ -325,7 +325,7 @@ if [ -d "$DPA_SRC" ] && [ -f "$DPA_SRC/Makefile" ]; then
   # this, Stage 3's `exit 1` cascades to ci-build-packages.sh swallowing the
   # error and shipping the stale prebuilt dpa_app — the SIGSEGV root cause.
   if [ -z "$CDX_INC" ]; then
-    PRODUCER_REPO="${ASK_PRODUCER_REPO:-mihakralj/lts_6.6_ls1046a}"
+    PRODUCER_REPO="${ASK_PRODUCER_REPO:-mihakralj/kernel-ls1046a-build}"
     PRODUCER_REF="${ASK_KERNEL_TAG:-}"
     if [ -z "$PRODUCER_REF" ] && [ -f "$REPO_ROOT/data/ask-kernel.pin" ]; then
       PRODUCER_REF=$(tr -d '[:space:]' < "$REPO_ROOT/data/ask-kernel.pin")
@@ -345,7 +345,7 @@ if [ -d "$DPA_SRC" ] && [ -f "$DPA_SRC/Makefile" ]; then
   if [ -z "$CDX_INC" ]; then
     echo "    ERROR: cdx_ioctl.h not found; tried STAGING, ASK_SRC," >&2
     echo "           \$KSRC/../../release/oot-modules/cdx," >&2
-    echo "           /root/lts_6.6_ls1046a/release/oot-modules/cdx," >&2
+    echo "           /root/kernel-ls1046a-build/release/oot-modules/cdx," >&2
     echo "           and shallow-clone of producer repo at pinned tag." >&2
     echo "    Hint: ensure data/ask-kernel.pin holds a published producer" >&2
     echo "          tag, or stage cdx headers into \$STAGING/include/cdx" >&2

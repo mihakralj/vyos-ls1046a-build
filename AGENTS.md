@@ -26,11 +26,11 @@ VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two bui
 
 ### Shared Cobalt 100 VM — A+B pattern (no operator mutex)
 
-The consumer `self-hosted-build.yml` and the producer `build-and-release.yml` (in `mihakralj/lts_6.6_ls1046a`) share **one** Azure ARM64 Cobalt 100 VM. The earlier "never run both simultaneously" mutex has been retired. Two cooperating mechanisms now solve the cost / coordination problem with zero operator action.
+The consumer `self-hosted-build.yml` and the producer `build-and-release.yml` (in `mihakralj/kernel-ls1046a-build`) share **one** Azure ARM64 Cobalt 100 VM. The earlier "never run both simultaneously" mutex has been retired. Two cooperating mechanisms now solve the cost / coordination problem with zero operator action.
 
 **Pattern A — idle-deallocator on the VM (NOT in CI).** Workflows only ever call `az vm start` (idempotent — no-op if already running) and **never** call `az vm deallocate`. A systemd timer on the VM (`idle-deallocate.timer`, threshold 10 min) checks every 2 min for any active `Runner.Worker` process and self-deallocates only when both runners have been idle long enough. Standing cost on Cobalt 100 ≈ ~$0.20/day.
 
-**Pattern B — two registered runners on the same VM.** Two `actions-runner` services run on the VM (`vm-runner-1` for `lts_6.6_ls1046a`, `vm-runner-2` for this repo) with separate `_work` dirs. GitHub schedules producer and consumer to *different* runners; both execute in parallel on the shared cores. There is no cross-repo serialization.
+**Pattern B — two registered runners on the same VM.** Two `actions-runner` services run on the VM (`vm-runner-1` for `kernel-ls1046a-build`, `vm-runner-2` for this repo) with separate `_work` dirs. GitHub schedules producer and consumer to *different* runners; both execute in parallel on the shared cores. There is no cross-repo serialization.
 
 **Hard rules:**
 
@@ -38,7 +38,7 @@ The consumer `self-hosted-build.yml` and the producer `build-and-release.yml` (i
 2. **Never block on the other repo's runs from inside a build script.** Pattern B's whole point is that they don't have to.
 3. **Build scripts must namespace any fixed absolute disk path on `${RUNNER_NAME}`** (or live under `${GITHUB_WORKSPACE}`, which is already runner-local). Adding a non-namespaced `/build/...` or `/work/...` reintroduces contention.
 
-Producer-side authoritative reference: `lts_6.6_ls1046a/.clinerules/01-shared-vm-runtime.md` (idle-deallocate script, systemd unit files, Managed Identity role assignment, failure-mode operator playbook).
+Producer-side authoritative reference: `kernel-ls1046a-build/.clinerules/01-shared-vm-runtime.md` (idle-deallocate script, systemd unit files, Managed Identity role assignment, failure-mode operator playbook).
 
 ## Critical Non-Obvious Rules
 

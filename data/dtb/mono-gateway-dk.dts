@@ -583,7 +583,7 @@ status = "disabled";
  * can resolve the includes.
  *
  * Files live under data/dtb/sdk-dtsi/ in this repo, copied verbatim from
- * the producer (lts_6.6_ls1046a) at:
+ * the producer (kernel-ls1046a-build) at:
  *   release/patches/kernel/sdk-sources/arch/arm64/boot/dts/freescale/
  */
 #include "qoriq-bman-portals-sdk.dtsi"
