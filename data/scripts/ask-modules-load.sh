@@ -2,7 +2,7 @@
 # ask-modules-load.sh — Load ASK out-of-tree kernel modules in correct order.
 #
 # Background:
-#   The producer release (lts_6.6_ls1046a, kernel-6.6.135-askN) ships an
+#   The producer release (kernel-ls1046a-build, kernel-6.6.135-askN) ships an
 #   `ask-modules-<KVER>-vyos_*_arm64.deb` whose contents install to the
 #   canonical kernel-modules location:
 #       /lib/modules/<KVER>/extra/ask/cdx.ko
