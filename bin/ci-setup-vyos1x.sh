@@ -44,10 +44,14 @@ pre_build_hook = """
   # never enforced.  We're on Debian trixie (pylint 3.3.4) which trips:
   #   E0606: possibly-used-before-assignment (~22 sites in vyos-1x source)
   #   E1111: assigning-from-no-return     (interfaces_wireless.py:179)
-  # These are real upstream bugs that vyos itself never fails CI on
+  #   E0001: syntax-error — pylint 3.x now picks up *.graphql and *.tmpl
+  #          files via the Makefile's `git ls-files src/services` glob and
+  #          treats them as Python, which obviously fails to parse.  Old
+  #          pylint silently skipped non-.py extensions.
+  # All three are real upstream bugs that vyos itself never fails CI on
   # because their builder uses old pylint.  Disabling matches upstream
   # behaviour and avoids us having to carry per-file fix patches.
-  sed -i 's/pylint --errors-only/pylint --errors-only --disable=E0606,E1111/' Makefile
+  sed -i 's/pylint --errors-only/pylint --errors-only --disable=E0606,E1111,E0001/' Makefile
   patch_fail=0
   for p in ../ls1046a-patches/vyos-1x-*.patch; do
     # Skip if already applied (idempotent across pre_build_hook re-invocations
