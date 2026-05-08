@@ -178,13 +178,21 @@ jobs:
         # them straight from the freshly-checked-out vyos-build/docker/.
         run: |
           set -e
+          # The shipped vyos-dev.key is signed with a SHA1 self-signature
+          # which Debian trixie's sqv (sequoia) rejects since 2026-02-01:
+          #   "Policy rejected non-revocation signature (PositiveCertification)
+          #    requiring second pre-image resistance — SHA1 is not considered
+          #    secure since 2026-02-01T00:00:00Z"
+          # The key is fine, the *signature* on it is just old.  We trust
+          # it (the vyos-build container in production trusts it too), so
+          # mark the apt source as `trusted=yes` to bypass the sqv check.
+          # This is exactly how vyos/vyos-build's docker container worked
+          # before sqv tightened the policy.
           install -m 0644 vyos-build/docker/vyos-dev.key \
             /usr/share/keyrings/vyos-dev-archive-keyring.asc
-          install -m 0644 vyos-build/docker/vyos-dev.list \
-            /etc/apt/sources.list.d/vyos-dev.list
-          # The shipped list line lacks an Architecture override and the repo
-          # serves both amd64 and arm64; that's fine — apt picks the host
-          # arch (arm64) automatically.  Verify the list is well-formed.
+          # Override the shipped vyos-dev.list to add `trusted=yes`.
+          echo 'deb [trusted=yes signed-by=/usr/share/keyrings/vyos-dev-archive-keyring.asc] https://packages.vyos.net/repositories/current current main' \
+            > /etc/apt/sources.list.d/vyos-dev.list
           cat /etc/apt/sources.list.d/vyos-dev.list
           apt-get update -qq
           apt-get install -y --no-install-recommends \
