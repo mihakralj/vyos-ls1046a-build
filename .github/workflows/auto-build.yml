@@ -54,14 +54,19 @@ jobs:
     runs-on: ${{ inputs.runs_on || 'ubuntu-24.04-arm' }}
     permissions:
       contents: write
-    container:
-      image: ${{ inputs.builder_image || github.event.inputs.builder_image || 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64' }}
-      options: --sysctl net.ipv6.conf.lo.disable_ipv6=0 --privileged --user root
-      volumes:
-        - /mnt:/mnt
+    # No `container:` — build runs natively on the self-hosted ARM64 runner.
+    # The runner host (Debian 13 trixie aarch64) provides all build deps
+    # (installed in the "Install Dependencies" step below). Removing the
+    # vyos-builder container removes the docker dependency on the runner
+    # and gives the build direct access to /mnt NVMe and full host RAM.
+    #
+    # `shell: sudo bash -e {0}` mirrors the `--user root` of the removed
+    # container: live-build needs root for debootstrap, chroot, mount,
+    # losetup, kpartx, etc. The runner user (`vyos`) has passwordless
+    # sudo configured on the host (member of group `sudo`).
     defaults:
       run:
-        shell: bash
+        shell: 'sudo bash -e {0}'
     outputs:
       BUILD_BY: ${{ steps.set_env_variables.outputs.BUILD_BY }}
       build_version: ${{ steps.set_env_variables.outputs.build_version }}
