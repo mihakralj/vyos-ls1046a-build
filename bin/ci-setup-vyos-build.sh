@@ -148,6 +148,46 @@ PREF
 echo "### Pinned upstream linux-image-*-vyos from packages.vyos.net to NotInstall:"
 cat vyos-build/data/live-build-config/archives/00-pin-ask-kernel.pref.chroot
 
+### Bookworm fallback archive for VyOS @current packages whose runtime
+### dependencies (libsnmp40, libapt-pkg6.0, libboost-filesystem1.74.0,
+### unionfs-fuse, kmod, bash-completion <2.16) only exist in Debian
+### bookworm and have been removed/SONAME-bumped in trixie.
+###
+### VyOS @current's apt archive at packages.vyos.net is built against
+### bookworm; rolling our chroot to trixie (so the chroot's libc 2.41
+### matches our trixie-built local .debs for vyos-1x/fmc/fmlib/ppp/
+### iptables-extensions) leaves these specific bookworm-only libraries
+### unsatisfiable.  The fix is to add bookworm as a low-priority
+### secondary archive (Pin-Priority: 100, below the trixie default of
+### 500) and explicitly raise priority for ONLY the runtime libs that
+### VyOS @current depends on but trixie no longer ships.  Trixie wins
+### everywhere else, so the chroot stays a trixie chroot.
+cat > vyos-build/data/live-build-config/archives/01-bookworm-fallback.list.chroot <<'LIST'
+deb [trusted=yes] http://deb.debian.org/debian bookworm main
+deb [trusted=yes] http://security.debian.org/debian-security bookworm-security main
+LIST
+cat > vyos-build/data/live-build-config/archives/01-bookworm-fallback.pref.chroot <<'PREF'
+Package: *
+Pin: release n=bookworm
+Pin-Priority: 100
+
+Package: *
+Pin: release n=bookworm-security
+Pin-Priority: 100
+
+Package: libsnmp40 libapt-pkg6.0 libapt-pkg5.0 libapt-pkg4.12 libboost-filesystem1.74.0 unionfs-fuse kmod bash-completion libvyatta-cfg1
+Pin: release n=bookworm
+Pin-Priority: 1001
+
+Package: libsnmp40 libapt-pkg6.0 libapt-pkg5.0 libapt-pkg4.12 libboost-filesystem1.74.0 unionfs-fuse kmod bash-completion libvyatta-cfg1
+Pin: release n=bookworm-security
+Pin-Priority: 1001
+PREF
+echo "### Bookworm fallback archive + pinning written:"
+cat vyos-build/data/live-build-config/archives/01-bookworm-fallback.list.chroot
+echo "---"
+cat vyos-build/data/live-build-config/archives/01-bookworm-fallback.pref.chroot
+
 ### Minisign public key + DTB for ISO
 cp data/vyos-ls1046a.minisign.pub vyos-build/data/live-build-config/includes.chroot/usr/share/vyos/keys/
 mkdir -p vyos-build/data/live-build-config/includes.binary
