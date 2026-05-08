@@ -134,6 +134,15 @@ jobs:
       - name: Install Dependencies (host base)
         run: |
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
+          # Clean up any VyOS apt source dropped by a prior failed run on
+          # this self-hosted runner — the SHA1-signed VyOS InRelease is
+          # rejected by trixie's sqv, and one bad source aborts the whole
+          # `apt-get update`.  The proper VyOS source (with trusted=yes)
+          # gets installed later, after the vyos-build checkout.
+          rm -f /etc/apt/sources.list.d/vyos-dev.list \
+                /etc/apt/sources.list.d/vyos.list \
+                /etc/apt/sources.list.d/vyos.sources \
+                /etc/apt/preferences.d/vyos
           apt-get update -qq
           apt-get install -y \
             libsystemd-dev libglib2.0-dev libip4tc-dev libipset-dev libnfnetlink-dev \
