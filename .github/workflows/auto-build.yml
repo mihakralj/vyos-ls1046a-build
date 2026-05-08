@@ -165,6 +165,7 @@ jobs:
             libpcre2-dev xorriso \
             libxml2-dev libtclap-dev \
             python3-tomli python3-jinja2 python3-yaml python3-toml python3-git \
+            python3-pystache pbuilder \
             python3-setuptools python3-pip python3-build python3-wheel \
             python3-stdeb dh-python debhelper devscripts equivs quilt \
             fakeroot rsync curl ca-certificates
