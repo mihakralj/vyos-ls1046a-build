@@ -653,7 +653,12 @@ managed = "in-band-status";
 	};
 };
 
-&{/thermal-zones/core-cluster/trips} {
+/* mainline 6.18 fsl-ls1046a.dtsi names the CPU thermal zone
+ * `cluster-thermal`, not `core-cluster` (the latter was the SDK / NXP
+ * lf-6.6 / 6.12 name).  Reference both /thermal-zones/cluster-thermal
+ * paths via the new label so the overlay applies cleanly on mainline.
+ */
+&{/thermal-zones/cluster-thermal/trips} {
 	fan_level1: fan-level1 {
 		temperature = <40000>;
 		hysteresis = <1000>;
@@ -685,7 +690,7 @@ managed = "in-band-status";
 	};
 };
 
-&{/thermal-zones/core-cluster/cooling-maps} {
+&{/thermal-zones/cluster-thermal/cooling-maps} {
 	fan-map1 {
 		trip = <&fan_level1>;
 		cooling-device = <&fan0 1 1>;
