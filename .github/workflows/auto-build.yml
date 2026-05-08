@@ -211,7 +211,42 @@ jobs:
             python3-netaddr python3-netifaces python3-paramiko python3-passlib \
             python3-psutil python3-tabulate python3-zmq python3-fastapi \
             python3-vici python3-certbot-nginx python3-hurry.filesize \
-            python3-nose2
+            python3-nose2 \
+            python3-jmespath python3-pyhumps
+
+      - name: Stub Python 3.13-removed 'spwd' module for vyos-1x pylint
+        # vyos-1x src/op_mode/show_users.py imports the stdlib 'spwd' module
+        # which was deprecated in Python 3.11 and REMOVED in Python 3.13.
+        # The runner host (Debian trixie) ships only Python 3.13 (no
+        # python3.11 packaging available).  At runtime show_users.py
+        # tolerates the missing module (try/except), but vyos-1x's
+        # debian/rules invokes pylint over the whole tree and pylint hard-
+        # fails on the import.
+        #
+        # Drop a no-op shim into the system site-packages so pylint resolves
+        # the import.  show_users.py only ever calls spwd.getspnam(), so a
+        # stub that raises KeyError is functionally equivalent on a Linux
+        # host where /etc/shadow lookups happen via NSS anyway.
+        run: |
+          set -e
+          SP_DIR=$(python3 -c 'import sys, sysconfig; print(sysconfig.get_paths()["purelib"])')
+          if [ ! -f "$SP_DIR/spwd.py" ]; then
+            # Use printf to avoid YAML heredoc indentation hazards: every
+            # newline is explicit, no whitespace ambiguity.
+            printf '%s\n' \
+              "# Stub for Python 3.13+ where the stdlib 'spwd' module was removed (PEP 594)." \
+              "# vyos-1x's pylint pass needs the import to resolve." \
+              "class struct_spwd(tuple):" \
+              "    sp_namp = sp_pwdp = sp_lstchg = sp_min = sp_max = None" \
+              "    sp_warn = sp_inact = sp_expire = sp_flag = None" \
+              "def getspnam(name):" \
+              "    raise KeyError(name)" \
+              "def getspall():" \
+              "    return []" \
+              > "$SP_DIR/spwd.py"
+            echo "Wrote spwd shim to $SP_DIR/spwd.py"
+            python3 -c 'import spwd; print("spwd OK:", spwd.getspall())'
+          fi
 
       - name: Bootstrap OCaml/opam for libvyosconfig (cached on runner)
         # vyos-1x's debian/rules calls 'opam env --root=/opt/opam' to build
