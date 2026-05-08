@@ -280,22 +280,40 @@ jobs:
         # (slow), reuse forever (~3 s).
         run: |
           set -e
-          if [ -x /opt/opam/4.14.2/bin/dune ] && [ -x /usr/bin/opam ]; then
-            echo "### opam + OCaml 4.14.2 already provisioned at /opt/opam — skipping"
-            ls /opt/opam/4.14.2/bin/ | head
-            exit 0
+          # Install opam itself if missing (fast: Debian package).
+          if [ ! -x /usr/bin/opam ]; then
+            apt-get install -y --no-install-recommends opam build-essential bubblewrap unzip
           fi
-          # Install opam itself (Debian package, fast).
-          apt-get install -y --no-install-recommends opam build-essential bubblewrap unzip
-          # Init opam at the path vyos-1x's Makefile expects.
+          # Init opam at the path vyos-1x's Makefile expects (slow first
+          # time only — survives between runner builds).
           if [ ! -d /opt/opam ]; then
             opam init --root=/opt/opam --comp=4.14.2 \
                       --disable-sandboxing --no-setup --yes
           fi
           eval "$(opam env --root=/opt/opam --set-root)"
+          # 'opam install -y' on already-installed packages is a fast no-op
+          # (~1 s for 13 packages), so unconditionally install — cheap and
+          # keeps the recipe declarative.
           opam install -y \
             re pcre2 num ctypes ctypes-foreign ctypes-build containers \
             fileutils xml-light mustache yojson fmt logs
+          # Pin vyos1x-config and vyconf at the exact commits vyos-1x's
+          # libvyosconfig/Makefile depends on.  The Makefile's `depends`
+          # target tries to do these pins itself via `sudo sh -c`, but
+          # only when /usr/lib/libvyosconfig.so.0 isn't already present;
+          # vyos-1x's debian/rules then unconditionally copies
+          # $OPAM/share/vyconf/vyconf.proto and the vyconf{d,_cli,_cli_compat}
+          # binaries into the libvyosconfig .deb at install time
+          # ("cp /opt/opam/share/vyconf/vyconf.proto ..."), so vyconf
+          # MUST be opam-installed in /opt/opam regardless of whether
+          # libvyosconfig is rebuilt.
+          # Commit pins are taken verbatim from vyos-1x's
+          # libvyosconfig/Makefile lines 45-46.
+          opam pin add -y -n vyos1x-config \
+            'https://github.com/vyos/vyos1x-config.git#52132ad2c0992bf6f17a06173384030d93a29053'
+          opam pin add -y -n vyconf \
+            'https://github.com/vyos/vyconf.git#e25b13ae3040d02326f01bf9bedd097795fb3a62'
+          opam install -y vyos1x-config vyconf
 
       - name: Setup vyos-1x patches
         env:
