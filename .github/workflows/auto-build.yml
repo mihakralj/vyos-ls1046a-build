@@ -144,7 +144,11 @@ jobs:
             libreadline-dev liblua5.3-dev byacc flex \
             dosfstools mtools zstd u-boot-tools \
             libpcre2-dev xorriso \
-            libxml2-dev libtclap-dev
+            libxml2-dev libtclap-dev \
+            python3-tomli python3-jinja2 python3-yaml python3-toml \
+            python3-setuptools python3-pip python3-build python3-wheel \
+            python3-stdeb dh-python debhelper devscripts equivs quilt \
+            fakeroot rsync
           # libxml2-dev + libtclap-dev: required to build fmc from source
           # (see bin/ci-build-fmc.sh and bin/ci-build-fmlib.sh). Rebuilding
           # fmc+fmlib ensures dpa_app links against ABI-consistent libraries
