@@ -203,11 +203,35 @@ jobs:
         #   libvyosconfig0 : Depends: libc6 (>= 2.38) but 2.36-9+deb12u13 is
         #     to be installed
         #   ppp : Depends: libpcap0.8t64 (>= 0.9.8) but it is not installable
+        #
+        # Also: vyos-build's build-vyos-image hardcodes
+        #   --debootstrap-options "...--include=apt-utils,...,linux-kbuild-6.1"
+        # but the trixie archive only ships linux-kbuild-6.12.<x>+deb13
+        # (no plain linux-kbuild-6.1).  debootstrap aborts with
+        #   E: Couldn't find these debs: linux-kbuild-6.1
+        # We don't actually need a host-kernel kbuild package in the live-
+        # build chroot — we ship our own kernel via packages.chroot and
+        # vyos-build's downstream Makefile invocations don't reference it
+        # during ISO bootstrap.  Strip linux-kbuild-* from the debootstrap
+        # include list entirely.
         run: |
+          set -e
           sed -i 's/^debian_distribution = "bookworm"/debian_distribution = "trixie"/' \
             vyos-build/data/defaults.toml
           echo "### Pinned debian_distribution:"
           grep '^debian_distribution' vyos-build/data/defaults.toml
+          # Drop the hardcoded bookworm-only linux-kbuild-6.1 from the
+          # debootstrap include list in build-vyos-image (and in
+          # scripts/image-build/build-vyos-image — the path varies between
+          # vyos-build versions).  Use a single sed that tolerates either
+          # ordering with apt-utils,ca-certificates,gnupg2.
+          for f in vyos-build/build-vyos-image \
+                   vyos-build/scripts/image-build/build-vyos-image ; do
+            [ -f "$f" ] || continue
+            sed -i 's/,linux-kbuild-6\.[0-9]\+//g' "$f"
+            echo "### Stripped linux-kbuild-6.x from $f:"
+            grep -n 'debootstrap-options' "$f" || true
+          done
 
       - name: Install vyos-1x build dependencies (VyOS apt repo)
         # mk-build-deps for vyos-1x needs VyOS-specific packages
