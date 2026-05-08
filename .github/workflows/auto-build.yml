@@ -213,6 +213,37 @@ jobs:
             python3-vici python3-certbot-nginx python3-hurry.filesize \
             python3-nose2
 
+      - name: Bootstrap OCaml/opam for libvyosconfig (cached on runner)
+        # vyos-1x's debian/rules calls 'opam env --root=/opt/opam' to build
+        # libvyosconfig.  The vyos-builder Dockerfile (vyos-build/docker/
+        # Dockerfile lines 144-165) installs opam from upstream, runs
+        # 'opam init --root=/opt/opam --comp=4.14.2', then 'opam install'
+        # 14 OCaml packages (re, pcre2, num, ctypes, ctypes-foreign,
+        # ctypes-build, containers, fileutils, xml-light, mustache,
+        # yojson, fmt, logs).  Total cold time: ~15 min.
+        #
+        # /opt/opam lives outside $GITHUB_WORKSPACE, so on the persistent
+        # self-hosted runner it survives between builds.  Bootstrap once
+        # (slow), reuse forever (~3 s).
+        run: |
+          set -e
+          if [ -x /opt/opam/4.14.2/bin/dune ] && [ -x /usr/bin/opam ]; then
+            echo "### opam + OCaml 4.14.2 already provisioned at /opt/opam — skipping"
+            ls /opt/opam/4.14.2/bin/ | head
+            exit 0
+          fi
+          # Install opam itself (Debian package, fast).
+          apt-get install -y --no-install-recommends opam build-essential bubblewrap unzip
+          # Init opam at the path vyos-1x's Makefile expects.
+          if [ ! -d /opt/opam ]; then
+            opam init --root=/opt/opam --comp=4.14.2 \
+                      --disable-sandboxing --no-setup --yes
+          fi
+          eval "\$(opam env --root=/opt/opam --set-root)"
+          opam install -y \
+            re pcre2 num ctypes ctypes-foreign ctypes-build containers \
+            fileutils xml-light mustache yojson fmt logs
+
       - name: Setup vyos-1x patches
         env:
           MOK_KEY: ${{ secrets.MOK_KEY }}
