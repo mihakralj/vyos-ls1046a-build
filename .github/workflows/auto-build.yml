@@ -131,10 +131,9 @@ jobs:
             chown -R vyos:vyos /mnt/nvme/_work 2>/dev/null || true
           fi
 
-      - name: Install Dependencies
+      - name: Install Dependencies (host base)
         run: |
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-          # apt-get needed before checkout since git-lfs may not be present
           apt-get update -qq
           apt-get install -y \
             libsystemd-dev libglib2.0-dev libip4tc-dev libipset-dev libnfnetlink-dev \
@@ -148,12 +147,9 @@ jobs:
             python3-tomli python3-jinja2 python3-yaml python3-toml \
             python3-setuptools python3-pip python3-build python3-wheel \
             python3-stdeb dh-python debhelper devscripts equivs quilt \
-            fakeroot rsync
+            fakeroot rsync curl ca-certificates
           # libxml2-dev + libtclap-dev: required to build fmc from source
-          # (see bin/ci-build-fmc.sh and bin/ci-build-fmlib.sh). Rebuilding
-          # fmc+fmlib ensures dpa_app links against ABI-consistent libraries
-          # and no longer SIGSEGVs on the mono gateway.
-          apt-get upgrade -y
+          # (see bin/ci-build-fmc.sh and bin/ci-build-fmlib.sh).
 
       - uses: actions/checkout@v6
         with:
@@ -173,6 +169,32 @@ jobs:
         with:
           repository: vyos/vyos-build
           path: vyos-build
+
+      - name: Install vyos-1x build dependencies (VyOS apt repo)
+        # mk-build-deps for vyos-1x needs VyOS-specific packages
+        # (python3-vici >=5.7.2, python3-certbot-nginx, python3-hurry.filesize,
+        #  python3-nose2, ...) that don't exist in Debian trixie main.  The
+        # vyos-build repo ships its own apt key + sources.list, so we install
+        # them straight from the freshly-checked-out vyos-build/docker/.
+        run: |
+          set -e
+          install -m 0644 vyos-build/docker/vyos-dev.key \
+            /usr/share/keyrings/vyos-dev-archive-keyring.asc
+          install -m 0644 vyos-build/docker/vyos-dev.list \
+            /etc/apt/sources.list.d/vyos-dev.list
+          # The shipped list line lacks an Architecture override and the repo
+          # serves both amd64 and arm64; that's fine — apt picks the host
+          # arch (arm64) automatically.  Verify the list is well-formed.
+          cat /etc/apt/sources.list.d/vyos-dev.list
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            libzmq3-dev pylint whois \
+            python3-pyudev python3-systemd python3-pam python3-pyroute2 \
+            python3-voluptuous python3-lxml python3-xmltodict python3-coverage \
+            python3-netaddr python3-netifaces python3-paramiko python3-passlib \
+            python3-psutil python3-tabulate python3-zmq python3-fastapi \
+            python3-vici python3-certbot-nginx python3-hurry.filesize \
+            python3-nose2
 
       - name: Setup vyos-1x patches
         env:
