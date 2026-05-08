@@ -60,13 +60,17 @@ jobs:
     # vyos-builder container removes the docker dependency on the runner
     # and gives the build direct access to /mnt NVMe and full host RAM.
     #
-    # `shell: sudo bash -e {0}` mirrors the `--user root` of the removed
+    # `shell: sudo -E bash -e {0}` mirrors the `--user root` of the removed
     # container: live-build needs root for debootstrap, chroot, mount,
     # losetup, kpartx, etc. The runner user (`vyos`) has passwordless
-    # sudo configured on the host (member of group `sudo`).
+    # sudo configured on the host. `-E` preserves the environment so
+    # `$GITHUB_ENV`, `$GITHUB_OUTPUT`, `$GITHUB_WORKSPACE`, and step `env:`
+    # vars survive into the root shell — without `-E` sudo strips them
+    # and scripts that write to those files fail with
+    # "bin/ci-…sh: line N: : No such file or directory".
     defaults:
       run:
-        shell: 'sudo bash -e {0}'
+        shell: 'sudo -E bash -e {0}'
     outputs:
       BUILD_BY: ${{ steps.set_env_variables.outputs.BUILD_BY }}
       build_version: ${{ steps.set_env_variables.outputs.build_version }}
