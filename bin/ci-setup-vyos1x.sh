@@ -51,7 +51,18 @@ pre_build_hook = """
   # All three are real upstream bugs that vyos itself never fails CI on
   # because their builder uses old pylint.  Disabling matches upstream
   # behaviour and avoids us having to carry per-file fix patches.
-  sed -i 's/pylint --errors-only/pylint --errors-only --disable=E0606,E1111,E0001/' Makefile
+  # E0001 (syntax-error) is *fatal* in pylint 3.x and cannot be silenced
+  # via --disable.  --ignore-paths does NOT skip files passed explicitly
+  # on the command line, but --ignore-patterns DOES (verified locally
+  # against pylint 3.3.4 on Debian trixie).
+  # Write a project-local .pylintrc so we don't have to inject regexes
+  # into the Makefile recipe with all the make/sed escaping headaches.
+  cat > .pylintrc <<'PYLINTRC'
+[MAIN]
+ignore-patterns=.*\\.graphql$,.*\\.tmpl$
+[MESSAGES CONTROL]
+disable=E0606,E1111
+PYLINTRC
   patch_fail=0
   for p in ../ls1046a-patches/vyos-1x-*.patch; do
     # Skip if already applied (idempotent across pre_build_hook re-invocations
