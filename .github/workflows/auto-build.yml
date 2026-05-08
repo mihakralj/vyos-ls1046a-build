@@ -221,17 +221,24 @@ jobs:
           echo "### Pinned debian_distribution:"
           grep '^debian_distribution' vyos-build/data/defaults.toml
           # Drop the hardcoded bookworm-only linux-kbuild-6.1 from the
-          # debootstrap include list in build-vyos-image (and in
-          # scripts/image-build/build-vyos-image — the path varies between
-          # vyos-build versions).  Use a single sed that tolerates either
-          # ordering with apt-utils,ca-certificates,gnupg2.
-          for f in vyos-build/build-vyos-image \
-                   vyos-build/scripts/image-build/build-vyos-image ; do
-            [ -f "$f" ] || continue
-            sed -i 's/,linux-kbuild-6\.[0-9]\+//g' "$f"
-            echo "### Stripped linux-kbuild-6.x from $f:"
-            grep -n 'debootstrap-options' "$f" || true
-          done
+          # debootstrap include list in build-vyos-image.
+          #
+          # IMPORTANT: vyos-build/build-vyos-image is a *symlink* to
+          # scripts/image-build/build-vyos-image. Running `sed -i` on the
+          # symlink replaces it with a regular file (--follow-symlinks would
+          # require explicit opt-in), which then breaks Python's `import
+          # defaults` line — defaults.py lives next to the real file under
+          # scripts/image-build/, and Python uses the script's realpath
+          # parent for sys.path[0]. Patch ONLY the real file under
+          # scripts/image-build/; the root symlink keeps pointing at it.
+          REAL_BVI="vyos-build/scripts/image-build/build-vyos-image"
+          if [ -f "$REAL_BVI" ]; then
+            sed -i 's/,linux-kbuild-6\.[0-9]\+//g' "$REAL_BVI"
+            echo "### Stripped linux-kbuild-6.x from $REAL_BVI:"
+            grep -n 'debootstrap-options' "$REAL_BVI" || true
+          fi
+          # Sanity: confirm the root symlink still resolves.
+          ls -la vyos-build/build-vyos-image
 
       - name: Install vyos-1x build dependencies (VyOS apt repo)
         # mk-build-deps for vyos-1x needs VyOS-specific packages
