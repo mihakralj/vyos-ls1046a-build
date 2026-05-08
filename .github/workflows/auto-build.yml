@@ -325,6 +325,18 @@ jobs:
           opam pin add -y -n vyconf \
             'https://github.com/vyos/vyconf.git#e25b13ae3040d02326f01bf9bedd097795fb3a62'
           opam install -y vyos1x-config vyconf
+          # vyos-1x's top-level Makefile gates the libvyosconfig build behind
+          #   @if [ ! -f /usr/lib/libvyosconfig.so.0 ]; then make -C libvyosconfig all; ... fi
+          # but vyos-1x's debian/rules:159 unconditionally does
+          #   cp libvyosconfig/_build/libvyosconfig.so debian/tmp/libvyosconfig/usr/lib/libvyosconfig.so.0
+          # If a previous build's `sudo make install` left
+          # /usr/lib/libvyosconfig.so.0 on the persistent self-hosted runner,
+          # the gate is true, the Makefile silently no-ops, _build/
+          # is never created, and the cp fails with
+          #   cp: cannot stat 'libvyosconfig/_build/libvyosconfig.so'.
+          # On the GitHub-hosted ARM runner this never reproduces because the
+          # filesystem is fresh per-job. Force a clean state on every build.
+          rm -f /usr/lib/libvyosconfig.so.0 /usr/lib/libvyosconfig.so
 
       - name: Setup vyos-1x patches
         env:
