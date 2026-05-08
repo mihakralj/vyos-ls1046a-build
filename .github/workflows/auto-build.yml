@@ -191,74 +191,6 @@ jobs:
           repository: vyos/vyos-build
           path: vyos-build
 
-      - name: Pin vyos-build chroot to Debian trixie
-        # vyos-build@current still defaults to debian_distribution = "bookworm"
-        # in data/defaults.toml, but the self-hosted runner is Debian trixie
-        # and every vyos-1x / ppp / iptables .deb we build locally links
-        # against libc6 (>= 2.38) and depends on the trixie t64 transition
-        # libs (libpcap0.8t64, libssl3t64) that don't exist in bookworm.
-        # Forcing the live-build chroot to trixie aligns the chroot with the
-        # build host so dpkg dependency resolution can satisfy our local debs.
-        # Without this, lb chroot_install-packages aborts with:
-        #   libvyosconfig0 : Depends: libc6 (>= 2.38) but 2.36-9+deb12u13 is
-        #     to be installed
-        #   ppp : Depends: libpcap0.8t64 (>= 0.9.8) but it is not installable
-        #
-        # Also: vyos-build's build-vyos-image hardcodes
-        #   --debootstrap-options "...--include=apt-utils,...,linux-kbuild-6.1"
-        # but the trixie archive only ships linux-kbuild-6.12.<x>+deb13
-        # (no plain linux-kbuild-6.1).  debootstrap aborts with
-        #   E: Couldn't find these debs: linux-kbuild-6.1
-        # We don't actually need a host-kernel kbuild package in the live-
-        # build chroot — we ship our own kernel via packages.chroot and
-        # vyos-build's downstream Makefile invocations don't reference it
-        # during ISO bootstrap.  Strip linux-kbuild-* from the debootstrap
-        # include list entirely.
-        run: |
-          set -e
-          sed -i 's/^debian_distribution = "bookworm"/debian_distribution = "trixie"/' \
-            vyos-build/data/defaults.toml
-          echo "### Pinned debian_distribution:"
-          grep '^debian_distribution' vyos-build/data/defaults.toml
-          # Drop the hardcoded bookworm-only linux-kbuild-6.1 from the
-          # debootstrap include list in build-vyos-image.
-          #
-          # IMPORTANT: vyos-build/build-vyos-image is a *symlink* to
-          # scripts/image-build/build-vyos-image. Running `sed -i` on the
-          # symlink replaces it with a regular file (--follow-symlinks would
-          # require explicit opt-in), which then breaks Python's `import
-          # defaults` line — defaults.py lives next to the real file under
-          # scripts/image-build/, and Python uses the script's realpath
-          # parent for sys.path[0]. Patch ONLY the real file under
-          # scripts/image-build/; the root symlink keeps pointing at it.
-          REAL_BVI="vyos-build/scripts/image-build/build-vyos-image"
-          if [ -f "$REAL_BVI" ]; then
-            sed -i 's/,linux-kbuild-6\.[0-9]\+//g' "$REAL_BVI"
-            echo "### Stripped linux-kbuild-6.x from $REAL_BVI:"
-            grep -n 'debootstrap-options' "$REAL_BVI" || true
-            # vyos-build writes the VyOS apt source line to
-            # config/archives/vyos.list.{chroot,binary} as a plain
-            #   deb <vyos_mirror> <vyos_branch> main
-            # without [trusted=yes].  The shipped vyos-dev archive key
-            # carries a SHA1 PositiveCertification self-signature that
-            # Debian trixie's sqv (sequoia) rejects since 2026-02-01,
-            # so apt-get update inside the live-build chroot fails with:
-            #   E: The repository 'https://packages.vyos.net/repositories/current
-            #      current InRelease' is not signed.
-            # We trust the repo (the host-side apt source is also marked
-            # trusted=yes in the earlier "Install vyos-1x build deps"
-            # step).  Inject `[trusted=yes]` into both the deb and deb-src
-            # lines that build-vyos-image emits.
-            sed -i \
-              -e 's|"deb {vyos_mirror}|"deb [trusted=yes] {vyos_mirror}|' \
-              -e 's|"deb-src {vyos_mirror}|"deb-src [trusted=yes] {vyos_mirror}|' \
-              "$REAL_BVI"
-            echo "### Injected [trusted=yes] into vyos repo entries:"
-            grep -n 'vyos_repo_entry' "$REAL_BVI" || true
-          fi
-          # Sanity: confirm the root symlink still resolves.
-          ls -la vyos-build/build-vyos-image
-
       - name: Install vyos-1x build dependencies (VyOS apt repo)
         # mk-build-deps for vyos-1x needs VyOS-specific packages
         # (python3-vici >=5.7.2, python3-certbot-nginx, python3-hurry.filesize,
@@ -311,40 +243,6 @@ jobs:
               'git+https://github.com/aristanetworks/j2lint.git@341b5d5db86'
           fi
           j2lint --version
-
-      - name: Stub Python 3.13-removed 'spwd' module for vyos-1x pylint
-        # vyos-1x src/op_mode/show_users.py imports the stdlib 'spwd' module
-        # which was deprecated in Python 3.11 and REMOVED in Python 3.13.
-        # The runner host (Debian trixie) ships only Python 3.13 (no
-        # python3.11 packaging available).  At runtime show_users.py
-        # tolerates the missing module (try/except), but vyos-1x's
-        # debian/rules invokes pylint over the whole tree and pylint hard-
-        # fails on the import.
-        #
-        # Drop a no-op shim into the system site-packages so pylint resolves
-        # the import.  show_users.py only ever calls spwd.getspnam(), so a
-        # stub that raises KeyError is functionally equivalent on a Linux
-        # host where /etc/shadow lookups happen via NSS anyway.
-        run: |
-          set -e
-          SP_DIR=$(python3 -c 'import sys, sysconfig; print(sysconfig.get_paths()["purelib"])')
-          if [ ! -f "$SP_DIR/spwd.py" ]; then
-            # Use printf to avoid YAML heredoc indentation hazards: every
-            # newline is explicit, no whitespace ambiguity.
-            printf '%s\n' \
-              "# Stub for Python 3.13+ where the stdlib 'spwd' module was removed (PEP 594)." \
-              "# vyos-1x's pylint pass needs the import to resolve." \
-              "class struct_spwd(tuple):" \
-              "    sp_namp = sp_pwdp = sp_lstchg = sp_min = sp_max = None" \
-              "    sp_warn = sp_inact = sp_expire = sp_flag = None" \
-              "def getspnam(name):" \
-              "    raise KeyError(name)" \
-              "def getspall():" \
-              "    return []" \
-              > "$SP_DIR/spwd.py"
-            echo "Wrote spwd shim to $SP_DIR/spwd.py"
-            python3 -c 'import spwd; print("spwd OK:", spwd.getspall())'
-          fi
 
       - name: Bootstrap OCaml/opam for libvyosconfig (cached on runner)
         # vyos-1x's debian/rules calls 'opam env --root=/opt/opam' to build
