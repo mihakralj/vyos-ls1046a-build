@@ -162,12 +162,23 @@ cat vyos-build/data/live-build-config/archives/00-pin-ask-kernel.pref.chroot
 ### 500) and explicitly raise priority for ONLY the runtime libs that
 ### VyOS @current depends on but trixie no longer ships.  Trixie wins
 ### everywhere else, so the chroot stays a trixie chroot.
-cat > vyos-build/data/live-build-config/archives/01-bookworm-fallback.list.chroot <<'LIST'
-deb [trusted=yes] http://deb.debian.org/debian bookworm main
-deb [trusted=yes] http://security.debian.org/debian-security bookworm-security main
+### snapshot.debian.org @ 2023-07-06 (Debian 12.1 release date) — anchors
+### the bookworm-side archive to the exact point-in-time when VyOS @current
+### was last rebuilt against bookworm.  Live deb.debian.org/bookworm has
+### already moved past the strict-version pins baked into VyOS's debs
+### (e.g. snmpd Depends libsnmp40=5.9.4+dfsg-1, vyatta-cfg Depends
+### bash-completion=1:2.8-6, kmod brings libkmod2=30+20221128-1).  Those
+### exact .deb files only exist on snapshot.debian.org now.
+###
+### Apt 2.x requires `[check-valid-until=no]` because snapshot URLs return
+### Release files whose Valid-Until field is in the past.
+SNAPSHOT_DATE="20230706T000000Z"
+cat > vyos-build/data/live-build-config/archives/01-bookworm-snapshot.list.chroot <<LIST
+deb [check-valid-until=no trusted=yes] https://snapshot.debian.org/archive/debian/${SNAPSHOT_DATE}/ bookworm main
+deb [check-valid-until=no trusted=yes] https://snapshot.debian.org/archive/debian-security/${SNAPSHOT_DATE}/ bookworm-security main
 LIST
-cat > vyos-build/data/live-build-config/archives/01-bookworm-fallback.pref.chroot <<'PREF'
-# Block bookworm globally — only the explicit allow-list below wins.
+cat > vyos-build/data/live-build-config/archives/01-bookworm-snapshot.pref.chroot <<'PREF'
+# Block bookworm/snapshot globally — only the explicit allow-list below wins.
 Package: *
 Pin: release o=Debian,n=bookworm
 Pin-Priority: -1
@@ -177,20 +188,31 @@ Pin: release o=Debian,n=bookworm-security
 Pin-Priority: -1
 
 # Allow-list: packages whose runtime ABI is gone from trixie and must
-# come from bookworm to satisfy VyOS @current's bookworm-built debs.
-# Priority 1001 forces downgrade-from-trixie if needed.
-Package: libsnmp40 libapt-pkg6.0 libapt-pkg5.0 libapt-pkg4.12 libboost-filesystem1.74.0 unionfs-fuse kmod libkmod2 bash-completion libvyatta-cfg1
+# come from the snapshot.debian.org bookworm freeze to satisfy VyOS
+# @current's bookworm-built debs (which strict-pin point-in-time
+# bookworm versions).  Priority 1001 forces downgrade-from-trixie.
+#
+# dracut-install pinned to bookworm because trixie's dracut-install
+# (065-2) Depends libkmod2 >= 33~, but bookworm libkmod2 is 30+...,
+# and we need bookworm libkmod2 to satisfy bookworm kmod (= 30+...)
+# which VyOS @current's vyatta-cfg / vyos-1x stack pulls in.
+Package: libsnmp40 libapt-pkg6.0 libapt-pkg5.0 libapt-pkg4.12 libboost-filesystem1.74.0 unionfs-fuse kmod libkmod2 bash-completion libvyatta-cfg1 dracut-install dracut dracut-core
 Pin: release o=Debian,n=bookworm
 Pin-Priority: 1001
 
-Package: libsnmp40 libapt-pkg6.0 libapt-pkg5.0 libapt-pkg4.12 libboost-filesystem1.74.0 unionfs-fuse kmod libkmod2 bash-completion libvyatta-cfg1
+Package: libsnmp40 libapt-pkg6.0 libapt-pkg5.0 libapt-pkg4.12 libboost-filesystem1.74.0 unionfs-fuse kmod libkmod2 bash-completion libvyatta-cfg1 dracut-install dracut dracut-core
 Pin: release o=Debian,n=bookworm-security
 Pin-Priority: 1001
 PREF
-echo "### Bookworm fallback archive + pinning written:"
-cat vyos-build/data/live-build-config/archives/01-bookworm-fallback.list.chroot
+echo "### Bookworm snapshot archive + pinning written:"
+cat vyos-build/data/live-build-config/archives/01-bookworm-snapshot.list.chroot
 echo "---"
-cat vyos-build/data/live-build-config/archives/01-bookworm-fallback.pref.chroot
+cat vyos-build/data/live-build-config/archives/01-bookworm-snapshot.pref.chroot
+
+### Remove the previous deb.debian.org bookworm files (renamed to
+### avoid shadowing snapshot.debian.org).  Idempotent: silent if absent.
+rm -f vyos-build/data/live-build-config/archives/01-bookworm-fallback.list.chroot \
+      vyos-build/data/live-build-config/archives/01-bookworm-fallback.pref.chroot
 
 ### Minisign public key + DTB for ISO
 cp data/vyos-ls1046a.minisign.pub vyos-build/data/live-build-config/includes.chroot/usr/share/vyos/keys/
