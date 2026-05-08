@@ -236,6 +236,25 @@ jobs:
             sed -i 's/,linux-kbuild-6\.[0-9]\+//g' "$REAL_BVI"
             echo "### Stripped linux-kbuild-6.x from $REAL_BVI:"
             grep -n 'debootstrap-options' "$REAL_BVI" || true
+            # vyos-build writes the VyOS apt source line to
+            # config/archives/vyos.list.{chroot,binary} as a plain
+            #   deb <vyos_mirror> <vyos_branch> main
+            # without [trusted=yes].  The shipped vyos-dev archive key
+            # carries a SHA1 PositiveCertification self-signature that
+            # Debian trixie's sqv (sequoia) rejects since 2026-02-01,
+            # so apt-get update inside the live-build chroot fails with:
+            #   E: The repository 'https://packages.vyos.net/repositories/current
+            #      current InRelease' is not signed.
+            # We trust the repo (the host-side apt source is also marked
+            # trusted=yes in the earlier "Install vyos-1x build deps"
+            # step).  Inject `[trusted=yes]` into both the deb and deb-src
+            # lines that build-vyos-image emits.
+            sed -i \
+              -e 's|"deb {vyos_mirror}|"deb [trusted=yes] {vyos_mirror}|' \
+              -e 's|"deb-src {vyos_mirror}|"deb-src [trusted=yes] {vyos_mirror}|' \
+              "$REAL_BVI"
+            echo "### Injected [trusted=yes] into vyos repo entries:"
+            grep -n 'vyos_repo_entry' "$REAL_BVI" || true
           fi
           # Sanity: confirm the root symlink still resolves.
           ls -la vyos-build/build-vyos-image
