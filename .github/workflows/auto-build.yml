@@ -109,6 +109,28 @@ jobs:
           echo "NVMe scratch ready at /mnt/build-workspace"
           df -h /mnt
 
+      - name: Reset workspace ownership (self-hosted)
+        if: ${{ inputs.runs_on != '' && inputs.runs_on != 'ubuntu-24.04-arm' }}
+        run: |
+          # The build steps run via `sudo -E bash` and create root-owned
+          # files in $GITHUB_WORKSPACE (live-build chroots, vyos-build/,
+          # work/, packages/, etc.). On the NEXT run, actions/checkout@v6
+          # runs as the unprivileged runner user (`vyos`) and tries to
+          # `unlink` those root-owned files, which fails with EACCES and
+          # aborts the job before the "Initialization: set env variables"
+          # step ever gets to run.  Reset ownership unconditionally so
+          # checkout can repopulate the workspace cleanly.
+          set -e
+          if [ -d "$GITHUB_WORKSPACE" ]; then
+            chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" 2>/dev/null || \
+              chown -R vyos:vyos "$GITHUB_WORKSPACE" 2>/dev/null || true
+          fi
+          # Also drop any prior root-owned content under the runner work root
+          # in case the workspace dir itself has the wrong owner.
+          if [ -d "/mnt/nvme/_work" ]; then
+            chown -R vyos:vyos /mnt/nvme/_work 2>/dev/null || true
+          fi
+
       - name: Install Dependencies
         run: |
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
