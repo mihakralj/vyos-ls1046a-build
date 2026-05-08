@@ -36,9 +36,14 @@
 
 echo "vyos" > /etc/hostname
 
-# Must match data/config.boot.default `system login user vyos
-# authentication encrypted-password`. Keep in sync.
-VYOS_HASH='$y$j9T$Rq06TVkTBOm.Xw0dNcvvd0$U73QHmRbKcnEQbQU90YTj9TZDDuIvCyakm25928fqn9'
+# Generate a unique random rescue password at build time instead of using a
+# fixed well-known hash (e.g. vyos/vyos). A publicly-known default credential
+# would allow any attacker to access every device built from this image.
+# The random password is unknown after build; vyos-router's first commit
+# overwrites this entry with the operator-configured hash from config.boot.
+VYOS_PASS=$(openssl rand -base64 16)
+VYOS_HASH=$(python3 -c "import crypt,sys; print(crypt.crypt(sys.argv[1],crypt.mksalt(crypt.METHOD_YESCRYPT)))" "${VYOS_PASS}")
+unset VYOS_PASS
 
 if getent passwd vyos >/dev/null 2>&1; then
   # User exists — rewrite shadow entry. Use chpasswd -e (encrypted input).
