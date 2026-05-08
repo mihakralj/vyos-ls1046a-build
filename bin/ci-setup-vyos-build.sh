@@ -29,8 +29,15 @@ cp data/config.boot.dhcp    "$CHROOT/opt/vyatta/etc/config.boot.default"
 cp data/config.boot.default "$CHROOT/opt/vyatta/etc/config.boot.minimal"
 cp data/config.boot.dhcp    "$CHROOT/opt/vyatta/etc/config.boot.dhcp"
 cp data/config.boot.full    "$CHROOT/opt/vyatta/etc/config.boot.full"
-patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-005-add_vim_link.patch
-patch --no-backup-if-mismatch -p1 -d vyos-build < data/vyos-build-007-no_sbsign.patch
+# Tolerate hunks already merged upstream (vim-link, no-sbsign): apply with -N
+# (skip already-applied) and treat exit 1 ("reversed/already applied") as success.
+for p in data/vyos-build-005-add_vim_link.patch data/vyos-build-007-no_sbsign.patch; do
+  if patch --no-backup-if-mismatch -N -p1 -d vyos-build --dry-run < "$p" >/dev/null 2>&1; then
+    patch --no-backup-if-mismatch -N -p1 -d vyos-build < "$p"
+  else
+    echo "### $p: skipped (already applied upstream or no longer applicable)"
+  fi
+done
 
 ### Remove --uefi-secure-boot from grub-install
 # U-Boot boots via booti (not bootefi) so no EFI runtime is present.

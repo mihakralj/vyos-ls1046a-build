@@ -34,10 +34,8 @@ gh workflow run "VyOS LS1046A build" --ref main
 
 | File | Description |
 |------|-------------|
-| `*-LS1046A-arm64-usb.img.zst` | **USB boot image** (FAT32, zstd-compressed): decompress, `dd` to USB, boot from U-Boot |
-| `*-LS1046A-arm64-usb.img.zst.minisig` | USB image signature ([verify key](data/vyos-ls1046a.minisign.pub)) |
-| `*-LS1046A-arm64.iso` | VyOS ISO for `add system image <url>` upgrades only. Not for USB boot. |
-| `*-LS1046A-arm64.iso.minisig` | ISO signature |
+| `*-LS1046A-arm64.iso` | **Hybrid ISO** — boot from USB (`dd if=...iso of=/dev/sdX bs=4M`) for live install, or `add system image <url>` to upgrade an installed system |
+| `*-LS1046A-arm64.iso.minisig` | ISO signature ([verify key](data/vyos-ls1046a.minisign.pub)) |
 | `vyos-packages.tar` | Built kernel + vyos-1x `.deb` packages |
 
 ## What This Build Actually Delivers
