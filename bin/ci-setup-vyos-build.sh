@@ -167,20 +167,24 @@ deb [trusted=yes] http://deb.debian.org/debian bookworm main
 deb [trusted=yes] http://security.debian.org/debian-security bookworm-security main
 LIST
 cat > vyos-build/data/live-build-config/archives/01-bookworm-fallback.pref.chroot <<'PREF'
+# Block bookworm globally — only the explicit allow-list below wins.
 Package: *
-Pin: release n=bookworm
-Pin-Priority: 100
+Pin: release o=Debian,n=bookworm
+Pin-Priority: -1
 
 Package: *
-Pin: release n=bookworm-security
-Pin-Priority: 100
+Pin: release o=Debian,n=bookworm-security
+Pin-Priority: -1
 
-Package: libsnmp40 libapt-pkg6.0 libapt-pkg5.0 libapt-pkg4.12 libboost-filesystem1.74.0 unionfs-fuse kmod bash-completion libvyatta-cfg1
-Pin: release n=bookworm
+# Allow-list: packages whose runtime ABI is gone from trixie and must
+# come from bookworm to satisfy VyOS @current's bookworm-built debs.
+# Priority 1001 forces downgrade-from-trixie if needed.
+Package: libsnmp40 libapt-pkg6.0 libapt-pkg5.0 libapt-pkg4.12 libboost-filesystem1.74.0 unionfs-fuse kmod libkmod2 bash-completion libvyatta-cfg1
+Pin: release o=Debian,n=bookworm
 Pin-Priority: 1001
 
-Package: libsnmp40 libapt-pkg6.0 libapt-pkg5.0 libapt-pkg4.12 libboost-filesystem1.74.0 unionfs-fuse kmod bash-completion libvyatta-cfg1
-Pin: release n=bookworm-security
+Package: libsnmp40 libapt-pkg6.0 libapt-pkg5.0 libapt-pkg4.12 libboost-filesystem1.74.0 unionfs-fuse kmod libkmod2 bash-completion libvyatta-cfg1
+Pin: release o=Debian,n=bookworm-security
 Pin-Priority: 1001
 PREF
 echo "### Bookworm fallback archive + pinning written:"
