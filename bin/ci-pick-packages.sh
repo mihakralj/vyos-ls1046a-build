@@ -31,6 +31,7 @@ ignore_packages=(
   rtr-tools
   sflowovsd.deb
   snmptrapd
+  sstp-client
   strongswan-nm
   strongswan-pki
   tkmib
