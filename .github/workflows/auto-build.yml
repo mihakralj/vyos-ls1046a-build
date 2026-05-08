@@ -66,7 +66,7 @@ jobs:
     permissions:
       contents: write
     # No `container:` — build runs natively on the self-hosted ARM64 runner.
-    # The runner host (Debian 13 trixie aarch64) provides all build deps
+    # The runner host (Debian 12 bookworm aarch64) provides all build deps
     # (installed in the "Install Dependencies" step below). Removing the
     # vyos-builder container removes the docker dependency on the runner
     # and gives the build direct access to /mnt NVMe and full host RAM.
@@ -147,7 +147,7 @@ jobs:
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
           # Clean up any VyOS apt source dropped by a prior failed run on
           # this self-hosted runner — the SHA1-signed VyOS InRelease is
-          # rejected by trixie's sqv, and one bad source aborts the whole
+          # rejected by bookworm's sqv, and one bad source aborts the whole
           # `apt-get update`.  The proper VyOS source (with trusted=yes)
           # gets installed later, after the vyos-build checkout.
           rm -f /etc/apt/sources.list.d/vyos-dev.list \
@@ -194,13 +194,13 @@ jobs:
       - name: Install vyos-1x build dependencies (VyOS apt repo)
         # mk-build-deps for vyos-1x needs VyOS-specific packages
         # (python3-vici >=5.7.2, python3-certbot-nginx, python3-hurry.filesize,
-        #  python3-nose2, ...) that don't exist in Debian trixie main.  The
+        #  python3-nose2, ...) that don't exist in Debian bookworm main.  The
         # vyos-build repo ships its own apt key + sources.list, so we install
         # them straight from the freshly-checked-out vyos-build/docker/.
         run: |
           set -e
           # The shipped vyos-dev.key is signed with a SHA1 self-signature
-          # which Debian trixie's sqv (sequoia) rejects since 2026-02-01:
+          # which Debian bookworm's sqv (sequoia) rejects since 2026-02-01:
           #   "Policy rejected non-revocation signature (PositiveCertification)
           #    requiring second pre-image resistance — SHA1 is not considered
           #    secure since 2026-02-01T00:00:00Z"
@@ -234,7 +234,7 @@ jobs:
         # if the binary isn't on PATH.  Inside the upstream vyos-builder
         # Docker image j2lint is preinstalled via that exact pip URL.
         # Replicate that on the bare runner (PEP 668 marks system Python
-        # externally-managed on trixie, so we use --break-system-packages
+        # externally-managed on bookworm, so we use --break-system-packages
         # since we're in a CI runner, not a user system).
         run: |
           set -e
