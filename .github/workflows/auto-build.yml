@@ -239,7 +239,7 @@ jobs:
             opam init --root=/opt/opam --comp=4.14.2 \
                       --disable-sandboxing --no-setup --yes
           fi
-          eval "\$(opam env --root=/opt/opam --set-root)"
+          eval "$(opam env --root=/opt/opam --set-root)"
           opam install -y \
             re pcre2 num ctypes ctypes-foreign ctypes-build containers \
             fileutils xml-light mustache yojson fmt logs
