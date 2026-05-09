@@ -137,6 +137,33 @@ else
     fail "patch-health.sh missing or not executable"
 fi
 
+# A.7b — sync-kernel-version.sh exists + tracks vyos-build/data/defaults.toml
+SYNC="$REPO_ROOT/kernel/common/scripts/sync-kernel-version.sh"
+if [[ -x "$SYNC" ]]; then
+    pass "sync-kernel-version.sh exists + executable"
+    UPSTREAM_KVER=$(awk -F'"' '/^[[:space:]]*kernel_version[[:space:]]*=/ { print $2; exit }' \
+        "$REPO_ROOT/vyos-build/data/defaults.toml" 2>/dev/null || echo "")
+    LOCK_KVER=$(awk -F'[:=}]' '/KERNEL_VERSION:=/ { gsub(/"/, "", $4); print $4; exit }' \
+        "$REPO_ROOT/versions.lock" 2>/dev/null || echo "")
+    if [[ -n "$UPSTREAM_KVER" ]]; then
+        SYNC_OUT=$(bash "$SYNC" 2>/dev/null | grep '^KERNEL_VERSION=' | cut -d= -f2)
+        if [[ "$SYNC_OUT" == "$UPSTREAM_KVER" ]]; then
+            pass "sync-kernel-version → KERNEL_VERSION=$SYNC_OUT (matches vyos-build/data/defaults.toml)"
+        else
+            fail "sync-kernel-version → $SYNC_OUT (expected $UPSTREAM_KVER from vyos-build)"
+        fi
+        if [[ "$LOCK_KVER" == "$UPSTREAM_KVER" ]]; then
+            pass "versions.lock pin ($LOCK_KVER) matches vyos-build upstream ($UPSTREAM_KVER)"
+        else
+            fail "versions.lock=$LOCK_KVER drifts from vyos-build upstream=$UPSTREAM_KVER (run sync-kernel-version.sh --update)"
+        fi
+    else
+        note "vyos-build/data/defaults.toml not present — skipping upstream-pin assertions"
+    fi
+else
+    fail "sync-kernel-version.sh missing or not executable"
+fi
+
 # A.8 — producer parity (if producer repo accessible, cross-check counts)
 # After PR 3 the consumer adds 1 board patch on top of the 16 producer patches.
 if [[ -n "$PRODUCER_REPO" && -d "$PRODUCER_REPO/release/patches" ]]; then

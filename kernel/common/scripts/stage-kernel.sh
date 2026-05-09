@@ -52,6 +52,16 @@ source "$SCRIPT_DIR/common.sh"
 export SCRIPTS_DIR="$SCRIPT_DIR"
 export WORK_DIR="$REPO_ROOT/work"
 
+# ── Pin resolution ────────────────────────────────────────────────────
+# 1. Load fallback defaults from versions.lock
+[[ -f "$REPO_ROOT/versions.lock" ]] && . "$REPO_ROOT/versions.lock"
+# 2. Auto-track upstream vyos-1x: read kernel_version from
+#    vyos-build/data/defaults.toml when that checkout is present.
+#    sync-kernel-version.sh respects an existing KERNEL_VERSION env var.
+# shellcheck source=sync-kernel-version.sh
+. "$SCRIPT_DIR/sync-kernel-version.sh"
+echo "  kernel pin: $KERNEL_VERSION (series $KERNEL_SERIES, source: $_SOURCE)"
+
 need git find python3 make
 
 # ── Argument parsing ──────────────────────────────────────────────────

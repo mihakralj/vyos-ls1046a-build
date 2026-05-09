@@ -3,11 +3,20 @@
 # Sourced by kernel/common/scripts/*. Each variable uses `: "${VAR:=...}"` so
 # an env-var override (e.g. `KERNEL_VERSION=6.18.30 bash …`) wins over the
 # default. Edit + commit to change the persistent pin.
+#
+# Override hierarchy (highest precedence first):
+#   1. KERNEL_VERSION env var
+#   2. vyos-build/data/defaults.toml `kernel_version`  ← AUTO-TRACKED
+#      (resolved by kernel/common/scripts/sync-kernel-version.sh)
+#   3. The pin below
+#
+# To re-sync this file with the upstream vyos-1x pin, run:
+#     bash kernel/common/scripts/sync-kernel-version.sh --update
 
 # ── Kernel ─────────────────────────────────────────────────────────────
-# Pinned to track the producer (kernel-ls1046a-build).
-# As of 2026-05-09 the producer migrated from 6.6.137 LTS to 6.18.x mainline.
-# Bump in a dedicated commit when you want to track a newer point release.
+# Persistent fallback pin. The actual build version is auto-discovered from
+# vyos-build/data/defaults.toml at build start when that checkout is present.
+# As of 2026-05-09 vyos-build pins 6.18.28 (was 6.6.137 LTS pre-mainline-migration).
 : "${KERNEL_VERSION:=6.18.28}"
 : "${KERNEL_SERIES:=6.18}"
 export KERNEL_VERSION KERNEL_SERIES
