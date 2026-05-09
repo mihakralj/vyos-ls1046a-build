@@ -50,6 +50,14 @@ export SCRIPTS_DIR="$SCRIPT_DIR"
 export WORK_DIR="$REPO_ROOT/work"
 mkdir -p "$WORK_DIR"
 
+# ── Pin resolution (auto-track upstream vyos-1x) ─────────────────────
+# 1. versions.lock provides fallback defaults.
+# 2. sync-kernel-version.sh overrides from vyos-build/data/defaults.toml when
+#    that checkout is present (env KERNEL_VERSION still wins).
+[[ -f "$REPO_ROOT/versions.lock" ]] && . "$REPO_ROOT/versions.lock"
+# shellcheck source=sync-kernel-version.sh
+. "$SCRIPT_DIR/sync-kernel-version.sh"
+
 need git find jq
 
 # ── Argument parsing ──────────────────────────────────────────────────
