@@ -313,6 +313,99 @@ if [[ "${SKIP_PATCH_HEALTH:-0}" != "1" && "${SKIP_BUILD:-0}" != "1" ]]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────
+# Checkpoint F — FLAVOR switch wiring (PR 4)
+hdr "Checkpoint F — FLAVOR switch wiring (bin/common.sh + bin/ci-stage-kernel.sh)"
+
+if [[ -f "$REPO_ROOT/bin/common.sh" ]]; then
+    pass "bin/common.sh exists"
+else
+    fail "bin/common.sh missing"
+fi
+
+if [[ -x "$REPO_ROOT/bin/ci-stage-kernel.sh" ]]; then
+    pass "bin/ci-stage-kernel.sh exists + executable"
+else
+    fail "bin/ci-stage-kernel.sh missing or not executable"
+fi
+
+# F.1 — default resolution (no FLAVOR env, no flavor.pin)
+F_OUT=$(env -u FLAVOR BC_QUIET=1 bash -c \
+    'cd "'"$REPO_ROOT"'" && . bin/common.sh && echo "FLAVOR=$FLAVOR KVER=$KERNEL_VERSION"' 2>/dev/null || true)
+if [[ "$F_OUT" == "FLAVOR=default KVER="* ]]; then
+    pass "common.sh default resolution: $F_OUT"
+else
+    fail "common.sh default resolution unexpected: '$F_OUT'"
+fi
+
+# F.2 — env override honored (FLAVOR=ask)
+F_OUT=$(env -u FLAVOR FLAVOR=ask BC_QUIET=1 bash -c \
+    'cd "'"$REPO_ROOT"'" && . bin/common.sh && echo "FLAVOR=$FLAVOR"' 2>/dev/null || true)
+if [[ "$F_OUT" == "FLAVOR=ask" ]]; then
+    pass "common.sh honors FLAVOR=ask env override"
+else
+    fail "common.sh ignored FLAVOR=ask env override (got '$F_OUT')"
+fi
+
+# F.3 — env override honored (FLAVOR=vpp)
+F_OUT=$(env -u FLAVOR FLAVOR=vpp BC_QUIET=1 bash -c \
+    'cd "'"$REPO_ROOT"'" && . bin/common.sh && echo "FLAVOR=$FLAVOR"' 2>/dev/null || true)
+if [[ "$F_OUT" == "FLAVOR=vpp" ]]; then
+    pass "common.sh honors FLAVOR=vpp env override"
+else
+    fail "common.sh ignored FLAVOR=vpp env override (got '$F_OUT')"
+fi
+
+# F.4 — invalid FLAVOR rejected (direct exec, exit nonzero)
+if FLAVOR=bogus bash "$REPO_ROOT/bin/common.sh" >/dev/null 2>&1; then
+    fail "common.sh accepted invalid FLAVOR=bogus (should reject)"
+else
+    pass "common.sh rejects invalid FLAVOR=bogus (exit nonzero)"
+fi
+
+# F.5 — KERNEL_VERSION resolution matches versions.lock or vyos-build/data/defaults.toml
+EXPECTED_KVER=$(awk -F'"' '/^[[:space:]]*kernel_version[[:space:]]*=/ { print $2; exit }' \
+    "$REPO_ROOT/vyos-build/data/defaults.toml" 2>/dev/null || \
+    awk -F'[:=}]' '/KERNEL_VERSION:=/ { gsub(/"/, "", $4); print $4; exit }' \
+    "$REPO_ROOT/versions.lock" 2>/dev/null || echo "")
+ACTUAL_KVER=$(env -u FLAVOR -u KERNEL_VERSION BC_QUIET=1 bash -c \
+    'cd "'"$REPO_ROOT"'" && . bin/common.sh && echo "$KERNEL_VERSION"' 2>/dev/null || true)
+if [[ -n "$EXPECTED_KVER" && "$ACTUAL_KVER" == "$EXPECTED_KVER" ]]; then
+    pass "common.sh resolves KERNEL_VERSION=$ACTUAL_KVER (matches upstream pin)"
+else
+    fail "common.sh KERNEL_VERSION='$ACTUAL_KVER' does not match expected '$EXPECTED_KVER'"
+fi
+
+# F.6 — ci-stage-kernel.sh dispatch wiring present (grep — no execution to avoid heavy stage)
+if grep -qE '^\s*ask\)\s*$' "$REPO_ROOT/bin/ci-stage-kernel.sh" \
+   && grep -q 'exec bin/ci-consume-ask-kernel.sh' "$REPO_ROOT/bin/ci-stage-kernel.sh"; then
+    pass "ci-stage-kernel.sh: ask branch delegates to ci-consume-ask-kernel.sh"
+else
+    fail "ci-stage-kernel.sh: ask delegation branch missing"
+fi
+if grep -qE 'default\|vpp\)' "$REPO_ROOT/bin/ci-stage-kernel.sh" \
+   && grep -q 'exec bash kernel/common/scripts/stage-kernel.sh' "$REPO_ROOT/bin/ci-stage-kernel.sh"; then
+    pass "ci-stage-kernel.sh: default|vpp branch invokes kernel/common/scripts/stage-kernel.sh"
+else
+    fail "ci-stage-kernel.sh: default|vpp branch missing"
+fi
+
+# F.7 — workflow inputs wired
+for wf in self-hosted-build.yml auto-build.yml; do
+    if grep -qE '^\s*flavor:' "$REPO_ROOT/.github/workflows/$wf"; then
+        pass ".github/workflows/$wf has 'flavor' input"
+    else
+        fail ".github/workflows/$wf missing 'flavor' input"
+    fi
+done
+
+# F.8 — auto-build.yml has FLAVOR env at job level
+if grep -qE '^\s*FLAVOR:\s*\$\{\{\s*inputs\.flavor' "$REPO_ROOT/.github/workflows/auto-build.yml"; then
+    pass "auto-build.yml exports FLAVOR env from inputs.flavor"
+else
+    fail "auto-build.yml missing FLAVOR env export"
+fi
+
+# ─────────────────────────────────────────────────────────────────────
 hdr "Verdict"
 printf 'Pass: %d   Fail: %d\n' "$PASSED" "$FAILED"
 

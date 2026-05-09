@@ -18,6 +18,14 @@ on:
       ASK_KERNEL_TAG:
         description: 'ASK kernel release tag to consume (default: read data/ask-kernel.pin). Set empty string to disable and build kernel locally.'
         default: ''
+      flavor:
+        description: 'Build flavor: default (mainline DPAA), ask (NXP SDK + ASK fast-path), or vpp (AF_XDP/VPP — placeholder).'
+        type: choice
+        default: 'ask'
+        options:
+          - ask
+          - default
+          - vpp
 
 jobs:
   # ── Step 1: Power on the Azure ARM64 VM ──────────────────────────
@@ -106,6 +114,7 @@ jobs:
       BUILD_BY: ${{ github.event.inputs.BUILD_BY }}
       build_version: ${{ github.event.inputs.build_version }}
       ASK_KERNEL_TAG: ${{ github.event.inputs.ASK_KERNEL_TAG }}
+      flavor: ${{ github.event.inputs.flavor }}
     secrets:
       MOK_KEY: ${{ secrets.MOK_KEY }}
       MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
