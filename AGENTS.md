@@ -16,6 +16,21 @@ The **qdrant** MCP server is the authoritative persistent memory for this projec
 
 - **Use Mermaid diagrams, not ASCII art**, to visualize concepts in `.md` documents. All architecture diagrams, flowcharts, sequence diagrams, and component relationship visualizations must use ` ```mermaid ` fenced code blocks — never ASCII box-drawing characters.
 
+## Producer absorption (PR 7, 2026-05-09) — single-repo + FLAVOR switch
+
+The former producer repo `mihakralj/kernel-ls1046a-build` is **deprecated and frozen**. Its content (release/patches, SDK source drops with `/* ASK-edit (askN) */` markers, OOT modules, userspace patches, scripts, CI) lives in this repo under `kernel/common/` (flavor-agnostic) and `kernel/flavors/{default,ask,vpp}/` (per-flavor). The single-repo build selects the kernel + userspace stack via the `flavor` workflow input on `self-hosted-build.yml` (default: `default`; choices: `default | ask | vpp`).
+
+Hard rules carried over from the producer to **this repo's** ASK flavor:
+
+- ASK-edit marker discipline: every direct edit to a vendored NXP SDK source under `kernel/flavors/ask/sdk-sources/` must carry an `/* ASK-edit (askN, …): rationale */` marker. Audit surface: `grep -rn 'ASK-edit' kernel/flavors/ask/sdk-sources/`. Producer baseline at freeze: 35 marked files.
+- Patch-health invariants for FLAVOR=ask: `kernel/common/scripts/patch-health.sh --flavor ask` must report `Pass: 17 Fail: 0  0 SDK conflicts (266 files to install)` (16 producer-absorbed patches + 1 consumer-board patch).
+- Kernel version is auto-tracked from `vyos-build/data/defaults.toml` via `kernel/common/scripts/sync-kernel-version.sh`. Currently `linux-6.18.28`. The legacy `data/ask-kernel.pin` mechanism (which used to pin against a producer GitHub Release tag) is **retired**.
+- Default reference defconfig invariants for ASK still hold: `CONFIG_NET_KEY=y` (load-bearing for `obj-y` items in `net/key/Makefile` per patch 097), `CONFIG_INET_IPSEC_OFFLOAD=n` on 6.6 (incompatible with 6.6 `xfrm_state` layout — and a fortiori on 6.18, the field still differs), `CONFIG_CPE_FAST_PATH=y` for the ASK fast-path master gate, `CONFIG_ASK_FCI_NLKEY=y` for the 6.6/6.18 narrow proto-32 gate.
+
+The two-chain failure model is also preserved: Chain 1 (kernel-side, e.g. `cmm.service` failures from `EPROTONOSUPPORT` on `NETLINK_KEY=32`) lives in `kernel/`; Chain 2 (userspace-side, e.g. `dpa_app rc=65280` from MURAM exhaustion) lives in `data/ask-userspace/` + `bin/ci-build-fmc.sh` / `bin/ci-build-fmlib.sh`. See producer `AGENTS.md` (frozen reference) for the full chain documentation.
+
+For historical context (per-askN iteration trail back to ask6 SDK refresh and the 35 ASK-edit markers added through ask41) consult the frozen producer repo's `AGENTS.md`. New ASK fixes happen here; the producer no longer accepts patches.
+
 ## Project
 
 VyOS ARM64 build scripts for NXP LS1046A (Mono Gateway Development Kit). Two build paths:
@@ -170,7 +185,7 @@ The DPDK DPAA1 PMD path was abandoned on 2026-04-03 (RC#31: `dpaa_bus` probe kil
 - **`binfmt_misc.mount` FAILED** — Expected on ARM64 target hardware. No binfmt emulation needed.
 - **`mount: /live/persistence/ failed: No such device`** — On the eMMC install path (post c689b96e) this is no longer suppressed; `find_persistence_media()` runs as upstream intends and discovers `mmcblk0p3` for the `vyos-union=` overlay. The per-candidate `mount: ... failed` lines for the OTHER candidate block devices (`mmcblk0boot0`, `mmcblk0boot1`, `mmcblk0p1`, etc.) are normal probe output — only `mmcblk0p3` is expected to succeed. On TFTP / USB live-boot paths `nopersistence` short-circuits the prober entirely so this message does not appear there.
 - **`/init: line 1365: can't open /tmp/custom_mounts.list: no such file`** — On the eMMC install path this is no longer expected: `get_custom_mounts()` populates the list normally now that `find_persistence_media()` runs. On TFTP / USB live-boot paths (`nopersistence` set), `data/hooks/92-livescripts-defensive-mount-list.chroot` patches `activate_custom_mounts()` to pre-create an empty list file on entry, so the `done < $custom_mounts` redirection becomes a no-op instead of an init-time error. If you see this message on a current eMMC build, either the U-Boot env still carries `nopersistence` (re-run `vyos-postinstall`), or the live-boot/initrd was built without the 92 hook (`gh run view <id> --log | grep 92-livescripts-defensive-mount-list` should show the patched-marker echo).
-- **`Error -ENOENT writing to proc file to set sysctl parameter 'net.core.default_qdisc=fq'`** — Suppressed since producer kernel-6.6.137-ask2 (`CONFIG_NET_SCH_FQ=y` in `release/vyos-base/10-networking.config`). If seen on a current build, your `data/ask-kernel.pin` is older than ask2.
+- **`Error -ENOENT writing to proc file to set sysctl parameter 'net.core.default_qdisc=fq'`** — Suppressed by `CONFIG_NET_SCH_FQ=y` in `kernel/common/vyos-base/10-networking.config` (originally introduced as producer ask2). If seen on a current build, verify the symbol is present in the staged `.config` after `kernel/common/scripts/stage-kernel.sh --flavor ask`.
 - **`sfp-xfi0: deferred probe pending`** — SFP cages wait for PHY driver. Resolves after full boot.
 - **`can't get pinctrl, bus recovery not supported`** — I2C pinctrl not in DTB. Harmless.
 
