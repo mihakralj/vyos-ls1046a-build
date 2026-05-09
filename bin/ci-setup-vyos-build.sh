@@ -255,10 +255,16 @@ cp data/systemd/fman-fq-qdisc.service "$CHROOT/etc/systemd/system/fman-fq-qdisc.
 cp data/systemd/fman-fq-qdisc.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fman-fq-qdisc.conf"
 
 ### SFP TX_DISABLE deassert for SDK kernel (no phylink SFP state machine)
-cp data/scripts/sfp-tx-enable-sdk.sh "$CHROOT/usr/local/bin/sfp-tx-enable-sdk.sh"
-chmod +x "$CHROOT/usr/local/bin/sfp-tx-enable-sdk.sh"
-cp data/systemd/sfp-tx-enable-sdk.service "$CHROOT/etc/systemd/system/sfp-tx-enable-sdk.service"
-cp data/systemd/sfp-tx-enable-sdk.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/sfp-tx-enable-sdk.conf"
+# ASK-only: required because the NXP SDK MAC driver lacks the phylink SFP
+# state machine that mainline DPAA + phylink uses to drive TX_DISABLE.
+# For FLAVOR=default|vpp the mainline phylink path handles SFP TX enable
+# via standard sfp_state_machine() — no helper service needed.
+if [[ "${FLAVOR:-ask}" == "ask" ]]; then
+    cp data/scripts/sfp-tx-enable-sdk.sh "$CHROOT/usr/local/bin/sfp-tx-enable-sdk.sh"
+    chmod +x "$CHROOT/usr/local/bin/sfp-tx-enable-sdk.sh"
+    cp data/systemd/sfp-tx-enable-sdk.service "$CHROOT/etc/systemd/system/sfp-tx-enable-sdk.service"
+    cp data/systemd/sfp-tx-enable-sdk.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/sfp-tx-enable-sdk.conf"
+fi
 
 ### Bind-mount /usr/lib/live/mount/medium → /usr/lib/live/mount/persistence (rw)
 ### Restores upstream find_persistence() semantics for LS1046A live-boot.
@@ -271,6 +277,18 @@ cp data/systemd/persistence-bindmount.service "$CHROOT/etc/systemd/system/persis
 ### ====================================================================
 ### ASK (Application Solutions Kit) fast-path userspace components
 ### ====================================================================
+# FLAVOR gate (PR 5): the entire ASK userspace stack — dpa_app, cmm, fmc,
+# libcli/libcmm/libfci, CDX/FMC config XMLs, ASK module loader/health
+# scripts, ASK chroot hooks — is meaningful only for FLAVOR=ask. For
+# FLAVOR=default|vpp the ISO ships stock VyOS userspace with mainline
+# DPAA (or AF_XDP/VPP) and none of these files belong in the chroot.
+# Backward-compat: an UNSET FLAVOR is treated as "ask" so existing CI
+# dispatches keep working unchanged.
+if [[ "${FLAVOR:-ask}" != "ask" ]]; then
+    echo "### FLAVOR=${FLAVOR:-} — skipping ASK userspace + module + service installation"
+    echo "### vyos-build setup complete (FLAVOR=${FLAVOR:-}, ASK userspace omitted)"
+    exit 0
+fi
 # ASK provides hardware flow offloading via FMan Coarse Classifier on LS1046A.
 # Components: cdx.ko (control plane), fci.ko (conntrack interface),
 # auto_bridge.ko (bridge offload), dpa_app (FMan programmer),
