@@ -21,10 +21,10 @@ on:
       flavor:
         description: 'Build flavor: default (mainline DPAA), ask (NXP SDK + ASK fast-path), or vpp (AF_XDP/VPP — placeholder).'
         type: choice
-        default: 'ask'
+        default: 'default'
         options:
-          - ask
           - default
+          - ask
           - vpp
 
 jobs:
