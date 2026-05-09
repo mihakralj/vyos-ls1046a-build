@@ -24,6 +24,20 @@
 set -ex
 cd "${GITHUB_WORKSPACE:-.}"
 
+# ── FLAVOR gate (PR 5) ────────────────────────────────────────────────
+# This script layers the NXP SDK DPAA + ASK fast-path on top of the base
+# LS1046A kernel. It is meaningful only for FLAVOR=ask. For FLAVOR=default
+# we want the mainline DPAA path (FSL_DPAA_ETH=y, no SDK), and for
+# FLAVOR=vpp we want mainline DPAA + AF_XDP. Backward-compat: an UNSET
+# FLAVOR is treated as "ask" so existing CI dispatches keep working.
+case "${FLAVOR:-ask}" in
+    ask) : ;;
+    *)
+        echo "### FLAVOR=${FLAVOR:-} — skipping ASK fast-path kernel injection (mainline path retained)"
+        exit 0
+        ;;
+esac
+
 ASK_REPO="${ASK_REPO:-ASK}"
 
 # Verify in-tree ASK userspace tree is present (folded in May 2026 from

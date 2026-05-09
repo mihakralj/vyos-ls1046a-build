@@ -14,6 +14,20 @@
 set -euo pipefail
 cd "${GITHUB_WORKSPACE:-.}"
 
+# ── FLAVOR gate (PR 5) ────────────────────────────────────────────────
+# This script downloads the prebuilt ASK kernel (kernel-6.6.137-askN). It
+# is only meaningful for FLAVOR=ask. For FLAVOR=default|vpp we build the
+# upstream-tracked kernel from source and have no askN tag to consume.
+# Backward-compat: an UNSET FLAVOR is treated as "ask" so existing CI
+# dispatches (and any direct shell invocations) keep working.
+case "${FLAVOR:-ask}" in
+    ask) : ;;
+    *)
+        echo "### FLAVOR=${FLAVOR:-} — skipping ASK prebuilt-kernel consume (not applicable)"
+        exit 0
+        ;;
+esac
+
 PIN_FILE=data/ask-kernel.pin
 TAG="${ASK_KERNEL_TAG:-}"
 if [ -z "$TAG" ] && [ -f "$PIN_FILE" ]; then

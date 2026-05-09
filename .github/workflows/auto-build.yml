@@ -312,6 +312,12 @@ jobs:
         run: bin/ci-setup-vyos1x.sh
 
       - name: Consume prebuilt ASK kernel
+        # FLAVOR gate (PR 5): only consume the prebuilt ASK kernel when this
+        # is an ASK build. For FLAVOR=default|vpp we build the upstream-tracked
+        # kernel from source via ci-setup-kernel.sh + ci-build-packages.sh.
+        # An empty FLAVOR means "use whatever data/flavor.pin / data/ask-kernel.pin
+        # say" — preserved for backward compat with existing dispatches.
+        if: env.FLAVOR == 'ask' || env.FLAVOR == ''
         env:
           # Manual override wins; otherwise script reads data/ask-kernel.pin.
           # Setting to empty explicitly disables ASK consume (falls through to local build).
@@ -340,6 +346,12 @@ jobs:
       # prebuilt in the kernel-6.6.137-askN release tarball.
 
       - name: Setup ASK fast-path kernel (SDK DPAA + hooks)
+        # FLAVOR gate (PR 5): the ASK fast-path layer (SDK DPAA replacement,
+        # hooks patches, EHASH wiring, post-defconfig overrides) is meaningful
+        # only for FLAVOR=ask. For default/vpp the script's internal FLAVOR
+        # gate also early-exits, so this `if:` is belt-and-braces — it skips
+        # the step entirely so the build log is cleaner.
+        if: env.FLAVOR == 'ask' || env.FLAVOR == ''
         run: bin/ci-setup-kernel-ask.sh
 
       - name: Compile Mono DTB from DTS (always rebuild from source)

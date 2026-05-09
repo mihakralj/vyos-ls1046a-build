@@ -406,6 +406,65 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────
+# Checkpoint G — ASK-script FLAVOR gates (PR 5)
+hdr "Checkpoint G — ASK-only scripts gate on FLAVOR=ask (PR 5)"
+
+# G.1 — ci-consume-ask-kernel.sh skips for FLAVOR=default (exit 0, "skipping" message)
+G_OUT=$(env -u FLAVOR FLAVOR=default GITHUB_WORKSPACE="$REPO_ROOT" \
+    bash "$REPO_ROOT/bin/ci-consume-ask-kernel.sh" 2>&1 || true)
+if echo "$G_OUT" | grep -q 'skipping ASK prebuilt-kernel consume'; then
+    pass "ci-consume-ask-kernel.sh skips for FLAVOR=default"
+else
+    fail "ci-consume-ask-kernel.sh did not skip for FLAVOR=default (got: $(echo "$G_OUT" | head -1))"
+fi
+
+# G.2 — ci-setup-kernel-ask.sh skips for FLAVOR=default (exit 0, "skipping" message)
+G_OUT=$(env -u FLAVOR FLAVOR=default GITHUB_WORKSPACE="$REPO_ROOT" \
+    bash "$REPO_ROOT/bin/ci-setup-kernel-ask.sh" 2>&1 || true)
+if echo "$G_OUT" | grep -q 'skipping ASK fast-path kernel injection'; then
+    pass "ci-setup-kernel-ask.sh skips for FLAVOR=default"
+else
+    fail "ci-setup-kernel-ask.sh did not skip for FLAVOR=default (got: $(echo "$G_OUT" | head -3))"
+fi
+
+# G.3 — ci-setup-kernel-ask.sh also skips for FLAVOR=vpp
+G_OUT=$(env -u FLAVOR FLAVOR=vpp GITHUB_WORKSPACE="$REPO_ROOT" \
+    bash "$REPO_ROOT/bin/ci-setup-kernel-ask.sh" 2>&1 || true)
+if echo "$G_OUT" | grep -q 'skipping ASK fast-path kernel injection'; then
+    pass "ci-setup-kernel-ask.sh skips for FLAVOR=vpp"
+else
+    fail "ci-setup-kernel-ask.sh did not skip for FLAVOR=vpp"
+fi
+
+# G.4 — ci-consume-ask-kernel.sh does NOT skip for unset FLAVOR (backward compat)
+#       (it will try to fetch and probably fail without network/token, but the
+#        important thing is it must NOT print the skip message)
+G_OUT=$(env -u FLAVOR GITHUB_WORKSPACE="$REPO_ROOT" \
+    bash "$REPO_ROOT/bin/ci-consume-ask-kernel.sh" 2>&1 || true)
+if echo "$G_OUT" | grep -q 'skipping ASK prebuilt-kernel consume'; then
+    fail "ci-consume-ask-kernel.sh skipped for unset FLAVOR (backward-compat broken — should treat as 'ask')"
+else
+    pass "ci-consume-ask-kernel.sh proceeds past gate for unset FLAVOR (backward-compat preserved)"
+fi
+
+# G.5 — ci-setup-vyos-build.sh has both ASK gates wired (SFP-SDK + ASK userspace)
+if grep -qE '^if \[\[ "\$\{FLAVOR:-ask\}" == "ask" \]\]; then$' "$REPO_ROOT/bin/ci-setup-vyos-build.sh" \
+   && grep -qE '^if \[\[ "\$\{FLAVOR:-ask\}" != "ask" \]\]; then$' "$REPO_ROOT/bin/ci-setup-vyos-build.sh"; then
+    pass "ci-setup-vyos-build.sh has both ASK gates (SFP-SDK include + ASK userspace early-exit)"
+else
+    fail "ci-setup-vyos-build.sh missing one or both FLAVOR gates"
+fi
+
+# G.6 — auto-build.yml gates "Consume prebuilt ASK kernel" + "Setup ASK fast-path kernel"
+ASK_IF_COUNT=$(grep -cE "if: env\.FLAVOR == 'ask' \|\| env\.FLAVOR == ''" \
+    "$REPO_ROOT/.github/workflows/auto-build.yml" || true)
+if [[ "$ASK_IF_COUNT" -ge 2 ]]; then
+    pass "auto-build.yml has $ASK_IF_COUNT FLAVOR-gated ASK steps (≥2 expected)"
+else
+    fail "auto-build.yml has $ASK_IF_COUNT FLAVOR-gated ASK steps (expected ≥2)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────
 hdr "Verdict"
 printf 'Pass: %d   Fail: %d\n' "$PASSED" "$FAILED"
 
