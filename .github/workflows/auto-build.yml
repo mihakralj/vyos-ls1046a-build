@@ -97,6 +97,7 @@ jobs:
       PREVIOUS_SUCCESS_BUILD_TIMESTAMP: ${{ steps.set_env_variables.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}
       image_iso: ${{ steps.build_iso.outputs.image_iso }}
       image_name: ${{ steps.build_iso.outputs.image_name }}
+      flavor: ${{ steps.build_iso.outputs.flavor }}
 
     steps:
       - name: Verify Hardware (self-hosted)
@@ -168,6 +169,7 @@ jobs:
             dosfstools mtools zstd u-boot-tools \
             libpcre2-dev xorriso \
             libxml2-dev libtclap-dev \
+            live-build \
             python3-tomli python3-jinja2 python3-yaml python3-toml python3-git \
             python3-pystache pbuilder \
             python3-setuptools python3-pip python3-build python3-wheel \
@@ -493,27 +495,73 @@ jobs:
           EOF
           cat /tmp/release_notes.md
 
-      - name: "Release publishing: create version.json"
-        uses: jsdaniell/create-json@v1.2.3
-        with:
-          name: "version.json"
-          json: |
-            [
-              {
-                "url": "https://github.com/${{ github.repository }}/releases/download/${{ needs.build_iso.outputs.build_version }}/${{ needs.build_iso.outputs.image_iso }}",
-                "version": "${{ needs.build_iso.outputs.build_version }}",
-                "timestamp": "${{ needs.build_iso.outputs.TIMESTAMP }}"
-              }
-            ]
+      # ─── Per-flavor update-check feed ─────────────────────────────────
+      # VyOS's `system update-check url ...` config takes one URL per system.
+      # Each flavor (default | ask | vpp) gets its own feed file so that
+      # installs of one flavor don't accidentally upgrade to a different one.
+      #
+      # Filename scheme:
+      #   version-default.json   ← consumed by flavor=default installs
+      #   version-ask.json       ← consumed by flavor=ask installs
+      #   version-vpp.json       ← consumed by flavor=vpp installs
+      #   version.json           ← legacy alias of version-default.json
+      #                            (kept so existing installs that still have
+      #                             the old `…/main/version.json` URL baked
+      #                             in keep working — they will receive the
+      #                             default-flavor stream)
+      #
+      # The autocommit step below picks up whichever files changed; the other
+      # flavors' feeds are left untouched until their own build runs.
+      - name: "Release publishing: write per-flavor version-${FLAVOR}.json"
+        env:
+          FLAVOR: ${{ needs.build_iso.outputs.flavor }}
+          BUILD_VERSION: ${{ needs.build_iso.outputs.build_version }}
+          IMAGE_ISO: ${{ needs.build_iso.outputs.image_iso }}
+          TIMESTAMP: ${{ needs.build_iso.outputs.TIMESTAMP }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          if [ -z "$FLAVOR" ]; then
+            echo "FATAL: build_iso did not export 'flavor' output"
+            exit 1
+          fi
+          URL="https://github.com/${REPO}/releases/download/${BUILD_VERSION}/${IMAGE_ISO}"
+          # Per-flavor feed — always written.
+          cat > "version-${FLAVOR}.json" <<EOF
+          [
+            {
+              "url": "${URL}",
+              "version": "${BUILD_VERSION}",
+              "timestamp": "${TIMESTAMP}"
+            }
+          ]
+          EOF
+          echo "### Wrote version-${FLAVOR}.json"
+          cat "version-${FLAVOR}.json"
+          # Legacy alias: version.json mirrors the default-flavor feed so
+          # pre-flavor-split installs (whose config.boot still references
+          # …/main/version.json) keep getting updates of the default stream.
+          if [ "$FLAVOR" = "default" ]; then
+            cp "version-${FLAVOR}.json" version.json
+            echo "### Mirrored to legacy version.json"
+          fi
 
       - name: "Release publishing: check if the repository was modified during runtime to prevent autocommit failure"
         id: check_if_the_repository_was_modified_during_runtime
+        env:
+          FLAVOR: ${{ needs.build_iso.outputs.flavor }}
         run: |
+          set -e
           sudo chown -R $(whoami):$(whoami) ./*
-          cp version.json /tmp/version.json.new
-          git checkout -- version.json 2>/dev/null || true
+          # Stash the freshly-generated feed file(s) before pulling.
+          cp "version-${FLAVOR}.json" "/tmp/version-${FLAVOR}.json.new"
+          [ "$FLAVOR" = "default" ] && cp version.json /tmp/version.json.new
+          # Reset to clean tree, pull, then restore.
+          git checkout -- "version-${FLAVOR}.json" 2>/dev/null || true
+          [ "$FLAVOR" = "default" ] && git checkout -- version.json 2>/dev/null || true
           git pull --rebase || true
-          cp /tmp/version.json.new version.json
+          cp "/tmp/version-${FLAVOR}.json.new" "version-${FLAVOR}.json"
+          [ "$FLAVOR" = "default" ] && cp /tmp/version.json.new version.json
 
       - name: "Release publishing: create autocommit and tag"
         uses: stefanzweifel/git-auto-commit-action@v7
