@@ -3,13 +3,13 @@ name: VyOS LS1046A build (reusable)
 # This workflow is INTENTIONALLY reusable-only — it has no `workflow_dispatch:`
 # trigger and therefore does NOT appear in the Actions "Run workflow" dropdown.
 #
-# Why: builds on GitHub-hosted `ubuntu-24.04-arm` runners consume our public
-# Actions minutes quota and lack the on-host caches / NAT routing the
-# self-hosted Azure ARM64 runner provides. We standardised on running every
-# ISO build through `self-hosted-build.yml`, which spins up the Azure VM,
-# delegates the heavy work here via `uses: ./.github/workflows/auto-build.yml`,
-# then deallocates the VM. Re-introducing `workflow_dispatch:` here would
-# silently re-enable hosted-runner builds — please don't.
+# It always runs on the self-hosted Azure ARM64 VM (label `ARM64`), which
+# is Debian 12 bookworm aarch64 — the same distribution the build expects
+# (matches the OCaml/opam pins, libc 2.36, and Python 3.11 of the
+# upstream vyos-builder Docker image). The build runs natively on the host;
+# there is NO `container:` block. Re-introducing `workflow_dispatch:` here
+# would re-enable GitHub-hosted-runner builds and burn our public Actions
+# minutes — please don't.
 #
 # To run a build manually, dispatch `self-hosted-build.yml` (named
 # "VyOS LS1046A build (self-hosted)" in the Actions UI).
@@ -21,7 +21,7 @@ on:
         description: 'Runner label to execute the build on'
         type: string
         required: false
-        default: 'ubuntu-24.04-arm'
+        default: 'ARM64'
       BUILD_BY:
         type: string
         required: false
@@ -30,10 +30,6 @@ on:
         type: string
         required: false
         default: ''
-      builder_image:
-        type: string
-        required: false
-        default: 'ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64'
       ASK_KERNEL_TAG:
         type: string
         required: false
@@ -62,11 +58,11 @@ env:
 
 jobs:
   build_iso:
-    runs-on: ${{ inputs.runs_on || 'ubuntu-24.04-arm' }}
+    runs-on: ${{ inputs.runs_on || 'ARM64' }}
     permissions:
       contents: write
     # No `container:` — build runs natively on the self-hosted ARM64 runner.
-    # The runner host (Debian 13 trixie aarch64) provides all build deps
+    # The runner host (Debian 12 bookworm aarch64) provides all build deps
     # (installed in the "Install Dependencies" step below). Removing the
     # vyos-builder container removes the docker dependency on the runner
     # and gives the build direct access to /mnt NVMe and full host RAM.
@@ -92,7 +88,6 @@ jobs:
 
     steps:
       - name: Verify Hardware (self-hosted)
-        if: ${{ inputs.runs_on != '' && inputs.runs_on != 'ubuntu-24.04-arm' }}
         run: |
           echo "=== Runner Hardware ==="
           echo "CPU Cores: $(nproc)"
@@ -109,10 +104,9 @@ jobs:
           free -h
 
       - name: Relocate workspace to NVMe (self-hosted)
-        if: ${{ inputs.runs_on != '' && inputs.runs_on != 'ubuntu-24.04-arm' }}
         run: |
           set -e
-          # The container has /mnt bind-mounted from the host (880 GiB NVMe).
+          # The host has /mnt mounted on the 880 GiB NVMe scratch disk.
           # Redirect the build scratch area to NVMe to avoid the slower OS disk.
           mkdir -p /mnt/build-workspace
           # Clean any stale content from a previous run of the same job
@@ -121,7 +115,6 @@ jobs:
           df -h /mnt
 
       - name: Reset workspace ownership (self-hosted)
-        if: ${{ inputs.runs_on != '' && inputs.runs_on != 'ubuntu-24.04-arm' }}
         run: |
           # The build steps run via `sudo -E bash` and create root-owned
           # files in $GITHUB_WORKSPACE (live-build chroots, vyos-build/,
@@ -146,9 +139,8 @@ jobs:
         run: |
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
           # Clean up any VyOS apt source dropped by a prior failed run on
-          # this self-hosted runner — the SHA1-signed VyOS InRelease is
-          # rejected by trixie's sqv, and one bad source aborts the whole
-          # `apt-get update`.  The proper VyOS source (with trusted=yes)
+          # this self-hosted runner — a stale or wrongly-signed source can
+          # break `apt-get update`.  The proper VyOS source (with trusted=yes)
           # gets installed later, after the vyos-build checkout.
           rm -f /etc/apt/sources.list.d/vyos-dev.list \
                 /etc/apt/sources.list.d/vyos.list \
@@ -194,21 +186,16 @@ jobs:
       - name: Install vyos-1x build dependencies (VyOS apt repo)
         # mk-build-deps for vyos-1x needs VyOS-specific packages
         # (python3-vici >=5.7.2, python3-certbot-nginx, python3-hurry.filesize,
-        #  python3-nose2, ...) that don't exist in Debian trixie main.  The
+        #  python3-nose2, ...) that don't exist in Debian bookworm main.  The
         # vyos-build repo ships its own apt key + sources.list, so we install
         # them straight from the freshly-checked-out vyos-build/docker/.
         run: |
           set -e
           # The shipped vyos-dev.key is signed with a SHA1 self-signature
-          # which Debian trixie's sqv (sequoia) rejects since 2026-02-01:
-          #   "Policy rejected non-revocation signature (PositiveCertification)
-          #    requiring second pre-image resistance — SHA1 is not considered
-          #    secure since 2026-02-01T00:00:00Z"
-          # The key is fine, the *signature* on it is just old.  We trust
-          # it (the vyos-build container in production trusts it too), so
-          # mark the apt source as `trusted=yes` to bypass the sqv check.
-          # This is exactly how vyos/vyos-build's docker container worked
-          # before sqv tightened the policy.
+          # which newer apt/sqv policies reject. The key is fine, the
+          # *signature* on it is just old. We trust it (the upstream
+          # vyos-builder Docker container trusts it too), so mark the apt
+          # source as `trusted=yes` to bypass the signature check.
           install -m 0644 vyos-build/docker/vyos-dev.key \
             /usr/share/keyrings/vyos-dev-archive-keyring.asc
           # Override the shipped vyos-dev.list to add `trusted=yes`.
@@ -233,9 +220,10 @@ jobs:
         # git+https://github.com/aristanetworks/j2lint.git@341b5d5db86")
         # if the binary isn't on PATH.  Inside the upstream vyos-builder
         # Docker image j2lint is preinstalled via that exact pip URL.
-        # Replicate that on the bare runner (PEP 668 marks system Python
-        # externally-managed on trixie, so we use --break-system-packages
-        # since we're in a CI runner, not a user system).
+        # Replicate that on the bare runner (Debian bookworm marks system
+        # Python externally-managed via PEP 668, so we use
+        # --break-system-packages since we're in a CI runner, not a user
+        # system).
         run: |
           set -e
           if ! command -v j2lint >/dev/null 2>&1; then
