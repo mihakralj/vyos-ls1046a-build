@@ -19,6 +19,11 @@
 # Expects: GITHUB_WORKSPACE, BUILD_BY, BUILD_VERSION, DEBIAN_MIRROR,
 #          DEBIAN_SECURITY_MIRROR, VYOS_MIRROR in env
 set -ex
+# Source FLAVOR resolution before changing dir.
+# bin/common.sh resolves FLAVOR from $FLAVOR, then data/flavor.pin, then "default".
+# We export it so the rename below produces flavor-tagged ISO filenames.
+BC_QUIET=1 source "${GITHUB_WORKSPACE:-.}/bin/common.sh"
+
 cd "${GITHUB_WORKSPACE:-.}/vyos-build"
 
 ### Pre-flight: verify custom kernel is present (defense-in-depth)
@@ -133,13 +138,19 @@ fi
   generic
 
 cd build
-# Rename generic -> LS1046A in artifact filenames
+# Rename generic -> LS1046A-${FLAVOR} in artifact filenames so multi-flavor
+# releases coexist on the same release/<tag> page without filename collisions.
+# Examples:
+#   vyos-2026.05.09-1830-rolling-LS1046A-default-arm64.iso
+#   vyos-2026.05.09-1830-rolling-LS1046A-ask-arm64.iso
+#   vyos-2026.05.09-1830-rolling-LS1046A-vpp-arm64.iso
 ORIG_ISO=$(jq --raw-output .artifacts[0] manifest.json)
-IMAGE_ISO="${ORIG_ISO/generic/LS1046A}"
+IMAGE_ISO="${ORIG_ISO/generic/LS1046A-${FLAVOR}}"
 IMAGE_NAME="${IMAGE_ISO%.iso}"
 mv "$ORIG_ISO" "$IMAGE_ISO"
 echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
 echo "image_iso=${IMAGE_ISO}" >> "$GITHUB_OUTPUT"
+echo "flavor=${FLAVOR}" >> "$GITHUB_OUTPUT"
 
 ### ─── Make ISO hybrid: append FAT32 boot partition for U-Boot ──────────────
 #
