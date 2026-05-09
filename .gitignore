@@ -67,3 +67,7 @@ ASK/fci/lib/src/*.la
 *.log
 /manifest.json
 /packages/
+.clinerules/
+.clinehooks/
+.clineskills/
+.clineworkflows/
