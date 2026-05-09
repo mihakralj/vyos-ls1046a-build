@@ -1,0 +1,54 @@
+Subject: wireless-extensions: force WIRELESS_EXT/WEXT_PRIV on, restore ndo_do_ioctl fallback
+
+ASK userspace tools (cmm, fmc, dpa_app) and several legacy ioctls
+issued by VyOS userspace use SIOCSIWxxx wireless-extension ioctls as
+a generic netdev escape hatch even on non-wireless interfaces. The
+upstream defaults leave WIRELESS_EXT and WEXT_PRIV unconditionally off
+on builds without a wireless driver, and wireless_process_ioctl()
+returns -EOPNOTSUPP without consulting the netdev's ndo_do_ioctl.
+
+This patch:
+  - flips WIRELESS_EXT and WEXT_PRIV to def_bool y so the wext core is
+    always linked in (we have no wireless drivers, but we keep the ABI),
+  - adds a fallback in wireless_process_ioctl() that calls the driver's
+    ndo_do_ioctl handler before giving up with -EOPNOTSUPP.
+
+Refreshed for Linux 6.18.x:
+  - WEXT_SPY symbol was removed upstream; the historic hunk that flipped
+    it to def_bool y is no longer applicable.
+  - wext-core.c::wireless_process_ioctl() context shifted (the function
+    moved from ~L984 to ~L943 between 6.6 and 6.18); hunk re-anchored.
+
+diff --git a/net/wireless/Kconfig b/net/wireless/Kconfig
+--- a/net/wireless/Kconfig
++++ b/net/wireless/Kconfig
+@@ -1,6 +1,6 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ config WIRELESS_EXT
+-	bool
++	def_bool y
+ 
+ config WEXT_CORE
+ 	def_bool y
+@@ -13,7 +13,7 @@ config WEXT_PROC
+ 	depends on WEXT_CORE
+ 
+ config WEXT_PRIV
+-	bool
++	def_bool y
+ 
+ config CFG80211
+ 	tristate "cfg80211 - wireless configuration API"
+diff --git a/net/wireless/wext-core.c b/net/wireless/wext-core.c
+--- a/net/wireless/wext-core.c
++++ b/net/wireless/wext-core.c
+@@ -980,6 +980,9 @@ static int wireless_process_ioctl(struct net *net, struct iwreq *iwr,
+ 		else if (private)
+ 			return private(dev, iwr, cmd, info, handler);
+ 	}
++	/* Old driver API : call driver ioctl handler */
++	if (dev->netdev_ops->ndo_do_ioctl)
++		return dev->netdev_ops->ndo_do_ioctl(dev, (struct ifreq *)iwr, cmd);
+ 	return -EOPNOTSUPP;
+ }
+ 

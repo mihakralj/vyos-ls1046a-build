@@ -1,0 +1,43 @@
+From: ASK <ask@kernel-ls1046a-build>
+Subject: [PATCH] tools/lib/perf: invoke Makefile.asm-headers from $(srctree)
+
+When building libperf as a perf sub-component on arm64,
+arch/arm64/kernel/Makefile.syscalls overrides the asm-headers
+syscalltbl to a srctree-RELATIVE path:
+
+    syscalltbl = arch/arm64/tools/syscall_%.tbl
+
+(scripts/Makefile.asm-headers' default uses $(srctree)/scripts/syscall.tbl
+— the arm64 override is the only in-tree caller that drops the prefix).
+
+The libperf rule that drives this sub-make sets the output dir via
+obj=$(uapi-asm) but does NOT change cwd, so when invoked from a
+libperf O= path (e.g. tools/perf/libperf/) the prerequisite
+arch/arm64/tools/syscall_64.tbl is looked up relative to that
+unrelated directory and make fails with:
+
+  No rule to make target '.../tools/perf/libperf/arch/arm64/include/
+  generated/uapi/asm/unistd_64.h'.  Stop.
+  *** [Makefile:108: uapi-asm-generic] Error 2
+
+Pass -C $(srctree) so the relative syscalltbl prereq resolves.
+The -f flag still references the absolute Makefile.asm-headers, and
+obj= / target paths are absolute via $(OUTPUT), so this is a
+no-behaviour-change fix for archs whose syscalltbl is already
+absolute and a correctness fix for arm64.
+
+Reproduces under bindeb-pkg's binary-perf target on linux-6.18.26.
+
+Signed-off-by: ASK <ask@kernel-ls1046a-build>
+---
+--- a/tools/lib/perf/Makefile
++++ b/tools/lib/perf/Makefile
+@@ -106,7 +106,7 @@
+ endif
+ uapi-asm-generic:
+ 	$(if $(syscall-y),\
+-		$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.asm-headers obj=$(uapi-asm) \
++		$(Q)$(MAKE) -C $(srctree) -f $(srctree)/scripts/Makefile.asm-headers obj=$(uapi-asm) \
+ 		generic=include/uapi/asm-generic $(syscall-y),)
+ 
+ $(LIBPERF_IN): uapi-asm-generic FORCE

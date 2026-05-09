@@ -1,0 +1,150 @@
+Subject: [PATCH] net/key: ASK_FCI_NLKEY narrow-gate NETLINK_KEY=32 registration
+
+Replaces ask48's broken approach (turning on CONFIG_INET_IPSEC_OFFLOAD,
+which can't compile on 6.6 because patch 040 references x->curr_time
+that was never added to struct xfrm_state) with a minimum-surface gate
+that only registers the NETLINK_KEY=32 kernel socket so userspace
+cmm's fci_open(FCILIB_KEY_TYPE) can succeed.
+
+cmm.service was failing on its second fci_open() call:
+
+    socket(AF_NETLINK, SOCK_RAW, 0x20 /* NETLINK_KEY=32 */) = -1 EPROTONOSUPPORT
+    cmm[]: cmmCtInit:3258 fci_open() failed, Protocol not supported
+
+NETLINK_KEY (32) is a uapi constant from patch 040 (along with
+NETLINK_FF=30 and MAX_LINKS bumped to 64), but no kernel-side socket
+is registered for it because patch 040 gated the entire registration
+path on CONFIG_INET_IPSEC_OFFLOAD which is structurally OFF on 6.6
+(turning it ON would expose x->curr_time / x->offloaded references
+that don't compile against 6.6's struct xfrm_state).
+
+Approach (v2 — uses a brand-new file, no af_key.c context conflicts):
+
+1. Add CONFIG_ASK_FCI_NLKEY (depends on NET_KEY, default n) with
+   real tab-indented Kconfig body so merge_config.sh / olddefconfig
+   pick it up.
+2. Add a NEW self-contained file net/key/ask_fci_nlkey.c that
+   does only one thing on late_initcall: netlink_kernel_create() for
+   NETLINK_KEY=32 with a no-op rcv handler. cmm only opens a listening
+   fd; it does not require kernel-originated traffic.
+3. Wire it into net/key/Makefile via obj-$(CONFIG_ASK_FCI_NLKEY).
+4. The existing patch-040 NLKEY_SUPPORT path stays gated on
+   CONFIG_INET_IPSEC_OFFLOAD and stays OFF, so the broken
+   x->curr_time / x->offloaded references remain compiled out.
+
+By using a brand-new file rather than editing af_key.c, this patch
+applies cleanly both against pristine 6.6.135 (for patch-health) and
+against the post-ASK-stack tree (for apply-to-tree), since neither
+the new file nor the trivial Kconfig/Makefile additions have context
+that any earlier ASK patch can disturb.
+
+Replaces patch 096 (which only added Kconfig stubs for the broken
+IPSEC_OFFLOAD path); 096 is removed.
+
+Signed-off-by: ASK fix-plan <FIX-PLAN-FCI-NETLINK-KEY.md>
+---
+diff --git a/net/key/Makefile b/net/key/Makefile
+index ed779c22f..81bd86d7b 100644
+--- a/net/key/Makefile
++++ b/net/key/Makefile
+@@ -4,3 +4,4 @@
+ #
+ 
+ obj-$(CONFIG_NET_KEY) += af_key.o
++obj-$(CONFIG_ASK_FCI_NLKEY) += ask_fci_nlkey.o
+diff --git a/net/key/ask_fci_nlkey.c b/net/key/ask_fci_nlkey.c
+new file mode 100644
+index 000000000..b817c3734
+--- /dev/null
++++ b/net/key/ask_fci_nlkey.c
+@@ -0,0 +1,65 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * ASK FCI NETLINK_KEY (proto 32) registration.
++ *
++ * Userspace cmm calls fci_open(FCILIB_KEY_TYPE), which under the hood
++ * does socket(AF_NETLINK, SOCK_RAW, NETLINK_KEY). Without a kernel
++ * registration for protocol 32, that call returns -EPROTONOSUPPORT
++ * and cmm.service fails to start.
++ *
++ * The "real" ASK in-kernel handler for NETLINK_KEY lives inside
++ * net/key/af_key.c gated by NLKEY_SUPPORT (which is gated on
++ * CONFIG_INET_IPSEC_OFFLOAD). On 6.6 that path does not compile
++ * because it references struct xfrm_state fields (curr_time,
++ * offloaded) that were never added on this kernel branch.
++ *
++ * Until that data-plane code is ported forward, register a minimal
++ * stub kernel socket so cmm's fci_open() succeeds and the userspace
++ * service can come up. The handler is a no-op drop: cmm only opens
++ * the fd, it does not require kernel-originated multicast traffic on
++ * this protocol.
++ */
++
++#include <linux/init.h>
++#include <linux/module.h>
++#include <linux/skbuff.h>
++#include <linux/netlink.h>
++#include <net/sock.h>
++#include <net/net_namespace.h>
++
++/*
++ * NETLINK_KEY=32 is the protocol number that legacy NXP ASK userspace
++ * (cmm/fci_open(FCILIB_KEY_TYPE)) opens. Mainline does not reserve it
++ * in <linux/netlink.h> (deleted ask/040 used to add it as a uapi). We
++ * register the kernel side here under that fixed number; user-space
++ * already hard-codes 32 in its socket() call.
++ */
++#ifndef NETLINK_KEY
++#define NETLINK_KEY 32
++#endif
++
++static struct sock *ask_fci_nlkey_sock;
++
++static void ask_fci_nlkey_rcv(struct sk_buff *skb)
++{
++	/* cmm only opens the fd; drop any inbound traffic. */
++	consume_skb(skb);
++}
++
++static int __init ask_fci_nlkey_init(void)
++{
++	struct netlink_kernel_cfg cfg = {
++		.groups = 1,
++		.input  = ask_fci_nlkey_rcv,
++	};
++
++	ask_fci_nlkey_sock = netlink_kernel_create(&init_net, NETLINK_KEY, &cfg);
++	if (!ask_fci_nlkey_sock) {
++		pr_warn("ASK FCI: failed to create NETLINK_KEY=%d socket\n",
++			NETLINK_KEY);
++		return -ENOMEM;
++	}
++	pr_info("ASK FCI: NETLINK_KEY=%d socket registered\n", NETLINK_KEY);
++	return 0;
++}
++late_initcall(ask_fci_nlkey_init);
++
++MODULE_LICENSE("GPL");
+diff --git a/net/xfrm/Kconfig b/net/xfrm/Kconfig
+index 3adf31a83..4cfa9011e 100644
+--- a/net/xfrm/Kconfig
++++ b/net/xfrm/Kconfig
+@@ -118,6 +118,18 @@ config NET_KEY
+ 
+ 	  Say Y unless you know what you are doing.
+ 
++config ASK_FCI_NLKEY
++	bool "ASK FCI NETLINK_KEY=32 registration (cmm.service preflight)"
++	depends on NET_KEY
++	default n
++	help
++	  Register a minimal kernel-side socket for NETLINK_KEY (protocol 32)
++	  so userspace cmm's fci_open(FCILIB_KEY_TYPE) succeeds. This is a
++	  narrow gate that does NOT enable the full ASK IPsec offload data
++	  path (which is structurally broken on 6.6 due to missing
++	  struct xfrm_state fields). Only enable on LS1046A ASK builds where
++	  cmm.service is required to come up.
++
+ config NET_KEY_MIGRATE
+ 	bool "PF_KEY MIGRATE"
+ 	depends on NET_KEY
