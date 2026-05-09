@@ -1,0 +1,78 @@
+From: ASK build tooling <ask@localhost>
+Subject: [PATCH] ASK: wire NXP SDK Kconfig/Makefile into parents + perf gitignore
+
+Wires the NXP SDK DPAA/FMan/QBMan subtrees that apply-to-tree.sh drops
+in into the kernel Kconfig/Makefile graph, so merge_config.sh /
+olddefconfig sees the new symbols and the parent Makefiles descend.
+
+Subtrees wired:
+    drivers/staging/fsl_qbman/                      (BMan/QMan)
+    drivers/net/ethernet/freescale/sdk_dpaa/        (SDK DPAA Ethernet)
+    drivers/net/ethernet/freescale/sdk_fman/        (SDK Frame Manager)
+
+Refreshed for Linux 6.18.x:
+  - The legacy `KBUILD_EXTMOD ?= $(SUBDIRS)` shim in the top Makefile is
+    no longer needed: our OOT modules (cdx, fci, auto_bridge) all use
+    `make M=$(PWD)` and SUBDIRS support was dropped upstream long ago.
+    Hunk removed.
+  - drivers/staging/Kconfig + Makefile tails grew a `gpib/` entry; the
+    SDK source/obj lines now anchor after gpib instead of vme_user /
+    axis-fifo / fieldbus / qlge.
+
+diff --git a/tools/perf/.gitignore b/tools/perf/.gitignore
+--- a/tools/perf/.gitignore
++++ b/tools/perf/.gitignore
+@@ -3,7 +3,6 @@ PERF-CFLAGS
+ PERF-GUI-VARS
+ PERF-VERSION-FILE
+ FEATURE-DUMP
+-perf
+ !include/perf/
+ perf-read-vdso32
+ perf-read-vdsox32
+diff --git a/drivers/net/ethernet/freescale/Kconfig b/drivers/net/ethernet/freescale/Kconfig
+--- a/drivers/net/ethernet/freescale/Kconfig
++++ b/drivers/net/ethernet/freescale/Kconfig
+@@ -107,4 +107,7 @@ source "drivers/net/ethernet/freescale/dpaa/Kconfig"
+ source "drivers/net/ethernet/freescale/dpaa2/Kconfig"
+ source "drivers/net/ethernet/freescale/enetc/Kconfig"
+ 
++source "drivers/net/ethernet/freescale/sdk_dpaa/Kconfig"
++source "drivers/net/ethernet/freescale/sdk_fman/Kconfig"
++
+ endif # NET_VENDOR_FREESCALE
+diff --git a/drivers/net/ethernet/freescale/Makefile b/drivers/net/ethernet/freescale/Makefile
+--- a/drivers/net/ethernet/freescale/Makefile
++++ b/drivers/net/ethernet/freescale/Makefile
+@@ -25,3 +25,15 @@ obj-$(CONFIG_FSL_DPAA_ETH) += dpaa/
+ obj-$(CONFIG_FSL_DPAA2_ETH) += dpaa2/
+ 
+ obj-y += enetc/
++
++# Order matters: sdk_fman MUST come before sdk_dpaa. Both compile
++# built-in (=y) and use module_init (= device_initcall), so init order
++# follows Makefile/link order. If sdk_dpaa initialises first, fsl_mac
++# probes before the FMan platform_driver is registered, fm_bind() returns
++# NULL, fsl_mac fails with -ENODEV, then fsl_dpa fails with -EINVAL via
++# dev_get_drvdata(mac)=NULL. Symptom on Mono Gateway (ask11/ask12):
++#   fsl_mac 1ae2000.ethernet: fm_bind(fman@1a00000) failed
++#   fsl_dpa soc:fsl,dpaa:ethernet@*: probe failed with error -22
++# followed by FMan only initialising ~200 ms later.
++obj-$(CONFIG_FSL_SDK_FMAN) += sdk_fman/
++obj-$(CONFIG_FSL_SDK_DPAA_ETH) += sdk_dpaa/
+diff --git a/drivers/staging/Kconfig b/drivers/staging/Kconfig
+--- a/drivers/staging/Kconfig
++++ b/drivers/staging/Kconfig
+@@ -51,3 +51,5 @@ source "drivers/staging/vme_user/Kconfig"
+ source "drivers/staging/gpib/Kconfig"
+ 
++source "drivers/staging/fsl_qbman/Kconfig"
++
+ endif # STAGING
+diff --git a/drivers/staging/Makefile b/drivers/staging/Makefile
+--- a/drivers/staging/Makefile
++++ b/drivers/staging/Makefile
+@@ -16,1 +16,3 @@
+ obj-$(CONFIG_GPIB)	 	+= gpib/
++
++obj-$(CONFIG_FSL_SDK_DPA)	+= fsl_qbman/

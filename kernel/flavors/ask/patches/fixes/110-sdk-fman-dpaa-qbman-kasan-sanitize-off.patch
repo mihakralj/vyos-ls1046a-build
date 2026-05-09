@@ -1,0 +1,224 @@
+From a20c2d9df90a2ed8a6a66f061d4aa4f630ad7290 Mon Sep 17 00:00:00 2001
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Sat, 25 Apr 2026 17:55:41 +0200
+Subject: [PATCH] sdk_fman/sdk_dpaa/qbman: skip KASAN instrumentation
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The vendored NXP DPAA/FMAN/QBMan trees do plain memset()/memcpy() on
+iomem destinations (devm_ioremap'd MURAM SRAM and QBMan portal regions).
+With CONFIG_KASAN_GENERIC=y the compiler rewrites these calls to the
+instrumented variants, which perform a shadow-byte lookup on the
+destination address. iomem regions have no KASAN shadow mapped, so the
+lookup itself faults — boot panics during FM_PCD_Init -> AllocFEObjs:
+
+    memset((uint8_t *)p_FeObj->h_FE, 0, FM_PCD_FE_MAX_SIZE);
+    ^ p_FeObj->h_FE is iomem (FM_MURAM_AllocMem -> devm_ioremap),
+      __asan_memset's shadow check faults on it.
+
+The proper fix is to audit every memset/memcpy against MURAM and
+register-block addresses across these trees and convert them to
+memset_io/memcpy_toio/memcpy_fromio. That's ~80-200 call sites of
+mostly mechanical edits, but the audit surface is the entire vendored
+codebase — out of scope for the security-hardening pass.
+
+Instead, scope KASAN to the code we own: cdx, fci, auto_bridge, plus
+the rest of the kernel keep full instrumentation; the three vendored
+trees are skipped. KASAN_SANITIZE := n only suppresses compiler
+instrumentation — KASAN remains globally enabled, so callers that pass
+kmalloc'd buffers down into FMAN/DPAA/QBMan still get OOB-write
+detection on the calling-context object (KASAN tracks allocations, not
+call sites). The only blind spot is FMAN-internal kmalloc'd buffers,
+which we already weren't instrumenting (KASAN was entirely off).
+
+Per Documentation/dev-tools/kasan.rst, KASAN_SANITIZE := n is
+per-Makefile and does not propagate to subdirectories — every
+sub-Makefile that produces objects needs the marker independently.
+Touching all 16 Makefiles under sdk_fman (13), sdk_dpaa (1),
+drivers/soc/fsl/qbman (1), and drivers/staging/fsl_qbman (1).
+
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+ drivers/net/ethernet/freescale/sdk_dpaa/Makefile                | 2 ++
+ drivers/net/ethernet/freescale/sdk_fman/Makefile                | 2 ++
+ .../net/ethernet/freescale/sdk_fman/Peripherals/FM/HC/Makefile  | 2 ++
+ .../net/ethernet/freescale/sdk_fman/Peripherals/FM/MAC/Makefile | 2 ++
+ drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Makefile | 2 ++
+ .../net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/Makefile | 2 ++
+ .../ethernet/freescale/sdk_fman/Peripherals/FM/Port/Makefile    | 2 ++
+ .../net/ethernet/freescale/sdk_fman/Peripherals/FM/Rtc/Makefile | 2 ++
+ .../net/ethernet/freescale/sdk_fman/Peripherals/FM/SP/Makefile  | 2 ++
+ drivers/net/ethernet/freescale/sdk_fman/etc/Makefile            | 2 ++
+ drivers/net/ethernet/freescale/sdk_fman/src/Makefile            | 2 ++
+ drivers/net/ethernet/freescale/sdk_fman/src/system/Makefile     | 2 ++
+ drivers/net/ethernet/freescale/sdk_fman/src/wrapper/Makefile    | 2 ++
+ drivers/net/ethernet/freescale/sdk_fman/src/xx/Makefile         | 2 ++
+ drivers/soc/fsl/qbman/Makefile                                  | 2 ++
+ drivers/staging/fsl_qbman/Makefile                              | 1 +
+ 16 files changed, 31 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/Makefile b/drivers/net/ethernet/freescale/sdk_dpaa/Makefile
+index a0623b24fa1c..d6f1558c09f5 100644
+--- a/drivers/net/ethernet/freescale/sdk_dpaa/Makefile
++++ b/drivers/net/ethernet/freescale/sdk_dpaa/Makefile
+@@ -1,3 +1,5 @@
++KASAN_SANITIZE := n
++
+ #
+ # Makefile for the Freescale Ethernet controllers
+ #
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/Makefile b/drivers/net/ethernet/freescale/sdk_fman/Makefile
+index 25ce7e6a13a0..28a04ee80694 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/Makefile
++++ b/drivers/net/ethernet/freescale/sdk_fman/Makefile
+@@ -1,3 +1,5 @@
++KASAN_SANITIZE := n
++
+ #
+ # Makefile for the Freescale Ethernet controllers
+ #
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/HC/Makefile b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/HC/Makefile
+index d0e76727b98b..29f55432916c 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/HC/Makefile
++++ b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/HC/Makefile
+@@ -1,3 +1,5 @@
++KASAN_SANITIZE := n
++
+ #
+ # Makefile for the Freescale Ethernet controllers
+ #
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/MAC/Makefile b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/MAC/Makefile
+index 98d42f723fdb..9ca3be2c1d4b 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/MAC/Makefile
++++ b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/MAC/Makefile
+@@ -1,3 +1,5 @@
++KASAN_SANITIZE := n
++
+ #
+ # Makefile for the Freescale Ethernet controllers
+ #
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Makefile b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Makefile
+index 7eef1043b103..872369f104f8 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Makefile
++++ b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Makefile
+@@ -1,3 +1,5 @@
++KASAN_SANITIZE := n
++
+ #
+ # Makefile for the Freescale Ethernet controllers
+ #
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/Makefile b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/Makefile
+index bcb4567cd5bb..4c8d3603bfab 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/Makefile
++++ b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/Makefile
+@@ -1,3 +1,5 @@
++KASAN_SANITIZE := n
++
+ #
+ # Makefile for the Freescale Ethernet controllers
+ #
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Port/Makefile b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Port/Makefile
+index 7d928e0a4aac..5a60b21808a2 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Port/Makefile
++++ b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Port/Makefile
+@@ -1,3 +1,5 @@
++KASAN_SANITIZE := n
++
+ #
+ # Makefile for the Freescale Ethernet controllers
+ #
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Rtc/Makefile b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Rtc/Makefile
+index d2c21d347538..91cbc804b8e2 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Rtc/Makefile
++++ b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Rtc/Makefile
+@@ -1,3 +1,5 @@
++KASAN_SANITIZE := n
++
+ #
+ # Makefile for the Freescale Ethernet controllers
+ #
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/SP/Makefile b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/SP/Makefile
+index fae50ce440a2..d1f34fc16ea1 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/SP/Makefile
++++ b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/SP/Makefile
+@@ -1,3 +1,5 @@
++KASAN_SANITIZE := n
++
+ #
+ # Makefile for the Freescale Ethernet controllers
+ #
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/etc/Makefile b/drivers/net/ethernet/freescale/sdk_fman/etc/Makefile
+index d03a519c8d60..0b72d8c40059 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/etc/Makefile
++++ b/drivers/net/ethernet/freescale/sdk_fman/etc/Makefile
+@@ -1,3 +1,5 @@
++KASAN_SANITIZE := n
++
+ #
+ # Makefile for the Freescale Ethernet controllers
+ #
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/src/Makefile b/drivers/net/ethernet/freescale/sdk_fman/src/Makefile
+index 49405d0ec925..3d8baa246cd7 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/src/Makefile
++++ b/drivers/net/ethernet/freescale/sdk_fman/src/Makefile
+@@ -1,3 +1,5 @@
++KASAN_SANITIZE := n
++
+ #
+ # Makefile for the Freescale Ethernet controllers
+ #
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/src/system/Makefile b/drivers/net/ethernet/freescale/sdk_fman/src/system/Makefile
+index 667cd859931f..8837373135e0 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/src/system/Makefile
++++ b/drivers/net/ethernet/freescale/sdk_fman/src/system/Makefile
+@@ -1,3 +1,5 @@
++KASAN_SANITIZE := n
++
+ #
+ # Makefile for the Freescale Ethernet controllers
+ #
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/Makefile b/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/Makefile
+index 62713d626dfa..a6a728e984e3 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/Makefile
++++ b/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/Makefile
+@@ -1,3 +1,5 @@
++KASAN_SANITIZE := n
++
+ #
+ # Makefile for the Freescale Ethernet controllers
+ #
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/src/xx/Makefile b/drivers/net/ethernet/freescale/sdk_fman/src/xx/Makefile
+index 451ec130f4f4..a298cb964316 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/src/xx/Makefile
++++ b/drivers/net/ethernet/freescale/sdk_fman/src/xx/Makefile
+@@ -1,3 +1,5 @@
++KASAN_SANITIZE := n
++
+ #
+ # Makefile for the Freescale Ethernet controllers
+ #
+diff --git a/drivers/soc/fsl/qbman/Makefile b/drivers/soc/fsl/qbman/Makefile
+index 811312ad526f..4ee2a84159f0 100644
+--- a/drivers/soc/fsl/qbman/Makefile
++++ b/drivers/soc/fsl/qbman/Makefile
+@@ -1,4 +1,6 @@
+ # SPDX-License-Identifier: GPL-2.0
++KASAN_SANITIZE := n
++
+ obj-$(CONFIG_FSL_DPAA)                          += bman_ccsr.o qman_ccsr.o \
+ 						   bman_portal.o qman_portal.o \
+ 						   bman.o qman.o dpaa_sys.o
+diff --git a/drivers/staging/fsl_qbman/Makefile b/drivers/staging/fsl_qbman/Makefile
+index 538f5b566f34..0f6387d7c76a 100644
+--- a/drivers/staging/fsl_qbman/Makefile
++++ b/drivers/staging/fsl_qbman/Makefile
+@@ -1,4 +1,5 @@
+ subdir-ccflags-y := -Werror
++KASAN_SANITIZE := n
+ 
+ # Include netcomm SW specific definitions
+ include $(srctree)/drivers/net/ethernet/freescale/sdk_fman/ncsw_config.mk
+-- 
+2.47.3
+
