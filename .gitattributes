@@ -1,2 +1,7 @@
 data/reftree.cache filter=lfs diff=lfs merge=lfs -text
 data/sdk-drivers.tar.zst filter=lfs diff=lfs merge=lfs -text
+*.c merge=mergiraf
+*.h merge=mergiraf
+*.py merge=mergiraf
+*.dts merge=mergiraf
+*.dtsi merge=mergiraf
