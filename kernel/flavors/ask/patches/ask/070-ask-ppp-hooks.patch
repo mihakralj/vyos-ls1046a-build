@@ -1,0 +1,105 @@
+Subject: ppp: ASK fast-path hooks (CPE_FAST_PATH)
+
+Three minimal hooks consumed by the ASK fast-path / CDX OOT module:
+
+  1. drivers/net/ppp/ppp_generic.c
+     - Include linux/jiffies.h (CPE_FAST_PATH timing helpers).
+     - On successful channel connect, fire RTM_NEWLINK so userspace
+       (cmm/dpa_app) gets a netlink notification it can correlate with
+       the PPP unit number. Gated on CONFIG_CPE_FAST_PATH.
+
+  2. drivers/net/ppp/pppoe.c
+     - In pppoe_seq_show(), provide an extended /proc/net/pppoe layout
+       (Id Address Device PPPDevice Unit) under CONFIG_CPE_FAST_PATH that
+       includes the resolved ppp_dev_name() and ppp_unit_number(). Keep
+       the historical layout when the option is off.
+
+  3. include/uapi/linux/ppp-ioctl.h
+     - PPPIOCSFPPIDLE: ioctl to push fast-path-derived idle stats back
+       into ppp/pppd. Used by the CDX module's session manager.
+
+Refreshed for Linux 6.18.x:
+  * The ipsec_offload-gated __pppoe_xmit() hunk that used to live here
+    has been dropped: the data-path INET_IPSEC_OFFLOAD machinery is
+    being replaced by an XFRM_OFFLOAD provider in a later patch (D1).
+  * ppp_connect_channel context shifted (L3519 -> L3536) and the lock
+    primitive at the outl: label changed from write_unlock_bh() to
+    spin_unlock() upstream; hunk re-anchored.
+  * pppoe_seq_show context shifted (L1030 -> L1033).
+
+diff --git a/drivers/net/ppp/ppp_generic.c b/drivers/net/ppp/ppp_generic.c
+--- a/drivers/net/ppp/ppp_generic.c
++++ b/drivers/net/ppp/ppp_generic.c
+@@ -54,6 +54,10 @@
+ #include <net/net_namespace.h>
+ #include <net/netns/generic.h>
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++#include <linux/jiffies.h>
++#endif
++
+ #define PPP_VERSION	"2.4.2"
+ 
+ /*
+@@ -3534,6 +3538,14 @@ ppp_connect_channel(struct channel *pch, int unit)
+ 
+  outl:
+ 	spin_unlock(&pch->upl);
++#if defined(CONFIG_CPE_FAST_PATH)
++	if ((ppp->dev) && (!ppp->closing)) {
++		rtnl_lock();
++		rtmsg_ifinfo(RTM_NEWLINK, ppp->dev, 0, GFP_KERNEL, 0, NULL);
++		rtnl_unlock();
++	}
++#endif
++
+  out:
+ 	mutex_unlock(&pn->all_ppp_mutex);
+ 	return ret;
+diff --git a/drivers/net/ppp/pppoe.c b/drivers/net/ppp/pppoe.c
+--- a/drivers/net/ppp/pppoe.c
++++ b/drivers/net/ppp/pppoe.c
+@@ -1033,17 +1033,32 @@ static int pppoe_seq_show(struct seq_file *seq, void *v)
+ {
+ 	struct pppox_sock *po;
+ 	char *dev_name;
++#if defined(CONFIG_CPE_FAST_PATH)
++	char *ppp_name;
++#endif
+ 
+ 	if (v == SEQ_START_TOKEN) {
++#if defined(CONFIG_CPE_FAST_PATH)
++		seq_puts(seq, "Id   Address           Device     PPPDevice  Unit\n");
++#else
+ 		seq_puts(seq, "Id       Address              Device\n");
++#endif
+ 		goto out;
+ 	}
+ 
+ 	po = v;
+ 	dev_name = po->pppoe_pa.dev;
++#if defined(CONFIG_CPE_FAST_PATH)
++	ppp_name = ppp_dev_name(&po->chan);
++	if (!ppp_name)
++		goto out;
+ 
++	seq_printf(seq, "%04X %pM %-10s %-10s %d\n",
++	ntohs(po->pppoe_pa.sid), po->pppoe_pa.remote, dev_name, ppp_name, ppp_unit_number(&po->chan));
++#else
+ 	seq_printf(seq, "%08X %pM %8s\n",
+ 		po->pppoe_pa.sid, po->pppoe_pa.remote, dev_name);
++#endif
+ out:
+ 	return 0;
+ }
+diff --git a/include/uapi/linux/ppp-ioctl.h b/include/uapi/linux/ppp-ioctl.h
+--- a/include/uapi/linux/ppp-ioctl.h
++++ b/include/uapi/linux/ppp-ioctl.h
+@@ -117,6 +117,7 @@ struct pppol2tp_ioc_stats {
+ #define PPPIOCGL2TPSTATS _IOR('t', 54, struct pppol2tp_ioc_stats)
+ #define PPPIOCBRIDGECHAN _IOW('t', 53, int)	/* bridge one channel to another */
+ #define PPPIOCUNBRIDGECHAN _IO('t', 52)	/* unbridge channel */
++#define PPPIOCSFPPIDLE _IOW('t', 51, struct ppp_idle)	/* Set the FPP stats */
+ 
+ #define SIOCGPPPSTATS   (SIOCDEVPRIVATE + 0)
+ #define SIOCGPPPVER     (SIOCDEVPRIVATE + 1)	/* NEVER change this!! */

@@ -1,0 +1,307 @@
+From 8d102a9e5aa9be3f854af6fd58106e0edbbbad0f Mon Sep 17 00:00:00 2001
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Sun, 25 Jan 2026 13:10:47 +0100
+Subject: [PATCH] ASK: Add CMM integration for PPPoE relay hardware offload
+
+Integrates pppoe-relay with NXP CMM (Connection Manager Module) daemon
+for hardware-accelerated PPPoE relay forwarding. When relay sessions are
+created or destroyed, the relay notifies CMM to install/remove fast path
+entries.
+
+Changes:
+- Link pppoe-relay with libcmm
+- Add CMM IPC calls on session create/destroy
+- Add PID file management (/var/run/pppoerelay.pid)
+- Clean SIGTERM handling (sends PADT to peers before exit)
+
+Upstream-Status: Inappropriate [NXP ASK extensions]
+
+diff --git a/src/Makefile.in b/src/Makefile.in
+index 7905ff8..d4804ce 100644
+--- a/src/Makefile.in
++++ b/src/Makefile.in
+@@ -84,7 +84,7 @@ pppoe: pppoe.o if.o debug.o common.o ppp.o discovery.o
+ 	@CC@ -o $@ $^ $(LDFLAGS)
+ 
+ pppoe-relay: relay.o if.o debug.o common.o
+-	@CC@ -o $@ $^ $(LDFLAGS)
++	@CC@ -o $@ $^ $(LDFLAGS) -lcmm
+ 
+ pppoe.o: pppoe.c pppoe.h
+ 	@CC@ $(CFLAGS) '-DRP_VERSION="$(RP_VERSION)"' -c -o $@ $<
+diff --git a/src/relay.c b/src/relay.c
+index bd91ea0..bb7ee39 100644
+--- a/src/relay.c
++++ b/src/relay.c
+@@ -16,6 +16,11 @@
+ *
+ ***********************************************************************/
+ #define _GNU_SOURCE 1 /* For SA_RESTART */
++
++#ifndef _RELAY_CMM_IPC
++#define _RELAY_CMM_IPC 1
++#endif
++
+ #include "config.h"
+ 
+ #include <sys/socket.h>
+@@ -38,6 +43,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <errno.h>
++#include <fcntl.h>
+ 
+ #ifdef HAVE_SYS_TIME_H
+ #include <sys/time.h>
+@@ -50,7 +56,17 @@
+ #ifdef HAVE_UNISTD_H
+ #include <unistd.h>
+ #endif
+-
++#if _RELAY_CMM_IPC
++//#include <sys/types.h>
++#include <sys/ipc.h>
++#include <sys/stat.h>
++#include <sys/msg.h>
++#include <libcmm.h>
++#include <cmmd.h>
++
++int sendMsgtoCMM(PPPoESession *ses, int type);
++#endif
++void cleanSessionsSigterm(void);
+ 
+ /* Interfaces (max MAX_INTERFACES) */
+ PPPoEInterface Interfaces[MAX_INTERFACES];
+@@ -87,6 +103,49 @@ int CleanPipe[2];
+ /* Hack for daemonizing */
+ #define CLOSEFD 64
+ 
++
++/**********************************************************************
++*%FUNCTION: pppoeCreateDaemonPidFile
++*%ARGUMENTS:
++* void
++*%RETURNS:
++* -1 if ERROR ; 0 otherwise.
++***********************************************************************/
++static 
++int pppoeCreateDaemonPidFile(void){
++     int fp;
++     char buf[10];
++     fp = open(PPPOERELAY_PID_FILE_PATH, O_WRONLY | O_CREAT | O_EXCL, 0600);
++     if ( fp < 0 )
++     {
++     	if(errno == EEXIST)
++	{
++		if (remove(PPPOERELAY_PID_FILE_PATH))
++		{
++			syslog(LOG_ERR,"Unable to delete the old PPPoE-Relay pid file (%s)",PPPOERELAY_PID_FILE_PATH);
++			return -1;
++
++		}
++			fp = open(PPPOERELAY_PID_FILE_PATH, O_WRONLY | O_CREAT | O_EXCL, 0600);
++		}
++		else 
++		{
++			syslog(LOG_ERR,"ERROR in opening the PPPoE-Relay pid file (%s)",PPPOERELAY_PID_FILE_PATH);
++			return -1;	
++		}		
++		
++	}
++	sprintf(buf, "%d\n", getpid());
++	if ( write(fp, buf, strlen(buf)) < 0 )
++	{
++		syslog(LOG_ERR,"ERROR in writing on PPPoE-Relay pid file (%s) errno %d",PPPOERELAY_PID_FILE_PATH, errno);
++		close(fp);
++		return -1;
++	}
++	close(fp);
++	return 0;
++}
++
+ /**********************************************************************
+ *%FUNCTION: keepDescriptor
+ *%ARGUMENTS:
+@@ -221,6 +280,24 @@ usage(char const *argv0)
+     exit(EXIT_SUCCESS);
+ }
+ 
++/**********************************************************************
++*%FUNCTION: sigpppoerelay_Term_Handler
++*%ARGUMENTS:
++* sig -- signal number
++*%RETURNS:
++* Nothing
++*%DESCRIPTION:
++* SIGTERM . Ensures session clean .
++***********************************************************************/
++void sigpppoerelay_Term_Handler(int signum)
++{
++	syslog(LOG_INFO, "%s: entered\n", __func__);
++	cleanSessionsSigterm();
++	remove(PPPOERELAY_PID_FILE_PATH);
++	/* Killing PPPoE-RELAY ........... */
++	exit(EXIT_SUCCESS);
++	
++}
+ /**********************************************************************
+ *%FUNCTION: main
+ *%ARGUMENTS:
+@@ -351,6 +428,25 @@ main(int argc, char *argv[])
+ 	openlog("pppoe-relay", LOG_PID, LOG_DAEMON);
+     }
+ 
++    /*Ensure clean termination and cleaning the session*/
++    sa.sa_handler = sigpppoerelay_Term_Handler;
++    sigemptyset(&sa.sa_mask);
++    sigaddset(&sa.sa_mask, SIGTERM);
++    sa.sa_flags = 0;
++   
++    if (sigaction(SIGTERM, &sa, NULL) < 0) 
++    {
++	syslog(LOG_ERR, "%s: sigaction() failed %s\n", __func__, strerror(errno));
++	syslog(LOG_ERR, "%s: exiting\n", __func__);
++        return EXIT_FAILURE;
++    }
++    
++
++    /* Create the daemon pid file */
++    if ( pppoeCreateDaemonPidFile() )
++    	return EXIT_FAILURE;
++		
++
+     /* Kick off SIGALRM if there is an idle timeout */
+     if (IdleTimeout) alarm(1);
+ 
+@@ -545,6 +641,10 @@ createSession(PPPoEInterface const *ac,
+ 	   cliHash->interface->name,
+ 	   ntohs(cliHash->sesNum));
+ 
++#if _RELAY_CMM_IPC
++    sendMsgtoCMM(sess, CMMD_CMD_PPPOE_RELAY_ADD);
++#endif
++
+     return sess;
+ }
+ 
+@@ -574,6 +674,9 @@ freeSession(PPPoESession *ses, char const *msg)
+ 	   ses->clientHash->peerMac[4], ses->clientHash->peerMac[5],
+ 	   ses->clientHash->interface->name,
+ 	   ntohs(ses->clientHash->sesNum), msg);
++#if _RELAY_CMM_IPC
++    sendMsgtoCMM(ses, CMMD_CMD_PPPOE_RELAY_REMOVE); 
++#endif
+ 
+     /* Unlink from active sessions */
+     if (ses->prev) {
+@@ -743,6 +846,52 @@ rp_fatal(char const *str)
+     exit(EXIT_FAILURE);
+ }
+ 
++#if _RELAY_CMM_IPC
++int sendMsgtoCMM(PPPoESession *ses, int type)
++{
++	cmm_command_t cmd;
++	cmm_response_t res;
++	cmm_handle_t *handle;
++	cmmd_relay_info_t *relay_cmd;
++	int rcv_len;
++	int rc = 0;
++
++	memset(&cmd, 0 , sizeof(cmd));
++	memset(&res, 0 , sizeof(res));
++
++	if (!(handle = cmm_open())) {
++		syslog(LOG_ERR, "Cannot open CMM handle");
++		return -1;
++	}
++
++	cmd.func = type;
++	cmd.length = sizeof(cmmd_relay_info_t);
++	relay_cmd = (cmmd_relay_info_t*)&cmd.buf;	
++
++	relay_cmd->sesID = ntohs(ses->acHash->sesNum);
++	relay_cmd->relaysesID = ntohs(ses->clientHash->sesNum);
++	memcpy(relay_cmd->peermac1, ses->acHash->peerMac, ETH_ALEN);
++	memcpy(relay_cmd->ipifname, ses->acHash->interface->name, IFNAMSIZ);
++	memcpy(relay_cmd->peermac2, ses->clientHash->peerMac, ETH_ALEN);
++	memcpy(relay_cmd->opifname, ses->clientHash->interface->name, IFNAMSIZ);
++
++	if (cmm_send(handle, &cmd, 0) != 0) {
++		syslog(LOG_ERR, "Error sending message to CMM, error = `%s'\n", strerror(errno));
++		rc = -1;
++		goto out;
++	}
++
++	if ((rcv_len = cmm_recv(handle, &res, 0)) < 0) {
++		syslog(LOG_ERR, "Error receiving message from CMM, error = `%s'\n", strerror(errno));
++		rc = -1;
++		goto out;
++	}
++out:
++	cmm_close(handle);
++	return rc;
++}
++#endif
++
+ /**********************************************************************
+ *%FUNCTION: relayLoop
+ *%ARGUMENTS:
+@@ -1564,3 +1713,33 @@ void cleanSessions(void)
+ 	cur = next;
+     }
+ }
++
++/********************************************************************************
++*%FUNCTION: cleanSessionsSigterm
++*%ARGUMENTS:
++* None
++*%RETURNS:
++* Nothing
++*%DESCRIPTION:
++* Goes through active sessions and ensures cleans sessions when receives SIGTERM
++***********************************************************************************/
++
++void cleanSessionsSigterm(void)
++{
++    PPPoESession *cur, *next;
++    cur = ActiveSessions;
++    while(cur) {
++	next = cur->next;
++	    /* Send PADT to each peer */
++	    relaySendError(CODE_PADT, cur->acHash->sesNum,
++			   cur->acHash->interface,
++			   cur->acHash->peerMac, NULL,
++			   "RP-PPPoE: Relay: Session killed");
++	    relaySendError(CODE_PADT, cur->clientHash->sesNum,
++			   cur->clientHash->interface,
++			   cur->clientHash->peerMac, NULL,
++			   "RP-PPPoE: Relay: Session killed");
++	    freeSession(cur, "PPPoE-Relay Deamon is killed");
++	cur = next;
++    }
++}
+diff --git a/src/relay.h b/src/relay.h
+index a112050..4e46597 100644
+--- a/src/relay.h
++++ b/src/relay.h
+@@ -93,8 +93,15 @@ void alarmHandler(int sig);
+ void cleanSessions(void);
+ 
+ #define MAX_INTERFACES 8
+-#define DEFAULT_SESSIONS 5000
++#define DEFAULT_SESSIONS 16
+ 
+ /* Hash table size -- a prime number; gives load factor of around 6
+    for 65534 sessions */
+ #define HASHTAB_SIZE 18917
++
++
++/* PPPoE-RELAY pid file */
++#define PPPOERELAY_PID_FILE_PATH  "/var/run/pppoerelay.pid"
++
++
++
+-- 
+2.47.3
+

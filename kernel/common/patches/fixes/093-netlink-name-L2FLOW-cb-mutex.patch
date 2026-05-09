@@ -1,0 +1,93 @@
+From: Mono Gateway ASK <noreply@example.com>
+Date: Tue, 21 Apr 2026 00:00:00 +0000
+Subject: [PATCH] netlink: bump MAX_LINKS to 64 and name NETLINK_KEY / NETLINK_L2FLOW
+
+Mainline 6.18 still pins MAX_LINKS = 32, so kernel-side netlink protocol
+slots above 31 (NETLINK_KEY = 32 used by net/key/af_key.c plus our
+ask_fci_nlkey shim, NETLINK_L2FLOW = 33 used by the ASK auto_bridge OOT
+module) cannot be opened by netlink_kernel_create() — the proto value is
+range-checked against MAX_LINKS in netlink_create()/netlink_insert().
+
+The nlk_cb_mutex_key_strings[] array in af_netlink.c is sized
+[MAX_LINKS + 1] but only had entries for indices 0..31 plus a single
+"nlk_cb_mutex-MAX_LINKS" sentinel at index 32 — leaving NETLINK_KEY and
+NETLINK_L2FLOW with NULL lockdep names that trip:
+
+    WARNING at lockdep.c:4925 DEBUG_LOCKS_WARN_ON(!name)
+    lockdep_init_map_type
+    __netlink_create
+    __netlink_kernel_create
+    abm_init [auto_bridge]   /  ask_fci_nlkey_init [built-in]
+
+Two changes:
+
+1. Bump MAX_LINKS from 32 to 64 in include/uapi/linux/netlink.h.
+   This is additive ABI: existing protocol numbers 0..31 are unchanged,
+   and the bump creates room for the ASK-private slots without forcing
+   userspace to redefine them. Mirrors what the legacy ASK bundle did
+   (deleted ask/040-ask-xfrm-ipsec-offload.patch carried this hunk).
+
+2. Extend nlk_cb_mutex_key_strings[] with KEY (32), L2FLOW (33), unnamed
+   slots 34..63, and the MAX_LINKS sentinel at index 64. With
+   MAX_LINKS = 64 the array is now declared as [65] and the initializer
+   exactly fills it.
+
+No functional change beyond enabling kernel-side socket creation on
+proto 32/33 and fixing lockdep trace readability.
+
+---
+diff --git a/include/uapi/linux/netlink.h b/include/uapi/linux/netlink.h
+--- a/include/uapi/linux/netlink.h
++++ b/include/uapi/linux/netlink.h
+@@ -32,7 +32,7 @@
+ 
+ #define NETLINK_INET_DIAG	NETLINK_SOCK_DIAG
+ 
+-#define MAX_LINKS 32		
++#define MAX_LINKS 64		
+ 
+ struct sockaddr_nl {
+ 	__kernel_sa_family_t	nl_family;	/* AF_NETLINK	*/
+diff --git a/net/netlink/af_netlink.c b/net/netlink/af_netlink.c
+index 8b060465a2be..5fa41e9e22da 100644
+--- a/net/netlink/af_netlink.c
++++ b/net/netlink/af_netlink.c
+@@ -127,6 +127,38 @@ static const char *const nlk_cb_mutex_key_strings[MAX_LINKS + 1] = {
+ 	"nlk_cb_mutex-29",
+ 	"nlk_cb_mutex-30",
+ 	"nlk_cb_mutex-31",
++	"nlk_cb_mutex-KEY",        /* NETLINK_KEY = 32 */
++	"nlk_cb_mutex-L2FLOW",     /* NETLINK_L2FLOW = 33 (ASK) */
++	"nlk_cb_mutex-34",
++	"nlk_cb_mutex-35",
++	"nlk_cb_mutex-36",
++	"nlk_cb_mutex-37",
++	"nlk_cb_mutex-38",
++	"nlk_cb_mutex-39",
++	"nlk_cb_mutex-40",
++	"nlk_cb_mutex-41",
++	"nlk_cb_mutex-42",
++	"nlk_cb_mutex-43",
++	"nlk_cb_mutex-44",
++	"nlk_cb_mutex-45",
++	"nlk_cb_mutex-46",
++	"nlk_cb_mutex-47",
++	"nlk_cb_mutex-48",
++	"nlk_cb_mutex-49",
++	"nlk_cb_mutex-50",
++	"nlk_cb_mutex-51",
++	"nlk_cb_mutex-52",
++	"nlk_cb_mutex-53",
++	"nlk_cb_mutex-54",
++	"nlk_cb_mutex-55",
++	"nlk_cb_mutex-56",
++	"nlk_cb_mutex-57",
++	"nlk_cb_mutex-58",
++	"nlk_cb_mutex-59",
++	"nlk_cb_mutex-60",
++	"nlk_cb_mutex-61",
++	"nlk_cb_mutex-62",
++	"nlk_cb_mutex-63",
+ 	"nlk_cb_mutex-MAX_LINKS"
+ };
+ 

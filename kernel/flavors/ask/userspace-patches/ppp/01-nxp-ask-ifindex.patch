@@ -1,0 +1,44 @@
+From f637168c9d2a702cbf1d4981f4a16f4f53de3901 Mon Sep 17 00:00:00 2001
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Sun, 25 Jan 2026 12:56:29 +0100
+Subject: [PATCH] ASK: Add interface index argument to ip-up/ip-down scripts
+
+Adds if_nametoindex(ifname) as 7th argument to pppd ip-up and ip-down
+script invocations. This allows scripts to correlate tunnels created
+with interface-index references (dev if<N>) before PPP interfaces exist.
+
+Upstream-Status: Inappropriate [NXP ASK extensions]
+
+diff --git a/pppd/ipcp.c b/pppd/ipcp.c
+index ded4370..cf33aa7 100644
+--- a/pppd/ipcp.c
++++ b/pppd/ipcp.c
+@@ -2126,12 +2126,13 @@ ipcp_script_done(void *arg)
+ static void
+ ipcp_script(char *script, int wait)
+ {
+-    char strspeed[32], strlocal[32], strremote[32];
+-    char *argv[8];
++    char strspeed[32], strlocal[32], strremote[32], strifindex[8];
++    char *argv[9];
+ 
+     slprintf(strspeed, sizeof(strspeed), "%d", baud_rate);
+     slprintf(strlocal, sizeof(strlocal), "%I", ipcp_gotoptions[0].ouraddr);
+     slprintf(strremote, sizeof(strremote), "%I", ipcp_hisoptions[0].hisaddr);
++    slprintf(strifindex, sizeof(strifindex), "%d", if_nametoindex(ifname));
+ 
+     argv[0] = script;
+     argv[1] = ifname;
+@@ -2140,7 +2141,8 @@ ipcp_script(char *script, int wait)
+     argv[4] = strlocal;
+     argv[5] = strremote;
+     argv[6] = ipparam;
+-    argv[7] = NULL;
++    argv[7] = strifindex;
++    argv[8] = NULL;
+     if (wait)
+ 	run_program(script, argv, 0, NULL, NULL, 1);
+     else
+-- 
+2.47.3
+

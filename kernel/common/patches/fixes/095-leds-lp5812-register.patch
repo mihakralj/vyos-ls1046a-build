@@ -1,0 +1,76 @@
+Subject: leds: register out-of-tree TI LP5812 driver
+From: mihakralj <mihakralj@users.noreply.github.com>
+
+Mono Gateway DK uses a TI LP5812 12-channel I2C LED controller for chassis
+status indicators. The driver is not in mainline 6.6.y; the source tree
+ships a copy under drivers/leds/lp5812/ via release/patches/kernel/sdk-sources/.
+
+This patch:
+  - adds the per-driver Kconfig + Makefile that gate compilation on
+    CONFIG_LEDS_LP5812 (a bool, depends on LEDS_CLASS && I2C, selects
+    LEDS_CLASS_MULTICOLOR for multi-color slot support),
+  - wires the new subdirectory into drivers/leds/Kconfig and
+    drivers/leds/Makefile so the kbuild walk picks it up.
+
+CONFIG_LEDS_LP5812=y is asserted in release/ask.config so the merge_config
+chain pins the driver built-in (Mono boot expects the LEDs to be operable
+before fancontrol/boot-complete-notify userspace runs).
+
+Source: based on we-are-mono/meta-mono recipes-kernel/lp5812-driver/files,
+identical to vyos-ls1046a-build/data/kernel-patches/lp5812/ (commit 6a47da3b).
+Migrated to the producer repo so the prebuilt linux-*.deb published as
+kernel-6.6.135-askN actually carries the driver -- the consumer-side inject
+became dead code when the kernel build moved out of vyos-ls1046a-build.
+
+Signed-off-by: mihakralj <mihakralj@users.noreply.github.com>
+
+diff --git a/drivers/leds/Kconfig b/drivers/leds/Kconfig
+index 3132439f9..5ab892848 100644
+--- a/drivers/leds/Kconfig
++++ b/drivers/leds/Kconfig
+@@ -1028,6 +1028,9 @@ source "drivers/leds/flash/Kconfig"
+ comment "RGB LED drivers"
+ source "drivers/leds/rgb/Kconfig"
+ 
++comment "Mono LED drivers"
++source "drivers/leds/lp5812/Kconfig"
++
+ comment "LED Triggers"
+ source "drivers/leds/trigger/Kconfig"
+ 
+diff --git a/drivers/leds/Makefile b/drivers/leds/Makefile
+index d7348e8bc..eb39eae68 100644
+--- a/drivers/leds/Makefile
++++ b/drivers/leds/Makefile
+@@ -124,3 +124,6 @@ obj-y					+= blink/
+ 
+ # Simatic LED drivers
+ obj-y					+= simatic/
++
++# Mono Gateway: TI LP5812 I2C LED controller (out-of-tree, sourced via sdk-sources)
++obj-$(CONFIG_LEDS_LP5812)		+= lp5812/
+diff --git a/drivers/leds/lp5812/Kconfig b/drivers/leds/lp5812/Kconfig
+new file mode 100644
+index 000000000..fef135dd0
+--- /dev/null
++++ b/drivers/leds/lp5812/Kconfig
+@@ -0,0 +1,11 @@
++# SPDX-License-Identifier: GPL-2.0-only
++config LEDS_LP5812
++	bool "LED Support for TI LP5812 I2C LED controller (Mono Gateway)"
++	depends on LEDS_CLASS && I2C && OF
++	select LEDS_CLASS_MULTICOLOR
++	help
++	  This option enables support for the TI LP5812 12-channel I2C LED
++	  controller used by the Mono Gateway DK chassis status indicators.
++	  Supports per-LED PWM and multi-color slots via the kernel's
++	  multicolor LED class. Source is shipped out-of-tree under
++	  drivers/leds/lp5812/ (originally from we-are-mono/meta-mono).
+diff --git a/drivers/leds/lp5812/Makefile b/drivers/leds/lp5812/Makefile
+new file mode 100644
+index 000000000..888a88dfc
+--- /dev/null
++++ b/drivers/leds/lp5812/Makefile
+@@ -0,0 +1,2 @@
++# SPDX-License-Identifier: GPL-2.0-only
++obj-$(CONFIG_LEDS_LP5812) += leds-lp5812.o
