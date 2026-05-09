@@ -34,6 +34,11 @@ on:
         type: string
         required: false
         default: ''
+      flavor:
+        description: 'Build flavor: default | ask | vpp. Falls back to data/flavor.pin or "default" if unset.'
+        type: string
+        required: false
+        default: ''
     secrets:
       MOK_KEY:
         required: false
@@ -61,6 +66,13 @@ jobs:
     runs-on: ${{ inputs.runs_on || 'ARM64' }}
     permissions:
       contents: write
+    env:
+      # FLAVOR drives FLAVOR-aware bin/ci-*.sh scripts via bin/common.sh.
+      # Empty string lets bin/common.sh fall back to data/flavor.pin or "default".
+      # On `ask`, the legacy ci-consume-ask-kernel.sh + ci-setup-kernel-ask.sh
+      # path is preserved; on `default`/`vpp`, ci-stage-kernel.sh wraps
+      # kernel/common/scripts/stage-kernel.sh.
+      FLAVOR: ${{ inputs.flavor || github.event.inputs.flavor || '' }}
     # No `container:` — build runs natively on the self-hosted ARM64 runner.
     # The runner host (Debian 12 bookworm aarch64) provides all build deps
     # (installed in the "Install Dependencies" step below). Removing the
