@@ -1,0 +1,55 @@
+From: VyOS LS1046A Build <build@vyos.io>
+Date: Mon, 30 Mar 2026 00:00:00 +0000
+Subject: [PATCH] net: sfp: treat EINVAL from sfp_add_phy as non-fatal for
+ rollball modules
+
+When a rollball copper SFP+ module (e.g. SFP-10G-T with RTL8261 PHY)
+is used with a MAC that operates in managed=in-band-status mode (e.g.
+NXP LS1046A FMan 10G MACs), phylink_attach_phy() returns -EINVAL because
+attaching a PHY in INBAND mode with a 10GBASER interface is rejected by
+the current phylink check.
+
+This causes sfp_sm_probe_for_phy() to return -EINVAL, which is treated
+as a fatal error by the SFP state machine (SFP_S_FAIL), permanently
+blocking link establishment even though the MAC can detect carrier via
+10GBASE-R in-band sync without MDIO PHY management.
+
+Fix: when sfp_sm_probe_for_phy() returns -EINVAL (PHY found but not
+attachable to this MAC), log a warning and treat it as "no PHY" (same
+as -ENODEV after retries exhausted). The MAC's in-band link detection
+correctly determines carrier once the copper PHY completes negotiation.
+
+This allows 10GBASE-T copper SFP+ modules with rollball PHYs to work
+with NXP DPAA1 FMan 10G MACs configured with managed=in-band-status.
+
+Signed-off-by: VyOS LS1046A Build <build@vyos.io>
+---
+ drivers/net/phy/sfp.c | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/phy/sfp.c b/drivers/net/phy/sfp.c
+index abcdef0..1234567 100644
+--- a/drivers/net/phy/sfp.c
++++ b/drivers/net/phy/sfp.c
+@@ -2667,8 +2667,19 @@
+ 				dev_info(sfp->dev, "no PHY detected\n");
+ 			}
+ 		} else if (ret) {
+-			sfp_sm_next(sfp, SFP_S_FAIL, 0);
+-			break;
++			if (ret == -EINVAL) {
++				/* PHY found but not attachable (e.g. rollball
++				 * PHY with managed in-band-status). Proceed
++				 * without PHY - MAC in-band link detection
++				 * will determine carrier state.
++				 */
++				dev_warn(sfp->dev,
++					 "PHY probe returned %d, continuing without PHY\n",
++					 ret);
++			} else {
++				sfp_sm_next(sfp, SFP_S_FAIL, 0);
++				break;
++			}
+ 		}
+ 		if (sfp_module_start(sfp->sfp_bus)) {
+ 			sfp_sm_next(sfp, SFP_S_FAIL, 0);

@@ -1,0 +1,17 @@
+# versions.lock — pinned inputs for the consumer build pipeline.
+#
+# Sourced by kernel/common/scripts/*. Each variable uses `: "${VAR:=...}"` so
+# an env-var override (e.g. `KERNEL_VERSION=6.18.30 bash …`) wins over the
+# default. Edit + commit to change the persistent pin.
+
+# ── Kernel ─────────────────────────────────────────────────────────────
+# Pinned to track the producer (kernel-ls1046a-build).
+# As of 2026-05-09 the producer migrated from 6.6.137 LTS to 6.18.x mainline.
+# Bump in a dedicated commit when you want to track a newer point release.
+: "${KERNEL_VERSION:=6.18.28}"
+: "${KERNEL_SERIES:=6.18}"
+export KERNEL_VERSION KERNEL_SERIES
+
+# ── Cross-compile (skipped automatically when uname -m == aarch64) ─────
+: "${ARCH:=arm64}"
+export ARCH
