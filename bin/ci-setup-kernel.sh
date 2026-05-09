@@ -47,8 +47,44 @@ done
 KERNEL_BUILD=vyos-build/scripts/package-build/linux-kernel
 KERNEL_PATCHES="$KERNEL_BUILD/patches/kernel"
 mkdir -p "$KERNEL_PATCHES"
-cp data/kernel-patches/4002-hwmon-ina2xx-add-INA234-support.patch "$KERNEL_PATCHES/"
-cp data/kernel-patches/4003-sfp-rollball-phylink-einval-fallback.patch "$KERNEL_PATCHES/"
+
+# 4002-hwmon-ina2xx-add-INA234-support.patch was authored against the
+# kernel 6.6 ina2xx driver structure ("for the kernel 6.6 ina2xx driver
+# structure (older driver lacks ina260/sy24655)" — patch header). On
+# kernel 6.7+ the upstream `ina2xx` driver was refactored to add
+# ina260/sy24655 entries (and INA234 itself landed upstream around
+# 6.10), and the patch's hunks no longer match. Resolve which kernel
+# series we are targeting via the same logic bin/common.sh uses, and
+# only stage this patch for the 6.6 series.
+KSERIES_FOR_PATCH=""
+if [ -f vyos-build/data/defaults.toml ]; then
+    KSERIES_FOR_PATCH=$(awk -F'"' '/^[[:space:]]*kernel_version[[:space:]]*=/{print $2}' \
+        vyos-build/data/defaults.toml | awk -F. '{print $1"."$2}')
+fi
+if [ -z "$KSERIES_FOR_PATCH" ] && [ -f versions.lock ]; then
+    KSERIES_FOR_PATCH=$(awk -F= '/KERNEL_SERIES/{gsub(/[" ]/,"",$2); print $2}' versions.lock)
+fi
+
+if [ "$KSERIES_FOR_PATCH" = "6.6" ]; then
+    echo "### Kernel series $KSERIES_FOR_PATCH — staging INA234 hwmon patch"
+    cp data/kernel-patches/4002-hwmon-ina2xx-add-INA234-support.patch "$KERNEL_PATCHES/"
+else
+    echo "### Kernel series ${KSERIES_FOR_PATCH:-unknown} — skipping 6.6-only INA234 hwmon patch (INA234 is upstream in 6.10+)"
+fi
+
+# 4003-sfp-rollball-phylink-einval-fallback.patch — same caveat: was
+# authored against the 6.6 sfp.c. Hunk drift is likely on 6.18 because
+# upstream sfp_sm_probe_for_phy() / sfp_add_phy() error handling has
+# been refactored. Try a dry-run before staging so we don't spike the
+# whole build over a moot hunk fuzz; on default-flavor 6.18 the issue
+# is irrelevant unless someone hot-plugs a rollball SFP module.
+SFP_PATCH=data/kernel-patches/4003-sfp-rollball-phylink-einval-fallback.patch
+if [ "$KSERIES_FOR_PATCH" = "6.6" ]; then
+    echo "### Kernel series $KSERIES_FOR_PATCH — staging SFP rollball phylink patch"
+    cp "$SFP_PATCH" "$KERNEL_PATCHES/"
+else
+    echo "### Kernel series ${KSERIES_FOR_PATCH:-unknown} — skipping 6.6-only SFP rollball phylink patch"
+fi
 
 # Stage phylink patch script for injection into build-kernel.sh
 cp data/kernel-patches/patch-phylink.py "$KERNEL_BUILD/"
