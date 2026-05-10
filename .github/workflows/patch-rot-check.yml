@@ -1,0 +1,86 @@
+name: Patch rot check
+
+# Runs weekly against latest upstream HEAD to catch drift before it bites a
+# real build. Does not block, only reports — every step has
+# continue-on-error: true so one failing patch does not mask the others.
+#
+# All staged patches in this repo are git-format unified diffs and apply via
+# `git apply --3way --whitespace=nowarn` in the actual build pipeline. This
+# workflow probes whether they STILL apply against the latest upstream
+# `current` branch (or pinned tag, for the kernel) without context drift.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check vyos-1x patches against latest current
+        run: |
+          set -e
+          git clone --branch current --depth 1 https://github.com/vyos/vyos-1x.git
+          cd vyos-1x
+          rc=0
+          for p in ../data/vyos-1x-*.patch; do
+              if ! git apply --3way --check --whitespace=nowarn "$p" 2>&1; then
+                  echo "::warning file=$p::Patch will not apply cleanly against latest vyos/vyos-1x current"
+                  rc=1
+              fi
+          done
+          exit $rc
+        continue-on-error: true
+
+      - name: Check vyos-build patches against latest current
+        run: |
+          set -e
+          git clone --branch current --depth 1 https://github.com/vyos/vyos-build.git
+          cd vyos-build
+          rc=0
+          for p in ../data/vyos-build-*.patch; do
+              if ! git apply --3way --check --whitespace=nowarn "$p" 2>&1; then
+                  echo "::warning file=$p::Patch will not apply cleanly against latest vyos/vyos-build current"
+                  rc=1
+              fi
+          done
+          exit $rc
+        continue-on-error: true
+
+      - name: Check kernel patches against pinned tag
+        run: |
+          set -e
+          # Kernel pin auto-tracked via vyos-build/data/defaults.toml.
+          # We need vyos-build/ checked out for the sync script to read it.
+          git clone --branch current --depth 1 https://github.com/vyos/vyos-build.git vyos-build
+          KERNEL_VERSION=$(bash -c '. kernel/common/scripts/sync-kernel-version.sh >/dev/null && echo $KERNEL_VERSION')
+          KERNEL_TAG="v${KERNEL_VERSION}"
+          echo "::notice::Probing kernel patches against $KERNEL_TAG"
+          git clone --branch "$KERNEL_TAG" --depth 1 \
+              https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git linux-src
+          cd linux-src
+          rc=0
+          # Iterate every flavor bucket in apply order
+          for bucket in \
+              ../kernel/common/patches/vyos \
+              ../kernel/common/patches/board \
+              ../kernel/common/patches/fixes \
+              ../kernel/flavors/ask/patches/ask \
+              ../kernel/flavors/ask/patches/fixes \
+              ../kernel/flavors/vpp/patches; do
+              [ -d "$bucket" ] || continue
+              for p in "$bucket"/*.patch; do
+                  [ -f "$p" ] || continue
+                  if ! git apply --3way --check --whitespace=nowarn "$p" 2>&1; then
+                      echo "::warning file=$p::Patch will not apply cleanly against $KERNEL_TAG"
+                      rc=1
+                  fi
+              done
+          done
+          exit $rc
+        continue-on-error: true
