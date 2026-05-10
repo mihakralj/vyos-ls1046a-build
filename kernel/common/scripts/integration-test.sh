@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # integration-test.sh — end-to-end acceptance test for kernel/ integration (PR 1+2).
 #
-# Verifies that the consumer's per-flavor kernel/ tree is functionally equivalent
-# to the producer's release/ tree (kernel-ls1046a-build), per
-# plans/INTEGRATION-PLAN.md §2 + §4.
+# Verifies that the this repo's per-flavor kernel/ tree is functionally equivalent
+# to the the archived kernel-build repo's release/ tree (kernel-ls1046a-build), per
+# plans/archive/INTEGRATION-PLAN.md §2 + §4 (historical merge plan).
 #
 # Runs four checkpoints:
-#   A. Layout + count parity  — every required dir exists; file counts match producer.
+#   A. Layout + count parity  — every required dir exists; file counts match absorbed.
 #   B. FLAVOR=ask              — Pass: 16, 0 SDK conflicts, 266 SDK files.
 #   C. FLAVOR=default          — Pass: 6, no SDK section.
 #   D. FLAVOR=vpp              — Pass: 6, no SDK section (smoke; no vpp-specific patches yet).
@@ -94,13 +94,13 @@ for d in "${!EXPECTED_PATCH_COUNT[@]}"; do
     fi
 done
 
-# A.3 — total kernel patch count = 17 after PR 3 (16 producer-absorbed + 1 board)
+# A.3 — total kernel patch count = 17 after PR 3 (16 absorbed + 1 board)
 TOTAL_PATCHES=$(find \
     "$REPO_ROOT/kernel/common/patches" \
     "$REPO_ROOT/kernel/flavors/ask/patches" \
     -maxdepth 3 -type f -name '*.patch' 2>/dev/null | wc -l)
 if [[ "$TOTAL_PATCHES" == "17" ]]; then
-    pass "total ASK kernel patches = 17 (16 producer + 1 consumer-board after PR 3)"
+    pass "total ASK kernel patches = 17 (16 absorbed + 1 board after PR 3)"
 else
     fail "total ASK kernel patches = $TOTAL_PATCHES (expected 17)"
 fi
@@ -108,7 +108,7 @@ fi
 # A.4 — SDK source file count = 266
 SDK_FILES=$(find "$REPO_ROOT/kernel/flavors/ask/sdk-sources" -type f 2>/dev/null | wc -l)
 if [[ "$SDK_FILES" == "266" ]]; then
-    pass "SDK source file count = 266 (matches producer invariant)"
+    pass "SDK source file count = 266 (matches absorbed invariant)"
 else
     fail "SDK source file count = $SDK_FILES (expected 266)"
 fi
@@ -116,7 +116,7 @@ fi
 # A.5 — ASK-edit marker preservation = 35 files
 ASK_EDIT_FILES=$(grep -rl 'ASK-edit' "$REPO_ROOT/kernel/flavors/ask/sdk-sources/" 2>/dev/null | wc -l)
 if [[ "$ASK_EDIT_FILES" == "35" ]]; then
-    pass "ASK-edit-marked SDK files = 35 (preserved from producer ask26..ask41)"
+    pass "ASK-edit-marked SDK files = 35 (preserved from the archived kernel-build repo ask26..ask41)"
 else
     fail "ASK-edit-marked SDK files = $ASK_EDIT_FILES (expected 35)"
 fi
@@ -164,27 +164,27 @@ else
     fail "sync-kernel-version.sh missing or not executable"
 fi
 
-# A.8 — producer parity (if producer repo accessible, cross-check counts)
-# After PR 3 the consumer adds 1 board patch on top of the 16 producer patches.
+# A.8 — absorption parity (if the archived kernel-build repo accessible, cross-check counts)
+# After PR 3 this repo adds 1 board patch on top of the 16 absorbed patches.
 if [[ -n "$PRODUCER_REPO" && -d "$PRODUCER_REPO/release/patches" ]]; then
-    PROD_TOTAL=$(find "$PRODUCER_REPO/release/patches/vyos" \
+    ARCHIVED_TOTAL=$(find "$PRODUCER_REPO/release/patches/vyos" \
                        "$PRODUCER_REPO/release/patches/ask" \
                        "$PRODUCER_REPO/release/patches/fixes" \
                        -maxdepth 1 -type f -name '*.patch' 2>/dev/null | wc -l)
-    CONSUMER_BOARD_COUNT=$(find "$REPO_ROOT/kernel/common/patches/board" -maxdepth 1 -type f -name '*.patch' 2>/dev/null | wc -l)
-    EXPECTED_TOTAL=$((PROD_TOTAL + CONSUMER_BOARD_COUNT))
-    PROD_SDK=$(find "$PRODUCER_REPO/release/patches/kernel/sdk-sources" -type f 2>/dev/null | wc -l)
-    PROD_ASK_EDIT=$(grep -rl 'ASK-edit' "$PRODUCER_REPO/release/patches/kernel/sdk-sources/" 2>/dev/null | wc -l)
+    BOARD_BOARD_COUNT=$(find "$REPO_ROOT/kernel/common/patches/board" -maxdepth 1 -type f -name '*.patch' 2>/dev/null | wc -l)
+    EXPECTED_TOTAL=$((ARCHIVED_TOTAL + BOARD_BOARD_COUNT))
+    ARCHIVED_SDK=$(find "$PRODUCER_REPO/release/patches/kernel/sdk-sources" -type f 2>/dev/null | wc -l)
+    ARCHIVED_ASK_EDIT=$(grep -rl 'ASK-edit' "$PRODUCER_REPO/release/patches/kernel/sdk-sources/" 2>/dev/null | wc -l)
 
     [[ "$EXPECTED_TOTAL" == "$TOTAL_PATCHES" ]] \
-        && pass "producer-parity: kernel patch count ($TOTAL_PATCHES == producer $PROD_TOTAL + consumer-board $CONSUMER_BOARD_COUNT)" \
-        || fail "producer-parity: kernel patch count diverged (consumer=$TOTAL_PATCHES, producer+board=$EXPECTED_TOTAL)"
-    [[ "$PROD_SDK" == "$SDK_FILES" ]] \
-        && pass "producer-parity: SDK file count ($SDK_FILES == $PROD_SDK)" \
-        || fail "producer-parity: SDK file count diverged (consumer=$SDK_FILES, producer=$PROD_SDK)"
-    [[ "$PROD_ASK_EDIT" == "$ASK_EDIT_FILES" ]] \
-        && pass "producer-parity: ASK-edit marker count ($ASK_EDIT_FILES == $PROD_ASK_EDIT)" \
-        || fail "producer-parity: ASK-edit marker count diverged (consumer=$ASK_EDIT_FILES, producer=$PROD_ASK_EDIT)"
+        && pass "absorption-parity: kernel patch count ($TOTAL_PATCHES == absorbed $ARCHIVED_TOTAL + board $BOARD_BOARD_COUNT)" \
+        || fail "absorption-parity: kernel patch count diverged (in-tree=$TOTAL_PATCHES, absorbed+board=$EXPECTED_TOTAL)"
+    [[ "$ARCHIVED_SDK" == "$SDK_FILES" ]] \
+        && pass "absorption-parity: SDK file count ($SDK_FILES == $ARCHIVED_SDK)" \
+        || fail "absorption-parity: SDK file count diverged (in-tree=$SDK_FILES, absorbed=$ARCHIVED_SDK)"
+    [[ "$ARCHIVED_ASK_EDIT" == "$ASK_EDIT_FILES" ]] \
+        && pass "absorption-parity: ASK-edit marker count ($ASK_EDIT_FILES == $ARCHIVED_ASK_EDIT)" \
+        || fail "absorption-parity: ASK-edit marker count diverged (in-tree=$ASK_EDIT_FILES, absorbed=$ARCHIVED_ASK_EDIT)"
 else
     note "PRODUCER_REPO not accessible at $PRODUCER_REPO — skipping cross-repo parity"
 fi
@@ -240,7 +240,7 @@ else
         fi
     }
 
-    # After PR 3: ask=17 (16 producer + 1 board), default=7 (2 vyos+1 board+4 fixes), vpp=7
+    # After PR 3: ask=17 (16 absorbed + 1 board), default=7 (2 vyos+1 board+4 fixes), vpp=7
     run_checkpoint B ask     17 yes
     run_checkpoint C default  7 no
     run_checkpoint D vpp      7 no
@@ -474,4 +474,4 @@ if (( FAILED > 0 )); then
     printf '\n%s✗ Integration NOT verified — see failures above.%s\n' "$_red" "$_rst"
     exit 1
 fi
-printf '\n%s✓ PR 1+2 integration VERIFIED — kernel/ tree is functionally equivalent to producer.%s\n' "$_grn" "$_rst"
+printf '\n%s✓ PR 1+2 integration VERIFIED — kernel/ tree is functionally equivalent to the archived kernel-build repo.%s\n' "$_grn" "$_rst"

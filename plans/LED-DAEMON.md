@@ -359,7 +359,7 @@ cleanest split).
 
 ## 8. Build / packaging integration
 
-This is a producer-side artifact (it ships in the ISO). Files land in
+This artifact ships in the ISO. Files land in
 the repo as:
 
 | File | Purpose |

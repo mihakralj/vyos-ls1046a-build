@@ -82,7 +82,7 @@ KRELEASE="${KVER}-vyos"
 # Post-redistribution (2026-05-05): the cdx / fci / auto_bridge sources
 # live in-tree under release/oot-modules/, imported from the now-archived
 # mihakralj/ask-ls1046a-6.6 @ 97d950e. No upstream fetch is performed;
-# the build copies the three subdirs straight from the producer repo.
+# the build copies the three subdirs straight from the archived kernel-build repo.
 OOT_SRC_DIR="$REPO_ROOT/release/oot-modules"
 [[ -d "$OOT_SRC_DIR/cdx" && -d "$OOT_SRC_DIR/fci" && -d "$OOT_SRC_DIR/auto_bridge" ]] \
     || err "release/oot-modules/{cdx,fci,auto_bridge} missing — repo corrupt?"

@@ -164,18 +164,18 @@ for package in $packages; do
 
     ### ASK out-of-tree kernel modules (cdx, fci, auto_bridge, iptables-extensions)
     #
-    # As of the May 2026 redistribution, OOT module SOURCES live in the producer
-    # repo (kernel-ls1046a-build/release/oot-modules/) and are BUILT BY THE PRODUCER's
-    # build-and-release.yml. The producer ships them as signed .ko inside the
-    # kernel-6.6.137-askN release tarball, alongside the kernel image and
-    # linux-headers .deb. The consumer consumes them via ci-consume-ask-kernel.sh,
-    # which is the canonical (ASK_KERNEL_TAG-driven) path.
+    # OOT module SOURCES live in this repo under
+    # `kernel/flavors/ask/oot-modules/`. When `ASK_KERNEL_TAG` is set, the
+    # corresponding signed .ko binaries are pulled in via
+    # `ci-consume-ask-kernel.sh` from the formerly-separate kernel build
+    # repo's GitHub Releases (mihakralj/kernel-ls1046a-build, now frozen
+    # and absorbed into this tree) — they ride inside the kernel-6.6.137-askN
+    # release tarball alongside the kernel image and linux-headers .deb.
     #
-    # The legacy local-build path that compiled cdx/fci/auto_bridge here from
-    # a sibling clone of mihakralj/ask-ls1046a-6.6 has been removed: the source
-    # is no longer present (it was redistributed to the producer's
-    # release/oot-modules/ tree), and the archived ask-ls1046a-6.6 repo is no
-    # longer cloned by auto-build.yml.
+    # The legacy local-build path that compiled cdx/fci/auto_bridge here
+    # from a sibling clone of the archived ask-ls1046a-6.6 repo has been
+    # removed: the sources now live in-tree under `kernel/flavors/ask/`
+    # and the archived repo is no longer cloned by auto-build.yml.
 
     ### Build ASK userspace binaries from source (cmm, dpa_app, libcli, libfci)
     # Overwrites pre-built binaries installed by ci-setup-vyos-build.sh with source-built versions
@@ -220,8 +220,8 @@ done
 #   get_phys_port_poolinfo_bysize::failed
 #   cdx_create_fragment_bufpool::failed to locate eth bman pool
 #
-# Fix: extract the producer's pinned linux-headers-*.deb (which already
-# ships the FMD UAPI under usr/src/linux-headers-*/include/uapi/linux/fmd/)
+# Fix: extract the pinned linux-headers-*.deb that ci-consume-ask-kernel.sh
+# already staged (which ships the FMD UAPI under usr/src/linux-headers-*/include/uapi/linux/fmd/)
 # and re-run ci-build-ask-userspace.sh against it. dpa_app, libfm.a,
 # libfmc.a, libcli, libfci, and cmm get rebuilt against the same kernel
 # headers we are about to ship, killing the ABI drift.

@@ -1,6 +1,6 @@
 # Flavor: `ask`
 
-NXP ASK fast-path kernel build for LS1046A. Layered on top of `kernel/common/` per [INTEGRATION-PLAN §3.4](../../../plans/INTEGRATION-PLAN.md). Verbatim absorption of the `kernel-ls1046a-build` producer (current pin: `kernel-6.6.137-ask41` patch set, now applied against `linux-6.18.28`).
+NXP ASK fast-path kernel build for LS1046A. Layered on top of `kernel/common/`. (For the historical migration plan that established this layout, see [plans/archive/INTEGRATION-PLAN.md](../../../plans/archive/INTEGRATION-PLAN.md) §3.4. The merge is complete; the formerly-separate kernel build repo has been absorbed.) Current patch set baseline: `kernel-6.6.137-ask41`, now applied against `linux-6.18.28`.
 
 ## Inputs
 
@@ -41,7 +41,7 @@ Required for the ASK userspace stack (`dpa_app`, `fmc`, `cmm`, `cdx`).
 Symptoms split into two **independent** chains — see [AGENTS.md](../../../AGENTS.md) for the full diagnostic checklist:
 
 - **Chain 1** (kernel-side, this repo): `cmm process running [FAILED]` → check `socket(AF_NETLINK, SOCK_RAW, NETLINK_KEY=32) = -EPROTONOSUPPORT`.
-- **Chain 2** (userspace-side, NOT this repo): `dpa_app applied PCD configuration (failed rc=65280)`. Sub-trigger A: MURAM exhaustion (consumer `cdx_pcd.xml` + `fmc` rebuild needed). Sub-trigger B: ARM64 oops in `copy_td_to_ccbase+0x68` — fixed at producer ask39 by gating EHASH cast on `externalHash`.
+- **Chain 2** (userspace-side, NOT this repo): `dpa_app applied PCD configuration (failed rc=65280)`. Sub-trigger A: MURAM exhaustion (`cdx_pcd.xml` + `fmc` rebuild needed). Sub-trigger B: ARM64 oops in `copy_td_to_ccbase+0x68` — fixed at the archived kernel-build repo ask39 by gating EHASH cast on `externalHash`.
 
 ## Validate locally
 

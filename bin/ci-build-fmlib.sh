@@ -10,7 +10,7 @@
 #
 # Rationale:
 #   The mono-ask-extensions patch ADDS FIELDS to `t_FmPcdKgSchemeParams` and
-#   `t_FmPcdHashTableParams`. Any consumer (dpa_app, libfmc) compiled against the
+#   `t_FmPcdHashTableParams`. Any caller (dpa_app, libfmc) compiled against the
 #   patched headers MUST link against a libfm.a built from the same patched
 #   source — otherwise struct offsets diverge → heap corruption → SIGSEGV
 #   inside libfmc C++ destructors during XML config processing.

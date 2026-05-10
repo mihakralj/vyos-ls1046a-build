@@ -3,9 +3,9 @@
 **Status:** Draft v0.4 (rescoped 2026-05-10) — supersedes v0.3 in entirety.
 **Target hardware:** NXP LS1046A Mono Gateway DK (Cortex-A72 ×4, FMan v3L, QMan v3, BMan v3, CAAM SEC 5.4).
 **Target software:** Linux mainline kernel 6.18.x, ARM64, VyOS 1.5+, FLAVOR=ask in this repo.
-**Reference implementation (the "6.12.y cribsheet"):** the NXP ASK source archived in this repo at `ASK/` plus `data/kernel-patches/003-ask-kernel-hooks.patch` (the kernel-hooks patch absorbed from the producer's `mt-6.12.y` baseline; 5797 lines, 64 mainline files modified + 10 new files added).
+**Reference implementation (the "6.12.y cribsheet"):** the NXP ASK source archived in this repo at `ASK/` plus `data/kernel-patches/003-ask-kernel-hooks.patch` (the kernel-hooks patch absorbed from the formerly-separate kernel build repo's `mt-6.12.y` baseline; 5797 lines, 64 mainline files modified + 10 new files added).
 **License intent:** GPL-2.0-or-later for kernel parts (matches NXP's ASK licensing); GPL-2.0-or-later for userspace daemons; LGPL-2.1-or-later for libfci.
-**What this spec is NOT:** a rewrite of `fsl_dpa`, `fsl_dpaa_mac`, `fsl_qbman`, mainline FMan, AF_XDP, tc-flower, CAAM xfrm, or DPDK PMD. Those belong to the **default flavor** of this repo and have separate specs/plans (`plans/NETWORKING-DEEP-DIVE.md`, `plans/VPP.md`, `plans/MIGRATION-PLAN-6.18.md`). Anything below the FMan microcode horizon is out of scope.
+**What this spec is NOT:** a rewrite of `fsl_dpa`, `fsl_dpaa_mac`, `fsl_qbman`, mainline FMan, AF_XDP, tc-flower, CAAM xfrm, or DPDK PMD. Those belong to the **default flavor** of this repo and have separate specs/plans (`plans/NETWORKING-DEEP-DIVE.md`, `plans/VPP.md`, `plans/archive/MIGRATION-PLAN-6.18.md`). Anything below the FMan microcode horizon is out of scope.
 
 ---
 
@@ -15,7 +15,7 @@ The **NXP Application Solutions Kit (ASK)** is a hardware-accelerated packet-pro
 
 The ASK stack as it ships today (FLAVOR=ask in this repo) is a **fork of NXP's LSDK**:
 
-* `kernel/flavors/ask/sdk-sources/` — 266 vendored SDK files (`sdk_fman/`, `sdk_dpaa/`, `fsl_qbman/`, mEMAC bits, …) carrying 35 `/* ASK-edit (askN, …) */` markers. Frozen at PR-7 producer absorption. Cannot be upstreamed. Kconfig-exclusive with mainline (`FSL_SDK_DPA depends on !FSL_DPAA`).
+* `kernel/flavors/ask/sdk-sources/` — 266 vendored SDK files (`sdk_fman/`, `sdk_dpaa/`, `fsl_qbman/`, mEMAC bits, …) carrying 35 `/* ASK-edit (askN, …) */` markers. Frozen at the PR-7 single-repo absorption. Cannot be upstreamed. Kconfig-exclusive with mainline (`FSL_SDK_DPA depends on !FSL_DPAA`).
 * `kernel/flavors/ask/patches/` — 16 patches against linux-6.6.137, ported piecemeal to 6.18.28.
 * `kernel/flavors/ask/oot-modules/cdx/` — 15-file out-of-tree `cdx.ko` (the fast-path engine; programs FMan from kernel context, calls `dpa_app` via UMH at insmod, registers `/dev/cdx_ctrl`, talks to FCI via NETLINK_KEY=32).
 * `kernel/flavors/ask/oot-modules/auto_bridge/auto_bridge.c` — single-file OOT module that watches bridge-FDB and notifies `cdx` of L2 flows eligible for offload.
@@ -113,7 +113,7 @@ The clean-room rewrite replaces the proprietary SDK pieces. Mainline-side change
 What survives unchanged from the proprietary side:
 
 * The **FMan microcode v210.10.1** binary in U-Boot SPI flash. Out of scope.
-* The **vendored SDK `sdk_fman` / `sdk_dpaa` / `fsl_qbman`** drivers under `kernel/flavors/ask/sdk-sources/`. ASK's CC programming goes through the SDK's `FM_PCD_*` API; rewriting that layer is a separate, much larger, project (it's the FMan v3L kernel driver — see `plans/MIGRATION-PLAN-6.18.md`). For ASK's clean-room rewrite, the SDK is the **substrate** the new modules sit on top of, exactly like today. Default-flavor users get mainline `fsl_dpa`/`fsl_dpaa_mac` with no FPEX at all.
+* The **vendored SDK `sdk_fman` / `sdk_dpaa` / `fsl_qbman`** drivers under `kernel/flavors/ask/sdk-sources/`. ASK's CC programming goes through the SDK's `FM_PCD_*` API; rewriting that layer is a separate, much larger, project (it's the FMan v3L kernel driver — see `plans/archive/MIGRATION-PLAN-6.18.md`). For ASK's clean-room rewrite, the SDK is the **substrate** the new modules sit on top of, exactly like today. Default-flavor users get mainline `fsl_dpa`/`fsl_dpaa_mac` with no FPEX at all.
 
 ---
 
@@ -437,13 +437,13 @@ This is informative for the rewrite (test it against these, on real hardware, be
 * `fpex.ko` reports MURAM allocation per-table in `/sys/kernel/debug/fpex/muram` — operators see exhaustion before the SIGSEGV.
 * Integration test pushes a deliberately oversized `cdx_pcd.xml` (e.g. mask `0xffff` on every table) and asserts `fpex-load` returns non-zero **and** `dmesg | grep -F 'MURAM exhausted'` is present.
 
-These two chains have been the **only** ASK production failure modes observed across the producer history (frozen at FLAVOR=ask import). The rewrite passes v1 acceptance only if both chains are reproducible-by-construction (oracle exists) and recoverable-by-construction (clean error messages, not SIGSEGV).
+These two chains have been the **only** ASK production failure modes observed across the absorbed kernel-build history (frozen at FLAVOR=ask import). The rewrite passes v1 acceptance only if both chains are reproducible-by-construction (oracle exists) and recoverable-by-construction (clean error messages, not SIGSEGV).
 
 ---
 
 ## 9. Build-and-CI flow (FLAVOR=ask)
 
-Single-repo, single-workflow model from `AGENTS.md` "Producer absorption (PR 7, 2026-05-09)" stays:
+Single-repo, single-workflow model from `AGENTS.md` "Single-repo absorption (May 2026)" stays:
 
 * Trigger: `gh workflow run "VyOS LS1046A build (self-hosted)" -F flavor=ask`.
 * Kernel staging: `bin/ci-stage-kernel.sh` → `bin/ci-consume-ask-kernel.sh` (existing; pulls 6.18.x kernel + applies the SDK + the new `200-fpex-hooks.patch`).
@@ -478,7 +478,7 @@ Total calendar: ~9 months for two engineers (one kernel, one userspace), assumin
 
 ## 11. Open questions
 
-1. **ucode v210.10.1 redistribution.** Loaded from SPI, not `request_firmware()`. Out of kernel licensing scope. But: can we ship it in our U-Boot image? Producer side already does; legal sign-off was on the producer side, not consumer. Confirm before public release.
+1. **ucode v210.10.1 redistribution.** Loaded from SPI, not `request_firmware()`. Out of kernel licensing scope. But: can we ship it in our U-Boot image? The legal sign-off was completed in the now-archived kernel build repo's release cycle and the U-Boot image already redistributes it. Confirm before public release.
 2. **Should `fpex_fci` be in-tree or OOT?** In-tree is cleaner (lives next to `net/key/af_key.c`) but requires a small `200-fpex-hooks.patch` modification per kernel rebase. OOT is more isolated. v1: in-tree-as-built-in (`obj-y`), gated by `CONFIG_FPEX_FCI`, depends on `NET_KEY`.
 3. **Drop NETLINK_KEY=32 in v2?** `nfnetlink` would be more idiomatic. But that breaks libfci's ABI for any external vendor tool that links it. Decision: keep NETLINK_KEY=32 forever for compat. Add an `nfnetlink` parallel surface in v2 if anyone asks.
 4. **`fpex` vs `dpaa1-fpex` vs another name.** Avoiding collision with mainline `drivers/cdx/`. Working name `fpex` (Fast-Path EXtension). Open to `dpaa1-fpex` if upstream submission ever happens.

@@ -2,12 +2,12 @@
 # ask-modules-load.sh — Load ASK out-of-tree kernel modules in correct order.
 #
 # Background:
-#   The producer release (kernel-ls1046a-build, kernel-6.6.135-askN) ships an
+#   The pinned ASK kernel release (kernel-6.6.137-askN) ships an
 #   `ask-modules-<KVER>-vyos_*_arm64.deb` whose contents install to the
 #   canonical kernel-modules location:
 #       /lib/modules/<KVER>/extra/ask/cdx.ko
 #       /lib/modules/<KVER>/extra/ask/fci.ko
-#       /lib/modules/<KVER>/extra/ask/auto_bridge.ko   (when the producer
+#       /lib/modules/<KVER>/extra/ask/auto_bridge.ko   (when the release
 #                                                       starts shipping it)
 #
 #   The deb's postinst runs depmod, so in-tree dependencies are resolvable
@@ -18,7 +18,7 @@
 # Behaviour:
 #   * Hard-fails (exit non-zero) if cdx.ko or fci.ko is missing/insmod errors,
 #     so systemd marks the unit failed and `ask-check` reports the right thing.
-#   * Tolerates a missing auto_bridge.ko (warning only) until the producer
+#   * Tolerates a missing auto_bridge.ko (warning only) until the release
 #     starts shipping it.
 #   * Skips quietly (exit 0) when DPAA isn't present (non-LS1046A or generic
 #     kernel) — there's nothing to do.
@@ -85,7 +85,7 @@ load_optional() {
     local mod="$1"
     local path="$MODDIR/${mod}.ko"
     if [ ! -f "$path" ]; then
-        echo "ask-modules-load: optional module $mod.ko absent — producer deb does not ship it yet"
+        echo "ask-modules-load: optional module $mod.ko absent — ask-modules .deb does not ship it yet"
         return 0
     fi
     echo "ask-modules-load: insmod $mod"

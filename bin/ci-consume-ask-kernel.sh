@@ -1,9 +1,15 @@
 #!/bin/bash
 # ci-consume-ask-kernel.sh — download prebuilt ASK kernel + userspace .debs
-# from mihakralj/kernel-ls1046a-build and stage them for live-build.
+# from the archived GitHub Releases of the formerly-separate kernel build
+# repo (mihakralj/kernel-ls1046a-build, now frozen and absorbed into this
+# tree), and stage them for live-build.
 #
-# Replaces the from-scratch kernel compile previously driven by
-# ci-setup-kernel.sh + ci-build-packages.sh (linux-kernel target).
+# This is the OPTIONAL fast path: when `data/ask-kernel.pin` (or the
+# `ASK_KERNEL_TAG` env / workflow input) names a published tag, the kernel
+# is fetched as a .deb instead of being compiled from source via
+# ci-setup-kernel.sh + ci-setup-kernel-ask.sh + ci-build-packages.sh. The
+# from-scratch path remains the authoritative build; this script merely
+# short-cuts it when a matching release is available.
 #
 # Reads the pinned tag from data/ask-kernel.pin. Override with env
 # ASK_KERNEL_TAG or workflow_dispatch input.
@@ -152,8 +158,8 @@ if [ -d "vyos-build/data/live-build-config" ]; then
         [ -f "$f" ] && cp -v "$f" "$VB_PKG_CHROOT/"
     done
     # ASK userspace overrides: iptables + xtables libs (QOSMARK/QOSCONNMARK),
-    # ppp/ppp-dev (NXP PPPoE offload / CMM relay), rp-pppoe when ever the
-    # producer ships one. Must be present in packages.chroot/ so live-build's
+    # ppp/ppp-dev (NXP PPPoE offload / CMM relay), rp-pppoe when the
+    # release ships one. Must be present in packages.chroot/ so live-build's
     # dpkg pass installs them instead of apt pulling stock Debian. Without
     # this, Debian bookworm's iptables_1.8.9-2 and ppp_2.4.9-1+1.1+b1 win
     # over our _1.8.10+ask1 / _+ask1 builds and the ISO ships non-ASK
@@ -193,8 +199,8 @@ VERIFY_LIST=packages/.ask-expected-packages.txt
 echo "linux-image-${KVER}-vyos"   >> "$VERIFY_LIST"
 echo "linux-headers-${KVER}-vyos" >> "$VERIFY_LIST"
 # Derive ASK userspace expectations from what we actually downloaded,
-# so removing or adding a +ask build in the producer repo auto-adjusts
-# the assertion without a corresponding consumer-side edit.
+# so removing or adding a +ask build in the published release auto-adjusts
+# the assertion without a hand-edit here.
 shopt -s nullglob
 for f in packages/iptables_*+ask*_arm64.deb \
          packages/libxtables*_*+ask*_arm64.deb \

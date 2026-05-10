@@ -37,4 +37,4 @@ Expected (today, before flavor patches are added): `Pass: 6  Fail: 0`, no SDK se
 
 ## Status
 
-PR 1+2 — scaffold only (empty `patches/` and `kernel-config/` dirs). VPP-specific work scheduled **after** both `default` and `ask` flavors are fully green per user instruction. Tracking issues to be filed in the consumer repo.
+PR 1+2 — scaffold only (empty `patches/` and `kernel-config/` dirs). VPP-specific work scheduled **after** both `default` and `ask` flavors are fully green per user instruction. Tracking issues to be filed in this repo.

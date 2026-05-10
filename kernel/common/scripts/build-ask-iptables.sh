@@ -190,7 +190,7 @@ done
 ok "installed ASK overlay into $(basename "$SRC_DIR")"
 
 # Generate a clean unified diff that adds these files (against /dev/null),
-# so a downstream consumer can reproduce exactly what we changed.
+# so a downstream reader can reproduce exactly what we changed.
 PATCH_FILE="$WS/0999-ask-qosmark-extensions.patch"
 {
     printf 'Description: Add NXP ASK QOSMARK/QOSCONNMARK xtables extensions\n'

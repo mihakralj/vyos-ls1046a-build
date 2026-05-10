@@ -4,8 +4,10 @@
 # Expects: GITHUB_WORKSPACE set
 #
 # When ASK_KERNEL_TAG is set, this script is a no-op: the kernel is consumed
-# prebuilt from mihakralj/kernel-ls1046a-build via bin/ci-consume-ask-kernel.sh,
-# so defconfig mutations and build-kernel.sh injections are meaningless.
+# prebuilt from the formerly-separate kernel build repo's GitHub Releases
+# (mihakralj/kernel-ls1046a-build, now frozen and absorbed into this tree)
+# via bin/ci-consume-ask-kernel.sh, so defconfig mutations and build-kernel.sh
+# injections are meaningless.
 set -ex
 cd "${GITHUB_WORKSPACE:-.}"
 
@@ -51,8 +53,9 @@ done
 # net.core.default_qdisc=fq before sch_fq.ko is loaded, producing
 #   "Error -ENOENT writing to proc file to set sysctl parameter
 #    'net.core.default_qdisc=fq'"
-# and the qdisc silently stays at pfifo_fast. Producer kernel-6.6.137-askN
-# ships =y for the same reason (see AGENTS.md).
+# and the qdisc silently stays at pfifo_fast. The pinned ASK kernel
+# (kernel-6.6.137-askN release tarball) also ships =y for the same reason —
+# see AGENTS.md.
 NS_FRAG=vyos-build/scripts/package-build/linux-kernel/config/13-net-sched.config
 if [ -f "$NS_FRAG" ]; then
     echo "### Forcing CONFIG_NET_SCH_FQ=y in $NS_FRAG (was =m → ENOENT at boot)"
@@ -81,47 +84,38 @@ if [ -z "$KSERIES_FOR_PATCH" ] && [ -f versions.lock ]; then
     KSERIES_FOR_PATCH=$(awk -F= '/KERNEL_SERIES/{gsub(/[" ]/,"",$2); print $2}' versions.lock)
 fi
 
+# INA234 hwmon patch was relocated under the ASK flavor in May 2026 — it is
+# only meaningful on the kernel 6.6 line (ASK), since INA234 is upstream from
+# kernel 6.10 onwards. The default + vpp flavors track 6.18+, so this is no
+# longer staged from the legacy path; the FLAVOR=ask build picks it up from
+# kernel/flavors/ask/patches/fixes/ via ci-setup-kernel-ask.sh.
 if [ "$KSERIES_FOR_PATCH" = "6.6" ]; then
-    echo "### Kernel series $KSERIES_FOR_PATCH — staging INA234 hwmon patch"
-    cp data/kernel-patches/4002-hwmon-ina2xx-add-INA234-support.patch "$KERNEL_PATCHES/"
-else
-    echo "### Kernel series ${KSERIES_FOR_PATCH:-unknown} — skipping 6.6-only INA234 hwmon patch (INA234 is upstream in 6.10+)"
+    echo "### Kernel series $KSERIES_FOR_PATCH — INA234 hwmon patch is provided by FLAVOR=ask (kernel/flavors/ask/patches/fixes/4002-*)"
 fi
 
-# 4003-sfp-rollball-phylink-einval-fallback.patch — applies to both 6.6
-# and 6.18 (verified 2026-05-10: kernel/common/patches/board/101-sfp-rollball-
-# phylink-fallback.patch is byte-identical and stages cleanly into
-# linux-6.18.28/drivers/net/phy/sfp.c via the new stage-kernel.sh path).
-# Required for SFP-10G-T copper rollball modules (RTL8261 PHY) on FMan 10G
-# MACs in managed=in-band-status mode — without it sfp_sm_probe_for_phy()
-# returns -EINVAL → SFP_S_FAIL → no link. Symptom on hardware: SFP+ DAC
-# (no PHY) comes up, SFP-10G-T copper does not.
-SFP_PATCH=data/kernel-patches/4003-sfp-rollball-phylink-einval-fallback.patch
-echo "### Kernel series ${KSERIES_FOR_PATCH:-unknown} — staging SFP rollball phylink patch"
-cp "$SFP_PATCH" "$KERNEL_PATCHES/"
+# Shared LS1046A board patches now live under kernel/common/patches/board/.
+# Source of truth: kernel/common/patches/board/{101,4005,4006,4007,4009}.patch.
+# These cover SFP rollball PHY EINVAL fallback (101 = former 4003), the
+# phylink in-band SFP fallback (4005), the DPAA XDP queue-index AF_XDP fix
+# (4006), the LS1046A xhci/dwc3 quirks (4007) and the OEM SFP-10G-T quirk
+# (4009). All are byte-identical to the formerly-duplicated copies under
+# data/kernel-patches/ which were removed in the legacy-path tidy.
+BOARD_PATCH_DIR=kernel/common/patches/board
+[ -d "$BOARD_PATCH_DIR" ] || { echo "ERROR: $BOARD_PATCH_DIR missing"; exit 1; }
+echo "### Staging LS1046A board patches from $BOARD_PATCH_DIR"
+cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/4007-xhci-ls1046a-dwc3-quirks.patch"     "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/4009-sfp-oem-rollball-quirk.patch"       "$KERNEL_PATCHES/"
 
-# Stage LS1046A board patches converted from former Python patchers
-# (patch-phylink.py / patch-dpaa-xdp-queue-index.py / patch-xhci-ls1046a-quirks.py
-# became 4005/4006/4007 unified diffs in the patch-migration-3way work).
-# These now flow through the standard $KERNEL_PATCHES path and are applied
-# by build-kernel.sh's normal patch loop instead of inline python.
-cp data/kernel-patches/4005-phylink-inband-sfp-fallback.patch       "$KERNEL_PATCHES/"
-cp data/kernel-patches/4006-dpaa-xdp-rxq-queue-index.patch          "$KERNEL_PATCHES/"
-cp data/kernel-patches/4007-xhci-ls1046a-dwc3-quirks.patch          "$KERNEL_PATCHES/"
-# 4009 — replaces the in-tree OEM/SFP-10G-T quirk so it uses the
-# sfp_fixup_fs_10gt fixup chain (rewrites connector/extended_cc to
-# 10GBASE-T short-reach BEFORE phylink parses the SR-misadvertised
-# EEPROM). Without this the FMan 10G MAC rejects the module with
-# "unsupported SFP module: no common interface modes" even after the
-# rollball PHY-attach EINVAL is caught by patch 4003. See the patch
-# header for the full kernel-side analysis.
-cp data/kernel-patches/4009-sfp-oem-rollball-quirk.patch            "$KERNEL_PATCHES/"
-
-# Stage FMD Shim source for injection into build-kernel.sh
-cp data/kernel-patches/fsl_fmd_shim.c "$KERNEL_BUILD/"
-
-# Stage LP5812 LED driver source for injection into build-kernel.sh
-cp -r data/kernel-patches/lp5812 "$KERNEL_BUILD/"
+# Stage FMD Shim + LP5812 source from the new common files layout.
+# Source of truth: kernel/common/files/{fsl_fmd_shim.c,lp5812/}.
+FILES_DIR=kernel/common/files
+[ -f "$FILES_DIR/fsl_fmd_shim.c" ] || { echo "ERROR: $FILES_DIR/fsl_fmd_shim.c missing"; exit 1; }
+[ -d "$FILES_DIR/lp5812" ]         || { echo "ERROR: $FILES_DIR/lp5812 missing"; exit 1; }
+cp "$FILES_DIR/fsl_fmd_shim.c" "$KERNEL_BUILD/"
+cp -r "$FILES_DIR/lp5812"      "$KERNEL_BUILD/"
 
 # Write injection block to temp file (heredoc avoids all quoting issues).
 # Note: the former phylink / dpaa-xdp / xhci-ls1046a Python patchers have

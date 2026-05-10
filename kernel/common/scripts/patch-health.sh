@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # patch-health.sh — FLAVOR-aware dry-run probe.
 #
-# Layered on the producer's patch-health.sh (./scripts/patch-health.sh in
-# kernel-ls1046a-build) but adapted to the consumer's per-flavor layout
-# (per plans/INTEGRATION-PLAN.md §2 + §4).
+# Layered on the the archived kernel-build repo's patch-health.sh (./scripts/patch-health.sh in
+# kernel-ls1046a-build) but adapted to the this repo's per-flavor layout
+# (per plans/archive/INTEGRATION-PLAN.md §2 + §4 — historical merge plan).
 #
 # Buckets, applied in this order:
 #   kernel/common/patches/vyos/*.patch           (always)
@@ -29,7 +29,7 @@
 
 set -euo pipefail
 
-# ── Derive paths (consumer layout, distinct from producer's $REPO_ROOT/scripts/common.sh) ──
+# ── Derive paths (in-tree layout, distinct from the archived kernel-build repo's $REPO_ROOT/scripts/common.sh) ──
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # kernel/common/scripts/ → repo root is three levels up
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -44,8 +44,8 @@ mkdir -p "$WORK_DIR"
 # shellcheck source=common.sh
 source "$SCRIPT_DIR/common.sh"
 
-# common.sh unconditionally re-exports SCRIPTS_DIR=$REPO_ROOT/scripts (producer
-# layout). Restore consumer-layout values that we actually want to use.
+# common.sh unconditionally re-exports SCRIPTS_DIR=$REPO_ROOT/scripts (orig kernel-build layout
+# layout). Restore in-tree-layout values that we actually want to use.
 export SCRIPTS_DIR="$SCRIPT_DIR"
 export WORK_DIR="$REPO_ROOT/work"
 mkdir -p "$WORK_DIR"
@@ -67,7 +67,7 @@ while (( $# )); do
     case "$1" in
         --flavor)  FLAVOR="$2"; shift 2 ;;
         --flavor=*) FLAVOR="${1#--flavor=}"; shift ;;
-        --source) shift 2 ;;  # accepted-and-ignored for back-compat with producer
+        --source) shift 2 ;;  # accepted-and-ignored for back-compat with the archived kernel-build repo
         -h|--help) sed -n '1,40p' "$0"; exit 0 ;;
         *) VERSION_ARG="$1"; shift ;;
     esac
@@ -84,7 +84,7 @@ FLAVOR_DIR="$REPO_ROOT/kernel/flavors/$FLAVOR"
 SDK_DIR="$REPO_ROOT/kernel/flavors/ask/sdk-sources"  # ASK-only, present iff $FLAVOR == ask
 
 [[ -d "$COMMON_DIR/patches" ]] \
-    || err "kernel/common/patches/ not found at $COMMON_DIR/patches (consumer layout)"
+    || err "kernel/common/patches/ not found at $COMMON_DIR/patches (in-tree layout)"
 [[ -d "$FLAVOR_DIR" ]] \
     || err "kernel/flavors/$FLAVOR/ not found (unknown flavor)"
 

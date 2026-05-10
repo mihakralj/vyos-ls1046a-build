@@ -3,7 +3,7 @@
 Post-patch source trees for ASK userspace components. Imported from upstream at
 the pinned tag, with the in-tree ASK patch applied. Future edits land directly
 on the vendored tree and are annotated with `ASK-edit (askN): rationale`
-markers (same discipline the producer uses for `release/patches/kernel/sdk-sources/`).
+markers (same discipline the kernel side uses for `kernel/flavors/ask/sdk-sources/`).
 
 | Component | Upstream | Tag | Imported HEAD | Files | Patch (audit copy) |
 |---|---|---|---|---|---|
@@ -34,7 +34,7 @@ directly, network only needed for `git clone` of THIS repo.
 
 ## Adding a new in-tree edit
 
-Same discipline as the producer's SDK direct-edit policy. Each delta from the
+Same discipline as the kernel SDK direct-edit policy. Each delta from the
 imported upstream gets a marker comment:
 
 ```c
