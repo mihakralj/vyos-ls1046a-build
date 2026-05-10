@@ -152,7 +152,11 @@ fi
 # of asking the Debian/VyOS mirrors for 6.18.26-vyos (which doesn't
 # exist there).
 PKG_CHROOT="vyos-build/data/live-build-config/packages.chroot"
-ASK_KERNEL_DEB=$(find "$PKG_CHROOT" -maxdepth 1 -name 'linux-image-*-vyos_*_arm64.deb' ! -name '*-dbg*' 2>/dev/null | head -1)
+if [ -d "$PKG_CHROOT" ]; then
+  ASK_KERNEL_DEB=$(find "$PKG_CHROOT" -maxdepth 1 -name 'linux-image-*-vyos_*_arm64.deb' ! -name '*-dbg*' 2>/dev/null | head -1 || true)
+else
+  ASK_KERNEL_DEB=
+fi
 if [ -n "$ASK_KERNEL_DEB" ]; then
   # linux-image-6.6.137-vyos_6.6.137-1_arm64.deb -> 6.6.137
   ASK_KVER=$(basename "$ASK_KERNEL_DEB" | sed -E 's/^linux-image-([0-9]+\.[0-9]+\.[0-9]+)-vyos_.*$/\1/')
