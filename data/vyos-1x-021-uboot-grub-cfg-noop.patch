@@ -1,0 +1,82 @@
+diff --git a/python/vyos/system/compat.py b/python/vyos/system/compat.py
+index 40b38b3..5011f69 100644
+--- a/python/vyos/system/compat.py
++++ b/python/vyos/system/compat.py
+@@ -30,6 +30,18 @@
+ 
+ TMPL_GRUB_COMPAT: str = 'grub/grub_compat.j2'
+ 
++# LS1046A / U-Boot boards have no GRUB: /boot/grub/grub.cfg never exists.
++# Detect once at import time so every grub_cfg_update() call short-circuits
++# without raising FileNotFoundError from parse_menuentries() / vars_read().
++def _is_uboot_board() -> bool:
++    try:
++        with open('/proc/device-tree/compatible', 'rb') as _f:
++            return b'fsl,ls1046a' in _f.read()
++    except OSError:
++        return False
++
++_UBOOT_BOARD: bool = _is_uboot_board()
++
+ # define regexes and variables
+ REGEX_VERSION = r'^menuentry "[^\n]*{\n[^}]*\s+linux /boot/(?P<version>\S+)/[^}]*}'
+ REGEX_MENUENTRY = r'^menuentry "[^\n]*{\n[^}]*\s+linux /boot/(?P<version>\S+)/vmlinuz (?P<options>[^\n]+)\n[^}]*}'
+@@ -48,6 +60,10 @@ class DowngradingImageTools(Exception):
+ 
+ 
+ def mode():
++    # On U-Boot boards (LS1046A) there is no GRUB at all; never enter the
++    # legacy grub.cfg compat path.
++    if _UBOOT_BOARD:
++        return False
+     if grub.get_cfg_ver() >= SYSTEM_CFG_VER:
+         return False
+ 
+@@ -327,6 +343,9 @@ def grub_cfg_fields(root_dir: str = '') -> dict:
+ 
+ def render_grub_cfg(root_dir: str = '') -> None:
+     """Render grub.cfg for legacy compatibility"""
++    # U-Boot boards (LS1046A) have no /boot/grub/grub.cfg to render.
++    if _UBOOT_BOARD:
++        return
+     if not root_dir:
+         root_dir = disk.find_persistence()
+ 
+diff --git a/python/vyos/system/grub_util.py b/python/vyos/system/grub_util.py
+index edaea8a..a9163fd 100644
+--- a/python/vyos/system/grub_util.py
++++ b/python/vyos/system/grub_util.py
+@@ -18,6 +18,15 @@
+ from vyos.system import image
+ from vyos.system import compat
+ 
++def _is_uboot_board() -> bool:
++    """LS1046A / U-Boot boards have no GRUB; skip cmdline / serial-console
++    updates that would otherwise read or write /boot/grub/grub.cfg."""
++    try:
++        with open('/proc/device-tree/compatible', 'rb') as _f:
++            return b'fsl,ls1046a' in _f.read()
++    except OSError:
++        return False
++
+ @compat.grub_cfg_update
+ def set_serial_console(console_type: str, console_num: str,
+                        console_speed: str, root_dir: str = '') -> None:
+@@ -37,6 +46,8 @@ def set_serial_console(console_type: str, console_num: str,
+ def update_serial_console(console_type: str, console_num: str,
+                           console_speed: str, root_dir: str = '') -> None:
+     """Update console_speed if different from current value"""
++    if _is_uboot_board():
++        return
+ 
+     if not root_dir:
+         root_dir = disk.find_persistence()
+@@ -70,6 +81,8 @@ def update_kernel_cmdline_options(cmdline_options: str,
+                                   root_dir: str = '',
+                                   version = image.get_running_image()) -> None:
+     """Update Kernel custom cmdline options"""
++    if _is_uboot_board():
++        return
+     if not root_dir:
+         root_dir = disk.find_persistence()
+ 

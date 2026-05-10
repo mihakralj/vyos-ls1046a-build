@@ -22,3 +22,18 @@ rm -f /etc/init.d/kexec-load /etc/init.d/kexec
 ln -sf /dev/null /etc/systemd/system/acpid.service
 ln -sf /dev/null /etc/systemd/system/acpid.socket
 ln -sf /dev/null /etc/systemd/system/acpid.path
+
+# vyos-grub-update.service: this is a U-Boot board, GRUB is never installed.
+# The service runs grub_update.py which calls image.is_live_boot() — that
+# returns False on installed eMMC systems (BOOT_IMAGE= is not set by booti),
+# so the script proceeds and unconditionally reads //boot/grub/grub.cfg,
+# raising FileNotFoundError. The failure cascades into vyos-router (which
+# Wants= it via vyos-router.service.wants/) and produces the "Configuration
+# error" line on the serial console. There is nothing to do here on a
+# U-Boot board — mask the unit.
+ln -sf /dev/null /etc/systemd/system/vyos-grub-update.service
+# Also remove the .wants symlink so vyos-router doesn't block on a masked
+# unit (systemd treats masked Wants= as a soft skip but the explicit
+# removal makes the boot dependency graph cleaner and avoids the noisy
+# [FAILED] line).
+rm -f /etc/systemd/system/vyos-router.service.wants/vyos-grub-update.service
