@@ -134,13 +134,40 @@ for sub in ask fixes ""; do
 done
 (( ${#PATCHES[@]} )) || err "no patches found for flavor=$FLAVOR"
 
+# Turn $KSRC into a throwaway git repo so that `git apply --3way` has access to
+# the pristine blobs for fallback 3-way merge. This is the same strategy used
+# by bin/ci-setup-vyos1x.sh / bin/ci-setup-vyos-build.sh on their upstream
+# clones. We commit per-bucket so a later patch sees previous patches' context.
+if [[ ! -d "$KSRC/.git" ]]; then
+    info "initializing throwaway git repo in $KSRC for --3way fallback…"
+    ( cd "$KSRC" && git init -q && git config user.email ci@local && \
+        git config user.name ci && git config gc.auto 0 && \
+        git add -A && git commit -qm "linux-$KVER pristine baseline" )
+fi
+
+# Drop .gitattributes so Mergiraf is wired as the merge driver for source
+# files when --3way needs to fall back to a real 3-way merge.
+cat > "$KSRC/.gitattributes" <<'GITATTR'
+*.c     merge=mergiraf
+*.h     merge=mergiraf
+*.py    merge=mergiraf
+*.json  merge=mergiraf
+*.yml   merge=mergiraf
+*.yaml  merge=mergiraf
+*.toml  merge=mergiraf
+*.xml   merge=mergiraf
+GITATTR
+
 info "applying ${#PATCHES[@]} patches to linux-$KVER…"
 for p in "${PATCHES[@]}"; do
     name="$(basename "$(dirname "$p")")/$(basename "$p")"
-    if patch --no-backup-if-mismatch -p1 -d "$KSRC" -s < "$p"; then
+    if git -C "$KSRC" apply --3way --whitespace=nowarn "$p" 2>&1; then
         printf '   ✓ %s\n' "$name"
+        ( cd "$KSRC" && git add -A && git commit -qm "$name" --allow-empty )
     else
-        err "patch failed: $name"
+        # Fall back to --reject to surface failing hunks for the maintainer.
+        git -C "$KSRC" apply --reject --whitespace=nowarn "$p" 2>&1 || true
+        err "patch failed: $name (see *.rej under $KSRC)"
     fi
 done
 
