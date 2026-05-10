@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # stage-kernel.sh — produce a fully patched + configured kernel tree for one flavor.
 #
-# Per plans/INTEGRATION-PLAN.md §3.4 + §3.5. This is the FLAVOR-aware analogue
-# of the consumer's bin/ci-setup-kernel.sh. It does NOT touch the consumer's
+# Per plans/archive/INTEGRATION-PLAN.md §3.4 + §3.5 (historical merge plan).
+# of the this repo's bin/ci-setup-kernel.sh. It does NOT touch the this repo's
 # legacy ci-setup-kernel.sh — the legacy script is what the existing CI uses
 # today; this script is the new path for FLAVOR builds (PR 3+).
 #
@@ -48,7 +48,7 @@ mkdir -p "$WORK_DIR"
 
 # shellcheck source=common.sh
 source "$SCRIPT_DIR/common.sh"
-# common.sh re-exports SCRIPTS_DIR/WORK_DIR; restore consumer-layout values.
+# common.sh re-exports SCRIPTS_DIR/WORK_DIR; restore in-tree-layout values.
 export SCRIPTS_DIR="$SCRIPT_DIR"
 export WORK_DIR="$REPO_ROOT/work"
 

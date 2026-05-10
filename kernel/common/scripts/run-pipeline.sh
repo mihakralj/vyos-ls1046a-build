@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run-pipeline.sh — orchestrate the ASK 6.6 build pipeline end-to-end.
 #
-# Pipeline (post-redistribution; producer is now self-contained):
+# Pipeline (post-redistribution; the build is now self-contained):
 #   1. fetch-kernel.sh       (linux-6.6.y stable tarball)
 #   2. patch-health.sh       (verify in-tree patches apply cleanly)
 #   3. apply-to-tree.sh      (--build: stamp kernel tree)

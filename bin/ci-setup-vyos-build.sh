@@ -145,7 +145,7 @@ fi
 # only mismatch is the version number in the template.
 #
 # Read the kernel version from the staged .deb (this self-adjusts when
-# the producer cuts a new askN) and rewrite kernel_version in
+# a new askN release is published) and rewrite kernel_version in
 # defaults.toml so build-vyos-image renders
 # `linux-image-6.6.137` and live-build resolves
 # `linux-image-6.6.137-vyos` against our packages.chroot/ .deb instead
@@ -435,8 +435,8 @@ chmod +x "$CHROOT/usr/local/bin/ask-conntrack-fix.sh"
 cp data/systemd/ask-conntrack-fix.service "$CHROOT/etc/systemd/system/ask-conntrack-fix.service"
 cp data/systemd/ask-conntrack-fix.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/ask-conntrack-fix.conf"
 
-### ASK kernel modules — shipped by the producer's ask-modules deb
-# (consumed via ci-consume-ask-kernel.sh, installed under
+### ASK kernel modules — shipped inside the kernel-6.6.137-askN release's
+# ask-modules .deb (consumed via ci-consume-ask-kernel.sh, installed under
 #  /lib/modules/<KVER>/extra/ask/). No staging needed here; the loader
 #  ask-modules-load.sh now reads from /lib/modules/$(uname -r)/extra/ask.
 

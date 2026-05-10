@@ -136,7 +136,7 @@ userspace daemon.
 ### 1.5 Boot-time defaults
 
 To make the LEDs come up in a known state on every boot, drop a oneshot
-unit (do this on the running system, **not** the producer repo):
+unit on the running system:
 
 ```bash
 cat >/etc/systemd/system/mono-leds.service <<'EOF'

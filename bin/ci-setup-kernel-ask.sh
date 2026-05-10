@@ -54,31 +54,34 @@ DEFCONFIG=vyos-build/scripts/package-build/linux-kernel/config/arm64/vyos_defcon
 # Remove mainline DPAA ETH — ASK SDK replaces it
 sed -i '/CONFIG_FSL_DPAA_ETH/d' "$DEFCONFIG"
 
-# Append ASK config fragment
+# Append ASK config fragment (relocated under kernel/flavors/ask/ in May 2026)
 echo "### Appending ASK kernel config fragment"
-cat data/kernel-config/ls1046a-ask.config >> "$DEFCONFIG"
+cat kernel/flavors/ask/kernel-config/ls1046a-ask.config >> "$DEFCONFIG"
 
 ### 2. Kernel hooks patch — copy to patches dir (applied by build-kernel.sh L50-55)
 KERNEL_BUILD=vyos-build/scripts/package-build/linux-kernel
 KERNEL_PATCHES="$KERNEL_BUILD/patches/kernel"
 mkdir -p "$KERNEL_PATCHES"
 
-# Use our local fixed copy (has curr_time declaration in struct xfrm_state)
-# NOT the ASK repo copy which is missing this field
+# ASK monolithic kernel hooks patch — the 010..080 splits under
+# kernel/flavors/ask/patches/ask/ are intentionally incomplete (32 files'
+# worth of xfrm/conntrack/bridge hooks have no split equivalent yet), so the
+# legacy build path keeps applying the monolithic patch as the source of
+# truth. The new stage-kernel.sh path uses the splits instead and is gated
+# behind FLAVOR=default|vpp until the splits cover the full hook surface.
 cp data/kernel-patches/003-ask-kernel-hooks.patch "$KERNEL_PATCHES/"
-# INA234 hwmon support (8x power sensors on Mono Gateway)
-cp data/kernel-patches/4002-hwmon-ina2xx-add-INA234-support.patch "$KERNEL_PATCHES/"
-# SFP rollball PHY EINVAL fallback (SFP-10G-T copper modules)
-cp data/kernel-patches/4003-sfp-rollball-phylink-einval-fallback.patch "$KERNEL_PATCHES/"
-# swphy patch: maps 10G/5G/2.5G to SWMII_SPEED_1000 for SDK fixed-link 10G MACs
-cp data/kernel-patches/4004-swphy-support-10g-fixed-link-speed.patch "$KERNEL_PATCHES/"
-# LS1046A board patches converted from former Python patchers (4005/4006/4007)
-# and the SDK DPAA probe-fix (4008, formerly patch-dpaa-probe-fix.py).
-cp data/kernel-patches/4005-phylink-inband-sfp-fallback.patch "$KERNEL_PATCHES/"
-cp data/kernel-patches/4006-dpaa-xdp-rxq-queue-index.patch    "$KERNEL_PATCHES/"
-cp data/kernel-patches/4007-xhci-ls1046a-dwc3-quirks.patch    "$KERNEL_PATCHES/"
-cp data/kernel-patches/4008-sdk-dpaa-probe-fix.patch          "$KERNEL_PATCHES/"
-echo "### ASK hooks + swphy + xhci + sdk-probe-fix patches staged at $KERNEL_PATCHES/"
+
+# ASK-specific kernel patches now live under kernel/flavors/ask/patches/fixes/.
+# Source of truth: kernel/flavors/ask/patches/fixes/{4002,4004,4008}.patch.
+#   4002 — INA234 hwmon support (6.6-only; upstream from 6.10)
+#   4004 — swphy 10G→1000 map for SDK fixed-link 10G MACs
+#   4008 — SDK DPAA probe fix (formerly patch-dpaa-probe-fix.py)
+ASK_FIXES_DIR=kernel/flavors/ask/patches/fixes
+[ -d "$ASK_FIXES_DIR" ] || { echo "ERROR: $ASK_FIXES_DIR missing"; exit 1; }
+cp "$ASK_FIXES_DIR/4002-hwmon-ina2xx-add-INA234-support.patch"      "$KERNEL_PATCHES/"
+cp "$ASK_FIXES_DIR/4004-swphy-support-10g-fixed-link-speed.patch"   "$KERNEL_PATCHES/"
+cp "$ASK_FIXES_DIR/4008-sdk-dpaa-probe-fix.patch"                   "$KERNEL_PATCHES/"
+echo "### ASK hooks + swphy + INA234 + sdk-probe-fix patches staged at $KERNEL_PATCHES/"
 
 ### 3. SDK sources — stage tarball and inject extraction BEFORE patches loop
 #
@@ -306,5 +309,6 @@ echo "###   - CONFIG_CPE_FAST_PATH=y, CONFIG_FSL_SDK_DPA=y"
 echo "###   - IPsec hardware offload, CEETM QoS, xt_QOSMARK"
 echo "###"
 echo "### Out-of-tree ASK modules (cdx, fci, auto_bridge) are built by the"
-echo "### producer (kernel-ls1046a-build) and shipped in the kernel-<VERSION>-askN"
-echo "### release tarball pinned by data/ask-kernel.pin — no longer built here."
+echo "### former kernel-ls1046a-build release tarball (now archived) and"
+echo "### shipped in the kernel-<VERSION>-askN release tarball pinned by"
+echo "### data/ask-kernel.pin — no longer built here."

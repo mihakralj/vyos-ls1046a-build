@@ -67,7 +67,7 @@ else
   HOST_TRIPLET="--host=aarch64-linux-gnu --build=$(uname -m)-linux-gnu"
 fi
 
-# DPAA_VERSION=11 is REQUIRED for dpa_app (and any other consumer that
+# DPAA_VERSION=11 is REQUIRED for dpa_app (and any other caller that
 # includes <fm_pcd_ext.h>). Without it, t_FmPcdHashTableParams omits
 # the externalHash / externalHashParams fields, so dpa_app silently
 # constructs the struct without them — even though libfm.a (built with
@@ -137,7 +137,7 @@ echo ""
 echo "### Stage 1: Building libcli"
 LIBCLI_SRC="$REPO_ROOT/libcli"
 if [ -d "$LIBCLI_SRC" ] && [ -f "$LIBCLI_SRC/Makefile" ]; then
-  # C3 B6 P0.3: apply consumer-tracked libcli patches (idempotent)
+  # C3 B6 P0.3: apply in-tree libcli patches (idempotent)
   LIBCLI_PATCHES="$REPO_ROOT/patches/libcli"
   if [ -d "$LIBCLI_PATCHES" ]; then
     # Drop .gitattributes so Mergiraf is the merge driver for source files
@@ -314,53 +314,24 @@ if [ -d "$DPA_SRC" ] && [ -f "$DPA_SRC/Makefile" ]; then
   DPA_CFLAGS="$DPA_CFLAGS -I$STAGING/include/fmd/Peripherals"
   DPA_CFLAGS="$DPA_CFLAGS -I$STAGING/include/fmd/integrations"
   # Locate cdx headers (cdx_ioctl.h, cdx_ctrl.h). The cdx OOT module
-  # was folded into the producer repo (kernel-ls1046a-build) under
-  # release/oot-modules/cdx/ in commit bc38d90 (2026-05); $ASK_SRC/cdx
-  # no longer exists in this tree. Fall back through plausible
-  # locations so both local-checkout and CI staged-sysroot paths work.
+  # source tree lives in this repo at kernel/flavors/ask/oot-modules/cdx/
+  # (absorbed from the formerly-separate kernel build repo). Fall through
+  # alternative locations so both local-checkout and CI staged-sysroot
+  # paths keep working if STAGING was populated by an earlier step.
   CDX_INC=""
   for cand in \
+      "$REPO_ROOT/kernel/flavors/ask/oot-modules/cdx" \
       "$STAGING/include/cdx" \
-      "$ASK_SRC/cdx" \
-      "$KSRC/../../release/oot-modules/cdx" \
-      "/root/kernel-ls1046a-build/release/oot-modules/cdx"; do
+      "$ASK_SRC/cdx"; do
     if [ -f "$cand/cdx_ioctl.h" ]; then
       CDX_INC="$cand"
       break
     fi
   done
-  # CI fallback: shallow-clone the producer repo at the pinned ASK_KERNEL_TAG
-  # to obtain release/oot-modules/cdx/. This runs on the GitHub Actions runner
-  # where neither the producer source tree nor its kernel-headers .deb carry
-  # the cdx headers (they live only in the producer repo's source). Without
-  # this, Stage 3's `exit 1` cascades to ci-build-packages.sh swallowing the
-  # error and shipping the stale prebuilt dpa_app — the SIGSEGV root cause.
   if [ -z "$CDX_INC" ]; then
-    PRODUCER_REPO="${ASK_PRODUCER_REPO:-mihakralj/kernel-ls1046a-build}"
-    PRODUCER_REF="${ASK_KERNEL_TAG:-}"
-    if [ -z "$PRODUCER_REF" ] && [ -f "$REPO_ROOT/data/ask-kernel.pin" ]; then
-      PRODUCER_REF=$(tr -d '[:space:]' < "$REPO_ROOT/data/ask-kernel.pin")
-    fi
-    if [ -n "$PRODUCER_REF" ]; then
-      echo "    cdx headers not local — shallow-cloning $PRODUCER_REPO@$PRODUCER_REF"
-      PRODUCER_CLONE="$STAGING/producer-clone"
-      rm -rf "$PRODUCER_CLONE"
-      if git clone --depth 1 --branch "$PRODUCER_REF" \
-            "https://github.com/$PRODUCER_REPO.git" "$PRODUCER_CLONE" 2>&1 | tail -3; then
-        if [ -f "$PRODUCER_CLONE/release/oot-modules/cdx/cdx_ioctl.h" ]; then
-          CDX_INC="$PRODUCER_CLONE/release/oot-modules/cdx"
-        fi
-      fi
-    fi
-  fi
-  if [ -z "$CDX_INC" ]; then
-    echo "    ERROR: cdx_ioctl.h not found; tried STAGING, ASK_SRC," >&2
-    echo "           \$KSRC/../../release/oot-modules/cdx," >&2
-    echo "           /root/kernel-ls1046a-build/release/oot-modules/cdx," >&2
-    echo "           and shallow-clone of producer repo at pinned tag." >&2
-    echo "    Hint: ensure data/ask-kernel.pin holds a published producer" >&2
-    echo "          tag, or stage cdx headers into \$STAGING/include/cdx" >&2
-    echo "          via ci-consume-ask-kernel.sh." >&2
+    echo "    ERROR: cdx_ioctl.h not found; tried" >&2
+    echo "           kernel/flavors/ask/oot-modules/cdx," >&2
+    echo "           \$STAGING/include/cdx, \$ASK_SRC/cdx." >&2
     exit 1
   fi
   echo "    cdx headers: $CDX_INC"
