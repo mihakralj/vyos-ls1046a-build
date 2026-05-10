@@ -5,6 +5,12 @@
 set -ex
 cd "${GITHUB_WORKSPACE:-.}"
 
+# Resolve $FLAVOR (default | ask | vpp) so the per-flavor update-check feed
+# URL can be substituted into config.boot.* before they're staged into the
+# chroot. Sourcing common.sh sets FLAVOR via env / data/flavor.pin / "default".
+# shellcheck disable=SC1091
+. "$(dirname "$0")/common.sh"
+
 CHROOT=vyos-build/data/live-build-config/includes.chroot
 HOOKS=vyos-build/data/live-build-config/hooks/live
 
@@ -29,13 +35,58 @@ cp data/config.boot.dhcp    "$CHROOT/opt/vyatta/etc/config.boot.default"
 cp data/config.boot.default "$CHROOT/opt/vyatta/etc/config.boot.minimal"
 cp data/config.boot.dhcp    "$CHROOT/opt/vyatta/etc/config.boot.dhcp"
 cp data/config.boot.full    "$CHROOT/opt/vyatta/etc/config.boot.full"
-# Tolerate hunks already merged upstream (vim-link, no-sbsign): apply with -N
-# (skip already-applied) and treat exit 1 ("reversed/already applied") as success.
+
+# Per-flavor update-check feed: rewrite the hard-coded `version-default.json`
+# URL in every staged config.boot.* to `version-${FLAVOR}.json`. Without this
+# rewrite an ASK or VPP install would point at the default-flavor JSON feed
+# and silently cross-upgrade to a default-flavor ISO on the next update check.
+# The repo source files keep `version-default.json` as the literal so a `grep`
+# of the working tree shows a sensible default; the substitution happens only
+# at CI time and only on the staged copies inside the chroot.
+FEED_URL="https://raw.githubusercontent.com/mihakralj/vyos-ls1046a-build/refs/heads/main/version-${FLAVOR}.json"
+for f in \
+    "$CHROOT/opt/vyatta/etc/config.boot.default" \
+    "$CHROOT/opt/vyatta/etc/config.boot.minimal" \
+    "$CHROOT/opt/vyatta/etc/config.boot.dhcp" \
+    "$CHROOT/opt/vyatta/etc/config.boot.full"; do
+    if [ -f "$f" ] && grep -q 'version-default\.json' "$f"; then
+        sed -i \
+            -e "s#https://raw\.githubusercontent\.com/mihakralj/vyos-ls1046a-build/refs/heads/main/version-default\.json#${FEED_URL}#g" \
+            "$f"
+    fi
+done
+echo "### Update-check feed URLs after FLAVOR=${FLAVOR} rewrite:"
+grep -H 'update-check\|version-' \
+    "$CHROOT/opt/vyatta/etc/config.boot.default" \
+    "$CHROOT/opt/vyatta/etc/config.boot.dhcp" \
+    "$CHROOT/opt/vyatta/etc/config.boot.full" 2>/dev/null \
+    | grep -E 'version-[a-z]+\.json' || true
+# Drop .gitattributes inside the upstream clone so Mergiraf is wired as the
+# merge driver for source-language files when --3way needs to fall back to a
+# real 3-way merge. git apply --3way only consults attributes in the target
+# tree, hence this lives inside vyos-build/, not at the repo root.
+cat > vyos-build/.gitattributes <<'GITATTR'
+*.c     merge=mergiraf
+*.h     merge=mergiraf
+*.py    merge=mergiraf
+*.json  merge=mergiraf
+*.yml   merge=mergiraf
+*.yaml  merge=mergiraf
+*.toml  merge=mergiraf
+*.xml   merge=mergiraf
+GITATTR
+
+# Apply with git apply --3way (refuses fuzz, falls back to real 3-way merge
+# on context drift). Idempotent: skip patches that reverse-apply cleanly,
+# treating that as "already merged upstream".
 for p in data/vyos-build-005-add_vim_link.patch data/vyos-build-007-no_sbsign.patch; do
-  if patch --no-backup-if-mismatch -N -p1 -d vyos-build --dry-run < "$p" >/dev/null 2>&1; then
-    patch --no-backup-if-mismatch -N -p1 -d vyos-build < "$p"
-  else
-    echo "### $p: skipped (already applied upstream or no longer applicable)"
+  if git -C vyos-build apply --reverse --check --whitespace=nowarn "../$p" >/dev/null 2>&1; then
+    echo "### $p: skipped (already applied upstream)"
+    continue
+  fi
+  if ! git -C vyos-build apply --3way --whitespace=nowarn "../$p"; then
+    echo "::error::$p failed to apply with --3way — context drift, refresh patch" >&2
+    exit 1
   fi
 done
 
