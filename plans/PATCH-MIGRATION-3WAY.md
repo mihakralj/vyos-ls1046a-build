@@ -1,24 +1,32 @@
 # PATCH MIGRATION: `git apply --3way` + Mergiraf + rerere
 
-**Status:** Draft for review
-**Date:** 2026-05-09
+**Status:** Ready for execution — integration merge (PRs 1–7 of `INTEGRATION-PLAN.md`) is complete on `main`. Mergiraf is already installed on the self-hosted runner (see Phase 5 note).
+**Date:** 2026-05-09 (revised after pre-flight inventory)
 **Companion plan:** [`INTEGRATION-PLAN.md`](./INTEGRATION-PLAN.md) (single-repo merge + FLAVOR switch)
+
+## Pre-flight inventory snapshot (2026-05-09)
+
+Actual patch surface as found on `main` after producer absorption (PR 7):
+
+| Bucket | Count | Apply-site |
+|---|---|---|
+| `data/vyos-1x-*.patch` | 16 | `bin/ci-setup-vyos1x.sh` |
+| `data/vyos-build-*.patch` | 2 | `bin/ci-setup-vyos-build.sh` |
+| `data/kernel-patches/*.patch` | 4 | staged by `kernel/common/scripts/stage-kernel.sh` |
+| `data/ask-userspace/{fmc,fmlib,libnetfilter-conntrack,libnfnetlink}/` | 5 | per-component build scripts |
+| `kernel/common/patches/{vyos,board,fixes}/` | 6 | `stage-kernel.sh` + `apply-to-tree.sh` |
+| `kernel/flavors/ask/patches/{ask,fixes}/` | 10 | `stage-kernel.sh` + `apply-to-tree.sh` |
+| `kernel/flavors/ask/userspace-patches/{ppp,rp-pppoe}/` | 2 | `kernel/common/scripts/build-ask-ppp.sh` |
+| `ASK/patches/{fmc,fmlib}/` | 4 | `bin/ci-build-fmc.sh`, `bin/ci-build-fmlib.sh` |
+| `patches/libcli/` | (workspace) | `bin/ci-build-ask-userspace.sh` (already uses `git apply`) |
+
+**Total: ~47 patches across 9 buckets, 8 distinct apply-sites.** Plan's earlier "~40+" estimate was low.
 
 ---
 
-## Sequencing recommendation: **AFTER the integration merge**
+## Sequencing context (historical)
 
-This patch-migration plan should land **after** the `INTEGRATION-PLAN.md` merge has reached at least PR 4 (the FLAVOR switch wired into CI with the `ask` flavor green). Reasoning:
-
-1. **The patch surface roughly triples in scope post-merge.** Today the consumer holds ~22 patches under `data/`. After the integration merge absorbs `kernel-ls1046a-build/release/patches/{vyos,ask,fixes}/` (17 patches) plus `release/patches/board/*` (board bringup that the consumer still has split between `data/kernel-patches/` and ad-hoc DTS sources), the total grows to ~40+ patches across `kernel/common/patches/{vyos,board,fixes}/` and `kernel/flavors/{ask,vpp,default}/patches/`. Migrating that surface in one pass is cheaper than migrating the consumer's 22 patches now and re-doing the same work for the producer's 17 after they land in the same tree.
-2. **The producer's existing patch-authoring workflow already uses git diff** (`scripts/normalize-patch.awk` consumes `git diff --no-prefix`), so producer patches are *closer to git format than consumer patches today*. Doing the migration after the merge lets us regularize on a single git-format convention across all buckets in one pass.
-3. **The producer's hunk-validator hook (`.clinehooks/hunk-validator`) is the prior art for the "stop on malformed hunk" failure mode** that this migration attacks more comprehensively. Folding that hook into the merged repo is a natural sub-task of the migration; keeping it intact during the integration merge avoids losing the existing safety net.
-4. **The integration merge already changes every `bin/ci-*.sh` script** (gating on `${FLAVOR}`, switching to `kernel/common/scripts/apply-to-tree.sh`). Stacking the `patch → git apply --3way` substitution on the same scripts in a separate PR (after the FLAVOR switch is green) avoids interleaving two large diff sets across the same files and makes review tractable.
-5. **Patch-rot detector (Phase 8) wants to know about flavors.** The weekly check needs to iterate over every per-flavor bucket (common-vyos, common-board, common-fixes, flavor-ask-{ask,fixes}, flavor-vpp-*), not the flat `data/*.patch` set. Designing it post-merge avoids two rewrites of the workflow.
-
-**Concretely:** insert this plan as **PR 9** in the integration sequence (after PR 8's optional matrix builds), or as **PR 4.5** if we're willing to delay the `default` and `vpp` flavor validation by one PR. Recommendation: **PR 9** (i.e., after the integration is fully bedded in).
-
-If the team prefers to do the migration first (e.g., to stop the silent-fuzz failure mode immediately on the consumer's existing 22 patches), the plan is independently executable today against the current `data/*.patch` layout — none of the steps below depend on the post-merge directory structure. They will simply need to be repeated in spirit (not in mechanics — the patches themselves don't need re-regeneration) when the producer's patches arrive in `kernel/flavors/ask/patches/`.
+*Original plan called this "PR 9" of the integration sequence. PR 7 (producer absorption) landed 2026-05-09; PR 8 (matrix builds) is deferred. This work is now the next major migration on `main` and should land as a single dedicated branch (`chore/patch-migration-3way`) rather than being interleaved with other refactors.*
 
 ---
 
@@ -40,24 +48,31 @@ The replacement stack is:
 
 ## Inputs
 
-- Repo root: `/home/vyos/vyos-ls1046a-build` (or post-merge: same path with `kernel/{common,flavors/*}/patches/`)
-- **Pre-merge patch inventory:**
-  - `data/vyos-1x-*.patch` — applied by `pre_build_hook` in `bin/ci-setup-vyos1x.sh` against a fresh `vyos/vyos-1x` clone at branch `current`
-  - `data/kernel-patches/*.patch` — applied during the kernel build, ordered by filename, against the kernel source tree
-  - `data/vyos-build-005-add_vim_link.patch`, `data/vyos-build-007-no_sbsign.patch` — applied against `vyos/vyos-build` checkout at branch `current`
-- **Post-merge patch inventory** (additional buckets):
-  - `kernel/common/patches/vyos/*.patch` — VyOS kernel deltas (3 patches)
-  - `kernel/common/patches/board/*.patch` — board bringup (boot, eMMC, console, fan, LED, mono DTS)
-  - `kernel/common/patches/fixes/*.patch` — flavor-agnostic 6.6.y repairs
-  - `kernel/flavors/ask/patches/{ask,fixes}/*.patch` — 8 ASK fast-path + ASK-specific 6.6.y fixes
-  - `kernel/flavors/vpp/patches/*.patch` — VPP / AF_XDP-specific (placeholder)
-- **CI scripts that apply patches** (verify with `grep -rn 'patch ' bin/`):
-  - `bin/ci-setup-vyos1x.sh`
-  - `bin/ci-setup-kernel.sh`
-  - `bin/ci-setup-kernel-ask.sh`
-  - `bin/ci-setup-vyos-build.sh`
-  - Post-merge: `kernel/common/scripts/apply-to-tree.sh`
-- **Self-hosted runner:** Debian 13 trixie, aarch64 (Cobalt 100, 32 vCPU). Persistent state in `/opt/`, `$HOME/.ccache`, `/opt/opam`. Runner user `vyos` with passwordless sudo.
+- Repo root: `/home/vyos/vyos-ls1046a-build`
+- **Patch buckets** (post-integration layout, see snapshot table above for counts):
+  - `data/vyos-1x-*.patch` — against `vyos/vyos-1x@current`
+  - `data/vyos-build-*.patch` — against `vyos/vyos-build@current`
+  - `data/kernel-patches/*.patch` — against the pinned kernel (today: `linux-6.18.28`, see below)
+  - `data/ask-userspace/{fmc,fmlib,libnetfilter-conntrack,libnfnetlink}/*.patch` — against pinned upstream userspace tarballs
+  - `kernel/common/patches/{vyos,board,fixes}/*.patch` — flavor-agnostic kernel deltas
+  - `kernel/flavors/ask/patches/{ask,fixes}/*.patch` — ASK fast-path + ASK-specific 6.6.y/6.18.y fixes
+  - `kernel/flavors/ask/userspace-patches/{ppp,rp-pppoe}/*.patch` — against pinned ppp / rp-pppoe sources
+  - `ASK/patches/{fmc,fmlib}/*.patch` — against `nxp-qoriq/fmlib` and `nxp-qoriq/fmc` at the pinned tag (`lf-6.18.2-1.0.0`)
+  - `patches/libcli/*.patch` — already in git format, applied via `git apply` (line 148 of `bin/ci-build-ask-userspace.sh`); needs only the `--3way` upgrade
+- **Kernel version pinning:** as of 2026-05-09, both `default` and `ask` flavors target `linux-6.18.28` (per `versions.lock` and `kernel/flavors/ask/README.md`). The historical 6.6.137 ASK base is gone — ASK was forward-ported through `nxp-qoriq/linux ask-6.6-port @ 6d0b77e` and now applies on top of `linux-6.18.28`. **Phase 2c and 2d both target the same kernel tag** (`v6.18.28`) and can share a single checkout. Re-evaluate if `versions.lock` is bumped after the migration starts.
+- **CI scripts that apply patches** (verified 2026-05-09; line numbers from current `main`):
+  - `bin/ci-setup-vyos1x.sh:70,74` — `patch --no-backup-if-mismatch -p1`
+  - `bin/ci-setup-vyos-build.sh:35–36` — `patch --no-backup-if-mismatch -N -p1 -d vyos-build`
+  - `bin/ci-build-fmc.sh:66` — `patch --no-backup-if-mismatch -p1`
+  - `bin/ci-build-fmlib.sh:71,74,77` — `patch --no-backup-if-mismatch -p1` (3 patches: ASK, B1, B3)
+  - `bin/ci-build-ask-userspace.sh:145,147,148` — already `git apply` for libcli; needs `--3way` flag added
+  - `kernel/common/scripts/stage-kernel.sh:140` — `patch --no-backup-if-mismatch -p1 -d "$KSRC"`
+  - `kernel/common/scripts/apply-to-tree.sh:135,137` — `git apply -p1 --unsafe-paths --directory="$KDIR"` (already git apply; needs `--3way`)
+  - `kernel/common/scripts/build-ask-modules.sh:170` — `git apply --whitespace=nowarn` (needs `--3way`)
+  - `kernel/common/scripts/build-ask-ppp.sh:174,176,183` — `patch -p1` (dry-run + apply pair)
+  - `kernel/common/scripts/patch-health.sh:160` — `git apply --check -p1 --unsafe-paths` (needs `--3way` to keep dry-run parity with `apply-to-tree.sh`)
+  - `bin/ci-setup-kernel.sh`, `bin/ci-setup-kernel-ask.sh` — `cp` patches into the kernel build dir only; actual application happens in `stage-kernel.sh` / `apply-to-tree.sh`
+- **Self-hosted runner:** Debian 13 trixie, aarch64 (Cobalt 100, 32 vCPU). Persistent state in `/opt/`, `$HOME/.ccache`, `/opt/opam`, `~/.cargo/bin/`. Runner user `vyos` with passwordless sudo. **PATH for the `actions-runner` service includes `~/.cargo/bin`** (verified 2026-05-09 via `systemctl cat actions.runner.*`), so the `mergiraf` binary is reachable from CI steps without modification.
 - **Build workflow:** `.github/workflows/auto-build.yml` (called from `self-hosted-build.yml`)
 
 ---
@@ -66,11 +81,11 @@ The replacement stack is:
 
 By end of migration:
 
-1. Every `.patch` file under `data/` (and post-merge: under `kernel/common/patches/` and `kernel/flavors/*/patches/`) is in git format (has `diff --git a/X b/X` headers and `index ABC..DEF` lines).
+1. Every `.patch` file under `data/` and `kernel/{common,flavors/*}/patches/` is in git format (has `diff --git a/X b/X` headers and `index ABC..DEF` lines).
 2. Every `.patch` file applies cleanly with `git apply --3way --check` against the upstream version it targets, without fuzz or context massaging.
-3. Patches that were "additions only" (single hunk, `@@ -0,0 +1,N @@`) have been removed; the added file content lives as a plain file under `data/files/` (or post-merge: `kernel/common/files/`, `kernel/flavors/*/files/`), copied into place by the relevant `bin/ci-*.sh` script.
+3. Patches that were "additions only" (single hunk, `@@ -0,0 +1,N @@`) have been removed; the added file content lives as a plain file under `data/files/`, `kernel/common/files/`, or `kernel/flavors/*/files/`, copied into place by the relevant `bin/ci-*.sh` script.
 4. All `bin/ci-*.sh` scripts use `git apply --3way --whitespace=nowarn` instead of `patch ... -p1`. The `--no-backup-if-mismatch` flag appears nowhere in the repo.
-5. Mergiraf is installed on the self-hosted runner and registered as a git merge driver in `/etc/gitconfig` so that all builds benefit.
+5. Mergiraf is installed on the self-hosted runner and registered as a git merge driver so that all builds benefit. **As of 2026-05-09 mergiraf 0.17.0 is already installed at `/home/vyos/.cargo/bin/mergiraf` and wired in `~/.gitconfig` (user-scope, `vyos` user) — Phase 5/6 are de-facto complete; only the system-scope migration is optional.**
 6. `.gitattributes` files are created in each upstream clone path (`vyos-build/`, `vyos-1x/`, kernel source) at clone-time by the relevant `bin/ci-*.sh` script, mapping `.c`, `.h`, `.py`, `.dts`, `.dtsi`, `.S` to `merge=mergiraf`.
 7. A patch-rot detector workflow (`.github/workflows/patch-rot-check.yml`) runs weekly against latest upstream HEAD and warns when any patch will not apply cleanly.
 8. Documentation in `AGENTS.md` (or new `docs/PATCHES.md`) describes the new conventions for adding patches.
@@ -86,7 +101,7 @@ cd /home/vyos/vyos-ls1046a-build
 git status --short
 git checkout -b chore/patch-migration-3way
 
-# 2. Inventory all patches (post-merge: includes kernel/ tree)
+# 2. Inventory all patches across data/ and kernel/ trees
 find data kernel -name '*.patch' -type f 2>/dev/null | sort > /tmp/patch-inventory.txt
 wc -l /tmp/patch-inventory.txt
 
@@ -150,13 +165,15 @@ mkdir -p vyos-build/$(dirname "$TARGET")
 cp data/files/vyos-1x/foo.something vyos-build/$TARGET
 ```
 
-**Acceptance gate:** every patch in `/tmp/migration/file-additions.txt` removed; corresponding plain file under `data/files/` (or post-merge: `kernel/.../files/`); relevant `bin/ci-*.sh` updated. Run a build end-to-end and confirm no patch-apply errors.
+**Acceptance gate:** every patch in `/tmp/migration/file-additions.txt` removed; corresponding plain file under `data/files/` or `kernel/.../files/`; relevant `bin/ci-*.sh` updated. Run a build end-to-end and confirm no patch-apply errors.
 
 ---
 
 ## Phase 2 — Regenerate modification patches in git format
 
 Regenerate each modification patch through git so it carries the index lines `--3way` needs.
+
+**Hard rule: refuse fuzz during regeneration.** Apply with `patch -F0 --no-backup-if-mismatch -p1` so any context drift fails loudly instead of silently encoding the wrong location into the regenerated patch. If a patch needs fuzz to apply against current upstream, that is a real drift signal — stop, inspect, and either refresh the patch by hand or document why it is fuzz-tolerant. Do not paper over it.
 
 ### 2a. vyos-1x patches
 
@@ -172,7 +189,7 @@ cd vyos-1x
 for p in "$REPO"/data/vyos-1x-*.patch; do
     base=$(basename "$p")
     echo "=== Regenerating $base ==="
-    if ! patch -p1 < "$p"; then
+    if ! patch -F0 --no-backup-if-mismatch -p1 < "$p"; then
         echo "FAIL: $base did not apply against current HEAD"
         exit 1
     fi
@@ -192,15 +209,18 @@ cd "$REPO"
 
 Same pattern, target `vyos/vyos-build@current`.
 
-### 2c. Kernel patches
+### 2c. Kernel patches (`data/kernel-patches/` + flavor-agnostic `kernel/common/patches/`)
 
-Kernel patches target a specific kernel version, not a moving branch. Read `data/ask-kernel.pin` (or post-merge: `kernel/common/scripts/fetch-kernel.sh`'s pinned version) for the exact tag.
+Kernel patches target a specific kernel version, not a moving branch. The legacy `data/ask-kernel.pin` mechanism was retired during integration (per `AGENTS.md` § "Producer absorption"). The current source of truth is `vyos-build/data/defaults.toml`, surfaced through `kernel/common/scripts/sync-kernel-version.sh`. As of 2026-05-09 the pin is `linux-6.18.28` for both `default` and `ask` flavors — a single kernel checkout works for the whole regen pass.
 
 ```sh
 REPO=$(pwd)
-KERNEL_TAG=$(cat data/ask-kernel.pin 2>/dev/null | tr -d '[:space:]')
-[ -z "$KERNEL_TAG" ] && KERNEL_TAG=$(grep -oE 'v6\.6\.[0-9]+' bin/ci-setup-kernel.sh | head -1)
-[ -z "$KERNEL_TAG" ] && { echo "Cannot determine kernel tag"; exit 1; }
+# Source helper to populate KERNEL_VERSION (e.g. "6.18.28"). Note: the helper
+# uses `set -euo pipefail`; isolate it in a sub-shell if you don't want those
+# semantics inherited by the calling regen script.
+KERNEL_VERSION=$(bash -c '. "'"$REPO"'/kernel/common/scripts/sync-kernel-version.sh" >/dev/null && echo "$KERNEL_VERSION"')
+KERNEL_TAG="v${KERNEL_VERSION}"
+[ -n "$KERNEL_VERSION" ] || { echo "Cannot determine kernel tag"; exit 1; }
 
 cd /tmp/regen
 rm -rf linux
@@ -208,12 +228,12 @@ git clone --branch "$KERNEL_TAG" --depth 1 \
     https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
 cd linux
 
-# Apply patches in filename order (post-merge: respect bucket order vyos → board → fixes → ask → flavor-fixes)
+# Apply patches in filename order, refusing fuzz
 for p in "$REPO"/data/kernel-patches/*.patch; do
     base=$(basename "$p")
     echo "=== Regenerating $base ==="
-    if ! patch -p1 < "$p"; then
-        echo "FAIL: $base did not apply against $KERNEL_TAG"
+    if ! patch -F0 --no-backup-if-mismatch -p1 < "$p"; then
+        echo "FAIL: $base did not apply against $KERNEL_TAG (or required fuzz)"
         exit 1
     fi
     git add -A
@@ -226,22 +246,53 @@ for p in "$REPO"/data/kernel-patches/*.patch; do
 done
 ```
 
-### 2d. Post-merge: producer-bucket patches
+### 2d. Producer-bucket patches (kernel/common + kernel/flavors/ask)
 
-Same kernel target, but iterate buckets in apply order:
+**Use the same `/tmp/regen/linux` checkout from 2c** — do not re-clone. The buckets must be applied in the exact order `kernel/common/scripts/apply-to-tree.sh` uses, because later patches in the chain depend on earlier ones being on disk. Stage the SDK source drop first (it is a *file* drop, not a patch) so any ASK patches that touch SDK paths can resolve.
 
 ```sh
+# Already in /tmp/regen/linux from Phase 2c; tree is on a tmp HEAD with all
+# data/kernel-patches/* applied. That state is fine — the kernel/common +
+# kernel/flavors/ask patches stack on top of those.
+
+# Step 0: stage SDK source drop (only needed for FLAVOR=ask)
+SDK_DIR="$REPO/kernel/flavors/ask/sdk-sources"
+if [ -d "$SDK_DIR" ]; then
+    (cd "$SDK_DIR" && find . -type f) | while read -r f; do
+        f=${f#./}
+        mkdir -p "$(dirname "/tmp/regen/linux/$f")"
+        cp "$SDK_DIR/$f" "/tmp/regen/linux/$f"
+    done
+    git add -A && git commit -m "tmp: stage SDK sources" --quiet --allow-empty
+fi
+
+# Step 1: iterate buckets in apply order; cumulative state is preserved
 for bucket_dir in \
     "$REPO/kernel/common/patches/vyos" \
     "$REPO/kernel/common/patches/board" \
     "$REPO/kernel/common/patches/fixes" \
     "$REPO/kernel/flavors/ask/patches/ask" \
     "$REPO/kernel/flavors/ask/patches/fixes"; do
+    [ -d "$bucket_dir" ] || continue
     for p in "$bucket_dir"/*.patch; do
-        # ... same regenerate loop as 2c ...
+        [ -f "$p" ] || continue
+        base=$(basename "$p")
+        echo "=== Regenerating $bucket_dir/$base ==="
+        if ! patch -F0 --no-backup-if-mismatch -p1 < "$p"; then
+            echo "FAIL: $bucket_dir/$base did not apply (or required fuzz)"
+            exit 1
+        fi
+        git add -A
+        git diff --cached > "$p.new"
+        git commit -m "tmp: $base" --quiet --allow-empty
+    done
+    for p in "$bucket_dir"/*.patch; do
+        [ -f "$p.new" ] && mv "$p.new" "$p"
     done
 done
 ```
+
+For `default` flavor regen, repeat Phase 2c+2d in a separate clone *without* the SDK drop and *without* the ASK buckets. The `default` flavor today only stacks `kernel/common/patches/{vyos,board,fixes}/`.
 
 **Acceptance gate after Phase 2:**
 
@@ -283,7 +334,8 @@ verify_patches https://github.com/vyos/vyos-1x.git current "$REPO"/data/vyos-1x-
 verify_patches https://github.com/vyos/vyos-build.git current "$REPO"/data/vyos-build-*.patch
 verify_patches https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
     "$KERNEL_TAG" "$REPO"/data/kernel-patches/*.patch
-# Post-merge: also verify each kernel/{common,flavors/*}/patches/* bucket
+# Also iterate kernel/{common,flavors/ask}/patches/* buckets in apply order
+# (each bucket inherits cumulative state — see Phase 2d for the loop pattern)
 ```
 
 If any patch fails, **stop and report which patch and against which upstream tag.** Do not silently regenerate again.
@@ -322,7 +374,7 @@ git -C vyos-build apply --3way --whitespace=nowarn "$REPO_ROOT"/data/vyos-build-
     || { echo "::error::vyos-build-005 failed"; exit 1; }
 ```
 
-**Post-merge note:** the producer's `kernel/common/scripts/apply-to-tree.sh` (formerly `kernel-ls1046a-build/scripts/apply-to-tree.sh`) gets the same treatment — replace its `git apply --check && git apply` pair with `git apply --3way --check && git apply --3way`.
+**Note on `apply-to-tree.sh`:** the producer-absorbed `kernel/common/scripts/apply-to-tree.sh` already uses `git apply -p1 --unsafe-paths --directory="$KDIR"` (lines 135, 137) — the change there is just adding `--3way` to both the strict apply and the `--reject` fallback. Same for `kernel/common/scripts/patch-health.sh:160` (the dry-run probe).
 
 **Acceptance gate after Phase 4:**
 
@@ -337,6 +389,8 @@ grep -rn 'git apply --3way' bin/ .github/ kernel/
 ---
 
 ## Phase 5 — Install Mergiraf on the self-hosted runner
+
+**Status (2026-05-09): already done.** `mergiraf 0.17.0` is present at `/home/vyos/.cargo/bin/mergiraf` on the Cobalt 100 runner (cargo-install path, not the `/usr/local/bin/` location originally specified). Since the runner executes as `vyos` and `~/.cargo/bin` is on that user's `$PATH`, no migration is required for the runner happy path. The `/usr/local/bin/` placement below remains the recommendation for any *new* runner provisioning.
 
 One-time setup on the persistent Cobalt 100 runner. Do not put this in the workflow itself — `cargo install` or binary download per build is wasteful and breaks when network/cache fails. Treat Mergiraf the same way `/opt/opam` is treated: bootstrap once, reuse.
 
@@ -376,6 +430,8 @@ sudo apt-get autoremove -y rustc cargo
 
 ## Phase 6 — Configure git on the runner
 
+**Status (2026-05-09): already done at user scope.** `~/.gitconfig` for the `vyos` user already contains `merge.conflictstyle = zdiff3`, `[merge "mergiraf"]` driver, and `[rerere]` section. Verify with `git config --get-all merge.conflictstyle` and `git config --get merge.mergiraf.driver` from any clone. The system-wide migration below is optional — useful only if a second user (e.g., `root` running the runner under sudo) ever needs the driver. **Recommendation: leave as-is.**
+
 System-wide config so every build benefits without per-job setup:
 
 ```sh
@@ -393,9 +449,10 @@ EOF
 
 `zdiff3` (zealous diff3) is required for Mergiraf's best work; the linear `merge` default elides context Mergiraf needs.
 
-**Acceptance gate:** deliberate-conflict smoke test triggers Mergiraf:
+**Acceptance gate:** deliberate-conflict smoke test triggers Mergiraf. **Run as the `vyos` user** so the test exercises the same gitconfig the actions-runner sees:
 
 ```sh
+sudo -iu vyos bash <<'TEST'
 cd /tmp && rm -rf merge-test && mkdir merge-test && cd merge-test
 git init -q
 echo '*.c merge=mergiraf' > .gitattributes
@@ -409,28 +466,34 @@ sed -i 's/int add/long add/' foo.c && git commit -aqm "rename add"
 git checkout -q main 2>/dev/null || git checkout -q master
 sed -i 's/return a + b/return (a + b)/' foo.c && git commit -aqm "parenthesize add"
 git merge branch1 2>&1 | grep -i mergiraf && echo "Mergiraf is wired up."
+TEST
 ```
 
 ---
 
 ## Phase 7 — Add `.gitattributes` to upstream clones at clone-time
 
-Runner-level git config sets up the merge driver, but each upstream tree needs `.gitattributes` to tell git which files use it. Add this in every `bin/ci-*.sh` that clones an upstream repo, immediately after the clone:
+Runner-level git config sets up the merge driver, but each upstream tree needs `.gitattributes` to tell git which files use it. Add this in every script that clones an upstream repo (`bin/ci-setup-vyos1x.sh`, `bin/ci-setup-vyos-build.sh`, `kernel/common/scripts/fetch-kernel.sh` / `apply-to-tree.sh`), immediately after the clone:
 
 ```sh
-# In bin/ci-setup-vyos1x.sh (and ci-setup-vyos-build.sh, ci-setup-kernel.sh, post-merge: kernel/common/scripts/apply-to-tree.sh):
 cat > vyos-1x/.gitattributes <<'EOF'
-*.c    merge=mergiraf
-*.h    merge=mergiraf
-*.py   merge=mergiraf
-*.sh   merge=mergiraf
-*.dts  merge=mergiraf
-*.dtsi merge=mergiraf
-*.S    merge=mergiraf
+*.c     merge=mergiraf
+*.h     merge=mergiraf
+*.cc    merge=mergiraf
+*.cpp   merge=mergiraf
+*.hpp   merge=mergiraf
+*.py    merge=mergiraf
+*.dts   merge=mergiraf
+*.dtsi  merge=mergiraf
+*.json  merge=mergiraf
+*.yml   merge=mergiraf
+*.yaml  merge=mergiraf
+*.toml  merge=mergiraf
+*.xml   merge=mergiraf
 EOF
 ```
 
-For the kernel tree, broader file set; consider also `*.lds`. Mergiraf falls back gracefully (line-based) for unsupported extensions, so over-listing is harmless.
+**Pattern set is constrained to languages mergiraf 0.17.0 actually parses** (verified via `mergiraf languages`). Notable omissions: shell scripts (`*.sh`, `*.bash`) and assembler (`*.S`, `*.lds`) — mergiraf has no AST grammar for these, so listing them yields no benefit and risks confusing future readers. Line-based merge still applies as the default fallback for any extension not listed.
 
 **Note:** `.gitattributes` must be in the upstream tree at the time of `git apply --3way`. Do not put it in the parent repo — git apply only consults attributes in the target tree.
 
@@ -492,12 +555,14 @@ jobs:
       - name: Check kernel patches against pinned tag
         run: |
           set -e
-          KERNEL_TAG=$(cat data/ask-kernel.pin | tr -d '[:space:]')
+          # Kernel pin auto-tracked via vyos-build/data/defaults.toml
+          KERNEL_VERSION=$(bash -c '. kernel/common/scripts/sync-kernel-version.sh >/dev/null && echo $KERNEL_VERSION')
+          KERNEL_TAG="v${KERNEL_VERSION}"
           git clone --branch "$KERNEL_TAG" --depth 1 \
               https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
           cd linux
           rc=0
-          # Post-merge: iterate every bucket in apply order
+          # Iterate every flavor bucket in apply order
           for bucket in \
               ../kernel/common/patches/vyos \
               ../kernel/common/patches/board \
@@ -529,7 +594,7 @@ Add a section to `AGENTS.md` (or create `docs/PATCHES.md`):
 ```markdown
 ## Patch conventions
 
-- All `.patch` files in `data/` (and post-merge `kernel/`) are git-format diffs (have `diff --git` and `index abc..def` lines).
+- All `.patch` files in `data/` and `kernel/` are git-format diffs (have `diff --git` and `index abc..def` lines).
 - Patches are applied with `git apply --3way --whitespace=nowarn`. Never with raw GNU `patch`. Never with `--no-backup-if-mismatch`.
 - File-addition-only patches do not exist. Files to be added land in `data/files/<target>/...` (or `kernel/common/files/`, `kernel/flavors/*/files/`) and are `cp`'d into place by the relevant `bin/ci-*.sh` script.
 - To add a new patch:
@@ -637,17 +702,9 @@ Patches in git format apply fine with old-style `patch -p1` (`index` lines ignor
 
 ## Interaction with `INTEGRATION-PLAN.md`
 
-If executed **after** the integration merge (PR 9 in the integration sequence):
+The integration merge (PRs 1–7) is complete on `main` as of 2026-05-09. This migration runs against the post-merge tree:
 
-- Patch surface to migrate: ~40+ patches across `kernel/common/patches/{vyos,board,fixes}/`, `kernel/flavors/ask/patches/{ask,fixes}/`, and `kernel/flavors/vpp/patches/` (if any), plus the unchanged `data/{vyos-1x,vyos-build}-*.patch` set.
-- The producer's existing `kernel-ls1046a-build/scripts/normalize-patch.awk` (folded into `kernel/common/scripts/normalize-patch.awk` per `INTEGRATION-PLAN.md` §2) is **made obsolete** by Phase 2's git-diff-based regeneration. Mark it as such or delete; document in the commit body why.
-- The producer's `.clinehooks/block-dual-ref-push.sh` and `.clinehooks/hunk-validator` (folded into the merged `.clinehooks/` per integration plan) **remain in force** — `git apply --3way` does not detect malformed hunk arithmetic that produces well-formed but semantically wrong patches. The producer's ask13→ask14 incident is the cautionary tale.
+- Patch surface: ~47 patches across `data/{vyos-1x,vyos-build,kernel-patches,ask-userspace}`, `kernel/common/patches/{vyos,board,fixes}/`, `kernel/flavors/ask/patches/{ask,fixes}/`, `kernel/flavors/ask/userspace-patches/`, and `ASK/patches/{fmc,fmlib}/`.
+- The producer-absorbed `kernel/common/scripts/normalize-patch.awk` is **made obsolete** by Phase 2's git-diff-based regeneration. Mark it as such (header comment) or delete in the migration PR; document in the commit body why.
+- The producer-absorbed hunk-validator hooks (`.clinehooks/block-dual-ref-push.sh`, `.clinehooks/hunk-validator`) **remain in force** — `git apply --3way` does not detect malformed hunk arithmetic that produces well-formed but semantically wrong patches. The producer's ask13→ask14 incident (`AGENTS.md`) is the cautionary tale.
 - The patch-rot workflow (Phase 8) iterates every flavor bucket, not just `data/`.
-
-If executed **before** the integration merge:
-
-- Patch surface to migrate: ~22 patches under `data/` only.
-- After the integration merge lands, the producer's 17 patches arrive in `kernel/flavors/ask/patches/` already in git-diff format (the producer authors via `git diff --no-prefix` piped through `normalize-patch.awk`). These need a one-shot regeneration through Phase 2's git pipeline (skipping `normalize-patch.awk`) to gain proper `index` lines, but the existing context is already correct.
-- Mergiraf, rerere, runner config, and patch-rot workflow are unchanged by the merge — those phases do not need re-execution.
-
-**Recommendation:** execute **after** the integration merge. The cost difference is small (~2x patch count to regenerate), the consolidation of the migration into a single PR against a single tree is clearer to review, and the post-merge patch surface is the long-term steady state — migrating it once and only once minimizes churn.
