@@ -72,13 +72,13 @@ cp data/kernel-patches/4002-hwmon-ina2xx-add-INA234-support.patch "$KERNEL_PATCH
 cp data/kernel-patches/4003-sfp-rollball-phylink-einval-fallback.patch "$KERNEL_PATCHES/"
 # swphy patch: maps 10G/5G/2.5G to SWMII_SPEED_1000 for SDK fixed-link 10G MACs
 cp data/kernel-patches/4004-swphy-support-10g-fixed-link-speed.patch "$KERNEL_PATCHES/"
-# NOTE: SDK sdk_dpaa soft-lockup fix is applied by patch-dpaa-probe-fix.py (below).
-# xHCI AVOID_BEI + TRUST_TX_LENGTH quirks — REQUIRED for USB live boot on LS1046A DWC3
-# Without this, USB storage dies during init-bottom squashfs mount → boot never completes.
-# NOTE: applied as a Python patcher rather than a unified-diff patch — hand-counted hunk
-# headers proved fragile and silently broke the build twice (2026-04-18).
-cp data/kernel-patches/patch-xhci-ls1046a-quirks.py "$KERNEL_BUILD/"
-echo "### ASK hooks + swphy + xhci patches staged at $KERNEL_PATCHES/ (xhci via Python patcher)"
+# LS1046A board patches converted from former Python patchers (4005/4006/4007)
+# and the SDK DPAA probe-fix (4008, formerly patch-dpaa-probe-fix.py).
+cp data/kernel-patches/4005-phylink-inband-sfp-fallback.patch "$KERNEL_PATCHES/"
+cp data/kernel-patches/4006-dpaa-xdp-rxq-queue-index.patch    "$KERNEL_PATCHES/"
+cp data/kernel-patches/4007-xhci-ls1046a-dwc3-quirks.patch    "$KERNEL_PATCHES/"
+cp data/kernel-patches/4008-sdk-dpaa-probe-fix.patch          "$KERNEL_PATCHES/"
+echo "### ASK hooks + swphy + xhci + sdk-probe-fix patches staged at $KERNEL_PATCHES/"
 
 ### 3. SDK sources — stage tarball and inject extraction BEFORE patches loop
 #

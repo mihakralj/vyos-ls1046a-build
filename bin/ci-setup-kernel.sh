@@ -100,18 +100,14 @@ SFP_PATCH=data/kernel-patches/4003-sfp-rollball-phylink-einval-fallback.patch
 echo "### Kernel series ${KSERIES_FOR_PATCH:-unknown} — staging SFP rollball phylink patch"
 cp "$SFP_PATCH" "$KERNEL_PATCHES/"
 
-# Stage phylink patch script for injection into build-kernel.sh
-cp data/kernel-patches/patch-phylink.py "$KERNEL_BUILD/"
-
-# Stage DPAA XDP queue_index fix for AF_XDP socket lookup
-cp data/kernel-patches/patch-dpaa-xdp-queue-index.py "$KERNEL_BUILD/"
-
-# Stage LS1046A DWC3 xHCI quirks (AVOID_BEI + TRUST_TX_LENGTH) — Python
-# patcher rather than unified diff (hand-counted hunk headers proved fragile).
-# Required for USB live boot: dwc3_host_init() creates the xhci platform
-# child with of_node=NULL, so the original unified-diff patch's of_device_is_compatible()
-# never matched at runtime and USB-storage probe killed the host controller.
-cp data/kernel-patches/patch-xhci-ls1046a-quirks.py "$KERNEL_BUILD/"
+# Stage LS1046A board patches converted from former Python patchers
+# (patch-phylink.py / patch-dpaa-xdp-queue-index.py / patch-xhci-ls1046a-quirks.py
+# became 4005/4006/4007 unified diffs in the patch-migration-3way work).
+# These now flow through the standard $KERNEL_PATCHES path and are applied
+# by build-kernel.sh's normal patch loop instead of inline python.
+cp data/kernel-patches/4005-phylink-inband-sfp-fallback.patch       "$KERNEL_PATCHES/"
+cp data/kernel-patches/4006-dpaa-xdp-rxq-queue-index.patch          "$KERNEL_PATCHES/"
+cp data/kernel-patches/4007-xhci-ls1046a-dwc3-quirks.patch          "$KERNEL_PATCHES/"
 
 # Stage FMD Shim source for injection into build-kernel.sh
 cp data/kernel-patches/fsl_fmd_shim.c "$KERNEL_BUILD/"
@@ -119,28 +115,11 @@ cp data/kernel-patches/fsl_fmd_shim.c "$KERNEL_BUILD/"
 # Stage LP5812 LED driver source for injection into build-kernel.sh
 cp -r data/kernel-patches/lp5812 "$KERNEL_BUILD/"
 
-# Write injection block to temp file (heredoc avoids all quoting issues)
+# Write injection block to temp file (heredoc avoids all quoting issues).
+# Note: the former phylink / dpaa-xdp / xhci-ls1046a Python patchers have
+# been retired — their effects are now carried by the 4005/4006/4007 unified
+# diff patches staged above and applied by build-kernel.sh's patch loop.
 cat > /tmp/kernel-inject.sh << 'INJECT_EOF'
-
-# Patch phylink: trust SFP link over PCS in INBAND mode (LS1046A XFI regression)
-PHYLINK_C=$(find . -path "*/net/phylink.c" -maxdepth 4 | head -1)
-if [ -n "$PHYLINK_C" ] && [ -f "${CWD}/patch-phylink.py" ]; then
-  python3 "${CWD}/patch-phylink.py" "$PHYLINK_C"
-fi
-
-# Fix DPAA xdp_rxq_info queue_index: FQID (32768+) exceeds XSKMAP max_entries
-# Without this, AF_XDP RX is completely non-functional on DPAA interfaces
-DPAA_ETH_C=$(find . -path "*/freescale/dpaa/dpaa_eth.c" -maxdepth 6 | head -1)
-if [ -n "$DPAA_ETH_C" ] && [ -f "${CWD}/patch-dpaa-xdp-queue-index.py" ]; then
-  python3 "${CWD}/patch-dpaa-xdp-queue-index.py" "$DPAA_ETH_C"
-fi
-
-# LS1046A DWC3 xHCI quirks (AVOID_BEI + TRUST_TX_LENGTH).
-# Required for USB live boot; without this, USB-storage probe stalls and
-# the host controller dies during init-bottom squashfs mount.
-if [ -f "${CWD}/patch-xhci-ls1046a-quirks.py" ]; then
-  python3 "${CWD}/patch-xhci-ls1046a-quirks.py" .
-fi
 
 # FMD Shim: inject /dev/fm0* chardev module for DPDK fmlib RSS
 if [ -f "${CWD}/fsl_fmd_shim.c" ]; then
