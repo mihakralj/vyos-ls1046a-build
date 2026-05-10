@@ -141,14 +141,38 @@ setup_uboot_env_once() {
     # Idempotency check — skip only when NOT forced (boot service path).
     # When force=1 (called from install image via --root), always rewrite SPI
     # to guarantee correct boot order after every install image run.
+    #
+    # On the boot-service path we additionally detect stale env values from
+    # earlier ISO generations and force a refresh:
+    #   - `nopersistence` (legacy, removed in commit c689b96e — kept the
+    #     overlay in tmpfs and silently dropped writes to /boot, breaking
+    #     `add system image`; see AGENTS.md "Persistence (eMMC config
+    #     retention)" + "/init: line 1365" entries).
+    #   - kernel `quiet` (replaced by `loglevel=4 systemd.show_status=true`
+    #     for serial-console visibility).
+    # Either marker means the env was written by a pre-c689b96e postinstall
+    # and must be rewritten with the current UBOOT_BOOTARGS_TAIL.
     if [ "$force" -eq 0 ]; then
         local current_vyos
         current_vyos=$(fw_printenv -n vyos 2>/dev/null || true)
         if echo "$current_vyos" | grep -q "vyos.env"; then
-            echo "✓ U-Boot SPI flash already configured (vyos references vyos.env)."
-            return 0
+            local stale=0
+            if echo "$current_vyos" | grep -qw "nopersistence"; then
+                echo "  Detected stale 'nopersistence' in vyos env — refreshing."
+                stale=1
+            fi
+            if echo "$current_vyos" | grep -qw "quiet"; then
+                echo "  Detected legacy 'quiet' in vyos env — refreshing for serial visibility."
+                stale=1
+            fi
+            if [ "$stale" -eq 0 ]; then
+                echo "✓ U-Boot SPI flash already configured (vyos references vyos.env)."
+                return 0
+            fi
+            echo "Refreshing U-Boot SPI flash (stale env detected)..."
+        else
+            echo "Configuring U-Boot SPI flash (first-time setup)..."
         fi
-        echo "Configuring U-Boot SPI flash (first-time setup)..."
     else
         echo "Updating U-Boot SPI flash (forced by install image)..."
     fi
