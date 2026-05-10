@@ -108,6 +108,14 @@ cp "$SFP_PATCH" "$KERNEL_PATCHES/"
 cp data/kernel-patches/4005-phylink-inband-sfp-fallback.patch       "$KERNEL_PATCHES/"
 cp data/kernel-patches/4006-dpaa-xdp-rxq-queue-index.patch          "$KERNEL_PATCHES/"
 cp data/kernel-patches/4007-xhci-ls1046a-dwc3-quirks.patch          "$KERNEL_PATCHES/"
+# 4009 — replaces the in-tree OEM/SFP-10G-T quirk so it uses the
+# sfp_fixup_fs_10gt fixup chain (rewrites connector/extended_cc to
+# 10GBASE-T short-reach BEFORE phylink parses the SR-misadvertised
+# EEPROM). Without this the FMan 10G MAC rejects the module with
+# "unsupported SFP module: no common interface modes" even after the
+# rollball PHY-attach EINVAL is caught by patch 4003. See the patch
+# header for the full kernel-side analysis.
+cp data/kernel-patches/4009-sfp-oem-rollball-quirk.patch            "$KERNEL_PATCHES/"
 
 # Stage FMD Shim source for injection into build-kernel.sh
 cp data/kernel-patches/fsl_fmd_shim.c "$KERNEL_BUILD/"

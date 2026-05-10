@@ -1,0 +1,63 @@
+From: VyOS LS1046A Build <build@vyos.io>
+Date: Sun, 10 May 2026 00:00:00 +0000
+Subject: [PATCH] net: sfp: upgrade OEM SFP-10G-T quirk to rewrite SR codes
+
+The unbranded "OEM SFP-10G-T" 10GBASE-T copper SFP+ module advertises
+SFP-MSA transceiver code 0x10 (10GBASE-SR fiber) in its EEPROM byte 3
+even though it is a copper module with an RTL8261 PHY behind a Rollball
+MDIO bridge. The existing kernel quirk
+
+  SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_rollball_cc)
+
+correctly sets sfp->mdio_protocol = MDIO_I2C_ROLLBALL but does NOT
+rewrite id.base.connector / id.base.extended_cc, so phylink's
+sfp_parse_support() still treats the module as SR fiber and produces a
+{10000baseSR_Full} link-mode set. On a MAC operating in
+managed=in-band-status mode (NXP LS1046A FMan 10G memac), the rollball
+PHY probe fails with -EINVAL in sfp_add_phy() (handled by patch 4003 —
+"PHY probe returned -22, continuing without PHY"), but the subsequent
+phylink_sfp_config_optical() then validates the 10000baseSR_Full link
+mode against the FMan memac's link capabilities (10000baseT/CR/KR/...)
+and bails with "unsupported SFP module: no common interface modes".
+
+The kernel already ships sfp_fixup_fs_10gt() for the FS / Walsun branded
+versions of the same hardware. It chains sfp_fixup_10gbaset_30m(), which
+rewrites id.base.connector to RJ45 and id.base.extended_cc to
+ECC_10GBASE_T_SR BEFORE sfp_parse_support() runs, plus
+sfp_fixup_rollball_wait4s() for the 4 s rollball PHY settle. After the
+fixup phylink sees a 10GBASE-T short-reach copper module, the parse
+path emits 10000baseT_Full as the link mode and 10GBASER stays in the
+interface bitmap (SFI/XFI is the SerDes-side interface for any SFP+
+cage, copper or fibre), the optical-config common-mode check on the
+FMan memac succeeds, and the MAC's 10GBASE-R in-band sync detects
+carrier once the rollball PHY finishes copper auto-neg.
+
+Replace the existing quirk's fixup function rather than adding a new
+SFP_QUIRK_F entry, because SFP_QUIRK matching is first-hit and the
+existing entry would shadow ours.
+
+Verified on hardware 2026-05-10 (LS1046A Mono Gateway, kernel 6.18.28,
+default flavor, FMan memac 1af0000 / eth3) with patch 4003 already
+applied.
+
+Signed-off-by: VyOS LS1046A Build <build@vyos.io>
+---
+ drivers/net/phy/sfp.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/phy/sfp.c b/drivers/net/phy/sfp.c
+--- a/drivers/net/phy/sfp.c
++++ b/drivers/net/phy/sfp.c
+@@ -579,7 +579,11 @@ static const struct sfp_quirk sfp_quirks[] = {
+ // OEM SFP-GE-T is a 1000Base-T module with broken TX_FAULT indicator
+ SFP_QUIRK_F("OEM", "SFP-GE-T", sfp_fixup_ignore_tx_fault),
+ 
+-SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_rollball_cc),
++// OEM SFP-10G-T is a 10GBASE-T copper rollball module that advertises
++// 10GBASE-SR fiber transceiver codes (byte 3 = 0x10) in its EEPROM. Use
++// the FS-10G-T fixup chain so the connector/extended_cc are rewritten
++// to 10GBASE-T short-reach BEFORE phylink parses the supported modes.
++SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_fs_10gt),
+ SFP_QUIRK_S("OEM", "SFP-2.5G-T", sfp_quirk_oem_2_5g),
+ SFP_QUIRK_S("OEM", "SFP-2.5G-BX10-D", sfp_quirk_2500basex),
+ SFP_QUIRK_S("OEM", "SFP-2.5G-BX10-U", sfp_quirk_2500basex),

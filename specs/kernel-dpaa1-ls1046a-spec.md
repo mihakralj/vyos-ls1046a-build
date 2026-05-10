@@ -1,1352 +1,491 @@
-# Kernel-Native DPAA1 Acceleration Stack for VyOS
+# Clean-Room Rewrite of the NXP ASK Fast-Path for VyOS on LS1046A
 
-**Status:** Draft v0.2
-**Target hardware:** NXP LS1046A (Cortex-A72 ×4, FMan v3L, QMan v3, BMan v3)
-**Target software:** Linux kernel 6.6+, ARM64, VyOS 1.5+
-**License intent:** GPL-2.0 (upstreamable)
-
----
-
-## 1. Scope
-
-A clean-room reimplementation of the LS1046A DPAA1 kernel stack: BMan, QMan, FMan, and the Ethernet driver. Modular, modprobe-friendly, designed around modern kernel networking idioms (NAPI, page_pool, phylink, XDP, AF_XDP, tc-flower offload). Replaces upstream `dpaa_eth` and the entire NXP LSDK out-of-tree variant for VyOS use.
-
-The end state is that VyOS users see normal Linux netdev interfaces. Everything they already know works: `ip`, `ip route`, `tc`, `nftables`, `bridge`, `bonding`, `conntrack`, `ethtool`, `tcpdump`. Performance improvements come from XDP for fast forwarding paths and AF_XDP for userspace consumers that want kernel-bypass without owning the entire stack.
-
-### 1.1 Goals
-
-- Six modular kernel modules with explicit dependency chain, no monolithic blob
-- Standard netdev interface per FMan port; no special VyOS integration required for normal use
-- Native XDP support including `XDP_REDIRECT` and `XDP_TX` at line rate
-- AF_XDP zero-copy support for VPP, DPDK, or custom userspace consumers
-- tc-flower offload using FMan's classifier (PCD CC) for ACLs and 5-tuple steering
-- ethtool RSS via FMan KeyGen
-- Modern memory management (page_pool, page_frag) replacing upstream's manual recycling
-- phylink-based MAC abstraction
-- Realistically upstreamable to mainline kernel (24-month horizon, not v1)
-
-### 1.2 Non-goals (v1)
-
-- DPAA2, LS1088, LX2160 support
-- IEEE 1588 PTP timestamping
-- DCB / PFC / lossless Ethernet
-- Multi-tenant resource partitioning (kernel + AF_XDP coexistence is in scope; multi-userspace-tenant is not)
-- Switchdev model (LS1046A has no switch fabric, just MACs)
-- SR-IOV (DPAA1 has no equivalent)
-
-### 1.3 Out-of-scope but planned
-
-- Full Rust port of the netdev driver layer in v2, once kernel Rust netdev abstractions stabilize
-- Mainline upstream submission post-v1
-- LS1043A support (same FMan v3L, fewer ports, mostly Kconfig work)
+**Status:** Draft v0.4 (rescoped 2026-05-10) — supersedes v0.3 in entirety.
+**Target hardware:** NXP LS1046A Mono Gateway DK (Cortex-A72 ×4, FMan v3L, QMan v3, BMan v3, CAAM SEC 5.4).
+**Target software:** Linux mainline kernel 6.18.x, ARM64, VyOS 1.5+, FLAVOR=ask in this repo.
+**Reference implementation (the "6.12.y cribsheet"):** the NXP ASK source archived in this repo at `ASK/` plus `data/kernel-patches/003-ask-kernel-hooks.patch` (the kernel-hooks patch absorbed from the producer's `mt-6.12.y` baseline; 5797 lines, 64 mainline files modified + 10 new files added).
+**License intent:** GPL-2.0-or-later for kernel parts (matches NXP's ASK licensing); GPL-2.0-or-later for userspace daemons; LGPL-2.1-or-later for libfci.
+**What this spec is NOT:** a rewrite of `fsl_dpa`, `fsl_dpaa_mac`, `fsl_qbman`, mainline FMan, AF_XDP, tc-flower, CAAM xfrm, or DPDK PMD. Those belong to the **default flavor** of this repo and have separate specs/plans (`plans/NETWORKING-DEEP-DIVE.md`, `plans/VPP.md`, `plans/MIGRATION-PLAN-6.18.md`). Anything below the FMan microcode horizon is out of scope.
 
 ---
 
-## 2. Hardware reference
+## 0. What is ASK and why does it need a rewrite?
 
-### 2.1 Block topology
+The **NXP Application Solutions Kit (ASK)** is a hardware-accelerated packet-processing stack for QorIQ Layerscape SoCs. On LS1046A it short-circuits established conntrack flows directly inside FMan — established TCP/UDP/ESP/PPPoE flows are matched in FMan's hash tables (CC nodes), parameters looked up in MURAM, and frames forwarded to the egress port via BMI without touching an A72 core. CMM (the userspace decision engine) watches `nf_conntrack` and pushes eligible flows into the FMan tables via the FCI netlink channel. Software stays authoritative; hardware accelerates the established-flow path.
 
-```
-+---------------+     +---------------+     +-------------+
-|   4× A72 CPU  |<--->|  CCI-400      |<--->|   DDR4      |
-+---------------+     +---------------+     +-------------+
-        |                     |
-        |                     v
-        |             +---------------+
-        |             |    DPAA1      |
-        |             |  +---------+  |
-        +-------------+->|  QMan   |  |
-        |             |  +---------+  |
-        |             |  +---------+  |
-        +-------------+->|  BMan   |  |
-                      |  +---------+  |
-                      |  +---------+  |
-                      |  |  FMan   |  |
-                      |  | (1×)    |  |
-                      |  +---------+  |
-                      |  +---------+  |
-                      |  |  CAAM   |  |
-                      |  +---------+  |
-                      +---------------+
-                              |
-                      +---------------+
-                      | 6× SGMII MAC  |
-                      | 2× 10G MAC    |
-                      +---------------+
-```
+The ASK stack as it ships today (FLAVOR=ask in this repo) is a **fork of NXP's LSDK**:
 
-LS1046A has one FMan instance with eight network ports total (six 1G SGMII and two 10G XFI), one QMan instance providing per-CPU portals, one BMan instance providing per-CPU portals, and one CAAM block for crypto. All sit on the internal CCI-400 coherent interconnect with the four A72 CPUs.
+* `kernel/flavors/ask/sdk-sources/` — 266 vendored SDK files (`sdk_fman/`, `sdk_dpaa/`, `fsl_qbman/`, mEMAC bits, …) carrying 35 `/* ASK-edit (askN, …) */` markers. Frozen at PR-7 producer absorption. Cannot be upstreamed. Kconfig-exclusive with mainline (`FSL_SDK_DPA depends on !FSL_DPAA`).
+* `kernel/flavors/ask/patches/` — 16 patches against linux-6.6.137, ported piecemeal to 6.18.28.
+* `kernel/flavors/ask/oot-modules/cdx/` — 15-file out-of-tree `cdx.ko` (the fast-path engine; programs FMan from kernel context, calls `dpa_app` via UMH at insmod, registers `/dev/cdx_ctrl`, talks to FCI via NETLINK_KEY=32).
+* `kernel/flavors/ask/oot-modules/auto_bridge/auto_bridge.c` — single-file OOT module that watches bridge-FDB and notifies `cdx` of L2 flows eligible for offload.
+* `data/kernel-patches/003-ask-kernel-hooks.patch` — the **6.12.y-derived** in-tree-hooks patch: 64 mainline files modified, 10 brand-new files added (`net/netfilter/comcerto_fp_netfilter.c`, `xt_qosmark.c`, `xt_qosconnmark.c`, `net/xfrm/ipsec_flow.{c,h}`, four UAPI headers, …). This is the kernel-side ABI the OOT modules depend on.
+* `ASK/cmm/` — userspace daemon (60+ files; `cmm.c`, `conntrack.c`, `ffbridge.c`, `ffcontrol.c`, `forward_engine.c`, `keytrack.c`, `module_expt.c`, `module_icc.c`, `libcmm.c`, …).
+* `ASK/dpa_app/` — userspace policy programmer (`dpa.c`, `main.c`, `testapp.c`).
+* `ASK/fci/lib/` — `libfci.c` + `libfci.h` (LGPL).
+* `ASK/patches/{fmc,fmlib}/01-mono-ask-extensions.patch` — patches against upstream `nxp-qoriq/fmlib` and `nxp-qoriq/fmc` that extend `t_FmPcdKgSchemeParams` (adds `bool shared`) and `t_FmPcdHashTableParams` (timestamp/IP-reassembly/shared-scheme fields). Required because `dpa_app` consumes those structs by value.
 
-### 2.2 Per-CPU portals
+The replacement target — a **clean-room** rewrite — must:
 
-Each Cortex-A72 has its own QMan portal and BMan portal mapped at fixed physical addresses. The portal is split into two MMIO regions:
+1. Reproduce the externally visible behaviour (same `/dev/cdx_ctrl` ioctl set, same `cdx_cfg.xml` and `cdx_pcd.xml` schemas, same NETLINK_KEY=32 protocol, same CMM CLI and `/etc/config/fastforward` format) so existing operator tooling works unchanged.
+2. Be implemented from scratch against the LS1046A Reference Manual and FMan documentation, **not** by copying NXP's SDK source. Existing `ASK/` tree and `data/kernel-patches/003-ask-kernel-hooks.patch` are the **functional reference**, not a code donor.
+3. Target mainline 6.18.x. No 6.6 backport. No SDK fork.
+4. Keep depending on the **proprietary FMan microcode v210.10.1** (loaded by U-Boot from SPI NOR `mtd4`, injected into the DTB `fsl,fman-firmware` node before kernel handoff). The microcode is the silicon program that gives FMan its parse/classify/forward pipeline; it is not in the rewrite scope and cannot be replaced from a clean-room.
+5. Coexist with the default-flavor mainline DPAA1 stack at the **flavor** level (Kconfig-exclusive, separate kernel build), not at runtime.
 
-| Region | Cacheability | Purpose |
-|--------|--------------|---------|
-| CE (Cache-Enabled) | Normal cacheable, write-back | Command rings, DQRR, EQCR, RCR |
-| CI (Cache-Inhibited) | Device-nGnRnE | Doorbells, status, interrupt regs |
-
-The CE region is sized 16 KiB per portal; CI is 4 KiB. Kernel init maps both with the correct memory attributes via `ioremap_wc` for CE and `ioremap` for CI. Since this is in-kernel, no PAMU programming for buffer access is needed; the standard DMA API (`dma_map_*`, `dma_alloc_coherent`) handles addressing.
-
-### 2.3 Ring structures
-
-**QMan EQCR (Enqueue Command Ring):** 8 entries × 64 B. Software writes a frame descriptor + verb, increments producer index, rings doorbell. Hardware drains and decrements consumer.
-
-**QMan DQRR (Dequeue Response Ring):** 16 entries × 64 B. Hardware writes dequeue responses (containing FD + FQID + sequence number); software polls consumer index, processes, advances.
-
-**QMan MR (Message Ring):** 8 entries × 64 B. Async events (FQ state changes, congestion notifications). Polled at slow path or threaded IRQ.
-
-**BMan RCR (Release Command Ring):** 8 entries × 64 B. Release up to 8 buffers per command. Acquire is via a separate command path on the BMan portal.
-
-All rings use cyclic indices with a "vbit" toggle so software detects new entries without per-entry zeroing.
-
-### 2.4 FMan structure
-
-One FMan instance with the following resources:
-
-- **MURAM**: 384 KiB shared RAM for FMan internal state (queue contexts, parser config, KeyGen tables). Statically partitioned at init.
-- **Ports**: 8 RX ports + 8 TX ports + 2 OP (offline parse) ports. Each network port maps to one MAC.
-- **Microcode**: ~16 KiB binary blob loaded into FMan at init. Provides the parse/classify pipeline. NXP-redistributable.
-- **Parser**: Microcode-driven parse tree (Ethernet, VLAN, IPv4, IPv6, TCP, UDP, GRE, ESP, custom).
-- **KeyGen**: Extracts hash keys from parse results for distribution across queues.
-- **Policer**: Two-rate three-color marker per port and per flow.
-- **CC (Coarse Classifier)**: Lookup tables for steering and ACLs.
-
-### 2.5 Frame Descriptor (FD)
-
-The 32-byte FD is the unit of work between software and hardware. Layout (little-endian on LS1046A; struct definition is illustrative, the implementer should generate from the LS1046A reference manual):
-
-```c
-struct qm_fd {
-    union {
-        struct {
-            u8       dd:2;          /* dynamic debug */
-            u8       liodn_offset:6;
-            u8       bpid;          /* buffer pool ID */
-            u8       eliodn_offset:4;
-            u8       reserved:4;
-            u8       addr_hi;       /* phys addr [39:32] */
-            __be32   addr_lo;       /* phys addr [31:0] */
-        };
-        u64      opaque_addr;
-    };
-    __be32   format:3;          /* 0=single buf, 1=S/G, 2=long single */
-    __be32   offset:9;          /* data offset within buffer */
-    __be32   length:20;         /* data length OR S/G entry count */
-    __be32   cmd_status;        /* tx confirmation, rx parse status */
-} __attribute__((packed, aligned(8)));
-```
-
-For RX, the offset points to the start of the L2 header; FMan writes a parse result block before that, in the headroom. For TX, software sets format=0, addr=phys(buffer_start), offset=headroom, length=packet_len.
-
-### 2.6 FMan parse result
-
-Sixty-four bytes written by FMan into the buffer at a configurable offset (we put it at byte 0 of the buffer). Contains L2/L3/L4 protocol identifiers, header offsets, hash result, VLAN tag info, and parse status flags. Bit-exact layout in LS1046A RM §8.7; the implementer should generate the struct from there rather than transcribing it from any other source.
-
-### 2.7 Stashing
-
-QMan can pre-fetch the start of incoming packet data into L1 or L2 cache before raising the dequeue response. Configured per-FQ:
-
-- `stash_lines`: number of 64 B lines to stash from packet data
-- `stash_data_l1` / `stash_data_l2`: target cache level
-- `stash_annotation_lines`: lines of parse result to stash
-- `stash_context_lines`: lines of FQ context to stash
-
-Critical for line rate. The difference between "stashing tuned" and "stashing off" is roughly 3× in L3 forwarding throughput on this SoC. v1 default is 1 + 2 + 1 (annotation + data + context) targeting L1.
-
-### 2.8 Errata to handle
-
-The LS1046A errata list (chip rev 1.0 and 1.1) includes ~30 DPAA-related items. Must-implement for v1:
-
-- A-009885 (FMan): RX FIFO threshold tuning per port speed
-- A-010022 (QMan): EQCR consumer index read after enqueue write
-- A-010165 (BMan): minimum 8-buffer release granularity below pool depletion threshold
-- A-010379 (FMan v3L): parser stall on certain VLAN+IPv6 ext header combinations, requires soft parser override
-
-The full list lives in the LS1046A chip errata document. Each erratum should be tagged in code with its number and the conditions under which it applies. Several PowerPC-era errata in NXP's code do not apply to A72 and should be omitted, not transcribed.
+This spec defines (1)–(5).
 
 ---
 
-## 3. Software architecture
+## 1. Hardware reference — the parts that matter for ASK
 
-### 3.1 Module layering
+### 1.1 The FMan classifier silicon
 
-```
-                  +---------------------------+
-                  |     fsl-dpaa1-caam.ko     |  optional
-                  |   (xfrm IPsec offload)    |
-                  +---------------------------+
-                            |  CAAM JR
-                            v
-+---------------------+  +---------------------+
-| fsl-dpaa1-pcd.ko    |  | fsl-dpaa1-eth.ko    |
-| (tc-flower offload) |  | (netdev driver)     |
-+---------------------+  +---------------------+
-            \             /
-             \           /
-              v         v
-            +-------------+
-            | fsl-fman.ko |
-            +-------------+
-                  |
-            +-------------+
-            | fsl-qman.ko |
-            +-------------+
-                  |
-            +-------------+
-            | fsl-bman.ko |
-            +-------------+
+Authoritative source: LS1046A RM chapter 8 (DPAA), specifically §8.7 (parser+KeyGen), §8.8 (CC), §8.9 (Policer), §8.10 (BMI). Implementer must read these chapters before writing any ASK code; this spec is a roadmap, not a substitute.
 
-Reused upstream: phylink, mdio, mdio-mux, of_mdio, page_pool, xdp_sock_buff
-```
+Each FMan port has, per RM:
 
-### 3.2 Module responsibilities
+* **Parser** — runs proprietary microcode on a dedicated RISC engine inside FMan (NOT on the A72). For the default flavor we use the standard ucode (`fsl_fman_ucode_ls1046_r1.0_106_4_18.bin`); for ASK we use **v210.10.1** (proprietary NXP binary — a different program for the same engine that adds the parse-result fields ASK needs and the BMI short-circuit path). Both feed into KeyGen.
+* **KeyGen** — extracts a hash key from the parse result, hashes it (CRC), looks up a base FQID, and enqueues. Up to 128 FQ-distributions ("schemes") per port. Used by mainline mostly for RSS; used by ASK as the front-half of CC-table lookup.
+* **Coarse Classifier (CC)** — the silicon block this whole spec is about. Per FMan, CC supports:
+  * **Exact-match** nodes (TCAM-like) — up to 256 entries per node.
+  * **Hash-table** nodes — chained `<num_sets>` × `<num_ways>` buckets in MURAM (and optionally DDR for "external hash"). The `cdx_pcd.xml` we ship hard-codes mask `0x7fff` for IPv4/IPv6 5-tuple tables (32K buckets) and `0xff` for narrower tables.
+  * Per-key actions: enqueue-to-FQ (default), direct-forward-to-TX-port (the "fast path"), drop, policer redirect, modify-and-forward (NAT — used by 4RD/EtherIP).
+* **Policer** — dual-rate token-bucket per port and per flow; ASK uses it for the exception-rate limiter (`CDX_EXPT_*_RATELIM`, see `ASK/dpa_app/dpa.c` `set_exptrate_policer_defaults`).
+* **BMI / MURAM / IRAM** — DMA engine, shared scratchpad, microcode RAM; all sized fixed by silicon.
 
-**`fsl-bman.ko`** (~2 kLOC):
-- BMan global init, portal infrastructure
-- Per-CPU portal driver with kernel-internal API
-- BPID allocation, buffer release/acquire primitives
-- Pool depletion notifications
-- Exposes `<linux/fsl/bman.h>` to higher layers
+The ASK fast-path uses CC's "modify-and-forward" action: when a CC entry matches an established flow, FMan rewrites the L2 header with the cached next-hop MAC, decrements TTL, fixes the IP/L4 checksums, and enqueues directly to the egress port's TX FQ. The A72 never sees the packet.
 
-**`fsl-qman.ko`** (~3.5 kLOC, softdep `fsl-bman`):
-- QMan global init, portal infrastructure
-- Per-CPU portal driver with EQCR push and DQRR poll
-- FQ state machine (OOS, SCHED, PARKED, RETIRED)
-- Channel and CGR (congestion group) management
-- IRQ handling, threaded IRQ for portal events
-- Exposes `<linux/fsl/qman.h>`
+### 1.2 MURAM — the hard limit
 
-**`fsl-fman.ko`** (~3 kLOC, softdep `fsl-qman fsl-bman`):
-- FMan global init, MURAM allocator
-- Microcode loader (firmware request, version check, load)
-- Port management (RX/TX/OP), MAC binding
-- phylink integration via existing `mac` driver pattern
-- Default parser/KeyGen profiles
-- Exposes `<linux/fsl/fman.h>`
+MURAM is shared FMan scratchpad. ASK's hash tables, KeyGen schemes, FCI port-to-policy map, parser config, FQ contexts, **and** the BMan fragment buffer pools used by CC for IP-reassembly all live in MURAM. **Exhaustion is the canonical Chain-2 production failure** (see §8). The clean-room rewrite must:
 
-**`fsl-dpaa1-pcd.ko`** (~2 kLOC, softdep `fsl-fman`):
-- PCD configuration: parser tweaks, KeyGen profiles, CC tables
-- tc-flower offload: translate flower rules into CC entries
-- Per-port classifier hierarchies
-- Optional module; without it, ports use a basic L4 hash profile
+* Compute MURAM use up-front from `cdx_cfg.xml` + `cdx_pcd.xml`, fail loudly at policy-load time if oversubscribed, never silently truncate.
+* Match the SDK's per-table MURAM accounting **byte for byte** (current tables: 16 of them, listed in §3.3) so existing `cdx_pcd.xml` policies parse-fit identically.
 
-**`fsl-dpaa1-eth.ko`** (~3.5 kLOC, softdep `fsl-fman`):
-- Per-port netdev registration
-- NAPI poll loops for RX
-- TX function with multi-queue
-- page_pool-backed buffer pools
-- ethtool ops (stats, link, RSS, ring, channels)
-- Native XDP, XDP_REDIRECT, AF_XDP zero-copy
-- Sysfs/debugfs surfaces
+### 1.3 The Mono Gateway DK port map (already canonical in `AGENTS.md`)
 
-**`fsl-dpaa1-caam.ko`** (~1.5 kLOC, softdep `caam_jr`):
-- Glue between kernel xfrm and CAAM job rings
-- Algorithm registration (AES-GCM, AES-CBC + HMAC-SHA, etc.)
-- Async crypto request submission and completion handling
-- Optional module; without it, IPsec runs in software
+| netdev | FMan MAC | DT unit-addr | physical port | `cdx_cfg.xml` portid |
+|--------|----------|--------------|----------------|----------------------|
+| `eth0` | mEMAC5   | `e8000`      | left RJ45 1G   | 4  |
+| `eth1` | mEMAC6   | `ea000`      | center RJ45 1G | 5  |
+| `eth2` | mEMAC2   | `e2000`      | right RJ45 1G  | 1  |
+| `eth3` | mEMAC9   | `f0000`      | left SFP+ 10G  | 6  |
+| `eth4` | mEMAC10  | `f2000`      | right SFP+ 10G | 7  |
+| (offline, `fman0-oh@2`) | OP1 | — | IPsec offload bound | 8 |
+| (offline, `fman0-oh@3`) | OP2 | — | WiFi/AP offload bound | 9 |
 
-Total: ~15.5 kLOC against ~60-80 kLOC for the equivalent upstream + LSDK code.
+The **offline ports (OPs)** are FMan ports with no MAC: they ingest from one BMI queue and re-inject to another. ASK uses them for flows that need an extra parse pass after a software action: encrypted packets land on OP1 after CAAM, get re-parsed and CC-classified for forwarding; bridge-flooded packets go via OP2 for wireless ALG. The clean-room rewrite must support both OPs; `cdx_cfg.xml` already encodes them (`<port type="OFFLINE" .../>`).
 
-### 3.3 NAPI worker model
+The offline-port semantics is **the** thing that distinguishes ASK from any tc-flower offload story. tc-flower has no model for "re-inject a packet into the classifier from the egress side"; ASK does, because the LS1046A silicon does. This is non-negotiable for IPsec offload.
 
-One NAPI instance per RX FQ. RX FQs are pinned to specific portals (one portal per CPU). The kernel scheduler runs the NAPI on the CPU owning the portal, IRQ affinity keeps wakeups local, and CPU hotplug callbacks migrate FQs to a surviving portal cleanly.
+### 1.4 What ASK does NOT touch
 
-No threaded NAPI in v1 (the gain is marginal when portals are already CPU-local). Easy toggle in v2 if profiling justifies it.
-
-### 3.4 Why a clean rewrite beats patching upstream
-
-Upstream `drivers/net/ethernet/freescale/dpaa/` carries 15 years of QorIQ history. Specifically:
-
-- PowerPC-era assumptions still latent in buffer alignment and barrier patterns
-- Manual buffer recycling instead of page_pool
-- Raw `phy_device` instead of phylink
-- No XDP, no AF_XDP, no tc-flower offload
-- Tight coupling of FMan, QMan, BMan into a single source dir without clean module boundaries
-- `fsl_mac` driver glued in via custom platform-data passing
-- Per-FQ context structures hand-managed without RCU
-
-Patching this incrementally toward the target architecture is a multi-year exercise involving many maintainers. A parallel implementation under `drivers/net/ethernet/freescale/dpaa1-ng/` (or out-of-tree first) ships in a fraction of the time and is far easier to review because each module is self-contained and small.
+* No PAMU programming (the standard DMA API handles addressing for kernel buffers; ASK doesn't expose userspace DMA).
+* No CAAM JR ownership (mainline `caam_jr` keeps ownership; ASK uses CAAM via `xfrm` offload hooks defined in `data/kernel-patches/003-ask-kernel-hooks.patch::net/xfrm/ipsec_flow.{c,h}`).
+* No mEMAC PHY/SFP/link control (mainline `fsl_dpaa_mac` + phylink for default flavor; SDK `fsl_mac` for ASK flavor — out of scope here).
+* No DTB structural changes vs. the existing `data/dtb/mono-gateway-dk-sdk.dts` (16 RX/TX port nodes in SDK compatible format; the rewrite still needs SDK-format strings because it consumes the same SDK BMan/QMan portal layer).
 
 ---
 
-## 4. Memory model
+## 2. Component inventory — old → new
 
-### 4.1 RX buffer model: page_pool
+The clean-room rewrite replaces the proprietary SDK pieces. Mainline-side changes are minimised; the kernel-hooks patch is rewritten as a **smaller** patch that hooks `flowtable` and `XFRM_OFFLOAD` instead of the legacy ASK ad-hoc hooks. Userspace daemons are rewritten in modern C with proper netlink (libmnl).
 
-Each RX queue allocates a `struct page_pool` with:
+| Layer | NXP ASK / SDK source today | Clean-room replacement | Naming (avoid collision) |
+|-------|----------------------------|-------------------------|--------------------------|
+| Kernel — fast-path engine | `kernel/flavors/ask/oot-modules/cdx/` (15 files, OOT module `cdx.ko`) | New OOT module **`fpex.ko`** (Fast-Path Engine, eXtensible) — same external API on `/dev/cdx_ctrl` for compat. | NOT `cdx`: mainline 6.18 already has `drivers/cdx/cdx.c` (AMD/Xilinx CDX bus, completely different thing). The userspace ABI symbol `/dev/cdx_ctrl` and `CDX_CTRL_*` ioctl names stay (compat); the **module name** changes. |
+| Kernel — bridge-FDB watcher | `kernel/flavors/ask/oot-modules/auto_bridge/auto_bridge.c` (single file) | **`fpex_bridge.ko`** | OOT, GPL. |
+| Kernel — netfilter ↔ userspace channel | `data/kernel-patches/003-ask-kernel-hooks.patch::net/netfilter/comcerto_fp_netfilter.c` + patches to `nf_conntrack_*` + `net/xfrm/ipsec_flow.{c,h}` + UAPI headers + `net/key/af_key.c` (to wire NETLINK_KEY=32 via `ask_fci_nlkey`) | A **smaller** in-tree-hooks patch (`kernel/flavors/ask/patches/200-fpex-hooks.patch`), backed by mainline **`flowtable`** for bridge offload and a new `XFRM_OFFLOAD` provider for IPsec. The legacy proto-32 NETLINK_KEY channel is **kept** for FCI (the userspace ABI dependency makes it cheaper to keep than to migrate cmm to `nf_tables` netlink). | New file lives under `net/netfilter/fpex_fci.c`; UAPI headers stay at `linux/netfilter/xt_QOSMARK.h`, `xt_QOSCONNMARK.h`. |
+| Kernel — QOSMARK/QOSCONNMARK xt match/target | new files in `003-ask-kernel-hooks.patch` | Reused as-is (these are 200-line standalone xt modules; no scope to rewrite). | `xt_qosmark.ko`, `xt_qosconnmark.ko`. |
+| Userspace — policy programmer | `ASK/dpa_app/` (`dpa.c`, `main.c`, `testapp.c`) | **`fpex-load`** — clean-room rewrite. Same XML schemas in/out. | binary at `/usr/sbin/fpex-load`. Spawned by `fpex.ko` via `call_usermodehelper(UMH_WAIT_PROC)` at insmod (matches existing model, see `cmm.service` comment). |
+| Userspace — connection manager | `ASK/cmm/` (60+ files) | **`fpexd`** — clean-room daemon. Same `fastforward` config format, same CLI. | `/usr/bin/fpexd`. systemd unit guarded by `ConditionPathExists=/dev/cdx_ctrl`. |
+| Userspace — FCI library | `ASK/fci/lib/` (`libfci.c`, `libfci.h`) | **`libfpex-fci`** — clean-room. Header-compatible with `libfci.h`. | `/usr/lib/aarch64-linux-gnu/libfpex_fci.so.1`, symlinked as `libfci.so.1` for compat. |
+| Userspace — fmlib extensions | `ASK/patches/fmlib/01-mono-ask-extensions.patch` | Re-derived patch against current `github.com/nxp-qoriq/fmlib` head. Same struct extensions (`t_FmPcdKgSchemeParams::shared`, `t_FmPcdHashTableParams::{table_type,timeout_val,…}`); same byte layout. | `data/ask-userspace/fmlib/patches/01-fpex-extensions.patch`. |
+| Userspace — fmc extensions | `ASK/patches/fmc/01-mono-ask-extensions.patch` | Re-derived patch against current `github.com/nxp-qoriq/fmc` head. | `data/ask-userspace/fmc/patches/01-fpex-extensions.patch`. |
+| Userspace — libnetfilter-conntrack ASK extensions | (in `data/ask-userspace/libnetfilter-conntrack/`) | Re-derived: fast-path info attributes + QOSCONNMARK accessors. | unchanged file location, new patch name. |
+| Userspace — libnfnetlink async heap | (in `data/ask-userspace/libnfnetlink/`) | Re-derived: non-blocking socket + heap-buffer mode for `fpexd` event burst handling. | unchanged. |
+| Userspace — iptables QOSMARK target | `ASK/` patch series | Re-derived patch. | unchanged. |
+| Userspace — iproute2 4RD/EtherIP | `ASK/` patch series | Re-derived patch. | unchanged. |
+| Userspace — ppp ifindex | `ASK/` patch series | Re-derived patch. | unchanged. |
+| Userspace — rp-pppoe CMM relay | `ASK/` patch series | Re-derived patch (now talks to `fpexd`). | unchanged. |
 
-- `pool_size = 1024` pages (tunable via ethtool `-G`)
-- `flags = PP_FLAG_DMA_MAP | PP_FLAG_DMA_SYNC_DEV`
-- `dma_dir = DMA_FROM_DEVICE`
-- `nid = NUMA_NO_NODE` (LS1046A is single-NUMA)
+What survives unchanged from the proprietary side:
 
-One 4 KiB page hosts two 2 KiB BMan buffers (head and tail of page). page_pool's fragment API (`page_pool_alloc_frag`) handles this. DMA mapping is cached in the page; BMan release returns the page to the pool.
-
-```
-    +-----------------------------+
-    | Page (4 KiB)                |
-    | +-------------------------+ |
-    | | Buffer 0 (2 KiB)        | |
-    | |  - 64 B parse result    | |
-    | |  - 64 B headroom        | |
-    | |  - 1920 B packet+tail   | |
-    | +-------------------------+ |
-    | | Buffer 1 (2 KiB)        | |
-    | |  (same layout)          | |
-    | +-------------------------+ |
-    +-----------------------------+
-```
-
-### 4.2 SKB construction
-
-On dequeue:
-
-```c
-page = bm_buf_to_page(fd_addr);
-skb = napi_build_skb(page_address(page) + buf_offset, frag_size);
-skb_reserve(skb, headroom);
-skb_put(skb, fd->length);
-skb_record_rx_queue(skb, rx_queue_idx);
-skb->protocol = eth_type_trans(skb, netdev);
-/* Map FMan parse result into skb hints */
-dpaa1_parse_to_skb(parse_result, skb);
-```
-
-`napi_build_skb` reuses the slab cache for skb headers and avoids per-packet `alloc_skb`. The buffer page itself stays on page_pool; on free, the page returns to the pool, not to the allocator.
-
-### 4.3 XDP buffer model
-
-For XDP, the same page is wrapped in an `xdp_buff`:
-
-```c
-struct xdp_buff xdp;
-xdp_init_buff(&xdp, frag_size, &rxq->xdp_rxq);
-xdp_prepare_buff(&xdp, page_address(page), headroom, fd->length, false);
-act = bpf_prog_run_xdp(prog, &xdp);
-```
-
-Headroom is always 64 B (above parse result), which is enough for `XDP_TX` to push an Ethernet header rewrite or a small encap.
-
-### 4.4 AF_XDP zero-copy
-
-When an AF_XDP socket binds in zero-copy mode to an RX queue:
-
-1. The driver replaces page_pool buffers with UMEM buffers from the socket's pool
-2. BMan is reseeded with UMEM-backed buffers (DMA addresses from `xsk_buff_pool`)
-3. RX path produces FDs whose addresses correspond to UMEM frames
-4. Driver hands UMEM descriptors directly to the socket; no skb construction
-5. TX from the socket: descriptor address goes straight into FD, FMan transmits, BMan returns
-
-UMEM frames are 4 KiB by default (matches our buffer page assumption) but the driver supports 2 KiB UMEM if the socket requests it. The trick is that BMan only manages buffers from one source at a time per BPID; the cleanest implementation is one BPID per RX queue, swapped between page_pool and UMEM modes on bind/unbind.
-
-### 4.5 TX buffer model
-
-TX is skb-based normally. The skb's frag list gets translated to a single-segment FD when possible (no fragments) or an S/G FD for multi-segment skbs.
-
-```c
-if (skb_is_nonlinear(skb)) {
-    fd = build_sg_fd(skb);  /* allocate S/G table from a small per-CPU pool */
-} else {
-    fd = build_simple_fd(skb);
-}
-```
-
-S/G tables are allocated from a dedicated DMA-coherent per-CPU pool (256 entries of 256 B = 64 KiB per CPU). After TX confirmation, the S/G table returns to the pool.
-
-For XDP_TX and AF_XDP TX, no skb is involved; FDs point directly at the page or UMEM frame.
-
-### 4.6 Buffer accounting
-
-Sysfs surface per netdev:
-
-```
-/sys/class/net/eth0/dpaa1/
-├── rx_pool_depth
-├── rx_pool_recycled
-├── rx_pool_allocated
-├── tx_inflight
-├── tx_sg_pool_used
-└── bman_pool_depth
-```
-
-Pool exhaustion triggers backpressure: FMan drops at MAC, increments port drop counter. The driver reads BMan depletion thresholds at init and configures reasonable refill points.
+* The **FMan microcode v210.10.1** binary in U-Boot SPI flash. Out of scope.
+* The **vendored SDK `sdk_fman` / `sdk_dpaa` / `fsl_qbman`** drivers under `kernel/flavors/ask/sdk-sources/`. ASK's CC programming goes through the SDK's `FM_PCD_*` API; rewriting that layer is a separate, much larger, project (it's the FMan v3L kernel driver — see `plans/MIGRATION-PLAN-6.18.md`). For ASK's clean-room rewrite, the SDK is the **substrate** the new modules sit on top of, exactly like today. Default-flavor users get mainline `fsl_dpa`/`fsl_dpaa_mac` with no FPEX at all.
 
 ---
 
-## 5. Resource model
+## 3. Kernel module spec — `fpex.ko` (replaces `cdx.ko`)
 
-### 5.1 ID allocations
+### 3.1 Responsibilities
 
-Resource IDs are assigned at probe time by the relevant module:
+1. Probe the SDK FMan driver (`fsl_fman`) at `module_init`. If the FMan microcode signature does not match v210.10.1, **bail out cleanly** with `dev_warn_once` and never create `/dev/cdx_ctrl`. (This is what gates `cmm.service` via `ConditionPathExists`.)
+2. Spawn `/usr/sbin/fpex-load` synchronously with `UMH_WAIT_PROC` to apply the policy from `cdx_cfg.xml` + `cdx_pcd.xml`. `fpex-load` calls back into `fpex.ko` via `CDX_CTRL_DPA_SET_PARAMS` ioctl with the compiled FMC model.
+3. Build the BMan fragment buffer pools (one per OFFLINE port) used by CC IP-reassembly hash tables. Failure here is the canonical *"failed to locate eth bman pool"* message in the Chain-2 failure model (§8).
+4. Register the FCI netlink protocol (NETLINK_KEY=32 — kept for ABI compat with existing `cmm`/`fpexd` clients) and the `nf_conntrack_event` notifier so the userspace daemon learns about new flows.
+5. Expose the `/dev/cdx_ctrl` chardev with the existing ioctl numbering (see UAPI header below).
+6. Implement IPsec offload as an `XFRM_OFFLOAD` provider that uses CAAM via the offline-port re-injection model (encrypted packet → CAAM JR → OFFLINE port OP1 → CC re-classify → forward). This replaces the legacy `INET_IPSEC_OFFLOAD=y` path that depends on the `xfrm_state` field layout from kernel 6.6 (which is broken on 6.18 — see `AGENTS.md` "Kconfig invariants" line `CONFIG_INET_IPSEC_OFFLOAD=n`).
+7. Provide bridge L2-flow offload via the mainline **`flowtable`** infrastructure (`nf_flow_table`), invoked by `fpex_bridge.ko` when the FDB learns a new MAC. This replaces the bespoke `auto_bridge` → CDX path with `flowtable` semantics that the mainline kernel already understands.
 
-| Resource | Range | Per-instance |
-|----------|-------|--------------|
-| FQ IDs | 0x100 - 0xFFFF | ~64 K |
-| BPIDs | 8 - 63 | 56 (0-7 reserved) |
-| Channels | 0x21 - 0x2F | 15 (one per portal + spares) |
-| CGR IDs | 0 - 255 | 256 |
-
-Kernel-internal allocator API:
-
-```c
-int qman_alloc_fqid_range(u32 *fqid, u32 num);
-void qman_release_fqid_range(u32 fqid, u32 num);
-
-int bman_alloc_bpid(u32 *bpid);
-void bman_release_bpid(u32 bpid);
-```
-
-These are kept compatible with upstream `qbman` headers so the FMan and Ethernet drivers can move between this implementation and upstream's during migration.
-
-### 5.2 Per-port resource layout (default)
-
-For each FMan port assigned to the driver:
-
-- 1 default RX FQ (catch-all)
-- 8 hashed RX FQs (KeyGen distribution targets)
-- 1 error FQ
-- N TX FQs where N = num_online_cpus() (one per CPU for lockless TX)
-- 1 TX confirmation FQ (shared across TX FQs of the same port)
-- 1 BPID per port (separate per-port pools simplify accounting)
-
-For LS1046A with 4 CPUs and 8 ports, total FQ usage is 8 × (1 + 8 + 1 + 4 + 1) = 120 FQs, well under the 64K budget.
-
-### 5.3 Channel assignment
-
-One channel per CPU portal. RX FQs schedule into the portal of the CPU that owns the queue (round-robin: FQ N goes to CPU N % num_cpus). TX FQs schedule into the portal of the CPU that produces the work (current CPU at TX time).
-
-### 5.4 Congestion groups
-
-One CGR per port for ingress. Threshold set to 80% of BMan pool depth; triggers an ECN mark on TCP if `ip_mark_ecn` sysctl is set, otherwise drops. CGR notifications drive netdev tx_queue stop/wake to throttle xmit.
-
----
-
-## 6. Initialization sequence
-
-### 6.1 Module load order
+### 3.2 File layout (target)
 
 ```
-modprobe fsl-bman              # foundation
-modprobe fsl-qman              # auto-pulls fsl-bman via softdep
-modprobe fsl-fman              # auto-pulls qman + bman
-modprobe fsl-dpaa1-eth         # auto-pulls fman, registers netdevs
-modprobe fsl-dpaa1-pcd         # optional, enables tc-flower offload
-modprobe fsl-dpaa1-caam        # optional, enables xfrm offload
+kernel/flavors/ask/oot-modules/fpex/
+├── Kbuild
+├── fpex_main.c          # init/exit, /dev/cdx_ctrl chardev, UMH dpa_app spawn
+├── fpex_dev.c           # FMan/PCD device handle plumbing (replaces cdx_dev.c)
+├── fpex_dpa.c           # DPA SET_PARAMS ioctl, port/dist/table ingest
+├── fpex_dpa_ipsec.c     # XFRM_OFFLOAD provider, CAAM submit/recv, OP1 re-inject
+├── fpex_qos.c           # exception-rate-limit policer setup, QOSMARK fastpath
+├── fpex_ehash.c         # external-hash CC operations (add/del/lookup)
+├── fpex_reassm.c        # IP-reassembly CC node config + BMan pool seed
+├── fpex_cmdhandler.c    # FCI protocol handler (NETLINK_KEY=32 receive path)
+├── fpex_ifstats.c       # per-flow byte/frame counters → libfci accessors
+├── fpex_mc_query.c      # multicast group lookup for CDX_CTRL ioctls
+├── fpex_timer.c         # IP-reassembly timeouts, conntrack-aging tick
+├── fpex_debug.c         # debugfs/seq_file under /sys/kernel/debug/fpex/
+└── fpex_internal.h      # private types, NOT exposed to userspace
+
+include/uapi/linux/fpex/
+├── cdx_ctrl.h           # /dev/cdx_ctrl ioctl numbers + structs (CDX_CTRL_*)
+└── fci.h                # NETLINK_KEY=32 message format (FCI_CMD_*)
 ```
 
-Dracut/initramfs hook adds these to early boot when DPAA1 is detected. VyOS image build script handles inclusion.
-
-### 6.2 Probe sequence per module
-
-**`fsl-bman`** probe:
-1. Map BMan global registers via OF
-2. Initialize buffer pool config space
-3. For each online CPU: probe portal, mmap CE/CI, request IRQ, register per-CPU state
-4. Register CPU hotplug callback for portal migration
-
-**`fsl-qman`** probe (after BMan ready):
-1. Map QMan global registers
-2. Allocate FQ ID and channel ID ranges from device tree
-3. Per-CPU portal init (similar to BMan)
-4. Initialize FQ state machine workqueue
-
-**`fsl-fman`** probe (after QMan + BMan ready):
-1. Map FMan registers, initialize MURAM
-2. `request_firmware()` for microcode, validate, load
-3. For each child MAC node: register subdevice
-4. Initialize default PCD profile (basic L3 hash)
-
-**`fsl-dpaa1-eth`** probe (per port, after FMan ready):
-1. Allocate netdev, set ops
-2. Allocate per-CPU TX FQs and per-port RX FQs
-3. Allocate BPID, create page_pool, seed buffers via BMan release
-4. Setup phylink, parse PHY from DT
-5. Register netdev with kernel
-6. ethtool, NAPI, XDP setup
-
-### 6.3 Microcode
-
-```c
-const struct firmware *fw;
-err = request_firmware(&fw, "fsl_fman_ucode_ls1046_r1.0_106_4_18.bin", dev);
-if (err) return err;
-err = fman_validate_ucode(fman, fw->data, fw->size);
-if (!err) fman_load_ucode(fman, fw->data, fw->size);
-release_firmware(fw);
-```
-
-Microcode version is logged at probe; mismatch with FMan revision is a warning (driver tries to continue) or error (if mismatch is incompatible). v1 supports microcode 106.4.18 (current as of LSDK 21.08). Newer microcode versions add features (fragmentation/reassembly, IPSec lookup) we don't use in v1.
-
-### 6.4 Failure modes
-
-- Microcode missing: FMan stays disabled, dependent ports do not register netdevs, kernel log makes the cause obvious
-- BMan pool seeding fails: port stays down, ethtool reports "no buffers"
-- PHY missing: phylink reports link down, port stays operational at netdev level (so userspace can configure)
-- IRQ allocation fails: probe fails, port unregisters cleanly
-
-All failures unwind via `devm_*` so partial init doesn't leak resources.
-
----
-
-## 7. RX data plane
-
-### 7.1 NAPI poll
-
-```c
-static int dpaa1_napi_poll(struct napi_struct *napi, int budget)
-{
-    struct dpaa1_napi *dn = container_of(napi, struct dpaa1_napi, napi);
-    struct qman_portal *p = dn->portal;
-    int work = 0;
-
-    while (work < budget) {
-        const struct qm_dqrr_entry *dq = qman_portal_peek_dqrr(p);
-        if (!dq) break;
-
-        if (likely(dq->fqid == dn->rx_fqid)) {
-            dpaa1_rx_one(dn, dq);
-        } else if (dq->fqid == dn->err_fqid) {
-            dpaa1_rx_error(dn, dq);
-        } else {
-            dpaa1_rx_unexpected(dn, dq);
-        }
-
-        qman_portal_consume_dqrr(p);
-        work++;
-    }
-
-    if (work < budget) {
-        if (napi_complete_done(napi, work))
-            qman_portal_irq_enable(p);
-    }
-
-    return work;
-}
-```
-
-Default budget is `NAPI_POLL_WEIGHT` (64). Tuned via ethtool `-C`.
-
-### 7.2 RX path detail
-
-```c
-static void dpaa1_rx_one(struct dpaa1_napi *dn, const struct qm_dqrr_entry *dq)
-{
-    struct page *page = bm_addr_to_page(dn, qm_fd_addr(&dq->fd));
-    void *va = page_address(page) + page_offset(dq->fd.bpid, page);
-    struct fm_parse_result *pr = va;
-    void *data = va + dn->buf_layout.data_offset;
-    u32 len = dq->fd.length;
-    struct sk_buff *skb;
-
-    /* DMA sync: device wrote, CPU reads */
-    dma_sync_single_for_cpu(dn->dev,
-                            page_pool_get_dma_addr(page) + page_offset(...),
-                            len + DPAA1_PARSE_RESULT_SIZE,
-                            DMA_FROM_DEVICE);
-
-    /* XDP first */
-    if (READ_ONCE(dn->xdp_prog)) {
-        u32 act = dpaa1_xdp_run(dn, page, data, len);
-        switch (act) {
-        case XDP_PASS:    break;
-        case XDP_DROP:    goto recycle;
-        case XDP_TX:      dpaa1_xdp_tx(dn, page, data, len); return;
-        case XDP_REDIRECT: dpaa1_xdp_redirect(dn, page, data, len); return;
-        default:          goto recycle;
-        }
-    }
-
-    /* Build skb backed by page_pool page */
-    skb = napi_build_skb(va, dn->buf_layout.frag_size);
-    if (!skb) goto recycle;
-
-    skb_reserve(skb, dn->buf_layout.data_offset);
-    skb_put(skb, len);
-    skb_mark_for_recycle(skb);  /* tells skb_release to return page to pool */
-    skb_record_rx_queue(skb, dn->rx_idx);
-    skb->protocol = eth_type_trans(skb, dn->netdev);
-
-    /* Map FMan parse result -> skb metadata */
-    if (pr->ip_pid == FM_PR_IPv4 || pr->ip_pid == FM_PR_IPv6)
-        skb->ip_summed = pr->cksum_valid ? CHECKSUM_UNNECESSARY : CHECKSUM_NONE;
-    if (pr->shimr & FM_PR_VLAN)
-        __vlan_hwaccel_put_tag(skb, htons(ETH_P_8021Q), pr->vlan_tci);
-    skb_set_hash(skb, pr->keygen_hash,
-                 pr->ip_pid ? PKT_HASH_TYPE_L4 : PKT_HASH_TYPE_L3);
-
-    napi_gro_receive(&dn->napi, skb);
-    return;
-
-recycle:
-    page_pool_put_full_page(dn->page_pool, page, true);
-}
-```
-
-### 7.3 Stashing tuning
-
-Per-FQ stashing config: 1 + 2 + 1 cache lines (annotation + data + context). Numbers come from empirical profiling on the target CPU. Stashing config is set when the FQ is initialized via QMan `INIT` verb and cannot be changed without retire/reinit.
-
-### 7.4 Buffer refill
-
-After NAPI consumes packets, BMan needs replenishment. Refill happens lazily: at the end of each NAPI poll, if pool depth drops below threshold, allocate up to 8 pages from page_pool and release to BMan in a single RCR command. Eight-buffer batching is mandatory (see errata A-010165 and basic perf hygiene).
-
-```c
-static void dpaa1_refill_pool(struct dpaa1_napi *dn)
-{
-    int depth = bman_pool_depth(dn->bpid);
-    int needed = dn->refill_target - depth;
-    struct bm_buffer bufs[8];
-    int i;
-
-    while (needed >= 8) {
-        for (i = 0; i < 8; i++) {
-            struct page *p = page_pool_alloc_frag(dn->page_pool, &offset, ...);
-            bm_buffer_set64(&bufs[i], page_to_phys(p) + offset);
-        }
-        bman_release(dn->bpid, bufs, 8);
-        needed -= 8;
-    }
-}
-```
-
----
-
-## 8. TX data plane
-
-### 8.1 ndo_start_xmit
-
-```c
-static netdev_tx_t dpaa1_start_xmit(struct sk_buff *skb, struct net_device *dev)
-{
-    struct dpaa1_priv *priv = netdev_priv(dev);
-    int cpu = smp_processor_id();
-    struct dpaa1_tx_q *txq = &priv->tx_qs[cpu];
-    struct qm_fd fd;
-    int err;
-
-    if (skb_is_nonlinear(skb)) {
-        err = build_sg_fd(priv, skb, &fd);
-    } else {
-        err = build_simple_fd(priv, skb, &fd);
-    }
-    if (unlikely(err)) goto drop;
-
-    /* Stash skb pointer in FD opaque field for tx confirm */
-    fd.cmd_status = (u32)txq_record_skb(txq, skb);
-
-    err = qman_enqueue(txq->fq, &fd);
-    if (unlikely(err)) {
-        if (err == -EBUSY) {
-            netif_tx_stop_queue(netdev_get_tx_queue(dev, cpu));
-            return NETDEV_TX_BUSY;
-        }
-        goto drop;
-    }
-
-    return NETDEV_TX_OK;
-
-drop:
-    dev_kfree_skb_any(skb);
-    dev->stats.tx_dropped++;
-    return NETDEV_TX_OK;
-}
-```
-
-Multiqueue: one txq per CPU. `dev->real_num_tx_queues = num_online_cpus()`. Default queue selection is `__netdev_pick_tx` (which uses the running CPU index by default), so packets stay on their producer CPU.
-
-### 8.2 TX confirmation
-
-A separate per-port confirmation FQ collects done frames. A NAPI instance for the confirm FQ runs on the CPU that owns the FQ's portal, drains FDs, looks up the original skb via the opaque field, and frees it.
-
-```c
-static int dpaa1_tx_confirm_poll(struct napi_struct *napi, int budget)
-{
-    /* Drain confirmation DQRR, free skbs, return S/G entries to per-CPU pool */
-    while (work < budget) {
-        const struct qm_dqrr_entry *dq = qman_portal_peek_dqrr(p);
-        if (!dq) break;
-        struct sk_buff *skb = txq_recover_skb(dq->fd.cmd_status);
-        if (skb_is_sg_fd(&dq->fd)) free_sg_table(...);
-        napi_consume_skb(skb, budget);
-        qman_portal_consume_dqrr(p);
-        work++;
-    }
-    /* ... */
-}
-```
-
-### 8.3 XDP_TX
-
-XDP_TX from RX path is enqueued back on the same port's TX FQ. The same buffer page is reused (no skb allocation, no copy). The TX confirm path detects "this FD came from XDP" via a flag bit in `cmd_status` and returns the page to page_pool instead of freeing an skb.
-
-### 8.4 XDP_REDIRECT
-
-Standard `xdp_do_redirect()` path. Target may be another DPAA1 port (in which case we hit XDP_TX path on the target), a different netdev (e.g., a tap or veth, packet goes through the kernel's generic redirect path), or an AF_XDP socket.
-
-### 8.5 AF_XDP TX
-
-When XSK is bound for TX, xsk completion ring entries map to FDs. The driver runs an XSK TX poll function:
-
-```c
-static int dpaa1_xsk_tx(struct dpaa1_napi *dn, int budget)
-{
-    struct xdp_desc desc;
-    while (work < budget && xsk_tx_peek_desc(xsk, &desc)) {
-        struct qm_fd fd;
-        u64 dma = xsk_buff_raw_get_dma(xsk_pool, desc.addr);
-        qm_fd_init(&fd, dma, 0, desc.len, dn->bpid);
-        if (qman_enqueue(dn->tx_fq, &fd)) break;
-        work++;
-    }
-    xsk_tx_release(xsk);
-    return work;
-}
-```
-
----
-
-## 9. PCD configuration and tc-flower offload
-
-### 9.1 Default PCD (no `fsl-dpaa1-pcd.ko` loaded)
-
-Without the optional PCD module, each port runs a hardcoded "L4 5-tuple hash → 8 RX FQs" profile. This is enough for normal forwarding and is what most users will have.
-
-### 9.2 With `fsl-dpaa1-pcd.ko` loaded
-
-The driver advertises `NETIF_F_HW_TC` and registers tc-flower offload callbacks. Supported keys in v1:
-
-- `eth_dst`, `eth_src`, `eth_type`
-- `vlan_id`, `vlan_priority`
-- `ipv4_src`, `ipv4_dst`, `ipv6_src`, `ipv6_dst`
-- `ip_proto`
-- `tcp_src`, `tcp_dst`, `udp_src`, `udp_dst`
-
-Supported actions:
-
-- `drop` (CC entry with discard verdict)
-- `pass` (default verdict)
-- `redirect` to specific RX FQ (steers to a CPU)
-- `mirred ingress redirect` to another DPAA1 port (uses FMan's offline parse for cross-port redirect; v1 limited support)
-
-Mapping:
+The `cdx_ctrl.h` UAPI is **byte-compatible** with the existing SDK header; only the implementation behind it changes. (No struct rename, no ioctl renumber — `CDX_CTRL_DPA_SET_PARAMS` stays `_IOW('C', 1, struct cdx_ctrl_set_dpa_params)`, etc. The exact constant values are pinned by the existing `dpa.c` in `ASK/dpa_app/dpa.c` — see §5.1.)
+
+### 3.3 The 16 CC-table types (pinned by `cdx_pcd.xml`)
+
+Verbatim from `ASK/dpa_app/dpa.c::table_params[]` and `ASK/dpa_app/files/etc/cdx_pcd.xml`. The clean-room implementation must support all 16 with the same MURAM footprint:
+
+| Table name | Key size (B) | Mask | Purpose |
+|------------|--------------|------|---------|
+| `cdx_udp4`        | 14 | 0x7fff | IPv4 UDP 5-tuple |
+| `cdx_tcp4`        | 14 | 0x7fff | IPv4 TCP 5-tuple |
+| `cdx_udp6`        | 38 | 0x7fff | IPv6 UDP 5-tuple |
+| `cdx_tcp6`        | 38 | 0x7fff | IPv6 TCP 5-tuple |
+| `cdx_multicast4`  | 10 | 0x00ff | IPv4 multicast 3-tuple |
+| `cdx_multicast6`  | 34 | 0x00ff | IPv6 multicast 3-tuple |
+| `cdx_pppoe`       | 11 | 0x000f | PPPoE session relay |
+| `cdx_ethernet`    | 15 | 0x00ff | L2 bridge offload |
+| `cdx_esp4`        | 10 | 0x00ff | IPv4 ESP/SPI |
+| `cdx_esp6`        | 22 | 0x00ff | IPv6 ESP/SPI |
+| `cdx_tuple3udp4`  | 8  | 0x00ff | IPv4 UDP 3-tuple (RTP relay) |
+| `cdx_tuple3tcp4`  | 8  | 0x000f | IPv4 TCP 3-tuple (RTP relay) |
+| `cdx_tuple3udp6`  | 20 | 0x00ff | IPv6 UDP 3-tuple |
+| `cdx_tuple3tcp6`  | 20 | 0x000f | IPv6 TCP 3-tuple |
+| `cdx_frag4`       | 12 | 0x000f | IPv4 reassembly context |
+| `cdx_frag6`       | 38 | 0x000f | IPv6 reassembly context |
+
+`max="512"` per table (pinned in the XML). All are `shared="true"` (one CC node, all 9 ports point at it via the `combine portid="true" offset="16" mask="0xF"` directive).
+
+### 3.4 Module dependency chain (load order)
+
+`/etc/modules-load.d/ask-modules.conf` already pins this order, kept in `ASK/config/ask-modules.conf` and re-published as the runtime config for the rewrite:
 
 ```
-tc filter add dev fm0-mac1 ingress \
-    protocol ip flower \
-    dst_ip 10.0.0.0/8 ip_proto tcp dst_port 22 \
-    action drop
+fpex                    # was: cdx
+fpex_bridge             # was: auto_bridge
+nf_conntrack
+nf_conntrack_netlink
+xt_conntrack
+fpex_fci                # was: fci, in-tree built-in once hooks patch lands
 ```
 
-becomes a CC entry on FMan's classifier table for that port. Match miss falls through to the default KeyGen path. v1 supports up to 256 CC entries per port (FMan CC table size).
+The systemd oneshot `ask-modules-load.service` modprobes these in order. `cmm.service` (renamed `fpexd.service`) has `Requires=ask-modules-load.service` so it never starts against a half-initialised fast-path. This ordering is **load-bearing** — see Chain-1 failure model in §8.
 
-### 9.3 ethtool RSS
-
-```
-ethtool -X fm0-mac1 hkey <key> hfunc toeplitz
-ethtool -X fm0-mac1 equal 8
-```
-
-translates to KeyGen reconfiguration. Supported hash functions: Toeplitz (FMan native), CRC32 (FMan default). Indirection table size is 8 (matches default 8 RX FQs).
+### 3.5 Kconfig
 
 ```
-ethtool -N fm0-mac1 rx-flow-hash tcp4 sdfn
-```
-
-modifies KeyGen field selection for TCP/IPv4. Supported flow types: tcp4, udp4, tcp6, udp6, ah4, esp4, ah6, esp6, ip4, ip6.
-
-### 9.4 ACL example
-
-```
-# Drop SSH from anywhere except management subnet
-tc qdisc add dev fm0-mac1 ingress
-tc filter add dev fm0-mac1 ingress prio 1 protocol ip flower \
-    src_ip 192.168.0.0/16 dst_port 22 ip_proto tcp action pass
-tc filter add dev fm0-mac1 ingress prio 2 protocol ip flower \
-    dst_port 22 ip_proto tcp action drop
-```
-
-These rules execute at FMan, before any kernel CPU sees the packet. Throughput-irrelevant: the drop happens at line rate regardless of system load.
-
-VyOS firewall config can opportunistically push compatible rules through tc-flower; rules that don't fit (stateful, complex) stay in nftables. Hybrid hardware/software firewall is a natural fit.
-
----
-
-## 10. CAAM crypto integration
-
-### 10.1 Job ring access
-
-CAAM has its own driver in upstream (`drivers/crypto/caam/`). We reuse it. Job rings are independent of QMan/BMan/FMan and have their own register interface. Upstream `caam_jr` is functional; the gap is xfrm offload, which `fsl-dpaa1-caam.ko` provides.
-
-### 10.2 xfrm offload
-
-Register as a crypto offload device:
-
-```c
-static const struct xfrmdev_ops dpaa1_xfrmdev_ops = {
-    .xdo_dev_state_add    = dpaa1_xfrm_state_add,
-    .xdo_dev_state_delete = dpaa1_xfrm_state_delete,
-    .xdo_dev_offload_ok   = dpaa1_xfrm_offload_ok,
-    .xdo_dev_state_advance_esn = NULL,  /* v1: not supported */
-};
-```
-
-Each offloaded SA gets a CAAM descriptor pre-built at state-add time. xmit path detects offload-eligible packets via `skb->sp` and submits to CAAM's job ring instead of the FMan TX FQ. CAAM completion is handled in soft IRQ; the crypted skb is then enqueued to FMan TX as a normal packet.
-
-### 10.3 Algorithms
-
-v1: AES-128-GCM, AES-256-GCM, AES-CBC + HMAC-SHA256 (legacy for IKEv1).
-v1 deferred: ChaCha20-Poly1305 (CAAM does not accelerate; runs in software regardless).
-v2: SHA-3 family if customers ask.
-
-### 10.4 Throughput
-
-CAAM on LS1046A reportedly does ~6 Gbps AES-GCM-128 with reasonable packet sizes. That's the offload ceiling; software AES-NI is irrelevant on ARM, so offload is effectively the only path to non-trivial IPsec throughput on this SoC.
-
----
-
-## 11. AF_XDP zero-copy detail
-
-### 11.1 Bind flow
-
-When userspace calls `bind(AF_XDP, ...)` with `XDP_ZEROCOPY`:
-
-1. Driver receives `XDP_SETUP_XSK_POOL` via `ndo_bpf`
-2. Validate `xsk_pool->headroom`, frame size; reject if incompatible
-3. Stop the target RX queue's NAPI
-4. Drain BMan pool of page_pool buffers, return to page_pool
-5. Convert UMEM frames to BMan buffers via `xsk_buff_alloc_batch` and release to BMan
-6. Restart NAPI; from now on, dequeue produces UMEM-backed FDs
-7. Driver handoff: instead of `napi_build_skb`, call `xsk_buff_set_size` and queue to socket
-
-### 11.2 RX path with XSK
-
-```c
-struct xdp_buff *xdp = xsk_buff_alloc_from_dma_addr(xsk_pool, fd_addr);
-xsk_buff_set_size(xdp, fd->length);
-xsk_buff_dma_sync_for_cpu(xdp);
-
-if (READ_ONCE(dn->xdp_prog)) {
-    act = bpf_prog_run_xdp(dn->xdp_prog, xdp);
-    /* XDP_REDIRECT to xsk: standard handling via xsk_redirect */
-}
-```
-
-### 11.3 Socket queue handling
-
-XSK fill queue: userspace pushes "free" UMEM descriptors. Driver consumes from fill queue when refilling BMan.
-
-XSK rx queue: driver pushes received descriptors. Userspace consumes.
-
-XSK tx queue: userspace pushes packets to send. Driver consumes in poll function and enqueues to FMan.
-
-XSK completion queue: driver pushes after FMan TX confirm. Userspace consumes to know when UMEM frames are reusable.
-
-### 11.4 Performance ceiling
-
-AF_XDP zero-copy on LS1046A should reach ~22-24 Gbps small-packet, close to wire on 2×XFI. The bottleneck is FMan parse/classify, not the buffer path. This gives kernel-bypass performance to a userspace consumer of choice (DPDK app, custom packet processor) without replacing the kernel network stack wholesale.
-
----
-
-## 12. Module structure and Kconfig
-
-### 12.1 Kconfig
-
-```
-menuconfig FSL_DPAA1_NG
-    bool "Freescale DPAA1 next-generation drivers"
-    depends on ARM64 && OF
+config FPEX
+    tristate "NXP LS1046A ASK Fast-Path Engine (clean-room)"
+    depends on FSL_SDK_DPA
+    depends on NETFILTER && NF_CONNTRACK && BRIDGE
+    depends on XFRM
+    select NET_KEY                  # NETLINK_KEY=32 plumbing in net/key
+    select NF_FLOW_TABLE             # backs fpex_bridge offload
     help
-      Modular, modprobe-friendly DPAA1 driver stack for LS1046A and
-      LS1043A. Replaces the legacy CONFIG_FSL_DPAA driver family.
-      Choose this OR the legacy stack, not both.
+      Out-of-tree-buildable replacement for the proprietary NXP cdx.ko fast-
+      path module. Programs FMan CC tables to short-circuit established
+      conntrack flows in hardware. Requires ASK-enabled FMan microcode
+      v210.10.1 in SPI flash; without that microcode the module bails out
+      and /dev/cdx_ctrl is never created.
 
-if FSL_DPAA1_NG
-
-config FSL_BMAN_NG
-    tristate "BMan portal driver"
-    select FSL_BMAN_PORTAL_DEFAULTS
-
-config FSL_QMAN_NG
-    tristate "QMan portal driver"
-    depends on FSL_BMAN_NG
-
-config FSL_FMAN_NG
-    tristate "FMan v3L driver"
-    depends on FSL_QMAN_NG && FSL_BMAN_NG
-    select FW_LOADER
-    select PHYLINK
-
-config FSL_DPAA1_ETH
-    tristate "DPAA1 Ethernet driver"
-    depends on FSL_FMAN_NG
-    select PAGE_POOL
-    select XDP_SOCKETS
-
-config FSL_DPAA1_PCD
-    tristate "tc-flower offload via FMan classifier"
-    depends on FSL_DPAA1_ETH && NET_CLS_FLOWER
-
-config FSL_DPAA1_CAAM
-    tristate "IPsec/xfrm offload via CAAM"
-    depends on FSL_DPAA1_ETH && CRYPTO_DEV_FSL_CAAM_JR
-    select XFRM_OFFLOAD
-
-endif
+config FPEX_BRIDGE
+    tristate "FPEX bridge-FDB watcher"
+    depends on FPEX && BRIDGE
 ```
 
-### 12.2 Source tree (out-of-tree first)
-
-```
-fsl-dpaa1-ng/
-├── bman/
-│   ├── bman.c
-│   ├── bman_portal.c
-│   ├── bman_test.c
-│   └── Makefile
-├── qman/
-│   ├── qman.c
-│   ├── qman_portal.c
-│   ├── qman_fq.c
-│   ├── qman_test.c
-│   └── Makefile
-├── fman/
-│   ├── fman.c
-│   ├── fman_muram.c
-│   ├── fman_ucode.c
-│   ├── fman_port.c
-│   ├── fman_mac.c
-│   ├── fman_pcd.c
-│   ├── fman_kg.c
-│   └── Makefile
-├── eth/
-│   ├── dpaa1_eth.c
-│   ├── dpaa1_ethtool.c
-│   ├── dpaa1_xdp.c
-│   ├── dpaa1_xsk.c
-│   ├── dpaa1_tx.c
-│   ├── dpaa1_rx.c
-│   └── Makefile
-├── pcd/
-│   ├── dpaa1_pcd.c
-│   ├── dpaa1_flower.c
-│   └── Makefile
-├── caam/
-│   ├── dpaa1_caam.c
-│   ├── dpaa1_xfrm.c
-│   └── Makefile
-├── include/
-│   └── linux/fsl/
-│       ├── bman.h
-│       ├── qman.h
-│       └── fman.h
-└── dkms.conf
-```
-
-For upstreaming, this becomes `drivers/net/ethernet/freescale/dpaa1-ng/` with the BMan/QMan parts moving to `drivers/soc/fsl/qbman-ng/` to match upstream's existing structure.
-
-### 12.3 Coexistence with upstream `dpaa_eth`
-
-Two strategies:
-
-**Mutually exclusive (preferred for v1):** Kconfig conflicts; users pick one stack. VyOS picks `FSL_DPAA1_NG` for Mono Gateway, leaves others on legacy.
-
-**Per-port handoff (for upstream):** New device tree property `fsl,driver = "dpaa1-ng";` on FMan MAC nodes lets the new driver claim specific ports while the legacy driver claims others. More work, only needed if upstream merges and existing users want gradual migration.
+`MODULE_SIG_FORCE=y` (per `AGENTS.md`) means both modules must be signed by the in-tree key after build — wired into `bin/ci-setup-kernel-ask.sh`.
 
 ---
 
-## 13. Configuration interface
+## 4. Kernel hooks patch — `200-fpex-hooks.patch`
 
-### 13.1 Standard Linux interfaces (no custom config needed)
+The legacy `data/kernel-patches/003-ask-kernel-hooks.patch` modifies 64 mainline files. The clean-room equivalent is **smaller and tighter**:
 
-VyOS users get all of these from the netdev:
+### 4.1 What stays (kept functional, rewritten cleanly)
 
-- `ip link`, `ip addr`, `ip route` (basic config)
-- `ethtool -S/-G/-K/-C/-X/-N` (stats, ring, features, coalesce, RSS, NTUPLE)
-- `tc qdisc/filter/class` (queueing, classification, offload)
-- `nftables` / `iptables` (firewall, NAT)
-- `bridge`, `bonding`, `vlan` (L2 services)
-- `ip xfrm` (IPsec, with offload if `fsl-dpaa1-caam.ko` loaded)
-- `ip link set ... xdp obj ...` (XDP attach)
-- AF_XDP via standard sockets API
+| File | Why it stays | Diff size estimate |
+|------|--------------|---------------------|
+| `net/key/af_key.c` | NETLINK_KEY=32 plumbing — `fpex_fci` registers as `pfkey_proto[NETLINK_KEY]`. `CONFIG_NET_KEY=y` is still mandatory. | ~30 lines |
+| `include/net/xfrm.h`, `net/xfrm/xfrm_state.c`, `net/xfrm/xfrm_user.c` | One new XFRM_OFFLOAD provider hook per existing kernel infrastructure. Replaces 003's bespoke `ipsec_flow.{c,h}` (200 lines deleted). | ~80 lines added, 200 removed |
+| `net/netfilter/Kconfig`, `net/netfilter/Makefile` | Wires `xt_QOSMARK`, `xt_QOSCONNMARK` (kept verbatim from 003 — small, self-contained). | unchanged from 003 |
+| `include/uapi/linux/netfilter/xt_QOSMARK.h`, `xt_QOSCONNMARK.h` | UAPI for the QOSMARK extensions. Verbatim from 003. | unchanged |
+| `net/netfilter/xt_qosmark.c`, `xt_qosconnmark.c` | The xt match/target. Verbatim from 003. | unchanged |
 
-This is the entire point of this design. Nothing here is DPAA1-specific from the operator's perspective.
+### 4.2 What gets DELETED vs `003-ask-kernel-hooks.patch`
 
-### 13.2 DPAA1-specific debugging surfaces
+| 003 patch artefact | Why deleted in v0.4 |
+|---------------------|----------------------|
+| `net/netfilter/comcerto_fp_netfilter.c` (new file, ~600 lines) | Replaced by mainline **`nf_flow_table`** (`flowtable`). `fpex_bridge` populates a flowtable; the kernel does the bridge-fast-path. This collapses a NXP-bespoke 600-line patched file into ~50 lines of clean kernel-side glue. |
+| All edits to `net/bridge/br_*.c` (8 files in 003) | Same — `flowtable` already has the bridge hooks mainline-side. |
+| `net/xfrm/ipsec_flow.{c,h}` (new files, ~400 lines combined) | Replaced by an XFRM_OFFLOAD provider in `fpex_dpa_ipsec.c` (OOT module). |
+| All edits to `drivers/net/ppp/ppp_generic.c`, `pppoe.c`, `drivers/net/usb/usbnet.c` | These existed because the legacy hook needed each subsystem to call into `comcerto_fp_*`. With `flowtable` doing bridge work and `xfrm_user` doing IPsec, ppp/pppoe/usbnet need no patches. |
+| Edits to `include/linux/{if_bridge,netdevice,poll,skbuff}.h`, `net/{ip,ip6_tunnel,netns/xfrm}.h` | Mostly extra fields used by the deleted `comcerto_fp_*`. Not needed once that file is gone. |
+| `drivers/crypto/caam/pdb.h::__attribute__((packed))` additions | The ASK reason-of-record was ABI compat with NXP USDPAA userspace; clean-room rewrite uses `xfrm_user` pdb structures, so packing is irrelevant. |
+| `Makefile :: KBUILD_EXTMOD` `SUBDIRS=` shim | Legacy `make SUBDIRS=...` syntax. Drop. |
+| `tools/perf/.gitignore` edit | Unrelated drift. Drop. |
 
-Sysfs (read-only):
+**Net:** ~5800 lines → estimated ~600 lines. 64 files → estimated 12 files. Most of the deletion is the bridge fast-path which mainline already has.
 
-```
-/sys/class/net/<ifname>/dpaa1/
-├── port_id
-├── mac_id
-├── fman_idx
-├── rx_fqids
-├── tx_fqids
-├── bpid
-├── parse_result_size
-└── microcode_version
-```
+### 4.3 What stays out-of-tree
 
-Debugfs (read-only, for kernel devs):
+`fpex.ko`, `fpex_bridge.ko`, `xt_QOSMARK`/`xt_QOSCONNMARK` are all OOT-buildable. They depend only on the in-tree hooks patch and the SDK FMan API. (Long-term: in-tree the modules under `drivers/net/dpaa1-fpex/` and submit upstream once the SDK→mainline FMan story is sorted. Out of v1 scope.)
 
-```
-/sys/kernel/debug/dpaa1/
-├── qman/
-│   └── portal_<N>/
-│       ├── eqcr_state
-│       ├── dqrr_state
-│       └── stats
-├── bman/
-│   └── portal_<N>/
-│       ├── rcr_state
-│       └── pool_<bpid>/
-│           ├── depth
-│           └── stats
-├── fman/
-│   ├── muram_map
-│   ├── port_<N>/
-│   │   ├── stats
-│   │   └── pcd
-└── eth/
-    └── <ifname>/
-        ├── napi_stats
-        ├── xdp_stats
-        └── xsk_stats
-```
+---
 
-Devlink (when applicable):
+## 5. Userspace — `/dev/cdx_ctrl` ABI and the policy XML schemas
 
-```
-devlink dev show
-devlink port show
-devlink dev info pci/0000:fsl_fman0   /* version, microcode rev */
-devlink dev param set pci/0000:fsl_fman0 name parser_profile value l4_hash
+The single hardest constraint on the rewrite: **existing `cdx_cfg.xml` and `cdx_pcd.xml` files must work unchanged.** Operators may have customised these per deployment; we cannot break their config.
+
+### 5.1 `/dev/cdx_ctrl` ioctl set (pinned)
+
+From `ASK/dpa_app/dpa.c` and the SDK `cdx_ioctl.h`. The clean-room UAPI header `include/uapi/linux/fpex/cdx_ctrl.h` must keep these constant values:
+
+* `CDX_CTRL_DPA_SET_PARAMS` (set FMan port/dist/table layout from compiled FMC model — called by `fpex-load` as the last step of policy load).
+* Per-flow add/del/lookup ioctls for each of the 16 table types (`IPV4_UDP_TABLE`, `IPV4_TCP_TABLE`, …, `IPV6_REASSM_TABLE`).
+* IPsec SA add/del/replace ioctls (used by `fpex_dpa_ipsec.c` from the kernel side; userspace `fpexd` proxies xfrm_user events to these).
+* Multicast group add/del.
+* Statistics fetch (per-table per-key byte/frame counters, used by `fpexd`'s `show flows` CLI).
+* Exception-rate-limiter tuning (`CDX_EXPT_*_RATELIM`, `CDX_EXPT_RATELIM_MODE`).
+
+The exact struct layout for `cdx_ctrl_set_dpa_params`, `cdx_fman_info`, `cdx_port_info`, `cdx_dist_info`, `cdx_ipr_info`, `table_info` is pinned by `ASK/dpa_app/dpa.c` lines 32–110 (visible in this session's context). Translate verbatim into `include/uapi/linux/fpex/cdx_ctrl.h`.
+
+### 5.2 `cdx_cfg.xml` schema (port-to-policy map)
+
+Pinned by `ASK/config/gateway-dk/cdx_cfg.xml`:
+
+```xml
+<cfgdata>
+  <config>
+    <engine name="fm0">
+      <port type="1G|10G|OFFLINE" number="N" policy="<policy_name>" portid="N"/>
+      ...
+    </engine>
+  </config>
+</cfgdata>
 ```
 
-v1 ships minimal devlink (info only). Devlink-based runtime config is v2.
+Type values and policy refs: `1G | 10G | OFFLINE`. `portid` 1–9 (1=eth2, 4=eth0, 5=eth1, 6=eth3, 7=eth4, 8=OP1, 9=OP2). The Mono Gateway DK config in this repo is the canonical example; `fpex-load` must parse it bit-identically.
 
-### 13.3 VyOS integration
+### 5.3 `cdx_pcd.xml` schema (FMan PCD policy)
 
-Most things require zero VyOS-side change because the netdev presents normally. The few additions:
+Pinned by `ASK/dpa_app/files/etc/cdx_pcd.xml`. The FMC library already parses this into `struct fmc_model_t`; the rewrite of `dpa_app` reuses the **same** FMC library (with the existing `01-mono-ask-extensions.patch` re-applied to upstream `nxp-qoriq/fmc`). The schema has three top-level sections:
 
-- `set system dpaa1 worker-cpus 1-3` (CPU affinity hints, optional)
-- `set system dpaa1 xdp-mode {none|native|generic}` (default native)
-- `set system dpaa1 caam-offload {enable|disable}` (loads or not the CAAM module)
+* `<classification name="cdx_*_cc">` — a CC node (hash-table, key-size, mask).
+* `<distribution name="cdx_*_dist">` — a KeyGen scheme (protocol, key fields, output FQID range, action — always "classification" pointing at a `cdx_*_cc`).
+* `<policy name="cdx_ethport_N_policy">` — ordered list of distribution refs applied to a port. The `<dist_order>` decides match precedence at the port (ESP first, then UDP/TCP, then multicast, then 3-tuples, then PPPoE, finally generic ethernet — see line 218 in the file).
 
-VyOS firewall and QoS subsystems opportunistically use tc-flower offload; this is invisible to the operator beyond a `show interfaces ethernet eth0 hardware-offload` summary.
+The clean-room rewrite **does not** re-implement the FMC compiler. It uses `fmc_compile()` from the patched upstream `fmc`. The single thing `fpex-load` adds is the policy schema fixups for things FMC doesn't know (the `t_FmPcdHashTableParams::table_type` and IP-reassembly fields — see `set_reassembly_params()` in `dpa.c`), and the `CDX_CTRL_DPA_SET_PARAMS` ioctl call at the end.
 
-### 13.4 Device tree
+### 5.4 `fastforward` config (ALG exclusion list)
 
-Reuses existing upstream `fsl,fman`, `fsl,qman`, `fsl,bman` bindings. One new optional property to choose driver stack:
+Pinned by `ASK/config/fastforward`. UCI-style key-value, three default entries (FTP, SIP, PPTP). `fpexd` parses this at startup; flows on the listed ports/protocols are tagged "do-not-offload" in the conntrack→FCI handler.
 
-```dts
-fman@1a00000 {
-    compatible = "fsl,fman";
-    fsl,driver = "dpaa1-ng";    /* new property */
-    /* ... */
+### 5.5 NETLINK_KEY=32 (FCI) message format
 
-    ethernet@e0000 {
-        compatible = "fsl,fman-memac";
-        /* ... */
-    };
+The FCI channel is netlink protocol number 32 (NETLINK_KEY in `include/uapi/linux/netlink.h`). Multiplexed with PF_KEYv2 — see the `pfkey_proto[]` table in `net/key/af_key.c` and the `ask_fci_nlkey` registration. Message format:
+
+```
+struct fci_msg {
+    __u16  cmd;        /* FCI_CMD_FLOW_ADD | FLOW_DEL | SA_ADD | … */
+    __u16  flags;
+    __u32  seq;
+    __u32  table_type; /* one of the 16 IPV4_UDP_TABLE etc. */
+    __u8   key[64];    /* table-specific, length = table->key_size */
+    __u8   mask[64];
+    /* TLV payload: action, next-hop MAC, egress portid, FQID, … */
 };
 ```
 
-Without `fsl,driver`, behavior matches upstream legacy. With `"dpaa1-ng"`, the new stack claims the FMan and all its ports.
+Re-derived from `ASK/cmm/src/fpp.h` and `ASK/fci/lib/include/libfci.h`. The rewrite preserves byte layout; existing `cmm` (and the new `fpexd`) speak the same protocol. (We do not migrate to `nfnetlink` because libfci is widely linked into vendor tools; the cost-benefit doesn't favour migration.)
 
 ---
 
-## 14. Build, packaging, upstreaming
-
-### 14.1 DKMS package for VyOS
-
-`vyos-dpaa1-ng-dkms`:
-- Source under `/usr/src/dpaa1-ng-<ver>/`
-- DKMS rebuild on kernel update
-- Postinstall depmod and microcode firmware install
-
-### 14.2 Firmware package
-
-`vyos-dpaa1-firmware`:
-- `/lib/firmware/fsl_fman_ucode_ls1046_*.bin`
-- License from NXP firmware redistribution agreement
-- Hashed and signed for reproducible builds
-
-### 14.3 Upstream submission plan
-
-12-18 month horizon after v1 ships:
-
-**Stage 1**: BMan/QMan rework as `qbman-ng` under `drivers/soc/fsl/`. RFC patch series. Coexistence with legacy via Kconfig.
-
-**Stage 2**: FMan rework. RFC. This is the contentious one because the upstream FMan code base is complex; reviewers will want detailed justification for not patching incrementally. Counter-argument: the diff would be larger than the rewrite, and the rewrite has features (RSS, tc offload) the legacy code lacks fundamentally.
-
-**Stage 3**: Ethernet driver. Easier; XDP/AF_XDP/page_pool are all things upstream wants more of, and the legacy driver's lack of these is a known gap.
-
-**Stage 4**: tc-flower offload, CAAM xfrm offload as separate series.
-
-Realistic outcome: 50/50 chance of full upstreaming. Worst case, downstream VyOS-only forever, maintenance ~1 engineer-quarter/year.
-
----
-
-## 15. Testing strategy
-
-### 15.1 Unit tests
-
-Per-module kernel selftests (`tools/testing/selftests/drivers/fsl-dpaa1-ng/`):
-
-- BMan: pool acquire/release correctness, depletion handling
-- QMan: FQ state transitions, EQCR/DQRR ring management
-- FMan: microcode load round-trip, MURAM allocator
-- Eth: skb/page_pool round-trip, XDP verdict handling, XSK bind/unbind
-
-### 15.2 Hardware-in-the-loop
-
-CI lab with at least one Mono Gateway board:
-
-- **Smoke**: load all six modules in dependency order, verify netdevs appear, ping over each port
-- **L2**: bridge two ports, iperf3 single-flow at 1G and 10G in both directions
-- **L3**: route between ports, multi-flow via TRex generator
-- **Stress**: 24-hour soak at line rate with packet capture sampling
-- **Pool exhaustion**: deliberately undersized pool, verify graceful degradation (not deadlock)
-- **CPU hotplug**: take CPUs offline and online during sustained traffic, verify FQ migration
-- **Microcode**: verify version reporting, deliberate version mismatch produces clean error
-- **Module unload/reload**: rmmod and modprobe in reverse and forward order, no leaks
-- **XDP soak**: attach a redirect program for 24 hours, verify no buffer leaks
-- **AF_XDP soak**: bind and rebind XSK sockets repeatedly under load, verify BPID swap correctness
-- **tc-flower scale**: install 256 flower rules, verify all match correctly at line rate
-- **IPsec soak**: 24-hour AES-GCM tunnel at offloaded throughput, verify no SA state corruption
-
-### 15.3 Performance gates
-
-CI fails if any of these regress more than 5%:
-
-| Test | v1 target | Notes |
-|------|-----------|-------|
-| iperf3 TCP, single flow, 1500B | 9.0 Gbps | wire on 10G |
-| Linux IP forwarding, 1500B, 4 cores | 18 Gbps | aggregate, multi-flow |
-| Linux IP forwarding, 64B, 4 cores | 4.5 Mpps | aggregate |
-| XDP_DROP, 64B, 4 cores | 14 Mpps | drop in driver |
-| XDP_TX, 64B, 4 cores | 12 Mpps | bounce |
-| XDP_REDIRECT, 64B, 4 cores | 11 Mpps | inter-port |
-| AF_XDP zero-copy RX, 64B, 4 cores | 22 Mpps | wire on 2×XFI |
-| nftables 1000-rule ACL, 1500B | 14 Gbps | software |
-| tc-flower 1000-rule ACL, 1500B | 25 Gbps | offloaded |
-| IPsec AES-GCM-128, 1500B | 6 Gbps | CAAM offloaded |
-
-Numbers are estimates; first run on real hardware sets the actual baseline. Regressions >5% fail CI.
-
-### 15.4 Bisect-friendliness
-
-Each module independently buildable and loadable. Each commit in the eventual upstream series compiles and runs in isolation. CI bisects on perf regressions automatically.
-
----
-
-## 16. Performance targets and analysis
-
-### 16.1 Performance modes
-
-This stack offers three operational modes, selected by what userspace does with the netdev:
-
-**Standard kernel networking** (default): packets traverse skb path, full L2/L3/L4 kernel features. Saturates at ~18 Gbps aggregate L3 forwarding, ~4.5 Mpps small-packet. This is what nftables/conntrack/bridge users get.
-
-**XDP fast path**: BPF program runs in driver before skb construction. XDP_DROP and XDP_TX hit ~12-14 Mpps small-packet. XDP_REDIRECT to another DPAA1 port hits ~11 Mpps. This is the path for software firewalls and load balancers that can be expressed in eBPF.
-
-**AF_XDP zero-copy**: userspace owns RX/TX queues, zero copy between hardware and userspace. ~22 Mpps small-packet, close to wire on 2×XFI. This is the path for userspace packet processors (DPDK apps, custom code) that want bypass without owning the whole stack.
-
-All three modes coexist. A single Mono Gateway can run kernel forwarding on six ports and AF_XDP on two without conflict.
-
-### 16.2 Where to spend optimization budget
-
-Highest-impact items, roughly in order:
-
-1. Stashing tuned per port speed (cache prefetch correct for 1G vs 10G)
-2. NAPI budget sized to match DQRR depth (16 entries per portal pull)
-3. page_pool fragment caching to avoid `dma_sync` on recycled buffers
-4. GRO enabled by default with FMan-provided hash
-5. Receive packet steering disabled (FMan KeyGen already steers)
-6. XPS configured to match TX FQ to CPU
-7. Per-port BPID separation (avoid pool contention on shared workloads)
-
-### 16.3 What kills performance
-
-In rough order of damage if you get them wrong:
-
-1. Stashing not configured (3× hit on L3 forwarding)
-2. Buffer release not batched (5× hit on TX-heavy workload)
-3. Single TX FQ shared across CPUs (cache line ping-pong, 2× hit)
-4. RX FQ not pinned to portal channel (random-CPU dispatch, 1.5× hit)
-5. Buffer not marked `skb_mark_for_recycle` (skb destructor frees the page instead of recycling, 2× slower)
-6. RPS enabled (forces software re-steer over FMan's already-correct steer, 1.4× hit)
-7. NAPI not pinned to portal CPU (cross-CPU portal access serializes, 2× hit)
-8. Refill threshold too aggressive (causes BMan pool empty events at line rate)
-9. DMA sync direction wrong (full sync vs cpu-only or device-only, 1.3× hit)
-10. SMMU page table lookups not cached (TLB pressure, varies)
-
----
-
-## 17. Phasing plan
-
-### Phase 0: Foundation (3 months)
-- BMan, QMan, FMan modules with microcode load
-- "Hello world" raw FQ test program in kernel selftest
-- Goal: prove modular structure works, microcode loads, packets traverse FMan
-
-### Phase 1: Basic netdev (3 months)
-- DPAA1 Ethernet driver with NAPI, page_pool, simple TX
-- ethtool basic ops, phylink integration
-- Goal: ping and iperf3 work on all 8 ports
-
-### Phase 2: tc-flower offload and ethtool RSS (2 months)
-- PCD module with CC table programming
-- Flower parser, action translator
-- ethtool RSS and NTUPLE via KeyGen
-- Goal: 25 Gbps with 1000-rule ACL
-
-### Phase 3: Native XDP (2 months)
-- XDP with all four return codes
-- XDP_REDIRECT
-- Goal: hit XDP_DROP and XDP_TX targets
-
-### Phase 4: AF_XDP zero-copy (2 months)
-- XSK pool integration
-- BMan reseed on bind/unbind
-- TX from XSK descriptors
-- Goal: 22 Mpps AF_XDP RX
-
-### Phase 5: CAAM xfrm offload (2 months)
-- xfrmdev_ops registration
-- Per-SA descriptor cache
-- Async completion plumbing
-- Goal: 6 Gbps IPsec
-
-### Phase 6: VyOS integration and hardening (2 months)
-- DKMS package
-- VyOS CLI hooks (the few that exist)
-- Documentation
-- Soak testing
-- Goal: Mono Gateway ships
-
-Total: ~16 months calendar, 2 engineers (one driver-focused, one networking-stack focused).
-
-Phase 2 is intentionally before native XDP: tc-flower offload is the most visible win over upstream `dpaa_eth` and is what motivates VyOS migration. XDP and AF_XDP are tablestakes for modern net drivers but don't differentiate the stack on their own.
-
----
-
-## 18. Open questions
-
-1. **Page-pool fragment vs full-page buffers**: With 2 KiB buffers, two per page, DMA accounting gets fiddly. Alternatives: 4 KiB buffers (wastes memory but simpler), per-buffer pages with smaller MTU (limits jumbo). Resolve via prototype and profiling in Phase 1.
-
-2. **AF_XDP BPID swap atomicity**: Switching a BPID from page_pool to UMEM mode requires draining FMan first. The CPU cost of drain-and-reseed on bind is non-trivial. Alternative: dedicate one BPID per RX queue per port permanently as "AF_XDP-eligible," accept some inefficiency when AF_XDP isn't bound. Decide in Phase 4.
-
-3. **CAAM job ring sharing**: Upstream `caam_jr` allocates job rings to consumers somewhat arbitrarily. We need predictable allocation for xfrm offload. Either patch caam_jr or build a thin allocator on top. Investigate in Phase 5.
-
-4. **Mainline path for FMan rewrite**: Upstream maintainers' tolerance for parallel implementations is uncertain. If RFC gets pushback in Stage 2, fallback is permanent downstream and that's fine for VyOS, less fine for community.
-
-5. **CPU hotplug correctness**: NAPI per portal per CPU means hotplug needs portal migration. Either move FQs to a surviving portal (complex) or stop the affected NAPI and lose that queue's traffic until hotplug back (simpler, acceptable if rare). Default v1: stop and resume.
-
-6. **XDP multi-buffer**: jumbo XDP requires `XDP_FLAGS_HAS_FRAGS`, which means S/G FDs in XDP path. Defer to v2.
-
-7. **Switchdev fakery**: VyOS users may want bridge-offload semantics across DPAA1 ports. LS1046A has no switch, but FMan can do MAC-based steering between ports via OP ports. Worth a switchdev driver? Probably not for v1; revisit if Mono Gateway use cases demand it.
-
-8. **Microcode redistribution**: confirm the FMan microcode license permits redistribution in a VyOS image. NXP's `linux-firmware` patches include it under a specific NXP license, not GPL. Need legal sign-off for VyOS package.
-
----
-
-## Appendix A: Frame Descriptor reference
-
-The 32-byte FD fields, format codes, and parse result structure are documented in:
-
-- LS1046A Reference Manual, Chapter 8 (DPAA), §8.4 Frame Descriptor
-- LS1046A Reference Manual, §8.7 Frame Manager Parse Results
-
-Implementer should generate `struct qm_fd` and `struct fm_prs_result` from the manual and cross-check against the upstream `drivers/soc/fsl/qbman/qman.c` and `drivers/net/ethernet/freescale/fman/fman.h` for known-good bit layouts. Do not transcribe from memory or other secondary sources; the bit positions matter exactly.
-
-Format codes:
-
-| Format | Meaning |
-|--------|---------|
-| 0 | Single buffer, contiguous |
-| 1 | Scatter/gather table |
-| 2 | Long single buffer (>256 KiB, unused on this SoC) |
-| 3-7 | Reserved |
-
-`cmd_status` field carries:
-- On RX: parse status, error flags, parse result offset hint
-- On TX: software-defined opaque used for confirmation lookup
-- On TX confirmation: completion status, error flags
-
-## Appendix B: Portal register map
-
-QMan portal CE region (per-CPU, 16 KiB, mapped cacheable WB):
-
-| Offset | Size | Purpose |
-|--------|------|---------|
-| 0x0000 | 0x200 | EQCR (8 entries × 64 B) |
-| 0x0200 | 0x400 | DQRR (16 entries × 64 B) |
-| 0x0600 | 0x200 | MR (8 entries × 64 B) |
-| 0x0800 | 0x200 | RCR (8 entries × 64 B) |
-| 0x0A00 | 0x600 | Reserved / extended |
-
-QMan portal CI region (per-CPU, 4 KiB, mapped device-nGnRnE):
-
-| Offset | Size | Purpose |
-|--------|------|---------|
-| 0x0000 | 0x40 | EQCR producer/consumer |
-| 0x0040 | 0x40 | DQRR producer/consumer + verb |
-| 0x0080 | 0x40 | MR producer/consumer |
-| 0x00C0 | 0x40 | RCR producer/consumer |
-| 0x0E00 | 0x100 | Status, IRQ enable/disable |
-
-BMan portal layout is structurally similar (CE for RCR + ACR, CI for doorbells/status) but smaller; full layout in LS1046A RM §8.6.
-
-Generate header constants from the manual; do not paraphrase the offsets above into code without verifying against the manual page-by-page.
-
-## Appendix C: Module dependency chain
-
-Kernel modprobe deps (resolved automatically via `MODULE_SOFTDEP`):
+## 6. Userspace daemons — `fpex-load` and `fpexd`
+
+### 6.1 `fpex-load` (replaces `dpa_app`)
+
+* ~1500 LOC C (vs. `ASK/dpa_app/dpa.c` ~600 LOC + supporting files).
+* Reads `/etc/cdx_cfg.xml`, `/etc/cdx_pcd.xml`, `/etc/cdx_sp.xml` (soft-parser), `/etc/fmc/config/hxs_pdl_v3.xml` (parser PDL).
+* Calls `fmc_compile()` from libfmc (patched upstream `nxp-qoriq/fmc`), then `fmc_execute()` — same control flow as `dpa_app::dpa_init()`.
+* Calls `FM_PCD_Open()` / `FM_PCD_Disable()` per FMan instance to put PCD into the configurable state before `fmc_execute()` runs `FM_PCD_SetAdvancedOffloadSupport()` (this dance is pinned by `set_fm_adv_options()` in `ASK/dpa_app/dpa.c`).
+* Walks the compiled `fmc_model_t`, builds `struct cdx_ctrl_set_dpa_params`, calls `ioctl(/dev/cdx_ctrl, CDX_CTRL_DPA_SET_PARAMS, &params)`.
+* Sets default exception-rate-limiter limits (`CDX_EXPT_ETH_DEFA_LIMIT = 195312` ≈ 100 Mbps; pinned by `dpa.c::set_exptrate_policer_defaults`).
+* Spawned **once** by `fpex.ko` at insmod via `call_usermodehelper(UMH_WAIT_PROC)` — there is no long-running `dpa_app`. After it exits, the FMan policy is live in hardware.
+
+### 6.2 `fpexd` (replaces `cmm`)
+
+* ~8 kLOC C (vs. `ASK/cmm/` ~25 kLOC across 60+ files; modern code with libmnl, GLib event loop, structured logging — the 3× LOC reduction is real).
+* Inputs:
+  * `nf_conntrack_event` via netlink (libnetfilter_conntrack with re-derived async/heap-buffer patches).
+  * Bridge FDB events via `RTM_NEWNEIGH` rtnetlink (replaces `auto_bridge` daemon-side; the kernel module still does flowtable wiring).
+  * xfrm SA events via `xfrm_user` rtnetlink.
+  * `/proc/net/route`, `/proc/net/route6`, neighbor table for next-hop resolution.
+  * `/etc/config/fastforward` for ALG-exclusion port/proto list.
+  * libcli-based interactive CLI on a unix socket (`/var/run/fpexd.sock`).
+* Outputs:
+  * Flow ADD/DEL via `libfpex_fci` (NETLINK_KEY=32) → `fpex_fci.ko` → `fpex.ko::fpex_cmdhandler.c` → CC table updates.
+  * Per-flow stats periodically scraped from `/dev/cdx_ctrl` and exposed via `show flows` CLI.
+* Decision engine:
+  1. New conntrack EST event → look up next-hop in route + neighbor → if reachable via offload-eligible port (1G or 10G, not loopback/tun/wifi-software-bridge) and protocol is not in `fastforward` list → push CC entry.
+  2. CT del event → drop CC entry.
+  3. xfrm SA add → push IPsec SA to OFFLINE port OP1 via FCI `SA_ADD`.
+  4. Bridge FDB add → push L2 entry to `cdx_ethernet` table.
+  5. Periodic timer (1 s): scrape `/dev/cdx_ctrl` per-flow counters, refresh conntrack last-used so software side doesn't time out hardware-active flows ("bytes-back" — exactly what `cmm/src/conntrack.c` does today).
+* No more `module_icc.c`/`module_expt.c` separation: one daemon, one event loop. The legacy modules existed for ICC asymmetric SoC support (Comcerto C2K dual-core stuff, irrelevant on LS1046A).
+
+### 6.3 systemd integration
 
 ```
-fsl-dpaa1-eth → fsl-fman → fsl-qman → fsl-bman
-fsl-dpaa1-pcd → fsl-fman
-fsl-dpaa1-caam → caam_jr (upstream)
+/lib/systemd/system/ask-modules-load.service     # oneshot: modprobe in order
+/lib/systemd/system/fpexd.service                # was cmm.service
+/etc/modules-load.d/ask-modules.conf             # was ASK/config/ask-modules.conf
+/etc/config/fastforward                          # unchanged from ASK/config/fastforward
+/etc/cdx_cfg.xml                                 # unchanged from ASK/config/gateway-dk/
+/etc/cdx_pcd.xml                                 # unchanged from ASK/dpa_app/files/etc/
 ```
 
-Boot-time load order via `/etc/modules-load.d/dpaa1.conf`:
+`fpexd.service` Unit:
+* `After=network.target ask-modules-load.service systemd-sysctl.service`
+* `Requires=ask-modules-load.service`  ← propagation, not Wants= — see Chain-1
+* `ConditionPathExists=/dev/cdx_ctrl`  ← microcode gate
+* `ExecStart=/usr/bin/fpexd -f /etc/config/fastforward -n 131072`
+* `Restart=on-failure RestartSec=5`
 
-```
-fsl-bman
-fsl-qman
-fsl-fman
-fsl-dpaa1-eth
-fsl-dpaa1-pcd
-fsl-dpaa1-caam
-```
-
-Removal works in reverse (rmmod refuses while in use).
-
-## Appendix D: ethtool feature matrix
-
-| Feature | Status | Mechanism |
-|---------|--------|-----------|
-| `rx-checksum` | Yes | FMan validates IPv4/TCP/UDP checksums |
-| `tx-checksum-ip-generic` | Yes | FMan computes |
-| `rx-vlan` | Yes | FMan parses, strips into `__vlan_hwaccel_put_tag` |
-| `tx-vlan` | Yes | FMan inserts |
-| `tso` | Yes | FMan TSO engine, IPv4 TCP only in v1 |
-| `gso` | Software | Standard kernel |
-| `gro` | Software | Standard kernel, GRO uses FMan hash |
-| `rxhash` | Yes | FMan KeyGen, ethtool `-X` configurable |
-| `ntuple` | Yes (with PCD) | FMan CC tables |
-| `hw-tc-offload` | Yes (with PCD) | FMan CC + KeyGen |
-| `rx-fcs` | No | Not exposed by FMan |
-| `rx-all` | No | FMan filters at MAC |
-| `xdp` | Yes | Native |
-| `xdp-redirect` | Yes | Native |
-| `xdp-zerocopy` | Yes | XSK |
+Mirrors `ASK/config/cmm.service` line for line; only the binary name and the daemon implementation change.
 
 ---
 
-**End of v0.2 spec.**
+## 7. The 9 lib patches — re-derived against current upstream
 
-Build order recommendation: Phase 0 → Phase 1 → Phase 2 (tc-flower) → Phase 3 (XDP) → Phase 4 (AF_XDP) → Phase 5 (CAAM) → Phase 6.
+Each one is a small, semantically minimal patch. All are re-authored against current upstream (not copied from `ASK/`); the only commitment is **same struct/enum byte layout** so binaries built against patched headers and binaries built against unpatched headers cannot be ABI-mixed (this is the Chain-2 silent-corruption failure mode).
+
+| # | Upstream | Reason | Re-derived patch path | Notes |
+|---|----------|--------|------------------------|-------|
+| 1 | `github.com/nxp-qoriq/fmlib` | Add `t_FmPcdKgSchemeParams::shared`, `t_FmPcdHashTableParams::{table_type,timeout_val,timeout_fqid,max_frags,min_frag_size,max_sessions}`, IP-reassembly enums | `data/ask-userspace/fmlib/patches/01-fpex-extensions.patch` | Built by `bin/ci-build-fmlib.sh`. Bit-identical struct layout vs `ASK/patches/fmlib/01-mono-ask-extensions.patch`. |
+| 2 | `github.com/nxp-qoriq/fmc` | Port-ID output, shared scheme/CC node replication, PPPoE field fix, libxml2 2.13+ compat | `data/ask-userspace/fmc/patches/01-fpex-extensions.patch` | Built by `bin/ci-build-fmc.sh`. |
+| 3 | `libnetfilter-conntrack` (Debian/upstream) | Fast-path info attributes (`CTA_FP_INFO_*`) + QOSCONNMARK accessors | `data/ask-userspace/libnetfilter-conntrack/patches/01-fpex-extensions.patch` | Used by `fpexd`. |
+| 4 | `libnfnetlink` | Non-blocking socket + heap-buffer mode for burst event handling | `data/ask-userspace/libnfnetlink/patches/01-fpex-async-heap.patch` | Used by `fpexd`. |
+| 5 | `iptables` | QOSMARK / QOSCONNMARK target+match userspace half | upstream patch series, parked under `data/ask-userspace/iptables/` | Mirrors kernel-side `xt_QOSMARK.ko` / `xt_QOSCONNMARK.ko`. |
+| 6 | `iproute2` | EtherIP + 4RD (4over6 RD) tunnel types | `data/ask-userspace/iproute2/patches/01-etherip-4rd.patch` | The kernel side is supplied by mainline `ip6_tunnel.c` (NPT support is in mainline already in 6.18). |
+| 7 | `ppp` | Tunnel ifindex propagation to PPP daemons (used so the offload engine can rewrite L2 on PPP-encapped flows) | `data/ask-userspace/ppp/patches/01-fpex-ifindex.patch` | |
+| 8 | `rp-pppoe` | CMM (now FPEXD) relay mode | `data/ask-userspace/rp-pppoe/patches/01-fpex-relay.patch` | Renamed sysfs hook from `/sys/class/cmm` → `/sys/class/fpex` (compat symlink kept). |
+| 9 | `accel-ppp-ng` | (NEW vs. legacy ASK) IPoE/L2TP integration with FPEXD for PPPoE-over-bridge offload | `data/ask-userspace/accel-ppp-ng/patches/01-fpex-bridge-handoff.patch` | Optional; only built if FLAVOR=ask + accel-ppp-ng is enabled. |
+
+Re-derivation procedure (per `AGENTS.md` "Patches are applied with `git apply --3way`" rule):
+
+1. Clone upstream at the version pinned in CI (`bin/ci-build-fmlib.sh` already pins `lf-6.18.2-1.0.0` for fmlib/fmc — keep that tag).
+2. Apply the corresponding `ASK/patches/{fmlib,fmc}/01-mono-ask-extensions.patch` as `git am` to a scratch branch, tag baseline.
+3. Manually re-author the same change with cleaner comments and verify struct sizes with `pahole`/`offsetof()` static-asserts in `dpa_app` → `fpex-load`.
+4. `git diff --cached > $REPO/data/ask-userspace/<lib>/patches/01-fpex-extensions.patch`.
+5. `git apply --3way --check` from CI to confirm.
+6. The `pahole`-comparable static-assert is the **Chain-2 oracle**: if `sizeof(t_FmPcdKgSchemeParams)` differs between `fpex-load`'s view and the linked libfm.a's view, build fails before runtime SIGSEGV.
+
+---
+
+## 8. Test oracles — the two-chain failure model
+
+This is informative for the rewrite (test it against these, on real hardware, before declaring v1).
+
+### 8.1 Chain 1 — kernel-side
+
+**Symptom (today):** `cmm.service` failed (`status=255`).
+**Root cause:** `NETLINK_KEY=32` not registered → `ask_fci_nlkey`/`fpex_fci` returns `EPROTONOSUPPORT` → CMM/FPEXD opens the FCI socket and immediately `connect()` fails.
+**Diagnose:** `/proc/config.gz | grep CONFIG_NET_KEY`, `/proc/net/netlink | awk '$1 == "32"'`, `lsmod | grep fpex_fci`.
+**Fix on FLAVOR=ask:** `CONFIG_NET_KEY=y` + `CONFIG_FPEX=y` (or `=m` with `ask-modules-load.service` ordering). The clean-room rewrite must **fail loudly** at `fpex.ko` insmod if NET_KEY isn't built in (`pr_err_once` then `return -EPROTONOSUPPORT` from `fpex_fci_init`).
+**Oracle:** integration test boots, asserts `awk '$1 == "32" {found=1} END {exit !found}' /proc/net/netlink`.
+
+### 8.2 Chain 2 — userspace-side
+
+**Symptoms (today):** `dpa_app rc=65280`, `cdx_module_init::start_dpa_app failed rc 11`, `cdx_create_fragment_bufpool::failed to locate eth bman pool`, `cdx_module_init::dpa_ipsec start failed`. SIGSEGV in `__memset_aarch64` DC ZVA loop (C++ destructor cascade in `dpa_app::main`).
+**Root cause options:**
+* **(a) MURAM exhaustion** — too-large `cdx_pcd.xml` + reassembly tables + parser config don't fit. FMC's `fmc_execute` returns failure; `dpa_app` segfaults later because the FMC model is in an inconsistent state.
+* **(b) Patched-struct ABI mismatch** — `dpa_app` compiled against patched fmlib headers (`t_FmPcdHashTableParams` extended) linked against an un-patched `libfm.a`. `dpa.c` line 704 uses `sizeof(t_FmPcdHashTableParams)` as a byte-loop bound; the loop now overruns the actual library struct, corrupting the heap.
+
+**Fix today:** `bin/ci-build-fmlib.sh` + `bin/ci-build-fmc.sh` rebuild from patched upstream in CI; prebuilt archives in `data/ask-userspace/{fmlib,fmc}/lib*.a` are emergency fallback only.
+
+**Oracle for the clean-room rewrite:**
+* `fpex-load` carries **static asserts** at compile time:
+  ```c
+  _Static_assert(sizeof(t_FmPcdKgSchemeParams) == 0x???, "fmlib ABI mismatch");
+  _Static_assert(sizeof(t_FmPcdHashTableParams) == 0x???, "fmlib ABI mismatch");
+  ```
+  If the linker pulls in the wrong libfm, the build fails — never the runtime.
+* `fpex.ko` reports MURAM allocation per-table in `/sys/kernel/debug/fpex/muram` — operators see exhaustion before the SIGSEGV.
+* Integration test pushes a deliberately oversized `cdx_pcd.xml` (e.g. mask `0xffff` on every table) and asserts `fpex-load` returns non-zero **and** `dmesg | grep -F 'MURAM exhausted'` is present.
+
+These two chains have been the **only** ASK production failure modes observed across the producer history (frozen at FLAVOR=ask import). The rewrite passes v1 acceptance only if both chains are reproducible-by-construction (oracle exists) and recoverable-by-construction (clean error messages, not SIGSEGV).
+
+---
+
+## 9. Build-and-CI flow (FLAVOR=ask)
+
+Single-repo, single-workflow model from `AGENTS.md` "Producer absorption (PR 7, 2026-05-09)" stays:
+
+* Trigger: `gh workflow run "VyOS LS1046A build (self-hosted)" -F flavor=ask`.
+* Kernel staging: `bin/ci-stage-kernel.sh` → `bin/ci-consume-ask-kernel.sh` (existing; pulls 6.18.x kernel + applies the SDK + the new `200-fpex-hooks.patch`).
+* OOT modules: `bin/ci-build-ask-userspace.sh` (existing) extended to compile `fpex.ko` + `fpex_bridge.ko` from `kernel/flavors/ask/oot-modules/fpex/` + `fpex_bridge/`. Sign with `$KSRC/scripts/sign-file sha512 $KSRC/certs/signing_key.pem $KSRC/certs/signing_key.x509` per `AGENTS.md` `MODULE_SIG_FORCE=y` rule.
+* Userspace libs: `bin/ci-build-fmlib.sh`, `bin/ci-build-fmc.sh` rebuilt against re-derived patches.
+* Userspace daemons: new scripts `bin/ci-build-fpex-load.sh` + `bin/ci-build-fpexd.sh` build the clean-room replacements.
+* ISO assembly: `bin/ci-build-iso.sh` + chroot hook `data/hooks/97-ask-userspace.chroot` install fpexd, fpex-load, libfpex_fci, the systemd units, and `/etc/cdx_*.xml`.
+* Patch-health: `kernel/common/scripts/patch-health.sh --flavor ask` runs across the 16 absorbed patches; the new `200-fpex-hooks.patch` adds one entry → invariant becomes `Pass: 18 Fail: 0 0 SDK conflicts`.
+* Verification: `bin/ci-verify-ask-iso.sh` (existing) extended to check that the ISO has `/usr/sbin/fpex-load`, `/usr/bin/fpexd`, signed `fpex.ko` and `fpex_bridge.ko`.
+
+`AGENTS.md` ASK-edit marker discipline does **not** apply to the clean-room modules (no NXP SDK lineage). It does still apply to anything that touches `kernel/flavors/ask/sdk-sources/`. CI audit (`grep -rn 'ASK-edit' kernel/flavors/ask/sdk-sources/` count must stay 35) is unchanged.
+
+---
+
+## 10. Migration path — how we get there from today's FLAVOR=ask
+
+Five phases, each independently verifiable on hardware:
+
+| Phase | Deliverable | Acceptance test |
+|-------|-------------|------------------|
+| **P1** | `200-fpex-hooks.patch` written, replaces `003-ask-kernel-hooks.patch`. Existing OOT `cdx`/`auto_bridge` rebuilt against it (no rewrite yet). | Kernel boots; `cdx.ko` insmods; `cmm` runs; `iperf3` over offloaded flow shows ≥4 Gbps (matching today's measured ASK SW flow offload baseline). |
+| **P2** | `fpex.ko` clean-room — replaces `cdx.ko`. UAPI byte-compatible. Old `cmm` daemon unchanged. | Phase-1 test passes against new module. `dmesg \| grep fpex` shows the new module banner. `cdx.ko` is uninstalled from the rootfs. |
+| **P3** | `fpex_bridge.ko` clean-room replaces `auto_bridge.ko`, backed by mainline `flowtable`. | Bridge two RJ45 ports; iperf3 single flow saturates 1G; offloaded flow visible in `bridge -s fdb show` AND in `cat /proc/net/nf_flowtable`. |
+| **P4** | `fpex-load` and `fpexd` clean-room replace `dpa_app` and `cmm`. `libfpex_fci` replaces `libfci`. Existing patched fmlib/fmc reused. | `cmm` and `dpa_app` removed from rootfs. Existing `cdx_cfg.xml`/`cdx_pcd.xml` unchanged. Phase-1 test passes. CLI `show flows` returns same data as legacy CMM CLI. |
+| **P5** | XFRM_OFFLOAD provider replaces `INET_IPSEC_OFFLOAD=y` path. `CONFIG_INET_IPSEC_OFFLOAD=n` becomes safe. | IPsec tunnel comes up; AES-GCM-128 1500 B throughput ≥ today's measurement; SA replace under load doesn't drop frames. |
+
+After P5: `kernel/flavors/ask/sdk-sources/` still carries the SDK FMan/QMan/BMan drivers (the FMan v3L kernel driver itself is not part of this rewrite). All 35 ASK-edit markers there are unchanged. The clean-room rewrite shrinks the **proprietary** ASK SDK kernel-hooks-and-modules surface from "5800-line patch + 15-file OOT cdx + auto_bridge" to "~600-line in-tree patch + ~3000-line clean-room OOT module pair", and the userspace from "25 kLOC cmm + 600-LOC dpa_app + libfci" to "~10 kLOC fpexd + ~1500-LOC fpex-load + libfpex_fci".
+
+Total calendar: ~9 months for two engineers (one kernel, one userspace), assuming P1 lands first as it unblocks the smaller-patch story and lets us measure the legacy stack against the new kernel hooks.
+
+---
+
+## 11. Open questions
+
+1. **ucode v210.10.1 redistribution.** Loaded from SPI, not `request_firmware()`. Out of kernel licensing scope. But: can we ship it in our U-Boot image? Producer side already does; legal sign-off was on the producer side, not consumer. Confirm before public release.
+2. **Should `fpex_fci` be in-tree or OOT?** In-tree is cleaner (lives next to `net/key/af_key.c`) but requires a small `200-fpex-hooks.patch` modification per kernel rebase. OOT is more isolated. v1: in-tree-as-built-in (`obj-y`), gated by `CONFIG_FPEX_FCI`, depends on `NET_KEY`.
+3. **Drop NETLINK_KEY=32 in v2?** `nfnetlink` would be more idiomatic. But that breaks libfci's ABI for any external vendor tool that links it. Decision: keep NETLINK_KEY=32 forever for compat. Add an `nfnetlink` parallel surface in v2 if anyone asks.
+4. **`fpex` vs `dpaa1-fpex` vs another name.** Avoiding collision with mainline `drivers/cdx/`. Working name `fpex` (Fast-Path EXtension). Open to `dpaa1-fpex` if upstream submission ever happens.
+5. **CC entry eviction policy.** ASK uses LRU per-CC-node. Mainline `flowtable` uses GC at fixed intervals. We need to reproduce LRU for the CC tables (the flow keep-alive in `fpexd` depends on it) AND honour the mainline flowtable GC for the bridge path. Two policies, one per offload pathway.
+6. **Per-OFFLINE-port BMan pool sizing.** Today the SDK hard-codes 2048 buffers per OP. The Mono Gateway DK has 2 OPs → 4096 buffers reserved out of the BMan pool. If we add an OP (e.g. for traffic-shaping post-process), we hit BMan exhaustion. Make the count `cdx_cfg.xml`-driven.
+7. **`vwd_fast_path_enable` sysfs hook in `cmm.service`.** The legacy `ExecStartPre` writes `/sys/class/vwd/vwd0/vwd_fast_path_enable`. `vwd` is a wireless module not present on this board. The hook is dead code on Mono Gateway DK. Drop in `fpexd.service`.
+
+---
+
+**End of v0.4. Out of scope for any future revision of this spec:** rewriting `fsl_dpa`, `fsl_dpaa_mac`, `fsl_qbman`, mainline FMan, AF_XDP, tc-flower offload, CAAM xfrm, or DPDK PMD. Those belong to **default-flavor** plans elsewhere in this repo.
