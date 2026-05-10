@@ -90,7 +90,6 @@ echo "### ASK hooks + swphy + xhci + sdk-probe-fix patches staged at $KERNEL_PAT
 # We insert the tarball extraction immediately BEFORE this line.
 
 cp data/kernel-patches/ask-nxp-sdk-sources.tar.gz "$KERNEL_BUILD/"
-cp data/kernel-patches/patch-dpaa-probe-fix.py "$KERNEL_BUILD/"
 
 cat > /tmp/ask-inject.sh << 'ASK_INJECT_EOF'
 
@@ -123,27 +122,10 @@ if [ -f "${CWD}/ask-nxp-sdk-sources.tar.gz" ]; then
     drivers/net/ethernet/freescale/sdk_fman/Makefile
   echo "I: ASK — USE_ENHANCED_EHASH enabled in sdk_fman Makefile"
 
-  # Fix soft lockup + add diagnostic tracing via Python patcher
-  # (replaces fragile sed injections that produced invalid C code)
-  # The patcher modifies dpaa_eth.h, dpaa_eth_common.c, and dpaa_eth.c:
-  #   - Reduce DPAA_ETH_RX_QUEUES 128 → 16 (unused PCD FQs without FMC)
-  #   - Add cond_resched() in dpa_fq_setup + dpa_fqs_init loops
-  #   - Add while-loop safety break (prevents infinite loop if no TX FQs)
-  #   - Add debug printk for every FQ iteration + probe progress markers
-  if [ -f "${CWD}/patch-dpaa-probe-fix.py" ]; then
-    python3 "${CWD}/patch-dpaa-probe-fix.py" .
-  else
-    echo "WARNING: patch-dpaa-probe-fix.py not found — SDK DPAA probe fix skipped"
-  fi
-
-  # LS1046A DWC3 xHCI quirks (AVOID_BEI + TRUST_TX_LENGTH).
-  # Without this, USB-storage probe stalls and the host controller dies
-  # during USB live boot; init-bottom hangs trying to mount squashfs.
-  if [ -f "${CWD}/patch-xhci-ls1046a-quirks.py" ]; then
-    python3 "${CWD}/patch-xhci-ls1046a-quirks.py" .
-  else
-    echo "WARNING: patch-xhci-ls1046a-quirks.py not found — xHCI quirks skipped"
-  fi
+  # NOTE: patch-dpaa-probe-fix.py and patch-xhci-ls1046a-quirks.py have been
+  # retired — they are now unified-diff patches 4008 and 4007 staged into
+  # $KERNEL_PATCHES alongside 003-ask-kernel-hooks.patch and applied by
+  # build-kernel.sh's normal patch loop.
 
   echo "I: ASK — SDK sources + build integration injected into kernel tree"
 fi

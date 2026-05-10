@@ -157,7 +157,7 @@ FAILED=()
 for p in "${PATCHES[@]}"; do
     parent="$(basename "$(dirname "$p")")"
     name="$parent/$(basename "$p")"
-    if out=$(git apply --check -p1 --unsafe-paths --directory="$KDIR" "$p" 2>&1); then
+    if out=$(git apply --check --3way -p1 --unsafe-paths --directory="$KDIR" "$p" 2>&1); then
         printf '  %s ✓%s %s\n' "$_C_GRN" "$_C_RST" "$name" | tee -a "$SUMMARY"
         PASS=$((PASS+1))
     else

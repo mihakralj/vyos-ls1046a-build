@@ -170,17 +170,34 @@ build_one() {
         fi
     fi
 
-    # 3. Dry-run the patch for clear diagnostics
-    if ! (cd "$src_dir" && patch -p1 --dry-run --quiet < "$patch_file"); then
-        warn "  $src_pkg: patch does not apply cleanly"
-        (cd "$src_dir" && patch -p1 --dry-run < "$patch_file") 2>&1 | tail -30 >&2
-        FAIL_SUMMARY+=("$src_pkg: patch rejected by dry-run")
+    # 3. Dry-run the patch for clear diagnostics. We use git apply --check
+    # against a throwaway git init in $src_dir so --3way fallback can resolve
+    # context drift; mergiraf is wired via a .gitattributes drop.
+    if [[ ! -d "$src_dir/.git" ]]; then
+        ( cd "$src_dir" && git init -q && git config user.email ci@local && \
+            git config user.name ci && git config gc.auto 0 && \
+            git add -A && git commit -qm "$src_pkg pristine baseline" )
+    fi
+    cat > "$src_dir/.gitattributes" <<'GITATTR'
+*.c     merge=mergiraf
+*.h     merge=mergiraf
+*.py    merge=mergiraf
+*.json  merge=mergiraf
+*.yml   merge=mergiraf
+*.yaml  merge=mergiraf
+*.toml  merge=mergiraf
+*.xml   merge=mergiraf
+GITATTR
+    if ! (cd "$src_dir" && git apply --3way --check --whitespace=nowarn "$patch_file" 2>&1); then
+        warn "  $src_pkg: patch does not apply cleanly (git apply --3way --check)"
+        (cd "$src_dir" && git apply --3way --check --whitespace=nowarn "$patch_file") 2>&1 | tail -30 >&2
+        FAIL_SUMMARY+=("$src_pkg: patch rejected by --3way dry-run")
         end_group
         return 2
     fi
 
     # 4. Apply and register
-    (cd "$src_dir" && patch -p1 --quiet < "$patch_file") \
+    (cd "$src_dir" && git apply --3way --whitespace=nowarn "$patch_file") \
         || { FAIL_SUMMARY+=("$src_pkg: patch apply failed post-dry-run"); end_group; return 1; }
     if [[ -f "$src_dir/debian/source/format" ]] \
         && grep -q '3.0 (quilt)' "$src_dir/debian/source/format"; then
