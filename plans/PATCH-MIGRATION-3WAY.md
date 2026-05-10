@@ -6,7 +6,7 @@
 
 ## Pre-flight inventory snapshot (2026-05-09)
 
-Actual patch surface as found on `main` after producer absorption (PR 7):
+Actual patch surface as found on `main` after single-repo absorption (PR 7):
 
 | Bucket | Count | Apply-site |
 |---|---|---|
@@ -26,7 +26,7 @@ Actual patch surface as found on `main` after producer absorption (PR 7):
 
 ## Sequencing context (historical)
 
-*Original plan called this "PR 9" of the integration sequence. PR 7 (producer absorption) landed 2026-05-09; PR 8 (matrix builds) is deferred. This work is now the next major migration on `main` and should land as a single dedicated branch (`chore/patch-migration-3way`) rather than being interleaved with other refactors.*
+*Original plan called this "PR 9" of the integration sequence. PR 7 (single-repo absorption) landed 2026-05-09; PR 8 (matrix builds) is deferred. This work is now the next major migration on `main` and should land as a single dedicated branch (`chore/patch-migration-3way`) rather than being interleaved with other refactors.*
 
 ---
 
@@ -34,7 +34,7 @@ Actual patch surface as found on `main` after producer absorption (PR 7):
 
 The `vyos-ls1046a-build` repo currently applies upstream modifications using GNU `patch` with `--no-backup-if-mismatch -p1`. This silently fuzzes hunks into the wrong place when upstream context drifts, and silently no-ops when patches reference files that have moved. Both failure modes are undetectable from build logs.
 
-The producer-side ask13→ask14 incident (documented in `kernel-ls1046a-build/AGENTS.md`) shows the worst-case symptom: a malformed `@@ -25,3 +25,6 @@` hunk header silently truncated 12 added lines to 6, dropping `obj-$(CONFIG_FSL_SDK_FMAN)` and `obj-$(CONFIG_FSL_SDK_DPAA_ETH)` from a Makefile and producing a kernel with neither `sdk_fman` nor `sdk_dpaa` built. `git apply` reported success. Only post-hoc visual inspection caught it.
+The the archived kernel-build repo's ask13→ask14 incident (documented in `kernel-ls1046a-build/AGENTS.md`) shows the worst-case symptom: a malformed `@@ -25,3 +25,6 @@` hunk header silently truncated 12 added lines to 6, dropping `obj-$(CONFIG_FSL_SDK_FMAN)` and `obj-$(CONFIG_FSL_SDK_DPAA_ETH)` from a Makefile and producing a kernel with neither `sdk_fman` nor `sdk_dpaa` built. `git apply` reported success. Only post-hoc visual inspection caught it.
 
 The replacement stack is:
 
@@ -211,7 +211,7 @@ Same pattern, target `vyos/vyos-build@current`.
 
 ### 2c. Kernel patches (`data/kernel-patches/` + flavor-agnostic `kernel/common/patches/`)
 
-Kernel patches target a specific kernel version, not a moving branch. The legacy `data/ask-kernel.pin` mechanism was retired during integration (per `AGENTS.md` § "Producer absorption"). The current source of truth is `vyos-build/data/defaults.toml`, surfaced through `kernel/common/scripts/sync-kernel-version.sh`. As of 2026-05-09 the pin is `linux-6.18.28` for both `default` and `ask` flavors — a single kernel checkout works for the whole regen pass.
+Kernel patches target a specific kernel version, not a moving branch. The legacy `data/ask-kernel.pin` mechanism was retired during integration (per `AGENTS.md` § "Single-repo absorption (May 2026)"). The current source of truth is `vyos-build/data/defaults.toml`, surfaced through `kernel/common/scripts/sync-kernel-version.sh`. As of 2026-05-09 the pin is `linux-6.18.28` for both `default` and `ask` flavors — a single kernel checkout works for the whole regen pass.
 
 ```sh
 REPO=$(pwd)
@@ -246,7 +246,7 @@ for p in "$REPO"/data/kernel-patches/*.patch; do
 done
 ```
 
-### 2d. Producer-bucket patches (kernel/common + kernel/flavors/ask)
+### 2d. Absorbed flavor-bucket patches (kernel/common + kernel/flavors/ask)
 
 **Use the same `/tmp/regen/linux` checkout from 2c** — do not re-clone. The buckets must be applied in the exact order `kernel/common/scripts/apply-to-tree.sh` uses, because later patches in the chain depend on earlier ones being on disk. Stage the SDK source drop first (it is a *file* drop, not a patch) so any ASK patches that touch SDK paths can resolve.
 
@@ -374,7 +374,7 @@ git -C vyos-build apply --3way --whitespace=nowarn "$REPO_ROOT"/data/vyos-build-
     || { echo "::error::vyos-build-005 failed"; exit 1; }
 ```
 
-**Note on `apply-to-tree.sh`:** the producer-absorbed `kernel/common/scripts/apply-to-tree.sh` already uses `git apply -p1 --unsafe-paths --directory="$KDIR"` (lines 135, 137) — the change there is just adding `--3way` to both the strict apply and the `--reject` fallback. Same for `kernel/common/scripts/patch-health.sh:160` (the dry-run probe).
+**Note on `apply-to-tree.sh`:** the absorbed `kernel/common/scripts/apply-to-tree.sh` already uses `git apply -p1 --unsafe-paths --directory="$KDIR"` (lines 135, 137) — the change there is just adding `--3way` to both the strict apply and the `--reject` fallback. Same for `kernel/common/scripts/patch-health.sh:160` (the dry-run probe).
 
 **Acceptance gate after Phase 4:**
 
@@ -606,7 +606,7 @@ Add a section to `AGENTS.md` (or create `docs/PATCHES.md`):
 - The self-hosted runner has Mergiraf installed and registered as a git merge driver; conflicting hunks in C, Python, DTS, and shell files are resolved syntax-aware where possible. Manual conflict resolutions are memoized via `git rerere`.
 ```
 
-Cross-reference the producer's existing `kernel-ls1046a-build/.clinerules/10-patch-authoring.md` (now folded into the merged `AGENTS.md` per `INTEGRATION-PLAN.md` §6.1): the visual-inspection step described there remains mandatory even after `git apply --3way` adoption — `--3way` catches context drift but does not catch malformed hunk arithmetic that produces a patch that *applies* but generates *wrong content*.
+Cross-reference the archived kernel-build repo's existing `kernel-ls1046a-build/.clinerules/10-patch-authoring.md` (now folded into the merged `AGENTS.md` per `INTEGRATION-PLAN.md` §6.1): the visual-inspection step described there remains mandatory even after `git apply --3way` adoption — `--3way` catches context drift but does not catch malformed hunk arithmetic that produces a patch that *applies* but generates *wrong content*.
 
 ---
 
@@ -705,6 +705,6 @@ Patches in git format apply fine with old-style `patch -p1` (`index` lines ignor
 The integration merge (PRs 1–7) is complete on `main` as of 2026-05-09. This migration runs against the post-merge tree:
 
 - Patch surface: ~47 patches across `data/{vyos-1x,vyos-build,kernel-patches,ask-userspace}`, `kernel/common/patches/{vyos,board,fixes}/`, `kernel/flavors/ask/patches/{ask,fixes}/`, `kernel/flavors/ask/userspace-patches/`, and `ASK/patches/{fmc,fmlib}/`.
-- The producer-absorbed `kernel/common/scripts/normalize-patch.awk` is **made obsolete** by Phase 2's git-diff-based regeneration. Mark it as such (header comment) or delete in the migration PR; document in the commit body why.
-- The producer-absorbed hunk-validator hooks (`.clinehooks/block-dual-ref-push.sh`, `.clinehooks/hunk-validator`) **remain in force** — `git apply --3way` does not detect malformed hunk arithmetic that produces well-formed but semantically wrong patches. The producer's ask13→ask14 incident (`AGENTS.md`) is the cautionary tale.
+- The absorbed `kernel/common/scripts/normalize-patch.awk` is **made obsolete** by Phase 2's git-diff-based regeneration. Mark it as such (header comment) or delete in the migration PR; document in the commit body why.
+- The absorbed hunk-validator hooks (`.clinehooks/block-dual-ref-push.sh`, `.clinehooks/hunk-validator`) **remain in force** — `git apply --3way` does not detect malformed hunk arithmetic that produces well-formed but semantically wrong patches. The archived kernel-build repo's ask13→ask14 incident (`AGENTS.md`) is the cautionary tale.
 - The patch-rot workflow (Phase 8) iterates every flavor bucket, not just `data/`.

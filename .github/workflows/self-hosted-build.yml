@@ -2,9 +2,9 @@ name: VyOS LS1046A build (self-hosted)
 
 # Start Azure ARM64 VM (idempotent) → build on self-hosted runner.
 # VM deallocation is handled by an idle-deallocate systemd timer on the
-# VM itself (10 min idle threshold). See .clinerules/01-shared-vm-runtime.md
-# in the producer repo (and the matching section in this repo's AGENTS.md)
-# for the full A+B pattern. CI must NOT call `az vm deallocate`.
+# VM itself (10 min idle threshold). See the matching "Shared Cobalt 100 VM"
+# section in this repo's AGENTS.md for the full idle-deallocator pattern.
+# CI must NOT call `az vm deallocate`.
 
 on:
   workflow_dispatch:
@@ -122,5 +122,6 @@ jobs:
   # NOTE: VM deallocation is intentionally NOT a CI step. The VM runs a
   # systemd timer (idle-deallocate.service) that self-deallocates after 10
   # min of runner idleness. Adding a stop-vm step here would re-introduce
-  # the cross-workflow VM race (producer's stop killing this consumer build
-  # mid-flight, or vice versa) that was observed in production 2026-05-06.
+  # the VM race against the in-VM idle-deallocate daemon (or, historically,
+  # a cross-workflow stop killing this build mid-flight) that was observed
+  # in production 2026-05-06.

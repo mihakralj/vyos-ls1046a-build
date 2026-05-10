@@ -3,7 +3,7 @@
 # mimicking the env that .github/workflows/auto-build.yml provides.
 set -e
 
-# Resolve the consumer repo root from this script's location, so the script
+# Resolve this repo's root from the script's location, so the script
 # works whether invoked from /workspace (legacy docker bind), /home/vyos/...
 # (native on the runner VM), or anywhere else.
 WORKSPACE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -111,11 +111,12 @@ export OCAML_VERSION=4.14.2
 
 step "Setup vyos-1x patches" bash bin/ci-setup-vyos1x.sh
 
-# Stage ASK kernel: prefer LOCAL producer build dir if PRODUCER_BUILD_DIR set;
-# else download the pinned tag from the producer GitHub release.
-if [ -n "${PRODUCER_BUILD_DIR:-}" ] && [ -d "$PRODUCER_BUILD_DIR" ]; then
-    : "${KVER:?set KVER alongside PRODUCER_BUILD_DIR (e.g. KVER=6.18.28)}"
-    export PRODUCER_BUILD_DIR KVER
+# Stage ASK kernel: prefer a LOCAL prebuilt .deb dir if LOCAL_KERNEL_DEB_DIR
+# is set; else download the pinned tag from the archived kernel-build repo's
+# GitHub release.
+if [ -n "${LOCAL_KERNEL_DEB_DIR:-}" ] && [ -d "$LOCAL_KERNEL_DEB_DIR" ]; then
+    : "${KVER:?set KVER alongside LOCAL_KERNEL_DEB_DIR (e.g. KVER=6.18.28)}"
+    export LOCAL_KERNEL_DEB_DIR KVER
     step "Stage prebuilt ASK kernel (local)" bash bin/local-stage-ask-kernel.sh
 else
     ASK_KERNEL_TAG="$(tr -d '[:space:]' < data/ask-kernel.pin)"

@@ -344,7 +344,7 @@ jobs:
       # longer cloned here. Its userspace contents (cmm/, dpa_app/, fci/lib/,
       # patches/{fmc,fmlib}/, config/) were folded in-tree under ASK/ in May
       # 2026, and its OOT kernel modules (cdx, fci, auto_bridge,
-      # iptables-extensions) moved to the producer (kernel-ls1046a-build) and ship
+      # iptables-extensions) now live in-tree under kernel/flavors/ask/ and ship
       # prebuilt in the kernel-6.6.137-askN release tarball.
 
       - name: Setup ASK fast-path kernel (SDK DPAA + hooks)
