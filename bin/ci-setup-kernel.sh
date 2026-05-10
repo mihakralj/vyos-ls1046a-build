@@ -43,6 +43,22 @@ for frag in data/kernel-config/ls1046a-*.config; do
   cat "$frag" >> "$DEFCONFIG"
 done
 
+# Override the VyOS-merged net-sched fragment for NET_SCH_FQ.
+# vyos-build/scripts/package-build/linux-kernel/config/13-net-sched.config
+# is processed by merge_config.sh AFTER our defconfig, and it explicitly
+# sets CONFIG_NET_SCH_FQ=m, overriding our ls1046a-network-perf.config =y.
+# Result on hardware: kernel boots with sysctl -p applying
+# net.core.default_qdisc=fq before sch_fq.ko is loaded, producing
+#   "Error -ENOENT writing to proc file to set sysctl parameter
+#    'net.core.default_qdisc=fq'"
+# and the qdisc silently stays at pfifo_fast. Producer kernel-6.6.137-askN
+# ships =y for the same reason (see AGENTS.md).
+NS_FRAG=vyos-build/scripts/package-build/linux-kernel/config/13-net-sched.config
+if [ -f "$NS_FRAG" ]; then
+    echo "### Forcing CONFIG_NET_SCH_FQ=y in $NS_FRAG (was =m → ENOENT at boot)"
+    sed -i 's/^CONFIG_NET_SCH_FQ=m$/CONFIG_NET_SCH_FQ=y/' "$NS_FRAG"
+fi
+
 ### Kernel patches (INA234 hwmon, SFP rollball PHY)
 KERNEL_BUILD=vyos-build/scripts/package-build/linux-kernel
 KERNEL_PATCHES="$KERNEL_BUILD/patches/kernel"
@@ -72,19 +88,17 @@ else
     echo "### Kernel series ${KSERIES_FOR_PATCH:-unknown} — skipping 6.6-only INA234 hwmon patch (INA234 is upstream in 6.10+)"
 fi
 
-# 4003-sfp-rollball-phylink-einval-fallback.patch — same caveat: was
-# authored against the 6.6 sfp.c. Hunk drift is likely on 6.18 because
-# upstream sfp_sm_probe_for_phy() / sfp_add_phy() error handling has
-# been refactored. Try a dry-run before staging so we don't spike the
-# whole build over a moot hunk fuzz; on default-flavor 6.18 the issue
-# is irrelevant unless someone hot-plugs a rollball SFP module.
+# 4003-sfp-rollball-phylink-einval-fallback.patch — applies to both 6.6
+# and 6.18 (verified 2026-05-10: kernel/common/patches/board/101-sfp-rollball-
+# phylink-fallback.patch is byte-identical and stages cleanly into
+# linux-6.18.28/drivers/net/phy/sfp.c via the new stage-kernel.sh path).
+# Required for SFP-10G-T copper rollball modules (RTL8261 PHY) on FMan 10G
+# MACs in managed=in-band-status mode — without it sfp_sm_probe_for_phy()
+# returns -EINVAL → SFP_S_FAIL → no link. Symptom on hardware: SFP+ DAC
+# (no PHY) comes up, SFP-10G-T copper does not.
 SFP_PATCH=data/kernel-patches/4003-sfp-rollball-phylink-einval-fallback.patch
-if [ "$KSERIES_FOR_PATCH" = "6.6" ]; then
-    echo "### Kernel series $KSERIES_FOR_PATCH — staging SFP rollball phylink patch"
-    cp "$SFP_PATCH" "$KERNEL_PATCHES/"
-else
-    echo "### Kernel series ${KSERIES_FOR_PATCH:-unknown} — skipping 6.6-only SFP rollball phylink patch"
-fi
+echo "### Kernel series ${KSERIES_FOR_PATCH:-unknown} — staging SFP rollball phylink patch"
+cp "$SFP_PATCH" "$KERNEL_PATCHES/"
 
 # Stage phylink patch script for injection into build-kernel.sh
 cp data/kernel-patches/patch-phylink.py "$KERNEL_BUILD/"
