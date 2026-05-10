@@ -30,7 +30,7 @@
 ```bash
 git clone --depth 1 https://github.com/nxp-qoriq/fmlib.git /tmp/fmlib
 cd /tmp/fmlib
-patch --no-backup-if-mismatch -p1 < 01-mono-ask-extensions.patch
+git apply --3way --whitespace=nowarn 01-mono-ask-extensions.patch
 make libfm-arm.a CROSS_COMPILE=aarch64-linux-gnu- KERNEL_SRC=<path-to-nxp-linux>
 # Output: libfm-arm.a (rename to libfm.a)
 ```

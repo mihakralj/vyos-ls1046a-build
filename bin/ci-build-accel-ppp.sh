@@ -104,10 +104,23 @@ echo "### Dependencies verified: libpcre2-8 and libssl present"
 PATCH_DIR="$WORKSPACE/vyos-build/scripts/package-build/linux-kernel/patches/accel-ppp-ng"
 if [ -d "$PATCH_DIR" ]; then
   cd "$ACCEL_SRC"
+  # Drop .gitattributes so Mergiraf is wired as the merge driver for source
+  # files when --3way needs to fall back to a real 3-way merge.
+  cat > "$ACCEL_SRC/.gitattributes" <<'GITATTR'
+*.c     merge=mergiraf
+*.h     merge=mergiraf
+*.py    merge=mergiraf
+*.json  merge=mergiraf
+*.yml   merge=mergiraf
+*.yaml  merge=mergiraf
+*.toml  merge=mergiraf
+*.xml   merge=mergiraf
+GITATTR
   for patch in "$PATCH_DIR"/*; do
     [ -f "$patch" ] || continue
     echo "I: Apply patch: $(basename "$patch")"
-    patch -p1 < "$patch" || echo "WARNING: $(basename "$patch") failed"
+    git apply --3way --whitespace=nowarn "$patch" \
+      || echo "WARNING: $(basename "$patch") failed"
   done
 fi
 
