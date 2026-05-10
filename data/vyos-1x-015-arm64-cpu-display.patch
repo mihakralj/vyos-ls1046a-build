@@ -1,3 +1,5 @@
+diff --git a/src/op_mode/cpu.py b/src/op_mode/cpu.py
+index 07cb901..7ec34c5 100755
 --- a/src/op_mode/cpu.py
 +++ b/src/op_mode/cpu.py
 @@ -22,13 +22,53 @@
@@ -59,7 +61,7 @@
  {% endfor %}
  """)
  
-@@ -47,8 +87,22 @@
+@@ -47,8 +87,22 @@ def _format_cpus(cpu_data):
  def _get_summary_data():
      count = get_core_count()
      cpu_data = get_cpus()
@@ -84,7 +86,7 @@
  
      return env
  
-@@ -61,7 +115,26 @@
+@@ -61,7 +115,26 @@ def show(raw: bool):
      if raw:
          return cpu_data
      else:

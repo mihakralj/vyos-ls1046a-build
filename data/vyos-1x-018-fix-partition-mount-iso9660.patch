@@ -1,6 +1,8 @@
+diff --git a/python/vyos/system/disk.py b/python/vyos/system/disk.py
+index 7ae9a15..e53f99b 100644
 --- a/python/vyos/system/disk.py
 +++ b/python/vyos/system/disk.py
-@@ -171,7 +171,7 @@
+@@ -171,7 +171,7 @@ def partition_mount(partition: str,
      """
      if fsype in ['squashfs', 'iso9660']:
          command: str = f'mount -o loop,ro -t {fsype} {partition} {path}'
