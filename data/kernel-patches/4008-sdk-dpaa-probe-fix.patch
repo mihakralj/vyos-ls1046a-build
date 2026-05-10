@@ -1,0 +1,115 @@
+diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c
+index 69962a5..8aac29c 100644
+--- a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c
+@@ -1038,6 +1038,7 @@ dpaa_eth_priv_probe(struct platform_device *_of_dev)
+ 
+ 	if (err < 0)
+ 		goto bp_create_failed;
++	printk("DPAA_PROBE: bp_create done\n");
+ 
+ 	priv->mac_dev = mac_dev;
+ 
+@@ -1047,11 +1048,14 @@ dpaa_eth_priv_probe(struct platform_device *_of_dev)
+ 		err = channel;
+ 		goto get_channel_failed;
+ 	}
++	printk("DPAA_PROBE: get_channel=%d\n", channel);
+ 
+ 	priv->channel = (uint16_t)channel;
+ 	dpaa_eth_add_channel(priv->channel);
++	printk("DPAA_PROBE: add_channel done\n");
+ 
+ 	dpa_fq_setup(priv, &private_fq_cbs, priv->mac_dev->port_dev[TX]);
++	printk("DPAA_PROBE: fq_setup done\n");
+ 
+ 	/* Create a congestion group for this netdev, with
+ 	 * dynamically-allocated CGR ID.
+@@ -1063,6 +1067,7 @@ dpaa_eth_priv_probe(struct platform_device *_of_dev)
+ 		dev_err(dev, "Error initializing CGR\n");
+ 		goto tx_cgr_init_failed;
+ 	}
++	printk("DPAA_PROBE: cgr_init done\n");
+ 	err = dpaa_eth_priv_ingress_cgr_init(priv);
+ 	if (err < 0) {
+ 		dev_err(dev, "Error initializing ingress CGR\n");
+@@ -1073,6 +1078,7 @@ dpaa_eth_priv_probe(struct platform_device *_of_dev)
+ 	err = dpa_fqs_init(dev,  &priv->dpa_fq_list, false);
+ 	if (err < 0)
+ 		goto fq_alloc_failed;
++	printk("DPAA_PROBE: fqs_init done\n");
+ 
+ 	priv->buf_layout = buf_layout;
+ 	priv->tx_headroom = dpa_get_headroom(&priv->buf_layout[TX]);
+diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.h
+index 8f9541d..6044646 100644
+--- a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.h
+@@ -201,7 +201,7 @@ increased buffer size from 2048 to 2176, to accomodate them in contiguous fd */
+ #define DPAA_ETH_TX_QUEUES	NR_CPUS
+ #endif
+ 
+-#define DPAA_ETH_RX_QUEUES	128
++#define DPAA_ETH_RX_QUEUES	16
+ #define DPAA_IP_VERSION_4  4
+ 
+ /* Convenience macros for storing/retrieving the skb back-pointers. They must
+diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c
+index b687592..d40a586 100644
+--- a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c
++++ b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_common.c
+@@ -1149,11 +1149,14 @@ void dpa_fq_setup(struct dpa_priv_s *priv, const struct dpa_fq_cbs_t *fq_cbs,
+ 	uint32_t pcd_fqid, pcd_fqid_hi_prio;
+ 	const cpumask_t *affine_cpus = qman_affine_cpus();
+ 	int egress_cnt = 0, conf_cnt = 0;
++	int __fq_dbg_cnt = 0;
++	printk("DPAA_FQ_SETUP: enter\n");
+ 
+ 	/* Prepare for PCD FQs init */
+ 	for_each_cpu(cpu, affine_cpus)
+ 		portals[num_portals++] = qman_affine_channel(cpu);
+ 	if (num_portals == 0)
++	printk("DPAA_FQ_SETUP: num_portals=%d\n", num_portals);
+ 		dev_err(priv->net_dev->dev.parent,
+ 			"No Qman software (affine) channels found");
+ 
+@@ -1164,6 +1167,9 @@ void dpa_fq_setup(struct dpa_priv_s *priv, const struct dpa_fq_cbs_t *fq_cbs,
+ 
+ 	/* Initialize each FQ in the list */
+ 	list_for_each_entry(fq, &priv->dpa_fq_list, list) {
++		cond_resched();
++		__fq_dbg_cnt++;
++		printk("DPAA_FQ_SETUP: fq #%d type=%d\n", __fq_dbg_cnt, fq->fq_type);
+ 		switch (fq->fq_type) {
+ 		case FQ_TYPE_RX_DEFAULT:
+ 			if (WARN_ON_ONCE(!priv->mac_dev)) continue;
+@@ -1220,19 +1226,29 @@ void dpa_fq_setup(struct dpa_priv_s *priv, const struct dpa_fq_cbs_t *fq_cbs,
+ 		}
+ 	}
+ 
++	printk("DPAA_FQ_SETUP: main loop done, %d FQs, egress_cnt=%d/%d\n",
++	       __fq_dbg_cnt, egress_cnt, DPAA_ETH_TX_QUEUES);
++
+ 	/* The number of Tx queues may be smaller than the number of cores, if
+ 	 * the Tx queue range is specified in the device tree instead of being
+ 	 * dynamically allocated.
+ 	 * Make sure all CPUs receive a corresponding Tx queue.
+ 	 */
+ 	while (egress_cnt < DPAA_ETH_TX_QUEUES) {
++		int __prev_egress = egress_cnt;
+ 		list_for_each_entry(fq, &priv->dpa_fq_list, list) {
++			cond_resched();
+ 			if (fq->fq_type != FQ_TYPE_TX)
+ 				continue;
+ 			priv->egress_fqs[egress_cnt++] = &fq->fq_base;
+ 			if (egress_cnt == DPAA_ETH_TX_QUEUES)
+ 				break;
+ 		}
++		if (egress_cnt == __prev_egress) {
++			printk("DPAA_FQ_SETUP: WARN no TX FQs, breaking egress fill (egress_cnt=%d/%d)\n",
++			       egress_cnt, DPAA_ETH_TX_QUEUES);
++			break;
++		}
+ 	}
+ }
+ EXPORT_SYMBOL(dpa_fq_setup);
