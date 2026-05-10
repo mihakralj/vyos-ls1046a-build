@@ -140,15 +140,26 @@ if [ -d "$LIBCLI_SRC" ] && [ -f "$LIBCLI_SRC/Makefile" ]; then
   # C3 B6 P0.3: apply consumer-tracked libcli patches (idempotent)
   LIBCLI_PATCHES="$REPO_ROOT/patches/libcli"
   if [ -d "$LIBCLI_PATCHES" ]; then
+    # Drop .gitattributes so Mergiraf is the merge driver for source files
+    # when --3way needs to fall back to a real 3-way merge.
+    cat > "$LIBCLI_SRC/.gitattributes" <<'GITATTR'
+*.c     merge=mergiraf
+*.h     merge=mergiraf
+*.py    merge=mergiraf
+*.json  merge=mergiraf
+*.yml   merge=mergiraf
+*.yaml  merge=mergiraf
+*.toml  merge=mergiraf
+*.xml   merge=mergiraf
+GITATTR
     for _p in "$LIBCLI_PATCHES"/*.patch; do
       [ -e "$_p" ] || continue
-      if (cd "$LIBCLI_SRC" && git apply --check --reverse "$_p" >/dev/null 2>&1); then
+      if (cd "$LIBCLI_SRC" && git apply --check --reverse --whitespace=nowarn "$_p" >/dev/null 2>&1); then
         echo "    libcli patch already applied: $(basename "$_p")"
-      elif (cd "$LIBCLI_SRC" && git apply --check "$_p" >/dev/null 2>&1); then
-        (cd "$LIBCLI_SRC" && git apply "$_p")
+      elif (cd "$LIBCLI_SRC" && git apply --3way --whitespace=nowarn "$_p" >/dev/null 2>&1); then
         echo "    libcli patch applied: $(basename "$_p")"
       else
-        echo "    libcli patch FAILED check: $(basename "$_p")" >&2
+        echo "    libcli patch FAILED apply: $(basename "$_p")" >&2
         exit 1
       fi
     done

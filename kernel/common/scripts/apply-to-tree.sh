@@ -126,16 +126,34 @@ ok "copied $SDK_COUNT SDK file(s)"
 # conflict markers into .rej files just like the old `patch` path did —
 # so the maintainer-workflow on failure is unchanged.
 info "step 2/4: applying ${#PATCH_FILES[@]} patch(es) in order"
+# Initialize $KDIR as a throwaway git repo so `git apply --3way` has access to
+# the pristine blobs for fallback 3-way merge. Drop a .gitattributes file that
+# wires Mergiraf as the merge driver for source files.
+if [[ ! -d "$KDIR/.git" ]]; then
+    ( cd "$KDIR" && git init -q && git config user.email ci@local && \
+        git config user.name ci && git config gc.auto 0 && \
+        git add -A && git commit -qm "kernel pristine baseline" )
+fi
+cat > "$KDIR/.gitattributes" <<'GITATTR'
+*.c     merge=mergiraf
+*.h     merge=mergiraf
+*.py    merge=mergiraf
+*.json  merge=mergiraf
+*.yml   merge=mergiraf
+*.yaml  merge=mergiraf
+*.toml  merge=mergiraf
+*.xml   merge=mergiraf
+GITATTR
 for P in "${PATCH_FILES[@]}"; do
     PNAME=$(basename "$P")
     dim "   → $PNAME"
-    # --unsafe-paths: $KDIR is an absolute path and we are intentionally applying
-    # outside any git worktree, which is what the flag unlocks.
-    if ! git apply -p1 --unsafe-paths --directory="$KDIR" "$P" 2>&1; then
+    if ! git -C "$KDIR" apply --3way --whitespace=nowarn "$P" 2>&1; then
         warn "strict apply failed for $PNAME — retrying with --reject to surface failing hunks"
-        git apply -p1 --unsafe-paths --directory="$KDIR" --reject "$P" || true
+        git -C "$KDIR" apply --reject --whitespace=nowarn "$P" || true
         err "$PNAME failed to apply — see *.rej files under $KDIR"
     fi
+    # Commit per-patch so the next patch sees previous resolved context.
+    ( cd "$KDIR" && git add -A && git commit -qm "$PNAME" --allow-empty )
 done
 ok "all patches applied"
 
