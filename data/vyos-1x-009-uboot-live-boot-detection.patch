@@ -1,6 +1,8 @@
+diff --git a/python/vyos/system/image.py b/python/vyos/system/image.py
+index ed8a96f..d1868fe 100644
 --- a/python/vyos/system/image.py
 +++ b/python/vyos/system/image.py
-@@ -262,6 +262,9 @@ def is_live_boot() -> bool:
+@@ -265,6 +265,9 @@ def is_live_boot() -> bool:
          boot_type: str = running_image_result.groupdict().get('boot_type', '')
          if boot_type == 'boot':
              return False
@@ -10,3 +12,23 @@
      return True
  
  def if_not_live_boot(func):
+diff --git a/src/op_mode/image_installer.py.rej b/src/op_mode/image_installer.py.rej
+new file mode 100644
+index 0000000..7b202f1
+--- /dev/null
++++ b/src/op_mode/image_installer.py.rej
+@@ -0,0 +1,14 @@
++--- src/op_mode/image_installer.py
+++++ src/op_mode/image_installer.py
++@@ -383,6 +408,11 @@ def ask_single_disk(disks_available: dict[str, int]) -> str:
++     """
++     print(MSG_INFO_INSTALL_DISKS_LIST)
++     default_disk: str = list(disks_available)[0]
+++    # Prefer eMMC/SD card (mmcblk) as default on embedded/ARM hardware.
+++    for _d in disks_available:
+++        if 'mmcblk' in _d:
+++            default_disk = _d
+++            break
++     for disk_name, disk_size in disks_available.items():
++         disk_size_human: str = bytes_to_gb(disk_size)
++         print(f'Drive: {disk_name} ({disk_size_human} GB)')

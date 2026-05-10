@@ -17,15 +17,13 @@ VYOS1X_BUILD=vyos-build/scripts/package-build/vyos-1x
 PATCH_STAGING="$VYOS1X_BUILD/ls1046a-patches"
 mkdir -p "$PATCH_STAGING"
 
-# Copy unified diff patches EXCEPT 010 (replaced by Python patcher)
+# Copy all unified-diff patches. Patch 010 (vpp-platform-bus) and the former
+# patch-mmcblk-default were Python patchers; both have been folded back into
+# proper git-format unified diffs (vyos-1x-010-*.patch handles vpp; the mmcblk
+# default is now part of vyos-1x-007-prefer-emmc-default.patch).
 for p in data/vyos-1x-*.patch; do
-  case "$(basename "$p")" in
-    vyos-1x-010-*) echo "Skipping $p (replaced by patch-vpp-platform-bus.py)" ;;
-    *) cp "$p" "$PATCH_STAGING/" ;;
-  esac
+  cp "$p" "$PATCH_STAGING/"
 done
-cp data/scripts/patch-mmcblk-default.py "$PATCH_STAGING/"
-cp data/scripts/patch-vpp-platform-bus.py "$PATCH_STAGING/"
 cp data/reftree.cache "$PATCH_STAGING/"
 
 cat > "$VYOS1X_BUILD/package.toml" <<'EOF'
@@ -64,20 +62,34 @@ ignore-patterns=.*\\.graphql$,.*\\.tmpl$
 disable=E0606,E1111
 PYLINTRC
   patch_fail=0
+  # Drop a .gitattributes that wires Mergiraf as the merge driver for
+  # source-language files. git apply --3way only consults attributes in
+  # the target tree, so this MUST live inside the upstream clone.
+  cat > .gitattributes <<'GITATTR'
+*.c     merge=mergiraf
+*.h     merge=mergiraf
+*.cc    merge=mergiraf
+*.cpp   merge=mergiraf
+*.hpp   merge=mergiraf
+*.py    merge=mergiraf
+*.json  merge=mergiraf
+*.yml   merge=mergiraf
+*.yaml  merge=mergiraf
+*.toml  merge=mergiraf
+*.xml   merge=mergiraf
+GITATTR
   for p in ../ls1046a-patches/vyos-1x-*.patch; do
     # Skip if already applied (idempotent across pre_build_hook re-invocations
     # and forward-compatible if upstream lands an equivalent change).
-    if patch --no-backup-if-mismatch -p1 --dry-run -R < "$p" >/dev/null 2>&1; then
+    if git apply --reverse --check --whitespace=nowarn "$p" >/dev/null 2>&1; then
       echo "SKIP: $(basename $p) — already applied (reverse-applies cleanly)"
       continue
     fi
-    if ! patch --no-backup-if-mismatch -p1 < "$p"; then
-      echo "WARNING: $(basename $p) failed to apply (continuing)"
+    if ! git apply --3way --whitespace=nowarn "$p"; then
+      echo "::error::$(basename $p) failed to apply with --3way — context drift, refresh patch" >&2
       patch_fail=1
     fi
   done
-  python3 ../ls1046a-patches/patch-mmcblk-default.py
-  python3 ../ls1046a-patches/patch-vpp-platform-bus.py
   echo "### VERIFY: VPP patches in source tree"
   grep -c 'fsl_dpa' src/conf_mode/vpp.py || echo "MISSING: fsl_dpa in vpp.py"
   grep -c 'namespace' data/templates/vpp/startup.conf.j2 || echo "MISSING: namespace in startup.conf.j2"

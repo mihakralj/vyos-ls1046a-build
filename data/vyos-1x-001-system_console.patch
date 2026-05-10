@@ -1,3 +1,5 @@
+diff --git a/interface-definitions/system_console.xml.in b/interface-definitions/system_console.xml.in
+index 8ae9829..043ad83 100644
 --- a/interface-definitions/system_console.xml.in
 +++ b/interface-definitions/system_console.xml.in
 @@ -12,7 +12,7 @@
@@ -9,17 +11,17 @@
                  <script>if [ -d /dev/serial/by-bus ]; then ls -1 /dev/serial/by-bus; fi</script>
                </completionHelp>
                <valueHelp>
-@@ -24,6 +24,10 @@
+@@ -23,6 +23,10 @@
+                 <format>ttyAMAN</format>
                  <description>TTY device name, ttyAMA based</description>
                </valueHelp>
-               <valueHelp>
++              <valueHelp>
 +                <format>ttyFIQN</format>
 +                <description>TTY device name, FIQ-based performance serial port</description>
 +              </valueHelp>
-+              <valueHelp>
+               <valueHelp>
                  <format>usbNbXpY</format>
                  <description>TTY device name, USB based</description>
-               </valueHelp>
 @@ -32,7 +36,7 @@
                  <description>Xen console</description>
                </valueHelp>

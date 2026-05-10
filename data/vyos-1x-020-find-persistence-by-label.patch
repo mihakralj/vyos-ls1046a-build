@@ -1,3 +1,5 @@
+diff --git a/python/vyos/system/disk.py b/python/vyos/system/disk.py
+index d27d15f..f553828 100644
 --- a/python/vyos/system/disk.py
 +++ b/python/vyos/system/disk.py
 @@ -15,6 +15,7 @@
@@ -5,10 +7,10 @@
  from json import loads as json_loads
  from os import sync
 +from os.path import realpath as _realpath
+ from os.path import basename as _basename
  from dataclasses import dataclass
  from time import sleep
- 
-@@ -47,15 +48,35 @@
+@@ -65,15 +66,35 @@ def disk_cleanup(drive_path: str) -> None:
  
  
  def find_persistence() -> str:
@@ -45,3 +47,5 @@
 +            except Exception:
 +                continue
      return ''
+ 
+ 

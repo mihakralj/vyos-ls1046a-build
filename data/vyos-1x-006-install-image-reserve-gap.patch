@@ -1,3 +1,5 @@
+diff --git a/python/vyos/system/disk.py b/python/vyos/system/disk.py
+index 7ae9a15..d27d15f 100644
 --- a/python/vyos/system/disk.py
 +++ b/python/vyos/system/disk.py
 @@ -15,6 +15,7 @@
@@ -8,7 +10,7 @@
  from dataclasses import dataclass
  from time import sleep
  
-@@ -30,6 +31,19 @@
+@@ -30,6 +31,19 @@ class DiskDetails:
      partition: dict[str, str]
  
  
@@ -28,7 +30,7 @@
  def disk_cleanup(drive_path: str) -> None:
      """Clean up disk partition table (MBR and GPT)
      Remove partition and device signatures.
-@@ -42,8 +56,12 @@
+@@ -42,8 +56,12 @@ def disk_cleanup(drive_path: str) -> None:
      partitions: list[str] = partition_list(drive_path)
      for partition in partitions:
          run(f'wipefs -af {partition}')
@@ -43,7 +45,7 @@
  
  
  def find_persistence() -> str:
-@@ -69,12 +87,21 @@
+@@ -69,12 +87,21 @@ def parttable_create(drive_path: str, root_size: int) -> None:
      Args:
          drive_path (str): path to a drive
      """
@@ -70,7 +72,7 @@
  
      run(command)
      # update partitions in kernel
-@@ -171,7 +198,7 @@
+@@ -171,7 +198,7 @@ def partition_mount(partition: str,
      """
      if fsype in ['squashfs', 'iso9660']:
          command: str = f'mount -o loop,ro -t {fsype} {partition} {path}'
@@ -79,6 +81,8 @@
          command: str = f'mount -t overlay -o noatime,\
              upperdir={overlay_params["upperdir"]},\
              lowerdir={overlay_params["lowerdir"]},\
+diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
+index 07f69cc..68db05f 100755
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
 @@ -130,7 +130,7 @@
@@ -90,7 +94,7 @@
  
  # define directories and paths
  DIR_CONFIG: str = directories['config']
-@@ -194,6 +194,41 @@
+@@ -194,6 +194,41 @@ def find_disks() -> dict[str, int]:
      for disk_name, disk_size in disks_available.copy().items():
          if disk_size < CONST_MIN_DISK_SIZE:
              del disks_available[disk_name]
@@ -132,7 +136,7 @@
      if not disks_available:
          print(MSG_ERR_NO_DISK)
          exit(MSG_INFO_INSTALL_EXIT)
-@@ -208,17 +243,30 @@
+@@ -208,17 +243,30 @@ def ask_root_size(available_space: int) -> int:
      """Define a size of root partition
  
      Args:
@@ -167,7 +171,7 @@
  
          if root_size_kbytes > available_space:
              print(MSG_WARN_ROOT_SIZE_TOOBIG)
-@@ -396,6 +444,11 @@
+@@ -396,6 +444,11 @@ def ask_single_disk(disks_available: dict[str, int]) -> str:
      """
      print(MSG_INFO_INSTALL_DISKS_LIST)
      default_disk: str = list(disks_available)[0]
@@ -179,7 +183,7 @@
      for disk_name, disk_size in disks_available.items():
          disk_size_human: str = bytes_to_gb(disk_size)
          print(f'Drive: {disk_name} ({disk_size_human} GB)')
-@@ -1058,6 +1111,94 @@
+@@ -1058,6 +1111,94 @@ def install_image() -> None:
          grub.set_default(image_name, DIR_DST_ROOT)
          grub.set_console_type(console_dict[console_type], DIR_DST_ROOT)
  
@@ -274,7 +278,7 @@
          if is_raid_install(install_target):
              # add RAID specific modules
              grub.modules_write(f'{DIR_DST_ROOT}/{grub.CFG_VYOS_MODULES}',
-@@ -1095,7 +1236,7 @@
+@@ -1095,7 +1236,7 @@ def install_image() -> None:
          exit()
  
      except Exception as err:
@@ -283,7 +287,7 @@
          # unmount filesystems and cleanup
          try:
              if install_target is not None:
-@@ -1307,6 +1448,11 @@
+@@ -1307,6 +1448,11 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
          copy(f'{DIR_ISO_MOUNT}/live/filesystem.squashfs',
               f'{root_dir}/boot/{image_name}/{image_name}.squashfs')
  
