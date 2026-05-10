@@ -228,32 +228,15 @@ MEOF
         || echo 'obj-$(CONFIG_FSL_FMD_SHIM) += fmd_shim/' >> "$KSRC/drivers/soc/fsl/Makefile"
 fi
 
-# ── Inline Python patchers (best-effort, legacy hooks) ────────────────
-run_inject_py() {
-    local script="$1" target_glob="$2" desc="$3"
-    [[ -f "$script" ]] || return 0
-    local target
-    target=$(find "$KSRC" -path "*/$target_glob" -maxdepth 6 2>/dev/null | head -1)
-    if [[ -z "$target" ]]; then
-        warn "$desc: target $target_glob not found in tree (skipping)"
-        return 0
-    fi
-    if python3 "$script" "$target" 2>&1 | grep -qE 'error|fail|Traceback'; then
-        warn "$desc: python patcher reported issues against $target"
-    else
-        ok "$desc: applied to $(realpath --relative-to="$KSRC" "$target")"
-    fi
-}
-if [[ -d "$INJECT_DIR" ]]; then
-    info "running inline python patchers…"
-    run_inject_py "$INJECT_DIR/patch-phylink.py"             "net/phylink.c"                      "phylink (LS1046A XFI fix)"
-    run_inject_py "$INJECT_DIR/patch-dpaa-xdp-queue-index.py" "freescale/dpaa/dpaa_eth.c"          "dpaa xdp_rxq queue_index"
-    run_inject_py "$INJECT_DIR/patch-xhci-ls1046a-quirks.py" ""                                    "xHCI LS1046A quirks (script targets root)"
-    # xhci patcher takes the kernel tree root, not a specific file:
-    [[ -f "$INJECT_DIR/patch-xhci-ls1046a-quirks.py" ]] && \
-        ( cd "$KSRC" && python3 "$INJECT_DIR/patch-xhci-ls1046a-quirks.py" . >/dev/null 2>&1 \
-            && ok "xHCI quirks applied" || warn "xHCI quirks: applier exited non-zero" )
-fi
+# ── Inline Python patchers — RETIRED ────────────────────────────────────
+# Previously this script ran 3 inline Python patchers (patch-phylink.py,
+# patch-dpaa-xdp-queue-index.py, patch-xhci-ls1046a-quirks.py) against the
+# kernel tree as a "best-effort" fallback. As of the patch-migration-3way
+# work, those have been converted to proper unified-diff patches that ship
+# under kernel/common/patches/board/ (4005/4006/4007). They are now applied
+# by the standard PATCHES loop above, with the same --3way safety as every
+# other patch. The patch-dpaa-probe-fix.py SDK patcher likewise became
+# kernel/flavors/ask/patches/fixes/4008-sdk-dpaa-probe-fix.patch.
 
 # ── Defconfig assembly (plan §3.5) ────────────────────────────────────
 info "assembling .config from defconfig fragments…"

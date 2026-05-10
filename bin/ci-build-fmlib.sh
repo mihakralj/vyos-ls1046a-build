@@ -67,14 +67,28 @@ echo "    cloned head=$HEAD_SHA (expected starts with $FMLIB_COMMIT)"
 
 # 2. Normalise line endings then apply ASK patch
 find "$WORK/fmlib" \( -name "*.c" -o -name "*.h" \) -exec sed -i 's/\r$//' {} +
+# Drop .gitattributes so Mergiraf is wired as the merge driver for source
+# files when --3way needs to fall back to a real 3-way merge.
+cat > "$WORK/fmlib/.gitattributes" <<'GITATTR'
+*.c     merge=mergiraf
+*.h     merge=mergiraf
+*.cpp   merge=mergiraf
+*.hpp   merge=mergiraf
+*.py    merge=mergiraf
+*.json  merge=mergiraf
+*.yml   merge=mergiraf
+*.yaml  merge=mergiraf
+*.toml  merge=mergiraf
+*.xml   merge=mergiraf
+GITATTR
 echo "--- applying $PATCH ---"
-(cd "$WORK/fmlib" && patch --no-backup-if-mismatch -p1 < "$PATCH")
+( cd "$WORK/fmlib" && git apply --3way --whitespace=nowarn "$PATCH" )
 echo "    patch applied OK"
 echo "--- applying $PATCH_B1 (F01/F02 ABI alignment with kernel UAPI) ---"
-(cd "$WORK/fmlib" && patch --no-backup-if-mismatch -p1 < "$PATCH_B1")
+( cd "$WORK/fmlib" && git apply --3way --whitespace=nowarn "$PATCH_B1" )
 echo "    B1 patch applied OK"
 echo "--- applying $PATCH_B3 (F08 bounds on num_of_keys / num_of_schemes) ---"
-(cd "$WORK/fmlib" && patch --no-backup-if-mismatch -p1 < "$PATCH_B3")
+( cd "$WORK/fmlib" && git apply --3way --whitespace=nowarn "$PATCH_B3" )
 echo "    B3 patch applied OK"
 
 # Sanity: verify the critical struct field is present after patch

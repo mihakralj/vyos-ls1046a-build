@@ -167,7 +167,7 @@ if [[ -d "$PATCH_DIR" ]]; then
         begin_group "apply ASK-modules patches (${#ask_patches[@]} file(s))"
         for p in "${ask_patches[@]}"; do
             info "  applying $(basename "$p")"
-            if ! (cd "$SRC_ROOT" && git apply --whitespace=nowarn "$p"); then
+            if ! (cd "$SRC_ROOT" && git apply --3way --whitespace=nowarn "$p"); then
                 err "failed to apply $(basename "$p")"
             fi
             ok "    applied $(basename "$p")"

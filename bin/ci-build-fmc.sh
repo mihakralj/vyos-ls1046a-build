@@ -63,7 +63,21 @@ echo "    cloned head=$HEAD_SHA (expected starts with $FMC_COMMIT)"
 find "$WORK/fmc" \( -name "*.cpp" -o -name "*.h" -o -name "*.c" \) -exec sed -i 's/\r$//' {} +
 
 echo "--- applying $PATCH ---"
-(cd "$WORK/fmc" && patch --no-backup-if-mismatch -p1 < "$PATCH")
+# Drop .gitattributes so Mergiraf is wired as the merge driver for source
+# files when --3way needs to fall back to a real 3-way merge.
+cat > "$WORK/fmc/.gitattributes" <<'GITATTR'
+*.c     merge=mergiraf
+*.h     merge=mergiraf
+*.cpp   merge=mergiraf
+*.hpp   merge=mergiraf
+*.py    merge=mergiraf
+*.json  merge=mergiraf
+*.yml   merge=mergiraf
+*.yaml  merge=mergiraf
+*.toml  merge=mergiraf
+*.xml   merge=mergiraf
+GITATTR
+( cd "$WORK/fmc" && git apply --3way --whitespace=nowarn "$PATCH" )
 echo "    patch applied OK"
 
 # Ensure libxml2 + tclap headers are available on the builder
