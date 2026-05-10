@@ -1,6 +1,8 @@
+diff --git a/src/conf_mode/system_timezone.py b/src/conf_mode/system_timezone.py
+index 54ffb88..57c72a3 100755
 --- a/src/conf_mode/system_timezone.py
 +++ b/src/conf_mode/system_timezone.py
-@@ -47,7 +47,12 @@
+@@ -47,7 +47,12 @@ def generate(tz):
  
  def apply(tz):
      call('/usr/bin/timedatectl set-timezone {}'.format(tz['name']))

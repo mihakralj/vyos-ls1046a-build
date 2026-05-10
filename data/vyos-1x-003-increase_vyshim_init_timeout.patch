@@ -1,8 +1,8 @@
 diff --git a/src/shim/vyshim.c b/src/shim/vyshim.c
-index 1eb653cbf..b48220106 100644
+index 7b516cd..2f843e6 100644
 --- a/src/shim/vyshim.c
 +++ b/src/shim/vyshim.c
-@@ -177,7 +177,7 @@ int initialization(void* Requester)
+@@ -196,7 +196,7 @@ int initialization(void* Requester, char* pid_val)
      sigaction(SIGALRM, &sa, NULL);
  
      timer.it_value.tv_sec = 0;

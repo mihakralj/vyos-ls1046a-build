@@ -1,45 +1,25 @@
-From: vyos-ls1046a-build maintainers
-Subject: [PATCH] system_option: skip kexec on LS1046A (SDK QBMan cannot survive kexec)
-
-The LS1046A Mono Gateway uses the NXP SDK staging DPAA1 stack
-(drivers/staging/fsl_qbman + drivers/net/ethernet/freescale/sdk_dpaa).
-Unlike mainline drivers/soc/fsl/qbman, the SDK driver has no
-bman_requires_cleanup() / qman_requires_cleanup() reset path. After a
-kexec, the second kernel finds BMan/QMan frame queues still configured
-in CCSR from the first kernel and qman_init_fq() returns -EIO for the
-first three FQs it touches, leaving 3 of 5 DPAA ports unusable
-(symptom: "fsl_dpa soc:fsl,dpaa:ethernet@N: qman_init_fq(...) = -5",
-"probe of soc:fsl,dpaa:ethernet@N failed with error -5").
-
-system_option.py uses kexec to apply MANAGED_PARAM kernel cmdline
-changes (hugepages, panic, mitigations, isolcpus, ...) without a cold
-reboot. On LS1046A this workflow is incompatible with the SDK driver,
-so we suppress the kexec self-heal branch entirely.
-
-Behavior:
-  * boot, LS1046A:        silently skip kexec. The just-booted kernel
-                          is the right one; the user already cold-rebooted.
-                          No Warning() is emitted at boot time, which
-                          avoids any chance of configd elevating it
-                          during the boot-config-loader transaction
-                          (previous revision of this patch raised a
-                          Warning here, which appears to have correlated
-                          with an empty running-config tree on first
-                          boot of a fresh ISO image).
-  * post-boot, LS1046A:   emit the upstream "save and reboot" warning
-                          (same path upstream takes on
-                          boot_configuration_complete()==True).
-  * boot, non-LS1046A:    upstream kexec self-heal — unchanged.
-  * post-boot, non-LS1046A: upstream warning — unchanged.
-
-Detection uses /proc/device-tree/compatible == 'fsl,ls1046a'.
-
-Picked up automatically by bin/ci-setup-vyos1x.sh (globs
-data/vyos-1x-*.patch).
-
+diff --git a/python/vyos/system/disk.py.rej b/python/vyos/system/disk.py.rej
+new file mode 100644
+index 0000000..0b49c5b
+--- /dev/null
++++ b/python/vyos/system/disk.py.rej
+@@ -0,0 +1,11 @@
++--- python/vyos/system/disk.py
+++++ python/vyos/system/disk.py
++@@ -171,7 +171,7 @@
++     """
++     if fsype in ['squashfs', 'iso9660']:
++         command: str = f'mount -o loop,ro -t {fsype} {partition} {path}'
++-    if fsype == 'overlay' and overlay_params:
+++    elif fsype == 'overlay' and overlay_params:
++         command: str = f'mount -t overlay -o noatime,\
++             upperdir={overlay_params["upperdir"]},\
++ 
+diff --git a/src/conf_mode/system_option.py b/src/conf_mode/system_option.py
+index 003e8c9..634abb2 100755
 --- a/src/conf_mode/system_option.py
 +++ b/src/conf_mode/system_option.py
-@@ -453,9 +453,23 @@
+@@ -480,9 +480,23 @@ def generate_cmdline_for_kexec(options):
  
  
  def apply(options):

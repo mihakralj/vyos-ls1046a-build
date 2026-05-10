@@ -1,10 +1,8 @@
-Prefer eMMC/SD card as default install target on embedded/ARM hardware.
-
 diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
-index cb3aa7b..a0355a8 100755
+index 07f69cc..967c5a4 100755
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
-@@ -383,6 +408,11 @@ def ask_single_disk(disks_available: dict[str, int]) -> str:
+@@ -396,6 +396,11 @@ def ask_single_disk(disks_available: dict[str, int]) -> str:
      """
      print(MSG_INFO_INSTALL_DISKS_LIST)
      default_disk: str = list(disks_available)[0]
