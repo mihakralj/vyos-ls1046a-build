@@ -29,7 +29,7 @@
 ```bash
 git clone --depth 1 https://git.netfilter.org/libnfnetlink /tmp/libnfnetlink
 cd /tmp/libnfnetlink
-patch --no-backup-if-mismatch -p1 < 01-nxp-ask-nonblocking-heap-buffer.patch
+git apply --3way --whitespace=nowarn 01-nxp-ask-nonblocking-heap-buffer.patch
 ./autogen.sh
 ./configure --host=aarch64-linux-gnu --prefix=/usr/local
 make

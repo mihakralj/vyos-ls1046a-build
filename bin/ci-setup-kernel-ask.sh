@@ -10,7 +10,7 @@
 # Build-kernel.sh flow (relevant lines):
 #   L12:  cd ${KERNEL_SRC}
 #   L44:  cat config snippets >> KERNEL_CONFIG
-#   L50:  PATCH_DIR=... ; for patch in ... ; patch -p1  <-- patches applied here
+#   L50:  PATCH_DIR=... ; for patch in ... ; git apply --3way <-- patches applied here
 #   L58:  (injection: copy fsl_usdpaa_mainline)
 #   L62:  # Change name of Signing Cert  <-- ci-setup-kernel.sh injects here
 #
