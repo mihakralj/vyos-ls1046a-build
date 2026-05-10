@@ -26,7 +26,37 @@ for package in $packages; do
 
   [ "$package" == "keepalived" ] && apt-get install -y libsnmp-dev
 
-  ./build.py
+  # Restrict linux-kernel/build.py to only the kernel sub-package.
+  #
+  # The upstream `package.toml` defines 13 sub-packages (linux-kernel,
+  # linux-firmware, accel-ppp-ng, nat-rtsp, qat, igb, ixgbe, ixgbevf, jool,
+  # mlnx, realtek-r8126, realtek-r8152, ipt-netflow). With no `--packages`
+  # filter, build.py iterates ALL of them, which on the LS1046A target wastes
+  # ~5 minutes per build:
+  #   * linux-firmware     — full git clone of huge Debian linux-firmware
+  #                          tree (~2m); we don't ship the resulting .deb
+  #                          (none of our config.boot.* depends on it and
+  #                          ci-pick-packages.sh has no opinion either way).
+  #   * accel-ppp-ng       — invokes vyos-build/.../build-accel-ppp-ng.sh,
+  #                          which on ARM64 ALWAYS fails because it requires
+  #                          building VPP from source first. We rebuild
+  #                          accel-ppp-ng correctly below via
+  #                          bin/ci-build-accel-ppp.sh (no VPP plugin).
+  #   * igb/ixgbe/ixgbevf  — Intel x86-cloud NIC OOT modules; the LS1046A
+  #                          has no Intel NICs (DPAA1 FMan).
+  #   * qat/mlnx/realtek/jool/nat-rtsp/ipt-netflow — none of these are in
+  #                          our package-lists or config.boot.* defaults,
+  #                          and none of our hooks reference them.
+  # `build.py` swallows individual package failures (prints "Failed to build
+  # package X" and continues), so dropping these is purely a time saving and
+  # does not change the ISO contents.
+  #
+  # vyos-1x has no sub-packages — invoke unfiltered.
+  if [ "$package" == "linux-kernel" ]; then
+    ./build.py --packages linux-kernel
+  else
+    ./build.py
+  fi
 
   [ "$package" == "keepalived" ] && apt-get remove -y libsnmp-dev
 
