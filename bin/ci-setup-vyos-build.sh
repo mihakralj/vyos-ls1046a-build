@@ -127,6 +127,32 @@ if [ -f vyos-build/data/defaults.toml ]; then
     vyos-build/data/defaults.toml
   echo "### defaults.toml console_type after sed:"
   grep -E '^\s*console_(type|num|speed)\s*=' vyos-build/data/defaults.toml || true
+
+  ### mksquashfs compression: zstd-22 instead of upstream xz/x86-BCJ.
+  #
+  # Upstream defaults.toml ships:
+  #   squashfs_compression_type = "xz -Xbcj x86 -b 256k -always-use-fragments -no-recovery"
+  # which (a) uses xz — single-threaded compress phase that dominates the
+  # `mksquashfs` step on Cobalt 100 — and (b) passes `-Xbcj x86`, which is
+  # actively wrong on ARM64 (BCJ filter for x86 instruction encoding does
+  # nothing useful on aarch64 binaries).
+  #
+  # Switch to zstd at level 22 with `-b 1M -Xcompression-level 22`. zstd
+  # mksquashfs is parallel-by-default and runs ~3-4x faster on the 4-core
+  # Cobalt 100 than xz; level 22 keeps compressed size within ~5-8% of xz.
+  # Final ISO grows from ~340 MB → ~360 MB squashfs, well under GitHub's
+  # 2 GB Release asset cap. The string is passed verbatim into
+  # `lb config --chroot-squashfs-compression-type "$VAL"` by
+  # vyos-build/scripts/image-build/build-vyos-image (Jinja2 template).
+  #
+  # If you ever need the old xz behaviour for size-critical experiments,
+  # comment out the sed below and the upstream value will pass through.
+  if grep -q '^squashfs_compression_type' vyos-build/data/defaults.toml; then
+    sed -i -E 's|^(\s*squashfs_compression_type\s*=\s*).*$|\1"zstd -b 1M -Xcompression-level 22"|' \
+      vyos-build/data/defaults.toml
+    echo "### defaults.toml squashfs_compression_type after sed:"
+    grep -E '^\s*squashfs_compression_type\s*=' vyos-build/data/defaults.toml || true
+  fi
 fi
 
 ### Pin kernel_version to the ASK kernel.
@@ -321,11 +347,10 @@ cp data/scripts/fan-check "$CHROOT/usr/local/bin/fan-check"
 chmod +x "$CHROOT/usr/local/bin/fan-check"
 
 
-### Boot-complete fan notification: whistle fans to alert admin
-cp data/scripts/boot-complete-notify.sh "$CHROOT/usr/local/bin/boot-complete-notify.sh"
-chmod +x "$CHROOT/usr/local/bin/boot-complete-notify.sh"
-cp data/systemd/boot-complete-notify.service "$CHROOT/etc/systemd/system/boot-complete-notify.service"
-cp data/systemd/boot-complete-notify.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/boot-complete-notify.conf"
+### Boot-complete fan whistle is now produced by fan-pid itself
+### (play_startup_whistle()).  The standalone boot-complete-notify
+### service was deleted to eliminate the systemd-ordering race over
+### /sys/.../pwm1 between fan-pid and the notify chirp.
 
 ### FQ qdisc for BBR pacing on 10G SFP+ interfaces
 cp data/scripts/fman-fq-qdisc "$CHROOT/usr/local/bin/fman-fq-qdisc"

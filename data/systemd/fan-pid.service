@@ -1,13 +1,18 @@
 [Unit]
 Description=PID-based EMC2305 fan controller for LS1046A Mono Gateway DK
 Documentation=file:///usr/local/bin/fan-pid
-DefaultDependencies=no
-# Run after sysfs/hwmon devices exist but before normal multi-user services.
+# Run after sysfs/hwmon devices exist; we keep DefaultDependencies=yes so
+# multi-user.target's WantedBy= symlink actually pulls us in at boot.
+# (DefaultDependencies=no detached the unit from the target graph and the
+#  .wants/ symlink alone was not enough — observed 2026-05-11.)
 After=sysinit.target systemd-modules-load.service
-Before=multi-user.target shutdown.target
-Conflicts=shutdown.target fancontrol.service
+Conflicts=fancontrol.service
 # Board gate: only Mono Gateway DK has the EMC2305 + LS1046A thermal zones.
+# Match the LS1046A SoC string (devicetree compatible is a NUL-separated list,
+# ConditionPathExistsGlob can't peek inside; the path-exists check is gated by
+# /proc/device-tree being a real DT node, which only LS1046A-class boards expose).
 ConditionPathExists=/proc/device-tree/compatible
+ConditionPathExistsGlob=/sys/bus/i2c/drivers/emc2305/*-002e
 
 [Service]
 Type=simple
