@@ -303,14 +303,14 @@ fi
 
 rm -f /tmp/ask-post-defconfig.sh
 
-### 5. SDK DTS — verify tracked data/dtb/mono-gateway-dk-sdk.dts is present.
-# The live SDK DTS at data/dtb/mono-gateway-dk-sdk.dts is the source of truth.
+### 5. SDK DTS — verify tracked board/dtb/mono-gateway-dk-sdk.dts is present.
+# The live SDK DTS at board/dtb/mono-gateway-dk-sdk.dts is the source of truth.
 # Do NOT overwrite it here — bin/ci-compile-mono-dtb.sh consumes it directly.
-if [ ! -f data/dtb/mono-gateway-dk-sdk.dts ]; then
-  echo "ERROR: data/dtb/mono-gateway-dk-sdk.dts missing — repo checkout incomplete?"
+if [ ! -f board/dtb/mono-gateway-dk-sdk.dts ]; then
+  echo "ERROR: board/dtb/mono-gateway-dk-sdk.dts missing — repo checkout incomplete?"
   exit 1
 fi
-echo "### SDK DTS present at data/dtb/mono-gateway-dk-sdk.dts ($(wc -c < data/dtb/mono-gateway-dk-sdk.dts) bytes)"
+echo "### SDK DTS present at board/dtb/mono-gateway-dk-sdk.dts ($(wc -c < board/dtb/mono-gateway-dk-sdk.dts) bytes)"
 
 echo ""
 echo "### ASK kernel setup complete"

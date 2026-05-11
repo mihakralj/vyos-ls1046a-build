@@ -1,12 +1,12 @@
 #!/bin/bash
-# ci-compile-mono-dtb.sh — Compile data/dtb/mono-gateway-dk.dts → data/dtb/mono-gw.dtb
+# ci-compile-mono-dtb.sh — Compile board/dtb/mono-gateway-dk.dts → board/dtb/mono-gw.dtb
 #
 # Called by: .github/workflows/auto-build.yml "Compile Mono DTB" step
 # Runs AFTER: ci-consume-ask-kernel.sh (so we know which kernel version to match)
-# Runs BEFORE: ci-setup-vyos-build.sh (which copies data/dtb/mono-gw.dtb into the ISO)
+# Runs BEFORE: ci-setup-vyos-build.sh (which copies board/dtb/mono-gw.dtb into the ISO)
 #
 # Why this exists:
-#   data/dtb/mono-gw.dtb is a binary artefact. When only data/dtb/mono-gateway-dk.dts
+#   board/dtb/mono-gw.dtb is a binary artefact. When only board/dtb/mono-gateway-dk.dts
 #   changes on main, the committed DTB can drift — and bin/ci-setup-vyos-build.sh
 #   copies the committed binary verbatim into the ISO, so DTS fixes never reach
 #   the device. This script closes that drift window by always recompiling the
@@ -15,9 +15,9 @@
 # Strategy:
 #   - Sparse-clone linux-stable at the tag matching the consumed ASK kernel
 #     (only arch/arm64/boot/dts/freescale + include/dt-bindings + scripts/dtc).
-#   - Drop data/dtb/mono-gateway-dk.dts into arch/arm64/boot/dts/freescale/.
+#   - Drop board/dtb/mono-gateway-dk.dts into arch/arm64/boot/dts/freescale/.
 #   - Preprocess with aarch64-linux-gnu-cpp, compile with dtc.
-#   - Overwrite data/dtb/mono-gw.dtb with the fresh binary.
+#   - Overwrite board/dtb/mono-gw.dtb with the fresh binary.
 #
 # Expects: GITHUB_WORKSPACE (optional), curl, git, dtc, aarch64-linux-gnu-cpp.
 # Installs dtc + gcc-aarch64-linux-gnu if missing (Debian/Ubuntu runners).
@@ -34,9 +34,9 @@ cd "${GITHUB_WORKSPACE:-.}"
 # and a bpool with fsl,bpool-ethernet-cfg that the SDK dpaa_eth driver needs.
 # See boot log on ask10: probe of soc:fsl,dpaa:ethernet@{8,9} failed with -22
 # because the DPDK bpool had no fsl,bpool-ethernet-cfg property.
-DTS_SRC="data/dtb/mono-gateway-dk-sdk.dts"
-DTS_BASE="data/dtb/mono-gateway-dk.dts"
-DTB_OUT="data/dtb/mono-gw.dtb"
+DTS_SRC="board/dtb/mono-gateway-dk-sdk.dts"
+DTS_BASE="board/dtb/mono-gateway-dk.dts"
+DTB_OUT="board/dtb/mono-gw.dtb"
 WORK="work/dtb-build"
 LINUX_SRC="$WORK/linux-src"
 
@@ -105,17 +105,17 @@ echo "### Base DTSIs OK"
 # qoriq-qman-portals-sdk.dtsi (supplying cell-index + allocator-range nodes
 # the ASK staging driver requires). Mainline kernel doesn't ship those
 # DTSIs — NXP's lf-*.y trees do. We carry bit-exact copies under
-# data/dtb/sdk-dtsi/ and drop them next to the board DTS so `dtc` resolves
+# board/dtb/sdk-dtsi/ and drop them next to the board DTS so `dtc` resolves
 # the includes via the same `-I $DTS_DIR` search path as the base DTSIs.
 DTS_DIR="$LINUX_SRC/arch/arm64/boot/dts/freescale"
 # ask11: the SDK DTS #includes all four of these — copy them all, not just the
 # two portal dtsi files the DPDK DTS needed.
-echo "### Staging SDK DTSIs from data/dtb/sdk-dtsi/ into $DTS_DIR"
-ls -l data/dtb/sdk-dtsi/ || { echo "ERROR: data/dtb/sdk-dtsi/ missing"; exit 1; }
+echo "### Staging SDK DTSIs from board/dtb/sdk-dtsi/ into $DTS_DIR"
+ls -l board/dtb/sdk-dtsi/ || { echo "ERROR: board/dtb/sdk-dtsi/ missing"; exit 1; }
 shopt -s nullglob
-dtsi_list=( data/dtb/sdk-dtsi/*.dtsi )
+dtsi_list=( board/dtb/sdk-dtsi/*.dtsi )
 shopt -u nullglob
-[ "${#dtsi_list[@]}" -gt 0 ] || { echo "ERROR: no *.dtsi under data/dtb/sdk-dtsi/"; exit 1; }
+[ "${#dtsi_list[@]}" -gt 0 ] || { echo "ERROR: no *.dtsi under board/dtb/sdk-dtsi/"; exit 1; }
 for dtsi in "${dtsi_list[@]}"; do
     echo "###   cp $dtsi -> $DTS_DIR/"
     cp "$dtsi" "$DTS_DIR/"
@@ -183,7 +183,7 @@ echo "### counters: fsl,bpool-ethernet-cfg=$BPOOL_CFG fsl,dpa-ethernet=$DPA_ETH"
 [ "$DPA_ETH"   -lt 5 ] && { echo "ERROR: fsl,dpa-ethernet count $DPA_ETH < 5 (need 3 SGMII + 2 10G)"; FAIL=1; }
 if [ "$FAIL" -ne 0 ]; then
     echo "ERROR: compiled DTB is missing expected NXP SDK portal DTSI payload"
-    echo "       (did bin/ci-compile-mono-dtb.sh copy data/dtb/sdk-dtsi/*.dtsi to $DTS_DIR?"
+    echo "       (did bin/ci-compile-mono-dtb.sh copy board/dtb/sdk-dtsi/*.dtsi to $DTS_DIR?"
     echo "        did mono-gateway-dk.dts #include qoriq-{bman,qman}-portals-sdk.dtsi?)"
     echo ""
     echo "=== DIAGNOSTIC: #include line-markers in preprocessed DTS ==="

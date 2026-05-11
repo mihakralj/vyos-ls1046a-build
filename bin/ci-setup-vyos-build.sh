@@ -33,14 +33,14 @@ HOOKS=vyos-build/data/live-build-config/hooks/live
 #     config.boot.default = lean reference (eth0 DHCP + SSH + console)
 #     config.boot.full    = rich reference (routing/firewall/NAT/DNS/API)
 case "$FLAVOR" in
-  vpp) ACTIVE_DEFAULT=data/config.boot.vpp ;;
-  *)   ACTIVE_DEFAULT=data/config.boot.dhcp ;;
+  vpp) ACTIVE_DEFAULT=board/vyos-config/config.boot.vpp ;;
+  *)   ACTIVE_DEFAULT=board/vyos-config/config.boot.dhcp ;;
 esac
 cp "$ACTIVE_DEFAULT"       "$CHROOT/opt/vyatta/etc/config.boot.default"
-cp data/config.boot.default "$CHROOT/opt/vyatta/etc/config.boot.minimal"
-cp data/config.boot.dhcp    "$CHROOT/opt/vyatta/etc/config.boot.dhcp"
-cp data/config.boot.full    "$CHROOT/opt/vyatta/etc/config.boot.full"
-cp data/config.boot.vpp     "$CHROOT/opt/vyatta/etc/config.boot.vpp"
+cp board/vyos-config/config.boot.default "$CHROOT/opt/vyatta/etc/config.boot.minimal"
+cp board/vyos-config/config.boot.dhcp    "$CHROOT/opt/vyatta/etc/config.boot.dhcp"
+cp board/vyos-config/config.boot.full    "$CHROOT/opt/vyatta/etc/config.boot.full"
+cp board/vyos-config/config.boot.vpp     "$CHROOT/opt/vyatta/etc/config.boot.vpp"
 
 # Per-flavor update-check feed: rewrite the hard-coded `version-default.json`
 # URL in every staged config.boot.* to `version-${FLAVOR}.json`. Without this
@@ -210,9 +210,9 @@ sed -i 's/ttyAMA0/ttyS0/g' \
   vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/grub/default-union-grub-entry
 
 ### MOK certificate for kernel module signing
-if [ -f data/mok/MOK.key ]; then
-  cp data/mok/MOK.key vyos-build/data/certificates/vyos-dev-2025-linux.key
-  cp data/mok/MOK.pem vyos-build/data/certificates/vyos-dev-2025-linux.pem
+if [ -f board/mok/MOK.key ]; then
+  cp board/mok/MOK.key vyos-build/data/certificates/vyos-dev-2025-linux.key
+  cp board/mok/MOK.pem vyos-build/data/certificates/vyos-dev-2025-linux.pem
 fi
 
 ### Apt preferences pin: block upstream linux-image-*-vyos.
@@ -248,40 +248,40 @@ cat vyos-build/data/live-build-config/archives/00-pin-ask-kernel.pref.chroot
 ### Minisign public key + DTB for ISO
 cp data/vyos-ls1046a.minisign.pub vyos-build/data/live-build-config/includes.chroot/usr/share/vyos/keys/
 mkdir -p vyos-build/data/live-build-config/includes.binary
-cp data/dtb/mono-gw.dtb vyos-build/data/live-build-config/includes.binary/mono-gw.dtb
+cp board/dtb/mono-gw.dtb vyos-build/data/live-build-config/includes.binary/mono-gw.dtb
 
 ### DTB inside squashfs: install_image() copies all files from /boot/
 mkdir -p "$CHROOT/boot"
-cp data/dtb/mono-gw.dtb "$CHROOT/boot/mono-gw.dtb"
+cp board/dtb/mono-gw.dtb "$CHROOT/boot/mono-gw.dtb"
 
 ### U-Boot tools: fw_setenv config for updating boot env from Linux
-cp data/scripts/fw_env.config "$CHROOT/etc/fw_env.config"
+cp board/scripts/fw_env.config "$CHROOT/etc/fw_env.config"
 
 ### LS1046A independent serial console (ls1046a-console.service)
 # Bypasses VyOS's system_console.py policy on serial-getty@ttyS0.service so
 # the login prompt on /dev/ttyS0 stays alive even when the seed config has
 # no `system { console { ... } }` stanza (commit 1876cff1). Enabled in
 # 96-enable-services.chroot.
-cp data/systemd/ls1046a-console.service "$CHROOT/etc/systemd/system/ls1046a-console.service"
+cp board/systemd/ls1046a-console.service "$CHROOT/etc/systemd/system/ls1046a-console.service"
 
 ### sysctl drop-in: quiet the kernel console AFTER userspace is up.
 ### Keeps early boot verbose (kernel cmdline has no loglevel=) but silences
 ### the NXP SDK fsl_dpa pr_err spam at T+62-64s that otherwise buries
 ### the login prompt on ttyS0. Applied by systemd-sysctl.service.
 mkdir -p "$CHROOT/etc/sysctl.d"
-cp data/scripts/99-ls1046a-quiet-console.conf "$CHROOT/etc/sysctl.d/99-ls1046a-quiet-console.conf"
+cp board/scripts/99-ls1046a-quiet-console.conf "$CHROOT/etc/sysctl.d/99-ls1046a-quiet-console.conf"
 
 ### Post-install helper: writes /boot/vyos.env + one-time U-Boot env setup
 mkdir -p "$CHROOT/usr/local/bin"
-cp data/scripts/vyos-postinstall "$CHROOT/usr/local/bin/vyos-postinstall"
+cp board/scripts/vyos-postinstall "$CHROOT/usr/local/bin/vyos-postinstall"
 chmod +x "$CHROOT/usr/local/bin/vyos-postinstall"
 
 ### Systemd service for vyos-postinstall (from extracted data file)
-cp data/systemd/vyos-postinstall.service "$CHROOT/etc/systemd/system/vyos-postinstall.service"
+cp board/systemd/vyos-postinstall.service "$CHROOT/etc/systemd/system/vyos-postinstall.service"
 
 ### tmpfiles.d: create .wants symlink at boot (live-build breaks systemctl enable)
 mkdir -p "$CHROOT/usr/lib/tmpfiles.d"
-cp data/systemd/vyos-postinstall.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/vyos-postinstall.conf"
+cp board/systemd/vyos-postinstall.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/vyos-postinstall.conf"
 
 ### Fan control: PID daemon (fan-pid) replaces lm-sensors fancontrol.
 ###
@@ -294,10 +294,10 @@ cp data/systemd/vyos-postinstall.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/vyos-posti
 ### See data/hooks/98-fancontrol.chroot for the rationale on masking
 ### upstream `fancontrol.service` defensively (two PWM controllers must
 ### never run concurrently).
-cp data/scripts/fan-pid "$CHROOT/usr/local/bin/fan-pid"
+cp board/scripts/fan-pid "$CHROOT/usr/local/bin/fan-pid"
 chmod +x "$CHROOT/usr/local/bin/fan-pid"
-cp data/systemd/fan-pid.service "$CHROOT/etc/systemd/system/fan-pid.service"
-cp data/systemd/fan-pid.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fan-pid.conf"
+cp board/systemd/fan-pid.service "$CHROOT/etc/systemd/system/fan-pid.service"
+cp board/systemd/fan-pid.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fan-pid.conf"
 # udev rule: start fan-pid.service at the moment the kernel binds the
 # emc2305 driver to its i2c device. Defends against the multi-user.target
 # vs i2c-bus-probe race that left the service `inactive (dead)` with an
@@ -306,15 +306,15 @@ cp data/systemd/fan-pid.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fan-pid.conf"
 # re-evaluated). With this rule + the DT-only board gate in the unit, the
 # daemon starts whichever way wins the race.
 mkdir -p "$CHROOT/etc/udev/rules.d"
-cp data/scripts/10-emc2305-fan-pid.rules "$CHROOT/etc/udev/rules.d/10-emc2305-fan-pid.rules"
+cp board/scripts/10-emc2305-fan-pid.rules "$CHROOT/etc/udev/rules.d/10-emc2305-fan-pid.rules"
 
 ### VPP/DPAA1 post-start: fix defunct interface MTU for AF_XDP TX
 mkdir -p "$CHROOT/etc/systemd/system/vpp.service.d"
 rm -f "$CHROOT/usr/local/bin/vpp-dpaa-rebind" \
   "$CHROOT/etc/systemd/system/vpp.service.d/dpaa-rebind.conf"
-cp data/scripts/vpp-post-start.sh "$CHROOT/usr/local/bin/vpp-post-start.sh"
+cp board/scripts/vpp-post-start.sh "$CHROOT/usr/local/bin/vpp-post-start.sh"
 chmod +x "$CHROOT/usr/local/bin/vpp-post-start.sh"
-cp data/systemd/vpp-post-start.conf "$CHROOT/etc/systemd/system/vpp.service.d/post-start.conf"
+cp board/systemd/vpp-post-start.conf "$CHROOT/etc/systemd/system/vpp.service.d/post-start.conf"
 
 ### Chroot hooks (from extracted data files)
 # 95: set /etc/hostname=vyos + force vyos user password BEFORE live-config runs
@@ -336,18 +336,18 @@ cp data/hooks/99-mask-services.chroot "$HOOKS/99-mask-services.chroot"
 chmod +x "$HOOKS/99-mask-services.chroot"
 
 ### Ethernet port remapping: FMan MAC → physical port position
-cp data/scripts/fman-port-name "$CHROOT/usr/local/bin/fman-port-name"
+cp board/scripts/fman-port-name "$CHROOT/usr/local/bin/fman-port-name"
 chmod +x "$CHROOT/usr/local/bin/fman-port-name"
 mkdir -p "$CHROOT/etc/udev/rules.d"
-cp data/scripts/10-fman-port-order.rules "$CHROOT/etc/udev/rules.d/10-fman-port-order.rules"
+cp board/scripts/10-fman-port-order.rules "$CHROOT/etc/udev/rules.d/10-fman-port-order.rules"
 mkdir -p "$CHROOT/etc/systemd/network"
-cp data/scripts/00-fman.link "$CHROOT/etc/systemd/network/00-fman.link"
+cp board/scripts/00-fman.link "$CHROOT/etc/systemd/network/00-fman.link"
 
 ### SFP+ inventory helper: `sfp-check` reports vendor/PN of every inserted
 ### module and emits a paste-ready SFP_QUIRK_F() line when a module looks
 ### like a 10GBASE-T rollball masquerading as SR fiber. Flavor-agnostic —
 ### only requires ethtool -m support, which is universal.
-cp data/scripts/sfp-check "$CHROOT/usr/local/bin/sfp-check"
+cp board/scripts/sfp-check "$CHROOT/usr/local/bin/sfp-check"
 chmod +x "$CHROOT/usr/local/bin/sfp-check"
 
 ### Thermal/fan status helper: `fan-check` reports all 5 LS1046A thermal
@@ -357,7 +357,7 @@ chmod +x "$CHROOT/usr/local/bin/sfp-check"
 ### fault — usable as a Nagios/monit probe. Mirrors sfp-check / ask-check
 ### style. Flavor-agnostic (every LS1046A board has the same EMC2305 +
 ### thermal-zone topology).
-cp data/scripts/fan-check "$CHROOT/usr/local/bin/fan-check"
+cp board/scripts/fan-check "$CHROOT/usr/local/bin/fan-check"
 chmod +x "$CHROOT/usr/local/bin/fan-check"
 
 
@@ -367,10 +367,10 @@ chmod +x "$CHROOT/usr/local/bin/fan-check"
 ### /sys/.../pwm1 between fan-pid and the notify chirp.
 
 ### FQ qdisc for BBR pacing on 10G SFP+ interfaces
-cp data/scripts/fman-fq-qdisc "$CHROOT/usr/local/bin/fman-fq-qdisc"
+cp board/scripts/fman-fq-qdisc "$CHROOT/usr/local/bin/fman-fq-qdisc"
 chmod +x "$CHROOT/usr/local/bin/fman-fq-qdisc"
-cp data/systemd/fman-fq-qdisc.service "$CHROOT/etc/systemd/system/fman-fq-qdisc.service"
-cp data/systemd/fman-fq-qdisc.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fman-fq-qdisc.conf"
+cp board/systemd/fman-fq-qdisc.service "$CHROOT/etc/systemd/system/fman-fq-qdisc.service"
+cp board/systemd/fman-fq-qdisc.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fman-fq-qdisc.conf"
 
 ### SFP TX_DISABLE deassert for SDK kernel (no phylink SFP state machine)
 # ASK-only: required because the NXP SDK MAC driver lacks the phylink SFP
@@ -378,19 +378,19 @@ cp data/systemd/fman-fq-qdisc.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fman-fq-qdisc
 # For FLAVOR=default|vpp the mainline phylink path handles SFP TX enable
 # via standard sfp_state_machine() — no helper service needed.
 if [[ "${FLAVOR:-ask}" == "ask" ]]; then
-    cp data/scripts/sfp-tx-enable-sdk.sh "$CHROOT/usr/local/bin/sfp-tx-enable-sdk.sh"
+    cp board/scripts/sfp-tx-enable-sdk.sh "$CHROOT/usr/local/bin/sfp-tx-enable-sdk.sh"
     chmod +x "$CHROOT/usr/local/bin/sfp-tx-enable-sdk.sh"
-    cp data/systemd/sfp-tx-enable-sdk.service "$CHROOT/etc/systemd/system/sfp-tx-enable-sdk.service"
-    cp data/systemd/sfp-tx-enable-sdk.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/sfp-tx-enable-sdk.conf"
+    cp board/systemd/sfp-tx-enable-sdk.service "$CHROOT/etc/systemd/system/sfp-tx-enable-sdk.service"
+    cp board/systemd/sfp-tx-enable-sdk.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/sfp-tx-enable-sdk.conf"
 fi
 
 ### Bind-mount /usr/lib/live/mount/medium → /usr/lib/live/mount/persistence (rw)
 ### Restores upstream find_persistence() semantics for LS1046A live-boot.
-### See data/systemd/persistence-bindmount.service header comment for the
+### See board/systemd/persistence-bindmount.service header comment for the
 ### full root cause (vyos-grub-update.service FileNotFoundError, broken
 ### `add system image`). Pairs with data/vyos-1x-020-find-persistence-by-label.patch
 ### which fixes the python layer for forward compatibility.
-cp data/systemd/persistence-bindmount.service "$CHROOT/etc/systemd/system/persistence-bindmount.service"
+cp board/systemd/persistence-bindmount.service "$CHROOT/etc/systemd/system/persistence-bindmount.service"
 
 ### ====================================================================
 ### ASK (Application Solutions Kit) fast-path userspace components
@@ -475,10 +475,10 @@ cp data/ask-userspace/fmc/config/netpcd.xsd     "$CHROOT/etc/fmc/config/"
 cp data/ask-userspace/fmc/config/cfgdata.xsd    "$CHROOT/etc/fmc/config/"
 
 ### ASK kernel module loader service (insmod for out-of-tree .ko files)
-cp data/scripts/ask-modules-load.sh "$CHROOT/usr/local/bin/ask-modules-load.sh"
+cp board/scripts/ask-modules-load.sh "$CHROOT/usr/local/bin/ask-modules-load.sh"
 chmod +x "$CHROOT/usr/local/bin/ask-modules-load.sh"
-cp data/systemd/ask-modules-load.service "$CHROOT/etc/systemd/system/ask-modules-load.service"
-cp data/systemd/ask-modules-load.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/ask-modules-load.conf"
+cp board/systemd/ask-modules-load.service "$CHROOT/etc/systemd/system/ask-modules-load.service"
+cp board/systemd/ask-modules-load.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/ask-modules-load.conf"
 
 ### CMM service and config
 cp ASK/config/cmm.service "$CHROOT/etc/systemd/system/cmm.service"
@@ -486,17 +486,17 @@ mkdir -p "$CHROOT/etc/config"
 cp ASK/config/fastforward "$CHROOT/etc/config/fastforward"
 
 ### CMM service enablement via tmpfiles.d
-cp data/systemd/cmm.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/cmm.conf"
+cp board/systemd/cmm.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/cmm.conf"
 
 ### ASK health check script
-cp data/scripts/ask-check.sh "$CHROOT/usr/local/bin/ask-check"
+cp board/scripts/ask-check.sh "$CHROOT/usr/local/bin/ask-check"
 chmod +x "$CHROOT/usr/local/bin/ask-check"
 
 ### ASK conntrack fix: flush VyOS notrack rules for fast-path offload
-cp data/scripts/ask-conntrack-fix.sh "$CHROOT/usr/local/bin/ask-conntrack-fix.sh"
+cp board/scripts/ask-conntrack-fix.sh "$CHROOT/usr/local/bin/ask-conntrack-fix.sh"
 chmod +x "$CHROOT/usr/local/bin/ask-conntrack-fix.sh"
-cp data/systemd/ask-conntrack-fix.service "$CHROOT/etc/systemd/system/ask-conntrack-fix.service"
-cp data/systemd/ask-conntrack-fix.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/ask-conntrack-fix.conf"
+cp board/systemd/ask-conntrack-fix.service "$CHROOT/etc/systemd/system/ask-conntrack-fix.service"
+cp board/systemd/ask-conntrack-fix.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/ask-conntrack-fix.conf"
 
 ### ASK kernel modules — shipped inside the kernel-6.6.137-askN release's
 # ask-modules .deb (consumed via ci-consume-ask-kernel.sh, installed under

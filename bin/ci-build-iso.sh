@@ -54,8 +54,8 @@ fi
 echo "### Pre-flight OK: custom kernel present ($KERNEL_IN_PACKAGES .deb in $SEARCH_DIR)"
 
 ### Copy mainline RDB DTB if built during kernel step
-if [ -f "$GITHUB_WORKSPACE/data/dtb/fsl-ls1046a-rdb.dtb" ]; then
-  cp "$GITHUB_WORKSPACE/data/dtb/fsl-ls1046a-rdb.dtb" \
+if [ -f "$GITHUB_WORKSPACE/board/dtb/fsl-ls1046a-rdb.dtb" ]; then
+  cp "$GITHUB_WORKSPACE/board/dtb/fsl-ls1046a-rdb.dtb" \
     data/live-build-config/includes.binary/fsl-ls1046a-rdb.dtb
   echo "### Mainline RDB DTB included in ISO"
 fi
@@ -177,14 +177,14 @@ done
 
 # Generate U-Boot boot script (boot.scr)
 mkimage -A arm64 -T script -C none -n "VyOS LS1046A USB Boot" \
-  -d "$GITHUB_WORKSPACE/data/scripts/boot.cmd" "$ISO_CONTENT/boot.scr"
+  -d "$GITHUB_WORKSPACE/board/scripts/boot.cmd" "$ISO_CONTENT/boot.scr"
 
 # Collect DTBs (use includes.binary version — may have been updated by ci-build-packages.sh)
 MONO_DTB_SRC="$GITHUB_WORKSPACE/vyos-build/data/live-build-config/includes.binary/mono-gw.dtb"
-[ ! -f "$MONO_DTB_SRC" ] && MONO_DTB_SRC="$GITHUB_WORKSPACE/data/dtb/mono-gw.dtb"
+[ ! -f "$MONO_DTB_SRC" ] && MONO_DTB_SRC="$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb"
 cp "$MONO_DTB_SRC" "$ISO_CONTENT/mono-gw.dtb"
-if [ -f "$GITHUB_WORKSPACE/data/dtb/fsl-ls1046a-rdb.dtb" ]; then
-  cp "$GITHUB_WORKSPACE/data/dtb/fsl-ls1046a-rdb.dtb" "$ISO_CONTENT/fsl-ls1046a-rdb.dtb"
+if [ -f "$GITHUB_WORKSPACE/board/dtb/fsl-ls1046a-rdb.dtb" ]; then
+  cp "$GITHUB_WORKSPACE/board/dtb/fsl-ls1046a-rdb.dtb" "$ISO_CONTENT/fsl-ls1046a-rdb.dtb"
 fi
 
 # Auto-size FAT32 partition: content + 32 MiB headroom, 4 MiB aligned
