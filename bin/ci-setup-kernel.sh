@@ -34,13 +34,22 @@ sed -i '/CONFIG_IO_STRICT_DEVMEM/d'         "$DEFCONFIG"
 sed -i '/CONFIG_CMA/d'                      "$DEFCONFIG"
 sed -i '/CONFIG_DMA_CMA/d'                  "$DEFCONFIG"
 
-# Append all LS1046A kernel config fragments
-# NOTE: DPDK PMD support has been removed (RC#31 — bus-level init kills kernel interfaces)
-# NOTE: ls1046a-sdk.config and ls1046a-ask.config are SDK+ASK only (ci-setup-kernel-sdk.sh)
-for frag in data/kernel-config/ls1046a-*.config; do
-  case "$(basename "$frag")" in
-    ls1046a-sdk.config|ls1046a-ask.config) continue ;;
-  esac
+# Append all flavor-agnostic LS1046A kernel config fragments from the
+# canonical location kernel/common/kernel-config/. Files are numbered
+# (00-board.config .. 08-dpaa1.config) so a plain glob expansion sorts
+# alphabetically into the intended load order. Flavor-specific fragments
+# live under kernel/flavors/<flavor>/kernel-config/ and are NOT picked up
+# here — bin/ci-setup-kernel-ask.sh handles ASK explicitly.
+#
+# History: prior to Phase 1c of the repo-layout refactor (2026-05-11)
+# these fragments were duplicated under data/kernel-config/ls1046a-*.config
+# (long-prefix names, byte-identical to the numbered copies). data/ was
+# the LIVE source then because this loop read from it; kernel/common/
+# was unwired dead code. Phase 1c deleted the data/ duplicates and
+# rewired this loop to the kernel/common/ canonical location, also
+# moving the previously-orphan ls1046a-dpaa1.config in as 08-dpaa1.config.
+# NOTE: DPDK PMD support has been removed (RC#31 — bus-level init kills kernel interfaces).
+for frag in kernel/common/kernel-config/*.config; do
   echo "### Appending kernel config fragment: $(basename "$frag")"
   cat "$frag" >> "$DEFCONFIG"
 done
