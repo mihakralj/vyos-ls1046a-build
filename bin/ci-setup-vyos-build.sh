@@ -209,6 +209,42 @@ sed -i 's/ttyAMA0/ttyS0/g' \
   vyos-build/data/live-build-config/hooks/live/01-live-serial.binary \
   vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/grub/default-union-grub-entry
 
+### Strip vyos-ipt-netflow from arm64.toml.
+#
+# vyos-build/data/architectures/arm64.toml ships a `packages = [...]` array
+# whose entries are unconditionally appended to live-build's
+# config/package-lists/custom.list.chroot. As of 2026-05-11 the upstream
+# vyos.net apt repo no longer publishes `vyos-ipt-netflow*` for arm64
+# (verified by curling
+#   https://packages.vyos.net/repositories/current/dists/current/main/binary-arm64/Packages.gz
+# and grepping — only `pmacct` matches "netflow", no `vyos-ipt-netflow*`
+# package stanza exists). Live-build's `lb chroot_install-packages` then
+# fails with:
+#     E: Unable to locate package vyos-ipt-netflow
+#     E: An unexpected failure occurred, exiting...
+# killing the entire ISO build.
+#
+# Our config.boot.* defaults do NOT use `set system flow-accounting netflow`,
+# so the OOT iptables-NETFLOW kmod + the small VyOS glue package are dead
+# weight on this board. Strip the entry from arm64.toml before
+# build-vyos-image renders custom.list.chroot. The companion sed normalizes
+# the trailing comma on the preceding `"grub-efi-arm64"` entry so the TOML
+# array stays syntactically valid after deletion.
+#
+# If upstream republishes the package later, this sed becomes a no-op
+# (the line will simply not exist to delete and the grub entry will not
+# have the trailing comma to strip), and we can revert this block.
+if [ -f vyos-build/data/architectures/arm64.toml ]; then
+  if grep -q '"vyos-ipt-netflow"' vyos-build/data/architectures/arm64.toml; then
+    sed -i -E \
+      -e '/^[[:space:]]*"vyos-ipt-netflow"[[:space:]]*,?[[:space:]]*$/d' \
+      -e 's/^([[:space:]]*"grub-efi-arm64")[[:space:]]*,[[:space:]]*$/\1/' \
+      vyos-build/data/architectures/arm64.toml
+    echo "### Stripped vyos-ipt-netflow from arm64.toml (upstream apt repo no longer ships it):"
+    cat vyos-build/data/architectures/arm64.toml
+  fi
+fi
+
 ### MOK certificate for kernel module signing
 if [ -f board/mok/MOK.key ]; then
   cp board/mok/MOK.key vyos-build/data/certificates/vyos-dev-2025-linux.key
