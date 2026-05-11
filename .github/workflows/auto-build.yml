@@ -317,18 +317,20 @@ jobs:
         # FLAVOR gate (PR 5): only consume the prebuilt ASK kernel when this
         # is an ASK build. For FLAVOR=default|vpp we build the upstream-tracked
         # kernel from source via ci-setup-kernel.sh + ci-build-packages.sh.
-        # An empty FLAVOR means "use whatever data/flavor.pin / data/ask-kernel.pin
+        # An empty FLAVOR means "use whatever data/flavor.pin / kernel/flavors/ask/kernel.pin
         # say" — preserved for backward compat with existing dispatches.
         if: env.FLAVOR == 'ask' || env.FLAVOR == ''
         env:
-          # Manual override wins; otherwise script reads data/ask-kernel.pin.
+          # Manual override wins; otherwise script reads kernel/flavors/ask/kernel.pin.
           # Setting to empty explicitly disables ASK consume (falls through to local build).
           ASK_KERNEL_TAG: ${{ inputs.ASK_KERNEL_TAG || github.event.inputs.ASK_KERNEL_TAG }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # If scheduled run or input was left blank, use the pin file.
-          if [ -z "${ASK_KERNEL_TAG:-}" ] && [ -f data/ask-kernel.pin ]; then
-              export ASK_KERNEL_TAG="$(tr -d '[:space:]' < data/ask-kernel.pin)"
+          # Pin file relocated from data/ask-kernel.pin in May 2026 (Phase 1d
+          # of the repo-layout refactor).
+          if [ -z "${ASK_KERNEL_TAG:-}" ] && [ -f kernel/flavors/ask/kernel.pin ]; then
+              export ASK_KERNEL_TAG="$(tr -d '[:space:]' < kernel/flavors/ask/kernel.pin)"
           fi
           # Empty literal means "no ASK, build from scratch": skip the consume step.
           if [ -n "${ASK_KERNEL_TAG:-}" ]; then
