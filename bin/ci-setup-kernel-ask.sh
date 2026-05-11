@@ -82,7 +82,12 @@ find "$KERNEL_PATCHES" -maxdepth 1 -type f -name '*.patch' \
 # legacy build path keeps applying the monolithic patch as the source of
 # truth. The new stage-kernel.sh path uses the splits instead and is gated
 # behind FLAVOR=default|vpp until the splits cover the full hook surface.
-cp data/kernel-patches/003-ask-kernel-hooks.patch "$KERNEL_PATCHES/"
+# Source-of-truth: kernel/flavors/ask/patches/ask-monolithic/ — relocated
+# from data/kernel-patches/ in May 2026 (Phase 1d of the repo-layout
+# refactor). The 'ask-monolithic/' bucket is named distinctly from the
+# sibling 'ask/' (split) bucket to make the side-by-side relationship
+# obvious in the directory listing.
+cp kernel/flavors/ask/patches/ask-monolithic/003-ask-kernel-hooks.patch "$KERNEL_PATCHES/"
 
 # ASK-specific kernel patches now live under kernel/flavors/ask/patches/fixes/.
 # Source of truth: kernel/flavors/ask/patches/fixes/{4002,4004,4008}.patch.
@@ -105,7 +110,13 @@ echo "### ASK hooks + swphy + INA234 + sdk-probe-fix patches staged at $KERNEL_P
 # Injection anchor: "PATCH_DIR=" line in build-kernel.sh (line 50).
 # We insert the tarball extraction immediately BEFORE this line.
 
-cp data/kernel-patches/ask-nxp-sdk-sources.tar.gz "$KERNEL_BUILD/"
+# SDK sources tarball relocated from data/kernel-patches/ to
+# kernel/flavors/ask/sdk-sources.tar.gz in May 2026 (Phase 1d). The tarball
+# (322 files, includes ppc64/x86 cruft) is NOT byte-equivalent to the
+# sibling kernel/flavors/ask/sdk-sources/ directory tree (266 files,
+# arm64-only) — the tarball is the build-time injection blob, the tree is
+# the source-of-truth for ASK-edit marker auditing.
+cp kernel/flavors/ask/sdk-sources.tar.gz "$KERNEL_BUILD/ask-nxp-sdk-sources.tar.gz"
 
 cat > /tmp/ask-inject.sh << 'ASK_INJECT_EOF'
 
@@ -324,4 +335,4 @@ echo "###"
 echo "### Out-of-tree ASK modules (cdx, fci, auto_bridge) are built by the"
 echo "### former kernel-ls1046a-build release tarball (now archived) and"
 echo "### shipped in the kernel-<VERSION>-askN release tarball pinned by"
-echo "### data/ask-kernel.pin — no longer built here."
+echo "### kernel/flavors/ask/kernel.pin — no longer built here."
