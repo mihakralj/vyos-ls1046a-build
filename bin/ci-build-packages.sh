@@ -184,11 +184,11 @@ for package in $packages; do
       INCLUDES_CHR="$GITHUB_WORKSPACE/vyos-build/data/live-build-config/includes.chroot"
 
       # Always ensure base DTS is in the kernel tree
-      cp "$GITHUB_WORKSPACE/data/dtb/mono-gateway-dk.dts" "$DTS_DIR/mono-gateway-dk.dts"
+      cp "$GITHUB_WORKSPACE/board/dtb/mono-gateway-dk.dts" "$DTS_DIR/mono-gateway-dk.dts"
 
-      # Copy SDK DTS if present (sourced from data/dtb/mono-gateway-dk-sdk.dts)
-      if [ -f "$GITHUB_WORKSPACE/data/dtb/mono-gateway-dk-sdk.dts" ]; then
-        cp "$GITHUB_WORKSPACE/data/dtb/mono-gateway-dk-sdk.dts" "$DTS_DIR/mono-gateway-dk-sdk.dts"
+      # Copy SDK DTS if present (sourced from board/dtb/mono-gateway-dk-sdk.dts)
+      if [ -f "$GITHUB_WORKSPACE/board/dtb/mono-gateway-dk-sdk.dts" ]; then
+        cp "$GITHUB_WORKSPACE/board/dtb/mono-gateway-dk-sdk.dts" "$DTS_DIR/mono-gateway-dk-sdk.dts"
         # Add to Makefile if not already present
         FMAKEFILE="$DTS_DIR/Makefile"
         if ! grep -q 'mono-gateway-dk-sdk' "$FMAKEFILE" 2>/dev/null; then
@@ -198,7 +198,7 @@ for package in $packages; do
 
       # Copy SDK dtsi files required by mono-gateway-dk-sdk.dts
       # These are NXP SDK-specific includes not present in the mainline kernel tree
-      SDK_DTSI_DIR="$GITHUB_WORKSPACE/data/dtb/sdk-dtsi"
+      SDK_DTSI_DIR="$GITHUB_WORKSPACE/board/dtb/sdk-dtsi"
       if [ -d "$SDK_DTSI_DIR" ]; then
         echo "### Installing SDK dtsi files into kernel DTS directory"
         cp -v "$SDK_DTSI_DIR"/*.dtsi "$DTS_DIR/" 2>/dev/null || true
@@ -235,7 +235,7 @@ for package in $packages; do
 
       # Build mainline DTB. FATAL when neither this nor a usable primary
       # alternative exists, because the historical fallback (shipping the
-      # potentially-stale data/dtb/mono-gw.dtb committed in the repo) is
+      # potentially-stale board/dtb/mono-gw.dtb committed in the repo) is
       # exactly how the missing DWC3 USB stability quirks slipped past CI.
       echo "### Building mainline DTB from kernel source"
       MAKE_RC=0
@@ -263,7 +263,7 @@ for package in $packages; do
             cp "$MONO_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
             echo "WARNING: FLAVOR=ask but SDK DTB unavailable — falling back to mainline DTB as PRIMARY"
           else
-            echo "FATAL: FLAVOR=ask and neither SDK nor mainline DTB built; refusing to ship stale data/dtb/mono-gw.dtb."
+            echo "FATAL: FLAVOR=ask and neither SDK nor mainline DTB built; refusing to ship stale board/dtb/mono-gw.dtb."
             exit 1
           fi
           ;;
@@ -278,7 +278,7 @@ for package in $packages; do
             echo "FATAL: forces mainline phylink into fixed-link fallback and rejects all SFP+ modules."
             exit 1
           else
-            echo "FATAL: FLAVOR=$FLAVOR and no DTB built; refusing to ship stale data/dtb/mono-gw.dtb."
+            echo "FATAL: FLAVOR=$FLAVOR and no DTB built; refusing to ship stale board/dtb/mono-gw.dtb."
             exit 1
           fi
           ;;
