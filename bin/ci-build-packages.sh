@@ -9,6 +9,11 @@
 # would just consume 20+ minutes and replace the ASK kernel with a vanilla
 # one that lacks fast-path hooks.
 set -ex
+
+# Source FLAVOR before changing CWD so common.sh can resolve REPO_ROOT.
+# shellcheck source=common.sh
+. "${GITHUB_WORKSPACE:-.}/bin/common.sh"
+
 cd "${GITHUB_WORKSPACE:-.}/vyos-build/scripts/package-build"
 
 if [ -n "${ASK_KERNEL_TAG:-}" ]; then
@@ -136,7 +141,18 @@ for package in $packages; do
         cp -v "$SDK_DTSI_DIR"/*.dtsi "$DTS_DIR/" 2>/dev/null || true
       fi
 
-      # Check if SDK DTS exists (injected by ci-setup-kernel-ask.sh)
+      # FLAVOR-aware DTB selection:
+      #   FLAVOR=ask           → SDK DTB is PRIMARY (SDK fsl_mac needs fixed-link
+      #                          on 10G MACs; mainline phylink path is bypassed)
+      #   FLAVOR=default|vpp   → MAINLINE DTB is PRIMARY (kernel uses mainline
+      #                          DPAA1 + phylink/SFP state machine; shipping the
+      #                          SDK DTB here forces phylink into fixed/10gbase-r
+      #                          fallback and rejects all SFP+ modules with
+      #                          "unsupported SFP module: no common interface modes")
+      #
+      # Both DTBs are still BUILT (when sources are present) and SHIPPED so
+      # diagnostics can compare. Only the `mono-gw.dtb` filename — what U-Boot
+      # actually loads — switches based on FLAVOR.
       SDK_DTS="$DTS_DIR/mono-gateway-dk-sdk.dts"
       SDK_DTB_OK=false
       if [ -f "$SDK_DTS" ]; then
@@ -144,52 +160,70 @@ for package in $packages; do
         make -C "$KSRC" freescale/mono-gateway-dk-sdk.dtb 2>&1 | tail -10 || true
         SDK_DTB="$DTS_DIR/mono-gateway-dk-sdk.dtb"
         if [ -f "$SDK_DTB" ]; then
-          # SDK DTB is PRIMARY — SDK fsl_mac driver needs fixed-link properties
-          # (not mainline phylink/SFP which causes "phy device not initialized").
-          # Previous working build used 35KB SDK DTB; OpenWrt 92KB DTB breaks SDK kernel.
-          cp "$SDK_DTB" "$INCLUDES_BIN/mono-gw.dtb"
-          cp "$SDK_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
-          # Also keep a named copy for reference
+          SDK_DTB_OK=true
+          # Always ship SDK DTB under its named alias for diagnostics.
           cp "$SDK_DTB" "$INCLUDES_BIN/mono-gw-sdk.dtb"
           cp "$SDK_DTB" "$INCLUDES_CHR/boot/mono-gw-sdk.dtb"
-          SDK_DTB_OK=true
-          echo "### SDK DTB compiled as PRIMARY mono-gw.dtb: $(stat -c '%s bytes' "$SDK_DTB")"
+          echo "### SDK DTB built: $(stat -c '%s bytes' "$SDK_DTB") → mono-gw-sdk.dtb"
         else
-          echo "WARNING: mono-gateway-dk-sdk.dtb build failed — falling back to mainline DTB"
+          echo "WARNING: mono-gateway-dk-sdk.dtb build failed"
         fi
       fi
 
-      # Build mainline DTB (primary only if SDK DTB not available).
-      # Failure here is FATAL when SDK DTB is also unavailable, because
-      # the fallback path silently ships the (potentially stale) DTB
-      # committed under data/dtb/.  That is exactly how the missing
-      # DWC3 USB stability quirks slipped past CI: dts gained the
-      # quirks, dtb was never recompiled, and live-boot from USB stick
-      # panicked with "Attempted to kill init!" on the Mono device.
+      # Build mainline DTB. FATAL when neither this nor a usable primary
+      # alternative exists, because the historical fallback (shipping the
+      # potentially-stale data/dtb/mono-gw.dtb committed in the repo) is
+      # exactly how the missing DWC3 USB stability quirks slipped past CI.
       echo "### Building mainline DTB from kernel source"
       MAKE_RC=0
       make -C "$KSRC" freescale/mono-gateway-dk.dtb 2>&1 | tail -10 || MAKE_RC=$?
       MONO_DTB="$DTS_DIR/mono-gateway-dk.dtb"
+      MAINLINE_DTB_OK=false
       if [ -f "$MONO_DTB" ]; then
-        if [ "$SDK_DTB_OK" = true ]; then
-          # SDK mode: mainline DTB is secondary (for reference/fallback only)
-          cp "$MONO_DTB" "$INCLUDES_BIN/mono-gw-mainline.dtb"
-          echo "### Mainline DTB saved as mono-gw-mainline.dtb (SDK DTB is primary)"
-        else
-          # Mainline mode (or SDK build failed): use mainline DTB as primary
-          cp "$MONO_DTB" "$INCLUDES_BIN/mono-gw.dtb"
-          cp "$MONO_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
-          echo "### Mainline DTB compiled as primary: $(stat -c '%s bytes' "$MONO_DTB")"
-        fi
+        MAINLINE_DTB_OK=true
+        # Always ship mainline DTB under its named alias for diagnostics.
+        cp "$MONO_DTB" "$INCLUDES_BIN/mono-gw-mainline.dtb"
+        echo "### Mainline DTB built: $(stat -c '%s bytes' "$MONO_DTB") → mono-gw-mainline.dtb"
       else
-        if [ "$SDK_DTB_OK" = true ]; then
-          echo "WARNING: mainline DTB build failed (rc=$MAKE_RC) — SDK DTB will be used as primary"
-        else
-          echo "FATAL: mono-gateway-dk.dtb build failed (rc=$MAKE_RC) and no SDK DTB available."
-          echo "FATAL: refusing to fall back to potentially stale data/dtb/mono-gw.dtb."
-          exit 1
-        fi
+        echo "WARNING: mainline DTB build failed (rc=$MAKE_RC)"
       fi
+
+      # Select PRIMARY mono-gw.dtb based on FLAVOR.
+      case "$FLAVOR" in
+        ask)
+          if [ "$SDK_DTB_OK" = true ]; then
+            cp "$SDK_DTB" "$INCLUDES_BIN/mono-gw.dtb"
+            cp "$SDK_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
+            echo "### FLAVOR=ask → SDK DTB selected as PRIMARY mono-gw.dtb"
+          elif [ "$MAINLINE_DTB_OK" = true ]; then
+            cp "$MONO_DTB" "$INCLUDES_BIN/mono-gw.dtb"
+            cp "$MONO_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
+            echo "WARNING: FLAVOR=ask but SDK DTB unavailable — falling back to mainline DTB as PRIMARY"
+          else
+            echo "FATAL: FLAVOR=ask and neither SDK nor mainline DTB built; refusing to ship stale data/dtb/mono-gw.dtb."
+            exit 1
+          fi
+          ;;
+        default|vpp)
+          if [ "$MAINLINE_DTB_OK" = true ]; then
+            cp "$MONO_DTB" "$INCLUDES_BIN/mono-gw.dtb"
+            cp "$MONO_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
+            echo "### FLAVOR=$FLAVOR → mainline DTB selected as PRIMARY mono-gw.dtb"
+          elif [ "$SDK_DTB_OK" = true ]; then
+            echo "FATAL: FLAVOR=$FLAVOR and mainline DTB build failed (rc=$MAKE_RC)."
+            echo "FATAL: refusing to ship SDK DTB as primary on a non-ASK flavor — that"
+            echo "FATAL: forces mainline phylink into fixed-link fallback and rejects all SFP+ modules."
+            exit 1
+          else
+            echo "FATAL: FLAVOR=$FLAVOR and no DTB built; refusing to ship stale data/dtb/mono-gw.dtb."
+            exit 1
+          fi
+          ;;
+        *)
+          echo "FATAL: unknown FLAVOR='$FLAVOR' in DTB selection"
+          exit 1
+          ;;
+      esac
     fi
 
     ### ASK out-of-tree kernel modules (cdx, fci, auto_bridge, iptables-extensions)
