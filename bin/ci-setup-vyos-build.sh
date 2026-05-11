@@ -296,6 +296,13 @@ cp data/scripts/10-fman-port-order.rules "$CHROOT/etc/udev/rules.d/10-fman-port-
 mkdir -p "$CHROOT/etc/systemd/network"
 cp data/scripts/00-fman.link "$CHROOT/etc/systemd/network/00-fman.link"
 
+### SFP+ inventory helper: `sfp-check` reports vendor/PN of every inserted
+### module and emits a paste-ready SFP_QUIRK_F() line when a module looks
+### like a 10GBASE-T rollball masquerading as SR fiber. Flavor-agnostic —
+### only requires ethtool -m support, which is universal.
+cp data/scripts/sfp-check "$CHROOT/usr/local/bin/sfp-check"
+chmod +x "$CHROOT/usr/local/bin/sfp-check"
+
 
 ### Boot-complete fan notification: whistle fans to alert admin
 cp data/scripts/boot-complete-notify.sh "$CHROOT/usr/local/bin/boot-complete-notify.sh"
