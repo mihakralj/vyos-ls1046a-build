@@ -102,6 +102,25 @@ fi
 # data/kernel-patches/ which were removed in the legacy-path tidy.
 BOARD_PATCH_DIR=kernel/common/patches/board
 [ -d "$BOARD_PATCH_DIR" ] || { echo "ERROR: $BOARD_PATCH_DIR missing"; exit 1; }
+
+# Clean stale patches left by prior CI runs on the same self-hosted runner.
+# Failure mode (observed 2026-05-11): a prior FLAVOR=ask build on the same
+# runner workspace left 003-ask-kernel-hooks, 4002-hwmon-ina2xx,
+# 4003-sfp-rollball-phylink-einval-fallback (legacy name of current 101) and
+# 4004-swphy-support-10g-fixed-link-speed in $KERNEL_PATCHES. They were then
+# applied alphabetically alongside the current default-flavor patches by
+# build-kernel.sh's `for patch in ...; patch -p1` loop, which does NOT check
+# exit codes. Legacy 4003 and current 101 both touch sfp.c near line 2667;
+# the second-applied silently fails, corrupts subsequent line anchors, and
+# 4009-sfp-oem-rollball-quirk's @@ -579 hunk silently misses its target.
+# Net result: vmlinuz shipped without the OEM/SFP-10G-T quirk entry → SFP-10G-T
+# copper modules fail with "no common interface modes" on FMan memac.
+# Fix: nuke everything except vyos-build's own upstream 0001-/0003- patches
+# before copying ours in.
+echo "### Cleaning stale patches in $KERNEL_PATCHES (preserving 0001-*, 0003-*)"
+find "$KERNEL_PATCHES" -maxdepth 1 -type f -name '*.patch' \
+  ! -name '0001-*' ! -name '0003-*' -print -delete
+
 echo "### Staging LS1046A board patches from $BOARD_PATCH_DIR"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
