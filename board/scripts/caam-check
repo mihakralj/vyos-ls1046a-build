@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+# caam-check — print full CAAM (Cryptographic Acceleration and Assurance
+# Module) status for the LS1046A Mono Gateway DK.
+#
+# Usage:   caam-check
+#
+# CAAM is the NXP SEC 5.4 hardware crypto engine on every Layerscape
+# LS1046A SoC. It accelerates AES/SHA/3DES/HMAC/RSA/RNG via Job Ring (JR)
+# descriptors submitted from the kernel crypto API, and on FLAVOR=ask it
+# additionally services IPsec ESP packets via the SDK fast-path SEC FQ
+# (`dpaa_submit_inb_pkt_to_SEC` in sdk_dpaa).
+#
+# Reports:
+#   - SoC presence (DT compatible, CAAM controller MMIO node)
+#   - kernel module / built-in posture per CAAM driver (caam, caam_jr,
+#     caamalg, caamhash, caamrng, caamprng, caampkc) and the count of
+#     active Job Rings (caam_jr0..N)
+#   - JR sysfs presence (/sys/bus/platform/drivers/caam_jr/* device links)
+#   - dmesg banner lines ("caam %s: device ID = ...", "caam_jr %s: Instantiated RNG4 SH...")
+#   - kernel crypto API registrations sourced from CAAM (looks for "caam"
+#     in /proc/crypto driver fields)
+#   - Hardware RNG: presence of /dev/hwrng, current_source (should be
+#     "caam-rng" once caamrng has loaded), and a 16-byte sample read
+#   - FLAVOR=ask only: dpa_ipsec sysfs / dmesg signs of CDX successfully
+#     locating the SEC FQ
+#
+# Designed to mirror the style of `sfp-check`, `fan-check`, and
+# `ask-check.sh`: human-readable table with [OK]/[WARN]/[FAIL]/[SKIP]
+# tags, colour where the tty supports it.
+#
+# Exit codes:
+#   0 — CAAM controller present, at least 1 Job Ring active, RNG sourced
+#       from caam-rng (or no /dev/hwrng but JR active is acceptable)
+#   1 — CAAM hardware not detected, no Job Rings up, or kernel crypto
+#       API has no CAAM-backed algorithms
+#   2 — board is not LS1046A (sysfs paths absent)
+
+set -u
+
+# ---------------------------------------------------------------------------
+# Colour escapes (TTY only). Same convention as fan-check / ask-check.
+# ---------------------------------------------------------------------------
+if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]; then
+    C_RST=$'\033[0m'
+    C_BOLD=$'\033[1m'
+    C_DIM=$'\033[2m'
+    C_GREEN=$'\033[1;32m'
+    C_YELLOW=$'\033[1;33m'
+    C_RED=$'\033[1;31m'
+    C_BLUE=$'\033[1;34m'
+else
+    C_RST='' C_BOLD='' C_DIM='' C_GREEN='' C_YELLOW='' C_RED='' C_BLUE=''
+fi
+
+ok()    { printf "  [%sOK%s]   %s\n"   "$C_GREEN"  "$C_RST" "$*"; }
+warn()  { printf "  [%sWARN%s] %s\n"   "$C_YELLOW" "$C_RST" "$*"; }
+fail()  { printf "  [%sFAIL%s] %s\n"   "$C_RED"    "$C_RST" "$*"; }
+skip()  { printf "  [%sSKIP%s] %s\n"   "$C_BLUE"   "$C_RST" "$*"; }
+note()  { printf "         %s%s%s\n"   "$C_DIM"    "$*"     "$C_RST"; }
+hdr()   { printf "\n%s%s%s\n"          "$C_BOLD"   "$*"     "$C_RST"; }
+
+EXIT=0
+mark_fail() { EXIT=1; }
+
+# ---------------------------------------------------------------------------
+# Board gate. Same idiom as fan-check / vyos-postinstall.
+# ---------------------------------------------------------------------------
+if [ ! -f /proc/device-tree/compatible ] \
+   || ! tr '\0' '\n' < /proc/device-tree/compatible | grep -q 'fsl,ls1046a'; then
+    echo "caam-check: not LS1046A — nothing to report" >&2
+    exit 2
+fi
+
+printf "%scaam-check%s — LS1046A SEC 5.4 status\n" "$C_BOLD" "$C_RST"
+
+# ---------------------------------------------------------------------------
+# 1. SoC controller presence (devicetree)
+# ---------------------------------------------------------------------------
+hdr "1) CAAM controller (devicetree)"
+
+# CAAM controller node lives at /soc/crypto@1700000 on LS1046A.
+# Compatible: "fsl,sec-v5.4" + "fsl,sec-v5.0" + "fsl,sec-v4.0" fallback.
+DT_CAAM=""
+for cand in /proc/device-tree/soc/crypto@* /proc/device-tree/crypto@*; do
+    [ -d "$cand" ] && DT_CAAM="$cand" && break
+done
+if [ -n "$DT_CAAM" ]; then
+    compat=$(tr '\0' ' ' < "$DT_CAAM/compatible" 2>/dev/null | sed 's/ *$//')
+    ok "DT node $(basename "$DT_CAAM") present"
+    note "compatible = \"$compat\""
+    if [ -f "$DT_CAAM/reg" ]; then
+        # First 8 bytes of reg = base address (big-endian).
+        baseaddr=$(od -An -tx1 -N8 "$DT_CAAM/reg" 2>/dev/null | tr -d ' \n')
+        note "MMIO reg base bytes = 0x$baseaddr"
+    fi
+else
+    fail "no /proc/device-tree/soc/crypto@* node — CAAM not in DT"
+    mark_fail
+fi
+
+# ---------------------------------------------------------------------------
+# 2. Driver / module posture
+# ---------------------------------------------------------------------------
+hdr "2) CAAM kernel drivers"
+
+# Drivers we care about. caam + caam_jr are mandatory; the *alg/hash/rng/pkc
+# layers are loaded on demand by the kernel crypto API.
+CAAM_DRVS=(caam caam_jr caamalg caamalg_qi caamalg_qi2 caamhash caamhash_desc caamrng caampkc rng-core)
+for drv in "${CAAM_DRVS[@]}"; do
+    if [ -d "/sys/module/${drv}" ]; then
+        # Built-in drivers have no refcnt file; modules do.
+        if [ -f "/sys/module/${drv}/refcnt" ]; then
+            refcnt=$(cat "/sys/module/${drv}/refcnt" 2>/dev/null || echo "?")
+            ok "${drv} loaded (refcnt=${refcnt}, module)"
+        else
+            ok "${drv} present (built-in)"
+        fi
+    else
+        # caam_jr is mandatory; caamalg/caamhash/etc are optional (may
+        # autoload only on first use). Only flag caam + caam_jr as fails.
+        case "$drv" in
+            caam|caam_jr)  fail "${drv} NOT present — CAAM unusable"; mark_fail ;;
+            *)             skip "${drv} not (yet) loaded — autoloads on first use" ;;
+        esac
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# 3. Job Ring devices
+# ---------------------------------------------------------------------------
+hdr "3) Job Rings (caam_jr platform devices)"
+
+JR_DRV_DIR=/sys/bus/platform/drivers/caam_jr
+if [ -d "$JR_DRV_DIR" ]; then
+    # Bound device symlinks (each one is a Job Ring).
+    JRS=()
+    for link in "$JR_DRV_DIR"/*; do
+        [ -L "$link" ] || continue
+        case "$(basename "$link")" in
+            bind|unbind|uevent|module) continue ;;
+        esac
+        JRS+=("$(basename "$link")")
+    done
+    if [ "${#JRS[@]}" -gt 0 ]; then
+        ok "${#JRS[@]} Job Ring(s) bound to caam_jr driver"
+        for jr in "${JRS[@]}"; do
+            note "  $jr"
+        done
+    else
+        fail "caam_jr driver present but ZERO Job Rings bound — RNG and crypto API will fail"
+        mark_fail
+    fi
+else
+    fail "no $JR_DRV_DIR — caam_jr driver did not register"
+    mark_fail
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Boot-time CAAM banner from dmesg
+# ---------------------------------------------------------------------------
+hdr "4) dmesg banner"
+
+if command -v dmesg >/dev/null 2>&1; then
+    DMESG_OUT=$(dmesg 2>/dev/null | grep -E 'caam|crypto.*1700000' || true)
+    if [ -n "$DMESG_OUT" ]; then
+        # Trim very long blobs; keep the most informative ~12 lines.
+        echo "$DMESG_OUT" | head -12 | while IFS= read -r line; do
+            note "$line"
+        done
+    else
+        warn "no caam-related dmesg lines (may be aged out of ring buffer)"
+    fi
+else
+    skip "dmesg not available"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. Kernel crypto API: CAAM-backed algorithms
+# ---------------------------------------------------------------------------
+hdr "5) /proc/crypto algorithms backed by CAAM"
+
+if [ -r /proc/crypto ]; then
+    # Block records by blank lines, keep blocks where driver name contains "caam".
+    CAAM_ALGS=$(awk '
+        BEGIN { RS=""; FS="\n" }
+        /driver +: .*caam/ {
+            for (i=1; i<=NF; i++) {
+                if ($i ~ /^name +:/)   sub(/^name +: */, "", $i),  name=$i
+                if ($i ~ /^driver +:/) sub(/^driver +: */, "", $i), drv=$i
+                if ($i ~ /^type +:/)   sub(/^type +: */, "", $i),   typ=$i
+            }
+            printf "%-28s  %-32s  %s\n", name, drv, typ
+        }
+    ' /proc/crypto 2>/dev/null)
+    if [ -n "$CAAM_ALGS" ]; then
+        count=$(printf "%s\n" "$CAAM_ALGS" | wc -l)
+        ok "$count CAAM-backed algorithm(s) registered"
+        printf "%s\n" "$CAAM_ALGS" | while IFS= read -r line; do
+            note "$line"
+        done
+    else
+        warn "/proc/crypto has no CAAM-backed entries (caamalg/caamhash never autoloaded)"
+        note "  (this is normal if no userland has requested an AEAD/AES algorithm yet —"
+        note "   try: openssl speed -evp aes-128-cbc, or wait for strongSwan to start)"
+    fi
+else
+    skip "/proc/crypto not readable"
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Hardware RNG (CAAM RNG4)
+# ---------------------------------------------------------------------------
+hdr "6) Hardware RNG (caamrng / RNG4)"
+
+if [ -e /dev/hwrng ]; then
+    ok "/dev/hwrng present"
+    if [ -r /sys/class/misc/hw_random/rng_current ]; then
+        cur=$(cat /sys/class/misc/hw_random/rng_current 2>/dev/null || echo "?")
+        if [ "$cur" = "caam-rng" ]; then
+            ok "rng_current = caam-rng (HW source active)"
+        else
+            warn "rng_current = $cur (CAAM RNG present but not selected)"
+            if [ -r /sys/class/misc/hw_random/rng_available ]; then
+                avail=$(cat /sys/class/misc/hw_random/rng_available 2>/dev/null)
+                note "rng_available = $avail"
+            fi
+        fi
+    fi
+    # Sample read (non-blocking, 16 bytes) — only as root.
+    if [ "$(id -u)" = "0" ]; then
+        sample=$(dd if=/dev/hwrng of=/dev/stdout bs=16 count=1 2>/dev/null \
+                 | od -An -tx1 -v 2>/dev/null | tr -d ' \n')
+        if [ -n "$sample" ]; then
+            ok "16-byte sample from /dev/hwrng: $sample"
+        else
+            warn "could not read sample from /dev/hwrng"
+        fi
+    else
+        skip "sample read of /dev/hwrng skipped (not root)"
+    fi
+else
+    warn "/dev/hwrng absent — caamrng module did not register hwrng node"
+    note "  (kernel may still satisfy crypto requests via the JR-backed crypto API,"
+    note "   but the hwrng userspace interface is unavailable)"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. FLAVOR=ask: CDX <-> SEC FQ wiring
+# ---------------------------------------------------------------------------
+hdr "7) ASK fast-path IPsec wiring (FLAVOR=ask only)"
+
+# Detect ASK flavor by presence of the CDX module (loaded by ask-modules-load
+# during early boot). On default/vpp this is absent and we just skip.
+if [ -d /sys/module/cdx ] || [ -d /sys/module/dpa_ipsec ]; then
+    if [ -d /sys/module/cdx ];        then ok "cdx module loaded";        else warn "cdx module NOT loaded — ASK IPsec offload disabled"; fi
+    if [ -d /sys/module/dpa_ipsec ];  then ok "dpa_ipsec module loaded";  else warn "dpa_ipsec module NOT loaded"; fi
+    # CDX prints "ipsec_fq_id=NNN" when it successfully locates the SEC FQ.
+    if command -v dmesg >/dev/null 2>&1; then
+        sec_fq=$(dmesg 2>/dev/null | grep -E 'cdx.*ipsec_fq|dpa_ipsec.*sec_fq|cdx.*SEC' | tail -3)
+        if [ -n "$sec_fq" ]; then
+            note "$sec_fq"
+        fi
+        # Failure pattern documented in AGENTS.md "ASK fmlib/fmc static libs"
+        # case: cdx_module_init::start_dpa_app failed rc 11 cascades into
+        # cdx_create_fragment_bufpool::failed to locate eth bman pool.
+        bad=$(dmesg 2>/dev/null | grep -E 'cdx_module_init.*failed|locate eth bman pool|dpa_ipsec start failed' | tail -3)
+        if [ -n "$bad" ]; then
+            fail "ASK CDX init errors detected:"
+            printf "%s\n" "$bad" | while IFS= read -r line; do note "$line"; done
+            mark_fail
+        fi
+    fi
+else
+    skip "FLAVOR != ask (cdx/dpa_ipsec not loaded) — ASK fast-path checks skipped"
+fi
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+hdr "Summary"
+if [ "$EXIT" = "0" ]; then
+    ok "CAAM healthy"
+else
+    fail "CAAM check FAILED — see entries above"
+fi
+
+exit "$EXIT"
