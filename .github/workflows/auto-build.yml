@@ -178,6 +178,45 @@ jobs:
           # libxml2-dev + libtclap-dev: required to build fmc from source
           # (see bin/ci-build-fmc.sh and bin/ci-build-fmlib.sh).
 
+      - name: Install Mergiraf (AST-aware 3-way merge driver)
+        # Wired as the merge driver for *.c *.h *.py *.json *.yml *.yaml
+        # *.toml *.xml via the .gitattributes drops in
+        # bin/ci-setup-vyos1x.sh and bin/ci-setup-vyos-build.sh —
+        # `git apply --3way` invokes it on context drift.
+        #
+        # Without mergiraf, --3way silently falls back to producing
+        # conflict markers in the patched file AND returns exit 0 with
+        # a "with conflicts" warning. That broke the vpp-flavor build
+        # #25703103908 on 2026-05-11 (vyos-1x-013-hide-live-boot-disk
+        # applied "with conflicts" instead of cleanly).
+        #
+        # Mergiraf is not packaged in Debian; install the upstream
+        # Codeberg prebuilt for the runner architecture. Idempotent:
+        # skip if /usr/local/bin/mergiraf is already at the pinned
+        # version. Self-hosted runner caches the binary across builds.
+        run: |
+          set -e
+          MERGIRAF_VERSION="v0.17.0"
+          MERGIRAF_BIN=/usr/local/bin/mergiraf
+          if "$MERGIRAF_BIN" --version 2>/dev/null | grep -q "${MERGIRAF_VERSION#v}"; then
+            echo "mergiraf ${MERGIRAF_VERSION} already installed"
+            exit 0
+          fi
+          arch=$(uname -m)
+          case "$arch" in
+            aarch64) tarball="mergiraf_aarch64-unknown-linux-gnu.tar.gz" ;;
+            x86_64)  tarball="mergiraf_x86_64-unknown-linux-gnu.tar.gz" ;;
+            *) echo "WARN: no mergiraf prebuilt for $arch — git apply --3way will fall back to conflict markers"; exit 0 ;;
+          esac
+          url="https://codeberg.org/mergiraf/mergiraf/releases/download/${MERGIRAF_VERSION}/${tarball}"
+          tmp=$(mktemp -d)
+          curl -fsSL "$url" -o "$tmp/mergiraf.tar.gz"
+          tar -xzf "$tmp/mergiraf.tar.gz" -C "$tmp"
+          install -m 0755 "$tmp"/mergiraf*/mergiraf "$MERGIRAF_BIN" 2>/dev/null \
+            || install -m 0755 "$tmp/mergiraf" "$MERGIRAF_BIN"
+          rm -rf "$tmp"
+          "$MERGIRAF_BIN" --version
+
       - uses: actions/checkout@v6
         with:
           lfs: true
