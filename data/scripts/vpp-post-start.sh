@@ -1,13 +1,13 @@
 #!/bin/bash
 # vpp-post-start.sh — Fix defunct interface MTU + VPP internal MTU after VPP/LCP renames
 #
-# When VPP starts with LCP, it renames hardware netdevs (eth3 → defunct_eth3)
+# When VPP starts with LCP, it renames hardware netdevs (eth1 → defunct_eth1)
 # and creates TAP interfaces with the original names.
 #
 # MTU strategy for DPAA1 AF_XDP:
-#   TAP interfaces (eth3/eth4):      1500 (standard network MTU, set by VyOS config)
-#   Defunct hardware (defunct_eth3):  3290 (DPAA1 AF_XDP maximum - required for XSK)
-#   VPP internal (af_xdp-eth3):      1500 (match network, not hardware limit)
+#   TAP interfaces (eth1-eth4):      1500 (standard network MTU, set by VyOS config)
+#   Defunct hardware (defunct_ethN): 3290 (DPAA1 AF_XDP maximum - required for XSK)
+#   VPP internal (af_xdp-ethN):      1500 (match network, not hardware limit)
 #
 # The defunct hardware interfaces MUST have MTU ≤ 3290 for AF_XDP socket creation.
 # Default 1500 works but 3290 gives AF_XDP maximum headroom.
