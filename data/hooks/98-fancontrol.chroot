@@ -1,12 +1,28 @@
 #!/bin/bash
-# Install fancontrol daemon for EMC2305 PWM fan control
-# Config at /etc/fancontrol maps EMC2305 PWM to core-cluster thermal zone
-# libatomic1: required by DPAA-enabled dpdk_plugin.so (NEEDED: libatomic.so.1)
-#   — upstream vpp-plugin-dpdk does not depend on it, but our custom build
-#   statically links DPDK DPAA PMD which uses __atomic builtins on aarch64
-apt-get update -qq && apt-get install -y --no-install-recommends fancontrol libatomic1
-systemctl enable fancontrol.service
-# vyos-postinstall: enabled via tmpfiles.d (NOT systemctl enable).
-# systemctl enable creates a .wants symlink that live-build's squashfs
-# dereferences into a regular file — systemd ignores non-symlink .wants.
+# 98-fancontrol — runtime deps for the fan-pid PID daemon (fancontrol replacement)
+#
+# fan-pid (data/scripts/fan-pid → /usr/local/bin/fan-pid) is a self-contained
+# Python 3 multi-zone PID controller for the EMC2305 PWM fan on the LS1046A
+# Mono Gateway DK. It replaces lm-sensors `fancontrol` because:
+#   - fancontrol drives a single linear curve from one thermal zone, ignoring
+#     the four other LS1046A thermal zones (ddr, serdes, fman, sec)
+#   - PID + max-policy combine yields lower acoustic noise band crossings
+#     and per-zone setpoints with anti-windup safety
+#
+# This hook therefore:
+#   1. Does NOT install the `fancontrol` package — fan-pid uses Python stdlib only
+#   2. Defensively masks fancontrol.service in case some other path drags the
+#      package in (apt recommends, vendor diff, etc.) — two daemons fighting
+#      over /sys/.../pwm1 produce sub-second oscillations that suffocate the SoC
+#   3. Installs libatomic1 — unrelated to the fan, but required by the DPAA-
+#      enabled dpdk_plugin.so (NEEDED: libatomic.so.1). Upstream vpp-plugin-dpdk
+#      does not depend on it; our custom build statically links DPDK DPAA PMD
+#      which uses __atomic builtins on aarch64. Keeping the install here so the
+#      package shopping list stays in one chroot hook.
+apt-get update -qq
+apt-get install -y --no-install-recommends libatomic1
+# Defensive mask: even if `fancontrol` is never installed, the unit name will
+# resolve to /dev/null and any `systemctl start fancontrol` will fail closed
+# instead of overlaying our PID loop.
+ln -sf /dev/null /etc/systemd/system/fancontrol.service
 apt-get clean
