@@ -266,4 +266,99 @@ LS1046A_POSTDEFCONFIG_EOF
 sed -i '/^make vyos_defconfig$/r /tmp/ls1046a-post-defconfig.sh' "$KERNEL_BUILD/build-kernel.sh"
 rm -f /tmp/ls1046a-post-defconfig.sh
 
+### Replace upstream `patch -p1` loop with `git apply --3way`.
+#
+# Upstream vyos-build build-kernel.sh applies kernel patches with:
+#     for patch in $(ls ${PATCH_DIR}); do
+#         patch -p1 < ${PATCH_DIR}/${patch}
+#     done
+# This loop:
+#   - uses GNU patch (not git apply), so no blob-SHA-anchored 3-way merge,
+#   - does NOT check the exit code, so a failed hunk leaves a .rej file
+#     and the build continues with a partially-patched kernel,
+#   - sorts via `ls` (locale-dependent) instead of `find ... | sort`.
+# This silent-failure mode shipped a kernel without the OEM/SFP-10G-T
+# quirk on ISO 2026.05.10-2322 (see commit c35005e changelog).
+#
+# We rewrite the loop to:
+#   - turn the kernel tree into a throwaway git repo so `git apply --3way`
+#     has blob-of-record as the 3-way merge base,
+#   - iterate patches via `find … | sort` (deterministic),
+#   - apply each with `git apply --3way --whitespace=nowarn`,
+#   - ABORT the build on first failure (no silent .rej drops),
+#   - commit the post-patch tree so any subsequent injection (e.g. the
+#     LP5812 force-config block) sees the patched state.
+#
+# Idempotent via SENTINEL marker — re-running ci-setup-kernel.sh (or
+# ci-setup-kernel-ask.sh layering on top) is a no-op.
+echo "### Rewriting build-kernel.sh patch loop: GNU patch -p1 -> git apply --3way"
+python3 - "$KERNEL_BUILD/build-kernel.sh" <<'PYEOF'
+import sys, re, pathlib
+
+bk = pathlib.Path(sys.argv[1])
+src = bk.read_text()
+SENTINEL = "# === ls1046a-build: git apply --3way kernel patch loop ==="
+
+if SENTINEL in src:
+    print(f"### {bk}: patch loop already replaced — no-op")
+    sys.exit(0)
+
+# Match the upstream loop EXACTLY. Indentation is 4 spaces.
+PATTERN = re.compile(
+    r"for patch in \$\(ls \$\{PATCH_DIR\}\)\n"
+    r"do\n"
+    r'    echo "I: Apply Kernel patch: \$\{PATCH_DIR\}/\$\{patch\}"\n'
+    r"    patch -p1 < \$\{PATCH_DIR\}/\$\{patch\}\n"
+    r"done\n",
+)
+
+REPLACEMENT = SENTINEL + """
+# Initialise the kernel source tree as a throwaway git repo so that
+# `git apply --3way` can fall back to a real 3-way merge using the
+# pre-patch blobs in object storage when context drifts.
+if [ ! -d .git ]; then
+    git -c init.defaultBranch=main init -q
+    git -c user.email=ci@local -c user.name=ci add -A
+    git -c user.email=ci@local -c user.name=ci commit -q -m "kernel pristine (pre-patches)" --allow-empty || true
+fi
+
+PATCH_FAIL=0
+PATCH_FAIL_LIST=""
+for patch in $(find "${PATCH_DIR}" -maxdepth 1 -type f -name '*.patch' | sort); do
+    pname=$(basename "$patch")
+    echo "I: Apply Kernel patch: $patch"
+    if ! git apply --3way --whitespace=nowarn "$patch"; then
+        echo "::error::Kernel patch FAILED to apply (git apply --3way): $pname" >&2
+        PATCH_FAIL=$((PATCH_FAIL + 1))
+        PATCH_FAIL_LIST="$PATCH_FAIL_LIST $pname"
+    fi
+done
+
+if [ "$PATCH_FAIL" -ne 0 ]; then
+    echo "::error::$PATCH_FAIL kernel patch(es) failed to apply:$PATCH_FAIL_LIST" >&2
+    echo "::error::Aborting build. The legacy patch -p1 loop would have continued silently with a partially-patched kernel." >&2
+    exit 1
+fi
+
+# Snapshot the patched tree so subsequent injections (LP5812 olddefconfig,
+# FMD shim, etc.) see the patched state as their merge base.
+git -c user.email=ci@local -c user.name=ci add -A
+git -c user.email=ci@local -c user.name=ci commit -q -m "kernel post-patches" --allow-empty || true
+# === end ls1046a-build patch-loop replacement ===
+"""
+
+new, n = PATTERN.subn(REPLACEMENT, src, count=1)
+if n == 0:
+    print(
+        f"ERROR: upstream `for patch in $(ls ${{PATCH_DIR}})` loop not found in {bk}.\n"
+        "       The upstream vyos-build build-kernel.sh layout has changed —\n"
+        "       update the regex in bin/ci-setup-kernel.sh accordingly.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+bk.write_text(new)
+print(f"### {bk}: patch loop replaced with git apply --3way (1 substitution)")
+PYEOF
+
 echo "### Kernel setup complete"
