@@ -95,7 +95,7 @@ GITATTR
   grep -c 'namespace' data/templates/vpp/startup.conf.j2 || echo "MISSING: namespace in startup.conf.j2"
   grep -c '1 << 28' python/vyos/vpp/config_verify.py || echo "MISSING: 256M in config_verify.py"
   grep -c 'min_cpus.*2' python/vyos/vpp/config_resource_checks/resource_defaults.py || echo "MISSING: min_cpus 2 in resource_defaults.py"
-  if grep -q '_dpaa_unbind_ifaces\|vpp-dpaa-unbound\|DPDK DPAA PMD' src/conf_mode/vpp.py; then
+  if grep -qE '_dpaa_unbind_ifaces|vpp-dpaa-unbound|DPDK DPAA PMD' src/conf_mode/vpp.py; then
     echo "::error::legacy DPAA PMD unbind path is still present in vpp.py" >&2
     patch_fail=1
   fi
