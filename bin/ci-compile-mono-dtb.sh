@@ -44,16 +44,16 @@ LINUX_SRC="$WORK/linux-src"
 [ -f "$DTS_BASE" ] || { echo "ERROR: $DTS_BASE not found"; exit 1; }
 
 ### 1. Determine kernel version tag.
-# Prefer version from ASK consumed manifest, fall back to data/ask-kernel.pin,
+# Prefer version from ASK consumed manifest, fall back to kernel/flavors/ask/kernel.pin,
 # fall back to data/kernel-version (simple "6.6.135" text file), fall back to
 # whatever is hard-coded below.
 KVER=""
 if [ -f work/ask-kernel/manifest.json ]; then
     KVER=$(jq -r '.linux_version // empty' work/ask-kernel/manifest.json 2>/dev/null || true)
 fi
-if [ -z "$KVER" ] && [ -f data/ask-kernel.pin ]; then
+if [ -z "$KVER" ] && [ -f kernel/flavors/ask/kernel.pin ]; then
     # Tag like "kernel-6.6.135-ask8" -> extract "6.6.135"
-    PIN=$(tr -d '[:space:]' < data/ask-kernel.pin)
+    PIN=$(tr -d '[:space:]' < kernel/flavors/ask/kernel.pin)
     KVER=$(echo "$PIN" | sed -n 's/^kernel-\([0-9][0-9.]*\)-ask.*/\1/p')
 fi
 if [ -z "$KVER" ] && [ -f data/kernel-version ]; then
