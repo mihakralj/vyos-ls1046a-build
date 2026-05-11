@@ -119,7 +119,7 @@ if [ -n "${LOCAL_KERNEL_DEB_DIR:-}" ] && [ -d "$LOCAL_KERNEL_DEB_DIR" ]; then
     export LOCAL_KERNEL_DEB_DIR KVER
     step "Stage prebuilt ASK kernel (local)" bash bin/local-stage-ask-kernel.sh
 else
-    ASK_KERNEL_TAG="$(tr -d '[:space:]' < data/ask-kernel.pin)"
+    ASK_KERNEL_TAG="$(tr -d '[:space:]' < kernel/flavors/ask/kernel.pin)"
     export ASK_KERNEL_TAG
     echo "ASK_KERNEL_TAG=$ASK_KERNEL_TAG"
     step "Consume prebuilt ASK kernel" bash bin/ci-consume-ask-kernel.sh

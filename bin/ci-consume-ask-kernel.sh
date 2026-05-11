@@ -4,14 +4,14 @@
 # repo (mihakralj/kernel-ls1046a-build, now frozen and absorbed into this
 # tree), and stage them for live-build.
 #
-# This is the OPTIONAL fast path: when `data/ask-kernel.pin` (or the
-# `ASK_KERNEL_TAG` env / workflow input) names a published tag, the kernel
+# This is the OPTIONAL fast path: when `kernel/flavors/ask/kernel.pin` (or
+# the `ASK_KERNEL_TAG` env / workflow input) names a published tag, the kernel
 # is fetched as a .deb instead of being compiled from source via
 # ci-setup-kernel.sh + ci-setup-kernel-ask.sh + ci-build-packages.sh. The
 # from-scratch path remains the authoritative build; this script merely
 # short-cuts it when a matching release is available.
 #
-# Reads the pinned tag from data/ask-kernel.pin. Override with env
+# Reads the pinned tag from kernel/flavors/ask/kernel.pin. Override with env
 # ASK_KERNEL_TAG or workflow_dispatch input.
 #
 # Called by: .github/workflows/auto-build.yml "Consume prebuilt ASK kernel" step
@@ -34,7 +34,10 @@ case "${FLAVOR:-ask}" in
         ;;
 esac
 
-PIN_FILE=data/ask-kernel.pin
+# Pin file relocated from data/ask-kernel.pin in May 2026 (Phase 1d of the
+# repo-layout refactor). Co-locates with the rest of the ASK flavor's
+# kernel artifacts under kernel/flavors/ask/.
+PIN_FILE=kernel/flavors/ask/kernel.pin
 TAG="${ASK_KERNEL_TAG:-}"
 if [ -z "$TAG" ] && [ -f "$PIN_FILE" ]; then
     TAG=$(tr -d '[:space:]' < "$PIN_FILE")
