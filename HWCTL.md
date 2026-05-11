@@ -263,7 +263,7 @@ systemctl restart fancontrol
 
 Note that `/etc/fancontrol` is **rewritten on every boot** by
 `fancontrol-setup.sh` from the template in
-[data/scripts/fancontrol.conf](data/scripts/fancontrol.conf). For
+[board/scripts/fancontrol.conf](board/scripts/fancontrol.conf). For
 permanent changes, edit that template in the source repo and rebuild
 the ISO — otherwise your tweaks survive only until the next reboot.
 

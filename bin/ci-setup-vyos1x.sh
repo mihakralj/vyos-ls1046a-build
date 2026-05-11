@@ -6,7 +6,7 @@ set -ex
 cd "${GITHUB_WORKSPACE:-.}"
 
 ### Write secrets to disk
-[ -n "$MOK_KEY" ] && echo "$MOK_KEY" > data/mok/MOK.key
+[ -n "$MOK_KEY" ] && echo "$MOK_KEY" > board/mok/MOK.key
 [ -n "$MINISIGN_PRIVATE_KEY" ] && echo "$MINISIGN_PRIVATE_KEY" > data/vyos-ls1046a.minisign.key
 
 ### vyos-1x patches
