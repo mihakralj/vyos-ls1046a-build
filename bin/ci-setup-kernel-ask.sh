@@ -63,6 +63,19 @@ KERNEL_BUILD=vyos-build/scripts/package-build/linux-kernel
 KERNEL_PATCHES="$KERNEL_BUILD/patches/kernel"
 mkdir -p "$KERNEL_PATCHES"
 
+# Clean stale patches left by prior CI runs on the same self-hosted runner.
+# When a prior FLAVOR=default build ran on this workspace, default-only
+# patches (101, 4005, 4006, 4007, 4009) persist in $KERNEL_PATCHES and would
+# be applied alongside the ASK-only patches by build-kernel.sh's patch loop
+# (which does NOT check exit codes). Cross-flavor patches that touch the
+# same files (e.g. default-flavor 101/4009 on sfp.c vs ASK's own modifications)
+# can silently fail and corrupt subsequent line anchors. See the matching
+# block in ci-setup-kernel.sh for the failure-mode write-up. Preserve only
+# vyos-build's own upstream 0001-/0003- patches.
+echo "### Cleaning stale patches in $KERNEL_PATCHES (preserving 0001-*, 0003-*)"
+find "$KERNEL_PATCHES" -maxdepth 1 -type f -name '*.patch' \
+  ! -name '0001-*' ! -name '0003-*' -print -delete
+
 # ASK monolithic kernel hooks patch — the 010..080 splits under
 # kernel/flavors/ask/patches/ask/ are intentionally incomplete (32 files'
 # worth of xfrm/conntrack/bridge hooks have no split equivalent yet), so the
