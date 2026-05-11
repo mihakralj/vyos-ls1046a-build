@@ -4,6 +4,26 @@
 
 **Status today.** The kernel side already has a clean `kernel/{common,flavors/<X>}/` split (committed pre-multi-flavor, see `bin/ci-stage-kernel.sh` and `kernel/common/scripts/stage-kernel.sh`). The userspace side is flat under `data/` with content-based gating. Three legacy ASK working trees (`ASK/`, `ask-userspace/`, `data/ask-userspace/`) have overlapping but non-identical content and need consolidating.
 
+## Phase 0 inventory findings (corrections to draft plan)
+
+The Phase 0 inventory (2026-05-11) revealed three errors in this plan's initial assumptions that need correcting before any moves happen:
+
+1. **`ASK/patches/fmc/` and `ASK/patches/fmlib/` ARE live patch source-of-truth** — not `data/ask-userspace/<pkg>/patches/` as the draft claimed. Verified by `grep -n ASK/ bin/ci-build-{fmc,fmlib}.sh`:
+   - `bin/ci-build-fmc.sh:27` → `PATCH="$REPO_ROOT/ASK/patches/fmc/01-mono-ask-extensions.patch"`
+   - `bin/ci-build-fmlib.sh:34/36/38` → 3 patches under `$REPO_ROOT/ASK/patches/fmlib/`
+   - `bin/ci-setup-vyos-build.sh:484/486` → `cp ASK/config/{cmm.service,fastforward}` to chroot
+   So `ASK/` is **NOT** deletable. It contains the canonical ASK build inputs (patches and config files baked into the chroot). Only `data/ask-userspace/` is the now-redundant copy.
+
+2. **`ask-userspace/` (top-level, NOT `data/ask-userspace/`) has zero CI references** — confirmed by `grep -rn 'ask-userspace/' bin/ .github/workflows/ | grep -v 'data/ask-userspace'` returning nothing. It's the pure-vendored upstream snapshot. Safe to delete after confirming the upstream clone in `bin/ci-build-{fmc,fmlib}.sh` is reachable in CI.
+
+3. **`data/` contains items the draft plan did not catalogue:**
+   - `data/ask-kernel.pin` (1-line file: `kernel-6.18.28-ask1`) — pin file for `ci-consume-ask-kernel.sh`. Move to `userspace/flavors/ask/` or keep at top-level as `ask-kernel.pin`. The `flavor.pin` already lives in `data/flavor.pin` (per `bin/common.sh`), so consistency suggests `userspace/flavors/ask/kernel.pin`.
+   - `data/kernel-config/` (9 fragments: ls1046a-{board,dpaa1,extras,i2c-gpio,leds,network-perf,sfp,usb,watchdog}.config) — **DUPLICATES** of what's already under `kernel/common/kernel-config/` (8 fragments) plus `usb` and `watchdog` extras. `bin/ci-setup-kernel.sh` reads from `data/kernel-config/ls1046a-*.config`, NOT from `kernel/common/kernel-config/`. So `data/kernel-config/` is the live source today; `kernel/common/kernel-config/` was created by the prior partial migration but is **not yet wired up**. **Decision:** sync the missing fragments from `data/kernel-config/` into `kernel/common/kernel-config/`, then update `bin/ci-setup-kernel.sh` to read from the new location, then delete `data/kernel-config/`. (`bin/ci-stage-kernel.sh` is the new wrapper but it's only called for FLAVOR=default|vpp via `kernel/common/scripts/stage-kernel.sh`; the FLAVOR=ask path uses `bin/ci-setup-kernel-ask.sh` which has its own ad-hoc reads. Both paths need rationalising.)
+   - `data/kernel-patches/` (2 files: `003-ask-kernel-hooks.patch`, `ask-nxp-sdk-sources.tar.gz`) — ASK-only artifacts (kernel hooks patch + 612KB tarball of vendored NXP SDK sources). The patch is duplicate of `kernel/flavors/ask/patches/ask/003-*.patch` (verify with `cmp`). The tarball is the reference snapshot of the SDK sources that are also extracted into `kernel/flavors/ask/sdk-sources/`. **Move both** to `kernel/flavors/ask/` (the patch as `kernel/flavors/ask/patches/ask/003-...patch` if not already byte-identical there; the tarball as `kernel/flavors/ask/sdk-sources.tar.gz` for the kernel build's extract step that `bin/ci-setup-kernel-ask.sh` does).
+   - `data/config.boot.vpp` — VPP-flavor default config. Move to `board/vyos-config/config.boot.vpp` alongside `default`/`dhcp`/`full`. (Or — alternatively, since this file is FLAVOR-specific behavior — move to `userspace/flavors/vpp/vyos-config/config.boot.vpp`. Question: is `bin/ci-setup-vyos-build.sh` already FLAVOR-aware in selecting which `config.boot.*` files to copy into the chroot? Need to check.)
+
+These changes don't invalidate the layout — they just refine which files go where. Plan updated above to reflect the corrected target paths. Phase 1 below now also handles the `data/kernel-config/` and `data/kernel-patches/` cleanup (mis-scoped before).
+
 ---
 
 ## Recommended layout
