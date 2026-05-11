@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+# fan-check — print full thermal + fan status for the LS1046A Mono Gateway DK.
+#
+# Usage:   fan-check
+#
+# Reports (one line per item):
+#   - all 5 thermal zones (ddr, serdes, fman, cluster, sec) with current
+#     temperature, fan-pid setpoint, fan-pid crit_temp, and a
+#     [COOL]/[WARM]/[HOT]/[CRIT] tag based on those thresholds
+#   - EMC2305 PWM duty cycle (raw 0..255 and percent) and fan tachometer RPM
+#   - fan-pid daemon status + uptime + last log line + per-zone PWM demands
+#   - sysfs hwmon paths used (so the reader can see which hwmonN is the EMC2305
+#     this boot — the index is unstable)
+#
+# Designed to mirror the style of `sfp-check` and `ask-check`: human-readable
+# table, colour where the tty supports it, exit code 0 if the daemon is alive
+# AND no zone is at/above its crit_temp, exit 1 otherwise. Shows the same data
+# fan-pid logs to journald so the operator can read current state without
+# tailing the journal.
+#
+# Exit codes:
+#   0 — fan-pid running and all zones below crit_temp
+#   1 — fan-pid not running, or any zone >= crit_temp, or no EMC2305 found
+#   2 — board is not LS1046A Mono Gateway DK (sysfs paths absent)
+
+set -u
+
+# ---------------------------------------------------------------------------
+# Tunables — MUST mirror data/scripts/fan-pid (kept in lockstep manually).
+# Not sourced because /usr/local/bin/fan-pid is a Python file; duplicating
+# the small constants is simpler than adding a JSON sidecar.
+# ---------------------------------------------------------------------------
+declare -A SETPOINT=(
+    [ddr-thermal]=65
+    [serdes-thermal]=70
+    [fman-thermal]=70
+    [cluster-thermal]=65
+    [sec-thermal]=65
+)
+declare -A CRIT=(
+    [ddr-thermal]=80
+    [serdes-thermal]=85
+    [fman-thermal]=87
+    [cluster-thermal]=85
+    [sec-thermal]=85
+)
+HARD_FAULT_TEMP=100
+PWM_MIN_RUN=51
+PWM_MAX=255
+
+# Display order (matches the daemon's max-policy combine ordering)
+ZONE_ORDER=(ddr-thermal serdes-thermal fman-thermal cluster-thermal sec-thermal)
+
+# ---------------------------------------------------------------------------
+# Colour escapes (TTY only). Same convention as ask-check.
+# ---------------------------------------------------------------------------
+if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]; then
+    C_RST=$'\033[0m'
+    C_BOLD=$'\033[1m'
+    C_DIM=$'\033[2m'
+    C_GREEN=$'\033[1;32m'
+    C_YELLOW=$'\033[1;33m'
+    C_RED=$'\033[1;31m'
+    C_BLUE=$'\033[1;34m'
+else
+    C_RST='' C_BOLD='' C_DIM='' C_GREEN='' C_YELLOW='' C_RED='' C_BLUE=''
+fi
+
+# ---------------------------------------------------------------------------
+# Board gate. Same idiom as fan-pid / vyos-postinstall.
+# ---------------------------------------------------------------------------
+if [ ! -f /proc/device-tree/compatible ] \
+   || ! tr '\0' '\n' < /proc/device-tree/compatible | grep -q 'fsl,ls1046a'; then
+    echo "fan-check: not LS1046A — nothing to report" >&2
+    exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# Locate EMC2305 hwmon by name (numbers drift across boots).
+# ---------------------------------------------------------------------------
+EMC=""
+for h in /sys/class/hwmon/hwmon*; do
+    [ -r "$h/name" ] || continue
+    [ "$(cat "$h/name" 2>/dev/null)" = emc2305 ] || continue
+    EMC=$h
+    break
+done
+
+# ---------------------------------------------------------------------------
+# Locate the 5 LS1046A thermal zones by `type` string.
+# ---------------------------------------------------------------------------
+declare -A ZONE_PATH
+for z in /sys/class/thermal/thermal_zone*; do
+    [ -r "$z/type" ] && [ -r "$z/temp" ] || continue
+    t=$(cat "$z/type" 2>/dev/null)
+    case "$t" in
+        ddr-thermal|serdes-thermal|fman-thermal|cluster-thermal|sec-thermal)
+            ZONE_PATH[$t]=$z/temp
+            ;;
+        # Tolerate SDK-kernel underscore aliases too.
+        ddr_thermal)     ZONE_PATH[ddr-thermal]=$z/temp ;;
+        serdes_thermal)  ZONE_PATH[serdes-thermal]=$z/temp ;;
+        fman_thermal)    ZONE_PATH[fman-thermal]=$z/temp ;;
+        cluster_thermal|core_cluster) ZONE_PATH[cluster-thermal]=$z/temp ;;
+        sec_thermal)     ZONE_PATH[sec-thermal]=$z/temp ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Helpers.
+# ---------------------------------------------------------------------------
+read_temp_c() {
+    # Convert millidegC to "NN.N" with 1 decimal.
+    local p=$1 m
+    [ -r "$p" ] || { echo "?"; return; }
+    m=$(cat "$p" 2>/dev/null) || { echo "?"; return; }
+    awk -v m="$m" 'BEGIN{ printf "%.1f", m/1000.0 }'
+}
+
+classify_zone() {
+    # Returns COOL / WARM / HOT / CRIT given temp + zone name.
+    local temp=$1 zone=$2
+    local sp=${SETPOINT[$zone]} ct=${CRIT[$zone]}
+    awk -v t="$temp" -v sp="$sp" -v ct="$ct" -v hf="$HARD_FAULT_TEMP" 'BEGIN{
+        if (t >= hf)        print "CRIT";
+        else if (t >= ct)   print "CRIT";
+        else if (t >= sp)   print "HOT";
+        else if (t >= sp-5) print "WARM";
+        else                print "COOL";
+    }'
+}
+
+color_for() {
+    case "$1" in
+        COOL) echo "$C_GREEN" ;;
+        WARM) echo "$C_DIM"   ;;
+        HOT)  echo "$C_YELLOW";;
+        CRIT) echo "$C_RED"   ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Header.
+# ---------------------------------------------------------------------------
+hostname_str=$(hostname 2>/dev/null || echo '?')
+kernel_str=$(uname -r 2>/dev/null || echo '?')
+echo "${C_BOLD}fan-check${C_RST}  host=${hostname_str}  kernel=${kernel_str}  $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+echo
+
+# ---------------------------------------------------------------------------
+# Thermal zones table.
+# ---------------------------------------------------------------------------
+hot_or_crit=0
+echo "${C_BOLD}Thermal zones${C_RST} (setpoint = fan-pid target; crit = force-MAX threshold)"
+printf "  %-16s  %7s  %8s  %8s  %s\n" "zone" "temp" "setpoint" "crit" "state"
+printf "  %s\n" "---------------------------------------------------------------"
+for zone in "${ZONE_ORDER[@]}"; do
+    path=${ZONE_PATH[$zone]:-}
+    if [ -z "$path" ]; then
+        printf "  %-16s  %s\n" "$zone" "${C_DIM}(not present)${C_RST}"
+        continue
+    fi
+    t=$(read_temp_c "$path")
+    if [ "$t" = "?" ]; then
+        printf "  %-16s  %s\n" "$zone" "${C_RED}(read failed)${C_RST}"
+        continue
+    fi
+    state=$(classify_zone "$t" "$zone")
+    col=$(color_for "$state")
+    sp=${SETPOINT[$zone]}
+    ct=${CRIT[$zone]}
+    printf "  %-16s  %s%6s C%s  %6d C  %6d C  %s[%s]%s\n" \
+        "$zone" "$col" "$t" "$C_RST" "$sp" "$ct" "$col" "$state" "$C_RST"
+    [ "$state" = HOT ] || [ "$state" = CRIT ] && hot_or_crit=1
+done
+echo
+
+# ---------------------------------------------------------------------------
+# EMC2305 PWM + fan tachometer.
+# ---------------------------------------------------------------------------
+echo "${C_BOLD}EMC2305 PWM fan controller${C_RST}"
+if [ -z "$EMC" ]; then
+    echo "  ${C_RED}NOT FOUND${C_RST} — EMC2305 hwmon entry missing" \
+         "(check i2c bus / driver bind)"
+    fan_emc_ok=0
+else
+    pwm=$(cat "$EMC/pwm1" 2>/dev/null || echo '?')
+    rpm=$(cat "$EMC/fan1_input" 2>/dev/null || echo '?')
+    fan2=$(cat "$EMC/fan2_input" 2>/dev/null || echo '?')
+    pwm_pct="?"
+    if [ "$pwm" != "?" ]; then
+        pwm_pct=$(awk -v p="$pwm" -v m="$PWM_MAX" 'BEGIN{printf "%.0f", p*100.0/m}')
+    fi
+    pwm_state="?"
+    if [ "$pwm" != "?" ]; then
+        if [ "$pwm" -eq 0 ]; then pwm_state="${C_GREEN}OFF${C_RST}"
+        elif [ "$pwm" -lt "$PWM_MIN_RUN" ]; then pwm_state="${C_YELLOW}STALL-RISK (<MIN_RUN=${PWM_MIN_RUN})${C_RST}"
+        elif [ "$pwm" -ge "$PWM_MAX" ]; then pwm_state="${C_RED}MAX (failsafe / hard fault)${C_RST}"
+        else pwm_state="${C_BLUE}RUNNING${C_RST}"
+        fi
+    fi
+    printf "  hwmon path : %s\n" "$EMC"
+    printf "  PWM duty   : %s/%d  (%s%%)  %s\n" "$pwm" "$PWM_MAX" "$pwm_pct" "$pwm_state"
+    printf "  Fan 1 RPM  : %s\n" "$rpm"
+    [ "$fan2" != "?" ] && [ "$fan2" != "0" ] && \
+        printf "  Fan 2 RPM  : %s  (Mono Gateway has only 1 physical fan; non-zero is unusual)\n" "$fan2"
+    fan_emc_ok=1
+fi
+echo
+
+# ---------------------------------------------------------------------------
+# fan-pid daemon status + last log line.
+# ---------------------------------------------------------------------------
+echo "${C_BOLD}fan-pid daemon${C_RST}"
+if systemctl list-unit-files fan-pid.service >/dev/null 2>&1; then
+    state=$(systemctl is-active fan-pid.service 2>/dev/null || echo unknown)
+    enabled=$(systemctl is-enabled fan-pid.service 2>/dev/null || echo unknown)
+    case "$state" in
+        active)    state_pretty="${C_GREEN}active${C_RST}"; daemon_ok=1 ;;
+        inactive)  state_pretty="${C_YELLOW}inactive${C_RST}"; daemon_ok=0 ;;
+        failed)    state_pretty="${C_RED}failed${C_RST}"; daemon_ok=0 ;;
+        *)         state_pretty="${C_DIM}${state}${C_RST}"; daemon_ok=0 ;;
+    esac
+    printf "  unit       : fan-pid.service  (state=%s, enabled=%s)\n" "$state_pretty" "$enabled"
+    # Active-since timestamp (only meaningful when running).
+    since=$(systemctl show fan-pid.service -p ActiveEnterTimestamp --value 2>/dev/null)
+    [ -n "$since" ] && printf "  since      : %s\n" "$since"
+    # Last 3 daemon log lines (most recent first → re-reverse for natural read order).
+    last=$(journalctl -t fan-pid -n 3 --no-pager -o cat 2>/dev/null)
+    if [ -n "$last" ]; then
+        echo "  recent log :"
+        printf "%s\n" "$last" | sed 's/^/    /'
+    else
+        echo "  recent log : ${C_DIM}(no fan-pid lines in journal yet)${C_RST}"
+    fi
+else
+    state_pretty="${C_DIM}not installed${C_RST}"
+    daemon_ok=0
+    printf "  unit       : fan-pid.service  (state=%s)\n" "$state_pretty"
+    # Check whether the binary at least exists, to distinguish "not in this
+    # ISO yet" from "service got removed but binary is on disk".
+    if [ -x /usr/local/bin/fan-pid ]; then
+        echo "  ${C_YELLOW}note${C_RST}: /usr/local/bin/fan-pid is installed but the systemd unit is not"
+        echo "        — first ISO build with fan-pid wiring (~PR after 2026-05-11) is needed"
+    fi
+fi
+echo
+
+# ---------------------------------------------------------------------------
+# Legacy fancontrol service state (informational, only flagged when it
+# CONFLICTS with fan-pid).
+# ---------------------------------------------------------------------------
+fc_state=$(systemctl is-active fancontrol.service 2>/dev/null || echo missing)
+if [ "$fc_state" = active ]; then
+    if [ "${daemon_ok:-0}" -eq 1 ]; then
+        # BOTH controllers running → genuine conflict, will oscillate the PWM.
+        echo "${C_BOLD}fancontrol (legacy)${C_RST}"
+        echo "  ${C_RED}WARNING${C_RST}: fancontrol.service is ALSO active — two daemons fighting"
+        echo "           over /sys/.../pwm1 will produce sub-second oscillations."
+        echo "           Expected post-fan-pid-rollout: masked. Run \`systemctl mask fancontrol\`."
+        echo
+    else
+        # fancontrol is the active controller (pre-fan-pid ISO or fan-pid stopped).
+        echo "${C_BOLD}fancontrol (legacy, currently active controller)${C_RST}"
+        echo "  This image still uses lm-sensors fancontrol on a single linear curve."
+        echo "  fan-pid will replace it on the next ISO build that includes the fan-pid wiring."
+        echo
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Exit code.
+# ---------------------------------------------------------------------------
+# 0 only when EMC2305 is present, no zone is HOT/CRIT, and the daemon is up
+# (or at least not failed). Anything else → 1, so this script is usable as a
+# Nagios/monit probe.
+if [ "$fan_emc_ok" -eq 1 ] && [ "$hot_or_crit" -eq 0 ] && [ "${daemon_ok:-0}" -eq 1 ]; then
+    exit 0
+else
+    exit 1
+fi

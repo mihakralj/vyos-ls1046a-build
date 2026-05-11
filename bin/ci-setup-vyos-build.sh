@@ -249,14 +249,21 @@ cp data/systemd/vyos-postinstall.service "$CHROOT/etc/systemd/system/vyos-postin
 mkdir -p "$CHROOT/usr/lib/tmpfiles.d"
 cp data/systemd/vyos-postinstall.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/vyos-postinstall.conf"
 
-### Fan control: EMC2305 PWM thermal management via standard fancontrol
-cp data/scripts/fancontrol.conf "$CHROOT/etc/fancontrol"
-cp data/scripts/fancontrol-setup.sh "$CHROOT/usr/local/bin/fancontrol-setup"
-chmod +x "$CHROOT/usr/local/bin/fancontrol-setup"
-
-### Systemd drop-in: run fancontrol-setup before fancontrol starts
-mkdir -p "$CHROOT/etc/systemd/system/fancontrol.service.d"
-cp data/systemd/fancontrol-dropin.conf "$CHROOT/etc/systemd/system/fancontrol.service.d/hwmon-setup.conf"
+### Fan control: PID daemon (fan-pid) replaces lm-sensors fancontrol.
+###
+### fan-pid is a self-contained Python 3 multi-zone PID controller that
+### samples all 5 LS1046A thermal zones (ddr, serdes, fman, cluster, sec)
+### and drives the EMC2305 PWM via max-policy combine + EMA smoothing +
+### anti-windup integral clamp + hard-fault force-MAX at 100 C. Installed
+### unconditionally for every flavor (default | ask | vpp) because all
+### LS1046A boards share the same EMC2305 + thermal-zone topology.
+### See data/hooks/98-fancontrol.chroot for the rationale on masking
+### upstream `fancontrol.service` defensively (two PWM controllers must
+### never run concurrently).
+cp data/scripts/fan-pid "$CHROOT/usr/local/bin/fan-pid"
+chmod +x "$CHROOT/usr/local/bin/fan-pid"
+cp data/systemd/fan-pid.service "$CHROOT/etc/systemd/system/fan-pid.service"
+cp data/systemd/fan-pid.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fan-pid.conf"
 
 ### VPP/DPAA1 rebind: restore kernel netdev ownership when VPP stops
 cp data/scripts/vpp-dpaa-rebind "$CHROOT/usr/local/bin/vpp-dpaa-rebind"
@@ -302,6 +309,16 @@ cp data/scripts/00-fman.link "$CHROOT/etc/systemd/network/00-fman.link"
 ### only requires ethtool -m support, which is universal.
 cp data/scripts/sfp-check "$CHROOT/usr/local/bin/sfp-check"
 chmod +x "$CHROOT/usr/local/bin/sfp-check"
+
+### Thermal/fan status helper: `fan-check` reports all 5 LS1046A thermal
+### zone temps with [COOL]/[WARM]/[HOT]/[CRIT] tags, EMC2305 PWM duty + RPM,
+### fan-pid daemon health (with journalctl tail), and flags genuine
+### fancontrol/fan-pid concurrency conflicts. Exit 0 healthy / non-zero on
+### fault — usable as a Nagios/monit probe. Mirrors sfp-check / ask-check
+### style. Flavor-agnostic (every LS1046A board has the same EMC2305 +
+### thermal-zone topology).
+cp data/scripts/fan-check "$CHROOT/usr/local/bin/fan-check"
+chmod +x "$CHROOT/usr/local/bin/fan-check"
 
 
 ### Boot-complete fan notification: whistle fans to alert admin
