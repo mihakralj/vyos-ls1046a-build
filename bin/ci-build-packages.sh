@@ -305,12 +305,19 @@ for package in $packages; do
     # and the archived repo is no longer cloned by auto-build.yml.
 
     ### Build ASK userspace binaries from source (cmm, dpa_app, libcli, libfci)
-    # Overwrites pre-built binaries installed by ci-setup-vyos-build.sh with source-built versions
-    if [ -n "$KSRC" ] && [ -x "$GITHUB_WORKSPACE/bin/ci-build-ask-userspace.sh" ]; then
+    # FLAVOR-gated: ASK userspace (cmm, dpa_app, fmlib, fmc, cdx, fci,
+    # auto_bridge) is only meaningful when running the NXP SDK + ASK
+    # fast-path kernel. On default/vpp flavors the underlying kernel has
+    # no SDK fsl_dpa driver and no /dev/fm* chardev — building these
+    # userspace components produces .debs that cannot install (missing
+    # kernel symbols) and pollutes the ISO.
+    if [ "${FLAVOR:-default}" = "ask" ] && [ -n "$KSRC" ] && [ -x "$GITHUB_WORKSPACE/bin/ci-build-ask-userspace.sh" ]; then
       KSRC_ABS_ASK="$(cd "$KSRC" && pwd)"
-      echo "### Building ASK userspace from source"
+      echo "### Building ASK userspace from source (FLAVOR=ask)"
       "$GITHUB_WORKSPACE/bin/ci-build-ask-userspace.sh" "$KSRC_ABS_ASK" "$INCLUDES_CHR" || \
         echo "WARNING: ASK userspace build failed (non-fatal) — using pre-built binaries"
+    elif [ "${FLAVOR:-default}" != "ask" ]; then
+      echo "### Skipping ASK userspace build (FLAVOR=${FLAVOR:-default}, not 'ask')"
     fi
 
     ### Build accel-ppp-ng ARM64 packages (daemon + kernel modules)
