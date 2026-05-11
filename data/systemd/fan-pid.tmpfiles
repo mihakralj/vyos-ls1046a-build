@@ -1,0 +1,4 @@
+# Enable fan-pid service via tmpfiles.d (live-build squashfs dereferences
+# absolute symlinks created by `systemctl enable` in chroot hooks, breaking
+# them — tmpfiles.d creates the .wants symlink at first boot of the target).
+L /etc/systemd/system/multi-user.target.wants/fan-pid.service - - - - /etc/systemd/system/fan-pid.service

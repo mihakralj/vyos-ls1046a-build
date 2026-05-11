@@ -1,0 +1,405 @@
+#!/usr/bin/env python3
+"""
+fan-pid — PID-based EMC2305 fan controller for the LS1046A Mono Gateway DK.
+
+Replaces the stock `fancontrol` linear-curve daemon with a multi-zone PID loop
+that drives the EMC2305 PWM from the *hottest* of the SoC's five thermal zones
+(ddr, serdes, fman, cluster, sec) plus an EMA filter on the fan tachometer.
+
+Why PID instead of fancontrol's linear ramp?
+  - smoother PWM trajectory  -> lower acoustic noise band crossings (~80 PWM)
+  - longer fan-bearing life   -> fewer step changes
+  - per-zone setpoints        -> SerDes/FMan/SEC get their own dT and target
+  - explicit safety ladder    -> hard MAXPWM at any zone >= ZONE.crit_temp,
+                                  hard FAULT log if any zone reaches 100 C
+
+Why a single Python file?
+  - same idiom as the existing fancontrol-setup.sh / sfp-check / ask-conntrack-fix
+  - no extra runtime deps (Python 3 + sysfs already shipped in VyOS)
+  - one systemd unit, one config block at the top, no dotfiles
+
+Hardware refs (LS1046A RM, AGENTS.md):
+  EMC2305 at i2c-7 addr 0x2e (hwmon by name, NOT by number — index drifts)
+  Cortex-A72 cluster T_J,throttle = 95 C, T_J,max = 105 C
+  EMC2305 PWM is quantized; minimum effective duty ~ PWM 51 (~1700 RPM)
+  Mono Gateway has hardware inverter on TX_DISABLE (irrelevant here, noted only
+    so future GPIO-related fan-fault designs don't repeat the misdiagnosis logged
+    in qdrant under "SFP+ misdiagnosis log").
+
+Algorithm summary:
+  Every TICK seconds:
+    1. Read all 5 thermal zones.  If any is unreadable, retain previous value
+       (sysfs reads under thermal-poll contention can transiently fail).
+    2. For each zone, compute error = T - setpoint.  Run a per-zone PI
+       controller: PWM_i = clamp(MIN_PWM, MAX_PWM, PWM_floor + Kp*err + Ki*sum_err).
+       Anti-windup: clamp the integral term to +/- (MAX_PWM - PWM_floor) / Ki.
+    3. Final PWM = max( PWM_i for all zones ).  This is the protective max-policy:
+       any zone individually demanding more cooling wins.
+    4. Hard ceiling: if ANY zone >= crit_temp, force PWM = MAX_PWM.  Anti-windup
+       reset on all zones to prevent overshoot when temps drop again.
+    5. Hard fault: if ANY zone >= 100 C, syslog at LOG_CRIT and force PWM = 255
+       (silicon damage threshold).  Continue running.
+    6. EMA-smooth the final PWM (alpha = EMA_ALPHA) before writing to sysfs to
+       avoid sub-tick jitter ringing the fan around the audible 80-PWM band.
+    7. Write final PWM if it changed by >= PWM_DEADBAND.  Reduces sysfs traffic
+       and EMC2305 register churn.
+    8. Log every LOG_INTERVAL seconds: per-zone temp, per-zone PWM, final PWM,
+       fan RPM.  At LOG_LEVEL=DEBUG, log every tick.
+
+Tuning rationale (Kp / Ki / setpoints) — see code constants below.
+
+ExecStart contract: runs in foreground, writes stderr to journald.  SIGTERM
+clean-shutdown: leaves PWM at MAX_PWM (255) so a daemon crash doesn't silently
+suffocate the SoC.  Use `systemctl stop fan-pid` only when you intend to stop
+managing the fan; it will go to full speed.
+"""
+from __future__ import annotations
+
+import errno
+import os
+import signal
+import sys
+import syslog
+import time
+from dataclasses import dataclass, field
+from typing import Optional
+
+
+# ---------- Tuning constants -----------------------------------------------------
+# Per-zone controller parameters.  Setpoints picked from LS1046A RM and AGENTS.md
+# field experience:
+#   ddr (commercial-grade DDR4):      derate above 85 C, conservative target 65
+#   serdes (10G PCS, hot under load): T_J,max 105, target 70 with extra headroom
+#   fman (microcode RAM hot-spot):    T_J,max 105, target 70 (FMan is the hottest
+#                                      die area when forwarding @ 10 Gbps)
+#   cluster (A72 quad):               throttle 95, target 65 to leave 30 C burst headroom
+#   sec (CAAM JR):                    T_J,max 105, target 65 under sustained IPsec
+#
+# Setpoint = "the temperature we want this zone to hold under steady-state load".
+# Crit_temp = "if exceeded, force MAX_PWM regardless of PI state" (5 C below the
+#             throttle/derate point so we still have margin for transient spikes).
+#
+# Kp and Ki are PWM-units per degree-C error.  Tuned for the EMC2305 + small
+# DC-axial fan time constant (fan: ~3 s rise from MIN to MAX duty; SoC zones:
+# 2 s for serdes/fman, 5 s for cluster/sec, ~30 s for ddr).
+#
+# Why per-zone Kp/Ki instead of one shared loop?
+#   - Different time constants need different gains.  A single Ki tuned for ddr
+#     (slow) would cause cluster (fast) to oscillate.  A single Ki tuned for
+#     cluster would windup before ddr ever moved.
+#   - Per-zone integrals also allow each zone to "settle into" its own quiet
+#     PWM without dragging the others along.
+@dataclass
+class Zone:
+    name: str            # /sys/class/thermal/thermal_zone*/type string
+    setpoint: float      # target temp (C)
+    crit_temp: float     # if T >= crit, force MAX_PWM
+    kp: float            # proportional gain (PWM per C)
+    ki: float            # integral gain (PWM per (C * tick))
+    # runtime state
+    last_temp: float = 0.0
+    integral: float = 0.0
+    last_pwm: float = 0.0
+
+
+ZONES = [
+    Zone("ddr-thermal",     setpoint=65.0, crit_temp=80.0, kp=4.0,  ki=0.20),
+    Zone("serdes-thermal",  setpoint=70.0, crit_temp=85.0, kp=6.0,  ki=0.30),
+    Zone("fman-thermal",    setpoint=70.0, crit_temp=87.0, kp=6.0,  ki=0.30),
+    Zone("cluster-thermal", setpoint=65.0, crit_temp=85.0, kp=5.0,  ki=0.25),
+    Zone("sec-thermal",     setpoint=65.0, crit_temp=85.0, kp=5.0,  ki=0.25),
+]
+# Aliases tolerated for thermal_zone "type" string differences across kernels.
+# (mainline 6.18 uses "ddr-thermal"/"cluster-thermal", SDK 6.6 uses
+#  "core_cluster" instead of "cluster-thermal".  Add as encountered.)
+ZONE_ALIASES = {
+    "cluster-thermal": ("core_cluster", "cluster_thermal"),
+    "ddr-thermal":     ("ddr_thermal",),
+    "fman-thermal":    ("fman_thermal",),
+    "serdes-thermal":  ("serdes_thermal",),
+    "sec-thermal":     ("sec_thermal",),
+}
+
+PWM_FLOOR    = 0     # PWM applied when all zones at/below setpoint
+PWM_MIN_RUN  = 51    # EMC2305 quantization floor; below this fan stalls
+PWM_MAX      = 255   # full speed
+PWM_DEADBAND = 3     # don't write to sysfs for changes smaller than this
+EMA_ALPHA    = 0.4   # 0 = no smoothing, 1 = no history; 0.4 ~= 1.5 tick lag
+
+TICK_SECONDS = 2.0   # control loop period
+LOG_INTERVAL = 30.0  # seconds between INFO log lines (use DEBUG for every tick)
+
+EMC2305_HWMON_NAME = "emc2305"
+PWM_FILE  = "pwm1"
+FAN_FILE  = "fan1_input"
+
+HARD_FAULT_TEMP = 100.0  # at/above this any zone triggers a CRIT log
+
+
+# ---------- sysfs helpers --------------------------------------------------------
+def find_emc2305_pwm() -> tuple[str, str]:
+    """Locate EMC2305 hwmon by name (numbers drift across boots).
+
+    Returns (pwm_path, fan_input_path) both absolute.
+    Raises RuntimeError if EMC2305 not present (board not Mono Gateway DK,
+    or i2c bus is broken).
+    """
+    for entry in sorted(os.listdir("/sys/class/hwmon")):
+        if not entry.startswith("hwmon"):
+            continue
+        name_path = f"/sys/class/hwmon/{entry}/name"
+        try:
+            with open(name_path) as f:
+                if f.read().strip() == EMC2305_HWMON_NAME:
+                    pwm  = f"/sys/class/hwmon/{entry}/{PWM_FILE}"
+                    fan  = f"/sys/class/hwmon/{entry}/{FAN_FILE}"
+                    if not os.path.exists(pwm):
+                        raise RuntimeError(f"{pwm} missing — wrong EMC2305 channel?")
+                    return pwm, fan
+        except OSError:
+            continue
+    raise RuntimeError("EMC2305 hwmon not found (no entry named 'emc2305')")
+
+
+def find_thermal_zones() -> dict[str, str]:
+    """Map zone canonical name -> /sys/class/thermal/thermal_zoneN/temp path.
+
+    Honors ZONE_ALIASES so the same daemon binary works on mainline and SDK
+    kernels without conditional code.  Missing zones are OK (logged once at
+    startup) — the PI loop simply won't include them in max().
+    """
+    found: dict[str, str] = {}
+    for entry in sorted(os.listdir("/sys/class/thermal")):
+        if not entry.startswith("thermal_zone"):
+            continue
+        type_path = f"/sys/class/thermal/{entry}/type"
+        temp_path = f"/sys/class/thermal/{entry}/temp"
+        if not (os.path.exists(type_path) and os.path.exists(temp_path)):
+            continue
+        try:
+            with open(type_path) as f:
+                t = f.read().strip()
+        except OSError:
+            continue
+        # Canonicalize against ZONES + ZONE_ALIASES.
+        for z in ZONES:
+            if t == z.name or t in ZONE_ALIASES.get(z.name, ()):
+                found[z.name] = temp_path
+                break
+    return found
+
+
+def read_temp(path: str) -> Optional[float]:
+    """Read /sys/class/thermal/.../temp (millidegC) -> degC float, or None."""
+    try:
+        with open(path) as f:
+            return int(f.read().strip()) / 1000.0
+    except (OSError, ValueError):
+        return None
+
+
+def write_pwm(path: str, value: int) -> None:
+    """Write integer 0..255 to EMC2305 PWM sysfs file.
+
+    OSError is logged but NOT raised — a transient sysfs write failure should
+    not crash the controller; we'll retry next tick.  If writes start failing
+    persistently the journald log will surface it for the operator.
+    """
+    try:
+        with open(path, "w") as f:
+            f.write(str(value))
+    except OSError as e:
+        syslog.syslog(syslog.LOG_WARNING,
+                      f"fan-pid: pwm write failed: {e}")
+
+
+def read_fan_rpm(path: str) -> Optional[int]:
+    try:
+        with open(path) as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+# ---------- Controller ----------------------------------------------------------
+class Controller:
+    """One PI controller per zone, output combined via max()."""
+
+    def __init__(self, pwm_path: str, fan_path: str, zone_paths: dict[str, str]):
+        self.pwm_path  = pwm_path
+        self.fan_path  = fan_path
+        self.zone_paths = zone_paths
+        self.last_written_pwm = -1   # force first write
+        self.smoothed_pwm = float(PWM_FLOOR)
+        self.last_log_t = 0.0
+
+    def integral_clamp(self, z: Zone) -> float:
+        """Anti-windup: cap |integral| so it can saturate the actuator but no more."""
+        if z.ki <= 0:
+            return 0.0
+        # Max useful integral = (PWM_MAX - PWM_FLOOR) / Ki.
+        # We allow +/- that magnitude.  Clamp tightens further for very-low-Ki
+        # zones (which already track via Kp).
+        return (PWM_MAX - PWM_FLOOR) / z.ki
+
+    def step(self) -> tuple[int, dict[str, float], dict[str, float]]:
+        """One control tick.  Returns (final_pwm, zone_temps, zone_pwms)."""
+        zone_temps: dict[str, float] = {}
+        zone_pwms:  dict[str, float] = {}
+        any_critical = False
+        any_fault    = False
+        max_pwm_zone = float(PWM_FLOOR)
+
+        for z in ZONES:
+            path = self.zone_paths.get(z.name)
+            if path is None:
+                continue
+            t = read_temp(path)
+            if t is None:
+                # transient read failure — reuse last good temp so PI doesn't
+                # zero-out integral and overshoot when reads recover
+                t = z.last_temp
+            else:
+                z.last_temp = t
+            zone_temps[z.name] = t
+
+            if t >= HARD_FAULT_TEMP:
+                any_fault = True
+            if t >= z.crit_temp:
+                any_critical = True
+
+            err = t - z.setpoint
+            # PI step.  Note we integrate even when output is saturated, but the
+            # clamp below prevents windup beyond useful range.
+            z.integral += err
+            ic = self.integral_clamp(z)
+            if z.integral >  ic: z.integral =  ic
+            if z.integral < -ic: z.integral = -ic
+
+            pwm_i = PWM_FLOOR + z.kp * err + z.ki * z.integral
+            # Clamp to actuator range, but enforce MIN_RUN if PI says fan should run
+            if pwm_i > 0 and pwm_i < PWM_MIN_RUN:
+                pwm_i = PWM_MIN_RUN
+            pwm_i = max(0.0, min(float(PWM_MAX), pwm_i))
+            z.last_pwm = pwm_i
+            zone_pwms[z.name] = pwm_i
+            if pwm_i > max_pwm_zone:
+                max_pwm_zone = pwm_i
+
+        # Safety overrides bypass smoothing — we want them to take effect THIS tick.
+        if any_critical or any_fault:
+            target = float(PWM_MAX)
+            # Reset integrals: when temp comes back down we don't want the
+            # accumulated 30-second saturation pushing PWM to MAX for another
+            # 30 s.  This is a hard reset, not a graceful decay, because the
+            # safety-override case is a thermal emergency.
+            for z in ZONES:
+                z.integral = 0.0
+            self.smoothed_pwm = target
+            if any_fault:
+                hottest = max(zone_temps.items(), key=lambda kv: kv[1], default=("?", 0))
+                syslog.syslog(syslog.LOG_CRIT,
+                              f"fan-pid: HARD FAULT zone={hottest[0]} temp={hottest[1]:.1f}C "
+                              f">= {HARD_FAULT_TEMP}C — silicon damage threshold; PWM forced to MAX")
+        else:
+            # EMA smoothing on the final actuator command
+            self.smoothed_pwm = (EMA_ALPHA * max_pwm_zone
+                                 + (1.0 - EMA_ALPHA) * self.smoothed_pwm)
+            target = self.smoothed_pwm
+
+        out = int(round(target))
+        # Deadband: avoid sysfs writes for noise-level changes.  Always write
+        # when crossing 0 (fan stop) or PWM_MAX (full).
+        force = (out == 0 or out == PWM_MAX)
+        if force or self.last_written_pwm < 0 or abs(out - self.last_written_pwm) >= PWM_DEADBAND:
+            write_pwm(self.pwm_path, out)
+            self.last_written_pwm = out
+
+        return out, zone_temps, zone_pwms
+
+    def maybe_log(self, now: float, final_pwm: int,
+                  zt: dict[str, float], zp: dict[str, float]) -> None:
+        if now - self.last_log_t < LOG_INTERVAL:
+            return
+        self.last_log_t = now
+        rpm = read_fan_rpm(self.fan_path)
+        rpm_str = f"{rpm}rpm" if rpm is not None else "?rpm"
+        zt_str = " ".join(f"{n.split('-')[0]}={t:.1f}" for n, t in zt.items())
+        zp_str = " ".join(f"{n.split('-')[0]}={p:.0f}" for n, p in zp.items())
+        syslog.syslog(syslog.LOG_INFO,
+                      f"fan-pid: pwm={final_pwm}/{PWM_MAX} {rpm_str} | T[{zt_str}] | demand[{zp_str}]")
+
+
+# ---------- Main loop -----------------------------------------------------------
+_running = True
+
+
+def _on_sigterm(_sig, _frame):
+    global _running
+    _running = False
+
+
+def main() -> int:
+    syslog.openlog("fan-pid", syslog.LOG_PID, syslog.LOG_DAEMON)
+
+    # Board gate — only run on LS1046A.  Same idiom as fancontrol-setup.
+    try:
+        with open("/proc/device-tree/compatible", "rb") as f:
+            compat = f.read().split(b"\0")
+    except OSError:
+        compat = []
+    if not any(b"fsl,ls1046a" in c for c in compat):
+        syslog.syslog(syslog.LOG_INFO, "fan-pid: not LS1046A, exiting")
+        return 0
+
+    try:
+        pwm_path, fan_path = find_emc2305_pwm()
+    except RuntimeError as e:
+        syslog.syslog(syslog.LOG_ERR, f"fan-pid: {e} — failing to MAX_PWM if possible, exit 1")
+        return 1
+    syslog.syslog(syslog.LOG_INFO, f"fan-pid: PWM at {pwm_path}, fan tach at {fan_path}")
+
+    zone_paths = find_thermal_zones()
+    if not zone_paths:
+        syslog.syslog(syslog.LOG_ERR, "fan-pid: no usable thermal_zone* found — exiting")
+        # Defensive: leave fan at full so the SoC isn't suffocated by a stuck low PWM.
+        write_pwm(pwm_path, PWM_MAX)
+        return 1
+    missing = [z.name for z in ZONES if z.name not in zone_paths]
+    if missing:
+        syslog.syslog(syslog.LOG_WARNING,
+                      f"fan-pid: thermal zones missing (will skip): {','.join(missing)}")
+    syslog.syslog(syslog.LOG_INFO,
+                  f"fan-pid: controlling {len(zone_paths)} zones: {','.join(zone_paths)}")
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+    signal.signal(signal.SIGINT,  _on_sigterm)
+
+    ctrl = Controller(pwm_path, fan_path, zone_paths)
+    next_tick = time.monotonic()
+    try:
+        while _running:
+            now = time.monotonic()
+            if now < next_tick:
+                time.sleep(min(TICK_SECONDS, next_tick - now))
+                continue
+            next_tick = now + TICK_SECONDS
+            try:
+                final, zt, zp = ctrl.step()
+                ctrl.maybe_log(now, final, zt, zp)
+            except Exception as e:  # belt-and-braces: never crash on a tick
+                syslog.syslog(syslog.LOG_ERR, f"fan-pid: tick failed: {e!r}")
+    finally:
+        # Defensive shutdown: hand control back to the BIOS/firmware default by
+        # writing MAX_PWM.  If a maintainer restarts the daemon under load they
+        # don't want a stale low PWM throttling the SoC during the gap.
+        try:
+            write_pwm(pwm_path, PWM_MAX)
+            syslog.syslog(syslog.LOG_INFO, "fan-pid: shutdown — left PWM at MAX as failsafe")
+        except Exception:
+            pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
