@@ -100,7 +100,12 @@ FILES_DIR="$COMMON_DIR/files"
 INJECT_DIR="$FILES_DIR/inject"
 
 [[ -d "$COMMON_DIR/patches" ]] || err "missing $COMMON_DIR/patches"
-[[ -d "$FLAVOR_DIR" ]]         || err "missing $FLAVOR_DIR"
+# kernel/flavors/$FLAVOR/ is optional: default and vpp share the upstream-tracked
+# kernel from kernel/common/ alone (their per-flavor dirs were dead-code
+# placeholders, removed 2026-05-11). Only ask is mandatory.
+if [[ ! -d "$FLAVOR_DIR" && "$FLAVOR" == "ask" ]]; then
+    err "missing $FLAVOR_DIR (required for FLAVOR=ask)"
+fi
 
 # ── Kernel source ──────────────────────────────────────────────────────
 if [[ -n "$VERSION_ARG" || ! -f "$WORK_DIR/.kernel-version" ]]; then
@@ -126,12 +131,14 @@ for sub in vyos board fixes; do
     while IFS= read -r p; do PATCHES+=("$p"); done \
         < <(find "$d" -maxdepth 1 -type f -name '*.patch' | sort)
 done
-for sub in ask fixes ""; do
-    d="$FLAVOR_DIR/patches${sub:+/$sub}"
-    [[ -d "$d" ]] || continue
-    while IFS= read -r p; do PATCHES+=("$p"); done \
-        < <(find "$d" -maxdepth 1 -type f -name '*.patch' | sort)
-done
+if [[ -d "$FLAVOR_DIR" ]]; then
+    for sub in ask fixes ""; do
+        d="$FLAVOR_DIR/patches${sub:+/$sub}"
+        [[ -d "$d" ]] || continue
+        while IFS= read -r p; do PATCHES+=("$p"); done \
+            < <(find "$d" -maxdepth 1 -type f -name '*.patch' | sort)
+    done
+fi
 (( ${#PATCHES[@]} )) || err "no patches found for flavor=$FLAVOR"
 
 # Turn $KSRC into a throwaway git repo so that `git apply --3way` has access to
