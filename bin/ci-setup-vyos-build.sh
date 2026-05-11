@@ -24,17 +24,23 @@ HOOKS=vyos-build/data/live-build-config/hooks/live
 #   on the target disk after install, so the same content is the default
 #   for live/USB/TFTP boot AND for the installed system on first boot.
 #
-#   We ship `config.boot.dhcp` (DHCP on all 5 LS1046A ports, SSH, NTP,
-#   syslog, watchdog, update-check) as that active default by copying it
-#   into the chroot under the canonical name `config.boot.default`.
-#   The other two variants are kept alongside under their original names
-#   for reference / `load` after login.
+#   For FLAVOR=default|ask we ship `config.boot.dhcp` (DHCP on all 5
+#   LS1046A ports, SSH, NTP, syslog, watchdog, update-check) as that active
+#   default. For FLAVOR=vpp we ship `config.boot.vpp` instead: eth0 stays as
+#   the kernel-owned management port, while eth1-eth4 are assigned to VPP.
+#   The other variants are kept alongside under their original names for
+#   reference / `load` after login.
 #     config.boot.default = lean reference (eth0 DHCP + SSH + console)
 #     config.boot.full    = rich reference (routing/firewall/NAT/DNS/API)
-cp data/config.boot.dhcp    "$CHROOT/opt/vyatta/etc/config.boot.default"
+case "$FLAVOR" in
+  vpp) ACTIVE_DEFAULT=data/config.boot.vpp ;;
+  *)   ACTIVE_DEFAULT=data/config.boot.dhcp ;;
+esac
+cp "$ACTIVE_DEFAULT"       "$CHROOT/opt/vyatta/etc/config.boot.default"
 cp data/config.boot.default "$CHROOT/opt/vyatta/etc/config.boot.minimal"
 cp data/config.boot.dhcp    "$CHROOT/opt/vyatta/etc/config.boot.dhcp"
 cp data/config.boot.full    "$CHROOT/opt/vyatta/etc/config.boot.full"
+cp data/config.boot.vpp     "$CHROOT/opt/vyatta/etc/config.boot.vpp"
 
 # Per-flavor update-check feed: rewrite the hard-coded `version-default.json`
 # URL in every staged config.boot.* to `version-${FLAVOR}.json`. Without this
@@ -48,7 +54,8 @@ for f in \
     "$CHROOT/opt/vyatta/etc/config.boot.default" \
     "$CHROOT/opt/vyatta/etc/config.boot.minimal" \
     "$CHROOT/opt/vyatta/etc/config.boot.dhcp" \
-    "$CHROOT/opt/vyatta/etc/config.boot.full"; do
+    "$CHROOT/opt/vyatta/etc/config.boot.full" \
+    "$CHROOT/opt/vyatta/etc/config.boot.vpp"; do
     if [ -f "$f" ] && grep -q 'version-default\.json' "$f"; then
         sed -i \
             -e "s#https://raw\.githubusercontent\.com/mihakralj/vyos-ls1046a-build/refs/heads/main/version-default\.json#${FEED_URL}#g" \
@@ -59,7 +66,8 @@ echo "### Update-check feed URLs after FLAVOR=${FLAVOR} rewrite:"
 grep -H 'update-check\|version-' \
     "$CHROOT/opt/vyatta/etc/config.boot.default" \
     "$CHROOT/opt/vyatta/etc/config.boot.dhcp" \
-    "$CHROOT/opt/vyatta/etc/config.boot.full" 2>/dev/null \
+    "$CHROOT/opt/vyatta/etc/config.boot.full" \
+    "$CHROOT/opt/vyatta/etc/config.boot.vpp" 2>/dev/null \
     | grep -E 'version-[a-z]+\.json' || true
 # Drop .gitattributes inside the upstream clone so Mergiraf is wired as the
 # merge driver for source-language files when --3way needs to fall back to a
@@ -290,14 +298,20 @@ cp data/scripts/fan-pid "$CHROOT/usr/local/bin/fan-pid"
 chmod +x "$CHROOT/usr/local/bin/fan-pid"
 cp data/systemd/fan-pid.service "$CHROOT/etc/systemd/system/fan-pid.service"
 cp data/systemd/fan-pid.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fan-pid.conf"
-
-### VPP/DPAA1 rebind: restore kernel netdev ownership when VPP stops
-cp data/scripts/vpp-dpaa-rebind "$CHROOT/usr/local/bin/vpp-dpaa-rebind"
-chmod +x "$CHROOT/usr/local/bin/vpp-dpaa-rebind"
-mkdir -p "$CHROOT/etc/systemd/system/vpp.service.d"
-cp data/systemd/vpp-dpaa-rebind.conf "$CHROOT/etc/systemd/system/vpp.service.d/dpaa-rebind.conf"
+# udev rule: start fan-pid.service at the moment the kernel binds the
+# emc2305 driver to its i2c device. Defends against the multi-user.target
+# vs i2c-bus-probe race that left the service `inactive (dead)` with an
+# empty journal on 2026-05-11 (the previous ConditionPathExistsGlob= on
+# the driver's bound-device symlink failed silently and was never
+# re-evaluated). With this rule + the DT-only board gate in the unit, the
+# daemon starts whichever way wins the race.
+mkdir -p "$CHROOT/etc/udev/rules.d"
+cp data/scripts/10-emc2305-fan-pid.rules "$CHROOT/etc/udev/rules.d/10-emc2305-fan-pid.rules"
 
 ### VPP/DPAA1 post-start: fix defunct interface MTU for AF_XDP TX
+mkdir -p "$CHROOT/etc/systemd/system/vpp.service.d"
+rm -f "$CHROOT/usr/local/bin/vpp-dpaa-rebind" \
+  "$CHROOT/etc/systemd/system/vpp.service.d/dpaa-rebind.conf"
 cp data/scripts/vpp-post-start.sh "$CHROOT/usr/local/bin/vpp-post-start.sh"
 chmod +x "$CHROOT/usr/local/bin/vpp-post-start.sh"
 cp data/systemd/vpp-post-start.conf "$CHROOT/etc/systemd/system/vpp.service.d/post-start.conf"
