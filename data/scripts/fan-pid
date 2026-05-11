@@ -21,7 +21,12 @@ Why a single Python file?
 Hardware refs (LS1046A RM, AGENTS.md):
   EMC2305 at i2c-7 addr 0x2e (hwmon by name, NOT by number — index drifts)
   Cortex-A72 cluster T_J,throttle = 95 C, T_J,max = 105 C
-  EMC2305 PWM is quantized; minimum effective duty ~ PWM 51 (~1700 RPM)
+  Stock DC-axial fan kick-start floor = PWM 39 (1044 RPM); PWM 38 stalls.
+    Daemon enforces PWM_MIN_RUN=40 with 1-PWM margin → 1020 RPM at idle.
+    The chip itself honors arbitrary 0..255 values via /dev/i2c — the floor
+    is the FAN's, not the silicon's. (Earlier "EMC2305 quantizes at 51"
+    lore was actually a kernel 6.18 sysfs driver bug; see the
+    EMC2305_I2C_ADDR comment block.)
   Mono Gateway has hardware inverter on TX_DISABLE (irrelevant here, noted only
     so future GPIO-related fan-fault designs don't repeat the misdiagnosis logged
     in qdrant under "SFP+ misdiagnosis log").
@@ -123,7 +128,19 @@ ZONE_ALIASES = {
 }
 
 PWM_FLOOR    = 0     # PWM applied when all zones at/below setpoint
-PWM_MIN_RUN  = 51    # EMC2305 quantization floor; below this fan stalls
+PWM_MIN_RUN  = 40    # Kick-start floor — empirically measured 2026-05-11
+                     # on Mono Gateway DK with stock DC-axial fan: from a
+                     # stopped state, PWM=39 is the lowest value that
+                     # spins the fan up (1044 RPM); PWM=38 stays stalled.
+                     # PWM=40 spins to 1020 RPM with 1-PWM margin against
+                     # the kick-start knee. The previous lore that "the
+                     # EMC2305 quantizes PWM at 51" was actually a kernel
+                     # 6.18 sysfs driver bug — see the EMC2305_I2C_ADDR
+                     # comment block — and was wrong about the silicon.
+                     # The chip honors arbitrary 0..255 values when written
+                     # over /dev/i2c. The stall floor is the FAN's, not the
+                     # chip's. If you swap the fan to a different model,
+                     # rerun the kick-start sweep and update this constant.
 PWM_MAX      = 255   # full speed
 PWM_DEADBAND = 3     # don't write to sysfs for changes smaller than this
 EMA_ALPHA    = 0.4   # 0 = no smoothing, 1 = no history; 0.4 ~= 1.5 tick lag
@@ -375,7 +392,13 @@ class Controller:
         self.fan_path  = fan_path
         self.zone_paths = zone_paths
         self.last_written_pwm = -1   # force first write
-        self.smoothed_pwm = float(PWM_FLOOR)
+        # Initialize EMA at MIN_RUN, not 0. Otherwise the first tick produces
+        # alpha*max_pwm_zone + (1-alpha)*0 = 0.4*40 = 16, which is well below
+        # the kick-start floor and stalls the fan from rest. Once stalled the
+        # PI controller can't recover until temps climb high enough that the
+        # EMA-smoothed output crosses 39 again, by which time the SoC has
+        # been baking for many ticks.
+        self.smoothed_pwm = float(PWM_MIN_RUN)
         self.last_log_t = 0.0
 
     def integral_clamp(self, z: Zone) -> float:
@@ -422,12 +445,16 @@ class Controller:
             if z.integral < -ic: z.integral = -ic
 
             pwm_i = PWM_FLOOR + z.kp * err + z.ki * z.integral
-            # Always enforce MIN_RUN: the EMC2305 silently coerces any write
-            # below ~51 to 51 anyway (verified on hardware 2026-05-11), so
-            # writing 0 is dishonest -- the fan keeps spinning at the chip's
-            # internal idle ~1500 RPM.  Floor at MIN_RUN so the logged value
-            # matches what the chip actually does, and so the PI math doesn't
-            # waste time trying to drive below an unreachable target.
+            # Always enforce PWM_MIN_RUN (=40): the stock DC-axial fan
+            # kick-start floor was empirically measured at PWM 39 (1044 RPM)
+            # on 2026-05-11; PWM 38 stays stalled. The chip itself honors
+            # arbitrary values via /dev/i2c — the limit is the fan's, not
+            # the silicon's. Anything below 40 risks a stalled fan and a
+            # dead spot in the cooling response, so the PI math is clamped
+            # here rather than producing physically-meaningless sub-stall
+            # demand. To run the fan slower, replace it with a smaller one
+            # and re-measure the kick-start knee (see the PWM_MIN_RUN
+            # docstring).
             if pwm_i < PWM_MIN_RUN:
                 pwm_i = PWM_MIN_RUN
             pwm_i = max(0.0, min(float(PWM_MAX), pwm_i))
@@ -455,6 +482,14 @@ class Controller:
             # EMA smoothing on the final actuator command
             self.smoothed_pwm = (EMA_ALPHA * max_pwm_zone
                                  + (1.0 - EMA_ALPHA) * self.smoothed_pwm)
+            # Enforce MIN_RUN AFTER smoothing too. The per-zone floor is
+            # applied before max(), but EMA blending with a previous low
+            # value can still drag the output below MIN_RUN on a downward
+            # transition. The fan kick-start floor is a hardware limit —
+            # any output below it physically stalls the fan, no matter how
+            # the math arrived there.
+            if self.smoothed_pwm < PWM_MIN_RUN:
+                self.smoothed_pwm = float(PWM_MIN_RUN)
             target = self.smoothed_pwm
 
         out = int(round(target))
