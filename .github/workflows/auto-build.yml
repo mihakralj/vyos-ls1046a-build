@@ -383,6 +383,10 @@ jobs:
           source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
           bin/ci-build-iso.sh
 
+      - name: Verify VPP ISO contents
+        if: env.FLAVOR == 'vpp'
+        run: bin/ci-verify-vpp-iso.sh
+
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.build_iso.outputs.image_name }}
