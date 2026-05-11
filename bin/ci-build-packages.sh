@@ -103,6 +103,22 @@ for package in $packages; do
   #
   # vyos-1x has no sub-packages — invoke unfiltered.
   if [ "$package" == "linux-kernel" ]; then
+    # Defensive: nuke any stale linux source tree / symlink left over from a
+    # previous build on this persistent self-hosted runner. build.py's
+    # build_kernel() guards source download with `if not os.path.exists('linux'):`
+    # so a stale `linux -> linux-6.18.29/` symlink (from an interrupted earlier
+    # build experiment) silently skips the curl of `linux-{kernel_version}.tar.xz`
+    # and reuses whatever happens to be on disk. `make kernelversion` then reads
+    # the wrong version from the stale tree → dpkg builds linux-image-6.18.29-vyos
+    # while defaults.toml says 6.18.28 → upstream OOT kmods (jool/nat-rtsp/
+    # ipt-netflow built against linux-image-6.18.28-vyos) become uninstallable in
+    # the chroot. Symptom seen on run 25699468756 (vpp): chroot_install-packages
+    # failed with "jool : Depends: linux-image-6.18.28-vyos but it is not installable".
+    # This rm is a no-op on hosted runners (fresh workspace) and on cold self-hosted
+    # workspaces; it costs nothing on warm ones except the re-download of the
+    # canonical tarball from kernel.org (~150MB, ~5s on the Cobalt 100 link).
+    echo "### Removing any stale linux source tree before kernel build (force re-download)"
+    rm -rf linux linux-[0-9]* linux-*.tar.xz linux-*.tar.sign 2>/dev/null || true
     ./build.py --packages linux-kernel
   elif [ "$SKIP_VYOS1X_BUILD" -eq 1 ]; then
     echo "### Skipping ./build.py for vyos-1x (cache hit)"
