@@ -56,7 +56,9 @@ managing the fan; it will go to full speed.
 from __future__ import annotations
 
 import errno
+import fcntl
 import os
+import re
 import signal
 import sys
 import syslog
@@ -133,6 +135,37 @@ EMC2305_HWMON_NAME = "emc2305"
 PWM_FILE  = "pwm1"
 FAN_FILE  = "fan1_input"
 
+# Direct-i2c bypass for the broken kernel emc2305 sysfs PWM path.
+#
+# Symptom (verified on kernel 6.18.28-vyos hwmon3 / i2c-7 0x2e on
+# 2026-05-11): writing N to /sys/class/hwmon/hwmonN/pwm1 returns
+# success and read-back returns N for ~1 second, then the sysfs read
+# spontaneously reverts to 255, the chip's actual duty register
+# (0x30) stays at 0xFF, and the fan stays at MAX RPM. The kernel
+# emc2305 driver in 6.18 silently drops sub-MAX writes — the chip
+# itself is in direct-PWM mode (FAN_CONFIG1 bit7=0, FSC disabled),
+# so writing the duty register over /dev/i2c-7 with I2C_SLAVE_FORCE
+# works perfectly: writing 51 to register 0x30 immediately drops
+# fan RPM from ~8700 to ~1700. Therefore fan-pid bypasses sysfs
+# entirely for PWM writes and goes straight to the chip via
+# /dev/i2c-<bus> + I2C_SLAVE_FORCE.
+#
+# Tach reads are kept on the sysfs path because hwmon's
+# fan1_input/fan2_input numbers are correct (and bypass would
+# require us to reimplement the multi-byte tach-to-RPM conversion
+# the kernel already does for free).
+#
+# Required: i2c-dev module loaded so /dev/i2c-* exists. The
+# `lm-sensors` apt package would normally install
+# /etc/modules-load.d/i2c-dev.conf; we don't ship lm-sensors, so
+# `i2c-dev` is loaded explicitly via `modprobe` in this daemon
+# (defensive — already auto-loads on most distros from the i2c-tools
+# udev rule).
+EMC2305_I2C_ADDR = 0x2e          # SMBus 7-bit address on i2c-7
+EMC2305_FAN1_DUTY_REG = 0x30     # bit7..0 = direct PWM duty 0..255
+EMC2305_FAN2_DUTY_REG = 0x40
+I2C_SLAVE_FORCE = 0x0706         # ioctl: claim addr even if kernel driver bound
+
 HARD_FAULT_TEMP = 100.0  # at/above this any zone triggers a CRIT log
 
 # Boot whistle: audible attention-getter chirp played once at daemon startup
@@ -152,7 +185,10 @@ WHISTLE_HALF_S   = 0.3   # seconds per half-cycle (low or high)
 def find_emc2305_pwm() -> tuple[str, str]:
     """Locate EMC2305 hwmon by name (numbers drift across boots).
 
-    Returns (pwm_path, fan_input_path) both absolute.
+    Returns (pwm_path, fan_input_path) both absolute.  pwm_path is kept
+    only for legacy callers / introspection — actual PWM writes go via
+    /dev/i2c (find_emc2305_i2c() below) because the kernel emc2305 sysfs
+    PWM interface is broken on 6.18 (silently drops sub-MAX writes).
     Raises RuntimeError if EMC2305 not present (board not Mono Gateway DK,
     or i2c bus is broken).
     """
@@ -171,6 +207,68 @@ def find_emc2305_pwm() -> tuple[str, str]:
         except OSError:
             continue
     raise RuntimeError("EMC2305 hwmon not found (no entry named 'emc2305')")
+
+
+def find_emc2305_i2c() -> int:
+    """Open /dev/i2c-<bus> for the EMC2305 and claim 0x2e with I2C_SLAVE_FORCE.
+
+    Walks /sys/bus/i2c/devices/ for an entry of the form '<bus>-002e' bound to
+    the emc2305 driver, opens the corresponding /dev/i2c-<bus> char device,
+    and issues the I2C_SLAVE_FORCE ioctl so we can talk to the chip even
+    though the kernel emc2305 driver also has it claimed (the FORCE variant
+    of I2C_SLAVE permits this; the unforced variant returns EBUSY).
+
+    Returns an open i2c bus fd. Caller must os.close() it on shutdown.
+    Raises RuntimeError if no EMC2305 is bound to the i2c subsystem
+    (would only happen on a board that lacks the chip).
+    """
+    rx = re.compile(r"^(\d+)-002e$")
+    for entry in sorted(os.listdir("/sys/bus/i2c/devices")):
+        m = rx.match(entry)
+        if not m:
+            continue
+        bus = int(m.group(1))
+        # Confirm it's actually an emc2305 (could be another chip at 0x2e
+        # on a different board); read the symlinked driver name.
+        drv = f"/sys/bus/i2c/devices/{entry}/driver"
+        if os.path.islink(drv):
+            target = os.path.basename(os.readlink(drv))
+            if target != "emc2305":
+                continue
+        dev = f"/dev/i2c-{bus}"
+        if not os.path.exists(dev):
+            # i2c-dev module not loaded — best-effort modprobe.
+            try:
+                os.system("modprobe i2c-dev >/dev/null 2>&1")
+            except Exception:
+                pass
+        if not os.path.exists(dev):
+            raise RuntimeError(f"{dev} missing (i2c-dev module not loaded?)")
+        fd = os.open(dev, os.O_RDWR)
+        try:
+            fcntl.ioctl(fd, I2C_SLAVE_FORCE, EMC2305_I2C_ADDR)
+        except OSError:
+            os.close(fd)
+            raise
+        return fd
+    raise RuntimeError("No EMC2305 found on any i2c bus (no <bus>-002e entry under /sys/bus/i2c/devices)")
+
+
+def i2c_write_pwm(i2c_fd: int, value: int) -> None:
+    """Write `value` (0..255) to EMC2305 fan1 duty register 0x30.
+
+    SMBus byte-data write: send two bytes (register, value). The kernel
+    i2c char-dev does the SMBus-vs-i2c framing for us when called via
+    plain os.write because the EMC2305 register protocol is "register
+    address byte, then data byte" — identical to what os.write delivers.
+
+    Errors are logged but NOT raised (a transient i2c NACK shouldn't kill
+    the controller; we'll retry next tick).
+    """
+    try:
+        os.write(i2c_fd, bytes([EMC2305_FAN1_DUTY_REG, value & 0xFF]))
+    except OSError as e:
+        syslog.syslog(syslog.LOG_WARNING, f"fan-pid: i2c write failed: {e}")
 
 
 def find_thermal_zones() -> dict[str, str]:
@@ -211,11 +309,15 @@ def read_temp(path: str) -> Optional[float]:
 
 
 def write_pwm(path: str, value: int) -> None:
-    """Write integer 0..255 to EMC2305 PWM sysfs file.
+    """Legacy sysfs-PWM write — KEPT FOR REFERENCE ONLY.
 
-    OSError is logged but NOT raised — a transient sysfs write failure should
-    not crash the controller; we'll retry next tick.  If writes start failing
-    persistently the journald log will surface it for the operator.
+    DO NOT CALL FROM THE CONTROL LOOP. The kernel emc2305 driver in 6.18
+    silently drops sub-MAX writes via this path (sysfs reports success,
+    register 0x30 stays 0xFF, fan stays at MAX). Use i2c_write_pwm() with
+    the fd returned by find_emc2305_i2c() instead.
+
+    This stub is left so introspection / unit tests can still target the
+    sysfs path if anyone wants to demonstrate the bug.
     """
     try:
         with open(path, "w") as f:
@@ -232,15 +334,22 @@ def read_fan_rpm(path: str) -> Optional[int]:
     except (OSError, ValueError):
         return None
 
-def play_startup_whistle(pwm_path: str) -> None:
+def play_startup_whistle(i2c_fd: int) -> None:
     """One-shot audible boot-complete chirp: WHISTLE_PULSES * (low, high) pairs.
 
     Absorbed from the legacy /usr/local/bin/boot-complete-notify.sh so there is
-    a single owner of /sys/.../pwm1 (the systemd ordering between fan-pid and
-    boot-complete-notify previously raced — fan-pid would step on the first
-    pulse and the operator heard a half-chirp instead of the full pattern).
+    a single owner of the EMC2305 duty register (the systemd ordering between
+    fan-pid and boot-complete-notify previously raced — fan-pid would step
+    on the first pulse and the operator heard a half-chirp instead of the
+    full pattern).
 
-    Best-effort: any sysfs write failure is logged but does not abort daemon
+    Goes via the direct-i2c path for the same reason the control loop does:
+    the kernel sysfs PWM interface on 6.18 silently drops sub-MAX writes, so
+    a sysfs-driven whistle would only ever produce the HIGH (255) pulses
+    audibly with no audible LOW transition (the LOW phase would silently
+    stay at 255).
+
+    Best-effort: any i2c write failure is logged but does not abort daemon
     startup.  Total runtime ~ WHISTLE_PULSES * 2 * WHISTLE_HALF_S = ~3.6 s with
     defaults; this delays entry into the control loop, which is acceptable
     because steady-state thermal response time is dominated by the SoC's own
@@ -248,9 +357,9 @@ def play_startup_whistle(pwm_path: str) -> None:
     """
     try:
         for _ in range(WHISTLE_PULSES):
-            write_pwm(pwm_path, WHISTLE_LOW_PWM)
+            i2c_write_pwm(i2c_fd, WHISTLE_LOW_PWM)
             time.sleep(WHISTLE_HALF_S)
-            write_pwm(pwm_path, WHISTLE_HIGH_PWM)
+            i2c_write_pwm(i2c_fd, WHISTLE_HIGH_PWM)
             time.sleep(WHISTLE_HALF_S)
     except Exception as e:
         syslog.syslog(syslog.LOG_WARNING, f"fan-pid: startup whistle failed: {e!r}")
@@ -261,8 +370,8 @@ def play_startup_whistle(pwm_path: str) -> None:
 class Controller:
     """One PI controller per zone, output combined via max()."""
 
-    def __init__(self, pwm_path: str, fan_path: str, zone_paths: dict[str, str]):
-        self.pwm_path  = pwm_path
+    def __init__(self, i2c_fd: int, fan_path: str, zone_paths: dict[str, str]):
+        self.i2c_fd    = i2c_fd
         self.fan_path  = fan_path
         self.zone_paths = zone_paths
         self.last_written_pwm = -1   # force first write
@@ -349,11 +458,11 @@ class Controller:
             target = self.smoothed_pwm
 
         out = int(round(target))
-        # Deadband: avoid sysfs writes for noise-level changes.  Always write
+        # Deadband: avoid i2c writes for noise-level changes.  Always write
         # when crossing 0 (fan stop) or PWM_MAX (full).
         force = (out == 0 or out == PWM_MAX)
         if force or self.last_written_pwm < 0 or abs(out - self.last_written_pwm) >= PWM_DEADBAND:
-            write_pwm(self.pwm_path, out)
+            i2c_write_pwm(self.i2c_fd, out)
             self.last_written_pwm = out
 
         return out, zone_temps, zone_pwms
@@ -398,13 +507,24 @@ def main() -> int:
     except RuntimeError as e:
         syslog.syslog(syslog.LOG_ERR, f"fan-pid: {e} — failing to MAX_PWM if possible, exit 1")
         return 1
-    syslog.syslog(syslog.LOG_INFO, f"fan-pid: PWM at {pwm_path}, fan tach at {fan_path}")
+    syslog.syslog(syslog.LOG_INFO, f"fan-pid: hwmon pwm path {pwm_path} (introspection only), fan tach at {fan_path}")
+
+    # Open raw i2c bypass (kernel sysfs PWM interface is broken on 6.18 — see
+    # the EMC2305_I2C_ADDR comment block at top). All PWM writes from here on
+    # go via i2c_write_pwm(i2c_fd, value).
+    try:
+        i2c_fd = find_emc2305_i2c()
+    except (RuntimeError, OSError) as e:
+        syslog.syslog(syslog.LOG_ERR, f"fan-pid: i2c open failed: {e!r} — exit 1")
+        return 1
+    syslog.syslog(syslog.LOG_INFO, f"fan-pid: i2c bus claimed at addr 0x{EMC2305_I2C_ADDR:02x}")
 
     zone_paths = find_thermal_zones()
     if not zone_paths:
         syslog.syslog(syslog.LOG_ERR, "fan-pid: no usable thermal_zone* found — exiting")
         # Defensive: leave fan at full so the SoC isn't suffocated by a stuck low PWM.
-        write_pwm(pwm_path, PWM_MAX)
+        i2c_write_pwm(i2c_fd, PWM_MAX)
+        os.close(i2c_fd)
         return 1
     missing = [z.name for z in ZONES if z.name not in zone_paths]
     if missing:
@@ -413,12 +533,12 @@ def main() -> int:
     syslog.syslog(syslog.LOG_INFO,
                   f"fan-pid: controlling {len(zone_paths)} zones: {','.join(zone_paths)}")
 
-    play_startup_whistle(pwm_path)
+    play_startup_whistle(i2c_fd)
 
     signal.signal(signal.SIGTERM, _on_sigterm)
     signal.signal(signal.SIGINT,  _on_sigterm)
 
-    ctrl = Controller(pwm_path, fan_path, zone_paths)
+    ctrl = Controller(i2c_fd, fan_path, zone_paths)
     next_tick = time.monotonic()
     try:
         while _running:
@@ -437,8 +557,12 @@ def main() -> int:
         # writing MAX_PWM.  If a maintainer restarts the daemon under load they
         # don't want a stale low PWM throttling the SoC during the gap.
         try:
-            write_pwm(pwm_path, PWM_MAX)
+            i2c_write_pwm(i2c_fd, PWM_MAX)
             syslog.syslog(syslog.LOG_INFO, "fan-pid: shutdown — left PWM at MAX as failsafe")
+        except Exception:
+            pass
+        try:
+            os.close(i2c_fd)
         except Exception:
             pass
     return 0
