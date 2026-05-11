@@ -128,6 +128,32 @@ cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4007-xhci-ls1046a-dwc3-quirks.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4009-sfp-oem-rollball-quirk.patch"       "$KERNEL_PATCHES/"
 
+# Stage flavor-agnostic kernel fix patches from kernel/common/patches/fixes/
+# and vyos-build integration patches from kernel/common/patches/vyos/.
+# These are required for FLAVOR=default and FLAVOR=vpp (FLAVOR=ask follows
+# its own staging path via ci-setup-kernel-ask.sh / ci-stage-kernel.sh).
+# Critical for build success: 120-perf-libperf-asm-headers-srctree.patch fixes
+# the arm64 perf build failure ("No rule to make target ...
+# tools/perf/libperf/arch/arm64/include/generated/uapi/asm/unistd_64.h").
+COMMON_FIXES_DIR=kernel/common/patches/fixes
+COMMON_VYOS_DIR=kernel/common/patches/vyos
+if [ -d "$COMMON_FIXES_DIR" ]; then
+    echo "### Staging common fix patches from $COMMON_FIXES_DIR"
+    for p in "$COMMON_FIXES_DIR"/*.patch; do
+        [ -f "$p" ] || continue
+        echo "###   - $(basename "$p")"
+        cp "$p" "$KERNEL_PATCHES/"
+    done
+fi
+if [ -d "$COMMON_VYOS_DIR" ]; then
+    echo "### Staging vyos integration patches from $COMMON_VYOS_DIR"
+    for p in "$COMMON_VYOS_DIR"/*.patch; do
+        [ -f "$p" ] || continue
+        echo "###   - $(basename "$p")"
+        cp "$p" "$KERNEL_PATCHES/"
+    done
+fi
+
 # Stage FMD Shim + LP5812 source from the new common files layout.
 # Source of truth: kernel/common/files/{fsl_fmd_shim.c,lp5812/}.
 FILES_DIR=kernel/common/files
