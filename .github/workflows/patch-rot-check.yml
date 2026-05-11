@@ -71,8 +71,7 @@ jobs:
               ../kernel/common/patches/board \
               ../kernel/common/patches/fixes \
               ../kernel/flavors/ask/patches/ask \
-              ../kernel/flavors/ask/patches/fixes \
-              ../kernel/flavors/vpp/patches; do
+              ../kernel/flavors/ask/patches/fixes; do
               [ -d "$bucket" ] || continue
               for p in "$bucket"/*.patch; do
                   [ -f "$p" ] || continue

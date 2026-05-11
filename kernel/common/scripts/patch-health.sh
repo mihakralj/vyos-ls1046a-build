@@ -85,8 +85,13 @@ SDK_DIR="$REPO_ROOT/kernel/flavors/ask/sdk-sources"  # ASK-only, present iff $FL
 
 [[ -d "$COMMON_DIR/patches" ]] \
     || err "kernel/common/patches/ not found at $COMMON_DIR/patches (in-tree layout)"
-[[ -d "$FLAVOR_DIR" ]] \
-    || err "kernel/flavors/$FLAVOR/ not found (unknown flavor)"
+# kernel/flavors/$FLAVOR/ is optional: default and vpp share the upstream-tracked
+# kernel from kernel/common/ alone (their per-flavor kernel-config + patches dirs
+# were dead-code placeholders, removed 2026-05-11). Only the ask flavor has an
+# in-tree subtree. Missing dir is normal for default/vpp; only ask is mandatory.
+if [[ ! -d "$FLAVOR_DIR" && "$FLAVOR" == "ask" ]]; then
+    err "kernel/flavors/ask/ not found (required for FLAVOR=ask)"
+fi
 
 # ── Ensure kernel source is present ────────────────────────────────────
 if [[ -n "$VERSION_ARG" || ! -f "$WORK_DIR/.kernel-version" ]]; then
@@ -150,13 +155,15 @@ for sub in vyos board fixes; do
         < <(find "$d" -maxdepth 1 -type f -name '*.patch' | sort)
 done
 
-# 2. Flavor-specific: ask/ → fixes/ → flavor-root
-for sub in ask fixes ""; do
-    d="$FLAVOR_DIR/patches${sub:+/$sub}"
-    [[ -d "$d" ]] || continue
-    while IFS= read -r p; do PATCHES+=("$p"); done \
-        < <(find "$d" -maxdepth 1 -type f -name '*.patch' | sort)
-done
+# 2. Flavor-specific: ask/ → fixes/ → flavor-root (only if flavor dir exists)
+if [[ -d "$FLAVOR_DIR" ]]; then
+    for sub in ask fixes ""; do
+        d="$FLAVOR_DIR/patches${sub:+/$sub}"
+        [[ -d "$d" ]] || continue
+        while IFS= read -r p; do PATCHES+=("$p"); done \
+            < <(find "$d" -maxdepth 1 -type f -name '*.patch' | sort)
+    done
+fi
 
 (( ${#PATCHES[@]} )) || err "no patches found for flavor=$FLAVOR under $COMMON_DIR/patches/ and $FLAVOR_DIR/patches/"
 dim "discovered ${#PATCHES[@]} patches for flavor=$FLAVOR"
