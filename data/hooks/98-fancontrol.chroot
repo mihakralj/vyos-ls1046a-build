@@ -14,11 +14,9 @@
 #   2. Defensively masks fancontrol.service in case some other path drags the
 #      package in (apt recommends, vendor diff, etc.) — two daemons fighting
 #      over /sys/.../pwm1 produce sub-second oscillations that suffocate the SoC
-#   3. Installs libatomic1 — unrelated to the fan, but required by the DPAA-
-#      enabled dpdk_plugin.so (NEEDED: libatomic.so.1). Upstream vpp-plugin-dpdk
-#      does not depend on it; our custom build statically links DPDK DPAA PMD
-#      which uses __atomic builtins on aarch64. Keeping the install here so the
-#      package shopping list stays in one chroot hook.
+#   3. Installs libatomic1 — unrelated to the fan, but required by VPP plugin
+#      code paths on aarch64 that use __atomic builtins. Keeping the install
+#      here so the package shopping list stays in one chroot hook.
 apt-get update -qq
 apt-get install -y --no-install-recommends libatomic1
 # Defensive mask: even if `fancontrol` is never installed, the unit name will
