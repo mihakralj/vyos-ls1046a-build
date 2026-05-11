@@ -1,0 +1,36 @@
+# 10-emc2305-fan-pid.rules — start fan-pid.service when the EMC2305 PWM fan
+# controller binds on the i2c bus.
+#
+# Why this exists:
+#   The fan-pid.service unit has WantedBy=multi-user.target plus a DT-only
+#   board-gate condition. On the LS1046A Mono Gateway DK the EMC2305 lives
+#   on i2c-7 at address 0x2e and is bound by the kernel's `emc2305` i2c
+#   driver asynchronously when the i2c bus probe runs. That probe RACES
+#   with multi-user.target activation: when systemd evaluates the unit
+#   before the device exists, the previous `ConditionPathExistsGlob=` on
+#   the driver's bound-device symlink would silently drop the unit and
+#   systemd would NEVER re-evaluate it later. Observed 2026-05-11: at
+#   login time both conditions were satisfied yet `journalctl -u
+#   fan-pid.service` showed `-- No entries --`.
+#
+# This rule guarantees the daemon starts the moment the device actually
+# binds, regardless of whether multi-user.target won the race or not. The
+# unit's `Conflicts=fancontrol.service` and the daemon's own startup
+# idempotency (it cleanly takes over the PWM register from any prior
+# writer) make a duplicate `start` from both paths harmless: systemd will
+# coalesce the request, and at most one fan-pid process ever runs.
+#
+# Match scope:
+#   - SUBSYSTEM=="i2c"          : i2c device events only
+#   - ACTION=="bind"            : driver→device bind moment (NOT just "add",
+#                                 which fires before the driver binds and
+#                                 would race the same way as the unit did)
+#   - DRIVER=="emc2305"         : the kernel's EMC2305 PWM fan controller
+#                                 driver; matches only the device the daemon
+#                                 actually controls
+#
+# We do NOT match on KERNEL=="7-002e" so this rule survives any future
+# board revision that moves the chip to a different i2c bus or address.
+# The driver name is the stable invariant.
+ACTION=="bind", SUBSYSTEM=="i2c", DRIVER=="emc2305", \
+    TAG+="systemd", ENV{SYSTEMD_WANTS}="fan-pid.service"

@@ -8,11 +8,21 @@ Documentation=file:///usr/local/bin/fan-pid
 After=sysinit.target systemd-modules-load.service
 Conflicts=fancontrol.service
 # Board gate: only Mono Gateway DK has the EMC2305 + LS1046A thermal zones.
-# Match the LS1046A SoC string (devicetree compatible is a NUL-separated list,
-# ConditionPathExistsGlob can't peek inside; the path-exists check is gated by
-# /proc/device-tree being a real DT node, which only LS1046A-class boards expose).
+# We gate ONLY on /proc/device-tree/compatible (a stable DT-only path that
+# only LS1046A-class boards expose). The previous gate also required
+# `ConditionPathExistsGlob=/sys/bus/i2c/drivers/emc2305/*-002e` — that path
+# is created asynchronously when the i2c-7 bus probe binds the emc2305
+# driver, which RACES with multi-user.target. When the condition fails,
+# systemd silently drops the unit and does NOT re-evaluate it later, so
+# the daemon would never start even though the device appears moments
+# afterward. Observed 2026-05-11: condition met at login time but boot
+# journal had `-- No entries --` for fan-pid.service. The hwmon-device
+# discovery is now retried inside the daemon at startup with a short
+# bounded wait, and a udev rule (10-emc2305-fan-pid.rules) ALSO `systemctl
+# start`s us when the device binds — so even if multi-user.target races
+# us, the udev path catches us. The DT board gate alone is enough to keep
+# us off non-LS1046A hardware.
 ConditionPathExists=/proc/device-tree/compatible
-ConditionPathExistsGlob=/sys/bus/i2c/drivers/emc2305/*-002e
 
 [Service]
 Type=simple
