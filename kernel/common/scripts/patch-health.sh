@@ -96,6 +96,49 @@ KVER=$(cat "$WORK_DIR/.kernel-version")
 KDIR="$WORK_DIR/linux-$KVER"
 [[ -d "$KDIR" ]] || err "kernel source missing: $KDIR"
 
+# ── Ensure kernel tree is a git repo (required for `git apply --3way`) ─
+# fetch-kernel.sh extracts a vanilla tarball with no .git directory. Without
+# an index, `git apply --check --3way` short-circuits with "does not exist
+# in index" before it can do any context matching, making every patch look
+# like it failed even when it would apply cleanly. We `git init` the
+# extracted tree once and stage everything in a single baseline commit.
+# Cost: ~30 s + ~2 GB on first run (cached for subsequent runs); enables the
+# real --3way diagnostic so legitimate context drift is reported instead of
+# being masked by the missing-index error.
+# Health-check: a baseline is "good" iff .git exists AND points at a commit.
+# We've seen half-initialised .git/ trees (HEAD + empty branches/, no index
+# and no objects) survive interrupted runs and silently make every patch
+# look broken. Re-initialise from scratch in that case.
+_baseline_ok=0
+if [[ -d "$KDIR/.git" ]]; then
+    if git -C "$KDIR" rev-parse --verify -q HEAD^{commit} >/dev/null 2>&1; then
+        _baseline_ok=1
+    else
+        warn "stale .git in $KDIR (no commit) — re-initialising"
+        rm -rf "$KDIR/.git"
+    fi
+fi
+if (( ! _baseline_ok )); then
+    info "initialising git baseline in $KDIR (one-time, enables --3way)"
+    (
+        cd "$KDIR"
+        git init -q -b baseline
+        # Pure dry-run probe: skip working-tree filters that would otherwise
+        # rewrite line endings or smudge content. Use a synthetic identity so
+        # the commit doesn't depend on the operator's git config.
+        git -c core.autocrlf=false \
+            -c user.email='patch-health@localhost' \
+            -c user.name='patch-health' \
+            add -A
+        git -c user.email='patch-health@localhost' \
+            -c user.name='patch-health' \
+            commit -q -m "linux-$KVER baseline (patch-health probe)"
+    ) || err "failed to initialise git baseline in $KDIR"
+    ok "git baseline ready in $KDIR"
+else
+    dim "git baseline present in $KDIR"
+fi
+
 # ── Discover patches in apply order ────────────────────────────────────
 PATCHES=()
 
@@ -157,7 +200,15 @@ FAILED=()
 for p in "${PATCHES[@]}"; do
     parent="$(basename "$(dirname "$p")")"
     name="$parent/$(basename "$p")"
-    if out=$(git apply --check --3way -p1 --unsafe-paths --directory="$KDIR" "$p" 2>&1); then
+    # Run `git apply` *inside* the kernel tree (-C "$KDIR"). The previous
+    # form (`git apply --directory=$KDIR`) ran in the outer repo's git
+    # context, which has no index for the Linux source paths and so every
+    # patch tripped "does not exist in index" before context matching could
+    # run. With -C, --3way actually queries the kernel tree's baseline
+    # commit (or transparently falls back to direct application) and
+    # reports legitimate context drift. Patch path must be absolute since
+    # we just changed working directory.
+    if out=$(git -C "$KDIR" apply --check --3way -p1 "$p" 2>&1); then
         printf '  %s ✓%s %s\n' "$_C_GRN" "$_C_RST" "$name" | tee -a "$SUMMARY"
         PASS=$((PASS+1))
     else
