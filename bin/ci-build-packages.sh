@@ -31,6 +31,51 @@ for package in $packages; do
 
   [ "$package" == "keepalived" ] && apt-get install -y libsnmp-dev
 
+  ### vyos-1x .deb cache (skip ~6m build when patches+upstream commit unchanged)
+  #
+  # Cache key derivation (must be deterministic and survive across runs):
+  #   * UPSTREAM_SHA — short SHA from the `commit_id = "..."` line of the
+  #     vyos-1x entry in `package.toml`. This is the upstream pin in the
+  #     vyos-build tree, BEFORE build.py clones+checks-out vyos-1x/. Reading
+  #     it from the toml lets us compute the key without first having to
+  #     clone vyos-1x (which `./build.py` does on a cache miss).
+  #   * PATCH_HASH — sha256 of `cat data/vyos-1x-*.patch`. Patch files are
+  #     applied in filesystem-sort order by build.py (`sorted(patch_dir.glob('*'))`),
+  #     so renaming or reordering them legitimately invalidates the cache —
+  #     this is intentional. New patches with new numbers also bump the hash.
+  #
+  # Cache lives under $RUNNER_TOOL_CACHE (set by GitHub Actions on the
+  # self-hosted runner — survives across runs). On non-Actions runs the
+  # /tmp fallback cache is volatile by design (local dev iteration).
+  #
+  # Eviction: 14-day mtime GC at the top of every cache check; harmless to
+  # delete entries that are still hot — they'll just be rebuilt on next miss.
+  SKIP_VYOS1X_BUILD=0
+  if [ "$package" == "vyos-1x" ]; then
+    UPSTREAM_SHA=$(awk -F'"' '/^commit_id/ {print $2}' package.toml 2>/dev/null | head -1 | cut -c1-12)
+    PATCH_HASH=$(cat "$GITHUB_WORKSPACE"/data/vyos-1x-*.patch 2>/dev/null | sha256sum | cut -c1-16)
+    CACHE_DIR="${RUNNER_TOOL_CACHE:-/tmp}/vyos-1x-cache"
+    mkdir -p "$CACHE_DIR"
+    find "$CACHE_DIR" -maxdepth 1 -name 'vyos-1x_*' -mtime +14 -delete 2>/dev/null || true
+    if [ -n "$UPSTREAM_SHA" ] && [ -n "$PATCH_HASH" ]; then
+      CACHE_KEY="vyos-1x_${UPSTREAM_SHA}_${PATCH_HASH}"
+      CACHED=$(find "$CACHE_DIR" -maxdepth 1 -name "${CACHE_KEY}__*_arm64.deb" 2>/dev/null | sort)
+      if [ -n "$CACHED" ]; then
+        echo "### vyos-1x cache HIT (key=$CACHE_KEY)"
+        for c in $CACHED; do
+          orig=$(basename "$c" | sed -E "s/^${CACHE_KEY}__//")
+          cp -v "$c" "../$orig"
+        done
+        SKIP_VYOS1X_BUILD=1
+      else
+        echo "### vyos-1x cache MISS (key=$CACHE_KEY) — building"
+      fi
+    else
+      echo "### vyos-1x cache: could not derive key (UPSTREAM_SHA='$UPSTREAM_SHA' PATCH_HASH='$PATCH_HASH') — building"
+      CACHE_KEY=""
+    fi
+  fi
+
   # Restrict linux-kernel/build.py to only the kernel sub-package.
   #
   # The upstream `package.toml` defines 13 sub-packages (linux-kernel,
@@ -59,8 +104,26 @@ for package in $packages; do
   # vyos-1x has no sub-packages — invoke unfiltered.
   if [ "$package" == "linux-kernel" ]; then
     ./build.py --packages linux-kernel
+  elif [ "$SKIP_VYOS1X_BUILD" -eq 1 ]; then
+    echo "### Skipping ./build.py for vyos-1x (cache hit)"
   else
     ./build.py
+  fi
+
+  ### Populate vyos-1x cache after a successful build (cache miss path)
+  if [ "$package" == "vyos-1x" ] && [ "$SKIP_VYOS1X_BUILD" -eq 0 ] && [ -n "${CACHE_KEY:-}" ]; then
+    cached_count=0
+    for built in ../vyos-1x_*_arm64.deb; do
+      [ -f "$built" ] || continue
+      cp "$built" "$CACHE_DIR/${CACHE_KEY}__$(basename "$built")"
+      cached_count=$((cached_count + 1))
+    done
+    if [ "$cached_count" -gt 0 ]; then
+      echo "### Cached $cached_count vyos-1x .deb(s) under key $CACHE_KEY"
+      ls -lh "$CACHE_DIR/${CACHE_KEY}__"*.deb 2>/dev/null || true
+    else
+      echo "### WARNING: vyos-1x build produced no ../vyos-1x_*_arm64.deb to cache"
+    fi
   fi
 
   [ "$package" == "keepalived" ] && apt-get remove -y libsnmp-dev

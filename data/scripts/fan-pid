@@ -135,6 +135,18 @@ FAN_FILE  = "fan1_input"
 
 HARD_FAULT_TEMP = 100.0  # at/above this any zone triggers a CRIT log
 
+# Boot whistle: audible attention-getter chirp played once at daemon startup
+# so the operator can confirm the box has reached usable runtime state without
+# needing a serial console or network to be up. Six pulses of (low, high,
+# low, high…) at ~3 Hz make a recognisable "wheeeeu-wheeeeu" pattern that
+# is distinct from any organic fan modulation under load.
+# Mirrors the legacy boot-complete-notify.sh behavior (which has been
+# absorbed into this daemon — single PWM owner, no race over /sys/.../pwm1).
+WHISTLE_PULSES   = 6
+WHISTLE_LOW_PWM  = 130   # ~50 % duty — soft tone
+WHISTLE_HIGH_PWM = 255   # full speed — loud tone
+WHISTLE_HALF_S   = 0.3   # seconds per half-cycle (low or high)
+
 
 # ---------- sysfs helpers --------------------------------------------------------
 def find_emc2305_pwm() -> tuple[str, str]:
@@ -220,6 +232,30 @@ def read_fan_rpm(path: str) -> Optional[int]:
     except (OSError, ValueError):
         return None
 
+def play_startup_whistle(pwm_path: str) -> None:
+    """One-shot audible boot-complete chirp: WHISTLE_PULSES * (low, high) pairs.
+
+    Absorbed from the legacy /usr/local/bin/boot-complete-notify.sh so there is
+    a single owner of /sys/.../pwm1 (the systemd ordering between fan-pid and
+    boot-complete-notify previously raced — fan-pid would step on the first
+    pulse and the operator heard a half-chirp instead of the full pattern).
+
+    Best-effort: any sysfs write failure is logged but does not abort daemon
+    startup.  Total runtime ~ WHISTLE_PULSES * 2 * WHISTLE_HALF_S = ~3.6 s with
+    defaults; this delays entry into the control loop, which is acceptable
+    because steady-state thermal response time is dominated by the SoC's own
+    ~30 s thermal mass, not the first few PWM ticks.
+    """
+    try:
+        for _ in range(WHISTLE_PULSES):
+            write_pwm(pwm_path, WHISTLE_LOW_PWM)
+            time.sleep(WHISTLE_HALF_S)
+            write_pwm(pwm_path, WHISTLE_HIGH_PWM)
+            time.sleep(WHISTLE_HALF_S)
+    except Exception as e:
+        syslog.syslog(syslog.LOG_WARNING, f"fan-pid: startup whistle failed: {e!r}")
+    syslog.syslog(syslog.LOG_INFO, "fan-pid: startup whistle complete — entering control loop")
+
 
 # ---------- Controller ----------------------------------------------------------
 class Controller:
@@ -277,8 +313,13 @@ class Controller:
             if z.integral < -ic: z.integral = -ic
 
             pwm_i = PWM_FLOOR + z.kp * err + z.ki * z.integral
-            # Clamp to actuator range, but enforce MIN_RUN if PI says fan should run
-            if pwm_i > 0 and pwm_i < PWM_MIN_RUN:
+            # Always enforce MIN_RUN: the EMC2305 silently coerces any write
+            # below ~51 to 51 anyway (verified on hardware 2026-05-11), so
+            # writing 0 is dishonest -- the fan keeps spinning at the chip's
+            # internal idle ~1500 RPM.  Floor at MIN_RUN so the logged value
+            # matches what the chip actually does, and so the PI math doesn't
+            # waste time trying to drive below an unreachable target.
+            if pwm_i < PWM_MIN_RUN:
                 pwm_i = PWM_MIN_RUN
             pwm_i = max(0.0, min(float(PWM_MAX), pwm_i))
             z.last_pwm = pwm_i
@@ -371,6 +412,8 @@ def main() -> int:
                       f"fan-pid: thermal zones missing (will skip): {','.join(missing)}")
     syslog.syslog(syslog.LOG_INFO,
                   f"fan-pid: controlling {len(zone_paths)} zones: {','.join(zone_paths)}")
+
+    play_startup_whistle(pwm_path)
 
     signal.signal(signal.SIGTERM, _on_sigterm)
     signal.signal(signal.SIGINT,  _on_sigterm)

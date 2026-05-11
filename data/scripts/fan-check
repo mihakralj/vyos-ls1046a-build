@@ -151,7 +151,6 @@ echo
 # Thermal zones table.
 # ---------------------------------------------------------------------------
 hot_or_crit=0
-echo "${C_BOLD}Thermal zones${C_RST} (setpoint = fan-pid target; crit = force-MAX threshold)"
 printf "  %-16s  %7s  %8s  %8s  %s\n" "zone" "temp" "setpoint" "crit" "state"
 printf "  %s\n" "---------------------------------------------------------------"
 for zone in "${ZONE_ORDER[@]}"; do
