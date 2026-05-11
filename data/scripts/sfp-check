@@ -1,0 +1,136 @@
+ #!/usr/bin/env bash
+# sfp-quirk-info — print a paste-ready SFP_QUIRK_F line for every inserted
+# SFP/SFP+ module on this LS1046A Mono Gateway (or any Linux box with
+# `ethtool -m` support).
+#
+# Usage:   sudo sfp-quirk-info
+#
+# Output (one block per inserted module):
+#
+#   eth3   OEM "SFP-10G-T"          rev "02"   sn "CSY101OB0963"
+#       Connector       : 0x07 (LC)
+#       Transceiver     : 10G Ethernet: 10G Base-SR
+#       BR              : 10300MBd
+#       Length(Copper)  : 0m
+#       Verdict         : likely 10GBASE-T rollball masquerading as SR fiber
+#       --- patch line ---
+#       SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_fs_10gt),
+#
+# Send the printed block to the maintainer; the SFP_QUIRK_F("...", "...", ...)
+# line drops directly into kernel/common/patches/board/4009-sfp-oem-rollball-quirk.patch
+# (or a sibling 4010-sfp-<vendor>-quirk.patch) inside the sfp_quirks[] array.
+#
+# Heuristic for suggesting the quirk:
+#   - Connector is LC (0x07) AND
+#   - Transceiver mentions 10G Base-SR / 10G Ethernet AND
+#   - Length(Copper) is 0m AND Length(SMF/OM3/OM2) all 0m
+#   => almost certainly a copper 10GBASE-T module lying about its media,
+#      needs sfp_fixup_fs_10gt (rewrites connector→RJ45, extended_cc→10GBASE-T-SR,
+#      sets MDIO_I2C_ROLLBALL, adds 4s settle for the RTL8261 micro-controller).
+#
+# Module classes that DO NOT need this quirk:
+#   - Passive DAC (Connector 0x21 "Copper pigtail", Transceiver "Passive Cable",
+#     Length(Copper) > 0): kernel handles natively via Twinax path.
+#   - Active DAC (Transceiver "Active Cable"): kernel handles natively.
+#   - Genuine fiber (LC + non-zero Length(SMF/OM3) + non-zero TX optical power):
+#     kernel handles natively, no fixup needed.
+#   - 1000BASE-T copper SFP (BR ~1300MBd, Connector RJ45 0x22): different quirks,
+#     consult drivers/net/phy/sfp.c sfp_quirks[] for matching entries.
+# What "fixup_fs_10gt" actually means: the module advertises 10GBASE-SR fiber
+# in its EEPROM but is really a 10GBASE-T copper module with an embedded
+# rollball-MDIO PHY (RTL8261N). The fixup rewrites the connector to RJ45 and
+# extended_cc to 10GBASE-T-SR before phylink validates link modes, AND adds
+# a 4-second wait before MDIO probing so the embedded PHY's micro-controller
+# finishes booting (otherwise it returns plausible-but-wrong PHY IDs and the
+# link silently never comes up).
+#
+# Exit codes:
+#   0 — at least one SFP/SFP+ module was found and reported
+#   1 — no modules found (no cages populated, or all empty)
+#   2 — `ethtool` not installed
+
+set -u
+
+if ! command -v ethtool >/dev/null 2>&1; then
+    echo "ERROR: ethtool not installed" >&2
+    exit 2
+fi
+
+if [ "$(id -u)" != "0" ]; then
+    echo "Re-running under sudo (need root for ethtool -m EEPROM read)..." >&2
+    exec sudo -- "$0" "$@"
+fi
+
+found=0
+
+for sysnet in /sys/class/net/*; do
+    iface=$(basename "$sysnet")
+    case "$iface" in
+        lo|tun*|tap*|veth*|br*|docker*|virbr*|vyos*) continue ;;
+    esac
+
+    out=$(ethtool -m "$iface" 2>/dev/null) || continue
+    [ -z "$out" ] && continue
+
+    vendor=$(echo "$out" | awk -F: '/Vendor name /{sub(/^ +/,"",$2); sub(/ +$/,"",$2); print $2; exit}')
+    pn=$(echo "$out"     | awk -F: '/Vendor PN /  {sub(/^ +/,"",$2); sub(/ +$/,"",$2); print $2; exit}')
+    rev=$(echo "$out"    | awk -F: '/Vendor rev / {sub(/^ +/,"",$2); sub(/ +$/,"",$2); print $2; exit}')
+    sn=$(echo "$out"     | awk -F: '/Vendor SN /  {sub(/^ +/,"",$2); sub(/ +$/,"",$2); print $2; exit}')
+    conn=$(echo "$out"   | awk -F: '/Connector /  {sub(/^ +/,"",$2); sub(/ +$/,"",$2); print $2; exit}')
+    ttype=$(echo "$out"  | awk -F: '/Transceiver type /{sub(/^ +/,"",$2); sub(/ +$/,"",$2); print $2; exit}')
+    br=$(echo "$out"     | awk -F: '/BR, Nominal / {sub(/^ +/,"",$2); sub(/ +$/,"",$2); print $2; exit}')
+    lcu=$(echo "$out"    | awk -F: '/Length \(Copper\) /{sub(/^ +/,"",$2); sub(/ +$/,"",$2); print $2; exit}')
+
+    [ -z "$vendor$pn" ] && continue
+
+    found=$((found + 1))
+
+    # Classify the module to decide whether it actually needs a quirk.
+    #
+    # We care about the "10GBASE-T copper module lying about being SR fiber"
+    # case, which is what the rollball / fs_10gt fixup chain handles. Anything
+    # else (passive DAC, active DAC, real fiber, 1G copper) is either handled
+    # natively by the kernel or needs a different fixup.
+    verdict=""
+    quirk_line=""
+    lc_in_conn=$(echo "$conn"  | tr '[:upper:]' '[:lower:]')
+    lc_in_type=$(echo "$ttype" | tr '[:upper:]' '[:lower:]')
+    lcu_num=$(echo "$lcu" | grep -oE '[0-9]+' | head -n1)
+    lcu_num=${lcu_num:-0}
+
+    if echo "$lc_in_type" | grep -q 'passive cable'; then
+        verdict="passive DAC — kernel handles natively, no quirk needed"
+    elif echo "$lc_in_type" | grep -q 'active cable'; then
+        verdict="active DAC — kernel handles natively, no quirk needed"
+    elif echo "$lc_in_conn" | grep -qE '\(lc\)' \
+         && echo "$lc_in_type" | grep -qE '10g( ethernet| base-sr|base-sr|/sr)' \
+         && [ "$lcu_num" = "0" ]; then
+        verdict="LIKELY 10GBASE-T rollball masquerading as SR fiber — needs sfp_fixup_fs_10gt"
+        quirk_line="SFP_QUIRK_F(\"$vendor\", \"$pn\", sfp_fixup_fs_10gt),"
+    elif echo "$lc_in_conn" | grep -qE '\(lc\)'; then
+        verdict="appears to be genuine fiber — kernel handles natively, no quirk needed"
+    elif echo "$lc_in_conn" | grep -qE '\(rj45\)|\(copper\)'; then
+        verdict="copper module with declared media — likely no quirk needed (consult sfp_quirks[])"
+    else
+        verdict="unknown class — inspect drivers/net/phy/sfp.c sfp_quirks[] manually"
+    fi
+
+    printf '\n%s   %s "%s"   rev "%s"   sn "%s"\n' \
+        "$iface" "$vendor" "$pn" "$rev" "$sn"
+    printf '    Connector       : %s\n'   "$conn"
+    printf '    Transceiver     : %s\n'   "$ttype"
+    printf '    BR              : %s\n'   "$br"
+    printf '    Length(Copper)  : %s\n'   "$lcu"
+    printf '    Verdict         : %s\n'   "$verdict"
+    if [ -n "$quirk_line" ]; then
+        printf '    --- patch line ---\n'
+        printf '    %s\n' "$quirk_line"
+    fi
+done
+
+if [ "$found" = 0 ]; then
+    echo "No SFP/SFP+ modules detected (all cages empty, or interfaces lack ethtool -m support)." >&2
+    exit 1
+fi
+
+exit 0
