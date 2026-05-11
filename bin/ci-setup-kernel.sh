@@ -128,30 +128,27 @@ cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4007-xhci-ls1046a-dwc3-quirks.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4009-sfp-oem-rollball-quirk.patch"       "$KERNEL_PATCHES/"
 
-# Stage flavor-agnostic kernel fix patches from kernel/common/patches/fixes/
-# and vyos-build integration patches from kernel/common/patches/vyos/.
-# These are required for FLAVOR=default and FLAVOR=vpp (FLAVOR=ask follows
-# its own staging path via ci-setup-kernel-ask.sh / ci-stage-kernel.sh).
-# Critical for build success: 120-perf-libperf-asm-headers-srctree.patch fixes
-# the arm64 perf build failure ("No rule to make target ...
-# tools/perf/libperf/arch/arm64/include/generated/uapi/asm/unistd_64.h").
+# Stage critical flavor-agnostic kernel fix:
+#   120-perf-libperf-asm-headers-srctree.patch — fixes arm64 perf build
+#   failure ("No rule to make target ... tools/perf/libperf/arch/arm64/
+#   include/generated/uapi/asm/unistd_64.h"). Required for FLAVOR=default
+#   and FLAVOR=vpp on kernel 6.18+.
+#
+# We DO NOT bulk-stage kernel/common/patches/{vyos,fixes}/ because:
+#   - kernel/common/patches/vyos/{001,003}-* are byte-identical duplicates
+#     of vyos-build's upstream `0001-*`/`0003-*` patches (which the
+#     cleanup glob already preserves) and re-applying them fails.
+#   - kernel/common/patches/fixes/095-leds-lp5812-register.patch wires
+#     LP5812 Kconfig/Makefile via a unified diff, but the inject block
+#     below already does the same thing via heredoc echoes — applying
+#     both produces a conflict / duplicate hunks.
 COMMON_FIXES_DIR=kernel/common/patches/fixes
-COMMON_VYOS_DIR=kernel/common/patches/vyos
-if [ -d "$COMMON_FIXES_DIR" ]; then
-    echo "### Staging common fix patches from $COMMON_FIXES_DIR"
-    for p in "$COMMON_FIXES_DIR"/*.patch; do
-        [ -f "$p" ] || continue
-        echo "###   - $(basename "$p")"
-        cp "$p" "$KERNEL_PATCHES/"
-    done
-fi
-if [ -d "$COMMON_VYOS_DIR" ]; then
-    echo "### Staging vyos integration patches from $COMMON_VYOS_DIR"
-    for p in "$COMMON_VYOS_DIR"/*.patch; do
-        [ -f "$p" ] || continue
-        echo "###   - $(basename "$p")"
-        cp "$p" "$KERNEL_PATCHES/"
-    done
+PERF_HEADERS_PATCH="$COMMON_FIXES_DIR/120-perf-libperf-asm-headers-srctree.patch"
+if [ -f "$PERF_HEADERS_PATCH" ]; then
+    echo "### Staging $(basename "$PERF_HEADERS_PATCH") (arm64 perf build fix)"
+    cp "$PERF_HEADERS_PATCH" "$KERNEL_PATCHES/"
+else
+    echo "WARNING: $PERF_HEADERS_PATCH missing — kernel arm64 perf build will fail"
 fi
 
 # Stage FMD Shim + LP5812 source from the new common files layout.
