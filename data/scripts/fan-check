@@ -45,7 +45,7 @@ declare -A CRIT=(
     [sec-thermal]=85
 )
 HARD_FAULT_TEMP=100
-PWM_MIN_RUN=51
+PWM_MIN_RUN=40
 PWM_MAX=255
 
 # Display order (matches the daemon's max-policy combine ordering)
