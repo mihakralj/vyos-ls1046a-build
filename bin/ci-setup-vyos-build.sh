@@ -360,6 +360,19 @@ chmod +x "$CHROOT/usr/local/bin/sfp-check"
 cp board/scripts/fan-check "$CHROOT/usr/local/bin/fan-check"
 chmod +x "$CHROOT/usr/local/bin/fan-check"
 
+### CAAM (NXP SEC 5.4) status helper: `caam-check` reports DT controller
+### presence, kernel driver / built-in posture (caam, caam_jr, caamalg,
+### caamhash, caamrng, …), Job Ring count, dmesg banner, /proc/crypto
+### registrations sourced from CAAM, /dev/hwrng status with current_source,
+### and (FLAVOR=ask only) CDX <-> SEC FQ wiring health. Exit 0 healthy /
+### non-zero on fault — usable as a Nagios/monit probe. Mirrors
+### sfp-check / fan-check / ask-check style. Flavor-agnostic at install
+### time (CAAM is the same SEC 5.4 block on every LS1046A board); the
+### script's section 7 is the only ASK-specific check and self-skips on
+### default/vpp where cdx/dpa_ipsec are absent.
+cp board/scripts/caam-check "$CHROOT/usr/local/bin/caam-check"
+chmod +x "$CHROOT/usr/local/bin/caam-check"
+
 
 ### Boot-complete fan whistle is now produced by fan-pid itself
 ### (play_startup_whistle()).  The standalone boot-complete-notify
