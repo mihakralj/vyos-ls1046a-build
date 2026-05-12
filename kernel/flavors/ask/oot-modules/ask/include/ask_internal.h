@@ -174,10 +174,39 @@ void ask_flow_flush(struct ask_flow_table *t);
 
 /* ------------------------------------------------------------------------- */
 /* ask_flow_offload.c — flow_block_cb registration on dpaa netdevs            */
-/* PR8 fills these in.                                                       */
+/*                                                                            */
+/* PR8 lands the FLOW_CLS_* dispatcher (replace/destroy/stats) plus the       */
+/* block-bind helper invoked from the in-tree dpaa patch (PR11/M2.2). Until   */
+/* that patch lands, the kunit harness drives                                 */
+/* ask_flow_offload_setup_tc_block_cb() directly with a synthetic netdev.     */
+/*                                                                            */
+/* Forward declarations keep the header light — only files that actually      */
+/* call these include <net/flow_offload.h> + <net/pkt_cls.h>.                 */
 /* ------------------------------------------------------------------------- */
+struct net_device;
+struct flow_block_offload;
+enum tc_setup_type;
+
 int  ask_flow_offload_init(void);
 void ask_flow_offload_exit(void);
+
+/*
+ * Public block-bind helper. The in-tree dpaa patch (PR11) calls this from
+ * dpaa_setup_tc() when type == TC_SETUP_BLOCK; the kunit synthetic-netdev
+ * path calls it the same way. Returns 0 on BIND/UNBIND success,
+ * -EOPNOTSUPP for non-ingress binders, -ENOMEM / -ENOENT on the usual
+ * failure paths.
+ */
+int ask_flow_offload_setup_tc(struct net_device *dev,
+      struct flow_block_offload *fbo);
+
+/*
+ * The single flow_block_cb dispatched on TC_SETUP_CLSFLOWER. Exported so
+ * kunit can drive it without going through the block-bind dance, and so
+ * future per-fman block bindings can re-use the same callback.
+ */
+int ask_flow_offload_setup_tc_block_cb(enum tc_setup_type type,
+       void *type_data, void *cb_priv);
 
 /* ------------------------------------------------------------------------- */
 /* ask_xfrm.c — xfrmdev_ops packet-mode IPsec offload                         */

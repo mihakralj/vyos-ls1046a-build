@@ -27,13 +27,15 @@
 extern struct kunit_suite ask_dummy_suite;
 extern struct kunit_suite ask_hostcmd_suite;
 extern struct kunit_suite ask_flow_suite;
+extern struct kunit_suite ask_flow_offload_suite;
 
 /*
  * kunit_test_suites() is variadic: append further suites here as the
  * M1 PRs land them (ask_genl_suite, etc.). Order does not matter for
  * execution but stays canonical for readability.
  */
-kunit_test_suites(&ask_dummy_suite, &ask_hostcmd_suite, &ask_flow_suite);
+kunit_test_suites(&ask_dummy_suite, &ask_hostcmd_suite, &ask_flow_suite,
+  &ask_flow_offload_suite);
 
 MODULE_AUTHOR("ASK 2.0 contributors");
 MODULE_DESCRIPTION("ASK 2.0 kunit test harness");
