@@ -1,0 +1,46 @@
+From e7929d1fc26d9cb54882be577bc282df048a9af0 Mon Sep 17 00:00:00 2001
+From: ASK20 <ask20@local>
+Date: Tue, 12 May 2026 18:08:47 +0000
+Subject: [PATCH] ASK 2.0 placeholder: caam_qi_ext_consumer_register stub
+
+---
+ drivers/crypto/caam/qi.c | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/drivers/crypto/caam/qi.c b/drivers/crypto/caam/qi.c
+index 1e731ed87..f0daf8af3 100644
+--- a/drivers/crypto/caam/qi.c
++++ b/drivers/crypto/caam/qi.c
+@@ -811,3 +811,29 @@ int caam_qi_init(struct platform_device *caam_pdev)
+ fail_cpumask:
+ 	return err;
+ }
++
++/* ------------------------------------------------------------------ */
++/* ASK 2.0 placeholder — external descriptor sharing API.             */
++/* This is a stub. The real implementation lands in PR10 (M2.1).      */
++/* See specs/ask-2.0-rewrite-spec.md §8.1.                            */
++/* ------------------------------------------------------------------ */
++#warning "ASK 2.0: caam_qi_ext_consumer_register is a stub (PR2 placeholder)"
++
++int caam_qi_ext_consumer_register(struct caam_drv_ctx *ctx,
++				  const char *consumer_name,
++				  u32 *out_rx_fqid,
++				  u32 in_tx_fqid)
++{
++	(void)ctx;
++	(void)consumer_name;
++	(void)out_rx_fqid;
++	(void)in_tx_fqid;
++	return -EOPNOTSUPP;
++}
++EXPORT_SYMBOL_GPL(caam_qi_ext_consumer_register);
++
++void caam_qi_ext_consumer_release(struct caam_drv_ctx *ctx)
++{
++	(void)ctx;
++}
++EXPORT_SYMBOL_GPL(caam_qi_ext_consumer_release);
+-- 
+2.39.5
+
