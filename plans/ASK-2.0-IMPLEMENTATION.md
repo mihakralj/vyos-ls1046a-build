@@ -34,18 +34,18 @@ document to track.
 | 7   | M1.3 — `ask_flow.c` rhashtable + RCU             | ask20  | agent | landed |
 | 8   | M1.4 — `ask_flow_offload.c` flow_block_cb        | ask20  | agent | landed |
 | 9   | M1.5 — kunit coverage ≥ 80% on M1 surface        | ask20  | agent | landed |
-| 10  | M2.1 — `0001-caam-qi-share.patch` (real code)    | ask20  | human | not started |
-| 11  | M2.2 — `0002-dpaa-eth-flow-block.patch` (real)   | ask20  | human | not started |
-| 12  | M2.3 — `0003-fman-host-command-api.patch` (real) | ask20  | human | not started |
-| 13  | M2.4 — `OP_GET_UCODE_VERSION` against silicon    | ask20  | human | not started |
-| 14  | M2.5 — `OP_FLOW_INSERT_V4_TCP` end-to-end        | ask20  | human | not started |
-| 15  | M3.x — remaining flow types (NAT/PAT/v6/bridge)  | ask20  | mixed | not started |
-| 16  | M4.x — `ask_xfrm.c` + CAAM packet-mode IPsec     | ask20  | mixed | not started |
+| 10  | M2.1 — `0001-caam-qi-share.patch` (real code)    | ask20  | agent | not started |
+| 11  | M2.2 — `0002-dpaa-eth-flow-block.patch` (real)   | ask20  | agent | not started |
+| 12  | M2.3 — `0003-fman-host-command-api.patch` (real) | ask20  | agent | not started |
+| 13  | M2.4 — `OP_GET_UCODE_VERSION` against silicon    | ask20  | agent | not started |
+| 14  | M2.5 — `OP_FLOW_INSERT_V4_TCP` end-to-end        | ask20  | agent | not started |
+| 15  | M3.x — remaining flow types (NAT/PAT/v6/bridge)  | ask20  | agent | not started |
+| 16  | M4.x — `ask_xfrm.c` + CAAM packet-mode IPsec     | ask20  | agent | not started |
 | 17  | M5.1 — `askd` (sd-event + libmnl)                | ask20  | agent | not started |
 | 18  | M5.2 — `ask-cli` (Python Varlink client)         | ask20  | agent | not started |
 | 19  | M5.3 — VyOS CLI integration                      | ask20  | agent | not started |
 | 20  | M5.4 — VyOS conf_mode + op_mode                  | ask20  | agent | not started |
-| 21  | M6.x — VPP coexistence, soak, performance gates  | ask20  | human | not started |
+| 21  | M6.x — VPP coexistence, soak, performance gates  | ask20  | agent | not started |
 
 Status legend:
 - **not started** — no commits yet on the target branch
@@ -62,7 +62,66 @@ Status legend:
   exercise without `fman_host_cmd_send()` existing.
 - M0 is **fully agent-driven, no hardware needed.**
 - M1 is **agent-driven with kunit; no hardware needed.**
-- M2 onwards requires the live Mono Gateway DK in the lab.
+- M2 onwards requires the live Mono Gateway DK — **but the agent has
+  full remote access to it** (see "Agent hardware loop" below). The
+  earlier "human-driven" classification on rows 10–14 / 15 / 16 / 21
+  was a misread of who has to be in the room with the board. Physical
+  bring-up (USB install, serial console, port-labeling) is done; from
+  here on every M2+ task is a normal edit → cross-compile → TFTP-boot
+  → SSH-test cycle the agent runs on its own.
+
+## Agent hardware loop
+
+The Mono Gateway DK is **continuously available** to the agent over the
+LAN:
+
+- The agent runs on **LXC 200 (`192.168.1.137`, the build host)**. This
+  is the same machine that owns `/srv/tftp/` and the cross-toolchain
+  tree at `/home/vyos/kernel-ls1046a-build/work/linux-*`. Iteration
+  times per `plans/DEV-LOOP.md`: incremental kernel cross-build ≈2 min,
+  full ≈8 min, DTB only ≈30 s.
+- The live target is reachable over SSH via the `ssh` MCP server with
+  four pre-configured connections:
+  - `vyos` (192.168.1.190) — management address on eth0
+  - `vyos-eth1` (192.168.1.185) — middle RJ45
+  - `vyos-eth2` (192.168.1.189) — leftmost RJ45
+  - `vyos-eth4` (192.168.1.192) — right SFP+
+  These are wired into `/home/vyos/.config/ssh-mcp-config.json`; any
+  agent session can `ssh_execute_command`, `ssh_upload_file`,
+  `ssh_download_file` against them without setup.
+- Target state (verified 2026-05-12): `Linux vyos 6.18.28-vyos
+  aarch64`, VyOS `2026.05.11-0542-rolling`, board DT compatible
+  `mono,gateway-dk fsl,ls1046a`. CAAM up with three job rings
+  (1710000/1720000/1730000.jr), FMan probed
+  (`/sys/bus/platform/devices/1a00000.fman`), all five `dpaa_setup_tc`
+  netdevs bound (`dpaa-ethernet.0` through `dpaa-ethernet.4`).
+- Boot-image cycle is **TFTP via U-Boot `run dev_boot`**. The agent
+  does not need a serial console for routine kernel iteration — the
+  device already comes up on the dev-loop kernel and the agent
+  triggers a fresh load via either `reboot` over SSH (U-Boot auto-runs
+  `dev_boot`) or `kexec -l && kexec -e` from the running kernel. The
+  serial console is only needed for U-Boot env edits or recovery from
+  a hard crash, both of which are infrequent.
+
+What the agent **still cannot do**:
+
+- Re-flash U-Boot itself in SPI (`mtd0`) — risky, would need serial
+  recovery if it bricks. Out of scope for ASK 2.0.
+- Re-label physical ports / move SFP modules. Not needed; the existing
+  labelling (eth0 mgmt, eth1/2 RJ45, eth3/4 SFP+) is fine.
+- Run with extra physical traffic generators (Spirent/Keysight). M6
+  performance soak still wants those for line-rate measurements at the
+  Geerling 1 Mpps target, but **agent-driven iperf3 between
+  vyos-eth{1,2,4} and an LXC peer covers everything up to ~3 Gbps**
+  which is the M2/M3 verification threshold per spec §11.1.
+
+So the previous "human-driven" tag on M2+ was wrong. **Every PR in
+this plan from M2 through M5 is agent-implementable end-to-end** —
+the agent authors the kernel patch, cross-builds, TFTP-boots, SSHes
+in, runs the verification, captures dmesg, writes findings back into
+the spec / Qdrant. M6 (performance soak) is the only milestone that
+benefits from operator presence, and even there the agent can carry
+the iperf3-level numbers — only the Spirent runs need a human.
 
 ---
 
@@ -359,7 +418,7 @@ LOC budget: ~600 of additional tests.
 
 ---
 
-## M2 — Hardware brought up *(human-driven, requires Mono Gateway DK)*
+## M2 — Hardware brought up *(agent-driven via TFTP + SSH; see "Agent hardware loop" above)*
 
 **Acceptance gate (M2 done, per spec §11.1 first row):**
 - M2 gate "M2: nft flow add over IPv4 TCP → packet traverses 210 fast
@@ -417,7 +476,7 @@ on the wire. Verify with iperf.
 
 ---
 
-## M3 — All flow types *(mixed: agent-implementable but each needs hardware verify)*
+## M3 — All flow types *(agent-driven; each PR cross-builds + TFTP-boots + SSH-verifies)*
 
 **Acceptance gate:** spec §11.1 row M3 — "All non-IPsec flow types +
 bridge + offline ports. NAT works, bridge offload works."
@@ -437,7 +496,7 @@ Each follows the same pattern as PR14: implement encoder, wire into
 
 ---
 
-## M4 — IPsec offload *(human-driven, complex)*
+## M4 — IPsec offload *(agent-driven; complex but no operator-in-the-room required)*
 
 **Acceptance gate:** spec §11.1 row M4 — "AES-GCM-128 IPsec at 3 Gbps."
 
@@ -490,11 +549,15 @@ currently 023).
 
 ---
 
-## M6 — VPP coexistence + soak *(human-driven)*
+## M6 — VPP coexistence + soak *(agent-driven up to ~3 Gbps; Spirent runs need a human)*
 
 Per spec §11.1 row M6. No new code per se — performance tuning, cache-line
-alignment, RCU latency verification, the actual Spirent/Keysight runs
-against the gate values in §11.1.
+alignment, RCU latency verification. The agent can carry the soak-level
+work end-to-end via iperf3 between `vyos-eth{1,2,4}` and an LXC peer.
+The Spirent/Keysight runs at the Geerling 1 Mpps line-rate target need
+a human in the lab — but the agent should land the code, characterise
+~3 Gbps behaviour, and document what the operator needs to verify on
+the traffic generator before that final run.
 
 ---
 
