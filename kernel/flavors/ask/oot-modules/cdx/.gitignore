@@ -1,9 +1,0 @@
-*.o
-*.ko
-*.cmd
-*.mod
-*.mod.c
-*.d
-Module.symvers
-modules.order
-version.h
