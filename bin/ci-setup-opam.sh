@@ -19,7 +19,7 @@
 #
 # Reads OCAML_VERSION from environment (set in auto-build.yml `env:` block).
 # Defaults to 4.14.2 — must match vyos-1x's libvyosconfig/Makefile pin.
-set -ex
+set -ex -o pipefail
 
 OCAML_VERSION="${OCAML_VERSION:-4.14.2}"
 

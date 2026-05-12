@@ -18,7 +18,7 @@
 #   Pre-built libfm.a in data/ask-userspace/fmlib/ cannot be trusted because
 #   there is no way to prove it was built from the current patch. Rebuild it.
 
-set -e
+set -e -o pipefail
 
 KSRC="${1:?Usage: ci-build-fmlib.sh <kernel-src-dir> <staging-dir>}"
 STAGING="${2:?Usage: ci-build-fmlib.sh <kernel-src-dir> <staging-dir>}"
@@ -139,7 +139,7 @@ make libfm-arm.a \
   EXTRA_CFLAGS="-DNCSW_LINUX -fPIC -shared -DLS1043 -DDPAA_VERSION=11" \
   KERNEL_SRC="$KSRC" 2>&1 | tee /tmp/fmlib-build.log | tail -40
 MAKE_RC=${PIPESTATUS[0]}
-set -e
+set -e -o pipefail
 if [ "$MAKE_RC" != "0" ]; then
   echo "ERROR: make libfm-arm.a exited $MAKE_RC" >&2
   echo "--- full log ---" >&2

@@ -10,7 +10,7 @@
 # log for the audit. Future additions go HERE, never inline in the
 # workflow YAML, so the dev-loop on LXC 200 stays able to reproduce a
 # CI build without dispatching CI.
-set -ex
+set -ex -o pipefail
 
 echo "HOME: $HOME"
 echo "PATH: $PATH"

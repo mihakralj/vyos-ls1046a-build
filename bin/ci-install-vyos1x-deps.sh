@@ -16,7 +16,7 @@
 # ...) that don't exist in Debian bookworm main. The vyos-build repo
 # ships its own apt key + sources.list, so we install them straight from
 # the freshly-checked-out vyos-build/docker/ tree.
-set -ex
+set -ex -o pipefail
 
 # The shipped vyos-dev.key is signed with a SHA1 self-signature which
 # newer apt/sqv policies reject. The key is fine, the *signature* on it

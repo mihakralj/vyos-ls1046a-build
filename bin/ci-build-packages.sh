@@ -8,7 +8,7 @@
 # bin/ci-consume-ask-kernel.sh. Building the kernel locally in that mode
 # would just consume 20+ minutes and replace the ASK kernel with a vanilla
 # one that lacks fast-path hooks.
-set -ex
+set -ex -o pipefail
 
 # Source FLAVOR before changing CWD so common.sh can resolve REPO_ROOT.
 # shellcheck source=common.sh
