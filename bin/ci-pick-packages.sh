@@ -2,7 +2,7 @@
 # ci-pick-packages.sh — Filter built debs and copy to packages/
 # Called by: .github/workflows/auto-build.yml "Pick Packages" step
 # Expects: GITHUB_WORKSPACE set
-set -ex
+set -ex -o pipefail
 cd "${GITHUB_WORKSPACE:-.}/vyos-build"
 
 deb_files=$(find scripts/package-build -name "*.deb" -type f | \

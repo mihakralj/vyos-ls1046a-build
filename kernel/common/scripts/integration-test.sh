@@ -47,6 +47,11 @@ PASSED=0; FAILED=0; FAILURES=()
 hdr "Checkpoint A — layout + count parity"
 
 # A.1 — required dirs exist
+# kernel/flavors/{default,vpp}/ were removed 2026-05-11 — they were dead-code
+# placeholders never read by bin/ci-setup-kernel.sh. The default and vpp flavors
+# share the upstream-tracked kernel built from kernel/common/kernel-config/
+# fragments alone; FLAVOR divergence is purely userspace + config.boot variant +
+# update-check feed URL. Only the ask flavor has a non-empty kernel/ subtree.
 for d in \
     kernel/common/patches/vyos \
     kernel/common/patches/board \
@@ -54,16 +59,12 @@ for d in \
     kernel/common/kernel-config \
     kernel/common/vyos-base \
     kernel/common/scripts \
-    kernel/flavors/default/patches \
-    kernel/flavors/default/kernel-config \
     kernel/flavors/ask/patches/ask \
     kernel/flavors/ask/patches/fixes \
     kernel/flavors/ask/kernel-config \
     kernel/flavors/ask/sdk-sources \
     kernel/flavors/ask/oot-modules \
     kernel/flavors/ask/userspace-patches \
-    kernel/flavors/vpp/patches \
-    kernel/flavors/vpp/kernel-config \
 ; do
     if [[ -d "$REPO_ROOT/$d" ]]; then
         pass "dir exists: $d"
@@ -81,8 +82,6 @@ declare -A EXPECTED_PATCH_COUNT=(
     ["kernel/common/patches/fixes"]=4
     ["kernel/flavors/ask/patches/ask"]=7
     ["kernel/flavors/ask/patches/fixes"]=3
-    ["kernel/flavors/default/patches"]=0
-    ["kernel/flavors/vpp/patches"]=0
 )
 for d in "${!EXPECTED_PATCH_COUNT[@]}"; do
     actual=$(find "$REPO_ROOT/$d" -maxdepth 3 -type f -name '*.patch' 2>/dev/null | wc -l)

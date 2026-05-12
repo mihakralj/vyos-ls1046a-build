@@ -21,7 +21,7 @@
 #          AF_XDP/VPP path is NOT compatible — ASK uses its own fast-path.
 #          SFP phylink is NOT available in SDK mode (use fixed-link DTS).
 
-set -ex
+set -ex -o pipefail
 cd "${GITHUB_WORKSPACE:-.}"
 
 # ── FLAVOR gate (PR 5) ────────────────────────────────────────────────

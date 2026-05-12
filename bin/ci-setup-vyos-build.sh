@@ -2,7 +2,7 @@
 # ci-setup-vyos-build.sh — Patch vyos-build, install chroot files, hooks, and config
 # Called by: .github/workflows/auto-build.yml "Setup vyos-build" step
 # Expects: GITHUB_WORKSPACE set
-set -ex
+set -ex -o pipefail
 cd "${GITHUB_WORKSPACE:-.}"
 
 # Resolve $FLAVOR (default | ask | vpp) so the per-flavor update-check feed

@@ -13,7 +13,7 @@
 #   lib/libfm.a                    — built by ci-build-fmlib.sh
 #   include/fmd/**                 — patched fmlib headers (with 'bool shared' etc.)
 
-set -e
+set -e -o pipefail
 
 STAGING="${1:?Usage: ci-build-fmc.sh <staging-dir>}"
 
