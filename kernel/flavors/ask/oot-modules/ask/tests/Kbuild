@@ -25,4 +25,5 @@ obj-$(CONFIG_NET_ASK_KUNIT_TEST) += ask_kunit.o
 ask_kunit-y := \
 ask_test_main.o \
 ask_test_dummy.o \
-ask_test_hostcmd.o
+ask_test_hostcmd.o \
+ask_test_flow.o
