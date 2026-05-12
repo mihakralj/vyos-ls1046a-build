@@ -14,6 +14,9 @@
 #include <linux/types.h>
 #include <linux/printk.h>
 #include <linux/skbuff.h>
+#include <linux/rhashtable.h>
+#include <linux/rcupdate.h>
+#include <linux/u64_stats_sync.h>
 #include <net/netlink.h>
 
 #define ASK_DRV_NAME            "ask"
@@ -46,10 +49,128 @@ extern const struct nla_policy ask_policer_policy[];
 
 /* ------------------------------------------------------------------------- */
 /* ask_flow.c — software flow table (rhashtable + RCU)                        */
-/* PR7 fills these in; for PR1 they are all stubs returning -EOPNOTSUPP.      */
 /* ------------------------------------------------------------------------- */
+
+/*
+ * Flow-table entry. The key is what makes a flow unique on the wire
+ * (5-tuple for L4, 3-tuple for multicast, ifindex+dmac for bridge).
+ * The action is what the hardware should do once the flow matches.
+ *
+ * `cookie` is the opaque ID the upper layer uses to refer to this
+ * flow. For nf_flow_table the cookie is the `unsigned long` the
+ * core hands us in `flow_offload->priv`. For genl-driven test
+ * insertions (PR7 kunit harness) it's an arbitrary u64 the caller
+ * chose.
+ *
+ * `hw_flow_id` is what the 210 microcode returns from the
+ * INSERT_V4_TCP / INSERT_V6_* / INSERT_BRIDGE responses. PR7 fakes
+ * it with an atomic counter (no hardware yet); PR14 replaces the
+ * fake with the real hostcmd response value.
+ *
+ * `stats` is a per-flow byte/packet counter pair guarded by a
+ * u64_stats_sync seqcount. The 1Hz dump-stats poller (PR15h) updates
+ * it from the bulk OP_FLOW_DUMP_STATS response.
+ *
+ * Lifetime: allocated with kzalloc(GFP_KERNEL), freed via call_rcu()
+ * once the rhashtable removal walk completes. NEVER kfree() directly
+ * after a remove — readers in an RCU read-side critical section may
+ * still hold a pointer.
+ */
+
+#define ASK_FLOW_L3_IPV4    0
+#define ASK_FLOW_L3_IPV6    1
+
+struct ask_flow_stats {
+struct u64_stats_sync syncp;
+u64 packets;
+u64 bytes;
+u64 last_seen_ns;
+};
+
+struct ask_flow_key {
+u8  l3_proto;       /* ASK_FLOW_L3_IPV4 / ASK_FLOW_L3_IPV6 */
+u8  l4_proto;       /* IPPROTO_TCP / IPPROTO_UDP / 0 for bridge */
+__be16 sport;
+__be16 dport;
+u32 iif;
+u16 vlan_id;
+u8  src_ip[16];     /* v4 packs into first 4, last 12 zero */
+u8  dst_ip[16];
+} __packed;
+
+struct ask_flow {
+struct rhash_head node;
+struct rcu_head rcu;
+u64 cookie;
+struct ask_flow_key key;
+u32 hw_flow_id;
+u32 oif;
+u32 action_flags;
+struct ask_flow_stats stats;
+};
+
+/*
+ * Per-fman software flow table. The current scaffold has exactly ONE
+ * global table because PR7 has no concept of a per-fman device — that
+ * layering arrives with the dpaa platform-driver work in M2. The
+ * struct is parameterised on a `tag` string so when M2 grows multi-
+ * fman support we can clone the table per fman without touching the
+ * core lookup/insert code.
+ */
+struct ask_flow_table {
+struct rhashtable rht;
+atomic_t fake_hw_id_seq; /* PR7 placeholder until real hostcmd */
+atomic_t num_flows;
+const char *tag;
+};
+
 int  ask_flow_init(void);
 void ask_flow_exit(void);
+
+/* The (sole) global flow table for PR7. Multi-fman support lands later. */
+struct ask_flow_table *ask_flow_default_table(void);
+
+int  ask_flow_table_create(struct ask_flow_table *t, const char *tag);
+void ask_flow_table_destroy(struct ask_flow_table *t);
+
+/* Lookup by cookie — RCU read-side, no allocation. */
+struct ask_flow *ask_flow_lookup(struct ask_flow_table *t, u64 cookie);
+
+/*
+ * Insert. Builds an ask_flow from the supplied key/action, returns
+ * 0 on success and stores the assigned hw_flow_id in *out_hw_id.
+ * -EEXIST if the cookie is already installed. Takes ownership of
+ * neither key nor action — both are copied.
+ */
+int ask_flow_insert(struct ask_flow_table *t,
+    u64 cookie,
+    const struct ask_flow_key *key,
+    u32 oif, u32 action_flags,
+    u32 *out_hw_id);
+
+/* Remove by cookie. Returns 0 on success, -ENOENT if not present. */
+int ask_flow_remove(struct ask_flow_table *t, u64 cookie);
+
+/*
+ * Snapshot the per-flow stats into the caller-supplied out parameters.
+ * Uses u64_stats_fetch_begin/retry around the seqcount so 32-bit
+ * readers don't see torn 64-bit values.
+ */
+int ask_flow_get_stats(struct ask_flow_table *t, u64 cookie,
+       u64 *packets, u64 *bytes, u64 *last_seen_ns);
+
+/* Update stats from hardware (used by the 1Hz poller in PR15h). */
+void ask_flow_update_stats(struct ask_flow *f, u64 add_packets, u64 add_bytes);
+
+/* Iterate all flows (used by ASK_CMD_DUMP_FLOWS). The walker holds
+ * the rht bucket lock across the per-entry callback, so the callback
+ * must be allocation-light and must not itself touch the table.
+ */
+typedef int (*ask_flow_walk_fn)(struct ask_flow *f, void *arg);
+int ask_flow_walk(struct ask_flow_table *t, ask_flow_walk_fn fn, void *arg);
+
+/* Flush every flow (used by ASK_CMD_FLUSH_FLOWS). */
+void ask_flow_flush(struct ask_flow_table *t);
 
 /* ------------------------------------------------------------------------- */
 /* ask_flow_offload.c — flow_block_cb registration on dpaa netdevs            */

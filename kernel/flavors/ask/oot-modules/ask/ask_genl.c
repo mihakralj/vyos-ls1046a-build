@@ -20,7 +20,18 @@
 #include <net/sock.h>
 
 #include <uapi/linux/ask/ask.h>
-#include "ask_internal.h"
+#include "include/ask_internal.h"
+
+/* ------------------------------------------------------------------------- */
+/* PR7 (M1.3) flow command handlers — wire DUMP_FLOWS / GET_FLOW /            */
+/* FLUSH_FLOWS to the rhashtable + RCU table in ask_flow.c.                   */
+/* ------------------------------------------------------------------------- */
+static int ask_genl_dump_flows_dumpit(struct sk_buff *skb,
+      struct netlink_callback *cb);
+static int ask_genl_get_flow_doit(struct sk_buff *skb,
+  struct genl_info *info);
+static int ask_genl_flush_flows_doit(struct sk_buff *skb,
+     struct genl_info *info);
 
 /* ------------------------------------------------------------------------- */
 /* Multicast groups                                                           */
@@ -77,13 +88,13 @@ static const struct genl_small_ops ask_genl_small_ops[] = {
 .cmd      = ASK_CMD_DUMP_FLOWS,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 .flags    = GENL_UNS_ADMIN_PERM,
-.dumpit   = ask_genl_eopnotsupp_dumpit,
+.dumpit   = ask_genl_dump_flows_dumpit,
 },
 {
 .cmd      = ASK_CMD_GET_FLOW,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 .flags    = GENL_UNS_ADMIN_PERM,
-.doit     = ask_genl_eopnotsupp_doit,
+.doit     = ask_genl_get_flow_doit,
 },
 {
 .cmd      = ASK_CMD_DUMP_SAS,
@@ -95,7 +106,7 @@ static const struct genl_small_ops ask_genl_small_ops[] = {
 .cmd      = ASK_CMD_FLUSH_FLOWS,
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 .flags    = GENL_UNS_ADMIN_PERM,
-.doit     = ask_genl_eopnotsupp_doit,
+.doit     = ask_genl_flush_flows_doit,
 },
 {
 .cmd      = ASK_CMD_FLUSH_SAS,
@@ -268,3 +279,221 @@ printk_ratelimited(KERN_INFO ASK_DRV_NAME
    cmd);
 return -EOPNOTSUPP;
 }
+
+/* ------------------------------------------------------------------------- */
+/* PR7 (M1.3) flow command handlers.                                          */
+/*                                                                            */
+/* These wire ASK_CMD_DUMP_FLOWS / GET_FLOW / FLUSH_FLOWS to the              */
+/* rhashtable + RCU table created in ask_flow.c. The wire format is the       */
+/* nested ASK_ATTR_FLOW container described in spec §7. Per-flow content:     */
+/*   ASK_FLOW_ATTR_COOKIE     (u64)                                           */
+/*   ASK_FLOW_ATTR_HW_FLOW_ID (u32)  — fake counter for PR7, real in PR14     */
+/*   ASK_FLOW_ATTR_OIF        (u32)                                           */
+/*   ASK_FLOW_ATTR_ACTION_FLAGS (u32)                                         */
+/*   ASK_FLOW_ATTR_PACKETS    (u64)                                           */
+/*   ASK_FLOW_ATTR_BYTES      (u64)                                           */
+/*   ASK_FLOW_ATTR_LAST_SEEN_NS (u64)                                         */
+/*                                                                            */
+/* Stats are read under u64_stats_fetch_begin / retry inside ask_flow.c so    */
+/* 32-bit readers cannot see torn 64-bit values.                              */
+/* ------------------------------------------------------------------------- */
+
+static int ask_genl_fill_one_flow(struct sk_buff *skb, struct ask_flow *f)
+{
+struct nlattr *nest;
+u64 packets, bytes, last_seen_ns;
+unsigned int seq;
+
+nest = nla_nest_start(skb, ASK_ATTR_FLOW);
+if (!nest)
+return -EMSGSIZE;
+
+if (nla_put_u64_64bit(skb, ASK_FLOW_ATTR_ID, f->cookie,
+      ASK_FLOW_ATTR_UNSPEC))
+goto nla_put_failure;
+if (nla_put_u32(skb, ASK_FLOW_ATTR_HW_FLOW_ID, f->hw_flow_id))
+goto nla_put_failure;
+if (nla_put_u32(skb, ASK_FLOW_ATTR_OIF, f->oif))
+goto nla_put_failure;
+
+do {
+seq = u64_stats_fetch_begin(&f->stats.syncp);
+packets      = f->stats.packets;
+bytes        = f->stats.bytes;
+last_seen_ns = f->stats.last_seen_ns;
+} while (u64_stats_fetch_retry(&f->stats.syncp, seq));
+
+if (nla_put_u64_64bit(skb, ASK_FLOW_ATTR_PACKETS, packets,
+      ASK_FLOW_ATTR_UNSPEC))
+goto nla_put_failure;
+if (nla_put_u64_64bit(skb, ASK_FLOW_ATTR_BYTES, bytes,
+      ASK_FLOW_ATTR_UNSPEC))
+goto nla_put_failure;
+if (nla_put_u64_64bit(skb, ASK_FLOW_ATTR_LAST_SEEN_NS, last_seen_ns,
+      ASK_FLOW_ATTR_UNSPEC))
+goto nla_put_failure;
+
+nla_nest_end(skb, nest);
+return 0;
+
+nla_put_failure:
+nla_nest_cancel(skb, nest);
+return -EMSGSIZE;
+}
+
+/*
+ * Dump context: cb->args[0] is the index of the next flow to emit (we
+ * advance it as we walk). cb->args[1] is a sentinel that becomes 1 once
+ * the walk exhausts so subsequent dumpit calls return 0 immediately.
+ *
+ * We snapshot the entire table per call rather than threading the
+ * rhashtable_iter through cb->args because the iter holds bucket locks
+ * and the netlink core may call dumpit multiple times across grace
+ * periods. A snapshot is cheap (a few hundred entries at most for the
+ * 210 hardware) and lets the walker exit cleanly between calls.
+ */
+struct ask_genl_dump_ctx {
+struct sk_buff *skb;
+int            start;   /* skip first N entries */
+int            count;   /* how many emitted so far this call */
+int            seen;    /* total walked (start + count + skipped tail) */
+int            err;
+};
+
+static int ask_genl_dump_one_cb(struct ask_flow *f, void *arg)
+{
+struct ask_genl_dump_ctx *ctx = arg;
+int rc;
+
+if (ctx->seen < ctx->start) {
+ctx->seen++;
+return 0;
+}
+
+rc = ask_genl_fill_one_flow(ctx->skb, f);
+if (rc) {
+ctx->err = rc;
+/* Stop walk; netlink core will resume from ctx->seen next call. */
+return rc;
+}
+
+ctx->count++;
+ctx->seen++;
+return 0;
+}
+
+static int ask_genl_dump_flows_dumpit(struct sk_buff *skb,
+      struct netlink_callback *cb)
+{
+struct ask_flow_table *t = ask_flow_default_table();
+struct ask_genl_dump_ctx ctx = { 0 };
+void *hdr;
+int rc;
+
+if (!t)
+return 0; /* table not initialised → empty dump */
+
+ctx.skb   = skb;
+ctx.start = cb->args[0];
+
+hdr = genlmsg_put(skb, NETLINK_CB(cb->skb).portid, cb->nlh->nlmsg_seq,
+  &ask_genl_family, NLM_F_MULTI, ASK_CMD_DUMP_FLOWS);
+if (!hdr)
+return -EMSGSIZE;
+
+rc = ask_flow_walk(t, ask_genl_dump_one_cb, &ctx);
+
+if (ctx.count == 0 && rc == -EMSGSIZE) {
+/* First fill on this call already overflowed → real error. */
+genlmsg_cancel(skb, hdr);
+return -EMSGSIZE;
+}
+
+genlmsg_end(skb, hdr);
+
+cb->args[0] = ctx.seen;
+
+/* Returning 0 ends the dump; returning >0 keeps it going. We end
+ * when the walker exhausted the table (rc == 0 AND ctx.count fit
+ * everything still owed). On EMSGSIZE we report the bytes written
+ * so far and let netlink call us again with cb->args[0] advanced.
+ */
+if (rc == 0 || rc == -EMSGSIZE)
+return skb->len;
+
+return rc;
+}
+
+static int ask_genl_get_flow_doit(struct sk_buff *skb, struct genl_info *info)
+{
+struct ask_flow_table *t = ask_flow_default_table();
+struct ask_flow *f;
+struct sk_buff *rep;
+struct nlattr *flow_attr, *cookie_attr;
+struct nlattr *flow_tb[ASK_FLOW_ATTR_MAX + 1];
+u64 cookie;
+void *hdr;
+int rc;
+
+if (!t)
+return -ENOENT;
+
+flow_attr = info->attrs[ASK_ATTR_FLOW];
+if (!flow_attr)
+return -EINVAL;
+
+rc = nla_parse_nested(flow_tb, ASK_FLOW_ATTR_MAX, flow_attr,
+      ask_flow_policy, info->extack);
+if (rc)
+return rc;
+
+cookie_attr = flow_tb[ASK_FLOW_ATTR_ID];
+if (!cookie_attr)
+return -EINVAL;
+cookie = nla_get_u64(cookie_attr);
+
+rep = genlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
+if (!rep)
+return -ENOMEM;
+
+hdr = genlmsg_put_reply(rep, info, &ask_genl_family, 0,
+ASK_CMD_GET_FLOW);
+if (!hdr) {
+rc = -EMSGSIZE;
+goto err;
+}
+
+rcu_read_lock();
+f = ask_flow_lookup(t, cookie);
+if (!f) {
+rcu_read_unlock();
+rc = -ENOENT;
+goto err_cancel;
+}
+rc = ask_genl_fill_one_flow(rep, f);
+rcu_read_unlock();
+if (rc)
+goto err_cancel;
+
+genlmsg_end(rep, hdr);
+return genlmsg_reply(rep, info);
+
+err_cancel:
+genlmsg_cancel(rep, hdr);
+err:
+nlmsg_free(rep);
+return rc;
+}
+
+static int ask_genl_flush_flows_doit(struct sk_buff *skb,
+     struct genl_info *info)
+{
+struct ask_flow_table *t = ask_flow_default_table();
+
+if (!t)
+return -ENOENT;
+
+ask_flow_flush(t);
+return 0;
+}
+
