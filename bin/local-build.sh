@@ -1,6 +1,17 @@
 #!/bin/bash
 # Local VyOS ISO build orchestrator — runs each ci-*.sh step in sequence,
 # mimicking the env that .github/workflows/auto-build.yml provides.
+#
+# Modes:
+#   (no arg)    — full ISO build (default flow)
+#   ask-mod     — build only the ASK 2.0 OOT kernel module against an
+#                 existing dev-loop kernel tree. Inputs:
+#                   $KSRC  — absolute path to the kernel source tree
+#                            (default: /opt/kernel-ls1046a-build/work/linux-*)
+#                   $PKG_DIR — where the .deb should land
+#                              (default: $WORKSPACE)
+#                 No vyos-build / live-build / ISO; ~30 second iteration
+#                 against a pre-built kernel.
 set -e -o pipefail
 
 # Resolve this repo's root from the script's location, so the script
@@ -8,6 +19,41 @@ set -e -o pipefail
 # (native on the runner VM), or anywhere else.
 WORKSPACE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$WORKSPACE"
+
+# ─── Mode dispatch: ask-mod (OOT-module-only fast iteration) ───────────
+if [ "${1:-}" = "ask-mod" ]; then
+    # Resolve KSRC: explicit env wins, then the standard dev-loop location.
+    if [ -z "${KSRC:-}" ]; then
+        # Pick the newest linux-* dir under the dev-loop kernel workspace.
+        KSRC=$(ls -1d /opt/kernel-ls1046a-build/work/linux-[0-9]* 2>/dev/null | sort -V | tail -1)
+    fi
+    if [ -z "${KSRC:-}" ] || [ ! -d "$KSRC" ]; then
+        echo "FATAL: ask-mod mode requires a built kernel source tree."
+        echo "       Set KSRC=/path/to/linux-X.Y.Z or build the dev-loop kernel first:"
+        echo "         cd /opt/kernel-ls1046a-build && bash bin/build-local.sh kernel"
+        exit 1
+    fi
+    PKG_DIR="${PKG_DIR:-$WORKSPACE}"
+    BUILDER="$WORKSPACE/kernel/flavors/ask/oot-modules/ask/ci-build.sh"
+    if [ ! -x "$BUILDER" ]; then
+        echo "FATAL: $BUILDER missing or not executable"
+        exit 1
+    fi
+    echo "============================================================"
+    echo "==> ask-mod: building ASK 2.0 OOT module"
+    echo "==>   KSRC    = $KSRC"
+    echo "==>   PKG_DIR = $PKG_DIR"
+    echo "============================================================"
+    # Use the same cross-build env as the dev-loop kernel build.
+    ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}" \
+        bash "$BUILDER" "$KSRC" "$PKG_DIR"
+    echo
+    echo "============================================================"
+    echo "ASK OOT module build complete"
+    echo "============================================================"
+    ls -la "$PKG_DIR"/ask-modules-*.deb 2>/dev/null || true
+    exit 0
+fi
 
 # Top-level workflow env vars (auto-build.yml `env:` block)
 export DEBIAN_MIRROR="http://deb.debian.org/debian/"
@@ -111,22 +157,12 @@ export OCAML_VERSION=4.14.2
 
 step "Setup vyos-1x patches" bash bin/ci-setup-vyos1x.sh
 
-# Stage ASK kernel: prefer a LOCAL prebuilt .deb dir if LOCAL_KERNEL_DEB_DIR
-# is set; else download the pinned tag from the archived kernel-build repo's
-# GitHub release.
-if [ -n "${LOCAL_KERNEL_DEB_DIR:-}" ] && [ -d "$LOCAL_KERNEL_DEB_DIR" ]; then
-    : "${KVER:?set KVER alongside LOCAL_KERNEL_DEB_DIR (e.g. KVER=6.18.28)}"
-    export LOCAL_KERNEL_DEB_DIR KVER
-    step "Stage prebuilt ASK kernel (local)" bash bin/local-stage-ask-kernel.sh
-else
-    ASK_KERNEL_TAG="$(tr -d '[:space:]' < kernel/flavors/ask/kernel.pin)"
-    export ASK_KERNEL_TAG
-    echo "ASK_KERNEL_TAG=$ASK_KERNEL_TAG"
-    step "Consume prebuilt ASK kernel" bash bin/ci-consume-ask-kernel.sh
-fi
+# ASK 2.0 (rewrite-in-progress): the legacy ASK kernel staging steps
+# (local-stage-ask-kernel.sh, ci-consume-ask-kernel.sh, ci-setup-kernel-ask.sh)
+# were removed on the ask20 branch. All flavors now build the kernel locally
+# from the upstream-tracked source via ci-setup-kernel.sh + ci-build-packages.sh.
 
 step "Setup kernel config and patches" bash bin/ci-setup-kernel.sh
-step "Setup ASK fast-path kernel" bash bin/ci-setup-kernel-ask.sh
 step "Compile Mono DTB" bash bin/ci-compile-mono-dtb.sh
 step "Setup vyos-build" bash bin/ci-setup-vyos-build.sh
 step "Build image packages" bash bin/ci-build-packages.sh
