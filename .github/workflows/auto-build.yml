@@ -148,78 +148,19 @@ jobs:
             chown -R vyos:vyos /mnt/nvme/_work 2>/dev/null || true
           fi
 
-      - name: Install Dependencies (host base)
-        run: |
-          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-          # Clean up any VyOS apt source dropped by a prior failed run on
-          # this self-hosted runner — a stale or wrongly-signed source can
-          # break `apt-get update`.  The proper VyOS source (with trusted=yes)
-          # gets installed later, after the vyos-build checkout.
-          rm -f /etc/apt/sources.list.d/vyos-dev.list \
-                /etc/apt/sources.list.d/vyos.list \
-                /etc/apt/sources.list.d/vyos.sources \
-                /etc/apt/preferences.d/vyos
-          apt-get update -qq
-          apt-get install -y \
-            libsystemd-dev libglib2.0-dev libip4tc-dev libipset-dev libnfnetlink-dev \
-            libnftnl-dev libnl-nf-3-dev libpopt-dev libpcap-dev libbpf-dev \
-            bubblewrap git-lfs kpartx clang llvm cmake \
-            protobuf-compiler python3-cracklib python3-protobuf \
-            libreadline-dev liblua5.3-dev byacc flex \
-            dosfstools mtools zstd u-boot-tools \
-            libpcre2-dev xorriso \
-            libxml2-dev libtclap-dev \
-            live-build \
-            python3-tomli python3-jinja2 python3-yaml python3-toml python3-git \
-            python3-pystache pbuilder \
-            python3-setuptools python3-pip python3-build python3-wheel \
-            python3-stdeb dh-python debhelper devscripts equivs quilt \
-            fakeroot rsync curl ca-certificates
-          # libxml2-dev + libtclap-dev: required to build fmc from source
-          # (see bin/ci-build-fmc.sh and bin/ci-build-fmlib.sh).
-
-      - name: Install Mergiraf (AST-aware 3-way merge driver)
-        # Wired as the merge driver for *.c *.h *.py *.json *.yml *.yaml
-        # *.toml *.xml via the .gitattributes drops in
-        # bin/ci-setup-vyos1x.sh and bin/ci-setup-vyos-build.sh —
-        # `git apply --3way` invokes it on context drift.
-        #
-        # Without mergiraf, --3way silently falls back to producing
-        # conflict markers in the patched file AND returns exit 0 with
-        # a "with conflicts" warning. That broke the vpp-flavor build
-        # #25703103908 on 2026-05-11 (vyos-1x-013-hide-live-boot-disk
-        # applied "with conflicts" instead of cleanly).
-        #
-        # Mergiraf is not packaged in Debian; install the upstream
-        # Codeberg prebuilt for the runner architecture. Idempotent:
-        # skip if /usr/local/bin/mergiraf is already at the pinned
-        # version. Self-hosted runner caches the binary across builds.
-        run: |
-          set -e
-          MERGIRAF_VERSION="v0.17.0"
-          MERGIRAF_BIN=/usr/local/bin/mergiraf
-          if "$MERGIRAF_BIN" --version 2>/dev/null | grep -q "${MERGIRAF_VERSION#v}"; then
-            echo "mergiraf ${MERGIRAF_VERSION} already installed"
-            exit 0
-          fi
-          arch=$(uname -m)
-          case "$arch" in
-            aarch64) tarball="mergiraf_aarch64-unknown-linux-gnu.tar.gz" ;;
-            x86_64)  tarball="mergiraf_x86_64-unknown-linux-gnu.tar.gz" ;;
-            *) echo "WARN: no mergiraf prebuilt for $arch — git apply --3way will fall back to conflict markers"; exit 0 ;;
-          esac
-          url="https://codeberg.org/mergiraf/mergiraf/releases/download/${MERGIRAF_VERSION}/${tarball}"
-          tmp=$(mktemp -d)
-          curl -fsSL "$url" -o "$tmp/mergiraf.tar.gz"
-          tar -xzf "$tmp/mergiraf.tar.gz" -C "$tmp"
-          install -m 0755 "$tmp"/mergiraf*/mergiraf "$MERGIRAF_BIN" 2>/dev/null \
-            || install -m 0755 "$tmp/mergiraf" "$MERGIRAF_BIN"
-          rm -rf "$tmp"
-          "$MERGIRAF_BIN" --version
-
       - uses: actions/checkout@v6
         with:
           lfs: true
+
+      - name: Install Dependencies (host base + Mergiraf)
+        # All host-side packages (apt + Mergiraf prebuilt) live in
+        # bin/ci-install-deps.sh — single source of truth so the local
+        # dev loop on LXC 200 (bin/local-build.sh) can reproduce a CI
+        # build environment without dispatching CI. Adding any package
+        # inline here is a layering bug — fix the script instead.
+        run: |
+          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
+          bin/ci-install-deps.sh
 
       - name: "Initialization: set env variables"
         id: set_env_variables
