@@ -30,7 +30,7 @@ document to track.
 | 3   | M0.3 — wire build pipeline (CI + local-build)    | ask20  | agent | landed (pending commit, 2026-05-12) |
 | 4   | M0.4 — kunit harness + first dummy test          | ask20  | agent | landed (pending commit, 2026-05-12) |
 | 5   | M1.1 — `ask_main.c` + `ask_genl.c` GET_INFO      | ask20  | agent | landed (pending commit, 2026-05-12) |
-| 6   | M1.2 — `ask_hostcmd.c` wire-format encoders      | ask20  | agent | not started |
+| 6   | M1.2 — `ask_hostcmd.c` wire-format encoders      | ask20  | agent | landed (pending commit, 2026-05-12) |
 | 7   | M1.3 — `ask_flow.c` rhashtable + RCU             | ask20  | agent | not started |
 | 8   | M1.4 — `ask_flow_offload.c` flow_block_cb        | ask20  | agent | not started |
 | 9   | M1.5 — kunit coverage ≥ 80% on M1 surface        | ask20  | agent | not started |
