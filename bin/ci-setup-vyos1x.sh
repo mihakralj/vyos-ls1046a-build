@@ -2,7 +2,7 @@
 # ci-setup-vyos1x.sh — Stage vyos-1x patches and generate package.toml
 # Called by: .github/workflows/auto-build.yml "Setup vyos-1x patches" step
 # Expects: GITHUB_WORKSPACE set, MOK_KEY and MINISIGN_PRIVATE_KEY in env
-set -ex
+set -ex -o pipefail
 cd "${GITHUB_WORKSPACE:-.}"
 
 ### Write secrets to disk
@@ -26,17 +26,38 @@ for p in data/vyos-1x-*.patch; do
 done
 cp data/reftree.cache "$PATCH_STAGING/"
 
+# NOTE: pre_build_hook MUST be a TOML *literal* multi-line string ('''...''')
+# not a TOML basic multi-line string ("""...""").  The basic string interprets
+# backslash escapes, so a `\"` inside the bash sed pattern gets unescaped to a
+# literal `"` BEFORE bash sees it — turning  sed -i "/^# For \"X\"$/.../d"
+# into   sed -i "/^# For "X"$/.../d"   which bash then word-splits on the
+# embedded quotes, leaving the unquoted argument  /^# For X$/.../d  that no
+# longer matches the upstream  # For "nat64"  / # End "nat64"  block headers.
+# Result: jool + nat-rtsp dependencies are NOT stripped, vyos-1x.deb fails to
+# install in lb chroot. Verified failure mode in run 25706953044 (2026-05-12).
+# Literal '''...''' passes the body through verbatim, so bash receives \"
+# unmolested and converts it to " correctly.
 cat > "$VYOS1X_BUILD/package.toml" <<'EOF'
 [[packages]]
 name = "vyos-1x"
 commit_id = "current"
 scm_url = "https://github.com/vyos/vyos-1x.git"
-pre_build_hook = """
+pre_build_hook = '''
   set -ex
   cp ../ls1046a-patches/reftree.cache data/reftree.cache
   sed -i 's/all: clean copyright/all: clean/' Makefile
-  # Remove packages not available for ARM64 from dependencies
+  # Remove packages not available for ARM64 from dependencies, plus sub-packages
+  # that ci-build-packages.sh intentionally does NOT build (jool, nat-rtsp, qat,
+  # mlnx, realtek-r8126, realtek-r8152, ipt-netflow, igb, ixgbe, ixgbevf —
+  # see bin/ci-build-packages.sh for the rationale).  Stripping at sed-time
+  # (pre-patch) keeps debian/control's blob SHA stable for any later git apply
+  # --3way calls that depend on the upstream blob hash.
   sed -i '/accel-ppp-ng/d' debian/control
+  # Strip whole "# For X" / "# End X" guard blocks so the leading comment and
+  # the trailing comment go away together with the body.
+  for blk in nat64 'system conntrack modules rtsp' 'qat' 'mellanox' 'realtek-r8126' 'realtek-r8152' 'ipt-netflow' 'intel-igb' 'intel-ixgbe' 'intel-ixgbevf'; do
+    sed -i "/^# For \"${blk}\"$/,/^# End \"${blk}\"$/d" debian/control
+  done
   # Relax pylint --errors-only to ignore checks added in pylint 3.x that
   # the upstream vyos-builder Docker image (Debian bookworm, pylint 2.16)
   # never enforced.  We're on Debian trixie (pylint 3.3.4) which trips:
@@ -99,8 +120,19 @@ GITATTR
     echo "::error::legacy DPAA PMD unbind path is still present in vpp.py" >&2
     patch_fail=1
   fi
-  [ $patch_fail -eq 1 ] && echo "ERROR: some patches failed — check build output" >&2 && exit 1
-"""
+  # NOTE: a trailing `[ X ] && cmd && exit 1` chain returns 1 when the test
+  # is FALSE (patch_fail=0), and as the LAST statement in the hook that 1
+  # becomes the script's exit status — vyos-build then logs "pre_build_hook
+  # failed" and aborts the rebuild, leaving any stale vyos-1x.deb from a
+  # prior successful run on the self-hosted runner to be picked up by lb
+  # chroot_install (with its un-stripped jool / nat-rtsp deps). Use a
+  # proper if-block and an explicit `exit 0` on the success path.
+  if [ $patch_fail -eq 1 ]; then
+    echo "ERROR: some patches failed — check build output" >&2
+    exit 1
+  fi
+  exit 0
+'''
 EOF
 
 echo "### vyos-1x patch staging complete: $(ls "$PATCH_STAGING" | wc -l) files staged"

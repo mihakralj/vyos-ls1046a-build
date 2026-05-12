@@ -148,39 +148,17 @@ jobs:
             chown -R vyos:vyos /mnt/nvme/_work 2>/dev/null || true
           fi
 
-      - name: Install Dependencies (host base)
-        run: |
-          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-          # Clean up any VyOS apt source dropped by a prior failed run on
-          # this self-hosted runner — a stale or wrongly-signed source can
-          # break `apt-get update`.  The proper VyOS source (with trusted=yes)
-          # gets installed later, after the vyos-build checkout.
-          rm -f /etc/apt/sources.list.d/vyos-dev.list \
-                /etc/apt/sources.list.d/vyos.list \
-                /etc/apt/sources.list.d/vyos.sources \
-                /etc/apt/preferences.d/vyos
-          apt-get update -qq
-          apt-get install -y \
-            libsystemd-dev libglib2.0-dev libip4tc-dev libipset-dev libnfnetlink-dev \
-            libnftnl-dev libnl-nf-3-dev libpopt-dev libpcap-dev libbpf-dev \
-            bubblewrap git-lfs kpartx clang llvm cmake \
-            protobuf-compiler python3-cracklib python3-protobuf \
-            libreadline-dev liblua5.3-dev byacc flex \
-            dosfstools mtools zstd u-boot-tools \
-            libpcre2-dev xorriso \
-            libxml2-dev libtclap-dev \
-            live-build \
-            python3-tomli python3-jinja2 python3-yaml python3-toml python3-git \
-            python3-pystache pbuilder \
-            python3-setuptools python3-pip python3-build python3-wheel \
-            python3-stdeb dh-python debhelper devscripts equivs quilt \
-            fakeroot rsync curl ca-certificates
-          # libxml2-dev + libtclap-dev: required to build fmc from source
-          # (see bin/ci-build-fmc.sh and bin/ci-build-fmlib.sh).
-
       - uses: actions/checkout@v6
         with:
           lfs: true
+
+      - name: Install Dependencies (host base + Mergiraf)
+        # All host-side packages (apt + Mergiraf prebuilt) live in
+        # bin/ci-install-deps.sh — single source of truth so the local
+        # dev loop on LXC 200 (bin/local-build.sh) can reproduce a CI
+        # build environment without dispatching CI. Adding any package
+        # inline here is a layering bug — fix the script instead.
+        run: bin/ci-install-deps.sh
 
       - name: "Initialization: set env variables"
         id: set_env_variables
@@ -198,114 +176,26 @@ jobs:
           path: vyos-build
 
       - name: Install vyos-1x build dependencies (VyOS apt repo)
-        # mk-build-deps for vyos-1x needs VyOS-specific packages
-        # (python3-vici >=5.7.2, python3-certbot-nginx, python3-hurry.filesize,
-        #  python3-nose2, ...) that don't exist in Debian bookworm main.  The
-        # vyos-build repo ships its own apt key + sources.list, so we install
-        # them straight from the freshly-checked-out vyos-build/docker/.
-        run: |
-          set -e
-          # The shipped vyos-dev.key is signed with a SHA1 self-signature
-          # which newer apt/sqv policies reject. The key is fine, the
-          # *signature* on it is just old. We trust it (the upstream
-          # vyos-builder Docker container trusts it too), so mark the apt
-          # source as `trusted=yes` to bypass the signature check.
-          install -m 0644 vyos-build/docker/vyos-dev.key \
-            /usr/share/keyrings/vyos-dev-archive-keyring.asc
-          # Override the shipped vyos-dev.list to add `trusted=yes`.
-          echo 'deb [trusted=yes signed-by=/usr/share/keyrings/vyos-dev-archive-keyring.asc] https://packages.vyos.net/repositories/current current main' \
-            > /etc/apt/sources.list.d/vyos-dev.list
-          cat /etc/apt/sources.list.d/vyos-dev.list
-          apt-get update -qq
-          apt-get install -y --no-install-recommends \
-            libzmq3-dev pylint whois \
-            python3-pyudev python3-systemd python3-pam python3-pyroute2 \
-            python3-voluptuous python3-lxml python3-xmltodict python3-coverage \
-            python3-netaddr python3-netifaces python3-paramiko python3-passlib \
-            python3-psutil python3-tabulate python3-zmq python3-fastapi \
-            python3-vici python3-certbot-nginx python3-hurry.filesize \
-            python3-nose2 \
-            python3-jmespath python3-pyhumps
+        # All package installs live in bin/ci-install-vyos1x-deps.sh so the
+        # LXC 200 dev loop (bin/local-build.sh) can reproduce it without
+        # dispatching CI. Inline additions here are a layering bug — edit
+        # the script. ORDER MATTERS: this step MUST run AFTER the `vyos-build`
+        # checkout (the script reads vyos-build/docker/vyos-dev.key), which
+        # is why it cannot fold into bin/ci-install-deps.sh (which runs at
+        # job start, before vyos-build is cloned).
+        run: bin/ci-install-vyos1x-deps.sh
 
-      - name: Install j2lint (Jinja2 linter not packaged in Debian)
-        # vyos-1x's debian/rules invokes `make j2lint` which runs the
-        # `j2lint` binary on data/templates/.  The Makefile errors out
-        # ("j2lint binary not found, consider installing: pip install
-        # git+https://github.com/aristanetworks/j2lint.git@341b5d5db86")
-        # if the binary isn't on PATH.  Inside the upstream vyos-builder
-        # Docker image j2lint is preinstalled via that exact pip URL.
-        # Replicate that on the bare runner (Debian bookworm marks system
-        # Python externally-managed via PEP 668, so we use
-        # --break-system-packages since we're in a CI runner, not a user
-        # system).
-        run: |
-          set -e
-          if ! command -v j2lint >/dev/null 2>&1; then
-            pip install --break-system-packages \
-              'git+https://github.com/aristanetworks/j2lint.git@341b5d5db86'
-          fi
-          j2lint --version
+      # j2lint install moved to bin/ci-install-deps.sh (runs as part of the
+      # "Install Dependencies" step). Keeping the install in one script keeps
+      # the local LXC dev loop reproducible without dispatching CI.
 
       - name: Bootstrap OCaml/opam for libvyosconfig (cached on runner)
-        # vyos-1x's debian/rules calls 'opam env --root=/opt/opam' to build
-        # libvyosconfig.  The vyos-builder Dockerfile (vyos-build/docker/
-        # Dockerfile lines 144-165) installs opam from upstream, runs
-        # 'opam init --root=/opt/opam --comp=4.14.2', then 'opam install'
-        # 14 OCaml packages (re, pcre2, num, ctypes, ctypes-foreign,
-        # ctypes-build, containers, fileutils, xml-light, mustache,
-        # yojson, fmt, logs).  Total cold time: ~15 min.
-        #
-        # /opt/opam lives outside $GITHUB_WORKSPACE, so on the persistent
-        # self-hosted runner it survives between builds.  Bootstrap once
-        # (slow), reuse forever (~3 s).
-        run: |
-          set -e
-          # Install opam itself if missing (fast: Debian package).
-          if [ ! -x /usr/bin/opam ]; then
-            apt-get install -y --no-install-recommends opam build-essential bubblewrap unzip
-          fi
-          # Init opam at the path vyos-1x's Makefile expects (slow first
-          # time only — survives between runner builds).
-          if [ ! -d /opt/opam ]; then
-            opam init --root=/opt/opam --comp=4.14.2 \
-                      --disable-sandboxing --no-setup --yes
-          fi
-          eval "$(opam env --root=/opt/opam --set-root)"
-          # 'opam install -y' on already-installed packages is a fast no-op
-          # (~1 s for 13 packages), so unconditionally install — cheap and
-          # keeps the recipe declarative.
-          opam install -y \
-            re pcre2 num ctypes ctypes-foreign ctypes-build containers \
-            fileutils xml-light mustache yojson fmt logs
-          # Pin vyos1x-config and vyconf at the exact commits vyos-1x's
-          # libvyosconfig/Makefile depends on.  The Makefile's `depends`
-          # target tries to do these pins itself via `sudo sh -c`, but
-          # only when /usr/lib/libvyosconfig.so.0 isn't already present;
-          # vyos-1x's debian/rules then unconditionally copies
-          # $OPAM/share/vyconf/vyconf.proto and the vyconf{d,_cli,_cli_compat}
-          # binaries into the libvyosconfig .deb at install time
-          # ("cp /opt/opam/share/vyconf/vyconf.proto ..."), so vyconf
-          # MUST be opam-installed in /opt/opam regardless of whether
-          # libvyosconfig is rebuilt.
-          # Commit pins are taken verbatim from vyos-1x's
-          # libvyosconfig/Makefile lines 45-46.
-          opam pin add -y -n vyos1x-config \
-            'https://github.com/vyos/vyos1x-config.git#52132ad2c0992bf6f17a06173384030d93a29053'
-          opam pin add -y -n vyconf \
-            'https://github.com/vyos/vyconf.git#e25b13ae3040d02326f01bf9bedd097795fb3a62'
-          opam install -y vyos1x-config vyconf
-          # vyos-1x's top-level Makefile gates the libvyosconfig build behind
-          #   @if [ ! -f /usr/lib/libvyosconfig.so.0 ]; then make -C libvyosconfig all; ... fi
-          # but vyos-1x's debian/rules:159 unconditionally does
-          #   cp libvyosconfig/_build/libvyosconfig.so debian/tmp/libvyosconfig/usr/lib/libvyosconfig.so.0
-          # If a previous build's `sudo make install` left
-          # /usr/lib/libvyosconfig.so.0 on the persistent self-hosted runner,
-          # the gate is true, the Makefile silently no-ops, _build/
-          # is never created, and the cp fails with
-          #   cp: cannot stat 'libvyosconfig/_build/libvyosconfig.so'.
-          # On the GitHub-hosted ARM runner this never reproduces because the
-          # filesystem is fresh per-job. Force a clean state on every build.
-          rm -f /usr/lib/libvyosconfig.so.0 /usr/lib/libvyosconfig.so
+        # All bootstrap logic lives in bin/ci-setup-opam.sh so the LXC 200
+        # dev loop (bin/local-build.sh) can reproduce it without dispatching
+        # CI. Inline additions here are a layering bug — edit the script.
+        # /opt/opam is outside $GITHUB_WORKSPACE so it survives across runs
+        # on the persistent self-hosted runner: ~15 min cold, ~3 s warm.
+        run: bin/ci-setup-opam.sh
 
       - name: Setup vyos-1x patches
         env:
@@ -365,14 +255,10 @@ jobs:
         run: bin/ci-setup-vyos-build.sh
 
       - name: Build Image Packages
-        run: |
-          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-          bin/ci-build-packages.sh
+        run: bin/ci-build-packages.sh
 
       - name: Pick Packages
-        run: |
-          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-          bin/ci-pick-packages.sh
+        run: bin/ci-pick-packages.sh
 
       - name: Install extra packages (non-Debian)
         run: bin/ci-install-extra-packages.sh
@@ -381,9 +267,11 @@ jobs:
         id: build_iso
         env:
           BUILD_VERSION: ${{ steps.set_env_variables.outputs.build_version }}
-        run: |
-          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-          bin/ci-build-iso.sh
+        run: bin/ci-build-iso.sh
+
+      - name: Verify VPP ISO contents
+        if: env.FLAVOR == 'vpp'
+        run: bin/ci-verify-vpp-iso.sh
 
       - name: Verify VPP ISO contents
         if: env.FLAVOR == 'vpp'
