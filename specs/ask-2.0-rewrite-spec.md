@@ -1,70 +1,104 @@
 # ASK 2.0 — Clean-Room Rewrite of the NXP ASK Fast-Path for VyOS on LS1046A
 
-**Status:** Draft v0.5 (renamed ASK 2.0, 2026-05-11) — supersedes v0.4 in entirety.
-**Target hardware:** NXP LS1046A Mono Gateway DK (Cortex-A72 ×4, FMan v3L, QMan v3, BMan v3, CAAM SEC 5.4).
-**Target software:** Linux mainline kernel 6.18.x, ARM64, VyOS 1.5+, FLAVOR=ask in this repo.
-**Reference implementation (the "ASK 1.x cribsheet"):** the NXP ASK source archived in this repo at `ASK/` plus `data/kernel-patches/003-ask-kernel-hooks.patch` (the kernel-hooks patch absorbed from the formerly-separate kernel build repo's `mt-6.12.y` baseline; 5797 lines, 64 mainline files modified + 10 new files added).
-**License intent:** GPL-2.0-or-later for kernel parts (matches NXP's ASK licensing); GPL-2.0-or-later for userspace daemons; LGPL-2.1-or-later for libfci.
-**Naming convention.** "**ASK 1.x**" = the proprietary NXP-LSDK-derived stack as it ships today (`cdx.ko`, `auto_bridge.ko`, `cmm`, `dpa_app`, `libfci`, `003-ask-kernel-hooks.patch`). "**ASK 2.0**" = the clean-room replacement defined by this spec (`ask.ko`, `ask_bridge.ko`, `askd`, `ask-load`, `libask_fci`, `200-ask2-hooks.patch`). The umbrella brand "**ASK**" — and the FLAVOR=ask build target, the `kernel/flavors/ask/` tree, the `/* ASK-edit */` markers, the `ask-modules-load.service` unit — all stay; only the proprietary internals get renamed.
-**What this spec is NOT:** a rewrite of `fsl_dpa`, `fsl_dpaa_mac`, `fsl_qbman`, mainline FMan, AF_XDP, tc-flower, CAAM xfrm, or DPDK PMD. Those belong to the **default flavor** of this repo and have separate specs/plans (`plans/NETWORKING-DEEP-DIVE.md`, `plans/VPP.md`, `plans/archive/MIGRATION-PLAN-6.18.md`). Anything below the FMan microcode horizon is out of scope.
+**Status:** Draft v0.6 (supersedes v0.5 in entirety). 2026-05-11.
+**Target hardware:** NXP LS1046A Mono Gateway DK (Cortex-A72 ×4 @ 1.6 GHz, FMan v3L, QMan v3, BMan v3, CAAM SEC 5.4, 384 KB MURAM).
+**Target software:** Linux mainline kernel 6.18 LTS, ARM64, VyOS rolling release, FLAVOR=ask.
+**Target microcode:** NXP proprietary 210-series fine classifier ucode (LS1046 r1.0 variant), baked into Mono Gateway firmware and exposed to U-Boot via SPI flash on every shipped unit.
+**Reference implementations** (functional, not code donors):
+- NXP ASK source archived at `we-are-mono/ASK` branch `mt-6.12.y` — kernel modules `cdx/`, `fci/`, `auto_bridge/`; userspace `cmm/`, `dpa_app/`.
+- `we-are-mono/opnsense-deps/fastpath/` — FreeBSD port of the same stack, useful cross-reference for protocol-level behaviour.
+- NXP ASK whitepaper `ASKTHOFOPERMWP.pdf` — operational model description.
+- NXP application notes AN4785 (IPsec on QorIQ), AN4760 (FMC), AN12714 (CAAM secure keys).
+**License intent:** GPL-2.0-or-later kernel parts; GPL-2.0-or-later userspace daemons; LGPL-2.1-or-later for `libask_fci`; the 210 microcode binary keeps NXP's binary EULA terms (redistribution path: Mono ships it on board, ASK 2.0 build pipeline never touches it).
+**Naming convention.**
+- **ASK 1.x** — the proprietary NXP-LSDK-derived stack as it ships today: `cdx.ko`, `auto_bridge.ko`, `cmm`, `dpa_app`, `libfci`, the 5797-line in-tree-hooks patch, the vendored SDK FMan/QMan/BMan drivers.
+- **ASK 2.0** — this spec: `ask.ko`, `ask_bridge.ko`, `askd`, `ask-load`, `libask_fci`, a ~1500-line in-tree-hooks patch, and a ~200-line patch to `drivers/crypto/caam/qi.c`.
+
+The umbrella brand **ASK** and the `FLAVOR=ask` build target carry forward unchanged.
 
 ---
 
-## 0. What is ASK and why does it need a rewrite?
+## 0. Document discipline (read this first if you're an agent)
 
-The **NXP Application Solutions Kit (ASK)** is a hardware-accelerated packet-processing stack for QorIQ Layerscape SoCs. On LS1046A it short-circuits established conntrack flows directly inside FMan — established TCP/UDP/ESP/PPPoE flows are matched in FMan's hash tables (CC nodes), parameters looked up in MURAM, and frames forwarded to the egress port via BMI without touching an A72 core. CMM (the userspace decision engine in ASK 1.x) watches `nf_conntrack` and pushes eligible flows into the FMan tables via the FCI netlink channel. Software stays authoritative; hardware accelerates the established-flow path.
+This spec is intended to be consumed by both human engineers and AI coding agents (Cline, Claude Code, Cursor). Sections are tagged where useful:
 
-The ASK 1.x stack as it ships today (FLAVOR=ask in this repo) is a **fork of NXP's LSDK**:
+- `[AGENT-IMPLEMENTABLE]` — sufficient context that a competent agent should produce a working first pass without human supervision. Effort estimates assume agent-driven implementation with human review.
+- `[HUMAN-REQUIRED]` — work that cannot be agent-implemented because it depends on hardware probing, NDA-protected behaviour, commercial negotiation, or judgement calls on undocumented silicon. Agents may assist with paperwork and analysis but cannot produce the deliverable alone.
+- `[MIXED]` — agent does the bulk, human does the verification step on real hardware before the deliverable is accepted.
 
-* `kernel/flavors/ask/sdk-sources/` — 266 vendored SDK files (`sdk_fman/`, `sdk_dpaa/`, `fsl_qbman/`, mEMAC bits, …) carrying 35 `/* ASK-edit (askN, …) */` markers. Frozen at the PR-7 single-repo absorption. Cannot be upstreamed. Kconfig-exclusive with mainline (`FSL_SDK_DPA depends on !FSL_DPAA`).
-* `kernel/flavors/ask/patches/` — 16 patches against linux-6.6.137, ported piecemeal to 6.18.28.
-* `kernel/flavors/ask/oot-modules/cdx/` — 15-file out-of-tree `cdx.ko` (the fast-path engine; programs FMan from kernel context, calls `dpa_app` via UMH at insmod, registers `/dev/cdx_ctrl`, talks to FCI via NETLINK_KEY=32).
-* `kernel/flavors/ask/oot-modules/auto_bridge/auto_bridge.c` — single-file OOT module that watches bridge-FDB and notifies `cdx` of L2 flows eligible for offload.
-* `data/kernel-patches/003-ask-kernel-hooks.patch` — the **6.12.y-derived** in-tree-hooks patch: 64 mainline files modified, 10 brand-new files added (`net/netfilter/comcerto_fp_netfilter.c`, `xt_qosmark.c`, `xt_qosconnmark.c`, `net/xfrm/ipsec_flow.{c,h}`, four UAPI headers, …). This is the kernel-side ABI the OOT modules depend on.
-* `ASK/cmm/` — userspace daemon (60+ files; `cmm.c`, `conntrack.c`, `ffbridge.c`, `ffcontrol.c`, `forward_engine.c`, `keytrack.c`, `module_expt.c`, `module_icc.c`, `libcmm.c`, …).
-* `ASK/dpa_app/` — userspace policy programmer (`dpa.c`, `main.c`, `testapp.c`).
-* `ASK/fci/lib/` — `libfci.c` + `libfci.h` (LGPL).
-* `ASK/patches/{fmc,fmlib}/01-mono-ask-extensions.patch` — patches against upstream `nxp-qoriq/fmlib` and `nxp-qoriq/fmc` that extend `t_FmPcdKgSchemeParams` (adds `bool shared`) and `t_FmPcdHashTableParams` (timestamp/IP-reassembly/shared-scheme fields). Required because `dpa_app` consumes those structs by value.
+Sections without a tag are reference material — read but don't act on them.
 
-The replacement target — the **ASK 2.0** clean-room rewrite — must:
-
-1. Reproduce the externally visible behaviour (same `/dev/cdx_ctrl` ioctl set, same `cdx_cfg.xml` and `cdx_pcd.xml` schemas, same NETLINK_KEY=32 protocol, same CMM CLI surface and `/etc/config/fastforward` format) so existing operator tooling works unchanged.
-2. Be implemented from scratch against the LS1046A Reference Manual and FMan documentation, **not** by copying NXP's SDK source. Existing `ASK/` tree and `data/kernel-patches/003-ask-kernel-hooks.patch` are the **functional reference**, not a code donor.
-3. Target mainline 6.18.x. No 6.6 backport. No SDK fork.
-4. Keep depending on the **proprietary FMan microcode v210.10.1** (loaded by U-Boot from SPI NOR `mtd4`, injected into the DTB `fsl,fman-firmware` node before kernel handoff). The microcode is the silicon program that gives FMan its parse/classify/forward pipeline; it is not in the rewrite scope and cannot be replaced from a clean-room.
-5. Coexist with the default-flavor mainline DPAA1 stack at the **flavor** level (Kconfig-exclusive, separate kernel build), not at runtime.
-
-This spec defines (1)–(5).
+When this document says "the agent" it means whatever coding agent is driving the implementation in the current session, not Claude specifically.
 
 ---
 
-## 1. Hardware reference — the parts that matter for ASK
+## 1. What ASK is, what 210 ucode is, and why the rewrite
 
-### 1.1 The FMan classifier silicon
+### 1.1 What ASK is
 
-Authoritative source: LS1046A RM chapter 8 (DPAA), specifically §8.7 (parser+KeyGen), §8.8 (CC), §8.9 (Policer), §8.10 (BMI). Implementer must read these chapters before writing any ASK 2.0 code; this spec is a roadmap, not a substitute.
+The **NXP Application Solutions Kit (ASK)** is a hardware-accelerated packet-processing stack for QorIQ Layerscape SoCs. On LS1046A it converts established conntrack flows into FMan-resident flow-table entries: the first packet of a connection traverses the kernel slow path, conntrack catches it, ASK programs FMan to recognise subsequent packets of the same flow, and from then on FMan parses, classifies, modifies (NAT, TTL), and forwards the frame directly via BMI without an A72 core ever touching it. NXP's published number for this on a Layerscape router workload is **CPU utilisation below 5%** during line-rate forwarding (whitepaper `ASKTHOFOPERMWP.pdf`).
 
-Each FMan port has, per RM:
+The ASK stack as shipped today is built on three layers:
 
-* **Parser** — runs proprietary microcode on a dedicated RISC engine inside FMan (NOT on the A72). For the default flavor we use the standard ucode (`fsl_fman_ucode_ls1046_r1.0_106_4_18.bin`); for ASK we use **v210.10.1** (proprietary NXP binary — a different program for the same engine that adds the parse-result fields ASK needs and the BMI short-circuit path). Both feed into KeyGen.
-* **KeyGen** — extracts a hash key from the parse result, hashes it (CRC), looks up a base FQID, and enqueues. Up to 128 FQ-distributions ("schemes") per port. Used by mainline mostly for RSS; used by ASK as the front-half of CC-table lookup.
-* **Coarse Classifier (CC)** — the silicon block this whole spec is about. Per FMan, CC supports:
-  * **Exact-match** nodes (TCAM-like) — up to 256 entries per node.
-  * **Hash-table** nodes — chained `<num_sets>` × `<num_ways>` buckets in MURAM (and optionally DDR for "external hash"). The `cdx_pcd.xml` we ship hard-codes mask `0x7fff` for IPv4/IPv6 5-tuple tables (32K buckets) and `0xff` for narrower tables.
-  * Per-key actions: enqueue-to-FQ (default), direct-forward-to-TX-port (the "fast path"), drop, policer redirect, modify-and-forward (NAT — used by 4RD/EtherIP).
-* **Policer** — dual-rate token-bucket per port and per flow; ASK uses it for the exception-rate limiter (`CDX_EXPT_*_RATELIM`, see `ASK/dpa_app/dpa.c` `set_exptrate_policer_defaults`).
-* **BMI / MURAM / IRAM** — DMA engine, shared scratchpad, microcode RAM; all sized fixed by silicon.
+1. **The 210-series FMan microcode** — proprietary NXP firmware program loaded by U-Boot into FMan's RISC engines at boot. Different from the public 106/108 microcode families on `github.com/nxp-qoriq/qoriq-fm-ucode` in one architecturally significant way: it implements **dynamic flow tables with high-rate host commands**, where the public ucode implements **static PCD compiled from XML at init time**. This is the architectural split Miha framed correctly as "coarse vs fine classifier" — `108_4_9` is coarse PCD, `210.x.x` is fine per-flow classification with NAT-rewrite-per-flow context.
+2. **The kernel-side fast-path engine (CDX) and bridge-FDB watcher (auto_bridge)** — out-of-tree GPL modules with a ~5800-line in-tree hooks patch that exposes conntrack, xfrm, bridge, and ppp events to the engine.
+3. **The userspace decision engine (CMM) and policy loader (dpa_app)** — daemons that consume conntrack events and translate them to FMan host commands via a netlink channel (`libfci`).
 
-The ASK fast-path uses CC's "modify-and-forward" action: when a CC entry matches an established flow, FMan rewrites the L2 header with the cached next-hop MAC, decrements TTL, fixes the IP/L4 checksums, and enqueues directly to the egress port's TX FQ. The A72 never sees the packet.
+The Mono Gateway hardware ships with the 210 ucode in SPI flash. U-Boot loads it before kernel handoff and patches the DTB `fsl,fman-firmware` node so the kernel sees it as available firmware. **Every shipped Mono Gateway has 210 available at boot.** ASK 2.0 inherits this loading path unchanged — the rewrite never touches the microcode, never includes it in any image artefact, and never depends on its source (which doesn't exist outside NXP).
 
-### 1.2 MURAM — the hard limit
+### 1.2 Why a rewrite
 
-MURAM is shared FMan scratchpad. ASK's hash tables, KeyGen schemes, FCI port-to-policy map, parser config, FQ contexts, **and** the BMan fragment buffer pools used by CC for IP-reassembly all live in MURAM. **Exhaustion is the canonical Chain-2 production failure** (see §8). The ASK 2.0 rewrite must:
+ASK 1.x has four practical problems:
 
-* Compute MURAM use up-front from `cdx_cfg.xml` + `cdx_pcd.xml`, fail loudly at policy-load time if oversubscribed, never silently truncate.
-* Match the SDK's per-table MURAM accounting **byte for byte** (current tables: 16 of them, listed in §3.3) so existing `cdx_pcd.xml` policies parse-fit identically.
+1. **Kernel-version lock-in.** The proprietary CDX/auto_bridge modules and the 5800-line hooks patch were authored against Linux 5.4 and forward-ported piecemeal to 6.6. Mainline 6.18 LTS (released 2025-11-30, supported until December 2027) has materially different netfilter, xfrm, and bridge APIs. Carrying the legacy patch forward to 6.18 is a porting exercise that approaches the cost of a rewrite.
+2. **Patch-surface fragility.** The 5800-line patch touches 64 mainline files including `net/bridge/`, `net/netfilter/`, `net/xfrm/`, `drivers/crypto/caam/`, and `drivers/net/ppp/`. Every mainline kernel update risks rejection in 3-way merge. Mono's `mt-6.12.y` branch is already deviating from upstream in ways that complicate VyOS rolling-release cadence.
+3. **Vendored SDK drivers.** ASK 1.x carries 266 files of vendored `sdk_fman/` and `sdk_dpaa/` source (FMan v3L kernel driver, QMan portal, BMan portal). These are Kconfig-exclusive with mainline `fsl_dpa`/`fsl_dpaa_mac` — you cannot build a kernel that supports both flavors. The VyOS default flavor wants mainline DPAA1.
+4. **No clean integration with VyOS modern facilities.** VPP in VyOS 1.5 LTS, `flowtable` as a software safety net, `XFRM_OFFLOAD` for non-fast-path crypto, generic netlink as the policy-channel idiom — none of these slot cleanly into ASK 1.x because the 1.x design predates them.
 
-### 1.3 The Mono Gateway DK port map (already canonical in `AGENTS.md`)
+ASK 2.0 keeps every byte of value from the proprietary stack — **the 210 microcode, the dynamic flow-table model, the offline-port re-inject pattern for IPsec, the CMM decision-engine algorithms** — and re-implements the kernel-and-userspace plumbing against modern Linux. The microcode does the work; everything above it gets rewritten clean.
+
+### 1.3 What this spec is NOT
+
+- Not a rewrite of `fsl_dpaa1` mainline driver, FMan v3L kernel-side init, QMan/BMan portal management. Those belong to the default VyOS flavor's networking stack.
+- Not a rewrite of `drivers/crypto/caam/` mainline driver. ASK 2.0 reuses it directly. See Section 8.
+- Not a rewrite of the 210 microcode. The microcode is the silicon program; it cannot be re-implemented from a clean room without an internal NXP FMan ISA reference that nobody outside NXP has.
+- Not a VPP plugin. VPP is a separate dataplane running on dedicated cores; ASK 2.0 and VPP coexist through documented kernel-userspace boundaries (Section 11), not through code merging.
+- Not a tc-flower offload upstreaming project. tc-flower upstreaming for DPAA1 is a multi-year mainline conversation; ASK 2.0 v1.0 ships with a generic-netlink side-band channel and revisits upstream later (Section 14).
+
+---
+
+## 2. Hardware reference
+
+Authoritative source: LS1046A Reference Manual chapter 8 (DPAA), specifically §8.7 (parser+KeyGen), §8.8 (CC), §8.9 (Policer), §8.10 (BMI). The implementer or agent MUST read these sections before writing code touching FMan programming; this spec is a roadmap, not a substitute. The RM is NDA-only — ask Miha or Mono for access.
+
+### 2.1 FMan with 210 ucode
+
+Each FMan port has, per the RM:
+
+- **Parser** — runs proprietary microcode on a dedicated RISC engine inside FMan (NOT on the A72). The 210 ucode replaces the parser+classifier program from public 108 with a fine-grained per-flow classification engine. Both feed into KeyGen.
+- **KeyGen** — extracts a hash key from the parse result, hashes it, looks up a base FQID. Under 108 this is used for RSS-style distribution; under 210 it's the front-half of flow-table lookup. 32 KeyGen schemes per FMan (silicon limit).
+- **Flow Tables (210-specific)** — what 108 calls "Coarse Classifier" nodes, 210 manages as runtime-mutable per-flow tables. Entries are inserted, modified, and evicted by host commands. Per-entry actions: **modify-and-forward** (rewrite L2 + IP + L4 headers via stored action template, decrement TTL, fix checksums, enqueue to egress TX FQ); enqueue-to-CAAM-FQ for IPsec; drop; policer redirect.
+- **Policer** — dual-rate token-bucket per port and per flow. ASK uses it for exception-rate limiting on the slow-path lift.
+- **BMI / MURAM / IRAM** — DMA engine, shared scratchpad, microcode RAM. MURAM is **384 KB total** on LS1046A (verified from mainline DTSI `qoriq-fman3-0.dtsi`: `muram@0 { reg = <0x0 0x60000>; }`). After accounting for FIFOs and frame internal contexts, the available CC/flow-table partition is approximately **64-96 KB**, giving 500-750 hardware flow entries at ~128 bytes per entry. Operators routinely run more than this many simultaneous connections; the spec assumes a software flowtable fallback for overflow (Section 6.7).
+
+### 2.2 MURAM partitioning under 210
+
+Under 108, MURAM allocation is decided at FMC compile time from XML. Under 210, allocation is decided at boot when ASK 2.0 initialises the flow tables. The agent implementing `ask.ko::ask_dpaa.c` must:
+
+- Read MURAM size from device tree (do not hardcode 384 KB; future SoCs may differ).
+- Subtract reservations for FIFOs (per RM §8.10) — typical 240 KB on a 4-port + 2-OP config.
+- Partition the remainder across 8-12 flow tables per `cdx_pcd.xml`-equivalent config.
+- Refuse to boot loudly with a structured `dev_err` if the partition is oversubscribed. `dmesg | grep -F 'ASK MURAM exhausted'` is the operator-facing signal.
+- Expose per-table allocation under `debugfs` at `/sys/kernel/debug/ask/muram/{table_name}`.
+
+### 2.3 CAAM SEC 5.4
+
+- 4 Job Rings (`caam_jr0` through `caam_jr3`).
+- Queue Interface (QI) — the path ASK 2.0 uses. CAAM dequeues from QMan, processes the crypto descriptor, enqueues back to QMan. No CPU touch on the data path.
+- Mainline driver: `drivers/crypto/caam/`, maintained by Pankaj Gupta and Gaurav Jain at NXP. ASK 2.0 reuses this driver unmodified except for one ~200-line patch exposing in-kernel descriptor-share API.
+- Performance baseline: kernel IPsec without ASK on LS1046A hits ~750 Mbps AES-CBC-SHA256 with `caam_jr`, ~2 Gbps with `caam_qi`. With ASK 2.0 + 210 routing ESP frames directly to CAAM QI without CPU mediation, the realistic target is **3-5 Gbps AES-GCM-128 at 1024 B**.
+
+### 2.4 Mono Gateway DK port map
 
 | netdev | FMan MAC | DT unit-addr | physical port | `cdx_cfg.xml` portid |
 |--------|----------|--------------|----------------|----------------------|
@@ -76,427 +110,958 @@ MURAM is shared FMan scratchpad. ASK's hash tables, KeyGen schemes, FCI port-to-
 | (offline, `fman0-oh@2`) | OP1 | — | IPsec offload bound | 8 |
 | (offline, `fman0-oh@3`) | OP2 | — | WiFi/AP offload bound | 9 |
 
-The **offline ports (OPs)** are FMan ports with no MAC: they ingest from one BMI queue and re-inject to another. ASK uses them for flows that need an extra parse pass after a software action: encrypted packets land on OP1 after CAAM, get re-parsed and CC-classified for forwarding; bridge-flooded packets go via OP2 for wireless ALG. The ASK 2.0 rewrite must support both OPs; `cdx_cfg.xml` already encodes them (`<port type="OFFLINE" .../>`).
+### 2.5 Offline Ports
 
-The offline-port semantics is **the** thing that distinguishes ASK from any tc-flower offload story. tc-flower has no model for "re-inject a packet into the classifier from the egress side"; ASK does, because the LS1046A silicon does. This is non-negotiable for IPsec offload.
+An OP is a hardware FMan port with no MAC. It dequeues from one QMan frame queue and re-enqueues to another after a re-parse pass. The architecturally significant property is **the re-parse on enqueue**, which is what makes IPsec decryption fast-path-able:
 
-### 1.4 What ASK does NOT touch
+```
+ESP ingress on eth3 (10G SFP+)
+    → FMan parses outer IP, classifies via 210 flow table (matched on dst_ip + SPI)
+    → flow action: enqueue to CAAM QI Rx FQ
+CAAM SEC 5.4
+    → dequeues from QMan, runs decryption descriptor (loaded by ASK at SA add time)
+    → enqueues decrypted frame to OP1 ingress FQ
+FMan OP1
+    → re-parses now-decrypted frame (sees inner IP+TCP/UDP 5-tuple)
+    → 210 flow table lookup on inner 5-tuple → modify-and-forward action
+    → enqueues frame to egress TX FQ on eth0
+A72 cores: untouched
+```
 
-* No PAMU programming (the standard DMA API handles addressing for kernel buffers; ASK doesn't expose userspace DMA).
-* No CAAM JR ownership (mainline `caam_jr` keeps ownership; ASK uses CAAM via `xfrm` offload hooks defined in `data/kernel-patches/003-ask-kernel-hooks.patch::net/xfrm/ipsec_flow.{c,h}`).
-* No mEMAC PHY/SFP/link control (mainline `fsl_dpaa_mac` + phylink for default flavor; SDK `fsl_mac` for ASK flavor — out of scope here).
-* No DTB structural changes vs. the existing `data/dtb/mono-gateway-dk-sdk.dts` (16 RX/TX port nodes in SDK compatible format; the rewrite still needs SDK-format strings because it consumes the same SDK BMan/QMan portal layer).
-
----
-
-## 2. Component inventory — ASK 1.x → ASK 2.0
-
-The clean-room rewrite replaces the proprietary SDK pieces. Mainline-side changes are minimised; the kernel-hooks patch is rewritten as a **smaller** patch that hooks `flowtable` and `XFRM_OFFLOAD` instead of the legacy ASK ad-hoc hooks. Userspace daemons are rewritten in modern C with proper netlink (libmnl).
-
-| Layer | ASK 1.x (NXP / SDK source today) | ASK 2.0 (clean-room replacement) | Naming notes |
-|-------|----------------------------------|-----------------------------------|--------------|
-| Kernel — fast-path engine | `kernel/flavors/ask/oot-modules/cdx/` (15 files, OOT module `cdx.ko`) | New OOT module **`ask.ko`** — same external API on `/dev/cdx_ctrl` for compat. | NOT `cdx`: mainline 6.18 already has `drivers/cdx/cdx.c` (AMD/Xilinx CDX bus, completely different thing). The userspace ABI symbol `/dev/cdx_ctrl` and `CDX_CTRL_*` ioctl names stay (compat); the **module name** changes to match the `kernel/flavors/ask/` directory and the FLAVOR=ask brand. |
-| Kernel — bridge-FDB watcher | `kernel/flavors/ask/oot-modules/auto_bridge/auto_bridge.c` (single file) | **`ask_bridge.ko`** | OOT, GPL. |
-| Kernel — netfilter ↔ userspace channel | `data/kernel-patches/003-ask-kernel-hooks.patch::net/netfilter/comcerto_fp_netfilter.c` + patches to `nf_conntrack_*` + `net/xfrm/ipsec_flow.{c,h}` + UAPI headers + `net/key/af_key.c` (to wire NETLINK_KEY=32 via `ask_fci_nlkey`) | A **smaller** in-tree-hooks patch (`kernel/flavors/ask/patches/200-ask2-hooks.patch`), backed by mainline **`flowtable`** for bridge offload and a new `XFRM_OFFLOAD` provider for IPsec. The legacy proto-32 NETLINK_KEY channel is **kept** for FCI (the userspace ABI dependency makes it cheaper to keep than to migrate cmm to `nf_tables` netlink). | New file lives under `net/netfilter/ask_fci.c` (already matches the existing `ask_fci_nlkey` symbol naming — minimal symbol churn). UAPI headers stay at `linux/netfilter/xt_QOSMARK.h`, `xt_QOSCONNMARK.h`. |
-| Kernel — QOSMARK/QOSCONNMARK xt match/target | new files in `003-ask-kernel-hooks.patch` | Reused as-is (these are 200-line standalone xt modules; no scope to rewrite). | `xt_qosmark.ko`, `xt_qosconnmark.ko`. |
-| Userspace — policy programmer | `ASK/dpa_app/` (`dpa.c`, `main.c`, `testapp.c`) | **`ask-load`** — clean-room rewrite. Same XML schemas in/out. | binary at `/usr/sbin/ask-load`. Spawned by `ask.ko` via `call_usermodehelper(UMH_WAIT_PROC)` at insmod (matches existing model, see `cmm.service` comment). |
-| Userspace — connection manager | `ASK/cmm/` (60+ files) | **`askd`** — clean-room daemon. Same `fastforward` config format, same CLI. | `/usr/bin/askd`. systemd unit guarded by `ConditionPathExists=/dev/cdx_ctrl`. |
-| Userspace — FCI library | `ASK/fci/lib/` (`libfci.c`, `libfci.h`) | **`libask_fci`** — clean-room. Header-compatible with `libfci.h`. | `/usr/lib/aarch64-linux-gnu/libask_fci.so.1`, symlinked as `libfci.so.1` for vendor-tool ABI compat. |
-| Userspace — fmlib extensions | `ASK/patches/fmlib/01-mono-ask-extensions.patch` | Re-derived patch against current `github.com/nxp-qoriq/fmlib` head. Same struct extensions (`t_FmPcdKgSchemeParams::shared`, `t_FmPcdHashTableParams::{table_type,timeout_val,…}`); same byte layout. | `data/ask-userspace/fmlib/patches/01-ask2-extensions.patch`. |
-| Userspace — fmc extensions | `ASK/patches/fmc/01-mono-ask-extensions.patch` | Re-derived patch against current `github.com/nxp-qoriq/fmc` head. | `data/ask-userspace/fmc/patches/01-ask2-extensions.patch`. |
-| Userspace — libnetfilter-conntrack ASK extensions | (in `data/ask-userspace/libnetfilter-conntrack/`) | Re-derived: fast-path info attributes + QOSCONNMARK accessors. | unchanged file location, new patch name. |
-| Userspace — libnfnetlink async heap | (in `data/ask-userspace/libnfnetlink/`) | Re-derived: non-blocking socket + heap-buffer mode for `askd` event burst handling. | unchanged. |
-| Userspace — iptables QOSMARK target | `ASK/` patch series | Re-derived patch. | unchanged. |
-| Userspace — iproute2 4RD/EtherIP | `ASK/` patch series | Re-derived patch. | unchanged. |
-| Userspace — ppp ifindex | `ASK/` patch series | Re-derived patch. | unchanged. |
-| Userspace — rp-pppoe CMM relay | `ASK/` patch series | Re-derived patch (now talks to `askd`). | unchanged. |
-
-What survives unchanged from the proprietary side:
-
-* The **FMan microcode v210.10.1** binary in U-Boot SPI flash. Out of scope.
-* The **vendored SDK `sdk_fman` / `sdk_dpaa` / `fsl_qbman`** drivers under `kernel/flavors/ask/sdk-sources/`. ASK's CC programming goes through the SDK's `FM_PCD_*` API; rewriting that layer is a separate, much larger, project (it's the FMan v3L kernel driver — see `plans/archive/MIGRATION-PLAN-6.18.md`). For ASK 2.0, the SDK is the **substrate** the new modules sit on top of, exactly like in ASK 1.x. Default-flavor users get mainline `fsl_dpa`/`fsl_dpaa_mac` with no ASK at all.
-
-What survives unchanged from the **operator-facing UAPI** (vendor-tool / config-file ABI compat):
-
-* `/dev/cdx_ctrl` chardev path and **all** `CDX_CTRL_*` ioctl names, numbers, struct layouts.
-* `cdx_cfg.xml`, `cdx_pcd.xml`, `cdx_sp.xml` schemas (and the existing files in `ASK/config/gateway-dk/` and `ASK/dpa_app/files/etc/`).
-* `/etc/config/fastforward` (UCI-style ALG-exclusion list).
-* NETLINK_KEY=32 (FCI) wire-format — `libfci.so.1` ABI preserved for any vendor tool that links it.
-* `/etc/modules-load.d/ask-modules.conf`, `ask-modules-load.service` unit name, `/* ASK-edit */` source markers.
+This pattern has no equivalent in mainline tc-flower or `flowtable` because mainline assumes single-pass classification per frame. The 210 ucode + OP combination is what makes ASK genuinely superior to anything achievable with only mainline facilities on this silicon.
 
 ---
 
-## 3. Kernel module spec — `ask.ko` (replaces `cdx.ko`)
+## 3. Architecture overview
 
-### 3.1 Responsibilities
+### 3.1 The three planes
 
-1. Probe the SDK FMan driver (`fsl_fman`) at `module_init`. If the FMan microcode signature does not match v210.10.1, **bail out cleanly** with `dev_warn_once` and never create `/dev/cdx_ctrl`. (This is what gates `cmm.service` / `askd.service` via `ConditionPathExists`.)
-2. Spawn `/usr/sbin/ask-load` synchronously with `UMH_WAIT_PROC` to apply the policy from `cdx_cfg.xml` + `cdx_pcd.xml`. `ask-load` calls back into `ask.ko` via `CDX_CTRL_DPA_SET_PARAMS` ioctl with the compiled FMC model.
-3. Build the BMan fragment buffer pools (one per OFFLINE port) used by CC IP-reassembly hash tables. Failure here is the canonical *"failed to locate eth bman pool"* message in the Chain-2 failure model (§8).
-4. Register the FCI netlink protocol (NETLINK_KEY=32 — kept for ABI compat with existing `cmm`/`askd` clients) and the `nf_conntrack_event` notifier so the userspace daemon learns about new flows.
-5. Expose the `/dev/cdx_ctrl` chardev with the existing ioctl numbering (see UAPI header below).
-6. Implement IPsec offload as an `XFRM_OFFLOAD` provider that uses CAAM via the offline-port re-injection model (encrypted packet → CAAM JR → OFFLINE port OP1 → CC re-classify → forward). This replaces the legacy `INET_IPSEC_OFFLOAD=y` path that depends on the `xfrm_state` field layout from kernel 6.6 (which is broken on 6.18 — see `AGENTS.md` "Kconfig invariants" line `CONFIG_INET_IPSEC_OFFLOAD=n`).
-7. Provide bridge L2-flow offload via the mainline **`flowtable`** infrastructure (`nf_flow_table`), invoked by `ask_bridge.ko` when the FDB learns a new MAC. This replaces the bespoke `auto_bridge` → CDX path with `flowtable` semantics that the mainline kernel already understands.
+ASK 2.0 establishes a clean three-plane architecture on a 4-core Mono Gateway DK:
 
-### 3.2 File layout (target)
+| Plane | Hardware location | Owns | Cores |
+|---|---|---|---|
+| **Dataplane fast** | FMan with 210 ucode + CAAM QI | Established 5-tuple flows, NAT, IPsec ESP, L2 bridge | none (silicon) |
+| **Dataplane slow** | Linux kernel netfilter, conntrack | First-packet, control-plane traffic, slow-path lift | 0-1 |
+| **Dataplane programmable** | VPP (optional) | CGNAT, SR-MPLS, complex ACLs, plugin features | 2-3 |
+
+A single chain of responsibility runs through all three:
+
+```
+        ┌─────────────────────────────────────────────┐
+        │  strongSwan / FRR / nft / iproute2 (control)│  cores 0-1
+        └────────────┬────────────────────────────────┘
+                     │ XFRM / netlink / netfilter
+        ┌────────────▼────────────────────────────────┐
+        │  Linux kernel networking stack               │  cores 0-1
+        │  (conntrack, nf_flowtable software fallback) │
+        └────────────┬────────────────────────────────┘
+                     │ conntrack notifier, xfrm notifier
+        ┌────────────▼────────────────────────────────┐
+        │  askd (userspace decision engine)            │  core 0
+        └────────────┬────────────────────────────────┘
+                     │ generic netlink (family "ask")
+        ┌────────────▼────────────────────────────────┐
+        │  ask.ko + ask_bridge.ko (OOT kernel modules) │  kernel context
+        │   ↓ in-kernel API ↓                           │
+        │  drivers/crypto/caam/caam_qi.ko (mainline)   │
+        └────────────┬────────────────────────────────┘
+                     │ FMan host commands + CAAM descriptors
+        ┌────────────▼────────────────────────────────┐
+        │  FMan with 210 ucode + CAAM SEC 5.4 (silicon)│
+        └─────────────────────────────────────────────┘
+
+        Parallel and optional, on cores 2-3:
+        ┌─────────────────────────────────────────────┐
+        │  VPP (with Linux-CP and memif handoff)       │
+        └─────────────────────────────────────────────┘
+```
+
+### 3.2 The bus that ties it together: generic netlink family `ask`
+
+Everything that's not silicon talks through one generic netlink family. This replaces the legacy `NETLINK_KEY=32` channel from ASK 1.x. The protocol carries both unicast commands (userspace→kernel→hardware) and multicast events (hardware→kernel→userspace).
+
+Schema in Section 7.
+
+### 3.3 The five user-visible artefacts
+
+1. **`ask.ko`** — kernel module, ~1500 LOC C, owns `/dev/ask_ctrl` chardev (kept under that path for vendor-tool ABI compatibility with `/dev/cdx_ctrl`; symlinked at boot) and registers genl family `ask`. Programs FMan 210 flow tables via FMC API. Implements CAAM xfrm offload glue.
+2. **`ask_bridge.ko`** — kernel module, ~400 LOC C, watches bridge FDB events via `RTM_NEWNEIGH`, forwards L2 flow promotions to `ask.ko` via in-kernel API.
+3. **`askd`** — userspace daemon, ~6000 LOC C, consumes conntrack/xfrm/bridge events from kernel, applies policy (ALG exclusion list, flow eligibility), pushes flow inserts to `ask.ko` via genl. Replaces `cmm` + part of `dpa_app`.
+4. **`ask-load`** — userspace one-shot, ~1200 LOC C, runs at module insmod via UMH. Reads `cdx_cfg.xml` + `cdx_pcd.xml`, compiles via patched upstream `fmc` library, pushes compiled FMC model to `ask.ko` via genl. Replaces `dpa_app`.
+5. **`libask_fci`** — userspace library, ~800 LOC C, header-compatible with legacy `libfci.h` so vendor tools that link `libfci.so.1` continue to work. Wraps the genl protocol.
+
+Plus invisible artefacts:
+
+6. **`200-ask2-hooks.patch`** — in-tree hooks patch against linux-6.18.x, ~1500 lines (down from 5797). Adds genl family registration scaffolding, xt_QOSMARK and xt_QOSCONNMARK matches (verbatim from legacy), and minor xfrm hooks.
+7. **`201-caam-qi-share.patch`** — in-tree patch against `drivers/crypto/caam/qi.c`, ~200 lines. Exposes `caam_qi_register_external_consumer()` so `ask.ko` can share CAAM descriptors with FMan flow-table actions. Candidate for upstream.
+
+---
+
+## 4. Component spec — `ask.ko`
+
+### 4.1 Responsibilities `[AGENT-IMPLEMENTABLE]`
+
+1. At `module_init`:
+   - Verify FMan microcode is the 210 family by probing the host-command opcode space. Bail with `pr_err_once` and `return -ENODEV` if it isn't.
+   - Open FMan PCD handle via SDK FMan driver API.
+   - Spawn `/usr/sbin/ask-load` via `call_usermodehelper(UMH_WAIT_PROC)`.
+   - Register genl family `ask` with command and event operations defined in Section 7.
+   - Register conntrack event notifier (`nf_conntrack_register_notifier`).
+   - Register xfrm state event notifier (`xfrm_register_km`).
+   - Register bridge FDB notifier (`register_netevent_notifier`).
+   - Create `/dev/ask_ctrl` chardev with legacy ioctl set for ABI compatibility (see Section 7.4).
+   - Create `/sys/kernel/debug/ask/` with `muram`, `flows`, `stats`, `events` files.
+2. At runtime:
+   - Translate conntrack events → flow-table inserts via FMC API on the path described in Section 6.4.
+   - Translate xfrm SA events → CAAM descriptor registration + flow-table ESP-SPI inserts via the path in Section 8.
+   - Multicast hardware-initiated events (flow eviction, table-full, ucode errors) to userspace via genl multicast group `flow_events`.
+3. At `module_exit`:
+   - Flush all flow tables via FMC API.
+   - Free CAAM descriptors.
+   - Unregister everything in reverse init order.
+
+### 4.2 File layout `[AGENT-IMPLEMENTABLE]`
 
 ```
 kernel/flavors/ask/oot-modules/ask/
 ├── Kbuild
-├── ask_main.c          # init/exit, /dev/cdx_ctrl chardev, UMH ask-load spawn
-├── ask_dev.c           # FMan/PCD device handle plumbing (replaces cdx_dev.c)
-├── ask_dpa.c           # DPA SET_PARAMS ioctl, port/dist/table ingest
-├── ask_dpa_ipsec.c     # XFRM_OFFLOAD provider, CAAM submit/recv, OP1 re-inject
-├── ask_qos.c           # exception-rate-limit policer setup, QOSMARK fastpath
-├── ask_ehash.c         # external-hash CC operations (add/del/lookup)
-├── ask_reassm.c        # IP-reassembly CC node config + BMan pool seed
-├── ask_cmdhandler.c    # FCI protocol handler (NETLINK_KEY=32 receive path)
-├── ask_ifstats.c       # per-flow byte/frame counters → libask_fci accessors
-├── ask_mc_query.c      # multicast group lookup for CDX_CTRL ioctls
-├── ask_timer.c         # IP-reassembly timeouts, conntrack-aging tick
-├── ask_debug.c         # debugfs/seq_file under /sys/kernel/debug/ask/
-└── ask_internal.h      # private types, NOT exposed to userspace
+├── ask_main.c          # module init/exit, genl registration, UMH ask-load spawn
+├── ask_genl.c          # generic netlink family operations
+├── ask_dev.c           # /dev/ask_ctrl chardev, legacy ioctl compat
+├── ask_dpaa.c          # FMan PCD handle, FMC model ingest, MURAM accounting
+├── ask_flowtable.c     # 210 flow table add/del/query operations
+├── ask_xfrm.c          # xfrm notifier → CAAM descriptor → ESP flow insert
+├── ask_caam.c          # in-kernel API calls into drivers/crypto/caam/qi.c
+├── ask_conntrack.c     # nf_conntrack notifier → flow promotion logic
+├── ask_bridge_api.c    # in-kernel API consumed by ask_bridge.ko
+├── ask_op.c            # offline port wiring for IPsec re-inject and bridge flood
+├── ask_qos.c           # exception-rate-limit policer, QOSMARK integration
+├── ask_stats.c         # per-flow byte/frame counters, per-CPU aggregation
+├── ask_debug.c         # debugfs files
+├── ask_internal.h      # private types, NOT exposed to userspace
+└── ask_uapi.h          # internal mirror of include/uapi/linux/ask/
 
 include/uapi/linux/ask/
-├── cdx_ctrl.h          # /dev/cdx_ctrl ioctl numbers + structs (CDX_CTRL_*)
-└── fci.h               # NETLINK_KEY=32 message format (FCI_CMD_*)
+├── ask.h               # genl protocol definitions
+└── ask_ctrl.h          # /dev/ask_ctrl legacy ioctl numbers + structs
 ```
 
-The `cdx_ctrl.h` UAPI is **byte-compatible** with the existing SDK header; only the implementation behind it changes. (No struct rename, no ioctl renumber — `CDX_CTRL_DPA_SET_PARAMS` stays `_IOW('C', 1, struct cdx_ctrl_set_dpa_params)`, etc. The exact constant values are pinned by the existing `dpa.c` in `ASK/dpa_app/dpa.c` — see §5.1.)
+### 4.3 Module dependency chain (load order) `[AGENT-IMPLEMENTABLE]`
 
-### 3.3 The 16 CC-table types (pinned by `cdx_pcd.xml`)
-
-Verbatim from `ASK/dpa_app/dpa.c::table_params[]` and `ASK/dpa_app/files/etc/cdx_pcd.xml`. The ASK 2.0 implementation must support all 16 with the same MURAM footprint:
-
-| Table name | Key size (B) | Mask | Purpose |
-|------------|--------------|------|---------|
-| `cdx_udp4`        | 14 | 0x7fff | IPv4 UDP 5-tuple |
-| `cdx_tcp4`        | 14 | 0x7fff | IPv4 TCP 5-tuple |
-| `cdx_udp6`        | 38 | 0x7fff | IPv6 UDP 5-tuple |
-| `cdx_tcp6`        | 38 | 0x7fff | IPv6 TCP 5-tuple |
-| `cdx_multicast4`  | 10 | 0x00ff | IPv4 multicast 3-tuple |
-| `cdx_multicast6`  | 34 | 0x00ff | IPv6 multicast 3-tuple |
-| `cdx_pppoe`       | 11 | 0x000f | PPPoE session relay |
-| `cdx_ethernet`    | 15 | 0x00ff | L2 bridge offload |
-| `cdx_esp4`        | 10 | 0x00ff | IPv4 ESP/SPI |
-| `cdx_esp6`        | 22 | 0x00ff | IPv6 ESP/SPI |
-| `cdx_tuple3udp4`  | 8  | 0x00ff | IPv4 UDP 3-tuple (RTP relay) |
-| `cdx_tuple3tcp4`  | 8  | 0x000f | IPv4 TCP 3-tuple (RTP relay) |
-| `cdx_tuple3udp6`  | 20 | 0x00ff | IPv6 UDP 3-tuple |
-| `cdx_tuple3tcp6`  | 20 | 0x000f | IPv6 TCP 3-tuple |
-| `cdx_frag4`       | 12 | 0x000f | IPv4 reassembly context |
-| `cdx_frag6`       | 38 | 0x000f | IPv6 reassembly context |
-
-`max="512"` per table (pinned in the XML). All are `shared="true"` (one CC node, all 9 ports point at it via the `combine portid="true" offset="16" mask="0xF"` directive). The `cdx_*` table names are **part of the operator-facing schema** (`cdx_pcd.xml`) and stay under their `cdx_*` names regardless of the kernel-side rename.
-
-### 3.4 Module dependency chain (load order)
-
-`/etc/modules-load.d/ask-modules.conf` already pins this order, kept in `ASK/config/ask-modules.conf` and re-published as the runtime config for ASK 2.0:
+Boot-time order in `/etc/modules-load.d/ask-modules.conf`:
 
 ```
-ask                     # was: cdx
-ask_bridge              # was: auto_bridge
 nf_conntrack
 nf_conntrack_netlink
-xt_conntrack
-ask_fci                 # was: fci, in-tree built-in once hooks patch lands
+xfrm_user
+ask                     # was: cdx
+ask_bridge              # was: auto_bridge
 ```
 
-The systemd oneshot `ask-modules-load.service` modprobes these in order. `cmm.service` (renamed `askd.service`) has `Requires=ask-modules-load.service` so it never starts against a half-initialised fast-path. This ordering is **load-bearing** — see Chain-1 failure model in §8.
+systemd oneshot `ask-modules-load.service` modprobes in order. `askd.service` has `Requires=ask-modules-load.service` and `ConditionPathExists=/dev/ask_ctrl`.
 
-### 3.5 Kconfig
+### 4.4 Kconfig `[AGENT-IMPLEMENTABLE]`
 
 ```
 config ASK
     tristate "NXP LS1046A ASK 2.0 Fast-Path Engine (clean-room)"
-    depends on FSL_SDK_DPA
+    depends on FSL_SDK_DPA || FSL_DPAA
     depends on NETFILTER && NF_CONNTRACK && BRIDGE
     depends on XFRM
-    select NET_KEY                  # NETLINK_KEY=32 plumbing in net/key
-    select NF_FLOW_TABLE             # backs ask_bridge offload
+    depends on CRYPTO_DEV_FSL_CAAM_QI
+    select GENERIC_NETLINK_CAPABILITY
     help
       Out-of-tree-buildable replacement for the proprietary NXP cdx.ko fast-
-      path module (the kernel-side core of ASK 1.x). Programs FMan CC tables
-      to short-circuit established conntrack flows in hardware. Requires
-      ASK-enabled FMan microcode v210.10.1 in SPI flash; without that
-      microcode the module bails out and /dev/cdx_ctrl is never created.
+      path module. Requires NXP 210-family FMan microcode loaded at boot;
+      without it the module bails out and /dev/ask_ctrl is never created.
 
 config ASK_BRIDGE
     tristate "ASK 2.0 bridge-FDB watcher"
     depends on ASK && BRIDGE
 ```
 
-`MODULE_SIG_FORCE=y` (per `AGENTS.md`) means both modules must be signed by the in-tree key after build — wired into `bin/ci-setup-kernel-ask.sh`.
+`CONFIG_ASK` does not collide with anything in mainline 6.18 — verified via `grep -r '^config ASK' linux-6.18/`. Default-flavor builds set `CONFIG_ASK=n`; ASK-flavor builds set `CONFIG_ASK=m` (out-of-tree from `kernel/flavors/ask/oot-modules/ask/`).
 
-> **Naming sanity check.** `CONFIG_ASK` does not collide with anything in mainline 6.18 (`grep -r '^config ASK' linux/` returns nothing). The FLAVOR=ask brand at the build-system level and the `CONFIG_ASK` symbol at the kernel level are independently scoped — there is no Kbuild conflict.
+### 4.5 The 210 host-command protocol `[HUMAN-REQUIRED]`
 
----
+This is the single hardest part of the implementation and the part no agent can do unsupervised. The 210 ucode exposes a host-command opcode space that the kernel module sends commands through via the FMan I/O block. The opcodes for "install flow", "remove flow", "query flow stats", "register SA descriptor" are not publicly documented.
 
-## 4. Kernel hooks patch — `200-ask2-hooks.patch`
+The reference for what bytes go on the wire is the legacy `we-are-mono/ASK/cdx/` source. Section 12 describes the reverse-engineering procedure. Plan **2 weeks of black-box probing per major feature** (Section 12.3 enumerates them).
 
-The legacy `data/kernel-patches/003-ask-kernel-hooks.patch` modifies 64 mainline files. The ASK 2.0 equivalent is **smaller and tighter**:
-
-### 4.1 What stays (kept functional, rewritten cleanly)
-
-| File | Why it stays | Diff size estimate |
-|------|--------------|---------------------|
-| `net/key/af_key.c` | NETLINK_KEY=32 plumbing — `ask_fci` registers as `pfkey_proto[NETLINK_KEY]`. `CONFIG_NET_KEY=y` is still mandatory. | ~30 lines |
-| `include/net/xfrm.h`, `net/xfrm/xfrm_state.c`, `net/xfrm/xfrm_user.c` | One new XFRM_OFFLOAD provider hook per existing kernel infrastructure. Replaces 003's bespoke `ipsec_flow.{c,h}` (200 lines deleted). | ~80 lines added, 200 removed |
-| `net/netfilter/Kconfig`, `net/netfilter/Makefile` | Wires `xt_QOSMARK`, `xt_QOSCONNMARK` (kept verbatim from 003 — small, self-contained). | unchanged from 003 |
-| `include/uapi/linux/netfilter/xt_QOSMARK.h`, `xt_QOSCONNMARK.h` | UAPI for the QOSMARK extensions. Verbatim from 003. | unchanged |
-| `net/netfilter/xt_qosmark.c`, `xt_qosconnmark.c` | The xt match/target. Verbatim from 003. | unchanged |
-
-### 4.2 What gets DELETED vs `003-ask-kernel-hooks.patch`
-
-| 003 patch artefact | Why deleted in ASK 2.0 |
-|---------------------|-------------------------|
-| `net/netfilter/comcerto_fp_netfilter.c` (new file, ~600 lines) | Replaced by mainline **`nf_flow_table`** (`flowtable`). `ask_bridge` populates a flowtable; the kernel does the bridge-fast-path. This collapses a NXP-bespoke 600-line patched file into ~50 lines of clean kernel-side glue. |
-| All edits to `net/bridge/br_*.c` (8 files in 003) | Same — `flowtable` already has the bridge hooks mainline-side. |
-| `net/xfrm/ipsec_flow.{c,h}` (new files, ~400 lines combined) | Replaced by an XFRM_OFFLOAD provider in `ask_dpa_ipsec.c` (OOT module). |
-| All edits to `drivers/net/ppp/ppp_generic.c`, `pppoe.c`, `drivers/net/usb/usbnet.c` | These existed because the legacy hook needed each subsystem to call into `comcerto_fp_*`. With `flowtable` doing bridge work and `xfrm_user` doing IPsec, ppp/pppoe/usbnet need no patches. |
-| Edits to `include/linux/{if_bridge,netdevice,poll,skbuff}.h`, `net/{ip,ip6_tunnel,netns/xfrm}.h` | Mostly extra fields used by the deleted `comcerto_fp_*`. Not needed once that file is gone. |
-| `drivers/crypto/caam/pdb.h::__attribute__((packed))` additions | The ASK 1.x reason-of-record was ABI compat with NXP USDPAA userspace; ASK 2.0 uses `xfrm_user` pdb structures, so packing is irrelevant. |
-| `Makefile :: KBUILD_EXTMOD` `SUBDIRS=` shim | Legacy `make SUBDIRS=...` syntax. Drop. |
-| `tools/perf/.gitignore` edit | Unrelated drift. Drop. |
-
-**Net:** ~5800 lines → estimated ~600 lines. 64 files → estimated 12 files. Most of the deletion is the bridge fast-path which mainline already has.
-
-### 4.3 What stays out-of-tree
-
-`ask.ko`, `ask_bridge.ko`, `xt_QOSMARK`/`xt_QOSCONNMARK` are all OOT-buildable. They depend only on the in-tree hooks patch and the SDK FMan API. (Long-term: in-tree the modules under `drivers/net/dpaa1-ask/` and submit upstream once the SDK→mainline FMan story is sorted. Out of v1 scope.)
+The agent's role here is supporting: build the test harness, write the dmesg-correlating probe script, automate the test matrix. The judgement call about what each opcode means and how to validate it must be made by a human looking at real hardware behaviour.
 
 ---
 
-## 5. Userspace — `/dev/cdx_ctrl` ABI and the policy XML schemas
+## 5. Component spec — `ask_bridge.ko`
 
-The single hardest constraint on the rewrite: **existing `cdx_cfg.xml` and `cdx_pcd.xml` files must work unchanged.** Operators may have customised these per deployment; we cannot break their config.
+### 5.1 Responsibilities `[AGENT-IMPLEMENTABLE]`
 
-### 5.1 `/dev/cdx_ctrl` ioctl set (pinned)
+1. At `module_init`: register `register_netevent_notifier` for `NETEVENT_NEIGH_UPDATE` and bridge FDB notifier.
+2. On bridge FDB add: extract `(bridge_ifindex, MAC, port_ifindex)`, call into `ask.ko` via in-kernel API `ask_bridge_promote_l2_flow()` to install L2 flow-table entry under 210.
+3. On bridge FDB del: call `ask_bridge_evict_l2_flow()`.
+4. At `module_exit`: unregister, flush bridge entries via `ask.ko` API.
 
-From `ASK/dpa_app/dpa.c` and the SDK `cdx_ioctl.h`. The ASK 2.0 UAPI header `include/uapi/linux/ask/cdx_ctrl.h` must keep these constant values:
+### 5.2 Why a separate module
 
-* `CDX_CTRL_DPA_SET_PARAMS` (set FMan port/dist/table layout from compiled FMC model — called by `ask-load` as the last step of policy load).
-* Per-flow add/del/lookup ioctls for each of the 16 table types (`IPV4_UDP_TABLE`, `IPV4_TCP_TABLE`, …, `IPV6_REASSM_TABLE`).
-* IPsec SA add/del/replace ioctls (used by `ask_dpa_ipsec.c` from the kernel side; userspace `askd` proxies xfrm_user events to these).
-* Multicast group add/del.
-* Statistics fetch (per-table per-key byte/frame counters, used by `askd`'s `show flows` CLI).
-* Exception-rate-limiter tuning (`CDX_EXPT_*_RATELIM`, `CDX_EXPT_RATELIM_MODE`).
+Could be in `ask.ko`. Separating it makes the bridge path independently loadable and unloadable for diagnostics, and matches the legacy split that operators are familiar with from ASK 1.x.
 
-The exact struct layout for `cdx_ctrl_set_dpa_params`, `cdx_fman_info`, `cdx_port_info`, `cdx_dist_info`, `cdx_ipr_info`, `table_info` is pinned by `ASK/dpa_app/dpa.c` lines 32–110. Translate verbatim into `include/uapi/linux/ask/cdx_ctrl.h`.
+### 5.3 File layout `[AGENT-IMPLEMENTABLE]`
 
-### 5.2 `cdx_cfg.xml` schema (port-to-policy map)
+```
+kernel/flavors/ask/oot-modules/ask_bridge/
+├── Kbuild
+├── ask_bridge_main.c   # init/exit, notifier registration
+├── ask_bridge_fdb.c    # FDB event handling
+└── ask_bridge.h
+```
 
-Pinned by `ASK/config/gateway-dk/cdx_cfg.xml`:
+---
 
+## 6. Component spec — userspace daemon `askd`
+
+### 6.1 Replaces `cmm` (legacy) plus the runtime parts of `dpa_app`
+
+`cmm` was ~25k LOC across 60+ files because it carried ICC asymmetric-SoC support (irrelevant on LS1046A) and FreeBSD/Linux build abstraction (we only need Linux). `askd` targets **~6000 LOC C** with libmnl for netlink, glib for event loop, structured logging via syslog.
+
+### 6.2 Inputs `[AGENT-IMPLEMENTABLE]`
+
+- `nf_conntrack_event` via netlink — libnetfilter_conntrack with the existing async/heap-buffer extension patch.
+- Bridge FDB events via `RTM_NEWNEIGH` rtnetlink.
+- xfrm SA events via xfrm_user rtnetlink.
+- `/proc/net/route`, `/proc/net/route6`, `/proc/net/ipv6_neigh` for next-hop resolution.
+- `/etc/config/fastforward` for ALG-exclusion list (FTP, SIP, PPTP by default).
+- VPP control socket (`/var/run/vpp/cli.sock`) for promotion handoff decisions — optional, only consulted if VPP is running.
+- CLI on `/var/run/askd.sock` via libcli.
+
+### 6.3 Outputs `[AGENT-IMPLEMENTABLE]`
+
+- genl messages to `ask.ko` for flow ADD/DEL/QUERY.
+- VPP memif setup for flows promoted to VPP CGNAT plane (optional).
+- syslog records and Prometheus exporter on TCP `/metrics`.
+
+### 6.4 Decision logic `[AGENT-IMPLEMENTABLE]`
+
+For each new `conntrack EST` event:
+
+```
+1. Parse: extract proto, src/dst/sport/dport, mark, zone
+2. Filter: if proto+port in fastforward exclusion list → skip
+3. Resolve: look up next-hop for dst via /proc/net/route + neigh table
+   - if next-hop is on a non-offloadable interface (loopback, tun, software bridge, wireguard) → skip
+   - if next-hop neigh entry is INCOMPLETE → re-queue, retry on next tick
+4. Optionally promote to VPP: if flow matches a VPP-promotion ACL → set up memif handoff, return
+5. Build flow descriptor:
+   - 5-tuple from conntrack
+   - egress port_ifindex + egress MAC from neigh resolution
+   - action template: rewrite_src_mac, rewrite_dst_mac, decrement_ttl, [NAT rewrite if conntrack has it]
+6. Send ASK_CMD_FLOW_ADD via genl
+7. On successful ACK: mark conntrack entry with custom mark bit IPS_HW_OFFLOAD
+```
+
+For each `conntrack DESTROY` event: send `ASK_CMD_FLOW_DEL` for the matching flow descriptor.
+
+For each periodic tick (1 Hz default, configurable): query `ASK_CMD_FLOW_QUERY` for all installed flows, update conntrack last-used time so software-side conntrack doesn't time out hardware-active flows. This is the "bytes-back" pattern.
+
+### 6.5 xfrm event handling `[AGENT-IMPLEMENTABLE]`
+
+For each new `xfrm SA add`:
+- Send `ASK_CMD_SA_ADD` with SA params (SPI, dst, src, AEAD algorithm, key material, replay window).
+- `ask.ko` registers a CAAM descriptor and inserts an ESP-SPI flow-table entry.
+
+For each `xfrm SA del`: send `ASK_CMD_SA_DEL`.
+
+The 210 ucode handles the data-path entirely; askd does not touch ESP frames at runtime.
+
+### 6.6 File layout `[AGENT-IMPLEMENTABLE]`
+
+```
+ask/userspace/askd/
+├── Makefile
+├── src/
+│   ├── main.c              # event loop, signal handling, daemonisation
+│   ├── conntrack.c         # libnetfilter_conntrack consumer
+│   ├── xfrm_events.c       # xfrm_user consumer
+│   ├── bridge_events.c     # rtnetlink RTM_NEWNEIGH consumer
+│   ├── neigh.c             # /proc/net/route + neigh resolution
+│   ├── policy.c            # fastforward ALG exclusion list parser
+│   ├── flow_descriptor.c   # build flow add/del payload
+│   ├── ask_genl.c          # libmnl wrapper for ask genl family
+│   ├── vpp_handoff.c       # optional memif setup for VPP promotion
+│   ├── cli.c               # libcli interactive CLI
+│   ├── prometheus.c        # /metrics HTTP exporter
+│   ├── log.c               # structured syslog
+│   └── config.c            # parse /etc/config/fastforward
+├── include/askd/
+│   └── askd.h
+└── tests/
+    ├── test_neigh.c
+    ├── test_flow_descriptor.c
+    └── test_policy.c
+```
+
+### 6.7 Software flowtable fallback `[AGENT-IMPLEMENTABLE]`
+
+When `ASK_CMD_FLOW_ADD` returns `-ENOSPC` (MURAM exhausted or flow table full):
+- Set up an `nf_flow_table` software-mode entry for the flow instead.
+- Mark the conntrack entry with `IPS_OFFLOAD` (software bypass) rather than `IPS_HW_OFFLOAD`.
+- Subsequent packets traverse the kernel software fastpath via `nf_flow_offload_ip_hook()`. Not as fast as hardware, but bypasses conntrack lookup per packet.
+
+This is the safety net. Without it, MURAM exhaustion causes the box to drop new connections.
+
+### 6.8 systemd integration `[AGENT-IMPLEMENTABLE]`
+
+```ini
+# /lib/systemd/system/askd.service
+[Unit]
+Description=ASK 2.0 connection manager
+After=network.target ask-modules-load.service systemd-sysctl.service
+Requires=ask-modules-load.service
+ConditionPathExists=/dev/ask_ctrl
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/askd --config /etc/config/fastforward --no-fork
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=131072
+
+[Install]
+WantedBy=multi-user.target
+```
+
+---
+
+## 7. The generic netlink protocol `[AGENT-IMPLEMENTABLE]`
+
+### 7.1 Family definition
+
+```c
+/* include/uapi/linux/ask/ask.h */
+#define ASK_GENL_NAME    "ask"
+#define ASK_GENL_VERSION 1
+
+enum ask_cmd {
+    ASK_CMD_UNSPEC,
+
+    /* Userspace → kernel */
+    ASK_CMD_TABLE_LIST,        /* dump all configured flow tables */
+    ASK_CMD_TABLE_FLUSH,       /* remove all entries from a table */
+    ASK_CMD_TABLE_STATS,       /* per-table allocation, MURAM use */
+
+    ASK_CMD_FLOW_ADD,          /* install a flow entry */
+    ASK_CMD_FLOW_DEL,
+    ASK_CMD_FLOW_QUERY,
+    ASK_CMD_FLOW_DUMP,         /* enumerate all flows in a table */
+
+    ASK_CMD_SA_ADD,            /* install an IPsec SA via 210 + CAAM */
+    ASK_CMD_SA_DEL,
+    ASK_CMD_SA_QUERY,
+    ASK_CMD_SA_DUMP,
+
+    ASK_CMD_LOAD_PCD,          /* called by ask-load: push compiled FMC model */
+    ASK_CMD_GET_MURAM_FREE,    /* operator visibility */
+
+    /* Kernel → userspace (multicast) */
+    ASK_EVENT_FLOW_INSTALLED,
+    ASK_EVENT_FLOW_EVICTED,    /* 210 evicted under pressure */
+    ASK_EVENT_TABLE_FULL,
+    ASK_EVENT_UCODE_ERROR,
+    ASK_EVENT_SA_INSTALLED,
+    ASK_EVENT_SA_EXPIRED,      /* xfrm hard-limit reached */
+
+    __ASK_CMD_MAX,
+};
+#define ASK_CMD_MAX (__ASK_CMD_MAX - 1)
+
+enum ask_mcast_group {
+    ASK_MCAST_FLOW_EVENTS,
+    ASK_MCAST_SA_EVENTS,
+    ASK_MCAST_HW_EVENTS,       /* table-full, ucode errors */
+};
+```
+
+### 7.2 Attributes
+
+```c
+enum ask_attr {
+    ASK_ATTR_UNSPEC,
+
+    /* Identifiers */
+    ASK_ATTR_TABLE_ID,         /* u8: 0..15 */
+    ASK_ATTR_FLOW_KEY,         /* nested: see ask_flow_key_attr */
+    ASK_ATTR_FLOW_ACTION,      /* nested: see ask_flow_action_attr */
+    ASK_ATTR_SA_KEY,           /* nested: SPI + dst */
+    ASK_ATTR_SA_PARAMS,        /* nested: AEAD alg + key material */
+
+    /* Stats */
+    ASK_ATTR_BYTES,            /* u64 */
+    ASK_ATTR_PACKETS,          /* u64 */
+    ASK_ATTR_LAST_USED,        /* u64 ns */
+
+    /* Errors */
+    ASK_ATTR_ERROR_CODE,       /* s32 */
+    ASK_ATTR_ERROR_STRING,     /* nul-terminated string */
+
+    __ASK_ATTR_MAX,
+};
+#define ASK_ATTR_MAX (__ASK_ATTR_MAX - 1)
+
+enum ask_flow_key_attr {
+    ASK_KEY_UNSPEC,
+    ASK_KEY_L3_PROTO,          /* u16: ETH_P_IP / ETH_P_IPV6 */
+    ASK_KEY_L4_PROTO,          /* u8:  IPPROTO_TCP / UDP / ESP */
+    ASK_KEY_SRC_IP,            /* binary, length depends on l3_proto */
+    ASK_KEY_DST_IP,
+    ASK_KEY_SPORT,             /* u16 NBO */
+    ASK_KEY_DPORT,
+    ASK_KEY_SPI,               /* u32, for ESP flows */
+    ASK_KEY_VLAN_ID,           /* u16 */
+    ASK_KEY_INPUT_IFINDEX,     /* u32 */
+    __ASK_KEY_MAX,
+};
+
+enum ask_flow_action_attr {
+    ASK_ACTION_UNSPEC,
+    ASK_ACTION_OUTPUT_IFINDEX, /* u32: egress port */
+    ASK_ACTION_REWRITE_SRC_MAC,/* binary 6 bytes */
+    ASK_ACTION_REWRITE_DST_MAC,
+    ASK_ACTION_REWRITE_SRC_IP, /* SNAT */
+    ASK_ACTION_REWRITE_DST_IP, /* DNAT */
+    ASK_ACTION_REWRITE_SPORT,  /* PAT */
+    ASK_ACTION_REWRITE_DPORT,
+    ASK_ACTION_VLAN_PUSH,      /* u16 vid */
+    ASK_ACTION_VLAN_POP,       /* flag */
+    ASK_ACTION_TTL_DEC,        /* flag, default true */
+    ASK_ACTION_TO_CAAM_FQ,     /* u32 FQID, for ESP→CAAM redirect */
+    ASK_ACTION_TO_OFFLINE_PORT,/* u8 OP number, for post-CAAM re-inject */
+    __ASK_ACTION_MAX,
+};
+```
+
+### 7.3 Capability gating
+
+Every command op requires `GENL_ADMIN_PERM` (CAP_NET_ADMIN). Verified in `ask_genl.c::ask_genl_ops[]` flags.
+
+### 7.4 Legacy `/dev/ask_ctrl` ioctl compatibility
+
+For binary ABI compatibility with vendor tools that hardcode the legacy `/dev/cdx_ctrl` ioctl numbers:
+
+- Symlink `/dev/cdx_ctrl` → `/dev/ask_ctrl` at module init.
+- Implement the original `CDX_CTRL_DPA_SET_PARAMS` and per-table flow add/del ioctls as a compatibility shim that internally translates to genl. ~300 lines of code in `ask_dev.c`.
+- Mark these as `deprecated` in kernel log on first use.
+- Existing `libfci.so.1` continues to work; new code uses `libask_fci.so.1` (which wraps genl directly).
+
+---
+
+## 8. Component spec — IPsec offload via CAAM reuse
+
+### 8.1 Architecture `[AGENT-IMPLEMENTABLE]`
+
+The full picture of what happens at SA add time:
+
+```
+1. strongSwan or VyOS IKE daemon negotiates SA, calls `ip xfrm state add ... offload packet dev eth3`
+2. Kernel xfrm_state.c calls xdo_dev_state_add() — but no CAAM driver implements this today
+3. Workaround for v1.0: askd watches xfrm_user RTM_NEWSA, intercepts the add event
+4. askd sends ASK_CMD_SA_ADD via genl to ask.ko
+5. ask.ko::ask_xfrm.c:
+   a. Calls caam_qi_aead_setkey() in drivers/crypto/caam/caamalg_qi.c — gets back a CAAM descriptor + FQID
+   b. Configures CAAM's QI for this descriptor via in-kernel API exposed by 201-caam-qi-share.patch
+   c. Calls FMC API to insert a flow-table entry: match=(dst_ip, ESP, spi) action=(to_caam_fq=FQID)
+   d. Configures OP1 to re-inject CAAM output frames into the regular flow-table lookup pipeline
+6. From this point: ESP frames arrive at eth3, FMan routes them to CAAM FQID, CAAM decrypts, OP1 re-classifies, FMan forwards. Zero CPU touch.
+```
+
+At packet time: nothing happens in software. The 210 ucode + CAAM QI handle everything.
+
+At SA delete time: reverse the install in the same order. Free the CAAM descriptor via `caam_qi_aead_release()`.
+
+### 8.2 What we DON'T write
+
+- ❌ A CAAM packet-mode xfrmdev_ops driver. Mainline doesn't have one and we don't need one. xfrm packet-mode requires `xdo_dev_state_add`/`xdo_dev_policy_add` and CAAM doesn't expose those. Instead, we intercept SA events at the xfrm_user notifier layer (in `askd`) and program FMan + CAAM directly. The end-user CLI looks identical (`ip xfrm state add ... offload ...`); only the implementation path differs.
+- ❌ Crypto descriptors. Mainline `caamalg_qi.c` already constructs them correctly for every supported AEAD/cipher.
+- ❌ ESP encapsulation/decapsulation logic. The 210 ucode handles ESP framing; CAAM handles the AEAD operation; mainline xfrm provides the SA state for replay window etc. but doesn't touch the data path once the SA is installed.
+
+### 8.3 The one in-tree patch `[AGENT-IMPLEMENTABLE WITH HUMAN REVIEW]`
+
+`201-caam-qi-share.patch`, ~200 lines against `drivers/crypto/caam/qi.c`:
+
+```c
+/*
+ * Expose CAAM descriptor + FQID to external in-kernel consumers (FMan ASK fast-path).
+ * The mainline driver assumes only kernel crypto API callers use the QI path; the patch
+ * adds a registration interface for external consumers that want to enqueue from
+ * a different engine.
+ */
+int caam_qi_register_external_consumer(struct caam_drv_ctx *ctx,
+                                        u32 *out_rx_fqid, u32 *out_tx_fqid);
+void caam_qi_unregister_external_consumer(struct caam_drv_ctx *ctx);
+EXPORT_SYMBOL_GPL(caam_qi_register_external_consumer);
+EXPORT_SYMBOL_GPL(caam_qi_unregister_external_consumer);
+```
+
+Propose upstream after v1.0 ships. Precedent exists: mlx5 does the equivalent for ConnectX-7 sharing crypto contexts between RDMA and Ethernet paths.
+
+### 8.4 Supported AEAD algorithms in v1.0 `[AGENT-IMPLEMENTABLE]`
+
+In priority order:
+1. AES-GCM-128 (rfc4106)
+2. AES-GCM-256
+3. AES-CBC + HMAC-SHA256 (legacy, still common in enterprise VPN)
+4. ChaCha20-Poly1305 — only if mainline `caamalg_qi.c` already supports it; check `/proc/crypto` first
+
+Defer to v1.1:
+- AES-CBC + HMAC-SHA1 (deprecated but operators still ask)
+- 3DES (obsolete; only if a customer specifically needs it)
+- ESN (extended sequence numbers)
+
+### 8.5 Tunnel vs transport mode `[AGENT-IMPLEMENTABLE]`
+
+- Tunnel mode is the common case (site-to-site VPN). The outer IP is the ESP envelope, the 210 flow-table key is `(outer_dst, ESP, SPI)`.
+- Transport mode (rare on a router but supported). Same flow-table key structure; the difference is the inner-frame action template doesn't strip an outer IP header.
+
+Both modes work the same way in v1.0 from the ASK side. Verify on hardware before claiming both pass acceptance.
+
+---
+
+## 9. Component spec — `ask-load` and policy XML schemas
+
+### 9.1 `ask-load` responsibilities `[AGENT-IMPLEMENTABLE]`
+
+- Run once at `ask.ko` insmod via UMH.
+- Read `/etc/cdx_cfg.xml`, `/etc/cdx_pcd.xml`, `/etc/cdx_sp.xml`, `/etc/fmc/config/hxs_pdl_v3.xml`.
+- Call `fmc_compile()` from patched upstream `fmc` library.
+- Call `FM_PCD_Open()` / `FM_PCD_Disable()` per FMan to put PCD into the configurable state.
+- Walk compiled `fmc_model_t`, build `ASK_CMD_LOAD_PCD` genl payload.
+- Send to `ask.ko`. On success, exit 0; on failure, exit non-zero with structured stderr.
+
+### 9.2 XML schemas (operator-visible, kept stable for ABI compat) `[REFERENCE]`
+
+`cdx_cfg.xml` — port-to-policy map:
 ```xml
 <cfgdata>
   <config>
     <engine name="fm0">
       <port type="1G|10G|OFFLINE" number="N" policy="<policy_name>" portid="N"/>
-      ...
     </engine>
   </config>
 </cfgdata>
 ```
 
-Type values and policy refs: `1G | 10G | OFFLINE`. `portid` 1–9 (1=eth2, 4=eth0, 5=eth1, 6=eth3, 7=eth4, 8=OP1, 9=OP2). The Mono Gateway DK config in this repo is the canonical example; `ask-load` must parse it bit-identically.
+`cdx_pcd.xml` — FMan PCD policy with three top-level sections:
+- `<classification>` — flow-table definition (key fields, mask, table type, action template)
+- `<distribution>` — KeyGen scheme (protocol, hash key, output FQID, target classification)
+- `<policy>` — ordered list of distributions applied to a port
 
-### 5.3 `cdx_pcd.xml` schema (FMan PCD policy)
+Both schemas are inherited from ASK 1.x unchanged. Operators with existing config files boot ASK 2.0 with no migration required.
 
-Pinned by `ASK/dpa_app/files/etc/cdx_pcd.xml`. The FMC library already parses this into `struct fmc_model_t`; the rewrite of `dpa_app` reuses the **same** FMC library (with the existing `01-mono-ask-extensions.patch` re-applied to upstream `nxp-qoriq/fmc`). The schema has three top-level sections:
+### 9.3 Required FMC library patches `[AGENT-IMPLEMENTABLE]`
 
-* `<classification name="cdx_*_cc">` — a CC node (hash-table, key-size, mask).
-* `<distribution name="cdx_*_dist">` — a KeyGen scheme (protocol, key fields, output FQID range, action — always "classification" pointing at a `cdx_*_cc`).
-* `<policy name="cdx_ethport_N_policy">` — ordered list of distribution refs applied to a port. The `<dist_order>` decides match precedence at the port (ESP first, then UDP/TCP, then multicast, then 3-tuples, then PPPoE, finally generic ethernet — see line 218 in the file).
+Re-derived against current upstream `nxp-qoriq/fmc` and `nxp-qoriq/fmlib`:
 
-The ASK 2.0 rewrite **does not** re-implement the FMC compiler. It uses `fmc_compile()` from the patched upstream `fmc`. The single thing `ask-load` adds is the policy schema fixups for things FMC doesn't know (the `t_FmPcdHashTableParams::table_type` and IP-reassembly fields — see `set_reassembly_params()` in `dpa.c`), and the `CDX_CTRL_DPA_SET_PARAMS` ioctl call at the end.
+- `data/ask-userspace/fmlib/patches/01-ask2-extensions.patch` — adds `t_FmPcdKgSchemeParams::shared`, `t_FmPcdHashTableParams::{table_type, timeout_val, timeout_fqid, max_frags, min_frag_size, max_sessions}`, IP-reassembly enums. Bit-identical struct layout vs. the legacy patch.
+- `data/ask-userspace/fmc/patches/01-ask2-extensions.patch` — port-ID output, shared scheme/CC node replication, PPPoE field fix, libxml2 2.13+ compat.
 
-### 5.4 `fastforward` config (ALG exclusion list)
+Build pipeline: `bin/ci-build-fmlib.sh` and `bin/ci-build-fmc.sh` run in CI, produce signed `.deb` packages, install during ISO assembly.
 
-Pinned by `ASK/config/fastforward`. UCI-style key-value, three default entries (FTP, SIP, PPTP). `askd` parses this at startup; flows on the listed ports/protocols are tagged "do-not-offload" in the conntrack→FCI handler.
-
-### 5.5 NETLINK_KEY=32 (FCI) message format
-
-The FCI channel is netlink protocol number 32 (NETLINK_KEY in `include/uapi/linux/netlink.h`). Multiplexed with PF_KEYv2 — see the `pfkey_proto[]` table in `net/key/af_key.c` and the `ask_fci_nlkey` registration. Message format:
-
-```
-struct fci_msg {
-    __u16  cmd;        /* FCI_CMD_FLOW_ADD | FLOW_DEL | SA_ADD | … */
-    __u16  flags;
-    __u32  seq;
-    __u32  table_type; /* one of the 16 IPV4_UDP_TABLE etc. */
-    __u8   key[64];    /* table-specific, length = table->key_size */
-    __u8   mask[64];
-    /* TLV payload: action, next-hop MAC, egress portid, FQID, … */
-};
+Static-assert chain in `ask-load`:
+```c
+_Static_assert(sizeof(t_FmPcdKgSchemeParams) == EXPECTED_KG_SCHEME_SIZE,
+               "fmlib ABI mismatch — rebuild fmlib with ask2-extensions patch");
+_Static_assert(sizeof(t_FmPcdHashTableParams) == EXPECTED_HASH_TABLE_SIZE,
+               "fmlib ABI mismatch — rebuild fmlib with ask2-extensions patch");
 ```
 
-Re-derived from `ASK/cmm/src/fpp.h` and `ASK/fci/lib/include/libfci.h`. The rewrite preserves byte layout; existing `cmm` (and the new `askd`) speak the same protocol. (We do not migrate to `nfnetlink` because libfci is widely linked into vendor tools; the cost-benefit doesn't favour migration.)
+If the wrong libfm is linked, the build fails — never the runtime. This pins the v0.5 "Chain-2 SIGSEGV" failure mode.
 
----
-
-## 6. Userspace daemons — `ask-load` and `askd`
-
-### 6.1 `ask-load` (replaces `dpa_app`)
-
-* ~1500 LOC C (vs. `ASK/dpa_app/dpa.c` ~600 LOC + supporting files).
-* Reads `/etc/cdx_cfg.xml`, `/etc/cdx_pcd.xml`, `/etc/cdx_sp.xml` (soft-parser), `/etc/fmc/config/hxs_pdl_v3.xml` (parser PDL).
-* Calls `fmc_compile()` from libfmc (patched upstream `nxp-qoriq/fmc`), then `fmc_execute()` — same control flow as `dpa_app::dpa_init()`.
-* Calls `FM_PCD_Open()` / `FM_PCD_Disable()` per FMan instance to put PCD into the configurable state before `fmc_execute()` runs `FM_PCD_SetAdvancedOffloadSupport()` (this dance is pinned by `set_fm_adv_options()` in `ASK/dpa_app/dpa.c`).
-* Walks the compiled `fmc_model_t`, builds `struct cdx_ctrl_set_dpa_params`, calls `ioctl(/dev/cdx_ctrl, CDX_CTRL_DPA_SET_PARAMS, &params)`.
-* Sets default exception-rate-limiter limits (`CDX_EXPT_ETH_DEFA_LIMIT = 195312` ≈ 100 Mbps; pinned by `dpa.c::set_exptrate_policer_defaults`).
-* Spawned **once** by `ask.ko` at insmod via `call_usermodehelper(UMH_WAIT_PROC)` — there is no long-running `dpa_app`. After it exits, the FMan policy is live in hardware.
-
-### 6.2 `askd` (replaces `cmm`)
-
-* ~8 kLOC C (vs. `ASK/cmm/` ~25 kLOC across 60+ files; modern code with libmnl, GLib event loop, structured logging — the 3× LOC reduction is real).
-* Inputs:
-  * `nf_conntrack_event` via netlink (libnetfilter_conntrack with re-derived async/heap-buffer patches).
-  * Bridge FDB events via `RTM_NEWNEIGH` rtnetlink (replaces `auto_bridge` daemon-side; the kernel module still does flowtable wiring).
-  * xfrm SA events via `xfrm_user` rtnetlink.
-  * `/proc/net/route`, `/proc/net/route6`, neighbor table for next-hop resolution.
-  * `/etc/config/fastforward` for ALG-exclusion port/proto list.
-  * libcli-based interactive CLI on a unix socket (`/var/run/askd.sock`).
-* Outputs:
-  * Flow ADD/DEL via `libask_fci` (NETLINK_KEY=32) → `ask_fci.ko` → `ask.ko::ask_cmdhandler.c` → CC table updates.
-  * Per-flow stats periodically scraped from `/dev/cdx_ctrl` and exposed via `show flows` CLI.
-* Decision engine:
-  1. New conntrack EST event → look up next-hop in route + neighbor → if reachable via offload-eligible port (1G or 10G, not loopback/tun/wifi-software-bridge) and protocol is not in `fastforward` list → push CC entry.
-  2. CT del event → drop CC entry.
-  3. xfrm SA add → push IPsec SA to OFFLINE port OP1 via FCI `SA_ADD`.
-  4. Bridge FDB add → push L2 entry to `cdx_ethernet` table.
-  5. Periodic timer (1 s): scrape `/dev/cdx_ctrl` per-flow counters, refresh conntrack last-used so software side doesn't time out hardware-active flows ("bytes-back" — exactly what `cmm/src/conntrack.c` does today).
-* No more `module_icc.c`/`module_expt.c` separation: one daemon, one event loop. The legacy modules existed for ICC asymmetric SoC support (Comcerto C2K dual-core stuff, irrelevant on LS1046A).
-
-### 6.3 systemd integration
+### 9.4 `ask-load` file layout `[AGENT-IMPLEMENTABLE]`
 
 ```
-/lib/systemd/system/ask-modules-load.service     # oneshot: modprobe in order
-/lib/systemd/system/askd.service                 # was cmm.service
-/etc/modules-load.d/ask-modules.conf             # was ASK/config/ask-modules.conf
-/etc/config/fastforward                          # unchanged from ASK/config/fastforward
-/etc/cdx_cfg.xml                                 # unchanged from ASK/config/gateway-dk/
-/etc/cdx_pcd.xml                                 # unchanged from ASK/dpa_app/files/etc/
+ask/userspace/ask-load/
+├── Makefile
+├── src/
+│   ├── main.c              # argv parsing, daemonised one-shot
+│   ├── xml_parse.c         # cdx_cfg.xml, cdx_pcd.xml ingest via libxml2
+│   ├── fmc_invoke.c        # fmc_compile() + FM_PCD_* calls
+│   ├── genl_send.c         # ASK_CMD_LOAD_PCD payload construction
+│   ├── exptrate.c          # default exception-rate-limit policer values
+│   └── static_asserts.c
+└── tests/
+    └── test_xml_parse.c
 ```
 
-`askd.service` Unit:
-* `After=network.target ask-modules-load.service systemd-sysctl.service`
-* `Requires=ask-modules-load.service`  ← propagation, not Wants= — see Chain-1
-* `ConditionPathExists=/dev/cdx_ctrl`  ← microcode gate
-* `ExecStart=/usr/bin/askd -f /etc/config/fastforward -n 131072`
-* `Restart=on-failure RestartSec=5`
+---
 
-Mirrors `ASK/config/cmm.service` line for line; only the binary name and the daemon implementation change.
+## 10. Kernel hooks patch — `200-ask2-hooks.patch`
+
+### 10.1 Scope `[AGENT-IMPLEMENTABLE WITH HUMAN REVIEW]`
+
+A ~1500-line in-tree patch against linux-6.18.x. Target file count: ~12 files (down from 64 in legacy).
+
+What stays from legacy:
+- `xt_QOSMARK` and `xt_QOSCONNMARK` match modules — verbatim copy, ~200 lines each.
+- `net/key/af_key.c` — minor scaffolding for `pfkey_register()` call from `ask.ko`. ~20 lines.
+
+What gets added:
+- `net/netfilter/ask_genl_glue.c` — generic-netlink family scaffold that `ask.ko` registers against. ~150 lines.
+- `include/uapi/linux/ask/ask.h`, `ask_ctrl.h` — public UAPI headers. ~300 lines.
+- Minor xfrm hook for SA-add event interception (alternative would be to add an xfrm notifier in `ask.ko` only, no patch needed; choose at implementation time based on whether mainline notifier infrastructure is sufficient).
+
+What's DELETED vs legacy:
+- All 600 lines of `comcerto_fp_netfilter.c` — replaced by mainline `nf_flow_table` + genl.
+- All bridge `net/bridge/br_*.c` edits — `nf_flow_table` already has bridge hooks.
+- All `net/xfrm/ipsec_flow.{c,h}` — replaced by askd's xfrm_user consumer.
+- All edits to `drivers/net/ppp/`, `drivers/net/usb/usbnet.c`, `net/ip6_tunnel.c` — not needed since we don't tap subsystem code paths anymore.
+- All edits to `include/linux/skbuff.h`, `if_bridge.h`, `netdevice.h`, `poll.h` — those were extra fields for the deleted `comcerto_fp_*` code.
+
+### 10.2 Patch maintenance discipline `[AGENT-IMPLEMENTABLE]`
+
+- Apply with `git apply --3way`.
+- CI gate: `kernel/common/scripts/patch-health.sh --flavor ask` must report `Pass: 2 Fail: 0` (this patch + the CAAM share patch).
+- Every mainline kernel bump: re-run apply, regenerate diff against the new base, commit with `kernel: rebase 200-ask2-hooks against 6.18.x`.
+- Goal: this patch dies entirely if mainline ever accepts `ndo_setup_tc` for DPAA1 + a genl-style interface for non-tc-flower offloads. That's a v2.0 project.
 
 ---
 
-## 7. The 9 lib patches — re-derived against current upstream
+## 11. VPP coexistence `[AGENT-IMPLEMENTABLE WITH HUMAN REVIEW]`
 
-Each one is a small, semantically minimal patch. All are re-authored against current upstream (not copied from `ASK/`); the only commitment is **same struct/enum byte layout** so binaries built against patched headers and binaries built against unpatched headers cannot be ABI-mixed (this is the Chain-2 silent-corruption failure mode).
+### 11.1 Architecture
 
-| # | Upstream | Reason | Re-derived patch path | Notes |
-|---|----------|--------|------------------------|-------|
-| 1 | `github.com/nxp-qoriq/fmlib` | Add `t_FmPcdKgSchemeParams::shared`, `t_FmPcdHashTableParams::{table_type,timeout_val,timeout_fqid,max_frags,min_frag_size,max_sessions}`, IP-reassembly enums | `data/ask-userspace/fmlib/patches/01-ask2-extensions.patch` | Built by `bin/ci-build-fmlib.sh`. Bit-identical struct layout vs `ASK/patches/fmlib/01-mono-ask-extensions.patch`. |
-| 2 | `github.com/nxp-qoriq/fmc` | Port-ID output, shared scheme/CC node replication, PPPoE field fix, libxml2 2.13+ compat | `data/ask-userspace/fmc/patches/01-ask2-extensions.patch` | Built by `bin/ci-build-fmc.sh`. |
-| 3 | `libnetfilter-conntrack` (Debian/upstream) | Fast-path info attributes (`CTA_FP_INFO_*`) + QOSCONNMARK accessors | `data/ask-userspace/libnetfilter-conntrack/patches/01-ask2-extensions.patch` | Used by `askd`. |
-| 4 | `libnfnetlink` | Non-blocking socket + heap-buffer mode for burst event handling | `data/ask-userspace/libnfnetlink/patches/01-ask2-async-heap.patch` | Used by `askd`. |
-| 5 | `iptables` | QOSMARK / QOSCONNMARK target+match userspace half | upstream patch series, parked under `data/ask-userspace/iptables/` | Mirrors kernel-side `xt_QOSMARK.ko` / `xt_QOSCONNMARK.ko`. |
-| 6 | `iproute2` | EtherIP + 4RD (4over6 RD) tunnel types | `data/ask-userspace/iproute2/patches/01-etherip-4rd.patch` | The kernel side is supplied by mainline `ip6_tunnel.c` (NPT support is in mainline already in 6.18). |
-| 7 | `ppp` | Tunnel ifindex propagation to PPP daemons (used so the offload engine can rewrite L2 on PPP-encapped flows) | `data/ask-userspace/ppp/patches/01-ask2-ifindex.patch` | |
-| 8 | `rp-pppoe` | CMM (now ASKD) relay mode | `data/ask-userspace/rp-pppoe/patches/01-ask2-relay.patch` | Renamed sysfs hook from `/sys/class/cmm` → `/sys/class/askd` (compat symlink kept). |
-| 9 | `accel-ppp-ng` | (NEW vs. legacy ASK 1.x) IPoE/L2TP integration with ASKD for PPPoE-over-bridge offload | `data/ask-userspace/accel-ppp-ng/patches/01-ask2-bridge-handoff.patch` | Optional; only built if FLAVOR=ask + accel-ppp-ng is enabled. |
+VyOS 1.5 LTS already integrates VPP with per-interface placement, Linux-CP for control-plane handoff, and shared-physical-NIC traffic via memif. ASK 2.0 piggybacks on this integration:
 
-Re-derivation procedure (per `AGENTS.md` "Patches are applied with `git apply --3way`" rule):
+- `set interfaces ethernet ethN offload ask` — port is ASK-managed, kernel netdev sees control-plane traffic only.
+- `set interfaces ethernet ethN offload vpp` — port is VPP-managed via DPDK `dpaa` PMD.
+- Default (neither set) — port is plain kernel netdev with mainline `dpaa_eth`.
 
-1. Clone upstream at the version pinned in CI (`bin/ci-build-fmlib.sh` already pins `lf-6.18.2-1.0.0` for fmlib/fmc — keep that tag).
-2. Apply the corresponding `ASK/patches/{fmlib,fmc}/01-mono-ask-extensions.patch` as `git am` to a scratch branch, tag baseline.
-3. Manually re-author the same change with cleaner comments and verify struct sizes with `pahole`/`offsetof()` static-asserts in `dpa_app` → `ask-load`.
-4. `git diff --cached > $REPO/data/ask-userspace/<lib>/patches/01-ask2-extensions.patch`.
-5. `git apply --3way --check` from CI to confirm.
-6. The `pahole`-comparable static-assert is the **Chain-2 oracle**: if `sizeof(t_FmPcdKgSchemeParams)` differs between `ask-load`'s view and the linked libfm.a's view, build fails before runtime SIGSEGV.
+For **flow promotion from ASK to VPP** (when a flow needs complex processing ASK can't do, like CGNAT with port pool management):
 
----
+```
+askd:
+  on conntrack EST event:
+    if (flow matches VPP-promotion ACL):
+      send ASK_CMD_FLOW_ADD with ASK_ACTION_OUTPUT_IFINDEX = memif_to_vpp
+      VPP receives the frame via memif on its dedicated cores
+      VPP processes (CGNAT, SR, complex ACL)
+      VPP sends back to a different FMan port or directly via memif
+    else:
+      send ASK_CMD_FLOW_ADD with ASK_ACTION_OUTPUT_IFINDEX = ethN (direct egress)
+```
 
-## 8. Test oracles — the two-chain failure model
+memif latency on A72 is in the low-µs range. The promotion overhead is constant regardless of flow size, so high-bandwidth flows pay it only once.
 
-This is informative for the rewrite (test it against these, on real hardware, before declaring v1).
+### 11.2 What VPP CANNOT do on this hardware
 
-### 8.1 Chain 1 — kernel-side
+The DPDK `dpaa` PMD does not expose FMan flow-table modify-and-forward as an `rte_flow` action. So VPP cannot install hardware fast-path flows itself. VPP runs its forwarding decisions in software, on dedicated A72 cores, at ~8-12 Gbps for 64 B IP forwarding (extrapolated from FD.io CSIT N1/Neoverse numbers; A72 is older and slower).
 
-**Symptom (ASK 1.x today):** `cmm.service` failed (`status=255`).
-**Root cause:** `NETLINK_KEY=32` not registered → `ask_fci_nlkey` / `ask_fci` returns `EPROTONOSUPPORT` → CMM/ASKD opens the FCI socket and immediately `connect()` fails.
-**Diagnose:** `/proc/config.gz | grep CONFIG_NET_KEY`, `/proc/net/netlink | awk '$1 == "32"'`, `lsmod | grep ask_fci`.
-**Fix on FLAVOR=ask:** `CONFIG_NET_KEY=y` + `CONFIG_ASK=y` (or `=m` with `ask-modules-load.service` ordering). The ASK 2.0 rewrite must **fail loudly** at `ask.ko` insmod if NET_KEY isn't built in (`pr_err_once` then `return -EPROTONOSUPPORT` from `ask_fci_init`).
-**Oracle:** integration test boots, asserts `awk '$1 == "32" {found=1} END {exit !found}' /proc/net/netlink`.
+This is why **VPP-only (no ASK) loses ~50% of the 64 B headroom**. The ASK path stays the right choice for plain forwarding; VPP is a specialised second-tier engine for things ASK can't do.
 
-### 8.2 Chain 2 — userspace-side
+### 11.3 Three deployment patterns supported in v1.0
 
-**Symptoms (ASK 1.x today):** `dpa_app rc=65280`, `cdx_module_init::start_dpa_app failed rc 11`, `cdx_create_fragment_bufpool::failed to locate eth bman pool`, `cdx_module_init::dpa_ipsec start failed`. SIGSEGV in `__memset_aarch64` DC ZVA loop (C++ destructor cascade in `dpa_app::main`).
-**Root cause options:**
-* **(a) MURAM exhaustion** — too-large `cdx_pcd.xml` + reassembly tables + parser config don't fit. FMC's `fmc_execute` returns failure; `dpa_app` segfaults later because the FMC model is in an inconsistent state.
-* **(b) Patched-struct ABI mismatch** — `dpa_app` compiled against patched fmlib headers (`t_FmPcdHashTableParams` extended) linked against an un-patched `libfm.a`. `dpa.c` line 704 uses `sizeof(t_FmPcdHashTableParams)` as a byte-loop bound; the loop now overruns the actual library struct, corrupting the heap.
+| Pattern | When to use | How configured |
+|---|---|---|
+| ASK-only | Pure routing/NAT, no CGNAT, no SR-MPLS, low VPN count | `set system offload ask enable` |
+| VPP-only | Specialised CGNAT/SR appliance, no need for kernel features | `set vpp enable; set vpp interface eth*` |
+| ASK + VPP hybrid | Mixed workload — most flows direct, some need VPP processing | both enabled; `set system offload ask promote vpp` ACL |
 
-**Fix today:** `bin/ci-build-fmlib.sh` + `bin/ci-build-fmc.sh` rebuild from patched upstream in CI; prebuilt archives in `data/ask-userspace/{fmlib,fmc}/lib*.a` are emergency fallback only.
+### 11.4 VPP plugin (out of scope for v1.0)
 
-**Oracle for ASK 2.0:**
-* `ask-load` carries **static asserts** at compile time:
-  ```c
-  _Static_assert(sizeof(t_FmPcdKgSchemeParams) == 0x???, "fmlib ABI mismatch");
-  _Static_assert(sizeof(t_FmPcdHashTableParams) == 0x???, "fmlib ABI mismatch");
-  ```
-  If the linker pulls in the wrong libfm, the build fails — never the runtime.
-* `ask.ko` reports MURAM allocation per-table in `/sys/kernel/debug/ask/muram` — operators see exhaustion before the SIGSEGV.
-* Integration test pushes a deliberately oversized `cdx_pcd.xml` (e.g. mask `0xffff` on every table) and asserts `ask-load` returns non-zero **and** `dmesg | grep -F 'MURAM exhausted'` is present.
-
-These two chains have been the **only** ASK production failure modes observed across the absorbed kernel-build history (frozen at FLAVOR=ask import). ASK 2.0 passes v1 acceptance only if both chains are reproducible-by-construction (oracle exists) and recoverable-by-construction (clean error messages, not SIGSEGV).
+A dedicated VPP plugin that talks to `ask.ko` over genl is a future possibility. It would let VPP push hardware-offload flows directly without going through askd. But it requires VPP-side memif management and a clean protocol boundary that doesn't exist yet. Defer to v1.1.
 
 ---
 
-## 9. Build-and-CI flow (FLAVOR=ask)
+## 12. The 210 host-command reverse-engineering process `[HUMAN-REQUIRED, AGENT-ASSISTED]`
 
-Single-repo, single-workflow model from `AGENTS.md` "Single-repo absorption (May 2026)" stays:
+### 12.1 What this section covers
 
-* Trigger: `gh workflow run "VyOS LS1046A build (self-hosted)" -F flavor=ask`.
-* Kernel staging: `bin/ci-stage-kernel.sh` → `bin/ci-consume-ask-kernel.sh` (existing; pulls 6.18.x kernel + applies the SDK + the new `200-ask2-hooks.patch`).
-* OOT modules: `bin/ci-build-ask-userspace.sh` (existing) extended to compile `ask.ko` + `ask_bridge.ko` from `kernel/flavors/ask/oot-modules/ask/` + `ask_bridge/`. Sign with `$KSRC/scripts/sign-file sha512 $KSRC/certs/signing_key.pem $KSRC/certs/signing_key.x509` per `AGENTS.md` `MODULE_SIG_FORCE=y` rule.
-* Userspace libs: `bin/ci-build-fmlib.sh`, `bin/ci-build-fmc.sh` rebuilt against re-derived patches.
-* Userspace daemons: new scripts `bin/ci-build-ask-load.sh` + `bin/ci-build-askd.sh` build the clean-room replacements.
-* ISO assembly: `bin/ci-build-iso.sh` + chroot hook `data/hooks/97-ask-userspace.chroot` install askd, ask-load, libask_fci, the systemd units, and `/etc/cdx_*.xml`.
-* Patch-health: `kernel/common/scripts/patch-health.sh --flavor ask` runs across the 16 absorbed patches; the new `200-ask2-hooks.patch` adds one entry → invariant becomes `Pass: 18 Fail: 0 0 SDK conflicts`.
-* Verification: `bin/ci-verify-ask-iso.sh` (existing) extended to check that the ISO has `/usr/sbin/ask-load`, `/usr/bin/askd`, signed `ask.ko` and `ask_bridge.ko`.
+This is the only section where engineering judgement on real hardware drives every decision. An agent can write test harnesses, parse dmesg, automate the test matrix, and propose hypotheses. A human must decide what each opcode does and whether the implementation is correct.
 
-`AGENTS.md` ASK-edit marker discipline does **not** apply to the ASK 2.0 modules (no NXP SDK lineage). It does still apply to anything that touches `kernel/flavors/ask/sdk-sources/`. CI audit (`grep -rn 'ASK-edit' kernel/flavors/ask/sdk-sources/` count must stay 35) is unchanged.
+### 12.2 The reference
+
+The legacy `we-are-mono/ASK/cdx/` source (branch `mt-6.12.y`) is the functional reference. The clean-room rewrite procedure:
+
+1. Pick one feature (e.g., "install IPv4 UDP 5-tuple flow").
+2. Read the legacy code's host-command sequence for that feature.
+3. Document the byte-level wire format: opcode, key encoding, action encoding, response format.
+4. Write a small probe: open `/dev/cdx_ctrl` on a vanilla Mono Gateway running legacy ASK, install a flow, capture the host-command exchange via dynamic tracing.
+5. Verify documented behaviour matches captured behaviour.
+6. Implement the same behaviour in `ask.ko::ask_flowtable.c` using FMC API calls.
+7. Test on Mono Gateway DK: install flow, verify packets traverse the fast path, verify CPU stays idle.
+8. Update v0.6.x of this spec with documented opcode behaviour.
+
+### 12.3 Feature matrix (rough order)
+
+| # | Feature | Estimated probe weeks |
+|---|---|---|
+| 1 | IPv4 UDP 5-tuple flow add/del/query | 1-2 |
+| 2 | IPv4 TCP 5-tuple flow add/del/query | 0.5 (likely same opcode space) |
+| 3 | IPv6 UDP/TCP 5-tuple | 1 |
+| 4 | IPv4 NAT rewrite (SNAT + DNAT + PAT) | 2 |
+| 5 | L2 bridge flow | 1 |
+| 6 | ESP IPv4 transport mode | 2 |
+| 7 | ESP IPv4 tunnel mode | 1 |
+| 8 | ESP IPv6 | 1 |
+| 9 | Multicast 3-tuple | 1 |
+| 10 | PPPoE relay | 1 |
+| 11 | Flow eviction events (hardware → host) | 2 |
+| 12 | Stats query (per-flow byte/packet counters) | 0.5 |
+
+Total raw probe time: ~14 weeks. With agent assistance for harness building and analysis, this compresses to **8-10 weeks of calendar time** if Miha + one collaborator work in parallel.
+
+### 12.4 Open question: NXP cooperation
+
+Even with a paid 210 license, the host-command protocol may not be in any document Mono received from NXP. Worth asking Tomaž directly:
+- Does Mono have an NXP-supplied "ASK Programmer's Reference Manual" or equivalent?
+- Are there NXP internal headers (`fpp_*.h`, `cdx_cmd_codes.h`) in the licensed source that document opcodes?
+- Can Mono ask NXP for the opcode list under NDA extension to Miha personally?
+
+If yes to any: probe time drops by half. If no: 8-10 weeks remains the estimate.
 
 ---
 
-## 10. Migration path — how we get there from today's ASK 1.x
+## 13. VyOS integration `[AGENT-IMPLEMENTABLE]`
 
-Five phases, each independently verifiable on hardware:
+### 13.1 CLI surface
 
-| Phase | Deliverable | Acceptance test |
-|-------|-------------|------------------|
-| **P1** | `200-ask2-hooks.patch` written, replaces `003-ask-kernel-hooks.patch`. Existing OOT `cdx`/`auto_bridge` rebuilt against it (no rewrite yet). | Kernel boots; `cdx.ko` insmods; `cmm` runs; `iperf3` over offloaded flow shows ≥4 Gbps (matching today's measured ASK SW flow offload baseline). |
-| **P2** | `ask.ko` clean-room — replaces `cdx.ko`. UAPI byte-compatible. Old `cmm` daemon unchanged. | Phase-1 test passes against new module. `dmesg \| grep ask` shows the new module banner. `cdx.ko` is uninstalled from the rootfs. |
-| **P3** | `ask_bridge.ko` clean-room replaces `auto_bridge.ko`, backed by mainline `flowtable`. | Bridge two RJ45 ports; iperf3 single flow saturates 1G; offloaded flow visible in `bridge -s fdb show` AND in `cat /proc/net/nf_flowtable`. |
-| **P4** | `ask-load` and `askd` clean-room replace `dpa_app` and `cmm`. `libask_fci` replaces `libfci`. Existing patched fmlib/fmc reused. | `cmm` and `dpa_app` removed from rootfs. Existing `cdx_cfg.xml`/`cdx_pcd.xml` unchanged. Phase-1 test passes. CLI `show flows` returns same data as legacy CMM CLI. |
-| **P5** | XFRM_OFFLOAD provider replaces `INET_IPSEC_OFFLOAD=y` path. `CONFIG_INET_IPSEC_OFFLOAD=n` becomes safe. | IPsec tunnel comes up; AES-GCM-128 1500 B throughput ≥ today's measurement; SA replace under load doesn't drop frames. |
+Follow the VPP precedent. Add to `vyos-1x/interface-definitions/`:
 
-After P5: `kernel/flavors/ask/sdk-sources/` still carries the SDK FMan/QMan/BMan drivers (the FMan v3L kernel driver itself is not part of this rewrite). All 35 ASK-edit markers there are unchanged. ASK 2.0 shrinks the **proprietary** ASK SDK kernel-hooks-and-modules surface from "5800-line patch + 15-file OOT cdx + auto_bridge" to "~600-line in-tree patch + ~3000-line clean-room OOT module pair", and the userspace from "25 kLOC cmm + 600-LOC dpa_app + libfci" to "~10 kLOC askd + ~1500-LOC ask-load + libask_fci".
+- `system-offload-ask.xml.in` — top-level enable/configure for ASK
+- `interfaces-ethernet.xml.in` — add `offload ask` and `offload vpp` leaf
 
-Total calendar: ~9 months for two engineers (one kernel, one userspace), assuming P1 lands first as it unblocks the smaller-patch story and lets us measure the legacy stack against the new kernel hooks.
+Example operator config:
+```
+set system offload ask
+set system offload ask max-flows 750
+set system offload ask flowtable-overflow software
+set system offload ask exclude-alg ftp sip pptp
+
+set interfaces ethernet eth0 offload ask
+set interfaces ethernet eth1 offload ask
+set interfaces ethernet eth2 offload ask
+set interfaces ethernet eth3 offload ask
+set interfaces ethernet eth4 offload ask
+
+set system offload ask promote vpp acl 100
+```
+
+### 13.2 conf_mode scripts
+
+```
+vyos-1x/src/conf_mode/
+├── system_offload_ask.py         # writes /etc/config/fastforward, reloads askd
+└── interfaces_ethernet.py        # adds offload-ask config to per-port policy
+```
+
+`system_offload_ask.py` talks to `askd` over `/var/run/askd.sock` for live reconfig. Falls back to a service restart if live reconfig fails.
+
+### 13.3 Operational commands
+
+```
+show offload ask flows                  # list installed flows
+show offload ask flows table cdx_tcp4   # filter by table
+show offload ask stats                  # aggregate counters
+show offload ask muram                  # MURAM allocation
+show offload ask events                 # recent eviction/error events
+clear offload ask flows                 # flush all flows
+restart offload ask                     # systemctl restart askd
+monitor offload ask events              # live tail
+```
+
+### 13.4 op_mode scripts
+
+```
+vyos-1x/src/op_mode/
+└── offload_ask.py                       # implements show/clear/restart/monitor
+```
 
 ---
 
-## 11. Open questions
+## 14. Upstream strategy (long-term, post-v1.0)
 
-1. ~~**ucode v210.10.1 redistribution.**~~ **RESOLVED.** The microcode is on the board's SPI NOR (`mtd4`); U-Boot loads it and patches the DTB `fsl,fman-firmware` node before kernel handoff. The U-Boot image we ship already redistributes the binary blob (legal sign-off was completed in the now-archived kernel build repo's release cycle). No `request_firmware()`, no `/lib/firmware/` file, no kernel licensing surface. ASK 2.0 inherits the existing redistribution path unchanged.
-2. ~~**Should `ask_fci` be in-tree or OOT?**~~ **RESOLVED — OOT, signed, same pattern as `ask.ko` and `ask_bridge.ko`.** Lives at `kernel/flavors/ask/oot-modules/ask_fci/`, built by `bin/ci-build-ask-userspace.sh` against the in-tree hooks patch's exported symbols (`net/key/af_key.c::pfkey_register`, `net/netfilter/nf_conntrack_*` notifier hooks). Signed by `$KSRC/scripts/sign-file sha512 …` per `AGENTS.md` `MODULE_SIG_FORCE=y` rule. The in-tree-built-in option was rejected because (a) it forces a `200-ask2-hooks.patch` edit per kernel rebase for what is logically a leaf module, (b) it diverges from the discipline `ask.ko`/`ask_bridge.ko` follow, (c) it would block `ask_fci` from being unloaded for diagnostics. Module load order in `/etc/modules-load.d/ask-modules.conf` (already shown in §3.4) places `ask_fci` last, so `ask.ko` registers `/dev/cdx_ctrl` and the FCI handler chain on its own; `ask_fci.ko` then attaches as the NETLINK_KEY=32 protocol handler via `pfkey_register(NETLINK_KEY, …)`.
-3. **Drop NETLINK_KEY=32 in v2?** `nfnetlink` would be more idiomatic. But that breaks libfci's ABI for any external vendor tool that links it. Decision: keep NETLINK_KEY=32 forever for compat. Add an `nfnetlink` parallel surface in v2 if anyone asks.
-4. **Module name `ask` vs `ask2` vs `dpaa1-ask`.** Avoiding collision with mainline `drivers/cdx/`. Working name `ask` (matches the `kernel/flavors/ask/` directory and the FLAVOR=ask brand; `CONFIG_ASK` does not collide with anything in mainline 6.18). Open to `dpaa1-ask` if upstream submission ever happens. `ask2` was rejected because the `/2` suffix would leak the version into every `lsmod` line and every `dmesg` banner forever.
-5. **CC entry eviction policy.** ASK 1.x uses LRU per-CC-node. Mainline `flowtable` uses GC at fixed intervals. We need to reproduce LRU for the CC tables (the flow keep-alive in `askd` depends on it) AND honour the mainline flowtable GC for the bridge path. Two policies, one per offload pathway.
-6. **Per-OFFLINE-port BMan pool sizing.** Today the SDK hard-codes 2048 buffers per OP. The Mono Gateway DK has 2 OPs → 4096 buffers reserved out of the BMan pool. If we add an OP (e.g. for traffic-shaping post-process), we hit BMan exhaustion. Make the count `cdx_cfg.xml`-driven.
-7. **`vwd_fast_path_enable` sysfs hook in `cmm.service`.** The legacy `ExecStartPre` writes `/sys/class/vwd/vwd0/vwd_fast_path_enable`. `vwd` is a wireless module not present on this board. The hook is dead code on Mono Gateway DK. Drop in `askd.service`.
+### 14.1 What we'd want to upstream
+
+1. `201-caam-qi-share.patch` — small, defensible, has mlx5 precedent. **High priority for v1.0 + 3 months.**
+2. Generic netlink family `ask` — once stable, propose as `vy_ask` or `qoriq_ask` to maintainers. Medium priority for v1.5.
+3. tc-flower offload for DPAA1 `dpaa_eth` driver — this is the big one. Would allow ASK 2.0 to ride on `flowtable` HW offload eventually. **Multi-year effort, depends on NXP cooperation.** Track separately.
+
+### 14.2 What stays out-of-tree forever
+
+- `ask.ko` and `ask_bridge.ko` themselves. They depend on FMan-specific FMC API surface that's not exposed to generic netdev offload infrastructure.
+- The 210 ucode. Binary blob, not in scope to upstream.
+- `askd` and `ask-load`. Userspace, no upstreaming concept.
 
 ---
 
-**End of v0.5 (ASK 2.0 rename). Out of scope for any future revision of this spec:** rewriting `fsl_dpa`, `fsl_dpaa_mac`, `fsl_qbman`, mainline FMan, AF_XDP, tc-flower offload, CAAM xfrm, or DPDK PMD. Those belong to **default-flavor** plans elsewhere in this repo.
+## 15. Effort estimation with agentic implementation
+
+### 15.1 The agentic multiplier
+
+Conventional estimation for clean-room C-language kernel + userspace rewrites uses **80-120 LOC/engineer-day** for kernel code, **150-250 LOC/engineer-day** for userspace daemons. Beast Mode style agents (Cline + Sonnet/Opus, with a well-scoped spec like this one) raise these to **400-800 LOC/engineer-day** for code with strong precedent (genl protocol handlers, ioctl shims, xml parsing, libcli CLIs) and **200-400 LOC/engineer-day** for code with weak precedent (FMan driver glue, undocumented opcode handling).
+
+The agentic speedup applies to **writing** code. It does NOT apply to:
+- Hardware probing (Section 12 reverse engineering)
+- Mainline kernel patch review cycles
+- NXP commercial negotiation
+- Real-hardware verification time
+- Acceptance gate testing on the Spirent / Keysight test harness
+
+### 15.2 Re-baselined LOC and effort
+
+| Component | LOC estimate | Precedent strength | Agentic eng-days |
+|---|---|---|---|
+| `200-ask2-hooks.patch` | 1500 | strong (xt modules verbatim, genl glue boilerplate) | 4 |
+| `201-caam-qi-share.patch` | 200 | strong (mainline pattern) | 2 |
+| `ask.ko` kernel module | 5000 | mixed (genl strong, FMC API mixed, opcode handling weak) | 25 |
+| `ask_bridge.ko` | 400 | strong | 2 |
+| `askd` userspace daemon | 6000 | strong (netlink consumer + glib loop is well-trodden) | 20 |
+| `ask-load` userspace | 1200 | strong | 5 |
+| `libask_fci` library | 800 | strong | 3 |
+| fmlib + fmc re-patch | 200 | strong (re-derivation, not authoring) | 2 |
+| VyOS CLI XML + conf_mode + op_mode | 1500 | strong (VyOS plugins are well-documented) | 5 |
+| Build pipeline (ci-build-ask*, ci-verify-ask-iso) | 500 | strong | 3 |
+| Test harness (kunit + userspace pytest) | 2000 | strong | 8 |
+| Documentation (operator manual, dev guide) | n/a | strong | 6 |
+| **Subtotal: agent-implementable engineering days** | **~19000 LOC** | | **85 eng-days** |
+
+### 15.3 Human-only work
+
+| Activity | Calendar weeks | Reason |
+|---|---|---|
+| 210 opcode reverse engineering (Section 12) | 8-10 | Hardware probing, judgement |
+| Mainline kernel patch upstream review | 12-16 | Out of our control; runs in parallel |
+| Hardware verification at each milestone | 8 | Real-board test loops |
+| Performance gate runs (Geerling-style 1 Mpps HTTP) | 4 | Test harness time |
+| NXP/Mono commercial conversations | 2-4 | Variable |
+| Code review and integration | 6 | Human judgement on agent output |
+| **Subtotal: human-only calendar weeks (sequential where dependent)** | | **~24 weeks** |
+
+### 15.4 Realistic total schedule
+
+With **two engineers** (one kernel-focused, one userspace + VyOS integration), running agent-driven implementation with structured human review:
+
+- **Months 1-2**: Architectural scaffolding (ask.ko skeleton, genl family, first flow type). Agent writes; human probes 210 opcodes for IPv4 UDP/TCP. M2 acceptance gate: kernel boots with `ask.ko` loaded, one flow type works end-to-end.
+- **Months 3-4**: All non-IPsec flow types + ask_bridge + askd skeleton. Agent writes; human probes 210 for NAT and bridge. M4 acceptance gate: full forwarding + NAT at ASK 1.x parity.
+- **Month 5**: CAAM xfrm offload (single largest individual feature). Agent writes glue; human verifies on real CAAM. M5 acceptance gate: AES-GCM-128 IPsec at 3 Gbps.
+- **Month 6**: VyOS CLI integration, ask-load XML compatibility, libask_fci ABI compatibility. Mostly agent work with strong precedent. M6 acceptance gate: vanilla Mono Gateway DK boots a VyOS rolling image with `set system offload ask`.
+- **Month 7**: VPP coexistence, software flowtable fallback, debugfs and stats. M7 acceptance gate: 3-plane architecture demo (ASK fast + kernel slow + VPP).
+- **Month 8**: Performance gate runs at acceptance levels (Section 15.5). Bug fixes. Documentation.
+- **Month 9**: Release candidate, soak testing, v1.0 ship.
+
+**Total: 9 months, 2 engineers.** Down from the v0.5 estimate of "9 months for 2 engineers" but with much higher confidence — the saved CAAM-driver work and the agentic speedup buy back the schedule that the 210 reverse-engineering work consumes.
+
+If only one engineer is available: **14-16 months calendar time** because the kernel and userspace tracks can't fully parallelise.
+
+If Mono provides NXP internals reducing opcode probe time to 4 weeks: **7 months, 2 engineers**.
+
+### 15.5 Acceptance gates (the GO/NO-GO targets)
+
+**Functional gates** (must all pass for v1.0 GA):
+- Plain IPv4 + IPv6 forwarding via 5-tuple flow tables.
+- IPv4 NAT (SNAT, DNAT, PAT) with conntrack sync.
+- L2 bridge flow offload.
+- IPsec ESP IPv4 tunnel mode + AES-GCM-128.
+- Existing `cdx_cfg.xml` and `cdx_pcd.xml` from `we-are-mono/ASK/config/gateway-dk/` boot unchanged.
+- `/dev/cdx_ctrl` ioctl ABI compatibility with vendor tools that link `libfci.so.1`.
+- VyOS CLI: `set system offload ask` produces a working config.
+
+**Performance gates** (Jeff Geerling / STH-style measurement on Mono Gateway DK):
+- **GO** if all of: ≥14 Gbps bidirectional at 512 B IPv4 forwarding; ≥1 Mpps real HTTP through-traffic; ≥3 Gbps AES-GCM-128 at 1024 B; <20% CPU on 4 cores at line rate.
+- **NO-GO** if any of those slip by more than 30%.
+
+**Quality gates**:
+- All kernel modules signed by ASK in-tree signing key per `MODULE_SIG_FORCE=y`.
+- `patch-health.sh` reports Pass: 2 Fail: 0 SDK conflicts: 0.
+- Code coverage ≥70% for `askd` (measured via gcov).
+- No regressions in the VyOS smoke test suite when running with FLAVOR=default.
+
+---
+
+## 16. Risk register
+
+| # | Risk | Probability | Impact | Mitigation |
+|---|---|---|---|---|
+| 1 | 210 opcode probing exceeds 10 weeks | Medium | High | Get NXP internals via Mono early; partial-feature release if needed |
+| 2 | Mono's 210 build doesn't expose every feature CDX 1.x had | Low | High | Audit feature parity at M2; descope features that are gone |
+| 3 | `201-caam-qi-share` rejected upstream | Low | Low | Keep as OOT patch indefinitely; mainline acceptance not on critical path |
+| 4 | Mainline `caam_qi.ko` API surface insufficient for descriptor share | Medium | Medium | Extend the in-tree patch; worst case is +400 LOC |
+| 5 | Kernel 6.18 LTS gets superseded mid-project | Low | Medium | Track 6.18.x LTS until 2027; if VyOS moves, rebase |
+| 6 | VyOS Inc. drops VPP from default | Low | Low | Option A (ASK-only) is the fallback; supported in spec |
+| 7 | Performance gate misses Geerling 1 Mpps | Medium | High | Hardware-specific tuning; ucode-policy review; OP plumbing verification |
+| 8 | Agent-generated code carries subtle bugs | High | Medium | Test coverage gate ≥70%; mandatory human review of every PR |
+| 9 | LOC estimates wrong by 2× | Medium | Medium | Padding built into 9-month schedule; revisit at M2 |
+| 10 | Microcode redistribution legal question | Low | Low | Resolved: 210 ships on board, never in our image |
+| 11 | Mainline kernel API churn in 6.18.x point releases | Medium | Low | Pin to LTS, only update at release boundary |
+| 12 | VPP+memif latency unacceptable for some flows | Medium | Low | Make VPP promotion opt-in per-ACL; default is direct ASK forwarding |
+
+---
+
+## 17. Open questions (for human resolution)
+
+1. **NXP internals access** — does Mono have an ASK Programmer's Reference Manual that documents 210 opcodes? Ask Tomaž directly. Resolves Risk #1.
+2. **210 feature parity** — does Mono's 210 build support every CDX 1.x feature (4o6 tunneling, EtherIP, IP fragmentation)? Audit early; descope where needed.
+3. **VyOS rolling vs LTS target** — v1.0 GA against rolling makes sense for early adopters; 1.6 LTS (probably mid-2026) is the long-term home. Confirm with VyOS Inc.
+4. **askd unix socket vs DBus** — current spec says `/var/run/askd.sock` libcli-style. VyOS Inc. is migrating some daemons to DBus. Check `vyos-1x` direction.
+5. **Test hardware availability** — running the performance gates requires a Spirent or Keysight CyPerf rig. Patrick Kennedy at STH ran the original Geerling test on Keysight; can we get access? Otherwise use software traffic generators with documented caveats.
+6. **Per-CPU stats aggregation cadence** — 1 Hz default in v0.6 spec; consider configurable per-flow refresh for high-frequency operators.
+7. **Multi-FMan support** — LS1046A has one FMan, but the spec should anticipate LS1046A in dual-FMan configurations (LS1048A, future SoCs). Out of scope for v1.0; flag for v2.0.
+8. **CAAM Job Ring fallback** — when CAAM QI is busy or unconfigured, can we fall back to caam_jr? Adds complexity; defer to v1.1 unless ops team asks.
+
+---
+
+## 18. Naming, paths, and ABI compatibility map
+
+For operators upgrading from ASK 1.x or running tools linked against legacy `libfci`:
+
+| Legacy path/symbol | ASK 2.0 path/symbol | Compat strategy |
+|---|---|---|
+| `/dev/cdx_ctrl` | `/dev/ask_ctrl` | Symlink at module load |
+| `CDX_CTRL_*` ioctls | same numbers, same structs | Shim in `ask_dev.c` |
+| `libfci.so.1` | `libask_fci.so.1` | Symlink + dlsym compat |
+| `cmm.service` | `askd.service` | systemd alias |
+| `cmmctl` | `askctl` | symlink + wrapper |
+| `/etc/config/fastforward` | unchanged | Same format |
+| `/etc/cdx_cfg.xml` | unchanged | Same schema |
+| `/etc/cdx_pcd.xml` | unchanged | Same schema |
+| `/etc/modules-load.d/cmm-modules.conf` | `ask-modules.conf` | Migration on first boot |
+| `cdx.ko` symbol exports | `ask.ko` symbol exports | KABI: not preserved; vendor tools must rebuild |
+| `auto_bridge.ko` | `ask_bridge.ko` | Same as above |
+| `NETLINK_KEY=32` channel | generic netlink family `ask` | `libask_fci` translates |
+| `/* ASK-edit */` source markers | unchanged | Only present in SDK sources, not in ASK 2.0 code |
+
+---
+
+## 19. Implementation order (cookbook for agents)
+
+For an agent picking up this spec cold:
+
+1. **Read Sections 1, 2, 3, 4, 7 in full.** Understand the architecture and the genl protocol.
+2. **Create the file layout.** All directories, empty `Kbuild` files, empty `Makefile`s. Commit.
+3. **Implement `ask.ko::ask_main.c` + `ask_genl.c`.** Make the module load, register the genl family, accept the dummy `ASK_CMD_TABLE_LIST` command and return an empty dump. Test with `genl ask dump`. Don't touch FMan yet.
+4. **Implement `ask_dev.c`** — `/dev/ask_ctrl` chardev with stub ioctls. Test with `cat /dev/ask_ctrl`.
+5. **Implement `askd` skeleton.** Just the event loop, conntrack consumer, genl sender. Verify it sees conntrack events and sends `ASK_CMD_FLOW_ADD` (which `ask.ko` returns `-ENOSYS` to for now).
+6. **Implement `ask-load`.** XML parsing, fmc invocation, `ASK_CMD_LOAD_PCD` payload construction. Verify `ask.ko` receives and parses the model correctly.
+7. **Now the FMan work** — `ask_dpaa.c`, `ask_flowtable.c`. This is where Section 12 (the 210 opcode probing) begins. Pause agent-driven work here; switch to human-led probing.
+8. **Once IPv4 UDP flow add/del/query works**, validate on hardware: install a flow manually via genl, send packets, verify they bypass conntrack and traverse the fast path.
+9. **Iterate through the Section 12 feature matrix** in priority order.
+10. **CAAM xfrm offload** is the largest standalone milestone. Allocate Month 5 to it.
+11. **VyOS CLI integration** comes near the end — there's no point making the CLI pretty before the engine works.
+
+---
+
+## 20. Glossary
+
+- **210 ucode** — NXP proprietary FMan microcode family implementing fine-grained per-flow classification. Licensed; baked into Mono Gateway firmware.
+- **108 ucode** — Public NXP FMan microcode family implementing coarse static classification. Free on github.com/nxp-qoriq/qoriq-fm-ucode.
+- **ASK** — NXP Application Solutions Kit. The commercial stack that turns FMan from a packet-distribution engine into a flow-termination engine.
+- **CC** — Coarse Classifier. The FMan silicon block used by 108 ucode. With 210, it's repurposed as dynamic per-flow tables.
+- **CDX** — the legacy kernel fast-path engine in ASK 1.x. Replaced by `ask.ko` in 2.0.
+- **CMM** — Connection Management Module. Legacy userspace daemon. Replaced by `askd` in 2.0.
+- **FCI** — Fast-path Control Interface. Legacy netlink channel between CMM and CDX. Replaced by genl family `ask` in 2.0.
+- **FMan** — Frame Manager. The packet-processing silicon block on LS1046A.
+- **FMC** — Frame Manager Configuration tool. Userspace XML-to-PCD compiler. Reused in 2.0 via patched upstream.
+- **OP** — Offline Port. FMan port without a MAC; used for re-injection after CAAM decryption.
+- **PCD** — Parse-Classify-Distribute. FMan's silicon-level packet pipeline.
+- **QI** — Queue Interface. CAAM's QMan-integrated path. The fast crypto path on LS1046A.
+
+---
+
+**End of v0.6.** This spec supersedes v0.5 in entirety. Out of scope for any future revision: rewriting `fsl_dpaa1`, mainline FMan, `caam_qi.ko`, VPP itself, or anything below the FMan microcode horizon. Those belong elsewhere in the repo.
