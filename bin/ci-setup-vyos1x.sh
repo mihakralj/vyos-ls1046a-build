@@ -120,7 +120,18 @@ GITATTR
     echo "::error::legacy DPAA PMD unbind path is still present in vpp.py" >&2
     patch_fail=1
   fi
-  [ $patch_fail -eq 1 ] && echo "ERROR: some patches failed — check build output" >&2 && exit 1
+  # NOTE: a trailing `[ X ] && cmd && exit 1` chain returns 1 when the test
+  # is FALSE (patch_fail=0), and as the LAST statement in the hook that 1
+  # becomes the script's exit status — vyos-build then logs "pre_build_hook
+  # failed" and aborts the rebuild, leaving any stale vyos-1x.deb from a
+  # prior successful run on the self-hosted runner to be picked up by lb
+  # chroot_install (with its un-stripped jool / nat-rtsp deps). Use a
+  # proper if-block and an explicit `exit 0` on the success path.
+  if [ $patch_fail -eq 1 ]; then
+    echo "ERROR: some patches failed — check build output" >&2
+    exit 1
+  fi
+  exit 0
 '''
 EOF
 
