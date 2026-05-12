@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# ASK 2.0 - Kconfig (out-of-tree)
+#
+# PR1: skeleton config. Hard dependencies on FSL_DPAA / CAAM_QI / etc.
+# will be tightened in later PRs as the corresponding subsystems start
+# referencing those facilities.
+
+config NET_ASK
+tristate "ASK 2.0 hardware-accelerated forwarding (LS1046A)"
+depends on NET
+depends on ARM64 || COMPILE_TEST
+default n
+help
+  ASK 2.0 ("Anti-Strawberry-Kiwi") is a clean-room reimplementation of
+  the legacy ASK 1.x flow/IPsec offload stack for the NXP LS1046A
+  Mono Gateway DK using mainline DPAA1 / CAAM drivers and standard
+  Linux callback infrastructure (nf_flow_table, xfrmdev_ops,
+  flow_block_cb).
+
+  Exposes a generic-netlink family ("ask") for userspace askd(8) to
+  query and configure the offload datapath.
+
+  PR1 is a skeleton: registers the genl family and answers
+  ASK_CMD_GET_INFO. No flows are accelerated yet.
+
+  See specs/ask-2.0-rewrite-spec.md for the full architecture.
+
+  Say M here to build as a module (recommended). Say N if unsure.
