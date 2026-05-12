@@ -107,3 +107,23 @@ else
   fi
 fi
 "$MERGIRAF_BIN" --version || echo "WARN: mergiraf install failed — patches with context drift may produce conflict markers"
+
+# ---------------------------------------------------------------------------
+# j2lint — Jinja2 linter, NOT packaged in Debian.
+# vyos-1x's debian/rules invokes `make j2lint` which runs the `j2lint`
+# binary on data/templates/. The Makefile errors out
+#   "j2lint binary not found, consider installing:
+#    pip install git+https://github.com/aristanetworks/j2lint.git@341b5d5db86"
+# if the binary is not on PATH. The upstream vyos-builder Docker image
+# preinstalls j2lint via that exact pip URL — replicate on the bare runner.
+#
+# Debian bookworm marks system Python externally-managed (PEP 668);
+# --break-system-packages is acceptable here because we are in a CI runner,
+# not a user system. Self-hosted runner caches the install across builds, so
+# the `command -v` guard makes this a fast no-op on warm caches.
+# ---------------------------------------------------------------------------
+J2LINT_PIN='git+https://github.com/aristanetworks/j2lint.git@341b5d5db86'
+if ! command -v j2lint >/dev/null 2>&1; then
+  pip install --break-system-packages "$J2LINT_PIN"
+fi
+j2lint --version
