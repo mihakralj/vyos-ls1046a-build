@@ -35,8 +35,18 @@ pre_build_hook = """
   set -ex
   cp ../ls1046a-patches/reftree.cache data/reftree.cache
   sed -i 's/all: clean copyright/all: clean/' Makefile
-  # Remove packages not available for ARM64 from dependencies
+  # Remove packages not available for ARM64 from dependencies, plus sub-packages
+  # that ci-build-packages.sh intentionally does NOT build (jool, nat-rtsp, qat,
+  # mlnx, realtek-r8126, realtek-r8152, ipt-netflow, igb, ixgbe, ixgbevf —
+  # see bin/ci-build-packages.sh for the rationale).  Stripping at sed-time
+  # (pre-patch) keeps debian/control's blob SHA stable for any later git apply
+  # --3way calls that depend on the upstream blob hash.
   sed -i '/accel-ppp-ng/d' debian/control
+  # Strip whole "# For X" / "# End X" guard blocks so the leading comment and
+  # the trailing comment go away together with the body.
+  for blk in nat64 'system conntrack modules rtsp' 'qat' 'mellanox' 'realtek-r8126' 'realtek-r8152' 'ipt-netflow' 'intel-igb' 'intel-ixgbe' 'intel-ixgbevf'; do
+    sed -i "/^# For \"${blk}\"$/,/^# End \"${blk}\"$/d" debian/control
+  done
   # Relax pylint --errors-only to ignore checks added in pylint 3.x that
   # the upstream vyos-builder Docker image (Debian bookworm, pylint 2.16)
   # never enforced.  We're on Debian trixie (pylint 3.3.4) which trips:
