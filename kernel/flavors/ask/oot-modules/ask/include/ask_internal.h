@@ -36,6 +36,32 @@
 int  ask_genl_register(void);
 void ask_genl_unregister(void);
 
+/*
+ * Test-only direct entry points for the kunit suite (PR9 / M1.5).
+ *
+ * Production callers always reach these via the genl_family small_ops
+ * dispatch table — never call them directly. They are exposed here so
+ * tests/ask_test_genl.c can drive the pure-helper logic (skb fill,
+ * dump-walker callback, eopnotsupp ratelimited stubs) without standing
+ * up a synthetic netlink socket and round-tripping through genl_rcv.
+ *
+ * struct ask_flow is forward-declared above; struct ask_genl_dump_ctx
+ * is defined inside ask_genl.c (the kunit code grabs it through a
+ * matching forward declaration so the layout stays single-sourced).
+ */
+struct sk_buff;
+struct genl_info;
+struct netlink_callback;
+struct ask_flow;
+struct ask_genl_dump_ctx;
+
+int ask_genl_get_info_fill(struct sk_buff *skb);
+int ask_genl_fill_one_flow(struct sk_buff *skb, struct ask_flow *f);
+int ask_genl_dump_one_cb(struct ask_flow *f, void *arg);
+int ask_genl_eopnotsupp_doit(struct sk_buff *skb, struct genl_info *info);
+int ask_genl_eopnotsupp_dumpit(struct sk_buff *skb,
+       struct netlink_callback *cb);
+
 /* ------------------------------------------------------------------------- */
 /* ask_genl_attr.c — nla_policy tables shared across nested attribute sets    */
 /* ------------------------------------------------------------------------- */

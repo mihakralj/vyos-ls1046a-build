@@ -12,6 +12,7 @@
  * having to touch this file again.
  */
 
+#include <linux/module.h>
 #include <net/netlink.h>
 #include <uapi/linux/ask/ask.h>
 #include "include/ask_internal.h"
@@ -38,6 +39,18 @@ const struct nla_policy ask_info_policy[ASK_INFO_ATTR_MAX + 1] = {
 [ASK_INFO_ATTR_NUM_FLOWS]      = { .type = NLA_U32 },
 [ASK_INFO_ATTR_MAX_FLOWS]      = { .type = NLA_U32 },
 };
+EXPORT_SYMBOL_GPL(ask_info_policy);
+
+/*
+ * The ask_top_policy and ask_flow_policy tables are referenced by the kunit
+ * suite (PR9 / M1.5) — the genl_attr coverage tests build hand-rolled nlattr
+ * streams and validate them through nla_validate_nested(). Other policy
+ * tables (muram, sa, event, policer) become exportable when their respective
+ * subsystem PRs need them; for now they live only inside ask.ko's address
+ * space.
+ */
+EXPORT_SYMBOL_GPL(ask_top_policy);
+EXPORT_SYMBOL_GPL(ask_flow_policy);
 
 const struct nla_policy ask_muram_policy[ASK_MURAM_ATTR_MAX + 1] = {
 [ASK_MURAM_ATTR_TOTAL_BYTES]      = { .type = NLA_U32 },
