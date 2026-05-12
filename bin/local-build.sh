@@ -1,7 +1,7 @@
 #!/bin/bash
 # Local VyOS ISO build orchestrator — runs each ci-*.sh step in sequence,
 # mimicking the env that .github/workflows/auto-build.yml provides.
-set -e
+set -e -o pipefail
 
 # Resolve this repo's root from the script's location, so the script
 # works whether invoked from /workspace (legacy docker bind), /home/vyos/...

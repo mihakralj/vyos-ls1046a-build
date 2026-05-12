@@ -2,7 +2,7 @@
 # ci-setup-vyos1x.sh — Stage vyos-1x patches and generate package.toml
 # Called by: .github/workflows/auto-build.yml "Setup vyos-1x patches" step
 # Expects: GITHUB_WORKSPACE set, MOK_KEY and MINISIGN_PRIVATE_KEY in env
-set -ex
+set -ex -o pipefail
 cd "${GITHUB_WORKSPACE:-.}"
 
 ### Write secrets to disk
