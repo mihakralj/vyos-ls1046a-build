@@ -73,22 +73,34 @@ Status legend:
 ## Agent hardware loop
 
 The Mono Gateway DK is **continuously available** to the agent over the
-LAN:
+LAN, reached via Tailscale subnet routing (the `192.168.0.0/16` route
+is advertised by a node in the LAN and accepted by this VM):
 
-- The agent runs on **LXC 200 (`192.168.1.137`, the build host)**. This
-  is the same machine that owns `/srv/tftp/` and the cross-toolchain
-  tree at `/home/vyos/kernel-ls1046a-build/work/linux-*`. Iteration
-  times per `plans/DEV-LOOP.md`: incremental kernel cross-build ≈2 min,
-  full ≈8 min, DTB only ≈30 s.
-- The live target is reachable over SSH via the `ssh` MCP server with
-  four pre-configured connections:
-  - `vyos` (192.168.1.190) — management address on eth0
+- The agent runs on the **Cobalt 100 Azure ARM64 VM** (`arm64-runner`,
+  Tailscale `100.125.95.22`). This is the **same VM that runs the
+  self-hosted GitHub Actions runner** (`vm-runner-2`) for CI ISO
+  builds. It is **not** the build host for the dev-loop kernel — that
+  lives on **LXC 200** (`vyos-builder` LXC inside the `heidi` Proxmox
+  host at `192.168.1.15`, container LAN IP `192.168.1.137`), which
+  owns `/srv/tftp/` and the cross-toolchain tree under
+  `/home/vyos/kernel-ls1046a-build/work/linux-*`. The agent reaches
+  LXC 200 over SSH (`ssh lxc200`) and runs the cross-build remotely.
+  Iteration times per `plans/DEV-LOOP.md`: incremental kernel
+  cross-build ≈2 min, full ≈8 min, DTB only ≈30 s.
+- All hosts are reachable over SSH via the `ssh` MCP server with
+  six pre-configured connections:
+  - `heidi` (192.168.1.15) — Proxmox host PVE 8.x running on the LAN
+  - `lxc200` (192.168.1.137) — `vyos-builder` LXC on heidi; owns
+    `/srv/tftp/` and the cross-build tree (dev-loop build host)
+  - `vyos` (192.168.1.190) — management address on eth0 (Mono Gateway)
   - `vyos-eth1` (192.168.1.185) — middle RJ45
   - `vyos-eth2` (192.168.1.189) — leftmost RJ45
   - `vyos-eth4` (192.168.1.192) — right SFP+
   These are wired into `/home/vyos/.config/ssh-mcp-config.json`; any
   agent session can `ssh_execute_command`, `ssh_upload_file`,
-  `ssh_download_file` against them without setup.
+  `ssh_download_file` against them without setup. The `vyos*` and
+  `lxc200` entries authenticate via `~/.ssh/vyos_vanity` and
+  `~/.ssh/admin_key` respectively.
 - Target state (verified 2026-05-12): `Linux vyos 6.18.28-vyos
   aarch64`, VyOS `2026.05.11-0542-rolling`, board DT compatible
   `mono,gateway-dk fsl,ls1046a`. CAAM up with three job rings

@@ -66,12 +66,16 @@ jobs:
           cd linux-src
           rc=0
           # Iterate every flavor bucket in apply order
+          # ASK 2.0 (rewrite-in-progress): kernel/flavors/ask/patches/ was
+          # deleted on the ask20 branch. ASK 2.0 ships ask.ko / ask_bridge.ko
+          # as out-of-tree modules per specs/ask-2.0-rewrite-spec.md, so
+          # there are no in-tree kernel patches to probe. Re-add the
+          # kernel/flavors/ask/patches/{ask,fixes} buckets here once any
+          # ASK 2.0 in-tree patches land.
           for bucket in \
               ../kernel/common/patches/vyos \
               ../kernel/common/patches/board \
-              ../kernel/common/patches/fixes \
-              ../kernel/flavors/ask/patches/ask \
-              ../kernel/flavors/ask/patches/fixes; do
+              ../kernel/common/patches/fixes; do
               [ -d "$bucket" ] || continue
               for p in "$bucket"/*.patch; do
                   [ -f "$p" ] || continue

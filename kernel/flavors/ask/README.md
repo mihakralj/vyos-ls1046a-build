@@ -1,64 +1,65 @@
-# Flavor: `ask`
+# Flavor: `ask` — ASK 2.0 (clean-room rewrite)
 
-NXP ASK fast-path kernel build for LS1046A. Layered on top of `kernel/common/`. (For the historical migration plan that established this layout, see [plans/archive/INTEGRATION-PLAN.md](../../../plans/archive/INTEGRATION-PLAN.md) §3.4. The merge is complete; the formerly-separate kernel build repo has been absorbed.) Current patch set baseline: `kernel-6.6.137-ask41`, now applied against `linux-6.18.28`.
+**Status:** scaffold only. Implementation tracked in
+[`specs/ask-2.0-rewrite-spec.md`](../../../specs/ask-2.0-rewrite-spec.md)
+(v0.6, 2026-05-11).
 
-## Inputs
+This flavor is the **clean-room rewrite** of the NXP ASK fast-path for
+LS1046A. It supersedes the legacy ASK 1.x stack (proprietary `cdx.ko`,
+`auto_bridge.ko`, `cmm`, `dpa_app`, the 5797-line in-tree-hooks patch,
+and the 266-file vendored NXP SDK FMan/QMan/BMan driver overlay) in
+**entirety**. Everything ASK 1.x was deleted from this branch
+(`ask20`) on 2026-05-12.
 
-- **Kernel base:** `linux-6.18.28` (from `versions.lock` once wired in PR 3+).
-- **Patches applied** (in order):
-  1. `kernel/common/patches/vyos/*.patch` — 2 patches (linkstate, perf .deb).
-  2. `kernel/common/patches/board/*.patch` — 0 patches (reserved 100..199).
-  3. `kernel/common/patches/fixes/*.patch` — 4 patches (093, 094, 095, 120).
-  4. `kernel/flavors/ask/patches/ask/*.patch` — **7 patches** (ASK fast-path: fman/dpaa ehash, bridge hooks, cpe fast-path Kconfig, ipv4/ipv6 fwd, netfilter qosmark, ppp hooks, wext core restore).
-  5. `kernel/flavors/ask/patches/fixes/*.patch` — **3 patches** (097 FCI nlkey narrow gate, 102 ioremap_cache_ns shim, 110 SDK Makefile KASAN-off).
-- **SDK source drop:** `kernel/flavors/ask/sdk-sources/` — **266 files** (lf-6.6.y SDK overlay forward-ported via `nxp-qoriq/linux ask-6.6-port` @ `6d0b77e999047`, with **35 ASK-edit-marked files** carrying ask26..ask41 direct edits).
-- **OOT modules:** `kernel/flavors/ask/oot-modules/{cdx,fci,auto_bridge,iptables-extensions}/`.
-- **Userspace patches:** `kernel/flavors/ask/userspace-patches/{ppp,rp-pppoe}/`.
+The brand "ASK" and the `FLAVOR=ask` build target carry forward
+unchanged. The 210-series FMan microcode (loaded by U-Boot from SPI
+flash on every shipped Mono Gateway) is also unchanged — ASK 2.0 sits
+on top of it without touching the binary.
 
-Total kernel patch count: **16** (verified by `kernel/common/scripts/patch-health.sh --flavor ask`).
+## What lives here
 
-## Driver stack
-
-NXP SDK drivers (NOT mainline DPAA):
-
-| Symbol | Path | Mainline equivalent (NOT used) |
-|---|---|---|
-| `CONFIG_FSL_SDK_FMAN=y` | `drivers/net/ethernet/freescale/sdk_fman/` | `fman/` (`CONFIG_FSL_FMAN`) |
-| `CONFIG_FSL_SDK_DPAA_ETH=y` | `drivers/net/ethernet/freescale/sdk_dpaa/` | `dpaa/` (`CONFIG_FSL_DPAA_ETH`) |
-| `CONFIG_FSL_SDK_DPA=y` | `drivers/staging/fsl_qbman/` | `drivers/soc/fsl/qbman/` |
-
-Required for the ASK userspace stack (`dpa_app`, `fmc`, `cmm`, `cdx`).
-
-## Defconfig invariants
-
-- `CONFIG_NET_KEY=y` (load-bearing — see [AGENTS.md "Reference-Aligned Defconfig Invariants"](../../../AGENTS.md)).
-- `CONFIG_INET_IPSEC_OFFLOAD=n` (xfrm fields missing on 6.6.y; will need re-evaluation once 6.18.x baseline is stable).
-- `CONFIG_CPE_FAST_PATH=y` (ASK fast-path master gate).
-- `CONFIG_ASK_FCI_NLKEY=y` (narrow-gate that registers `NETLINK_KEY=32` proto without enabling the broken IPsec offload data path).
-
-## Two-chain failure model
-
-Symptoms split into two **independent** chains — see [AGENTS.md](../../../AGENTS.md) for the full diagnostic checklist:
-
-- **Chain 1** (kernel-side, this repo): `cmm process running [FAILED]` → check `socket(AF_NETLINK, SOCK_RAW, NETLINK_KEY=32) = -EPROTONOSUPPORT`.
-- **Chain 2** (userspace-side, NOT this repo): `dpa_app applied PCD configuration (failed rc=65280)`. Sub-trigger A: MURAM exhaustion (`cdx_pcd.xml` + `fmc` rebuild needed). Sub-trigger B: ARM64 oops in `copy_td_to_ccbase+0x68` — fixed at the archived kernel-build repo ask39 by gating EHASH cast on `externalHash`.
-
-## Validate locally
-
-```bash
-bash kernel/common/scripts/patch-health.sh --flavor ask
+```
+kernel/flavors/ask/
+├── README.md                  # this file
+├── kernel-config/             # ASK-flavor kernel config fragments (TBD)
+├── manifest.json              # generated at CI time (TBD)
+├── kernel.pin                 # 6.18.x LTS pin (TBD)
+├── oot-modules/               # OOT kernel modules
+│   ├── ask/                   # ~1500 LOC C — replaces cdx.ko (spec §4)
+│   └── ask_bridge/            # ~400 LOC C  — replaces auto_bridge.ko (spec §5)
+├── patches/                   # in-tree kernel patches
+│   ├── 200-ask2-hooks.patch       # ~1500 lines (down from 5797) (spec §10)
+│   └── 201-caam-qi-share.patch    # ~200 lines, candidate for upstream (spec §8.3)
+└── userspace/                 # userspace daemons + library
+    ├── askd/                  # ~6000 LOC C — replaces cmm (spec §6)
+    ├── ask-load/              # ~1200 LOC C — replaces dpa_app (spec §9)
+    └── libask_fci/            # ~800 LOC C  — replaces libfci (spec §7.4)
 ```
 
-Expected: `Pass: 16  Fail: 0` and `no SDK file conflicts (266 files to install)`.
+## ABI and config compatibility with ASK 1.x
 
-## ASK-edit audit surface
+Per spec §18, the following operator-facing surfaces are kept stable so
+existing field configs, vendor tools, and the hardware microcode still
+boot unchanged:
 
-```bash
-grep -rn 'ASK-edit' kernel/flavors/ask/sdk-sources/
-```
+- `/etc/cdx_cfg.xml`, `/etc/cdx_pcd.xml`, `/etc/cdx_sp.xml` — same
+  schemas, ingested by `ask-load` instead of `dpa_app`.
+- `/dev/cdx_ctrl` — symlink to the new `/dev/ask_ctrl` chardev; the
+  legacy ioctl numbers and structs work via a compat shim in
+  `oot-modules/ask/ask_dev.c`.
+- `libfci.so.1` SONAME — symlinked to `libask_fci.so.1`, which wraps
+  the new generic-netlink protocol.
+- `/etc/config/fastforward` — same ALG-exclusion list format,
+  consumed by `askd`.
 
-Should return entries from 35 distinct files spanning ask26..ask41 direct SDK source edits (per the policy shift documented in [AGENTS.md "ask26 direct SDK source edits"](../../../AGENTS.md)).
+## What stays from the legacy stack
 
-## Status
+Nothing in source form. The only carryovers are the operator-visible
+schemas and ABI surfaces above, plus the `xt_QOSMARK` and `xt_QOSCONNMARK`
+match modules (verbatim copy into `200-ask2-hooks.patch` per spec §10.1).
 
-PR 1+2 (scaffold + verbatim absorption) — **done**. Green build deferred to PR 3+ (after `default` flavor lands first per the user's "default → ask → vpp" sequence).
+## Implementation order
+
+See [`specs/ask-2.0-rewrite-spec.md`](../../../specs/ask-2.0-rewrite-spec.md)
+§19 for the agent-driven implementation cookbook. Acceptance gates are
+in §15.5.

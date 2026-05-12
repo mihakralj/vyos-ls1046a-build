@@ -27,18 +27,12 @@ BC_QUIET=1 source "${GITHUB_WORKSPACE:-.}/bin/common.sh"
 cd "${GITHUB_WORKSPACE:-.}/vyos-build"
 
 ### Pre-flight: verify custom kernel is present (defense-in-depth)
-# In ASK-consume mode (ASK_KERNEL_TAG set) the prebuilt kernel .deb is staged
-# into data/live-build-config/packages.chroot/ by ci-consume-ask-kernel.sh — NOT
-# into vyos-build/packages/ — because that is the directory live-build's dpkg
-# pass picks up during chroot. Check the chroot staging dir in that mode.
-if [ -n "${ASK_KERNEL_TAG:-}" ]; then
-  PKG_CHROOT="data/live-build-config/packages.chroot"
-  KERNEL_IN_PACKAGES=$(find "$PKG_CHROOT" -maxdepth 1 -name 'linux-image-*_arm64.deb' ! -name '*-dbg*' 2>/dev/null | wc -l)
-  SEARCH_DIR="$PKG_CHROOT/"
-else
-  KERNEL_IN_PACKAGES=$(find packages -name 'linux-image-*.deb' ! -name '*-dbg*' 2>/dev/null | wc -l)
-  SEARCH_DIR="packages/"
-fi
+# ASK 2.0 (rewrite-in-progress): the legacy ASK-consume path
+# (ASK_KERNEL_TAG → data/live-build-config/packages.chroot/) was removed
+# on the ask20 branch. All flavors now build the kernel locally via
+# ci-build-packages.sh and stage it under vyos-build/packages/.
+KERNEL_IN_PACKAGES=$(find packages -name 'linux-image-*.deb' ! -name '*-dbg*' 2>/dev/null | wc -l)
+SEARCH_DIR="packages/"
 if [ "$KERNEL_IN_PACKAGES" -eq 0 ]; then
   echo ""
   echo "###############################################################"
@@ -46,8 +40,7 @@ if [ "$KERNEL_IN_PACKAGES" -eq 0 ]; then
   echo "### Refusing to build ISO with upstream fallback kernel.    ###"
   echo "###############################################################"
   echo ""
-  echo "This check prevents shipping an ISO without ASK/SDK drivers."
-  echo "The kernel build/consume likely failed silently in a previous step."
+  echo "The kernel build likely failed silently in a previous step."
   echo ""
   exit 1
 fi
@@ -62,34 +55,11 @@ fi
 
 rm -rf packages/linux-headers-*
 
-### Force live-build to install ASK-specific .debs from packages.chroot/.
-#
-# live-build only invokes `dpkg -i` against packages.chroot/ for packages
-# that are explicitly named (via package-lists or --custom-package) OR that
-# are pulled in as a Depends: of something else that is installed.
-#
-# linux-image-<KVER>-vyos is depended on by vyos-1x via the kernel ABI
-# pin, so it lands automatically. ask-modules-<KVER>-vyos has NO reverse
-# dependency in the VyOS stack — it sits in packages.chroot/ as a
-# stand-alone deb and gets ignored by apt unless we name it explicitly.
-#
-# Derive the package name by reading the actual .deb file we staged, so
-# this self-adjusts when the kernel version bumps.
-ASK_CUSTOM_ARGS=()
-if [ -n "${ASK_KERNEL_TAG:-}" ]; then
-    PKG_CHROOT="data/live-build-config/packages.chroot"
-    shopt -s nullglob
-    for deb in "$PKG_CHROOT"/ask-modules-*_arm64.deb; do
-        pkg=$(dpkg-deb -f "$deb" Package)
-        ASK_CUSTOM_ARGS+=(--custom-package "$pkg")
-        echo "### Forcing install of ASK package: $pkg (from $(basename "$deb"))"
-    done
-    shopt -u nullglob
-    if [ ${#ASK_CUSTOM_ARGS[@]} -eq 0 ]; then
-        echo "WARN: ASK_KERNEL_TAG set but no ask-modules-*.deb in $PKG_CHROOT/"
-        echo "      The ISO will boot without OOT fast-path modules (cdx/fci)."
-    fi
-fi
+### ASK 2.0 (rewrite-in-progress): the legacy ask-modules-*.deb
+### --custom-package injection (for the OOT cdx/fci/auto_bridge modules
+### shipped via ASK_KERNEL_TAG) was removed on the ask20 branch. ASK 2.0
+### will ship ask.ko + ask_bridge.ko via a new packaging path per
+### specs/ask-2.0-rewrite-spec.md.
 
 ./build-vyos-image \
   --architecture arm64 \
@@ -134,7 +104,6 @@ fi
   --custom-package catatonit \
   --custom-package uidmap \
   --custom-package fuse-overlayfs \
-  "${ASK_CUSTOM_ARGS[@]}" \
   generic
 
 cd build
@@ -266,15 +235,10 @@ else
   echo "fake sign" > "${IMAGE_ISO}.minisig"
 fi
 
-### Verify ASK packages landed in the ISO
-# Assert every staged ASK package actually landed in the ISO before we
-# spend another minute signing / uploading. Fails the build loudly if
-# the ASK userspace regressed back to stock Debian (as happened in run
-# 24794085304 before the packages.chroot/staging fix).
-mkdir -p /tmp/iso-mount
-mount -o loop "$IMAGE_ISO" /tmp/iso-mount
-"$GITHUB_WORKSPACE/bin/ci-verify-ask-iso.sh" /tmp/iso-mount
-umount /tmp/iso-mount
+### ASK 2.0 (rewrite-in-progress): the ci-verify-ask-iso.sh post-build
+### check was removed on the ask20 branch along with the ASK 1.x
+### userspace stack. A new verifier will be added once ASK 2.0
+### components land per specs/ask-2.0-rewrite-spec.md.
 
 # Move all artifacts to workspace
 mv manifest.json "${IMAGE_ISO}" "${IMAGE_ISO}.minisig" "$GITHUB_WORKSPACE"
