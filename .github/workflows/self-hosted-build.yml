@@ -15,11 +15,8 @@ on:
       build_version:
         description: 'Version number (auto: YYYY.MM.DD-HHMM-rolling)'
         default: ''
-      ASK_KERNEL_TAG:
-        description: 'ASK kernel release tag to consume (default: read kernel/flavors/ask/kernel.pin). Set empty string to disable and build kernel locally.'
-        default: ''
       flavor:
-        description: 'Build flavor: default (mainline DPAA), ask (NXP SDK + ASK fast-path), or vpp (AF_XDP/VPP — placeholder).'
+        description: 'Build flavor: default (mainline DPAA), ask (ASK 2.0 rewrite — scaffold only, builds vanilla VyOS), or vpp (AF_XDP/VPP — placeholder).'
         type: choice
         default: 'default'
         options:
@@ -113,7 +110,6 @@ jobs:
       runs_on: ARM64
       BUILD_BY: ${{ github.event.inputs.BUILD_BY }}
       build_version: ${{ github.event.inputs.build_version }}
-      ASK_KERNEL_TAG: ${{ github.event.inputs.ASK_KERNEL_TAG }}
       flavor: ${{ github.event.inputs.flavor }}
     secrets:
       MOK_KEY: ${{ secrets.MOK_KEY }}

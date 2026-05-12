@@ -30,10 +30,6 @@ on:
         type: string
         required: false
         default: ''
-      ASK_KERNEL_TAG:
-        type: string
-        required: false
-        default: ''
       flavor:
         description: 'Build flavor: default | ask | vpp. Falls back to data/flavor.pin or "default" if unset.'
         type: string
@@ -69,9 +65,10 @@ jobs:
     env:
       # FLAVOR drives FLAVOR-aware bin/ci-*.sh scripts via bin/common.sh.
       # Empty string lets bin/common.sh fall back to data/flavor.pin or "default".
-      # On `ask`, the legacy ci-consume-ask-kernel.sh + ci-setup-kernel-ask.sh
-      # path is preserved; on `default`/`vpp`, ci-stage-kernel.sh wraps
-      # kernel/common/scripts/stage-kernel.sh.
+      # All flavors (default/ask/vpp) currently route through ci-stage-kernel.sh
+      # → kernel/common/scripts/stage-kernel.sh. ASK 2.0 (per
+      # specs/ask-2.0-rewrite-spec.md) is scaffold-only; FLAVOR=ask builds a
+      # vanilla VyOS image until ASK 2.0 components land.
       FLAVOR: ${{ inputs.flavor || github.event.inputs.flavor || '' }}
     # No `container:` — build runs natively on the self-hosted ARM64 runner.
     # The runner host (Debian 12 bookworm aarch64) provides all build deps
@@ -203,50 +200,15 @@ jobs:
           MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
         run: bin/ci-setup-vyos1x.sh
 
-      - name: Consume prebuilt ASK kernel
-        # FLAVOR gate (PR 5): only consume the prebuilt ASK kernel when this
-        # is an ASK build. For FLAVOR=default|vpp we build the upstream-tracked
-        # kernel from source via ci-setup-kernel.sh + ci-build-packages.sh.
-        # An empty FLAVOR means "use whatever data/flavor.pin / kernel/flavors/ask/kernel.pin
-        # say" — preserved for backward compat with existing dispatches.
-        if: env.FLAVOR == 'ask' || env.FLAVOR == ''
-        env:
-          # Manual override wins; otherwise script reads kernel/flavors/ask/kernel.pin.
-          # Setting to empty explicitly disables ASK consume (falls through to local build).
-          ASK_KERNEL_TAG: ${{ inputs.ASK_KERNEL_TAG || github.event.inputs.ASK_KERNEL_TAG }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # If scheduled run or input was left blank, use the pin file.
-          # Pin file relocated from data/ask-kernel.pin in May 2026 (Phase 1d
-          # of the repo-layout refactor).
-          if [ -z "${ASK_KERNEL_TAG:-}" ] && [ -f kernel/flavors/ask/kernel.pin ]; then
-              export ASK_KERNEL_TAG="$(tr -d '[:space:]' < kernel/flavors/ask/kernel.pin)"
-          fi
-          # Empty literal means "no ASK, build from scratch": skip the consume step.
-          if [ -n "${ASK_KERNEL_TAG:-}" ]; then
-              ASK_KERNEL_TAG="$ASK_KERNEL_TAG" bin/ci-consume-ask-kernel.sh
-          else
-              echo "### ASK_KERNEL_TAG empty — will build kernel locally via ci-setup-kernel.sh"
-          fi
-
       - name: Setup kernel config and patches
         run: bin/ci-setup-kernel.sh
 
-      # NOTE: The previously-archived mihakralj/ask-ls1046a-6.6 repo is no
-      # longer cloned here. Its userspace contents (cmm/, dpa_app/, fci/lib/,
-      # patches/{fmc,fmlib}/, config/) were folded in-tree under ASK/ in May
-      # 2026, and its OOT kernel modules (cdx, fci, auto_bridge,
-      # iptables-extensions) now live in-tree under kernel/flavors/ask/ and ship
-      # prebuilt in the kernel-6.6.137-askN release tarball.
-
-      - name: Setup ASK fast-path kernel (SDK DPAA + hooks)
-        # FLAVOR gate (PR 5): the ASK fast-path layer (SDK DPAA replacement,
-        # hooks patches, EHASH wiring, post-defconfig overrides) is meaningful
-        # only for FLAVOR=ask. For default/vpp the script's internal FLAVOR
-        # gate also early-exits, so this `if:` is belt-and-braces — it skips
-        # the step entirely so the build log is cleaner.
-        if: env.FLAVOR == 'ask' || env.FLAVOR == ''
-        run: bin/ci-setup-kernel-ask.sh
+      # ASK 2.0 (rewrite-in-progress): the legacy ASK 1.x build steps
+      # (Consume prebuilt ASK kernel, Setup ASK fast-path kernel) were
+      # removed on the ask20 branch. Until ASK 2.0 components land
+      # (ask.ko, ask_bridge.ko, askd, ask-load, libask_fci) per
+      # specs/ask-2.0-rewrite-spec.md, FLAVOR=ask builds produce a
+      # vanilla VyOS image with no ASK userspace and no SDK kernel.
 
       - name: Compile Mono DTB from DTS (always rebuild from source)
         run: bin/ci-compile-mono-dtb.sh
@@ -268,10 +230,6 @@ jobs:
         env:
           BUILD_VERSION: ${{ steps.set_env_variables.outputs.build_version }}
         run: bin/ci-build-iso.sh
-
-      - name: Verify VPP ISO contents
-        if: env.FLAVOR == 'vpp'
-        run: bin/ci-verify-vpp-iso.sh
 
       - name: Verify VPP ISO contents
         if: env.FLAVOR == 'vpp'

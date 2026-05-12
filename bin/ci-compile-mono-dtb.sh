@@ -28,38 +28,32 @@ set -euo pipefail
 exec 2>&1
 cd "${GITHUB_WORKSPACE:-.}"
 
-# ask11: ship the SDK DTS, not the DPDK DTS. The SDK DTS #includes the DPDK
-# base DTS and then /delete-node/s the DPDK dpaa container + bpool, replacing
-# them with proper fsl,dpa-ethernet nodes for all 6 MACs (SGMII RJ45 + 10G SFP+)
-# and a bpool with fsl,bpool-ethernet-cfg that the SDK dpaa_eth driver needs.
-# See boot log on ask10: probe of soc:fsl,dpaa:ethernet@{8,9} failed with -22
-# because the DPDK bpool had no fsl,bpool-ethernet-cfg property.
-DTS_SRC="board/dtb/mono-gateway-dk-sdk.dts"
+# ASK 2.0 (rewrite-in-progress): the SDK DTS overlay
+# (mono-gateway-dk-sdk.dts) was deleted on the ask20 branch along with the
+# rest of the ASK 1.x SDK stack. All flavors now compile the mainline
+# mono-gateway-dk.dts directly. The ASK 2.0 spec keeps the mainline FMan
+# driver and re-implements the fast-path in ask.ko / askd, so an SDK DTS
+# overlay is no longer needed.
+DTS_SRC="board/dtb/mono-gateway-dk.dts"
 DTS_BASE="board/dtb/mono-gateway-dk.dts"
 DTB_OUT="board/dtb/mono-gw.dtb"
 WORK="work/dtb-build"
 LINUX_SRC="$WORK/linux-src"
 
 [ -f "$DTS_SRC" ]  || { echo "ERROR: $DTS_SRC not found";  exit 1; }
-[ -f "$DTS_BASE" ] || { echo "ERROR: $DTS_BASE not found"; exit 1; }
 
 ### 1. Determine kernel version tag.
-# Prefer version from ASK consumed manifest, fall back to kernel/flavors/ask/kernel.pin,
-# fall back to data/kernel-version (simple "6.6.135" text file), fall back to
-# whatever is hard-coded below.
+# Read from vyos-build/data/defaults.toml (kernel_version = "6.18.28") if the
+# repo is checked out, fall back to data/kernel-version (simple text file),
+# fall back to whatever is hard-coded below.
 KVER=""
-if [ -f work/ask-kernel/manifest.json ]; then
-    KVER=$(jq -r '.linux_version // empty' work/ask-kernel/manifest.json 2>/dev/null || true)
-fi
-if [ -z "$KVER" ] && [ -f kernel/flavors/ask/kernel.pin ]; then
-    # Tag like "kernel-6.6.135-ask8" -> extract "6.6.135"
-    PIN=$(tr -d '[:space:]' < kernel/flavors/ask/kernel.pin)
-    KVER=$(echo "$PIN" | sed -n 's/^kernel-\([0-9][0-9.]*\)-ask.*/\1/p')
+if [ -z "$KVER" ] && [ -f vyos-build/data/defaults.toml ]; then
+    KVER=$(awk -F'"' '/^kernel_version/ {print $2; exit}' vyos-build/data/defaults.toml)
 fi
 if [ -z "$KVER" ] && [ -f data/kernel-version ]; then
     KVER=$(tr -d '[:space:]' < data/kernel-version)
 fi
-KVER="${KVER:-6.6.135}"
+KVER="${KVER:-6.18.28}"
 TAG="v${KVER}"
 echo "### Compiling Mono DTB against Linux $TAG"
 
@@ -100,32 +94,11 @@ for f in fsl-ls1046a.dtsi fsl-ls1046-post.dtsi; do
 done
 echo "### Base DTSIs OK"
 
-### 4. Stage the Mono DTS + NXP SDK portal DTSIs into the kernel source tree.
-# The board DTS `#include`s qoriq-bman-portals-sdk.dtsi and
-# qoriq-qman-portals-sdk.dtsi (supplying cell-index + allocator-range nodes
-# the ASK staging driver requires). Mainline kernel doesn't ship those
-# DTSIs — NXP's lf-*.y trees do. We carry bit-exact copies under
-# board/dtb/sdk-dtsi/ and drop them next to the board DTS so `dtc` resolves
-# the includes via the same `-I $DTS_DIR` search path as the base DTSIs.
+### 4. Stage the Mono DTS into the kernel source tree.
 DTS_DIR="$LINUX_SRC/arch/arm64/boot/dts/freescale"
-# ask11: the SDK DTS #includes all four of these — copy them all, not just the
-# two portal dtsi files the DPDK DTS needed.
-echo "### Staging SDK DTSIs from board/dtb/sdk-dtsi/ into $DTS_DIR"
-ls -l board/dtb/sdk-dtsi/ || { echo "ERROR: board/dtb/sdk-dtsi/ missing"; exit 1; }
-shopt -s nullglob
-dtsi_list=( board/dtb/sdk-dtsi/*.dtsi )
-shopt -u nullglob
-[ "${#dtsi_list[@]}" -gt 0 ] || { echo "ERROR: no *.dtsi under board/dtb/sdk-dtsi/"; exit 1; }
-for dtsi in "${dtsi_list[@]}"; do
-    echo "###   cp $dtsi -> $DTS_DIR/"
-    cp "$dtsi" "$DTS_DIR/"
-done
-# The SDK DTS #includes "mono-gateway-dk.dts" — both must be present together
-# in $DTS_DIR so the preprocessor can resolve the include.
-echo "### Staging $DTS_BASE and $DTS_SRC into $DTS_DIR"
+echo "### Staging $DTS_BASE into $DTS_DIR"
 cp "$DTS_BASE" "$DTS_DIR/mono-gateway-dk.dts"
-cp "$DTS_SRC"  "$DTS_DIR/mono-gateway-dk-sdk.dts"
-ls -l "$DTS_DIR/mono-gateway-dk.dts" "$DTS_DIR/mono-gateway-dk-sdk.dts" "$DTS_DIR"/qoriq-*.dtsi
+ls -l "$DTS_DIR/mono-gateway-dk.dts"
 
 ### 5. Preprocess + compile.
 echo "### Preprocessing with aarch64-linux-gnu-cpp"
@@ -136,7 +109,7 @@ aarch64-linux-gnu-cpp \
     -I "$LINUX_SRC/include" \
     -undef -D__DTS__ \
     -x assembler-with-cpp \
-    "$DTS_DIR/mono-gateway-dk-sdk.dts" \
+    "$DTS_DIR/mono-gateway-dk.dts" \
     -o "$PP"
 echo "### Preprocessed DTS: $(wc -l < "$PP") lines"
 
@@ -146,69 +119,16 @@ dtc -I dts -O dtb \
     "$PP"
 echo "### dtc done: $(stat -c%s "$DTB_OUT") bytes"
 
-### 6. Verify the SDK DTSI payload made it in.
-# Expected (post-#include of qoriq-{bman,qman}-portals-sdk.dtsi):
-#   cell-index         >= 20  (10 BMan portals + 10 QMan portals, both numbered 0..9)
-#   bpid-range         >= 1   (bman-bpids@0)
-#   fqid-range         >= 2   (qman-fqids@0 and @1)
-#   pool-channel-range >= 1   (qman-pools@0)
-#   cgrid-range        >= 1   (qman-cgrids@0)
-echo "### Verifying DTB payload"
-DECOMP_FILE="$WORK/mono-gw.decompiled.dts"
-dtc -I dtb -O dts -o "$DECOMP_FILE" "$DTB_OUT"
-echo "### Decompiled DTB -> $DECOMP_FILE ($(wc -l < "$DECOMP_FILE") lines)"
-DECOMP=$(cat "$DECOMP_FILE")
-# grep -c returns 1 when there are no matches; protect the assignments from
-# `set -e` by appending `|| true`.
-CELL_IDX=$(echo "$DECOMP"   | grep -c 'cell-index'               || true)
-BPID=$(echo "$DECOMP"       | grep -c 'bpid-range'               || true)
-FQID=$(echo "$DECOMP"       | grep -c 'fqid-range'               || true)
-POOLCH=$(echo "$DECOMP"     | grep -c 'pool-channel-range'       || true)
-CGRID=$(echo "$DECOMP"      | grep -c 'cgrid-range'              || true)
-echo "### counters: cell-index=$CELL_IDX bpid-range=$BPID fqid-range=$FQID pool-channel-range=$POOLCH cgrid-range=$CGRID"
-FAIL=0
-[ "$CELL_IDX" -lt 20 ] && { echo "ERROR: cell-index count $CELL_IDX < 20";               FAIL=1; }
-[ "$BPID"     -lt 1  ] && { echo "ERROR: bpid-range count $BPID < 1";                    FAIL=1; }
-[ "$FQID"     -lt 2  ] && { echo "ERROR: fqid-range count $FQID < 2";                    FAIL=1; }
-[ "$POOLCH"   -lt 1  ] && { echo "ERROR: pool-channel-range count $POOLCH < 1";          FAIL=1; }
-[ "$CGRID"    -lt 1  ] && { echo "ERROR: cgrid-range count $CGRID < 1";                  FAIL=1; }
-
-# ask11: also verify SDK-DTS payload landed — at least one fsl,bpool-ethernet-cfg
-# (SDK bpool property) and 5 fsl,dpa-ethernet nodes (3×SGMII RJ45 + 2×10G SFP+).
-# Mono Gateway has 3 RJ45 SGMII ports (MAC2/MAC5/MAC6) wired to sgmii_phy0..2.
-BPOOL_CFG=$(echo "$DECOMP" | grep -c 'fsl,bpool-ethernet-cfg'    || true)
-DPA_ETH=$(echo "$DECOMP"   | grep -c '"fsl,dpa-ethernet"'        || true)
-echo "### counters: fsl,bpool-ethernet-cfg=$BPOOL_CFG fsl,dpa-ethernet=$DPA_ETH"
-[ "$BPOOL_CFG" -lt 1 ] && { echo "ERROR: fsl,bpool-ethernet-cfg not found — SDK DTS didn't land"; FAIL=1; }
-[ "$DPA_ETH"   -lt 5 ] && { echo "ERROR: fsl,dpa-ethernet count $DPA_ETH < 5 (need 3 SGMII + 2 10G)"; FAIL=1; }
-if [ "$FAIL" -ne 0 ]; then
-    echo "ERROR: compiled DTB is missing expected NXP SDK portal DTSI payload"
-    echo "       (did bin/ci-compile-mono-dtb.sh copy board/dtb/sdk-dtsi/*.dtsi to $DTS_DIR?"
-    echo "        did mono-gateway-dk.dts #include qoriq-{bman,qman}-portals-sdk.dtsi?)"
-    echo ""
-    echo "=== DIAGNOSTIC: #include line-markers in preprocessed DTS ==="
-    grep -n '^# [0-9]' "$PP" | sed 's#.*/\([^/]*\)"#\1#' | sort -u | head -40 || true
-    echo ""
-    echo "=== DIAGNOSTIC: all fsl,dpa-ethernet nodes + paths in decompiled DTB ==="
-    awk '
-        /^[[:space:]]*[a-zA-Z_][a-zA-Z0-9_,.+-]*@[0-9a-f]+[[:space:]]*{/ {
-            n = match($0, /[a-zA-Z_][a-zA-Z0-9_,.+-]*@[0-9a-f]+/);
-            if (n) { node = substr($0, RSTART, RLENGTH); stack[depth++] = node; }
-        }
-        /^[[:space:]]*};[[:space:]]*$/ { if (depth > 0) depth--; }
-        /fsl,dpa-ethernet|fsl,bpool-ethernet-cfg/ {
-            path = "";
-            for (i = 0; i < depth; i++) path = path "/" stack[i];
-            print path ": " $0;
-        }
-    ' "$DECOMP_FILE" || true
-    echo ""
-    echo "=== DIAGNOSTIC: first 40 lines of preprocessed DTS ==="
-    head -40 "$PP" || true
+### 6. Sanity-check the compiled DTB.
+# ASK 2.0 (rewrite-in-progress): the SDK-specific verification (cell-index >= 20,
+# fsl,bpool-ethernet-cfg, fsl,dpa-ethernet count, etc.) was removed on the ask20
+# branch along with the SDK DTS overlay. We now only sanity-check that the DTB
+# is non-trivially populated.
+DTB_BYTES=$(stat -c%s "$DTB_OUT")
+if [ "$DTB_BYTES" -lt 4096 ]; then
+    echo "ERROR: compiled DTB is suspiciously small ($DTB_BYTES bytes < 4096)"
     exit 1
 fi
 
 echo "### Mono DTB compiled from DTS:"
 ls -l "$DTB_OUT"
-echo "### cell-index=$CELL_IDX  bpid-range=$BPID  fqid-range=$FQID  pool-channel-range=$POOLCH  cgrid-range=$CGRID"
-echo "### fsl,bpool-ethernet-cfg=$BPOOL_CFG  fsl,dpa-ethernet=$DPA_ETH"

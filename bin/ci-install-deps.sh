@@ -41,13 +41,10 @@ apt-get install -y \
   libsystemd-dev libglib2.0-dev libip4tc-dev libipset-dev libnfnetlink-dev \
   libnftnl-dev libnl-nf-3-dev libpopt-dev libpcap-dev libbpf-dev \
   libreadline-dev liblua5.3-dev libpcre2-dev \
-  `# Toolchains used by sub-package builds (cdx, fci, dpa_app, accel-ppp)` \
+  `# Toolchains used by sub-package builds (accel-ppp; ASK 2.0 components` \
+  `# will declare their own additional deps here once they land per` \
+  `# specs/ask-2.0-rewrite-spec.md).` \
   bubblewrap clang llvm cmake byacc flex \
-  `# fmc / fmlib (NXP FMan Config tool) build deps — see ci-build-fmc.sh` \
-  `# and ci-build-fmlib.sh for why we MUST rebuild fmlib so that` \
-  `# t_FmPcdKgSchemeParams / t_FmPcdHashTableParams struct layouts match` \
-  `# the patched fmlib headers used by dpa_app.` \
-  libxml2-dev libtclap-dev \
   `# Protobuf path (vyconf .proto compilation)` \
   `# python3-cracklib: https://github.com/vyos/vyos-build/commit/e846e68f9f6457865f3e3af92adfe42933555c59` \
   `# protobuf-compiler: https://github.com/vyos/vyos-build/commit/0a6c197226400c4bbe210b435baaa716d4fb8377` \

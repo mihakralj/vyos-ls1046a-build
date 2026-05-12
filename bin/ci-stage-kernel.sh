@@ -8,9 +8,12 @@
 #      pipeline expects it (vyos-build/scripts/package-build/linux-kernel/...).
 #
 # Routing:
-#   FLAVOR=default | vpp  → stage from kernel/common + kernel/flavors/$FLAVOR
-#   FLAVOR=ask            → defer to bin/ci-consume-ask-kernel.sh (legacy
-#                           prebuilt-tag consumption path; replaced in PR 5).
+#   FLAVOR=default | vpp | ask  → stage from kernel/common + kernel/flavors/$FLAVOR
+#
+# ASK 2.0 (rewrite-in-progress): the legacy `ask` branch that delegated
+# to ci-consume-ask-kernel.sh was removed on the ask20 branch. Until ASK
+# 2.0 lands per specs/ask-2.0-rewrite-spec.md, FLAVOR=ask is staged the
+# same way as default/vpp (vanilla kernel, no SDK, no ASK fast-path).
 #
 # Called by: .github/workflows/auto-build.yml "Stage kernel tree" step.
 # Expects:   GITHUB_WORKSPACE set, or run from repo root.
@@ -22,12 +25,7 @@ cd "${GITHUB_WORKSPACE:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 . "$(dirname "$0")/common.sh"
 
 case "$FLAVOR" in
-    ask)
-        echo "### FLAVOR=ask — delegating to ci-consume-ask-kernel.sh (legacy path)"
-        # Honour the existing PIN/TAG override semantics.
-        exec bin/ci-consume-ask-kernel.sh "$@"
-        ;;
-    default|vpp)
+    default|vpp|ask)
         echo "### FLAVOR=$FLAVOR — staging kernel via kernel/common/scripts/stage-kernel.sh"
         exec bash kernel/common/scripts/stage-kernel.sh --flavor "$FLAVOR" "$@"
         ;;
