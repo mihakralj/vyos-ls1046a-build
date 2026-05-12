@@ -28,7 +28,7 @@
 #     cdx_module_init::dpa_ipsec start failed
 #   Rebuilding both libs with the same patched headers fixes all three.
 
-set -e
+set -e -o pipefail
 
 KSRC="${1:?Usage: ci-build-ask-userspace.sh <kernel-src-dir> <output-chroot-dir>}"
 CHROOT="${2:?Usage: ci-build-ask-userspace.sh <kernel-src-dir> <output-chroot-dir>}"

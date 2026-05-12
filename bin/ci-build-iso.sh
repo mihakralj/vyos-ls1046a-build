@@ -18,7 +18,7 @@
 # Called by: .github/workflows/auto-build.yml "Build VyOS ISO" step
 # Expects: GITHUB_WORKSPACE, BUILD_BY, BUILD_VERSION, DEBIAN_MIRROR,
 #          DEBIAN_SECURITY_MIRROR, VYOS_MIRROR in env
-set -ex
+set -ex -o pipefail
 # Source FLAVOR resolution before changing dir.
 # bin/common.sh resolves FLAVOR from $FLAVOR, then data/flavor.pin, then "default".
 # We export it so the rename below produces flavor-tagged ISO filenames.

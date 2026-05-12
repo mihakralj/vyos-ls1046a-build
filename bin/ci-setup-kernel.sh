@@ -8,7 +8,7 @@
 # (mihakralj/kernel-ls1046a-build, now frozen and absorbed into this tree)
 # via bin/ci-consume-ask-kernel.sh, so defconfig mutations and build-kernel.sh
 # injections are meaningless.
-set -ex
+set -ex -o pipefail
 cd "${GITHUB_WORKSPACE:-.}"
 
 if [ -n "${ASK_KERNEL_TAG:-}" ]; then
