@@ -26,12 +26,23 @@ for p in data/vyos-1x-*.patch; do
 done
 cp data/reftree.cache "$PATCH_STAGING/"
 
+# NOTE: pre_build_hook MUST be a TOML *literal* multi-line string ('''...''')
+# not a TOML basic multi-line string ("""...""").  The basic string interprets
+# backslash escapes, so a `\"` inside the bash sed pattern gets unescaped to a
+# literal `"` BEFORE bash sees it — turning  sed -i "/^# For \"X\"$/.../d"
+# into   sed -i "/^# For "X"$/.../d"   which bash then word-splits on the
+# embedded quotes, leaving the unquoted argument  /^# For X$/.../d  that no
+# longer matches the upstream  # For "nat64"  / # End "nat64"  block headers.
+# Result: jool + nat-rtsp dependencies are NOT stripped, vyos-1x.deb fails to
+# install in lb chroot. Verified failure mode in run 25706953044 (2026-05-12).
+# Literal '''...''' passes the body through verbatim, so bash receives \"
+# unmolested and converts it to " correctly.
 cat > "$VYOS1X_BUILD/package.toml" <<'EOF'
 [[packages]]
 name = "vyos-1x"
 commit_id = "current"
 scm_url = "https://github.com/vyos/vyos-1x.git"
-pre_build_hook = """
+pre_build_hook = '''
   set -ex
   cp ../ls1046a-patches/reftree.cache data/reftree.cache
   sed -i 's/all: clean copyright/all: clean/' Makefile
@@ -110,7 +121,7 @@ GITATTR
     patch_fail=1
   fi
   [ $patch_fail -eq 1 ] && echo "ERROR: some patches failed — check build output" >&2 && exit 1
-"""
+'''
 EOF
 
 echo "### vyos-1x patch staging complete: $(ls "$PATCH_STAGING" | wc -l) files staged"
