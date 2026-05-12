@@ -8,7 +8,7 @@
 # bin/ci-consume-ask-kernel.sh. Building the kernel locally in that mode
 # would just consume 20+ minutes and replace the ASK kernel with a vanilla
 # one that lacks fast-path hooks.
-set -ex
+set -ex -o pipefail
 
 # Source FLAVOR before changing CWD so common.sh can resolve REPO_ROOT.
 # shellcheck source=common.sh
@@ -31,6 +31,90 @@ for package in $packages; do
 
   [ "$package" == "keepalived" ] && apt-get install -y libsnmp-dev
 
+  ### linux-kernel .deb + DTB + accel-ppp-ng cache
+  #
+  # Skip the ~20-minute kernel compile (and the ~3-minute accel-ppp-ng kmod
+  # build that depends on it) when none of the inputs that affect the
+  # produced .debs have changed.
+  #
+  # Cache key derivation:
+  #   * KVER         — kernel_version from vyos-build/data/defaults.toml
+  #                    (pins which upstream tarball gets downloaded)
+  #   * FLAVOR       — default | vpp | ask. Encoded in the key so cross-flavor
+  #                    cache contamination is impossible. (ask is currently
+  #                    excluded from caching anyway — see scope gate below.)
+  #   * KERNEL_HASH  — sha256(first 16 chars) of every input that mutates the
+  #                    kernel source tree or .config:
+  #                      - data/kernel-config/*.config  (defconfig fragments)
+  #                      - data/kernel-patches/*        (kernel patches + DTS
+  #                        patchers)
+  #                      - bin/ci-setup-kernel.sh       (the integrator that
+  #                        appends fragments and injects patches into
+  #                        vyos-build/scripts/package-build/linux-kernel/)
+  #                      - bin/ci-setup-vyos-build.sh   (also patches
+  #                        build-kernel.sh)
+  #                      - board/dtb/                   (DTS + sdk-dtsi —
+  #                        compiled DTB ships under the same cache key)
+  #                      - bin/ci-build-accel-ppp.sh    (its .deb rides in
+  #                        the same cache entry)
+  #
+  # Cache scope: enabled only for FLAVOR in {default,vpp}. The ask flavor
+  # builds OOT ASK userspace binaries against $KSRC (cmm, dpa_app, fci, cdx,
+  # auto_bridge) — caching the kernel without also caching the ASK userspace
+  # tree would leave us with a hit on the .debs but no $KSRC for the
+  # userspace step. Out of scope for this iteration. ASK_KERNEL_TAG mode
+  # (which already consumes a prebuilt kernel from a frozen release) is
+  # likewise excluded — there is no kernel build to cache.
+  #
+  # Cache layout: one directory per key under $CACHE_DIR/<key>/ containing:
+  #   linux-image-<kver>_arm64.deb
+  #   linux-headers-<kver>_arm64.deb
+  #   linux-libc-dev_<kver>_arm64.deb
+  #   mono-gateway-dk.dtb              (mainline DTB — what default/vpp ship)
+  #   accel-ppp-ng_*_arm64.deb         (optional — only if the build produced
+  #                                     one; absence on hit is non-fatal)
+  #
+  # 14-day mtime GC matches the vyos-1x cache. .debs are 60-100MB each so the
+  # cache footprint stays bounded (~3-4 keys retained ~= 1GB).
+  SKIP_KERNEL_BUILD=0
+  KERNEL_CACHE_KEY=""
+  KERNEL_CACHE_HIT_DIR=""
+  if [ "$package" == "linux-kernel" ] && [ "${FLAVOR:-default}" != "ask" ] && [ -z "${ASK_KERNEL_TAG:-}" ]; then
+    KVER=$(awk -F'"' '/^kernel_version/ {print $2}' "$GITHUB_WORKSPACE/vyos-build/data/defaults.toml" 2>/dev/null | head -1)
+    KERNEL_HASH=$( {
+      find "$GITHUB_WORKSPACE/data/kernel-config" -maxdepth 1 -name '*.config' -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
+      find "$GITHUB_WORKSPACE/data/kernel-patches" -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
+      cat "$GITHUB_WORKSPACE/bin/ci-setup-kernel.sh" 2>/dev/null
+      cat "$GITHUB_WORKSPACE/bin/ci-setup-vyos-build.sh" 2>/dev/null
+      cat "$GITHUB_WORKSPACE/bin/ci-build-accel-ppp.sh" 2>/dev/null
+      find "$GITHUB_WORKSPACE/board/dtb" -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
+    } | sha256sum | cut -c1-16)
+    KERNEL_CACHE_ROOT="${RUNNER_TOOL_CACHE:-/tmp}/linux-kernel-cache"
+    mkdir -p "$KERNEL_CACHE_ROOT"
+    # GC stale entries (14 days)
+    find "$KERNEL_CACHE_ROOT" -maxdepth 1 -mindepth 1 -type d -mtime +14 -exec rm -rf {} + 2>/dev/null || true
+    if [ -n "$KVER" ] && [ -n "$KERNEL_HASH" ]; then
+      KERNEL_CACHE_KEY="linux-kernel_${KVER}_${FLAVOR:-default}_${KERNEL_HASH}"
+      KERNEL_CACHE_HIT_DIR="$KERNEL_CACHE_ROOT/$KERNEL_CACHE_KEY"
+      if [ -d "$KERNEL_CACHE_HIT_DIR" ] && \
+         ls "$KERNEL_CACHE_HIT_DIR"/linux-image-*_arm64.deb >/dev/null 2>&1; then
+        echo "### linux-kernel cache HIT (key=$KERNEL_CACHE_KEY)"
+        # Replay .debs into package-build/linux-kernel/ (current cwd)
+        for d in "$KERNEL_CACHE_HIT_DIR"/*.deb; do
+          [ -f "$d" ] || continue
+          cp -v "$d" "./$(basename "$d")"
+        done
+        # Refresh mtime on a HIT so the GC doesn't evict warm entries
+        touch "$KERNEL_CACHE_HIT_DIR"
+        SKIP_KERNEL_BUILD=1
+      else
+        echo "### linux-kernel cache MISS (key=$KERNEL_CACHE_KEY) — building"
+      fi
+    else
+      echo "### linux-kernel cache: could not derive key (KVER='$KVER' KERNEL_HASH='$KERNEL_HASH') — building"
+    fi
+  fi
+
   ### vyos-1x .deb cache (skip ~6m build when patches+upstream commit unchanged)
   #
   # Cache key derivation (must be deterministic and survive across runs):
@@ -39,10 +123,16 @@ for package in $packages; do
   #     vyos-build tree, BEFORE build.py clones+checks-out vyos-1x/. Reading
   #     it from the toml lets us compute the key without first having to
   #     clone vyos-1x (which `./build.py` does on a cache miss).
-  #   * PATCH_HASH — sha256 of `cat data/vyos-1x-*.patch`. Patch files are
-  #     applied in filesystem-sort order by build.py (`sorted(patch_dir.glob('*'))`),
-  #     so renaming or reordering them legitimately invalidates the cache —
-  #     this is intentional. New patches with new numbers also bump the hash.
+  #   * PATCH_HASH — sha256 of `cat data/vyos-1x-*.patch` ++ the contents
+  #     of `bin/ci-setup-vyos1x.sh` (which carries the pre_build_hook —
+  #     including the debian/control sed loop that strips jool / nat-rtsp /
+  #     unbuilt-nic guard blocks). Patch files are applied in filesystem-sort
+  #     order by build.py (`sorted(patch_dir.glob('*'))`), so renaming or
+  #     reordering them legitimately invalidates the cache — this is
+  #     intentional. New patches with new numbers also bump the hash.
+  #     INVARIANT: any logic that mutates the upstream vyos-1x source tree
+  #     before `dpkg-buildpackage` runs MUST be reflected in this hash —
+  #     otherwise a stale cached .deb will be replayed and overrule the fix.
   #
   # Cache lives under $RUNNER_TOOL_CACHE (set by GitHub Actions on the
   # self-hosted runner — survives across runs). On non-Actions runs the
@@ -53,7 +143,7 @@ for package in $packages; do
   SKIP_VYOS1X_BUILD=0
   if [ "$package" == "vyos-1x" ]; then
     UPSTREAM_SHA=$(awk -F'"' '/^commit_id/ {print $2}' package.toml 2>/dev/null | head -1 | cut -c1-12)
-    PATCH_HASH=$(cat "$GITHUB_WORKSPACE"/data/vyos-1x-*.patch 2>/dev/null | sha256sum | cut -c1-16)
+    PATCH_HASH=$( { cat "$GITHUB_WORKSPACE"/data/vyos-1x-*.patch 2>/dev/null; cat "$GITHUB_WORKSPACE"/bin/ci-setup-vyos1x.sh 2>/dev/null; } | sha256sum | cut -c1-16)
     CACHE_DIR="${RUNNER_TOOL_CACHE:-/tmp}/vyos-1x-cache"
     mkdir -p "$CACHE_DIR"
     find "$CACHE_DIR" -maxdepth 1 -name 'vyos-1x_*' -mtime +14 -delete 2>/dev/null || true
@@ -117,9 +207,13 @@ for package in $packages; do
     # This rm is a no-op on hosted runners (fresh workspace) and on cold self-hosted
     # workspaces; it costs nothing on warm ones except the re-download of the
     # canonical tarball from kernel.org (~150MB, ~5s on the Cobalt 100 link).
-    echo "### Removing any stale linux source tree before kernel build (force re-download)"
-    rm -rf linux linux-[0-9]* linux-*.tar.xz linux-*.tar.sign 2>/dev/null || true
-    ./build.py --packages linux-kernel
+    if [ "$SKIP_KERNEL_BUILD" -eq 1 ]; then
+      echo "### Skipping ./build.py for linux-kernel (cache hit)"
+    else
+      echo "### Removing any stale linux source tree before kernel build (force re-download)"
+      rm -rf linux linux-[0-9]* linux-*.tar.xz linux-*.tar.sign 2>/dev/null || true
+      ./build.py --packages linux-kernel
+    fi
   elif [ "$SKIP_VYOS1X_BUILD" -eq 1 ]; then
     echo "### Skipping ./build.py for vyos-1x (cache hit)"
   else
@@ -169,7 +263,30 @@ for package in $packages; do
   fi
 
   ### Build Mono Gateway DTB from kernel source (before cleanup)
-  if [ "$package" == "linux-kernel" ]; then
+  if [ "$package" == "linux-kernel" ] && [ "$SKIP_KERNEL_BUILD" -eq 1 ]; then
+    ### Cache-hit DTB replay — kernel source tree does not exist, so we
+    ### restore the DTB straight from the cache directory into the
+    ### includes.binary / includes.chroot trees. accel-ppp-ng .debs were
+    ### already replayed at the top of this iteration alongside the kernel
+    ### .debs, so this block has no other side effects.
+    echo "### linux-kernel cache HIT: replaying cached DTB (skipping kernel-source-dependent steps)"
+    INCLUDES_BIN="$GITHUB_WORKSPACE/vyos-build/data/live-build-config/includes.binary"
+    INCLUDES_CHR="$GITHUB_WORKSPACE/vyos-build/data/live-build-config/includes.chroot"
+    CACHED_DTB="$KERNEL_CACHE_HIT_DIR/mono-gateway-dk.dtb"
+    if [ -f "$CACHED_DTB" ]; then
+      mkdir -p "$INCLUDES_BIN" "$INCLUDES_CHR/boot"
+      cp "$CACHED_DTB" "$INCLUDES_BIN/mono-gw.dtb"
+      cp "$CACHED_DTB" "$INCLUDES_BIN/mono-gw-mainline.dtb"
+      cp "$CACHED_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
+      echo "### DTB replayed from cache: $(stat -c '%s bytes' "$CACHED_DTB")"
+    else
+      echo "FATAL: linux-kernel cache HIT but cached DTB missing at $CACHED_DTB"
+      echo "FATAL: refusing to ship without a board DTB"
+      exit 1
+    fi
+    echo "### accel-ppp-ng .debs (replayed from cache, if any):"
+    ls -lh accel-ppp*.deb 2>/dev/null || echo "  (none in cache)"
+  elif [ "$package" == "linux-kernel" ]; then
     # Find the actual kernel source tree (has Makefile + arch/arm64).
     # `find -name 'linux-*'` matches both linux-6.6.x/ (the kernel) AND
     # linux-firmware/ (just firmware blobs). We must exclude the latter,
@@ -345,6 +462,47 @@ for package in $packages; do
         echo "WARNING: accel-ppp-ng build failed (non-fatal) — PPPoE/L2TP will be unavailable"
       echo "### accel-ppp-ng .debs in package dir:"
       ls -lh accel-ppp*.deb 2>/dev/null || echo "  (none produced)"
+    fi
+
+    ### Populate linux-kernel cache after a successful build (cache miss path)
+    #
+    # Captures the linux-image/linux-headers/linux-libc-dev .debs that
+    # build.py just produced, the mainline DTB that the `make
+    # freescale/mono-gateway-dk.dtb` step just compiled, and the
+    # accel-ppp-ng .deb that bin/ci-build-accel-ppp.sh just emitted, all
+    # under one key. Next run with identical inputs (same kernel_version,
+    # config fragments, patches, DTS, setup scripts) will replay the entire
+    # bundle and skip the ~25-minute combined build.
+    #
+    # Excludes the -dbg variant (hundreds of MB) — VyOS doesn't ship it
+    # and ci-pick-packages.sh ignores it anyway.
+    if [ "$SKIP_KERNEL_BUILD" -eq 0 ] && [ -n "${KERNEL_CACHE_KEY:-}" ]; then
+      KERNEL_CACHE_NEW_DIR="$KERNEL_CACHE_ROOT/$KERNEL_CACHE_KEY"
+      # Stage into a sibling tmp dir then rename, so a partial population
+      # never poisons the cache for a concurrent reader.
+      KERNEL_CACHE_STAGE="$KERNEL_CACHE_ROOT/.staging.$$.$KERNEL_CACHE_KEY"
+      rm -rf "$KERNEL_CACHE_STAGE" "$KERNEL_CACHE_NEW_DIR"
+      mkdir -p "$KERNEL_CACHE_STAGE"
+      cached_count=0
+      for built in linux-image-*_arm64.deb linux-headers-*_arm64.deb linux-libc-dev_*_arm64.deb accel-ppp-ng_*_arm64.deb; do
+        [ -f "$built" ] || continue
+        case "$built" in *-dbg*) continue ;; esac
+        cp "$built" "$KERNEL_CACHE_STAGE/$(basename "$built")"
+        cached_count=$((cached_count + 1))
+      done
+      # Mainline DTB (default/vpp ship this — ask flavor is excluded from cache)
+      if [ -n "${MONO_DTB:-}" ] && [ -f "$MONO_DTB" ]; then
+        cp "$MONO_DTB" "$KERNEL_CACHE_STAGE/mono-gateway-dk.dtb"
+        cached_count=$((cached_count + 1))
+      fi
+      if [ "$cached_count" -gt 0 ]; then
+        mv "$KERNEL_CACHE_STAGE" "$KERNEL_CACHE_NEW_DIR"
+        echo "### Cached $cached_count linux-kernel artifact(s) under key $KERNEL_CACHE_KEY"
+        ls -lh "$KERNEL_CACHE_NEW_DIR"/ 2>/dev/null || true
+      else
+        rm -rf "$KERNEL_CACHE_STAGE"
+        echo "### WARNING: linux-kernel build produced nothing cacheable under key $KERNEL_CACHE_KEY"
+      fi
     fi
   fi
 

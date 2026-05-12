@@ -3,7 +3,7 @@
 # Called by: .github/workflows/auto-build.yml "Set env variables" step
 # Inputs (env): INPUT_BUILD_BY, INPUT_BUILD_VERSION, REPO_OWNER_ID, REPO_OWNER
 # Outputs: writes to $GITHUB_ENV and $GITHUB_OUTPUT
-set -ex
+set -ex -o pipefail
 
 # Resolve FLAVOR (default | ask | vpp) so we read the right per-flavor feed
 # below. bin/common.sh handles env-var → data/flavor.pin → "default" fallback.

@@ -7,7 +7,7 @@
 # All extra packages are optional best-effort: a failure to fetch/install any
 # single package logs a WARNING and the script continues. The script always
 # exits 0 so a flaky upstream release mirror cannot break the ISO build.
-set -uo pipefail
+set -euo pipefail
 cd "${GITHUB_WORKSPACE:-.}"
 
 CHROOT=vyos-build/data/live-build-config/includes.chroot
