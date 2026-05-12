@@ -25,3 +25,10 @@ ask_op.o \
 ask_hostcmd.o \
 ask_stats.o \
 ask_debugfs.o
+
+# PR4 (M0.4): kunit test harness. Built as a SEPARATE module
+# (ask_kunit.ko) only when CONFIG_NET_ASK_KUNIT_TEST is set, so the
+# production ask.ko stays free of test code. See tests/Kbuild for the
+# subdirectory build rules and tests/ask_test_main.c for the suite
+# registration entry point.
+obj-$(CONFIG_NET_ASK_KUNIT_TEST) += tests/
