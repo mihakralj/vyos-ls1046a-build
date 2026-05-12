@@ -46,10 +46,34 @@ static const struct genl_multicast_group ask_mcgrps[] = {
 
 /* Forward */
 static int ask_genl_get_info_doit(struct sk_buff *skb, struct genl_info *info);
-static int ask_genl_eopnotsupp_doit(struct sk_buff *skb,
-    struct genl_info *info);
-static int ask_genl_eopnotsupp_dumpit(struct sk_buff *skb,
-      struct netlink_callback *cb);
+/*
+ * The eopnotsupp stubs and the per-flow fill / dump-walker helpers below
+ * are non-static so the kunit suite (PR9 / M1.5) can call them directly
+ * without going through the genl_family small_ops dispatch table. The
+ * production code path always reaches them via the dispatch table; the
+ * test-only direct-call entry is a coverage convenience, not an API.
+ * See tests/ask_test_genl.c.
+ */
+int ask_genl_eopnotsupp_doit(struct sk_buff *skb, struct genl_info *info);
+int ask_genl_eopnotsupp_dumpit(struct sk_buff *skb,
+       struct netlink_callback *cb);
+int ask_genl_get_info_fill(struct sk_buff *skb);
+int ask_genl_fill_one_flow(struct sk_buff *skb, struct ask_flow *f);
+
+/*
+ * Dump context: cb->args[0] is the index of the next flow to emit (we
+ * advance it as we walk). cb->args[1] is a sentinel that becomes 1 once
+ * the walk exhausts so subsequent dumpit calls return 0 immediately.
+ */
+struct ask_genl_dump_ctx {
+struct sk_buff *skb;
+int            start;   /* skip first N entries */
+int            count;   /* how many emitted so far this call */
+int            seen;    /* total walked (start + count + skipped tail) */
+int            err;
+};
+
+int ask_genl_dump_one_cb(struct ask_flow *f, void *arg);
 
 /* ------------------------------------------------------------------------- */
 /* small_ops table                                                            */
@@ -152,7 +176,7 @@ static struct genl_family ask_genl_family __ro_after_init = {
 /* the ucode fields from a real OP_GET_UCODE_VERSION; M3/M4 OR in the         */
 /* capability bits as each feature lands.                                     */
 /* ------------------------------------------------------------------------- */
-static int ask_genl_get_info_fill(struct sk_buff *skb)
+int ask_genl_get_info_fill(struct sk_buff *skb)
 {
 struct nlattr *nest;
 
@@ -194,6 +218,7 @@ nla_put_failure:
 nla_nest_cancel(skb, nest);
 return -EMSGSIZE;
 }
+EXPORT_SYMBOL_GPL(ask_genl_get_info_fill);
 
 static int ask_genl_get_info_doit(struct sk_buff *skb, struct genl_info *info)
 {
@@ -259,7 +284,7 @@ ask_pr_info("genl family unregistered\n");
 /* with the real handler — the ratelimit hides duplicates but never the      */
 /* first occurrence.                                                          */
 /* ------------------------------------------------------------------------- */
-static int ask_genl_eopnotsupp_doit(struct sk_buff *skb,
+int ask_genl_eopnotsupp_doit(struct sk_buff *skb,
     struct genl_info *info)
 {
 printk_ratelimited(KERN_INFO ASK_DRV_NAME
@@ -267,9 +292,10 @@ printk_ratelimited(KERN_INFO ASK_DRV_NAME
    info->genlhdr->cmd);
 return -EOPNOTSUPP;
 }
+EXPORT_SYMBOL_GPL(ask_genl_eopnotsupp_doit);
 
-static int ask_genl_eopnotsupp_dumpit(struct sk_buff *skb,
-      struct netlink_callback *cb)
+int ask_genl_eopnotsupp_dumpit(struct sk_buff *skb,
+       struct netlink_callback *cb)
 {
 u8 cmd = cb->nlh ?
 ((struct genlmsghdr *)nlmsg_data(cb->nlh))->cmd : 0;
@@ -279,6 +305,7 @@ printk_ratelimited(KERN_INFO ASK_DRV_NAME
    cmd);
 return -EOPNOTSUPP;
 }
+EXPORT_SYMBOL_GPL(ask_genl_eopnotsupp_dumpit);
 
 /* ------------------------------------------------------------------------- */
 /* PR7 (M1.3) flow command handlers.                                          */
@@ -298,7 +325,7 @@ return -EOPNOTSUPP;
 /* 32-bit readers cannot see torn 64-bit values.                              */
 /* ------------------------------------------------------------------------- */
 
-static int ask_genl_fill_one_flow(struct sk_buff *skb, struct ask_flow *f)
+int ask_genl_fill_one_flow(struct sk_buff *skb, struct ask_flow *f)
 {
 struct nlattr *nest;
 u64 packets, bytes, last_seen_ns;
@@ -340,27 +367,15 @@ nla_put_failure:
 nla_nest_cancel(skb, nest);
 return -EMSGSIZE;
 }
+EXPORT_SYMBOL_GPL(ask_genl_fill_one_flow);
 
 /*
- * Dump context: cb->args[0] is the index of the next flow to emit (we
- * advance it as we walk). cb->args[1] is a sentinel that becomes 1 once
- * the walk exhausts so subsequent dumpit calls return 0 immediately.
- *
- * We snapshot the entire table per call rather than threading the
- * rhashtable_iter through cb->args because the iter holds bucket locks
- * and the netlink core may call dumpit multiple times across grace
- * periods. A snapshot is cheap (a few hundred entries at most for the
- * 210 hardware) and lets the walker exit cleanly between calls.
+ * The struct ask_genl_dump_ctx layout (and its narrative on snapshot vs.
+ * iter-threaded walks) is forward-declared up top alongside the kunit
+ * helper prototypes so tests/ask_test_genl.c can construct one without
+ * needing a private copy of the type.
  */
-struct ask_genl_dump_ctx {
-struct sk_buff *skb;
-int            start;   /* skip first N entries */
-int            count;   /* how many emitted so far this call */
-int            seen;    /* total walked (start + count + skipped tail) */
-int            err;
-};
-
-static int ask_genl_dump_one_cb(struct ask_flow *f, void *arg)
+int ask_genl_dump_one_cb(struct ask_flow *f, void *arg)
 {
 struct ask_genl_dump_ctx *ctx = arg;
 int rc;
@@ -381,6 +396,7 @@ ctx->count++;
 ctx->seen++;
 return 0;
 }
+EXPORT_SYMBOL_GPL(ask_genl_dump_one_cb);
 
 static int ask_genl_dump_flows_dumpit(struct sk_buff *skb,
       struct netlink_callback *cb)

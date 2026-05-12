@@ -23,23 +23,23 @@ document to track.
 
 | PR  | Title                                            | Target | Owner | Status      |
 |-----|--------------------------------------------------|--------|-------|-------------|
-| —   | Spec authored, scaffold cleanup                  | ask20  | —     | landed (commit 27c3624) |
-| —   | UAPI header `include/uapi/linux/ask/ask.h`       | ask20  | agent | landed (in PR1, commit 03f0d38) |
-| 1   | M0.1 — module skeleton + Kbuild + Kconfig        | ask20  | agent | landed (commit 03f0d38, 2026-05-12) |
-| 2   | M0.2 — three in-tree patch stubs (placeholders)  | ask20  | agent | landed (pending commit, 2026-05-12) |
-| 3   | M0.3 — wire build pipeline (CI + local-build)    | ask20  | agent | landed (pending commit, 2026-05-12) |
-| 4   | M0.4 — kunit harness + first dummy test          | ask20  | agent | landed (pending commit, 2026-05-12) |
-| 5   | M1.1 — `ask_main.c` + `ask_genl.c` GET_INFO      | ask20  | agent | landed (pending commit, 2026-05-12) |
-| 6   | M1.2 — `ask_hostcmd.c` wire-format encoders      | ask20  | agent | landed (pending commit, 2026-05-12) |
-| 7   | M1.3 — `ask_flow.c` rhashtable + RCU             | ask20  | agent | landed (pending commit, 2026-05-12) |
-| 8   | M1.4 — `ask_flow_offload.c` flow_block_cb        | ask20  | agent | landed (pending commit, 2026-05-12) |
-| 9   | M1.5 — kunit coverage ≥ 80% on M1 surface        | ask20  | agent | not started |
+| —   | Spec authored, scaffold cleanup                  | ask20  | —     | landed |
+| —   | UAPI header `include/uapi/linux/ask/ask.h`       | ask20  | agent | landed |
+| 1   | M0.1 — module skeleton + Kbuild + Kconfig        | ask20  | agent | landed |
+| 2   | M0.2 — three in-tree patch stubs (placeholders)  | ask20  | agent | landed |
+| 3   | M0.3 — wire build pipeline (CI + local-build)    | ask20  | agent | landed |
+| 4   | M0.4 — kunit harness + first dummy test          | ask20  | agent | landed |
+| 5   | M1.1 — `ask_main.c` + `ask_genl.c` GET_INFO      | ask20  | agent | landed |
+| 6   | M1.2 — `ask_hostcmd.c` wire-format encoders      | ask20  | agent | landed |
+| 7   | M1.3 — `ask_flow.c` rhashtable + RCU             | ask20  | agent | landed |
+| 8   | M1.4 — `ask_flow_offload.c` flow_block_cb        | ask20  | agent | landed |
+| 9   | M1.5 — kunit coverage ≥ 80% on M1 surface        | ask20  | agent | landed |
 | 10  | M2.1 — `0001-caam-qi-share.patch` (real code)    | ask20  | human | not started |
 | 11  | M2.2 — `0002-dpaa-eth-flow-block.patch` (real)   | ask20  | human | not started |
 | 12  | M2.3 — `0003-fman-host-command-api.patch` (real) | ask20  | human | not started |
 | 13  | M2.4 — `OP_GET_UCODE_VERSION` against silicon    | ask20  | human | not started |
 | 14  | M2.5 — `OP_FLOW_INSERT_V4_TCP` end-to-end        | ask20  | human | not started |
-| 15  | M3.x — remaining flow types (NAT/PAT/v6/bridge/op)| ask20  | mixed | not started |
+| 15  | M3.x — remaining flow types (NAT/PAT/v6/bridge)  | ask20  | mixed | not started |
 | 16  | M4.x — `ask_xfrm.c` + CAAM packet-mode IPsec     | ask20  | mixed | not started |
 | 17  | M5.1 — `askd` (sd-event + libmnl)                | ask20  | agent | not started |
 | 18  | M5.2 — `ask-cli` (Python Varlink client)         | ask20  | agent | not started |
