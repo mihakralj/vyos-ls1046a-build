@@ -27,3 +27,20 @@ help
   See specs/ask-2.0-rewrite-spec.md for the full architecture.
 
   Say M here to build as a module (recommended). Say N if unsure.
+
+config NET_ASK_KUNIT_TEST
+tristate "ASK 2.0 kunit test harness"
+depends on NET_ASK
+depends on KUNIT
+default n
+help
+  Build the ASK 2.0 kunit test harness as a separate module
+  (ask_kunit.ko). Loading the module on a kunit-enabled kernel
+  registers every ASK kunit suite and prints KTAP results to
+  dmesg + /sys/kernel/debug/kunit/.
+
+  PR4 (M0.4) ships a single dummy "ok 1" test that proves the
+  harness end-to-end. M1 PRs append real coverage on top.
+
+  This is a build-and-test convenience for developers and CI; it
+  is NOT shipped on production images. Say N if unsure.
