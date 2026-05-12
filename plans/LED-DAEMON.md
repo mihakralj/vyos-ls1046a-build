@@ -392,6 +392,9 @@ ships:
 - Driver-level changes to `leds-lp5812` (autonomous engine,
   `LOG_SCALE_EN`, per-channel current trim via DT). Tracked separately
   if/when v2 needs them.
+- **Total-throughput mode** (`load_mode = total`, summing all ports
+  instead of max-port). Planned for v2 with an externalised
+  `states.json` table; see §10.
 - Encoding additional signals (memory pressure, temperature, VPN
   state, PPS, etc.) into the same LED. The W channel is reserved for
   link-saturation; everything else fights for the same colour space
@@ -403,7 +406,119 @@ ships:
 
 ---
 
-## 10. Acceptance checklist
+## 10. v2 extension — total-throughput indicator
+
+> **Status:** planned, not in v1. Tracked here so the design fits into the
+> existing daemon without a rewrite when the time comes.
+
+### 10.1 Motivation
+
+The v1 load metric is **max-port**: the single busiest port wins and drives
+the colour ramp. That is the right choice for a WAN-router glance because a
+saturated 10G WAN should dominate the display even when the LAN ports are
+idle.
+
+A secondary use-case is **total network throughput visualisation** — the
+sum of all traffic passing through the box — which matters more for a
+transparent switch or a traffic-measurement context. Rather than a config
+flag that silently changes signal semantics, this is designed as a
+**distinct table-driven mode** (`load_mode = total` vs. the existing
+`load_mode = max_port`).
+
+### 10.2 Calculation
+
+The aggregate bps value is computed identically to per-port, just summed:
+
+```
+total_bps = Σ ( Δrx_bytes[i] + Δtx_bytes[i] ) * 8 / Δt
+            for i in interfaces
+```
+
+Note that on a routing box `rx` on one port and `tx` on another both
+represent the same packet counted twice; for a pure throughput-visualiser
+that is acceptable (and the visual is still monotone with real load).
+If single-counted throughput is needed, sum only `rx_bytes` across all
+ports (`tx` is always the same packet exiting somewhere else).
+
+The log-normalised scalar fed into the state table stays identical to v1:
+
+```
+bps      = max(1.0, total_bps)
+load_log = (log10(bps) − log10(LOG_FLOOR)) /
+           (log10(LOG_CEIL) − log10(LOG_FLOOR))
+load_log = clamp(load_log, 0.0, 1.0)
+s = round(load_log * (TABLE_SIZE − 1))
+```
+
+`LOG_FLOOR` and `LOG_CEIL` stay 1 Mbps / 10 Gbps. With five ports the
+total ceiling is ~23 Gbps, so step 15 is reached at ~10 Gbps aggregate,
+which is a useful alarm point even when no single port is saturated.
+
+### 10.3 State table approach
+
+Rather than hard-coding the RGBW values in the daemon source (the way the
+current 16-entry black-body table is embedded), v2 externalises the table
+entirely as `states.json`. The daemon already ships this file at
+`/usr/local/share/monoledd/states.json` (§6 specifies it); the extension
+is to make the file **the authoritative source** instead of a shadow copy.
+
+Each entry in `states.json` is keyed by step index and holds:
+
+```json
+[
+  { "step": 0,  "load_pct_min": 0,  "load_pct_max": 2,  "r": 0,   "g": 8,   "b": 16,  "w": 0   },
+  { "step": 1,  "load_pct_min": 2,  "load_pct_max": 5,  "r": 0,   "g": 16,  "b": 24,  "w": 0   },
+  ...
+  { "step": 15, "load_pct_min": 98, "load_pct_max": 100,"r": 255, "g": 200, "b": 64,  "w": 255 }
+]
+```
+
+The daemon:
+
+1. Loads the table at startup (and on `SIGHUP` for live retuning without
+   restart).
+2. Looks up the row where `load_pct_min <= computed_load_pct <= load_pct_max`.
+3. Applies per-channel scale factors from `[trim]` config.
+4. Feeds the RGBW values into the existing smoothing pipeline (§5).
+
+Operators can ship a custom table for their environment (e.g. a 4-step
+"green/yellow/orange/red" table with fewer entries) without touching daemon
+code. The `--state N` CLI flag overrides the table lookup for calibration.
+
+### 10.4 Config additions (`/etc/monoledd.conf`)
+
+```ini
+[load]
+load_mode        = max_port   ; max_port (v1 default) | total
+```
+
+`total` mode only changes the scalar computation in §10.2; the table
+lookup and smoothing pipeline are unchanged.
+
+### 10.5 Implementation notes
+
+- **Backward compatible**: `load_mode = max_port` is the default; no
+  existing deployment changes behaviour.
+- **Table size is variable**: the daemon reads `TABLE_SIZE` from the
+  length of the loaded array, not from a compile-time constant. The
+  existing 16-step table in §3 still works with no modification.
+- **Hysteresis is handled by the ±1 step clamp** in §5; no additional
+  per-table hysteresis band is needed.
+- **VPP/AF_XDP caveat from §4 still applies**: kernel counters reflect
+  AF_XDP traffic correctly; full DPDK PMD would silence the counters.
+
+### 10.6 Acceptance additions (for v2)
+
+- [ ] `load_mode = total` with `iperf3` on two ports simultaneously
+  shows a higher step than either port would trigger alone in
+  `max_port` mode.
+- [ ] Custom 4-entry `states.json` loaded via `SIGHUP` without restart.
+- [ ] `--state N` walks each table row in sequence on demand (calibration
+  sweep).
+
+---
+
+## 11. Acceptance checklist
 
 Before declaring v1 done:
 
