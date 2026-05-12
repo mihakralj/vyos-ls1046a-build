@@ -39,10 +39,16 @@ for package in $packages; do
   #     vyos-build tree, BEFORE build.py clones+checks-out vyos-1x/. Reading
   #     it from the toml lets us compute the key without first having to
   #     clone vyos-1x (which `./build.py` does on a cache miss).
-  #   * PATCH_HASH — sha256 of `cat data/vyos-1x-*.patch`. Patch files are
-  #     applied in filesystem-sort order by build.py (`sorted(patch_dir.glob('*'))`),
-  #     so renaming or reordering them legitimately invalidates the cache —
-  #     this is intentional. New patches with new numbers also bump the hash.
+  #   * PATCH_HASH — sha256 of `cat data/vyos-1x-*.patch` ++ the contents
+  #     of `bin/ci-setup-vyos1x.sh` (which carries the pre_build_hook —
+  #     including the debian/control sed loop that strips jool / nat-rtsp /
+  #     unbuilt-nic guard blocks). Patch files are applied in filesystem-sort
+  #     order by build.py (`sorted(patch_dir.glob('*'))`), so renaming or
+  #     reordering them legitimately invalidates the cache — this is
+  #     intentional. New patches with new numbers also bump the hash.
+  #     INVARIANT: any logic that mutates the upstream vyos-1x source tree
+  #     before `dpkg-buildpackage` runs MUST be reflected in this hash —
+  #     otherwise a stale cached .deb will be replayed and overrule the fix.
   #
   # Cache lives under $RUNNER_TOOL_CACHE (set by GitHub Actions on the
   # self-hosted runner — survives across runs). On non-Actions runs the
@@ -53,7 +59,7 @@ for package in $packages; do
   SKIP_VYOS1X_BUILD=0
   if [ "$package" == "vyos-1x" ]; then
     UPSTREAM_SHA=$(awk -F'"' '/^commit_id/ {print $2}' package.toml 2>/dev/null | head -1 | cut -c1-12)
-    PATCH_HASH=$(cat "$GITHUB_WORKSPACE"/data/vyos-1x-*.patch 2>/dev/null | sha256sum | cut -c1-16)
+    PATCH_HASH=$( { cat "$GITHUB_WORKSPACE"/data/vyos-1x-*.patch 2>/dev/null; cat "$GITHUB_WORKSPACE"/bin/ci-setup-vyos1x.sh 2>/dev/null; } | sha256sum | cut -c1-16)
     CACHE_DIR="${RUNNER_TOOL_CACHE:-/tmp}/vyos-1x-cache"
     mkdir -p "$CACHE_DIR"
     find "$CACHE_DIR" -maxdepth 1 -name 'vyos-1x_*' -mtime +14 -delete 2>/dev/null || true
