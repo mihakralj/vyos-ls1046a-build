@@ -207,24 +207,9 @@ jobs:
             python3-nose2 \
             python3-jmespath python3-pyhumps
 
-      - name: Install j2lint (Jinja2 linter not packaged in Debian)
-        # vyos-1x's debian/rules invokes `make j2lint` which runs the
-        # `j2lint` binary on data/templates/.  The Makefile errors out
-        # ("j2lint binary not found, consider installing: pip install
-        # git+https://github.com/aristanetworks/j2lint.git@341b5d5db86")
-        # if the binary isn't on PATH.  Inside the upstream vyos-builder
-        # Docker image j2lint is preinstalled via that exact pip URL.
-        # Replicate that on the bare runner (Debian bookworm marks system
-        # Python externally-managed via PEP 668, so we use
-        # --break-system-packages since we're in a CI runner, not a user
-        # system).
-        run: |
-          set -e
-          if ! command -v j2lint >/dev/null 2>&1; then
-            pip install --break-system-packages \
-              'git+https://github.com/aristanetworks/j2lint.git@341b5d5db86'
-          fi
-          j2lint --version
+      # j2lint install moved to bin/ci-install-deps.sh (runs as part of the
+      # "Install Dependencies" step). Keeping the install in one script keeps
+      # the local LXC dev loop reproducible without dispatching CI.
 
       - name: Bootstrap OCaml/opam for libvyosconfig (cached on runner)
         # vyos-1x's debian/rules calls 'opam env --root=/opt/opam' to build
