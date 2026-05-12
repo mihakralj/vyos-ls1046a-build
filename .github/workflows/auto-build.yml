@@ -158,9 +158,7 @@ jobs:
         # dev loop on LXC 200 (bin/local-build.sh) can reproduce a CI
         # build environment without dispatching CI. Adding any package
         # inline here is a layering bug — fix the script instead.
-        run: |
-          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-          bin/ci-install-deps.sh
+        run: bin/ci-install-deps.sh
 
       - name: "Initialization: set env variables"
         id: set_env_variables
@@ -330,14 +328,10 @@ jobs:
         run: bin/ci-setup-vyos-build.sh
 
       - name: Build Image Packages
-        run: |
-          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-          bin/ci-build-packages.sh
+        run: bin/ci-build-packages.sh
 
       - name: Pick Packages
-        run: |
-          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-          bin/ci-pick-packages.sh
+        run: bin/ci-pick-packages.sh
 
       - name: Install extra packages (non-Debian)
         run: bin/ci-install-extra-packages.sh
@@ -346,9 +340,7 @@ jobs:
         id: build_iso
         env:
           BUILD_VERSION: ${{ steps.set_env_variables.outputs.build_version }}
-        run: |
-          source <(sed -n '/enable programmable completion/,$p' /etc/skel/.bashrc)
-          bin/ci-build-iso.sh
+        run: bin/ci-build-iso.sh
 
       - name: Verify VPP ISO contents
         if: env.FLAVOR == 'vpp'
