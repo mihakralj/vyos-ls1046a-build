@@ -1,0 +1,35 @@
+#!/bin/sh
+# 97-ask-modules.chroot — auto-load ASK 2.0 OOT modules at boot
+#
+# Per plans/ASK-2.0-IMPLEMENTATION.md PR3 (M0.3 — wire build pipeline):
+# the ask-modules-*.deb that bin/ci-pick-packages.sh stages into the
+# chroot installs ask.ko (and future ask_bridge.ko) under
+# /lib/modules/${KVER}/extra/. Without this hook, the modules would be
+# installed-but-never-loaded — `lsmod | grep ask` would return empty on
+# the live system because nothing tells systemd-modules-load to auto-load
+# them.
+#
+# Drop a /etc/modules-load.d/ask.conf so systemd-modules-load.service
+# loads ask.ko at every boot (matches how mainline kernel modules are
+# wired up via /etc/modules-load.d/*.conf).
+#
+# Hook ordering: 97 runs after 96-enable-services.chroot (which enables
+# our custom services) and before 98-fancontrol.chroot / 99-mask-services.
+# No ordering dependency on the others — ask.ko is purely a kernel-side
+# resource; userspace integration (askd) lands in M5.
+#
+# Idempotent: writing the same file twice is fine. The file is
+# overwritten on every chroot rebuild.
+set -e
+
+CONF=/etc/modules-load.d/ask.conf
+
+mkdir -p "$(dirname "$CONF")"
+cat > "$CONF" <<EOF
+# ASK 2.0 OOT kernel modules — managed by 97-ask-modules.chroot
+# See plans/ASK-2.0-IMPLEMENTATION.md and specs/ask-2.0-rewrite-spec.md.
+ask
+EOF
+
+echo "I: 97-ask-modules.chroot: wrote $CONF"
+cat "$CONF"

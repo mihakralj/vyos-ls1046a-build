@@ -3,11 +3,12 @@
 # Called by: .github/workflows/auto-build.yml "Setup kernel config" step
 # Expects: GITHUB_WORKSPACE set
 #
-# When ASK_KERNEL_TAG is set, this script is a no-op: the kernel is consumed
-# prebuilt from the formerly-separate kernel build repo's GitHub Releases
-# (mihakralj/kernel-ls1046a-build, now frozen and absorbed into this tree)
-# via bin/ci-consume-ask-kernel.sh, so defconfig mutations and build-kernel.sh
-# injections are meaningless.
+# ASK 2.0 (rewrite-in-progress): the legacy ASK_KERNEL_TAG env var and the
+# ci-consume-ask-kernel.sh / ci-setup-kernel-ask.sh helpers were deleted on
+# the ask20 branch along with the ASK 1.x SDK kernel stack. This script
+# now runs unconditionally for all flavors (default | ask | vpp). The
+# ASK_KERNEL_TAG guard below is dead code kept only as a safety belt in
+# case some external caller still injects the variable.
 set -ex -o pipefail
 cd "${GITHUB_WORKSPACE:-.}"
 
@@ -39,7 +40,10 @@ sed -i '/CONFIG_DMA_CMA/d'                  "$DEFCONFIG"
 # (00-board.config .. 08-dpaa1.config) so a plain glob expansion sorts
 # alphabetically into the intended load order. Flavor-specific fragments
 # live under kernel/flavors/<flavor>/kernel-config/ and are NOT picked up
-# here — bin/ci-setup-kernel-ask.sh handles ASK explicitly.
+# here. ASK 2.0 (per specs/ask-2.0-rewrite-spec.md) does not currently
+# add any flavor-specific kernel-config fragments; if it grows them they
+# would live under kernel/flavors/ask/kernel-config/ and need explicit
+# wiring at that point.
 #
 # History: prior to Phase 1c of the repo-layout refactor (2026-05-11)
 # these fragments were duplicated under data/kernel-config/ls1046a-*.config
@@ -93,14 +97,12 @@ if [ -z "$KSERIES_FOR_PATCH" ] && [ -f versions.lock ]; then
     KSERIES_FOR_PATCH=$(awk -F= '/KERNEL_SERIES/{gsub(/[" ]/,"",$2); print $2}' versions.lock)
 fi
 
-# INA234 hwmon patch was relocated under the ASK flavor in May 2026 — it is
-# only meaningful on the kernel 6.6 line (ASK), since INA234 is upstream from
-# kernel 6.10 onwards. The default + vpp flavors track 6.18+, so this is no
-# longer staged from the legacy path; the FLAVOR=ask build picks it up from
-# kernel/flavors/ask/patches/fixes/ via ci-setup-kernel-ask.sh.
-if [ "$KSERIES_FOR_PATCH" = "6.6" ]; then
-    echo "### Kernel series $KSERIES_FOR_PATCH — INA234 hwmon patch is provided by FLAVOR=ask (kernel/flavors/ask/patches/fixes/4002-*)"
-fi
+# INA234 hwmon patch (formerly kernel/flavors/ask/patches/fixes/4002-*) was
+# only meaningful on the kernel 6.6 line, since INA234 is upstream from
+# kernel 6.10 onwards. The default + vpp flavors track 6.18+, so the patch
+# is unnecessary. ASK 2.0 (rewrite-in-progress) tracks the same 6.18+
+# kernel as the other flavors per specs/ask-2.0-rewrite-spec.md — no
+# special handling needed here.
 
 # Shared LS1046A board patches now live under kernel/common/patches/board/.
 # Source of truth: kernel/common/patches/board/{101,4005,4006,4007,4009}.patch.
@@ -158,6 +160,64 @@ if [ -f "$PERF_HEADERS_PATCH" ]; then
     cp "$PERF_HEADERS_PATCH" "$KERNEL_PATCHES/"
 else
     echo "WARNING: $PERF_HEADERS_PATCH missing — kernel arm64 perf build will fail"
+fi
+
+### FLAVOR=ask: stage the ASK 2.0 in-tree kernel patches
+#
+# Per plans/ASK-2.0-IMPLEMENTATION.md PR2/PR3 and spec §10, the ASK 2.0
+# kernel surface needs three small patches (currently placeholder stubs;
+# real implementations land in M2):
+#   0001-caam-qi-share.patch        — caam_qi_ext_consumer_register/release
+#   0002-dpaa-eth-flow-block.patch  — TC_SETUP_BLOCK in dpaa_setup_tc()
+#   0003-fman-host-command-api.patch — fman_host_cmd_send() + new header
+#
+# Naming hazard: vyos-build's own upstream patch loop reserves the
+# `0001-*` and `0003-*` filenames in $KERNEL_PATCHES (preserved by the
+# cleanup glob above via `! -name '0001-*' ! -name '0003-*'`). Copying our
+# patches in with their authored 0001/0002/0003 names would collide with
+# vyos-build's reserved upstream patches and either silently overwrite
+# them or fail to apply. Solution: rename to 1001/1002/1003 at staging
+# time. The build-kernel.sh patch loop applies `find … | sort`-ordered,
+# producing the deterministic apply order:
+#     0001 0003 101 1001 1002 1003 4005 4006 4007 4009
+# i.e. vyos-build's reserved patches first, then board patches, then
+# ASK patches, then the rest of the board patches.
+#
+# Source-of-truth filenames in the repo stay 0001/0002/0003 because that
+# matches the spec §10 numbering and the authoring rule (every patch is
+# `git format-patch`-style starting at 0001). The rename happens ONLY in
+# the staged copies. README.md under kernel/flavors/ask/patches/ documents
+# this.
+if [ "${FLAVOR:-default}" = "ask" ]; then
+    ASK_PATCH_DIR=kernel/flavors/ask/patches
+    if [ ! -d "$ASK_PATCH_DIR" ]; then
+        echo "ERROR: FLAVOR=ask but $ASK_PATCH_DIR is missing"
+        exit 1
+    fi
+    echo "### FLAVOR=ask — staging ASK 2.0 in-tree kernel patches from $ASK_PATCH_DIR"
+    ASK_PATCH_COUNT=0
+    for src_patch in "$ASK_PATCH_DIR"/0001-*.patch \
+                     "$ASK_PATCH_DIR"/0002-*.patch \
+                     "$ASK_PATCH_DIR"/0003-*.patch; do
+        [ -f "$src_patch" ] || { echo "ERROR: missing $src_patch"; exit 1; }
+        # Rename 0001-→1001-, 0002-→1002-, 0003-→1003- to avoid collision
+        # with vyos-build's reserved upstream 0001-*/0003-* patches.
+        base=$(basename "$src_patch")
+        case "$base" in
+            0001-*) dst="1001-${base#0001-}" ;;
+            0002-*) dst="1002-${base#0002-}" ;;
+            0003-*) dst="1003-${base#0003-}" ;;
+            *)      echo "ERROR: unexpected ASK patch name: $base"; exit 1 ;;
+        esac
+        echo "###   $base → $dst"
+        cp "$src_patch" "$KERNEL_PATCHES/$dst"
+        ASK_PATCH_COUNT=$((ASK_PATCH_COUNT + 1))
+    done
+    if [ "$ASK_PATCH_COUNT" -ne 3 ]; then
+        echo "ERROR: expected 3 ASK kernel patches, staged $ASK_PATCH_COUNT"
+        exit 1
+    fi
+    echo "### ASK 2.0: $ASK_PATCH_COUNT in-tree kernel patches staged"
 fi
 
 # Stage FMD Shim + LP5812 source from the new common files layout.
@@ -321,8 +381,8 @@ rm -f /tmp/ls1046a-post-defconfig.sh
 #   - commit the post-patch tree so any subsequent injection (e.g. the
 #     LP5812 force-config block) sees the patched state.
 #
-# Idempotent via SENTINEL marker — re-running ci-setup-kernel.sh (or
-# ci-setup-kernel-ask.sh layering on top) is a no-op.
+# Idempotent via SENTINEL marker — re-running ci-setup-kernel.sh is a
+# no-op.
 echo "### Rewriting build-kernel.sh patch loop: GNU patch -p1 -> git apply --3way"
 python3 - "$KERNEL_BUILD/build-kernel.sh" <<'PYEOF'
 import sys, re, pathlib

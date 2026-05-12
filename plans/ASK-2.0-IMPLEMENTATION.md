@@ -27,7 +27,7 @@ document to track.
 | —   | UAPI header `include/uapi/linux/ask/ask.h`       | ask20  | agent | landed (in PR1, commit 03f0d38) |
 | 1   | M0.1 — module skeleton + Kbuild + Kconfig        | ask20  | agent | landed (commit 03f0d38, 2026-05-12) |
 | 2   | M0.2 — three in-tree patch stubs (placeholders)  | ask20  | agent | landed (pending commit, 2026-05-12) |
-| 3   | M0.3 — wire build pipeline (CI + local-build)    | ask20  | agent | not started |
+| 3   | M0.3 — wire build pipeline (CI + local-build)    | ask20  | agent | landed (pending commit, 2026-05-12) |
 | 4   | M0.4 — kunit harness + first dummy test          | ask20  | agent | not started |
 | 5   | M1.1 — `ask_main.c` + `ask_genl.c` GET_INFO      | ask20  | agent | not started |
 | 6   | M1.2 — `ask_hostcmd.c` wire-format encoders      | ask20  | agent | not started |

@@ -251,9 +251,8 @@ for package in $packages; do
       echo "Check build-kernel.sh output above for the actual error."
       echo ""
       echo "Common causes:"
-      echo "  - Patch failed to apply (check 003-ask-kernel-hooks.patch)"
-      echo "  - SDK source extraction failed (ask-nxp-sdk-sources.tar.gz)"
-      echo "  - Kconfig symbol conflict (mainline vs SDK DPAA)"
+      echo "  - Patch failed to apply"
+      echo "  - Kconfig symbol conflict"
       echo "  - Missing kernel dependency"
       echo ""
       exit 1
@@ -422,35 +421,38 @@ for package in $packages; do
       esac
     fi
 
-    ### ASK out-of-tree kernel modules (cdx, fci, auto_bridge, iptables-extensions)
+    ### ASK 2.0 OOT kernel modules (ask.ko, future ask_bridge.ko)
     #
-    # OOT module SOURCES live in this repo under
-    # `kernel/flavors/ask/oot-modules/`. When `ASK_KERNEL_TAG` is set, the
-    # corresponding signed .ko binaries are pulled in via
-    # `ci-consume-ask-kernel.sh` from the formerly-separate kernel build
-    # repo's GitHub Releases (mihakralj/kernel-ls1046a-build, now frozen
-    # and absorbed into this tree) — they ride inside the kernel-6.6.137-askN
-    # release tarball alongside the kernel image and linux-headers .deb.
+    # Build and sign the ASK 2.0 OOT module .ko against the kernel source
+    # tree we just compiled. Must run BEFORE the post-build cleanup that
+    # deletes $KSRC at the end of this iteration — the OOT build needs
+    # Module.symvers, scripts/sign-file, and certs/signing_key.{pem,x509}
+    # all of which live inside $KSRC.
     #
-    # The legacy local-build path that compiled cdx/fci/auto_bridge here
-    # from a sibling clone of the archived ask-ls1046a-6.6 repo has been
-    # removed: the sources now live in-tree under `kernel/flavors/ask/`
-    # and the archived repo is no longer cloned by auto-build.yml.
-
-    ### Build ASK userspace binaries from source (cmm, dpa_app, libcli, libfci)
-    # FLAVOR-gated: ASK userspace (cmm, dpa_app, fmlib, fmc, cdx, fci,
-    # auto_bridge) is only meaningful when running the NXP SDK + ASK
-    # fast-path kernel. On default/vpp flavors the underlying kernel has
-    # no SDK fsl_dpa driver and no /dev/fm* chardev — building these
-    # userspace components produces .debs that cannot install (missing
-    # kernel symbols) and pollutes the ISO.
-    if [ "${FLAVOR:-default}" = "ask" ] && [ -n "$KSRC" ] && [ -x "$GITHUB_WORKSPACE/bin/ci-build-ask-userspace.sh" ]; then
-      KSRC_ABS_ASK="$(cd "$KSRC" && pwd)"
-      echo "### Building ASK userspace from source (FLAVOR=ask)"
-      "$GITHUB_WORKSPACE/bin/ci-build-ask-userspace.sh" "$KSRC_ABS_ASK" "$INCLUDES_CHR" || \
-        echo "WARNING: ASK userspace build failed (non-fatal) — using pre-built binaries"
-    elif [ "${FLAVOR:-default}" != "ask" ]; then
-      echo "### Skipping ASK userspace build (FLAVOR=${FLAVOR:-default}, not 'ask')"
+    # The signed .ko is packaged as a .deb under $PKG_DIR (the current
+    # `linux-kernel/` package-build dir), where bin/ci-pick-packages.sh's
+    # `find scripts/package-build -name '*.deb'` sweep will pick it up.
+    #
+    # Userspace components (askd, ask-load, libask_fci) are not yet
+    # implemented — see specs/ask-2.0-rewrite-spec.md §§4–9.
+    if [ "${FLAVOR:-default}" = "ask" ]; then
+      ASK_OOT_BUILDER="$GITHUB_WORKSPACE/kernel/flavors/ask/oot-modules/ask/ci-build.sh"
+      if [ -n "$KSRC" ] && [ -x "$ASK_OOT_BUILDER" ]; then
+        KSRC_ABS_ASK="$(cd "$KSRC" && pwd)"
+        echo "### FLAVOR=ask: building ASK 2.0 OOT kernel modules"
+        # Cross-build env is already exported by the kernel build above
+        # (ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-). Pass through.
+        ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}" \
+          "$ASK_OOT_BUILDER" "$KSRC_ABS_ASK" "$(pwd)"
+        echo "### ASK OOT module .deb(s) in package dir:"
+        ls -lh ask-modules-*.deb 2>/dev/null || { echo "FATAL: no ask-modules-*.deb produced"; exit 1; }
+      else
+        echo "FATAL: FLAVOR=ask but cannot build OOT modules:"
+        echo "FATAL:   KSRC='$KSRC'"
+        echo "FATAL:   ASK_OOT_BUILDER='$ASK_OOT_BUILDER' (must be executable)"
+        exit 1
+      fi
+      echo "### FLAVOR=ask: userspace stack (askd, ask-load, libask_fci) not yet implemented (see specs/ask-2.0-rewrite-spec.md)"
     fi
 
     ### Build accel-ppp-ng ARM64 packages (daemon + kernel modules)
@@ -514,56 +516,9 @@ for package in $packages; do
   cd ..
 done
 
-### ASK userspace rebuild in ASK-consume mode ##########################
-#
-# In ASK-consume mode the linux-kernel package is skipped, so the entire
-# `if [ "$package" == "linux-kernel" ]` block above (which contains the
-# DTB build, ASK kernel-module build, AND the ASK userspace rebuild) is
-# never entered. That left dpa_app/cmm/fmlib/fmc shipping as the stale
-# prebuilt blobs from data/ask-userspace/ -- they were compiled against
-# an older kernel ABI and SIGSEGV at runtime under cdx_module_init's
-# call_usermodehelper, producing the cascade:
-#
-#   cdx_module_init::start_dpa_app failed rc 11
-#   get_phys_port_poolinfo_bysize::failed
-#   cdx_create_fragment_bufpool::failed to locate eth bman pool
-#
-# Fix: extract the pinned linux-headers-*.deb that ci-consume-ask-kernel.sh
-# already staged (which ships the FMD UAPI under usr/src/linux-headers-*/include/uapi/linux/fmd/)
-# and re-run ci-build-ask-userspace.sh against it. dpa_app, libfm.a,
-# libfmc.a, libcli, libfci, and cmm get rebuilt against the same kernel
-# headers we are about to ship, killing the ABI drift.
-if [ -n "${ASK_KERNEL_TAG:-}" ]; then
-  echo ""
-  echo "### ASK-consume mode: rebuilding ASK userspace against pinned kernel-headers .deb"
-  VB_PKG_CHROOT="$GITHUB_WORKSPACE/vyos-build/data/live-build-config/packages.chroot"
-  INCLUDES_CHR="$GITHUB_WORKSPACE/vyos-build/data/live-build-config/includes.chroot"
-  HDR_DEB=$(ls "$VB_PKG_CHROOT"/linux-headers-*_arm64.deb 2>/dev/null | head -1)
-  if [ -z "$HDR_DEB" ]; then
-    echo "WARNING: no linux-headers-*_arm64.deb in $VB_PKG_CHROOT/ — ASK userspace will NOT be rebuilt"
-    echo "         (ci-consume-ask-kernel.sh must have run first)"
-  elif [ ! -x "$GITHUB_WORKSPACE/bin/ci-build-ask-userspace.sh" ]; then
-    echo "WARNING: bin/ci-build-ask-userspace.sh missing or not executable — skipping userspace rebuild"
-  else
-    KHDR_EXTRACT="/tmp/ask-khdr"
-    rm -rf "$KHDR_EXTRACT"
-    mkdir -p "$KHDR_EXTRACT"
-    dpkg-deb -x "$HDR_DEB" "$KHDR_EXTRACT"
-    KSRC_ASK=$(find "$KHDR_EXTRACT/usr/src" -maxdepth 1 -type d -name 'linux-headers-*' | head -1)
-    if [ -z "$KSRC_ASK" ] || [ ! -d "$KSRC_ASK/include/uapi/linux/fmd" ]; then
-      echo "WARNING: extracted headers missing FMD UAPI tree at $KSRC_ASK/include/uapi/linux/fmd"
-      echo "         — ASK userspace will NOT be rebuilt"
-    else
-      echo "### KSRC_ASK=$KSRC_ASK (FMD UAPI present)"
-      echo "### INCLUDES_CHR=$INCLUDES_CHR"
-      if ! "$GITHUB_WORKSPACE/bin/ci-build-ask-userspace.sh" "$KSRC_ASK" "$INCLUDES_CHR"; then
-        if [ "${ASK_USERSPACE_STRICT:-1}" = "1" ]; then
-          echo "ERROR: ASK userspace rebuild failed — aborting (set ASK_USERSPACE_STRICT=0 to override; ships stale prebuilt dpa_app → SIGSEGV)" >&2
-          exit 1
-        fi
-        echo "WARNING: ASK userspace rebuild failed — falling back to prebuilt blobs (dpa_app likely SIGSEGV)"
-      fi
-    fi
-    rm -rf "$KHDR_EXTRACT"
-  fi
-fi
+### ASK 2.0 (rewrite-in-progress): the legacy ASK-consume mode userspace
+### rebuild block was removed on the ask20 branch along with
+### ci-consume-ask-kernel.sh and ci-build-ask-userspace.sh. The ASK 2.0
+### userspace stack (askd, ask-load, libask_fci) will be built by new
+### scripts under bin/ci-build-ask-*.sh once the components land per
+### specs/ask-2.0-rewrite-spec.md.
