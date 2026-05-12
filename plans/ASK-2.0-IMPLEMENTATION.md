@@ -95,13 +95,23 @@ LAN:
   (1710000/1720000/1730000.jr), FMan probed
   (`/sys/bus/platform/devices/1a00000.fman`), all five `dpaa_setup_tc`
   netdevs bound (`dpaa-ethernet.0` through `dpaa-ethernet.4`).
-- Boot-image cycle is **TFTP via U-Boot `run dev_boot`**. The agent
-  does not need a serial console for routine kernel iteration — the
-  device already comes up on the dev-loop kernel and the agent
-  triggers a fresh load via either `reboot` over SSH (U-Boot auto-runs
-  `dev_boot`) or `kexec -l && kexec -e` from the running kernel. The
-  serial console is only needed for U-Boot env edits or recovery from
-  a hard crash, both of which are infrequent.
+- Boot-image cycle is **`ssh vyos reboot` → U-Boot → TFTP `run dev_boot`**
+  (which is wired into the SPI env to fetch vmlinuz/DTB/initrd from
+  `192.168.1.137:/srv/tftp/` on LXC 200). One reboot ≈30–45 s wall-clock
+  from `ssh reboot` to login prompt on the new kernel; the SSH MCP
+  connection drops mid-cycle and the agent re-establishes it after a
+  short sleep. **`kexec` is NOT a routine iteration path on this
+  target.** Verified 2026-05-12: (a) the `kexec` userspace binary is
+  not in the VyOS ISO (`which kexec` empty, vbash returns "Invalid
+  command"), (b) the kernel was built with `CONFIG_KEXEC_SIG=y` +
+  `CONFIG_KEXEC_IMAGE_VERIFY_SIG=y` + `CONFIG_ARCH_DEFAULT_KEXEC_IMAGE_VERIFY_SIG=y`
+  so even with `kexec-tools` installed, `kexec_file_load(2)` would
+  reject the unsigned dev-loop vmlinuz from TFTP, and (c) the legacy
+  `kexec_load(2)` would in principle work (the syscall isn't disabled
+  via `kexec_load_disabled`) but VyOS doesn't ship `kexec-tools` and
+  there is no signed kernel iteration loop on the dev path. The serial
+  console is only needed for U-Boot env edits or recovery from a hard
+  crash, both of which are infrequent.
 
 What the agent **still cannot do**:
 
