@@ -29,7 +29,7 @@ document to track.
 | 2   | M0.2 — three in-tree patch stubs (placeholders)  | ask20  | agent | landed (pending commit, 2026-05-12) |
 | 3   | M0.3 — wire build pipeline (CI + local-build)    | ask20  | agent | landed (pending commit, 2026-05-12) |
 | 4   | M0.4 — kunit harness + first dummy test          | ask20  | agent | landed (pending commit, 2026-05-12) |
-| 5   | M1.1 — `ask_main.c` + `ask_genl.c` GET_INFO      | ask20  | agent | not started |
+| 5   | M1.1 — `ask_main.c` + `ask_genl.c` GET_INFO      | ask20  | agent | landed (pending commit, 2026-05-12) |
 | 6   | M1.2 — `ask_hostcmd.c` wire-format encoders      | ask20  | agent | not started |
 | 7   | M1.3 — `ask_flow.c` rhashtable + RCU             | ask20  | agent | not started |
 | 8   | M1.4 — `ask_flow_offload.c` flow_block_cb        | ask20  | agent | not started |

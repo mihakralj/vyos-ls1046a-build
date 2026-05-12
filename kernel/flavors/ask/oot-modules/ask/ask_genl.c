@@ -2,13 +2,14 @@
 /*
  * ask_genl.c — generic-netlink family for ASK 2.0
  *
- * PR1 wires only ASK_CMD_GET_INFO. Every other command in the UAPI
- * (DUMP_FLOWS / GET_FLOW / DUMP_SAS / FLUSH_FLOWS / FLUSH_SAS /
- *  SET_POLICER / GET_MURAM) is intentionally omitted from the small_ops
- * table — the genl core will reply -EOPNOTSUPP for any unknown command,
- * which is exactly the M0 contract: the family exists, version 1 is
- * advertised, info reports a populated struct, everything else is
- * unsupported until the relevant PR lands.
+ * PR1 (M0.1) wired ASK_CMD_GET_INFO with a real handler.
+ * PR5 (M1.1) wires the remaining 7 UAPI commands as enumerated stubs
+ * that log + return -EOPNOTSUPP via printk_ratelimited, so that
+ * `genl ctrl-list -f ask` enumerates all 8 ops and userspace tooling
+ * (askd, ask-cli) can introspect what this build supports without
+ * trial-and-error round-trips. Each later PR replaces the eopnotsupp
+ * wiring with the real handler when its subsystem lands (PR7: flows,
+ * PR16a: SAs, plus dedicated PRs for SET_POLICER / GET_MURAM).
  *
  * See specs/ask-2.0-rewrite-spec.md §7 for the protocol design.
  */
@@ -34,10 +35,30 @@ static const struct genl_multicast_group ask_mcgrps[] = {
 
 /* Forward */
 static int ask_genl_get_info_doit(struct sk_buff *skb, struct genl_info *info);
+static int ask_genl_eopnotsupp_doit(struct sk_buff *skb,
+    struct genl_info *info);
+static int ask_genl_eopnotsupp_dumpit(struct sk_buff *skb,
+      struct netlink_callback *cb);
 
 /* ------------------------------------------------------------------------- */
 /* small_ops table                                                            */
-/* PR1 only registers GET_INFO. Future PRs append entries here.               */
+/*                                                                            */
+/* PR5 (M1.1) wires every UAPI command. ASK_CMD_GET_INFO is the only one     */
+/* with a real handler; the other seven dispatch to ask_genl_eopnotsupp_*    */
+/* which logs "command N not yet supported" once per cmd via printk          */
+/* ratelimit and returns -EOPNOTSUPP. Benefit over leaving them out of       */
+/* small_ops (and letting genl core return -EOPNOTSUPP silently) is twofold: */
+/*   1. `genl ctrl-list -f ask` enumerates all 8 ops, so userspace tooling   */
+/*      (askd, ask-cli) can introspect what this driver build claims to      */
+/*      support without trial-and-error round-trips.                         */
+/*   2. dmesg gets a one-shot breadcrumb the first time askd asks for an     */
+/*      unsupported command — the diagnostic surface a developer wants when  */
+/*      bringing up a partial build.                                         */
+/*                                                                          */
+/* Each later PR replaces the eopnotsupp doit/dumpit pointers with real      */
+/* handlers as the corresponding subsystem lands (PR7: DUMP_FLOWS /          */
+/* GET_FLOW / FLUSH_FLOWS, PR16a: DUMP_SAS / FLUSH_SAS, the policer PR:      */
+/* SET_POLICER, the muram PR: GET_MURAM).                                   */
 /* ------------------------------------------------------------------------- */
 static const struct genl_small_ops ask_genl_small_ops[] = {
 {
@@ -45,6 +66,48 @@ static const struct genl_small_ops ask_genl_small_ops[] = {
 .validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 .flags    = GENL_UNS_ADMIN_PERM,
 .doit     = ask_genl_get_info_doit,
+},
+{
+.cmd      = ASK_CMD_GET_MURAM,
+.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
+.flags    = GENL_UNS_ADMIN_PERM,
+.doit     = ask_genl_eopnotsupp_doit,
+},
+{
+.cmd      = ASK_CMD_DUMP_FLOWS,
+.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
+.flags    = GENL_UNS_ADMIN_PERM,
+.dumpit   = ask_genl_eopnotsupp_dumpit,
+},
+{
+.cmd      = ASK_CMD_GET_FLOW,
+.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
+.flags    = GENL_UNS_ADMIN_PERM,
+.doit     = ask_genl_eopnotsupp_doit,
+},
+{
+.cmd      = ASK_CMD_DUMP_SAS,
+.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
+.flags    = GENL_UNS_ADMIN_PERM,
+.dumpit   = ask_genl_eopnotsupp_dumpit,
+},
+{
+.cmd      = ASK_CMD_FLUSH_FLOWS,
+.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
+.flags    = GENL_UNS_ADMIN_PERM,
+.doit     = ask_genl_eopnotsupp_doit,
+},
+{
+.cmd      = ASK_CMD_FLUSH_SAS,
+.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
+.flags    = GENL_UNS_ADMIN_PERM,
+.doit     = ask_genl_eopnotsupp_doit,
+},
+{
+.cmd      = ASK_CMD_SET_POLICER,
+.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
+.flags    = GENL_UNS_ADMIN_PERM,
+.doit     = ask_genl_eopnotsupp_doit,
 },
 };
 
@@ -173,4 +236,35 @@ void ask_genl_unregister(void)
 {
 genl_unregister_family(&ask_genl_family);
 ask_pr_info("genl family unregistered\n");
+}
+
+/* ------------------------------------------------------------------------- */
+/* PR5 stub doit/dumpit shared by the seven not-yet-implemented commands.    */
+/*                                                                            */
+/* The ratelimit (printk_ratelimited default: 10 messages per 5s) is          */
+/* deliberately generous so a misconfigured askd hammering an unsupported    */
+/* command does not flood dmesg, but the FIRST hit is always visible. PRs    */
+/* that implement a command MUST replace its eopnotsupp doit/dumpit wiring   */
+/* with the real handler — the ratelimit hides duplicates but never the      */
+/* first occurrence.                                                          */
+/* ------------------------------------------------------------------------- */
+static int ask_genl_eopnotsupp_doit(struct sk_buff *skb,
+    struct genl_info *info)
+{
+printk_ratelimited(KERN_INFO ASK_DRV_NAME
+   ": ASK_CMD_%u not yet supported in this build\n",
+   info->genlhdr->cmd);
+return -EOPNOTSUPP;
+}
+
+static int ask_genl_eopnotsupp_dumpit(struct sk_buff *skb,
+      struct netlink_callback *cb)
+{
+u8 cmd = cb->nlh ?
+((struct genlmsghdr *)nlmsg_data(cb->nlh))->cmd : 0;
+
+printk_ratelimited(KERN_INFO ASK_DRV_NAME
+   ": ASK_CMD_%u (dump) not yet supported in this build\n",
+   cmd);
+return -EOPNOTSUPP;
 }
