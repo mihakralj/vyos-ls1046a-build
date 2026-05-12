@@ -1,0 +1,32 @@
+From d57dfbc08e0d003d9328efd145e32d110cf0a5f0 Mon Sep 17 00:00:00 2001
+From: ASK20 <ask20@local>
+Date: Tue, 12 May 2026 18:08:47 +0000
+Subject: [PATCH] ASK 2.0 placeholder: dpaa_eth flow_block stub
+
+---
+ drivers/net/ethernet/freescale/dpaa/dpaa_eth.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 3edc8d142..46beb7a27 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -376,6 +376,15 @@ static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
+ 	u8 num_tc;
+ 	int i;
+ 
++	/* ASK 2.0 placeholder — flow_block_cb hand-off to ask.ko.
++	 * This is a stub. The real implementation lands in PR11 (M2.2).
++	 * See specs/ask-2.0-rewrite-spec.md §10.2.
++	 */
++	if (type == TC_SETUP_BLOCK) {
++		netdev_dbg(net_dev, "ASK 2.0: TC_SETUP_BLOCK stub (PR2 placeholder)\n");
++		return -EOPNOTSUPP;
++	}
++
+ 	if (type != TC_SETUP_QDISC_MQPRIO)
+ 		return -EOPNOTSUPP;
+ 
+-- 
+2.39.5
+

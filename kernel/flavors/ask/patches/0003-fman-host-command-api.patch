@@ -1,0 +1,80 @@
+From bbc687c4944ff3d0c79bf952469b4a42efbac865 Mon Sep 17 00:00:00 2001
+From: ASK20 <ask20@local>
+Date: Tue, 12 May 2026 18:08:47 +0000
+Subject: [PATCH] ASK 2.0 placeholder: fman_host_cmd_send stub + header
+
+---
+ drivers/net/ethernet/freescale/fman/fman.c | 22 ++++++++++++++++
+ include/linux/fsl/fman_host_cmd.h          | 30 ++++++++++++++++++++++
+ 2 files changed, 52 insertions(+)
+ create mode 100644 include/linux/fsl/fman_host_cmd.h
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman.c b/drivers/net/ethernet/freescale/fman/fman.c
+index 11887458f..4b94cc947 100644
+--- a/drivers/net/ethernet/freescale/fman/fman.c
++++ b/drivers/net/ethernet/freescale/fman/fman.c
+@@ -2911,3 +2911,25 @@ module_exit(fman_unload);
+ 
+ MODULE_LICENSE("Dual BSD/GPL");
+ MODULE_DESCRIPTION("Freescale DPAA Frame Manager driver");
++
++/* ------------------------------------------------------------------ */
++/* ASK 2.0 placeholder — FMan host-command transport.                 */
++/* This is a stub. The real implementation lands in PR12 (M2.3).      */
++/* See specs/ask-2.0-rewrite-spec.md §10.3.                           */
++/* ------------------------------------------------------------------ */
++#warning "ASK 2.0: fman_host_cmd_send is a stub (PR2 placeholder)"
++
++#include <linux/fsl/fman_host_cmd.h>
++
++int fman_host_cmd_send(struct fman *fman,
++       const void *cmd_buf, size_t cmd_len,
++       void *resp_buf, size_t *resp_len)
++{
++(void)fman;
++(void)cmd_buf;
++(void)cmd_len;
++(void)resp_buf;
++(void)resp_len;
++return -EOPNOTSUPP;
++}
++EXPORT_SYMBOL_GPL(fman_host_cmd_send);
+diff --git a/include/linux/fsl/fman_host_cmd.h b/include/linux/fsl/fman_host_cmd.h
+new file mode 100644
+index 000000000..88a842546
+--- /dev/null
++++ b/include/linux/fsl/fman_host_cmd.h
+@@ -0,0 +1,30 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * ASK 2.0 placeholder — FMan host-command transport API.
++ * This is a stub. The real implementation lands in PR12 (M2.3).
++ * See specs/ask-2.0-rewrite-spec.md §10.3.
++ */
++#ifndef __LINUX_FSL_FMAN_HOST_CMD_H
++#define __LINUX_FSL_FMAN_HOST_CMD_H
++
++#include <linux/types.h>
++
++struct fman;
++
++/**
++ * fman_host_cmd_send - synchronous host-command transport over FMan IRQ + MURAM
++ * @fman: target FMan instance (from fman_bind())
++ * @cmd_buf: opcode + payload, big-endian wire bytes
++ * @cmd_len: length of @cmd_buf in bytes
++ * @resp_buf: caller-provided response buffer
++ * @resp_len: in: capacity of @resp_buf; out: bytes written
++ *
++ * Return: 0 on success, negative errno on failure.
++ *
++ * PR2 placeholder: always returns -EOPNOTSUPP.
++ */
++int fman_host_cmd_send(struct fman *fman,
++       const void *cmd_buf, size_t cmd_len,
++       void *resp_buf, size_t *resp_len);
++
++#endif /* __LINUX_FSL_FMAN_HOST_CMD_H */
+-- 
+2.39.5
+
