@@ -28,6 +28,23 @@ nxp-fmlib/
 nxp-fmc/
 libcli/
 !patches/libcli/
+
+# Python bytecode caches
+__pycache__/
+*.pyc
+
+# Kernel out-of-tree module build artifacts
+*.o
+*.o.d
+*.o.cmd
+*.ko
+*.ko.cmd
+*.mod
+*.mod.c
+*.mod.cmd
+.*.cmd
+modules.order
+Module.symvers
 artifacts/
 work/
 !data/ask-userspace/libcli/
