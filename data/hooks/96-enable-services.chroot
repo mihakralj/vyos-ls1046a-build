@@ -194,27 +194,39 @@ ExecStartPre=
 # Empty ExecStart= resets the list inherited from upstream, then we
 # re-add a single agetty invocation with the LS1046A-specific flags.
 ExecStart=
-# "First prompt swallows my keystrokes" race fix:
-#   Originally we tried agetty --wait-cr to force tcsetattr() BEFORE
-#   the banner write — that works, but produces a silent prompt that
-#   makes users think the box is frozen (no banner until they hit CR).
-#   Better approach: keep the banner eager, but defer agetty start by
-#   ~1 s via ExecStartPre. That lets the late-boot kernel printk burst
-#   (e.g. "vyos-config[…]: Configuration success" lines around
-#   T+78..98 s) drain past /dev/ttyS0 before agetty opens the line,
-#   so the open + tcsetattr + banner sequence is not racing printk
-#   traffic for the line discipline. First keystroke on the banner'd
-#   prompt is then always cooked.
-ExecStartPre=/bin/sleep 1
+# Plain agetty invocation. Two earlier "fixes" were both wrong:
+#
+#   --wait-cr (1095e14): cured the keystroke race but produced a
+#       silent prompt — operators saw no banner and thought the box
+#       was frozen, so we reverted it.
+#
+#   ExecStartPre=/bin/sleep 1 (95ca16b): even worse — combined with
+#       Restart=on-abnormal it produced ZERO working prompts. Why:
+#       the "second prompt worked" behaviour in the original buggy
+#       build was the SAVING GRACE. Restart=always was respawning
+#       agetty after each printk-induced clean exit, and the 2nd
+#       (or 3rd, or 4th) instance was the one that won the race
+#       and gave a working login. With Restart=on-abnormal, the
+#       first clean exit kills the getty permanently. With both
+#       Restart=on-abnormal AND a 1 s pre-sleep, the very first
+#       instance is still racing printk AND there's no respawn to
+#       save the operator. We reverted both.
+#
+# Current strategy: let agetty respawn freely (Restart=always) with
+# a short RestartSec so the line self-heals after each printk-induced
+# clean exit. The cascade is bounded by StartLimit* (set in [Unit]
+# above to 0/0 — unbounded — because on a serial-console-only box,
+# permanent start-limit-hit is unrecoverable without a power cycle).
+# In practice the printk burst drains in 1–2 s and the next respawn
+# gives a stable prompt; the operator sees a couple of duplicate
+# banners and then a working one. That's ugly but it's the only
+# regime in which the console is guaranteed reachable.
 ExecStart=-/sbin/agetty -L --keep-baud --noclear -o '-p -- \\u' 115200 %I $TERM
 TTYPath=/dev/ttyS0
 TTYVHangup=no
 SendSIGHUP=no
-# See note (4) above: clean/failure exits must NOT trigger respawn or
-# the boot-time printk race and the post-failed-login path cascade
-# stacked banners on the console.
-Restart=on-abnormal
-RestartSec=5s
+Restart=always
+RestartSec=1s
 StandardOutput=tty
 StandardError=journal
 EOF
