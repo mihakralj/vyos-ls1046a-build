@@ -120,6 +120,7 @@ fi
   --custom-package conntrack \
   --custom-package strace \
   --custom-package lsof \
+  --custom-package psmisc \
   --custom-package tmux \
   --custom-package jq \
   --custom-package sysstat \
