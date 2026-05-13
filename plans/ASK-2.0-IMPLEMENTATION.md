@@ -34,7 +34,7 @@ document to track.
 | 7   | M1.3 — `ask_flow.c` rhashtable + RCU             | ask20  | agent | landed |
 | 8   | M1.4 — `ask_flow_offload.c` flow_block_cb        | ask20  | agent | landed |
 | 9   | M1.5 — kunit coverage ≥ 80% on M1 surface        | ask20  | agent | landed |
-| 10  | M2.1 — `0001-caam-qi-share.patch` (real code)    | ask20  | agent | not started |
+| 10  | M2.1 — `0001-caam-qi-share.patch` (real code)    | ask20  | agent | landed |
 | 11  | M2.2 — `0002-dpaa-eth-flow-block.patch` (real)   | ask20  | agent | not started |
 | 12  | M2.3 — `0003-fman-host-command-api.patch` (real) | ask20  | agent | not started |
 | 13  | M2.4 — `OP_GET_UCODE_VERSION` against silicon    | ask20  | agent | not started |
