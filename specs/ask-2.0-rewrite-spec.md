@@ -713,35 +713,89 @@ Modern Linux tooling (`ynl` from kernel/tools/net/ynl) generates per-family Pyth
 
 The mainline `caam_qi.ko` already does crypto descriptor construction for all AEAD algorithms we care about. The single missing piece is: descriptors are created assuming kernel-crypto-API callers will use them. For ASK we need FMan to dequeue from CAAM's RX queue without going through kernel crypto API.
 
-### 8.1 The patch `0001-caam-qi-share-descriptors.patch`
+### 8.1 The patch `0001-caam-qi-share.patch`
 
-~150 lines against `drivers/crypto/caam/qi.c`:
+~150 lines against `drivers/crypto/caam/qi.c`, plus a new
+upstream-ready header at `include/linux/crypto/caam_qi_share.h`:
 
 ```c
+/* SPDX-License-Identifier: GPL-2.0 */
+/* include/linux/crypto/caam_qi_share.h
+ *
+ * CAAM/QI external descriptor sharing — for in-kernel consumers that
+ * need to share a CAAM AEAD descriptor with a non-crypto-API dequeuer
+ * (e.g. FMan 210 ucode on the ASK fast path).
+ *
+ * See specs/ask-2.0-rewrite-spec.md §8.1.
+ */
+#ifndef _LINUX_CRYPTO_CAAM_QI_SHARE_H
+#define _LINUX_CRYPTO_CAAM_QI_SHARE_H
+
+#include <linux/types.h>
+
+struct caam_drv_ctx;
+
 /**
- * caam_qi_ext_consumer_register - share an AEAD descriptor with external dequeue
- * @ctx: descriptor context created via caam_qi_aead_setkey
- * @consumer_name: diagnostic string for /proc/crypto and tracepoints
- * @out_rx_fqid: where decrypted frames should be enqueued (caller sets)
- * @out_tx_fqid: where encrypted frames are dequeued (this function returns)
+ * caam_qi_ext_consumer_register - share a CAAM/QI descriptor's request FQ
+ *                                  with an external dequeuer (e.g. FMan 210
+ *                                  ucode driving an offline port).
+ * @ctx:           descriptor context previously created via
+ *                 caam_drv_ctx_init() (typically by caamalg_qi.c on behalf
+ *                 of an xfrm SA install).
+ * @consumer_name: diagnostic string for /proc/crypto and tracepoints,
+ *                 e.g. "ask:fman0:op1:spi-0x12345678".
+ * @sink_fqid:     FQID that CAAM should enqueue completed frames to.
+ *                 Caller-owned (typically a 210-managed FMan offline-port
+ *                 RX FQ). REPLACES the response path that
+ *                 caam_qi_enqueue() callbacks would have used; while an
+ *                 external consumer is registered, in-kernel crypto-API
+ *                 callers of this @ctx will not receive completions via
+ *                 the normal callback.
+ * @caam_req_fqid: [out] FQID of the CAAM request queue that the external
+ *                 producer (e.g. FMan 210 ucode) must enqueue encrypted
+ *                 ESP frames to. This is @ctx->req_fq->fqid exposed
+ *                 read-only to the caller.
  *
- * After registration, the caller (e.g. ask.ko) is responsible for ensuring
- * that frames sent to *out_tx_fqid are valid ESP frames matching the SA,
- * and for handling frames received on *out_rx_fqid.
+ * Single-consumer: returns -EBUSY if @ctx already has an external
+ * consumer registered.
+ * Refcount: increments @ctx->refcnt on success. The caller must invoke
+ * caam_qi_ext_consumer_release() to balance it.
  *
- * Return: 0 on success, negative errno on failure.
+ * Return: 0 on success, -EINVAL on bad arguments, -EBUSY if an external
+ * consumer is already registered, -ENOMEM on allocation failure.
  */
 int caam_qi_ext_consumer_register(struct caam_drv_ctx *ctx,
-                                   const char *consumer_name,
-                                   u32 *out_rx_fqid,
-                                   u32 in_tx_fqid);
-EXPORT_SYMBOL_GPL(caam_qi_ext_consumer_register);
+                                  const char *consumer_name,
+                                  u32 sink_fqid,
+                                  u32 *caam_req_fqid);
 
+/**
+ * caam_qi_ext_consumer_release - undo caam_qi_ext_consumer_register().
+ * @ctx: descriptor context that was previously registered.
+ *
+ * Restores the default response path so subsequent caam_qi_enqueue()
+ * calls on @ctx are dispatched to the normal callback again.
+ * Idempotent: a no-op if no external consumer is currently registered
+ * on @ctx. RCU-safe: in-flight responses already on the sink FQ are
+ * not retroactively redirected.
+ * Decrements @ctx->refcnt.
+ */
 void caam_qi_ext_consumer_release(struct caam_drv_ctx *ctx);
-EXPORT_SYMBOL_GPL(caam_qi_ext_consumer_release);
+
+#endif /* _LINUX_CRYPTO_CAAM_QI_SHARE_H */
 ```
 
-Patch is upstream-ready. Submit alongside ASK 2.0 v1.0 release. Precedent: mlx5 does similar descriptor sharing between RDMA and Ethernet paths.
+The implementation in `drivers/crypto/caam/qi.c` adds two
+EXPORT_SYMBOL_GPL functions plus a small per-`caam_drv_ctx` extension
+(an `ext_consumer` pointer guarded by RCU; the dispatcher in
+`caam_qi_poll_resp_fq()` / the QMan response callback consults it and
+diverts to `sink_fqid` via `qman_enqueue()` when set, otherwise runs
+the normal callback path). Net diff in `qi.c`: ~150 LOC.
+
+Patch is upstream-ready. Submit alongside ASK 2.0 v1.0 release.
+Precedent: mlx5 does similar descriptor sharing between RDMA and
+Ethernet paths via `mlx5_core_modify_qp_state()` + RDMA-CM device
+ownership transfer.
 
 ### 8.2 Why not reimplement CAAM descriptors
 
