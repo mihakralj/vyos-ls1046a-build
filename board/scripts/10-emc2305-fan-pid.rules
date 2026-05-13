@@ -22,9 +22,31 @@
 #
 # Match scope:
 #   - SUBSYSTEM=="i2c"          : i2c device events only
-#   - ACTION=="bind"            : driver→device bind moment (NOT just "add",
-#                                 which fires before the driver binds and
-#                                 would race the same way as the unit did)
+#   - ACTION=="add|bind"        : we match BOTH actions because:
+#                                   * `bind` covers hot-plug unbind/rebind
+#                                     cycles (driver→device bind moment).
+#                                   * `add` covers cold boot. The kernel
+#                                     binds built-in drivers (emc2305 is
+#                                     CONFIG_SENSORS_EMC2305=y here) BEFORE
+#                                     systemd-udevd starts. systemd-udevd's
+#                                     coldplug pass synthesises `add` events
+#                                     for every existing sysfs device but
+#                                     does NOT synthesise `bind` events, so
+#                                     a `bind`-only rule is silently skipped
+#                                     at every cold boot — confirmed on
+#                                     2026.05.12-0558-rolling: `udevadm info
+#                                     /sys/bus/i2c/devices/7-002e` showed
+#                                     no TAGS=, no SYSTEMD_WANTS=, while
+#                                     `udevadm test --action=bind` matched
+#                                     the rule fine. By the time the
+#                                     synthesised `add` runs the built-in
+#                                     emc2305 driver is already bound, so
+#                                     `DRIVER=="emc2305"` still matches in
+#                                     the `add` path. The unit's
+#                                     `Conflicts=fancontrol.service` plus
+#                                     the daemon's idempotent PWM-register
+#                                     takeover make a duplicate start from
+#                                     both paths harmless.
 #   - DRIVER=="emc2305"         : the kernel's EMC2305 PWM fan controller
 #                                 driver; matches only the device the daemon
 #                                 actually controls
@@ -32,5 +54,5 @@
 # We do NOT match on KERNEL=="7-002e" so this rule survives any future
 # board revision that moves the chip to a different i2c bus or address.
 # The driver name is the stable invariant.
-ACTION=="bind", SUBSYSTEM=="i2c", DRIVER=="emc2305", \
+ACTION=="add|bind", SUBSYSTEM=="i2c", DRIVER=="emc2305", \
     TAG+="systemd", ENV{SYSTEMD_WANTS}="fan-pid.service"
