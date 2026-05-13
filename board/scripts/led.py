@@ -13,11 +13,11 @@
 #   leading '#' on hex tokens is accepted and ignored.
 #   simulate [tick_s]            -> network-saturation demo: jump to a uniformly
 #                                   random palette index every tick_s seconds
-#                                   (default 0.5). Ctrl-C to stop. Restores
+#                                   (default 0.1). Ctrl-C to stop. Restores
 #                                   'off' on exit.
 #   steps [tick_s]               -> walk palette 0→1→…→31→30→…→0→1→… on a
 #                                   triangle wave, one step per tick_s seconds
-#                                   (default 0.5). Ctrl-C to stop. Restores
+#                                   (default 0.1). Ctrl-C to stop. Restores
 #                                   'off' on exit.
 #
 # All transitions fade from the current LED state to the target over
@@ -60,8 +60,8 @@ CHANNELS = ("red", "green", "blue", "white")   # canonical R G B W
 
 # Total fade duration, in milliseconds, applied to every colour change.
 # Linear interpolation in raw PWM space at FADE_FPS Hz.
-FADE_MS = 100
-FADE_FPS = 50          # -> 20 ms/frame, 5 frames per default fade
+FADE_MS = 50
+FADE_FPS = 100         # -> 10 ms/frame, 5 frames per default fade
 MIN_FRAME_MS = 5       # hard floor on per-frame sleep (200 Hz cap on writes)
 
 # Baked-in 32-entry traffic-saturation palette. Indices are stable —
@@ -112,7 +112,7 @@ assert all(re.fullmatch(r"[0-9a-fA-F]{8}", c) for c in PALETTE), \
 # `led simulate [tick_s]` jumps to a uniformly random palette index
 # every `tick_s` seconds. Each tick is independent (no random walk,
 # no memory). Defaults tuned for a comfortable demo cadence.
-SIM_TICK_S = 0.5    # seconds between palette jumps
+SIM_TICK_S = 0.1    # seconds between palette jumps / triangle-wave steps
 
 
 # ---- low-level sysfs -----------------------------------------------------
