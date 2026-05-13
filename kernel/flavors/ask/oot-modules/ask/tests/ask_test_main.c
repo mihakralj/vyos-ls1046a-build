@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * ASK 2.0 - kunit suite registration (PR4 / M0.4)
+ * ASK2 - kunit suite registration (PR4 / M0.4)
  *
  * The harness module ask_kunit.ko is built only when
  * CONFIG_NET_ASK_KUNIT_TEST is enabled. Loading it registers every
@@ -38,6 +38,6 @@ extern struct kunit_suite ask_genl_suite;
 kunit_test_suites(&ask_dummy_suite, &ask_hostcmd_suite, &ask_flow_suite,
   &ask_flow_offload_suite, &ask_genl_suite);
 
-MODULE_AUTHOR("ASK 2.0 contributors");
-MODULE_DESCRIPTION("ASK 2.0 kunit test harness");
+MODULE_AUTHOR("ASK2 contributors");
+MODULE_DESCRIPTION("ASK2 kunit test harness");
 MODULE_LICENSE("GPL v2");

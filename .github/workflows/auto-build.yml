@@ -66,9 +66,9 @@ jobs:
       # FLAVOR drives FLAVOR-aware bin/ci-*.sh scripts via bin/common.sh.
       # Empty string lets bin/common.sh fall back to data/flavor.pin or "default".
       # All flavors (default/ask/vpp) currently route through ci-stage-kernel.sh
-      # → kernel/common/scripts/stage-kernel.sh. ASK 2.0 (per
-      # specs/ask-2.0-rewrite-spec.md) is scaffold-only; FLAVOR=ask builds a
-      # vanilla VyOS image until ASK 2.0 components land.
+      # → kernel/common/scripts/stage-kernel.sh. ASK2 (per
+      # specs/ask2-rewrite-spec.md) is scaffold-only; FLAVOR=ask builds a
+      # vanilla VyOS image until ASK2 components land.
       FLAVOR: ${{ inputs.flavor || github.event.inputs.flavor || '' }}
     # No `container:` — build runs natively on the self-hosted ARM64 runner.
     # The runner host (Debian 12 bookworm aarch64) provides all build deps
@@ -203,11 +203,11 @@ jobs:
       - name: Setup kernel config and patches
         run: bin/ci-setup-kernel.sh
 
-      # ASK 2.0 (rewrite-in-progress): the legacy ASK 1.x build steps
+      # ASK2 (rewrite-in-progress): the legacy ASK 1.x build steps
       # (Consume prebuilt ASK kernel, Setup ASK fast-path kernel) were
-      # removed on the ask20 branch. Until ASK 2.0 components land
+      # removed on the ask20 branch. Until ASK2 components land
       # (ask.ko, ask_bridge.ko, askd, ask-load, libask_fci) per
-      # specs/ask-2.0-rewrite-spec.md, FLAVOR=ask builds produce a
+      # specs/ask2-rewrite-spec.md, FLAVOR=ask builds produce a
       # vanilla VyOS image with no ASK userspace and no SDK kernel.
 
       - name: Compile Mono DTB from DTS (always rebuild from source)

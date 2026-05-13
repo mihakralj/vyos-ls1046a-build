@@ -10,9 +10,9 @@
 # Routing:
 #   FLAVOR=default | vpp | ask  → stage from kernel/common + kernel/flavors/$FLAVOR
 #
-# ASK 2.0 (rewrite-in-progress): the legacy `ask` branch that delegated
+# ASK2 (rewrite-in-progress): the legacy `ask` branch that delegated
 # to ci-consume-ask-kernel.sh was removed on the ask20 branch. Until ASK
-# 2.0 lands per specs/ask-2.0-rewrite-spec.md, FLAVOR=ask is staged the
+# 2.0 lands per specs/ask2-rewrite-spec.md, FLAVOR=ask is staged the
 # same way as default/vpp (vanilla kernel, no SDK, no ASK fast-path).
 #
 # Called by: .github/workflows/auto-build.yml "Stage kernel tree" step.

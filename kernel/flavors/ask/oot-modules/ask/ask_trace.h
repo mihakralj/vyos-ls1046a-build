@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * ASK 2.0 - tracepoints
+ * ASK2 - tracepoints
  *
  * Module-private trace events. We intentionally do NOT use the
  * TRACE_EVENT()/CREATE_TRACE_POINTS machinery from <trace/define_trace.h>

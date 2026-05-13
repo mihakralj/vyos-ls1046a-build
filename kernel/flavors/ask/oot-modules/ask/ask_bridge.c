@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * ASK 2.0 - bridge subsystem (PR1 stub)
+ * ASK2 - bridge subsystem (PR1 stub)
  *
  * Lifecycle hook only. Real implementation lands in a later PR per
- * plans/ASK-2.0-IMPLEMENTATION.md.
+ * plans/ASK2-IMPLEMENTATION.md.
  */
 
 #include <linux/kernel.h>

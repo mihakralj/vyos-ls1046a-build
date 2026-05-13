@@ -1,8 +1,8 @@
 # ASK2 implementation plan — PR breakdown
 
 **Status:** active. Drives the implementation of ASK2 per
-[`specs/ask2-rewrite-spec.md`](../specs/ask2-rewrite-spec.md) (v0.7,
-2026-05-12). All PRs target the `ask20` branch unless noted otherwise.
+[`specs/ask2-rewrite-spec.md`](../specs/ask2-rewrite-spec.md) (v0.8,
+2026-05-13). All PRs target the `ask20` branch unless noted otherwise.
 
 This document is the working implementation plan; the spec is the
 architecture source-of-truth. When the two disagree, **the spec wins**
@@ -37,7 +37,7 @@ architecture source-of-truth. When the two disagree, **the spec wins**
 | 10  | M2.1 — `0001-caam-qi-share.patch` (real code)    | ask20  | landed |
 | 11  | M2.2 — `0002-dpaa-eth-flow-block.patch` (real)   | ask20  | landed |
 | 12  | M2.3 — `0003-fman-host-command-api.patch` (real) | ask20  | landed |
-| 13  | M2.4 — `OP_GET_UCODE_VERSION` against silicon    | ask20  | not started |
+| 13  | M2.4 — ucode version from QEF blob (DT) + spec §12.8 | ask20  | landed |
 | 14  | M2.5 — `OP_FLOW_INSERT_V4_TCP` end-to-end        | ask20  | not started |
 | 15  | M3.x — remaining flow types (NAT/PAT/v6/bridge)  | ask20  | not started |
 | 16  | M4.x — `ask_xfrm.c` + CAAM packet-mode IPsec     | ask20  | not started |
@@ -585,30 +585,102 @@ offset and IRQ wiring (which are explicitly listed in spec §12.7 as
 "must be probed" against live silicon). PR13 is therefore the first PR
 in the M2 sequence that genuinely requires `ssh vyos reboot`.
 
-### PR13 — `OP_GET_UCODE_VERSION` against silicon
+### PR13 — ucode version from QEF blob (DT) + spec §12.8 — **landed**
 
-First real hardware test. Replace the hard-coded zeros in
-`ASK_INFO_ATTR_UCODE_*` with a call to `ask_hw_ucode_get_version()`,
-which uses `fman_host_cmd_send()` with opcode `0x01` per spec §12.2.
-Verify the response matches family `0x0210` against the live Mono
-Gateway DK.
+First real hardware-validated read against the live Mono Gateway DK.
+Original framing (call `fman_host_cmd_send()` with opcode `0x01` per
+spec §12.2 and verify the family-`0x0210` response) was abandoned mid-PR
+when the hardware probe proved the §12 host-command opcode dispatcher
+does not exist on the loaded microcode. Replacement implementation
+reads the ucode version directly from the QEF firmware blob exposed by
+the kernel via the device-tree property
+`/soc/fman@1a00000/fman-firmware/fsl,firmware` — the same blob that
+U-Boot loaded into FMan IRAM at boot from SPI flash partition `mtd3`.
 
-This PR also probes the spec §12.7 unknowns:
-- exact MURAM partition behaviour
-- event channel binding (IRQ number)
-- eviction policy tunables (scan opcode space 0x90-0x9F)
+**Files added/changed:**
+- `kernel/flavors/ask/oot-modules/ask/ask_hw.c` (new, ~250 LOC) —
+  `ask_hw_init()`/`ask_hw_exit()` plus `ask_hw_ucode_get_version()`
+  helper. Walks DT for `compatible = "fsl,fman-firmware"`, reads the
+  `fsl,firmware` property, validates the `'Q' 'E' 'F' 0x01` magic at
+  offset 4, sscanf-parses `family.major.minor` from the 64-byte ASCII
+  description at offset 8 (`"Microcode version 210.10.1 for LS1043 r1.0"`).
+  Caches via `READ_ONCE`/`WRITE_ONCE`. Logs single dmesg breadcrumb
+  `ask: hw: FMan microcode 210.10.1 ("Microcode version …")` on success.
+- `kernel/flavors/ask/oot-modules/ask/include/ask_internal.h` —
+  `struct ask_hw_ucode_version { u16 family; u8 major; u8 minor;
+   u16 patch; char description[64]; }` + three function decls.
+- `kernel/flavors/ask/oot-modules/ask/Kbuild` — adds `ask_hw.o`.
+- `kernel/flavors/ask/oot-modules/ask/ask_main.c` — wires
+  `ask_hw_init` as the first subsystem and `ask_hw_exit` as the last
+  in the unwind chain (zero deps on other subsystems; non-DPAA hosts
+  fail-fast with a single dmesg line, and a missing/malformed blob is
+  non-fatal — module still loads with version 0.0.0).
+- `kernel/flavors/ask/oot-modules/ask/ask_genl.c` —
+  `ASK_INFO_ATTR_UCODE_FAMILY/MAJOR/MINOR/PATCH` are now sourced from
+  `ask_hw_ucode_get_version()` instead of hard-coded zeros.
 
-Findings get written back into the spec — this is the only PR that
-expects the spec to be updated based on real hardware behaviour.
+**Hardware-probe findings written back to spec §12.8** (full prose
+there). Headlines:
 
-### PR14 — `OP_FLOW_INSERT_V4_TCP` end-to-end
+1. The loaded microcode is stock NXP **QorIQ Engine Firmware QEF
+   210.10.1**, the same blob that mainline `drivers/net/ethernet/freescale/fman/fman.c`
+   was designed to drive. It implements parser + classifier + policer +
+   KeyGen entirely via MURAM-resident config tables.
+2. The §12 host-command opcode dispatcher (CEV doorbell + REV IRQ at
+   FPM+0xE0/+0x20/+0x40) **does not exist** on stock QEF microcode.
+   The §12.2 opcode map (`OP_GET_UCODE_VERSION=0x01`,
+   `OP_FLOW_INSERT_V4_TCP=0x10`, …) was specific to a custom
+   NXP/proprietary microcode that shipped with the legacy `we-are-mono/ASK`
+   stack — not to QEF.
+3. PR12's `0003-fman-host-command-api.patch` is correct as-landed and
+   stays. `fmd_host_cmd_send()` correctly returns `-ENXIO` because the
+   doorbell is genuinely unanswered for the running microcode. Patch
+   is preserved as future infrastructure for a hypothetical custom
+   ASK2 microcode.
+4. §12.7 question 2 (event-channel binding) is partially answered:
+   SPI 44 (Linux IRQ 59) is the FMan event IRQ on LS1046A, SPI 45 is
+   the FMan err IRQ. Questions 1 (MURAM partition behaviour) and 3
+   (eviction tunables) are moot — there are no opcodes to scan.
 
-Implement `ask_hw_flow_insert_v4_tcp()` (real implementation, calling
-`fman_host_cmd_send()` with opcode `0x10` per spec §12.5). Wire it into
-`ask_flow_insert()` so a real nft flow add results in a real opcode 0x10
-on the wire. Verify with iperf.
+**Verification on live Mono Gateway DK (kernel 6.18.28):**
+- `ask.ko` insmods cleanly.
+- `dmesg | grep '^ask: hw'` shows the version banner with the QEF
+  description string.
+- `ASK_INFO` genl reply carries `family=210, major=10, minor=1,
+  patch=0` byte-for-byte matching the DT blob.
 
-**M2 acceptance gate runs here.**
+**Mechanism switch — binding decision for ASK2 v1.0.** Per spec §12.8,
+the §12.1–§12.6 host-command protocol is **deferred indefinitely**.
+PR14+ is re-scoped accordingly: the consumer of `ask_hostcmd.c`
+becomes the in-tree FMan PCD table-programming pathway
+(`drivers/net/ethernet/freescale/fman/fman_keygen.c` and siblings),
+not opcode-dispatch insertion. PR14's heading below is preserved for
+historical context but the implementation strategy underneath it has
+changed.
+
+### PR14 — first PCD-driven flow insertion (re-scoped from `OP_FLOW_INSERT_V4_TCP`)
+
+**Re-scope per spec §12.8 (PR13 finding).** Original framing ("call
+`fman_host_cmd_send()` with opcode `0x10` per spec §12.5") is
+deferred indefinitely — the host-command opcode dispatcher does not
+exist on the loaded QEF microcode. Replacement: implement
+`ask_hw_flow_insert_v4_tcp()` as a thin wrapper over the in-tree
+mainline FMan PCD API. Concrete steps to be detailed in PR14 itself:
+
+- Read `drivers/net/ethernet/freescale/fman/fman_keygen.c` and
+  `fman_port.c` to understand the KeyGen scheme + classification node
+  + policer programming surface that QEF actually consumes.
+- Decide whether `ask.ko` programs PCD directly (likely requires a new
+  in-tree EXPORT_SYMBOL in `fman_keygen.c`) or whether it goes through
+  a userspace path in `askd` (libfmcllib-style — but rebuilt against
+  modern Linux, no XML).
+- Implement encoder, wire into `ask_flow.c::ask_flow_insert()` so that
+  a real `nft flow add` results in a real PCD scheme update on the
+  wire (verifiable via `cat /sys/kernel/debug/fsl_dpaa/...`).
+- Verify with iperf that the first packet is fast-path and the CPU is
+  not touched after flow insertion.
+
+**M2 acceptance gate runs here** (unchanged from original plan).
 
 ---
 
@@ -742,9 +814,10 @@ Per spec §18:
 ## Coordination
 
 - Spec updates flow back into `specs/ask2-rewrite-spec.md`. Bump
-  version number (currently v0.7); bump this document's "drives" line
+  version number (currently v0.8); bump this document's "drives" line
   in sync.
 - Hardware findings get stored in Qdrant per `.clinerules/70-qdrant-memory.md`
   with tags `ask2`, `hardware-probe`, plus the relevant PR number.
-- The spec §12.7 unknowns get answered in PR13 and the spec gets a §12.8
-  "Confirmed hardware behaviour" appendix.
+- The spec §12.7 unknowns were answered in PR13 (landed 2026-05-13)
+  and the spec received a §12.8 "Confirmed hardware behaviour" appendix
+  in v0.8.

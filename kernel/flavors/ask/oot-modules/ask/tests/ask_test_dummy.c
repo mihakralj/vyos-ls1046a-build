@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * ASK 2.0 - dummy kunit test (PR4 / M0.4)
+ * ASK2 - dummy kunit test (PR4 / M0.4)
  *
  * The sole purpose of this file is to prove the harness works:
  *   1. modprobe ask_kunit

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * ask_genl.c — generic-netlink family for ASK 2.0
+ * ask_genl.c — generic-netlink family for ASK2
  *
  * PR1 (M0.1) wired ASK_CMD_GET_INFO with a real handler.
  * PR5 (M1.1) wires the remaining 7 UAPI commands as enumerated stubs
@@ -11,7 +11,7 @@
  * wiring with the real handler when its subsystem lands (PR7: flows,
  * PR16a: SAs, plus dedicated PRs for SET_POLICER / GET_MURAM).
  *
- * See specs/ask-2.0-rewrite-spec.md §7 for the protocol design.
+ * See specs/ask2-rewrite-spec.md §7 for the protocol design.
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -191,14 +191,33 @@ goto nla_put_failure;
 if (nla_put_u32(skb, ASK_INFO_ATTR_GENL_VERSION, ASK_GENL_VERSION))
 goto nla_put_failure;
 
-if (nla_put_u16(skb, ASK_INFO_ATTR_UCODE_FAMILY, 0))
-goto nla_put_failure;
-if (nla_put_u8(skb,  ASK_INFO_ATTR_UCODE_MAJOR,  0))
-goto nla_put_failure;
-if (nla_put_u8(skb,  ASK_INFO_ATTR_UCODE_MINOR,  0))
-goto nla_put_failure;
-if (nla_put_u16(skb, ASK_INFO_ATTR_UCODE_PATCH,  0))
-goto nla_put_failure;
+/*
+ * PR13 (M2.4): populate the ucode-version fields from the live QEF
+ * blob loaded by U-Boot into FMan IRAM and republished via DT
+ * /soc/fman@<addr>/fman-firmware/fsl,firmware. ask_hw_ucode_get_version()
+ * is cheap (cached after first call) and never sleeps in the steady
+ * state, so calling it from the get-info doit hot-path is fine.
+ *
+ * If the probe fails for any reason (no FMan in DT, missing firmware
+ * property, malformed QEF blob) we fall back to all-zeros — userspace
+ * already knows zero means "no microcode info" from the PR1 contract.
+ * The first failure is logged via ask_pr_warn() in ask_hw.c, so the
+ * cause appears in dmesg without spamming on every get-info call.
+ */
+{
+        struct ask_hw_ucode_version v = {0};
+
+        (void)ask_hw_ucode_get_version(&v);
+
+        if (nla_put_u16(skb, ASK_INFO_ATTR_UCODE_FAMILY, v.family))
+                goto nla_put_failure;
+        if (nla_put_u8(skb,  ASK_INFO_ATTR_UCODE_MAJOR,  v.major))
+                goto nla_put_failure;
+        if (nla_put_u8(skb,  ASK_INFO_ATTR_UCODE_MINOR,  v.minor))
+                goto nla_put_failure;
+        if (nla_put_u16(skb, ASK_INFO_ATTR_UCODE_PATCH,  v.patch))
+                goto nla_put_failure;
+}
 
 if (nla_put_u64_64bit(skb, ASK_INFO_ATTR_CAPABILITIES, 0,
       ASK_INFO_ATTR_UNSPEC))

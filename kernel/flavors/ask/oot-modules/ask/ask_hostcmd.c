@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * ASK 2.0 - hostcmd subsystem (PR6 / M1.2)
+ * ASK2 - hostcmd subsystem (PR6 / M1.2)
  *
  * Wire-format encoders and decoders for the FMan 210 host-command
  * protocol described in spec §12.1-§12.6. Pure byte-shuffling: nothing

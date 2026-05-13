@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# ASK 2.0 - out-of-tree build wrapper
+# ASK2 - out-of-tree build wrapper
 #
 # Default target builds against the running kernel's headers. Override
 # KDIR and ARCH/CROSS_COMPILE to cross-build for the LS1046A target:
