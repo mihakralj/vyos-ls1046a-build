@@ -1,19 +1,19 @@
-# ASK 2.0 implementation plan — PR breakdown
+# ASK2 implementation plan — PR breakdown
 
-**Status:** active. Drives the implementation of ASK 2.0 per
-[`specs/ask-2.0-rewrite-spec.md`](../specs/ask-2.0-rewrite-spec.md) (v0.7,
+**Status:** active. Drives the implementation of ASK2 per
+[`specs/ask2-rewrite-spec.md`](../specs/ask2-rewrite-spec.md) (v0.7,
 2026-05-12). All PRs target the `ask20` branch unless noted otherwise.
 
-This document is the operator-facing plan; the spec is the architecture
-source-of-truth. When the two disagree, **the spec wins** — update this
-document to track.
+This document is the working implementation plan; the spec is the
+architecture source-of-truth. When the two disagree, **the spec wins**
+— update this document to track.
 
 ## Branch hygiene
 
 - `main` continues to ship the default + vpp flavors (mainline DPAA,
-  no ASK). `FLAVOR=ask` builds on `main` are vanilla VyOS until ASK 2.0
+  no ASK). `FLAVOR=ask` builds on `main` are vanilla VyOS until ASK2
   components land here.
-- `ask20` is the integration branch for ASK 2.0. **All PRs in this
+- `ask20` is the integration branch for ASK2. **All PRs in this
   document land on `ask20` first.** Periodic merges from `main` keep
   the kernel/board/CI baseline in sync.
 - After M5 acceptance gate (Section 11.1 of the spec), `ask20` is
@@ -21,31 +21,31 @@ document to track.
 
 ## Status tracker
 
-| PR  | Title                                            | Target | Owner | Status      |
-|-----|--------------------------------------------------|--------|-------|-------------|
-| —   | Spec authored, scaffold cleanup                  | ask20  | —     | landed |
-| —   | UAPI header `include/uapi/linux/ask/ask.h`       | ask20  | agent | landed |
-| 1   | M0.1 — module skeleton + Kbuild + Kconfig        | ask20  | agent | landed |
-| 2   | M0.2 — three in-tree patch stubs (placeholders)  | ask20  | agent | landed |
-| 3   | M0.3 — wire build pipeline (CI + local-build)    | ask20  | agent | landed |
-| 4   | M0.4 — kunit harness + first dummy test          | ask20  | agent | landed |
-| 5   | M1.1 — `ask_main.c` + `ask_genl.c` GET_INFO      | ask20  | agent | landed |
-| 6   | M1.2 — `ask_hostcmd.c` wire-format encoders      | ask20  | agent | landed |
-| 7   | M1.3 — `ask_flow.c` rhashtable + RCU             | ask20  | agent | landed |
-| 8   | M1.4 — `ask_flow_offload.c` flow_block_cb        | ask20  | agent | landed |
-| 9   | M1.5 — kunit coverage ≥ 80% on M1 surface        | ask20  | agent | landed |
-| 10  | M2.1 — `0001-caam-qi-share.patch` (real code)    | ask20  | agent | landed |
-| 11  | M2.2 — `0002-dpaa-eth-flow-block.patch` (real)   | ask20  | agent | landed |
-| 12  | M2.3 — `0003-fman-host-command-api.patch` (real) | ask20  | agent | not started |
-| 13  | M2.4 — `OP_GET_UCODE_VERSION` against silicon    | ask20  | agent | not started |
-| 14  | M2.5 — `OP_FLOW_INSERT_V4_TCP` end-to-end        | ask20  | agent | not started |
-| 15  | M3.x — remaining flow types (NAT/PAT/v6/bridge)  | ask20  | agent | not started |
-| 16  | M4.x — `ask_xfrm.c` + CAAM packet-mode IPsec     | ask20  | agent | not started |
-| 17  | M5.1 — `askd` (sd-event + libmnl)                | ask20  | agent | not started |
-| 18  | M5.2 — `ask-cli` (Python Varlink client)         | ask20  | agent | not started |
-| 19  | M5.3 — VyOS CLI integration                      | ask20  | agent | not started |
-| 20  | M5.4 — VyOS conf_mode + op_mode                  | ask20  | agent | not started |
-| 21  | M6.x — VPP coexistence, soak, performance gates  | ask20  | agent | not started |
+| PR  | Title                                            | Target | Status      |
+|-----|--------------------------------------------------|--------|-------------|
+| —   | Spec authored, scaffold cleanup                  | ask20  | landed |
+| —   | UAPI header `include/uapi/linux/ask/ask.h`       | ask20  | landed |
+| 1   | M0.1 — module skeleton + Kbuild + Kconfig        | ask20  | landed |
+| 2   | M0.2 — three in-tree patch stubs (placeholders)  | ask20  | landed |
+| 3   | M0.3 — wire build pipeline (CI + local-build)    | ask20  | landed |
+| 4   | M0.4 — kunit harness + first dummy test          | ask20  | landed |
+| 5   | M1.1 — `ask_main.c` + `ask_genl.c` GET_INFO      | ask20  | landed |
+| 6   | M1.2 — `ask_hostcmd.c` wire-format encoders      | ask20  | landed |
+| 7   | M1.3 — `ask_flow.c` rhashtable + RCU             | ask20  | landed |
+| 8   | M1.4 — `ask_flow_offload.c` flow_block_cb        | ask20  | landed |
+| 9   | M1.5 — kunit coverage ≥ 80% on M1 surface        | ask20  | landed |
+| 10  | M2.1 — `0001-caam-qi-share.patch` (real code)    | ask20  | landed |
+| 11  | M2.2 — `0002-dpaa-eth-flow-block.patch` (real)   | ask20  | landed |
+| 12  | M2.3 — `0003-fman-host-command-api.patch` (real) | ask20  | not started |
+| 13  | M2.4 — `OP_GET_UCODE_VERSION` against silicon    | ask20  | not started |
+| 14  | M2.5 — `OP_FLOW_INSERT_V4_TCP` end-to-end        | ask20  | not started |
+| 15  | M3.x — remaining flow types (NAT/PAT/v6/bridge)  | ask20  | not started |
+| 16  | M4.x — `ask_xfrm.c` + CAAM packet-mode IPsec     | ask20  | not started |
+| 17  | M5.1 — `askd` (sd-event + libmnl)                | ask20  | not started |
+| 18  | M5.2 — `ask-cli` (Python Varlink client)         | ask20  | not started |
+| 19  | M5.3 — VyOS CLI integration                      | ask20  | not started |
+| 20  | M5.4 — VyOS conf_mode + op_mode                  | ask20  | not started |
+| 21  | M6.x — VPP coexistence, soak, performance gates  | ask20  | not started |
 
 Status legend:
 - **not started** — no commits yet on the target branch
@@ -58,34 +58,32 @@ Status legend:
 - PRs within a milestone are **not** strictly sequential, but they share
   acceptance gates. A milestone is "done" when the gate passes.
 - Hardware-touching PRs (M2 onwards) **block on the in-tree kernel patch
-  PRs (10/11/12)**. The agent cannot land a `OP_FLOW_INSERT_V4_TCP`
+  PRs (10/11/12)**. There is no way to land an `OP_FLOW_INSERT_V4_TCP`
   exercise without `fman_host_cmd_send()` existing.
-- M0 is **fully agent-driven, no hardware needed.**
-- M1 is **agent-driven with kunit; no hardware needed.**
-- M2 onwards requires the live Mono Gateway DK — **but the agent has
-  full remote access to it** (see "Agent hardware loop" below). The
-  earlier "human-driven" classification on rows 10–14 / 15 / 16 / 21
-  was a misread of who has to be in the room with the board. Physical
-  bring-up (USB install, serial console, port-labeling) is done; from
-  here on every M2+ task is a normal edit → cross-compile → TFTP-boot
-  → SSH-test cycle the agent runs on its own.
+- **M0** needs no hardware; build pipeline + module skeleton only.
+- **M1** needs no hardware; kunit covers the surface.
+- **M2 onwards** requires the live Mono Gateway DK over the lab loop
+  documented under "Hardware loop" below. Physical bring-up (USB
+  install, serial console, port-labeling) is done; from here on every
+  M2+ task is a normal edit → cross-compile → TFTP-boot → SSH-test
+  cycle.
 
-## Agent hardware loop
+## Hardware loop
 
-The Mono Gateway DK is **continuously available** to the agent over the
-LAN, reached via Tailscale subnet routing (the `192.168.0.0/16` route
-is advertised by a node in the LAN and accepted by this VM):
+The Mono Gateway DK is **continuously available** over the LAN,
+reached via Tailscale subnet routing (the `192.168.0.0/16` route is
+advertised by a node in the LAN and accepted by this VM):
 
-- The agent runs on the **Cobalt 100 Azure ARM64 VM** (`arm64-runner`,
-  Tailscale `100.125.95.22`). This is the **same VM that runs the
-  self-hosted GitHub Actions runner** (`vm-runner-2`) for CI ISO
-  builds. It is **not** the build host for the dev-loop kernel — that
-  lives on **LXC 200** (`vyos-builder` LXC inside the `heidi` Proxmox
-  host at `192.168.1.15`, container LAN IP `192.168.1.137`), which
-  owns `/srv/tftp/` and the cross-toolchain tree under
-  `/home/vyos/kernel-ls1046a-build/work/linux-*`. The agent reaches
-  LXC 200 over SSH (`ssh lxc200`) and runs the cross-build remotely.
-  Iteration times per `plans/DEV-LOOP.md`: incremental kernel
+- The dev-loop **build host** is **LXC 200** (`vyos-builder` LXC inside
+  the `heidi` Proxmox host at `192.168.1.15`, container LAN IP
+  `192.168.1.137`), which owns `/srv/tftp/` and the cross-toolchain
+  tree under `/home/vyos/kernel-ls1046a-build/work/linux-*`. Reach it
+  over SSH (`ssh lxc200`) and run the cross-build remotely.
+- The **CI host** is the **Cobalt 100 Azure ARM64 VM** (`arm64-runner`,
+  Tailscale `100.125.95.22`), which runs the self-hosted GitHub Actions
+  runner (`vm-runner-2`) for ISO builds. It is **not** used for the
+  dev-loop kernel build.
+- Iteration times per `plans/DEV-LOOP.md`: incremental kernel
   cross-build ≈2 min, full ≈8 min, DTB only ≈30 s.
 - All hosts are reachable over SSH via the `ssh` MCP server with
   six pre-configured connections:
@@ -96,11 +94,11 @@ is advertised by a node in the LAN and accepted by this VM):
   - `vyos-eth1` (192.168.1.185) — middle RJ45
   - `vyos-eth2` (192.168.1.189) — leftmost RJ45
   - `vyos-eth4` (192.168.1.192) — right SFP+
-  These are wired into `/home/vyos/.config/ssh-mcp-config.json`; any
-  agent session can `ssh_execute_command`, `ssh_upload_file`,
-  `ssh_download_file` against them without setup. The `vyos*` and
-  `lxc200` entries authenticate via `~/.ssh/vyos_vanity` and
-  `~/.ssh/admin_key` respectively.
+  These are wired into `/home/vyos/.config/ssh-mcp-config.json` and
+  available to any session as `ssh_execute_command`, `ssh_upload_file`,
+  `ssh_download_file` without further setup. The `vyos*` and `lxc200`
+  entries authenticate via `~/.ssh/vyos_vanity` and `~/.ssh/admin_key`
+  respectively.
 - Target state (verified 2026-05-12): `Linux vyos 6.18.28-vyos
   aarch64`, VyOS `2026.05.11-0542-rolling`, board DT compatible
   `mono,gateway-dk fsl,ls1046a`. CAAM up with three job rings
@@ -110,12 +108,12 @@ is advertised by a node in the LAN and accepted by this VM):
 - Boot-image cycle is **`ssh vyos reboot` → U-Boot → TFTP `run dev_boot`**
   (which is wired into the SPI env to fetch vmlinuz/DTB/initrd from
   `192.168.1.137:/srv/tftp/` on LXC 200). One reboot ≈30–45 s wall-clock
-  from `ssh reboot` to login prompt on the new kernel; the SSH MCP
-  connection drops mid-cycle and the agent re-establishes it after a
-  short sleep. **`kexec` is NOT a routine iteration path on this
-  target.** Verified 2026-05-12: (a) the `kexec` userspace binary is
-  not in the VyOS ISO (`which kexec` empty, vbash returns "Invalid
-  command"), (b) the kernel was built with `CONFIG_KEXEC_SIG=y` +
+  from `ssh reboot` to login prompt on the new kernel; the SSH
+  connection drops mid-cycle and is re-established after a short sleep.
+  **`kexec` is NOT a routine iteration path on this target.** Verified
+  2026-05-12: (a) the `kexec` userspace binary is not in the VyOS ISO
+  (`which kexec` empty, vbash returns "Invalid command"), (b) the
+  kernel was built with `CONFIG_KEXEC_SIG=y` +
   `CONFIG_KEXEC_IMAGE_VERIFY_SIG=y` + `CONFIG_ARCH_DEFAULT_KEXEC_IMAGE_VERIFY_SIG=y`
   so even with `kexec-tools` installed, `kexec_file_load(2)` would
   reject the unsigned dev-loop vmlinuz from TFTP, and (c) the legacy
@@ -125,29 +123,28 @@ is advertised by a node in the LAN and accepted by this VM):
   console is only needed for U-Boot env edits or recovery from a hard
   crash, both of which are infrequent.
 
-What the agent **still cannot do**:
+What the lab loop **does not cover**:
 
-- Re-flash U-Boot itself in SPI (`mtd0`) — risky, would need serial
-  recovery if it bricks. Out of scope for ASK 2.0.
-- Re-label physical ports / move SFP modules. Not needed; the existing
-  labelling (eth0 mgmt, eth1/2 RJ45, eth3/4 SFP+) is fine.
-- Run with extra physical traffic generators (Spirent/Keysight). M6
-  performance soak still wants those for line-rate measurements at the
-  Geerling 1 Mpps target, but **agent-driven iperf3 between
-  vyos-eth{1,2,4} and an LXC peer covers everything up to ~3 Gbps**
-  which is the M2/M3 verification threshold per spec §11.1.
+- Re-flashing U-Boot itself in SPI (`mtd0`) — risky, would need serial
+  recovery if it bricks. Out of scope for ASK2.
+- Re-labeling physical ports / moving SFP modules. Not needed; the
+  existing labelling (eth0 mgmt, eth1/2 RJ45, eth3/4 SFP+) is fine.
+- Extra physical traffic generators (Spirent/Keysight). M6 performance
+  soak wants those for line-rate measurements at the Geerling 1 Mpps
+  target, but **iperf3 between vyos-eth{1,2,4} and an LXC peer covers
+  everything up to ~3 Gbps**, which is the M2/M3 verification
+  threshold per spec §11.1.
 
-So the previous "human-driven" tag on M2+ was wrong. **Every PR in
-this plan from M2 through M5 is agent-implementable end-to-end** —
-the agent authors the kernel patch, cross-builds, TFTP-boots, SSHes
-in, runs the verification, captures dmesg, writes findings back into
-the spec / Qdrant. M6 (performance soak) is the only milestone that
-benefits from operator presence, and even there the agent can carry
-the iperf3-level numbers — only the Spirent runs need a human.
+**Every PR from M2 through M5 is exercisable end-to-end through this
+loop** — kernel patch authored, cross-built, TFTP-booted, verified
+over SSH, with dmesg captured and findings written back into the spec
+and Qdrant. M6 (performance soak) is the only milestone that requires
+on-site lab presence for the Spirent/Keysight runs; the iperf3-level
+numbers up to ~3 Gbps remain reachable through the loop.
 
 ---
 
-## M0 — Build pipeline scaffolding *(agent-only, no hardware)*
+## M0 — Build pipeline scaffolding *(no hardware required)*
 
 **Acceptance gate:** `FLAVOR=ask gh workflow run "VyOS LS1046A build (self-hosted)"`
 produces a signed `ask.ko` artefact. The module loads cleanly on a real
@@ -209,13 +206,13 @@ ask-y := \
 **Kconfig contents:**
 ```
 config NET_ASK
-    tristate "ASK 2.0 fast-path offload for NXP LS1046A FMan/210"
+    tristate "ASK2 fast-path offload for NXP LS1046A FMan/210"
     depends on FSL_DPAA && CAAM_QI && NET_FLOW_OFFLOAD
     select XFRM_OFFLOAD
     help
-      ASK 2.0 NXP LS1046A FMan microcode (210-series) hardware offload
+      ASK2 NXP LS1046A FMan microcode (210-series) hardware offload
       driver. Replaces the legacy proprietary cdx.ko/auto_bridge.ko stack.
-      See specs/ask-2.0-rewrite-spec.md.
+      See specs/ask2-rewrite-spec.md.
 
       To compile this driver as a module, choose M here. The module will
       be called ask.
@@ -244,7 +241,7 @@ module_init(ask_init);
 module_exit(ask_exit);
 
 MODULE_AUTHOR("VyOS LS1046A maintainers");
-MODULE_DESCRIPTION("ASK 2.0 — NXP LS1046A FMan/210 hardware offload");
+MODULE_DESCRIPTION("ASK2 — NXP LS1046A FMan/210 hardware offload");
 MODULE_LICENSE("GPL");
 MODULE_VERSION("2.0.0");
 ```
@@ -271,7 +268,7 @@ Per spec §10, three small kernel patches are needed:
    (~120 LOC + new header `include/linux/fsl/fman_host_cmd.h`)
 
 **PR2 lands placeholder patches** — each is a unified-diff that adds a
-`#warning "ASK 2.0: TODO"` comment and a stub function returning
+`#warning "ASK2: TODO"` comment and a stub function returning
 `-EOPNOTSUPP`. This lets the build pipeline (PR3) wire the patch list
 without blocking on the real implementation work.
 
@@ -355,7 +352,7 @@ Add `config NET_ASK_KUNIT_TEST` to `Kconfig` (defaults to `n`, depends on
 
 ---
 
-## M1 — Kernel skeleton with hardware-free functionality *(agent-only, no hardware)*
+## M1 — Kernel skeleton with hardware-free functionality *(no hardware required)*
 
 **Acceptance gate (M1 done):**
 - `genl ctrl-list | grep ask` shows the family registered with version 1
@@ -440,7 +437,7 @@ LOC budget: ~600 of additional tests.
 
 ---
 
-## M2 — Hardware brought up *(agent-driven via TFTP + SSH; see "Agent hardware loop" above)*
+## M2 — Hardware brought up *(via TFTP + SSH; see "Hardware loop" above)*
 
 **Acceptance gate (M2 done, per spec §11.1 first row):**
 - M2 gate "M2: nft flow add over IPv4 TCP → packet traverses 210 fast
@@ -449,20 +446,78 @@ LOC budget: ~600 of additional tests.
   `ASK_FLOW_ATTR_PACKETS` matches `iperf` reported throughput within 1%
 - `dmesg` shows zero ucode errors during a 60-second iperf run
 
-### PR10 — `0001-caam-qi-share.patch` (real implementation)
+### PR10 — `0001-caam-qi-share.patch` (real implementation) — **landed (ff4a801)**
 
 Per spec §8.3. Adds `caam_qi_ext_consumer_register()` to `drivers/crypto/caam/qi.c`,
-exports it, and provides a counterpart `caam_qi_ext_consumer_unregister()`.
+exports it, and provides a counterpart `caam_qi_ext_consumer_release()`.
 
 Critical: this is the patch we hope to upstream. Get the API shape right
-on the first try by reviewing it with NXP CAAM maintainers (Madalin Bucur,
-Camelia Groza) in parallel with the implementation. See spec §16 #4.
+on the first try by reviewing it with the NXP CAAM maintainers (Madalin
+Bucur, Camelia Groza) in parallel with the implementation. See spec §16 #4.
 
-### PR11 — `0002-dpaa-eth-flow-block.patch` (real implementation)
+**Link-time validation, 2026-05-13** (LXC 200 `/var/tmp/pr10-pr11/linux-6.18.28`,
+fresh `linux-6.18.28.tar.xz` from cdn.kernel.org, `git apply --3way` clean,
+mono prod `.config` seeded from `zcat /proc/config.gz` with `MODULE_SIG` /
+`SYSTEM_TRUSTED_KEYS` disabled for the dev build, then `make -j12 Image`
+followed by `make -j4 drivers/crypto/caam/`):
+
+```
+$ aarch64-linux-gnu-nm drivers/crypto/caam/caam.o | grep caam_qi_ext_consumer
+0000000000000010 d __UNIQUE_ID___addressable_caam_qi_ext_consumer_register1207
+0000000000000008 d __UNIQUE_ID___addressable_caam_qi_ext_consumer_release1210
+0000000000000080 r __export_symbol_caam_qi_ext_consumer_register
+0000000000000090 r __export_symbol_caam_qi_ext_consumer_release
+0000000000002e20 T caam_qi_ext_consumer_register
+0000000000003340 T caam_qi_ext_consumer_release
+```
+
+`T` = global text, `__export_symbol_*` = KSYMTAB GPL entry, `__UNIQUE_ID___addressable_*`
+= modpost addressable refs. Pre-existing `caam_drv_ctx_update` and
+`caam_qi_enqueue` (the EXPORT_SYMBOL_GPL pattern PR10 mirrors) appear with
+identical structure in the same `.o` — confirms standard kernel boilerplate
+was followed.
+
+Hardware-boot validation deliberately deferred until PR13 (`OP_GET_UCODE_VERSION`
+against silicon). Rationale: these new functions have no in-tree caller
+(ask.ko is unbuilt), so a boot run would only re-prove that vmlinux loads
+(which mono already does daily on the prod 6.18.28-vyos build) and that
+EXPORT_SYMBOL_GPL produces no runtime-init code (true by definition — it
+emits ELF metadata only). Additionally, deploying a dev kernel via TFTP
+with `EXTRAVERSION=''` would vermagic-mismatch ALL `=m` modules including
+caam.ko itself, defeating the very PR10 module-symbol verification a boot
+was supposed to do. PR13 introduces the first real consumer call site and
+will exercise both the registration dance and the FQ-swap atomic on live
+silicon.
+
+### PR11 — `0002-dpaa-eth-flow-block.patch` (real implementation) — **landed (5f42606)**
 
 Per spec §10.2. Wires `flow_block_cb` into `dpaa_setup_tc()` so each
 `fsl,dpa` netdev can advertise hardware flow offload via nft. The
 callback is owned by `ask.ko` (registered through a small shim API).
+
+**Link-time validation, 2026-05-13** (same build tree as PR10):
+
+```
+$ grep -E 'dpaa_(un)?register_flow_offload_handler|dpaa_setup_tc' System.map
+ffff8000809a9750 T dpaa_register_flow_offload_handler
+ffff8000809a9818 T dpaa_unregister_flow_offload_handler
+ffff8000809ab268 t dpaa_setup_tc
+ffff800081485998 r __ksymtab_dpaa_register_flow_offload_handler
+ffff8000814859a4 r __ksymtab_dpaa_unregister_flow_offload_handler
+```
+
+Both new symbols are linked into vmlinux KSYMTAB at fixed addresses (FSL_DPAA=y
+on the prod config), so they would appear in `/proc/kallsyms` of any boot
+based on this build. The local `dpaa_setup_tc` carries the new
+RCU-protected `TC_SETUP_BLOCK` dispatch case (lowercase `t` = file-local
+since the function is `static`).
+
+Hardware-boot validation deliberately deferred for the same reason as PR10:
+the new TC_SETUP_BLOCK case is `rcu_dereference()`-guarded and with no
+consumer registered (ask.ko unbuilt) returns `-EOPNOTSUPP`, identical to
+the existing MQPRIO guard fallthrough. PR14 (`OP_FLOW_INSERT_V4_TCP` end-to-end)
+is the first PR that exercises this path on live silicon via an actual
+`nft flow add` from userspace.
 
 ### PR12 — `0003-fman-host-command-api.patch` (real implementation)
 
@@ -498,7 +553,7 @@ on the wire. Verify with iperf.
 
 ---
 
-## M3 — All flow types *(agent-driven; each PR cross-builds + TFTP-boots + SSH-verifies)*
+## M3 — All flow types *(each PR cross-builds + TFTP-boots + SSH-verifies)*
 
 **Acceptance gate:** spec §11.1 row M3 — "All non-IPsec flow types +
 bridge + offline ports. NAT works, bridge offload works."
@@ -518,7 +573,7 @@ Each follows the same pattern as PR14: implement encoder, wire into
 
 ---
 
-## M4 — IPsec offload *(agent-driven; complex but no operator-in-the-room required)*
+## M4 — IPsec offload *(complex but no on-site presence required)*
 
 **Acceptance gate:** spec §11.1 row M4 — "AES-GCM-128 IPsec at 3 Gbps."
 
@@ -531,7 +586,7 @@ Each follows the same pattern as PR14: implement encoder, wire into
 
 ---
 
-## M5 — Userspace + VyOS integration *(agent-driven)*
+## M5 — Userspace + VyOS integration
 
 **Acceptance gate:** spec §11.1 row M5 — "vanilla Mono Gateway DK boots
 VyOS rolling with `set system offload ask` and forwards at line rate."
@@ -571,15 +626,15 @@ currently 023).
 
 ---
 
-## M6 — VPP coexistence + soak *(agent-driven up to ~3 Gbps; Spirent runs need a human)*
+## M6 — VPP coexistence + soak *(soak runs over the lab loop up to ~3 Gbps; Spirent runs require on-site presence)*
 
 Per spec §11.1 row M6. No new code per se — performance tuning, cache-line
-alignment, RCU latency verification. The agent can carry the soak-level
-work end-to-end via iperf3 between `vyos-eth{1,2,4}` and an LXC peer.
-The Spirent/Keysight runs at the Geerling 1 Mpps line-rate target need
-a human in the lab — but the agent should land the code, characterise
-~3 Gbps behaviour, and document what the operator needs to verify on
-the traffic generator before that final run.
+alignment, RCU latency verification. The soak-level work runs end-to-end
+via iperf3 between `vyos-eth{1,2,4}` and an LXC peer. The
+Spirent/Keysight runs at the Geerling 1 Mpps line-rate target require a
+human in the lab — but the code should land, ~3 Gbps behaviour should
+be characterised, and the document should specify exactly what needs to
+be verified on the traffic generator before that final run.
 
 ---
 
@@ -611,26 +666,26 @@ Per spec §18:
   patches PR10/11/12 are the only upstream candidates — and only when
   stable)
 
-## How an agent picks up a PR
+## How to pick up a PR
 
-1. Open this document, find the "not started" PR you want to claim.
+1. Open this document, find the next "not started" PR.
 2. Re-read the spec sections it references **in full**.
-3. Query Qdrant (`qdrant-find`) for any prior session insights on the
-   files you're about to touch (per `.clinerules/70-qdrant-memory.md`).
-4. Open the target files in the workspace; read enough context (200-2000
-   lines) before writing.
-5. Update `task_progress` with the PR's checklist on the first tool
-   call. Mark items off as you go.
+3. Check Qdrant (`qdrant-find`) for prior session insights on the files
+   about to be touched (per `.clinerules/70-qdrant-memory.md`).
+4. Open the target files in the workspace; read enough context
+   (200-2000 lines) before writing.
+5. Track work against the PR's checklist; mark items off as they
+   complete.
 6. Run the acceptance check listed under the PR.
-7. **Do not** open the next PR in the same session unless the user
-   explicitly asks. Each PR is a discrete review unit.
+7. **Do not** open the next PR in the same session unless explicitly
+   requested. Each PR is a discrete review unit.
 
 ## Coordination
 
-- Spec updates flow back into `specs/ask-2.0-rewrite-spec.md`. Bump
+- Spec updates flow back into `specs/ask2-rewrite-spec.md`. Bump
   version number (currently v0.7); bump this document's "drives" line
   in sync.
 - Hardware findings get stored in Qdrant per `.clinerules/70-qdrant-memory.md`
-  with tags `ask-2.0`, `hardware-probe`, plus the relevant PR number.
+  with tags `ask2`, `hardware-probe`, plus the relevant PR number.
 - The spec §12.7 unknowns get answered in PR13 and the spec gets a §12.8
   "Confirmed hardware behaviour" appendix.
