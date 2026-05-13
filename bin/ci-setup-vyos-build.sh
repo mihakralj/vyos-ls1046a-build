@@ -398,6 +398,11 @@ chmod +x "$HOOKS/95-vyos-hostname.chroot"
 cp data/hooks/92-livescripts-defensive-mount-list.chroot "$HOOKS/92-livescripts-defensive-mount-list.chroot"
 chmod +x "$HOOKS/92-livescripts-defensive-mount-list.chroot"
 
+### Extra diagnostic utilities (psmisc → fuser, lsof). Required by
+### board/scripts/serial-console-debug.sh section 8.
+cp data/hooks/93-extra-utils.chroot "$HOOKS/93-extra-utils.chroot"
+chmod +x "$HOOKS/93-extra-utils.chroot"
+
 cp data/hooks/98-fancontrol.chroot "$HOOKS/98-fancontrol.chroot"
 chmod +x "$HOOKS/98-fancontrol.chroot"
 
