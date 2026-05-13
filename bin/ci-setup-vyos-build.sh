@@ -451,21 +451,6 @@ chmod +x "$CHROOT/usr/local/bin/caam-check"
 cp board/scripts/led.py "$CHROOT/usr/local/bin/led"
 chmod +x "$CHROOT/usr/local/bin/led"
 
-### serial-console-debug: one-shot diagnostic that dumps everything we
-### need to debug serial-getty@ttyS0 problems (effective unit, drop-ins,
-### agetty process state, /dev/ttyS0 owners + termios, journal tail,
-### dmesg tail) to the systemd journal under its own unit name. Runs
-### +20 s after multi-user.target. An operator who can still reach the
-### box over SSH (when the console is dead) retrieves it with:
-###   journalctl -u serial-console-debug --no-pager
-### The .service install step here only stages the unit + script; the
-### actual symlink into multi-user.target.wants/ is created in
-### data/hooks/96-enable-services.chroot (same pattern as the other
-### custom units).
-cp board/scripts/serial-console-debug.sh "$CHROOT/usr/local/bin/serial-console-debug.sh"
-chmod +x "$CHROOT/usr/local/bin/serial-console-debug.sh"
-cp board/systemd/serial-console-debug.service "$CHROOT/etc/systemd/system/serial-console-debug.service"
-
 ### Boot-complete fan whistle is now produced by fan-pid itself
 ### (play_startup_whistle()).  The standalone boot-complete-notify
 ### service was deleted to eliminate the systemd-ordering race over
