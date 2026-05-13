@@ -62,6 +62,7 @@
 #include <linux/netdevice.h>
 #include <net/flow_offload.h>
 #include <net/pkt_cls.h>
+#include <linux/fsl/dpaa_flow_offload.h>
 
 #include "include/ask_internal.h"
 
@@ -413,18 +414,73 @@ return -EOPNOTSUPP;
 EXPORT_SYMBOL_GPL(ask_flow_offload_setup_tc);
 
 /* ------------------------------------------------------------------------- */
+/* dpaa_flow_offload_ops backend registration (in-tree patch PR11/M2.2).     */
+/*                                                                            */
+/* The dpaa_eth driver carries a single-slot RCU-protected registration       */
+/* point (include/linux/fsl/dpaa_flow_offload.h, added by                    */
+/* 0002-dpaa-eth-flow-block.patch). When ask.ko loads, we plug ourselves     */
+/* in; on rmmod we unplug. dpaa_setup_tc() RCU-derefs the slot for every     */
+/* TC_SETUP_BLOCK and dispatches to ops->setup_tc_block (= the function      */
+/* below, which is just a thin wrapper around ask_flow_offload_setup_tc()).  */
+/* ------------------------------------------------------------------------- */
+
+static int ask_dpaa_setup_tc_block(struct net_device *dev,
+   struct flow_block_offload *fbo)
+{
+return ask_flow_offload_setup_tc(dev, fbo);
+}
+
+static const struct dpaa_flow_offload_ops ask_dpaa_fo_ops = {
+.owner          = THIS_MODULE,
+.setup_tc_block = ask_dpaa_setup_tc_block,
+};
+
+/* ------------------------------------------------------------------------- */
 /* Lifecycle                                                                  */
 /* ------------------------------------------------------------------------- */
 
 int ask_flow_offload_init(void)
 {
-ask_pr_info("flow_offload: ready (flow_block_cb registered)\n");
+int rc;
+
+rc = dpaa_register_flow_offload_handler(&ask_dpaa_fo_ops);
+if (rc == -ENODEV) {
+/*
+ * Built without CONFIG_FSL_DPAA, or the dpaa driver did not
+ * load. ask.ko stays usable for kunit and for genl-only
+ * surface; the synthetic-netdev test path exercises
+ * ask_flow_offload_setup_tc_block_cb() directly.
+ */
+ask_pr_info("flow_offload: dpaa backend unavailable (-ENODEV); "
+    "running standalone\n");
+return 0;
+}
+if (rc) {
+ask_pr_err("flow_offload: dpaa_register_flow_offload_handler "
+   "failed: %d\n", rc);
+return rc;
+}
+
+ask_pr_info("flow_offload: ready (registered with dpaa_eth)\n");
 return 0;
 }
 
 void ask_flow_offload_exit(void)
 {
 struct ask_flow_block_priv_entry *e, *tmp;
+int rc;
+
+/*
+ * Drop the dpaa registration first so dpaa_setup_tc() stops
+ * dispatching new TC_SETUP_BLOCK events to us. The unregister
+ * path inside dpaa_eth synchronize_rcu()s before returning, so
+ * by the time it completes no inflight dispatcher is still
+ * holding a pointer to ask_dpaa_fo_ops.
+ */
+rc = dpaa_unregister_flow_offload_handler(&ask_dpaa_fo_ops);
+if (rc && rc != -ENODEV && rc != -EINVAL)
+ask_pr_warn("flow_offload: dpaa_unregister_flow_offload_handler "
+    "failed: %d\n", rc);
 
 /*
  * Ordinarily every block_cb gets torn down by the netdev's
