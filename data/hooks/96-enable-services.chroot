@@ -16,7 +16,7 @@ echo "I: Enabling custom LS1046A services..."
 
 # multi-user.target services
 for svc in vyos-postinstall fman-fq-qdisc sfp-tx-enable-sdk \
-           ask-conntrack-fix cmm serial-console-debug; do
+           ask-conntrack-fix cmm; do
   if [ -f "/etc/systemd/system/${svc}.service" ]; then
     mkdir -p /etc/systemd/system/multi-user.target.wants
     ln -sf "../${svc}.service" "/etc/systemd/system/multi-user.target.wants/${svc}.service"
