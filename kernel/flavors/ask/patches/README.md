@@ -1,6 +1,6 @@
-# ASK 2.0 in-tree kernel patches
+# ASK2 in-tree kernel patches
 
-Per `specs/ask-2.0-rewrite-spec.md` §10.1, ASK 2.0 needs three small
+Per `specs/ask2-rewrite-spec.md` §10.1, ASK2 needs three small
 in-tree kernel patches. They are listed and applied in numeric order:
 
 | File                                  | Spec ref | Replaced in |

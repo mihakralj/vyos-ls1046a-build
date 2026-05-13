@@ -1,6 +1,6 @@
-# ASK 2.0 — out-of-tree kernel module (PR1 / M0.1 skeleton)
+# ASK2 — out-of-tree kernel module (PR1 / M0.1 skeleton)
 
-Reference: `specs/ask-2.0-rewrite-spec.md` (v0.7), `plans/ASK-2.0-IMPLEMENTATION.md`.
+Reference: `specs/ask2-rewrite-spec.md` (v0.7), `plans/ASK2-IMPLEMENTATION.md`.
 
 ## What this is
 
@@ -90,7 +90,7 @@ sudo rmmod ask
 sudo dmesg | grep ask:                          # expect "unloaded"
 ```
 
-(See `plans/ASK-2.0-IMPLEMENTATION.md` PR1 acceptance criteria.)
+(See `plans/ASK2-IMPLEMENTATION.md` PR1 acceptance criteria.)
 
 ## Future PRs
 

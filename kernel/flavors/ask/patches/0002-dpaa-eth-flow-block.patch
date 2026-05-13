@@ -6,7 +6,7 @@ Subject: [PATCH 2/3] net: dpaa: register external flow-offload backend
 The DPAA1 (fsl_dpa) Ethernet driver does not implement tc-flower /
 nf_flow_table HW offload itself. On NXP LS1046A, the FMan 210-series
 microcode running on an offline parser provides hardware flow offload
-(see specs/ask-2.0-rewrite-spec.md \10 for the broader design).
+(see specs/ask2-rewrite-spec.md \10 for the broader design).
 
 The driver lives in vmlinux (FSL_DPAA=y is mandatory on this board
 because FMan must initialise before rootfs mount), while the
@@ -37,7 +37,7 @@ structure is one new header, two new EXPORT_SYMBOL_GPL symbols, one
 new __rcu pointer slot, and a 16-line block at the top of
 dpaa_setup_tc().
 
-The ASK 2.0 backend implements ops->setup_tc_block via the existing
+The ASK2 backend implements ops->setup_tc_block via the existing
 ask_flow_offload_setup_tc() entry point in kernel/flavors/ask/
 oot-modules/ask/ask_flow_offload.c (PR8, M1.4).
 
@@ -59,14 +59,14 @@ index 3edc8d1..c564ee0 100644
  	}
  }
  
-+/* ASK 2.0 — external flow-offload backend registration.
++/* ASK2 — external flow-offload backend registration.
 + *
 + * Single-slot. The backend (ask.ko) registers at module init and
 + * unregisters at module exit. dpaa_setup_tc() RCU-derefs the slot
 + * for every TC_SETUP_BLOCK to dispatch flow_block_offload events.
 + *
 + * See include/linux/fsl/dpaa_flow_offload.h for the contract and
-+ * specs/ask-2.0-rewrite-spec.md Â§10 for the design rationale.
++ * specs/ask2-rewrite-spec.md Â§10 for the design rationale.
 + */
 +static const struct dpaa_flow_offload_ops __rcu *dpaa_fo_ops_slot;
 +static DEFINE_SPINLOCK(dpaa_fo_ops_lock);
@@ -133,7 +133,7 @@ index 3edc8d1..c564ee0 100644
  	u8 num_tc;
  	int i;
  
-+	/* ASK 2.0 — dispatch flow-block offloads to the registered
++	/* ASK2 — dispatch flow-block offloads to the registered
 +	 * backend (typically ask.ko). Returns -EOPNOTSUPP if no
 +	 * backend is registered, which lets the upper layer fall
 +	 * back to software flow_offload.
@@ -170,9 +170,9 @@ index 0000000..425110a
 + * nf_flow_table HW offload. Instead it exposes a single registration
 + * slot that an external offload backend can occupy at runtime.
 + *
-+ * On NXP LS1046A, the backend is the ASK 2.0 module (ask.ko) which
++ * On NXP LS1046A, the backend is the ASK2 module (ask.ko) which
 + * drives the FMan 210-series microcode running on an offline parser.
-+ * See specs/ask-2.0-rewrite-spec.md for the broader design.
++ * See specs/ask2-rewrite-spec.md for the broader design.
 + *
 + * The split exists so the dpaa driver itself does not depend on
 + * ask.ko (which would create a circular module dependency: ask.ko

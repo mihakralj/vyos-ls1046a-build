@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * ASK 2.0 internal API.
+ * ASK2 internal API.
  *
  * Forward declarations and module-private function signatures shared
  * between the .c files inside ask.ko. Anything exposed to userspace
  * lives in include/uapi/linux/ask/ask.h instead.
  *
- * See specs/ask-2.0-rewrite-spec.md for the full architecture.
+ * See specs/ask2-rewrite-spec.md for the full architecture.
  */
 #ifndef _ASK_INTERNAL_H
 #define _ASK_INTERNAL_H
@@ -61,6 +61,33 @@ int ask_genl_dump_one_cb(struct ask_flow *f, void *arg);
 int ask_genl_eopnotsupp_doit(struct sk_buff *skb, struct genl_info *info);
 int ask_genl_eopnotsupp_dumpit(struct sk_buff *skb,
        struct netlink_callback *cb);
+
+/* ------------------------------------------------------------------------- */
+/* ask_hw.c — hardware-derived information shared with userspace               */
+/*                                                                            */
+/* PR13 (M2.4) introduced this. The microcode version reported by             */
+/* ASK_CMD_GET_INFO is read from the QEF (QorIQ Embedded Firmware)            */
+/* blob that U-Boot loads from the SPI "fman-ucode" partition into            */
+/* FMan IRAM at boot, and which is also re-published in the device            */
+/* tree at /soc/fman@<addr>/fman-firmware/fsl,firmware. See                   */
+/* specs/ask2-rewrite-spec.md §12.8 for the rationale (the standard           */
+/* NXP 210.x QEF microcode does not implement the spec §12.2 host             */
+/* command opcode dispatcher; the version is therefore derived from           */
+/* the loaded blob, not from a runtime opcode 0x01).                          */
+/* ------------------------------------------------------------------------- */
+struct ask_hw_ucode_version {
+        u16 family;          /* "210" in "210.10.1" */
+        u8  major;           /* "10"  in "210.10.1" */
+        u8  minor;           /* "1"   in "210.10.1" */
+        u16 patch;           /* always 0 for stock NXP QEF; reserved for
+                              * a hypothetical custom ASK2 microcode */
+        char description[64];/* full QEF description string,
+                              * e.g. "Microcode version 210.10.1 for LS1043 r1.0" */
+};
+
+int  ask_hw_ucode_get_version(struct ask_hw_ucode_version *out);
+int  ask_hw_init(void);
+void ask_hw_exit(void);
 
 /* ------------------------------------------------------------------------- */
 /* ask_genl_attr.c — nla_policy tables shared across nested attribute sets    */

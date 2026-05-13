@@ -421,9 +421,9 @@ for package in $packages; do
       esac
     fi
 
-    ### ASK 2.0 OOT kernel modules (ask.ko, future ask_bridge.ko)
+    ### ASK2 OOT kernel modules (ask.ko, future ask_bridge.ko)
     #
-    # Build and sign the ASK 2.0 OOT module .ko against the kernel source
+    # Build and sign the ASK2 OOT module .ko against the kernel source
     # tree we just compiled. Must run BEFORE the post-build cleanup that
     # deletes $KSRC at the end of this iteration — the OOT build needs
     # Module.symvers, scripts/sign-file, and certs/signing_key.{pem,x509}
@@ -434,12 +434,12 @@ for package in $packages; do
     # `find scripts/package-build -name '*.deb'` sweep will pick it up.
     #
     # Userspace components (askd, ask-load, libask_fci) are not yet
-    # implemented — see specs/ask-2.0-rewrite-spec.md §§4–9.
+    # implemented — see specs/ask2-rewrite-spec.md §§4–9.
     if [ "${FLAVOR:-default}" = "ask" ]; then
       ASK_OOT_BUILDER="$GITHUB_WORKSPACE/kernel/flavors/ask/oot-modules/ask/ci-build.sh"
       if [ -n "$KSRC" ] && [ -x "$ASK_OOT_BUILDER" ]; then
         KSRC_ABS_ASK="$(cd "$KSRC" && pwd)"
-        echo "### FLAVOR=ask: building ASK 2.0 OOT kernel modules"
+        echo "### FLAVOR=ask: building ASK2 OOT kernel modules"
         # Cross-build env is already exported by the kernel build above
         # (ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-). Pass through.
         ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}" \
@@ -452,7 +452,7 @@ for package in $packages; do
         echo "FATAL:   ASK_OOT_BUILDER='$ASK_OOT_BUILDER' (must be executable)"
         exit 1
       fi
-      echo "### FLAVOR=ask: userspace stack (askd, ask-load, libask_fci) not yet implemented (see specs/ask-2.0-rewrite-spec.md)"
+      echo "### FLAVOR=ask: userspace stack (askd, ask-load, libask_fci) not yet implemented (see specs/ask2-rewrite-spec.md)"
     fi
 
     ### Build accel-ppp-ng ARM64 packages (daemon + kernel modules)
@@ -516,9 +516,9 @@ for package in $packages; do
   cd ..
 done
 
-### ASK 2.0 (rewrite-in-progress): the legacy ASK-consume mode userspace
+### ASK2 (rewrite-in-progress): the legacy ASK-consume mode userspace
 ### rebuild block was removed on the ask20 branch along with
-### ci-consume-ask-kernel.sh and ci-build-ask-userspace.sh. The ASK 2.0
+### ci-consume-ask-kernel.sh and ci-build-ask-userspace.sh. The ASK2
 ### userspace stack (askd, ask-load, libask_fci) will be built by new
 ### scripts under bin/ci-build-ask-*.sh once the components land per
-### specs/ask-2.0-rewrite-spec.md.
+### specs/ask2-rewrite-spec.md.

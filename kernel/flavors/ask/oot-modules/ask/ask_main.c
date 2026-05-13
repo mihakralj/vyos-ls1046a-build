@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * ask_main.c — module init/exit for ASK 2.0
+ * ask_main.c — module init/exit for ASK2
  *
  * PR1 (M0.1) skeleton: registers the generic-netlink family and the
  * subordinate subsystems (which are all stubs at this point). Any
  * subsystem that fails on init causes a clean teardown of the previous
  * ones — strict reverse-order unwind via goto labels.
  *
- * See specs/ask-2.0-rewrite-spec.md §4.2 for the full module layout
- * and plans/ASK-2.0-IMPLEMENTATION.md for the PR breakdown.
+ * See specs/ask2-rewrite-spec.md §4.2 for the full module layout
+ * and plans/ASK2-IMPLEMENTATION.md for the PR breakdown.
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -23,6 +23,10 @@ static int __init ask_init(void)
 
 	ask_pr_info("loading ASK %s (skeleton — no offload functionality yet)\n",
 		    ASK_DRV_VERSION_STR);
+
+	rc = ask_hw_init();
+	if (rc)
+		goto err_hw;
 
 	rc = ask_stats_init();
 	if (rc)
@@ -92,6 +96,8 @@ err_flow:
 err_hostcmd:
 	ask_stats_exit();
 err_stats:
+	ask_hw_exit();
+err_hw:
 	ask_pr_err("init failed: %d\n", rc);
 	return rc;
 }
@@ -109,6 +115,7 @@ static void __exit ask_exit(void)
 	ask_flow_exit();
 	ask_hostcmd_exit();
 	ask_stats_exit();
+	ask_hw_exit();
 	ask_pr_info("unloaded\n");
 }
 
@@ -116,7 +123,7 @@ module_init(ask_init);
 module_exit(ask_exit);
 
 MODULE_AUTHOR("VyOS LS1046A maintainers");
-MODULE_DESCRIPTION("ASK 2.0 — NXP LS1046A FMan/210 hardware offload (skeleton)");
+MODULE_DESCRIPTION("ASK2 — NXP LS1046A FMan/210 hardware offload (skeleton)");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(ASK_DRV_VERSION_STR);
 MODULE_ALIAS_GENL_FAMILY("ask");

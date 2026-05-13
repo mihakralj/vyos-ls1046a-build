@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# ASK 2.0 - kunit test suite Kbuild (PR4 / M0.4)
+# ASK2 - kunit test suite Kbuild (PR4 / M0.4)
 #
 # Built only when CONFIG_NET_ASK_KUNIT_TEST=y (or =m). Produces a
 # separate ask_kunit.ko so the production ask.ko stays free of test

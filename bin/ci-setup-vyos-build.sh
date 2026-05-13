@@ -421,7 +421,7 @@ chmod +x "$CHROOT/usr/local/bin/fman-fq-qdisc"
 cp board/systemd/fman-fq-qdisc.service "$CHROOT/etc/systemd/system/fman-fq-qdisc.service"
 cp board/systemd/fman-fq-qdisc.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fman-fq-qdisc.conf"
 
-### SFP TX_DISABLE handling: ASK 2.0 will reuse mainline phylink's SFP
+### SFP TX_DISABLE handling: ASK2 will reuse mainline phylink's SFP
 ### state machine (sfp_state_machine() drives TX_DISABLE via gpiod) — no
 ### legacy SDK-only helper script is needed any more. The previous
 ### sfp-tx-enable-sdk.{sh,service,tmpfiles} files were deleted on
@@ -443,15 +443,15 @@ cp data/hooks/96-enable-services.chroot "$HOOKS/96-enable-services.chroot"
 chmod +x "$HOOKS/96-enable-services.chroot"
 
 ### ====================================================================
-### ASK 2.0 userspace components (clean-room rewrite — NOT YET IMPLEMENTED)
+### ASK2 userspace components (clean-room rewrite — NOT YET IMPLEMENTED)
 ### ====================================================================
 # The legacy ASK 1.x userspace stack (dpa_app, cmm, fmc, libcli/libcmm/libfci,
 # libnfnetlink/libnetfilter-conntrack forks, CDX/FMC config XMLs, ASK module
 # loader/health scripts, 97-ask-userspace chroot hook) was deleted on
-# 2026-05-12 as part of the ASK 2.0 clean-room rewrite (branch ask20).
+# 2026-05-12 as part of the ASK2 clean-room rewrite (branch ask20).
 #
-# ASK 2.0 will ship its own userspace components per
-# specs/ask-2.0-rewrite-spec.md §§4–9:
+# ASK2 will ship its own userspace components per
+# specs/ask2-rewrite-spec.md §§4–9:
 #   - askd            — connection manager / decision engine (replaces cmm)
 #   - ask-load        — XML→FMC compiler one-shot       (replaces dpa_app)
 #   - libask_fci.so.1 — generic-netlink wrapper library (replaces libfci)
@@ -467,8 +467,8 @@ chmod +x "$HOOKS/96-enable-services.chroot"
 # staging entirely. The resulting ISO will boot a vanilla VyOS kernel +
 # userspace; nothing ASK-specific will be present in the image.
 if [[ "${FLAVOR:-default}" == "ask" ]]; then
-    echo "### FLAVOR=ask — ASK 2.0 userspace stack not yet implemented"
-    echo "### See specs/ask-2.0-rewrite-spec.md for the rewrite plan"
+    echo "### FLAVOR=ask — ASK2 userspace stack not yet implemented"
+    echo "### See specs/ask2-rewrite-spec.md for the rewrite plan"
 
     # M0.3: drop the chroot hook that auto-loads ask.ko at boot via
     # /etc/modules-load.d/ask.conf. The ask-modules-*.deb (built by

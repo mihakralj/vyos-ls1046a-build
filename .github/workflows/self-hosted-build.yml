@@ -16,7 +16,7 @@ on:
         description: 'Version number (auto: YYYY.MM.DD-HHMM-rolling)'
         default: ''
       flavor:
-        description: 'Build flavor: default (mainline DPAA), ask (ASK 2.0 rewrite — scaffold only, builds vanilla VyOS), or vpp (AF_XDP/VPP — placeholder).'
+        description: 'Build flavor: default (mainline DPAA), ask (ASK2 rewrite — scaffold only, builds vanilla VyOS), or vpp (AF_XDP/VPP — placeholder).'
         type: choice
         default: 'default'
         options:

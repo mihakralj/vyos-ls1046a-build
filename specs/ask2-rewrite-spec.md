@@ -1,6 +1,6 @@
-# ASK 2.0 — Modern Linux Implementation of FMan 210 Hardware Offload for VyOS
+# ASK2 — Modern Linux Implementation of FMan 210 Hardware Offload for VyOS
 
-**Status:** Draft v0.7 (supersedes v0.6). 2026-05-11.
+**Status:** Draft v0.8 (supersedes v0.7). 2026-05-13. Adds §12.8 with PR13 hardware-probe findings.
 **Target hardware:** NXP LS1046A Mono Gateway DK.
 **Target software:** Linux 6.18 LTS, ARM64, VyOS rolling release, FLAVOR=ask.
 **Target microcode:** NXP proprietary 210-series fine classifier ucode (LS1046 r1.0). Loaded by U-Boot from SPI flash on every shipped Mono Gateway. Out of scope for this rewrite.
@@ -13,13 +13,9 @@
 
 ## 0. How to read this spec
 
-This document is structured for a small team driving implementation through coding agents (Cline + Claude Code style loops). Sections are tagged:
+This document is the architecture source-of-truth for ASK2. It is written to be implementable from the text alone: every section either specifies a concrete file/API/wire format, or documents a hardware fact that must be verified on real silicon before the surrounding code can be trusted.
 
-- `[AGENT]` — agent-implementable from spec alone, human reviews each PR
-- `[HUMAN]` — requires hardware probing, judgement, or commercial conversation
-- `[MIXED]` — agent does first pass, human verifies on real silicon
-
-The spec is the prompt. When the spec is wrong, fix the spec first, then regenerate code.
+When the spec is wrong, fix the spec first, then regenerate code. Hardware findings that contradict or extend the spec are folded back into the relevant section (and into Section 12 for protocol-level facts) rather than living only in commit messages.
 
 ---
 
@@ -116,7 +112,7 @@ Per-FMan resources we touch:
 
 - 4 Job Rings, plus QI integration with QMan
 - Mainline driver `drivers/crypto/caam/` (Madalin Bucur, Pankaj Gupta maintainers at NXP)
-- ASK 2.0 reuses this driver. The one delta is patch `0001-caam-qi-share-descriptors.patch` exposing a small in-kernel API for FMan-initiated dequeues.
+- ASK2 reuses this driver. The one delta is patch `0001-caam-qi-share-descriptors.patch` exposing a small in-kernel API for FMan-initiated dequeues.
 
 ### 2.3 Mono Gateway DK port map
 
@@ -132,7 +128,7 @@ Identical to v0.6:
 
 ## 3. The kernel module — `ask.ko`
 
-### 3.1 What it is `[AGENT]`
+### 3.1 What it is
 
 A single kernel module, ~3500 LOC C, building out-of-tree against linux-6.18.x. Loaded after `dpaa_eth`. Registers:
 
@@ -149,7 +145,7 @@ It does NOT register:
 - An ioctl interface. Legacy `cdx_ctrl` compatibility is in `libask` userspace shim only (Section 6.6), never in kernel.
 - An ad-hoc netlink protocol number.
 
-### 3.2 File layout `[AGENT]`
+### 3.2 File layout
 
 ```
 drivers/net/ethernet/freescale/ask/             # if we ever upstream
@@ -180,7 +176,7 @@ include/uapi/linux/ask/
 └── ask.h                                       # genl protocol UAPI
 ```
 
-### 3.3 Concurrency model `[AGENT]`
+### 3.3 Concurrency model
 
 The single rule: **the data path is RCU; the control path is a mutex.**
 
@@ -220,7 +216,9 @@ struct ask_stats {
 
 Stats updates from the hardware-eviction path use `this_cpu_add` under `u64_stats_update_begin/end`. Reads use `u64_stats_fetch_begin/retry`. No global lock, no atomic64 contention.
 
-### 3.4 The 210 host-command interface (in kernel) `[AGENT for protocol; HUMAN for first-pass on real silicon]`
+### 3.4 The 210 host-command interface (in kernel)
+
+The protocol layer is implementable from this spec alone; the first-pass exercise on real silicon is required to confirm IRQ wiring and MURAM doorbell timing.
 
 Single in-kernel function exposed by `0003-fman-host-command-api.patch`:
 
@@ -235,11 +233,11 @@ int fmd_host_cmd(struct fman *fman,
 
 All 210-specific binary encoding lives in `ask_hostcmd.c`. Opcode constants and struct layouts in Section 12. The opcode space is treated like an external ABI: validated at every layer, fuzzed in kunit, traced with tracepoint events for every command/response pair.
 
-### 3.5 Kconfig `[AGENT]`
+### 3.5 Kconfig
 
 ```
 config ASK
-    tristate "NXP LS1046A ASK 2.0 (modern)"
+    tristate "NXP LS1046A ASK2 (modern)"
     depends on FSL_DPAA
     depends on NF_FLOW_TABLE
     depends on XFRM_OFFLOAD
@@ -265,7 +263,7 @@ config ASK_DEBUG
     default y if DEBUG_KERNEL
 ```
 
-### 3.6 Probe sequence `[AGENT]`
+### 3.6 Probe sequence
 
 ```
 ask_init():
@@ -291,9 +289,9 @@ No userspace helper. No XML parsing. No UMH. The kernel loads, probes, registers
 
 ---
 
-## 4. nf_flow_table HW offload backing `[AGENT]`
+## 4. nf_flow_table HW offload backing
 
-This is the single biggest architectural improvement over NXP 1.x. Instead of `comcerto_fp_netfilter.c` tapping every netfilter hook, ASK 2.0 backs the mainline `nf_flow_table` infrastructure via `flow_block_cb`.
+This is the single biggest architectural improvement over NXP 1.x. Instead of `comcerto_fp_netfilter.c` tapping every netfilter hook, ASK2 backs the mainline `nf_flow_table` infrastructure via `flow_block_cb`.
 
 ### 4.1 Operator-facing usage
 
@@ -335,7 +333,7 @@ connection ends, conntrack times out
                     2. rhashtable_remove + call_rcu free
 ```
 
-### 4.3 Flow stats `[AGENT]`
+### 4.3 Flow stats
 
 Mainline `nf_flow_table` polls offload drivers for per-flow stats via `FLOW_CLS_STATS`. `ask.ko` handles this by reading per-CPU counters that have been updated from the 210 ucode eviction-notification path:
 
@@ -382,7 +380,7 @@ We did not write a single line of "packet handling code". The kernel does it thr
 
 ---
 
-## 5. xfrm packet-mode offload `[AGENT]`
+## 5. xfrm packet-mode offload
 
 Modern Linux 6.18 `xfrmdev_ops` with packet-mode (Leon Romanovsky's series merged 6.2, matured through 6.10). The legacy NXP `ipsec_flow.c` (400 lines of bespoke xfrm tapping) is replaced by ~250 lines of standard `xfrmdev_ops` callbacks.
 
@@ -405,7 +403,7 @@ That's it. Same `ip xfrm` syntax everyone uses. The kernel routes the SA to ASK'
 2. Calls `fmd_host_cmd(OP_SA_INSERT, ...)` to insert the ESP-SPI flow in 210 with action "to CAAM RX FQ"
 3. Calls `fmd_host_cmd(OP_OP_CONFIG, ...)` to wire OP1 to re-inject decrypted frames
 
-### 5.2 The xfrmdev_ops surface `[AGENT]`
+### 5.2 The xfrmdev_ops surface
 
 ```c
 static const struct xfrmdev_ops ask_xfrmdev_ops = {
@@ -430,7 +428,7 @@ netdev->hw_enc_features |= NETIF_F_HW_ESP | NETIF_F_HW_ESP_TX_CSUM;
 
 No `cmm.c::ipsec.c` (1200 lines in NXP source). No `fci.c::sa_handler` (600 lines). No `cdx.c::cdx_ipsec_*` (800 lines). The kernel's xfrm subsystem already does SA lifecycle management; we provide the device callbacks and the protocol does the rest.
 
-### 5.3 Supported AEAD algorithms v1.0 `[AGENT]`
+### 5.3 Supported AEAD algorithms v1.0
 
 In priority order, gated by what `caam_qi.ko` already exposes via crypto API:
 
@@ -453,7 +451,7 @@ We provide: the device callback that translates SA state into 210 + CAAM hardwar
 
 ---
 
-## 6. The userspace daemon — `askd` `[AGENT]`
+## 6. The userspace daemon — `askd`
 
 ### 6.1 What it is
 
@@ -464,7 +462,7 @@ A small daemon, ~4000 LOC C with sd-event and libmnl, doing exactly two things:
 
 It does not duplicate kernel work. It does not parse routing tables from `/proc`. It does not run a control plane.
 
-### 6.2 Why askd exists at all `[REFERENCE]`
+### 6.2 Why askd exists at all
 
 The kernel module handles `nf_flow_table` promotions automatically once the operator's nftables ruleset says `flow add @f`. So askd is only needed for:
 
@@ -476,7 +474,7 @@ The kernel module handles `nf_flow_table` promotions automatically once the oper
 
 Operators who want pure declarative configuration via nftables can run without askd. The kernel module is functional on its own. askd adds: policy, operator UX, and VPP integration.
 
-### 6.3 Architecture `[AGENT]`
+### 6.3 Architecture
 
 ```
 askd/
@@ -521,7 +519,7 @@ Modern choices vs NXP `cmm`:
 | No metrics | Prometheus /metrics exporter |
 | No IPC API | Varlink interface for ask-cli + scripts |
 
-### 6.4 Promotion decision logic `[AGENT]`
+### 6.4 Promotion decision logic
 
 ```c
 /* Pseudocode — actual implementation in promotion.c */
@@ -551,12 +549,12 @@ askd_promotion_decide(struct conntrack_event *ev)
 
 Decisions flow to either `ASK_CMD_FLOW_ADD` over genl (hardware path) or `vpp_memif.c` (VPP path).
 
-### 6.5 systemd integration `[AGENT]`
+### 6.5 systemd integration
 
 ```ini
 # /lib/systemd/system/askd.service
 [Unit]
-Description=ASK 2.0 promotion daemon
+Description=ASK2 promotion daemon
 Documentation=man:askd(8)
 After=network-pre.target systemd-modules-load.service
 Wants=network-pre.target
@@ -595,7 +593,7 @@ WantedBy=multi-user.target
 
 Compare to `cmm.service`: no `ConditionPathExists=/dev/cdx_ctrl`, no `ExecStartPre` to write sysfs hooks, no LimitMEMLOCK gymnastics, full systemd sandboxing.
 
-### 6.6 ask-cli (operator tool) `[AGENT]`
+### 6.6 ask-cli (operator tool)
 
 A small CLI in Python that talks to askd over Varlink. Replaces `cmmctl` (1500 LOC C).
 
@@ -621,7 +619,7 @@ If a deployment surfaces that genuinely needs `cdx_ctrl` compatibility, ship a s
 
 ---
 
-## 7. The genl_family protocol `[AGENT]`
+## 7. The genl_family protocol
 
 ### 7.1 Family registration
 
@@ -709,7 +707,9 @@ Modern Linux tooling (`ynl` from kernel/tools/net/ynl) generates per-family Pyth
 
 ---
 
-## 8. CAAM integration (reuse + 1 small patch) `[AGENT, with HUMAN review on the patch]`
+## 8. CAAM integration (reuse + 1 small patch)
+
+The in-tree patch in §8.1 is upstream-targeted; it gets a normal upstream review cycle in parallel with the rest of the implementation.
 
 The mainline `caam_qi.ko` already does crypto descriptor construction for all AEAD algorithms we care about. The single missing piece is: descriptors are created assuming kernel-crypto-API callers will use them. For ASK we need FMan to dequeue from CAAM's RX queue without going through kernel crypto API.
 
@@ -726,7 +726,7 @@ upstream-ready header at `include/linux/crypto/caam_qi_share.h`:
  * need to share a CAAM AEAD descriptor with a non-crypto-API dequeuer
  * (e.g. FMan 210 ucode on the ASK fast path).
  *
- * See specs/ask-2.0-rewrite-spec.md §8.1.
+ * See specs/ask2-rewrite-spec.md §8.1.
  */
 #ifndef _LINUX_CRYPTO_CAAM_QI_SHARE_H
 #define _LINUX_CRYPTO_CAAM_QI_SHARE_H
@@ -792,7 +792,7 @@ EXPORT_SYMBOL_GPL functions plus a small per-`caam_drv_ctx` extension
 diverts to `sink_fqid` via `qman_enqueue()` when set, otherwise runs
 the normal callback path). Net diff in `qi.c`: ~150 LOC.
 
-Patch is upstream-ready. Submit alongside ASK 2.0 v1.0 release.
+Patch is upstream-ready. Submit alongside ASK2 v1.0 release.
 Precedent: mlx5 does similar descriptor sharing between RDMA and
 Ethernet paths via `mlx5_core_modify_qp_state()` + RDMA-CM device
 ownership transfer.
@@ -810,7 +810,9 @@ This is the one place where "use the existing GPL code" is unambiguously the rig
 
 ---
 
-## 9. VPP coexistence `[AGENT, HUMAN for tuning]`
+## 9. VPP coexistence
+
+The data-path mechanics here are spec-driven; final tuning of CPU pinning and memif queue depths is a hardware-measurement step.
 
 ### 9.1 The model
 
@@ -830,7 +832,7 @@ ASK fast path runs in silicon regardless of VPP. The interaction surface is: how
 | **VPP-only** | `set vpp enable; set vpp interface ethN` | Specialised CGNAT/SR appliance with no kernel features |
 | **Hybrid** | both enabled | Most flows direct via ASK, specific flows via VPP plugins |
 
-### 9.3 Hybrid mode promotion path `[AGENT]`
+### 9.3 Hybrid mode promotion path
 
 ```
 flow arrives at eth3
@@ -857,14 +859,14 @@ set policy access-list 100 rule 10 destination address 10.0.0.0/8
 
 Flows matching ACL 100 go to VPP instead of direct ASK hardware. Everything else uses ASK.
 
-### 9.5 What we don't do `[REFERENCE]`
+### 9.5 What we don't do
 
 - No VPP plugin that talks to `ask.ko` directly. VPP runs in its lane, ASK runs in its lane. They communicate through memif (existing VPP infrastructure) and rtnetlink (existing kernel infrastructure). No new coupling.
 - No promotion of hardware-offloaded flows into VPP mid-flow. Once a flow is in 210 silicon, it stays there until eviction. Operators wanting VPP processing classify flows up-front via ACL.
 
 ---
 
-## 10. Build pipeline and VyOS integration `[AGENT]`
+## 10. Build pipeline and VyOS integration
 
 ### 10.1 Repository layout
 
@@ -1005,7 +1007,7 @@ Measured on Mono Gateway DK with Spirent or Keysight CyPerf, both directions, 4 
 
 ---
 
-## 12. The 210 microcode protocol (reference) `[REFERENCE]`
+## 12. The 210 microcode protocol (reference)
 
 This section documents the wire-level protocol that the 210 microcode expects. **It is extracted from the GPL-2.0 source published at `github.com/we-are-mono/ASK` and treated as documentation of silicon behaviour, not as code to copy.** The implementation in `ask_hostcmd.c` derives only from these documented facts, not from the source file structure or function names.
 
@@ -1215,7 +1217,7 @@ int ask_hw_sa_insert_v4_esp(struct fman *fman,
 
 The rest of `ask.ko` calls these typed functions. The wire format never leaks out of `ask_hostcmd.c`. Tracepoints fire on every call for observability.
 
-### 12.7 What's NOT documented and must be probed `[HUMAN]`
+### 12.7 What's NOT documented and must be probed
 
 Most of the opcode space is documented in the GPL source. Three things require live-hardware confirmation:
 
@@ -1225,9 +1227,35 @@ Most of the opcode space is documented in the GPL source. Three things require l
 
 Estimated probe time: **1-2 weeks**, not 8-10 weeks. The protocol is documented; we're confirming edge cases.
 
+### 12.8 Confirmed hardware behaviour (PR13 findings, 2026-05-13)
+
+PR13 (M2.4 — first hardware-validated read against the live Mono Gateway DK) probed the §12.7 unknowns and surfaced a fundamental mismatch between the §12.1–§12.6 host-command protocol and the microcode actually loaded on the silicon.
+
+**Finding 1 — the loaded microcode is stock NXP QEF 210.10.1, not an opcode-dispatch microcode.**
+U-Boot loads the microcode blob from SPI flash partition `mtd3` (`fman-ucode`, 1 MiB) into FMan IRAM at boot. The DT exposes the same blob via `/soc/fman@1a00000/fman-firmware/fsl,firmware` (reachable from kernel space via `of_find_compatible_node("fsl,fman-firmware")` + `of_get_property("fsl,firmware")`). The blob carries the magic `'Q' 'E' 'F' 0x01` at offset 4, followed by a 64-byte ASCII description at offset 8 reading `"Microcode version 210.10.1 for LS1043 r1.0"`. This is the upstream NXP QorIQ Engine Firmware that mainline `drivers/net/ethernet/freescale/fman/fman.c` and the in-tree FMan PCD API are designed to drive — it implements the parser, classifier, policer, and KeyGen entirely via MURAM-resident config tables, **not** via a CPU-side host-command doorbell.
+
+**Finding 2 — the §12 host-command opcode dispatcher does not exist on this microcode.**
+The FPM host-command region (`fmfp_cev[0..3]` at FMan base + 0xC30E0, mask `fmfp_cee[0..3]` at +0xC3040, response IRQ bits `INTR_EN_REV0..3 = 0x8000/0x4000/0x2000/0x1000` in `fm_npi` at +0xC30D4) is physically present and writeable, but stock 210.x QEF microcode does not poll the CEV doorbell or raise REV events in response. Confirmed indirectly: mainline `fman_irq()` in `drivers/net/ethernet/freescale/fman/fman.c` never dispatches the REV0..3 bits, and `fman_register_intr(fman, FMAN_EV_FMAN_CTRL_0..3, ...)` is `EXPORT_SYMBOL`'d but has zero in-tree callers. There is no upstream consumer of the CPU↔ucode message-passing channel because no upstream microcode implements the receive side. The §12.2 opcode map (`OP_GET_UCODE_VERSION=0x01`, `OP_FLOW_INSERT_V4_TCP=0x10`, …) was extracted from `cdx-5.03.1`/`fci-9.00.12` source headers in the legacy `we-are-mono/ASK` tree, where those opcodes were dispatched by a **custom NXP/proprietary microcode binary** that shipped with that vendor stack — not by the QEF blob in mainline U-Boot or in our SPI flash.
+
+**Finding 3 — `0003-fman-host-command-api.patch` (landed in PR12) is correct as-is and stays.**
+The kernel-side transport layer (`fmd_host_cmd_ring_doorbell`, `fmd_host_cmd_arm_irq`) is sound. It correctly returns `-ENXIO` from `fmd_host_cmd_send()` because the doorbell is genuinely unanswered for the running microcode. The patch is preserved as future infrastructure for a hypothetical custom ASK2 microcode (or for a future revision of QEF that adds opcode dispatch); no rework is required if and when such a microcode appears. PR12 was not wasted work — it is the architecturally correct wire layer; only the §12.2 opcode contract above it is hypothetical.
+
+**Finding 4 — §12.7 question 2 (event-channel binding) is partially answered, questions 1 and 3 are moot.**
+SPI 44 (Linux IRQ 59) is the FMan event IRQ on LS1046A; SPI 45 is the FMan err IRQ (shared with `bman-err`/`qman-err`). The CEV/REV register topology is documented above. However, §12.7 questions 1 (MURAM partition behaviour under `OP_GET_MURAM_INFO`) and 3 (eviction-policy tunables in opcode space 0x90–0x9F) are not answerable because the opcodes themselves are not implemented — there is nothing to scan. Hardware-side MURAM partitioning is observable instead via the in-tree `fman_muram` allocator API and via the parser/classifier table layouts programmed through the FMan PCD interface.
+
+**Finding 5 — `STRICT_DEVMEM=y` blocks `/dev/mem` peeks on the FLAVOR=default 6.18 kernel.**
+Register-level probing of FMan FPM from userspace requires either a debug kernel build with `STRICT_DEVMEM=n` or a kernel-side ioremap (the path PR13 took for the DT blob read). This is intentional and stays.
+
+**Mechanism switch for ASK2 v1.0 (binding decision).**
+ASK2 v1.0 will program the FMan PCD (parser/classifier/KeyGen/policer) via the in-tree mainline FMan API in `drivers/net/ethernet/freescale/fman/fman_keygen.c` (and siblings `fman_port.c`, `fman_dtsec.c`, `fman_memac.c`), driven from `ask.ko` and from `askd` userspace. The §12.1–§12.6 host-command protocol is **deferred indefinitely** — it remains in this spec as a reference for what a future custom-microcode path would look like, and PR12's wire layer is preserved against that future. PR14+ (§5.5 onwards) is re-scoped accordingly: the consumer of `ask_hostcmd.c` becomes the FMan PCD table-programming pathway, not opcode-dispatch insertion. The `ask_hw_ucode_get_version()` helper added in PR13 (sourced from the QEF blob in DT, not from `OP_GET_UCODE_VERSION`) is the canonical and the only required version-read mechanism.
+
+**Verification** — `ask.ko` loaded on the live Mono Gateway DK with kernel 6.18.28, `dmesg | grep '^ask: hw'` shows `ask: hw: FMan microcode 210.10.1 ("Microcode version 210.10.1 for LS1043 r1.0")`; the `ASK_INFO` genl reply carries `family=210, major=10, minor=1, patch=0` matching the DT blob byte-for-byte.
+
 ---
 
-## 13. Testing strategy `[AGENT for unit + integration; HUMAN for performance gates]`
+## 13. Testing strategy
+
+Unit and integration tests are implementable from this spec; the performance gates in §11.1 require live hardware and a traffic generator.
 
 ### 13.1 Unit tests (kunit, in-tree)
 
@@ -1274,11 +1302,11 @@ The acceptance gates in Section 11.1 must pass on the Mono test rig before v1.0 
 
 The reduction comes from: no `cdx_ctrl` legacy compat shim (-500), no XML loader path (-1200), thinner askd because the kernel does more (-2000), unified flow handling instead of 16 separate table types in userspace (-500).
 
-### 14.2 Agentic implementation time
+### 14.2 Implementation time (spec-driven)
 
-Given the spec is concrete and the design uses standard mainline patterns:
+Given the spec is concrete and the design uses standard mainline patterns, productivity is bounded by the strength of mainline precedent for each component:
 
-| Component | Precedent strength | Agent productivity (LOC/day) | Eng-days |
+| Component | Precedent strength | Productivity (LOC/day) | Eng-days |
 |---|---|---|---|
 | ask.ko core (flow table, RCU, genl) | Very strong (mlx5, nfp examples) | 600 | 6 |
 | ask.ko offload (flow_block, xfrmdev) | Strong (mainline patterns) | 400 | 5 |
@@ -1291,9 +1319,11 @@ Given the spec is concrete and the design uses standard mainline patterns:
 | Build pipeline | Strong | 400 | 2 |
 | Test suite | Strong | 500 | 5 |
 | Documentation | Strong | 800 | 2 |
-| **Subtotal agent-implementable** | | | **37 eng-days** |
+| **Subtotal spec-implementable** | | | **37 eng-days** |
 
-### 14.3 Human-only work
+### 14.3 Hardware-bound and review-bound work
+
+These items require live silicon, a traffic generator, or upstream review and run on a calendar (not LOC) basis. They overlap heavily with §14.2:
 
 | Activity | Calendar weeks |
 |---|---|
@@ -1302,11 +1332,11 @@ Given the spec is concrete and the design uses standard mainline patterns:
 | Performance gate measurement runs | 2 |
 | Upstream patch review (caam-qi-share, dpaa-eth-flow-block) | 8-12 (parallel) |
 | Code review and integration | 3 |
-| **Subtotal human calendar (mostly parallel)** | **10-12 weeks** |
+| **Subtotal calendar (mostly parallel)** | **10-12 weeks** |
 
 ### 14.4 Realistic total
 
-With **one senior engineer** driving agent loops + hardware verification + one part-time engineer for review and integration:
+Combining the spec-implementable work with the hardware-bound and review-bound calendar:
 
 - **Months 1-2**: ask.ko core + in-tree patches + first flow type working end-to-end. M2 gate: nft `flow add` over IPv4 TCP → packet traverses 210 fast path on real hardware.
 - **Month 3**: All non-IPsec flow types + bridge + offline ports. M3 gate: NAT works, bridge offload works.
@@ -1314,12 +1344,12 @@ With **one senior engineer** driving agent loops + hardware verification + one p
 - **Month 5**: askd + ask-cli + VyOS CLI. M5 gate: vanilla Mono Gateway DK boots VyOS rolling with `set system offload ask` and forwards at line rate.
 - **Month 6**: VPP coexistence, performance tuning, soak testing, v1.0 RC.
 
-**Total: 6 months, 1 engineer + 0.5 reviewer.** Significant compression vs v0.6's 9 months because:
+**Total: 6 months end-to-end.** Significant compression vs v0.6's 9 months because:
 - No clean-room opcode probing (Section 12 documents the protocol)
 - No legacy ABI compat shim
 - No XML loader UMH dance
 - Aggressive reuse of mainline `nf_flow_table` and `xfrmdev_ops` infrastructure
-- Agentic implementation of well-precedented code patterns
+- Spec-driven implementation of well-precedented code patterns
 
 If hardware verification reveals protocol edge cases beyond what Section 12 covers, add 1-2 months. If upstream patch review delays affect critical path, those happen in parallel — they don't gate v1.0.
 
@@ -1335,7 +1365,7 @@ If hardware verification reveals protocol edge cases beyond what Section 12 cove
 | 4 | Performance gates miss Geerling 1 Mpps target | Medium | High | Cache-line alignment tuning; verify RCU latency; offline-port plumbing |
 | 5 | Mono changes 210 ucode and breaks protocol | Low | High | Pin ucode version in Section 12; version-gate at module init |
 | 6 | VyOS Inc. changes VPP integration model | Low | Low | Track 1.5 LTS until 2027 |
-| 7 | Agent-generated code carries subtle bugs | High | Medium | kunit ≥80%, mandatory human review, syzkaller fuzzing |
+| 7 | Subtle bugs in fast-path / RCU / genl code | High | Medium | kunit ≥80%, mandatory code review, syzkaller fuzzing |
 | 8 | 6.18 LTS gets superseded mid-project | Low | Medium | Pin to LTS until 2027, update at boundary |
 | 9 | NETIF_F_HW_ESP / NETIF_F_HW_TC interaction with VyOS networking config | Low | Low | Test early, document any caveats |
 | 10 | RCU grace period under high flow churn causes memory pressure | Low | Medium | call_rcu rate-limiting if needed; monitor in soak testing |
@@ -1398,7 +1428,7 @@ These are non-goals. Don't slip them in.
 
 ---
 
-## 19. Implementation cookbook (for agents picking up the spec)
+## 19. Implementation cookbook
 
 1. **Read Sections 0, 1, 3, 4, 5, 7, 12 in full** before writing any code.
 2. **Set up the build pipeline first.** Get a kernel building with the three in-tree patches applied, even if they're empty stubs. Verify the OOT module skeleton builds, signs, and loads.
@@ -1430,4 +1460,4 @@ These are non-goals. Don't slip them in.
 
 ---
 
-**End of v0.7.** Supersedes v0.6 in entirety. The next version, if any, only updates Section 12 with confirmed hardware probe results from M1-M2 milestones.
+**End of v0.8.** Supersedes v0.7 in entirety. v0.8 adds §12.8 capturing PR13's confirmed hardware-probe findings against the live Mono Gateway DK and binds ASK2 v1.0 to the in-tree FMan PCD pathway rather than the hypothetical opcode-dispatch protocol of §12.1–§12.6 (which is preserved as reference for a future custom-microcode path).

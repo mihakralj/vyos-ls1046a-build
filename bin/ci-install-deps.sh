@@ -41,9 +41,9 @@ apt-get install -y \
   libsystemd-dev libglib2.0-dev libip4tc-dev libipset-dev libnfnetlink-dev \
   libnftnl-dev libnl-nf-3-dev libpopt-dev libpcap-dev libbpf-dev \
   libreadline-dev liblua5.3-dev libpcre2-dev \
-  `# Toolchains used by sub-package builds (accel-ppp; ASK 2.0 components` \
+  `# Toolchains used by sub-package builds (accel-ppp; ASK2 components` \
   `# will declare their own additional deps here once they land per` \
-  `# specs/ask-2.0-rewrite-spec.md).` \
+  `# specs/ask2-rewrite-spec.md).` \
   bubblewrap clang llvm cmake byacc flex \
   `# Protobuf path (vyconf .proto compilation)` \
   `# python3-cracklib: https://github.com/vyos/vyos-build/commit/e846e68f9f6457865f3e3af92adfe42933555c59` \

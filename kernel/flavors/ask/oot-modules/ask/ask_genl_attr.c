@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * ASK 2.0 - Generic netlink attribute policies
+ * ASK2 - Generic netlink attribute policies
  *
  * Defines the nla_policy tables referenced by ask_genl.c. Per spec v0.7 §7,
  * all top-level attributes are NLA_NESTED containers; the inner policies

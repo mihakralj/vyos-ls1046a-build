@@ -28,10 +28,10 @@ set -euo pipefail
 exec 2>&1
 cd "${GITHUB_WORKSPACE:-.}"
 
-# ASK 2.0 (rewrite-in-progress): the SDK DTS overlay
+# ASK2 (rewrite-in-progress): the SDK DTS overlay
 # (mono-gateway-dk-sdk.dts) was deleted on the ask20 branch along with the
 # rest of the ASK 1.x SDK stack. All flavors now compile the mainline
-# mono-gateway-dk.dts directly. The ASK 2.0 spec keeps the mainline FMan
+# mono-gateway-dk.dts directly. The ASK2 spec keeps the mainline FMan
 # driver and re-implements the fast-path in ask.ko / askd, so an SDK DTS
 # overlay is no longer needed.
 DTS_SRC="board/dtb/mono-gateway-dk.dts"
@@ -120,7 +120,7 @@ dtc -I dts -O dtb \
 echo "### dtc done: $(stat -c%s "$DTB_OUT") bytes"
 
 ### 6. Sanity-check the compiled DTB.
-# ASK 2.0 (rewrite-in-progress): the SDK-specific verification (cell-index >= 20,
+# ASK2 (rewrite-in-progress): the SDK-specific verification (cell-index >= 20,
 # fsl,bpool-ethernet-cfg, fsl,dpa-ethernet count, etc.) was removed on the ask20
 # branch along with the SDK DTS overlay. We now only sanity-check that the DTB
 # is non-trivially populated.

@@ -1,12 +1,12 @@
 #!/bin/bash
-# ci-build.sh — CI driver for the ASK 2.0 OOT kernel module
+# ci-build.sh — CI driver for the ASK2 OOT kernel module
 #
 # Builds ask.ko against the kernel source tree that bin/ci-build-packages.sh
 # just compiled, signs the module with the kernel's auto-generated signing
 # key, and packages the signed .ko as a Debian package that
 # bin/ci-pick-packages.sh will pull into the live-build chroot.
 #
-# Invariants relied upon (see AGENTS.md and plans/ASK-2.0-IMPLEMENTATION.md):
+# Invariants relied upon (see AGENTS.md and plans/ASK2-IMPLEMENTATION.md):
 #   - $KSRC must contain a complete built kernel tree with Module.symvers,
 #     vmlinux, scripts/sign-file, and certs/signing_key.{pem,x509}.
 #     bin/ci-build-packages.sh calls us BEFORE the post-build cleanup that
@@ -28,7 +28,7 @@
 # Outputs:
 #   ask-modules-${KVER}_${PKG_VER}_arm64.deb in $PKG_DIR
 #
-# Spec: plans/ASK-2.0-IMPLEMENTATION.md PR3 (M0.3 — wire build pipeline)
+# Spec: plans/ASK2-IMPLEMENTATION.md PR3 (M0.3 — wire build pipeline)
 set -ex -o pipefail
 
 KSRC="${1:?KSRC required as \$1}"
@@ -59,7 +59,7 @@ fi
 ASK_VER="$(grep -E '^MODULE_VERSION' ask_main.c | sed -nE 's/.*"([^"]+)".*/\1/p' | head -1)"
 [ -n "$ASK_VER" ] || ASK_VER="2.0.0"
 
-echo "### ASK 2.0 OOT module build"
+echo "### ASK2 OOT module build"
 echo "###   KSRC      = $KSRC"
 echo "###   KVER      = $KVER"
 echo "###   ASK_VER   = $ASK_VER"
@@ -130,13 +130,13 @@ Priority: optional
 Architecture: arm64
 Maintainer: VyOS LS1046A maintainers <noreply@invalid>
 Depends: linux-image-${KVER}
-Description: ASK 2.0 OOT kernel modules for LS1046A FMan/210 hardware offload
- Out-of-tree kernel modules implementing the ASK 2.0 fast-path offload
+Description: ASK2 OOT kernel modules for LS1046A FMan/210 hardware offload
+ Out-of-tree kernel modules implementing the ASK2 fast-path offload
  for the NXP LS1046A FMan microcode (210-series). Replaces the legacy
  proprietary cdx.ko / auto_bridge.ko stack.
  .
- See specs/ask-2.0-rewrite-spec.md for the architecture and
- plans/ASK-2.0-IMPLEMENTATION.md for the implementation status.
+ See specs/ask2-rewrite-spec.md for the architecture and
+ plans/ASK2-IMPLEMENTATION.md for the implementation status.
 EOF
 
 # postinst: regenerate the modules.dep so insmod-by-name works on next boot.
@@ -164,7 +164,7 @@ chmod 0755 "$STAGE/DEBIAN/postrm"
 echo "### Building $DEB_FILE"
 dpkg-deb --build --root-owner-group "$STAGE" "$PKG_DIR/$DEB_FILE"
 
-echo "### ASK 2.0 OOT module .deb produced:"
+echo "### ASK2 OOT module .deb produced:"
 ls -lh "$PKG_DIR/$DEB_FILE"
 dpkg-deb --info "$PKG_DIR/$DEB_FILE"
 dpkg-deb --contents "$PKG_DIR/$DEB_FILE"

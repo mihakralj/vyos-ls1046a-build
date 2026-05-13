@@ -1,7 +1,7 @@
-# Flavor: `ask` — ASK 2.0 (clean-room rewrite)
+# Flavor: `ask` — ASK2 (clean-room rewrite)
 
 **Status:** scaffold only. Implementation tracked in
-[`specs/ask-2.0-rewrite-spec.md`](../../../specs/ask-2.0-rewrite-spec.md)
+[`specs/ask2-rewrite-spec.md`](../../../specs/ask2-rewrite-spec.md)
 (v0.6, 2026-05-11).
 
 This flavor is the **clean-room rewrite** of the NXP ASK fast-path for
@@ -13,7 +13,7 @@ and the 266-file vendored NXP SDK FMan/QMan/BMan driver overlay) in
 
 The brand "ASK" and the `FLAVOR=ask` build target carry forward
 unchanged. The 210-series FMan microcode (loaded by U-Boot from SPI
-flash on every shipped Mono Gateway) is also unchanged — ASK 2.0 sits
+flash on every shipped Mono Gateway) is also unchanged — ASK2 sits
 on top of it without touching the binary.
 
 ## What lives here
@@ -60,6 +60,6 @@ match modules (verbatim copy into `200-ask2-hooks.patch` per spec §10.1).
 
 ## Implementation order
 
-See [`specs/ask-2.0-rewrite-spec.md`](../../../specs/ask-2.0-rewrite-spec.md)
+See [`specs/ask2-rewrite-spec.md`](../../../specs/ask2-rewrite-spec.md)
 §19 for the agent-driven implementation cookbook. Acceptance gates are
 in §15.5.

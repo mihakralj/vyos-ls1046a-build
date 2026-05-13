@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * ASK 2.0 generic-netlink UAPI.
+ * ASK2 generic-netlink UAPI.
  *
  * The kernel module exposes a single GENL family named "ask" (version 1)
  * with three multicast groups (events, flows, sas).
@@ -12,7 +12,7 @@
  * that matters: the legacy stack made userspace push flows; the modern
  * stack lets the kernel pull them through standard infrastructure.
  *
- * See specs/ask-2.0-rewrite-spec.md §7 for the full protocol.
+ * See specs/ask2-rewrite-spec.md §7 for the full protocol.
  */
 #ifndef _UAPI_LINUX_ASK_H
 #define _UAPI_LINUX_ASK_H
@@ -75,7 +75,7 @@ enum ask_genl_attr {
 enum ask_info_attr {
     ASK_INFO_ATTR_UNSPEC,
 
-    ASK_INFO_ATTR_DRIVER_VERSION,   /* string, e.g. "ask 2.0.0" */
+    ASK_INFO_ATTR_DRIVER_VERSION,   /* string, e.g. "ask2.0" */
     ASK_INFO_ATTR_GENL_VERSION,     /* u32 */
     ASK_INFO_ATTR_UCODE_FAMILY,     /* u16 (e.g. 0x0210) */
     ASK_INFO_ATTR_UCODE_MAJOR,      /* u8 */

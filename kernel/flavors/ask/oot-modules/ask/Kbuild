@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# ASK 2.0 - out-of-tree kernel module Kbuild
+# ASK2 - out-of-tree kernel module Kbuild
 #
 # PR1: skeleton only. Compiles into a single ask.ko containing
 # the genl family registration + ASK_CMD_GET_INFO. All other
@@ -15,6 +15,7 @@ ask-y := \
 ask_main.o \
 ask_genl.o \
 ask_genl_attr.o \
+ask_hw.o \
 ask_flow.o \
 ask_flow_offload.o \
 ask_xfrm.o \

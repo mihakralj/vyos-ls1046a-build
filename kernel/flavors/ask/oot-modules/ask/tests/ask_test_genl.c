@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * ASK 2.0 - kunit suite for ask_genl.c (PR9 / M1.5)
+ * ASK2 - kunit suite for ask_genl.c (PR9 / M1.5)
  *
  * Drives the pure-helper surface of ask_genl.c directly:
  *

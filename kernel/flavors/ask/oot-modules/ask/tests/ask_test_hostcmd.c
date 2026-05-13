@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * ASK 2.0 - hostcmd encoder/decoder kunit suite (PR6 / M1.2)
+ * ASK2 - hostcmd encoder/decoder kunit suite (PR6 / M1.2)
  *
  * Golden-hex tests against spec §12.1-§12.5. Every test below pins
  * the exact byte stream the encoder must produce. The §12.5 canonical

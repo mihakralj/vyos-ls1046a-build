@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * ASK 2.0 - kunit suite for ask_flow_offload.c (PR8 / M1.4)
+ * ASK2 - kunit suite for ask_flow_offload.c (PR8 / M1.4)
  *
  * Drives the FLOW_CLS_REPLACE / DESTROY / STATS dispatcher in
  * ask_flow_offload_setup_tc_block_cb() directly, bypassing the

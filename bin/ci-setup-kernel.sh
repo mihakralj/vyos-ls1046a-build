@@ -3,7 +3,7 @@
 # Called by: .github/workflows/auto-build.yml "Setup kernel config" step
 # Expects: GITHUB_WORKSPACE set
 #
-# ASK 2.0 (rewrite-in-progress): the legacy ASK_KERNEL_TAG env var and the
+# ASK2 (rewrite-in-progress): the legacy ASK_KERNEL_TAG env var and the
 # ci-consume-ask-kernel.sh / ci-setup-kernel-ask.sh helpers were deleted on
 # the ask20 branch along with the ASK 1.x SDK kernel stack. This script
 # now runs unconditionally for all flavors (default | ask | vpp). The
@@ -40,7 +40,7 @@ sed -i '/CONFIG_DMA_CMA/d'                  "$DEFCONFIG"
 # (00-board.config .. 08-dpaa1.config) so a plain glob expansion sorts
 # alphabetically into the intended load order. Flavor-specific fragments
 # live under kernel/flavors/<flavor>/kernel-config/ and are NOT picked up
-# here. ASK 2.0 (per specs/ask-2.0-rewrite-spec.md) does not currently
+# here. ASK2 (per specs/ask2-rewrite-spec.md) does not currently
 # add any flavor-specific kernel-config fragments; if it grows them they
 # would live under kernel/flavors/ask/kernel-config/ and need explicit
 # wiring at that point.
@@ -100,8 +100,8 @@ fi
 # INA234 hwmon patch (formerly kernel/flavors/ask/patches/fixes/4002-*) was
 # only meaningful on the kernel 6.6 line, since INA234 is upstream from
 # kernel 6.10 onwards. The default + vpp flavors track 6.18+, so the patch
-# is unnecessary. ASK 2.0 (rewrite-in-progress) tracks the same 6.18+
-# kernel as the other flavors per specs/ask-2.0-rewrite-spec.md — no
+# is unnecessary. ASK2 (rewrite-in-progress) tracks the same 6.18+
+# kernel as the other flavors per specs/ask2-rewrite-spec.md — no
 # special handling needed here.
 
 # Shared LS1046A board patches now live under kernel/common/patches/board/.
@@ -162,9 +162,9 @@ else
     echo "WARNING: $PERF_HEADERS_PATCH missing — kernel arm64 perf build will fail"
 fi
 
-### FLAVOR=ask: stage the ASK 2.0 in-tree kernel patches
+### FLAVOR=ask: stage the ASK2 in-tree kernel patches
 #
-# Per plans/ASK-2.0-IMPLEMENTATION.md PR2/PR3 and spec §10, the ASK 2.0
+# Per plans/ASK2-IMPLEMENTATION.md PR2/PR3 and spec §10, the ASK2
 # kernel surface needs three small patches (currently placeholder stubs;
 # real implementations land in M2):
 #   0001-caam-qi-share.patch        — caam_qi_ext_consumer_register/release
@@ -194,7 +194,7 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
         echo "ERROR: FLAVOR=ask but $ASK_PATCH_DIR is missing"
         exit 1
     fi
-    echo "### FLAVOR=ask — staging ASK 2.0 in-tree kernel patches from $ASK_PATCH_DIR"
+    echo "### FLAVOR=ask — staging ASK2 in-tree kernel patches from $ASK_PATCH_DIR"
     ASK_PATCH_COUNT=0
     for src_patch in "$ASK_PATCH_DIR"/0001-*.patch \
                      "$ASK_PATCH_DIR"/0002-*.patch \
@@ -217,7 +217,7 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
         echo "ERROR: expected 3 ASK kernel patches, staged $ASK_PATCH_COUNT"
         exit 1
     fi
-    echo "### ASK 2.0: $ASK_PATCH_COUNT in-tree kernel patches staged"
+    echo "### ASK2: $ASK_PATCH_COUNT in-tree kernel patches staged"
 fi
 
 # Stage FMD Shim + LP5812 source from the new common files layout.

@@ -4,7 +4,7 @@
 #
 # Modes:
 #   (no arg)    — full ISO build (default flow)
-#   ask-mod     — build only the ASK 2.0 OOT kernel module against an
+#   ask-mod     — build only the ASK2 OOT kernel module against an
 #                 existing dev-loop kernel tree. Inputs:
 #                   $KSRC  — absolute path to the kernel source tree
 #                            (default: /opt/kernel-ls1046a-build/work/linux-*)
@@ -40,7 +40,7 @@ if [ "${1:-}" = "ask-mod" ]; then
         exit 1
     fi
     echo "============================================================"
-    echo "==> ask-mod: building ASK 2.0 OOT module"
+    echo "==> ask-mod: building ASK2 OOT module"
     echo "==>   KSRC    = $KSRC"
     echo "==>   PKG_DIR = $PKG_DIR"
     echo "============================================================"
@@ -157,7 +157,7 @@ export OCAML_VERSION=4.14.2
 
 step "Setup vyos-1x patches" bash bin/ci-setup-vyos1x.sh
 
-# ASK 2.0 (rewrite-in-progress): the legacy ASK kernel staging steps
+# ASK2 (rewrite-in-progress): the legacy ASK kernel staging steps
 # (local-stage-ask-kernel.sh, ci-consume-ask-kernel.sh, ci-setup-kernel-ask.sh)
 # were removed on the ask20 branch. All flavors now build the kernel locally
 # from the upstream-tracked source via ci-setup-kernel.sh + ci-build-packages.sh.

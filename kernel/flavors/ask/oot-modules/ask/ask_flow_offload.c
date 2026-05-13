@@ -1,6 +1,6 @@
  // SPDX-License-Identifier: GPL-2.0
 /*
- * ASK 2.0 - flow_offload subsystem (PR8 / M1.4)
+ * ASK2 - flow_offload subsystem (PR8 / M1.4)
  *
  * Implements the `flow_block_cb` dispatcher that the in-tree dpaa
  * patch (PR11/M2.2 — `0002-dpaa-eth-flow-block.patch`) plugs into the
