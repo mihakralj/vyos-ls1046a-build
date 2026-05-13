@@ -11,10 +11,10 @@
 #   RRGGBBWW (8 hex)             -> fade to that colour
 #   RRGGBB   (6 hex)             -> fade to (RR,GG,BB,00)
 #   leading '#' on hex tokens is accepted and ignored.
-#   simulate [tick_s [sigma]]    -> network-saturation demo: Geometric Brownian
-#                                   Motion random walk over palette indices,
-#                                   jumps every tick_s seconds (default 0.5).
-#                                   Ctrl-C to stop. Restores 'off' on exit.
+#   simulate [tick_s]            -> network-saturation demo: jump to a uniformly
+#                                   random palette index every tick_s seconds
+#                                   (default 0.5). Ctrl-C to stop. Restores
+#                                   'off' on exit.
 #
 # All transitions fade from the current LED state to the target over
 # FADE_MS milliseconds (linear interpolation in raw 8-bit PWM space).
@@ -40,7 +40,6 @@
 
 from __future__ import annotations
 
-import math
 import random
 import re
 import signal
@@ -106,16 +105,10 @@ assert all(re.fullmatch(r"[0-9a-fA-F]{8}", c) for c in PALETTE), \
 
 # ---- traffic-simulation defaults ----------------------------------------
 #
-# `led simulate [tick_s [sigma]]` walks a virtual saturation state under
-# Geometric Brownian Motion in log-space and maps it to a palette index
-# every `tick_s` seconds. Defaults tuned so an unattended demo cycles
-# through the whole ramp in a few minutes without parking at an extreme.
-SIM_TICK_S      = 0.5    # seconds between palette jumps
-SIM_SIGMA       = 0.35   # GBM volatility per tick (log-space); larger = jumpier
-SIM_MU          = 0.0    # GBM drift; 0 = unbiased random walk in log space
-SIM_X0          = 0.5    # initial normalized saturation (0..1) → mid-ramp
-SIM_REFLECT_LO  = 0.02   # soft floor so state doesn't park at index 0
-SIM_REFLECT_HI  = 0.99   # soft ceiling so state doesn't park at index 31
+# `led simulate [tick_s]` jumps to a uniformly random palette index
+# every `tick_s` seconds. Each tick is independent (no random walk,
+# no memory). Defaults tuned for a comfortable demo cadence.
+SIM_TICK_S = 0.5    # seconds between palette jumps
 
 
 # ---- low-level sysfs -----------------------------------------------------
@@ -267,31 +260,27 @@ def _parse_positive_float(tok: str, label: str) -> float:
         v = float(tok)
     except ValueError:
         die(f"simulate: {label} '{tok}' is not a number", 2)
-    if not math.isfinite(v) or v <= 0:
-        die(f"simulate: {label} must be > 0 (got {tok})", 2)
+    # Reject inf/nan/negative/zero — every code path that uses the
+    # result then passes it to time.sleep(), which would silently
+    # hang on inf and raise on negative.
+    if v != v or v == float("inf") or v <= 0:
+        die(f"simulate: {label} must be a positive finite number (got {tok})", 2)
     return v
 
 
 def cmd_simulate(args: list[str]) -> None:
-    """Network-saturation demo via Geometric Brownian Motion in log-space.
+    """Network-saturation demo via uniform random palette jumps.
 
-    State x_t ∈ (0, 1) is updated each tick by
-
-        x_{t+1} = clip( x_t * exp((mu - sigma^2/2)*dt + sigma*sqrt(dt)*Z) )
-
-    with Z ~ N(0,1) and dt = 1 (per-tick units already baked into mu/sigma).
-    The result is reflected at SIM_REFLECT_LO / SIM_REFLECT_HI so the demo
-    spends time across the whole ramp instead of parking at an extreme.
-    x is then mapped linearly onto the palette index 0..len(PALETTE)-1.
+    Each tick, pick an independent uniform-random palette index in
+    0..len(PALETTE)-1 and fade to it. No random walk, no memory between
+    ticks. Ctrl-C / SIGTERM punches the LED to 0 0 0 0 on exit.
 
     Argv tail (optional):
         args[0]  tick interval in seconds  (default SIM_TICK_S)
-        args[1]  GBM sigma                 (default SIM_SIGMA)
     """
     tick_s = _parse_positive_float(args[0], "tick_s") if len(args) >= 1 else SIM_TICK_S
-    sigma  = _parse_positive_float(args[1], "sigma")  if len(args) >= 2 else SIM_SIGMA
-    if len(args) > 2:
-        die(f"simulate: expected at most 2 args (tick_s sigma); got {len(args)}", 2)
+    if len(args) > 1:
+        die(f"simulate: expected at most 1 arg (tick_s); got {len(args)}", 2)
 
     verify_driver()
     claim_triggers()
@@ -310,34 +299,18 @@ def cmd_simulate(args: list[str]) -> None:
     signal.signal(signal.SIGTERM, _cleanup)
 
     rng = random.Random()
-    x = SIM_X0
     n = len(PALETTE)
     last_idx = -1
-    drift = SIM_MU - 0.5 * sigma * sigma   # Itô-correction term
 
     print(
-        f"simulate: tick={tick_s}s sigma={sigma} mu={SIM_MU} "
-        f"x0={SIM_X0} reflect=({SIM_REFLECT_LO},{SIM_REFLECT_HI}) "
-        f"palette_len={n}  (Ctrl-C to stop)",
+        f"simulate: tick={tick_s}s uniform_random palette_len={n}  "
+        f"(Ctrl-C to stop)",
         file=sys.stderr,
     )
 
     try:
         while True:
-            z = rng.gauss(0.0, 1.0)
-            x = x * math.exp(drift + sigma * z)
-
-            # Reflective barriers on (lo, hi) — flip the excess back inside.
-            if x < SIM_REFLECT_LO:
-                x = SIM_REFLECT_LO + (SIM_REFLECT_LO - x)
-            elif x > SIM_REFLECT_HI:
-                x = SIM_REFLECT_HI - (x - SIM_REFLECT_HI)
-            # And clamp in case the reflection itself overshoots.
-            x = max(SIM_REFLECT_LO, min(SIM_REFLECT_HI, x))
-
-            idx = int(x * n)
-            if idx >= n:
-                idx = n - 1
+            idx = rng.randrange(n)
             if idx != last_idx:
                 last_idx = idx
                 r, g, b, w = parse_hex8(PALETTE[idx])
@@ -357,7 +330,7 @@ USAGE = (
     f"       {PROG} R G B                 fade to (R,G,B,0) — white channel zeroed\n"
     f"       {PROG} RRGGBBWW              fade to 8-hex-digit colour (optional leading #)\n"
     f"       {PROG} RRGGBB                fade to 6-hex-digit colour, white channel zeroed\n"
-    f"       {PROG} simulate [tick [σ]]   GBM network-saturation demo (defaults: {SIM_TICK_S}s, σ={SIM_SIGMA})\n"
+    f"       {PROG} simulate [tick]       uniform-random network-saturation demo (default tick: {SIM_TICK_S}s)\n"
     f"\n"
     f"All set/fade transitions take {FADE_MS} ms (baked in)."
 )
