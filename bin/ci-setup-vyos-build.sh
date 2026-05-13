@@ -296,9 +296,31 @@ cp board/scripts/fw_env.config "$CHROOT/etc/fw_env.config"
 ### LS1046A independent serial console (ls1046a-console.service)
 # Bypasses VyOS's system_console.py policy on serial-getty@ttyS0.service so
 # the login prompt on /dev/ttyS0 stays alive even when the seed config has
-# no `system { console { ... } }` stanza (commit 1876cff1). Enabled in
-# 96-enable-services.chroot.
+# no `system { console { ... } }` stanza (commit 1876cff1).
+#
+# Enable directly via RELATIVE symlinks in the chroot tree (NOT via the
+# 96-enable-services.chroot hook). Rationale: on the 2026.05.12-0558-rolling
+# build that hook silently failed to run — `udevadm info` and squashfs
+# inspection on mono confirmed NONE of the hook's outputs were present in
+# the live ISO (no zz-ls1046a-nodevbind.conf drop-in, no tuned ordering
+# drop-in, no `multi-user.target.wants/ls1046a-console.service`). Result:
+# `serial-getty@ttyS0` was torn down 9.143 s after start by VyOS's
+# `system_console.py SERIAL` ExecStartPre and there was nothing else
+# reading /dev/ttyS0 → admin locked out of the only physical console.
+#
+# Symlink targets are RELATIVE (`../ls1046a-console.service`) so that
+# `shutil.copytree(..., symlinks=False)` and `cp -a` in the live-build
+# pipeline preserve them as symlinks all the way into the squashfs.
+# (Absolute symlinks get dereferenced into regular files, which systemd
+# then ignores in `.wants/` directories — that is the bug that originally
+# motivated the chroot-hook indirection.)
 cp board/systemd/ls1046a-console.service "$CHROOT/etc/systemd/system/ls1046a-console.service"
+mkdir -p "$CHROOT/etc/systemd/system/multi-user.target.wants" \
+         "$CHROOT/etc/systemd/system/getty.target.wants"
+ln -sf ../ls1046a-console.service \
+       "$CHROOT/etc/systemd/system/multi-user.target.wants/ls1046a-console.service"
+ln -sf ../ls1046a-console.service \
+       "$CHROOT/etc/systemd/system/getty.target.wants/ls1046a-console.service"
 
 ### sysctl drop-in: quiet the kernel console AFTER userspace is up.
 ### Keeps early boot verbose (kernel cmdline has no loglevel=) but silences
