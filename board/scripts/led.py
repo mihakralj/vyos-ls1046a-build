@@ -2,16 +2,23 @@
 # led.py — Mono Gateway DK status LED control (LP5812, RGBW)
 #
 # Three input forms, single output: write R/G/B/W brightness 0..255 to the
-# LP5812 sysfs channels.
+# LP5812 sysfs channels, optionally fading from the current state.
 #
-#   led.py 17                    # int → index into /config/led.json palette
-#   led.py 51 0 51 0             # four ints 0..255 → R G B W
-#   led.py '#33003300'           # hex RRGGBBWW (with or without leading '#')
-#   led.py 33003300              # bare hex, 8 digits exactly
-#   led.py off                   # alias for index 0 of the palette
-#   led.py get                   # print current state
-#   led.py list                  # print the palette
-#   led.py -h | --help
+#   led 17                       # int → index into /config/led.json palette
+#   led 51 0 51 0                # four ints 0..255 → R G B W
+#   led '#33003300'              # hex RRGGBBWW (with or without leading '#')
+#   led 33003300                 # bare hex, 8 digits exactly
+#   led off                      # alias for index 0 of the palette
+#   led get                      # print current state
+#   led list                     # print the palette
+#   led -h | --help
+#
+# Fade options (apply to every form that *sets* a colour — index/decimal/
+# hex/off; ignored by get/list):
+#
+#   --fade-ms <N>     fade duration in milliseconds (default 200)
+#   --instant         alias for --fade-ms 0 (snap, no fade)
+#   --fps <N>         frame rate during the fade (default 50, → ~20 ms/frame)
 #
 # Index vs hex disambiguation:
 #   - exactly 8 hex digits (with optional '#')  -> hex form
@@ -33,13 +40,20 @@
 # Hardware: LP5812 on i2c-15 addr 0x6c, four single-colour LEDs forming one
 # logical RGBW indicator. Each channel is 8-bit PWM (0..255). The kernel
 # `trigger` attribute MUST be 'none' for direct brightness writes to stick;
-# this script enforces that on every write (same logic as led.sh).
+# this script enforces that on every write.
 #
 # Sysfs paths:
 #   /sys/class/leds/status:red/brightness
 #   /sys/class/leds/status:green/brightness
 #   /sys/class/leds/status:blue/brightness
 #   /sys/class/leds/status:white/brightness
+#
+# Fade implementation: read current R/G/B/W from sysfs, linearly interpolate
+# to the target over `fade_ms` total wall-clock at `fps` Hz, writing all
+# four channels per frame. For 200 ms at 50 fps → 10 frames @ 20 ms/frame.
+# fade_ms == 0 (or --instant) writes target directly with no sleep. The
+# final frame is always the exact target so rounding never strands the LED
+# one tick off.
 #
 # Exit codes:
 #   0  ok
@@ -50,10 +64,12 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 PROG = Path(sys.argv[0]).name
@@ -62,6 +78,13 @@ LED_BASE = Path("/sys/class/leds")
 CHANNELS = ("red", "green", "blue", "white")           # canonical R G B W
 PALETTE_PATH = Path("/config/led.json")
 PALETTE_SIZE = 32                                       # default length
+
+# Fade defaults. 200 ms at 50 fps is the sweet spot: visibly smooth (10 frames),
+# perceptibly snappy (still feels responsive on the CLI), cheap on sysfs writes
+# (40 writes total: 4 channels × 10 frames).
+DEFAULT_FADE_MS = 200
+DEFAULT_FPS = 50
+MIN_FRAME_MS = 5         # don't burn sysfs writes faster than 200 Hz
 
 # Default 32-colour palette. Order is stable so customer scripts that hard-code
 # an index keep working across upgrades. Colours stored as 8-hex strings
@@ -105,29 +128,9 @@ DEFAULT_PALETTE = [
 assert len(DEFAULT_PALETTE) == PALETTE_SIZE, "default palette must be 32 long"
 
 
-def die(msg: str, code: int) -> "None":
+def die(msg: str, code: int) -> None:
     print(f"{PROG}: {msg}", file=sys.stderr)
     sys.exit(code)
-
-
-def usage(stream=sys.stdout) -> None:
-    print(
-        f"""Usage: {PROG} <index>            # int → /config/led.json palette entry
-       {PROG} R G B W            # four 0-255 decimal channel values
-       {PROG} '#RRGGBBWW'        # 8 hex digits (with or without '#')
-       {PROG} off                # alias for palette index 0
-       {PROG} get                # print current state
-       {PROG} list               # print the palette
-
-Index vs hex: exactly 8 hex digits (with optional '#') is the hex form;
-any other pure-digit token is a palette index. So '99' is index 99 and
-'00000099' is the hex colour 00000099.
-
-Palette: {PALETTE_PATH} — auto-created with a 32-entry default on first
-run if missing. Edit it (preserving the JSON layout) to customise.
-""",
-        file=stream,
-    )
 
 
 def led_path(channel: str) -> Path:
@@ -162,8 +165,8 @@ def ensure_trigger_none(channel_dir: Path) -> None:
 
 
 def write_brightness(channel: str, value: int) -> None:
+    """Write a single channel without re-checking the trigger (caller has)."""
     p = led_path(channel)
-    ensure_trigger_none(p)
     try:
         (p / "brightness").write_text(str(value))
     except OSError as e:
@@ -180,18 +183,77 @@ def read_brightness(channel: str) -> int:
         return 0
 
 
-def set_rgbw(r: int, g: int, b: int, w: int) -> None:
-    for name, val in zip(("R", "G", "B", "W"), (r, g, b, w)):
-        if not (0 <= val <= 255):
-            die(f"{name}={val} out of range 0..255", 2)
-    verify_driver()
+def claim_triggers() -> None:
+    """Force trigger=none on all four channels once per invocation."""
+    for ch in CHANNELS:
+        ensure_trigger_none(led_path(ch))
+
+
+def write_rgbw_now(r: int, g: int, b: int, w: int) -> None:
+    """Write target values directly, no interpolation."""
     write_brightness("red", r)
     write_brightness("green", g)
     write_brightness("blue", b)
     write_brightness("white", w)
+
+
+def fade_to_rgbw(
+    target: tuple[int, int, int, int],
+    fade_ms: int,
+    fps: int,
+) -> None:
+    """Linear-interpolate from current sysfs state to target over fade_ms.
+
+    fade_ms == 0: snap to target (one write per channel).
+    fade_ms  > 0: interpolate in `frames` steps at `frame_ms` cadence,
+                  always landing exactly on target on the final frame.
+    """
+    r1, g1, b1, w1 = target
+    if fade_ms <= 0:
+        write_rgbw_now(r1, g1, b1, w1)
+        return
+
+    r0 = read_brightness("red")
+    g0 = read_brightness("green")
+    b0 = read_brightness("blue")
+    w0 = read_brightness("white")
+
+    # If we are already there, save the syscalls.
+    if (r0, g0, b0, w0) == (r1, g1, b1, w1):
+        return
+
+    frame_ms = max(MIN_FRAME_MS, int(1000 / fps))
+    frames = max(1, fade_ms // frame_ms)
+    # frame i in 1..frames; t = i/frames in (0,1]; t==1 lands on target.
+    for i in range(1, frames + 1):
+        t = i / frames
+        r = round(r0 + (r1 - r0) * t)
+        g = round(g0 + (g1 - g0) * t)
+        b = round(b0 + (b1 - b0) * t)
+        w = round(w0 + (w1 - w0) * t)
+        write_rgbw_now(r, g, b, w)
+        if i < frames:
+            time.sleep(frame_ms / 1000.0)
+
+
+def set_rgbw(
+    r: int,
+    g: int,
+    b: int,
+    w: int,
+    fade_ms: int = DEFAULT_FADE_MS,
+    fps: int = DEFAULT_FPS,
+) -> None:
+    for name, val in zip(("R", "G", "B", "W"), (r, g, b, w)):
+        if not (0 <= val <= 255):
+            die(f"{name}={val} out of range 0..255", 2)
+    verify_driver()
+    claim_triggers()
+    fade_to_rgbw((r, g, b, w), fade_ms, fps)
+    suffix = " (instant)" if fade_ms <= 0 else f" (fade {fade_ms} ms)"
     print(
         f"LED set R={r} G={g} B={b} W={w} "
-        f"(#{r:02X}{g:02X}{b:02X}{w:02X})"
+        f"(#{r:02X}{g:02X}{b:02X}{w:02X}){suffix}"
     )
 
 
@@ -288,7 +350,7 @@ def parse_hex8(s: str) -> tuple[int, int, int, int]:
     )
 
 
-def apply_palette_index(idx: int) -> None:
+def apply_palette_index(idx: int, fade_ms: int, fps: int) -> None:
     colors = load_palette()
     if not (0 <= idx < len(colors)):
         die(
@@ -298,20 +360,80 @@ def apply_palette_index(idx: int) -> None:
         )
     entry = colors[idx]
     r, g, b, w = parse_hex8(entry["color"])
-    set_rgbw(r, g, b, w)
+    set_rgbw(r, g, b, w, fade_ms=fade_ms, fps=fps)
+
+
+# argparse with positional pass-through. argparse alone cannot disambiguate
+# between "led <int-index>" and "led <int> <int> <int> <int>" cleanly because
+# argparse needs the variadic positional to be the last arg, and we also need
+# subcommands `off|get|list`. We split: argparse handles flags + collects all
+# positionals as one list; we route on the list ourselves (same logic as
+# main() in the pre-fade version, just with fade_ms/fps threaded through).
+
+def build_argparser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(
+        prog=PROG,
+        description=(
+            "Set the Mono Gateway DK status LED. Accepts a palette index, "
+            "four decimal R G B W bytes, or an 8-digit hex RRGGBBWW. "
+            "All forms fade from the current colour by default."
+        ),
+        epilog=(
+            "Examples:\n"
+            f"  {PROG} 1                  set palette index 1, 200 ms fade\n"
+            f"  {PROG} --instant 1        same, no fade\n"
+            f"  {PROG} --fade-ms 1000 6   green over 1 s\n"
+            f"  {PROG} 51 0 51 0          R=51 G=0 B=51 W=0\n"
+            f"  {PROG} '#33003300'        same in hex\n"
+            f"  {PROG} off                shorthand for index 0\n"
+            f"  {PROG} get                print current R G B W\n"
+            f"  {PROG} list               print palette\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=True,
+    )
+    ap.add_argument(
+        "--fade-ms",
+        type=int,
+        default=DEFAULT_FADE_MS,
+        metavar="N",
+        help=f"fade duration in ms (default {DEFAULT_FADE_MS})",
+    )
+    ap.add_argument(
+        "--instant",
+        action="store_true",
+        help="snap to target, no fade (== --fade-ms 0)",
+    )
+    ap.add_argument(
+        "--fps",
+        type=int,
+        default=DEFAULT_FPS,
+        metavar="N",
+        help=f"fade frame rate (default {DEFAULT_FPS})",
+    )
+    ap.add_argument(
+        "args",
+        nargs="*",
+        help="palette index | R G B W | '#RRGGBBWW' | off | get | list",
+    )
+    return ap
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) == 0:
-        usage(sys.stderr)
+    ap = build_argparser()
+    ns = ap.parse_args(argv)
+
+    fade_ms = 0 if ns.instant else max(0, ns.fade_ms)
+    fps = max(1, ns.fps)
+
+    args = ns.args
+    if not args:
+        ap.print_help(sys.stderr)
         return 2
 
-    head = argv[0]
+    head = args[0]
 
-    # special words
-    if head in ("-h", "--help", "help"):
-        usage()
-        return 0
+    # special words (no fade applies to get/list; off does fade)
     if head == "get":
         cmd_get()
         return 0
@@ -319,36 +441,36 @@ def main(argv: list[str]) -> int:
         cmd_list()
         return 0
     if head == "off":
-        apply_palette_index(0)
+        apply_palette_index(0, fade_ms, fps)
         return 0
 
     # 4-arg decimal form
-    if len(argv) == 4:
+    if len(args) == 4:
         try:
-            r, g, b, w = (int(x, 10) for x in argv)
+            r, g, b, w = (int(x, 10) for x in args)
         except ValueError:
             die("decimal form expects four 0..255 integers", 2)
-        set_rgbw(r, g, b, w)
+        set_rgbw(r, g, b, w, fade_ms=fade_ms, fps=fps)
         return 0
 
     # single-token forms
-    if len(argv) == 1:
+    if len(args) == 1:
         token = head.strip()
         # hex8 takes priority — exactly 8 hex digits with optional '#'
         if HEX8.match(token):
             r, g, b, w = parse_hex8(token)
-            set_rgbw(r, g, b, w)
+            set_rgbw(r, g, b, w, fade_ms=fade_ms, fps=fps)
             return 0
         # otherwise pure integer = palette index
         if INT_ONLY.match(token):
-            apply_palette_index(int(token, 10))
+            apply_palette_index(int(token, 10), fade_ms, fps)
             return 0
         die(
             f"'{token}' is neither an integer index nor an 8-digit hex colour",
             2,
         )
 
-    die(f"expected 1 or 4 arguments; got {len(argv)}", 2)
+    die(f"expected 1 or 4 positional arguments; got {len(args)}", 2)
     return 2  # unreachable, satisfies type checker
 
 
