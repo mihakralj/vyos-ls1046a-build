@@ -161,6 +161,25 @@ cat > "/etc/systemd/system/serial-getty@ttyS0.service.d/zz-ls1046a-nodevbind.con
 #                              without a power cycle. Reset-failed +
 #                              restart by hand was needed once
 #                              (2026-05-13) — never again.
+#
+#  (4) Replaces upstream Restart=always with Restart=on-abnormal so the
+#      service does NOT respawn on every clean exit (status 0, normal
+#      agetty→login handoff after logout) NOR on every failure exit
+#      (status 1, failed `login` after wrong password). Symptom of the
+#      old behavior (boot 2026-05-13, build 25812726726): four
+#      "Welcome to VyOS / vyos login:" banners cascading at boot before
+#      any user input (each kernel printk write to /dev/ttyS0 during
+#      late boot races agetty's tcsetattr, agetty exits clean, systemd
+#      respawns it after RestartSec=2s, fresh /etc/issue prints — 4×),
+#      then THREE more banners after a single failed login attempt
+#      (login exits 1 after one bad password, Restart=always fires,
+#      respawn, banner, repeat). Restart=on-abnormal only respawns on
+#      SIGNAL/CORE/TIMEOUT — clean exits and exit-status failures do
+#      not trigger a new instance. Trade-off: serial console does NOT
+#      auto-respawn after logout; operator types nothing for 2 min and
+#      then has to either reboot or hit enter on a still-attached login
+#      session. On a serial-console-only board this is the right
+#      trade-off — the cascade was making the console unusable.
 [Unit]
 BindsTo=
 After=systemd-user-sessions.service plymouth-quit-wait.service getty-pre.target
@@ -179,7 +198,11 @@ ExecStart=-/sbin/agetty -L --keep-baud --noclear -o '-p -- \\u' 115200 %I $TERM
 TTYPath=/dev/ttyS0
 TTYVHangup=no
 SendSIGHUP=no
-RestartSec=2s
+# See note (4) above: clean/failure exits must NOT trigger respawn or
+# the boot-time printk race and the post-failed-login path cascade
+# stacked banners on the console.
+Restart=on-abnormal
+RestartSec=5s
 StandardOutput=tty
 StandardError=journal
 EOF
