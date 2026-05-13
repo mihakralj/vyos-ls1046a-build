@@ -15,6 +15,10 @@
 #                                   random palette index every tick_s seconds
 #                                   (default 0.5). Ctrl-C to stop. Restores
 #                                   'off' on exit.
+#   steps [tick_s]               -> walk palette 0→1→…→31→30→…→0→1→… on a
+#                                   triangle wave, one step per tick_s seconds
+#                                   (default 0.5). Ctrl-C to stop. Restores
+#                                   'off' on exit.
 #
 # All transitions fade from the current LED state to the target over
 # FADE_MS milliseconds (linear interpolation in raw 8-bit PWM space).
@@ -268,6 +272,17 @@ def _parse_positive_float(tok: str, label: str) -> float:
     return v
 
 
+def _install_cleanup_handlers() -> None:
+    """Punch the LED to 0 on SIGINT/SIGTERM so the demo never strands
+    the indicator on a bright colour."""
+    def _cleanup(*_):
+        try:
+            write_rgbw_now(0, 0, 0, 0)
+        finally:
+            sys.exit(0)
+    signal.signal(signal.SIGINT,  _cleanup)
+    signal.signal(signal.SIGTERM, _cleanup)
+
 def cmd_simulate(args: list[str]) -> None:
     """Network-saturation demo via uniform random palette jumps.
 
@@ -284,19 +299,7 @@ def cmd_simulate(args: list[str]) -> None:
 
     verify_driver()
     claim_triggers()
-
-    # Make sure we don't leave the LED stuck on a bright colour if the
-    # operator Ctrl-C's the demo.
-    def _cleanup(*_):
-        try:
-            # Bypass the fade engine on exit so we don't race the signal
-            # handler against our own loop — just punch the LED to 0.
-            write_rgbw_now(0, 0, 0, 0)
-        finally:
-            sys.exit(0)
-
-    signal.signal(signal.SIGINT,  _cleanup)
-    signal.signal(signal.SIGTERM, _cleanup)
+    _install_cleanup_handlers()
 
     rng = random.Random()
     n = len(PALETTE)
@@ -317,7 +320,51 @@ def cmd_simulate(args: list[str]) -> None:
                 fade_to((r, g, b, w))
             time.sleep(tick_s)
     except KeyboardInterrupt:
-        _cleanup()
+        # Cleanup handler installed above does the punch-to-0 + exit.
+        signal.raise_signal(signal.SIGINT)
+
+def cmd_steps(args: list[str]) -> None:
+    """Triangle-wave palette walk: 0 → 1 → … → 31 → 30 → … → 0 → 1 → …
+
+    One step per `tick_s` seconds. Each step performs the standard fade
+    (FADE_MS); pick tick_s ≥ FADE_MS/1000 if you want the LED to settle
+    between steps. Ctrl-C / SIGTERM punches the LED to 0 0 0 0 on exit.
+
+    Argv tail (optional):
+        args[0]  tick interval in seconds  (default SIM_TICK_S)
+    """
+    tick_s = _parse_positive_float(args[0], "tick_s") if len(args) >= 1 else SIM_TICK_S
+    if len(args) > 1:
+        die(f"steps: expected at most 1 arg (tick_s); got {len(args)}", 2)
+
+    verify_driver()
+    claim_triggers()
+    _install_cleanup_handlers()
+
+    n = len(PALETTE)
+    idx = 0
+    direction = 1   # +1 = ascending toward n-1, -1 = descending toward 0
+
+    print(
+        f"steps: tick={tick_s}s triangle 0..{n - 1}..0 palette_len={n}  "
+        f"(Ctrl-C to stop)",
+        file=sys.stderr,
+    )
+
+    try:
+        while True:
+            r, g, b, w = parse_hex8(PALETTE[idx])
+            fade_to((r, g, b, w))
+            time.sleep(tick_s)
+            # Triangle-wave step: bounce off the endpoints without
+            # re-emitting them, so the sequence is 0,1,...,30,31,30,...,1,0,1,...
+            if idx == n - 1:
+                direction = -1
+            elif idx == 0:
+                direction = 1
+            idx += direction
+    except KeyboardInterrupt:
+        signal.raise_signal(signal.SIGINT)
 
 
 # ---- main dispatcher -----------------------------------------------------
@@ -331,6 +378,7 @@ USAGE = (
     f"       {PROG} RRGGBBWW              fade to 8-hex-digit colour (optional leading #)\n"
     f"       {PROG} RRGGBB                fade to 6-hex-digit colour, white channel zeroed\n"
     f"       {PROG} simulate [tick]       uniform-random network-saturation demo (default tick: {SIM_TICK_S}s)\n"
+    f"       {PROG} steps [tick]          triangle-wave 0→31→0 palette walk (default tick: {SIM_TICK_S}s)\n"
     f"\n"
     f"All set/fade transitions take {FADE_MS} ms (baked in)."
 )
@@ -348,11 +396,17 @@ def main(argv: list[str]) -> int:
         cmd_get()
         return 0
 
-    # 'simulate' must be detected before single-token / decimal paths,
-    # because it consumes 0..2 trailing arguments of its own.
-    if argv[0].lower() == "simulate":
+    # 'simulate' and 'steps' must be detected before single-token /
+    # decimal paths, because they consume 0..1 trailing arguments of
+    # their own and the keywords themselves are not valid colour
+    # tokens.
+    head = argv[0].lower()
+    if head == "simulate":
         cmd_simulate(argv[1:])
-        return 0  # not reached: cmd_simulate sys.exit()s via signal handler
+        return 0  # not reached: signal handler sys.exit()s on Ctrl-C
+    if head == "steps":
+        cmd_steps(argv[1:])
+        return 0  # not reached: signal handler sys.exit()s on Ctrl-C
 
     # Single-token forms.
     if len(argv) == 1:
@@ -388,7 +442,7 @@ def main(argv: list[str]) -> int:
             return 0
 
         die(
-            f"'{tok}' is not a palette index, 'off', 'simulate', "
+            f"'{tok}' is not a palette index, 'off', 'simulate', 'steps', "
             f"or a 6/8-digit hex colour",
             2,
         )
