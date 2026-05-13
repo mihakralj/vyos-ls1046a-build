@@ -1,0 +1,20 @@
+#!/bin/sh -e
+#
+# Install diagnostic utilities used by board scripts (e.g. serial-console-debug).
+# psmisc provides `fuser` (and `pstree`, `killall`); lsof is invaluable for
+# tracing which process holds /dev/ttyS0 or any other device.
+#
+# This hook is a no-op if the packages already happen to be pulled in by
+# another dependency.
+
+set -e
+
+echo "I: 93-extra-utils.chroot: installing psmisc, lsof"
+
+apt-get update -y
+apt-get install -y --no-install-recommends psmisc lsof
+
+# Keep these packages from being auto-removed by live-build cleanup
+apt-mark manual psmisc lsof || true
+
+echo "I: 93-extra-utils.chroot: done"
