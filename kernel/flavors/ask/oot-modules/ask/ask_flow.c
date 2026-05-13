@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * ASK 2.0 - software flow table (PR7 / M1.3)
+ * ASK2 - software flow table (PR7 / M1.3)
  *
  * Lock-free RCU lookup, single-writer-style insert/remove backed by
  * the linux/rhashtable internal locks. Per-flow stats live in a

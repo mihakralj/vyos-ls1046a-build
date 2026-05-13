@@ -27,7 +27,7 @@ BC_QUIET=1 source "${GITHUB_WORKSPACE:-.}/bin/common.sh"
 cd "${GITHUB_WORKSPACE:-.}/vyos-build"
 
 ### Pre-flight: verify custom kernel is present (defense-in-depth)
-# ASK 2.0 (rewrite-in-progress): the legacy ASK-consume path
+# ASK2 (rewrite-in-progress): the legacy ASK-consume path
 # (ASK_KERNEL_TAG → data/live-build-config/packages.chroot/) was removed
 # on the ask20 branch. All flavors now build the kernel locally via
 # ci-build-packages.sh and stage it under vyos-build/packages/.
@@ -55,11 +55,11 @@ fi
 
 rm -rf packages/linux-headers-*
 
-### ASK 2.0 (rewrite-in-progress): the legacy ask-modules-*.deb
+### ASK2 (rewrite-in-progress): the legacy ask-modules-*.deb
 ### --custom-package injection (for the OOT cdx/fci/auto_bridge modules
-### shipped via ASK_KERNEL_TAG) was removed on the ask20 branch. ASK 2.0
+### shipped via ASK_KERNEL_TAG) was removed on the ask20 branch. ASK2
 ### will ship ask.ko + ask_bridge.ko via a new packaging path per
-### specs/ask-2.0-rewrite-spec.md.
+### specs/ask2-rewrite-spec.md.
 
 ./build-vyos-image \
   --architecture arm64 \
@@ -235,10 +235,10 @@ else
   echo "fake sign" > "${IMAGE_ISO}.minisig"
 fi
 
-### ASK 2.0 (rewrite-in-progress): the ci-verify-ask-iso.sh post-build
+### ASK2 (rewrite-in-progress): the ci-verify-ask-iso.sh post-build
 ### check was removed on the ask20 branch along with the ASK 1.x
-### userspace stack. A new verifier will be added once ASK 2.0
-### components land per specs/ask-2.0-rewrite-spec.md.
+### userspace stack. A new verifier will be added once ASK2
+### components land per specs/ask2-rewrite-spec.md.
 
 # Move all artifacts to workspace
 mv manifest.json "${IMAGE_ISO}" "${IMAGE_ISO}.minisig" "$GITHUB_WORKSPACE"

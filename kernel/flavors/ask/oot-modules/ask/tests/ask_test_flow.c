@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * ASK 2.0 - kunit suite for ask_flow.c (PR7 / M1.3)
+ * ASK2 - kunit suite for ask_flow.c (PR7 / M1.3)
  *
  * Validates the rhashtable + RCU + u64_stats_sync software flow table
  * without touching hardware. Each test creates its own ask_flow_table

@@ -54,7 +54,7 @@ ls -alh packages
 
 ### Validate critical packages are present — no silent fallback to upstream
 #
-# ASK 2.0 (rewrite-in-progress): the legacy ASK-consume branch
+# ASK2 (rewrite-in-progress): the legacy ASK-consume branch
 # (ASK_KERNEL_TAG → packages.chroot/) was removed on the ask20 branch.
 # All flavors now build the kernel locally and stage it under packages/.
 KERNEL_PKGS=$(find packages -name 'linux-image-*.deb' ! -name '*-dbg*' | wc -l)
@@ -69,7 +69,7 @@ if [ "$KERNEL_PKGS" -eq 0 ]; then
 fi
 echo "### Package validation OK: $KERNEL_PKGS kernel image package(s) in packages/"
 
-### FLAVOR=ask: validate the ASK 2.0 OOT module .deb is present
+### FLAVOR=ask: validate the ASK2 OOT module .deb is present
 #
 # The default `find scripts/package-build -name '*.deb'` glob above
 # already sweeps in our ask-modules-${KVER}_*_arm64.deb (produced by
@@ -84,7 +84,7 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
         echo ""
         echo "###############################################################"
         echo "### FATAL: FLAVOR=ask but no ask-modules-*.deb in packages/ ###"
-        echo "### ASK 2.0 OOT kernel module would be MISSING from the ISO.###"
+        echo "### ASK2 OOT kernel module would be MISSING from the ISO.###"
         echo "###############################################################"
         echo ""
         exit 1
