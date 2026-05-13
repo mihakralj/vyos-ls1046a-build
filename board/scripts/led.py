@@ -2,20 +2,24 @@
 # led.py — Mono Gateway DK status LED control (LP5812, RGBW)
 #
 # Spec (frozen):
-#   no args                  -> print current LED state as 4 ints AND as
-#                               quad-tuple hex; exit 0
-#   off                      -> fade to 00 00 00 00
-#   <int>                    -> fade to PALETTE[int]   (single token, decimal)
-#   R G B W (4 decimals)     -> fade to (R,G,B,W),  each 0..255
-#   R G B   (3 decimals)     -> fade to (R,G,B,0)   (W forced to 0)
-#   RRGGBBWW (8 hex)         -> fade to that colour
-#   RRGGBB   (6 hex)         -> fade to (RR,GG,BB,00)
+#   no args                      -> print current LED state as 4 ints AND as
+#                                   quad-tuple hex; exit 0
+#   off                          -> fade to 00 00 00 00
+#   <int>                        -> fade to PALETTE[int]   (single token, decimal)
+#   R G B W (4 decimals)         -> fade to (R,G,B,W),  each 0..255
+#   R G B   (3 decimals)         -> fade to (R,G,B,0)   (W forced to 0)
+#   RRGGBBWW (8 hex)             -> fade to that colour
+#   RRGGBB   (6 hex)             -> fade to (RR,GG,BB,00)
 #   leading '#' on hex tokens is accepted and ignored.
+#   simulate [tick_s [sigma]]    -> network-saturation demo: Geometric Brownian
+#                                   Motion random walk over palette indices,
+#                                   jumps every tick_s seconds (default 0.5).
+#                                   Ctrl-C to stop. Restores 'off' on exit.
 #
 # All transitions fade from the current LED state to the target over
 # FADE_MS milliseconds (linear interpolation in raw 8-bit PWM space).
-# There are no command-line flags — fade time and palette are baked in
-# as constants below.
+# There are no command-line flags — fade time, palette, and simulation
+# defaults are baked in as constants below.
 #
 # Hardware: LP5812 on i2c-15 addr 0x6c, four single-colour LEDs forming
 # one logical RGBW indicator. Each channel is 8-bit PWM (0..255). The
@@ -36,7 +40,10 @@
 
 from __future__ import annotations
 
+import math
+import random
 import re
+import signal
 import sys
 import time
 from pathlib import Path
@@ -54,48 +61,61 @@ FADE_MS = 200
 FADE_FPS = 50          # -> 20 ms/frame, 10 frames per default fade
 MIN_FRAME_MS = 5       # hard floor on per-frame sleep (200 Hz cap on writes)
 
-# Baked-in 32-entry palette. Indices are stable: customer scripts that
-# hard-code an index keep working across upgrades. Each entry is an
-# 8-hex-digit string RRGGBBWW (W = white channel, NOT alpha). Brightness
-# is intentionally moderate (~40% peak on coloured entries) — driving
-# four white SMD LEDs through the Mono case at 100% is uncomfortably
-# bright in an office.
+# Baked-in 32-entry traffic-saturation palette. Indices are stable —
+# customer scripts that hard-code an index keep working across upgrades.
+# Each entry is an 8-hex-digit string RRGGBBWW (W = white channel,
+# NOT alpha). The ramp is designed for use as a network-load indicator:
+# idle = faint grey baseline (0), then red→orange→yellow through mid
+# traffic, transitioning to cool/blue-white at peak load.
 PALETTE = (
-    "00000000",   #  0  off
-    "66000000",   #  1  red
-    "66330000",   #  2  orange
-    "66440000",   #  3  amber
-    "66660000",   #  4  yellow
-    "33660000",   #  5  chartreuse
-    "00660000",   #  6  green
-    "00663300",   #  7  spring-green
-    "00666600",   #  8  cyan
-    "00336600",   #  9  azure
-    "00006600",   # 10  blue
-    "33006600",   # 11  violet
-    "66006600",   # 12  magenta
-    "66003300",   # 13  rose
-    "66202000",   # 14  pink
-    "66440800",   # 15  gold
-    "22660000",   # 16  lime
-    "00444400",   # 17  teal
-    "22004400",   # 18  indigo
-    "00554400",   # 19  turquoise
-    "66331a00",   # 20  salmon
-    "44440000",   # 21  olive
-    "00003300",   # 22  navy
-    "33000000",   # 23  maroon
-    "33003300",   # 24  purple
-    "00000020",   # 25  white-dim
-    "00000040",   # 26  white-cool
-    "11110030",   # 27  white-warm
-    "00000066",   # 28  white-bright
-    "ff000000",   # 29  alert-red       (emergency override)
-    "ffff0000",   # 30  alert-yellow    (emergency override)
-    "000000ff",   # 31  alert-white     (full white)
+    "01010100",   #  0  idle: faint dim gray baseline (min traffic)
+    "08000000",   #  1  very dim red
+    "10000000",   #  2  dim red
+    "18000000",   #  3  soft red
+    "22000000",   #  4  red
+    "33000000",   #  5  bright red
+    "48000000",   #  6  vivid red
+    "66000000",   #  7  intense red (slow traffic phase)
+    "88000000",   #  8  hot red
+    "AA220000",   #  9  red-orange
+    "CC440000",   # 10  deep orange
+    "EE660000",   # 11  orange
+    "FF880000",   # 12  golden orange
+    "FFAA0000",   # 13  amber
+    "FFCC0000",   # 14  yellow-orange
+    "FFEE0000",   # 15  warm yellow (moderate traffic phase)
+    "FFFF0000",   # 16  pure yellow
+    "FFFF0022",   # 17  yellow + faint white heat
+    "FFFF0044",   # 18  bright yellow-white
+    "FFFF0066",   # 19  intense yellow-white
+    "FFFF0088",   # 20  blinding yellow-white
+    "EEEE11AA",   # 21  shifting cooler (heavy traffic phase)
+    "DDDD22BB",   # 22  warm white transitioning
+    "CCCC44CC",   # 23  neutral white
+    "AAAA66DD",   # 24  cool white
+    "888888EE",   # 25  bright cool white
+    "6666AAFF",   # 26  ice blue-white
+    "4444BBFF",   # 27  electric blue-white
+    "2222CCFF",   # 28  neon blue-white (overdrive phase)
+    "1111DDFF",   # 29  plasma blue
+    "0808EEFF",   # 30  supernova blue
+    "0000FFFF",   # 31  screaming bright blue-white hot (max traffic)
 )
 assert all(re.fullmatch(r"[0-9a-fA-F]{8}", c) for c in PALETTE), \
     "palette entries must be 8 hex digits each"
+
+# ---- traffic-simulation defaults ----------------------------------------
+#
+# `led simulate [tick_s [sigma]]` walks a virtual saturation state under
+# Geometric Brownian Motion in log-space and maps it to a palette index
+# every `tick_s` seconds. Defaults tuned so an unattended demo cycles
+# through the whole ramp in a few minutes without parking at an extreme.
+SIM_TICK_S      = 0.5    # seconds between palette jumps
+SIM_SIGMA       = 0.35   # GBM volatility per tick (log-space); larger = jumpier
+SIM_MU          = 0.0    # GBM drift; 0 = unbiased random walk in log space
+SIM_X0          = 0.5    # initial normalized saturation (0..1) → mid-ramp
+SIM_REFLECT_LO  = 0.02   # soft floor so state doesn't park at index 0
+SIM_REFLECT_HI  = 0.99   # soft ceiling so state doesn't park at index 31
 
 
 # ---- low-level sysfs -----------------------------------------------------
@@ -240,16 +260,104 @@ def apply_palette_index(idx: int) -> None:
     set_rgbw(r, g, b, w)
 
 
+# ---- traffic-saturation simulation --------------------------------------
+
+def _parse_positive_float(tok: str, label: str) -> float:
+    try:
+        v = float(tok)
+    except ValueError:
+        die(f"simulate: {label} '{tok}' is not a number", 2)
+    if not math.isfinite(v) or v <= 0:
+        die(f"simulate: {label} must be > 0 (got {tok})", 2)
+    return v
+
+
+def cmd_simulate(args: list[str]) -> None:
+    """Network-saturation demo via Geometric Brownian Motion in log-space.
+
+    State x_t ∈ (0, 1) is updated each tick by
+
+        x_{t+1} = clip( x_t * exp((mu - sigma^2/2)*dt + sigma*sqrt(dt)*Z) )
+
+    with Z ~ N(0,1) and dt = 1 (per-tick units already baked into mu/sigma).
+    The result is reflected at SIM_REFLECT_LO / SIM_REFLECT_HI so the demo
+    spends time across the whole ramp instead of parking at an extreme.
+    x is then mapped linearly onto the palette index 0..len(PALETTE)-1.
+
+    Argv tail (optional):
+        args[0]  tick interval in seconds  (default SIM_TICK_S)
+        args[1]  GBM sigma                 (default SIM_SIGMA)
+    """
+    tick_s = _parse_positive_float(args[0], "tick_s") if len(args) >= 1 else SIM_TICK_S
+    sigma  = _parse_positive_float(args[1], "sigma")  if len(args) >= 2 else SIM_SIGMA
+    if len(args) > 2:
+        die(f"simulate: expected at most 2 args (tick_s sigma); got {len(args)}", 2)
+
+    verify_driver()
+    claim_triggers()
+
+    # Make sure we don't leave the LED stuck on a bright colour if the
+    # operator Ctrl-C's the demo.
+    def _cleanup(*_):
+        try:
+            # Bypass the fade engine on exit so we don't race the signal
+            # handler against our own loop — just punch the LED to 0.
+            write_rgbw_now(0, 0, 0, 0)
+        finally:
+            sys.exit(0)
+
+    signal.signal(signal.SIGINT,  _cleanup)
+    signal.signal(signal.SIGTERM, _cleanup)
+
+    rng = random.Random()
+    x = SIM_X0
+    n = len(PALETTE)
+    last_idx = -1
+    drift = SIM_MU - 0.5 * sigma * sigma   # Itô-correction term
+
+    print(
+        f"simulate: tick={tick_s}s sigma={sigma} mu={SIM_MU} "
+        f"x0={SIM_X0} reflect=({SIM_REFLECT_LO},{SIM_REFLECT_HI}) "
+        f"palette_len={n}  (Ctrl-C to stop)",
+        file=sys.stderr,
+    )
+
+    try:
+        while True:
+            z = rng.gauss(0.0, 1.0)
+            x = x * math.exp(drift + sigma * z)
+
+            # Reflective barriers on (lo, hi) — flip the excess back inside.
+            if x < SIM_REFLECT_LO:
+                x = SIM_REFLECT_LO + (SIM_REFLECT_LO - x)
+            elif x > SIM_REFLECT_HI:
+                x = SIM_REFLECT_HI - (x - SIM_REFLECT_HI)
+            # And clamp in case the reflection itself overshoots.
+            x = max(SIM_REFLECT_LO, min(SIM_REFLECT_HI, x))
+
+            idx = int(x * n)
+            if idx >= n:
+                idx = n - 1
+            if idx != last_idx:
+                last_idx = idx
+                r, g, b, w = parse_hex8(PALETTE[idx])
+                fade_to((r, g, b, w))
+            time.sleep(tick_s)
+    except KeyboardInterrupt:
+        _cleanup()
+
+
 # ---- main dispatcher -----------------------------------------------------
 
 USAGE = (
-    f"usage: {PROG}                  print current LED state\n"
-    f"       {PROG} off              fade to 0 0 0 0\n"
-    f"       {PROG} <index>          fade to baked-in palette entry (0..{len(PALETTE) - 1})\n"
-    f"       {PROG} R G B W          fade to four decimal channel values\n"
-    f"       {PROG} R G B            fade to (R,G,B,0) — white channel zeroed\n"
-    f"       {PROG} RRGGBBWW         fade to 8-hex-digit colour (optional leading #)\n"
-    f"       {PROG} RRGGBB           fade to 6-hex-digit colour, white channel zeroed\n"
+    f"usage: {PROG}                       print current LED state\n"
+    f"       {PROG} off                   fade to 0 0 0 0\n"
+    f"       {PROG} <index>               fade to baked-in palette entry (0..{len(PALETTE) - 1})\n"
+    f"       {PROG} R G B W               fade to four decimal channel values\n"
+    f"       {PROG} R G B                 fade to (R,G,B,0) — white channel zeroed\n"
+    f"       {PROG} RRGGBBWW              fade to 8-hex-digit colour (optional leading #)\n"
+    f"       {PROG} RRGGBB                fade to 6-hex-digit colour, white channel zeroed\n"
+    f"       {PROG} simulate [tick [σ]]   GBM network-saturation demo (defaults: {SIM_TICK_S}s, σ={SIM_SIGMA})\n"
     f"\n"
     f"All set/fade transitions take {FADE_MS} ms (baked in)."
 )
@@ -266,6 +374,12 @@ def main(argv: list[str]) -> int:
     if not argv:
         cmd_get()
         return 0
+
+    # 'simulate' must be detected before single-token / decimal paths,
+    # because it consumes 0..2 trailing arguments of its own.
+    if argv[0].lower() == "simulate":
+        cmd_simulate(argv[1:])
+        return 0  # not reached: cmd_simulate sys.exit()s via signal handler
 
     # Single-token forms.
     if len(argv) == 1:
@@ -301,7 +415,8 @@ def main(argv: list[str]) -> int:
             return 0
 
         die(
-            f"'{tok}' is not a palette index, 'off', or a 6/8-digit hex colour",
+            f"'{tok}' is not a palette index, 'off', 'simulate', "
+            f"or a 6/8-digit hex colour",
             2,
         )
 
