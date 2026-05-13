@@ -1,0 +1,106 @@
+diff --git a/src/conf_mode/system_console.py b/src/conf_mode/system_console.py
+index 4985b80c0..786c24289 100755
+--- a/src/conf_mode/system_console.py
++++ b/src/conf_mode/system_console.py
+@@ -15,6 +15,7 @@
+ # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ 
+ import os
++import hashlib
+ from pathlib import Path
+ 
+ from vyos.base import Warning
+@@ -30,6 +31,36 @@
+ 
+ by_bus_dir = '/dev/serial/by-bus'
+ 
++# LS1046A: snapshot of rendered serial-getty@*.service drop-ins captured in
++# generate() (pre-unlink and post-render). apply() uses this to skip
++# restart_login_consoles() when nothing changed, because systemctl restart
++# kills the agetty (Stop) and there is a window before the fresh agetty
++# attaches where the serial console swallows keystrokes from a connected
++# operator. With Restart=always agetty does NOT recover from an explicit
++# Stop, by systemd design (see systemd.service(5)).
++_serial_getty_snapshot_pre: dict = {}
++_serial_getty_snapshot_post: dict = {}
++
++def _snapshot_serial_getty_renders(base_dir: str) -> dict:
++    """Return {filename: sha256-hex} for every serial-getty@*.service file
++    currently present under base_dir. Missing directory yields {}."""
++    out: dict = {}
++    if not os.path.isdir(base_dir):
++        return out
++    for entry in os.listdir(base_dir):
++        if 'serial-getty' not in entry:
++            continue
++        path = os.path.join(base_dir, entry)
++        if not os.path.isfile(path):
++            continue
++        try:
++            with open(path, 'rb') as f:
++                out[entry] = hashlib.sha256(f.read()).hexdigest()
++        except OSError:
++            # Treat unreadable file as "changed" by recording a sentinel
++            out[entry] = 'unreadable'
++    return out
++
+ def get_config(config=None):
+     if config:
+         conf = config
+@@ -81,6 +112,12 @@ def verify(console):
+ 
+ def generate(console):
+     base_dir = '/run/systemd/system'
++
++    # LS1046A: snapshot existing renders BEFORE unlink so apply() can decide
++    # whether to skip the expensive (and console-disrupting) systemctl restart.
++    global _serial_getty_snapshot_pre, _serial_getty_snapshot_post
++    _serial_getty_snapshot_pre = _snapshot_serial_getty_renders(base_dir)
++
+     # Remove all serial-getty configuration files in advance
+     for root, dirs, files in os.walk(base_dir):
+         for basename in files:
+@@ -90,6 +127,7 @@ def generate(console):
+     # Define a default console on a tty framebuffer
+     default_tty_console = ('tty', '0', '')
+     if not console or 'device' not in console:
++        _serial_getty_snapshot_post = _snapshot_serial_getty_renders(base_dir)
+         grub_util.update_serial_console(*default_tty_console)
+         return None
+ 
+@@ -127,6 +165,7 @@ def generate(console):
+             console_num = device[len(console_type):]
+             default_tty_console = (console_type, console_num, device_config['speed'])
+ 
++    _serial_getty_snapshot_post = _snapshot_serial_getty_renders(base_dir)
+     grub_util.update_serial_console(*default_tty_console)
+     return None
+ 
+@@ -137,7 +176,19 @@ def apply(console):
+     # Service control moved to vyos.utils.serial to unify checks and prompts.
+     # If users are connected, we want to show an informational message on completing
+     # the process, but not halt configuration processing with an interactive prompt.
+-    restart_login_consoles(prompt_user=False, quiet=False)
++    #
++    # LS1046A: skip restart_login_consoles() if the rendered drop-ins are
++    # byte-identical to what was already on disk. systemctl restart performs
++    # an explicit Stop of serial-getty@*, which kills the agetty; with
++    # Restart=always agetty does not recover from explicit Stop per
++    # systemd.service(5), and on serial-only boards this swallows keystrokes
++    # from the operator until the fresh agetty attaches. Skipping the
++    # restart when nothing actually changed avoids the disruption entirely.
++    if _serial_getty_snapshot_pre == _serial_getty_snapshot_post and _serial_getty_snapshot_pre:
++        # No-op render: drop-ins unchanged, do not disturb live consoles.
++        pass
++    else:
++        restart_login_consoles(prompt_user=False, quiet=False)
+ 
+     if not console:
+         return None
+@@ -156,4 +207,4 @@ def apply(console):
+         apply(c)
+     except ConfigError as e:
+         print(e)
+-        exit(1)
++        exit(1)
+\ No newline at end of file

@@ -44,6 +44,14 @@ Description=Bind-mount live-boot medium as persistence (LS1046A workaround)
 DefaultDependencies=no
 ConditionPathIsDirectory=/usr/lib/live/mount/medium
 ConditionPathIsMountPoint=!/usr/lib/live/mount/persistence
+# Suppress on live-boot USB sessions where `nopersistence` is in /proc/cmdline.
+# In that mode /usr/lib/live/mount/medium is a read-only ISO9660 mount and the
+# `mount -o remount,rw` ExecStart legitimately fails, emitting a spurious
+# `[FAILED] Failed to start Bind-mount…sistence (LS1046A workaround).` on the
+# console. The unit is only meaningful on the installed eMMC path where the
+# medium is an ext4 partition holding the squashfs + /boot/, and there
+# `nopersistence` is NOT set.
+ConditionKernelCommandLine=!nopersistence
 Before=local-fs.target vyos-grub-update.service vyos-router.service
 After=systemd-remount-fs.service
 RequiresMountsFor=/usr/lib/live/mount/medium
