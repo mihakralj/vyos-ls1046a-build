@@ -194,16 +194,19 @@ ExecStartPre=
 # Empty ExecStart= resets the list inherited from upstream, then we
 # re-add a single agetty invocation with the LS1046A-specific flags.
 ExecStart=
-# --wait-cr fixes the "first prompt swallows my keystrokes" race: agetty
-# completes its tcsetattr() to set cooked-mode termios BEFORE printing
-# any banner, then blocks reading until the operator sends a CR. The
-# moment a CR arrives, the issue + login: prompt is printed and the
-# line discipline is already cooked, so the next character the operator
-# types is always echoed and seen. Without --wait-cr, agetty prints the
-# banner immediately on open and races its own tcsetattr against the
-# first keystroke — that keystroke gets consumed by the raw line
-# discipline that was active at open time, hence "second prompt works".
-ExecStart=-/sbin/agetty -L --keep-baud --noclear --wait-cr -o '-p -- \\u' 115200 %I $TERM
+# "First prompt swallows my keystrokes" race fix:
+#   Originally we tried agetty --wait-cr to force tcsetattr() BEFORE
+#   the banner write — that works, but produces a silent prompt that
+#   makes users think the box is frozen (no banner until they hit CR).
+#   Better approach: keep the banner eager, but defer agetty start by
+#   ~1 s via ExecStartPre. That lets the late-boot kernel printk burst
+#   (e.g. "vyos-config[…]: Configuration success" lines around
+#   T+78..98 s) drain past /dev/ttyS0 before agetty opens the line,
+#   so the open + tcsetattr + banner sequence is not racing printk
+#   traffic for the line discipline. First keystroke on the banner'd
+#   prompt is then always cooked.
+ExecStartPre=/bin/sleep 1
+ExecStart=-/sbin/agetty -L --keep-baud --noclear -o '-p -- \\u' 115200 %I $TERM
 TTYPath=/dev/ttyS0
 TTYVHangup=no
 SendSIGHUP=no
