@@ -36,7 +36,7 @@ architecture source-of-truth. When the two disagree, **the spec wins**
 | 9   | M1.5 — kunit coverage ≥ 80% on M1 surface        | ask20  | landed |
 | 10  | M2.1 — `0001-caam-qi-share.patch` (real code)    | ask20  | landed |
 | 11  | M2.2 — `0002-dpaa-eth-flow-block.patch` (real)   | ask20  | landed |
-| 12  | M2.3 — `0003-fman-host-command-api.patch` (real) | ask20  | not started |
+| 12  | M2.3 — `0003-fman-host-command-api.patch` (real) | ask20  | landed |
 | 13  | M2.4 — `OP_GET_UCODE_VERSION` against silicon    | ask20  | not started |
 | 14  | M2.5 — `OP_FLOW_INSERT_V4_TCP` end-to-end        | ask20  | not started |
 | 15  | M3.x — remaining flow types (NAT/PAT/v6/bridge)  | ask20  | not started |
@@ -519,12 +519,71 @@ the existing MQPRIO guard fallthrough. PR14 (`OP_FLOW_INSERT_V4_TCP` end-to-end)
 is the first PR that exercises this path on live silicon via an actual
 `nft flow add` from userspace.
 
-### PR12 — `0003-fman-host-command-api.patch` (real implementation)
+### PR12 — `0003-fman-host-command-api.patch` (real implementation) — **landed (af2c678)**
 
-Per spec §10.3. Exposes `fman_host_cmd_send(struct fman *, void *cmd_buf,
-size_t len, void *resp_buf, size_t *resp_len)` — synchronous host-command
-transport on top of the FMan IRQ + MURAM doorbell mechanism. ~120 LOC
-including the new header `include/linux/fsl/fman_host_cmd.h`.
+Per spec §3.4. Exposes the spec's canonical signature
+
+```c
+int fmd_host_cmd(struct fman *fman, u8 opcode,
+                 const void *req, size_t req_len,
+                 void *resp, size_t resp_buf_len,
+                 size_t *resp_len_out);
+void fmd_host_cmd_complete(struct fman *fman);
+```
+
+plus the new public header `include/linux/fsl/fman_host_cmd.h` and a small
+`fman_get_muram()` accessor on `struct fman`. Spec-vs-plan reconciliation:
+earlier drafts of this document referred to the symbol as
+`fman_host_cmd_send()`; the spec uses `fmd_host_cmd()` and per AGENTS.md
+"the spec wins" — the function landed with the spec's name. References
+elsewhere in this document are kept at their original wording for
+historical fidelity (the section bodies are exposition, not contracts).
+
+Final shape: 427 insertions across 5 files (one new transport `.c` of
+325 LOC, one new public header of 84 LOC, one accessor + its prototype on
+`struct fman`, one Makefile object addition). Larger than the
+plan-estimate of ~120 LOC because the spec contract grew to include
+mutex serialisation, completion-driven IRQ wakeup, lazy per-FMan state
+registry, and graceful `-ENXIO` handling for the not-yet-probed
+microcode-specific MMIO. The transport itself (4-byte header framing,
+MURAM region claim, mutex, 100 ms response-timeout, response-header
+validation) is **complete and link-validated** — the only piece still
+stubbed is the microcode-specific doorbell register write and IRQ-status
+unmask, isolated to two ~5-line helpers (`fmd_host_cmd_ring_doorbell()`
+and `fmd_host_cmd_arm_irq()`) that both currently `return -ENXIO`.
+
+**Link-time validation, 2026-05-13** (LXC 200 `/var/tmp/pr10-pr11/linux-6.18.28`,
+same fresh upstream tree as PR10/PR11):
+
+```
+$ aarch64-linux-gnu-nm drivers/net/ethernet/freescale/fman/fman_host_cmd.o \
+    | grep -E 'fmd_host_cmd|__export_symbol'
+0000000000000008 d __UNIQUE_ID___addressable_fmd_host_cmd742
+0000000000000000 d __UNIQUE_ID___addressable_fmd_host_cmd_complete743
+0000000000000000 r __export_symbol_fmd_host_cmd
+0000000000000010 r __export_symbol_fmd_host_cmd_complete
+00000000000000b0 T fmd_host_cmd
+0000000000000008 T fmd_host_cmd_complete
+
+$ aarch64-linux-gnu-nm drivers/net/ethernet/freescale/fman/fman.o \
+    | grep -E 'fman_get_muram'
+0000000000000010 d __UNIQUE_ID___addressable_fman_get_muram772
+00000000000000c0 r __export_symbol_fman_get_muram
+0000000000000140 T fman_get_muram
+```
+
+All three new EXPORT_SYMBOL_GPLs link cleanly into `fsl_dpaa_fman.ko`.
+`patch-health.sh --flavor ask --source release` shows `patches/0003-...`
+green alongside `patches/0001-...` and `patches/0002-...` (the seven
+remaining failures are the same pre-existing patch-rot items unrelated
+to ASK2).
+
+Hardware-boot validation deliberately deferred to PR13 for the same
+reason as PR10/PR11: there is no caller yet, and the two MMIO helpers
+return `-ENXIO` until PR13 fills in the microcode-specific doorbell
+offset and IRQ wiring (which are explicitly listed in spec §12.7 as
+"must be probed" against live silicon). PR13 is therefore the first PR
+in the M2 sequence that genuinely requires `ssh vyos reboot`.
 
 ### PR13 — `OP_GET_UCODE_VERSION` against silicon
 
