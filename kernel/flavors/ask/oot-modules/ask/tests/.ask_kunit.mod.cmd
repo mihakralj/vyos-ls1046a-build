@@ -1,1 +1,0 @@
-savedcmd_tests/ask_kunit.mod := printf '%s\n'   ask_test_main.o ask_test_dummy.o ask_test_hostcmd.o ask_test_flow.o ask_test_flow_offload.o ask_test_genl.o | awk '!x[$$0]++ { print("tests/"$$0) }' > tests/ask_kunit.mod
