@@ -60,8 +60,8 @@ CHANNELS = ("red", "green", "blue", "white")   # canonical R G B W
 
 # Total fade duration, in milliseconds, applied to every colour change.
 # Linear interpolation in raw PWM space at FADE_FPS Hz.
-FADE_MS = 200
-FADE_FPS = 50          # -> 20 ms/frame, 10 frames per default fade
+FADE_MS = 100
+FADE_FPS = 50          # -> 20 ms/frame, 5 frames per default fade
 MIN_FRAME_MS = 5       # hard floor on per-frame sleep (200 Hz cap on writes)
 
 # Baked-in 32-entry traffic-saturation palette. Indices are stable —
