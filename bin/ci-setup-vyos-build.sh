@@ -313,6 +313,26 @@ cp board/scripts/fw_env.config "$CHROOT/etc/fw_env.config"
 # placement is the chroot-hook indirection.
 cp board/systemd/ls1046a-console.service "$CHROOT/etc/systemd/system/ls1046a-console.service"
 
+### Service enablement chroot hook — MUST run for every flavor.
+# Stage this BEFORE the FLAVOR gate at the bottom of this script.
+# Previously this copy lived after the `if FLAVOR != ask; exit 0` gate, so
+# FLAVOR=default|vpp ISOs shipped without the hook entirely. Symptom on
+# 2026.05.13-0443-rolling (FLAVOR=default): ls1046a-console.service was
+# installed under /etc/systemd/system/ but had no enable symlink in
+# getty.target.wants/, so kernel echoed characters on /dev/ttyS0 with no
+# agetty reading them ("blind echo only" — admin locked out of the only
+# console on the board). The hook also installs the serial-getty@ttyS0
+# zz-ls1046a-nodevbind.conf drop-in and the tuned.service ordering
+# drop-in, both of which are flavor-agnostic and equally needed on
+# default and vpp builds.
+#
+# Must be a chroot hook (not includes.chroot symlinks) because
+# build-vyos-image uses shutil.copytree(symlinks=False) which converts
+# symlinks to regular files → systemd ignores non-symlink files in
+# .wants/ directories.
+cp data/hooks/96-enable-services.chroot "$HOOKS/96-enable-services.chroot"
+chmod +x "$HOOKS/96-enable-services.chroot"
+
 ### sysctl drop-in: quiet the kernel console AFTER userspace is up.
 ### Keeps early boot verbose (kernel cmdline has no loglevel=) but silences
 ### the NXP SDK fsl_dpa pr_err spam at T+62-64s that otherwise buries
@@ -568,12 +588,5 @@ cp board/systemd/ask-conntrack-fix.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/ask-conn
 ### ASK chroot hook (ldconfig, depmod, runtime deps)
 cp data/hooks/97-ask-userspace.chroot "$HOOKS/97-ask-userspace.chroot"
 chmod +x "$HOOKS/97-ask-userspace.chroot"
-
-### Service enablement chroot hook
-# Must be a chroot hook (not includes.chroot symlinks) because build-vyos-image
-# uses shutil.copytree() which follows symlinks → converts to regular files →
-# systemd ignores non-symlink files in .wants/ directories.
-cp data/hooks/96-enable-services.chroot "$HOOKS/96-enable-services.chroot"
-chmod +x "$HOOKS/96-enable-services.chroot"
 
 echo "### vyos-build setup complete (with ASK fast-path userspace)"
