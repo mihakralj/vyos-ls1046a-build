@@ -22,9 +22,10 @@ hardware and the same `trigger=none` convention:
 
 1. **`led`** — manual single-shot CLI (ships today, lives in
    `board/scripts/led.py` → `/usr/local/bin/led`). Operator-facing.
-   Three input forms, palette in `/config/led.json`, **animated
-   transition by default** (200 ms fade). Implementation-grade spec
-   in [Part 1](#part-1--led--manual-cli).
+   No CLI flags. Six input forms (palette index, 3- or 4-decimal,
+   6- or 8-hex, `off`), all animated by a baked-in 200 ms fade.
+   Calling it with **no arguments** prints the current LED state.
+   Implementation-grade spec in [Part 1](#part-1--led--manual-cli).
 2. **`monoledd`** — autonomous load-driven daemon (not implemented
    yet). 16-step black-body / iron colour ramp tied to NIC throughput.
    Plan-grade spec in [Part 2](#part-2--monoledd--autonomous-daemon).
@@ -46,74 +47,112 @@ in the ISO: `/usr/local/bin/led` (no `.py` suffix, matching the
 chroot by `bin/ci-setup-vyos-build.sh` directly after the `caam-check`
 block.
 
-## 1.1 Input forms
+The CLI is **flag-free by design.** Fade duration and palette are
+**baked in as Python constants** at the top of `led.py` so the script
+behaves identically every invocation, with no per-call tuning surface
+for the operator to get wrong. To re-tune fade speed or palette,
+edit and reinstall the script; there is no runtime knob.
 
-Three mutually-exclusive ways to specify the target colour, plus three
-non-setting subcommands:
+## 1.1 Baked-in constants
 
-| Form | Example | Meaning |
+Top of `board/scripts/led.py`:
+
+| Constant | Value | Meaning |
 |---|---|---|
-| Palette index (int) | `led 17` | colour at index 17 of `/config/led.json` |
-| Decimal R G B W | `led 51 0 51 0` | four 0–255 values |
-| Hex RRGGBBWW | `led 33003300` or `led '#33003300'` | 8 hex digits, optional `#` |
-| `off` | `led off` | shorthand for palette index 0 |
-| `get` | `led get` | print current `R G B W  #RRGGBBWW` |
-| `list` | `led list` | print the palette |
+| `FADE_MS` | `200` | total fade duration in ms, applied to **every** colour change |
+| `FADE_FPS` | `50` | frame rate during the fade (→ 20 ms/frame, 10 frames) |
+| `MIN_FRAME_MS` | `5` | hard floor on per-frame sleep (200 Hz cap on sysfs writes) |
+| `PALETTE` | 32-entry tuple of `"RRGGBBWW"` strings | indices stable across upgrades |
 
-**Index vs hex disambiguation** is regex-ordered:
-`HEX8 = ^#?[0-9a-fA-F]{8}$` is checked before `INT_ONLY = ^[0-9]+$`.
-Consequence: `00000099` is the hex colour, `99` is palette index 99.
-The user cannot accidentally get an out-of-range palette index from
-typing a long-but-numeric hex string.
+Setting `FADE_MS = 0` (edit and reinstall) disables the fade engine —
+all transitions become a single 4-channel write. There is no CLI flag
+for this.
 
-## 1.2 Fade animation
+## 1.2 Input forms
 
-**Every input form that *sets* a colour fades from the current sysfs
-state to the target.** This includes `led <index>`, `led R G B W`,
-`led #RRGGBBWW`, and `led off`. The non-setting subcommands `get` and
-`list` do no LED I/O at all.
+The CLI dispatches purely on **argument count and shape** of `argv`:
 
-### Defaults
+| `argv` | Example | Meaning |
+|---|---|---|
+| (empty) | `led` | print current LED state as `R G B W  #RRGGBBWW`; exit 0 |
+| `off` | `led off` | fade to `0 0 0 0` |
+| 1 token, pure decimal | `led 17` | fade to `PALETTE[17]` |
+| 1 token, 8 hex digits (optional `#`) | `led 33003300` / `led '#33003300'` | fade to `RR GG BB WW` |
+| 1 token, 6 hex digits with `#` *or* containing a non-decimal hex digit | `led '#ff8800'` / `led ab12cd` | fade to `RR GG BB 00` (W zeroed) |
+| 3 decimals | `led 51 0 51` | fade to `R G B 0` (W zeroed) |
+| 4 decimals | `led 51 0 51 0` | fade to `R G B W` |
+| `-h` / `--help` / `help` | `led --help` | print usage; exit 0 |
 
-- `--fade-ms` default **200 ms** (matches the original spec for
-  "going from `01010101` to `AABBEEDD` should happen as a fade in
-  200 ms").
-- `--fps` default **50 Hz** → 20 ms per frame → 10 frames for the
-  default 200 ms fade.
-- `MIN_FRAME_MS = 5` clamp prevents pathological `--fps 1000` from
-  starving sysfs.
+There are **no other input forms** and **no flags**. Anything that
+doesn't match one of the rows above exits with code 2.
 
-### Overrides
+### Disambiguation rules
 
-| Flag | Effect |
-|---|---|
-| `--fade-ms N` | total fade duration in ms (`0` = no fade) |
-| `--instant` | alias for `--fade-ms 0`, snap to target |
-| `--fps N` | frame rate during the fade |
+For single-token input the parser tests in this fixed order:
+
+1. literal `off` (case-insensitive) → fade to all zeros.
+2. `^[0-9a-fA-F]{8}$` (after stripping a leading `#`) → 8-hex form.
+   Consequence: `00000000` is the hex colour, **not** palette index 0
+   (palette index 0 is the literal token `0`).
+3. `^[0-9a-fA-F]{6}$` (after stripping `#`) AND the token either
+   started with `#` *or* is not pure decimal → 6-hex form (W := 0).
+   Consequence: a bare 6-decimal-digit token like `123456` is treated
+   as a palette index (and will fail the range check, palette is 32
+   long). Prefix with `#` to force hex: `led '#123456'`.
+4. `^[0-9]+$` → palette index.
+5. Anything else → exit 2.
+
+This ordering is deliberate: the user cannot accidentally select an
+out-of-range palette index by typing a long-but-numeric hex string,
+and a bare 6-digit decimal cannot silently become a hex colour.
+
+## 1.3 Read-current (no-args) form
+
+```
+$ led
+51 0 51 0  #33003300
+```
+
+Output is one line, two views of the same state, separated by **two
+spaces**:
+
+- four space-separated decimal channel values in `R G B W` order
+- the 8-digit uppercase hex form prefixed with `#`
+
+Machine-readable: `read R G B W _ HEX < <(led)` works in bash. No
+trailing newline beyond the single one from `print()`. No extra
+columns, no header, no commentary.
+
+## 1.4 Fade animation
+
+**Every transition fades from the current LED state to the target
+over `FADE_MS` milliseconds** by linear interpolation in raw 8-bit
+PWM space at `FADE_FPS` Hz. This applies to every form that sets a
+colour: `off`, `<index>`, 3-decimal, 4-decimal, 6-hex, 8-hex.
 
 ### Algorithm
 
 ```python
-def fade_to_rgbw(target, fade_ms, fps):
-    if fade_ms <= 0:
+def fade_to(target):
+    if FADE_MS <= 0:
         write_rgbw_now(*target)
         return
-    r0,g0,b0,w0 = read_brightness_all()       # current state from sysfs
-    if (r0,g0,b0,w0) == target:                # nothing to do
+    r0,g0,b0,w0 = read_brightness_all()           # current sysfs state
+    if (r0,g0,b0,w0) == target:                   # nothing to do
         return
-    frame_ms = max(5, int(1000 / fps))
-    frames   = max(1, fade_ms // frame_ms)
+    frame_ms = max(MIN_FRAME_MS, int(1000 / FADE_FPS))
+    frames   = max(1, FADE_MS // frame_ms)
     for i in range(1, frames + 1):
-        t = i / frames                         # t == 1 on final frame
-        write_rgbw_now(*linear_interp(start, target, t))
+        t = i / frames                            # t == 1 on final frame
+        write_rgbw_now(*linear_interp((r0,g0,b0,w0), target, t))
         if i < frames:
             time.sleep(frame_ms / 1000.0)
 ```
 
 Linear interpolation in raw PWM space (no gamma correction). At
 200 ms total duration the perceptual non-linearity of LED brightness
-isn't visible — gamma would help only on longer fades (multi-second).
-The final frame always lands on the exact target so rounding never
+isn't visible — gamma would help only on multi-second fades. The
+final frame always lands on the exact target so rounding never
 strands the LED one PWM tick off.
 
 ### Cost
@@ -124,31 +163,22 @@ under any reasonable cost budget for a one-shot CLI.
 
 ### Failure modes during fade
 
-- Sysfs write fails mid-fade → `die()` immediately with exit code 3.
-  No attempt to "wind back" the partial fade; the operator already
-  has bigger problems (most likely missing root) and the LED state
-  is wherever the last successful write left it.
+- Sysfs write fails mid-fade → exit code 3 immediately. No attempt
+  to "wind back" the partial fade; the LED state is wherever the
+  last successful write left it (most likely cause is missing root,
+  which the operator needs to fix anyway).
 - `read_brightness()` returns 0 on sysfs read failure → fade starts
   from "off", which is the safest default if state cannot be
   recovered.
 
-## 1.3 Palette: `/config/led.json`
+## 1.5 Palette: baked into `led.py`
 
-Created on first run with a 32-entry default if the file doesn't
-exist:
-
-```json
-{
-  "_comment": "Mono Gateway DK status LED palette. Edit `colors` to taste; preserve list length so existing integer indices keep meaning. Each entry: name (free text), color (8 hex digits RRGGBBWW where W is the white channel, NOT alpha).",
-  "colors": [
-    {"name": "off",          "color": "00000000"},
-    {"name": "red",          "color": "66000000"},
-    {"name": "orange",       "color": "66330000"},
-    ...
-    {"name": "alert-white",  "color": "000000ff"}
-  ]
-}
-```
+The palette is a 32-entry Python tuple at the top of `led.py`.
+There is **no `/config/led.json`**, no on-disk state, no auto-create
+logic. Indices are stable across upgrades because they're literally
+in the source — bumping the palette requires editing `led.py` and
+republishing the ISO (or copying the new script into
+`/usr/local/bin/led` on a live system).
 
 Indices 0–28 sit at ~40% peak brightness (the LP5812 driving four
 white SMDs through the Mono case at 100% is uncomfortably bright in
@@ -156,50 +186,34 @@ an office). Indices 29–31 are reserved `alert-*` entries at full
 brightness for emergency overrides — `monoledd` (Part 2) treats
 these the same way.
 
-**`/config` persistence.** `/config` is the VyOS persistent overlay
-mounted from eMMC `p3` via `vyos-union=`. Customer edits to
-`led.json` survive reboots and `add system image` upgrades. The
-loader does **not** auto-migrate when a new build's `DEFAULT_PALETTE`
-adds entries — `colors` list length stays at whatever the user has
-in `/config/led.json` to keep hard-coded indices stable. To force a
-regenerate: `rm /config/led.json`, next `led` invocation writes the
-current default.
+A palette index ≥ `len(PALETTE)` (i.e. ≥ 32) exits with code 2.
 
-**Validation.** `load_palette()` rejects:
-- non-JSON or unreadable file → exit 4
-- missing top-level `colors` list → exit 4
-- empty `colors` list → exit 4
-- any entry missing a `color` string → exit 4
-
-A palette index ≥ `len(colors)` is exit 2 (bad-args), not exit 4
-(palette is *valid*, the index is just out of range).
-
-## 1.4 Exit codes
+## 1.6 Exit codes
 
 | Code | Meaning |
 |---|---|
 | 0 | success |
 | 1 | LP5812 driver not loaded (sysfs path absent) |
-| 2 | bad argument / parse error / out-of-range |
+| 2 | bad argument / parse error / out-of-range index |
 | 3 | sysfs write failed (usually need root) |
-| 4 | palette file corrupt or unreadable |
 
 These match what other operator tools in this repo (`fan-check`,
 `caam-check`, `sfp-check`) emit so they can all be wired as
-Nagios/monit probes by the same selector.
+Nagios/monit probes by the same selector. Note: there is no exit
+code 4 (palette is in source, cannot be "corrupt" at runtime).
 
-## 1.5 Examples
+## 1.7 Examples
 
 ```bash
-led 1                       # palette index 1 (red), 200 ms fade
-led --instant 1             # same, no fade
-led --fade-ms 1000 6        # green, 1 s fade
-led --fade-ms 50 --fps 100  # 50 ms fade at 100 fps (5 frames)
-led 51 0 51 0               # R=51 G=0 B=51 W=0
-led '#33003300'             # same in hex
-led off                     # fade to index 0 (off)
-led get                     # print current R G B W
-led list                    # print the 32-entry palette
+led                         # print current state, e.g. "51 0 51 0  #33003300"
+led off                     # fade to 0 0 0 0
+led 1                       # fade to PALETTE[1]
+led 51 0 51 0               # R=51 G=0 B=51 W=0  (decimal 4-tuple)
+led 51 0 51                 # same as above; W forced to 0
+led 33003300                # 8-hex form, same colour as the decimals above
+led '#33003300'             # same, with explicit '#'
+led ff8800                  # 6-hex form, fades to (255,136,0,0)
+led '#ff8800'               # same, with explicit '#'
 ```
 
 ---
@@ -591,7 +605,7 @@ concurrently without fighting each other.
 |---|---|
 | Just want to set a colour by hand once | Use `led`. Do not stop `monoledd` — the daemon will overwrite within one tick (200 ms). For a brief override you can `led 29` (alert-red) and the daemon will fade back to the load colour within ~3 s. |
 | Want manual control for an extended period (debugging, scripted UI) | `systemctl stop monoledd.service` first, then use `led`. Re-`systemctl start monoledd.service` when done. |
-| Want manual control permanently (operator preference) | `systemctl disable --now monoledd.service`. `led` then has exclusive ownership; `/config/led.json` is the only colour source. |
+| Want manual control permanently (operator preference) | `systemctl disable --now monoledd.service`. `led` then has exclusive ownership; the baked-in `PALETTE` is the only colour source. |
 | Want to script colour changes from a custom daemon | Either disable `monoledd` or fork it. Two userspace processes writing the same sysfs nodes is unsupported. |
 
 The shared conventions guarantee that switching between them is safe:
@@ -610,6 +624,7 @@ The shared conventions guarantee that switching between them is safe:
 - Manual tool source: `board/scripts/led.py`
 - Manual tool staging block: `bin/ci-setup-vyos-build.sh` (just
   after the `caam-check` block, before the FLAVOR=ask gate)
-- Persistent palette: `/config/led.json` (auto-created on first run)
+- Palette: baked into `board/scripts/led.py` as the `PALETTE`
+  constant (32 entries). No on-disk state.
 - Future daemon source location: `board/scripts/monoledd` (to be
   added)
