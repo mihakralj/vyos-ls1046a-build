@@ -1,0 +1,178 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index 5a7951ce4..6d444142a 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -292,9 +292,9 @@ struct fman_pcd_cc_node {
+  * PR14c-body-4 wires fman_pcd_cc_node_add_key().
+  *
+  * Returns 0 on success, -EINVAL for an unknown action->type, and
+- * -EOPNOTSUPP for REPLICATE/MANIPULATE which require helper objects
+- * not yet plumbed (REPLICATE waits on PR14f-body integration; the
+- * MANIPULATE arm landed in PR14d-body-3 and is now functional).
++ * -EOPNOTSUPP only for REPLICATE which waits on PR14f-body
++ * integration.  MANIPULATE landed in PR14d-body-3; POLICE landed
++ * in PR14e-body-3.
+  *
+  * Empty-table FQ-0-trap safety property (carried over from body-2):
+  * an all-zero AD slot decodes as RESULT_CONTRL_FLOW with fqid=0, which
+@@ -391,6 +391,50 @@ cc_encode_ad(const struct fman_pcd_action *action, void __iomem *ad)
+ 		break;
+ 	}
+ 
++	case FMAN_PCD_ACTION_POLICE: {
++		/*
++		 * Police-AD encoding per RM 8.7.4.3 Table 8-119 cross-ref
++		 * SDK fm_cc.c BuildAdForProfile() (RESULT_CF + plcr-arm).
++		 * The match-table AD encodes a control-flow result that
++		 * is metered by the named policer profile BEFORE the
++		 * frame is enqueued to next_fqid:
++		 *
++		 *   fqid = police.next_fqid    (post-meter FQID)
++		 *   plcr = profile_id          (silicon slot 0..255 as
++		 *                               programmed by PR14e
++		 *                               body-1/2 into MURAM)
++		 *   nia  = RESULT_CF           (PLCR_DIS clear -- the
++		 *                               whole point is to run
++		 *                               the policer pass)
++		 *   res  = 0                   (no chained next-AD)
++		 *
++		 * Silicon ordering: AD -> PLCR meter -> trTCM color
++		 * decision -> (green|yellow) enqueue to AD.fqid, (red)
++		 * drop or downgrade per the profile's mode word.  The
++		 * profile's record was written under prof->lock by
++		 * plcr_program_record() in body-2.
++		 *
++		 * Validation: non-NULL profile handle, non-zero post-
++		 * meter fqid, and a profile_id in the silicon-legal
++		 * 0..255 range (the accessor returns 0xffff for NULL).
++		 */
++		u16 pid;
++
++		if (!action->police.profile)
++			return -EINVAL;
++		if (action->police.next_fqid == 0)
++			return -EINVAL;
++		pid = fman_pcd_plcr_profile_id_internal(action->police.profile);
++		if (pid == 0xffffu)
++			return -EINVAL;
++		if (pid > 0xffu)
++			return -ERANGE;
++		nia = FMAN_PCD_AD_NIA_TYPE_RESULT_CF;
++		fqid = action->police.next_fqid;
++		plcr = pid;
++		break;
++	}
++
+ 	default:
+ 		return -EINVAL;
+ 	}
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+index 3e79617ad..f009828ca 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+@@ -67,4 +67,17 @@ unsigned long fman_pcd_cc_tree_group_table_off(
+  */
+ unsigned long fman_pcd_manip_hmtd_off(const struct fman_pcd_manip *manip);
+ 
++/* fman_pcd_plcr_profile_id_internal:
++ *   Cross-TU accessor exposing struct fman_pcd_plcr_profile::profile_id
++ *   to fman_pcd_cc.c, which needs it to encode the
++ *   FMAN_PCD_ACTION_POLICE arm in cc_encode_ad().  Mirrors the
++ *   public fman_pcd_plcr_profile_get_id() one-to-one; declared in
++ *   the internal header so the CC TU does not have to pull in
++ *   <linux/fsl/fman_pcd.h>'s public-ABI sentinel surface for a
++ *   single accessor.  Returns 0xffff for NULL @prof to match the
++ *   sibling-TU defensive idiom.
++ */
++u16 fman_pcd_plcr_profile_id_internal(
++	const struct fman_pcd_plcr_profile *prof);
++
+ #endif /* __FMAN_PCD_INTERNAL_H */
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
+index 5c100ce8b..40a7f473d 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
+@@ -725,3 +725,38 @@ void fman_pcd_plcr_profile_destroy(struct fman_pcd_plcr_profile *prof)
+ 	kfree(prof);
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_plcr_profile_destroy);
++
++/**
++ * fman_pcd_plcr_profile_get_id() - read the silicon slot id of @prof.
++ *
++ * Public-ABI accessor matching the declaration in
++ * <linux/fsl/fman_pcd.h>.  Cross-TU consumers inside the driver
++ * (currently fman_pcd_cc.c via the FMAN_PCD_ACTION_POLICE arm in
++ * cc_encode_ad()) reach this through the internal accessor
++ * fman_pcd_plcr_profile_id_internal() declared in
++ * fman_pcd_internal.h, which is just a thin alias of this one.
++ * Returns 0xffff for a NULL @prof so callers can distinguish from
++ * the well-known catch-all silicon id 0; the body-1 slot
++ * allocator never hands out 0xffff (max legal id is 0xff).
++ */
++u16 fman_pcd_plcr_profile_get_id(const struct fman_pcd_plcr_profile *prof)
++{
++	if (!prof)
++		return 0xffffu;
++	return prof->profile_id;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_plcr_profile_get_id);
++
++/*
++ * fman_pcd_plcr_profile_id_internal: thin in-driver alias of the
++ * public helper above.  Kept separate so the CC TU does not have
++ * to pull <linux/fsl/fman_pcd.h> into its dependency closure just
++ * for one accessor; matches the
++ * fman_pcd_cc_tree_group_table_off / fman_pcd_manip_hmtd_off
++ * idiom from PR14c/PR14d.  Not EXPORT_SYMBOL'd -- internal use only.
++ */
++u16 fman_pcd_plcr_profile_id_internal(
++	const struct fman_pcd_plcr_profile *prof)
++{
++	return fman_pcd_plcr_profile_get_id(prof);
++}
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 9b5a069fd..16a724535 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -232,7 +232,8 @@ enum fman_pcd_action_type {
+ 	FMAN_PCD_ACTION_FORWARD_CAAM,
+ 	FMAN_PCD_ACTION_REPLICATE,
+ 	FMAN_PCD_ACTION_MANIPULATE,
+-	FMAN_PCD_ACTION_NEXT_CC_NODE,
++FMAN_PCD_ACTION_NEXT_CC_NODE,
++	FMAN_PCD_ACTION_POLICE,
+ };
+ 
+ /**
+@@ -269,6 +270,10 @@ struct fman_pcd_action {
+ 		struct {
+ 			struct fman_pcd_cc_node *node;
+ 		} next_cc;
++		struct {
++			struct fman_pcd_plcr_profile *profile;
++			u32 next_fqid;
++		} police;
+ 	};
+ };
+ 
+@@ -647,6 +652,19 @@ int fman_pcd_plcr_profile_set_rates(struct fman_pcd_plcr_profile *prof,
+  */
+ void fman_pcd_plcr_profile_destroy(struct fman_pcd_plcr_profile *prof);
+ 
++/**
++ * fman_pcd_plcr_profile_get_id() - read the silicon slot id of @prof.
++ * @prof: handle from fman_pcd_plcr_profile_create().
++ *
++ * Returns the policer-profile id (0..255) programmed into MURAM
++ * by the body-2 slot allocator.  Used by callers that want to wire
++ * the profile into a CC-node action via FMAN_PCD_ACTION_POLICE
++ * (see cc_encode_ad() in fman_pcd_cc.c) or read it back for
++ * diagnostics.  Returns 0xffff for a NULL @prof so the caller can
++ * distinguish from the well-known catch-all id 0.
++ */
++u16 fman_pcd_plcr_profile_get_id(const struct fman_pcd_plcr_profile *prof);
++
+ /* ----------------------------------------------------------------------
+  * Replicator groups + Parser (fman_pcd_replic.c, fman_pcd_prs.c, PR14f)
+  *
