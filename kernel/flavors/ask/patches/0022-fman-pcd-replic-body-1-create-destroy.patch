@@ -1,0 +1,395 @@
+From 1a42ddba3602b27d2f974cd1eaad2b307971df4f Mon Sep 17 00:00:00 2001
+From: "miha.kralj" <miha.kralj@outlook.com>
+Date: Thu, 14 May 2026 15:25:26 +0000
+Subject: [PATCH] =?UTF-8?q?ask2:=20PR14f-body-1=20=E2=80=94=20fman=5Fpcd?=
+ =?UTF-8?q?=5Freplic=20group=20create/destroy=20MURAM=20bodies=20(patch=20?=
+ =?UTF-8?q?0022)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Replace PR14f-prep ERR_PTR(-EOPNOTSUPP) stubs with real silicon-resident
+source-TD + member-AD MURAM allocation per LS1046A RM 8.7.7 (Frame
+replicator group table format).
+
+- struct fman_pcd_replic_group (private to TU): list anchor on
+  pcd->replic_groups, pcd back-pointer, num_members, source_td/members
+  MURAM off+iomem, members_sz, spinlock for body-3 runtime updates.
+- create() validates args (pcd, members, num_members in [1,64]),
+  allocates source-TD (16 B) + members array (num_members*16 B) via
+  fman_pcd_muram_alloc(), memset_io zero both regions, stamps the
+  source-TD type field with FMAN_PCD_REPLIC_SOURCE_TD_OPCODE (0x75),
+  list_add_tail on pcd->replic_groups under pcd->lock.
+- destroy() is exact reverse: list_del under lock, zero before free,
+  fman_pcd_muram_free() in reverse order, kfree handle.
+- Pre-declares body-2 constants (FR_BIT, NL_BIT, ADDR_SHIFT,
+  INVALID_MEMBER_INDEX) and source-TD record offsets per RM Table 8-128.
+
+Body-1 deliberately does NOT consume the members[] arg yet — FQID
+encoding + NEXT chaining + NL_BIT stamping lands in body-2 as one
+atomic programming pass.  All-zero MURAM keeps silicon walker
+inactive (operationCode=0 short-circuits the walker), preserving the
+same inactive-state safety invariant as PR14d-body-1 (HMCT all-zero)
+and PR14e-body-1 (PLCR record all-zero).
+---
+ .../ethernet/freescale/fman/fman_pcd_replic.c | 305 +++++++++++++++---
+ 1 file changed, 266 insertions(+), 39 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c b/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c
+index 3482b2019..9d46bef39 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c
+@@ -1,83 +1,310 @@
+ // SPDX-License-Identifier: GPL-2.0
+ /*
+- * FMan PCD Frame Replicator - public API stubs.
++ * FMan PCD Frame Replicator - real MURAM bodies (PR14f-body-1).
+  *
+- * PR14f-prep of the ASK2 v1.0 PR14 series (replicator half).  Declares
+- * the on-disk translation unit for the multicast-fanout layer and
+- * provides ERR_PTR(-EOPNOTSUPP) / no-op stubs for every public entry
+- * point declared in <linux/fsl/fman_pcd.h>.  PR14f-body replaces these
+- * stubs with the real silicon-programming code per LS1046A RM 8.7.7
++ * Replaces the PR14f-prep ERR_PTR(-EOPNOTSUPP) stubs in
++ * fman_pcd_replic_group_create() / _destroy() with real silicon-resident
++ * source-TD + member-AD MURAM allocation per LS1046A RM 8.7.7
+  * (Frame replicator group table format).
+  *
+  * Authoritative reference
+  * -----------------------
+- * - LS1046A Reference Manual sec 8.7.7 (Frame replicator).
++ * - LS1046A Reference Manual sec 8.7.7 (Frame replicator) - silicon-fact
++ *   source of the source-TD record layout, member-AD chaining via
++ *   NEXT_FRM_REPLIC_ADDR_SHIFT, FR/NL bits, and the 64-member hard limit.
+  *
+  * Provenance (v1.1)
+  * ---------------------
+  * Mainline drivers/net/ethernet/freescale/fman/ has zero replicator
+  * code; this file is authored from the RM only.  The legacy NXP SDK
+- * fm_replic.c (~900 LOC under drivers/net/ethernet/freescale/sdk_fman/
+- * Peripherals/FM/Pcd/ in the archived mihakralj/kernel-ls1046a-build
+- * repo at HEAD 464df181) is a read-only silicon-fact cross-reference
+- * only - no code or struct layouts are copied from it.  See spec
+- * specs/ask2-rewrite-spec.md sec 16 (provenance discipline risk #12).
++ * fm_replic.c / fm_replic.h under drivers/net/ethernet/freescale/
++ * sdk_fman/Peripherals/FM/Pcd/ in the archived
++ * mihakralj/kernel-ls1046a-build repo at HEAD 464df181 is a read-only
++ * silicon-fact cross-reference only - no code or struct layouts are
++ * copied.  See spec specs/ask2-rewrite-spec.md sec 16 (provenance
++ * discipline risk #12).
+  *
+- * What this file delivers at PR14f-prep
+- * -------------------------------------
+- * Two public entry points, both returning ERR_PTR(-EOPNOTSUPP) /
+- * no-op.  No struct fman_pcd_replic_group definition yet - it stays
+- * forward-declared in <linux/fsl/fman_pcd.h>.  No MURAM allocation,
+- * no register writes.  PR14f-body materialises the silicon-resident
+- * replicator-group table.  Consumed in M3 by IPv4 / IPv6 multicast
+- * flow types (OP_FLOW_INSERT_V4_MCAST / _V6_MCAST per spec sec 12).
++ * Body-1 scope
++ * ------------
++ * - struct fman_pcd_replic_group (private to TU): list anchor on
++ *   pcd->replic_groups, pcd back-pointer, cached num_members, source-TD
++ *   MURAM offset+iomem, members-array MURAM offset+iomem, members-array
++ *   byte size, spinlock_t lock for body-3 add/remove softirq paths.
++ * - Real create() validates args, allocates source-TD (16 B) +
++ *   members array (num_members * 16 B), memset_io zero (all-zero source-TD
++ *   has operationCode=0 = inactive; silicon walker never invoked even
++ *   when no NL_BIT marks the members), populates source-TD type field
++ *   with FRM_REPLIC_SOURCE_TD_OPCODE so it is recognised as a replicator
++ *   anchor when activated by body-3.  Note: body-1 deliberately does
++ *   NOT chain the members via their NEXT pointers nor stamp NL_BIT -
++ *   body-2 (member-AD encoder) does that as a single atomic
++ *   programming pass.
++ * - Real destroy() is the exact reverse: list_del under pcd->lock,
++ *   free members array, free source-TD, kfree handle.
++ *
++ * Body-2 will add the member-AD encoder (FQID into each 16-B member
++ * slot, NEXT pointer chaining via FRM_REPLIC_ADDR_SHIFT, NL_BIT on the
++ * last member, FR_BIT to enable per-member fan-out) and stamp them in
++ * one pass under group->lock so silicon never sees a partial chain.
++ * Body-3 wires cc_encode_ad() FMAN_PCD_ACTION_REPLICATE to point AD.res
++ * at group->source_td_off.  Body-4 lands the KUnit suite covering the
++ * source-TD layout byte-perfect against RM 8.7.7 and the member-AD
++ * chaining math.
+  */
+ 
+ #include <linux/err.h>
+ #include <linux/errno.h>
+ #include <linux/export.h>
++#include <linux/io.h>
+ #include <linux/kernel.h>
++#include <linux/list.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
+ #include <linux/types.h>
+ 
+ #include <linux/fsl/fman_pcd.h>
++#include "fman.h"
++#include "fman_muram.h"
+ #include "fman_pcd_internal.h"
+ 
+-/* Silicon hard limit per RM 8.7.7: 64 members per replicator group. */
+-#define FMAN_PCD_REPLIC_MAX_MEMBERS 64
++/*
++ * Silicon hard limit per LS1046A RM sec 8.7.7: a single replicator group
++ * may hold up to 64 members.  Matches the SDK FM_PCD_MAX_NUM_OF_REPLIC_MEMBERS
++ * value (cross-ref read-only) and is exposed in the public header doc.
++ */
++#define FMAN_PCD_REPLIC_MAX_MEMBERS		64
++
++/*
++ * Source-TD record is 16 B per RM sec 8.7.7 (cross-ref SDK fm_replic.h
++ * t_FrmReplicGroupSourceAd, which is 4 x u32).  Member-AD records are
++ * also 16 B each - same layout as CC ADs (fqid/plcr/nia/res) with the
++ * NEXT_FRM_REPLIC_ADDR_SHIFT field packed into the NIA word.
++ */
++#define FMAN_PCD_REPLIC_AD_SIZE			16
++
++/*
++ * Body-2 register constants pre-declared in body-1 so the encoder drop
++ * lands with zero new constants.  Per RM sec 8.7.7 + cross-ref SDK
++ * fm_replic.h lines 46-55:
++ *
++ *   - SOURCE_TD_OPCODE 0x75: stamped into the source-TD type field; the
++ *     silicon parser-classifier walker recognises this as the entry
++ *     point of a replicator chain.
++ *   - FR_BIT 0x08000000: NIA[27] - "Fan-out enable" on each member AD.
++ *   - NL_BIT 0x10000000: NIA[28] - "No-Link" terminates the chain;
++ *     stamped into the LAST member's NIA word.
++ *   - ADDR_SHIFT 4: NEXT pointer is the high-order MURAM offset
++ *     of the next member, shifted left 4 (i.e. 16-B aligned).
++ *   - INVALID_MEMBER_INDEX 0xffff: sentinel for body-2 "no successor"
++ *     while still inside the chain (only the LAST member has NL_BIT
++ *     set; intermediate vacant slots use this sentinel).
++ */
++#define FMAN_PCD_REPLIC_SOURCE_TD_OPCODE	0x75u
++#define FMAN_PCD_REPLIC_FR_BIT			0x08000000u
++#define FMAN_PCD_REPLIC_NL_BIT			0x10000000u
++#define FMAN_PCD_REPLIC_ADDR_SHIFT		4
++#define FMAN_PCD_REPLIC_INVALID_MEMBER_INDEX	0xffffu
++
++/* Source-TD record offsets (RM sec 8.7.7 Table 8-128). */
++#define FMAN_PCD_REPLIC_SRC_OFF_TYPE		0x0
++#define FMAN_PCD_REPLIC_SRC_OFF_FRG_POINTER	0x4
++#define FMAN_PCD_REPLIC_SRC_OFF_OPCODE		0x8
++#define FMAN_PCD_REPLIC_SRC_OFF_RES		0xc
++
++/**
++ * struct fman_pcd_replic_group - one MURAM-resident replicator group.
++ * @node: anchor on pcd->replic_groups
++ * @pcd: parent PCD context (back-pointer)
++ * @num_members: 1..FMAN_PCD_REPLIC_MAX_MEMBERS
++ * @source_td_off: MURAM byte offset of the source-TD record (16 B)
++ * @source_td: iomem pointer of the source-TD record
++ * @members_off: MURAM byte offset of the members-array (num_members * 16 B)
++ * @members: iomem pointer of the members-array base
++ * @members_sz: byte size of the members array (cached for free)
++ * @lock: serialises body-3 add/remove paths against runtime updates
++ *
++ * Body-1 keeps the struct private to fman_pcd_replic.c.  Body-3 will
++ * expose a cross-TU accessor (mirror of fman_pcd_manip_hmtd_off()) so
++ * cc_encode_ad() can read source_td_off when encoding the REPLICATE
++ * arm without depending on the layout.
++ */
++struct fman_pcd_replic_group {
++	struct list_head	node;
++	struct fman_pcd		*pcd;
++	u8			num_members;
++	unsigned long		source_td_off;
++	void __iomem		*source_td;
++	unsigned long		members_off;
++	void __iomem		*members;
++	size_t			members_sz;
++	spinlock_t		lock;
++};
+ 
+ /**
+  * fman_pcd_replic_group_create() - allocate a replicator group.
+  *
+- * PR14f-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
+- * Returns ERR_PTR(-EOPNOTSUPP) until PR14f-body lands.
++ * Body-1 real allocation.  See <linux/fsl/fman_pcd.h> for the contract.
++ *
++ * Sequence:
++ *   1. arg validate (pcd, members, num_members in [1, 64])
++ *   2. kzalloc handle, init lock + list node, cache num_members + pcd
++ *   3. fman_pcd_muram_alloc(16) for source-TD; iomem via
++ *      fman_muram_offset_to_vbase(muram_handle, off) where
++ *      muram_handle = fman_get_muram(fman_pcd_get_fman(pcd)).
++ *   4. fman_pcd_muram_alloc(num_members * 16) for members array.
++ *   5. memset_io both regions to zero (safe inactive state: source-TD
++ *      operationCode=0 means silicon walker never enters the chain).
++ *   6. iowrite32be FMAN_PCD_REPLIC_SOURCE_TD_OPCODE into source-TD type
++ *      field so body-2 can populate frg_pointer and the silicon
++ *      recognises this as a replicator entry point when body-2 stamps
++ *      the active OPCODE byte.
++ *   7. list_add_tail on pcd->replic_groups under pcd->lock so
++ *      fman_pcd_release() reaps leaked handles on driver unbind.
++ *
++ * Note: per-member FQID programming + NEXT chaining + NL_BIT stamping
++ * is deferred to body-2 (the encoder drop).  Body-1 leaves the members
++ * array all-zero - this is the same inactive-state safety invariant
++ * established by PR14d-body-1 (HMCT all-zero) and PR14e-body-1 (PLCR
++ * record all-zero): silicon cannot enter undefined state because the
++ * source-TD operationCode=0 short-circuits the walker.
+  */
+ struct fman_pcd_replic_group *
+ fman_pcd_replic_group_create(struct fman_pcd *pcd,
+-     const struct fman_pcd_replic_member *members,
+-     u8 num_members)
++				     const struct fman_pcd_replic_member *members,
++				     u8 num_members)
+ {
+-if (!pcd || !members)
+-return ERR_PTR(-EINVAL);
+-if (num_members == 0 || num_members > FMAN_PCD_REPLIC_MAX_MEMBERS)
+-return ERR_PTR(-EINVAL);
++	struct fman_pcd_replic_group *group;
++	struct muram_info *muram;
++	unsigned long off;
++	size_t members_sz;
++	struct mutex *pcd_lock;
++	struct list_head *list;
+ 
+-return ERR_PTR(-EOPNOTSUPP);
++	if (!pcd || !members)
++		return ERR_PTR(-EINVAL);
++	if (num_members == 0 || num_members > FMAN_PCD_REPLIC_MAX_MEMBERS)
++		return ERR_PTR(-EINVAL);
++
++	muram = fman_get_muram(fman_pcd_get_fman(pcd));
++	if (!muram)
++		return ERR_PTR(-EINVAL);
++
++	group = kzalloc(sizeof(*group), GFP_KERNEL);
++	if (!group)
++		return ERR_PTR(-ENOMEM);
++
++	INIT_LIST_HEAD(&group->node);
++	spin_lock_init(&group->lock);
++	group->pcd = pcd;
++	group->num_members = num_members;
++
++	/* Source-TD: 16 B, 16-B aligned (gen_pool min_alloc_order=8 covers). */
++	off = fman_pcd_muram_alloc(pcd, FMAN_PCD_REPLIC_AD_SIZE);
++	if (IS_ERR_VALUE(off)) {
++		kfree(group);
++		return ERR_PTR(-ENOMEM);
++	}
++	group->source_td_off = off;
++	group->source_td = (void __iomem *)fman_muram_offset_to_vbase(muram, off);
++
++	/* Members array: num_members * 16 B contiguous. */
++	members_sz = (size_t)num_members * FMAN_PCD_REPLIC_AD_SIZE;
++	off = fman_pcd_muram_alloc(pcd, members_sz);
++	if (IS_ERR_VALUE(off)) {
++		fman_pcd_muram_free(pcd, group->source_td_off,
++				    FMAN_PCD_REPLIC_AD_SIZE);
++		kfree(group);
++		return ERR_PTR(-ENOMEM);
++	}
++	group->members_off = off;
++	group->members = (void __iomem *)fman_muram_offset_to_vbase(muram, off);
++	group->members_sz = members_sz;
++
++	/* Zero both regions before publishing - silicon walker treats
++	 * operationCode=0 as inactive, so this is the canonical safe state.
++	 */
++	memset_io(group->source_td, 0, FMAN_PCD_REPLIC_AD_SIZE);
++	memset_io(group->members, 0, members_sz);
++
++	/* Stamp the source-TD type field so body-2 can find it and the
++	 * silicon recognises the record as a replicator entry point once
++	 * body-2 writes the real operationCode.  type field is at offset 0,
++	 * holds FRM_REPLIC_SOURCE_TD_OPCODE in the high byte per RM 8.7.7.
++	 */
++	iowrite32be(FMAN_PCD_REPLIC_SOURCE_TD_OPCODE << 24,
++		    group->source_td + FMAN_PCD_REPLIC_SRC_OFF_TYPE);
++
++	pcd_lock = fman_pcd_get_lock(pcd);
++	list = fman_pcd_get_replic_list(pcd);
++	if (!pcd_lock || !list) {
++		fman_pcd_muram_free(pcd, group->members_off, members_sz);
++		fman_pcd_muram_free(pcd, group->source_td_off,
++				    FMAN_PCD_REPLIC_AD_SIZE);
++		kfree(group);
++		return ERR_PTR(-EINVAL);
++	}
++	mutex_lock(pcd_lock);
++	list_add_tail(&group->node, list);
++	mutex_unlock(pcd_lock);
++
++	/* members[] is consumed by body-2 - body-1 stores the requested
++	 * FQIDs nowhere yet, on the principle that body-1 can land
++	 * independently of body-2 without leaving a partially-programmed
++	 * silicon state.  Pinning the FQIDs into the all-zero MURAM region
++	 * would defeat the inactive-state invariant.  Body-2's signature
++	 * will take (group, members[], num) and re-validate against
++	 * group->num_members.
++	 */
++	(void)members;
++
++	return group;
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_replic_group_create);
+ 
+ /**
+  * fman_pcd_replic_group_destroy() - free one replicator group.
+  *
+- * PR14f-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
+- * NULL-safe no-op until PR14f-body lands.
++ * Body-1 real destroy.  See <linux/fsl/fman_pcd.h> for the contract.
++ * NULL-safe.  Acquires pcd->lock, list_del, frees MURAM (members first,
++ * then source-TD), frees handle.
++ *
++ * Body-3 will add a WARN_ON if any CC action template still references
++ * this group via FMAN_PCD_ACTION_REPLICATE - that requires a refcount
++ * field that gets bumped/dropped when add_key encodes the REPLICATE arm.
++ * For body-1 the assumption is single-consumer: only the test harness
++ * and the eventual ASK2 multicast flow type call this pair.
+  */
+ void fman_pcd_replic_group_destroy(struct fman_pcd_replic_group *group)
+ {
+-if (!group)
+-return;
+-/* PR14f-body: WARN if any CC action template still references this
+- * group, free MURAM table, free handle.
+- */
++	struct mutex *pcd_lock;
++
++	if (!group)
++		return;
++
++	pcd_lock = fman_pcd_get_lock(group->pcd);
++	if (pcd_lock) {
++		mutex_lock(pcd_lock);
++		list_del(&group->node);
++		mutex_unlock(pcd_lock);
++	} else {
++		/* PCD already torn down: leak the list anchor, it points at
++		 * freed memory anyway. */
++		WARN_ON_ONCE(1);
++	}
++
++	/* Zero before free so a future MURAM re-alloc that grabs the same
++	 * offset cannot inherit a half-active source-TD opcode.  Mirrors
++	 * PR14e-body-2's destroy enhancement.
++	 */
++	memset_io(group->members, 0, group->members_sz);
++	memset_io(group->source_td, 0, FMAN_PCD_REPLIC_AD_SIZE);
++
++	fman_pcd_muram_free(group->pcd, group->members_off, group->members_sz);
++	fman_pcd_muram_free(group->pcd, group->source_td_off,
++			    FMAN_PCD_REPLIC_AD_SIZE);
++
++	kfree(group);
+ }
+-EXPORT_SYMBOL_GPL(fman_pcd_replic_group_destroy);
+\ No newline at end of file
++EXPORT_SYMBOL_GPL(fman_pcd_replic_group_destroy);
+-- 
+2.39.5
+
