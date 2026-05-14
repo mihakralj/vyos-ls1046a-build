@@ -170,6 +170,7 @@ fi
 #   0001-caam-qi-share.patch        — caam_qi_ext_consumer_register/release
 #   0002-dpaa-eth-flow-block.patch  — TC_SETUP_BLOCK in dpaa_setup_tc()
 #   0003-fman-host-command-api.patch — fman_host_cmd_send() + new header
+#   0004-fman-pcd-subsystem.patch   — FMan PCD orchestration scaffold (PR14a)
 #
 # Naming hazard: vyos-build's own upstream patch loop reserves the
 # `0001-*` and `0003-*` filenames in $KERNEL_PATCHES (preserved by the
@@ -198,23 +199,26 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
     ASK_PATCH_COUNT=0
     for src_patch in "$ASK_PATCH_DIR"/0001-*.patch \
                      "$ASK_PATCH_DIR"/0002-*.patch \
-                     "$ASK_PATCH_DIR"/0003-*.patch; do
+                     "$ASK_PATCH_DIR"/0003-*.patch \
+                     "$ASK_PATCH_DIR"/0004-*.patch; do
         [ -f "$src_patch" ] || { echo "ERROR: missing $src_patch"; exit 1; }
-        # Rename 0001-→1001-, 0002-→1002-, 0003-→1003- to avoid collision
-        # with vyos-build's reserved upstream 0001-*/0003-* patches.
+        # Rename 0001-→1001-, 0002-→1002-, 0003-→1003-, 0004-→1004- to
+        # avoid collision with vyos-build's reserved upstream
+        # 0001-*/0003-* patches.
         base=$(basename "$src_patch")
         case "$base" in
             0001-*) dst="1001-${base#0001-}" ;;
             0002-*) dst="1002-${base#0002-}" ;;
             0003-*) dst="1003-${base#0003-}" ;;
+            0004-*) dst="1004-${base#0004-}" ;;
             *)      echo "ERROR: unexpected ASK patch name: $base"; exit 1 ;;
         esac
         echo "###   $base → $dst"
         cp "$src_patch" "$KERNEL_PATCHES/$dst"
         ASK_PATCH_COUNT=$((ASK_PATCH_COUNT + 1))
     done
-    if [ "$ASK_PATCH_COUNT" -ne 3 ]; then
-        echo "ERROR: expected 3 ASK kernel patches, staged $ASK_PATCH_COUNT"
+    if [ "$ASK_PATCH_COUNT" -ne 4 ]; then
+        echo "ERROR: expected 4 ASK kernel patches, staged $ASK_PATCH_COUNT"
         exit 1
     fi
     echo "### ASK2: $ASK_PATCH_COUNT in-tree kernel patches staged"
