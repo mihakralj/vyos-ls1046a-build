@@ -171,6 +171,7 @@ fi
 #   0002-dpaa-eth-flow-block.patch  — TC_SETUP_BLOCK in dpaa_setup_tc()
 #   0003-fman-host-command-api.patch — fman_host_cmd_send() + new header
 #   0004-fman-pcd-subsystem.patch   — FMan PCD orchestration scaffold (PR14a)
+#   0005-fman-pcd-kg-prep.patch     — FMan PCD KeyGen public API stub (PR14b-prep)
 #
 # Naming hazard: vyos-build's own upstream patch loop reserves the
 # `0001-*` and `0003-*` filenames in $KERNEL_PATCHES (preserved by the
@@ -180,7 +181,7 @@ fi
 # them or fail to apply. Solution: rename to 1001/1002/1003 at staging
 # time. The build-kernel.sh patch loop applies `find … | sort`-ordered,
 # producing the deterministic apply order:
-#     0001 0003 101 1001 1002 1003 4005 4006 4007 4009
+#     0001 0003 101 1001 1002 1003 1004 1005 4005 4006 4007 4009
 # i.e. vyos-build's reserved patches first, then board patches, then
 # ASK patches, then the rest of the board patches.
 #
@@ -200,25 +201,27 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
     for src_patch in "$ASK_PATCH_DIR"/0001-*.patch \
                      "$ASK_PATCH_DIR"/0002-*.patch \
                      "$ASK_PATCH_DIR"/0003-*.patch \
-                     "$ASK_PATCH_DIR"/0004-*.patch; do
+                     "$ASK_PATCH_DIR"/0004-*.patch \
+                     "$ASK_PATCH_DIR"/0005-*.patch; do
         [ -f "$src_patch" ] || { echo "ERROR: missing $src_patch"; exit 1; }
-        # Rename 0001-→1001-, 0002-→1002-, 0003-→1003-, 0004-→1004- to
-        # avoid collision with vyos-build's reserved upstream
-        # 0001-*/0003-* patches.
+        # Rename 0001-→1001-, 0002-→1002-, 0003-→1003-, 0004-→1004-,
+        # 0005-→1005- to avoid collision with vyos-build's reserved
+        # upstream 0001-*/0003-* patches.
         base=$(basename "$src_patch")
         case "$base" in
             0001-*) dst="1001-${base#0001-}" ;;
             0002-*) dst="1002-${base#0002-}" ;;
             0003-*) dst="1003-${base#0003-}" ;;
             0004-*) dst="1004-${base#0004-}" ;;
+            0005-*) dst="1005-${base#0005-}" ;;
             *)      echo "ERROR: unexpected ASK patch name: $base"; exit 1 ;;
         esac
         echo "###   $base → $dst"
         cp "$src_patch" "$KERNEL_PATCHES/$dst"
         ASK_PATCH_COUNT=$((ASK_PATCH_COUNT + 1))
     done
-    if [ "$ASK_PATCH_COUNT" -ne 4 ]; then
-        echo "ERROR: expected 4 ASK kernel patches, staged $ASK_PATCH_COUNT"
+    if [ "$ASK_PATCH_COUNT" -ne 5 ]; then
+        echo "ERROR: expected 5 ASK kernel patches, staged $ASK_PATCH_COUNT"
         exit 1
     fi
     echo "### ASK2: $ASK_PATCH_COUNT in-tree kernel patches staged"
