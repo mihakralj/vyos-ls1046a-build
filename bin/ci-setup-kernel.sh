@@ -182,7 +182,7 @@ fi
 # them or fail to apply. Solution: rename to 1001/1002/1003 at staging
 # time. The build-kernel.sh patch loop applies `find … | sort`-ordered,
 # producing the deterministic apply order:
-#     0001 0003 101 1001 1002 1003 1004 1005 1006 4005 4006 4007 4009
+#     0001 0003 101 1001 1002 1003 1004 1005 1006 1007 4005 4006 4007 4009
 # i.e. vyos-build's reserved patches first, then board patches, then
 # ASK patches, then the rest of the board patches.
 #
@@ -204,11 +204,12 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
                      "$ASK_PATCH_DIR"/0003-*.patch \
                      "$ASK_PATCH_DIR"/0004-*.patch \
                      "$ASK_PATCH_DIR"/0005-*.patch \
-                     "$ASK_PATCH_DIR"/0006-*.patch; do
+                     "$ASK_PATCH_DIR"/0006-*.patch \
+                     "$ASK_PATCH_DIR"/0007-*.patch; do
         [ -f "$src_patch" ] || { echo "ERROR: missing $src_patch"; exit 1; }
         # Rename 0001-→1001-, 0002-→1002-, 0003-→1003-, 0004-→1004-,
-        # 0005-→1005-, 0006-→1006- to avoid collision with vyos-build's reserved
-        # upstream 0001-*/0003-* patches.
+        # 0005-→1005-, 0006-→1006-, 0007-→1007- to avoid collision with
+        # vyos-build's reserved upstream 0001-*/0003-* patches.
         base=$(basename "$src_patch")
         case "$base" in
             0001-*) dst="1001-${base#0001-}" ;;
@@ -217,14 +218,15 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
             0004-*) dst="1004-${base#0004-}" ;;
             0005-*) dst="1005-${base#0005-}" ;;
             0006-*) dst="1006-${base#0006-}" ;;
+            0007-*) dst="1007-${base#0007-}" ;;
             *)      echo "ERROR: unexpected ASK patch name: $base"; exit 1 ;;
         esac
         echo "###   $base → $dst"
         cp "$src_patch" "$KERNEL_PATCHES/$dst"
         ASK_PATCH_COUNT=$((ASK_PATCH_COUNT + 1))
     done
-    if [ "$ASK_PATCH_COUNT" -ne 6 ]; then
-        echo "ERROR: expected 6 ASK kernel patches, staged $ASK_PATCH_COUNT"
+    if [ "$ASK_PATCH_COUNT" -ne 7 ]; then
+        echo "ERROR: expected 7 ASK kernel patches, staged $ASK_PATCH_COUNT"
         exit 1
     fi
     echo "### ASK2: $ASK_PATCH_COUNT in-tree kernel patches staged"
