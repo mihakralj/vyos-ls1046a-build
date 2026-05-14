@@ -1,8 +1,8 @@
 # ASK2 implementation plan — PR breakdown
 
 **Status:** active. Drives the implementation of ASK2 per
-[`specs/ask2-rewrite-spec.md`](../specs/ask2-rewrite-spec.md) (v0.8,
-2026-05-13). All PRs target the `ask20` branch unless noted otherwise.
+[`specs/ask2-rewrite-spec.md`](../specs/ask2-rewrite-spec.md) (v1.0,
+2026-05-14). All PRs target the `ask20` branch unless noted otherwise.
 
 This document is the working implementation plan; the spec is the
 architecture source-of-truth. When the two disagree, **the spec wins**
@@ -37,15 +37,21 @@ architecture source-of-truth. When the two disagree, **the spec wins**
 | 10  | M2.1 — `0001-caam-qi-share.patch` (real code)    | ask20  | landed |
 | 11  | M2.2 — `0002-dpaa-eth-flow-block.patch` (real)   | ask20  | landed |
 | 12  | M2.3 — `0003-fman-host-command-api.patch` (real) | ask20  | landed |
-| 13  | M2.4 — ucode version from QEF blob (DT) + spec §12.8 | ask20  | landed |
-| 14  | M2.5 — `OP_FLOW_INSERT_V4_TCP` end-to-end        | ask20  | not started |
-| 15  | M3.x — remaining flow types (NAT/PAT/v6/bridge)  | ask20  | not started |
-| 16  | M4.x — `ask_xfrm.c` + CAAM packet-mode IPsec     | ask20  | not started |
-| 17  | M5.1 — `askd` (sd-event + libmnl)                | ask20  | not started |
-| 18  | M5.2 — `ask-cli` (Python Varlink client)         | ask20  | not started |
-| 19  | M5.3 — VyOS CLI integration                      | ask20  | not started |
-| 20  | M5.4 — VyOS conf_mode + op_mode                  | ask20  | not started |
-| 21  | M6.x — VPP coexistence, soak, performance gates  | ask20  | not started |
+| 13  | M2.4 — ucode version from QEF blob (DT)          | ask20  | landed |
+| 14a | M2.5a — `0004-fman-pcd-subsystem.patch` orchestration (`fman_pcd.c` + accessors in `fman.c`) | ask20 | not started |
+| 14b | M2.5b — KeyGen schemes with `match_vector ≠ 0` (`fman_pcd_kg.c` + `fman_keygen.c` exports) | ask20 | not started |
+| 14c | M2.5c — Coarse Classifier match trees (`fman_pcd_cc.c`) | ask20 | not started |
+| 14d | M2.5d — Header manipulation (`fman_pcd_manip.c`) | ask20 | not started |
+| 14e | M2.5e — Policer profiles (`fman_pcd_plcr.c`) | ask20 | not started |
+| 14f | M2.5f — Parser + Replicator (`fman_pcd_prs.c`, `fman_pcd_replic.c`) | ask20 | not started |
+| 14g | M2.5g — End-to-end wire-up — `ask_hostcmd.c` calls PCD API; first IPv4 TCP flow traverses silicon | ask20 | not started |
+| 15  | M3.x — remaining flow types (NAT/PAT/v6/bridge)  | ask20  | blocked on PR14g |
+| 16  | M4.x — `ask_xfrm.c` + CAAM packet-mode IPsec     | ask20  | blocked on PR14g |
+| 17  | M5.1 — `askd` (sd-event + libmnl)                | ask20  | blocked on PR14g |
+| 18  | M5.2 — `ask-cli` (Python Varlink client)         | ask20  | blocked on PR14g |
+| 19  | M5.3 — VyOS CLI integration                      | ask20  | blocked on PR14g |
+| 20  | M5.4 — VyOS conf_mode + op_mode                  | ask20  | blocked on PR14g |
+| 21  | M6.x — VPP coexistence, soak, performance gates  | ask20  | blocked on PR14g |
 
 Status legend:
 - **not started** — no commits yet on the target branch
@@ -658,29 +664,391 @@ not opcode-dispatch insertion. PR14's heading below is preserved for
 historical context but the implementation strategy underneath it has
 changed.
 
-### PR14 — first PCD-driven flow insertion (re-scoped from `OP_FLOW_INSERT_V4_TCP`)
+### §12.9 — Decision: Option C-clean-room (2026-05-14)
 
-**Re-scope per spec §12.8 (PR13 finding).** Original framing ("call
-`fman_host_cmd_send()` with opcode `0x10` per spec §12.5") is
-deferred indefinitely — the host-command opcode dispatcher does not
-exist on the loaded QEF microcode. Replacement: implement
-`ask_hw_flow_insert_v4_tcp()` as a thin wrapper over the in-tree
-mainline FMan PCD API. Concrete steps to be detailed in PR14 itself:
+**Status:** decided. The C / D / E decision tree opened by PR14-prep
+(see prior revision of this plan) has been resolved in favour of
+**Option C-clean-room**: write a new FMan PCD subsystem from scratch
+using only the LS1046A Reference Manual chapter 8 as reference,
+explicitly **not** forward-porting any deleted NXP SDK code.
 
-- Read `drivers/net/ethernet/freescale/fman/fman_keygen.c` and
-  `fman_port.c` to understand the KeyGen scheme + classification node
-  + policer programming surface that QEF actually consumes.
-- Decide whether `ask.ko` programs PCD directly (likely requires a new
-  in-tree EXPORT_SYMBOL in `fman_keygen.c`) or whether it goes through
-  a userspace path in `askd` (libfmcllib-style — but rebuilt against
-  modern Linux, no XML).
-- Implement encoder, wire into `ask_flow.c::ask_flow_insert()` so that
-  a real `nft flow add` results in a real PCD scheme update on the
-  wire (verifiable via `cat /sys/kernel/debug/fsl_dpaa/...`).
-- Verify with iperf that the first packet is fast-path and the CPU is
-  not touched after flow insertion.
+**Authoritative reference:** spec §12.9 (decision evidence + cost
+survey) and **spec §13** (full architectural design — module
+decomposition, per-module APIs, integration plan, Kconfig, acceptance
+gates, upstream posture). The plan section that follows turns spec §13
+into seven sequential PRs (PR14a–g).
 
-**M2 acceptance gate runs here** (unchanged from original plan).
+**Top-level numbers:**
+
+| Path | LOC | Calendar | Hits §11.1 perf gates? | Vendor-code risk |
+|---|---|---|---|---|
+| C-forward-port (SDK port) | 15k–30k kept | 4 mo | Yes | High — license audit + ncsw shim removal + AMP IPC removal |
+| **C-clean-room (chosen)** | **~7,800 LOC new** | **~5 weeks code + 4–6 weeks silicon bring-up** | **Yes** | **None — clean-room from RM only** |
+| D (sw fallback) | ~500 | 1 week | No (1–2 Gbps cap) | None |
+| E (cancel) | 0 | 0 | N/A | N/A |
+
+**What this means for the PR sequence:**
+
+- PR14 is **expanded into PR14a–g**, one per spec §13 module, landing
+  in dependency order. Each lands a single subsystem of
+  `0004-fman-pcd-subsystem.patch`.
+- PRs 15–21 unblock as soon as **PR14g** (end-to-end wire-up) lands —
+  not earlier. PR14a–f are mechanically buildable but don't deliver
+  the first hardware-validated flow until PR14g.
+- The acceptance gate for the full PR14 series is spec §13.7: nft
+  `flow add` → packet traverses 210 fast path → CPU < 5 % at ≥ 2 Gbps
+  on real Mono Gateway DK silicon.
+
+**Clean-room provenance discipline (risk #12 in spec §16):** every
+non-trivial function in PR14a–g must carry a comment citing its RM
+section (e.g. `/* RM §8.7.3.2 — KeyGen scheme extract masking */`).
+No file in `drivers/net/ethernet/freescale/fman/fman_pcd*.c` may be
+authored by anyone who has read the deleted SDK PCD tree at
+`mihakralj/kernel-ls1046a-build` ref `464df181`. Reviewer assignment
+for risk #12 is open question §17/8 in the spec.
+
+---
+
+### PR14a — `0004-fman-pcd-subsystem.patch` orchestration (`fman_pcd.c` + accessors)
+
+Per spec §13.3 (orchestration) + §13.4 (integration with existing
+in-tree files).
+
+**Files added/changed (linux-6.18.x):**
+
+- `drivers/net/ethernet/freescale/fman/fman_pcd.c` (new, ~800 LOC):
+  - `struct fman_pcd { struct fman *fman; struct mutex lock;
+    struct fman_pcd_muram_budget budget; struct list_head schemes;
+    struct list_head trees; struct list_head profiles;
+    struct dentry *debugfs_root; ... };`
+  - `fman_pcd_init(struct fman *fman)` — allocs the struct, claims a
+    MURAM partition via `fman_muram_alloc()`, initialises lock + lists,
+    creates `/sys/kernel/debug/fman_pcd/<fman_id>/muram_budget`.
+  - `fman_pcd_release(struct fman_pcd *pcd)` — symmetric teardown.
+  - `fman_pcd_get_muram_budget(struct fman_pcd *pcd)` — returns the
+    current allocation breakdown.
+  - All six EXPORT_SYMBOL_GPL'd for `ask.ko` consumption per spec §13.3.
+- `drivers/net/ethernet/freescale/fman/fman.c` (~30 LOC):
+  - Add `struct fman_pcd *pcd;` field to `struct fman`.
+  - Wire `fman_pcd_init()` into `fman_probe()` after `fman_muram_init()`.
+  - Wire `fman_pcd_release()` into `fman_remove()`.
+  - Add `struct fman_pcd *fman_get_pcd(struct fman *fman)` accessor +
+    EXPORT_SYMBOL_GPL.
+- `include/linux/fsl/fman_pcd.h` (new, the ~600 LOC public header
+  per spec §13.3 — forward decls + `fman_pcd_init/release/get_pcd/
+  get_muram_budget` prototypes only at this PR; the per-block APIs
+  land in PR14b–f as their .c files do).
+- `drivers/net/ethernet/freescale/fman/Makefile`: add `fman_pcd.o` to
+  `fsl_dpaa_fman-objs`.
+- `drivers/net/ethernet/freescale/fman/Kconfig`: add
+  `CONFIG_FSL_FMAN_PCD` (tristate, default `m`, depends on `FSL_FMAN`)
+  per spec §13.6.
+
+**kunit suite (in-tree):** `drivers/net/ethernet/freescale/fman/tests/fman_pcd_test.c`
+covers `fman_pcd_init/release` lifecycle on a mock `struct fman` and
+the MURAM budget accounting on a 96 KiB simulated MURAM.
+
+**Acceptance:**
+
+- `bash kernel/common/scripts/patch-health.sh --flavor ask --source release`
+  shows `patches/0004-fman-pcd-subsystem.patch` green.
+- Cross-built kernel boots on Mono Gateway DK; `dmesg | grep fman_pcd`
+  shows the init banner; `cat /sys/kernel/debug/fman_pcd/0/muram_budget`
+  returns a non-zero free figure.
+- `lsmod | grep fsl_dpaa_fman` still single module (per spec §13.6 —
+  no new `.ko`).
+
+LOC budget: ~870 (800 fman_pcd.c + 30 fman.c + ~40 header skeleton).
+
+---
+
+### PR14b — KeyGen schemes with `match_vector ≠ 0` (`fman_pcd_kg.c`)
+
+Per spec §13.3 (`fman_pcd_kg.c` section) + §13.4 (the
+`fman_keygen.c` ~10 LOC change).
+
+**Files added/changed:**
+
+- `drivers/net/ethernet/freescale/fman/fman_pcd_kg.c` (new, ~1500 LOC):
+  - `struct fman_pcd_kg_scheme` — wraps a hardware scheme slot (0–31),
+    its MURAM-resident scheme record, the extract spec, the bound port
+    mask, the attached CC tree pointer.
+  - `fman_pcd_kg_scheme_create(pcd, extract, base_fqid, num_of_fqs)`
+    — allocates a free scheme slot, builds the scheme record with
+    `match_vector != 0`, writes it to MURAM, programs the KG scheme
+    registers per RM §8.7.3.
+  - `fman_pcd_kg_scheme_bind_port(scheme, hw_port_id)` — links the
+    port's KG entry point to the scheme.
+  - `fman_pcd_kg_scheme_attach_cc(scheme, tree)` — sets the scheme's
+    next-engine to point at a CC tree (consumed in PR14c).
+  - `fman_pcd_kg_scheme_destroy(scheme)` — symmetric teardown,
+    rollback the bind first.
+  - All EXPORT_SYMBOL_GPL.
+- `drivers/net/ethernet/freescale/fman/fman_keygen.c` (~10 LOC):
+  - Demote `keygen_scheme_setup` and `keygen_bind_port_to_schemes`
+    from `static` → non-static.
+  - EXPORT_SYMBOL_GPL both.
+  - Add prototypes to a new `fman_keygen.h` (or extend
+    `fman_pcd.h` — TBD at implementation time per spec §13.4).
+- `include/linux/fsl/fman_pcd.h`: add the KG public API.
+
+**kunit suite:** `fman_pcd_kg_test.c` covers scheme record encoding
+(byte-perfect against RM §8.7.3 examples), slot allocation under
+contention, double-bind rejection, destroy-while-bound rejection.
+
+**Hardware bring-up at PR14b end (first silicon-touching step of
+`0004`):** create a single KG scheme that extracts the IPv4 5-tuple and
+dispatches to a fixed FQID. Bind it to eth0's RX port. Send a single
+TCP packet to that FQID. Verify the packet arrives on the bound FQ
+(observable via `fsl_dpaa_eth` debugfs or `tcpdump -i eth0`). This is
+the first end-to-end-on-silicon proof that `0004` programs the FMan
+PCD correctly.
+
+**Acceptance:**
+
+- kunit suite passes (`make kunit ARCH=arm64 ...`).
+- On real Mono Gateway DK: `echo 1 > /sys/kernel/debug/fman_pcd/0/test_kg_scheme`
+  (a debugfs hook added in this PR for hardware bring-up only) programs
+  the scheme; a `ping 10.0.0.1` from a connected host increments the
+  FQ counter visible at `/sys/kernel/debug/fsl_dpaa_eth/eth0/rx_fqid_<n>`.
+- `patch-health.sh --flavor ask --source release` green on `0004-*`.
+
+LOC budget: ~1550 (1500 fman_pcd_kg.c + 10 fman_keygen.c + ~40 header
+additions).
+
+---
+
+### PR14c — Coarse Classifier match trees (`fman_pcd_cc.c`)
+
+Per spec §13.3 (`fman_pcd_cc.c` section). Largest single PR in the
+PR14 series.
+
+**Files added/changed:**
+
+- `drivers/net/ethernet/freescale/fman/fman_pcd_cc.c` (new, ~2500 LOC):
+  - `struct fman_pcd_cc_tree` — root of a match-tree, owns the
+    MURAM-resident tree-group table (RM §8.7.4.1).
+  - `struct fman_pcd_cc_node` — a single classification node within
+    a tree; carries the extract spec, the key table, the per-key
+    action array.
+  - `struct fman_pcd_action` — the tagged-union discriminator per
+    spec §13.3 carrying `ACTION_DROP`, `ACTION_FORWARD_FQ`,
+    `ACTION_FORWARD_CAAM`, `ACTION_REPLICATE`, `ACTION_MANIPULATE`,
+    `ACTION_NEXT_CC_NODE`.
+  - `fman_pcd_cc_tree_create/destroy()` — tree lifecycle.
+  - `fman_pcd_cc_node_create(tree, extract, keys)` — installs a
+    classification node into the tree per RM §8.7.4.2.
+  - `fman_pcd_cc_node_add_key(node, entry, action)` — append a key →
+    action pair to an existing node (the per-flow insert path).
+  - `fman_pcd_cc_node_modify_next_action(node, key_index, action)`.
+  - `fman_pcd_cc_node_destroy()`.
+  - All EXPORT_SYMBOL_GPL.
+- `include/linux/fsl/fman_pcd.h`: add the CC public API + the
+  `fman_pcd_action` tagged-union enum.
+
+**kunit suite:** `fman_pcd_cc_test.c` covers tree-group MURAM layout
+byte-perfect against RM §8.7.4.1 figure, node-record packing, key-table
+ordering, action-template encoding for each action type.
+
+**Acceptance:**
+
+- kunit suite passes.
+- On real Mono Gateway DK: extend the PR14b debugfs hook to wire the
+  KG scheme → a one-node CC tree with one key (the original IPv4
+  5-tuple) → `ACTION_FORWARD_FQ` to a different FQID than the KG
+  default. Send the test packet; verify it arrives at the new FQ, not
+  the KG default. This proves the CC walk happens in silicon.
+- `patch-health.sh` green on `0004-*`.
+
+LOC budget: ~2550 (2500 fman_pcd_cc.c + ~50 header additions).
+
+---
+
+### PR14d — Header manipulation (`fman_pcd_manip.c`)
+
+Per spec §13.3 (`fman_pcd_manip.c` section). The NAT engine.
+
+**Files added/changed:**
+
+- `drivers/net/ethernet/freescale/fman/fman_pcd_manip.c` (new, ~1200
+  LOC):
+  - `struct fman_pcd_manip` + `struct fman_pcd_manip_params` tagged
+    union: `MANIP_NAT_V4`, `MANIP_NAT_V6`, `MANIP_VLAN_PUSH`,
+    `MANIP_VLAN_POP`, `MANIP_TTL_DEC`.
+  - `fman_pcd_manip_create(pcd, params)` — programs the in-silicon
+    header-rewriter MURAM template per RM §8.7.5.
+  - `fman_pcd_manip_destroy(manip)`.
+  - Hooks into `fman_pcd_action` so a CC key match can carry an
+    `ACTION_MANIPULATE` discriminator pointing at a manip handle.
+  - Auto-includes IPv4/UDP/TCP checksum recompute per RM §8.7.5.4.
+- `include/linux/fsl/fman_pcd.h`: add manip API.
+
+**kunit suite:** `fman_pcd_manip_test.c` covers template encoding for
+each MANIP_* variant; verifies the IPv4 SNAT example from spec §12.5
+produces the right rewrite-template bytes (the spec's worked example
+becomes a unit test).
+
+**Acceptance:**
+
+- kunit suite passes.
+- On real Mono Gateway DK: extend the PR14c debugfs hook with an
+  `ACTION_MANIPULATE` of type `MANIP_NAT_V4` rewriting source IP.
+  Send the test packet; verify the egress port sees the rewritten
+  source IP (via `tcpdump -i <egress>` on a connected peer).
+- `patch-health.sh` green.
+
+LOC budget: ~1250.
+
+---
+
+### PR14e — Policer profiles (`fman_pcd_plcr.c`)
+
+Per spec §13.3 (`fman_pcd_plcr.c` section).
+
+**Files added/changed:**
+
+- `drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c` (new, ~800
+  LOC):
+  - `struct fman_pcd_plcr_profile`.
+  - `fman_pcd_plcr_profile_create(pcd, params)` — allocates a
+    policer-profile slot, writes the trTCM profile record per RM
+    §8.7.6.
+  - `fman_pcd_plcr_profile_set_rates(prof, cir, cbs, eir, ebs)` —
+    runtime rate update (no re-create cost).
+  - `fman_pcd_plcr_profile_destroy()`.
+  - Hooks into `fman_pcd_action` via a discriminator field
+    `policer_profile_id` on every action type (orthogonal to the
+    next-engine — a packet can be policed AND classified AND
+    manipulated).
+- `include/linux/fsl/fman_pcd.h`: add policer API.
+
+**kunit suite:** `fman_pcd_plcr_test.c` covers RFC 4115 trTCM record
+encoding, rate-to-token-bucket-period conversion (silicon expects
+clock-cycle counts, not bytes/sec), profile-slot allocation.
+
+**Acceptance:**
+
+- kunit suite passes.
+- On real Mono Gateway DK: program a 100 Mbps CIR / 1 Gbps EIR
+  policer on the test flow from PR14c. Generate 500 Mbps with iperf;
+  verify yellow-marked frames in stats and red-marked drops at >1 Gbps.
+- `patch-health.sh` green.
+
+LOC budget: ~850.
+
+---
+
+### PR14f — Parser + Replicator (`fman_pcd_prs.c`, `fman_pcd_replic.c`)
+
+Per spec §13.3. Two small modules bundled into one PR because each is
+under 600 LOC and they share the same review surface (PCD-side
+table programming with no `ask.ko` consumer changes).
+
+**Files added/changed:**
+
+- `drivers/net/ethernet/freescale/fman/fman_pcd_prs.c` (new, ~400 LOC):
+  - Programs FMan parser "header examination sequences" (HXS) per
+    RM §8.7.2.
+  - v1.0 ships pass-through configuration (stock IPv4/IPv6/TCP/UDP/ESP/VLAN
+    parser is mainline-default; nothing more needed for v1.0 flow
+    types).
+  - GRE / VXLAN / MPLS HXS deferred to v1.1.
+- `drivers/net/ethernet/freescale/fman/fman_pcd_replic.c` (new, ~600
+  LOC):
+  - Multicast egress fanout per RM §8.7.7.
+  - `fman_pcd_replic_group_create()` / `destroy()`.
+  - Consumed in M3 (`OP_FLOW_INSERT_V4_MCAST` / `_V6_MCAST` flow
+    types).
+- `include/linux/fsl/fman_pcd.h`: parser + replicator APIs.
+- `drivers/net/ethernet/freescale/fman/fman_port.c` (~40 LOC):
+  - Add `fman_port_pcd_attach(struct fman_port *port,
+    struct fman_pcd_kg_scheme *scheme)` accessor per spec §13.4.
+
+**kunit suite:** `fman_pcd_prs_test.c` covers HXS record encoding;
+`fman_pcd_replic_test.c` covers replication-group table layout.
+
+**Acceptance:**
+
+- kunit suite passes.
+- On real Mono Gateway DK: no new operator-facing demonstration
+  (replicator is consumed in M3; parser change is pass-through).
+  Verify `fman_port_pcd_attach()` is callable from `ask.ko` without
+  vermagic mismatch.
+- `patch-health.sh` green.
+
+LOC budget: ~1040.
+
+---
+
+### PR14g — End-to-end wire-up: `ask_hostcmd.c` calls PCD API + M2 gate
+
+Per spec §13.5 (what `ask.ko` calls) + §13.7 (acceptance gates) + §11.1
+M2 gate.
+
+**Files changed (out-of-tree `ask.ko`):**
+
+- `kernel/flavors/ask/oot-modules/ask/ask_hostcmd.c`:
+  - `ask_hw_flow_insert_v4_tcp()` switches from
+    "encode wire bytes + `fmd_host_cmd()` → `-ENXIO`" to
+    "build `fman_pcd_cc_key_table` + call
+    `fman_pcd_cc_node_add_key()`" per the spec §13.5 worked example.
+  - Same surface to the rest of `ask.ko` — `ask_flow.c` is untouched.
+  - The §12 wire-format encoders survive as dead code preserved against
+    a future custom-microcode path (kunit golden-hex tests from PR6
+    stay green — that's why PR6 was preserved through the §12.8
+    pivot).
+  - Add `ask_hw_flow_remove()`, `ask_hw_flow_query_stats()` companions
+    using `fman_pcd_cc_node_destroy_key()` and the per-key MURAM
+    stats counter readback.
+- `kernel/flavors/ask/oot-modules/ask/ask_hw.c`:
+  - Add `ask_priv_alloc_cc_node_for_v4_tcp()` — at module init, build
+    the per-FMan KG scheme + CC tree + CC node skeleton that
+    `ask_hw_flow_insert_v4_tcp()` will append keys to. Wires
+    PR14b's KG scheme → PR14c's one-node CC tree per spec §13.5.
+  - Add `ask_priv_pack_hw_flow_id(node, key_idx)` /
+    `ask_priv_unpack_hw_flow_id()` — translate `(node, key_index)` ↔
+    32-bit opaque ID for the `ASK_FLOW_ATTR_HW_FLOW_ID` UAPI surface.
+- Remove the PR14b debugfs hardware-bring-up hook
+  (`/sys/kernel/debug/fman_pcd/<n>/test_*`) — those were
+  bring-up-only and the real flow path now exercises the same code
+  through `nft flow add`.
+
+**Hardware verification on Mono Gateway DK:**
+
+1. `modprobe ask` succeeds; `dmesg | grep '^ask: hw'` shows the ucode
+   banner from PR13 plus a new `ask: hw: PCD subsystem ready
+   (<n> KiB MURAM free)` line.
+2. `nft add table inet f; nft add flowtable inet f h { hook ingress
+   priority 0; devices = { eth0, eth1 }; flags offload; }; nft add
+   chain inet f forward { type filter hook forward priority 0; };
+   nft add rule inet f forward ip protocol tcp flow add @h` — flow
+   block callback fires, CC key gets installed in silicon, `ASK_FLOW_ATTR_HW_FLOW_ID`
+   in the genl dump is non-zero.
+3. iperf3 IPv4 TCP from peer A through eth0 → eth1 to peer B.
+4. **First packet** traverses the kernel slow path (counter:
+   `/sys/kernel/debug/fsl_dpaa_eth/eth0/rx_default_fqid`); subsequent
+   packets traverse the FMan PCD fast path (counter:
+   the CC-node FQID).
+5. **CPU idle stays > 95 %** at 2 Gbps line rate (measured via
+   `mpstat -P ALL 1`) — this is the M2 acceptance threshold in spec
+   §11.1.
+6. After flow timeout, `nft delete rule …` removes the CC key; the
+   FMan FQID counter stops incrementing.
+
+**Acceptance (this is the M2 milestone gate):**
+
+- All six verification steps above pass on live silicon.
+- kunit coverage on `ask_hostcmd.c` ≥ 80 % (golden-hex tests from PR6
+  + new PCD-API-builder tests).
+- `patch-health.sh --flavor ask --source release` green on all of
+  `0001`/`0002`/`0003`/`0004`.
+- `gh workflow run "VyOS LS1046A build (self-hosted)" -f flavor=ask`
+  produces a complete `vyos-*-LS1046A-ask-arm64.iso` that boots and
+  passes step 1 on the Mono Gateway DK from cold.
+- **PRs 15–21 unblock.**
+
+LOC budget: ~400 of new `ask.ko` code + ~50 ask_hw additions; no new
+in-tree LOC (the in-tree work is done in PR14a–f).
 
 ---
 
@@ -814,10 +1182,16 @@ Per spec §18:
 ## Coordination
 
 - Spec updates flow back into `specs/ask2-rewrite-spec.md`. Bump
-  version number (currently v0.8); bump this document's "drives" line
+  version number (currently v1.0); bump this document's "drives" line
   in sync.
 - Hardware findings get stored in Qdrant per `.clinerules/70-qdrant-memory.md`
   with tags `ask2`, `hardware-probe`, plus the relevant PR number.
 - The spec §12.7 unknowns were answered in PR13 (landed 2026-05-13)
   and the spec received a §12.8 "Confirmed hardware behaviour" appendix
   in v0.8.
+- PR14-prep (2026-05-14) discovered the mainline FMan PCD gap and
+  prompted the C/D/E decision. Decision **Option C-clean-room** was
+  taken the same day; spec §12.9 records the finding and spec §13
+  specifies the new ~7800 LOC clean-room FMan PCD subsystem
+  (`0004-fman-pcd-subsystem.patch`). PR14 was expanded into PR14a–g
+  in this document, one per spec §13 module.

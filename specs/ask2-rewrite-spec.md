@@ -1,6 +1,6 @@
 # ASK2 — Modern Linux Implementation of FMan 210 Hardware Offload for VyOS
 
-**Status:** Draft v0.8 (supersedes v0.7). 2026-05-13. Adds §12.8 with PR13 hardware-probe findings.
+**Status:** Draft v1.0 (supersedes v0.8). 2026-05-14. Major: adds §12.9 (PR14-prep mainline-PCD-gap finding) and §13 (clean-room FMan PCD subsystem) — a new ~7800 LOC in-tree kernel patch series replacing the v0.8 assumption that the in-tree mainline FMan exposes a usable PCD API. Decision **Option C-clean-room** taken 2026-05-14 after cost survey of the deleted SDK PCD code (~30,000 LOC vendor C) made the forward-port path uneconomical.
 **Target hardware:** NXP LS1046A Mono Gateway DK.
 **Target software:** Linux 6.18 LTS, ARM64, VyOS rolling release, FLAVOR=ask.
 **Target microcode:** NXP proprietary 210-series fine classifier ucode (LS1046 r1.0). Loaded by U-Boot from SPI flash on every shipped Mono Gateway. Out of scope for this rewrite.
@@ -79,15 +79,16 @@ Three components, each with one clear job:
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-Plus a small in-tree patch series:
+Plus a four-patch in-tree series (was three in v0.8 — §12.9 added the fourth):
 
-- `0001-caam-qi-share-descriptors.patch` — expose `caam_qi_ext_consumer_register/release` so `ask.ko` can share CAAM descriptors with FMan-initiated dequeues. ~150 lines. Upstream-ready.
-- `0002-dpaa-eth-flow-block.patch` — register `flow_block` callbacks on `dpaa_eth` netdevs so `nf_flow_table` and `tc-flower` can offload through `ask.ko`. ~300 lines. Upstream-candidate (NXP `dpaa_eth` maintainers are at Madalin Bucur / Camelia Groza).
-- `0003-fman-host-command-api.patch` — expose `fmd_host_cmd()` as a kernel-internal API in `drivers/net/ethernet/freescale/fman/`. ~200 lines. Required because the host-command path is currently buried in the SDK.
+- `0001-caam-qi-share-descriptors.patch` — expose `caam_qi_ext_consumer_register/release` so `ask.ko` can share CAAM descriptors with FMan-initiated dequeues. ~150 lines. Upstream-ready. **Landed PR10.**
+- `0002-dpaa-eth-flow-block.patch` — register `flow_block` callbacks on `dpaa_eth` netdevs so `nf_flow_table` and `tc-flower` can offload through `ask.ko`. ~300 lines. Upstream-candidate (NXP `dpaa_eth` maintainers are at Madalin Bucur / Camelia Groza). **Landed PR11.**
+- `0003-fman-host-command-api.patch` — expose `fmd_host_cmd()` as a kernel-internal API in `drivers/net/ethernet/freescale/fman/`. ~200 lines. Required infrastructure for a future custom-microcode path (see §12.8); the stock QEF 210.10.1 ucode loaded on shipping Mono Gateways does not implement the opcode-dispatch protocol that motivated this patch. Preserved as future infrastructure. **Landed PR12.**
+- `0004-fman-pcd-subsystem.patch` — **NEW in v1.0.** Clean-room implementation of the FMan PCD (Parse / Classify / Distribute) hardware-programming layer that mainline 6.18 is missing. Replaces the deleted NXP SDK `sdk_fman/Peripherals/FM/Pcd/` tree (~30,000 LOC vendor C, dual-licensed BSD-3-Clause-or-GPL-2.0) with **~7800 LOC** of modern kernel C structured per §13. This is the patch that makes ASK2 v1.0 deliverable on stock NXP QEF microcode without resurrecting any NXP SDK code. **Not yet started — see plan PR14a–g.**
 
-Total in-tree patch: ~650 lines, 3 files, all small enough to be merged incrementally upstream.
+Total in-tree patch: ~8400 lines across the four patches. Patches 0001/0002/0003 are upstream-candidates today. 0004 is upstream-aspirational — the right consumers (NXP FMan maintainers Madalin Bucur, Camelia Groza, plus anyone shipping LS1043/LS1046 in mainline products) exist, but the patch is large enough that landing it requires sustained review effort.
 
-No vendored SDK. No `cdx_ctrl` ioctl surface. No `NETLINK_KEY=32`. No `comcerto_fp_*`. No `dpa_app` UMH dance. No XML parsing in the load path.
+No vendored SDK. No `cdx_ctrl` ioctl surface. No `NETLINK_KEY=32`. No `comcerto_fp_*`. No `dpa_app` UMH dance. No XML parsing in the load path. No FMC binary blob loading. No `fmlib` userspace dependency.
 
 ---
 
@@ -1251,19 +1252,280 @@ ASK2 v1.0 will program the FMan PCD (parser/classifier/KeyGen/policer) via the i
 
 **Verification** — `ask.ko` loaded on the live Mono Gateway DK with kernel 6.18.28, `dmesg | grep '^ask: hw'` shows `ask: hw: FMan microcode 210.10.1 ("Microcode version 210.10.1 for LS1043 r1.0")`; the `ASK_INFO` genl reply carries `family=210, major=10, minor=1, patch=0` matching the DT blob byte-for-byte.
 
+### 12.9 The in-tree FMan PCD does not exist — clean-room decision (PR14-prep, 2026-05-14)
+
+§12.8 above bound ASK2 v1.0 to "the in-tree mainline FMan API in `drivers/net/ethernet/freescale/fman/fman_keygen.c` (and siblings `fman_port.c`, `fman_dtsec.c`, `fman_memac.c`)". Inspection of the actual linux-6.18.28 source tree on 2026-05-14 proves that **the "siblings" required for ASK2 (classifier, policer, match-vector schemes, header manipulation) do not exist in mainline**. §12.8 made a hardware-truth decision ("QEF doesn't dispatch opcodes") but never checked the code-truth ("mainline doesn't expose PCD").
+
+**Evidence (linux-6.18.28):**
+
+- `ls drivers/net/ethernet/freescale/fman/` → `fman.c`, `fman_dtsec.c`, `fman_memac.c`, `fman_tgec.c`, `fman_keygen.c`, `fman_muram.c`, `fman_port.c`, `fman_sp.c`, `fman_host_cmd.c` (from PR12). **No `fman_cc.c`, no `fman_plcr.c`, no `fman_pcd.c`, no `fman_manip.c`.**
+- `grep -nE 'classif|coarse_class|FMan_CC|fman_cc' fman.c` → zero hits.
+- `fman_keygen.c` exports two symbols: `keygen_init()` (one-shot per FMan) and `keygen_port_hashing_init()` (RSS hashing). Both `EXPORT_SYMBOL` (old, not `_GPL`).
+- `keygen_port_hashing_init()` explicitly sets `scheme->match_vector = 0` — meaning no header inspection, no exact-match lookup, just a hash bucket index modulo `hash_size`. This is **RSS load-balancing only**, not classifier programming.
+- `fman.c` mentions "policer" only as the FPM clock-divider threshold register `plcr_disp_tsh` — no policer-profile programming surface.
+- The only callers in the whole kernel tree: `fman_init → keygen_init` (once at probe) and `fman_port_init → keygen_port_hashing_init` (per port). `dpaa_eth.c` uses this only for `NETIF_F_RXHASH` via `ethtool -K rxhash on/off`.
+
+**Cost survey of the deleted SDK PCD path (2026-05-14, archived `mihakralj/kernel-ls1046a-build` repo):**
+
+| File | LOC (.c) | Purpose |
+|---|---|---|
+| `fm_cc.c` | ~7,500 | Coarse Classifier — 5-tuple match trees |
+| `fm_manip.c` | ~6,000 | Header manipulation — NAT rewrite, checksum, VLAN, TTL |
+| `fm_kg.c` | ~3,500 | KeyGen scheme programming (match_vector ≠ 0) |
+| `fm_pcd.c` | ~2,500 | PCD top-level orchestration |
+| `fm_plcr.c` | ~1,900 | Policer profiles |
+| `fm_ehash.c` | ~1,700 | Exact-match hash tables |
+| `fm_replic.c` | ~900 | Frame replication (multicast) |
+| `fman_kg.c` | ~600 | Low-level KeyGen register access |
+| `fm_prs.c` | ~400 | Parser configuration |
+| `fman_prs.c` | ~100 | Low-level parser registers |
+| Headers (10×) | ~6,000 | |
+| **SDK total** | **~30,000** | Vendor C, dual-licensed BSD-3-or-GPL-2.0 |
+
+**Three options were on the table:**
+
+- **C-forward-port** — pull SDK PCD code from the archive, modernize for 6.18 APIs, ship as a 4th in-tree patch. Cost: ~15,000–30,000 LOC kept, plus per-file license audit, plus removal of the SDK's `fsl-ncsw` OS shim, `TRACE_RTOS` macros, `handle_t` opaque ABI, AMP IPC layer (`fm_pcd_ipc.h`), and the nested `Peripherals/FM/` directory structure. Architecturally tied to a 2015-era SDK model.
+- **D** — software fast-path only via `nf_flow_table` sw mode + PR11's `flow_block_cb` without hardware backing. ~500 LOC, ~1–2 Gbps cap. Misses §11.1 perf gates by an order of magnitude.
+- **E** — cancel ASK2 v1.0 on this SoC. Zero LOC. Defeats the project.
+
+**Decision (2026-05-14): Option C-clean-room.** Write a new FMan PCD subsystem from scratch using only the LS1046A Reference Manual chapter 8 (NDA-only) as reference. Target ~7800 LOC of modern kernel C. Cheaper than the forward-port, no vendor copyright concerns, structured for modern Linux idioms from the start. The full module decomposition is **§13 below**.
+
 ---
 
-## 13. Testing strategy
+## 13. The FMan PCD subsystem — `0004-fman-pcd-subsystem.patch`
+
+This section specifies a new in-tree kernel patch series that resurrects the FMan Parse / Classify / Distribute (PCD) hardware-programming layer that mainline 6.18 is missing. It is the largest single block of new C in ASK2 v1.0 (~7800 LOC, larger than `ask.ko` itself) but the smallest path to delivering the spec's perf gates. The implementation is **clean-room** — written from the LS1046A Reference Manual chapter 8 (NDA, RM §8.7–8.10), not derived from any NXP SDK source.
+
+### 13.1 Architectural principles
+
+The legacy NXP SDK PCD code was a 25,000 LOC vendor port of a multi-OS abstraction layer ("ncsw" — Network Co-processor Subsystem Wrapper) designed to run on Linux, VxWorks, AMP-mode bare-metal, and FreeBSD from a single source. The ASK2 PCD subsystem keeps the silicon contract (register layouts, MURAM table formats, KeyGen scheme bit fields, classifier-node walk semantics) and discards everything else. Specifically:
+
+| SDK pattern | ASK2 replacement | LOC saved |
+|---|---|---|
+| `handle_t` opaque-pointer ABI throughout | Typed `struct fman_pcd_*` pointers | ~800 |
+| `fsl-ncsw` OS-shim layer (XX_Malloc, XX_Free, IO_MEMORY_MAP_DECLARE, mutex/spinlock wrappers) | Direct kernel primitives (`kmalloc`/`devm_kzalloc`, `ioremap`/`readl`/`writel`, `mutex`, `spinlock`, `rcu`) | ~2,500 |
+| `TRACE_RTOS` macros | Kernel tracepoints (`include/trace/events/fman_pcd.h`) | ~400 |
+| AMP multi-OS IPC layer (`fm_pcd_ipc.h`, ~1900 LOC) | Deleted entirely — Linux-only, no remote OS to coordinate with | ~1,900 |
+| SDK exact-match hash (`fm_ehash.c`, ~1700 LOC) | Kernel `rhashtable` reused from `ask_flow.c` | ~1,700 |
+| SDK `crc64.h` inline tables | Kernel `<linux/crc64.h>` | ~400 |
+| `fm_cc_dbg.h` debug-only macros (~700 LOC) | Kernel tracepoints + `dynamic_debug` | ~700 |
+| Per-platform `dflags.h` matrix (8 SoCs) | Single `fmanv3_dflags.h` for LS1043/LS1046 | ~200 |
+| 16 separate flow-table types in userspace contract | Single `struct fman_pcd_action` discriminator | ~600 |
+| Nested `Peripherals/FM/Pcd/` directory layout | Flat in `drivers/net/ethernet/freescale/fman/` | ~50 (build-system only) |
+| **Total SDK savings** | | **~9,250 LOC** |
+
+Net target: **~7,800 LOC** of new kernel C (≈ 1/4 the SDK's volume, ≈ 1/2 the planned ASK2 kernel module size).
+
+### 13.2 Module decomposition
+
+Seven new `.c` files plus one public header. All flat in `drivers/net/ethernet/freescale/fman/` (mainline preferred layout). One new UAPI-adjacent header in `include/linux/fsl/`. No new directories.
+
+```
+drivers/net/ethernet/freescale/fman/
+├── fman.c                       (existing — no changes)
+├── fman_keygen.c                (existing — extended with non-static helpers; see §13.3)
+├── fman_port.c                  (existing — extended with PCD attach hook; see §13.4)
+├── fman_pcd.c            NEW    ~800 LOC   Top-level orchestration
+├── fman_pcd_kg.c         NEW    ~1500 LOC  KeyGen schemes (match_vector ≠ 0)
+├── fman_pcd_cc.c         NEW    ~2500 LOC  Coarse Classifier match trees
+├── fman_pcd_manip.c      NEW    ~1200 LOC  Header manipulation (NAT rewrite, checksum, VLAN, TTL)
+├── fman_pcd_plcr.c       NEW    ~800 LOC   Policer profiles (rate, burst, color)
+├── fman_pcd_prs.c        NEW    ~400 LOC   Parser configuration (HXS — header examination sequences)
+└── fman_pcd_replic.c     NEW    ~600 LOC   Frame replication for multicast egress
+
+include/linux/fsl/
+└── fman_pcd.h            NEW    ~600 LOC   Public API: typed handles, action structs,
+                                            register-bit constants exposed to ask.ko
+```
+
+**Net: 7,800 LOC of new C across 7 .c files + 1 header.** The 7-file split mirrors the silicon's natural functional boundaries (KeyGen / Classifier / Policer / Parser / Manipulator / Replicator / orchestration) and matches the RM §8.7–8.10 section structure.
+
+### 13.3 Per-module responsibility
+
+#### `fman_pcd.c` — orchestration (~800 LOC)
+
+Top-level entry points for `ask.ko`:
+
+```c
+struct fman_pcd *fman_pcd_init(struct fman *fman);
+void fman_pcd_release(struct fman_pcd *pcd);
+struct fman_pcd_muram_budget fman_pcd_get_muram_budget(struct fman_pcd *pcd);
+```
+
+Owns: the per-FMan MURAM partition between KG schemes, CC trees, policer profiles, and PCD-internal scratch. Implements MURAM tracking via the existing in-tree `fman_muram` allocator (no new allocator). Wires the per-FMan PCD state into the existing `struct fman` via a single new accessor.
+
+EXPORT_SYMBOL_GPL: 6 functions consumed by `ask.ko`.
+
+#### `fman_pcd_kg.c` — KeyGen schemes with match_vector ≠ 0 (~1500 LOC)
+
+Programs the 32 hardware KeyGen schemes for **exact-match flow lookup** (not RSS hashing — that's the existing `keygen_port_hashing_init`).
+
+Public API:
+
+```c
+struct fman_pcd_kg_scheme;
+
+struct fman_pcd_kg_scheme *
+fman_pcd_kg_scheme_create(struct fman_pcd *pcd,
+                          const struct fman_pcd_kg_extract *extract,
+                          u32 base_fqid, u32 num_of_fqs);
+
+int fman_pcd_kg_scheme_bind_port(struct fman_pcd_kg_scheme *scheme,
+                                  u8 hw_port_id);
+
+int fman_pcd_kg_scheme_attach_cc(struct fman_pcd_kg_scheme *scheme,
+                                  struct fman_pcd_cc_tree *tree);
+
+void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme);
+```
+
+Extends `fman_keygen.c` by demoting two file-static helpers (`keygen_scheme_setup`, `keygen_bind_port_to_schemes`) to non-static and EXPORT_SYMBOL_GPL — same pattern PR10 used for `caam_qi`. ~30 LOC change to `fman_keygen.c`, the rest is new.
+
+#### `fman_pcd_cc.c` — Coarse Classifier match trees (~2500 LOC)
+
+The exact-match table layer. KG scheme extracts the key; CC walks a match tree and selects an action.
+
+```c
+struct fman_pcd_cc_tree;
+struct fman_pcd_cc_node;
+
+struct fman_pcd_cc_tree *
+fman_pcd_cc_tree_create(struct fman_pcd *pcd, u8 num_of_groups);
+
+struct fman_pcd_cc_node *
+fman_pcd_cc_node_create(struct fman_pcd_cc_tree *tree,
+                        const struct fman_pcd_cc_extract *extract,
+                        const struct fman_pcd_cc_key_table *keys);
+
+int fman_pcd_cc_node_modify_next_action(struct fman_pcd_cc_node *node,
+                                         u16 key_index,
+                                         const struct fman_pcd_action *action);
+
+void fman_pcd_cc_node_destroy(struct fman_pcd_cc_node *node);
+void fman_pcd_cc_tree_destroy(struct fman_pcd_cc_tree *tree);
+```
+
+The `struct fman_pcd_action` discriminator carries all action types (drop, forward-to-FQ, forward-to-CAAM, replicate, manipulate-and-forward) in a single typed union — replacing the SDK's 16 separate `t_FmPcdCcNextEngineParams` flavors.
+
+#### `fman_pcd_manip.c` — Header manipulation (~1200 LOC)
+
+The NAT engine. Programs the in-silicon header rewriters: SNAT/DNAT/PAT (IPv4 + IPv6), VLAN push/pop, TTL decrement, IPv4/UDP/TCP checksum recomputation.
+
+```c
+struct fman_pcd_manip;
+
+struct fman_pcd_manip *
+fman_pcd_manip_create(struct fman_pcd *pcd,
+                      const struct fman_pcd_manip_params *params);
+
+void fman_pcd_manip_destroy(struct fman_pcd_manip *manip);
+```
+
+`fman_pcd_manip_params` is a tagged-union: `MANIP_NAT_V4`, `MANIP_NAT_V6`, `MANIP_VLAN_PUSH`, `MANIP_VLAN_POP`, `MANIP_TTL_DEC`. Each carries its required fields and nothing more.
+
+#### `fman_pcd_plcr.c` — Policer profiles (~800 LOC)
+
+Two-rate three-color (RFC 4115) policer profiles for exception-rate-limiting and DDOS protection.
+
+```c
+struct fman_pcd_plcr_profile;
+
+struct fman_pcd_plcr_profile *
+fman_pcd_plcr_profile_create(struct fman_pcd *pcd,
+                             const struct fman_pcd_plcr_params *params);
+
+int fman_pcd_plcr_profile_set_rates(struct fman_pcd_plcr_profile *prof,
+                                     u32 cir_bps, u32 cbs_bytes,
+                                     u32 eir_bps, u32 ebs_bytes);
+
+void fman_pcd_plcr_profile_destroy(struct fman_pcd_plcr_profile *prof);
+```
+
+#### `fman_pcd_prs.c` — Parser configuration (~400 LOC)
+
+Programs the FMan parser's "header examination sequences" (HXS). Mainline already initialises the parser for stock IPv4/IPv6/TCP/UDP/ESP/VLAN — this module adds HXS for the L7-tunnel/custom-header cases ASK2 needs (GRE, VXLAN, MPLS in v1.1; pass-through in v1.0).
+
+#### `fman_pcd_replic.c` — Frame replication (~600 LOC)
+
+Multicast egress fanout. Builds and maintains the silicon's frame-replication tables. Consumed by `ask_flow.c` when `OP_FLOW_INSERT_V4_MCAST` / `OP_FLOW_INSERT_V6_MCAST` paths are wired in M3.
+
+#### `include/linux/fsl/fman_pcd.h` — Public API (~600 LOC)
+
+Single header consumed by `ask.ko`. Contains:
+- All typed handle forward declarations (`struct fman_pcd`, `struct fman_pcd_kg_scheme`, etc.)
+- All function prototypes
+- `struct fman_pcd_action` and the action-type discriminator enum
+- Register-bit constants the consumer needs at compile time (e.g. action-flags bitmap, scheme-extract masks)
+- Versioning macro: `FMAN_PCD_API_VERSION 1` for ABI gating
+
+### 13.4 Integration with existing in-tree files
+
+Three existing files get small additions (≤ 50 LOC each):
+
+- **`fman.c`** — add `fman_get_pcd(struct fman *)` accessor + lifecycle wire-up of `fman_pcd_init/release` in `fman_probe/remove`. ~30 LOC.
+- **`fman_keygen.c`** — demote two static helpers (`keygen_scheme_setup`, `keygen_bind_port_to_schemes`) to non-static + EXPORT_SYMBOL_GPL. ~10 LOC.
+- **`fman_port.c`** — add `fman_port_pcd_attach(struct fman_port *port, struct fman_pcd_kg_scheme *scheme)` for routing port ingress into the PCD pipeline. ~40 LOC.
+
+Total in-tree additions outside the new files: ~80 LOC. Existing functionality untouched — patch is additive, not invasive.
+
+### 13.5 What `ask.ko` calls
+
+`ask_hostcmd.c` (the wire-format encoders from PR6) is repurposed as the **typed-struct layer**. The existing `ask_hw_flow_insert_v4_tcp(fman, key, action, out_id)` signature stays — the implementation switches from "encode wire bytes + send via fmd_host_cmd" to "build fman_pcd_cc_key_table + call fman_pcd_cc_node_create". Same surface for the rest of `ask.ko`; only the back-end changes.
+
+```c
+/* ask_hostcmd.c — after PR14 lands */
+int ask_hw_flow_insert_v4_tcp(struct fman *fman,
+                               const struct ask_hw_flow_key_v4 *key,
+                               const struct ask_hw_action *action,
+                               u32 *out_hw_flow_id)
+{
+    struct fman_pcd *pcd = fman_get_pcd(fman);
+    struct fman_pcd_cc_key_table entry = { ... build from *key ... };
+    struct fman_pcd_action act        = { ... build from *action ... };
+    struct fman_pcd_cc_node *node     = ask_priv_cc_node_for_v4_tcp(fman);
+    int idx = fman_pcd_cc_node_add_key(node, &entry, &act);
+    if (idx < 0) return idx;
+    *out_hw_flow_id = ask_priv_pack_hw_flow_id(node, idx);
+    return 0;
+}
+```
+
+The §12 wire-format encoders survive as **dead code preserved against a future custom-microcode path** — same fate as PR12's `fmd_host_cmd_send()`. They have golden-hex kunit tests (PR6) and stay green.
+
+### 13.6 Module signing and Kconfig
+
+`CONFIG_FSL_FMAN_PCD` (new, tristate, default `m` on ARM64, depends on `FSL_FMAN`). Builds as part of `fsl_dpaa_fman.ko` (same module as existing `fman.c` / `fman_keygen.c` etc.). No new .ko introduced — fewer artefacts to sign and load. `MODULE_SIG_FORCE=y` covers it via the existing FMan module signature.
+
+### 13.7 Acceptance gates for the patch
+
+PR14a–g (see implementation plan):
+
+1. `bash kernel/common/scripts/patch-health.sh --flavor ask --source release` shows `patches/0004-fman-pcd-subsystem.patch` green.
+2. `ls /sys/bus/platform/devices/1a00000.fman/` shows no new entries (no operator-facing sysfs — pure ask.ko backend).
+3. `cat /sys/kernel/debug/fman_pcd/muram_budget` (debugfs, added in PR14a) shows non-zero free MURAM.
+4. kunit suites for each module pass: `tests/fman_pcd_kg_test.c`, `fman_pcd_cc_test.c`, etc.
+5. On real silicon: `ask-cli muram` reports MURAM budget after `modprobe ask` and `set system offload ask enable`.
+6. M2 acceptance gate (§11.1) passes: nft `flow add` → packet traverses 210 fast path → CPU < 5% at ≥ 2 Gbps.
+
+### 13.8 Upstream submission posture
+
+`0004-fman-pcd-subsystem.patch` is **upstream-aspirational**, not upstream-ready at landing time. The right reviewers (NXP FMan maintainers Madalin Bucur, Camelia Groza, plus anyone shipping LS1043/LS1046 in mainline products) exist, but at ~7800 LOC across 7 files this is a large enough patch series that landing it requires (a) splitting into 3–4 reviewable chunks (orchestration + KG + CC + manip-plcr-prs-replic) and (b) sustained review effort across multiple cycles. The patch ships out-of-tree under `kernel/flavors/ask/patches/0004-*.patch` for ASK2 v1.0 GA. Upstream submission is a v1.1 milestone.
+
+License: GPL-2.0-only (matches existing `fman.c`). No SDK-derived headers, no dual-licensed code — the clean-room implementation removes the SDK's BSD-3-or-GPL-2.0 dual-license complication entirely.
+
+---
+
+## 14. Testing strategy
 
 Unit and integration tests are implementable from this spec; the performance gates in §11.1 require live hardware and a traffic generator.
 
-### 13.1 Unit tests (kunit, in-tree)
+### 14.1 Unit tests (kunit, in-tree)
 
 Cover `ask_flow.c` (RCU semantics, hash table operations), `ask_hostcmd.c` (wire format encoding/decoding, byte-perfect), `ask_genl_attr.c` (nla policy enforcement, malformed input rejection).
 
 Run on every patch via kunit_runner in CI on x86_64 emulation. No hardware required.
 
-### 13.2 Integration tests (pytest, hardware-in-the-loop)
+### 14.2 Integration tests (pytest, hardware-in-the-loop)
 
 Run on a real Mono Gateway DK in the CI lab. Tests:
 
@@ -1274,35 +1536,36 @@ Run on a real Mono Gateway DK in the CI lab. Tests:
 - VyOS CLI commands produce expected configuration
 - Real HTTP traffic generator (h2load) at 1 Mpps → verify offload counters
 
-### 13.3 Fuzzing (syzkaller, periodic)
+### 14.3 Fuzzing (syzkaller, periodic)
 
 The genl interface is a syscall surface. Add ask family to syzkaller fuzzing harness. Catches: malformed nla attributes, missing capability checks, integer overflows in length fields, double-free in flow_block_cb.
 
-### 13.4 Performance benchmarks (Spirent / Keysight, pre-release)
+### 14.4 Performance benchmarks (Spirent / Keysight, pre-release)
 
 The acceptance gates in Section 11.1 must pass on the Mono test rig before v1.0 GA tag.
 
 ---
 
-## 14. Effort estimation
+## 15. Effort estimation
 
-### 14.1 LOC estimate
+### 15.1 LOC estimate
 
 | Component | LOC | Notes |
 |---|---|---|
 | ask.ko (kernel module) | 3500 | Modern C, RCU/u64_stats_sync, type-safe genl |
-| In-tree patches (3 files) | 650 | Small, upstream-ready |
+| In-tree patches 0001/0002/0003 | 650 | Small, upstream-ready |
+| **In-tree patch 0004 — FMan PCD subsystem (§13)** | **7800** | **NEW in v1.0. Clean-room FMan PCD across 7 .c + 1 .h** |
 | askd (userspace daemon) | 4000 | meson/libmnl/sd-event, modern systemd integration |
 | ask-cli (Python) | 800 | Varlink client, rich tabular output |
 | VyOS CLI integration | 1200 | XML defs + conf_mode + op_mode |
 | Build pipeline | 600 | bin/ci-build-ask-*.sh, hooks |
 | Test suite (kunit + pytest) | 2500 | Unit + integration + fuzzing harness |
 | Documentation | 1500 | man pages, operator guide, dev guide |
-| **Total** | **~14750 LOC** | Down from v0.6's ~19000 |
+| **Total** | **~22550 LOC** | v0.8 was ~14750; +7800 for §13 PCD subsystem |
 
-The reduction comes from: no `cdx_ctrl` legacy compat shim (-500), no XML loader path (-1200), thinner askd because the kernel does more (-2000), unified flow handling instead of 16 separate table types in userspace (-500).
+The PCD subsystem (§13) is the single largest component and the gating block for §11.1 perf gates. It is still **~9,250 LOC smaller** than a forward-port of the deleted SDK PCD code (~30,000 LOC vendor C) would have been — see §12.9 cost survey and §13.1 savings table.
 
-### 14.2 Implementation time (spec-driven)
+### 15.2 Implementation time (spec-driven)
 
 Given the spec is concrete and the design uses standard mainline patterns, productivity is bounded by the strength of mainline precedent for each component:
 
@@ -1312,79 +1575,80 @@ Given the spec is concrete and the design uses standard mainline patterns, produ
 | ask.ko offload (flow_block, xfrmdev) | Strong (mainline patterns) | 400 | 5 |
 | ask.ko hostcmd (wire protocol) | Strong (Section 12 specification) | 500 | 3 |
 | ask.ko CAAM glue | Medium (one in-tree patch) | 300 | 2 |
-| In-tree patches | Strong (mainline conventions) | 200 | 4 |
+| In-tree patches 0001/0002/0003 | Strong (mainline conventions) | 200 | 4 |
+| **In-tree patch 0004 — FMan PCD (§13)** | **Medium (RM §8.7–8.10, no upstream precedent)** | **300** | **26** |
 | askd | Very strong (modern daemon patterns) | 800 | 5 |
 | ask-cli | Very strong (Python Varlink client) | 1000 | 1 |
 | VyOS CLI | Very strong (VPP precedent) | 600 | 2 |
 | Build pipeline | Strong | 400 | 2 |
 | Test suite | Strong | 500 | 5 |
 | Documentation | Strong | 800 | 2 |
-| **Subtotal spec-implementable** | | | **37 eng-days** |
+| **Subtotal spec-implementable** | | | **63 eng-days** |
 
-### 14.3 Hardware-bound and review-bound work
+### 15.3 Hardware-bound and review-bound work
 
 These items require live silicon, a traffic generator, or upstream review and run on a calendar (not LOC) basis. They overlap heavily with §14.2:
 
 | Activity | Calendar weeks |
 |---|---|
-| 210 protocol edge-case probing (Section 12.7) | 1-2 |
+| FMan PCD silicon-bringup against RM §8.7–8.10 (KG schemes, CC trees, manip, plcr) | 4-6 |
 | Hardware verification at each milestone | 4 |
 | Performance gate measurement runs | 2 |
 | Upstream patch review (caam-qi-share, dpaa-eth-flow-block) | 8-12 (parallel) |
+| Upstream patch review (0004 PCD — v1.1 target, not v1.0 critical path) | 20+ (parallel, post-GA) |
 | Code review and integration | 3 |
-| **Subtotal calendar (mostly parallel)** | **10-12 weeks** |
+| **Subtotal calendar (mostly parallel)** | **12-14 weeks** |
 
-### 14.4 Realistic total
+### 15.4 Realistic total
 
 Combining the spec-implementable work with the hardware-bound and review-bound calendar:
 
-- **Months 1-2**: ask.ko core + in-tree patches + first flow type working end-to-end. M2 gate: nft `flow add` over IPv4 TCP → packet traverses 210 fast path on real hardware.
-- **Month 3**: All non-IPsec flow types + bridge + offline ports. M3 gate: NAT works, bridge offload works.
-- **Month 4**: xfrm packet-mode + CAAM integration. M4 gate: AES-GCM-128 IPsec at 3 Gbps.
-- **Month 5**: askd + ask-cli + VyOS CLI. M5 gate: vanilla Mono Gateway DK boots VyOS rolling with `set system offload ask` and forwards at line rate.
-- **Month 6**: VPP coexistence, performance tuning, soak testing, v1.0 RC.
+- **Months 1-2**: ask.ko core + in-tree patches 0001/0002/0003 + skeleton ask.ko on hardware. M1 gate: `modprobe ask` succeeds, `ASK_CMD_GET_INFO` round-trip works.
+- **Months 2-3**: **FMan PCD subsystem (§13 / patch 0004)** — orchestration, KG schemes (match_vector ≠ 0), CC match trees. PR14a–c.
+- **Month 4**: PCD manip + plcr + prs + replic (PR14d–f) + end-to-end wire-up (PR14g). M2 gate: nft `flow add` → packet traverses 210 fast path on real hardware → CPU < 5 % at ≥ 2 Gbps.
+- **Month 5**: All non-IPsec flow types + bridge + offline ports + xfrm packet-mode + CAAM integration. M3+M4 gates: NAT works, bridge offload works, AES-GCM-128 IPsec at 3 Gbps.
+- **Month 6**: askd + ask-cli + VyOS CLI. M5 gate: vanilla Mono Gateway DK boots VyOS rolling with `set system offload ask` and forwards at line rate.
+- **Month 7**: VPP coexistence, performance tuning, soak testing, v1.0 RC.
 
-**Total: 6 months end-to-end.** Significant compression vs v0.6's 9 months because:
-- No clean-room opcode probing (Section 12 documents the protocol)
-- No legacy ABI compat shim
-- No XML loader UMH dance
-- Aggressive reuse of mainline `nf_flow_table` and `xfrmdev_ops` infrastructure
-- Spec-driven implementation of well-precedented code patterns
+**Total: 7 months end-to-end.** v0.8 estimated 6 months on the (incorrect) assumption that the in-tree FMan PCD existed. The added month covers §13 (PCD subsystem) which §12.9 identified as a hard gating dependency.
 
-If hardware verification reveals protocol edge cases beyond what Section 12 covers, add 1-2 months. If upstream patch review delays affect critical path, those happen in parallel — they don't gate v1.0.
+If hardware verification of the PCD subsystem reveals RM-undocumented edge cases, add 1-2 months. If upstream patch review delays affect critical path, those happen in parallel — they don't gate v1.0 GA.
 
 ---
 
-## 15. Risk register
+## 16. Risk register
 
 | # | Risk | Probability | Impact | Mitigation |
 |---|---|---|---|---|
-| 1 | 210 protocol edge cases beyond Section 12.7 | Medium | Medium | Conservative budget; probe in M1-M2 |
+| 1 | RM §8.7–8.10 leaves PCD register/MURAM-layout corner cases undocumented | Medium | High | Live-silicon probing during PR14b–d; preserve SDK archive as last-resort reference (read, don't copy) |
 | 2 | `caam_qi_ext_consumer_register` API insufficient | Low | Medium | Extend patch; mainline maintainers are at NXP, expect cooperation |
 | 3 | `dpaa-eth-flow-block` patch rejected upstream | Low | Low | Keep as OOT for v1.0; revisit upstream after stabilisation |
-| 4 | Performance gates miss Geerling 1 Mpps target | Medium | High | Cache-line alignment tuning; verify RCU latency; offline-port plumbing |
-| 5 | Mono changes 210 ucode and breaks protocol | Low | High | Pin ucode version in Section 12; version-gate at module init |
-| 6 | VyOS Inc. changes VPP integration model | Low | Low | Track 1.5 LTS until 2027 |
-| 7 | Subtle bugs in fast-path / RCU / genl code | High | Medium | kunit ≥80%, mandatory code review, syzkaller fuzzing |
-| 8 | 6.18 LTS gets superseded mid-project | Low | Medium | Pin to LTS until 2027, update at boundary |
-| 9 | NETIF_F_HW_ESP / NETIF_F_HW_TC interaction with VyOS networking config | Low | Low | Test early, document any caveats |
-| 10 | RCU grace period under high flow churn causes memory pressure | Low | Medium | call_rcu rate-limiting if needed; monitor in soak testing |
+| 4 | `0004-fman-pcd-subsystem.patch` (§13) rejected by NXP FMan maintainers as out-of-scope | Medium | Low | Patch is upstream-aspirational, not blocking — v1.0 ships it OOT; upstream is a v1.1 target |
+| 5 | Performance gates miss Geerling 1 Mpps target | Medium | High | Cache-line alignment tuning; verify RCU latency; offline-port plumbing |
+| 6 | Mono changes 210 ucode and breaks PCD register contract | Low | High | RM §8.7–8.10 is silicon-stable; ucode change wouldn't move PCD registers |
+| 7 | VyOS Inc. changes VPP integration model | Low | Low | Track 1.5 LTS until 2027 |
+| 8 | Subtle bugs in fast-path / RCU / genl code | High | Medium | kunit ≥80%, mandatory code review, syzkaller fuzzing |
+| 9 | 6.18 LTS gets superseded mid-project | Low | Medium | Pin to LTS until 2027, update at boundary |
+| 10 | NETIF_F_HW_ESP / NETIF_F_HW_TC interaction with VyOS networking config | Low | Low | Test early, document any caveats |
+| 11 | RCU grace period under high flow churn causes memory pressure | Low | Medium | call_rcu rate-limiting if needed; monitor in soak testing |
+| 12 | Clean-room PCD inadvertently mirrors SDK structure → copyright concern | Low | High | Mandatory reviewer who has NOT read the archived SDK; document RM-section provenance for every non-trivial function |
 
 ---
 
-## 16. Open questions
+## 17. Open questions
 
-1. **210 event channel binding** — confirm IRQ number and event queue layout on Mono hardware. Ask Tomaž.
-2. **Mono's exact 210 build version** — confirm we're targeting `210.10.x` LS1046 build, not LS1043. Ask Tomaž.
+1. **210 event channel binding** — confirm IRQ number and event queue layout on Mono hardware. Ask Tomaž. *(partially answered §12.8 — SPI 44 / Linux IRQ 59 is the FMan event IRQ on LS1046A.)*
+2. **Mono's exact 210 build version** — confirmed §12.8: QEF 210.10.1 LS1043 r1.0.
 3. **VPP shipping path in VyOS 1.6** — track VyOS Inc. roadmap; if VPP becomes default, hybrid mode becomes default.
-4. **Upstream NXP cooperation on `dpaa-eth-flow-block`** — Madalin Bucur and Camelia Groza are the maintainers. Open conversation early; their feedback shapes patch design.
-5. **MURAM allocation tuning** — what's the right partition between flow tables, OP queues, FIFO reservations? Probe during M1 with `OP_GET_MURAM_INFO`.
+4. **Upstream NXP cooperation on `dpaa-eth-flow-block` and `0004-fman-pcd-subsystem.patch`** — Madalin Bucur and Camelia Groza are the maintainers. Open conversation early; their feedback shapes patch design.
+5. **MURAM allocation tuning for PCD subsystem** — what's the right partition between KG scheme storage, CC match trees, manipulator templates, policer profiles, and FIFO reservations on a 384 KB MURAM? Probe during PR14a using the new debugfs `/sys/kernel/debug/fman_pcd/muram_budget`.
 6. **Spirent vs CyPerf for performance gates** — Patrick Kennedy at STH ran Geerling's test on Keysight. Can we get access? Otherwise document software-generator caveats.
 7. **VyOS rolling vs LTS target for v1.0** — rolling makes sense for early adopters; 1.6 LTS (mid-2026?) for production. Confirm with VyOS Inc.
+8. **Clean-room reviewer assignment** — who reviews `0004-fman-pcd-subsystem.patch` who has demonstrably NOT read the deleted SDK PCD code? Critical for risk #12.
 
 ---
 
-## 17. Reference table — every modern Linux 6.18 facility we use
+## 18. Reference table — every modern Linux 6.18 facility we use
 
 | Facility | Where we use it | Replaces what NXP 1.x had |
 |---|---|---|
@@ -1406,15 +1670,20 @@ If hardware verification reveals protocol edge cases beyond what Section 12 cove
 | meson build | `askd/meson.build` | autotools |
 | sd_notify Type=notify | `askd.service` | fork/daemonize |
 | systemd sandboxing | `askd.service` | None |
+| `fman_muram` allocator | `fman_pcd.c` (§13.3) | SDK XX_Malloc OS-shim |
+| `rhashtable` (PCD-side reuse) | `fman_pcd_cc.c` (§13.2) | SDK fm_ehash.c (~1700 LOC) |
+| Kernel `<linux/crc64.h>` | `fman_pcd_kg.c` | SDK crc64.h inline tables |
+| `include/trace/events/fman_pcd.h` | `fman_pcd*.c` | SDK TRACE_RTOS macros |
 
 ---
 
-## 18. What we don't do
+## 19. What we don't do
 
 For clarity, listing the things this spec explicitly does NOT include:
 
-- Rewrite mainline `dpaa_eth`, `fman`, `fsl_qbman`, `caam_qi`. We use mainline as-is.
+- Rewrite mainline `dpaa_eth`, `fman` (core), `fsl_qbman`, `caam_qi`. We use mainline as-is. §13's `0004` patch is **additive** in `drivers/net/ethernet/freescale/fman/` — it does not modify existing files beyond ~80 LOC of accessor additions.
 - Rewrite the 210 ucode. It's silicon firmware.
+- Forward-port the deleted NXP SDK `sdk_fman/Peripherals/FM/Pcd/` tree. §12.9 cost survey rejected this in favour of clean-room §13.
 - Vendor SDK FMan/QMan/BMan drivers. We use mainline `drivers/net/ethernet/freescale/dpaa/`.
 - `/dev/cdx_ctrl` ioctl compatibility shim. Out of v1.0 scope.
 - `libfci.so.1` ABI preservation. Out of v1.0 scope.
@@ -1423,32 +1692,39 @@ For clarity, listing the things this spec explicitly does NOT include:
 - A DPDK PMD. ASK is kernel-side offload; DPDK has its own path.
 - tc-flower as the primary user-facing interface. We support it via flow_block_cb but nft `flow add` is the preferred operator surface for VyOS users.
 - Upstream submission of `ask.ko` itself. The module stays out-of-tree until the protocol/MURAM accounting matures and the dpaa_eth flow_block patch lands.
+- Upstream submission of `0004-fman-pcd-subsystem.patch` in v1.0. §13.8 makes it upstream-aspirational; v1.1 target.
 
 These are non-goals. Don't slip them in.
 
 ---
 
-## 19. Implementation cookbook
+## 20. Implementation cookbook
 
-1. **Read Sections 0, 1, 3, 4, 5, 7, 12 in full** before writing any code.
-2. **Set up the build pipeline first.** Get a kernel building with the three in-tree patches applied, even if they're empty stubs. Verify the OOT module skeleton builds, signs, and loads.
+1. **Read Sections 0, 1, 3, 4, 5, 7, 12, 13 in full** before writing any code. §13 is the largest single block of new C and the gate to §11.1 perf.
+2. **Set up the build pipeline first.** Get a kernel building with the four in-tree patches applied, even if 0004 is an empty stub. Verify the OOT module skeleton builds, signs, and loads.
 3. **Implement `ask_main.c` + `ask_genl.c`** with `ASK_CMD_GET_INFO` returning version 1. Verify with `genl ctrl-list | grep ask` and `ynl --family ask --do get-info`.
-4. **Implement `ask_hostcmd.c`** with full Section 12 wire-format support. Backed by kunit tests for every encoding path. Do NOT touch hardware yet.
+4. **Implement `ask_hostcmd.c`** with full Section 12 wire-format support. Backed by kunit tests for every encoding path. Do NOT touch hardware yet. (Preserved against future custom-microcode path per §12.8; consumed by §13 PCD path in steps 7–10.)
 5. **Implement `ask_flow.c`** with rhashtable + RCU. kunit tests for insert/lookup/remove under simulated concurrent access.
 6. **Implement `ask_flow_offload.c`** registering `flow_block_cb` on a dummy netdev in test. Verify nft `flow add` translates to your callback.
-7. **Now touch hardware.** Implement `OP_GET_UCODE_VERSION` against real Mono Gateway DK. Confirm response matches Section 12.2 family=0x0210.
-8. **Implement `OP_FLOW_INSERT_V4_TCP`** end-to-end. Generate a flow with iperf, watch it install via tracepoints, watch packets traverse the silicon. M2 gate.
-9. **Iterate through remaining opcode types** in priority order (Section 12.2).
-10. **Implement `ask_xfrm.c`** with `xdo_dev_state_add` + CAAM descriptor sharing. M4 gate: AES-GCM-128 at 3 Gbps.
-11. **Implement `askd`** with sd-event + libmnl. Wire to genl multicast events.
-12. **Wire VyOS CLI** following the VPP precedent.
-13. **Performance gates** (Section 11.1) run on real hardware against the M5 build.
+7. **Implement §13 patch 0004 — FMan PCD subsystem.** PR14a (orchestration) → PR14b (KG schemes) → PR14c (CC trees) → PR14d (manip) → PR14e (plcr) → PR14f (prs+replic). kunit per module. Hardware bring-up at PR14b end (single KG scheme programs a known FQID).
+8. **Wire `ask_hostcmd.c` to the PCD API** (§13.5). The wire-format encoders become typed-struct builders calling `fman_pcd_cc_node_add_key()` etc. Same surface for the rest of `ask.ko`.
+9. **End-to-end on hardware.** Generate a flow with iperf, watch it install via tracepoints, watch packets traverse the silicon. M2 gate (PR14g).
+10. **Iterate through remaining flow types** (IPv6, mcast, bridge) by adding CC node specialisations in `ask_hostcmd.c`.
+11. **Implement `ask_xfrm.c`** with `xdo_dev_state_add` + CAAM descriptor sharing. M4 gate: AES-GCM-128 at 3 Gbps.
+12. **Implement `askd`** with sd-event + libmnl. Wire to genl multicast events.
+13. **Wire VyOS CLI** following the VPP precedent.
+14. **Performance gates** (Section 11.1) run on real hardware against the M5 build.
 
 ---
 
-## 20. Glossary
+## 21. Glossary
 
-- **210 ucode** — NXP proprietary FMan microcode, fine classifier. Loaded by U-Boot from SPI flash on Mono Gateway. Not redistributed by us.
+- **210 ucode** — NXP QEF microcode (210.10.1 LS1043 r1.0 on shipping Mono Gateway DK, see §12.8). Loaded by U-Boot from SPI flash. Not redistributed by us. **Does not implement the §12.1–§12.6 host-command opcode-dispatch protocol** — that protocol is reference material against a hypothetical future custom microcode.
+- **PCD (Parse / Classify / Distribute)** — FMan's silicon-side classification and forwarding pipeline. Specified in LS1046A RM chapter 8. Implemented for ASK2 by §13's clean-room `0004-fman-pcd-subsystem.patch` because mainline 6.18 ships only KG-for-RSS, not the full PCD surface.
+- **KG (KeyGen)** — FMan block that extracts a key from a packet's headers and dispatches it into a classification scheme. 32 schemes per FMan. RSS hashing is `match_vector = 0`; exact-match flow lookup needs `match_vector ≠ 0` (§13.3).
+- **CC (Coarse Classifier)** — FMan block that walks a match-tree using the KG-extracted key and selects an action. The exact-match table layer of §13.
+- **Manip (Header Manipulation)** — FMan block that rewrites headers in silicon (SNAT/DNAT/PAT, VLAN, TTL, checksum). §13's NAT engine.
+- **Plcr (Policer)** — FMan block implementing RFC 4115 two-rate three-color policing.
 - **flow_block_cb** — Mainline Linux callback structure for HW offload drivers. Used by `nf_flow_table` and `tc-flower` to push flows to drivers.
 - **xfrmdev_ops** — Mainline Linux device callbacks for IPsec offload. Packet mode (since 6.2) lets hardware own SA state.
 - **CAAM QI** — Queue Interface path on CAAM SEC. Crypto descriptors dequeue/enqueue via QMan, not CPU.
@@ -1457,7 +1733,9 @@ These are non-goals. Don't slip them in.
 - **fmd_host_cmd** — Kernel-internal API exposed by patch 0003 for sending host commands to FMan microcode.
 - **Varlink** — Modern IPC protocol used by systemd ecosystem. Replaces D-Bus for new services.
 - **ynl** — Kernel tool (in `tools/net/ynl`) that generates type-safe genl clients from YAML schemas.
+- **QEF (QorIQ Engine Firmware)** — NXP's upstream microcode blob format for FMan, distinguished from the hypothetical custom-microcode path of §12.1–§12.6 by the magic `'Q' 'E' 'F' 0x01` at offset 4 of the SPI-flash blob. §12.8.
+- **Clean-room** — implementation derived only from the LS1046A Reference Manual (NDA), not from any NXP SDK source. §13's `0004-fman-pcd-subsystem.patch` is clean-room; the deleted SDK PCD code is preserved in the archived `mihakralj/kernel-ls1046a-build` repo only as a last-resort hardware-behaviour reference, never as a copy source. Risk #12 in §16.
 
 ---
 
-**End of v0.8.** Supersedes v0.7 in entirety. v0.8 adds §12.8 capturing PR13's confirmed hardware-probe findings against the live Mono Gateway DK and binds ASK2 v1.0 to the in-tree FMan PCD pathway rather than the hypothetical opcode-dispatch protocol of §12.1–§12.6 (which is preserved as reference for a future custom-microcode path).
+**End of v1.0.** Supersedes v0.8 in entirety. v1.0's central addition is §12.9 (mainline-PCD-gap finding, Option C-clean-room decision 2026-05-14) and §13 (the FMan PCD subsystem — a new ~7800 LOC in-tree kernel patch series across 7 .c files + 1 header, replacing the v0.8 assumption that mainline 6.18 exposed a usable PCD API). LOC budget grows from ~14,750 to ~22,550. Calendar grows from 6 to 7 months. Risk register adds two PCD-specific risks (#4 upstream rejection, #12 clean-room provenance). The §12.1–§12.6 host-command opcode-dispatch protocol and §12.8 hardware-probe findings are unchanged.
