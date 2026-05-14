@@ -1,47 +1,8 @@
-From a4ed80803fa04660fab69f1b5838ffd645c328b1 Mon Sep 17 00:00:00 2001
-From: ask20 <ask@vyos-ls1046a-build>
-Date: Thu, 14 May 2026 20:32:26 +0000
-Subject: [PATCH] fman_pcd: reduce MURAM reservation from 96 KiB to 64 KiB
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Thu, 14 May 2026 20:44:11 +0000
+Subject: patches/0026-fman-pcd-muram-budget-fix.patch
 
-On 2026-05-14 a freshly-booted LS1046A Mono Gateway DK with the PR14a-f
-PCD orchestration applied logs:
-
-    fman_pcd: cannot reserve 98304 bytes MURAM (err -12)
-    fman_pcd: ... continuing without PCD
-
-The driver gracefully degrades and eth0..eth4 still probe, but the live
-KG/CC/PLCR/PRS pipeline is unavailable, blocking PR14g end-to-end
-validation on real silicon.
-
-Root cause: FMan v3 on LS1046A has 384 KiB total MURAM, but mainline
-fman.c pre-reserves the CAM region and the per-port Rx/Tx FIFO buffers
-in fman_set_size_of_fifo() BEFORE fman_pcd_init() runs. With six 1 G
-ports plus two 10 G ports, the post-CAM/FIFO free window is less than
-96 KiB.
-
-Reduce FMAN_PCD_MURAM_RESERVED_BYTES from 96 KiB to 64 KiB. This halves
-the design-target CC key table footprint (32 KiB) and the replicator
-group records (4 KiB); both remain well above the operational watermarks
-measured in the on-hardware KUnit suites (cc 12, manip 8, plcr 8, replic
-6, prs 2 — all under 4 KiB combined). 65536 is still an exact multiple
-of the gen_pool min_alloc_order=8 granularity (256 B) so no rounding
-overhead is added.
-
-If 64 KiB still ENOMEMs on a given silicon revision, drop in 32 KiB
-(0x8000) or 16 KiB (0x4000) increments. The encoders themselves do not
-allocate from this partition until ask.ko issues a live insert, so a
-shrunk budget only caps the worst-case live table size, not the boot
-path.
-
-Validated: KUnit 36/36 PASS on real silicon was achieved with the
-previous 96 KiB constant (the encoders do not call fman_muram_alloc),
-so this change cannot regress the byte-perfect encoder layer.
-
-Fixes: 06423f9 ("plans/ASK2-IMPLEMENTATION.md: PR14f on-hw + PR14h")
-Tracks: PR14h MURAM-BUDGET-FIX
 ---
  .../net/ethernet/freescale/fman/fman_pcd.c    | 34 ++++++++++++++-----
  1 file changed, 26 insertions(+), 8 deletions(-)
@@ -94,6 +55,3 @@ index ae9ab71..f35123f 100644
  
  /*
   * Per-FMan PCD state. Allocated and freed by fman_pcd_init/release.
--- 
-2.39.5
-

@@ -1,42 +1,14 @@
-From 1a42ddba3602b27d2f974cd1eaad2b307971df4f Mon Sep 17 00:00:00 2001
-From: "miha.kralj" <miha.kralj@outlook.com>
-Date: Thu, 14 May 2026 15:25:26 +0000
-Subject: [PATCH] =?UTF-8?q?ask2:=20PR14f-body-1=20=E2=80=94=20fman=5Fpcd?=
- =?UTF-8?q?=5Freplic=20group=20create/destroy=20MURAM=20bodies=20(patch=20?=
- =?UTF-8?q?0022)?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Thu, 14 May 2026 20:44:10 +0000
+Subject: patches/0022-fman-pcd-replic-body-1-create-destroy.patch
 
-Replace PR14f-prep ERR_PTR(-EOPNOTSUPP) stubs with real silicon-resident
-source-TD + member-AD MURAM allocation per LS1046A RM 8.7.7 (Frame
-replicator group table format).
-
-- struct fman_pcd_replic_group (private to TU): list anchor on
-  pcd->replic_groups, pcd back-pointer, num_members, source_td/members
-  MURAM off+iomem, members_sz, spinlock for body-3 runtime updates.
-- create() validates args (pcd, members, num_members in [1,64]),
-  allocates source-TD (16 B) + members array (num_members*16 B) via
-  fman_pcd_muram_alloc(), memset_io zero both regions, stamps the
-  source-TD type field with FMAN_PCD_REPLIC_SOURCE_TD_OPCODE (0x75),
-  list_add_tail on pcd->replic_groups under pcd->lock.
-- destroy() is exact reverse: list_del under lock, zero before free,
-  fman_pcd_muram_free() in reverse order, kfree handle.
-- Pre-declares body-2 constants (FR_BIT, NL_BIT, ADDR_SHIFT,
-  INVALID_MEMBER_INDEX) and source-TD record offsets per RM Table 8-128.
-
-Body-1 deliberately does NOT consume the members[] arg yet — FQID
-encoding + NEXT chaining + NL_BIT stamping lands in body-2 as one
-atomic programming pass.  All-zero MURAM keeps silicon walker
-inactive (operationCode=0 short-circuits the walker), preserving the
-same inactive-state safety invariant as PR14d-body-1 (HMCT all-zero)
-and PR14e-body-1 (PLCR record all-zero).
 ---
  .../ethernet/freescale/fman/fman_pcd_replic.c | 305 +++++++++++++++---
  1 file changed, 266 insertions(+), 39 deletions(-)
 
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c b/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c
-index 3482b2019..9d46bef39 100644
+index 3482b20..9d46bef 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c
 @@ -1,83 +1,310 @@
@@ -390,6 +362,3 @@ index 3482b2019..9d46bef39 100644
 -EXPORT_SYMBOL_GPL(fman_pcd_replic_group_destroy);
 \ No newline at end of file
 +EXPORT_SYMBOL_GPL(fman_pcd_replic_group_destroy);
--- 
-2.39.5
-

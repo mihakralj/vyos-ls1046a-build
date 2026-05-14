@@ -1,37 +1,12 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: ASK2 maintainers <ask2@vyos-ls1046a-build.local>
-Date: Wed, 14 May 2026 18:10:00 +0000
-Subject: [PATCH] fman_pcd: cc: real fman_pcd_cc_tree_create/destroy bodies
- (PR14c-body-1)
+From: ci <ci@local>
+Date: Thu, 14 May 2026 20:44:06 +0000
+Subject: patches/0009-fman-pcd-cc-body-data-structures.patch
 
-PR14c-body-1 of the ASK2 v1.0 PR14 series.  Replaces the PR14c-prep
--EOPNOTSUPP stubs for fman_pcd_cc_tree_create() and
-fman_pcd_cc_tree_destroy() with real MURAM-resident tree-group-table
-allocation per LS1046A RM 8.7.4.1.
-
-The remaining four stubs (fman_pcd_cc_node_create, _add_key,
-_modify_next_action, _destroy) stay -EOPNOTSUPP until PR14c-body-2..-4
-land them.
-
-This is a RE-ROLL of the original PR14c-body-1 patch (workspace SHA
-3b791d1) which had a hunk header @@ -1,77 +1,242 @@ expecting a
-77-line fman_pcd_cc.c baseline that never existed in this repo.  See
-plans/PATCH-STACK-FORENSIC-2026-05-14.md for the full forensic.
-
-Functional content is preserved verbatim from the original design memo:
-- struct fman_pcd_cc_tree private to this TU.
-- 256-byte fixed group table (16 entries x 16 bytes) per RM 8.7.4.1 P2.
-- Dual-API MURAM: fman_pcd_muram_alloc/free for budget, then
-  fman_muram_offset_to_vbase for the CPU iomem pointer.
-- pcd->lock (mutex) serialises tree lifecycle on pcd->cc_trees.
-- tree->lifecycle_lock (mutex) declared now, populated in PR14c-body-2.
-- WARN_ON(!list_empty(&tree->nodes)) leak detection at destroy.
-
-Build: zero-warning ARM64 cross-build on Cobalt 100.
-Cross-ref: SDK fm_cc.c:6470-6483 CcTreeBuild + DeleteTree.
-
-Signed-off-by: ASK2 maintainers <ask2@vyos-ls1046a-build.local>
 ---
+ .../net/ethernet/freescale/fman/fman_pcd_cc.c | 303 +++++++++++++++---
+ 1 file changed, 256 insertions(+), 47 deletions(-)
+
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 index ac97573..8f9cb77 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
@@ -428,6 +403,3 @@ index ac97573..8f9cb77 100644
 -EXPORT_SYMBOL_GPL(fman_pcd_cc_tree_destroy);
 \ No newline at end of file
 +EXPORT_SYMBOL_GPL(fman_pcd_cc_tree_destroy);
--- 
-2.39.5
-

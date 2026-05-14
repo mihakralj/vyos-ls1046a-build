@@ -1,14 +1,14 @@
-From 62514722d78007ebce080517e0d35df6b916c8fc Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: ci <ci@local>
-Date: Thu, 14 May 2026 06:23:33 +0000
-Subject: [PATCH] fman: pcd_plcr body-1 -- struct + create/destroy MURAM bodies
+Date: Thu, 14 May 2026 20:44:09 +0000
+Subject: patches/0018-fman-pcd-plcr-body-1-create-destroy.patch
 
 ---
  .../ethernet/freescale/fman/fman_pcd_plcr.c   | 432 +++++++++++++++---
  1 file changed, 371 insertions(+), 61 deletions(-)
 
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
-index d5e2345bb..ef6501b2e 100644
+index d5e2345..ef6501b 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
 @@ -1,116 +1,426 @@
@@ -500,6 +500,3 @@ index d5e2345bb..ef6501b2e 100644
 -EXPORT_SYMBOL_GPL(fman_pcd_plcr_profile_destroy);
 \ No newline at end of file
 +EXPORT_SYMBOL_GPL(fman_pcd_plcr_profile_destroy);
--- 
-2.39.5
-

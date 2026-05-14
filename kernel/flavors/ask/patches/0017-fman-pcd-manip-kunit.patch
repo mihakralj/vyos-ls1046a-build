@@ -1,5 +1,17 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Thu, 14 May 2026 20:44:08 +0000
+Subject: patches/0017-fman-pcd-manip-kunit.patch
+
+---
+ .../ethernet/freescale/fman/fman_pcd_manip.c  |  11 +
+ .../freescale/fman/tests/fman_pcd_cc_test.c   |  21 +-
+ .../fman/tests/fman_pcd_manip_test.c          | 340 ++++++++++++++++++
+ 3 files changed, 369 insertions(+), 3 deletions(-)
+ create mode 100644 drivers/net/ethernet/freescale/fman/tests/fman_pcd_manip_test.c
+
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
-index 46af621fd..5c1b916a7 100644
+index 46af621..5c1b916 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
 @@ -790,3 +790,14 @@ unsigned long fman_pcd_manip_hmtd_off(const struct fman_pcd_manip *manip)
@@ -18,7 +30,7 @@ index 46af621fd..5c1b916a7 100644
 +#include "tests/fman_pcd_manip_test.c"
 +#endif /* CONFIG_FSL_FMAN_PCD_KUNIT_TEST */
 diff --git a/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
-index 6794e0783..090b96dee 100644
+index 6794e07..090b96d 100644
 --- a/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
 +++ b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
 @@ -190,11 +190,26 @@ static void cc_encode_ad_replicate_test(struct kunit *test)
@@ -53,7 +65,7 @@ index 6794e0783..090b96dee 100644
  /* ---- TEST: NULL args return -EINVAL ----------------------------- */
 diff --git a/drivers/net/ethernet/freescale/fman/tests/fman_pcd_manip_test.c b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_manip_test.c
 new file mode 100644
-index 000000000..8b27e3728
+index 0000000..8b27e37
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_manip_test.c
 @@ -0,0 +1,340 @@

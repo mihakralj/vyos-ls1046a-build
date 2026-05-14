@@ -1,42 +1,14 @@
-From 080bafe75d07a2e3e779ff272d6ff12580dd608f Mon Sep 17 00:00:00 2001
-From: ASK2 Bot <ask2@local>
-Date: Thu, 14 May 2026 15:55:21 +0000
-Subject: [PATCH] =?UTF-8?q?ask2:=20PR14f-body-2=20=E2=80=94=20fman=5Fpcd?=
- =?UTF-8?q?=5Freplic=20member-AD=20encoder=20+=20source-TD=20publish=20(pa?=
- =?UTF-8?q?tch=200023)?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Thu, 14 May 2026 20:44:10 +0000
+Subject: patches/0023-fman-pcd-replic-body-2-member-encoder.patch
 
-Adds replic_encode_members() helper that stamps FQID + NEXT/FR/NL bits
-into all member-AD slots in one atomic pass under group->lock, then
-publishes source-TD frg_pointer + active OPCODE as the single
-publication point.
-
-Per LS1046A RM §8.7.7: each 16-B member-AD slot carries FQID at offset
-0x0 and NIA at 0x8.  NIA of member[i] for i in [0, num-2] holds
-FR_BIT | (next_member_off >> ADDR_SHIFT); the LAST member additionally
-has NL_BIT set with zero NEXT to terminate the chain.
-
-Source-TD frg_pointer (offset 0x4) is the NEXT pointer to member[0]
-(addr >> 4).  Active OPCODE word (offset 0x8) is written LAST as the
-single publication point; before that write, source-TD operationCode is
-zero and the silicon walker short-circuits.
-
-Body-2 keeps the inactive-state safety invariant from body-1: until the
-opcode word goes hot, partial visibility of stamped MURAM cannot route
-traffic.
-
-Symbol size: fman_pcd_replic_group_create 456 B (0x1c8) -> 716 B (0x2cc)
-(encoder inlined, single caller).  fman_pcd_replic_group_destroy
-unchanged at 204 B (0xcc).  All __ksymtab_fman_pcd_replic_* entries
-preserved.  Build verified ARM64 zero-warning on linux-6.18.28.
 ---
  .../ethernet/freescale/fman/fman_pcd_replic.c | 130 +++++++++++++++---
  1 file changed, 111 insertions(+), 19 deletions(-)
 
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c b/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c
-index 9d46bef39..7a5a068a4 100644
+index 9d46bef..7a5a068 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c
 @@ -1,6 +1,6 @@
@@ -215,6 +187,3 @@ index 9d46bef39..7a5a068a4 100644
  	return group;
  }
  EXPORT_SYMBOL_GPL(fman_pcd_replic_group_create);
--- 
-2.39.5
-
