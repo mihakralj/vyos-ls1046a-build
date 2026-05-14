@@ -1,0 +1,774 @@
+From 7a56bea44378ba4d5c15116286529e18811d1fd5 Mon Sep 17 00:00:00 2001
+From: Build Cobalt100 <build@cobalt100>
+Date: Thu, 14 May 2026 03:32:37 +0000
+Subject: =?UTF-8?q?fman/pcd:=20PR14d/14e/14f-prep=20=E2=80=94=20manip,=20p?=
+ =?UTF-8?q?lcr,=20replic,=20parser=20stub=20APIs?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Combines the three remaining FMan PCD sub-API prep stubs into one
+bisectable commit. The header (include/linux/fsl/fman_pcd.h) and the
+Makefile both need all three sub-APIs simultaneously: the Makefile
+references the new .o files together, and the header forward declares
+struct fman_pcd_manip (used by struct fman_pcd_action.manipulate.manip)
+and struct fman_pcd_replic_group (used by struct fman_pcd_action.
+replicate.group), so splitting into three separate prep commits would
+leave intermediate revisions with broken header references or Makefile
+references to missing .c sources.
+
+Files added (all in drivers/net/ethernet/freescale/fman/):
+  fman_pcd_manip.c   (89 LOC) - PR14d-prep, header manipulation stubs
+  fman_pcd_plcr.c    (115 LOC) - PR14e-prep, policer profile stubs
+  fman_pcd_replic.c  (84 LOC) - PR14f-prep, frame replicator stubs
+  fman_pcd_prs.c     (60 LOC) - PR14f-prep, FMan parser config stub
+
+Files extended:
+  drivers/net/ethernet/freescale/fman/Makefile - adds the four new
+    fman_pcd_*.o files to fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD)
+  include/linux/fsl/fman_pcd.h - adds ~300 LOC of public ABI:
+    * enum fman_pcd_manip_type, struct fman_pcd_manip_params tagged
+      union (NAT_V4, NAT_V6, VLAN_PUSH, VLAN_POP, TTL_DEC)
+    * enum fman_pcd_plcr_color_mode, struct fman_pcd_plcr_params
+      (CIR / CBS / EIR / EBS + color awareness per RFC 4115)
+    * struct fman_pcd_replic_member (egress FQID per replicator member)
+    * 8 function prototypes covering all three sub-APIs
+
+All 8 new public entry points return ERR_PTR(-EOPNOTSUPP) /
+-EOPNOTSUPP / NULL-safe-no-op until the corresponding body PRs land.
+
+Acceptance:
+  - Native ARM64 build (make ARCH=arm64 -j32 Image modules on Cobalt
+    100, FSL_FMAN_PCD=y, FSL_FMAN=y, FSL_DPAA=y, FSL_DPAA_ETH=y):
+    zero warnings, zero errors.
+  - All 8 new fman_pcd_* symbols present in System.map as T entries
+    with corresponding __ksymtab_* rodata entries.
+
+Body PRs queued:
+  PR14d-body - real manip template MURAM programming per RM 8.7.5
+  PR14e-body - real trTCM profile MURAM programming per RM 8.7.6
+  PR14f-body - real replicator-group + parser HXS programming per
+               RM 8.7.7 / 8.7.2
+
+Clean-room provenance: all four .c files authored from LS1046A RM
+only; archived SDK fm_manip.c / fm_plcr.c / fm_replic.c / fm_prs.c +
+fman_prs.c at mihakralj/kernel-ls1046a-build@464df181 are read-only
+silicon-fact cross-references per spec sec 16 (clean-room provenance
+risk #12).  No code or struct layouts are copied.
+
+Signed-off-by: Build Cobalt100 <build@cobalt100>
+---
+ drivers/net/ethernet/freescale/fman/Makefile  |   4 +-
+ .../ethernet/freescale/fman/fman_pcd_manip.c  |  89 ++++++
+ .../ethernet/freescale/fman/fman_pcd_plcr.c   | 116 +++++++
+ .../ethernet/freescale/fman/fman_pcd_prs.c    |  60 ++++
+ .../ethernet/freescale/fman/fman_pcd_replic.c |  83 +++++
+ include/linux/fsl/fman_pcd.h                  | 300 ++++++++++++++++++
+ 6 files changed, 651 insertions(+), 1 deletion(-)
+ create mode 100644 drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+ create mode 100644 drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
+ create mode 100644 drivers/net/ethernet/freescale/fman/fman_pcd_prs.c
+ create mode 100644 drivers/net/ethernet/freescale/fman/fman_pcd_replic.c
+
+diff --git a/drivers/net/ethernet/freescale/fman/Makefile b/drivers/net/ethernet/freescale/fman/Makefile
+index a6f4a59b9..9650ca1fc 100644
+--- a/drivers/net/ethernet/freescale/fman/Makefile
++++ b/drivers/net/ethernet/freescale/fman/Makefile
+@@ -6,6 +6,8 @@ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_fman_port.o
+ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_mac.o
+ 
+ fsl_dpaa_fman-objs	:= fman_muram.o fman.o fman_sp.o fman_keygen.o fman_host_cmd.o
+-fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o fman_pcd_kg.o fman_pcd_cc.o
++fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o fman_pcd_kg.o fman_pcd_cc.o \
++       fman_pcd_manip.o fman_pcd_plcr.o \
++       fman_pcd_replic.o fman_pcd_prs.o
+ fsl_dpaa_fman_port-objs := fman_port.o
+ fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+new file mode 100644
+index 000000000..3bfadaa7b
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+@@ -0,0 +1,89 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * FMan PCD Header Manipulation - public API stubs.
++ *
++ * PR14d-prep of the ASK2 v1.0 PR14 series.  Declares the on-disk
++ * translation unit for the header-manip layer and provides
++ * -EOPNOTSUPP stubs for every public entry point declared in
++ * <linux/fsl/fman_pcd.h>.  PR14d-body replaces these stubs with the
++ * real silicon-programming code per LS1046A RM 8.7.5 (header
++ * modification table format) and 8.7.5.4 (incremental checksum
++ * recompute hardware support).
++ *
++ * Authoritative reference
++ * -----------------------
++ * - LS1046A Reference Manual sec 8.7.5 (Header modification table).
++ * - LS1046A Reference Manual sec 8.7.5.4 (Auto checksum recompute).
++ *
++ * Clean-room provenance
++ * ---------------------
++ * Mainline drivers/net/ethernet/freescale/fman/ has zero manip code;
++ * this file is authored from the RM only.  The legacy NXP SDK
++ * fm_manip.c (~6000 LOC under drivers/net/ethernet/freescale/sdk_fman/
++ * Peripherals/FM/Pcd/ in the archived mihakralj/kernel-ls1046a-build
++ * repo at HEAD 464df181) is a read-only silicon-fact cross-reference
++ * only - no code or struct layouts are copied from it.  See spec
++ * specs/ask2-rewrite-spec.md sec 16 (clean-room provenance risk #12).
++ *
++ * What this file delivers at PR14d-prep
++ * -------------------------------------
++ * Two public entry points, both returning ERR_PTR(-EOPNOTSUPP) /
++ * no-op.  No struct fman_pcd_manip definition yet - it stays forward-
++ * declared in <linux/fsl/fman_pcd.h>.  No MURAM allocation, no register
++ * writes.  The point of this PR is to lock down the public ABI surface
++ * (struct fman_pcd_manip_params tagged union with five MANIP_* variants)
++ * and the Makefile integration so that PR14d-body is a pure
++ * implementation drop.
++ */
++
++#include <linux/err.h>
++#include <linux/errno.h>
++#include <linux/export.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/types.h>
++
++#include <linux/fsl/fman_pcd.h>
++#include "fman_pcd_internal.h"
++
++/**
++ * fman_pcd_manip_create() - program one header-manip template.
++ *
++ * PR14d-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
++ * Returns ERR_PTR(-EOPNOTSUPP) until PR14d-body lands.
++ */
++struct fman_pcd_manip *
++fman_pcd_manip_create(struct fman_pcd *pcd,
++		      const struct fman_pcd_manip_params *params)
++{
++	if (!pcd || !params)
++		return ERR_PTR(-EINVAL);
++
++	switch (params->type) {
++	case FMAN_PCD_MANIP_NAT_V4:
++	case FMAN_PCD_MANIP_NAT_V6:
++	case FMAN_PCD_MANIP_VLAN_PUSH:
++	case FMAN_PCD_MANIP_VLAN_POP:
++	case FMAN_PCD_MANIP_TTL_DEC:
++		break;
++	default:
++		return ERR_PTR(-EINVAL);
++	}
++
++	return ERR_PTR(-EOPNOTSUPP);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_manip_create);
++
++/**
++ * fman_pcd_manip_destroy() - tear down one header-manip template.
++ *
++ * PR14d-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
++ * NULL-safe no-op until PR14d-body lands.
++ */
++void fman_pcd_manip_destroy(struct fman_pcd_manip *manip)
++{
++	if (!manip)
++		return;
++	/* PR14d-body: detach from CC keys, free MURAM template, free handle. */
++}
++EXPORT_SYMBOL_GPL(fman_pcd_manip_destroy);
+\ No newline at end of file
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
+new file mode 100644
+index 000000000..6c33c088a
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
+@@ -0,0 +1,116 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * FMan PCD Policer profiles - public API stubs.
++ *
++ * PR14e-prep of the ASK2 v1.0 PR14 series.  Declares the on-disk
++ * translation unit for the policer-profile layer and provides
++ * -EOPNOTSUPP stubs for every public entry point declared in
++ * <linux/fsl/fman_pcd.h>.  PR14e-body replaces these stubs with the
++ * real silicon-programming code per LS1046A RM 8.7.6 (Policer profile
++ * record format and trTCM token-bucket arithmetic).
++ *
++ * Authoritative reference
++ * -----------------------
++ * - LS1046A Reference Manual sec 8.7.6 (Policer profile record).
++ * - RFC 4115 (Two Rate Three Color Marker - trTCM).
++ *
++ * Clean-room provenance
++ * ---------------------
++ * Mainline drivers/net/ethernet/freescale/fman/ has zero policer code;
++ * this file is authored from the RM only.  The legacy NXP SDK
++ * fm_plcr.c (~1900 LOC under drivers/net/ethernet/freescale/sdk_fman/
++ * Peripherals/FM/Pcd/ in the archived mihakralj/kernel-ls1046a-build
++ * repo at HEAD 464df181) is a read-only silicon-fact cross-reference
++ * only - no code or struct layouts are copied from it.  See spec
++ * specs/ask2-rewrite-spec.md sec 16 (clean-room provenance risk #12).
++ *
++ * What this file delivers at PR14e-prep
++ * -------------------------------------
++ * Three public entry points, all returning ERR_PTR(-EOPNOTSUPP) /
++ * -EOPNOTSUPP / no-op.  No struct fman_pcd_plcr_profile definition yet -
++ * it stays forward-declared in <linux/fsl/fman_pcd.h>.  No MURAM
++ * allocation, no register writes.  The point of this PR is to lock
++ * down the public ABI surface (struct fman_pcd_plcr_params with CIR /
++ * CBS / EIR / EBS + color mode) and the Makefile integration so that
++ * PR14e-body is a pure implementation drop.
++ *
++ * Locking model (forward-looking, PR14e-body)
++ * -------------------------------------------
++ * pcd->lock serialises profile-slot allocation and the slot-bitmap
++ * update.  Per-profile rate updates via fman_pcd_plcr_profile_set_rates()
++ * use a 128-bit MMIO store under pcd->lock - the silicon side observes
++ * the new rates atomically.  Token-bucket counters in MURAM are NOT
++ * reset on a rate update; ask.ko's M5 QoS code relies on this.
++ */
++
++#include <linux/err.h>
++#include <linux/errno.h>
++#include <linux/export.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/types.h>
++
++#include <linux/fsl/fman_pcd.h>
++#include "fman_pcd_internal.h"
++
++/* Silicon hard limit per RM 8.7.6: 256 policer profiles per FMan. */
++#define FMAN_PCD_PLCR_MAX_PROFILES 256
++
++/**
++ * fman_pcd_plcr_profile_create() - allocate and program one policer profile.
++ *
++ * PR14e-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
++ * Returns ERR_PTR(-EOPNOTSUPP) until PR14e-body lands.
++ */
++struct fman_pcd_plcr_profile *
++fman_pcd_plcr_profile_create(struct fman_pcd *pcd,
++     const struct fman_pcd_plcr_params *params)
++{
++if (!pcd || !params)
++return ERR_PTR(-EINVAL);
++if (params->color_mode != FMAN_PCD_PLCR_COLOR_BLIND &&
++    params->color_mode != FMAN_PCD_PLCR_COLOR_AWARE)
++return ERR_PTR(-EINVAL);
++if (params->cir_bps == 0 && params->eir_bps == 0)
++return ERR_PTR(-EINVAL);
++if (params->cbs_bytes == 0 && params->ebs_bytes == 0)
++return ERR_PTR(-EINVAL);
++
++return ERR_PTR(-EOPNOTSUPP);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_plcr_profile_create);
++
++/**
++ * fman_pcd_plcr_profile_set_rates() - runtime rate update.
++ *
++ * PR14e-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
++ * Returns -EOPNOTSUPP until PR14e-body lands.
++ */
++int fman_pcd_plcr_profile_set_rates(struct fman_pcd_plcr_profile *prof,
++    const struct fman_pcd_plcr_params *params)
++{
++if (!prof || !params)
++return -EINVAL;
++if (params->color_mode != FMAN_PCD_PLCR_COLOR_BLIND &&
++    params->color_mode != FMAN_PCD_PLCR_COLOR_AWARE)
++return -EINVAL;
++
++return -EOPNOTSUPP;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_plcr_profile_set_rates);
++
++/**
++ * fman_pcd_plcr_profile_destroy() - free one policer profile.
++ *
++ * PR14e-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
++ * NULL-safe no-op until PR14e-body lands.
++ */
++void fman_pcd_plcr_profile_destroy(struct fman_pcd_plcr_profile *prof)
++{
++if (!prof)
++return;
++/* PR14e-body: clear profile-slot bitmap bit, zero MURAM record,
++ * WARN if any CC action template still references this id, free handle.
++ */
++}
++EXPORT_SYMBOL_GPL(fman_pcd_plcr_profile_destroy);
+\ No newline at end of file
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_prs.c b/drivers/net/ethernet/freescale/fman/fman_pcd_prs.c
+new file mode 100644
+index 000000000..d4828e2b5
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_prs.c
+@@ -0,0 +1,60 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * FMan PCD Parser - public API stubs.
++ *
++ * PR14f-prep of the ASK2 v1.0 PR14 series (parser half).  Declares
++ * the on-disk translation unit for the soft-parser configuration layer
++ * and provides a -EOPNOTSUPP stub for the single public entry point
++ * declared in <linux/fsl/fman_pcd.h>.  PR14f-body replaces the stub
++ * with the real silicon-programming code per LS1046A RM 8.7.2
++ * (Header eXamination Sequence - HXS - table format).
++ *
++ * Authoritative reference
++ * -----------------------
++ * - LS1046A Reference Manual sec 8.7.2 (FMan parser HXS table).
++ *
++ * Clean-room provenance
++ * ---------------------
++ * Mainline drivers/net/ethernet/freescale/fman/ has zero parser-config
++ * code; this file is authored from the RM only.  The legacy NXP SDK
++ * fm_prs.c / fman_prs.c (~500 LOC combined under
++ * drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/ in the
++ * archived mihakralj/kernel-ls1046a-build repo at HEAD 464df181) is a
++ * read-only silicon-fact cross-reference only - no code or struct
++ * layouts are copied from it.  See spec specs/ask2-rewrite-spec.md
++ * sec 16 (clean-room provenance risk #12).
++ *
++ * What this file delivers at PR14f-prep
++ * -------------------------------------
++ * One public entry point: fman_pcd_prs_init(), returning -EOPNOTSUPP.
++ * No HXS table writes, no register writes.  PR14f-body adds a
++ * pass-through configuration plus a debugfs dump - the stock IPv4 /
++ * IPv6 / TCP / UDP / ESP / VLAN HXSes loaded by FMan ucode 210.10.1
++ * cover every ASK2 v1.0 flow type, so the parser change in v1.0 is
++ * minimal.  GRE / VXLAN / MPLS HXS programming is deferred to v1.1.
++ */
++
++#include <linux/err.h>
++#include <linux/errno.h>
++#include <linux/export.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/types.h>
++
++#include <linux/fsl/fman_pcd.h>
++#include "fman_pcd_internal.h"
++
++/**
++ * fman_pcd_prs_init() - configure FMan parser for ASK2 v1.0.
++ *
++ * PR14f-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
++ * Returns -EOPNOTSUPP until PR14f-body lands.
++ */
++int fman_pcd_prs_init(struct fman_pcd *pcd)
++{
++if (!pcd)
++return -EINVAL;
++
++return -EOPNOTSUPP;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_prs_init);
+\ No newline at end of file
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c b/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c
+new file mode 100644
+index 000000000..b198b6554
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c
+@@ -0,0 +1,83 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * FMan PCD Frame Replicator - public API stubs.
++ *
++ * PR14f-prep of the ASK2 v1.0 PR14 series (replicator half).  Declares
++ * the on-disk translation unit for the multicast-fanout layer and
++ * provides ERR_PTR(-EOPNOTSUPP) / no-op stubs for every public entry
++ * point declared in <linux/fsl/fman_pcd.h>.  PR14f-body replaces these
++ * stubs with the real silicon-programming code per LS1046A RM 8.7.7
++ * (Frame replicator group table format).
++ *
++ * Authoritative reference
++ * -----------------------
++ * - LS1046A Reference Manual sec 8.7.7 (Frame replicator).
++ *
++ * Clean-room provenance
++ * ---------------------
++ * Mainline drivers/net/ethernet/freescale/fman/ has zero replicator
++ * code; this file is authored from the RM only.  The legacy NXP SDK
++ * fm_replic.c (~900 LOC under drivers/net/ethernet/freescale/sdk_fman/
++ * Peripherals/FM/Pcd/ in the archived mihakralj/kernel-ls1046a-build
++ * repo at HEAD 464df181) is a read-only silicon-fact cross-reference
++ * only - no code or struct layouts are copied from it.  See spec
++ * specs/ask2-rewrite-spec.md sec 16 (clean-room provenance risk #12).
++ *
++ * What this file delivers at PR14f-prep
++ * -------------------------------------
++ * Two public entry points, both returning ERR_PTR(-EOPNOTSUPP) /
++ * no-op.  No struct fman_pcd_replic_group definition yet - it stays
++ * forward-declared in <linux/fsl/fman_pcd.h>.  No MURAM allocation,
++ * no register writes.  PR14f-body materialises the silicon-resident
++ * replicator-group table.  Consumed in M3 by IPv4 / IPv6 multicast
++ * flow types (OP_FLOW_INSERT_V4_MCAST / _V6_MCAST per spec sec 12).
++ */
++
++#include <linux/err.h>
++#include <linux/errno.h>
++#include <linux/export.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/types.h>
++
++#include <linux/fsl/fman_pcd.h>
++#include "fman_pcd_internal.h"
++
++/* Silicon hard limit per RM 8.7.7: 64 members per replicator group. */
++#define FMAN_PCD_REPLIC_MAX_MEMBERS 64
++
++/**
++ * fman_pcd_replic_group_create() - allocate a replicator group.
++ *
++ * PR14f-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
++ * Returns ERR_PTR(-EOPNOTSUPP) until PR14f-body lands.
++ */
++struct fman_pcd_replic_group *
++fman_pcd_replic_group_create(struct fman_pcd *pcd,
++     const struct fman_pcd_replic_member *members,
++     u8 num_members)
++{
++if (!pcd || !members)
++return ERR_PTR(-EINVAL);
++if (num_members == 0 || num_members > FMAN_PCD_REPLIC_MAX_MEMBERS)
++return ERR_PTR(-EINVAL);
++
++return ERR_PTR(-EOPNOTSUPP);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_replic_group_create);
++
++/**
++ * fman_pcd_replic_group_destroy() - free one replicator group.
++ *
++ * PR14f-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
++ * NULL-safe no-op until PR14f-body lands.
++ */
++void fman_pcd_replic_group_destroy(struct fman_pcd_replic_group *group)
++{
++if (!group)
++return;
++/* PR14f-body: WARN if any CC action template still references this
++ * group, free MURAM table, free handle.
++ */
++}
++EXPORT_SYMBOL_GPL(fman_pcd_replic_group_destroy);
+\ No newline at end of file
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 256349533..9b5a069fd 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -422,4 +422,304 @@ void fman_pcd_cc_node_destroy(struct fman_pcd_cc_node *node);
+  */
+ void fman_pcd_cc_tree_destroy(struct fman_pcd_cc_tree *tree);
+ 
++/* ----------------------------------------------------------------------
++ * Header manipulation (fman_pcd_manip.c, PR14d)
++ *
++ * The header-manipulation engine sits between the CC walker and the
++ * QMan enqueue step.  When a CC key match produces an
++ * FMAN_PCD_ACTION_MANIPULATE action, the silicon walks the manip
++ * chain pointed to by @manipulate.manip before enqueueing the frame
++ * to @manipulate.next_fqid.
++ *
++ * Each manip handle programs one MURAM-resident rewrite template per
++ * LS1046A RM sec 8.7.5.  Templates are stateless; the same handle
++ * may be referenced by N CC keys.  IPv4 / IPv6 / TCP / UDP checksum
++ * incremental recompute is hardware-automatic per RM sec 8.7.5.4 and
++ * does not require a separate manip kind.
++ * ---------------------------------------------------------------------- */
++
++/**
++ * enum fman_pcd_manip_type - tagged-union discriminator for manip params.
++ * @FMAN_PCD_MANIP_NAT_V4:     IPv4 SNAT/DNAT (rewrite SA and/or DA + L4 port)
++ * @FMAN_PCD_MANIP_NAT_V6:     IPv6 SNAT/DNAT (rewrite SA and/or DA + L4 port)
++ * @FMAN_PCD_MANIP_VLAN_PUSH:  prepend an 802.1Q tag
++ * @FMAN_PCD_MANIP_VLAN_POP:   strip outer 802.1Q tag
++ * @FMAN_PCD_MANIP_TTL_DEC:    decrement IPv4 TTL / IPv6 Hop Limit
++ *
++ * Hardware-supported manip kinds for ASK2 v1.0 per spec sec 13.3.
++ * GRE / VXLAN encap is deferred to v1.1.  Multiple manips per flow
++ * are chained via repeated FMAN_PCD_ACTION_MANIPULATE actions across
++ * a multi-node CC tree path.
++ */
++enum fman_pcd_manip_type {
++FMAN_PCD_MANIP_NAT_V4 = 0,
++FMAN_PCD_MANIP_NAT_V6,
++FMAN_PCD_MANIP_VLAN_PUSH,
++FMAN_PCD_MANIP_VLAN_POP,
++FMAN_PCD_MANIP_TTL_DEC,
++};
++
++/**
++ * struct fman_pcd_manip_params - configuration for one manip template.
++ * @type:                   discriminator selecting the union arm
++ * @nat_v4.rewrite_sa:      if true, rewrite source IPv4 address
++ * @nat_v4.new_sa:          new source address (host byte order)
++ * @nat_v4.rewrite_da:      if true, rewrite destination IPv4 address
++ * @nat_v4.new_da:          new destination address (host byte order)
++ * @nat_v4.rewrite_sport:   if true, rewrite L4 source port (TCP/UDP only)
++ * @nat_v4.new_sport:       new source port (host byte order)
++ * @nat_v4.rewrite_dport:   if true, rewrite L4 destination port
++ * @nat_v4.new_dport:       new destination port (host byte order)
++ * @nat_v6.rewrite_sa:      if true, rewrite source IPv6 address
++ * @nat_v6.new_sa:          new source address, 16 bytes network order
++ * @nat_v6.rewrite_da:      if true, rewrite destination IPv6 address
++ * @nat_v6.new_da:          new destination address, 16 bytes network order
++ * @nat_v6.rewrite_sport:   if true, rewrite L4 source port
++ * @nat_v6.new_sport:       new source port (host byte order)
++ * @nat_v6.rewrite_dport:   if true, rewrite L4 destination port
++ * @nat_v6.new_dport:       new destination port (host byte order)
++ * @vlan_push.tci:          full 16-bit TCI to push (PCP + DEI + VID)
++ * @vlan_push.tpid:         EtherType for the pushed tag, normally 0x8100
++ *
++ * @vlan_pop has no payload.  @ttl_dec has no payload.
++ *
++ * All addresses / ports stored in host byte order for caller convenience;
++ * the manip-template encoder swaps to network order before MURAM write.
++ */
++struct fman_pcd_manip_params {
++enum fman_pcd_manip_type type;
++union {
++struct {
++bool rewrite_sa;
++__be32 new_sa;
++bool rewrite_da;
++__be32 new_da;
++bool rewrite_sport;
++__be16 new_sport;
++bool rewrite_dport;
++__be16 new_dport;
++} nat_v4;
++struct {
++bool rewrite_sa;
++u8 new_sa[16];
++bool rewrite_da;
++u8 new_da[16];
++bool rewrite_sport;
++__be16 new_sport;
++bool rewrite_dport;
++__be16 new_dport;
++} nat_v6;
++struct {
++__be16 tci;
++__be16 tpid;
++} vlan_push;
++};
++};
++
++/**
++ * fman_pcd_manip_create() - program one header-manip template.
++ * @pcd:    parent FMan PCD context.
++ * @params: manip parameters; @params->type selects the union arm.
++ *
++ * Allocates a MURAM-resident manip template, encodes it per RM sec 8.7.5,
++ * registers the handle on the PCD context.  IPv4/UDP/TCP checksum
++ * incremental recompute is enabled automatically for all NAT variants
++ * per RM sec 8.7.5.4 - no explicit knob.
++ *
++ * Returns ERR_PTR(-EOPNOTSUPP) at PR14d-prep; PR14d-body programs the
++ * real silicon templates.
++ *
++ * Locking: takes pcd->lock.  May sleep (MURAM alloc).
++ *
++ * Return: handle on success, ERR_PTR(-EINVAL) on bad args, ERR_PTR(-ENOMEM)
++ * if MURAM exhausted, ERR_PTR(-EOPNOTSUPP) until PR14d-body lands.
++ */
++struct fman_pcd_manip *
++fman_pcd_manip_create(struct fman_pcd *pcd,
++      const struct fman_pcd_manip_params *params);
++
++/**
++ * fman_pcd_manip_destroy() - tear down one manip template.
++ * @manip: handle from fman_pcd_manip_create().  NULL-safe.
++ *
++ * Frees the MURAM-resident template and the handle.  WARN if any CC
++ * key still references this manip via FMAN_PCD_ACTION_MANIPULATE
++ * (caller leaked a manip).
++ *
++ * Locking: takes pcd->lock.  May sleep.
++ */
++void fman_pcd_manip_destroy(struct fman_pcd_manip *manip);
++
++/* ----------------------------------------------------------------------
++ * Policer profiles (fman_pcd_plcr.c, PR14e)
++ *
++ * Policer profiles are orthogonal to the CC walk: every CC action may
++ * carry a policer-profile id (programmed into the action template at
++ * CC-node-create time) that meters the frame BEFORE the action is
++ * executed.  A profile implements an RFC 4115 trTCM with
++ * configurable CIR / CBS / EIR / EBS per RM sec 8.7.6.
++ *
++ * Token-bucket rates are passed in bps; the encoder converts to
++ * silicon clock-cycle counts using the FMan reference clock.
++ * ---------------------------------------------------------------------- */
++
++/**
++ * enum fman_pcd_plcr_color_mode - trTCM color awareness.
++ * @FMAN_PCD_PLCR_COLOR_BLIND: ignore ingress color, treat as green
++ * @FMAN_PCD_PLCR_COLOR_AWARE: respect ingress color from upstream policer
++ *
++ * Per RFC 4115 sec 2.  ASK2 v1.0 uses BLIND mode exclusively;
++ * AWARE is reserved for chained policers in v1.1.
++ */
++enum fman_pcd_plcr_color_mode {
++FMAN_PCD_PLCR_COLOR_BLIND = 0,
++FMAN_PCD_PLCR_COLOR_AWARE,
++};
++
++/**
++ * struct fman_pcd_plcr_params - one policer-profile configuration.
++ * @color_mode: BLIND or AWARE per RFC 4115
++ * @cir_bps:    committed information rate, bits per second
++ * @cbs_bytes:  committed burst size in bytes (token-bucket depth)
++ * @eir_bps:    excess information rate, bits per second
++ * @ebs_bytes:  excess burst size in bytes
++ *
++ * RFC 4115 trTCM:  if frame_size <= committed_tokens  -> green
++ *                  else if frame_size <= excess_tokens -> yellow
++ *                  else                                -> red (drop).
++ *
++ * The action template attached to a CC key carries a 16-bit profile id
++ * that selects the meter; per-profile colour counters live in MURAM and
++ * are read via fman_pcd_plcr_profile_query_stats() (PR14e-body).
++ */
++struct fman_pcd_plcr_params {
++enum fman_pcd_plcr_color_mode color_mode;
++u64 cir_bps;
++u32 cbs_bytes;
++u64 eir_bps;
++u32 ebs_bytes;
++};
++
++/**
++ * fman_pcd_plcr_profile_create() - allocate and program one policer profile.
++ * @pcd:    parent FMan PCD context.
++ * @params: rate / burst / color configuration.
++ *
++ * Allocates a free profile slot (LS1046A FMan has 256 slots per RM
++ * sec 8.7.6), writes the trTCM record, returns the handle.  Profile id
++ * is queryable via fman_pcd_plcr_profile_get_id().
++ *
++ * Locking: takes pcd->lock.  May sleep (MURAM alloc).
++ *
++ * Return: handle on success, ERR_PTR(-EINVAL) on bad args, ERR_PTR(-ENOSPC)
++ * if all profile slots are in use, ERR_PTR(-EOPNOTSUPP) until PR14e-body.
++ */
++struct fman_pcd_plcr_profile *
++fman_pcd_plcr_profile_create(struct fman_pcd *pcd,
++     const struct fman_pcd_plcr_params *params);
++
++/**
++ * fman_pcd_plcr_profile_set_rates() - runtime rate update.
++ * @prof:   handle from fman_pcd_plcr_profile_create().
++ * @params: new rate / burst configuration.  @params->color_mode is honoured.
++ *
++ * Re-writes the trTCM rate fields in MURAM atomically from the silicon
++ * side (single 128-bit write).  Token counters are NOT reset - the
++ * profile keeps its current burst credit.  Used by ask.ko for runtime
++ * QoS changes without re-creating the profile (which would lose the
++ * id and force every CC key to be re-modified).
++ *
++ * Locking: takes pcd->lock.  May sleep.
++ *
++ * Return: 0 on success, -EINVAL on bad args, -EOPNOTSUPP at PR14e-prep.
++ */
++int fman_pcd_plcr_profile_set_rates(struct fman_pcd_plcr_profile *prof,
++    const struct fman_pcd_plcr_params *params);
++
++/**
++ * fman_pcd_plcr_profile_destroy() - free one policer profile.
++ * @prof: handle from fman_pcd_plcr_profile_create().  NULL-safe.
++ *
++ * Frees the profile slot and the handle.  WARN if any CC action
++ * template still references this profile id (caller leaked).
++ *
++ * Locking: takes pcd->lock.  May sleep.
++ */
++void fman_pcd_plcr_profile_destroy(struct fman_pcd_plcr_profile *prof);
++
++/* ----------------------------------------------------------------------
++ * Replicator groups + Parser (fman_pcd_replic.c, fman_pcd_prs.c, PR14f)
++ *
++ * Replicator groups fan one ingress frame out to N egress FQIDs for
++ * multicast forwarding per RM sec 8.7.7.  A CC action of type
++ * FMAN_PCD_ACTION_REPLICATE points at a replicator-group handle.
++ *
++ * The parser layer is configured pass-through for ASK2 v1.0 (the stock
++ * IPv4/IPv6/TCP/UDP/ESP/VLAN HXSes shipped with FMan ucode 210.10.1
++ * cover every v1.0 flow type).  GRE / VXLAN / MPLS HXS is reserved
++ * for v1.1.  fman_pcd_prs_init() is the only entry point.
++ * ---------------------------------------------------------------------- */
++
++/**
++ * struct fman_pcd_replic_member - one egress FQID in a replicator group.
++ * @fqid: destination FQID for this copy of the frame
++ *
++ * The silicon replicator stamps one frame descriptor per member; the
++ * DPAA TX path then enqueues each copy to its FQID independently.
++ * Per RM sec 8.7.7, a single group may hold up to 64 members.
++ */
++struct fman_pcd_replic_member {
++u32 fqid;
++};
++
++/**
++ * fman_pcd_replic_group_create() - allocate a replicator group.
++ * @pcd:        parent FMan PCD context.
++ * @members:    array of egress FQIDs, length @num_members.
++ * @num_members: number of egress copies; 1..64 per RM sec 8.7.7.
++ *
++ * Programs the MURAM-resident replicator-group table.  Returns the
++ * handle to feed into an FMAN_PCD_ACTION_REPLICATE action.
++ *
++ * Locking: takes pcd->lock.  May sleep (MURAM alloc).
++ *
++ * Return: handle on success, ERR_PTR(-EINVAL) if @num_members is 0 or > 64,
++ * ERR_PTR(-ENOMEM) if MURAM exhausted, ERR_PTR(-EOPNOTSUPP) until
++ * PR14f-body lands.
++ */
++struct fman_pcd_replic_group *
++fman_pcd_replic_group_create(struct fman_pcd *pcd,
++     const struct fman_pcd_replic_member *members,
++     u8 num_members);
++
++/**
++ * fman_pcd_replic_group_destroy() - free one replicator group.
++ * @group: handle from fman_pcd_replic_group_create().  NULL-safe.
++ *
++ * Frees the MURAM-resident table and the handle.  WARN if any CC key
++ * still references this group via FMAN_PCD_ACTION_REPLICATE.
++ *
++ * Locking: takes pcd->lock.  May sleep.
++ */
++void fman_pcd_replic_group_destroy(struct fman_pcd_replic_group *group);
++
++/**
++ * fman_pcd_prs_init() - configure FMan parser for ASK2 v1.0.
++ * @pcd: parent FMan PCD context.
++ *
++ * Pass-through configuration: the stock IPv4/IPv6/TCP/UDP/ESP/VLAN
++ * HXSes loaded by FMan ucode 210.10.1 cover every ASK2 v1.0 flow
++ * type, so this entry point currently just validates that the parser
++ * is in a known-good state and registers a debugfs dump of the active
++ * HXS table.  GRE / VXLAN / MPLS HXS programming lands in v1.1.
++ *
++ * Idempotent - safe to call from fman_pcd_init() and again from each
++ * fman_port_pcd_attach() call.
++ *
++ * Locking: takes pcd->lock.  May sleep.
++ *
++ * Return: 0 on success, -EOPNOTSUPP at PR14f-prep.
++ */
++int fman_pcd_prs_init(struct fman_pcd *pcd);
++
+ #endif /* __LINUX_FSL_FMAN_PCD_H */
+-- 
+2.39.5
+
