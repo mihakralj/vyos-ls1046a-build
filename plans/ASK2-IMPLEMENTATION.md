@@ -43,7 +43,7 @@ architecture source-of-truth. When the two disagree, **the spec wins**
 | 14b-prep | M2.5b-prep — KG public API stub (`fman_pcd_kg.c`) + `keygen_scheme_setup`/`keygen_bind_port_to_schemes` exports | ask20 | landed (fda5a03) |
 | 14b-body | M2.5b-body — KG real KGSE_* programming (IPv4 5-tuple) | ask20 | landed (00d6f16) |
 | 14c-prep | M2.5c-prep — CC public API stub (`fman_pcd_cc.c` with 6 -EOPNOTSUPP stubs) + `fman_pcd_action` tagged-union + extract/key-table types in `<linux/fsl/fman_pcd.h>` | ask20 | landed (c613714) |
-| 14c-body | M2.5c-body — CC real MURAM-resident tree-group-table programming (RM 8.7.4.1), classification-node record packing (RM 8.7.4.2), action-template encoding (RM 8.7.4.3), kunit, also replaces `fman_pcd_kg_attach_cc()` -EOPNOTSUPP stub. Split into 5 sub-PRs (body-1..5) per the design memo below. | ask20 | **WIP** — body-1 (3b791d1, patch 0009), body-2 (94d8237, patch 0010), body-3 (28f638f, patch 0011) landed; body-4/5 pending |
+| 14c-body | M2.5c-body — CC real MURAM-resident tree-group-table programming (RM 8.7.4.1), classification-node record packing (RM 8.7.4.2), action-template encoding (RM 8.7.4.3), kunit, also replaces `fman_pcd_kg_attach_cc()` -EOPNOTSUPP stub. Split into 5 sub-PRs (body-1..5) per the design memo below. | ask20 | ✅ **landed (5/5)** — body-1 (3b791d1, patch 0009), body-2 (94d8237, patch 0010), body-3 (d87652d, patch 0011), body-4 (17d0f2b, patch 0012), body-5 (25ef650, patch 0013) |
 | 14d-prep | M2.5d-prep — manip public API stub (`fman_pcd_manip.c`) + `fman_pcd_manip_params` tagged-union (NAT_V4, NAT_V6, VLAN_PUSH, VLAN_POP, TTL_DEC) in `<linux/fsl/fman_pcd.h>` | ask20 | landed (ad52365, combined patch 0008) |
 | 14d-body | M2.5d-body — manip real MURAM template programming (RM 8.7.5), auto-checksum recompute (RM 8.7.5.4), kunit | ask20 | not started — unblocked by spec v1.1 (cross-ref SDK `fm_manip.c`) |
 | 14e-prep | M2.5e-prep — plcr public API stub (`fman_pcd_plcr.c`) + `fman_pcd_plcr_params` (CIR/CBS/EIR/EBS, color mode) in `<linux/fsl/fman_pcd.h>` | ask20 | landed (ad52365, combined patch 0008) |
@@ -1129,9 +1129,9 @@ ask --source release`. Land as patch 0009.
 |---|---|---|---|---|---|
 | **body-1** | `0009-fman-pcd-cc-body-data-structures.patch` (605 lines) | `3b791d1` | 2026-05-14 | ✅ landed on `ask20` | Zero-warning ARM64 build; `nm` shows `tree_create` 16→520 B, `tree_destroy` 16→352 B; all 6 `__ksymtab_fman_pcd_cc_*` entries present; `patch-health` ✓ 0009 against linux-6.18.28 baseline. |
 | **body-2** | `0010-fman-pcd-cc-body-node-create-destroy.patch` (615 lines, +620/-3) | `94d8237` | 2026-05-14 | ✅ landed on `ask20` | Zero-warning ARM64 build; `nm` shows `node_create` 28→288 B (0x120), `node_destroy` 24→1016 B (0x3f8), `add_key`/`modify_next_action` unchanged at stub sizes; `patch-health` ✓ 0010. |
-| **body-3** | `0011-fman-pcd-cc-body-action-encoding.patch` (227 lines, +144/-9) | `28f638f` | 2026-05-14 | ✅ landed on `ask20` | Zero-warning ARM64 build (`make -j32 Image modules` in 20 s); `cc_encode_ad` is DCE'd at vmlinux (no consumer yet — that is correct: `__maybe_unused static` + body-4 wires it); all 6 `__ksymtab_fman_pcd_cc_*` entries present; `patch-health` ✓ 0011 against the cumulative stack. Empty-table FQ-0-trap invariant preserved (helper does not touch the miss-AD slot). |
-| **body-4** | `0012-fman-pcd-cc-body-add-modify-key.patch` | — | — | ⏳ next | Real bodies for `cc_node_add_key` + `cc_node_modify_next_action` (spinlock-protected, consume `cc_encode_ad`). Also replaces `fman_pcd_kg_attach_cc()` `-EOPNOTSUPP` stub with real `KGSE_CCBS` write. |
-| **body-5** | `0013-fman-pcd-cc-body-kunit.patch` | — | — | ⏸ blocked on body-4 | kunit suite `tests/fman_pcd_cc_test.c`: AD encoding byte-perfect vs RM §8.7.4.3; tree-group MURAM layout byte-perfect vs RM §8.7.4.1; node-create rejects 0-key/256-key; add_key vs modify race under spinlock contention. |
+| **body-3** | `0011-fman-pcd-cc-body-action-encoding.patch` (227 lines, +144/-9) | `d87652d` | 2026-05-14 | ✅ landed on `ask20` | Zero-warning ARM64 build (`make -j32 Image modules` in 20 s); `cc_encode_ad` is DCE'd at vmlinux (no consumer yet — that is correct: `__maybe_unused static` + body-4 wires it); all 6 `__ksymtab_fman_pcd_cc_*` entries present; `patch-health` ✓ 0011 against the cumulative stack. Empty-table FQ-0-trap invariant preserved (helper does not touch the miss-AD slot). |
+| **body-4** | `0012-fman-pcd-cc-kg-body-add-key-modify-attach.patch` (452 lines, +275/-28 across 5 files) | `17d0f2b` | 2026-05-14 | ✅ landed on `ask20` | Real bodies for `cc_node_add_key` + `cc_node_modify_next_action` (spinlock-protected, consume `cc_encode_ad`). Also replaces `fman_pcd_kg_attach_cc()` `-EOPNOTSUPP` stub with real `keygen_scheme_set_ccbs()` AR-indirect KGSE_CCBS read-modify-write. All 6 new symbols (`keygen_scheme_set_ccbs`, `fman_pcd_kg_attach_cc`, `cc_encode_ad`, `fman_pcd_cc_node_modify_next_action`, `fman_pcd_cc_node_add_key`, `fman_pcd_cc_tree_group_table_off`) verified present in `System.map`. Cross-TU accessor `fman_pcd_cc_tree_group_table_off()` added to `fman_pcd_internal.h` so KG can resolve the tree's MURAM offset without reaching into the opaque `cc_tree` struct. `cc_encode_ad` dropped its `__maybe_unused` since `add_key` / `modify_next_action` now consume it. |
+| **body-5** | `0013-fman-pcd-cc-kunit-suite.patch` (362 lines, +308/-1 across 3 files) | `25ef650` | 2026-05-14 | ✅ landed on `ask20` | 10-case KUnit suite for `cc_encode_ad`: DROP (nia=BYPASS), FORWARD_FQ (valid + FQID=0→-EINVAL), FORWARD_CAAM (PLCR_DIS set because CAAM does its own metering), NEXT_CC_NODE (res=ad_table_off, nia=CONT_LOOKUP) + NULL→-EINVAL, REPLICATE/MANIPULATE→-EOPNOTSUPP, NULL-args→-EINVAL, and a byte-layout regression canary that raw-bytes-checks `0xDEADBEEF` at offset 0 against RM 8.7.4.3 Table 8-119. Tests are `#include`'d from `fman_pcd_cc.c` under new `CONFIG_FSL_FMAN_PCD_KUNIT_TEST` Kconfig so they reach the static `cc_encode_ad()` directly; scratch buffer is `kunit_kzalloc`'d 16 bytes cast `(void __iomem __force *)` — `iowrite32be` on arm64 is `__raw_writel + swab` with no MMIO ordering hooks. Build-verified clean both with the option off (default kernel) and on (KUnit kernel). MURAM-resident tree/node layout tests and add_key vs modify race tests deferred to live-silicon bring-up because they need real `fman_muram_alloc` infra. |
 
 **Invariants captured in body-1 + body-2 (informs body-3 onward):**
 
@@ -1168,7 +1168,18 @@ ask --source release`. Land as patch 0009.
    most-recently-landed body is the meaningful signal; verify each new
    sub-PR's own line shows ✓.
 
-**Next-session entry point (updated):** start with PR14c-body-4
+**Next-session entry point (updated, after body-5 landing 2026-05-14):**
+PR14c is closed (5/5 sub-PRs landed). The next planned work item is
+PR14d — header-manipulation. The `cc_encode_ad` `MANIPULATE` arm
+currently returns `-EOPNOTSUPP`; PR14d will wire it to the manip-AD
+opcode-extension format from RM §8.7.5. The bring-up validation gate
+deferred from PR14b-body (kernel boots cleanly on Mono Gateway DK with
+the FMan PCD subsystem active and `attach_cc()` exercised end-to-end
+through `fman_pcd_cc_tree_create()` → `fman_pcd_kg_attach_cc()` →
+`KGSE_CCBS` register write) can now run because the entire CC stack is
+silicon-resident. Stale next-session pointer below kept for reference.
+
+**Stale next-session entry point (pre-2026-05-14, kept for historical context):** start with PR14c-body-4
 (`0012-fman-pcd-cc-body-add-modify-key.patch`). The encoder helper
 `cc_encode_ad()` from body-3 is now resident in
 `work/linux-6.18.28/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c`
