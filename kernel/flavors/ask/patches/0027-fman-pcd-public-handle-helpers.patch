@@ -1,0 +1,158 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ask2 PR14g-prep <ask2@local>
+Date: Thu, 14 May 2026 21:23:15 +0000
+Subject: fman_pcd: promote OOT consumer helpers + fman_pcd_from_of_node()
+
+Add fman_pcd_from_of_node() convenience wrapper in fman.c that walks
+of_find_device_by_node() -> fman_bind() -> fman_get_pcd(), so OOT
+consumers (ask.ko PR14g-body-*) can resolve a DT node to a struct
+fman_pcd handle in one call without dragging in driver-private fman.h
+or knowing the platform_device dance.
+
+The header (<linux/fsl/fman_pcd.h>) already exports the consumer
+entry-point declarations for fman_bind/fman_get_pcd/fman_get_dev/
+fman_get_id (PR14g-prep header promotion) and the new
+fman_pcd_from_of_node prototype. All four already had
+EXPORT_SYMBOL/EXPORT_SYMBOL_GPL at the C level; this patch only
+exposes them through the public header so they are reachable from
+out-of-tree GPL modules.
+---
+ drivers/net/ethernet/freescale/fman/fman.c | 48 ++++++++++++++++++++
+ include/linux/fsl/fman_pcd.h               | 53 +++++++++++++++++++++-
+ 2 files changed, 99 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman.c b/drivers/net/ethernet/freescale/fman/fman.c
+index b0c6cd7..4774746 100644
+--- a/drivers/net/ethernet/freescale/fman/fman.c
++++ b/drivers/net/ethernet/freescale/fman/fman.c
+@@ -2552,6 +2552,54 @@ u8 fman_get_id(struct fman *fman)
+ }
+ EXPORT_SYMBOL_GPL(fman_get_id);
+ 
++/**
++ * fman_pcd_from_of_node - OOT-friendly resolver, DT node -> struct fman_pcd *
++ * @np: device_node pointing at an "fsl,fman" node, or NULL to fall back to
++ *      the first such node on the SoC. The caller retains ownership of any
++ *      reference it holds on @np; when @np is NULL the helper drops the
++ *      internally-acquired reference before returning.
++ *
++ * Walks: of_find_device_by_node() -> fman_bind() -> fman_get_pcd().
++ * Intended for out-of-tree consumers (ask.ko PR14g-body-*) that need a
++ * struct fman_pcd handle but should not have to know the platform_device
++ * dance or include driver-private fman.h.
++ *
++ * Return: PCD handle on success, NULL if the FMan instance is not yet
++ * probed or its PCD subsystem failed to init at probe time.
++ */
++struct fman_pcd *fman_pcd_from_of_node(struct device_node *np)
++{
++	struct platform_device *pdev;
++	struct device_node *owned_np = NULL;
++	struct fman *fman;
++	struct fman_pcd *pcd = NULL;
++
++	if (!np) {
++		owned_np = of_find_compatible_node(NULL, NULL, "fsl,fman");
++		np = owned_np;
++	}
++	if (!np)
++		return NULL;
++
++	pdev = of_find_device_by_node(np);
++	if (!pdev)
++		goto out;
++
++	fman = fman_bind(&pdev->dev);
++	if (!fman)
++		goto out_put_pdev;
++
++	pcd = fman_get_pcd(fman);
++
++out_put_pdev:
++	put_device(&pdev->dev);
++out:
++	if (owned_np)
++		of_node_put(owned_np);
++	return pcd;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_from_of_node);
++
+ 
+ 
+ #ifdef CONFIG_DPAA_ERRATUM_A050385
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 16a7245..d1a5761 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -25,6 +25,8 @@
+ 
+ #include <linux/types.h>
+ 
++struct device;
++struct device_node;
+ struct fman;
+ 
+ /*
+@@ -68,13 +70,60 @@ struct fman_pcd_muram_budget {
+  * fman_pcd_init() is called by fman_probe() after fman_muram_init().
+  * fman_pcd_release() is called via devm_add_action_or_reset() on
+  * unbind/probe-failure.  Consumers should retrieve the per-FMan handle
+- * with fman_get_pcd() (declared in include/linux/fsl/fman.h via the
+- * integration patch on fman.c).
++ * with fman_get_pcd() (re-declared below in PR14g-prep for OOT consumers
++ * - the canonical declaration lives in the driver-private
++ * drivers/net/ethernet/freescale/fman/fman.h).
+  */
+ struct fman_pcd *fman_pcd_init(struct fman *fman);
+ void fman_pcd_release(struct fman_pcd *pcd);
+ struct fman_pcd_muram_budget fman_pcd_get_muram_budget(struct fman_pcd *pcd);
+ 
++/*
++ * OOT consumer entry points (PR14g-prep).
++ *
++ * Re-declare the four fman.c exports that are otherwise only visible
++ * to in-tree FMan callers (fman.h is driver-private).  ask.ko consumes
++ * these to walk from a device-tree FMan node to a usable struct fman_pcd
++ * handle without needing to include the private header.  All four
++ * are EXPORT_SYMBOL_GPL'd in drivers/net/ethernet/freescale/fman/fman.c
++ * - this header only promotes their declarations.
++ *
++ * Typical OOT call sequence:
++ *   np   = of_find_compatible_node(NULL, NULL, "fsl,fman");
++ *   pdev = of_find_device_by_node(np);
++ *   fman = fman_bind(&pdev->dev);
++ *   pcd  = fman_get_pcd(fman);
++ *
++ * Or use the convenience wrapper:
++ *   pcd = fman_pcd_from_of_node(np);
++ *
++ * which performs all four steps inside the FMan driver where the
++ * private types are still in scope.
++ */
++struct fman *fman_bind(struct device *fm_dev);
++struct fman_pcd *fman_get_pcd(struct fman *fman);
++struct device *fman_get_dev(struct fman *fman);
++u8 fman_get_id(struct fman *fman);
++
++/**
++ * fman_pcd_from_of_node() - OOT-friendly resolver, device tree node ->
++ * struct fman_pcd *.
++ * @np: device_node previously found via of_find_compatible_node()
++ *      with compatible "fsl,fman" (or NULL to use the first FMan on
++ *      the SoC).
++ *
++ * Walks the platform-bus device that owns @np, calls fman_bind() on
++ * its struct device, then fman_get_pcd() on the resulting struct fman.
++ * Drops the of_node_get() reference taken on @np by the caller -
++ * callers should _not_ pre-of_node_get() the node.
++ *
++ * Return: PCD handle on success, NULL if the FMan device is absent,
++ *         unbound, or has no PCD subsystem (probe failure).
++ *         May safely be called with @np == NULL: this looks up the
++ *         first "fsl,fman" node in the device tree.
++ */
++struct fman_pcd *fman_pcd_from_of_node(struct device_node *np);
++
+ /*
+  * KeyGen (KG) API (PR14b).
+  *
