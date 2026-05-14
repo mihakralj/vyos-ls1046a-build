@@ -152,9 +152,10 @@ jobs:
       - name: Install Dependencies (host base + Mergiraf)
         # All host-side packages (apt + Mergiraf prebuilt) live in
         # bin/ci-install-deps.sh — single source of truth so the local
-        # dev loop on LXC 200 (bin/local-build.sh) can reproduce a CI
-        # build environment without dispatching CI. Adding any package
-        # inline here is a layering bug — fix the script instead.
+        # dev loop on this same Cobalt 100 VM (bin/dev-build.sh +
+        # bin/local-build.sh) can reproduce a CI build environment
+        # without dispatching CI. Adding any package inline here is a
+        # layering bug — fix the script instead.
         run: bin/ci-install-deps.sh
 
       - name: "Initialization: set env variables"
@@ -174,7 +175,7 @@ jobs:
 
       - name: Install vyos-1x build dependencies (VyOS apt repo)
         # All package installs live in bin/ci-install-vyos1x-deps.sh so the
-        # LXC 200 dev loop (bin/local-build.sh) can reproduce it without
+        # Cobalt 100 dev loop (bin/local-build.sh) can reproduce it without
         # dispatching CI. Inline additions here are a layering bug — edit
         # the script. ORDER MATTERS: this step MUST run AFTER the `vyos-build`
         # checkout (the script reads vyos-build/docker/vyos-dev.key), which
@@ -184,10 +185,10 @@ jobs:
 
       # j2lint install moved to bin/ci-install-deps.sh (runs as part of the
       # "Install Dependencies" step). Keeping the install in one script keeps
-      # the local LXC dev loop reproducible without dispatching CI.
+      # the local Cobalt 100 dev loop reproducible without dispatching CI.
 
       - name: Bootstrap OCaml/opam for libvyosconfig (cached on runner)
-        # All bootstrap logic lives in bin/ci-setup-opam.sh so the LXC 200
+        # All bootstrap logic lives in bin/ci-setup-opam.sh so the Cobalt 100
         # dev loop (bin/local-build.sh) can reproduce it without dispatching
         # CI. Inline additions here are a layering bug — edit the script.
         # /opt/opam is outside $GITHUB_WORKSPACE so it survives across runs

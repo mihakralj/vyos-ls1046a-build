@@ -86,22 +86,29 @@ The Mono Gateway DK is **continuously available** over the LAN,
 reached via Tailscale subnet routing (the `192.168.0.0/16` route is
 advertised by a node in the LAN and accepted by this VM):
 
-- The dev-loop **build host** is **LXC 200** (`vyos-builder` LXC inside
-  the `heidi` Proxmox host at `192.168.1.15`, container LAN IP
-  `192.168.1.137`), which owns `/srv/tftp/` and the cross-toolchain
-  tree under `/home/vyos/kernel-ls1046a-build/work/linux-*`. Reach it
-  over SSH (`ssh lxc200`) and run the cross-build remotely.
-- The **CI host** is the **Cobalt 100 Azure ARM64 VM** (`arm64-runner`,
-  Tailscale `100.125.95.22`), which runs the self-hosted GitHub Actions
-  runner (`vm-runner-2`) for ISO builds. It is **not** used for the
-  dev-loop kernel build.
-- Iteration times per `plans/DEV-LOOP.md`: incremental kernel
-  cross-build ≈2 min, full ≈8 min, DTB only ≈30 s.
+- The dev-loop **build host is now the Cobalt 100 Azure ARM64 VM**
+  (`arm64-runner`, Tailscale `100.125.95.22`). Native aarch64, 32
+  cores, 125 GB RAM. Workspace at `/home/vyos/vyos-ls1046a-build/`,
+  staged kernel tree at `work/linux-${KERNEL_VERSION}/`. Both the
+  self-hosted GitHub Actions runner (`vm-runner-2`) for ISO builds
+  AND the fast dev-loop kernel build now run here — same VM, same
+  toolchain, no cross-compile penalty. Iteration script:
+  `bin/dev-build.sh kernel|dtb|extract|iso-live|push`.
+- The **artefact serving host** is **LXC 200** (`vyos-builder` LXC
+  inside the `heidi` Proxmox host at `192.168.1.15`, container LAN IP
+  `192.168.1.137`). It owns `/srv/tftp/` (tftpd-hpa on UDP/69) and the
+  HTTP server on port 8080 that the board's `dev_boot_live` U-Boot env
+  fetches the squashfs from. **LXC 200 is no longer a build host** —
+  it has been decommissioned to pure serving relay. `bin/dev-build.sh`
+  on Cobalt 100 rsyncs artefacts to `admin@192.168.1.137:/srv/tftp/`
+  via `--rsync-path="sudo rsync"` (admin has passwordless sudo).
+- Iteration times per `plans/DEV-LOOP.md`: native arm64 incremental
+  kernel build ≈30 s, full ≈2–3 min, DTB only ≈10 s.
 - All hosts are reachable over SSH via the `ssh` MCP server with
   six pre-configured connections:
   - `heidi` (192.168.1.15) — Proxmox host PVE 8.x running on the LAN
   - `lxc200` (192.168.1.137) — `vyos-builder` LXC on heidi; owns
-    `/srv/tftp/` and the cross-build tree (dev-loop build host)
+    `/srv/tftp/` and serves it over TFTP/HTTP (artefact host only)
   - `vyos` (192.168.1.190) — management address on eth0 (Mono Gateway)
   - `vyos-eth1` (192.168.1.185) — middle RJ45
   - `vyos-eth2` (192.168.1.189) — leftmost RJ45
@@ -117,7 +124,7 @@ advertised by a node in the LAN and accepted by this VM):
   (1710000/1720000/1730000.jr), FMan probed
   (`/sys/bus/platform/devices/1a00000.fman`), all five `dpaa_setup_tc`
   netdevs bound (`dpaa-ethernet.0` through `dpaa-ethernet.4`).
-- Boot-image cycle is **`ssh vyos reboot` → U-Boot → TFTP `run dev_boot`**
+- Boot-image cycle is **`ssh vyos sudo reboot` → U-Boot → TFTP `run dev_boot`**
   (which is wired into the SPI env to fetch vmlinuz/DTB/initrd from
   `192.168.1.137:/srv/tftp/` on LXC 200). One reboot ≈30–45 s wall-clock
   from `ssh reboot` to login prompt on the new kernel; the SSH

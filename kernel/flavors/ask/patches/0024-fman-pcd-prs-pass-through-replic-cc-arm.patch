@@ -1,0 +1,166 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -348,8 +348,58 @@ cc_encode_ad(const struct fman_pcd_action *action, void __iomem *ad)
+ break;
+ 
+-case FMAN_PCD_ACTION_REPLICATE:
+-/* PR14f-body integration territory. */
+-return -EOPNOTSUPP;
++case FMAN_PCD_ACTION_REPLICATE: {
++/*
++ * Replicator-AD encoding per RM 8.7.4.3 Table 8-119
++ * cross-ref SDK fm_cc.c FmPcdCcBuildReplicAdResult()
++ * / fm_replic.c source-TD chain semantics.  The match-
++ * table AD slot encodes a control-flow result whose
++ * NADEN bit redirects the silicon walker through the
++ * replicator's 16-B source-TD; the source-TD's active
++ * OPCODE (programmed in PR14f-body-2) then dispatches
++ * the frame to every member-AD slot in the NEXT chain,
++ * each carrying its own egress FQID:
++ *
++ *   fqid = 0                  (per-member FQIDs live in
++ *                              the member-AD slots; this
++ *                              AD field is unused once
++ *                              NADEN takes effect)
++ *   plcr = 0                  (no policer pass before
++ *                              replic)
++ *   nia  = RESULT_CF | NADEN  (walk next-AD chain via
++ *                              source-TD)
++ *   res  = source_td_off      (24-bit MURAM offset of
++ *                              the source-TD allocated
++ *                              by replic_group_create())
++ *
++ * The source-TD's active OPCODE = REPLIC was the
++ * single publication point in PR14f-body-2: until that
++ * write the silicon walker short-circuits on the
++ * all-zero opcode, so racing cc_encode_ad() against a
++ * partially-built group cannot fan a frame out before
++ * the member-AD chain is complete.
++ *
++ * Validation: non-NULL group handle, non-zero MURAM
++ * offset (0 sentinel from the accessor means
++ * uninitialised handle), 24-bit overflow check matches
++ * the MURAM-on-FMan-v3 hard limit (same bound used for
++ * hmtd_off in the MANIPULATE arm above; MURAM is
++ * < 16 MiB on LS1046A).
++ */
++unsigned long src_off;
++
++if (!action->replicate.group)
++return -EINVAL;
++src_off = fman_pcd_replic_group_source_td_off(
++action->replicate.group);
++if (src_off == 0)
++return -EINVAL;
++if (src_off > 0x00ffffffUL)
++return -EOVERFLOW;
++nia = FMAN_PCD_AD_NIA_TYPE_RESULT_CF |
++      FMAN_PCD_AD_NIA_NADEN;
++res = (u32)src_off;
++break;
++}
+ 
+ case FMAN_PCD_ACTION_MANIPULATE: {
+ /*
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+@@ -80,4 +80,18 @@ unsigned long fman_pcd_manip_hmtd_off(const struct fman_pcd_manip *manip);
+ u16 fman_pcd_plcr_profile_id_internal(
+ const struct fman_pcd_plcr_profile *prof);
+ 
++/* fman_pcd_replic_group_source_td_off:
++ *   Cross-TU accessor exposing struct fman_pcd_replic_group::source_td_off
++ *   to fman_pcd_cc.c, which needs it to encode the
++ *   FMAN_PCD_ACTION_REPLICATE arm in cc_encode_ad().  Same idiom as
++ *   fman_pcd_manip_hmtd_off() and fman_pcd_plcr_profile_id_internal()
++ *   above: the struct layout stays private to fman_pcd_replic.c so
++ *   PR14f-body adjustments do not ripple across the PR14 TU surface.
++ *   Returns 0 if @group is NULL (defensive; caller is expected to
++ *   validate).  The 24-bit MURAM-offset range is the caller's
++ *   responsibility to check.
++ */
++unsigned long fman_pcd_replic_group_source_td_off(
++const struct fman_pcd_replic_group *group);
++
+ #endif /* __FMAN_PCD_INTERNAL_H */
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_prs.c b/drivers/net/ethernet/freescale/fman/fman_pcd_prs.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_prs.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_prs.c
+@@ -46,15 +46,39 @@
+ /**
+  * fman_pcd_prs_init() - configure FMan parser for ASK2 v1.0.
+  *
+- * PR14f-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
+- * Returns -EOPNOTSUPP until PR14f-body lands.
++ * PR14f-body-3 real body.  v1.0 pass-through: the FMan parser's
++ * built-in Header eXamination Sequences (HXS) loaded by ucode
++ * 210.10.1 at FMan probe already cover every flow type ASK2 v1.0
++ * needs (IPv4, IPv6, TCP, UDP, ESP, VLAN per RM 8.7.2 default HXS
++ * table).  No HXS table writes are required - the silicon already
++ * parses these protocols and produces a 5-tuple parse result that
++ * the KG schemes (PR14b) hash into the FQID used by the CC trees
++ * (PR14c).
++ *
++ * v1.1 will replace this pass-through with HXS programming for
++ * the L7-tunnel cases (GRE, VXLAN, MPLS) per LS1046A RM 8.7.2
++ * (Header eXamination Sequence table format) and SDK fm_prs.c
++ * FmPcdPrsBuildHxs() (silicon-fact cross-reference only).
++ *
++ * Returns 0 on success.  The only failure mode at v1.0 is the
++ * caller passing a NULL @pcd handle.
+  */
+ int fman_pcd_prs_init(struct fman_pcd *pcd)
+ {
+ if (!pcd)
+ return -EINVAL;
+ 
+-return -EOPNOTSUPP;
++/* v1.0 pass-through: no register writes.  Stock HXSes loaded by
++ * FMan ucode 210.10.1 cover IPv4/IPv6/TCP/UDP/ESP/VLAN, which is
++ * the entire ASK2 v1.0 flow-type set per spec sec 13.6 (PR14f).
++ *
++ * The hook is kept as a non-trivial entry point (not just an
++ * inline 0-returning shim) so v1.1 can drop in GRE / VXLAN /
++ * MPLS HXS programming without an ABI change to ask.ko.  See
++ * specs/ask2-rewrite-spec.md sec 13.6 patch 0004 milestone
++ * gates.
++ */
++return 0;
+ }
+ 
+ EXPORT_SYMBOL_GPL(fman_pcd_prs_init);
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c b/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_replic.c
+@@ -399,3 +399,29 @@ void fman_pcd_replic_group_destroy(struct fman_pcd_replic_group *group)
+ kfree(group);
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_replic_group_destroy);
++
++/**
++ * fman_pcd_replic_group_source_td_off() - 24-bit MURAM offset accessor.
++ *
++ * Cross-TU accessor used by fman_pcd_cc.c::cc_encode_ad() to wire the
++ * FMAN_PCD_ACTION_REPLICATE arm in PR14f-body-3.  The CC AD record
++ * encodes nia = RESULT_CF | NADEN with res = source_td_off so that the
++ * silicon walker chains AD -> source-TD -> member-AD fan-out per LS1046A
++ * RM 8.7.4.3 + 8.7.7.  The struct fman_pcd_replic_group definition is
++ * intentionally private to this TU so PR14f-body-3+ refactors do not
++ * leak across the PR14 TU surface; see fman_pcd_internal.h for the
++ * matching idiom on cc_tree_group_table_off / manip_hmtd_off /
++ * plcr_profile_id_internal.
++ *
++ * Returns the source-TD MURAM byte offset.  NULL-safe: returns 0 so
++ * cc_encode_ad() can reject the action with -EINVAL via the standard
++ * "zero MURAM offset means uninitialised handle" sentinel.
++ */
++unsigned long fman_pcd_replic_group_source_td_off(
++const struct fman_pcd_replic_group *group)
++{
++if (!group)
++return 0;
++
++return group->source_td_off;
++}

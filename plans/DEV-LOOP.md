@@ -1,50 +1,66 @@
 # Dev-Test Loop: Fast Iteration for VyOS LS1046A
 
-> **Status:** ✅ WORKING (verified 2026-03-30)
-> **Goal:** Reduce dev-test cycle from ~60 to 90 min down to ~10 min (kernel) / ~2 min (DTB/config). Because waiting an hour to test a one-line config change is not engineering. It's penance.
+> **Status:** ✅ WORKING (Cobalt 100 build host, verified 2026-05-14)
+> **Goal:** Reduce dev-test cycle from ~60 to 90 min down to ~3 min (kernel) / ~30 s (DTB/config). Because waiting an hour to test a one-line config change is not engineering. It's penance.
 
 ## Network Topology
 
 ```
-LXC 200 "vyos-builder" (Ubuntu 22.04, 192.168.1.137, 12 cores, 16GB RAM, 80GB disk)
-  ├── VS Code Remote          ← edit + build here (we run directly on LXC 200)
-  ├── /srv/tftp/             → vmlinuz (27MB), mono-gw.dtb (92KB), initrd.img (32MB)
-  ├── /opt/vyos-dev/         → linux-6.6.y source, vyos-build, build-scripts
-  ├── aarch64-linux-gnu-gcc 12.2.0 (cross-toolchain)
-  └── tftpd-hpa on port 69
+Cobalt 100 Azure ARM64 VM "arm64-runner" (Debian 12, native aarch64, 32 cores, 125 GB RAM)
+  ├── /home/vyos/vyos-ls1046a-build/  ← this repo (build + edit here)
+  ├── work/linux-6.18.28/             ← staged kernel tree
+  ├── work/dev-tftp/                  ← local rsync staging area
+  ├── native arm64 gcc + ccache
+  ├── Azure NIC 10.0.0.4, Tailscale 100.125.95.22 (reaches LAN via subnet route)
+  └── bin/dev-build.sh kernel|dtb|extract|iso-live → rsync → LXC 200
 
-Mono Gateway (LS1046A, 4× Cortex-A72, 8GB DDR4)
+LXC 200 "vyos-builder" (Ubuntu 22.04, 192.168.1.137, on the LAN)
+  ├── /srv/tftp/             → vmlinuz, mono-gw.dtb, initrd.img, filesystem.squashfs
+  ├── tftpd-hpa on UDP/69    → serves vmlinuz/initrd/dtb to U-Boot
+  └── python http.server :8080 → serves filesystem.squashfs to live-boot fetch=
+     (NB: no toolchain, no kernel tree — pure serving relay)
+
+Mono Gateway (LS1046A, 4× Cortex-A72, 8 GB DDR4)
   ├── fm1-mac5 (rightmost RJ45) → U-Boot TFTP, static IP 192.168.1.200
-  ├── eMMC: mmcblk0p3 = VyOS root (image: 2026.03.22-0432-rolling)
-  └── U-Boot 2025.04: dev_boot → TFTP from LXC 200
+  ├── eth0 (left RJ45) MGMT 192.168.1.190 → SSH from the VM via Tailscale
+  ├── eMMC: mmcblk0p3 = VyOS root
+  └── U-Boot 2025.04: dev_boot → TFTP from 192.168.1.137 (LXC 200)
 ```
 
-All development happens directly on **LXC 200**. VS Code is connected directly to this container — no SSH needed.
-Serial console to the Mono Gateway is via PuTTY/minicom (115200 8N1) from any machine with USB access.
+All development happens on the **Cobalt 100 ARM64 VM**, edited locally (VS Code Remote-SSH or local CLI). Build artefacts are rsync'd to LXC 200 over Tailscale; the board only ever talks to LXC 200 on the LAN. LXC 200 has been decommissioned as a build host — it serves files and nothing else.
+
+Serial console to the Mono Gateway is via PuTTY/minicom (115200 8N1) from any machine with USB access, but most iteration cycles need only SSH to `vyos@192.168.1.190`.
 
 ## Verified Iteration Times
 
-| Change Type | Before (CI+USB) | After (local) | Method |
-|-------------|-----------------|---------------|--------|
-| Kernel config (`CONFIG_*`) | ~60 min | **~2 min** (incremental) | Cross-compile on LXC 200 → TFTP boot |
-| Full kernel rebuild | ~60 min | **~8 min** | From-scratch cross-compile |
-| DTS / DTB only | ~60 min | **~30 sec** | `dtc` compile → TFTP |
-| `config.boot.default` | ~60 min | **~2 min** | Edit on eMMC via SSH |
-| `vyos-1x` patch | ~60 min | **~25 min** | Docker binfmt build |
+| Change Type | Before (CI+USB) | LXC 200 cross-build | **Cobalt 100 native** | Method |
+|-------------|-----------------|---------------------|-----------------------|--------|
+| Kernel config (`CONFIG_*`) | ~60 min | ~2 min  | **~30 s** | Native build + rsync → TFTP |
+| Full kernel rebuild       | ~60 min | ~8 min  | **~2–3 min** | Native build + rsync → TFTP |
+| DTS / DTB only            | ~60 min | ~30 s   | **~10 s** | `bin/ci-compile-mono-dtb.sh` → rsync |
+| `config.boot.default`     | ~60 min | ~2 min  | **~2 min** | Edit + `add system image` |
+| `vyos-1x` patch           | ~60 min | ~25 min | use CI    | `gh workflow run` (faster than local) |
 
 ## Quick Start
 
-### 1. Provision LXC 200 (one-time)
+### 1. Prereqs on Cobalt 100 (already provisioned)
 
-On the Proxmox host, create and provision LXC 200. See `DEV-LOCAL.md` Step 1 for the full `pct create` + toolchain install commands.
+The Cobalt 100 VM ships with everything needed: `aarch64-linux-gnu-gcc`, native `gcc`, `make`, `ccache`, `dtc`, `xorriso`, `rsync`, `ssh`, `git`, `gh`, plus all VyOS-build apt deps. Workspace lives at `/home/vyos/vyos-ls1046a-build/`. `vyos-build/` is already checked out.
+
+First-time SSH check to LXC 200:
+
+```bash
+ssh -i ~/.ssh/admin_key admin@192.168.1.137 'echo ok'
+# admin@192.168.1.137 has passwordless sudo; rsync uses --rsync-path="sudo rsync"
+```
 
 ### 2. Seed TFTP with initrd from last good ISO (one-time)
 
 ```bash
-# On LXC 200:
-cd /opt/vyos-dev
-wget https://github.com/mihakralj/vyos-ls1046a-build/releases/latest/download/vyos-2026.03.22-0432-rolling-LS1046A-arm64.iso
-./build-local.sh extract *.iso
+# On Cobalt 100, in the repo root:
+bin/dev-build.sh iso-live                  # downloads newest GitHub release ISO,
+                                           # extracts kernel/initrd/dtb/squashfs,
+                                           # rsyncs to LXC 200:/srv/tftp/
 ```
 
 ### 3. Set up U-Boot dev_boot (one-time, from serial console)
@@ -76,16 +92,18 @@ saveenv
 ### 4. Dev iteration cycle (the fast path)
 
 ```bash
-# On LXC 200: edit code, then build kernel
-cd /opt/vyos-dev && ./build-local.sh kernel
+# On Cobalt 100, in the repo root:
+bin/dev-build.sh kernel    # stage + native build + rsync to LXC 200 TFTP
+# or:
+bin/dev-build.sh dtb       # DTB only (~10 s)
 ```
 
-```
-# From serial console (115200 8N1):
-# Power-cycle Mono Gateway or type 'reboot' in VyOS
-# Interrupt U-Boot → type:
-run dev_boot
-# Wait ~26s for first VyOS boot → kexec → ~82s for final login prompt
+```bash
+# Trigger a reboot over SSH (no serial console needed for routine cycles):
+ssh vyos sudo reboot
+# U-Boot SPI env is pre-set to `run dev_boot` at power-on, so the board
+# TFTPs the new vmlinuz/DTB/initrd from LXC 200 automatically.
+# ~30–45 s wall-clock to login prompt on the new kernel.
 ```
 
 ## TFTP Live Boot (no USB, no eMMC required)
@@ -95,18 +113,20 @@ run dev_boot
 
 `dev_boot` above mounts the squashfs from eMMC (`vyos-union=/boot/<IMAGE>`) — so it still depends on an `install image` having happened once, and you cannot test changes to the squashfs itself. `dev_boot_live` fixes that: kernel+initrd come via TFTP, the squashfs streams over HTTP into tmpfs at initrd time. Exactly the same boot path as USB live boot, but over the network.
 
-### 1. Deploy the live artifacts (on LXC 200)
+### 1. Deploy the live artifacts (from Cobalt 100)
 
 ```bash
-cd /root/vyos-ls1046a-build
-./bin/build-local.sh iso-live                # auto-downloads the newest GitHub release
+cd /home/vyos/vyos-ls1046a-build
+bin/dev-build.sh iso-live                          # auto-downloads the newest GitHub release
 # or pass an explicit ISO path to use a local build:
-./bin/build-local.sh iso-live /tmp/vyos-<version>-LS1046A-arm64.iso
+bin/dev-build.sh iso-live /tmp/vyos-<version>-LS1046A-arm64.iso
 ```
 
-With no argument, `iso-live` queries `gh release view --repo mihakralj/vyos-ls1046a-build` for the newest `*-LS1046A-arm64.iso` asset and downloads it to `/tmp/` (skipping if the same file is already there — matched by name). This guarantees you are testing the exact ISO that was just published to GitHub, without having to copy or rename anything.
+With no argument, `iso-live` queries `gh release view --repo mihakralj/vyos-ls1046a-build` for the newest `*-LS1046A-arm64.iso` asset and downloads it to `/tmp/` on the Cobalt VM (skipping if the same file is already there — matched by name). This guarantees you are testing the exact ISO that was just published to GitHub.
 
-It then extracts `live/filesystem.squashfs` (≈515 MB), `live/vmlinuz`, `live/initrd.img`, and `mono-gw.dtb` from the ISO into `/srv/tftp/`. A Python `http.server` on port 8080 (background process, already running) serves the squashfs over HTTP — `fetch=` does not support TFTP.
+It then extracts `live/filesystem.squashfs` (≈515 MB), `live/vmlinuz`, `live/initrd.img`, and `/mono-gw.dtb` from the ISO into `work/dev-tftp/` on the Cobalt VM, and rsyncs them to `admin@192.168.1.137:/srv/tftp/` over Tailscale (using `--rsync-path="sudo rsync"` because /srv/tftp is root-owned).
+
+LXC 200 runs a Python `http.server` on port 8080 in the background, serving `/srv/tftp/filesystem.squashfs` over HTTP — live-boot's `fetch=` does not support TFTP. That HTTP server stays put across migrations; only the artefact source changes.
 
 Verify:
 
@@ -132,7 +152,7 @@ setenv dev_boot_live 'tftp ${kernel_addr_r} vmlinuz; tftp ${fdt_addr_r} mono-gw.
 saveenv
 ```
 
-The three files pulled over TFTP (`vmlinuz`, `initrd.img`, `mono-gw.dtb`) and the squashfs pulled over HTTP are **the exact same bytes** that live on the ISO and on a `dd`'d USB stick — `build-local.sh iso-live` extracts them directly from `live/` inside the ISO without modification. No synthesis, no repackaging.
+The three files pulled over TFTP (`vmlinuz`, `initrd.img`, `mono-gw.dtb`) and the squashfs pulled over HTTP are **the exact same bytes** that live on the ISO and on a `dd`'d USB stick — `bin/dev-build.sh iso-live` extracts them directly from `live/` inside the ISO via `xorriso` without modification. No synthesis, no repackaging.
 
 > **Why HTTP not TFTP for the squashfs?** live-boot's `fetch=` supports only `http://`, `ftp://`, and `file:` — not TFTP. Also, TFTP is UDP block-by-block — 515 MB over 512-byte blocks would be painful. HTTP on GbE pulls the squashfs in ~5–10 s.
 >
@@ -159,8 +179,8 @@ Total: similar to USB live boot (~90 s including DPAA1 init), but every iteratio
 
 ```bash
 # After CI publishes a new release (watch it with `gh run watch`):
-./bin/build-local.sh iso-live
-# Power-cycle Mono Gateway, interrupt U-Boot:
+bin/dev-build.sh iso-live
+# Power-cycle the board (or `ssh vyos sudo reboot`), interrupt U-Boot:
 run dev_boot_live
 ```
 
@@ -185,7 +205,7 @@ No USB flashing, no `install image`, no `add system image`, no manually download
 ```
 U-Boot
   └── run dev_boot
-        ├── tftp 0xa0000000 vmlinuz      (TFTP kernel from LXC 200)
+        ├── tftp 0xa0000000 vmlinuz      (TFTP kernel from LXC 200 /srv/tftp/)
         ├── tftp ${fdt_addr_r} mono-gw.dtb  (TFTP DTB to 0x88000000)
         ├── tftp 0xb0000000 initrd.img   (TFTP initrd, loaded LAST for ${filesize})
         └── booti 0xa0000000 0xb0000000:${filesize} ${fdt_addr_r}
@@ -211,13 +231,17 @@ U-Boot
 
 ## Build Modes
 
-| Command | What it does | Time |
+All modes run on **Cobalt 100** and rsync the result to LXC 200:/srv/tftp/.
+
+| Command | What it does | Time (Cobalt 100 native) |
 |---------|-------------|------|
-| `build-local.sh kernel` | Cross-compile kernel + DTB → `/srv/tftp/` | ~2 min (incr) / ~8 min (full) |
-| `build-local.sh dtb` | Compile DTB only → `/srv/tftp/` | ~5 sec |
-| `build-local.sh extract [iso]` | Extract vmlinuz+initrd+DTB from ISO → TFTP | ~30 sec |
-| `build-local.sh vyos1x` | Rebuild vyos-1x .deb via Docker binfmt | ~20 min |
-| `build-local.sh iso` | Full ISO build (placeholder — use CI for now) | ~25 min |
+| `bin/dev-build.sh kernel` | Stage + build kernel Image + DTB → push to TFTP | ~30 s incr / ~2–3 min full |
+| `bin/dev-build.sh dtb` | Compile `board/dtb/mono-gw.dtb` only → push to TFTP | ~10 s |
+| `bin/dev-build.sh extract [iso]` | Extract vmlinuz+initrd+DTB from ISO → push to TFTP | ~10 s |
+| `bin/dev-build.sh iso-live [iso]` | Extract kernel+initrd+DTB+squashfs from ISO → push | ~20 s |
+| `bin/dev-build.sh push` | Re-rsync `work/dev-tftp/` to LXC 200 (no rebuild) | ~5 s |
+
+All modes accept `FLAVOR=default|ask|vpp` in the env. Full ISO builds remain on CI (`gh workflow run "VyOS LS1046A build (self-hosted)"`) — they only take ~7 min warm.
 
 ## Kernel Config: Key Lessons
 
@@ -228,7 +252,8 @@ VyOS kernel builds require merging **7 config fragments** from
 Without these fragments, SQUASHFS, OVERLAY_FS, FUSE_FS, and 200+ netfilter rules are missing.
 
 ```bash
-# build-local.sh does this automatically:
+# bin/dev-build.sh wires this automatically (via bin/ci-stage-kernel.sh +
+# kernel/common/scripts/stage-kernel.sh):
 cp vyos_defconfig .config
 cat *.config >> .config          # Append all fragments
 make olddefconfig                # Resolve conflicts
@@ -280,9 +305,9 @@ boot=live rootdelay=5 noautologin vyos-union=/boot/<IMAGE_NAME>
 
 | File | Purpose |
 |------|---------|
-| [`bin/build-local.sh`](../bin/build-local.sh) | Fast build: `kernel`, `dtb`, `extract`, `vyos1x`, `iso` modes |
+| [`bin/dev-build.sh`](../bin/dev-build.sh) | Cobalt 100 dev loop: `kernel`, `dtb`, `extract`, `iso-live`, `push` modes |
+| [`bin/local-build.sh`](../bin/local-build.sh) | Full ISO build orchestrator (mirrors CI) |
 | [`plans/DEV-LOOP.md`](DEV-LOOP.md) | This document |
-| [`DEV-LOCAL.md`](../DEV-LOCAL.md) | Full local dev setup guide |
 
 ## Constraints Preserved
 
