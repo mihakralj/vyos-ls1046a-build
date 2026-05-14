@@ -41,7 +41,8 @@ architecture source-of-truth. When the two disagree, **the spec wins**
 | 14a | M2.5a — `0004-fman-pcd-subsystem.patch` orchestration (`fman_pcd.c` + accessors in `fman.c`) | ask20 | landed (91e1d7a) |
 | 14b-prep | M2.5b-prep — KG public API stub (`fman_pcd_kg.c`) + `keygen_scheme_setup`/`keygen_bind_port_to_schemes` exports | ask20 | landed (fda5a03) |
 | 14b-body | M2.5b-body — KG real KGSE_* programming (IPv4 5-tuple) | ask20 | landed (00d6f16) |
-| 14c | M2.5c — Coarse Classifier match trees (`fman_pcd_cc.c`) — also unblocks `fman_pcd_kg_attach_cc()` | ask20 | not started |
+| 14c-prep | M2.5c-prep — CC public API stub (`fman_pcd_cc.c` with 6 -EOPNOTSUPP stubs) + `fman_pcd_action` tagged-union + extract/key-table types in `<linux/fsl/fman_pcd.h>` | ask20 | landed (c613714) |
+| 14c-body | M2.5c-body — CC real MURAM-resident tree-group-table programming (RM 8.7.4.1), classification-node record packing (RM 8.7.4.2), action-template encoding (RM 8.7.4.3), kunit, also replaces `fman_pcd_kg_attach_cc()` -EOPNOTSUPP stub | ask20 | not started |
 | 14d | M2.5d — Header manipulation (`fman_pcd_manip.c`) | ask20 | not started |
 | 14e | M2.5e — Policer profiles (`fman_pcd_plcr.c`) | ask20 | not started |
 | 14f | M2.5f — Parser + Replicator (`fman_pcd_prs.c`, `fman_pcd_replic.c`) | ask20 | not started |
@@ -858,49 +859,105 @@ helper rather than re-implementing KGSE_* register writes.
 
 ---
 
-### PR14c — Coarse Classifier match trees (`fman_pcd_cc.c`)
+### PR14c — Coarse Classifier match trees (`fman_pcd_cc.c`) — **split into two parts**
 
 Per spec §13.3 (`fman_pcd_cc.c` section). Largest single PR in the
-PR14 series.
+PR14 series. Split into prep+body using the same two-step landing
+pattern that worked for PR14b.
+
+#### PR14c-prep — CC public API stub — **landed (c613714)**
+
+Captured as `kernel/flavors/ask/patches/0007-fman-pcd-cc-prep.patch`
+(386 LOC: +157 in new `.c`, +281 in header, +1 Makefile, +1 wiring).
+Kernel-side commit `965b9d9f4` on `/var/tmp/pr14a/linux-6.18.28`.
 
 **Files added/changed:**
 
-- `drivers/net/ethernet/freescale/fman/fman_pcd_cc.c` (new, ~2500 LOC):
+- `drivers/net/ethernet/freescale/fman/fman_pcd_cc.c` (new, ~157 LOC) —
+  six `-EOPNOTSUPP` / `ERR_PTR(-EOPNOTSUPP)` stubs with clean-room
+  provenance comment citing RM §8.7.4.1–8.7.4.3. Every stub validates
+  inputs (NULL, `num_of_groups 1..8`, `extract->size 1..56`) before
+  returning the sentinel. NULL-safe destroy paths.
+- `include/linux/fsl/fman_pcd.h` (+281 LOC public ABI):
+  - `enum fman_pcd_action_type` — 6 variants (`DROP`, `FORWARD_FQ`,
+    `FORWARD_CAAM`, `REPLICATE`, `MANIPULATE`, `NEXT_CC_NODE`) — single
+    discriminator replacing the SDK's 16 separate
+    `t_FmPcdCcNextEngineParams` flavors per spec §13.3.
+  - `struct fman_pcd_action` — tagged union carrying per-variant payload.
+  - `enum fman_pcd_cc_extract_type` (KEY / HDR / NONHDR per RM 8.7.4.2).
+  - `struct fman_pcd_cc_extract`, `struct fman_pcd_cc_key_entry`
+    (56-byte key+mask + action — silicon hard limit per RM §8.7.4.2),
+    `struct fman_pcd_cc_key_table`.
+  - 6 function prototypes: `cc_tree_create`, `cc_node_create`,
+    `cc_node_add_key`, `cc_node_modify_next_action`, `cc_node_destroy`,
+    `cc_tree_destroy`.
+- `drivers/net/ethernet/freescale/fman/Makefile`: `fman_pcd_cc.o` added
+  to `fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD)`.
+
+**Key insight:** PR14a already provisioned `cc_trees` list and
+`fman_pcd_get_cc_list()` accessor in `fman_pcd.c` — no orchestration
+changes needed in PR14c-prep, only the new `.c` + header + one
+Makefile line. Same delegation pattern that dropped PR14b-body to
+330 LOC.
+
+**Validation evidence (PR14c-prep):**
+
+- Native ARM64 build on Cobalt 100 (`make ARCH=arm64 -j32 Image
+  modules`): success, **zero warnings, zero errors** across the entire
+  build. All 6 `fman_pcd_cc_*` symbols present in `System.map` as `T`
+  with matching `__ksymtab_*` entries.
+- Round-trip `git apply --3way --check` clean on fresh
+  linux-6.18.28 worktree at `6e7e2c37a` (PR14b-body tip).
+- `patch-health.sh --flavor ask --source release`: **Pass 5 / Fail 11**
+  (improved by 1 over PR14b-body's 4/11).
+- `bin/ci-setup-kernel.sh` extended: glob `0001-0007`, rename case adds
+  `0007-→1007-`, count guard 6→7, apply-order doc updated.
+
+#### PR14c-body — Real silicon-resident tree/node programming
+
+Replaces the 6 stubs from PR14c-prep with the real implementation.
+
+**Files added/changed (in-tree):**
+
+- `drivers/net/ethernet/freescale/fman/fman_pcd_cc.c` (extend from
+  ~157 LOC stub to ~2500 LOC) — real implementation:
   - `struct fman_pcd_cc_tree` — root of a match-tree, owns the
     MURAM-resident tree-group table (RM §8.7.4.1).
   - `struct fman_pcd_cc_node` — a single classification node within
     a tree; carries the extract spec, the key table, the per-key
     action array.
-  - `struct fman_pcd_action` — the tagged-union discriminator per
-    spec §13.3 carrying `ACTION_DROP`, `ACTION_FORWARD_FQ`,
-    `ACTION_FORWARD_CAAM`, `ACTION_REPLICATE`, `ACTION_MANIPULATE`,
-    `ACTION_NEXT_CC_NODE`.
-  - `fman_pcd_cc_tree_create/destroy()` — tree lifecycle.
-  - `fman_pcd_cc_node_create(tree, extract, keys)` — installs a
-    classification node into the tree per RM §8.7.4.2.
-  - `fman_pcd_cc_node_add_key(node, entry, action)` — append a key →
-    action pair to an existing node (the per-flow insert path).
-  - `fman_pcd_cc_node_modify_next_action(node, key_index, action)`.
-  - `fman_pcd_cc_node_destroy()`.
-  - All EXPORT_SYMBOL_GPL.
-- `include/linux/fsl/fman_pcd.h`: add the CC public API + the
-  `fman_pcd_action` tagged-union enum.
+  - MURAM-resident tree-group-table programming byte-perfect against
+    RM §8.7.4.1 figure.
+  - Classification-node record packing per RM §8.7.4.2.
+  - Key-table ordering rules per RM §8.7.4.2.
+  - Action-template encoding per RM §8.7.4.3 for each
+    `enum fman_pcd_action_type` variant.
+- `drivers/net/ethernet/freescale/fman/fman_pcd_kg.c` (extend):
+  - Replace `fman_pcd_kg_attach_cc()` `-EOPNOTSUPP` stub with real
+    `KGSE_CCBS` register programming now that
+    `struct fman_pcd_cc_tree` is concrete.
 
-**kunit suite:** `fman_pcd_cc_test.c` covers tree-group MURAM layout
-byte-perfect against RM §8.7.4.1 figure, node-record packing, key-table
-ordering, action-template encoding for each action type.
+**kunit suite:** `drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c`
+covers tree-group MURAM layout byte-perfect against RM §8.7.4.1 figure,
+node-record packing, key-table ordering, action-template encoding for
+each action type.
 
 **Acceptance:**
 
 - kunit suite passes.
-- On real Mono Gateway DK: extend the PR14b debugfs hook to wire the
-  KG scheme → a one-node CC tree with one key (the original IPv4
-  5-tuple) → `ACTION_FORWARD_FQ` to a different FQID than the KG
-  default. Send the test packet; verify it arrives at the new FQ, not
-  the KG default. This proves the CC walk happens in silicon.
-- `patch-health.sh` green on `0004-*`.
+- On real Mono Gateway DK: install KG scheme (PR14b path) →
+  one-node CC tree with one key (the original IPv4 5-tuple) →
+  `ACTION_FORWARD_FQ` to a different FQID than the KG default. Send
+  the test packet; verify it arrives at the new FQ, not the KG default.
+  This proves the CC walk happens in silicon.
+- `patch-health.sh --flavor ask --source release`: target Pass 6 /
+  Fail 11.
+- Native ARM64 build: zero warnings, zero errors.
+- Round-trip `git apply --3way --check` clean against PR14c-prep tip
+  (`965b9d9f4`).
 
-LOC budget: ~2550 (2500 fman_pcd_cc.c + ~50 header additions).
+LOC budget: ~2500 LOC `.c` growth + ~30 LOC in `fman_pcd_kg.c`
+(`attach_cc` body).
 
 ---
 
