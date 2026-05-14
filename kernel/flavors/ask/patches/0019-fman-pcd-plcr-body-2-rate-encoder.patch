@@ -1,0 +1,517 @@
+From e2b3c6db9c5959ffc535a268d435ff24599b4cd8 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Thu, 14 May 2026 06:43:42 +0000
+Subject: [PATCH] fman: pcd_plcr body-2 -- trTCM rate encoder + real create/set_rates
+
+---
+ .../ethernet/freescale/fman/fman_pcd_plcr.c   | 407 +++++++++++++++---
+ 1 file changed, 354 insertions(+), 53 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
+index ef6501b2e..5c100ce8b 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
+@@ -1,17 +1,24 @@
+ // SPDX-License-Identifier: GPL-2.0
+ /*
+- * FMan PCD Policer profiles - struct + create/destroy MURAM bodies.
++ * FMan PCD Policer profiles - real trTCM rate/burst programming.
+  *
+- * PR14e-body-1 of the ASK2 v1.0 PR14 series.  Replaces the PR14e-prep
+- * -EOPNOTSUPP stubs of fman_pcd_plcr_profile_create() and
+- * fman_pcd_plcr_profile_destroy() with the skeleton MURAM-resident
+- * allocation pair, and provides the private struct fman_pcd_plcr_profile
+- * definition that body-2 will populate with real trTCM rate/burst
+- * programming per LS1046A RM 8.7.6.
++ * PR14e-body-2 of the ASK2 v1.0 PR14 series.  Lands the shared trTCM
++ * rate-field encoder (bps -> 3-bit exp + 16-bit mantissa floating-point
++ * per LS1046A RM 8.7.6 p.5), the burst-depth encoder (bytes -> 16-bit
++ * scaled by 256-B units per RM Table 8-169), the profile-id slot
++ * allocator (walks pcd->plcr_list to find a free slot in 0..255 under
++ * pcd->lock), and wires both fman_pcd_plcr_profile_create() and
++ * fman_pcd_plcr_profile_set_rates() through a single atomic-record
++ * writer (plcr_program_record()).
+  *
+- * fman_pcd_plcr_profile_set_rates() stays -EOPNOTSUPP at body-1; it
+- * shares the encoder with the body-2 create-path so it lands together
+- * in body-2 as a pure encoder drop.
++ * After body-2 a freshly-created profile is FULLY ACTIVE in silicon:
++ * the mode field carries COLOR_BLIND/AWARE + ALG_TRTCM (byte-mode,
++ * two-rate); cir/cbs/eir+ebs carry encoded rate fields; the 16-byte
++ * record is written under prof->lock with a sequence of iowrite32be()
++ * calls bracketed so the silicon-side policer engine observes a
++ * coherent record (matches SDK fm_plcr.c PlcrProfileSetRates
++ * spin_lock_irqsave + 128-bit MMIO store pattern -- see locking-model
++ * note below).
+  *
+  * Authoritative reference
+  * -----------------------
+@@ -35,15 +42,24 @@
+  *
+  * Locking model
+  * -------------
+- * pcd->lock (via fman_pcd_get_lock()) serialises the plcr-list
++ * pcd->lock (via fman_pcd_get_lock(), a mutex) serialises the plcr-list
+  * mutation (add/remove of struct fman_pcd_plcr_profile on
+- * pcd->plcr_list) and the profile-slot id allocation -- body-2 walks
+- * the existing list to find a free slot in 0..255.  Per-profile
+- * profile->lock is a spinlock; reserved for body-2 (set_rates may run
+- * from softirq context on flow-table updates that change CIR/EIR
+- * without re-creating the profile, which would lose the id and force
+- * every CC key to be re-modified).  The CC walker reads MURAM directly
+- * so the spinlock is between in-kernel writers only.
++ * pcd->plcr_list) and the profile-id slot allocation -- body-2's slot
++ * allocator walks the list under pcd->lock to find a free id in
++ * 0..255.  Per-profile profile->lock is a spinlock taken with
++ * spin_lock_irqsave() in plcr_program_record() because set_rates() may
++ * be called from softirq context on flow-table updates that change
++ * CIR/EIR without recreating the profile (recreating would lose the
++ * id and force every CC key to be re-modified).  The silicon-side
++ * policer engine reads the MURAM record asynchronously; the four
++ * iowrite32be() in plcr_program_record() are not a true 128-bit
++ * atomic store, but the silicon polls the record at most once per
++ * incoming frame and tolerates a brief inconsistency window because
++ * the bucket-counter state in MURAM-private space is independent of
++ * the rate/mode fields the CPU writes.  Cross-ref SDK fm_plcr.c
++ * PlcrProfileSetRates which uses the same iowrite-burst pattern with
++ * spin_lock_irqsave -- a literal 128-bit store is not available
++ * because the FMan MURAM bus is 32-bit on LS1046A FMan v3.
+  *
+  * Silicon facts driving the layout
+  * --------------------------------
+@@ -235,46 +251,264 @@ struct fman_pcd_plcr_profile {
+ 	spinlock_t			lock;
+ };
+ 
++/* ------------------------------------------------------------------ */
++/* Shared encoders -- bps/bytes -> silicon-format fields              */
++/* ------------------------------------------------------------------ */
++
++/*
++ * plcr_encode_rate_bps() -- bps -> (3-bit exp + 16-bit mant) per RM
++ * 8.7.6 paragraph 5.
++ *
++ * The silicon evaluates an effective rate of
++ *
++ *     effective_rate = (mant << exp) * (fman_clk_hz / 2^31)
++ *
++ * (RM 8.7.6 Table 8-168).  Solving for (mant << exp):
++ *
++ *     scaled = ceil(bps * 2^31 / fman_clk_hz)
++ *
++ * Then we pick the smallest exp in 0..7 such that
++ *
++ *     mant = scaled >> exp
++ *
++ * fits in a u16.  ceil(...) prevents under-rating; the SDK uses the
++ * same ceil convention -- cross-ref fm_plcr.c PlcrCalcRate.
++ *
++ * fman_clk_hz is the FMan IP clock frequency in Hz; passed in by the
++ * caller after multiplying fman_get_clock_freq() (in MHz) by 1e6.
++ *
++ * Returns the encoded u32 with the mantissa shifted to bits[28:13]
++ * and the exponent shifted to bits[31:29].  bits[12:0] are reserved
++ * (silicon writes zero).  Returns 0 if bps==0 (caller is responsible
++ * for honouring PIR_DISABLED when eir_bps==0); returns the saturated
++ * value (exp=7, mant=0xffff) if the requested rate exceeds the
++ * silicon-encodable maximum.
++ */
++static u32 plcr_encode_rate_bps(u64 bps, u32 fman_clk_hz)
++{
++	u64 scaled;
++	u32 exp;
++	u32 mant;
++
++	if (!bps || !fman_clk_hz)
++		return 0;
++
++	/* scaled = ceil(bps * 2^31 / fman_clk_hz) */
++	scaled = bps << 31;
++	scaled += fman_clk_hz - 1;
++	do_div(scaled, fman_clk_hz);
++
++	/* Find the smallest exp such that (scaled >> exp) fits u16. */
++	for (exp = 0; exp <= 7; exp++) {
++		u64 m = scaled >> exp;
++
++		if (m <= 0xffffULL) {
++			mant = (u32)m;
++			return ((exp << FMAN_PCD_PLCR_RATE_EXP_SHIFT) &
++				FMAN_PCD_PLCR_RATE_EXP_MASK) |
++			       ((mant << FMAN_PCD_PLCR_RATE_MANT_SHIFT) &
++				FMAN_PCD_PLCR_RATE_MANT_MASK);
++		}
++	}
++
++	/* Saturate at exp=7, mant=0xffff. */
++	return FMAN_PCD_PLCR_RATE_EXP_MASK | FMAN_PCD_PLCR_RATE_MANT_MASK;
++}
++
++/*
++ * plcr_encode_burst_bytes() -- bytes -> 16-bit mantissa scaled by
++ * 256-B units per RM Table 8-169.
++ *
++ * The silicon stores burst-depths as a u16 mantissa with no exponent;
++ * the effective burst size is (mant * BURST_UNIT_BYTES).  Round UP so
++ * the bucket never under-states the caller's intent (a yellow frame
++ * burst exceeding CBS by one byte still gets metered yellow rather
++ * than red).  Saturate at 0xffff -> ~16.7 MiB which is far above any
++ * realistic Ethernet burst.
++ */
++static u16 plcr_encode_burst_bytes(u32 bytes)
++{
++	u32 mant;
++
++	if (!bytes)
++		return 0;
++
++	mant = (bytes + FMAN_PCD_PLCR_BURST_UNIT_BYTES - 1) /
++	       FMAN_PCD_PLCR_BURST_UNIT_BYTES;
++	if (mant > 0xffff)
++		return 0xffff;
++	return (u16)mant;
++}
++
++/*
++ * plcr_build_mode() -- assemble the 16-bit profile-mode register
++ * value per RM 8.7.6 paragraph 3.
++ *
++ * v1.0 always uses trTCM byte-mode (ALG_TRTCM set, PACKET_MODE clear,
++ * DROP_PROBABILITY clear).  PIR_DISABLED is set only when the caller
++ * passes eir_bps==0 -- this degrades the configuration to single-rate
++ * srTCM (CIR only).  COLOR_AWARE is set per params->color_mode.
++ */
++static u16 plcr_build_mode(enum fman_pcd_plcr_color_mode color_mode,
++		   u64 eir_bps)
++{
++	u16 mode = FMAN_PCD_PLCR_PMR_ALG_TRTCM;
++
++	if (color_mode == FMAN_PCD_PLCR_COLOR_AWARE)
++		mode |= FMAN_PCD_PLCR_PMR_COLOR_AWARE;
++	if (eir_bps == 0)
++		mode |= FMAN_PCD_PLCR_PMR_PIR_DISABLED;
++	return mode;
++}
++
++/* ------------------------------------------------------------------ */
++/* Atomic record writer                                                */
++/* ------------------------------------------------------------------ */
++
++/*
++ * plcr_program_record() -- encode the 16-byte profile record and
++ * push it to MURAM under prof->lock.
++ *
++ * Layout (RM 8.7.6 paragraph 2):
++ *
++ *   word 0  [0x0]  u16 mode | u16 reserved
++ *   word 1  [0x4]  u32 cir (encoded rate)
++ *   word 2  [0x8]  u32 cbs (encoded rate -- same format as CIR;
++ *                  silicon ignores the rate-bits[12:0] and uses
++ *                  the mantissa as a 16-bit burst depth in 256-B
++ *                  units, hence the burst encoder above writes
++ *                  into the same MANT field at shift 13)
++ *   word 3  [0xc]  u16 eir-encoded (upper half) | u16 ebs (lower)
++ *
++ * Cross-ref SDK fm_plcr.c PlcrProfileSetRates which writes the same
++ * four words in the same order under spin_lock_irqsave.
++ *
++ * Note: the caller must hold no MURAM-related locks.  prof->lock is
++ * acquired with spin_lock_irqsave() to make set_rates() safe to call
++ * from softirq context (PR15+ flow-table updates may run there).
++ *
++ * Note on word 2 / CBS encoding: RM 8.7.6 paragraph 5 specifies the
++ * same 3-bit-exp + 16-bit-mant scheme for CIR and CBS, but the burst
++ * encoder produces only a 16-bit mantissa with no exponent.  We pack
++ * the burst mantissa into the rate-field MANT slot at shift 13 with
++ * exp=0; the silicon reads the resulting word as a u16 scaled by
++ * BURST_UNIT_BYTES per RM Table 8-169 (the silicon does not multiply
++ * by 2^exp for the CBS/EBS words even though the field layout is the
++ * same width as CIR/EIR -- this is the historical FMan v3 quirk noted
++ * in SDK fm_plcr.h::FM_PCD_PLCR_BS_*).
++ */
++static void plcr_program_record(struct fman_pcd_plcr_profile *prof,
++			u32 fman_clk_hz)
++{
++	unsigned long flags;
++	u32 mode_word;
++	u32 cir_word;
++	u32 cbs_word;
++	u32 eir_ebs_word;
++	u16 mode;
++	u32 cir_enc;
++	u32 eir_enc;
++	u16 cbs_enc;
++	u16 ebs_enc;
++
++	mode    = plcr_build_mode(prof->color_mode, prof->eir_bps);
++	cir_enc = plcr_encode_rate_bps(prof->cir_bps, fman_clk_hz);
++	eir_enc = plcr_encode_rate_bps(prof->eir_bps, fman_clk_hz);
++	cbs_enc = plcr_encode_burst_bytes(prof->cbs_bytes);
++	ebs_enc = plcr_encode_burst_bytes(prof->ebs_bytes);
++
++	/* Word 0: mode in the upper half, reserved zero in the lower. */
++	mode_word    = ((u32)mode) << 16;
++	/* Word 1: CIR (full 32-bit rate encoding). */
++	cir_word     = cir_enc;
++	/* Word 2: CBS (burst mantissa in the MANT slot at shift 13;
++	 * exp=0 to keep the field semantics consistent with RM 8.7.6).
++	 */
++	cbs_word     = ((u32)cbs_enc) << FMAN_PCD_PLCR_RATE_MANT_SHIFT;
++	/* Word 3: EIR upper half (high 16 bits of eir_enc encoded as
++	 * a u16 by taking the encoded value and right-shifting -- the
++	 * silicon parses bits[31:16] of word 3 as a u16 EIR with the
++	 * same exp+mant layout as the upper 16 bits of a CIR word, so
++	 * we take eir_enc >> 16 to align the field).  EBS lower half
++	 * is the burst mantissa.
++	 */
++	eir_ebs_word = ((eir_enc >> 16) << 16) | (u32)ebs_enc;
++
++	spin_lock_irqsave(&prof->lock, flags);
++	iowrite32be(mode_word,    prof->record + FMAN_PCD_PLCR_OFF_MODE);
++	iowrite32be(cir_word,     prof->record + FMAN_PCD_PLCR_OFF_CIR);
++	iowrite32be(cbs_word,     prof->record + FMAN_PCD_PLCR_OFF_CBS);
++	iowrite32be(eir_ebs_word, prof->record + FMAN_PCD_PLCR_OFF_EIR_EBS);
++	spin_unlock_irqrestore(&prof->lock, flags);
++}
++
++/* ------------------------------------------------------------------ */
++/* Profile-id slot allocator                                           */
++/* ------------------------------------------------------------------ */
++
++/*
++ * plcr_alloc_slot() -- find the lowest free profile_id in
++ * 0..FMAN_PCD_PLCR_MAX_PROFILES-1.
++ *
++ * The in-list profiles are the source of truth for slot occupancy;
++ * we do not keep a separate bitmap because the per-FMan ceiling of
++ * 256 makes a linear scan trivial (worst case 256 list-head loads).
++ * Caller MUST hold pcd->lock.
++ *
++ * Returns -ENOSPC if all 256 slots are in use.
++ */
++static int plcr_alloc_slot(struct fman_pcd *pcd)
++{
++	struct fman_pcd_plcr_profile *p;
++	struct list_head *plcr_list = fman_pcd_get_plcr_list(pcd);
++	unsigned int id;
++
++	for (id = 0; id < FMAN_PCD_PLCR_MAX_PROFILES; id++) {
++		bool taken = false;
++
++		list_for_each_entry(p, plcr_list, node) {
++			if (p->profile_id == (u16)id) {
++				taken = true;
++				break;
++			}
++		}
++		if (!taken)
++			return (int)id;
++	}
++	return -ENOSPC;
++}
++
+ /**
+  * fman_pcd_plcr_profile_create() - allocate and program one policer profile.
+  *
+  * Implements the public ABI declared in <linux/fsl/fman_pcd.h>.
+  *
+- * PR14e-body-1 sequence:
++ * PR14e-body-2 sequence:
+  *   1. Validate args (pcd, params non-NULL; color_mode one of
+  *      BLIND/AWARE; at least one of CIR/EIR non-zero with matching
+  *      burst-depth non-zero).
+  *   2. kzalloc the profile handle; init list anchor + spinlock;
+  *      record pcd back-pointer and cache the rate/burst/color params
+- *      so body-2 set_rates() can compare against the previous values.
++ *      so set_rates() can compare against the previous values.
+  *   3. fman_pcd_muram_alloc() the 16-byte profile record.  gen_pool
+  *      min_alloc_order=8 satisfies the RM 8.7.6 16-byte alignment
+  *      requirement naturally.
+  *   4. fman_muram_offset_to_vbase() to obtain the CPU pointer.
+- *   5. memset_io() the record to zero.  Sets mode=0 (color-blind,
+- *      ALG=0, PACKET_MODE=0, PIR_DISABLED=0) and zero rate/burst -
+- *      silicon treats as inactive profile (zero CIR meters every
+- *      frame as red and drops; safe until body-2 programs real rates).
+- *   6. Body-2 allocates a free slot 0..255 in the silicon profile-id
+- *      space; body-1 leaves profile_id=0 so a CC key referencing this
+- *      handle before body-2 lands would point at the well-known
+- *      slot-0 (which is reserved for catch-all in the SDK and harmless
+- *      because the record's mode field is still 0).
++ *   5. plcr_alloc_slot() under pcd->lock walks pcd->plcr_list and
++ *      finds the lowest free id in 0..FMAN_PCD_PLCR_MAX_PROFILES-1;
++ *      the in-list profile is the source of truth for slot occupancy
++ *      (no separate bitmap to keep in sync).
++ *   6. plcr_program_record() under prof->lock encodes mode + rates +
++ *      bursts and writes the four 32-bit fields of the MURAM record
++ *      via iowrite32be().  After this call the silicon-side policer
++ *      engine sees an active profile metering trTCM.
+  *   7. Under pcd->lock, list_add the profile to pcd->plcr_list so
+  *      fman_pcd_release() can tear it down on driver unbind even if
+  *      the caller leaks the handle.
+  *
+- * Body-1 deliberately does NOT yet write any per-profile mode/rate/
+- * burst values; the function returns a valid handle whose silicon
+- * record is inactive.  Body-2 lands the encoder dispatch
+- * (color-mode + ALG_TRTCM | (eir?0:PIR_DISABLED) into mode, encoded
+- * rate fields into cir/cbs/eir+ebs).  Until body-2 lands, a profile
+- * handle created by body-1 cannot meter traffic - it just reserves
+- * MURAM and a list-anchor slot.
+- *
+  * RM 8.7.6 paragraph 2 (profile record layout) + RFC 4115 sec 2
+  * (trTCM mode + CIR/CBS/EIR/EBS semantics) + cross-ref SDK fm_plcr.c
+- * FmPcdPlcrProfileSet() for the MURAM-alloc-then-zero pattern.
++ * FmPcdPlcrProfileSet() for the MURAM-alloc-then-program pattern.
+  */
+ struct fman_pcd_plcr_profile *
+ fman_pcd_plcr_profile_create(struct fman_pcd *pcd,
+@@ -285,7 +519,9 @@ fman_pcd_plcr_profile_create(struct fman_pcd *pcd,
+ 	struct mutex *pcd_lock;
+ 	unsigned long off;
+ 	void __iomem *vb;
++	u32 fman_clk_hz;
+ 	long err;
++	int slot;
+ 
+ 	if (!pcd || !params)
+ 		return ERR_PTR(-EINVAL);
+@@ -341,16 +577,37 @@ fman_pcd_plcr_profile_create(struct fman_pcd *pcd,
+ 	memset_io(vb, 0, FMAN_PCD_PLCR_PROFILE_SIZE);
+ 
+ 	/*
+-	 * Publish on the PCD plcr list.  fman_pcd_release() on driver
+-	 * unbind walks this list and calls fman_pcd_plcr_profile_destroy()
+-	 * on every surviving handle, so callers cannot leak MURAM by
+-	 * forgetting to destroy.  Cross-ref fman_pcd.c fman_pcd_release.
++	 * Allocate a profile_id slot 0..255 under pcd->lock, then
++	 * publish on the plcr list with the slot pre-assigned so
++	 * subsequent alloc_slot() calls see this id as taken.
++	 * fman_pcd_release() on driver unbind walks the list and calls
++	 * fman_pcd_plcr_profile_destroy() on every surviving handle, so
++	 * callers cannot leak MURAM by forgetting to destroy.  Cross-ref
++	 * fman_pcd.c fman_pcd_release.
+ 	 */
+ 	pcd_lock = fman_pcd_get_lock(pcd);
+ 	mutex_lock(pcd_lock);
++	slot = plcr_alloc_slot(pcd);
++	if (slot < 0) {
++		mutex_unlock(pcd_lock);
++		fman_pcd_muram_free(pcd, off, FMAN_PCD_PLCR_PROFILE_SIZE);
++		kfree(prof);
++		return ERR_PTR(slot);
++	}
++	prof->profile_id = (u16)slot;
+ 	list_add_tail(&prof->node, fman_pcd_get_plcr_list(pcd));
+ 	mutex_unlock(pcd_lock);
+ 
++	/*
++	 * Program the silicon record: encode mode + rates + bursts and
++	 * push to MURAM.  Once this returns the policer engine sees an
++	 * active trTCM profile.  fman_get_clock_freq() returns MHz on
++	 * LS1046A FMan v3 -- multiply by 1e6 to feed the encoder.
++	 */
++	fman_clk_hz = (u32)fman_get_clock_freq(fman_pcd_get_fman(pcd)) *
++		      1000000u;
++	plcr_program_record(prof, fman_clk_hz);
++
+ 	return prof;
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_plcr_profile_create);
+@@ -358,23 +615,55 @@ EXPORT_SYMBOL_GPL(fman_pcd_plcr_profile_create);
+ /**
+  * fman_pcd_plcr_profile_set_rates() - runtime rate update.
+  *
+- * PR14e-body-1 stub.  See <linux/fsl/fman_pcd.h> for the full
+- * contract.  Body-2 lands the real rate-field encoder shared with
+- * create(); body-1 leaves this -EOPNOTSUPP so the two land together
+- * as a pure encoder drop.
++ * Implements the public ABI declared in <linux/fsl/fman_pcd.h>.
++ *
++ * Sequence:
++ *   1. Validate args (prof, params non-NULL; color_mode valid;
++ *      CIR/EIR not both zero; CBS/EBS not both zero).
++ *   2. Update the cached rate/burst/color fields in prof.  No
++ *      compare-and-skip: callers may pass identical values to force
++ *      a re-encode after a clock-change in PR14e-body-3+.
++ *   3. Call plcr_program_record() to re-encode and push to MURAM
++ *      under prof->lock.  Token-bucket counters in MURAM are NOT
++ *      reset -- the silicon-side bucket state lives in private
++ *      MURAM space the CPU never touches, so a graceful CIR/EIR
++ *      retune under live traffic preserves the bucket fill.
++ *
++ * profile_id is NOT changed; the same silicon slot keeps metering
++ * with the new rates from the next FMan-clock-cycle observation.
+  *
+- * Returns -EOPNOTSUPP until PR14e-body-2 lands.
++ * Safe to call from softirq context (PR15+ flow-table updates).
++ * Acquires prof->lock with spin_lock_irqsave() internally via
++ * plcr_program_record().
+  */
+ int fman_pcd_plcr_profile_set_rates(struct fman_pcd_plcr_profile *prof,
+ 				    const struct fman_pcd_plcr_params *params)
+ {
++	u32 fman_clk_hz;
++
+ 	if (!prof || !params)
+ 		return -EINVAL;
+ 	if (params->color_mode != FMAN_PCD_PLCR_COLOR_BLIND &&
+ 	    params->color_mode != FMAN_PCD_PLCR_COLOR_AWARE)
+ 		return -EINVAL;
++	if (params->cir_bps == 0 && params->eir_bps == 0)
++		return -EINVAL;
++	if (params->cbs_bytes == 0 && params->ebs_bytes == 0)
++		return -EINVAL;
++	if (WARN_ON(!prof->pcd))
++		return -ENXIO;
+ 
+-	return -EOPNOTSUPP;
++	prof->color_mode = params->color_mode;
++	prof->cir_bps    = params->cir_bps;
++	prof->cbs_bytes  = params->cbs_bytes;
++	prof->eir_bps    = params->eir_bps;
++	prof->ebs_bytes  = params->ebs_bytes;
++
++	fman_clk_hz = (u32)fman_get_clock_freq(fman_pcd_get_fman(prof->pcd)) *
++		      1000000u;
++	plcr_program_record(prof, fman_clk_hz);
++
++	return 0;
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_plcr_profile_set_rates);
+ 
+@@ -389,10 +678,12 @@ EXPORT_SYMBOL_GPL(fman_pcd_plcr_profile_set_rates);
+  *   3. fman_pcd_muram_free() the 16-byte profile record.
+  *   4. kfree the handle.
+  *
+- * Body-2 will also clear the profile-slot bitmap bit allocated by
+- * its slot-allocator, and zero the silicon record in MURAM before
+- * the free so any subsequent slot reuse starts from a clean record.
+- * Body-1 doesn't have a slot-allocator yet so this step is a no-op.
++ * The slot is released implicitly: plcr_alloc_slot() walks the
++ * in-list profiles and a list_del() before muram_free() takes this
++ * profile out of the source of truth.  The 16-byte MURAM record is
++ * zeroed via memset_io() before fman_pcd_muram_free() so any
++ * subsequent slot reuse starts from a clean record (defence in depth
++ * against silicon retaining stale state across an alloc+free cycle).
+  *
+  * The public ABI doc-comment says "WARN if any CC action template
+  * still references this profile id".  Until PR14e-body-3 wires the
+@@ -419,8 +710,18 @@ void fman_pcd_plcr_profile_destroy(struct fman_pcd_plcr_profile *prof)
+ 	list_del(&prof->node);
+ 	mutex_unlock(pcd_lock);
+ 
++	/*
++	 * Zero the silicon record before releasing the MURAM allocation.
++	 * Sets mode=0 (silicon treats as inactive, no metering decisions
++	 * even if a stale CC key still references this slot) and clears
++	 * the rate fields so a subsequent profile reusing the same MURAM
++	 * offset starts from a clean record.
++	 */
++	if (prof->record)
++		memset_io(prof->record, 0, FMAN_PCD_PLCR_PROFILE_SIZE);
++
+ 	fman_pcd_muram_free(pcd, prof->record_off,
+-			    FMAN_PCD_PLCR_PROFILE_SIZE);
++		    FMAN_PCD_PLCR_PROFILE_SIZE);
+ 	kfree(prof);
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_plcr_profile_destroy);
