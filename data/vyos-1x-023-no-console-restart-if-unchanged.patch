@@ -7,7 +7,7 @@ index 51c95fc..b55b3a2 100755
  from vyos.utils.serial import is_tty
  from vyos.system import grub_util
 -from vyos.template import render
-+from vyos.template import render, render_to_string
++from vyos.template import render_to_string
  from vyos import ConfigError
  from vyos import airbag
  airbag.enable()
