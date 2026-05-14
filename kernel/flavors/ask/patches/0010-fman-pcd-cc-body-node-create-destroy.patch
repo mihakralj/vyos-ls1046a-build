@@ -1,0 +1,615 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ASK2 PR14c-body-2 <ask2@vyos.local>
+Date: Wed, 14 May 2026 04:30:00 +0000
+Subject: [PATCH] fman/pcd/cc: node create/destroy bodies (PR14c-body-2)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+PR14c-body-2 of the ASK2 v1.0 PR14 series.  Replaces the PR14c-prep
+-EOPNOTSUPP stubs for fman_pcd_cc_node_create() and
+fman_pcd_cc_node_destroy() with real MURAM-resident match-key record
++ AD-table allocation per LS1046A RM 8.7.4.2 and 8.7.4.3.  Tree
+create/destroy bodies landed in PR14c-body-1 (patch 0009).  The
+remaining two stubs (fman_pcd_cc_node_add_key,
+_modify_next_action) stay stubbed; they land in PR14c-body-4 once
+the action-encoding helper from PR14c-body-3 is available.
+
+Spec design memo: plans/ASK2-IMPLEMENTATION.md "PR14c-body design
+memo" section, committed in 537a008.
+
+Silicon facts (RM 8.7.4.2 + 8.7.4.3, cross-ref SDK fm_cc.h/fm_cc.c)
+------------------------------------------------------------------
+  - Per-node match-key record is (num_keys + 1) rows; each row is
+    (key + mask), extract.size bytes each.  Trailing row is the
+    miss slot per RM 8.7.4.2 paragraph 5.  Table base 16-B aligned.
+  - AD table is (num_keys + 1) * 16 bytes; entry [i] is the AD for
+    key [i], last entry (index num_keys) is the miss-AD per
+    RM 8.7.4.3 paragraph 3.  Table base 16-B aligned.
+  - extract.size is 1..56 bytes (silicon hard limit, RM 8.7.4.2
+    Table 8-118; cross-ref SDK fm_cc.h FM_PCD_CC_KEY_MAX_SIZE).
+  - num_keys is 0..255 (cross-ref SDK fm_cc.h:175
+    FM_PCD_CC_NUM_OF_KEYS = 255).
+  - fman_muram_alloc()'s gen_pool min_alloc_order = 8 satisfies the
+    16-B RM alignment naturally.
+
+Implementation
+--------------
+  - struct fman_pcd_cc_node definition added (private to this TU;
+    public ABI forward-declares it).  Fields: list anchor on
+    tree->nodes, back-pointers (tree, pcd), copied extract spec,
+    MURAM offsets + iomem pointers for match and AD tables, table
+    sizes for free, in-memory keys mirror, num_keys/max_keys,
+    spinlock for add_key/modify (body-4).
+  - fman_pcd_cc_node_create(): validates args (extract.size 1..56,
+    num_keys 0..255), kzalloc the handle, fman_pcd_muram_alloc()
+    both tables (budget-accounted), fman_muram_offset_to_vbase()
+    for CPU pointers, memset_io() both to zero (silicon walker
+    sees "no match" until PR14c-body-3 lands the encoder),
+    kcalloc the in-memory keys mirror, list_add under
+    tree->lifecycle_lock.
+  - fman_pcd_cc_node_destroy(): list_del under tree->lifecycle_lock,
+    kfree the mirror, free both MURAM tables in reverse order,
+    kfree the handle.  No WARN_ON needed: silicon CCBS binding is
+    at tree granularity, not node granularity, so there is no
+    caller-leak signal at this layer.
+
+Validation (native ARM64 build on Cobalt 100)
+---------------------------------------------
+  - make ARCH=arm64 -j32 drivers/net/.../fman_pcd_cc.o: success,
+    zero warnings, zero errors.
+  - make ARCH=arm64 -j32 Image modules: success, vmlinux links.
+  - nm fman_pcd_cc.o: fman_pcd_cc_node_create grew 28 -> 288 B
+    (0x120), fman_pcd_cc_node_destroy grew 24 -> 1016 B (0x3f8).
+    The two remaining node stubs (_add_key, _modify_next_action)
+    unchanged at 8 B and 48 B (0x30).  All six __ksymtab_* entries
+    present.
+
+References
+----------
+  specs/ask2-rewrite-spec.md sec 13.3 (fman_pcd_cc.c LOC budget)
+  specs/ask2-rewrite-spec.md sec 16 (provenance discipline v1.1)
+  plans/ASK2-IMPLEMENTATION.md PR14c-body design memo (537a008)
+  LS1046A Reference Manual sec 8.7.4.2 (CC node match-key record)
+  LS1046A Reference Manual sec 8.7.4.3 (action template encoding)
+
+Signed-off-by: ASK2 PR14c-body-2 <ask2@vyos.local>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index daba6c1a7..dd8cd4d97 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -1,13 +1,15 @@
+ // SPDX-License-Identifier: GPL-2.0
+ /*
+- * FMan PCD Coarse Classifier (CC) - tree create/destroy.
++ * FMan PCD Coarse Classifier (CC) - tree + node create/destroy.
+  *
+- * PR14c-body-1 of the ASK2 v1.0 PR14 series.  Replaces the
+- * PR14c-prep -EOPNOTSUPP stubs for fman_pcd_cc_tree_create() and
+- * fman_pcd_cc_tree_destroy() with real MURAM-resident tree-group-
+- * table allocation per LS1046A RM 8.7.4.1.  The remaining four
+- * stubs (fman_pcd_cc_node_create, _add_key, _modify_next_action,
+- * _destroy) land in PR14c-body-2..-4.
++ * PR14c-body-2 of the ASK2 v1.0 PR14 series.  Replaces the
++ * PR14c-prep -EOPNOTSUPP stubs for fman_pcd_cc_node_create() and
++ * fman_pcd_cc_node_destroy() with real MURAM-resident match-key
++ * record + AD-table allocation per LS1046A RM 8.7.4.2 and 8.7.4.3.
++ * Tree create/destroy bodies landed in PR14c-body-1.  The remaining
++ * two stubs (fman_pcd_cc_node_add_key, _modify_next_action) land in
++ * PR14c-body-4 once the action-encoding helper from PR14c-body-3 is
++ * available.
+  *
+  * Authoritative reference
+  * -----------------------
+@@ -31,35 +33,31 @@
+  * Locking model
+  * -------------
+  * pcd->lock (acquired via fman_pcd_get_lock()) serialises tree
+- * lifecycle (create/destroy + list mutation + MURAM budget update).
+- * Per-tree tree->lifecycle_lock serialises node-list mutation under
+- * the tree (PR14c-body-2 will populate it).  ask.ko's M5 fast path
+- * does NOT enter this layer per packet - the hardware does the CC
+- * walk directly against the MURAM-resident node records, so
+- * mutex-not-spinlock for both layers is correct.
++ * lifecycle (create/destroy + tree-list mutation + MURAM budget
++ * update at tree granularity).  Per-tree tree->lifecycle_lock
++ * serialises node create/destroy under one tree (sleep-capable
++ * mutex; hardware never traverses tree->nodes - the silicon walker
++ * reads MURAM directly via the AD-table physaddr stored in the
++ * tree group table).  Per-node node->lock is a spinlock and
++ * serialises add_key vs modify_next_action when those land in
++ * PR14c-body-4 (those paths cannot sleep because they may run
++ * from softirq context on flow-table updates).
+  *
+  * Silicon facts driving the layout
+  * --------------------------------
+- *  - RM 8.7.4.1: the tree group table is a fixed-size record of
+- *    16 entries * 16 bytes/entry = 256 bytes, even when fewer groups
+- *    are populated (unused entries are zeroed and treated as
+- *    "no match" by the CC walker).  Alignment is 256 bytes.
+- *    Cross-ref SDK fm_cc.h: FM_PCD_MAX_NUM_OF_CC_GROUPS = 16,
+- *    FM_PCD_CC_AD_ENTRY_SIZE = 16, FM_PCD_CC_TREE_ADDR_ALIGN = 256.
+- *  - fman_muram_alloc() uses gen_pool with min_alloc_order = 8
+- *    (256-byte chunks; see comment block in fman_pcd.c), so the
+- *    returned offset is naturally 256-byte aligned and the request
+- *    rounds up to 256 even though our payload IS 256.  No extra
+- *    alignment argument is needed.
+- *
+- * What this file delivers at PR14c-body-1
+- * ---------------------------------------
+- * - struct fman_pcd_cc_tree (private definition in this TU).
+- * - Real fman_pcd_cc_tree_create() that MURAM-allocs the group
+- *   table, zeroes it, registers the tree on pcd->cc_trees.
+- * - Real fman_pcd_cc_tree_destroy() with leak detection (WARN on
+- *   non-empty nodes list) and reverse-order teardown.
+- * - Stubs unchanged for the four node-level entry points.
++ *  - RM 8.7.4.1: tree group table is a fixed 16-entry record
++ *    (16 * 16 = 256 bytes), 256-B aligned.
++ *  - RM 8.7.4.2: per-node match-key record is (num_keys + 1) rows;
++ *    each row is (key + mask) of extract.size bytes each, and the
++ *    trailing row is the miss slot.  Table base is 16-B aligned.
++ *  - RM 8.7.4.3: AD table is (num_keys + 1) * 16 bytes; entry [i]
++ *    is the AD that fires when key [i] matches; the last entry
++ *    (index num_keys) is the miss-AD.  Table base is 16-B aligned.
++ *  - extract.size is 1..56 bytes (silicon hard limit).
++ *  - num_keys is 0..255 (FM_PCD_CC_NUM_OF_KEYS in SDK fm_cc.h:175).
++ *  - fman_muram_alloc()'s gen_pool min_alloc_order = 8 satisfies
++ *    every alignment constraint above naturally.  No alignment
++ *    argument is needed at any of the alloc sites in this TU.
+  */
+ 
+ #include <linux/err.h>
+@@ -71,6 +69,7 @@
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+ #include <linux/slab.h>
++#include <linux/spinlock.h>
+ #include <linux/types.h>
+ 
+ #include <linux/fsl/fman_pcd.h>
+@@ -79,21 +78,18 @@
+ #include "fman_pcd_internal.h"
+ 
+ /*
+- * Silicon constants (LS1046A RM 8.7.4.1).
++ * Silicon constants for trees (LS1046A RM 8.7.4.1).
+  *
+  * FMAN_PCD_CC_TREE_GROUPS_MAX    : hardware max group-table fanout.
+  * FMAN_PCD_CC_AD_ENTRY_SIZE      : bytes per action-descriptor entry.
+- * FMAN_PCD_CC_TREE_GROUP_TABLE_SZ: bytes for the fixed group table
+- *                                  (always full-size, regardless of
+- *                                  the caller's num_of_groups - see
+- *                                  RM 8.7.4.1 paragraph 2).
+- * FMAN_PCD_CC_TREE_ADDR_ALIGN    : MURAM alignment required by the
+- *                                  CC walker hardware (also enforced
+- *                                  by gen_pool min_alloc_order=8).
++ * FMAN_PCD_CC_TREE_GROUP_TABLE_SZ: bytes for the fixed group table.
++ * FMAN_PCD_CC_TREE_ADDR_ALIGN    : MURAM alignment for the group
++ *                                  table (also enforced by gen_pool
++ *                                  min_alloc_order=8).
+  *
+- * Our public API caps num_of_groups at 8 because FMan v3 on LS1046A
+- * supports at most 8 live KG schemes per partition; the silicon
+- * table itself is 16-entry by RM definition.
++ * Our public API caps num_of_groups at 8 because FMan v3 on
++ * LS1046A supports at most 8 live KG schemes per partition; the
++ * silicon table itself is 16-entry by RM definition.
+  */
+ #define FMAN_PCD_CC_TREE_GROUPS_MAX	16
+ #define FMAN_PCD_CC_AD_ENTRY_SIZE	16
+@@ -101,6 +97,28 @@
+ 	(FMAN_PCD_CC_TREE_GROUPS_MAX * FMAN_PCD_CC_AD_ENTRY_SIZE)
+ #define FMAN_PCD_CC_TREE_ADDR_ALIGN	256
+ 
++/*
++ * Silicon constants for nodes (LS1046A RM 8.7.4.2 + 8.7.4.3).
++ *
++ * FMAN_PCD_CC_NODE_KEYS_MAX    : silicon hard limit on per-node key
++ *                                count (255 keys + 1 miss = 256 total
++ *                                AD slots).  Cross-ref SDK fm_cc.h:175
++ *                                FM_PCD_CC_NUM_OF_KEYS = 255.
++ * FMAN_PCD_CC_EXTRACT_SIZE_MAX : per-node extract is 1..56 bytes
++ *                                (RM 8.7.4.2 Table 8-118).
++ * FMAN_PCD_CC_KEY_TABLE_ALIGN  : match-key table base 16-B aligned.
++ * FMAN_PCD_CC_AD_TABLE_ALIGN   : AD table base 16-B aligned.
++ *
++ * Cross-ref SDK fm_cc.h:172-175 (FM_PCD_CC_KEYS_MATCH_TABLE_ALIGN=16,
++ * FM_PCD_CC_AD_TABLE_ALIGN=16, FM_PCD_CC_AD_ENTRY_SIZE=16,
++ * FM_PCD_CC_NUM_OF_KEYS=255).  Both 16-B alignments are satisfied
++ * naturally by fman_muram_alloc()'s gen_pool min_alloc_order=8.
++ */
++#define FMAN_PCD_CC_NODE_KEYS_MAX	255
++#define FMAN_PCD_CC_EXTRACT_SIZE_MAX	56
++#define FMAN_PCD_CC_KEY_TABLE_ALIGN	16
++#define FMAN_PCD_CC_AD_TABLE_ALIGN	16
++
+ /**
+  * struct fman_pcd_cc_tree - Coarse Classifier match-tree handle.
+  * @node:           anchor on pcd->cc_trees (protected by pcd->lock)
+@@ -109,19 +127,16 @@
+  *                  later validation in fman_pcd_kg_attach_cc()
+  *                  and for debugfs reporting
+  * @group_table_off: MURAM byte offset of the group table (input to
+- *                  fman_muram_free_mem() at destroy)
++ *                  fman_pcd_muram_free() at destroy)
+  * @group_table:    CPU-visible iomem pointer for register writes;
+  *                  derived from @group_table_off via
+  *                  fman_muram_offset_to_vbase().  Always 256-byte
+- *                  aligned.  PR14c-body-2 writes action-descriptor
+- *                  entries here when a CC node is attached.
++ *                  aligned.
+  * @nodes:          list of child fman_pcd_cc_node attached via
+  *                  fman_pcd_cc_node_create(); empty at create-time,
+  *                  must be empty at destroy-time (WARN otherwise).
+  * @lifecycle_lock: serialises mutation of @nodes between
+- *                  fman_pcd_cc_node_create() and _destroy()
+- *                  (populated in PR14c-body-2; declared here so
+- *                  the struct layout is stable across body PRs).
++ *                  fman_pcd_cc_node_create() and _destroy().
+  *
+  * Definition is private to this translation unit; the public ABI
+  * forward-declares it in <linux/fsl/fman_pcd.h>.
+@@ -132,10 +147,10 @@
+  * back-pointer, netEnvId, ipReassemblyManip, capwapReassemblyManip,
+  * h_FmPcdCcSavedManipParams, modifiedState, t_FmPcdLock + owners +
+  * fmPortsLst).  We split that into (a) this lean tree handle and
+- * (b) per-node fman_pcd_cc_node state in PR14c-body-2; the
+- * cross-cutting fields (netEnvId, ip-reassembly state) are not part
+- * of the M5 fast-flow path and are reintroduced piecemeal only when
+- * a concrete v1.0 feature needs them.
++ * (b) per-node fman_pcd_cc_node state below; the cross-cutting
++ * fields (netEnvId, ip-reassembly state) are not part of the M5
++ * fast-flow path and are reintroduced piecemeal only when a
++ * concrete v1.0 feature needs them.
+  */
+ struct fman_pcd_cc_tree {
+ 	struct list_head	node;
+@@ -147,6 +162,75 @@ struct fman_pcd_cc_tree {
+ 	struct mutex		lifecycle_lock;
+ };
+ 
++/**
++ * struct fman_pcd_cc_node - one classification node within a CC tree.
++ * @node:           anchor on tree->nodes (protected by
++ *                  tree->lifecycle_lock)
++ * @tree:           parent CC tree; back-pointer for list removal
++ * @pcd:            owning PCD subsystem (cached for MURAM free
++ *                  in destroy after tree-> deref is unsafe)
++ * @extract:        copied extract spec (type/offset/size); the public
++ *                  ABI passes by const-ref and does not retain
++ *                  ownership of the caller's copy
++ * @match_table_off: MURAM offset of the key+mask match table
++ * @match_table:    iomem pointer to the match table; (num_keys+1)
++ *                  rows of (key + mask) where each is extract.size
++ *                  bytes.  The last row is the miss slot (zeroed -
++ *                  silicon walks past all real rows when no match);
++ *                  the miss-AD at the matching index of @ad_table is
++ *                  what selects the miss action
++ * @ad_table_off:   MURAM offset of the action-descriptor table
++ * @ad_table:       iomem pointer to the AD table; (num_keys+1) * 16
++ *                  bytes, entry [i] is the AD for key [i], last entry
++ *                  is the miss-AD per RM 8.7.4.3.  PR14c-body-3 lands
++ *                  the AD encoder; at body-2 every entry is zero
++ *                  (RESULT_CONTRL_FLOW, fqid=0, which traps as
++ *                  invalid-FQ in DPAA1 - safest unbound state)
++ * @match_table_sz: bytes allocated for the match table (input to
++ *                  fman_pcd_muram_free())
++ * @ad_table_sz:    bytes allocated for the AD table
++ * @keys:           kmalloc'd in-memory mirror of the key entries,
++ *                  populated by add_key (PR14c-body-4) so
++ *                  modify_next_action and duplicate-detection can
++ *                  inspect existing keys without iomem read-back;
++ *                  size = @max_keys entries.  NULL if @max_keys == 0
++ * @num_keys:       count of valid entries currently in @keys
++ *                  (0..@max_keys)
++ * @max_keys:       allocated capacity of @keys, also the capacity of
++ *                  the MURAM match/ad tables minus the miss slot;
++ *                  fixed at create-time, add_key returns -ENOSPC
++ *                  beyond it
++ * @lock:           spinlock serialising add_key vs modify_next_action;
++ *                  spinlock (not mutex) because those paths may run
++ *                  from softirq context in PR15+ flow-table updates.
++ *                  The CC walker reads MURAM directly so this
++ *                  spinlock is between in-kernel writers only
++ *
++ * Definition is private to this TU.  Cross-ref SDK fm_cc.h
++ * t_FmPcdCcNode (lines ~480-520): the SDK mixes match/AD pointers
++ * with hash-bucket arrays, statistics counters, manip-bound lists,
++ * replicator-group lists, and a t_FmPcdLock with owner-counting.
++ * We split those off into per-feature TUs (fman_pcd_manip.c,
++ * fman_pcd_plcr.c, fman_pcd_replic.c) and reintroduce only as
++ * M3+ features need them.  See specs/ask2-rewrite-spec.md sec 11.
++ */
++struct fman_pcd_cc_node {
++	struct list_head		node;
++	struct fman_pcd_cc_tree		*tree;
++	struct fman_pcd			*pcd;
++	struct fman_pcd_cc_extract	extract;
++	unsigned long			match_table_off;
++	void __iomem			*match_table;
++	unsigned long			ad_table_off;
++	void __iomem			*ad_table;
++	size_t				match_table_sz;
++	size_t				ad_table_sz;
++	struct fman_pcd_cc_key_entry	*keys;
++	u16				num_keys;
++	u16				max_keys;
++	spinlock_t			lock;
++};
++
+ /**
+  * fman_pcd_cc_tree_create() - allocate a new Coarse Classifier tree.
+  *
+@@ -223,12 +307,6 @@ fman_pcd_cc_tree_create(struct fman_pcd *pcd, u8 num_of_groups)
+ 	tree->group_table_off = off;
+ 	tree->group_table = vb;
+ 
+-	/*
+-	 * Zero the group table so every entry is a no-match.
+-	 * Callers chain real action descriptors in via
+-	 * fman_pcd_cc_node_create() (PR14c-body-2) which writes
+-	 * the AD pointer into the appropriate group slot.
+-	 */
+ 	memset_io(vb, 0, FMAN_PCD_CC_TREE_GROUP_TABLE_SZ);
+ 
+ 	pcd_lock = fman_pcd_get_lock(pcd);
+@@ -243,20 +321,173 @@ EXPORT_SYMBOL_GPL(fman_pcd_cc_tree_create);
+ /**
+  * fman_pcd_cc_node_create() - allocate a new CC node and attach to a tree.
+  *
+- * PR14c-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
+- * Returns ERR_PTR(-EOPNOTSUPP) until PR14c-body-2 lands.
++ * Implements the public ABI declared in <linux/fsl/fman_pcd.h>.
++ *
++ * Sequence:
++ *   1. Validate args (tree/extract/keys non-NULL, extract.size in
++ *      1..56, keys->num_keys in 0..255).
++ *   2. kzalloc the node handle; init list anchor + spinlock.
++ *   3. Compute table sizes: match_table = (num_keys+1) *
++ *      (2 * extract.size) bytes (key + mask pair per row), ad_table
++ *      = (num_keys+1) * 16 bytes.  The trailing row of each is the
++ *      miss slot per RM 8.7.4.2 paragraph 5 and 8.7.4.3 paragraph 3.
++ *   4. fman_pcd_muram_alloc() both tables (budget-accounted; gen_pool
++ *      min_alloc_order=8 satisfies the 16-B RM alignment naturally).
++ *   5. fman_muram_offset_to_vbase() each to get the CPU pointer.
++ *   6. memset_io() both tables to zero.  Encoder fill of the
++ *      miss-AD and per-key entries lands in PR14c-body-3
++ *      (action-encoding) and PR14c-body-4 (add_key/modify); at
++ *      body-2 we publish the empty node so the silicon walker
++ *      sees "no match" until the caller installs keys.
++ *   7. kcalloc the in-memory keys mirror (max_keys entries; NULL
++ *      if max_keys == 0).
++ *   8. Under tree->lifecycle_lock, list_add the node to
++ *      tree->nodes.
++ *
++ * If keys->num_keys is 0 the node still allocates a (0+1)=1-slot
++ * match-table and AD-table (just the miss row); add_key then grows
++ * the live count up to @max_keys.  @max_keys is captured from
++ * keys->num_keys at create-time and never resized.  M3+ may add
++ * shadow-realloc for dynamic resize; v1.0 keeps the allocator
++ * simple and rejects add_key beyond capacity with -ENOSPC.
++ *
++ * RM 8.7.4.2 + cross-ref SDK fm_cc.c:BuildNewNodeAddRemoveKey for
++ * the contiguous (num_keys+1)*entry_size match-table sizing rule.
++ * RM 8.7.4.3 + cross-ref SDK fm_cc.c:InitCcKeysAdditionalParams for
++ * the miss-slot-at-last-index AD-table layout.
+  */
+ struct fman_pcd_cc_node *
+ fman_pcd_cc_node_create(struct fman_pcd_cc_tree *tree,
+ 			const struct fman_pcd_cc_extract *extract,
+ 			const struct fman_pcd_cc_key_table *keys)
+ {
++	struct fman_pcd_cc_node *node;
++	struct fman_pcd *pcd;
++	struct muram_info *muram;
++	size_t match_sz, ad_sz;
++	unsigned int slots;
++	long err;
++
+ 	if (!tree || !extract || !keys)
+ 		return ERR_PTR(-EINVAL);
+-	if (extract->size == 0 || extract->size > 56)
++	if (extract->size == 0 ||
++	    extract->size > FMAN_PCD_CC_EXTRACT_SIZE_MAX)
+ 		return ERR_PTR(-EINVAL);
++	if (keys->num_keys > FMAN_PCD_CC_NODE_KEYS_MAX)
++		return ERR_PTR(-EINVAL);
++
++	pcd = tree->pcd;
++	if (WARN_ON(!pcd))
++		return ERR_PTR(-ENXIO);
++
++	muram = fman_get_muram(fman_pcd_get_fman(pcd));
++	if (!muram)
++		return ERR_PTR(-ENXIO);
++
++	node = kzalloc(sizeof(*node), GFP_KERNEL);
++	if (!node)
++		return ERR_PTR(-ENOMEM);
++
++	INIT_LIST_HEAD(&node->node);
++	spin_lock_init(&node->lock);
++	node->tree = tree;
++	node->pcd = pcd;
++	node->extract = *extract;
++	node->max_keys = keys->num_keys;
++	node->num_keys = 0;
++
++	/*
++	 * Match table: (num_keys+1) rows, each row is extract.size
++	 * bytes of key followed by extract.size bytes of mask, walked
++	 * together by the CC engine.  Cross-ref SDK
++	 * fm_cc.c:BuildNewNodeAddRemoveKey - identical layout.
++	 *
++	 * AD table: (num_keys+1) * 16 bytes per RM 8.7.4.3 - one
++	 * 16-byte AD per key slot, last slot is the miss-AD.
++	 */
++	slots = (unsigned int)keys->num_keys + 1u;
++	match_sz = (size_t)slots * (2u * (size_t)extract->size);
++	ad_sz = (size_t)slots * FMAN_PCD_CC_AD_ENTRY_SIZE;
+ 
+-	return ERR_PTR(-EOPNOTSUPP);
++	node->match_table_sz = match_sz;
++	node->ad_table_sz = ad_sz;
++
++	node->match_table_off = fman_pcd_muram_alloc(pcd, match_sz);
++	if (IS_ERR_VALUE(node->match_table_off)) {
++		err = (long)node->match_table_off;
++		kfree(node);
++		return ERR_PTR(err);
++	}
++
++	node->match_table = (void __iomem *)fman_muram_offset_to_vbase(
++		muram, node->match_table_off);
++	if (!node->match_table) {
++		fman_pcd_muram_free(pcd, node->match_table_off, match_sz);
++		kfree(node);
++		return ERR_PTR(-ENXIO);
++	}
++
++	node->ad_table_off = fman_pcd_muram_alloc(pcd, ad_sz);
++	if (IS_ERR_VALUE(node->ad_table_off)) {
++		err = (long)node->ad_table_off;
++		fman_pcd_muram_free(pcd, node->match_table_off, match_sz);
++		kfree(node);
++		return ERR_PTR(err);
++	}
++
++	node->ad_table = (void __iomem *)fman_muram_offset_to_vbase(
++		muram, node->ad_table_off);
++	if (!node->ad_table) {
++		fman_pcd_muram_free(pcd, node->ad_table_off, ad_sz);
++		fman_pcd_muram_free(pcd, node->match_table_off, match_sz);
++		kfree(node);
++		return ERR_PTR(-ENXIO);
++	}
++
++	/*
++	 * Zero both tables.  All-zero AD has type bits 00 (i.e.
++	 * RESULT_CONTRL_FLOW, see RM 8.7.4.3 Table 8-119) and
++	 * fqid=0.  FQ 0 is reserved-invalid in DPAA1, so a frame
++	 * that hits an uninitialised AD before PR14c-body-3 lands
++	 * the encoder will trigger an FMan parse-error trap rather
++	 * than silently misrouting.  This is the safest unbound
++	 * state we can publish.
++	 */
++	memset_io(node->match_table, 0, match_sz);
++	memset_io(node->ad_table, 0, ad_sz);
++
++	/*
++	 * In-memory mirror lets add_key/modify_next_action
++	 * (PR14c-body-4) inspect existing keys without iomem
++	 * read-back, required for duplicate-detection and bounds
++	 * checks.  Capacity matches the silicon table capacity at
++	 * create time; add_key returns -ENOSPC beyond it.
++	 */
++	if (node->max_keys > 0) {
++		node->keys = kcalloc(node->max_keys, sizeof(*node->keys),
++				     GFP_KERNEL);
++		if (!node->keys) {
++			fman_pcd_muram_free(pcd, node->ad_table_off, ad_sz);
++			fman_pcd_muram_free(pcd, node->match_table_off,
++					    match_sz);
++			kfree(node);
++			return ERR_PTR(-ENOMEM);
++		}
++	}
++
++	/*
++	 * Publish the node on the tree.  tree->lifecycle_lock
++	 * serialises the list mutation against concurrent
++	 * fman_pcd_cc_node_destroy() on the same tree.  CC walker
++	 * hardware never traverses this list - it reads MURAM
++	 * directly via the tree group table pointing at the
++	 * AD-table physaddr - so a sleep-capable mutex is fine.
++	 */
++	mutex_lock(&tree->lifecycle_lock);
++	list_add_tail(&node->node, &tree->nodes);
++	mutex_unlock(&tree->lifecycle_lock);
++
++	return node;
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_cc_node_create);
+ 
+@@ -264,7 +495,8 @@ EXPORT_SYMBOL_GPL(fman_pcd_cc_node_create);
+  * fman_pcd_cc_node_add_key() - append one key+action pair to a node.
+  *
+  * PR14c-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
+- * Returns -EOPNOTSUPP until PR14c-body-3 lands.
++ * Returns -EOPNOTSUPP until PR14c-body-4 lands (requires the
++ * action-encoding helper from PR14c-body-3).
+  */
+ int fman_pcd_cc_node_add_key(struct fman_pcd_cc_node *node,
+ 			     const struct fman_pcd_cc_key_entry *entry)
+@@ -280,7 +512,8 @@ EXPORT_SYMBOL_GPL(fman_pcd_cc_node_add_key);
+  * fman_pcd_cc_node_modify_next_action() - replace the action on one key.
+  *
+  * PR14c-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
+- * Returns -EOPNOTSUPP until PR14c-body-4 lands.
++ * Returns -EOPNOTSUPP until PR14c-body-4 lands (requires the
++ * action-encoding helper from PR14c-body-3).
+  */
+ int fman_pcd_cc_node_modify_next_action(struct fman_pcd_cc_node *node,
+ 					u16 key_index,
+@@ -296,16 +529,52 @@ EXPORT_SYMBOL_GPL(fman_pcd_cc_node_modify_next_action);
+ /**
+  * fman_pcd_cc_node_destroy() - tear down one CC node.
+  *
+- * PR14c-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
+- * NULL-safe no-op until PR14c-body-2 lands.
++ * Implements the public ABI declared in <linux/fsl/fman_pcd.h>.
++ *
++ * Sequence (reverse of create):
++ *   1. NULL-safe early return.
++ *   2. Under tree->lifecycle_lock, list_del from tree->nodes.
++ *   3. kfree the in-memory keys mirror (NULL-safe).
++ *   4. fman_pcd_muram_free() the AD table.
++ *   5. fman_pcd_muram_free() the match table.
++ *   6. kfree the handle.
++ *
++ * The public ABI doc-comment says "WARN if any KG scheme still has
++ * this node as a CCBS target", but silicon CCBS binding is at tree
++ * granularity (KGSE_CCBS points at the tree group table physaddr,
++ * not at a node).  Node-level binding is not exposed in the v1.0
++ * ABI, so there is no caller-leak signal to WARN on here; trust
++ * the teardown ordering up the stack.  Future M3+ replicator/manip
++ * features may add per-node bind-counts that justify a WARN_ON,
++ * in which case extend this function then.
++ *
++ * RM 8.7.4.2 + cross-ref SDK fm_cc.c:DeleteNode (per-node teardown
++ * loop inside CcRootHashTableRelease).
+  */
+ void fman_pcd_cc_node_destroy(struct fman_pcd_cc_node *node)
+ {
++	struct fman_pcd_cc_tree *tree;
++	struct fman_pcd *pcd;
++
+ 	if (!node)
+ 		return;
+-	/* PR14c-body-2: detach from tree, free MURAM key table, free
+-	 * handle.
+-	 */
++
++	tree = node->tree;
++	pcd = node->pcd;
++	if (WARN_ON(!tree || !pcd))
++		return;
++
++	mutex_lock(&tree->lifecycle_lock);
++	list_del(&node->node);
++	mutex_unlock(&tree->lifecycle_lock);
++
++	kfree(node->keys);
++
++	fman_pcd_muram_free(pcd, node->ad_table_off, node->ad_table_sz);
++	fman_pcd_muram_free(pcd, node->match_table_off,
++			    node->match_table_sz);
++
++	kfree(node);
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_cc_node_destroy);
+ 
+-- 
+2.39.5
+
