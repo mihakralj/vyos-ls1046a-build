@@ -1,24 +1,15 @@
-From 3cd69a75fd121c2fa325741d9d7911b5ce5902cd Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: ci <ci@local>
-Date: Thu, 14 May 2026 05:00:59 +0000
-Subject: [PATCH] fman: pcd_cc: add KUnit suite for cc_encode_ad
+Date: Thu, 14 May 2026 20:44:07 +0000
+Subject: patches/0013-fman-pcd-cc-kunit-suite.patch
 
-PR14c-body-5 of 5.  Adds the byte-perfect AD-record encoder unit
-test suite for the FMan PCD Coarse Classifier.  Ten test cases
-covering DROP / FORWARD_FQ (valid + zero-FQID reject) / FORWARD_CAAM
-(PLCR_DIS) / NEXT_CC_NODE (table-offset in res, null reject) /
-REPLICATE+MANIPULATE (EOPNOTSUPP) / null-arg reject / byte-layout
-regression canary against LS1046A RM 8.7.4.3 Table 8-119.
-
-Tests are #include'd from fman_pcd_cc.c under
-CONFIG_FSL_FMAN_PCD_KUNIT_TEST so they reach the static
-cc_encode_ad() helper and the layout #defines directly.  Scratch
-buffer is kunit_kzalloc'd and cast __iomem __force -- iowrite32be
-on arm64 is __raw_writel+swab, no MMIO ordering hooks needed.
-
-Build-verified clean both with the option off (default kernel build)
-and on (KUnit kernel build) on linux-6.18.28 arm64.
 ---
+ drivers/net/ethernet/freescale/fman/Kconfig   |  17 ++
+ .../net/ethernet/freescale/fman/fman_pcd_cc.c |  13 +
+ .../freescale/fman/tests/fman_pcd_cc_test.c   | 277 ++++++++++++++++++
+ 3 files changed, 307 insertions(+)
+ create mode 100644 drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
+
 diff --git a/drivers/net/ethernet/freescale/fman/Kconfig b/drivers/net/ethernet/freescale/fman/Kconfig
 index d043723..0164a65 100644
 --- a/drivers/net/ethernet/freescale/fman/Kconfig
@@ -348,5 +339,3 @@ index 0000000..6794e07
 +};
 +
 +kunit_test_suite(fman_pcd_cc_test_suite);
--- 
-2.43.0

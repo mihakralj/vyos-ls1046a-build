@@ -1,5 +1,17 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Thu, 14 May 2026 20:44:10 +0000
+Subject: patches/0021-fman-pcd-plcr-kunit.patch
+
+---
+ .../ethernet/freescale/fman/fman_pcd_plcr.c   |  12 +
+ .../freescale/fman/tests/fman_pcd_cc_test.c   |  42 +++
+ .../freescale/fman/tests/fman_pcd_plcr_test.c | 251 ++++++++++++++++++
+ 3 files changed, 305 insertions(+)
+ create mode 100644 drivers/net/ethernet/freescale/fman/tests/fman_pcd_plcr_test.c
+
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
-index 40a7f473d..75e3d86b0 100644
+index 40a7f47..75e3d86 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
 @@ -760,3 +760,15 @@ u16 fman_pcd_plcr_profile_id_internal(
@@ -19,7 +31,7 @@ index 40a7f473d..75e3d86b0 100644
 +#include "tests/fman_pcd_plcr_test.c"
 +#endif /* CONFIG_FSL_FMAN_PCD_KUNIT_TEST */
 diff --git a/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
-index 090b96dee..221417f97 100644
+index 090b96d..221417f 100644
 --- a/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
 +++ b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
 @@ -212,6 +212,46 @@ static void cc_encode_ad_manipulate_test(struct kunit *test)
@@ -80,7 +92,7 @@ index 090b96dee..221417f97 100644
  	{}
 diff --git a/drivers/net/ethernet/freescale/fman/tests/fman_pcd_plcr_test.c b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_plcr_test.c
 new file mode 100644
-index 000000000..2f35bd05b
+index 0000000..2f35bd0
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_plcr_test.c
 @@ -0,0 +1,251 @@

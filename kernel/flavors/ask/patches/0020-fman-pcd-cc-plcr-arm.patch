@@ -1,8 +1,20 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Thu, 14 May 2026 20:44:09 +0000
+Subject: patches/0020-fman-pcd-cc-plcr-arm.patch
+
+---
+ .../net/ethernet/freescale/fman/fman_pcd_cc.c | 50 +++++++++++++++++--
+ .../freescale/fman/fman_pcd_internal.h        | 13 +++++
+ .../ethernet/freescale/fman/fman_pcd_plcr.c   | 35 +++++++++++++
+ include/linux/fsl/fman_pcd.h                  | 20 +++++++-
+ 4 files changed, 114 insertions(+), 4 deletions(-)
+
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
-index 5a7951ce4..6d444142a 100644
+index 077ec24..9b7b08d 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
-@@ -292,9 +292,9 @@ struct fman_pcd_cc_node {
+@@ -293,9 +293,9 @@ struct fman_pcd_cc_node {
   * PR14c-body-4 wires fman_pcd_cc_node_add_key().
   *
   * Returns 0 on success, -EINVAL for an unknown action->type, and
@@ -15,7 +27,7 @@ index 5a7951ce4..6d444142a 100644
   *
   * Empty-table FQ-0-trap safety property (carried over from body-2):
   * an all-zero AD slot decodes as RESULT_CONTRL_FLOW with fqid=0, which
-@@ -391,6 +391,50 @@ cc_encode_ad(const struct fman_pcd_action *action, void __iomem *ad)
+@@ -392,6 +392,50 @@ cc_encode_ad(const struct fman_pcd_action *action, void __iomem *ad)
  		break;
  	}
  
@@ -67,7 +79,7 @@ index 5a7951ce4..6d444142a 100644
  		return -EINVAL;
  	}
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
-index 3e79617ad..f009828ca 100644
+index 3e79617..f009828 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
 @@ -67,4 +67,17 @@ unsigned long fman_pcd_cc_tree_group_table_off(
@@ -89,7 +101,7 @@ index 3e79617ad..f009828ca 100644
 +
  #endif /* __FMAN_PCD_INTERNAL_H */
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
-index 5c100ce8b..40a7f473d 100644
+index 5c100ce..40a7f47 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
 @@ -725,3 +725,38 @@ void fman_pcd_plcr_profile_destroy(struct fman_pcd_plcr_profile *prof)
@@ -132,7 +144,7 @@ index 5c100ce8b..40a7f473d 100644
 +	return fman_pcd_plcr_profile_get_id(prof);
 +}
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index 9b5a069fd..16a724535 100644
+index 9b5a069..16a7245 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
 @@ -232,7 +232,8 @@ enum fman_pcd_action_type {

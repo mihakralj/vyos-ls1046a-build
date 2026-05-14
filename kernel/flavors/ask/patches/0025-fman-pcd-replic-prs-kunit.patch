@@ -1,38 +1,8 @@
-From c1a259989ead4be3179dd4d487109d812fb5b114 Mon Sep 17 00:00:00 2001
-From: x <x@x>
-Date: Thu, 14 May 2026 19:32:07 +0000
-Subject: [PATCH] fman/pcd: PR14f-body-4 - kunit suites for replic + prs +
- cc-arm regression
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Thu, 14 May 2026 20:44:11 +0000
+Subject: patches/0025-fman-pcd-replic-prs-kunit.patch
 
-Adds two new KUnit suites and refreshes the cc encoder's REPLICATE
-regression tests to match the body-3 wiring:
-
-  tests/fman_pcd_replic_test.c (new):
-    - source-TD layout offsets vs RM 8.7.7 Table 8-128
-    - source-TD active-OPCODE single-publication regression canary
-    - member-AD layout constants + NIA encoding bits
-    - replic_encode_members byte-perfect 3-member chain
-    - FQID high-byte clamping
-    - source_td_off NULL-safety accessor pin
-
-  tests/fman_pcd_prs_test.c (new):
-    - NULL pcd handle yields -EINVAL
-    - non-NULL pcd handle yields 0 (v1.0 pass-through contract)
-
-  tests/fman_pcd_cc_test.c:
-    - replace obsolete -EOPNOTSUPP REPLICATE test with two opaque-
-      pointer failure-mode tests (NULL group rejected) that mirror
-      the MANIPULATE / POLICE arm patterns
-
-  fman_pcd_replic.c, fman_pcd_prs.c:
-    - trailer #include of the new test files under
-      CONFIG_FSL_FMAN_PCD_KUNIT_TEST, mirroring the idiom from
-      fman_pcd_cc.c (patch 0013), fman_pcd_manip.c (0017),
-      fman_pcd_plcr.c (0021)
-
-Build-verified: both CONFIG_FSL_FMAN_PCD_KUNIT_TEST=n and =y compile
-cleanly with zero warnings for fman_pcd_{cc,prs,replic}.o on
-linux-6.18.28 arm64.
 ---
  .../ethernet/freescale/fman/fman_pcd_prs.c    |  15 +-
  .../ethernet/freescale/fman/fman_pcd_replic.c |  21 +-
@@ -569,6 +539,3 @@ index 0000000..1c79f8f
 +
 +kunit_test_suite(fman_pcd_replic_test_suite);
 \ No newline at end of file
--- 
-2.39.5
-

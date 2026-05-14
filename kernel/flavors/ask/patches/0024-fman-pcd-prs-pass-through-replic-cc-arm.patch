@@ -1,16 +1,14 @@
-From a95a55692d64834447b87b851d29f36faefdc869 Mon Sep 17 00:00:00 2001
-From: ASK2 PR14f-body-3 reroll <ask2@vyos.local>
-Date: Thu, 14 May 2026 19:24:00 +0000
-Subject: fman/pcd: PR14f-body-3 - prs pass-through + cc REPLICATE arm +
- source_td_off accessor
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Thu, 14 May 2026 20:44:11 +0000
+Subject: patches/0024-fman-pcd-prs-pass-through-replic-cc-arm.patch
 
-Re-roll of patch 0024 against post-cascade baseline.  Original patch
-authored without tab indentation when the surrounding code in
-fman_pcd_cc.c uses tabs; the PR14c-body Option-A re-rolls (commits
-c01b946..c2a5b43 and 32c3ea2 on workspace ask20) brought back the
-upstream tab convention and 0024 no longer applied.
-
-No functional change vs the original 970a81e body-3 narrative.
+---
+ .../net/ethernet/freescale/fman/fman_pcd_cc.c | 56 ++++++++++++++++++-
+ .../freescale/fman/fman_pcd_internal.h        | 14 +++++
+ .../ethernet/freescale/fman/fman_pcd_prs.c    | 30 +++++++++-
+ .../ethernet/freescale/fman/fman_pcd_replic.c | 26 +++++++++
+ 4 files changed, 120 insertions(+), 6 deletions(-)
 
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 index 9b7b08d..b40d998 100644

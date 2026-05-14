@@ -1,46 +1,12 @@
-From 7ebbb4e8c458d6f8426aedc22fef4a9b1f603230 Mon Sep 17 00:00:00 2001
-From: ASK2 PR14c-body-3 <ask2@vyos.local>
-Date: Thu, 14 May 2026 04:38:21 +0000
-Subject: [PATCH] fman/pcd/cc: AD encoder helper (PR14c-body-3)
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Thu, 14 May 2026 20:44:07 +0000
+Subject: patches/0011-fman-pcd-cc-body-action-encoding.patch
 
-PR14c-body-3 of the ASK2 v1.0 PR14 series.  Adds the static
-cc_encode_ad() helper that packs a typed struct fman_pcd_action
-into the 16-byte MURAM-resident action-descriptor record format
-documented in LS1046A RM 8.7.4.3 (Table 8-119).
-
-The encoder dispatches on action->type:
-  * FMAN_PCD_ACTION_DROP            -> nia=BYPASS (0xc0000000)
-  * FMAN_PCD_ACTION_FORWARD_FQ      -> nia=RESULT_CONTRL_FLOW, fqid
-  * FMAN_PCD_ACTION_FORWARD_CAAM    -> nia=RESULT_CF|PLCR_DIS,
-                                       plcr=profile_id
-  * FMAN_PCD_ACTION_NEXT_CC_NODE    -> nia=CONT_LOOKUP (0x40000000),
-                                       res=next-node ad_table_off
-  * FMAN_PCD_ACTION_REPLICATE       -> -EOPNOTSUPP (PR14f-body)
-  * FMAN_PCD_ACTION_MANIPULATE      -> -EOPNOTSUPP (PR14d-body)
-  * other                           -> -EINVAL
-
-All four 32-bit words at byte offsets 0x0/0x4/0x8/0xc are written
-with iowrite32be() because FMan MURAM is big-endian relative to
-the host CPU.  The helper is marked __maybe_unused and is currently
-DCE'd because body-3 has no consumer; PR14c-body-4 wires it into
-fman_pcd_cc_node_add_key() and _modify_next_action() under the
-per-node spinlock.
-
-The empty-table FQ-0-trap safety property from PR14c-body-2 is
-preserved: an un-programmed AD slot decodes as RESULT_CONTRL_FLOW
-with fqid=0 (DPAA1 reserved-invalid), triggering an FMan parse-
-error trap rather than silent misrouting.
-
-Spec design memo: plans/ASK2-IMPLEMENTATION.md "PR14c-body design
-memo", committed in 537a008.  Provenance per spec v1.1 sec 13 —
-RM 8.7.4.3 plus read-only SDK cross-ref to fm_cc.c GetAdOfTypeResult
-and NextStepAd for silicon-fact selection-table origin.
-
-Signed-off-by: ASK2 PR14c-body-3 <ask2@vyos.local>
 ---
+ .../net/ethernet/freescale/fman/fman_pcd_cc.c | 153 ++++++++++++++++--
+ 1 file changed, 144 insertions(+), 9 deletions(-)
+
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 index 84e9b01..e214440 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
@@ -219,5 +185,3 @@ index 84e9b01..e214440 100644
  
  /**
   * fman_pcd_cc_tree_create() - allocate a new Coarse Classifier tree.
--- 
-2.43.0

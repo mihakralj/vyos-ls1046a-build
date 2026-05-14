@@ -1,80 +1,12 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: ASK2 PR14c-body-2 <ask2@vyos.local>
-Date: Wed, 14 May 2026 04:30:00 +0000
-Subject: [PATCH] fman/pcd/cc: node create/destroy bodies (PR14c-body-2)
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+From: ci <ci@local>
+Date: Thu, 14 May 2026 20:44:06 +0000
+Subject: patches/0010-fman-pcd-cc-body-node-create-destroy.patch
 
-PR14c-body-2 of the ASK2 v1.0 PR14 series.  Replaces the PR14c-prep
--EOPNOTSUPP stubs for fman_pcd_cc_node_create() and
-fman_pcd_cc_node_destroy() with real MURAM-resident match-key record
-+ AD-table allocation per LS1046A RM 8.7.4.2 and 8.7.4.3.  Tree
-create/destroy bodies landed in PR14c-body-1 (patch 0009).  The
-remaining two stubs (fman_pcd_cc_node_add_key,
-_modify_next_action) stay stubbed; they land in PR14c-body-4 once
-the action-encoding helper from PR14c-body-3 is available.
-
-Spec design memo: plans/ASK2-IMPLEMENTATION.md "PR14c-body design
-memo" section, committed in 537a008.
-
-Silicon facts (RM 8.7.4.2 + 8.7.4.3, cross-ref SDK fm_cc.h/fm_cc.c)
-------------------------------------------------------------------
-  - Per-node match-key record is (num_keys + 1) rows; each row is
-    (key + mask), extract.size bytes each.  Trailing row is the
-    miss slot per RM 8.7.4.2 paragraph 5.  Table base 16-B aligned.
-  - AD table is (num_keys + 1) * 16 bytes; entry [i] is the AD for
-    key [i], last entry (index num_keys) is the miss-AD per
-    RM 8.7.4.3 paragraph 3.  Table base 16-B aligned.
-  - extract.size is 1..56 bytes (silicon hard limit, RM 8.7.4.2
-    Table 8-118; cross-ref SDK fm_cc.h FM_PCD_CC_KEY_MAX_SIZE).
-  - num_keys is 0..255 (cross-ref SDK fm_cc.h:175
-    FM_PCD_CC_NUM_OF_KEYS = 255).
-  - fman_muram_alloc()'s gen_pool min_alloc_order = 8 satisfies the
-    16-B RM alignment naturally.
-
-Implementation
---------------
-  - struct fman_pcd_cc_node definition added (private to this TU;
-    public ABI forward-declares it).  Fields: list anchor on
-    tree->nodes, back-pointers (tree, pcd), copied extract spec,
-    MURAM offsets + iomem pointers for match and AD tables, table
-    sizes for free, in-memory keys mirror, num_keys/max_keys,
-    spinlock for add_key/modify (body-4).
-  - fman_pcd_cc_node_create(): validates args (extract.size 1..56,
-    num_keys 0..255), kzalloc the handle, fman_pcd_muram_alloc()
-    both tables (budget-accounted), fman_muram_offset_to_vbase()
-    for CPU pointers, memset_io() both to zero (silicon walker
-    sees "no match" until PR14c-body-3 lands the encoder),
-    kcalloc the in-memory keys mirror, list_add under
-    tree->lifecycle_lock.
-  - fman_pcd_cc_node_destroy(): list_del under tree->lifecycle_lock,
-    kfree the mirror, free both MURAM tables in reverse order,
-    kfree the handle.  No WARN_ON needed: silicon CCBS binding is
-    at tree granularity, not node granularity, so there is no
-    caller-leak signal at this layer.
-
-Validation (native ARM64 build on Cobalt 100)
----------------------------------------------
-  - make ARCH=arm64 -j32 drivers/net/.../fman_pcd_cc.o: success,
-    zero warnings, zero errors.
-  - make ARCH=arm64 -j32 Image modules: success, vmlinux links.
-  - nm fman_pcd_cc.o: fman_pcd_cc_node_create grew 28 -> 288 B
-    (0x120), fman_pcd_cc_node_destroy grew 24 -> 1016 B (0x3f8).
-    The two remaining node stubs (_add_key, _modify_next_action)
-    unchanged at 8 B and 48 B (0x30).  All six __ksymtab_* entries
-    present.
-
-References
-----------
-  specs/ask2-rewrite-spec.md sec 13.3 (fman_pcd_cc.c LOC budget)
-  specs/ask2-rewrite-spec.md sec 16 (provenance discipline v1.1)
-  plans/ASK2-IMPLEMENTATION.md PR14c-body design memo (537a008)
-  LS1046A Reference Manual sec 8.7.4.2 (CC node match-key record)
-  LS1046A Reference Manual sec 8.7.4.3 (action template encoding)
-
-Signed-off-by: ASK2 PR14c-body-2 <ask2@vyos.local>
 ---
+ .../net/ethernet/freescale/fman/fman_pcd_cc.c | 417 +++++++++++++++---
+ 1 file changed, 344 insertions(+), 73 deletions(-)
+
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 index 8f9cb77..84e9b01 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
@@ -614,5 +546,3 @@ index 8f9cb77..84e9b01 100644
  }
  EXPORT_SYMBOL_GPL(fman_pcd_cc_node_destroy);
  
---
-2.43.0

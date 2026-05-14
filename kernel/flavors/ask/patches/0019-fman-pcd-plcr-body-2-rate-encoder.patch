@@ -1,14 +1,14 @@
-From e2b3c6db9c5959ffc535a268d435ff24599b4cd8 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: ci <ci@local>
-Date: Thu, 14 May 2026 06:43:42 +0000
-Subject: [PATCH] fman: pcd_plcr body-2 -- trTCM rate encoder + real create/set_rates
+Date: Thu, 14 May 2026 20:44:09 +0000
+Subject: patches/0019-fman-pcd-plcr-body-2-rate-encoder.patch
 
 ---
  .../ethernet/freescale/fman/fman_pcd_plcr.c   | 407 +++++++++++++++---
  1 file changed, 354 insertions(+), 53 deletions(-)
 
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
-index ef6501b2e..5c100ce8b 100644
+index ef6501b..5c100ce 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
 @@ -1,17 +1,24 @@

@@ -1,55 +1,16 @@
-From 158fe8bd59f8d6ae0c04a8baf2f16e64e7376999 Mon Sep 17 00:00:00 2001
-From: ASK2 build <ask2@vyos-ls1046a>
-Date: Thu, 14 May 2026 04:52:48 +0000
-Subject: [PATCH] fman: PCD CC/KG body-4 -- add_key, modify_next_action,
- kg_attach_cc
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Thu, 14 May 2026 20:44:07 +0000
+Subject: patches/0012-fman-pcd-cc-kg-body-add-key-modify-attach.patch
 
-Replaces the three -EOPNOTSUPP stubs left in place by PR14c-prep / PR14b-body
-with their real bodies, completing the silicon programming path from a KG
-scheme through a CC tree's group table down to per-key action descriptors.
-
-Changes:
-- fman_keygen.c: add internal helper keygen_scheme_set_ccbs() that does an
-  AR-mediated indirect read-modify-write of a single scheme's KGSE_CCBS
-  register, preserving every other KGSE_* field that keygen_scheme_setup()
-  programmed.  Exported via fman_keygen_internal.h.
-- fman_pcd_internal.h: add cross-TU accessor fman_pcd_cc_tree_group_table_off()
-  so fman_pcd_kg.c can read the private tree handle's group-table MURAM offset
-  without exposing struct fman_pcd_cc_tree's layout.
-- fman_pcd_cc.c: implement fman_pcd_cc_node_add_key() and
-  fman_pcd_cc_node_modify_next_action() under node->lock (spin_lock_bh,
-  softirq-safe).  add_key encodes the AD slot first via cc_encode_ad
-  (PR14c-body-3) before writing key+mask bytes, so a partially-populated
-  row cannot misroute -- the AD stays in its all-zero FQ-0-trap state on
-  encoder failure.  modify_next_action only mutates the AD; key bytes are
-  immutable per the ABI doc.  Also drops the __maybe_unused attr from
-  cc_encode_ad now that it has real callers, and adds the cross-TU
-  accessor body.
-- fman_pcd_kg.c: implement fman_pcd_kg_attach_cc() that resolves the tree's
-  group-table offset, masks to the low 24 MURAM-addressable bits, and calls
-  keygen_scheme_set_ccbs() under pcd->lock to update only KGSE_CCBS.
-
-Verification on Cobalt 100 ARM64 (make Image modules, kernel 6.18.28):
-  ffff8000809beb68 T keygen_scheme_set_ccbs
-  ffff8000809bff28 T fman_pcd_kg_attach_cc
-  ffff8000809c0478 t cc_encode_ad         (no longer DCE'd)
-  ffff8000809c0550 T fman_pcd_cc_node_modify_next_action
-  ffff8000809c0618 T fman_pcd_cc_node_add_key
-  ffff8000809c0db8 T fman_pcd_cc_tree_group_table_off
-  + __ksymtab entries for all four public ABI exports.
-
-Locking summary:
-- node->lock (spinlock_t): protects per-node match-table/AD-table writes
-  against softirq-context flow-table updates from PR15+.
-- pcd->lock (mutex): held across keygen_scheme_set_ccbs to serialise the
-  AR-indirect-window read-modify-write against any other scheme writer.
-
-ABI: no change to <linux/fsl/fman_pcd.h>; this body lights up entry points
-whose contracts the header already documents.
-
-Refs: ASK2 spec v1.1, RM 8.7.4 (KGSE_CCBS), 8.7.4.2 (CC match table),
-      8.7.4.3 Table 8-119 (AD record), PR14c-body-3 (commit 7ebbb4e8c).
 ---
+ .../net/ethernet/freescale/fman/fman_keygen.c |  67 +++++++++
+ .../freescale/fman/fman_keygen_internal.h     |  12 ++
+ .../net/ethernet/freescale/fman/fman_pcd_cc.c | 139 ++++++++++++++++--
+ .../freescale/fman/fman_pcd_internal.h        |  11 ++
+ .../net/ethernet/freescale/fman/fman_pcd_kg.c |  68 +++++++--
+ 5 files changed, 272 insertions(+), 25 deletions(-)
+
 diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
 index fe5710c..ffd4072 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
@@ -437,5 +398,3 @@ index 366537b..2b9729c 100644
  }
  EXPORT_SYMBOL_GPL(fman_pcd_kg_attach_cc);
  
--- 
-2.43.0
