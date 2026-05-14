@@ -42,11 +42,14 @@ architecture source-of-truth. When the two disagree, **the spec wins**
 | 14b-prep | M2.5b-prep — KG public API stub (`fman_pcd_kg.c`) + `keygen_scheme_setup`/`keygen_bind_port_to_schemes` exports | ask20 | landed (fda5a03) |
 | 14b-body | M2.5b-body — KG real KGSE_* programming (IPv4 5-tuple) | ask20 | landed (00d6f16) |
 | 14c-prep | M2.5c-prep — CC public API stub (`fman_pcd_cc.c` with 6 -EOPNOTSUPP stubs) + `fman_pcd_action` tagged-union + extract/key-table types in `<linux/fsl/fman_pcd.h>` | ask20 | landed (c613714) |
-| 14c-body | M2.5c-body — CC real MURAM-resident tree-group-table programming (RM 8.7.4.1), classification-node record packing (RM 8.7.4.2), action-template encoding (RM 8.7.4.3), kunit, also replaces `fman_pcd_kg_attach_cc()` -EOPNOTSUPP stub | ask20 | not started |
-| 14d | M2.5d — Header manipulation (`fman_pcd_manip.c`) | ask20 | not started |
-| 14e | M2.5e — Policer profiles (`fman_pcd_plcr.c`) | ask20 | not started |
-| 14f | M2.5f — Parser + Replicator (`fman_pcd_prs.c`, `fman_pcd_replic.c`) | ask20 | not started |
-| 14g | M2.5g — End-to-end wire-up — `ask_hostcmd.c` calls PCD API; first IPv4 TCP flow traverses silicon | ask20 | not started |
+| 14c-body | M2.5c-body — CC real MURAM-resident tree-group-table programming (RM 8.7.4.1), classification-node record packing (RM 8.7.4.2), action-template encoding (RM 8.7.4.3), kunit, also replaces `fman_pcd_kg_attach_cc()` -EOPNOTSUPP stub | ask20 | not started — needs RM §8.7.4 |
+| 14d-prep | M2.5d-prep — manip public API stub (`fman_pcd_manip.c`) + `fman_pcd_manip_params` tagged-union (NAT_V4, NAT_V6, VLAN_PUSH, VLAN_POP, TTL_DEC) in `<linux/fsl/fman_pcd.h>` | ask20 | landed (ad52365, combined patch 0008) |
+| 14d-body | M2.5d-body — manip real MURAM template programming (RM 8.7.5), auto-checksum recompute (RM 8.7.5.4), kunit | ask20 | not started — needs RM §8.7.5 |
+| 14e-prep | M2.5e-prep — plcr public API stub (`fman_pcd_plcr.c`) + `fman_pcd_plcr_params` (CIR/CBS/EIR/EBS, color mode) in `<linux/fsl/fman_pcd.h>` | ask20 | landed (ad52365, combined patch 0008) |
+| 14e-body | M2.5e-body — plcr real trTCM profile programming per RM 8.7.6, runtime rate update, kunit | ask20 | not started — needs RM §8.7.6 |
+| 14f-prep | M2.5f-prep — replicator + parser public API stubs (`fman_pcd_replic.c`, `fman_pcd_prs.c`) + `fman_pcd_replic_member` in `<linux/fsl/fman_pcd.h>` | ask20 | landed (ad52365, combined patch 0008) |
+| 14f-body | M2.5f-body — replicator real MURAM group table (RM 8.7.7), parser HXS pass-through config (RM 8.7.2), kunit | ask20 | not started — needs RM §8.7.7 + §8.7.2 |
+| 14g | M2.5g — End-to-end wire-up — `ask_hostcmd.c` calls PCD API; first IPv4 TCP flow traverses silicon | ask20 | blocked on 14c-body + 14d-body + 14e-body + 14f-body |
 | 15  | M3.x — remaining flow types (NAT/PAT/v6/bridge)  | ask20  | blocked on PR14g |
 | 16  | M4.x — `ask_xfrm.c` + CAAM packet-mode IPsec     | ask20  | blocked on PR14g |
 | 17  | M5.1 — `askd` (sd-event + libmnl)                | ask20  | blocked on PR14g |
