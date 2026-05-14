@@ -1,8 +1,9 @@
 # ASK2 implementation plan — PR breakdown
 
 **Status:** active. Drives the implementation of ASK2 per
-[`specs/ask2-rewrite-spec.md`](../specs/ask2-rewrite-spec.md) (v1.0,
-2026-05-14). All PRs target the `ask20` branch unless noted otherwise.
+[`specs/ask2-rewrite-spec.md`](../specs/ask2-rewrite-spec.md) (v1.1,
+2026-05-14 — provenance relaxation). All PRs target the `ask20` branch
+unless noted otherwise.
 
 This document is the working implementation plan; the spec is the
 architecture source-of-truth. When the two disagree, **the spec wins**
@@ -42,13 +43,13 @@ architecture source-of-truth. When the two disagree, **the spec wins**
 | 14b-prep | M2.5b-prep — KG public API stub (`fman_pcd_kg.c`) + `keygen_scheme_setup`/`keygen_bind_port_to_schemes` exports | ask20 | landed (fda5a03) |
 | 14b-body | M2.5b-body — KG real KGSE_* programming (IPv4 5-tuple) | ask20 | landed (00d6f16) |
 | 14c-prep | M2.5c-prep — CC public API stub (`fman_pcd_cc.c` with 6 -EOPNOTSUPP stubs) + `fman_pcd_action` tagged-union + extract/key-table types in `<linux/fsl/fman_pcd.h>` | ask20 | landed (c613714) |
-| 14c-body | M2.5c-body — CC real MURAM-resident tree-group-table programming (RM 8.7.4.1), classification-node record packing (RM 8.7.4.2), action-template encoding (RM 8.7.4.3), kunit, also replaces `fman_pcd_kg_attach_cc()` -EOPNOTSUPP stub | ask20 | not started — needs RM §8.7.4 |
+| 14c-body | M2.5c-body — CC real MURAM-resident tree-group-table programming (RM 8.7.4.1), classification-node record packing (RM 8.7.4.2), action-template encoding (RM 8.7.4.3), kunit, also replaces `fman_pcd_kg_attach_cc()` -EOPNOTSUPP stub | ask20 | not started — unblocked by spec v1.1 (cross-ref SDK `fm_cc.c` + we-are-mono cdx classifier sources) |
 | 14d-prep | M2.5d-prep — manip public API stub (`fman_pcd_manip.c`) + `fman_pcd_manip_params` tagged-union (NAT_V4, NAT_V6, VLAN_PUSH, VLAN_POP, TTL_DEC) in `<linux/fsl/fman_pcd.h>` | ask20 | landed (ad52365, combined patch 0008) |
-| 14d-body | M2.5d-body — manip real MURAM template programming (RM 8.7.5), auto-checksum recompute (RM 8.7.5.4), kunit | ask20 | not started — needs RM §8.7.5 |
+| 14d-body | M2.5d-body — manip real MURAM template programming (RM 8.7.5), auto-checksum recompute (RM 8.7.5.4), kunit | ask20 | not started — unblocked by spec v1.1 (cross-ref SDK `fm_manip.c`) |
 | 14e-prep | M2.5e-prep — plcr public API stub (`fman_pcd_plcr.c`) + `fman_pcd_plcr_params` (CIR/CBS/EIR/EBS, color mode) in `<linux/fsl/fman_pcd.h>` | ask20 | landed (ad52365, combined patch 0008) |
-| 14e-body | M2.5e-body — plcr real trTCM profile programming per RM 8.7.6, runtime rate update, kunit | ask20 | not started — needs RM §8.7.6 |
+| 14e-body | M2.5e-body — plcr real trTCM profile programming per RM 8.7.6, runtime rate update, kunit | ask20 | not started — unblocked by spec v1.1 (cross-ref SDK `fm_plcr.c`) |
 | 14f-prep | M2.5f-prep — replicator + parser public API stubs (`fman_pcd_replic.c`, `fman_pcd_prs.c`) + `fman_pcd_replic_member` in `<linux/fsl/fman_pcd.h>` | ask20 | landed (ad52365, combined patch 0008) |
-| 14f-body | M2.5f-body — replicator real MURAM group table (RM 8.7.7), parser HXS pass-through config (RM 8.7.2), kunit | ask20 | not started — needs RM §8.7.7 + §8.7.2 |
+| 14f-body | M2.5f-body — replicator real MURAM group table (RM 8.7.7), parser HXS pass-through config (RM 8.7.2), kunit | ask20 | not started — unblocked by spec v1.1 (cross-ref SDK `fm_replic.c` + `fm_prs.c`/`fman_prs.c`) |
 | 14g | M2.5g — End-to-end wire-up — `ask_hostcmd.c` calls PCD API; first IPv4 TCP flow traverses silicon | ask20 | blocked on 14c-body + 14d-body + 14e-body + 14f-body |
 | 15  | M3.x — remaining flow types (NAT/PAT/v6/bridge)  | ask20  | blocked on PR14g |
 | 16  | M4.x — `ask_xfrm.c` + CAAM packet-mode IPsec     | ask20  | blocked on PR14g |
@@ -669,13 +670,22 @@ not opcode-dispatch insertion. PR14's heading below is preserved for
 historical context but the implementation strategy underneath it has
 changed.
 
-### §12.9 — Decision: Option C-clean-room (2026-05-14)
+### §12.9 — Decision: Option C-modernize (2026-05-14, relaxed in spec v1.1)
 
 **Status:** decided. The C / D / E decision tree opened by PR14-prep
 (see prior revision of this plan) has been resolved in favour of
-**Option C-clean-room**: write a new FMan PCD subsystem from scratch
-using only the LS1046A Reference Manual chapter 8 as reference,
-explicitly **not** forward-porting any deleted NXP SDK code.
+**Option C-modernize**: write a new FMan PCD subsystem of ~7800 LOC
+modern kernel C. **Spec v1.1 (same day) relaxed the original
+"clean-room" provenance constraint** — both the archived NXP SDK PCD
+tree at `mihakralj/kernel-ls1046a-build@464df181` (dual-licensed
+BSD-3-or-GPL-2.0) and the `we-are-mono/ASK` legacy stack (GPL) are
+GPL-compatible and **usable as silicon-behaviour references**. What
+remains rejected is the SDK's *architecture* (`handle_t` opaque ABI,
+`fsl-ncsw` OS shim, AMP multi-OS IPC, `TRACE_RTOS` macros, `fm_ehash.c`
+custom hash, nested `Peripherals/FM/Pcd/` layout, 16-flavour
+`t_FmPcdCcNextEngineParams` hierarchy) — not its silicon facts. The
+LS1046A Reference Manual chapter 8 remains authoritative when SDK
+sources disagree or omit a field.
 
 **Authoritative reference:** spec §12.9 (decision evidence + cost
 survey) and **spec §13** (full architectural design — module
@@ -687,8 +697,8 @@ into seven sequential PRs (PR14a–g).
 
 | Path | LOC | Calendar | Hits §11.1 perf gates? | Vendor-code risk |
 |---|---|---|---|---|
-| C-forward-port (SDK port) | 15k–30k kept | 4 mo | Yes | High — license audit + ncsw shim removal + AMP IPC removal |
-| **C-clean-room (chosen)** | **~7,800 LOC new** | **~5 weeks code + 4–6 weeks silicon bring-up** | **Yes** | **None — clean-room from RM only** |
+| C-forward-port (SDK port) | 15k–30k kept | 4 mo | Yes | High — ncsw shim removal + AMP IPC removal carried forward |
+| **C-modernize (chosen, v1.1)** | **~7,800 LOC new** | **~5 weeks code + 4–6 weeks silicon bring-up** | **Yes** | **None — SDK is GPL; we reference silicon facts and rewrite architecture** |
 | D (sw fallback) | ~500 | 1 week | No (1–2 Gbps cap) | None |
 | E (cancel) | 0 | 0 | N/A | N/A |
 
@@ -704,13 +714,20 @@ into seven sequential PRs (PR14a–g).
   `flow add` → packet traverses 210 fast path → CPU < 5 % at ≥ 2 Gbps
   on real Mono Gateway DK silicon.
 
-**Clean-room provenance discipline (risk #12 in spec §16):** every
-non-trivial function in PR14a–g must carry a comment citing its RM
-section (e.g. `/* RM §8.7.3.2 — KeyGen scheme extract masking */`).
-No file in `drivers/net/ethernet/freescale/fman/fman_pcd*.c` may be
-authored by anyone who has read the deleted SDK PCD tree at
-`mihakralj/kernel-ls1046a-build` ref `464df181`. Reviewer assignment
-for risk #12 is open question §17/8 in the spec.
+**Modernization discipline (risk #12 in spec §16, v1.1 reframed):**
+every non-trivial function in PR14a–g must carry a comment citing its
+primary RM section (e.g. `/* RM §8.7.3.2 — KeyGen scheme extract
+masking */`). Where SDK or `we-are-mono` source was consulted to
+disambiguate an RM ambiguity or to verify register-write ordering, the
+comment must additionally name the source file (e.g. `/* RM §8.7.4.2
++ cross-ref SDK fm_cc.c MatchTableTryLockAcquire() for polling-loop
+semantics */`). **Reviewer focus** (per risk #12 mitigation) is
+modern-kernel idiom enforcement — typed structs (no `handle_t`), RCU
+correctness, `devm_*` lifetimes, `kmalloc`/`ioremap`/`readl`/`writel`
+direct calls (no OS-shim wrapper layer), `mutex`/`spinlock`/`rcu`
+primitives, tracepoints over `printk`, `<linux/crc64.h>` over inline
+tables. Open question #8 (the v1.0 "clean-room reviewer assignment"
+question) is **closed** in v1.1.
 
 ---
 
@@ -877,8 +894,8 @@ Kernel-side commit `965b9d9f4` on `/var/tmp/pr14a/linux-6.18.28`.
 **Files added/changed:**
 
 - `drivers/net/ethernet/freescale/fman/fman_pcd_cc.c` (new, ~157 LOC) —
-  six `-EOPNOTSUPP` / `ERR_PTR(-EOPNOTSUPP)` stubs with clean-room
-  provenance comment citing RM §8.7.4.1–8.7.4.3. Every stub validates
+  six `-EOPNOTSUPP` / `ERR_PTR(-EOPNOTSUPP)` stubs with RM-citation
+  provenance comment (RM §8.7.4.1–8.7.4.3). Every stub validates
   inputs (NULL, `num_of_groups 1..8`, `extract->size 1..56`) before
   returning the sentinel. NULL-safe destroy paths.
 - `include/linux/fsl/fman_pcd.h` (+281 LOC public ABI):
@@ -1290,8 +1307,17 @@ Per spec §18:
   and the spec received a §12.8 "Confirmed hardware behaviour" appendix
   in v0.8.
 - PR14-prep (2026-05-14) discovered the mainline FMan PCD gap and
-  prompted the C/D/E decision. Decision **Option C-clean-room** was
-  taken the same day; spec §12.9 records the finding and spec §13
-  specifies the new ~7800 LOC clean-room FMan PCD subsystem
-  (`0004-fman-pcd-subsystem.patch`). PR14 was expanded into PR14a–g
-  in this document, one per spec §13 module.
+  prompted the C/D/E decision. Decision **Option C** was taken the
+  same day; spec §12.9 records the finding and spec §13 specifies
+  the new ~7800 LOC FMan PCD subsystem (`0004-fman-pcd-subsystem.patch`).
+  PR14 was expanded into PR14a–g in this document, one per spec §13
+  module. **Spec v1.1 (2026-05-14)** relaxed the original clean-room
+  provenance constraint: NXP SDK + we-are-mono are both GPL and
+  usable as silicon-behaviour references; only the SDK's architecture
+  (handle_t / ncsw / AMP IPC / nested Peripherals/ layout) remains
+  rejected. This unblocks all four PR14 body PRs immediately —
+  sessions without the (NDA) LS1046A Reference Manual loaded can
+  still author bodies by cross-referencing the archived SDK alongside
+  whatever RM excerpts are available, with each non-trivial function
+  citing its primary RM section and any SDK/we-are-mono cross-ref in
+  a header comment.
