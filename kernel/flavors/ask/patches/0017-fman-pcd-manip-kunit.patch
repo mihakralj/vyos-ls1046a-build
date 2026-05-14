@@ -1,0 +1,399 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+index 46af621fd..5c1b916a7 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+@@ -790,3 +790,14 @@ unsigned long fman_pcd_manip_hmtd_off(const struct fman_pcd_manip *manip)
+ 		return 0;
+ 	return manip->hmtd_off;
+ }
++
++#if IS_ENABLED(CONFIG_FSL_FMAN_PCD_KUNIT_TEST)
++/*
++ * KUnit suite lives in tests/fman_pcd_manip_test.c and is #include'd
++ * here so the test functions have static-scope access to the
++ * manip_encode_*() helpers and to the layout #defines (FMAN_PCD_HMTD_*,
++ * FMAN_PCD_HMCT_*, FMAN_PCD_HMCD_*).  Mirrors the trailer-include
++ * idiom established by fman_pcd_cc.c (PR14c-body-5, patch 0013).
++ */
++#include "tests/fman_pcd_manip_test.c"
++#endif /* CONFIG_FSL_FMAN_PCD_KUNIT_TEST */
+diff --git a/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
+index 6794e0783..090b96dee 100644
+--- a/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
++++ b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
+@@ -190,11 +190,26 @@ static void cc_encode_ad_replicate_test(struct kunit *test)
+ 
+ static void cc_encode_ad_manipulate_test(struct kunit *test)
+ {
++	/*
++	 * PR14d-body-3 regression canary: the MANIPULATE arm of
++	 * cc_encode_ad() now returns -EINVAL on NULL manip (was
++	 * -EOPNOTSUPP before body-3 wired the arm).  If anyone
++	 * accidentally re-introduces -EOPNOTSUPP here, this test
++	 * fails.
++	 *
++	 * Byte-perfect positive-path coverage of the MANIPULATE
++	 * arm (RESULT_CF|NADEN nia, fqid=next_fqid, res=hmtd_off)
++	 * lives in tests/fman_pcd_manip_test.c where struct
++	 * fman_pcd_manip is in static scope -- it is opaque from
++	 * the fman_pcd_cc TU.
++	 */
+ 	void __iomem *ad = ad_scratch_alloc(test);
+-	struct fman_pcd_action act = { .type = FMAN_PCD_ACTION_MANIPULATE };
+-	int err = cc_encode_ad(&act, ad);
++	struct fman_pcd_action act = {
++		.type = FMAN_PCD_ACTION_MANIPULATE,
++		.manipulate = { .manip = NULL, .next_fqid = 1 },
++	};
+ 
+-	KUNIT_EXPECT_EQ(test, err, -EOPNOTSUPP);
++	KUNIT_EXPECT_EQ(test, cc_encode_ad(&act, ad), -EINVAL);
+ }
+ 
+ /* ---- TEST: NULL args return -EINVAL ----------------------------- */
+diff --git a/drivers/net/ethernet/freescale/fman/tests/fman_pcd_manip_test.c b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_manip_test.c
+new file mode 100644
+index 000000000..8b27e3728
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_manip_test.c
+@@ -0,0 +1,340 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * KUnit suite for the FMan PCD Header Manipulation HMCT encoders.
++ *
++ * This file is #include'd from fman_pcd_manip.c under
++ * CONFIG_FSL_FMAN_PCD_KUNIT_TEST so the tests reach the static
++ * manip_encode_*() helpers and the struct fman_pcd_manip layout
++ * directly.  Coverage:
++ *
++ *   - NAT_V4 SA+DA+L4 ports  (IPv4_UPDATE + TCP_UDP_UPDATE words,
++ *                             auto-CS_CALC bit, BE payload order)
++ *   - NAT_V4 SA-only SNAT    (regression canary for the most common
++ *                             ASK2 fast-flow path: stateful NAT44)
++ *   - NAT_V6 SA-only         (16-byte address payload, BE byte order)
++ *   - VLAN_PUSH              (GENERIC_INSRT op=0x02, offset=12, size=4,
++ *                             inline TPID+TCI payload)
++ *   - VLAN_POP               (GENERIC_RMV op=0x01, offset=12, size=4,
++ *                             no payload)
++ *   - TTL_DEC                (IPv4_UPDATE op + TTL bit, no payload)
++ *   - empty-params reject    (NAT_V4 with no rewrite_* flags must
++ *                             return NULL from the encoder so
++ *                             fman_pcd_manip_create() rolls back)
++ *   - HMCD_LAST termination  (the OR-in of 0x00800000 on the last
++ *                             command word, performed by
++ *                             fman_pcd_manip_create() AFTER the
++ *                             encoder returns - simulated here)
++ *
++ * The encoders all take a struct fman_pcd_manip * and read manip->hmct.
++ * Tests construct a minimal stub fman_pcd_manip on the stack with
++ * .hmct pointing at a kunit_kzalloc'd 64-byte scratch buffer (cast
++ * void __iomem __force *), then call the static encoder and read back
++ * via ioread32be / raw byte index.  This is the same scaffolding idiom
++ * used by fman_pcd_cc_test.c (PR14c-body-5).
++ *
++ * Authoritative reference: LS1046A RM 8.7.5 (HMTD/HMCT layout) and
++ * RM 8.7.5.4 (auto checksum recompute).
++ */
++#include <kunit/test.h>
++#include <linux/io.h>
++#include <linux/kernel.h>
++#include <linux/types.h>
++
++/* Allocate a 64-byte HMCT scratch buffer (matches FMAN_PCD_HMCT_SIZE). */
++static void __iomem *hmct_scratch_alloc(struct kunit *test)
++{
++	void *buf = kunit_kzalloc(test, FMAN_PCD_HMCT_SIZE, GFP_KERNEL);
++
++	KUNIT_ASSERT_NOT_NULL(test, buf);
++	return (void __iomem __force *)buf;
++}
++
++static u32 hmct_read_be32(void __iomem *hmct, unsigned int off)
++{
++	return ioread32be(hmct + off);
++}
++
++/* ---- TEST: NAT_V4 SA+DA+L4 ports, byte-perfect against RM 8.7.5 -- */
++static void manip_encode_nat_v4_full_test(struct kunit *test)
++{
++	void __iomem *hmct = hmct_scratch_alloc(test);
++	struct fman_pcd_manip stub = { .hmct = hmct };
++	struct fman_pcd_manip_params p = {
++		.type = FMAN_PCD_MANIP_NAT_V4,
++		.nat_v4 = {
++			.rewrite_sa    = true,
++			.rewrite_da    = true,
++			.rewrite_sport = true,
++			.rewrite_dport = true,
++			.new_sa    = cpu_to_be32(0x0a000001),  /* 10.0.0.1 */
++			.new_da    = cpu_to_be32(0xc0a80164),  /* 192.168.1.100 */
++			.new_sport = cpu_to_be16(0x1234),
++			.new_dport = cpu_to_be16(0x5678),
++		},
++	};
++	void __iomem *last_cmd;
++	u8 op = 0;
++
++	last_cmd = manip_encode_nat_v4(&stub, &p, &op);
++	KUNIT_ASSERT_NOT_NULL(test, last_cmd);
++	KUNIT_EXPECT_EQ(test, op, (u8)FMAN_PCD_HMAN_OC_IP_MANIP);
++
++	/*
++	 * Expected HMCT layout (full path):
++	 *   0x00: IPV4_UPDATE | SRC | DST | CS_CALC
++	 *   0x04: new_sa  (4 bytes BE)
++	 *   0x08: new_da  (4 bytes BE)
++	 *   0x0c: TCP_UDP_UPDATE | L4_SRC | L4_DST
++	 *   0x10: (sport<<16) | dport
++	 */
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x00),
++		((u32)FMAN_PCD_HMCD_OP_IPV4_UPDATE
++			<< FMAN_PCD_HMCD_OC_SHIFT) |
++		FMAN_PCD_HMCD_IPV4_UPDATE_SRC |
++		FMAN_PCD_HMCD_IPV4_UPDATE_DST |
++		FMAN_PCD_HMCD_IP_L4_CS_CALC);
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x04), 0x0a000001u);
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x08), 0xc0a80164u);
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x0c),
++		((u32)FMAN_PCD_HMCD_OP_TCP_UDP_UPDATE
++			<< FMAN_PCD_HMCD_OC_SHIFT) |
++		FMAN_PCD_HMCD_L4_UPDATE_SRC |
++		FMAN_PCD_HMCD_L4_UPDATE_DST);
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x10),
++			(0x1234u << 16) | 0x5678u);
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x14), 0u);
++
++	/* last_cmd must point at the L4 command word at offset 0x0c. */
++	KUNIT_EXPECT_PTR_EQ(test, last_cmd, hmct + 0x0c);
++}
++
++/* ---- TEST: NAT_V4 SA-only SNAT regression canary ---------------- */
++/*
++ * This is the most-likely future-rot failure mode for ASK2: the
++ * stateful NAT44 fast path repeatedly rebuilds NAT_V4 manips with
++ * SA-only rewrites (no DA, no ports - the L4 ports are left alone
++ * because conntrack already tracked the original 5-tuple before the
++ * manip applied).  The encoded HMCT MUST be exactly two BE words:
++ *
++ *   0x00: 0x0C040040  = (OP_IPV4_UPDATE << 24) | UPDATE_SRC | CS_CALC
++ *   0x04: new_sa BE
++ *
++ * If the encoder ever stops setting CS_CALC on an SA-only rewrite the
++ * silicon will forward frames with a stale IPv4 header checksum and
++ * EVERY downstream switch will drop them.  This test makes that
++ * regression a build-time failure.
++ */
++static void manip_encode_nat_v4_snat_canary_test(struct kunit *test)
++{
++	void __iomem *hmct = hmct_scratch_alloc(test);
++	struct fman_pcd_manip stub = { .hmct = hmct };
++	struct fman_pcd_manip_params p = {
++		.type = FMAN_PCD_MANIP_NAT_V4,
++		.nat_v4 = {
++			.rewrite_sa = true,
++			.new_sa = cpu_to_be32(0xc0a80101),  /* 192.168.1.1 */
++		},
++	};
++	void __iomem *last_cmd;
++	u8 op = 0;
++	u32 expected;
++
++	last_cmd = manip_encode_nat_v4(&stub, &p, &op);
++	KUNIT_ASSERT_NOT_NULL(test, last_cmd);
++	KUNIT_EXPECT_EQ(test, op, (u8)FMAN_PCD_HMAN_OC_IP_MANIP);
++
++	expected = ((u32)FMAN_PCD_HMCD_OP_IPV4_UPDATE
++			<< FMAN_PCD_HMCD_OC_SHIFT) |
++		   FMAN_PCD_HMCD_IPV4_UPDATE_SRC |
++		   FMAN_PCD_HMCD_IP_L4_CS_CALC;
++	KUNIT_EXPECT_EQ(test, expected, 0x0c040040u);  /* silicon-fact pin */
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x00), expected);
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x04), 0xc0a80101u);
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x08), 0u);
++
++	/* last_cmd must be the IPv4 command word at offset 0x00. */
++	KUNIT_EXPECT_PTR_EQ(test, last_cmd, hmct + 0x00);
++}
++
++/* ---- TEST: NAT_V6 SA-only ---------------------------------------- */
++static void manip_encode_nat_v6_test(struct kunit *test)
++{
++	void __iomem *hmct = hmct_scratch_alloc(test);
++	struct fman_pcd_manip stub = { .hmct = hmct };
++	struct fman_pcd_manip_params p = {
++		.type = FMAN_PCD_MANIP_NAT_V6,
++		.nat_v6 = {
++			.rewrite_sa = true,
++			/* 2001:db8::1 in network byte order */
++			.new_sa = {
++				0x20, 0x01, 0x0d, 0xb8,
++				0x00, 0x00, 0x00, 0x00,
++				0x00, 0x00, 0x00, 0x00,
++				0x00, 0x00, 0x00, 0x01,
++			},
++		},
++	};
++	void __iomem *last_cmd;
++	u8 op = 0;
++
++	last_cmd = manip_encode_nat_v6(&stub, &p, &op);
++	KUNIT_ASSERT_NOT_NULL(test, last_cmd);
++	KUNIT_EXPECT_EQ(test, op, (u8)FMAN_PCD_HMAN_OC_IP_MANIP);
++
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x00),
++		((u32)FMAN_PCD_HMCD_OP_IPV6_UPDATE
++			<< FMAN_PCD_HMCD_OC_SHIFT) |
++		FMAN_PCD_HMCD_IPV6_UPDATE_SRC |
++		FMAN_PCD_HMCD_IP_L4_CS_CALC);
++	/* 16-byte address as 4 BE-32 words: 2001:0db8 :: :0001. */
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x04), 0x20010db8u);
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x08), 0u);
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x0c), 0u);
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x10), 1u);
++
++	KUNIT_EXPECT_PTR_EQ(test, last_cmd, hmct + 0x00);
++}
++
++/* ---- TEST: VLAN_PUSH ------------------------------------------- */
++static void manip_encode_vlan_push_test(struct kunit *test)
++{
++	void __iomem *hmct = hmct_scratch_alloc(test);
++	struct fman_pcd_manip stub = { .hmct = hmct };
++	struct fman_pcd_manip_params p = {
++		.type = FMAN_PCD_MANIP_VLAN_PUSH,
++		.vlan_push = {
++			.tpid = cpu_to_be16(0x8100),
++			.tci  = cpu_to_be16(0x0064),  /* VID 100, PCP 0 */
++		},
++	};
++	void __iomem *last_cmd;
++	u8 op = 0;
++	u32 expected_cmd;
++
++	last_cmd = manip_encode_vlan_push(&stub, &p, &op);
++	KUNIT_ASSERT_NOT_NULL(test, last_cmd);
++	KUNIT_EXPECT_EQ(test, op, (u8)FMAN_PCD_HMAN_OC);
++
++	expected_cmd = ((u32)FMAN_PCD_HMCD_OP_GENERIC_INSRT
++			<< FMAN_PCD_HMCD_OC_SHIFT) |
++		       ((u32)FMAN_PCD_VLAN_TAG_OFFSET
++			<< FMAN_PCD_HMCD_INSRT_OFFSET_SHIFT) |
++		       ((u32)FMAN_PCD_VLAN_TAG_SIZE
++			<< FMAN_PCD_HMCD_INSRT_SIZE_SHIFT);
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x00), expected_cmd);
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x04),
++			(0x8100u << 16) | 0x0064u);
++
++	KUNIT_EXPECT_PTR_EQ(test, last_cmd, hmct + 0x00);
++}
++
++/* ---- TEST: VLAN_POP -------------------------------------------- */
++static void manip_encode_vlan_pop_test(struct kunit *test)
++{
++	void __iomem *hmct = hmct_scratch_alloc(test);
++	struct fman_pcd_manip stub = { .hmct = hmct };
++	void __iomem *last_cmd;
++	u8 op = 0;
++	u32 expected_cmd;
++
++	last_cmd = manip_encode_vlan_pop(&stub, &op);
++	KUNIT_ASSERT_NOT_NULL(test, last_cmd);
++	KUNIT_EXPECT_EQ(test, op, (u8)FMAN_PCD_HMAN_OC);
++
++	expected_cmd = ((u32)FMAN_PCD_HMCD_OP_GENERIC_RMV
++			<< FMAN_PCD_HMCD_OC_SHIFT) |
++		       ((u32)FMAN_PCD_VLAN_TAG_OFFSET
++			<< FMAN_PCD_HMCD_RMV_OFFSET_SHIFT) |
++		       ((u32)FMAN_PCD_VLAN_TAG_SIZE
++			<< FMAN_PCD_HMCD_RMV_SIZE_SHIFT);
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x00), expected_cmd);
++	/* No inline payload for RMV. */
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x04), 0u);
++
++	KUNIT_EXPECT_PTR_EQ(test, last_cmd, hmct + 0x00);
++}
++
++/* ---- TEST: TTL_DEC --------------------------------------------- */
++static void manip_encode_ttl_dec_test(struct kunit *test)
++{
++	void __iomem *hmct = hmct_scratch_alloc(test);
++	struct fman_pcd_manip stub = { .hmct = hmct };
++	void __iomem *last_cmd;
++	u8 op = 0;
++	u32 expected_cmd;
++
++	last_cmd = manip_encode_ttl_dec(&stub, &op);
++	KUNIT_ASSERT_NOT_NULL(test, last_cmd);
++	KUNIT_EXPECT_EQ(test, op, (u8)FMAN_PCD_HMAN_OC_IP_MANIP);
++
++	expected_cmd = ((u32)FMAN_PCD_HMCD_OP_IPV4_UPDATE
++			<< FMAN_PCD_HMCD_OC_SHIFT) |
++		       FMAN_PCD_HMCD_IPV4_UPDATE_TTL;
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x00), expected_cmd);
++	KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x04), 0u);
++
++	KUNIT_EXPECT_PTR_EQ(test, last_cmd, hmct + 0x00);
++}
++
++/* ---- TEST: empty NAT_V4 params return NULL --------------------- */
++static void manip_encode_nat_v4_empty_test(struct kunit *test)
++{
++	void __iomem *hmct = hmct_scratch_alloc(test);
++	struct fman_pcd_manip stub = { .hmct = hmct };
++	struct fman_pcd_manip_params p = {
++		.type = FMAN_PCD_MANIP_NAT_V4,
++		.nat_v4 = { 0 },  /* no rewrite flags set */
++	};
++	u8 op = 0;
++	void __iomem *last_cmd;
++
++	last_cmd = manip_encode_nat_v4(&stub, &p, &op);
++	KUNIT_EXPECT_PTR_EQ(test, last_cmd, NULL);
++}
++
++/* ---- TEST: HMCD_LAST OR-in (silicon walker termination) ------- */
++/*
++ * fman_pcd_manip_create() ORs HMCD_LAST=0x00800000 into the last
++ * command word AFTER the encoder returns.  This test simulates that
++ * step on an encoder-produced HMCT to verify the bit position is
++ * preserved against accidental drift in the FMAN_PCD_HMCD_LAST macro.
++ */
++static void manip_hmcd_last_or_test(struct kunit *test)
++{
++	void __iomem *hmct = hmct_scratch_alloc(test);
++	struct fman_pcd_manip stub = { .hmct = hmct };
++	void __iomem *last_cmd;
++	u8 op = 0;
++	u32 base, terminated;
++
++	last_cmd = manip_encode_ttl_dec(&stub, &op);
++	KUNIT_ASSERT_NOT_NULL(test, last_cmd);
++
++	base = ioread32be(last_cmd);
++	iowrite32be(base | FMAN_PCD_HMCD_LAST, last_cmd);
++	terminated = ioread32be(last_cmd);
++
++	KUNIT_EXPECT_EQ(test, terminated & FMAN_PCD_HMCD_LAST,
++			FMAN_PCD_HMCD_LAST);
++	KUNIT_EXPECT_EQ(test, terminated & ~FMAN_PCD_HMCD_LAST, base);
++	KUNIT_EXPECT_EQ(test, FMAN_PCD_HMCD_LAST, 0x00800000u);
++}
++
++static struct kunit_case fman_pcd_manip_test_cases[] = {
++	KUNIT_CASE(manip_encode_nat_v4_full_test),
++	KUNIT_CASE(manip_encode_nat_v4_snat_canary_test),
++	KUNIT_CASE(manip_encode_nat_v6_test),
++	KUNIT_CASE(manip_encode_vlan_push_test),
++	KUNIT_CASE(manip_encode_vlan_pop_test),
++	KUNIT_CASE(manip_encode_ttl_dec_test),
++	KUNIT_CASE(manip_encode_nat_v4_empty_test),
++	KUNIT_CASE(manip_hmcd_last_or_test),
++	{}
++};
++
++static struct kunit_suite fman_pcd_manip_test_suite = {
++	.name = "fman_pcd_manip",
++	.test_cases = fman_pcd_manip_test_cases,
++};
++
++kunit_test_suite(fman_pcd_manip_test_suite);
