@@ -41,11 +41,8 @@ and NextStepAd for silicon-fact selection-table origin.
 
 Signed-off-by: ASK2 PR14c-body-3 <ask2@vyos.local>
 ---
- .../net/ethernet/freescale/fman/fman_pcd_cc.c | 153 ++++++++++++++++--
- 1 file changed, 144 insertions(+), 9 deletions(-)
-
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
-index dd8cd4d97..e3ac023aa 100644
+index 84e9b01..e214440 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 @@ -1,15 +1,25 @@
@@ -84,8 +81,8 @@ index dd8cd4d97..e3ac023aa 100644
   * Authoritative reference
   * -----------------------
 @@ -119,6 +129,39 @@
- #define FMAN_PCD_CC_KEY_TABLE_ALIGN	16
- #define FMAN_PCD_CC_AD_TABLE_ALIGN	16
+ #define FMAN_PCD_CC_KEY_TABLE_ALIGN		16
+ #define FMAN_PCD_CC_AD_TABLE_ALIGN		16
  
 +/* ------------------------------------------------------------------ */
 +/* Action-descriptor (AD) record field bits — RM 8.7.4.3 Table 8-119. */
@@ -113,18 +110,18 @@ index dd8cd4d97..e3ac023aa 100644
 +#define FMAN_PCD_AD_NIA_TYPE_RESULT_CF	0x00000000u	/* RESULT_CONTRL_FLOW */
 +#define FMAN_PCD_AD_NIA_TYPE_CONT_LOOKUP	0x40000000u	/* next CC node    */
 +#define FMAN_PCD_AD_NIA_TYPE_RESULT_DF	0x80000000u	/* RESULT_DATA_FLOW  */
-+#define FMAN_PCD_AD_NIA_TYPE_BYPASS	0xc0000000u	/* drop / discard    */
-+#define FMAN_PCD_AD_NIA_TYPE_MASK	0xc0000000u
++#define FMAN_PCD_AD_NIA_TYPE_BYPASS		0xc0000000u	/* drop / discard    */
++#define FMAN_PCD_AD_NIA_TYPE_MASK		0xc0000000u
 +
-+#define FMAN_PCD_AD_NIA_PLCR_DIS	0x20000000u	/* nia[29] = skip plcr */
-+#define FMAN_PCD_AD_NIA_OPCODE_MASK	0x0000000fu	/* nia[3:0] sub-id    */
++#define FMAN_PCD_AD_NIA_PLCR_DIS		0x20000000u	/* nia[29] = skip plcr */
++#define FMAN_PCD_AD_NIA_OPCODE_MASK		0x0000000fu	/* nia[3:0] sub-id    */
 +
 +
+ 
  /**
   * struct fman_pcd_cc_tree - Coarse Classifier match-tree handle.
-  * @node:           anchor on pcd->cc_trees (protected by pcd->lock)
-@@ -231,6 +274,98 @@ struct fman_pcd_cc_node {
- 	spinlock_t			lock;
+@@ -232,6 +275,98 @@ struct fman_pcd_cc_node {
+ 	spinlock_t		lock;
  };
  
 +/**
@@ -219,9 +216,8 @@ index dd8cd4d97..e3ac023aa 100644
 +	return 0;
 +}
 +
+ 
  /**
   * fman_pcd_cc_tree_create() - allocate a new Coarse Classifier tree.
-  *
 -- 
-2.39.5
-
+2.43.0
