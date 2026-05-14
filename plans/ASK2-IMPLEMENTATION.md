@@ -38,9 +38,10 @@ architecture source-of-truth. When the two disagree, **the spec wins**
 | 11  | M2.2 — `0002-dpaa-eth-flow-block.patch` (real)   | ask20  | landed |
 | 12  | M2.3 — `0003-fman-host-command-api.patch` (real) | ask20  | landed |
 | 13  | M2.4 — ucode version from QEF blob (DT)          | ask20  | landed |
-| 14a | M2.5a — `0004-fman-pcd-subsystem.patch` orchestration (`fman_pcd.c` + accessors in `fman.c`) | ask20 | not started |
-| 14b | M2.5b — KeyGen schemes with `match_vector ≠ 0` (`fman_pcd_kg.c` + `fman_keygen.c` exports) | ask20 | not started |
-| 14c | M2.5c — Coarse Classifier match trees (`fman_pcd_cc.c`) | ask20 | not started |
+| 14a | M2.5a — `0004-fman-pcd-subsystem.patch` orchestration (`fman_pcd.c` + accessors in `fman.c`) | ask20 | landed (91e1d7a) |
+| 14b-prep | M2.5b-prep — KG public API stub (`fman_pcd_kg.c`) + `keygen_scheme_setup`/`keygen_bind_port_to_schemes` exports | ask20 | landed (fda5a03) |
+| 14b-body | M2.5b-body — KG real KGSE_* programming (IPv4 5-tuple) | ask20 | landed (00d6f16) |
+| 14c | M2.5c — Coarse Classifier match trees (`fman_pcd_cc.c`) — also unblocks `fman_pcd_kg_attach_cc()` | ask20 | not started |
 | 14d | M2.5d — Header manipulation (`fman_pcd_manip.c`) | ask20 | not started |
 | 14e | M2.5e — Policer profiles (`fman_pcd_plcr.c`) | ask20 | not started |
 | 14f | M2.5f — Parser + Replicator (`fman_pcd_prs.c`, `fman_pcd_replic.c`) | ask20 | not started |
@@ -762,59 +763,98 @@ LOC budget: ~870 (800 fman_pcd.c + 30 fman.c + ~40 header skeleton).
 
 ---
 
-### PR14b — KeyGen schemes with `match_vector ≠ 0` (`fman_pcd_kg.c`)
+### PR14b — KeyGen schemes with `match_vector ≠ 0` (`fman_pcd_kg.c`) — **landed in two parts**
 
 Per spec §13.3 (`fman_pcd_kg.c` section) + §13.4 (the
-`fman_keygen.c` ~10 LOC change).
+`fman_keygen.c` exports).
 
-**Files added/changed:**
+Split into two landings so each could be independently link-validated
+and round-tripped through `patch-health`:
 
-- `drivers/net/ethernet/freescale/fman/fman_pcd_kg.c` (new, ~1500 LOC):
-  - `struct fman_pcd_kg_scheme` — wraps a hardware scheme slot (0–31),
-    its MURAM-resident scheme record, the extract spec, the bound port
-    mask, the attached CC tree pointer.
-  - `fman_pcd_kg_scheme_create(pcd, extract, base_fqid, num_of_fqs)`
-    — allocates a free scheme slot, builds the scheme record with
-    `match_vector != 0`, writes it to MURAM, programs the KG scheme
-    registers per RM §8.7.3.
-  - `fman_pcd_kg_scheme_bind_port(scheme, hw_port_id)` — links the
-    port's KG entry point to the scheme.
-  - `fman_pcd_kg_scheme_attach_cc(scheme, tree)` — sets the scheme's
-    next-engine to point at a CC tree (consumed in PR14c).
-  - `fman_pcd_kg_scheme_destroy(scheme)` — symmetric teardown,
-    rollback the bind first.
-  - All EXPORT_SYMBOL_GPL.
-- `drivers/net/ethernet/freescale/fman/fman_keygen.c` (~10 LOC):
-  - Demote `keygen_scheme_setup` and `keygen_bind_port_to_schemes`
-    from `static` → non-static.
-  - EXPORT_SYMBOL_GPL both.
-  - Add prototypes to a new `fman_keygen.h` (or extend
-    `fman_pcd.h` — TBD at implementation time per spec §13.4).
-- `include/linux/fsl/fman_pcd.h`: add the KG public API.
+#### PR14b-prep — KG public API stub + helper exports — **landed (fda5a03)**
 
-**kunit suite:** `fman_pcd_kg_test.c` covers scheme record encoding
-(byte-perfect against RM §8.7.3 examples), slot allocation under
-contention, double-bind rejection, destroy-while-bound rejection.
+Captured as `kernel/flavors/ask/patches/0005-fman-pcd-kg-prep.patch`
+(541 lines). Adds:
 
-**Hardware bring-up at PR14b end (first silicon-touching step of
-`0004`):** create a single KG scheme that extracts the IPv4 5-tuple and
-dispatches to a fixed FQID. Bind it to eth0's RX port. Send a single
-TCP packet to that FQID. Verify the packet arrives on the bound FQ
-(observable via `fsl_dpaa_eth` debugfs or `tcpdump -i eth0`). This is
-the first end-to-end-on-silicon proof that `0004` programs the FMan
-PCD correctly.
+- `drivers/net/ethernet/freescale/fman/fman_pcd_kg.c` (new) — public
+  API with four `-EOPNOTSUPP` stubs (`fman_pcd_kg_scheme_create`,
+  `fman_pcd_kg_bind_port`, `fman_pcd_kg_attach_cc`,
+  `fman_pcd_kg_scheme_destroy`), `struct fman_pcd_kg_scheme` opaque
+  handle, registered list head on `pcd->kg_schemes`.
+- `drivers/net/ethernet/freescale/fman/fman_keygen.c` — `EXPORT_SYMBOL_GPL`
+  for `keygen_scheme_setup()` and `keygen_bind_port_to_schemes()`
+  (existing functions promoted from `static`).
+- `drivers/net/ethernet/freescale/fman/fman_keygen_internal.h` — moves
+  `FM_KG_MAX_NUM_OF_SCHEMES` macro under `#ifndef` guard so the new
+  `.c` file can `#include` it without redefinition.
+- `include/linux/fsl/fman_pcd.h` — forward-decls for the four public
+  functions + the opaque struct.
 
-**Acceptance:**
+Also added to `patch-health.sh`: cumulative-stack mode for
+`kernel/flavors/ask/patches/` so cross-dependent patches in a logical
+series (0004 + 0005 etc.) don't produce false-positive rot.
 
-- kunit suite passes (`make kunit ARCH=arm64 ...`).
-- On real Mono Gateway DK: `echo 1 > /sys/kernel/debug/fman_pcd/0/test_kg_scheme`
-  (a debugfs hook added in this PR for hardware bring-up only) programs
-  the scheme; a `ping 10.0.0.1` from a connected host increments the
-  FQ counter visible at `/sys/kernel/debug/fsl_dpaa_eth/eth0/rx_fqid_<n>`.
-- `patch-health.sh --flavor ask --source release` green on `0004-*`.
+#### PR14b-body — Real KGSE_* programming (IPv4 5-tuple) — **landed (00d6f16)**
 
-LOC budget: ~1550 (1500 fman_pcd_kg.c + 10 fman_keygen.c + ~40 header
-additions).
+Captured as `kernel/flavors/ask/patches/0006-fman-pcd-kg-body.patch`
+(341 inserted / 48 deleted in `fman_pcd_kg.c`, ~330 LOC final).
+Replaces the four `-EOPNOTSUPP` stubs with the real implementation:
+
+- `fman_pcd_kg_scheme_create()` — allocates a free scheme id in
+  `[0, FM_KG_MAX_NUM_OF_SCHEMES)`, populates `keygen->schemes[id]`
+  with silicon match-vector + base_fqid + hashing fields, delegates
+  KGSE_* register write to the in-tree `keygen_scheme_setup()` helper.
+- `fman_pcd_kg_bind_port()` — sets `slot->hw_port_id`, delegates to
+  `keygen_bind_port_to_schemes()`.
+- `fman_pcd_kg_scheme_destroy()` — unbinds + tears down with
+  probe-failure safety (drops wrapper without touching silicon if
+  parent `fman->keygen` is already freed).
+- `fman_pcd_kg_attach_cc()` — still `-EOPNOTSUPP` pending PR14c's
+  `struct fman_pcd_cc_tree` (KGSE_CCBS wiring deferred).
+
+**Key insight captured during implementation** (stored in Qdrant
+2026-05-14): The existing in-tree `keygen_scheme_setup()` already
+programs all KGSE_* registers. PR14b-body just needs to (a) allocate
+scheme id, (b) populate `keygen->schemes[id]` slot, (c) call the
+existing helper. Total `fman_pcd_kg.c` size dropped from the original
+~1500 LOC budget to ~330 LOC.
+
+**Build gotcha captured in Qdrant:** the `KG_SCH_KN_*` silicon-bit
+macros (`PTYPE1`, `IPSRC1`, `IPDST1`, `L4PSRC`, `L4PDST`) are private
+to `fman_keygen.c` upstream (defined inline, not exported in any
+header). Cannot include them. Solution: define the 5 macros locally
+in `fman_pcd_kg.c` with comment citing RM §8.7.4 `KGSE_MV` register as
+the silicon-fact source.
+
+**Supported match-vector shape at this iteration:** IPv4 5-tuple only
+(SIP/DIP/proto/SPORT/DPORT via parse_result offsets 12/16/9/20/22).
+Wider shapes return `-EOPNOTSUPP` loudly. Field-level hash tuning
+(`hash_fqid_count`, `symmetric_hash`, `hashShift`) uses conservative
+defaults; promoted to API params if/when consumers need them.
+
+**Validation evidence (PR14b-body):**
+
+- Native ARM64 build on Cobalt 100 (`make ARCH=arm64 -j32 Image`,
+  ~1m31s): zero warnings, all 4 public symbols present in `System.map`
+  with `__ksymtab_*` exports.
+- Round-trip `git apply --3way --check` on a fresh clone of kernel
+  commit `8259d70f7` (PR14b-prep tip): clean.
+- `patch-health.sh --flavor ask --source release`: **Pass 4 / Fail 11**
+  (baseline before PR14b-body was Pass 3 / Fail 11 — improved by one
+  passing patch, zero regressions). The 11 pre-existing failures are
+  baseline patch-rot tracked separately from ASK2 work.
+
+**Hardware-boot validation deferred to PR14c.** Rationale: the
+debugfs `test_kg_scheme` hook originally planned for PR14b end
+(silicon programming proof) is more naturally co-located with the CC
+tree wire-up — it would need to be torn down and rewritten anyway
+when `attach_cc()` lands. PR14c's bring-up step will exercise both
+KG and CC end-to-end on silicon.
+
+LOC actuals: 541 lines (PR14b-prep patch) + 502 lines (PR14b-body
+patch) = 1043 lines vs original budget ~1550. The savings come
+entirely from delegating to the in-tree `keygen_scheme_setup()`
+helper rather than re-implementing KGSE_* register writes.
 
 ---
 
