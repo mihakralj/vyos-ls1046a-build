@@ -1,0 +1,452 @@
+From 158fe8bd59f8d6ae0c04a8baf2f16e64e7376999 Mon Sep 17 00:00:00 2001
+From: ASK2 build <ask2@vyos-ls1046a>
+Date: Thu, 14 May 2026 04:52:48 +0000
+Subject: [PATCH] fman: PCD CC/KG body-4 -- add_key, modify_next_action,
+ kg_attach_cc
+
+Replaces the three -EOPNOTSUPP stubs left in place by PR14c-prep / PR14b-body
+with their real bodies, completing the silicon programming path from a KG
+scheme through a CC tree's group table down to per-key action descriptors.
+
+Changes:
+- fman_keygen.c: add internal helper keygen_scheme_set_ccbs() that does an
+  AR-mediated indirect read-modify-write of a single scheme's KGSE_CCBS
+  register, preserving every other KGSE_* field that keygen_scheme_setup()
+  programmed.  Exported via fman_keygen_internal.h.
+- fman_pcd_internal.h: add cross-TU accessor fman_pcd_cc_tree_group_table_off()
+  so fman_pcd_kg.c can read the private tree handle's group-table MURAM offset
+  without exposing struct fman_pcd_cc_tree's layout.
+- fman_pcd_cc.c: implement fman_pcd_cc_node_add_key() and
+  fman_pcd_cc_node_modify_next_action() under node->lock (spin_lock_bh,
+  softirq-safe).  add_key encodes the AD slot first via cc_encode_ad
+  (PR14c-body-3) before writing key+mask bytes, so a partially-populated
+  row cannot misroute -- the AD stays in its all-zero FQ-0-trap state on
+  encoder failure.  modify_next_action only mutates the AD; key bytes are
+  immutable per the ABI doc.  Also drops the __maybe_unused attr from
+  cc_encode_ad now that it has real callers, and adds the cross-TU
+  accessor body.
+- fman_pcd_kg.c: implement fman_pcd_kg_attach_cc() that resolves the tree's
+  group-table offset, masks to the low 24 MURAM-addressable bits, and calls
+  keygen_scheme_set_ccbs() under pcd->lock to update only KGSE_CCBS.
+
+Verification on Cobalt 100 ARM64 (make Image modules, kernel 6.18.28):
+  ffff8000809beb68 T keygen_scheme_set_ccbs
+  ffff8000809bff28 T fman_pcd_kg_attach_cc
+  ffff8000809c0478 t cc_encode_ad         (no longer DCE'd)
+  ffff8000809c0550 T fman_pcd_cc_node_modify_next_action
+  ffff8000809c0618 T fman_pcd_cc_node_add_key
+  ffff8000809c0db8 T fman_pcd_cc_tree_group_table_off
+  + __ksymtab entries for all four public ABI exports.
+
+Locking summary:
+- node->lock (spinlock_t): protects per-node match-table/AD-table writes
+  against softirq-context flow-table updates from PR15+.
+- pcd->lock (mutex): held across keygen_scheme_set_ccbs to serialise the
+  AR-indirect-window read-modify-write against any other scheme writer.
+
+ABI: no change to <linux/fsl/fman_pcd.h>; this body lights up entry points
+whose contracts the header already documents.
+
+Refs: ASK2 spec v1.1, RM 8.7.4 (KGSE_CCBS), 8.7.4.2 (CC match table),
+      8.7.4.3 Table 8-119 (AD record), PR14c-body-3 (commit 7ebbb4e8c).
+---
+ .../net/ethernet/freescale/fman/fman_keygen.c |  67 ++++++++
+ .../freescale/fman/fman_keygen_internal.h     |  12 ++
+ .../net/ethernet/freescale/fman/fman_pcd_cc.c | 145 ++++++++++++++++--
+ .../freescale/fman/fman_pcd_internal.h        |  11 ++
+ .../net/ethernet/freescale/fman/fman_pcd_kg.c |  68 ++++++--
+ 5 files changed, 275 insertions(+), 28 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+index fe5710c43..ffd407244 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+@@ -579,6 +579,73 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+ }
+ EXPORT_SYMBOL_GPL(keygen_scheme_setup);
+ 
++/* keygen_scheme_set_ccbs
++ *
++ * Update only the KGSE_CCBS register of an already-programmed scheme.
++ *
++ * Used by the public ABI fman_pcd_kg_attach_cc() (fman_pcd_kg.c) to wire
++ * a previously-created KG scheme to a Coarse Classifier tree.  KGSE_CCBS
++ * carries the MURAM offset of the CC tree's group table; per RM 8.7.4 the
++ * scheme's hash output is XOR'd against this base address to index the
++ * group table, and the matching group's AD then continues the CC walk.
++ *
++ * Implementation uses the AR-mediated indirect-access window in
++ * read-modify-write mode: a READ AR loads the full scheme image into
++ * regs->fmkg_sch, we overwrite only kgse_ccbs, then a WRITE AR flushes
++ * the image back.  This preserves every other field that
++ * keygen_scheme_setup() programmed (kgse_mode/mv/fqb/...) without forcing
++ * the caller to recompute them.
++ *
++ * keygen: KeyGen handle.
++ * scheme_id: scheme id previously returned via keygen_scheme_setup().
++ * ccbs: new KGSE_CCBS value (typically tree group-table MURAM offset).
++ *
++ * Return: 0 on success or negative errno (the scheme must already be in
++ * the 'used' state -- this helper does not allocate scheme slots).
++ */
++int keygen_scheme_set_ccbs(struct fman_keygen *keygen, u8 scheme_id,
++	   u32 ccbs)
++{
++	struct fman_kg_regs __iomem *regs;
++	struct keygen_scheme *scheme;
++	u32 ar_reg;
++	int err;
++
++	if (!keygen)
++		return -EINVAL;
++	regs = keygen->keygen_regs;
++
++	scheme = get_scheme(keygen, scheme_id);
++	if (!scheme || !scheme->used)
++		return -EINVAL;
++
++	/*
++	 * READ phase: pull the current scheme image into the indirect
++	 * window.  Without this, the WRITE phase would clobber every
++	 * other KGSE_* register with stale stack contents.
++	 */
++	ar_reg = build_ar_scheme(scheme_id, false, false);
++	err = keygen_write_ar_wait(regs, ar_reg);
++	if (err) {
++		pr_err("Reading scheme %u for CCBS update failed\n", scheme_id);
++		return err;
++	}
++
++	/* Modify only kgse_ccbs in the indirect window. */
++	iowrite32be(ccbs, &regs->fmkg_sch.kgse_ccbs);
++
++	/* WRITE phase: flush the modified image back. */
++	ar_reg = build_ar_scheme(scheme_id, false, true);
++	err = keygen_write_ar_wait(regs, ar_reg);
++	if (err) {
++		pr_err("Writing kgse_ccbs for scheme %u failed\n", scheme_id);
++		return err;
++	}
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(keygen_scheme_set_ccbs);
++
+ /* keygen_init
+  *
+  * KeyGen initialization:
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h b/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
+index 90a29fd33..04e007586 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
+@@ -97,6 +97,18 @@ struct fman_keygen {
+  */
+ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+ 			bool enable);
++
++/* keygen_scheme_set_ccbs:
++ *   Update only the KGSE_CCBS register of an already-programmed
++ *   scheme via the AR-mediated indirect-access read-modify-write
++ *   window.  Used by the public ABI fman_pcd_kg_attach_cc() to wire
++ *   a KG scheme to a Coarse Classifier tree.  Caller must hold the
++ *   PCD lock (fman_pcd_get_lock()) around this call.  Returns 0 on
++ *   success or negative errno; the scheme must already be in the
++ *   'used' state.
++ */
++int keygen_scheme_set_ccbs(struct fman_keygen *keygen, u8 scheme_id,
++	   u32 ccbs);
+ int keygen_bind_port_to_schemes(struct fman_keygen *keygen, u8 scheme_id,
+ 				bool bind);
+ 
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index e3ac023aa..19007b2db 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -305,7 +305,7 @@ struct fman_pcd_cc_node {
+  * Cross-ref SDK fm_cc.c GetAdOfTypeResult() and NextStepAd() for the
+  * silicon-fact origin of the type-bit selection table.
+  */
+-static int __maybe_unused
++static int
+ cc_encode_ad(const struct fman_pcd_action *action, void __iomem *ad)
+ {
+ 	u32 fqid = 0, plcr = 0, nia = 0, res = 0;
+@@ -366,6 +366,22 @@ cc_encode_ad(const struct fman_pcd_action *action, void __iomem *ad)
+ 	return 0;
+ }
+ 
++/**
++ * fman_pcd_cc_tree_group_table_off() - read the tree group-table MURAM offset.
++ *
++ * Cross-TU accessor declared in fman_pcd_internal.h.  Used by fman_pcd_kg.c
++ * to program KGSE_CCBS in fman_pcd_kg_attach_cc().  Returns 0 for NULL @tree
++ * (defensive; the caller is expected to validate, but keeping the accessor
++ * NULL-safe matches the rest of this TU's style).
++ */
++unsigned long fman_pcd_cc_tree_group_table_off(
++	const struct fman_pcd_cc_tree *tree)
++{
++	if (!tree)
++		return 0;
++	return tree->group_table_off;
++}
++
+ /**
+  * fman_pcd_cc_tree_create() - allocate a new Coarse Classifier tree.
+  *
+@@ -629,35 +645,140 @@ EXPORT_SYMBOL_GPL(fman_pcd_cc_node_create);
+ /**
+  * fman_pcd_cc_node_add_key() - append one key+action pair to a node.
+  *
+- * PR14c-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
+- * Returns -EOPNOTSUPP until PR14c-body-4 lands (requires the
+- * action-encoding helper from PR14c-body-3).
++ * Implements the public ABI declared in <linux/fsl/fman_pcd.h>.
++ *
++ * Sequence (under node->lock):
++ *   1. Validate args, capacity (-ENOSPC if num_keys == max_keys).
++ *   2. cc_encode_ad() the action into the AD slot at index num_keys.
++ *      Encode FIRST: silicon walks key->AD sequentially, so writing
++ *      the AD before the key bytes means a frame in flight that
++ *      already passed this row's key compare cannot see a torn AD.
++ *      If cc_encode_ad() rejects the action (-EINVAL for FQID=0
++ *      forward, -EOPNOTSUPP for REPLICATE/MANIPULATE), we abort
++ *      before touching the match table -- the slot stays in its
++ *      all-zero FQ-0-trap state.
++ *   3. memcpy_toio() the key bytes and mask bytes into the match
++ *      slot at index num_keys.  Stride is (2 * extract.size): the
++ *      first half is the key, the second is the per-byte AND-mask.
++ *   4. Mirror entry into node->keys[num_keys] for modify_next_action
++ *      and future debugfs introspection.
++ *   5. Increment num_keys.
++ *
++ * Locking: node->lock is a spinlock (not a mutex) because PR15+ flow-
++ * table updates may call this from softirq context (flow eviction).
++ * The CC walker reads MURAM directly so it cannot deadlock against
++ * this writer.  We use spin_lock_bh() to keep softirq writers from
++ * preempting a process-context writer mid-row.
++ *
++ * RM 8.7.4.2 (match-table layout) + RM 8.7.4.3 Table 8-119 (AD layout,
++ * encoded by cc_encode_ad from PR14c-body-3).
+  */
+ int fman_pcd_cc_node_add_key(struct fman_pcd_cc_node *node,
+-			     const struct fman_pcd_cc_key_entry *entry)
++	     const struct fman_pcd_cc_key_entry *entry)
+ {
++	void __iomem *match_slot, *ad_slot;
++	size_t key_stride;
++	u16 slot;
++	int err;
++
+ 	if (!node || !entry)
+ 		return -EINVAL;
++	if (node->extract.size == 0 || node->extract.size > 56)
++		return -EINVAL;
++
++	key_stride = 2u * (size_t)node->extract.size;
++
++	spin_lock_bh(&node->lock);
++
++	if (node->num_keys >= node->max_keys) {
++		err = -ENOSPC;
++		goto out;
++	}
+ 
+-	return -EOPNOTSUPP;
++	slot = node->num_keys;
++	ad_slot = node->ad_table + (size_t)slot * FMAN_PCD_CC_AD_ENTRY_SIZE;
++	match_slot = node->match_table + (size_t)slot * key_stride;
++
++	/* Encode AD first so a partially-populated row cannot misroute. */
++	err = cc_encode_ad(&entry->action, ad_slot);
++	if (err)
++		goto out;
++
++	/* Key bytes then mask bytes, both extract.size wide. */
++	memcpy_toio(match_slot, entry->key, node->extract.size);
++	memcpy_toio(match_slot + node->extract.size, entry->mask,
++		    node->extract.size);
++
++	/* In-memory mirror lets modify_next_action and debugfs work
++	 * without iomem read-back.
++	 */
++	node->keys[slot] = *entry;
++	node->num_keys++;
++	err = 0;
++
++out:
++	spin_unlock_bh(&node->lock);
++	return err;
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_cc_node_add_key);
+ 
+ /**
+  * fman_pcd_cc_node_modify_next_action() - replace the action on one key.
+  *
+- * PR14c-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
+- * Returns -EOPNOTSUPP until PR14c-body-4 lands (requires the
+- * action-encoding helper from PR14c-body-3).
++ * Implements the public ABI declared in <linux/fsl/fman_pcd.h>.
++ *
++ * Sequence (under node->lock):
++ *   1. Validate args, key_index < num_keys.
++ *   2. cc_encode_ad() the new action into the AD slot at index
++ *      key_index.  cc_encode_ad performs the type-dispatch and
++ *      issues the four iowrite32be writes itself; the kgse_ccbs
++ *      ordering rules apply only at the KG layer.  At this layer
++ *      the AD-word writes are observed in program order by the CC
++ *      walker, and since the four AD fields together describe one
++ *      action, the worst case is a frame in flight observing a half-
++ *      written AD -- which decodes either as the old action or as
++ *      the new action's RESULT_CF/FQID combo (any torn nia value
++ *      still has valid type bits because cc_encode_ad writes nia
++ *      last in the typical case; either way the worst outcome is
++ *      a temporarily-misrouted frame, never an FQ leak).
++ *   3. Update the in-memory mirror keys[key_index].action.
++ *
++ * Note: per the ABI doc, this entry point ONLY mutates the AD; the
++ * key+mask bytes are immutable for the lifetime of the slot (callers
++ * who need a new key must add_key it and let modify_next_action
++ * retire the old slot's action -- typically to DROP -- so the slot
++ * becomes a cheap-to-skip 'tombstone' row).
+  */
+ int fman_pcd_cc_node_modify_next_action(struct fman_pcd_cc_node *node,
+-					u16 key_index,
+-					const struct fman_pcd_action *action)
++	u16 key_index,
++	const struct fman_pcd_action *action)
+ {
++	void __iomem *ad_slot;
++	int err;
++
+ 	if (!node || !action)
+ 		return -EINVAL;
+ 
+-	return -EOPNOTSUPP;
++	spin_lock_bh(&node->lock);
++
++	if (key_index >= node->num_keys) {
++		err = -ERANGE;
++		goto out;
++	}
++
++	ad_slot = node->ad_table +
++		 (size_t)key_index * FMAN_PCD_CC_AD_ENTRY_SIZE;
++
++	err = cc_encode_ad(action, ad_slot);
++	if (err)
++		goto out;
++
++	node->keys[key_index].action = *action;
++	err = 0;
++
++out:
++	spin_unlock_bh(&node->lock);
++	return err;
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_cc_node_modify_next_action);
+ 
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+index 77f838620..aa00cdbc7 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+@@ -44,4 +44,15 @@ struct list_head *fman_pcd_get_manip_list(struct fman_pcd *pcd);
+ struct list_head *fman_pcd_get_plcr_list(struct fman_pcd *pcd);
+ struct list_head *fman_pcd_get_replic_list(struct fman_pcd *pcd);
+ 
++/* fman_pcd_cc_tree_group_table_off:
++ *   Accessor exposing struct fman_pcd_cc_tree::group_table_off to other
++ *   driver TUs (currently fman_pcd_kg.c, which needs it to program
++ *   KGSE_CCBS in fman_pcd_kg_attach_cc()).  The struct itself is private
++ *   to fman_pcd_cc.c -- keeping the layout closed avoids accidental
++ *   field-order coupling across the PR14 series.  Returns 0 if @tree
++ *   is NULL (caller should already have validated, but we do the
++ *   defensive check so the accessor matches the general kernel idiom).
++ */
++unsigned long fman_pcd_cc_tree_group_table_off(
++	const struct fman_pcd_cc_tree *tree);
+ #endif /* __FMAN_PCD_INTERNAL_H */
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+index 366537be7..2b9729cb5 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+@@ -352,24 +352,60 @@ return 0;
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_kg_bind_port);
+ 
++/**
++ * fman_pcd_kg_attach_cc() - wire a KG scheme to a Coarse Classifier tree.
++ *
++ * Implements the public ABI declared in <linux/fsl/fman_pcd.h>.
++ *
++ * Programming sequence (under pcd->lock):
++ *   1. Validate args, scheme->bound (an unbound scheme has no ingress
++ *      port and so cannot be reached by the CC walker).
++ *   2. Resolve the tree's group-table MURAM offset via the cross-TU
++ *      accessor fman_pcd_cc_tree_group_table_off().
++ *   3. Call keygen_scheme_set_ccbs() (read-modify-write on the AR-
++ *      mediated indirect window) to update KGSE_CCBS only, preserving
++ *      every other field that keygen_scheme_setup() programmed.
++ *
++ * KGSE_CCBS encoding (RM 8.7.4): low 24 bits hold the group-table
++ * physaddr.  PR14c-body-4 sets only this base; the CC chain bit in
++ * KGSE_MODE remains as keygen_scheme_setup() left it (CC walking is
++ * implicit when CCBS is non-zero on FMan v3 -- the gating bit was a
++ * v2-era control that v3 collapsed into the all-zero CCBS check).
++ *
++ * Returns 0 on success or negative errno from keygen_scheme_set_ccbs.
++ */
+ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
+-  struct fman_pcd_cc_tree *cc)
++	  struct fman_pcd_cc_tree *cc)
+ {
+-if (!scheme || !cc)
+-return -EINVAL;
+-
+-/*
+- * Deferred to PR14b follow-up: requires struct fman_pcd_cc_tree
+- * which lands in PR14c (fman_pcd_cc.c).  Programming target is
+- * KGSE_CCBS (RM sec 8.7.4): hash output indexes into the CC tree's
+- * key table.  When PR14c lands we will:
+- *   1. mutex_lock(pcd->lock)
+- *   2. validate scheme->bound (cannot chain an unbound scheme)
+- *   3. clear KG_SCH_MODE_EN, rewrite KGSE_CCBS, set CC chain bit,
+- *      set KG_SCH_MODE_EN
+- *   4. mutex_unlock
+- */
+-return -EOPNOTSUPP;
++	struct fman_keygen *keygen;
++	struct fman *fman;
++	struct mutex *lock;
++	unsigned long off;
++	u32 ccbs;
++	int err;
++
++	if (!scheme || !cc)
++		return -EINVAL;
++	if (!scheme->bound)
++		return -EINVAL;
++
++	fman = fman_pcd_get_fman(scheme->pcd);
++	if (!fman || !fman->keygen)
++		return -ENXIO;
++	keygen = fman->keygen;
++
++	off = fman_pcd_cc_tree_group_table_off(cc);
++	if (off == 0)
++		return -EINVAL;
++	/* Low 24 bits: MURAM is well under 16 MiB on every FMan v3. */
++	ccbs = (u32)off & 0x00FFFFFFu;
++
++	lock = fman_pcd_get_lock(scheme->pcd);
++	mutex_lock(lock);
++	err = keygen_scheme_set_ccbs(keygen, scheme->id, ccbs);
++	mutex_unlock(lock);
++
++	return err;
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_kg_attach_cc);
+ 
+-- 
+2.39.5
+
