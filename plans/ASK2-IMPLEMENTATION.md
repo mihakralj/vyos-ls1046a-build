@@ -39,17 +39,17 @@ architecture source-of-truth. When the two disagree, **the spec wins**
 | 11  | M2.2 — `0002-dpaa-eth-flow-block.patch` (real)   | ask20  | landed |
 | 12  | M2.3 — `0003-fman-host-command-api.patch` (real) | ask20  | landed |
 | 13  | M2.4 — ucode version from QEF blob (DT)          | ask20  | landed |
-| 14a | M2.5a — `0004-fman-pcd-subsystem.patch` orchestration (`fman_pcd.c` + accessors in `fman.c`) | ask20 | landed (91e1d7a) |
-| 14b-prep | M2.5b-prep — KG public API stub (`fman_pcd_kg.c`) + `keygen_scheme_setup`/`keygen_bind_port_to_schemes` exports | ask20 | landed (fda5a03) |
-| 14b-body | M2.5b-body — KG real KGSE_* programming (IPv4 5-tuple) | ask20 | landed (00d6f16) |
-| 14c-prep | M2.5c-prep — CC public API stub (`fman_pcd_cc.c` with 6 -EOPNOTSUPP stubs) + `fman_pcd_action` tagged-union + extract/key-table types in `<linux/fsl/fman_pcd.h>` | ask20 | landed (c613714) |
-| 14c-body | M2.5c-body — CC real MURAM-resident tree-group-table programming (RM 8.7.4.1), classification-node record packing (RM 8.7.4.2), action-template encoding (RM 8.7.4.3), kunit, also replaces `fman_pcd_kg_attach_cc()` -EOPNOTSUPP stub. Split into 5 sub-PRs (body-1..5) per the design memo below. | ask20 | ✅ **landed (5/5)** — body-1 (3b791d1, patch 0009), body-2 (94d8237, patch 0010), body-3 (d87652d, patch 0011), body-4 (17d0f2b, patch 0012), body-5 (25ef650, patch 0013) |
-| 14d-prep | M2.5d-prep — manip public API stub (`fman_pcd_manip.c`) + `fman_pcd_manip_params` tagged-union (NAT_V4, NAT_V6, VLAN_PUSH, VLAN_POP, TTL_DEC) in `<linux/fsl/fman_pcd.h>` | ask20 | landed (ad52365, combined patch 0008) |
-| 14d-body | M2.5d-body — manip real MURAM template programming (RM 8.7.5), auto-checksum recompute (RM 8.7.5.4), kunit | ask20 | ✅ **landed (4/4)** — body-1 (`d239de0`, patch 0014, struct + create/destroy MURAM bodies), body-2 (`18b48a3`, patch 0015, HMCT variant encoders + HMTD finalisation), body-3 (`cdd8865`, patch 0016, `cc_encode_ad` MANIPULATE arm + cross-TU `hmtd_off` accessor), body-4 (`549381a`, patch 0017, 8-case KUnit suite with SNAT silicon-fact pin `0x0c040040`) |
-| 14e-prep | M2.5e-prep — plcr public API stub (`fman_pcd_plcr.c`) + `fman_pcd_plcr_params` (CIR/CBS/EIR/EBS, color mode) in `<linux/fsl/fman_pcd.h>` | ask20 | landed (ad52365, combined patch 0008) |
+| 14a | M2.5a — `0004-fman-pcd-subsystem.patch` orchestration (`fman_pcd.c` + accessors in `fman.c`) | ask20 | landed |
+| 14b-prep | M2.5b-prep — KG public API stub (`fman_pcd_kg.c`) + `keygen_scheme_setup`/`keygen_bind_port_to_schemes` exports | ask20 | landed |
+| 14b-body | M2.5b-body — KG real KGSE_* programming (IPv4 5-tuple) | ask20 | landed |
+| 14c-prep | M2.5c-prep — CC public API stub (`fman_pcd_cc.c` with 6 -EOPNOTSUPP stubs) + `fman_pcd_action` tagged-union + extract/key-table types in `<linux/fsl/fman_pcd.h>` | ask20 | landed |
+| 14c-body | M2.5c-body — CC real MURAM-resident tree-group-table programming (RM 8.7.4.1), classification-node record packing (RM 8.7.4.2), action-template encoding (RM 8.7.4.3), kunit, also replaces `fman_pcd_kg_attach_cc()` -EOPNOTSUPP stub. Split into 5 sub-PRs (body-1..5) per the design memo below. | ask20 | landed |
+| 14d-prep | M2.5d-prep — manip public API stub (`fman_pcd_manip.c`) + `fman_pcd_manip_params` tagged-union (NAT_V4, NAT_V6, VLAN_PUSH, VLAN_POP, TTL_DEC) in `<linux/fsl/fman_pcd.h>` | ask20 | landed |
+| 14d-body | M2.5d-body — manip real MURAM template programming (RM 8.7.5), auto-checksum recompute (RM 8.7.5.4), kunit | ask20 | landed |
+| 14e-prep | M2.5e-prep — plcr public API stub (`fman_pcd_plcr.c`) + `fman_pcd_plcr_params` (CIR/CBS/EIR/EBS, color mode) in `<linux/fsl/fman_pcd.h>` | ask20 | landed |
 | 14e-body | M2.5e-body — plcr real trTCM profile programming per RM 8.7.6, runtime rate update, kunit. Split into sub-PRs (body-1+ TBD) following the PR14d cadence. | ask20 | 🟡 **in progress (4/N)** — body-1 (`ccdf040`, patch 0018, struct + create/destroy MURAM bodies), body-2 (`dfc7f64`, patch 0019, trTCM rate encoder + real create/set_rates), body-3 (`2cb2779`, patch 0020, `cc_encode_ad` POLICE arm + public `fman_pcd_plcr_profile_get_id()` accessor), body-4 (`1042e8d`, patch 0021, KUnit suite for plcr encoders + record layout + POLICE-arm opaque failure-mode tests) |
-| 14f-prep | M2.5f-prep — replicator + parser public API stubs (`fman_pcd_replic.c`, `fman_pcd_prs.c`) + `fman_pcd_replic_member` in `<linux/fsl/fman_pcd.h>` | ask20 | landed (ad52365, combined patch 0008) |
-| 14f-body | M2.5f-body — replicator real MURAM group table (RM 8.7.7), parser HXS pass-through config (RM 8.7.2), kunit | ask20 | not started — unblocked by spec v1.1 (cross-ref SDK `fm_replic.c` + `fm_prs.c`/`fman_prs.c`) |
+| 14f-prep | M2.5f-prep — replicator + parser public API stubs (`fman_pcd_replic.c`, `fman_pcd_prs.c`) + `fman_pcd_replic_member` in `<linux/fsl/fman_pcd.h>` | ask20 | landed |
+| 14f-body | M2.5f-body — replicator real MURAM group table (RM 8.7.7), parser HXS pass-through config (RM 8.7.2), kunit | ask20 | 🟡 in progress (1/4) — body-1 `<pending>` (replic create/destroy MURAM, patch 0022); body-2 (member-AD encoder) / body-3 (prs validator + cc REPLICATE arm) / body-4 (kunit) pending |
 | 14g | M2.5g — End-to-end wire-up — `ask_hostcmd.c` calls PCD API; first IPv4 TCP flow traverses silicon | ask20 | blocked on 14c-body + 14d-body + 14e-body + 14f-body |
 | 15  | M3.x — remaining flow types (NAT/PAT/v6/bridge)  | ask20  | blocked on PR14g |
 | 16  | M4.x — `ask_xfrm.c` + CAAM packet-mode IPsec     | ask20  | blocked on PR14g |
@@ -1348,7 +1348,7 @@ LOC budget: ~850.
 7. **Body-2 register constants pre-declared in body-1.** PMR bits (`COLOR_AWARE`, `ALG_TRTCM`, `PACKET_MODE`, `DROP_PROBABILITY`, `PIR_DISABLED`); rate-field encoding scheme (3-bit exp + 16-bit mant + 13-bit reserved); burst-depth `BURST_UNIT_BYTES=256` scale factor. Body-2 implements `plcr_encode_rate(bps) -> u32 (exp<<29 \| mant<<13)` and `plcr_encode_burst(bytes) -> u16 (saturating mant in 256-B units)` helpers shared between create and set_rates.
 8. **Anonymous union: NONE here.** `struct fman_pcd_plcr_params` is a flat struct (color_mode + 4 rate/burst fields), no union — none of the PR14d-body-2 `p->u.x` accessor gotcha applies.
 
-**Next-session entry point (after body-4 landing 2026-05-14):** **PR14e is closed (4/4 sub-PRs landed).** All four bodies on `ask20`: body-1 `ccdf040` (struct + create/destroy MURAM), body-2 `dfc7f64` (trTCM rate encoder + real create/set_rates), body-3 `2cb2779` (`cc_encode_ad` POLICE arm + `fman_pcd_plcr_profile_get_id()` public accessor), body-4 `1042e8d` (8-case PLCR KUnit suite + 2 cc-side POLICE failure-mode tests, patch 0021). The byte-perfect happy-path POLICE-arm test is deferred to the §13.7 M2 live-silicon acceptance gate because `cc_encode_ad()` is static to `fman_pcd_cc.c` and cannot be reached from a cross-TU kunit (same scope-limit pattern as PR14d-body-4). With PR14c, PR14d, PR14e all closed, the next planned work item is **PR14f** — Parser + Replicator (`fman_pcd_prs.c`, `fman_pcd_replic.c`) per spec §13.3, two small modules bundled into one PR (each under 600 LOC, shared review surface). After PR14f lands, **PR14g** (the end-to-end M2 wire-up — `ask_hostcmd.c` switches from `-ENXIO` host-command path to real `fman_pcd_cc_node_add_key()` calls; first IPv4 TCP flow traverses 210 silicon) unblocks. Until M2 acceptance, all subsequent milestones (M3 flow types, M4 IPsec, M5 askd/CLI/VyOS, M6 perf-soak) remain blocked on PR14g per the dependency tree in the status tracker.
+**Next-session entry point (after PR14f-body-1 landing 2026-05-14):** **PR14e is closed (4/4 sub-PRs landed); PR14f is in progress at 1/4 bodies.** PR14f body-1 (`<pending>` — replic create/destroy MURAM, patch 0022) replaces the PR14f-prep `ERR_PTR(-EOPNOTSUPP)` stub with real source-TD + member-AD MURAM allocation per RM §8.7.7. The members-array is allocated zeroed and the FQIDs are deliberately NOT programmed yet — body-2 (member-AD encoder) will stamp FQID/NEXT/FR_BIT/NL_BIT under `group->lock` as one atomic pass, with the source-TD active-OPCODE write as the single publication point (silicon never sees a partial chain). Next planned work item: **PR14f-body-2** — member-AD encoder using the pre-declared body-2 constants (`FR_BIT 0x08000000`, `NL_BIT 0x10000000`, `ADDR_SHIFT 4`, `INVALID_MEMBER_INDEX 0xffff`) and the cross-TU accessor `fman_pcd_replic_group_source_td_off()` that body-3 will add. After PR14f closes (body-2, body-3 = prs validator + cc REPLICATE-arm wire-up, body-4 = kunit), **PR14g** (the end-to-end M2 wire-up — `ask_hostcmd.c` switches from `-ENXIO` host-command path to real `fman_pcd_cc_node_add_key()` calls; first IPv4 TCP flow traverses 210 silicon) unblocks. Until M2 acceptance, all subsequent milestones (M3 flow types, M4 IPsec, M5 askd/CLI/VyOS, M6 perf-soak) remain blocked on PR14g per the dependency tree in the status tracker.
 
 ---
 
@@ -1391,6 +1391,58 @@ table programming with no `ask.ko` consumer changes).
 - `patch-health.sh` green.
 
 LOC budget: ~1040.
+
+#### PR14f-body progress log
+
+Following the established cadence (PR14c×5, PR14d×4, PR14e×4), PR14f is
+split into four sub-PRs each landing as a separate kernel-tree commit
+and a separate workspace patch under `kernel/flavors/ask/patches/`:
+
+- **body-1 — `fman_pcd_replic` group create/destroy MURAM bodies** —
+  patch `0022-fman-pcd-replic-body-1-create-destroy.patch`, kernel-tree
+  commit `<pending>`. Defines `struct fman_pcd_replic_group` (private
+  to TU), allocates source-TD (16 B) + members array (num_members × 16 B)
+  via `fman_pcd_muram_alloc()`, `memset_io` zeros both regions, stamps
+  source-TD type field with `FMAN_PCD_REPLIC_SOURCE_TD_OPCODE` (0x75)
+  so silicon recognises the entry point, `list_add_tail` on
+  `pcd->replic_groups` under `pcd->lock`. Destroy is exact reverse:
+  list_del under lock, zero before free, `fman_pcd_muram_free()` in
+  reverse order, `kfree` handle. Pre-declares body-2 register
+  constants (`FR_BIT 0x08000000`, `NL_BIT 0x10000000`, `ADDR_SHIFT 4`,
+  `INVALID_MEMBER_INDEX 0xffff`) and source-TD record offsets per
+  RM Table 8-128. **Body-1 deliberately does NOT consume the
+  `members[]` arg yet** — FQID encoding + NEXT chaining + NL_BIT
+  stamping lands in body-2 as one atomic programming pass.  All-zero
+  MURAM keeps silicon walker inactive (operationCode=0 short-circuits
+  the walker), preserving the inactive-state safety invariant of
+  PR14d-body-1 (HMCT all-zero) and PR14e-body-1 (PLCR record all-zero).
+  LOC: +266 / −39.
+- **body-2 — replicator member-AD encoder** — pending. Will program
+  per-member FQID into each 16-B member slot under `group->lock`, chain
+  members via NEXT pointer in NIA word (offset by `ADDR_SHIFT`), set
+  `FR_BIT` on each member to enable per-member fan-out, stamp `NL_BIT`
+  on the last member to terminate the chain. Function signature
+  `fman_pcd_replic_group_members_set(group, members, num)` re-validates
+  num against `group->num_members`. Final step in member-set programming
+  is `iowrite32be` of the active operationCode byte into source-TD,
+  which makes silicon walker start traversing the chain (single atomic
+  publication point — never a partial chain visible).
+- **body-3 — parser HXS validator + cc REPLICATE arm wire-up** —
+  pending. Replaces `fman_pcd_prs.c` ERR(-EOPNOTSUPP) stub with the
+  v1.0 pass-through validator (HXS = mainline-default IPv4/IPv6/TCP/
+  UDP/ESP/VLAN; this body just validates the request and writes a
+  debugfs dump entry — no register programming needed for pass-through).
+  Adds cross-TU accessor `fman_pcd_replic_group_source_td_off()` so
+  `cc_encode_ad()` in `fman_pcd_cc.c` can wire `FMAN_PCD_ACTION_REPLICATE`
+  to point AD.res at `group->source_td_off` without depending on the
+  private struct layout.
+- **body-4 — KUnit suite** — pending. `fman_pcd_replic_test.c` covers
+  source-TD byte-perfect layout against RM 8.7.7 and member-AD
+  chaining math (NEXT pointer encoding, NL_BIT terminator);
+  `fman_pcd_prs_test.c` covers HXS request validation. Same cross-TU
+  scope-limit pattern as PR14d-body-4 / PR14e-body-4 — the byte-perfect
+  REPLICATE-arm test against `cc_encode_ad()` is deferred to the §13.7
+  M2 live-silicon acceptance gate.
 
 ---
 
