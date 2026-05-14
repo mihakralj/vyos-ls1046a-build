@@ -1,16 +1,16 @@
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
-index 7032a7052..5a7951ce4 100644
+index bad14d0..077ec24 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 @@ -159,6 +159,7 @@
- #define FMAN_PCD_AD_NIA_TYPE_MASK	0xc0000000u
+ #define FMAN_PCD_AD_NIA_TYPE_MASK		0xc0000000u
  
- #define FMAN_PCD_AD_NIA_PLCR_DIS	0x20000000u	/* nia[29] = skip plcr */
-+#define FMAN_PCD_AD_NIA_NADEN		0x20000000u	/* nia[29] = next-AD enable */
- #define FMAN_PCD_AD_NIA_OPCODE_MASK	0x0000000fu	/* nia[3:0] sub-id    */
+ #define FMAN_PCD_AD_NIA_PLCR_DIS		0x20000000u	/* nia[29] = skip plcr */
++#define FMAN_PCD_AD_NIA_NADEN			0x20000000u	/* nia[29] = next-AD enable */
+ #define FMAN_PCD_AD_NIA_OPCODE_MASK		0x0000000fu	/* nia[3:0] sub-id    */
  
  
-@@ -292,8 +293,8 @@ struct fman_pcd_cc_node {
+@@ -293,8 +294,8 @@ struct fman_pcd_cc_node {
   *
   * Returns 0 on success, -EINVAL for an unknown action->type, and
   * -EOPNOTSUPP for REPLICATE/MANIPULATE which require helper objects
@@ -21,7 +21,7 @@ index 7032a7052..5a7951ce4 100644
   *
   * Empty-table FQ-0-trap safety property (carried over from body-2):
   * an all-zero AD slot decodes as RESULT_CONTRL_FLOW with fqid=0, which
-@@ -350,9 +351,45 @@ cc_encode_ad(const struct fman_pcd_action *action, void __iomem *ad)
+@@ -351,9 +352,45 @@ cc_encode_ad(const struct fman_pcd_action *action, void __iomem *ad)
  		/* PR14f-body integration territory. */
  		return -EOPNOTSUPP;
  
@@ -71,7 +71,7 @@ index 7032a7052..5a7951ce4 100644
  	default:
  		return -EINVAL;
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
-index aa00cdbc7..3e79617ad 100644
+index aa00cdb..3e79617 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
 @@ -55,4 +55,16 @@ struct list_head *fman_pcd_get_replic_list(struct fman_pcd *pcd);
@@ -92,7 +92,7 @@ index aa00cdbc7..3e79617ad 100644
 +
  #endif /* __FMAN_PCD_INTERNAL_H */
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
-index 2715a0f04..46af621fd 100644
+index 2715a0f..46af621 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
 @@ -772,3 +772,21 @@ void fman_pcd_manip_destroy(struct fman_pcd_manip *manip)
