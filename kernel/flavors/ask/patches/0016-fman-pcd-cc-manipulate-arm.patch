@@ -1,0 +1,119 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index 7032a7052..5a7951ce4 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -159,6 +159,7 @@
+ #define FMAN_PCD_AD_NIA_TYPE_MASK	0xc0000000u
+ 
+ #define FMAN_PCD_AD_NIA_PLCR_DIS	0x20000000u	/* nia[29] = skip plcr */
++#define FMAN_PCD_AD_NIA_NADEN		0x20000000u	/* nia[29] = next-AD enable */
+ #define FMAN_PCD_AD_NIA_OPCODE_MASK	0x0000000fu	/* nia[3:0] sub-id    */
+ 
+ 
+@@ -292,8 +293,8 @@ struct fman_pcd_cc_node {
+  *
+  * Returns 0 on success, -EINVAL for an unknown action->type, and
+  * -EOPNOTSUPP for REPLICATE/MANIPULATE which require helper objects
+- * not yet plumbed (body-4 wires MANIPULATE via PR14d-body, REPLICATE
+- * via PR14f-body integration).
++ * not yet plumbed (REPLICATE waits on PR14f-body integration; the
++ * MANIPULATE arm landed in PR14d-body-3 and is now functional).
+  *
+  * Empty-table FQ-0-trap safety property (carried over from body-2):
+  * an all-zero AD slot decodes as RESULT_CONTRL_FLOW with fqid=0, which
+@@ -350,9 +351,45 @@ cc_encode_ad(const struct fman_pcd_action *action, void __iomem *ad)
+ 		/* PR14f-body integration territory. */
+ 		return -EOPNOTSUPP;
+ 
+-	case FMAN_PCD_ACTION_MANIPULATE:
+-		/* PR14d-body integration territory. */
+-		return -EOPNOTSUPP;
++	case FMAN_PCD_ACTION_MANIPULATE: {
++		/*
++		 * Manip-AD encoding per RM 8.7.4.3 Table 8-119 cross-ref
++		 * SDK fm_manip.c FmPcdManipUpdateAdResultForCc()
++		 * (HMAN_OC family, non-CAPWAP path).  The match-table
++		 * AD slot encodes a control-flow result whose NADEN bit
++		 * redirects the silicon walker through the manip's 16-B
++		 * HMTD before enqueueing the rewritten frame to the
++		 * post-manip FQID carried in this same AD.
++		 *
++		 *   fqid = manipulate.next_fqid  (post-rewrite FQID)
++		 *   plcr = 0                    (no policer pass before manip)
++		 *   nia  = RESULT_CF | NADEN    (walk next-AD then forward)
++		 *   res  = hmtd_off             (24-bit MURAM offset of
++		 *                                the HMTD record built
++		 *                                by fman_pcd_manip_create())
++		 *
++		 * The HMTD itself was finalised under manip->lock in
++		 * body-2: cfg = TYPE | EXT_HMCT, hmcdBasePtr = hmct_off,
++		 * opCode = HMAN_OC{,_IP_MANIP}.  Silicon ordering:
++		 * AD -> HMTD -> HMCT -> enqueue to AD.fqid.
++		 */
++		unsigned long hmtd_off;
++
++		if (!action->manipulate.manip)
++			return -EINVAL;
++		if (action->manipulate.next_fqid == 0)
++			return -EINVAL;
++		hmtd_off = fman_pcd_manip_hmtd_off(action->manipulate.manip);
++		if (hmtd_off == 0)
++			return -EINVAL;
++		if (hmtd_off > 0x00ffffffUL)
++			return -EOVERFLOW;
++		nia = FMAN_PCD_AD_NIA_TYPE_RESULT_CF |
++		      FMAN_PCD_AD_NIA_NADEN;
++		fqid = action->manipulate.next_fqid;
++		res = (u32)hmtd_off;
++		break;
++	}
+ 
+ 	default:
+ 		return -EINVAL;
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+index aa00cdbc7..3e79617ad 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+@@ -55,4 +55,16 @@ struct list_head *fman_pcd_get_replic_list(struct fman_pcd *pcd);
+  */
+ unsigned long fman_pcd_cc_tree_group_table_off(
+ 	const struct fman_pcd_cc_tree *tree);
++
++/* fman_pcd_manip_hmtd_off:
++ *   Accessor exposing struct fman_pcd_manip::hmtd_off to other driver
++ *   TUs (currently fman_pcd_cc.c, which needs it to encode the
++ *   FMAN_PCD_ACTION_MANIPULATE arm in cc_encode_ad()).  Same idiom as
++ *   fman_pcd_cc_tree_group_table_off() above: the struct layout stays
++ *   private to fman_pcd_manip.c so PR14d-body adjustments do not
++ *   ripple across the PR14 TU surface.  Returns 0 if @manip is NULL
++ *   (defensive; caller is expected to validate).
++ */
++unsigned long fman_pcd_manip_hmtd_off(const struct fman_pcd_manip *manip);
++
+ #endif /* __FMAN_PCD_INTERNAL_H */
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+index 2715a0f04..46af621fd 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+@@ -772,3 +772,21 @@ void fman_pcd_manip_destroy(struct fman_pcd_manip *manip)
+ 	kfree(manip);
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_manip_destroy);
++
++/**
++ * fman_pcd_manip_hmtd_off() - read the manip's HMTD MURAM offset.
++ *
++ * Cross-TU accessor declared in fman_pcd_internal.h.  Used by
++ * fman_pcd_cc.c to wire the FMAN_PCD_ACTION_MANIPULATE arm of
++ * cc_encode_ad(): the CC AD slot encodes RESULT_CF | NADEN with
++ * @res = hmtd_off, so silicon walks from the match-table AD into
++ * the manip's HMTD before enqueuing to the post-manip FQID.
++ * Returns 0 for NULL @manip (defensive; caller is expected to
++ * validate, matches sibling-TU idiom).
++ */
++unsigned long fman_pcd_manip_hmtd_off(const struct fman_pcd_manip *manip)
++{
++	if (!manip)
++		return 0;
++	return manip->hmtd_off;
++}
