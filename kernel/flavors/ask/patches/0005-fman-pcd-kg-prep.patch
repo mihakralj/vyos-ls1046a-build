@@ -1,0 +1,541 @@
+From 8259d70f7ffbff8780fd770ad95bc230af690e61 Mon Sep 17 00:00:00 2001
+From: Miha Kralj <miha@mihakralj.com>
+Date: Thu, 14 May 2026 02:48:38 +0000
+Subject: [PATCH] fman/pcd: KeyGen public API stub (PR14b-prep)
+
+Lay down the ASK2 v1.0 PR14b foundation without touching FMan silicon
+yet.  This change is mechanical scaffolding only - every public entry
+point returns -EOPNOTSUPP (or ERR_PTR thereof).  The real KGSE_*
+register programming and scheme allocator land in PR14b-body as a
+clean-room implementation against LS1046A RM sec 8.7.4-8.7.5.
+
+What this commit does
+---------------------
+1. New include/linux/fsl/fman_pcd.h KG section: declares
+   enum fman_pcd_kg_extract_from, struct fman_pcd_kg_extract_spec,
+   struct fman_pcd_kg_scheme_params, and the four public entry
+   points fman_pcd_kg_scheme_create / bind_port / attach_cc /
+   scheme_destroy.  ABI is what ask.ko M5 will consume.
+
+2. New drivers/net/ethernet/freescale/fman/fman_pcd_kg.c (~110 LOC):
+   stub bodies that perform input validation (-EINVAL on bad args,
+   port_id range check 1..10 per RM sec 8.4) and return -EOPNOTSUPP
+   for the silicon path.  Opaque struct fman_pcd_kg_scheme is fully
+   defined here so consumers see only the forward decl.  All four
+   entry points are EXPORT_SYMBOL_GPL because ask.ko (GPL, out-of-
+   tree) is the sole consumer.
+
+3. New drivers/net/ethernet/freescale/fman/fman_keygen_internal.h:
+   promotes the file-static struct keygen_scheme and struct
+   fman_keygen from fman_keygen.c to module-internal scope, plus the
+   FM_KG_MAX_NUM_OF_SCHEMES macro that dimensions the schemes[]
+   array.  Header is fsl_dpaa_fman.ko-internal only; out-of-tree
+   consumers go through the public surface.
+
+4. fman_keygen.c: demote keygen_scheme_setup() and
+   keygen_bind_port_to_schemes() from file-static to non-static
+   and tag both EXPORT_SYMBOL_GPL.  These are the existing in-tree
+   helpers that already program the silicon for match_vector=0
+   (RSS hashing); PR14b-body will reuse them after populating
+   keygen->schemes[scheme_id] with match_vector != 0 for exact-
+   match flow lookup.  Remove the two struct bodies that now live
+   in the new header and #include the header in their place.
+
+5. fman/Makefile: add fman_pcd_kg.o under CONFIG_FSL_FMAN_PCD so
+   the stub links into fsl_dpaa_fman.ko exactly when PR14a's
+   orchestration layer does.
+
+Build verification (Cobalt 100 native arm64, gcc 13.3.0):
+  make ARCH=arm64 -j32 Image
+  -> zero warnings, zero errors
+  System.map shows all six expected symbols (T) plus __ksymtab
+  entries for the four EXPORT_SYMBOL_GPL surfaces and the two
+  EXPORT_SYMBOL_GPL helpers promoted from fman_keygen.c.
+
+No silicon registers are programmed by this commit.  Existing
+fman_keygen.c behaviour (keygen_port_hashing_init() etc.) is byte-
+identical at the call-site level; only linkage of two helpers
+changed.
+
+Spec: specs/ask2-rewrite-spec.md sec 13.6 (PR14a-g).
+Reference: LS1046A Reference Manual sec 8.7.4 (scheme registers),
+           sec 8.7.5 (extract record format), sec 8.4 (port ids).
+
+Signed-off-by: Miha Kralj <miha@mihakralj.com>
+---
+ drivers/net/ethernet/freescale/fman/Makefile  |   2 +-
+ .../net/ethernet/freescale/fman/fman_keygen.c |  43 +------
+ .../freescale/fman/fman_keygen_internal.h     | 103 +++++++++++++++
+ .../net/ethernet/freescale/fman/fman_pcd_kg.c | 115 +++++++++++++++++
+ include/linux/fsl/fman_pcd.h                  | 121 ++++++++++++++++++
+ 5 files changed, 345 insertions(+), 39 deletions(-)
+ create mode 100644 drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
+ create mode 100644 drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+
+diff --git a/drivers/net/ethernet/freescale/fman/Makefile b/drivers/net/ethernet/freescale/fman/Makefile
+index 54c759d94..a7ce1bab8 100644
+--- a/drivers/net/ethernet/freescale/fman/Makefile
++++ b/drivers/net/ethernet/freescale/fman/Makefile
+@@ -6,6 +6,6 @@ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_fman_port.o
+ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_mac.o
+ 
+ fsl_dpaa_fman-objs	:= fman_muram.o fman.o fman_sp.o fman_keygen.o fman_host_cmd.o
+-fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o
++fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o fman_pcd_kg.o
+ fsl_dpaa_fman_port-objs := fman_port.o
+ fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+index e73f6ef3c..fe5710c43 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+@@ -8,6 +8,7 @@
+ #include <linux/slab.h>
+ 
+ #include "fman_keygen.h"
++#include "fman_keygen_internal.h"
+ 
+ /* Maximum number of HW Ports */
+ #define FMAN_MAX_NUM_OF_HW_PORTS		64
+@@ -194,43 +195,7 @@ struct fman_kg_regs {
+ };
+ 
+ /* KeyGen Scheme data */
+-struct keygen_scheme {
+-	bool used;	/* Specifies if this scheme is used */
+-	u8 hw_port_id;
+-		/* Hardware port ID
+-		 * schemes sharing between multiple ports is not
+-		 * currently supported
+-		 * so we have only one port id bound to a scheme
+-		 */
+-	u32 base_fqid;
+-		/* Base FQID:
+-		 * Must be between 1 and 2^24-1
+-		 * If hash is used and an even distribution is
+-		 * expected according to hash_fqid_count,
+-		 * base_fqid must be aligned to hash_fqid_count
+-		 */
+-	u32 hash_fqid_count;
+-		/* FQ range for hash distribution:
+-		 * Must be a power of 2
+-		 * Represents the range of queues for spreading
+-		 */
+-	bool use_hashing;	/* Usage of Hashing and spreading over FQ */
+-	bool symmetric_hash;	/* Symmetric Hash option usage */
+-	u8 hashShift;
+-		/* Hash result right shift.
+-		 * Select the 24 bits out of the 64 hash result.
+-		 * 0 means using the 24 LSB's, otherwise
+-		 * use the 24 LSB's after shifting right
+-		 */
+-	u32 match_vector;	/* Match Vector */
+-};
+ 
+-/* KeyGen driver data */
+-struct fman_keygen {
+-	struct keygen_scheme schemes[FM_KG_MAX_NUM_OF_SCHEMES];
+-				/* Array of schemes */
+-	struct fman_kg_regs __iomem *keygen_regs;	/* KeyGen registers */
+-};
+ 
+ /* keygen_write_ar_wait
+  *
+@@ -455,7 +420,7 @@ static struct keygen_scheme *get_scheme(struct fman_keygen *keygen,
+  *
+  * Return: Zero for success or error code in case of failure
+  */
+-static int keygen_bind_port_to_schemes(struct fman_keygen *keygen,
++int keygen_bind_port_to_schemes(struct fman_keygen *keygen,
+ 				       u8 scheme_id,
+ 					bool bind)
+ {
+@@ -495,6 +460,7 @@ static int keygen_bind_port_to_schemes(struct fman_keygen *keygen,
+ 
+ 	return 0;
+ }
++EXPORT_SYMBOL_GPL(keygen_bind_port_to_schemes);
+ 
+ /* keygen_scheme_setup
+  *
+@@ -506,7 +472,7 @@ static int keygen_bind_port_to_schemes(struct fman_keygen *keygen,
+  *
+  * Return: Zero for success or error code in case of failure
+  */
+-static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
++int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+ 			       bool enable)
+ {
+ 	struct fman_kg_regs __iomem *keygen_regs = keygen->keygen_regs;
+@@ -611,6 +577,7 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+ 
+ 	return 0;
+ }
++EXPORT_SYMBOL_GPL(keygen_scheme_setup);
+ 
+ /* keygen_init
+  *
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h b/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
+new file mode 100644
+index 000000000..90a29fd33
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
+@@ -0,0 +1,103 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * FMan KeyGen — intra-module internal header.
++ *
++ * Promotes the previously file-local types `struct keygen_scheme` and
++ * `struct fman_keygen` to module-internal scope so that sibling
++ * translation units within fsl_dpaa_fman.ko (specifically fman_pcd_kg.c
++ * added in PR14b) can populate a scheme slot before calling the now-
++ * non-static keygen_scheme_setup() / keygen_bind_port_to_schemes()
++ * helpers.
++ *
++ * Not exported via include/linux/fsl/ — this header is fsl_dpaa_fman.ko-
++ * internal and must NOT be consumed from outside the module. ask.ko and
++ * other out-of-tree consumers go through the public fman_pcd_kg_*
++ * surface in include/linux/fsl/fman_pcd.h.
++ *
++ * Copyright 2026 Mono Networks / VyOS LS1046A maintainers.
++ */
++
++#ifndef __FMAN_KEYGEN_INTERNAL_H
++#define __FMAN_KEYGEN_INTERNAL_H
++
++#include <linux/io.h>
++#include <linux/types.h>
++
++#include "fman_keygen.h"
++
++/* Forward decl; full body lives in fman_keygen.c. */
++struct fman_kg_regs;
++
++/* Maximum number of KeyGen Schemes (FMan v3 silicon, RM §8.7.4).
++ * Promoted here from fman_keygen.c so the struct fman_keygen array
++ * dimension below is visible to sibling translation units.
++ */
++#ifndef FM_KG_MAX_NUM_OF_SCHEMES
++#define FM_KG_MAX_NUM_OF_SCHEMES	32
++#endif
++
++/* Per-scheme bookkeeping. Mirrors the file-static definition that used
++ * to live in fman_keygen.c — moved here verbatim so fman_pcd_kg.c can
++ * populate match_vector ≠ 0 for exact-match flow lookup (RM §8.7.3),
++ * not just the match_vector = 0 RSS-hashing case that
++ * keygen_port_hashing_init() programs.
++ */
++struct keygen_scheme {
++	bool used;		/* Specifies if this scheme is used */
++	u8 hw_port_id;
++				/* Hardware port ID
++				 * schemes sharing between multiple ports is not
++				 * currently supported
++				 * so we have only one port id bound to a scheme
++				 */
++	u32 base_fqid;
++				/* Base FQID:
++				 * Must be between 1 and 2^24-1
++				 * If hash is used and an even distribution is
++				 * expected according to hash_fqid_count,
++				 * base_fqid must be aligned to hash_fqid_count
++				 */
++	u32 hash_fqid_count;
++				/* FQ range for hash distribution:
++				 * Must be a power of 2
++				 * Represents the range of queues for spreading
++				 */
++	bool use_hashing;	/* Usage of Hashing and spreading over FQ */
++	bool symmetric_hash;	/* Symmetric Hash option usage */
++	u8 hashShift;
++				/* Hash result right shift.
++				 * Select the 24 bits out of the 64 hash result.
++				 * 0 means using the 24 LSB's, otherwise
++				 * use the 24 LSB's after shifting right
++				 */
++	u32 match_vector;	/* Match Vector */
++};
++
++/* KeyGen driver data. Mirrors the file-static definition formerly in
++ * fman_keygen.c.
++ */
++struct fman_keygen {
++	struct keygen_scheme schemes[FM_KG_MAX_NUM_OF_SCHEMES];
++	struct fman_kg_regs __iomem *keygen_regs;
++};
++
++/* Demoted from file-static in fman_keygen.c. Both EXPORT_SYMBOL_GPL.
++ * fman_pcd_kg.c calls these after populating a scheme slot with
++ * match_vector ≠ 0.
++ *
++ *   keygen_scheme_setup(keygen, scheme_id, enable):
++ *     Writes the populated keygen->schemes[scheme_id] state out to
++ *     silicon via the FMan KeyGen Action Register protocol. @enable
++ *     toggles the scheme's valid bit.
++ *
++ *   keygen_bind_port_to_schemes(keygen, scheme_id, bind):
++ *     Programs the FMan KG schemes-bind vector so that the hardware
++ *     port saved in keygen->schemes[scheme_id].hw_port_id dispatches
++ *     into this scheme. @bind=true to bind, false to unbind.
++ */
++int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
++			bool enable);
++int keygen_bind_port_to_schemes(struct fman_keygen *keygen, u8 scheme_id,
++				bool bind);
++
++#endif /* __FMAN_KEYGEN_INTERNAL_H */
+\ No newline at end of file
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+new file mode 100644
+index 000000000..f14ddf9f3
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+@@ -0,0 +1,115 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * FMan PCD KeyGen (KG) - PR14b-prep stub.
++ *
++ * Authoritative reference: LS1046A Reference Manual sec 8.7.4 (scheme
++ * registers KGSE_MV/MODE/EKDV/EKFC/CCBS/HC/FQB) and 8.7.5 (extract
++ * record format).  The actual silicon-programming body lands in
++ * PR14b-body and is authored clean-room from the RM plus the existing
++ * in-tree register definitions in fman_keygen.c.
++ *
++ * What PR14b-prep delivers
++ * ------------------------
++ * Only the public API surface required so that ask.ko can link against
++ * fsl_dpaa_fman.ko today and skip its FMan-offload code path cleanly
++ * when KG is not yet wired up.  Every entry point returns -EOPNOTSUPP
++ * (or ERR_PTR(-EOPNOTSUPP) for the constructor) so a consumer can
++ * detect the stub at runtime without crashing.  The opaque
++ * struct fman_pcd_kg_scheme is fully defined here so sizeof() works
++ * inside this TU when PR14b-body extends it; consumers see only the
++ * forward declaration in <linux/fsl/fman_pcd.h>.
++ *
++ * Symbol visibility: all four public entry points are EXPORT_SYMBOL_GPL
++ * because ask.ko (out-of-tree, GPL) is the sole consumer; the rest of
++ * the kernel must not call into the KG layer directly.
++ *
++ * Locking: at PR14b-prep there is no state to lock.  PR14b-body will
++ * take pcd->lock (via fman_pcd_get_lock()) around the
++ * keygen_scheme_setup() / keygen_bind_port_to_schemes() calls promoted
++ * to module-internal scope in this same patch.
++ */
++
++#include <linux/err.h>
++#include <linux/export.h>
++#include <linux/kernel.h>
++#include <linux/list.h>
++#include <linux/module.h>
++#include <linux/slab.h>
++#include <linux/types.h>
++
++#include <linux/fsl/fman_pcd.h>
++#include "fman_pcd_internal.h"
++
++/*
++ * Opaque KG scheme handle.  Only the fields touched by PR14b-prep are
++ * declared; PR14b-body will extend this with the cached register values
++ * (mv/mode/ekdv[8]/ccbs/fqb), the per-scheme spinlock, and the parent
++ * pcd back-pointer needed for fman_pcd_kg_scheme_destroy() to unlink
++ * from pcd->kg_schemes under pcd->lock.
++ */
++struct fman_pcd_kg_scheme {
++struct list_head node;        /* link into pcd->kg_schemes */
++struct fman_pcd *pcd;         /* parent subsystem, never NULL */
++u8 id;                        /* 0..31 on FMan v3 LS1046A */
++};
++
++struct fman_pcd_kg_scheme *
++fman_pcd_kg_scheme_create(struct fman_pcd *pcd,
++  const struct fman_pcd_kg_scheme_params *params)
++{
++if (!pcd || !params)
++return ERR_PTR(-EINVAL);
++
++if (params->num_extracts == 0 || params->num_extracts > 8)
++return ERR_PTR(-EINVAL);
++
++/*
++ * PR14b-body lands the real allocator + KGSE_* register
++ * programming.  Today we refuse cleanly so ask.ko's M5 KG
++ * path falls back to its software-FIB until the silicon
++ * code is in place.
++ */
++return ERR_PTR(-EOPNOTSUPP);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_kg_scheme_create);
++
++int fman_pcd_kg_bind_port(struct fman_pcd_kg_scheme *scheme, u8 port_id)
++{
++if (!scheme)
++return -EINVAL;
++
++/*
++ * LS1046A FMan v3 has 8x 1G MACs (ports 1-8) plus 2x 10G
++ * MACs (ports 9-10) per RM 8.4.  Port id 0 is reserved for
++ * the offline parsing port and is never a valid KG target.
++ */
++if (port_id == 0 || port_id > 10)
++return -EINVAL;
++
++return -EOPNOTSUPP;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_kg_bind_port);
++
++int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
++  struct fman_pcd_cc_tree *cc)
++{
++if (!scheme || !cc)
++return -EINVAL;
++
++return -EOPNOTSUPP;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_kg_attach_cc);
++
++void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme)
++{
++if (!scheme)
++return;
++
++/*
++ * No real allocation happens at PR14b-prep, so there is
++ * nothing to free.  PR14b-body will take pcd->lock, splice
++ * scheme->node out of pcd->kg_schemes, clear the KGSE_*
++ * registers for scheme->id, and kfree(scheme).
++ */
++}
++EXPORT_SYMBOL_GPL(fman_pcd_kg_scheme_destroy);
+\ No newline at end of file
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 4cb5875ef..27c9c2843 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -75,4 +75,125 @@ struct fman_pcd *fman_pcd_init(struct fman *fman);
+ void fman_pcd_release(struct fman_pcd *pcd);
+ struct fman_pcd_muram_budget fman_pcd_get_muram_budget(struct fman_pcd *pcd);
+ 
++/*
++ * KeyGen (KG) API (PR14b).
++ *
++ * The KeyGen engine extracts a configurable byte-mask out of every
++ * incoming frame and feeds it to a hash that selects one of N
++ * Classifier-Continue (CC) targets, a direct frame queue, or a default
++ * policer profile.  PR14b-prep declares the public surface; the actual
++ * hardware programming lives in fman_pcd_kg.c and currently returns
++ * -EOPNOTSUPP from every entry point until PR14b-body lands.
++ *
++ * Reference: LS1046A RM 8.7.4 (KeyGen scheme registers), 8.7.5 (KG
++ * extract record format).  All extract offsets are in bytes from the
++ * start of the parse result described in RM 8.7.3.
++ */
++
++/**
++ * enum fman_pcd_kg_extract_from - source for one extract slot.
++ * @FMAN_PCD_KG_EXTRACT_FROM_FRAME:        raw byte at fixed frame offset
++ * @FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT: byte at offset inside parse result
++ * @FMAN_PCD_KG_EXTRACT_FROM_DEFAULT:      use the per-port default value
++ *
++ * Mirrors the KGSE_EKDV (KeyGen Scheme Extract Definition - Value) field
++ * documented in RM 8.7.5 Table 8-105.
++ */
++enum fman_pcd_kg_extract_from {
++	FMAN_PCD_KG_EXTRACT_FROM_FRAME = 0,
++	FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT,
++	FMAN_PCD_KG_EXTRACT_FROM_DEFAULT,
++};
++
++/**
++ * struct fman_pcd_kg_extract_spec - one extract slot inside a scheme.
++ * @src:    where the byte run comes from (frame / parse result / default)
++ * @offset: starting byte offset (0..63 for parse result, 0..127 for frame)
++ * @size:   number of bytes to extract (1..16); total across all slots must
++ *          not exceed the FMan KG generic extract buffer of 36 bytes
++ * @mask:   per-byte AND-mask applied before hashing (0xff = no mask)
++ *
++ * Used to build the IPv4/IPv6 5-tuple key (typical ASK2 flow: SIP, DIP,
++ * proto, SPORT, DPORT - all sourced from FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT
++ * with the standard FMan parser offsets).
++ */
++struct fman_pcd_kg_extract_spec {
++	enum fman_pcd_kg_extract_from src;
++	u8 offset;
++	u8 size;
++	u8 mask;
++};
++
++/**
++ * struct fman_pcd_kg_scheme_params - immutable scheme description.
++ * @id:         requested scheme id (0..31 on FMan v3); -1 = first free
++ * @num_extracts:  count of populated entries in @extracts (1..8)
++ * @extracts:   per-slot extract specs
++ * @default_fqid: fallback FQID when CC chaining is not used
++ * @use_hash:   true = hash extracts and select target via CC; false = direct
++ *              FQID via @default_fqid only
++ *
++ * Mainline LS1046A FMan v3 silicon has 32 KG schemes (8 per netcfg
++ * partition).  Each scheme is single-attach to a port; ask.ko in M5 will
++ * own one scheme per ingress port.
++ */
++struct fman_pcd_kg_scheme_params {
++	int id;
++	u8 num_extracts;
++	struct fman_pcd_kg_extract_spec extracts[8];
++	u32 default_fqid;
++	bool use_hash;
++};
++
++/**
++ * fman_pcd_kg_scheme_create() - allocate and program a new KG scheme.
++ * @pcd:    PCD subsystem handle from fman_pcd_init()
++ * @params: scheme parameters; not retained after the call returns
++ *
++ * Programs the FMan KGSE_* registers for the chosen scheme id, attaches
++ * the scheme to @pcd->kg_schemes, and returns a handle that can be passed
++ * to fman_pcd_kg_bind_port() / fman_pcd_kg_attach_cc().
++ *
++ * Return: handle on success, ERR_PTR(-EOPNOTSUPP) at PR14b-prep (no
++ * silicon code yet), ERR_PTR(-EBUSY) if @params->id is already in use.
++ */
++struct fman_pcd_kg_scheme *
++fman_pcd_kg_scheme_create(struct fman_pcd *pcd,
++			  const struct fman_pcd_kg_scheme_params *params);
++
++/**
++ * fman_pcd_kg_bind_port() - bind a scheme to an FMan ingress port.
++ * @scheme:  handle from fman_pcd_kg_scheme_create()
++ * @port_id: FMan port id (0..7 for 1G, 8..9 for 10G on LS1046A)
++ *
++ * Writes the scheme's match-vector bit for @port_id and updates the
++ * port's PCD configuration so that frames classified to this scheme
++ * enter the KG hash pipeline.
++ *
++ * Return: 0 on success, -EOPNOTSUPP at PR14b-prep, -EINVAL on bad args.
++ */
++int fman_pcd_kg_bind_port(struct fman_pcd_kg_scheme *scheme, u8 port_id);
++
++/**
++ * fman_pcd_kg_attach_cc() - chain a scheme to a Classifier-Continue tree.
++ * @scheme: handle from fman_pcd_kg_scheme_create()
++ * @cc:     classifier tree from fman_pcd_cc_tree_create() (PR14c)
++ *
++ * Wires the KGSE_CCBS (CC Base Scheme) register so that the scheme's
++ * hash output indexes into the CC tree's key table.
++ *
++ * Return: 0 on success, -EOPNOTSUPP at PR14b-prep, -EINVAL on bad args.
++ */
++int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
++			  struct fman_pcd_cc_tree *cc);
++
++/**
++ * fman_pcd_kg_scheme_destroy() - tear down a previously created scheme.
++ * @scheme: handle from fman_pcd_kg_scheme_create().  NULL-safe.
++ *
++ * Detaches all port bindings, clears the KGSE_* registers, removes the
++ * scheme from @pcd->kg_schemes, and frees the handle.
++ */
++void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme);
++
+ #endif /* __LINUX_FSL_FMAN_PCD_H */
+-- 
+2.39.5
+
