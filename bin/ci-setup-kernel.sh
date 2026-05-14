@@ -211,7 +211,8 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
                      "$ASK_PATCH_DIR"/0010-*.patch \
                      "$ASK_PATCH_DIR"/0011-*.patch \
                      "$ASK_PATCH_DIR"/0012-*.patch \
-                     "$ASK_PATCH_DIR"/0013-*.patch; do
+                     "$ASK_PATCH_DIR"/0013-*.patch \
+                     "$ASK_PATCH_DIR"/0014-*.patch; do
         [ -f "$src_patch" ] || { echo "ERROR: missing $src_patch"; exit 1; }
         # Rename 0001-→1001-, 0002-→1002-, 0003-→1003-, 0004-→1004-,
         # 0005-→1005-, 0006-→1006-, 0007-→1007-, 0008-→1008-,
@@ -232,14 +233,15 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
             0011-*) dst="1011-${base#0011-}" ;;
             0012-*) dst="1012-${base#0012-}" ;;
             0013-*) dst="1013-${base#0013-}" ;;
+            0014-*) dst="1014-${base#0014-}" ;;
             *)      echo "ERROR: unexpected ASK patch name: $base"; exit 1 ;;
         esac
         echo "###   $base → $dst"
         cp "$src_patch" "$KERNEL_PATCHES/$dst"
         ASK_PATCH_COUNT=$((ASK_PATCH_COUNT + 1))
     done
-    if [ "$ASK_PATCH_COUNT" -ne 13 ]; then
-        echo "ERROR: expected 13 ASK kernel patches, staged $ASK_PATCH_COUNT"
+    if [ "$ASK_PATCH_COUNT" -ne 14 ]; then
+        echo "ERROR: expected 14 ASK kernel patches, staged $ASK_PATCH_COUNT"
         exit 1
     fi
     echo "### ASK2: $ASK_PATCH_COUNT in-tree kernel patches staged"
