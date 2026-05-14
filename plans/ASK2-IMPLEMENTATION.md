@@ -979,6 +979,150 @@ each action type.
 LOC budget: ~2500 LOC `.c` growth + ~30 LOC in `fman_pcd_kg.c`
 (`attach_cc` body).
 
+#### PR14c-body design memo (2026-05-14, v1.1)
+
+Authored after spec v1.1 unblocked SDK cross-referencing. Grounds the
+next session's body-PR author with silicon facts cited from RM §8.7.4
+and SDK `sdk_fman/Peripherals/FM/Pcd/fm_cc.{c,h}` (preserved verbatim
+under `work/linux-6.18.28/drivers/net/ethernet/freescale/sdk_fman/` and
+in the archived `mihakralj/kernel-ls1046a-build@464df181` tree).
+
+**Silicon facts (from SDK `fm_cc.h` lines 172–211, RM §8.7.4):**
+
+| Constant | Value | Source | Meaning |
+|---|---|---|---|
+| `FM_PCD_CC_AD_ENTRY_SIZE` | 16 bytes | fm_cc.h:174 | Every Action Descriptor in MURAM is exactly 16 B |
+| `FM_PCD_CC_NUM_OF_KEYS` | 255 | fm_cc.h:175 | Max keys per CC node (+1 miss = 256 total ADs/node) |
+| `FM_PCD_CC_KEYS_MATCH_TABLE_ALIGN` | 16 | fm_cc.h:172 | Match-key table base address 16-B aligned |
+| `FM_PCD_CC_AD_TABLE_ALIGN` | 16 | fm_cc.h:173 | AD table base address 16-B aligned |
+| `FM_PCD_CC_TREE_ADDR_ALIGN` | 256 | fm_cc.h:176 | Tree-group table base 256-B aligned |
+| `CC_GLBL_MASK_SIZE` | 4 | fm_cc.h:214 | Global mask is 4 B (32-bit) per group |
+| `FM_PCD_AD_RESULT_CONTRL_FLOW_TYPE` | `0x00000000` | fm_cc.h:178 | AD type bits (nia[31:30]): forward-to-FQ control-flow |
+| `FM_PCD_AD_RESULT_DATA_FLOW_TYPE` | `0x80000000` | fm_cc.h:179 | AD type: forward-to-FQ data-flow + statistics |
+| `FM_PCD_AD_CONT_LOOKUP_TYPE` | `0x40000000` | fm_cc.h:185 | AD type: continue to next CC node |
+| `FM_PCD_AD_BYPASS_TYPE` | `0xc0000000` | fm_cc.h:200 | AD type: drop/bypass |
+| `FM_PCD_AD_OPCODE_MASK` | `0x0000000f` | fm_cc.h:203 | nia[3:0] = sub-opcode (replicator id, manip id, …) |
+| `FM_PCD_AD_RESULT_PLCR_DIS` | `0x20000000` | fm_cc.h:180 | nia[29] = policer-disable flag |
+| `FM_PCD_AD_RESULT_NADEN` | `0x20000000` | fm_cc.h:182 | Next-Action-Descriptor enable |
+
+**AD record layout (SDK `t_AdOfTypeResult`, fm_cc.h:261–267, 16 B):**
+
+```
+offset 0x0  u32 fqid          // egress FQID (for result-flow ADs)
+offset 0x4  u32 plcrProfile   // policer profile id (low 24 bits) | enable bits
+offset 0x8  u32 nia           // type[31:30] | flags[29:4] | opcode[3:0]
+offset 0xc  u32 res           // reserved / next-AD-pointer for chained walks
+```
+
+This is the **only** AD format ASK2 v1.0 needs at PR14c-body. The
+SDK's other AD typedefs (`t_AdOfTypeContLookup`, `t_AdOfTypeStats`,
+`t_FEOfTypeHash`) are needed for M3+ flow types (continue-lookup,
+stats-AD, hash-indexed externalize) and stay out of PR14c-body scope.
+
+**Data structures (`fman_pcd_cc.c`, PR14c-body):**
+
+```c
+struct fman_pcd_cc_node {
+    struct list_head        node;            /* tree->nodes */
+    struct fman_pcd_cc_tree *tree;           /* back-ref */
+    struct fman_pcd        *pcd;             /* MURAM allocator owner */
+    struct fman_pcd_cc_extract extract;      /* key spec (copied) */
+    /* MURAM allocation (one alloc each, 16-B aligned per fm_cc.h:172-173): */
+    void __iomem           *match_table;     /* (size+1) * extract.size bytes,
+                                                key+mask pairs, last = miss key 0 */
+    void __iomem           *ad_table;        /* (size+1) * 16 bytes, last = miss AD */
+    size_t                  match_table_sz;
+    size_t                  ad_table_sz;
+    /* in-memory mirror for fast modify-next-action: */
+    struct fman_pcd_cc_key_entry *keys;      /* kmalloc(size * sizeof(*keys)) */
+    u16                     num_keys;        /* current valid keys (≤ 255) */
+    u16                     max_keys;        /* allocated capacity */
+    spinlock_t              lock;            /* serialises add_key/modify */
+};
+
+struct fman_pcd_cc_tree {
+    struct list_head        node;            /* pcd->cc_trees */
+    struct fman_pcd        *pcd;
+    u8                      num_of_groups;   /* 1..8, fm_cc.h enforces ≤ 8 */
+    /* MURAM tree-group table: 256-B aligned per fm_cc.h:176, holds 8 group
+       descriptors of 32 B each = 256 B fixed-size: */
+    void __iomem           *group_table;
+    struct list_head        nodes;           /* attached fman_pcd_cc_node */
+    struct mutex            lifecycle_lock;  /* serialises node create/destroy */
+};
+```
+
+**MURAM allocation strategy:** one `fman_muram_alloc()` per table
+(match_table, ad_table, group_table). Aligned via the existing
+`fman_muram_alloc()` API which already accepts an alignment hint. No
+per-key alloc — the match-table and ad-table are one contiguous block
+per node, sized at `cc_node_create()` time from `keys->num_keys`. A
+realloc-via-shadow scheme can be added later if dynamic resize matters
+(M3+); v1.0 sizes the node once at create and rejects add_key beyond
+the original capacity with `-ENOSPC`.
+
+**Sub-PR decomposition for landability (~2500 LOC total):**
+
+| Sub-PR | Patch file | Files / scope | LOC |
+|---|---|---|---|
+| **14c-body-1** | `0009-fman-pcd-cc-body-data-structures.patch` | `struct fman_pcd_cc_tree` + `fman_pcd_cc_tree_create/destroy` real bodies (MURAM group-table alloc, list registration in `pcd->cc_trees`, NULL-safe destroy with WARN on attached nodes). `fman_pcd_internal.h` exports for `cc_trees` list anchor. | ~600 |
+| **14c-body-2** | `0010-fman-pcd-cc-body-node-create-destroy.patch` | `struct fman_pcd_cc_node` + `cc_node_create/destroy` (MURAM match-table + ad-table alloc, extract validation, miss-key AD initialization). | ~700 |
+| **14c-body-3** | `0011-fman-pcd-cc-body-action-encoding.patch` | `fman_pcd_action` → AD-record encoder for each `enum fman_pcd_action_type` (DROP→bypass, FORWARD_FQ→result-flow, FORWARD_CAAM→result-flow with CAAM FQID, NEXT_CC_NODE→continue-lookup, REPLICATE→opcode-extension stub returning `-EOPNOTSUPP` until PR14f, MANIPULATE→opcode-extension stub returning `-EOPNOTSUPP` until PR14d). Helper `cc_encode_ad(action, ad_iomem)`. | ~500 |
+| **14c-body-4** | `0012-fman-pcd-cc-body-add-modify-key.patch` | `cc_node_add_key` + `cc_node_modify_next_action` (key-table append, AD-table update via `cc_encode_ad`, spinlock-protected). Replaces `fman_pcd_kg_attach_cc()` `-EOPNOTSUPP` stub with real `KGSE_CCBS` register write now that `cc_tree` is concrete. | ~400 |
+| **14c-body-5** | `0013-fman-pcd-cc-body-kunit.patch` | kunit suite `tests/fman_pcd_cc_test.c`: AD encoding byte-perfect against RM §8.7.4.3 worked example; tree-group MURAM layout byte-perfect against RM §8.7.4.1 figure; node-create rejects 0-key and 256-key tables; modify_next_action races vs add_key under spinlock contention (stress 1000× iterations on simulated MURAM). | ~300 |
+
+Each sub-PR lands as an additive patch and keeps `patch-health.sh
+--flavor ask --source release` green. After PR14c-body-5 lands, the
+`Pass 5 / Fail 11` baseline becomes `Pass 10 / Fail 11`.
+
+**SDK cross-reference map (one cite per non-trivial function):**
+
+| PR14c-body function | RM § | SDK file:function | What we consult it for |
+|---|---|---|---|
+| `cc_tree_create` MURAM alloc | §8.7.4.1 | `fm_cc.c:CcRootHashTableInit` | Tree-group-table 256-B alignment + 8-group max enforcement |
+| `cc_tree_destroy` WARN-on-attached | §8.7.4.1 | `fm_cc.c:CcRootHashTableRelease` | Cleanup ordering: detach nodes → free group table → list_del |
+| `cc_node_create` extract validation | §8.7.4.2 | `fm_cc.c:FmPcdCcNodeTreeTryLock` | Extract-size limits (1..56 B silicon hard limit per RM 8.7.4.2 table) |
+| `cc_node_create` match-table size | §8.7.4.2 | `fm_cc.c:BuildNewNodeAddRemoveKey` | (num_keys+1) * extract.size bytes contiguous |
+| `cc_node_create` ad-table init | §8.7.4.3 | `fm_cc.c:InitCcKeysAdditionalParams` | Miss-AD at index `num_keys` (last slot) with default-drop |
+| `cc_encode_ad(DROP)` | §8.7.4.3 | `fm_cc.c:NextStepAd` (BYPASS path) | nia |= `FM_PCD_AD_BYPASS_TYPE` (0xc0000000) |
+| `cc_encode_ad(FORWARD_FQ)` | §8.7.4.3 | `fm_cc.c:GetAdOfTypeResult` | fqid in offset 0x0; nia type bits = `RESULT_CONTRL_FLOW_TYPE` (0x0) |
+| `cc_encode_ad(NEXT_CC_NODE)` | §8.7.4.3 | `fm_cc.c:CcNextEngineParamsToAd` (CONT_LOOKUP path) | nia type bits = `CONT_LOOKUP_TYPE` (0x40000000); res = next-node AD-table physaddr |
+| `cc_encode_ad(FORWARD_CAAM)` | §8.7.4.3 | `fm_cc.c:GetAdOfTypeResult` (CAAM FQID variant) | fqid = `caam_qi_ext_consumer_register()` returned `caam_req_fqid`; nia |= `RESULT_PLCR_DIS` since CAAM bypasses policer |
+| `cc_node_add_key` table append | §8.7.4.2 | `fm_cc.c:BuildNewNodeAddRemoveKey` | Append-only; existing keys' table offsets must not shift |
+| `cc_node_modify_next_action` | §8.7.4.3 | `fm_cc.c:ModifyKeyAndNextEngineEntry` | Atomic 16-B AD write (single CASW64 cache-line update OK because nia is the last word silicon reads) |
+| `fman_pcd_kg_attach_cc` body | §8.7.3 | `fm_kg.c:KgSetClsPlan` (KGSE_CCBS path) | Scheme→tree binding via `KGSE_CCBS` register low-bits = tree-group-table physaddr |
+
+Citation discipline per spec §13 intro: every non-trivial function
+carries a comment of the form `/* RM §8.7.4.2 + cross-ref SDK fm_cc.c
+<function-name> for <specific behaviour> */`. Reviewer audit point per
+risk #12: confirm comments cite RM-first, SDK-second, and that the
+function body uses modern kernel idioms (typed structs, `readl/writel`,
+no `handle_t`, no `XX_Malloc`, no `TRACE_RTOS`).
+
+**Stale provenance comments in patches 0004–0008:** the v1.0
+"Clean-room provenance" file-headers in `fman_pcd.c`, `fman_pcd_cc.c`,
+`fman_pcd_manip.c`, `fman_pcd_plcr.c`, `fman_pcd_prs.c`,
+`fman_pcd_replic.c` are now stale but **not lying** — the prep-stub
+code is literally `-EOPNOTSUPP` stubs with no SDK code copied. They
+will be refreshed to v1.1 language as a sweep PR after PR14g lands
+(low-priority; tracked separately to avoid re-patching five patches
+each time PR14c-body lands a sub-step). New body code (PR14c-body-1
+onward) uses v1.1 provenance language from the start.
+
+**Next-session entry point:** start with PR14c-body-1
+(`0009-fman-pcd-cc-body-data-structures.patch`). Open
+`work/linux-6.18.28/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c`
+(the PR14c-prep stub) and
+`work/linux-6.18.28/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_cc.{c,h}`
+(the silicon-fact reference). Implement `struct fman_pcd_cc_tree`,
+real `fman_pcd_cc_tree_create()` (`fman_muram_alloc` with 256-B
+alignment for the 256-B fixed-size group table per fm_cc.h:176, list
+registration in `pcd->cc_trees`, mutex init), real
+`fman_pcd_cc_tree_destroy()` (WARN-on-attached-nodes check, free MURAM,
+list_del). Validate with `make ARCH=arm64 -j32 Image modules`,
+`git apply --3way --check` on a fresh clone, `patch-health.sh --flavor
+ask --source release`. Land as patch 0009.
+
 ---
 
 ### PR14d — Header manipulation (`fman_pcd_manip.c`)
