@@ -1,0 +1,482 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ASK2-CI <ci@mono-networks.local>
+Date: Wed, 14 May 2026 05:22:00 +0000
+Subject: [PATCH] fman: pcd_manip body-1 -- struct + create/destroy MURAM bodies
+
+PR14d-body-1 of the ASK2 v1.0 PR14 series.  Replaces the
+PR14d-prep -EOPNOTSUPP stubs of fman_pcd_manip_create() and
+fman_pcd_manip_destroy() with the skeleton MURAM-resident
+allocation pair:
+
+  - the per-manip HMTD (Header Manipulation Table Descriptor),
+    16 bytes, MURAM-resident, opCode=0x00 (no manip) until body-2;
+  - the per-manip HMCT (Header Manipulation Command Table), 64-B
+    scratch region for the variant-specific command sequence
+    written by the body-2 encoders.
+
+The four other public entry points stay -EOPNOTSUPP-free because
+the ABI defines only two functions: create + destroy.  The five
+MANIP_* variants land as a single internal encoder dispatch in
+PR14d-body-2.  The cc_encode_ad() MANIPULATE arm wiring lands in
+PR14d-body-3.  A KUnit suite covering each variant byte-for-byte
+against the RM lands in PR14d-body-4.
+
+Authoritative reference:
+  - LS1046A Reference Manual sec 8.7.5    (Header modification table)
+  - LS1046A Reference Manual sec 8.7.5.4  (Auto checksum recompute)
+  - LS1046A Reference Manual sec 8.7.4.3  (AD opcode-extension layout
+    for HMAN_OC, used by body-3 cc_encode_ad MANIPULATE arm)
+
+Provenance (v1.1): authored from the RM only; the legacy NXP SDK
+fm_manip.c is read-only silicon-fact cross-reference, no code or
+struct layouts copied.
+
+Build-validated on linux-6.18.28 ARM64 (native Cobalt 100):
+  - zero warnings
+  - vmlinux links clean
+  - both symbols present in System.map with __ksymtab_* entries
+  - fman_pcd_manip_create grew 28 -> 468 B
+  - fman_pcd_manip_destroy grew 24 -> 188 B
+
+Signed-off-by: ASK2-CI <ci@mono-networks.local>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+index d9ae4ca55..e2c459089 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+@@ -1,61 +1,277 @@
+ // SPDX-License-Identifier: GPL-2.0
+ /*
+- * FMan PCD Header Manipulation - public API stubs.
++ * FMan PCD Header Manipulation - struct + create/destroy bodies.
+  *
+- * PR14d-prep of the ASK2 v1.0 PR14 series.  Declares the on-disk
+- * translation unit for the header-manip layer and provides
+- * -EOPNOTSUPP stubs for every public entry point declared in
+- * <linux/fsl/fman_pcd.h>.  PR14d-body replaces these stubs with the
+- * real silicon-programming code per LS1046A RM 8.7.5 (header
+- * modification table format) and 8.7.5.4 (incremental checksum
+- * recompute hardware support).
++ * PR14d-body-1 of the ASK2 v1.0 PR14 series.  Replaces the PR14d-prep
++ * -EOPNOTSUPP stubs of fman_pcd_manip_create() and _destroy() with the
++ * skeleton MURAM-resident allocation pair:
++ *
++ *   - the per-manip HMTD (Header Manipulation Table Descriptor),
++ *     16 bytes, MURAM-resident, opCode=0x00 (no manip) until body-2;
++ *   - the per-manip HMCT (Header Manipulation Command Table), 64 byte
++ *     scratch region for the variant-specific command sequence written
++ *     by the body-2 encoders.
++ *
++ * The cc_encode_ad() MANIPULATE arm wiring lands in PR14d-body-3.  A
++ * KUnit suite covering each variant byte-for-byte against the RM lands
++ * in PR14d-body-4.
+  *
+  * Authoritative reference
+  * -----------------------
+- * - LS1046A Reference Manual sec 8.7.5 (Header modification table).
+- * - LS1046A Reference Manual sec 8.7.5.4 (Auto checksum recompute).
++ * - LS1046A Reference Manual sec 8.7.5    (Header modification table).
++ * - LS1046A Reference Manual sec 8.7.5.4  (Auto checksum recompute).
++ * - LS1046A Reference Manual sec 8.7.4.3  (AD opcode-extension layout
++ *   for HMAN_OC, used by body-3 cc_encode_ad MANIPULATE arm).
+  *
+  * Provenance (v1.1)
+- * ---------------------
++ * -----------------
+  * Mainline drivers/net/ethernet/freescale/fman/ has zero manip code;
+  * this file is authored from the RM only.  The legacy NXP SDK
+  * fm_manip.c (~6000 LOC under drivers/net/ethernet/freescale/sdk_fman/
+  * Peripherals/FM/Pcd/ in the archived mihakralj/kernel-ls1046a-build
+  * repo at HEAD 464df181) is a read-only silicon-fact cross-reference
+- * only - no code or struct layouts are copied from it.  See spec
+- * specs/ask2-rewrite-spec.md sec 16 (provenance discipline risk #12).
+- *
+- * What this file delivers at PR14d-prep
+- * -------------------------------------
+- * Two public entry points, both returning ERR_PTR(-EOPNOTSUPP) /
+- * no-op.  No struct fman_pcd_manip definition yet - it stays forward-
+- * declared in <linux/fsl/fman_pcd.h>.  No MURAM allocation, no register
+- * writes.  The point of this PR is to lock down the public ABI surface
+- * (struct fman_pcd_manip_params tagged union with five MANIP_* variants)
+- * and the Makefile integration so that PR14d-body is a pure
+- * implementation drop.
++ * only - no code or struct layouts are copied from it.  Cross-refs
++ * appear inline in "RM ... + cross-ref SDK fm_manip.{h,c} <symbol>"
++ * style comments per spec specs/ask2-rewrite-spec.md sec 13 (citation
++ * discipline) and sec 16 (provenance discipline risk 12).
++ *
++ * Locking model
++ * -------------
++ * pcd->lock (via fman_pcd_get_lock()) serialises the manip-list
++ * mutation (add/remove of struct fman_pcd_manip on pcd->manip_list)
++ * and the per-manip MURAM budget update at manip granularity.
++ * Per-manip manip->lock is a spinlock; reserved for body-2 (variant
++ * encoders may run from softirq context on flow-table updates that
++ * recreate a manip to apply a runtime NAT change).  The CC walker
++ * reads MURAM directly so this spinlock is between in-kernel writers
++ * only.
++ *
++ * Silicon facts driving the layout
++ * --------------------------------
++ *  - RM 8.7.5 paragraph 2: HMTD is a fixed 16-byte record (cross-ref
++ *    SDK fm_manip.h::t_Hmtd, 16 bytes).
++ *  - RM 8.7.5 paragraph 4: each HMCT command is a 4-byte word with
++ *    opcode bits[31:24] and operands in bits[23:0].  The list is
++ *    terminated by HMCD_LAST=0x00800000 OR'd into the last word.
++ *    Cross-ref SDK fm_manip.h::HMCD_*.
++ *  - RM 8.7.5.4: when bit HMCD_IP_L4_CS_CALC=0x00040000 is set in an
++ *    IPv4_UPDATE or IPv6_UPDATE HMCT command, the FMan re-computes
++ *    the IPv4 header checksum and (if a TCP/UDP L4 header is present
++ *    per the parse result) the L4 checksum, transparently.  Body-2
++ *    sets this bit on every NAT_V4/NAT_V6 command.
++ *  - HMCT sizing for body-1: worst case is NAT_V6 with both SA+DA
++ *    rewrite + L4 port rewrite = 4 commands * 4 B header + 16 + 16 +
++ *    4 (port pair) payload = 56 B.  Rounded up to 64 B for slack.
++ *    gen_pool min_alloc_order=8 inside fman_muram_alloc() guarantees
++ *    natural 256-B alignment, stricter than every RM requirement.
++ *  - Cross-ref SDK fm_manip.c MANIP_GET_HMCT_PTR / MANIP_GET_DATA_PTR
++ *    macros: the SDK stores p_Hmct + p_Data CPU pointers on the manip
++ *    handle.  We do the same.
+  */
+ 
+ #include <linux/err.h>
+ #include <linux/errno.h>
+ #include <linux/export.h>
++#include <linux/io.h>
+ #include <linux/kernel.h>
++#include <linux/list.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
+ #include <linux/types.h>
+ 
+ #include <linux/fsl/fman_pcd.h>
++#include "fman.h"
++#include "fman_muram.h"
+ #include "fman_pcd_internal.h"
+ 
++/* ------------------------------------------------------------------ */
++/* HMTD (Header Manipulation Table Descriptor) layout - RM 8.7.5 p.2  */
++/* ------------------------------------------------------------------ */
++
++/*
++ * The HMTD is a 16-byte MURAM-resident record consumed by the FMan
++ * header-manip engine.  Field offsets within the descriptor, all
++ * big-endian relative to the host:
++ *
++ *   0x0  u16 cfg                - HMTD configuration flags
++ *   0x2  u8  eliodnOffset       - extended LIODN offset
++ *   0x3  u8  extHmcdBasePtrHi   - HMCT base pointer, high byte
++ *   0x4  u32 hmcdBasePtr        - HMCT base pointer, low 32 bits
++ *   0x8  u16 nextAdIdx          - next-AD index for cascade
++ *   0xa  u8  res1               - reserved
++ *   0xb  u8  opCode             - HMAN_OC family selector
++ *   0xc  u32 res2               - reserved
++ *
++ * Cross-ref SDK fm_manip.h::t_Hmtd (packed struct).
++ */
++#define FMAN_PCD_HMTD_SIZE		16
++#define FMAN_PCD_HMTD_OFF_CFG		0x0
++#define FMAN_PCD_HMTD_OFF_ELIODN_OFF	0x2
++#define FMAN_PCD_HMTD_OFF_EXT_HMCD_HI	0x3
++#define FMAN_PCD_HMTD_OFF_HMCD_BASE	0x4
++#define FMAN_PCD_HMTD_OFF_NEXT_AD_IDX	0x8
++#define FMAN_PCD_HMTD_OFF_OPCODE	0xb
++#define FMAN_PCD_HMTD_OFF_RES2		0xc
++
++/*
++ * HMTD cfg-word bits (RM 8.7.5 + cross-ref SDK fm_manip.h::HMTD_CFG_*):
++ *   TYPE          - 0x4000, marks this descriptor as a header-manip
++ *   EXT_HMCT      - 0x0080, HMCT lives outside the descriptor (always
++ *                   true for our layout)
++ *   PRS_AFTER_HM  - 0x0040, re-run the FMan parser after manip; we
++ *                   leave this CLEAR because NAT/VLAN/TTL never
++ *                   change the parse-result layout in a way that
++ *                   affects downstream classification
++ *   NEXT_AD_EN    - 0x0020, enable cascade to next-AD; CLEAR by default
++ */
++#define FMAN_PCD_HMTD_CFG_TYPE		0x4000
++#define FMAN_PCD_HMTD_CFG_EXT_HMCT	0x0080
++#define FMAN_PCD_HMTD_CFG_PRS_AFTER_HM	0x0040
++#define FMAN_PCD_HMTD_CFG_NEXT_AD_EN	0x0020
++
++/*
++ * HMAN_OC opcode family selectors (RM 8.7.5 + cross-ref SDK fm_manip.h
++ * HMAN_OC_IP_MANIP=0x34 / HMAN_OC=0x35).  HMAN_OC_IP_MANIP is used
++ * when the manip touches IP header fields (NAT_V4, NAT_V6, TTL_DEC,
++ * and the L4-port-update sub-command); HMAN_OC is the generic family
++ * used for L2-only ops (VLAN_PUSH, VLAN_POP).  Body-2 selects per-type.
++ */
++#define FMAN_PCD_HMAN_OC			0x35
++#define FMAN_PCD_HMAN_OC_IP_MANIP	0x34
++
++/* ------------------------------------------------------------------ */
++/* HMCT (Header Manipulation Command Table) layout - RM 8.7.5 p.4     */
++/* ------------------------------------------------------------------ */
++
++/*
++ * HMCT is a sequence of 4-byte big-endian command words optionally
++ * followed by inline payload.  Each command word is encoded as:
++ *
++ *   bits[31:24]  opcode (HMCD_OPCODE_*; cross-ref SDK fm_manip.h)
++ *   bits[23:0]   per-opcode operand bits
++ *
++ * The last command word OR's in HMCD_LAST=0x00800000 to terminate the
++ * list (silicon stops walking at the first word with that bit set).
++ *
++ * Body-1 allocates a fixed-size 64-byte HMCT region that is large
++ * enough to hold the worst-case command sequence (NAT_V6 SA+DA + L4
++ * ports = 56 B, rounded up to 64 for slack).  All five MANIP_*
++ * variants share this fixed-size HMCT region.
++ */
++#define FMAN_PCD_HMCT_SIZE		64
++
++/* HMCT word constants used by body-2 encoders; defined here so body-1
++ * compiles cleanly with the cross-reference table documenting the full
++ * set in one place.  Cross-ref SDK fm_manip.h::HMCD_*.
++ */
++#define FMAN_PCD_HMCD_LAST		0x00800000u
++#define FMAN_PCD_HMCD_OC_SHIFT		24
++#define FMAN_PCD_HMCD_OP_IPV4_UPDATE	0x0Cu
++#define FMAN_PCD_HMCD_OP_IPV6_UPDATE	0x10u
++#define FMAN_PCD_HMCD_OP_TCP_UDP_UPDATE	0x0Eu
++#define FMAN_PCD_HMCD_OP_L2_INSRT	0x09u
++#define FMAN_PCD_HMCD_OP_L2_RMV		0x08u
++
++/* IPv4 update operand bits (RM 8.7.5 + SDK HMCD_IPV4_UPDATE_*) */
++#define FMAN_PCD_HMCD_IPV4_UPDATE_TTL	0x00000001u
++#define FMAN_PCD_HMCD_IPV4_UPDATE_DST	0x00000020u
++#define FMAN_PCD_HMCD_IPV4_UPDATE_SRC	0x00000040u
++
++/* IPv6 update operand bits (HMCD_IPV6_UPDATE_*) */
++#define FMAN_PCD_HMCD_IPV6_UPDATE_HL	0x00000001u
++#define FMAN_PCD_HMCD_IPV6_UPDATE_DST	0x00000040u
++#define FMAN_PCD_HMCD_IPV6_UPDATE_SRC	0x00000080u
++
++/* TCP/UDP update operand bits (HMCD_TCP_UDP_UPDATE_*) */
++#define FMAN_PCD_HMCD_L4_UPDATE_DST	0x00004000u
++#define FMAN_PCD_HMCD_L4_UPDATE_SRC	0x00008000u
++#define FMAN_PCD_HMCD_L4_UPDATE_SRC_SHIFT	16
++
++/* Auto checksum recompute (RM 8.7.5.4 + SDK HMCD_IP_L4_CS_CALC) */
++#define FMAN_PCD_HMCD_IP_L4_CS_CALC	0x00040000u
++
++/**
++ * struct fman_pcd_manip - one MURAM-resident header-manip template.
++ * @node:        anchor on pcd->manip_list (protected by pcd->lock)
++ * @pcd:         owning PCD subsystem; back-pointer for MURAM free
++ * @type:        copied from params->type at create-time; selects the
++ *               body-2 encoder branch and the body-3 AD-opcode value
++ * @hmtd_off:    MURAM byte offset of the 16-byte HMTD record
++ * @hmtd:        CPU-visible iomem pointer to the HMTD; 16-byte aligned
++ * @hmct_off:    MURAM byte offset of the 64-byte HMCT scratch region
++ * @hmct:        CPU-visible iomem pointer to the HMCT
++ * @hmct_sz:     bytes allocated for @hmct
++ * @lock:        per-manip spinlock; reserved for body-2 encoders
++ *
++ * Definition is private to this translation unit; the public ABI
++ * forward-declares it in <linux/fsl/fman_pcd.h>.
++ *
++ * Cross-ref SDK fm_manip.h::t_FmPcdManip (a ~50-field struct mixing
++ * HMTD/HMCT pointers with frag/reasm/ipsec/capwap state, owners,
++ * statistics, spinlock).  We keep only the seven fields needed for
++ * the v1.0 ASK2 fast-flow path; the cascade and stats fields are
++ * reintroduced piecemeal in later milestones (M3+).
++ */
++struct fman_pcd_manip {
++	struct list_head		node;
++	struct fman_pcd		*pcd;
++	enum fman_pcd_manip_type	type;
++	unsigned long			hmtd_off;
++	void __iomem			*hmtd;
++	unsigned long			hmct_off;
++	void __iomem			*hmct;
++	size_t				hmct_sz;
++	spinlock_t			lock;
++};
++
+ /**
+  * fman_pcd_manip_create() - program one header-manip template.
+  *
+- * PR14d-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
+- * Returns ERR_PTR(-EOPNOTSUPP) until PR14d-body lands.
++ * Implements the public ABI declared in <linux/fsl/fman_pcd.h>.
++ *
++ * PR14d-body-1 sequence:
++ *   1. Validate args (pcd, params non-NULL; params->type one of the
++ *      five MANIP_* variants).
++ *   2. kzalloc the manip handle; init list anchor + spinlock; record
++ *      type + pcd back-pointer.
++ *   3. fman_pcd_muram_alloc() the 16-byte HMTD region.  gen_pool
++ *      min_alloc_order=8 satisfies the RM 8.7.5 16-byte alignment
++ *      requirement naturally.
++ *   4. fman_muram_offset_to_vbase() to obtain the CPU pointer.
++ *   5. memset_io() the HMTD to zero.  Sets opCode=0 (no manip) and
++ *      cfg=0 (TYPE bit clear) - silicon treats as inactive descriptor.
++ *   6. fman_pcd_muram_alloc() the 64-byte HMCT region.
++ *   7. memset_io() the HMCT to zero.  All-zero HMCT decodes as an
++ *      opcode-0 word without HMCD_LAST set; silicon would walk forever,
++ *      but the HMTD opCode=0 path never invokes the HMCT walker - safe.
++ *   8. Under pcd->lock, list_add the manip to pcd->manip_list so
++ *      fman_pcd_release() can tear it down on driver unbind even if
++ *      the caller leaks the handle.
++ *
++ * Body-1 deliberately does NOT yet write any per-variant HMCT commands;
++ * the function returns a valid handle whose silicon table is inactive.
++ * Body-2 lands the per-variant encoder dispatch.  Body-3 wires the
++ * cc_encode_ad() MANIPULATE arm so the AD points at this HMTD MURAM
++ * offset.  Until body-3 lands, a manip handle created by body-1 cannot
++ * be referenced from a CC key (the cc_encode_ad arm still -EOPNOTSUPP).
++ *
++ * RM 8.7.5 paragraph 2 (HMTD layout) + RM 8.7.5 paragraph 4 (HMCT
++ * layout) + cross-ref SDK fm_manip.c FmPcdManipCreate() for the
++ * HMTD+HMCT alloc-pair pattern.
+  */
+ struct fman_pcd_manip *
+ fman_pcd_manip_create(struct fman_pcd *pcd,
+ 		      const struct fman_pcd_manip_params *params)
+ {
++	struct fman_pcd_manip *manip;
++	struct muram_info *muram;
++	struct mutex *pcd_lock;
++	unsigned long off;
++	void __iomem *vb;
++	long err;
++
+ 	if (!pcd || !params)
+ 		return ERR_PTR(-EINVAL);
+ 
+@@ -70,20 +286,126 @@ fman_pcd_manip_create(struct fman_pcd *pcd,
+ 		return ERR_PTR(-EINVAL);
+ 	}
+ 
+-	return ERR_PTR(-EOPNOTSUPP);
++	muram = fman_get_muram(fman_pcd_get_fman(pcd));
++	if (!muram)
++		return ERR_PTR(-ENXIO);
++
++	manip = kzalloc(sizeof(*manip), GFP_KERNEL);
++	if (!manip)
++		return ERR_PTR(-ENOMEM);
++
++	INIT_LIST_HEAD(&manip->node);
++	spin_lock_init(&manip->lock);
++	manip->pcd = pcd;
++	manip->type = params->type;
++
++	/*
++	 * Allocate the 16-byte HMTD.  All-zero HMTD has opCode=0
++	 * (treated as "no manip" by the silicon walker) and cfg=0
++	 * (TYPE bit clear).  Cross-ref SDK fm_manip.c HmctInit() for
++	 * the same alloc-then-zero pattern.
++	 */
++	off = fman_pcd_muram_alloc(pcd, FMAN_PCD_HMTD_SIZE);
++	if (IS_ERR_VALUE(off)) {
++		err = (long)off;
++		kfree(manip);
++		return ERR_PTR(err);
++	}
++
++	vb = (void __iomem *)fman_muram_offset_to_vbase(muram, off);
++	if (!vb) {
++		fman_pcd_muram_free(pcd, off, FMAN_PCD_HMTD_SIZE);
++		kfree(manip);
++		return ERR_PTR(-ENXIO);
++	}
++
++	manip->hmtd_off = off;
++	manip->hmtd = vb;
++	memset_io(vb, 0, FMAN_PCD_HMTD_SIZE);
++
++	/*
++	 * Allocate the 64-byte HMCT scratch region.  Body-2 encoders
++	 * write into this region under manip->lock; body-3 plumbs the
++	 * HMCT base pointer into the HMTD hmcdBasePtr field at the end
++	 * of the body-2 encoder dispatch (so the HMTD only points at a
++	 * fully-formed HMCT, never a partially-written one).
++	 */
++	off = fman_pcd_muram_alloc(pcd, FMAN_PCD_HMCT_SIZE);
++	if (IS_ERR_VALUE(off)) {
++		err = (long)off;
++		fman_pcd_muram_free(pcd, manip->hmtd_off,
++				    FMAN_PCD_HMTD_SIZE);
++		kfree(manip);
++		return ERR_PTR(err);
++	}
++
++	vb = (void __iomem *)fman_muram_offset_to_vbase(muram, off);
++	if (!vb) {
++		fman_pcd_muram_free(pcd, off, FMAN_PCD_HMCT_SIZE);
++		fman_pcd_muram_free(pcd, manip->hmtd_off,
++				    FMAN_PCD_HMTD_SIZE);
++		kfree(manip);
++		return ERR_PTR(-ENXIO);
++	}
++
++	manip->hmct_off = off;
++	manip->hmct = vb;
++	manip->hmct_sz = FMAN_PCD_HMCT_SIZE;
++	memset_io(vb, 0, FMAN_PCD_HMCT_SIZE);
++
++	/*
++	 * Publish on the PCD manip list.  fman_pcd_release() on driver
++	 * unbind walks this list and calls fman_pcd_manip_destroy() on
++	 * every surviving handle, so callers cannot leak MURAM by
++	 * forgetting to destroy.  Cross-ref fman_pcd.c fman_pcd_release.
++	 */
++	pcd_lock = fman_pcd_get_lock(pcd);
++	mutex_lock(pcd_lock);
++	list_add_tail(&manip->node, fman_pcd_get_manip_list(pcd));
++	mutex_unlock(pcd_lock);
++
++	return manip;
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_manip_create);
+ 
+ /**
+  * fman_pcd_manip_destroy() - tear down one header-manip template.
+  *
+- * PR14d-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
+- * NULL-safe no-op until PR14d-body lands.
++ * Implements the public ABI declared in <linux/fsl/fman_pcd.h>.
++ *
++ * Sequence (reverse of create):
++ *   1. NULL-safe early return.
++ *   2. Under pcd->lock, list_del from pcd->manip_list.
++ *   3. fman_pcd_muram_free() the HMCT.
++ *   4. fman_pcd_muram_free() the HMTD.
++ *   5. kfree the handle.
++ *
++ * The public ABI doc-comment says "WARN if any CC key still references
++ * this manip via FMAN_PCD_ACTION_MANIPULATE".  Until body-3 wires the
++ * cc_encode_ad MANIPULATE arm, no CC key can reference a manip, so
++ * there is nothing to count - the WARN_ON extends in body-3.
++ *
++ * RM 8.7.5 + cross-ref SDK fm_manip.c FmPcdManipDelete.
+  */
+ void fman_pcd_manip_destroy(struct fman_pcd_manip *manip)
+ {
++	struct fman_pcd *pcd;
++	struct mutex *pcd_lock;
++
+ 	if (!manip)
+ 		return;
+-	/* PR14d-body: detach from CC keys, free MURAM template, free handle. */
++
++	pcd = manip->pcd;
++	if (WARN_ON(!pcd))
++		return;
++
++	pcd_lock = fman_pcd_get_lock(pcd);
++	mutex_lock(pcd_lock);
++	list_del(&manip->node);
++	mutex_unlock(pcd_lock);
++
++	fman_pcd_muram_free(pcd, manip->hmct_off, manip->hmct_sz);
++	fman_pcd_muram_free(pcd, manip->hmtd_off, FMAN_PCD_HMTD_SIZE);
++	kfree(manip);
+ }
+-EXPORT_SYMBOL_GPL(fman_pcd_manip_destroy);
+\ No newline at end of file
++EXPORT_SYMBOL_GPL(fman_pcd_manip_destroy);
