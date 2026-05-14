@@ -52,13 +52,13 @@ architecture source-of-truth. When the two disagree, **the spec wins**
 | 14f-body | M2.5f-body — replicator real MURAM group table (RM 8.7.7), parser HXS pass-through config (RM 8.7.2), kunit | ask20 | landed |
 | 14g | M2.5g — End-to-end wire-up — `ask_hostcmd.c` calls PCD API; first IPv4 TCP flow traverses silicon | ask20 | **🛑 BLOCKED on CC-chain re-roll.** Silicon-side MURAM gate (PR14h) was cleared but the *source-of-truth* patch stack is still cascade-failed per `plans/PATCH-STACK-FORENSIC-2026-05-14.md`: `patch-health.sh --flavor ask --source release` reports `Pass=11 / Fail=24` with patches 0009–0013, 0016, 0017, 0020, 0021, 0024 (the entire CC chain + cross-arm wiring) failing to apply on a clean kernel. Tonight's on-silicon KUnit 36/36 PASS came from a session-mutated `work/linux-6.18.28/`, NOT from a clean re-application of `kernel/flavors/ask/patches/` — so a fresh CI build would NOT reproduce those results. PR14g cannot be authored on this stack because its `<linux/fsl/fman_pcd.h>` consumer symbols live in the cascade-failed patches. **Three repair options remain (forensic memo §3):** (A) re-roll 0009..0024 in cumulative order against the actual 159-line baseline preserving the body-* split (~5–10 sessions); (B) collapse the CC chain into one fresh body patch, drop 0009-0013/0016/0017/0020/0021/0024 (~1–2 sessions, loses review trail); (C) hold PR14, mark BROKEN-NEEDS-REROLL here, address before any further PR14g/g+ work. Operator decision required. |
 | 14h | MURAM-BUDGET-FIX — reduce `FMAN_PCD_MURAM_RESERVED_BYTES` from 96 KiB to a probe-able value (candidates 64 / 32 / 16 KiB) so `fman_muram_alloc()` succeeds on real silicon | ask20 | Patch `0026-*` applies cleanly ✓ — silicon ran fine on the session-mutated tree. **Note:** the earlier "patch-health Pass=35/Fail=0" claim in commits `573ef60` / `63d48f3` was a verdict-misread; re-running patch-health after PR14h still shows the inherited CC-chain cascade-failure (`Pass=11 / Fail=24`). 0026 itself is good; the cascade was pre-existing and is captured under row 14g + `plans/PATCH-STACK-FORENSIC-2026-05-14.md`. |
-| 15  | M3.x — remaining flow types (NAT/PAT/v6/bridge)  | ask20  | blocked on PR14g |
-| 16  | M4.x — `ask_xfrm.c` + CAAM packet-mode IPsec     | ask20  | blocked on PR14g |
-| 17  | M5.1 — `askd` (sd-event + libmnl)                | ask20  | blocked on PR14g |
-| 18  | M5.2 — `ask-cli` (Python Varlink client)         | ask20  | blocked on PR14g |
-| 19  | M5.3 — VyOS CLI integration                      | ask20  | blocked on PR14g |
-| 20  | M5.4 — VyOS conf_mode + op_mode                  | ask20  | blocked on PR14g |
-| 21  | M6.x — VPP coexistence, soak, performance gates  | ask20  | blocked on PR14g |
+| 15  | M3.x — remaining flow types (NAT/PAT/v6/bridge)  | ask20  | gated on PR14g |
+| 16  | M4.x — `ask_xfrm.c` + CAAM packet-mode IPsec     | ask20  | gated on PR14g |
+| 17  | M5.1 — `askd` (sd-event + libmnl)                | ask20  | gated on PR14g |
+| 18  | M5.2 — `ask-cli` (Python Varlink client)         | ask20  | gated on PR14g |
+| 19  | M5.3 — VyOS CLI integration                      | ask20  | gated on PR14g |
+| 20  | M5.4 — VyOS conf_mode + op_mode                  | ask20  | gated on PR14g |
+| 21  | M6.x — VPP coexistence, soak, performance gates  | ask20  | gated on PR14g |
 
 Status legend:
 - **not started** — no commits yet on the target branch
