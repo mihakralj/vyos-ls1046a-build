@@ -1,0 +1,227 @@
+From 7ebbb4e8c458d6f8426aedc22fef4a9b1f603230 Mon Sep 17 00:00:00 2001
+From: ASK2 PR14c-body-3 <ask2@vyos.local>
+Date: Thu, 14 May 2026 04:38:21 +0000
+Subject: [PATCH] fman/pcd/cc: AD encoder helper (PR14c-body-3)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+PR14c-body-3 of the ASK2 v1.0 PR14 series.  Adds the static
+cc_encode_ad() helper that packs a typed struct fman_pcd_action
+into the 16-byte MURAM-resident action-descriptor record format
+documented in LS1046A RM 8.7.4.3 (Table 8-119).
+
+The encoder dispatches on action->type:
+  * FMAN_PCD_ACTION_DROP            -> nia=BYPASS (0xc0000000)
+  * FMAN_PCD_ACTION_FORWARD_FQ      -> nia=RESULT_CONTRL_FLOW, fqid
+  * FMAN_PCD_ACTION_FORWARD_CAAM    -> nia=RESULT_CF|PLCR_DIS,
+                                       plcr=profile_id
+  * FMAN_PCD_ACTION_NEXT_CC_NODE    -> nia=CONT_LOOKUP (0x40000000),
+                                       res=next-node ad_table_off
+  * FMAN_PCD_ACTION_REPLICATE       -> -EOPNOTSUPP (PR14f-body)
+  * FMAN_PCD_ACTION_MANIPULATE      -> -EOPNOTSUPP (PR14d-body)
+  * other                           -> -EINVAL
+
+All four 32-bit words at byte offsets 0x0/0x4/0x8/0xc are written
+with iowrite32be() because FMan MURAM is big-endian relative to
+the host CPU.  The helper is marked __maybe_unused and is currently
+DCE'd because body-3 has no consumer; PR14c-body-4 wires it into
+fman_pcd_cc_node_add_key() and _modify_next_action() under the
+per-node spinlock.
+
+The empty-table FQ-0-trap safety property from PR14c-body-2 is
+preserved: an un-programmed AD slot decodes as RESULT_CONTRL_FLOW
+with fqid=0 (DPAA1 reserved-invalid), triggering an FMan parse-
+error trap rather than silent misrouting.
+
+Spec design memo: plans/ASK2-IMPLEMENTATION.md "PR14c-body design
+memo", committed in 537a008.  Provenance per spec v1.1 sec 13 —
+RM 8.7.4.3 plus read-only SDK cross-ref to fm_cc.c GetAdOfTypeResult
+and NextStepAd for silicon-fact selection-table origin.
+
+Signed-off-by: ASK2 PR14c-body-3 <ask2@vyos.local>
+---
+ .../net/ethernet/freescale/fman/fman_pcd_cc.c | 153 ++++++++++++++++--
+ 1 file changed, 144 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index dd8cd4d97..e3ac023aa 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -1,15 +1,25 @@
+ // SPDX-License-Identifier: GPL-2.0
+ /*
+- * FMan PCD Coarse Classifier (CC) - tree + node create/destroy.
++ * FMan PCD Coarse Classifier (CC) - tree + node create/destroy +
++ * action-descriptor encoder.
+  *
+- * PR14c-body-2 of the ASK2 v1.0 PR14 series.  Replaces the
+- * PR14c-prep -EOPNOTSUPP stubs for fman_pcd_cc_node_create() and
+- * fman_pcd_cc_node_destroy() with real MURAM-resident match-key
+- * record + AD-table allocation per LS1046A RM 8.7.4.2 and 8.7.4.3.
+- * Tree create/destroy bodies landed in PR14c-body-1.  The remaining
+- * two stubs (fman_pcd_cc_node_add_key, _modify_next_action) land in
+- * PR14c-body-4 once the action-encoding helper from PR14c-body-3 is
+- * available.
++ * PR14c-body-3 of the ASK2 v1.0 PR14 series.  Adds the static
++ * cc_encode_ad() helper that translates a typed struct fman_pcd_action
++ * into the 16-byte MURAM-resident action-descriptor record format
++ * documented in LS1046A RM 8.7.4.3 (action template encoding).  The
++ * helper is internal to this translation unit; it has no callers yet
++ * because the two consumers (fman_pcd_cc_node_add_key,
++ * _modify_next_action) still return -EOPNOTSUPP.  PR14c-body-4 wires
++ * the helper into those entry points and replaces their stub bodies
++ * with the real key/AD-row programming sequence.
++ *
++ * Previous body PRs:
++ *   - PR14c-body-1: struct fman_pcd_cc_tree, tree create/destroy bodies
++ *     (MURAM-resident 256-B tree group table per RM 8.7.4.1).
++ *   - PR14c-body-2: struct fman_pcd_cc_node, node create/destroy bodies
++ *     (MURAM-resident match-key record + AD table per RM 8.7.4.2 and
++ *     RM 8.7.4.3, table base 16-B aligned naturally via gen_pool
++ *     min_alloc_order=8).
+  *
+  * Authoritative reference
+  * -----------------------
+@@ -119,6 +129,39 @@
+ #define FMAN_PCD_CC_KEY_TABLE_ALIGN	16
+ #define FMAN_PCD_CC_AD_TABLE_ALIGN	16
+ 
++/* ------------------------------------------------------------------ */
++/* Action-descriptor (AD) record field bits — RM 8.7.4.3 Table 8-119. */
++/* ------------------------------------------------------------------ */
++
++/*
++ * The 16-byte MURAM-resident AD record is four big-endian 32-bit words.
++ * Byte offsets within one record:
++ *
++ *   0x0  u32 fqid          - egress FQID for RESULT_*FLOW actions
++ *   0x4  u32 plcr_profile  - policer profile id + enable bits
++ *   0x8  u32 nia           - type[31:30] | flags[29:4] | opcode[3:0]
++ *   0xc  u32 res           - reserved / next-AD-pointer for CONT_LOOKUP
++ *
++ * The four type-encoding bits in nia[31:30] select the AD variant
++ * (cross-ref SDK fm_cc.h:178-181).  PLCR_DIS in nia[29] suppresses
++ * the policer pass on the CAAM path.  OPCODE_MASK in nia[3:0] is the
++ * sub-id for REPLICATE / MANIPULATE variants (body-4 territory).
++ */
++#define FMAN_PCD_AD_OFF_FQID		0x0
++#define FMAN_PCD_AD_OFF_PLCR		0x4
++#define FMAN_PCD_AD_OFF_NIA		0x8
++#define FMAN_PCD_AD_OFF_RES		0xc
++
++#define FMAN_PCD_AD_NIA_TYPE_RESULT_CF	0x00000000u	/* RESULT_CONTRL_FLOW */
++#define FMAN_PCD_AD_NIA_TYPE_CONT_LOOKUP	0x40000000u	/* next CC node    */
++#define FMAN_PCD_AD_NIA_TYPE_RESULT_DF	0x80000000u	/* RESULT_DATA_FLOW  */
++#define FMAN_PCD_AD_NIA_TYPE_BYPASS	0xc0000000u	/* drop / discard    */
++#define FMAN_PCD_AD_NIA_TYPE_MASK	0xc0000000u
++
++#define FMAN_PCD_AD_NIA_PLCR_DIS	0x20000000u	/* nia[29] = skip plcr */
++#define FMAN_PCD_AD_NIA_OPCODE_MASK	0x0000000fu	/* nia[3:0] sub-id    */
++
++
+ /**
+  * struct fman_pcd_cc_tree - Coarse Classifier match-tree handle.
+  * @node:           anchor on pcd->cc_trees (protected by pcd->lock)
+@@ -231,6 +274,98 @@ struct fman_pcd_cc_node {
+ 	spinlock_t			lock;
+ };
+ 
++/**
++ * cc_encode_ad - pack a typed fman_pcd_action into a 16-byte AD record.
++ * @action: caller-owned action descriptor (already validated).
++ * @ad:     CPU-visible iomem pointer to the AD slot (16-B aligned,
++ *          inside the per-node AD table allocated by node_create()).
++ *
++ * Writes the four big-endian 32-bit words at offsets 0x0/0x4/0x8/0xc
++ * within @ad.  FMan MURAM is big-endian relative to the host, so
++ * iowrite32be() is the correct primitive for all four words.
++ *
++ * Caller-locking contract: must hold the per-node spinlock when @ad
++ * lives inside a node's AD table; cc_encode_ad() itself does NOT take
++ * any lock.  The miss-AD slot (last entry of the table) is exempt at
++ * the moment because no caller mutates it under contention until
++ * PR14c-body-4 wires fman_pcd_cc_node_add_key().
++ *
++ * Returns 0 on success, -EINVAL for an unknown action->type, and
++ * -EOPNOTSUPP for REPLICATE/MANIPULATE which require helper objects
++ * not yet plumbed (body-4 wires MANIPULATE via PR14d-body, REPLICATE
++ * via PR14f-body integration).
++ *
++ * Empty-table FQ-0-trap safety property (carried over from body-2):
++ * an all-zero AD slot decodes as RESULT_CONTRL_FLOW with fqid=0, which
++ * is reserved-invalid in DPAA1 — the FMan generates a parse-error
++ * trap rather than silently misrouting a frame.  Callers that want
++ * "drop" semantics for an un-programmed miss-AD must explicitly
++ * encode FMAN_PCD_ACTION_DROP via this helper.
++ *
++ * Cross-ref SDK fm_cc.c GetAdOfTypeResult() and NextStepAd() for the
++ * silicon-fact origin of the type-bit selection table.
++ */
++static int __maybe_unused
++cc_encode_ad(const struct fman_pcd_action *action, void __iomem *ad)
++{
++	u32 fqid = 0, plcr = 0, nia = 0, res = 0;
++
++	if (!action || !ad)
++		return -EINVAL;
++
++	switch (action->type) {
++	case FMAN_PCD_ACTION_DROP:
++		nia = FMAN_PCD_AD_NIA_TYPE_BYPASS;
++		break;
++
++	case FMAN_PCD_ACTION_FORWARD_FQ:
++		if (action->forward_fq.fqid == 0)
++			return -EINVAL;
++		nia = FMAN_PCD_AD_NIA_TYPE_RESULT_CF;
++		fqid = action->forward_fq.fqid;
++		break;
++
++	case FMAN_PCD_ACTION_FORWARD_CAAM:
++		/*
++		 * profile_id is the CAAM-QI consumer slot returned by
++		 * caam_qi_ext_consumer_register() (PR1).  Encoded into
++		 * the plcr_profile word; PLCR_DIS suppresses the FMan
++		 * policer pass because CAAM does its own rate metering.
++		 * Body-4 may revisit the fqid encoding once the CAAM-QI
++		 * ingress FQID is wired through the same struct.
++		 */
++		nia = FMAN_PCD_AD_NIA_TYPE_RESULT_CF |
++		      FMAN_PCD_AD_NIA_PLCR_DIS;
++		plcr = action->forward_caam.profile_id;
++		break;
++
++	case FMAN_PCD_ACTION_NEXT_CC_NODE:
++		if (!action->next_cc.node)
++			return -EINVAL;
++		nia = FMAN_PCD_AD_NIA_TYPE_CONT_LOOKUP;
++		res = (u32)action->next_cc.node->ad_table_off;
++		break;
++
++	case FMAN_PCD_ACTION_REPLICATE:
++		/* PR14f-body integration territory. */
++		return -EOPNOTSUPP;
++
++	case FMAN_PCD_ACTION_MANIPULATE:
++		/* PR14d-body integration territory. */
++		return -EOPNOTSUPP;
++
++	default:
++		return -EINVAL;
++	}
++
++	iowrite32be(fqid, ad + FMAN_PCD_AD_OFF_FQID);
++	iowrite32be(plcr, ad + FMAN_PCD_AD_OFF_PLCR);
++	iowrite32be(nia,  ad + FMAN_PCD_AD_OFF_NIA);
++	iowrite32be(res,  ad + FMAN_PCD_AD_OFF_RES);
++
++	return 0;
++}
++
+ /**
+  * fman_pcd_cc_tree_create() - allocate a new Coarse Classifier tree.
+  *
+-- 
+2.39.5
+
