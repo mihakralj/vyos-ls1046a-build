@@ -19,14 +19,8 @@ on arm64 is __raw_writel+swab, no MMIO ordering hooks needed.
 Build-verified clean both with the option off (default kernel build)
 and on (KUnit kernel build) on linux-6.18.28 arm64.
 ---
- drivers/net/ethernet/freescale/fman/Kconfig   |  17 ++
- .../net/ethernet/freescale/fman/fman_pcd_cc.c |  15 +-
- .../freescale/fman/tests/fman_pcd_cc_test.c   | 277 ++++++++++++++++++
- 3 files changed, 308 insertions(+), 1 deletion(-)
- create mode 100644 drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
-
 diff --git a/drivers/net/ethernet/freescale/fman/Kconfig b/drivers/net/ethernet/freescale/fman/Kconfig
-index d04372350..0164a65a4 100644
+index d043723..0164a65 100644
 --- a/drivers/net/ethernet/freescale/fman/Kconfig
 +++ b/drivers/net/ethernet/freescale/fman/Kconfig
 @@ -50,3 +50,20 @@ config FSL_FMAN_PCD
@@ -51,16 +45,13 @@ index d04372350..0164a65a4 100644
 +	
 +	  If unsure, say N.
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
-index 19007b2db..7032a7052 100644
+index 3a59868..bad14d0 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
-@@ -890,4 +890,17 @@ void fman_pcd_cc_tree_destroy(struct fman_pcd_cc_tree *tree)
- 	mutex_destroy(&tree->lifecycle_lock);
+@@ -893,3 +893,16 @@ void fman_pcd_cc_tree_destroy(struct fman_pcd_cc_tree *tree)
  	kfree(tree);
  }
--EXPORT_SYMBOL_GPL(fman_pcd_cc_tree_destroy);
-\ No newline at end of file
-+EXPORT_SYMBOL_GPL(fman_pcd_cc_tree_destroy);
+ EXPORT_SYMBOL_GPL(fman_pcd_cc_tree_destroy);
 +
 +#if IS_ENABLED(CONFIG_FSL_FMAN_PCD_KUNIT_TEST)
 +/*
@@ -76,7 +67,7 @@ index 19007b2db..7032a7052 100644
 +#endif /* CONFIG_FSL_FMAN_PCD_KUNIT_TEST */
 diff --git a/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
 new file mode 100644
-index 000000000..6794e0783
+index 0000000..6794e07
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
 @@ -0,0 +1,277 @@
@@ -358,5 +349,4 @@ index 000000000..6794e0783
 +
 +kunit_test_suite(fman_pcd_cc_test_suite);
 -- 
-2.39.5
-
+2.43.0
