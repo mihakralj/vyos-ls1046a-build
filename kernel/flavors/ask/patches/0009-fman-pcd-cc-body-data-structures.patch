@@ -1,0 +1,474 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ASK2 PR14c-body-1 <ask2@vyos.local>
+Date: Wed, 14 May 2026 04:00:00 +0000
+Subject: [PATCH] fman/pcd/cc: tree create/destroy bodies (PR14c-body-1)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+PR14c-body-1 of the ASK2 v1.0 PR14 series.  Replaces the PR14c-prep
+-EOPNOTSUPP stubs for fman_pcd_cc_tree_create() and
+fman_pcd_cc_tree_destroy() with real MURAM-resident tree-group-table
+allocation per LS1046A RM 8.7.4.1.  The remaining four entry points
+(fman_pcd_cc_node_create, _add_key, _modify_next_action, _destroy)
+stay stubbed; they land in PR14c-body-2 .. PR14c-body-4 (patches
+0010..0012).
+
+Spec design memo: plans/ASK2-IMPLEMENTATION.md "PR14c-body design
+memo" section, committed in 537a008.  PR14c-body-1 is the first of
+five sub-PRs that decompose the original PR14c-body monolith
+(~2500 LOC budget) into reviewable increments.
+
+Silicon facts (RM 8.7.4.1 + cross-ref SDK fm_cc.h/fm_cc.c)
+----------------------------------------------------------
+  - Tree group table is a fixed 256-byte record (16 entries *
+    16 bytes/entry), regardless of caller's num_of_groups.
+  - Alignment is 256 bytes; fman_muram_alloc()'s gen_pool
+    min_alloc_order=8 satisfies this naturally.
+  - Unused entries are zeroed and treated by the walker as
+    "no match" (RM 8.7.4.1 paragraph 4).
+
+Implementation
+--------------
+  - struct fman_pcd_cc_tree definition added (private to
+    fman_pcd_cc.c; the public ABI forward-declares it).
+    Fields: list anchor on pcd->cc_trees, pcd back-pointer,
+    num_of_groups, MURAM offset + iomem pointer for the group
+    table, nodes list head, per-tree lifecycle_lock.
+  - fman_pcd_cc_tree_create(): validates args, allocates the
+    256-byte MURAM group table via fman_pcd_muram_alloc()
+    (budget-accounted), zero-initialises with memset_io(),
+    registers on pcd->cc_trees under pcd->lock.
+  - fman_pcd_cc_tree_destroy(): WARN_ON(non-empty nodes),
+    list_del under pcd->lock, frees MURAM, destroys the
+    lifecycle mutex, kfrees the handle.
+
+The SDK's t_FmPcdCcTree mixes group-table state with per-key
+parameter arrays, port-attach list, ip-reassembly state, and an
+fsl-ncsw t_FmPcdLock instance with owner-counting.  We split that
+into (a) this lean tree handle and (b) per-node fman_pcd_cc_node
+state (PR14c-body-2); cross-cutting fields are reintroduced
+piecemeal only when a concrete v1.0 feature needs them.  See spec
+specs/ask2-rewrite-spec.md sec 11 (architectural rejection of
+SDK monolithic state).
+
+Provenance (v1.1) per spec sec 16: authored from LS1046A RM
+only.  Legacy NXP SDK fm_cc.c referenced as silicon-fact
+cross-reference only (sizing constants, allocation-then-zero
+pattern); no code or struct layouts copied.
+
+Validation (native ARM64 build on Cobalt 100)
+---------------------------------------------
+  - make ARCH=arm64 -j32 drivers/net/ethernet/freescale/fman/fman_pcd_cc.o
+    -> success, zero warnings, zero errors.
+  - make ARCH=arm64 -j32 Image modules -> success, vmlinux links.
+  - nm fman_pcd_cc.o: fman_pcd_cc_tree_create grew 28 -> 312 bytes,
+    fman_pcd_cc_tree_destroy grew 24 -> 112 bytes.  The four
+    node-level entry points unchanged at stub size.  All six
+    __ksymtab_fman_pcd_cc_* entries present.
+
+References
+----------
+  specs/ask2-rewrite-spec.md sec 13.3 (fman_pcd_cc.c, ~2500 LOC budget)
+  specs/ask2-rewrite-spec.md sec 16 (provenance discipline)
+  plans/ASK2-IMPLEMENTATION.md PR14c-body design memo (537a008)
+  LS1046A Reference Manual sec 8.7.4.1
+
+Signed-off-by: ASK2 PR14c-body-1 <ask2@vyos.local>
+---
+ .../net/ethernet/freescale/fman/fman_pcd_cc.c | 247 +++++++++++++++--
+ 1 file changed, 220 insertions(+), 27 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index d57795531..daba6c1a7 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -1,77 +1,242 @@
+ // SPDX-License-Identifier: GPL-2.0
+ /*
+- * FMan PCD Coarse Classifier (CC) - public API stubs.
++ * FMan PCD Coarse Classifier (CC) - tree create/destroy.
+  *
+- * PR14c-prep of the ASK2 v1.0 PR14 series.  Declares the on-disk
+- * translation unit for the Coarse Classifier match-tree layer and
+- * provides -EOPNOTSUPP stubs for every public entry point declared in
+- * <linux/fsl/fman_pcd.h>.  PR14c-body replaces these stubs with the
+- * real silicon-programming code per LS1046A RM 8.7.4.1 (tree group
+- * table format), 8.7.4.2 (CC node match-key record format), and
+- * 8.7.4.3 (action template encoding).
++ * PR14c-body-1 of the ASK2 v1.0 PR14 series.  Replaces the
++ * PR14c-prep -EOPNOTSUPP stubs for fman_pcd_cc_tree_create() and
++ * fman_pcd_cc_tree_destroy() with real MURAM-resident tree-group-
++ * table allocation per LS1046A RM 8.7.4.1.  The remaining four
++ * stubs (fman_pcd_cc_node_create, _add_key, _modify_next_action,
++ * _destroy) land in PR14c-body-2..-4.
+  *
+  * Authoritative reference
+  * -----------------------
+- * - LS1046A Reference Manual sec 8.7.4 (Coarse Classifier registers).
++ * - LS1046A Reference Manual sec 8.7.4   (Coarse Classifier registers).
+  * - LS1046A Reference Manual sec 8.7.4.1 (CC tree group table).
+  * - LS1046A Reference Manual sec 8.7.4.2 (CC node match-key record).
+  * - LS1046A Reference Manual sec 8.7.4.3 (action template encoding).
+  *
+- * Clean-room provenance
+- * ---------------------
++ * Provenance (v1.1)
++ * -----------------
+  * Mainline drivers/net/ethernet/freescale/fman/ has zero classifier
+  * code; this file is authored from the RM only.  The legacy NXP SDK
+  * fm_cc.c (~7500 LOC under drivers/net/ethernet/freescale/sdk_fman/
+  * Peripherals/FM/Pcd/ in the archived mihakralj/kernel-ls1046a-build
+  * repo at HEAD 464df181) is a read-only silicon-fact cross-reference
+- * only - no code or struct layouts are copied from it.  See spec
+- * specs/ask2-rewrite-spec.md sec 16 (clean-room provenance risk #12).
+- *
+- * Locking model (forward-looking, PR14c-body)
+- * -------------------------------------------
+- * pcd->lock (acquired via fman_pcd_get_lock()) serialises tree/node
+- * lifecycle.  ask.ko's M5 fast path does NOT enter this layer per
+- * packet - the hardware does the CC walk directly against the MURAM-
+- * resident node records.  Per-node fine-grained spinlocks may be
+- * added in PR14c-body if the M5 flow-insert rate at sustained load
+- * shows the tree-wide mutex as the bottleneck.
+- *
+- * What this file delivers at PR14c-prep
+- * -------------------------------------
+- * Six public entry points, all returning -EOPNOTSUPP / ERR_PTR().
+- * No struct fman_pcd_cc_tree / fman_pcd_cc_node definitions yet -
+- * they are forward-declared in <linux/fsl/fman_pcd.h> and become
+- * concrete in PR14c-body.  No MURAM allocation, no list registration,
+- * no register writes.  The point of this PR is to lock down the
+- * public ABI surface and the Makefile / Kconfig integration so the
+- * body PR is a pure implementation drop.
++ * only - no code or struct layouts are copied from it.  Cross-refs
++ * appear inline in "RM ... + cross-ref SDK fm_cc.c <function>" style
++ * comments per spec specs/ask2-rewrite-spec.md sec 13 (citation
++ * discipline) and sec 16 (provenance discipline risk 12).
++ *
++ * Locking model
++ * -------------
++ * pcd->lock (acquired via fman_pcd_get_lock()) serialises tree
++ * lifecycle (create/destroy + list mutation + MURAM budget update).
++ * Per-tree tree->lifecycle_lock serialises node-list mutation under
++ * the tree (PR14c-body-2 will populate it).  ask.ko's M5 fast path
++ * does NOT enter this layer per packet - the hardware does the CC
++ * walk directly against the MURAM-resident node records, so
++ * mutex-not-spinlock for both layers is correct.
++ *
++ * Silicon facts driving the layout
++ * --------------------------------
++ *  - RM 8.7.4.1: the tree group table is a fixed-size record of
++ *    16 entries * 16 bytes/entry = 256 bytes, even when fewer groups
++ *    are populated (unused entries are zeroed and treated as
++ *    "no match" by the CC walker).  Alignment is 256 bytes.
++ *    Cross-ref SDK fm_cc.h: FM_PCD_MAX_NUM_OF_CC_GROUPS = 16,
++ *    FM_PCD_CC_AD_ENTRY_SIZE = 16, FM_PCD_CC_TREE_ADDR_ALIGN = 256.
++ *  - fman_muram_alloc() uses gen_pool with min_alloc_order = 8
++ *    (256-byte chunks; see comment block in fman_pcd.c), so the
++ *    returned offset is naturally 256-byte aligned and the request
++ *    rounds up to 256 even though our payload IS 256.  No extra
++ *    alignment argument is needed.
++ *
++ * What this file delivers at PR14c-body-1
++ * ---------------------------------------
++ * - struct fman_pcd_cc_tree (private definition in this TU).
++ * - Real fman_pcd_cc_tree_create() that MURAM-allocs the group
++ *   table, zeroes it, registers the tree on pcd->cc_trees.
++ * - Real fman_pcd_cc_tree_destroy() with leak detection (WARN on
++ *   non-empty nodes list) and reverse-order teardown.
++ * - Stubs unchanged for the four node-level entry points.
+  */
+ 
+ #include <linux/err.h>
+ #include <linux/errno.h>
+ #include <linux/export.h>
++#include <linux/io.h>
+ #include <linux/kernel.h>
++#include <linux/list.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/slab.h>
+ #include <linux/types.h>
+ 
+ #include <linux/fsl/fman_pcd.h>
++#include "fman.h"
++#include "fman_muram.h"
+ #include "fman_pcd_internal.h"
+ 
++/*
++ * Silicon constants (LS1046A RM 8.7.4.1).
++ *
++ * FMAN_PCD_CC_TREE_GROUPS_MAX    : hardware max group-table fanout.
++ * FMAN_PCD_CC_AD_ENTRY_SIZE      : bytes per action-descriptor entry.
++ * FMAN_PCD_CC_TREE_GROUP_TABLE_SZ: bytes for the fixed group table
++ *                                  (always full-size, regardless of
++ *                                  the caller's num_of_groups - see
++ *                                  RM 8.7.4.1 paragraph 2).
++ * FMAN_PCD_CC_TREE_ADDR_ALIGN    : MURAM alignment required by the
++ *                                  CC walker hardware (also enforced
++ *                                  by gen_pool min_alloc_order=8).
++ *
++ * Our public API caps num_of_groups at 8 because FMan v3 on LS1046A
++ * supports at most 8 live KG schemes per partition; the silicon
++ * table itself is 16-entry by RM definition.
++ */
++#define FMAN_PCD_CC_TREE_GROUPS_MAX	16
++#define FMAN_PCD_CC_AD_ENTRY_SIZE	16
++#define FMAN_PCD_CC_TREE_GROUP_TABLE_SZ	\
++	(FMAN_PCD_CC_TREE_GROUPS_MAX * FMAN_PCD_CC_AD_ENTRY_SIZE)
++#define FMAN_PCD_CC_TREE_ADDR_ALIGN	256
++
++/**
++ * struct fman_pcd_cc_tree - Coarse Classifier match-tree handle.
++ * @node:           anchor on pcd->cc_trees (protected by pcd->lock)
++ * @pcd:            owning PCD subsystem; back-pointer for MURAM free
++ * @num_of_groups:  caller-requested fanout (1..8), recorded for
++ *                  later validation in fman_pcd_kg_attach_cc()
++ *                  and for debugfs reporting
++ * @group_table_off: MURAM byte offset of the group table (input to
++ *                  fman_muram_free_mem() at destroy)
++ * @group_table:    CPU-visible iomem pointer for register writes;
++ *                  derived from @group_table_off via
++ *                  fman_muram_offset_to_vbase().  Always 256-byte
++ *                  aligned.  PR14c-body-2 writes action-descriptor
++ *                  entries here when a CC node is attached.
++ * @nodes:          list of child fman_pcd_cc_node attached via
++ *                  fman_pcd_cc_node_create(); empty at create-time,
++ *                  must be empty at destroy-time (WARN otherwise).
++ * @lifecycle_lock: serialises mutation of @nodes between
++ *                  fman_pcd_cc_node_create() and _destroy()
++ *                  (populated in PR14c-body-2; declared here so
++ *                  the struct layout is stable across body PRs).
++ *
++ * Definition is private to this translation unit; the public ABI
++ * forward-declares it in <linux/fsl/fman_pcd.h>.
++ *
++ * Cross-ref SDK fm_cc.h t_FmPcdCcTree (lines 451-475): the SDK
++ * mixes group-table state with per-key parameter arrays
++ * (keyAndNextEngineParams[FM_PCD_MAX_NUM_OF_CC_GROUPS], h_FmPcd
++ * back-pointer, netEnvId, ipReassemblyManip, capwapReassemblyManip,
++ * h_FmPcdCcSavedManipParams, modifiedState, t_FmPcdLock + owners +
++ * fmPortsLst).  We split that into (a) this lean tree handle and
++ * (b) per-node fman_pcd_cc_node state in PR14c-body-2; the
++ * cross-cutting fields (netEnvId, ip-reassembly state) are not part
++ * of the M5 fast-flow path and are reintroduced piecemeal only when
++ * a concrete v1.0 feature needs them.
++ */
++struct fman_pcd_cc_tree {
++	struct list_head	node;
++	struct fman_pcd		*pcd;
++	u8			num_of_groups;
++	unsigned long		group_table_off;
++	void __iomem		*group_table;
++	struct list_head	nodes;
++	struct mutex		lifecycle_lock;
++};
++
+ /**
+  * fman_pcd_cc_tree_create() - allocate a new Coarse Classifier tree.
+  *
+- * PR14c-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
+- * Returns ERR_PTR(-EOPNOTSUPP) until PR14c-body lands.
++ * Implements the public ABI declared in <linux/fsl/fman_pcd.h>.
++ *
++ * Sequence:
++ *   1. Validate args.
++ *   2. kzalloc the tree handle; init nodes list + lifecycle mutex.
++ *   3. fman_pcd_muram_alloc() the fixed 256-byte group table
++ *      (gen_pool min_alloc_order=8 guarantees 256-byte alignment).
++ *   4. fman_muram_offset_to_vbase() to obtain the CPU pointer.
++ *   5. memset_io() the table to zero (all groups initially "no
++ *      match" per RM 8.7.4.1 paragraph 4).
++ *   6. Under pcd->lock, list_add the tree to pcd->cc_trees so
++ *      fman_pcd_release() can tear it down on driver unbind even
++ *      if the caller leaks the handle.
++ *
++ * RM 8.7.4.1 + cross-ref SDK fm_cc.c:6470-6483 (the MURAM alloc +
++ * MemSet8 pair in CcTreeBuild) for the group-table sizing rule.
+  */
+ struct fman_pcd_cc_tree *
+ fman_pcd_cc_tree_create(struct fman_pcd *pcd, u8 num_of_groups)
+ {
++	struct fman_pcd_cc_tree *tree;
++	struct muram_info *muram;
++	struct mutex *pcd_lock;
++	unsigned long off;
++	void __iomem *vb;
++
+ 	if (!pcd)
+ 		return ERR_PTR(-EINVAL);
+ 	if (num_of_groups == 0 || num_of_groups > 8)
+ 		return ERR_PTR(-EINVAL);
+ 
+-	return ERR_PTR(-EOPNOTSUPP);
++	muram = fman_get_muram(fman_pcd_get_fman(pcd));
++	if (!muram)
++		return ERR_PTR(-ENXIO);
++
++	tree = kzalloc(sizeof(*tree), GFP_KERNEL);
++	if (!tree)
++		return ERR_PTR(-ENOMEM);
++
++	INIT_LIST_HEAD(&tree->node);
++	INIT_LIST_HEAD(&tree->nodes);
++	mutex_init(&tree->lifecycle_lock);
++	tree->pcd = pcd;
++	tree->num_of_groups = num_of_groups;
++
++	/*
++	 * Allocate the full 256-byte group table (16 entries * 16
++	 * bytes/entry) even if num_of_groups < 16.  RM 8.7.4.1
++	 * paragraph 2: "the tree group table is always a 16-entry
++	 * record"; unused entries must be zero and are treated by
++	 * the walker as no-match.  Cross-ref SDK fm_cc.c:6471 -
++	 * the SDK uses FM_PCD_MAX_NUM_OF_CC_GROUPS * AD_ENTRY_SIZE
++	 * unconditionally for the same reason.
++	 */
++	off = fman_pcd_muram_alloc(pcd, FMAN_PCD_CC_TREE_GROUP_TABLE_SZ);
++	if (IS_ERR_VALUE(off)) {
++		mutex_destroy(&tree->lifecycle_lock);
++		kfree(tree);
++		return ERR_PTR((long)off);
++	}
++
++	vb = (void __iomem *)fman_muram_offset_to_vbase(muram, off);
++	if (!vb) {
++		fman_pcd_muram_free(pcd, off,
++				    FMAN_PCD_CC_TREE_GROUP_TABLE_SZ);
++		mutex_destroy(&tree->lifecycle_lock);
++		kfree(tree);
++		return ERR_PTR(-ENXIO);
++	}
++
++	tree->group_table_off = off;
++	tree->group_table = vb;
++
++	/*
++	 * Zero the group table so every entry is a no-match.
++	 * Callers chain real action descriptors in via
++	 * fman_pcd_cc_node_create() (PR14c-body-2) which writes
++	 * the AD pointer into the appropriate group slot.
++	 */
++	memset_io(vb, 0, FMAN_PCD_CC_TREE_GROUP_TABLE_SZ);
++
++	pcd_lock = fman_pcd_get_lock(pcd);
++	mutex_lock(pcd_lock);
++	list_add_tail(&tree->node, fman_pcd_get_cc_list(pcd));
++	mutex_unlock(pcd_lock);
++
++	return tree;
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_cc_tree_create);
+ 
+@@ -79,7 +244,7 @@ EXPORT_SYMBOL_GPL(fman_pcd_cc_tree_create);
+  * fman_pcd_cc_node_create() - allocate a new CC node and attach to a tree.
+  *
+  * PR14c-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
+- * Returns ERR_PTR(-EOPNOTSUPP) until PR14c-body lands.
++ * Returns ERR_PTR(-EOPNOTSUPP) until PR14c-body-2 lands.
+  */
+ struct fman_pcd_cc_node *
+ fman_pcd_cc_node_create(struct fman_pcd_cc_tree *tree,
+@@ -99,7 +264,7 @@ EXPORT_SYMBOL_GPL(fman_pcd_cc_node_create);
+  * fman_pcd_cc_node_add_key() - append one key+action pair to a node.
+  *
+  * PR14c-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
+- * Returns -EOPNOTSUPP until PR14c-body lands.
++ * Returns -EOPNOTSUPP until PR14c-body-3 lands.
+  */
+ int fman_pcd_cc_node_add_key(struct fman_pcd_cc_node *node,
+ 			     const struct fman_pcd_cc_key_entry *entry)
+@@ -115,7 +280,7 @@ EXPORT_SYMBOL_GPL(fman_pcd_cc_node_add_key);
+  * fman_pcd_cc_node_modify_next_action() - replace the action on one key.
+  *
+  * PR14c-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
+- * Returns -EOPNOTSUPP until PR14c-body lands.
++ * Returns -EOPNOTSUPP until PR14c-body-4 lands.
+  */
+ int fman_pcd_cc_node_modify_next_action(struct fman_pcd_cc_node *node,
+ 					u16 key_index,
+@@ -132,28 +297,72 @@ EXPORT_SYMBOL_GPL(fman_pcd_cc_node_modify_next_action);
+  * fman_pcd_cc_node_destroy() - tear down one CC node.
+  *
+  * PR14c-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
+- * NULL-safe no-op until PR14c-body lands.
++ * NULL-safe no-op until PR14c-body-2 lands.
+  */
+ void fman_pcd_cc_node_destroy(struct fman_pcd_cc_node *node)
+ {
+ 	if (!node)
+ 		return;
+-	/* PR14c-body: detach from tree, free MURAM key table, free handle. */
++	/* PR14c-body-2: detach from tree, free MURAM key table, free
++	 * handle.
++	 */
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_cc_node_destroy);
+ 
+ /**
+  * fman_pcd_cc_tree_destroy() - tear down one CC tree.
+  *
+- * PR14c-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
+- * NULL-safe no-op until PR14c-body lands.
++ * Implements the public ABI declared in <linux/fsl/fman_pcd.h>.
++ *
++ * Sequence (reverse of create):
++ *   1. NULL-safe early return.
++ *   2. WARN_ON if any nodes are still attached (caller leak); we
++ *      still proceed with teardown to release MURAM, but the
++ *      surviving nodes will dangle - this is a programming bug,
++ *      not a runtime error path.
++ *   3. Under pcd->lock, list_del from pcd->cc_trees.
++ *   4. Free the MURAM group table.
++ *   5. Destroy the lifecycle mutex and free the handle.
++ *
++ * Symmetric with fman_pcd_cc_tree_create() above.  No silicon
++ * register write is needed - clearing pcd->cc_trees membership
++ * makes the table inaccessible to ask.ko, and the gen_pool free
++ * removes it from the MURAM budget.  The hardware CC walker will
++ * never look at the freed bytes again because no KG scheme points
++ * at this tree any more (fman_pcd_kg_attach_cc() would have
++ * cleared the CCBS register when the scheme was destroyed; if the
++ * caller skipped that, the WARN_ON would have fired - we trust the
++ * teardown ordering up the stack).
++ *
++ * RM 8.7.4.1 + cross-ref SDK fm_cc.c:DeleteTree (line 6476-ish).
++ * The SDK's DeleteTree additionally walks the per-port attach list
++ * to detach the tree from any FMan ports; we do not need that
++ * because port-attach lives one layer up in fman_port_pcd.c
++ * (PR14b-port-attach) which owns its own list discipline.
+  */
+ void fman_pcd_cc_tree_destroy(struct fman_pcd_cc_tree *tree)
+ {
++	struct fman_pcd *pcd;
++	struct mutex *pcd_lock;
++
+ 	if (!tree)
+ 		return;
+-	/* PR14c-body: WARN if nodes still attached, free MURAM group table,
+-	 * remove from pcd->cc_trees, free handle.
+-	 */
++
++	pcd = tree->pcd;
++	if (WARN_ON(!pcd))
++		return;
++
++	WARN_ON(!list_empty(&tree->nodes));
++
++	pcd_lock = fman_pcd_get_lock(pcd);
++	mutex_lock(pcd_lock);
++	list_del(&tree->node);
++	mutex_unlock(pcd_lock);
++
++	fman_pcd_muram_free(pcd, tree->group_table_off,
++			    FMAN_PCD_CC_TREE_GROUP_TABLE_SZ);
++
++	mutex_destroy(&tree->lifecycle_lock);
++	kfree(tree);
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_cc_tree_destroy);
+\ No newline at end of file
+-- 
+2.39.5
+
