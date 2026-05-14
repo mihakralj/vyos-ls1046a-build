@@ -1,0 +1,582 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ASK2-CI <ci@mono-networks.local>
+Date: Wed, 14 May 2026 06:00:00 +0000
+Subject: [PATCH] fman: pcd_manip body-2 -- HMCT variant encoders + HMTD finalise
+
+PR14d-body-2 of the ASK2 v1.0 PR14 series.  Adds the per-variant HMCT
+command-table encoders for NAT_V4, NAT_V6, VLAN_PUSH, VLAN_POP, and
+TTL_DEC, plus the HMTD finalisation that publishes them to silicon.
+
+Per-variant encoding:
+  - NAT_V4: emits IPV4_UPDATE command word (opcode|SRC|DST|CS_CALC bits)
+    + 4-B inline SRC + 4-B inline DST + optional TCP_UDP_UPDATE command
+    + 4-B inline port-pair (sport<<16|dport).  Auto-checksum recompute
+    on SA/DA rewrite per RM 8.7.5.4.
+  - NAT_V6: emits IPV6_UPDATE command word + 16-B inline SRC + 16-B
+    inline DST (each address written as 4 BE-32 words preserving
+    on-wire octet order) + optional TCP_UDP_UPDATE + 4-B port-pair.
+    Auto-checksum recompute on SA/DA rewrite per RM 8.7.5.4.
+  - VLAN_PUSH: emits GENERIC_INSRT at L2 offset 12 size 4, plus 4-B
+    inline TPID(2)+TCI(2) payload.  FMan reparses the frame on its way
+    out so downstream classification sees the new VLAN tag.
+  - VLAN_POP: emits GENERIC_RMV at L2 offset 12 size 4.
+  - TTL_DEC: emits IPV4_UPDATE with TTL bit only; silicon decrements
+    TTL by 1 in flight and recomputes the IPv4 checksum unconditionally
+    (TTL change always touches the cksum byte).
+
+HMCD_LAST=0x00800000 is OR'd into the FIRST 32-bit word of the LAST
+command after the encoder returns, matching the SDK fm_manip.c
+BuildHmct() pattern (lines 1074-1076).  HMTD is then finalised under
+manip->lock: cfg=TYPE|EXT_HMCT, hmcdBasePtr=manip->hmct_off (MURAM
+byte offset), opCode=HMAN_OC_IP_MANIP for NAT_V4/V6/TTL_DEC and
+HMAN_OC for VLAN_PUSH/POP (RM 8.7.5 family selectors).
+
+Encoder-failure rollback: if an encoder returns NULL (caller params
+carry no rewrite_* flag at all - e.g. NAT_V4 with all bools clear),
+the manip is fully torn down with HMTD still unwritten so silicon
+never sees a partial template, and -EINVAL is returned.
+
+Locking: encoders run under spin_lock_irqsave(&manip->lock, flags)
+to honour the public-ABI doc-comment promise that re-creation is
+softirq-safe (needed for PR15+ runtime NAT/CT flow-table updates).
+MURAM alloc + manip-list publish still take pcd->lock outside the
+spinlock.
+
+Authoritative reference:
+  - LS1046A Reference Manual sec 8.7.5    (Header modification table)
+  - LS1046A Reference Manual sec 8.7.5.4  (Auto checksum recompute)
+
+Provenance (v1.1): bit-exact silicon facts authored from the RM with
+the legacy NXP SDK fm_manip.c BuildHmct() as a read-only cross-
+reference for the on-wire byte order of inline payload (no code
+copied).  Cross-refs cited inline in the encoder docstrings.
+
+Signed-off-by: ASK2-CI <ci@mono-networks.local>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+index e2c459089..2715a0f04 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+@@ -73,6 +73,7 @@
+ #include <linux/errno.h>
+ #include <linux/export.h>
+ #include <linux/io.h>
++#include <linux/unaligned.h>
+ #include <linux/kernel.h>
+ #include <linux/list.h>
+ #include <linux/module.h>
+@@ -189,6 +190,29 @@
+ #define FMAN_PCD_HMCD_L4_UPDATE_SRC	0x00008000u
+ #define FMAN_PCD_HMCD_L4_UPDATE_SRC_SHIFT	16
+ 
++/* Generic insert/remove opcodes used by VLAN_PUSH/POP encoders.
++ * RM 8.7.5 generic op encoding + cross-ref SDK fm_manip.h
++ * HMCD_OPCODE_GENERIC_INSRT=0x02 / _GENERIC_RMV=0x01.
++ */
++#define FMAN_PCD_HMCD_OP_GENERIC_INSRT	0x02u
++#define FMAN_PCD_HMCD_OP_GENERIC_RMV		0x01u
++
++/* Generic INSRT/RMV operand layout: bits[7:0]=offset, bits[15:8]=size.
++ * Cross-ref SDK fm_manip.h HMCD_{INSRT,RMV}_{OFFSET,SIZE}_SHIFT.
++ */
++#define FMAN_PCD_HMCD_INSRT_OFFSET_SHIFT	0
++#define FMAN_PCD_HMCD_INSRT_SIZE_SHIFT		8
++#define FMAN_PCD_HMCD_RMV_OFFSET_SHIFT		0
++#define FMAN_PCD_HMCD_RMV_SIZE_SHIFT		8
++
++/* VLAN tag is inserted/removed right after the 12-byte Ethernet
++ * dst+src MAC pair, before the EtherType.  Size is 4 bytes
++ * (TPID + TCI = 16+16 bits).  RM 8.7.5 +
++ * cross-ref SDK fm_manip.c BuildHmct e_FM_PCD_MANIP_INSRT_GENERIC.
++ */
++#define FMAN_PCD_VLAN_TAG_OFFSET		12u
++#define FMAN_PCD_VLAN_TAG_SIZE		4u
++
+ /* Auto checksum recompute (RM 8.7.5.4 + SDK HMCD_IP_L4_CS_CALC) */
+ #define FMAN_PCD_HMCD_IP_L4_CS_CALC	0x00040000u
+ 
+@@ -226,50 +250,336 @@ struct fman_pcd_manip {
+ 	spinlock_t			lock;
+ };
+ 
++/* ------------------------------------------------------------------ */
++/* HMCT variant encoders - RM 8.7.5 + 8.7.5.4                         */
++/* ------------------------------------------------------------------ */
++
++/*
++ * Each encoder writes a sequence of 4-byte BE command words (and
++ * optional inline payload, also 4-byte aligned) into the manip's
++ * MURAM-resident HMCT region, returns the iomem address of the
++ * FIRST 32-bit word of the LAST command it wrote, and updates *out_op
++ * with the HMAN_OC family selector that must land in the HMTD
++ * opCode field at the end of dispatch.  Returning the last-cmd
++ * pointer lets fman_pcd_manip_create() OR HMCD_LAST into it once
++ * AFTER all commands have been emitted - matches the SDK pattern
++ * at fm_manip.c BuildHmct() lines 1074-1076.
++ *
++ * All encoders are __must_check; a NULL return signals an
++ * encoder-level invariant violation (caller param set carries no
++ * action - e.g. NAT_V4 with neither SA nor DA nor port rewrite).
++ */
++
++static __must_check void __iomem *
++manip_encode_nat_v4(struct fman_pcd_manip *manip,
++			const struct fman_pcd_manip_params *p,
++			u8 *out_op)
++{
++	void __iomem *hmct = manip->hmct;
++	void __iomem *last_cmd;
++	void __iomem *cur;
++	u32 ip_cmd = (u32)FMAN_PCD_HMCD_OP_IPV4_UPDATE
++			<< FMAN_PCD_HMCD_OC_SHIFT;
++	bool have_ip = false;
++	bool have_l4 = false;
++
++	/* IPv4 word: opcode + per-field flags + CS_CALC if SA/DA rewrite.
++	 * Cross-ref SDK fm_manip.c BuildHmct case IPV4_UPDATE (line 792).
++	 */
++	if (p->nat_v4.rewrite_sa) {
++		ip_cmd |= FMAN_PCD_HMCD_IPV4_UPDATE_SRC;
++		ip_cmd |= FMAN_PCD_HMCD_IP_L4_CS_CALC;
++		have_ip = true;
++	}
++	if (p->nat_v4.rewrite_da) {
++		ip_cmd |= FMAN_PCD_HMCD_IPV4_UPDATE_DST;
++		ip_cmd |= FMAN_PCD_HMCD_IP_L4_CS_CALC;
++		have_ip = true;
++	}
++	if (p->nat_v4.rewrite_sport || p->nat_v4.rewrite_dport)
++		have_l4 = true;
++
++	if (!have_ip && !have_l4)
++		return NULL;
++
++	cur = hmct;
++	last_cmd = NULL;
++
++	if (have_ip) {
++		iowrite32be(ip_cmd, cur);
++		last_cmd = cur;
++		cur += 4;
++		/* Inline payload order: SRC (4B BE), then DST (4B BE).
++		 * Cross-ref SDK fm_manip.c lines 836-854.  __be32 fields
++		 * are already in network byte order; iowrite32be performs
++		 * a host->BE swap on writes, so we must convert via
++		 * be32_to_cpu() first to keep the on-wire bytes correct.
++		 */
++		if (p->nat_v4.rewrite_sa) {
++			iowrite32be(be32_to_cpu(p->nat_v4.new_sa),
++				    cur);
++			cur += 4;
++		}
++		if (p->nat_v4.rewrite_da) {
++			iowrite32be(be32_to_cpu(p->nat_v4.new_da),
++				    cur);
++			cur += 4;
++		}
++	}
++
++	if (have_l4) {
++		u32 l4_cmd = (u32)FMAN_PCD_HMCD_OP_TCP_UDP_UPDATE
++				<< FMAN_PCD_HMCD_OC_SHIFT;
++		u32 ports = 0;
++
++		if (p->nat_v4.rewrite_sport)
++			l4_cmd |= FMAN_PCD_HMCD_L4_UPDATE_SRC;
++		if (p->nat_v4.rewrite_dport)
++			l4_cmd |= FMAN_PCD_HMCD_L4_UPDATE_DST;
++
++		iowrite32be(l4_cmd, cur);
++		last_cmd = cur;
++		cur += 4;
++
++		/* L4 inline payload: bits[31:16]=sport, bits[15:0]=dport.
++		 * Cross-ref SDK fm_manip.c lines 942-953.
++		 */
++		if (p->nat_v4.rewrite_sport)
++			ports |= ((u32)be16_to_cpu(p->nat_v4.new_sport))
++				<< FMAN_PCD_HMCD_L4_UPDATE_SRC_SHIFT;
++		if (p->nat_v4.rewrite_dport)
++			ports |= (u32)be16_to_cpu(p->nat_v4.new_dport);
++		iowrite32be(ports, cur);
++	}
++
++	*out_op = FMAN_PCD_HMAN_OC_IP_MANIP;
++	return last_cmd;
++}
++
++static __must_check void __iomem *
++manip_encode_nat_v6(struct fman_pcd_manip *manip,
++			const struct fman_pcd_manip_params *p,
++			u8 *out_op)
++{
++	void __iomem *hmct = manip->hmct;
++	void __iomem *last_cmd;
++	void __iomem *cur;
++	u32 ip_cmd = (u32)FMAN_PCD_HMCD_OP_IPV6_UPDATE
++			<< FMAN_PCD_HMCD_OC_SHIFT;
++	bool have_ip = false;
++	bool have_l4 = false;
++	int i;
++
++	/* IPv6 word: opcode + per-field flags + CS_CALC if SA/DA rewrite.
++	 * Cross-ref SDK fm_manip.c BuildHmct case IPV6_UPDATE (line 858).
++	 */
++	if (p->nat_v6.rewrite_sa) {
++		ip_cmd |= FMAN_PCD_HMCD_IPV6_UPDATE_SRC;
++		ip_cmd |= FMAN_PCD_HMCD_IP_L4_CS_CALC;
++		have_ip = true;
++	}
++	if (p->nat_v6.rewrite_da) {
++		ip_cmd |= FMAN_PCD_HMCD_IPV6_UPDATE_DST;
++		ip_cmd |= FMAN_PCD_HMCD_IP_L4_CS_CALC;
++		have_ip = true;
++	}
++	if (p->nat_v6.rewrite_sport || p->nat_v6.rewrite_dport)
++		have_l4 = true;
++
++	if (!have_ip && !have_l4)
++		return NULL;
++
++	cur = hmct;
++	last_cmd = NULL;
++
++	if (have_ip) {
++		iowrite32be(ip_cmd, cur);
++		last_cmd = cur;
++		cur += 4;
++		/* IPv6 inline payload: SRC (16B), then DST (16B).  Each
++		 * 16-byte address is written as 4 BE-32 words preserving
++		 * the on-wire octet order via get_unaligned_be32().
++		 * Cross-ref SDK fm_manip.c lines 881-907.
++		 */
++		if (p->nat_v6.rewrite_sa) {
++			for (i = 0; i < 16; i += 4) {
++				u32 w = get_unaligned_be32(
++					&p->nat_v6.new_sa[i]);
++				iowrite32be(w, cur);
++				cur += 4;
++			}
++		}
++		if (p->nat_v6.rewrite_da) {
++			for (i = 0; i < 16; i += 4) {
++				u32 w = get_unaligned_be32(
++					&p->nat_v6.new_da[i]);
++				iowrite32be(w, cur);
++				cur += 4;
++			}
++		}
++	}
++
++	if (have_l4) {
++		u32 l4_cmd = (u32)FMAN_PCD_HMCD_OP_TCP_UDP_UPDATE
++				<< FMAN_PCD_HMCD_OC_SHIFT;
++		u32 ports = 0;
++
++		if (p->nat_v6.rewrite_sport)
++			l4_cmd |= FMAN_PCD_HMCD_L4_UPDATE_SRC;
++		if (p->nat_v6.rewrite_dport)
++			l4_cmd |= FMAN_PCD_HMCD_L4_UPDATE_DST;
++
++		iowrite32be(l4_cmd, cur);
++		last_cmd = cur;
++		cur += 4;
++
++		if (p->nat_v6.rewrite_sport)
++			ports |= ((u32)be16_to_cpu(p->nat_v6.new_sport))
++				<< FMAN_PCD_HMCD_L4_UPDATE_SRC_SHIFT;
++		if (p->nat_v6.rewrite_dport)
++			ports |= (u32)be16_to_cpu(p->nat_v6.new_dport);
++		iowrite32be(ports, cur);
++	}
++
++	*out_op = FMAN_PCD_HMAN_OC_IP_MANIP;
++	return last_cmd;
++}
++
++static __must_check void __iomem *
++manip_encode_vlan_push(struct fman_pcd_manip *manip,
++			  const struct fman_pcd_manip_params *p,
++			  u8 *out_op)
++{
++	void __iomem *hmct = manip->hmct;
++	u32 cmd;
++	u32 payload;
++
++	/* Generic insert at L2 offset 12 (right after 12-byte src+dst
++	 * MAC pair, before the EtherType), size 4 bytes carrying
++	 * inline TPID(2)+TCI(2).  The FMan engine then re-runs the
++	 * parser so downstream classification sees the new VLAN tag.
++	 * RM 8.7.5 generic INSRT + cross-ref SDK fm_manip.c BuildHmct
++	 * e_FM_PCD_MANIP_INSRT_GENERIC (line 532).
++	 */
++	cmd  = (u32)FMAN_PCD_HMCD_OP_GENERIC_INSRT
++		<< FMAN_PCD_HMCD_OC_SHIFT;
++	cmd |= (u32)FMAN_PCD_VLAN_TAG_OFFSET
++		<< FMAN_PCD_HMCD_INSRT_OFFSET_SHIFT;
++	cmd |= (u32)FMAN_PCD_VLAN_TAG_SIZE
++		<< FMAN_PCD_HMCD_INSRT_SIZE_SHIFT;
++
++	iowrite32be(cmd, hmct);
++
++	/* Inline payload: TPID in high 16 bits, TCI in low 16 bits,
++	 * each already in network byte order in the ABI struct.
++	 */
++	payload  = ((u32)be16_to_cpu(p->vlan_push.tpid)) << 16;
++	payload |= (u32)be16_to_cpu(p->vlan_push.tci);
++	iowrite32be(payload, hmct + 4);
++
++	*out_op = FMAN_PCD_HMAN_OC;
++	return hmct;  /* command word is the only one we wrote */
++}
++
++static __must_check void __iomem *
++manip_encode_vlan_pop(struct fman_pcd_manip *manip,
++			 u8 *out_op)
++{
++	void __iomem *hmct = manip->hmct;
++	u32 cmd;
++
++	/* Generic remove at L2 offset 12, size 4 bytes (drop the single
++	 * VLAN tag).  Cross-ref SDK fm_manip.c BuildHmct
++	 * e_FM_PCD_MANIP_RMV_GENERIC (line 442).
++	 */
++	cmd  = (u32)FMAN_PCD_HMCD_OP_GENERIC_RMV
++		<< FMAN_PCD_HMCD_OC_SHIFT;
++	cmd |= (u32)FMAN_PCD_VLAN_TAG_OFFSET
++		<< FMAN_PCD_HMCD_RMV_OFFSET_SHIFT;
++	cmd |= (u32)FMAN_PCD_VLAN_TAG_SIZE
++		<< FMAN_PCD_HMCD_RMV_SIZE_SHIFT;
++
++	iowrite32be(cmd, hmct);
++
++	*out_op = FMAN_PCD_HMAN_OC;
++	return hmct;
++}
++
++static __must_check void __iomem *
++manip_encode_ttl_dec(struct fman_pcd_manip *manip, u8 *out_op)
++{
++	void __iomem *hmct = manip->hmct;
++	u32 cmd;
++
++	/* IPv4 update with TTL bit set; FMan decrements the TTL byte
++	 * by 1 in flight and recomputes the IPv4 header checksum
++	 * unconditionally (TTL change always touches the cksum byte).
++	 * No inline payload - the decrement amount is fixed at 1 by
++	 * silicon.  Cross-ref SDK fm_manip.c BuildHmct IPV4_UPDATE
++	 * with HDR_MANIP_IPV4_TTL only (line 796).
++	 */
++	cmd  = (u32)FMAN_PCD_HMCD_OP_IPV4_UPDATE
++		<< FMAN_PCD_HMCD_OC_SHIFT;
++	cmd |= FMAN_PCD_HMCD_IPV4_UPDATE_TTL;
++
++	iowrite32be(cmd, hmct);
++
++	*out_op = FMAN_PCD_HMAN_OC_IP_MANIP;
++	return hmct;
++}
++
+ /**
+  * fman_pcd_manip_create() - program one header-manip template.
+  *
+  * Implements the public ABI declared in <linux/fsl/fman_pcd.h>.
+  *
+- * PR14d-body-1 sequence:
+- *   1. Validate args (pcd, params non-NULL; params->type one of the
+- *      five MANIP_* variants).
+- *   2. kzalloc the manip handle; init list anchor + spinlock; record
+- *      type + pcd back-pointer.
+- *   3. fman_pcd_muram_alloc() the 16-byte HMTD region.  gen_pool
+- *      min_alloc_order=8 satisfies the RM 8.7.5 16-byte alignment
+- *      requirement naturally.
+- *   4. fman_muram_offset_to_vbase() to obtain the CPU pointer.
+- *   5. memset_io() the HMTD to zero.  Sets opCode=0 (no manip) and
+- *      cfg=0 (TYPE bit clear) - silicon treats as inactive descriptor.
+- *   6. fman_pcd_muram_alloc() the 64-byte HMCT region.
+- *   7. memset_io() the HMCT to zero.  All-zero HMCT decodes as an
+- *      opcode-0 word without HMCD_LAST set; silicon would walk forever,
+- *      but the HMTD opCode=0 path never invokes the HMCT walker - safe.
+- *   8. Under pcd->lock, list_add the manip to pcd->manip_list so
+- *      fman_pcd_release() can tear it down on driver unbind even if
+- *      the caller leaks the handle.
++ * PR14d-body-2 sequence:
++ *   1. Validate args + 5-variant type switch.
++ *   2. kzalloc the manip handle.
++ *   3. Allocate + zero the 16-B HMTD MURAM region.
++ *   4. Allocate + zero the 64-B HMCT MURAM region.
++ *   5. Under manip->lock, dispatch to the per-variant encoder which
++ *      writes 4-byte BE command words (and optional inline payload)
++ *      into the HMCT and returns the iomem pointer of the FIRST
++ *      32-bit word of the LAST command it wrote, plus the HMAN_OC
++ *      family selector to land in the HMTD opCode field.
++ *   6. OR HMCD_LAST=0x00800000 into the last command word so the
++ *      silicon walker terminates correctly.  Matches SDK fm_manip.c
++ *      BuildHmct() lines 1074-1076.
++ *   7. Finalise the HMTD: cfg = TYPE|EXT_HMCT, hmcdBasePtr =
++ *      manip->hmct_off (the MURAM byte offset), opCode = the family
++ *      selector from step 5 (HMAN_OC_IP_MANIP for NAT_V4/V6/TTL_DEC,
++ *      HMAN_OC for VLAN_PUSH/POP).  Matches SDK fm_manip.c lines
++ *      1223-1230 (the WRITE_UINT16(cfg)/WRITE_UINT32(hmcdBasePtr)/
++ *      WRITE_UINT8(opCode) sequence).
++ *   8. list_add the manip to pcd->manip_list under pcd->lock.
+  *
+- * Body-1 deliberately does NOT yet write any per-variant HMCT commands;
+- * the function returns a valid handle whose silicon table is inactive.
+- * Body-2 lands the per-variant encoder dispatch.  Body-3 wires the
+- * cc_encode_ad() MANIPULATE arm so the AD points at this HMTD MURAM
+- * offset.  Until body-3 lands, a manip handle created by body-1 cannot
+- * be referenced from a CC key (the cc_encode_ad arm still -EOPNOTSUPP).
++ * Encoder-failure rollback: if the encoder returns NULL (invariant
++ * violated - e.g. NAT_V4 params with no rewrite_* set), we free both
++ * MURAM regions and the handle, return -EINVAL.  The HMTD remains
++ * unwritten so the manip never becomes referenceable by hardware.
++ *
++ * Body-3 will wire cc_encode_ad() to pick this manip's hmtd_off into
++ * the MANIPULATE arm of an AD record so a CC key can reference it.
+  *
+  * RM 8.7.5 paragraph 2 (HMTD layout) + RM 8.7.5 paragraph 4 (HMCT
+- * layout) + cross-ref SDK fm_manip.c FmPcdManipCreate() for the
+- * HMTD+HMCT alloc-pair pattern.
++ * layout) + RM 8.7.5.4 (auto checksum recompute) + cross-ref SDK
++ * fm_manip.c FmPcdManipCreate() / BuildHmct().
+  */
+ struct fman_pcd_manip *
+ fman_pcd_manip_create(struct fman_pcd *pcd,
+-		      const struct fman_pcd_manip_params *params)
++      const struct fman_pcd_manip_params *params)
+ {
+ 	struct fman_pcd_manip *manip;
+ 	struct muram_info *muram;
+ 	struct mutex *pcd_lock;
++	void __iomem *last_cmd;
+ 	unsigned long off;
++	unsigned long flags;
+ 	void __iomem *vb;
++	u32 last_word;
++	u16 cfg;
++	u8 op = 0;
+ 	long err;
+ 
+ 	if (!pcd || !params)
+@@ -299,11 +609,8 @@ fman_pcd_manip_create(struct fman_pcd *pcd,
+ 	manip->pcd = pcd;
+ 	manip->type = params->type;
+ 
+-	/*
+-	 * Allocate the 16-byte HMTD.  All-zero HMTD has opCode=0
+-	 * (treated as "no manip" by the silicon walker) and cfg=0
+-	 * (TYPE bit clear).  Cross-ref SDK fm_manip.c HmctInit() for
+-	 * the same alloc-then-zero pattern.
++	/* HMTD: 16-byte MURAM-resident descriptor.  Zero-initialised
++	 * so opCode=0 (no manip) until we finalise below.
+ 	 */
+ 	off = fman_pcd_muram_alloc(pcd, FMAN_PCD_HMTD_SIZE);
+ 	if (IS_ERR_VALUE(off)) {
+@@ -323,18 +630,16 @@ fman_pcd_manip_create(struct fman_pcd *pcd,
+ 	manip->hmtd = vb;
+ 	memset_io(vb, 0, FMAN_PCD_HMTD_SIZE);
+ 
+-	/*
+-	 * Allocate the 64-byte HMCT scratch region.  Body-2 encoders
+-	 * write into this region under manip->lock; body-3 plumbs the
+-	 * HMCT base pointer into the HMTD hmcdBasePtr field at the end
+-	 * of the body-2 encoder dispatch (so the HMTD only points at a
+-	 * fully-formed HMCT, never a partially-written one).
++	/* HMCT: 64-byte MURAM-resident command-table scratch.  Zero
++	 * pre-encoder so any unused slack stays inactive (silicon
++	 * never walks past the HMCD_LAST-marked word the encoder will
++	 * stamp below).
+ 	 */
+ 	off = fman_pcd_muram_alloc(pcd, FMAN_PCD_HMCT_SIZE);
+ 	if (IS_ERR_VALUE(off)) {
+ 		err = (long)off;
+ 		fman_pcd_muram_free(pcd, manip->hmtd_off,
+-				    FMAN_PCD_HMTD_SIZE);
++		    FMAN_PCD_HMTD_SIZE);
+ 		kfree(manip);
+ 		return ERR_PTR(err);
+ 	}
+@@ -343,7 +648,7 @@ fman_pcd_manip_create(struct fman_pcd *pcd,
+ 	if (!vb) {
+ 		fman_pcd_muram_free(pcd, off, FMAN_PCD_HMCT_SIZE);
+ 		fman_pcd_muram_free(pcd, manip->hmtd_off,
+-				    FMAN_PCD_HMTD_SIZE);
++		    FMAN_PCD_HMTD_SIZE);
+ 		kfree(manip);
+ 		return ERR_PTR(-ENXIO);
+ 	}
+@@ -353,11 +658,69 @@ fman_pcd_manip_create(struct fman_pcd *pcd,
+ 	manip->hmct_sz = FMAN_PCD_HMCT_SIZE;
+ 	memset_io(vb, 0, FMAN_PCD_HMCT_SIZE);
+ 
+-	/*
+-	 * Publish on the PCD manip list.  fman_pcd_release() on driver
++	/* Encoder dispatch under manip->lock.  spin_lock_irqsave is
++	 * used because the public-ABI doc-comment promises softirq-safe
++	 * re-creation for runtime NAT updates (PR15+).
++	 */
++	spin_lock_irqsave(&manip->lock, flags);
++
++	switch (params->type) {
++	case FMAN_PCD_MANIP_NAT_V4:
++		last_cmd = manip_encode_nat_v4(manip, params, &op);
++		break;
++	case FMAN_PCD_MANIP_NAT_V6:
++		last_cmd = manip_encode_nat_v6(manip, params, &op);
++		break;
++	case FMAN_PCD_MANIP_VLAN_PUSH:
++		last_cmd = manip_encode_vlan_push(manip, params, &op);
++		break;
++	case FMAN_PCD_MANIP_VLAN_POP:
++		last_cmd = manip_encode_vlan_pop(manip, &op);
++		break;
++	case FMAN_PCD_MANIP_TTL_DEC:
++		last_cmd = manip_encode_ttl_dec(manip, &op);
++		break;
++	default:
++		/* type already validated above; unreachable. */
++		last_cmd = NULL;
++		break;
++	}
++
++	if (!last_cmd) {
++		spin_unlock_irqrestore(&manip->lock, flags);
++		fman_pcd_muram_free(pcd, manip->hmct_off, manip->hmct_sz);
++		fman_pcd_muram_free(pcd, manip->hmtd_off,
++		    FMAN_PCD_HMTD_SIZE);
++		kfree(manip);
++		return ERR_PTR(-EINVAL);
++	}
++
++	/* Stamp HMCD_LAST onto the LAST command word.  iomem read +
++	 * OR + write performs the silicon-walker termination set per
++	 * SDK fm_manip.c lines 1074-1076.
++	 */
++	last_word = ioread32be(last_cmd);
++	iowrite32be(last_word | FMAN_PCD_HMCD_LAST, last_cmd);
++
++	/* Finalise the HMTD.  Order: hmcdBasePtr first (the MURAM byte
++	 * offset of our HMCT), then cfg with TYPE|EXT_HMCT bits set,
++	 * then opCode (the family selector).  Field offsets per RM
++	 * 8.7.5 paragraph 2.  Writing cfg LAST is safe because the
++	 * silicon walker only inspects opCode after cfg.TYPE is set,
++	 * but the SDK orders cfg then hmcdBasePtr then opCode - we
++	 * follow the same order (fm_manip.c lines 1223-1230).
++	 */
++	cfg = FMAN_PCD_HMTD_CFG_TYPE | FMAN_PCD_HMTD_CFG_EXT_HMCT;
++	iowrite16be(cfg, manip->hmtd + FMAN_PCD_HMTD_OFF_CFG);
++	iowrite32be((u32)manip->hmct_off,
++		    manip->hmtd + FMAN_PCD_HMTD_OFF_HMCD_BASE);
++	iowrite8(op, manip->hmtd + FMAN_PCD_HMTD_OFF_OPCODE);
++
++	spin_unlock_irqrestore(&manip->lock, flags);
++
++	/* Publish on the PCD manip list.  fman_pcd_release() on driver
+ 	 * unbind walks this list and calls fman_pcd_manip_destroy() on
+-	 * every surviving handle, so callers cannot leak MURAM by
+-	 * forgetting to destroy.  Cross-ref fman_pcd.c fman_pcd_release.
++	 * every surviving handle.  Cross-ref fman_pcd.c fman_pcd_release.
+ 	 */
+ 	pcd_lock = fman_pcd_get_lock(pcd);
+ 	mutex_lock(pcd_lock);
