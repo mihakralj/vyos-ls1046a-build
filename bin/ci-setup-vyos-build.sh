@@ -443,12 +443,12 @@ cp data/hooks/96-enable-services.chroot "$HOOKS/96-enable-services.chroot"
 chmod +x "$HOOKS/96-enable-services.chroot"
 
 ### ====================================================================
-### ASK2 userspace components (clean-room rewrite — NOT YET IMPLEMENTED)
+### ASK2 userspace components (modern rewrite — NOT YET IMPLEMENTED)
 ### ====================================================================
 # The legacy ASK 1.x userspace stack (dpa_app, cmm, fmc, libcli/libcmm/libfci,
 # libnfnetlink/libnetfilter-conntrack forks, CDX/FMC config XMLs, ASK module
 # loader/health scripts, 97-ask-userspace chroot hook) was deleted on
-# 2026-05-12 as part of the ASK2 clean-room rewrite (branch ask20).
+# 2026-05-12 as part of the ASK2 modern rewrite (branch ask20).
 #
 # ASK2 will ship its own userspace components per
 # specs/ask2-rewrite-spec.md §§4–9:

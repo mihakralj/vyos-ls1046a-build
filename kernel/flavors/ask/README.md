@@ -1,10 +1,10 @@
-# Flavor: `ask` — ASK2 (clean-room rewrite)
+# Flavor: `ask` — ASK2 (modern rewrite)
 
 **Status:** scaffold only. Implementation tracked in
 [`specs/ask2-rewrite-spec.md`](../../../specs/ask2-rewrite-spec.md)
 (v0.6, 2026-05-11).
 
-This flavor is the **clean-room rewrite** of the NXP ASK fast-path for
+This flavor is the **modern rewrite** of the NXP ASK fast-path for
 LS1046A. It supersedes the legacy ASK 1.x stack (proprietary `cdx.ko`,
 `auto_bridge.ko`, `cmm`, `dpa_app`, the 5797-line in-tree-hooks patch,
 and the 266-file vendored NXP SDK FMan/QMan/BMan driver overlay) in

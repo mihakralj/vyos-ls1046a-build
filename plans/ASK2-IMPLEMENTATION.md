@@ -676,7 +676,7 @@ changed.
 (see prior revision of this plan) has been resolved in favour of
 **Option C-modernize**: write a new FMan PCD subsystem of ~7800 LOC
 modern kernel C. **Spec v1.1 (same day) relaxed the original
-"clean-room" provenance constraint** — both the archived NXP SDK PCD
+strict-provenance constraint** — both the archived NXP SDK PCD
 tree at `mihakralj/kernel-ls1046a-build@464df181` (dual-licensed
 BSD-3-or-GPL-2.0) and the `we-are-mono/ASK` legacy stack (GPL) are
 GPL-compatible and **usable as silicon-behaviour references**. What
@@ -726,7 +726,7 @@ modern-kernel idiom enforcement — typed structs (no `handle_t`), RCU
 correctness, `devm_*` lifetimes, `kmalloc`/`ioremap`/`readl`/`writel`
 direct calls (no OS-shim wrapper layer), `mutex`/`spinlock`/`rcu`
 primitives, tracepoints over `printk`, `<linux/crc64.h>` over inline
-tables. Open question #8 (the v1.0 "clean-room reviewer assignment"
+tables. Open question #8 (the v1.0 "provenance-reviewer assignment"
 question) is **closed** in v1.1.
 
 ---
@@ -1100,7 +1100,7 @@ function body uses modern kernel idioms (typed structs, `readl/writel`,
 no `handle_t`, no `XX_Malloc`, no `TRACE_RTOS`).
 
 **Stale provenance comments in patches 0004–0008:** the v1.0
-"Clean-room provenance" file-headers in `fman_pcd.c`, `fman_pcd_cc.c`,
+"Provenance (v1.1)" file-headers in `fman_pcd.c`, `fman_pcd_cc.c`,
 `fman_pcd_manip.c`, `fman_pcd_plcr.c`, `fman_pcd_prs.c`,
 `fman_pcd_replic.c` are now stale but **not lying** — the prep-stub
 code is literally `-EOPNOTSUPP` stubs with no SDK code copied. They
@@ -1455,7 +1455,7 @@ Per spec §18:
   same day; spec §12.9 records the finding and spec §13 specifies
   the new ~7800 LOC FMan PCD subsystem (`0004-fman-pcd-subsystem.patch`).
   PR14 was expanded into PR14a–g in this document, one per spec §13
-  module. **Spec v1.1 (2026-05-14)** relaxed the original clean-room
+  module. **Spec v1.1 (2026-05-14)** relaxed the original strict-provenance
   provenance constraint: NXP SDK + we-are-mono are both GPL and
   usable as silicon-behaviour references; only the SDK's architecture
   (handle_t / ncsw / AMP IPC / nested Peripherals/ layout) remains

@@ -41,7 +41,7 @@ Wiring:
   to fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD).  fman_pcd.c already exports
   fman_pcd_get_cc_list() and the cc_trees list (landed in PR14a).
 
-Clean-room provenance per spec §16: authored from LS1046A RM only.
+Provenance (v1.1) per spec §16: authored from LS1046A RM only.
 The legacy NXP SDK fm_cc.c (~7500 LOC in archived
 mihakralj/kernel-ls1046a-build@464df181) is read-only cross-reference;
 no code or struct layouts copied.
@@ -54,7 +54,7 @@ Validation (native ARM64 build on Cobalt 100):
 
 References:
   specs/ask2-rewrite-spec.md §13.3 (fman_pcd_cc.c, ~2500 LOC budget)
-  specs/ask2-rewrite-spec.md §16  (clean-room provenance risk #12)
+  specs/ask2-rewrite-spec.md §16  (provenance discipline risk #12)
   LS1046A Reference Manual §8.7.4.1, §8.7.4.2, §8.7.4.3
 
 Signed-off-by: ASK2 PR14c-prep <ask2@vyos.local>
@@ -102,7 +102,7 @@ index 000000000..d57795531
 + * - LS1046A Reference Manual sec 8.7.4.2 (CC node match-key record).
 + * - LS1046A Reference Manual sec 8.7.4.3 (action template encoding).
 + *
-+ * Clean-room provenance
++ * Provenance (v1.1)
 + * ---------------------
 + * Mainline drivers/net/ethernet/freescale/fman/ has zero classifier
 + * code; this file is authored from the RM only.  The legacy NXP SDK
@@ -110,7 +110,7 @@ index 000000000..d57795531
 + * Peripherals/FM/Pcd/ in the archived mihakralj/kernel-ls1046a-build
 + * repo at HEAD 464df181) is a read-only silicon-fact cross-reference
 + * only - no code or struct layouts are copied from it.  See spec
-+ * specs/ask2-rewrite-spec.md sec 16 (clean-room provenance risk #12).
++ * specs/ask2-rewrite-spec.md sec 16 (provenance discipline risk #12).
 + *
 + * Locking model (forward-looking, PR14c-body)
 + * -------------------------------------------

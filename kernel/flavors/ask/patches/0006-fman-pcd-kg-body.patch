@@ -42,7 +42,7 @@ index f14ddf9f3..366537be7 100644
 - * Authoritative reference: LS1046A Reference Manual sec 8.7.4 (scheme
 - * registers KGSE_MV/MODE/EKDV/EKFC/CCBS/HC/FQB) and 8.7.5 (extract
 - * record format).  The actual silicon-programming body lands in
-- * PR14b-body and is authored clean-room from the RM plus the existing
+- * PR14b-body and is authored RM-authoritative, with SDK + we-are-mono as silicon-behaviour cross-refs (spec v1.1) plus the existing
 - * in-tree register definitions in fman_keygen.c.
 + * PR14b-body of the ASK2 v1.0 PR14 series.  Replaces the four
 + * -EOPNOTSUPP stubs that PR14b-prep landed with a real
