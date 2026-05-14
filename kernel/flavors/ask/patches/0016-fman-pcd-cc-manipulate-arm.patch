@@ -1,3 +1,14 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Thu, 14 May 2026 20:44:08 +0000
+Subject: patches/0016-fman-pcd-cc-manipulate-arm.patch
+
+---
+ .../net/ethernet/freescale/fman/fman_pcd_cc.c | 47 +++++++++++++++++--
+ .../freescale/fman/fman_pcd_internal.h        | 12 +++++
+ .../ethernet/freescale/fman/fman_pcd_manip.c  | 18 +++++++
+ 3 files changed, 72 insertions(+), 5 deletions(-)
+
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 index bad14d0..077ec24 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c

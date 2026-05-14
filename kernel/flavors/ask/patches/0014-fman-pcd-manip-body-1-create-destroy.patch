@@ -1,47 +1,14 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: ASK2-CI <ci@mono-networks.local>
-Date: Wed, 14 May 2026 05:22:00 +0000
-Subject: [PATCH] fman: pcd_manip body-1 -- struct + create/destroy MURAM bodies
+From: ci <ci@local>
+Date: Thu, 14 May 2026 20:44:07 +0000
+Subject: patches/0014-fman-pcd-manip-body-1-create-destroy.patch
 
-PR14d-body-1 of the ASK2 v1.0 PR14 series.  Replaces the
-PR14d-prep -EOPNOTSUPP stubs of fman_pcd_manip_create() and
-fman_pcd_manip_destroy() with the skeleton MURAM-resident
-allocation pair:
-
-  - the per-manip HMTD (Header Manipulation Table Descriptor),
-    16 bytes, MURAM-resident, opCode=0x00 (no manip) until body-2;
-  - the per-manip HMCT (Header Manipulation Command Table), 64-B
-    scratch region for the variant-specific command sequence
-    written by the body-2 encoders.
-
-The four other public entry points stay -EOPNOTSUPP-free because
-the ABI defines only two functions: create + destroy.  The five
-MANIP_* variants land as a single internal encoder dispatch in
-PR14d-body-2.  The cc_encode_ad() MANIPULATE arm wiring lands in
-PR14d-body-3.  A KUnit suite covering each variant byte-for-byte
-against the RM lands in PR14d-body-4.
-
-Authoritative reference:
-  - LS1046A Reference Manual sec 8.7.5    (Header modification table)
-  - LS1046A Reference Manual sec 8.7.5.4  (Auto checksum recompute)
-  - LS1046A Reference Manual sec 8.7.4.3  (AD opcode-extension layout
-    for HMAN_OC, used by body-3 cc_encode_ad MANIPULATE arm)
-
-Provenance (v1.1): authored from the RM only; the legacy NXP SDK
-fm_manip.c is read-only silicon-fact cross-reference, no code or
-struct layouts copied.
-
-Build-validated on linux-6.18.28 ARM64 (native Cobalt 100):
-  - zero warnings
-  - vmlinux links clean
-  - both symbols present in System.map with __ksymtab_* entries
-  - fman_pcd_manip_create grew 28 -> 468 B
-  - fman_pcd_manip_destroy grew 24 -> 188 B
-
-Signed-off-by: ASK2-CI <ci@mono-networks.local>
 ---
+ .../ethernet/freescale/fman/fman_pcd_manip.c  | 382 ++++++++++++++++--
+ 1 file changed, 352 insertions(+), 30 deletions(-)
+
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
-index d9ae4ca55..e2c459089 100644
+index d9ae4ca..e2c4590 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
 @@ -1,61 +1,277 @@

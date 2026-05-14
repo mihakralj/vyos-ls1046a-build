@@ -1,60 +1,14 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: ASK2-CI <ci@mono-networks.local>
-Date: Wed, 14 May 2026 06:00:00 +0000
-Subject: [PATCH] fman: pcd_manip body-2 -- HMCT variant encoders + HMTD finalise
+From: ci <ci@local>
+Date: Thu, 14 May 2026 20:44:08 +0000
+Subject: patches/0015-fman-pcd-manip-body-2-variant-encoders.patch
 
-PR14d-body-2 of the ASK2 v1.0 PR14 series.  Adds the per-variant HMCT
-command-table encoders for NAT_V4, NAT_V6, VLAN_PUSH, VLAN_POP, and
-TTL_DEC, plus the HMTD finalisation that publishes them to silicon.
-
-Per-variant encoding:
-  - NAT_V4: emits IPV4_UPDATE command word (opcode|SRC|DST|CS_CALC bits)
-    + 4-B inline SRC + 4-B inline DST + optional TCP_UDP_UPDATE command
-    + 4-B inline port-pair (sport<<16|dport).  Auto-checksum recompute
-    on SA/DA rewrite per RM 8.7.5.4.
-  - NAT_V6: emits IPV6_UPDATE command word + 16-B inline SRC + 16-B
-    inline DST (each address written as 4 BE-32 words preserving
-    on-wire octet order) + optional TCP_UDP_UPDATE + 4-B port-pair.
-    Auto-checksum recompute on SA/DA rewrite per RM 8.7.5.4.
-  - VLAN_PUSH: emits GENERIC_INSRT at L2 offset 12 size 4, plus 4-B
-    inline TPID(2)+TCI(2) payload.  FMan reparses the frame on its way
-    out so downstream classification sees the new VLAN tag.
-  - VLAN_POP: emits GENERIC_RMV at L2 offset 12 size 4.
-  - TTL_DEC: emits IPV4_UPDATE with TTL bit only; silicon decrements
-    TTL by 1 in flight and recomputes the IPv4 checksum unconditionally
-    (TTL change always touches the cksum byte).
-
-HMCD_LAST=0x00800000 is OR'd into the FIRST 32-bit word of the LAST
-command after the encoder returns, matching the SDK fm_manip.c
-BuildHmct() pattern (lines 1074-1076).  HMTD is then finalised under
-manip->lock: cfg=TYPE|EXT_HMCT, hmcdBasePtr=manip->hmct_off (MURAM
-byte offset), opCode=HMAN_OC_IP_MANIP for NAT_V4/V6/TTL_DEC and
-HMAN_OC for VLAN_PUSH/POP (RM 8.7.5 family selectors).
-
-Encoder-failure rollback: if an encoder returns NULL (caller params
-carry no rewrite_* flag at all - e.g. NAT_V4 with all bools clear),
-the manip is fully torn down with HMTD still unwritten so silicon
-never sees a partial template, and -EINVAL is returned.
-
-Locking: encoders run under spin_lock_irqsave(&manip->lock, flags)
-to honour the public-ABI doc-comment promise that re-creation is
-softirq-safe (needed for PR15+ runtime NAT/CT flow-table updates).
-MURAM alloc + manip-list publish still take pcd->lock outside the
-spinlock.
-
-Authoritative reference:
-  - LS1046A Reference Manual sec 8.7.5    (Header modification table)
-  - LS1046A Reference Manual sec 8.7.5.4  (Auto checksum recompute)
-
-Provenance (v1.1): bit-exact silicon facts authored from the RM with
-the legacy NXP SDK fm_manip.c BuildHmct() as a read-only cross-
-reference for the on-wire byte order of inline payload (no code
-copied).  Cross-refs cited inline in the encoder docstrings.
-
-Signed-off-by: ASK2-CI <ci@mono-networks.local>
 ---
+ .../ethernet/freescale/fman/fman_pcd_manip.c  | 451 ++++++++++++++++--
+ 1 file changed, 407 insertions(+), 44 deletions(-)
+
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
-index e2c459089..2715a0f04 100644
+index e2c4590..2715a0f 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
 @@ -73,6 +73,7 @@
