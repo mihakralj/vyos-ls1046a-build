@@ -1,0 +1,362 @@
+From 3cd69a75fd121c2fa325741d9d7911b5ce5902cd Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Thu, 14 May 2026 05:00:59 +0000
+Subject: [PATCH] fman: pcd_cc: add KUnit suite for cc_encode_ad
+
+PR14c-body-5 of 5.  Adds the byte-perfect AD-record encoder unit
+test suite for the FMan PCD Coarse Classifier.  Ten test cases
+covering DROP / FORWARD_FQ (valid + zero-FQID reject) / FORWARD_CAAM
+(PLCR_DIS) / NEXT_CC_NODE (table-offset in res, null reject) /
+REPLICATE+MANIPULATE (EOPNOTSUPP) / null-arg reject / byte-layout
+regression canary against LS1046A RM 8.7.4.3 Table 8-119.
+
+Tests are #include'd from fman_pcd_cc.c under
+CONFIG_FSL_FMAN_PCD_KUNIT_TEST so they reach the static
+cc_encode_ad() helper and the layout #defines directly.  Scratch
+buffer is kunit_kzalloc'd and cast __iomem __force -- iowrite32be
+on arm64 is __raw_writel+swab, no MMIO ordering hooks needed.
+
+Build-verified clean both with the option off (default kernel build)
+and on (KUnit kernel build) on linux-6.18.28 arm64.
+---
+ drivers/net/ethernet/freescale/fman/Kconfig   |  17 ++
+ .../net/ethernet/freescale/fman/fman_pcd_cc.c |  15 +-
+ .../freescale/fman/tests/fman_pcd_cc_test.c   | 277 ++++++++++++++++++
+ 3 files changed, 308 insertions(+), 1 deletion(-)
+ create mode 100644 drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
+
+diff --git a/drivers/net/ethernet/freescale/fman/Kconfig b/drivers/net/ethernet/freescale/fman/Kconfig
+index d04372350..0164a65a4 100644
+--- a/drivers/net/ethernet/freescale/fman/Kconfig
++++ b/drivers/net/ethernet/freescale/fman/Kconfig
+@@ -50,3 +50,20 @@ config FSL_FMAN_PCD
+ 	  pipeline at line rate. PR14a delivers the orchestration
+ 	  scaffold; PR14b-f deliver the per-engine APIs.
+ 	  If unsure, say Y.
++
++config FSL_FMAN_PCD_KUNIT_TEST
++	tristate "KUnit tests for FMan PCD CC node encoder" if !KUNIT_ALL_TESTS
++	depends on FSL_FMAN_PCD && KUNIT
++	default KUNIT_ALL_TESTS
++	help
++	  Builds the byte-perfect AD-record encoder tests for the FMan
++	  Coarse Classifier (drivers/net/ethernet/freescale/fman/tests/
++	  fman_pcd_cc_test.c).  Validates the LS1046A RM 8.7.4.3 Table
++	  8-119 layout: fqid at offset 0x0, plcr_profile at 0x4, nia at
++	  0x8 (with type bits at [31:30], PLCR_DIS at [29], opcode at
++	  [3:0]), and the res word at 0xc.  All four words are big-
++	  endian relative to the host because MURAM is BE.  Tests run
++	  in-tree against a kmalloc'd scratch buffer (cast __iomem for
++	  iowrite32be) -- no real MURAM allocation required.
++	
++	  If unsure, say N.
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index 19007b2db..7032a7052 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -890,4 +890,17 @@ void fman_pcd_cc_tree_destroy(struct fman_pcd_cc_tree *tree)
+ 	mutex_destroy(&tree->lifecycle_lock);
+ 	kfree(tree);
+ }
+-EXPORT_SYMBOL_GPL(fman_pcd_cc_tree_destroy);
+\ No newline at end of file
++EXPORT_SYMBOL_GPL(fman_pcd_cc_tree_destroy);
++
++#if IS_ENABLED(CONFIG_FSL_FMAN_PCD_KUNIT_TEST)
++/*
++ * KUnit suite lives in tests/fman_pcd_cc_test.c and is #include'd here
++ * so the test functions have static-scope access to cc_encode_ad() and
++ * to the layout #defines (FMAN_PCD_AD_OFF_*, FMAN_PCD_AD_NIA_*).  This
++ * mirrors the in-tree pattern used by other driver kunit suites that
++ * need to reach private helpers (e.g. drivers/net/ethernet/microchip/
++ * vcap/vcap_api_kunit.c is a separate TU because vcap exposes its
++ * helpers; the cc encoder is intentionally static, hence the include).
++ */
++#include "tests/fman_pcd_cc_test.c"
++#endif /* CONFIG_FSL_FMAN_PCD_KUNIT_TEST */
+diff --git a/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
+new file mode 100644
+index 000000000..6794e0783
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
+@@ -0,0 +1,277 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * KUnit suite for the FMan PCD Coarse Classifier AD-record encoder.
++ *
++ * This file is #include'd from fman_pcd_cc.c under
++ * CONFIG_FSL_FMAN_PCD_KUNIT_TEST so the tests have direct static-scope
++ * access to cc_encode_ad() and the FMAN_PCD_AD_* layout macros.
++ *
++ * Coverage target: PR14c-body-3 (commit 7ebbb4e8c, patch 0011) +
++ * PR14c-body-4 (commit 158fe8bd5, patch 0012).  The encoder is the
++ * pure-software unit-bias under those two patches; the surrounding
++ * fman_pcd_cc_node_add_key / fman_pcd_cc_node_modify_next_action paths
++ * delegate the byte-encoding to cc_encode_ad and add only MURAM
++ * book-keeping that cannot run without real silicon.  Verifying the
++ * encoder is therefore sufficient to catch silicon-fact regressions in
++ * the AD shape -- exactly the most-likely future-rot failure mode for
++ * this layer of the stack.
++ *
++ * Authoritative reference: LS1046A RM 8.7.4.3 Table 8-119.
++ */
++#include <kunit/test.h>
++#include <linux/io.h>
++#include <linux/kernel.h>
++#include <linux/types.h>
++
++/*
++ * Allocate a 16-byte scratch buffer for one AD record.  cc_encode_ad
++ * expects a void __iomem * (it calls iowrite32be); a plain kmalloc'd
++ * region is fine because iowrite32be on arm64 is just a __raw_writel
++ * with a CPU-to-BE swap on top, no MMIO ordering hooks that would
++ * require real iomem.  We use the __force cast that the kernel allows
++ * for exactly this kind of test scaffolding.
++ */
++static void __iomem *ad_scratch_alloc(struct kunit *test)
++{
++	void *buf = kunit_kzalloc(test, 16, GFP_KERNEL);
++
++	KUNIT_ASSERT_NOT_NULL(test, buf);
++	return (void __iomem __force *)buf;
++}
++
++/*
++ * Read one BE32 word from offset @off of the scratch buffer.  This is
++ * the inverse of cc_encode_ad's iowrite32be: we use ioread32be so that
++ * a wrong-endian write would fail the test rather than producing a
++ * byteswapped pass.
++ */
++static u32 ad_read_be32(void __iomem *ad, unsigned int off)
++{
++	return ioread32be(ad + off);
++}
++
++/* ---- TEST: DROP -------------------------------------------------- */
++static void cc_encode_ad_drop_test(struct kunit *test)
++{
++	void __iomem *ad = ad_scratch_alloc(test);
++	struct fman_pcd_action act = { .type = FMAN_PCD_ACTION_DROP };
++	u32 fqid, plcr, nia, res;
++	int err;
++
++	err = cc_encode_ad(&act, ad);
++	KUNIT_ASSERT_EQ(test, err, 0);
++
++	fqid = ad_read_be32(ad, FMAN_PCD_AD_OFF_FQID);
++	plcr = ad_read_be32(ad, FMAN_PCD_AD_OFF_PLCR);
++	nia  = ad_read_be32(ad, FMAN_PCD_AD_OFF_NIA);
++	res  = ad_read_be32(ad, FMAN_PCD_AD_OFF_RES);
++
++	KUNIT_EXPECT_EQ(test, fqid, 0u);
++	KUNIT_EXPECT_EQ(test, plcr, 0u);
++	KUNIT_EXPECT_EQ(test, res,  0u);
++	KUNIT_EXPECT_EQ(test, nia & FMAN_PCD_AD_NIA_TYPE_MASK,
++			FMAN_PCD_AD_NIA_TYPE_BYPASS);
++}
++
++/* ---- TEST: FORWARD_FQ with non-zero FQID ------------------------- */
++static void cc_encode_ad_forward_fq_test(struct kunit *test)
++{
++	void __iomem *ad = ad_scratch_alloc(test);
++	struct fman_pcd_action act = {
++		.type = FMAN_PCD_ACTION_FORWARD_FQ,
++		.forward_fq = { .fqid = 0x12345 },
++	};
++	u32 fqid, plcr, nia, res;
++	int err;
++
++	err = cc_encode_ad(&act, ad);
++	KUNIT_ASSERT_EQ(test, err, 0);
++
++	fqid = ad_read_be32(ad, FMAN_PCD_AD_OFF_FQID);
++	plcr = ad_read_be32(ad, FMAN_PCD_AD_OFF_PLCR);
++	nia  = ad_read_be32(ad, FMAN_PCD_AD_OFF_NIA);
++	res  = ad_read_be32(ad, FMAN_PCD_AD_OFF_RES);
++
++	KUNIT_EXPECT_EQ(test, fqid, 0x12345u);
++	KUNIT_EXPECT_EQ(test, plcr, 0u);
++	KUNIT_EXPECT_EQ(test, res,  0u);
++	KUNIT_EXPECT_EQ(test, nia & FMAN_PCD_AD_NIA_TYPE_MASK,
++			FMAN_PCD_AD_NIA_TYPE_RESULT_CF);
++	KUNIT_EXPECT_EQ(test, nia & FMAN_PCD_AD_NIA_PLCR_DIS, 0u);
++}
++
++/* ---- TEST: FORWARD_FQ with FQID 0 is rejected -------------------- */
++static void cc_encode_ad_forward_fq_zero_test(struct kunit *test)
++{
++	void __iomem *ad = ad_scratch_alloc(test);
++	struct fman_pcd_action act = {
++		.type = FMAN_PCD_ACTION_FORWARD_FQ,
++		.forward_fq = { .fqid = 0 },
++	};
++	int err = cc_encode_ad(&act, ad);
++
++	KUNIT_EXPECT_EQ(test, err, -EINVAL);
++}
++
++/* ---- TEST: FORWARD_CAAM ----------------------------------------- */
++static void cc_encode_ad_forward_caam_test(struct kunit *test)
++{
++	void __iomem *ad = ad_scratch_alloc(test);
++	struct fman_pcd_action act = {
++		.type = FMAN_PCD_ACTION_FORWARD_CAAM,
++		.forward_caam = { .profile_id = 42 },
++	};
++	u32 fqid, plcr, nia, res;
++	int err;
++
++	err = cc_encode_ad(&act, ad);
++	KUNIT_ASSERT_EQ(test, err, 0);
++
++	fqid = ad_read_be32(ad, FMAN_PCD_AD_OFF_FQID);
++	plcr = ad_read_be32(ad, FMAN_PCD_AD_OFF_PLCR);
++	nia  = ad_read_be32(ad, FMAN_PCD_AD_OFF_NIA);
++	res  = ad_read_be32(ad, FMAN_PCD_AD_OFF_RES);
++
++	KUNIT_EXPECT_EQ(test, fqid, 0u);
++	KUNIT_EXPECT_EQ(test, plcr, 42u);
++	KUNIT_EXPECT_EQ(test, res,  0u);
++	KUNIT_EXPECT_EQ(test, nia & FMAN_PCD_AD_NIA_TYPE_MASK,
++			FMAN_PCD_AD_NIA_TYPE_RESULT_CF);
++	/* CAAM bypasses the FMan policer because CAAM does its own metering. */
++	KUNIT_EXPECT_EQ(test, nia & FMAN_PCD_AD_NIA_PLCR_DIS,
++			FMAN_PCD_AD_NIA_PLCR_DIS);
++}
++
++/* ---- TEST: NEXT_CC_NODE encodes the table offset into res ------- */
++static void cc_encode_ad_next_cc_test(struct kunit *test)
++{
++	void __iomem *ad = ad_scratch_alloc(test);
++	struct fman_pcd_cc_node stub_next = { .ad_table_off = 0xABCDE };
++	struct fman_pcd_action act = {
++		.type = FMAN_PCD_ACTION_NEXT_CC_NODE,
++		.next_cc = { .node = &stub_next },
++	};
++	u32 nia, res;
++	int err;
++
++	err = cc_encode_ad(&act, ad);
++	KUNIT_ASSERT_EQ(test, err, 0);
++
++	nia = ad_read_be32(ad, FMAN_PCD_AD_OFF_NIA);
++	res = ad_read_be32(ad, FMAN_PCD_AD_OFF_RES);
++
++	KUNIT_EXPECT_EQ(test, nia & FMAN_PCD_AD_NIA_TYPE_MASK,
++			FMAN_PCD_AD_NIA_TYPE_CONT_LOOKUP);
++	KUNIT_EXPECT_EQ(test, res, 0xABCDEu);
++}
++
++/* ---- TEST: NEXT_CC_NODE with NULL node returns -EINVAL --------- */
++static void cc_encode_ad_next_cc_null_test(struct kunit *test)
++{
++	void __iomem *ad = ad_scratch_alloc(test);
++	struct fman_pcd_action act = {
++		.type = FMAN_PCD_ACTION_NEXT_CC_NODE,
++		.next_cc = { .node = NULL },
++	};
++	int err = cc_encode_ad(&act, ad);
++
++	KUNIT_EXPECT_EQ(test, err, -EINVAL);
++}
++
++/* ---- TEST: REPLICATE / MANIPULATE return -EOPNOTSUPP ----------- */
++static void cc_encode_ad_replicate_test(struct kunit *test)
++{
++	void __iomem *ad = ad_scratch_alloc(test);
++	struct fman_pcd_action act = { .type = FMAN_PCD_ACTION_REPLICATE };
++	int err = cc_encode_ad(&act, ad);
++
++	KUNIT_EXPECT_EQ(test, err, -EOPNOTSUPP);
++}
++
++static void cc_encode_ad_manipulate_test(struct kunit *test)
++{
++	void __iomem *ad = ad_scratch_alloc(test);
++	struct fman_pcd_action act = { .type = FMAN_PCD_ACTION_MANIPULATE };
++	int err = cc_encode_ad(&act, ad);
++
++	KUNIT_EXPECT_EQ(test, err, -EOPNOTSUPP);
++}
++
++/* ---- TEST: NULL args return -EINVAL ----------------------------- */
++static void cc_encode_ad_null_args_test(struct kunit *test)
++{
++	void __iomem *ad = ad_scratch_alloc(test);
++	struct fman_pcd_action act = { .type = FMAN_PCD_ACTION_DROP };
++
++	KUNIT_EXPECT_EQ(test, cc_encode_ad(NULL, ad), -EINVAL);
++	KUNIT_EXPECT_EQ(test, cc_encode_ad(&act, NULL), -EINVAL);
++}
++
++/* ---- TEST: AD layout offsets are byte-perfect vs RM 8.7.4.3 ---- */
++/*
++ * This is the regression-canary test that catches anyone editing the
++ * AD layout #defines.  RM 8.7.4.3 Table 8-119 is silicon-fixed:
++ *   offset 0x0 = fqid, 0x4 = plcr_profile, 0x8 = nia, 0xc = res.
++ * The encoder writes via offset macros, but a typo (e.g. swapping the
++ * fqid and plcr offsets) would produce a build that boots fine,
++ * silently misroutes every flow, and would only show up on the wire.
++ *
++ * We verify by encoding a FORWARD_FQ with a unique non-zero fqid and a
++ * unique CAAM-style profile (here re-using the layered encoding paths)
++ * and observing the wire-order bytes in the scratch buffer.
++ */
++static void cc_encode_ad_byte_layout_test(struct kunit *test)
++{
++	void __iomem *ad = ad_scratch_alloc(test);
++	struct fman_pcd_action act = {
++		.type = FMAN_PCD_ACTION_FORWARD_FQ,
++		.forward_fq = { .fqid = 0xDEADBEEF },
++	};
++	const u8 *raw = (const u8 __force *)ad;
++	int err;
++
++	err = cc_encode_ad(&act, ad);
++	KUNIT_ASSERT_EQ(test, err, 0);
++
++	/* fqid is the FIRST four bytes, big-endian: DE AD BE EF. */
++	KUNIT_EXPECT_EQ(test, raw[0], 0xDEu);
++	KUNIT_EXPECT_EQ(test, raw[1], 0xADu);
++	KUNIT_EXPECT_EQ(test, raw[2], 0xBEu);
++	KUNIT_EXPECT_EQ(test, raw[3], 0xEFu);
++
++	/* plcr at offset 4 must be zero (not the fqid). */
++	KUNIT_EXPECT_EQ(test, raw[4], 0u);
++	KUNIT_EXPECT_EQ(test, raw[5], 0u);
++	KUNIT_EXPECT_EQ(test, raw[6], 0u);
++	KUNIT_EXPECT_EQ(test, raw[7], 0u);
++
++	/* nia at offset 8: high two bits = RESULT_CF = 00b => byte 8 == 0. */
++	KUNIT_EXPECT_EQ(test, raw[8], 0u);
++
++	/* res at offset 0xc must be zero. */
++	KUNIT_EXPECT_EQ(test, raw[12], 0u);
++	KUNIT_EXPECT_EQ(test, raw[13], 0u);
++	KUNIT_EXPECT_EQ(test, raw[14], 0u);
++	KUNIT_EXPECT_EQ(test, raw[15], 0u);
++}
++
++static struct kunit_case fman_pcd_cc_test_cases[] = {
++	KUNIT_CASE(cc_encode_ad_drop_test),
++	KUNIT_CASE(cc_encode_ad_forward_fq_test),
++	KUNIT_CASE(cc_encode_ad_forward_fq_zero_test),
++	KUNIT_CASE(cc_encode_ad_forward_caam_test),
++	KUNIT_CASE(cc_encode_ad_next_cc_test),
++	KUNIT_CASE(cc_encode_ad_next_cc_null_test),
++	KUNIT_CASE(cc_encode_ad_replicate_test),
++	KUNIT_CASE(cc_encode_ad_manipulate_test),
++	KUNIT_CASE(cc_encode_ad_null_args_test),
++	KUNIT_CASE(cc_encode_ad_byte_layout_test),
++	{}
++};
++
++static struct kunit_suite fman_pcd_cc_test_suite = {
++	.name = "fman_pcd_cc",
++	.test_cases = fman_pcd_cc_test_cases,
++};
++
++kunit_test_suite(fman_pcd_cc_test_suite);
+-- 
+2.39.5
+
