@@ -49,7 +49,7 @@ architecture source-of-truth. When the two disagree, **the spec wins**
 | 14e-prep | M2.5e-prep — plcr public API stub (`fman_pcd_plcr.c`) + `fman_pcd_plcr_params` (CIR/CBS/EIR/EBS, color mode) in `<linux/fsl/fman_pcd.h>` | ask20 | landed |
 | 14e-body | M2.5e-body — plcr real trTCM profile programming per RM 8.7.6, runtime rate update, kunit. Split into sub-PRs (body-1+ TBD) following the PR14d cadence. | ask20 | 🟡 **in progress (4/N)** — body-1 (`ccdf040`, patch 0018, struct + create/destroy MURAM bodies), body-2 (`dfc7f64`, patch 0019, trTCM rate encoder + real create/set_rates), body-3 (`2cb2779`, patch 0020, `cc_encode_ad` POLICE arm + public `fman_pcd_plcr_profile_get_id()` accessor), body-4 (`1042e8d`, patch 0021, KUnit suite for plcr encoders + record layout + POLICE-arm opaque failure-mode tests) |
 | 14f-prep | M2.5f-prep — replicator + parser public API stubs (`fman_pcd_replic.c`, `fman_pcd_prs.c`) + `fman_pcd_replic_member` in `<linux/fsl/fman_pcd.h>` | ask20 | landed |
-| 14f-body | M2.5f-body — replicator real MURAM group table (RM 8.7.7), parser HXS pass-through config (RM 8.7.2), kunit | ask20 | 🟡 in progress (1/4) — body-1 `1a42ddb` (kernel) / `8fdafc7` (workspace) — replic create/destroy MURAM, patch 0022; body-2 (member-AD encoder) / body-3 (prs validator + cc REPLICATE arm) / body-4 (kunit) pending |
+| 14f-body | M2.5f-body — replicator real MURAM group table (RM 8.7.7), parser HXS pass-through config (RM 8.7.2), kunit | ask20 | 🟡 in progress (2/4) — body-1 `1a42ddb`/`8fdafc7`; body-2 `080bafe7` (kernel) / `<pending>` (workspace) — member-AD encoder + source-TD active-OPCODE publish, patch 0023; body-3 (prs validator + cc REPLICATE arm) / body-4 (kunit) pending |
 | 14g | M2.5g — End-to-end wire-up — `ask_hostcmd.c` calls PCD API; first IPv4 TCP flow traverses silicon | ask20 | blocked on 14c-body + 14d-body + 14e-body + 14f-body |
 | 15  | M3.x — remaining flow types (NAT/PAT/v6/bridge)  | ask20  | blocked on PR14g |
 | 16  | M4.x — `ask_xfrm.c` + CAAM packet-mode IPsec     | ask20  | blocked on PR14g |
@@ -1348,7 +1348,7 @@ LOC budget: ~850.
 7. **Body-2 register constants pre-declared in body-1.** PMR bits (`COLOR_AWARE`, `ALG_TRTCM`, `PACKET_MODE`, `DROP_PROBABILITY`, `PIR_DISABLED`); rate-field encoding scheme (3-bit exp + 16-bit mant + 13-bit reserved); burst-depth `BURST_UNIT_BYTES=256` scale factor. Body-2 implements `plcr_encode_rate(bps) -> u32 (exp<<29 \| mant<<13)` and `plcr_encode_burst(bytes) -> u16 (saturating mant in 256-B units)` helpers shared between create and set_rates.
 8. **Anonymous union: NONE here.** `struct fman_pcd_plcr_params` is a flat struct (color_mode + 4 rate/burst fields), no union — none of the PR14d-body-2 `p->u.x` accessor gotcha applies.
 
-**Next-session entry point (after PR14f-body-1 landing 2026-05-14):** **PR14e is closed (4/4 sub-PRs landed); PR14f is in progress at 1/4 bodies.** PR14f body-1 (`<pending>` — replic create/destroy MURAM, patch 0022) replaces the PR14f-prep `ERR_PTR(-EOPNOTSUPP)` stub with real source-TD + member-AD MURAM allocation per RM §8.7.7. The members-array is allocated zeroed and the FQIDs are deliberately NOT programmed yet — body-2 (member-AD encoder) will stamp FQID/NEXT/FR_BIT/NL_BIT under `group->lock` as one atomic pass, with the source-TD active-OPCODE write as the single publication point (silicon never sees a partial chain). Next planned work item: **PR14f-body-2** — member-AD encoder using the pre-declared body-2 constants (`FR_BIT 0x08000000`, `NL_BIT 0x10000000`, `ADDR_SHIFT 4`, `INVALID_MEMBER_INDEX 0xffff`) and the cross-TU accessor `fman_pcd_replic_group_source_td_off()` that body-3 will add. After PR14f closes (body-2, body-3 = prs validator + cc REPLICATE-arm wire-up, body-4 = kunit), **PR14g** (the end-to-end M2 wire-up — `ask_hostcmd.c` switches from `-ENXIO` host-command path to real `fman_pcd_cc_node_add_key()` calls; first IPv4 TCP flow traverses 210 silicon) unblocks. Until M2 acceptance, all subsequent milestones (M3 flow types, M4 IPsec, M5 askd/CLI/VyOS, M6 perf-soak) remain blocked on PR14g per the dependency tree in the status tracker.
+**Next-session entry point (after PR14f-body-2 landing 2026-05-14):** **PR14e is closed (4/4 sub-PRs landed); PR14f is in progress at 2/4 bodies.** PR14f body-2 (`080bafe7` kernel / `<pending>` workspace — member-AD encoder + source-TD active-OPCODE publish, patch 0023) wires the FQID/NEXT/FR_BIT/NL_BIT programming pass that body-1 deliberately deferred. Static helper `replic_encode_members()` (inlined by gcc — single caller, +260 B grow on `fman_pcd_replic_group_create`) walks the members array under `group->lock` (caller-held spin_lock_irqsave), writes per-member FQID at MBR_OFF_FQID 0x0 (low 24 bits) and NIA at 0x8 (`FR_BIT | (next_off >> ADDR_SHIFT)` for intermediates, `NL_BIT` alone for the last member). Publication ordering: frg_pointer at source-TD offset 0x4 first, then active OPCODE word at 0x8 LAST as the single publication point — silicon walker short-circuits on all-zero active OPCODE until that final write, so a half-built chain is never visible. Next planned work item: **PR14f-body-3** — parser HXS validator (replaces `fman_pcd_prs.c` `-EOPNOTSUPP` stub with v1.0 pass-through validator + debugfs dump) + cross-TU accessor `fman_pcd_replic_group_source_td_off()` so `cc_encode_ad()` in `fman_pcd_cc.c` can wire `FMAN_PCD_ACTION_REPLICATE` to point AD.res at `group->source_td_off` without depending on the private struct layout. After PR14f closes (body-3, body-4 = kunit), **PR14g** (the end-to-end M2 wire-up — `ask_hostcmd.c` switches from `-ENXIO` host-command path to real `fman_pcd_cc_node_add_key()` calls; first IPv4 TCP flow traverses 210 silicon) unblocks. Until M2 acceptance, all subsequent milestones (M3 flow types, M4 IPsec, M5 askd/CLI/VyOS, M6 perf-soak) remain blocked on PR14g per the dependency tree in the status tracker.
 
 ---
 
@@ -1417,16 +1417,31 @@ and a separate workspace patch under `kernel/flavors/ask/patches/`:
   the walker), preserving the inactive-state safety invariant of
   PR14d-body-1 (HMCT all-zero) and PR14e-body-1 (PLCR record all-zero).
   LOC: +266 / −39.
-- **body-2 — replicator member-AD encoder** — pending. Will program
-  per-member FQID into each 16-B member slot under `group->lock`, chain
-  members via NEXT pointer in NIA word (offset by `ADDR_SHIFT`), set
-  `FR_BIT` on each member to enable per-member fan-out, stamp `NL_BIT`
-  on the last member to terminate the chain. Function signature
-  `fman_pcd_replic_group_members_set(group, members, num)` re-validates
-  num against `group->num_members`. Final step in member-set programming
-  is `iowrite32be` of the active operationCode byte into source-TD,
-  which makes silicon walker start traversing the chain (single atomic
-  publication point — never a partial chain visible).
+- **body-2 — replicator member-AD encoder + source-TD active-OPCODE
+  publish** — patch `0023-fman-pcd-replic-body-2-member-encoder.patch`,
+  kernel-tree commit `080bafe7`, workspace commit `<pending>`. Adds
+  member-AD record offset macros `FMAN_PCD_REPLIC_MBR_OFF_FQID 0x0` and
+  `_NIA 0x8` and a static helper `replic_encode_members(group, members)`
+  (caller must hold `group->lock`; gcc inlines it — single caller, sole
+  size impact is `fman_pcd_replic_group_create` +456→+716 B = +260 B,
+  destroy unchanged at 204 B). Inside `fman_pcd_replic_group_create()`
+  body-1's `(void)members` no-op is replaced with: (1) spin_lock_irqsave
+  on `group->lock`, call `replic_encode_members()` which walks the
+  array writing each member's FQID (low 24 bits) at MBR_OFF_FQID and
+  NIA at MBR_OFF_NIA as `FR_BIT 0x08000000 | (next_member_off >> ADDR_SHIFT)`
+  for intermediates and `NL_BIT 0x10000000` (zero NEXT) for the last
+  member, spin_unlock_irqrestore; (2) `iowrite32be` of the
+  members-array MURAM offset into source-TD at SRC_OFF_FRG_POINTER 0x4;
+  (3) `iowrite32be` of the active OPCODE word (`FMAN_PCD_REPLIC_SOURCE_TD_OPCODE
+  << 24`) into source-TD at SRC_OFF_OPCODE 0x8 LAST — single publication
+  point. Silicon walker short-circuits on all-zero active OPCODE until
+  that final write, so a partial chain is never visible (same safety
+  property as PR14d-body-1 HMCT all-zero / PR14e-body-1 PLCR record
+  all-zero). LOC: +111 / −19. Authoring gotcha: body-1's `#define`
+  lines use TWO tabs between macro name and value; single-tab search
+  patterns in patch-author scripts silently fail to match and produce
+  a build error (`'FMAN_PCD_REPLIC_MBR_OFF_FQID' undeclared`) — verify
+  with `od -c` on the line, not `grep -P "\t"`.
 - **body-3 — parser HXS validator + cc REPLICATE arm wire-up** —
   pending. Replaces `fman_pcd_prs.c` ERR(-EOPNOTSUPP) stub with the
   v1.0 pass-through validator (HXS = mainline-default IPv4/IPv6/TCP/
