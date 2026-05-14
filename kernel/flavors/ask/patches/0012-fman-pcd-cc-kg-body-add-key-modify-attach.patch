@@ -50,15 +50,8 @@ whose contracts the header already documents.
 Refs: ASK2 spec v1.1, RM 8.7.4 (KGSE_CCBS), 8.7.4.2 (CC match table),
       8.7.4.3 Table 8-119 (AD record), PR14c-body-3 (commit 7ebbb4e8c).
 ---
- .../net/ethernet/freescale/fman/fman_keygen.c |  67 ++++++++
- .../freescale/fman/fman_keygen_internal.h     |  12 ++
- .../net/ethernet/freescale/fman/fman_pcd_cc.c | 145 ++++++++++++++++--
- .../freescale/fman/fman_pcd_internal.h        |  11 ++
- .../net/ethernet/freescale/fman/fman_pcd_kg.c |  68 ++++++--
- 5 files changed, 275 insertions(+), 28 deletions(-)
-
 diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
-index fe5710c43..ffd407244 100644
+index fe5710c..ffd4072 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
 @@ -579,6 +579,73 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
@@ -136,7 +129,7 @@ index fe5710c43..ffd407244 100644
   *
   * KeyGen initialization:
 diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h b/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
-index 90a29fd33..04e007586 100644
+index 90a29fd..04e0075 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
 +++ b/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
 @@ -97,6 +97,18 @@ struct fman_keygen {
@@ -159,10 +152,10 @@ index 90a29fd33..04e007586 100644
  				bool bind);
  
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
-index e3ac023aa..19007b2db 100644
+index e214440..3a59868 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
-@@ -305,7 +305,7 @@ struct fman_pcd_cc_node {
+@@ -306,7 +306,7 @@ struct fman_pcd_cc_node {
   * Cross-ref SDK fm_cc.c GetAdOfTypeResult() and NextStepAd() for the
   * silicon-fact origin of the type-bit selection table.
   */
@@ -171,9 +164,9 @@ index e3ac023aa..19007b2db 100644
  cc_encode_ad(const struct fman_pcd_action *action, void __iomem *ad)
  {
  	u32 fqid = 0, plcr = 0, nia = 0, res = 0;
-@@ -366,6 +366,22 @@ cc_encode_ad(const struct fman_pcd_action *action, void __iomem *ad)
- 	return 0;
+@@ -368,6 +368,22 @@ cc_encode_ad(const struct fman_pcd_action *action, void __iomem *ad)
  }
+ 
  
 +/**
 + * fman_pcd_cc_tree_group_table_off() - read the tree group-table MURAM offset.
@@ -194,7 +187,7 @@ index e3ac023aa..19007b2db 100644
  /**
   * fman_pcd_cc_tree_create() - allocate a new Coarse Classifier tree.
   *
-@@ -629,35 +645,140 @@ EXPORT_SYMBOL_GPL(fman_pcd_cc_node_create);
+@@ -631,35 +647,140 @@ EXPORT_SYMBOL_GPL(fman_pcd_cc_node_create);
  /**
   * fman_pcd_cc_node_add_key() - append one key+action pair to a node.
   *
@@ -230,8 +223,7 @@ index e3ac023aa..19007b2db 100644
 + * encoded by cc_encode_ad from PR14c-body-3).
   */
  int fman_pcd_cc_node_add_key(struct fman_pcd_cc_node *node,
--			     const struct fman_pcd_cc_key_entry *entry)
-+	     const struct fman_pcd_cc_key_entry *entry)
+ 			     const struct fman_pcd_cc_key_entry *entry)
  {
 +	void __iomem *match_slot, *ad_slot;
 +	size_t key_stride;
@@ -265,7 +257,7 @@ index e3ac023aa..19007b2db 100644
 +	/* Key bytes then mask bytes, both extract.size wide. */
 +	memcpy_toio(match_slot, entry->key, node->extract.size);
 +	memcpy_toio(match_slot + node->extract.size, entry->mask,
-+		    node->extract.size);
++	    node->extract.size);
 +
 +	/* In-memory mirror lets modify_next_action and debugfs work
 +	 * without iomem read-back.
@@ -311,10 +303,8 @@ index e3ac023aa..19007b2db 100644
 + * becomes a cheap-to-skip 'tombstone' row).
   */
  int fman_pcd_cc_node_modify_next_action(struct fman_pcd_cc_node *node,
--					u16 key_index,
--					const struct fman_pcd_action *action)
-+	u16 key_index,
-+	const struct fman_pcd_action *action)
+ 				u16 key_index,
+ 				const struct fman_pcd_action *action)
  {
 +	void __iomem *ad_slot;
 +	int err;
@@ -331,7 +321,7 @@ index e3ac023aa..19007b2db 100644
 +	}
 +
 +	ad_slot = node->ad_table +
-+		 (size_t)key_index * FMAN_PCD_CC_AD_ENTRY_SIZE;
++	 (size_t)key_index * FMAN_PCD_CC_AD_ENTRY_SIZE;
 +
 +	err = cc_encode_ad(action, ad_slot);
 +	if (err)
@@ -347,7 +337,7 @@ index e3ac023aa..19007b2db 100644
  EXPORT_SYMBOL_GPL(fman_pcd_cc_node_modify_next_action);
  
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
-index 77f838620..aa00cdbc7 100644
+index 77f8386..aa00cdb 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
 @@ -44,4 +44,15 @@ struct list_head *fman_pcd_get_manip_list(struct fman_pcd *pcd);
@@ -367,7 +357,7 @@ index 77f838620..aa00cdbc7 100644
 +	const struct fman_pcd_cc_tree *tree);
  #endif /* __FMAN_PCD_INTERNAL_H */
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
-index 366537be7..2b9729cb5 100644
+index 366537b..2b9729c 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
 @@ -352,24 +352,60 @@ return 0;
@@ -448,5 +438,4 @@ index 366537be7..2b9729cb5 100644
  EXPORT_SYMBOL_GPL(fman_pcd_kg_attach_cc);
  
 -- 
-2.39.5
-
+2.43.0
