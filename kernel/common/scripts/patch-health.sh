@@ -202,29 +202,80 @@ SUMMARY="$WORK_DIR/patch-health-${FLAVOR}.txt"
 } | tee "$SUMMARY"
 
 # ── Dry-run each patch ─────────────────────────────────────────────────
+#
+# Two modes per patch, decided by the parent directory:
+#
+#   parent != "patches"  → independent dry-run (--check) against the
+#       pristine baseline.  Used for vyos/board/fixes/ask which are
+#       all designed to apply standalone on a clean kernel tree.
+#
+#   parent == "patches"  → cumulative stack apply against the running
+#       tree.  ASK2's kernel/flavors/ask/patches/{0001..NNNN}-*.patch
+#       set is a logical patch series (each one expects its
+#       predecessors applied, e.g. 0005-fman-pcd-kg-prep modifies
+#       include/linux/fsl/fman_pcd.h which is *created* by
+#       0004-fman-pcd-subsystem).  Treating them as independent
+#       dry-runs produces false-positive rot.  We apply each one,
+#       commit the result, and let the next patch see the cumulative
+#       tree — exactly mirroring what build-kernel.sh does at build
+#       time after the GNU-patch→git-apply loop rewrite.
+#
+# Patch path must be absolute since `git -C $KDIR` changes the
+# git directory.
 PASS=0; FAIL=0
 FAILED=()
+STACK_DIRTY=0
 for p in "${PATCHES[@]}"; do
     parent="$(basename "$(dirname "$p")")"
     name="$parent/$(basename "$p")"
-    # Run `git apply` *inside* the kernel tree (-C "$KDIR"). The previous
-    # form (`git apply --directory=$KDIR`) ran in the outer repo's git
-    # context, which has no index for the Linux source paths and so every
-    # patch tripped "does not exist in index" before context matching could
-    # run. With -C, --3way actually queries the kernel tree's baseline
-    # commit (or transparently falls back to direct application) and
-    # reports legitimate context drift. Patch path must be absolute since
-    # we just changed working directory.
-    if out=$(git -C "$KDIR" apply --check --3way -p1 "$p" 2>&1); then
-        printf '  %s ✓%s %s\n' "$_C_GRN" "$_C_RST" "$name" | tee -a "$SUMMARY"
-        PASS=$((PASS+1))
+
+    if [[ "$parent" == "patches" ]]; then
+        # Cumulative apply mode: actually apply + commit so the next
+        # patch in the series can rely on the prior one's blobs.
+        if out=$(git -C "$KDIR" apply --3way -p1 "$p" 2>&1); then
+            git -C "$KDIR" add -A >/dev/null 2>&1 || true
+            git -C "$KDIR" -c user.email=patch-health@local \
+                -c user.name=patch-health \
+                commit -q -m "patch-health: stack apply $name" \
+                --allow-empty >/dev/null 2>&1 || true
+            STACK_DIRTY=1
+            printf '  %s ✓%s %s\n' "$_C_GRN" "$_C_RST" "$name" \
+                | tee -a "$SUMMARY"
+            PASS=$((PASS+1))
+        else
+            printf '  %s ✗%s %s\n' "$_C_RED" "$_C_RST" "$name" \
+                | tee -a "$SUMMARY"
+            printf '%s\n' "$out" | sed 's/^/      /' | tee -a "$SUMMARY"
+            FAIL=$((FAIL+1))
+            FAILED+=("$name")
+            # Reset the tree so a failing patch in the middle of the
+            # stack doesn't poison the rest of the series.
+            git -C "$KDIR" reset --hard -q >/dev/null 2>&1 || true
+            git -C "$KDIR" clean -fdq      >/dev/null 2>&1 || true
+        fi
     else
-        printf '  %s ✗%s %s\n' "$_C_RED" "$_C_RST" "$name" | tee -a "$SUMMARY"
-        printf '%s\n' "$out" | sed 's/^/      /' | tee -a "$SUMMARY"
-        FAIL=$((FAIL+1))
-        FAILED+=("$name")
+        # Independent dry-run mode: --check against the current tree.
+        if out=$(git -C "$KDIR" apply --check --3way -p1 "$p" 2>&1); then
+            printf '  %s ✓%s %s\n' "$_C_GRN" "$_C_RST" "$name" \
+                | tee -a "$SUMMARY"
+            PASS=$((PASS+1))
+        else
+            printf '  %s ✗%s %s\n' "$_C_RED" "$_C_RST" "$name" \
+                | tee -a "$SUMMARY"
+            printf '%s\n' "$out" | sed 's/^/      /' | tee -a "$SUMMARY"
+            FAIL=$((FAIL+1))
+            FAILED+=("$name")
+        fi
     fi
 done
+
+# Roll the kernel tree back to the pristine baseline so the next
+# patch-health run starts clean.  Only needed if we ever applied a
+# cumulative stack patch this run.
+if (( STACK_DIRTY )); then
+    git -C "$KDIR" reset --hard -q >/dev/null 2>&1 || true
+    git -C "$KDIR" clean -fdq      >/dev/null 2>&1 || true
+fi
 
 # ── SDK conflict report (ASK only) ─────────────────────────────────────
 if [[ "$FLAVOR" == "ask" && -d "$SDK_DIR" ]]; then
