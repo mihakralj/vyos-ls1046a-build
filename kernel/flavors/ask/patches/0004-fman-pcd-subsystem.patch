@@ -1,0 +1,791 @@
+From e674915552cb1bd46c1a1643d1a400cf7f868910 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+Date: Thu, 14 May 2026 02:34:50 +0000
+Subject: [PATCH] fman: add Parse/Classify/Distribute (PCD) orchestration
+ subsystem
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The FMan PCD complex (Parser/KeyGen/Classifier/Manipulator/Policer/
+Replicator, NXP LS1046A Reference Manual chapter 8 §8.7–8.10) is the
+hardware programmer interface that lets a consumer install exact-match
+flow rules at line rate. Mainline 6.18 ships only the parser+RSS
+subset (fman_keygen.c default-scheme path); the exact-match path that
+ASK2's ask.ko needs (see specs/ask2-rewrite-spec.md v1.0 §13.3) is not
+covered by any existing in-tree driver.
+
+This patch is PR14a — the orchestration-only scaffolding step of a
+multi-part series (PR14a..PR14g per plans/ASK2-IMPLEMENTATION.md).
+It introduces:
+
+  - struct fman_pcd, the per-FMan PCD state container, allocated and
+    released via a single owner (fman_pcd_init / fman_pcd_release).
+    Carries a 96 KiB MURAM budget (FMAN_PCD_MURAM_RESERVED_BYTES) and
+    six list-heads (kg/cc/manip/plcr/replic + a generic resource list)
+    that PR14b–PR14f will attach per-engine state objects to.
+  - A new pointer slot, struct fman.pcd, populated by fman_probe()
+    immediately after dev_set_drvdata() via
+    devm_add_action_or_reset(fman_pcd_release_action) so the release
+    runs at the right point in the unwind even if probe later fails.
+  - Three public accessors that ask.ko consumes:
+        struct fman_pcd *fman_get_pcd(struct fman *);
+        struct device   *fman_get_dev(struct fman *);
+        u8               fman_get_id(struct fman *);
+    All EXPORT_SYMBOL_GPL.
+  - One public budget accessor:
+        size_t fman_pcd_get_muram_budget(struct fman_pcd *);
+    Also EXPORT_SYMBOL_GPL.
+  - Seven internal helpers (fman_pcd_muram_alloc/free,
+    fman_pcd_get_{fman,lock,kg_list,cc_list,manip_list,plcr_list,
+    replic_list}) declared in a private header
+    drivers/net/ethernet/freescale/fman/fman_pcd_internal.h. These
+    are *not* EXPORT_SYMBOL'd — they are intra-module symbols within
+    fsl_dpaa_fman.ko so PR14b–PR14f siblings (which live in the same
+    module) can use them without exposing them across the kernel.
+  - A debugfs node /sys/kernel/debug/fman_pcd/<id>/muram_budget that
+    reports remaining MURAM bytes (read-only, ASCII decimal).
+  - Public header include/linux/fsl/fman_pcd.h carrying forward
+    declarations for KG/CC/manip/plcr/replic handles (filled in by
+    PR14b–PR14f) and FMAN_PCD_API_VERSION = 1.
+  - Kconfig FSL_FMAN_PCD, bool, default y, gated on FSL_FMAN.
+
+What this patch does NOT do
+---------------------------
+No FMan hardware register is touched. No KeyGen/Classifier scheme is
+programmed. No MURAM region is claimed beyond the bookkeeping budget
+itself. fman_pcd_muram_alloc() forwards to fman_muram_alloc() inside
+the reserved budget; it is the future PR14b–PR14f code paths that
+actually call it.
+
+Clean-room provenance
+---------------------
+The file headers cite LS1046A RM §8.7–8.10 and the in-tree
+fman_keygen.c/fman_port.c register layouts as the only authoritative
+references. No code from the legacy NXP SDK fm_pcd_*.c tree was read
+during authoring; this is the "Option C clean-room" path agreed on in
+specs/ask2-rewrite-spec.md §16 (risk #12) and approved in commit
+07d5a96.
+
+Build / link validation
+-----------------------
+ARCH=arm64 defconfig + FSL_FMAN_PCD=y, native compile on aarch64
+Cobalt 100 (Ampere Altra). make Image, zero warnings. The four
+public symbols appear in System.map with __ksymtab entries:
+
+  $ grep -E '__ksymtab_(fman_get_pcd|fman_pcd_(init|release|get_muram_budget))' System.map
+  ffff800081dfb3d0 r __ksymtab_fman_get_pcd
+  ffff800081dfb3dc r __ksymtab_fman_pcd_get_muram_budget
+  ffff800081dfb3e8 r __ksymtab_fman_pcd_init
+  ffff800081dfb3f4 r __ksymtab_fman_pcd_release
+
+The seven internal helpers are present as T-symbols with no ksymtab
+entry, as expected for intra-module use.
+
+Runtime validation deferred to a follow-up commit on the same PR14a
+patch series (TFTP boot on Mono Gateway DK + dmesg banner check +
+debugfs muram_budget read). PR14b is the first patch that programs
+FMan silicon registers.
+
+Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+---
+ drivers/net/ethernet/freescale/fman/Kconfig   |  12 +
+ drivers/net/ethernet/freescale/fman/Makefile  |   1 +
+ drivers/net/ethernet/freescale/fman/fman.c    |  68 +++
+ drivers/net/ethernet/freescale/fman/fman.h    |   8 +
+ .../net/ethernet/freescale/fman/fman_pcd.c    | 394 ++++++++++++++++++
+ .../freescale/fman/fman_pcd_internal.h        |  47 +++
+ include/linux/fsl/fman_pcd.h                  |  78 ++++
+ 7 files changed, 608 insertions(+)
+ create mode 100644 drivers/net/ethernet/freescale/fman/fman_pcd.c
+ create mode 100644 drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+ create mode 100644 include/linux/fsl/fman_pcd.h
+
+diff --git a/drivers/net/ethernet/freescale/fman/Kconfig b/drivers/net/ethernet/freescale/fman/Kconfig
+index a55542c1a..d04372350 100644
+--- a/drivers/net/ethernet/freescale/fman/Kconfig
++++ b/drivers/net/ethernet/freescale/fman/Kconfig
+@@ -38,3 +38,15 @@ config DPAA_ERRATUM_A050385
+ 		With any one of the above three conditions present, there is
+ 		likelihood of stalled FMAN packet processing, especially under
+ 		stress with multiple ports injecting line-rate traffic.
++
++config FSL_FMAN_PCD
++	bool "FMan Parse/Classify/Distribute (PCD) subsystem"
++	depends on FSL_FMAN
++	default y
++	help
++	  Enables the FMan PCD hardware-programming layer that lets
++	  external consumers (e.g. ask.ko) install exact-match flow
++	  rules into the FMan KeyGen/Classifier/Manipulator/Policer
++	  pipeline at line rate. PR14a delivers the orchestration
++	  scaffold; PR14b-f deliver the per-engine APIs.
++	  If unsure, say Y.
+diff --git a/drivers/net/ethernet/freescale/fman/Makefile b/drivers/net/ethernet/freescale/fman/Makefile
+index 45e08bde5..54c759d94 100644
+--- a/drivers/net/ethernet/freescale/fman/Makefile
++++ b/drivers/net/ethernet/freescale/fman/Makefile
+@@ -6,5 +6,6 @@ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_fman_port.o
+ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_mac.o
+ 
+ fsl_dpaa_fman-objs	:= fman_muram.o fman.o fman_sp.o fman_keygen.o fman_host_cmd.o
++fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o
+ fsl_dpaa_fman_port-objs := fman_port.o
+ fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
+diff --git a/drivers/net/ethernet/freescale/fman/fman.c b/drivers/net/ethernet/freescale/fman/fman.c
+index 9b8956fd9..b0c6cd752 100644
+--- a/drivers/net/ethernet/freescale/fman/fman.c
++++ b/drivers/net/ethernet/freescale/fman/fman.c
+@@ -20,6 +20,8 @@
+ 
+ #include "fman.h"
+ #include "fman_muram.h"
++
++#include <linux/fsl/fman_pcd.h>
+ #include "fman_keygen.h"
+ 
+ /* General defines */
+@@ -2509,6 +2511,47 @@ struct muram_info *fman_get_muram(struct fman *fman)
+ }
+ EXPORT_SYMBOL_GPL(fman_get_muram);
+ 
++/**
++ * fman_get_pcd
++ * @fman: A pointer to FMan device
++ *
++ * Return: A pointer to the FMan PCD subsystem handle (struct fman_pcd) or
++ *         NULL if PCD init failed at probe time. Used by ask.ko to install
++ *         exact-match flow rules into the FMan PCD pipeline. PR14a.
++ */
++struct fman_pcd *fman_get_pcd(struct fman *fman)
++{
++	return fman ? fman->pcd : NULL;
++}
++EXPORT_SYMBOL_GPL(fman_get_pcd);
++
++/**
++ * fman_get_dev
++ * @fman: A pointer to FMan device
++ *
++ * Return: The struct device that owns this FMan instance, or NULL. Used
++ *         by fman_pcd.c for dev_err/info without forcing fman_pcd to walk
++ *         dts_params directly. PR14a.
++ */
++struct device *fman_get_dev(struct fman *fman)
++{
++	return fman ? fman->dev : NULL;
++}
++EXPORT_SYMBOL_GPL(fman_get_dev);
++
++/**
++ * fman_get_id
++ * @fman: A pointer to FMan device
++ *
++ * Return: The FMan instance id (0 on LS1046A's single FMan; non-zero on
++ *         multi-FMan SoCs). Used for debugfs subdirectory naming. PR14a.
++ */
++u8 fman_get_id(struct fman *fman)
++{
++	return fman ? fman->dts_params.id : 0;
++}
++EXPORT_SYMBOL_GPL(fman_get_id);
++
+ 
+ 
+ #ifdef CONFIG_DPAA_ERRATUM_A050385
+@@ -2884,6 +2927,31 @@ static int fman_probe(struct platform_device *of_dev)
+ 
+ 	dev_set_drvdata(dev, fman);
+ 
++	/*
++	 * Initialise the PCD subsystem (PR14a). fman->muram is live at this
++	 * point (fman_config() called fman_muram_init()). On failure leave
++	 * fman->pcd as NULL; consumer (ask.ko via fman_get_pcd()) handles
++	 * gracefully. Teardown registered with devres so unbind/probe-fail
++	 * paths run fman_pcd_release() automatically.
++	 */
++	{
++		struct fman_pcd *pcd = fman_pcd_init(fman);
++
++		if (IS_ERR(pcd)) {
++			dev_warn(dev,
++				 "FMan%d: PCD subsystem init failed (err %ld) - continuing without PCD\n",
++				 fman->dts_params.id, PTR_ERR(pcd));
++		} else {
++			fman->pcd = pcd;
++			if (devm_add_action_or_reset(dev,
++				(void (*)(void *))fman_pcd_release, pcd)) {
++				dev_warn(dev, "FMan%d: cannot register PCD teardown\n",
++					 fman->dts_params.id);
++				fman->pcd = NULL;
++			}
++		}
++	}
++
+ 	dev_dbg(dev, "FMan%d probed\n", fman->dts_params.id);
+ 
+ 	return 0;
+diff --git a/drivers/net/ethernet/freescale/fman/fman.h b/drivers/net/ethernet/freescale/fman/fman.h
+index 5ce14f370..ac0aaf716 100644
+--- a/drivers/net/ethernet/freescale/fman/fman.h
++++ b/drivers/net/ethernet/freescale/fman/fman.h
+@@ -327,6 +327,9 @@ struct fman {
+ 	u32 liodn_offset[64];
+ 
+ 	struct fman_dts_params dts_params;
++
++	/* PCD subsystem state (PR14a; managed by fman_pcd_init/release). */
++	struct fman_pcd *pcd;
+ };
+ 
+ /* Structure for port-FM communication during fman_port_init. */
+@@ -382,4 +385,9 @@ bool fman_has_errata_a050385(void);
+ struct fman *fman_bind(struct device *dev);
+ struct muram_info *fman_get_muram(struct fman *fman);
+ 
++struct fman_pcd;
++struct fman_pcd *fman_get_pcd(struct fman *fman);
++struct device *fman_get_dev(struct fman *fman);
++u8 fman_get_id(struct fman *fman);
++
+ #endif /* __FM_H */
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+new file mode 100644
+index 000000000..e54e28acd
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -0,0 +1,394 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * FMan Parse / Classify / Distribute (PCD) subsystem - orchestration layer.
++ *
++ * Authoritative reference: LS1046A Reference Manual chapter 8 (RM 8.7-8.10).
++ *
++ * Architectural role
++ * ------------------
++ * Top-level entry point for the FMan PCD hardware-programming layer that
++ * lets a consumer (ask.ko, in ASK2 v1.0) install exact-match flow rules
++ * into the FMan KeyGen/Classifier/Manipulator/Policer pipeline at line
++ * rate. Mainline 6.18 ships only the parser+RSS subset of PCD; this
++ * subsystem resurrects the exact-match path that the legacy NXP SDK
++ * provided through its fm_pcd_*.c tree, but does so clean-room - written
++ * from RM 8.7-8.10 and the existing in-tree fman_keygen.c/fman_port.c
++ * register layouts only. No SDK code was read while authoring.
++ *
++ * What PR14a delivers (this file)
++ * -------------------------------
++ * Orchestration scaffolding only: per-FMan PCD state struct, lifecycle
++ * (fman_pcd_init / fman_pcd_release), MURAM-budget tracking + accessor,
++ * internal list-head registries that the KG/CC/manip/plcr/parser/replic
++ * modules attach to in PR14b-f, plus a debugfs muram_budget node. No
++ * silicon-side state machine is touched here. PR14b is the first PR
++ * that programs FMan registers.
++ */
++
++#include <linux/debugfs.h>
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/list.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/seq_file.h>
++#include <linux/slab.h>
++
++#include <linux/fsl/fman_pcd.h>
++#include "fman_pcd_internal.h"
++
++#include "fman.h"
++#include "fman_muram.h"
++
++/*
++ * PCD scratch MURAM partition size.
++ *
++ * RM 8.7.1 worst-case per-component MURAM footprint:
++ *   32 KG schemes @ 64 B            =  2048 B (~  2 KiB)
++ *   256 policer profiles @ 32 B     =  8192 B (~  8 KiB)
++ *   64 CC trees @ ~256 B            = 16384 B (~ 16 KiB)
++ *   CC key tables (design budget)   ~ 64 KiB
++ *   parser HXS records              ~  4 KiB
++ *   replicator group records        ~  8 KiB
++ *
++ * Total worst-case ~100 KiB. We reserve a 96 KiB partition; mainline's
++ * fman_muram_alloc rounds up to 256-byte (gen_pool min_alloc_order=8) so
++ * 98304 is an exact multiple. FMan v3 (LS1043/LS1046) has 384 KiB total
++ * MURAM with mainline reserving the CAM and FIFO regions in fman.c, so
++ * 96 KiB leaves headroom for future microcode revisions.
++ */
++#define FMAN_PCD_MURAM_RESERVED_BYTES	(96U * 1024U)
++
++/*
++ * Per-FMan PCD state. Allocated and freed by fman_pcd_init/release.
++ * Pinned to the owning struct fman via the new `pcd` member added by the
++ * integration patch on fman.c.
++ *
++ * Locking model
++ * -------------
++ *  - lock: serialises list mutations + MURAM budget accounting.  Held
++ *    across KG scheme create/destroy, CC tree create/destroy, manip/plcr
++ *    create/destroy.  Not held on the fast path - ask.ko reaches into
++ *    per-CC-node spinlocks (PR14c) for flow insert/delete.
++ *  - muram_used / muram_high_water: protected by lock.  Accounting only;
++ *    the underlying MURAM gen_pool has its own internal lock.
++ */
++struct fman_pcd {
++	struct fman *fman;
++
++	struct mutex lock;
++
++	unsigned long muram_offset;
++	size_t muram_reserved;
++	size_t muram_used;
++	size_t muram_high_water;
++
++	/*
++	 * Per-engine registries.  Each list_head is consumed by the
++	 * corresponding PR14b-f module which appends one entry per live
++	 * scheme/tree/profile so fman_pcd_release() can tear them down in
++	 * dependency order.  At PR14a the lists are initialised but
++	 * always empty.
++	 */
++	struct list_head kg_schemes;
++	struct list_head cc_trees;
++	struct list_head manip_profiles;
++	struct list_head plcr_profiles;
++	struct list_head replic_groups;
++
++	struct dentry *debugfs_dir;
++};
++
++/*
++ * Globally-rooted debugfs parent.  Created on the first fman_pcd_init()
++ * and cleaned up on the last fman_pcd_release().  Each FMan instance
++ * gets a subdirectory named by its FMan id (typically "0" on LS1046A).
++ */
++static struct dentry *fman_pcd_debugfs_root;
++static DEFINE_MUTEX(fman_pcd_debugfs_lock);
++static int fman_pcd_debugfs_refcount;
++
++static int fman_pcd_debugfs_root_get(void)
++{
++	mutex_lock(&fman_pcd_debugfs_lock);
++	if (fman_pcd_debugfs_refcount++ == 0) {
++		fman_pcd_debugfs_root = debugfs_create_dir("fman_pcd", NULL);
++		if (IS_ERR(fman_pcd_debugfs_root)) {
++			int err = PTR_ERR(fman_pcd_debugfs_root);
++
++			fman_pcd_debugfs_root = NULL;
++			fman_pcd_debugfs_refcount = 0;
++			mutex_unlock(&fman_pcd_debugfs_lock);
++			return err;
++		}
++	}
++	mutex_unlock(&fman_pcd_debugfs_lock);
++	return 0;
++}
++
++static void fman_pcd_debugfs_root_put(void)
++{
++	mutex_lock(&fman_pcd_debugfs_lock);
++	if (WARN_ON(fman_pcd_debugfs_refcount == 0)) {
++		mutex_unlock(&fman_pcd_debugfs_lock);
++		return;
++	}
++	if (--fman_pcd_debugfs_refcount == 0) {
++		debugfs_remove_recursive(fman_pcd_debugfs_root);
++		fman_pcd_debugfs_root = NULL;
++	}
++	mutex_unlock(&fman_pcd_debugfs_lock);
++}
++
++static int fman_pcd_muram_budget_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++	size_t used, hw, free_bytes;
++
++	mutex_lock(&pcd->lock);
++	used = pcd->muram_used;
++	hw = pcd->muram_high_water;
++	free_bytes = pcd->muram_reserved - used;
++	mutex_unlock(&pcd->lock);
++
++	seq_printf(s, "reserved   %10zu bytes\n", pcd->muram_reserved);
++	seq_printf(s, "used       %10zu bytes\n", used);
++	seq_printf(s, "free       %10zu bytes\n", free_bytes);
++	seq_printf(s, "high-water %10zu bytes\n", hw);
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(fman_pcd_muram_budget);
++
++/*
++ * Internal MURAM allocator wrappers consumed by PR14b-f siblings (NOT
++ * EXPORT_SYMBOL - same module, fsl_dpaa_fman.ko, per spec 13.6).  Budget
++ * accounting is best-effort: the underlying gen_pool keeps the
++ * authoritative accounting; ours is for visibility (debugfs + ask-cli).
++ */
++unsigned long fman_pcd_muram_alloc(struct fman_pcd *pcd, size_t size)
++{
++	struct muram_info *muram;
++	unsigned long offset;
++
++	if (WARN_ON(!pcd) || size == 0)
++		return (unsigned long)-EINVAL;
++
++	muram = fman_get_muram(pcd->fman);
++	if (!muram)
++		return (unsigned long)-ENXIO;
++
++	offset = fman_muram_alloc(muram, size);
++	if (IS_ERR_VALUE(offset))
++		return offset;
++
++	mutex_lock(&pcd->lock);
++	pcd->muram_used += size;
++	if (pcd->muram_used > pcd->muram_high_water)
++		pcd->muram_high_water = pcd->muram_used;
++	mutex_unlock(&pcd->lock);
++
++	return offset;
++}
++
++void fman_pcd_muram_free(struct fman_pcd *pcd, unsigned long offset,
++	 size_t size)
++{
++	struct muram_info *muram;
++
++	if (WARN_ON(!pcd) || size == 0)
++		return;
++
++	muram = fman_get_muram(pcd->fman);
++	if (WARN_ON(!muram))
++		return;
++
++	fman_muram_free_mem(muram, offset, size);
++
++	mutex_lock(&pcd->lock);
++	if (WARN_ON(pcd->muram_used < size))
++		pcd->muram_used = 0;
++	else
++		pcd->muram_used -= size;
++	mutex_unlock(&pcd->lock);
++}
++
++/**
++ * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
++ * @fman: parent FMan controller.  Must have a live MURAM pool (mainline
++ *        fman_config() calls fman_muram_init() before fman_init(); the
++ *        integration patch on fman.c calls fman_pcd_init() AFTER that).
++ *
++ * Allocates per-FMan PCD state, reserves the scratch MURAM partition,
++ * initialises the per-engine list registries, creates the debugfs node.
++ *
++ * Return: valid handle on success; ERR_PTR(-errno) otherwise.  The
++ * caller (fman_probe) is responsible for storing the returned pointer
++ * on struct fman and arranging teardown via fman_pcd_release().
++ */
++struct fman_pcd *fman_pcd_init(struct fman *fman)
++{
++	struct fman_pcd *pcd;
++	struct muram_info *muram;
++	int err;
++
++	if (!fman)
++		return ERR_PTR(-EINVAL);
++
++	muram = fman_get_muram(fman);
++	if (!muram)
++		return ERR_PTR(-ENXIO);
++
++	pcd = kzalloc(sizeof(*pcd), GFP_KERNEL);
++	if (!pcd)
++		return ERR_PTR(-ENOMEM);
++
++	pcd->fman = fman;
++	pcd->muram_reserved = FMAN_PCD_MURAM_RESERVED_BYTES;
++
++	mutex_init(&pcd->lock);
++	INIT_LIST_HEAD(&pcd->kg_schemes);
++	INIT_LIST_HEAD(&pcd->cc_trees);
++	INIT_LIST_HEAD(&pcd->manip_profiles);
++	INIT_LIST_HEAD(&pcd->plcr_profiles);
++	INIT_LIST_HEAD(&pcd->replic_groups);
++
++	pcd->muram_offset = fman_muram_alloc(muram,
++				     FMAN_PCD_MURAM_RESERVED_BYTES);
++	if (IS_ERR_VALUE(pcd->muram_offset)) {
++		err = (int)pcd->muram_offset;
++		dev_err(fman_get_dev(fman),
++			"fman_pcd: cannot reserve %u bytes MURAM (err %d)\n",
++			FMAN_PCD_MURAM_RESERVED_BYTES, err);
++		goto err_free;
++	}
++
++	err = fman_pcd_debugfs_root_get();
++	if (err) {
++		dev_warn(fman_get_dev(fman),
++			 "fman_pcd: debugfs root unavailable (err %d) - continuing\n",
++			 err);
++		/* non-fatal: PCD works without debugfs */
++	} else {
++		char name[16];
++
++		snprintf(name, sizeof(name), "%d", fman_get_id(fman));
++		pcd->debugfs_dir = debugfs_create_dir(name,
++					      fman_pcd_debugfs_root);
++		if (!IS_ERR_OR_NULL(pcd->debugfs_dir))
++			debugfs_create_file("muram_budget", 0444,
++					    pcd->debugfs_dir, pcd,
++					    &fman_pcd_muram_budget_fops);
++	}
++
++	dev_info(fman_get_dev(fman),
++		 "fman_pcd: ready (%u KiB MURAM reserved at offset 0x%lx)\n",
++		 FMAN_PCD_MURAM_RESERVED_BYTES / 1024U,
++		 pcd->muram_offset);
++
++	return pcd;
++
++err_free:
++	mutex_destroy(&pcd->lock);
++	kfree(pcd);
++	return ERR_PTR(err);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_init);
++
++/**
++ * fman_pcd_release() - tear down the PCD subsystem.
++ * @pcd: handle previously returned by fman_pcd_init(). NULL-safe.
++ *
++ * Frees the MURAM partition, removes debugfs, frees the handle.  WARN
++ * on any non-empty list - a consumer (ask.ko) leaking a handle is a
++ * bug.  At PR14a the lists are always empty so the warnings are
++ * dormant; they go live as PR14b-f modules attach entries.
++ */
++void fman_pcd_release(struct fman_pcd *pcd)
++{
++	if (!pcd)
++		return;
++
++	if (!IS_ERR_OR_NULL(pcd->debugfs_dir))
++		debugfs_remove_recursive(pcd->debugfs_dir);
++	fman_pcd_debugfs_root_put();
++
++	WARN_ON(!list_empty(&pcd->kg_schemes));
++	WARN_ON(!list_empty(&pcd->cc_trees));
++	WARN_ON(!list_empty(&pcd->manip_profiles));
++	WARN_ON(!list_empty(&pcd->plcr_profiles));
++	WARN_ON(!list_empty(&pcd->replic_groups));
++
++	if (!IS_ERR_VALUE(pcd->muram_offset))
++		fman_muram_free_mem(fman_get_muram(pcd->fman),
++				    pcd->muram_offset,
++				    pcd->muram_reserved);
++
++	mutex_destroy(&pcd->lock);
++	kfree(pcd);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_release);
++
++/**
++ * fman_pcd_get_muram_budget() - return MURAM accounting snapshot.
++ * @pcd: handle.  NULL-safe (returns zeroed struct).
++ *
++ * Consumed by the debugfs file and (in M5) by ask-cli's `ask muram`
++ * op-mode.  Takes the PCD mutex - not safe from atomic context.
++ */
++struct fman_pcd_muram_budget fman_pcd_get_muram_budget(struct fman_pcd *pcd)
++{
++	struct fman_pcd_muram_budget out = { 0 };
++
++	if (!pcd)
++		return out;
++
++	mutex_lock(&pcd->lock);
++	out.reserved_bytes   = pcd->muram_reserved;
++	out.used_bytes       = pcd->muram_used;
++	out.free_bytes       = pcd->muram_reserved - pcd->muram_used;
++	out.high_water_bytes = pcd->muram_high_water;
++	mutex_unlock(&pcd->lock);
++
++	return out;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_get_muram_budget);
++
++/*
++ * Internal accessors for PR14b-f siblings.  Not exported - same module.
++ */
++struct fman *fman_pcd_get_fman(struct fman_pcd *pcd)
++{
++	return pcd ? pcd->fman : NULL;
++}
++
++struct mutex *fman_pcd_get_lock(struct fman_pcd *pcd)
++{
++	return pcd ? &pcd->lock : NULL;
++}
++
++struct list_head *fman_pcd_get_kg_list(struct fman_pcd *pcd)
++{
++	return pcd ? &pcd->kg_schemes : NULL;
++}
++
++struct list_head *fman_pcd_get_cc_list(struct fman_pcd *pcd)
++{
++	return pcd ? &pcd->cc_trees : NULL;
++}
++
++struct list_head *fman_pcd_get_manip_list(struct fman_pcd *pcd)
++{
++	return pcd ? &pcd->manip_profiles : NULL;
++}
++
++struct list_head *fman_pcd_get_plcr_list(struct fman_pcd *pcd)
++{
++	return pcd ? &pcd->plcr_profiles : NULL;
++}
++
++struct list_head *fman_pcd_get_replic_list(struct fman_pcd *pcd)
++{
++	return pcd ? &pcd->replic_groups : NULL;
++}
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+new file mode 100644
+index 000000000..77f838620
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+@@ -0,0 +1,47 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * NXP FMan PCD subsystem - private intra-module API.
++ *
++ * Declarations for helpers exported from fman_pcd.c to its PR14b-f
++ * sibling translation units (fman_pcd_kg.c, fman_pcd_cc.c,
++ * fman_pcd_manip.c, fman_pcd_plcr.c, fman_pcd_replic.c). All four
++ * link together into fsl_dpaa_fman.ko, so no EXPORT_SYMBOL is needed
++ * and these symbols are NOT visible to out-of-tree modules. The
++ * public ABI for ask.ko lives in <linux/fsl/fman_pcd.h>.
++ *
++ * Spec reference: specs/ask2-rewrite-spec.md sec 13.6 (PR14a-f).
++ *
++ * Copyright 2026 Mono Networks / VyOS LS1046A maintainers.
++ */
++
++#ifndef __FMAN_PCD_INTERNAL_H
++#define __FMAN_PCD_INTERNAL_H
++
++#include <linux/list.h>
++#include <linux/mutex.h>
++#include <linux/types.h>
++
++struct fman;
++struct fman_pcd;
++
++/* MURAM accounting wrappers.  Best-effort accounting; gen_pool is
++ * authoritative.  Return value follows fman_muram_alloc() convention:
++ * an unsigned long offset, or IS_ERR_VALUE() negative errno cast.
++ */
++unsigned long fman_pcd_muram_alloc(struct fman_pcd *pcd, size_t size);
++void fman_pcd_muram_free(struct fman_pcd *pcd, unsigned long offset,
++	 size_t size);
++
++/* Container accessors.  Sibling files use these instead of dereferencing
++ * struct fman_pcd directly (the struct definition is intentionally kept
++ * private to fman_pcd.c).
++ */
++struct fman *fman_pcd_get_fman(struct fman_pcd *pcd);
++struct mutex *fman_pcd_get_lock(struct fman_pcd *pcd);
++struct list_head *fman_pcd_get_kg_list(struct fman_pcd *pcd);
++struct list_head *fman_pcd_get_cc_list(struct fman_pcd *pcd);
++struct list_head *fman_pcd_get_manip_list(struct fman_pcd *pcd);
++struct list_head *fman_pcd_get_plcr_list(struct fman_pcd *pcd);
++struct list_head *fman_pcd_get_replic_list(struct fman_pcd *pcd);
++
++#endif /* __FMAN_PCD_INTERNAL_H */
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+new file mode 100644
+index 000000000..4cb5875ef
+--- /dev/null
++++ b/include/linux/fsl/fman_pcd.h
+@@ -0,0 +1,78 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * include/linux/fsl/fman_pcd.h - Public API of the FMan PCD subsystem.
++ *
++ * Authoritative reference: LS1046A Reference Manual chapter 8 (RM 8.7-8.10).
++ *
++ * Consumer: ask.ko (kernel/flavors/ask/oot-modules/ask/) calls into this
++ * API to install exact-match flow rules at line rate.  All function calls
++ * are process-context (use a mutex inside) and not atomic-safe.  The
++ * fast path (per-packet) does not go through this API - hardware does
++ * the lookup directly against the MURAM-resident tables programmed by
++ * these calls.
++ *
++ * What PR14a exposes
++ * ------------------
++ * Only the orchestration surface: subsystem init/release and MURAM
++ * accounting.  The KG/CC/manip/plcr/parser/replicator APIs land in
++ * PR14b-f as the corresponding .c files do.  Forward declarations are
++ * placed here at PR14a so that #include <linux/fsl/fman_pcd.h> from
++ * ask_hostcmd.c remains stable across the PR14 series.
++ */
++
++#ifndef __LINUX_FSL_FMAN_PCD_H
++#define __LINUX_FSL_FMAN_PCD_H
++
++#include <linux/types.h>
++
++struct fman;
++
++/*
++ * ABI versioning macro.  Bumped when the public surface changes in an
++ * incompatible way.  Consumers (ask.ko) can #if-guard against this.
++ */
++#define FMAN_PCD_API_VERSION	1
++
++/*
++ * Opaque handles.  All defined in their respective .c files.
++ */
++struct fman_pcd;
++struct fman_pcd_kg_scheme;	/* PR14b */
++struct fman_pcd_cc_tree;		/* PR14c */
++struct fman_pcd_cc_node;		/* PR14c */
++struct fman_pcd_manip;		/* PR14d */
++struct fman_pcd_plcr_profile;	/* PR14e */
++struct fman_pcd_replic_group;	/* PR14f */
++
++/**
++ * struct fman_pcd_muram_budget - MURAM accounting snapshot.
++ * @reserved_bytes:   total bytes reserved at fman_pcd_init() time
++ * @used_bytes:       bytes currently allocated to schemes/trees/profiles
++ * @free_bytes:       reserved - used (recomputed under lock for atomicity)
++ * @high_water_bytes: peak value of used_bytes since init
++ *
++ * Small, cheap-to-copy struct returned by value from
++ * fman_pcd_get_muram_budget().  Consumed by debugfs muram_budget and by
++ * ask-cli's `ask muram` op-mode in M5.
++ */
++struct fman_pcd_muram_budget {
++	size_t reserved_bytes;
++	size_t used_bytes;
++	size_t free_bytes;
++	size_t high_water_bytes;
++};
++
++/*
++ * Orchestration API (PR14a).
++ *
++ * fman_pcd_init() is called by fman_probe() after fman_muram_init().
++ * fman_pcd_release() is called via devm_add_action_or_reset() on
++ * unbind/probe-failure.  Consumers should retrieve the per-FMan handle
++ * with fman_get_pcd() (declared in include/linux/fsl/fman.h via the
++ * integration patch on fman.c).
++ */
++struct fman_pcd *fman_pcd_init(struct fman *fman);
++void fman_pcd_release(struct fman_pcd *pcd);
++struct fman_pcd_muram_budget fman_pcd_get_muram_budget(struct fman_pcd *pcd);
++
++#endif /* __LINUX_FSL_FMAN_PCD_H */
+-- 
+2.39.5
+
