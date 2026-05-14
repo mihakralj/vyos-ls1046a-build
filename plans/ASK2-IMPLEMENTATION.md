@@ -49,7 +49,7 @@ architecture source-of-truth. When the two disagree, **the spec wins**
 | 14e-prep | M2.5e-prep — plcr public API stub (`fman_pcd_plcr.c`) + `fman_pcd_plcr_params` (CIR/CBS/EIR/EBS, color mode) in `<linux/fsl/fman_pcd.h>` | ask20 | landed |
 | 14e-body | M2.5e-body — plcr real trTCM profile programming per RM 8.7.6, runtime rate update, kunit. Split into sub-PRs (body-1+ TBD) following the PR14d cadence. | ask20 | 🟡 **in progress (4/N)** — body-1 (`ccdf040`, patch 0018, struct + create/destroy MURAM bodies), body-2 (`dfc7f64`, patch 0019, trTCM rate encoder + real create/set_rates), body-3 (`2cb2779`, patch 0020, `cc_encode_ad` POLICE arm + public `fman_pcd_plcr_profile_get_id()` accessor), body-4 (`1042e8d`, patch 0021, KUnit suite for plcr encoders + record layout + POLICE-arm opaque failure-mode tests) |
 | 14f-prep | M2.5f-prep — replicator + parser public API stubs (`fman_pcd_replic.c`, `fman_pcd_prs.c`) + `fman_pcd_replic_member` in `<linux/fsl/fman_pcd.h>` | ask20 | landed |
-| 14f-body | M2.5f-body — replicator real MURAM group table (RM 8.7.7), parser HXS pass-through config (RM 8.7.2), kunit | ask20 | 🟡 in progress (1/4) — body-1 `<pending>` (replic create/destroy MURAM, patch 0022); body-2 (member-AD encoder) / body-3 (prs validator + cc REPLICATE arm) / body-4 (kunit) pending |
+| 14f-body | M2.5f-body — replicator real MURAM group table (RM 8.7.7), parser HXS pass-through config (RM 8.7.2), kunit | ask20 | 🟡 in progress (1/4) — body-1 `1a42ddb` (kernel) / `8fdafc7` (workspace) — replic create/destroy MURAM, patch 0022; body-2 (member-AD encoder) / body-3 (prs validator + cc REPLICATE arm) / body-4 (kunit) pending |
 | 14g | M2.5g — End-to-end wire-up — `ask_hostcmd.c` calls PCD API; first IPv4 TCP flow traverses silicon | ask20 | blocked on 14c-body + 14d-body + 14e-body + 14f-body |
 | 15  | M3.x — remaining flow types (NAT/PAT/v6/bridge)  | ask20  | blocked on PR14g |
 | 16  | M4.x — `ask_xfrm.c` + CAAM packet-mode IPsec     | ask20  | blocked on PR14g |
@@ -1400,7 +1400,7 @@ and a separate workspace patch under `kernel/flavors/ask/patches/`:
 
 - **body-1 — `fman_pcd_replic` group create/destroy MURAM bodies** —
   patch `0022-fman-pcd-replic-body-1-create-destroy.patch`, kernel-tree
-  commit `<pending>`. Defines `struct fman_pcd_replic_group` (private
+  commit `1a42ddb`, workspace commit `8fdafc7`. Defines `struct fman_pcd_replic_group` (private
   to TU), allocates source-TD (16 B) + members array (num_members × 16 B)
   via `fman_pcd_muram_alloc()`, `memset_io` zeros both regions, stamps
   source-TD type field with `FMAN_PCD_REPLIC_SOURCE_TD_OPCODE` (0x75)
