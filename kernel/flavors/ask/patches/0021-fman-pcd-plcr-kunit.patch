@@ -1,0 +1,337 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
+index 40a7f473d..75e3d86b0 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
+@@ -760,3 +760,15 @@ u16 fman_pcd_plcr_profile_id_internal(
+ {
+ 	return fman_pcd_plcr_profile_get_id(prof);
+ }
++
++#if IS_ENABLED(CONFIG_FSL_FMAN_PCD_KUNIT_TEST)
++/*
++ * KUnit suite lives in tests/fman_pcd_plcr_test.c and is #include'd
++ * here so the test functions have static-scope access to the
++ * plcr_encode_*() / plcr_build_mode() / plcr_program_record() helpers
++ * and to the struct fman_pcd_plcr_profile layout.  Mirrors the
++ * trailer-include idiom established by fman_pcd_cc.c (PR14c-body-5,
++ * patch 0013) and fman_pcd_manip.c (PR14d-body-4, patch 0017).
++ */
++#include "tests/fman_pcd_plcr_test.c"
++#endif /* CONFIG_FSL_FMAN_PCD_KUNIT_TEST */
+diff --git a/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
+index 090b96dee..221417f97 100644
+--- a/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
++++ b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_cc_test.c
+@@ -212,6 +212,46 @@ static void cc_encode_ad_manipulate_test(struct kunit *test)
+ 	KUNIT_EXPECT_EQ(test, cc_encode_ad(&act, ad), -EINVAL);
+ }
+ 
++/* ---- TEST: POLICE arm rejects NULL profile -------------------- */
++/*
++ * The struct fman_pcd_plcr_profile is opaque from the cc TU, so the
++ * happy-path byte-perfect POLICE encode lives in tests/fman_pcd_plcr_test.c.
++ * Here we only verify the two failure modes that are reachable without
++ * needing the struct's internals: NULL profile (the 0xffff sentinel
++ * comes back from fman_pcd_plcr_profile_id_internal()) and zero post-
++ * meter fqid.  Both must yield -EINVAL.
++ */
++static void cc_encode_ad_police_null_profile_test(struct kunit *test)
++{
++	void __iomem *ad = ad_scratch_alloc(test);
++	struct fman_pcd_action act = {
++		.type = FMAN_PCD_ACTION_POLICE,
++		.police = { .profile = NULL, .next_fqid = 1 },
++	};
++
++	KUNIT_EXPECT_EQ(test, cc_encode_ad(&act, ad), -EINVAL);
++}
++
++/* ---- TEST: POLICE arm rejects zero next_fqid ------------------ */
++static void cc_encode_ad_police_zero_fqid_test(struct kunit *test)
++{
++	void __iomem *ad = ad_scratch_alloc(test);
++	/*
++	 * We cannot reach into struct fman_pcd_plcr_profile from here, but
++	 * we CAN exercise the zero-next_fqid early reject because that
++	 * check fires before the profile pointer is dereferenced.  Use a
++	 * non-NULL bogus pointer that the validator never touches.
++	 */
++	struct fman_pcd_plcr_profile *bogus =
++		(struct fman_pcd_plcr_profile *)0x1;
++	struct fman_pcd_action act = {
++		.type = FMAN_PCD_ACTION_POLICE,
++		.police = { .profile = bogus, .next_fqid = 0 },
++	};
++
++	KUNIT_EXPECT_EQ(test, cc_encode_ad(&act, ad), -EINVAL);
++}
++
+ /* ---- TEST: NULL args return -EINVAL ----------------------------- */
+ static void cc_encode_ad_null_args_test(struct kunit *test)
+ {
+@@ -279,6 +319,8 @@ static struct kunit_case fman_pcd_cc_test_cases[] = {
+ 	KUNIT_CASE(cc_encode_ad_next_cc_null_test),
+ 	KUNIT_CASE(cc_encode_ad_replicate_test),
+ 	KUNIT_CASE(cc_encode_ad_manipulate_test),
++	KUNIT_CASE(cc_encode_ad_police_null_profile_test),
++	KUNIT_CASE(cc_encode_ad_police_zero_fqid_test),
+ 	KUNIT_CASE(cc_encode_ad_null_args_test),
+ 	KUNIT_CASE(cc_encode_ad_byte_layout_test),
+ 	{}
+diff --git a/drivers/net/ethernet/freescale/fman/tests/fman_pcd_plcr_test.c b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_plcr_test.c
+new file mode 100644
+index 000000000..2f35bd05b
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_plcr_test.c
+@@ -0,0 +1,251 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * KUnit suite for the FMan PCD Policer (PLCR) encoders + MURAM record
++ * programming + the POLICE action-descriptor arm landed in PR14e-body-3.
++ *
++ * This file is #include'd from fman_pcd_plcr.c under
++ * CONFIG_FSL_FMAN_PCD_KUNIT_TEST so the tests reach the static
++ * plcr_encode_rate_bps() / plcr_encode_burst_bytes() / plcr_build_mode()
++ * / plcr_program_record() helpers and the struct fman_pcd_plcr_profile
++ * layout directly.  Coverage:
++ *
++ *   - rate encoder zero-bps                    (CIR=0 -> exp=0,mant=0)
++ *   - rate encoder saturation                  (bps overflow -> 0xFFFF saturate)
++ *   - burst encoder rounding                   (ceil to BURST_UNIT_BYTES=256)
++ *   - mode builder COLOR_BLIND, no EIR         (trTCM, PIR_DISABLED)
++ *   - mode builder COLOR_AWARE, with EIR       (trTCM, COLOR_AWARE, no PIR_DIS)
++ *   - program_record byte-perfect MURAM layout (RM 8.7.6 4-BE32-words)
++ *   - get_id sentinel                          (NULL prof -> 0xffff)
++ *   - internal-accessor id passthrough         (id from struct -> internal helper)
++ *
++ * The POLICE-arm byte-perfect happy-path encode CANNOT live in this
++ * file because cc_encode_ad() is static to fman_pcd_cc.c (the trailer
++ * #include scope is per-TU).  Opaque-pointer POLICE tests (NULL
++ * profile, zero next_fqid) live in tests/fman_pcd_cc_test.c instead.
++ * Byte-perfect POLICE encoding is covered indirectly: the AD layout
++ * macros are pinned by cc_encode_ad_byte_layout_test in cc_test
++ * (FORWARD_FQ path uses the same iowrite32be slots), and the
++ * profile-id accessor used by the POLICE arm is pinned here.
++ *
++ * Authoritative reference: LS1046A RM 8.7.6 (Policer profile layout,
++ * rate exp+mant encoding, trTCM mode word) and RM 8.7.4.3 Table 8-119
++ * (the AD slot fields filled in by the POLICE arm in fman_pcd_cc.c).
++ *
++ * Tests construct stub struct fman_pcd_plcr_profile values on the stack
++ * with .record pointing at a kunit_kzalloc'd 16-byte scratch buffer
++ * cast void __iomem __force *, then call the static encoders and read
++ * back via ioread32be.  This is the same scaffolding idiom used by
++ * fman_pcd_manip_test.c (PR14d-body-4) and fman_pcd_cc_test.c (PR14c-body-5).
++ */
++#include <kunit/test.h>
++#include <linux/io.h>
++#include <linux/kernel.h>
++#include <linux/types.h>
++
++/* Allocate a 16-byte profile-record scratch buffer. */
++static void __iomem *plcr_scratch_alloc(struct kunit *test)
++{
++	void *buf = kunit_kzalloc(test, FMAN_PCD_PLCR_PROFILE_SIZE, GFP_KERNEL);
++
++	KUNIT_ASSERT_NOT_NULL(test, buf);
++	return (void __iomem __force *)buf;
++}
++
++static u32 plcr_read_be32(void __iomem *rec, unsigned int off)
++{
++	return ioread32be(rec + off);
++}
++
++/* ---- TEST: rate encoder zero-bps -------------------------------- */
++/*
++ * bps=0 must encode as (exp=0,mant=0).  This is the boundary value
++ * that the rate-encoder ALWAYS shortcircuits before the loop --
++ * anyone replacing the early-exit with a "natural" mantissa derivation
++ * would feed mant=1<<63 / fman_clk_hz through the loop and the encoded
++ * field would no longer be all-zeros.  trTCM with cir_word==0 is the
++ * silicon-fact "drop everything" mode the spec relies on for the
++ * default-no-traffic placeholder profile, so an all-zeros encoding
++ * MUST stay all-zeros.
++ */
++static void plcr_encode_rate_zero_test(struct kunit *test)
++{
++	KUNIT_EXPECT_EQ(test, plcr_encode_rate_bps(0, 300000000), 0u);
++}
++
++/* ---- TEST: rate encoder saturation ------------------------------ */
++/*
++ * Excess bps must saturate to the maximum field value
++ * (exp_mask | mant_mask).  This guards against silent wraparound on a
++ * 64-bit-bps -> 19-bit-field conversion: a wraparound would land in
++ * the silicon as a tiny rate, the policer would drop nearly all
++ * traffic, and the failure would look like "VPP doesn't forward".
++ */
++static void plcr_encode_rate_saturate_test(struct kunit *test)
++{
++	/* 1 Tbps with a tiny 1 MHz clock -> impossible to encode -> saturate. */
++	u32 r = plcr_encode_rate_bps(1000000000000ull, 1000000);
++
++	KUNIT_EXPECT_EQ(test, r,
++			FMAN_PCD_PLCR_RATE_EXP_MASK | FMAN_PCD_PLCR_RATE_MANT_MASK);
++}
++
++/* ---- TEST: burst encoder rounding ------------------------------- */
++/*
++ * The silicon's burst-size field is in units of 256 bytes
++ * (FMAN_PCD_PLCR_BURST_UNIT_BYTES per RM Table 8-169).  A request
++ * for 1 byte must round UP to 1 unit (== 256 bytes), 257 must round
++ * up to 2 units, 256*100 must encode as exactly 100 units.  This is
++ * the most common silicon-fact mismatch when somebody "optimizes" the
++ * formula: the kernel keeps requesting 1-byte bursts and the policer
++ * drops everything immediately.
++ */
++static void plcr_encode_burst_round_test(struct kunit *test)
++{
++	KUNIT_EXPECT_EQ(test, plcr_encode_burst_bytes(0), 0);
++	KUNIT_EXPECT_EQ(test, plcr_encode_burst_bytes(1), 1);
++	KUNIT_EXPECT_EQ(test, plcr_encode_burst_bytes(256), 1);
++	KUNIT_EXPECT_EQ(test, plcr_encode_burst_bytes(257), 2);
++	KUNIT_EXPECT_EQ(test, plcr_encode_burst_bytes(256 * 100), 100);
++}
++
++/* ---- TEST: mode builder COLOR_BLIND, no EIR --------------------- */
++/*
++ * trTCM is always on (RM 8.7.6 paragraph 6 -- the FMan v3 silicon
++ * implements only the trTCM algorithm, the srTCM mode bit exists in
++ * the layout but is rejected by the hardware).  When eir_bps==0 the
++ * PIR_DISABLED bit MUST be set so the silicon does NOT compute a
++ * peak-bucket fill (without that bit, the policer reads the all-zeros
++ * EIR_EBS word as "rate==0 for EIR" and starves the green bucket too).
++ */
++static void plcr_build_mode_blind_no_eir_test(struct kunit *test)
++{
++	u16 m = plcr_build_mode(FMAN_PCD_PLCR_COLOR_BLIND, 0);
++
++	KUNIT_EXPECT_EQ(test, m & FMAN_PCD_PLCR_PMR_ALG_TRTCM,
++			FMAN_PCD_PLCR_PMR_ALG_TRTCM);
++	KUNIT_EXPECT_EQ(test, m & FMAN_PCD_PLCR_PMR_COLOR_AWARE, 0);
++	KUNIT_EXPECT_EQ(test, m & FMAN_PCD_PLCR_PMR_PIR_DISABLED,
++			FMAN_PCD_PLCR_PMR_PIR_DISABLED);
++}
++
++/* ---- TEST: mode builder COLOR_AWARE, with EIR ------------------- */
++/*
++ * COLOR_AWARE means the policer trusts incoming-color metadata
++ * (carried on the FD frame-management cluster word).  When eir_bps>0
++ * the PIR_DISABLED bit MUST stay cleared so the silicon services the
++ * peak bucket.
++ */
++static void plcr_build_mode_aware_eir_test(struct kunit *test)
++{
++	u16 m = plcr_build_mode(FMAN_PCD_PLCR_COLOR_AWARE, 200000000);
++
++	KUNIT_EXPECT_EQ(test, m & FMAN_PCD_PLCR_PMR_ALG_TRTCM,
++			FMAN_PCD_PLCR_PMR_ALG_TRTCM);
++	KUNIT_EXPECT_EQ(test, m & FMAN_PCD_PLCR_PMR_COLOR_AWARE,
++			FMAN_PCD_PLCR_PMR_COLOR_AWARE);
++	KUNIT_EXPECT_EQ(test, m & FMAN_PCD_PLCR_PMR_PIR_DISABLED, 0);
++}
++
++/* ---- TEST: program_record byte-perfect MURAM layout ------------- */
++/*
++ * RM 8.7.6 fixes the 16-byte profile-record layout as four BE32 words:
++ *   offset 0x0 = MODE  (mode_word << 16)
++ *   offset 0x4 = CIR   (exp+mant rate encoding)
++ *   offset 0x8 = CBS   (burst mantissa << RATE_MANT_SHIFT)
++ *   offset 0xc = EIR|EBS (upper half = EIR-as-u16-from-encoded>>16, lower = ebs)
++ *
++ * A typo that swaps CIR with CBS would silently misprogram every
++ * profile and the failure would look like "policer never meters"
++ * because the rate would be parsed as a burst.  This test is the
++ * regression canary.
++ */
++static void plcr_program_record_layout_test(struct kunit *test)
++{
++	void __iomem *rec = plcr_scratch_alloc(test);
++	struct fman_pcd_plcr_profile stub = {
++		.profile_id = 0x42,
++		.color_mode = FMAN_PCD_PLCR_COLOR_BLIND,
++		.cir_bps    = 100000000ull,  /* 100 Mbps */
++		.cbs_bytes  = 4096,          /* 16 burst units */
++		.eir_bps    = 0,             /* PIR disabled */
++		.ebs_bytes  = 0,
++		.record     = rec,
++	};
++	u32 w0, w1, w2, w3;
++
++	spin_lock_init(&stub.lock);
++	plcr_program_record(&stub, 300000000);  /* 300 MHz fman_clk */
++
++	w0 = plcr_read_be32(rec, FMAN_PCD_PLCR_OFF_MODE);
++	w1 = plcr_read_be32(rec, FMAN_PCD_PLCR_OFF_CIR);
++	w2 = plcr_read_be32(rec, FMAN_PCD_PLCR_OFF_CBS);
++	w3 = plcr_read_be32(rec, FMAN_PCD_PLCR_OFF_EIR_EBS);
++
++	/* Word 0 lower half must be reserved-zero. */
++	KUNIT_EXPECT_EQ(test, w0 & 0xffffu, 0u);
++	/* Word 0 upper half = mode with trTCM+PIR_DIS set (color-blind, no EIR). */
++	KUNIT_EXPECT_EQ(test, (w0 >> 16) & FMAN_PCD_PLCR_PMR_ALG_TRTCM,
++			FMAN_PCD_PLCR_PMR_ALG_TRTCM);
++	KUNIT_EXPECT_EQ(test, (w0 >> 16) & FMAN_PCD_PLCR_PMR_PIR_DISABLED,
++			FMAN_PCD_PLCR_PMR_PIR_DISABLED);
++
++	/* Word 1: CIR is non-zero for a non-zero rate. */
++	KUNIT_EXPECT_NE(test, w1, 0u);
++	/* Mantissa lives in bits[28:13]; exponent in bits[31:29]; rest reserved. */
++	KUNIT_EXPECT_EQ(test, w1 & ~(FMAN_PCD_PLCR_RATE_EXP_MASK |
++				     FMAN_PCD_PLCR_RATE_MANT_MASK), 0u);
++
++	/* Word 2: CBS is (16 units) << RATE_MANT_SHIFT. */
++	KUNIT_EXPECT_EQ(test, w2, 16u << FMAN_PCD_PLCR_RATE_MANT_SHIFT);
++
++	/* Word 3: EIR upper half == 0 (no EIR), EBS lower == 0. */
++	KUNIT_EXPECT_EQ(test, w3, 0u);
++}
++
++/* ---- TEST: get_id sentinel -------------------------------------- */
++/*
++ * fman_pcd_plcr_profile_get_id(NULL) must return the 0xffff sentinel
++ * so cc_encode_ad's POLICE arm can distinguish a NULL handle from the
++ * well-known catch-all silicon id 0 (PR14e-body-3 invariant).
++ */
++static void plcr_get_id_null_test(struct kunit *test)
++{
++	KUNIT_EXPECT_EQ(test, fman_pcd_plcr_profile_get_id(NULL), 0xffffu);
++}
++
++/* ---- TEST: internal-accessor id passthrough --------------------- */
++/*
++ * fman_pcd_plcr_profile_id_internal() is the cross-TU helper called
++ * from fman_pcd_cc.c::cc_encode_ad()'s POLICE arm.  It MUST return
++ * the same value as the public get_id() and MUST NOT mutate the
++ * struct.  Anyone reordering the struct layout in a future refactor
++ * would break the accessor and this test catches that immediately.
++ */
++static void plcr_id_internal_passthrough_test(struct kunit *test)
++{
++struct fman_pcd_plcr_profile prof = { .profile_id = 0x00A5 };
++
++KUNIT_EXPECT_EQ(test, fman_pcd_plcr_profile_id_internal(&prof),
++0x00A5u);
++KUNIT_EXPECT_EQ(test, fman_pcd_plcr_profile_get_id(&prof), 0x00A5u);
++KUNIT_EXPECT_EQ(test, prof.profile_id, 0x00A5u);
++}
++
++static struct kunit_case fman_pcd_plcr_test_cases[] = {
++KUNIT_CASE(plcr_encode_rate_zero_test),
++KUNIT_CASE(plcr_encode_rate_saturate_test),
++KUNIT_CASE(plcr_encode_burst_round_test),
++KUNIT_CASE(plcr_build_mode_blind_no_eir_test),
++KUNIT_CASE(plcr_build_mode_aware_eir_test),
++KUNIT_CASE(plcr_program_record_layout_test),
++KUNIT_CASE(plcr_get_id_null_test),
++KUNIT_CASE(plcr_id_internal_passthrough_test),
++{}
++};
++
++static struct kunit_suite fman_pcd_plcr_test_suite = {
++	.name = "fman_pcd_plcr",
++	.test_cases = fman_pcd_plcr_test_cases,
++};
++
++kunit_test_suite(fman_pcd_plcr_test_suite);
