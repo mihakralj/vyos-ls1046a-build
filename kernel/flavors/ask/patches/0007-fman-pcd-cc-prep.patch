@@ -1,0 +1,483 @@
+From 965b9d9f4890c5df26dab413200c812ea3ed5ade Mon Sep 17 00:00:00 2001
+From: ASK2 PR14c-prep <ask2@vyos.local>
+Date: Thu, 14 May 2026 03:13:53 +0000
+Subject: [PATCH] fman/pcd: Coarse Classifier public API stub (PR14c-prep)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+PR14c-prep of the ASK2 v1.0 PR14 series. Adds the Coarse Classifier
+(CC) public ABI surface and a fman_pcd_cc.c translation unit that
+provides -EOPNOTSUPP / ERR_PTR(-EOPNOTSUPP) stubs for every entry
+point. PR14c-body will replace the stubs with real silicon-resident
+tree/node programming per LS1046A RM 8.7.4.1-8.7.4.3.
+
+Two-step landing pattern proven on PR14b:
+  PR14c-prep (this commit) — public ABI + Makefile + stubs, builds clean
+  PR14c-body — real implementation, byte-perfect against RM tables
+
+New public types in <linux/fsl/fman_pcd.h>:
+  - enum fman_pcd_action_type      (6 variants: DROP, FORWARD_FQ,
+                                    FORWARD_CAAM, REPLICATE, MANIPULATE,
+                                    NEXT_CC_NODE) — single discriminator
+                                    replacing the SDK's 16 separate
+                                    t_FmPcdCcNextEngineParams flavors
+  - struct fman_pcd_action         (tagged union)
+  - enum fman_pcd_cc_extract_type  (KEY / HDR / NONHDR per RM 8.7.4.2)
+  - struct fman_pcd_cc_extract
+  - struct fman_pcd_cc_key_entry   (56-byte key+mask + action)
+  - struct fman_pcd_cc_key_table
+
+New public functions (all stubbed):
+  - fman_pcd_cc_tree_create        — allocate match-tree
+  - fman_pcd_cc_node_create        — allocate node with extract+keys
+  - fman_pcd_cc_node_add_key       — append one key+action pair
+  - fman_pcd_cc_node_modify_next_action — replace action atomically
+  - fman_pcd_cc_node_destroy
+  - fman_pcd_cc_tree_destroy
+
+Wiring:
+  drivers/net/ethernet/freescale/fman/Makefile — fman_pcd_cc.o added
+  to fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD).  fman_pcd.c already exports
+  fman_pcd_get_cc_list() and the cc_trees list (landed in PR14a).
+
+Clean-room provenance per spec §16: authored from LS1046A RM only.
+The legacy NXP SDK fm_cc.c (~7500 LOC in archived
+mihakralj/kernel-ls1046a-build@464df181) is read-only cross-reference;
+no code or struct layouts copied.
+
+Validation (native ARM64 build on Cobalt 100):
+  - make ARCH=arm64 -j32 Image  → success, zero warnings
+  - System.map: all 6 fman_pcd_cc_* symbols present as 'T', each with
+    matching __ksymtab_fman_pcd_cc_* entry
+  - No regression in any other translation unit
+
+References:
+  specs/ask2-rewrite-spec.md §13.3 (fman_pcd_cc.c, ~2500 LOC budget)
+  specs/ask2-rewrite-spec.md §16  (clean-room provenance risk #12)
+  LS1046A Reference Manual §8.7.4.1, §8.7.4.2, §8.7.4.3
+
+Signed-off-by: ASK2 PR14c-prep <ask2@vyos.local>
+---
+ drivers/net/ethernet/freescale/fman/Makefile  |   2 +-
+ .../net/ethernet/freescale/fman/fman_pcd_cc.c | 159 ++++++++++++
+ include/linux/fsl/fman_pcd.h                  | 226 ++++++++++++++++++
+ 3 files changed, 386 insertions(+), 1 deletion(-)
+ create mode 100644 drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+
+diff --git a/drivers/net/ethernet/freescale/fman/Makefile b/drivers/net/ethernet/freescale/fman/Makefile
+index a7ce1bab8..a6f4a59b9 100644
+--- a/drivers/net/ethernet/freescale/fman/Makefile
++++ b/drivers/net/ethernet/freescale/fman/Makefile
+@@ -6,6 +6,6 @@ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_fman_port.o
+ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_mac.o
+ 
+ fsl_dpaa_fman-objs	:= fman_muram.o fman.o fman_sp.o fman_keygen.o fman_host_cmd.o
+-fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o fman_pcd_kg.o
++fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o fman_pcd_kg.o fman_pcd_cc.o
+ fsl_dpaa_fman_port-objs := fman_port.o
+ fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+new file mode 100644
+index 000000000..d57795531
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -0,0 +1,159 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * FMan PCD Coarse Classifier (CC) - public API stubs.
++ *
++ * PR14c-prep of the ASK2 v1.0 PR14 series.  Declares the on-disk
++ * translation unit for the Coarse Classifier match-tree layer and
++ * provides -EOPNOTSUPP stubs for every public entry point declared in
++ * <linux/fsl/fman_pcd.h>.  PR14c-body replaces these stubs with the
++ * real silicon-programming code per LS1046A RM 8.7.4.1 (tree group
++ * table format), 8.7.4.2 (CC node match-key record format), and
++ * 8.7.4.3 (action template encoding).
++ *
++ * Authoritative reference
++ * -----------------------
++ * - LS1046A Reference Manual sec 8.7.4 (Coarse Classifier registers).
++ * - LS1046A Reference Manual sec 8.7.4.1 (CC tree group table).
++ * - LS1046A Reference Manual sec 8.7.4.2 (CC node match-key record).
++ * - LS1046A Reference Manual sec 8.7.4.3 (action template encoding).
++ *
++ * Clean-room provenance
++ * ---------------------
++ * Mainline drivers/net/ethernet/freescale/fman/ has zero classifier
++ * code; this file is authored from the RM only.  The legacy NXP SDK
++ * fm_cc.c (~7500 LOC under drivers/net/ethernet/freescale/sdk_fman/
++ * Peripherals/FM/Pcd/ in the archived mihakralj/kernel-ls1046a-build
++ * repo at HEAD 464df181) is a read-only silicon-fact cross-reference
++ * only - no code or struct layouts are copied from it.  See spec
++ * specs/ask2-rewrite-spec.md sec 16 (clean-room provenance risk #12).
++ *
++ * Locking model (forward-looking, PR14c-body)
++ * -------------------------------------------
++ * pcd->lock (acquired via fman_pcd_get_lock()) serialises tree/node
++ * lifecycle.  ask.ko's M5 fast path does NOT enter this layer per
++ * packet - the hardware does the CC walk directly against the MURAM-
++ * resident node records.  Per-node fine-grained spinlocks may be
++ * added in PR14c-body if the M5 flow-insert rate at sustained load
++ * shows the tree-wide mutex as the bottleneck.
++ *
++ * What this file delivers at PR14c-prep
++ * -------------------------------------
++ * Six public entry points, all returning -EOPNOTSUPP / ERR_PTR().
++ * No struct fman_pcd_cc_tree / fman_pcd_cc_node definitions yet -
++ * they are forward-declared in <linux/fsl/fman_pcd.h> and become
++ * concrete in PR14c-body.  No MURAM allocation, no list registration,
++ * no register writes.  The point of this PR is to lock down the
++ * public ABI surface and the Makefile / Kconfig integration so the
++ * body PR is a pure implementation drop.
++ */
++
++#include <linux/err.h>
++#include <linux/errno.h>
++#include <linux/export.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/types.h>
++
++#include <linux/fsl/fman_pcd.h>
++#include "fman_pcd_internal.h"
++
++/**
++ * fman_pcd_cc_tree_create() - allocate a new Coarse Classifier tree.
++ *
++ * PR14c-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
++ * Returns ERR_PTR(-EOPNOTSUPP) until PR14c-body lands.
++ */
++struct fman_pcd_cc_tree *
++fman_pcd_cc_tree_create(struct fman_pcd *pcd, u8 num_of_groups)
++{
++	if (!pcd)
++		return ERR_PTR(-EINVAL);
++	if (num_of_groups == 0 || num_of_groups > 8)
++		return ERR_PTR(-EINVAL);
++
++	return ERR_PTR(-EOPNOTSUPP);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_cc_tree_create);
++
++/**
++ * fman_pcd_cc_node_create() - allocate a new CC node and attach to a tree.
++ *
++ * PR14c-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
++ * Returns ERR_PTR(-EOPNOTSUPP) until PR14c-body lands.
++ */
++struct fman_pcd_cc_node *
++fman_pcd_cc_node_create(struct fman_pcd_cc_tree *tree,
++			const struct fman_pcd_cc_extract *extract,
++			const struct fman_pcd_cc_key_table *keys)
++{
++	if (!tree || !extract || !keys)
++		return ERR_PTR(-EINVAL);
++	if (extract->size == 0 || extract->size > 56)
++		return ERR_PTR(-EINVAL);
++
++	return ERR_PTR(-EOPNOTSUPP);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_cc_node_create);
++
++/**
++ * fman_pcd_cc_node_add_key() - append one key+action pair to a node.
++ *
++ * PR14c-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
++ * Returns -EOPNOTSUPP until PR14c-body lands.
++ */
++int fman_pcd_cc_node_add_key(struct fman_pcd_cc_node *node,
++			     const struct fman_pcd_cc_key_entry *entry)
++{
++	if (!node || !entry)
++		return -EINVAL;
++
++	return -EOPNOTSUPP;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_cc_node_add_key);
++
++/**
++ * fman_pcd_cc_node_modify_next_action() - replace the action on one key.
++ *
++ * PR14c-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
++ * Returns -EOPNOTSUPP until PR14c-body lands.
++ */
++int fman_pcd_cc_node_modify_next_action(struct fman_pcd_cc_node *node,
++					u16 key_index,
++					const struct fman_pcd_action *action)
++{
++	if (!node || !action)
++		return -EINVAL;
++
++	return -EOPNOTSUPP;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_cc_node_modify_next_action);
++
++/**
++ * fman_pcd_cc_node_destroy() - tear down one CC node.
++ *
++ * PR14c-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
++ * NULL-safe no-op until PR14c-body lands.
++ */
++void fman_pcd_cc_node_destroy(struct fman_pcd_cc_node *node)
++{
++	if (!node)
++		return;
++	/* PR14c-body: detach from tree, free MURAM key table, free handle. */
++}
++EXPORT_SYMBOL_GPL(fman_pcd_cc_node_destroy);
++
++/**
++ * fman_pcd_cc_tree_destroy() - tear down one CC tree.
++ *
++ * PR14c-prep stub.  See <linux/fsl/fman_pcd.h> for the full contract.
++ * NULL-safe no-op until PR14c-body lands.
++ */
++void fman_pcd_cc_tree_destroy(struct fman_pcd_cc_tree *tree)
++{
++	if (!tree)
++		return;
++	/* PR14c-body: WARN if nodes still attached, free MURAM group table,
++	 * remove from pcd->cc_trees, free handle.
++	 */
++}
++EXPORT_SYMBOL_GPL(fman_pcd_cc_tree_destroy);
+\ No newline at end of file
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 27c9c2843..256349533 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -196,4 +196,230 @@ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
+  */
+ void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme);
+ 
++/*
++ * Coarse Classifier (CC) API (PR14c).
++ *
++ * The CC engine walks a match-tree using the key extracted by KG and
++ * selects an action (drop, forward-to-FQ, forward-to-CAAM, replicate,
++ * manipulate-and-forward).  Each tree contains one or more nodes; each
++ * node has an extract specification (which key bytes to compare) and a
++ * key table (the actual exact-match entries with per-entry actions).
++ *
++ * Reference: LS1046A RM 8.7.4.1 (CC tree group table format), 8.7.4.2
++ * (CC node match-key record format), 8.7.4.3 (action template encoding).
++ *
++ * At PR14c-prep, all entry points return -EOPNOTSUPP / ERR_PTR(-EOPNOTSUPP).
++ * PR14c-body replaces the stubs with real MURAM-resident tree/node
++ * programming.
++ */
++
++/**
++ * enum fman_pcd_action_type - tagged-union discriminator for CC node actions.
++ * @FMAN_PCD_ACTION_DROP:           drop the frame at the CC node
++ * @FMAN_PCD_ACTION_FORWARD_FQ:     enqueue the frame to a specific FQID
++ * @FMAN_PCD_ACTION_FORWARD_CAAM:   hand the frame to CAAM (IPsec offload)
++ * @FMAN_PCD_ACTION_REPLICATE:      send to a replicator group (PR14f)
++ * @FMAN_PCD_ACTION_MANIPULATE:     run header-manip chain then forward
++ * @FMAN_PCD_ACTION_NEXT_CC_NODE:   continue classification at another node
++ *
++ * Replaces the SDK's 16 separate t_FmPcdCcNextEngineParams flavors with
++ * a single discriminator.  The union body in struct fman_pcd_action
++ * carries the type-specific payload.
++ */
++enum fman_pcd_action_type {
++	FMAN_PCD_ACTION_DROP = 0,
++	FMAN_PCD_ACTION_FORWARD_FQ,
++	FMAN_PCD_ACTION_FORWARD_CAAM,
++	FMAN_PCD_ACTION_REPLICATE,
++	FMAN_PCD_ACTION_MANIPULATE,
++	FMAN_PCD_ACTION_NEXT_CC_NODE,
++};
++
++/**
++ * struct fman_pcd_action - tagged-union describing one CC-node action.
++ * @type:                discriminator selecting one of the union arms
++ * @forward_fq.fqid:     destination FQID for FORWARD_FQ
++ * @forward_caam.profile_id: CAAM profile id for FORWARD_CAAM
++ * @replicate.group:     handle from PR14f for REPLICATE
++ * @manipulate.manip:    header-manip chain head from PR14d
++ * @manipulate.next_fqid: post-manip FQID
++ * @next_cc.node:        next-hop CC node for NEXT_CC_NODE
++ *
++ * All non-active union members are unread; consumers must zero the
++ * struct before populating to ease debugging.  Lifetime of referenced
++ * handles (manip chains, replicator groups, next CC nodes) is the
++ * caller's responsibility - the CC API does not take ownership.
++ */
++struct fman_pcd_action {
++	enum fman_pcd_action_type type;
++	union {
++		struct {
++			u32 fqid;
++		} forward_fq;
++		struct {
++			u16 profile_id;
++		} forward_caam;
++		struct {
++			struct fman_pcd_replic_group *group;
++		} replicate;
++		struct {
++			struct fman_pcd_manip *manip;
++			u32 next_fqid;
++		} manipulate;
++		struct {
++			struct fman_pcd_cc_node *node;
++		} next_cc;
++	};
++};
++
++/**
++ * enum fman_pcd_cc_extract_type - what part of the frame the node compares.
++ * @FMAN_PCD_CC_EXTRACT_KEY:       key bytes produced by the upstream KG scheme
++ * @FMAN_PCD_CC_EXTRACT_HDR:       a header field directly from the parse result
++ * @FMAN_PCD_CC_EXTRACT_NONHDR:    a fixed offset from start-of-frame
++ *
++ * Mirrors the silicon CC-node extract-source field documented in
++ * RM 8.7.4.2 Table 8-118.  Most ASK2 v1.0 nodes use EXTRACT_KEY for
++ * 5-tuple exact match; HDR / NONHDR are reserved for deeper L7 lookups.
++ */
++enum fman_pcd_cc_extract_type {
++	FMAN_PCD_CC_EXTRACT_KEY = 0,
++	FMAN_PCD_CC_EXTRACT_HDR,
++	FMAN_PCD_CC_EXTRACT_NONHDR,
++};
++
++/**
++ * struct fman_pcd_cc_extract - one CC-node extract specification.
++ * @type:   selector for the extract source (KEY / HDR / NONHDR)
++ * @offset: byte offset within the source (0..63 for KEY, 0..255 for HDR)
++ * @size:   number of bytes to compare (1..56 - silicon hard limit)
++ *
++ * Size is constrained by the CC node record format: a single node
++ * encodes a single fixed-width key; multi-field 5-tuple matches use
++ * the KG-produced concatenated key in EXTRACT_KEY mode.
++ */
++struct fman_pcd_cc_extract {
++	enum fman_pcd_cc_extract_type type;
++	u8 offset;
++	u8 size;
++};
++
++/**
++ * struct fman_pcd_cc_key_entry - one entry inside a CC-node key table.
++ * @key:    key bytes (LSB-first, length == extract.size)
++ * @mask:   per-byte AND-mask (0xff = exact match; 0x00 = wildcard byte)
++ * @action: action to take when this entry matches
++ *
++ * The key+mask pair lets a single entry cover small ranges (e.g. all
++ * port numbers in a /24 by masking off the host bits).  ASK2 v1.0 uses
++ * exact-match only (mask = all-ones).
++ */
++struct fman_pcd_cc_key_entry {
++	u8 key[56];
++	u8 mask[56];
++	struct fman_pcd_action action;
++};
++
++/**
++ * struct fman_pcd_cc_key_table - immutable description of a CC-node key set.
++ * @num_keys:     count of populated @keys (1..255)
++ * @keys:         array of @num_keys entries; caller-owned, copied by
++ *                fman_pcd_cc_node_create()
++ * @miss_action:  action used when no entry matches
++ *
++ * Passed by value to fman_pcd_cc_node_create().  Not retained after the
++ * call; the silicon node owns the MURAM-resident copy.
++ */
++struct fman_pcd_cc_key_table {
++	u16 num_keys;
++	const struct fman_pcd_cc_key_entry *keys;
++	struct fman_pcd_action miss_action;
++};
++
++/**
++ * fman_pcd_cc_tree_create() - allocate a new Coarse Classifier tree.
++ * @pcd:           PCD subsystem handle from fman_pcd_init()
++ * @num_of_groups: tree group-table size (1..8 on FMan v3)
++ *
++ * Allocates a MURAM-resident tree-group-table per RM 8.7.4.1 and
++ * registers the tree on @pcd->cc_trees.  A tree is the attach point
++ * for a KG scheme via fman_pcd_kg_attach_cc(); nodes are added to the
++ * tree by fman_pcd_cc_node_create().
++ *
++ * Return: handle on success, ERR_PTR(-EOPNOTSUPP) at PR14c-prep,
++ * ERR_PTR(-ENOMEM) on MURAM exhaustion.
++ */
++struct fman_pcd_cc_tree *
++fman_pcd_cc_tree_create(struct fman_pcd *pcd, u8 num_of_groups);
++
++/**
++ * fman_pcd_cc_node_create() - allocate a new CC node and attach to a tree.
++ * @tree:    tree handle from fman_pcd_cc_tree_create()
++ * @extract: extract specification (what bytes the node compares)
++ * @keys:    initial key table (may have num_keys == 0 for an empty node)
++ *
++ * Programs the MURAM-resident classification-node record per
++ * RM 8.7.4.2 with the extract spec, the key table, and one action
++ * template per key per RM 8.7.4.3.  Returns a handle the caller can
++ * later modify via fman_pcd_cc_node_add_key() /
++ * fman_pcd_cc_node_modify_next_action().
++ *
++ * Return: handle on success, ERR_PTR(-EOPNOTSUPP) at PR14c-prep.
++ */
++struct fman_pcd_cc_node *
++fman_pcd_cc_node_create(struct fman_pcd_cc_tree *tree,
++			const struct fman_pcd_cc_extract *extract,
++			const struct fman_pcd_cc_key_table *keys);
++
++/**
++ * fman_pcd_cc_node_add_key() - append one key+action pair to a node.
++ * @node:   node handle from fman_pcd_cc_node_create()
++ * @entry:  key+mask+action triple to install
++ *
++ * Walks the node's MURAM-resident key table, finds the next free slot,
++ * encodes @entry per RM 8.7.4.2 / 8.7.4.3, and increments the node's
++ * key count.  Serialised against parallel inserts by pcd->lock.
++ *
++ * Return: 0 or positive index of the inserted slot on success,
++ * -EOPNOTSUPP at PR14c-prep, -ENOSPC if the key table is full,
++ * -EINVAL on key/mask size mismatch with the node's extract spec.
++ */
++int fman_pcd_cc_node_add_key(struct fman_pcd_cc_node *node,
++			     const struct fman_pcd_cc_key_entry *entry);
++
++/**
++ * fman_pcd_cc_node_modify_next_action() - replace the action on one key.
++ * @node:      node handle
++ * @key_index: 0-based slot to modify (must be < current key count)
++ * @action:    new action template; not retained after the call
++ *
++ * Used by ask.ko on flow-table updates without re-programming the key
++ * bytes (e.g. counter-reset + FQID redirect).  Atomic from the silicon
++ * side - the CC walker reads a single 64-bit action-template word.
++ *
++ * Return: 0 on success, -EOPNOTSUPP at PR14c-prep, -EINVAL on bad args.
++ */
++int fman_pcd_cc_node_modify_next_action(struct fman_pcd_cc_node *node,
++					u16 key_index,
++					const struct fman_pcd_action *action);
++
++/**
++ * fman_pcd_cc_node_destroy() - tear down one CC node.
++ * @node: handle from fman_pcd_cc_node_create().  NULL-safe.
++ *
++ * Frees the MURAM-resident key table and action templates, removes the
++ * node from its parent tree's node list, frees the handle.  WARN if
++ * any KG scheme still has this node as a CCBS target.
++ */
++void fman_pcd_cc_node_destroy(struct fman_pcd_cc_node *node);
++
++/**
++ * fman_pcd_cc_tree_destroy() - tear down one CC tree.
++ * @tree: handle from fman_pcd_cc_tree_create().  NULL-safe.
++ *
++ * Frees the tree-group-table, removes the tree from @pcd->cc_trees.
++ * WARN if any nodes are still attached (caller leaked a node).
++ */
++void fman_pcd_cc_tree_destroy(struct fman_pcd_cc_tree *tree);
++
+ #endif /* __LINUX_FSL_FMAN_PCD_H */
+-- 
+2.39.5
+
