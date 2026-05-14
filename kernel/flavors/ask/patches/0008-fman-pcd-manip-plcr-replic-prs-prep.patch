@@ -50,10 +50,10 @@ Body PRs queued:
   PR14f-body - real replicator-group + parser HXS programming per
                RM 8.7.7 / 8.7.2
 
-Clean-room provenance: all four .c files authored from LS1046A RM
+Provenance (v1.1): all four .c files authored from LS1046A RM
 only; archived SDK fm_manip.c / fm_plcr.c / fm_replic.c / fm_prs.c +
 fman_prs.c at mihakralj/kernel-ls1046a-build@464df181 are read-only
-silicon-fact cross-references per spec sec 16 (clean-room provenance
+silicon-fact cross-references per spec sec 16 (provenance discipline
 risk #12).  No code or struct layouts are copied.
 
 Signed-off-by: Build Cobalt100 <build@cobalt100>
@@ -107,7 +107,7 @@ index 000000000..3bfadaa7b
 + * - LS1046A Reference Manual sec 8.7.5 (Header modification table).
 + * - LS1046A Reference Manual sec 8.7.5.4 (Auto checksum recompute).
 + *
-+ * Clean-room provenance
++ * Provenance (v1.1)
 + * ---------------------
 + * Mainline drivers/net/ethernet/freescale/fman/ has zero manip code;
 + * this file is authored from the RM only.  The legacy NXP SDK
@@ -115,7 +115,7 @@ index 000000000..3bfadaa7b
 + * Peripherals/FM/Pcd/ in the archived mihakralj/kernel-ls1046a-build
 + * repo at HEAD 464df181) is a read-only silicon-fact cross-reference
 + * only - no code or struct layouts are copied from it.  See spec
-+ * specs/ask2-rewrite-spec.md sec 16 (clean-room provenance risk #12).
++ * specs/ask2-rewrite-spec.md sec 16 (provenance discipline risk #12).
 + *
 + * What this file delivers at PR14d-prep
 + * -------------------------------------
@@ -202,7 +202,7 @@ index 000000000..6c33c088a
 + * - LS1046A Reference Manual sec 8.7.6 (Policer profile record).
 + * - RFC 4115 (Two Rate Three Color Marker - trTCM).
 + *
-+ * Clean-room provenance
++ * Provenance (v1.1)
 + * ---------------------
 + * Mainline drivers/net/ethernet/freescale/fman/ has zero policer code;
 + * this file is authored from the RM only.  The legacy NXP SDK
@@ -210,7 +210,7 @@ index 000000000..6c33c088a
 + * Peripherals/FM/Pcd/ in the archived mihakralj/kernel-ls1046a-build
 + * repo at HEAD 464df181) is a read-only silicon-fact cross-reference
 + * only - no code or struct layouts are copied from it.  See spec
-+ * specs/ask2-rewrite-spec.md sec 16 (clean-room provenance risk #12).
++ * specs/ask2-rewrite-spec.md sec 16 (provenance discipline risk #12).
 + *
 + * What this file delivers at PR14e-prep
 + * -------------------------------------
@@ -324,7 +324,7 @@ index 000000000..d4828e2b5
 + * -----------------------
 + * - LS1046A Reference Manual sec 8.7.2 (FMan parser HXS table).
 + *
-+ * Clean-room provenance
++ * Provenance (v1.1)
 + * ---------------------
 + * Mainline drivers/net/ethernet/freescale/fman/ has zero parser-config
 + * code; this file is authored from the RM only.  The legacy NXP SDK
@@ -333,7 +333,7 @@ index 000000000..d4828e2b5
 + * archived mihakralj/kernel-ls1046a-build repo at HEAD 464df181) is a
 + * read-only silicon-fact cross-reference only - no code or struct
 + * layouts are copied from it.  See spec specs/ask2-rewrite-spec.md
-+ * sec 16 (clean-room provenance risk #12).
++ * sec 16 (provenance discipline risk #12).
 + *
 + * What this file delivers at PR14f-prep
 + * -------------------------------------
@@ -391,7 +391,7 @@ index 000000000..b198b6554
 + * -----------------------
 + * - LS1046A Reference Manual sec 8.7.7 (Frame replicator).
 + *
-+ * Clean-room provenance
++ * Provenance (v1.1)
 + * ---------------------
 + * Mainline drivers/net/ethernet/freescale/fman/ has zero replicator
 + * code; this file is authored from the RM only.  The legacy NXP SDK
@@ -399,7 +399,7 @@ index 000000000..b198b6554
 + * Peripherals/FM/Pcd/ in the archived mihakralj/kernel-ls1046a-build
 + * repo at HEAD 464df181) is a read-only silicon-fact cross-reference
 + * only - no code or struct layouts are copied from it.  See spec
-+ * specs/ask2-rewrite-spec.md sec 16 (clean-room provenance risk #12).
++ * specs/ask2-rewrite-spec.md sec 16 (provenance discipline risk #12).
 + *
 + * What this file delivers at PR14f-prep
 + * -------------------------------------

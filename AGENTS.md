@@ -18,7 +18,7 @@ The **qdrant** MCP server is the authoritative persistent memory for this projec
 
 ## ASK2 (rewrite-in-progress) — FLAVOR=ask
 
-The legacy ASK 1.x stack (vendored NXP SDK FMan/QMan/BMan overlay, `cdx.ko`/`auto_bridge.ko`/`cmm`/`dpa_app`/`libfci`, the 5797-line in-tree-hooks patch, the `/* ASK-edit (askN, …) */` marker discipline, the `data/ask-userspace/` userspace tree, `ci-build-fmc.sh` / `ci-build-fmlib.sh` / `ci-setup-kernel-ask.sh` / `ci-consume-ask-kernel.sh`, the `kernel/flavors/ask/{sdk-sources,oot-modules,patches,userspace-patches}` trees, the `mono-gateway-dk-sdk.dts` overlay, the SDK portal DTSIs, and the `ASK_KERNEL_TAG` workflow input) was **deleted on the `ask20` branch** as part of the clean-room ASK2 rewrite. See `specs/ask2-rewrite-spec.md` (v0.6) for the full architecture.
+The legacy ASK 1.x stack (vendored NXP SDK FMan/QMan/BMan overlay, `cdx.ko`/`auto_bridge.ko`/`cmm`/`dpa_app`/`libfci`, the 5797-line in-tree-hooks patch, the `/* ASK-edit (askN, …) */` marker discipline, the `data/ask-userspace/` userspace tree, `ci-build-fmc.sh` / `ci-build-fmlib.sh` / `ci-setup-kernel-ask.sh` / `ci-consume-ask-kernel.sh`, the `kernel/flavors/ask/{sdk-sources,oot-modules,patches,userspace-patches}` trees, the `mono-gateway-dk-sdk.dts` overlay, the SDK portal DTSIs, and the `ASK_KERNEL_TAG` workflow input) was **deleted on the `ask20` branch** as part of the modern ASK2 rewrite. See `specs/ask2-rewrite-spec.md` (v0.6) for the full architecture.
 
 Until the ASK2 components land (`ask.ko` ~1500 LOC, `ask_bridge.ko` ~400 LOC, `askd` ~6000 LOC, `ask-load` ~1200 LOC, `libask_fci.so.1` ~800 LOC):
 
@@ -225,7 +225,7 @@ The DPDK DPAA1 PMD path was abandoned on 2026-04-03 (RC#31: `dpaa_bus` probe kil
 | `bin/build-local.sh` | Fast local build: `kernel`, `dtb`, `extract`, `vyos1x`, `iso` modes |
 | `plans/VPP.md` | VPP native integration: VyOS `set vpp` CLI with AF_XDP on SFP+ (eth3/eth4), thermal management, DPAA1 PMD roadmap |
 | `plans/DEV-LOOP.md` | Dev-test loop architecture doc — TFTP boot procedure, lessons learned |
-| `specs/ask2-rewrite-spec.md` | ASK2 clean-room rewrite spec (v0.6) — authoritative reference for all ASK2 work on the `ask20` branch |
+| `specs/ask2-rewrite-spec.md` | ASK2 modern rewrite spec (v0.6) — authoritative reference for all ASK2 work on the `ask20` branch |
 | `kernel/flavors/ask/README.md` | Scaffold-only pointer to the ASK2 spec; all ASK 1.x source/kernel/userspace artifacts under this tree were deleted on `ask20` |
 | `plans/NETWORKING-DEEP-DIVE.md` | DPAA1 networking deep-dive: FMan architecture, QBMan, portal allocation, driver split |
 | `board/scripts/fman-port-name` | Script called by udev: reads `/sys/class/net/<iface>/device/of_node` to map FMan MAC DT address → physical port name (eth0-eth4) |
