@@ -1,6 +1,6 @@
 # ASK2 — Modern Linux Implementation of FMan 210 Hardware Offload for VyOS
 
-**Status:** Draft v1.0 (supersedes v0.8). 2026-05-14. Major: adds §12.9 (PR14-prep mainline-PCD-gap finding) and §13 (clean-room FMan PCD subsystem) — a new ~7800 LOC in-tree kernel patch series replacing the v0.8 assumption that the in-tree mainline FMan exposes a usable PCD API. Decision **Option C-clean-room** taken 2026-05-14 after cost survey of the deleted SDK PCD code (~30,000 LOC vendor C) made the forward-port path uneconomical.
+**Status:** Draft v1.1 (supersedes v1.0). 2026-05-14. Material change vs v1.0: drops the clean-room constraint on §13's FMan PCD subsystem. The deleted NXP SDK PCD tree (preserved in `mihakralj/kernel-ls1046a-build@464df181`) is GPL-2.0 (dual-licensed BSD-3-or-GPL-2.0) and the `we-are-mono/ASK` legacy stack is likewise GPL — both are usable as references for silicon behaviour, MURAM byte layouts, and register-write ordering. **What remains rejected is the SDK's architecture, not its silicon facts**: the `handle_t` opaque ABI, `fsl-ncsw` OS-shim layer, AMP IPC, `TRACE_RTOS`, `fm_ehash.c` custom hash, and nested `Peripherals/FM/Pcd/` directory layout are still discarded in favour of modern kernel idioms (typed structs, `kmalloc`/`devm_kzalloc`, `ioremap`/`readl`/`writel`, `mutex`/`spinlock`/`rcu`, `rhashtable`, tracepoints, flat `drivers/net/ethernet/freescale/fman/` layout). The LS1046A Reference Manual chapter 8 remains authoritative for byte-perfect MURAM layouts when SDK code disagrees with itself or omits a field. Net effect: PR14 body work unblocks immediately — sessions without RM access in the workspace can still author body PRs by cross-referencing the archived SDK alongside the RM. v1.0's §12.9 cost survey (~7800 LOC net target after dropping SDK bloat) is unchanged; only the provenance discipline is relaxed. Risk #12 reframed from copyright concern to maintainability concern. Open question #8 closed.
 **Target hardware:** NXP LS1046A Mono Gateway DK.
 **Target software:** Linux 6.18 LTS, ARM64, VyOS rolling release, FLAVOR=ask.
 **Target microcode:** NXP proprietary 210-series fine classifier ucode (LS1046 r1.0). Loaded by U-Boot from SPI flash on every shipped Mono Gateway. Out of scope for this rewrite.
@@ -1288,13 +1288,13 @@ ASK2 v1.0 will program the FMan PCD (parser/classifier/KeyGen/policer) via the i
 - **D** — software fast-path only via `nf_flow_table` sw mode + PR11's `flow_block_cb` without hardware backing. ~500 LOC, ~1–2 Gbps cap. Misses §11.1 perf gates by an order of magnitude.
 - **E** — cancel ASK2 v1.0 on this SoC. Zero LOC. Defeats the project.
 
-**Decision (2026-05-14): Option C-clean-room.** Write a new FMan PCD subsystem from scratch using only the LS1046A Reference Manual chapter 8 (NDA-only) as reference. Target ~7800 LOC of modern kernel C. Cheaper than the forward-port, no vendor copyright concerns, structured for modern Linux idioms from the start. The full module decomposition is **§13 below**.
+**Decision (2026-05-14, revised in v1.1): Option C-modernize.** Write a new FMan PCD subsystem targeting ~7800 LOC of modern kernel C. The deleted NXP SDK and the `we-are-mono/ASK` legacy stack are both GPL — they remain available as silicon-behaviour references for byte layouts, register-write ordering, and microcode-handshake sequences. **The SDK's *architecture* is what we reject** (per §13.1 below): `handle_t` opaque ABI, `fsl-ncsw` OS shim, AMP multi-OS IPC, `TRACE_RTOS`, nested `Peripherals/FM/Pcd/` layout, 16-flavour next-engine struct hierarchy. The LS1046A Reference Manual chapter 8 remains authoritative when SDK code is ambiguous or contradicts itself. Per-file copyright headers will cite GPL-2.0-only (matching mainline `fman.c`) since both source pools are GPL-compatible. The full module decomposition is **§13 below**.
 
 ---
 
 ## 13. The FMan PCD subsystem — `0004-fman-pcd-subsystem.patch`
 
-This section specifies a new in-tree kernel patch series that resurrects the FMan Parse / Classify / Distribute (PCD) hardware-programming layer that mainline 6.18 is missing. It is the largest single block of new C in ASK2 v1.0 (~7800 LOC, larger than `ask.ko` itself) but the smallest path to delivering the spec's perf gates. The implementation is **clean-room** — written from the LS1046A Reference Manual chapter 8 (NDA, RM §8.7–8.10), not derived from any NXP SDK source.
+This section specifies a new in-tree kernel patch series that resurrects the FMan Parse / Classify / Distribute (PCD) hardware-programming layer that mainline 6.18 is missing. It is the largest single block of new C in ASK2 v1.0 (~7800 LOC, larger than `ask.ko` itself) but the smallest path to delivering the spec's perf gates. **Source provenance (v1.1):** the LS1046A Reference Manual chapter 8 (RM §8.7–8.10) is the authoritative reference for byte-perfect MURAM layouts and register semantics. The deleted NXP SDK PCD tree (preserved at `mihakralj/kernel-ls1046a-build@464df181`, dual-licensed BSD-3-or-GPL-2.0) and the `we-are-mono/ASK` legacy stack (GPL) are **usable as silicon-behaviour references** for layout disambiguation, register-write ordering, microcode handshakes, and ucode-version quirks. What we explicitly do **not** carry forward is the SDK's *architecture*: §13.1 below enumerates the patterns rejected. Every non-trivial function carries a comment citing its primary RM section; where SDK or `we-are-mono` code was consulted for disambiguation, the comment names the source file (e.g. `/* RM §8.7.4.2 + cross-ref SDK fm_cc.c MatchTableTryLockAcquire() for the polling-loop semantics */`).
 
 ### 13.1 Architectural principles
 
@@ -1511,7 +1511,7 @@ PR14a–g (see implementation plan):
 
 `0004-fman-pcd-subsystem.patch` is **upstream-aspirational**, not upstream-ready at landing time. The right reviewers (NXP FMan maintainers Madalin Bucur, Camelia Groza, plus anyone shipping LS1043/LS1046 in mainline products) exist, but at ~7800 LOC across 7 files this is a large enough patch series that landing it requires (a) splitting into 3–4 reviewable chunks (orchestration + KG + CC + manip-plcr-prs-replic) and (b) sustained review effort across multiple cycles. The patch ships out-of-tree under `kernel/flavors/ask/patches/0004-*.patch` for ASK2 v1.0 GA. Upstream submission is a v1.1 milestone.
 
-License: GPL-2.0-only (matches existing `fman.c`). No SDK-derived headers, no dual-licensed code — the clean-room implementation removes the SDK's BSD-3-or-GPL-2.0 dual-license complication entirely.
+License: GPL-2.0-only (matches existing `fman.c`). Both the NXP SDK PCD tree (dual-licensed BSD-3-or-GPL-2.0 — we elect GPL-2.0) and the `we-are-mono/ASK` stack (GPL) are GPL-compatible, so referencing them for silicon behaviour does not encumber the GPL-2.0-only license assertion on `0004-fman-pcd-subsystem.patch`. No SDK *headers* are pulled in verbatim — the public ABI in `include/linux/fsl/fman_pcd.h` is a fresh design per §13.1 (modern Linux idioms, typed structs, single discriminator-union per spec §13.5).
 
 ---
 
@@ -1631,7 +1631,7 @@ If hardware verification of the PCD subsystem reveals RM-undocumented edge cases
 | 9 | 6.18 LTS gets superseded mid-project | Low | Medium | Pin to LTS until 2027, update at boundary |
 | 10 | NETIF_F_HW_ESP / NETIF_F_HW_TC interaction with VyOS networking config | Low | Low | Test early, document any caveats |
 | 11 | RCU grace period under high flow churn causes memory pressure | Low | Medium | call_rcu rate-limiting if needed; monitor in soak testing |
-| 12 | Clean-room PCD inadvertently mirrors SDK structure → copyright concern | Low | High | Mandatory reviewer who has NOT read the archived SDK; document RM-section provenance for every non-trivial function |
+| 12 | PCD subsystem inadvertently carries forward SDK architectural patterns (handle_t, OS-shim, AMP IPC, nested Peripherals/ layout) → maintainability concern (v1.1) | Medium | Medium | Reviewer focuses on modern-kernel idiom enforcement (typed structs, RCU correctness, devm_*, no opaque handles); every non-trivial function cites its primary RM section in a comment; SDK/we-are-mono cross-refs cited only for silicon-behaviour disambiguation, never for code structure |
 
 ---
 
@@ -1644,7 +1644,7 @@ If hardware verification of the PCD subsystem reveals RM-undocumented edge cases
 5. **MURAM allocation tuning for PCD subsystem** — what's the right partition between KG scheme storage, CC match trees, manipulator templates, policer profiles, and FIFO reservations on a 384 KB MURAM? Probe during PR14a using the new debugfs `/sys/kernel/debug/fman_pcd/muram_budget`.
 6. **Spirent vs CyPerf for performance gates** — Patrick Kennedy at STH ran Geerling's test on Keysight. Can we get access? Otherwise document software-generator caveats.
 7. **VyOS rolling vs LTS target for v1.0** — rolling makes sense for early adopters; 1.6 LTS (mid-2026?) for production. Confirm with VyOS Inc.
-8. **Clean-room reviewer assignment** — who reviews `0004-fman-pcd-subsystem.patch` who has demonstrably NOT read the deleted SDK PCD code? Critical for risk #12.
+8. ~~**Clean-room reviewer assignment**~~ — *Closed in v1.1.* Clean-room provenance constraint dropped; both NXP SDK and `we-are-mono/ASK` are GPL and usable as silicon-behaviour references. Reviewer focus shifts to modern-kernel idiom enforcement per risk #12 mitigation above.
 
 ---
 
@@ -1734,8 +1734,8 @@ These are non-goals. Don't slip them in.
 - **Varlink** — Modern IPC protocol used by systemd ecosystem. Replaces D-Bus for new services.
 - **ynl** — Kernel tool (in `tools/net/ynl`) that generates type-safe genl clients from YAML schemas.
 - **QEF (QorIQ Engine Firmware)** — NXP's upstream microcode blob format for FMan, distinguished from the hypothetical custom-microcode path of §12.1–§12.6 by the magic `'Q' 'E' 'F' 0x01` at offset 4 of the SPI-flash blob. §12.8.
-- **Clean-room** — implementation derived only from the LS1046A Reference Manual (NDA), not from any NXP SDK source. §13's `0004-fman-pcd-subsystem.patch` is clean-room; the deleted SDK PCD code is preserved in the archived `mihakralj/kernel-ls1046a-build` repo only as a last-resort hardware-behaviour reference, never as a copy source. Risk #12 in §16.
+- **Clean-room** — (deprecated in v1.1) was the v1.0 constraint that §13's `0004-fman-pcd-subsystem.patch` be derived only from the LS1046A Reference Manual. Dropped in v1.1: both the archived NXP SDK PCD tree (`mihakralj/kernel-ls1046a-build@464df181`, dual-licensed BSD-3-or-GPL-2.0) and the `we-are-mono/ASK` legacy stack are GPL-compatible and are now usable as silicon-behaviour references. What remains rejected is the SDK's *architecture* (handle_t, ncsw, AMP IPC, nested Peripherals/) — not its silicon facts. See §13 intro and risk #12.
 
 ---
 
-**End of v1.0.** Supersedes v0.8 in entirety. v1.0's central addition is §12.9 (mainline-PCD-gap finding, Option C-clean-room decision 2026-05-14) and §13 (the FMan PCD subsystem — a new ~7800 LOC in-tree kernel patch series across 7 .c files + 1 header, replacing the v0.8 assumption that mainline 6.18 exposed a usable PCD API). LOC budget grows from ~14,750 to ~22,550. Calendar grows from 6 to 7 months. Risk register adds two PCD-specific risks (#4 upstream rejection, #12 clean-room provenance). The §12.1–§12.6 host-command opcode-dispatch protocol and §12.8 hardware-probe findings are unchanged.
+**End of v1.1.** Supersedes v1.0 in entirety. v1.1's material change is the **provenance relaxation** on §13's FMan PCD subsystem: clean-room is replaced with "RM-authoritative, SDK + we-are-mono usable as silicon references, modern kernel architecture mandatory". This unblocks PR14c-body / PR14d-body / PR14e-body / PR14f-body work in sessions that have the archived `mihakralj/kernel-ls1046a-build@464df181` SDK tree loaded but not the (NDA) LS1046A Reference Manual — they can author body PRs by reading silicon facts from the SDK and modernizing the architecture per §13.1. v1.0's §12.9 cost survey and §13 module decomposition are unchanged. Risk #12 reframed from copyright→maintainability. Open question #8 closed. LOC budget, calendar, milestone gates: unchanged from v1.0.
