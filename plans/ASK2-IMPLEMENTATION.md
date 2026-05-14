@@ -43,14 +43,14 @@ architecture source-of-truth. When the two disagree, **the spec wins**
 | 14b-prep | M2.5b-prep — KG public API stub (`fman_pcd_kg.c`) + `keygen_scheme_setup`/`keygen_bind_port_to_schemes` exports | ask20 | landed |
 | 14b-body | M2.5b-body — KG real KGSE_* programming (IPv4 5-tuple) | ask20 | landed |
 | 14c-prep | M2.5c-prep — CC public API stub (`fman_pcd_cc.c` with 6 -EOPNOTSUPP stubs) + `fman_pcd_action` tagged-union + extract/key-table types in `<linux/fsl/fman_pcd.h>` | ask20 | landed |
-| 14c-body | M2.5c-body — CC real MURAM-resident tree-group-table programming (RM 8.7.4.1), classification-node record packing (RM 8.7.4.2), action-template encoding (RM 8.7.4.3), kunit, also replaces `fman_pcd_kg_attach_cc()` -EOPNOTSUPP stub. Split into 5 sub-PRs (body-1..5) per the design memo below. | ask20 | 🔴 **BROKEN-NEEDS-REROLL** — patches 0009–0013 on disk but cascade-fail `patch-health.sh` against linux-6.18.28. Patch 0009 first hunk header is `@@ -1,77 +1,242 @@` but patch 0007 has always produced a 159-line `fman_pcd_cc.c` (the 77-line baseline never existed). All five sub-PR commits exist on `ask20` (workspace SHAs preserved) but the stack does not apply. See `plans/PATCH-STACK-FORENSIC-2026-05-14.md` (commit `b1f36bb`). |
+| 14c-body | M2.5c-body — CC real MURAM-resident tree-group-table programming (RM 8.7.4.1), classification-node record packing (RM 8.7.4.2), action-template encoding (RM 8.7.4.3), kunit, also replaces `fman_pcd_kg_attach_cc()` -EOPNOTSUPP stub. Split into 5 sub-PRs (body-1..5) per the design memo below. | ask20 | landed |
 | 14d-prep | M2.5d-prep — manip public API stub (`fman_pcd_manip.c`) + `fman_pcd_manip_params` tagged-union (NAT_V4, NAT_V6, VLAN_PUSH, VLAN_POP, TTL_DEC) in `<linux/fsl/fman_pcd.h>` | ask20 | landed |
-| 14d-body | M2.5d-body — manip real MURAM template programming (RM 8.7.5), auto-checksum recompute (RM 8.7.5.4), kunit | ask20 | 🟡 **partial** — body-1 (patch 0014) + body-2 (patch 0015) apply cleanly. body-3 (patch 0016, cc MANIPULATE arm) + body-4 (patch 0017, kunit) ARE IN THE CC-CHAIN CASCADE and do not apply against the broken 0009 predecessor. Repairing PR14c-body unblocks these. |
+| 14d-body | M2.5d-body — manip real MURAM template programming (RM 8.7.5), auto-checksum recompute (RM 8.7.5.4), kunit | ask20 | landed |
 | 14e-prep | M2.5e-prep — plcr public API stub (`fman_pcd_plcr.c`) + `fman_pcd_plcr_params` (CIR/CBS/EIR/EBS, color mode) in `<linux/fsl/fman_pcd.h>` | ask20 | landed |
-| 14e-body | M2.5e-body — plcr real trTCM profile programming per RM 8.7.6, runtime rate update, kunit. Split into sub-PRs (body-1+ TBD) following the PR14d cadence. | ask20 | 🟡 **partial** — body-1 (`ccdf040`, patch 0018) + body-2 (`dfc7f64`, patch 0019) apply cleanly. body-3 (`2cb2779`, patch 0020, cc POLICE arm) + body-4 (`1042e8d`, patch 0021, kunit) ARE IN THE CC-CHAIN CASCADE and do not apply. Repairing PR14c-body unblocks these. |
+| 14e-body | M2.5e-body — plcr real trTCM profile programming per RM 8.7.6, runtime rate update, kunit. Split into sub-PRs (body-1+ TBD) following the PR14d cadence. | ask20 | landed |
 | 14f-prep | M2.5f-prep — replicator + parser public API stubs (`fman_pcd_replic.c`, `fman_pcd_prs.c`) + `fman_pcd_replic_member` in `<linux/fsl/fman_pcd.h>` | ask20 | landed |
-| 14f-body | M2.5f-body — replicator real MURAM group table (RM 8.7.7), parser HXS pass-through config (RM 8.7.2), kunit | ask20 | 🟡 **partial** — body-1 `1a42ddb`/`8fdafc7` (patch 0022) + body-2 `080bafe7`/`ae52ecb` (patch 0023, member-AD encoder + source-TD active-OPCODE publish) apply cleanly. body-3 `970a81e` (patch 0024, `fman_pcd_prs_init()` pass-through + `cc_encode_ad()` REPLICATE arm + cross-TU accessor `fman_pcd_replic_group_source_td_off()`) IS IN THE CC-CHAIN CASCADE and does not apply. body-4 (kunit) blocked because it needs to append to `tests/fman_pcd_cc_test.c` which is created by 0013 (also in cascade). Repairing PR14c-body unblocks both. |
-| 14g | M2.5g — End-to-end wire-up — `ask_hostcmd.c` calls PCD API; first IPv4 TCP flow traverses silicon | ask20 | blocked on 14c-body + 14d-body + 14e-body + 14f-body |
+| 14f-body | M2.5f-body — replicator real MURAM group table (RM 8.7.7), parser HXS pass-through config (RM 8.7.2), kunit | ask20 | landed — body-1 `1a42ddb`/`8fdafc7` (patch 0022), body-2 `080bafe7`/`ae52ecb` (patch 0023), body-3 re-roll `b79ffbd` (patch 0024 regenerated 2026-05-14 with correct tab indentation — root cause was per-file indent mismatch against post-PR14c-re-roll `fman_pcd_cc.c`, not the previously-suspected stale blob SHAs), body-4 `9b31f93` (patch 0025 — `fman_pcd_replic_test.c` + `fman_pcd_prs_test.c` + REPLICATE-arm regression refresh in `fman_pcd_cc_test.c`). `patch-health.sh --flavor ask --source release` reports Pass=34/Fail=0. Both `CONFIG_FSL_FMAN_PCD_KUNIT_TEST=n` and `=y` build cleanly with zero warnings for `fman_pcd_{cc,prs,replic}.o`. |
+| 14g | M2.5g — End-to-end wire-up — `ask_hostcmd.c` calls PCD API; first IPv4 TCP flow traverses silicon | ask20 | ready to start (unblocked 2026-05-14) |
 | 15  | M3.x — remaining flow types (NAT/PAT/v6/bridge)  | ask20  | blocked on PR14g |
 | 16  | M4.x — `ask_xfrm.c` + CAAM packet-mode IPsec     | ask20  | blocked on PR14g |
 | 17  | M5.1 — `askd` (sd-event + libmnl)                | ask20  | blocked on PR14g |
@@ -1355,7 +1355,7 @@ LOC budget: ~850.
 7. **Body-2 register constants pre-declared in body-1.** PMR bits (`COLOR_AWARE`, `ALG_TRTCM`, `PACKET_MODE`, `DROP_PROBABILITY`, `PIR_DISABLED`); rate-field encoding scheme (3-bit exp + 16-bit mant + 13-bit reserved); burst-depth `BURST_UNIT_BYTES=256` scale factor. Body-2 implements `plcr_encode_rate(bps) -> u32 (exp<<29 \| mant<<13)` and `plcr_encode_burst(bytes) -> u16 (saturating mant in 256-B units)` helpers shared between create and set_rates.
 8. **Anonymous union: NONE here.** `struct fman_pcd_plcr_params` is a flat struct (color_mode + 4 rate/burst fields), no union — none of the PR14d-body-2 `p->u.x` accessor gotcha applies.
 
-**Next-session entry point (after PR14f-body-3 landing 2026-05-14):** **PR14f is in progress at 3/4 bodies.** PR14f body-3 (workspace `970a81e` — `fman_pcd_prs_init()` v1.0 pass-through + `cc_encode_ad()` REPLICATE arm + cross-TU `fman_pcd_replic_group_source_td_off()` accessor, patch 0024) wires the last cc-side action arm to the silicon-resident source-TD chain programmed by body-2, and removes the parser stub by acknowledging that stock ucode 210.10.1 HXSes already cover ASK2 v1.0 flow types (no register writes needed for v1.0). With the REPLICATE arm wired, all six `enum fman_pcd_action_type` discriminators (DROP, FORWARD_FQ, FORWARD_CAAM, NEXT_CC_NODE, MANIPULATE, REPLICATE) plus the policer-orthogonal POLICE arm are concrete in `cc_encode_ad()` — the M2 §13.7 acceptance gate's worked-example walk (KG scheme → CC tree → key match → action descriptor → silicon enqueue) is end-to-end implementable. Next planned work item: **PR14f-body-4** — KUnit suite covering replic encoders (source-TD layout byte-perfect against RM 8.7.7 Table 8-128, member-AD chaining math, NEXT pointer encoding + NL_BIT terminator), member-AD layout per body-2 byte-perfect against RM 8.7.7, source-TD active-OPCODE publish ordering (write to offset 0x8 last) regression canary, and parser pass-through validator opaque cases (NULL pcd → `-EINVAL`, valid pcd → 0). Same cross-TU scope-limit pattern as PR14d-body-4 / PR14e-body-4 applies — byte-perfect cc REPLICATE-arm test against `cc_encode_ad()` is deferred to the §13.7 M2 live-silicon acceptance gate (the cc-side test TU can only exercise opaque `-EINVAL` / `-ERANGE` validation paths because `struct fman_pcd_replic_group` is private to the replic TU). After PR14f closes (body-4 = kunit), **PR14g** (the end-to-end M2 wire-up — `ask_hostcmd.c` switches from `-ENXIO` host-command path to real `fman_pcd_cc_node_add_key()` calls; first IPv4 TCP flow traverses 210 silicon) unblocks. Until M2 acceptance, all subsequent milestones (M3 flow types, M4 IPsec, M5 askd/CLI/VyOS, M6 perf-soak) remain blocked on PR14g per the dependency tree in the status tracker.
+**Next-session entry point (after PR14f closure 2026-05-14):** **PR14f is fully landed.** All four bodies are in tree (`1a42ddb`/`8fdafc7` patch 0022 body-1, `080bafe7`/`ae52ecb` patch 0023 body-2, `b79ffbd` patch 0024 body-3 re-roll, `9b31f93` patch 0025 body-4). `patch-health.sh --flavor ask --source release` reports Pass=34/Fail=0; both `CONFIG_FSL_FMAN_PCD_KUNIT_TEST=n` and `=y` build cleanly. All six `enum fman_pcd_action_type` discriminators (DROP, FORWARD_FQ, FORWARD_CAAM, NEXT_CC_NODE, MANIPULATE, REPLICATE) plus the policer-orthogonal POLICE arm are concrete in `cc_encode_ad()` — the M2 §13.7 acceptance gate's worked-example walk (KG scheme → CC tree → key match → action descriptor → silicon enqueue) is end-to-end implementable. **PR14g** (the end-to-end M2 wire-up — `ask_hostcmd.c` switches from `-ENXIO` host-command path to real `fman_pcd_cc_node_add_key()` calls; first IPv4 TCP flow traverses 210 silicon) is now ready to start. Until M2 acceptance, all subsequent milestones (M3 flow types, M4 IPsec, M5 askd/CLI/VyOS, M6 perf-soak) remain blocked on PR14g per the dependency tree in the status tracker.
 
 ---
 
@@ -1505,13 +1505,42 @@ and a separate workspace patch under `kernel/flavors/ask/patches/`:
   these because real `git format-patch` output gets both right
   automatically — the gotcha only surfaces when hand-authoring
   patches.
-- **body-4 — KUnit suite** — pending. `fman_pcd_replic_test.c` covers
-  source-TD byte-perfect layout against RM 8.7.7 and member-AD
-  chaining math (NEXT pointer encoding, NL_BIT terminator);
-  `fman_pcd_prs_test.c` covers HXS request validation. Same cross-TU
-  scope-limit pattern as PR14d-body-4 / PR14e-body-4 — the byte-perfect
-  REPLICATE-arm test against `cc_encode_ad()` is deferred to the §13.7
-  M2 live-silicon acceptance gate.
+- **body-3 re-roll (2026-05-14)** — landed (`b79ffbd`). The original
+  patch 0024 was authored with no tab indentation but the
+  post-PR14c-re-roll `fman_pcd_cc.c` uses tabs (`\t` for the case
+  label, `\t\t` for the body). `git apply` rejected the patch because
+  the indent didn't match the on-disk text — this was the real root
+  cause, NOT the stale blob SHA hypothesis floated in the original
+  body-3 failure log. Regenerated via `git format-patch` from
+  work-tree commit `a95a556` after authoring with the correct
+  per-file indent conventions (`fman_pcd_cc.c` tabs, `fman_pcd_prs.c`
+  no body indent, `fman_pcd_internal.h` none). 4 hunks across
+  `fman_pcd_cc.c`, `fman_pcd_internal.h`, `fman_pcd_prs.c`,
+  `fman_pcd_replic.c`. patch-health: Pass=33/Fail=0.
+- **body-4 — KUnit suite (2026-05-14)** — landed (`9b31f93`, patch
+  0025 = 574 lines). Two new test files:
+  `tests/fman_pcd_replic_test.c` covers source-TD layout offsets
+  byte-perfect against RM 8.7.7 Table 8-128, the source-TD
+  active-OPCODE single-publication regression canary
+  (`replic_source_td_publication_order_test` simulates the body-1 →
+  body-2 publication sequence and pins both the type-word HIGH-byte
+  OPCODE and the OPCODE-word-at-offset-0x8 publish ordering),
+  member-AD layout constants + NIA encoding bits, byte-perfect
+  3-member chain encoding via `replic_encode_members()`, FQID
+  high-byte clamping, and `source_td_off` NULL-safety accessor pin.
+  `tests/fman_pcd_prs_test.c` covers `fman_pcd_prs_init(NULL) →
+  -EINVAL` and the v1.0 pass-through happy path. The obsolete
+  `-EOPNOTSUPP` REPLICATE test in `tests/fman_pcd_cc_test.c` was
+  replaced with `cc_encode_ad_replicate_null_group_test` (NULL group
+  → -EINVAL), mirroring the MANIPULATE / POLICE arm patterns. Trailer
+  `#include` of the new test files under
+  `CONFIG_FSL_FMAN_PCD_KUNIT_TEST` added to both `fman_pcd_replic.c`
+  and `fman_pcd_prs.c`. Build-verified with both `=n` and `=y`. Same
+  cross-TU scope-limit pattern as PR14d-body-4 / PR14e-body-4 — the
+  byte-perfect REPLICATE-arm test against `cc_encode_ad()` is
+  deferred to the §13.7 M2 live-silicon acceptance gate.
+
+**PR14f closed 2026-05-14. PR14g (M2 acceptance gate) unblocked.**
 
 ---
 
