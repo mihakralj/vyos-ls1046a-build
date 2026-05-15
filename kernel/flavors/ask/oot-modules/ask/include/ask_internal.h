@@ -89,6 +89,93 @@ int  ask_hw_ucode_get_version(struct ask_hw_ucode_version *out);
 int  ask_hw_init(void);
 void ask_hw_exit(void);
 
+/*
+ * PR14g-body-1 (M2.5g) - FMan PCD bring-up cache.
+ *
+ * struct ask_hw_pcd holds the per-FMan PCD handles that ask.ko owns
+ * for the lifetime of the module: the PCD subsystem handle resolved
+ * from DT, a single CC tree (group-count = 1), the per-proto CC nodes
+ * that the dispatch layer (PR14g-body-2) populates with exact-match
+ * 5-tuple keys, and the upstream KG scheme that chains the
+ * silicon's KeyGen hash output into the CC tree's group table.
+ *
+ * Body-1 brings up exactly one CC node (v4-TCP).  IPv4 UDP, IPv6 TCP,
+ * IPv6 UDP land as additional struct fields + bring-up calls in later
+ * sub-PRs (M3.x).  The struct is forward-declared opaquely in
+ * ask_internal.h scope - the full definition lives in ask_hw.c so
+ * other TUs cannot inadvertently grow new dependencies on the PCD
+ * handle layout.
+ *
+ * NULL-safe: if DT resolution or PCD probe fails (no fsl,fman node,
+ * fman driver not bound, MURAM exhaustion), ask_hw_pcd_bringup()
+ * logs a single warn and returns 0.  ask_hw_pcd_get() then returns
+ * NULL and the body-2 dispatcher falls back to software-only mode
+ * (existing fake_hw_id_seq atomic in ask_flow.c).  This keeps ask.ko
+ * loadable on non-DPAA hosts and on DPAA hosts where the PCD chain
+ * has been disabled for diagnostics.
+ *
+ * Per Q1/Q2/Q3 architectural decisions (approved 2026-05-14):
+ *   - hw_flow_id encodes (node_token : 16) | (key_idx : 16) so the
+ *     dispatcher can route OP_FLOW_REMOVE / OP_FLOW_QUERY_STATS back
+ *     to the right CC node without a side-table lookup.
+ *   - node_token is a per-ask_hw_pcd small-integer ID assigned at
+ *     bring-up.  Body-1 uses token 1 for v4-TCP; higher numbers are
+ *     reserved for the remaining flow types.  Token 0 is a sentinel
+ *     ("no HW backing").
+ */
+struct ask_hw_pcd;
+
+/*
+ * Bring up the FMan PCD chain.  Idempotent.  Called once from
+ * ask_hw_init() at module load.  Returns 0 on success and on the
+ * "no DPAA / no PCD / probe failed" path (in which case ask_hw_pcd_get()
+ * returns NULL and the dispatcher uses the software-only fallback).
+ */
+int ask_hw_pcd_bringup(void);
+
+/* Tear down the FMan PCD chain.  Called from ask_hw_exit(). */
+void ask_hw_pcd_teardown(void);
+
+/*
+ * Accessor for the body-2 dispatcher.  Returns NULL if bring-up did not
+ * complete (either by failure or because ask.ko is running on a host
+ * without DPAA).  Callers MUST treat NULL as the "software-only mode"
+ * signal - it is the expected return on non-DPAA platforms.
+ *
+ * No lock required on the return pointer: the struct is allocated once
+ * at module init and freed once at module exit.  Fields inside it that
+ * may mutate at runtime (per-proto handle pointers, etc.) are guarded
+ * by the struct's own internal mutex - body-2 uses dedicated accessors
+ * that take that lock, not raw field access.
+ */
+struct ask_hw_pcd *ask_hw_pcd_get(void);
+
+/*
+ * hw_flow_id helpers (PR14g-body-1).
+ *
+ * The 32-bit hw_flow_id stored in struct ask_flow encodes:
+ *   bits 31..16   node_token  - which CC node owns this key
+ *   bits 15..0    key_idx     - 0-based slot inside the CC node's key table
+ *
+ * The token half is opaque to ask_flow.c: only the body-2 dispatcher
+ * and removal path interpret it.  Token 0 + idx 0 is reserved for the
+ * "software-only fallback" case (no HW backing) - the fake_hw_id_seq
+ * atomic in ask_flow.c uses values 1..U32_MAX which never collide with
+ * a real packed (token, idx) because real token is always >= 1.
+ *
+ * Both helpers are pure functions (no global state).  Inline at the
+ * call site once gcc sees them in a single TU; declared here so other
+ * TUs (ask_genl.c dump path, ask_debugfs.c) can use the unpacker for
+ * diagnostic display.
+ */
+#define ASK_HW_FLOW_ID_TOKEN_NONE       0u
+#define ASK_HW_FLOW_ID_TOKEN_V4_TCP     1u
+/* Reserved for future bring-up: V4_UDP=2, V6_TCP=3, V6_UDP=4 */
+
+u32  ask_priv_pack_hw_flow_id(u16 node_token, u16 key_idx);
+void ask_priv_unpack_hw_flow_id(u32 hw_flow_id,
+        u16 *node_token, u16 *key_idx);
+
 /* ------------------------------------------------------------------------- */
 /* ask_genl_attr.c — nla_policy tables shared across nested attribute sets    */
 /* ------------------------------------------------------------------------- */
