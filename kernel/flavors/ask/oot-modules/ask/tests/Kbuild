@@ -28,4 +28,5 @@ ask_test_dummy.o \
 ask_test_hostcmd.o \
 ask_test_flow.o \
 ask_test_flow_offload.o \
-ask_test_genl.o
+ask_test_genl.o \
+ask_test_hw_pcd.o
