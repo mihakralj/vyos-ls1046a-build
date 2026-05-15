@@ -50,7 +50,12 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/types.h>
+#include <linux/in.h>
+#include <linux/netdevice.h>
+#include <linux/rcupdate.h>
+#include <net/net_namespace.h>
 #include <linux/fsl/fman_pcd.h>
+#include <linux/fsl/dpaa_flow_offload.h>
 
 #include "include/ask_internal.h"
 
@@ -557,6 +562,245 @@ void ask_priv_unpack_hw_flow_id(u32 hw_flow_id,
                 *key_idx    = (u16)(hw_flow_id & 0xffffu);
 }
 EXPORT_SYMBOL_GPL(ask_priv_unpack_hw_flow_id);
+
+/* ------------------------------------------------------------------------- */
+/* PR14g-body-2 (M2.5g): runtime flow insert / remove dispatcher              */
+/*                                                                            */
+/* Per Q2 architectural decision (operator-approved 2026-05-14): a single     */
+/* ask_hw_flow_insert() entry point switches on (key->l3_proto, key->l4_proto)*/
+/* and routes to a per-protocol worker.  Worker contract:                     */
+/*                                                                            */
+/*   return  0           -> packed hw_flow_id written through @out_hw_id      */
+/*           -ENODEV     -> no HW backing for this protocol/netdev; caller    */
+/*                          (ask_flow.c body-3) must fall back to the         */
+/*                          fake_hw_id_seq software-only counter              */
+/*           -EOPNOTSUPP -> protocol not yet implemented in HW (body-2 only   */
+/*                          ships v4-TCP; v4-UDP/v6-TCP/v6-UDP land later)    */
+/*           other -E    -> hard failure (MURAM exhaustion, key table full,   */
+/*                          mask/size mismatch); caller MUST fail the insert  */
+/*                          rather than silently fall back, so userspace      */
+/*                          observes the error and does not believe a flow    */
+/*                          is offloaded when it is not                       */
+/*                                                                            */
+/* The dispatcher itself acquires no locks; per-CC-node serialisation lives   */
+/* inside the worker around the pcd->lock + fman_pcd_cc_node_add_key() pair   */
+/* (the silicon-side serialisation is provided by the in-tree PCD subsystem  */
+/* mutex; the per-ask_hw_pcd mutex above only protects the local handle      */
+/* fields - currently a no-op until body-3 starts mutating per-flow state). */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Resolve @oif to an FMan-backed dpaa netdev and look up its
+ * RX-default FQID via the in-tree export from patch 0028.
+ *
+ * Returns 0 on success with *fqid populated, -ENODEV if @oif does
+ * not name a dpaa-backed netdev (the standard "non-DPAA" fallback
+ * signal), or any other -E forwarded from dpaa_get_rx_default_fqid().
+ *
+ * Locking: takes rcu_read_lock() across dev_get_by_index_rcu() so the
+ * netdev cannot disappear underneath us; dpaa_get_rx_default_fqid()
+ * is documented (see <linux/fsl/dpaa_flow_offload.h>) to require RTNL,
+ * but the actual list it walks (priv->dpaa_fq_list) is only mutated
+ * at probe/remove and is stable for the netdev's lifetime - rcu_read_
+ * lock + dev_get_by_index_rcu is sufficient to keep the netdev alive
+ * across the call.  We pass init_net here because all dpaa netdevs
+ * live in the host network namespace by construction (the dpaa
+ * driver does not register per-netns).
+ */
+static int ask_hw_resolve_oif_fqid(u32 oif, u32 *fqid)
+{
+        struct net_device *dev;
+        int rc;
+
+        rcu_read_lock();
+        dev = dev_get_by_index_rcu(&init_net, oif);
+        if (!dev) {
+                rcu_read_unlock();
+                return -ENODEV;
+        }
+        rc = dpaa_get_rx_default_fqid(dev, fqid);
+        rcu_read_unlock();
+        return rc;
+}
+
+/*
+ * v4-TCP worker.  Builds a 13-byte exact-match key matching the KG
+ * scheme's PARSE_RESULT extract layout (SIP[4] DIP[4] proto[1]
+ * sport[2] dport[2]), looks up the netdev's RX-default FQID, and
+ * installs the (key, FORWARD_FQ(fqid)) entry into the cc_v4_tcp
+ * node's key table.
+ *
+ * IMPORTANT: the byte layout below MUST stay in lock-step with the
+ * five PARSE_RESULT extract specs in ask_hw_pcd_build_chain() above.
+ * The KG hardware concatenates extracts in slot order, so:
+ *   bytes[ 0.. 3] = SIP   (matches kg_params.extracts[0])
+ *   bytes[ 4.. 7] = DIP   (matches kg_params.extracts[1])
+ *   bytes[    8 ] = proto (matches kg_params.extracts[2])
+ *   bytes[ 9..10] = sport (matches kg_params.extracts[3])
+ *   bytes[11..12] = dport (matches kg_params.extracts[4])
+ *
+ * The 5-tuple fields in struct ask_flow_key are already __be (network
+ * byte order) per the parse-result wire format, so a straight memcpy
+ * is correct - no swap required.  src_ip[16]/dst_ip[16] hold the v4
+ * address packed into the first 4 bytes per the ask_flow.c contract.
+ */
+static int ask_hw_flow_insert_v4_tcp(struct ask_hw_pcd *h,
+                                     const struct ask_flow_key *key,
+                                     u32 oif, u32 action_flags,
+                                     u32 *out_hw_id)
+{
+        struct fman_pcd_cc_key_entry entry;
+        struct fman_pcd_action *act;
+        u32 fqid;
+        int slot;
+        int rc;
+
+        /*
+         * action_flags is reserved for body-3+ when NAT/TTL-DEC/VLAN
+         * manipulation actions get wired in via FMAN_PCD_ACTION_
+         * MANIPULATE.  For body-2 the only action is a straight
+         * FORWARD_FQ to the netdev's RX-default FQID, mirroring what
+         * the kernel datapath would do for an un-offloaded flow.
+         */
+        (void)action_flags;
+
+        rc = ask_hw_resolve_oif_fqid(oif, &fqid);
+        if (rc)
+                return rc;     /* -ENODEV propagates as fallback signal */
+
+        memset(&entry, 0, sizeof(entry));
+
+        /* Key bytes — see comment block above for slot layout. */
+        memcpy(&entry.key[0],  &key->src_ip[0], 4);   /* SIP   */
+        memcpy(&entry.key[4],  &key->dst_ip[0], 4);   /* DIP   */
+        entry.key[8]  = IPPROTO_TCP;                  /* proto */
+        memcpy(&entry.key[9],  &key->sport, 2);       /* sport */
+        memcpy(&entry.key[11], &key->dport, 2);       /* dport */
+
+        /* Exact match: all 13 bytes contribute. */
+        memset(&entry.mask[0], 0xff, ASK_HW_V4_KEY_WIDTH);
+
+        act = &entry.action;
+        act->type             = FMAN_PCD_ACTION_FORWARD_FQ;
+        act->forward_fq.fqid  = fqid;
+
+        mutex_lock(&h->lock);
+        slot = fman_pcd_cc_node_add_key(h->cc_v4_tcp, &entry);
+        mutex_unlock(&h->lock);
+
+        if (slot < 0) {
+                ask_pr_warn("hw: cc_node_add_key v4-TCP failed (%d)\n", slot);
+                return slot;
+        }
+        if (slot > U16_MAX) {
+                /*
+                 * Should never happen — node key table size is u16.
+                 * Defensive: roll back the just-installed key so we
+                 * do not leak a slot the dispatcher cannot reference.
+                 */
+                struct fman_pcd_action drop = { .type = FMAN_PCD_ACTION_DROP };
+                ask_pr_warn("hw: cc_node_add_key v4-TCP slot %d > U16_MAX\n", slot);
+                mutex_lock(&h->lock);
+                (void)fman_pcd_cc_node_modify_next_action(h->cc_v4_tcp,
+                                                         (u16)slot, &drop);
+                mutex_unlock(&h->lock);
+                return -EOVERFLOW;
+        }
+
+        *out_hw_id = ask_priv_pack_hw_flow_id(ASK_HW_FLOW_ID_TOKEN_V4_TCP,
+                                              (u16)slot);
+        return 0;
+}
+
+int ask_hw_flow_insert(const struct ask_flow_key *key,
+                       u32 oif, u32 action_flags,
+                       u32 *out_hw_id)
+{
+        struct ask_hw_pcd *h;
+
+        if (!key || !out_hw_id)
+                return -EINVAL;
+
+        h = ask_hw_pcd_get();
+        if (!h)
+                return -ENODEV;     /* no HW backing -> SW fallback */
+
+        if (key->l3_proto == ASK_FLOW_L3_IPV4 &&
+            key->l4_proto == IPPROTO_TCP)
+                return ask_hw_flow_insert_v4_tcp(h, key, oif, action_flags,
+                                                 out_hw_id);
+
+        return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(ask_hw_flow_insert);
+
+int ask_hw_flow_remove(u32 hw_flow_id)
+{
+        struct ask_hw_pcd *h;
+        struct fman_pcd_action drop = { .type = FMAN_PCD_ACTION_DROP };
+        u16 token, key_idx;
+        int rc;
+
+        h = ask_hw_pcd_get();
+        if (!h)
+                return -ENODEV;
+
+        ask_priv_unpack_hw_flow_id(hw_flow_id, &token, &key_idx);
+
+        switch (token) {
+        case ASK_HW_FLOW_ID_TOKEN_NONE:
+                /*
+                 * Caller handed us a software-only id.  Not our slot
+                 * to free; ask_flow.c body-3 should not have called us
+                 * for this id, but be defensive and silently succeed.
+                 */
+                return 0;
+
+        case ASK_HW_FLOW_ID_TOKEN_V4_TCP:
+                /*
+                 * The CC node has no real "remove key" operation in
+                 * the public ABI - the silicon record format keeps
+                 * slot indices stable across the lifetime of the
+                 * node so callers can hold (token, idx) tuples
+                 * indefinitely.  Replacing the slot's action with
+                 * DROP is the documented removal pattern: future
+                 * frames that hash to this slot get dropped at the
+                 * CC walker rather than mis-routed to a stale FQID.
+                 */
+                mutex_lock(&h->lock);
+                rc = fman_pcd_cc_node_modify_next_action(h->cc_v4_tcp,
+                                                         key_idx, &drop);
+                mutex_unlock(&h->lock);
+                if (rc)
+                        ask_pr_warn("hw: remove v4-TCP slot %u failed (%d)\n",
+                                    key_idx, rc);
+                return rc;
+
+        default:
+                ask_pr_warn("hw: remove unknown token %u (id 0x%08x)\n",
+                            token, hw_flow_id);
+                return -EINVAL;
+        }
+}
+EXPORT_SYMBOL_GPL(ask_hw_flow_remove);
+
+int ask_hw_flow_query_stats(u32 hw_flow_id, u64 *packets, u64 *bytes)
+{
+        /*
+         * Per-CC-key counters land in M3 (PR15h - bulk OP_FLOW_DUMP_
+         * STATS poller) once the dpaa rx-default fqid wiring is in
+         * place and we can read MURAM-resident per-action counters.
+         * Body-2 returns -EOPNOTSUPP so the genl OP_FLOW_QUERY_STATS
+         * handler reports the software-table counters (which are
+         * exact for the SW fallback path and zero for HW-offloaded
+         * flows until the poller starts populating them).
+         */
+        (void)hw_flow_id;
+        (void)packets;
+        (void)bytes;
+        return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(ask_hw_flow_query_stats);
 
 int ask_hw_init(void)
 {

@@ -176,6 +176,45 @@ u32  ask_priv_pack_hw_flow_id(u16 node_token, u16 key_idx);
 void ask_priv_unpack_hw_flow_id(u32 hw_flow_id,
         u16 *node_token, u16 *key_idx);
 
+/*
+ * PR14g-body-2 - runtime flow insert / remove dispatcher.
+ *
+ * struct ask_flow_key is forward-declared further down in this header
+ * (ask_flow.c section); body-2 only needs the pointer type, not the
+ * full layout, so the order here works.
+ *
+ * Contract for ask_hw_flow_insert():
+ *   return  0           -> packed (token, idx) hw_flow_id in *out_hw_id;
+ *                          caller stores it in struct ask_flow.hw_flow_id
+ *                          and uses ask_hw_flow_remove() at teardown
+ *           -ENODEV     -> no HW backing for this protocol/netdev (no DPAA,
+ *                          PCD bring-up failed, or @oif is not a dpaa port);
+ *                          caller MUST fall back to the SW-only fake_hw_id
+ *                          atomic so the flow still appears in the SW table
+ *           -EOPNOTSUPP -> protocol path not implemented yet (body-2 ships
+ *                          v4-TCP only; v4-UDP / v6-TCP / v6-UDP land later);
+ *                          caller falls back identically to -ENODEV
+ *           other -E    -> hard failure (MURAM exhaustion, key table full,
+ *                          mask/size mismatch); caller MUST fail the insert
+ *                          rather than silently fall back, so userspace
+ *                          observes the error
+ *
+ * ask_hw_flow_remove() is NULL-safe when @hw_flow_id has token NONE
+ * (an SW-only id from the fake counter) and returns 0 in that case so
+ * callers can call it unconditionally on every flow tear-down without
+ * inspecting the token first.
+ *
+ * ask_hw_flow_query_stats() returns -EOPNOTSUPP at body-2; per-key
+ * MURAM counters land in M3 with the bulk OP_FLOW_DUMP_STATS poller.
+ */
+struct ask_flow_key;
+
+int  ask_hw_flow_insert(const struct ask_flow_key *key,
+        u32 oif, u32 action_flags,
+        u32 *out_hw_id);
+int  ask_hw_flow_remove(u32 hw_flow_id);
+int  ask_hw_flow_query_stats(u32 hw_flow_id, u64 *packets, u64 *bytes);
+
 /* ------------------------------------------------------------------------- */
 /* ask_genl_attr.c — nla_policy tables shared across nested attribute sets    */
 /* ------------------------------------------------------------------------- */
