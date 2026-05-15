@@ -45,8 +45,12 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/err.h>
+#include <linux/mutex.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/types.h>
+#include <linux/fsl/fman_pcd.h>
 
 #include "include/ask_internal.h"
 
@@ -236,6 +240,324 @@ int ask_hw_ucode_get_version(struct ask_hw_ucode_version *out)
 }
 EXPORT_SYMBOL_GPL(ask_hw_ucode_get_version);
 
+/* ------------------------------------------------------------------------- */
+/* PR14g-body-1 (M2.5g): FMan PCD bring-up                                    */
+/*                                                                            */
+/* Walks the device tree to the first "fsl,fman" node, resolves the           */
+/* per-FMan struct fman_pcd handle via fman_pcd_from_of_node() (a             */
+/* convenience helper exported by drivers/net/ethernet/freescale/fman/        */
+/* fman.c at PR14g-prep / patch 0027), then constructs the minimal silicon    */
+/* programming pipeline that the M2 acceptance gate (spec §11.1 / §13.7)      */
+/* needs to traverse a single IPv4 TCP flow through the 210 fast path:        */
+/*                                                                            */
+/*   1. one CC tree with a single group (group_count = 1 - PR14c-body-1's    */
+/*      256-byte MURAM-resident group table covers up to 16 entries but       */
+/*      v1.0 only uses one)                                                   */
+/*   2. one EMPTY CC node, extract = KEY mode at offset 0 size 13 (the        */
+/*      KG-concatenated 5-tuple width); miss action = DROP so unprogrammed    */
+/*      keys fail silently to the FQ-0 trap rather than misroute              */
+/*   3. one KG scheme extracting the IPv4 5-tuple from PARSE_RESULT (SIP      */
+/*      offset 12 size 4, DIP offset 16 size 4, proto offset 9 size 1, sport  */
+/*      offset 20 size 2, dport offset 22 size 2 - 13 bytes total, well       */
+/*      under the 36-byte FMan KG generic extract budget per RM 8.7.5)        */
+/*   4. KG scheme attach to the CC tree via fman_pcd_kg_attach_cc() so that  */
+/*      classification hits chain into the CC node's empty key table          */
+/*                                                                            */
+/* All four allocations are MURAM-backed and counted against pcd->muram_      */
+/* budget by the in-tree PCD subsystem (PR14a-f bodies).  Body-1 makes NO    */
+/* port-bind call (fman_pcd_kg_bind_port) - the bind has to wait until the   */
+/* dpaa Ethernet driver tells us which FMan port is RX-default for which     */
+/* netdev, and that wiring lives in PR15 (M3).  At body-1 the chain is       */
+/* programmed but quiescent: silicon does the lookup against the all-zero    */
+/* miss-slot and forwards everything to the kernel fast path as before,     */
+/* identical to module-not-loaded behaviour.                                 */
+/*                                                                            */
+/* Failure mode: ANY -E from the chain unwinds in reverse order and leaves   */
+/* ask_hw_pcd.pcd = NULL.  ask_hw_pcd_get() then returns NULL and the body-2 */
+/* dispatcher falls back to fake_hw_id_seq software-only mode.  This is the  */
+/* expected outcome on non-DPAA hosts and any host whose fsl,fman node is    */
+/* status="disabled" - ask.ko remains functionally complete (genl up,        */
+/* software flow table up) just without HW-offload.                          */
+/* ------------------------------------------------------------------------- */
+
+/* Standard FMan parse-result offsets (RM 8.7.3 Table 8-107). */
+#define ASK_HW_PR_OFF_L4PROTO   9
+#define ASK_HW_PR_OFF_IPV4_SIP  12
+#define ASK_HW_PR_OFF_IPV4_DIP  16
+#define ASK_HW_PR_OFF_L4_SPORT  20
+#define ASK_HW_PR_OFF_L4_DPORT  22
+
+/* KG-concatenated 5-tuple width = SIP(4) + DIP(4) + proto(1) + sport(2) + dport(2). */
+#define ASK_HW_V4_KEY_WIDTH     13
+
+struct ask_hw_pcd {
+        struct mutex lock;
+        struct fman_pcd *pcd;
+        struct fman_pcd_cc_tree *cc_tree;
+        struct fman_pcd_cc_node *cc_v4_tcp;
+        struct fman_pcd_kg_scheme *kg_v4_tcp;
+};
+
+/*
+ * Single per-module instance.  Allocated once in ask_hw_pcd_bringup()
+ * and freed once in ask_hw_pcd_teardown().  Lifetime spans the whole
+ * module: ask_main.c calls ask_hw_init()/ask_hw_exit() at module load/
+ * unload exactly once.  Hence the bare static pointer rather than a
+ * refcounted container - body-2's runtime dispatcher only ever reads
+ * the pointer, never re-allocates it.
+ */
+static struct ask_hw_pcd *ask_hw_pcd_inst;
+
+static int ask_hw_pcd_build_chain(struct ask_hw_pcd *h)
+{
+        struct fman_pcd_cc_extract extract;
+        struct fman_pcd_cc_key_table keys;
+        struct fman_pcd_kg_scheme_params kg_params;
+        int rc;
+
+        /* Step 1 - empty 1-group CC tree (PR14c-body-1 silicon programming). */
+        h->cc_tree = fman_pcd_cc_tree_create(h->pcd, 1);
+        if (IS_ERR(h->cc_tree)) {
+                rc = PTR_ERR(h->cc_tree);
+                h->cc_tree = NULL;
+                ask_pr_warn("hw: cc_tree_create failed (%d) - HW offload disabled\n",
+                            rc);
+                return rc;
+        }
+
+        /*
+         * Step 2 - empty v4-TCP CC node.  Extract source is KEY (i.e. the
+         * KG-concatenated extract output, NOT the parse result directly),
+         * starting at byte 0 of the KG result with the full 13-byte width.
+         * num_keys = 0 -> body-2 fills in slots via fman_pcd_cc_node_add_key().
+         * miss_action = DROP so unprogrammed slots are safe-by-default.
+         */
+        memset(&extract, 0, sizeof(extract));
+        extract.type   = FMAN_PCD_CC_EXTRACT_KEY;
+        extract.offset = 0;
+        extract.size   = ASK_HW_V4_KEY_WIDTH;
+
+        memset(&keys, 0, sizeof(keys));
+        keys.num_keys = 0;
+        keys.keys = NULL;
+        keys.miss_action.type = FMAN_PCD_ACTION_DROP;
+
+        h->cc_v4_tcp = fman_pcd_cc_node_create(h->cc_tree, &extract, &keys);
+        if (IS_ERR(h->cc_v4_tcp)) {
+                rc = PTR_ERR(h->cc_v4_tcp);
+                h->cc_v4_tcp = NULL;
+                ask_pr_warn("hw: cc_node_create v4-TCP failed (%d)\n", rc);
+                goto err_tree;
+        }
+
+        /*
+         * Step 3 - IPv4 5-tuple KG scheme.  Use the first free scheme id
+         * (params.id = -1) so we coexist with whatever the in-tree dpaa
+         * driver may have programmed.  use_hash = true so the hash output
+         * feeds into the CC tree group-table index.
+         */
+        memset(&kg_params, 0, sizeof(kg_params));
+        kg_params.id = -1;
+        kg_params.use_hash = true;
+        kg_params.default_fqid = 0;     /* Unused with use_hash = true. */
+        kg_params.num_extracts = 5;
+
+        kg_params.extracts[0].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
+        kg_params.extracts[0].offset = ASK_HW_PR_OFF_IPV4_SIP;
+        kg_params.extracts[0].size   = 4;
+        kg_params.extracts[0].mask   = 0xff;
+
+        kg_params.extracts[1].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
+        kg_params.extracts[1].offset = ASK_HW_PR_OFF_IPV4_DIP;
+        kg_params.extracts[1].size   = 4;
+        kg_params.extracts[1].mask   = 0xff;
+
+        kg_params.extracts[2].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
+        kg_params.extracts[2].offset = ASK_HW_PR_OFF_L4PROTO;
+        kg_params.extracts[2].size   = 1;
+        kg_params.extracts[2].mask   = 0xff;
+
+        kg_params.extracts[3].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
+        kg_params.extracts[3].offset = ASK_HW_PR_OFF_L4_SPORT;
+        kg_params.extracts[3].size   = 2;
+        kg_params.extracts[3].mask   = 0xff;
+
+        kg_params.extracts[4].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
+        kg_params.extracts[4].offset = ASK_HW_PR_OFF_L4_DPORT;
+        kg_params.extracts[4].size   = 2;
+        kg_params.extracts[4].mask   = 0xff;
+
+        h->kg_v4_tcp = fman_pcd_kg_scheme_create(h->pcd, &kg_params);
+        if (IS_ERR(h->kg_v4_tcp)) {
+                rc = PTR_ERR(h->kg_v4_tcp);
+                h->kg_v4_tcp = NULL;
+                ask_pr_warn("hw: kg_scheme_create v4-TCP failed (%d)\n", rc);
+                goto err_node;
+        }
+
+        /* Step 4 - chain KG -> CC tree.  Once attached, classification hits
+         * fan out via the CC tree group table to the (currently empty)
+         * v4-TCP node.  No port bind yet - that happens in M3.
+         */
+        rc = fman_pcd_kg_attach_cc(h->kg_v4_tcp, h->cc_tree);
+        if (rc) {
+                ask_pr_warn("hw: kg_attach_cc v4-TCP failed (%d)\n", rc);
+                goto err_kg;
+        }
+
+        ask_pr_info("hw: FMan PCD chain up (v4-TCP empty CC node, KG-attached, no port-bind)\n");
+        return 0;
+
+err_kg:
+        fman_pcd_kg_scheme_destroy(h->kg_v4_tcp);
+        h->kg_v4_tcp = NULL;
+err_node:
+        fman_pcd_cc_node_destroy(h->cc_v4_tcp);
+        h->cc_v4_tcp = NULL;
+err_tree:
+        fman_pcd_cc_tree_destroy(h->cc_tree);
+        h->cc_tree = NULL;
+        return rc;
+}
+
+int ask_hw_pcd_bringup(void)
+{
+        struct ask_hw_pcd *h;
+        struct device_node *np;
+        struct fman_pcd *pcd;
+        int rc;
+
+        if (ask_hw_pcd_inst) {
+                ask_pr_dbg("hw: pcd bringup already done\n");
+                return 0;
+        }
+
+        /*
+         * Locate the first fsl,fman node and resolve to a struct fman_pcd *.
+         * fman_pcd_from_of_node() handles the platform-device walk,
+         * fman_bind(), fman_get_pcd() chain in driver-private scope so we
+         * never need to include the in-tree fman.h.  NULL return is normal
+         * on non-DPAA hosts - we treat it as a soft-failure.
+         */
+        np = of_find_compatible_node(NULL, NULL, "fsl,fman");
+        if (!np) {
+                ask_pr_info("hw: no fsl,fman in DT - HW offload not available\n");
+                return 0;
+        }
+
+        pcd = fman_pcd_from_of_node(np);
+        of_node_put(np);
+        if (!pcd) {
+                ask_pr_info("hw: fman_pcd_from_of_node returned NULL - HW offload not available\n");
+                return 0;
+        }
+
+        h = kzalloc(sizeof(*h), GFP_KERNEL);
+        if (!h)
+                return -ENOMEM;
+
+        mutex_init(&h->lock);
+        h->pcd = pcd;
+
+        rc = ask_hw_pcd_build_chain(h);
+        if (rc) {
+                /*
+                 * Build failure means the chain is fully unwound (build
+                 * itself rolls back on every error path).  Free the handle
+                 * but DO NOT propagate -E up: ask.ko should still load and
+                 * fall back to software-only mode.  The single warn line
+                 * inside build_chain has already explained the failure.
+                 */
+                kfree(h);
+                return 0;
+        }
+
+        ask_hw_pcd_inst = h;
+        return 0;
+}
+
+void ask_hw_pcd_teardown(void)
+{
+        struct ask_hw_pcd *h = ask_hw_pcd_inst;
+
+        if (!h)
+                return;
+
+        ask_hw_pcd_inst = NULL;
+
+        /*
+         * Teardown order is exact reverse of bring-up.  Each destroy is
+         * NULL-safe per the public-ABI contract in <linux/fsl/fman_pcd.h>,
+         * but we set the local field to NULL after each call as a
+         * defence-in-depth measure should a future leak-detection
+         * dump_stack() ever walk this struct mid-teardown.
+         *
+         * No need to detach the KG scheme from the CC tree explicitly -
+         * fman_pcd_kg_scheme_destroy() clears the CCBS register as part
+         * of its silicon teardown (PR14b-body).
+         */
+        if (h->kg_v4_tcp) {
+                fman_pcd_kg_scheme_destroy(h->kg_v4_tcp);
+                h->kg_v4_tcp = NULL;
+        }
+        if (h->cc_v4_tcp) {
+                fman_pcd_cc_node_destroy(h->cc_v4_tcp);
+                h->cc_v4_tcp = NULL;
+        }
+        if (h->cc_tree) {
+                fman_pcd_cc_tree_destroy(h->cc_tree);
+                h->cc_tree = NULL;
+        }
+        /*
+         * h->pcd is owned by the FMan driver - we do not free it.  The
+         * fman_bind() call inside fman_pcd_from_of_node() is balanced by
+         * the FMan driver's own devm cleanup at unbind.
+         */
+        mutex_destroy(&h->lock);
+        kfree(h);
+
+        ask_pr_dbg("hw: FMan PCD chain torn down\n");
+}
+
+struct ask_hw_pcd *ask_hw_pcd_get(void)
+{
+        /*
+         * No READ_ONCE/WRITE_ONCE: the pointer is only ever published
+         * once in ask_hw_pcd_bringup() (under the implicit module-init
+         * ordering) and only ever cleared once in ask_hw_pcd_teardown()
+         * (under the implicit module-exit ordering).  Body-2 callers
+         * run between init and exit; no torn-pointer hazard exists.
+         */
+        return ask_hw_pcd_inst;
+}
+
+/* ------------------------------------------------------------------------- */
+/* hw_flow_id pack/unpack (PR14g-body-1)                                      */
+/*                                                                            */
+/* The 32-bit hw_flow_id stored in struct ask_flow encodes:                   */
+/*   bits 31..16   node_token  - identifies the owning CC node                */
+/*   bits 15..0    key_idx     - 0-based slot inside that node's key table    */
+/*                                                                            */
+/* Pure functions; no global state.  Declared in ask_internal.h so other     */
+/* TUs (debugfs, genl dump) can call the unpacker for pretty-printing.       */
+/* ------------------------------------------------------------------------- */
+
+u32 ask_priv_pack_hw_flow_id(u16 node_token, u16 key_idx)
+{
+        return ((u32)node_token << 16) | (u32)key_idx;
+}
+EXPORT_SYMBOL_GPL(ask_priv_pack_hw_flow_id);
+
+void ask_priv_unpack_hw_flow_id(u32 hw_flow_id,
+                                u16 *node_token, u16 *key_idx)
+{
+        if (node_token)
+                *node_token = (u16)(hw_flow_id >> 16);
+        if (key_idx)
+                *key_idx    = (u16)(hw_flow_id & 0xffffu);
+}
+EXPORT_SYMBOL_GPL(ask_priv_unpack_hw_flow_id);
+
 int ask_hw_init(void)
 {
         struct ask_hw_ucode_version v;
@@ -253,12 +575,21 @@ int ask_hw_init(void)
         if (rc) {
                 ask_pr_warn("hw: ucode version probe failed (%d); ASK_CMD_GET_INFO will report zeros\n",
                             rc);
-                return 0;
+                /* Continue - non-fatal. */
         }
+
+        /*
+         * PR14g-body-1: bring up the FMan PCD chain.  Always returns 0 -
+         * any real failure is logged inside and results in ask_hw_pcd_get()
+         * returning NULL, which body-2's dispatcher treats as the
+         * software-only fallback signal.
+         */
+        (void)ask_hw_pcd_bringup();
         return 0;
 }
 
 void ask_hw_exit(void)
 {
+        ask_hw_pcd_teardown();
         WRITE_ONCE(ask_hw_cached_valid, false);
 }
