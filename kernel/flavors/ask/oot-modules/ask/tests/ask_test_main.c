@@ -29,14 +29,20 @@ extern struct kunit_suite ask_hostcmd_suite;
 extern struct kunit_suite ask_flow_suite;
 extern struct kunit_suite ask_flow_offload_suite;
 extern struct kunit_suite ask_genl_suite;
+extern struct kunit_suite ask_hw_pcd_suite;
 
 /*
  * kunit_test_suites() is variadic: append further suites here as the
- * M1 PRs land them. Order does not matter for execution but stays
- * canonical for readability. ask_genl_suite landed in PR9 (M1.5).
+ * M1/M2 PRs land them. Order does not matter for execution but stays
+ * canonical for readability. ask_genl_suite landed in PR9 (M1.5);
+ * ask_hw_pcd_suite landed in PR14g-body-4 (M2.5g) and covers the
+ * FMan PCD dispatcher contract (pack/unpack helpers, no-HW fallback
+ * arms, TOKEN_NONE no-op tear-down) that ask_flow.c body-3 depends
+ * on.
  */
 kunit_test_suites(&ask_dummy_suite, &ask_hostcmd_suite, &ask_flow_suite,
-  &ask_flow_offload_suite, &ask_genl_suite);
+  &ask_flow_offload_suite, &ask_genl_suite,
+  &ask_hw_pcd_suite);
 
 MODULE_AUTHOR("ASK2 contributors");
 MODULE_DESCRIPTION("ASK2 kunit test harness");
