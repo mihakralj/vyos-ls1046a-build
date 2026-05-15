@@ -181,7 +181,8 @@ int ask_flow_insert(struct ask_flow_table *t,
 {
 struct ask_flow *f;
 int rc;
-u32 hw_id;
+u32 hw_id = 0;
+bool hw_inserted = false;
 
 if (!t || !key || !out_hw_id)
 return -EINVAL;
@@ -197,20 +198,70 @@ f->action_flags = action_flags;
 u64_stats_init(&f->stats.syncp);
 
 /*
- * Allocate a fake hw_flow_id. PR14 will replace this with the
- * value returned by ask_hw_flow_insert_v4_tcp() once the real
- * fman_host_cmd_send() exists. The atomic counter never wraps in
- * practice (32 bits at typical insert rates is millennia), but
- * if it ever did the rhashtable still keys on cookie so collisions
- * on hw_id are non-fatal here — they would only matter once we
- * round-trip the hw_id through the silicon.
+ * PR14g-body-3: try the silicon fast path first.
+ *
+ *   rc == 0          -> hw_id is a packed (token, key_idx) referring
+ *                       to a real CC-node slot. Caller's tear-down
+ *                       path (ask_flow_remove) will pass it back to
+ *                       ask_hw_flow_remove() to free the slot.
+ *   rc == -ENODEV    -> no HW backing (no DPAA on this host, PCD
+ *                       bring-up failed, or @oif is not a dpaa-backed
+ *                       netdev). Fall back to the software-only fake
+ *                       counter so the flow still appears in the SW
+ *                       table for stats / dump purposes.
+ *   rc == -EOPNOTSUPP-> protocol path not implemented in HW yet
+ *                       (body-2 ships v4-TCP only; v4-UDP / v6-* land
+ *                       in M3.x). Same fallback as -ENODEV.
+ *   other -E         -> hard failure (MURAM exhaustion, key table
+ *                       full, mask/size mismatch). Propagate so
+ *                       userspace sees the real error rather than
+ *                       silently believing a flow is offloaded when
+ *                       it is not. Free the freshly-allocated entry
+ *                       and bail out.
+ *
+ * The dispatcher contract is documented in include/ask_internal.h
+ * (PR14g-body-2 section). Token packing uses bit 31..16 = node
+ * token, bit 15..0 = slot; the SW-only fake counter is a flat u32
+ * starting at 1 and incrementing — these never collide with a real
+ * (token >= 1, slot < 65536) packed id at typical workloads, and
+ * even if the counter ever wrapped the only consequence would be a
+ * misroute through ask_hw_flow_remove() (which the TOKEN_NONE arm
+ * silently ignores). Cookie is the rht key, not hw_id, so collisions
+ * here are non-fatal.
  */
+rc = ask_hw_flow_insert(key, oif, action_flags, &hw_id);
+if (rc == 0) {
+hw_inserted = true;
+} else if (rc == -ENODEV || rc == -EOPNOTSUPP) {
 hw_id = (u32)atomic_inc_return(&t->fake_hw_id_seq);
+} else {
+ask_pr_warn("flow: hw_insert(cookie=0x%llx) hard fail %d\n",
+    cookie, rc);
+kfree(f);
+return rc;
+}
 f->hw_flow_id = hw_id;
 
 rc = rhashtable_lookup_insert_fast(&t->rht, &f->node,
    ask_flow_rht_params);
 if (rc) {
+/*
+ * Rollback: the silicon already has the key installed (slot
+ * reserved by ask_hw_flow_insert above) but the SW table
+ * rejected the cookie (most commonly -EEXIST from a duplicate
+ * nft flow add). Drop the silicon slot before freeing the
+ * software entry so we do not leak a forever-routed CC slot
+ * to a now-orphan flow. ask_hw_flow_remove() is NULL-safe on
+ * a TOKEN_NONE id, so the SW-fallback path's call here is a
+ * harmless no-op.
+ */
+if (hw_inserted) {
+int rm_rc = ask_hw_flow_remove(hw_id);
+
+if (rm_rc)
+ask_pr_warn("flow: hw_remove rollback (cookie=0x%llx hw_id=0x%08x) failed %d\n",
+    cookie, hw_id, rm_rc);
+}
 kfree(f);
 if (rc == -EEXIST)
 return -EEXIST;
@@ -228,6 +279,7 @@ EXPORT_SYMBOL_GPL(ask_flow_insert);
 int ask_flow_remove(struct ask_flow_table *t, u64 cookie)
 {
 struct ask_flow *f;
+u32 hw_id;
 int rc;
 
 if (!t)
@@ -240,17 +292,43 @@ rcu_read_unlock();
 return -ENOENT;
 }
 /*
+ * Snapshot hw_flow_id BEFORE the rht unlink so we can hand it to
+ * ask_hw_flow_remove() after the SW table no longer references the
+ * entry. Reading f->hw_flow_id is safe under rcu_read_lock — the
+ * field is set once at insert time and never mutated after.
+ *
  * Pin the entry across the rhashtable_remove_fast() call. The
  * remove path itself does not free; it just unlinks. Once unlink
  * succeeds we hand the entry to call_rcu() so any concurrent
  * lookup that already obtained the pointer drains through a
  * grace period before the kfree fires.
  */
+hw_id = f->hw_flow_id;
 rc = rhashtable_remove_fast(&t->rht, &f->node, ask_flow_rht_params);
 rcu_read_unlock();
 
 if (rc)
 return rc;
+
+/*
+ * PR14g-body-3: drop the silicon slot (if any). NULL-safe on a
+ * SW-only id (TOKEN_NONE arm of the dispatcher returns 0 without
+ * touching hardware), so unconditional call here covers both the
+ * HW-offloaded and SW-fallback cases without inspection. A non-
+ * zero return is logged but not propagated — the SW table has
+ * already released ownership of the cookie and the caller (nft
+ * flow destroy) cannot re-attempt; surfacing the error here would
+ * just leak the SW entry. In practice the only non-zero return
+ * is -EINVAL on a malformed token, which means the slot was never
+ * really ours and there is nothing to free.
+ */
+{
+int rm_rc = ask_hw_flow_remove(hw_id);
+
+if (rm_rc && rm_rc != -ENODEV)
+ask_pr_warn("flow: hw_remove(cookie=0x%llx hw_id=0x%08x) %d\n",
+    cookie, hw_id, rm_rc);
+}
 
 atomic_dec(&t->num_flows);
 call_rcu(&f->rcu, ask_flow_free_rcu);
