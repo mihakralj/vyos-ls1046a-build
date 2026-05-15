@@ -1,0 +1,131 @@
+From f35b9a60c9107f11af1e35fa8bd23f9a954ed22a Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Thu, 14 May 2026 23:42:27 +0000
+Subject: [PATCH] fsl/dpaa: export per-port RX default FQID accessor for FMan
+ PCD CC-node action sinks
+
+---
+ .../net/ethernet/freescale/dpaa/dpaa_eth.c    | 52 ++++++++++++++++++-
+ include/linux/fsl/dpaa_flow_offload.h         | 34 +++++++++++-
+ 2 files changed, 83 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 2dda81d..7227672 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -436,8 +436,58 @@ int dpaa_unregister_flow_offload_handler(const struct dpaa_flow_offload_ops *ops
+ }
+ EXPORT_SYMBOL_GPL(dpaa_unregister_flow_offload_handler);
+ 
++/* dpaa_ops is defined later in this file — forward-declare so
++ * dpaa_get_rx_default_fqid() can compare against it without
++ * pulling the entire 200+ line struct definition up here.
++ */
++static const struct net_device_ops dpaa_ops;
++
++/**
++ * dpaa_get_rx_default_fqid() - per-port RX default FQID accessor.
++ *
++ * See <linux/fsl/dpaa_flow_offload.h> for the full contract.  This is
++ * the authoritative source for "where does the kernel NAPI poller
++ * dequeue from on this port" — used by the ASK2 FMan PCD bring-up
++ * path (kernel/flavors/ask/oot-modules/ask/ask_hw.c) to program a
++ * CC-node FORWARD_FQ action whose sink matches the existing kernel
++ * datapath.  Pointing the CC node at any other FQID would cause
++ * matched frames to land in a queue with no consumer and be dropped
++ * silently after a BMan buffer-pool timeout.
++ *
++ * Defensive checks:
++ *   - @dev must be backed by dpaa_ops; otherwise return -ENODEV so
++ *     the caller does not interpret an unrelated netdev_priv() blob
++ *     as a struct dpaa_priv.
++ *   - The FQ list must contain at least one FQ_TYPE_RX_DEFAULT entry;
++ *     if not, return -ENOENT and let the caller log a probe-time bug.
++ *   - No locking: the list is only mutated by dpaa_probe() /
++ *     dpaa_remove(); callers are expected to hold RTNL (the standard
++ *     netdev-lifetime contract for any access through net_device *).
++ */
++int dpaa_get_rx_default_fqid(struct net_device *dev, u32 *fqid)
++{
++struct dpaa_priv *priv;
++struct dpaa_fq *fq;
++
++if (!dev || !fqid)
++return -EINVAL;
++
++if (dev->netdev_ops != &dpaa_ops)
++return -ENODEV;
++
++priv = netdev_priv(dev);
++list_for_each_entry(fq, &priv->dpaa_fq_list, list) {
++if (fq->fq_type == FQ_TYPE_RX_DEFAULT) {
++*fqid = fq->fqid;
++return 0;
++}
++}
++return -ENOENT;
++}
++EXPORT_SYMBOL_GPL(dpaa_get_rx_default_fqid);
++
+ static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
+-			 void *type_data)
++ void *type_data)
+ {
+ 	struct dpaa_priv *priv = netdev_priv(net_dev);
+ 	int num_txqs_per_tc = dpaa_num_txqs_per_tc();
+diff --git a/include/linux/fsl/dpaa_flow_offload.h b/include/linux/fsl/dpaa_flow_offload.h
+index 0234c62..992eb34 100644
+--- a/include/linux/fsl/dpaa_flow_offload.h
++++ b/include/linux/fsl/dpaa_flow_offload.h
+@@ -52,16 +52,46 @@ struct dpaa_flow_offload_ops {
+ #if IS_ENABLED(CONFIG_FSL_DPAA)
+ int dpaa_register_flow_offload_handler(const struct dpaa_flow_offload_ops *ops);
+ int dpaa_unregister_flow_offload_handler(const struct dpaa_flow_offload_ops *ops);
++
++/**
++ * dpaa_get_rx_default_fqid() - look up the per-port RX default FQID.
++ * @dev: a netdev that may or may not be backed by the dpaa Ethernet
++ *       driver (caller is allowed to pass any net_device — the helper
++ *       returns -ENODEV if @dev is not a dpaa port).
++ *
++ * Walks the @dev's per-port FQ list and returns the FQID of the
++ * single FQ_TYPE_RX_DEFAULT entry the dpaa driver allocates for the
++ * port at probe time.  This is the FQID the kernel NAPI poller is
++ * already dequeuing from — it is the only safe sink for an FMan PCD
++ * CC-node action of type FMAN_PCD_ACTION_FORWARD_FQ if the goal is to
++ * deliver the matched frame back to the same netdev that received it.
++ *
++ * Callers MUST hold RTNL (or be in a path where the netdev cannot
++ * disappear, e.g. inside the netdev's own .ndo_*) so the dpaa_priv
++ * cannot be freed while we read priv->dpaa_fq_list.  The returned
++ * FQID is stable for the lifetime of the netdev.
++ *
++ * Return: 0 on success with *fqid populated, -ENODEV if @dev is not
++ * a dpaa-backed netdev (e.g. someone passes the management interface
++ * or a non-FMan device), -ENOENT if the FQ list is empty (driver
++ * bug — RX_DEFAULT is always allocated at probe).
++ */
++int dpaa_get_rx_default_fqid(struct net_device *dev, u32 *fqid);
+ #else
+ static inline int
+ dpaa_register_flow_offload_handler(const struct dpaa_flow_offload_ops *ops)
+ {
+-	return -ENODEV;
++return -ENODEV;
+ }
+ static inline int
+ dpaa_unregister_flow_offload_handler(const struct dpaa_flow_offload_ops *ops)
+ {
+-	return -ENODEV;
++return -ENODEV;
++}
++static inline int
++dpaa_get_rx_default_fqid(struct net_device *dev, u32 *fqid)
++{
++return -ENODEV;
+ }
+ #endif
+ 
+-- 
+2.39.5
+
