@@ -272,6 +272,134 @@ KUNIT_EXPECT_EQ(test, ctx.count, 0);
 ask_flow_table_destroy(&t);
 }
 
+/* ------------------------------------------------------------------------- */
+/* PR14g-body-4: HW-fallback round-trip cases                                 */
+/*                                                                            */
+/* These exercise the body-3 dispatcher integration in ask_flow_insert /     */
+/* ask_flow_remove. On the kunit harness ask_hw_pcd_get() returns NULL so    */
+/* ask_hw_flow_insert() returns -ENODEV and the SW-fallback path runs:       */
+/* hw_id = atomic_inc_return(&t->fake_hw_id_seq) yielding a packed (token=0, */
+/* idx=N) value where token=0 == ASK_HW_FLOW_ID_TOKEN_NONE. ask_flow_remove  */
+/* then calls ask_hw_flow_remove(hw_id) unconditionally; the TOKEN_NONE arm  */
+/* of the dispatcher silently succeeds without touching hardware. This is    */
+/* the safe-by-construction contract that lets body-3 avoid having to        */
+/* inspect the token before calling the dispatcher tear-down.                */
+/* ------------------------------------------------------------------------- */
+
+static void ask_flow_test_hw_fallback_insert_remove(struct kunit *test)
+{
+struct ask_flow_table t;
+struct ask_flow_key key;
+u32 hw_id_a = 0, hw_id_b = 0;
+struct ask_flow *f;
+u16 token = 0xffff, idx = 0;
+
+KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-hw-fallback"), 0);
+
+/*
+ * Two distinct cookies. With ask_hw_pcd_get() == NULL, both inserts
+ * take the SW-fallback path, so the assigned hw_ids are sequential
+ * fake-counter values (1, 2 — fake_hw_id_seq starts at 0 and uses
+ * inc_return). The token half MUST be TOKEN_NONE so a subsequent
+ * unconditional ask_hw_flow_remove() is a no-op.
+ */
+make_key_v4(&key, htonl(0x0a010001), htonl(0x0a010002),
+    htons(11000), htons(80));
+KUNIT_EXPECT_EQ(test,
+ask_flow_insert(&t, 0xaaaa, &key, 1, 0, &hw_id_a), 0);
+
+make_key_v4(&key, htonl(0x0a010003), htonl(0x0a010004),
+    htons(11001), htons(80));
+KUNIT_EXPECT_EQ(test,
+ask_flow_insert(&t, 0xbbbb, &key, 1, 0, &hw_id_b), 0);
+
+/* Sequential SW-counter ids: 1 then 2. */
+KUNIT_EXPECT_EQ(test, hw_id_a, 1u);
+KUNIT_EXPECT_EQ(test, hw_id_b, 2u);
+
+/* Token half MUST be TOKEN_NONE for SW-fallback ids. */
+ask_priv_unpack_hw_flow_id(hw_id_a, &token, &idx);
+KUNIT_EXPECT_EQ(test, token, (u16)ASK_HW_FLOW_ID_TOKEN_NONE);
+KUNIT_EXPECT_EQ(test, idx,   (u16)1);
+
+ask_priv_unpack_hw_flow_id(hw_id_b, &token, &idx);
+KUNIT_EXPECT_EQ(test, token, (u16)ASK_HW_FLOW_ID_TOKEN_NONE);
+KUNIT_EXPECT_EQ(test, idx,   (u16)2);
+
+/* Both flows must be reachable in the SW table. */
+rcu_read_lock();
+f = ask_flow_lookup(&t, 0xaaaa);
+KUNIT_EXPECT_NOT_NULL(test, f);
+if (f)
+KUNIT_EXPECT_EQ(test, f->hw_flow_id, hw_id_a);
+
+f = ask_flow_lookup(&t, 0xbbbb);
+KUNIT_EXPECT_NOT_NULL(test, f);
+if (f)
+KUNIT_EXPECT_EQ(test, f->hw_flow_id, hw_id_b);
+rcu_read_unlock();
+
+/*
+ * Remove must succeed even though body-3 unconditionally calls
+ * ask_hw_flow_remove() on the fake-counter hw_id — the TOKEN_NONE
+ * arm short-circuits to 0 (or -ENODEV in the no-PCD harness, which
+ * body-3 logs but does not propagate).
+ */
+KUNIT_EXPECT_EQ(test, ask_flow_remove(&t, 0xaaaa), 0);
+KUNIT_EXPECT_EQ(test, ask_flow_remove(&t, 0xbbbb), 0);
+
+ask_flow_table_destroy(&t);
+}
+
+static void ask_flow_test_hw_fallback_eexist_rollback(struct kunit *test)
+{
+struct ask_flow_table t;
+struct ask_flow_key key;
+u32 hw_id_a = 0, hw_id_b = 0;
+int rc;
+
+/*
+ * EEXIST rollback path: body-3 calls ask_hw_flow_insert() BEFORE
+ * the rht insert, so a duplicate-cookie EEXIST after a successful
+ * HW insert would leak a CC slot. The rollback path calls
+ * ask_hw_flow_remove(hw_id) before kfree(f). On the kunit harness
+ * the HW path falls back to the SW counter so the rollback is a
+ * NULL-safe no-op via TOKEN_NONE — but the SW counter still
+ * advanced once for the failed insert attempt, so the second
+ * (succeeding) insert with a different cookie will see counter+1.
+ *
+ * What this test pins: EEXIST is reported back unchanged (so
+ * userspace sees the right error), and a subsequent insert with a
+ * different cookie still works (i.e. the rollback path did not
+ * corrupt the table or leak the kzalloc'd entry).
+ */
+KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-hw-eexist"), 0);
+
+make_key_v4(&key, htonl(0x0b010001), htonl(0x0b010002),
+    htons(22000), htons(443));
+
+KUNIT_EXPECT_EQ(test,
+ask_flow_insert(&t, 0xc001, &key, 1, 0, &hw_id_a), 0);
+
+/* Same cookie, same key → -EEXIST. Triggers the rollback path. */
+rc = ask_flow_insert(&t, 0xc001, &key, 1, 0, &hw_id_b);
+KUNIT_EXPECT_EQ(test, rc, -EEXIST);
+
+/*
+ * Different cookie — must succeed. If the rollback corrupted the
+ * counter or the table state, this would fail or assign a clearly-
+ * bogus hw_id.
+ */
+make_key_v4(&key, htonl(0x0b010003), htonl(0x0b010004),
+    htons(22001), htons(443));
+KUNIT_EXPECT_EQ(test,
+ask_flow_insert(&t, 0xc002, &key, 1, 0, &hw_id_b), 0);
+KUNIT_EXPECT_GT(test, hw_id_b, 0u);
+KUNIT_EXPECT_NE(test, hw_id_b, hw_id_a);
+
+ask_flow_table_destroy(&t);
+}
+
 static void ask_flow_test_default_table_unused_until_init(struct kunit *test)
 {
 /*
@@ -309,6 +437,8 @@ KUNIT_CASE(ask_flow_test_remove_missing),
 KUNIT_CASE(ask_flow_test_stats),
 KUNIT_CASE(ask_flow_test_walk_and_flush),
 KUNIT_CASE(ask_flow_test_stress_walk),
+KUNIT_CASE(ask_flow_test_hw_fallback_insert_remove),
+KUNIT_CASE(ask_flow_test_hw_fallback_eexist_rollback),
 KUNIT_CASE(ask_flow_test_default_table_unused_until_init),
 {}
 };
