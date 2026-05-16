@@ -98,25 +98,25 @@ skip "ask.ko is not loaded on the DUT (lsmod | grep ask returned nothing)"
 fi
 
 # 2. FMan PCD chain reported up in dmesg?
-if ! ssh_dut "dmesg | grep -q 'ask: hw: FMan PCD chain up'" 2>/dev/null; then
+if ! ssh_dut "sudo -n dmesg 2>/dev/null | grep -q 'ask: hw: FMan PCD chain up'" 2>/dev/null; then
 log "WARN: 'ask: hw: FMan PCD chain up' not in dmesg — flows will run via SW fallback only"
 log "WARN: this means the gate measures the body-3 SW fallback path, not the silicon fast path"
 log "WARN: continuing anyway so the harness can be validated on non-DPAA dev hosts"
 fi
 
 # 3. nft flowtable present and bound to both ports?
-if ! ssh_dut "nft list ruleset 2>/dev/null | grep -q 'flowtable'" ; then
+if ! ssh_dut "sudo -n nft list ruleset 2>/dev/null | grep -q 'flowtable'" ; then
 fail "no nft flowtable configured on the DUT"
 fi
-if ! ssh_dut "nft list ruleset 2>/dev/null | grep -E 'devices.*=.*\\b${IFACE_IN}\\b'" ; then
+if ! ssh_dut "sudo -n nft list ruleset 2>/dev/null | grep -E 'devices.*=.*\\b${IFACE_IN}\\b'" ; then
 fail "nft flowtable does not include $IFACE_IN in its devices list"
 fi
-if ! ssh_dut "nft list ruleset 2>/dev/null | grep -E 'devices.*=.*\\b${IFACE_OUT}\\b'" ; then
+if ! ssh_dut "sudo -n nft list ruleset 2>/dev/null | grep -E 'devices.*=.*\\b${IFACE_OUT}\\b'" ; then
 fail "nft flowtable does not include $IFACE_OUT in its devices list"
 fi
 
 # 4. ip_forward enabled?
-if [ "$(ssh_dut 'cat /proc/sys/net/ipv4/ip_forward')" != "1" ]; then
+if [ "$(ssh_dut 'sudo -n cat /proc/sys/net/ipv4/ip_forward')" != "1" ]; then
 fail "net.ipv4.ip_forward = 0 on the DUT — enable forwarding first"
 fi
 
@@ -130,17 +130,18 @@ TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 log "starting iperf3 -s on $SINK_HOST"
-ssh_sink 'pkill -f "iperf3 -s" 2>/dev/null; (iperf3 -s -D >/dev/null 2>&1)'
+ssh -o BatchMode=yes "$SINK_HOST" 'pkill -f "iperf3 -s" 2>/dev/null; sleep 0.2' || true
+ssh -o BatchMode=yes -f "$SINK_HOST" "iperf3 -s -1 >/dev/null 2>&1"
 sleep 1
 
 log "capturing baseline CPU on DUT (3 s)"
-BASE_IDLE=$(ssh_dut "mpstat 1 3 | awk '/Average:.*all/ {print \$NF; exit}'")
+BASE_IDLE=$(ssh_dut "sudo -n mpstat 1 3 | awk '/Average:.*all/ {print \$NF; exit}'")
 BASE_CPU=$(awk -v idle="$BASE_IDLE" 'BEGIN{printf "%.2f", 100.0 - idle}')
 log "baseline CPU = ${BASE_CPU} % (idle ${BASE_IDLE} %)"
 
 log "starting mpstat sampler on DUT for ${DURATION} s"
-ssh_dut "mpstat 1 $DURATION > /tmp/verify-ask-mpstat.txt 2>&1 &"
-MPSTAT_REMOTE_PID=$(ssh_dut 'pgrep -f "mpstat 1 '"$DURATION"'" | head -1' || true)
+ssh_dut "sudo -n mpstat 1 $DURATION > /tmp/verify-ask-mpstat.txt 2>&1 &"
+MPSTAT_REMOTE_PID=$(ssh_dut 'pgrep -f "sudo -n mpstat 1 '"$DURATION"'" | head -1' || true)
 
 log "starting iperf3 client on $GEN_HOST → $SINK_IP for ${DURATION} s with -P $PARALLEL"
 ssh_gen "iperf3 -c $SINK_IP -t $DURATION -P $PARALLEL -J" \

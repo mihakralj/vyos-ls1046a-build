@@ -18,6 +18,13 @@
 #   iso-live [<iso>]    Extract live artefacts (kernel/initrd/dtb/squashfs)
 #                       for the dev_boot_live U-Boot env, push to TFTP.
 #                       With no arg, downloads the newest GitHub release.
+#   iso                 Run bin/local-build.sh with $FLAVOR set (default | ask
+#                       | vpp), then publish the resulting .iso (+ .minisig if
+#                       produced) to admin@LXC200:/srv/tftp/iso/ so the board
+#                       can pull it with `add system image http://192.168.1.137
+#                       :8080/iso/<name>.iso`. Symlinks
+#                       /srv/tftp/iso/latest-<flavor>.iso to the just-built
+#                       ISO. Roughly ~40 min cold, ~7 min warm caches.
 #   push                Just rsync work/dev-tftp/ -> admin@LXC200:/srv/tftp/.
 #   help                This message.
 #
@@ -77,9 +84,13 @@ fi
 # CI scripts expect GITHUB_WORKSPACE etc. Provide minimal shims so they
 # can be invoked directly from a developer shell.
 export GITHUB_WORKSPACE="$REPO_ROOT"
-export GITHUB_OUTPUT="${GITHUB_OUTPUT:-/tmp/dev-gh_output}"
-export GITHUB_ENV="${GITHUB_ENV:-/tmp/dev-gh_env}"
-export GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-/tmp/dev-gh_step_summary}"
+# Namespace these on EUID so a previous sudo-as-root run cannot leave
+# /tmp/dev-gh_output owned-by-root and break a subsequent non-root run
+# (and vice versa). The `iso` mode re-invokes the script under sudo, so
+# both UIDs touch these in normal operation.
+export GITHUB_OUTPUT="${GITHUB_OUTPUT:-/tmp/dev-gh_output.$(id -u)}"
+export GITHUB_ENV="${GITHUB_ENV:-/tmp/dev-gh_env.$(id -u)}"
+export GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-/tmp/dev-gh_step_summary.$(id -u)}"
 : > "$GITHUB_OUTPUT"; : > "$GITHUB_ENV"; : > "$GITHUB_STEP_SUMMARY"
 export FLAVOR
 
@@ -242,12 +253,69 @@ cmd_iso_live() {
     info "(squashfs is served via HTTP by LXC 200 on :8080)"
 }
 
+# ── iso: full ISO build via bin/local-build.sh + publish to LXC 200 ───
+#
+# Builds a FLAVOR-tagged ISO locally using the same CI script chain that
+# self-hosted CI uses, then rsyncs the .iso (+ .minisig if produced) to
+# admin@LXC200:/srv/tftp/iso/ so the running board can pull it with
+#   add system image http://192.168.1.137:8080/iso/<file>.iso
+# A symlink /srv/tftp/iso/latest-<flavor>.iso is updated to the just-
+# built ISO so dev workflows can always grab the freshest build from a
+# stable URL.
+#
+# Requires sudo on this VM (local-build.sh installs host build-deps).
+cmd_iso() {
+    hdr "Full ISO build (FLAVOR=$FLAVOR) via bin/local-build.sh"
+
+    if [ "$(id -u)" -ne 0 ]; then
+        info "local-build.sh installs apt packages — re-invoking under sudo"
+        # Preserve FLAVOR + auth env across the sudo boundary.
+        exec sudo --preserve-env=FLAVOR,LXC200_HOST,TFTP_DIR_REMOTE,SSH_KEY,JOBS,USE_CCACHE \
+            HOME="$HOME" bash "$0" iso "$@"
+    fi
+
+    check_lxc_reachable
+
+    # Clean any stale ISO so the post-build `ls` picks up only the new one.
+    rm -f "$REPO_ROOT"/vyos-*-LS1046A-*.iso "$REPO_ROOT"/vyos-*-LS1046A-*.iso.minisig
+
+    local _T0=$SECONDS
+    FLAVOR="$FLAVOR" bash "$REPO_ROOT/bin/local-build.sh"
+    ok "ISO build finished in $(( SECONDS - _T0 ))s"
+
+    # The build leaves exactly one ISO at the repo root; pick it up.
+    local iso
+    iso=$(ls -1t "$REPO_ROOT"/vyos-*-LS1046A-"$FLAVOR"-arm64.iso 2>/dev/null | head -1)
+    [ -n "$iso" ] && [ -f "$iso" ] \
+        || die "No ISO matching vyos-*-LS1046A-$FLAVOR-arm64.iso at $REPO_ROOT"
+    local iso_name; iso_name=$(basename "$iso")
+    info "Built: $iso_name ($(du -h "$iso" | cut -f1))"
+
+    hdr "Publishing to $LXC200_HOST:$TFTP_DIR_REMOTE/iso/"
+    ssh_lxc "sudo install -d -m 0755 -o admin -g admin $TFTP_DIR_REMOTE/iso"
+    rsync_lxc -av --info=progress2 "$iso" "$LXC200_HOST:$TFTP_DIR_REMOTE/iso/$iso_name"
+    if [ -f "$iso.minisig" ]; then
+        rsync_lxc -av "$iso.minisig" "$LXC200_HOST:$TFTP_DIR_REMOTE/iso/$iso_name.minisig"
+    fi
+    # Refresh the stable "latest" symlink for this flavor.
+    ssh_lxc "sudo ln -sfn '$iso_name' '$TFTP_DIR_REMOTE/iso/latest-$FLAVOR.iso'"
+    ok "Published"
+
+    local lxc_ip="${LXC200_HOST#*@}"
+    echo
+    info "On the running board (vyos@192.168.1.190):"
+    echo "    add system image http://${lxc_ip}:8080/iso/$iso_name"
+    info "Or via the stable 'latest' alias:"
+    echo "    add system image http://${lxc_ip}:8080/iso/latest-$FLAVOR.iso"
+}
+
 # ── Dispatch ──────────────────────────────────────────────────────────
 case "${1:-help}" in
     kernel)     shift; cmd_kernel    "$@" ;;
     dtb)        shift; cmd_dtb       "$@" ;;
     extract)    shift; cmd_extract   "$@" ;;
     iso-live)   shift; cmd_iso_live  "$@" ;;
+    iso)        shift; cmd_iso       "$@" ;;
     push)       shift; cmd_push      "$@" ;;
     help|-h|--help)
         # Print only the leading header comment block (lines starting with #).

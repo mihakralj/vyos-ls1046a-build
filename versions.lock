@@ -17,7 +17,7 @@
 # Persistent fallback pin. The actual build version is auto-discovered from
 # vyos-build/data/defaults.toml at build start when that checkout is present.
 # As of 2026-05-09 vyos-build pins 6.18.28 (was 6.6.137 LTS pre-mainline-migration).
-: "${KERNEL_VERSION:=6.18.28}"
+: "${KERNEL_VERSION:=6.18.29}"
 : "${KERNEL_SERIES:=6.18}"
 export KERNEL_VERSION KERNEL_SERIES
 
