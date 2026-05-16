@@ -1,10 +1,10 @@
 firewall {
     flowtable FT01 {
-        interface eth0
-        interface eth1
-        interface eth2
-        interface eth3
-        interface eth4
+        interface e2
+        interface e3
+        interface e4
+        interface e5
+        interface e6
         offload software
     }
     global-options {
@@ -19,13 +19,13 @@ firewall {
     }
     group {
         interface-group IG-LAN {
-            interface eth0
-            interface eth1
-            interface eth2
+            interface e2
+            interface e3
+            interface e4
         }
         interface-group IG-WAN {
-            interface eth3
-            interface eth4
+            interface e5
+            interface e6
         }
     }
     ipv4 {
@@ -97,9 +97,9 @@ firewall {
     }
 }
 interfaces {
-    ethernet eth0 {
+    ethernet e2 {
         address dhcp
-        description "RJ45 port 1"
+        description "RJ45 right"
         ipv6 {
             address {
                 autoconf
@@ -113,9 +113,9 @@ interfaces {
             sg
         }
     }
-    ethernet eth1 {
+    ethernet e3 {
         address dhcp
-        description "RJ45 port 2"
+        description "MGMT (left RJ45)"
         ipv6 {
             address {
                 autoconf
@@ -129,9 +129,9 @@ interfaces {
             sg
         }
     }
-    ethernet eth2 {
+    ethernet e4 {
         address dhcp
-        description "RJ45 port 3"
+        description "RJ45 center"
         ipv6 {
             address {
                 autoconf
@@ -145,9 +145,9 @@ interfaces {
             sg
         }
     }
-    ethernet eth3 {
+    ethernet e5 {
         address dhcp
-        description "SFP+ port 1"
+        description "SFP+ left"
         ipv6 {
             address {
                 autoconf
@@ -161,9 +161,9 @@ interfaces {
             sg
         }
     }
-    ethernet eth4 {
+    ethernet e6 {
         address dhcp
-        description "SFP+ port 2"
+        description "SFP+ right"
         ipv6 {
             address {
                 autoconf
@@ -294,11 +294,11 @@ system {
         }
     }
     name-server 127.0.0.1
-    name-server eth0
-    name-server eth1
-    name-server eth2
-    name-server eth3
-    name-server eth4
+    name-server e2
+    name-server e3
+    name-server e4
+    name-server e5
+    name-server e6
     option {
         kernel {
         }

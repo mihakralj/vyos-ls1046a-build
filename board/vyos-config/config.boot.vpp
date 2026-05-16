@@ -1,21 +1,21 @@
 interfaces {
-    ethernet eth0 {
+    ethernet e3 {
         address dhcp
         description "MGMT (left RJ45)"
     }
-    ethernet eth1 {
-        description "VPP data (center RJ45)"
-        mtu 1500
-    }
-    ethernet eth2 {
+    ethernet e2 {
         description "VPP data (right RJ45)"
         mtu 1500
     }
-    ethernet eth3 {
+    ethernet e4 {
+        description "VPP data (center RJ45)"
+        mtu 1500
+    }
+    ethernet e5 {
         description "VPP data (left SFP+)"
         mtu 1500
     }
-    ethernet eth4 {
+    ethernet e6 {
         description "VPP data (right SFP+)"
         mtu 1500
     }
@@ -94,13 +94,13 @@ system {
 vpp {
     settings {
         allow-unsupported-nics
-        interface eth1 {
+        interface e2 {
         }
-        interface eth2 {
+        interface e4 {
         }
-        interface eth3 {
+        interface e5 {
         }
-        interface eth4 {
+        interface e6 {
         }
         poll-sleep-usec 100
         resource-allocation {
