@@ -141,8 +141,17 @@ else
 fi
 
 # --- Patch 0002 dpaa-eth-flow-block (PR11) ---
-# Registers flow_block_cb on dpaa_eth netdevs so nf_flow_table can offload.
-# Exposed via NETIF_F_HW_TC feature bit on the netdev + setup_tc op.
+# Exposes RCU-protected single-slot registration API:
+#   dpaa_register_flow_offload_handler() / dpaa_unregister_flow_offload_handler()
+# so an external backend (ask.ko) can hook TC_SETUP_BLOCK on dpaa netdevs.
+#
+# IMPORTANT: the patch by design does NOT bump NETIF_F_HW_TC on the netdev
+# (see commit 5f42606 / 0002 commit message: "No behaviour change for
+# in-tree dpaa users"). hw-tc-offload only flips to "on" once ask.ko's
+# init has actually called dpaa_register_flow_offload_handler() AND the
+# backend chose to advertise the feature bit. Probing the feature bit
+# therefore conflates two layers and was producing a FALSE FAIL on healthy
+# kernels — check the exported symbol instead.
 DPAA_NETDEVS=()
 for dev in /sys/class/net/*/device/of_node; do
     [ -L "$dev" ] || continue
@@ -153,23 +162,41 @@ for dev in /sys/class/net/*/device/of_node; do
 done
 if [ "${#DPAA_NETDEVS[@]}" -gt 0 ]; then
     record_ok "${#DPAA_NETDEVS[@]} FMan/DPAA netdev(s) present: ${DPAA_NETDEVS[*]}"
-    # Pick the first DPAA netdev and probe its hw-tc-offload feature.
-    probe="${DPAA_NETDEVS[0]}"
-    if command -v ethtool >/dev/null 2>&1; then
-        tc_off=$(ethtool -k "$probe" 2>/dev/null | awk -F: '/hw-tc-offload/ {gsub(/ /,"",$2); print $2}')
-        case "$tc_off" in
-            on)           record_ok "0002-dpaa-eth-flow-block.patch ($probe hw-tc-offload=on)" ;;
-            off)          record_warn "0002 patch present but $probe hw-tc-offload=off (enable with ethtool -K $probe hw-tc-offload on)" ;;
-            "on[fixed]")  record_ok "0002 patch landed and locked on ($probe hw-tc-offload=on [fixed])" ;;
-            "off[fixed]") record_fail "0002 patch missing — $probe hw-tc-offload=off [fixed]" ;;
-            *)            record_warn "0002 status indeterminate — ethtool -k $probe hw-tc-offload reports '$tc_off'" ;;
-        esac
-    else
-        record_skip "ethtool not installed — cannot probe hw-tc-offload on $probe"
-    fi
 else
     record_fail "no DPAA/FMan netdevs found — DPAA1 stack did not initialise"
     note "AGENTS.md: 'fsl_dpa' driver creates eth0..ethN under fsl_dpaa_mac parents"
+fi
+
+# Exported-symbol probe: the patch produces these two EXPORT_SYMBOL_GPL.
+if has_sym dpaa_register_flow_offload_handler && has_sym dpaa_unregister_flow_offload_handler; then
+    record_ok "0002-dpaa-eth-flow-block.patch (dpaa_register/unregister_flow_offload_handler exported)"
+elif [ -z "$KALLSYMS" ]; then
+    record_warn "/proc/kallsyms unreadable — cannot confirm 0002 exports (re-run with sudo)"
+else
+    record_fail "0002-dpaa-eth-flow-block patch missing — dpaa_*_flow_offload_handler not exported"
+    note "commit 5f42606 expected this — verify CONFIG_FSL_DPAA=y and patch applied"
+fi
+
+# Secondary indicator: hw-tc-offload feature bit flips on once ask.ko's
+# bring-up successfully calls dpaa_register_flow_offload_handler() AND
+# the backend opts into advertising NETIF_F_HW_TC. This is informational —
+# a WARN means "kernel side fine, ask.ko bring-up did not complete";
+# the gating signal is the exported symbol above.
+if [ "${#DPAA_NETDEVS[@]}" -gt 0 ] && command -v ethtool >/dev/null 2>&1; then
+    probe="${DPAA_NETDEVS[0]}"
+    tc_off=$(ethtool -k "$probe" 2>/dev/null | awk -F: '/hw-tc-offload/ {gsub(/ /,"",$2); print $2}')
+    case "$tc_off" in
+        on|"on[fixed]")
+            record_ok "$probe hw-tc-offload=$tc_off — backend has registered offload handler"
+            ;;
+        off|"off[fixed]")
+            record_warn "$probe hw-tc-offload=$tc_off — backend has NOT called dpaa_register_flow_offload_handler()"
+            note "ask.ko bring-up (PR14g body-1) gap — flow offload will fall back to SW path"
+            ;;
+        *)
+            record_warn "$probe hw-tc-offload status indeterminate: '$tc_off'"
+            ;;
+    esac
 fi
 
 # --- Patch 0003 fman-host-command-api (PR12) ---
@@ -186,36 +213,55 @@ fi
 # --- Patch 0004 fman-pcd-subsystem (PR14a-f) ---
 # Modern PCD reimplementation: KeyGen, CC, Manip, Plcr, Replic, Prs.
 # Surfaces:
-#   - /sys/kernel/debug/fman_pcd/muram_budget                  (PR14a)
+#   - /sys/kernel/debug/fman_pcd/<idx>/muram_budget            (PR14a, per-FMan instance)
 #   - exported symbols fman_pcd_keygen_*  (PR14b body)
 #   - exported symbols fman_pcd_cc_*       (PR14c body)
 #   - exported symbols fman_pcd_manip_*    (PR14d body)
 #   - exported symbols fman_pcd_plcr_*     (PR14e body)
 #   - exported symbols fman_pcd_replic_*   (PR14f body)
 #   - fman_pcd_from_of_node                (PR14g-prep)
+#
+# debugfs root is mode 0700 (root:root), so a non-root invocation cannot
+# even stat $PCD_DBGFS. Detect EUID and re-classify: as non-root the lack
+# of access is a "re-run with sudo" condition, not a regression.
 PCD_DBGFS="/sys/kernel/debug/fman_pcd"
-if [ -d "$PCD_DBGFS" ]; then
+if [ ! -d /sys/kernel/debug ]; then
+    record_skip "debugfs not mounted — mount -t debugfs none /sys/kernel/debug to probe PCD"
+elif [ "$(id -u)" -ne 0 ] && [ ! -r /sys/kernel/debug ]; then
+    record_skip "/sys/kernel/debug is mode 0700 — re-run with sudo to probe PR14a debugfs surface"
+elif [ -d "$PCD_DBGFS" ]; then
     record_ok "0004 PCD debugfs root present at $PCD_DBGFS"
-    if [ -r "$PCD_DBGFS/muram_budget" ]; then
-        budget_str=$(cat "$PCD_DBGFS/muram_budget" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
-        free_bytes=$(echo "$budget_str" | grep -oE 'free=[0-9]+' | head -1 | cut -d= -f2)
+    # muram_budget lives one level deeper, under a per-FMan-instance dir
+    # (e.g. ".../fman_pcd/0/muram_budget"). Probe the first instance.
+    budget_file=$(find "$PCD_DBGFS" -mindepth 2 -maxdepth 2 -name muram_budget -type f 2>/dev/null | head -1)
+    if [ -n "$budget_file" ] && [ -r "$budget_file" ]; then
+        budget_str=$(tr '\n' ' ' < "$budget_file" 2>/dev/null | sed 's/  */ /g; s/ *$//')
+        # New format (kernel 6.18.29-vyos, PR14h):
+        #   reserved 65536 bytes / used 0 bytes / free 65536 bytes / high-water 298 bytes
+        # Old format (pre-PR14h, kept for back-compat): "free=N"
+        free_bytes=$(echo "$budget_str" | grep -oE 'free[= ]+[0-9]+' | head -1 | grep -oE '[0-9]+')
         if [ -n "$free_bytes" ] && [ "$free_bytes" -gt 0 ] 2>/dev/null; then
-            record_ok "muram_budget free=${free_bytes} bytes"
+            record_ok "muram_budget free=${free_bytes} bytes ($(dirname "$budget_file" | xargs basename))"
             note "$budget_str"
         else
             record_warn "muram_budget present but free=0 — silicon may be wedged or budget too tight"
             note "PR14h reduced FMAN_PCD_MURAM_RESERVED_BYTES — confirm RESERVED < total"
+            note "$budget_str"
         fi
+    elif [ -n "$budget_file" ]; then
+        record_warn "$budget_file exists but unreadable (file mode? cf. proc handler)"
     else
-        record_warn "$PCD_DBGFS exists but muram_budget unreadable (mount debugfs as root)"
+        # Directory exists but no muram_budget anywhere underneath.
+        instances=$(find "$PCD_DBGFS" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+        if [ "$instances" -eq 0 ]; then
+            record_fail "$PCD_DBGFS exists but has no per-FMan instance subdirs — fman_pcd_init() never registered"
+        else
+            record_fail "$PCD_DBGFS has $instances instance subdir(s) but no muram_budget — PR14a debugfs init incomplete"
+        fi
     fi
 else
-    if [ ! -d /sys/kernel/debug ]; then
-        record_skip "debugfs not mounted — mount -t debugfs none /sys/kernel/debug to probe PCD"
-    else
-        record_fail "0004-fman-pcd-subsystem.patch missing — $PCD_DBGFS absent"
-        note "PR14a was expected to create this — check kernel config CONFIG_FSL_FMAN_PCD=y"
-    fi
+    record_fail "0004-fman-pcd-subsystem.patch missing — $PCD_DBGFS absent"
+    note "PR14a was expected to create this — check kernel config CONFIG_FSL_FMAN_PCD=y"
 fi
 
 # Per-component PCD exported symbols (each gates one sub-PR).
@@ -268,12 +314,24 @@ if [ -d /sys/module/ask/parameters ]; then
 fi
 
 # genl_family registered (Section 7.1).
+# iproute2 syntax is `genl ctrl list` (three tokens, NOT `ctrl-list`),
+# and it requires CAP_NET_ADMIN — unprivileged invocation returns an
+# empty list with rc=0. Parse the "Name: ask\nID: 0xNN" pair so a stray
+# string match in some other family's metadata cannot false-positive us.
 if command -v genl >/dev/null 2>&1; then
-    if genl ctrl-list 2>/dev/null | grep -qw 'ask'; then
-        family_id=$(genl ctrl-list 2>/dev/null | awk '/ Name: ask/ {print "found"; exit}')
-        record_ok "genl_family 'ask' registered"
+    if [ "$(id -u)" -ne 0 ]; then
+        record_skip "genl ctrl list requires root — re-run with sudo to probe genl_family 'ask'"
     else
-        record_fail "genl_family 'ask' not registered (PR5 GET_INFO should give this)"
+        genl_out=$(genl ctrl list 2>/dev/null || true)
+        # Grab the line right after "Name: ask" — it carries the family ID.
+        ask_id=$(echo "$genl_out" | awk '
+            /^Name: ask$/ { getline; if ($1 == "ID:") { print $2; exit } }
+        ')
+        if [ -n "$ask_id" ]; then
+            record_ok "genl_family 'ask' registered (family id $ask_id)"
+        else
+            record_fail "genl_family 'ask' not registered (PR5 GET_INFO should give this)"
+        fi
     fi
 elif command -v ynl >/dev/null 2>&1; then
     # Modern probe path
