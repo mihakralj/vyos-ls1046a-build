@@ -865,7 +865,7 @@ index d1a5761..fc6f2a0 100644
   * incompatible way.  Consumers (ask.ko) can #if-guard against this.
   */
 -#define FMAN_PCD_API_VERSION	1
-+#define FMAN_PCD_API_VERSION1
++#define FMAN_PCD_API_VERSION 1
  
  /*
   * Opaque handles.  All defined in their respective .c files.
