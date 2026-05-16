@@ -113,6 +113,15 @@ jobs:
           echo "=== Memory ==="
           free -h
 
+      - name: Configure build parallelism (self-hosted)
+        run: |
+          set -e
+          CORES=$(nproc)
+          echo "MAKEFLAGS=-j$CORES" >> "$GITHUB_ENV"
+          echo "DEB_BUILD_OPTIONS=parallel=$CORES" >> "$GITHUB_ENV"
+          echo "VYOS_BUILD_THREADS=$CORES" >> "$GITHUB_ENV"
+          echo "### Build parallelism configured for $CORES cores"
+
       - name: Relocate workspace to NVMe (self-hosted)
         run: |
           set -e
