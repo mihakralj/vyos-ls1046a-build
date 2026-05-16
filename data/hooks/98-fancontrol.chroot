@@ -14,13 +14,18 @@
 #   2. Defensively masks fancontrol.service in case some other path drags the
 #      package in (apt recommends, vendor diff, etc.) — two daemons fighting
 #      over /sys/.../pwm1 produce sub-second oscillations that suffocate the SoC
-#   3. Installs libatomic1 — unrelated to the fan, but required by VPP plugin
-#      code paths on aarch64 that use __atomic builtins. Keeping the install
-#      here so the package shopping list stays in one chroot hook.
-apt-get update -qq
-apt-get install -y --no-install-recommends libatomic1
+#   3. libatomic1 (previously apt-get installed here) is now injected via
+#      vyos-build/data/architectures/arm64.toml's `packages = [...]` array by
+#      bin/ci-setup-vyos-build.sh. By the time live-build dispatches user
+#      hooks under config/hooks/live/*.chroot, `lb chroot_archives chroot
+#      remove` has already deconfigured the chroot's apt sources, and any
+#      `apt-get install ...` from a user hook fails with
+#          E: Unable to locate package <name>
+#      Injecting through arm64.toml lands the package in live-build's normal
+#      `lb chroot_install-packages` pass, well before the sources are torn
+#      down. Keep this hook focused on the fan-only bits.
+#
 # Defensive mask: even if `fancontrol` is never installed, the unit name will
 # resolve to /dev/null and any `systemctl start fancontrol` will fail closed
 # instead of overlaying our PID loop.
 ln -sf /dev/null /etc/systemd/system/fancontrol.service
-apt-get clean

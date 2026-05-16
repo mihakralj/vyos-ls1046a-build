@@ -245,6 +245,29 @@ if [ -f vyos-build/data/architectures/arm64.toml ]; then
   fi
 fi
 
+### Inject libatomic1 into arm64.toml.
+#
+# libatomic1 is needed at runtime by VPP plugin code paths on aarch64 that
+# use __atomic builtins. We used to `apt-get install -y libatomic1` from
+# data/hooks/98-fancontrol.chroot, but by the time live-build dispatches
+# user hooks under config/hooks/live/*.chroot, `lb chroot_archives chroot
+# remove` has already deconfigured the chroot's apt sources, so apt fails
+# with "E: Unable to locate package libatomic1" and the whole ISO build
+# dies. Injecting through arm64.toml lands the package in live-build's
+# normal `lb chroot_install-packages` pass, which runs well before the
+# sources are torn down. Idempotent — guarded by a grep so re-runs against
+# an already-patched checkout are no-ops.
+if [ -f vyos-build/data/architectures/arm64.toml ]; then
+  if ! grep -q '"libatomic1"' vyos-build/data/architectures/arm64.toml; then
+    sed -i -E \
+      -e 's/^([[:space:]]*"grub-efi-arm64")[[:space:]]*$/\1,\n  "libatomic1"/' \
+      -e 's/^([[:space:]]*"grub-efi-arm64")[[:space:]]*,[[:space:]]*$/\1,\n  "libatomic1",/' \
+      vyos-build/data/architectures/arm64.toml
+    echo "### Injected libatomic1 into arm64.toml:"
+    cat vyos-build/data/architectures/arm64.toml
+  fi
+fi
+
 ### MOK certificate for kernel module signing
 if [ -f board/mok/MOK.key ]; then
   cp board/mok/MOK.key vyos-build/data/certificates/vyos-dev-2025-linux.key
