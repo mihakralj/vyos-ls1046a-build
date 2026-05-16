@@ -27,13 +27,13 @@ Build: native ARM64 on Cobalt 100, zero warnings, all four symbols
 present in System.map with __ksymtab entries.
 ---
  .../net/ethernet/freescale/fman/fman_pcd_kg.c | 389 +++++++++++++++---
- 1 file changed, 341 insertions(+), 48 deletions(-)
+ 1 file changed, 350 insertions(+), 48 deletions(-)
 
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
 index f14ddf9f3..366537be7 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
-@@ -1,92 +1,354 @@
+@@ -1,92 +1,363 @@
  // SPDX-License-Identifier: GPL-2.0
  /*
 - * FMan PCD KeyGen (KG) - PR14b-prep stub.
@@ -301,8 +301,17 @@ index f14ddf9f3..366537be7 100644
 -
  if (params->num_extracts == 0 || params->num_extracts > 8)
  return ERR_PTR(-EINVAL);
-+if (params->default_fqid == 0 ||
-+    params->default_fqid >= (1U << 24))
++/*
++ * default_fqid is dispatched-to only when use_hash == false.  When
++ * the scheme is in hash mode the silicon walks the hash-FQID base
++ * register and the per-bucket index, leaving slot->base_fqid as a
++ * write-but-never-read field.  Reject default_fqid == 0 only in the
++ * non-hash case so ask.ko's IPv4 5-tuple scheme (use_hash = true,
++ * default_fqid = 0) is accepted.
++ */
++if (!params->use_hash && params->default_fqid == 0)
++return ERR_PTR(-EINVAL);
++if (params->default_fqid >= (1U << 24))
 +return ERR_PTR(-EINVAL);
 +
 +fman = fman_pcd_get_fman(pcd);
@@ -432,7 +441,7 @@ index f14ddf9f3..366537be7 100644
  }
  EXPORT_SYMBOL_GPL(fman_pcd_kg_bind_port);
  
-@@ -96,20 +358,51 @@ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
+@@ -96,20 +367,51 @@ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
  if (!scheme || !cc)
  return -EINVAL;
  

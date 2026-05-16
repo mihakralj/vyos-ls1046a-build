@@ -151,6 +151,33 @@ void ask_hw_pcd_teardown(void);
 struct ask_hw_pcd *ask_hw_pcd_get(void);
 
 /*
+ * ask_hw_port_bind() - bind the v4-TCP KG scheme to an FMan ingress port.
+ *
+ * Called from the flow_offload FLOW_BLOCK_BIND path (ask_flow_offload.c)
+ * once we have a netdev and have resolved its FMan port id via the
+ * in-tree dpaa_get_fman_port_id() helper (kernel patch 0030).
+ *
+ * The underlying fman_pcd_kg_bind_port() is single-port-per-scheme on
+ * LS1046A silicon: the second call with a different @port_id returns
+ * -EBUSY because the KGSE_MV match-vector slot is already claimed. The
+ * wrapper here tracks the bound port internally and returns:
+ *
+ *   0           first bind for this @port_id succeeded
+ *   0           idempotent re-bind for the SAME @port_id (safe no-op)
+ *   -EBUSY      already bound to a DIFFERENT port (caller should NOT
+ *               fail the FLOW_BLOCK_BIND - software fallback for the
+ *               second port is still functional, just unaccelerated)
+ *   -ENODEV     ask_hw_pcd_get() returned NULL (no HW backing - same
+ *               software-only fallback signal as the rest of ask_hw)
+ *   other -E    propagated from fman_pcd_kg_bind_port()
+ *
+ * Caller should LOG (not fail) on -EBUSY at the BIND callsite so the
+ * operator can see "second port could not be HW-accelerated, falling
+ * back to SW" without the whole flow_offload bind being rejected.
+ */
+int ask_hw_port_bind(u8 port_id);
+
+/*
  * hw_flow_id helpers (PR14g-body-1).
  *
  * The 32-bit hw_flow_id stored in struct ask_flow encodes:

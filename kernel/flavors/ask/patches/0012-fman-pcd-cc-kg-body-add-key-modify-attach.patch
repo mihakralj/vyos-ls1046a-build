@@ -321,7 +321,7 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/eth
 index 366537b..2b9729c 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
-@@ -352,24 +352,60 @@ return 0;
+@@ -352,24 +352,61 @@ return 0;
  }
  EXPORT_SYMBOL_GPL(fman_pcd_kg_bind_port);
  
@@ -331,8 +331,11 @@ index 366537b..2b9729c 100644
 + * Implements the public ABI declared in <linux/fsl/fman_pcd.h>.
 + *
 + * Programming sequence (under pcd->lock):
-+ *   1. Validate args, scheme->bound (an unbound scheme has no ingress
-+ *      port and so cannot be reached by the CC walker).
++ *   1. Validate args.  The scheme MAY be unbound: during M2 dry bringup
++ *      ask.ko allocates the KG/CC chain and attaches it before any port
++ *      is bound (port-bind is deferred to M3/PR15).  The register write
++ *      that follows (KGSE_CCBS) is harmless in that state -- the chain
++ *      is programmed but quiescent until a subsequent kg_bind_port().
 + *   2. Resolve the tree's group-table MURAM offset via the cross-TU
 + *      accessor fman_pcd_cc_tree_group_table_off().
 + *   3. Call keygen_scheme_set_ccbs() (read-modify-write on the AR-
@@ -349,7 +352,7 @@ index 366537b..2b9729c 100644
 + */
  int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
 -  struct fman_pcd_cc_tree *cc)
-+	  struct fman_pcd_cc_tree *cc)
++  struct fman_pcd_cc_tree *cc)
  {
 -if (!scheme || !cc)
 -return -EINVAL;
@@ -366,35 +369,33 @@ index 366537b..2b9729c 100644
 - *   4. mutex_unlock
 - */
 -return -EOPNOTSUPP;
-+	struct fman_keygen *keygen;
-+	struct fman *fman;
-+	struct mutex *lock;
-+	unsigned long off;
-+	u32 ccbs;
-+	int err;
++struct fman_keygen *keygen;
++struct fman *fman;
++struct mutex *lock;
++unsigned long off;
++u32 ccbs;
++int err;
 +
-+	if (!scheme || !cc)
-+		return -EINVAL;
-+	if (!scheme->bound)
-+		return -EINVAL;
++if (!scheme || !cc)
++return -EINVAL;
 +
-+	fman = fman_pcd_get_fman(scheme->pcd);
-+	if (!fman || !fman->keygen)
-+		return -ENXIO;
-+	keygen = fman->keygen;
++fman = fman_pcd_get_fman(scheme->pcd);
++if (!fman || !fman->keygen)
++return -ENXIO;
++keygen = fman->keygen;
 +
-+	off = fman_pcd_cc_tree_group_table_off(cc);
-+	if (off == 0)
-+		return -EINVAL;
-+	/* Low 24 bits: MURAM is well under 16 MiB on every FMan v3. */
-+	ccbs = (u32)off & 0x00FFFFFFu;
++off = fman_pcd_cc_tree_group_table_off(cc);
++if (off == 0)
++return -EINVAL;
++/* Low 24 bits: MURAM is well under 16 MiB on every FMan v3. */
++ccbs = (u32)off & 0x00FFFFFFu;
 +
-+	lock = fman_pcd_get_lock(scheme->pcd);
-+	mutex_lock(lock);
-+	err = keygen_scheme_set_ccbs(keygen, scheme->id, ccbs);
-+	mutex_unlock(lock);
++lock = fman_pcd_get_lock(scheme->pcd);
++mutex_lock(lock);
++err = keygen_scheme_set_ccbs(keygen, scheme->id, ccbs);
++mutex_unlock(lock);
 +
-+	return err;
++return err;
  }
  EXPORT_SYMBOL_GPL(fman_pcd_kg_attach_cc);
  

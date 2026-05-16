@@ -301,6 +301,26 @@ struct ask_hw_pcd {
         struct fman_pcd_cc_tree *cc_tree;
         struct fman_pcd_cc_node *cc_v4_tcp;
         struct fman_pcd_kg_scheme *kg_v4_tcp;
+
+        /*
+         * PR14g-body-1 (part 2): port-bind tracking.
+         *
+         * fman_pcd_kg_bind_port() is single-port-per-scheme on LS1046A
+         * silicon (the KGSE_MV match-vector slot is a single u32 with
+         * one bit per port; the second bind to a different port
+         * returns -EBUSY).  We cache the first successfully-bound
+         * port_id so subsequent calls from FLOW_BLOCK_BIND on the
+         * SAME netdev become idempotent no-ops, and the operator sees
+         * a single warn line when a SECOND netdev attempts to bind to
+         * a different port (the second port still works in software,
+         * just unaccelerated).
+         *
+         * v4_tcp_bound_port_valid is false until the first successful
+         * bind; v4_tcp_bound_port holds the port_id once valid.
+         * Protected by ->lock.
+         */
+        bool v4_tcp_bound_port_valid;
+        u8   v4_tcp_bound_port;
 };
 
 /*
@@ -410,7 +430,7 @@ static int ask_hw_pcd_build_chain(struct ask_hw_pcd *h)
                 goto err_kg;
         }
 
-        ask_pr_info("hw: FMan PCD chain up (v4-TCP empty CC node, KG-attached, no port-bind)\n");
+        ask_pr_info("hw: FMan PCD chain up (v4-TCP empty CC node, KG-attached, awaiting port-bind from flow_offload)\n");
         return 0;
 
 err_kg:
@@ -535,6 +555,82 @@ struct ask_hw_pcd *ask_hw_pcd_get(void)
          */
         return ask_hw_pcd_inst;
 }
+
+/* ------------------------------------------------------------------------- */
+/* PR14g-body-1 (part 2): port-bind                                           */
+/*                                                                            */
+/* Called from ask_flow_offload.c on FLOW_BLOCK_BIND once we have resolved   */
+/* the netdev to an FMan port id via dpaa_get_fman_port_id() (kernel patch   */
+/* 0030).  Wraps fman_pcd_kg_bind_port() with idempotency and single-port-   */
+/* per-scheme accounting; see the kerneldoc in include/ask_internal.h for   */
+/* the full return-value contract.                                            */
+/* ------------------------------------------------------------------------- */
+
+int ask_hw_port_bind(u8 port_id)
+{
+        struct ask_hw_pcd *h = ask_hw_pcd_get();
+        int rc;
+
+        if (!h)
+                return -ENODEV;
+
+        /*
+         * Range-check matches the header doc in <linux/fsl/fman_pcd.h>:
+         * "FMan port id (0..7 for 1G, 8..9 for 10G on LS1046A)".  The
+         * in-tree dpaa_get_fman_port_id() helper guarantees this range
+         * via -ERANGE, but we re-check defensively so ask_hw_port_bind
+         * is usable from kunit harnesses that synthesise port_id values
+         * directly without going through dpaa_get_fman_port_id().
+         */
+        if (port_id > 9) {
+                ask_pr_warn("hw: port-bind port_id %u out of range (0..9)\n",
+                            port_id);
+                return -EINVAL;
+        }
+
+        mutex_lock(&h->lock);
+
+        if (h->v4_tcp_bound_port_valid) {
+                if (h->v4_tcp_bound_port == port_id) {
+                        /* Idempotent rebind from the same netdev. */
+                        mutex_unlock(&h->lock);
+                        ask_pr_dbg("hw: port-bind v4-TCP idempotent (port %u)\n",
+                                   port_id);
+                        return 0;
+                }
+                /*
+                 * A DIFFERENT port is asking to bind.  LS1046A KGSE_MV
+                 * is single-port-per-scheme; we cannot accept this.
+                 * Log once-ish (the caller bumps a counter so the dbg
+                 * spam is bounded), return -EBUSY so the caller can
+                 * fall back to software for this second port without
+                 * tearing down the first port's acceleration.
+                 */
+                mutex_unlock(&h->lock);
+                ask_pr_warn("hw: port-bind v4-TCP: already bound to port %u, "
+                            "cannot also bind port %u - second port will run "
+                            "in software\n",
+                            h->v4_tcp_bound_port, port_id);
+                return -EBUSY;
+        }
+
+        rc = fman_pcd_kg_bind_port(h->kg_v4_tcp, port_id);
+        if (rc) {
+                mutex_unlock(&h->lock);
+                ask_pr_warn("hw: fman_pcd_kg_bind_port(v4-TCP, port=%u) failed: %d\n",
+                            port_id, rc);
+                return rc;
+        }
+
+        h->v4_tcp_bound_port = port_id;
+        h->v4_tcp_bound_port_valid = true;
+        mutex_unlock(&h->lock);
+
+        ask_pr_info("hw: FMan PCD v4-TCP scheme bound to port %u (HW offload active)\n",
+                    port_id);
+        return 0;
+}
+EXPORT_SYMBOL_GPL(ask_hw_port_bind);
 
 /* ------------------------------------------------------------------------- */
 /* hw_flow_id pack/unpack (PR14g-body-1)                                      */
