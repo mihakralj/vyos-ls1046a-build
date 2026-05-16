@@ -34,7 +34,7 @@ index 5c1b916..6b5ae56 100644
  
  /* Auto checksum recompute (RM 8.7.5.4 + SDK HMCD_IP_L4_CS_CALC) */
 -#define FMAN_PCD_HMCD_IP_L4_CS_CALC	0x00040000u
-+#define FMAN_PCD_HMCD_IP_L4_CS_CALC0x00040000u
++#define FMAN_PCD_HMCD_IP_L4_CS_CALC 0x00040000u
 +
 +/* ------------------------------------------------------------------ */
 +/* v1.2 (PR14i) additions for the OH-port AD chain                    */
@@ -54,8 +54,8 @@ index 5c1b916..6b5ae56 100644
 + * e_FM_PCD_MANIP_HDR_RMV_ETHERNET (line 432) and
 + * e_FM_PCD_MANIP_HDR_INSRT_GENERIC (line 528).
 + */
-+#define FMAN_PCD_L2_HDR_OFFSET0u
-+#define FMAN_PCD_L2_HDR_RMV_SIZE14u /* 6 dst + 6 src + 2 EtherType */
++#define FMAN_PCD_L2_HDR_OFFSET 0u
++#define FMAN_PCD_L2_HDR_RMV_SIZE 14u /* 6 dst + 6 src + 2 EtherType */
 +
 +/*
 + * MANIP_FIELD_UPDATE_IPV4_FORWARD silicon facts.
@@ -77,9 +77,9 @@ index 5c1b916..6b5ae56 100644
 + * Cross-ref SDK fm_manip.c case e_FM_PCD_MANIP_HDR_FIELD_UPDATE_IPV4
 + * + SDK HMCD_IPV4_UPDATE_DSCP=0x00000004 / HMCD_IPV4_DSCP_SHIFT=26.
 + */
-+#define FMAN_PCD_HMCD_IPV4_UPDATE_DSCP0x00000004u
-+#define FMAN_PCD_HMCD_IPV4_DSCP_SHIFT26 /* DSCP in inline payload */
-+#define FMAN_PCD_IPV4_DSCP_MAX0x3Fu /* 6 bits */
++#define FMAN_PCD_HMCD_IPV4_UPDATE_DSCP 0x00000004u
++#define FMAN_PCD_HMCD_IPV4_DSCP_SHIFT 26 /* DSCP in inline payload */
++#define FMAN_PCD_IPV4_DSCP_MAX 0x3Fu /* 6 bits */
  
  /**
   * struct fman_pcd_manip - one MURAM-resident header-manip template.
@@ -636,8 +636,8 @@ index f9f43a3..f207c6c 100644
 + *       L3-forwarding AD chain - MANIP_RMV_ETHERNET,
 + *       MANIP_INSRT_GENERIC, MANIP_FIELD_UPDATE_IPV4_FORWARD.
   */
--#define FMAN_PCD_API_VERSION1
-+#define FMAN_PCD_API_VERSION2
+-#define FMAN_PCD_API_VERSION 1
++#define FMAN_PCD_API_VERSION 2
  
  /*
   * Opaque handles.  All defined in their respective .c files.
@@ -702,7 +702,7 @@ index f9f43a3..f207c6c 100644
 + * the ABI exposes the full 32-byte ceiling so MPLS / GRE / VXLAN
 + * inline pushes in later milestones reuse the same template type.
 + */
-+#define FMAN_PCD_MANIP_INSRT_GENERIC_MAX_SIZE32u
++#define FMAN_PCD_MANIP_INSRT_GENERIC_MAX_SIZE 32u
 +
  /**
   * struct fman_pcd_manip_params - configuration for one manip template.
