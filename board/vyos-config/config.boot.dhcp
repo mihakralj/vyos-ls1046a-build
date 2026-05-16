@@ -61,25 +61,25 @@ system {
 interfaces {
     loopback lo {
     }
-    ethernet eth0 {
+    ethernet e2 {
+        address dhcp
+        description "RJ45 right"
+    }
+    ethernet e3 {
         address dhcp
         description "MGMT (left RJ45)"
     }
-    ethernet eth1 {
+    ethernet e4 {
         address dhcp
-        description "MGMT (center RJ45)"
+        description "RJ45 center"
     }
-    ethernet eth2 {
+    ethernet e5 {
         address dhcp
-        description "MGMT (right RJ45)"
+        description "SFP+ left"
     }
-    ethernet eth3 {
+    ethernet e6 {
         address dhcp
-        description "MGMT (left SFP+)"
-    }
-    ethernet eth4 {
-        address dhcp
-        description "MGMT (right SFP+)"
+        description "SFP+ right"
     }
 }
 
