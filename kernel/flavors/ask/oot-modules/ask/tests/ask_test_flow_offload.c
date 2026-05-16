@@ -429,6 +429,54 @@ ask_flow_offload_owns_default_table = false;
 /* suite                                                                      */
 /* ------------------------------------------------------------------------- */
 
+/* ------------------------------------------------------------------------- */
+/* PR14j tests — direction classifier + deferred-bind contract                */
+/*                                                                            */
+/* These pin two PR14j architectural decisions:                               */
+/*                                                                            */
+/*   A. ask_flow_offload_classify_dir() is a pure of_node walk.  It MUST be   */
+/*      NULL-safe (return ASK_DIR_UNKNOWN on NULL dev) and MUST return        */
+/*      ASK_DIR_UNKNOWN for any net_device whose dev.parent->of_node does     */
+/*      not carry the DPAA1 MAC compatibles / phandle properties (e.g. lo,   */
+/*      the dummy device that ask_test_flow_offload_setup() borrows, vmnet   */
+/*      style virtio-net netdevs, etc.).  This guards us against a future    */
+/*      change that promotes the helper from logging-only back to making a   */
+/*      binding decision: it must keep returning UNKNOWN for non-DPAA paths. */
+/*                                                                            */
+/*   B. FLOW_BLOCK_BIND no longer calls ask_hw_port_bind().  On the kunit    */
+/*      harness ask_hw_pcd_get() is NULL so any accidental call would       */
+/*      return -ENODEV without crashing — but the contract we want to lock  */
+/*      is "BIND succeeds even when REPLACE later cannot bind silicon".     */
+/*      We exercise BIND on a dummy netdev (no FMan port id) and assert the */
+/*      BIND path returns 0 regardless.                                      */
+/* ------------------------------------------------------------------------- */
+
+static void ask_flow_offload_test_classify_dir_null(struct kunit *test)
+{
+        KUNIT_EXPECT_EQ(test, ask_flow_offload_classify_dir(NULL),
+                        ASK_DIR_UNKNOWN);
+}
+
+static void ask_flow_offload_test_classify_dir_non_dpaa(struct kunit *test)
+{
+        struct net_device *lo;
+
+        /*
+         * Loopback has a dev.parent->of_node of NULL on most arches.
+         * The helper MUST gracefully return UNKNOWN rather than walk
+         * into a NULL.  init_net's loopback is always present.
+         */
+        lo = dev_get_by_name(&init_net, "lo");
+        if (!lo) {
+                kunit_skip(test, "loopback not present in this test ns");
+                return;
+        }
+
+        KUNIT_EXPECT_EQ(test, ask_flow_offload_classify_dir(lo),
+                        ASK_DIR_UNKNOWN);
+        dev_put(lo);
+}
+
 static struct kunit_case ask_flow_offload_test_cases[] = {
 KUNIT_CASE(ask_flow_offload_test_replace_minimal),
 KUNIT_CASE(ask_flow_offload_test_destroy_round_trip),
@@ -438,6 +486,9 @@ KUNIT_CASE(ask_flow_offload_test_replace_idempotent),
 KUNIT_CASE(ask_flow_offload_test_action_unknown),
 KUNIT_CASE(ask_flow_offload_test_action_no_redirect),
 KUNIT_CASE(ask_flow_offload_test_ipv6_rejected),
+/* PR14j: direction classifier null-safety + non-DPAA fallthrough. */
+KUNIT_CASE(ask_flow_offload_test_classify_dir_null),
+KUNIT_CASE(ask_flow_offload_test_classify_dir_non_dpaa),
 {}
 };
 

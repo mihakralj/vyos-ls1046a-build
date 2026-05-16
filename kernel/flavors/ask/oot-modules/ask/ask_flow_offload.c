@@ -1,55 +1,45 @@
- // SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0
 /*
- * ASK2 - flow_offload subsystem (PR8 / M1.4)
+ * ASK2 - flow_offload subsystem (PR8 / M1.4 + PR14j ingress-only bind).
  *
  * Implements the `flow_block_cb` dispatcher that the in-tree dpaa
- * patch (PR11/M2.2 — `0002-dpaa-eth-flow-block.patch`) plugs into the
- * `dpaa_setup_tc()` path. Until that patch lands, ask_flow_offload
- * exposes the same callback as a public symbol so:
+ * patch (PR11/M2.2 - `0002-dpaa-eth-flow-block.patch`) plugs into the
+ * `dpaa_setup_tc()` path.
  *
- *   - PR9 kunit can drive it against a synthetic netdev,
- *   - PR15 (per-flow-type expansion) can layer parsers on top,
- *   - the in-tree patch PR11 only needs to invoke the existing
- *     `ask_flow_offload_setup_tc()` from `dpaa_setup_tc()` — all the
- *     translation logic stays in this OOT file.
+ * PR14j architectural change vs. PR14g:
  *
- * Translation shape (FLOW_CLS_* → ask_flow_*):
+ *   PR14g bound the KG scheme to whichever dpaa netdev received the
+ *   FIRST FLOW_BLOCK_BIND.  On the M2 test rig that turned out to be
+ *   egress eth4 - so the ingress eth3 bind returned -EBUSY and the
+ *   classifier never saw RX traffic.  Result: 6.9 Gbps / 54% CPU, well
+ *   below the 18 Gbps M2 gate.
  *
- *   FLOW_CLS_REPLACE: parse `flow_cls_offload->rule->match` into
- *     struct ask_flow_key, parse `->rule->action` into action_flags +
- *     oif, then call ask_flow_insert(default_table, cookie, key, oif,
- *     flags, &hw_id). The cookie is the `flow_cls_offload->cookie`
- *     unsigned long handed by the netfilter/tc core. The hw_id is
- *     fake (atomic counter) until PR14 wires the real hostcmd path;
- *     we still return 0 on success so the upper layer caches our
- *     willingness to offload.
+ *   PR14j defers ask_hw_port_bind() from FLOW_BLOCK_BIND to
+ *   FLOW_CLS_REPLACE.  At REPLACE time the rule carries a REDIRECT /
+ *   MIRRED action with the egress target, so the netdev whose block
+ *   received the REPLACE is unambiguously the INGRESS netdev (the
+ *   one that matched the 5-tuple).  We bind KG to THAT netdev's FMan
+ *   port id.  Egress-only netdevs never receive a REPLACE for which
+ *   they are the source, so they never consume the single-port-per-
+ *   scheme KGSE_MV slot.
  *
- *   FLOW_CLS_DESTROY: ask_flow_remove(table, cookie). -ENOENT is
- *     swallowed (the upper layer occasionally double-destroys when
- *     a connection ages out concurrently with an explicit nft delete).
+ *   FLOW_BLOCK_BIND still installs the block_cb (so we'll see the
+ *   REPLACE events) - it just does not touch silicon.
  *
- *   FLOW_CLS_STATS: ask_flow_get_stats(table, cookie, &p, &b, &lns)
- *     and stuff the result into `flow_cls_offload->stats` via
- *     `flow_stats_update()`. nf_flow_table polls this every second to
- *     decide whether to keep offloading.
+ * Translation shape (FLOW_CLS_* -> ask_flow_*):
  *
- * What's NOT in PR8:
- *   - real hardware insert (PR14)
- *   - the in-tree dpaa patch that wires `ask_flow_offload_setup_tc()`
- *     into `dpaa_setup_tc()` (PR11)
- *   - tc-flower-specific quirks beyond the shared FLOW_CLS_* dispatch
- *     (those land in PR15 once we have a hardware target to validate
- *     against)
- *   - IPv6 / multicast / bridge parsers (PR15a/c/d/e)
+ *   FLOW_CLS_REPLACE: parse match into ask_flow_key, parse action into
+ *     action_flags + oif, resolve neighbour MAC for the egress netdev
+ *     (so the OH-port INSRT_GENERIC can push a real L2 header), bind
+ *     KG to this netdev's FMan port id (idempotent), then call
+ *     ask_flow_insert().
  *
- * Concurrency:
- *   The callback is invoked from process context (nft commit path) or
- *   softirq (nf_flow_table refresh). We rely on ask_flow.c's RCU/
- *   rhashtable concurrency guarantees — the callback itself takes no
- *   private locks.
+ *   FLOW_CLS_DESTROY: ask_flow_remove(table, cookie).
  *
- * Spec ref: §4.3 (flow_block_cb integration), §11.1 (M1 acceptance
- * gate), §16 #6 (recommended bring-up order: dummy netdev first).
+ *   FLOW_CLS_STATS: ask_flow_get_stats() into flow_stats_update().
+ *
+ * Spec ref: §4.3 (flow_block_cb integration), §11.1 (M2 perf gate),
+ * plans/PR14j-DESIGN.md (the two-stage OH-port architecture).
  */
 
 #include <linux/kernel.h>
@@ -60,429 +50,544 @@
 #include <linux/list.h>
 #include <linux/spinlock.h>
 #include <linux/netdevice.h>
+#include <linux/inetdevice.h>
+#include <linux/of.h>
+#include <linux/string.h>
+#include <linux/if_ether.h>
 #include <net/flow_offload.h>
 #include <net/pkt_cls.h>
+#include <net/arp.h>
+#include <net/neighbour.h>
+#include <net/net_namespace.h>
 #include <linux/fsl/dpaa_flow_offload.h>
 
 #include "include/ask_internal.h"
 
 /* ------------------------------------------------------------------------- */
-/* Per-block state                                                            */
+/* PR14j: direction classification helper                                     */
 /*                                                                            */
-/* The flow_block_offload core hands us an opaque `void *cb_priv` we may use  */
-/* to thread per-block context. PR8 keeps it minimal: a back-pointer to the   */
-/* netdev for diagnostic logging only. PR15 will extend this to carry a       */
-/* per-fman flow-table pointer once multi-fman support arrives.               */
+/* Used by ask_flow_offload_setup_tc(FLOW_BLOCK_BIND) for logging only;       */
+/* the actual ingress-vs-egress decision in PR14j is made at FLOW_CLS_REPLACE */
+/* time (see ask_flow_offload_replace() below) when the REDIRECT target is    */
+/* visible.  At FLOW_BLOCK_BIND we don't have enough context to know which    */
+/* end of the flow this netdev is going to be.                                */
+/*                                                                            */
+/* The walk: from dev->dev.parent->of_node (the platform device's DT node)    */
+/* walk upward via of_get_next_parent(), looking for a node with the          */
+/* "fsl,fman-memac" compatible or "fsl,fman-mac-rx"/"fsl,fman-mac-tx"         */
+/* phandle properties.  DPAA1 MACs always have BOTH rx and tx phandles, so    */
+/* the helper returns ASK_DIR_INGRESS for any MAC that has an rx phandle      */
+/* pointing at a "*-rx" port (= all DPAA1 MACs) and falls back to             */
+/* ASK_DIR_EGRESS / ASK_DIR_UNKNOWN otherwise.                                */
+/*                                                                            */
+/* This is intentionally weak; the real binding decision is in the REPLACE    */
+/* path.  The helper exists so kunit can exercise the of_node parsing logic   */
+/* and so future PR14k/l revisions can elevate it.                            */
+/* ------------------------------------------------------------------------- */
+
+static bool ask_node_is_rx_port(const struct device_node *np)
+{
+        if (!np)
+                return false;
+        return of_device_is_compatible(np, "fsl,fman-port-1g-rx")  ||
+               of_device_is_compatible(np, "fsl,fman-port-10g-rx") ||
+               of_device_is_compatible(np, "fsl,fman-v3-port-rx");
+}
+
+static bool ask_node_is_tx_port(const struct device_node *np)
+{
+        if (!np)
+                return false;
+        return of_device_is_compatible(np, "fsl,fman-port-1g-tx")  ||
+               of_device_is_compatible(np, "fsl,fman-port-10g-tx") ||
+               of_device_is_compatible(np, "fsl,fman-v3-port-tx");
+}
+
+int ask_flow_offload_classify_dir(const struct net_device *dev)
+{
+        struct device_node *mac_np;
+        struct device_node *port_np;
+        struct device *parent;
+        int dir = ASK_DIR_UNKNOWN;
+
+        if (!dev)
+                return ASK_DIR_UNKNOWN;
+
+        parent = dev->dev.parent;
+        if (!parent || !parent->of_node)
+                return ASK_DIR_UNKNOWN;
+
+        /* Walk up to the MAC node carrying the rx/tx phandle properties. */
+        mac_np = of_node_get(parent->of_node);
+        while (mac_np) {
+                struct device_node *tmp;
+
+                if (of_device_is_compatible(mac_np, "fsl,fman-memac") ||
+                    of_get_property(mac_np, "fsl,fman-mac-rx", NULL) ||
+                    of_get_property(mac_np, "fsl,fman-mac-tx", NULL))
+                        break;
+
+                tmp = of_get_next_parent(mac_np);
+                mac_np = tmp;
+        }
+
+        if (!mac_np)
+                return ASK_DIR_UNKNOWN;
+
+        port_np = of_parse_phandle(mac_np, "fsl,fman-mac-rx", 0);
+        if (port_np) {
+                if (ask_node_is_rx_port(port_np))
+                        dir = ASK_DIR_INGRESS;
+                of_node_put(port_np);
+        }
+
+        if (dir == ASK_DIR_UNKNOWN) {
+                port_np = of_parse_phandle(mac_np, "fsl,fman-mac-tx", 0);
+                if (port_np) {
+                        if (ask_node_is_tx_port(port_np))
+                                dir = ASK_DIR_EGRESS;
+                        of_node_put(port_np);
+                }
+        }
+
+        of_node_put(mac_np);
+        return dir;
+}
+EXPORT_SYMBOL_GPL(ask_flow_offload_classify_dir);
+
+/* ------------------------------------------------------------------------- */
+/* PR14j: neighbour resolution for OH-port MANIP_INSRT_GENERIC                */
+/*                                                                            */
+/* The OH-port chain pushes a fresh 14-byte L2 header onto the rewritten      */
+/* IPv4 packet (next_hop_mac, egress_mac, ETH_P_IP).  We need both MACs at    */
+/* FLOW_CLS_REPLACE time so the per-flow fman_pcd_manip can be created in    */
+/* ask_hw_flow_insert_v4_tcp().                                               */
+/*                                                                            */
+/*   egress_mac    = the egress netdev's own MAC (dev_addr)                   */
+/*   next_hop_mac  = neigh_lookup(arp_tbl, dst_ip, egress_dev) and check      */
+/*                   NUD_CONNECTED|NUD_REACHABLE|NUD_PERMANENT.  If the       */
+/*                   neighbour is not yet resolved we leave next_hop_mac      */
+/*                   zero; ask_hw_flow_insert_v4_tcp() returns -EAGAIN and    */
+/*                   the SW path handles the flow until the neighbour         */
+/*                   resolves and the next retry succeeds.                    */
+/* ------------------------------------------------------------------------- */
+
+static void ask_resolve_neigh_v4(struct net_device *egress_dev,
+                                 __be32 dst_ip,
+                                 u8 *out_next_hop_mac,
+                                 u8 *out_egress_mac)
+{
+        struct neighbour *n;
+        u32 dst_key = (__force u32)dst_ip;
+
+        memset(out_next_hop_mac, 0, ETH_ALEN);
+        memset(out_egress_mac,   0, ETH_ALEN);
+
+        if (!egress_dev)
+                return;
+
+        memcpy(out_egress_mac, egress_dev->dev_addr, ETH_ALEN);
+
+        n = neigh_lookup(&arp_tbl, &dst_key, egress_dev);
+        if (!n)
+                return;
+
+        read_lock_bh(&n->lock);
+        if (n->nud_state & (NUD_CONNECTED | NUD_REACHABLE | NUD_PERMANENT))
+                memcpy(out_next_hop_mac, n->ha, ETH_ALEN);
+        read_unlock_bh(&n->lock);
+
+        neigh_release(n);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Per-block state                                                            */
 /* ------------------------------------------------------------------------- */
 
 struct ask_flow_block_priv {
-struct net_device *dev;
+        struct net_device *dev;
 };
 
-/*
- * We track every block we have bound to so unregister can find them by
- * netdev. The list is small (one entry per dpaa netdev — at most 5 on
- * LS1046A) so a flat list with a spinlock is fine; no need for an
- * rhashtable here.
- */
 static LIST_HEAD(ask_flow_block_priv_list);
 static DEFINE_SPINLOCK(ask_flow_block_priv_lock);
 
 struct ask_flow_block_priv_entry {
-struct list_head node;
-struct ask_flow_block_priv priv;
+        struct list_head node;
+        struct ask_flow_block_priv priv;
 };
 
 static struct ask_flow_block_priv_entry *
 ask_flow_block_priv_alloc(struct net_device *dev)
 {
-struct ask_flow_block_priv_entry *e;
+        struct ask_flow_block_priv_entry *e;
 
-e = kzalloc(sizeof(*e), GFP_KERNEL);
-if (!e)
-return NULL;
+        e = kzalloc(sizeof(*e), GFP_KERNEL);
+        if (!e)
+                return NULL;
 
-e->priv.dev = dev;
-spin_lock(&ask_flow_block_priv_lock);
-list_add(&e->node, &ask_flow_block_priv_list);
-spin_unlock(&ask_flow_block_priv_lock);
-return e;
+        e->priv.dev = dev;
+        spin_lock(&ask_flow_block_priv_lock);
+        list_add(&e->node, &ask_flow_block_priv_list);
+        spin_unlock(&ask_flow_block_priv_lock);
+        return e;
 }
 
 static void ask_flow_block_priv_free(void *cb_priv)
 {
-struct ask_flow_block_priv *p = cb_priv;
-struct ask_flow_block_priv_entry *e, *tmp;
+        struct ask_flow_block_priv *p = cb_priv;
+        struct ask_flow_block_priv_entry *e, *tmp;
 
-if (!p)
-return;
+        if (!p)
+                return;
 
-spin_lock(&ask_flow_block_priv_lock);
-list_for_each_entry_safe(e, tmp, &ask_flow_block_priv_list, node) {
-if (&e->priv == p) {
-list_del(&e->node);
-spin_unlock(&ask_flow_block_priv_lock);
-kfree(e);
-return;
+        spin_lock(&ask_flow_block_priv_lock);
+        list_for_each_entry_safe(e, tmp, &ask_flow_block_priv_list, node) {
+                if (&e->priv == p) {
+                        list_del(&e->node);
+                        spin_unlock(&ask_flow_block_priv_lock);
+                        kfree(e);
+                        return;
+                }
+        }
+        spin_unlock(&ask_flow_block_priv_lock);
 }
-}
-spin_unlock(&ask_flow_block_priv_lock);
+
+static struct net_device *
+ask_flow_block_priv_dev(void *cb_priv)
+{
+        struct ask_flow_block_priv *p = cb_priv;
+
+        return p ? p->dev : NULL;
 }
 
 /* ------------------------------------------------------------------------- */
 /* Match parsing                                                              */
-/*                                                                            */
-/* PR8 supports IPv4 5-tuple + IIF only. IPv6 lands in PR15a, multicast in    */
-/* PR15c/d, bridge in PR15e. Returns 0 on success, -EOPNOTSUPP if the rule    */
-/* uses a key element we don't yet handle (the upper layer interprets that    */
-/* as "keep in software", not as a hard error).                               */
 /* ------------------------------------------------------------------------- */
 
 static int ask_parse_match_v4(struct flow_cls_offload *f,
-      struct ask_flow_key *key)
+                              struct ask_flow_key *key)
 {
-struct flow_rule *rule = flow_cls_offload_flow_rule(f);
-struct flow_dissector *d = rule->match.dissector;
+        struct flow_rule *rule = flow_cls_offload_flow_rule(f);
+        struct flow_dissector *d = rule->match.dissector;
 
-memset(key, 0, sizeof(*key));
-key->l3_proto = ASK_FLOW_L3_IPV4;
+        memset(key, 0, sizeof(*key));
+        key->l3_proto = ASK_FLOW_L3_IPV4;
 
-/* Control / basic — required for any rule we accept. */
-if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC)) {
-struct flow_match_basic m;
+        if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC)) {
+                struct flow_match_basic m;
 
-flow_rule_match_basic(rule, &m);
-if (m.key->n_proto != htons(ETH_P_IP))
-return -EOPNOTSUPP;
-key->l4_proto = m.key->ip_proto;
-} else {
-return -EOPNOTSUPP;
-}
+                flow_rule_match_basic(rule, &m);
+                if (m.key->n_proto != htons(ETH_P_IP))
+                        return -EOPNOTSUPP;
+                key->l4_proto = m.key->ip_proto;
+        } else {
+                return -EOPNOTSUPP;
+        }
 
-/* Source / dest IPv4. */
-if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_IPV4_ADDRS)) {
-struct flow_match_ipv4_addrs m;
+        if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_IPV4_ADDRS)) {
+                struct flow_match_ipv4_addrs m;
 
-flow_rule_match_ipv4_addrs(rule, &m);
-memcpy(&key->src_ip[0], &m.key->src, 4);
-memcpy(&key->dst_ip[0], &m.key->dst, 4);
-} else {
-return -EOPNOTSUPP;
-}
+                flow_rule_match_ipv4_addrs(rule, &m);
+                memcpy(&key->src_ip[0], &m.key->src, 4);
+                memcpy(&key->dst_ip[0], &m.key->dst, 4);
+        } else {
+                return -EOPNOTSUPP;
+        }
 
-/* L4 ports — TCP or UDP only. */
-if (key->l4_proto == IPPROTO_TCP || key->l4_proto == IPPROTO_UDP) {
-struct flow_match_ports m;
+        if (key->l4_proto == IPPROTO_TCP || key->l4_proto == IPPROTO_UDP) {
+                struct flow_match_ports m;
 
-if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS))
-return -EOPNOTSUPP;
-flow_rule_match_ports(rule, &m);
-key->sport = m.key->src;
-key->dport = m.key->dst;
-}
+                if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS))
+                        return -EOPNOTSUPP;
+                flow_rule_match_ports(rule, &m);
+                key->sport = m.key->src;
+                key->dport = m.key->dst;
+        }
 
-/* Optional VLAN. */
-if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_VLAN)) {
-struct flow_match_vlan m;
+        if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_VLAN)) {
+                struct flow_match_vlan m;
 
-flow_rule_match_vlan(rule, &m);
-key->vlan_id = m.key->vlan_id;
-}
+                flow_rule_match_vlan(rule, &m);
+                key->vlan_id = m.key->vlan_id;
+        }
 
-/* Suppress an unused-variable warning if d isn't otherwise read. */
-(void)d;
-return 0;
+        (void)d;
+        return 0;
 }
 
 /* ------------------------------------------------------------------------- */
 /* Action parsing                                                             */
 /*                                                                            */
-/* Translate flow_action_entry list into ask action_flags + oif. Anything we  */
-/* don't yet implement (rewrite SRC/DST, mangle, mirror, etc.) returns        */
-/* -EOPNOTSUPP so the upper layer stays in software for that flow.            */
+/* PR14j extension: also returns the egress net_device * (act->dev) so the    */
+/* caller can run neigh_lookup() and fill key->next_hop_mac / egress_mac.     */
+/* The pointer is borrowed from the rule and is RCU-protected; caller must    */
+/* use it before returning from the FLOW_CLS_REPLACE handler.                 */
 /* ------------------------------------------------------------------------- */
 
 static int ask_parse_action(struct flow_cls_offload *f,
-    u32 *out_action_flags, u32 *out_oif)
+                            u32 *out_action_flags, u32 *out_oif,
+                            struct net_device **out_egress_dev)
 {
-struct flow_rule *rule = flow_cls_offload_flow_rule(f);
-struct flow_action_entry *act;
-u32 flags = 0;
-u32 oif = 0;
-int i;
+        struct flow_rule *rule = flow_cls_offload_flow_rule(f);
+        struct flow_action_entry *act;
+        struct net_device *egress = NULL;
+        u32 flags = 0;
+        u32 oif = 0;
+        int i;
 
-flow_action_for_each(i, act, &rule->action) {
-switch (act->id) {
-case FLOW_ACTION_REDIRECT:
-case FLOW_ACTION_MIRRED:
-if (!act->dev)
-return -EOPNOTSUPP;
-oif = act->dev->ifindex;
-break;
-case FLOW_ACTION_VLAN_PUSH:
-flags |= ASK_ACT_VLAN_PUSH;
-break;
-case FLOW_ACTION_VLAN_POP:
-flags |= ASK_ACT_VLAN_POP;
-break;
-case FLOW_ACTION_CSUM:
-/* Hardware always recomputes — silently accept. */
-break;
-case FLOW_ACTION_PTYPE:
-case FLOW_ACTION_ACCEPT:
-break;
-default:
-/* Unknown action → keep the flow in software. */
-return -EOPNOTSUPP;
-}
-}
+        flow_action_for_each(i, act, &rule->action) {
+                switch (act->id) {
+                case FLOW_ACTION_REDIRECT:
+                case FLOW_ACTION_MIRRED:
+                        if (!act->dev)
+                                return -EOPNOTSUPP;
+                        oif = act->dev->ifindex;
+                        egress = act->dev;
+                        break;
+                case FLOW_ACTION_VLAN_PUSH:
+                        flags |= ASK_ACT_VLAN_PUSH;
+                        break;
+                case FLOW_ACTION_VLAN_POP:
+                        flags |= ASK_ACT_VLAN_POP;
+                        break;
+                case FLOW_ACTION_CSUM:
+                        break;
+                case FLOW_ACTION_PTYPE:
+                case FLOW_ACTION_ACCEPT:
+                        break;
+                default:
+                        return -EOPNOTSUPP;
+                }
+        }
 
-if (oif == 0)
-return -EOPNOTSUPP;
+        if (oif == 0)
+                return -EOPNOTSUPP;
 
-*out_action_flags = flags;
-*out_oif = oif;
-return 0;
+        *out_action_flags = flags;
+        *out_oif = oif;
+        if (out_egress_dev)
+                *out_egress_dev = egress;
+        return 0;
 }
 
 /* ------------------------------------------------------------------------- */
 /* FLOW_CLS_* dispatch                                                        */
 /* ------------------------------------------------------------------------- */
 
-static int ask_flow_offload_replace(struct flow_cls_offload *f)
+static int ask_flow_offload_replace(struct net_device *ingress_dev,
+                                    struct flow_cls_offload *f)
 {
-struct ask_flow_table *t = ask_flow_default_table();
-struct ask_flow_key key;
-u32 hw_id = 0;
-u32 action_flags = 0;
-u32 oif = 0;
-int rc;
+        struct ask_flow_table *t = ask_flow_default_table();
+        struct net_device *egress_dev = NULL;
+        struct ask_flow_key key;
+        __be32 dst_ip;
+        u32 hw_id = 0;
+        u32 action_flags = 0;
+        u32 oif = 0;
+        int rc;
 
-if (!t)
-return -EOPNOTSUPP;
+        if (!t)
+                return -EOPNOTSUPP;
 
-rc = ask_parse_match_v4(f, &key);
-if (rc)
-return rc;
+        rc = ask_parse_match_v4(f, &key);
+        if (rc)
+                return rc;
 
-rc = ask_parse_action(f, &action_flags, &oif);
-if (rc)
-return rc;
+        rc = ask_parse_action(f, &action_flags, &oif, &egress_dev);
+        if (rc)
+                return rc;
 
-rc = ask_flow_insert(t, (u64)f->cookie, &key, oif,
-     action_flags, &hw_id);
-if (rc == -EEXIST) {
-/*
- * Upper layer occasionally re-issues REPLACE for an
- * already-installed flow when an attribute is touched.
- * Treat as success — we already track the cookie and the
- * key is immutable in 5-tuple offload.
- */
-return 0;
-}
-if (rc)
-return rc;
+        /*
+         * PR14j: resolve the OH-chain L2 header.  We need
+         *   egress_mac   = egress netdev's own MAC
+         *   next_hop_mac = neigh ARP entry for dst_ip on egress_dev
+         * before handing the key to ask_flow_insert() -> ask_hw_flow_insert().
+         * If the neighbour is not yet resolved, the HW path returns -EAGAIN
+         * and the SW path takes the flow until the neighbour completes.
+         */
+        memcpy(&dst_ip, &key.dst_ip[0], 4);
+        ask_resolve_neigh_v4(egress_dev, dst_ip,
+                             key.next_hop_mac, key.egress_mac);
 
-ask_pr_dbg("flow_offload: REPLACE cookie=0x%lx hw_id=%u oif=%u\n",
-   f->cookie, hw_id, oif);
-return 0;
+        /*
+         * PR14j: ingress-only KG port-bind.
+         *
+         * The REPLACE arrived on @ingress_dev's block (the dpaa netdev
+         * that matched the 5-tuple).  Bind KG to THAT netdev's FMan
+         * port id, not the egress device.  Idempotent re-bind for the
+         * same port is a no-op.  -EBUSY (different port already bound)
+         * is logged and ignored - the SW path picks up the flow.
+         */
+        if (ingress_dev) {
+                u8 pid;
+                int prc = dpaa_get_fman_port_id(ingress_dev, &pid);
+
+                if (prc == 0) {
+                        prc = ask_hw_port_bind(pid);
+                        if (prc == -EBUSY)
+                                ask_pr_dbg("flow_offload: REPLACE %s: KG already bound to other port, SW fallback\n",
+                                           netdev_name(ingress_dev));
+                        else if (prc && prc != -ENODEV)
+                                ask_pr_warn("flow_offload: REPLACE %s (pid %u) port-bind failed: %d\n",
+                                            netdev_name(ingress_dev), pid, prc);
+                } else if (prc != -ENODEV && prc != -ERANGE) {
+                        ask_pr_dbg("flow_offload: REPLACE dpaa_get_fman_port_id(%s) failed: %d\n",
+                                   netdev_name(ingress_dev), prc);
+                }
+        }
+
+        rc = ask_flow_insert(t, (u64)f->cookie, &key, oif,
+                             action_flags, &hw_id);
+        if (rc == -EEXIST)
+                return 0;
+        if (rc)
+                return rc;
+
+        ask_pr_dbg("flow_offload: REPLACE cookie=0x%lx hw_id=0x%08x ingress=%s oif=%u next_hop=%pM egress_mac=%pM\n",
+                   f->cookie, hw_id,
+                   ingress_dev ? netdev_name(ingress_dev) : "?", oif,
+                   key.next_hop_mac, key.egress_mac);
+        return 0;
 }
 
 static int ask_flow_offload_destroy(struct flow_cls_offload *f)
 {
-struct ask_flow_table *t = ask_flow_default_table();
-int rc;
+        struct ask_flow_table *t = ask_flow_default_table();
+        int rc;
 
-if (!t)
-return -EOPNOTSUPP;
+        if (!t)
+                return -EOPNOTSUPP;
 
-rc = ask_flow_remove(t, (u64)f->cookie);
-if (rc == -ENOENT) {
-/* Double-destroy race — not a real error. */
-return 0;
-}
-if (rc)
-return rc;
+        rc = ask_flow_remove(t, (u64)f->cookie);
+        if (rc == -ENOENT)
+                return 0;
+        if (rc)
+                return rc;
 
-ask_pr_dbg("flow_offload: DESTROY cookie=0x%lx\n", f->cookie);
-return 0;
+        ask_pr_dbg("flow_offload: DESTROY cookie=0x%lx\n", f->cookie);
+        return 0;
 }
 
 static int ask_flow_offload_stats(struct flow_cls_offload *f)
 {
-struct ask_flow_table *t = ask_flow_default_table();
-u64 packets = 0, bytes = 0, last_seen_ns = 0;
-int rc;
+        struct ask_flow_table *t = ask_flow_default_table();
+        u64 packets = 0, bytes = 0, last_seen_ns = 0;
+        int rc;
 
-if (!t)
-return -EOPNOTSUPP;
+        if (!t)
+                return -EOPNOTSUPP;
 
-rc = ask_flow_get_stats(t, (u64)f->cookie,
-&packets, &bytes, &last_seen_ns);
-if (rc)
-return rc;
+        rc = ask_flow_get_stats(t, (u64)f->cookie,
+                                &packets, &bytes, &last_seen_ns);
+        if (rc)
+                return rc;
 
-flow_stats_update(&f->stats, bytes, packets, 0, last_seen_ns,
-  FLOW_ACTION_HW_STATS_DELAYED);
-return 0;
+        flow_stats_update(&f->stats, bytes, packets, 0, last_seen_ns,
+                          FLOW_ACTION_HW_STATS_DELAYED);
+        return 0;
 }
 
 /*
  * The single flow_block_cb consumed by both nf_flow_table and tc-flower.
- * Returning -EOPNOTSUPP for an unhandled command is the documented pattern
- * (see net/sched/cls_flower.c) — the core falls back to software.
  */
 int ask_flow_offload_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
-       void *cb_priv)
+                                       void *cb_priv)
 {
-struct flow_cls_offload *f = type_data;
+        struct flow_cls_offload *f = type_data;
+        struct net_device *dev = ask_flow_block_priv_dev(cb_priv);
 
-/*
- * Both entry paths (tc-flower direct AND nft `flags offload`) deliver
- * per-flow events here as TC_SETUP_CLSFLOWER once the block_cb is
- * registered — nf_flow_table_offload.c::nf_flow_table_block_offload_cmd()
- * always dispatches FLOW_CLS_* via TC_SETUP_CLSFLOWER even when the
- * outer ndo_setup_tc() entry was TC_SETUP_FT.  PR14g body-3 widens the
- * outer entry in 0002-dpaa-eth-flow-block.patch (to forward TC_SETUP_FT
- * to ops->setup_tc_block) but the inner cb stays CLSFLOWER-only.
- */
-if (type != TC_SETUP_CLSFLOWER)
-return -EOPNOTSUPP;
+        if (type != TC_SETUP_CLSFLOWER)
+                return -EOPNOTSUPP;
 
-switch (f->command) {
-case FLOW_CLS_REPLACE:
-return ask_flow_offload_replace(f);
-case FLOW_CLS_DESTROY:
-return ask_flow_offload_destroy(f);
-case FLOW_CLS_STATS:
-return ask_flow_offload_stats(f);
-default:
-return -EOPNOTSUPP;
-}
+        switch (f->command) {
+        case FLOW_CLS_REPLACE:
+                return ask_flow_offload_replace(dev, f);
+        case FLOW_CLS_DESTROY:
+                return ask_flow_offload_destroy(f);
+        case FLOW_CLS_STATS:
+                return ask_flow_offload_stats(f);
+        default:
+                return -EOPNOTSUPP;
+        }
 }
 EXPORT_SYMBOL_GPL(ask_flow_offload_setup_tc_block_cb);
 
 /* ------------------------------------------------------------------------- */
-/* Public block-bind helper called from the in-tree dpaa patch (PR11) and    */
-/* from the kunit synthetic-netdev path.                                      */
+/* Public block-bind helper                                                   */
 /*                                                                            */
-/* The caller provides a flow_block_offload* (which the netdev's setup_tc    */
-/* delivered) and the netdev itself (so we can stash it in cb_priv for        */
-/* logging).                                                                  */
+/* PR14j change: no longer calls ask_hw_port_bind() here.  We register the    */
+/* block_cb for every netdev (so we'll see REPLACE / DESTROY / STATS) but     */
+/* defer the silicon port-bind to ask_flow_offload_replace(), which knows    */
+/* the actual ingress direction.                                             */
 /* ------------------------------------------------------------------------- */
 
 static LIST_HEAD(ask_flow_block_cb_list);
 
 int ask_flow_offload_setup_tc(struct net_device *dev,
-      struct flow_block_offload *fbo)
+                              struct flow_block_offload *fbo)
 {
-struct ask_flow_block_priv_entry *e;
-struct flow_block_cb *block_cb;
+        struct ask_flow_block_priv_entry *e;
+        struct flow_block_cb *block_cb;
 
-/*
- * nf_flow_table_offload sets binder_type = CLSACT_INGRESS for both
- * tc-flower and nft `flags offload` paths (FLOW_BLOCK_BINDER_TYPE_FT
- * does NOT exist in mainline 6.18 — only the outer enum tc_setup_type
- * distinguishes them).  Accept only the ingress binder; everything
- * else (CLSACT_EGRESS, RED, etc.) we leave to other drivers.
- */
-if (fbo->binder_type != FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
-return -EOPNOTSUPP;
+        if (fbo->binder_type != FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
+                return -EOPNOTSUPP;
 
-fbo->driver_block_list = &ask_flow_block_cb_list;
+        fbo->driver_block_list = &ask_flow_block_cb_list;
 
-switch (fbo->command) {
-case FLOW_BLOCK_BIND:
-e = ask_flow_block_priv_alloc(dev);
-if (!e)
-return -ENOMEM;
+        switch (fbo->command) {
+        case FLOW_BLOCK_BIND:
+                e = ask_flow_block_priv_alloc(dev);
+                if (!e)
+                        return -ENOMEM;
 
-block_cb = flow_block_cb_alloc(
-ask_flow_offload_setup_tc_block_cb,
-&e->priv, &e->priv,
-ask_flow_block_priv_free);
-if (IS_ERR(block_cb)) {
-ask_flow_block_priv_free(&e->priv);
-return PTR_ERR(block_cb);
-}
-flow_block_cb_add(block_cb, fbo);
-list_add_tail(&block_cb->driver_list,
-      &ask_flow_block_cb_list);
-/*
- * PR14g body-1 part-3: HW port-bind.  Resolve the dpaa
- * netdev to its FMan port id (cell-index 0..9 on LS1046A)
- * via the in-tree export from kernel patch 0030, then bind
- * the v4-TCP KG scheme to that port via ask_hw_port_bind().
- *
- * Failures here MUST NOT fail the FLOW_BLOCK_BIND: software
- * flow_offload still works without HW acceleration.  The
- * contract from ask_internal.h:
- *   0          -> bind succeeded (first call) or idempotent
- *   -EBUSY     -> already bound to a DIFFERENT port; log and
- *                 continue (second port runs in SW)
- *   -ENODEV    -> no HW backing (no DPAA, PCD bring-up
- *                 failed); silent skip
- *   -ERANGE    -> dpaa_get_fman_port_id rejected the netdev
- *                 (synthetic kunit netdev, or future SoC with
- *                 wider cell-index); silent skip
- *   other -E   -> hard failure inside the silicon path; warn
- *                 so the operator can diagnose
- */
-{
-u8 pid;
-int prc = dpaa_get_fman_port_id(dev, &pid);
+                block_cb = flow_block_cb_alloc(
+                        ask_flow_offload_setup_tc_block_cb,
+                        &e->priv, &e->priv,
+                        ask_flow_block_priv_free);
+                if (IS_ERR(block_cb)) {
+                        ask_flow_block_priv_free(&e->priv);
+                        return PTR_ERR(block_cb);
+                }
+                flow_block_cb_add(block_cb, fbo);
+                list_add_tail(&block_cb->driver_list,
+                              &ask_flow_block_cb_list);
 
-if (prc == 0) {
-prc = ask_hw_port_bind(pid);
-if (prc && prc != -EBUSY && prc != -ENODEV)
-ask_pr_warn("flow_offload: port-bind %s (pid %u) failed: %d\n",
-    netdev_name(dev), pid, prc);
-} else if (prc != -ENODEV && prc != -ERANGE) {
-ask_pr_dbg("flow_offload: dpaa_get_fman_port_id(%s) failed: %d\n",
-   netdev_name(dev), prc);
-}
-}
-ask_pr_dbg("flow_offload: BIND %s\n", netdev_name(dev));
-return 0;
+                ask_pr_dbg("flow_offload: BIND %s (dir=%d; PR14j defers KG bind to REPLACE)\n",
+                           netdev_name(dev),
+                           ask_flow_offload_classify_dir(dev));
+                return 0;
 
-case FLOW_BLOCK_UNBIND:
-block_cb = flow_block_cb_lookup(
-fbo->block,
-ask_flow_offload_setup_tc_block_cb,
-NULL);
-if (!block_cb)
-return -ENOENT;
-flow_block_cb_remove(block_cb, fbo);
-list_del(&block_cb->driver_list);
-ask_pr_dbg("flow_offload: UNBIND %s\n", netdev_name(dev));
-return 0;
+        case FLOW_BLOCK_UNBIND:
+                block_cb = flow_block_cb_lookup(
+                        fbo->block,
+                        ask_flow_offload_setup_tc_block_cb,
+                        NULL);
+                if (!block_cb)
+                        return -ENOENT;
+                flow_block_cb_remove(block_cb, fbo);
+                list_del(&block_cb->driver_list);
+                ask_pr_dbg("flow_offload: UNBIND %s\n", netdev_name(dev));
+                return 0;
 
-default:
-return -EOPNOTSUPP;
-}
+        default:
+                return -EOPNOTSUPP;
+        }
 }
 EXPORT_SYMBOL_GPL(ask_flow_offload_setup_tc);
 
 /* ------------------------------------------------------------------------- */
-/* dpaa_flow_offload_ops backend registration (in-tree patch PR11/M2.2).     */
-/*                                                                            */
-/* The dpaa_eth driver carries a single-slot RCU-protected registration       */
-/* point (include/linux/fsl/dpaa_flow_offload.h, added by                    */
-/* 0002-dpaa-eth-flow-block.patch). When ask.ko loads, we plug ourselves     */
-/* in; on rmmod we unplug. dpaa_setup_tc() RCU-derefs the slot for every     */
-/* TC_SETUP_BLOCK and dispatches to ops->setup_tc_block (= the function      */
-/* below, which is just a thin wrapper around ask_flow_offload_setup_tc()).  */
+/* dpaa_flow_offload_ops backend registration                                 */
 /* ------------------------------------------------------------------------- */
 
 static int ask_dpaa_setup_tc_block(struct net_device *dev,
-   struct flow_block_offload *fbo)
+                                   struct flow_block_offload *fbo)
 {
-return ask_flow_offload_setup_tc(dev, fbo);
+        return ask_flow_offload_setup_tc(dev, fbo);
 }
 
 static const struct dpaa_flow_offload_ops ask_dpaa_fo_ops = {
-.owner          = THIS_MODULE,
-.setup_tc_block = ask_dpaa_setup_tc_block,
+        .owner          = THIS_MODULE,
+        .setup_tc_block = ask_dpaa_setup_tc_block,
 };
 
 /* ------------------------------------------------------------------------- */
@@ -491,59 +596,39 @@ static const struct dpaa_flow_offload_ops ask_dpaa_fo_ops = {
 
 int ask_flow_offload_init(void)
 {
-int rc;
+        int rc;
 
-rc = dpaa_register_flow_offload_handler(&ask_dpaa_fo_ops);
-if (rc == -ENODEV) {
-/*
- * Built without CONFIG_FSL_DPAA, or the dpaa driver did not
- * load. ask.ko stays usable for kunit and for genl-only
- * surface; the synthetic-netdev test path exercises
- * ask_flow_offload_setup_tc_block_cb() directly.
- */
-ask_pr_info("flow_offload: dpaa backend unavailable (-ENODEV); "
-    "running standalone\n");
-return 0;
-}
-if (rc) {
-ask_pr_err("flow_offload: dpaa_register_flow_offload_handler "
-   "failed: %d\n", rc);
-return rc;
-}
+        rc = dpaa_register_flow_offload_handler(&ask_dpaa_fo_ops);
+        if (rc == -ENODEV) {
+                ask_pr_info("flow_offload: dpaa backend unavailable (-ENODEV); running standalone\n");
+                return 0;
+        }
+        if (rc) {
+                ask_pr_err("flow_offload: dpaa_register_flow_offload_handler failed: %d\n",
+                           rc);
+                return rc;
+        }
 
-ask_pr_info("flow_offload: ready (registered with dpaa_eth)\n");
-return 0;
+        ask_pr_info("flow_offload: ready (registered with dpaa_eth, PR14j ingress-only KG bind)\n");
+        return 0;
 }
 
 void ask_flow_offload_exit(void)
 {
-struct ask_flow_block_priv_entry *e, *tmp;
-int rc;
+        struct ask_flow_block_priv_entry *e, *tmp;
+        int rc;
 
-/*
- * Drop the dpaa registration first so dpaa_setup_tc() stops
- * dispatching new TC_SETUP_BLOCK events to us. The unregister
- * path inside dpaa_eth synchronize_rcu()s before returning, so
- * by the time it completes no inflight dispatcher is still
- * holding a pointer to ask_dpaa_fo_ops.
- */
-rc = dpaa_unregister_flow_offload_handler(&ask_dpaa_fo_ops);
-if (rc && rc != -ENODEV && rc != -EINVAL)
-ask_pr_warn("flow_offload: dpaa_unregister_flow_offload_handler "
-    "failed: %d\n", rc);
+        rc = dpaa_unregister_flow_offload_handler(&ask_dpaa_fo_ops);
+        if (rc && rc != -ENODEV && rc != -EINVAL)
+                ask_pr_warn("flow_offload: dpaa_unregister_flow_offload_handler failed: %d\n",
+                            rc);
 
-/*
- * Ordinarily every block_cb gets torn down by the netdev's
- * UNBIND path before module exit. This sweep is defensive — if
- * the in-tree patch (PR11) ever fails to unbind on netdev
- * teardown, we still leak no memory at rmmod time.
- */
-spin_lock(&ask_flow_block_priv_lock);
-list_for_each_entry_safe(e, tmp, &ask_flow_block_priv_list, node) {
-list_del(&e->node);
-kfree(e);
-}
-spin_unlock(&ask_flow_block_priv_lock);
+        spin_lock(&ask_flow_block_priv_lock);
+        list_for_each_entry_safe(e, tmp, &ask_flow_block_priv_list, node) {
+                list_del(&e->node);
+                kfree(e);
+        }
+        spin_unlock(&ask_flow_block_priv_lock);
 
-ask_pr_dbg("flow_offload: exit\n");
+        ask_pr_dbg("flow_offload: exit\n");
 }

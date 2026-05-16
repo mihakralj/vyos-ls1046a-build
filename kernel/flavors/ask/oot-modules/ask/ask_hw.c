@@ -10,33 +10,18 @@
  * in-kernel consumer can identify the loaded microcode without
  * touching MMIO.
  *
- * Why this path instead of the spec §12.2 OP_GET_UCODE_VERSION host
- * command? See specs/ask2-rewrite-spec.md §12.8 (PR13 hardware-probe
- * findings): the standard NXP 210.x QEF microcode loaded on this
- * board does not implement a host-command opcode dispatcher — it
- * implements parser/policer/keygen via MURAM-resident config tables
- * programmed by drivers/net/ethernet/freescale/fman/fman_keygen.c,
- * fman_port.c and fman_memac.c. The host-command transport
- * (kernel/flavors/ask/patches/0003-fman-host-command-api.patch) is
- * preserved as future infrastructure for a hypothetical custom ASK2
- * microcode that does implement opcode dispatch, but is not used by
- * v1.0 against stock 210.x.
+ * PR14g (M2.5g) added the FMan PCD bring-up + body-2 flow dispatcher.
  *
- * QEF blob layout (verified 2026-05-13 against
- * /proc/device-tree/soc/fman@1a00000/fman-firmware/fsl,firmware on
- * the live Mono Gateway DK, kernel 6.18.28-vyos):
+ * PR14j (M2.5j) reshapes the body-2 dispatcher into a true two-stage
+ * silicon bypass: ingress KG+CC -> OH-port input FQ ->
+ * MANIP{RMV_ETHERNET, INSRT_GENERIC, FIELD_UPDATE_IPV4_FORWARD} ->
+ * peer netdev's existing TX FQ (via dpaa_get_tx_fqid()).  The previous
+ * single-stage FORWARD_FQ to RX-default-FQ path looped frames back
+ * through the kernel NAPI and never achieved the M2 perf gate.
  *
- *   off  size  field
- *   ---  ----  -------------------------------------------------
- *   0x00   4   crc32 (big-endian, over the rest of the blob)
- *   0x04   4   magic 'Q' 'E' 'F' 0x01 (= 0x51454601 BE)
- *   0x08  64   NUL-terminated ASCII description string, e.g.
- *               "Microcode version 210.10.1 for LS1043 r1.0"
- *   0x48   N   binary microcode payload (opaque to the kernel)
- *
- * The version fields are extracted by sscanf() from the description
- * string. This is the same approach the SDK fmlib library uses, and
- * is robust across all known 210.x microcode generations.
+ * See plans/PR14j-DESIGN.md for the full PR14j architecture, the
+ * rollback sequence (err_drop_slot -> err_clear_chain -> err_free_insrt),
+ * and the 5 open risks called out in §8.
  *
  * Copyright 2026 Mono Networks / VyOS LS1046A maintainers.
  */
@@ -45,21 +30,32 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/of_platform.h>
+#include <linux/platform_device.h>
 #include <linux/err.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/in.h>
+#include <linux/if_ether.h>
 #include <linux/netdevice.h>
 #include <linux/rcupdate.h>
+#include <linux/xarray.h>
 #include <net/net_namespace.h>
 #include <linux/fsl/fman_pcd.h>
 #include <linux/fsl/dpaa_flow_offload.h>
 
 #include "include/ask_internal.h"
 
-/* QEF blob structural constants (see comment above). */
+/*
+ * Patch 0027 declares fman_bind() / fman_get_pcd() / fman_get_dev() /
+ * fman_get_id() and the convenience wrapper fman_pcd_from_of_node()
+ * inside <linux/fsl/fman_pcd.h> (re-declared there for OOT consumers
+ * since the FMan driver's private fman.h is not exported).
+ */
+
+/* QEF blob structural constants (see PR13 comment, preserved verbatim). */
 #define ASK_QEF_MAGIC          0x51454601u   /* 'Q' 'E' 'F' 0x01 */
 #define ASK_QEF_MAGIC_OFFSET   4
 #define ASK_QEF_DESC_OFFSET    8
@@ -74,17 +70,7 @@ static bool ask_hw_cached_valid;
 /* QEF blob parsing                                                           */
 /* ------------------------------------------------------------------------- */
 
-/*
- * Validate the QEF magic and return the embedded description string.
- * @blob:   pointer to the firmware blob bytes (DT property contents)
- * @len:    length of the blob in bytes
- * @desc:   output buffer of at least ASK_QEF_DESC_LEN bytes; the
- *          description is copied here NUL-terminated on success.
- *
- * Return: 0 on success, -EINVAL on bad magic or short blob.
- */
-static int ask_hw_qef_get_description(const u8 *blob, size_t len,
-                                      char *desc)
+static int ask_hw_qef_get_description(const u8 *blob, size_t len, char *desc)
 {
         u32 magic;
 
@@ -105,31 +91,11 @@ static int ask_hw_qef_get_description(const u8 *blob, size_t len,
                 return -EINVAL;
         }
 
-        /*
-         * The description region is exactly 64 bytes wide and is
-         * always NUL-terminated by the QEF spec. We copy and force a
-         * terminator at the last byte as belt-and-braces against a
-         * malformed blob.
-         */
         memcpy(desc, blob + ASK_QEF_DESC_OFFSET, ASK_QEF_DESC_LEN);
         desc[ASK_QEF_DESC_LEN - 1] = '\0';
         return 0;
 }
 
-/*
- * Parse a QEF description string of the form
- *   "Microcode version <family>.<major>.<minor> for <soc> r<rev>"
- * (e.g. "Microcode version 210.10.1 for LS1043 r1.0") into the four
- * version fields exposed by ASK_INFO_ATTR_UCODE_*.
- *
- * The patch field (ASK_INFO_ATTR_UCODE_PATCH) is set to 0 for stock
- * NXP microcode — the QEF format does not encode a fourth version
- * component. It is reserved for any custom microcode that bumps it
- * (the ASK2 hypothetical custom microcode path per spec §12.8).
- *
- * Return: 0 on success, -EINVAL if the string does not match the
- *         expected pattern.
- */
 static int ask_hw_parse_desc(const char *desc,
                              struct ask_hw_ucode_version *out)
 {
@@ -157,31 +123,6 @@ static int ask_hw_parse_desc(const char *desc,
         return 0;
 }
 
-/* ------------------------------------------------------------------------- */
-/* DT lookup                                                                  */
-/* ------------------------------------------------------------------------- */
-
-/*
- * Walk the device tree to find the FMan firmware blob.
- *
- * The mainline FMan binding places the firmware as a child node of
- * the FMan controller:
- *
- *   /soc/fman@<addr>/fman-firmware {
- *       compatible = "fsl,fman-firmware";
- *       fsl,firmware = <BLOB BYTES>;
- *   };
- *
- * U-Boot fills in fsl,firmware from the SPI "fman-ucode" partition
- * before it boots Linux. We accept the firmware from any FMan on the
- * SoC — this is single-FMan on LS1046A, dual-FMan on LS1043A. The
- * first match wins; v1.0 does not differentiate per FMan because
- * NXP ships the same QEF microcode for every FMan on a given SoC.
- *
- * Return: 0 on success, -ENODEV if no fsl,fman-firmware node is
- *         present, -ENOENT if the node lacks the fsl,firmware
- *         property, -EINVAL if the QEF blob fails sanity checks.
- */
 static int ask_hw_probe_ucode_locked(struct ask_hw_ucode_version *out)
 {
         struct device_node *np;
@@ -219,10 +160,6 @@ static int ask_hw_probe_ucode_locked(struct ask_hw_ucode_version *out)
         return 0;
 }
 
-/* ------------------------------------------------------------------------- */
-/* Public API                                                                 */
-/* ------------------------------------------------------------------------- */
-
 int ask_hw_ucode_get_version(struct ask_hw_ucode_version *out)
 {
         int rc;
@@ -246,43 +183,7 @@ int ask_hw_ucode_get_version(struct ask_hw_ucode_version *out)
 EXPORT_SYMBOL_GPL(ask_hw_ucode_get_version);
 
 /* ------------------------------------------------------------------------- */
-/* PR14g-body-1 (M2.5g): FMan PCD bring-up                                    */
-/*                                                                            */
-/* Walks the device tree to the first "fsl,fman" node, resolves the           */
-/* per-FMan struct fman_pcd handle via fman_pcd_from_of_node() (a             */
-/* convenience helper exported by drivers/net/ethernet/freescale/fman/        */
-/* fman.c at PR14g-prep / patch 0027), then constructs the minimal silicon    */
-/* programming pipeline that the M2 acceptance gate (spec §11.1 / §13.7)      */
-/* needs to traverse a single IPv4 TCP flow through the 210 fast path:        */
-/*                                                                            */
-/*   1. one CC tree with a single group (group_count = 1 - PR14c-body-1's    */
-/*      256-byte MURAM-resident group table covers up to 16 entries but       */
-/*      v1.0 only uses one)                                                   */
-/*   2. one EMPTY CC node, extract = KEY mode at offset 0 size 13 (the        */
-/*      KG-concatenated 5-tuple width); miss action = DROP so unprogrammed    */
-/*      keys fail silently to the FQ-0 trap rather than misroute              */
-/*   3. one KG scheme extracting the IPv4 5-tuple from PARSE_RESULT (SIP      */
-/*      offset 12 size 4, DIP offset 16 size 4, proto offset 9 size 1, sport  */
-/*      offset 20 size 2, dport offset 22 size 2 - 13 bytes total, well       */
-/*      under the 36-byte FMan KG generic extract budget per RM 8.7.5)        */
-/*   4. KG scheme attach to the CC tree via fman_pcd_kg_attach_cc() so that  */
-/*      classification hits chain into the CC node's empty key table          */
-/*                                                                            */
-/* All four allocations are MURAM-backed and counted against pcd->muram_      */
-/* budget by the in-tree PCD subsystem (PR14a-f bodies).  Body-1 makes NO    */
-/* port-bind call (fman_pcd_kg_bind_port) - the bind has to wait until the   */
-/* dpaa Ethernet driver tells us which FMan port is RX-default for which     */
-/* netdev, and that wiring lives in PR15 (M3).  At body-1 the chain is       */
-/* programmed but quiescent: silicon does the lookup against the all-zero    */
-/* miss-slot and forwards everything to the kernel fast path as before,     */
-/* identical to module-not-loaded behaviour.                                 */
-/*                                                                            */
-/* Failure mode: ANY -E from the chain unwinds in reverse order and leaves   */
-/* ask_hw_pcd.pcd = NULL.  ask_hw_pcd_get() then returns NULL and the body-2 */
-/* dispatcher falls back to fake_hw_id_seq software-only mode.  This is the  */
-/* expected outcome on non-DPAA hosts and any host whose fsl,fman node is    */
-/* status="disabled" - ask.ko remains functionally complete (genl up,        */
-/* software flow table up) just without HW-offload.                          */
+/* PR14g/j: FMan PCD bring-up                                                 */
 /* ------------------------------------------------------------------------- */
 
 /* Standard FMan parse-result offsets (RM 8.7.3 Table 8-107). */
@@ -295,43 +196,109 @@ EXPORT_SYMBOL_GPL(ask_hw_ucode_get_version);
 /* KG-concatenated 5-tuple width = SIP(4) + DIP(4) + proto(1) + sport(2) + dport(2). */
 #define ASK_HW_V4_KEY_WIDTH     13
 
+/*
+ * PR14j: which OH port we use for the v4-TCP forwarding chain.
+ *
+ * LS1046A exposes 6 OH ports at port@82000..port@87000 (cell-index 0x2..0x7).
+ * The fman_pcd_oh.c API uses oh_idx = cell_index - 2, so cell-index 0x2
+ * corresponds to oh_idx = 0.  We pick 0 deterministically for v4-TCP;
+ * future protocol bring-ups (v4-UDP, v6-TCP) get 1, 2, 3 etc.
+ *
+ * NOTE: the design memo §2 quotes "OH port 0x2" referring to the
+ * DT cell-index; that translates to oh_idx = 0 here.
+ */
+#define ASK_HW_V4_TCP_OH_IDX    0
+
 struct ask_hw_pcd {
         struct mutex lock;
+        struct fman *fman;             /* PR14j: kept for OH-port claim */
         struct fman_pcd *pcd;
         struct fman_pcd_cc_tree *cc_tree;
         struct fman_pcd_cc_node *cc_v4_tcp;
         struct fman_pcd_kg_scheme *kg_v4_tcp;
 
-        /*
-         * PR14g-body-1 (part 2): port-bind tracking.
-         *
-         * fman_pcd_kg_bind_port() is single-port-per-scheme on LS1046A
-         * silicon (the KGSE_MV match-vector slot is a single u32 with
-         * one bit per port; the second bind to a different port
-         * returns -EBUSY).  We cache the first successfully-bound
-         * port_id so subsequent calls from FLOW_BLOCK_BIND on the
-         * SAME netdev become idempotent no-ops, and the operator sees
-         * a single warn line when a SECOND netdev attempts to bind to
-         * a different port (the second port still works in software,
-         * just unaccelerated).
-         *
-         * v4_tcp_bound_port_valid is false until the first successful
-         * bind; v4_tcp_bound_port holds the port_id once valid.
-         * Protected by ->lock.
-         */
+        /* PR14g port-bind tracking (single-port-per-scheme KGSE_MV). */
         bool v4_tcp_bound_port_valid;
         u8   v4_tcp_bound_port;
+
+        /*
+         * PR14j additions: OH-port + shared MANIPs + cookie table.
+         *
+         * oh_v4_tcp == NULL means the OH-port chain was not brought
+         * up (no fsl,fman, claim failed, MURAM exhaustion, …).
+         * ask_hw_flow_insert_v4_tcp() detects this and returns -ENODEV
+         * so the caller falls back to SW.
+         */
+        struct fman_pcd_oh_port *oh_v4_tcp;
+        struct fman_pcd_manip   *m_v4_rmv;      /* shared MANIP_RMV_ETHERNET */
+        struct fman_pcd_manip   *m_v4_ipv4;     /* shared TTL-- + cksum */
+
+        /*
+         * Cookie indirection table.  Index space is 1..U32_MAX (0 is
+         * the "no HW backing" sentinel — XA_FLAGS_ALLOC1 skips it).
+         * Entries are kzalloc'd in ask_hw_cookie_alloc() and freed in
+         * ask_hw_cookie_free().  The struct content (cc_node, key_idx,
+         * m_insrt, …) is the per-flow silicon state ask_hw_flow_remove()
+         * needs to disarm the slot, destroy the per-flow m_insrt, and
+         * release the cookie.
+         */
+        struct xarray flow_cookies;
 };
 
-/*
- * Single per-module instance.  Allocated once in ask_hw_pcd_bringup()
- * and freed once in ask_hw_pcd_teardown().  Lifetime spans the whole
- * module: ask_main.c calls ask_hw_init()/ask_hw_exit() at module load/
- * unload exactly once.  Hence the bare static pointer rather than a
- * refcounted container - body-2's runtime dispatcher only ever reads
- * the pointer, never re-allocates it.
- */
 static struct ask_hw_pcd *ask_hw_pcd_inst;
+
+/* ------------------------------------------------------------------------- */
+/* PR14j cookie indirection table helpers                                     */
+/* ------------------------------------------------------------------------- */
+
+u32 ask_hw_cookie_alloc(struct ask_hw_pcd *h,
+                        const struct ask_hw_flow_cookie *src)
+{
+        struct ask_hw_flow_cookie *entry;
+        u32 cookie = 0;
+        int rc;
+
+        if (!h || !src)
+                return 0;
+
+        entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+        if (!entry)
+                return 0;
+        *entry = *src;
+
+        rc = xa_alloc(&h->flow_cookies, &cookie, entry,
+                      XA_LIMIT(1, U32_MAX), GFP_KERNEL);
+        if (rc) {
+                kfree(entry);
+                return 0;
+        }
+        return cookie;
+}
+EXPORT_SYMBOL_GPL(ask_hw_cookie_alloc);
+
+struct ask_hw_flow_cookie *
+ask_hw_cookie_lookup(struct ask_hw_pcd *h, u32 cookie)
+{
+        if (!h || cookie == 0)
+                return NULL;
+        return xa_load(&h->flow_cookies, cookie);
+}
+EXPORT_SYMBOL_GPL(ask_hw_cookie_lookup);
+
+void ask_hw_cookie_free(struct ask_hw_pcd *h, u32 cookie)
+{
+        struct ask_hw_flow_cookie *entry;
+
+        if (!h || cookie == 0)
+                return;
+        entry = xa_erase(&h->flow_cookies, cookie);
+        kfree(entry);
+}
+EXPORT_SYMBOL_GPL(ask_hw_cookie_free);
+
+/* ------------------------------------------------------------------------- */
+/* PR14g KG/CC bring-up (preserved verbatim from body-1)                      */
+/* ------------------------------------------------------------------------- */
 
 static int ask_hw_pcd_build_chain(struct ask_hw_pcd *h)
 {
@@ -340,7 +307,6 @@ static int ask_hw_pcd_build_chain(struct ask_hw_pcd *h)
         struct fman_pcd_kg_scheme_params kg_params;
         int rc;
 
-        /* Step 1 - empty 1-group CC tree (PR14c-body-1 silicon programming). */
         h->cc_tree = fman_pcd_cc_tree_create(h->pcd, 1);
         if (IS_ERR(h->cc_tree)) {
                 rc = PTR_ERR(h->cc_tree);
@@ -350,13 +316,6 @@ static int ask_hw_pcd_build_chain(struct ask_hw_pcd *h)
                 return rc;
         }
 
-        /*
-         * Step 2 - empty v4-TCP CC node.  Extract source is KEY (i.e. the
-         * KG-concatenated extract output, NOT the parse result directly),
-         * starting at byte 0 of the KG result with the full 13-byte width.
-         * num_keys = 0 -> body-2 fills in slots via fman_pcd_cc_node_add_key().
-         * miss_action = DROP so unprogrammed slots are safe-by-default.
-         */
         memset(&extract, 0, sizeof(extract));
         extract.type   = FMAN_PCD_CC_EXTRACT_KEY;
         extract.offset = 0;
@@ -375,16 +334,10 @@ static int ask_hw_pcd_build_chain(struct ask_hw_pcd *h)
                 goto err_tree;
         }
 
-        /*
-         * Step 3 - IPv4 5-tuple KG scheme.  Use the first free scheme id
-         * (params.id = -1) so we coexist with whatever the in-tree dpaa
-         * driver may have programmed.  use_hash = true so the hash output
-         * feeds into the CC tree group-table index.
-         */
         memset(&kg_params, 0, sizeof(kg_params));
         kg_params.id = -1;
         kg_params.use_hash = true;
-        kg_params.default_fqid = 0;     /* Unused with use_hash = true. */
+        kg_params.default_fqid = 0;
         kg_params.num_extracts = 5;
 
         kg_params.extracts[0].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
@@ -420,10 +373,6 @@ static int ask_hw_pcd_build_chain(struct ask_hw_pcd *h)
                 goto err_node;
         }
 
-        /* Step 4 - chain KG -> CC tree.  Once attached, classification hits
-         * fan out via the CC tree group table to the (currently empty)
-         * v4-TCP node.  No port bind yet - that happens in M3.
-         */
         rc = fman_pcd_kg_attach_cc(h->kg_v4_tcp, h->cc_tree);
         if (rc) {
                 ask_pr_warn("hw: kg_attach_cc v4-TCP failed (%d)\n", rc);
@@ -445,10 +394,112 @@ err_tree:
         return rc;
 }
 
+/* ------------------------------------------------------------------------- */
+/* PR14j OH-port + shared MANIP bring-up                                      */
+/* ------------------------------------------------------------------------- */
+
+static int ask_hw_pcd_bringup_oh(struct ask_hw_pcd *h)
+{
+        struct fman_pcd_manip_params mp;
+        int rc;
+
+        h->oh_v4_tcp = fman_pcd_oh_port_claim(h->fman, ASK_HW_V4_TCP_OH_IDX);
+        if (IS_ERR_OR_NULL(h->oh_v4_tcp)) {
+                rc = h->oh_v4_tcp ? PTR_ERR(h->oh_v4_tcp) : -ENODEV;
+                h->oh_v4_tcp = NULL;
+                ask_pr_warn("hw: oh_port_claim(%u) failed (%d) - HW offload falls back to SW for v4-TCP\n",
+                            ASK_HW_V4_TCP_OH_IDX, rc);
+                return rc;
+        }
+
+        memset(&mp, 0, sizeof(mp));
+        mp.type = FMAN_PCD_MANIP_RMV_ETHERNET;
+        h->m_v4_rmv = fman_pcd_manip_create(h->pcd, &mp);
+        if (IS_ERR_OR_NULL(h->m_v4_rmv)) {
+                rc = h->m_v4_rmv ? PTR_ERR(h->m_v4_rmv) : -ENOMEM;
+                h->m_v4_rmv = NULL;
+                ask_pr_warn("hw: manip_create(RMV_ETHERNET) failed (%d)\n", rc);
+                goto err_release_oh;
+        }
+
+        memset(&mp, 0, sizeof(mp));
+        mp.type = FMAN_PCD_MANIP_FIELD_UPDATE_IPV4_FORWARD;
+        mp.ipv4_forward.recompute_cksum = true;
+        mp.ipv4_forward.rewrite_dscp    = false;
+        mp.ipv4_forward.new_dscp        = 0;
+        h->m_v4_ipv4 = fman_pcd_manip_create(h->pcd, &mp);
+        if (IS_ERR_OR_NULL(h->m_v4_ipv4)) {
+                rc = h->m_v4_ipv4 ? PTR_ERR(h->m_v4_ipv4) : -ENOMEM;
+                h->m_v4_ipv4 = NULL;
+                ask_pr_warn("hw: manip_create(IPV4_FORWARD) failed (%d)\n", rc);
+                goto err_destroy_rmv;
+        }
+
+        ask_pr_info("hw: PR14j OH-port chain ready (oh_idx=%u, input_fqid=0x%x)\n",
+                    ASK_HW_V4_TCP_OH_IDX,
+                    fman_pcd_oh_port_input_fqid(h->oh_v4_tcp));
+        return 0;
+
+err_destroy_rmv:
+        fman_pcd_manip_destroy(h->m_v4_rmv);
+        h->m_v4_rmv = NULL;
+err_release_oh:
+        fman_pcd_oh_port_release(h->oh_v4_tcp);
+        h->oh_v4_tcp = NULL;
+        return rc;
+}
+
+static void ask_hw_pcd_teardown_oh(struct ask_hw_pcd *h)
+{
+        /*
+         * Drain any per-flow cookies still alive.  Each entry implies a
+         * leaked per-flow m_insrt and a still-attached OH-port chain.
+         * Free the m_insrt explicitly; the OH-port AD chain is reset
+         * to NULL once below, which is the documented "disarm" form.
+         *
+         * xa_for_each + xa_erase under the same critical section is
+         * safe per the xarray API contract (the iterator caches the
+         * next key before yielding to the body).
+         */
+        if (h->oh_v4_tcp) {
+                struct ask_hw_flow_cookie *ck;
+                unsigned long idx;
+
+                xa_for_each(&h->flow_cookies, idx, ck) {
+                        if (ck && ck->m_insrt)
+                                fman_pcd_manip_destroy(ck->m_insrt);
+                        xa_erase(&h->flow_cookies, idx);
+                        kfree(ck);
+                }
+
+                /* Disarm the OH AD chain so no stale RMV/INSRT can run. */
+                (void)fman_pcd_oh_port_set_chain(h->oh_v4_tcp, NULL, 0, 0);
+        }
+
+        if (h->m_v4_ipv4) {
+                fman_pcd_manip_destroy(h->m_v4_ipv4);
+                h->m_v4_ipv4 = NULL;
+        }
+        if (h->m_v4_rmv) {
+                fman_pcd_manip_destroy(h->m_v4_rmv);
+                h->m_v4_rmv = NULL;
+        }
+        if (h->oh_v4_tcp) {
+                fman_pcd_oh_port_release(h->oh_v4_tcp);
+                h->oh_v4_tcp = NULL;
+        }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Bring-up / teardown                                                        */
+/* ------------------------------------------------------------------------- */
+
 int ask_hw_pcd_bringup(void)
 {
         struct ask_hw_pcd *h;
         struct device_node *np;
+        struct platform_device *pdev;
+        struct fman *fman;
         struct fman_pcd *pcd;
         int rc;
 
@@ -458,11 +509,11 @@ int ask_hw_pcd_bringup(void)
         }
 
         /*
-         * Locate the first fsl,fman node and resolve to a struct fman_pcd *.
-         * fman_pcd_from_of_node() handles the platform-device walk,
-         * fman_bind(), fman_get_pcd() chain in driver-private scope so we
-         * never need to include the in-tree fman.h.  NULL return is normal
-         * on non-DPAA hosts - we treat it as a soft-failure.
+         * PR14j: locate the FMan, then derive both the struct fman * (for
+         * OH-port claim) and the struct fman_pcd * (for KG/CC/MANIP work)
+         * from the same platform device.  Both bind paths are read-only
+         * on the FMan driver state — they bump no refcount that we have
+         * to drop, the FMan driver owns the lifetime through devm.
          */
         np = of_find_compatible_node(NULL, NULL, "fsl,fman");
         if (!np) {
@@ -470,34 +521,67 @@ int ask_hw_pcd_bringup(void)
                 return 0;
         }
 
-        pcd = fman_pcd_from_of_node(np);
+        pdev = of_find_device_by_node(np);
         of_node_put(np);
+        if (!pdev) {
+                ask_pr_info("hw: no platform_device for fsl,fman - HW offload not available\n");
+                return 0;
+        }
+
+        fman = fman_bind(&pdev->dev);
+        if (!fman) {
+                ask_pr_info("hw: fman_bind() failed - HW offload not available\n");
+                put_device(&pdev->dev);
+                return 0;
+        }
+
+        pcd = fman_get_pcd(fman);
         if (!pcd) {
-                ask_pr_info("hw: fman_pcd_from_of_node returned NULL - HW offload not available\n");
+                ask_pr_info("hw: fman_get_pcd() returned NULL - HW offload not available\n");
+                put_device(&pdev->dev);
                 return 0;
         }
 
         h = kzalloc(sizeof(*h), GFP_KERNEL);
-        if (!h)
+        if (!h) {
+                put_device(&pdev->dev);
                 return -ENOMEM;
+        }
 
         mutex_init(&h->lock);
-        h->pcd = pcd;
+        h->fman = fman;
+        h->pcd  = pcd;
+        xa_init_flags(&h->flow_cookies, XA_FLAGS_ALLOC1);
 
         rc = ask_hw_pcd_build_chain(h);
         if (rc) {
-                /*
-                 * Build failure means the chain is fully unwound (build
-                 * itself rolls back on every error path).  Free the handle
-                 * but DO NOT propagate -E up: ask.ko should still load and
-                 * fall back to software-only mode.  The single warn line
-                 * inside build_chain has already explained the failure.
-                 */
+                xa_destroy(&h->flow_cookies);
+                mutex_destroy(&h->lock);
                 kfree(h);
+                put_device(&pdev->dev);
                 return 0;
         }
 
+        /*
+         * PR14j OH-port chain.  Non-fatal: if claim or shared MANIPs fail,
+         * ask_hw_flow_insert_v4_tcp() will see h->oh_v4_tcp == NULL and
+         * return -ENODEV so ask_flow.c falls back to SW.  Frames still
+         * traverse the kernel slow path — they just are not silicon-
+         * accelerated.
+         */
+        (void)ask_hw_pcd_bringup_oh(h);
+
         ask_hw_pcd_inst = h;
+
+        /*
+         * Drop the platform_device reference taken by of_find_device_by_node.
+         * The FMan driver retains its own lifetime tracking via devm; our
+         * `struct fman *` remains valid for ask.ko's entire lifetime so
+         * long as the FMan driver does not unbind underneath us (a kernel
+         * regression that would be visible at NAPI / phylink layers long
+         * before it manifested here).
+         */
+        put_device(&pdev->dev);
         return 0;
 }
 
@@ -510,17 +594,9 @@ void ask_hw_pcd_teardown(void)
 
         ask_hw_pcd_inst = NULL;
 
-        /*
-         * Teardown order is exact reverse of bring-up.  Each destroy is
-         * NULL-safe per the public-ABI contract in <linux/fsl/fman_pcd.h>,
-         * but we set the local field to NULL after each call as a
-         * defence-in-depth measure should a future leak-detection
-         * dump_stack() ever walk this struct mid-teardown.
-         *
-         * No need to detach the KG scheme from the CC tree explicitly -
-         * fman_pcd_kg_scheme_destroy() clears the CCBS register as part
-         * of its silicon teardown (PR14b-body).
-         */
+        /* PR14j OH side first — it may dereference shared MANIPs. */
+        ask_hw_pcd_teardown_oh(h);
+
         if (h->kg_v4_tcp) {
                 fman_pcd_kg_scheme_destroy(h->kg_v4_tcp);
                 h->kg_v4_tcp = NULL;
@@ -533,37 +609,20 @@ void ask_hw_pcd_teardown(void)
                 fman_pcd_cc_tree_destroy(h->cc_tree);
                 h->cc_tree = NULL;
         }
-        /*
-         * h->pcd is owned by the FMan driver - we do not free it.  The
-         * fman_bind() call inside fman_pcd_from_of_node() is balanced by
-         * the FMan driver's own devm cleanup at unbind.
-         */
+
+        xa_destroy(&h->flow_cookies);
         mutex_destroy(&h->lock);
         kfree(h);
-
         ask_pr_dbg("hw: FMan PCD chain torn down\n");
 }
 
 struct ask_hw_pcd *ask_hw_pcd_get(void)
 {
-        /*
-         * No READ_ONCE/WRITE_ONCE: the pointer is only ever published
-         * once in ask_hw_pcd_bringup() (under the implicit module-init
-         * ordering) and only ever cleared once in ask_hw_pcd_teardown()
-         * (under the implicit module-exit ordering).  Body-2 callers
-         * run between init and exit; no torn-pointer hazard exists.
-         */
         return ask_hw_pcd_inst;
 }
 
 /* ------------------------------------------------------------------------- */
-/* PR14g-body-1 (part 2): port-bind                                           */
-/*                                                                            */
-/* Called from ask_flow_offload.c on FLOW_BLOCK_BIND once we have resolved   */
-/* the netdev to an FMan port id via dpaa_get_fman_port_id() (kernel patch   */
-/* 0030).  Wraps fman_pcd_kg_bind_port() with idempotency and single-port-   */
-/* per-scheme accounting; see the kerneldoc in include/ask_internal.h for   */
-/* the full return-value contract.                                            */
+/* PR14g port-bind (unchanged from body-1 + part-3)                           */
 /* ------------------------------------------------------------------------- */
 
 int ask_hw_port_bind(u8 port_id)
@@ -574,14 +633,6 @@ int ask_hw_port_bind(u8 port_id)
         if (!h)
                 return -ENODEV;
 
-        /*
-         * Range-check matches the header doc in <linux/fsl/fman_pcd.h>:
-         * "FMan port id (0..7 for 1G, 8..9 for 10G on LS1046A)".  The
-         * in-tree dpaa_get_fman_port_id() helper guarantees this range
-         * via -ERANGE, but we re-check defensively so ask_hw_port_bind
-         * is usable from kunit harnesses that synthesise port_id values
-         * directly without going through dpaa_get_fman_port_id().
-         */
         if (port_id > 9) {
                 ask_pr_warn("hw: port-bind port_id %u out of range (0..9)\n",
                             port_id);
@@ -592,20 +643,11 @@ int ask_hw_port_bind(u8 port_id)
 
         if (h->v4_tcp_bound_port_valid) {
                 if (h->v4_tcp_bound_port == port_id) {
-                        /* Idempotent rebind from the same netdev. */
                         mutex_unlock(&h->lock);
                         ask_pr_dbg("hw: port-bind v4-TCP idempotent (port %u)\n",
                                    port_id);
                         return 0;
                 }
-                /*
-                 * A DIFFERENT port is asking to bind.  LS1046A KGSE_MV
-                 * is single-port-per-scheme; we cannot accept this.
-                 * Log once-ish (the caller bumps a counter so the dbg
-                 * spam is bounded), return -EBUSY so the caller can
-                 * fall back to software for this second port without
-                 * tearing down the first port's acceleration.
-                 */
                 mutex_unlock(&h->lock);
                 ask_pr_warn("hw: port-bind v4-TCP: already bound to port %u, "
                             "cannot also bind port %u - second port will run "
@@ -633,14 +675,7 @@ int ask_hw_port_bind(u8 port_id)
 EXPORT_SYMBOL_GPL(ask_hw_port_bind);
 
 /* ------------------------------------------------------------------------- */
-/* hw_flow_id pack/unpack (PR14g-body-1)                                      */
-/*                                                                            */
-/* The 32-bit hw_flow_id stored in struct ask_flow encodes:                   */
-/*   bits 31..16   node_token  - identifies the owning CC node                */
-/*   bits 15..0    key_idx     - 0-based slot inside that node's key table    */
-/*                                                                            */
-/* Pure functions; no global state.  Declared in ask_internal.h so other     */
-/* TUs (debugfs, genl dump) can call the unpacker for pretty-printing.       */
+/* Legacy hw_flow_id pack/unpack (debugfs / kunit use only after PR14j)       */
 /* ------------------------------------------------------------------------- */
 
 u32 ask_priv_pack_hw_flow_id(u16 node_token, u16 key_idx)
@@ -660,50 +695,32 @@ void ask_priv_unpack_hw_flow_id(u32 hw_flow_id,
 EXPORT_SYMBOL_GPL(ask_priv_unpack_hw_flow_id);
 
 /* ------------------------------------------------------------------------- */
-/* PR14g-body-2 (M2.5g): runtime flow insert / remove dispatcher              */
-/*                                                                            */
-/* Per Q2 architectural decision (operator-approved 2026-05-14): a single     */
-/* ask_hw_flow_insert() entry point switches on (key->l3_proto, key->l4_proto)*/
-/* and routes to a per-protocol worker.  Worker contract:                     */
-/*                                                                            */
-/*   return  0           -> packed hw_flow_id written through @out_hw_id      */
-/*           -ENODEV     -> no HW backing for this protocol/netdev; caller    */
-/*                          (ask_flow.c body-3) must fall back to the         */
-/*                          fake_hw_id_seq software-only counter              */
-/*           -EOPNOTSUPP -> protocol not yet implemented in HW (body-2 only   */
-/*                          ships v4-TCP; v4-UDP/v6-TCP/v6-UDP land later)    */
-/*           other -E    -> hard failure (MURAM exhaustion, key table full,   */
-/*                          mask/size mismatch); caller MUST fail the insert  */
-/*                          rather than silently fall back, so userspace      */
-/*                          observes the error and does not believe a flow    */
-/*                          is offloaded when it is not                       */
-/*                                                                            */
-/* The dispatcher itself acquires no locks; per-CC-node serialisation lives   */
-/* inside the worker around the pcd->lock + fman_pcd_cc_node_add_key() pair   */
-/* (the silicon-side serialisation is provided by the in-tree PCD subsystem  */
-/* mutex; the per-ask_hw_pcd mutex above only protects the local handle      */
-/* fields - currently a no-op until body-3 starts mutating per-flow state). */
+/* PR14j: per-flow OH-chain insert / remove                                   */
 /* ------------------------------------------------------------------------- */
 
 /*
- * Resolve @oif to an FMan-backed dpaa netdev and look up its
- * RX-default FQID via the in-tree export from patch 0028.
- *
- * Returns 0 on success with *fqid populated, -ENODEV if @oif does
- * not name a dpaa-backed netdev (the standard "non-DPAA" fallback
- * signal), or any other -E forwarded from dpaa_get_rx_default_fqid().
- *
- * Locking: takes rcu_read_lock() across dev_get_by_index_rcu() so the
- * netdev cannot disappear underneath us; dpaa_get_rx_default_fqid()
- * is documented (see <linux/fsl/dpaa_flow_offload.h>) to require RTNL,
- * but the actual list it walks (priv->dpaa_fq_list) is only mutated
- * at probe/remove and is stable for the netdev's lifetime - rcu_read_
- * lock + dev_get_by_index_rcu is sufficient to keep the netdev alive
- * across the call.  We pass init_net here because all dpaa netdevs
- * live in the host network namespace by construction (the dpaa
- * driver does not register per-netns).
+ * mac_is_zero() — defensive check used at insert time.  The
+ * ask_flow_offload.c FLOW_CLS_REPLACE path is expected to populate
+ * next_hop_mac/egress_mac via neigh_lookup() before invoking the
+ * dispatcher.  If either MAC is still zero we MUST refuse the HW
+ * insert (otherwise the OH chain would push a broadcast/unspec L2
+ * header and frames would be dropped or misrouted on the egress
+ * link).  -EAGAIN is the documented signal for "neighbour not yet
+ * resolved, keep this flow in SW for now".
  */
-static int ask_hw_resolve_oif_fqid(u32 oif, u32 *fqid)
+static bool mac_is_zero(const u8 *m)
+{
+        u8 acc = m[0] | m[1] | m[2] | m[3] | m[4] | m[5];
+        return acc == 0;
+}
+
+/*
+ * ask_hw_resolve_oif_tx_fqid() — look up the peer netdev's per-queue
+ * TX FQID via the in-tree export from patch 0031.  Returns the FQID
+ * the OH-port AD chain's trailing FORWARD_FQ should aim at.  -ENODEV
+ * propagates from non-DPAA netdevs so the caller knows to SW-fallback.
+ */
+static int ask_hw_resolve_oif_tx_fqid(u32 oif, u32 *fqid)
 {
         struct net_device *dev;
         int rc;
@@ -714,32 +731,11 @@ static int ask_hw_resolve_oif_fqid(u32 oif, u32 *fqid)
                 rcu_read_unlock();
                 return -ENODEV;
         }
-        rc = dpaa_get_rx_default_fqid(dev, fqid);
+        rc = dpaa_get_tx_fqid(dev, /*queue=*/0, fqid);
         rcu_read_unlock();
         return rc;
 }
 
-/*
- * v4-TCP worker.  Builds a 13-byte exact-match key matching the KG
- * scheme's PARSE_RESULT extract layout (SIP[4] DIP[4] proto[1]
- * sport[2] dport[2]), looks up the netdev's RX-default FQID, and
- * installs the (key, FORWARD_FQ(fqid)) entry into the cc_v4_tcp
- * node's key table.
- *
- * IMPORTANT: the byte layout below MUST stay in lock-step with the
- * five PARSE_RESULT extract specs in ask_hw_pcd_build_chain() above.
- * The KG hardware concatenates extracts in slot order, so:
- *   bytes[ 0.. 3] = SIP   (matches kg_params.extracts[0])
- *   bytes[ 4.. 7] = DIP   (matches kg_params.extracts[1])
- *   bytes[    8 ] = proto (matches kg_params.extracts[2])
- *   bytes[ 9..10] = sport (matches kg_params.extracts[3])
- *   bytes[11..12] = dport (matches kg_params.extracts[4])
- *
- * The 5-tuple fields in struct ask_flow_key are already __be (network
- * byte order) per the parse-result wire format, so a straight memcpy
- * is correct - no swap required.  src_ip[16]/dst_ip[16] hold the v4
- * address packed into the first 4 bytes per the ask_flow.c contract.
- */
 static int ask_hw_flow_insert_v4_tcp(struct ask_hw_pcd *h,
                                      const struct ask_flow_key *key,
                                      u32 oif, u32 action_flags,
@@ -747,65 +743,145 @@ static int ask_hw_flow_insert_v4_tcp(struct ask_hw_pcd *h,
 {
         struct fman_pcd_cc_key_entry entry;
         struct fman_pcd_action *act;
-        u32 fqid;
+        struct fman_pcd_manip_params insrt_params;
+        struct fman_pcd_manip *manips[3];
+        struct ask_hw_flow_cookie ck = { 0 };
+        u32 oh_input_fqid;
+        u32 peer_tx_fqid;
+        u32 cookie;
         int slot;
         int rc;
 
-        /*
-         * action_flags is reserved for body-3+ when NAT/TTL-DEC/VLAN
-         * manipulation actions get wired in via FMAN_PCD_ACTION_
-         * MANIPULATE.  For body-2 the only action is a straight
-         * FORWARD_FQ to the netdev's RX-default FQID, mirroring what
-         * the kernel datapath would do for an un-offloaded flow.
-         */
         (void)action_flags;
 
-        rc = ask_hw_resolve_oif_fqid(oif, &fqid);
+        /* PR14j gate: bring-up may have failed; behave like "no HW". */
+        if (!h->oh_v4_tcp || !h->m_v4_rmv || !h->m_v4_ipv4)
+                return -ENODEV;
+
+        /*
+         * Neighbour MUST be resolved before we burn silicon resources.
+         * ask_flow_offload.c populates these fields via neigh_lookup()
+         * with NUD_CONNECTED gating — but defence in depth: if either
+         * MAC is still zero, refuse and let SW handle the flow.
+         */
+        if (mac_is_zero(key->next_hop_mac) || mac_is_zero(key->egress_mac))
+                return -EAGAIN;
+
+        /* 1. Resolve peer egress TX FQ. */
+        rc = ask_hw_resolve_oif_tx_fqid(oif, &peer_tx_fqid);
         if (rc)
-                return rc;     /* -ENODEV propagates as fallback signal */
+                return rc;        /* -ENODEV / -ERANGE propagate */
 
+        /* 2. Build per-flow MANIP_INSRT_GENERIC with the new L2 header. */
+        memset(&insrt_params, 0, sizeof(insrt_params));
+        insrt_params.type = FMAN_PCD_MANIP_INSRT_GENERIC;
+        insrt_params.insrt_generic.size = ETH_HLEN;
+        memcpy(&insrt_params.insrt_generic.hdr[0],
+               &key->next_hop_mac[0], ETH_ALEN);
+        memcpy(&insrt_params.insrt_generic.hdr[6],
+               &key->egress_mac[0],   ETH_ALEN);
+        insrt_params.insrt_generic.hdr[12] = (ETH_P_IP >> 8) & 0xff;
+        insrt_params.insrt_generic.hdr[13] =  ETH_P_IP        & 0xff;
+
+        ck.m_insrt = fman_pcd_manip_create(h->pcd, &insrt_params);
+        if (IS_ERR_OR_NULL(ck.m_insrt)) {
+                rc = ck.m_insrt ? PTR_ERR(ck.m_insrt) : -ENOMEM;
+                ck.m_insrt = NULL;
+                return rc;
+        }
+
+        /*
+         * 3. Program the OH-port AD chain.
+         *
+         * NOTE: per the design memo §8 Q2, the OH AD chain is per-port,
+         * not per-flow.  Each new flow's set_chain() re-programs the
+         * chain with that flow's per-flow m_insrt.  This is correct for
+         * v1.0 because *all* v4-TCP flows hit the same OH port and the
+         * chain shape (RMV -> INSRT -> IPv4-FWD) is identical; only the
+         * INSRT inline header bytes differ per flow.  set_chain pauses
+         * the OH BMI dequeue for the rewrite window per the in-tree
+         * driver semantics, so frames in flight either traverse the old
+         * chain (for the prior flow's MAC pair) or the new one.  v1.0
+         * accepts this latency-of-rewrite for the first packet of each
+         * new flow; v1.1 (PR15) gets one OH port per flow if needed.
+         */
+        manips[0] = h->m_v4_rmv;
+        manips[1] = ck.m_insrt;
+        manips[2] = h->m_v4_ipv4;
+
+        mutex_lock(&h->lock);
+        rc = fman_pcd_oh_port_set_chain(h->oh_v4_tcp, manips, 3, peer_tx_fqid);
+        mutex_unlock(&h->lock);
+        if (rc) {
+                ask_pr_warn("hw: oh_port_set_chain failed (%d)\n", rc);
+                goto err_free_insrt;
+        }
+
+        oh_input_fqid = fman_pcd_oh_port_input_fqid(h->oh_v4_tcp);
+
+        /* 4. Install ingress CC key with FORWARD_FQ -> oh_input_fqid. */
         memset(&entry, 0, sizeof(entry));
-
-        /* Key bytes — see comment block above for slot layout. */
-        memcpy(&entry.key[0],  &key->src_ip[0], 4);   /* SIP   */
-        memcpy(&entry.key[4],  &key->dst_ip[0], 4);   /* DIP   */
-        entry.key[8]  = IPPROTO_TCP;                  /* proto */
-        memcpy(&entry.key[9],  &key->sport, 2);       /* sport */
-        memcpy(&entry.key[11], &key->dport, 2);       /* dport */
-
-        /* Exact match: all 13 bytes contribute. */
+        memcpy(&entry.key[0],  &key->src_ip[0], 4);
+        memcpy(&entry.key[4],  &key->dst_ip[0], 4);
+        entry.key[8] = IPPROTO_TCP;
+        memcpy(&entry.key[9],  &key->sport, 2);
+        memcpy(&entry.key[11], &key->dport, 2);
         memset(&entry.mask[0], 0xff, ASK_HW_V4_KEY_WIDTH);
 
         act = &entry.action;
-        act->type             = FMAN_PCD_ACTION_FORWARD_FQ;
-        act->forward_fq.fqid  = fqid;
+        act->type            = FMAN_PCD_ACTION_FORWARD_FQ;
+        act->forward_fq.fqid = oh_input_fqid;
 
         mutex_lock(&h->lock);
         slot = fman_pcd_cc_node_add_key(h->cc_v4_tcp, &entry);
         mutex_unlock(&h->lock);
-
         if (slot < 0) {
+                rc = slot;
                 ask_pr_warn("hw: cc_node_add_key v4-TCP failed (%d)\n", slot);
-                return slot;
+                goto err_clear_chain;
         }
         if (slot > U16_MAX) {
-                /*
-                 * Should never happen — node key table size is u16.
-                 * Defensive: roll back the just-installed key so we
-                 * do not leak a slot the dispatcher cannot reference.
-                 */
-                struct fman_pcd_action drop = { .type = FMAN_PCD_ACTION_DROP };
-                ask_pr_warn("hw: cc_node_add_key v4-TCP slot %d > U16_MAX\n", slot);
-                mutex_lock(&h->lock);
-                (void)fman_pcd_cc_node_modify_next_action(h->cc_v4_tcp,
-                                                         (u16)slot, &drop);
-                mutex_unlock(&h->lock);
-                return -EOVERFLOW;
+                rc = -EOVERFLOW;
+                goto err_drop_slot;
         }
 
-        *out_hw_id = ask_priv_pack_hw_flow_id(ASK_HW_FLOW_ID_TOKEN_V4_TCP,
-                                              (u16)slot);
+        /* 5. Snapshot cookie fields. */
+        ck.cc_node      = h->cc_v4_tcp;
+        ck.key_idx      = (u16)slot;
+        ck.m_rmv        = h->m_v4_rmv;
+        ck.m_ipv4       = h->m_v4_ipv4;
+        ck.sink_ifindex = (int)oif;
+        ck.sink_fqid    = peer_tx_fqid;
+
+        /* 6. Stash in cookie table; the returned cookie is the public hw_id. */
+        cookie = ask_hw_cookie_alloc(h, &ck);
+        if (cookie == 0) {
+                rc = -ENOMEM;
+                goto err_drop_slot;
+        }
+        *out_hw_id = cookie;
         return 0;
+
+err_drop_slot:
+        {
+                struct fman_pcd_action drop = { .type = FMAN_PCD_ACTION_DROP };
+                mutex_lock(&h->lock);
+                (void)fman_pcd_cc_node_modify_next_action(h->cc_v4_tcp,
+                                                          ck.key_idx, &drop);
+                mutex_unlock(&h->lock);
+        }
+err_clear_chain:
+        /*
+         * Best-effort disarm.  If other flows share this OH port they
+         * already failed at insert time too (single OH port per protocol
+         * at v1.0); no inflight-flow corruption risk.
+         */
+        mutex_lock(&h->lock);
+        (void)fman_pcd_oh_port_set_chain(h->oh_v4_tcp, NULL, 0, 0);
+        mutex_unlock(&h->lock);
+err_free_insrt:
+        fman_pcd_manip_destroy(ck.m_insrt);
+        return rc;
 }
 
 int ask_hw_flow_insert(const struct ask_flow_key *key,
@@ -819,7 +895,7 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
 
         h = ask_hw_pcd_get();
         if (!h)
-                return -ENODEV;     /* no HW backing -> SW fallback */
+                return -ENODEV;
 
         if (key->l3_proto == ASK_FLOW_L3_IPV4 &&
             key->l4_proto == IPPROTO_TCP)
@@ -833,64 +909,60 @@ EXPORT_SYMBOL_GPL(ask_hw_flow_insert);
 int ask_hw_flow_remove(u32 hw_flow_id)
 {
         struct ask_hw_pcd *h;
+        struct ask_hw_flow_cookie *ck;
         struct fman_pcd_action drop = { .type = FMAN_PCD_ACTION_DROP };
-        u16 token, key_idx;
-        int rc;
 
         h = ask_hw_pcd_get();
         if (!h)
                 return -ENODEV;
 
-        ask_priv_unpack_hw_flow_id(hw_flow_id, &token, &key_idx);
-
-        switch (token) {
-        case ASK_HW_FLOW_ID_TOKEN_NONE:
-                /*
-                 * Caller handed us a software-only id.  Not our slot
-                 * to free; ask_flow.c body-3 should not have called us
-                 * for this id, but be defensive and silently succeed.
-                 */
+        /*
+         * PR14j: hw_flow_id is now an xarray cookie (>= 1).  Cookie 0
+         * is the SW-only sentinel — return 0 unconditionally so
+         * ask_flow_remove() can call us without inspecting the id.
+         */
+        if (hw_flow_id == 0)
                 return 0;
 
-        case ASK_HW_FLOW_ID_TOKEN_V4_TCP:
-                /*
-                 * The CC node has no real "remove key" operation in
-                 * the public ABI - the silicon record format keeps
-                 * slot indices stable across the lifetime of the
-                 * node so callers can hold (token, idx) tuples
-                 * indefinitely.  Replacing the slot's action with
-                 * DROP is the documented removal pattern: future
-                 * frames that hash to this slot get dropped at the
-                 * CC walker rather than mis-routed to a stale FQID.
-                 */
-                mutex_lock(&h->lock);
-                rc = fman_pcd_cc_node_modify_next_action(h->cc_v4_tcp,
-                                                         key_idx, &drop);
-                mutex_unlock(&h->lock);
-                if (rc)
-                        ask_pr_warn("hw: remove v4-TCP slot %u failed (%d)\n",
-                                    key_idx, rc);
-                return rc;
-
-        default:
-                ask_pr_warn("hw: remove unknown token %u (id 0x%08x)\n",
-                            token, hw_flow_id);
+        ck = ask_hw_cookie_lookup(h, hw_flow_id);
+        if (!ck) {
+                ask_pr_warn("hw: remove: unknown cookie 0x%08x\n", hw_flow_id);
                 return -EINVAL;
         }
+
+        /*
+         * Disarm the ingress CC slot first so no new frames enter the
+         * OH chain via this flow's key.  Then free the per-flow
+         * m_insrt.  The shared m_rmv / m_ipv4 stay alive; they belong
+         * to ask_hw_pcd and are destroyed in teardown.
+         *
+         * We deliberately do NOT re-program the OH chain to NULL here
+         * because other flows may still be using it.  When the last
+         * flow on the OH port is removed the chain is left programmed
+         * with the previous flow's m_insrt — that m_insrt has now been
+         * destroyed, so the OH BMI would dereference a stale MURAM
+         * offset.  This is a latent issue documented in the memo §8 Q2:
+         * the OH port is per-protocol, not per-flow, at v1.0.  v1.1 will
+         * either (a) give each flow its own OH port (we have 6), or
+         * (b) refcount the OH chain and disarm-on-zero here.  For now
+         * we rely on the fact that ask.ko under sustained load always
+         * has flows present; the teardown path resets the chain.
+         */
+        mutex_lock(&h->lock);
+        (void)fman_pcd_cc_node_modify_next_action(ck->cc_node, ck->key_idx,
+                                                  &drop);
+        mutex_unlock(&h->lock);
+
+        if (ck->m_insrt)
+                fman_pcd_manip_destroy(ck->m_insrt);
+
+        ask_hw_cookie_free(h, hw_flow_id);
+        return 0;
 }
 EXPORT_SYMBOL_GPL(ask_hw_flow_remove);
 
 int ask_hw_flow_query_stats(u32 hw_flow_id, u64 *packets, u64 *bytes)
 {
-        /*
-         * Per-CC-key counters land in M3 (PR15h - bulk OP_FLOW_DUMP_
-         * STATS poller) once the dpaa rx-default fqid wiring is in
-         * place and we can read MURAM-resident per-action counters.
-         * Body-2 returns -EOPNOTSUPP so the genl OP_FLOW_QUERY_STATS
-         * handler reports the software-table counters (which are
-         * exact for the SW fallback path and zero for HW-offloaded
-         * flows until the poller starts populating them).
-         */
         (void)hw_flow_id;
         (void)packets;
         (void)bytes;
@@ -898,32 +970,20 @@ int ask_hw_flow_query_stats(u32 hw_flow_id, u64 *packets, u64 *bytes)
 }
 EXPORT_SYMBOL_GPL(ask_hw_flow_query_stats);
 
+/* ------------------------------------------------------------------------- */
+/* Module hooks                                                               */
+/* ------------------------------------------------------------------------- */
+
 int ask_hw_init(void)
 {
         struct ask_hw_ucode_version v;
         int rc;
 
-        /*
-         * Probe at module load so dmesg carries the microcode version
-         * as a single "ask: hw: FMan microcode X.Y.Z" breadcrumb. If
-         * the probe fails we log it but do not fail module load —
-         * userspace will still be able to query ASK_CMD_GET_INFO and
-         * receive zero ucode fields plus a -ENODEV trail in dmesg
-         * explaining why.
-         */
         rc = ask_hw_ucode_get_version(&v);
-        if (rc) {
+        if (rc)
                 ask_pr_warn("hw: ucode version probe failed (%d); ASK_CMD_GET_INFO will report zeros\n",
                             rc);
-                /* Continue - non-fatal. */
-        }
 
-        /*
-         * PR14g-body-1: bring up the FMan PCD chain.  Always returns 0 -
-         * any real failure is logged inside and results in ask_hw_pcd_get()
-         * returning NULL, which body-2's dispatcher treats as the
-         * software-only fallback signal.
-         */
         (void)ask_hw_pcd_bringup();
         return 0;
 }
