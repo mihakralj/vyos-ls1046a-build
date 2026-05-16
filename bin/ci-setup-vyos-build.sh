@@ -371,13 +371,15 @@ chmod +x "$HOOKS/98-fancontrol.chroot"
 cp data/hooks/99-mask-services.chroot "$HOOKS/99-mask-services.chroot"
 chmod +x "$HOOKS/99-mask-services.chroot"
 
-### Ethernet port remapping: FMan MAC → physical port position
-cp board/scripts/fman-port-name "$CHROOT/usr/local/bin/fman-port-name"
-chmod +x "$CHROOT/usr/local/bin/fman-port-name"
-mkdir -p "$CHROOT/etc/udev/rules.d"
-cp board/scripts/10-fman-port-order.rules "$CHROOT/etc/udev/rules.d/10-fman-port-order.rules"
-mkdir -p "$CHROOT/etc/systemd/network"
-cp board/scripts/00-fman.link "$CHROOT/etc/systemd/network/00-fman.link"
+### NOTE: ethernet port remapping was deleted on 2026-05-15. The previous
+### eth0..eth4 rename layer (fman-port-name + 10-fman-port-order.rules +
+### 00-fman.link) lived in the squashfs, but the predictable-naming race
+### in the initramfs already renamed interfaces to e2..e6 at T+3s (before
+### squashfs is mounted) — so the squashfs-side override was structurally
+### inert and the names landed as e2..e6 every boot regardless. The repo
+### now standardises on the kernel/systemd-assigned e2..e6 names. The
+### authoritative live-boot eN <-> physical-port mapping is recorded in
+### AGENTS.md / HWCTL.md — do not duplicate it here.
 
 ### SFP+ inventory helper: `sfp-check` reports vendor/PN of every inserted
 ### module and emits a paste-ready SFP_QUIRK_F() line when a module looks
@@ -409,6 +411,20 @@ chmod +x "$CHROOT/usr/local/bin/fan-check"
 cp board/scripts/caam-check "$CHROOT/usr/local/bin/caam-check"
 chmod +x "$CHROOT/usr/local/bin/caam-check"
 
+### ASK2 stack health helper: `ask-check` reports the landed state of the
+### ASK2 in-tree kernel patches (0001 caam-qi-share, 0002 dpaa-eth-flow-block,
+### 0003 fman-host-command-api, 0004 fman-pcd-subsystem incl. PR14a-PR14g-prep
+### symbol probes), the ask.ko / ask_bridge.ko OOT module load state, askd
+### daemon presence, ask-cli operator tool, VyOS 'set system ask ...' CLI
+### surface, nf_flow_table HW-offload smoke test, and dmesg integrity.
+### Exit 0 healthy / non-zero on fault — usable as a Nagios/monit probe.
+### Mirrors sfp-check / fan-check / caam-check style. Installed
+### unconditionally on every flavor: on default/vpp the ASK-specific
+### sections cleanly emit TODO/SKIP (no false FAILs), making it a useful
+### roadmap-status printer. On FLAVOR=ask it is the single command an
+### operator runs to confirm the modern ASK2 stack came up correctly.
+cp board/scripts/ask-check "$CHROOT/usr/local/bin/ask-check"
+chmod +x "$CHROOT/usr/local/bin/ask-check"
 
 ### Boot-complete fan whistle is now produced by fan-pid itself
 ### (play_startup_whistle()).  The standalone boot-complete-notify
