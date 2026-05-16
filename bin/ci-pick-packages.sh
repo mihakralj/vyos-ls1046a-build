@@ -42,12 +42,14 @@ ignore_packages=(
   accel-ppp
 )
 
+mkdir -p packages
+
 for deb_file in $deb_files; do
   if [[ " ${ignore_packages[@]} " =~ " $(basename "$deb_file" | cut -d_ -f1) " ]]; then
     echo "ignore $deb_file"
     continue
   fi
-  cp "$deb_file" packages
+  cp "$deb_file" packages/
 done
 
 ls -alh packages
