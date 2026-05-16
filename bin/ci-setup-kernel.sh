@@ -226,7 +226,10 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
                      "$ASK_PATCH_DIR"/0025-*.patch \
                      "$ASK_PATCH_DIR"/0026-*.patch \
                      "$ASK_PATCH_DIR"/0027-*.patch \
-                     "$ASK_PATCH_DIR"/0028-*.patch; do
+                     "$ASK_PATCH_DIR"/0028-*.patch \
+                     "$ASK_PATCH_DIR"/0029-*.patch \
+                     "$ASK_PATCH_DIR"/0030-*.patch \
+                     "$ASK_PATCH_DIR"/0031-*.patch; do
         [ -f "$src_patch" ] || { echo "ERROR: missing $src_patch"; exit 1; }
         # Rename 0001-→1001-, 0002-→1002-, 0003-→1003-, 0004-→1004-,
         # 0005-→1005-, 0006-→1006-, 0007-→1007-, 0008-→1008-,
@@ -262,14 +265,17 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
             0026-*) dst="1026-${base#0026-}" ;;
             0027-*) dst="1027-${base#0027-}" ;;
             0028-*) dst="1028-${base#0028-}" ;;
+            0029-*) dst="1029-${base#0029-}" ;;
+            0030-*) dst="1030-${base#0030-}" ;;
+            0031-*) dst="1031-${base#0031-}" ;;
             *)      echo "ERROR: unexpected ASK patch name: $base"; exit 1 ;;
         esac
         echo "###   $base → $dst"
         cp "$src_patch" "$KERNEL_PATCHES/$dst"
         ASK_PATCH_COUNT=$((ASK_PATCH_COUNT + 1))
     done
-    if [ "$ASK_PATCH_COUNT" -ne 28 ]; then
-        echo "ERROR: expected 28 ASK kernel patches, staged $ASK_PATCH_COUNT"
+    if [ "$ASK_PATCH_COUNT" -ne 31 ]; then
+        echo "ERROR: expected 31 ASK kernel patches, staged $ASK_PATCH_COUNT"
         exit 1
     fi
     echo "### ASK2: $ASK_PATCH_COUNT in-tree kernel patches staged"
@@ -358,10 +364,21 @@ rm -f /tmp/kernel-inject.sh
 
 ### Post-defconfig: force LS1046A built-in configs after VyOS snippets
 #
-# VyOS config/*.config snippets are appended to the defconfig AFTER our
-# LS1046A fragments in build-kernel.sh. These snippets may override critical
-# built-in settings (e.g., USB_STORAGE=y→m, DEVTMPFS_MOUNT=y→n).
-# Fix: inject scripts/config overrides AFTER make vyos_defconfig.
+# VyOS config/*.config snippets are merged onto our LS1046A defconfig
+# additions via `scripts/kconfig/merge_config.sh` (T8506, upstream
+# vyos-build 2026-05). For symbols also set by VyOS snippets, the
+# VyOS value wins (later in the merge order) — e.g. USB_STORAGE=m
+# (VyOS) overrides our USB_STORAGE=y. This block injects scripts/config
+# --set-val overrides AFTER merge_config.sh has produced .config to force
+# the LS1046A-required values back in.
+#
+# History: pre-T8506 upstream ran `make vyos_defconfig` after `cat`-ing all
+# snippets onto the defconfig, and our anchor was the `make vyos_defconfig`
+# line. Upstream replaced that step with merge_config.sh on 2026-05; the
+# old anchor no longer exists. The injection-anchor verification below
+# ensures any future upstream refactor fails loudly instead of silently
+# no-opping (which is exactly what would have shipped a kernel without
+# our forced builtins).
 #
 cat > /tmp/ls1046a-post-defconfig.sh << 'LS1046A_POSTDEFCONFIG_EOF'
 
@@ -410,7 +427,50 @@ make olddefconfig
 
 LS1046A_POSTDEFCONFIG_EOF
 
-sed -i '/^make vyos_defconfig$/r /tmp/ls1046a-post-defconfig.sh' "$KERNEL_BUILD/build-kernel.sh"
+# Anchor: the line that runs `scripts/kconfig/merge_config.sh "${KCONFIG_MERGE_FRAGMENTS[@]}"`
+# in the post-T8506 build-kernel.sh. Inject our forcing block IMMEDIATELY
+# AFTER that line so .config exists and our `scripts/config --set-val ...`
+# block can modify it, followed by `make olddefconfig` to resolve any
+# auto-dependencies.
+#
+# Implementation note: this used to be a sed `\|addr|r file` invocation
+# but BRE-sed treats `\{...\}` as an interval expression (which requires
+# digits inside), so any pattern containing the literal `${...}` bash
+# expansion would fail with "Invalid content of \{\}". Switched to a
+# Python rewrite using the existing python3 dependency — same approach
+# as the kernel-patch-loop rewrite below. The anchor is matched as a
+# fixed string against full lines, so there is no regex hazard.
+ANCHOR_LINE='scripts/kconfig/merge_config.sh "${KCONFIG_MERGE_FRAGMENTS[@]}"'
+if ! grep -qxF "$ANCHOR_LINE" "$KERNEL_BUILD/build-kernel.sh"; then
+    echo "ERROR: post-defconfig anchor missing in $KERNEL_BUILD/build-kernel.sh" >&2
+    echo "       expected exact line: $ANCHOR_LINE" >&2
+    echo "       upstream vyos-build's build-kernel.sh layout has changed —" >&2
+    echo "       update the anchor in bin/ci-setup-kernel.sh to inject the" >&2
+    echo "       LS1046A scripts/config --set-val block AFTER the new config-merge step." >&2
+    exit 1
+fi
+python3 - "$KERNEL_BUILD/build-kernel.sh" "$ANCHOR_LINE" /tmp/ls1046a-post-defconfig.sh <<'PYEOF'
+import sys, pathlib
+bk = pathlib.Path(sys.argv[1])
+anchor = sys.argv[2]
+inject = pathlib.Path(sys.argv[3]).read_text()
+lines = bk.read_text().splitlines(keepends=True)
+out = []
+done = False
+for ln in lines:
+    out.append(ln)
+    if not done and ln.rstrip("\n") == anchor:
+        # Ensure injected block starts on its own line and ends with newline
+        if not inject.startswith("\n"):
+            out.append("\n")
+        out.append(inject if inject.endswith("\n") else inject + "\n")
+        done = True
+if not done:
+    print(f"ERROR: anchor not matched line-for-line in {bk}", file=sys.stderr)
+    sys.exit(1)
+bk.write_text("".join(out))
+print(f"### {bk}: post-defconfig block injected after merge_config.sh line")
+PYEOF
 rm -f /tmp/ls1046a-post-defconfig.sh
 
 ### Replace upstream `patch -p1` loop with `git apply --3way`.
