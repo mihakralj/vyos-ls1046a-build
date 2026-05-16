@@ -44,15 +44,48 @@ PKG_DIR="${2:?PKG_DIR required as \$2}"
 OOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$OOT_DIR"
 
-# Resolve KVER from the kernel tree itself (not from defaults.toml — they
-# can drift if the tree was patched). `make kernelrelease` is the
-# canonical answer; falls back to `kernelversion` if release reports the
-# raw version (no -vyos suffix yet).
-KVER="$(make -C "$KSRC" -s kernelrelease 2>/dev/null || true)"
-if [ -z "$KVER" ]; then
-    KVER="$(make -C "$KSRC" -s kernelversion 2>/dev/null || true)"
+# Resolve KVER from the actually produced kernel .deb in $PKG_DIR.
+#
+# RATIONALE: `make -s kernelrelease` on a dirty tree returns
+# "<base>+" (e.g. "6.18.28+") because scripts/setlocalversion appends
+# the dirty marker when CONFIG_LOCALVERSION_AUTO=y and the tree has
+# uncommitted modifications — which is ALWAYS the case here because
+# bin/ci-setup-kernel.sh injects FMD-shim + LP5812 sources into the
+# tree without committing them. The "+" ends up in the .deb's
+# Depends: line and apt can't resolve it ("Depends: linux-image-6.18.28+
+# but it is not installable") because the kernel .deb that vyos-build
+# itself produces is named "linux-image-6.18.28-vyos" (without the +).
+#
+# Reading KVER from the .deb filename is byte-equivalent to what apt
+# will look for, eliminating the localversion/dirty-marker drift.
+KERNEL_DEB="$(find "$PKG_DIR" -maxdepth 1 -name 'linux-image-*-vyos_*_arm64.deb' \
+    ! -name '*-dbg_*' ! -name '*-headers_*' ! -name '*-dbgsym_*' 2>/dev/null | head -1)"
+if [ -n "$KERNEL_DEB" ]; then
+    # Parse "6.18.29-vyos" from "linux-image-6.18.29-vyos_6.18.29-1_arm64.deb"
+    KVER="$(basename "$KERNEL_DEB" | sed -E 's/^linux-image-(.+)_[^_]+_arm64\.deb$/\1/')"
+    echo "### KVER from $(basename "$KERNEL_DEB"): $KVER"
+else
+    # Fallback: derive from the kernel tree. Strip any trailing "+" added
+    # by scripts/setlocalversion when the tree is uncommitted-dirty.
+    echo "### no linux-image-*-vyos*.deb in $PKG_DIR — falling back to make kernelrelease"
+    KVER="$(make -C "$KSRC" -s kernelrelease 2>/dev/null | sed 's/+$//' || true)"
+    if [ -z "$KVER" ]; then
+        KVER="$(make -C "$KSRC" -s kernelversion 2>/dev/null || true)"
+    fi
 fi
-[ -n "$KVER" ] || { echo "FATAL: could not resolve KVER from $KSRC"; exit 1; }
+[ -n "$KVER" ] || { echo "FATAL: could not resolve KVER from $PKG_DIR or $KSRC"; exit 1; }
+
+# Sanity-check: KVER must end with "-vyos" so the produced ask-modules
+# .deb's "Depends: linux-image-${KVER}" matches the kernel .deb that
+# live-build's chroot-install pass actually has available.
+case "$KVER" in
+    *-vyos) : ;;
+    *)
+        echo "FATAL: KVER='$KVER' does not end in '-vyos' — would produce a .deb that apt cannot resolve" >&2
+        echo "       (expected something like '6.18.29-vyos', got '$KVER')" >&2
+        exit 1
+        ;;
+esac
 
 # ASK module version. Track MODULE_VERSION() in ask_main.c so dpkg-deb
 # version matches what insmod will report.

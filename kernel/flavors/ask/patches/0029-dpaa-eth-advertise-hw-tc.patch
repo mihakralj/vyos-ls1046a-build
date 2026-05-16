@@ -1,0 +1,44 @@
+From ab5fd3ad063db428938f985404a210437e8ea889 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Sat, 16 May 2026 00:29:15 +0000
+Subject: [PATCH] net: dpaa: advertise NETIF_F_HW_TC for nft flowtable offload
+
+PR14g-body-1: completes the wiring from 0002 + 0028. Without
+NETIF_F_HW_TC in dev->features, nf_flow_offload_tuple() silently
+falls back to software (every packet rides the kernel softpath
+and CPU pins at ~50%% at multi-Gbps line rates).
+
+With this bit set, nft flowtable offload reaches dpaa_setup_tc()
+which dispatches to ask.ko, which programs the FMan PCD chain.
+No behaviour change when ask.ko is not loaded (dispatcher slot
+empty -> -EOPNOTSUPP -> SW fallback as before).
+
+Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+
+---
+ drivers/net/ethernet/freescale/dpaa/dpaa_eth.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index b6b7316..38ed9ae 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -233,6 +233,15 @@ static int dpaa_netdev_init(struct net_device *net_dev,
+ 				 NETIF_F_RXHASH);
+ 
+ 	net_dev->hw_features |= NETIF_F_SG | NETIF_F_HIGHDMA;
++
++	/* ASK2 — advertise NETIF_F_HW_TC so nft flowtable offload
++	 * (nf_flow_table_offload.c::nf_flow_offload_tuple) will push
++	 * flows to hardware via dpaa_setup_tc(). If no backend has
++	 * registered via dpaa_register_flow_offload_handler(), the
++	 * dispatch returns -EOPNOTSUPP and the upper layer falls
++	 * back to software flow_offload.
++	 */
++	net_dev->hw_features |= NETIF_F_HW_TC;
+ 	/* The kernels enables GSO automatically, if we declare NETIF_F_SG.
+ 	 * For conformity, we'll still declare GSO explicitly.
+ 	 */
+-- 
+2.39.5
+

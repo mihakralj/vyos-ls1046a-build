@@ -1,0 +1,155 @@
+From 4da1e05c92bde85ccee9ea64acce6f7bd5e3abb4 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Sat, 16 May 2026 01:47:40 +0000
+Subject: [PATCH] dpaa: export fman_mac_get_hw_id() and dpaa_get_fman_port_id()
+
+PR14g body-1 part-2: ask.ko's port-bind step needs to resolve a dpaa
+netdev to its FMan hardware port id (the cell-index in 0..9 on
+LS1046A) to call fman_pcd_kg_bind_port(scheme, port_id).
+
+struct mac_priv_s is private to fman/mac.c, so dpaa_eth.c cannot read
+mac_dev->priv->cell_index directly. Add a small cross-module accessor:
+
+  - fman_mac_get_hw_id(mac_dev) lives in fman/mac.c where mac_priv_s
+    is in scope. EXPORT_SYMBOL_GPL.
+  - dpaa_get_fman_port_id(netdev, *port_id) is the public entry point
+    in include/linux/fsl/dpaa_flow_offload.h, with a -ENODEV stub for
+    !CONFIG_FSL_DPAA so out-of-tree consumers (ask.ko) build on
+    non-DPAA kernels too. EXPORT_SYMBOL_GPL.
+
+Range-checks 0..9 (per MAX_NUM_OF_MACS=10 in fman.h) so callers get
+-ERANGE instead of a silently-wrong port id if a future SoC widens
+cell-index.
+
+Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+---
+ .../net/ethernet/freescale/dpaa/dpaa_eth.c    | 33 +++++++++++++++++++
+ drivers/net/ethernet/freescale/fman/mac.c     | 14 ++++++++
+ drivers/net/ethernet/freescale/fman/mac.h     |  7 ++++
+ include/linux/fsl/dpaa_flow_offload.h         | 18 ++++++++++
+ 4 files changed, 72 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 38ed9ae..3d4f6ca 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -495,6 +495,39 @@ return -ENOENT;
+ }
+ EXPORT_SYMBOL_GPL(dpaa_get_rx_default_fqid);
+ 
++/**
++ * dpaa_get_fman_port_id() - per-netdev FMan port id accessor.
++ *
++ * Used by ASK2 ask.ko (PR14g body-1 part-2) to resolve a dpaa netdev
++ * to the FMan hardware port id that fman_pcd_kg_bind_port() takes.
++ * On LS1046A the cell-index is in range 0..9 (MAC1..MAC10 numbered
++ * 0..9 by the FMan binding); ports 8/9 are the 10G SFP+ MACs at
++ * f0000/f2000.
++ *
++ * Lifetime: caller holds RTNL or any equivalent guarantee that @dev
++ * cannot disappear underneath us.  No additional locking is needed:
++ * priv->mac_dev is set once at dpaa_probe() and never mutated after.
++ */
++int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id)
++{
++	struct dpaa_priv *priv;
++	int id;
++
++	if (!dev || !port_id)
++		return -EINVAL;
++	if (dev->netdev_ops != &dpaa_ops)
++		return -ENODEV;
++	priv = netdev_priv(dev);
++	if (!priv->mac_dev)
++		return -ENODEV;
++	id = fman_mac_get_hw_id(priv->mac_dev);
++	if (id < 0 || id > 9)
++		return -ERANGE;
++	*port_id = (u8)id;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(dpaa_get_fman_port_id);
++
+ static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
+  void *type_data)
+ {
+diff --git a/drivers/net/ethernet/freescale/fman/mac.c b/drivers/net/ethernet/freescale/fman/mac.c
+index f27ff62..2abd6f6 100644
+--- a/drivers/net/ethernet/freescale/fman/mac.c
++++ b/drivers/net/ethernet/freescale/fman/mac.c
+@@ -334,6 +334,20 @@ static void mac_remove(struct platform_device *pdev)
+ 	platform_device_unregister(mac_dev->priv->eth_dev);
+ }
+ 
++/* ASK2 PR14g body-1 part-2: cross-module accessor for the FMan MAC
++ * hardware cell-index.  Defined here because struct mac_priv_s is
++ * private to this translation unit; the caller (dpaa_eth) is in a
++ * different module so it cannot reach mac_dev->priv->cell_index
++ * directly.  Range is 1..10 on LS1046A per the binding doc.
++ */
++int fman_mac_get_hw_id(struct mac_device *mac_dev)
++{
++	if (!mac_dev || !mac_dev->priv)
++		return -EINVAL;
++	return mac_dev->priv->cell_index;
++}
++EXPORT_SYMBOL_GPL(fman_mac_get_hw_id);
++
+ static struct platform_driver mac_driver = {
+ 	.driver = {
+ 		.name		= KBUILD_MODNAME,
+diff --git a/drivers/net/ethernet/freescale/fman/mac.h b/drivers/net/ethernet/freescale/fman/mac.h
+index 955ace3..8bcca1b 100644
+--- a/drivers/net/ethernet/freescale/fman/mac.h
++++ b/drivers/net/ethernet/freescale/fman/mac.h
+@@ -72,4 +72,11 @@ extern const char	*mac_driver_description;
+ 
+ int fman_set_multi(struct net_device *net_dev, struct mac_device *mac_dev);
+ 
++/* ASK2 PR14g body-1 part-2: expose the FMan MAC hw cell-index to consumers
++ * outside the fman/ module so that an offload backend (e.g. ask.ko via
++ * dpaa_get_fman_port_id) can pass the port id to fman_pcd_kg_bind_port().
++ * Returns the cell-index in the range 1..10 on LS1046A, or -EINVAL.
++ */
++int fman_mac_get_hw_id(struct mac_device *mac_dev);
++
+ #endif	/* __MAC_H */
+diff --git a/include/linux/fsl/dpaa_flow_offload.h b/include/linux/fsl/dpaa_flow_offload.h
+index 992eb34..4d43b96 100644
+--- a/include/linux/fsl/dpaa_flow_offload.h
++++ b/include/linux/fsl/dpaa_flow_offload.h
+@@ -77,6 +77,19 @@ int dpaa_unregister_flow_offload_handler(const struct dpaa_flow_offload_ops *ops
+  * bug — RX_DEFAULT is always allocated at probe).
+  */
+ int dpaa_get_rx_default_fqid(struct net_device *dev, u32 *fqid);
++
++/**
++ * dpaa_get_fman_port_id() - look up the FMan port hardware id for a netdev.
++ * @dev:     dpaa netdev to query.
++ * @port_id: out-param receiving the port id in range 0..9 on LS1046A.
++ *
++ * Resolves the netdev to its backing struct mac_device and returns the
++ * cell-index, which is the same hardware port id that
++ * fman_pcd_kg_bind_port() expects.  Returns 0 on success, -EINVAL on
++ * bad args, -ENODEV if @dev is not a dpaa netdev or has no mac_dev,
++ * or -ERANGE if the cell-index is out of the 0..9 range.
++ */
++int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id);
+ #else
+ static inline int
+ dpaa_register_flow_offload_handler(const struct dpaa_flow_offload_ops *ops)
+@@ -93,6 +106,11 @@ dpaa_get_rx_default_fqid(struct net_device *dev, u32 *fqid)
+ {
+ return -ENODEV;
+ }
++static inline int
++dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id)
++{
++return -ENODEV;
++}
+ #endif
+ 
+ #endif /* _LINUX_FSL_DPAA_FLOW_OFFLOAD_H */
+-- 
+2.39.5
+

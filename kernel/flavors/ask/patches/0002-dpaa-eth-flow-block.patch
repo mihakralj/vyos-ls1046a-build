@@ -138,7 +138,7 @@ index 3edc8d1..c564ee0 100644
 +	 * backend is registered, which lets the upper layer fall
 +	 * back to software flow_offload.
 +	 */
-+	if (type == TC_SETUP_BLOCK) {
++	if (type == TC_SETUP_BLOCK || type == TC_SETUP_FT) {
 +		const struct dpaa_flow_offload_ops *ops;
 +		int err;
 +
