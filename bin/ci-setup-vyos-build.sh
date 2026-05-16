@@ -426,6 +426,15 @@ chmod +x "$CHROOT/usr/local/bin/caam-check"
 cp board/scripts/ask-check "$CHROOT/usr/local/bin/ask-check"
 chmod +x "$CHROOT/usr/local/bin/ask-check"
 
+### Mono Gateway DK LP5812 status LED control: `led` (Python 3) supports
+### three input forms — palette index, four decimals R G B W, and 8-digit
+### hex RRGGBBWW. Auto-creates /config/led.json with a 32-entry default
+### palette on first run; the palette persists across reboots via the
+### VyOS /config overlay. Installed as /usr/local/bin/led (no .py suffix,
+### matching fan-pid / caam-check convention).
+cp board/scripts/led.py "$CHROOT/usr/local/bin/led"
+chmod +x "$CHROOT/usr/local/bin/led"
+
 ### Boot-complete fan whistle is now produced by fan-pid itself
 ### (play_startup_whistle()).  The standalone boot-complete-notify
 ### service was deleted to eliminate the systemd-ordering race over
