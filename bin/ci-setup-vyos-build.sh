@@ -483,118 +483,43 @@ fi
 cp board/systemd/persistence-bindmount.service "$CHROOT/etc/systemd/system/persistence-bindmount.service"
 
 ### ====================================================================
-### ASK (Application Solutions Kit) fast-path userspace components
+### ASK2 userspace components (modern rewrite — NOT YET IMPLEMENTED)
 ### ====================================================================
-# FLAVOR gate (PR 5): the entire ASK userspace stack — dpa_app, cmm, fmc,
-# libcli/libcmm/libfci, CDX/FMC config XMLs, ASK module loader/health
-# scripts, ASK chroot hooks — is meaningful only for FLAVOR=ask. For
-# FLAVOR=default|vpp the ISO ships stock VyOS userspace with mainline
-# DPAA (or AF_XDP/VPP) and none of these files belong in the chroot.
-# Backward-compat: an UNSET FLAVOR is treated as "ask" so existing CI
-# dispatches keep working unchanged.
-if [[ "${FLAVOR:-ask}" != "ask" ]]; then
-    echo "### FLAVOR=${FLAVOR:-} — skipping ASK userspace + module + service installation"
-    echo "### vyos-build setup complete (FLAVOR=${FLAVOR:-}, ASK userspace omitted)"
-    exit 0
-fi
-# ASK provides hardware flow offloading via FMan Coarse Classifier on LS1046A.
-# Components: cdx.ko (control plane), fci.ko (conntrack interface),
-# auto_bridge.ko (bridge offload), dpa_app (FMan programmer),
-# cmm (connection manager), fmc (FMan compiler), shared libraries.
+# The legacy ASK 1.x userspace stack (dpa_app, cmm, fmc, libcli/libcmm/libfci,
+# libnfnetlink/libnetfilter-conntrack forks, CDX/FMC config XMLs, ASK module
+# loader/health scripts, 97-ask-userspace chroot hook) was deleted on
+# 2026-05-12 as part of the ASK2 modern rewrite (branch ask20).
 #
-# Kernel modules (.ko) are built from source in ci-build-packages.sh
-# and placed directly into $CHROOT/usr/local/lib/ask-modules/.
-# Here we install userspace binaries, libraries, configs, and services.
+# ASK2 will ship its own userspace components per
+# specs/ask2-rewrite-spec.md §§4–9:
+#   - askd            — connection manager / decision engine (replaces cmm)
+#   - ask-load        — XML→FMC compiler one-shot       (replaces dpa_app)
+#   - libask_fci.so.1 — generic-netlink wrapper library (replaces libfci)
+#   - ask.ko + ask_bridge.ko — OOT kernel modules       (replace cdx.ko + auto_bridge.ko)
+#
+# Operator-visible compatibility surfaces preserved per spec §18:
+#   /etc/cdx_cfg.xml, /etc/cdx_pcd.xml, /etc/cdx_sp.xml — same schemas
+#   /dev/cdx_ctrl       — symlink to /dev/ask_ctrl (legacy ioctl shim)
+#   libfci.so.1 SONAME  — symlink to libask_fci.so.1
+#   /etc/config/fastforward — same ALG-exclusion list format
+#
+# Until those components are authored, FLAVOR=ask builds skip userspace
+# staging entirely. The resulting ISO will boot a vanilla VyOS kernel +
+# userspace; nothing ASK-specific will be present in the image.
+if [[ "${FLAVOR:-default}" == "ask" ]]; then
+    echo "### FLAVOR=ask — ASK2 userspace stack not yet implemented"
+    echo "### See specs/ask2-rewrite-spec.md for the rewrite plan"
 
-### ASK userspace binaries
-# CDX module calls /usr/bin/dpa_app via call_usermodehelper (hardcoded path)
-mkdir -p "$CHROOT/usr/bin"
-cp data/ask-userspace/dpa_app/dpa_app "$CHROOT/usr/bin/dpa_app"
-chmod +x "$CHROOT/usr/bin/dpa_app"
-cp data/ask-userspace/cmm/cmm "$CHROOT/usr/bin/cmm"
-chmod +x "$CHROOT/usr/bin/cmm"
-cp data/ask-userspace/fmc/fmc "$CHROOT/usr/local/bin/fmc"
-chmod +x "$CHROOT/usr/local/bin/fmc"
+    # M0.3: drop the chroot hook that auto-loads ask.ko at boot via
+    # /etc/modules-load.d/ask.conf. The ask-modules-*.deb (built by
+    # kernel/flavors/ask/oot-modules/ask/ci-build.sh and swept into the
+    # chroot by ci-pick-packages.sh) installs ask.ko under
+    # /lib/modules/$KVER/extra/ but does not auto-load it — that's this
+    # hook's job. Hook is FLAVOR-gated (only staged on ask builds) so
+    # default/vpp ISOs never see it.
+    cp data/hooks/97-ask-modules.chroot "$HOOKS/97-ask-modules.chroot"
+    chmod +x "$HOOKS/97-ask-modules.chroot"
+    echo "### FLAVOR=ask: staged 97-ask-modules.chroot for systemd-modules-load auto-load"
+fi
 
-### ASK shared libraries → /usr/local/lib/
-mkdir -p "$CHROOT/usr/local/lib"
-
-# libcli (CLI library for dpa_app)
-cp data/ask-userspace/libcli/libcli.so.1.10.8  "$CHROOT/usr/local/lib/"
-ln -sf libcli.so.1.10.8  "$CHROOT/usr/local/lib/libcli.so.1.10"
-ln -sf libcli.so.1.10    "$CHROOT/usr/local/lib/libcli.so"
-
-# libfci (fast-path conntrack interface library)
-cp data/ask-userspace/fci/libfci.so.0.1  "$CHROOT/usr/local/lib/"
-ln -sf libfci.so.0.1  "$CHROOT/usr/local/lib/libfci.so.0"
-ln -sf libfci.so.0    "$CHROOT/usr/local/lib/libfci.so"
-
-# libcmm (CMM shared library)
-cp data/ask-userspace/cmm/libcmm.so.0.0.0  "$CHROOT/usr/local/lib/"
-ln -sf libcmm.so.0.0.0  "$CHROOT/usr/local/lib/libcmm.so.0"
-ln -sf libcmm.so.0      "$CHROOT/usr/local/lib/libcmm.so"
-
-# libnfnetlink (NXP-patched: nonblocking + heap buffer extensions)
-cp data/ask-userspace/libnfnetlink/libnfnetlink.so.0.2.0  "$CHROOT/usr/local/lib/"
-ln -sf libnfnetlink.so.0.2.0  "$CHROOT/usr/local/lib/libnfnetlink.so.0"
-ln -sf libnfnetlink.so.0      "$CHROOT/usr/local/lib/libnfnetlink.so"
-
-# libnetfilter_conntrack (NXP-patched: comcerto fast-path extensions)
-cp data/ask-userspace/libnetfilter-conntrack/libnetfilter_conntrack.so.3.8.0  "$CHROOT/usr/local/lib/"
-ln -sf libnetfilter_conntrack.so.3.8.0  "$CHROOT/usr/local/lib/libnetfilter_conntrack.so.3"
-ln -sf libnetfilter_conntrack.so.3      "$CHROOT/usr/local/lib/libnetfilter_conntrack.so"
-
-### ASK CDX config XMLs → /etc/ (dpa_app expects /etc/cdx_cfg.xml etc.)
-# Use Mono Gateway config as default (3×1G + 2×10G + 2×OH)
-cp data/ask-userspace/dpa_app/etc/cdx_cfg_mono_gw.xml "$CHROOT/etc/cdx_cfg.xml"
-cp data/ask-userspace/dpa_app/etc/cdx_pcd.xml         "$CHROOT/etc/cdx_pcd.xml"
-cp data/ask-userspace/dpa_app/etc/cdx_sp.xml          "$CHROOT/etc/cdx_sp.xml"
-# Keep originals in /etc/cdx/ for reference
-mkdir -p "$CHROOT/etc/cdx"
-cp data/ask-userspace/dpa_app/etc/cdx_cfg.xml         "$CHROOT/etc/cdx/"
-cp data/ask-userspace/dpa_app/etc/cdx_cfg_mono_gw.xml "$CHROOT/etc/cdx/"
-cp data/ask-userspace/dpa_app/etc/cdx_pcd.xml         "$CHROOT/etc/cdx/"
-cp data/ask-userspace/dpa_app/etc/cdx_sp.xml          "$CHROOT/etc/cdx/"
-
-### FMC config: hxs_pdl_v3.xml (NetPDL protocol definitions for soft parser)
-# dpa_app / libfmc statically links to FMC which reads /etc/fmc/config/hxs_pdl_v3.xml
-# at init time. Without this file, dpa_app SIGSEGV (null pointer in XML parse).
-mkdir -p "$CHROOT/etc/fmc/config"
-cp data/ask-userspace/fmc/config/hxs_pdl_v3.xml "$CHROOT/etc/fmc/config/"
-cp data/ask-userspace/fmc/config/netpcd.xsd     "$CHROOT/etc/fmc/config/"
-cp data/ask-userspace/fmc/config/cfgdata.xsd    "$CHROOT/etc/fmc/config/"
-
-### ASK kernel module loader service (insmod for out-of-tree .ko files)
-cp board/scripts/ask-modules-load.sh "$CHROOT/usr/local/bin/ask-modules-load.sh"
-chmod +x "$CHROOT/usr/local/bin/ask-modules-load.sh"
-cp board/systemd/ask-modules-load.service "$CHROOT/etc/systemd/system/ask-modules-load.service"
-cp board/systemd/ask-modules-load.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/ask-modules-load.conf"
-
-### CMM service and config
-cp ASK/config/cmm.service "$CHROOT/etc/systemd/system/cmm.service"
-mkdir -p "$CHROOT/etc/config"
-cp ASK/config/fastforward "$CHROOT/etc/config/fastforward"
-
-### CMM service enablement via tmpfiles.d
-cp board/systemd/cmm.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/cmm.conf"
-
-### ASK health check script
-cp board/scripts/ask-check.sh "$CHROOT/usr/local/bin/ask-check"
-chmod +x "$CHROOT/usr/local/bin/ask-check"
-
-### ASK conntrack fix: flush VyOS notrack rules for fast-path offload
-cp board/scripts/ask-conntrack-fix.sh "$CHROOT/usr/local/bin/ask-conntrack-fix.sh"
-chmod +x "$CHROOT/usr/local/bin/ask-conntrack-fix.sh"
-cp board/systemd/ask-conntrack-fix.service "$CHROOT/etc/systemd/system/ask-conntrack-fix.service"
-cp board/systemd/ask-conntrack-fix.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/ask-conntrack-fix.conf"
-
-### ASK kernel modules — shipped inside the kernel-6.6.137-askN release's
-# ask-modules .deb (consumed via ci-consume-ask-kernel.sh, installed under
-#  /lib/modules/<KVER>/extra/ask/). No staging needed here; the loader
-#  ask-modules-load.sh now reads from /lib/modules/$(uname -r)/extra/ask.
-
-### ASK chroot hook (ldconfig, depmod, runtime deps)
-cp data/hooks/97-ask-userspace.chroot "$HOOKS/97-ask-userspace.chroot"
-chmod +x "$HOOKS/97-ask-userspace.chroot"
-
-echo "### vyos-build setup complete (with ASK fast-path userspace)"
+echo "### vyos-build setup complete (FLAVOR=${FLAVOR:-default})"
