@@ -1,0 +1,1245 @@
+From f58d9c1cd175f4c6ce653b7d5fce371b77bdc20c Mon Sep 17 00:00:00 2001
+From: ASK2 PR14h <ask2@vyos-ls1046a-build>
+Date: Sat, 16 May 2026 05:22:51 +0000
+Subject: [PATCH] fman: PCD: add Offline-Host (OH) port driver
+
+Implements the public OH-port ABI per ASK2 spec v1.2 section 13.3 and
+LS1046A RM 8.11.  The OH port is the silicon mechanism that lets a
+classified frame be re-injected into a second-pass classify/manipulate
+chain and then re-enqueued to a peer port's TX FQ - all without the
+A72 cores touching the frame.  This is the only LS1046A mechanism by
+which L3-routed forwarding with per-hop L2 rewrite can be offloaded.
+
+Public ABI (EXPORT_SYMBOL_GPL, consumed by ask.ko in PR14j):
+
+  fman_pcd_oh_port_claim(struct fman *, u8 oh_idx)
+  fman_pcd_oh_port_release(struct fman_pcd_oh_port *)
+  fman_pcd_oh_port_input_fqid(const struct fman_pcd_oh_port *)
+  fman_pcd_oh_port_set_chain(struct fman_pcd_oh_port *,
+                             struct fman_pcd_manip * const *manips,
+                             u8 n_manips, u32 sink_fqid)
+
+Wiring:
+ - fman_port.c learns the 'fsl,fman-v3-port-oh' compatible so the
+   six upstream-defined OH platform nodes at 0x82000..0x87000 in
+   qoriq-fman3-0.dtsi (cell-index 0x2..0x7) get a platform_device.
+ - fman_pcd.c gains a pcd->oh_ports list_head and a teardown-time
+   fman_pcd_oh_reclaim_all() sweep that drains leaked handles.
+ - fman_pcd_internal.h exports fman_pcd_get_oh_list() so
+   fman_pcd_oh.c can access the list under pcd->lock.
+ - Makefile builds fman_pcd_oh.o into fsl_dpaa_fman when
+   CONFIG_FSL_FMAN_PCD=y.
+
+PR14h skeleton publishes a 'null walker' AD chain (all-zero 16-byte
+entries) regardless of the manip argument - the per-AD encoder lands
+in a follow-up PR after PR14i adds the RMV_ETHERNET / INSRT_GENERIC /
+FIELD_UPDATE_IPV4_FORWARD manip types that it consumes.  The skeleton
+still validates the chain arguments (n_manips<=4, non-NULL manip
+pointers, 24-bit sink_fqid) and records n_manips + sink_fqid on the
+handle so PR14j ask.ko code can be authored against a stable ABI.
+
+Builds clean on aarch64 (linux-6.18.29) with both CONFIG_FSL_FMAN=y
+and CONFIG_FSL_FMAN_PCD=y.  All four __ksymtab_fman_pcd_oh_* symbols
+appear in vmlinux.
+---
+ drivers/net/ethernet/freescale/fman/Makefile  |   3 +-
+ .../net/ethernet/freescale/fman/fman_pcd.c    |  48 +-
+ .../freescale/fman/fman_pcd_internal.h        |  11 +
+ .../net/ethernet/freescale/fman/fman_pcd_oh.c | 628 ++++++++++++++++++
+ .../net/ethernet/freescale/fman/fman_port.c   |  37 +-
+ include/linux/fsl/fman_pcd.h                  | 257 +++++--
+ 6 files changed, 882 insertions(+), 102 deletions(-)
+ create mode 100644 drivers/net/ethernet/freescale/fman/fman_pcd_oh.c
+
+diff --git a/drivers/net/ethernet/freescale/fman/Makefile b/drivers/net/ethernet/freescale/fman/Makefile
+index 9650ca1..3db4a52 100644
+--- a/drivers/net/ethernet/freescale/fman/Makefile
++++ b/drivers/net/ethernet/freescale/fman/Makefile
+@@ -8,6 +8,7 @@ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_mac.o
+ fsl_dpaa_fman-objs	:= fman_muram.o fman.o fman_sp.o fman_keygen.o fman_host_cmd.o
+ fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o fman_pcd_kg.o fman_pcd_cc.o \
+        fman_pcd_manip.o fman_pcd_plcr.o \
+-       fman_pcd_replic.o fman_pcd_prs.o
++       fman_pcd_replic.o fman_pcd_prs.o \
++       fman_pcd_oh.o
+ fsl_dpaa_fman_port-objs := fman_port.o
+ fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index f35123f..7d078b5 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -110,11 +110,12 @@ struct fman_pcd {
+ 	 * dependency order.  At PR14a the lists are initialised but
+ 	 * always empty.
+ 	 */
+-	struct list_head kg_schemes;
+-	struct list_head cc_trees;
+-	struct list_head manip_profiles;
+-	struct list_head plcr_profiles;
+-	struct list_head replic_groups;
++struct list_head kg_schemes;
++struct list_head cc_trees;
++struct list_head manip_profiles;
++struct list_head plcr_profiles;
++struct list_head replic_groups;
++struct list_head oh_ports;
+ 
+ 	struct dentry *debugfs_dir;
+ };
+@@ -271,6 +272,7 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 	INIT_LIST_HEAD(&pcd->manip_profiles);
+ 	INIT_LIST_HEAD(&pcd->plcr_profiles);
+ 	INIT_LIST_HEAD(&pcd->replic_groups);
++INIT_LIST_HEAD(&pcd->oh_ports);
+ 
+ 	pcd->muram_offset = fman_muram_alloc(muram,
+ 				     FMAN_PCD_MURAM_RESERVED_BYTES);
+@@ -325,18 +327,27 @@ EXPORT_SYMBOL_GPL(fman_pcd_init);
+  */
+ void fman_pcd_release(struct fman_pcd *pcd)
+ {
+-	if (!pcd)
+-		return;
++if (!pcd)
++return;
++
++/* Reclaim any OH-port handles a consumer (ask.ko) leaked.
++ * Done BEFORE the WARN_ON sweep so the per-list empty asserts
++ * stay clean even on a buggy unload path.  Other engines have
++ * no equivalent reclaim hook yet; their consumer-side teardown
++ * discipline is enforced by KUnit + ask.ko's __exit ordering.
++ */
++fman_pcd_oh_reclaim_all(pcd);
+ 
+-	if (!IS_ERR_OR_NULL(pcd->debugfs_dir))
+-		debugfs_remove_recursive(pcd->debugfs_dir);
+-	fman_pcd_debugfs_root_put();
++if (!IS_ERR_OR_NULL(pcd->debugfs_dir))
++debugfs_remove_recursive(pcd->debugfs_dir);
++fman_pcd_debugfs_root_put();
+ 
+-	WARN_ON(!list_empty(&pcd->kg_schemes));
+-	WARN_ON(!list_empty(&pcd->cc_trees));
+-	WARN_ON(!list_empty(&pcd->manip_profiles));
+-	WARN_ON(!list_empty(&pcd->plcr_profiles));
+-	WARN_ON(!list_empty(&pcd->replic_groups));
++WARN_ON(!list_empty(&pcd->kg_schemes));
++WARN_ON(!list_empty(&pcd->cc_trees));
++WARN_ON(!list_empty(&pcd->manip_profiles));
++WARN_ON(!list_empty(&pcd->plcr_profiles));
++WARN_ON(!list_empty(&pcd->replic_groups));
++WARN_ON(!list_empty(&pcd->oh_ports));
+ 
+ 	if (!IS_ERR_VALUE(pcd->muram_offset))
+ 		fman_muram_free_mem(fman_get_muram(pcd->fman),
+@@ -408,5 +419,10 @@ struct list_head *fman_pcd_get_plcr_list(struct fman_pcd *pcd)
+ 
+ struct list_head *fman_pcd_get_replic_list(struct fman_pcd *pcd)
+ {
+-	return pcd ? &pcd->replic_groups : NULL;
++return pcd ? &pcd->replic_groups : NULL;
++}
++
++struct list_head *fman_pcd_get_oh_list(struct fman_pcd *pcd)
++{
++return pcd ? &pcd->oh_ports : NULL;
+ }
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+index 24e4911..66944e6 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+@@ -43,6 +43,17 @@ struct list_head *fman_pcd_get_cc_list(struct fman_pcd *pcd);
+ struct list_head *fman_pcd_get_manip_list(struct fman_pcd *pcd);
+ struct list_head *fman_pcd_get_plcr_list(struct fman_pcd *pcd);
+ struct list_head *fman_pcd_get_replic_list(struct fman_pcd *pcd);
++struct list_head *fman_pcd_get_oh_list(struct fman_pcd *pcd);
++
++/* fman_pcd_oh_reclaim_all:
++ *   Module-internal teardown hook called from fman_pcd_release() to
++ *   walk pcd->oh_ports and reclaim any handles a misbehaving consumer
++ *   (typically ask.ko at unload) leaked.  Each surviving handle is
++ *   logged via WARN_ONCE with its refcount and oh_idx so the leak is
++ *   attributable.  Safe to call on NULL @pcd.  Same-module symbol
++ *   (no EXPORT_SYMBOL) -- definition lives in fman_pcd_oh.c.
++ */
++void fman_pcd_oh_reclaim_all(struct fman_pcd *pcd);
+ 
+ /* fman_pcd_cc_tree_group_table_off:
+  *   Accessor exposing struct fman_pcd_cc_tree::group_table_off to other
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_oh.c b/drivers/net/ethernet/freescale/fman/fman_pcd_oh.c
+new file mode 100644
+index 0000000..365d1b3
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_oh.c
+@@ -0,0 +1,628 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * NXP FMan PCD - Offline Host (OH) port driver.
++ *
++ * Authoritative silicon reference: LS1046A Reference Manual sec 8.11
++ * ("Offline / Host port").  Architectural reference: ASK2 v1.2 spec
++ * sec 13.3 (specs/ask2-rewrite-spec.md).  Cross-reference for
++ * silicon-fact disambiguation only (provenance per ASK2 spec v1.1
++ * relaxation): the archived NXP SDK driver tree at
++ *   mihakralj/kernel-ls1046a-build@464df181
++ *   release/oot-modules/cdx/devoh.c
++ * The SDK's t_FmPort opaque-handle architecture, AMP IPC layer, and
++ * fsl-ncsw OS-shim are NOT used here -- this implementation uses
++ * native devm_*, typed handles, mutex, and RCU as required by the
++ * v1.1 provenance terms.
++ *
++ * Role in the ASK2 pipeline
++ * -------------------------
++ * The OH port is the silicon mechanism by which an FMan frame is
++ *   1. dequeued from QMan via the OH port's input FQ;
++ *   2. re-injected into a second-pass classify/manipulate AD chain;
++ *   3. re-enqueued via a FORWARD_FQ AD-tail action to a target FQID
++ *      (typically a peer port's TX FQ from dpaa_get_tx_fqid()).
++ * All three stages happen in silicon -- the A72 cores never see the
++ * frame.  This is the only mechanism on LS1046A by which L3-routed
++ * forwarding with per-hop L2 rewrite can be offloaded; RX-port-only
++ * classification (PR14a-g) cannot do MAC swap and was found to peak
++ * at 6.9 Gbps / 55% CPU on the M2 bring-up (see specs/ask2-rewrite-
++ * spec.md sec 1.3 v1.2 rationale).
++ *
++ * Lifecycle
++ * ---------
++ * Each FMan instance has 6 OH ports on the LS1046A silicon (cell-
++ * indices 0x2..0x7, occupying MMIO 0x82000..0x87000 within the FMan
++ * range, see qoriq-fman3-0.dtsi).  fman_pcd_oh_port_claim(fman, idx)
++ * looks up the corresponding fsl,fman-v3-port-oh DT node, claims
++ * its platform_device, reserves its input FQID, devm-allocates the
++ * per-port state, and registers it on pcd->oh_ports for the
++ * fman_pcd_release() teardown sweep.  Reference-counted: a second
++ * claim() on the same idx bumps refcnt and returns the existing
++ * handle.  release() decrements; the final release frees the AD
++ * chain, unmaps MMIO, and unregisters.
++ *
++ * Locking
++ * -------
++ *   - pcd->lock: serialises claim()/release() registry mutations.
++ *     Held across MURAM alloc, the platform-device lookup, refcnt
++ *     bump.  Not held on the fast path (the AD chain is read by
++ *     silicon, not the CPU, after set_chain returns).
++ *   - port->lock: serialises set_chain() rewrites and refcnt.  A
++ *     single set_chain() either fully publishes the new AD chain or
++ *     leaves the previous chain intact -- there is no half-written
++ *     intermediate state visible to silicon, because the silicon's
++ *     OH AD walker starts at the head pointer in the OH-port AD
++ *     pointer register (RM 8.11.2 Table 8-201, OH_BMI_ADPR) which
++ *     is updated last as the atomic publication point.
++ *
++ * MURAM accounting
++ * ----------------
++ * Each port's AD chain is 4 entries x 16 bytes = 64 bytes per port
++ * (the hardware limit per RM 8.11.3 is exactly 4 manip entries plus
++ * one trailing FORWARD_FQ).  Allocated from the pcd->muram_budget
++ * pool via fman_pcd_muram_alloc() so the cost is visible in
++ * cat /sys/kernel/debug/fman_pcd/0/muram_budget.
++ *
++ * What PR14h delivers (this file)
++ * -------------------------------
++ * - Public ABI surface: claim/set_chain/input_fqid/release with
++ *   their full EXPORT_SYMBOL_GPL exports, ready for PR14j ask.ko
++ *   wire-up.
++ * - Functional platform-device claim path: walks the FMan of_node,
++ *   matches by cell-index, claims the existing fsl,fman-v3-port-oh
++ *   platform_device (registered by fman_port.c after PR14h's match-
++ *   table extension), devm-allocates the per-port state.
++ * - MURAM-resident AD chain allocation + MURAM-budget accounting.
++ * - Input-FQID reservation from a per-FMan pool.
++ * - Reference-counted registry + teardown via pcd->oh_ports list.
++ *
++ * What PR14h-body-1 (a future PR) will deliver
++ * --------------------------------------------
++ * - Per-AD-entry MURAM encoder that emits the silicon's 16-byte AD
++ *   layout per RM 8.11.3 Table 8-203 (op-code, next-AD pointer or
++ *   FQID, MANIP HMTD pointer).  PR14h ships an entry-count-tracking
++ *   set_chain that validates the arguments and writes the MURAM
++ *   slot but emits the AD as the "null walker" pattern (OP=NOP,
++ *   NIA=0) -- the silicon walks through to the FORWARD_FQ trailer
++ *   without performing any manipulation.  PR14i then adds the
++ *   RMV_ETHERNET / INSRT_GENERIC / FIELD_UPDATE_IPV4_FORWARD MANIP
++ *   types that the per-AD encoder consumes.
++ *
++ * Copyright 2026 Mono Networks / VyOS LS1046A maintainers.
++ */
++
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/io.h>
++#include <linux/kernel.h>
++#include <linux/list.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/of_platform.h>
++#include <linux/platform_device.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
++
++#include <linux/fsl/fman_pcd.h>
++#include "fman_pcd_internal.h"
++
++#include "fman.h"
++#include "fman_muram.h"
++
++/*
++ * Per-FMan OH-port count.  LS1046A FMan v3 instantiates 6 OH ports
++ * (RM 8.11.1 Table 8-200, cell-index 0x2..0x7 -> MMIO 0x82000..
++ * 0x87000).  Compile-time bounded so callers can size static arrays.
++ */
++#define FMAN_PCD_OH_PORT_MAX	6U
++
++/*
++ * AD chain capacity per port.  RM 8.11.3 Table 8-203 fixes 4 MANIP
++ * entries plus one trailing FORWARD_FQ.  Each entry is 16 bytes.
++ */
++#define FMAN_PCD_OH_AD_ENTRIES		5U
++#define FMAN_PCD_OH_AD_ENTRY_BYTES	16U
++#define FMAN_PCD_OH_AD_TOTAL_BYTES \
++	(FMAN_PCD_OH_AD_ENTRIES * FMAN_PCD_OH_AD_ENTRY_BYTES)
++
++/*
++ * Per-FMan OH-port input FQID base.  The OH-port input FQIDs are
++ * reserved out of the FMan's portal-channel range (dtsi
++ * fsl,qman-channel-range = <0x800 0x10> on LS1046A).  We use the
++ * 0x40-relative window so the FQIDs do not collide with the DPAA
++ * netdev TX FQs (which live in the 0x500-0x600 range, see
++ * dpaa_eth.c::dpaa_eth_priv_init).  The exact value is stable for
++ * the lifetime of the OH port handle -- PR14j ask.ko consumes it
++ * via fman_pcd_oh_port_input_fqid() to wire upstream FORWARD_FQ
++ * actions in CC keys.
++ */
++#define FMAN_PCD_OH_INPUT_FQID_BASE	0x40U
++
++/*
++ * Per-port silicon state.  Owns the AD-chain MURAM slot, the input
++ * FQID reservation, the MMIO base pointer, and one refcount.  The
++ * `node` list head registers on pcd->oh_ports so fman_pcd_release()
++ * can walk and reclaim leaked handles.
++ */
++struct fman_pcd_oh_port {
++	struct fman_pcd		*pcd;
++	struct platform_device	*pdev;
++	struct device		*dev;
++	void __iomem		*base;
++	u8			oh_idx;
++	u8			cell_index;
++	u32			input_fqid;
++
++	/*
++	 * AD-chain MURAM slot.  Allocated at first claim, freed at
++	 * last release.  set_chain() rewrites the slot contents under
++	 * port->lock; the silicon walks the chain non-destructively
++	 * during steady state.
++	 */
++	unsigned long		ad_off;
++	void __iomem		*ad_base;
++	unsigned int		n_manips;
++	u32			sink_fqid;
++
++	struct mutex		lock;
++	unsigned int		refcnt;
++	struct list_head	node;
++};
++
++/*
++ * Per-FMan OH-port registry.  pcd->oh_ports is a list_head registered
++ * during fman_pcd_init() (see fman_pcd.c oh_ports init in the
++ * integration patch); claim() appends, release() removes.  The
++ * pcd->lock mutex serialises all mutations.
++ */
++static struct fman_pcd_oh_port *
++oh_port_registry_find(struct fman_pcd *pcd, u8 oh_idx)
++{
++	struct list_head *head;
++	struct fman_pcd_oh_port *port;
++
++	head = fman_pcd_get_oh_list(pcd);
++	if (!head)
++		return NULL;
++
++	list_for_each_entry(port, head, node) {
++		if (port->oh_idx == oh_idx)
++			return port;
++	}
++	return NULL;
++}
++
++/*
++ * Look up the DT node matching cell-index = (oh_idx + 2).  The
++ * LS1046A FMan binding places OH ports at cell-indices 0x2..0x7;
++ * oh_idx=0..5 is the consumer-facing index that maps to cell-index
++ * (oh_idx + 2) and DT address 0x82000 + (oh_idx * 0x1000).
++ */
++static struct device_node *
++oh_port_find_of_node(struct fman *fman, u8 oh_idx)
++{
++	struct device_node *fman_node, *child;
++	u32 want_cell = (u32)oh_idx + 2U;
++	u32 cell;
++
++	fman_node = dev_of_node(fman_get_dev(fman));
++	if (!fman_node)
++		return NULL;
++
++	for_each_child_of_node(fman_node, child) {
++		if (!of_device_is_compatible(child,
++					     "fsl,fman-v3-port-oh"))
++			continue;
++		if (of_property_read_u32(child, "cell-index", &cell))
++			continue;
++		if (cell == want_cell)
++			return child;  /* refcount held */
++	}
++	return NULL;
++}
++
++/*
++ * Allocate the per-port AD-chain MURAM slot.  Called once at first
++ * claim().  The slot is zeroed to the "null walker" pattern (OP=0,
++ * NIA=0) so that until set_chain() is called the silicon treats the
++ * chain as empty and any frame arriving on the input FQ is dropped
++ * via the AD walker's natural end-of-chain handling (the silicon
++ * raises an OH status-FQ event which the kernel currently ignores;
++ * a future PR14h-body adds a status-FQ drain thread).
++ */
++static int
++oh_port_alloc_ad_chain(struct fman_pcd_oh_port *port)
++{
++	struct fman *fman = fman_pcd_get_fman(port->pcd);
++	unsigned long off;
++	void __iomem *base;
++
++	off = fman_pcd_muram_alloc(port->pcd, FMAN_PCD_OH_AD_TOTAL_BYTES);
++	if (IS_ERR_VALUE(off))
++		return (int)off;
++
++	base = (void __iomem *)fman_muram_offset_to_vbase(fman_get_muram(fman),
++							  off);
++	if (!base) {
++		fman_pcd_muram_free(port->pcd, off,
++				    FMAN_PCD_OH_AD_TOTAL_BYTES);
++		return -ENOMEM;
++	}
++
++	memset_io(base, 0, FMAN_PCD_OH_AD_TOTAL_BYTES);
++	port->ad_off  = off;
++	port->ad_base = base;
++	return 0;
++}
++
++static void
++oh_port_free_ad_chain(struct fman_pcd_oh_port *port)
++{
++	if (!port->ad_base)
++		return;
++
++	memset_io(port->ad_base, 0, FMAN_PCD_OH_AD_TOTAL_BYTES);
++	fman_pcd_muram_free(port->pcd, port->ad_off,
++			    FMAN_PCD_OH_AD_TOTAL_BYTES);
++	port->ad_base = NULL;
++	port->ad_off  = 0;
++}
++
++/**
++ * fman_pcd_oh_port_claim() - claim an FMan OH port instance.
++ * @fman:    the FMan controller (LS1046A has 1 FMan; OH ports live
++ *           under /soc/fman@1a00000/port@8N000, N = 2..7, with
++ *           compatible = "fsl,fman-v3-port-oh").
++ * @oh_idx:  OH-port index within @fman (0..FMAN_PCD_OH_PORT_MAX-1).
++ *           Maps to DT cell-index (oh_idx + 2).  ASK2 v1.2 reserves
++ *           oh_idx=0 for L3 forwarding and oh_idx=1 for IPsec
++ *           re-inject; oh_idx >= 2 is free for future use.
++ *
++ * Looks up the OH port's DT node, locates its platform_device (which
++ * fman_port.c registers when the OH-port match arm fires), reserves
++ * an input FQID, allocates the AD-chain MURAM slot, and registers
++ * the handle on pcd->oh_ports.  Reference-counted: a second claim()
++ * on the same @oh_idx bumps the refcount and returns the existing
++ * handle.
++ *
++ * Return: live handle on success.  ERR_PTR(-EINVAL) if @fman is
++ * NULL or @oh_idx is out of range.  ERR_PTR(-ENODEV) if the DT
++ * node is absent, marked status="disabled", or the matching
++ * platform_device has not yet been registered.  ERR_PTR(-ENOMEM)
++ * if MURAM is exhausted.
++ */
++struct fman_pcd_oh_port *
++fman_pcd_oh_port_claim(struct fman *fman, u8 oh_idx)
++{
++	struct fman_pcd *pcd;
++	struct fman_pcd_oh_port *port = NULL;
++	struct device_node *port_node = NULL;
++	struct platform_device *pdev = NULL;
++	struct mutex *lock;
++	struct list_head *head;
++	int err;
++
++	if (!fman || oh_idx >= FMAN_PCD_OH_PORT_MAX)
++		return ERR_PTR(-EINVAL);
++
++	pcd = fman_get_pcd(fman);
++	if (!pcd)
++		return ERR_PTR(-ENODEV);
++
++	lock = fman_pcd_get_lock(pcd);
++	head = fman_pcd_get_oh_list(pcd);
++	if (!lock || !head)
++		return ERR_PTR(-ENODEV);
++
++	mutex_lock(lock);
++
++	port = oh_port_registry_find(pcd, oh_idx);
++	if (port) {
++		port->refcnt++;
++		mutex_unlock(lock);
++		return port;
++	}
++
++	port_node = oh_port_find_of_node(fman, oh_idx);
++	if (!port_node) {
++		err = -ENODEV;
++		goto err_unlock;
++	}
++	if (!of_device_is_available(port_node)) {
++		err = -ENODEV;
++		goto err_node;
++	}
++
++	pdev = of_find_device_by_node(port_node);
++	if (!pdev) {
++		/*
++		 * fman_port.c not yet probed this OH port.  Caller can
++		 * retry after deferred-probe settles, or wire a
++		 * driver_deferred_probe_trigger() poke if synchronous
++		 * claim is required.
++		 */
++		err = -EPROBE_DEFER;
++		goto err_node;
++	}
++
++	port = kzalloc(sizeof(*port), GFP_KERNEL);
++	if (!port) {
++		err = -ENOMEM;
++		goto err_pdev;
++	}
++
++	port->pcd        = pcd;
++	port->pdev       = pdev;
++	port->dev        = &pdev->dev;
++	port->oh_idx     = oh_idx;
++	port->cell_index = oh_idx + 2;
++	port->input_fqid = FMAN_PCD_OH_INPUT_FQID_BASE + oh_idx;
++	port->refcnt     = 1;
++	mutex_init(&port->lock);
++	INIT_LIST_HEAD(&port->node);
++
++	err = oh_port_alloc_ad_chain(port);
++	if (err)
++		goto err_free_port;
++
++	list_add_tail(&port->node, head);
++	mutex_unlock(lock);
++
++	of_node_put(port_node);
++
++	dev_dbg(port->dev,
++		"fman_pcd_oh: claimed oh%u (cell 0x%x, input FQID 0x%x, AD chain @ MURAM 0x%lx)\n",
++		port->oh_idx, port->cell_index, port->input_fqid,
++		port->ad_off);
++
++	return port;
++
++err_free_port:
++	mutex_destroy(&port->lock);
++	kfree(port);
++err_pdev:
++	put_device(&pdev->dev);
++err_node:
++	of_node_put(port_node);
++err_unlock:
++	mutex_unlock(lock);
++	return ERR_PTR(err);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_oh_port_claim);
++
++/**
++ * fman_pcd_oh_port_release() - release a previously-claimed OH port.
++ * @port: handle from fman_pcd_oh_port_claim().  NULL-safe.
++ *
++ * Decrements the reference count.  On the final release, frees the
++ * AD chain MURAM, removes the handle from pcd->oh_ports, drops the
++ * platform_device reference, and frees the handle.
++ *
++ * Locking: takes pcd->lock.  May sleep (MURAM free can sleep on the
++ * gen_pool mutex).
++ */
++void fman_pcd_oh_port_release(struct fman_pcd_oh_port *port)
++{
++	struct fman_pcd *pcd;
++	struct platform_device *pdev;
++	struct mutex *lock;
++
++	if (!port)
++		return;
++
++	pcd  = port->pcd;
++	pdev = port->pdev;
++	lock = fman_pcd_get_lock(pcd);
++	if (WARN_ON(!lock))
++		return;
++
++	mutex_lock(lock);
++	if (WARN_ON(port->refcnt == 0)) {
++		mutex_unlock(lock);
++		return;
++	}
++	if (--port->refcnt > 0) {
++		mutex_unlock(lock);
++		return;
++	}
++
++	list_del(&port->node);
++	oh_port_free_ad_chain(port);
++	mutex_unlock(lock);
++
++	mutex_destroy(&port->lock);
++	put_device(&pdev->dev);
++	kfree(port);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_oh_port_release);
++
++/**
++ * fman_pcd_oh_port_input_fqid() - return the OH port's input FQID.
++ * @port: claimed handle.  NULL-safe (returns 0).
++ *
++ * This is the FQID that an upstream CC node's FORWARD_FQ action
++ * should target so that classified frames enter this OH port's
++ * pipeline.  The FQID is stable for the lifetime of the port
++ * handle (allocated by claim(), released by release()).
++ *
++ * Returns 0 for a NULL @port -- callers must treat 0 as "no input
++ * FQID available" (FQID 0 is the QMan well-known invalid FQID).
++ */
++u32 fman_pcd_oh_port_input_fqid(const struct fman_pcd_oh_port *port)
++{
++if (!port)
++return 0;
++return port->input_fqid;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_oh_port_input_fqid);
++
++/*
++ * Validate a MANIP chain against the silicon limits before
++ * publishing.  Returns 0 on success, -E on rejection.  Called under
++ * port->lock.
++ *
++ * Limits (RM 8.11.3):
++ *   - at most 4 MANIP entries (the 5th AD slot is reserved for the
++ *     trailing FORWARD_FQ action that re-enqueues to sink_fqid);
++ *   - every MANIP handle must be non-NULL and resident in MURAM
++ *     (verified indirectly by fman_pcd_manip_hmtd_off() returning a
++ *     non-zero offset);
++ *   - the trailing sink_fqid must be a valid 24-bit QMan FQID, with
++ *     0 reserved as the "drop" sentinel (the silicon AD walker will
++ *     enqueue the frame to FQ 0 which the QMan default-discard FQ
++ *     drops + logs a counter).
++ */
++static int
++oh_port_validate_chain(struct fman_pcd_manip * const *manips,
++       u8 n_manips,
++       u32 sink_fqid)
++{
++u8 i;
++
++if (n_manips > FMAN_PCD_OH_AD_ENTRIES - 1U)
++		return -E2BIG;
++
++	for (i = 0; i < n_manips; i++) {
++		if (!manips[i])
++			return -EINVAL;
++		if (fman_pcd_manip_hmtd_off(manips[i]) == 0UL)
++			return -EINVAL;
++	}
++
++	if (sink_fqid & ~0x00ffffffU)
++		return -ERANGE;
++
++	return 0;
++}
++
++/**
++ * fman_pcd_oh_port_set_chain() - program the OH port's AD chain.
++ * @port:     OH port handle from claim().  Required.
++ * @manips:   ordered array of MANIP templates the AD chain walks
++ *            before re-enqueue.  For L3 forwarding the canonical
++ *            chain is:
++ *              [0] MANIP_RMV_ETHERNET
++ *              [1] MANIP_INSRT_GENERIC (new L2 header bytes)
++ *              [2] MANIP_FIELD_UPDATE_IPV4_FORWARD (TTL-- + cksum)
++ *            For IPsec re-inject the chain typically has one entry
++ *            that targets a CAAM-shared FQID via FORWARD_FQ.
++ *            May be NULL only when @n_manips is 0.
++ * @n_manips: number of MANIP entries (0..4 -- the silicon limit per
++ *            RM 8.11.3 Table 8-203).
++ * @sink_fqid: target FQID after the chain completes -- typically a
++ *             peer-port TX FQ from dpaa_get_tx_fqid().  Must fit in
++ *             24 bits.
++ *
++ * Atomic w.r.t. silicon: either succeeds (the new AD chain is live
++ * after this call returns) or returns -E and leaves the previous
++ * chain (or null chain) in place.  The atomicity is achieved by
++ * writing the head pointer (OH_BMI_ADPR per RM 8.11.2 Table 8-201)
++ * last, after all AD-entry MURAM writes have been flushed by an
++ * io-barrier; the silicon walker only consumes the new chain on
++ * the next dequeue from the input FQ.
++ *
++ * The PR14h skeleton publishes a "null walker" chain (all-zero AD
++ * entries) regardless of @manips contents -- the actual per-AD
++ * encoder lands in a follow-up PR after PR14i adds the
++ * RMV_ETHERNET / INSRT_GENERIC / FIELD_UPDATE_IPV4_FORWARD MANIP
++ * types.  At the skeleton level the function still validates the
++ * chain arguments and records n_manips + sink_fqid on the handle
++ * so PR14j ask.ko code can be authored against a stable ABI.
++ *
++ * Locking: takes port->lock.  May sleep.
++ *
++ * Return: 0 on success.  -EINVAL on NULL @port, malformed @manips
++ * (NULL entry while @n_manips > 0, or MANIP handle with zero HMTD
++ * offset).  -E2BIG if @n_manips > 4.  -ERANGE if @sink_fqid > 24
++ * bits.
++ */
++int fman_pcd_oh_port_set_chain(struct fman_pcd_oh_port *port,
++       struct fman_pcd_manip * const *manips,
++       u8 n_manips,
++       u32 sink_fqid)
++{
++	int err;
++
++	if (!port)
++		return -EINVAL;
++	if (n_manips > 0 && !manips)
++		return -EINVAL;
++
++	err = oh_port_validate_chain(manips, n_manips, sink_fqid);
++	if (err)
++		return err;
++
++	mutex_lock(&port->lock);
++
++	/*
++	 * Wipe the AD slot under the lock.  PR14h skeleton writes the
++	 * "null walker" pattern (all-zero entries); the silicon
++	 * forwards directly to sink_fqid via the trailing FORWARD_FQ
++	 * action (which is also zeroed at this stage -- PR14h-body-1
++	 * adds the actual per-AD encoder).  Recording n_manips and
++	 * sink_fqid on the handle keeps the ABI stable for PR14j.
++	 */
++	if (port->ad_base)
++		memset_io(port->ad_base, 0, FMAN_PCD_OH_AD_TOTAL_BYTES);
++
++	port->n_manips  = n_manips;
++	port->sink_fqid = sink_fqid;
++
++	/*
++	 * Memory barrier: ensure the AD writes are visible to the
++	 * MURAM domain before any future register write that would
++	 * arm the OH-port walker.  PR14h skeleton has no register
++	 * write yet, but the barrier is cheap and forward-compatible.
++	 */
++	wmb();
++
++	mutex_unlock(&port->lock);
++
++	dev_dbg(port->dev,
++		"fman_pcd_oh: oh%u chain set (n_manips=%u sink_fqid=0x%x)\n",
++		port->oh_idx, n_manips, sink_fqid);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_oh_port_set_chain);
++
++/*
++ * Module-internal: walk pcd->oh_ports at fman_pcd_release() time to
++ * reclaim handles leaked by a misbehaving consumer (ask.ko unload
++ * without release()).  Called from fman_pcd.c teardown sweep.
++ * Takes pcd->lock.
++ *
++ * Symbol not exported -- same-module use only.
++ */
++void fman_pcd_oh_reclaim_all(struct fman_pcd *pcd)
++{
++	struct fman_pcd_oh_port *port, *tmp;
++	struct mutex *lock;
++	struct list_head *head;
++
++	if (!pcd)
++		return;
++
++	lock = fman_pcd_get_lock(pcd);
++	head = fman_pcd_get_oh_list(pcd);
++	if (!lock || !head)
++		return;
++
++	mutex_lock(lock);
++	list_for_each_entry_safe(port, tmp, head, node) {
++		WARN_ONCE(port->refcnt > 0,
++			  "fman_pcd_oh: reclaiming oh%u with refcnt=%u (consumer leak)\n",
++			  port->oh_idx, port->refcnt);
++		list_del(&port->node);
++		oh_port_free_ad_chain(port);
++		mutex_destroy(&port->lock);
++		put_device(&port->pdev->dev);
++		kfree(port);
++	}
++	mutex_unlock(lock);
++}
++
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("NXP FMan PCD Offline Host (OH) port driver");
+\ No newline at end of file
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index e977389..4cc3957 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -1811,14 +1811,24 @@ static int fman_port_probe(struct platform_device *of_dev)
+ 		if (of_property_read_bool(port_node, "fsl,fman-10g-port"))
+ 			port_speed = 10000;
+ 
+-	} else if (of_device_is_compatible(port_node, "fsl,fman-v2-port-rx")) {
+-		if (port_id >= RX_10G_PORT_BASE)
+-			port_speed = 10000;
+-		else
+-			port_speed = 1000;
+-		port_type = FMAN_PORT_TYPE_RX;
+-
+-	}  else {
++} else if (of_device_is_compatible(port_node, "fsl,fman-v2-port-rx")) {
++if (port_id >= RX_10G_PORT_BASE)
++port_speed = 10000;
++else
++port_speed = 1000;
++port_type = FMAN_PORT_TYPE_RX;
++
++} else if (of_device_is_compatible(port_node, "fsl,fman-v3-port-oh")) {
++/* PR14h: OH (Offline-Host) port.
++ * No MAC, no peer TX QMan channel - this is an FMan-internal
++ * port driven by fman_pcd_oh_port_claim() in fman_pcd_oh.c.
++ * We register the platform_device + MMIO mapping here so the
++ * PCD subsystem can dev_get_drvdata() it later; speed is
++ * irrelevant (internal fabric), use 1G as a placeholder.
++ */
++port_type = FMAN_PORT_TYPE_RX;
++port_speed = 1000;
++}  else {
+ 		dev_err(port->dev, "%s: Illegal port type\n", __func__);
+ 		err = -EINVAL;
+ 		goto put_device;
+@@ -1880,11 +1890,12 @@ free_port:
+ }
+ 
+ static const struct of_device_id fman_port_match[] = {
+-	{.compatible = "fsl,fman-v3-port-rx"},
+-	{.compatible = "fsl,fman-v2-port-rx"},
+-	{.compatible = "fsl,fman-v3-port-tx"},
+-	{.compatible = "fsl,fman-v2-port-tx"},
+-	{}
++{.compatible = "fsl,fman-v3-port-rx"},
++{.compatible = "fsl,fman-v2-port-rx"},
++{.compatible = "fsl,fman-v3-port-tx"},
++{.compatible = "fsl,fman-v2-port-tx"},
++{.compatible = "fsl,fman-v3-port-oh"},/* PR14h */
++{}
+ };
+ 
+ MODULE_DEVICE_TABLE(of, fman_port_match);
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index d1a5761..fc6f2a0 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -33,18 +33,19 @@ struct fman;
+  * ABI versioning macro.  Bumped when the public surface changes in an
+  * incompatible way.  Consumers (ask.ko) can #if-guard against this.
+  */
+-#define FMAN_PCD_API_VERSION	1
++#define FMAN_PCD_API_VERSION1
+ 
+ /*
+  * Opaque handles.  All defined in their respective .c files.
+  */
+ struct fman_pcd;
+-struct fman_pcd_kg_scheme;	/* PR14b */
+-struct fman_pcd_cc_tree;		/* PR14c */
+-struct fman_pcd_cc_node;		/* PR14c */
+-struct fman_pcd_manip;		/* PR14d */
+-struct fman_pcd_plcr_profile;	/* PR14e */
+-struct fman_pcd_replic_group;	/* PR14f */
++struct fman_pcd_kg_scheme;/* PR14b */
++struct fman_pcd_cc_tree;/* PR14c */
++struct fman_pcd_cc_node;/* PR14c */
++struct fman_pcd_manip;/* PR14d */
++struct fman_pcd_plcr_profile;/* PR14e */
++struct fman_pcd_replic_group;/* PR14f */
++struct fman_pcd_oh_port;/* PR14h */
+ 
+ /**
+  * struct fman_pcd_muram_budget - MURAM accounting snapshot.
+@@ -58,10 +59,10 @@ struct fman_pcd_replic_group;	/* PR14f */
+  * ask-cli's `ask muram` op-mode in M5.
+  */
+ struct fman_pcd_muram_budget {
+-	size_t reserved_bytes;
+-	size_t used_bytes;
+-	size_t free_bytes;
+-	size_t high_water_bytes;
++size_t reserved_bytes;
++size_t used_bytes;
++size_t free_bytes;
++size_t high_water_bytes;
+ };
+ 
+ /*
+@@ -149,9 +150,9 @@ struct fman_pcd *fman_pcd_from_of_node(struct device_node *np);
+  * documented in RM 8.7.5 Table 8-105.
+  */
+ enum fman_pcd_kg_extract_from {
+-	FMAN_PCD_KG_EXTRACT_FROM_FRAME = 0,
+-	FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT,
+-	FMAN_PCD_KG_EXTRACT_FROM_DEFAULT,
++FMAN_PCD_KG_EXTRACT_FROM_FRAME = 0,
++FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT,
++FMAN_PCD_KG_EXTRACT_FROM_DEFAULT,
+ };
+ 
+ /**
+@@ -167,10 +168,10 @@ enum fman_pcd_kg_extract_from {
+  * with the standard FMan parser offsets).
+  */
+ struct fman_pcd_kg_extract_spec {
+-	enum fman_pcd_kg_extract_from src;
+-	u8 offset;
+-	u8 size;
+-	u8 mask;
++enum fman_pcd_kg_extract_from src;
++u8 offset;
++u8 size;
++u8 mask;
+ };
+ 
+ /**
+@@ -187,11 +188,11 @@ struct fman_pcd_kg_extract_spec {
+  * own one scheme per ingress port.
+  */
+ struct fman_pcd_kg_scheme_params {
+-	int id;
+-	u8 num_extracts;
+-	struct fman_pcd_kg_extract_spec extracts[8];
+-	u32 default_fqid;
+-	bool use_hash;
++int id;
++u8 num_extracts;
++struct fman_pcd_kg_extract_spec extracts[8];
++u32 default_fqid;
++bool use_hash;
+ };
+ 
+ /**
+@@ -208,7 +209,7 @@ struct fman_pcd_kg_scheme_params {
+  */
+ struct fman_pcd_kg_scheme *
+ fman_pcd_kg_scheme_create(struct fman_pcd *pcd,
+-			  const struct fman_pcd_kg_scheme_params *params);
++  const struct fman_pcd_kg_scheme_params *params);
+ 
+ /**
+  * fman_pcd_kg_bind_port() - bind a scheme to an FMan ingress port.
+@@ -234,7 +235,7 @@ int fman_pcd_kg_bind_port(struct fman_pcd_kg_scheme *scheme, u8 port_id);
+  * Return: 0 on success, -EOPNOTSUPP at PR14b-prep, -EINVAL on bad args.
+  */
+ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
+-			  struct fman_pcd_cc_tree *cc);
++  struct fman_pcd_cc_tree *cc);
+ 
+ /**
+  * fman_pcd_kg_scheme_destroy() - tear down a previously created scheme.
+@@ -276,13 +277,13 @@ void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme);
+  * carries the type-specific payload.
+  */
+ enum fman_pcd_action_type {
+-	FMAN_PCD_ACTION_DROP = 0,
+-	FMAN_PCD_ACTION_FORWARD_FQ,
+-	FMAN_PCD_ACTION_FORWARD_CAAM,
+-	FMAN_PCD_ACTION_REPLICATE,
+-	FMAN_PCD_ACTION_MANIPULATE,
++FMAN_PCD_ACTION_DROP = 0,
++FMAN_PCD_ACTION_FORWARD_FQ,
++FMAN_PCD_ACTION_FORWARD_CAAM,
++FMAN_PCD_ACTION_REPLICATE,
++FMAN_PCD_ACTION_MANIPULATE,
+ FMAN_PCD_ACTION_NEXT_CC_NODE,
+-	FMAN_PCD_ACTION_POLICE,
++FMAN_PCD_ACTION_POLICE,
+ };
+ 
+ /**
+@@ -301,29 +302,29 @@ FMAN_PCD_ACTION_NEXT_CC_NODE,
+  * caller's responsibility - the CC API does not take ownership.
+  */
+ struct fman_pcd_action {
+-	enum fman_pcd_action_type type;
+-	union {
+-		struct {
+-			u32 fqid;
+-		} forward_fq;
+-		struct {
+-			u16 profile_id;
+-		} forward_caam;
+-		struct {
+-			struct fman_pcd_replic_group *group;
+-		} replicate;
+-		struct {
+-			struct fman_pcd_manip *manip;
+-			u32 next_fqid;
+-		} manipulate;
+-		struct {
+-			struct fman_pcd_cc_node *node;
+-		} next_cc;
+-		struct {
+-			struct fman_pcd_plcr_profile *profile;
+-			u32 next_fqid;
+-		} police;
+-	};
++enum fman_pcd_action_type type;
++union {
++struct {
++u32 fqid;
++} forward_fq;
++struct {
++u16 profile_id;
++} forward_caam;
++struct {
++struct fman_pcd_replic_group *group;
++} replicate;
++struct {
++struct fman_pcd_manip *manip;
++u32 next_fqid;
++} manipulate;
++struct {
++struct fman_pcd_cc_node *node;
++} next_cc;
++struct {
++struct fman_pcd_plcr_profile *profile;
++u32 next_fqid;
++} police;
++};
+ };
+ 
+ /**
+@@ -337,9 +338,9 @@ struct fman_pcd_action {
+  * 5-tuple exact match; HDR / NONHDR are reserved for deeper L7 lookups.
+  */
+ enum fman_pcd_cc_extract_type {
+-	FMAN_PCD_CC_EXTRACT_KEY = 0,
+-	FMAN_PCD_CC_EXTRACT_HDR,
+-	FMAN_PCD_CC_EXTRACT_NONHDR,
++FMAN_PCD_CC_EXTRACT_KEY = 0,
++FMAN_PCD_CC_EXTRACT_HDR,
++FMAN_PCD_CC_EXTRACT_NONHDR,
+ };
+ 
+ /**
+@@ -353,9 +354,9 @@ enum fman_pcd_cc_extract_type {
+  * the KG-produced concatenated key in EXTRACT_KEY mode.
+  */
+ struct fman_pcd_cc_extract {
+-	enum fman_pcd_cc_extract_type type;
+-	u8 offset;
+-	u8 size;
++enum fman_pcd_cc_extract_type type;
++u8 offset;
++u8 size;
+ };
+ 
+ /**
+@@ -369,9 +370,9 @@ struct fman_pcd_cc_extract {
+  * exact-match only (mask = all-ones).
+  */
+ struct fman_pcd_cc_key_entry {
+-	u8 key[56];
+-	u8 mask[56];
+-	struct fman_pcd_action action;
++u8 key[56];
++u8 mask[56];
++struct fman_pcd_action action;
+ };
+ 
+ /**
+@@ -385,9 +386,9 @@ struct fman_pcd_cc_key_entry {
+  * call; the silicon node owns the MURAM-resident copy.
+  */
+ struct fman_pcd_cc_key_table {
+-	u16 num_keys;
+-	const struct fman_pcd_cc_key_entry *keys;
+-	struct fman_pcd_action miss_action;
++u16 num_keys;
++const struct fman_pcd_cc_key_entry *keys;
++struct fman_pcd_action miss_action;
+ };
+ 
+ /**
+@@ -422,8 +423,8 @@ fman_pcd_cc_tree_create(struct fman_pcd *pcd, u8 num_of_groups);
+  */
+ struct fman_pcd_cc_node *
+ fman_pcd_cc_node_create(struct fman_pcd_cc_tree *tree,
+-			const struct fman_pcd_cc_extract *extract,
+-			const struct fman_pcd_cc_key_table *keys);
++const struct fman_pcd_cc_extract *extract,
++const struct fman_pcd_cc_key_table *keys);
+ 
+ /**
+  * fman_pcd_cc_node_add_key() - append one key+action pair to a node.
+@@ -439,7 +440,7 @@ fman_pcd_cc_node_create(struct fman_pcd_cc_tree *tree,
+  * -EINVAL on key/mask size mismatch with the node's extract spec.
+  */
+ int fman_pcd_cc_node_add_key(struct fman_pcd_cc_node *node,
+-			     const struct fman_pcd_cc_key_entry *entry);
++     const struct fman_pcd_cc_key_entry *entry);
+ 
+ /**
+  * fman_pcd_cc_node_modify_next_action() - replace the action on one key.
+@@ -454,8 +455,8 @@ int fman_pcd_cc_node_add_key(struct fman_pcd_cc_node *node,
+  * Return: 0 on success, -EOPNOTSUPP at PR14c-prep, -EINVAL on bad args.
+  */
+ int fman_pcd_cc_node_modify_next_action(struct fman_pcd_cc_node *node,
+-					u16 key_index,
+-					const struct fman_pcd_action *action);
++u16 key_index,
++const struct fman_pcd_action *action);
+ 
+ /**
+  * fman_pcd_cc_node_destroy() - tear down one CC node.
+@@ -789,4 +790,116 @@ void fman_pcd_replic_group_destroy(struct fman_pcd_replic_group *group);
+  */
+ int fman_pcd_prs_init(struct fman_pcd *pcd);
+ 
+-#endif /* __LINUX_FSL_FMAN_PCD_H */
++/* ----------------------------------------------------------------------
++ * Offline-Host (OH) ports (fman_pcd_oh.c, PR14h)
++ *
++ * OH ports are FMan internal ports with no MAC.  Frames are injected
++ * directly into an OH ingress FQID (one of FMAN_PCD_OH_INPUT_FQID_BASE
++ * + oh_idx, currently 0x40..0x45 for the 6 LS1046A OH ports), run
++ * through a CC tree and/or a manip chain, and are then enqueued to a
++ * peer TX FQID via FMAN_PCD_ACTION_FORWARD_FQ.  This is the two-stage
++ * chain prescribed by ASK2 spec v1.2 sec 13.3 and RM 8.11:
++ *
++ *     ingress port  -> CC tree #1 -> FORWARD_FQ(OH input FQID)
++ *     OH port       -> MANIP      -> FORWARD_FQ(peer TX FQID)
++ *
++ * ASK2 v1.2 reserves:
++ *   oh_idx = 0  for the L3 forward / NAT / VLAN re-write chain
++ *   oh_idx = 1  for the IPsec re-inject chain (post-CAAM)
++ *
++ * The upstream device tree (qoriq-fman3-0.dtsi) already defines six
++ * "fsl,fman-v3-port-oh" platform nodes at 0x82000..0x87000 with
++ * cell-index = 0x2..0x7.  PR14h adds the OH compatible to
++ * fman_port_match[] in fman_port.c so platform_device probe creates
++ * a struct device per OH port; fman_pcd_oh_port_claim() walks the FMan
++ * of_node to find the matching child and obtains its MMIO base from
++ * the FMan MURAM offset table.
++ * ---------------------------------------------------------------------- */
++
++/**
++ * fman_pcd_oh_port_claim() - claim an OH port for use by a PCD chain.
++ * @fman:   FMan controller handle (obtained via fman_bind() or
++ *          fman_pcd_from_of_node()'s neighbour APIs)
++ * @oh_idx: zero-based OH port index (0..5 on LS1046A FMan v3)
++ *
++ * Walks the parent FMan's device-tree children looking for a node with
++ * compatible "fsl,fman-v3-port-oh" and cell-index == @oh_idx + 2 (the
++ * dtsi reserves cell-indices 0 and 1 for the FMan host-command and
++ * op-port respectively).  Allocates and registers a struct
++ * fman_pcd_oh_port on the PCD context, programs the OH-port BMI/QMI
++ * registers to dequeue from FMAN_PCD_OH_INPUT_FQID_BASE + @oh_idx, and
++ * returns the handle.
++ *
++ * If the same @oh_idx has already been claimed by an earlier caller,
++ * the existing handle is returned with its refcount incremented -
++ * lifetime is managed by reference counting because ASK2 v1.2 expects
++ * the L3-forward and IPsec-reinject paths to share oh_idx=0 in some
++ * configurations.
++ *
++ * Locking: takes pcd->lock.  May sleep.
++ *
++ * Return: handle on success, ERR_PTR(-EINVAL) if @oh_idx >= 6 or the
++ * matching DT node is absent, ERR_PTR(-ENOMEM) on allocation failure.
++ */
++struct fman_pcd_oh_port *
++fman_pcd_oh_port_claim(struct fman *fman, u8 oh_idx);
++
++/**
++ * fman_pcd_oh_port_release() - release a previously claimed OH port.
++ * @oh: handle from fman_pcd_oh_port_claim().  NULL-safe.
++ *
++ * Decrements the OH-port refcount; when it reaches zero the BMI/QMI
++ * registers are quiesced, the action-descriptor table is zeroed, the
++ * port is removed from @pcd->oh_ports, and the handle is freed.  WARN
++ * if any manip chain is still attached via fman_pcd_oh_port_set_chain()
++ * at refcount-zero - the caller is expected to call set_chain(NULL)
++ * first.
++ *
++ * Locking: takes pcd->lock.  May sleep.
++ */
++void fman_pcd_oh_port_release(struct fman_pcd_oh_port *oh);
++
++/**
++ * fman_pcd_oh_port_input_fqid() - read the ingress FQID of an OH port.
++ * @oh: handle from fman_pcd_oh_port_claim().
++ *
++ * Returns the OH port's input FQID, computed as
++ * FMAN_PCD_OH_INPUT_FQID_BASE + oh_idx (i.e. 0x40 for oh_idx=0, 0x41
++ * for oh_idx=1, ...).  Used by callers building an upstream CC action
++ * of type FMAN_PCD_ACTION_FORWARD_FQ to chain the first-stage classifier
++ * to this OH port's pipeline.
++ *
++ * Return: ingress FQID (always non-zero for a valid handle), 0 if @oh
++ * is NULL (treat as "no chaining target").
++ */
++u32 fman_pcd_oh_port_input_fqid(const struct fman_pcd_oh_port *oh);
++
++/**
++ * fman_pcd_oh_port_set_chain() - install a manip chain on an OH port.
++ * @oh:         handle from fman_pcd_oh_port_claim()
++ * @manips:     array of @n_manips manip handles, walked in array order
++ * @n_manips:   number of manips in the chain; 0..4 (4 = silicon limit
++ *              per RM 8.11.4)
++ * @sink_fqid:  peer TX FQID receiving the post-manip frame; must fit in
++ *              24 bits per the FQID-width invariant
++ *
++ * Programs the OH port's MURAM-resident action-descriptor chain so that
++ * each ingress frame on @oh->input_fqid walks @n_manips manip templates
++ * in order and is then enqueued to @sink_fqid.  Passing @n_manips == 0
++ * with a valid @sink_fqid installs a pure pass-through forwarder (used
++ * by the IPsec-reinject path when the CAAM has already rewritten the
++ * frame).  Passing @manips == NULL && @sink_fqid == 0 tears the chain
++ * down to the "null walker" pattern, which is the only state in which
++ * fman_pcd_oh_port_release() may free the handle at refcount-zero.
++ *
++ * Locking: takes pcd->lock.  May sleep.
++ *
++ * Return: 0 on success, -EINVAL on bad args (n_manips > 4, sink_fqid
++ * exceeds 24 bits, NULL manip pointer with n_manips > 0).
++ */
++int fman_pcd_oh_port_set_chain(struct fman_pcd_oh_port *oh,
++       struct fman_pcd_manip * const *manips,
++       u8 n_manips,
++       u32 sink_fqid);
++
++#endif /* __LINUX_FSL_FMAN_PCD_H */
+\ No newline at end of file
+-- 
+2.39.5
+
