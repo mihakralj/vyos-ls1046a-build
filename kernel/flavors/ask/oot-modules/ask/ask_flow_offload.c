@@ -337,6 +337,15 @@ int ask_flow_offload_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
 {
 struct flow_cls_offload *f = type_data;
 
+/*
+ * Both entry paths (tc-flower direct AND nft `flags offload`) deliver
+ * per-flow events here as TC_SETUP_CLSFLOWER once the block_cb is
+ * registered — nf_flow_table_offload.c::nf_flow_table_block_offload_cmd()
+ * always dispatches FLOW_CLS_* via TC_SETUP_CLSFLOWER even when the
+ * outer ndo_setup_tc() entry was TC_SETUP_FT.  PR14g body-3 widens the
+ * outer entry in 0002-dpaa-eth-flow-block.patch (to forward TC_SETUP_FT
+ * to ops->setup_tc_block) but the inner cb stays CLSFLOWER-only.
+ */
 if (type != TC_SETUP_CLSFLOWER)
 return -EOPNOTSUPP;
 
@@ -370,6 +379,13 @@ int ask_flow_offload_setup_tc(struct net_device *dev,
 struct ask_flow_block_priv_entry *e;
 struct flow_block_cb *block_cb;
 
+/*
+ * nf_flow_table_offload sets binder_type = CLSACT_INGRESS for both
+ * tc-flower and nft `flags offload` paths (FLOW_BLOCK_BINDER_TYPE_FT
+ * does NOT exist in mainline 6.18 — only the outer enum tc_setup_type
+ * distinguishes them).  Accept only the ingress binder; everything
+ * else (CLSACT_EGRESS, RED, etc.) we leave to other drivers.
+ */
 if (fbo->binder_type != FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
 return -EOPNOTSUPP;
 
@@ -392,6 +408,40 @@ return PTR_ERR(block_cb);
 flow_block_cb_add(block_cb, fbo);
 list_add_tail(&block_cb->driver_list,
       &ask_flow_block_cb_list);
+/*
+ * PR14g body-1 part-3: HW port-bind.  Resolve the dpaa
+ * netdev to its FMan port id (cell-index 0..9 on LS1046A)
+ * via the in-tree export from kernel patch 0030, then bind
+ * the v4-TCP KG scheme to that port via ask_hw_port_bind().
+ *
+ * Failures here MUST NOT fail the FLOW_BLOCK_BIND: software
+ * flow_offload still works without HW acceleration.  The
+ * contract from ask_internal.h:
+ *   0          -> bind succeeded (first call) or idempotent
+ *   -EBUSY     -> already bound to a DIFFERENT port; log and
+ *                 continue (second port runs in SW)
+ *   -ENODEV    -> no HW backing (no DPAA, PCD bring-up
+ *                 failed); silent skip
+ *   -ERANGE    -> dpaa_get_fman_port_id rejected the netdev
+ *                 (synthetic kunit netdev, or future SoC with
+ *                 wider cell-index); silent skip
+ *   other -E   -> hard failure inside the silicon path; warn
+ *                 so the operator can diagnose
+ */
+{
+u8 pid;
+int prc = dpaa_get_fman_port_id(dev, &pid);
+
+if (prc == 0) {
+prc = ask_hw_port_bind(pid);
+if (prc && prc != -EBUSY && prc != -ENODEV)
+ask_pr_warn("flow_offload: port-bind %s (pid %u) failed: %d\n",
+    netdev_name(dev), pid, prc);
+} else if (prc != -ENODEV && prc != -ERANGE) {
+ask_pr_dbg("flow_offload: dpaa_get_fman_port_id(%s) failed: %d\n",
+   netdev_name(dev), prc);
+}
+}
 ask_pr_dbg("flow_offload: BIND %s\n", netdev_name(dev));
 return 0;
 
