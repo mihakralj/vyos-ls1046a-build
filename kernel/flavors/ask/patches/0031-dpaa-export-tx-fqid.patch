@@ -1,0 +1,146 @@
+From cd3ac25dbe0d6b80441ccd7b4d68c25d86c6291e Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Sat, 16 May 2026 04:26:46 +0000
+Subject: [PATCH] dpaa: export per-port per-queue TX FQID accessor for FMan PCD
+ OH-port chains
+
+The ASK2 FMan PCD two-stage OH-port re-injection pipeline needs to
+program the trailing FORWARD_FQ action of an OH-port MANIP chain so
+that the L3-rewritten frame lands on the peer netdev's existing TX FQ
+(struct dpaa_priv::egress_fqs[queue], i.e. the same queue dpaa_xmit()
+would have used for the rewritten frame had it traversed the kernel
+slow path).  Pointing the OH-port output at any other FQID would
+either bypass the dpaa driver's stats/qdisc accounting (if the FQID
+happened to be a TX FQ on the peer port) or land the frame in a queue
+with no QMan binding (and be dropped silently after a BMan buffer-pool
+timeout).
+
+Add dpaa_get_tx_fqid(dev, queue, *fqid) as the egress counterpart to
+dpaa_get_rx_default_fqid().  Same defensive posture (NULL args,
+non-dpaa netdev, queue out of range, missing egress_fqs slot).  Uses
+the upstream qman_fq_fqid() accessor.  Same lifetime contract
+(caller-holds-RTNL).
+
+Signed-off-by: ASK2 build bot <ask2-build@kralj.dev>
+---
+ .../net/ethernet/freescale/dpaa/dpaa_eth.c    | 46 +++++++++++++++++++
+ include/linux/fsl/dpaa_flow_offload.h         | 39 ++++++++++++++++
+ 2 files changed, 85 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 3d4f6ca..4521174 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -528,6 +528,52 @@ int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id)
+ }
+ EXPORT_SYMBOL_GPL(dpaa_get_fman_port_id);
+ 
++/**
++ * dpaa_get_tx_fqid() - per-port per-queue TX FQID accessor.
++ *
++ * See <linux/fsl/dpaa_flow_offload.h> for the full contract.  This is
++ * the authoritative source for "where does dpaa_xmit() enqueue on
++ * this port for queue @queue" — see dpaa_xmit() at the
++ * priv->egress_fqs[queue] use site.  Used by the ASK2 FMan PCD
++ * two-stage OH-port chain (kernel/flavors/ask/oot-modules/ask/ask_hw.c,
++ * PR14j) to program the trailing FORWARD_FQ action of an OH-port
++ * MANIP chain so that the L3-rewritten frame lands on the peer
++ * netdev's existing TX FQ — the same queue dpaa_xmit() would have
++ * used had the frame traversed the kernel slow path.  Pointing the
++ * OH-port output at any other FQID would either bypass the dpaa
++ * driver's stats/qdisc accounting (if it is still a valid TX FQ on
++ * the peer port) or land the frame in a queue with no QMan binding
++ * (and be dropped silently after a BMan buffer-pool timeout).
++ *
++ * Mirrors dpaa_get_rx_default_fqid() in defensive posture and
++ * locking discipline.  See that helper's kerneldoc for the rationale.
++ *
++ * @queue is the TX queue index in [0, dpaa_max_num_txqs()); callers
++ * who do not have a specific queue selection should pass 0 (the
++ * lowest-priority default TX queue every dpaa port allocates).
++ */
++int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid)
++{
++	struct dpaa_priv *priv;
++
++	if (!dev || !fqid)
++		return -EINVAL;
++
++	if (dev->netdev_ops != &dpaa_ops)
++		return -ENODEV;
++
++	if (queue >= dpaa_max_num_txqs())
++		return -ERANGE;
++
++	priv = netdev_priv(dev);
++	if (!priv->egress_fqs || !priv->egress_fqs[queue])
++		return -ENOENT;
++
++	*fqid = qman_fq_fqid(priv->egress_fqs[queue]);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(dpaa_get_tx_fqid);
++
+ static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
+  void *type_data)
+ {
+diff --git a/include/linux/fsl/dpaa_flow_offload.h b/include/linux/fsl/dpaa_flow_offload.h
+index 4d43b96..161156c 100644
+--- a/include/linux/fsl/dpaa_flow_offload.h
++++ b/include/linux/fsl/dpaa_flow_offload.h
+@@ -90,6 +90,40 @@ int dpaa_get_rx_default_fqid(struct net_device *dev, u32 *fqid);
+  * or -ERANGE if the cell-index is out of the 0..9 range.
+  */
+ int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id);
++
++/**
++ * dpaa_get_tx_fqid() - look up a per-port per-queue TX FQID.
++ * @dev:   a netdev that may or may not be backed by the dpaa Ethernet
++ *         driver (caller is allowed to pass any net_device — the
++ *         helper returns -ENODEV if @dev is not a dpaa port).
++ * @queue: TX queue index in [0, dpaa_max_num_txqs()).
++ * @fqid:  out-param; on success receives the FQID of
++ *         priv->egress_fqs[@queue] (i.e. the queue dpaa_xmit() uses
++ *         for that index on this netdev).
++ *
++ * This is the egress counterpart to dpaa_get_rx_default_fqid() and is
++ * intended for the ASK2 FMan PCD OH-port re-injection pipeline
++ * (kernel/flavors/ask/oot-modules/ask/ask_hw.c, PR14j) which needs to
++ * point an OH-port output at the peer netdev's existing TX FQ — the
++ * exact queue dpaa_xmit() would have used for the rewritten frame had
++ * the frame traversed the kernel slow path.  Pointing the OH-port
++ * output at any other FQID would either bypass the dpaa driver's
++ * stats/qdisc accounting (if the FQID happens to be a TX FQ on the
++ * peer port) or land the frame in a queue with no QMan binding (and
++ * be dropped silently after a BMan buffer-pool timeout).
++ *
++ * Callers MUST hold RTNL (or have an equivalent guarantee that @dev
++ * cannot disappear) so the dpaa_priv cannot be freed while we read
++ * priv->egress_fqs.  The returned FQID is stable for the lifetime of
++ * the netdev.
++ *
++ * Return: 0 on success with *fqid populated, -EINVAL on NULL args,
++ * -ENODEV if @dev is not a dpaa-backed netdev, -ERANGE if @queue is
++ * out of bounds for this port, or -ENOENT if the egress_fqs slot at
++ * @queue has not been initialised (driver bug — every slot in
++ * [0, dpaa_max_num_txqs()) is populated at probe time).
++ */
++int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
+ #else
+ static inline int
+ dpaa_register_flow_offload_handler(const struct dpaa_flow_offload_ops *ops)
+@@ -111,6 +145,11 @@ dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id)
+ {
+ return -ENODEV;
+ }
++static inline int
++dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid)
++{
++return -ENODEV;
++}
+ #endif
+ 
+ #endif /* _LINUX_FSL_DPAA_FLOW_OFFLOAD_H */
+-- 
+2.39.5
+
