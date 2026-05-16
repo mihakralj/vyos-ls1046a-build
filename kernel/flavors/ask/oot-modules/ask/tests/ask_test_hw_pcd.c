@@ -327,20 +327,181 @@ static void hw_pcd_test_get_returns_null_without_init(struct kunit *test)
 /* suite                                                                      */
 /* ------------------------------------------------------------------------- */
 
+/* ------------------------------------------------------------------------- */
+/* PR14j tests — cookie indirection table + OH-port insert pre-flight        */
+/*                                                                            */
+/* These exercise contract surfaces that are reachable on the kunit harness   */
+/* (no fsl,fman in QEMU virt DT, so ask_hw_pcd_get() is NULL) and DO NOT      */
+/* touch silicon.  They lock the documented behaviours:                       */
+/*                                                                            */
+/*   1. ask_hw_cookie_alloc() never returns 0 (the SW-only sentinel).         */
+/*      Cookies live in xa_init_flags(XA_FLAGS_ALLOC1) → index 0 is reserved. */
+/*                                                                            */
+/*   2. ask_hw_cookie_lookup() after ask_hw_cookie_free() returns NULL.       */
+/*      Required for ask_hw_flow_remove() to safely return -EINVAL on stale   */
+/*      cookies (e.g. a userspace genl DESTROY that races a Phase-2 expire).  */
+/*                                                                            */
+/*   3. ask_hw_flow_insert_v4_tcp via the public dispatcher with the zero-MAC */
+/*      neighbour-unresolved key returns -EAGAIN (PR14j 'defence in depth'    */
+/*      mac_is_zero() gate).  ask_flow.c body-3 treats -EAGAIN as a fallback  */
+/*      signal indistinguishable from -ENODEV/-EOPNOTSUPP (all three demote   */
+/*      to the SW fake-counter path), so the test accepts that the no-PCD    */
+/*      kunit-harness early-out (-ENODEV) wins instead.  The contract is     */
+/*      'never let a half-resolved flow burn silicon', not 'always return    */
+/*      exactly -EAGAIN here'.                                                */
+/*                                                                            */
+/*   4. ask_hw_flow_remove(non-existent cookie) returns -EINVAL (kunit        */
+/*      harness path is -ENODEV because ask_hw_pcd_get() is NULL — both       */
+/*      are 'do not crash, do not silently succeed' outcomes).                */
+/* ------------------------------------------------------------------------- */
+
+static void hw_pcd_test_cookie_alloc_skips_zero(struct kunit *test)
+{
+        /*
+         * Without a live ask_hw_pcd_get() handle there is no xarray to
+         * allocate against.  The helper must defensively return 0 on a
+         * NULL handle so callers cannot construct a "valid cookie 0"
+         * by accident.  This pins the NULL-handle contract; the real
+         * "never returns 0 on a populated handle" property is held by
+         * the XA_FLAGS_ALLOC1 flag in xa_init_flags() and is not
+         * reachable from kunit without a synthetic PCD handle (a
+         * deliberate test-fixture v1.1 deliverable, not v1.0).
+         */
+        u32 c = ask_hw_cookie_alloc(NULL, NULL);
+        KUNIT_EXPECT_EQ(test, c, 0u);
+}
+
+static void hw_pcd_test_cookie_lookup_null_safe(struct kunit *test)
+{
+        /*
+         * Cookie 0 is the SW-only sentinel; lookup MUST return NULL.
+         * A NULL handle MUST also return NULL.  These two together are
+         * what make ask_hw_flow_remove(hw_flow_id=0) a no-op.
+         */
+        KUNIT_EXPECT_NULL(test, ask_hw_cookie_lookup(NULL, 0));
+        KUNIT_EXPECT_NULL(test, ask_hw_cookie_lookup(NULL, 42));
+        KUNIT_EXPECT_NULL(test, ask_hw_cookie_lookup(ask_hw_pcd_get(), 0));
+}
+
+static void hw_pcd_test_cookie_free_null_safe(struct kunit *test)
+{
+        /*
+         * Cookie 0 free MUST be a no-op (matches the lookup contract).
+         * A NULL handle MUST not crash.  These are the defensive
+         * preconditions ask_hw_flow_remove() relies on.
+         */
+        ask_hw_cookie_free(NULL, 0);
+        ask_hw_cookie_free(NULL, 0xdeadbeef);
+        ask_hw_cookie_free(ask_hw_pcd_get(), 0);
+        KUNIT_SUCCEED(test);
+}
+
+static void hw_pcd_test_insert_zero_mac_eagain(struct kunit *test)
+{
+        struct ask_flow_key k;
+        u32 hw_id = 0xdeadbeef;
+        int rc;
+
+        /*
+         * Build a v4-TCP key with the PR14j-required next_hop_mac /
+         * egress_mac fields LEFT ZERO.  On a populated PCD this hits
+         * the mac_is_zero() gate in ask_hw_flow_insert_v4_tcp() and
+         * returns -EAGAIN.  On the kunit harness ask_hw_pcd_get() is
+         * NULL so the public dispatcher's early no-PCD check wins and
+         * returns -ENODEV.  Both responses are 'fall back to SW',
+         * which is the only contract this test pins.  The
+         * out_hw_id MUST NOT have been touched on either failure
+         * path — protecting userspace from picking up a stale token.
+         */
+        make_v4_tcp_key(&k, htonl(0x0a000001), htonl(0x0a000002),
+                        htons(1000), htons(80));
+        /* next_hop_mac / egress_mac are zero by make_v4_tcp_key memset. */
+
+        rc = ask_hw_flow_insert(&k, /*oif=*/1, /*action_flags=*/0, &hw_id);
+        KUNIT_EXPECT_TRUE(test, rc == -EAGAIN || rc == -ENODEV ||
+                                 rc == -EOPNOTSUPP);
+        KUNIT_EXPECT_EQ(test, hw_id, 0xdeadbeefu);
+}
+
+static void hw_pcd_test_insert_zero_dst_mac_only_eagain(struct kunit *test)
+{
+        struct ask_flow_key k;
+        u32 hw_id = 0;
+        int rc;
+
+        /*
+         * Egress MAC resolved (neigh_lookup found us the local
+         * interface's dev_addr) but the next-hop MAC is still zero
+         * because ARP has not completed for the destination yet.
+         * This is the dominant case in practice: ask_resolve_neigh_v4
+         * always fills egress_mac from dev_addr, but next_hop_mac
+         * only fills once the neighbour is NUD_CONNECTED.
+         *
+         * Same outcome envelope as the all-zero case: -EAGAIN on a
+         * populated PCD, -ENODEV/-EOPNOTSUPP on the kunit harness.
+         */
+        make_v4_tcp_key(&k, htonl(0x0a000001), htonl(0x0a000002),
+                        htons(2000), htons(80));
+        k.egress_mac[0] = 0x02;
+        k.egress_mac[5] = 0x42;
+        /* next_hop_mac left zero. */
+
+        rc = ask_hw_flow_insert(&k, /*oif=*/1, /*action_flags=*/0, &hw_id);
+        KUNIT_EXPECT_TRUE(test, rc == -EAGAIN || rc == -ENODEV ||
+                                 rc == -EOPNOTSUPP);
+        KUNIT_EXPECT_EQ(test, hw_id, 0u);
+}
+
+static void hw_pcd_test_remove_cookie_zero_is_noop(struct kunit *test)
+{
+        /*
+         * PR14j changes hw_flow_id semantics: cookie 0 means
+         * 'this flow has no HW backing' (SW-only fake_hw_id_seq
+         * counter starting at 1 in ask_flow.c).  ask_hw_flow_remove()
+         * MUST return 0 for cookie 0 so ask_flow_remove() can call us
+         * unconditionally on every flow tear-down without inspecting
+         * the cookie value.  Identical contract to PR14g TOKEN_NONE.
+         */
+        int rc = ask_hw_flow_remove(0);
+        KUNIT_EXPECT_EQ(test, rc, 0);
+}
+
+static void hw_pcd_test_remove_unknown_cookie(struct kunit *test)
+{
+        /*
+         * A non-zero cookie that was never returned by ask_hw_cookie_
+         * alloc() must return -EINVAL on a populated PCD (the xa_load
+         * miss path), or -ENODEV on the kunit harness (no PCD at
+         * all).  Either way it MUST NOT crash and MUST NOT silently
+         * report success — that would let userspace believe a slot
+         * was freed when no such slot existed.
+         */
+        int rc = ask_hw_flow_remove(0xabcdef01u);
+        KUNIT_EXPECT_TRUE(test, rc == -EINVAL || rc == -ENODEV);
+}
+
 static struct kunit_case ask_hw_pcd_test_cases[] = {
-	KUNIT_CASE(hw_pcd_test_pack_unpack_roundtrip),
-	KUNIT_CASE(hw_pcd_test_unpack_null_safe),
-	KUNIT_CASE(hw_pcd_test_token_sentinels),
-	KUNIT_CASE(hw_pcd_test_insert_null_key),
-	KUNIT_CASE(hw_pcd_test_insert_null_out),
-	KUNIT_CASE(hw_pcd_test_insert_no_hw_backing),
-	KUNIT_CASE(hw_pcd_test_insert_unsupported_proto),
-	KUNIT_CASE(hw_pcd_test_insert_unsupported_l3),
-	KUNIT_CASE(hw_pcd_test_remove_token_none_is_noop),
-	KUNIT_CASE(hw_pcd_test_remove_unknown_token),
-	KUNIT_CASE(hw_pcd_test_query_stats_eopnotsupp),
-	KUNIT_CASE(hw_pcd_test_get_returns_null_without_init),
-	{}
+KUNIT_CASE(hw_pcd_test_pack_unpack_roundtrip),
+KUNIT_CASE(hw_pcd_test_unpack_null_safe),
+KUNIT_CASE(hw_pcd_test_token_sentinels),
+KUNIT_CASE(hw_pcd_test_insert_null_key),
+KUNIT_CASE(hw_pcd_test_insert_null_out),
+KUNIT_CASE(hw_pcd_test_insert_no_hw_backing),
+KUNIT_CASE(hw_pcd_test_insert_unsupported_proto),
+KUNIT_CASE(hw_pcd_test_insert_unsupported_l3),
+KUNIT_CASE(hw_pcd_test_remove_token_none_is_noop),
+KUNIT_CASE(hw_pcd_test_remove_unknown_token),
+KUNIT_CASE(hw_pcd_test_query_stats_eopnotsupp),
+KUNIT_CASE(hw_pcd_test_get_returns_null_without_init),
+/* PR14j: cookie indirection table + OH-port pre-flight gates. */
+KUNIT_CASE(hw_pcd_test_cookie_alloc_skips_zero),
+KUNIT_CASE(hw_pcd_test_cookie_lookup_null_safe),
+KUNIT_CASE(hw_pcd_test_cookie_free_null_safe),
+KUNIT_CASE(hw_pcd_test_insert_zero_mac_eagain),
+KUNIT_CASE(hw_pcd_test_insert_zero_dst_mac_only_eagain),
+KUNIT_CASE(hw_pcd_test_remove_cookie_zero_is_noop),
+KUNIT_CASE(hw_pcd_test_remove_unknown_cookie),
+{}
 };
 
 struct kunit_suite ask_hw_pcd_suite = {

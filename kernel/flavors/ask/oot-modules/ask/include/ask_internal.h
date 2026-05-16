@@ -17,6 +17,8 @@
 #include <linux/rhashtable.h>
 #include <linux/rcupdate.h>
 #include <linux/u64_stats_sync.h>
+#include <linux/if_ether.h>      /* ETH_ALEN — PR14j L2 header plumbing */
+#include <linux/xarray.h>        /* PR14j cookie indirection table */
 #include <net/netlink.h>
 
 #define ASK_DRV_NAME            "ask"
@@ -199,9 +201,70 @@ int ask_hw_port_bind(u8 port_id);
 #define ASK_HW_FLOW_ID_TOKEN_V4_TCP     1u
 /* Reserved for future bring-up: V4_UDP=2, V6_TCP=3, V6_UDP=4 */
 
+/*
+ * Legacy helpers — PR14g body-1.  After PR14j the live insert/remove
+ * path no longer encodes hw_flow_id as a packed (token, key_idx) tuple;
+ * it returns an opaque xarray cookie (see ask_hw_cookie_alloc() below).
+ * The pack/unpack helpers are kept exported so debugfs and genl
+ * pretty-printers that still want to display the legacy form (or that
+ * synthesise sentinel ids in kunit) keep building.  Do NOT call them
+ * from the runtime fast path.
+ */
 u32  ask_priv_pack_hw_flow_id(u16 node_token, u16 key_idx);
 void ask_priv_unpack_hw_flow_id(u32 hw_flow_id,
         u16 *node_token, u16 *key_idx);
+
+/*
+ * PR14j (M2.5j) - two-stage OH-port chain bookkeeping.
+ *
+ * The widened hw_flow_id is an opaque u32 cookie that indexes into a
+ * per-ask_hw_pcd xarray of struct ask_hw_flow_cookie.  Each entry
+ * tracks the four silicon objects PR14j allocates per v4-TCP flow:
+ *
+ *   1. ingress CC slot (cc_node + key_idx) - same as PR14g body-1
+ *   2. shared MANIP_RMV_ETHERNET handle (pcd-wide, owned by ask_hw_pcd)
+ *   3. per-flow MANIP_INSRT_GENERIC handle (new L2 header bytes)
+ *   4. shared MANIP_FIELD_UPDATE_IPV4_FORWARD handle (pcd-wide)
+ *
+ * The shared (rmv, ipv4_forward) handles are NOT freed per-flow; only
+ * the per-flow m_insrt is destroyed in ask_hw_flow_remove().  This
+ * cuts MURAM HMTD allocations from 3*N_flows to 2 + N_flows.
+ *
+ * sink_ifindex / sink_fqid are snapshotted for stats and debugability;
+ * they are not dereferenced during teardown.
+ *
+ * Cookie 0 is reserved as the "no HW backing" sentinel so ask_flow.c
+ * can call ask_hw_flow_remove() unconditionally on every tear-down.
+ * The xarray is initialised with XA_FLAGS_ALLOC1 so the allocator
+ * skips 0.
+ */
+struct fman_pcd_cc_node;
+struct fman_pcd_manip;
+
+struct ask_hw_flow_cookie {
+        struct fman_pcd_cc_node  *cc_node;
+        u16                       key_idx;
+        struct fman_pcd_manip    *m_rmv;     /* shared — do NOT destroy */
+        struct fman_pcd_manip    *m_insrt;   /* per-flow */
+        struct fman_pcd_manip    *m_ipv4;    /* shared — do NOT destroy */
+        int                       sink_ifindex;
+        u32                       sink_fqid;
+};
+
+/*
+ * PR14j cookie-table helpers.  Implemented in ask_hw.c.  All three
+ * are NULL-safe on a NULL ask_hw_pcd; alloc returns 0 (the sentinel,
+ * which ask_flow.c treats as "no HW backing — use SW fake counter").
+ *
+ * ask_hw_cookie_lookup() returns a pointer that is valid until
+ * ask_hw_cookie_free() runs for the same cookie.  Callers must not
+ * mutate the returned struct.
+ */
+u32  ask_hw_cookie_alloc(struct ask_hw_pcd *h,
+                         const struct ask_hw_flow_cookie *src);
+struct ask_hw_flow_cookie *
+     ask_hw_cookie_lookup(struct ask_hw_pcd *h, u32 cookie);
+void ask_hw_cookie_free(struct ask_hw_pcd *h, u32 cookie);
 
 /*
  * PR14g-body-2 - runtime flow insert / remove dispatcher.
@@ -302,6 +365,23 @@ u32 iif;
 u16 vlan_id;
 u8  src_ip[16];     /* v4 packs into first 4, last 12 zero */
 u8  dst_ip[16];
+
+/*
+ * PR14j (M2.5j) - L2 header for the OH-port MANIP_INSRT_GENERIC
+ * silicon template.  Populated by ask_flow_offload.c via
+ * neigh_lookup() against @dst_ip on the egress netdev.  Read once
+ * inside ask_hw_flow_insert_v4_tcp() to build the per-flow
+ * fman_pcd_manip_params.insrt_generic.hdr[] byte array; not used
+ * at lookup time, but kept inside the key (and therefore the
+ * rhashtable hash inputs) so a subsequent neighbour change forces
+ * the flow to be re-inserted rather than silently routing to a
+ * stale MAC.  Zero-initialised by ask_parse_match_v4(); if either
+ * MAC is all-zero when ask_hw_flow_insert() runs, the dispatcher
+ * returns -EAGAIN so the upper layer keeps the flow in SW until
+ * the neighbour resolves.
+ */
+u8  next_hop_mac[ETH_ALEN]; /* dst MAC the OH chain pushes */
+u8  egress_mac[ETH_ALEN];   /* src MAC = peer port's own MAC */
 } __packed;
 
 struct ask_flow {
@@ -377,6 +457,34 @@ int ask_flow_walk(struct ask_flow_table *t, ask_flow_walk_fn fn, void *arg);
 
 /* Flush every flow (used by ASK_CMD_FLUSH_FLOWS). */
 void ask_flow_flush(struct ask_flow_table *t);
+
+/*
+ * PR14j direction-aware FLOW_BLOCK_BIND.
+ *
+ * The LS1046A KGSE_MV silicon supports a single port per KG scheme;
+ * binding the second port returns -EBUSY (see ask_hw_port_bind()
+ * contract in ask_hw.c).  PR14g first-binder-wins picked egress eth4
+ * over ingress eth3 and the classifier never saw RX traffic.
+ *
+ * Solution: walk the dpaa netdev's of_node parent chain to the FMan
+ * port node and inspect its compatible string for "*-rx" vs "*-tx".
+ * Only ingress ports are passed to ask_hw_port_bind(); egress ports
+ * participate as OH-chain sinks (via dpaa_get_tx_fqid()) and are
+ * deliberately not bound to a KG scheme.
+ *
+ * Returns ASK_DIR_INGRESS / ASK_DIR_EGRESS / ASK_DIR_UNKNOWN.  The
+ * UNKNOWN return is fail-closed (caller treats it identically to
+ * EGRESS - skip the bind) so a synthetic kunit netdev with no
+ * of_node parent chain cannot inadvertently consume the single-port
+ * scheme slot.
+ */
+enum ask_flow_direction {
+        ASK_DIR_UNKNOWN = 0,
+        ASK_DIR_INGRESS = 1,
+        ASK_DIR_EGRESS  = 2,
+};
+
+int ask_flow_offload_classify_dir(const struct net_device *dev);
 
 /* ------------------------------------------------------------------------- */
 /* ask_flow_offload.c — flow_block_cb registration on dpaa netdevs            */
