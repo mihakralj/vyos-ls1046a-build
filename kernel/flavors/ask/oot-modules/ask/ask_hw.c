@@ -66,6 +66,36 @@
 static struct ask_hw_ucode_version ask_hw_cached;
 static bool ask_hw_cached_valid;
 
+/*
+ * PR14j-hotfix (2026-05-16): ask_hw_pcd_bringup_oh() deadlocks on real
+ * LS1046A silicon because kernel patch 0032 fman_pcd_oh_port_claim()
+ * holds pcd->lock across oh_port_alloc_ad_chain() which re-enters
+ * fman_pcd_muram_alloc() taking the same mutex (recursive deadlock —
+ * systemd-modules-load hung_task fires at +122s).
+ *
+ * Until patch 0032 is fixed (split the critical section: alloc AD chain
+ * outside the lock, then re-acquire only to insert into the registry
+ * list), this module parameter gates the OH-port bring-up call.
+ *
+ *   ask.enable_oh_chain=0  (default) — skip bringup_oh(); ask.ko loads
+ *                                       cleanly, KG+CC stays armed but
+ *                                       silicon-bypass HW offload falls
+ *                                       back to SW (-ENODEV from the
+ *                                       ask_hw_flow_insert_v4_tcp gate).
+ *   ask.enable_oh_chain=1            — attempt bringup_oh(); will hang
+ *                                       on current silicon, kept for
+ *                                       post-fix re-verification.
+ *
+ * Diagnostic stored in qdrant 2026-05-16 with tags oh-port-deadlock /
+ * muram-mutex / patch-0032 / real-silicon-failure for the next session.
+ */
+static bool ask_enable_oh_chain;
+module_param_named(enable_oh_chain, ask_enable_oh_chain, bool, 0444);
+MODULE_PARM_DESC(enable_oh_chain,
+        "PR14j OH-port silicon-bypass chain bring-up (default off — "
+        "patch 0032 fman_pcd_oh_port_claim deadlocks on LS1046A; "
+        "leave off until PR14k lands)");
+
 /* ------------------------------------------------------------------------- */
 /* QEF blob parsing                                                           */
 /* ------------------------------------------------------------------------- */
@@ -568,8 +598,19 @@ int ask_hw_pcd_bringup(void)
          * return -ENODEV so ask_flow.c falls back to SW.  Frames still
          * traverse the kernel slow path — they just are not silicon-
          * accelerated.
+         *
+         * PR14j-hotfix: gated behind module parameter (default OFF) because
+         * fman_pcd_oh_port_claim() in kernel patch 0032 deadlocks on real
+         * LS1046A silicon — see top-of-file note + qdrant entry
+         * tagged oh-port-deadlock dated 2026-05-16.  Set
+         * ask.enable_oh_chain=1 on the kernel command line to re-enable
+         * once patch 0032 is fixed in PR14k.
          */
-        (void)ask_hw_pcd_bringup_oh(h);
+        if (ask_enable_oh_chain) {
+                (void)ask_hw_pcd_bringup_oh(h);
+        } else {
+                ask_pr_info("hw: OH-port chain bring-up SKIPPED (ask.enable_oh_chain=0); HW offload will fall back to SW\n");
+        }
 
         ask_hw_pcd_inst = h;
 
