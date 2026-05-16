@@ -1,7 +1,7 @@
 interfaces {
-    ethernet eth0 {
+    ethernet e3 {
         address dhcp
-        description "RJ45 port 1"
+        description "MGMT (left RJ45)"
     }
     loopback lo {
     }

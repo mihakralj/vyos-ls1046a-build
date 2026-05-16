@@ -566,28 +566,24 @@ status = "disabled";
 #include "fsl-ls1046-post.dtsi"
 
 /*
- * NXP SDK portal DTSIs — supply the missing DT properties the ASK staging
- * driver (drivers/staging/fsl_qbman/{bman,qman}_driver.c) requires:
- *   - bman-portal@N { cell-index = <N>; };  (mainline qoriq-bman-portals.dtsi
- *     omits cell-index; ASK's parse_pcfg() refuses any portal node without it,
- *     producing "No BMan portals available!" and a boot freeze after
- *     "Bman portals initialised".)
- *   - bman-bpids@0  (fsl,bpid-range) — seeds the BPID allocator so DPDK/USDPAA
- *     buffer pool allocation can succeed.
- *   - fsl,fqid-range / fsl,pool-channel-range / fsl,cgrid-range — seed the
- *     QMan FQID / pool-channel / CGRID allocators.
+ * ASK2 (2026-05-15): the NXP SDK portal DTSIs were dropped here.
  *
- * NXP's own lf-6.6.y / lf-6.12.y kernel trees include these DTSIs in-tree;
- * mainline (gregkh/linux) strips them. These files are staged into the kernel
- * source tree by bin/ci-compile-mono-dtb.sh alongside this board DTS so `dtc`
- * can resolve the includes.
+ * Background: the legacy ASK 1.x staging driver
+ * (drivers/staging/fsl_qbman/{bman,qman}_driver.c) refused to enumerate any
+ * portal node that lacked `cell-index = <N>;` and also required
+ * `fsl,bpid-range` / `fsl,fqid-range` / `fsl,pool-channel-range` /
+ * `fsl,cgrid-range` resource-pool seeds. NXP's lf-6.x kernel trees ship
+ * qoriq-bman-portals-sdk.dtsi / qoriq-qman-portals-sdk.dtsi to supply those;
+ * mainline (gregkh/linux) does not.
  *
- * Files live under data/dtb/sdk-dtsi/ in this repo, copied verbatim from
- * the producer (kernel-ls1046a-build) at:
- *   release/patches/kernel/sdk-sources/arch/arm64/boot/dts/freescale/
+ * ASK 1.x is gone. The mainline DPAA1 QBMan driver
+ * (drivers/soc/fsl/qbman/{bman,qman}_portal.c) enumerates portals positionally
+ * from the standard qoriq-{bman,qman}-portals.dtsi already pulled in by
+ * fsl-ls1046a.dtsi, and seeds the pool/FQID ranges from the bman/qman CCSR
+ * blocks at probe time. The SDK DTSI files (and the data/dtb/sdk-dtsi/ tree)
+ * were deleted on ask20; including them here was a residual reference that
+ * broke `bin/ci-compile-mono-dtb.sh`.
  */
-#include "qoriq-bman-portals-sdk.dtsi"
-#include "qoriq-qman-portals-sdk.dtsi"
 
 &fman0 {
 	ethernet@e0000 {
