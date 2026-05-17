@@ -232,8 +232,17 @@ u64_stats_init(&f->stats.syncp);
 rc = ask_hw_flow_insert(key, oif, action_flags, &hw_id);
 if (rc == 0) {
 hw_inserted = true;
+pr_info_ratelimited("ask: flow: hw_insert OK cookie=0x%llx oif=%u hw_id=0x%08x\n",
+    cookie, oif, hw_id);
 } else if (rc == -ENODEV || rc == -EOPNOTSUPP) {
 hw_id = (u32)atomic_inc_return(&t->fake_hw_id_seq);
+pr_info_ratelimited("ask: flow: hw_insert=%d (SW-fallback) cookie=0x%llx oif=%u l3=%u l4=%u sport=%u dport=%u\n",
+    rc, cookie, oif, key->l3_proto, key->l4_proto,
+    ntohs(key->sport), ntohs(key->dport));
+} else if (rc == -EAGAIN) {
+hw_id = (u32)atomic_inc_return(&t->fake_hw_id_seq);
+pr_info_ratelimited("ask: flow: hw_insert=-EAGAIN (neigh unresolved) cookie=0x%llx oif=%u nh=%pM em=%pM\n",
+    cookie, oif, key->next_hop_mac, key->egress_mac);
 } else {
 ask_pr_warn("flow: hw_insert(cookie=0x%llx) hard fail %d\n",
     cookie, rc);
