@@ -433,6 +433,55 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
         }
 
         /*
+         * PR14r (2026-05-17): dedupe duplicate REPLACE for the same
+         * cookie BEFORE touching silicon.
+         *
+         * nft flowtable offload registers our block_cb on every netdev
+         * in the flowtable's `devices = { ... }` list.  For a typical
+         * router flowtable that contains BOTH the ingress and the
+         * egress port — so when a flow add fires, the same cookie is
+         * delivered to us TWICE: once via the ingress netdev's block,
+         * once via the egress netdev's block.
+         *
+         * The SW path in ask_flow_insert() correctly dedupes via the
+         * rhashtable insert (-EEXIST → wrapped to 0 below).  But it
+         * does so AFTER calling ask_hw_flow_insert(), which means the
+         * second call burns a fresh CC node slot, then rolls it back
+         * by re-programming the slot to DROP via
+         * ask_hw_flow_remove() — but the FMan PCD CC API has NO key-
+         * removal primitive (see ask_hw.c PR14r comment + fman_pcd_cc.c
+         * line 882: keys are append-only with DROP tombstones).  So
+         * every duplicate burns ONE permanent slot, doubling slot
+         * consumption per flow.
+         *
+         * Skip the wasted hw_insert by checking the SW table first.
+         * If the cookie already lives there, this is the second-
+         * direction (egress block) replay — treat it as success and
+         * return.  Only the first arrival (ingress) actually drives
+         * hardware.
+         *
+         * PR14p instrumentation on 2026-05-17 caught the smoking-gun
+         * dmesg pattern: every flow shows two consecutive `REPLACE
+         * installed` lines, dev=eth3 then dev=eth4, identical cookie,
+         * consecutive hw_id slots.  After this dedupe only the eth3
+         * line should appear; the eth4 second-replay logs a single
+         * `REPLACE dedup` line instead.
+         */
+        {
+                struct ask_flow *existing;
+
+                rcu_read_lock();
+                existing = ask_flow_lookup(t, (u64)f->cookie);
+                rcu_read_unlock();
+                if (existing) {
+                        pr_info_ratelimited("ask: flow_offload: REPLACE dedup cookie=0x%lx ingress=%s (already installed via first-arrival block)\n",
+                                            f->cookie,
+                                            ingress_dev ? netdev_name(ingress_dev) : "?");
+                        return 0;
+                }
+        }
+
+        /*
          * PR14j: resolve the OH-chain L2 header.  We need
          *   egress_mac   = egress netdev's own MAC
          *   next_hop_mac = neigh ARP entry for dst_ip on egress_dev
@@ -483,14 +532,20 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
         }
 
         /*
-         * PR14p: surface what tier of offload was actually achieved.
-         * hw_id bit-31 set => packed (token,slot) from a real HW insert;
-         * hw_id with token bits clear => SW-only fake counter (HW insert
-         * returned -ENODEV/-EOPNOTSUPP and ask_flow_insert fell back).
+         * PR14r (2026-05-17): the previous packed-id tier check
+         * (hw_id & 0xffff0000) was a holdover from the pre-PR14j packed
+         * (token<<16 | slot) encoding.  Since PR14j the hw_id is an
+         * xarray cookie that starts at 1, so this check ALWAYS reported
+         * "SW-fallback" — masking the fact that HW offload was actually
+         * working.  The authoritative HW-vs-SW signal is the
+         * "ask: flow: hw_insert OK ..." vs "ask: flow: hw_insert=-NN
+         * (SW-fallback)" pr_info emitted by ask_flow.c at insert time
+         * (one log line per cookie, immediately precedes this one).
+         * Drop the misleading "tier" string here; keep cookie + hw_id
+         * for cross-referencing.
          */
-        pr_info_ratelimited("ask: flow_offload: REPLACE installed cookie=0x%lx hw_id=0x%08x %s ingress=%s oif=%u nh=%pM em=%pM\n",
+        pr_info_ratelimited("ask: flow_offload: REPLACE installed cookie=0x%lx hw_id=0x%08x ingress=%s oif=%u nh=%pM em=%pM\n",
                             f->cookie, hw_id,
-                            (hw_id & 0xffff0000) ? "HW" : "SW-fallback",
                             ingress_dev ? netdev_name(ingress_dev) : "?", oif,
                             key.next_hop_mac, key.egress_mac);
         return 0;

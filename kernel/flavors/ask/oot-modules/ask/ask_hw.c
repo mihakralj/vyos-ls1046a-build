@@ -362,8 +362,50 @@ static int ask_hw_pcd_build_chain(struct ask_hw_pcd *h)
         extract.offset = 0;
         extract.size   = ASK_HW_V4_KEY_WIDTH;
 
+        /*
+         * PR14r (2026-05-17): pre-size the CC v4-TCP match table to
+         * 255 slots — the silicon hard cap (FMAN_PCD_CC_NODE_KEYS_MAX
+         * in drivers/net/ethernet/freescale/fman/fman_pcd_cc.c line
+         * 127, validated at line 660 of the same file).  The SDK API
+         * treats keys->num_keys at create-time as BOTH the initial
+         * entry count AND the lifetime capacity (fman_pcd_cc.c line
+         * 680: "node->max_keys = keys->num_keys").  Subsequent
+         * fman_pcd_cc_node_add_key() calls fail with -ENOSPC once
+         * node->num_keys reaches max_keys (line 826).  Worse, the SDK
+         * provides NO API to remove a key after add — ask_hw_flow_remove()
+         * can only re-program the AD slot to DROP (a "tombstone"; see
+         * fman_pcd_cc.c line 882 doc-comment).  So every flow insert is
+         * append-only, and the M2 acceptance gate (8 iperf3 -P streams
+         * × 2 directions × 2 dpaa block dups + control traffic) burns
+         * ~32 slots in the first second.  With max_keys=0 the very
+         * first add_key still SEEMS to succeed because slot 0 is the
+         * miss-AD row that pre-exists; the second add_key onward fails.
+         *
+         * 1024 was the original PR14r target for headroom but is
+         * rejected by the SDK's validator (-EINVAL at line 660:
+         * "keys->num_keys > FMAN_PCD_CC_NODE_KEYS_MAX").  255 is the
+         * hardware-imposed ceiling — going above it would require a
+         * second CC node and a CC-tree branch, which is out of scope
+         * for PR14r.  At 255 the M2 gate has headroom for ~127 unique
+         * cookies after PR14r-B dedupe halves the duplicate-arrival
+         * burn rate; for the standard 8-stream iperf3 workload that
+         * leaves >100 spare slots even before the inevitable
+         * tombstone accumulation under flow churn.  v1.1 (PR15) will
+         * add a second CC node + tree branch to lift the ceiling.
+         *
+         * Setting keys.keys = NULL is the documented "pre-allocate
+         * empty slots, fill them later via add_key" idiom — the SDK
+         * kcalloc()s the in-memory mirror to 255 entries, the MURAM
+         * match+AD tables are sized for 256 rows (255 keys + 1 miss),
+         * and node->num_keys starts at 0 so add_key happily appends
+         * from slot 0 onward.
+         *
+         * Each slot costs (key_stride + AD_ENTRY_SIZE) = (2*13 + 16)
+         * = 42 B of MURAM.  256 rows × 42 B = 10.5 KiB out of the
+         * LS1046A's 384 KiB FMan MURAM pool — trivially within budget.
+         */
         memset(&keys, 0, sizeof(keys));
-        keys.num_keys = 0;
+        keys.num_keys = 255;
         keys.keys = NULL;
         keys.miss_action.type = FMAN_PCD_ACTION_DROP;
 
