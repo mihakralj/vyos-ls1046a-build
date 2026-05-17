@@ -1,0 +1,184 @@
+From 26382f3102f9d2c01295322fefc4622f0623bd88 Mon Sep 17 00:00:00 2001
+From: ASK2 PR14k <ask2@vyos-ls1046a-build>
+Date: Sun, 17 May 2026 03:14:17 +0000
+Subject: [PATCH] fman: PCD OH-port: split fman_pcd_oh_port_claim() critical
+ section (PR14k)
+
+The original PR14h flow held pcd->lock across the entire claim sequence,
+including oh_port_alloc_ad_chain() which calls fman_pcd_muram_alloc()
+which itself takes pcd->lock (drivers/net/ethernet/freescale/fman/
+fman_pcd.c::fman_pcd_muram_alloc). That is a recursive acquisition on
+a non-recursive mutex.
+
+On real LS1046A silicon (PR14j live-fire 2026-05-16, kernel
+6.18.31-vyos), this deadlocked systemd-modules-load at boot: ask.ko's
+ask_hw_pcd_bringup_oh() called fman_pcd_oh_port_claim(), which took
+pcd->lock, then re-entered it via the MURAM alloc and the task slept
+forever. hung_task watchdog fired at +122s and systemd-modules-load
+never released its blocking call. Workaround in PR14j-hotfix
+(0e9bdef + bf9cded): gate the OH-port bring-up behind the new
+ask.enable_oh_chain module param (default off).
+
+This patch is the real fix and lets the operator set
+ask.enable_oh_chain=1 safely.
+
+Lock-split discipline (3 phases):
+
+  Phase 1 (locked, short):  optimistic registry lookup.  If the
+                            port is already claimed bump refcnt and
+                            return.
+
+  Phase 2 (unlocked, slow): DT walk, of_find_device_by_node,
+                            kzalloc, AD-chain MURAM alloc.  Only
+                            the MURAM alloc takes pcd->lock
+                            internally; the others must NOT be
+                            invoked under it (devm/of_* can sleep
+                            on their own internal locks and would
+                            order-invert against pcd->lock).
+
+  Phase 3 (locked, short):  re-acquire pcd->lock, re-check the
+                            registry for a concurrent winner, and
+                            either insert our new handle or bump
+                            the racing winner's refcnt and unwind
+                            our orphan allocation.
+
+The 'racing winner' branch must drop pcd->lock BEFORE freeing the
+orphan AD chain because oh_port_free_ad_chain() calls
+fman_pcd_muram_free() which itself takes pcd->lock -- the same
+deadlock class this whole refactor is fixing.
+
+The err_unlock: label is gone; err_free_port, err_pdev, err_node
+cleanup labels now run with the lock NOT held.
+
+No public ABI change.  Builds clean on aarch64 (linux-6.18.29) with
+make W=1, no new warnings.
+
+Signed-off-by: ASK2 PR14k <ask2@vyos-ls1046a-build>
+---
+ .../net/ethernet/freescale/fman/fman_pcd_oh.c | 83 +++++++++++++++++--
+ 1 file changed, 75 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_oh.c b/drivers/net/ethernet/freescale/fman/fman_pcd_oh.c
+index 365d1b3..532ab03 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_oh.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_oh.c
+@@ -316,20 +316,59 @@ fman_pcd_oh_port_claim(struct fman *fman, u8 oh_idx)
+ 	if (!lock || !head)
+ 		return ERR_PTR(-ENODEV);
+ 
+-	mutex_lock(lock);
++	/*
++	 * PR14k: lock-split refactor.
++	 *
++	 * The original (PR14h) flow held pcd->lock across the entire
++	 * claim sequence, including oh_port_alloc_ad_chain() which calls
++	 * fman_pcd_muram_alloc() which itself takes pcd->lock
++	 * (drivers/net/ethernet/freescale/fman/fman_pcd.c:fman_pcd_muram_alloc).
++	 * That is a recursive mutex acquisition on a non-recursive mutex
++	 * and deadlocked systemd-modules-load at boot on real LS1046A
++	 * silicon (PR14j live-fire 2026-05-16, kernel 6.18.31-vyos,
++	 * hung_task watchdog at +122s -- see qdrant tag oh-port-deadlock).
++	 *
++	 * Split discipline:
++	 *
++	 *   Phase 1 (locked, short):  optimistic registry lookup.  If
++	 *                             the port is already claimed bump
++	 *                             refcnt and return.
++	 *
++	 *   Phase 2 (unlocked, slow): DT walk, platform_device lookup,
++	 *                             kzalloc, AD-chain MURAM alloc.  Of
++	 *                             these, only the MURAM alloc takes
++	 *                             pcd->lock internally; the others
++	 *                             must not be invoked under it (the
++	 *                             devm/of_* code can sleep on its
++	 *                             own internal locks and would order-
++	 *                             invert against pcd->lock).
++	 *
++	 *   Phase 3 (locked, short):  re-acquire pcd->lock, re-check the
++	 *                             registry for a concurrent winner,
++	 *                             and either insert our new handle
++	 *                             or bump the racing winner's refcnt
++	 *                             and unwind our orphan allocation.
++	 *
++	 * The "racing winner" branch must drop pcd->lock BEFORE freeing
++	 * the orphan AD chain because oh_port_free_ad_chain() calls
++	 * fman_pcd_muram_free() which itself takes pcd->lock -- the same
++	 * deadlock class this whole refactor is fixing.
++	 */
+ 
++	/* Phase 1 -- optimistic locked lookup. */
++	mutex_lock(lock);
+ 	port = oh_port_registry_find(pcd, oh_idx);
+ 	if (port) {
+ 		port->refcnt++;
+ 		mutex_unlock(lock);
+ 		return port;
+ 	}
++	mutex_unlock(lock);
+ 
++	/* Phase 2 -- unlocked construction. */
+ 	port_node = oh_port_find_of_node(fman, oh_idx);
+-	if (!port_node) {
+-		err = -ENODEV;
+-		goto err_unlock;
+-	}
++	if (!port_node)
++		return ERR_PTR(-ENODEV);
+ 	if (!of_device_is_available(port_node)) {
+ 		err = -ENODEV;
+ 		goto err_node;
+@@ -363,11 +402,41 @@ fman_pcd_oh_port_claim(struct fman *fman, u8 oh_idx)
+ 	mutex_init(&port->lock);
+ 	INIT_LIST_HEAD(&port->node);
+ 
++	/*
++	 * oh_port_alloc_ad_chain() takes pcd->lock internally via
++	 * fman_pcd_muram_alloc().  Must NOT be invoked under pcd->lock
++	 * (the original deadlock).
++	 */
+ 	err = oh_port_alloc_ad_chain(port);
+ 	if (err)
+ 		goto err_free_port;
+ 
+-	list_add_tail(&port->node, head);
++	/* Phase 3 -- re-acquire pcd->lock, race-check, insert. */
++	mutex_lock(lock);
++	{
++		struct fman_pcd_oh_port *winner;
++
++		winner = oh_port_registry_find(pcd, oh_idx);
++		if (winner) {
++			/*
++			 * Lost the race: another task completed claim()
++			 * for this oh_idx while we were in Phase 2.
++			 * Bump winner's refcnt, drop pcd->lock, then
++			 * unwind our orphan allocation (AD-chain free
++			 * must run UNLOCKED -- it re-enters MURAM).
++			 */
++			winner->refcnt++;
++			mutex_unlock(lock);
++
++			oh_port_free_ad_chain(port);
++			mutex_destroy(&port->lock);
++			kfree(port);
++			put_device(&pdev->dev);
++			of_node_put(port_node);
++			return winner;
++		}
++		list_add_tail(&port->node, head);
++	}
+ 	mutex_unlock(lock);
+ 
+ 	of_node_put(port_node);
+@@ -386,8 +455,6 @@ err_pdev:
+ 	put_device(&pdev->dev);
+ err_node:
+ 	of_node_put(port_node);
+-err_unlock:
+-	mutex_unlock(lock);
+ 	return ERR_PTR(err);
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_oh_port_claim);
+-- 
+2.39.5
+
