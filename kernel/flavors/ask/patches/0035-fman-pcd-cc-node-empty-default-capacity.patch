@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+Date: Sat, 17 May 2026 05:14:00 +0000
+Subject: [PATCH] fman_pcd_cc: default-cap empty CC node so add_key can grow
+
+PR14m: fixes the M2 silicon perf-gate blocker discovered on
+2026-05-17.
+
+Symptom on PR14l silicon (ISO 2026.05.17-0404):
+
+  ask: hw: FMan PCD v4-TCP scheme bound to port 8 (HW offload active)
+  ask: hw: cc_node_add_key v4-TCP failed (-28)
+  ask: flow: hw_insert(cookie=0x...) hard fail -28
+
+Root cause: ask_hw.c::ask_hw_pcd_build_chain() creates the v4-TCP
+CC node with keys.num_keys = 0 (intentional: empty CC node,
+KG-attached, awaiting per-flow inserts from
+ask_flow_offload_replace -> ask_hw_flow_insert_v4_tcp).
+
+The fman_pcd_cc_node_create() implementation in PR14c-body-2
+(patch 0010) captured the capacity directly from the caller:
+
+    node->max_keys = keys->num_keys;   /* = 0 */
+    slots = (unsigned int)keys->num_keys + 1u; /* = 1 */
+
+So max_keys ended up 0 and the MURAM match/AD tables were sized
+for just the miss row. Then PR14c-body-4 (patch 0012)
+fman_pcd_cc_node_add_key() guards every insert with:
+
+    if (node->num_keys >= node->max_keys) {
+        err = -ENOSPC;
+        goto out;
+    }
+
+With max_keys=0 and num_keys=0 the guard fires on the very first
+insert, every per-flow insert from ask returns -28 (-ENOSPC), and
+the kernel softpath never sheds load.
+
+The 0010 patch's own kernel-doc comment block already calls out
+the intended design ("If keys->num_keys is 0 the node still
+allocates a (0+1)=1-slot match-table and AD-table (just the miss
+row); add_key then grows the live count up to @max_keys") - but
+the implementation contradicted the documented intent because
+@max_keys was tied to keys->num_keys.
+
+This patch reinterprets keys->num_keys==0 as "use the FMan v3
+silicon hard limit as the default capacity" - i.e. allocate a
+255-key MURAM match/AD table so per-flow add_key has room to
+grow. Callers that DO pass a concrete num_keys (with a non-NULL
+keys->keys array) get the original behaviour: pre-populated keys,
+max_keys = num_keys, no further growth.
+
+MURAM cost at v4-TCP key width (ASK_HW_V4_KEY_WIDTH = 13 bytes):
+  match_table = 256 * (2 * 13) =  6,656 B
+  ad_table    = 256 *      16  =  4,096 B
+                                 ------
+                                10,752 B   (~10.5 KB of 64 KB MURAM)
+
+Negligible against the PCD's MURAM budget; in line with the
+"M3+ may add shadow-realloc for dynamic resize; v1.0 keeps the
+allocator simple" remark in the 0010 doc block.
+
+After this patch:
+
+  ask: hw: FMan PCD v4-TCP scheme bound to port 8 (HW offload active)
+  ask: flow_offload: REPLACE cookie=0x... hw_id=0x...
+  (no -ENOSPC follow-up)
+
+and `cat /proc/net/nf_conntrack | grep -c HW_OFFLOAD` becomes
+non-zero during an offloaded iperf3 flow, which is the actual
+M2 acceptance gate per specs/ask2-rewrite-spec.md \11.1.
+
+No ABI / public-header change: struct fman_pcd_cc_key_table still
+exposes only {num_keys, keys, miss_action}. The new behaviour is
+purely an implementation detail of fman_pcd_cc_node_create() and
+is invisible to ask.ko (which already passes num_keys=0).
+
+Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+---
+ drivers/net/ethernet/freescale/fman/fman_pcd_cc.c | 26 +++++++++++++++++++++--
+ 1 file changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -370,7 +370,18 @@ fman_pcd_cc_node_create(struct fman_pcd_cc_tree *tree,
+ 	node->tree = tree;
+ 	node->pcd = pcd;
+ 	node->extract = *extract;
+-	node->max_keys = keys->num_keys;
++	/*
++	 * PR14m: callers (notably ask.ko's ask_hw_pcd_build_chain) create
++	 * the CC node empty (keys->num_keys == 0) and rely on
++	 * fman_pcd_cc_node_add_key() to grow the live key count via
++	 * per-flow offload inserts.  Sizing max_keys to 0 would make
++	 * every add_key return -ENOSPC.  Default to the FMan v3 silicon
++	 * hard cap so the MURAM tables are sized for growth; callers
++	 * that pass a concrete num_keys keep the original capped
++	 * behaviour.
++	 */
++	node->max_keys = keys->num_keys ? keys->num_keys
++					: FMAN_PCD_CC_NODE_KEYS_MAX;
+ 	node->num_keys = 0;
+ 
+ 	/*
+@@ -382,7 +393,18 @@ fman_pcd_cc_node_create(struct fman_pcd_cc_tree *tree,
+ 	 * AD table: (num_keys+1) * 16 bytes per RM 8.7.4.3 - one
+ 	 * 16-byte AD per key slot, last slot is the miss-AD.
+ 	 */
+-	slots = (unsigned int)keys->num_keys + 1u;
++	/*
++	 * PR14m: slot count must match max_keys (not keys->num_keys),
++	 * otherwise the MURAM tables are too small for the keys that
++	 * fman_pcd_cc_node_add_key() will later install.  +1 for the
++	 * trailing miss row per RM 8.7.4.2 paragraph 5.  When the
++	 * caller passes keys->num_keys == 0 this yields
++	 * FMAN_PCD_CC_NODE_KEYS_MAX + 1 = 256 slots which costs
++	 * approximately 10 KB of MURAM at ASK_HW_V4_KEY_WIDTH (13 B)
++	 * - negligible against the 64 KB PCD MURAM reservation.
++	 */
++	slots = (unsigned int)node->max_keys + 1u;
+ 	match_sz = (size_t)slots * (2u * (size_t)extract->size);
+ 	ad_sz = (size_t)slots * FMAN_PCD_CC_AD_ENTRY_SIZE;
+ 
+-- 
+2.39.5
