@@ -127,34 +127,41 @@ index 3edc8d1..c564ee0 100644
 +EXPORT_SYMBOL_GPL(dpaa_unregister_flow_offload_handler);
 +
  static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
- 			 void *type_data)
+   void *type_data)
  {
-@@ -376,6 +445,26 @@ static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
- 	u8 num_tc;
- 	int i;
+@@ -376,6 +445,33 @@ static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
+ u8 num_tc;
+ int i;
  
-+	/* ASK2 — dispatch flow-block offloads to the registered
-+	 * backend (typically ask.ko). Returns -EOPNOTSUPP if no
-+	 * backend is registered, which lets the upper layer fall
-+	 * back to software flow_offload.
-+	 */
-+	if (type == TC_SETUP_BLOCK || type == TC_SETUP_FT) {
-+		const struct dpaa_flow_offload_ops *ops;
-+		int err;
++/* PR14o diagnostic — fire a one-shot pr_info per (netdev, type)
++ * combination so we can verify in dmesg that the dpaa driver IS
++ * receiving the call from upper layers. Was previously invisible.
++ */
++pr_info_once("dpaa: setup_tc called dev=%s type=%u (PR14o diagnostic, once-per-boot)\n",
++     netdev_name(net_dev), (unsigned int)type);
 +
-+		rcu_read_lock();
-+		ops = rcu_dereference(dpaa_fo_ops_slot);
-+		if (!ops) {
-+			rcu_read_unlock();
-+			return -EOPNOTSUPP;
-+		}
-+		err = ops->setup_tc_block(net_dev, type_data);
-+		rcu_read_unlock();
-+		return err;
-+	}
++/* ASK2 — dispatch flow-block offloads to the registered
++ * backend (typically ask.ko). Returns -EOPNOTSUPP if no
++ * backend is registered, which lets the upper layer fall
++ * back to software flow_offload.
++ */
++if (type == TC_SETUP_BLOCK || type == TC_SETUP_FT) {
++const struct dpaa_flow_offload_ops *ops;
++int err;
 +
- 	if (type != TC_SETUP_QDISC_MQPRIO)
- 		return -EOPNOTSUPP;
++rcu_read_lock();
++ops = rcu_dereference(dpaa_fo_ops_slot);
++if (!ops) {
++rcu_read_unlock();
++return -EOPNOTSUPP;
++}
++err = ops->setup_tc_block(net_dev, type_data);
++rcu_read_unlock();
++return err;
++}
++
+ if (type != TC_SETUP_QDISC_MQPRIO)
+ return -EOPNOTSUPP;
  
 diff --git a/include/linux/fsl/dpaa_flow_offload.h b/include/linux/fsl/dpaa_flow_offload.h
 new file mode 100644

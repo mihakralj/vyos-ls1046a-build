@@ -489,6 +489,13 @@ static int ask_flow_offload_stats(struct flow_cls_offload *f)
 
 /*
  * The single flow_block_cb consumed by both nf_flow_table and tc-flower.
+ *
+ * PR14o instrumentation: emit a ratelimited pr_info on first entry per
+ * netdev so a production build with no dyndbg still proves whether our
+ * cb is being invoked at all. The M2 verification on 2026-05-17 showed
+ * BIND events firing but no REPLACE events — this trace is what we need
+ * to confirm whether nf_flow_table_offload reaches us or silently aborts
+ * in nf_flow_offload_alloc().
  */
 int ask_flow_offload_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
                                        void *cb_priv)
@@ -496,17 +503,29 @@ int ask_flow_offload_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
         struct flow_cls_offload *f = type_data;
         struct net_device *dev = ask_flow_block_priv_dev(cb_priv);
 
-        if (type != TC_SETUP_CLSFLOWER)
+        if (type != TC_SETUP_CLSFLOWER) {
+                pr_warn_ratelimited("ask: flow_offload: unexpected tc_setup_type=%u (expected CLSFLOWER)\n",
+                                    type);
                 return -EOPNOTSUPP;
+        }
 
         switch (f->command) {
         case FLOW_CLS_REPLACE:
+                pr_info_ratelimited("ask: flow_offload: cb invoked REPLACE cookie=0x%lx dev=%s\n",
+                                    f->cookie,
+                                    dev ? netdev_name(dev) : "?");
                 return ask_flow_offload_replace(dev, f);
         case FLOW_CLS_DESTROY:
+                pr_info_ratelimited("ask: flow_offload: cb invoked DESTROY cookie=0x%lx\n",
+                                    f->cookie);
                 return ask_flow_offload_destroy(f);
         case FLOW_CLS_STATS:
+                /* STATS fires once per refresh interval per flow; keep at
+                 * dbg level to avoid spam. */
                 return ask_flow_offload_stats(f);
         default:
+                pr_warn_ratelimited("ask: flow_offload: unexpected flow_cls command=%u\n",
+                                    f->command);
                 return -EOPNOTSUPP;
         }
 }
@@ -561,9 +580,9 @@ int ask_flow_offload_setup_tc(struct net_device *dev,
                 list_add_tail(&block_cb->driver_list,
                               &ask_flow_block_cb_list);
 
-                ask_pr_dbg("flow_offload: BIND %s (dir=%d; PR14j defers KG bind to REPLACE)\n",
-                           netdev_name(dev),
-                           ask_flow_offload_classify_dir(dev));
+                pr_info_ratelimited("ask: flow_offload: BIND %s (dir=%d; PR14j defers KG bind to REPLACE)\n",
+                                    netdev_name(dev),
+                                    ask_flow_offload_classify_dir(dev));
                 return 0;
 
         case FLOW_BLOCK_UNBIND:
@@ -697,7 +716,7 @@ int ask_flow_offload_init(void)
                 return rc;
         }
 
-        ask_pr_info("flow_offload: ready (PR14n: dpaa_eth ndo + indr nft-flowtable bind)\n");
+        ask_pr_info("flow_offload: ready (PR14o: dpaa_eth ndo + indr nft-flowtable bind, cb-trace pr_info)\n");
         return 0;
 }
 
