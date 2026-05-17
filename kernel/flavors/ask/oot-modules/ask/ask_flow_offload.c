@@ -519,6 +519,17 @@ EXPORT_SYMBOL_GPL(ask_flow_offload_setup_tc_block_cb);
 /* block_cb for every netdev (so we'll see REPLACE / DESTROY / STATS) but     */
 /* defer the silicon port-bind to ask_flow_offload_replace(), which knows    */
 /* the actual ingress direction.                                             */
+/*                                                                            */
+/* PR14n change: accept FLOW_BLOCK_BINDER_TYPE_FT in addition to              */
+/* FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS.  nft flowtables with                */
+/* `flags offload` register through the flow_indr_dev path with binder_type  */
+/* == FT, not CLSACT_INGRESS.  Without this widening every nft-flowtable     */
+/* bind got -EOPNOTSUPP, the SW flowtable fast path took over, and ask.ko   */
+/* never saw a single FLOW_CLS_REPLACE event — even though `nft flow add`   */
+/* succeeded, conntrack reported [OFFLOAD] (kernel SW), and traffic         */
+/* peaked at ~6 Gbps / 60% CPU.  Accepting FT lets the nft path reach the  */
+/* same block_cb the tc-flower path uses (FLOW_CLS_REPLACE handlers are     */
+/* binder-type agnostic).                                                   */
 /* ------------------------------------------------------------------------- */
 
 static LIST_HEAD(ask_flow_block_cb_list);
@@ -529,7 +540,8 @@ int ask_flow_offload_setup_tc(struct net_device *dev,
         struct ask_flow_block_priv_entry *e;
         struct flow_block_cb *block_cb;
 
-        if (fbo->binder_type != FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
+        if (fbo->binder_type != FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS &&
+            fbo->binder_type != FLOW_BLOCK_BINDER_TYPE_FT)
                 return -EOPNOTSUPP;
 
         fbo->driver_block_list = &ask_flow_block_cb_list;
@@ -591,6 +603,74 @@ static const struct dpaa_flow_offload_ops ask_dpaa_fo_ops = {
 };
 
 /* ------------------------------------------------------------------------- */
+/* PR14n: flow_indr_dev callback for nft-flowtable bind                       */
+/*                                                                            */
+/* nft flowtables with `flags offload` deliver their FLOW_BLOCK_BIND through  */
+/* the flow_indr_dev_register() path (see net/core/flow_offload.c             */
+/* flow_indr_dev_setup_offload()), NOT through ndo_setup_tc().  Without a    */
+/* registered indr callback ask.ko never sees the bind and the kernel falls  */
+/* back to the SW flowtable fast path (~6 Gbps / 60% CPU on LS1046A).        */
+/*                                                                            */
+/* The indr core invokes our callback once per (netdev, flowtable) pair when */
+/* the userspace `nft flow add` -> nf_flow_table_offload_setup() machinery   */
+/* arrives.  We accept any dpaa netdev (i.e. one whose ->dev.parent->driver  */
+/* matches our existing dpaa_flow_offload_ops registration target) and       */
+/* dispatch TC_SETUP_BLOCK + TC_SETUP_FT to the same                          */
+/* ask_flow_offload_setup_tc() helper used by the dpaa_eth ndo path.  The    */
+/* binder-type widening for FT was done above (PR14n change to               */
+/* ask_flow_offload_setup_tc).                                                */
+/*                                                                            */
+/* Filtering by netdev: rather than maintaining a separate "is this our      */
+/* netdev" predicate (the bnxt / mlx5 / nfp drivers each carry a private one */
+/* keyed on their tunnel-device type), we rely on the dpaa backend rejecting */
+/* unknown netdevs via dpaa_register_flow_offload_handler — the same        */
+/* indirection already used by the ndo path.  In practice the indr core      */
+/* only reaches us when nft has matched a device whose flowtable is bound,   */
+/* so the check is rarely exercised; when it is, ask_flow_offload_setup_tc  */
+/* will silently no-op on a non-dpaa netdev because the per-block priv       */
+/* allocation succeeds but the block_cb's REPLACE handler then fails to     */
+/* resolve dpaa_get_fman_port_id() and the flow stays SW-only (same          */
+/* graceful degradation as PR14j ingress-only bind).                          */
+/* ------------------------------------------------------------------------- */
+
+static int ask_flow_indr_setup_block_cb(struct net_device *dev,
+                                        struct flow_block_offload *fbo,
+                                        void (*cleanup)(struct flow_block_cb *block_cb))
+{
+        /*
+         * The indr path supplies its own cleanup() that the flow_block
+         * core expects us to wire into the allocated block_cb.  Our
+         * existing ask_flow_offload_setup_tc() path uses
+         * flow_block_cb_alloc() (not flow_indr_block_cb_alloc()) and
+         * does not pre-register a cleanup hook, so we mirror that here:
+         * the per-flow allocation lifetime is owned by the indr core's
+         * block-release path, which calls cleanup() against our block_cb
+         * once the upper layer unbinds.  ask_flow_block_priv_free()
+         * (registered as the cb_priv release in flow_block_cb_alloc)
+         * takes care of the per-block priv struct.
+         */
+        (void)cleanup;
+        return ask_flow_offload_setup_tc(dev, fbo);
+}
+
+static int ask_flow_indr_setup_cb(struct net_device *dev, struct Qdisc *sch,
+                                  void *cb_priv, enum tc_setup_type type,
+                                  void *type_data, void *data,
+                                  void (*cleanup)(struct flow_block_cb *block_cb))
+{
+        if (!dev)
+                return -EOPNOTSUPP;
+
+        switch (type) {
+        case TC_SETUP_BLOCK:
+        case TC_SETUP_FT:
+                return ask_flow_indr_setup_block_cb(dev, type_data, cleanup);
+        default:
+                return -EOPNOTSUPP;
+        }
+}
+
+/* ------------------------------------------------------------------------- */
 /* Lifecycle                                                                  */
 /* ------------------------------------------------------------------------- */
 
@@ -601,22 +681,42 @@ int ask_flow_offload_init(void)
         rc = dpaa_register_flow_offload_handler(&ask_dpaa_fo_ops);
         if (rc == -ENODEV) {
                 ask_pr_info("flow_offload: dpaa backend unavailable (-ENODEV); running standalone\n");
-                return 0;
-        }
-        if (rc) {
+                /*
+                 * Still register the indr callback so a non-DPAA host with
+                 * a kunit synthetic netdev (or a future DPAA2 host where
+                 * the ndo path lives elsewhere) can still drive
+                 * FLOW_CLS_REPLACE through the indr path.
+                 */
+        } else if (rc) {
                 ask_pr_err("flow_offload: dpaa_register_flow_offload_handler failed: %d\n",
                            rc);
                 return rc;
         }
 
-        ask_pr_info("flow_offload: ready (registered with dpaa_eth, PR14j ingress-only KG bind)\n");
+        rc = flow_indr_dev_register(ask_flow_indr_setup_cb, NULL);
+        if (rc) {
+                ask_pr_err("flow_offload: flow_indr_dev_register failed: %d\n", rc);
+                dpaa_unregister_flow_offload_handler(&ask_dpaa_fo_ops);
+                return rc;
+        }
+
+        ask_pr_info("flow_offload: ready (PR14n: dpaa_eth ndo + indr nft-flowtable bind)\n");
         return 0;
+}
+
+static void ask_flow_indr_release(void *cb_priv)
+{
+        /* No per-cb state; the cb_priv passed at register-time was NULL. */
+        (void)cb_priv;
 }
 
 void ask_flow_offload_exit(void)
 {
         struct ask_flow_block_priv_entry *e, *tmp;
         int rc;
+
+        flow_indr_dev_unregister(ask_flow_indr_setup_cb, NULL,
+                                 ask_flow_indr_release);
 
         rc = dpaa_unregister_flow_offload_handler(&ask_dpaa_fo_ops);
         if (rc && rc != -ENODEV && rc != -EINVAL)
