@@ -81,9 +81,10 @@ Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
  1 file changed, 24 insertions(+), 2 deletions(-)
 
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index b40d998dd..e7f6cc204 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
-@@ -370,7 +370,18 @@ fman_pcd_cc_node_create(struct fman_pcd_cc_tree *tree,
+@@ -677,7 +677,18 @@ fman_pcd_cc_node_create(struct fman_pcd_cc_tree *tree,
  	node->tree = tree;
  	node->pcd = pcd;
  	node->extract = *extract;
@@ -99,11 +100,11 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/eth
 +	 * behaviour.
 +	 */
 +	node->max_keys = keys->num_keys ? keys->num_keys
-+					: FMAN_PCD_CC_NODE_KEYS_MAX;
++				       : FMAN_PCD_CC_NODE_KEYS_MAX;
  	node->num_keys = 0;
  
  	/*
-@@ -382,7 +393,18 @@ fman_pcd_cc_node_create(struct fman_pcd_cc_tree *tree,
+@@ -689,7 +700,17 @@ fman_pcd_cc_node_create(struct fman_pcd_cc_tree *tree,
  	 * AD table: (num_keys+1) * 16 bytes per RM 8.7.4.3 - one
  	 * 16-byte AD per key slot, last slot is the miss-AD.
  	 */
@@ -122,5 +123,3 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/eth
  	match_sz = (size_t)slots * (2u * (size_t)extract->size);
  	ad_sz = (size_t)slots * FMAN_PCD_CC_AD_ENTRY_SIZE;
  
--- 
-2.39.5
