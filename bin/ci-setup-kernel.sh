@@ -162,6 +162,22 @@ else
     echo "WARNING: $PERF_HEADERS_PATCH missing — kernel arm64 perf build will fail"
 fi
 
+# Stage PR14o diagnostic patch:
+#   130-nf-flow-offload-log-alloc-failure.patch — adds a
+#   net_warn_ratelimited() to nf_flow_table_offload.c's
+#   flow_offload_work_add() silent-return path so the operator can see
+#   when nf_flow_offload_alloc() fails and HW offload is aborted before
+#   reaching the driver's FLOW_CLS_REPLACE cb. Required to diagnose the
+#   M2 acceptance gate failure (2026-05-17: BIND fires, REPLACE never
+#   does). Flavor-agnostic; safe for default/ask/vpp.
+NF_FLOW_LOG_PATCH="$COMMON_FIXES_DIR/130-nf-flow-offload-log-alloc-failure.patch"
+if [ -f "$NF_FLOW_LOG_PATCH" ]; then
+    echo "### Staging $(basename "$NF_FLOW_LOG_PATCH") (PR14o nf_flow_table_offload alloc-failure diagnostic)"
+    cp "$NF_FLOW_LOG_PATCH" "$KERNEL_PATCHES/"
+else
+    echo "WARNING: $NF_FLOW_LOG_PATCH missing — PR14o REPLACE-delivery diagnostic disabled"
+fi
+
 ### FLAVOR=ask: stage the ASK2 in-tree kernel patches
 #
 # Per plans/ASK2-IMPLEMENTATION.md PR2/PR3 and spec §10, the ASK2
