@@ -386,16 +386,25 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
         u32 oif = 0;
         int rc;
 
-        if (!t)
+        if (!t) {
+                pr_info_ratelimited("ask: flow_offload: REPLACE early-return (no default table) cookie=0x%lx\n",
+                                    f->cookie);
                 return -EOPNOTSUPP;
+        }
 
         rc = ask_parse_match_v4(f, &key);
-        if (rc)
+        if (rc) {
+                pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_match_v4=%d) cookie=0x%lx\n",
+                                    rc, f->cookie);
                 return rc;
+        }
 
         rc = ask_parse_action(f, &action_flags, &oif, &egress_dev);
-        if (rc)
+        if (rc) {
+                pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_action=%d) cookie=0x%lx\n",
+                                    rc, f->cookie);
                 return rc;
+        }
 
         /*
          * PR14j: resolve the OH-chain L2 header.  We need
@@ -440,13 +449,24 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                              action_flags, &hw_id);
         if (rc == -EEXIST)
                 return 0;
-        if (rc)
+        if (rc) {
+                pr_info_ratelimited("ask: flow_offload: REPLACE flow_insert=%d cookie=0x%lx oif=%u nh=%pM em=%pM\n",
+                                    rc, f->cookie, oif,
+                                    key.next_hop_mac, key.egress_mac);
                 return rc;
+        }
 
-        ask_pr_dbg("flow_offload: REPLACE cookie=0x%lx hw_id=0x%08x ingress=%s oif=%u next_hop=%pM egress_mac=%pM\n",
-                   f->cookie, hw_id,
-                   ingress_dev ? netdev_name(ingress_dev) : "?", oif,
-                   key.next_hop_mac, key.egress_mac);
+        /*
+         * PR14p: surface what tier of offload was actually achieved.
+         * hw_id bit-31 set => packed (token,slot) from a real HW insert;
+         * hw_id with token bits clear => SW-only fake counter (HW insert
+         * returned -ENODEV/-EOPNOTSUPP and ask_flow_insert fell back).
+         */
+        pr_info_ratelimited("ask: flow_offload: REPLACE installed cookie=0x%lx hw_id=0x%08x %s ingress=%s oif=%u nh=%pM em=%pM\n",
+                            f->cookie, hw_id,
+                            (hw_id & 0xffff0000) ? "HW" : "SW-fallback",
+                            ingress_dev ? netdev_name(ingress_dev) : "?", oif,
+                            key.next_hop_mac, key.egress_mac);
         return 0;
 }
 

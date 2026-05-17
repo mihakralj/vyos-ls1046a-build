@@ -66,12 +66,16 @@
 set -euo pipefail
 
 # ------------------------------------------------------------ defaults
+# Defaults match the actually-cabled M2 rig (PR14o-verified 2026-05-17):
+#   lxc201 (10.99.1.2) -> mono eth3 (10.99.1.1/30) -> mono eth4 (192.168.1.192)
+#                                                  -> lxc200 sink (192.168.1.137)
+# Override env vars to point at a different topology.
 DUT="${DUT:-vyos}"
-GEN_HOST="${GEN_HOST:-lxc200}"
-SINK_HOST="${SINK_HOST:-lxc201}"
-SINK_IP="${SINK_IP:-10.99.2.2}"
-IFACE_IN="${IFACE_IN:-vyos-eth1}"
-IFACE_OUT="${IFACE_OUT:-vyos-eth2}"
+GEN_HOST="${GEN_HOST:-lxc201}"
+SINK_HOST="${SINK_HOST:-lxc200}"
+SINK_IP="${SINK_IP:-192.168.1.137}"
+IFACE_IN="${IFACE_IN:-eth3}"
+IFACE_OUT="${IFACE_OUT:-eth4}"
 DURATION="${DURATION:-30}"
 PARALLEL="${PARALLEL:-8}"
 THRESHOLD_GBPS="${THRESHOLD_GBPS:-2.0}"
