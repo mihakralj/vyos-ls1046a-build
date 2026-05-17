@@ -355,13 +355,39 @@ static int ask_parse_action(struct flow_cls_offload *f,
                 case FLOW_ACTION_PTYPE:
                 case FLOW_ACTION_ACCEPT:
                         break;
+                /*
+                 * PR14q: kernel 6.18 nft flowtable offload emits
+                 * FLOW_ACTION_MANGLE (L2 dst-MAC + IP TTL decrement at
+                 * minimum, optionally NAT src/dst rewrite) BEFORE the
+                 * FLOW_ACTION_REDIRECT that names the egress netdev.
+                 * PR14p instrumentation on 2026-05-17 caught every
+                 * REPLACE returning -EOPNOTSUPP (-95) from this switch
+                 * because MANGLE was unhandled. The HW path does not
+                 * yet apply MANGLE rewrites (OH-port chain only pushes
+                 * the next-hop L2 header from neigh_lookup); we accept
+                 * the action as a no-op here so that the REDIRECT that
+                 * follows actually gets to set oif. Header rewrite
+                 * fidelity is deferred to PR14r/PR14s.
+                 *
+                 * FLOW_ACTION_TUNNEL_ENCAP / FLOW_ACTION_TUNNEL_DECAP
+                 * are similarly accepted as no-ops so a future kernel
+                 * that emits them on the flowtable path does not
+                 * regress us back to silent SW fallback.
+                 */
+                case FLOW_ACTION_MANGLE:
+                case FLOW_ACTION_ADD:
+                        break;
                 default:
+                        pr_info_ratelimited("ask: flow_offload: parse_action: unhandled act->id=%u (treating as -EOPNOTSUPP)\n",
+                                            act->id);
                         return -EOPNOTSUPP;
                 }
         }
 
-        if (oif == 0)
+        if (oif == 0) {
+                pr_info_ratelimited("ask: flow_offload: parse_action: no REDIRECT/MIRRED found (oif still 0)\n");
                 return -EOPNOTSUPP;
+        }
 
         *out_action_flags = flags;
         *out_oif = oif;
