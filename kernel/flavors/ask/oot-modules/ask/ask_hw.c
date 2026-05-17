@@ -67,34 +67,45 @@ static struct ask_hw_ucode_version ask_hw_cached;
 static bool ask_hw_cached_valid;
 
 /*
- * PR14j-hotfix (2026-05-16): ask_hw_pcd_bringup_oh() deadlocks on real
- * LS1046A silicon because kernel patch 0032 fman_pcd_oh_port_claim()
- * holds pcd->lock across oh_port_alloc_ad_chain() which re-enters
- * fman_pcd_muram_alloc() taking the same mutex (recursive deadlock —
- * systemd-modules-load hung_task fires at +122s).
+ * PR14l (2026-05-17): default flipped to true.  Silicon-verified on mono
+ * with PR14k (kernel patch 0034 — fman_pcd_oh_port_claim lock-split into
+ * 3 phases so MURAM alloc no longer recurses on pcd->lock).  Boot is
+ * clean, dmesg reports "ask: hw: PR14j OH-port chain ready (oh_idx=0,
+ * input_fqid=0x40)" and there is no hung_task at +122s.
  *
- * Until patch 0032 is fixed (split the critical section: alloc AD chain
- * outside the lock, then re-acquire only to insert into the registry
- * list), this module parameter gates the OH-port bring-up call.
+ * History:
+ *   PR14j-hotfix (2026-05-16): added this gate (default off) because
+ *     pre-PR14k fman_pcd_oh_port_claim() held pcd->lock across
+ *     oh_port_alloc_ad_chain() which re-entered fman_pcd_muram_alloc()
+ *     taking the same mutex — systemd-modules-load hung_task at +122s.
+ *   PR14k (2026-05-17):       split fman_pcd_oh_port_claim() into 3
+ *     phases (locked lookup, unlocked construction incl. MURAM alloc,
+ *     locked race-check+insert).  Verified on mono with
+ *     enable_oh_chain=1 forced via /etc/modprobe.d.
+ *   PR14l (2026-05-17):       flipped default to true so fresh boots
+ *     arm the OH-port chain without needing the modprobe.d override.
  *
- *   ask.enable_oh_chain=0  (default) — skip bringup_oh(); ask.ko loads
- *                                       cleanly, KG+CC stays armed but
- *                                       silicon-bypass HW offload falls
- *                                       back to SW (-ENODEV from the
- *                                       ask_hw_flow_insert_v4_tcp gate).
- *   ask.enable_oh_chain=1            — attempt bringup_oh(); will hang
- *                                       on current silicon, kept for
- *                                       post-fix re-verification.
+ *   ask.enable_oh_chain=1  (default) — call bringup_oh(); on success
+ *                                       silicon-bypass HW offload is
+ *                                       live.  On failure (claim error,
+ *                                       MURAM exhaustion, …) ask.ko
+ *                                       still loads and HW offload
+ *                                       falls back to SW.
+ *   ask.enable_oh_chain=0            — skip bringup_oh() entirely;
+ *                                       KG+CC stays armed but every
+ *                                       ask_hw_flow_insert_v4_tcp()
+ *                                       returns -ENODEV → SW fallback.
+ *                                       Kept as a kill-switch for
+ *                                       diagnostics and bisection.
  *
- * Diagnostic stored in qdrant 2026-05-16 with tags oh-port-deadlock /
- * muram-mutex / patch-0032 / real-silicon-failure for the next session.
+ * Diagnostic memos in qdrant: oh-port-deadlock / muram-alloc-recursion /
+ * pcd-lock / recursive-mutex / pr14k / silicon-verified-2026-05-17.
  */
-static bool ask_enable_oh_chain;
+static bool ask_enable_oh_chain = true;
 module_param_named(enable_oh_chain, ask_enable_oh_chain, bool, 0444);
 MODULE_PARM_DESC(enable_oh_chain,
-        "PR14j OH-port silicon-bypass chain bring-up (default off — "
-        "patch 0032 fman_pcd_oh_port_claim deadlocks on LS1046A; "
-        "leave off until PR14k lands)");
+        "PR14j OH-port silicon-bypass chain bring-up (default on since "
+        "PR14l/PR14k — set to 0 only as a kill-switch for diagnostics)");
 
 /* ------------------------------------------------------------------------- */
 /* QEF blob parsing                                                           */
@@ -599,12 +610,12 @@ int ask_hw_pcd_bringup(void)
          * traverse the kernel slow path — they just are not silicon-
          * accelerated.
          *
-         * PR14j-hotfix: gated behind module parameter (default OFF) because
-         * fman_pcd_oh_port_claim() in kernel patch 0032 deadlocks on real
-         * LS1046A silicon — see top-of-file note + qdrant entry
-         * tagged oh-port-deadlock dated 2026-05-16.  Set
-         * ask.enable_oh_chain=1 on the kernel command line to re-enable
-         * once patch 0032 is fixed in PR14k.
+         * PR14l (2026-05-17): the ask.enable_oh_chain module parameter
+         * now defaults to true since PR14k fixed the pcd->lock recursive
+         * deadlock in fman_pcd_oh_port_claim() (kernel patch 0034 —
+         * see top-of-file note + qdrant entry tagged pr14k /
+         * silicon-verified-2026-05-17).  Set ask.enable_oh_chain=0
+         * as a kill-switch for diagnostics or bisection.
          */
         if (ask_enable_oh_chain) {
                 (void)ask_hw_pcd_bringup_oh(h);
