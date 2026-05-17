@@ -177,6 +177,93 @@ numbers up to ~3 Gbps remain reachable through the loop.
 
 ---
 
+## M2 acceptance — VyOS conntrack pre-requisite
+
+The M2 acceptance gate (`bin/verify-ask-flow-offload.sh`) drives an
+iperf3 burst across `eth3 → eth4` and reads `/proc/net/nf_conntrack`
+to confirm the flow shows the `[HW_OFFLOAD]` mark and CPU stays ≤5 %.
+Both signals depend on **conntrack actually tracking the test flow**,
+which VyOS does **not** do by default for forwarded traffic.
+
+### What VyOS does at boot
+
+VyOS commits a default nftables ruleset that ends the `ip
+vyos_conntrack PREROUTING` chain with a literal:
+
+```
+chain PREROUTING {
+    type filter hook prerouting priority -300; policy accept;
+    ...
+    notrack                              # handle 25 (or similar)
+}
+```
+
+The `notrack` verdict short-circuits the conntrack engine for every
+packet that reaches it without a prior firewall/NAT rule promoting
+the flow to be tracked. For a vanilla "two-interface routed forward"
+config — exactly what the M2 harness sets up — every iperf3 packet
+hits `notrack`, `/proc/net/nf_conntrack` stays empty for the test
+5-tuple, and `nft flow add @ft1` is a silent no-op. The HW offload
+chain (`ask_flow_offload_setup_tc_block_cb` → `FLOW_CLS_REPLACE` →
+`ask_flow_insert`) is never exercised because the flowtable has no
+flow entries to install.
+
+This was the root cause of the 2026-05-17 M2 gate FAIL (6.471 Gbps /
+61.57 % CPU): the SW flowtable did all the forwarding, the silicon
+stayed idle, and `dmesg` showed BIND events but zero REPLACE events.
+
+### Mandatory M2 harness pre-condition
+
+Before each M2 run, one of the following must be true:
+
+1. **Promote the test flow to be tracked.** Add a VyOS firewall rule
+   that fires on the iperf3 5-tuple, e.g.
+
+   ```
+   set firewall ipv4 forward filter rule 10 action accept
+   set firewall ipv4 forward filter rule 10 destination port 5201
+   set firewall ipv4 forward filter rule 10 protocol tcp
+   commit
+   ```
+
+   The presence of a `filter` rule in `forward` causes the conntrack
+   PREROUTING chain to track matching flows instead of falling through
+   to `notrack`.
+
+2. **Disable the `notrack` rule for the duration of the test.** Cheap
+   but invasive:
+
+   ```
+   sudo nft delete rule ip vyos_conntrack PREROUTING handle 25
+   ```
+
+   (The handle number can drift across VyOS releases — confirm with
+   `sudo nft -a list chain ip vyos_conntrack PREROUTING`.) The test
+   harness must restore the rule afterwards or save/restore the
+   entire ruleset.
+
+3. **Use a custom test config that omits `vyos_conntrack`.** Possible
+   on a stripped-down test image but adds maintenance burden.
+
+`bin/verify-ask-flow-offload.sh` currently assumes option (1) is in
+effect — a `set firewall ipv4 forward filter` rule is added to the
+DUT's running config before the test. Without that pre-condition the
+script's HW offload assertion will fail with no useful diagnostic,
+because the SW flowtable also won't engage (conntrack is required for
+the flowtable add path too) — the harness will simply report
+"0 entries in @ft1, expected ≥1".
+
+### Cross-reference
+
+This is documented separately in:
+
+- `plans/PR14o-DESIGN.md` §"Bonus — VyOS pre-condition" (the
+  discovery write-up).
+- `bin/verify-ask-flow-offload.sh` — the harness must `set firewall`
+  + `commit` as part of its setup phase.
+
+---
+
 ## M0 — Build pipeline scaffolding *(no hardware required)*
 
 **Acceptance gate:** `FLAVOR=ask gh workflow run "VyOS LS1046A build (self-hosted)"`

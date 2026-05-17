@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+Date: Sat, 17 May 2026 08:30:00 +0000
+Subject: [PATCH] netfilter: nf_flow_table_offload: log silent alloc failure
+
+PR14o diagnostic -- the upstream flow_offload_work_add() swallows
+nf_flow_offload_alloc() failures silently. When the alloc fails
+(e.g. unresolved neighbour during flow_offload_eth_src/eth_dst,
+or any of the five other failure sites in nf_flow_rule_route_common),
+the offload work item is dropped without a single message, the
+driver'\''s FLOW_CLS_REPLACE cb is never invoked, and the operator
+has no way to tell from dmesg why HW offload did not engage.
+
+On NXP LS1046A (ASK2 / ask.ko), this exact failure mode resulted in
+the M2 acceptance gate (2026-05-17, ISO 2026.05.17-0738-rolling)
+reporting 6.471 Gbps / 61.57 %% CPU -- the SW flowtable doing all the
+forwarding work while the silicon stayed idle, and zero indication
+why. The BIND eth3 / BIND eth4 traces from ask.ko fired correctly,
+but REPLACE never did.
+
+Add a net_warn_ratelimited() on the silent return path so the
+failure is visible. One line, ratelimited; cannot spam the log.
+
+Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+---
+ net/netfilter/nf_flow_table_offload.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/net/netfilter/nf_flow_table_offload.c b/net/netfilter/nf_flow_table_offload.c
+index aaaaaaa..bbbbbbb 100644
+--- a/net/netfilter/nf_flow_table_offload.c
++++ b/net/netfilter/nf_flow_table_offload.c
+@@ -974,8 +974,11 @@ static void flow_offload_work_add(struct flow_offload_work *offload)
+ 	int err;
+ 
+ 	err = nf_flow_offload_alloc(offload, flow_rule);
+-	if (err < 0)
++	if (err < 0) {
++		net_warn_ratelimited("nf_flow_table_offload: alloc failed err=%d flow=%p cmd=%d -- HW offload silently aborted (PR14o diagnostic)\n",
++				     err, offload->flow, offload->cmd);
+ 		return;
++	}
+ 
+ 	err = flow_offload_rule_add(offload, flow_rule);
+ 	if (err < 0)
+-- 
+2.39.5
