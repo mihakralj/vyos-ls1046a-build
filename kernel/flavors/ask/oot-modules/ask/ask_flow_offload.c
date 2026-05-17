@@ -520,16 +520,14 @@ EXPORT_SYMBOL_GPL(ask_flow_offload_setup_tc_block_cb);
 /* defer the silicon port-bind to ask_flow_offload_replace(), which knows    */
 /* the actual ingress direction.                                             */
 /*                                                                            */
-/* PR14n change: accept FLOW_BLOCK_BINDER_TYPE_FT in addition to              */
-/* FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS.  nft flowtables with                */
-/* `flags offload` register through the flow_indr_dev path with binder_type  */
-/* == FT, not CLSACT_INGRESS.  Without this widening every nft-flowtable     */
-/* bind got -EOPNOTSUPP, the SW flowtable fast path took over, and ask.ko   */
-/* never saw a single FLOW_CLS_REPLACE event — even though `nft flow add`   */
-/* succeeded, conntrack reported [OFFLOAD] (kernel SW), and traffic         */
-/* peaked at ~6 Gbps / 60% CPU.  Accepting FT lets the nft path reach the  */
-/* same block_cb the tc-flower path uses (FLOW_CLS_REPLACE handlers are     */
-/* binder-type agnostic).                                                   */
+/* PR14n note: kernel 6.18 nft flowtable offload (nf_flow_table_offload.c)   */
+/* sets bo->binder_type = FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS — there is   */
+/* no FLOW_BLOCK_BINDER_TYPE_FT enumerator in this kernel (the value was     */
+/* never landed upstream by the time of 6.18).  Both tc-flower and nft       */
+/* flowtable therefore arrive with binder_type==CLSACT_INGRESS, so a single  */
+/* equality check suffices.  The real PR14n fix is the flow_indr_dev         */
+/* registration below — that's what unblocks the nft-flowtable bind path,   */
+/* not a binder-type widening.                                                */
 /* ------------------------------------------------------------------------- */
 
 static LIST_HEAD(ask_flow_block_cb_list);
@@ -540,8 +538,7 @@ int ask_flow_offload_setup_tc(struct net_device *dev,
         struct ask_flow_block_priv_entry *e;
         struct flow_block_cb *block_cb;
 
-        if (fbo->binder_type != FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS &&
-            fbo->binder_type != FLOW_BLOCK_BINDER_TYPE_FT)
+        if (fbo->binder_type != FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
                 return -EOPNOTSUPP;
 
         fbo->driver_block_list = &ask_flow_block_cb_list;
