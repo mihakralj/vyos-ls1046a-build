@@ -67,45 +67,15 @@ static struct ask_hw_ucode_version ask_hw_cached;
 static bool ask_hw_cached_valid;
 
 /*
- * PR14l (2026-05-17): default flipped to true.  Silicon-verified on mono
- * with PR14k (kernel patch 0034 — fman_pcd_oh_port_claim lock-split into
- * 3 phases so MURAM alloc no longer recurses on pcd->lock).  Boot is
- * clean, dmesg reports "ask: hw: PR14j OH-port chain ready (oh_idx=0,
- * input_fqid=0x40)" and there is no hung_task at +122s.
- *
- * History:
- *   PR14j-hotfix (2026-05-16): added this gate (default off) because
- *     pre-PR14k fman_pcd_oh_port_claim() held pcd->lock across
- *     oh_port_alloc_ad_chain() which re-entered fman_pcd_muram_alloc()
- *     taking the same mutex — systemd-modules-load hung_task at +122s.
- *   PR14k (2026-05-17):       split fman_pcd_oh_port_claim() into 3
- *     phases (locked lookup, unlocked construction incl. MURAM alloc,
- *     locked race-check+insert).  Verified on mono with
- *     enable_oh_chain=1 forced via /etc/modprobe.d.
- *   PR14l (2026-05-17):       flipped default to true so fresh boots
- *     arm the OH-port chain without needing the modprobe.d override.
- *
- *   ask.enable_oh_chain=1  (default) — call bringup_oh(); on success
- *                                       silicon-bypass HW offload is
- *                                       live.  On failure (claim error,
- *                                       MURAM exhaustion, …) ask.ko
- *                                       still loads and HW offload
- *                                       falls back to SW.
- *   ask.enable_oh_chain=0            — skip bringup_oh() entirely;
- *                                       KG+CC stays armed but every
- *                                       ask_hw_flow_insert_v4_tcp()
- *                                       returns -ENODEV → SW fallback.
- *                                       Kept as a kill-switch for
- *                                       diagnostics and bisection.
- *
- * Diagnostic memos in qdrant: oh-port-deadlock / muram-alloc-recursion /
- * pcd-lock / recursive-mutex / pr14k / silicon-verified-2026-05-17.
+ * PR14x (2026-05-18): the OH-port silicon-bypass model (PR14j..PR14w)
+ * has been retired in favour of the single-stage MANIP-chain
+ * primitive landed in kernel patch 0036.  The ask.enable_oh_chain
+ * module parameter is gone with it; HW offload bring-up no longer
+ * has any kill-switch knob because there is no longer a deadlock /
+ * MURAM-recursion failure mode to bisect around.  See
+ * plans/PR14x-DESIGN.md and the cookie-struct comment block in
+ * include/ask_internal.h for the architectural rationale.
  */
-static bool ask_enable_oh_chain = true;
-module_param_named(enable_oh_chain, ask_enable_oh_chain, bool, 0444);
-MODULE_PARM_DESC(enable_oh_chain,
-        "PR14j OH-port silicon-bypass chain bring-up (default on since "
-        "PR14l/PR14k — set to 0 only as a kill-switch for diagnostics)");
 
 /* ------------------------------------------------------------------------- */
 /* QEF blob parsing                                                           */
@@ -238,27 +208,6 @@ EXPORT_SYMBOL_GPL(ask_hw_ucode_get_version);
 #define ASK_HW_V4_KEY_WIDTH     13
 
 /*
- * PR14j: which OH port we use for the v4-TCP forwarding chain.
- *
- * LS1046A exposes 6 OH ports at port@82000..port@87000 (cell-index 0x2..0x7).
- * The fman_pcd_oh.c API uses oh_idx = cell_index - 2, so cell-index 0x2
- * corresponds to oh_idx = 0.  We pick 0 deterministically for v4-TCP;
- * future protocol bring-ups (v4-UDP, v6-TCP) get 1, 2, 3 etc.
- *
- * NOTE: the design memo §2 quotes "OH port 0x2" referring to the
- * DT cell-index; that translates to oh_idx = 0 here.
- */
-#define ASK_HW_V4_TCP_OH_IDX    0
-
-/*
- * PR14s (2026-05-18): number of Offline Host ports available on
- * LS1046A FMan v3.  Cell-index 0x2..0x7 → oh_idx 0..5.  ask.ko claims
- * as many as it can at bring-up and hands one out per HW-offloaded
- * flow so the AD chain is never shared / rewritten between flows.
- */
-#define ASK_HW_NUM_OH_PORTS     6
-
-/*
  * PR14v (2026-05-18): maximum number of distinct FMan ingress ports
  * that can be HW-accelerated for v4-TCP at the same time.  LS1046A
  * has 8x 1G + 2x 10G MACs; ASK's M2 reference forwards between
@@ -307,54 +256,47 @@ struct ask_hw_pcd {
         u8                               v4_tcp_bind_count;
 
         /*
-         * PR14w (2026-05-18): per-resource ENOSPC counters.  Exposed
-         * via debugfs (ask_debugfs.c) so the operator can pinpoint
-         * which silicon resource is exhausted when HW offload
-         * silently falls back to SW.  Each counter is bumped under
-         * h->lock at the precise return site so the counts are
-         * race-free relative to insert / remove ordering.
+         * PR14w/PR14x (2026-05-18): per-resource ENOSPC counters.
+         * Exposed via debugfs (ask_debugfs.c) so the operator can
+         * pinpoint which silicon resource is exhausted when HW
+         * offload silently falls back to SW.  Each counter is
+         * bumped under h->lock at the precise return site so the
+         * counts are race-free relative to insert / remove ordering.
          *
-         * enospc_oh_pool  — bitmap full: every OH port owned by a
-         *                   live cookie (insert returns -ENOSPC,
-         *                   flow stays in SW).
-         * enospc_oh_chain — fman_pcd_oh_port_set_chain failed
-         *                   with -ENOSPC (per-OH AD chain MURAM
-         *                   exhaustion).
-         * enospc_cc_keys  — fman_pcd_cc_node_add_key returned
-         *                   -ENOSPC (CC node hit cap-255 silicon
-         *                   limit per PR14r).
-         * other_enospc    — any other -ENOSPC return inside the
-         *                   insert path that does not match the
-         *                   three sites above (currently zero —
-         *                   reserved for future bring-up).
+         * enospc_chain_muram — fman_pcd_manip_chain_create() returned
+         *                      -ENOSPC (PR14x kernel patch 0036
+         *                      primitive: MURAM exhaustion building
+         *                      the fused HMCT chain handle).
+         * enospc_cc_keys     — fman_pcd_cc_node_add_key returned
+         *                      -ENOSPC (CC node hit cap-255 silicon
+         *                      limit per PR14r).
+         * other_enospc       — any other -ENOSPC return inside the
+         *                      insert path that does not match the
+         *                      two sites above (currently zero —
+         *                      reserved for future bring-up).
+         *
+         * The legacy enospc_oh_pool / enospc_oh_chain counters from
+         * PR14w are retired: the OH-port pool model they tracked no
+         * longer exists (see PR14x).
          */
-        u64                              enospc_oh_pool;
-        u64                              enospc_oh_chain;
+        u64                              enospc_chain_muram;
         u64                              enospc_cc_keys;
         u64                              other_enospc;
 
         /*
-         * PR14s additions (2026-05-18): per-flow OH-port pool.
+         * PR14x shared MANIPs (2026-05-18).  These two pcd-wide
+         * handles are created at bring-up and freed at teardown.
+         * Every per-flow chain handle returned by
+         * fman_pcd_manip_chain_create() fuses these (plus the
+         * per-flow m_insrt) into a single HMCT consumed directly by
+         * the ingress CC key's FMAN_PCD_ACTION_MANIPULATE arm — no
+         * Offline Host port hop, no two-stage AD routing.
          *
-         * LS1046A FMan v3 exposes six Offline Host ports at cell-index
-         * 0x2..0x7 → oh_idx 0..5.  ask.ko claims as many as it can at
-         * bring-up (graceful — recorded in `oh_pool_count`) and hands
-         * one out per HW-offloaded flow.  The old single-OH model
-         * (PR14j..PR14r) shared one port across all flows and reset
-         * its AD chain at every insert; that race is the M2 gate
-         * blocker documented in the PR14r retest memo.
-         *
-         * `oh_pool_count == 0` is the "no HW backing" sentinel —
-         * insert returns -ENODEV and the caller stays on SW.
-         *
-         * `oh_alloc_bitmap` tracks which pool slots are currently
-         * owned by a live cookie.  Always taken under `h->lock`.
+         * If either is NULL the HW insert path returns -ENODEV and
+         * the flow stays in SW (graceful degradation).
          */
         struct fman_pcd_manip   *m_v4_rmv;      /* shared MANIP_RMV_ETHERNET */
         struct fman_pcd_manip   *m_v4_ipv4;     /* shared TTL-- + cksum */
-        struct fman_pcd_oh_port *oh_pool[ASK_HW_NUM_OH_PORTS];
-        u8                       oh_pool_count;
-        unsigned long            oh_alloc_bitmap;
 
         /*
          * Cookie indirection table.  Index space is 1..U32_MAX (0 is
@@ -557,22 +499,20 @@ err_tree:
 }
 
 /* ------------------------------------------------------------------------- */
-/* PR14j OH-port + shared MANIP bring-up                                      */
+/* PR14x shared-MANIP bring-up / teardown                                     */
 /* ------------------------------------------------------------------------- */
 
-static int ask_hw_pcd_bringup_oh(struct ask_hw_pcd *h)
+/*
+ * Build the two pcd-wide shared MANIPs (RMV_ETHERNET, IPv4 TTL--/cksum)
+ * consumed by every per-flow chain handle.  Non-fatal: on failure,
+ * h->m_v4_rmv / h->m_v4_ipv4 stay NULL and ask_hw_flow_insert_v4_tcp()
+ * gates on them so the flow falls back to SW.
+ */
+static int ask_hw_pcd_bringup_shared_manips(struct ask_hw_pcd *h)
 {
         struct fman_pcd_manip_params mp;
-        struct fman_pcd_oh_port *oh;
-        unsigned int i;
         int rc;
 
-        /*
-         * PR14s: build the shared MANIPs first.  These are pcd-wide
-         * (RMV-Ethernet header strip + IPv4 TTL--/cksum) and are
-         * referenced by every per-flow AD chain; per-flow MANIP_INSRT
-         * carrying the new L2 header is built at insert time.
-         */
         memset(&mp, 0, sizeof(mp));
         mp.type = FMAN_PCD_MANIP_RMV_ETHERNET;
         h->m_v4_rmv = fman_pcd_manip_create(h->pcd, &mp);
@@ -593,91 +533,39 @@ static int ask_hw_pcd_bringup_oh(struct ask_hw_pcd *h)
                 rc = h->m_v4_ipv4 ? PTR_ERR(h->m_v4_ipv4) : -ENOMEM;
                 h->m_v4_ipv4 = NULL;
                 ask_pr_warn("hw: manip_create(IPV4_FORWARD) failed (%d)\n", rc);
-                goto err_destroy_rmv;
+                fman_pcd_manip_destroy(h->m_v4_rmv);
+                h->m_v4_rmv = NULL;
+                return rc;
         }
 
-        /*
-         * PR14s: claim every available OH port into the pool.  Partial
-         * success is fine — `oh_pool_count >= 1` is enough for HW
-         * offload to function (one in-flight HW-offloaded flow at a
-         * time, beyond which insert returns -ENOSPC and SW takes over).
-         */
-        h->oh_pool_count   = 0;
-        h->oh_alloc_bitmap = 0;
-        for (i = 0; i < ASK_HW_NUM_OH_PORTS; i++) {
-                oh = fman_pcd_oh_port_claim(h->fman, i);
-                if (IS_ERR_OR_NULL(oh)) {
-                        ask_pr_dbg("hw: oh_port_claim(%u) skipped (%ld)\n",
-                                   i, oh ? PTR_ERR(oh) : -ENODEV);
-                        h->oh_pool[i] = NULL;
-                        continue;
-                }
-                h->oh_pool[i] = oh;
-                h->oh_pool_count++;
-        }
-
-        if (h->oh_pool_count == 0) {
-                ask_pr_warn("hw: no OH ports claimable - HW offload falls back to SW\n");
-                rc = -ENODEV;
-                goto err_destroy_ipv4;
-        }
-
-        ask_pr_info("hw: PR14s OH-port pool ready (claimed %u/%u ports)\n",
-                    h->oh_pool_count, ASK_HW_NUM_OH_PORTS);
+        ask_pr_info("hw: PR14x shared MANIPs ready (RMV_ETHERNET + IPv4 TTL--/cksum)\n");
         return 0;
-
-err_destroy_ipv4:
-        fman_pcd_manip_destroy(h->m_v4_ipv4);
-        h->m_v4_ipv4 = NULL;
-err_destroy_rmv:
-        fman_pcd_manip_destroy(h->m_v4_rmv);
-        h->m_v4_rmv = NULL;
-        return rc;
 }
 
-static void ask_hw_pcd_teardown_oh(struct ask_hw_pcd *h)
+/*
+ * Drain any per-flow cookies that survived to teardown (leaked refs),
+ * destroying each cookie's per-flow MANIP_INSRT_GENERIC and chain
+ * handle, then release the two pcd-wide shared MANIPs.
+ *
+ * xa_for_each + xa_erase under the same critical section is safe per
+ * the xarray API contract (the iterator caches the next key before
+ * yielding to the body).
+ */
+static void ask_hw_pcd_teardown_shared_manips(struct ask_hw_pcd *h)
 {
         struct ask_hw_flow_cookie *ck;
         unsigned long idx;
-        unsigned int i;
 
-        /*
-         * PR14s: drain any per-flow cookies still alive.  Each entry
-         * implies a leaked per-flow m_insrt and (if oh_owned) an
-         * armed OH-port AD chain.  Disarm the owning OH port's chain
-         * first, then destroy the m_insrt, then erase the xarray slot.
-         *
-         * xa_for_each + xa_erase under the same critical section is
-         * safe per the xarray API contract (the iterator caches the
-         * next key before yielding to the body).
-         */
         xa_for_each(&h->flow_cookies, idx, ck) {
                 if (!ck)
                         continue;
-                if (ck->oh_owned && ck->oh_idx < ASK_HW_NUM_OH_PORTS &&
-                    h->oh_pool[ck->oh_idx]) {
-                        (void)fman_pcd_oh_port_set_chain(h->oh_pool[ck->oh_idx],
-                                                         NULL, 0, 0);
-                }
+                if (ck->manip_chain)
+                        fman_pcd_manip_chain_destroy(ck->manip_chain);
                 if (ck->m_insrt)
                         fman_pcd_manip_destroy(ck->m_insrt);
                 xa_erase(&h->flow_cookies, idx);
                 kfree(ck);
         }
-
-        /* Release every OH port we successfully claimed at bring-up. */
-        for (i = 0; i < ASK_HW_NUM_OH_PORTS; i++) {
-                if (h->oh_pool[i]) {
-                        /* Belt-and-braces disarm in case a cookie was
-                         * leaked without oh_owned set. */
-                        (void)fman_pcd_oh_port_set_chain(h->oh_pool[i],
-                                                         NULL, 0, 0);
-                        fman_pcd_oh_port_release(h->oh_pool[i]);
-                        h->oh_pool[i] = NULL;
-                }
-        }
-        h->oh_pool_count   = 0;
-        h->oh_alloc_bitmap = 0;
 
         if (h->m_v4_ipv4) {
                 fman_pcd_manip_destroy(h->m_v4_ipv4);
@@ -762,24 +650,14 @@ int ask_hw_pcd_bringup(void)
         }
 
         /*
-         * PR14j OH-port chain.  Non-fatal: if claim or shared MANIPs fail,
-         * ask_hw_flow_insert_v4_tcp() will see h->oh_pool_count == 0 and
-         * return -ENODEV so ask_flow.c falls back to SW.  Frames still
-         * traverse the kernel slow path — they just are not silicon-
-         * accelerated.
-         *
-         * PR14l (2026-05-17): the ask.enable_oh_chain module parameter
-         * now defaults to true since PR14k fixed the pcd->lock recursive
-         * deadlock in fman_pcd_oh_port_claim() (kernel patch 0034 —
-         * see top-of-file note + qdrant entry tagged pr14k /
-         * silicon-verified-2026-05-17).  Set ask.enable_oh_chain=0
-         * as a kill-switch for diagnostics or bisection.
+         * PR14x (2026-05-18): build the two pcd-wide shared MANIPs.
+         * Non-fatal — if either fails, h->m_v4_rmv / h->m_v4_ipv4
+         * stay NULL and ask_hw_flow_insert_v4_tcp() returns -ENODEV
+         * so ask_flow.c falls back to SW for every flow.  Frames
+         * still traverse the kernel slow path; they just are not
+         * silicon-accelerated.
          */
-        if (ask_enable_oh_chain) {
-                (void)ask_hw_pcd_bringup_oh(h);
-        } else {
-                ask_pr_info("hw: OH-port chain bring-up SKIPPED (ask.enable_oh_chain=0); HW offload will fall back to SW\n");
-        }
+        (void)ask_hw_pcd_bringup_shared_manips(h);
 
         ask_hw_pcd_inst = h;
 
@@ -804,8 +682,8 @@ void ask_hw_pcd_teardown(void)
 
         ask_hw_pcd_inst = NULL;
 
-        /* PR14j OH side first — it may dereference shared MANIPs. */
-        ask_hw_pcd_teardown_oh(h);
+        /* PR14x: drain cookies + release shared MANIPs. */
+        ask_hw_pcd_teardown_shared_manips(h);
 
         /*
          * PR14v: destroy every per-port KG scheme.  Each scheme's
@@ -1052,7 +930,6 @@ static int ask_hw_flow_insert_v4_tcp(struct ask_hw_pcd *h,
         struct fman_pcd_manip_params insrt_params;
         struct fman_pcd_manip *manips[3];
         struct ask_hw_flow_cookie ck = { 0 };
-        u32 oh_input_fqid;
         u32 peer_tx_fqid;
         u32 cookie;
         int slot;
@@ -1060,8 +937,8 @@ static int ask_hw_flow_insert_v4_tcp(struct ask_hw_pcd *h,
 
         (void)action_flags;
 
-        /* PR14s gate: bring-up may have failed; behave like "no HW". */
-        if (!h->oh_pool_count || !h->m_v4_rmv || !h->m_v4_ipv4)
+        /* PR14x gate: bring-up may have failed; behave like "no HW". */
+        if (!h->m_v4_rmv || !h->m_v4_ipv4)
                 return -ENODEV;
 
         /*
@@ -1097,80 +974,36 @@ static int ask_hw_flow_insert_v4_tcp(struct ask_hw_pcd *h,
         }
 
         /*
-         * 3. PR14s: allocate a dedicated OH port from the pool for
-         *    this flow.  Each OH port's AD chain is owned by exactly
-         *    one cookie for its lifetime — no inter-flow rewrite race.
-         *
-         *    Pool exhaustion returns -ENOSPC; ask_flow.c treats this
-         *    like -ENODEV / -EOPNOTSUPP and falls back to SW.
+         * 3. PR14x kernel patch 0036: fuse [m_v4_rmv, m_insrt, m_v4_ipv4]
+         *    into a single chain handle.  Each source manip's HMCT
+         *    command bytes are memcpied into one fresh HMCT with
+         *    HMCD_LAST cleared on the first two so silicon walks all
+         *    three before terminating.  The returned handle is
+         *    consumed directly by the ingress CC key's MANIPULATE
+         *    action — no OH-port hop, no two-stage AD routing.
          */
-        {
-                int oh_slot;
-
-                mutex_lock(&h->lock);
-                oh_slot = -1;
-                {
-                        unsigned int i;
-                        for (i = 0; i < ASK_HW_NUM_OH_PORTS; i++) {
-                                if (!h->oh_pool[i])
-                                        continue;
-                                if (h->oh_alloc_bitmap & BIT(i))
-                                        continue;
-                                h->oh_alloc_bitmap |= BIT(i);
-                                oh_slot = (int)i;
-                                break;
-                        }
-                }
-                mutex_unlock(&h->lock);
-
-                if (oh_slot < 0) {
-                        /*
-                         * PR14w site (1/3): OH-port pool fully owned.
-                         * Bump the per-resource ENOSPC counter under
-                         * h->lock so debugfs sees a coherent read, and
-                         * print a ratelimited info banner so the
-                         * operator can see in dmesg WHICH resource was
-                         * exhausted (vs a generic -ENOSPC which could
-                         * come from the chain or the CC keys).
-                         */
-                        mutex_lock(&h->lock);
-                        h->enospc_oh_pool++;
-                        mutex_unlock(&h->lock);
-                        pr_info_ratelimited("ask: hw: insert: ENOSPC at OH pool "
-                                "(all %u/%u OH ports owned; flow stays in SW)\n",
-                                h->oh_pool_count, ASK_HW_NUM_OH_PORTS);
-                        rc = -ENOSPC;
-                        goto err_free_insrt;
-                }
-                ck.oh_idx   = (u8)oh_slot;
-                ck.oh_owned = true;
-        }
-
         manips[0] = h->m_v4_rmv;
         manips[1] = ck.m_insrt;
         manips[2] = h->m_v4_ipv4;
 
-        mutex_lock(&h->lock);
-        rc = fman_pcd_oh_port_set_chain(h->oh_pool[ck.oh_idx],
-                                        manips, 3, peer_tx_fqid);
-        if (rc == -ENOSPC)
-                h->enospc_oh_chain++;   /* PR14w site (2/3) */
-        mutex_unlock(&h->lock);
-        if (rc) {
-                if (rc == -ENOSPC)
+        ck.manip_chain = fman_pcd_manip_chain_create(h->pcd, manips, 3);
+        if (IS_ERR_OR_NULL(ck.manip_chain)) {
+                rc = ck.manip_chain ? PTR_ERR(ck.manip_chain) : -ENOMEM;
+                ck.manip_chain = NULL;
+                if (rc == -ENOSPC) {
+                        mutex_lock(&h->lock);
+                        h->enospc_chain_muram++;
+                        mutex_unlock(&h->lock);
                         pr_info_ratelimited("ask: hw: insert: ENOSPC at "
-                                "oh_port_set_chain(oh_idx=%u) — per-OH AD-chain "
-                                "MURAM exhausted; flow stays in SW\n",
-                                ck.oh_idx);
-                else
-                        ask_pr_warn("hw: oh_port_set_chain(oh_idx=%u) failed (%d)\n",
-                                    ck.oh_idx, rc);
-                goto err_release_oh_slot;
+                                "manip_chain_create — fused-HMCT MURAM "
+                                "exhausted; flow stays in SW\n");
+                } else {
+                        ask_pr_warn("hw: manip_chain_create failed (%d)\n", rc);
+                }
+                goto err_free_insrt;
         }
 
-        oh_input_fqid = fman_pcd_oh_port_input_fqid(h->oh_pool[ck.oh_idx]);
-
-        /* 4. Install ingress CC key with FORWARD_FQ -> oh_input_fqid. */
+        /* 4. Install ingress CC key with MANIPULATE -> chain -> peer_tx_fqid. */
         memset(&entry, 0, sizeof(entry));
         memcpy(&entry.key[0],  &key->src_ip[0], 4);
         memcpy(&entry.key[4],  &key->dst_ip[0], 4);
@@ -1180,13 +1013,14 @@ static int ask_hw_flow_insert_v4_tcp(struct ask_hw_pcd *h,
         memset(&entry.mask[0], 0xff, ASK_HW_V4_KEY_WIDTH);
 
         act = &entry.action;
-        act->type            = FMAN_PCD_ACTION_FORWARD_FQ;
-        act->forward_fq.fqid = oh_input_fqid;
+        act->type                  = FMAN_PCD_ACTION_MANIPULATE;
+        act->manipulate.manip      = ck.manip_chain;
+        act->manipulate.next_fqid  = peer_tx_fqid;
 
         mutex_lock(&h->lock);
         slot = fman_pcd_cc_node_add_key(h->cc_v4_tcp, &entry);
         if (slot == -ENOSPC)
-                h->enospc_cc_keys++;    /* PR14w site (3/3) */
+                h->enospc_cc_keys++;
         mutex_unlock(&h->lock);
         if (slot < 0) {
                 rc = slot;
@@ -1196,7 +1030,7 @@ static int ask_hw_flow_insert_v4_tcp(struct ask_hw_pcd *h,
                                 "cap-255 silicon limit (PR14r); flow stays in SW\n");
                 else
                         ask_pr_warn("hw: cc_node_add_key v4-TCP failed (%d)\n", slot);
-                goto err_clear_chain;
+                goto err_destroy_chain;
         }
         if (slot > U16_MAX) {
                 rc = -EOVERFLOW;
@@ -1228,25 +1062,12 @@ err_drop_slot:
                                                           ck.key_idx, &drop);
                 mutex_unlock(&h->lock);
         }
-err_clear_chain:
-        /*
-         * PR14s: disarm THIS flow's OH port (we own it exclusively).
-         */
-        mutex_lock(&h->lock);
-        if (ck.oh_owned && ck.oh_idx < ASK_HW_NUM_OH_PORTS &&
-            h->oh_pool[ck.oh_idx]) {
-                (void)fman_pcd_oh_port_set_chain(h->oh_pool[ck.oh_idx],
-                                                 NULL, 0, 0);
-        }
-        mutex_unlock(&h->lock);
-err_release_oh_slot:
-        mutex_lock(&h->lock);
-        if (ck.oh_owned && ck.oh_idx < ASK_HW_NUM_OH_PORTS)
-                h->oh_alloc_bitmap &= ~BIT(ck.oh_idx);
-        mutex_unlock(&h->lock);
-        ck.oh_owned = false;
+err_destroy_chain:
+        if (ck.manip_chain)
+                fman_pcd_manip_chain_destroy(ck.manip_chain);
 err_free_insrt:
-        fman_pcd_manip_destroy(ck.m_insrt);
+        if (ck.m_insrt)
+                fman_pcd_manip_destroy(ck.m_insrt);
         return rc;
 }
 
@@ -1310,24 +1131,19 @@ int ask_hw_flow_remove(u32 hw_flow_id)
         }
 
         /*
-         * PR14s: disarm the ingress CC slot AND this flow's OH-port
-         * AD chain in one critical section, then free the per-flow
-         * m_insrt.  The shared m_rmv / m_ipv4 stay alive; they belong
-         * to ask_hw_pcd and are destroyed in teardown.  Returning the
-         * OH port to the pool (clearing the bitmap bit) is also done
-         * under h->lock so a concurrent insert sees the slot free.
+         * PR14x: disarm the ingress CC slot (tombstone to DROP), then
+         * release the per-flow chain handle and the per-flow m_insrt.
+         * The shared m_rmv / m_ipv4 stay alive; they belong to
+         * ask_hw_pcd and are destroyed in teardown.  No OH-port pool
+         * accounting any more.
          */
         mutex_lock(&h->lock);
         (void)fman_pcd_cc_node_modify_next_action(ck->cc_node, ck->key_idx,
                                                   &drop);
-        if (ck->oh_owned && ck->oh_idx < ASK_HW_NUM_OH_PORTS &&
-            h->oh_pool[ck->oh_idx]) {
-                (void)fman_pcd_oh_port_set_chain(h->oh_pool[ck->oh_idx],
-                                                 NULL, 0, 0);
-                h->oh_alloc_bitmap &= ~BIT(ck->oh_idx);
-        }
         mutex_unlock(&h->lock);
 
+        if (ck->manip_chain)
+                fman_pcd_manip_chain_destroy(ck->manip_chain);
         if (ck->m_insrt)
                 fman_pcd_manip_destroy(ck->m_insrt);
 

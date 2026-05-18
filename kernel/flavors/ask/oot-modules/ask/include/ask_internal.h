@@ -253,44 +253,48 @@ struct fman_pcd_cc_node;
 struct fman_pcd_manip;
 
 /*
- * PR14s (2026-05-18) — per-flow OH-port ownership.
+ * PR14x (2026-05-18) — single-stage MANIP-chain ownership.
  *
- * The shared-OH-chain model that PR14j shipped at v1.0 is the M2
- * gate blocker: every set_chain() reprogrammed the SINGLE shared OH
- * port's AD chain with the latest flow's per-flow m_insrt, so only
- * the most-recent flow had its destination MAC armed in silicon.
- * All earlier flows either (a) hit the chain with the wrong dst-MAC
- * and got dropped at the peer link, or (b) the OH BMI's stall during
- * set_chain caused frames to NAPI-loop back into the kernel SW path.
- * Net effect: CPU dominated by SW forwarding, M2 gate FAIL.
+ * Supersedes the PR14s per-flow OH-port model.  The PR14x kernel
+ * primitive fman_pcd_manip_chain_create() (kernel patch 0036) returns
+ * a single struct fman_pcd_manip * whose HMCT contains the
+ * concatenated command bytes of N source manips (RMV_ETHERNET +
+ * INSRT_GENERIC + FIELD_UPDATE_IPV4_FORWARD for v4-TCP), with
+ * HMCD_LAST cleared on all but the trailing manip.  The chain handle
+ * is consumed directly by the ingress CC key's
+ * FMAN_PCD_ACTION_MANIPULATE arm — no Offline Host port hop, no
+ * per-OH AD-chain MURAM allocation, no two-stage routing through
+ * input/output FQs.
  *
- * PR14s pivots to a per-flow OH-port model.  LS1046A exposes six
- * Offline Host ports at cell-index 0x2..0x7 → oh_idx 0..5; ask.ko
- * claims all six at bring-up and allocates one per HW-offloaded
- * flow.  When the pool is empty the insert path returns -ENOSPC and
- * the flow stays on the SW fast path (graceful degradation).  Each
- * OH port's AD chain is now exclusively owned by one flow for its
- * lifetime, so set_chain is called ONCE per flow at insert and
- * disarmed at remove — no inter-flow chain rewrite races.
+ * Silicon-resource accounting after PR14x:
+ *   - per-flow: one MANIP_INSRT_GENERIC (m_insrt, ~32 B MURAM) +
+ *               one chain handle (manip_chain, ~64 B MURAM for the
+ *               fused HMCT) + one CC key slot.
+ *   - pcd-wide: m_v4_rmv + m_v4_ipv4 (shared, freed at teardown).
  *
- * `oh_idx` is the cookie field that records which OH port this
- * flow owns.  `oh_owned == true` means ask_hw_flow_remove() must
- * call fman_pcd_oh_port_set_chain(NULL, 0, 0) on that port AND
- * clear bit oh_idx in the pcd-wide ask_hw_pcd.oh_alloc_bitmap.
- * `oh_owned == false` is the legacy / failure path: no OH port
- * was actually programmed for this cookie, so teardown must not
- * touch the pool.
+ * Flow ceiling: 255 concurrent v4-TCP cookies (CC node cap from
+ * PR14r; chain handles cost ~64 B MURAM each so 255 × 64 = 16 KiB
+ * of MURAM for the chain pool — well within the 384 KiB budget).
+ *
+ * `manip_chain` is the per-flow handle returned by
+ * fman_pcd_manip_chain_create().  ask_hw_flow_remove() calls
+ * fman_pcd_manip_chain_destroy(manip_chain) to release the fused
+ * HMCT before destroying the per-flow m_insrt.  NULL means HW
+ * insert never armed silicon for this cookie (e.g. -ENOSPC from
+ * chain_create) — teardown is a no-op for the chain.
+ *
+ * m_rmv / m_ipv4 are kept as informational snapshots (matching the
+ * pcd-wide shared handles); they are NOT destroyed per-flow.
  */
 struct ask_hw_flow_cookie {
         struct fman_pcd_cc_node  *cc_node;
         u16                       key_idx;
-        struct fman_pcd_manip    *m_rmv;     /* shared — do NOT destroy */
-        struct fman_pcd_manip    *m_insrt;   /* per-flow */
-        struct fman_pcd_manip    *m_ipv4;    /* shared — do NOT destroy */
+        struct fman_pcd_manip    *m_rmv;        /* shared — do NOT destroy */
+        struct fman_pcd_manip    *m_insrt;      /* per-flow */
+        struct fman_pcd_manip    *m_ipv4;       /* shared — do NOT destroy */
+        struct fman_pcd_manip    *manip_chain;  /* PR14x: per-flow chain */
         int                       sink_ifindex;
         u32                       sink_fqid;
-        u8                        oh_idx;    /* PR14s: which OH port */
-        bool                      oh_owned;  /* PR14s: pool slot held */
 };
 
 /*
