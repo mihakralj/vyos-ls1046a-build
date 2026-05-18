@@ -20,7 +20,7 @@
 #   - kernel crypto API registrations sourced from CAAM (looks for "caam"
 #     in /proc/crypto driver fields)
 #   - Hardware RNG: presence of /dev/hwrng, current_source (should be
-#     "caam-rng" once caamrng has loaded), and a 16-byte sample read
+#     "rng-caam" once caamrng has loaded), and a 16-byte sample read
 #   - FLAVOR=ask only: dpa_ipsec sysfs / dmesg signs of CDX successfully
 #     locating the SEC FQ
 #
@@ -30,7 +30,7 @@
 #
 # Exit codes:
 #   0 — CAAM controller present, at least 1 Job Ring active, RNG sourced
-#       from caam-rng (or no /dev/hwrng but JR active is acceptable)
+#       from rng-caam (or no /dev/hwrng but JR active is acceptable)
 #   1 — CAAM hardware not detected, no Job Rings up, or kernel crypto
 #       API has no CAAM-backed algorithms
 #   2 — board is not LS1046A (sysfs paths absent)
@@ -103,9 +103,19 @@ fi
 # ---------------------------------------------------------------------------
 hdr "2) CAAM kernel drivers"
 
-# Drivers we care about. caam + caam_jr are mandatory; the *alg/hash/rng/pkc
-# layers are loaded on demand by the kernel crypto API.
-CAAM_DRVS=(caam caam_jr caamalg caamalg_qi caamalg_qi2 caamhash caamhash_desc caamrng caampkc rng-core)
+# Drivers we care about. In mainline 6.18, the per-algorithm front-ends
+# (caamalg, caamhash, caamrng, caampkc, caamalg_qi) are NOT separate
+# .ko files — they are linked into caam_jr.ko at build time
+# (drivers/crypto/caam/Makefile: caam_jr-$(CONFIG_..._API) += caamalg.o
+# etc.). The only separately-loadable modules are:
+#   caam            — controller (ctrl.o)
+#   caam_jr         — Job Ring driver + all *alg/hash/rng/pkc front-ends
+#   caamalg_desc    — descriptor helpers shared with dpaa2_caam
+#   caamhash_desc   — descriptor helpers shared with dpaa2_caam
+#   error           — error decode helpers
+# A previous version of this script also probed caamalg/caamhash/etc.
+# as if they were separate modules — they never load on mainline 6.x.
+CAAM_DRVS=(caam caam_jr caamalg_desc caamhash_desc error)
 for drv in "${CAAM_DRVS[@]}"; do
     if [ -d "/sys/module/${drv}" ]; then
         # Built-in drivers have no refcnt file; modules do.
@@ -116,11 +126,14 @@ for drv in "${CAAM_DRVS[@]}"; do
             ok "${drv} present (built-in)"
         fi
     else
-        # caam_jr is mandatory; caamalg/caamhash/etc are optional (may
-        # autoload only on first use). Only flag caam + caam_jr as fails.
+        # caam + caam_jr are mandatory; the *_desc helpers are pulled in
+        # automatically by caam_jr's symbol deps so absence is also a
+        # hard fail. error is technically optional but always present.
         case "$drv" in
-            caam|caam_jr)  fail "${drv} NOT present — CAAM unusable"; mark_fail ;;
-            *)             skip "${drv} not (yet) loaded — autoloads on first use" ;;
+            caam|caam_jr|caamalg_desc|caamhash_desc)
+                fail "${drv} NOT loaded — CAAM crypto API unavailable"; mark_fail ;;
+            *)
+                skip "${drv} not loaded (optional)" ;;
         esac
     fi
 done
@@ -162,6 +175,12 @@ hdr "4) dmesg banner"
 
 if command -v dmesg >/dev/null 2>&1; then
     DMESG_OUT=$(dmesg 2>/dev/null | grep -E 'caam|crypto.*1700000' || true)
+    # Fall back to the persistent journal if the kernel ring buffer has
+    # aged out the CAAM banner (uptime > ~30 min on a busy system).
+    if [ -z "$DMESG_OUT" ] && command -v journalctl >/dev/null 2>&1; then
+        DMESG_OUT=$(journalctl -k -b -o cat 2>/dev/null \
+                    | grep -E 'caam|crypto.*1700000' || true)
+    fi
     if [ -n "$DMESG_OUT" ]; then
         # Trim very long blobs; keep the most informative ~12 lines.
         echo "$DMESG_OUT" | head -12 | while IFS= read -r line; do
@@ -180,28 +199,37 @@ fi
 hdr "5) /proc/crypto algorithms backed by CAAM"
 
 if [ -r /proc/crypto ]; then
-    # Block records by blank lines, keep blocks where driver name contains "caam".
+    # Block records by blank lines, keep blocks where driver name contains
+    # "caam". Use match()+substr() instead of sub()+comma — mawk silently
+    # treats `sub(...) , var=$i` as a syntax error and produces no rows.
     CAAM_ALGS=$(awk '
         BEGIN { RS=""; FS="\n" }
         /driver +: .*caam/ {
+            name=""; drv=""; typ="";
             for (i=1; i<=NF; i++) {
-                if ($i ~ /^name +:/)   sub(/^name +: */, "", $i),  name=$i
-                if ($i ~ /^driver +:/) sub(/^driver +: */, "", $i), drv=$i
-                if ($i ~ /^type +:/)   sub(/^type +: */, "", $i),   typ=$i
+                if (match($i, /^name +: */))   { name = substr($i, RSTART+RLENGTH) }
+                if (match($i, /^driver +: */)) { drv  = substr($i, RSTART+RLENGTH) }
+                if (match($i, /^type +: */))   { typ  = substr($i, RSTART+RLENGTH) }
             }
-            printf "%-28s  %-32s  %s\n", name, drv, typ
+            printf "%-28s  %-40s  %s\n", name, drv, typ
         }
     ' /proc/crypto 2>/dev/null)
     if [ -n "$CAAM_ALGS" ]; then
         count=$(printf "%s\n" "$CAAM_ALGS" | wc -l)
         ok "$count CAAM-backed algorithm(s) registered"
-        printf "%s\n" "$CAAM_ALGS" | while IFS= read -r line; do
+        # 6.18 LS1046A registers ~250 entries (AEAD + skcipher + ahash +
+        # rsa + rng across both JR and QI paths). Cap the dump to the
+        # first 12 so the report stays scannable.
+        printf "%s\n" "$CAAM_ALGS" | head -12 | while IFS= read -r line; do
             note "$line"
         done
+        if [ "$count" -gt 12 ]; then
+            note "  ... ($((count - 12)) more — full list: grep -A6 caam /proc/crypto)"
+        fi
     else
-        warn "/proc/crypto has no CAAM-backed entries (caamalg/caamhash never autoloaded)"
-        note "  (this is normal if no userland has requested an AEAD/AES algorithm yet —"
-        note "   try: openssl speed -evp aes-128-cbc, or wait for strongSwan to start)"
+        warn "/proc/crypto has no CAAM-backed entries"
+        note "  (caam_jr probed but registered zero algorithms — check dmesg for"
+        note "   'caam_jr: register algs' errors, or RNG4 instantiation failure)"
     fi
 else
     skip "/proc/crypto not readable"
@@ -216,8 +244,11 @@ if [ -e /dev/hwrng ]; then
     ok "/dev/hwrng present"
     if [ -r /sys/class/misc/hw_random/rng_current ]; then
         cur=$(cat /sys/class/misc/hw_random/rng_current 2>/dev/null || echo "?")
-        if [ "$cur" = "caam-rng" ]; then
-            ok "rng_current = caam-rng (HW source active)"
+        # Mainline caamrng (drivers/crypto/caam/caamrng.c) registers as
+        # "rng-caam". Older out-of-tree backports used "caam-rng" — accept
+        # both so the check works across kernel versions.
+        if [ "$cur" = "rng-caam" ] || [ "$cur" = "caam-rng" ]; then
+            ok "rng_current = $cur (HW source active)"
         else
             warn "rng_current = $cur (CAAM RNG present but not selected)"
             if [ -r /sys/class/misc/hw_random/rng_available ]; then
