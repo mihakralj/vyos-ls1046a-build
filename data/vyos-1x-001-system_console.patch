@@ -54,3 +54,30 @@ index 8ae9829..043ad83 100644
                    </constraint>
                  </properties>
                  <defaultValue>115200</defaultValue>
+diff --git a/src/conf_mode/system_console.py b/src/conf_mode/system_console.py
+index 51c95fc..ff1d028 100755
+--- a/src/conf_mode/system_console.py
++++ b/src/conf_mode/system_console.py
+@@ -136,14 +136,19 @@ def apply(console):
+     # Reset screen blanking
+     call('/usr/bin/setterm -blank 0 -powersave off -powerdown 0 -term linux </dev/tty1 >/dev/tty1 2>&1')
+ 
++    if not console:
++        # LS1046A: when no `system console` stanza is configured, skip the
++        # serial-getty restart. Restarting it on every boot commit re-prints
++        # /etc/issue + the login prompt, producing the cosmetic "two banners
++        # on first boot" symptom on serial-only boards (no console config =
++        # nothing to apply, so the restart is a pure side effect).
++        return None
++
+     # Service control moved to vyos.utils.serial to unify checks and prompts.
+     # If users are connected, we want to show an informational message on completing
+     # the process, but not halt configuration processing with an interactive prompt.
+     restart_login_consoles(prompt_user=False, quiet=False)
+ 
+-    if not console:
+-        return None
+-
+     if 'powersave' in console.keys():
+         # Configure screen blank powersaving on VGA console
+         call('/usr/bin/setterm -blank 15 -powersave powerdown -powerdown 60 -term linux </dev/tty1 >/dev/tty1 2>&1')
