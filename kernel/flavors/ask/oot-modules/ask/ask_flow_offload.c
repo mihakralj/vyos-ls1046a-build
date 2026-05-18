@@ -54,10 +54,12 @@
 #include <linux/of.h>
 #include <linux/string.h>
 #include <linux/if_ether.h>
+#include <linux/etherdevice.h>
 #include <net/flow_offload.h>
 #include <net/pkt_cls.h>
 #include <net/arp.h>
 #include <net/neighbour.h>
+#include <net/netevent.h>
 #include <net/net_namespace.h>
 #include <linux/fsl/dpaa_flow_offload.h>
 
@@ -220,6 +222,200 @@ static void ask_resolve_neigh_v4(struct net_device *egress_dev,
 
         neigh_release(n);
 }
+
+/* ------------------------------------------------------------------------- */
+/* PR14y: deferred-insert pending queue + NETEVENT_NEIGH_UPDATE notifier.    */
+/*                                                                            */
+/* The kernel delivers FLOW_CLS_REPLACE for new flows BEFORE the next-hop    */
+/* ARP/ND has resolved.  PR14y catches the unresolved REPLACE, parks the    */
+/* cookie in a pending list, and replays the HW insert from the netevent     */
+/* notifier the moment the neigh transitions to a NUD_VALID state.  Until   */
+/* the retry succeeds the kernel SW flowtable carries the flow (the         */
+/* per-flow forwarding decision still works in software, just at higher     */
+/* CPU cost).                                                                */
+/*                                                                            */
+/* Bounded: ASK_FLOW_PENDING_MAX = 256.  Beyond the cap we drop new          */
+/* deferrals on the floor (counter pr_info'd, ratelimited) so a pathological */
+/* burst can't pin unbounded memory.                                         */
+/*                                                                            */
+/* Lifetime: entries live until (a) neigh resolves and HW insert is replayed,*/
+/* (b) FLOW_CLS_DESTROY arrives for the same cookie before resolution, or   */
+/* (c) module unload.                                                        */
+/* ------------------------------------------------------------------------- */
+
+#define ASK_FLOW_PENDING_MAX 256
+
+struct ask_flow_pending {
+        struct list_head        node;
+        u64                     cookie;
+        struct ask_flow_key     key;
+        u32                     oif;
+        u32                     action_flags;
+        int                     egress_ifindex;
+        __be32                  dst_ip;
+        unsigned long           jiffies_inserted;
+};
+
+static LIST_HEAD(ask_flow_pending_list);
+static DEFINE_SPINLOCK(ask_flow_pending_lock);
+static unsigned int ask_flow_pending_count;
+static atomic_t ask_flow_pending_deferred = ATOMIC_INIT(0);
+static atomic_t ask_flow_pending_resolved = ATOMIC_INIT(0);
+static atomic_t ask_flow_pending_overflow = ATOMIC_INIT(0);
+
+static struct ask_flow_pending *
+ask_flow_pending_take_one(int egress_ifindex, __be32 dst_ip)
+{
+        struct ask_flow_pending *p, *tmp;
+        struct ask_flow_pending *ret = NULL;
+
+        spin_lock_bh(&ask_flow_pending_lock);
+        list_for_each_entry_safe(p, tmp, &ask_flow_pending_list, node) {
+                if (p->egress_ifindex == egress_ifindex &&
+                    p->dst_ip == dst_ip) {
+                        list_del(&p->node);
+                        ask_flow_pending_count--;
+                        ret = p;
+                        break;
+                }
+        }
+        spin_unlock_bh(&ask_flow_pending_lock);
+        return ret;
+}
+
+static bool ask_flow_pending_drop_cookie(u64 cookie)
+{
+        struct ask_flow_pending *p, *tmp;
+        bool found = false;
+
+        spin_lock_bh(&ask_flow_pending_lock);
+        list_for_each_entry_safe(p, tmp, &ask_flow_pending_list, node) {
+                if (p->cookie == cookie) {
+                        list_del(&p->node);
+                        ask_flow_pending_count--;
+                        found = true;
+                        kfree(p);
+                        break;
+                }
+        }
+        spin_unlock_bh(&ask_flow_pending_lock);
+        return found;
+}
+
+static int ask_flow_pending_enqueue(u64 cookie,
+                                    const struct ask_flow_key *key,
+                                    u32 oif, u32 action_flags,
+                                    int egress_ifindex, __be32 dst_ip)
+{
+        struct ask_flow_pending *p;
+
+        p = kzalloc(sizeof(*p), GFP_ATOMIC);
+        if (!p)
+                return -ENOMEM;
+
+        p->cookie           = cookie;
+        p->key              = *key;
+        p->oif              = oif;
+        p->action_flags     = action_flags;
+        p->egress_ifindex   = egress_ifindex;
+        p->dst_ip           = dst_ip;
+        p->jiffies_inserted = jiffies;
+
+        spin_lock_bh(&ask_flow_pending_lock);
+        if (ask_flow_pending_count >= ASK_FLOW_PENDING_MAX) {
+                spin_unlock_bh(&ask_flow_pending_lock);
+                kfree(p);
+                atomic_inc(&ask_flow_pending_overflow);
+                return -ENOSPC;
+        }
+        list_add_tail(&p->node, &ask_flow_pending_list);
+        ask_flow_pending_count++;
+        spin_unlock_bh(&ask_flow_pending_lock);
+        atomic_inc(&ask_flow_pending_deferred);
+        return 0;
+}
+
+static int ask_flow_offload_netevent(struct notifier_block *nb,
+                                     unsigned long event, void *ptr)
+{
+        struct neighbour *n;
+        struct net_device *dev;
+        __be32 dst_ip;
+        struct ask_flow_pending *p;
+        struct ask_flow_table *t;
+        u32 hw_id = 0;
+        int rc;
+
+        if (event != NETEVENT_NEIGH_UPDATE)
+                return NOTIFY_DONE;
+
+        n = ptr;
+        if (!n || n->tbl != &arp_tbl)
+                return NOTIFY_DONE;
+
+        /* Only act on transitions into NUD_VALID (lladdr is now meaningful). */
+        read_lock_bh(&n->lock);
+        if (!(n->nud_state & NUD_VALID)) {
+                read_unlock_bh(&n->lock);
+                return NOTIFY_DONE;
+        }
+        dev = n->dev;
+        memcpy(&dst_ip, n->primary_key, sizeof(dst_ip));
+        read_unlock_bh(&n->lock);
+
+        if (!dev)
+                return NOTIFY_DONE;
+
+        t = ask_flow_default_table();
+        if (!t)
+                return NOTIFY_DONE;
+
+        /*
+         * Drain ALL pending entries waiting on (dev->ifindex, dst_ip) — a
+         * single ARP resolution can unblock multiple cookies if several
+         * flows are heading at the same next-hop.
+         */
+        while ((p = ask_flow_pending_take_one(dev->ifindex, dst_ip))) {
+                /* Re-resolve so we always pick up the fresh n->ha. */
+                ask_resolve_neigh_v4(dev, dst_ip,
+                                     p->key.next_hop_mac, p->key.egress_mac);
+                if (is_zero_ether_addr(p->key.next_hop_mac)) {
+                        /* Race: neigh went back to INCOMPLETE between
+                         * NETEVENT delivery and our re-lookup.  Re-park.
+                         */
+                        if (ask_flow_pending_enqueue(p->cookie, &p->key,
+                                                     p->oif, p->action_flags,
+                                                     p->egress_ifindex,
+                                                     p->dst_ip) == 0)
+                                pr_info_ratelimited("ask: flow_offload: PR14y re-park cookie=0x%llx dev=%s\n",
+                                                    p->cookie, netdev_name(dev));
+                        kfree(p);
+                        continue;
+                }
+
+                rc = ask_flow_insert(t, p->cookie, &p->key, p->oif,
+                                     p->action_flags, &hw_id);
+                if (rc == -EEXIST)
+                        rc = 0;
+                if (rc == 0) {
+                        atomic_inc(&ask_flow_pending_resolved);
+                        pr_info_ratelimited("ask: flow_offload: PR14y deferred-insert OK cookie=0x%llx dev=%s hw_id=0x%08x nh=%pM em=%pM\n",
+                                            p->cookie, netdev_name(dev),
+                                            hw_id, p->key.next_hop_mac,
+                                            p->key.egress_mac);
+                } else {
+                        pr_info_ratelimited("ask: flow_offload: PR14y deferred-insert FAIL rc=%d cookie=0x%llx dev=%s\n",
+                                            rc, p->cookie, netdev_name(dev));
+                }
+                kfree(p);
+        }
+
+        return NOTIFY_DONE;
+}
+
+static struct notifier_block ask_flow_offload_netevent_nb = {
+        .notifier_call = ask_flow_offload_netevent,
+};
 
 /* ------------------------------------------------------------------------- */
 /* Per-block state                                                            */
@@ -515,6 +711,49 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                              key.next_hop_mac, key.egress_mac);
 
         /*
+         * PR14y: if the next-hop MAC is still all-zero, the ARP entry is
+         * NUD_NONE / NUD_INCOMPLETE / NUD_FAILED.  Don't burn a CC slot on
+         * a guaranteed-failure HW insert — park the cookie on the pending
+         * list and let the NETEVENT_NEIGH_UPDATE notifier replay the
+         * insert the moment the neigh resolves.  The kernel SW flowtable
+         * carries the flow in the meantime, and crucially we send a probe
+         * via neigh_event_send() to accelerate ARP resolution rather than
+         * waiting for the SW path's natural ARP trigger.
+         *
+         * Cookie is NOT inserted into the rhashtable yet; if FLOW_CLS_DESTROY
+         * arrives before the neigh resolves, ask_flow_offload_destroy()
+         * drops the pending entry instead of trying ask_flow_remove() on a
+         * cookie that was never installed.
+         */
+        if (egress_dev && is_zero_ether_addr(key.next_hop_mac)) {
+                int qrc;
+                struct neighbour *n;
+                u32 dst_key = (__force u32)dst_ip;
+
+                n = neigh_lookup(&arp_tbl, &dst_key, egress_dev);
+                if (!n)
+                        n = __neigh_create(&arp_tbl, &dst_key, egress_dev, true);
+                if (n && !IS_ERR(n)) {
+                        neigh_event_send(n, NULL);
+                        neigh_release(n);
+                }
+
+                qrc = ask_flow_pending_enqueue((u64)f->cookie, &key, oif,
+                                               action_flags,
+                                               egress_dev->ifindex, dst_ip);
+                if (qrc == 0) {
+                        pr_info_ratelimited("ask: flow_offload: PR14y defer cookie=0x%lx oif=%u (neigh unresolved, ARP probed)\n",
+                                            f->cookie, oif);
+                        return 0;
+                }
+                pr_info_ratelimited("ask: flow_offload: PR14y queue full (%d), falling through to SW for cookie=0x%lx\n",
+                                    qrc, f->cookie);
+                /* Fall through: let the original code path return whatever
+                 * ask_flow_insert() gives us (it will likely succeed in
+                 * software-only mode and the flow stays SW-pinned). */
+        }
+
+        /*
          * PR14j: ingress-only KG port-bind.
          *
          * The REPLACE arrived on @ingress_dev's block (the dpaa netdev
@@ -576,6 +815,20 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
 {
         struct ask_flow_table *t = ask_flow_default_table();
         int rc;
+
+        /*
+         * PR14y: drop any pending deferred-insert entry for this cookie
+         * BEFORE attempting the flow-table remove.  If the cookie was
+         * still pending (never made it to ask_flow_insert), the rht
+         * lookup below would return -ENOENT and we'd silently succeed,
+         * but the pending entry would leak until module unload.
+         */
+        if (ask_flow_pending_drop_cookie((u64)f->cookie)) {
+                ask_pr_dbg("flow_offload: DESTROY drop pending cookie=0x%lx\n",
+                           f->cookie);
+                /* Fall through — also try the rht remove in case the
+                 * cookie was simultaneously promoted by the notifier. */
+        }
 
         if (!t)
                 return -EOPNOTSUPP;
@@ -812,6 +1065,10 @@ static int ask_flow_indr_setup_cb(struct net_device *dev, struct Qdisc *sch,
 /* Lifecycle                                                                  */
 /* ------------------------------------------------------------------------- */
 
+/* Forward decl: ask_flow_offload_init's PR14y error path needs to call the
+ * indr unregister, which takes the release helper that is defined below. */
+static void ask_flow_indr_release(void *cb_priv);
+
 int ask_flow_offload_init(void)
 {
         int rc;
@@ -838,7 +1095,23 @@ int ask_flow_offload_init(void)
                 return rc;
         }
 
-        ask_pr_info("flow_offload: ready (PR14o: dpaa_eth ndo + indr nft-flowtable bind, cb-trace pr_info)\n");
+        /*
+         * PR14y: subscribe to NETEVENT_NEIGH_UPDATE so we can replay the
+         * deferred-insert pending queue the moment any ARP entry resolves.
+         * register_netevent_notifier() is documented as never failing in
+         * mainline (it's a raw atomic notifier chain register), but the
+         * return is checked for completeness.
+         */
+        rc = register_netevent_notifier(&ask_flow_offload_netevent_nb);
+        if (rc) {
+                ask_pr_err("flow_offload: register_netevent_notifier failed: %d\n", rc);
+                flow_indr_dev_unregister(ask_flow_indr_setup_cb, NULL,
+                                         ask_flow_indr_release);
+                dpaa_unregister_flow_offload_handler(&ask_dpaa_fo_ops);
+                return rc;
+        }
+
+        ask_pr_info("flow_offload: ready (PR14y: deferred-insert + netevent neigh notifier)\n");
         return 0;
 }
 
@@ -851,7 +1124,29 @@ static void ask_flow_indr_release(void *cb_priv)
 void ask_flow_offload_exit(void)
 {
         struct ask_flow_block_priv_entry *e, *tmp;
+        struct ask_flow_pending *p, *ptmp;
         int rc;
+
+        unregister_netevent_notifier(&ask_flow_offload_netevent_nb);
+
+        /*
+         * PR14y: drain any still-pending deferred-insert entries.  The
+         * netevent notifier is already unregistered so no new entries
+         * can land; the kernel SW flowtable will continue to carry the
+         * flow until userspace tears down the rule.  Just free memory.
+         */
+        spin_lock_bh(&ask_flow_pending_lock);
+        list_for_each_entry_safe(p, ptmp, &ask_flow_pending_list, node) {
+                list_del(&p->node);
+                ask_flow_pending_count--;
+                kfree(p);
+        }
+        spin_unlock_bh(&ask_flow_pending_lock);
+
+        ask_pr_info("flow_offload: PR14y stats deferred=%d resolved=%d overflow=%d\n",
+                    atomic_read(&ask_flow_pending_deferred),
+                    atomic_read(&ask_flow_pending_resolved),
+                    atomic_read(&ask_flow_pending_overflow));
 
         flow_indr_dev_unregister(ask_flow_indr_setup_cb, NULL,
                                  ask_flow_indr_release);
