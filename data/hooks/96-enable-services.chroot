@@ -15,8 +15,19 @@ set -e
 echo "I: Enabling custom LS1046A services..."
 
 # multi-user.target services
+# NOTE: ls1046a-console.service was REMOVED from this list (2026-05-18).
+# It was originally added when config.boot.default had NO `system console`
+# stanza, because system_console.py would then disable serial-getty@ttyS0
+# leaving the board with no agetty on /dev/ttyS0. The stanza is now back
+# in seed configs, system_console.py runs cleanly, and serial-getty@ttyS0
+# (with the zz-ls1046a-nodevbind.conf drop-in below) is sufficient. Having
+# BOTH units enabled creates a dual-agetty race: TTYVHangup=yes makes each
+# unit SIGHUP the other on start → both Restart=always respawn → both hit
+# start-limit-hit (counter 13) within ~10s → console dies after the user
+# sees the login prompt 2–3 times. SSH stays alive (different code path),
+# which is exactly the symptom the operator reported.
 for svc in vyos-postinstall fman-fq-qdisc sfp-tx-enable-sdk \
-           ask-conntrack-fix cmm ls1046a-console; do
+           ask-conntrack-fix cmm; do
   if [ -f "/etc/systemd/system/${svc}.service" ]; then
     mkdir -p /etc/systemd/system/multi-user.target.wants
     ln -sf "../${svc}.service" "/etc/systemd/system/multi-user.target.wants/${svc}.service"
@@ -51,20 +62,15 @@ ln -sf "/lib/systemd/system/serial-getty@.service" \
        "/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service"
 echo "  enabled: serial-getty@ttyS0.service → getty.target"
 
-# --- Force-enable LS1046A independent serial console -------------------
-# ls1046a-console.service runs agetty on /dev/ttyS0 with a unit name VyOS
-# does NOT recognise, so system_console.py cannot disable it during the
-# first vyos-router commit (which it WILL do to serial-getty@ttyS0.service
-# now that we ship the seed configs without `system { console { ... } }`,
-# see commit 1876cff1). This is the load-bearing reason interactive serial
-# console came back to life — without it, kernel TTY echoes characters but
-# no agetty reads them = "blind echo of keystrokes only". Symlinked into
-# multi-user.target.wants/ above as well; keeping it in getty.target.wants/
-# too matches the contract of agetty units.
-mkdir -p /etc/systemd/system/getty.target.wants
-ln -sf "/etc/systemd/system/ls1046a-console.service" \
-       "/etc/systemd/system/getty.target.wants/ls1046a-console.service"
-echo "  enabled: ls1046a-console.service → getty.target"
+# --- ls1046a-console.service is INTENTIONALLY NOT enabled --------------
+# See note above the multi-user.target loop. The independent agetty unit
+# was a workaround for system_console.py disabling serial-getty when the
+# `system console` stanza was missing from the seed config. The stanza is
+# back, so the workaround is now harmful (causes dual-agetty start-limit
+# crash). Defensively remove any stale enable symlink that a previous
+# build might have left behind on an in-place upgrade.
+rm -f /etc/systemd/system/getty.target.wants/ls1046a-console.service \
+      /etc/systemd/system/multi-user.target.wants/ls1046a-console.service
 
 # --- Drop-in override for serial-getty@ttyS0 ----------------------------
 # Root cause (2026-04-18 boot #2): serial-getty@ttyS0.service is queued
