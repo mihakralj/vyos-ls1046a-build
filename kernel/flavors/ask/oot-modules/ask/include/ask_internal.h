@@ -165,17 +165,28 @@ struct ask_hw_pcd *ask_hw_pcd_get(void);
  * wrapper here tracks the bound port internally and returns:
  *
  *   0           first bind for this @port_id succeeded
- *   0           idempotent re-bind for the SAME @port_id (safe no-op)
- *   -EBUSY      already bound to a DIFFERENT port (caller should NOT
- *               fail the FLOW_BLOCK_BIND - software fallback for the
- *               second port is still functional, just unaccelerated)
+ *   0           idempotent re-bind for an ALREADY-BOUND @port_id (safe
+ *               no-op — supports the FLOW_CLS_REPLACE bind path that
+ *               may run on the same port multiple times)
+ *   -ENOSPC    bind-array full (more than ASK_HW_V4_TCP_MAX_BINDS
+ *               distinct ports tried to bind); caller logs and falls
+ *               back to SW for the extra ports
  *   -ENODEV     ask_hw_pcd_get() returned NULL (no HW backing - same
  *               software-only fallback signal as the rest of ask_hw)
- *   other -E    propagated from fman_pcd_kg_bind_port()
+ *   other -E    propagated from fman_pcd_kg_scheme_create() /
+ *               fman_pcd_kg_attach_cc() / fman_pcd_kg_bind_port()
  *
- * Caller should LOG (not fail) on -EBUSY at the BIND callsite so the
- * operator can see "second port could not be HW-accelerated, falling
- * back to SW" without the whole flow_offload bind being rejected.
+ * PR14v (2026-05-18): replaced the legacy single-scheme bind with a
+ * per-port scheme allocator.  LS1046A KGSE_MV is single-port-per-
+ * scheme, but multiple schemes may each be attached to the same CC
+ * tree.  PR14v allocates one KG scheme per ingress port, attaches
+ * each to the shared cc_tree, and binds each to its own port — so
+ * both eth3 (port 8) and eth4 (port 9) classify v4-TCP in silicon
+ * to the same CC node.  Pre-PR14v the second port hit -EBUSY and
+ * ran in SW.
+ *
+ * Caller should LOG (not fail) on -ENOSPC at the BIND callsite so
+ * the operator can see "scheme pool exhausted, falling back to SW".
  */
 int ask_hw_port_bind(u8 port_id);
 

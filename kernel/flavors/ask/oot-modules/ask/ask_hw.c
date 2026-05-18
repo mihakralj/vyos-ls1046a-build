@@ -258,17 +258,80 @@ EXPORT_SYMBOL_GPL(ask_hw_ucode_get_version);
  */
 #define ASK_HW_NUM_OH_PORTS     6
 
+/*
+ * PR14v (2026-05-18): maximum number of distinct FMan ingress ports
+ * that can be HW-accelerated for v4-TCP at the same time.  LS1046A
+ * has 8x 1G + 2x 10G MACs; ASK's M2 reference forwards between
+ * eth3 (port 8) and eth4 (port 9), so 2 is the immediate target.
+ * Sized to 4 to give headroom for adding routed RJ45 ports later
+ * (eth0/eth1/eth2 = ports 5/6/2) without re-spinning the kernel.
+ *
+ * Each entry costs one KGSE_MV silicon slot plus ~256 B of host
+ * memory; the KGSE register file has 32 slots total on FMan v3 so
+ * 4 is well below the silicon ceiling.
+ *
+ * Each scheme is created with the same kg_params (saved in
+ * ask_hw_pcd.kg_params_v4_tcp at bring-up) and attached to the
+ * shared cc_tree, so all schemes funnel into the SAME CC node —
+ * the FORWARD_FQ → OH-port AD chain stays single-instance per
+ * (cookie, OH-port-slot) pair.
+ */
+#define ASK_HW_V4_TCP_MAX_BINDS 4
+
+/* PR14v dual-port bind entry. */
+struct ask_hw_kg_bind {
+        u8                          port_id;     /* FMan MAC cell-index 1..10 */
+        struct fman_pcd_kg_scheme  *scheme;      /* per-port KGSE_MV slot */
+};
+
 struct ask_hw_pcd {
         struct mutex lock;
         struct fman *fman;             /* PR14j: kept for OH-port claim */
         struct fman_pcd *pcd;
         struct fman_pcd_cc_tree *cc_tree;
         struct fman_pcd_cc_node *cc_v4_tcp;
-        struct fman_pcd_kg_scheme *kg_v4_tcp;
 
-        /* PR14g port-bind tracking (single-port-per-scheme KGSE_MV). */
-        bool v4_tcp_bound_port_valid;
-        u8   v4_tcp_bound_port;
+        /*
+         * PR14v (2026-05-18): per-port KG schemes.  Each entry is one
+         * KGSE_MV slot bound to its own port; all entries are attached
+         * to the same cc_tree above so traffic from any bound port
+         * lands in cc_v4_tcp.
+         *
+         * kg_params_v4_tcp is the recipe used by ask_hw_pcd_build_chain
+         * at bring-up; we keep it so ask_hw_port_bind() can spin up
+         * additional schemes on later port-bind requests without
+         * re-deriving the KG extract layout.
+         */
+        struct fman_pcd_kg_scheme_params kg_params_v4_tcp;
+        struct ask_hw_kg_bind            v4_tcp_binds[ASK_HW_V4_TCP_MAX_BINDS];
+        u8                               v4_tcp_bind_count;
+
+        /*
+         * PR14w (2026-05-18): per-resource ENOSPC counters.  Exposed
+         * via debugfs (ask_debugfs.c) so the operator can pinpoint
+         * which silicon resource is exhausted when HW offload
+         * silently falls back to SW.  Each counter is bumped under
+         * h->lock at the precise return site so the counts are
+         * race-free relative to insert / remove ordering.
+         *
+         * enospc_oh_pool  — bitmap full: every OH port owned by a
+         *                   live cookie (insert returns -ENOSPC,
+         *                   flow stays in SW).
+         * enospc_oh_chain — fman_pcd_oh_port_set_chain failed
+         *                   with -ENOSPC (per-OH AD chain MURAM
+         *                   exhaustion).
+         * enospc_cc_keys  — fman_pcd_cc_node_add_key returned
+         *                   -ENOSPC (CC node hit cap-255 silicon
+         *                   limit per PR14r).
+         * other_enospc    — any other -ENOSPC return inside the
+         *                   insert path that does not match the
+         *                   three sites above (currently zero —
+         *                   reserved for future bring-up).
+         */
+        u64                              enospc_oh_pool;
+        u64                              enospc_oh_chain;
+        u64                              enospc_cc_keys;
+        u64                              other_enospc;
 
         /*
          * PR14s additions (2026-05-18): per-flow OH-port pool.
@@ -364,7 +427,7 @@ static int ask_hw_pcd_build_chain(struct ask_hw_pcd *h)
 {
         struct fman_pcd_cc_extract extract;
         struct fman_pcd_cc_key_table keys;
-        struct fman_pcd_kg_scheme_params kg_params;
+        struct fman_pcd_kg_scheme_params *kg_params = &h->kg_params_v4_tcp;
         int rc;
 
         h->cc_tree = fman_pcd_cc_tree_create(h->pcd, 1);
@@ -436,60 +499,57 @@ static int ask_hw_pcd_build_chain(struct ask_hw_pcd *h)
                 goto err_tree;
         }
 
-        memset(&kg_params, 0, sizeof(kg_params));
-        kg_params.id = -1;
-        kg_params.use_hash = true;
-        kg_params.default_fqid = 0;
-        kg_params.num_extracts = 5;
+        /*
+         * PR14v (2026-05-18): build the KG recipe ONCE and save it
+         * inside h.  ask_hw_port_bind() spins up a NEW scheme from
+         * this recipe per ingress port (up to ASK_HW_V4_TCP_MAX_BINDS),
+         * attaches each to the shared cc_tree, and binds each to its
+         * own port.  KGSE_MV is single-port-per-scheme on LS1046A so
+         * dual-port classification requires dual schemes.
+         *
+         * No scheme is created at bring-up — bring-up leaves the
+         * silicon armed but quiescent (cc_tree+cc_node ready, KG
+         * recipe saved), waiting for the first FLOW_BLOCK_BIND.
+         * This avoids burning a KGSE slot on a scheme that may
+         * never get a port-bind in some deployment shapes.
+         */
+        memset(kg_params, 0, sizeof(*kg_params));
+        kg_params->id = -1;
+        kg_params->use_hash = true;
+        kg_params->default_fqid = 0;
+        kg_params->num_extracts = 5;
 
-        kg_params.extracts[0].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
-        kg_params.extracts[0].offset = ASK_HW_PR_OFF_IPV4_SIP;
-        kg_params.extracts[0].size   = 4;
-        kg_params.extracts[0].mask   = 0xff;
+        kg_params->extracts[0].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
+        kg_params->extracts[0].offset = ASK_HW_PR_OFF_IPV4_SIP;
+        kg_params->extracts[0].size   = 4;
+        kg_params->extracts[0].mask   = 0xff;
 
-        kg_params.extracts[1].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
-        kg_params.extracts[1].offset = ASK_HW_PR_OFF_IPV4_DIP;
-        kg_params.extracts[1].size   = 4;
-        kg_params.extracts[1].mask   = 0xff;
+        kg_params->extracts[1].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
+        kg_params->extracts[1].offset = ASK_HW_PR_OFF_IPV4_DIP;
+        kg_params->extracts[1].size   = 4;
+        kg_params->extracts[1].mask   = 0xff;
 
-        kg_params.extracts[2].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
-        kg_params.extracts[2].offset = ASK_HW_PR_OFF_L4PROTO;
-        kg_params.extracts[2].size   = 1;
-        kg_params.extracts[2].mask   = 0xff;
+        kg_params->extracts[2].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
+        kg_params->extracts[2].offset = ASK_HW_PR_OFF_L4PROTO;
+        kg_params->extracts[2].size   = 1;
+        kg_params->extracts[2].mask   = 0xff;
 
-        kg_params.extracts[3].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
-        kg_params.extracts[3].offset = ASK_HW_PR_OFF_L4_SPORT;
-        kg_params.extracts[3].size   = 2;
-        kg_params.extracts[3].mask   = 0xff;
+        kg_params->extracts[3].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
+        kg_params->extracts[3].offset = ASK_HW_PR_OFF_L4_SPORT;
+        kg_params->extracts[3].size   = 2;
+        kg_params->extracts[3].mask   = 0xff;
 
-        kg_params.extracts[4].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
-        kg_params.extracts[4].offset = ASK_HW_PR_OFF_L4_DPORT;
-        kg_params.extracts[4].size   = 2;
-        kg_params.extracts[4].mask   = 0xff;
+        kg_params->extracts[4].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
+        kg_params->extracts[4].offset = ASK_HW_PR_OFF_L4_DPORT;
+        kg_params->extracts[4].size   = 2;
+        kg_params->extracts[4].mask   = 0xff;
 
-        h->kg_v4_tcp = fman_pcd_kg_scheme_create(h->pcd, &kg_params);
-        if (IS_ERR(h->kg_v4_tcp)) {
-                rc = PTR_ERR(h->kg_v4_tcp);
-                h->kg_v4_tcp = NULL;
-                ask_pr_warn("hw: kg_scheme_create v4-TCP failed (%d)\n", rc);
-                goto err_node;
-        }
+        h->v4_tcp_bind_count = 0;
+        memset(h->v4_tcp_binds, 0, sizeof(h->v4_tcp_binds));
 
-        rc = fman_pcd_kg_attach_cc(h->kg_v4_tcp, h->cc_tree);
-        if (rc) {
-                ask_pr_warn("hw: kg_attach_cc v4-TCP failed (%d)\n", rc);
-                goto err_kg;
-        }
-
-        ask_pr_info("hw: FMan PCD chain up (v4-TCP empty CC node, KG-attached, awaiting port-bind from flow_offload)\n");
+        ask_pr_info("hw: FMan PCD chain up (v4-TCP CC node + KG recipe ready; per-port KG schemes deferred to FLOW_BLOCK_BIND)\n");
         return 0;
 
-err_kg:
-        fman_pcd_kg_scheme_destroy(h->kg_v4_tcp);
-        h->kg_v4_tcp = NULL;
-err_node:
-        fman_pcd_cc_node_destroy(h->cc_v4_tcp);
-        h->cc_v4_tcp = NULL;
 err_tree:
         fman_pcd_cc_tree_destroy(h->cc_tree);
         h->cc_tree = NULL;
@@ -747,10 +807,25 @@ void ask_hw_pcd_teardown(void)
         /* PR14j OH side first — it may dereference shared MANIPs. */
         ask_hw_pcd_teardown_oh(h);
 
-        if (h->kg_v4_tcp) {
-                fman_pcd_kg_scheme_destroy(h->kg_v4_tcp);
-                h->kg_v4_tcp = NULL;
+        /*
+         * PR14v: destroy every per-port KG scheme.  Each scheme's
+         * destroy path internally unbinds its KGSE_MV slot from the
+         * port it was bound to and re-clears the KGSE registers, so
+         * the silicon goes back to the same quiescent state as
+         * before any ask_hw_port_bind() call.
+         */
+        {
+                unsigned int i;
+                for (i = 0; i < h->v4_tcp_bind_count; i++) {
+                        if (h->v4_tcp_binds[i].scheme) {
+                                fman_pcd_kg_scheme_destroy(h->v4_tcp_binds[i].scheme);
+                                h->v4_tcp_binds[i].scheme = NULL;
+                        }
+                        h->v4_tcp_binds[i].port_id = 0;
+                }
+                h->v4_tcp_bind_count = 0;
         }
+
         if (h->cc_v4_tcp) {
                 fman_pcd_cc_node_destroy(h->cc_v4_tcp);
                 h->cc_v4_tcp = NULL;
@@ -772,54 +847,135 @@ struct ask_hw_pcd *ask_hw_pcd_get(void)
 }
 
 /* ------------------------------------------------------------------------- */
-/* PR14g port-bind (unchanged from body-1 + part-3)                           */
+/* PR14v port-bind — per-port KG scheme allocator                             */
+/*                                                                            */
+/* KGSE_MV silicon-fact: an FMan v3 KG scheme can be bound to exactly one     */
+/* port.  Pre-PR14v ask.ko owned a single scheme created at bring-up and the  */
+/* second port-bind hit -EBUSY, leaving the second ingress port in SW.       */
+/*                                                                            */
+/* PR14v inverts this: at bring-up we save the KG recipe (h->kg_params_v4_tcp)*/
+/* but allocate ZERO schemes.  Each call to ask_hw_port_bind() that names a   */
+/* new port allocates a fresh scheme from the recipe, attaches it to the     */
+/* shared h->cc_tree (so the new port's hashed traffic indexes into the same */
+/* CC node), and binds it to the requested port.  Idempotent on a port that  */
+/* already has a scheme.  Returns -ENOSPC once the per-pcd bind array is     */
+/* full (ASK_HW_V4_TCP_MAX_BINDS).                                            */
 /* ------------------------------------------------------------------------- */
 
 int ask_hw_port_bind(u8 port_id)
 {
         struct ask_hw_pcd *h = ask_hw_pcd_get();
+        struct fman_pcd_kg_scheme *new_scheme = NULL;
+        unsigned int i, slot;
         int rc;
 
         if (!h)
                 return -ENODEV;
 
-        if (port_id > 9) {
-                ask_pr_warn("hw: port-bind port_id %u out of range (0..9)\n",
+        /*
+         * fman_pcd_kg_bind_port() rejects port_id == 0 (reserved for
+         * OP) and port_id > 10.  LS1046A FMan v3 ports 1..8 are 1G
+         * MACs, 9..10 are 10G MACs; we cap externally at 10.
+         */
+        if (port_id == 0 || port_id > 10) {
+                ask_pr_warn("hw: port-bind port_id %u out of range (1..10)\n",
                             port_id);
                 return -EINVAL;
         }
 
         mutex_lock(&h->lock);
 
-        if (h->v4_tcp_bound_port_valid) {
-                if (h->v4_tcp_bound_port == port_id) {
+        /* Idempotent fast-path: port already has a scheme. */
+        for (i = 0; i < h->v4_tcp_bind_count; i++) {
+                if (h->v4_tcp_binds[i].port_id == port_id) {
                         mutex_unlock(&h->lock);
-                        ask_pr_dbg("hw: port-bind v4-TCP idempotent (port %u)\n",
-                                   port_id);
+                        ask_pr_dbg("hw: port-bind v4-TCP idempotent (port %u, slot %u)\n",
+                                   port_id, i);
                         return 0;
                 }
-                mutex_unlock(&h->lock);
-                ask_pr_warn("hw: port-bind v4-TCP: already bound to port %u, "
-                            "cannot also bind port %u - second port will run "
-                            "in software\n",
-                            h->v4_tcp_bound_port, port_id);
-                return -EBUSY;
         }
 
-        rc = fman_pcd_kg_bind_port(h->kg_v4_tcp, port_id);
-        if (rc) {
+        if (h->v4_tcp_bind_count >= ASK_HW_V4_TCP_MAX_BINDS) {
                 mutex_unlock(&h->lock);
-                ask_pr_warn("hw: fman_pcd_kg_bind_port(v4-TCP, port=%u) failed: %d\n",
+                ask_pr_warn("hw: port-bind v4-TCP: bind-array full (%u/%u), "
+                            "cannot bind port %u — falling back to SW for "
+                            "this port\n",
+                            h->v4_tcp_bind_count, ASK_HW_V4_TCP_MAX_BINDS,
+                            port_id);
+                return -ENOSPC;
+        }
+        slot = h->v4_tcp_bind_count;
+
+        mutex_unlock(&h->lock);
+
+        /*
+         * Heavy work (scheme_create, attach_cc, bind_port) is done
+         * outside h->lock because the underlying fman_pcd_* APIs each
+         * take pcd->lock internally — nesting our mutex around them
+         * would risk inversion against the OH-port claim path which
+         * also touches pcd->lock.
+         */
+        new_scheme = fman_pcd_kg_scheme_create(h->pcd, &h->kg_params_v4_tcp);
+        if (IS_ERR_OR_NULL(new_scheme)) {
+                rc = new_scheme ? PTR_ERR(new_scheme) : -ENOMEM;
+                ask_pr_warn("hw: port-bind v4-TCP: kg_scheme_create for port %u failed: %d\n",
                             port_id, rc);
                 return rc;
         }
 
-        h->v4_tcp_bound_port = port_id;
-        h->v4_tcp_bound_port_valid = true;
+        rc = fman_pcd_kg_attach_cc(new_scheme, h->cc_tree);
+        if (rc) {
+                ask_pr_warn("hw: port-bind v4-TCP: kg_attach_cc for port %u failed: %d\n",
+                            port_id, rc);
+                fman_pcd_kg_scheme_destroy(new_scheme);
+                return rc;
+        }
+
+        rc = fman_pcd_kg_bind_port(new_scheme, port_id);
+        if (rc) {
+                ask_pr_warn("hw: port-bind v4-TCP: kg_bind_port(port=%u) failed: %d\n",
+                            port_id, rc);
+                fman_pcd_kg_scheme_destroy(new_scheme);
+                return rc;
+        }
+
+        /* Re-acquire h->lock to commit the new bind into the array. */
+        mutex_lock(&h->lock);
+
+        /*
+         * Re-check that no concurrent binder filled the slot we
+         * reserved.  Under normal flow_offload bind ordering this
+         * cannot happen (the flow_block_cb path serialises through
+         * the nft flowtable), but we re-check to keep the function
+         * safe under hypothetical reentrant callers.
+         */
+        if (h->v4_tcp_bind_count >= ASK_HW_V4_TCP_MAX_BINDS) {
+                mutex_unlock(&h->lock);
+                ask_pr_warn("hw: port-bind v4-TCP: bind-array filled by concurrent binder before slot %u for port %u could commit; destroying scheme\n",
+                            slot, port_id);
+                fman_pcd_kg_scheme_destroy(new_scheme);
+                return -ENOSPC;
+        }
+        /* Re-check that port wasn't bound by a concurrent caller. */
+        for (i = 0; i < h->v4_tcp_bind_count; i++) {
+                if (h->v4_tcp_binds[i].port_id == port_id) {
+                        mutex_unlock(&h->lock);
+                        ask_pr_warn("hw: port-bind v4-TCP: port %u was bound concurrently in slot %u; destroying duplicate scheme\n",
+                                    port_id, i);
+                        fman_pcd_kg_scheme_destroy(new_scheme);
+                        return 0;
+                }
+        }
+
+        slot = h->v4_tcp_bind_count;
+        h->v4_tcp_binds[slot].port_id = port_id;
+        h->v4_tcp_binds[slot].scheme  = new_scheme;
+        h->v4_tcp_bind_count++;
+
         mutex_unlock(&h->lock);
 
-        ask_pr_info("hw: FMan PCD v4-TCP scheme bound to port %u (HW offload active)\n",
-                    port_id);
+        ask_pr_info("hw: FMan PCD v4-TCP scheme bound to port %u (slot %u/%u — HW offload active)\n",
+                    port_id, slot + 1, ASK_HW_V4_TCP_MAX_BINDS);
         return 0;
 }
 EXPORT_SYMBOL_GPL(ask_hw_port_bind);
@@ -968,6 +1124,21 @@ static int ask_hw_flow_insert_v4_tcp(struct ask_hw_pcd *h,
                 mutex_unlock(&h->lock);
 
                 if (oh_slot < 0) {
+                        /*
+                         * PR14w site (1/3): OH-port pool fully owned.
+                         * Bump the per-resource ENOSPC counter under
+                         * h->lock so debugfs sees a coherent read, and
+                         * print a ratelimited info banner so the
+                         * operator can see in dmesg WHICH resource was
+                         * exhausted (vs a generic -ENOSPC which could
+                         * come from the chain or the CC keys).
+                         */
+                        mutex_lock(&h->lock);
+                        h->enospc_oh_pool++;
+                        mutex_unlock(&h->lock);
+                        pr_info_ratelimited("ask: hw: insert: ENOSPC at OH pool "
+                                "(all %u/%u OH ports owned; flow stays in SW)\n",
+                                h->oh_pool_count, ASK_HW_NUM_OH_PORTS);
                         rc = -ENOSPC;
                         goto err_free_insrt;
                 }
@@ -982,10 +1153,18 @@ static int ask_hw_flow_insert_v4_tcp(struct ask_hw_pcd *h,
         mutex_lock(&h->lock);
         rc = fman_pcd_oh_port_set_chain(h->oh_pool[ck.oh_idx],
                                         manips, 3, peer_tx_fqid);
+        if (rc == -ENOSPC)
+                h->enospc_oh_chain++;   /* PR14w site (2/3) */
         mutex_unlock(&h->lock);
         if (rc) {
-                ask_pr_warn("hw: oh_port_set_chain(oh_idx=%u) failed (%d)\n",
-                            ck.oh_idx, rc);
+                if (rc == -ENOSPC)
+                        pr_info_ratelimited("ask: hw: insert: ENOSPC at "
+                                "oh_port_set_chain(oh_idx=%u) — per-OH AD-chain "
+                                "MURAM exhausted; flow stays in SW\n",
+                                ck.oh_idx);
+                else
+                        ask_pr_warn("hw: oh_port_set_chain(oh_idx=%u) failed (%d)\n",
+                                    ck.oh_idx, rc);
                 goto err_release_oh_slot;
         }
 
@@ -1006,10 +1185,17 @@ static int ask_hw_flow_insert_v4_tcp(struct ask_hw_pcd *h,
 
         mutex_lock(&h->lock);
         slot = fman_pcd_cc_node_add_key(h->cc_v4_tcp, &entry);
+        if (slot == -ENOSPC)
+                h->enospc_cc_keys++;    /* PR14w site (3/3) */
         mutex_unlock(&h->lock);
         if (slot < 0) {
                 rc = slot;
-                ask_pr_warn("hw: cc_node_add_key v4-TCP failed (%d)\n", slot);
+                if (slot == -ENOSPC)
+                        pr_info_ratelimited("ask: hw: insert: ENOSPC at "
+                                "cc_node_add_key v4-TCP — CC node hit "
+                                "cap-255 silicon limit (PR14r); flow stays in SW\n");
+                else
+                        ask_pr_warn("hw: cc_node_add_key v4-TCP failed (%d)\n", slot);
                 goto err_clear_chain;
         }
         if (slot > U16_MAX) {
