@@ -241,6 +241,35 @@ void ask_priv_unpack_hw_flow_id(u32 hw_flow_id,
 struct fman_pcd_cc_node;
 struct fman_pcd_manip;
 
+/*
+ * PR14s (2026-05-18) — per-flow OH-port ownership.
+ *
+ * The shared-OH-chain model that PR14j shipped at v1.0 is the M2
+ * gate blocker: every set_chain() reprogrammed the SINGLE shared OH
+ * port's AD chain with the latest flow's per-flow m_insrt, so only
+ * the most-recent flow had its destination MAC armed in silicon.
+ * All earlier flows either (a) hit the chain with the wrong dst-MAC
+ * and got dropped at the peer link, or (b) the OH BMI's stall during
+ * set_chain caused frames to NAPI-loop back into the kernel SW path.
+ * Net effect: CPU dominated by SW forwarding, M2 gate FAIL.
+ *
+ * PR14s pivots to a per-flow OH-port model.  LS1046A exposes six
+ * Offline Host ports at cell-index 0x2..0x7 → oh_idx 0..5; ask.ko
+ * claims all six at bring-up and allocates one per HW-offloaded
+ * flow.  When the pool is empty the insert path returns -ENOSPC and
+ * the flow stays on the SW fast path (graceful degradation).  Each
+ * OH port's AD chain is now exclusively owned by one flow for its
+ * lifetime, so set_chain is called ONCE per flow at insert and
+ * disarmed at remove — no inter-flow chain rewrite races.
+ *
+ * `oh_idx` is the cookie field that records which OH port this
+ * flow owns.  `oh_owned == true` means ask_hw_flow_remove() must
+ * call fman_pcd_oh_port_set_chain(NULL, 0, 0) on that port AND
+ * clear bit oh_idx in the pcd-wide ask_hw_pcd.oh_alloc_bitmap.
+ * `oh_owned == false` is the legacy / failure path: no OH port
+ * was actually programmed for this cookie, so teardown must not
+ * touch the pool.
+ */
 struct ask_hw_flow_cookie {
         struct fman_pcd_cc_node  *cc_node;
         u16                       key_idx;
@@ -249,6 +278,8 @@ struct ask_hw_flow_cookie {
         struct fman_pcd_manip    *m_ipv4;    /* shared — do NOT destroy */
         int                       sink_ifindex;
         u32                       sink_fqid;
+        u8                        oh_idx;    /* PR14s: which OH port */
+        bool                      oh_owned;  /* PR14s: pool slot held */
 };
 
 /*
