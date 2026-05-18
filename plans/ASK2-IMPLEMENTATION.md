@@ -1726,23 +1726,121 @@ in-tree LOC (the in-tree work is done in PR14a–f).
 
 ---
 
+## M2.5 — PR14 follow-up bundle *(post-M2-deploy cleanup + capacity)*
+
+**Acceptance gate:** PR14z (commit `8de3b35`) has landed on hardware and
+the M2 retest at 2 Gbps / ≤5 % CPU has signed off. M2.5 picks up the
+seven improvement proposals from
+`plans/ASK-VS-ASK2-COMPARATIVE-REVIEW.md` that are non-blocking for the
+M2 gate itself but should land before M3 freezes the chain primitive.
+
+Authoritative reference: `plans/ASK-VS-ASK2-COMPARATIVE-REVIEW.md` §7
+(P1–P7) and `plans/ASK2-CMM-TEST-PARITY.md` (cmm-test triage).
+
+- **PR14-cleanup (P4)** — delete dormant OH-port consumer path in
+  `ask_hw.c` (~200 LOC deletion). Keep patch 0031 (OH-port claim
+  primitive in the in-tree FMan driver) for future R3/R7 use; only
+  delete the `ask.ko` consumer. Land **only after** the M2 retest
+  passes — preserves rollback option if PR14z's chain primitive turns
+  out to have an unknown edge case.
+- **PR14-aging-invariant (P5)** — add `WARN_ON_ONCE(aging)` in
+  `fman_pcd_cc_node_create` (~5 LOC). Contracts the
+  "HW-aging off / kernel-aging on" invariant explicitly so a future
+  caller can't silently re-enable HW aging and race the nft-flowtable
+  eviction path. Land with PR15b (M3 NAT44).
+- **PR14-hmct-bytes (P1)** — **LANDED** as patch
+  `0038-fman-pcd-manip-chain-bytes-used-accessor.patch`
+  (commit pending). Adds the public accessor
+  `size_t fman_pcd_manip_chain_hmct_bytes_used(const struct fman_pcd_manip *chain)`
+  exported via `EXPORT_SYMBOL_GPL`, prototyped in
+  `include/linux/fsl/fman_pcd.h`, returning the per-chain
+  `hmct_used` byte sum populated by the PR14z v1.2 encoders
+  (`fman_pcd_manip_chain_create()` in patch 0036). NULL-safe
+  (returns 0). Callers can now pre-flight single-AD vs multi-AD
+  walk decisions and the MURAM budget counter in `ask_hw.c` can
+  charge the actual byte cost. Verified by
+  `kernel/common/scripts/patch-health.sh --source release`
+  (stack-apply marks 0038 ✓; the 33 pre-existing ✗ entries in
+  isolated dry-run mode are not regressions — CI run
+  26028478858 confirmed the full stack applies cleanly).
+  Per `kernel/flavors/ask/patches/README.md`
+  ("FMAN_PCD_API_VERSION bump rule") this is a new optional
+  output accessor and **does not** bump
+  `FMAN_PCD_API_VERSION_PR14` (still 0x102).
+- **PR14-multi-cc (P2)** — multi-CC-node fan-out in `ask_hw.c`
+  (~200 LOC). Extends the per-port 4-KG-scheme model (PR14j's
+  `ASK_HW_V4_TCP_MAX_BINDS=4`) to 4 KG schemes × 2 protocols (TCP/UDP)
+  × 2 families (v4/v6) = up to 16 CC nodes × 255 keys = **4080 flow
+  capacity** per port. Within MURAM budget (~10 KB per CC node × 16 =
+  160 KB vs ~512 KB total MURAM). Closes the quantitative gap vs
+  ASK 1.x's external-hash CC table (512 keys/table × 16 tables = 8 k).
+  Mechanical extension of the existing
+  `(l3_proto, l4_proto)` dispatcher in `ask_hw_flow_insert()`.
+- **PR14-plcr-default (P3)** — attach a default 100 Mbps single-rate
+  two-color PLCR policer to the host-rx slow-path FQ in
+  `ask_hw_pcd_bringup()` (~50 LOC, no new patches — patches 0026/0027
+  already implement the PLCR primitive). DoS-resistance parity with
+  ASK 1.x's `CDX_EXPT_ETH_DEFA_LIMIT 195312` so a flood hitting the
+  kernel slow path can't saturate the eth0 management CPU.
+- **`bin/verify-ask-enable-toggle.sh` (P7-critical)** — the one
+  cmm-test parity script that needs to exist **inside M2** but is
+  missing today. Validates the `/etc/config/fastforward = 0/1` ABI
+  surface from spec §17. ~80 LOC bash. See
+  `plans/ASK2-CMM-TEST-PARITY.md` "The genuinely-missing-today test"
+  for the step-by-step skeleton. Lands as part of this bundle so the
+  M2 final-gate sign-off covers the toggle path explicitly.
+
+P6 (`FMAN_PCD_API_VERSION` bump rule documentation) and P7 (cmm-test
+classification matrix) are docs-only and have **already landed** —
+see `kernel/flavors/ask/patches/README.md` and
+`plans/ASK2-CMM-TEST-PARITY.md` respectively.
+
+---
+
 ## M3 — All flow types *(each PR cross-builds + TFTP-boots + SSH-verifies)*
 
 **Acceptance gate:** spec §11.1 row M3 — "All non-IPsec flow types +
 bridge + offline ports. NAT works, bridge offload works."
 
-Split into one PR per flow family:
-- PR15a — IPv6 TCP/UDP (opcode 0x11)
-- PR15b — IPv4 NAT/PAT (action_flags variants)
-- PR15c — IPv4 multicast (opcode 0x12)
-- PR15d — IPv6 multicast (opcode 0x13)
-- PR15e — Bridge fast-path (opcode 0x14, switchdev notifier)
-- PR15f — Offline ports (opcode 0x30)
-- PR15g — Policer (opcode 0x40)
-- PR15h — VLAN push/pop
+Split into one PR per flow family. Each PR cross-references the cmm
+unit-test parity matrix in `plans/ASK2-CMM-TEST-PARITY.md` and lands
+the relevant `bin/verify-ask-*.sh` script alongside the feature.
+
+- PR15a — IPv6 TCP/UDP (opcode 0x11). **Ports cmm tests:** 040
+  (cmm-socket v6 — covered behaviourally, not by CLI parity). **Lands
+  test:** `bin/verify-ask-flow-offload-v6.sh` — v6 sibling of
+  `verify-ask-flow-offload.sh`. Risk row: R1.
+- PR15b — IPv4 NAT/PAT (action_flags variants). **Also lands P5
+  WARN_ON_ONCE(aging) invariant** (M2.5 PR14-aging-invariant).
+- PR15c — IPv4 multicast (opcode 0x12). **Ports cmm tests:** 031–033.
+  **Lands test:** `bin/verify-ask-multicast.sh` (combined with PR15d).
+  Risk row: R3.
+- PR15d — IPv6 multicast (opcode 0x13). **Ports cmm tests:** 028–030.
+  Shares `verify-ask-multicast.sh` with PR15c. Risk row: R3.
+- PR15e — Bridge fast-path (opcode 0x14, switchdev notifier).
+  **Ports cmm tests:** 003, 010, 015–017, 019, 020.
+  **Lands test:** `bin/verify-ask-bridge.sh`. Risk row: R-bridge.
+- PR15f — Offline ports (opcode 0x30). No cmm-test parity (cmm
+  doesn't expose an OH-port CLI).
+- PR15g — Policer (opcode 0x40). Builds on M2.5 PR14-plcr-default
+  (P3) — that PR attaches the default host-rx policer; PR15g exposes
+  the per-flow PLCR action to nft.
+- PR15h — VLAN push/pop. **Ports cmm tests:** 018, 021, 036–038.
+  **Lands test:** `bin/verify-ask-vlan.sh`. Risk row: R10.
+- PR15i — PPPoE relay / encap. **Ports cmm tests:** 024, 034.
+  **Lands test:** `bin/verify-ask-pppoe.sh`. Patch 0033 already has
+  `FMAN_PCD_MANIP_INSRT_PPPOE`; ask_flow_offload just needs to detect
+  PPPoE-encapped flows and steer them through the chain primitive.
+  Risk row: R2. **Mono-deployment-critical** — schedule first in M3
+  if claiming ASK-1.x drop-in compatibility.
 
 Each follows the same pattern as PR14: implement encoder, wire into
-`ask_flow.c`/`ask_bridge.c`, verify on hardware.
+`ask_flow.c`/`ask_bridge.c`, verify on hardware, ship the matching
+`verify-ask-*.sh`. The 16 cmm tests in the "won't port" disposition
+column of `plans/ASK2-CMM-TEST-PARITY.md` (cmm-socket CLI, RTP/VoIP,
+WiFi/route-cache) are explicitly **out of scope** for M3 and remain so
+unless an operator decision in `ASK-VS-ASK2-COMPARATIVE-REVIEW.md` §8
+overrides.
 
 ---
 
