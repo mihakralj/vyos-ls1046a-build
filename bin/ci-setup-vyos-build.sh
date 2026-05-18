@@ -317,10 +317,18 @@ cp board/dtb/mono-gw.dtb "$CHROOT/boot/mono-gw.dtb"
 cp board/scripts/fw_env.config "$CHROOT/etc/fw_env.config"
 
 ### LS1046A independent serial console (ls1046a-console.service)
-# Bypasses VyOS's system_console.py policy on serial-getty@ttyS0.service so
-# the login prompt on /dev/ttyS0 stays alive even when the seed config has
-# no `system { console { ... } }` stanza (commit 1876cff1). Enabled in
-# 96-enable-services.chroot.
+# Staged but INTENTIONALLY NOT ENABLED as of 2026-05-18. The unit was a
+# workaround for system_console.py disabling serial-getty@ttyS0.service
+# when the seed config carried no `system console` stanza (commit
+# 1876cff1). The stanza is now back in board/vyos-config/config.boot.*,
+# system_console.py runs cleanly, and serial-getty@ttyS0 + the
+# zz-ls1046a-nodevbind.conf drop-in is sufficient. If both units are
+# enabled simultaneously they fight over /dev/ttyS0 via TTYVHangup=yes
+# and hit start-limit-hit (counter 13) within ~10s, killing the console
+# after 2–3 banners (operator-visible symptom 2026-05-18). The file is
+# left in the squashfs as a one-symlink-away rescue if VyOS regresses
+# its serial-getty policy again — see 96-enable-services.chroot for the
+# matching defensive rm of any stale enable symlinks.
 cp board/systemd/ls1046a-console.service "$CHROOT/etc/systemd/system/ls1046a-console.service"
 
 ### sysctl drop-in: quiet the kernel console AFTER userspace is up.
