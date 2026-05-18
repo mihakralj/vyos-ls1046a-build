@@ -1,0 +1,105 @@
+From 3054912264d54d44a07521cfba7e906930ee1899 Mon Sep 17 00:00:00 2001
+From: ci <ci@ask>
+Date: Mon, 18 May 2026 11:11:41 +0000
+Subject: [PATCH] fman/pcd: surface hmct_bytes_used on chain handle
+ (PR14-hmct-bytes / P1)
+
+Add fman_pcd_manip_chain_hmct_bytes_used() as a NULL-safe accessor over
+the chain->hmct_used field that patch 0036 already populates.
+
+This is an additive, optional-output accessor: per
+kernel/flavors/ask/patches/README.md 'FMAN_PCD_API_VERSION bump rule'
+no API version bump is required (no struct-layout change, no new
+required argument, in-tree writers continue to populate the field
+unconditionally).
+
+Use cases:
+  - cc_encode_ad() can pre-flight whether a chain fits in one AD slot
+    vs needs the multi-AD walker (single-AD threshold ~32 B per RM
+    8.7.4.3).
+  - The MURAM budget counter in ask_hw can charge actual byte cost,
+    not the worst-case FMAN_PCD_HMCT_CHAIN_SIZE upper bound.
+  - cat /sys/kernel/debug/fman_pcd/<n>/manip becomes a useful
+    capacity-planning tool.
+
+Signed-off-by: ASK2 CI <ci@ask>
+---
+ .../ethernet/freescale/fman/fman_pcd_manip.c  | 38 +++++++++++++++++++
+ include/linux/fsl/fman_pcd.h                  | 12 ++++++
+ 2 files changed, 50 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+index 62c9eea..543bb19 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+@@ -1048,6 +1048,44 @@ unsigned long fman_pcd_manip_hmtd_off(const struct fman_pcd_manip *manip)
+ 	return manip->hmtd_off;
+ }
+ 
++/**
++ * fman_pcd_manip_chain_hmct_bytes_used() - read the chain's active-HMCT byte count.
++ * @chain: chain handle from fman_pcd_manip_chain_create().  NULL-safe.
++ *
++ * Returns the number of HMCT bytes actually consumed by the
++ * concatenated command sequence (the sum of every contained manip's
++ * hmct_used at chain-create time).  Always <= FMAN_PCD_HMCT_CHAIN_SIZE
++ * (256 B silicon hard limit per RM 8.11.4 + worst-case 4 manips at
++ * 56 B each = 224 B).
++ *
++ * Use cases (P1 - debuggability + capacity planning):
++ *   - cc_encode_ad() can pre-flight whether a chain fits in one AD
++ *     slot vs needs the multi-AD walker (single-AD threshold ~32 B
++ *     per RM 8.7.4.3).
++ *   - The MURAM budget counter in ask_hw can charge actual byte
++ *     cost, not the worst-case FMAN_PCD_HMCT_CHAIN_SIZE upper bound.
++ *   - `cat /sys/kernel/debug/fman_pcd/<n>/manip` becomes a useful
++ *     capacity-planning tool.
++ *
++ * Returns 0 if @chain is NULL (sentinel, NOT a legal value - a real
++ * chain always has at least one contained manip with hmct_used >=
++ * 4 bytes per the validator in fman_pcd_manip_chain_create()).
++ *
++ * This is an additive accessor: the field it reads is already
++ * populated by the chain-create path landed in patch 0036 / PR14x.
++ * Per kernel/flavors/ask/patches/README.md "FMAN_PCD_API_VERSION
++ * bump rule" this does NOT require bumping FMAN_PCD_API_VERSION
++ * (no struct-layout change, no new required argument, in-tree
++ * writers continue to populate the field unconditionally).
++ */
++size_t fman_pcd_manip_chain_hmct_bytes_used(const struct fman_pcd_manip *chain)
++{
++	if (!chain)
++		return 0;
++	return chain->hmct_used;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_manip_chain_hmct_bytes_used);
++
+ 
+ /* ------------------------------------------------------------------ */
+ /* PR14x: chained-manip primitive                                     */
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index eff86c3..04c82ea 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -730,6 +730,18 @@ fman_pcd_manip_chain_create(struct fman_pcd *pcd,
+  */
+ void fman_pcd_manip_chain_destroy(struct fman_pcd_manip *chain);
+ 
++/**
++ * fman_pcd_manip_chain_hmct_bytes_used() - read the chain's active HMCT byte count.
++ * @chain: chain handle from fman_pcd_manip_chain_create().  NULL-safe.
++ *
++ * See implementation kerneldoc in fman_pcd_manip.c for the full
++ * contract.  TL;DR: returns the sum of every contained manip's
++ * hmct_used at chain-create time, in bytes, always <= 256.  Used
++ * by ask.ko for MURAM budget accounting and single-AD vs multi-AD
++ * walk pre-flight decisions.  Returns 0 on NULL @chain.
++ */
++size_t fman_pcd_manip_chain_hmct_bytes_used(const struct fman_pcd_manip *chain);
++
+ /* ----------------------------------------------------------------------
+  * Policer profiles (fman_pcd_plcr.c, PR14e)
+  *
+-- 
+2.39.5
+
