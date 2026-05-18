@@ -109,12 +109,21 @@ class Zone:
     last_pwm: float = 0.0
 
 
+# Gains softened 2026-05-17 after field observation that a single-tick
+# cluster spike of ~+15 C above setpoint produced an immediate PWM jump
+# from 40 (kick-start floor) to ~77 (30 %), audibly ramping the fan from
+# ~1.6k RPM to ~2.6k RPM and back within ~5 s. Kp values reduced by ~40 %
+# so the same transient now produces pwm_i ~= 45 (barely above MIN_RUN)
+# and the EMA blends it down further. Ki values kept proportional so the
+# steady-state set-point tracking time constant is unchanged: a sustained
+# +15 C error still drives PWM to MAX within roughly the same number of
+# ticks as before, it just no longer overreacts to single-sample noise.
 ZONES = [
-    Zone("ddr-thermal",     setpoint=65.0, crit_temp=80.0, kp=4.0,  ki=0.20),
-    Zone("serdes-thermal",  setpoint=70.0, crit_temp=85.0, kp=6.0,  ki=0.30),
-    Zone("fman-thermal",    setpoint=70.0, crit_temp=87.0, kp=6.0,  ki=0.30),
-    Zone("cluster-thermal", setpoint=65.0, crit_temp=85.0, kp=5.0,  ki=0.25),
-    Zone("sec-thermal",     setpoint=65.0, crit_temp=85.0, kp=5.0,  ki=0.25),
+    Zone("ddr-thermal",     setpoint=65.0, crit_temp=80.0, kp=2.5,  ki=0.20),
+    Zone("serdes-thermal",  setpoint=70.0, crit_temp=85.0, kp=3.5,  ki=0.30),
+    Zone("fman-thermal",    setpoint=70.0, crit_temp=87.0, kp=3.5,  ki=0.30),
+    Zone("cluster-thermal", setpoint=65.0, crit_temp=85.0, kp=3.0,  ki=0.25),
+    Zone("sec-thermal",     setpoint=65.0, crit_temp=85.0, kp=3.0,  ki=0.25),
 ]
 # Aliases tolerated for thermal_zone "type" string differences across kernels.
 # (mainline 6.18 uses "ddr-thermal"/"cluster-thermal", SDK 6.6 uses
@@ -143,7 +152,14 @@ PWM_MIN_RUN  = 40    # Kick-start floor — empirically measured 2026-05-11
                      # rerun the kick-start sweep and update this constant.
 PWM_MAX      = 255   # full speed
 PWM_DEADBAND = 3     # don't write to sysfs for changes smaller than this
-EMA_ALPHA    = 0.4   # 0 = no smoothing, 1 = no history; 0.4 ~= 1.5 tick lag
+EMA_ALPHA    = 0.25  # 0 = no smoothing, 1 = no history; 0.25 ~= 3 tick lag.
+                     # Lowered from 0.4 on 2026-05-17 alongside the Kp
+                     # reduction so a single-tick high P-term contributes
+                     # only ~25 % to the actuator command this tick; a
+                     # transient that doesn't repeat across ~3 ticks is
+                     # filtered out before reaching the fan. Sustained
+                     # high temps still reach MAX_PWM in well under the
+                     # SoC's own thermal time constant.
 
 TICK_SECONDS = 2.0   # control loop period
 LOG_INTERVAL = 30.0  # seconds between INFO log lines (use DEBUG for every tick)
