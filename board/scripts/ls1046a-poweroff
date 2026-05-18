@@ -1,0 +1,50 @@
+#!/bin/sh
+# /lib/systemd/system-shutdown/ls1046a-poweroff
+#
+# Asserts the Mono Gateway DK board-level power-off GPIO at the very end of
+# the shutdown sequence so the chassis actually drops power instead of
+# parking the SoC in a halted-but-energised state.
+#
+# systemd-shutdown(8) runs every executable in /lib/systemd/system-shutdown/
+# with a single argument — "halt", "poweroff", "reboot" or "kexec" — after
+# all filesystems have been unmounted and just before the final syscall.
+# sysfs is still mounted at this point, so the same export+direction+value
+# dance that works from a live shell works here too. We only act on
+# "poweroff" — a reboot/kexec must NOT trip the power-off GPIO or the next
+# boot would never start.
+#
+# GPIO map (per HWCTL.md / AGENTS.md):
+#   gpiochip2 base = 576, line 21 -> global sysfs number 597
+#   Asserting line 21 HIGH on gpiochip2 cuts board power on Mono Gateway DK
+#   (verified 2026-05-17 from a running VyOS shell).
+#
+# Board-gated against /proc/device-tree/compatible so the same script is a
+# no-op on any other hardware that happens to ship this squashfs.
+
+ACTION="$1"
+[ "$ACTION" = "poweroff" ] || exit 0
+
+# /proc is unmounted late but is still present here. If for some reason the
+# compatible file is missing, refuse to touch GPIO — we'd rather leave the
+# board halted than randomly poke a GPIO line on unknown silicon.
+COMPAT=/proc/device-tree/compatible
+[ -r "$COMPAT" ] || exit 0
+grep -aq 'fsl,ls1046a' "$COMPAT" || exit 0
+
+GPIO=597
+SYSFS=/sys/class/gpio
+
+# Export is one-shot per boot; if something exported it already, writing
+# again returns EBUSY which is harmless. Ignore errors throughout — we are
+# already past the point where logging anywhere useful is possible.
+if [ ! -d "$SYSFS/gpio${GPIO}" ]; then
+    echo "$GPIO" > "$SYSFS/export" 2>/dev/null || true
+fi
+echo out > "$SYSFS/gpio${GPIO}/direction" 2>/dev/null || true
+echo 1   > "$SYSFS/gpio${GPIO}/value"     2>/dev/null || true
+
+# Give the regulator a moment to actually drop the rail before systemd
+# falls through to the reboot()/poweroff() syscall, which on a board
+# without working ACPI/PSCI poweroff would otherwise spin in WFI.
+sleep 1
+exit 0
