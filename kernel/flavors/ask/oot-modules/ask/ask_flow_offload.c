@@ -192,8 +192,29 @@ static void ask_resolve_neigh_v4(struct net_device *egress_dev,
         if (!n)
                 return;
 
+        /*
+         * PR14y: accept any NUD_VALID state (which includes STALE,
+         * DELAY, PROBE in addition to REACHABLE/PERMANENT/NOARP).
+         * A STALE neighbour still has a valid n->ha — STALE only means
+         * "no recent confirmation traffic", not "MAC unknown".  The
+         * earlier PR14j mask of CONNECTED|REACHABLE|PERMANENT rejected
+         * every STALE entry, which is the dominant state for ARP
+         * entries refreshed >30 s ago.  Result was every nft-flowtable
+         * REPLACE returning -EAGAIN ("neigh unresolved") even though
+         * the kernel had a perfectly good lladdr cached.  The full
+         * M2 gate (16 parallel iperf3 streams over a single 5-tuple
+         * pair) measured 6.853 Gbps at 63 % CPU with the narrow mask
+         * because all flows fell back to the SW fastpath.
+         *
+         * Reference: include/net/neighbour.h
+         *   #define NUD_VALID  (NUD_PERMANENT|NUD_NOARP|NUD_REACHABLE| \
+         *                       NUD_PROBE|NUD_STALE|NUD_DELAY)
+         * NUD_VALID is exactly "n->ha is meaningful".  Anything not
+         * in NUD_VALID (NONE/INCOMPLETE/FAILED) has no MAC and must
+         * still bounce to SW.
+         */
         read_lock_bh(&n->lock);
-        if (n->nud_state & (NUD_CONNECTED | NUD_REACHABLE | NUD_PERMANENT))
+        if (n->nud_state & NUD_VALID)
                 memcpy(out_next_hop_mac, n->ha, ETH_ALEN);
         read_unlock_bh(&n->lock);
 
