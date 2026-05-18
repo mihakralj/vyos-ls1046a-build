@@ -367,6 +367,20 @@ cp board/systemd/fan-pid.tmpfiles "$CHROOT/usr/lib/tmpfiles.d/fan-pid.conf"
 mkdir -p "$CHROOT/etc/udev/rules.d"
 cp board/scripts/10-emc2305-fan-pid.rules "$CHROOT/etc/udev/rules.d/10-emc2305-fan-pid.rules"
 
+### Board-level power-off GPIO hook (Mono Gateway DK).
+###
+### LS1046A has no working PSCI/ACPI poweroff and the on-board PMIC is
+### gated by gpiochip2 line 21 (global sysfs number 597). systemd-shutdown
+### runs every executable in /lib/systemd/system-shutdown/ exactly once,
+### with arg="poweroff" (or halt/reboot/kexec), after all filesystems are
+### unmounted and just before the final reboot()/poweroff() syscall.
+### Acting only on arg="poweroff" guarantees a reboot or kexec never trips
+### the power-cut GPIO. Board-gated on /proc/device-tree/compatible so the
+### same squashfs is a no-op on any other ARM64 hardware.
+mkdir -p "$CHROOT/lib/systemd/system-shutdown"
+cp board/scripts/ls1046a-poweroff "$CHROOT/lib/systemd/system-shutdown/ls1046a-poweroff"
+chmod +x "$CHROOT/lib/systemd/system-shutdown/ls1046a-poweroff"
+
 ### VPP/DPAA1 post-start: fix defunct interface MTU for AF_XDP TX
 mkdir -p "$CHROOT/etc/systemd/system/vpp.service.d"
 rm -f "$CHROOT/usr/local/bin/vpp-dpaa-rebind" \
