@@ -1,0 +1,76 @@
+From d66d4c3b2cce5f5e2dd685f0753b06c465539961 Mon Sep 17 00:00:00 2001
+From: Build Cobalt100 <build@cobalt100>
+Date: Mon, 18 May 2026 10:37:32 +0000
+Subject: [PATCH] =?UTF-8?q?fman/pcd:=20PR14z=20=E2=80=94=20set=20hmct=5Fus?=
+ =?UTF-8?q?ed=20in=20v1.2=20OH-port-chain=20encoders?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Patch 0036 introduced fman_pcd_manip_chain_create() with a precondition
+that each contained manip carry a non-zero hmct_used recording the
+exact byte count of its HMCT command stream.  0036 added hmct_used
+assignments to the four v1.1 encoders (NAT_V4, NAT_V6, VLAN_PUSH,
+VLAN_POP) but missed the four v1.2 encoders introduced by patch 0033
+(TTL_DEC rewrite, RMV_ETHERNET, INSRT_GENERIC,
+FIELD_UPDATE_IPV4_FORWARD).  Result on live mono LS1046A: every call
+to fman_pcd_manip_chain_create() from ask.ko's ask_hw_flow_insert_v4_tcp()
+returns -EINVAL at the per-source-manip hmct_used==0 validation arm,
+so every offloaded flow falls back to SW and the M2 gate measures
+6.796 Gbps / 68.67 % CPU instead of the >= 2 Gbps / <= 5 % CPU target.
+
+Fix: set hmct_used in each of the four v1.2 encoders to the exact
+number of bytes that encoder wrote into manip->hmct.
+
+  TTL_DEC          1 cmd word              =>  hmct_used = 4
+  RMV_ETHERNET     1 cmd word              =>  hmct_used = 4
+  INSRT_GENERIC    1 cmd + ceil(size/4) words => 4 + n_words*4
+  IPV4_FORWARD     1 cmd + 0..1 DSCP words =>  emit_payload ? 8 : 4
+
+Native ARM64 build clean (Cobalt 100, kernel 6.18.29).
+M2 gate re-run pending on dispatched ISO build.
+
+Signed-off-by: Build Cobalt100 <build@cobalt100>
+---
+ drivers/net/ethernet/freescale/fman/fman_pcd_manip.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+index 06f64b7..62c9eea 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+@@ -602,6 +602,7 @@ cmd |= FMAN_PCD_HMCD_IPV4_UPDATE_TTL;
+ 
+ iowrite32be(cmd, hmct);
+ 
++manip->hmct_used = 4; /* PR14z: cmd word, no payload */
+ *out_op = FMAN_PCD_HMAN_OC_IP_MANIP;
+ return hmct;
+ }
+@@ -637,6 +638,7 @@ cmd |= (u32)FMAN_PCD_L2_HDR_RMV_SIZE
+ 
+ iowrite32be(cmd, hmct);
+ 
++manip->hmct_used = 4; /* PR14z: cmd word, no payload */
+ *out_op = FMAN_PCD_HMAN_OC;
+ return hmct;
+ }
+@@ -701,6 +703,7 @@ iowrite32be(word, cur);
+ cur += 4;
+ }
+ 
++manip->hmct_used = 4 + (n_words * 4); /* PR14z: cmd word + payload words */
+ *out_op = FMAN_PCD_HMAN_OC;
+ return hmct;
+ }
+@@ -763,6 +766,7 @@ payload = ((u32)p->ipv4_forward.new_dscp)
+ iowrite32be(payload, hmct + 4);
+ }
+ 
++manip->hmct_used = emit_payload ? 8 : 4; /* PR14z: cmd + optional DSCP word */
+ *out_op = FMAN_PCD_HMAN_OC_IP_MANIP;
+ return hmct;
+ }
+-- 
+2.39.5
+
