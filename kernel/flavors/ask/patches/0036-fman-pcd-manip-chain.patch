@@ -1,0 +1,420 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+index c2d117b..06f64b7 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+@@ -312,6 +312,15 @@ struct fman_pcd_manip {
+ 	unsigned long			hmct_off;
+ 	void __iomem			*hmct;
+ 	size_t				hmct_sz;
++	/*
++	 * PR14x: number of bytes actually written into @hmct by the
++	 * variant encoder (or copied in by chain_create).  Always <=
++	 * @hmct_sz.  Used by fman_pcd_manip_chain_create() to memcpy
++	 * just the active command sequence of each source manip into
++	 * a new chain HMCT, instead of dragging the 64 - active_bytes
++	 * slack of zero-padding along with it.
++	 */
++	size_t				hmct_used;
+ 	spinlock_t			lock;
+ };
+ 
+@@ -417,6 +426,7 @@ manip_encode_nat_v4(struct fman_pcd_manip *manip,
+ 		iowrite32be(ports, cur);
+ 	}
+ 
++	manip->hmct_used = (size_t)(cur - hmct);
+ 	*out_op = FMAN_PCD_HMAN_OC_IP_MANIP;
+ 	return last_cmd;
+ }
+@@ -506,6 +516,7 @@ manip_encode_nat_v6(struct fman_pcd_manip *manip,
+ 		iowrite32be(ports, cur);
+ 	}
+ 
++	manip->hmct_used = (size_t)(cur - hmct);
+ 	*out_op = FMAN_PCD_HMAN_OC_IP_MANIP;
+ 	return last_cmd;
+ }
+@@ -542,6 +553,7 @@ manip_encode_vlan_push(struct fman_pcd_manip *manip,
+ 	payload |= (u32)be16_to_cpu(p->vlan_push.tci);
+ 	iowrite32be(payload, hmct + 4);
+ 
++	manip->hmct_used = 8; /* cmd word + 4-byte TPID/TCI payload */
+ 	*out_op = FMAN_PCD_HMAN_OC;
+ 	return hmct;  /* command word is the only one we wrote */
+ }
+@@ -566,6 +578,7 @@ manip_encode_vlan_pop(struct fman_pcd_manip *manip,
+ 
+ 	iowrite32be(cmd, hmct);
+ 
++	manip->hmct_used = 4; /* cmd word, no payload */
+ 	*out_op = FMAN_PCD_HMAN_OC;
+ 	return hmct;
+ }
+@@ -1031,6 +1044,293 @@ unsigned long fman_pcd_manip_hmtd_off(const struct fman_pcd_manip *manip)
+ 	return manip->hmtd_off;
+ }
+ 
++
++/* ------------------------------------------------------------------ */
++/* PR14x: chained-manip primitive                                     */
++/* ------------------------------------------------------------------ */
++
++/*
++ * Silicon facts driving fman_pcd_manip_chain_create():
++ *
++ *  - The FMan header-manip walker dispatches per-command-word, not per
++ *    HMTD.  The HMTD's opCode is the family selector that gates which
++ *    silicon micro-program runs the chain (HMAN_OC_IP_MANIP=0x34 if
++ *    any contained command is an IP/L4 mutation, HMAN_OC=0x35
++ *    otherwise).  The walker terminates at the first HMCD_LAST bit it
++ *    encounters in a command word.
++ *
++ *  - Therefore "chaining" N manips is exactly: allocate a fresh
++ *    HMTD+HMCT pair, memcpy each contained manip's active HMCT bytes
++ *    (offset 0 .. hmct_used, recorded by the per-variant encoders)
++ *    into the new HMCT consecutively, CLEAR the HMCD_LAST bit on the
++ *    first HMCD_LAST-bearing word of every contained manip except
++ *    the last (because each source manip stamped HMCD_LAST on its
++ *    own last command word at create-time), and KEEP HMCD_LAST set
++ *    on the final source manip's last word (which is now the chain's
++ *    last word).  Finalise the new HMTD with the union opCode
++ *    (IP_MANIP if any source is IP_MANIP, OC otherwise).
++ *
++ *  - The source manips are NOT mutated.  Their HMCT bytes remain
++ *    valid (a chain MEMCPIES them, it does not consume them) so the
++ *    same source manip handle may be referenced by N chains
++ *    simultaneously.  ask.ko keeps shared RMV_ETHERNET /
++ *    FIELD_UPDATE_IPV4_FORWARD manips alive in ask_hw_pcd across
++ *    every per-flow chain built by ask_hw_flow_insert_v4_tcp().
++ *
++ *  - The contained manips' lifetime is the CALLER'S responsibility.
++ *    fman_pcd_manip_chain_destroy() frees the chain's own HMTD+HMCT
++ *    but does NOT touch the source manips.
++ *
++ *  - HMCT sizing: worst-case chain = 4 manips at 56 B each = 224 B.
++ *    Rounded up to 256 B - one MURAM slab at gen_pool
++ *    min_alloc_order=8.
++ *
++ *  - Why no new enum / no new action arm: the existing
++ *    FMAN_PCD_ACTION_MANIPULATE union arm in struct fman_pcd_action
++ *    consumes a struct fman_pcd_manip *.  A chain handle IS a
++ *    struct fman_pcd_manip * (with a fresh HMTD+HMCT containing the
++ *    concatenated commands) so cc_encode_ad()'s existing arm picks
++ *    it up unchanged.
++ *
++ * RM 8.7.5 paragraphs 2 + 4 (HMTD + HMCT layout, identical for
++ * single and chained manips) + cross-ref SDK fm_manip.c BuildHmct()
++ * with multi-command output (same byte layout).
++ */
++
++/*
++ * Maximum source manips per chain.  RM 8.11.4 quotes 4 as the OH-port
++ * AD-chain limit; we adopt the same ceiling.
++ */
++#define FMAN_PCD_MANIP_CHAIN_MAX_MANIPS	4
++
++/* See "Silicon facts" comment above for sizing rationale. */
++#define FMAN_PCD_HMCT_CHAIN_SIZE	256u
++
++/**
++ * fman_pcd_manip_chain_create() - bundle up to 4 manips into one HMTD.
++ *
++ * Implements the public ABI declared in <linux/fsl/fman_pcd.h>.
++ */
++struct fman_pcd_manip *
++fman_pcd_manip_chain_create(struct fman_pcd *pcd,
++			    struct fman_pcd_manip * const *manips,
++			    u8 n_manips)
++{
++	struct fman_pcd_manip *chain;
++	struct muram_info *muram;
++	struct mutex *pcd_lock;
++	unsigned long off;
++	unsigned long flags;
++	void __iomem *vb;
++	void __iomem *cur;
++	size_t total_bytes = 0;
++	size_t hmct_used_running;
++	u32 first_word;
++	u32 last_word;
++	u8 op = FMAN_PCD_HMAN_OC;
++	u16 cfg;
++	u8 i;
++	long err;
++
++	if (!pcd || !manips || n_manips == 0 ||
++	    n_manips > FMAN_PCD_MANIP_CHAIN_MAX_MANIPS)
++		return ERR_PTR(-EINVAL);
++
++	for (i = 0; i < n_manips; i++) {
++		if (!manips[i])
++			return ERR_PTR(-EINVAL);
++		if (manips[i]->hmct_used == 0 ||
++		    manips[i]->hmct_used > manips[i]->hmct_sz)
++			return ERR_PTR(-EINVAL);
++		if (manips[i]->pcd != pcd)
++			return ERR_PTR(-EINVAL);
++		total_bytes += manips[i]->hmct_used;
++	}
++	if (total_bytes > FMAN_PCD_HMCT_CHAIN_SIZE)
++		return ERR_PTR(-E2BIG);
++
++	muram = fman_get_muram(fman_pcd_get_fman(pcd));
++	if (!muram)
++		return ERR_PTR(-ENXIO);
++
++	chain = kzalloc(sizeof(*chain), GFP_KERNEL);
++	if (!chain)
++		return ERR_PTR(-ENOMEM);
++
++	INIT_LIST_HEAD(&chain->node);
++	spin_lock_init(&chain->lock);
++	chain->pcd = pcd;
++	chain->type = manips[0]->type;
++
++	/* HMTD: same 16 B layout as a single-manip HMTD. */
++	off = fman_pcd_muram_alloc(pcd, FMAN_PCD_HMTD_SIZE);
++	if (IS_ERR_VALUE(off)) {
++		err = (long)off;
++		kfree(chain);
++		return ERR_PTR(err);
++	}
++	vb = (void __iomem *)fman_muram_offset_to_vbase(muram, off);
++	if (!vb) {
++		fman_pcd_muram_free(pcd, off, FMAN_PCD_HMTD_SIZE);
++		kfree(chain);
++		return ERR_PTR(-ENXIO);
++	}
++	chain->hmtd_off = off;
++	chain->hmtd = vb;
++	memset_io(vb, 0, FMAN_PCD_HMTD_SIZE);
++
++	/* HMCT: larger 256 B region holding the concatenated commands. */
++	off = fman_pcd_muram_alloc(pcd, FMAN_PCD_HMCT_CHAIN_SIZE);
++	if (IS_ERR_VALUE(off)) {
++		err = (long)off;
++		fman_pcd_muram_free(pcd, chain->hmtd_off,
++				    FMAN_PCD_HMTD_SIZE);
++		kfree(chain);
++		return ERR_PTR(err);
++	}
++	vb = (void __iomem *)fman_muram_offset_to_vbase(muram, off);
++	if (!vb) {
++		fman_pcd_muram_free(pcd, off, FMAN_PCD_HMCT_CHAIN_SIZE);
++		fman_pcd_muram_free(pcd, chain->hmtd_off,
++				    FMAN_PCD_HMTD_SIZE);
++		kfree(chain);
++		return ERR_PTR(-ENXIO);
++	}
++	chain->hmct_off = off;
++	chain->hmct = vb;
++	chain->hmct_sz = FMAN_PCD_HMCT_CHAIN_SIZE;
++	memset_io(vb, 0, FMAN_PCD_HMCT_CHAIN_SIZE);
++
++	spin_lock_irqsave(&chain->lock, flags);
++
++	cur = vb;
++	hmct_used_running = 0;
++	for (i = 0; i < n_manips; i++) {
++		struct fman_pcd_manip *src = manips[i];
++		size_t used = src->hmct_used;
++		unsigned int w;
++		void __iomem *seg_start = cur;
++		void __iomem *seg_last_cmd = NULL;
++		unsigned int n_words = used / 4;
++
++		/*
++		 * memcpy_fromio reads source MURAM into a kernel
++		 * buffer; we then iowrite32be the words back into the
++		 * chain HMCT to preserve byte ordering and avoid
++		 * iomem-to-iomem memcpy (not portable across arches).
++		 */
++		{
++			u32 buf[FMAN_PCD_HMCT_CHAIN_SIZE / 4];
++			unsigned int j;
++
++			memcpy_fromio(buf, src->hmct, used);
++			for (j = 0; j < n_words; j++)
++				iowrite32be(be32_to_cpu(
++					(__force __be32)buf[j]),
++					cur + (j * 4));
++		}
++
++		/*
++		 * Find the source segment's HMCD_LAST-bearing word
++		 * (walking forward from segment start).  For
++		 * intermediate segments, clear that bit so the silicon
++		 * walker proceeds into the next segment.  For the final
++		 * segment leave it set so the walker terminates correctly.
++		 */
++		for (w = 0; w < n_words; w++) {
++			void __iomem *wp = seg_start + (w * 4);
++			u32 v = ioread32be(wp);
++
++			if (v & FMAN_PCD_HMCD_LAST) {
++				seg_last_cmd = wp;
++				break;
++			}
++		}
++
++		if (!seg_last_cmd) {
++			spin_unlock_irqrestore(&chain->lock, flags);
++			fman_pcd_muram_free(pcd, chain->hmct_off,
++					    chain->hmct_sz);
++			fman_pcd_muram_free(pcd, chain->hmtd_off,
++					    FMAN_PCD_HMTD_SIZE);
++			kfree(chain);
++			return ERR_PTR(-EINVAL);
++		}
++
++		if (i < n_manips - 1) {
++			u32 v = ioread32be(seg_last_cmd);
++
++			iowrite32be(v & ~FMAN_PCD_HMCD_LAST,
++				    seg_last_cmd);
++		}
++
++		/* Promote chain opCode if any source uses IP_MANIP. */
++		switch (manips[i]->type) {
++		case FMAN_PCD_MANIP_NAT_V4:
++		case FMAN_PCD_MANIP_NAT_V6:
++		case FMAN_PCD_MANIP_TTL_DEC:
++		case FMAN_PCD_MANIP_FIELD_UPDATE_IPV4_FORWARD:
++			op = FMAN_PCD_HMAN_OC_IP_MANIP;
++			break;
++		default:
++			break;
++		}
++
++		cur += used;
++		hmct_used_running += used;
++	}
++	chain->hmct_used = hmct_used_running;
++
++	/*
++	 * Defensive read-back: confirm the memcpy actually landed.
++	 * 0xffffffff would indicate a NULL MURAM mapping regression.
++	 */
++	first_word = ioread32be(vb);
++	last_word  = ioread32be(vb + hmct_used_running - 4);
++	if (first_word == 0xffffffffu || last_word == 0xffffffffu) {
++		spin_unlock_irqrestore(&chain->lock, flags);
++		fman_pcd_muram_free(pcd, chain->hmct_off,
++				    chain->hmct_sz);
++		fman_pcd_muram_free(pcd, chain->hmtd_off,
++				    FMAN_PCD_HMTD_SIZE);
++		kfree(chain);
++		return ERR_PTR(-ENXIO);
++	}
++
++	/* Finalise the HMTD. */
++	cfg = FMAN_PCD_HMTD_CFG_TYPE | FMAN_PCD_HMTD_CFG_EXT_HMCT;
++	iowrite16be(cfg, chain->hmtd + FMAN_PCD_HMTD_OFF_CFG);
++	iowrite32be((u32)chain->hmct_off,
++		    chain->hmtd + FMAN_PCD_HMTD_OFF_HMCD_BASE);
++	iowrite8(op, chain->hmtd + FMAN_PCD_HMTD_OFF_OPCODE);
++
++	spin_unlock_irqrestore(&chain->lock, flags);
++
++	/* Publish on pcd->manip_list so fman_pcd_release() reaps it. */
++	pcd_lock = fman_pcd_get_lock(pcd);
++	mutex_lock(pcd_lock);
++	list_add_tail(&chain->node, fman_pcd_get_manip_list(pcd));
++	mutex_unlock(pcd_lock);
++
++	return chain;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_manip_chain_create);
++
++/**
++ * fman_pcd_manip_chain_destroy() - drop a chain handle.
++ *
++ * Implements the public ABI declared in <linux/fsl/fman_pcd.h>.
++ *
++ * Equivalent to fman_pcd_manip_destroy() on the chain handle; provided
++ * as a separate symbol to make cookie-cleanup pairing self-documenting
++ * in consumer code (ask.ko per-flow remove path).
++ */
++void fman_pcd_manip_chain_destroy(struct fman_pcd_manip *chain)
++{
++	fman_pcd_manip_destroy(chain);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_manip_chain_destroy);
++
+ #if IS_ENABLED(CONFIG_FSL_FMAN_PCD_KUNIT_TEST)
+ /*
+  * KUnit suite lives in tests/fman_pcd_manip_test.c and is #include'd
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index ae65fe7..eff86c3 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -667,6 +667,69 @@ fman_pcd_manip_create(struct fman_pcd *pcd,
+  */
+ void fman_pcd_manip_destroy(struct fman_pcd_manip *manip);
+ 
++/**
++ * fman_pcd_manip_chain_create() - bundle up to 4 manips into one HMTD/HMCT.
++ * @pcd:      parent FMan PCD context.
++ * @manips:   array of @n_manips contained-manip handles, in execution
++ *            order.  Each handle's underlying HMCT command bytes are
++ *            memcpied into the chain's fresh HMCT; the source handles
++ *            are NOT consumed and may be reused across other chains
++ *            and / or other CC keys.
++ * @n_manips: 1..4 source manips.  4 = silicon limit per RM 8.11.4.
++ *
++ * Returns a handle that is a struct fman_pcd_manip * carrying a fresh
++ * MURAM-resident HMTD + (larger) HMCT containing the concatenated
++ * command stream of all @n_manips source manips, with HMCD_LAST
++ * stamped on the final word and cleared on every intermediate source
++ * manip's last word.  The chain handle is consumable by the existing
++ * FMAN_PCD_ACTION_MANIPULATE arm of struct fman_pcd_action just like
++ * a handle from fman_pcd_manip_create() - no API additions needed
++ * elsewhere.
++ *
++ * The HMTD opCode is promoted to HMAN_OC_IP_MANIP if ANY source manip
++ * touches IP/L4 fields (NAT_V4, NAT_V6, TTL_DEC,
++ * FIELD_UPDATE_IPV4_FORWARD), otherwise HMAN_OC.
++ *
++ * Source manip lifetime is the CALLER'S responsibility.
++ * fman_pcd_manip_chain_destroy() frees only the chain's OWN HMTD+HMCT
++ * MURAM regions and the chain handle; it does NOT touch the source
++ * manips.  Typical ASK2 OH-port use:
++ *   - long-lived shared manips (m_rmv_ethernet, m_ipv4_forward) kept
++ *     alive in ask_hw_pcd across the bridge's lifetime;
++ *   - per-flow INSRT_GENERIC manip held in the per-flow cookie and
++ *     freed alongside the chain in ask_hw_flow_remove().
++ *
++ * Locking: takes pcd->lock.  May sleep (MURAM alloc).
++ *
++ * Return: chain handle on success, ERR_PTR(-EINVAL) on bad args
++ * (NULL pcd / NULL @manips array / out-of-range @n_manips / a
++ * contained manip with zero hmct_used / a source manip whose pcd
++ * differs from @pcd), ERR_PTR(-E2BIG) if the concatenated HMCT
++ * would exceed the chain HMCT region (256 B), ERR_PTR(-ENOMEM) /
++ * -ENOSPC if MURAM is exhausted, ERR_PTR(-ENXIO) if MURAM
++ * mapping is degenerate.
++ */
++struct fman_pcd_manip *
++fman_pcd_manip_chain_create(struct fman_pcd *pcd,
++			    struct fman_pcd_manip * const *manips,
++			    u8 n_manips);
++
++/**
++ * fman_pcd_manip_chain_destroy() - drop a chain handle.
++ * @chain: handle from fman_pcd_manip_chain_create().  NULL-safe.
++ *
++ * Tears down the chain's OWN HMTD + HMCT MURAM regions and frees the
++ * handle.  The contained source manips are NOT touched - their
++ * lifetime is the caller's responsibility (they may be referenced
++ * by other chains or by direct CC-key actions).  Equivalent to
++ * fman_pcd_manip_destroy() on the chain handle; provided as a
++ * separate symbol to make cookie-cleanup pairing self-documenting
++ * in consumer code (ask.ko per-flow remove path).
++ *
++ * Locking: takes pcd->lock.  May sleep.
++ */
++void fman_pcd_manip_chain_destroy(struct fman_pcd_manip *chain);
++
+ /* ----------------------------------------------------------------------
+  * Policer profiles (fman_pcd_plcr.c, PR14e)
+  *
