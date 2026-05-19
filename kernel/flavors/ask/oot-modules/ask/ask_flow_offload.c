@@ -901,7 +901,51 @@ static int ask_flow_offload_stats(struct flow_cls_offload *f)
         if (rc)
                 return rc;
 
-        flow_stats_update(&f->stats, bytes, packets, 0, last_seen_ns,
+        /*
+         * PR14z3 (2026-05-19): keep offloaded flows alive against the
+         * netfilter flowtable's idle-timeout sweeper.
+         *
+         * Root cause of the PR14z2 throughput regression (0.941 Gbps /
+         * 2.08% CPU on the M2 gate): once a cookie is successfully
+         * installed in silicon, ALL data-plane packets bypass the kernel
+         * and never touch nf_flow_table_lookup(). The flowtable code in
+         * net/netfilter/nf_flow_table_core.c uses `flow->timeout` —
+         * driven exclusively by `flow_stats_update(..., lastused, ...)`
+         * — to decide when to garbage-collect the entry. With no SW
+         * packets and ask_flow_update_stats() never invoked from the
+         * production datapath (it's only called from selftests, see
+         * grep), `last_seen_ns` stays frozen at install time. The
+         * sweeper then runs (~every 30 s on the established-flow path),
+         * sees `lastused` lagging by >30 s, calls flow_offload_teardown()
+         * → FLOW_CLS_DESTROY arrives, ask_flow_offload_destroy() removes
+         * the silicon entry, and the next packet of the same conntrack
+         * gets re-offered as FLOW_CLS_REPLACE. The PR14r dedup logic
+         * blocks the re-install because the cookie pointer recycled
+         * from slab matches one still in our rhashtable for ~1 RCU
+         * grace period. Result: install→destroy→reinstall-blocked churn
+         * at ~1 Hz, traffic falls to slow path, throughput collapses to
+         * single-core forward rate.
+         *
+         * Fix: report `jiffies` (the kernel-time the flowtable code
+         * actually compares against, see nf_flow_offload_gc_step()) as
+         * the lastused value. As long as the HW slot still holds this
+         * cookie — and we know it does because ask_flow_get_stats() just
+         * returned 0 — the flow IS alive, regardless of whether we can
+         * read a packet counter back from FMan PCD CC. The kernel
+         * flowtable interprets this as a refresh and re-arms the timer.
+         *
+         * Side-note on units: the prior code passed last_seen_ns
+         * (nanoseconds, from ktime_get_ns()) as `lastused`, but the
+         * flow_stats_update() lastused parameter is documented in
+         * jiffies (see include/net/flow_offload.h and the call sites
+         * in mlx5/mlxsw/sfc drivers). Even if ask_flow_update_stats()
+         * were wired into a polling loop, the unit was wrong. Passing
+         * `jiffies` directly is both semantically correct and decouples
+         * keep-alive from per-flow HW counter polling (which we will
+         * still want eventually for accurate Gbps reporting via
+         * `nft list flowtable`, but is orthogonal to M2 gate pass).
+         */
+        flow_stats_update(&f->stats, bytes, packets, 0, jiffies,
                           FLOW_ACTION_HW_STATS_DELAYED);
         return 0;
 }
