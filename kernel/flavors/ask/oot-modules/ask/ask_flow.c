@@ -239,11 +239,54 @@ hw_id = (u32)atomic_inc_return(&t->fake_hw_id_seq);
 pr_info_ratelimited("ask: flow: hw_insert=%d (SW-fallback) cookie=0x%llx oif=%u l3=%u l4=%u sport=%u dport=%u\n",
     rc, cookie, oif, key->l3_proto, key->l4_proto,
     ntohs(key->sport), ntohs(key->dport));
-} else if (rc == -EAGAIN) {
-hw_id = (u32)atomic_inc_return(&t->fake_hw_id_seq);
-pr_info_ratelimited("ask: flow: hw_insert=-EAGAIN (neigh unresolved) cookie=0x%llx oif=%u nh=%pM em=%pM\n",
-    cookie, oif, key->next_hop_mac, key->egress_mac);
-} else {
+	} else if (rc == -EAGAIN) {
+		/*
+		 * PR14z2 (2026-05-18): NEVER fabricate a fake hw_id and
+		 * shove the flow into the SW rhashtable on -EAGAIN.
+		 *
+		 * Older PR14y code installed the cookie into the SW table
+		 * with a fake hw_flow_id (atomic_inc_return on the
+		 * SW-fallback counter), reasoning that the kernel SW
+		 * flowtable would carry the flow until the neighbour
+		 * resolves and a later REPLACE retried the HW insert.
+		 * In practice that broke M2 in two ways:
+		 *
+		 *  (a) Once the cookie is in the rht, ask_flow_offload_replace
+		 *      dedupes future REPLACE callbacks for the same cookie
+		 *      (PR14r "REPLACE dedup" path) — so even after ARP
+		 *      resolves we never re-try the HW insert. The flow is
+		 *      pinned in SW for its entire lifetime → 43 % CPU at
+		 *      6.9 Gbps (M2 gate is ≤ 5 % at ≥ 2 Gbps).
+		 *
+		 *  (b) On DESTROY, ask_hw_flow_remove(fake_id) walks the
+		 *      ask_hw xarray, finds no matching entry, and warns
+		 *      "ask: hw: remove: unknown cookie 0x… (already
+		 *      freed?)" once per orphan fake-id. Cosmetic only,
+		 *      but it floods dmesg under flow churn.
+		 *
+		 * Correct behaviour: propagate -EAGAIN to the caller. The
+		 * caller (ask_flow_offload_replace) is expected to handle
+		 * -EAGAIN by parking the cookie on the PR14y deferred-
+		 * insert pending queue and replaying through the
+		 * NETEVENT_NEIGH_UPDATE notifier the moment the ARP entry
+		 * lands in NUD_VALID. The cookie is NOT in the rht while
+		 * pending, so the dedupe race in (a) cannot trigger and
+		 * the eventual deferred replay reaches ask_hw_flow_insert
+		 * with a real next-hop MAC.
+		 *
+		 * Defence in depth: the caller (ask_flow_offload_replace)
+		 * actually intercepts is_zero_ether_addr(next_hop_mac)
+		 * BEFORE invoking ask_flow_insert, so reaching this arm
+		 * means a TOCTOU race (neigh resolved during the resolve
+		 * call, then evicted before hw_insert ran) — rare but
+		 * possible. Returning -EAGAIN lets the caller fall back
+		 * to the pending queue.
+		 */
+		pr_info_ratelimited("ask: flow: hw_insert=-EAGAIN (neigh unresolved) cookie=0x%llx oif=%u nh=%pM em=%pM — caller defers via PR14y pending queue\n",
+				    cookie, oif, key->next_hop_mac, key->egress_mac);
+		kfree(f);
+		return -EAGAIN;
+	} else {
 ask_pr_warn("flow: hw_insert(cookie=0x%llx) hard fail %d\n",
     cookie, rc);
 kfree(f);

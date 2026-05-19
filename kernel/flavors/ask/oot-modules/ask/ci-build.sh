@@ -35,11 +35,59 @@ KSRC="${1:?KSRC required as \$1}"
 PKG_DIR="${2:?PKG_DIR required as \$2}"
 
 [ -d "$KSRC" ] || { echo "FATAL: KSRC=$KSRC does not exist"; exit 1; }
+[ -d "$PKG_DIR" ] || { echo "FATAL: PKG_DIR=$PKG_DIR does not exist"; exit 1; }
+
+# PR14z2 fix #4 (v2): switch KSRC to the headers-snapshot tree if the
+# bindeb-pkg chain has wiped Module.symvers from the original kernel
+# source dir. The snapshot is created by build-kernel.sh AFTER bindeb-pkg
+# successfully produces linux-headers-*-vyos_*_arm64.deb (see the
+# "ASK2 v2 post-bindeb-pkg headers snapshot" block injected by
+# bin/ci-setup-kernel.sh).
+#
+# Snapshot layout:
+#   $KSRC/../ask-kernel-snapshot/
+#       extracted/usr/src/linux-headers-X.Y.Z-vyos/   (full OOT-build tree)
+#                                       Module.symvers
+#                                       scripts/sign-file
+#                                       scripts/mod/modpost
+#                                       include/{config,generated,...}
+#                                       arch/<arch>/include/generated
+#                                       Makefile, Kbuild, ...
+#                                       certs/signing_key.{pem,x509}  ← copied
+#                                                                       in by
+#                                                                       build-
+#                                                                       kernel.sh
+#       ksrc -> extracted/usr/src/linux-headers-X.Y.Z-vyos   (convenience link)
+#       .done   (flag file)
+#
+# The signing key is the persistent key generated PRE-bindeb-pkg, whose
+# cert was embedded in vmlinux's trusted keyring. Signing ask.ko with this
+# key produces a module that passes MODULE_SIG_FORCE at insmod time.
+SNAP_DIR="$(dirname "$KSRC")/ask-kernel-snapshot"
+if [ ! -f "$KSRC/Module.symvers" ] && [ -d "$SNAP_DIR" ] && [ -e "$SNAP_DIR/.done" ]; then
+    # Resolve the snapshot KSRC. Prefer the convenience symlink; fall back
+    # to find under extracted/ if the symlink is missing for some reason.
+    if [ -L "$SNAP_DIR/ksrc" ] || [ -d "$SNAP_DIR/ksrc" ]; then
+        SNAP_KSRC="$(readlink -f "$SNAP_DIR/ksrc")"
+    else
+        SNAP_KSRC="$(find "$SNAP_DIR/extracted/usr/src" -maxdepth 1 -type d -name 'linux-headers-*' 2>/dev/null | head -1)"
+    fi
+    if [ -n "$SNAP_KSRC" ] && [ -f "$SNAP_KSRC/Module.symvers" ]; then
+        echo "### Original \$KSRC=$KSRC has no Module.symvers (post-bindeb-pkg clean)."
+        echo "### Switching to snapshot KSRC: $SNAP_KSRC"
+        KSRC="$SNAP_KSRC"
+    else
+        echo "FATAL: snapshot dir exists at $SNAP_DIR but ksrc resolution failed"
+        echo "FATAL:   SNAP_KSRC='$SNAP_KSRC'"
+        ls -la "$SNAP_DIR" "$SNAP_DIR/extracted/usr/src" 2>&1 || true
+        exit 1
+    fi
+fi
+
 [ -f "$KSRC/Module.symvers" ] || { echo "FATAL: $KSRC/Module.symvers missing — kernel not built?"; exit 1; }
 [ -x "$KSRC/scripts/sign-file" ] || { echo "FATAL: $KSRC/scripts/sign-file missing — kernel not built?"; exit 1; }
 [ -f "$KSRC/certs/signing_key.pem" ] || { echo "FATAL: $KSRC/certs/signing_key.pem missing — MODULE_SIG_KEYS broken?"; exit 1; }
 [ -f "$KSRC/certs/signing_key.x509" ] || { echo "FATAL: $KSRC/certs/signing_key.x509 missing"; exit 1; }
-[ -d "$PKG_DIR" ] || { echo "FATAL: PKG_DIR=$PKG_DIR does not exist"; exit 1; }
 
 OOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$OOT_DIR"
