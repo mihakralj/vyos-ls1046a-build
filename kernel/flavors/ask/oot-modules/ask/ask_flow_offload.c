@@ -272,6 +272,57 @@ struct ask_flow_pending {
         u32                     oif;
         u32                     action_flags;
         int                     egress_ifindex;
+        /*
+         * PR14z10 (2026-05-19): ingress-side ifindex captured at
+         * defer time. M2 telemetry (2026-05-19, PR14z9 build) showed
+         * PR14z9 poll ticking at 100 ms for the full 30 s test with
+         * scanned=227 resolved=0 pending=227 — i.e. the pending list
+         * never drained even though the next-hop ARP had long since
+         * resolved. Root cause: when nft flowtable emits the REPLACE
+         * for the REV direction (eth4 -> eth3 return traffic) the
+         * REDIRECT action's act->dev is eth3 (the egress for the
+         * reply path), so egress_ifindex captured eth3's ifindex.
+         * But the kernel's neigh lookup for the dst_ip in the rule's
+         * key happens against `egress_dev` (eth3) and the dst_ip
+         * itself is 10.99.1.2 (the lxc201 side that lives on eth3),
+         * so neigh resolution should work — yet poll's repeated
+         * dev_get_by_index_rcu(egress_ifindex=5) + neigh_lookup
+         * never returned NUD_VALID, while NETEVENT fired with
+         * dev->ifindex=6 (eth4) for the FORWARD direction's
+         * 10.11.1.2 -> eth4 ARP that resolved fine on its own.
+         *
+         * The asymmetry: nft flowtable delivers the SAME REPLACE
+         * cookie to BOTH block_cbs (the dedup at PR14r line 687
+         * suppresses the second silicon insert, but the FIRST-
+         * arrival can be EITHER block depending on registration
+         * order). For an eth3->eth4 forward stream the first-
+         * arrival block can be eth4 (block-cb registered on eth4
+         * sees the REPLACE first), in which case ingress_dev=eth4
+         * but act->dev=eth4 too (PR14z6 echo filter triggers and
+         * we return early) -- OR ingress_dev=eth3, act->dev=eth4,
+         * defer with egress_ifindex=6. The REV direction symmetric
+         * case: ingress_dev=eth4, act->dev=eth3, defer with
+         * egress_ifindex=5. But the dst_ip stored in the defer
+         * entry comes from the rule's key, which the kernel
+         * computed from the conntrack tuple — and for some REV
+         * cookies that key's dst_ip is the ORIGINAL direction's
+         * dst_ip (the L3 destination of the FORWARD packet that
+         * created the conntrack entry, 10.11.1.2), not the reply's
+         * dst_ip (10.99.1.2). That dst_ip is only resolvable on
+         * eth4, not on the stored egress_ifindex=eth3.
+         *
+         * Mitigation: also store the ingress_dev's ifindex at defer
+         * time, and in BOTH the poll and the netevent fast-path
+         * match against EITHER ifindex. Whichever device the kernel
+         * actually resolves the neighbour on is the one we use to
+         * pick up n->ha. The "wrong" pipeline tagging (FWD vs REV)
+         * is harmless because the PR14z5 first_pid latch already
+         * decided that at synchronous REPLACE time -- by the time
+         * the deferred replay lands, the silicon classifier is
+         * armed and the 5-tuple match still wins regardless of
+         * which cc_tree the cookie's CC slot lives in.
+         */
+        int                     ingress_ifindex;
         __be32                  dst_ip;
         unsigned long           jiffies_inserted;
 };
@@ -283,15 +334,22 @@ static atomic_t ask_flow_pending_deferred = ATOMIC_INIT(0);
 static atomic_t ask_flow_pending_resolved = ATOMIC_INIT(0);
 static atomic_t ask_flow_pending_overflow = ATOMIC_INIT(0);
 
+/*
+ * PR14z10: match on EITHER egress_ifindex OR ingress_ifindex. The
+ * netevent fires with dev = the actual device the neigh resolved on,
+ * which can be either end of the flow depending on which direction's
+ * dst_ip we stored in the defer entry.
+ */
 static struct ask_flow_pending *
-ask_flow_pending_take_one(int egress_ifindex, __be32 dst_ip)
+ask_flow_pending_take_one(int ifindex, __be32 dst_ip)
 {
         struct ask_flow_pending *p, *tmp;
         struct ask_flow_pending *ret = NULL;
 
         spin_lock_bh(&ask_flow_pending_lock);
         list_for_each_entry_safe(p, tmp, &ask_flow_pending_list, node) {
-                if (p->egress_ifindex == egress_ifindex &&
+                if ((p->egress_ifindex == ifindex ||
+                     p->ingress_ifindex == ifindex) &&
                     p->dst_ip == dst_ip) {
                         list_del(&p->node);
                         ask_flow_pending_count--;
@@ -325,7 +383,9 @@ static bool ask_flow_pending_drop_cookie(u64 cookie)
 static int ask_flow_pending_enqueue(u64 cookie,
                                     const struct ask_flow_key *key,
                                     u32 oif, u32 action_flags,
-                                    int egress_ifindex, __be32 dst_ip)
+                                    int egress_ifindex,
+                                    int ingress_ifindex,
+                                    __be32 dst_ip)
 {
         struct ask_flow_pending *p;
 
@@ -338,6 +398,7 @@ static int ask_flow_pending_enqueue(u64 cookie,
         p->oif              = oif;
         p->action_flags     = action_flags;
         p->egress_ifindex   = egress_ifindex;
+        p->ingress_ifindex  = ingress_ifindex;
         p->dst_ip           = dst_ip;
         p->jiffies_inserted = jiffies;
 
@@ -443,6 +504,7 @@ static int ask_flow_offload_netevent(struct notifier_block *nb,
                         if (ask_flow_pending_enqueue(p->cookie, &p->key,
                                                      p->oif, p->action_flags,
                                                      p->egress_ifindex,
+                                                     p->ingress_ifindex,
                                                      p->dst_ip) == 0)
                                 pr_info_ratelimited("ask: flow_offload: PR14y re-park cookie=0x%llx dev=%s\n",
                                                     p->cookie, netdev_name(dev));
@@ -550,30 +612,48 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
          */
         spin_lock_bh(&ask_flow_pending_lock);
         list_for_each_entry_safe(p, tmp, &ask_flow_pending_list, node) {
-                struct net_device *egress_dev;
+                struct net_device *dev_try;
                 struct neighbour *n;
                 u32 dst_key = (__force u32)p->dst_ip;
                 bool got_mac = false;
+                int tried_ifindex[2];
+                int n_tries;
+                int i;
 
                 scanned++;
-                rcu_read_lock();
-                egress_dev = dev_get_by_index_rcu(&init_net, p->egress_ifindex);
-                if (!egress_dev) {
-                        rcu_read_unlock();
-                        continue;
-                }
-                n = neigh_lookup(&arp_tbl, &dst_key, egress_dev);
-                rcu_read_unlock();
-                if (!n)
-                        continue;
 
-                read_lock_bh(&n->lock);
-                if (n->nud_state & NUD_VALID) {
-                        memcpy(p->key.next_hop_mac, n->ha, ETH_ALEN);
-                        got_mac = true;
+                /*
+                 * PR14z10: try BOTH ifindices captured at defer time.
+                 * The dst_ip stored in the defer entry may be resolvable
+                 * on either end of the flow depending on which direction
+                 * the kernel chose to encode in this REPLACE's key.
+                 */
+                tried_ifindex[0] = p->egress_ifindex;
+                n_tries = 1;
+                if (p->ingress_ifindex && p->ingress_ifindex != p->egress_ifindex)
+                        tried_ifindex[n_tries++] = p->ingress_ifindex;
+
+                for (i = 0; i < n_tries && !got_mac; i++) {
+                        rcu_read_lock();
+                        dev_try = dev_get_by_index_rcu(&init_net,
+                                                       tried_ifindex[i]);
+                        if (!dev_try) {
+                                rcu_read_unlock();
+                                continue;
+                        }
+                        n = neigh_lookup(&arp_tbl, &dst_key, dev_try);
+                        rcu_read_unlock();
+                        if (!n)
+                                continue;
+
+                        read_lock_bh(&n->lock);
+                        if (n->nud_state & NUD_VALID) {
+                                memcpy(p->key.next_hop_mac, n->ha, ETH_ALEN);
+                                got_mac = true;
+                        }
+                        read_unlock_bh(&n->lock);
+                        neigh_release(n);
                 }
-                read_unlock_bh(&n->lock);
-                neigh_release(n);
 
                 if (got_mac) {
                         list_del(&p->node);
@@ -597,13 +677,15 @@ static void ask_flow_pending_poll_fn(struct work_struct *work)
                         atomic_inc(&ask_flow_pending_resolved);
                         atomic_inc(&ask_flow_pending_poll_resolved);
                         resolved_this_tick++;
-                        pr_info_ratelimited("ask: flow_offload: PR14z9 poll-resolved cookie=0x%llx ifindex=%d hw_id=0x%08x nh=%pM em=%pM\n",
+                        pr_info_ratelimited("ask: flow_offload: PR14z10 poll-resolved cookie=0x%llx eg_if=%d in_if=%d hw_id=0x%08x nh=%pM em=%pM\n",
                                             p->cookie, p->egress_ifindex,
+                                            p->ingress_ifindex,
                                             hw_id, p->key.next_hop_mac,
                                             p->key.egress_mac);
                 } else {
-                        pr_info_ratelimited("ask: flow_offload: PR14z9 poll-insert FAIL rc=%d cookie=0x%llx ifindex=%d\n",
-                                            rc, p->cookie, p->egress_ifindex);
+                        pr_info_ratelimited("ask: flow_offload: PR14z10 poll-insert FAIL rc=%d cookie=0x%llx eg_if=%d in_if=%d\n",
+                                            rc, p->cookie, p->egress_ifindex,
+                                            p->ingress_ifindex);
                 }
                 kfree(p);
         }
@@ -993,10 +1075,15 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 
                 qrc = ask_flow_pending_enqueue((u64)f->cookie, &key, oif,
                                                action_flags,
-                                               egress_dev->ifindex, dst_ip);
+                                               egress_dev->ifindex,
+                                               ingress_dev ? ingress_dev->ifindex : 0,
+                                               dst_ip);
                 if (qrc == 0) {
-                        pr_info_ratelimited("ask: flow_offload: PR14y defer cookie=0x%lx oif=%u (neigh unresolved, ARP probed)\n",
-                                            f->cookie, oif);
+                        pr_info_ratelimited("ask: flow_offload: PR14z10 defer cookie=0x%lx oif=%u eg_if=%d in_if=%d dst=%pI4 (neigh unresolved, ARP probed)\n",
+                                            f->cookie, oif,
+                                            egress_dev->ifindex,
+                                            ingress_dev ? ingress_dev->ifindex : 0,
+                                            &dst_ip);
                         return 0;
                 }
                 /*
@@ -1489,7 +1576,7 @@ int ask_flow_offload_init(void)
         schedule_delayed_work(&ask_flow_pending_poll_work,
                               msecs_to_jiffies(ASK_FLOW_PENDING_POLL_INTERVAL_MS));
 
-        ask_pr_info("flow_offload: ready (PR14y deferred-insert + PR14z8 netevent trace + PR14z9 active poll %d ms)\n",
+        ask_pr_info("flow_offload: ready (PR14y deferred-insert + PR14z8 netevent trace + PR14z9 active poll %d ms + PR14z10 dual-ifindex match)\n",
                     ASK_FLOW_PENDING_POLL_INTERVAL_MS);
         return 0;
 }
