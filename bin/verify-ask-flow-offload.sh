@@ -14,18 +14,23 @@
 # silicon fast path is wired end-to-end and that an offloaded flow
 # costs measurably less CPU than the kernel-software fast path.
 #
-# Topology (Mono Gateway DK):
+# Topology (Mono Gateway DK — rebuilt 2026-05-19, pure L3 no-NAT):
 #
-#   ┌──────────────┐    ┌────────────────────────────┐    ┌──────────────┐
-#   │ traffic gen  │ -> │ vyos-eth1     vyos-eth2    │ -> │ traffic sink │
-#   │ (LXC 200)    │    │   (DUT — runs ASK2 ask.ko) │    │ (LXC 201)    │
-#   └──────────────┘    └────────────────────────────┘    └──────────────┘
+#   ┌──────────────┐  10.99.1.0/30  ┌─────────────────────┐  10.11.1.0/30  ┌──────────────┐
+#   │ traffic gen  │ -------------> │ eth3 (DUT) eth4     │ -------------> │ traffic sink │
+#   │ lxc201 .2    │                │  ASK2 ask.ko routes │                │ lxc202 .2    │
+#   └──────────────┘                └─────────────────────┘                └──────────────┘
+#                                     10.99.1.1   10.11.1.1
+#
+# Both gen and sink are LXC containers on the heidi Proxmox host
+# (192.168.1.15). Each /30 is its own subnet so the DUT's only
+# possible path between them is the kernel forward plane (no /16
+# ECMP ambiguity, no upstream router involvement, no NAT).
 #
 # The DUT must already have:
 #   - ask.ko loaded and FMan PCD chain up
 #       (dmesg: "ask: hw: FMan PCD chain up")
-#   - vyos-eth1 + vyos-eth2 brought up with /30 IPs (or full /24
-#     networks; the harness only needs L3 forwarding to work)
+#   - eth3 (10.99.1.1/30) + eth4 (10.11.1.1/30) up
 #   - nft flowtable bound to both ports with offload flag
 #   - sysctl net.ipv4.ip_forward=1
 #
@@ -36,11 +41,11 @@
 #
 # Inputs (env-overridable):
 #   DUT          — SSH alias for the device under test  [vyos]
-#   GEN_HOST     — SSH alias for the traffic generator  [lxc200]
-#   SINK_HOST    — SSH alias for the traffic sink       [lxc201]
-#   SINK_IP      — IP the gen iperf3 client targets     [10.99.2.2]
-#   IFACE_IN     — DUT ingress port                     [vyos-eth1]
-#   IFACE_OUT    — DUT egress  port                     [vyos-eth2]
+#   GEN_HOST     — SSH alias for the traffic generator  [lxc201]
+#   SINK_HOST    — SSH alias for the traffic sink       [lxc202]
+#   SINK_IP      — IP the gen iperf3 client targets     [10.11.1.2]
+#   IFACE_IN     — DUT ingress port                     [eth3]
+#   IFACE_OUT    — DUT egress  port                     [eth4]
 #   DURATION     — iperf3 duration in seconds           [30]
 #   PARALLEL     — iperf3 -P streams                    [8]
 #   THRESHOLD_GBPS — minimum throughput to pass         [2.0]
@@ -66,14 +71,17 @@
 set -euo pipefail
 
 # ------------------------------------------------------------ defaults
-# Defaults match the actually-cabled M2 rig (PR14o-verified 2026-05-17):
-#   lxc201 (10.99.1.2) -> mono eth3 (10.99.1.1/30) -> mono eth4 (192.168.1.192)
-#                                                  -> lxc200 sink (192.168.1.137)
-# Override env vars to point at a different topology.
+# Defaults match the actually-cabled M2 rig (rebuilt 2026-05-19):
+#   lxc201 (10.99.1.2/30) -> mono eth3 (10.99.1.1/30) -> DUT routes (no NAT)
+#                                                     -> mono eth4 (10.11.1.1/30)
+#                                                     -> lxc202 sink (10.11.1.2/30)
+# Pure L3 routing through the DUT — no upstream router involved, no NAT,
+# no /16 ECMP ambiguity (each side is its own /30). Override env vars to
+# point at a different topology.
 DUT="${DUT:-vyos}"
 GEN_HOST="${GEN_HOST:-lxc201}"
-SINK_HOST="${SINK_HOST:-lxc200}"
-SINK_IP="${SINK_IP:-192.168.1.137}"
+SINK_HOST="${SINK_HOST:-lxc202}"
+SINK_IP="${SINK_IP:-10.11.1.2}"
 IFACE_IN="${IFACE_IN:-eth3}"
 IFACE_OUT="${IFACE_OUT:-eth4}"
 DURATION="${DURATION:-30}"
@@ -129,14 +137,22 @@ ssh_gen  "command -v iperf3 >/dev/null" || skip "iperf3 not installed on $GEN_HO
 ssh_sink "command -v iperf3 >/dev/null" || skip "iperf3 not installed on $SINK_HOST"
 ssh_dut  "command -v mpstat >/dev/null" || skip "mpstat (sysstat) not installed on the DUT"
 
+# 6. Persistent iperf3-sink.service running on $SINK_HOST?
+#
+# As of 2026-05-19 the sink runs iperf3 -s permanently via the
+# /etc/systemd/system/iperf3-sink.service unit on lxc202 (bound to
+# 10.11.1.2:5201, Restart=always).  The harness used to start its own
+# `iperf3 -s -1` (single-shot) per run, but that race-d with itself when
+# multiple gates ran back-to-back (server still in TIME_WAIT cleanup).
+# We just confirm the persistent server is listening; if not, skip with
+# operator-actionable advice instead of trying to start one.
+if ! ssh_sink "ss -tlnp 2>/dev/null | grep -q ':5201 '" ; then
+        skip "iperf3-sink.service not listening on $SINK_HOST:5201 — run: ssh heidi 'sudo pct exec 202 -- systemctl restart iperf3-sink.service'"
+fi
+
 # ------------------------------------------------------------ measurement
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
-
-log "starting iperf3 -s on $SINK_HOST"
-ssh -o BatchMode=yes "$SINK_HOST" 'pkill -f "iperf3 -s" 2>/dev/null; sleep 0.2' || true
-ssh -o BatchMode=yes -f "$SINK_HOST" "iperf3 -s -1 >/dev/null 2>&1"
-sleep 1
 
 log "capturing baseline CPU on DUT (3 s)"
 BASE_IDLE=$(ssh_dut "sudo -n mpstat 1 3 | awk '/Average:.*all/ {print \$NF; exit}'")

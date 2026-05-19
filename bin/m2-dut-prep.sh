@@ -36,7 +36,10 @@
 #   DUT          — SSH alias for the device under test  [vyos]
 #   IFACE_IN     — DUT ingress port                     [eth3]
 #   IFACE_OUT    — DUT egress  port                     [eth4]
-#   SINK_IP      — M2 sink IP (lxc200)                  [192.168.1.137]
+#   SINK_IP      — M2 sink IP (lxc202 on the 10.11.1.0/30 leg)  [10.11.1.2]
+#
+# Topology (rebuilt 2026-05-19 — pure L3, no NAT, no /32 pin):
+#   lxc201 (10.99.1.2/30) -> eth3 (10.99.1.1/30) -> DUT -> eth4 (10.11.1.1/30) -> lxc202 (10.11.1.2/30)
 #
 # Exit status:
 #   0 — all prereqs in place
@@ -48,7 +51,7 @@ set -euo pipefail
 DUT="${DUT:-vyos}"
 IFACE_IN="${IFACE_IN:-eth3}"
 IFACE_OUT="${IFACE_OUT:-eth4}"
-SINK_IP="${SINK_IP:-192.168.1.137}"
+SINK_IP="${SINK_IP:-10.11.1.2}"
 
 log()  { printf '[m2-dut-prep] %s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
@@ -116,40 +119,23 @@ if ! grep -q "$IFACE_IN"  <<<"$LIST"; then fail "flowtable ft1 missing $IFACE_IN
 if ! grep -q "$IFACE_OUT" <<<"$LIST"; then fail "flowtable ft1 missing $IFACE_OUT"; fi
 if ! grep -q "offload"    <<<"$LIST"; then fail "flowtable ft1 missing offload flag"; fi
 
-# 4. Pin SINK_IP/32 to IFACE_OUT (override /16 ECMP that picks eth1 1G over eth4 10G).
+# 4. Verify SINK_IP egress path matches IFACE_OUT.
 #
-# Without this, the kernel route lookup for ${SINK_IP} on a DUT with multiple
-# interfaces in 192.168.1.0/16 spreads via ECMP and frequently chooses the
-# 1G RJ45 port (eth1) over the 10G SFP+ port (eth4). The flow then tops out
-# at ~0.94 Gbps regardless of how well the silicon classifier is working,
-# because the SLOW path is single-1G-capped. Installing a /32 host route
-# forces the egress to IFACE_OUT and lets the M2 gate actually measure
-# silicon-offload throughput.
-log "step 4/4: pin $SINK_IP/32 to dev $IFACE_OUT (override /16 ECMP)"
-IFACE_OUT_SRC=$(ssh_dut "ip -4 -o addr show dev $IFACE_OUT 2>/dev/null | awk '{print \$4}' | cut -d/ -f1 | head -n1" 2>/dev/null || true)
-# Defensive fallback: if the awk \$4 substitution got mangled by quoting,
-# re-extract from the raw `ip` output with a sed pipeline that has no \$.
-if [ -z "${IFACE_OUT_SRC:-}" ]; then
-        IFACE_OUT_SRC=$(ssh_dut "ip -4 -o addr show dev $IFACE_OUT" 2>/dev/null \
-                | sed -nE 's@.*inet ([0-9.]+)/[0-9]+.*@\1@p' \
-                | head -n1 || true)
-fi
-if [ -z "${IFACE_OUT_SRC:-}" ]; then
-        log "WARN: could not read IPv4 src addr from $IFACE_OUT — skipping /32 pin"
+# As of 2026-05-19 the M2 rig was rebuilt with dedicated /30 subnets:
+#   eth3 = 10.99.1.1/30 -> lxc201 (10.99.1.2)
+#   eth4 = 10.11.1.1/30 -> lxc202 (10.11.1.2)
+# Each /30 is its own connected route, so a kernel route lookup for the
+# sink IP unambiguously selects IFACE_OUT — no /32 host-route pin is
+# needed. We just confirm the route resolves to the expected device, so
+# a future re-cabling or DHCP regression is caught early.
+log "step 4/4: verify $SINK_IP routes out $IFACE_OUT (connected /30, no ECMP)"
+ROUTE_DEV=$(ssh_dut "ip -4 route get $SINK_IP 2>/dev/null | awk '/dev/ {for(i=1;i<=NF;i++) if(\$i==\"dev\") {print \$(i+1); exit}}'" || true)
+if [ -z "${ROUTE_DEV:-}" ]; then
+        fail "no route to $SINK_IP from DUT (check IFACE_OUT IP + cabling)"
+elif [ "$ROUTE_DEV" != "$IFACE_OUT" ]; then
+        fail "$SINK_IP routes via $ROUTE_DEV, expected $IFACE_OUT (check /30 subnet assignment)"
 else
-        EXISTING=$(ssh_dut "ip -4 route show $SINK_IP/32 2>/dev/null" || true)
-        WANT="$SINK_IP dev $IFACE_OUT src $IFACE_OUT_SRC"
-        if grep -q "dev $IFACE_OUT" <<<"$EXISTING" && grep -q "src $IFACE_OUT_SRC" <<<"$EXISTING"; then
-                log "       $SINK_IP/32 already pinned: $EXISTING"
-        else
-                if [ -n "$EXISTING" ]; then
-                        ssh_dut "sudo -n ip route del $SINK_IP/32" \
-                                || fail "could not delete stale $SINK_IP/32 route"
-                fi
-                ssh_dut "sudo -n ip route add $SINK_IP/32 dev $IFACE_OUT src $IFACE_OUT_SRC" \
-                        || fail "could not add $SINK_IP/32 dev $IFACE_OUT src $IFACE_OUT_SRC"
-                log "       added: $SINK_IP/32 dev $IFACE_OUT src $IFACE_OUT_SRC"
-        fi
+        log "       $SINK_IP -> dev $IFACE_OUT (connected route OK)"
 fi
 
 log "all prereqs in place — run bin/verify-ask-flow-offload.sh to measure"
