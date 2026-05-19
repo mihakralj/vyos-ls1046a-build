@@ -94,7 +94,7 @@ KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-crud"), 0);
 make_key_v4(&key, htonl(0x0a000001), htonl(0x0a000002),
     htons(1234), htons(80));
 
-rc = ask_flow_insert(&t, 0xdeadbeef, &key, 7, ASK_ACT_TTL_DEC, &hw_id);
+rc = ask_flow_insert(&t, 0xdeadbeef, &key, 7, ASK_ACT_TTL_DEC, ASK_HW_DIR_FWD, &hw_id);
 KUNIT_EXPECT_EQ(test, rc, 0);
 KUNIT_EXPECT_GT(test, hw_id, 0u);
 
@@ -131,8 +131,8 @@ KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-dup"), 0);
 make_key_v4(&key, htonl(0x01010101), htonl(0x02020202),
     htons(1), htons(2));
 
-KUNIT_EXPECT_EQ(test, ask_flow_insert(&t, 1, &key, 0, 0, &hw_id_a), 0);
-rc = ask_flow_insert(&t, 1, &key, 0, 0, &hw_id_b);
+KUNIT_EXPECT_EQ(test, ask_flow_insert(&t, 1, &key, 0, 0, ASK_HW_DIR_FWD, &hw_id_a), 0);
+rc = ask_flow_insert(&t, 1, &key, 0, 0, ASK_HW_DIR_FWD, &hw_id_b);
 KUNIT_EXPECT_EQ(test, rc, -EEXIST);
 
 ask_flow_table_destroy(&t);
@@ -164,7 +164,7 @@ KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-stats"), 0);
 make_key_v4(&key, htonl(0x0a000005), htonl(0x0a000006),
     htons(5555), htons(443));
 KUNIT_ASSERT_EQ(test,
-ask_flow_insert(&t, 42, &key, 1, 0, &hw_id), 0);
+ask_flow_insert(&t, 42, &key, 1, 0, ASK_HW_DIR_FWD, &hw_id), 0);
 
 /* read-back should be zero before any update */
 KUNIT_EXPECT_EQ(test,
@@ -216,7 +216,7 @@ make_key_v4(&key, htonl(0x0a000000 + i),
     htonl(0x0b000000 + i),
     htons(1000 + i), htons(80));
 KUNIT_ASSERT_EQ(test,
-ask_flow_insert(&t, 100 + i, &key, i, 0, &hw_id),
+ask_flow_insert(&t, 100 + i, &key, i, 0, ASK_HW_DIR_FWD, &hw_id),
 0);
 expected_sum += 100 + i;
 }
@@ -255,7 +255,7 @@ make_key_v4(&key, htonl(0x10000000 + i),
     htons(i & 0xffff));
 KUNIT_ASSERT_EQ(test,
 ask_flow_insert(&t, 0x1000 + i, &key, i & 7,
-0, &hw_id), 0);
+0, ASK_HW_DIR_FWD, &hw_id), 0);
 }
 
 ctx = (struct walk_count_ctx){ 0 };
@@ -306,12 +306,12 @@ KUNIT_ASSERT_EQ(test, ask_flow_table_create(&t, "kunit-hw-fallback"), 0);
 make_key_v4(&key, htonl(0x0a010001), htonl(0x0a010002),
     htons(11000), htons(80));
 KUNIT_EXPECT_EQ(test,
-ask_flow_insert(&t, 0xaaaa, &key, 1, 0, &hw_id_a), 0);
+ask_flow_insert(&t, 0xaaaa, &key, 1, 0, ASK_HW_DIR_FWD, &hw_id_a), 0);
 
 make_key_v4(&key, htonl(0x0a010003), htonl(0x0a010004),
     htons(11001), htons(80));
 KUNIT_EXPECT_EQ(test,
-ask_flow_insert(&t, 0xbbbb, &key, 1, 0, &hw_id_b), 0);
+ask_flow_insert(&t, 0xbbbb, &key, 1, 0, ASK_HW_DIR_FWD, &hw_id_b), 0);
 
 /* Sequential SW-counter ids: 1 then 2. */
 KUNIT_EXPECT_EQ(test, hw_id_a, 1u);
@@ -379,10 +379,10 @@ make_key_v4(&key, htonl(0x0b010001), htonl(0x0b010002),
     htons(22000), htons(443));
 
 KUNIT_EXPECT_EQ(test,
-ask_flow_insert(&t, 0xc001, &key, 1, 0, &hw_id_a), 0);
+ask_flow_insert(&t, 0xc001, &key, 1, 0, ASK_HW_DIR_FWD, &hw_id_a), 0);
 
 /* Same cookie, same key → -EEXIST. Triggers the rollback path. */
-rc = ask_flow_insert(&t, 0xc001, &key, 1, 0, &hw_id_b);
+rc = ask_flow_insert(&t, 0xc001, &key, 1, 0, ASK_HW_DIR_FWD, &hw_id_b);
 KUNIT_EXPECT_EQ(test, rc, -EEXIST);
 
 /*
@@ -393,7 +393,7 @@ KUNIT_EXPECT_EQ(test, rc, -EEXIST);
 make_key_v4(&key, htonl(0x0b010003), htonl(0x0b010004),
     htons(22001), htons(443));
 KUNIT_EXPECT_EQ(test,
-ask_flow_insert(&t, 0xc002, &key, 1, 0, &hw_id_b), 0);
+ask_flow_insert(&t, 0xc002, &key, 1, 0, ASK_HW_DIR_FWD, &hw_id_b), 0);
 KUNIT_EXPECT_GT(test, hw_id_b, 0u);
 KUNIT_EXPECT_NE(test, hw_id_b, hw_id_a);
 

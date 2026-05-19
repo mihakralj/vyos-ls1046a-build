@@ -142,7 +142,7 @@ static void hw_pcd_test_insert_null_key(struct kunit *test)
 	u32 hw_id = 0xdeadbeefu;
 	int rc;
 
-	rc = ask_hw_flow_insert(NULL, 1, 0, &hw_id);
+	rc = ask_hw_flow_insert(NULL, 1, 0, ASK_HW_DIR_FWD, &hw_id);
 	KUNIT_EXPECT_EQ(test, rc, -EINVAL);
 	/* hw_id must NOT have been written on the failure path. */
 	KUNIT_EXPECT_EQ(test, hw_id, 0xdeadbeefu);
@@ -155,7 +155,7 @@ static void hw_pcd_test_insert_null_out(struct kunit *test)
 
 	make_v4_tcp_key(&key, htonl(0x0a000001), htonl(0x0a000002),
 			htons(1234), htons(80));
-	rc = ask_hw_flow_insert(&key, 1, 0, NULL);
+	rc = ask_hw_flow_insert(&key, 1, 0, ASK_HW_DIR_FWD, NULL);
 	KUNIT_EXPECT_EQ(test, rc, -EINVAL);
 }
 
@@ -183,7 +183,7 @@ static void hw_pcd_test_insert_no_hw_backing(struct kunit *test)
 	make_v4_tcp_key(&key, htonl(0x0a000001), htonl(0x0a000002),
 			htons(1234), htons(80));
 
-	rc = ask_hw_flow_insert(&key, 999, 0, &hw_id);
+	rc = ask_hw_flow_insert(&key, 999, 0, ASK_HW_DIR_FWD, &hw_id);
 	KUNIT_EXPECT_EQ(test, rc, -ENODEV);
 	/* hw_id must NOT have been written on the failure path. */
 	KUNIT_EXPECT_EQ(test, hw_id, 0xdeadbeefu);
@@ -208,7 +208,7 @@ static void hw_pcd_test_insert_unsupported_proto(struct kunit *test)
 			htons(1234), htons(80));
 	key.l4_proto = IPPROTO_UDP;
 
-	rc = ask_hw_flow_insert(&key, 999, 0, &hw_id);
+	rc = ask_hw_flow_insert(&key, 999, 0, ASK_HW_DIR_FWD, &hw_id);
 	KUNIT_EXPECT_TRUE(test, rc == -ENODEV || rc == -EOPNOTSUPP);
 	KUNIT_EXPECT_EQ(test, hw_id, 0xdeadbeefu);
 }
@@ -223,7 +223,7 @@ static void hw_pcd_test_insert_unsupported_l3(struct kunit *test)
 			htons(1234), htons(80));
 	key.l3_proto = ASK_FLOW_L3_IPV6;
 
-	rc = ask_hw_flow_insert(&key, 999, 0, &hw_id);
+	rc = ask_hw_flow_insert(&key, 999, 0, ASK_HW_DIR_FWD, &hw_id);
 	KUNIT_EXPECT_TRUE(test, rc == -ENODEV || rc == -EOPNOTSUPP);
 	KUNIT_EXPECT_EQ(test, hw_id, 0xdeadbeefu);
 }
@@ -417,7 +417,7 @@ static void hw_pcd_test_insert_zero_mac_eagain(struct kunit *test)
                         htons(1000), htons(80));
         /* next_hop_mac / egress_mac are zero by make_v4_tcp_key memset. */
 
-        rc = ask_hw_flow_insert(&k, /*oif=*/1, /*action_flags=*/0, &hw_id);
+        rc = ask_hw_flow_insert(&k, /*oif=*/1, /*action_flags=*/0, ASK_HW_DIR_FWD, &hw_id);
         KUNIT_EXPECT_TRUE(test, rc == -EAGAIN || rc == -ENODEV ||
                                  rc == -EOPNOTSUPP);
         KUNIT_EXPECT_EQ(test, hw_id, 0xdeadbeefu);
@@ -446,7 +446,7 @@ static void hw_pcd_test_insert_zero_dst_mac_only_eagain(struct kunit *test)
         k.egress_mac[5] = 0x42;
         /* next_hop_mac left zero. */
 
-        rc = ask_hw_flow_insert(&k, /*oif=*/1, /*action_flags=*/0, &hw_id);
+        rc = ask_hw_flow_insert(&k, /*oif=*/1, /*action_flags=*/0, ASK_HW_DIR_FWD, &hw_id);
         KUNIT_EXPECT_TRUE(test, rc == -EAGAIN || rc == -ENODEV ||
                                  rc == -EOPNOTSUPP);
         KUNIT_EXPECT_EQ(test, hw_id, 0u);
