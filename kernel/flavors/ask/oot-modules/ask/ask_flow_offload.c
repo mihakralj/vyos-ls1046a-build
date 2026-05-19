@@ -701,6 +701,21 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          * consecutive hw_id slots.  After this dedupe only the eth3
          * line should appear; the eth4 second-replay logs a single
          * `REPLACE dedup` line instead.
+         *
+         * PR14z4 (2026-05-19) NOTE: an earlier revision hoisted
+         * ask_hw_port_bind() ABOVE this dedup check on the theory that
+         * the second-arrival netdev (eth4) needed its own KG scheme
+         * for reverse-direction silicon classification.  Empirically
+         * (M2 run 2026-05-19) binding TWO KG schemes to the SAME
+         * cc_tree HALVED forward-direction silicon throughput (eth3
+         * RX dropped fell from 37.9M → 16.0M, eth4 TX from 53.7 GB →
+         * 20.5 GB) without enabling reverse-direction silicon (eth4
+         * RX still kernel-SW-only).  Hypothesis: FMan v3 cannot
+         * usefully share a cc_tree across two schemes — the second
+         * scheme's KG hash either fragments the CC slot population or
+         * starves a shared QBMan resource.  Reverted; reverse-
+         * direction silicon needs a separate cc_tree (PR14z5 future
+         * work), not a second scheme.
          */
         {
                 struct ask_flow *existing;
@@ -805,6 +820,13 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          * port id, not the egress device.  Idempotent re-bind for the
          * same port is a no-op.  -EBUSY (different port already bound)
          * is logged and ignored - the SW path picks up the flow.
+         *
+         * PR14z4 reverted (see comment block at PR14r dedup above):
+         * we no longer try to bind port 9 (eth4) as a second KG
+         * scheme — the FMan v3 shared-cc_tree mode does not work that
+         * way and halves forward-direction throughput.  Reverse-
+         * direction silicon is a separate effort (PR14z5: build a
+         * second cc_tree dedicated to reverse direction).
          */
         if (ingress_dev) {
                 u8 pid;
