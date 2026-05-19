@@ -55,6 +55,8 @@
 #include <linux/string.h>
 #include <linux/if_ether.h>
 #include <linux/etherdevice.h>
+#include <linux/workqueue.h>
+#include <linux/jiffies.h>
 #include <net/flow_offload.h>
 #include <net/pkt_cls.h>
 #include <net/arp.h>
@@ -363,18 +365,50 @@ static int ask_flow_offload_netevent(struct notifier_block *nb,
         struct ask_flow_table *t;
         u32 hw_id = 0;
         int rc;
+        unsigned int drained = 0;
+
+        /*
+         * PR14z8 (2026-05-19): instrument the NETEVENT path to nail down
+         * why ask_flow_pending_list never drains (M2 2026-05-19 dmesg
+         * counters: installed=33, defer=141, deferred-insert OK=0).
+         *
+         * Two competing hypotheses:
+         *  H1: NETEVENT_NEIGH_UPDATE doesn't fire for entries we created
+         *      ourselves via __neigh_create()+neigh_event_send() — it only
+         *      fires on already-tracked INCOMPLETE→REACHABLE transitions.
+         *  H2: It does fire, but ask_flow_pending_take_one() filter on
+         *      (egress_ifindex, dst_ip) misses because primary_key
+         *      encoding differs from how we stored dst_ip at defer time.
+         *
+         * The three pr_info_ratelimited below distinguish them:
+         *  - "netevent entry" with the event code proves H1 false (we ARE
+         *    being called); absence of this trace proves H1 true.
+         *  - "netevent NUD_VALID" with the dst_ip + dev->ifindex shows
+         *    what filter key we're searching with.
+         *  - "netevent drained N" at exit shows whether any cookies
+         *    matched. If we see NUD_VALID traces but drained=0 every
+         *    time, H2 is confirmed.
+         */
+        pr_info_ratelimited("ask: flow_offload: netevent entry event=%lu ptr=%px\n",
+                            event, ptr);
 
         if (event != NETEVENT_NEIGH_UPDATE)
                 return NOTIFY_DONE;
 
         n = ptr;
-        if (!n || n->tbl != &arp_tbl)
+        if (!n || n->tbl != &arp_tbl) {
+                pr_info_ratelimited("ask: flow_offload: netevent skip (n=%px tbl=%s)\n",
+                                    n, (n && n->tbl) ? "non-arp" : "null");
                 return NOTIFY_DONE;
+        }
 
         /* Only act on transitions into NUD_VALID (lladdr is now meaningful). */
         read_lock_bh(&n->lock);
         if (!(n->nud_state & NUD_VALID)) {
+                u8 ns = n->nud_state;
                 read_unlock_bh(&n->lock);
+                pr_info_ratelimited("ask: flow_offload: netevent skip not-VALID nud_state=0x%02x\n",
+                                    ns);
                 return NOTIFY_DONE;
         }
         dev = n->dev;
@@ -383,6 +417,10 @@ static int ask_flow_offload_netevent(struct notifier_block *nb,
 
         if (!dev)
                 return NOTIFY_DONE;
+
+        pr_info_ratelimited("ask: flow_offload: netevent NUD_VALID dev=%s ifindex=%d dst_ip=%pI4 pending_count=%u\n",
+                            netdev_name(dev), dev->ifindex, &dst_ip,
+                            READ_ONCE(ask_flow_pending_count));
 
         t = ask_flow_default_table();
         if (!t)
@@ -394,6 +432,7 @@ static int ask_flow_offload_netevent(struct notifier_block *nb,
          * flows are heading at the same next-hop.
          */
         while ((p = ask_flow_pending_take_one(dev->ifindex, dst_ip))) {
+                drained++;
                 /* Re-resolve so we always pick up the fresh n->ha. */
                 ask_resolve_neigh_v4(dev, dst_ip,
                                      p->key.next_hop_mac, p->key.egress_mac);
@@ -454,6 +493,130 @@ static int ask_flow_offload_netevent(struct notifier_block *nb,
 static struct notifier_block ask_flow_offload_netevent_nb = {
         .notifier_call = ask_flow_offload_netevent,
 };
+
+/* ------------------------------------------------------------------------- */
+/* PR14z9 (2026-05-19): active-poll fallback for pending queue drain.        */
+/*                                                                            */
+/* PR14y's design relied entirely on NETEVENT_NEIGH_UPDATE firing when our   */
+/* deferred next-hop ARP resolves.  Empirically (M2 2026-05-19 dmesg:        */
+/* defer=141, deferred-insert OK=0) that notifier never delivers a useful   */
+/* transition for entries we ourselves created via __neigh_create() +       */
+/* neigh_event_send() — either it doesn't fire at all for solicited-by-us   */
+/* probes (H1) or the (ifindex, dst_ip) filter inside the notifier misses   */
+/* (H2).  PR14z8 instrumentation will tell us which; PR14z9 makes the       */
+/* answer irrelevant by polling the pending list ourselves every 100 ms     */
+/* and re-running neigh_lookup() on each entry.                              */
+/*                                                                            */
+/* Why 100 ms: Linux ARP retransmits every ~1 s, neigh_event_send() kicks   */
+/* the first solicit immediately, so reply latency on a healthy LAN is      */
+/* typically <2 ms.  100 ms gives us ≥10 chances/sec to catch the resolve  */
+/* before the kernel's flowtable sweeper expires the cookie.  On a fully   */
+/* idle pending list this poll costs one spinlock acquire + list_empty()   */
+/* check = ~50 ns per tick, negligible.                                     */
+/*                                                                            */
+/* When the list is empty the work re-arms anyway; cheaper than maintaining */
+/* a "should I run?" signal between enqueue and poller.                     */
+/* ------------------------------------------------------------------------- */
+
+#define ASK_FLOW_PENDING_POLL_INTERVAL_MS 100
+
+static struct delayed_work ask_flow_pending_poll_work;
+static atomic_t ask_flow_pending_poll_runs = ATOMIC_INIT(0);
+static atomic_t ask_flow_pending_poll_resolved = ATOMIC_INIT(0);
+
+static void ask_flow_pending_poll_fn(struct work_struct *work)
+{
+        struct ask_flow_pending *p, *tmp;
+        struct ask_flow_table *t;
+        LIST_HEAD(ready);
+        unsigned int scanned = 0;
+        unsigned int resolved_this_tick = 0;
+
+        atomic_inc(&ask_flow_pending_poll_runs);
+
+        /* Fast-path bail-out on empty list to avoid log spam. */
+        if (list_empty(&ask_flow_pending_list))
+                goto rearm;
+
+        t = ask_flow_default_table();
+        if (!t)
+                goto rearm;
+
+        /*
+         * Walk the pending list under the lock and pull out any entry
+         * whose neigh has resolved.  We move ready entries to a local
+         * list so we can replay the HW insert outside the lock (the
+         * insert path takes its own locks / sleeps in PCD CC API).
+         */
+        spin_lock_bh(&ask_flow_pending_lock);
+        list_for_each_entry_safe(p, tmp, &ask_flow_pending_list, node) {
+                struct net_device *egress_dev;
+                struct neighbour *n;
+                u32 dst_key = (__force u32)p->dst_ip;
+                bool got_mac = false;
+
+                scanned++;
+                rcu_read_lock();
+                egress_dev = dev_get_by_index_rcu(&init_net, p->egress_ifindex);
+                if (!egress_dev) {
+                        rcu_read_unlock();
+                        continue;
+                }
+                n = neigh_lookup(&arp_tbl, &dst_key, egress_dev);
+                rcu_read_unlock();
+                if (!n)
+                        continue;
+
+                read_lock_bh(&n->lock);
+                if (n->nud_state & NUD_VALID) {
+                        memcpy(p->key.next_hop_mac, n->ha, ETH_ALEN);
+                        got_mac = true;
+                }
+                read_unlock_bh(&n->lock);
+                neigh_release(n);
+
+                if (got_mac) {
+                        list_del(&p->node);
+                        ask_flow_pending_count--;
+                        list_add_tail(&p->node, &ready);
+                }
+        }
+        spin_unlock_bh(&ask_flow_pending_lock);
+
+        /* Now replay HW insert for each ready cookie, lock-free. */
+        list_for_each_entry_safe(p, tmp, &ready, node) {
+                u32 hw_id = 0;
+                int rc;
+
+                list_del(&p->node);
+                rc = ask_flow_insert(t, p->cookie, &p->key, p->oif,
+                                     p->action_flags, ASK_HW_DIR_FWD, &hw_id);
+                if (rc == -EEXIST)
+                        rc = 0;
+                if (rc == 0) {
+                        atomic_inc(&ask_flow_pending_resolved);
+                        atomic_inc(&ask_flow_pending_poll_resolved);
+                        resolved_this_tick++;
+                        pr_info_ratelimited("ask: flow_offload: PR14z9 poll-resolved cookie=0x%llx ifindex=%d hw_id=0x%08x nh=%pM em=%pM\n",
+                                            p->cookie, p->egress_ifindex,
+                                            hw_id, p->key.next_hop_mac,
+                                            p->key.egress_mac);
+                } else {
+                        pr_info_ratelimited("ask: flow_offload: PR14z9 poll-insert FAIL rc=%d cookie=0x%llx ifindex=%d\n",
+                                            rc, p->cookie, p->egress_ifindex);
+                }
+                kfree(p);
+        }
+
+        if (resolved_this_tick || scanned > 0)
+                pr_info_ratelimited("ask: flow_offload: PR14z9 poll tick scanned=%u resolved=%u pending=%u\n",
+                                    scanned, resolved_this_tick,
+                                    READ_ONCE(ask_flow_pending_count));
+
+rearm:
+        schedule_delayed_work(&ask_flow_pending_poll_work,
+                              msecs_to_jiffies(ASK_FLOW_PENDING_POLL_INTERVAL_MS));
+}
 
 /* ------------------------------------------------------------------------- */
 /* Per-block state                                                            */
@@ -1316,7 +1479,18 @@ int ask_flow_offload_init(void)
                 return rc;
         }
 
-        ask_pr_info("flow_offload: ready (PR14y: deferred-insert + netevent neigh notifier)\n");
+        /*
+         * PR14z9 (2026-05-19): arm the active-poll fallback that re-runs
+         * neigh_lookup() on the pending list every 100 ms.  Defends
+         * against any case where NETEVENT_NEIGH_UPDATE fails to fire
+         * (or fails to match our filter) for cookies we deferred.
+         */
+        INIT_DELAYED_WORK(&ask_flow_pending_poll_work, ask_flow_pending_poll_fn);
+        schedule_delayed_work(&ask_flow_pending_poll_work,
+                              msecs_to_jiffies(ASK_FLOW_PENDING_POLL_INTERVAL_MS));
+
+        ask_pr_info("flow_offload: ready (PR14y deferred-insert + PR14z8 netevent trace + PR14z9 active poll %d ms)\n",
+                    ASK_FLOW_PENDING_POLL_INTERVAL_MS);
         return 0;
 }
 
@@ -1331,6 +1505,13 @@ void ask_flow_offload_exit(void)
         struct ask_flow_block_priv_entry *e, *tmp;
         struct ask_flow_pending *p, *ptmp;
         int rc;
+
+        /*
+         * PR14z9: stop the active poller before unregistering the
+         * netevent notifier and draining the list.  cancel_delayed_work_sync
+         * guarantees no poll callback is in flight when we return.
+         */
+        cancel_delayed_work_sync(&ask_flow_pending_poll_work);
 
         unregister_netevent_notifier(&ask_flow_offload_netevent_nb);
 
@@ -1348,10 +1529,12 @@ void ask_flow_offload_exit(void)
         }
         spin_unlock_bh(&ask_flow_pending_lock);
 
-        ask_pr_info("flow_offload: PR14y stats deferred=%d resolved=%d overflow=%d\n",
+        ask_pr_info("flow_offload: PR14y stats deferred=%d resolved=%d overflow=%d  PR14z9 poll runs=%d poll-resolved=%d\n",
                     atomic_read(&ask_flow_pending_deferred),
                     atomic_read(&ask_flow_pending_resolved),
-                    atomic_read(&ask_flow_pending_overflow));
+                    atomic_read(&ask_flow_pending_overflow),
+                    atomic_read(&ask_flow_pending_poll_runs),
+                    atomic_read(&ask_flow_pending_poll_resolved));
 
         flow_indr_dev_unregister(ask_flow_indr_setup_cb, NULL,
                                  ask_flow_indr_release);

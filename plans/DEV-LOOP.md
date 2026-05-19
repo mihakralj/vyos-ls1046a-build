@@ -324,3 +324,110 @@ boot=live rootdelay=5 noautologin vyos-union=/boot/<IMAGE_NAME>
 - Changelog generation from upstream vyos-1x / vyos-build
 
 The local dev loop is a **parallel fast-iteration path**, not a replacement for CI. CI produces signed releases. The dev loop produces answers in two minutes.
+## ASK2 M2 Acceptance-Gate Test Rig
+
+> **Status:** ✅ INFRA OPERATIONAL (rebuilt 2026-05-19)
+> **Purpose:** Measure end-to-end nft-flowtable HW offload (`ask.ko` PR14g+) throughput
+> and DUT CPU on a topology where the DUT is the ONLY possible forwarding path between
+> the two test endpoints — no /16 ECMP ambiguity, no upstream router, no NAT.
+
+### Topology
+
+```mermaid
+flowchart LR
+  subgraph heidi["heidi Proxmox host (192.168.1.15)"]
+    lxc201["lxc201 (VMID 201)<br/>10.99.1.2/30<br/>gw 10.99.1.1<br/>iperf3 client"]
+    lxc202["lxc202 (VMID 202)<br/>10.11.1.2/30<br/>gw 10.11.1.1<br/>iperf3 server"]
+  end
+  subgraph mono["Mono Gateway DK (DUT, 192.168.1.190)"]
+    eth3["eth3<br/>10.99.1.1/30"]
+    eth4["eth4<br/>10.11.1.1/30"]
+    ask[("ask.ko<br/>FMan PCD<br/>flow offload")]
+  end
+  lxc201 -.10G SFP+.- eth3
+  eth4 -.10G SFP+.- lxc202
+  eth3 --- ask --- eth4
+```
+
+Both endpoints are unprivileged Debian 12.12 LXC containers on the heidi Proxmox host.
+Each /30 is its own connected subnet, so the DUT's kernel route lookup for the sink IP
+unambiguously selects the correct egress port — no ECMP, no `ip route get` surprises.
+
+### Why this topology
+
+Three previous iterations of the M2 rig failed in subtle ways that the previous
+"single sink on a /16" topology hid:
+
+1. **/16 ECMP ambiguity** — when both eth1 (1G RJ45 MGMT) and eth4 (10G SFP+) were
+   on 192.168.1.0/16, kernel route lookup for the sink (192.168.1.137) sometimes
+   picked the 1G port. The flow then capped at ~0.94 Gbps regardless of how well
+   the silicon classifier worked.
+2. **Sink not reachable** — earlier 10.99.2.2 sink configs targeted an IP that
+   was never assigned to lxc200, so the SYN traversed lxc201 → DUT eth3 → DUT eth4
+   → upstream Linksys 192.168.1.1 → silently dropped. M2 measurement was running
+   on a connection that never actually established offload-eligible traffic.
+3. **NAT masquerade** — earlier setups added `nat source rule N masquerade`
+   from VyOS conf. The translation perturbs the 5-tuple after FLOW_BLOCK_BIND so
+   the silicon CC slot keyed on (orig_src_ip, orig_src_port) never matched the
+   post-NAT packet. ask.ko's HW path silently fell back to SW.
+
+The /30 + no-NAT rebuild removes all three failure modes simultaneously. The DUT
+is now the SOLE forwarding path with a unique unambiguous route, and the 5-tuple
+on the wire matches what nft flowtable offloaded to silicon.
+
+### Reproducing the infra from scratch
+
+1. **Create lxc202** on heidi:
+   ```bash
+   ssh heidi 'sudo pct create 202 local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst \
+     --hostname lxc202 --cores 4 --memory 2048 --rootfs local-lvm:8 \
+     --net0 name=eth0,bridge=vmbr0,ip=10.11.1.2/30,gw=10.11.1.1,hwaddr=BC:24:11:02:02:02 \
+     --unprivileged 1 --features nesting=1 --start 1'
+   ```
+2. **Add admin user** (mirrors lxc201 layout):
+   ```bash
+   # see bin/lxc202-setup.sh (idempotent) — useradd admin, sudoers NOPASSWD,
+   # echo admin pubkey > /home/admin/.ssh/authorized_keys
+   ```
+3. **Add eth4 IP on DUT** (one-time, persists in config.boot):
+   ```bash
+   # via vbash batch on the DUT
+   set interfaces ethernet eth4 address 10.11.1.1/30
+   set interfaces ethernet eth4 description 'ASK2 gate egress (M2 to lxc202)'
+   commit && save
+   ```
+4. **No NAT rules** — the L3 forwarding plane carries all traffic unchanged.
+5. **Install iperf3 on lxc202** (no direct internet without NAT — use `pct push`
+   of `iperf3`, `libiperf0`, `libsctp1` .debs from lxc201's apt cache).
+6. **~/.ssh/config entry** on the build VM:
+   ```
+   Host lxc202
+     HostName 10.11.1.2
+     User admin
+     IdentityFile ~/.ssh/admin_key
+     ProxyJump vyos
+   ```
+   The `ProxyJump vyos` lets the build VM reach lxc202 (which has no route off
+   its /30) by tunnelling through the DUT's eth0 management interface.
+
+### Running the gate
+
+```bash
+bin/m2-dut-prep.sh                  # remove VyOS notrack, enable hw-tc-offload,
+                                    # install ask_offload nft table, verify route
+bin/verify-ask-flow-offload.sh      # 30 s iperf3 -P 8 + mpstat → verdict
+```
+
+Defaults are baked in: `GEN_HOST=lxc201`, `SINK_HOST=lxc202`, `SINK_IP=10.11.1.2`,
+`IFACE_IN=eth3`, `IFACE_OUT=eth4`. Override any of them via env var for
+ad-hoc experiments.
+
+### M2 reading as of infra rebuild
+
+First clean run on the new infra (2026-05-19): **6.314 Gbps / 65.41 % CPU**.
+Throughput is well above the 2 Gbps threshold; CPU is NOT below 5 %, meaning the
+gate currently FAILS not because of the test rig but because the PR14y
+deferred-insert pending queue never drains (`defer=141, deferred-insert OK=0`)
+during 8-stream iperf3 cold-start. That's a real `ask.ko` bug now exposed by
+the working test path — see qdrant entry `ask2-m2-pr14y-broken (2026-05-19)`
+for the current hypothesis and next steps.
