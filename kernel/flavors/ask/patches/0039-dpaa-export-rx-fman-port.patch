@@ -1,0 +1,149 @@
+From e1bc990246c7661feb7558f5e840d98469b0e8dd Mon Sep 17 00:00:00 2001
+From: ci <ci@ask>
+Date: Tue, 19 May 2026 05:50:53 +0000
+Subject: [PATCH] dpaa: export dpaa_get_rx_fman_port() (PR14z7)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The ASK2 silicon-offload module (ask.ko, OOT) needs the per-netdev
+struct fman_port * handle to call fman_port_use_kg_hash(port, true)
+at FLOW_BLOCK_BIND time.  Without that call the per-port BMI Rx
+Frame-Parser Next-Engine register (FMBM_RFPNE, RM 8.7.4) stays at
+its boot-default NIA_ENG_BMI|NIA_BMI_AC_ENQ_FRAME and post-Parser
+frames bypass the HW KeyGen / CC / MANIP pipeline ask.ko programs.
+
+Mainline fman_port_init() only flips FMBM_RFPNE to NIA_ENG_HWK when
+the device tree sets pcd_fqs_count > 0 — a property the LS1046A
+Mono Gateway DK does not set by design because the ingress FQ
+topology is decided dynamically by the offload module.
+
+struct dpaa_priv already carries the reference via mac_dev->port[RX];
+this patch adds a small NULL-safe accessor that exposes it to OOT
+consumers, mirroring the existing dpaa_get_fman_port_id() and
+dpaa_get_tx_fqid() exports.
+
+See plans/PR14z7-DESIGN.md for the full architectural rationale.
+
+Signed-off-by: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+---
+ .../net/ethernet/freescale/dpaa/dpaa_eth.c    | 42 +++++++++++++++++++
+ include/linux/fsl/dpaa_flow_offload.h         | 42 ++++++++++++++++++++
+ 2 files changed, 84 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 4521174..9bcb92d 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -574,6 +574,48 @@ int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid)
+ }
+ EXPORT_SYMBOL_GPL(dpaa_get_tx_fqid);
+ 
++/**
++ * dpaa_get_rx_fman_port() - resolve the RX FMan port behind a dpaa netdev.
++ *
++ * PR14z7 (M2 follow-up): the ASK2 silicon-offload module (ask.ko, OOT)
++ * needs the `struct fman_port *` handle of an ingress dpaa netdev so it
++ * can call fman_port_use_kg_hash(port, true) at FLOW_BLOCK_BIND time.
++ * Without that call the per-port BMI Rx Frame-Parser Next-Engine
++ * register (FMBM_RFPNE, RM 8.7.4) stays at its boot-default value
++ * NIA_ENG_BMI|NIA_BMI_AC_ENQ_FRAME, which routes post-Parser frames to
++ * the dpaa default RX FQ and bypasses the entire HW KeyGen / CC / MANIP
++ * pipeline that ask.ko programs.  Mainline fman_port_init() only flips
++ * the gate to NIA_ENG_HWK when DTS supplies `pcd_fqs_count > 0` — a
++ * property our LS1046A Mono Gateway DK device tree does NOT set, by
++ * design, because the ingress FQ topology is decided dynamically by the
++ * offload module.
++ *
++ * struct dpaa_priv already carries this reference via mac_dev->port[RX]
++ * (RX = 0 per the private enum port_type in this TU).  Expose it.
++ *
++ * Lifetime: caller holds RTNL or any equivalent guarantee that @dev
++ * cannot disappear underneath us.  No additional locking is needed:
++ * priv->mac_dev and mac_dev->port[] are set once at dpaa_probe() and
++ * are never mutated thereafter.
++ *
++ * Returns the RX fman_port handle on success, or NULL if @dev is not
++ * a dpaa netdev or has no backing mac_dev.
++ */
++struct fman_port *dpaa_get_rx_fman_port(struct net_device *dev)
++{
++	struct dpaa_priv *priv;
++
++	if (!dev)
++		return NULL;
++	if (dev->netdev_ops != &dpaa_ops)
++		return NULL;
++	priv = netdev_priv(dev);
++	if (!priv->mac_dev)
++		return NULL;
++	return priv->mac_dev->port[RX];
++}
++EXPORT_SYMBOL_GPL(dpaa_get_rx_fman_port);
++
+ static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
+  void *type_data)
+ {
+diff --git a/include/linux/fsl/dpaa_flow_offload.h b/include/linux/fsl/dpaa_flow_offload.h
+index 161156c..7d509fb 100644
+--- a/include/linux/fsl/dpaa_flow_offload.h
++++ b/include/linux/fsl/dpaa_flow_offload.h
+@@ -124,6 +124,38 @@ int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id);
+  * [0, dpaa_max_num_txqs()) is populated at probe time).
+  */
+ int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
++
++/**
++ * dpaa_get_rx_fman_port() - resolve the RX FMan port handle for a netdev.
++ * @dev: dpaa netdev (e.g. eth3) to query.
++ *
++ * Returns the `struct fman_port *` for the netdev's underlying RX FMan
++ * port — the handle accepted by fman_port_use_kg_hash() and the rest of
++ * the fman_port_* API.  Returns NULL for non-dpaa netdevs or netdevs
++ * with no backing mac_device.
++ *
++ * Used by the ASK2 silicon-offload module (ask.ko PR14z7) to arm the
++ * per-port Rx Frame-Parser Next-Engine gate (FMBM_RFPNE, RM 8.7.4) so
++ * post-Parser frames reach the HW KeyGen block instead of the default
++ * RX FQ.  See plans/PR14z7-DESIGN.md for the architectural rationale.
++ *
++ * Forward-declared `struct fman_port` keeps consumers from having to
++ * pull in the fman/ private header.
++ */
++struct fman_port;
++struct fman_port *dpaa_get_rx_fman_port(struct net_device *dev);
++
++/**
++ * fman_port_use_kg_hash() - arm/disarm the per-port HW KeyGen hash gate.
++ * @port: RX FMan port (from dpaa_get_rx_fman_port()).
++ * @enable: true to route post-Parser frames into HW KeyGen (FMBM_RFPNE =
++ *          NIA_ENG_HWK); false to restore BMI direct-to-default-FQ.
++ *
++ * Re-declared here as an OOT-visible prototype.  Real definition lives
++ * in drivers/net/ethernet/freescale/fman/fman_port.{h,c} (EXPORT_SYMBOL).
++ * ASK2 ask.ko (PR14z7) calls this at FLOW_BLOCK_BIND/UNBIND time.
++ */
++void fman_port_use_kg_hash(struct fman_port *port, bool enable);
+ #else
+ static inline int
+ dpaa_register_flow_offload_handler(const struct dpaa_flow_offload_ops *ops)
+@@ -150,6 +182,16 @@ dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid)
+ {
+ return -ENODEV;
+ }
++struct fman_port;
++static inline struct fman_port *
++dpaa_get_rx_fman_port(struct net_device *dev)
++{
++return NULL;
++}
++static inline void
++fman_port_use_kg_hash(struct fman_port *port, bool enable)
++{
++}
+ #endif
+ 
+ #endif /* _LINUX_FSL_DPAA_FLOW_OFFLOAD_H */
+-- 
+2.39.5
+

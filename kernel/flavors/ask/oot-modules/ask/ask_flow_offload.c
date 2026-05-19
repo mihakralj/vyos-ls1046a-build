@@ -411,8 +411,28 @@ static int ask_flow_offload_netevent(struct notifier_block *nb,
                         continue;
                 }
 
+                /*
+                 * PR14z5: deferred replay uses FWD by default.  The
+                 * direction was effectively decided at REPLACE time
+                 * when ask_hw_port_bind() ran; by the time we get
+                 * here the cookie's ingress pipeline is already
+                 * armed.  Sub-optimal if the deferred cookie should
+                 * have been REV (its CC slot will then live in the
+                 * FWD cc_tree), but functionally correct: the
+                 * silicon still classifies on 5-tuple, and the
+                 * second-arrival REPLACE for the REV direction is
+                 * what flips first_pid into the REV pipeline.
+                 *
+                 * Cookies that arrive after first_pid is locked in
+                 * route correctly via the synchronous REPLACE path
+                 * above.  Cookies that are deferred (rare: only
+                 * those whose neigh is INCOMPLETE at REPLACE time)
+                 * may land in the "wrong" pipeline but still hit
+                 * silicon.  PR14z6 (future) can capture the dir at
+                 * defer time and replay it here.
+                 */
                 rc = ask_flow_insert(t, p->cookie, &p->key, p->oif,
-                                     p->action_flags, &hw_id);
+                                     p->action_flags, ASK_HW_DIR_FWD, &hw_id);
                 if (rc == -EEXIST)
                         rc = 0;
                 if (rc == 0) {
@@ -668,6 +688,43 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
         }
 
         /*
+         * PR14z6 (2026-05-19): ingress-side filter.
+         *
+         * The kernel's nft flowtable offload delivers every
+         * FLOW_CLS_REPLACE to EVERY netdev in the flowtable's
+         * `devices = { ... }` list, not just the true ingress.  For a
+         * 2-port flowtable (eth3, eth4) each cookie therefore arrives
+         * twice: once with this block_cb's dev == true ingress, once
+         * with this block_cb's dev == the egress (= act->dev).
+         *
+         * The PR14r dedup below silently drops the second delivery
+         * but keeps the FIRST's `ingress_dev` as the "ingress" — and
+         * the first delivery is whichever block_cb was registered
+         * first (eth3, alphabetically).  Result: every cookie gets
+         * tagged with ingress=eth3, the `first_pid` cmpxchg latches
+         * eth3's pid as FWD, and the REV pipeline NEVER receives a
+         * single flow.  The eth4→eth3 reverse-direction traffic
+         * (TCP data return) goes slow-path → ~60% DUT CPU under
+         * iperf3 -P 8 (the M2 2026-05-19 measurement was 6.881 Gbps
+         * / 59.92% CPU, the smoking gun: dmesg shows ALL "REPLACE
+         * installed" entries with `ingress=eth3` regardless of the
+         * cookie's true direction).
+         *
+         * The disambiguator: if this block_cb's dev IS the egress
+         * dev named by the REDIRECT/MIRRED action, this is the
+         * egress-side echo, NOT the true ingress.  Decline; the
+         * other block_cb (true ingress) handles the actual install.
+         * Direction auto-discovery via `first_pid` then sees the
+         * true ingress pid for each cookie and routes FWD vs REV
+         * pipelines correctly.
+         */
+        if (ingress_dev && egress_dev && ingress_dev == egress_dev) {
+                pr_info_ratelimited("ask: flow_offload: REPLACE skip egress-side echo cookie=0x%lx dev=%s (act->dev matches block dev — true ingress will install)\n",
+                                    f->cookie, netdev_name(ingress_dev));
+                return 0;
+        }
+
+        /*
          * PR14r (2026-05-17): dedupe duplicate REPLACE for the same
          * cookie BEFORE touching silicon.
          *
@@ -813,41 +870,79 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
         }
 
         /*
-         * PR14j: ingress-only KG port-bind.
+         * PR14z5 (2026-05-19): dual-pipeline ingress KG port-bind.
          *
-         * The REPLACE arrived on @ingress_dev's block (the dpaa netdev
-         * that matched the 5-tuple).  Bind KG to THAT netdev's FMan
-         * port id, not the egress device.  Idempotent re-bind for the
-         * same port is a no-op.  -EBUSY (different port already bound)
-         * is logged and ignored - the SW path picks up the flow.
+         * Each direction now has its own independent cc_tree + KG
+         * scheme.  We decide which pipeline (FWD vs REV) the current
+         * REPLACE belongs to by auto-discovering the first-arrival
+         * ingress port: the very first ingress pid we ever see is
+         * tagged FWD; any other pid is tagged REV.  This is
+         * direction-agnostic with respect to physical port wiring —
+         * either eth3 or eth4 can be "forward" depending on which
+         * iperf stream lands first.
          *
-         * PR14z4 reverted (see comment block at PR14r dedup above):
-         * we no longer try to bind port 9 (eth4) as a second KG
-         * scheme — the FMan v3 shared-cc_tree mode does not work that
-         * way and halves forward-direction throughput.  Reverse-
-         * direction silicon is a separate effort (PR14z5: build a
-         * second cc_tree dedicated to reverse direction).
+         * `first_pid` is static so it persists across calls.
+         * 0xff = uninitialised.  Once locked in at first arrival it
+         * never changes for the lifetime of the module.  On rmmod
+         * the variable resets to 0xff via the .data zero-init on
+         * next insmod (file-scope static in BSS-equivalent storage),
+         * giving a clean slate for the next session.
+         *
+         * Concurrency: multiple FLOW_CLS_REPLACE callbacks can race
+         * here under different ingress dev locks.  The READ_ONCE +
+         * cmpxchg pattern ensures the first writer wins and all
+         * subsequent readers see the same value.  Worst case under
+         * extreme race: two REPLACEs both see first_pid==0xff and
+         * one of them wins the cmpxchg; the loser proceeds with the
+         * winner's value and may be tagged REV when it should have
+         * been FWD (or vice versa).  This is acceptable because the
+         * two pipelines are functionally symmetric — only the
+         * physical port assignment differs.
          */
-        if (ingress_dev) {
-                u8 pid;
-                int prc = dpaa_get_fman_port_id(ingress_dev, &pid);
+        {
+                static u8 first_pid = 0xff;
+                enum ask_hw_dir __dir = ASK_HW_DIR_FWD;
 
-                if (prc == 0) {
-                        prc = ask_hw_port_bind(pid);
-                        if (prc == -EBUSY)
-                                ask_pr_dbg("flow_offload: REPLACE %s: KG already bound to other port, SW fallback\n",
-                                           netdev_name(ingress_dev));
-                        else if (prc && prc != -ENODEV)
-                                ask_pr_warn("flow_offload: REPLACE %s (pid %u) port-bind failed: %d\n",
-                                            netdev_name(ingress_dev), pid, prc);
-                } else if (prc != -ENODEV && prc != -ERANGE) {
-                        ask_pr_dbg("flow_offload: REPLACE dpaa_get_fman_port_id(%s) failed: %d\n",
-                                   netdev_name(ingress_dev), prc);
+                if (ingress_dev) {
+                        u8 pid;
+                        int prc = dpaa_get_fman_port_id(ingress_dev, &pid);
+
+                        if (prc == 0) {
+                                u8 expected = 0xff;
+                                u8 winner;
+
+                                /*
+                                 * Race-free first-arrival latch:
+                                 * cmpxchg succeeds (returns expected)
+                                 * only if first_pid was still 0xff at
+                                 * the moment of the swap.
+                                 */
+                                if (cmpxchg(&first_pid, expected, pid) == expected)
+                                        winner = pid;
+                                else
+                                        winner = READ_ONCE(first_pid);
+
+                                __dir = (pid == winner) ? ASK_HW_DIR_FWD
+                                                        : ASK_HW_DIR_REV;
+
+                                prc = ask_hw_port_bind(pid, __dir, ingress_dev);
+                                if (prc == -EBUSY)
+                                        ask_pr_dbg("flow_offload: REPLACE %s pid=%u dir=%u: pipeline busy, SW fallback\n",
+                                                   netdev_name(ingress_dev),
+                                                   pid, __dir);
+                                else if (prc && prc != -ENODEV)
+                                        ask_pr_warn("flow_offload: REPLACE %s (pid %u dir %u) port-bind failed: %d\n",
+                                                    netdev_name(ingress_dev),
+                                                    pid, __dir, prc);
+                        } else if (prc != -ENODEV && prc != -ERANGE) {
+                                ask_pr_dbg("flow_offload: REPLACE dpaa_get_fman_port_id(%s) failed: %d\n",
+                                           netdev_name(ingress_dev), prc);
+                        }
                 }
-        }
 
-        rc = ask_flow_insert(t, (u64)f->cookie, &key, oif,
-                             action_flags, &hw_id);
+                rc = ask_flow_insert(t, (u64)f->cookie, &key, oif,
+                                     action_flags, __dir, &hw_id);
+        }
         if (rc == -EEXIST)
                 return 0;
         if (rc) {

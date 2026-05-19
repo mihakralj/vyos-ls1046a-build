@@ -168,9 +168,10 @@ struct ask_hw_pcd *ask_hw_pcd_get(void);
  *   0           idempotent re-bind for an ALREADY-BOUND @port_id (safe
  *               no-op — supports the FLOW_CLS_REPLACE bind path that
  *               may run on the same port multiple times)
- *   -ENOSPC    bind-array full (more than ASK_HW_V4_TCP_MAX_BINDS
- *               distinct ports tried to bind); caller logs and falls
- *               back to SW for the extra ports
+ *   -EBUSY      the named pipeline already owns a DIFFERENT port id
+ *               (caller decided ASK_HW_DIR_FWD for port X then later
+ *               asked to bind port Y as FWD too — semantically wrong;
+ *               caller should pick a different direction)
  *   -ENODEV     ask_hw_pcd_get() returned NULL (no HW backing - same
  *               software-only fallback signal as the rest of ask_hw)
  *   other -E    propagated from fman_pcd_kg_scheme_create() /
@@ -180,15 +181,45 @@ struct ask_hw_pcd *ask_hw_pcd_get(void);
  * per-port scheme allocator.  LS1046A KGSE_MV is single-port-per-
  * scheme, but multiple schemes may each be attached to the same CC
  * tree.  PR14v allocates one KG scheme per ingress port, attaches
- * each to the shared cc_tree, and binds each to its own port — so
- * both eth3 (port 8) and eth4 (port 9) classify v4-TCP in silicon
- * to the same CC node.  Pre-PR14v the second port hit -EBUSY and
- * ran in SW.
+ * each to the shared cc_tree, and binds each to its own port.
  *
- * Caller should LOG (not fail) on -ENOSPC at the BIND callsite so
- * the operator can see "scheme pool exhausted, falling back to SW".
+ * PR14z5 (2026-05-19): the empirical PR14z4 measurement showed that
+ * FMan v3 cannot usefully share a single cc_tree across two KG
+ * schemes (binding the second port HALVED forward-direction
+ * throughput, 6.83 → 5.24 Gbps).  The architectural fix is to split
+ * the classifier into TWO independent pipelines, one per direction.
+ * Each pipeline { cc_tree, cc_v4_tcp, scheme } owns exactly one
+ * ingress port — FWD = first-arrival (forward direction), REV =
+ * second-arrival (reverse direction).  Callers tell us which
+ * direction this bind is for via @dir; the pipeline arrays are
+ * sized ASK_HW_DIR_NR.
+ *
+ * Caller should LOG (not fail) on -EBUSY at the BIND callsite so
+ * the operator can see "direction mis-assignment, falling back to SW".
  */
-int ask_hw_port_bind(u8 port_id);
+enum ask_hw_dir {
+        ASK_HW_DIR_FWD = 0,
+        ASK_HW_DIR_REV = 1,
+        ASK_HW_DIR_NR  = 2,
+};
+
+/*
+ * PR14z7 (2026-05-19) — extended signature with @ingress_dev so the
+ * implementation can look up the underlying RX `struct fman_port *`
+ * via dpaa_get_rx_fman_port() and arm the per-port BMI Rx Frame-Parser
+ * Next-Engine register (FMBM_RFPNE, RM 8.7.4) via
+ * fman_port_use_kg_hash(port, true). Without that final step the
+ * KG scheme is bound to the silicon but post-Parser frames bypass
+ * KeyGen entirely and route to the dpaa default RX FQ — defeating
+ * the entire HW classifier pipeline (measured at 6.85 Gbps / 70%
+ * CPU on M2 baseline; see plans/PR14z7-DESIGN.md §1 for the trace).
+ *
+ * @ingress_dev may be NULL for unit-test contexts that drive the
+ * port_bind path without a live netdev; in that case FMBM_RFPNE is
+ * left at its boot-default value and the pipeline is bound-but-inert.
+ */
+int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
+                     struct net_device *ingress_dev);
 
 /*
  * hw_flow_id helpers (PR14g-body-1).
@@ -347,6 +378,7 @@ struct ask_flow_key;
 
 int  ask_hw_flow_insert(const struct ask_flow_key *key,
         u32 oif, u32 action_flags,
+        enum ask_hw_dir dir,
         u32 *out_hw_id);
 int  ask_hw_flow_remove(u32 hw_flow_id);
 int  ask_hw_flow_query_stats(u32 hw_flow_id, u64 *packets, u64 *bytes);
@@ -438,6 +470,13 @@ struct ask_flow_key key;
 u32 hw_flow_id;
 u32 oif;
 u32 action_flags;
+/*
+ * PR14z5: which silicon pipeline (FWD or REV) owns this flow's
+ * CC slot.  Snapshotted at insert time so the remove path (which
+ * only has the cookie / hw_flow_id) can route teardown to the
+ * correct cc_tree without re-deriving direction from oif.
+ */
+u8  dir;
 struct ask_flow_stats stats;
 };
 
@@ -478,6 +517,7 @@ int ask_flow_insert(struct ask_flow_table *t,
     u64 cookie,
     const struct ask_flow_key *key,
     u32 oif, u32 action_flags,
+    enum ask_hw_dir dir,
     u32 *out_hw_id);
 
 /* Remove by cookie. Returns 0 on success, -ENOENT if not present. */
