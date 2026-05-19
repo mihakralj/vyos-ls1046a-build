@@ -177,6 +177,7 @@ int ask_flow_insert(struct ask_flow_table *t,
     u64 cookie,
     const struct ask_flow_key *key,
     u32 oif, u32 action_flags,
+    enum ask_hw_dir dir,
     u32 *out_hw_id)
 {
 struct ask_flow *f;
@@ -187,6 +188,9 @@ bool hw_inserted = false;
 if (!t || !key || !out_hw_id)
 return -EINVAL;
 
+if (dir >= ASK_HW_DIR_NR)
+return -EINVAL;
+
 f = kzalloc(sizeof(*f), GFP_KERNEL);
 if (!f)
 return -ENOMEM;
@@ -195,6 +199,7 @@ f->cookie       = cookie;
 f->key          = *key;
 f->oif          = oif;
 f->action_flags = action_flags;
+f->dir          = (u8)dir;
 u64_stats_init(&f->stats.syncp);
 
 /*
@@ -229,7 +234,7 @@ u64_stats_init(&f->stats.syncp);
  * silently ignores). Cookie is the rht key, not hw_id, so collisions
  * here are non-fatal.
  */
-rc = ask_hw_flow_insert(key, oif, action_flags, &hw_id);
+rc = ask_hw_flow_insert(key, oif, action_flags, dir, &hw_id);
 if (rc == 0) {
 hw_inserted = true;
 pr_info_ratelimited("ask: flow: hw_insert OK cookie=0x%llx oif=%u hw_id=0x%08x\n",

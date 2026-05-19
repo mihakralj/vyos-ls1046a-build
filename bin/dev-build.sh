@@ -146,9 +146,15 @@ cmd_kernel() {
 
     hdr "Building kernel (native arm64, -j$JOBS)"
     local _T0=$SECONDS
+    # LOCALVERSION=-vyos is MANDATORY — it is the vermagic suffix every
+    # released kernel uses (build-kernel.sh:42 default, CI ships `*-vyos`
+    # .deb packages). Without it the dev-built kernel reports `6.18.31+`
+    # which mismatches every signed -vyos OOT module and breaks ask.ko
+    # insmod on the DUT. See AGENTS.md "Kernel signing artifacts" and
+    # Qdrant memory "kernel LOCALVERSION invariant".
     (
         cd "$KSRC"
-        make ARCH="$ARCH" -j"$JOBS" Image
+        make ARCH="$ARCH" LOCALVERSION=-vyos -j"$JOBS" Image
     )
     ok "Kernel built in $(( SECONDS - _T0 ))s"
 
