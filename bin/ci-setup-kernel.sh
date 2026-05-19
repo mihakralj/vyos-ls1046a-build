@@ -598,4 +598,155 @@ bk.write_text(new)
 print(f"### {bk}: patch loop replaced with git apply --3way (1 substitution)")
 PYEOF
 
+### PR14z2 fix #4 (v2): persistent signing key + post-build snapshot from headers .deb
+#
+# Background: linux 6.18.31's `make bindeb-pkg` chain runs `make clean`
+# AFTER producing the binary .debs, wiping Module.symvers, certs/signing_key.*,
+# .config, scripts/sign-file, scripts/mod/modpost, include/{config,generated},
+# arch/arm64/include/generated. Three earlier attempts failed:
+#   (1) DPKG_FLAGS=--no-post-clean — redundant (default in dpkg 1.19+), no effect
+#   (2) builddeb `set -eu` hook — anchor found and patched but the hook never
+#       fires because builddeb's CWD when it runs is debian/linux-image-X.Y.Z/
+#       staging dir, NOT the kernel source root, so the `[ -f Module.symvers ]`
+#       test fails silently
+#   (3) Pre-build snapshot — bindeb-pkg's internal `make clean` then rebuild
+#       generates a NEW ephemeral signing key, leaving any pre-snapshotted
+#       key paired with the wrong kernel
+#
+# v2 approach (this block):
+#   PRE-bindeb-pkg (run while .config still exists in-tree):
+#     - Pre-generate persistent RSA signing key at ${CWD}/ask-persistent-keys/
+#     - Override CONFIG_MODULE_SIG_KEY to point at it
+#     - Run `make olddefconfig` to resolve the change
+#     - This makes the kernel embed the persistent key's cert in the
+#       in-vmlinux trusted keyring, so a module signed later with the same
+#       persistent key passes MODULE_SIG_FORCE verification at insmod time
+#
+#   POST-bindeb-pkg (after linux-image / linux-headers .debs land):
+#     - Extract linux-headers-*-vyos_*_arm64.deb into ${CWD}/ask-kernel-snapshot/
+#       (the headers .deb is purpose-built for OOT module compilation —
+#       it ships Module.symvers, scripts/sign-file, scripts/mod/modpost,
+#       include/{config,generated}, arch/<arch>/include/generated, and the
+#       complete kbuild Makefile machinery)
+#     - Copy the persistent key+cert into the extracted tree's certs/ dir
+#     - Symlink ${CWD}/ask-kernel-snapshot/ksrc -> extracted/usr/src/linux-headers-…
+#       so kernel/flavors/ask/oot-modules/ask/ci-build.sh can use it as KSRC
+#     - Touch ${CWD}/ask-kernel-snapshot/.done as the "snapshot ready" flag
+#
+# kernel/flavors/ask/oot-modules/ask/ci-build.sh checks for the snapshot
+# when its $KSRC/Module.symvers is missing and switches KSRC to the
+# snapshot's extracted headers tree.
+#
+# Idempotency: the marker `# === ASK2 v2 persistent-key + headers-snapshot ===`
+# short-circuits re-injection on re-runs of ci-setup-kernel.sh.
+echo "### Injecting ASK2 v2 persistent-key + headers-snapshot blocks into build-kernel.sh"
+python3 - "$KERNEL_BUILD/build-kernel.sh" <<'PYEOF'
+import pathlib, sys
+bk = pathlib.Path(sys.argv[1])
+src = bk.read_text()
+
+MARKER = "# === ASK2 v2 persistent-key + headers-snapshot ==="
+if MARKER in src:
+    print(f"### {bk}: ASK2 v2 blocks already injected — no-op")
+    sys.exit(0)
+
+# The merge_config.sh + olddefconfig sequence is duplicated 4 times in the
+# current build-kernel.sh (one real + three accidental duplicates from prior
+# ci-setup-kernel.sh re-runs without idempotency). We anchor against the
+# FIRST `make olddefconfig` line that follows the LS1046A scripts/config
+# block — that's the moment .config exists and the kernel hasn't been built
+# yet. We inject the key-setup block AFTER that line.
+KEY_BLOCK = '''
+''' + MARKER + '''
+# Pre-generate a persistent module signing key OUTSIDE the kernel tree so
+# it survives the post-bindeb-pkg `make clean`. Override CONFIG_MODULE_SIG_KEY
+# to point at it; vmlinux will embed this key's cert in the trusted keyring,
+# enabling later signing of OOT ask.ko with the same key.
+ASK_KEY_DIR="${CWD}/ask-persistent-keys"
+mkdir -p "$ASK_KEY_DIR"
+ASK_KEY_PEM="$ASK_KEY_DIR/signing_key.pem"
+ASK_KEY_X509="$ASK_KEY_DIR/signing_key.x509"
+if [ ! -f "$ASK_KEY_PEM" ]; then
+    echo "I: ASK2 v2 — generating persistent module signing key at $ASK_KEY_PEM"
+    openssl req -new -nodes -utf8 -sha512 -days 36500 -batch -x509 \\
+        -config <(printf '%s\\n' '[req]' 'distinguished_name=req_dn' 'prompt=no' 'x509_extensions=req_ext' '[req_dn]' 'CN=ASK2 persistent module signing key' '[req_ext]' 'basicConstraints=critical,CA:FALSE' 'keyUsage=digitalSignature' 'subjectKeyIdentifier=hash' 'authorityKeyIdentifier=keyid') \\
+        -keyout "$ASK_KEY_PEM" -out "$ASK_KEY_PEM"
+fi
+if [ ! -f "$ASK_KEY_X509" ] || [ "$ASK_KEY_PEM" -nt "$ASK_KEY_X509" ]; then
+    openssl x509 -in "$ASK_KEY_PEM" -outform DER -out "$ASK_KEY_X509"
+fi
+echo "I: ASK2 v2 — overriding CONFIG_MODULE_SIG_KEY=$ASK_KEY_PEM"
+scripts/config --set-str CONFIG_MODULE_SIG_KEY "$ASK_KEY_PEM"
+# Also disable trusted-keys file injection; vyos-build's GIT_ROOT/data/certificates
+# scan adds external keys via CONFIG_SYSTEM_TRUSTED_KEYS, but on ASK2 we want
+# the OOT signing path to depend ONLY on our persistent key. (Empty value =
+# only the MODULE_SIG_KEY cert + system keyring built-ins are trusted.)
+make olddefconfig
+# === end ASK2 v2 persistent-key block ===
+
+'''
+
+# Find the FIRST `make olddefconfig` line that follows the LS1046A force-config
+# block ("scripts/config --disable CONFIG_IO_STRICT_DEVMEM" + "make olddefconfig").
+ANCHOR_FIRST = "scripts/config --disable CONFIG_IO_STRICT_DEVMEM\nmake olddefconfig\n"
+idx = src.find(ANCHOR_FIRST)
+if idx < 0:
+    print(f"ERROR: ASK2 v2 anchor not found in {bk} (expected post-LS1046A olddefconfig)", file=sys.stderr)
+    sys.exit(1)
+insert_at = idx + len(ANCHOR_FIRST)
+src = src[:insert_at] + KEY_BLOCK + src[insert_at:]
+
+# Inject the snapshot block AFTER the `make bindeb-pkg ...` line.
+BINDEB_ANCHOR = "make bindeb-pkg BUILD_TOOLS=1 LOCALVERSION=${KERNEL_SUFFIX} KDEB_PKGVERSION=${KERNEL_VERSION}-1"
+bidx = src.find(BINDEB_ANCHOR)
+if bidx < 0:
+    print(f"ERROR: ASK2 v2 bindeb-pkg anchor not found in {bk}", file=sys.stderr)
+    sys.exit(1)
+# Find end-of-line after the bindeb-pkg invocation.
+eol = src.find("\n", bidx)
+if eol < 0:
+    print(f"ERROR: ASK2 v2 bindeb-pkg line has no newline in {bk}", file=sys.stderr)
+    sys.exit(1)
+
+SNAPSHOT_BLOCK = '''
+
+# === ASK2 v2 post-bindeb-pkg headers snapshot ===
+# bindeb-pkg has just produced linux-image-*.deb + linux-headers-*.deb and
+# (in 6.18.x) wiped the in-tree build state. Extract linux-headers .deb to
+# ${CWD}/ask-kernel-snapshot/extracted/ — that's a complete OOT-module-build
+# tree (Module.symvers, scripts/sign-file, generated headers, kbuild
+# Makefiles). Copy the persistent signing key into the extracted certs/ dir
+# so OOT builds can sign ask.ko with the SAME key embedded in vmlinux's
+# trusted keyring.
+ASK_SNAP_DIR="${CWD}/ask-kernel-snapshot"
+ASK_HEADERS_DEB=$(ls "${CWD}"/linux-headers-*-vyos_*_arm64.deb 2>/dev/null | head -1)
+if [ -n "$ASK_HEADERS_DEB" ] && [ -f "$ASK_KEY_PEM" ]; then
+    echo "I: ASK2 v2 — extracting $ASK_HEADERS_DEB into $ASK_SNAP_DIR/extracted/"
+    rm -rf "$ASK_SNAP_DIR"
+    mkdir -p "$ASK_SNAP_DIR/extracted"
+    dpkg-deb -x "$ASK_HEADERS_DEB" "$ASK_SNAP_DIR/extracted"
+    ASK_KSRC=$(find "$ASK_SNAP_DIR/extracted/usr/src" -maxdepth 1 -type d -name 'linux-headers-*' 2>/dev/null | head -1)
+    if [ -n "$ASK_KSRC" ]; then
+        ln -sfn "$ASK_KSRC" "$ASK_SNAP_DIR/ksrc"
+        mkdir -p "$ASK_KSRC/certs"
+        cp "$ASK_KEY_PEM"  "$ASK_KSRC/certs/signing_key.pem"
+        cp "$ASK_KEY_X509" "$ASK_KSRC/certs/signing_key.x509"
+        touch "$ASK_SNAP_DIR/.done"
+        echo "I: ASK2 v2 — snapshot ready: $ASK_SNAP_DIR/ksrc -> $ASK_KSRC"
+        ls -la "$ASK_KSRC/Module.symvers" "$ASK_KSRC/scripts/sign-file" "$ASK_KSRC/certs/signing_key.pem" 2>&1 || true
+    else
+        echo "WARNING: ASK2 v2 — extracted .deb but no usr/src/linux-headers-* dir found"
+    fi
+else
+    echo "WARNING: ASK2 v2 — snapshot skipped: ASK_HEADERS_DEB='$ASK_HEADERS_DEB' ASK_KEY_PEM='$ASK_KEY_PEM'"
+fi
+# === end ASK2 v2 post-bindeb-pkg headers snapshot ===
+'''
+
+src = src[:eol+1] + SNAPSHOT_BLOCK + src[eol+1:]
+
+bk.write_text(src)
+print(f"### {bk}: ASK2 v2 persistent-key + headers-snapshot blocks injected")
+PYEOF
+
 echo "### Kernel setup complete"

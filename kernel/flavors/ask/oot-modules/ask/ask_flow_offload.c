@@ -243,7 +243,25 @@ static void ask_resolve_neigh_v4(struct net_device *egress_dev,
 /* (c) module unload.                                                        */
 /* ------------------------------------------------------------------------- */
 
-#define ASK_FLOW_PENDING_MAX 256
+/*
+ * PR14z2 (2026-05-18): raised from 256 → 4096 after M2 measurement on
+ * 2026-05-18 captured `PR14y queue full (-28)` overflow within the
+ * first 100 ms of iperf3 `-P 8` cold-start. With 8 parallel TCP
+ * streams the kernel's nft flowtable emits ~16 FLOW_CLS_REPLACE
+ * within the first millisecond (forward + reverse direction per
+ * stream), and each one whose neigh is still NUD_INCOMPLETE lands
+ * here. 256 was sized for steady-state churn, not for a thundering-
+ * herd ARP-warmup. 4096 covers a /24 ARP table worst-case, costs
+ * ~256 KB peak when fully populated (struct ask_flow_pending is ~64 B
+ * with cacheline padding), and is drained the moment each neigh
+ * resolves — so the steady-state count under normal traffic remains
+ * effectively zero.
+ *
+ * If even 4096 overflows, that is a legitimate "router is being DoS'd
+ * by SYN flood at unresolvable next-hops" condition and the SW path
+ * (which still carries the flow) is the correct backstop.
+ */
+#define ASK_FLOW_PENDING_MAX 4096
 
 struct ask_flow_pending {
         struct list_head        node;
@@ -746,11 +764,37 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                                             f->cookie, oif);
                         return 0;
                 }
-                pr_info_ratelimited("ask: flow_offload: PR14y queue full (%d), falling through to SW for cookie=0x%lx\n",
+                /*
+                 * PR14z2 (2026-05-18): on queue overflow do NOT fall
+                 * through to ask_flow_insert(). The old PR14y fall-
+                 * through path called ask_flow_insert() with a zero
+                 * next-hop MAC; ask_hw_flow_insert returned -EAGAIN;
+                 * the pre-PR14z2 ask_flow_insert then fabricated a
+                 * fake hw_id and shoved the cookie into the rht,
+                 * pinning the flow to the SW fast path for its
+                 * entire lifetime (because the PR14r "REPLACE dedup"
+                 * check at line 687 prevented any future retry once
+                 * the cookie was in the rht).
+                 *
+                 * Correct behaviour: return -EOPNOTSUPP. The kernel
+                 * nf_flow_table core treats -EOPNOTSUPP as "this
+                 * driver declined offload"; the flow stays on the
+                 * kernel SW flowtable's own fast path (which is
+                 * still considerably cheaper than the per-packet
+                 * routing slow path). If/when the operator clears
+                 * the ARP storm and a new FLOW_CLS_REPLACE arrives,
+                 * the cookie has changed (nf_flow_table generates a
+                 * fresh cookie per `flow add`), so dedupe does not
+                 * apply and the second-attempt offload can succeed.
+                 *
+                 * Whether the workload that overflowed a 4096-deep
+                 * queue should reach M2 thresholds at all is an
+                 * orthogonal question — this branch is a safety
+                 * valve, not a fast path.
+                 */
+                pr_info_ratelimited("ask: flow_offload: PR14z2 queue full (%d) — declining HW offload, kernel SW flowtable retains cookie=0x%lx\n",
                                     qrc, f->cookie);
-                /* Fall through: let the original code path return whatever
-                 * ask_flow_insert() gives us (it will likely succeed in
-                 * software-only mode and the flow stays SW-pinned). */
+                return -EOPNOTSUPP;
         }
 
         /*

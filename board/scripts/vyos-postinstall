@@ -286,14 +286,51 @@ detect_latest_image() {
 }
 
 # Determine image to boot — priority order:
-#   1. Currently running image (from /proc/cmdline vyos-union= or BOOT_IMAGE=)
-#   2. Existing vyos.env content (preserves user's set-default-boot choice)
+#   1. Existing vyos.env content (preserves user's set-default-boot choice,
+#      and crucially preserves an `add system image` that has not yet been
+#      booted into — the new image must remain the default after reboot)
+#   2. Currently running image (from /proc/cmdline vyos-union= or BOOT_IMAGE=)
+#      — only used on first install when no vyos.env exists yet
 #   3. Lexicographically latest (fallback for first install)
+#
+# 2026-05-18 priority swap (PR14z2 side-fix): the previous ordering (cmdline
+# first, vyos.env second) caused the boot-service Phase 2 to silently
+# OVERWRITE the just-installed `vyos.env` with the currently-running image
+# name on every boot. Workflow that broke:
+#   1. operator runs `add system image https://…/new.iso` from running img A
+#   2. install_image hook writes /boot/vyos.env -> vyos_image=B (the new img)
+#   3. operator reboots
+#   4. U-Boot reads vyos.env=B, boots image B  ✓
+#   5. vyos-postinstall.service runs on first boot of B
+#   6. /proc/cmdline says vyos-union=/boot/B  (we're running B — correct)
+#   7. detect_current_image returns B  ✓ — but only by coincidence
+# AND the dangerous variant:
+#   1. operator runs `set system image default-boot B` while running A
+#   2. set_default hook writes /boot/vyos.env -> vyos_image=B
+#   3. operator reboots — but a U-Boot or eMMC glitch loads kernel A
+#      (ext4 transient failure, see AGENTS.md)
+#   4. Now running A, but vyos.env correctly says B (intended default)
+#   5. vyos-postinstall.service runs
+#   6. OLD priority: /proc/cmdline says A → vyos.env gets clobbered to A
+#      NEW priority: vyos.env says B → preserved, next boot returns to B  ✓
 detect_current_image() {
     local root="$1"
     local img
 
-    # 1. Currently running image from /proc/cmdline
+    # 1. Existing vyos.env (preserves set-default-boot selection AND any
+    #    just-installed `add system image` target that has not yet been
+    #    booted into).
+    local env_path="${root}/boot/${VYOS_ENV_FILE}"
+    if [ -f "$env_path" ]; then
+        img=$(grep -oP '(?<=vyos_image=)\S+' "$env_path" 2>/dev/null)
+        if [ -n "$img" ] && [ -d "${root}/boot/${img}" ]; then
+            echo "$img"
+            return 0
+        fi
+    fi
+
+    # 2. Currently running image from /proc/cmdline (first-install fallback
+    #    when vyos.env does not exist yet).
     img=$(grep -oP '(?<=vyos-union=/boot/)[^ ]+' /proc/cmdline 2>/dev/null)
     if [ -n "$img" ] && [ -d "${root}/boot/${img}" ]; then
         echo "$img"
@@ -303,16 +340,6 @@ detect_current_image() {
     if [ -n "$img" ] && [ -d "${root}/boot/${img}" ]; then
         echo "$img"
         return 0
-    fi
-
-    # 2. Existing vyos.env (preserves set-default-boot selection)
-    local env_path="${root}/boot/${VYOS_ENV_FILE}"
-    if [ -f "$env_path" ]; then
-        img=$(grep -oP '(?<=vyos_image=)\S+' "$env_path" 2>/dev/null)
-        if [ -n "$img" ] && [ -d "${root}/boot/${img}" ]; then
-            echo "$img"
-            return 0
-        fi
     fi
 
     # 3. Fallback: lexicographically latest
