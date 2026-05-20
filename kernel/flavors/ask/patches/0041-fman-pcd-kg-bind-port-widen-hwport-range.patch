@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Wed, 20 May 2026 16:50:00 +0000
+Subject: [PATCH] patches/0041-fman-pcd-kg-bind-port-widen-hwport-range.patch
+
+PR14z12-D (2026-05-20): widen fman_pcd_kg_bind_port() port_id validator
+from `> 10` to `> 0x3F` so it accepts BMI hwport_id values.
+
+Background
+----------
+Patch 0040 (PR14z12-C) changed dpaa_get_fman_port_id() to return the BMI
+port hwport_id (DTS cell-index of the fman-v3-port-rx node) instead of
+the MAC cell-index, because KGAR walks fmkg_pe_sp[hwport_id] indexed by
+the BMI hwport. On LS1046A the 10G RX ports at port@90000 / port@91000
+have hwport_id 0x10 / 0x11 (= 16 / 17 decimal).
+
+The matching validator inside fman_pcd_kg_bind_port() in patch 0006 was
+authored against the old MAC-cell-index namespace (range 1..10) and was
+NOT updated when patch 0040 switched the producer side to the BMI
+namespace. Result observed on live DUT (2026-05-20):
+
+  ask: hw: port-bind v4-TCP: kg_bind_port(port=16 dir=0) failed: -22
+  ask: hw: port-bind v4-TCP: kg_bind_port(port=17 dir=1) failed: -22
+
+i.e. -EINVAL from this validator, KG scheme never bound to ports,
+fman_port_use_kg_hash() from PR14z7 never reached, silicon fully inert.
+
+Fix
+---
+Widen the bound to 0x3F to match patch 0040's dpaa_get_fman_port_id()
+upper bound. BMI hwport_ids on LS1046A FMan3 occupy 0x01..0x31:
+
+  RX 1G  base 0x08, RX 10G base 0x10
+  TX 1G  base 0x28, TX 10G base 0x30
+  OH     base 0x02
+
+0x3F gives headroom for a future SoC widening while still trapping
+obviously-bogus values.
+---
+ drivers/net/ethernet/freescale/fman/fman_pcd_kg.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+index d0a21e9..85a6d3a 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+@@ -329,7 +329,12 @@ int err;
+ 
+ if (!scheme)
+ return -EINVAL;
+-if (port_id == 0 || port_id > 10)
++/*
++ * PR14z12-D: port_id here is the BMI port hwport_id (DTS cell-index
++ * of fman-v3-port-rx / -tx), NOT the MAC cell-index. On LS1046A
++ * FMan3 the hwport_id range is 0x01..0x31; cap at 0x3F for headroom.
++ */
++if (port_id == 0 || port_id > 0x3F)
+ return -EINVAL;
+ 
+ fman = fman_pcd_get_fman(scheme->pcd);
+-- 
+2.39.5
