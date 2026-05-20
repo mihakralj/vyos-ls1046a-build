@@ -1,0 +1,117 @@
+From c2a77ab2ed9f6606a258e351696081398ae4a4b5 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Wed, 20 May 2026 01:03:48 +0000
+Subject: [PATCH] patches/0040-fman-port-id-use-bmi-hwport.patch
+
+---
+ .../net/ethernet/freescale/dpaa/dpaa_eth.c    | 32 +++++++++++++++----
+ .../net/ethernet/freescale/fman/fman_port.c   | 17 ++++++++++
+ .../net/ethernet/freescale/fman/fman_port.h   |  9 ++++++
+ 3 files changed, 51 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 5ce3246..1b1ffac 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -498,11 +498,18 @@ EXPORT_SYMBOL_GPL(dpaa_get_rx_default_fqid);
+ /**
+  * dpaa_get_fman_port_id() - per-netdev FMan port id accessor.
+  *
+- * Used by ASK2 ask.ko (PR14g body-1 part-2) to resolve a dpaa netdev
+- * to the FMan hardware port id that fman_pcd_kg_bind_port() takes.
+- * On LS1046A the cell-index is in range 0..9 (MAC1..MAC10 numbered
+- * 0..9 by the FMan binding); ports 8/9 are the 10G SFP+ MACs at
+- * f0000/f2000.
++ * Used by ASK2 ask.ko (PR14g body-1 part-2; PR14z12-C root-cause
++ * fix) to resolve a dpaa netdev to the FMan hardware port id that
++ * fman_pcd_kg_bind_port() takes.
++ *
++ * IMPORTANT (PR14z12-C, 2026-05-19): this returns the **BMI port
++ * hwport_id** (DTS cell-index of the fman-v3-port-rx node), NOT the
++ * MAC cell-index.  The two namespaces are different.  KGAR walks the
++ * fmkg_pe_sp[hwport_id] table indexed by the BMI hwport, so binding
++ * a scheme by MAC cell-index sets bits in the wrong row of that table
++ * and silicon never consults our scheme.  For the LS1046A 10G SFP+
++ * MACs at ethernet@f0000 / ethernet@f2000, BMI RX hwport_ids are 0x10
++ * and 0x11 respectively (see qoriq-fman3-0-10g.dtsi port@90000/91000).
+  *
+  * Lifetime: caller holds RTNL or any equivalent guarantee that @dev
+  * cannot disappear underneath us.  No additional locking is needed:
+@@ -511,6 +518,7 @@ EXPORT_SYMBOL_GPL(dpaa_get_rx_default_fqid);
+ int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id)
+ {
+ 	struct dpaa_priv *priv;
++	struct fman_port *rx_port;
+ 	int id;
+ 
+ 	if (!dev || !port_id)
+@@ -520,8 +528,18 @@ int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id)
+ 	priv = netdev_priv(dev);
+ 	if (!priv->mac_dev)
+ 		return -ENODEV;
+-	id = fman_mac_get_hw_id(priv->mac_dev);
+-	if (id < 0 || id > 9)
++	rx_port = priv->mac_dev->port[RX];
++	if (!rx_port)
++		return -ENODEV;
++	id = fman_port_get_hw_port_id(rx_port);
++	/*
++	 * BMI hwport_ids on LS1046A FMan3 occupy 0x01..0x31:
++	 *   RX 1G  base 0x08, RX 10G base 0x10
++	 *   TX 1G  base 0x28, TX 10G base 0x30
++	 *   OH     base 0x02
++	 * Cap at 0x3F so a future SoC widening still trips -ERANGE.
++	 */
++	if (id < 0 || id > 0x3F)
+ 		return -ERANGE;
+ 	*port_id = (u8)id;
+ 	return 0;
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 4cc3957..de43515 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -1716,6 +1716,23 @@ struct device *fman_port_get_device(struct fman_port *port)
+ }
+ EXPORT_SYMBOL(fman_port_get_device);
+ 
++/* PR14z12-C: expose the BMI port hwport_id (DTS cell-index of the
++ * fman-v3-port-rx node) to OOT consumers.  ASK2 ask.ko needs this
++ * value — not the MAC cell-index — when calling
++ * fman_pcd_kg_bind_port(), because KGAR walks fmkg_pe_sp[hwport_id]
++ * to look up which scheme(s) are bound to the ingress port, and the
++ * BMI port hwport_id is the namespace silicon uses for that index.
++ * On LS1046A the 10G RX ports at port@90000 / port@91000 have
++ * cell-index 0x10 / 0x11.  Returns -EINVAL on NULL @port.
++ */
++int fman_port_get_hw_port_id(struct fman_port *port)
++{
++	if (!port)
++		return -EINVAL;
++	return (int)port->port_id;
++}
++EXPORT_SYMBOL_GPL(fman_port_get_hw_port_id);
++
+ int fman_port_get_hash_result_offset(struct fman_port *port, u32 *offset)
+ {
+ 	if (port->buffer_offsets.hash_result_offset == ILLEGAL_BASE)
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.h b/drivers/net/ethernet/freescale/fman/fman_port.h
+index 4917fe8..c8ead41 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.h
++++ b/drivers/net/ethernet/freescale/fman/fman_port.h
+@@ -132,4 +132,13 @@ struct fman_port *fman_port_bind(struct device *dev);
+ 
+ struct device *fman_port_get_device(struct fman_port *port);
+ 
++/* PR14z12-C (2026-05-19): expose the BMI port hwport_id (DTS
++ * cell-index of the fman-v3-port-rx node) so OOT consumers can
++ * pass it to fman_pcd_kg_bind_port().  This is the **silicon**
++ * port-id space (KGAR / fmkg_pe_sp index), distinct from the MAC
++ * cell-index space exposed by fman_mac_get_hw_id().  Returns the
++ * port_id (0..0x3F on LS1046A) on success, -EINVAL on NULL @port.
++ */
++int fman_port_get_hw_port_id(struct fman_port *port);
++
+ #endif /* __FMAN_PORT_H */
+-- 
+2.39.5
+

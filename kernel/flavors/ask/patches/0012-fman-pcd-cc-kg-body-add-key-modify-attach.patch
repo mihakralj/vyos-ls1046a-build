@@ -1,15 +1,15 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 732c8bfa8ee85eae96d53dc8bf2462fad8077783 Mon Sep 17 00:00:00 2001
 From: ci <ci@local>
-Date: Thu, 14 May 2026 20:44:07 +0000
-Subject: patches/0012-fman-pcd-cc-kg-body-add-key-modify-attach.patch
+Date: Tue, 19 May 2026 11:28:29 +0000
+Subject: [PATCH] patches/0012-fman-pcd-cc-kg-body-add-key-modify-attach.patch
 
 ---
  .../net/ethernet/freescale/fman/fman_keygen.c |  67 +++++++++
  .../freescale/fman/fman_keygen_internal.h     |  12 ++
  .../net/ethernet/freescale/fman/fman_pcd_cc.c | 139 ++++++++++++++++--
  .../freescale/fman/fman_pcd_internal.h        |  11 ++
- .../net/ethernet/freescale/fman/fman_pcd_kg.c |  68 +++++++--
- 5 files changed, 272 insertions(+), 25 deletions(-)
+ .../net/ethernet/freescale/fman/fman_pcd_kg.c |  61 ++++++--
+ 5 files changed, 269 insertions(+), 21 deletions(-)
 
 diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
 index fe5710c..ffd4072 100644
@@ -318,10 +318,10 @@ index 77f8386..aa00cdb 100644
 +	const struct fman_pcd_cc_tree *tree);
  #endif /* __FMAN_PCD_INTERNAL_H */
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
-index 366537b..2b9729c 100644
+index dbf1c87..d0a21e9 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
-@@ -352,24 +352,61 @@ return 0;
+@@ -361,24 +361,61 @@ return 0;
  }
  EXPORT_SYMBOL_GPL(fman_pcd_kg_bind_port);
  
@@ -351,12 +351,18 @@ index 366537b..2b9729c 100644
 + * Returns 0 on success or negative errno from keygen_scheme_set_ccbs.
 + */
  int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
--  struct fman_pcd_cc_tree *cc)
-+  struct fman_pcd_cc_tree *cc)
+   struct fman_pcd_cc_tree *cc)
  {
--if (!scheme || !cc)
--return -EINVAL;
--
++struct fman_keygen *keygen;
++struct fman *fman;
++struct mutex *lock;
++unsigned long off;
++u32 ccbs;
++int err;
++
+ if (!scheme || !cc)
+ return -EINVAL;
+ 
 -/*
 - * Deferred to PR14b follow-up: requires struct fman_pcd_cc_tree
 - * which lands in PR14c (fman_pcd_cc.c).  Programming target is
@@ -369,16 +375,6 @@ index 366537b..2b9729c 100644
 - *   4. mutex_unlock
 - */
 -return -EOPNOTSUPP;
-+struct fman_keygen *keygen;
-+struct fman *fman;
-+struct mutex *lock;
-+unsigned long off;
-+u32 ccbs;
-+int err;
-+
-+if (!scheme || !cc)
-+return -EINVAL;
-+
 +fman = fman_pcd_get_fman(scheme->pcd);
 +if (!fman || !fman->keygen)
 +return -ENXIO;
@@ -399,3 +395,6 @@ index 366537b..2b9729c 100644
  }
  EXPORT_SYMBOL_GPL(fman_pcd_kg_attach_cc);
  
+-- 
+2.39.5
+

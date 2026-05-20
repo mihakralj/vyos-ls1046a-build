@@ -1,36 +1,14 @@
-From 6e7e2c37a4d4c07705cc1825b1e4f5aa1ee0ac3a Mon Sep 17 00:00:00 2001
-From: ASK2 <ask2@vyos.local>
-Date: Thu, 14 May 2026 03:01:12 +0000
-Subject: [PATCH] =?UTF-8?q?fman:=20PCD=20KG=20PR14b-body=20=E2=80=94=20rea?=
- =?UTF-8?q?l=20KGSE=5F*=20programming?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+From e0512a87a35cf3423991d977216d409c5708014e Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Tue, 19 May 2026 11:28:27 +0000
+Subject: [PATCH] patches/0006-fman-pcd-kg-body.patch
 
-Replace the four -EOPNOTSUPP stubs that PR14b-prep landed with the
-real implementation. Allocates a free KG scheme id, populates
-keygen->schemes[id] with the silicon match-vector built from the
-caller's extract spec, and delegates the actual KGSE_* register
-write to the existing in-tree keygen_scheme_setup() helper (made
-EXPORT_SYMBOL_GPL in PR14b-prep).
-
-Supported shape: IPv4 5-tuple (SIP/DIP/proto/SPORT/DPORT). Wider
-shapes return -EOPNOTSUPP loudly rather than silently degrading.
-
-attach_cc() remains -EOPNOTSUPP — CCBS wiring requires PR14c's
-struct fman_pcd_cc_tree.
-
-Reference: LS1046A RM §8.7.4–8.7.5 (KGSE_MV/MODE/EKDV/EKFC/CCBS/
-HC/FQB) plus in-tree fman_keygen.c silicon-bit definitions.
-
-Build: native ARM64 on Cobalt 100, zero warnings, all four symbols
-present in System.map with __ksymtab entries.
 ---
- .../net/ethernet/freescale/fman/fman_pcd_kg.c | 389 +++++++++++++++---
+ .../net/ethernet/freescale/fman/fman_pcd_kg.c | 398 +++++++++++++++---
  1 file changed, 350 insertions(+), 48 deletions(-)
 
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
-index f14ddf9f3..366537be7 100644
+index 1b53ad0..dbf1c87 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
 @@ -1,92 +1,363 @@
@@ -345,7 +323,8 @@ index f14ddf9f3..366537be7 100644
 + * stays 0 until bind_port wires us up; setup() does not
 + * dispatch frames into a scheme until match_vector AND the
 + * port-binding ar register both reference it.
-+ */
+  */
+-return ERR_PTR(-EOPNOTSUPP);
 +slot = &keygen->schemes[id];
 +memset(slot, 0, sizeof(*slot));
 +slot->match_vector = match_vector;
@@ -357,8 +336,7 @@ index f14ddf9f3..366537be7 100644
 + * hashShift) becomes a public API parameter in
 + * PR14b-body-tuning if/when ask.ko needs more than
 + * one FQID per scheme.
-  */
--return ERR_PTR(-EOPNOTSUPP);
++ */
 +slot->hash_fqid_count = 1;
 +slot->symmetric_hash = true;
 +slot->hashShift = 0;
