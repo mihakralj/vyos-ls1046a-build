@@ -232,7 +232,16 @@ for package in $packages; do
       echo "### Cached $cached_count vyos-1x .deb(s) under key $CACHE_KEY"
       ls -lh "$CACHE_DIR/${CACHE_KEY}__"*.deb 2>/dev/null || true
     else
-      echo "### WARNING: vyos-1x build produced no ../vyos-1x_*_arm64.deb to cache"
+      # HARD FAIL: build.py's per-package error swallower ("Failed to build
+      # package vyos-1x: ... ignoring") used to let CI continue with NO
+      # vyos-1x .deb produced. live-build chroot_install would then silently
+      # substitute the unpatched upstream vyos-1x from the VyOS apt repo,
+      # shipping an ISO without our LS1046A patches → `add system image`
+      # writes boot dirs with no mono-gw.dtb → unbootable installs. (CI run
+      # 26142046765, 2026-05-20.) Refuse to proceed instead.
+      echo "::error::vyos-1x build produced no ../vyos-1x_*_arm64.deb — refusing to build ISO with unpatched upstream vyos-1x" >&2
+      echo "::error::This usually means dpkg-buildpackage failed inside build.py and the failure was swallowed. Search the log above for 'Failed to build package vyos-1x' and look at the preceding output." >&2
+      exit 1
     fi
   fi
 
