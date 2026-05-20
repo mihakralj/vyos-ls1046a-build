@@ -253,7 +253,8 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
                      "$ASK_PATCH_DIR"/0036-*.patch \
                      "$ASK_PATCH_DIR"/0037-*.patch \
                      "$ASK_PATCH_DIR"/0038-*.patch \
-                     "$ASK_PATCH_DIR"/0039-*.patch; do
+                     "$ASK_PATCH_DIR"/0039-*.patch \
+                     "$ASK_PATCH_DIR"/0040-*.patch; do
         [ -f "$src_patch" ] || { echo "ERROR: missing $src_patch"; exit 1; }
         # Rename 0001-→1001-, 0002-→1002-, 0003-→1003-, 0004-→1004-,
         # 0005-→1005-, 0006-→1006-, 0007-→1007-, 0008-→1008-,
@@ -300,14 +301,15 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
             0037-*) dst="1037-${base#0037-}" ;;
             0038-*) dst="1038-${base#0038-}" ;;
             0039-*) dst="1039-${base#0039-}" ;;
+            0040-*) dst="1040-${base#0040-}" ;;
             *)      echo "ERROR: unexpected ASK patch name: $base"; exit 1 ;;
         esac
         echo "###   $base → $dst"
         cp "$src_patch" "$KERNEL_PATCHES/$dst"
         ASK_PATCH_COUNT=$((ASK_PATCH_COUNT + 1))
     done
-    if [ "$ASK_PATCH_COUNT" -ne 39 ]; then
-        echo "ERROR: expected 39 ASK kernel patches, staged $ASK_PATCH_COUNT"
+    if [ "$ASK_PATCH_COUNT" -ne 40 ]; then
+        echo "ERROR: expected 40 ASK kernel patches, staged $ASK_PATCH_COUNT"
         exit 1
     fi
     echo "### ASK2: $ASK_PATCH_COUNT in-tree kernel patches staged"
@@ -733,6 +735,23 @@ if [ -n "$ASK_HEADERS_DEB" ] && [ -f "$ASK_KEY_PEM" ]; then
         mkdir -p "$ASK_KSRC/certs"
         cp "$ASK_KEY_PEM"  "$ASK_KSRC/certs/signing_key.pem"
         cp "$ASK_KEY_X509" "$ASK_KSRC/certs/signing_key.x509"
+        # PR14z12-D (2026-05-19): the headers .deb that bindeb-pkg
+        # produces does NOT include private FSL headers like
+        # include/linux/fsl/fman_pcd.h, fman_host_cmd.h, or
+        # dpaa_flow_offload.h — they are added by our ASK patch stack
+        # 0003 / 0004 / 0027 / 0028 etc and are required by the OOT
+        # ask.ko (ask_hw.c includes <linux/fsl/fman_pcd.h>). Without
+        # this rsync the OOT build fails with
+        # "fatal error: linux/fsl/fman_pcd.h: No such file or directory".
+        # Copy them — and any other ASK-injected include/linux/fsl/*.h —
+        # from the original kernel source tree into the snapshot before
+        # signalling .done.
+        if [ -d "${CWD}/${KERNEL_DIR}/include/linux/fsl" ]; then
+            mkdir -p "$ASK_KSRC/include/linux/fsl"
+            cp -av "${CWD}/${KERNEL_DIR}/include/linux/fsl/." \
+                   "$ASK_KSRC/include/linux/fsl/" 2>&1 | tail -5 || true
+            echo "I: ASK2 v2 — copied include/linux/fsl/ headers into snapshot"
+        fi
         touch "$ASK_SNAP_DIR/.done"
         echo "I: ASK2 v2 — snapshot ready: $ASK_SNAP_DIR/ksrc -> $ASK_KSRC"
         ls -la "$ASK_KSRC/Module.symvers" "$ASK_KSRC/scripts/sign-file" "$ASK_KSRC/certs/signing_key.pem" 2>&1 || true

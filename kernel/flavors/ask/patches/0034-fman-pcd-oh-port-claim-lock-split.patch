@@ -1,59 +1,8 @@
-From 26382f3102f9d2c01295322fefc4622f0623bd88 Mon Sep 17 00:00:00 2001
-From: ASK2 PR14k <ask2@vyos-ls1046a-build>
-Date: Sun, 17 May 2026 03:14:17 +0000
-Subject: [PATCH] fman: PCD OH-port: split fman_pcd_oh_port_claim() critical
- section (PR14k)
+From e6744c626658c7b7349668142ee174e13bca1859 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Tue, 19 May 2026 11:28:37 +0000
+Subject: [PATCH] patches/0034-fman-pcd-oh-port-claim-lock-split.patch
 
-The original PR14h flow held pcd->lock across the entire claim sequence,
-including oh_port_alloc_ad_chain() which calls fman_pcd_muram_alloc()
-which itself takes pcd->lock (drivers/net/ethernet/freescale/fman/
-fman_pcd.c::fman_pcd_muram_alloc). That is a recursive acquisition on
-a non-recursive mutex.
-
-On real LS1046A silicon (PR14j live-fire 2026-05-16, kernel
-6.18.31-vyos), this deadlocked systemd-modules-load at boot: ask.ko's
-ask_hw_pcd_bringup_oh() called fman_pcd_oh_port_claim(), which took
-pcd->lock, then re-entered it via the MURAM alloc and the task slept
-forever. hung_task watchdog fired at +122s and systemd-modules-load
-never released its blocking call. Workaround in PR14j-hotfix
-(0e9bdef + bf9cded): gate the OH-port bring-up behind the new
-ask.enable_oh_chain module param (default off).
-
-This patch is the real fix and lets the operator set
-ask.enable_oh_chain=1 safely.
-
-Lock-split discipline (3 phases):
-
-  Phase 1 (locked, short):  optimistic registry lookup.  If the
-                            port is already claimed bump refcnt and
-                            return.
-
-  Phase 2 (unlocked, slow): DT walk, of_find_device_by_node,
-                            kzalloc, AD-chain MURAM alloc.  Only
-                            the MURAM alloc takes pcd->lock
-                            internally; the others must NOT be
-                            invoked under it (devm/of_* can sleep
-                            on their own internal locks and would
-                            order-invert against pcd->lock).
-
-  Phase 3 (locked, short):  re-acquire pcd->lock, re-check the
-                            registry for a concurrent winner, and
-                            either insert our new handle or bump
-                            the racing winner's refcnt and unwind
-                            our orphan allocation.
-
-The 'racing winner' branch must drop pcd->lock BEFORE freeing the
-orphan AD chain because oh_port_free_ad_chain() calls
-fman_pcd_muram_free() which itself takes pcd->lock -- the same
-deadlock class this whole refactor is fixing.
-
-The err_unlock: label is gone; err_free_port, err_pdev, err_node
-cleanup labels now run with the lock NOT held.
-
-No public ABI change.  Builds clean on aarch64 (linux-6.18.29) with
-make W=1, no new warnings.
-
-Signed-off-by: ASK2 PR14k <ask2@vyos-ls1046a-build>
 ---
  .../net/ethernet/freescale/fman/fman_pcd_oh.c | 83 +++++++++++++++++--
  1 file changed, 75 insertions(+), 8 deletions(-)

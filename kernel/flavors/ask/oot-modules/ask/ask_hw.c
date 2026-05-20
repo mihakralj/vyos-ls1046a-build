@@ -793,12 +793,18 @@ int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
         }
 
         /*
-         * fman_pcd_kg_bind_port() rejects port_id == 0 (reserved for
-         * OP) and port_id > 10.  LS1046A FMan v3 ports 1..8 are 1G
-         * MACs, 9..10 are 10G MACs; we cap externally at 10.
+         * PR14z12-C (2026-05-19): port_id is the **BMI port hwport_id**
+         * (DTS cell-index of the fman-v3-port-rx node), NOT the MAC
+         * cell-index.  On LS1046A FMan v3 BMI hwport_ids occupy the
+         * range 0x01..0x31 (RX 1G base 0x08, RX 10G base 0x10, OH
+         * base 0x02, TX 1G base 0x28, TX 10G base 0x30).  Silicon caps
+         * at 0x3F (KGAR PORT_ENTRY is 6 bits).  Reject port_id == 0
+         * (reserved for OP / null) and >= 0x40.  Previous bound of 10
+         * was the MAC cell-index ceiling and rejected legitimate 10G
+         * RX hwports 0x10 / 0x11 — see PR14z12-B diagnostic.
          */
-        if (port_id == 0 || port_id > 10) {
-                ask_pr_warn("hw: port-bind port_id %u out of range (1..10)\n",
+        if (port_id == 0 || port_id > 0x3F) {
+                ask_pr_warn("hw: port-bind port_id 0x%02x out of range (0x01..0x3F)\n",
                             port_id);
                 return -EINVAL;
         }

@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From a68e2b06b8bb17826140b3c9862c66502c7d47e8 Mon Sep 17 00:00:00 2001
 From: ci <ci@local>
-Date: Thu, 14 May 2026 20:44:08 +0000
-Subject: patches/0016-fman-pcd-cc-manipulate-arm.patch
+Date: Tue, 19 May 2026 11:28:31 +0000
+Subject: [PATCH] patches/0016-fman-pcd-cc-manipulate-arm.patch
 
 ---
  .../net/ethernet/freescale/fman/fman_pcd_cc.c | 47 +++++++++++++++++--
@@ -128,3 +128,6 @@ index 2715a0f..46af621 100644
 +		return 0;
 +	return manip->hmtd_off;
 +}
+-- 
+2.39.5
+

@@ -1,46 +1,8 @@
-From f58d9c1cd175f4c6ce653b7d5fce371b77bdc20c Mon Sep 17 00:00:00 2001
-From: ASK2 PR14h <ask2@vyos-ls1046a-build>
-Date: Sat, 16 May 2026 05:22:51 +0000
-Subject: [PATCH] fman: PCD: add Offline-Host (OH) port driver
+From da9a755cb301d07c5539fb039f53d39354a0a24f Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Tue, 19 May 2026 11:28:37 +0000
+Subject: [PATCH] patches/0032-fman-pcd-oh-port.patch
 
-Implements the public OH-port ABI per ASK2 spec v1.2 section 13.3 and
-LS1046A RM 8.11.  The OH port is the silicon mechanism that lets a
-classified frame be re-injected into a second-pass classify/manipulate
-chain and then re-enqueued to a peer port's TX FQ - all without the
-A72 cores touching the frame.  This is the only LS1046A mechanism by
-which L3-routed forwarding with per-hop L2 rewrite can be offloaded.
-
-Public ABI (EXPORT_SYMBOL_GPL, consumed by ask.ko in PR14j):
-
-  fman_pcd_oh_port_claim(struct fman *, u8 oh_idx)
-  fman_pcd_oh_port_release(struct fman_pcd_oh_port *)
-  fman_pcd_oh_port_input_fqid(const struct fman_pcd_oh_port *)
-  fman_pcd_oh_port_set_chain(struct fman_pcd_oh_port *,
-                             struct fman_pcd_manip * const *manips,
-                             u8 n_manips, u32 sink_fqid)
-
-Wiring:
- - fman_port.c learns the 'fsl,fman-v3-port-oh' compatible so the
-   six upstream-defined OH platform nodes at 0x82000..0x87000 in
-   qoriq-fman3-0.dtsi (cell-index 0x2..0x7) get a platform_device.
- - fman_pcd.c gains a pcd->oh_ports list_head and a teardown-time
-   fman_pcd_oh_reclaim_all() sweep that drains leaked handles.
- - fman_pcd_internal.h exports fman_pcd_get_oh_list() so
-   fman_pcd_oh.c can access the list under pcd->lock.
- - Makefile builds fman_pcd_oh.o into fsl_dpaa_fman when
-   CONFIG_FSL_FMAN_PCD=y.
-
-PR14h skeleton publishes a 'null walker' AD chain (all-zero 16-byte
-entries) regardless of the manip argument - the per-AD encoder lands
-in a follow-up PR after PR14i adds the RMV_ETHERNET / INSRT_GENERIC /
-FIELD_UPDATE_IPV4_FORWARD manip types that it consumes.  The skeleton
-still validates the chain arguments (n_manips<=4, non-NULL manip
-pointers, 24-bit sink_fqid) and records n_manips + sink_fqid on the
-handle so PR14j ask.ko code can be authored against a stable ABI.
-
-Builds clean on aarch64 (linux-6.18.29) with both CONFIG_FSL_FMAN=y
-and CONFIG_FSL_FMAN_PCD=y.  All four __ksymtab_fman_pcd_oh_* symbols
-appear in vmlinux.
 ---
  drivers/net/ethernet/freescale/fman/Makefile  |   3 +-
  .../net/ethernet/freescale/fman/fman_pcd.c    |  48 +-
@@ -857,7 +819,7 @@ index e977389..4cc3957 100644
  
  MODULE_DEVICE_TABLE(of, fman_port_match);
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index d1a5761..fc6f2a0 100644
+index d1a5761..89230bc 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
 @@ -33,18 +33,19 @@ struct fman;
