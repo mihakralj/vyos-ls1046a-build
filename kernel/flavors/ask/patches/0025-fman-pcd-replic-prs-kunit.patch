@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 11356239d02f4a9098c0484e8308689886f67bbf Mon Sep 17 00:00:00 2001
 From: ci <ci@local>
-Date: Thu, 14 May 2026 20:44:11 +0000
-Subject: patches/0025-fman-pcd-replic-prs-kunit.patch
+Date: Tue, 19 May 2026 11:28:34 +0000
+Subject: [PATCH] patches/0025-fman-pcd-replic-prs-kunit.patch
 
 ---
  .../ethernet/freescale/fman/fman_pcd_prs.c    |  15 +-
@@ -539,3 +539,6 @@ index 0000000..1c79f8f
 +
 +kunit_test_suite(fman_pcd_replic_test_suite);
 \ No newline at end of file
+-- 
+2.39.5
+

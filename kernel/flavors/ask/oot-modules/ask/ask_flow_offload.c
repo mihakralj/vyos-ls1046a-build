@@ -63,6 +63,7 @@
 #include <net/neighbour.h>
 #include <net/netevent.h>
 #include <net/net_namespace.h>
+#include <net/netfilter/nf_flow_table.h>
 #include <linux/fsl/dpaa_flow_offload.h>
 
 #include "include/ask_internal.h"
@@ -897,6 +898,101 @@ static int ask_parse_action(struct flow_cls_offload *f,
 }
 
 /* ------------------------------------------------------------------------- */
+/* PR14z11 (2026-05-19): recover the true next-hop dst from flow_offload.    */
+/*                                                                            */
+/* Root cause of PR14z10's M2 FAIL (6.918 Gbps PASS, 66.76% CPU FAIL):       */
+/*                                                                            */
+/* nf_flow_table_offload.c line 896 sets                                     */
+/*    cls_flow->cookie = (unsigned long)tuple                                 */
+/* where `tuple` is `struct flow_offload_tuple *` for ONE direction of the   */
+/* conntrack flow.  When the REV direction is offered, the FLOW_DISSECTOR    */
+/* key built from `tuple->src_v4 / tuple->dst_v4` encodes the REPLY tuple —  */
+/* but conntrack's "reply tuple" semantics swap src/dst, so `dst_v4` for     */
+/* the REV REPLACE is the DUT's OWN ip (the original src of the FWD).  That  */
+/* address is never resolvable as a neighbour anywhere, so PR14z10's poll    */
+/* tried `neigh_lookup(dst=DUT-ip)` 300+ times across both ifindices for    */
+/* the full 30 s test and never drained a single REV cookie.  Every REV     */
+/* packet fell back to the SW flowtable fast path, pushing CPU to 67%.       */
+/*                                                                            */
+/* The kernel's own `flow_offload_eth_dst()` (nf_flow_table_offload.c        */
+/* line 280) reveals the canonical recipe for the                            */
+/* FLOW_OFFLOAD_XMIT_NEIGH path:                                              */
+/*                                                                            */
+/*   this_tuple  = &flow->tuplehash[dir].tuple;                               */
+/*   other_tuple = &flow->tuplehash[!dir].tuple;                              */
+/*   daddr       = &other_tuple->src_v4;            <- true next-hop IP     */
+/*   n = dst_neigh_lookup(this_tuple->dst_cache, daddr);                     */
+/*                                                                            */
+/* i.e. the OTHER direction's `src_v4` IS this direction's true L3 next-hop. */
+/* For a forwarded TCP stream over a routed segment, the OPPOSITE tuple's    */
+/* src_v4 is exactly the next-hop the kernel routed against.                 */
+/*                                                                            */
+/* Recovery from cookie: the cookie is `(unsigned long)tuple`, where tuple   */
+/* is the address of `flow->tuplehash[dir].tuple` (an inner field of         */
+/* flow_offload_tuple_rhash, which is in turn an array element of            */
+/* flow_offload.tuplehash[]).  Two container_of steps reach the parent:     */
+/*                                                                            */
+/*   rh   = container_of(t,  struct flow_offload_tuple_rhash, tuple);        */
+/*   // tuplehash[dir] == *rh, so:                                          */
+/*   flow = (struct flow_offload *)((char *)rh -                             */
+/*          offsetof(struct flow_offload, tuplehash[t->dir]));               */
+/*                                                                            */
+/* `t->dir` is encoded in the bitfield set by the kernel at flow install    */
+/* time and is valid for the cookie's lifetime.                              */
+/*                                                                            */
+/* Safety: the cookie/tuple is valid for the duration of the REPLACE         */
+/* callback.  The kernel holds the flowtable's rwlock across the offload    */
+/* setup path (see nf_flow_offload_work_alloc + nf_flow_offload_tuple)      */
+/* so the flow is guaranteed not to be freed while we read.                 */
+/* ------------------------------------------------------------------------- */
+
+static __be32 ask_z11_other_src_v4(unsigned long cookie, int *out_dir,
+                                   struct net_device **out_iif)
+{
+        struct flow_offload_tuple *t;
+        struct flow_offload_tuple_rhash *rh;
+        struct flow_offload *flow;
+        struct flow_offload_tuple *other;
+        int dir;
+
+        if (out_iif)
+                *out_iif = NULL;
+
+        if (!cookie)
+                return 0;
+
+        t   = (struct flow_offload_tuple *)cookie;
+        dir = t->dir;
+        if (dir < 0 || dir >= FLOW_OFFLOAD_DIR_MAX)
+                return 0;
+
+        rh   = container_of(t, struct flow_offload_tuple_rhash, tuple);
+        flow = (struct flow_offload *)((char *)rh -
+                offsetof(struct flow_offload, tuplehash[dir]));
+        if (!flow)
+                return 0;
+
+        other = &flow->tuplehash[!dir].tuple;
+
+        if (out_dir)
+                *out_dir = dir;
+        if (out_iif) {
+                /*
+                 * The OTHER tuple's iifidx is the netdev the kernel
+                 * routed the THIS direction's egress against — i.e.
+                 * the real egress device for the resolvable next-hop.
+                 * Recover it via init_net (DPAA1 is always init_net).
+                 */
+                rcu_read_lock();
+                *out_iif = dev_get_by_index_rcu(&init_net, other->iifidx);
+                /* No refcount held outside rcu — caller treats as
+                 * borrowed and re-resolves under its own rcu/ref. */
+                rcu_read_unlock();
+        }
+        return other->src_v4.s_addr;
+}
+
+/* ------------------------------------------------------------------------- */
 /* FLOW_CLS_* dispatch                                                        */
 /* ------------------------------------------------------------------------- */
 
@@ -930,6 +1026,44 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                 pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_action=%d) cookie=0x%lx\n",
                                     rc, f->cookie);
                 return rc;
+        }
+
+        /*
+         * PR14z11 (2026-05-19): override the key's dst_ip with the
+         * conntrack opposite-direction tuple's src_v4 — this is the
+         * REAL next-hop IP the kernel routed against, and matches
+         * what nf_flow_table_offload.c's own flow_offload_eth_dst()
+         * helper does for the FLOW_OFFLOAD_XMIT_NEIGH case.
+         *
+         * The kernel-encoded FLOW_DISSECTOR dst_ip in the cls_flow
+         * rule encodes the THIS-direction tuple's dst_v4, which under
+         * conntrack's swapped reply-tuple semantics for the REV
+         * direction equals the DUT's own IP (the original FWD src).
+         * That value is never neigh-resolvable, so the PR14z10
+         * pending list never drained REV cookies on the M2 gate.
+         *
+         * We additionally override egress_dev with the opposite-
+         * direction tuple's iifidx — i.e. the netdev the kernel
+         * actually routed THIS direction's TX through. Without this,
+         * the egress_dev that came out of ask_parse_action() is
+         * whatever act->dev the REDIRECT named, which for some REV
+         * cookies points at the wrong interface (the one that owns
+         * the un-resolvable original-fwd-dst IP).
+         */
+        {
+                struct net_device *z11_iif = NULL;
+                __be32 z11_dst;
+
+                z11_dst = ask_z11_other_src_v4((unsigned long)f->cookie,
+                                               NULL, &z11_iif);
+                if (z11_dst != 0) {
+                        memcpy(&key.dst_ip[0], &z11_dst, 4);
+                        if (z11_iif)
+                                egress_dev = z11_iif;
+                        pr_info_ratelimited("ask: flow_offload: PR14z11 override cookie=0x%lx new-dst=%pI4 new-egress=%s\n",
+                                            f->cookie, &z11_dst,
+                                            egress_dev ? netdev_name(egress_dev) : "?");
+                }
         }
 
         /*
@@ -1576,7 +1710,7 @@ int ask_flow_offload_init(void)
         schedule_delayed_work(&ask_flow_pending_poll_work,
                               msecs_to_jiffies(ASK_FLOW_PENDING_POLL_INTERVAL_MS));
 
-        ask_pr_info("flow_offload: ready (PR14y deferred-insert + PR14z8 netevent trace + PR14z9 active poll %d ms + PR14z10 dual-ifindex match)\n",
+        ask_pr_info("flow_offload: ready (PR14y deferred-insert + PR14z9 active poll %d ms + PR14z10 dual-ifindex match + PR14z11 cookie-recovered next-hop)\n",
                     ASK_FLOW_PENDING_POLL_INTERVAL_MS);
         return 0;
 }
