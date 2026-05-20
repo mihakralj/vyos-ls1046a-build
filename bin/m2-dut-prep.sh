@@ -64,7 +64,14 @@ log "DUT=$DUT iface_in=$IFACE_IN iface_out=$IFACE_OUT"
 ssh_dut "true" 2>/dev/null || { log "DUT $DUT unreachable"; exit 2; }
 
 # 1. Delete VyOS notrack rule on FORWARD (handle is dynamic — find by content).
-log "step 1/3: remove VyOS notrack rule from vyos_conntrack PREROUTING (if present)"
+#
+# VyOS's vyos_conntrack PREROUTING chain ends with a `notrack` rule that short-
+# circuits conntrack for any forwarded traffic that hasn't matched an earlier
+# rule. Without removing it, the iperf3 data flows are never tracked by
+# conntrack, never reach the ASSURED state, and the nftables flowtable
+# refuses to offload them (`nf_flow_offload_tuple()` only acts on
+# ASSURED-state conntrack entries).
+log "step 1/4: remove VyOS notrack rule from vyos_conntrack PREROUTING (if present)"
 NOTRACK_HANDLE=$(ssh_dut "sudo -n nft -a list chain ip vyos_conntrack PREROUTING 2>/dev/null | awk '/notrack/ {for(i=1;i<=NF;i++) if(\$i==\"handle\") {print \$(i+1); exit}}'" || true)
 if [ -n "${NOTRACK_HANDLE:-}" ]; then
         ssh_dut "sudo -n nft delete rule ip vyos_conntrack PREROUTING handle $NOTRACK_HANDLE" \
@@ -75,7 +82,7 @@ else
 fi
 
 # 2. hw-tc-offload on both ports
-log "step 2/3: ensure hw-tc-offload is on for $IFACE_IN and $IFACE_OUT"
+log "step 2/4: ensure hw-tc-offload is on for $IFACE_IN and $IFACE_OUT"
 for iface in "$IFACE_IN" "$IFACE_OUT"; do
         state=$(ssh_dut "sudo -n ethtool -k $iface 2>/dev/null | awk -F': ' '/hw-tc-offload/ {print \$2; exit}'" || true)
         case "$state" in
@@ -91,8 +98,23 @@ for iface in "$IFACE_IN" "$IFACE_OUT"; do
         esac
 done
 
-# 3. ask_offload table + flowtable + forward chain
-log "step 3/3: install inet ask_offload table with flowtable ft1 + forward chain"
+# 3. ask_offload table + flowtable + forward chain + conntrack-promoting rule.
+#
+# The forward chain references @ft1 (flowtable lookup) but the flowtable
+# only sees ASSURED conntrack entries.  conntrack itself only confirms a
+# flow when *some* rule in the netfilter pipeline touches `ct state`.
+# We add a dedicated `conntrack_promote` chain at PREROUTING priority -150
+# (BEFORE the VyOS `vyos_conntrack` chain at -200 used to short-circuit
+# with `notrack`, after that's deleted in step 1) whose only job is to
+# match iperf3 5201/tcp NEW packets and `accept` them — the `ct state new`
+# match alone is sufficient to register the flow with conntrack so it
+# walks NEW -> ESTABLISHED -> ASSURED and the flowtable then promotes it.
+#
+# Diagnosed 2026-05-20 (qdrant "M2-flowtable-conntrack-blocker"): without
+# this rule, `conntrack -L` returned ZERO entries during active 7 Gbps
+# forwarding, the flowtable never engaged, and the 4.5-6.3% softirq we
+# measured pre-fix WAS the full unaccelerated kernel forward plane.
+log "step 3/4: install inet ask_offload table with flowtable ft1 + forward + conntrack_promote"
 if ssh_dut "sudo -n nft list table inet ask_offload" >/dev/null 2>&1; then
         log "       table inet ask_offload already exists — leaving it in place"
         log "       (run: sudo nft delete table inet ask_offload  to force re-create)"
@@ -108,10 +130,27 @@ table inet ask_offload {
                 type filter hook forward priority -200; policy accept;
                 ip protocol { tcp, udp } flow add @ft1
         }
+        chain conntrack_promote {
+                type filter hook prerouting priority -150; policy accept;
+                ct state new tcp dport 5201 counter accept
+                ct state new tcp sport 5201 counter accept
+        }
 }
 EOF" || fail "could not install ask_offload table"
-        log "       installed ask_offload table"
+        log "       installed ask_offload table (incl. conntrack_promote chain)"
 fi
+
+# Defensive: if the table existed already from a previous run that pre-dates
+# the conntrack_promote chain, install the chain via heredoc (the `nft -f -`
+# pattern handles semicolons & braces cleanly, unlike escaped shell args).
+# `add chain` with a pre-existing chain definition is idempotent in nft.
+ssh_dut "sudo -n nft -f - <<'EOF'
+add chain inet ask_offload conntrack_promote { type filter hook prerouting priority -150; policy accept; }
+flush chain inet ask_offload conntrack_promote
+add rule inet ask_offload conntrack_promote ct state new tcp dport 5201 counter accept
+add rule inet ask_offload conntrack_promote ct state new tcp sport 5201 counter accept
+EOF" || fail "could not arm conntrack_promote chain"
+log "       conntrack_promote chain armed (ct state new tcp {dport,sport} 5201)"
 
 # Sanity: confirm flowtable lists both devices with offload flag
 LIST=$(ssh_dut "sudo -n nft list flowtable inet ask_offload ft1" 2>/dev/null || true)
