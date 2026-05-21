@@ -221,9 +221,21 @@ for package in $packages; do
   fi
 
   ### Populate vyos-1x cache after a successful build (cache miss path)
+  #
+  # cwd here is `vyos-build/scripts/package-build/vyos-1x/` (we cd'd into
+  # $package above). build.py's `repo_dir = Path('vyos-1x')` makes the
+  # actual git clone live at `./vyos-1x/`. dpkg-buildpackage runs with
+  # cwd=repo_dir and emits .debs to repo_dir.parent — which is `./` here,
+  # NOT `../`. (`../` would be `package-build/` itself, and that's where
+  # build.py's copy_packages() *eventually* lifts them — but copy_packages
+  # is called by build.py's __main__ AFTER this script's per-package step
+  # has already finished, and only if it walks back to build.py's main
+  # loop. By that time we're already in the post-build guard.) Glob both
+  # locations defensively so future refactors of build.py / copy_packages
+  # don't silently re-break the guard.
   if [ "$package" == "vyos-1x" ] && [ "$SKIP_VYOS1X_BUILD" -eq 0 ] && [ -n "${CACHE_KEY:-}" ]; then
     cached_count=0
-    for built in ../vyos-1x_*_arm64.deb; do
+    for built in vyos-1x_*_arm64.deb ../vyos-1x_*_arm64.deb; do
       [ -f "$built" ] || continue
       cp "$built" "$CACHE_DIR/${CACHE_KEY}__$(basename "$built")"
       cached_count=$((cached_count + 1))
@@ -239,8 +251,12 @@ for package in $packages; do
       # shipping an ISO without our LS1046A patches → `add system image`
       # writes boot dirs with no mono-gw.dtb → unbootable installs. (CI run
       # 26142046765, 2026-05-20.) Refuse to proceed instead.
-      echo "::error::vyos-1x build produced no ../vyos-1x_*_arm64.deb — refusing to build ISO with unpatched upstream vyos-1x" >&2
+      echo "::error::vyos-1x build produced no vyos-1x_*_arm64.deb in either ./ or ../ — refusing to build ISO with unpatched upstream vyos-1x" >&2
       echo "::error::This usually means dpkg-buildpackage failed inside build.py and the failure was swallowed. Search the log above for 'Failed to build package vyos-1x' and look at the preceding output." >&2
+      echo "### Debug: contents of cwd ($(pwd)):" >&2
+      ls -la . 2>&1 | head -40 >&2 || true
+      echo "### Debug: contents of parent ($(cd .. && pwd)):" >&2
+      ls -la .. 2>&1 | head -40 >&2 || true
       exit 1
     fi
   fi
