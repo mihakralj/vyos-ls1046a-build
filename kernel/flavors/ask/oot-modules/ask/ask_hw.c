@@ -226,11 +226,31 @@ EXPORT_SYMBOL_GPL(ask_hw_ucode_get_version);
  * cc_tree + cc_v4_tcp are created up front at bring-up; scheme is
  * lazily allocated on first ask_hw_port_bind() for this direction.
  */
+/*
+ * PR14z13 (2026-05-21): graft model.  ASK no longer allocates KG
+ * schemes; it discovers the kernel-owned scheme on the port via
+ * fman_pcd_kg_lookup_port_scheme() and grafts its CC tree onto it
+ * via fman_pcd_kg_graft_cc().  The base_fqid returned by lookup is
+ * the kernel scheme's KGSE_FQB and is wired into the CC node's
+ * miss_action so unmatched frames (ARP / SYN / ICMP / VPP AF_XDP)
+ * fall back to the kernel's per-CPU RX FQ pool, preserving the
+ * control plane.
+ *
+ * scheme_id == 0xff means the pipeline is unbound.  No struct
+ * fman_pcd_kg_scheme * is stored because ASK never owns one — the
+ * scheme lifetime belongs to dpaa_eth.c's keygen_port_hashing_init().
+ *
+ * cc_tree is created up front at bring-up (it is a pure container,
+ * grafting doesn't consume it); cc_v4_tcp is created LAZILY at
+ * ask_hw_port_bind() time because its miss_action depends on the
+ * per-port base_fqid which isn't known until we look up the kernel
+ * scheme.
+ */
 struct ask_hw_pipeline {
         struct fman_pcd_cc_tree   *cc_tree;
         struct fman_pcd_cc_node   *cc_v4_tcp;
-        struct fman_pcd_kg_scheme *scheme;     /* single port per pipeline */
-        struct fman_port          *fman_port;  /* PR14z7: arms FMBM_RFPNE → NIA_ENG_HWK */
+        u8                         scheme_id;  /* 0xff = no graft active */
+        u32                        base_fqid;  /* kernel scheme's KGSE_FQB */
         u8                         bound_pid;  /* 0xff = unbound */
 };
 
@@ -433,40 +453,36 @@ static int ask_hw_pcd_build_chain(struct ask_hw_pcd *h)
          * total vs PR14z3's single 256*(2*13+16) = 10,752 B — same
          * footprint, split across two trees.
          */
-        memset(&keys, 0, sizeof(keys));
-        keys.num_keys = 127;
-        keys.keys = NULL;
-        keys.miss_action.type = FMAN_PCD_ACTION_DROP;
-
         /*
-         * PR14z5: build ONE cc_tree + cc_v4_tcp per direction.  Each
-         * pipeline gets its own 255-slot match table so direction
-         * pressure is decoupled (a 255-flow forward burst no longer
-         * starves reverse).  The KG extract recipe below is shared
-         * across pipelines — only the resulting hash output is fed
-         * into different cc_trees.
+         * PR14z13 (2026-05-21): the cc_v4_tcp NODE is created lazily
+         * at ask_hw_port_bind() time, not here, because its
+         * miss_action must be FORWARD_FQ(base_fqid) where base_fqid
+         * is the kernel scheme's KGSE_FQB — and we only learn that
+         * by calling fman_pcd_kg_lookup_port_scheme() against a
+         * specific port.  At bring-up we still create the cc_tree
+         * (a pure container, no per-port state) so the lookup table
+         * is initialised; the node is created on first bind.
+         *
+         * `extract` and `keys` are kept here only to silence -Wunused;
+         * the actual cc_node_create call lives in ask_hw_port_bind().
          */
+        (void)extract;
+        (void)keys;
+        memset(&keys, 0, sizeof(keys));
+
         for (d = 0; d < ASK_HW_DIR_NR; d++) {
                 struct ask_hw_pipeline *p = &h->pipe[d];
 
                 p->bound_pid = 0xff;
-                p->scheme    = NULL;
+                p->scheme_id = 0xff;
+                p->base_fqid = 0;
+                p->cc_v4_tcp = NULL;
 
                 p->cc_tree = fman_pcd_cc_tree_create(h->pcd, 1);
                 if (IS_ERR(p->cc_tree)) {
                         rc = PTR_ERR(p->cc_tree);
                         p->cc_tree = NULL;
                         ask_pr_warn("hw: cc_tree_create dir=%u failed (%d)\n",
-                                    d, rc);
-                        goto err_unwind;
-                }
-
-                p->cc_v4_tcp = fman_pcd_cc_node_create(p->cc_tree, &extract,
-                                                      &keys);
-                if (IS_ERR(p->cc_v4_tcp)) {
-                        rc = PTR_ERR(p->cc_v4_tcp);
-                        p->cc_v4_tcp = NULL;
-                        ask_pr_warn("hw: cc_node_create v4-TCP dir=%u failed (%d)\n",
                                     d, rc);
                         goto err_unwind;
                 }
@@ -515,7 +531,7 @@ static int ask_hw_pcd_build_chain(struct ask_hw_pcd *h)
         kg_params->extracts[4].size   = 2;
         kg_params->extracts[4].mask   = 0xff;
 
-        ask_pr_info("hw: FMan PCD chain up — PR14z5 dual-pipeline v4-TCP (FWD + REV cc_trees + KG recipe ready; per-direction KG schemes deferred to FLOW_BLOCK_BIND)\n");
+        ask_pr_info("hw: FMan PCD chain up — PR14z13 graft model (FWD + REV cc_trees ready; cc_v4_tcp nodes deferred to ask_hw_port_bind for per-port miss-action FORWARD_FQ(base_fqid))\n");
         return 0;
 
 err_unwind:
@@ -727,22 +743,19 @@ void ask_hw_pcd_teardown(void)
          * it was bound to.  CC node + CC tree destroy release the
          * MURAM match/AD tables.
          */
+        /*
+         * PR14z13: ungraft (clear KGSE_CCBS) on the kernel-owned
+         * scheme before destroying the cc_tree, so the kernel
+         * scheme reverts to direct FORWARD_FQ(base_fqid) dispatch.
+         * Then destroy the (lazily created) cc_v4_tcp node and the
+         * cc_tree.  No KG scheme to free — ASK never owned one.
+         */
         for (d = 0; d < ASK_HW_DIR_NR; d++) {
                 struct ask_hw_pipeline *p = &h->pipe[d];
 
-                /*
-                 * PR14z7: disarm FMBM_RFPNE before destroying the KG
-                 * scheme so the port reverts to boot-default routing
-                 * (Parser → default FQ) instead of pointing at a
-                 * scheme handle we just freed.
-                 */
-                if (p->fman_port) {
-                        fman_port_use_kg_hash(p->fman_port, false);
-                        p->fman_port = NULL;
-                }
-                if (p->scheme) {
-                        fman_pcd_kg_scheme_destroy(p->scheme);
-                        p->scheme = NULL;
+                if (p->scheme_id != 0xff) {
+                        (void)fman_pcd_kg_ungraft_cc(h->pcd, p->scheme_id);
+                        p->scheme_id = 0xff;
                 }
                 if (p->cc_v4_tcp) {
                         fman_pcd_cc_node_destroy(p->cc_v4_tcp);
@@ -753,6 +766,7 @@ void ask_hw_pcd_teardown(void)
                         p->cc_tree = NULL;
                 }
                 p->bound_pid = 0xff;
+                p->base_fqid = 0;
         }
 
         xa_destroy(&h->flow_cookies);
@@ -775,14 +789,43 @@ struct ask_hw_pcd *ask_hw_pcd_get(void)
 /* the same dir return -EBUSY — the caller picked the wrong direction.       */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * PR14z13 (2026-05-21): graft model — lookup, lazy-create CC node
+ * with FORWARD_FQ(base_fqid) miss-action, graft onto kernel scheme.
+ *
+ * Step sequence:
+ *   1. fman_pcd_kg_lookup_port_scheme(pcd, port_id, &sid, &base_fqid)
+ *      Discovers the in-tree kernel-owned KG scheme that
+ *      dpaa_eth.c::keygen_port_hashing_init() bound to this hwport
+ *      at MAC probe.  Returns its scheme_id (the LOWEST one in
+ *      fmkg_pe_sp — which is what FMan KG actually dispatches to)
+ *      and its KGSE_FQB base_fqid.
+ *   2. Lazily create cc_v4_tcp with miss_action=FORWARD_FQ(base_fqid)
+ *      so unmatched frames (ARP / SYN / ICMP / VPP AF_XDP) fall back
+ *      to the kernel's per-CPU RX FQ pool — control plane preserved.
+ *   3. fman_pcd_kg_graft_cc(pcd, sid, cc_tree) writes KGSE_CCBS on
+ *      the kernel scheme via AR-mediated RMW.  No new scheme is
+ *      allocated; the kernel scheme keeps its parser/extract recipe
+ *      and bind to the hwport via fmkg_pe_sp.  Result: same scheme
+ *      that already wins the KG dispatch race now walks our CC tree.
+ *
+ * No fman_pcd_kg_scheme_create / _attach_cc / _bind_port any more.
+ * No fman_port_use_kg_hash either — the kernel already armed
+ * FMBM_RFPNE → NIA_ENG_HWK when it brought up the scheme at MAC probe.
+ */
 int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
                      struct net_device *ingress_dev)
 {
         struct ask_hw_pcd *h = ask_hw_pcd_get();
         struct ask_hw_pipeline *p;
-        struct fman_pcd_kg_scheme *new_scheme = NULL;
-        struct fman_port *fp = NULL;
+        struct fman_pcd_cc_extract extract;
+        struct fman_pcd_cc_key_table keys;
+        struct fman_pcd_cc_node *new_node = NULL;
+        u8  sid = 0xff;
+        u32 base_fqid = 0;
         int rc;
+
+        (void)ingress_dev;  /* PR14z13: kernel already armed FMBM_RFPNE */
 
         if (!h)
                 return -ENODEV;
@@ -796,12 +839,8 @@ int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
          * PR14z12-C (2026-05-19): port_id is the **BMI port hwport_id**
          * (DTS cell-index of the fman-v3-port-rx node), NOT the MAC
          * cell-index.  On LS1046A FMan v3 BMI hwport_ids occupy the
-         * range 0x01..0x31 (RX 1G base 0x08, RX 10G base 0x10, OH
-         * base 0x02, TX 1G base 0x28, TX 10G base 0x30).  Silicon caps
-         * at 0x3F (KGAR PORT_ENTRY is 6 bits).  Reject port_id == 0
-         * (reserved for OP / null) and >= 0x40.  Previous bound of 10
-         * was the MAC cell-index ceiling and rejected legitimate 10G
-         * RX hwports 0x10 / 0x11 — see PR14z12-B diagnostic.
+         * range 0x01..0x31 (RX 1G base 0x08, RX 10G base 0x10).
+         * Silicon caps at 0x3F (KGAR PORT_ENTRY is 6 bits).
          */
         if (port_id == 0 || port_id > 0x3F) {
                 ask_pr_warn("hw: port-bind port_id 0x%02x out of range (0x01..0x3F)\n",
@@ -812,99 +851,99 @@ int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
         p = &h->pipe[dir];
 
         mutex_lock(&h->lock);
-
         if (p->bound_pid == port_id) {
                 mutex_unlock(&h->lock);
-                ask_pr_dbg("hw: port-bind v4-TCP idempotent (port %u, dir %u)\n",
+                ask_pr_dbg("hw: port-bind graft idempotent (port 0x%02x, dir %u)\n",
                            port_id, dir);
                 return 0;
         }
         if (p->bound_pid != 0xff) {
                 u8 cur = p->bound_pid;
                 mutex_unlock(&h->lock);
-                ask_pr_warn("hw: port-bind v4-TCP: pipeline dir=%u already owns port %u, refusing port %u\n",
+                ask_pr_warn("hw: port-bind graft: pipeline dir=%u already owns port 0x%02x, refusing port 0x%02x\n",
                             dir, cur, port_id);
                 return -EBUSY;
         }
-
         mutex_unlock(&h->lock);
 
+        if (!p->cc_tree) {
+                ask_pr_warn("hw: port-bind graft: dir=%u has no cc_tree (bring-up failed?)\n",
+                            dir);
+                return -ENODEV;
+        }
+
         /*
-         * Heavy work (scheme_create, attach_cc, bind_port) is done
-         * outside h->lock because the underlying fman_pcd_* APIs each
-         * take pcd->lock internally — nesting our mutex around them
-         * would risk inversion against the FMan driver's own paths.
+         * 1. Discover the kernel-owned scheme on this hwport + its base_fqid.
+         *    Heavy work outside h->lock because the FMan PCD APIs take
+         *    pcd->lock internally — nesting our mutex would invert.
          */
-        new_scheme = fman_pcd_kg_scheme_create(h->pcd, &h->kg_params_v4_tcp);
-        if (IS_ERR_OR_NULL(new_scheme)) {
-                rc = new_scheme ? PTR_ERR(new_scheme) : -ENOMEM;
-                ask_pr_warn("hw: port-bind v4-TCP: kg_scheme_create for port %u dir %u failed: %d\n",
-                            port_id, dir, rc);
+        rc = fman_pcd_kg_lookup_port_scheme(h->pcd, port_id, &sid, &base_fqid);
+        if (rc) {
+                ask_pr_warn("hw: port-bind graft: lookup_port_scheme(port=0x%02x) failed: %d (no kernel scheme on this hwport?)\n",
+                            port_id, rc);
+                return rc;
+        }
+        ask_pr_info("hw: port-bind graft: port 0x%02x dir %u — kernel scheme_id=%u base_fqid=0x%x\n",
+                    port_id, dir, sid, base_fqid);
+
+        /*
+         * 2. Lazily create cc_v4_tcp with miss-action = FORWARD_FQ(base_fqid).
+         *    This is the new architectural invariant: unmatched frames
+         *    fall back to the kernel's per-CPU RX FQ pool, preserving
+         *    ARP / SYN / ICMP / VPP AF_XDP delivery.
+         */
+        memset(&extract, 0, sizeof(extract));
+        extract.type   = FMAN_PCD_CC_EXTRACT_KEY;
+        extract.offset = 0;
+        extract.size   = ASK_HW_V4_KEY_WIDTH;
+
+        memset(&keys, 0, sizeof(keys));
+        keys.num_keys = 127;  /* PR14z5 hotfix: 127 per pipeline (MURAM budget) */
+        keys.keys = NULL;
+        keys.miss_action.type             = FMAN_PCD_ACTION_FORWARD_FQ;
+        keys.miss_action.forward_fq.fqid  = base_fqid;
+
+        new_node = fman_pcd_cc_node_create(p->cc_tree, &extract, &keys);
+        if (IS_ERR_OR_NULL(new_node)) {
+                rc = new_node ? PTR_ERR(new_node) : -ENOMEM;
+                ask_pr_warn("hw: port-bind graft: cc_node_create dir=%u failed: %d\n",
+                            dir, rc);
                 return rc;
         }
 
-        rc = fman_pcd_kg_attach_cc(new_scheme, p->cc_tree);
+        /*
+         * 3. Graft the CC tree onto the kernel-owned scheme by writing
+         *    KGSE_CCBS.  After this RMW, the kernel scheme keeps its
+         *    parser/extract recipe and fmkg_pe_sp binding intact, but
+         *    every dispatched frame now walks our CC tree instead of
+         *    going straight to the hash FQ.
+         */
+        rc = fman_pcd_kg_graft_cc(h->pcd, sid, p->cc_tree);
         if (rc) {
-                ask_pr_warn("hw: port-bind v4-TCP: kg_attach_cc for port %u dir %u failed: %d\n",
-                            port_id, dir, rc);
-                fman_pcd_kg_scheme_destroy(new_scheme);
-                return rc;
-        }
-
-        rc = fman_pcd_kg_bind_port(new_scheme, port_id);
-        if (rc) {
-                ask_pr_warn("hw: port-bind v4-TCP: kg_bind_port(port=%u dir=%u) failed: %d\n",
-                            port_id, dir, rc);
-                fman_pcd_kg_scheme_destroy(new_scheme);
+                ask_pr_warn("hw: port-bind graft: graft_cc(sid=%u) failed: %d\n",
+                            sid, rc);
+                fman_pcd_cc_node_destroy(new_node);
                 return rc;
         }
 
         mutex_lock(&h->lock);
         if (p->bound_pid != 0xff) {
-                /* Concurrent caller beat us to it. */
                 u8 cur = p->bound_pid;
                 mutex_unlock(&h->lock);
-                ask_pr_warn("hw: port-bind v4-TCP: race detected, pipeline dir=%u was bound to port %u concurrently; destroying duplicate scheme for port %u\n",
-                            dir, cur, port_id);
-                fman_pcd_kg_scheme_destroy(new_scheme);
+                ask_pr_warn("hw: port-bind graft: race — dir=%u bound to port 0x%02x concurrently; ungrafting duplicate sid=%u for port 0x%02x\n",
+                            dir, cur, sid, port_id);
+                (void)fman_pcd_kg_ungraft_cc(h->pcd, sid);
+                fman_pcd_cc_node_destroy(new_node);
                 return cur == port_id ? 0 : -EBUSY;
         }
-        p->scheme    = new_scheme;
+        p->cc_v4_tcp = new_node;
+        p->scheme_id = sid;
+        p->base_fqid = base_fqid;
         p->bound_pid = port_id;
         mutex_unlock(&h->lock);
 
-        /*
-         * PR14z7 (2026-05-19): arm FMBM_RFPNE → NIA_ENG_HWK on the
-         * ingress port's BMI Rx so post-Parser frames are routed into
-         * KeyGen instead of dropping out to the default-FQ.  Without
-         * this, the LS1046A DTS leaves pcd_fqs_count=0 → mainline
-         * fman_port_init() never calls fman_port_use_kg_hash() →
-         * FMBM_RFPNE stays at boot default NIA_ENG_BMI|ENQ_FRAME,
-         * meaning our KG scheme and CC tree are inert and every flow
-         * bypasses silicon.  Kernel patch 0039 exports
-         * dpaa_get_rx_fman_port() so we can resolve the netdev's RX
-         * port handle without poking dpaa_eth internals.
-         *
-         * Non-fatal: if fp is NULL, leave the port armed for KG-bind
-         * but not for FMBM_RFPNE — the flow will still install but
-         * frames will silently bypass.  Logged as warn so the
-         * operator can spot it in dmesg.
-         */
-        fp = dpaa_get_rx_fman_port(ingress_dev);
-        if (fp) {
-                fman_port_use_kg_hash(fp, true);
-                mutex_lock(&h->lock);
-                p->fman_port = fp;
-                mutex_unlock(&h->lock);
-                ask_pr_info("hw: port %u dir %u: FMBM_RFPNE → NIA_ENG_HWK (KeyGen enabled)\n",
-                            port_id, dir);
-        } else {
-                ask_pr_warn("hw: port %u dir %u: dpaa_get_rx_fman_port returned NULL — frames will bypass KG scheme (SW fallback)\n",
-                            port_id, dir);
-        }
-
-        ask_pr_info("hw: FMan PCD v4-TCP scheme bound to port %u dir %u (PR14z5 dual-pipeline — HW offload active)\n",
-                    port_id, dir);
+        ask_pr_info("hw: PR14z13 graft active: port 0x%02x dir %u → scheme_id=%u CCBS=cc_tree(dir=%u) miss=FORWARD_FQ(0x%x) — HW offload primed\n",
+                    port_id, dir, sid, dir, base_fqid);
         return 0;
 }
 EXPORT_SYMBOL_GPL(ask_hw_port_bind);
