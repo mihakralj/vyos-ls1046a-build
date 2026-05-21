@@ -1,0 +1,492 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: 2026-05-21T07:10:58Z
+Subject: [PATCH] patches/0042-fman-pcd-kg-graft-cc.patch
+
+PR14z13 (2026-05-21): graft an ASK CC tree onto an existing kernel-owned
+KG scheme instead of allocating a NEW scheme that loses the FMan KG
+dispatch race against the in-tree default.
+
+Background
+----------
+At MAC bringup, dpaa_eth.c calls keygen_port_hashing_init() for every
+probed FMan MAC.  That helper uses get_free_scheme_id() which is
+first-fit from slot 0 -> on LS1046A the 5 probed MACs (eth0..eth4)
+land in KG scheme slots 0..4 with match_vector=0 (catch-all hash
+distribution to per-CPU RX FQs).
+
+ASK's prior fman_pcd_kg_scheme_create() PR14z5 path then allocated
+NEW schemes at slot 5/6 (FWD/REV pipelines), bound them to the same
+hwports (0x10/0x11) as the in-tree defaults, and attached its CC tree
+via fman_pcd_kg_attach_cc().  Live silicon regdump on 2026-05-21
+confirmed the schemes are correctly programmed (kgse_mv=0x001c0006
+specific 5-tuple, kgse_ccbs=0x0005ac00/0x0005c200 valid CC handles,
+fmkg_pe_sp bits 26/25 = scheme IDs 5/6 via the 31-N reverse encoding
+in keygen_bind_port_to_schemes()).
+
+BUT the FMan v3 KG silicon dispatches EXACTLY ONE scheme per packet:
+the lowest scheme ID set in fmkg_pe_sp for the port wins.  Scheme 3
+(in-tree, kgse_mv=0, bound to 0x10) consumes every frame BEFORE
+scheme 5 (ASK) gets a look.  Measured kgse_spc: scheme 3 = 63,160,848
+during a 6.98 Gbps iperf3 -P 8 burst; scheme 5 = 0.
+
+Result: HW offload is fully inert; the 7 Gbps stream rides the kernel
+SW fast path consuming ~45-60% softirq CPU (M2 acceptance gate FAIL).
+
+Architectural fix
+-----------------
+Option A from the PR14z13 decision matrix: ASK does NOT create new
+KG schemes.  Instead, ASK GRAFTS its CC tree onto the EXISTING
+kernel-owned scheme via KGSE_CCBS programming.  The kernel scheme's
+parser/extract recipe stays unchanged; KGSE_CCBS is updated to point
+at ASK's CC tree.  The CC tree's miss-action falls back to the
+kernel scheme's original base_fqid, preserving kernel control-plane
+RX (ARP, SYN, ICMP) and VPP AF_XDP consumption via per-CPU FQs.
+
+This pattern is the strategic precedent for all future ASK2 features
+(NAT44, VLAN push/pop, IPsec offload via CAAM) and aligns with VPP's
+"layer on top, don't displace" philosophy:
+
+  kernel owns scheme identity -> ASK extends via CC -> VPP layers via AF_XDP
+                          ^                    ^                    ^
+                          |                    |                    |
+                      dpaa_eth.c          fman_pcd_kg_graft_cc   fsl_dpa+AF_XDP
+
+This patch
+----------
+Adds three new public API entry points:
+
+  fman_pcd_kg_lookup_port_scheme(pcd, port_id, *scheme_id, *base_fqid)
+    Reads fmkg_pe_sp[port_id] via AR-mediated indirect access, returns
+    the LOWEST scheme ID bound to that hwport (which is the one FMan
+    KG will actually dispatch to per packet) and that scheme's
+    KGSE_FQB base_fqid (so CC miss can fall back to it).  Returns
+    -ENOENT if no scheme is bound to the port.
+
+  fman_pcd_kg_graft_cc(pcd, scheme_id, cc_tree)
+    AR-mediated read-modify-write on KGSE_CCBS of the named scheme,
+    setting it to cc_tree's group_table_off (same encoding as the
+    existing fman_pcd_kg_attach_cc() applies to ASK-owned schemes).
+    The scheme MUST already be in 'used' state -- this helper does
+    not allocate.  Returns 0 on success.
+
+  fman_pcd_kg_ungraft_cc(pcd, scheme_id)
+    Symmetric inverse: AR-mediated RMW that clears KGSE_CCBS back to
+    0, restoring the scheme's pre-graft "scheme dispatches directly
+    to hash-FQ" behaviour.  Called from ask.ko on module unload.
+
+Implementation reuses the existing keygen_scheme_set_ccbs() primitive
+landed by PR14c-body-4 (patch 0012), which already does the correct
+AR-mediated RMW preserving every other KGSE_* field of the target
+scheme.  The new helper keygen_lookup_port_scheme() in fman_keygen.c
+adds a parallel AR-mediated read of fmkg_pe.fmkg_pe_sp via the
+SEL_PORT_ENTRY indirect window.
+
+Locking model unchanged: all three new entry points take pcd->lock
+via fman_pcd_get_lock() before touching keygen state.
+
+What this patch does NOT do
+---------------------------
+- Does NOT modify ask.ko.  The ASK-side rewrite of
+  ask_hw_port_bind() to call fman_pcd_kg_graft_cc() instead of
+  fman_pcd_kg_scheme_create()+bind+attach is a separate change in
+  kernel/flavors/ask/oot-modules/ask/ask_hw.c (PR14z13-ask, lands
+  next session).
+- Does NOT change CC tree miss-action semantics.  The CC tree's
+  miss_action.type = FMAN_PCD_ACTION_FORWARD_FQ with next_fqid =
+  <kernel scheme's base_fqid> is set by the ASK side using the
+  base_fqid returned by lookup_port_scheme().
+- Does NOT touch dpaa_eth.c.  Kernel-owned scheme allocation policy
+  is preserved verbatim; ASK simply grafts onto whatever the kernel
+  already allocated.
+
+Verification
+------------
+1. patch-health.sh --flavor ask --source release: must not regress.
+2. KUnit (lands in PR14z13-kunit): graft_unbound_scheme_returns_einval,
+   graft_then_ungraft_restores_kgse_ccbs_zero,
+   lookup_port_scheme_returns_lowest_bound.
+3. On hardware after the ASK side lands:
+   - bin/ask-pcd-regdump.py shows kgse_ccbs != 0 on the kernel scheme
+     (slot 3 or 4) after ask.ko load + first iperf3 burst.
+   - kgse_spc on the kernel scheme keeps incrementing (proves frames
+     are still walking the parser).
+   - kgse_spc on the ASK-created scheme slots (5/6) stays 0 because
+     ASK no longer creates them.
+   - eth3 rx_dropped stops growing and matches eth4 tx_packets minus
+     ACK overhead (proves CC tree is consuming the 5-tuple matches
+     and forwarding via silicon to peer TX FQ).
+   - bin/verify-ask-flow-offload.sh CPU metric drops from ~45-60% to
+     <=5% (M2 acceptance gate PASS).
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+index ffd407244..9b311fd8c 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+@@ -789,3 +789,102 @@ int keygen_port_hashing_init(struct fman_keygen *keygen, u8 hw_port_id,
+ 	return 0;
+ }
+ EXPORT_SYMBOL(keygen_port_hashing_init);
++
++/* keygen_lookup_port_scheme
++ *
++ * PR14z13: discover the lowest-ID KG scheme currently bound to a given
++ * BMI hwport, so an external PCD consumer (ask.ko) can GRAFT its CC
++ * tree onto an existing kernel-owned scheme instead of creating a new
++ * scheme that loses the FMan KG dispatch race.
++ *
++ * Walks fmkg_pe.fmkg_pe_sp[hwport_id] via the AR-mediated indirect
++ * access window (SEL_PORT_ENTRY, read), then iterates the set bits
++ * in the resulting scheme partition vector to find the lowest bound
++ * scheme ID -- which is the one FMan KG actually dispatches to per
++ * packet (silicon resolves multi-scheme port-bindings by lowest
++ * scheme ID wins).
++ *
++ * Then reads that scheme's KGSE_FQB (via SCHEME_ENTRY READ AR) to
++ * extract base_fqid so the caller's CC tree can use it as the
++ * FORWARD_FQ target for miss-action, preserving the kernel's RX hash
++ * distribution to per-CPU FQs for any packet that doesn't match an
++ * ASK CC node.
++ *
++ * Encoding reminder (RM 8.7.4): keygen_bind_port_to_schemes() sets
++ * fmkg_pe_sp bit (31 - scheme_id), so bit N decodes to scheme
++ * (31 - N).
++ *
++ * keygen:     KeyGen handle.
++ * hwport_id:  BMI hardware port id (LS1046A range 0x01..0x31).
++ * scheme_id:  out, lowest scheme ID currently bound to hwport.
++ * base_fqid:  out, that scheme's KGSE_FQB base_fqid (low 24 bits).
++ *
++ * Return: 0 on success, -ENOENT if no scheme is bound to the port,
++ * negative errno on AR access failure.
++ */
++int keygen_lookup_port_scheme(struct fman_keygen *keygen, u8 hwport_id,
++	      u8 *scheme_id, u32 *base_fqid)
++{
++	struct fman_kg_regs __iomem *regs;
++	u32 ar_reg;
++	u32 sp_vec;
++	u32 fqb;
++	int err;
++	int bit;
++	u8 sid = 0;
++
++	if (!keygen || !scheme_id || !base_fqid)
++		return -EINVAL;
++	if (hwport_id == 0 || hwport_id > 0x3F)
++		return -EINVAL;
++	regs = keygen->keygen_regs;
++
++	/*
++	 * Phase 1: read fmkg_pe_sp[hwport_id] via SEL_PORT_ENTRY READ AR.
++	 * build_ar_bind_scheme(hwport_id, false) builds the read variant.
++	 */
++	ar_reg = build_ar_bind_scheme(hwport_id, false);
++	err = keygen_write_ar_wait(regs, ar_reg);
++	if (err) {
++		pr_err("keygen_lookup_port_scheme: SP read AR failed for hwport 0x%02x\n",
++		       hwport_id);
++		return err;
++	}
++	sp_vec = ioread32be(&regs->fmkg_pe.fmkg_pe_sp);
++	if (sp_vec == 0)
++		return -ENOENT;
++
++	/*
++	 * Phase 2: find the lowest scheme ID set in sp_vec.  FMan KG
++	 * dispatches lowest-ID-first, so this is the scheme that actually
++	 * processes every packet on this port.  bit N -> scheme (31 - N).
++	 * Iterate from MSB downward; first set bit gives lowest scheme ID.
++	 */
++	for (bit = 31; bit >= 0; bit--) {
++		if (sp_vec & (1u << bit)) {
++			sid = (u8)(31 - bit);
++			goto found;
++		}
++	}
++	return -ENOENT;
++found:
++	/*
++	 * Phase 3: read that scheme's KGSE_FQB via SCHEME_ENTRY READ AR
++	 * (update_counter=false, write=false).  KGSE_FQB low 24 bits =
++	 * base_fqid; upper bits are pool-channel/spread config and are
++	 * not relevant for the CC tree's FORWARD_FQ target.
++	 */
++	ar_reg = build_ar_scheme(sid, false, false);
++	err = keygen_write_ar_wait(regs, ar_reg);
++	if (err) {
++		pr_err("keygen_lookup_port_scheme: scheme %u read AR failed\n",
++		       sid);
++		return err;
++	}
++	fqb = ioread32be(&regs->fmkg_sch.kgse_fqb);
++
++	*scheme_id = sid;
++	*base_fqid = fqb & 0x00FFFFFFu;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(keygen_lookup_port_scheme);
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h b/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
+index 04e007586..fe43fc8be 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
+@@ -110,6 +110,20 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+ int keygen_scheme_set_ccbs(struct fman_keygen *keygen, u8 scheme_id,
+ 	   u32 ccbs);
+ int keygen_bind_port_to_schemes(struct fman_keygen *keygen, u8 scheme_id,
+-				bool bind);
++bool bind);
+ 
+-#endif /* __FMAN_KEYGEN_INTERNAL_H */
+\ No newline at end of file
++/* keygen_lookup_port_scheme:
++ *   PR14z13 — discover the lowest-ID KG scheme currently bound to a
++ *   given BMI hwport, plus that scheme's KGSE_FQB base_fqid.  Used by
++ *   the public ABI fman_pcd_kg_lookup_port_scheme() so external PCD
++ *   consumers (ask.ko) can GRAFT a CC tree onto an existing kernel-
++ *   owned scheme instead of allocating a NEW scheme that loses the
++ *   FMan KG dispatch race (silicon dispatches lowest-ID-bound scheme
++ *   per packet — see fman_keygen.c::keygen_bind_port_to_schemes()
++ *   reverse-bit encoding, bit N in fmkg_pe_sp -> scheme (31 - N)).
++ *   Caller must hold the PCD lock around this call.
++ */
++int keygen_lookup_port_scheme(struct fman_keygen *keygen, u8 hwport_id,
++      u8 *scheme_id, u32 *base_fqid);
++
++#endif /* __FMAN_KEYGEN_INTERNAL_H */
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+index 85a6d3a3d..81bd3b04a 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+@@ -456,4 +456,163 @@ mutex_unlock(lock);
+ 
+ kfree(scheme);
+ }
+-EXPORT_SYMBOL_GPL(fman_pcd_kg_scheme_destroy);
+\ No newline at end of file
++EXPORT_SYMBOL_GPL(fman_pcd_kg_scheme_destroy);
++/**
++ * fman_pcd_kg_lookup_port_scheme() - PR14z13: find the kernel-owned KG
++ *                                    scheme on a port and report its
++ *                                    base_fqid.
++ *
++ * External PCD consumers (ask.ko) need to GRAFT their CC tree onto the
++ * in-tree default KG scheme that dpaa_eth allocated at MAC bringup,
++ * instead of creating a NEW scheme that would lose the FMan KG dispatch
++ * race (lowest-ID-bound scheme wins per packet; silicon dispatches
++ * exactly one scheme per packet).
++ *
++ * Wraps keygen_lookup_port_scheme() with public-ABI argument validation
++ * and pcd->lock acquisition.
++ *
++ * @pcd:       FMan PCD handle from fman_get_pcd().
++ * @port_id:   BMI hardware port id (LS1046A 0x01..0x31).
++ * @scheme_id: out, the lowest scheme ID currently bound to @port_id
++ *             (this is the scheme FMan KG will actually dispatch).
++ * @base_fqid: out, that scheme's KGSE_FQB base_fqid -- the value the
++ *             caller should use as the FORWARD_FQ target for its CC
++ *             tree's miss-action (preserves kernel RX hash + control
++ *             plane delivery for unmatched packets).
++ *
++ * Return: 0 on success, -ENOENT if no scheme bound to @port_id,
++ * -EINVAL on bad args, -ENXIO if FMan keygen not initialised.
++ */
++int fman_pcd_kg_lookup_port_scheme(struct fman_pcd *pcd, u8 port_id,
++			   u8 *scheme_id, u32 *base_fqid)
++{
++	struct fman_keygen *keygen;
++	struct fman *fman;
++	struct mutex *lock;
++	int err;
++
++	if (!pcd || !scheme_id || !base_fqid)
++		return -EINVAL;
++	if (port_id == 0 || port_id > 0x3F)
++		return -EINVAL;
++
++	fman = fman_pcd_get_fman(pcd);
++	if (!fman || !fman->keygen)
++		return -ENXIO;
++	keygen = fman->keygen;
++	lock = fman_pcd_get_lock(pcd);
++
++	mutex_lock(lock);
++	err = keygen_lookup_port_scheme(keygen, port_id, scheme_id, base_fqid);
++	mutex_unlock(lock);
++
++	return err;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_kg_lookup_port_scheme);
++
++/**
++ * fman_pcd_kg_graft_cc() - PR14z13: graft a CC tree onto an existing
++ *                          KG scheme identified by scheme_id.
++ *
++ * The architectural alternative to fman_pcd_kg_attach_cc() for the
++ * "extend kernel-owned scheme" pattern.  Where attach_cc() programs
++ * KGSE_CCBS on a scheme created by THIS module (the caller owns the
++ * scheme handle), graft_cc() programs KGSE_CCBS by scheme_id ALONE so
++ * the kernel scheme allocated by dpaa_eth -- which has no public handle
++ * -- can also be extended.
++ *
++ * The scheme MUST already be in 'used' state (this is enforced by
++ * keygen_scheme_set_ccbs()); graft_cc() does not allocate.  After
++ * graft, every packet that the kernel scheme would have hash-dispatched
++ * to a per-CPU RX FQ now walks @cc first; CC tree matches go wherever
++ * the CC key's action specifies; CC tree misses MUST be configured by
++ * the caller to fall back to FORWARD_FQ(base_fqid) so kernel control
++ * plane RX (ARP, SYN, ICMP) keeps working.
++ *
++ * Use fman_pcd_kg_lookup_port_scheme() first to discover @scheme_id +
++ * @base_fqid for the target hwport.
++ *
++ * Locking: takes pcd->lock around keygen_scheme_set_ccbs() (which
++ * does an AR-mediated indirect RMW on KGSE_CCBS only, preserving
++ * every other KGSE_* field that keygen_scheme_setup() programmed).
++ *
++ * @pcd:       FMan PCD handle.
++ * @scheme_id: scheme ID returned by fman_pcd_kg_lookup_port_scheme(),
++ *             or any other valid scheme ID in 'used' state.
++ * @cc:        CC tree handle from fman_pcd_cc_tree_create().
++ *
++ * Return: 0 on success or negative errno (the scheme must already be
++ * in 'used' state -- this helper does not allocate).
++ */
++int fman_pcd_kg_graft_cc(struct fman_pcd *pcd, u8 scheme_id,
++		 struct fman_pcd_cc_tree *cc)
++{
++	struct fman_keygen *keygen;
++	struct fman *fman;
++	struct mutex *lock;
++	unsigned long off;
++	u32 ccbs;
++	int err;
++
++	if (!pcd || !cc)
++		return -EINVAL;
++
++	fman = fman_pcd_get_fman(pcd);
++	if (!fman || !fman->keygen)
++		return -ENXIO;
++	keygen = fman->keygen;
++
++	off = fman_pcd_cc_tree_group_table_off(cc);
++	if (off == 0)
++		return -EINVAL;
++	/* Low 24 bits: MURAM is well under 16 MiB on every FMan v3. */
++	ccbs = (u32)off & 0x00FFFFFFu;
++
++	lock = fman_pcd_get_lock(pcd);
++	mutex_lock(lock);
++	err = keygen_scheme_set_ccbs(keygen, scheme_id, ccbs);
++	mutex_unlock(lock);
++
++	return err;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_kg_graft_cc);
++
++/**
++ * fman_pcd_kg_ungraft_cc() - PR14z13: reverse fman_pcd_kg_graft_cc().
++ *
++ * Clears KGSE_CCBS back to 0, restoring the scheme's pre-graft
++ * "scheme dispatches directly to hash-FQ" behaviour.  Called from
++ * ask.ko on module unload so the kernel default RX hash works
++ * unchanged after ASK goes away.
++ *
++ * Idempotent: ungrafting a scheme that already has KGSE_CCBS=0 is
++ * a no-op write but returns 0 (no error reporting on this path).
++ *
++ * @pcd:       FMan PCD handle.
++ * @scheme_id: scheme ID previously passed to fman_pcd_kg_graft_cc().
++ *
++ * Return: 0 on success or negative errno.
++ */
++int fman_pcd_kg_ungraft_cc(struct fman_pcd *pcd, u8 scheme_id)
++{
++	struct fman_keygen *keygen;
++	struct fman *fman;
++	struct mutex *lock;
++	int err;
++
++	if (!pcd)
++		return -EINVAL;
++
++	fman = fman_pcd_get_fman(pcd);
++	if (!fman || !fman->keygen)
++		return -ENXIO;
++	keygen = fman->keygen;
++
++	lock = fman_pcd_get_lock(pcd);
++	mutex_lock(lock);
++	err = keygen_scheme_set_ccbs(keygen, scheme_id, 0);
++	mutex_unlock(lock);
++
++	return err;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_kg_ungraft_cc);
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 6207cc4af..4255cca64 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -253,6 +253,61 @@ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
+  */
+ void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme);
+ 
++/**
++ * fman_pcd_kg_lookup_port_scheme() - PR14z13: discover the kernel-owned
++ *                                    KG scheme bound to an FMan port.
++ * @pcd:       FMan PCD handle from fman_get_pcd().
++ * @port_id:   BMI hardware port id (LS1046A 0x01..0x31).
++ * @scheme_id: out, lowest scheme ID currently bound to @port_id (FMan
++ *             KG dispatches lowest-ID first; this is the one that
++ *             actually processes every packet on this port).
++ * @base_fqid: out, that scheme's KGSE_FQB base_fqid -- use as the
++ *             FORWARD_FQ target for CC tree miss-action to preserve
++ *             kernel RX hash + control plane delivery.
++ *
++ * Used by external PCD consumers (ask.ko) BEFORE calling
++ * fman_pcd_kg_graft_cc() so they can graft onto the kernel-owned
++ * scheme allocated by dpaa_eth at MAC bringup, instead of creating a
++ * NEW scheme that would lose the FMan KG dispatch race.
++ *
++ * Return: 0 on success, -ENOENT if no scheme is bound to @port_id,
++ * -EINVAL on bad args, -ENXIO if FMan keygen not initialised.
++ */
++int fman_pcd_kg_lookup_port_scheme(struct fman_pcd *pcd, u8 port_id,
++				   u8 *scheme_id, u32 *base_fqid);
++
++/**
++ * fman_pcd_kg_graft_cc() - PR14z13: attach a CC tree to an existing
++ *                          KG scheme identified by ID (not by handle).
++ * @pcd:       FMan PCD handle.
++ * @scheme_id: scheme ID returned by fman_pcd_kg_lookup_port_scheme(),
++ *             or any other valid scheme ID in 'used' state.
++ * @cc:        CC tree handle from fman_pcd_cc_tree_create().
++ *
++ * The architectural alternative to fman_pcd_kg_attach_cc() for the
++ * "extend kernel-owned scheme" pattern.  CC tree's miss-action MUST
++ * be configured by the caller to FORWARD_FQ to the scheme's
++ * @base_fqid so kernel control plane RX (ARP, SYN, ICMP) keeps
++ * working for unmatched packets.
++ *
++ * Return: 0 on success or negative errno.
++ */
++int fman_pcd_kg_graft_cc(struct fman_pcd *pcd, u8 scheme_id,
++			 struct fman_pcd_cc_tree *cc);
++
++/**
++ * fman_pcd_kg_ungraft_cc() - PR14z13: reverse fman_pcd_kg_graft_cc().
++ * @pcd:       FMan PCD handle.
++ * @scheme_id: scheme ID previously passed to fman_pcd_kg_graft_cc().
++ *
++ * Clears KGSE_CCBS back to 0.  Idempotent.  Called from ask.ko on
++ * module unload so the kernel default RX hash works unchanged
++ * after ASK goes away.
++ *
++ * Return: 0 on success or negative errno.
++ */
++int fman_pcd_kg_ungraft_cc(struct fman_pcd *pcd, u8 scheme_id);
++
+ /*
+  * Coarse Classifier (CC) API (PR14c).
+  *
