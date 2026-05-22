@@ -854,9 +854,9 @@ int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
         struct fman_pcd_cc_node *new_node = NULL;
         u8  sid = 0xff;
         u32 base_fqid = 0;
+        u32 hash_base_fqid = 0;
+        u32 dpaa_default_fqid = 0;
         int rc;
-
-        (void)ingress_dev;  /* PR14z13: kernel already armed FMBM_RFPNE */
 
         if (!h)
                 return -ENODEV;
@@ -908,14 +908,57 @@ int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
          *    Heavy work outside h->lock because the FMan PCD APIs take
          *    pcd->lock internally — nesting our mutex would invert.
          */
-        rc = fman_pcd_kg_lookup_port_scheme(h->pcd, port_id, &sid, &base_fqid);
+        rc = fman_pcd_kg_lookup_port_scheme(h->pcd, port_id, &sid, &hash_base_fqid);
         if (rc) {
                 ask_pr_warn("hw: port-bind graft: lookup_port_scheme(port=0x%02x) failed: %d (no kernel scheme on this hwport?)\n",
                             port_id, rc);
                 return rc;
         }
-        ask_pr_info("hw: port-bind graft: port 0x%02x dir %u — kernel scheme_id=%u base_fqid=0x%x\n",
-                    port_id, dir, sid, base_fqid);
+
+        /*
+         * PR14z16 (2026-05-22): the value returned by lookup_port_scheme()
+         * is KGSE_FQB low 24 bits — the BASE of the KG hash-distribution
+         * range (e.g. 0x200 for eth3 → FQs 0x200..0x203 sharded by per-CPU
+         * NAPI affinity).  It is NOT a single pollable FQ.  Pointing a
+         * CC-engine FORWARD_FQ miss-action at this base lands every
+         * unmatched frame (ARP/SYN/ICMP/non-TCP) in the hash bucket for
+         * CPU 0 only; many of those frames are dropped before the
+         * specific NAPI instance dequeues, manifesting as ~50% rx_dropped
+         * and total ARP loss on the post-graft control plane
+         * (verified 2026-05-22 on Mono DUT, ISO 0559).
+         *
+         * The kernel's actual "default RX FQ" — the one the BMI port
+         * targets via FMBM_RFQID and the one dpaa_eth allocates as
+         * FQ_TYPE_RX_DEFAULT and polls on EVERY NAPI instance as the
+         * fallback for non-PCD packets — is exported by patch 0028
+         * (dpaa_get_rx_default_fqid).  Use it as the miss-action target
+         * so the CC engine drops unmatched frames into the same FQ the
+         * kernel was already polling for unhashed traffic.
+         *
+         * Fallback: if dpaa_get_rx_default_fqid() is unavailable (e.g.
+         * kunit-test path with a synthetic netdev, or a non-DPAA host),
+         * fall back to the hash-base value.  This preserves the prior
+         * (broken-on-LS1046A-silicon) behaviour for those environments
+         * rather than refusing the bind outright.
+         */
+        base_fqid = hash_base_fqid;
+        if (ingress_dev) {
+                u32 dflt = 0;
+                int drc = dpaa_get_rx_default_fqid(ingress_dev, &dflt);
+
+                if (drc == 0 && dflt != 0) {
+                        dpaa_default_fqid = dflt;
+                        base_fqid = dflt;
+                } else {
+                        ask_pr_warn("hw: port-bind graft: dpaa_get_rx_default_fqid(%s) = %d — falling back to KGSE_FQB hash-base 0x%x (may break control-plane RX)\n",
+                                    netdev_name(ingress_dev), drc,
+                                    hash_base_fqid);
+                }
+        }
+
+        ask_pr_info("hw: port-bind graft: port 0x%02x dir %u — kernel scheme_id=%u KGSE_FQB hash-base=0x%x dpaa RX_DEFAULT=0x%x → miss-action FQ=0x%x\n",
+                    port_id, dir, sid, hash_base_fqid,
+                    dpaa_default_fqid, base_fqid);
 
         /*
          * 2. Lazily create cc_v4_tcp with miss-action = FORWARD_FQ(base_fqid).
@@ -973,8 +1016,8 @@ int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
         p->bound_pid = port_id;
         mutex_unlock(&h->lock);
 
-        ask_pr_info("hw: PR14z13 graft active: port 0x%02x dir %u → scheme_id=%u CCBS=cc_tree(dir=%u) miss=FORWARD_FQ(0x%x) — HW offload primed\n",
-                    port_id, dir, sid, dir, base_fqid);
+        ask_pr_info("hw: PR14z13+z16 graft active: port 0x%02x dir %u → scheme_id=%u CCBS=cc_tree(dir=%u) miss=FORWARD_FQ(0x%x [dpaa RX_DEFAULT, was hash-base 0x%x]) — HW offload primed\n",
+                    port_id, dir, sid, dir, base_fqid, hash_base_fqid);
         return 0;
 }
 EXPORT_SYMBOL_GPL(ask_hw_port_bind);
