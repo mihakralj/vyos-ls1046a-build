@@ -204,8 +204,39 @@ EXPORT_SYMBOL_GPL(ask_hw_ucode_get_version);
 #define ASK_HW_PR_OFF_L4_SPORT  20
 #define ASK_HW_PR_OFF_L4_DPORT  22
 
-/* KG-concatenated 5-tuple width = SIP(4) + DIP(4) + proto(1) + sport(2) + dport(2). */
-#define ASK_HW_V4_KEY_WIDTH     13
+/*
+ * PR14z14 (2026-05-22): silicon-truth CC key width and layout.
+ *
+ * The kernel-owned KG scheme on each FMan ingress port (programmed by
+ * keygen_port_hashing_init() in drivers/net/ethernet/freescale/fman/
+ * fman_keygen.c) sets kgse_ekfc = DEFAULT_HASH_KEY_EXTRACT_FIELDS =
+ * (IPSRC1 | IPDST1 | IPSEC_SPI | L4PSRC | L4PDST).  FMan v3 silicon
+ * extracts those fields in BIT-POSITION ORDER MSB-first per RM 8.7.4
+ * and concatenates the bytes into the stream that the CC tree (grafted
+ * via KGSE_CCBS by patch 0042 fman_pcd_kg_graft_cc) consumes through
+ * FMAN_PCD_CC_EXTRACT_KEY.  That stream is:
+ *
+ *   [ IPSRC1:4 ][ IPDST1:4 ][ IPSEC_SPI:4 ][ L4PSRC:2 ][ L4PDST:2 ]
+ *   total = 16 bytes; no L4 proto byte; SPI sits between DIP and sports.
+ *
+ * For non-IPSec TCP/UDP frames the silicon-extracted SPI is zero (the
+ * parse engine has no IPSec header to source from and the kgse_ekdv /
+ * kgse_dv0/dv1 default-substitution fields configured by the kernel
+ * cover only IP-addr and L4-port, not SPI).  We therefore install CC
+ * keys with bytes 8..11 = 0x00000000 and mask = 0xff so they MATCH a
+ * non-IPSec frame and MISS an IPSec frame (whose SPI is non-zero per
+ * RFC 4303).  This makes the v4-TCP/UDP fast path on this CC node
+ * implicitly non-IPSec — exactly the M2 acceptance scope.
+ *
+ * Pre-PR14z14 the code used width=13 with [SIP|DIP|PROTO|SPORT|DPORT]
+ * which mismatched the silicon stream in two ways (extra proto byte at
+ * offset 8, ports shifted left by 1 and truncated last byte), causing
+ * EVERY flow to MISS the CC lookup and fall through to miss_action.
+ * forward_fq = base_fqid, i.e. back into the kernel RX hash FQ.  Net
+ * effect: graft installed but unused, kernel SW fastpath carried all
+ * traffic, M2 CPU stuck at 20-27%% softirq at 6.9 Gbps.
+ */
+#define ASK_HW_V4_KEY_WIDTH     16
 
 /*
  * PR14z5 (2026-05-19): one independent classifier pipeline per
@@ -531,7 +562,7 @@ static int ask_hw_pcd_build_chain(struct ask_hw_pcd *h)
         kg_params->extracts[4].size   = 2;
         kg_params->extracts[4].mask   = 0xff;
 
-        ask_pr_info("hw: FMan PCD chain up — PR14z13 graft model (FWD + REV cc_trees ready; cc_v4_tcp nodes deferred to ask_hw_port_bind for per-port miss-action FORWARD_FQ(base_fqid))\n");
+        ask_pr_info("hw: FMan PCD chain up — PR14z13 graft model + PR14z14 silicon-truth key layout (16B [SIP|DIP|SPI=0|SPORT|DPORT], FWD + REV cc_trees ready; cc_v4_tcp nodes deferred to ask_hw_port_bind for per-port miss-action FORWARD_FQ(base_fqid))\n");
         return 0;
 
 err_unwind:
@@ -1111,12 +1142,30 @@ static int ask_hw_flow_insert_v4_tcp(struct ask_hw_pcd *h,
         }
 
         /* 4. Install ingress CC key with MANIPULATE -> chain -> peer_tx_fqid. */
+        /*
+         * PR14z14 (2026-05-22): lay out the CC key to match the
+         * silicon-emitted byte stream from the upstream KG scheme:
+         *   [0..3]   IPSRC1     = key->src_ip
+         *   [4..7]   IPDST1     = key->dst_ip
+         *   [8..11]  IPSEC_SPI  = 0x00000000   (TCP/UDP frames have
+         *                                       no SPI; silicon emits
+         *                                       zeros for these fields)
+         *   [12..13] L4PSRC     = key->sport
+         *   [14..15] L4PDST     = key->dport
+         * Mask is 0xff per byte so SPI=0 must match exactly, which
+         * implicitly filters out IPSec ESP frames (their non-zero SPI
+         * cannot collide with TCP/UDP keys here).  No L4 proto byte
+         * appears in the silicon stream — the kernel KG scheme does
+         * NOT extract KG_SCH_KN_IPPID so we MUST NOT pre-load proto
+         * into the key.  TCP-vs-UDP demux happens upstream in conntrack;
+         * the CC node only needs to match the 4-tuple + zero-SPI guard.
+         */
         memset(&entry, 0, sizeof(entry));
         memcpy(&entry.key[0],  &key->src_ip[0], 4);
         memcpy(&entry.key[4],  &key->dst_ip[0], 4);
-        entry.key[8] = IPPROTO_TCP;
-        memcpy(&entry.key[9],  &key->sport, 2);
-        memcpy(&entry.key[11], &key->dport, 2);
+        /* entry.key[8..11] left as zero (SPI guard) by the memset above. */
+        memcpy(&entry.key[12], &key->sport, 2);
+        memcpy(&entry.key[14], &key->dport, 2);
         memset(&entry.mask[0], 0xff, ASK_HW_V4_KEY_WIDTH);
 
         act = &entry.action;
