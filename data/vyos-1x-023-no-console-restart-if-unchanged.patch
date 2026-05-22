@@ -1,0 +1,182 @@
+diff --git a/src/conf_mode/system_console.py b/src/conf_mode/system_console.py
+index 51c95fc..b55b3a2 100755
+--- a/src/conf_mode/system_console.py
++++ b/src/conf_mode/system_console.py
+@@ -23,13 +23,55 @@
+ from vyos.utils.serial import restart_login_consoles
+ from vyos.utils.serial import is_tty
+ from vyos.system import grub_util
+-from vyos.template import render
++from vyos.template import render_to_string
+ from vyos import ConfigError
+ from vyos import airbag
+ airbag.enable()
+ 
+ by_bus_dir = '/dev/serial/by-bus'
+ 
++# LS1046A: tracks whether any serial-getty drop-in file was actually
++# modified during generate(). apply() uses this to decide whether to call
++# restart_login_consoles().
++#
++# Background: the original generate() unconditionally os.unlink()'d every
++# serial-getty*.service file in /run/systemd/system, then re-rendered
++# them. On a serial-console-only board with `console=ttyS0` in the kernel
++# cmdline, the unit-file disappearance, combined with the subsequent
++# `systemctl daemon-reload` issued elsewhere in the vyos-router pipeline,
++# makes systemd GC the running serial-getty@ttyS0 instance and emit an
++# explicit Stop job (MESSAGE_ID=de5b426a..., JOB_TYPE=stop, _PID=1
++# _COMM=systemd). Restart=always does NOT recover from explicit stops
++# (systemd.service(5)), so the console stays dead until a much later
++# commit-phase restart_login_consoles() brings it back up — 21+ s on
++# LS1046A. The fix: never touch a drop-in unless its rendered replacement
++# is genuinely different. systemd then sees no unit-file disappearance
++# during daemon-reload and emits no GC stop job.
++_serial_getty_files_changed: bool = False
++
++def _read_file_bytes(path: str) -> bytes:
++    try:
++        with open(path, 'rb') as f:
++            return f.read()
++    except OSError:
++        return b''
++
++def _write_if_changed(path: str, content: str) -> bool:
++    """Write content to path only if the on-disk bytes differ. Returns True
++    if a write occurred, False if the file was already byte-identical.
++    The parent directory is created if missing. Uses temp-file + rename
++    so systemd never sees a partial/empty file during a concurrent
++    daemon-reload."""
++    new_bytes = content.encode('utf-8')
++    if os.path.isfile(path) and _read_file_bytes(path) == new_bytes:
++        return False
++    os.makedirs(os.path.dirname(path), exist_ok=True)
++    tmp_path = path + '.tmp'
++    with open(tmp_path, 'wb') as f:
++        f.write(new_bytes)
++    os.rename(tmp_path, path)
++    return True
++
+ def get_config(config=None):
+     if config:
+         conf = config
+@@ -83,15 +125,33 @@ def verify(console):
+ 
+ def generate(console):
+     base_dir = '/run/systemd/system'
+-    # Remove all serial-getty configuration files in advance
+-    for root, dirs, files in os.walk(base_dir):
+-        for basename in files:
+-            if 'serial-getty' in basename:
+-                os.unlink(os.path.join(root, basename))
++    global _serial_getty_files_changed
++    _serial_getty_files_changed = False
++
++    # LS1046A: enumerate existing serial-getty drop-ins but DO NOT unlink
++    # them yet. We unlink only files that are genuinely stale (devices no
++    # longer in config) at the end. Files for devices still in config are
++    # left in place if the rendered replacement matches byte-for-byte.
++    existing_serial_getty_files = set()
++    if os.path.isdir(base_dir):
++        for entry in os.listdir(base_dir):
++            if entry.startswith('serial-getty@') and entry.endswith('.service'):
++                existing_serial_getty_files.add(entry)
+ 
+     # Define a default console on a tty framebuffer
+     default_tty_console = ('tty', '0', '')
+     if not console or 'device' not in console:
++        # No console devices configured: remove any stale renders that exist.
++        for entry in existing_serial_getty_files:
++            _serial_getty_files_changed = True
++            try:
++                os.unlink(os.path.join(base_dir, entry))
++            except OSError:
++                pass
++            try:
++                os.unlink(os.path.join(base_dir, 'getty.target.wants', entry))
++            except OSError:
++                pass
+         grub_util.update_serial_console(*default_tty_console)
+         return None
+ 
+@@ -112,6 +172,7 @@ def generate(console):
+             else:
+                 raise ConfigError(f'Device {device} does not support being used as tty')
+ 
++    rendered_filenames = set()
+     for device, device_config in console['device'].items():
+         # Do not render getty configuration if specified device is not a TTY.
+         if not is_tty(device):
+@@ -119,9 +180,28 @@ def generate(console):
+         config_file = base_dir + f'/serial-getty@{device}.service'
+         Path(f'{base_dir}/getty.target.wants').mkdir(exist_ok=True)
+         getty_wants_symlink = base_dir + f'/getty.target.wants/serial-getty@{device}.service'
++        rendered_filenames.add(f'serial-getty@{device}.service')
+ 
+-        render(config_file, 'getty/serial-getty.service.j2', device_config)
+-        os.symlink(config_file, getty_wants_symlink)
++        # Render to string first so we can compare against the existing
++        # file. Only write if content differs — this avoids the unit-file
++        # disappearance window that triggers systemd GC stop on the next
++        # daemon-reload.
++        rendered = render_to_string('getty/serial-getty.service.j2', device_config)
++        if _write_if_changed(config_file, rendered):
++            _serial_getty_files_changed = True
++
++        # Ensure the getty.target.wants symlink exists and points at us.
++        try:
++            current_target = os.readlink(getty_wants_symlink)
++        except OSError:
++            current_target = None
++        if current_target != config_file:
++            try:
++                os.unlink(getty_wants_symlink)
++            except OSError:
++                pass
++            os.symlink(config_file, getty_wants_symlink)
++            _serial_getty_files_changed = True
+ 
+         if 'kernel' in device_config:
+             # get console type ("ttyS" or "ttyAMA") from device (e.g. "ttyS0")
+@@ -129,6 +209,18 @@ def generate(console):
+             console_num = device[len(console_type):]
+             default_tty_console = (console_type, console_num, device_config['speed'])
+ 
++    # Remove stale renders for devices that are no longer in config.
++    for stale in existing_serial_getty_files - rendered_filenames:
++        _serial_getty_files_changed = True
++        try:
++            os.unlink(os.path.join(base_dir, stale))
++        except OSError:
++            pass
++        try:
++            os.unlink(os.path.join(base_dir, 'getty.target.wants', stale))
++        except OSError:
++            pass
++
+     grub_util.update_serial_console(*default_tty_console)
+     return None
+ 
+@@ -139,7 +231,15 @@ def apply(console):
+     # Service control moved to vyos.utils.serial to unify checks and prompts.
+     # If users are connected, we want to show an informational message on completing
+     # the process, but not halt configuration processing with an interactive prompt.
+-    restart_login_consoles(prompt_user=False, quiet=False)
++    #
++    # LS1046A: skip restart_login_consoles() if generate() did not touch
++    # any serial-getty drop-in file. systemctl restart performs an
++    # explicit Stop of serial-getty@*, which kills the agetty; with
++    # Restart=always agetty does NOT recover from explicit Stop per
++    # systemd.service(5), and on serial-only boards this swallows
++    # keystrokes from the operator until the fresh agetty attaches.
++    if _serial_getty_files_changed:
++        restart_login_consoles(prompt_user=False, quiet=False)
+ 
+     if not console:
+         return None
+@@ -158,4 +258,4 @@ def apply(console):
+         apply(c)
+     except ConfigError as e:
+         print(e)
+-        exit(1)
++        exit(1)
+\ No newline at end of file
