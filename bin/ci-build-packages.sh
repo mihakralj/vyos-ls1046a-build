@@ -405,6 +405,26 @@ for package in $packages; do
             cp "$MONO_DTB" "$INCLUDES_BIN/mono-gw.dtb"
             cp "$MONO_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
             echo "### FLAVOR=$FLAVOR → mainline DTB selected as PRIMARY mono-gw.dtb"
+          elif [ -f "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" ] \
+               && [ "$(stat -c %Y "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb")" -gt "$(stat -c %Y "$GITHUB_WORKSPACE/board/dtb/mono-gateway-dk.dts")" ]; then
+            # ci-compile-mono-dtb.sh ran earlier in this CI run (workflow step
+            # "Compile Mono DTB from DTS" at .github/workflows/auto-build.yml
+            # line 223; bin/local-build.sh:166 for local builds) and produced
+            # board/dtb/mono-gw.dtb FROM the current DTS in this workspace by
+            # sparse-cloning linux-stable at the matching kernel tag. We verify
+            # by mtime ordering, so a stale committed DTB cannot sneak past.
+            # The in-kernel-tree DTB build attempt above blew up because
+            # vyos-build's bindeb-pkg wipes .config (and friends) after
+            # packaging, leaving the kernel tree unconfigured for the dtbs
+            # target. Re-using the pre-compiled DTB is safe — it came from
+            # the same DTS we would have compiled here, against the same
+            # kernel tag.
+            cp "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" "$INCLUDES_BIN/mono-gw.dtb"
+            cp "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" "$INCLUDES_CHR/boot/mono-gw.dtb"
+            # Also publish under the named alias for diagnostic parity with
+            # the in-tree build path.
+            cp "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" "$INCLUDES_BIN/mono-gw-mainline.dtb"
+            echo "### FLAVOR=$FLAVOR → falling back to pre-compiled board/dtb/mono-gw.dtb (mtime > DTS mtime, ci-compile-mono-dtb.sh output; in-tree make failed rc=$MAKE_RC because bindeb-pkg cleaned .config)"
           elif [ "$SDK_DTB_OK" = true ]; then
             echo "FATAL: FLAVOR=$FLAVOR and mainline DTB build failed (rc=$MAKE_RC)."
             echo "FATAL: refusing to ship SDK DTB as primary on a non-ASK flavor — that"
