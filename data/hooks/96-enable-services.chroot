@@ -51,6 +51,15 @@ ln -sf "/lib/systemd/system/serial-getty@.service" \
        "/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service"
 echo "  enabled: serial-getty@ttyS0.service → getty.target"
 
+# Defensive: scrub any stale ls1046a-console.service enable symlink that an
+# older squashfs layer (pre-cutover ISO) or an operator's emergency
+# `systemctl enable ls1046a-console.service` may have left in the persistent
+# overlay. Two enabled agetty -L instances on /dev/ttyS0 both Restart=always
+# → both hit start-limit-hit within ~10s → console dies; SSH stays alive,
+# masking the failure (the exact symptom reported 2026-05-18).
+rm -f /etc/systemd/system/getty.target.wants/ls1046a-console.service \
+      /etc/systemd/system/multi-user.target.wants/ls1046a-console.service
+
 # NOTE: ls1046a-console.service is intentionally NOT enabled.
 #
 # It was originally added (commit 1876cff1 era) as a separate-named agetty
