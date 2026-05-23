@@ -74,7 +74,7 @@ Signed-off-by: ASK2 build bot <ask2-build@kralj.dev>
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-@@ -528,6 +528,76 @@ int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id)
+@@ -528,6 +528,79 @@ int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id)
  }
  EXPORT_SYMBOL_GPL(dpaa_get_fman_port_id);
  
@@ -154,7 +154,7 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethern
  static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
   void *type_data)
  {
-@@ -1359,7 +1429,8 @@ static int dpaa_fq_init(struct dpaa_fq *dpaa_fq, bool td_enable)
+@@ -1359,8 +1432,9 @@ static int dpaa_fq_init(struct dpaa_fq *dpaa_fq, bool td_enable)
  		 * place them in the netdev's CGR, along with the Tx FQs.
  		 */
  		if (dpaa_fq->fq_type == FQ_TYPE_TX ||
@@ -165,7 +165,7 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethern
  			initfq.we_mask |= cpu_to_be16(QM_INITFQ_WE_CGID);
  			initfq.fqd.fq_ctrl |= cpu_to_be16(QM_FQCTRL_CGE);
  			initfq.fqd.cgid = (u8)priv->cgr_data.cgr.cgrid;
-@@ -1405,6 +1476,13 @@ static int dpaa_fq_init(struct dpaa_fq *dpaa_fq, bool td_enable)
+@@ -1405,6 +1479,16 @@ static int dpaa_fq_init(struct dpaa_fq *dpaa_fq, bool td_enable)
  			}
  		}
  
@@ -196,7 +196,7 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethern
 diff --git a/include/linux/fsl/dpaa_flow_offload.h b/include/linux/fsl/dpaa_flow_offload.h
 --- a/include/linux/fsl/dpaa_flow_offload.h
 +++ b/include/linux/fsl/dpaa_flow_offload.h
-@@ -122,6 +122,38 @@ int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id);
+@@ -122,6 +122,40 @@ int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id);
   * [0, dpaa_max_num_txqs()) is populated at probe time).
   */
  int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
@@ -237,7 +237,7 @@ diff --git a/include/linux/fsl/dpaa_flow_offload.h b/include/linux/fsl/dpaa_flow
  #else
  static inline int
  dpaa_register_flow_offload_handler(const struct dpaa_flow_offload_ops *ops)
-@@ -150,6 +182,11 @@ dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid)
+@@ -150,6 +184,11 @@ dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid)
  {
  	return -ENODEV;
  }
