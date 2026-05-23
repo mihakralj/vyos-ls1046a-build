@@ -95,4 +95,4 @@ ASK/fci/lib/src/*.la
 .clinerules/
 .clinehooks/
 .clineskills/
-.clineworkflows/
+.clineworkflows/.vscode/

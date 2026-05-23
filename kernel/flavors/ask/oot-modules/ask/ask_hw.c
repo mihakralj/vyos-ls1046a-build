@@ -283,6 +283,29 @@ struct ask_hw_pipeline {
         u8                         scheme_id;  /* 0xff = no graft active */
         u32                        base_fqid;  /* kernel scheme's KGSE_FQB */
         u8                         bound_pid;  /* 0xff = unbound */
+        /*
+         * PR14z18 (2026-05-23): per-pipeline live-cookie refcount.
+         *
+         * Bumped after a successful ask_hw_cookie_alloc() in
+         * ask_hw_flow_insert_v4_tcp(), decremented after a successful
+         * ask_hw_cookie_free() in ask_hw_flow_remove().  When the
+         * count transitions to 0 AND bound_pid != 0xff, ask.ko
+         * automatically fires ask_hw_port_unbind() to ungraft the
+         * kernel scheme back to direct-hash dispatch.
+         *
+         * Rationale: nftables flowtable lifecycle in kernel 6.18.31
+         * does NOT call ndo_setup_tc(FLOW_BLOCK_UNBIND) on
+         * `nft delete table` — it only tears down per-flow via
+         * FLOW_CLS_DESTROY.  Without this refcount, the explicit
+         * UNBIND handler in ask_flow_offload_setup_tc() is never
+         * invoked, the silicon graft persists past the policy
+         * lifetime, and unhashed RX frames wedge until reboot
+         * (qdrant 2026-05-22 silicon-wedge note).
+         *
+         * Maintained under h->lock.  Auto-unbind happens AFTER
+         * h->lock is dropped (ask_hw_port_unbind() re-acquires).
+         */
+        u32                        n_flows;
 };
 
 struct ask_hw_pcd {
@@ -1330,6 +1353,18 @@ static int ask_hw_flow_insert_v4_tcp(struct ask_hw_pcd *h,
                 goto err_drop_slot;
         }
         *out_hw_id = cookie;
+
+        /*
+         * PR14z18 (2026-05-23): bump per-pipeline live-cookie refcount.
+         * Decremented in ask_hw_flow_remove() when this cookie's
+         * silicon state is torn down; when the count transitions to
+         * 0 the auto-unbind path there will ungraft the kernel
+         * scheme so the next `nft delete table` doesn't wedge RX.
+         */
+        mutex_lock(&h->lock);
+        h->pipe[dir].n_flows++;
+        mutex_unlock(&h->lock);
+
         return 0;
 
 err_drop_slot:
@@ -1429,7 +1464,49 @@ int ask_hw_flow_remove(u32 hw_flow_id)
         if (ck->m_insrt)
                 fman_pcd_manip_destroy(ck->m_insrt);
 
-        ask_hw_cookie_free(h, hw_flow_id);
+        /*
+         * PR14z18 (2026-05-23): snapshot cc_node BEFORE cookie_free()
+         * because that call kfrees ck.  We need cc_node to identify
+         * which pipeline this cookie belonged to, so we can decrement
+         * that pipeline's per-pipeline live-cookie refcount and
+         * auto-fire ask_hw_port_unbind() when it hits zero.
+         *
+         * Why here and not in ask_flow_offload.c's FLOW_BLOCK_UNBIND
+         * handler: kernel 6.18.31 nftables flowtable lifecycle does
+         * NOT call ndo_setup_tc(FLOW_BLOCK_UNBIND) on `nft delete
+         * table`.  Only per-cookie FLOW_CLS_DESTROY fires.  So the
+         * UNBIND handler exists as a fallback but never runs in
+         * practice.  Refcounting cookies in the silicon driver is
+         * the only place we can observe "last cookie gone" reliably.
+         */
+        {
+                struct fman_pcd_cc_node *removed_cc_node = ck->cc_node;
+                unsigned int d;
+                u8 pid_to_unbind = 0xff;
+
+                ask_hw_cookie_free(h, hw_flow_id);
+
+                mutex_lock(&h->lock);
+                for (d = 0; d < ASK_HW_DIR_NR; d++) {
+                        struct ask_hw_pipeline *p = &h->pipe[d];
+
+                        if (p->cc_v4_tcp == removed_cc_node &&
+                            p->n_flows > 0) {
+                                p->n_flows--;
+                                if (p->n_flows == 0 &&
+                                    p->bound_pid != 0xff)
+                                        pid_to_unbind = p->bound_pid;
+                                break;
+                        }
+                }
+                mutex_unlock(&h->lock);
+
+                if (pid_to_unbind != 0xff) {
+                        ask_pr_info("hw: PR14z18 auto-unbind: port 0x%02x — last cookie destroyed, ungrafting\n",
+                                    pid_to_unbind);
+                        (void)ask_hw_port_unbind(pid_to_unbind);
+                }
+        }
         return 0;
 }
 EXPORT_SYMBOL_GPL(ask_hw_flow_remove);
