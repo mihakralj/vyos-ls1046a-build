@@ -10,6 +10,7 @@ architectural rationale.
 Adds:
   - FQ_TYPE_TX_NO_CONFIRM enum value in dpaa_eth.h
   - dpaa_alloc_offload_tx_fq() exported helper in dpaa_eth.c
+    (placed AFTER dpaa_fq_init so it can call it directly).
   - context_a = 0x1c00000080000000ULL (B0V=0) programming in
     dpaa_fq_init() for the new FQ type
   - Public declaration + !FLOW_OFFLOAD stub in dpaa_flow_offload.h
@@ -17,12 +18,40 @@ Adds:
 Signed-off-by: ASK2 build bot <ask2-build@kralj.dev>
 ---
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-index aae9360..f67b638 100644
+index aae9360..a432708 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-@@ -546,6 +546,57 @@ int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id)
+@@ -1360,7 +1360,8 @@ static int dpaa_fq_init(struct dpaa_fq *dpaa_fq, bool td_enable)
+ 		 */
+ 		if (dpaa_fq->fq_type == FQ_TYPE_TX ||
+ 		    dpaa_fq->fq_type == FQ_TYPE_TX_CONFIRM ||
+-		    dpaa_fq->fq_type == FQ_TYPE_TX_CONF_MQ) {
++		    dpaa_fq->fq_type == FQ_TYPE_TX_CONF_MQ ||
++		    dpaa_fq->fq_type == FQ_TYPE_TX_NO_CONFIRM) {
+ 			initfq.we_mask |= cpu_to_be16(QM_INITFQ_WE_CGID);
+ 			initfq.fqd.fq_ctrl |= cpu_to_be16(QM_FQCTRL_CGE);
+ 			initfq.fqd.cgid = (u8)priv->cgr_data.cgr.cgrid;
+@@ -1406,6 +1407,17 @@ static int dpaa_fq_init(struct dpaa_fq *dpaa_fq, bool td_enable)
+ 			}
+ 		}
+ 
++		/* PR14z23: silicon-suppressed TX confirmation.  Same
++		 * context_a layout as FQ_TYPE_TX (OVOM|A2V|A0V|EBD)
++		 * but B0V=0 so FMan does NOT enqueue a TX-confirm FD
++		 * on each transmit.
++		 */
++		if (dpaa_fq->fq_type == FQ_TYPE_TX_NO_CONFIRM) {
++			initfq.we_mask |= cpu_to_be16(QM_INITFQ_WE_CONTEXTA);
++			qm_fqd_context_a_set64(&initfq.fqd,
++					       0x1c00000080000000ULL);
++		}
++
+ 		/* Put all the ingress queues in our "ingress CGR". */
+ 		if (priv->use_ingress_cgr &&
+ 		    (dpaa_fq->fq_type == FQ_TYPE_RX_DEFAULT ||
+@@ -1471,6 +1483,52 @@ static int dpaa_fq_init(struct dpaa_fq *dpaa_fq, bool td_enable)
+ 	return 0;
  }
- EXPORT_SYMBOL_GPL(dpaa_get_fman_port_id);
  
 +/**
 + * dpaa_alloc_offload_tx_fq() - allocate a TX FQ with TX confirmation
@@ -35,7 +64,6 @@ index aae9360..f67b638 100644
 +	struct dpaa_priv *priv;
 +	struct dpaa_fq *dpaa_fq;
 +	struct device *parent;
-+	u16 tx_channel;
 +	int err;
 +
 +	if (!dev || !fqid)
@@ -47,17 +75,13 @@ index aae9360..f67b638 100644
 +	priv = netdev_priv(dev);
 +	parent = dev->dev.parent;
 +
-+	if (!priv->egress_fqs || !priv->egress_fqs[0])
-+		return -ENOENT;
-+	tx_channel = priv->egress_fqs[0]->channel;
-+
 +	dpaa_fq = devm_kzalloc(parent, sizeof(*dpaa_fq), GFP_KERNEL);
 +	if (!dpaa_fq)
 +		return -ENOMEM;
 +
 +	dpaa_fq->fq_type = FQ_TYPE_TX_NO_CONFIRM;
 +	dpaa_fq->net_dev = dev;
-+	dpaa_fq->channel = tx_channel;
++	dpaa_fq->channel = priv->channel;
 +	dpaa_fq->wq = 6;
 +	dpaa_fq->fqid = 0;
 +	dpaa_fq->flags = QMAN_FQ_FLAG_TO_DCPORTAL;
@@ -75,37 +99,9 @@ index aae9360..f67b638 100644
 +}
 +EXPORT_SYMBOL_GPL(dpaa_alloc_offload_tx_fq);
 +
- /**
-  * dpaa_get_tx_fqid() - per-port per-queue TX FQID accessor.
-  *
-@@ -1360,7 +1411,8 @@ static int dpaa_fq_init(struct dpaa_fq *dpaa_fq, bool td_enable)
- 		 */
- 		if (dpaa_fq->fq_type == FQ_TYPE_TX ||
- 		    dpaa_fq->fq_type == FQ_TYPE_TX_CONFIRM ||
--		    dpaa_fq->fq_type == FQ_TYPE_TX_CONF_MQ) {
-+		    dpaa_fq->fq_type == FQ_TYPE_TX_CONF_MQ ||
-+		    dpaa_fq->fq_type == FQ_TYPE_TX_NO_CONFIRM) {
- 			initfq.we_mask |= cpu_to_be16(QM_INITFQ_WE_CGID);
- 			initfq.fqd.fq_ctrl |= cpu_to_be16(QM_FQCTRL_CGE);
- 			initfq.fqd.cgid = (u8)priv->cgr_data.cgr.cgrid;
-@@ -1406,6 +1458,17 @@ static int dpaa_fq_init(struct dpaa_fq *dpaa_fq, bool td_enable)
- 			}
- 		}
- 
-+		/* PR14z23: silicon-suppressed TX confirmation.  Same
-+		 * context_a layout as FQ_TYPE_TX (OVOM|A2V|A0V|EBD)
-+		 * but B0V=0 so FMan does NOT enqueue a TX-confirm FD
-+		 * on each transmit.
-+		 */
-+		if (dpaa_fq->fq_type == FQ_TYPE_TX_NO_CONFIRM) {
-+			initfq.we_mask |= cpu_to_be16(QM_INITFQ_WE_CONTEXTA);
-+			qm_fqd_context_a_set64(&initfq.fqd,
-+						       0x1c00000080000000ULL);
-+		}
-+
- 		/* Put all the ingress queues in our "ingress CGR". */
- 		if (priv->use_ingress_cgr &&
- 		    (dpaa_fq->fq_type == FQ_TYPE_RX_DEFAULT ||
+ static int dpaa_fq_free_entry(struct device *dev, struct qman_fq *fq)
+ {
+ 	const struct dpaa_priv  *priv;
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
 index 7ed659e..f2e3e15 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
@@ -119,7 +115,7 @@ index 7ed659e..f2e3e15 100644
  
  struct dpaa_fq {
 diff --git a/include/linux/fsl/dpaa_flow_offload.h b/include/linux/fsl/dpaa_flow_offload.h
-index d3e1ab7..f9cca98 100644
+index d3e1ab7..777352b 100644
 --- a/include/linux/fsl/dpaa_flow_offload.h
 +++ b/include/linux/fsl/dpaa_flow_offload.h
 @@ -125,6 +125,18 @@ int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id);
@@ -148,7 +144,7 @@ index d3e1ab7..f9cca98 100644
 +static inline int
 +dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid)
 +{
-+	return -ENODEV;
++return -ENODEV;
 +}
  struct fman_port;
  static inline struct fman_port *
