@@ -1,0 +1,138 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: 2026-05-23T18:45:00Z
+Subject: [PATCH] patches/0051-fman-keygen-revert-pr14z15-nia-rmw.patch
+
+PR14z20 (2026-05-23): revert PR14z15 KGSE_MODE.NIA rewrite in
+keygen_scheme_set_ccbs().
+
+PR14z15 (patch 0043) was authored on the hypothesis that FMan v3
+silicon ignores a non-zero KGSE_CCBS unless KGSE_MODE.NIA engine bits
+are flipped from NIA_ENG_BMI to FM_CTL (0x00000000).  Live-silicon
+regdump on the LS1046A Mono Gateway DK 2026-05-23 (after patch 0050
+group_table[0] + miss-AD wiring) DISPROVED that hypothesis:
+
+  Working schemes 0/1/2 (kernel dpaa hash):
+    kgse_mode = 0x80500002, kgse_ccbs = 0
+    kgse_spc actively counting (5254, 6167 pkts)
+
+  Grafted schemes 3/4 (PR14z15 NIA-RMW applied):
+    kgse_mode = 0x80000000 (EN only, NIA=0, CCOBASE=0)
+    kgse_ccbs = 0x0005ac00 / 0x0005ad00 (valid)
+    kgse_spc = 227 / 371 (almost zero -- silicon RX path dead)
+
+The legacy QorIQ SDK USDPAA reference (tmp-mono-ask/patches/kernel/
+999-layerscape-ask-kernel_linux_5_4_3_00_0.patch lines 13838-13844,
+silicon-validated in production for years) keeps NIA = BMI|ENQ_FRAME
+(0x500002) when grafting to CC and ORs in CCOBASE bits[30:24].  CC
+walking on FMan v3 is implicit when KGSE_CCBS is non-zero -- as
+documented in fman_pcd_kg.c::fman_pcd_kg_attach_cc().
+
+Fix: leave kgse_mode untouched.  keygen_scheme_setup() already
+programmed it to 0x80500002 at MAC probe time; that is the silicon-
+truth value regardless of CCBS.  Patch removes the KGSE_MODE RMW
+block introduced by PR14z15 and the now-unused `u32 mode;` local.
+The KG_NIA_ENG_MASK / KG_NIA_AC_MASK / KG_NIA_ENG_FM_CTL #defines
+(lines 103-105) are kept in the header to document the bit layout
+for future debug code.
+
+Signed-off-by: ci <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+index 9dd68d7..9455eaf 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+@@ -630,35 +630,66 @@ int keygen_scheme_set_ccbs(struct fman_keygen *keygen, u8 scheme_id,
+ 	if (!scheme || !scheme->used)
+ 		return -EINVAL;
+ 
+-	/*
+-	 * READ phase: pull the current scheme image into the indirect
+-	 * window.  Without this, the WRITE phase would clobber every
+-	 * other KGSE_* register with stale stack contents.
+-	 */
+-	ar_reg = build_ar_scheme(scheme_id, false, false);
+-	err = keygen_write_ar_wait(regs, ar_reg);
+-	if (err) {
+-		pr_err("Reading scheme %u for CCBS update failed\n", scheme_id);
+-		return err;
+-	}
++/*
++ * READ phase: pull the current scheme image into the indirect
++ * window.  Without this, the WRITE phase would clobber every
++ * other KGSE_* register with stale stack contents.
++ */
++ar_reg = build_ar_scheme(scheme_id, false, false);
++err = keygen_write_ar_wait(regs, ar_reg);
++if (err) {
++pr_err("Reading scheme %u for CCBS update failed\n", scheme_id);
++return err;
++}
+ 
+-	/* PR14z15: rewrite KGSE_MODE NIA engine + action fields in the
+-	 * indirect window before flushing.  Without this, a non-zero
+-	 * KGSE_CCBS is silently ignored because the silicon dispatcher
+-	 * still routes KG -> BMI (the default NIA programmed at
+-	 * keygen_scheme_setup() time).  CCOBASE bits[30:24] and the EN
+-	 * bit are preserved -- only the NIA engine field flips.
+-	 */
+-	mode = ioread32be(&regs->fmkg_sch.kgse_mode);
+-	mode &= ~(KG_NIA_ENG_MASK | KG_NIA_AC_MASK);
+-	if (ccbs != 0)
+-		mode |= KG_NIA_ENG_FM_CTL;	/* graft: KG -> CC engine */
+-	else
+-		mode |= ENQUEUE_KG_DFLT_NIA;	/* ungraft: KG -> BMI default */
+-	iowrite32be(mode, &regs->fmkg_sch.kgse_mode);
++/*
++ * PR14z20 (2026-05-23): revert PR14z15 KGSE_MODE.NIA rewrite.
++ *
++ * PR14z15 was authored on the hypothesis that FMan v3 silicon
++ * ignores a non-zero KGSE_CCBS unless KGSE_MODE.NIA engine bits
++ * are flipped from NIA_ENG_BMI to FM_CTL (0x00000000).  Live-
++ * silicon regdump on the LS1046A Mono Gateway DK 2026-05-23
++ * (post patch 0050 group-table + miss-AD wiring) DISPROVED that
++ * hypothesis:
++ *
++ *   Working schemes 0/1/2 (kernel dpaa hash):
++ *     kgse_mode = 0x80500002, kgse_ccbs = 0
++ *     kgse_spc actively counting (5254, 6167 pkts)
++ *
++ *   Grafted schemes 3/4 (PR14z15 NIA-RMW applied):
++ *     kgse_mode = 0x80000000 (EN only, NIA=0, CCOBASE=0)
++ *     kgse_ccbs = 0x0005ac00 / 0x0005ad00 (valid)
++ *     kgse_spc = 227 / 371 (almost zero — silicon path dead)
++ *
++ * Cross-checked against the legacy QorIQ SDK USDPAA reference
++ * (tmp-mono-ask/patches/kernel/999-layerscape-ask-kernel_linux_
++ * 5_4_3_00_0.patch lines 13838-13844, silicon-validated in
++ * production for years):
++ *
++ *   if (p_SchemeParams->nextEngine == e_FM_PCD_CC) {
++ *       tmpReg = (KG_SCH_MODE_EN | GET_NIA_BMI_AC_ENQ_FRAME(p_FmPcd));
++ *       tmpReg |= (grpBase << KG_SCH_MODE_CCOBASE_SHIFT);
++ *   }
++ *
++ * The SDK does NOT clear the NIA fields when grafting to CC --
++ * it keeps NIA = BMI|ENQ_FRAME (0x500002) and ORs in the CCOBASE
++ * field (bits[30:24]).  CC walking on FMan v3 is implicit when
++ * KGSE_CCBS is non-zero -- the gating bit was a v2-era control
++ * that v3 collapsed into the all-zero CCBS check, as documented
++ * in fman_pcd_kg.c::fman_pcd_kg_attach_cc().
++ *
++ * Therefore: leave kgse_mode untouched.  The dpaa_eth driver's
++ * keygen_scheme_setup() already programmed it to 0x80500002 at
++ * MAC probe time; that is the silicon-truth value for an active
++ * scheme regardless of whether KGSE_CCBS is zero or non-zero.
++ *
++ * The KG_NIA_ENG_MASK / KG_NIA_AC_MASK / KG_NIA_ENG_FM_CTL
++ * #defines (lines 103-105) are now unused but kept in the header
++ * to document the bit layout for future debug code.
++ */
+ 
+-	/* PR14z13: update KGSE_CCBS (CC tree MURAM offset / 0 to clear). */
+-	iowrite32be(ccbs, &regs->fmkg_sch.kgse_ccbs);
++/* PR14z13: update KGSE_CCBS (CC tree MURAM offset / 0 to clear). */
++iowrite32be(ccbs, &regs->fmkg_sch.kgse_ccbs);
+ 
+ 	/* WRITE phase: flush the modified image back. */
+ 	ar_reg = build_ar_scheme(scheme_id, false, true);
