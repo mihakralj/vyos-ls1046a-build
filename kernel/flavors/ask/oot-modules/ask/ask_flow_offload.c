@@ -68,6 +68,15 @@
 
 #include "include/ask_internal.h"
 
+/*
+ * PR14z17: file-scope first-arrival latch (hoisted from function-scope
+ * static in PR14z5).  The FLOW_BLOCK_UNBIND handler resets this back
+ * to 0xff between nft flowtable load cycles so a second `nft -f` run
+ * does not see the previous run's pipeline assignment.  cmpxchg on a
+ * `u8` is supported on arm64 via __cmpxchg_small (kernel 6.18).
+ */
+static u8 ask_flow_first_pid = 0xff;
+
 /* ------------------------------------------------------------------------- */
 /* PR14j: direction classification helper                                     */
 /*                                                                            */
@@ -1538,7 +1547,6 @@ static LIST_HEAD(ask_flow_block_cb_list);
  *
  * 0xff = unlatched / no pipeline bound.
  */
-static u8 ask_flow_first_pid = 0xff;
 
 int ask_flow_offload_setup_tc(struct net_device *dev,
                               struct flow_block_offload *fbo)
