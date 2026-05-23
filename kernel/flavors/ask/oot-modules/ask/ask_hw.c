@@ -1023,6 +1023,85 @@ int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
 EXPORT_SYMBOL_GPL(ask_hw_port_bind);
 
 /* ------------------------------------------------------------------------- */
+/* PR14z17 (2026-05-22): symmetric un-bind for FLOW_BLOCK_UNBIND              */
+/*                                                                            */
+/* When nft `delete table` (or any other path) tears down the flowtable that  */
+/* triggered ask_hw_port_bind(), the kernel-owned KG scheme MUST be reverted  */
+/* to its pre-graft state — otherwise eth3/eth4 RX is wedged: KGSE_CCBS       */
+/* still points at a soon-to-be-destroyed CC tree (or, more dangerously,      */
+/* kgse_mode still routes KG -> CC engine while CCBS is zero, dropping every  */
+/* unhashed frame).  Patch 0043's RMW of kgse_mode inside                     */
+/* fman_pcd_kg_ungraft_cc() restores ENQUEUE_KG_DFLT_NIA atomically with     */
+/* clearing KGSE_CCBS, giving a byte-exact restore of silicon state.          */
+/*                                                                            */
+/* Scope: only the per-port silicon graft + the lazily-created cc_v4_tcp     */
+/* node are torn down.  The per-direction cc_tree stays alive (it's created  */
+/* up-front at bring-up and shared across consecutive bind/unbind cycles).   */
+/* Cookie-table flow entries (m_insrt + manip_chain per flow) are torn down  */
+/* via the FLOW_CLS_DESTROY path before UNBIND fires, so cc_v4_tcp is        */
+/* expected to be empty (no keys) at this point.                              */
+/* ------------------------------------------------------------------------- */
+int ask_hw_port_unbind(u8 port_id)
+{
+        struct ask_hw_pcd *h = ask_hw_pcd_get();
+        unsigned int d;
+        int matched = 0;
+
+        if (!h)
+                return -ENODEV;
+
+        if (port_id == 0 || port_id > 0x3F) {
+                ask_pr_warn("hw: port-unbind port_id 0x%02x out of range (0x01..0x3F)\n",
+                            port_id);
+                return -EINVAL;
+        }
+
+        for (d = 0; d < ASK_HW_DIR_NR; d++) {
+                struct ask_hw_pipeline *p = &h->pipe[d];
+                u8 sid;
+                struct fman_pcd_cc_node *node_to_destroy = NULL;
+
+                mutex_lock(&h->lock);
+                if (p->bound_pid != port_id) {
+                        mutex_unlock(&h->lock);
+                        continue;
+                }
+                sid              = p->scheme_id;
+                node_to_destroy  = p->cc_v4_tcp;
+                p->bound_pid     = 0xff;
+                p->scheme_id     = 0xff;
+                p->base_fqid     = 0;
+                p->cc_v4_tcp     = NULL;
+                mutex_unlock(&h->lock);
+
+                /*
+                 * Heavy work outside h->lock — fman_pcd_kg_ungraft_cc()
+                 * and fman_pcd_cc_node_destroy() take pcd->lock
+                 * internally; nesting would invert.  Patch 0043 makes
+                 * the ungraft a byte-exact restore of kgse_mode +
+                 * KGSE_CCBS=0 in a single AR-flushed indirect window.
+                 */
+                if (sid != 0xff)
+                        (void)fman_pcd_kg_ungraft_cc(h->pcd, sid);
+
+                if (node_to_destroy)
+                        fman_pcd_cc_node_destroy(node_to_destroy);
+
+                matched++;
+                ask_pr_info("hw: PR14z17 port-unbind: port 0x%02x dir %u — ungrafted scheme_id=%u, destroyed cc_v4_tcp; kernel scheme restored to direct hash dispatch\n",
+                            port_id, d, sid);
+        }
+
+        if (!matched) {
+                ask_pr_dbg("hw: port-unbind: port 0x%02x not currently bound to any pipeline (idempotent)\n",
+                           port_id);
+                return 0;
+        }
+        return 0;
+}
+EXPORT_SYMBOL_GPL(ask_hw_port_unbind);
+
+/* ------------------------------------------------------------------------- */
 /* Legacy hw_flow_id pack/unpack (debugfs / kunit use only after PR14j)       */
 /* ------------------------------------------------------------------------- */
 
