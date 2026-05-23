@@ -222,6 +222,22 @@ int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
                      struct net_device *ingress_dev);
 
 /*
+ * PR14z17 (2026-05-22): symmetric un-bind for FLOW_BLOCK_UNBIND.
+ *
+ * Walks both pipelines; for any pipeline whose bound_pid matches
+ * @port_id, ungrafts the kernel-owned KG scheme (patch 0043 RMW
+ * restores kgse_mode NIA back to ENQUEUE_KG_DFLT_NIA and clears
+ * KGSE_CCBS atomically), destroys the lazily-created cc_v4_tcp
+ * node, and resets the pipeline state to unbound.  The
+ * per-direction cc_tree is left intact for subsequent bind cycles.
+ *
+ * Idempotent: returns 0 if @port_id is not currently bound to any
+ * pipeline (the common case under nft `delete table` after the
+ * matching FLOW_CLS_DESTROYs have already removed all flows).
+ */
+int ask_hw_port_unbind(u8 port_id);
+
+/*
  * hw_flow_id helpers (PR14g-body-1).
  *
  * The 32-bit hw_flow_id stored in struct ask_flow encodes:
