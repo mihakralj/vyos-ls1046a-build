@@ -10,104 +10,36 @@ mediated RMW primitive keygen_scheme_set_ccbs().  Live silicon
 regdump on 2026-05-22 (bin/ask-pcd-regdump.py against DUT
 192.168.1.190) confirmed KGSE_CCBS is correctly programmed on the
 grafted schemes -- but the M2 metric did not move (6.901 Gbps PASS /
-27.26%% kernel-net CPU FAIL vs. <=5%% threshold).  Every kernel-owned
-scheme on every active port was carrying:
-
-    kgse_mode      = 0x80500002    (EN | NIA_ENG_BMI | NIA_BMI_AC_ENQ_FRAME)
-    kgse_ekfc      = 0x00180206    (IPSRC1|IPDST1|IPSEC_SPI|L4PSRC|L4PDST)
-    kgse_spc       = 4050 / 3128 / 3118 ...   (scheme actively dispatching)
-    kgse_ccbs      != 0 on slots 3 & 4         (PR14z13 graft worked)
+27.26%% kernel-net CPU FAIL vs. <=5%% threshold).
 
 KGSE_MODE NIA encoding (RM 8.7.4, confirmed against SDK
-fsl_fman_kg.h in archived mihakralj/kernel-ls1046a-build at SHA
-464df181, fm_kg_build_nia() in fman_kg.c lines 528-538):
+fsl_fman_kg.h fm_kg_build_nia()):
 
     bits[31]        EN
     bits[30:24]     CCOBASE        (CC group base offset, 8 bits)
     bits[22:18]     NIA engine     (mask 0x007C0000)
                     FM_CTL = 0x00000000   <- route KG -> CC engine
-                    PRS    = 0x00440000
-                    KG     = 0x00480000
-                    PLCR   = 0x004C0000
                     BMI    = 0x00500000   <- route KG -> BMI direct
     bits[17:0]      NIA action     (mask 0x0003FFFF)
 
 The silicon dispatcher consults KGSE_CCBS ONLY when the NIA engine
 field equals FM_CTL.  With NIA = BMI the scheme enqueues directly to
-the kernel's per-CPU RX FQ and the CC engine is never invoked --
-which is precisely the failure mode the live regdump confirms.
+the kernel's per-CPU RX FQ and the CC engine is never invoked.
 keygen_scheme_setup() always sets kgse_mode = (KG_SCH_MODE_EN |
-ENQUEUE_KG_DFLT_NIA) at scheme-create time (fman_keygen.c line 506),
-and PR14z13's keygen_scheme_set_ccbs() RMW touches ONLY kgse_ccbs --
-so a freshly-grafted scheme has the CCBS pointer set but the NIA
-engine still routing past the CC engine.
+ENQUEUE_KG_DFLT_NIA) at scheme-create time, and PR14z13's RMW touches
+ONLY kgse_ccbs -- so a freshly-grafted scheme has the CCBS pointer
+set but the NIA engine still routing past the CC engine.
 
-PR14z14 in ask_hw.c (silicon-truth 16-byte CC key layout, SIP|DIP|
-SPI=0|SPORT|DPORT) is correct per kgse_ekfc but unreachable because
-the CC engine never runs.
+Fix: extend keygen_scheme_set_ccbs() to RMW kgse_mode in the SAME
+AR-mediated transaction as kgse_ccbs.  Two cases:
 
-Fix
+  ccbs != 0 (graft):    NIA engine -> FM_CTL, NIA action cleared
+  ccbs == 0 (ungraft):  NIA engine -> BMI, action = ENQ_FRAME
+
+Two fields written inside the same indirect window flush as one
+atomic WRITE AR.
 ---
-Extend keygen_scheme_set_ccbs() to RMW kgse_mode in the SAME AR-
-mediated transaction as kgse_ccbs.  The READ AR pulls the full
-scheme image into regs->fmkg_sch; we modify kgse_mode AND kgse_ccbs
-in the indirect window; the WRITE AR flushes both back atomically.
-Every other KGSE_* field (kgse_ekfc, kgse_mv, kgse_fqb, kgse_hc,
-kgse_dv0/1, kgse_om, kgse_vsp, generic extracts) is preserved by
-virtue of being re-emitted from the same indirect window the READ
-just populated.
-
-Two cases:
-
-  ccbs != 0  (graft):
-      mode = (mode & ~(KG_NIA_ENG_MASK | KG_NIA_AC_MASK))
-              | KG_NIA_ENG_FM_CTL    (= 0x00000000 -- explicit for clarity)
-      // CCOBASE bits[30:24] stay at whatever they were (0 for the
-      // single-group cc_trees ASK uses today).
-
-  ccbs == 0  (ungraft):
-      mode = (mode & ~(KG_NIA_ENG_MASK | KG_NIA_AC_MASK))
-              | ENQUEUE_KG_DFLT_NIA  (= 0x00500002 -- restore default
-                                       BMI direct-enqueue NIA used at
-                                       keygen_scheme_setup() time)
-
-The masks KG_NIA_ENG_MASK (0x007C0000) and KG_NIA_AC_MASK
-(0x0003FFFF) are added to fman_keygen.c next to the existing
-NIA_ENG_BMI / NIA_BMI_AC_ENQ_FRAME / ENQUEUE_KG_DFLT_NIA constants.
-Naming follows the SDK header (KG_NIA_*) to keep cross-reference
-trivial.
-
-Locking / atomicity
--------------------
-Unchanged.  The AR READ/WRITE pair runs under fman_pcd's pcd->lock
-(taken by fman_pcd_kg_graft_cc / fman_pcd_kg_ungraft_cc in patch
-0042 before invoking keygen_scheme_set_ccbs).  Two fields written
-inside the same indirect window flush as one atomic WRITE AR.
-
-Compatibility
--------------
-keygen_scheme_setup() and keygen_port_hashing_init() are unchanged:
-they still initialise kgse_mode to ENQUEUE_KG_DFLT_NIA, which is
-the correct default for an un-grafted hash-only scheme.  The NIA
-rewrite happens exclusively inside keygen_scheme_set_ccbs() so non-
-graft callers see no behavioural change.
-
-Verification
-------------
-1. patch-health.sh --flavor ask --source release: must apply clean.
-2. After CI build + ISO install on Mono DUT:
-   - bin/ask-pcd-regdump.py shows kgse_mode of grafted schemes
-     (slots 3 and 4 on hwports 0x10/0x11) with NIA engine bits
-     cleared (mode & 0x007C0000 == 0), kgse_ccbs unchanged from
-     pre-patch graft value.  Un-grafted schemes (slots 0/1/2)
-     still show kgse_mode = 0x80500002.
-   - kgse_spc on grafted schemes keeps incrementing.
-   - bin/verify-ask-flow-offload.sh: kernel-net CPU drops to
-     <=5%% while throughput stays >=2 Gbps -> M2 gate PASS.
-3. On module unload (rmmod ask), regdump shows the slots that
-   were grafted now have kgse_mode restored to 0x80500002 and
-   kgse_ccbs back to 0 -- proves ungraft path symmetry.
----
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
 --- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
 @@ -94,6 +94,16 @@
@@ -127,7 +59,7 @@ Verification
  /* Hard-coded configuration:
   * These values are used as hard-coded values for KeyGen configuration
   * and they replace user selections for this hard-coded version
-@@ -609,6 +619,7 @@
+@@ -609,6 +619,7 @@ int keygen_scheme_set_ccbs(struct fman_keygen *keygen, u8 scheme_id,
  	struct fman_kg_regs __iomem *regs;
  	struct keygen_scheme *scheme;
  	u32 ar_reg;
@@ -135,7 +67,7 @@ Verification
  	int err;
  
  	if (!keygen)
-@@ -631,7 +642,22 @@
+@@ -631,7 +642,22 @@ int keygen_scheme_set_ccbs(struct fman_keygen *keygen, u8 scheme_id,
  		return err;
  	}
  
