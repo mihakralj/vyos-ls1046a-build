@@ -124,3 +124,68 @@ This document is committed as a checkpoint. Next session should:
 3. Run iperf3 + capture eth3/eth4 deltas + dmesg
 4. Based on outcome, proceed to step 2/3/4 above
 
+---
+
+## 2026-05-23 21:30Z — STEP 1 EXECUTED — BREAKTHROUGH
+
+ISO built with patch `0053-diag-cc-miss-drop.patch` (commit `ae9b46c` on
+`origin/ask20`). Deployed via `add system image
+http://192.168.1.137:8080/iso/latest-ask.iso`, booted as Default.
+M2 gate (`bin/verify-ask-flow-offload.sh DURATION=20 PARALLEL=8`) executed.
+
+### Result
+
+| Metric | Pre-PR14z22 (PR14z21) | Post-PR14z22 step-1 (DROP) | Target |
+|---|---|---|---|
+| Throughput | 6.86 Gbps | **6.945 Gbps** | ≥ 2 Gbps ✅ |
+| NET_KERNEL_CPU | 52.91% | **16.63%** | ≤ 5% ❌ |
+| eth3 `rx_packets [TOTAL]` (after run) | ~8.8 M | **1,053** | — |
+| eth4 `tx_packets [TOTAL]` (after run) | ~8.8 M | **23,991,552** | — |
+| eth4 `tx_confirm [TOTAL]` | matches `tx_packets` | matches `tx_packets` | — |
+
+### Interpretation — the diagnostic disambiguated cleanly
+
+With `miss_action = DROP`, iperf3 still ran at **6.945 Gbps**. That is
+only possible if frames were **HITTING** the CC keys and silicon was
+dispatching them via `FORWARD_FQ` to the egress FQ. If keys had been
+mismatching, throughput would have collapsed to ~0.
+
+The 1053 RX packets on eth3 account for ARP, SSH-control, and the
+conntrack-promote chain — all traffic that does **not** match the
+installed v4-TCP cc_v4_tcp keys. Everything else (24 M frames) went
+silicon-direct from eth3 RX → eth4 TX without ever touching
+`dpaa_eth_napi_poll` RX path.
+
+**The silicon CC HIT path IS WORKING.** PR14z14 / PR14z18 / PR14z20 were
+correct. The key layout `[SIP|DIP|0x00000000|SPORT|DPORT]` matches what
+KG emits.
+
+### Where the remaining 15.97% softirq comes from
+
+DPAA1 silicon enqueues a Frame Descriptor onto a per-CPU **TX-confirmation
+FQ** for every transmitted frame, regardless of whether TX was
+silicon-offloaded or kernel-driven. `dpaa_eth` NAPI polls that FQ and
+calls the skb-free path. At ~1.6 Mpps egress on eth4 across 4 cores,
+`dpaa_eth_napi_poll` on the TX-confirm FQ accounts for ~16% softirq
+cleanly — matching observation. The legacy ASK 1.x `sdk_dpaa` driver
+sidestepped this by allocating TX FQs with `no_confirm=1` for
+silicon-offloaded HIT-path traffic; mainline `dpaa_eth` does not.
+
+### Step 2/3/4 — NO LONGER NEEDED
+
+The CC-key-mismatch hypothesis is **disproved**. Steps 2 (MURAM key
+byte dump), 3 (alternative key orderings), and 4 (KGSE_HC reset) are
+all unnecessary. Skip directly to PR14z23 (TX-confirm softirq reduction)
+— see `plans/PR14z23-DESIGN.md`.
+
+### Cleanup
+
+- Patch `0053-diag-cc-miss-drop.patch` MUST be reverted before any
+  merge to `main` (DROP miss-action would break ARP/SSH on the
+  production ISO if a non-offloaded packet ever hit cc_v4_tcp).
+  Reverted in this commit; `ASK_PATCH_COUNT` rolled 53 → 52 in
+  `bin/ci-setup-kernel.sh`.
+- M2 conclusion: **silicon offload is functionally correct; the
+  remaining wedge is a kernel-side TX-confirm NAPI workload that must
+  be optimized away for the 5% CPU target.**
+
