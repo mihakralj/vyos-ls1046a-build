@@ -436,8 +436,8 @@ No `cmm.c::ipsec.c` (1200 lines in NXP source). No `fci.c::sa_handler` (600 line
 
 In priority order, gated by what `caam_qi.ko` already exposes via crypto API:
 
-1. `rfc4106(gcm(aes))` 128-bit and 256-bit — primary target
-2. `authenc(hmac(sha256),cbc(aes))` 128/256 — legacy enterprise VPN
+1. `authenc(hmac(sha256),cbc(aes))` 128/256 — primary target
+2. `rfc4106(gcm(aes))` 128-bit and 256-bit — **MUST BE REFUSED** (return `-EOPNOTSUPP`). The FMan/CAAM hardware produces duplicate sequence numbers on the wire for GCM ("A24a wire-seq dupes"), causing anti-replay validation failures at the peer. Let the kernel `xfrm` software path handle GCM.
 3. `rfc7539esp(chacha20,poly1305)` — if mainline `caam_qi` supports it; check `/proc/crypto` at probe
 
 Tunnel mode and transport mode share the same `xdo_dev_state_add` path; the action template differs in whether it strips an outer header.

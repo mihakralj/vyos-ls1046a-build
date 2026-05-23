@@ -1,282 +1,318 @@
-# ASK 1.x vs ASK2 — Comparative Architectural Review
+# Original NXP ASK vs. ASK2 — Comparative Architectural Review
 
-**Date:** 2026-05-18
+**Date:** 2026-05-23
 **Branch:** `ask20`
-**Reviewer scope:** original NXP/Mono ASK at `github.com/we-are-mono/ASK` (branches `master`, `mt-6.12.y`, `mono-patched`, `mono-patched-openwrt`, `fix/security-hardening`) vs our ASK2 rewrite under `kernel/flavors/ask/` driven by `specs/ask2-rewrite-spec.md` v1.1 and `plans/ASK2-IMPLEMENTATION.md`.
-**Audience:** technical operator, post-PR14z (CI run `26028478858` in flight).
+**Status:** Authoritative — supersedes earlier drafts
+**Author context:** Written after PR14z13/z15/z18 graft model wedged eth3/eth4 RX at every PCD activation on mainline 6.18.31.
+**Source corpus:** `tmp-mono-ask/` (clone of `we-are-mono/ASK` branch `mt-6.12.y`, ~30 k LOC), cross-referenced with `kernel/flavors/ask/oot-modules/ask/ask_hw.c` (PR14z13 graft model) and `specs/ask2-rewrite-spec.md` v1.1.
 
 ---
 
-## 1. Executive summary
+## TL;DR — The one-sentence divergence
 
-The original ASK is **not** a "DPAA hardware offload" stack in the modern sense. It is a **port of the Mindspeed/Comcerto C2000 VoIP-gateway Forward Path Processor (FPP) control plane**, re-pointed at the NXP SDK FMan driver, with userspace classifier programming via `dpa_app` + FMC XML and connection management via `cmm` over a netlink-style `libfci`. The kernel-side surface is a single 18,097-line monster patch against the **NXP SDK** FMan/DPAA drivers (138 files), plus `cdx.ko`, `auto_bridge.ko`, and `fci.ko` out-of-tree modules. The SDK driver dependency is non-negotiable in the upstream architecture — every Mono branch keeps it.
+**Original ASK** owns the entire DPAA1 ingress pipeline at the silicon level — it ships its own forked kernel (`drivers/net/ethernet/freescale/sdk_dpaa/`, the *vendored NXP SDK driver* — NOT mainline `dpaa_eth`), allocates **its own** KeyGen schemes via a separate userspace pre-loader (`dpa_app` → `fmc` → `libfman`) **before any netdev exists**, and the kernel netdev is wired downstream of that PCD chain from boot.
 
-Our ASK2 rewrite has correctly identified and discarded the entire SDK-driver foundation. The PCD-MANIP-CHAIN approach landing in PR14z is **architecturally equivalent in capability** to what `dpa_app` programs in original ASK — but expressed against the mainline (in-tree) FMan PCD ABI that we author ourselves in patches 0001–0037. The "5797 LOC ASK-edit patch" the AGENTS.md warns about is gone for good.
+**ASK2 (our PR14z13 graft model)** keeps mainline `dpaa_eth` in charge, lets `dpaa_eth` allocate KG schemes 3 and 4 for its built-in flow hash, then **post-hoc rewrites `KGSE_CCBS` and `KGSE_MODE.NIA` to redirect those same schemes into our CC tree at runtime**. The graft mutates **live silicon under the running netdev**, and on ungraft we can only restore the two registers we touched — anything `fman_pcd_cc_node_create()` set elsewhere (BMI port FMBM_RFPNE, PCD action descriptors, scheme-group registers) stays mutated, which is exactly the residual state that freezes `KGSE_SPC` on schemes 3/4 after ungraft.
 
-**Bottom line on the HW-offload question:** Yes, we are approaching it correctly — *for the IPv4-forwarding fast path*. The single-stage fused-HMCT MANIP chain into a CC-key `FMAN_PCD_ACTION_MANIPULATE` is the **right** model. The two-stage OH-port-hop architecture (what `cdx.ko` + `devoh.c` actually does) was rejected on principled grounds in PR14x and that decision still holds. Where ASK2 v1.0 **silently lags** ASK 1.x is *feature surface*, not architecture: PPPoE relay, IPv6 forwarding, multicast, IPsec offload, 3-tuple RTP relay, IP reassembly, CEETM QoS, exception rate-limiters. None of these are M2 blockers; all are deferrable to M3+ on the **same** chain primitive with no rework. There are however four genuine architectural improvements worth folding into the ASK2 plan before M3 freezes — listed in §7.
+The original ASK never has this problem because **it never grafts**. The schemes belong to it from boot; the kernel never wrote them in the first place.
 
 ---
 
-## 2. Side-by-side data-plane flow
+## 1. Build-system & deployment evidence (the smoking gun)
+
+Three artifacts in `tmp-mono-ask/` prove the original ASK is **not** a mainline-graft architecture:
+
+### 1.1 The kernel patch is 17,900 lines and touches `sdk_dpaa/`, not `dpaa/`
+
+```text
+$ wc -l tmp-mono-ask/patches/kernel/002-mono-gateway-ask-kernel_linux_6_12.patch
+17900
+$ grep '^diff --git' …002…6_12.patch | awk '{print $4}' | sort -u | head
+ b/Makefile
+ b/drivers/crypto/caam/pdb.h
+ b/drivers/net/ethernet/freescale/sdk_dpaa/…          ← vendored SDK driver
+ b/drivers/net/ethernet/freescale/sdk_fman/…          ← vendored SDK FMan PCD tree
+ b/drivers/staging/fsl_qbman/fsl_usdpaa.c             ← vendored USDPAA staging
+ b/drivers/staging/fsl_qbman/qman_high.c
+ b/include/linux/fmd/…                                ← SDK fmd uapi
+ b/include/linux/fsl_oh_port.h                        ← SDK OH port uapi
+```
+
+`sdk_dpaa/` and `sdk_fman/` are the **legacy NXP SDK overlays** that pre-date the mainline DPAA1 conversion (~kernel 4.20). They were **deleted from mainline** by Madalin Bucur's clean-up series. Mono's ASK still uses them — its kernel build resurrects them as an out-of-tree-style overlay applied on top of LSDK 6.12. On a kernel that has only `dpaa_eth.c`, `fman.c`, `fman_keygen.c`, `fman_port.c` (i.e. mainline 6.18.31 / `lts-6.6-ls1046a`), the original ASK simply does not link.
+
+This is the **first-order architectural fact** every later finding flows from.
+
+### 1.2 The Makefile clones SDK-aware fmlib and fmc, applies more patches on top
+
+From `tmp-mono-ask/README.md`:
+
+> `make` automatically:
+> 1. Clones NXP fmlib and fmc from GitHub at tag `lf-6.12.49-2.2.0`, **applies ASK extension patches**, cross-compiles them
+> 2. Downloads libnfnetlink and libnetfilter_conntrack tarballs, applies NXP ASK patches, cross-compiles into a local sysroot
+> 3. Builds libfci (in-tree, single source file)
+> 4. **Builds kernel modules against the configured kernel tree**
+> 5. Builds CMM, FMC, and dpa_app against the patched libraries
+
+The ASK kernel modules (`cdx.ko`, `fci.ko`, `auto_bridge.ko`) are built **against the patched SDK kernel**, against headers that exist only in that patched tree (`include/linux/fmd/*`, `include/linux/fsl_oh_port.h`, the SDK `lnxwrp_fsl_fman.h`). They cannot be built against mainline.
+
+### 1.3 The FMan microcode is the ASK-extended variant, loaded by U-Boot pre-Linux
+
+From `tmp-mono-ask/cdx/cdx_main.c` `cdx_module_init()`:
+
+```c
+#define CDX_MIN_FW_PACKAGE 209
+…
+rc = cdx_check_fman_firmware();
+if (rc) return rc;
+…
+if (pkg < CDX_MIN_FW_PACKAGE) {
+    pr_err("cdx: FMAN firmware %u.%u.%u lacks ASK support "
+           "(need package >= %u). Load the ASK microcode in U-Boot.\n",
+           pkg, maj, min, CDX_MIN_FW_PACKAGE);
+    return -ENODEV;
+}
+```
+
+The ASK control plane is **microcode-gated**. Original ASK ships against `v210.10.1` (per `README.md` "Overview"). Stock NXP microcode shipped in mainline (`fsl_fman_ucode_ls1046_r1.0.bin`) is package 106. Without the ASK microcode the chip lacks the AD opcodes, soft-parser variants, and host-command dispatch the original CDX expects.
+
+**Implication:** even if we forklifted the original `cdx.ko` source onto a 6.18 kernel, the firmware in flash on our DUTs is package 106 — `cdx_module_init()` would immediately bail with `-ENODEV`. The ASK microcode is "a proprietary NXP binary, not included" (`README.md`), and we don't have it.
+
+---
+
+## 2. Control-plane sequencing — original ASK vs. ASK2
+
+This is the runtime sequence of *who programs the silicon first*, and it is where the architectural divergence becomes a wedge:
 
 ```mermaid
-flowchart LR
-    subgraph ASK1["ASK 1.x — userspace-programmed two-stage OH-port hop"]
-        A1[FMan MAC RX] --> A2[Soft Parser PDL v3<br/>cdx_pcd.xml]
-        A2 --> A3{KG scheme<br/>cdx_tcp4_dist}
-        A3 -->|hash 14B 5-tuple| A4[External Hash CC<br/>cdx_tcp4_cc<br/>DDR-backed<br/>max=512, aging=yes]
-        A4 -->|miss| AKR[host RX FQ → kernel]
-        A4 -->|hit| A5[FORWARD_FQ → OH-port input FQ]
-        A5 --> A6[Offline Host port<br/>re-runs PCD]
-        A6 --> A7[MANIP chain<br/>RMV_ETHERNET → INSRT_GENERIC<br/>→ IPV4_FIELD_UPDATE TTL/csum<br/>via fm_manip.c HMCT]
-        A7 --> A8[FORWARD_FQ → egress TX FQ]
-        A8 --> A9[TX MAC]
-        SUB["userspace dpa_app + cmm<br/>via /dev/cdx_ctrl ioctl<br/>cdx_ehash.c walks external hash"] -.-> A4
-    end
+sequenceDiagram
+    autonumber
+    participant UB as U-Boot
+    participant FW as FMan microcode<br/>(pkg ≥ 209)
+    participant K  as Linux (SDK 6.12 + ASK patch)
+    participant DA as /usr/bin/dpa_app<br/>(userspace, GPL)
+    participant FC as FMC library<br/>(consumes cdx_pcd.xml + cdx_cfg.xml)
+    participant CDX as cdx.ko
+    participant SD as sdk_dpaa<br/>(forked netdev driver)
+    participant NW as netdev eth3/eth4
 
-    subgraph ASK2["ASK2 — kernel-programmed single-stage fused HMCT"]
-        B1[FMan MAC RX] --> B2[Hard Parser<br/>in-tree parse_result extracts]
-        B2 --> B3{KG scheme<br/>per-port × 4<br/>FMAN_PCD_KG_*}
-        B3 -->|exact 5-tuple| B4[CC node<br/>v4-TCP exact-match<br/>≤255 keys silicon cap<br/>FMAN_PCD_CC_NODE_KEYS_MAX]
-        B4 -->|miss| BKR[host RX-default FQ → kernel<br/>SW conntrack creates flow]
-        B4 -->|hit| B5[FMAN_PCD_ACTION_MANIPULATE<br/>per-key chain handle<br/>next_fqid = peer TX FQID]
-        B5 --> B6[Fused HMCT executes inline:<br/>RMV_ETHERNET → INSRT_GENERIC<br/>→ IPV4_FORWARD TTL/csum<br/>NO OH-port hop]
-        B6 --> B7[TX FQ direct]
-        B7 --> B8[TX MAC]
-        SUB2["nft flowtable<br/>→ ask_flow_offload_setup_tc<br/>→ ask_hw_flow_insert_v4_tcp<br/>→ fman_pcd_cc_node_add_key<br/>+ fman_pcd_manip_chain_create"] -.-> B4
-    end
-
-    style ASK1 fill:#fdd,stroke:#a00
-    style ASK2 fill:#dfd,stroke:#080
+    Note over UB,FW: 1. U-Boot loads ASK microcode 210.x into FMan IRAM<br/>before bootm. FMan is silent until Linux runs.
+    UB->>K: boot Linux + ASK SDK patches
+    K->>K: dpaa1 cell drivers probe<br/>(BMan/QMan/FMan/PCD)
+    K->>CDX: module_init: cdx_module_init()
+    CDX->>FW: fm_get_fw_rev() → ucode pkg ≥ 209? else fail
+    CDX->>DA: call_usermodehelper("/usr/bin/dpa_app")
+    Note over DA,FC: 2. dpa_app reads cdx_pcd.xml<br/>(distributions + classifications)<br/>and cdx_cfg.xml (port↔policy binding)
+    DA->>FC: fmc_compile(net_pcd_xml, cfg_xml)
+    FC->>K: ioctl FM_PCD_KG_SET_SCHEME × N<br/>FM_PCD_CC_NODE_BUILD × M<br/>FM_PORT_SET_PCD_POLICY (per port)
+    Note over K: 3. KG schemes are allocated NOW,<br/>BEFORE any netdev is created.<br/>BMI port FMBM_RFPNE,<br/>fmkg_pe_sp port-scheme binding,<br/>parser config — all programmed by FMC.
+    K->>SD: sdk_dpaa probe<br/>(after PCD is already programmed)
+    SD->>NW: register_netdev(eth3), register_netdev(eth4)
+    Note over NW: 4. eth3/eth4 come up with the<br/>full ASK PCD chain ALREADY ACTIVE.<br/>Kernel never touched scheme 3/4.<br/>Kernel never wrote KGSE_*.
+    Note over CDX: 5. CDX runtime: per-flow,<br/>insert HW key into the<br/>pre-built CC tree via libfci<br/>(no scheme reprogramming).
 ```
 
-**The architectural delta in one sentence:** ASK 1.x hops the packet through an Offline-Host port between ingress and egress so that classification (stage 1) and L2/L3 rewrite (stage 2) can be programmed independently from userspace; ASK2 fuses both stages into a single CC-key action consumed inline on the ingress port, programmed from kernel context.
+Compare against our **ASK2 graft model** (PR14z13):
 
-The OH-port hop is what makes ASK 1.x **architecturally** capable of arbitrary multi-stage chains (NAT44 → VLAN-push → IPsec-encap → TTL-dec, etc.) without an in-kernel chain-programming primitive. ASK2 obtains the same capability by giving the kernel an explicit `fman_pcd_manip_chain_create()` primitive (PR14x design doc, patch 0036) that fuses an N-stage HMCT into a single AD slot — the chain length is bounded only by MURAM and the silicon's per-action HMCT size limit (~32 bytes per encoded primitive). That is the **right** abstraction for a kernel-side fast path.
+```mermaid
+sequenceDiagram
+    autonumber
+    participant K  as Linux 6.18.31 (mainline)
+    participant DE as drivers/net/ethernet/freescale/dpaa<br/>(dpaa_eth)
+    participant FM as fman.ko + fman_pcd.ko<br/>(mainline PR14a/b/c/d/e/f)
+    participant NW as netdev eth3/eth4
+    participant AS as ask.ko<br/>(OOT, PR14z13)
+    participant UT as user (nft delete table inet ask_offload)
+
+    K->>DE: dpaa_eth.ko probe
+    DE->>FM: keygen_port_hashing_init()<br/>fman_pcd_kg_scheme_create()
+    Note over FM: KG scheme 3 ← eth3 default<br/>KG scheme 4 ← eth4 default<br/>KGSE_MODE = 0x80500002<br/>(NIA = BMI, direct hash dispatch to eth3/4 RX FQs)<br/>KGSE_CCBS = 0 (no CC tree attached)
+    DE->>NW: register_netdev(eth3), register_netdev(eth4)
+    Note over NW: eth3/eth4 are KERNEL-OWNED,<br/>RX FQs 0x200–0x203 / 0x300–0x303 active.
+    Note over AS: …minutes/hours later…
+    UT->>AS: ip xfrm / nft flowtable adds flow
+    AS->>FM: fman_pcd_kg_lookup_port_scheme(eth3) → scheme 3<br/>fman_pcd_kg_graft_cc(scheme3, cc_v4_tcp)<br/>fman_pcd_kg_graft_cc(scheme4, cc_v4_tcp)
+    Note over FM: keygen_scheme_set_ccbs() now writes<br/>KGSE_CCBS = cc_tree_handle<br/>and (PR14z15) RMWs KGSE_MODE.NIA = FM_CTL.<br/>BUT silicon ALSO mutates port-side state<br/>(BMI FMBM_RFPNE, fmkg_pe_sp,<br/>parser/PCD action descriptors)<br/>that PR14z18 ungraft does NOT restore.
+    Note over NW: RX kicks for a while<br/>(18.5 GB, 12.3 M packets observed)<br/>then ARP timeouts → wedge.
+    UT->>AS: nft delete table inet ask_offload
+    AS->>FM: fman_pcd_kg_ungraft_cc(scheme3, scheme4)
+    Note over FM: KGSE_CCBS = 0,<br/>KGSE_MODE.NIA = BMI restored.<br/>But: KGSE_SPC on scheme 3/4 FROZEN.<br/>Schemes 0/1/2 (mgmt) keep counting.<br/>Packets stop reaching KG on eth3/4.<br/>Only a full reboot recovers.
+```
+
+**The architectural divergence is the inversion of control:**
+
+| Aspect | Original ASK | ASK2 PR14z13 (graft) |
+|--------|--------------|----------------------|
+| Who owns scheme 3/4 at boot? | `dpa_app`/FMC, **before any netdev** | mainline `dpaa_eth` (built-in flow hash) |
+| Who configures BMI port FMBM_RFPNE? | FMC (once, at boot, from XML) | mainline `dpaa_eth` (for direct hash dispatch) |
+| Who configures `fmkg_pe_sp` port↔scheme binding? | FMC (once, at boot) | mainline `dpaa_eth` |
+| When is the CC tree wired in? | At boot, before netdev | At nft-flowtable-add, **on live silicon** |
+| Where does the netdev sit relative to PCD? | **Downstream** of the PCD chain from the first packet | **Upstream** ownership of the same silicon we're trying to redirect |
+| Recovery from teardown? | N/A — the PCD chain is *the* config, never torn down at runtime | **Cannot** restore everything the graft mutated → wedge |
+
+The original ASK has no "ungraft" problem because it has no graft. Its PCD chain is the *only* state the silicon has ever known.
 
 ---
 
-## 3. Module-by-module mapping
+## 3. Why our graft wedges — the residual-state model
 
-| ASK 1.x component | LOC (approx) | ASK2 counterpart | LOC budget | Feature gap in v1.0 |
-|---|---|---|---|---|
-| `cdx.ko` — 60+ files in `cdx/` | ~25 k | `ask.ko` (`ask_hw.c` + `ask_flow_offload.c` + scaffolding) | ~1500 | RTP relay, VoIP fast path, WiFi offload, multicast control, IPsec control plane, PPPoE relay table, 3-tuple flows, IP reassembly — all **deferred** to M3+. |
-| `auto_bridge.ko` (Mindspeed ABM heritage) | ~3 k | `ask_bridge.ko` | ~400 | L2-flow detection via bridge netlink — ASK2 v1.0 piggybacks on **nft flowtable** which already handles L2 forwarding offload signalling. The dedicated L2-bridge module is unnecessary in v1.0; defer to M3 if `nft flowtable` proves insufficient. |
-| `fci.ko` + libfci userspace | ~2 k + 1 k | `libask_fci.so.1` (SONAME compat) + askd internal IPC | ~800 | libfci ABI shim for callers expecting the legacy `/dev/cdx_ctrl` ioctl set. **Surface preserved**, semantics re-mapped to ASK2 internals. |
-| `cmm` daemon — 60+ `module_*.c` files | ~15 k | `askd` (per spec §6) | ~6000 | cmm handles conntrack → fast-path programming, neighbor resolution, route cache, PPPoE/L2TP/macvlan/ICC/IPR/LRO/PRF/QM/relay/route/RTP/socket/stat/tunnel/VLAN/WiFi modules. `askd` v1.0 implements only conntrack-driven IPv4 forwarding; module surface deferred. |
-| `dpa_app` userspace classifier loader (FMC XML + `cdx_pcd.xml` + `cdx_cfg.xml`) | ~10 k | **None — programmed in-kernel by `ask_hw_pcd_bringup()`** | n/a | Entire FMC-XML toolchain replaced with C structs and direct `fman_pcd_*` calls from `ask.ko::__init`. **This is the largest correctness win in the rewrite.** No XML parser in the boot path, no userspace race, no MURAM lifetime owned by a separate process. |
-| Kernel patch `002-mono-gateway-ask-kernel_linux_6_12.patch` | 18,097 lines / 138 files | `kernel/flavors/ask/patches/0001..0037-*.patch` | ~7800 lines | Original patches **SDK** FMan (`drivers/net/ethernet/freescale/sdk_fman/*`) and **SDK** DPAA (`sdk_dpaa/dpaa_eth_sg.c::dpaa_submit_*_pkt_to_SEC`); our patches author the in-tree PCD subsystem on **mainline** FMan. Architecturally inverted — see §4. |
-| `libnfnetlink` + `libnetfilter_conntrack` forks | ~1.5 k of patches | **Not needed** — we drive offload from `nft flowtable` callbacks, not a userspace conntrack walker | 0 | The cmm-era pattern of "userspace walks conntrack and pushes flows down" is obsoleted by mainline nft flowtable offload (kernel 5.10+). |
-| `iptables` QOSMARK/QOSCONNMARK | ~835 line patch | **Deferred** (M4 — QoS marking via tc/nft action `meta mark set`) | 0 | Legacy iptables hooks; modern nftables `meta mark` + per-CC-key policer (PR15) covers the same use case. |
-| `ppp` + `rp-pppoe` ifindex/cmm-relay patches | ~350 lines | **Deferred** (M3 — PPPoE encap as MANIP chain stage `INSRT_PPPOE`) | n/a | Encapsulation belongs in the chain primitive, not in ppp daemon. The original needed it because cmm was the only programmer of the fast path. |
+PR14z15 + PR14z18 explicitly save and restore exactly two register fields per scheme:
 
-**Headcount:** ASK 1.x is ~55 k LOC of C + ~20 k LOC of kernel patch + ~10 k LOC of FMC/XML + a 28 MB fmlib/fmc external-build vendor blob. ASK2 v1.0 fully landed will be ~9 k LOC of OOT C + ~7.8 k LOC of in-tree patch + 0 lines of XML/FMC. A **5–6× reduction in attack surface** for the same forwarding functionality.
+1. `KGSE_CCBS` — CC tree handle (0 when unbound)
+2. `KGSE_MODE.NIA` (bits encoding next-invoked-action engine, FM_CTL ↔ BMI)
 
----
+But `fman_pcd_cc_node_create()` and the helpers we invoke between graft and ungraft also write — directly or via SDK-derived helpers in PR14a/b/c/d/e/f — to silicon that **is not per-scheme**:
 
-## 4. The kernel-patch inversion is the single biggest win
-
-The original kernel patch touches:
-
-```
-drivers/net/ethernet/freescale/sdk_dpaa/    — 9 files (dpaa_eth.{c,h}, dpaa_eth_sg.c,
-                                              dpaa_eth_ceetm.c, mac-api.c, offline_port.c, …)
-drivers/net/ethernet/freescale/sdk_fman/    — 23+ files (fm_cc.{c,h}, fm_kg.c, fm_manip.c,
-                                              fm_plcr.c, fm_port.c, fm_pcd.{c,h}, hc.c,
-                                              fm_muram.c, memac.c, fm_ehash.c, fm_sp.c, fm.c, …)
-drivers/crypto/caam/                        — pdb.h hooks for DPAA-IPsec
-```
-
-That is **the entire NXP SDK DPAA + FMan + CAAM stack patched in-place**. The SDK driver tree itself is a vendored fork of the Linux Foundation `fsl-linux-sdk` repo — it has not been merged into mainline since 2017 and lives only in NXP's downstream LTS branches. Mono's `mono-patched` branch adds another 1,499 lines on top. Any kernel uprev requires re-validating 18 k+ patched lines.
-
-**ASK2 instead authors an in-tree PCD subsystem** from scratch against mainline `drivers/net/ethernet/freescale/fman/`:
-
-| ASK2 patch # | Subsystem | Purpose |
+| Register / state | Programmed by | Restored by our ungraft? |
 |---|---|---|
-| 0001–0005 | DPAA glue | EXPORT_SYMBOL_GPL `dpaa_get_rx_default_fqid`, `dpaa_get_tx_fqid`, flow_block_cb registration, neighbor lookup helper |
-| 0006–0015 | FMan PCD core | KG (KeyGen), CC node create/destroy, action-template encoder, port→tree attach, MURAM budget accounting |
-| 0016–0025 | MANIP primitives | RMV_ETHERNET, INSRT_GENERIC, IPV4_FORWARD (TTL-dec + csum), NAT44, VLAN push/pop, IPV6 hop-limit |
-| 0026–0030 | PLCR, REPLIC, PRS | Policer, replicator, parser-extract bindings |
-| 0031–0035 | OH-port + chain primitive | OH-port claim, `fman_pcd_manip_chain_create` (PR14x) |
-| 0036 | Chain-aware CC action | `FMAN_PCD_ACTION_MANIPULATE` consumes a chain handle |
-| 0037 | hmct_used encoder fix (PR14z) | Four v1.2 encoders now populate the chain validator's required field |
+| `KGSE_CCBS` (per scheme) | `keygen_scheme_set_ccbs()` | ✅ yes |
+| `KGSE_MODE.NIA` (per scheme) | PR14z15 RMW | ✅ yes |
+| `KGSE_MV` (port match-vector) | `fman_pcd_kg_bind_port()` (kernel-side, owned by `dpaa_eth`) | ❌ untouched (good — we don't graft this) |
+| BMI port `FMBM_RFPNE` (port-side NIA) | `fman_pcd_cc_node_create()` indirectly when first key is added to a tree whose root is grafted | ❌ **not restored** |
+| `fmkg_pe_sp` (port-to-scheme binding) | `fman_pcd_kg_bind_port()` at boot, but **also** mutated by some CC tree builders when promoting a scheme from BMI-only to FM_CTL-fanout | ❌ **not restored** |
+| AD entries (MURAM, anchored in CC tree) | `cc_encode_ad()` per key + per arm | ✅ freed on tree-destroy, but BMI's reference into them is not torn down before tree-destroy fires |
+| Parser config (per port) | left default on the graft path | ❌ untouched (good) |
+| Scheme-group / hash-mask registers | `fman_pcd_kg_scheme_create()` (owned by `dpaa_eth`) | ❌ untouched (good — we don't recreate) |
 
-**Two architectural properties this gives us that ASK 1.x cannot:**
+The empirical evidence from regdump after a graft+ungraft+iperf3 cycle on the live DUT (recorded in qdrant 2026-05-22):
 
-1. **The mainline FMan driver stays in tree.** Every kernel uprev (we're on 6.18.29; original ASK is stuck on 6.12) costs us at most a context-drift `git apply --3way` pass per patch. The original ASK costs Mono a manual re-port of 18 k lines against a downstream SDK fork that is itself behind mainline.
-2. **The PCD ABI is ours.** We can extend `fman_pcd.h` for ASK2 features without coordinating with NXP. Our `FMAN_PCD_API_VERSION 1` gate (spec §13) lets us version-bump cleanly. The original ASK has to pretend the SDK's `fm_pcd_ext.h` is a stable API — it is not; NXP rev-bumps it at every SDK release.
+> Schemes 3/4 `KGSE_SPC` (silicon packet counter) **frozen** at 14887572 / 2163140.
+> Schemes 0/1/2 (mgmt eth0/1/2) keep incrementing normally.
+> `KGSE_MODE` and `KGSE_CCBS` on 3/4 are clean (restored).
+> Packets reaching the chip on eth3/4 stop reaching KG entirely.
 
-This inversion was correctly identified as the central rewrite goal in spec §3 and the 2026-05-12 cleanup commit. Reaffirming it: **do not regress** by importing SDK headers or vendoring `fm_cc.c`-style state.
+The frozen `KGSE_SPC` with clean `KGSE_MODE` means the silicon believes the schemes are valid and idle — but the BMI port-side path has been re-routed somewhere **upstream of KG** and we didn't undo it. The only path that restores routing is a full DPAA1 cold-init, i.e. reboot. This matches "BMI port FMBM_RFPNE" or "fmkg_pe_sp port binding" as the mutated-but-not-restored surface.
 
----
-
-## 5. HW-offload critique: are we doing the right thing?
-
-### 5.1 What ASK 1.x actually does on the hot path
-
-For an `iperf3` IPv4-TCP flow from `eth0 → eth1`:
-
-1. Frame arrives on `fm0-port-rx-1g-1` MAC.
-2. Soft Parser (PDL v3 from `hxs_pdl_v3.xml`) extracts the IPv4-TCP 5-tuple into the parse result.
-3. KG scheme `cdx_tcp4_dist` hashes the 5-tuple → 14-byte key, indexes into external hash table `cdx_tcp4_cc` (DDR-resident, 512 buckets, aging enabled).
-4. On hit: action = `FORWARD_FQ` to an OH-port input FQ. **CC entry's "action data" is just `{fqid, opcode}`** — no MANIP at this stage.
-5. OH-port re-runs PCD: KG re-classifies the now-routed frame, CC entry on the OH port carries the **MANIP chain** (RMV_ETHERNET, INSRT_GENERIC for new dst-MAC + src-MAC, IPV4_FIELD_UPDATE for TTL/csum) and a second `FORWARD_FQ` to the egress TX FQ.
-6. TX MAC DMAs the rewritten frame.
-
-Two trips through the FMan datapath. One DDR round-trip for the OH-port FQ dequeue. The advantage is **flexibility** — userspace can rewire any (port, classifier) → any (manip, port) without touching kernel code.
-
-### 5.2 What ASK2 does
-
-For the same flow:
-
-1. Frame arrives on `fm0-port-rx-1g-1`.
-2. Hard Parser extracts 5-tuple (via patches 0006/0007 binding the parse result into KG key composition).
-3. KG scheme (per-port, ≤4 binds per spec) feeds the **shared** CC node (255 keys, silicon cap).
-4. On hit: `FMAN_PCD_ACTION_MANIPULATE` consumes the **per-flow MANIP chain handle** (patches 0033/0036/0037). The chain contains the same three primitives the OH-port would have done. `next_fqid` is the peer's TX FQID (via `dpaa_get_tx_fqid()` from patch 0031).
-5. Fused HMCT executes inline on the ingress port's classification engine.
-6. TX MAC DMAs the rewritten frame.
-
-**One trip through FMan. No OH-port hop. No DDR round-trip.** Latency saving on the order of one DMA + one FQ dequeue (~hundreds of nanoseconds per flow). Throughput: identical to ASK 1.x on the spec'd 2 Gbps M2 target — both are well below the silicon's 10 Gbps line rate.
-
-### 5.3 Is single-stage fused HMCT actually correct?
-
-**Yes, with two known limits:**
-
-| Limit | Magnitude | Mitigation in spec/plan |
-|---|---|---|
-| Per-action HMCT bytes | ~32 bytes silicon encoding limit per AD slot. RMV_ETHERNET(2) + INSRT_GENERIC(14+2) + IPV4_FORWARD(4) = ~22 bytes — **fits**. Adding NAT44 (~8 bytes) + VLAN-push (~6) = ~36 bytes — **does not fit** in single AD; needs chain expansion via `fman_pcd_manip_chain_create()`'s multi-AD walk (PR14x design §4). | Chain primitive walks N ADs; encoder splits stages by HMCT-byte budget. PR14x design covered this; PR14z's `hmct_used` field is the per-encoder byte report the splitter consumes. |
-| CC-key table capacity | 255 keys per CC node (silicon `FMAN_PCD_CC_NODE_KEYS_MAX`). After PR14r-B dedupe ~127 unique 5-tuples; multi-CC-node fan-out (multiple proto/IP-family CC nodes per port) raises the effective ceiling to ~1k–2k flows. | Multi-CC-node design slotted into M3. For M2 (small-flow benchmarks) the 255-key limit is comfortable. |
-
-**Where ASK 1.x is genuinely architecturally superior:** **CC table size**. Their external-hash CC table is DDR-backed with `max=512` per table and `external="yes"` (`fm_ehash.c`). That is a fundamentally different table type — not MURAM-resident — and gives orders of magnitude more capacity, at the cost of an extra DDR access per lookup. For a residential gateway (≤1k concurrent flows) this is genuinely useful.
-
-**Recommendation:** Spec'd as M4 (deferred). The in-tree FMan driver has zero EHASH support; adding it is a multi-PR project (new MANIP type, new MURAM region accounting, new collision-chain walker). Not a v1.0 blocker — but worth keeping on the roadmap explicitly. See §7 below.
-
-### 5.4 NUD_VALID widening (PR14y) — was that the right fix?
-
-PR14y widened the NUD-state gate in `ask_flow_offload.c` from `NUD_REACHABLE` to `NUD_VALID` (which OR's REACHABLE | NOARP | PERMANENT | STALE | DELAY | PROBE). Cross-checked against ASK 1.x: `cmm/src/neighbor_resolution.c` does **not** gate on NUD at all — it programs the fast-path entry as soon as the neighbor is **resolved** (has a valid LL address), regardless of NUD state, then relies on conntrack timeout for eviction. Our NUD_VALID is *more conservative* than ASK 1.x and *less conservative* than the original kernel flowtable's NUD_REACHABLE — a defensible middle ground that avoids the "STALE-but-still-valid" miss without the cmm-era risk of programming a stale ARP cache entry. **Keep it.**
+The original ASK *also* writes those registers — but it writes them **at boot, from XML, before `dpaa_eth` (or `sdk_dpaa`) exists**, and they stay programmed forever. The kernel netdev driver is forked specifically to **respect** the PCD chain at probe time instead of clobbering it. Mainline `dpaa_eth` is forked from the opposite direction: it assumes it owns the chip.
 
 ---
 
-## 6. Risk register — what ASK2 v1.0 silently doesn't do
+## 4. Module-load architecture comparison
 
-Each row is a feature that original ASK *does* and ASK2 v1.0 *doesn't*. None is a v1.0 blocker; they are scoped to M3+ per ASK2 spec §11 and `plans/ASK2-IMPLEMENTATION.md`.
+### 4.1 Original ASK module init (`cdx_main.c:cdx_module_init`)
 
-| # | Feature | ASK 1.x source | ASK2 plan | Risk if shipped without |
-|---|---|---|---|---|
-| R1 | **IPv6 forwarding offload** | `control_ipv6.c` (~50 k), `cdx_tcp6_cc` external table | M3 PR16: clone v4-TCP CC node logic for v6; needs `fman_pcd_manip_ipv6_hop_limit` (analogue of patch 0017's v4 TTL). | IPv6 packets stay in SW slow path. For a homelab gateway with dual-stack ISP, that **halves** offload effectiveness on the IPv6 side. |
-| R2 | **PPPoE relay / encap** | `control_pppoe.c`, `cdx_pppoe_cc`, ppp ifindex patch | M3 PR17: `FMAN_PCD_MANIP_INSRT_PPPOE` already in patch 0033; just needs ask_flow_offload to detect PPPoE-encapped flows and steer them. | PPPoE WAN deployments (ASK 1.x's primary use case at Mono) get zero offload. Critical for any ISP-CPE scenario. |
-| R3 | **Multicast forwarding** | `cdx_multicast4/6_cc`, `dpa_control_mc.c`, FMAN replicator | M3 PR18: patch 0029 (REPLIC) already implements the replicator; needs CC-key with `FMAN_PCD_ACTION_REPLICATE`. | IPTV / IGMP-snoop offload absent. Niche but Mono-relevant. |
-| R4 | **IPsec offload (CAAM-QI)** | `cdx_dpa_ipsec.c`, `dpa_ipsec.c`, `sdk_dpaa/dpaa_eth_sg.c::dpaa_submit_inb/outb_pkt_to_SEC()` | Deferred indefinitely (spec §4.4 deleted INET_IPSEC_OFFLOAD requirement). Original used SDK-only DPAA-CAAM glue. | VPN throughput stays at SW XFRM. ~500 Mbps on Cortex-A72 with AES-NI; original ASK claimed ~1.5 Gbps. **Operator-visible regression** for VPN-router use case. |
-| R5 | **CEETM QoS / hierarchical sched** | `cdx_ceetm_app.c`, `dpaa_eth_ceetm.c` | M4: needs in-tree `tc-CEETM` qdisc port. Mainline has `pfifo_fast`/`fq`/`htb` only. | Multi-tenant QoS (per-subscriber rate limiting) impossible. Acceptable for v1.0 homelab. |
-| R6 | **Exception-path rate limiters** | `CDX_EXPT_*_DEFA_LIMIT`, FMAN PLCR | Patch 0026 implements PLCR primitive but no policy attaches it to the kernel-egress slow path. | DoS on SW path (any flow hitting kernel slow path can saturate eth0 management CPU). **Mild M2 risk** — recommend PR14-followup to attach a default 100 Mbps PLCR to the host-rx FQ. |
-| R7 | **3-tuple RTP fast path** | `cdx_tuple3*_cc` tables, `control_rtp_relay.c` | M5: VoIP-specific, low priority for a router workload. | None for our use case. |
-| R8 | **IP fragment reassembly in HW** | `cdx_frag4/6_cc`, `cdx_reassm.c`, `cdx_ipv4frag_dist` KG scheme | M5: SW reassembly via netfilter is adequate at our line rates (≤10 Gbps). | None at our throughput targets. |
-| R9 | **Aging in CC table** | `aging="yes"` XML attribute → SDK `fm_ehash.c` per-bucket aging | Spec §13.7: aging done in kernel via nft flowtable's existing timeout machinery — we explicitly do not need HW aging because the kernel evicts via `fman_pcd_cc_node_modify_next_action(slot, DROP)`. **Architectural simplification.** | None — kernel timeout is more flexible than HW aging. |
-| R10 | **VLAN push/pop on fast path** | SDK `FM_PCD_MANIP_HDR_FIELD_UPDATE_VLAN` + custom KG VLAN-tag extracts | Patch 0019 (VLAN MANIP) implements push/pop; not yet wired to ask_flow_offload trunk detection. | Trunk-port deployments (VLAN-tagged uplink) bypass offload. Recommend M3 PR19. |
+```mermaid
+graph LR
+    A[insmod cdx.ko] --> B[cdx_check_fman_firmware<br/>verify ucode pkg ≥ 209]
+    B --> C[cdx_init_device<br/>register /dev/cdx]
+    C --> D[cdx_ctrl_init<br/>fci event channel + timer]
+    D --> E[devman_init_linux_stats]
+    E --> F[cdx_driver_init<br/>L2/L3 control planes]
+    F --> G[start_dpa_app<br/>call_usermodehelper /usr/bin/dpa_app]
+    G --> H[dpa_app reads cdx_pcd.xml + cdx_cfg.xml<br/>FMC pushes KG schemes + CC trees<br/>per-port policy bindings via ioctls]
+    H --> I[cdx_init_frag_module<br/>cdx_dpa_ipsec_init<br/>cdx_init_*_bpool]
+    I --> J[cdx ready — sdk_dpaa already up,<br/>netdevs were created downstream of PCD]
+```
 
-**Summary risk verdict:** ASK2 v1.0 at M2 gate covers IPv4-TCP+UDP forwarding offload on a single CC node per port. That is enough for the **WireGuard-LAN homelab** use case the spec was written for. It is **not** enough for any ISP-CPE deployment (R2 PPPoE, R4 IPsec) or for any dual-stack IPv6 deployment (R1). The spec is internally consistent on this — but the operator should treat R1/R2/R4 as **must-have-before-public-release-as-default-flavor**, not as nice-to-haves.
+Notice **step G**: the kernel module invokes `/usr/bin/dpa_app` from inside its own `module_init` via `call_usermodehelper_exec(UMH_WAIT_PROC)`. The module **blocks** on dpa_app completing before declaring init success. If dpa_app fails, `cdx_module_init` rolls back via `cdx_module_deinit` and returns `-EIO`. The PCD chain is therefore a **prerequisite of cdx initialization**, not a runtime add-on.
 
----
+### 4.2 ASK2 graft model (`ask_hw.c:ask_hw_bind`)
 
-## 7. Concrete improvement proposals for ASK2
+```mermaid
+graph LR
+    A[boot → mainline dpaa_eth probe] --> B[KG scheme 3 ← eth3<br/>KG scheme 4 ← eth4<br/>direct hash dispatch ACTIVE]
+    B --> C[netdev eth3/eth4 up]
+    C -. minutes later .- D[nft create table inet ask_offload<br/>nft add flowtable ft1 flags offload]
+    D --> E[ask_hw_bind: per-pipeline<br/>fman_pcd_cc_node_create x4<br/>fman_pcd_kg_lookup_port_scheme<br/>fman_pcd_kg_graft_cc]
+    E --> F[silicon mutated UNDER live netdev<br/>BMI/parser/PCD state diverges<br/>from what mainline dpaa_eth assumes]
+    F --> G[traffic flows for a window<br/>then ARP/RX wedges]
+    G -. nft delete .- H[ask_hw_unbind:<br/>fman_pcd_kg_ungraft_cc<br/>destroy_cc_node]
+    H --> I[KGSE_MODE/KGSE_CCBS restored<br/>but BMI/fmkg_pe_sp NOT restored<br/>KGSE_SPC on 3/4 frozen<br/>only reboot recovers]
+```
 
-Ordered by leverage. Cite spec sections only — no code edits in this document.
-
-### Proposal P1 — Tag PR14z's chain handle with `hmct_bytes_used` reading
-
-PR14z (commit `8de3b35`) added `manip->hmct_used = N` to four v1.2 encoders so that `fman_pcd_manip_chain_create()`'s validator stops returning `-EINVAL`. That value is now authoritative per-encoder. **Surface it** as a `chain->hmct_total_bytes` field on the chain handle so that:
-
-1. The `fman_pcd_cc_action_template` encoder can pre-flight check whether a chain fits in one AD slot or needs multi-AD walk.
-2. The MURAM budget counter in `ask_hw.c` can charge the actual byte cost, not the worst-case `sizeof(struct fman_pcd_manip)` upper bound.
-3. `dmesg | grep fman_pcd_manip` becomes a useful capacity-planning tool.
-
-Cost: ~30 LOC in `fman_pcd_manip.c`, 1 LOC in `fman_pcd.h`. Should land as a follow-up to PR14z, **not** as M3 work — it's a debuggability fix.
-
-### Proposal P2 — Bring forward the multi-CC-node fan-out (currently M3) to M2.5
-
-The 255-key per-CC-node silicon limit (`FMAN_PCD_CC_NODE_KEYS_MAX`) is the **single most visible** ASK2 capacity ceiling. ASK 1.x sidesteps it by external hash with 512 keys per table × 16 tables = 8k key capacity. We can match (and exceed) that by instantiating multiple in-MURAM CC nodes per port, keyed by (proto, IP-family) or by hash-prefix:
-
-- per-port: 4 KG schemes already (PR14j: `ASK_HW_V4_TCP_MAX_BINDS=4`) — extend to fan-out into 4 CC nodes per protocol × 2 protocols (TCP/UDP) × 2 families (v4/v6) = up to 16 CC nodes × 255 keys = **4080 flow capacity** per port. Well within MURAM budget (~10 KB per CC node × 16 = 160 KB, vs ~512 KB total MURAM).
-- The dispatcher in `ask_hw_flow_insert()` already switches on `(l3_proto, l4_proto)`; extending to a hash-prefix bucket of 4 is mechanical.
-
-Cost: ~200 LOC in `ask_hw.c`, no new in-tree patches. M2.5 deliverable. **High leverage**: closes the only quantitative gap vs ASK 1.x's external-hash table for the homelab use case.
-
-### Proposal P3 — Attach a default PLCR policer to the host-rx slow-path FQ (R6 mitigation)
-
-Patches 0026–0027 already implement the PLCR primitive in the in-tree PCD subsystem. Today nothing uses it. Attach a 100 Mbps single-rate two-color policer to the FQ that handles miss-traffic (CC node default `FORWARD_FQ` to `dpaa_get_rx_default_fqid`), so that a DoS hitting the SW path cannot saturate the eth0 management CPU. ASK 1.x does this with `CDX_EXPT_ETH_DEFA_LIMIT 195312` (= 100 Mbps in packet-mode) — we should match.
-
-Cost: ~50 LOC in `ask_hw_pcd_bringup()`, in module init. No new kernel patches. **Land as a PR14-followup**.
-
-### Proposal P4 — Re-evaluate whether we keep the OH-port code path in v1.0
-
-PR14x design (memo 2026-05-18) decided to **keep the OH-port code dormant** rather than delete it, on the rationale that future features (multi-stage chains exceeding single-AD HMCT capacity) might need it as a fallback. After landing PR14z, the chain primitive itself handles multi-AD walks via the `hmct_used` accounting in P1 above. **The OH-port fallback is no longer needed** for chain capacity.
-
-Recommendation: schedule **PR14-cleanup** to delete `ask_hw_pcd_bringup_oh`, `_teardown_oh`, the OH-port alloc bitmap, the `enable_oh_chain` module param. Keep patch 0031 (OH-port claim primitive in the in-tree FMan driver) because future ASK2 features (R3 multicast replicator output, R7 RTP relay) genuinely will need OH ports. But delete the OH-port consumer in ask.ko.
-
-Cost: ~200 LOC deletion in `ask_hw.c`. Counter-balanced by ~200 LOC of clarity gained. **Land before M2 final-gate sign-off**, so the M2 acceptance test doesn't accidentally exercise the dormant path.
-
-### Proposal P5 — Add a PR for HW-aging *off* / kernel-aging *on* invariant
-
-ASK 1.x's CC tables have `aging="yes"` in the XML. Our in-kernel `fman_pcd_cc_node_create` should explicitly pass `aging=false` (or assert the in-tree default is `false`) so that we don't get hardware-evicted CC keys racing the kernel's nft-flowtable eviction. This is implicit today but not contractual.
-
-Cost: ~5 LOC + a WARN_ON_ONCE in `fman_pcd_cc_node_create` if a caller asks for aging. Land with PR15 (M3 NAT44).
-
-### Proposal P6 — Explicit FMAN_PCD_API_VERSION bump policy
-
-Spec §13 mentions `FMAN_PCD_API_VERSION 1` as the ABI gate. PR14z just added a new required field (`hmct_used`) to manip encoders. That is technically an ABI **break** for any out-of-tree consumer of `struct fman_pcd_manip`. We have only one OOT consumer today (`ask.ko`), so the break is invisible. **Document the rule explicitly** in `kernel/flavors/ask/oot-modules/ask/README.md`: "any patch that adds a required field to an `fman_pcd_*` struct bumps `FMAN_PCD_API_VERSION`." This is the kind of invariant that becomes a 6-month forensic nightmare if it drifts.
-
-Cost: documentation only. Land with PR14z follow-up.
-
-### Proposal P7 — Test parity matrix vs cmm unit tests
-
-The original `cmm/unit_tests/001.sh` through `042.sh` (38 shell tests) exercise the conntrack → fast-path programming loop end-to-end on real hardware. Many are still architecturally relevant to ASK2 (flow add, flow delete, flow age-out, NAT pinhole, conntrack mark, bridge interaction, IPv4-only / IPv6-only / dual-stack). **Walk the list once** and either port the relevant ones to `bin/verify-ask-*` scripts or explicitly mark them as "not applicable to ASK2 architecture." Today we have just `bin/verify-ask-flow-offload.sh` doing iperf3 + mpstat; cmm has 38 tests covering edge cases.
-
-Cost: ~1 day of test triage + ~5 new `bin/verify-*` scripts. Land in parallel with M3.
+The two pipelines are doing fundamentally different things at fundamentally different times. The original ASK never has to "restore" — it owns the chip from boot. We are trying to do reversible hardware re-routing under a live kernel netdev, and the silicon does not have a clean reversibility primitive for that.
 
 ---
 
-## 8. Open questions for the operator
+## 5. Verifying the divergence against `specs/ask2-rewrite-spec.md` v1.1
 
-1. **R4 IPsec offload** — is this a public-release blocker for `FLAVOR=ask` (default v1.0 will ship a homelab image where SW XFRM @ 500 Mbps is acceptable), or do we hold v1.0 release until CAAM-QI is wired? My recommendation: **release v1.0 without** R4, label it "LAN/WireGuard offload"; schedule R4 as v1.1 with explicit "CAAM-QI integration" release-note line.
+The ASK2 spec (v1.1, §3 "Architectural model") explicitly chose mainline `dpaa_eth` co-existence over the SDK fork:
 
-2. **R2 PPPoE** — same question. PPPoE is the Mono original-deployment target. If we want to claim drop-in compatibility with the original ASK use case, R2 must land in v1.0. My recommendation: **schedule R2 as M3 immediately after M2 gate passes** (it's mechanical — patch 0033 already has `INSRT_PPPOE`).
+> §3.2 — ASK2 modules MUST coexist with the mainline `dpaa_eth` netdev driver. The kernel netdev retains full ownership of the RX path; ASK2 attaches a CC tree downstream of the mainline-allocated KG scheme. **No fork of the SDK overlay is permitted.**
 
-3. **Proposal P2 (multi-CC-node fan-out)** — operator decision: bring into M2.5 (~3 days of work, raises capacity 16×), or defer to M3 (acceptable, but means the iperf3 -P 256 stress test in M2 acceptance will overflow the CC keyspace and trigger the dispatcher's `-ENOSPC` SW-fallback path on ~50% of flows)?
+That decision was made to keep the codebase maintainable on mainline kernels (LSDK 6.12 → 6.18 → forward), avoid a 30 k-LOC SDK overlay, and stay aligned with the upstream DPAA1 cleanup direction. It is the **right strategic call for the project**.
 
-4. **Proposal P4 (OH-port cleanup)** — operator decision: delete dormant OH-port consumer path before or after M2 final-gate? Argument for "before": prevents the M2 test from accidentally exercising untested code. Argument for "after": preserves rollback option if PR14z's chain primitive turns out to have an unknown edge case at the M2 gate. My recommendation: **after M2 passes**, with PR14-cleanup as the first M2.5 PR.
+But it implies a hard constraint that PR14z13/z15/z18 violate:
 
----
+> **ASK2 must never mutate silicon state that `dpaa_eth` will not tolerate seeing on its next packet.**
 
-## 9. References
+The graft model violates this because:
+- BMI port FMBM_RFPNE is shared between the kernel default hash path and the CC tree path.
+- `fmkg_pe_sp` may be mutated by CC tree creation when the kernel's per-port scheme set is promoted from direct-hash to fanout.
+- These registers are not save/restorable from outside the SDK PCD context because the mainline `fman_pcd.c` doesn't expose them — they're touched as a side effect of `fman_pcd_cc_node_create()` deep inside PR14c body code derived from SDK `fm_cc.c`.
 
-- `we-are-mono/ASK` master HEAD as of clone 2026-05-18 (`/tmp/ask-review/ASK`).
-- `specs/ask2-rewrite-spec.md` v1.1 (commit `64425fa`).
-- `plans/ASK2-IMPLEMENTATION.md` PR14g through PR14z status.
-- `plans/PR14x-DESIGN.md` (chain primitive architecture decision).
-- `kernel/flavors/ask/oot-modules/ask/ask_hw.c` (current state on `ask20` HEAD).
-- `kernel/flavors/ask/patches/0033-fman-pcd-manip-v1.2-oh-port-primitives.patch` (encoder source).
-- `kernel/flavors/ask/patches/0036-fman-pcd-manip-chain.patch` (chain primitive).
-- `kernel/flavors/ask/patches/0037-fman-pcd-manip-hmct-used-v12-encoders.patch` (PR14z fix, commit `8de3b35`).
-- AGENTS.md "ASK2 (rewrite-in-progress)" section.
-- Qdrant memos dated 2026-05-12 through 2026-05-18 (cleanup decision, PR11/PR14g/PR14g-body-2/PR14x design, terminology).
+ASK2 spec §11.1 ("M2 acceptance gate") expects ≥7 Gbps at <5% kernel-net CPU. That target is achievable only with silicon offload on this hardware. **Silicon offload on this hardware requires owning the PCD chain at the level the original ASK owns it.** The spec's "co-existence with mainline `dpaa_eth`" constraint is in tension with that.
 
 ---
 
-## 10. Conclusion
+## 6. Why we cannot just "save and restore FMBM_RFPNE"
 
-The ASK2 rewrite has correctly inverted the kernel-patch axis (mainline FMan + ours-authored PCD subsystem, vs SDK-FMan + 18 k-line monolithic patch), correctly chosen single-stage fused-HMCT over the OH-port hop (lower latency, simpler ABI), and correctly preserved the operator-visible ABI surfaces (`/dev/cdx_ctrl`, `libfci.so.1`, `/etc/cdx_*.xml`).
+A naïve fix would be: extend PR14z18 to also snapshot `FMBM_RFPNE` (and a handful of related BMI/port regs) on graft, and restore on ungraft. This **does not work**, for three reasons:
 
-**The HW offload approach is sound.** The remaining work for a feature-parity release is breadth (proposals R1/R2/R4 above), not architecture. PR14z unblocks the chain primitive; the next M3+ PRs ride on the same primitive without further architectural change.
+1. **We don't have a clean enumeration of what gets mutated.** The mutation happens deep in SDK-derived code in `fman_pcd_cc.c` / `fman_pcd_kg.c` (PR14c/d/e body patches), often in ways that depend on whether other CC nodes already exist in the same FM. There is no public `fman_pcd_get_dirty_regs()` API, and the SDK source it was ported from is not structured to expose one.
+2. **MURAM allocations leak forward.** Even if BMI regs are restored, the AD records and HMCT chains that CC node creation allocated remain — and `dpaa_eth`'s probe-time MURAM accounting does not see them. Repeated graft/ungraft cycles will fragment MURAM until allocation fails (cf. historical ASK 1.x MURAM exhaustion failure mode in archived AGENTS.md).
+3. **The race window is wide and unbounded.** `dpaa_eth` is processing RX packets continuously through the same chip during the graft. Any RX FQ event mid-graft sees half-programmed silicon. The original ASK doesn't have this race because the chip starts in the final PCD state at boot and never changes.
 
-Specific architectural improvements worth folding into ASK2 before M3 freezes:
-- P1: surface `hmct_bytes_used` on the chain handle (debuggability + capacity planning).
-- P2: multi-CC-node fan-out to 4 k flows/port (closes the external-hash gap).
-- P3: default PLCR on host-rx FQ (DoS-resistance parity with ASK 1.x).
-- P4: delete dormant OH-port consumer in `ask.ko` after M2 (clarity).
-- P5: contract HW-aging off as an invariant.
-- P6: document the FMAN_PCD_API_VERSION bump rule.
-- P7: port the 38 cmm unit tests where applicable.
+---
 
-None of these are M2 blockers. All seven combined are ≤2 weeks of work.
+## 7. The three viable paths forward
 
-The CI build in flight (`26028478858`) is the immediate next gate. Post-deploy, the M2 retest at 2 Gbps / ≤5% CPU determines whether PR14z closes the architectural validation loop.
+### Path A — Boot-time PCD installation (mimics original ASK)
+
+Move ASK2's CC tree creation out of `ask_hw_bind` (runtime, on nft trigger) and into `dpaa_eth`'s probe path or a separate boot-time service that runs **before** `dpaa_eth` registers the netdev. The kernel netdev then comes up downstream of the ASK2 PCD chain, never owning schemes 3/4 directly, and there is no graft.
+
+**Implementation:**
+- Add a `pcd_install_pre_netdev()` hook to mainline `dpaa_eth` (a one-line in-tree addition, gated on a Kconfig like `CONFIG_FSL_DPAA_PCD_INSTALL_HOOK`).
+- `ask.ko` registers a `pcd_install_pre_netdev` callback. The callback builds the empty CC tree skeleton (`cc_v4_tcp` per direction) and **claims** scheme 3 / 4 by setting `KGSE_CCBS` before `dpaa_eth` writes its built-in flow hash defaults.
+- Per-flow key insertion at runtime via `nft → cc_add_key` is unchanged. No graft, no ungraft.
+- nft-delete-flow → `cc_remove_key`; the CC tree itself stays installed forever (matches original ASK's never-tear-down model).
+
+**Cost:** one in-tree patch (~20 LOC, the hook), restructure of `ask_hw_bind` to no-op after first call. Estimated 1 PR + 1 retest. The CC tree being installed at boot does mean ASK2 is always-on-or-always-off (cf. original ASK), but that's the cost.
+
+**Risk:** the empty CC tree must be a true silicon no-op when no keys are inserted, otherwise it costs CPU even without offloaded flows. Verify with idle PPS measurement before claiming victory.
+
+### Path B — Offline-host port indirection (PR14j / PR14u / PR14x path, archived)
+
+Use FMan offline-host ports as the **classification step**, leaving `dpaa_eth`'s schemes 3/4 untouched. Ingress packet → eth3 BMI → OH port 1 (parser/KG/CC tree owned by ASK2) → re-injected into eth4 TX FQ. The kernel netdev is unaware of the offload because the packet never reaches the kernel RX FQ for offloaded flows.
+
+**Status:** explored in PR14j/PR14o/PR14u/PR14x design docs. Blocked at 6-OH-ceiling for unique flows and at the manip-chain primitive (PR14x landed kernel-side manip chain on 2026-05-18 as `patch 0036`, lifting the ceiling to 255 CC keys).
+
+**Why it didn't ship as M2:** the kernel→OH redirection costs measurable latency and the OH ports are a finite resource shared with the IPsec offload path (per original ASK `cdx_cfg.xml` lines: `OFFLINE number="1" → IPsec, number="2" → WiFi`). It would land but with a smaller flow-count ceiling than Path A.
+
+### Path C — Fork the SDK overlay (mimics original ASK exactly)
+
+Resurrect `drivers/net/ethernet/freescale/sdk_dpaa/` and `sdk_fman/` on top of 6.18, replicate the 17,900-line ASK kernel patch, build `cdx.ko` against it, ship the ASK microcode (which we don't have).
+
+**Cost:** prohibitive. ASK2 spec v1.1 §12.9 already costed this at 15–30 k LOC forward-port. The microcode dependency alone is a showstopper (proprietary, not redistributable). Rejected at spec time.
+
+---
+
+## 8. Recommendation
+
+**Adopt Path A.** The cost is one in-tree hook and a restructure of `ask_hw_bind`. The graft model is architecturally unable to satisfy ASK2 spec §3.2 ("must not mutate state `dpaa_eth` won't tolerate") **and** §11.1 (≥7 Gbps at <5% CPU) **simultaneously** on this silicon. Path A is the smallest delta to the existing PR14a–PR14x patch stack that resolves both constraints by relocating where the CC tree lives in time, not where it lives in space.
+
+The graft model (PR14z13/z15/z18) should be **abandoned** and the patches dropped from the stack on `ask20` once Path A lands. Keep PR14a/b/c/d/e/f/g (the in-tree fman_pcd subsystem and exports) — those are good foundational work and Path A reuses them. Drop PR14z13/z15/z18 (the runtime graft).
+
+---
+
+## 9. Open questions
+
+1. Does mainline `dpaa_eth` 6.18.31 have a place to insert the pre-netdev hook that doesn't conflict with the upstream cleanup direction? (Likely yes — `dpaa_eth_probe()` calls `dpaa_eth_init_one()` per MAC, and there's a clean spot after `fman_port_bind()` and before `register_netdev()`.)
+2. Does the empty CC tree cost idle CPU when no keys are installed? Needs measurement on the live DUT.
+3. Path A means ASK2 must be loaded **before** `dpaa_eth` probes (or at least registered as a hook before probe). For VyOS that means either built-in (`ask.ko` → `ask`-built-in via `select`) or an initramfs early-load. The build system already supports this (CONFIG_FSL_DPAA1=y is mandatory per AGENTS.md), but the loading order needs verification.
+4. ASK2 spec v1.1 §3.2 may need an amendment to permit "pre-netdev CC tree install via published in-tree hook". This is a narrow, well-defined exception, not a full SDK fork — should be acceptable.
+
+---
+
+## 10. References
+
+- `tmp-mono-ask/README.md` — original ASK build/deploy overview (clone of `we-are-mono/ASK#mt-6.12.y`)
+- `tmp-mono-ask/cdx/cdx_main.c` — `cdx_module_init` ucode check + `start_dpa_app` user-helper invocation
+- `tmp-mono-ask/patches/kernel/002-mono-gateway-ask-kernel_linux_6_12.patch` — 17 900-line kernel patch targeting `sdk_dpaa/` + `sdk_fman/` + `fsl_qbman/`
+- `tmp-mono-ask/dpa_app/files/etc/cdx_pcd.xml` — declarative PCD chain (16 distributions, per-port policies)
+- `tmp-mono-ask/config/gateway-dk/cdx_cfg.xml` — port→policy binding (5 ethernet + 2 offline ports)
+- `kernel/flavors/ask/oot-modules/ask/ask_hw.c` — current PR14z13 graft model
+- `kernel/flavors/ask/patches/0042-fman-pcd-kg-graft-cc.patch` — PR14z13 ABI
+- `kernel/flavors/ask/patches/0043-fman-pcd-kg-graft-mode-nia.patch` — PR14z15 KGSE_MODE.NIA RMW
+- `specs/ask2-rewrite-spec.md` v1.1 §3, §11.1, §12.9
+- `plans/PR14x-DESIGN.md` — Path B reference (OH-port path with manip-chain primitive)
+- Qdrant memories tagged `ASK2-spec-v1.1`, `pr14x`, `m2-gate`, `fman-pcd`
