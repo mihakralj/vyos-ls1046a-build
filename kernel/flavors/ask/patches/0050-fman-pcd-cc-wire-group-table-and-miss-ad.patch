@@ -1,0 +1,234 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Fri, 23 May 2026 17:30:00 +0000
+Subject: [PATCH] fman-pcd-cc: wire group table entry and encode miss-AD
+
+PR14z19: fix FMan PCD graft RX-wedge.
+
+Root cause: cc_node_create() allocates match-key and AD tables in
+MURAM but never writes the parent tree's group_table[0] entry to
+point to them, and never encodes the caller's miss_action into the
+AD table's miss slot.  When fman_pcd_kg_graft_cc() writes KGSE_CCBS,
+the CC engine reads an all-zero group table entry which decodes as
+RESULT_CF fqid=0 (reserved-invalid) — every frame is dropped.
+
+Fix:
+1. cc_node_create: encode miss_action into ad_table[0] (miss slot
+   at num_keys=0) via cc_encode_ad().
+2. cc_node_create: write tree->group_table[0] with CONT_LOOKUP AD
+   encoding match_table_off, ad_table_off, extract.size, num_keys=0.
+3. add_key: slide miss-AD from slot[N] to slot[N+1] before writing
+   new key's AD, then update group_table[0] word0 with new key count.
+
+Two new static helpers: cc_write_node_group_entry() (full 4-word
+CONT_LOOKUP AD write) and cc_update_node_num_keys() (word0-only RMW
+for the add_key fast path).
+
+CC-node-lookup AD format (RM 8.7.4.1):
+  Word 0: (numOfKeys << 24) | (matchTableAddr & 0x00FFFFFF)
+  Word 1: (adTableAddr & 0x00FFFFFF)
+  Word 2: CONT_LOOKUP (0x40000000) | ((keySize-1) << 24)
+  Word 3: 0
+
+Signed-off-by: ci <ci@local>
+---
+ drivers/net/ethernet/freescale/fman/fman_pcd_cc.c | 121 +++++++++++++++++++++
+ 1 file changed, 121 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index 4051ab0..ab26e4c 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -130,6 +130,19 @@
+ #define FMAN_PCD_CC_KEY_TABLE_ALIGN		16
+ #define FMAN_PCD_CC_AD_TABLE_ALIGN		16
+ 
++/*
++ * CC-node-lookup AD field encoding (group table entry pointing to a
++ * CC node).  RM 8.7.4.1 + SDK fm_cc.h FM_PCD_AD_NCSNFO_*.
++ *
++ * Word 0: (numOfKeys << 24) | (matchTableAddr & 0x00FFFFFF)
++ * Word 1: (adTableAddr & 0x00FFFFFF)
++ * Word 2: CONT_LOOKUP (0x40000000) | ((keySize - 1) << 24)
++ * Word 3: 0
++ */
++#define CC_NODE_AD_NUM_KEYS_SHIFT	24
++#define CC_NODE_AD_KEY_SIZE_SHIFT	24
++#define CC_NODE_AD_ADDR_MASK		0x00FFFFFFu
++
+ /* ------------------------------------------------------------------ */
+ /* Action-descriptor (AD) record field bits — RM 8.7.4.3 Table 8-119. */
+ /* ------------------------------------------------------------------ */
+@@ -277,6 +290,74 @@ struct fman_pcd_cc_node {
+ 	spinlock_t		lock;
+ };
+ 
++/**
++ * cc_write_node_group_entry - write a CONT_LOOKUP AD into a tree's
++ *                             group_table slot linking it to a CC node.
++ * @tree:      parent CC tree (provides group_table iomem pointer)
++ * @group_idx: group table slot index (0..15)
++ * @node:      the CC node to link (provides match_table_off, ad_table_off,
++ *             extract.size)
++ * @num_keys:  current number of valid keys in the node (encoded into
++ *             the AD so the CC engine knows how many entries to compare
++ *             before falling through to miss)
++ *
++ * Encodes the four-word CC-node-lookup AD per RM 8.7.4.1 and writes
++ * it to tree->group_table[group_idx].  The CC engine reads this entry
++ * to locate the node's match-key and AD tables and determine the key
++ * width and count.
++ *
++ * Caller must hold tree->lifecycle_lock or otherwise ensure exclusive
++ * access to the group table slot.
++ */
++static void cc_write_node_group_entry(struct fman_pcd_cc_tree *tree,
++				      u8 group_idx,
++				      const struct fman_pcd_cc_node *node,
++				      u16 num_keys)
++{
++	void __iomem *entry;
++	u32 w0, w1, w2;
++
++	entry = tree->group_table +
++		(size_t)group_idx * FMAN_PCD_CC_AD_ENTRY_SIZE;
++
++	w0 = ((u32)num_keys << CC_NODE_AD_NUM_KEYS_SHIFT) |
++	     ((u32)node->match_table_off & CC_NODE_AD_ADDR_MASK);
++	w1 = (u32)node->ad_table_off & CC_NODE_AD_ADDR_MASK;
++	w2 = FMAN_PCD_AD_NIA_TYPE_CONT_LOOKUP |
++	     (((u32)node->extract.size - 1u) << CC_NODE_AD_KEY_SIZE_SHIFT);
++
++	iowrite32be(w0, entry + FMAN_PCD_AD_OFF_FQID);
++	iowrite32be(w1, entry + FMAN_PCD_AD_OFF_PLCR);
++	iowrite32be(w2, entry + FMAN_PCD_AD_OFF_NIA);
++	iowrite32be(0,  entry + FMAN_PCD_AD_OFF_RES);
++}
++
++/**
++ * cc_update_node_num_keys - update only the numOfKeys field in the
++ *                           group table entry for a node.
++ * @tree:      parent CC tree
++ * @group_idx: group table slot index
++ * @node:      the CC node (for match_table_off, which shares word 0)
++ * @num_keys:  new key count
++ *
++ * RMW on word 0 only — avoids full rewrite of the group table entry
++ * for the common add_key path.
++ */
++static void cc_update_node_num_keys(struct fman_pcd_cc_tree *tree,
++				    u8 group_idx,
++				    const struct fman_pcd_cc_node *node,
++				    u16 num_keys)
++{
++	void __iomem *entry;
++	u32 w0;
++
++	entry = tree->group_table +
++		(size_t)group_idx * FMAN_PCD_CC_AD_ENTRY_SIZE;
++	w0 = ((u32)num_keys << CC_NODE_AD_NUM_KEYS_SHIFT) |
++	     ((u32)node->match_table_off & CC_NODE_AD_ADDR_MASK);
++	iowrite32be(w0, entry + FMAN_PCD_AD_OFF_FQID);
++}
++
+ /**
+  * cc_encode_ad - pack a typed fman_pcd_action into a 16-byte AD record.
+  * @action: caller-owned action descriptor (already validated).
+@@ -801,15 +882,7 @@ fman_pcd_cc_node_create(struct fman_pcd_cc_tree *tree,
+ 		return ERR_PTR(-ENXIO);
+ 	}
+ 
+-	/*
+-	 * Zero both tables.  All-zero AD has type bits 00 (i.e.
+-	 * RESULT_CONTRL_FLOW, see RM 8.7.4.3 Table 8-119) and
+-	 * fqid=0.  FQ 0 is reserved-invalid in DPAA1, so a frame
+-	 * that hits an uninitialised AD before PR14c-body-3 lands
+-	 * the encoder will trigger an FMan parse-error trap rather
+-	 * than silently misrouting.  This is the safest unbound
+-	 * state we can publish.
+-	 */
++	/* Zero both tables as a safety baseline. */
+ 	memset_io(node->match_table, 0, match_sz);
+ 	memset_io(node->ad_table, 0, ad_sz);
+ 
+@@ -832,6 +905,36 @@ fman_pcd_cc_node_create(struct fman_pcd_cc_tree *tree,
+ 		}
+ 	}
+ 
++
++	/*
++	 * PR14z19: encode the caller's miss-action into the AD table's
++	 * miss slot.  At create time num_keys=0, so the miss slot is
++	 * ad_table[0].  The CC engine walks 0 key entries and immediately
++	 * falls through to this AD.
++	 *
++	 * If encoding fails (e.g. invalid action type), we leave the
++	 * slot as all-zero (FQ-0 trap) and WARN — the graft will still
++	 * wedge RX, but at least the failure is visible.
++	 */
++	{
++		void __iomem *miss_ad = node->ad_table;  /* slot [0] */
++		int enc_rc = cc_encode_ad(&keys->miss_action, miss_ad);
++
++		if (enc_rc)
++			pr_warn("fman_pcd_cc: node_create miss-AD encode failed: %d (FQ-0 trap active)\n",
++				enc_rc);
++	}
++
++	/*
++	 * PR14z19: write the tree's group_table[0] entry to point to
++	 * this node.  group_idx=0 because ASK v1.0 uses single-group
++	 * trees (num_of_groups=1).  num_keys=0 at create time — the CC
++	 * engine will walk 0 entries and fall through to the miss-AD.
++	 * The group table was previously all-zero (FQ-0 trap); after
++	 * this write it becomes a valid CONT_LOOKUP AD.
++	 */
++	cc_write_node_group_entry(tree, 0, node, 0);
++
+ 	/*
+ 	 * Publish the node on the tree.  tree->lifecycle_lock
+ 	 * serialises the list mutation against concurrent
+@@ -882,7 +985,8 @@ EXPORT_SYMBOL_GPL(fman_pcd_cc_node_create);
+ int fman_pcd_cc_node_add_key(struct fman_pcd_cc_node *node,
+ 			     const struct fman_pcd_cc_key_entry *entry)
+ {
+-	void __iomem *match_slot, *ad_slot;
++void __iomem *match_slot, *ad_slot, *new_miss_ad;
++u8 miss_ad_buf[FMAN_PCD_CC_AD_ENTRY_SIZE];
+ 	size_t key_stride;
+ 	u16 slot;
+ 	int err;
+@@ -905,6 +1009,17 @@ int fman_pcd_cc_node_add_key(struct fman_pcd_cc_node *node,
+ 	ad_slot = node->ad_table + (size_t)slot * FMAN_PCD_CC_AD_ENTRY_SIZE;
+ 	match_slot = node->match_table + (size_t)slot * key_stride;
+ 
++	/*
++	 * PR14z19: slide the miss-AD from slot[num_keys] to
++	 * slot[num_keys+1] BEFORE overwriting slot[num_keys] with
++	 * the new key's AD.  The CC engine expects the miss entry
++	 * immediately after the last valid key.
++	 */
++	new_miss_ad = node->ad_table +
++		      (size_t)(slot + 1) * FMAN_PCD_CC_AD_ENTRY_SIZE;
++	memcpy_fromio(miss_ad_buf, ad_slot, FMAN_PCD_CC_AD_ENTRY_SIZE);
++	memcpy_toio(new_miss_ad, miss_ad_buf, FMAN_PCD_CC_AD_ENTRY_SIZE);
++
+ 	/* Encode AD first so a partially-populated row cannot misroute. */
+ 	err = cc_encode_ad(&entry->action, ad_slot);
+ 	if (err)
+@@ -920,6 +1035,13 @@ int fman_pcd_cc_node_add_key(struct fman_pcd_cc_node *node,
+ 	 */
+ 	node->keys[slot] = *entry;
+ 	node->num_keys++;
++
++	/*
++	 * PR14z19: update the group_table[0] numOfKeys field so the
++	 * CC engine knows about the newly added key.
++	 */
++	if (node->tree)
++		cc_update_node_num_keys(node->tree, 0, node, node->num_keys);
+ 	err = 0;
+ 
+ out:
+-- 
+2.39.5
