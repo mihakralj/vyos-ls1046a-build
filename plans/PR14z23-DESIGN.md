@@ -187,3 +187,75 @@ Choose path:
 Default of this design doc is **B-then-C** — Option B is a 5-minute
 operator test on the live DUT and produces a data point that gates
 the Option C effort cleanly.
+
+---
+
+## 2026-05-23 21:58Z — Options A and B EXECUTED, BOTH RULED OUT
+
+Operator selected "A → B → C in sequence". A and B were tried live on
+the PR14z22 step-1 DUT (kernel 6.18.31-vyos, threaded NAPI knobs and
+NAPI poll-budget sysctls both available).
+
+### Option A measured
+
+Applied sysctls: `netdev_budget=2048`, `netdev_budget_usecs=16000`,
+`dev_weight=256`, `gro_normal_batch=64`. Ran M2 gate.
+
+| Metric | Baseline (default sysctls) | Option A | Δ |
+|---|---|---|---|
+| Throughput | 6.945 Gbps | 6.945 Gbps | unchanged |
+| `%sys` | 0.91% | 0.86% | unchanged |
+| `%soft` | 15.97% | 21.08% | **+5.11 pts WORSE** |
+| NET_KERNEL_CPU | 16.63% | **21.77%** | **+5.14 pts FAIL** |
+
+**Verdict: Option A is a regression.** Raising netdev_budget reduces
+NAPI exit frequency but lengthens per-poll wall time and inflates
+cache pressure on the A72. Total work per FD goes up. Sysctls reverted
+to defaults.
+
+### Option B measured
+
+DPAA1 QMan portals are **strictly per-CPU silicon** — see
+`/proc/interrupts` line 46-49: portal 0 fires only on CPU0, portal 1
+only on CPU1, etc. Cgroup pinning of `ksoftirqd/N` to a subset of
+cores would force portal IRQs to re-IPI onto the chosen subset, which
+breaks the per-CPU portal model and serialises all dequeue traffic
+through fewer cores. This is structurally worse, not better.
+
+The only **viable** Option B knob on DPAA1 is **threaded NAPI**:
+`echo 1 > /sys/class/net/eth4/threaded`. This moves the NAPI poll
+work from softirq context to per-NAPI kthreads (`napi/eth4-N`),
+reclassifying the CPU usage from `%soft` to `%sys`. The M2 gate
+metric is `%sys + %soft`, so threaded NAPI cannot reduce the total
+— but it CAN reveal whether softirq dispatch overhead is a hidden
+cost factor.
+
+Result:
+
+| Metric | Baseline (softirq) | Threaded NAPI | Δ |
+|---|---|---|---|
+| Throughput | 6.945 Gbps | 6.902 Gbps | unchanged |
+| `%sys` | 0.91% | **57.15%** | +56 pts |
+| `%soft` | 15.97% | 0.00% | -16 pts |
+| NET_KERNEL_CPU | 16.63% | **56.98%** | **+40 pts** |
+
+**Verdict: Option B is a dramatic regression.** Total work tripled.
+Threaded NAPI adds per-poll context-switch overhead on a workload
+where each QMan-portal poll cycle is small (handful of confirm FDs),
+and the wake/sleep cost dominates dispatch. Knob reset to softirq
+mode (`echo 0`).
+
+### Architectural conclusion
+
+The TX-confirmation softirq cannot be reduced by tuning Linux-side
+knobs. The work is **physically tied to per-CPU QMan portals at the
+silicon level**, and the per-frame cost (~50 ns on A72) multiplied
+by ~1.6 Mpps is what produces the ~16% floor.
+
+The ONLY remaining path is **Option C — silicon-level suppression of
+the TX-confirm FD enqueue via FQ_FLAG_NO_TXCONFIRM**, which the
+legacy ASK 1.x sdk_dpaa fork used to reach >9 Gbps line rate at <5%
+CPU. This is what PR14z23 must implement.
+
+Skipping the further "B-then-C" gate; proceeding straight to Option C
+implementation per the operator's "A → B → C" sequence.
