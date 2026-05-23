@@ -3,78 +3,24 @@ From: ci <ci@local>
 Date: Fri, 23 May 2026 22:30:00 +0000
 Subject: [PATCH] fsl/dpaa: add NO_TXCONFIRM offload TX FQ allocator
 
-PR14z23 — silicon-level suppression of per-frame TX-confirmation work
-on the FMan PCD HIT path.
+PR14z23 - silicon-level suppression of per-frame TX-confirmation work
+on the FMan PCD HIT path.  See plans/PR14z23-DESIGN.md for the full
+architectural rationale.
 
-Background.  PR14z22 step-1 (diagnostic patch 0053, since reverted)
-disambiguated the M2 acceptance-gate softirq wedge: with the cc_v4_tcp
-miss-action set to DROP, iperf3 still ran at 6.945 Gbps, proving the
-silicon CC HIT path was functionally correct and frames were going
-eth3 RX -> eth4 TX without traversing the kernel RX NAPI poller.  The
-remaining 15.97% softirq floor (and the M2 5%-CPU gate failure) is the
-**TX-confirmation NAPI poll** — dpaa_eth_napi_poll() processing the
-per-CPU TX-confirm FQ that silicon enqueues a Frame Descriptor onto
-for every transmitted frame.  At ~1.6 Mpps egress across 4 CPUs the
-per-frame skb-free cost is ~50 ns -> ~16% per-CPU floor.
-
-Architectural conclusion (see plans/PR14z23-DESIGN.md "Options A and
-B EXECUTED, BOTH RULED OUT"): sysctl netdev_budget tuning (Option A)
-produces +5pts regression; threaded NAPI (Option B) produces +40pts
-regression because DPAA1 QMan portals are strictly per-CPU silicon
-and Linux-side knobs cannot redistribute the per-frame TX-confirm
-cost.  Only Option C — suppression of the TX-confirm FD enqueue at
-the silicon level — can reach the gate.
-
-The legacy ASK 1.x sdk_dpaa fork solved this by allocating dedicated
-no-confirm TX FQs (QM_INITFQ_WE_CONTEXTA with B0V=0) for
-silicon-offloaded HIT-path traffic and routing CC-HIT enqueues
-through them; that is how it reached >9 Gbps line rate at <5% CPU.
-The legacy reference is tmp-mono-ask/cdx/devman.c lines 290-330,
-which used context_a.hi=0x9a000000 lo=0xC0000000 (OVFQ|A2V|A0V|EBD,
-B0V=0).  Mainline dpaa_eth.c at the existing FQ_TYPE_TX path uses
-0x1e00000080000000ULL (OVOM|A2V|A0V|B0V|EBD); clearing B0V (bit 1
-of the high byte) gives 0x1c00000080000000ULL — identical to the
-mainline pattern except for the suppressed confirmation enqueue.
-EBD is preserved so FMan still recycles the BMan buffer after TX
-(RISK#1 in PR14z23-DESIGN.md).
-
-This patch adds:
-
-  1. A new enum value FQ_TYPE_TX_NO_CONFIRM in dpaa_eth.h.
-
-  2. dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid),
-     exported via <linux/fsl/dpaa_flow_offload.h>, that allocates a
-     fresh dynamic-FQID dpaa_fq of the new type, inherits the
-     existing TX QMan channel from priv->egress_fqs[0]->channel
-     (the FMan TX port's channel as resolved by
-     fman_port_get_qman_channel_id() at probe), assigns WQ 6 (same
-     as best-effort FQ_TYPE_TX), splices it into priv->dpaa_fq_list
-     so retire/cleanup runs at port removal, and runs the standard
-     dpaa_fq_init() path.
-
-  3. A switch-case treatment in dpaa_fq_init() for the new type
-     that mirrors the FQ_TYPE_TX path (CGR membership, OAL/OAC) but
-     programs context_a directly with 0x1c00000080000000ULL,
-     suppressing the silicon TX-confirm enqueue.
-
-The consumer (ask_hw.c) is updated in patch 0054.
-
-No regression risk for non-offloaded traffic.  Existing FQ_TYPE_TX,
-FQ_TYPE_TX_CONFIRM, FQ_TYPE_TX_CONF_MQ paths are unchanged.  Kernel
-control-plane (dpaa_xmit), ARP, and the conntrack-promote chain
-continue to use the existing TX FQs with confirmation enabled.
+Adds:
+  - FQ_TYPE_TX_NO_CONFIRM enum value in dpaa_eth.h
+  - dpaa_alloc_offload_tx_fq() exported helper in dpaa_eth.c
+  - context_a = 0x1c00000080000000ULL (B0V=0) programming in
+    dpaa_fq_init() for the new FQ type
+  - Public declaration + !FLOW_OFFLOAD stub in dpaa_flow_offload.h
 
 Signed-off-by: ASK2 build bot <ask2-build@kralj.dev>
 ---
- .../net/ethernet/freescale/dpaa/dpaa_eth.c    | 80 ++++++++++++++++++-
- .../net/ethernet/freescale/dpaa/dpaa_eth.h    |  1 +
- include/linux/fsl/dpaa_flow_offload.h         | 37 ++++++++-
- 3 files changed, 116 insertions(+), 2 deletions(-)
-
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index aae9360..f67b638 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-@@ -528,6 +528,79 @@ int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id)
+@@ -546,6 +546,57 @@ int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id)
  }
  EXPORT_SYMBOL_GPL(dpaa_get_fman_port_id);
  
@@ -83,24 +29,6 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethern
 + * suppressed at the silicon level.
 + *
 + * See <linux/fsl/dpaa_flow_offload.h> for the full contract.  PR14z23.
-+ *
-+ * Allocates a fresh dynamic-FQID dpaa_fq tagged FQ_TYPE_TX_NO_CONFIRM,
-+ * inherits the FMan TX port's QMan channel from the existing
-+ * priv->egress_fqs[0] (which was set by dpaa_setup_egress() at probe
-+ * via fman_port_get_qman_channel_id()), assigns WQ 6 (same as the
-+ * best-effort FQ_TYPE_TX class), splices it into priv->dpaa_fq_list
-+ * so retire/cleanup runs at port-remove time, and runs the standard
-+ * dpaa_fq_init() path — which for FQ_TYPE_TX_NO_CONFIRM programs
-+ * context_a = 0x1c00000080000000ULL (B0V=0, no confirm-FQ enqueue).
-+ *
-+ * Used by the ASK2 FMan PCD HIT path (ask_hw.c) as the sink for
-+ * silicon-offloaded forwarded flows.  When the CC node's per-key
-+ * FORWARD_FQ action points at this FQID instead of the kernel's
-+ * default egress_fqs[0], FMan still transmits the frame on the wire
-+ * but does NOT enqueue a TX-confirmation FD to the per-CPU TX-confirm
-+ * FQ — eliminating the dpaa_eth_napi_poll() per-frame work that
-+ * pinned NET_KERNEL_CPU at the ~16% floor in the PR14z22 step-1
-+ * measurement.
 + */
 +int dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid)
 +{
@@ -119,10 +47,6 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethern
 +	priv = netdev_priv(dev);
 +	parent = dev->dev.parent;
 +
-+	/* The FMan TX port's QMan channel is resolved at probe by
-+	 * dpaa_setup_egress() and stored on each TX FQ.  Inherit from
-+	 * egress_fqs[0] — guaranteed populated by probe before any
-+	 * external module can resolve the netdev. */
 +	if (!priv->egress_fqs || !priv->egress_fqs[0])
 +		return -ENOENT;
 +	tx_channel = priv->egress_fqs[0]->channel;
@@ -134,8 +58,8 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethern
 +	dpaa_fq->fq_type = FQ_TYPE_TX_NO_CONFIRM;
 +	dpaa_fq->net_dev = dev;
 +	dpaa_fq->channel = tx_channel;
-+	dpaa_fq->wq = 6;		/* match best-effort FQ_TYPE_TX */
-+	dpaa_fq->fqid = 0;		/* dynamic */
++	dpaa_fq->wq = 6;
++	dpaa_fq->fqid = 0;
 +	dpaa_fq->flags = QMAN_FQ_FLAG_TO_DCPORTAL;
 +	INIT_LIST_HEAD(&dpaa_fq->list);
 +	list_add_tail(&dpaa_fq->list, &priv->dpaa_fq_list);
@@ -151,11 +75,10 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethern
 +}
 +EXPORT_SYMBOL_GPL(dpaa_alloc_offload_tx_fq);
 +
- static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
-  void *type_data)
- {
-@@ -1359,8 +1432,9 @@ static int dpaa_fq_init(struct dpaa_fq *dpaa_fq, bool td_enable)
- 		 * place them in the netdev's CGR, along with the Tx FQs.
+ /**
+  * dpaa_get_tx_fqid() - per-port per-queue TX FQID accessor.
+  *
+@@ -1360,7 +1411,8 @@ static int dpaa_fq_init(struct dpaa_fq *dpaa_fq, bool td_enable)
  		 */
  		if (dpaa_fq->fq_type == FQ_TYPE_TX ||
  		    dpaa_fq->fq_type == FQ_TYPE_TX_CONFIRM ||
@@ -165,27 +88,29 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethern
  			initfq.we_mask |= cpu_to_be16(QM_INITFQ_WE_CGID);
  			initfq.fqd.fq_ctrl |= cpu_to_be16(QM_FQCTRL_CGE);
  			initfq.fqd.cgid = (u8)priv->cgr_data.cgr.cgrid;
-@@ -1405,6 +1479,16 @@ static int dpaa_fq_init(struct dpaa_fq *dpaa_fq, bool td_enable)
+@@ -1406,6 +1458,17 @@ static int dpaa_fq_init(struct dpaa_fq *dpaa_fq, bool td_enable)
  			}
  		}
  
 +		/* PR14z23: silicon-suppressed TX confirmation.  Same
-+		 * context_a layout as FQ_TYPE_TX (OVOM|A2V|A0V|EBD) but
-+		 * B0V=0 so FMan does NOT enqueue a TX-confirm FD on
-+		 * each transmit.  No conf_fqs[] lookup. */
++		 * context_a layout as FQ_TYPE_TX (OVOM|A2V|A0V|EBD)
++		 * but B0V=0 so FMan does NOT enqueue a TX-confirm FD
++		 * on each transmit.
++		 */
 +		if (dpaa_fq->fq_type == FQ_TYPE_TX_NO_CONFIRM) {
 +			initfq.we_mask |= cpu_to_be16(QM_INITFQ_WE_CONTEXTA);
 +			qm_fqd_context_a_set64(&initfq.fqd,
-+					       0x1c00000080000000ULL);
++						       0x1c00000080000000ULL);
 +		}
 +
  		/* Put all the ingress queues in our "ingress CGR". */
  		if (priv->use_ingress_cgr &&
  		    (dpaa_fq->fq_type == FQ_TYPE_RX_DEFAULT ||
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+index 7ed659e..f2e3e15 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
-@@ -27,6 +27,7 @@ enum dpaa_fq_type {
+@@ -28,6 +28,7 @@ enum dpaa_fq_type {
  	FQ_TYPE_TX_CONFIRM,	/* Tx default Conf FQ (actually an Rx FQ) */
  	FQ_TYPE_TX_CONF_MQ,	/* Tx conf FQs (one for each Tx FQ) */
  	FQ_TYPE_TX_ERROR,	/* Tx Error FQs (these are actually Rx FQs) */
@@ -194,60 +119,39 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethern
  
  struct dpaa_fq {
 diff --git a/include/linux/fsl/dpaa_flow_offload.h b/include/linux/fsl/dpaa_flow_offload.h
+index d3e1ab7..f9cca98 100644
 --- a/include/linux/fsl/dpaa_flow_offload.h
 +++ b/include/linux/fsl/dpaa_flow_offload.h
-@@ -122,6 +122,40 @@ int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id);
-  * [0, dpaa_max_num_txqs()) is populated at probe time).
+@@ -125,6 +125,18 @@ int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id);
   */
  int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
-+
+ 
 +/**
-+ * dpaa_alloc_offload_tx_fq() - allocate a TX FQ with TX confirmation
-+ * suppressed at the silicon level.
-+ * @dev:   a netdev that may or may not be backed by the dpaa Ethernet
-+ *         driver (caller is allowed to pass any net_device — the
-+ *         helper returns -ENODEV if @dev is not a dpaa port).
-+ * @fqid:  out-param; on success receives the FQID of the newly
-+ *         allocated no-confirm TX FQ.
++ * dpaa_alloc_offload_tx_fq() - allocate a TX FQ with confirmation suppressed.
++ * @dev:   any net_device; -ENODEV if not a dpaa port.
++ * @fqid:  out-param; receives the FQID on success.
 + *
 + * Allocates a fresh dynamic-FQID dpaa_fq tagged FQ_TYPE_TX_NO_CONFIRM
 + * and initialises it with context_a programmed to suppress the silicon
-+ * TX-confirm FD enqueue (B0V=0).  The FQ inherits the FMan TX port's
-+ * QMan channel from the netdev's existing TX FQs and assigns WQ 6
-+ * (best-effort).  The new FQ is appended to priv->dpaa_fq_list so its
-+ * retire/cleanup runs at port-remove time alongside the regular TX
-+ * FQs.
-+ *
-+ * Intended for the ASK2 FMan PCD HIT path: a CC-node FORWARD_FQ
-+ * action pointed at @fqid will silicon-transmit the matched frame
-+ * without queueing a TX-confirmation FD onto the per-CPU TX-confirm
-+ * FQ.  This eliminates the dpaa_eth_napi_poll() per-frame work that
-+ * accounts for the ~16% NET_KERNEL_CPU floor on the M2 acceptance
-+ * gate (PR14z22 step-1 measurement).
-+ *
-+ * Each call allocates a NEW FQ — callers wanting per-port singletons
-+ * (typical) must cache the returned FQID themselves.
-+ *
-+ * Return: 0 on success with *fqid populated, -EINVAL on NULL args,
-+ * -ENODEV if @dev is not a dpaa-backed netdev, -ENOENT if the netdev's
-+ * egress_fqs[] is not yet populated (probe-ordering bug), -ENOMEM on
-+ * allocation failure.
++ * TX-confirm FD enqueue (B0V=0).  Used by ASK2 ask.ko (PR14z23) as the
++ * FORWARD_FQ sink for silicon HIT-path frames.
 + */
 +int dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid);
- #else
- static inline int
- dpaa_register_flow_offload_handler(const struct dpaa_flow_offload_ops *ops)
-@@ -150,6 +184,11 @@ dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid)
++
+ /**
+  * dpaa_get_rx_fman_port() - resolve the RX FMan port handle for a netdev.
+  * @dev: dpaa netdev (e.g. eth3) to query.
+@@ -182,6 +194,11 @@ dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid)
  {
- 	return -ENODEV;
+ return -ENODEV;
  }
 +static inline int
 +dpaa_alloc_offload_tx_fq(struct net_device *dev, u32 *fqid)
 +{
 +	return -ENODEV;
 +}
- #endif
- 
- #endif /* _LINUX_FSL_DPAA_FLOW_OFFLOAD_H */
+ struct fman_port;
+ static inline struct fman_port *
+ dpaa_get_rx_fman_port(struct net_device *dev)
 -- 
 2.39.5
