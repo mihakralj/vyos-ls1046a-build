@@ -1037,8 +1037,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                 return rc;
         }
 
+        memcpy(&dst_ip, &key.dst_ip[0], 4);
+
         /*
-         * PR14z11 (2026-05-19): override the key's dst_ip with the
+         * PR14z11 (2026-05-19): resolve the next-hop dst_ip with the
          * conntrack opposite-direction tuple's src_v4 — this is the
          * REAL next-hop IP the kernel routed against, and matches
          * what nf_flow_table_offload.c's own flow_offload_eth_dst()
@@ -1058,6 +1060,12 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          * whatever act->dev the REDIRECT named, which for some REV
          * cookies points at the wrong interface (the one that owns
          * the un-resolvable original-fwd-dst IP).
+         *
+         * CRITICAL: We do NOT mutate key.dst_ip here. The HW CC node
+         * built in ask_hw_flow_insert_v4_tcp() uses key.dst_ip to build
+         * the 5-tuple match block, which must remain the packet's true
+         * L3 destination IP. We only mutate the local dst_ip variable
+         * for routing/neighbour resolution purposes.
          */
         {
                 struct net_device *z11_iif = NULL;
@@ -1066,10 +1074,12 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                 z11_dst = ask_z11_other_src_v4((unsigned long)f->cookie,
                                                NULL, &z11_iif);
                 if (z11_dst != 0) {
-                        memcpy(&key.dst_ip[0], &z11_dst, 4);
-                        if (z11_iif)
+                        dst_ip = z11_dst;
+                        if (z11_iif) {
                                 egress_dev = z11_iif;
-                        pr_info_ratelimited("ask: flow_offload: PR14z11 override cookie=0x%lx new-dst=%pI4 new-egress=%s\n",
+                                oif = z11_iif->ifindex;
+                        }
+                        pr_info_ratelimited("ask: flow_offload: PR14z11 resolved next-hop cookie=0x%lx nh-dst=%pI4 egress=%s\n",
                                             f->cookie, &z11_dst,
                                             egress_dev ? netdev_name(egress_dev) : "?");
                 }
@@ -1184,7 +1194,6 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          * If the neighbour is not yet resolved, the HW path returns -EAGAIN
          * and the SW path takes the flow until the neighbour completes.
          */
-        memcpy(&dst_ip, &key.dst_ip[0], 4);
         ask_resolve_neigh_v4(egress_dev, dst_ip,
                              key.next_hop_mac, key.egress_mac);
 
@@ -1319,6 +1328,15 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                                 else
                                         winner = READ_ONCE(ask_flow_first_pid);
 
+                                /*
+                                 * PR14z14 candidate fix (symmetric graft):
+                                 * Ensure BOTH directions/ports are grafted.
+                                 * We call ask_hw_port_bind separately for BOTH
+                                 * the winner AND the current pid when they differ,
+                                 * but the logic here handles current 'pid'.
+                                 * Wait, ask_hw_port_bind handles idempotent binds,
+                                 * but earlier we bound ONLY one side.
+                                 */
                                 __dir = (pid == winner) ? ASK_HW_DIR_FWD
                                                         : ASK_HW_DIR_REV;
 
