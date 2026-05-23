@@ -259,3 +259,108 @@ CPU. This is what PR14z23 must implement.
 
 Skipping the further "B-then-C" gate; proceeding straight to Option C
 implementation per the operator's "A → B → C" sequence.
+
+---
+
+## 2026-05-23 22:30Z — Option C IMPLEMENTED — awaiting build & DUT gate
+
+Two new patches landed on `ask20`:
+
+### `kernel/flavors/ask/patches/0053-dpaa-noconfirm-offload-tx-fq.patch`
+
+In-tree kernel patch (`drivers/net/ethernet/freescale/dpaa/dpaa_eth.{c,h}`
++ `include/linux/fsl/dpaa_flow_offload.h`):
+
+- New enum value `FQ_TYPE_TX_NO_CONFIRM` in `dpaa_eth.h`.
+- New exported helper `dpaa_alloc_offload_tx_fq(struct net_device *,
+  u32 *fqid)` that allocates a fresh dynamic-FQID `dpaa_fq` of the new
+  type, inherits the FMan TX port's QMan channel from
+  `priv->egress_fqs[0]->channel` (resolved at probe by
+  `fman_port_get_qman_channel_id()`), assigns WQ 6 (best-effort), and
+  splices it into `priv->dpaa_fq_list` so retire/cleanup runs at port
+  removal.
+- New if-block in `dpaa_fq_init()` that programs `context_a =
+  0x1c00000080000000ULL` (OVOM|A2V|A0V|EBD, **B0V=0**) when
+  `fq->fq_type == FQ_TYPE_TX_NO_CONFIRM`. The standard FQ_TYPE_TX path
+  at line 1390 (with its `confq` lookup) is **skipped** for the new
+  type; the existing CGR-membership block at line 1361 was extended
+  to include FQ_TYPE_TX_NO_CONFIRM alongside FQ_TYPE_TX / TX_CONFIRM
+  / TX_CONF_MQ.
+- Empirical contexta value derivation: mainline uses
+  `0x1e00000080000000ULL` (B0V=1, FMan enqueues confirmation FD to
+  `conf_fqs[queue]`). Clearing bit 1 of the high byte (B0V) gives
+  `0x1c000000` — i.e. `0x1c00000080000000ULL`. EBD remains set so
+  FMan still recycles the BMan buffer after TX (mitigates Risk #1).
+  Legacy ASK 1.x SDK used `0x9a000000C0000000ULL` for a related
+  CDX-direct-enqueue scenario; that pattern is intentionally NOT
+  copied here because the mainline TX init path already handles
+  WQ/CGR/OAL correctly — only the confirmation-suppression bit is
+  changed.
+
+### `kernel/flavors/ask/patches/0054-ask-hw-noconfirm-tx-fq-resolver.patch`
+
+Consumer change in `drivers/net/ethernet/freescale/dpaa/ask/ask_hw.c`:
+
+- `ask_hw_resolve_oif_tx_fqid()` rewritten to allocate (once per OIF,
+  cached) a no-confirm TX FQ via `dpaa_alloc_offload_tx_fq()` instead
+  of returning `priv->egress_fqs[0]` via the existing
+  `dpaa_get_tx_fqid()` helper.
+- 16-slot direct-mapped cache keyed by `oif % 16`. On hash collision
+  (statistically impossible on Mono Gateway DK with only 5 DPAA
+  netdevs), a fresh FQ is allocated without caching — correctness
+  over performance.
+- RTNL is asserted via `ASSERT_RTNL()` because the flow-offload caller
+  chain always holds it.
+- All call sites that used `peer_tx_fqid` are unchanged — they now
+  receive the no-confirm FQID transparently.
+
+### CI hook updates (`bin/ci-setup-kernel.sh`)
+
+- Patch glob extended through `0054-*.patch`.
+- Rename-case for slots 0053 and 0054 added.
+- `ASK_PATCH_COUNT` guard rolled `52 → 54`.
+
+### Expected outcome on M2 gate
+
+With HIT-path frames routed through FQ_TYPE_TX_NO_CONFIRM:
+
+- `dpaa_eth_napi_poll()` should process only control-plane TX-confirm
+  FDs (ARP, SSH, conntrack-promote — low thousands per run, not the
+  24 M observed with the standard egress FQ in PR14z22 step-1).
+- `ethtool -S eth4 | grep tx_confirm` delta should drop from
+  matching `tx_packets` to ≤ low thousands during a 20 s iperf3.
+- NET_KERNEL_CPU target ≤ 5%; baseline 16.63%.
+
+### Verification plan
+
+1. Dispatch CI: `gh workflow run "VyOS LS1046A build (self-hosted)"
+   --ref ask20`.
+2. After successful build, download ISO from
+   `lxc200:/srv/tftp/iso/latest-ask.iso` and deploy via
+   `add system image http://192.168.1.137:8080/iso/latest-ask.iso`.
+3. Boot installed image as Default.
+4. Capture baseline `cat /proc/interrupts | grep portal` snapshot.
+5. Run `bin/verify-ask-flow-offload.sh DURATION=20 PARALLEL=8`.
+6. Capture deltas: `ethtool -S eth4 | grep tx`, `mpstat -P ALL 2`,
+   `dmesg | grep 'no-confirm TX FQID'`.
+7. Update this section with measured throughput, NET_KERNEL_CPU,
+   `tx_confirm` ratio, and any dmesg anomalies.
+
+### Risk validation
+
+- **Risk #1 (BMan buffer pool exhaustion):** monitor
+  `cat /sys/devices/platform/soc/.../bman*/pool*/in_use` during the
+  20 s iperf3. EBD=1 in our contexta value tells FMan to deallocate
+  buffers internally, so the pool should remain bounded. If `in_use`
+  drifts upward, the fix is to switch the contexta value pattern (try
+  the legacy SDK's `0x9a000000C0000000ULL` which is also EBD=1 but
+  uses different control bits).
+- **Risk #2 (probe ordering):** the `dpaa_alloc_offload_tx_fq()` helper
+  is called from `ask_hw_resolve_oif_tx_fqid()` which runs inside
+  `ask_flow_offload_replace()` — i.e. **after** the netdev is up and
+  the kernel flow-offload subsystem has reached the steady state.
+  `priv->egress_fqs[0]` is guaranteed populated by probe by then.
+- **Risk #4 (in-tree placement):** the helper is added to the dpaa
+  driver itself (not a generic header) and only consumed by ask_hw.c
+  which is also in-tree under `drivers/net/ethernet/freescale/dpaa/ask/`.
+  No mainline-maintainer review surface.
