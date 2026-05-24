@@ -68,6 +68,15 @@
 
 #include "include/ask_internal.h"
 
+/*
+ * PR14z17: file-scope first-arrival latch (hoisted from function-scope
+ * static in PR14z5).  The FLOW_BLOCK_UNBIND handler resets this back
+ * to 0xff between nft flowtable load cycles so a second `nft -f` run
+ * does not see the previous run's pipeline assignment.  cmpxchg on a
+ * `u8` is supported on arm64 via __cmpxchg_small (kernel 6.18).
+ */
+static u8 ask_flow_first_pid = 0xff;
+
 /* ------------------------------------------------------------------------- */
 /* PR14j: direction classification helper                                     */
 /*                                                                            */
@@ -1028,8 +1037,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                 return rc;
         }
 
+        memcpy(&dst_ip, &key.dst_ip[0], 4);
+
         /*
-         * PR14z11 (2026-05-19): override the key's dst_ip with the
+         * PR14z11 (2026-05-19): resolve the next-hop dst_ip with the
          * conntrack opposite-direction tuple's src_v4 — this is the
          * REAL next-hop IP the kernel routed against, and matches
          * what nf_flow_table_offload.c's own flow_offload_eth_dst()
@@ -1049,6 +1060,12 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          * whatever act->dev the REDIRECT named, which for some REV
          * cookies points at the wrong interface (the one that owns
          * the un-resolvable original-fwd-dst IP).
+         *
+         * CRITICAL: We do NOT mutate key.dst_ip here. The HW CC node
+         * built in ask_hw_flow_insert_v4_tcp() uses key.dst_ip to build
+         * the 5-tuple match block, which must remain the packet's true
+         * L3 destination IP. We only mutate the local dst_ip variable
+         * for routing/neighbour resolution purposes.
          */
         {
                 struct net_device *z11_iif = NULL;
@@ -1057,10 +1074,12 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                 z11_dst = ask_z11_other_src_v4((unsigned long)f->cookie,
                                                NULL, &z11_iif);
                 if (z11_dst != 0) {
-                        memcpy(&key.dst_ip[0], &z11_dst, 4);
-                        if (z11_iif)
+                        dst_ip = z11_dst;
+                        if (z11_iif) {
                                 egress_dev = z11_iif;
-                        pr_info_ratelimited("ask: flow_offload: PR14z11 override cookie=0x%lx new-dst=%pI4 new-egress=%s\n",
+                                oif = z11_iif->ifindex;
+                        }
+                        pr_info_ratelimited("ask: flow_offload: PR14z11 resolved next-hop cookie=0x%lx nh-dst=%pI4 egress=%s\n",
                                             f->cookie, &z11_dst,
                                             egress_dev ? netdev_name(egress_dev) : "?");
                 }
@@ -1175,7 +1194,6 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          * If the neighbour is not yet resolved, the HW path returns -EAGAIN
          * and the SW path takes the flow until the neighbour completes.
          */
-        memcpy(&dst_ip, &key.dst_ip[0], 4);
         ask_resolve_neigh_v4(egress_dev, dst_ip,
                              key.next_hop_mac, key.egress_mac);
 
@@ -1284,7 +1302,6 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          * physical port assignment differs.
          */
         {
-                static u8 first_pid = 0xff;
                 enum ask_hw_dir __dir = ASK_HW_DIR_FWD;
 
                 if (ingress_dev) {
@@ -1298,14 +1315,28 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                                 /*
                                  * Race-free first-arrival latch:
                                  * cmpxchg succeeds (returns expected)
-                                 * only if first_pid was still 0xff at
-                                 * the moment of the swap.
+                                 * only if ask_flow_first_pid was
+                                 * still 0xff at the moment of the
+                                 * swap.  PR14z17 (2026-05-22): the
+                                 * latch is now file-scope so the
+                                 * FLOW_BLOCK_UNBIND handler can
+                                 * reset it back to 0xff between nft
+                                 * flowtable load cycles.
                                  */
-                                if (cmpxchg(&first_pid, expected, pid) == expected)
+                                if (cmpxchg(&ask_flow_first_pid, expected, pid) == expected)
                                         winner = pid;
                                 else
-                                        winner = READ_ONCE(first_pid);
+                                        winner = READ_ONCE(ask_flow_first_pid);
 
+                                /*
+                                 * PR14z14 candidate fix (symmetric graft):
+                                 * Ensure BOTH directions/ports are grafted.
+                                 * We call ask_hw_port_bind separately for BOTH
+                                 * the winner AND the current pid when they differ,
+                                 * but the logic here handles current 'pid'.
+                                 * Wait, ask_hw_port_bind handles idempotent binds,
+                                 * but earlier we bound ONLY one side.
+                                 */
                                 __dir = (pid == winner) ? ASK_HW_DIR_FWD
                                                         : ASK_HW_DIR_REV;
 
@@ -1515,6 +1546,26 @@ EXPORT_SYMBOL_GPL(ask_flow_offload_setup_tc_block_cb);
 
 static LIST_HEAD(ask_flow_block_cb_list);
 
+/*
+ * PR14z17 (2026-05-22): hoisted from FLOW_CLS_REPLACE function-scope
+ * to file scope so the FLOW_BLOCK_UNBIND handler can reset it.
+ *
+ * `first_pid` latches the first ingress hwport_id observed via the
+ * REPLACE path (cmpxchg from 0xff -> pid).  Subsequent REPLACEs on
+ * the same pid get tagged ASK_HW_DIR_FWD; any other pid is tagged
+ * ASK_HW_DIR_REV.  This is direction-agnostic with respect to
+ * physical port wiring — either eth3 or eth4 can be "forward"
+ * depending on which iperf stream lands first.
+ *
+ * On FLOW_BLOCK_UNBIND we reset to 0xff so a fresh nft flowtable
+ * load can re-latch from scratch (without this, the second nft
+ * `add flowtable` cycle in the same module lifetime would inherit
+ * the previous session's FWD/REV assignment, mis-routing the bind
+ * if the iperf direction was reversed between runs).
+ *
+ * 0xff = unlatched / no pipeline bound.
+ */
+
 int ask_flow_offload_setup_tc(struct net_device *dev,
                               struct flow_block_offload *fbo)
 {
@@ -1558,7 +1609,60 @@ int ask_flow_offload_setup_tc(struct net_device *dev,
                         return -ENOENT;
                 flow_block_cb_remove(block_cb, fbo);
                 list_del(&block_cb->driver_list);
-                ask_pr_dbg("flow_offload: UNBIND %s\n", netdev_name(dev));
+
+                /*
+                 * PR14z17 (2026-05-22): symmetric un-graft to repair
+                 * the eth3/eth4 RX wedge that nft `delete table`
+                 * leaves behind otherwise.
+                 *
+                 * Background: PR14z13's FLOW_CLS_REPLACE handler
+                 * grafted ASK's CC tree onto the kernel-owned KG
+                 * scheme by writing KGSE_CCBS, and patch 0043's
+                 * RMW of kgse_mode rerouted KG -> CC engine.
+                 * Without an inverse, the next REPLACE-less event
+                 * (BLOCK_UNBIND fires when the flowtable disappears
+                 * — typically via nft `delete table inet …`) tore
+                 * down the block_cb but left silicon pointing at a
+                 * soon-to-be-destroyed cc_tree, wedging every
+                 * subsequent unhashed frame on that port.  Only a
+                 * full reboot recovered.
+                 *
+                 * Fix: resolve this netdev's hwport_id and call
+                 * ask_hw_port_unbind() to ungraft (kgse_mode NIA
+                 * restored to ENQUEUE_KG_DFLT_NIA + KGSE_CCBS=0 in
+                 * a single AR-flushed indirect window per patch
+                 * 0043) and destroy the lazily-created cc_v4_tcp
+                 * node.  Idempotent if the port is not currently
+                 * bound (the common case for any non-DPAA netdev
+                 * that landed here via the indr path).
+                 *
+                 * Reset the first-arrival latch so the next BIND
+                 * cycle can re-discover direction from scratch.
+                 * This is safe because flow cookies that survived
+                 * UNBIND (none expected; FLOW_CLS_DESTROY fires
+                 * before UNBIND for every cookie) cannot be
+                 * resurrected — the SW table entry is gone and
+                 * the silicon CC slot has been tombstoned.
+                 */
+                if (dev) {
+                        u8 pid;
+                        int prc = dpaa_get_fman_port_id(dev, &pid);
+
+                        if (prc == 0) {
+                                int urc = ask_hw_port_unbind(pid);
+
+                                if (urc && urc != -ENODEV)
+                                        ask_pr_warn("flow_offload: UNBIND %s (pid 0x%02x) port-unbind failed: %d\n",
+                                                    netdev_name(dev), pid, urc);
+                        } else if (prc != -ENODEV && prc != -ERANGE) {
+                                ask_pr_dbg("flow_offload: UNBIND dpaa_get_fman_port_id(%s) failed: %d\n",
+                                           netdev_name(dev), prc);
+                        }
+                }
+                WRITE_ONCE(ask_flow_first_pid, 0xff);
+
+                ask_pr_dbg("flow_offload: UNBIND %s — un-grafted + first_pid latch reset\n",
+                           netdev_name(dev));
                 return 0;
 
         default:

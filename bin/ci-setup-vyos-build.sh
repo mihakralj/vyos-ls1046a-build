@@ -410,6 +410,12 @@ chmod +x "$HOOKS/95-vyos-hostname.chroot"
 cp data/hooks/92-livescripts-defensive-mount-list.chroot "$HOOKS/92-livescripts-defensive-mount-list.chroot"
 chmod +x "$HOOKS/92-livescripts-defensive-mount-list.chroot"
 
+# 94: prime VYATTA_* env on interactive vbash login so `configure` op-mode
+#     does not SIGABRT with std::out_of_range in libvyatta-cfg setupSession.
+#     Drops /etc/profile.d/zz-vyatta-cfg-env.sh. Full diagnosis in the hook.
+cp data/hooks/94-vbash-vyatta-env.chroot "$HOOKS/94-vbash-vyatta-env.chroot"
+chmod +x "$HOOKS/94-vbash-vyatta-env.chroot"
+
 cp data/hooks/98-fancontrol.chroot "$HOOKS/98-fancontrol.chroot"
 chmod +x "$HOOKS/98-fancontrol.chroot"
 

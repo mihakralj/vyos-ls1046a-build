@@ -204,8 +204,39 @@ EXPORT_SYMBOL_GPL(ask_hw_ucode_get_version);
 #define ASK_HW_PR_OFF_L4_SPORT  20
 #define ASK_HW_PR_OFF_L4_DPORT  22
 
-/* KG-concatenated 5-tuple width = SIP(4) + DIP(4) + proto(1) + sport(2) + dport(2). */
-#define ASK_HW_V4_KEY_WIDTH     13
+/*
+ * PR14z14 (2026-05-22): silicon-truth CC key width and layout.
+ *
+ * The kernel-owned KG scheme on each FMan ingress port (programmed by
+ * keygen_port_hashing_init() in drivers/net/ethernet/freescale/fman/
+ * fman_keygen.c) sets kgse_ekfc = DEFAULT_HASH_KEY_EXTRACT_FIELDS =
+ * (IPSRC1 | IPDST1 | IPSEC_SPI | L4PSRC | L4PDST).  FMan v3 silicon
+ * extracts those fields in BIT-POSITION ORDER MSB-first per RM 8.7.4
+ * and concatenates the bytes into the stream that the CC tree (grafted
+ * via KGSE_CCBS by patch 0042 fman_pcd_kg_graft_cc) consumes through
+ * FMAN_PCD_CC_EXTRACT_KEY.  That stream is:
+ *
+ *   [ IPSRC1:4 ][ IPDST1:4 ][ IPSEC_SPI:4 ][ L4PSRC:2 ][ L4PDST:2 ]
+ *   total = 16 bytes; no L4 proto byte; SPI sits between DIP and sports.
+ *
+ * For non-IPSec TCP/UDP frames the silicon-extracted SPI is zero (the
+ * parse engine has no IPSec header to source from and the kgse_ekdv /
+ * kgse_dv0/dv1 default-substitution fields configured by the kernel
+ * cover only IP-addr and L4-port, not SPI).  We therefore install CC
+ * keys with bytes 8..11 = 0x00000000 and mask = 0xff so they MATCH a
+ * non-IPSec frame and MISS an IPSec frame (whose SPI is non-zero per
+ * RFC 4303).  This makes the v4-TCP/UDP fast path on this CC node
+ * implicitly non-IPSec — exactly the M2 acceptance scope.
+ *
+ * Pre-PR14z14 the code used width=13 with [SIP|DIP|PROTO|SPORT|DPORT]
+ * which mismatched the silicon stream in two ways (extra proto byte at
+ * offset 8, ports shifted left by 1 and truncated last byte), causing
+ * EVERY flow to MISS the CC lookup and fall through to miss_action.
+ * forward_fq = base_fqid, i.e. back into the kernel RX hash FQ.  Net
+ * effect: graft installed but unused, kernel SW fastpath carried all
+ * traffic, M2 CPU stuck at 20-27%% softirq at 6.9 Gbps.
+ */
+#define ASK_HW_V4_KEY_WIDTH     16
 
 /*
  * PR14z5 (2026-05-19): one independent classifier pipeline per
@@ -252,6 +283,29 @@ struct ask_hw_pipeline {
         u8                         scheme_id;  /* 0xff = no graft active */
         u32                        base_fqid;  /* kernel scheme's KGSE_FQB */
         u8                         bound_pid;  /* 0xff = unbound */
+        /*
+         * PR14z18 (2026-05-23): per-pipeline live-cookie refcount.
+         *
+         * Bumped after a successful ask_hw_cookie_alloc() in
+         * ask_hw_flow_insert_v4_tcp(), decremented after a successful
+         * ask_hw_cookie_free() in ask_hw_flow_remove().  When the
+         * count transitions to 0 AND bound_pid != 0xff, ask.ko
+         * automatically fires ask_hw_port_unbind() to ungraft the
+         * kernel scheme back to direct-hash dispatch.
+         *
+         * Rationale: nftables flowtable lifecycle in kernel 6.18.31
+         * does NOT call ndo_setup_tc(FLOW_BLOCK_UNBIND) on
+         * `nft delete table` — it only tears down per-flow via
+         * FLOW_CLS_DESTROY.  Without this refcount, the explicit
+         * UNBIND handler in ask_flow_offload_setup_tc() is never
+         * invoked, the silicon graft persists past the policy
+         * lifetime, and unhashed RX frames wedge until reboot
+         * (qdrant 2026-05-22 silicon-wedge note).
+         *
+         * Maintained under h->lock.  Auto-unbind happens AFTER
+         * h->lock is dropped (ask_hw_port_unbind() re-acquires).
+         */
+        u32                        n_flows;
 };
 
 struct ask_hw_pcd {
@@ -531,7 +585,7 @@ static int ask_hw_pcd_build_chain(struct ask_hw_pcd *h)
         kg_params->extracts[4].size   = 2;
         kg_params->extracts[4].mask   = 0xff;
 
-        ask_pr_info("hw: FMan PCD chain up — PR14z13 graft model (FWD + REV cc_trees ready; cc_v4_tcp nodes deferred to ask_hw_port_bind for per-port miss-action FORWARD_FQ(base_fqid))\n");
+        ask_pr_info("hw: FMan PCD chain up — PR14z13 graft model + PR14z14 silicon-truth key layout (16B [SIP|DIP|SPI=0|SPORT|DPORT], FWD + REV cc_trees ready; cc_v4_tcp nodes deferred to ask_hw_port_bind for per-port miss-action FORWARD_FQ(base_fqid))\n");
         return 0;
 
 err_unwind:
@@ -823,9 +877,9 @@ int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
         struct fman_pcd_cc_node *new_node = NULL;
         u8  sid = 0xff;
         u32 base_fqid = 0;
+        u32 hash_base_fqid = 0;
+        u32 dpaa_default_fqid = 0;
         int rc;
-
-        (void)ingress_dev;  /* PR14z13: kernel already armed FMBM_RFPNE */
 
         if (!h)
                 return -ENODEV;
@@ -877,14 +931,57 @@ int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
          *    Heavy work outside h->lock because the FMan PCD APIs take
          *    pcd->lock internally — nesting our mutex would invert.
          */
-        rc = fman_pcd_kg_lookup_port_scheme(h->pcd, port_id, &sid, &base_fqid);
+        rc = fman_pcd_kg_lookup_port_scheme(h->pcd, port_id, &sid, &hash_base_fqid);
         if (rc) {
                 ask_pr_warn("hw: port-bind graft: lookup_port_scheme(port=0x%02x) failed: %d (no kernel scheme on this hwport?)\n",
                             port_id, rc);
                 return rc;
         }
-        ask_pr_info("hw: port-bind graft: port 0x%02x dir %u — kernel scheme_id=%u base_fqid=0x%x\n",
-                    port_id, dir, sid, base_fqid);
+
+        /*
+         * PR14z16 (2026-05-22): the value returned by lookup_port_scheme()
+         * is KGSE_FQB low 24 bits — the BASE of the KG hash-distribution
+         * range (e.g. 0x200 for eth3 → FQs 0x200..0x203 sharded by per-CPU
+         * NAPI affinity).  It is NOT a single pollable FQ.  Pointing a
+         * CC-engine FORWARD_FQ miss-action at this base lands every
+         * unmatched frame (ARP/SYN/ICMP/non-TCP) in the hash bucket for
+         * CPU 0 only; many of those frames are dropped before the
+         * specific NAPI instance dequeues, manifesting as ~50% rx_dropped
+         * and total ARP loss on the post-graft control plane
+         * (verified 2026-05-22 on Mono DUT, ISO 0559).
+         *
+         * The kernel's actual "default RX FQ" — the one the BMI port
+         * targets via FMBM_RFQID and the one dpaa_eth allocates as
+         * FQ_TYPE_RX_DEFAULT and polls on EVERY NAPI instance as the
+         * fallback for non-PCD packets — is exported by patch 0028
+         * (dpaa_get_rx_default_fqid).  Use it as the miss-action target
+         * so the CC engine drops unmatched frames into the same FQ the
+         * kernel was already polling for unhashed traffic.
+         *
+         * Fallback: if dpaa_get_rx_default_fqid() is unavailable (e.g.
+         * kunit-test path with a synthetic netdev, or a non-DPAA host),
+         * fall back to the hash-base value.  This preserves the prior
+         * (broken-on-LS1046A-silicon) behaviour for those environments
+         * rather than refusing the bind outright.
+         */
+        base_fqid = hash_base_fqid;
+        if (ingress_dev) {
+                u32 dflt = 0;
+                int drc = dpaa_get_rx_default_fqid(ingress_dev, &dflt);
+
+                if (drc == 0 && dflt != 0) {
+                        dpaa_default_fqid = dflt;
+                        base_fqid = dflt;
+                } else {
+                        ask_pr_warn("hw: port-bind graft: dpaa_get_rx_default_fqid(%s) = %d — falling back to KGSE_FQB hash-base 0x%x (may break control-plane RX)\n",
+                                    netdev_name(ingress_dev), drc,
+                                    hash_base_fqid);
+                }
+        }
+
+        ask_pr_info("hw: port-bind graft: port 0x%02x dir %u — kernel scheme_id=%u KGSE_FQB hash-base=0x%x dpaa RX_DEFAULT=0x%x → miss-action FQ=0x%x\n",
+                    port_id, dir, sid, hash_base_fqid,
+                    dpaa_default_fqid, base_fqid);
 
         /*
          * 2. Lazily create cc_v4_tcp with miss-action = FORWARD_FQ(base_fqid).
@@ -942,11 +1039,90 @@ int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
         p->bound_pid = port_id;
         mutex_unlock(&h->lock);
 
-        ask_pr_info("hw: PR14z13 graft active: port 0x%02x dir %u → scheme_id=%u CCBS=cc_tree(dir=%u) miss=FORWARD_FQ(0x%x) — HW offload primed\n",
-                    port_id, dir, sid, dir, base_fqid);
+        ask_pr_info("hw: PR14z13+z16 graft active: port 0x%02x dir %u → scheme_id=%u CCBS=cc_tree(dir=%u) miss=FORWARD_FQ(0x%x [dpaa RX_DEFAULT, was hash-base 0x%x]) — HW offload primed\n",
+                    port_id, dir, sid, dir, base_fqid, hash_base_fqid);
         return 0;
 }
 EXPORT_SYMBOL_GPL(ask_hw_port_bind);
+
+/* ------------------------------------------------------------------------- */
+/* PR14z17 (2026-05-22): symmetric un-bind for FLOW_BLOCK_UNBIND              */
+/*                                                                            */
+/* When nft `delete table` (or any other path) tears down the flowtable that  */
+/* triggered ask_hw_port_bind(), the kernel-owned KG scheme MUST be reverted  */
+/* to its pre-graft state — otherwise eth3/eth4 RX is wedged: KGSE_CCBS       */
+/* still points at a soon-to-be-destroyed CC tree (or, more dangerously,      */
+/* kgse_mode still routes KG -> CC engine while CCBS is zero, dropping every  */
+/* unhashed frame).  Patch 0043's RMW of kgse_mode inside                     */
+/* fman_pcd_kg_ungraft_cc() restores ENQUEUE_KG_DFLT_NIA atomically with     */
+/* clearing KGSE_CCBS, giving a byte-exact restore of silicon state.          */
+/*                                                                            */
+/* Scope: only the per-port silicon graft + the lazily-created cc_v4_tcp     */
+/* node are torn down.  The per-direction cc_tree stays alive (it's created  */
+/* up-front at bring-up and shared across consecutive bind/unbind cycles).   */
+/* Cookie-table flow entries (m_insrt + manip_chain per flow) are torn down  */
+/* via the FLOW_CLS_DESTROY path before UNBIND fires, so cc_v4_tcp is        */
+/* expected to be empty (no keys) at this point.                              */
+/* ------------------------------------------------------------------------- */
+int ask_hw_port_unbind(u8 port_id)
+{
+        struct ask_hw_pcd *h = ask_hw_pcd_get();
+        unsigned int d;
+        int matched = 0;
+
+        if (!h)
+                return -ENODEV;
+
+        if (port_id == 0 || port_id > 0x3F) {
+                ask_pr_warn("hw: port-unbind port_id 0x%02x out of range (0x01..0x3F)\n",
+                            port_id);
+                return -EINVAL;
+        }
+
+        for (d = 0; d < ASK_HW_DIR_NR; d++) {
+                struct ask_hw_pipeline *p = &h->pipe[d];
+                u8 sid;
+                struct fman_pcd_cc_node *node_to_destroy = NULL;
+
+                mutex_lock(&h->lock);
+                if (p->bound_pid != port_id) {
+                        mutex_unlock(&h->lock);
+                        continue;
+                }
+                sid              = p->scheme_id;
+                node_to_destroy  = p->cc_v4_tcp;
+                p->bound_pid     = 0xff;
+                p->scheme_id     = 0xff;
+                p->base_fqid     = 0;
+                p->cc_v4_tcp     = NULL;
+                mutex_unlock(&h->lock);
+
+                /*
+                 * Heavy work outside h->lock — fman_pcd_kg_ungraft_cc()
+                 * and fman_pcd_cc_node_destroy() take pcd->lock
+                 * internally; nesting would invert.  Patch 0043 makes
+                 * the ungraft a byte-exact restore of kgse_mode +
+                 * KGSE_CCBS=0 in a single AR-flushed indirect window.
+                 */
+                if (sid != 0xff)
+                        (void)fman_pcd_kg_ungraft_cc(h->pcd, sid);
+
+                if (node_to_destroy)
+                        fman_pcd_cc_node_destroy(node_to_destroy);
+
+                matched++;
+                ask_pr_info("hw: PR14z17 port-unbind: port 0x%02x dir %u — ungrafted scheme_id=%u, destroyed cc_v4_tcp; kernel scheme restored to direct hash dispatch\n",
+                            port_id, d, sid);
+        }
+
+        if (!matched) {
+                ask_pr_dbg("hw: port-unbind: port 0x%02x not currently bound to any pipeline (idempotent)\n",
+                           port_id);
+                return 0;
+        }
+        return 0;
+}
+EXPORT_SYMBOL_GPL(ask_hw_port_unbind);
 
 /* ------------------------------------------------------------------------- */
 /* Legacy hw_flow_id pack/unpack (debugfs / kunit use only after PR14j)       */
@@ -989,15 +1165,54 @@ static bool mac_is_zero(const u8 *m)
 }
 
 /*
- * ask_hw_resolve_oif_tx_fqid() — look up the peer netdev's per-queue
- * TX FQID via the in-tree export from patch 0031.  Returns the FQID
- * the OH-port AD chain's trailing FORWARD_FQ should aim at.  -ENODEV
- * propagates from non-DPAA netdevs so the caller knows to SW-fallback.
+ * PR14z23: per-OIF no-confirm TX FQ cache.
+ *
+ * ASK_HW_OFFLOAD_TX_CACHE_SZ is sized to fit all five DPAA netdevs
+ * (eth0..eth4) on the Mono Gateway DK with margin; on hash collision
+ * (a previously cached OIF re-hashes here with a different ifindex)
+ * we fall back to allocating a fresh FQ for this OIF without
+ * overwriting the prior entry, keeping correctness over performance.
+ */
+#define ASK_HW_OFFLOAD_TX_CACHE_SZ 16
+
+struct ask_hw_offload_tx_cache_entry {
+        u32 oif;        /* ifindex; 0 = empty */
+        u32 fqid;
+};
+
+static struct ask_hw_offload_tx_cache_entry
+ask_hw_offload_tx_cache[ASK_HW_OFFLOAD_TX_CACHE_SZ];
+
+/*
+ * ask_hw_resolve_oif_tx_fqid() — resolve the OIF to a no-confirm
+ * TX FQID for the silicon HIT path.  Allocates (and caches) a
+ * dedicated FQ_TYPE_TX_NO_CONFIRM FQ on first use via the in-tree
+ * export dpaa_alloc_offload_tx_fq() from patch 0053.
+ *
+ * The CC node's per-key FORWARD_FQ action will point at the
+ * returned FQID; matched frames are TX'd on the wire by FMan
+ * without a per-frame TX-confirm FD enqueue, eliminating the
+ * dpaa_eth_napi_poll() per-frame work on the HIT path.
+ *
+ * Returns -ENODEV / -ENOMEM / -ENOENT from the underlying
+ * allocator; the caller treats any error as SW-fallback (the same
+ * contract as the old dpaa_get_tx_fqid()-based resolver).
  */
 static int ask_hw_resolve_oif_tx_fqid(u32 oif, u32 *fqid)
 {
+        struct ask_hw_offload_tx_cache_entry *slot;
         struct net_device *dev;
+        u32 cached;
         int rc;
+
+        slot = &ask_hw_offload_tx_cache[oif % ASK_HW_OFFLOAD_TX_CACHE_SZ];
+        if (slot->oif == oif) {
+                cached = READ_ONCE(slot->fqid);
+                if (cached) {
+                        *fqid = cached;
+                        return 0;
+                }
+        }
 
         rcu_read_lock();
         dev = dev_get_by_index_rcu(&init_net, oif);
@@ -1005,8 +1220,21 @@ static int ask_hw_resolve_oif_tx_fqid(u32 oif, u32 *fqid)
                 rcu_read_unlock();
                 return -ENODEV;
         }
-        rc = dpaa_get_tx_fqid(dev, /*queue=*/0, fqid);
+        rc = dpaa_alloc_offload_tx_fq(dev, fqid);
         rcu_read_unlock();
+        if (rc)
+                return rc;
+
+        if (slot->oif == 0 || slot->oif == oif) {
+                slot->oif = oif;
+                WRITE_ONCE(slot->fqid, *fqid);
+                pr_info("ask: hw: cached no-confirm TX FQID 0x%x for oif=%u\n",
+                        *fqid, oif);
+        } else {
+                pr_warn("ask: hw: offload TX cache collision at slot %u "
+                        "(cached oif=%u, new oif=%u) — allocating without caching\n",
+                        oif % ASK_HW_OFFLOAD_TX_CACHE_SZ, slot->oif, oif);
+        }
         return rc;
 }
 
@@ -1111,12 +1339,30 @@ static int ask_hw_flow_insert_v4_tcp(struct ask_hw_pcd *h,
         }
 
         /* 4. Install ingress CC key with MANIPULATE -> chain -> peer_tx_fqid. */
+        /*
+         * PR14z14 (2026-05-22): lay out the CC key to match the
+         * silicon-emitted byte stream from the upstream KG scheme:
+         *   [0..3]   IPSRC1     = key->src_ip
+         *   [4..7]   IPDST1     = key->dst_ip
+         *   [8..11]  IPSEC_SPI  = 0x00000000   (TCP/UDP frames have
+         *                                       no SPI; silicon emits
+         *                                       zeros for these fields)
+         *   [12..13] L4PSRC     = key->sport
+         *   [14..15] L4PDST     = key->dport
+         * Mask is 0xff per byte so SPI=0 must match exactly, which
+         * implicitly filters out IPSec ESP frames (their non-zero SPI
+         * cannot collide with TCP/UDP keys here).  No L4 proto byte
+         * appears in the silicon stream — the kernel KG scheme does
+         * NOT extract KG_SCH_KN_IPPID so we MUST NOT pre-load proto
+         * into the key.  TCP-vs-UDP demux happens upstream in conntrack;
+         * the CC node only needs to match the 4-tuple + zero-SPI guard.
+         */
         memset(&entry, 0, sizeof(entry));
         memcpy(&entry.key[0],  &key->src_ip[0], 4);
         memcpy(&entry.key[4],  &key->dst_ip[0], 4);
-        entry.key[8] = IPPROTO_TCP;
-        memcpy(&entry.key[9],  &key->sport, 2);
-        memcpy(&entry.key[11], &key->dport, 2);
+        /* entry.key[8..11] left as zero (SPI guard) by the memset above. */
+        memcpy(&entry.key[12], &key->sport, 2);
+        memcpy(&entry.key[14], &key->dport, 2);
         memset(&entry.mask[0], 0xff, ASK_HW_V4_KEY_WIDTH);
 
         act = &entry.action;
@@ -1159,6 +1405,18 @@ static int ask_hw_flow_insert_v4_tcp(struct ask_hw_pcd *h,
                 goto err_drop_slot;
         }
         *out_hw_id = cookie;
+
+        /*
+         * PR14z18 (2026-05-23): bump per-pipeline live-cookie refcount.
+         * Decremented in ask_hw_flow_remove() when this cookie's
+         * silicon state is torn down; when the count transitions to
+         * 0 the auto-unbind path there will ungraft the kernel
+         * scheme so the next `nft delete table` doesn't wedge RX.
+         */
+        mutex_lock(&h->lock);
+        h->pipe[dir].n_flows++;
+        mutex_unlock(&h->lock);
+
         return 0;
 
 err_drop_slot:
@@ -1258,7 +1516,80 @@ int ask_hw_flow_remove(u32 hw_flow_id)
         if (ck->m_insrt)
                 fman_pcd_manip_destroy(ck->m_insrt);
 
-        ask_hw_cookie_free(h, hw_flow_id);
+        /*
+         * PR14z18 (2026-05-23): snapshot cc_node BEFORE cookie_free()
+         * because that call kfrees ck.  We need cc_node to identify
+         * which pipeline this cookie belonged to, so we can decrement
+         * that pipeline's per-pipeline live-cookie refcount and
+         * auto-fire ask_hw_port_unbind() when it hits zero.
+         *
+         * Why here and not in ask_flow_offload.c's FLOW_BLOCK_UNBIND
+         * handler: kernel 6.18.31 nftables flowtable lifecycle does
+         * NOT call ndo_setup_tc(FLOW_BLOCK_UNBIND) on `nft delete
+         * table`.  Only per-cookie FLOW_CLS_DESTROY fires.  So the
+         * UNBIND handler exists as a fallback but never runs in
+         * practice.  Refcounting cookies in the silicon driver is
+         * the only place we can observe "last cookie gone" reliably.
+         */
+        {
+                struct fman_pcd_cc_node *removed_cc_node = ck->cc_node;
+                unsigned int d;
+                u8 pid_to_unbind = 0xff;
+
+                ask_hw_cookie_free(h, hw_flow_id);
+
+                mutex_lock(&h->lock);
+                for (d = 0; d < ASK_HW_DIR_NR; d++) {
+                        struct ask_hw_pipeline *p = &h->pipe[d];
+
+                        if (p->cc_v4_tcp == removed_cc_node &&
+                            p->n_flows > 0) {
+                                p->n_flows--;
+                                if (p->n_flows == 0 &&
+                                    p->bound_pid != 0xff)
+                                        pid_to_unbind = p->bound_pid;
+                                break;
+                        }
+                }
+                mutex_unlock(&h->lock);
+
+                if (pid_to_unbind != 0xff) {
+                        /*
+                         * PR14z23.1 (2026-05-24): SUPPRESS the actual
+                         * ungraft.  ask_hw_port_unbind() calls
+                         * fman_pcd_kg_ungraft_cc() which rewrites the
+                         * KeyGen scheme through the *shared* FMan
+                         * indirect-access window (AR-flushed),
+                         * serializing the entire FMan's parse →
+                         * classify pipeline for the duration.  That
+                         * stall is observable as ARP/keepalive loss
+                         * on the management LAN (eth0/1/2,
+                         * 192.168.0.0/16) every time a flow_offload
+                         * cookie storm drains the per-pipeline
+                         * refcount to zero on the test-plane SFP+
+                         * ports (eth3/eth4).
+                         *
+                         * Leaving cc_v4_tcp grafted across a cookie
+                         * storm is safe: silicon HIT keeps forwarding
+                         * the 5-tuples already in the CC table, and
+                         * the next REPLACE burst (typically <2 s
+                         * later under sustained TCP load) re-populates
+                         * the same tree.  The kernel-side cookies
+                         * being destroyed are bookkeeping records,
+                         * not silicon entries.
+                         *
+                         * The cc_v4_tcp trees are torn down properly
+                         * via ask_hw_pcd_teardown() on module exit
+                         * (rmmod ask) and on flavour reconfiguration,
+                         * which are the only legitimate ungraft
+                         * points until a future patch introduces a
+                         * proper flowtable-gone signal.
+                         */
+                        ask_pr_info("hw: PR14z23.1: skip auto-unbind on port 0x%02x — last cookie destroyed but cc_v4_tcp left grafted (FMan-wide stall avoidance)\n",
+                                    pid_to_unbind);
+                        /* (void)ask_hw_port_unbind(pid_to_unbind); -- SUPPRESSED, see comment */
+                }
+        }
         return 0;
 }
 EXPORT_SYMBOL_GPL(ask_hw_flow_remove);
