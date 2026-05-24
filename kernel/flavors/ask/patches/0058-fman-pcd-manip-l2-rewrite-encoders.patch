@@ -1,322 +1,170 @@
-From c163fee90a759cb7cb59e03dc584ba4d16a195ab Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: ci <ci@local>
-Date: Tue, 19 May 2026 11:28:37 +0000
-Subject: [PATCH] fman-pcd-manip: RMV_ETHERNET + INSRT_GENERIC encoders (ARCHIVED v1.3)
+Date: Sun, 24 May 2026 21:20:00 +0000
+Subject: [PATCH] fman-pcd-manip: RMV_ETHERNET + INSRT_GENERIC encoders
 
-ARCHIVE-half of the original 0033-fman-pcd-manip-v1.2-oh-port-primitives.
-These two encoders (MANIP_RMV_ETHERNET and MANIP_INSRT_GENERIC) are
-the OH-port AD-chain primitives that the v1.3 Path A architecture
-deletes from the v1.0 forward path.  Path A's FORWARD_FQ_WITH_MANIP
-CC-key action atom does not need them — it carries the new L2 header
-inline on the CC-key TX FQID encoding and lets dpaa_eth's TX path
-re-paint the MAC via the standard PHYLINK MAC-update primitive.
+Phase 4.1 / v1.3 restoration of the L2-rewrite primitives needed by
+ASK2 Path A per-flow MANIP chain (plan §4.2):
 
-The third encoder originally bundled in 0033 — MANIP_FIELD_UPDATE_IPV4_FORWARD
-— survives Path A and lives in the active patch series at
-0054-fman-pcd-manip-ipv4-forward-encoder.patch (see plans/
-ASK2-COURSE-CORRECTION.md §2 Phase 2 + plans/ASK2-PHASE2-PATCH-TRIAGE.md §3.1).
+  flow MANIP chain = [ RMV_ETHERNET, INSRT_GENERIC(14B new L2),
+                       FIELD_UPDATE_IPV4_FORWARD ]
+  → fman_pcd_manip_chain_create() → CC-key action MANIPULATE{chain, tx_fqid}
 
-This patch is kept in the archive tree as a bisect anchor for one
-release cycle.  It is NOT applied at build time — `bin/ci-setup-kernel.sh`
-globs only the top-level `kernel/flavors/ask/patches/*.patch`, not
-subdirectories.
-
-If a future v1.1 restores OH-port for IPsec re-inject, this patch can
-be re-applied alongside the OH-port driver (0032-archived) and the
-matching hmct_used hunks (0037-archived).
-
-Content (preserved as-authored on 2026-05-19):
-  - L2 header macros: FMAN_PCD_L2_HDR_OFFSET, FMAN_PCD_L2_HDR_RMV_SIZE
-  - manip_encode_rmv_ethernet() — GENERIC_RMV at offset 0, size 14
-  - manip_encode_insrt_generic() — GENERIC_INSRT at offset 0, size 1..32
-                                   with ceil(size/4) BE-32 inline words
-  - FMAN_PCD_MANIP_INSRT_GENERIC_MAX_SIZE = 32u
-  - 3 KUnit tests: rmv_ethernet, insrt_generic_l2, insrt_generic_reject
+Adds:
+  - L2 helper macros FMAN_PCD_L2_HDR_OFFSET / FMAN_PCD_L2_HDR_RMV_SIZE
+  - manip_encode_rmv_ethernet()       — GENERIC_RMV  offset 0, size 14
+  - manip_encode_insrt_generic()      — GENERIC_INSRT offset 0, size 1..32
+                                        with ceil(size/4) BE-32 inline words
+  - hmct_used bookkeeping in both encoders (folds in former patch 0059)
   - FMAN_PCD_MANIP_RMV_ETHERNET + FMAN_PCD_MANIP_INSRT_GENERIC enum members
-  - insrt_generic union arm in fman_pcd_manip_params
-  - dispatch arms in fman_pcd_manip_create()
+  - FMAN_PCD_MANIP_INSRT_GENERIC_MAX_SIZE = 32u
+  - insrt_generic{size, hdr[]} union arm in fman_pcd_manip_params
+  - validator + dispatcher case arms in fman_pcd_manip_create()
 
-Cross-reference: SDK fm_manip.c case e_FM_PCD_MANIP_HDR_RMV_ETHERNET (line 432)
-and case e_FM_PCD_MANIP_HDR_INSRT_GENERIC (line 528).
+Patch authored on 2026-05-24 as a fresh regeneration against the
+post-0057 staged kernel tree, replacing the corrupt archived 0033
+hunk arithmetic that didn't apply on top of patches 0050+0054+0055+0057.
+The L2-rewrite encoders are silicon-fact identical to the archived
+0033 version (cross-ref SDK fm_manip.c lines 432 and 528).
 ---
- .../ethernet/freescale/fman/fman_pcd_manip.c  | 175 ++++++++++++++++++
- .../fman/tests/fman_pcd_manip_test.c          | 153 +++++++++++++++
- include/linux/fsl/fman_pcd.h                  |  35 ++++
- 3 files changed, 363 insertions(+)
-
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
-index 5c1b916..c2d117b 100644
+index 027f7cd..7165c98 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
-@@ -224,6 +224,21 @@
- #define FMAN_PCD_HMCD_IP_L4_CS_CALC 0x00040000u
+@@ -224,6 +224,17 @@
+ /* Auto checksum recompute (RM 8.7.5.4 + SDK HMCD_IP_L4_CS_CALC) */
+ #define FMAN_PCD_HMCD_IP_L4_CS_CALC	0x00040000u
  
- /* ------------------------------------------------------------------ */
-+/* v1.2 (PR14i) OH-port AD-chain L2-rewrite primitives  [ARCHIVED]    */
-+/* ------------------------------------------------------------------ */
-+
-+/*
-+ * MANIP_RMV_ETHERNET / MANIP_INSRT_GENERIC silicon facts.
++/* v1.2 (PR14i) OH-port AD-chain L2-rewrite primitives.
 + *
-+ * Both use the same GENERIC_INSRT / GENERIC_RMV opcodes (0x02 / 0x01).
++ * MANIP_RMV_ETHERNET / MANIP_INSRT_GENERIC silicon facts:
++ * use the GENERIC_RMV (0x01) / GENERIC_INSRT (0x02) opcodes.
 + * Cross-ref SDK fm_manip.c BuildHmct() arms
 + * e_FM_PCD_MANIP_HDR_RMV_ETHERNET (line 432) and
 + * e_FM_PCD_MANIP_HDR_INSRT_GENERIC (line 528).
 + */
-+#define FMAN_PCD_L2_HDR_OFFSET 0u
-+#define FMAN_PCD_L2_HDR_RMV_SIZE 14u /* 6 dst + 6 src + 2 EtherType */
++#define FMAN_PCD_L2_HDR_OFFSET		0u
++#define FMAN_PCD_L2_HDR_RMV_SIZE	14u	/* 6 dst + 6 src + 2 EtherType */
 +
-+/* ------------------------------------------------------------------ */
- /* v1.2 (PR14i) additions consumed by Path A's CC-key inline MANIP    */
- /* ------------------------------------------------------------------ */
- 
-@@ -570,6 +585,84 @@
- return hmct;
+ /**
+  * struct fman_pcd_manip - one MURAM-resident header-manip template.
+  * @node:        anchor on pcd->manip_list (protected by pcd->lock)
+@@ -552,6 +563,88 @@ manip_encode_ttl_dec(struct fman_pcd_manip *manip, u8 *out_op)
+ 	return hmct;
  }
  
++/* ------------------------------------------------------------------ */
++/* v1.2 (PR14i) OH-port AD-chain L2-rewrite encoders                  */
++/* ------------------------------------------------------------------ */
++
 +static __must_check void __iomem *
 +manip_encode_rmv_ethernet(struct fman_pcd_manip *manip, u8 *out_op)
 +{
-+void __iomem *hmct = manip->hmct;
-+u32 cmd;
++	void __iomem *hmct = manip->hmct;
++	u32 cmd;
 +
-+/* Generic remove at frame offset 0, size 14 (ETH_HLEN).
-+ * Strips the outer Ethernet header in flight.  No inline payload.
-+ * Cross-ref SDK fm_manip.c BuildHmct case
-+ * e_FM_PCD_MANIP_HDR_RMV_ETHERNET (line 432).
-+ */
-+cmd  = (u32)FMAN_PCD_HMCD_OP_GENERIC_RMV
-+<< FMAN_PCD_HMCD_OC_SHIFT;
-+cmd |= (u32)FMAN_PCD_L2_HDR_OFFSET
-+<< FMAN_PCD_HMCD_RMV_OFFSET_SHIFT;
-+cmd |= (u32)FMAN_PCD_L2_HDR_RMV_SIZE
-+<< FMAN_PCD_HMCD_RMV_SIZE_SHIFT;
++	/* Generic remove at frame offset 0, size 14 (ETH_HLEN).
++	 * Strips the outer Ethernet header in flight.  No inline payload.
++	 * Cross-ref SDK fm_manip.c BuildHmct case
++	 * e_FM_PCD_MANIP_HDR_RMV_ETHERNET (line 432).
++	 */
++	cmd  = (u32)FMAN_PCD_HMCD_OP_GENERIC_RMV
++		<< FMAN_PCD_HMCD_OC_SHIFT;
++	cmd |= (u32)FMAN_PCD_L2_HDR_OFFSET
++		<< FMAN_PCD_HMCD_RMV_OFFSET_SHIFT;
++	cmd |= (u32)FMAN_PCD_L2_HDR_RMV_SIZE
++		<< FMAN_PCD_HMCD_RMV_SIZE_SHIFT;
 +
-+iowrite32be(cmd, hmct);
++	iowrite32be(cmd, hmct);
 +
-+*out_op = FMAN_PCD_HMAN_OC;
-+return hmct;
++	manip->hmct_used = 4;
++	*out_op = FMAN_PCD_HMAN_OC;
++	return hmct;
 +}
 +
 +static __must_check void __iomem *
 +manip_encode_insrt_generic(struct fman_pcd_manip *manip,
-+   const struct fman_pcd_manip_params *p,
-+   u8 *out_op)
++			   const struct fman_pcd_manip_params *p,
++			   u8 *out_op)
 +{
-+void __iomem *hmct = manip->hmct;
-+void __iomem *cur;
-+u32 cmd;
-+unsigned int n_words;
-+unsigned int i;
-+u8 size = p->insrt_generic.size;
++	void __iomem *hmct = manip->hmct;
++	void __iomem *cur;
++	u32 cmd;
++	unsigned int n_words;
++	unsigned int i;
++	u8 size = p->insrt_generic.size;
 +
-+if (size == 0 || size > FMAN_PCD_MANIP_INSRT_GENERIC_MAX_SIZE)
-+return NULL;
++	if (size == 0 || size > FMAN_PCD_MANIP_INSRT_GENERIC_MAX_SIZE)
++		return NULL;
 +
-+/* Generic insert at frame offset 0, size N bytes carrying
-+ * inline payload p->insrt_generic.hdr[0..N-1].  Cross-ref SDK
-+ * fm_manip.c BuildHmct case e_FM_PCD_MANIP_HDR_INSRT_GENERIC
-+ * (line 528).
-+ */
-+cmd  = (u32)FMAN_PCD_HMCD_OP_GENERIC_INSRT
-+<< FMAN_PCD_HMCD_OC_SHIFT;
-+cmd |= (u32)FMAN_PCD_L2_HDR_OFFSET
-+<< FMAN_PCD_HMCD_INSRT_OFFSET_SHIFT;
-+cmd |= (u32)size
-+<< FMAN_PCD_HMCD_INSRT_SIZE_SHIFT;
++	/* Generic insert at frame offset 0, size N bytes carrying
++	 * inline payload p->insrt_generic.hdr[0..N-1].  Cross-ref SDK
++	 * fm_manip.c BuildHmct case e_FM_PCD_MANIP_HDR_INSRT_GENERIC
++	 * (line 528).
++	 */
++	cmd  = (u32)FMAN_PCD_HMCD_OP_GENERIC_INSRT
++		<< FMAN_PCD_HMCD_OC_SHIFT;
++	cmd |= (u32)FMAN_PCD_L2_HDR_OFFSET
++		<< FMAN_PCD_HMCD_INSRT_OFFSET_SHIFT;
++	cmd |= (u32)size
++		<< FMAN_PCD_HMCD_INSRT_SIZE_SHIFT;
 +
-+iowrite32be(cmd, hmct);
++	iowrite32be(cmd, hmct);
 +
-+/* Inline payload: ceil(size/4) BE-32 words. */
-+n_words = (size + 3) / 4;
-+cur = hmct + 4;
-+for (i = 0; i < n_words; i++) {
-+unsigned int base = i * 4;
-+u32 word = 0;
-+unsigned int b;
++	/* Inline payload: ceil(size/4) BE-32 words. */
++	n_words = (size + 3) / 4;
++	cur = hmct + 4;
++	for (i = 0; i < n_words; i++) {
++		unsigned int base = i * 4;
++		u32 word = 0;
++		unsigned int b;
 +
-+for (b = 0; b < 4; b++) {
-+unsigned int idx = base + b;
-+u8 byte = (idx < size) ? p->insrt_generic.hdr[idx]
-+       : 0u;
++		for (b = 0; b < 4; b++) {
++			unsigned int idx = base + b;
++			u8 byte = (idx < size) ? p->insrt_generic.hdr[idx]
++					       : 0u;
 +
-+word |= ((u32)byte) << ((3 - b) * 8);
-+}
-+iowrite32be(word, cur);
-+cur += 4;
-+}
++			word |= ((u32)byte) << ((3 - b) * 8);
++		}
++		iowrite32be(word, cur);
++		cur += 4;
++	}
 +
-+*out_op = FMAN_PCD_HMAN_OC;
-+return hmct;
++	manip->hmct_used = 4 + (n_words * 4);
++	*out_op = FMAN_PCD_HMAN_OC;
++	return hmct;
 +}
 +
  /* ------------------------------------------------------------------ */
- /* v1.2 (PR14i) encoder — Path A CC-key inline MANIP primitive        */
+ /* v1.2 (PR14i) encoder - Path A CC-key inline MANIP primitive        */
  /* ------------------------------------------------------------------ */
-@@ -688,6 +781,8 @@
- case FMAN_PCD_MANIP_VLAN_PUSH:
- case FMAN_PCD_MANIP_VLAN_POP:
- case FMAN_PCD_MANIP_TTL_DEC:
-+case FMAN_PCD_MANIP_RMV_ETHERNET:
-+case FMAN_PCD_MANIP_INSRT_GENERIC:
- case FMAN_PCD_MANIP_FIELD_UPDATE_IPV4_FORWARD:
- break;
- default:
-@@ -779,6 +874,12 @@
- case FMAN_PCD_MANIP_TTL_DEC:
- last_cmd = manip_encode_ttl_dec(manip, &op);
- break;
-+case FMAN_PCD_MANIP_RMV_ETHERNET:
-+last_cmd = manip_encode_rmv_ethernet(manip, &op);
-+break;
-+case FMAN_PCD_MANIP_INSRT_GENERIC:
-+last_cmd = manip_encode_insrt_generic(manip, params, &op);
-+break;
- case FMAN_PCD_MANIP_FIELD_UPDATE_IPV4_FORWARD:
- last_cmd = manip_encode_field_update_ipv4_forward(manip,
-   params,
-diff --git a/drivers/net/ethernet/freescale/fman/tests/fman_pcd_manip_test.c b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_manip_test.c
-index 8b27e37..081fcea 100644
---- a/drivers/net/ethernet/freescale/fman/tests/fman_pcd_manip_test.c
-+++ b/drivers/net/ethernet/freescale/fman/tests/fman_pcd_manip_test.c
-@@ -292,6 +292,135 @@ static void manip_encode_nat_v4_empty_test(struct kunit *test)
- KUNIT_EXPECT_PTR_EQ(test, last_cmd, NULL);
- }
- 
-+/* ---- TEST: MANIP_RMV_ETHERNET (v1.2) ----------- [ARCHIVED] ---- */
-+/*
-+ * 14-byte L2 strip at frame offset 0 — the OH-port chain's stage-1
-+ * primitive.  Encoded as a single GENERIC_RMV command word with no
-+ * inline payload.
-+ */
-+static void manip_encode_rmv_ethernet_test(struct kunit *test)
-+{
-+void __iomem *hmct = hmct_scratch_alloc(test);
-+struct fman_pcd_manip stub = { .hmct = hmct };
-+void __iomem *last_cmd;
-+u8 op = 0;
-+u32 expected_cmd;
-+
-+last_cmd = manip_encode_rmv_ethernet(&stub, &op);
-+KUNIT_ASSERT_NOT_NULL(test, last_cmd);
-+KUNIT_EXPECT_EQ(test, op, (u8)FMAN_PCD_HMAN_OC);
-+
-+expected_cmd = ((u32)FMAN_PCD_HMCD_OP_GENERIC_RMV
-+<< FMAN_PCD_HMCD_OC_SHIFT) |
-+       ((u32)FMAN_PCD_L2_HDR_OFFSET
-+<< FMAN_PCD_HMCD_RMV_OFFSET_SHIFT) |
-+       ((u32)FMAN_PCD_L2_HDR_RMV_SIZE
-+<< FMAN_PCD_HMCD_RMV_SIZE_SHIFT);
-+
-+/* Silicon-fact pin: GENERIC_RMV(op=0x01) at offset 0, size 14
-+ * encodes as exactly 0x01000E00.
-+ */
-+KUNIT_EXPECT_EQ(test, expected_cmd, 0x01000e00u);
-+KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x00), expected_cmd);
-+KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x04), 0u);
-+
-+KUNIT_EXPECT_PTR_EQ(test, last_cmd, hmct + 0x00);
-+}
-+
-+/* ---- TEST: MANIP_INSRT_GENERIC 14-byte L2 (v1.2) [ARCHIVED] ---- */
-+static void manip_encode_insrt_generic_l2_test(struct kunit *test)
-+{
-+void __iomem *hmct = hmct_scratch_alloc(test);
-+struct fman_pcd_manip stub = { .hmct = hmct };
-+struct fman_pcd_manip_params p = {
-+.type = FMAN_PCD_MANIP_INSRT_GENERIC,
-+.insrt_generic = {
-+.size = 14,
-+.hdr = {
-+0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-+0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
-+0x08, 0x00,
-+},
-+},
-+};
-+void __iomem *last_cmd;
-+u8 op = 0;
-+u32 expected_cmd;
-+
-+last_cmd = manip_encode_insrt_generic(&stub, &p, &op);
-+KUNIT_ASSERT_NOT_NULL(test, last_cmd);
-+KUNIT_EXPECT_EQ(test, op, (u8)FMAN_PCD_HMAN_OC);
-+
-+expected_cmd = ((u32)FMAN_PCD_HMCD_OP_GENERIC_INSRT
-+<< FMAN_PCD_HMCD_OC_SHIFT) |
-+       ((u32)FMAN_PCD_L2_HDR_OFFSET
-+<< FMAN_PCD_HMCD_INSRT_OFFSET_SHIFT) |
-+       ((u32)14u
-+<< FMAN_PCD_HMCD_INSRT_SIZE_SHIFT);
-+
-+KUNIT_EXPECT_EQ(test, expected_cmd, 0x02000e00u);
-+KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x00), expected_cmd);
-+
-+KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x04), 0xaabbccddu);
-+KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x08), 0xeeff1122u);
-+KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x0c), 0x33445566u);
-+KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x10), 0x08000000u);
-+KUNIT_EXPECT_EQ(test, hmct_read_be32(hmct, 0x14), 0u);
-+
-+KUNIT_EXPECT_PTR_EQ(test, last_cmd, hmct + 0x00);
-+}
-+
-+/* ---- TEST: MANIP_INSRT_GENERIC reject (v1.2) -- [ARCHIVED] ----- */
-+static void manip_encode_insrt_generic_reject_test(struct kunit *test)
-+{
-+void __iomem *hmct = hmct_scratch_alloc(test);
-+struct fman_pcd_manip stub = { .hmct = hmct };
-+struct fman_pcd_manip_params p_zero = {
-+.type = FMAN_PCD_MANIP_INSRT_GENERIC,
-+.insrt_generic = { .size = 0, .hdr = { 0 } },
-+};
-+struct fman_pcd_manip_params p_over = {
-+.type = FMAN_PCD_MANIP_INSRT_GENERIC,
-+.insrt_generic = { .size = 33, .hdr = { 0 } },
-+};
-+u8 op = 0;
-+
-+KUNIT_EXPECT_PTR_EQ(test,
-+    manip_encode_insrt_generic(&stub, &p_zero, &op),
-+    NULL);
-+KUNIT_EXPECT_PTR_EQ(test,
-+    manip_encode_insrt_generic(&stub, &p_over, &op),
-+    NULL);
-+}
-+
- /* ---- TEST: HMCD_LAST OR-in (silicon walker termination) ------- */
-@@ -419,6 +548,9 @@
- KUNIT_CASE(manip_encode_vlan_pop_test),
- KUNIT_CASE(manip_encode_ttl_dec_test),
- KUNIT_CASE(manip_encode_nat_v4_empty_test),
-+KUNIT_CASE(manip_encode_rmv_ethernet_test),
-+KUNIT_CASE(manip_encode_insrt_generic_l2_test),
-+KUNIT_CASE(manip_encode_insrt_generic_reject_test),
- KUNIT_CASE(manip_encode_field_update_ipv4_forward_ttl_test),
- KUNIT_CASE(manip_encode_field_update_ipv4_forward_dscp_test),
- KUNIT_CASE(manip_hmcd_last_or_test),
+@@ -676,6 +769,8 @@ fman_pcd_manip_create(struct fman_pcd *pcd,
+ 	case FMAN_PCD_MANIP_VLAN_PUSH:
+ 	case FMAN_PCD_MANIP_VLAN_POP:
+ 	case FMAN_PCD_MANIP_TTL_DEC:
++	case FMAN_PCD_MANIP_RMV_ETHERNET:
++	case FMAN_PCD_MANIP_INSRT_GENERIC:
+ 	case FMAN_PCD_MANIP_FIELD_UPDATE_IPV4_FORWARD:
+ 		break;
+ 	default:
+@@ -766,6 +861,12 @@ fman_pcd_manip_create(struct fman_pcd *pcd,
+ 	case FMAN_PCD_MANIP_TTL_DEC:
+ 		last_cmd = manip_encode_ttl_dec(manip, &op);
+ 		break;
++	case FMAN_PCD_MANIP_RMV_ETHERNET:
++		last_cmd = manip_encode_rmv_ethernet(manip, &op);
++		break;
++	case FMAN_PCD_MANIP_INSRT_GENERIC:
++		last_cmd = manip_encode_insrt_generic(manip, params, &op);
++		break;
+ 	case FMAN_PCD_MANIP_FIELD_UPDATE_IPV4_FORWARD:
+ 		last_cmd = manip_encode_field_update_ipv4_forward(manip,
+ 								  params,
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index a5e2c91..89230bc 100644
+index ea0cb9d..d0f1161 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
-@@ -509,6 +509,16 @@
-  * @FMAN_PCD_MANIP_VLAN_PUSH:            prepend an 802.1Q tag
-  * @FMAN_PCD_MANIP_VLAN_POP:             strip outer 802.1Q tag
-  * @FMAN_PCD_MANIP_TTL_DEC:              decrement IPv4 TTL / IPv6 Hop Limit
-+ * @FMAN_PCD_MANIP_RMV_ETHERNET:         strip the outer Ethernet/802.3 header
-+ *                                       (14 bytes, no payload).  v1.2.
-+ *                                       [ARCHIVED — OH-port chain only]
-+ * @FMAN_PCD_MANIP_INSRT_GENERIC:        push an operator-supplied byte array
-+ *                                       at frame offset 0 (typical use:
-+ *                                       insert a new L2 header after
-+ *                                       RMV_ETHERNET).  Carries
-+ *                                       @insrt_generic.size and
-+ *                                       @insrt_generic.hdr[].  v1.2.
-+ *                                       [ARCHIVED — OH-port chain only]
-  * @FMAN_PCD_MANIP_FIELD_UPDATE_IPV4_FORWARD:
-  *                                       TTL-decrement + IPv4 header-checksum
-  *                                       recompute (and optional DSCP rewrite)
-@@ -525,9 +535,21 @@
+@@ -581,9 +581,20 @@ FMAN_PCD_MANIP_NAT_V6,
  FMAN_PCD_MANIP_VLAN_PUSH,
  FMAN_PCD_MANIP_VLAN_POP,
  FMAN_PCD_MANIP_TTL_DEC,
@@ -333,19 +181,20 @@ index a5e2c91..89230bc 100644
 + */
 +#define FMAN_PCD_MANIP_INSRT_GENERIC_MAX_SIZE 32u
 +
++
  /**
   * struct fman_pcd_manip_params - configuration for one manip template.
   * @type:                   discriminator selecting the union arm
-@@ -596,6 +618,10 @@
- __be16 tci;
+@@ -653,6 +664,10 @@ __be16 tci;
  __be16 tpid;
  } vlan_push;
-+struct {
+ struct {
 +u8 size;
 +u8 hdr[FMAN_PCD_MANIP_INSRT_GENERIC_MAX_SIZE];
 +} insrt_generic;
- struct {
++struct {
  bool recompute_cksum;
  bool rewrite_dscp;
+ u8 new_dscp;
 -- 
 2.39.5
