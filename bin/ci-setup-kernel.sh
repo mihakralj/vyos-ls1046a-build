@@ -214,6 +214,16 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
         exit 1
     fi
     echo "### FLAVOR=ask — staging ASK2 in-tree kernel patches from $ASK_PATCH_DIR"
+    # NOTE: slots 0032, 0033, 0034, 0036, 0037, 0038, 0042, 0043, 0045,
+    # 0046, 0051 were archived to $ASK_PATCH_DIR/archive-grafted-2026-05-24/
+    # on 2026-05-24 as part of the v1.3 Path A architecture (graft model +
+    # OH-port two-stage chain abandoned, plus the cross-file keygen.c-deps
+    # debugfs regdump 0045 and the now-orphaned 0051 revert of archived
+    # 0043). The KEEP halves of the PARTIAL splits of 0033 + 0037 + 0046
+    # live in the active series as 0054 + 0055 + 0056 respectively.  See
+    # plans/ASK2-PHASE2-PATCH-TRIAGE.md for the full audit (Option C2).
+    # Archived patches are NOT applied at build time — the subdirectory
+    # is not globbed below.
     ASK_PATCH_COUNT=0
     for src_patch in "$ASK_PATCH_DIR"/0001-*.patch \
                      "$ASK_PATCH_DIR"/0002-*.patch \
@@ -246,28 +256,20 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
                      "$ASK_PATCH_DIR"/0029-*.patch \
                      "$ASK_PATCH_DIR"/0030-*.patch \
                      "$ASK_PATCH_DIR"/0031-*.patch \
-                     "$ASK_PATCH_DIR"/0032-*.patch \
-                     "$ASK_PATCH_DIR"/0033-*.patch \
-                     "$ASK_PATCH_DIR"/0034-*.patch \
                      "$ASK_PATCH_DIR"/0035-*.patch \
-                     "$ASK_PATCH_DIR"/0036-*.patch \
-                     "$ASK_PATCH_DIR"/0037-*.patch \
-                     "$ASK_PATCH_DIR"/0038-*.patch \
                      "$ASK_PATCH_DIR"/0039-*.patch \
                      "$ASK_PATCH_DIR"/0040-*.patch \
                      "$ASK_PATCH_DIR"/0041-*.patch \
-                     "$ASK_PATCH_DIR"/0042-*.patch \
-                     "$ASK_PATCH_DIR"/0043-*.patch \
                      "$ASK_PATCH_DIR"/0044-*.patch \
-                     "$ASK_PATCH_DIR"/0045-*.patch \
-                     "$ASK_PATCH_DIR"/0046-*.patch \
                      "$ASK_PATCH_DIR"/0047-*.patch \
                      "$ASK_PATCH_DIR"/0048-*.patch \
                      "$ASK_PATCH_DIR"/0049-*.patch \
                      "$ASK_PATCH_DIR"/0050-*.patch \
-                     "$ASK_PATCH_DIR"/0051-*.patch \
                      "$ASK_PATCH_DIR"/0052-*.patch \
-                     "$ASK_PATCH_DIR"/0053-*.patch; do
+                     "$ASK_PATCH_DIR"/0053-*.patch \
+                     "$ASK_PATCH_DIR"/0054-*.patch \
+                     "$ASK_PATCH_DIR"/0055-*.patch \
+                     "$ASK_PATCH_DIR"/0056-*.patch; do
         [ -f "$src_patch" ] || { echo "ERROR: missing $src_patch"; exit 1; }
         # Rename 0001-→1001-, 0002-→1002-, 0003-→1003-, 0004-→1004-,
         # 0005-→1005-, 0006-→1006-, 0007-→1007-, 0008-→1008-,
@@ -306,36 +308,38 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
             0029-*) dst="1029-${base#0029-}" ;;
             0030-*) dst="1030-${base#0030-}" ;;
             0031-*) dst="1031-${base#0031-}" ;;
-            0032-*) dst="1032-${base#0032-}" ;;
-            0033-*) dst="1033-${base#0033-}" ;;
-            0034-*) dst="1034-${base#0034-}" ;;
             0035-*) dst="1035-${base#0035-}" ;;
-            0036-*) dst="1036-${base#0036-}" ;;
-            0037-*) dst="1037-${base#0037-}" ;;
-            0038-*) dst="1038-${base#0038-}" ;;
             0039-*) dst="1039-${base#0039-}" ;;
             0040-*) dst="1040-${base#0040-}" ;;
             0041-*) dst="1041-${base#0041-}" ;;
-            0042-*) dst="1042-${base#0042-}" ;;
-            0043-*) dst="1043-${base#0043-}" ;;
             0044-*) dst="1044-${base#0044-}" ;;
-            0045-*) dst="1045-${base#0045-}" ;;
-            0046-*) dst="1046-${base#0046-}" ;;
             0047-*) dst="1047-${base#0047-}" ;;
             0048-*) dst="1048-${base#0048-}" ;;
             0049-*) dst="1049-${base#0049-}" ;;
             0050-*) dst="1050-${base#0050-}" ;;
-            0051-*) dst="1051-${base#0051-}" ;;
             0052-*) dst="1052-${base#0052-}" ;;
             0053-*) dst="1053-${base#0053-}" ;;
+            0054-*) dst="1054-${base#0054-}" ;;
+            0055-*) dst="1055-${base#0055-}" ;;
+            0056-*) dst="1056-${base#0056-}" ;;
             *)      echo "ERROR: unexpected ASK patch name: $base"; exit 1 ;;
         esac
         echo "###   $base → $dst"
         cp "$src_patch" "$KERNEL_PATCHES/$dst"
         ASK_PATCH_COUNT=$((ASK_PATCH_COUNT + 1))
     done
-    if [ "$ASK_PATCH_COUNT" -ne 53 ]; then
-        echo "ERROR: expected 53 ASK kernel patches, staged $ASK_PATCH_COUNT"
+    # Expected count: 45 (Phase 2 Option C2 result — see
+    # plans/ASK2-PHASE2-PATCH-TRIAGE.md §5 for arithmetic):
+    #   53 original
+    # -  8 archived 2026-05-24 stage 1 (0032/0033-RMV/0034/0036/0037-RMV/
+    #                                   0038/0042/0043)
+    # -  3 archived 2026-05-24 stage 2 (Option C2: 0045 wholesale due to
+    #                                   keygen.c cross-file deps; 0046
+    #                                   PARTIAL-split; 0051 orphaned)
+    # +  3 new KEEP-half patches (0054 ex-0033, 0055 ex-0037, 0056 ex-0046)
+    # = 45 active.
+    if [ "$ASK_PATCH_COUNT" -ne 45 ]; then
+        echo "ERROR: expected 45 ASK kernel patches, staged $ASK_PATCH_COUNT"
         exit 1
     fi
     echo "### ASK2: $ASK_PATCH_COUNT in-tree kernel patches staged"
