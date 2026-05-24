@@ -23,7 +23,6 @@ ask_caam.o \
 ask_bridge.o \
 ask_neigh.o \
 ask_op.o \
-ask_hostcmd.o \
 ask_stats.o \
 ask_debugfs.o
 

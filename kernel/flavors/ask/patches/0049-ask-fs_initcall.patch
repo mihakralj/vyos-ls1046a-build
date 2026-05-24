@@ -23,7 +23,7 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/ask/ask_main.c b/drivers/net/et
 index 0b2bae15b..31c21639f 100644
 --- a/drivers/net/ethernet/freescale/dpaa/ask/ask_main.c
 +++ b/drivers/net/ethernet/freescale/dpaa/ask/ask_main.c
-@@ -1,129 +1,75 @@
+@@ -1,122 +1,75 @@
 -// SPDX-License-Identifier: GPL-2.0
 -/*
 - * ask_main.c — module init/exit for ASK2
@@ -64,10 +64,6 @@ index 0b2bae15b..31c21639f 100644
 -	rc = ask_stats_init();
 -	if (rc)
 -		goto err_stats;
--
--	rc = ask_hostcmd_init();
--	if (rc)
--		goto err_hostcmd;
 -
 -	rc = ask_flow_init();
 -	if (rc)
@@ -151,8 +147,6 @@ index 0b2bae15b..31c21639f 100644
 -err_neigh:
 -	ask_flow_exit();
 -err_flow:
--	ask_hostcmd_exit();
--err_hostcmd:
 -	ask_stats_exit();
 -err_stats:
 -	ask_hw_exit();
@@ -174,7 +168,6 @@ index 0b2bae15b..31c21639f 100644
 -	ask_bridge_exit();
 -	ask_neigh_exit();
 -	ask_flow_exit();
--	ask_hostcmd_exit();
 -	ask_stats_exit();
 -	ask_hw_exit();
 -	ask_pr_info("unloaded\n");
