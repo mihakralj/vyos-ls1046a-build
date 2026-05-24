@@ -153,6 +153,17 @@ void ask_hw_pcd_teardown(void);
 struct ask_hw_pcd *ask_hw_pcd_get(void);
 
 /*
+ * Phase 4.10 helpers (v1.3 Path A): per-port CC node accessors. The
+ * pre-netdev hook (ask_pcd_install_hook) creates one cc_v4_tcp and
+ * one cc_v4_udp empty node per claimed FMan ingress port at boot.
+ * ask_flow_offload.c looks them up by hwport_id when adding/removing
+ * per-flow CC keys. Returns NULL if no pipeline is installed for
+ * @hwport_id (i.e. the hook didn't claim that port).
+ */
+struct fman_pcd_cc_node *ask_hw_pcd_cc_v4_tcp_for_port(u8 hwport_id);
+struct fman_pcd_cc_node *ask_hw_pcd_cc_v4_udp_for_port(u8 hwport_id);
+
+/*
  * ask_hw_port_bind() - bind the v4-TCP KG scheme to an FMan ingress port.
  *
  * Called from the flow_offload FLOW_BLOCK_BIND path (ask_flow_offload.c)
