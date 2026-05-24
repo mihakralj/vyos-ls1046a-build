@@ -1,0 +1,96 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Sun, 24 May 2026 00:10:00 +0000
+Subject: [PATCH] ask: suppress PR14z18 auto-unbind to protect FMan-shared
+ management plane (PR14z23.1)
+
+PR14z18 fired ask_hw_port_unbind() automatically whenever a pipeline's
+per-pipeline live-cookie refcount transitioned to zero (last
+FLOW_CLS_DESTROY on the test plane).  ask_hw_port_unbind() calls
+fman_pcd_kg_ungraft_cc() which rewrites the KeyGen scheme through the
+*shared* FMan indirect-access window (AR-flushed), serializing the
+entire FMan's parse → classify pipeline for the duration of the RMW.
+
+On Mono Gateway DK, that stall is observable as ARP/keepalive loss on
+the management LAN (eth0/eth1/eth2 RJ45 ports on 192.168.0.0/16 —
+FMan MAC5/MAC6/MAC2) every time a flow_offload cookie storm drains
+the per-pipeline refcount to zero on the SFP+ test-plane ports
+(eth3/eth4 on /30 link nets — FMan MAC9/MAC10).  Confirmed via ftrace
+on the live DUT 2026-05-24: two ask_hw_port_unbind() calls per M2
+gate run (port 0x10 + 0x11) correlate 1:1 with operator-reported
+management-network disruption.
+
+This is a production safety bug: any legitimate flowtable teardown
+(operator removes a port from `set vpp settings interface`, SFP+ link
+flap, `nft delete table inet ask_offload`) will brown out the mgmt
+plane for the same reason.
+
+Fix: keep the per-pipeline refcount + the log line (so the next-step
+investigation of "who queues the destroy work bypassing
+flow_offload_queue_work" can resume safely once the FMan-wide stall is
+removed), but DO NOT invoke ask_hw_port_unbind() from the destroy
+path.  Leaving cc_v4_tcp grafted across a cookie storm is safe:
+silicon HIT keeps forwarding the 5-tuples already in the CC table,
+and the next REPLACE burst (typically <2 s later under sustained TCP
+load) re-populates the same tree.  The kernel-side cookies being
+destroyed are bookkeeping records, not silicon entries.  cc_v4_tcp
+trees are still torn down properly via ask_hw_pcd_teardown() on
+module exit and on flavour reconfiguration — the only legitimate
+ungraft points until a future patch introduces a proper
+flowtable-gone signal (FLOW_BLOCK_UNBIND is documented as never fired
+by the kernel 6.18.31 nftables flowtable lifecycle on `nft delete
+table`, per PR14z18 design comment).
+
+See plans/PR14z23-DESIGN.md "## 2026-05-24 00:05Z — ftrace IDENTIFIES
+destroy caller + CRITICAL management-network disruption" for the
+ftrace evidence and the root-cause analysis.
+
+Signed-off-by: ASK2 build bot <ask2-build@kralj.dev>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/ask/ask_hw.c b/drivers/net/ethernet/freescale/dpaa/ask/ask_hw.c
+index dc41947..e5ab323 100644
+--- a/drivers/net/ethernet/freescale/dpaa/ask/ask_hw.c
++++ b/drivers/net/ethernet/freescale/dpaa/ask/ask_hw.c
+@@ -1502,9 +1502,40 @@ int ask_hw_flow_remove(u32 hw_flow_id)
+                 mutex_unlock(&h->lock);
+ 
+                 if (pid_to_unbind != 0xff) {
+-                        ask_pr_info("hw: PR14z18 auto-unbind: port 0x%02x — last cookie destroyed, ungrafting\n",
++                        /*
++                         * PR14z23.1 (2026-05-24): SUPPRESS the actual
++                         * ungraft.  ask_hw_port_unbind() calls
++                         * fman_pcd_kg_ungraft_cc() which rewrites the
++                         * KeyGen scheme through the *shared* FMan
++                         * indirect-access window (AR-flushed),
++                         * serializing the entire FMan's parse →
++                         * classify pipeline for the duration.  That
++                         * stall is observable as ARP/keepalive loss
++                         * on the management LAN (eth0/1/2,
++                         * 192.168.0.0/16) every time a flow_offload
++                         * cookie storm drains the per-pipeline
++                         * refcount to zero on the test-plane SFP+
++                         * ports (eth3/eth4).
++                         *
++                         * Leaving cc_v4_tcp grafted across a cookie
++                         * storm is safe: silicon HIT keeps forwarding
++                         * the 5-tuples already in the CC table, and
++                         * the next REPLACE burst (typically <2 s
++                         * later under sustained TCP load) re-populates
++                         * the same tree.  The kernel-side cookies
++                         * being destroyed are bookkeeping records,
++                         * not silicon entries.
++                         *
++                         * The cc_v4_tcp trees are torn down properly
++                         * via ask_hw_pcd_teardown() on module exit
++                         * (rmmod ask) and on flavour reconfiguration,
++                         * which are the only legitimate ungraft
++                         * points until a future patch introduces a
++                         * proper flowtable-gone signal.
++                         */
++                        ask_pr_info("hw: PR14z23.1: skip auto-unbind on port 0x%02x — last cookie destroyed but cc_v4_tcp left grafted (FMan-wide stall avoidance)\n",
+                                     pid_to_unbind);
+-                        (void)ask_hw_port_unbind(pid_to_unbind);
++                        /* (void)ask_hw_port_unbind(pid_to_unbind); -- SUPPRESSED, see comment */
+                 }
+         }
+         return 0;

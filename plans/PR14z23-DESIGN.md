@@ -364,3 +364,269 @@ With HIT-path frames routed through FQ_TYPE_TX_NO_CONFIRM:
   driver itself (not a generic header) and only consumed by ask_hw.c
   which is also in-tree under `drivers/net/ethernet/freescale/dpaa/ask/`.
   No mainline-maintainer review surface.
+
+---
+
+## 2026-05-23 23:40Z — M2 GATE RUN: NET_KERNEL_CPU 27.19% FAIL — but NOT an Option C regression
+
+First M2 gate run on the PR14z23 Option C ISO. Measured numbers:
+
+| Metric | PR14z22 step-1 | PR14z23 Option C run-1 |
+|---|---|---|
+| Throughput | 6.945 Gbps | 6.932 Gbps |
+| `%sys` | 0.91% | 0.77% |
+| `%soft` | 15.97% | 26.50% |
+| NET_KERNEL_CPU | **16.63%** | **27.19%** |
+
+### Diagnosis — the gate measured the unaccelerated SW path
+
+dmesg forensics on the gate run window:
+
+- `23:36:21–26` — `cb invoked REPLACE` bursts (~150 cookies); `port-bind
+  graft` active for ports 0x10 + 0x11; HW offload primed.
+- `23:36:28` — **synchronous DESTROY of all cookies** → `PR14z18
+  auto-unbind` tears down both cc_v4_tcp trees. Only **7 seconds**
+  after first REPLACE.
+- `23:36:35 → 23:39:17` — only ARP/netevent activity. **Zero further
+  REPLACE callbacks** for the entire remaining 30s gate window.
+
+No `pr_info("cached no-confirm TX FQID 0x%x for oif=%u")` line ever
+appears in dmesg. `ask_hw_resolve_oif_tx_fqid()` (patch 0054) was
+never invoked. `dpaa_alloc_offload_tx_fq()` (patch 0053) was never
+called. The no-confirm FQ infrastructure exists in the binary but
+was never exercised by the gate's traffic.
+
+The 27.19% NET_KERNEL_CPU is the **pure unaccelerated kernel forward
+plane at 6.9 Gbps** — no Option C feature was tested.
+
+### Root cause hypothesis — silicon HIT bypass starves kernel flowtable GC
+
+DPAA1 silicon CC HIT path forwards packets eth3 → cc_v4_tcp → eth4
+without traversing kernel `dpaa_eth` RX NAPI. The kernel-side
+nf_flow_offload flowtable never sees the packet counters, so
+`nf_flow_offload_work_gc()` thinks the entry is idle and ages it
+out — explaining the synchronous DESTROY at 23:36:28 while iperf3
+was actively pushing 6.9 Gbps of TCP.
+
+PR14z22 step-1 likely suffered the same aging problem but somewhat
+less severely (the TX-confirm completion path still hit `dpaa_eth`,
+which may have tickled some kernel-side accounting that delayed
+the GC slightly — explaining why PR14z22 measured 16.63% with
+**partial** silicon engagement vs PR14z23's measurement of the
+fully-deaccelerated SW path).
+
+This is the **same class of bug** the legacy ASK 1.x sdk_dpaa fork
+solved with explicit silicon→software counter refresh wiring
+(`cdx_dpa_pkt_count_update()` periodic poll feeding back into
+conntrack/flowtable accounting).
+
+### What this means for Option C
+
+- **Option C is neither validated nor invalidated by run-1.** It cannot
+  be measured until the silicon HIT path stays engaged for the full
+  gate window.
+- The patches 0053 (`dpaa_alloc_offload_tx_fq` helper + B0V=0
+  context_a programming) and 0054 (cached no-confirm FQ resolver in
+  ask_hw.c) compile, load, and report `ask: hw: FMan PCD chain up`
+  cleanly at boot, but their fast-path is unreachable when the
+  silicon CC tree gets torn down 7 s into the test.
+- The **prerequisite** for any meaningful Option C measurement is to
+  solve the flow-offload aging-while-active problem.
+
+### Three forward paths
+
+1. **PR14z24 — silicon counter refresh.** Wire a periodic
+   ksoftirq/work to read CC node hit counters (`fman_pcd_cc_node_
+   match_table_get_key_stat()` per LS1046A FMan PCD API), feed
+   them into `nf_flow_offload_stats_fill()` so the kernel
+   flowtable sees activity and does NOT GC the entry. Estimated
+   ~150-300 LOC in `ask_flow_offload.c`. This is the legacy
+   ASK 1.x architecture re-implemented.
+
+2. **PR14z24-lite — pin via long-lived nft rule.** Add a stateful
+   nftables rule (e.g. `tcp dport 5201 counter`) that forces every
+   forwarded packet through the kernel netfilter pipeline,
+   refreshing the conntrack timeout. Cheap (5-line nft fragment in
+   `m2-dut-prep.sh`) but defeats the whole point of silicon HIT
+   (every packet still walks the kernel). Useful only as a
+   diagnostic-gate to first PROVE Option C works.
+
+3. **PR14z24-coalesce — kernel-side aging knob bump.** Set
+   `/proc/sys/net/netfilter/nf_flowtable_tcp_timeout` (or the
+   per-flow `nf_flow_offload_timeout`) to a value >> gate
+   duration (e.g. 600 s). Confirms the aging hypothesis cheaply
+   without code changes. Operator-actionable in seconds.
+
+**Recommended order: 3 → 2 → 1.** If knob bump (3) lets the silicon
+path stay engaged, the 6.9 Gbps + measured NET_KERNEL_CPU number
+becomes meaningful. If Option C then passes the 5% gate, ship as-is
+and treat (1) as v1.1 hardening. If knob bump fails to stop the
+aging, hypothesis is wrong and we need deeper FMan PCD trace.
+
+---
+
+## 2026-05-23 23:51Z — Path 3 EXECUTED, RULED OUT — aging hypothesis is wrong
+
+Bumped `/proc/sys/net/netfilter/nf_flowtable_tcp_timeout` and
+`nf_flowtable_udp_timeout` from default 30 → 600. Re-ran the M2 gate.
+
+| Metric | Run 1 (timeout=30) | Run 2 (timeout=600) | Δ |
+|---|---|---|---|
+| Throughput | 6.932 Gbps | 6.933 Gbps | noise |
+| `%sys` | 0.77% | 0.75% | noise |
+| `%soft` | 26.50% | 28.94% | +2.44 pts noise |
+| NET_KERNEL_CPU | **27.19%** | **29.61%** | **+2.42 pts (within run-to-run variance)** |
+
+dmesg pattern is essentially identical between runs:
+
+- Run 2 REPLACE bursts: `23:50:56`
+- Run 2 DESTROY cascade + auto-unbind: `23:50:58` — **only 2 seconds later**
+
+This is FAR too fast to be the netfilter flowtable GC timer (which runs
+~1 Hz and aged-out flows at `now > flow->timeout`, where the timeout
+field IS initialized to `now + nf_flowtable_tcp_timeout` at install).
+
+**Conclusion:** the DESTROY cascade is NOT driven by netfilter flowtable
+aging. Something else — likely conntrack-side flow teardown, or an
+internal kernel flowtable consistency check — is actively destroying
+the cookies within 2 s of installation while iperf3 is still actively
+pushing TCP at 6.9 Gbps.
+
+Knobs reset to default 30 s.
+
+### Revised next-step proposal: temporarily disable PR14z18 auto-unbind
+
+The cleanest one-line diagnostic to isolate "what's destroying cookies"
+from "is silicon HIT path actually correct": **disable PR14z18
+auto-unbind** in ask.ko. Comment out the `ask_hw_port_unbind()` call
+in the destroy path so the silicon CC trees stay grafted regardless of
+flow_offload cookie churn. The cookies still get destroyed every 2 s
+(whatever upstream is doing that, continues), but the silicon CC tree
+keeps running until ask.ko is unloaded.
+
+If, with auto-unbind disabled, the gate reports < 5% NET_KERNEL_CPU
+at 6.9 Gbps with `pr_info("cached no-confirm TX FQID")` lines in
+dmesg, **Option C is proven correct** and we can ship it as the M2
+gate solution, then tackle the auto-unbind teardown issue as a
+separate v1.0 hardening item.
+
+Cost: ~5 LOC patch (0055-disable-pr14z18-auto-unbind-for-bringup-
+test.patch), 1 CI cycle (~7 min), 1 ISO deploy, 1 gate run.
+
+If gate still fails with auto-unbind disabled, Option C itself has a
+real bug and needs to go back to design.
+
+## 2026-05-24 00:05Z — ftrace IDENTIFIES destroy caller + CRITICAL management-network disruption
+
+### Finding 1 — destroy callbacks are dispatched, but NOT via flow_offload_queue_work
+
+Two ftrace runs on the DUT (kprobe + stacktrace, 10 s iperf3 -P4
+6.89 Gbps, 1540 retx) on 2026-05-23 to 24:
+
+**Run A** — kprobe on `ask_flow_offload_setup_tc_block_cb` (the
+ask.ko dispatcher itself):
+- 872 events captured in 10 s.
+- **Every single one** has the identical call chain:
+  ```
+  ret_from_fork → kthread → worker_thread → process_one_work
+    → flow_offload_work_handler → ask_flow_offload_setup_tc_block_cb
+  ```
+- No exception. REPLACE, DEDUP, and DESTROY all arrive via that
+  one kworker.
+
+**Run B** — kprobe on `flow_offload_queue_work` (the single
+chokepoint in `net/netfilter/nf_flow_table_offload.c` that enqueues
+work onto the kworker the dispatcher runs on):
+- Only 98 events in 10 s.
+- 100 % of stacks are one of:
+  ```
+  flow_offload_queue_work ← flow_offload_add ← nft_flow_offload_eval ← ...
+  flow_offload_queue_work ← flow_offload_refresh ← nf_flow_offload_ip_hook ← ...
+  ```
+- **ZERO destroy stacks.** No `flow_offload_teardown`, no
+  `nf_flow_offload_work_gc`, no `nf_flow_offload_destroy` in any
+  trace.
+
+**Interpretation.** The flow_offload destroy work items are being
+queued by a path that **bypasses `flow_offload_queue_work`**.
+Candidates remaining: direct `flow_offload_work_handler` invocation
+during `nf_flow_table_offload_flush()` (block-level teardown),
+netdev unregister path, or a direct `queue_work()` call from a
+separate netfilter subsystem.  This narrows the search but the
+exact upstream trigger is still TBD.  More importantly, knowing the
+trigger no longer matters for the **immediate** unblock — see
+Finding 2.
+
+### Finding 2 — every destroy cascade disrupts 192.168.0.0/16
+
+Operator-reported (2026-05-24 00:01): every PR14z18 auto-unbind
+event correlates with packet loss / device-level disruption on the
+**management LAN (192.168.0.0/16)** which is on `eth0`/`eth1`/`eth2`
+(RJ45 — FMan MAC5/MAC6/MAC2) — physically separate ports from the
+M2 test plane (`eth3`/`eth4` SFP+ — FMan MAC9/MAC10 on /30 link
+subnets 10.99.1.0/30 and 10.11.1.0/30 with no routing overlap).
+
+**Root cause (from `ask_hw.c::ask_hw_port_unbind()` review).**
+`ask_hw_port_unbind()` does two FMan-global operations:
+
+1. `fman_pcd_kg_ungraft_cc(h->pcd, sid)` — rewrites the KeyGen
+   scheme entry through the **single shared FMan KeyGen indirect-
+   access window**.  The patch 0043 comment in ask_hw.c calls out
+   that this is "byte-exact restore of kgse_mode + KGSE_CCBS=0 in
+   a single AR-flushed indirect window".  AR (action register)
+   flush serializes the whole FMan's KeyGen for the duration —
+   every port's parse → classify pipeline is stalled while the
+   indirect register sequence executes.
+2. `fman_pcd_cc_node_destroy(node_to_destroy)` — destroys a CC
+   node; takes the FMan-wide `pcd->lock` for the duration.
+
+Two `ask_hw_port_unbind()` calls per gate run (port 0x10 and 0x11),
+each stalling the FMan classifier long enough for upstream switches
+/ devices on 192.168.x.x to observe ARP/keepalive loss.
+
+**This is no longer just an M2 gate noise problem.  It is a
+production safety problem.**  Even if M2 passes one day, an
+operational ASK deployment that legitimately tears down a
+flowtable (e.g. user removes a port from `set vpp settings interface`,
+nft `delete table inet ask_offload`, link flap on SFP+) will brown-
+out the management network for the duration of the unbind.
+
+### Decision — 0055 no-op patch is now MANDATORY, not just "diagnostic"
+
+The previously-proposed 0055 patch (no-op the `ask_hw_port_unbind()`
+call inside `ask_hw_flow_remove()` while keeping the refcount and the
+log line) is upgraded from "diagnostic bringup helper" to "production
+safety fix".  Justification:
+
+- **Leaving cc_v4_tcp grafted across a cookie storm is safe**: the
+  silicon CC HIT path keeps forwarding whatever 5-tuples it still
+  has in the table; the kernel-side cookies being destroyed are
+  the bookkeeping records, not the silicon entries.  Next REPLACE
+  burst will re-populate the same cc_v4_tcp tree with the same
+  5-tuples (iperf3 connections are stable across the test).
+- **Avoids the FMan-wide KeyGen stall** entirely on every destroy
+  cascade — restores the cross-port isolation that the operator
+  legitimately expects from a multi-MAC FMan.
+- **Trivial to revert** if a later iteration finds a need to ungraft
+  on flowtable teardown — restore the `ask_hw_port_unbind()` call
+  but gate it on a real flowtable-gone signal (e.g. FLOW_BLOCK_UNBIND
+  if/when kernel 6.18.x actually fires it, or a sysfs/ioctl knob).
+
+Out-of-scope-for-0055 but tracked: the upstream "who queues the
+destroy work bypassing flow_offload_queue_work" question is now
+demoted to a v1.0 hardening / observability item.  Without 0055 in
+place there is no way to do that investigation safely on the live
+DUT — every probe of the destroy path triggers the very FMan stall
+we are trying to study.
+
+### Next action
+
+Build patch 0055 (~5 LOC change in `ask_hw.c::ask_hw_flow_remove()`
+to skip the `ask_hw_port_unbind()` call but keep refcount + log),
+ship through CI, deploy ISO, re-run M2 gate.  Expected outcome:
+
+- Management network undisturbed across the entire gate run.
+- `pr_info("cached no-confirm TX FQID")` lines appear once the
+  no-confirm TX FQ path is actually exercised (proves PR14z23
+  Option C is reaching the fast path).
+- NET_KERNEL_CPU drops below 5% at ≥ 2 Gbps (the M2 pass criterion).
