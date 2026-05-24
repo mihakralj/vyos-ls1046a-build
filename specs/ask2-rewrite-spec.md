@@ -263,7 +263,9 @@ Note: ask_pcd_install() itself runs earlier, from the in-tree fman_memac.c shim
 inside the MAC-bringup path, BEFORE register_netdev() is called for that port.
 That is Path A — the PCD pipeline is live before the netdev exists.
         - assign xfrmdev_ops
-    6. Configure offline ports OP1/OP2 via fmd_host_cmd
+    6. (v1.3: no OH-port configuration — OH-port subsystem deferred to v1.1
+       for IPsec re-inject; see §13.2. v1.0 L3-forward uses inline
+       FORWARD_FQ_WITH_MANIP CC-key actions only.)
     7. Register nf_conntrack_event_notifier (priority NF_IP_PRI_LAST)
     8. Register netevent_notifier (NEIGH_UPDATE)
     9. Register switchdev_notifier
@@ -271,7 +273,44 @@ That is Path A — the PCD pipeline is live before the netdev exists.
    11. emit ASK_EVENT_READY on multicast group "events"
 ```
 
-No userspace helper. No XML parsing. No UMH. The kernel loads, probes, registers, done. Userspace tools attach over genl when they're ready.
+No userspace helper. No XML parsing. No UMH. The kernel loads, probes, registers, done. Userspace tools attach over YNL when they're ready.
+
+### 3.6 Operator UX (v1.3)
+
+ASK2 ships **no vendor daemon, no Python CLI, no FCI compatibility shim**. The operator-facing surface is the three mainline Linux tools every VyOS / Debian sysadmin already has on the box:
+
+| Tool | What the operator does | What it talks to |
+|---|---|---|
+| `nft` | Add/remove flowtables, install ALG-exclusion rules, query offload stats | `nf_flow_table` → `flow_block_cb` → `ask.ko` (`drivers/net/.../ask/ask_flow.c`) |
+| `ynl` | Dump live offloaded flows, read per-CC-tree stats, read MURAM occupancy, inspect KG schemes | YNL family `ask` (schema `Documentation/netlink/specs/ask.yaml`, generated client via `tools/net/ynl/ynl-gen-c.py`) |
+| `node_exporter --collector.textfile` | Scrape Prometheus metrics for Grafana | `/run/ask/metrics.prom` written by an in-kernel 5 s periodic from `ask_flow.c` (~50 LOC) |
+
+Three worked examples:
+
+```sh
+# 1. Promotion policy: keep FTP and SIP-ALG flows in software so connection
+#    tracking helpers stay live; everything else gets offloaded.
+nft add rule inet filter forward                                 \
+    ip protocol tcp tcp dport != { 21, 5060 }                    \
+    flow add @f
+
+# 2. Operator inspection: list every flow currently in 210 silicon.
+ynl --family ask --do dump-flows
+
+# 3. Prometheus textfile drop-in: node_exporter scrapes /run/ask/metrics.prom
+#    every 15 s; Grafana panels alert on `ask_muram_used_bytes` >= 90% of
+#    `ask_muram_total_bytes`, or on `ask_cc_miss_rate` exceeding threshold.
+```
+
+Bytes-back keepalive (used to keep `nf_conntrack` aware that offloaded flows are alive) is an in-kernel 1 Hz timer in `ask_flow.c` calling `nf_ct_refresh_acct()` — ~30 LOC, no userspace component.
+
+VPP handoff (offload→DPDK PMD promotion) is **deferred to v1.1** as a `Type=oneshot` systemd unit `ask-vpp-promote` (Trajectory B from the architecture review) — out of scope for v1.0.
+
+What this gets us:
+- Zero vendor daemon lifecycle to maintain (no `askd.service`, no `Restart=on-failure`, no log channel).
+- Zero ABI shim (no `libask_fci.so.1`).
+- Operator UX is one `apt install`-level command away — `nft` and `ynl` are already on the box; `node_exporter` is the standard Prometheus scraper.
+- Any future control-plane attribute is added once to `ask.yaml` and is immediately discoverable by `ynl --family ask --help`. No CLI wrapper to update.
 
 ---
 
