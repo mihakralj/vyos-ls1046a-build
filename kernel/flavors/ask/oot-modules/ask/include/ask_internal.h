@@ -660,43 +660,19 @@ int  ask_op_init(void);
 void ask_op_exit(void);
 
 /* ------------------------------------------------------------------------- */
-/* ask_hostcmd.c — wire-format encoders/decoders for FMan host commands       */
+/* ask flow-offload action flag bits                                          */
+/*                                                                            */
+/* These were originally the §12.4 wire-format action flag bits consumed by   */
+/* the ask_hostcmd encoder layer. v1.3 Phase 3 deleted that opcode/encoder    */
+/* layer (the Path A architecture talks to FMan via fman_pcd_cc_node_* and    */
+/* fman_pcd_manip_* directly, not via a wire-format command channel), but    */
+/* the flag-bit values themselves remain the ask.ko-internal ABI between     */
+/* ask_flow_offload (which parses nft / netfilter actions into a flag        */
+/* bitmask) and ask_hw (which consumes the bitmask to decide which          */
+/* PCD manip variants to arm). The numeric values are arbitrary — no on-     */
+/* wire compatibility requirement — but they are kept stable here so       */
+/* existing ask_flow_offload.c / ask_hw.c references compile unchanged.     */
 /* ------------------------------------------------------------------------- */
-int  ask_hostcmd_init(void);
-void ask_hostcmd_exit(void);
-
-/*
- * Wire-format opcodes (spec §12.2). Kept in this private header rather
- * than the UAPI because they are an internal implementation detail —
- * userspace only ever sees the genl_family in <uapi/linux/ask/ask.h>.
- */
-#define ASK_OP_GET_UCODE_VERSION    0x01
-#define ASK_OP_GET_CAPABILITIES     0x02
-#define ASK_OP_GET_MURAM_INFO       0x03
-#define ASK_OP_RESET_TABLES         0x04
-
-#define ASK_OP_FLOW_INSERT_V4_TCP   0x10
-#define ASK_OP_FLOW_INSERT_V4_UDP   0x11
-#define ASK_OP_FLOW_INSERT_V6_TCP   0x12
-#define ASK_OP_FLOW_INSERT_V6_UDP   0x13
-#define ASK_OP_FLOW_INSERT_V4_MCAST 0x14
-#define ASK_OP_FLOW_INSERT_V6_MCAST 0x15
-#define ASK_OP_FLOW_INSERT_BRIDGE   0x16
-#define ASK_OP_FLOW_REMOVE          0x18
-#define ASK_OP_FLOW_QUERY_STATS     0x19
-#define ASK_OP_FLOW_DUMP_STATS      0x1A
-
-#define ASK_OP_SA_INSERT_V4_ESP     0x20
-#define ASK_OP_SA_INSERT_V6_ESP     0x21
-#define ASK_OP_SA_REMOVE            0x28
-#define ASK_OP_SA_QUERY_STATS       0x29
-
-#define ASK_OP_OP_CONFIGURE         0x30
-#define ASK_OP_OP_FLUSH             0x31
-
-#define ASK_OP_POLICER_SET_EXC_RATE 0x40
-
-/* Action flag bits (spec §12.4) */
 #define ASK_ACT_TTL_DEC             (1U << 0)
 #define ASK_ACT_NAT_SRC             (1U << 1)
 #define ASK_ACT_NAT_DST             (1U << 2)
@@ -705,135 +681,6 @@ void ask_hostcmd_exit(void);
 #define ASK_ACT_VLAN_POP            (1U << 5)
 #define ASK_ACT_TO_CAAM             (1U << 6)
 #define ASK_ACT_TO_OP               (1U << 7)
-
-/* Frame sizes (spec §12.1, §12.3, §12.4) */
-#define ASK_HOSTCMD_HDR_LEN         4
-#define ASK_HOSTCMD_MAX_PAYLOAD     1020
-#define ASK_HOSTCMD_MAX_FRAME       (ASK_HOSTCMD_HDR_LEN + ASK_HOSTCMD_MAX_PAYLOAD)
-
-#define ASK_FLOW_KEY_V4_LEN         24
-#define ASK_FLOW_KEY_V6_LEN         48
-#define ASK_FLOW_ACTION_V4_LEN      40
-#define ASK_FLOW_ACTION_V6_LEN      48
-
-/* Typed structs the rest of ask.ko hands to the encoders (spec §12.6). */
-struct ask_hw_flow_key_v4 {
-__be32 src_ip;
-__be32 dst_ip;
-__be16 sport;
-__be16 dport;
-u32    iif;
-u16    vlan_id;
-};
-
-struct ask_hw_flow_key_v6 {
-u8     src_ip[16];
-u8     dst_ip[16];
-__be16 sport;
-__be16 dport;
-u32    iif;
-u16    vlan_id;
-};
-
-struct ask_hw_action_v4 {
-u32    flags;
-u32    oif;
-u8     rewrite_src_mac[6];
-u8     rewrite_dst_mac[6];
-__be32 rewrite_src_ip;
-__be32 rewrite_dst_ip;
-__be16 rewrite_sport;
-__be16 rewrite_dport;
-u16    vlan_id;
-};
-
-struct ask_hw_action_v6 {
-u32    flags;
-u32    oif;
-u8     rewrite_src_mac[6];
-u8     rewrite_dst_mac[6];
-u8     rewrite_src_ip[16];
-u8     rewrite_dst_ip[16];
-__be16 rewrite_sport;
-__be16 rewrite_dport;
-u16    vlan_id;
-};
-
-struct ask_hw_sa_v4 {
-__be32 spi;
-__be32 dst_ip;
-u32    caam_rx_fqid;
-u32    op_inject_fqid;
-u8     key_material[64];
-};
-
-struct ask_hw_policer {
-u8  port_id;
-u32 rate_bps;
-u32 burst_bytes;
-};
-
-/*
- * Encoders. Each encoder builds a host-command frame (header + payload)
- * into the caller-supplied buffer 'buf' of capacity 'buf_len' bytes,
- * returns the number of bytes written on success, or a negative errno
- * on overflow / bad input. None of these touch hardware; the hardware
- * I/O happens in fman_host_cmd() (added in PR2 placeholder, real
- * implementation in M2).
- *
- * The "out_buf" alternative variants allocate an sk_buff via
- * alloc_skb(GFP_KERNEL) for callers that want to push the frame
- * straight into the FMan I/O block.
- */
-int ask_hostcmd_enc_get_ucode_version(void *buf, size_t buf_len);
-
-int ask_hostcmd_enc_flow_insert_v4(u8 op,
-   const struct ask_hw_flow_key_v4 *key,
-   const struct ask_hw_action_v4 *act,
-   void *buf, size_t buf_len);
-
-int ask_hostcmd_enc_flow_insert_v6(u8 op,
-   const struct ask_hw_flow_key_v6 *key,
-   const struct ask_hw_action_v6 *act,
-   void *buf, size_t buf_len);
-
-int ask_hostcmd_enc_flow_remove(u32 hw_flow_id,
-void *buf, size_t buf_len);
-
-int ask_hostcmd_enc_flow_query_stats(u32 hw_flow_id,
-     void *buf, size_t buf_len);
-
-int ask_hostcmd_enc_sa_insert_v4_esp(const struct ask_hw_sa_v4 *sa,
-     void *buf, size_t buf_len);
-
-int ask_hostcmd_enc_sa_remove(u32 hw_sa_id, void *buf, size_t buf_len);
-
-int ask_hostcmd_enc_policer_set(const struct ask_hw_policer *p,
-void *buf, size_t buf_len);
-
-int ask_hostcmd_enc_op_flush(u8 port_id, void *buf, size_t buf_len);
-
-int ask_hostcmd_enc_reset_tables(void *buf, size_t buf_len);
-
-/*
- * Decoders. Parse a response frame (already stripped of any FMan
- * transport framing — these see the raw 4-byte header + payload).
- * Validate opcode echo + length, then unpack into the typed out
- * parameter. Return 0 on success, -EINVAL on malformed input,
- * -EPROTO on opcode mismatch.
- */
-int ask_hostcmd_dec_ucode_version(const void *buf, size_t buf_len,
-  u16 *family, u8 *major,
-  u8 *minor, u16 *patch);
-
-int ask_hostcmd_dec_flow_insert(const void *buf, size_t buf_len,
-u8 expected_op, u32 *hw_flow_id);
-
-int ask_hostcmd_dec_flow_query_stats(const void *buf, size_t buf_len,
-     u64 *bytes, u64 *packets);
-
-int ask_hostcmd_dec_sa_insert(const void *buf, size_t buf_len,
-      u8 expected_op, u32 *hw_sa_id);
 
 /* ------------------------------------------------------------------------- */
 /* ask_stats.c — u64_stats_sync wrappers                                      */

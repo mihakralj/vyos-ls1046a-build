@@ -31,21 +31,13 @@
 #define ASK_TRACE_QUIET 0
 #endif
 
-static inline void trace_ask_hostcmd_send(u8 op, u16 len, const void *payload)
-{
-	if (ASK_TRACE_QUIET)
-		return;
-	pr_debug("ask: hostcmd send op=0x%02x len=%u payload=%p\n",
-		 op, (unsigned int)len, payload);
-}
-
-static inline void trace_ask_hostcmd_recv(u8 op, u16 len, int rc,
-					  const void *payload)
-{
-	if (ASK_TRACE_QUIET)
-		return;
-	pr_debug("ask: hostcmd recv op=0x%02x len=%u rc=%d payload=%p\n",
-		 op, (unsigned int)len, rc, payload);
-}
+/*
+ * Trace event stubs intentionally empty. The §12 host-command opcode
+ * layer (ask_hostcmd.c) that owned trace_ask_hostcmd_send/recv was
+ * deleted in v1.3 Phase 3 — the Path A architecture bypasses the
+ * wire-format encoder layer entirely and calls fman_pcd_cc_node_*
+ * directly. New trace_ask_* helpers will be added back here once the
+ * in-tree TRACE_EVENT() machinery (post-0048 migration) lands.
+ */
 
 #endif /* _ASK_TRACE_H */

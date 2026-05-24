@@ -28,17 +28,13 @@ static int __init ask_init(void)
 	if (rc)
 		goto err_hw;
 
-	rc = ask_stats_init();
-	if (rc)
-		goto err_stats;
+rc = ask_stats_init();
+if (rc)
+goto err_stats;
 
-	rc = ask_hostcmd_init();
-	if (rc)
-		goto err_hostcmd;
-
-	rc = ask_flow_init();
-	if (rc)
-		goto err_flow;
+rc = ask_flow_init();
+if (rc)
+goto err_flow;
 
 	rc = ask_neigh_init();
 	if (rc)
@@ -92,9 +88,7 @@ err_bridge:
 err_neigh:
 	ask_flow_exit();
 err_flow:
-	ask_hostcmd_exit();
-err_hostcmd:
-	ask_stats_exit();
+ask_stats_exit();
 err_stats:
 	ask_hw_exit();
 err_hw:
@@ -112,11 +106,10 @@ static void __exit ask_exit(void)
 	ask_op_exit();
 	ask_bridge_exit();
 	ask_neigh_exit();
-	ask_flow_exit();
-	ask_hostcmd_exit();
-	ask_stats_exit();
-	ask_hw_exit();
-	ask_pr_info("unloaded\n");
+ask_flow_exit();
+ask_stats_exit();
+ask_hw_exit();
+ask_pr_info("unloaded\n");
 }
 
 module_init(ask_init);
