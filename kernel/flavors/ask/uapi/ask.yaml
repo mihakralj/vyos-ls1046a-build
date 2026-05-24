@@ -1,0 +1,444 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# YNL netlink-family schema for ASK2 (NXP LS1046A FMan 210 HW offload).
+#
+# Authoritative source: specs/ask2-rewrite-spec.md §7 "The genl_family
+# protocol" and §3.5 "Operator UX". This file is the entire userspace
+# control-plane surface of ASK2 v1.3 — there is no askd daemon, no
+# ask-cli Python tool, no libask_fci.so.1 ABI shim. Operators talk to
+# ask.ko directly via the standard YNL tool:
+#
+#     ynl --family ask --do get-info
+#     ynl --family ask --dump dump-flows
+#     ynl --family ask --do get-muram
+#
+# VyOS op_mode wraps these `ynl` calls from Python (no daemon in the
+# path). C consumers are generated with:
+#
+#     tools/net/ynl/ynl-gen-c.py \
+#         --mode user \
+#         --spec Documentation/netlink/specs/ask.yaml
+#
+# Place this file at Documentation/netlink/specs/ask.yaml when the
+# ask.ko series is upstreamed. Until then it lives in this repo at
+# kernel/flavors/ask/uapi/ask.yaml and is copied into the kernel tree
+# by bin/ci-stage-kernel.sh (FLAVOR=ask) during the build.
+#
+# Schema authoring rules: see Documentation/userspace-api/netlink/
+# specs.rst — this file follows the genetlink-legacy style so it works
+# with stock 6.6+ ynl tooling without needing the post-6.10 attribute
+# nesting extensions.
+
+name: ask
+protocol: genetlink-legacy
+uapi-header: linux/ask/ask.h
+doc: |
+  ASK2 — kernel-side hardware-offload driver for the NXP LS1046A FMan
+  with proprietary 210 microcode. Drives FMan PCD KeyGen schemes,
+  Coarse Classifier match trees, MANIP templates (including the
+  FORWARD_FQ_WITH_MANIP CC-action atom of RM §8.7.3.4), and the CAAM
+  Job Ring QI sharing surface.
+
+  Flow and SA inserts do not have CMD entries here: they enter via
+  nf_flow_table (nft 'flow add @f') and xfrm packet-mode offload
+  (ip xfrm add ... offload packet) respectively, which route to ask.ko
+  via flow_block_cb and xfrmdev_ops. The CMDs below are query +
+  administrative-flush + policer-configuration only.
+
+definitions:
+  -
+    type: const
+    name: family-name
+    value: ask
+  -
+    type: const
+    name: version
+    value: 1
+  -
+    type: enum
+    name: flow-l4-proto
+    doc: IANA L4 protocol numbers used as ASK_FLOW_ATTR_L4_PROTO values.
+    entries:
+      - icmp
+      - tcp
+      - udp
+      - esp
+      - sctp
+  -
+    type: enum
+    name: capability
+    doc: Capability bits returned by ASK_CMD_GET_INFO.
+    entries:
+      - ipv4-forward
+      - ipv6-forward
+      - nat44
+      - nat66
+      - bridge-offload
+      - xfrm-aes-cbc-hmac-sha256
+      - forward-fq-with-manip
+      - path-a-pre-register
+  -
+    type: struct
+    name: ucode-version
+    doc: |
+      Microcode family/version from the QEF blob magic (offset 4 of the
+      SPI-mtd3 firmware), as read by ask_hw_ucode_get_version() from the
+      device-tree fsl,firmware property. No opcode-dispatch probe.
+    members:
+      -
+        name: family
+        type: u16
+        doc: 210 for stock NXP QEF; vendor-defined for future custom ucode.
+      -
+        name: major
+        type: u8
+      -
+        name: minor
+        type: u8
+      -
+        name: patch
+        type: u8
+
+attribute-sets:
+  -
+    name: info
+    name-prefix: ask-info-
+    attributes:
+      -
+        name: driver-version
+        type: string
+        doc: kernel module SCM revision, e.g. "ask20-aef5a11".
+      -
+        name: ucode
+        type: binary
+        struct: ucode-version
+      -
+        name: capabilities
+        type: u64
+        doc: bitmask of `capability` enum values supported by this build.
+      -
+        name: fman-count
+        type: u8
+        doc: number of FMan controllers under ask.ko management (LS1046A=1).
+  -
+    name: muram
+    name-prefix: ask-muram-
+    doc: |
+      Per-FMan MURAM budget snapshot. Returned by ASK_CMD_GET_MURAM as a
+      list (one entry per FMan, indexed by fman-id 0..fman-count-1).
+    attributes:
+      -
+        name: fman-id
+        type: u8
+      -
+        name: total-bytes
+        type: u32
+        doc: 384 KiB on LS1046A, minus FIFO/internal-context reservations.
+      -
+        name: used-bytes
+        type: u32
+      -
+        name: kg-schemes-bytes
+        type: u32
+      -
+        name: cc-trees-bytes
+        type: u32
+      -
+        name: manip-templates-bytes
+        type: u32
+      -
+        name: policer-profiles-bytes
+        type: u32
+      -
+        name: oh-port-ad-bytes
+        type: u32
+        doc: zero in v1.3 (OH-port deleted; see specs §13.2). Reserved for v1.1 IPsec re-inject.
+  -
+    name: flow
+    name-prefix: ask-flow-attr-
+    doc: |
+      Per-flow attributes. Returned by ASK_CMD_DUMP_FLOWS (dump) and
+      ASK_CMD_GET_FLOW (single). Insertion does NOT happen via genl —
+      flows enter via nf_flow_table + flow_block_cb.
+    attributes:
+      -
+        name: id
+        type: u64
+        doc: opaque kernel-assigned cookie, stable for the flow's lifetime.
+      -
+        name: l3-proto
+        type: u16
+        doc: ETH_P_IP (0x0800) or ETH_P_IPV6 (0x86dd).
+      -
+        name: l4-proto
+        type: u8
+        enum: flow-l4-proto
+      -
+        name: src-ip
+        type: binary
+        doc: 4 bytes for IPv4, 16 for IPv6.
+      -
+        name: dst-ip
+        type: binary
+      -
+        name: sport
+        type: u16
+        byte-order: big-endian
+      -
+        name: dport
+        type: u16
+        byte-order: big-endian
+      -
+        name: iif
+        type: u32
+        doc: ingress ifindex.
+      -
+        name: oif
+        type: u32
+        doc: egress ifindex.
+      -
+        name: packets
+        type: u64
+      -
+        name: bytes
+        type: u64
+      -
+        name: last-seen-ns
+        type: u64
+        doc: CLOCK_MONOTONIC ns of most recent hardware stats update.
+      -
+        name: hw-flow-id
+        type: u32
+        doc: |
+          Opaque cookie packing the CC-node + key-index that backs this
+          flow in silicon. Operators should treat as opaque; debug-only.
+  -
+    name: sa
+    name-prefix: ask-sa-attr-
+    doc: |
+      Per-xfrm-state offload attributes. Returned by ASK_CMD_DUMP_SAS.
+      SA insertion happens via xfrmdev_ops, not via genl.
+    attributes:
+      -
+        name: spi
+        type: u32
+        byte-order: big-endian
+      -
+        name: src-ip
+        type: binary
+      -
+        name: dst-ip
+        type: binary
+      -
+        name: aead
+        type: string
+        doc: kernel-crypto AEAD name, e.g. "authenc(hmac(sha256),cbc(aes))".
+      -
+        name: mode
+        type: u8
+        doc: 0=transport, 1=tunnel.
+      -
+        name: dev-ifindex
+        type: u32
+      -
+        name: packets
+        type: u64
+      -
+        name: bytes
+        type: u64
+  -
+    name: event
+    name-prefix: ask-event-attr-
+    doc: |
+      Asynchronous event payload broadcast on the events / flows / sas
+      multicast groups.
+    attributes:
+      -
+        name: type
+        type: u32
+        doc: |
+          0=READY (module loaded, PCD installed),
+          1=FLOW_ADDED, 2=FLOW_REMOVED, 3=FLOW_EVICTED,
+          4=SA_ADDED, 5=SA_EXPIRED,
+          6=MURAM_PRESSURE (used >= 90% total),
+          7=UCODE_ERROR.
+      -
+        name: flow-id
+        type: u64
+      -
+        name: sa-spi
+        type: u32
+        byte-order: big-endian
+      -
+        name: muram-fman-id
+        type: u8
+      -
+        name: muram-used-bytes
+        type: u32
+  -
+    name: policer
+    name-prefix: ask-policer-
+    doc: |
+      Slow-path exception-rate-limiter configuration (PCD plcr; see
+      specs §13.3 `fman_pcd_plcr.c`). Two-rate three-color (RFC 4115).
+    attributes:
+      -
+        name: cir-bps
+        type: u32
+        doc: committed information rate in bits per second.
+      -
+        name: cbs-bytes
+        type: u32
+        doc: committed burst size in bytes.
+      -
+        name: eir-bps
+        type: u32
+        doc: excess information rate.
+      -
+        name: ebs-bytes
+        type: u32
+        doc: excess burst size.
+
+operations:
+  list:
+    -
+      name: get-info
+      doc: |
+        Return driver version, microcode version, and capability bitmap.
+        No arguments. Always returns a single message.
+      attribute-set: info
+      flags: [ admin-perm ]
+      do:
+        reply:
+          attributes:
+            - driver-version
+            - ucode
+            - capabilities
+            - fman-count
+    -
+      name: get-muram
+      doc: |
+        Return a list of per-FMan MURAM budget snapshots, one nested
+        attribute per FMan. Single-message reply on LS1046A (fman-count=1).
+      attribute-set: muram
+      flags: [ admin-perm ]
+      do:
+        reply:
+          attributes:
+            - fman-id
+            - total-bytes
+            - used-bytes
+            - kg-schemes-bytes
+            - cc-trees-bytes
+            - manip-templates-bytes
+            - policer-profiles-bytes
+            - oh-port-ad-bytes
+    -
+      name: dump-flows
+      doc: |
+        Dump all flows currently in 210 silicon. NLM_F_DUMP-style
+        pagination; one message per flow.
+      attribute-set: flow
+      flags: [ admin-perm ]
+      dump:
+        reply:
+          attributes:
+            - id
+            - l3-proto
+            - l4-proto
+            - src-ip
+            - dst-ip
+            - sport
+            - dport
+            - iif
+            - oif
+            - packets
+            - bytes
+            - last-seen-ns
+            - hw-flow-id
+    -
+      name: get-flow
+      doc: |
+        Query a single flow by `id`. Returns -ENOENT if the flow has
+        been evicted between dump and get.
+      attribute-set: flow
+      flags: [ admin-perm ]
+      do:
+        request:
+          attributes:
+            - id
+        reply:
+          attributes:
+            - id
+            - l3-proto
+            - l4-proto
+            - src-ip
+            - dst-ip
+            - sport
+            - dport
+            - iif
+            - oif
+            - packets
+            - bytes
+            - last-seen-ns
+            - hw-flow-id
+    -
+      name: dump-sas
+      doc: Dump all xfrm SAs currently offloaded to CAAM + 210.
+      attribute-set: sa
+      flags: [ admin-perm ]
+      dump:
+        reply:
+          attributes:
+            - spi
+            - src-ip
+            - dst-ip
+            - aead
+            - mode
+            - dev-ifindex
+            - packets
+            - bytes
+    -
+      name: flush-flows
+      doc: |
+        Administratively remove all offloaded flows (debug/recovery).
+        Userspace flowtable rules remain; flows re-promote organically
+        as traffic resumes. Does NOT flush SAs.
+      attribute-set: flow
+      flags: [ admin-perm ]
+      do: {}
+    -
+      name: flush-sas
+      doc: Administratively remove all offloaded SAs (debug/recovery).
+      attribute-set: sa
+      flags: [ admin-perm ]
+      do: {}
+    -
+      name: set-policer
+      doc: |
+        Configure the slow-path exception-rate policer profile. One
+        global profile in v1.0; per-flow policer profiles are a v1.1
+        capability gated by `ASK_CAP_POLICER_PER_FLOW`.
+      attribute-set: policer
+      flags: [ admin-perm ]
+      do:
+        request:
+          attributes:
+            - cir-bps
+            - cbs-bytes
+            - eir-bps
+            - ebs-bytes
+
+mcast-groups:
+  list:
+    -
+      name: events
+      doc: |
+        Lifecycle and MURAM-pressure events. Subscribe with:
+            ynl --family ask --mcast events
+    -
+      name: flows
+      doc: Per-flow add/remove/evict events. Higher volume — subscribe with care under churn.
+    -
+      name: sas
+      doc: Per-SA add/expire events.
