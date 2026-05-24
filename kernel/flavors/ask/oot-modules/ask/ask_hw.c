@@ -55,6 +55,98 @@
  * since the FMan driver's private fman.h is not exported).
  */
 
+/*
+ * ─────────────────────────────────────────────────────────────────────
+ * Phase 4.9a transitional stubs — graft API archived by v1.3 plan §2.1.
+ *
+ * Patches 0042-fman-pcd-kg-graft-cc.patch and
+ * 0043-fman-pcd-kg-graft-mode-nia.patch were moved to
+ * kernel/flavors/ask/patches/archive-grafted-2026-05-24/ as part of
+ * the Path A course-correction. The exported symbols
+ * fman_pcd_kg_graft_cc() and fman_pcd_kg_ungraft_cc() no longer exist
+ * in the kernel's <linux/fsl/fman_pcd.h>.
+ *
+ * The full Path A replacement (per plans/ASK2-COURSE-CORRECTION.md
+ * §4.3) is to delete ask_hw_port_bind(), ask_hw_port_unbind(), and
+ * ask_hw_pcd_build_chain() entirely and replace them with an
+ * ask_pcd_install() routine driven from patch 0044's
+ * fman_pcd_register_pre_netdev_hook(). That deletion is ~600 LOC
+ * across this file and a coordinated rewrite of ask_flow_offload.c
+ * REPLACE/DESTROY handlers — too large for a single-commit landing.
+ *
+ * Until that rewrite lands, provide no-op stubs so ask.ko continues
+ * to compile against the post-archive kernel. The runtime semantics
+ * become: graft is never actually wired (KGSE_CCBS is never written),
+ * the kernel's default hash dispatch stays intact, and any caller
+ * that depended on hardware acceleration silently falls back to the
+ * kernel slow path. ASK_CMD_GET_INFO and the genl surface continue
+ * to function; only the silicon-classify fast path is disabled.
+ *
+ * Refs: plans/ASK2-COURSE-CORRECTION.md §2.4 Phase 4.3-4.5 (full
+ * deletion); §4.9a (this stub interim).
+ * ─────────────────────────────────────────────────────────────────────
+ */
+static inline int fman_pcd_kg_graft_cc(struct fman_pcd *pcd, u8 scheme_id,
+				       struct fman_pcd_cc_tree *cc_tree)
+{
+	(void)pcd; (void)scheme_id; (void)cc_tree;
+	/* Phase 4.9a: graft API archived; Path A pre-netdev hook replacement pending. */
+	return -EOPNOTSUPP;
+}
+
+static inline int fman_pcd_kg_ungraft_cc(struct fman_pcd *pcd, u8 scheme_id)
+{
+(void)pcd; (void)scheme_id;
+/* Phase 4.9a: graft API archived; Path A pre-netdev hook replacement pending. */
+return 0;
+}
+
+/*
+ * Phase 4.9a transitional stubs (continued) — the OH-port L2-rewrite
+ * MANIP encoders (RMV_ETHERNET / INSRT_GENERIC) were ARCHIVED with
+ * patches 0033/0037 because the v1.3 Path A FORWARD_FQ_WITH_MANIP
+ * CC-key action carries the new L2 header inline on the TX FQID
+ * encoding (dpaa_eth's TX path re-paints the MAC via the standard
+ * PHYLINK MAC-update primitive). The full Phase 4.10 rewrite of
+ * ask_flow_offload.c REPLACE/DESTROY + the Phase 4.9 deletion of
+ * ask_hw_flow_insert_v4_tcp / ask_hw_pcd_bringup_shared_manips will
+ * remove every remaining reference to these symbols. Until then,
+ * provide the enum + struct member + function decl shims needed to
+ * keep ask_hw.c compiling against the post-archive kernel headers.
+ *
+ * The dead-code paths that use these shims (ask_hw_pcd_bringup_shared_manips
+ * line ~668, ask_hw_port_bind line ~980 fman_pcd_kg_lookup_port_scheme
+ * call, ask_hw_flow_insert_v4_tcp line ~1341 insrt_generic block) all
+ * fail at runtime with -ENODEV / -EOPNOTSUPP, gracefully degrading to
+ * the kernel SW fastpath. ASK_CMD_GET_INFO and the genl surface
+ * continue to function; only the silicon-classify fast path is
+ * disabled until Phase 4.9/4.10 lands.
+ */
+static inline int fman_pcd_kg_lookup_port_scheme(struct fman_pcd *pcd, u8 port_id,
+        u8 *out_sid, u32 *out_base_fqid)
+{
+(void)pcd; (void)port_id;
+if (out_sid)       *out_sid = 0xff;
+if (out_base_fqid) *out_base_fqid = 0;
+/* Phase 4.9a: graft API archived; Path A pre-netdev hook owns scheme allocation. */
+return -EOPNOTSUPP;
+}
+
+/*
+ * Phase 4.9a: the two functions below — ask_hw_pcd_bringup_shared_manips()
+ * and ask_hw_flow_insert_v4_tcp() — depend on MANIP_RMV_ETHERNET and
+ * MANIP_INSRT_GENERIC which were ARCHIVED with patches 0033/0037 per
+ * the v1.3 Path A plan. Phase 4.9 will delete both functions entirely
+ * (along with ask_hw_port_bind/unbind/build_chain) and replace them
+ * with ask_pcd_install() driven from the patch 0044 pre-netdev hook.
+ *
+ * Until the full Phase 4.9 deletion lands, gate them out with #if 0
+ * so the file compiles. Runtime behaviour: the bring-up call below in
+ * ask_hw_pcd_bringup() is wrapped in (void)(...); the stubs at the
+ * call sites return -ENODEV so ask_flow_offload.c falls back to SW.
+ */
+#define ASK_HW_PHASE4_DEAD_CODE 0
+
 /* QEF blob structural constants (see PR13 comment, preserved verbatim). */
 #define ASK_QEF_MAGIC          0x51454601u   /* 'Q' 'E' 'F' 0x01 */
 #define ASK_QEF_MAGIC_OFFSET   4
@@ -615,6 +707,19 @@ err_unwind:
  */
 static int ask_hw_pcd_bringup_shared_manips(struct ask_hw_pcd *h)
 {
+        /*
+         * Phase 4.9a: archived MANIP_RMV_ETHERNET / MANIP_INSRT_GENERIC
+         * encoders. Leave both shared MANIPs NULL — ask_hw_flow_insert_v4_tcp()
+         * gates on `!h->m_v4_rmv || !h->m_v4_ipv4` and returns -ENODEV,
+         * so ask_flow_offload.c falls back to SW for every flow until
+         * Phase 4.9/4.10 lands the Path A pre-netdev hook replacement.
+         */
+        h->m_v4_rmv = NULL;
+        h->m_v4_ipv4 = NULL;
+        ask_pr_info("hw: Phase 4.9a: shared MANIPs disabled (v1.3 plan §4.9 deletion pending)\n");
+        return -EOPNOTSUPP;
+
+#if ASK_HW_PHASE4_DEAD_CODE
         struct fman_pcd_manip_params mp;
         int rc;
 
@@ -645,6 +750,7 @@ static int ask_hw_pcd_bringup_shared_manips(struct ask_hw_pcd *h)
 
         ask_pr_info("hw: PR14x shared MANIPs ready (RMV_ETHERNET + IPv4 TTL--/cksum)\n");
         return 0;
+#endif /* ASK_HW_PHASE4_DEAD_CODE */
 }
 
 /*
@@ -1244,6 +1350,21 @@ static int ask_hw_flow_insert_v4_tcp(struct ask_hw_pcd *h,
                                      enum ask_hw_dir dir,
                                      u32 *out_hw_id)
 {
+        /*
+         * Phase 4.9a: this entire function depends on the archived
+         * MANIP_RMV_ETHERNET / MANIP_INSRT_GENERIC encoders (patches
+         * 0033/0037). The v1.3 plan §4.9/§4.10 deletes it and replaces
+         * the flow-insert path with a much smaller routine driven by
+         * ask_pcd_install() from the patch 0044 pre-netdev hook.
+         * Until that lands, refuse all HW inserts so ask_flow_offload.c
+         * falls back to the kernel SW fastpath.
+         */
+        (void)h; (void)key; (void)oif; (void)action_flags; (void)dir;
+        if (out_hw_id)
+                *out_hw_id = 0;
+        return -ENODEV;
+
+#if ASK_HW_PHASE4_DEAD_CODE
         struct fman_pcd_cc_key_entry entry;
         struct fman_pcd_action *act;
         struct fman_pcd_manip_params insrt_params;
@@ -1434,6 +1555,7 @@ err_free_insrt:
         if (ck.m_insrt)
                 fman_pcd_manip_destroy(ck.m_insrt);
         return rc;
+#endif /* ASK_HW_PHASE4_DEAD_CODE */
 }
 
 int ask_hw_flow_insert(const struct ask_flow_key *key,
