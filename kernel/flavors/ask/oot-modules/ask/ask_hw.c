@@ -89,8 +89,19 @@
 #include <net/net_namespace.h>
 #include <linux/fsl/fman_pcd.h>
 #include <linux/fsl/dpaa_flow_offload.h>
+#include <linux/etherdevice.h>          /* is_zero_ether_addr */
+#include <linux/if_ether.h>             /* ETH_P_IP, ETH_ALEN */
+#include <linux/in.h>                   /* IPPROTO_TCP */
 
 #include "include/ask_internal.h"
+
+/*
+ * Forward declarations of the dpaa-eth helpers exported by patches
+ * 0030 (dpaa-export-fman-port-id) and 0031 (dpaa-export-tx-fqid).
+ * The dpaa private header is not OOT-friendly so we re-declare here.
+ */
+int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id);
+int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
 
 /*
  * QEF blob structural constants (PR13). The microcode version
@@ -832,35 +843,273 @@ void ask_priv_unpack_hw_flow_id(u32 hw_flow_id,
 }
 EXPORT_SYMBOL_GPL(ask_priv_unpack_hw_flow_id);
 
+/*
+ * Build per-flow MANIP chain (v1.3 Path A, plan §4.2):
+ *
+ *   1. m_rmv   = MANIP_RMV_ETHERNET  (strip 14-byte ingress L2)
+ *   2. m_insrt = MANIP_INSRT_GENERIC (push 14-byte egress L2:
+ *                next_hop_mac + egress_mac + ETH_P_IP)
+ *   3. m_ipv4  = MANIP_FIELD_UPDATE_IPV4_FORWARD (TTL-- + cksum
+ *                recompute)
+ *   4. chain   = fman_pcd_manip_chain_create([m_rmv, m_insrt, m_ipv4])
+ *
+ * The chain handle is consumed by a CC-key action atom of type
+ * FMAN_PCD_ACTION_MANIPULATE { .manip = chain, .next_fqid = tx_fqid }.
+ *
+ * On any failure all partially-constructed manips are destroyed and
+ * an errno is propagated to the caller (ask_flow_offload.c REPLACE
+ * handler). The ASK_HW path NEVER leaks MURAM on the error path —
+ * caller falls back to SW-only.
+ */
+static int ask_hw_build_manip_chain(struct ask_hw_pcd *h,
+                                    const struct ask_flow_key *key,
+                                    struct fman_pcd_manip **out_rmv,
+                                    struct fman_pcd_manip **out_insrt,
+                                    struct fman_pcd_manip **out_ipv4,
+                                    struct fman_pcd_manip **out_chain)
+{
+        struct fman_pcd_manip_params p;
+        struct fman_pcd_manip *m_rmv = NULL, *m_insrt = NULL;
+        struct fman_pcd_manip *m_ipv4 = NULL, *chain = NULL;
+        struct fman_pcd_manip *src[3];
+        __be16 etype = htons(ETH_P_IP);
+        int rc;
+
+        /* 1. RMV_ETHERNET — strip 14-byte ingress L2 header. */
+        memset(&p, 0, sizeof(p));
+        p.type = FMAN_PCD_MANIP_RMV_ETHERNET;
+        m_rmv = fman_pcd_manip_create(h->pcd, &p);
+        if (IS_ERR_OR_NULL(m_rmv)) {
+                rc = m_rmv ? PTR_ERR(m_rmv) : -ENOMEM;
+                m_rmv = NULL;
+                goto err;
+        }
+
+        /* 2. INSRT_GENERIC — push new 14-byte L2 header. */
+        memset(&p, 0, sizeof(p));
+        p.type = FMAN_PCD_MANIP_INSRT_GENERIC;
+        p.insrt_generic.size = 14;
+        memcpy(&p.insrt_generic.hdr[0], key->next_hop_mac, ETH_ALEN);
+        memcpy(&p.insrt_generic.hdr[6], key->egress_mac,   ETH_ALEN);
+        memcpy(&p.insrt_generic.hdr[12], &etype, 2);
+        m_insrt = fman_pcd_manip_create(h->pcd, &p);
+        if (IS_ERR_OR_NULL(m_insrt)) {
+                rc = m_insrt ? PTR_ERR(m_insrt) : -ENOMEM;
+                m_insrt = NULL;
+                goto err;
+        }
+
+        /* 3. FIELD_UPDATE_IPV4_FORWARD — TTL-- + IPv4 cksum recompute. */
+        memset(&p, 0, sizeof(p));
+        p.type = FMAN_PCD_MANIP_FIELD_UPDATE_IPV4_FORWARD;
+        p.ipv4_forward.recompute_cksum = true;
+        m_ipv4 = fman_pcd_manip_create(h->pcd, &p);
+        if (IS_ERR_OR_NULL(m_ipv4)) {
+                rc = m_ipv4 ? PTR_ERR(m_ipv4) : -ENOMEM;
+                m_ipv4 = NULL;
+                goto err;
+        }
+
+        /* 4. Concatenate into one HMCT. */
+        src[0] = m_rmv;
+        src[1] = m_insrt;
+        src[2] = m_ipv4;
+        chain = fman_pcd_manip_chain_create(h->pcd, src, 3);
+        if (IS_ERR_OR_NULL(chain)) {
+                rc = chain ? PTR_ERR(chain) : -ENOMEM;
+                chain = NULL;
+                goto err;
+        }
+
+        *out_rmv   = m_rmv;
+        *out_insrt = m_insrt;
+        *out_ipv4  = m_ipv4;
+        *out_chain = chain;
+        return 0;
+
+err:
+        if (m_ipv4)  fman_pcd_manip_destroy(m_ipv4);
+        if (m_insrt) fman_pcd_manip_destroy(m_insrt);
+        if (m_rmv)   fman_pcd_manip_destroy(m_rmv);
+        return rc;
+}
+
+/*
+ * Build the 16-byte exact-match CC key matching the per-port KG
+ * scheme's 5-extract recipe [SIP:4][DIP:4][SPI:4=0][SP:2][DP:2].
+ *
+ * Bytes 8..11 (SPI slot) are silicon-zero for non-IPSec TCP/UDP, so
+ * we leave them at 0 with mask 0xff — non-IPSec frames match, IPSec
+ * frames implicitly miss (v1.0 scope).
+ */
+static void ask_hw_build_cc_key_v4(const struct ask_flow_key *key,
+                                   struct fman_pcd_cc_key_entry *entry)
+{
+        memset(entry, 0, sizeof(*entry));
+
+        /* Bytes 0..3 : src IPv4 */
+        memcpy(&entry->key[0], &key->src_ip[0], 4);
+        /* Bytes 4..7 : dst IPv4 */
+        memcpy(&entry->key[4], &key->dst_ip[0], 4);
+        /* Bytes 8..11: SPI = 0 (non-IPSec); already zeroed. */
+        /* Bytes 12..13: L4 src port */
+        memcpy(&entry->key[12], &key->sport, 2);
+        /* Bytes 14..15: L4 dst port */
+        memcpy(&entry->key[14], &key->dport, 2);
+
+        /* Exact-match mask across all 16 emitted key bytes. */
+        memset(&entry->mask[0], 0xff, ASK_HW_V4_KEY_WIDTH);
+}
+
 int ask_hw_flow_insert(const struct ask_flow_key *key,
                        u32 oif, u32 action_flags,
                        enum ask_hw_dir dir,
                        u32 *out_hw_id)
 {
-        /*
-         * Phase 4.10 will replace this stub with the per-flow
-         * MANIP-chain + cc_node_add_key path. Until then, return
-         * -EOPNOTSUPP so ask_flow_offload.c falls back to the SW
-         * fastpath for every flow. Module loads and probes pass
-         * cleanly; only the silicon-classify fast path is dormant.
-         */
-        (void)key; (void)oif; (void)action_flags; (void)dir;
+        struct ask_hw_pcd *h = ask_hw_pcd_get();
+        struct net_device *dev_iif = NULL, *dev_oif = NULL;
+        struct fman_pcd_cc_node *cc_node;
+        struct fman_pcd_manip *m_rmv = NULL, *m_insrt = NULL;
+        struct fman_pcd_manip *m_ipv4 = NULL, *chain = NULL;
+        struct fman_pcd_cc_key_entry entry;
+        struct ask_hw_flow_cookie ck;
+        u32 tx_fqid = 0, cookie = 0;
+        u8 hwport_id;
+        int rc, slot;
+
+        (void)action_flags; (void)dir;
+
         if (out_hw_id)
                 *out_hw_id = 0;
-        return -EOPNOTSUPP;
+
+        /* No HW backing → SW-only fallback. */
+        if (!h)
+                return -ENODEV;
+
+        /* v1.0 scope: IPv4 TCP only. UDP v6 land in M3. */
+        if (key->l3_proto != ASK_FLOW_L3_IPV4 ||
+            key->l4_proto != IPPROTO_TCP)
+                return -EOPNOTSUPP;
+
+        /* Neigh not yet resolved → caller retries after netevent. */
+        if (is_zero_ether_addr(key->next_hop_mac) ||
+            is_zero_ether_addr(key->egress_mac))
+                return -EAGAIN;
+
+        /* Resolve ingress kernel ifindex → FMan BMI hwport_id. */
+        dev_iif = dev_get_by_index(&init_net, key->iif);
+        if (!dev_iif) {
+                rc = -ENODEV;
+                goto out;
+        }
+        rc = dpaa_get_fman_port_id(dev_iif, &hwport_id);
+        if (rc)
+                goto out;
+
+        /* Per-port CC node installed by the pre-netdev hook. */
+        cc_node = ask_hw_pcd_cc_v4_tcp_for_port(hwport_id);
+        if (!cc_node) {
+                rc = -ENODEV;
+                goto out;
+        }
+
+        /* Resolve egress ifindex → DPAA TX FQID. Use queue 0
+         * (single TX path; M3 will add per-CPU TX queue selection).
+         */
+        dev_oif = dev_get_by_index(&init_net, oif);
+        if (!dev_oif) {
+                rc = -ENODEV;
+                goto out;
+        }
+        rc = dpaa_get_tx_fqid(dev_oif, 0, &tx_fqid);
+        if (rc)
+                goto out;
+
+        /* Build the per-flow 3-MANIP chain (rmv + insrt + ipv4). */
+        rc = ask_hw_build_manip_chain(h, key, &m_rmv, &m_insrt,
+                                      &m_ipv4, &chain);
+        if (rc)
+                goto out;
+
+        /* Build the CC key and install it. */
+        ask_hw_build_cc_key_v4(key, &entry);
+        entry.action.type = FMAN_PCD_ACTION_MANIPULATE;
+        entry.action.manipulate.manip     = chain;
+        entry.action.manipulate.next_fqid = tx_fqid;
+
+        slot = fman_pcd_cc_node_add_key(cc_node, &entry);
+        if (slot < 0) {
+                rc = slot;
+                ask_pr_warn("hw: flow_insert: cc_node_add_key failed: %d\n", rc);
+                goto out_chain;
+        }
+
+        /* Stash cookie state for the matching remove. */
+        memset(&ck, 0, sizeof(ck));
+        ck.cc_node      = cc_node;
+        ck.key_idx      = (u16)slot;
+        ck.m_rmv        = m_rmv;
+        ck.m_insrt      = m_insrt;
+        ck.m_ipv4       = m_ipv4;
+        ck.manip_chain  = chain;
+        ck.sink_ifindex = oif;
+        ck.sink_fqid    = tx_fqid;
+
+        cookie = ask_hw_cookie_alloc(h, &ck);
+        if (cookie == 0) {
+                rc = -ENOMEM;
+                ask_pr_warn("hw: flow_insert: cookie_alloc failed\n");
+                fman_pcd_cc_node_remove_key(cc_node, (u16)slot);
+                goto out_chain;
+        }
+
+        *out_hw_id = cookie;
+        rc = 0;
+
+        ask_pr_dbg("hw: flow_insert: port 0x%02x slot=%d tx_fqid=0x%x cookie=0x%x\n",
+                   hwport_id, slot, tx_fqid, cookie);
+        goto out;
+
+out_chain:
+        if (chain)   fman_pcd_manip_chain_destroy(chain);
+        if (m_ipv4)  fman_pcd_manip_destroy(m_ipv4);
+        if (m_insrt) fman_pcd_manip_destroy(m_insrt);
+        if (m_rmv)   fman_pcd_manip_destroy(m_rmv);
+out:
+        if (dev_oif) dev_put(dev_oif);
+        if (dev_iif) dev_put(dev_iif);
+        return rc;
 }
 EXPORT_SYMBOL_GPL(ask_hw_flow_insert);
 
 int ask_hw_flow_remove(u32 hw_flow_id)
 {
-        /*
-         * Phase 4.10 will fill this in (cookie_lookup →
-         * cc_node_remove_key → chain_destroy → m_insrt destroy →
-         * cookie_free). Stub now: cookie 0 is the SW-only sentinel
-         * (success); any non-zero cookie can't exist yet because
-         * ask_hw_flow_insert returns -EOPNOTSUPP, so just no-op.
-         */
-        (void)hw_flow_id;
+        struct ask_hw_pcd *h = ask_hw_pcd_get();
+        struct ask_hw_flow_cookie *ck;
+
+        if (!h || hw_flow_id == 0)
+                return 0;
+
+        ck = ask_hw_cookie_lookup(h, hw_flow_id);
+        if (!ck) {
+                /* Already torn down; treat as success (idempotent). */
+                return 0;
+        }
+
+        if (ck->cc_node)
+                fman_pcd_cc_node_remove_key(ck->cc_node, ck->key_idx);
+        if (ck->manip_chain)
+                fman_pcd_manip_chain_destroy(ck->manip_chain);
+        if (ck->m_ipv4)
+                fman_pcd_manip_destroy(ck->m_ipv4);
+        if (ck->m_insrt)
+                fman_pcd_manip_destroy(ck->m_insrt);
+        if (ck->m_rmv)
+                fman_pcd_manip_destroy(ck->m_rmv);
+
+        ask_hw_cookie_free(h, hw_flow_id);
+
+        ask_pr_dbg("hw: flow_remove: cookie=0x%x torn down\n", hw_flow_id);
         return 0;
 }
 EXPORT_SYMBOL_GPL(ask_hw_flow_remove);
