@@ -124,26 +124,31 @@ Exit gate: `ask.ko` loads, `ask_main.ko` init logs unchanged, no symbol named `*
 
 Goal: implement the **architectural win** of the review — replace the OH-port two-stage classify→re-inject pipeline with a **single CC-key action that carries an inline MANIP chain reference**. This is the real PR15.
 
-- [ ] **4.1** Add **`FORWARD_FQ_WITH_MANIP`** action type to `fman_pcd_cc.c` and `include/linux/fsl/fman_pcd.h`:
+- [ ] **4.1** ~~Add new `FORWARD_FQ_WITH_MANIP` action enum~~ — **OBSOLETED 2026-05-24**. Investigation of the landed patch stack found that **patch `0016-fman-pcd-cc-manipulate-arm.patch` already encodes RM §8.7.3.4 semantics into the existing `FMAN_PCD_ACTION_MANIPULATE` arm**: `cc_encode_ad()` writes `nia = RESULT_CF | NADEN`, `fqid = action.manipulate.next_fqid`, `res = manip->hmtd_off`. Silicon walker order AD → HMTD → HMCT → enqueue to `AD.fqid` IS exactly `FORWARD_FQ_WITH_MANIP`. No new enum needed; no patch `0005` to author. **Action for this step:** restore the three archived patches that supply the chain primitive + L2-rewrite MANIP encoders that the existing arm consumes:
+  - **`archive-grafted-2026-05-24/0036-fman-pcd-manip-chain.patch`** — `fman_pcd_manip_chain_create([m1, m2, m3], N)` returns ONE manip handle whose HMCT is the memcpy concatenation of the N source HMCTs (HMCD_LAST cleared on intermediates, set on final). Restore as `kernel/flavors/ask/patches/0057-fman-pcd-manip-chain.patch` (next free slot after 0056). EXPORT_SYMBOL_GPL'd `_create` + `_destroy`. ~370 LOC, no OH-port references — restore as-is.
+  - **`archive-grafted-2026-05-24/0033-fman-pcd-manip-v1.2-oh-port-primitives-RMV-INSRT-only.patch`** — split per Phase 2 §2.3: keep the `MANIP_RMV_ETHERNET` + `MANIP_INSRT_GENERIC` + `MANIP_FIELD_UPDATE_IPV4_FORWARD` enum extensions and their HMCT byte-encoders; drop any OH-port AD-chain wiring. New patch slot `0058-fman-pcd-manip-l2-rewrite-encoders.patch`.
+  - **`archive-grafted-2026-05-24/0037-fman-pcd-manip-hmct-used-v12-encoders-RMV-INSRT-only.patch`** — same PARTIAL split: keep the HMCT bytes-used accounting for the three new encoders (required by `chain_create`'s memcpy arithmetic); drop OH-AD references. New slot `0059-fman-pcd-manip-hmct-bytes-used.patch`.
+  - Net kernel-side LOC: ~600 added across three patches (all surgical restores from `archive-grafted-2026-05-24/`), no new enum, no new public-ABI surface beyond what was already audited at archive time.
+- [ ] **4.2** Refactor `ask_flow_offload.c` REPLACE handler. Per-flow construction:
   ```c
-  enum fman_pcd_action_type {
-      FMAN_PCD_ACTION_FORWARD_FQ,
-      FMAN_PCD_ACTION_DROP,
-      FMAN_PCD_ACTION_MANIPULATE,
-      FMAN_PCD_ACTION_FORWARD_FQ_WITH_MANIP,   /* new — RM §8.7.3.4 */
-  };
-
-  struct fman_pcd_action {
-      enum fman_pcd_action_type type;
-      union {
-          struct { u32 fqid; } forward_fq;
-          struct { u32 fqid; struct fman_pcd_manip *chain[4]; u8 n_manips; } forward_fq_with_manip;
-          /* ... */
-      };
-  };
+  /* Build three short-lived MANIPs for this flow. */
+  m_rmv  = fman_pcd_manip_create(pcd, &(struct fman_pcd_manip_params){
+      .type = FMAN_PCD_MANIP_RMV_ETHERNET });
+  m_insrt = fman_pcd_manip_create(pcd, &(struct fman_pcd_manip_params){
+      .type = FMAN_PCD_MANIP_INSRT_GENERIC,
+      .insrt_generic = { .offset = 0, .size = 14, .data = new_eth_hdr } });
+  m_ipv4 = fman_pcd_manip_create(pcd, &(struct fman_pcd_manip_params){
+      .type = FMAN_PCD_MANIP_FIELD_UPDATE_IPV4_FORWARD });
+  /* Concatenate into one HMCT. */
+  chain = fman_pcd_manip_chain_create(pcd,
+      (struct fman_pcd_manip *[]){ m_rmv, m_insrt, m_ipv4 }, 3);
+  /* Single action atom carries fqid + manip handle. */
+  action = (struct fman_pcd_action){
+      .type = FMAN_PCD_ACTION_MANIPULATE,
+      .manipulate = { .manip = chain, .next_fqid = egress_tx_fqid } };
+  hw_id = fman_pcd_cc_node_add_key(cc_v4_tcp, key, mask, &action);
   ```
-  Encoder: set `e_FM_PCD_CC_KEY_FLAG_DO_MANIP_BEFORE_NE | DO_NE_FORWARD_TO_TX_PORT` in the MURAM AD entry, write the manip-chain handle pointer at the documented HMCT offset (cross-ref SDK `fm_cc.c::FmPcdCcKeySetActionParams` for byte-perfect encoding). ~150 LOC.
-- [ ] **4.2** Refactor `ask_flow_offload.c` REPLACE handler to build an `action.forward_fq_with_manip = { fqid = egress_tx_fqid, chain = [m_rmv_eth, m_insrt_l2, m_ipv4_fwd], n_manips = 3 }` and call `fman_pcd_cc_node_add_key(cc_v4_tcp, key, mask, &action)` directly. DESTROY handler calls `fman_pcd_cc_node_remove_key(cc_v4_tcp, hw_id)`.
+  DESTROY handler calls `fman_pcd_cc_node_remove_key(cc_v4_tcp, hw_id)` then `fman_pcd_manip_chain_destroy(chain)` then per-source `fman_pcd_manip_destroy()` for `m_rmv`/`m_insrt`/`m_ipv4`. (`chain_create` memcpies bytes; source manips are independently destroyable per Qdrant memo on PR14x.)
 - [ ] **4.3** Replace the in-`ask.ko` graft logic (`ask_hw_port_bind`, `ask_hw_pcd_build_chain`) with **`ask_pcd_install()`** that runs from the 0044 pre-`register_netdev` hook:
   - Claims KG schemes 3 + 4 (writes `KGSE_MODE.NIA = FM_CTL`, `KGSE_CCBS = group_table_idx`, `KGSE_EKFC = DEFAULT_HASH_KEY_EXTRACT_FIELDS`, `KGSE_FQB = base_fqid_for_miss`).
   - Creates empty `cc_v4_tcp_in` and `cc_v4_udp_in` CC trees with `miss_action = FORWARD_FQ(kernel_rx_default_fqid)` and `num_keys = 0`.
