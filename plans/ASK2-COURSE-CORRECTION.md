@@ -40,26 +40,26 @@ Five phases. Each phase is independently testable. Phases 1–2 are **documentat
 
 Goal: make the documentation consistent with where Path A actually lands us, so subsequent code deletions are uncontroversial.
 
-- [ ] **1.1** Bump `specs/ask2-rewrite-spec.md` v1.2 → **v1.3**. Rewrite the v1.3 status block to summarize: *graft model abandoned, OH-port subsystem scoped out of v1.0 L3-forward path, §12 wire-format layer deleted, `askd`/`ask-cli`/`libask_fci.so.1`/`ask-load` removed from scope.*
-- [ ] **1.2** Amend spec **§3.2** as the review directs:
+- [x] **1.1** Bump `specs/ask2-rewrite-spec.md` v1.2 → **v1.3**. Rewrite the v1.3 status block to summarize: *graft model abandoned, OH-port subsystem scoped out of v1.0 L3-forward path, §12 wire-format layer deleted, `askd`/`ask-cli`/`libask_fci.so.1`/`ask-load` removed from scope.*
+- [x] **1.2** Amend spec **§3.2** as the review directs:
   - Replace *"The kernel netdev retains full ownership of the RX path; ASK2 attaches a CC tree downstream of the mainline-allocated KG scheme."*
   - With *"ASK2 owns the FMan PCD chain (KG schemes 3+4, CC trees, MANIP chains) from boot. The kernel netdev sits downstream of the PCD chain — packets reach eth3/eth4 RX FQs only when no offloaded CC key matches. The PCD chain is installed once at boot and never torn down at runtime; per-flow keys are added/removed within the pre-built CC tree."*
-- [ ] **1.3** Delete spec **§12** in full (the host-command opcode protocol chapter). Preserve a ~1-page *§2.x "FMan 210 microcode hardware note"* that captures only the surviving facts: package version gate, `OP_GET_UCODE_VERSION` lives in the QEF blob magic at SPI mtd3, no opcode-dispatch microcode exists or is planned.
-- [ ] **1.4** Delete spec **§3.4** ("The 210 host-command interface (in kernel)").
-- [ ] **1.5** Update spec **§13.2** module decomposition:
+- [x] **1.3** Delete spec **§12** in full (the host-command opcode protocol chapter). Preserve a ~1-page *§2.x "FMan 210 microcode hardware note"* that captures only the surviving facts: package version gate, `OP_GET_UCODE_VERSION` lives in the QEF blob magic at SPI mtd3, no opcode-dispatch microcode exists or is planned.
+- [x] **1.4** Delete spec **§3.4** ("The 210 host-command interface (in kernel)").
+- [x] **1.5** Update spec **§13.2** module decomposition:
   - Remove `fman_pcd_oh.c` (~800 LOC) from the v1.0 budget. Note it stays as **deferred to v1.1 for IPsec re-inject only**.
   - Reduce `fman_pcd_manip.c` from 1600 → 1200 LOC (drop the OH-AD-chain encoder path; keep the three new MANIP tags but invoke them inline from CC-key action atoms).
   - Add new module `fman_pcd_cc.c` action type `FORWARD_FQ_WITH_MANIP` (~150 LOC).
-- [ ] **1.6** Update spec **§15.1 LOC table** to v1.3 numbers from the review (`ask.ko` 3700→2800, patch 0004 10 000→5 500, askd 4000→0, ask-cli 800→0, tests 2700→1600, docs 1500→1000, **new** patch 0005 0→150).
-- [ ] **1.7** Update spec **§19 "What we don't do"** to list, *explicitly*: no `/dev/cdx_ctrl` (incl. no symlink), no `libfci.so.1` ABI, no `/etc/cdx_*.xml`, no `/etc/config/fastforward` toggle, no `askd` daemon in v1.0, no `ask-cli` Python tool (use `ynl --family ask`), no `ask-load` early-init binary.
-- [ ] **1.8** Update spec **§11.1** perf-gate narrative to reflect that the M2 row is now achievable via **inline MANIP on CC key action** (the silicon primitive RM §8.7.3.4 + SDK `e_FM_PCD_CC_KEY_FLAG_DO_MANIP_BEFORE_NE`), not via OH-port indirection.
-- [ ] **1.9** Update **`AGENTS.md`** ASK2 component-LOC list to match the v1.3 numbers. Remove the `/dev/cdx_ctrl`, `libfci.so.1`, `/etc/cdx_*.xml`, `/etc/config/fastforward` "ABI compatibility surfaces" sentence — it directly contradicts spec §19 and is the single most misleading line in the file.
-- [ ] **1.10** Update **`plans/ASK2-IMPLEMENTATION.md`** tracker:
+- [x] **1.6** Update spec **§15.1 LOC table** to v1.3 numbers from the review (`ask.ko` 3700→2800, patch 0004 10 000→5 500, askd 4000→0, ask-cli 800→0, tests 2700→1600, docs 1500→1000, **new** patch 0005 0→150).
+- [x] **1.7** Update spec **§19 "What we don't do"** to list, *explicitly*: no `/dev/cdx_ctrl` (incl. no symlink), no `libfci.so.1` ABI, no `/etc/cdx_*.xml`, no `/etc/config/fastforward` toggle, no `askd` daemon in v1.0, no `ask-cli` Python tool (use `ynl --family ask`), no `ask-load` early-init binary.
+- [x] **1.8** Update spec **§11.1** perf-gate narrative to reflect that the M2 row is now achievable via **inline MANIP on CC key action** (the silicon primitive RM §8.7.3.4 + SDK `e_FM_PCD_CC_KEY_FLAG_DO_MANIP_BEFORE_NE`), not via OH-port indirection.
+- [x] **1.9** Update **`AGENTS.md`** ASK2 component-LOC list to match the v1.3 numbers. Remove the `/dev/cdx_ctrl`, `libfci.so.1`, `/etc/cdx_*.xml`, `/etc/config/fastforward` "ABI compatibility surfaces" sentence — it directly contradicts spec §19 and is the single most misleading line in the file.
+- [x] **1.10** Update **`plans/ASK2-IMPLEMENTATION.md`** tracker:
   - Mark **PR14h, PR14i, PR14j, PR14k, PR14l, PR14n, PR14u, PR14x** rows as **deferred to v1.1 (OH-port re-inject for IPsec only)**.
   - Mark **PR14z13, PR14z14, PR14z15, PR14z18** as **archived (graft model abandoned, Path A supersedes)**.
   - Mark **PR14y, PR14z2, PR14z9, PR14z10, PR14z11** as **archived (deferred-insert / cookie-recovery / dual-ifindex bookkeeping all subsumed by Path A's at-boot install)**.
   - Add new rows **PR15 (Phase 3)**, **PR16 (Phase 4)**, **PR17 (Phase 5)** per this document.
-- [ ] **1.11** Author a single commit `docs(ask2): v1.3 spec reconciliation — Path A + delete §12 + drop OH-port from v1.0` that touches only `specs/ask2-rewrite-spec.md`, `AGENTS.md`, `plans/ASK2-IMPLEMENTATION.md`, and adds this `plans/ASK2-COURSE-CORRECTION.md`. Do **not** touch any code in this commit.
+- [x] **1.11** Author a single commit `docs(ask2): v1.3 spec reconciliation — Path A + delete §12 + drop OH-port from v1.0` that touches only `specs/ask2-rewrite-spec.md`, `AGENTS.md`, `plans/ASK2-IMPLEMENTATION.md`, and adds this `plans/ASK2-COURSE-CORRECTION.md`. Do **not** touch any code in this commit.
 
 Exit gate: `git log --stat -1` shows only doc files; `patch-health.sh` clean (no code touched); spec/AGENTS.md grep for "graft", "OH-port v1.0", "askd", "cdx_ctrl", "libfci.so.1" returns no stale references.
 
@@ -67,7 +67,7 @@ Exit gate: `git log --stat -1` shows only doc files; `patch-health.sh` clean (no
 
 Goal: every patch in `kernel/flavors/ask/patches/` is classified as **keep / archive / supersede**, and the archive moves are landed *before* any code is deleted, so a bisect across the boundary is possible.
 
-- [ ] **2.1** For each patch `0026` … `0053`, write its disposition into the patch's leading comment block AND into `kernel/flavors/ask/patches/README.md`:
+- [x] **2.1** For each patch `0026` … `0053`, write its disposition into the patch's leading comment block AND into `kernel/flavors/ask/patches/README.md`:
 
   | Patch | Subject | Disposition (v1.3) |
   |---|---|---|
@@ -99,10 +99,10 @@ Goal: every patch in `kernel/flavors/ask/patches/` is classified as **keep / arc
   | 0051 | fman-keygen-revert-pr14z15-nia-rmw | **KEEP** (revert of dead 0043) |
   | 0052 | uapi-ask-spdx-syscall-note | **KEEP** |
   | 0053 | dpaa-noconfirm-offload-tx-fq | **KEEP** — TX-conf fast-path elision needed for M2 perf |
-- [ ] **2.2** Move all **ARCHIVE** patches to `kernel/flavors/ask/patches/archived/`. Update `bin/ci-setup-kernel.sh` `ASK_PATCH_COUNT` accordingly. Do **not** delete archived patches — they remain in tree for one release cycle as a bisect anchor.
-- [ ] **2.3** Split the **PARTIAL** patches (0033, 0037) into two patches each: one with the keepable MANIP tag encoders, one with the OH-AD-specific wiring (the OH-AD half goes to `archived/`).
-- [ ] **2.4** Run `bash scripts/patch-health.sh --source release --flavor ask` and confirm `Pass=N Fail=0` with the reduced patch set.
-- [ ] **2.5** Single commit: `build(ask): archive OH-port + graft patches per v1.3 spec`.
+- [x] **2.2** Move all **ARCHIVE** patches to `kernel/flavors/ask/patches/archived/`. Update `bin/ci-setup-kernel.sh` `ASK_PATCH_COUNT` accordingly. Do **not** delete archived patches — they remain in tree for one release cycle as a bisect anchor.
+- [x] **2.3** Split the **PARTIAL** patches (0033, 0037) into two patches each: one with the keepable MANIP tag encoders, one with the OH-AD-specific wiring (the OH-AD half goes to `archived/`).
+- [x] **2.4** Run `bash scripts/patch-health.sh --source release --flavor ask` and confirm `Pass=N Fail=0` with the reduced patch set.
+- [x] **2.5** Single commit: `build(ask): archive OH-port + graft patches per v1.3 spec`.
 
 Exit gate: archived patches do not apply to the source tree at build time; `patch-health.sh` green; reduced `ASK_PATCH_COUNT` reflected in CI script; ISO still builds (CI smoke run).
 
@@ -110,13 +110,13 @@ Exit gate: archived patches do not apply to the source tree at build time; `patc
 
 Goal: delete the dead host-command opcode layer from `oot-modules/ask/` (or, equivalently, from the in-tree `drivers/net/.../ask/` after the 0047/0048 migration). This is **pure deletion** with no functional change.
 
-- [ ] **3.1** Delete `ask_hostcmd.c` and `tests/ask_hostcmd_test.c`. Strip `#include "ask_hostcmd.h"` and any `ask_hw_ucode_send_*` / `fmd_host_cmd_*` calls from `ask_hw.c`, `ask_main.c`, `ask_flow.c`.
-- [ ] **3.2** Re-implement the public surface used elsewhere in `ask.ko` (`ask_hw_flow_insert_v4_tcp`, `ask_hw_flow_remove`, `ask_hw_ucode_get_version`) so the function names and signatures stay, but the bodies call **directly** into `fman_pcd_cc_node_add_key()` / `fman_pcd_cc_node_remove_key()` (and read the QEF magic from the device tree for `_get_version`). No wire format ever encoded.
-- [ ] **3.3** Update `Kbuild` to drop `ask_hostcmd.o`. Update the in-tree `Makefile` (if 0047 has landed) to match.
-- [ ] **3.4** Verify with `nm ask.ko | grep -c hostcmd` returning 0 and `objdump -d ask.ko | grep -c fmd_host_cmd` returning 0.
-- [ ] **3.5** Delete patch `0003-fman-host-command-api.patch` from the patch stack (it lives under `kernel/common/patches/` if it was promoted out of flavor scope; otherwise under `kernel/flavors/ask/patches/`). Move to `archived/`.
-- [ ] **3.6** `patch-health.sh` green. CI ISO build green. On-silicon: `dmesg | grep ask` should show no regression in module init banner.
-- [ ] **3.7** Commit: `ask(v1.3): delete §12 host-command opcode layer (dead code)`.
+- [x] **3.1** Delete `ask_hostcmd.c` and `tests/ask_hostcmd_test.c`. Strip `#include "ask_hostcmd.h"` and any `ask_hw_ucode_send_*` / `fmd_host_cmd_*` calls from `ask_hw.c`, `ask_main.c`, `ask_flow.c`.
+- [x] **3.2** Re-implement the public surface used elsewhere in `ask.ko` (`ask_hw_flow_insert_v4_tcp`, `ask_hw_flow_remove`, `ask_hw_ucode_get_version`) so the function names and signatures stay, but the bodies call **directly** into `fman_pcd_cc_node_add_key()` / `fman_pcd_cc_node_remove_key()` (and read the QEF magic from the device tree for `_get_version`). No wire format ever encoded.
+- [x] **3.3** Update `Kbuild` to drop `ask_hostcmd.o`. Update the in-tree `Makefile` (if 0047 has landed) to match.
+- [x] **3.4** Verify with `nm ask.ko | grep -c hostcmd` returning 0 and `objdump -d ask.ko | grep -c fmd_host_cmd` returning 0.
+- [x] **3.5** Delete patch `0003-fman-host-command-api.patch` from the patch stack (it lives under `kernel/common/patches/` if it was promoted out of flavor scope; otherwise under `kernel/flavors/ask/patches/`). Move to `archived/`.
+- [x] **3.6** `patch-health.sh` green. CI ISO build green. On-silicon: `dmesg | grep ask` should show no regression in module init banner.
+- [x] **3.7** Commit: `ask(v1.3): delete §12 host-command opcode layer (dead code)`.
 
 Exit gate: `ask.ko` loads, `ask_main.ko` init logs unchanged, no symbol named `*hostcmd*` or `*fmd_host_cmd*` survives, **and** the M2 perf measurement is unchanged from pre-Phase-3 (this phase is supposed to be a pure no-op behaviourally).
 
@@ -124,12 +124,12 @@ Exit gate: `ask.ko` loads, `ask_main.ko` init logs unchanged, no symbol named `*
 
 Goal: implement the **architectural win** of the review — replace the OH-port two-stage classify→re-inject pipeline with a **single CC-key action that carries an inline MANIP chain reference**. This is the real PR15.
 
-- [ ] **4.1** ~~Add new `FORWARD_FQ_WITH_MANIP` action enum~~ — **OBSOLETED 2026-05-24**. Investigation of the landed patch stack found that **patch `0016-fman-pcd-cc-manipulate-arm.patch` already encodes RM §8.7.3.4 semantics into the existing `FMAN_PCD_ACTION_MANIPULATE` arm**: `cc_encode_ad()` writes `nia = RESULT_CF | NADEN`, `fqid = action.manipulate.next_fqid`, `res = manip->hmtd_off`. Silicon walker order AD → HMTD → HMCT → enqueue to `AD.fqid` IS exactly `FORWARD_FQ_WITH_MANIP`. No new enum needed; no patch `0005` to author. **Action for this step:** restore the three archived patches that supply the chain primitive + L2-rewrite MANIP encoders that the existing arm consumes:
+- [x] **4.1** ~~Add new `FORWARD_FQ_WITH_MANIP` action enum~~ — **OBSOLETED 2026-05-24**. Investigation of the landed patch stack found that **patch `0016-fman-pcd-cc-manipulate-arm.patch` already encodes RM §8.7.3.4 semantics into the existing `FMAN_PCD_ACTION_MANIPULATE` arm**: `cc_encode_ad()` writes `nia = RESULT_CF | NADEN`, `fqid = action.manipulate.next_fqid`, `res = manip->hmtd_off`. Silicon walker order AD → HMTD → HMCT → enqueue to `AD.fqid` IS exactly `FORWARD_FQ_WITH_MANIP`. No new enum needed; no patch `0005` to author. **Action for this step:** restore the three archived patches that supply the chain primitive + L2-rewrite MANIP encoders that the existing arm consumes:
   - **`archive-grafted-2026-05-24/0036-fman-pcd-manip-chain.patch`** — `fman_pcd_manip_chain_create([m1, m2, m3], N)` returns ONE manip handle whose HMCT is the memcpy concatenation of the N source HMCTs (HMCD_LAST cleared on intermediates, set on final). Restore as `kernel/flavors/ask/patches/0057-fman-pcd-manip-chain.patch` (next free slot after 0056). EXPORT_SYMBOL_GPL'd `_create` + `_destroy`. ~370 LOC, no OH-port references — restore as-is.
   - **`archive-grafted-2026-05-24/0033-fman-pcd-manip-v1.2-oh-port-primitives-RMV-INSRT-only.patch`** — split per Phase 2 §2.3: keep the `MANIP_RMV_ETHERNET` + `MANIP_INSRT_GENERIC` + `MANIP_FIELD_UPDATE_IPV4_FORWARD` enum extensions and their HMCT byte-encoders; drop any OH-port AD-chain wiring. New patch slot `0058-fman-pcd-manip-l2-rewrite-encoders.patch`.
   - **`archive-grafted-2026-05-24/0037-fman-pcd-manip-hmct-used-v12-encoders-RMV-INSRT-only.patch`** — same PARTIAL split: keep the HMCT bytes-used accounting for the three new encoders (required by `chain_create`'s memcpy arithmetic); drop OH-AD references. New slot `0059-fman-pcd-manip-hmct-bytes-used.patch`.
   - Net kernel-side LOC: ~600 added across three patches (all surgical restores from `archive-grafted-2026-05-24/`), no new enum, no new public-ABI surface beyond what was already audited at archive time.
-- [ ] **4.2** Refactor `ask_flow_offload.c` REPLACE handler. Per-flow construction:
+- [x] **4.2** Refactor `ask_flow_offload.c` REPLACE handler. Per-flow construction:
   ```c
   /* Build three short-lived MANIPs for this flow. */
   m_rmv  = fman_pcd_manip_create(pcd, &(struct fman_pcd_manip_params){
@@ -149,23 +149,23 @@ Goal: implement the **architectural win** of the review — replace the OH-port 
   hw_id = fman_pcd_cc_node_add_key(cc_v4_tcp, key, mask, &action);
   ```
   DESTROY handler calls `fman_pcd_cc_node_remove_key(cc_v4_tcp, hw_id)` then `fman_pcd_manip_chain_destroy(chain)` then per-source `fman_pcd_manip_destroy()` for `m_rmv`/`m_insrt`/`m_ipv4`. (`chain_create` memcpies bytes; source manips are independently destroyable per Qdrant memo on PR14x.)
-- [ ] **4.3** Replace the in-`ask.ko` graft logic (`ask_hw_port_bind`, `ask_hw_pcd_build_chain`) with **`ask_pcd_install()`** that runs from the 0044 pre-`register_netdev` hook:
+- [x] **4.3** Replace the in-`ask.ko` graft logic (`ask_hw_port_bind`, `ask_hw_pcd_build_chain`) with **`ask_pcd_install()`** that runs from the 0044 pre-`register_netdev` hook:
   - Claims KG schemes 3 + 4 (writes `KGSE_MODE.NIA = FM_CTL`, `KGSE_CCBS = group_table_idx`, `KGSE_EKFC = DEFAULT_HASH_KEY_EXTRACT_FIELDS`, `KGSE_FQB = base_fqid_for_miss`).
   - Creates empty `cc_v4_tcp_in` and `cc_v4_udp_in` CC trees with `miss_action = FORWARD_FQ(kernel_rx_default_fqid)` and `num_keys = 0`.
   - Returns `0` from the hook — `dpaa_eth_probe` proceeds to `register_netdev` with the PCD chain already live.
   - The hook fires **before** `dpaa_eth` writes `KGSE_MODE = BMI_DIRECT_ENQUEUE`, so there is no race.
-- [ ] **4.4** Delete `ask_hw_port_bind`, `ask_hw_port_unbind`, `ask_hw_pcd_build_chain` from `ask_hw.c`. Net deletion ~600 LOC.
-- [ ] **4.5** `ask_flow_offload.c` ADD/DELETE callbacks become near-trivial: build the action, call add_key / remove_key, store the returned cookie in the xarray, return. No graft, no ungraft, no deferred-insert queue, no cookie-recovery hack.
-- [ ] **4.6** Delete `ask_neigh.c`'s deferred-resolve logic and queue — once Path A pre-builds the CC tree, neigh resolution happens **before** flow add (kernel's `nf_flow_offload_route` has already populated the next-hop MAC into the `flow_offload_tuple`). Net ~200 LOC saved.
-- [ ] **4.7** Build, `patch-health.sh` green, CI ISO green.
-- [ ] **4.8** **Hardware bring-up**:
+- [x] **4.4** Delete `ask_hw_port_bind`, `ask_hw_port_unbind`, `ask_hw_pcd_build_chain` from `ask_hw.c`. Net deletion ~600 LOC.
+- [x] **4.5** `ask_flow_offload.c` ADD/DELETE callbacks become near-trivial: build the action, call add_key / remove_key, store the returned cookie in the xarray, return. No graft, no ungraft, no deferred-insert queue, no cookie-recovery hack.
+- [x] **4.6** Delete `ask_neigh.c`'s deferred-resolve logic and queue — once Path A pre-builds the CC tree, neigh resolution happens **before** flow add (kernel's `nf_flow_offload_route` has already populated the next-hop MAC into the `flow_offload_tuple`). Net ~200 LOC saved.
+- [x] **4.7** Build, `patch-health.sh` green, CI ISO green.
+- [x] **4.8** **Hardware bring-up**:
   1. Flash ISO to mono DUT (192.168.1.190).
   2. `dmesg | grep -E 'ask:|fman_pcd:'` — verify `ask: pcd install: schemes 3+4 claimed, cc_v4_tcp_in/udp_in trees ready (0 keys), miss=FORWARD_FQ(kernel)` appears **before** any `dpaa_eth ... eth3` register banner.
   3. Idle measurement: `bin/ask-pcd-regdump.py --history 10` confirms KGSE_SPC counts on schemes 3/4 (silicon walking empty trees), no MURAM allocation churn.
   4. `bash bin/m2-dut-prep.sh && bash bin/verify-ask-flow-offload.sh`.
   5. **M2 perf gate target**: ≥ 2 Gbps throughput AND ≤ 5% kernel-net CPU at iperf3 -P 8 30s baseline. **Stretch target** (the real review claim): ≥ 7 Gbps + < 5% CPU.
-- [ ] **4.9** If M2 gate fails: capture full regdump + dmesg + ethtool -S, file as a follow-up bug, **do not roll back Phase 4**. Path A is structurally correct regardless of M2 numbers; if the silicon primitive `FORWARD_FQ_WITH_MANIP` doesn't behave as RM §8.7.3.4 documents, fall back to OH-port indirection from `archived/` patches as a **v1.1 follow-up** (Risk #1 in the review).
-- [ ] **4.10** Commit: `ask(v1.3): Path A boot-time PCD install + inline FORWARD_FQ_WITH_MANIP action`.
+- [x] **4.9** If M2 gate fails: capture full regdump + dmesg + ethtool -S, file as a follow-up bug, **do not roll back Phase 4**. Path A is structurally correct regardless of M2 numbers; if the silicon primitive `FORWARD_FQ_WITH_MANIP` doesn't behave as RM §8.7.3.4 documents, fall back to OH-port indirection from `archived/` patches as a **v1.1 follow-up** (Risk #1 in the review).
+- [x] **4.10** Commit: `ask(v1.3): Path A boot-time PCD install + inline FORWARD_FQ_WITH_MANIP action`.
 
 Exit gate: ISO boots, `ask.ko` installs PCD chain before `register_netdev`, M2 gate passes OR a single clear regression note is filed; the graft-related dmesg lines (`PR14z13 graft active`, `port 0xNN dir N → scheme_id=…`) are **gone**.
 
