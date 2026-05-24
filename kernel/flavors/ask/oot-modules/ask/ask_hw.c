@@ -1165,15 +1165,54 @@ static bool mac_is_zero(const u8 *m)
 }
 
 /*
- * ask_hw_resolve_oif_tx_fqid() — look up the peer netdev's per-queue
- * TX FQID via the in-tree export from patch 0031.  Returns the FQID
- * the OH-port AD chain's trailing FORWARD_FQ should aim at.  -ENODEV
- * propagates from non-DPAA netdevs so the caller knows to SW-fallback.
+ * PR14z23: per-OIF no-confirm TX FQ cache.
+ *
+ * ASK_HW_OFFLOAD_TX_CACHE_SZ is sized to fit all five DPAA netdevs
+ * (eth0..eth4) on the Mono Gateway DK with margin; on hash collision
+ * (a previously cached OIF re-hashes here with a different ifindex)
+ * we fall back to allocating a fresh FQ for this OIF without
+ * overwriting the prior entry, keeping correctness over performance.
+ */
+#define ASK_HW_OFFLOAD_TX_CACHE_SZ 16
+
+struct ask_hw_offload_tx_cache_entry {
+        u32 oif;        /* ifindex; 0 = empty */
+        u32 fqid;
+};
+
+static struct ask_hw_offload_tx_cache_entry
+ask_hw_offload_tx_cache[ASK_HW_OFFLOAD_TX_CACHE_SZ];
+
+/*
+ * ask_hw_resolve_oif_tx_fqid() — resolve the OIF to a no-confirm
+ * TX FQID for the silicon HIT path.  Allocates (and caches) a
+ * dedicated FQ_TYPE_TX_NO_CONFIRM FQ on first use via the in-tree
+ * export dpaa_alloc_offload_tx_fq() from patch 0053.
+ *
+ * The CC node's per-key FORWARD_FQ action will point at the
+ * returned FQID; matched frames are TX'd on the wire by FMan
+ * without a per-frame TX-confirm FD enqueue, eliminating the
+ * dpaa_eth_napi_poll() per-frame work on the HIT path.
+ *
+ * Returns -ENODEV / -ENOMEM / -ENOENT from the underlying
+ * allocator; the caller treats any error as SW-fallback (the same
+ * contract as the old dpaa_get_tx_fqid()-based resolver).
  */
 static int ask_hw_resolve_oif_tx_fqid(u32 oif, u32 *fqid)
 {
+        struct ask_hw_offload_tx_cache_entry *slot;
         struct net_device *dev;
+        u32 cached;
         int rc;
+
+        slot = &ask_hw_offload_tx_cache[oif % ASK_HW_OFFLOAD_TX_CACHE_SZ];
+        if (slot->oif == oif) {
+                cached = READ_ONCE(slot->fqid);
+                if (cached) {
+                        *fqid = cached;
+                        return 0;
+                }
+        }
 
         rcu_read_lock();
         dev = dev_get_by_index_rcu(&init_net, oif);
@@ -1181,8 +1220,21 @@ static int ask_hw_resolve_oif_tx_fqid(u32 oif, u32 *fqid)
                 rcu_read_unlock();
                 return -ENODEV;
         }
-        rc = dpaa_get_tx_fqid(dev, /*queue=*/0, fqid);
+        rc = dpaa_alloc_offload_tx_fq(dev, fqid);
         rcu_read_unlock();
+        if (rc)
+                return rc;
+
+        if (slot->oif == 0 || slot->oif == oif) {
+                slot->oif = oif;
+                WRITE_ONCE(slot->fqid, *fqid);
+                pr_info("ask: hw: cached no-confirm TX FQID 0x%x for oif=%u\n",
+                        *fqid, oif);
+        } else {
+                pr_warn("ask: hw: offload TX cache collision at slot %u "
+                        "(cached oif=%u, new oif=%u) — allocating without caching\n",
+                        oif % ASK_HW_OFFLOAD_TX_CACHE_SZ, slot->oif, oif);
+        }
         return rc;
 }
 
@@ -1502,9 +1554,40 @@ int ask_hw_flow_remove(u32 hw_flow_id)
                 mutex_unlock(&h->lock);
 
                 if (pid_to_unbind != 0xff) {
-                        ask_pr_info("hw: PR14z18 auto-unbind: port 0x%02x — last cookie destroyed, ungrafting\n",
+                        /*
+                         * PR14z23.1 (2026-05-24): SUPPRESS the actual
+                         * ungraft.  ask_hw_port_unbind() calls
+                         * fman_pcd_kg_ungraft_cc() which rewrites the
+                         * KeyGen scheme through the *shared* FMan
+                         * indirect-access window (AR-flushed),
+                         * serializing the entire FMan's parse →
+                         * classify pipeline for the duration.  That
+                         * stall is observable as ARP/keepalive loss
+                         * on the management LAN (eth0/1/2,
+                         * 192.168.0.0/16) every time a flow_offload
+                         * cookie storm drains the per-pipeline
+                         * refcount to zero on the test-plane SFP+
+                         * ports (eth3/eth4).
+                         *
+                         * Leaving cc_v4_tcp grafted across a cookie
+                         * storm is safe: silicon HIT keeps forwarding
+                         * the 5-tuples already in the CC table, and
+                         * the next REPLACE burst (typically <2 s
+                         * later under sustained TCP load) re-populates
+                         * the same tree.  The kernel-side cookies
+                         * being destroyed are bookkeeping records,
+                         * not silicon entries.
+                         *
+                         * The cc_v4_tcp trees are torn down properly
+                         * via ask_hw_pcd_teardown() on module exit
+                         * (rmmod ask) and on flavour reconfiguration,
+                         * which are the only legitimate ungraft
+                         * points until a future patch introduces a
+                         * proper flowtable-gone signal.
+                         */
+                        ask_pr_info("hw: PR14z23.1: skip auto-unbind on port 0x%02x — last cookie destroyed but cc_v4_tcp left grafted (FMan-wide stall avoidance)\n",
                                     pid_to_unbind);
-                        (void)ask_hw_port_unbind(pid_to_unbind);
+                        /* (void)ask_hw_port_unbind(pid_to_unbind); -- SUPPRESSED, see comment */
                 }
         }
         return 0;
