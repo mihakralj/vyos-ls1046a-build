@@ -225,6 +225,16 @@ SUMMARY="$WORK_DIR/patch-health-${FLAVOR}.txt"
 PASS=0; FAIL=0
 FAILED=()
 STACK_DIRTY=0
+# Capture the pristine baseline commit SHA BEFORE any stack-apply commits
+# pile up on top of it. Required for the STACK_DIRTY cleanup at end-of-loop
+# AND for mid-loop failure recovery — both must reset to *this* SHA, not
+# to HEAD (which by then is the last stack-applied commit, not the
+# baseline). Without this capture, subsequent patch-health runs start
+# from a polluted HEAD with prior stack commits still present, and every
+# patch in the series cascade-fails as 'repository lacks the necessary
+# blob to perform 3-way merge' — a false-positive rot signal.
+# See Qdrant memo 2026-05-23.
+BASELINE_REF=$(git -C "$KDIR" rev-parse HEAD)
 for p in "${PATCHES[@]}"; do
     parent="$(basename "$(dirname "$p")")"
     name="$parent/$(basename "$p")"
@@ -248,10 +258,13 @@ for p in "${PATCHES[@]}"; do
             printf '%s\n' "$out" | sed 's/^/      /' | tee -a "$SUMMARY"
             FAIL=$((FAIL+1))
             FAILED+=("$name")
-            # Reset the tree so a failing patch in the middle of the
-            # stack doesn't poison the rest of the series.
-            git -C "$KDIR" reset --hard -q >/dev/null 2>&1 || true
-            git -C "$KDIR" clean -fdq      >/dev/null 2>&1 || true
+            # Reset the tree to the pristine baseline so a failing patch
+            # in the middle of the stack doesn't poison the rest of the
+            # series. MUST target $BASELINE_REF explicitly — `git reset
+            # --hard` with no ref defaults to HEAD which by now is the
+            # last successful stack-applied commit, not the baseline.
+            git -C "$KDIR" reset --hard "$BASELINE_REF" -q >/dev/null 2>&1 || true
+            git -C "$KDIR" clean -fdq                       >/dev/null 2>&1 || true
         fi
     else
         # Independent dry-run mode: --check against the current tree.
@@ -271,10 +284,11 @@ done
 
 # Roll the kernel tree back to the pristine baseline so the next
 # patch-health run starts clean.  Only needed if we ever applied a
-# cumulative stack patch this run.
+# cumulative stack patch this run.  MUST target $BASELINE_REF — see
+# the comment at the BASELINE_REF capture site above.
 if (( STACK_DIRTY )); then
-    git -C "$KDIR" reset --hard -q >/dev/null 2>&1 || true
-    git -C "$KDIR" clean -fdq      >/dev/null 2>&1 || true
+    git -C "$KDIR" reset --hard "$BASELINE_REF" -q >/dev/null 2>&1 || true
+    git -C "$KDIR" clean -fdq                       >/dev/null 2>&1 || true
 fi
 
 # ── SDK conflict report (ASK only) ─────────────────────────────────────

@@ -1,0 +1,361 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ask2 PR14z19 <ask2@local>
+Date: Sat, 23 May 2026 05:50:00 +0000
+Subject: fman_pcd: cc_node_remove_key() + cc_nodes debugfs view
+
+PR14z19 Path A patch 0045 (third of three patches in the series).
+
+Adds the public fman_pcd_cc_node_remove_key() ABI -- the tombstone-
+idiom counterpart of fman_pcd_cc_node_add_key() that ASK2 needs to
+retire individual flow rows without teardown-then-rebuild churn and
+without losing slot-index stability (required for flow-id round-
+tripping per plans/PR14z19-PATH-A-DESIGN.md sec 3.5).
+
+Also adds the cc_nodes debugfs view alongside the kg_schemes / port_sp
+views from patch 0046, so operators can visually inspect CC-tree /
+CC-node layout in MURAM at any time including under load.  Non-
+destructive (read-only struct walk, no register I/O); safe to cat
+during traffic.
+
+Files touched:
+ * drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+     - new fman_pcd_cc_node_remove_key() body
+     - new fman_pcd_cc_nodes_dump_seq() same-module helper
+ * drivers/net/ethernet/freescale/fman/fman_pcd.c
+     - new cc_nodes debugfs show fn + debugfs_create_file()
+ * drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+     - prototype for fman_pcd_cc_nodes_dump_seq()
+ * include/linux/fsl/fman_pcd.h
+     - public prototype + kerneldoc for fman_pcd_cc_node_remove_key()
+       (this file already carried the prototype before 0045 was
+       split out; the chunk here is a no-op against the in-tree
+       state when stacked on top of 0044)
+
+Tombstone semantics:
+  - AD slot is re-encoded as FMAN_PCD_ACTION_DROP (fqid=0 bypass,
+    traps as invalid-FQ in DPAA1 if the walker ever reaches it).
+  - Mask half of the match slot is zeroed so the walker skips this
+    row for every possible extract value.
+  - Key bytes are intentionally LEFT INTACT so cc_nodes debugfs
+    dumps still show what USED to be at this index after a flow
+    eviction storm (forensic-residue diagnosis).
+  - num_keys is NOT decremented -- the slot remains live in
+    indexing terms; only node_destroy() reclaims it.
+
+
+---
+ .../net/ethernet/freescale/fman/fman_pcd.c    |  24 ++-
+ .../net/ethernet/freescale/fman/fman_pcd_cc.c | 175 +++++++++++++++++-
+ .../freescale/fman/fman_pcd_internal.h        |  13 +-
+ include/linux/fsl/fman_pcd.h                  |  21 +++
+ 4 files changed, 224 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index eb6c2a5..6c844a9 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -283,6 +283,19 @@ static int fman_pcd_port_sp_show(struct seq_file *m, void *unused)
+ }
+ DEFINE_SHOW_ATTRIBUTE(fman_pcd_port_sp);
+ 
++static int fman_pcd_cc_nodes_show(struct seq_file *m, void *unused)
++{
++struct fman_pcd *pcd = m->private;
++
++if (!pcd) {
++seq_puts(m, "# pcd not initialised\n");
++return 0;
++}
++fman_pcd_cc_nodes_dump_seq(m, pcd);
++return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(fman_pcd_cc_nodes);
++
+ 
+ /*
+  * Internal MURAM allocator wrappers consumed by PR14b-f siblings (NOT
+@@ -479,10 +492,13 @@ INIT_LIST_HEAD(&pcd->oh_ports);
+ 			debugfs_create_file("kg_schemes", 0444,
+ 					    pcd->debugfs_dir, pcd,
+ 					    &fman_pcd_kg_schemes_fops);
+-			debugfs_create_file("port_sp", 0444,
+-					    pcd->debugfs_dir, pcd,
+-					    &fman_pcd_port_sp_fops);
+-		}
++debugfs_create_file("port_sp", 0444,
++    pcd->debugfs_dir, pcd,
++    &fman_pcd_port_sp_fops);
++debugfs_create_file("cc_nodes", 0444,
++    pcd->debugfs_dir, pcd,
++    &fman_pcd_cc_nodes_fops);
++}
+ 	}
+ 
+ 	dev_info(fman_get_dev(fman),
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index e7f6cc2..4051ab0 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -78,6 +78,7 @@
+ #include <linux/list.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
++#include <linux/seq_file.h>
+ #include <linux/slab.h>
+ #include <linux/spinlock.h>
+ #include <linux/types.h>
+@@ -508,11 +509,62 @@ cc_encode_ad(const struct fman_pcd_action *action, void __iomem *ad)
+  * NULL-safe matches the rest of this TU's style).
+  */
+ unsigned long fman_pcd_cc_tree_group_table_off(
+-	const struct fman_pcd_cc_tree *tree)
++const struct fman_pcd_cc_tree *tree)
+ {
+-	if (!tree)
+-		return 0;
+-	return tree->group_table_off;
++if (!tree)
++return 0;
++return tree->group_table_off;
++}
++
++/**
++ * fman_pcd_cc_nodes_dump_seq() - same-module helper for the cc_nodes
++ * debugfs view defined in fman_pcd.c.
++ *
++ * Walks every CC tree on @pcd, then every node on each tree, printing
++ * a one-line summary suitable for forensic dumps after a flow
++ * eviction storm or a graft/ungraft residue investigation.  Holds
++ * tree->lifecycle_lock across each tree's node walk and node->lock
++ * across each node's mirror read.  Safe to call at any time including
++ * under load -- no register I/O, just struct-field reads.
++ *
++ * PR14z19 patch 0045: see plans/PR14z19-PATH-A-DESIGN.md §4.2 for the
++ * full inspection-point list.
++ */
++void fman_pcd_cc_nodes_dump_seq(struct seq_file *m, struct fman_pcd *pcd)
++{
++struct list_head *cc_list;
++struct fman_pcd_cc_tree *tree;
++struct fman_pcd_cc_node *node;
++
++if (!m || !pcd)
++return;
++
++cc_list = fman_pcd_get_cc_list(pcd);
++if (!cc_list)
++return;
++
++seq_puts(m, "# tree           groups  group_off    node  ext_type  off  size  num_keys  max_keys  match_off    ad_off\n");
++list_for_each_entry(tree, cc_list, node) {
++int n_idx = 0;
++
++mutex_lock(&tree->lifecycle_lock);
++list_for_each_entry(node, &tree->nodes, node) {
++spin_lock_bh(&node->lock);
++seq_printf(m,
++   "  %p  %3u     0x%08lx  %4d  %u         %3u  %3u   %4u      %4u      0x%08lx  0x%08lx\n",
++   tree, tree->num_of_groups,
++   tree->group_table_off, n_idx,
++   node->extract.type,
++   node->extract.offset,
++   node->extract.size,
++   node->num_keys, node->max_keys,
++   node->match_table_off,
++   node->ad_table_off);
++spin_unlock_bh(&node->lock);
++n_idx++;
++}
++mutex_unlock(&tree->lifecycle_lock);
++}
+ }
+ 
+ /**
+@@ -936,6 +988,121 @@ out:
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_cc_node_modify_next_action);
+ 
++/**
++ * fman_pcd_cc_node_remove_key() - retire a single key+AD row.
++ *
++ * Implements the public ABI declared in <linux/fsl/fman_pcd.h>.
++ *
++ * The CC walker compares the extract bytes against (match_table[i].key
++ * & match_table[i].mask) for i in [0, num_keys); the miss-slot at
++ * index num_keys catches no-match.  To safely retire a row without
++ * teardown-then-rebuild churn we cannot simply shift higher slots
++ * down -- the walker reads MURAM directly and a mid-write shift
++ * would temporarily duplicate or lose entries.  Instead we:
++ *
++ *   1. Re-encode the AD slot to a "drop" (FQID=0 control-flow,
++ *      which traps as invalid-FQ in DPAA1 -- same posture as a
++ *      freshly-allocated node).  This is one cc_encode_ad() call
++ *      against a known-typed action; identical guarantee as
++ *      modify_next_action() above re: torn-AD safety.
++ *   2. Overwrite the mask half of the match slot with all-zero
++ *      bytes.  A zero mask means no byte position can match, so
++ *      the walker will skip this row for every possible extract
++ *      value, but the row still exists and num_keys is unchanged.
++ *      This is the same "tombstone" idiom the SDK used in the
++ *      legacy fm_pcd_cc.c DeleteKey path.
++ *   3. Clear the in-memory mirror entry (key+mask zeroed, action
++ *      replaced with the same drop sentinel).
++ *
++ * num_keys is left untouched: shrinking it would let a subsequent
++ * add_key() reuse the tombstoned slot, which would be safe but
++ * loses the slot-index stability that ASK2 relies on for flow-id
++ * round-tripping (PR14z19 design §3.5).  Use add_key() to grow,
++ * remove_key() to retire; only node_destroy() reclaims slots.
++ *
++ * Locking: same spin_lock_bh() as add_key/modify_next_action.
++ *
++ * Returns 0 on success, -EINVAL on NULL @node or out-of-range
++ * @key_index, -ENOENT if the slot is already a tombstone (mask
++ * already zero).  The -ENOENT path is informational; callers can
++ * treat it as success if they don't care about double-removes.
++ */
++int fman_pcd_cc_node_remove_key(struct fman_pcd_cc_node *node,
++u16 key_index)
++{
++struct fman_pcd_action drop = {
++.type = FMAN_PCD_ACTION_DROP,
++};
++void __iomem *match_slot, *ad_slot;
++size_t key_stride;
++int err;
++u8 zero_mask[56];
++u8 i;
++bool already_tombstoned;
++
++if (!node)
++return -EINVAL;
++if (node->extract.size == 0 || node->extract.size > 56)
++return -EINVAL;
++
++key_stride = 2u * (size_t)node->extract.size;
++memset(zero_mask, 0, sizeof(zero_mask));
++
++spin_lock_bh(&node->lock);
++
++if (key_index >= node->num_keys) {
++err = -EINVAL;
++goto out;
++}
++
++/* Detect double-remove: if every byte of the mirror's mask is
++ * already zero the slot is already a tombstone.  Cheap pre-check
++ * before the iowrite traffic.
++ */
++already_tombstoned = true;
++for (i = 0; i < node->extract.size; i++) {
++if (node->keys[key_index].mask[i] != 0) {
++already_tombstoned = false;
++break;
++}
++}
++if (already_tombstoned) {
++err = -ENOENT;
++goto out;
++}
++
++ad_slot = node->ad_table + (size_t)key_index *
++  FMAN_PCD_CC_AD_ENTRY_SIZE;
++match_slot = node->match_table + (size_t)key_index * key_stride;
++
++/* Re-encode AD to drop FIRST.  cc_encode_ad on FMAN_PCD_ACTION_DROP
++ * cannot fail (no operand validation needed for the drop arm),
++ * but check anyway -- if it ever did fail we would leak a live
++ * row, which is worse than aborting with the slot still live.
++ */
++err = cc_encode_ad(&drop, ad_slot);
++if (err)
++goto out;
++
++/* Tombstone the mask half of the match slot. */
++memcpy_toio(match_slot + node->extract.size, zero_mask,
++    node->extract.size);
++
++/* Mirror: zero mask + record the drop sentinel.  Leave key bytes
++ * intact so debugfs cc_nodes can still show what USED to be here
++ * (useful for forensic dumps after a flow eviction storm).
++ */
++memset(node->keys[key_index].mask, 0,
++       sizeof(node->keys[key_index].mask));
++node->keys[key_index].action = drop;
++err = 0;
++
++out:
++spin_unlock_bh(&node->lock);
++return err;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_cc_node_remove_key);
++
+ /**
+  * fman_pcd_cc_node_destroy() - tear down one CC node.
+  *
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+index a5c97ca..ade0e52 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+@@ -23,6 +23,7 @@
+ 
+ struct fman;
+ struct fman_pcd;
++struct seq_file;
+ 
+ /* MURAM accounting wrappers.  Best-effort accounting; gen_pool is
+  * authoritative.  Return value follows fman_muram_alloc() convention:
+@@ -65,7 +66,17 @@ void fman_pcd_oh_reclaim_all(struct fman_pcd *pcd);
+  *   defensive check so the accessor matches the general kernel idiom).
+  */
+ unsigned long fman_pcd_cc_tree_group_table_off(
+-	const struct fman_pcd_cc_tree *tree);
++const struct fman_pcd_cc_tree *tree);
++
++/* fman_pcd_cc_nodes_dump_seq:
++ *   Same-module helper used by fman_pcd.c's cc_nodes debugfs file to
++ *   walk every CC tree on @pcd and every node on each tree, emitting a
++ *   one-line forensic summary per node.  struct fman_pcd_cc_tree and
++ *   struct fman_pcd_cc_node are private to fman_pcd_cc.c so the walker
++ *   has to live in that TU; fman_pcd.c just provides the seq_file.
++ *   Safe to call on NULL @m or NULL @pcd (no-op).  PR14z19 patch 0045.
++ */
++void fman_pcd_cc_nodes_dump_seq(struct seq_file *m, struct fman_pcd *pcd);
+ 
+ /* fman_pcd_manip_hmtd_off:
+  *   Accessor exposing struct fman_pcd_manip::hmtd_off to other driver
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 5a8bd2a..f50f363 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -554,6 +554,27 @@ int fman_pcd_cc_node_modify_next_action(struct fman_pcd_cc_node *node,
+ u16 key_index,
+ const struct fman_pcd_action *action);
+ 
++/**
++ * fman_pcd_cc_node_remove_key() - retire one key+AD row in a CC node.
++ * @node:      handle from fman_pcd_cc_node_create().
++ * @key_index: slot to retire, 0..num_keys-1 as returned by the
++ *             implicit add_key sequence.
++ *
++ * Tombstones the slot: re-encodes the AD to a DROP sentinel, then
++ * zeroes the mask half of the match slot so silicon never matches
++ * this row.  Slot index stays valid (num_keys is unchanged) so
++ * higher-indexed flows keep their identity across removes -- this is
++ * the slot-stability contract that ASK2 relies on for flow-id round-
++ * tripping.  Subsequent add_key() always appends to the tail; only
++ * node_destroy() reclaims slots.
++ *
++ * Returns 0 on success, -EINVAL on NULL @node or @key_index out of
++ * range, -ENOENT if the slot is already a tombstone (mask already
++ * zero -- safe to ignore on double-remove paths).
++ */
++int fman_pcd_cc_node_remove_key(struct fman_pcd_cc_node *node,
++u16 key_index);
++
+ /**
+  * fman_pcd_cc_node_destroy() - tear down one CC node.
+  * @node: handle from fman_pcd_cc_node_create().  NULL-safe.
+-- 
+2.39.5
+

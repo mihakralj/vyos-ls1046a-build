@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: 2026-05-23T19:15:00Z
+Subject: [PATCH] patches/0052-uapi-ask-spdx-syscall-note.patch
+
+PR14z21 (2026-05-23): fix UAPI SPDX identifier on
+include/uapi/linux/ask/ask.h so that `make headers_install` accepts it.
+
+Symptom (CI run 26341035245, ask20 branch, FLAVOR=ask):
+
+  HDRINST usr/include/linux/ask/ask.h
+  error: include/uapi/linux/ask/ask.h: missing "WITH Linux-syscall-note"
+         for SPDX-License-Identifier
+  make[5]: *** [scripts/Makefile.headersinst:63: usr/include/linux/ask/ask.h] Error 1
+  make[4]: *** [Makefile:1382: headers] Error 2
+
+Root cause: patch 0048-ask-in-tree-source-migration.patch creates the new
+uapi header with
+
+  /* SPDX-License-Identifier: GPL-2.0 */
+
+The kernel uapi-header linter (scripts/headers_install.sh /
+scripts/Makefile.headersinst, anchored on the recipe at
+Documentation/process/license-rules.rst#L155 and enforced since
+4.18) requires that every file under include/uapi/ carries the
+syscall-note exception:
+
+  /* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
+
+without it, headers_install refuses to copy the header to
+usr/include/, which bindeb-pkg invokes when building the
+linux-headers .deb, breaking the whole kernel build.
+
+The header has only just begun shipping in CI (PR14z19 / commit
+17de07d landed patches 0044-0049 including 0048; all prior ASK
+flavor builds were against an older patch stack that did not yet
+create include/uapi/linux/ask/ask.h, so this latent SPDX bug was
+not exercised). Run 26341035245 was the first ASK build to apply
+0048 and hit the lint.
+
+Fix: replace the first line of include/uapi/linux/ask/ask.h.
+Authored as a follow-up patch instead of editing 0048 in place
+to preserve 0048's blob hash and avoid touching line arithmetic
+in a 6,900-line patch.
+
+Signed-off-by: ci <ci@local>
+---
+diff --git a/include/uapi/linux/ask/ask.h b/include/uapi/linux/ask/ask.h
+index 3debd51..7c0d8f1 100644
+--- a/include/uapi/linux/ask/ask.h
++++ b/include/uapi/linux/ask/ask.h
+@@ -1,4 +1,4 @@
+-/* SPDX-License-Identifier: GPL-2.0 */
++/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
+ /*
+  * ASK2 generic-netlink UAPI.
+  *

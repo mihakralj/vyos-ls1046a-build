@@ -256,7 +256,18 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
                      "$ASK_PATCH_DIR"/0039-*.patch \
                      "$ASK_PATCH_DIR"/0040-*.patch \
                      "$ASK_PATCH_DIR"/0041-*.patch \
-                     "$ASK_PATCH_DIR"/0042-*.patch; do
+                     "$ASK_PATCH_DIR"/0042-*.patch \
+                     "$ASK_PATCH_DIR"/0043-*.patch \
+                     "$ASK_PATCH_DIR"/0044-*.patch \
+                     "$ASK_PATCH_DIR"/0045-*.patch \
+                     "$ASK_PATCH_DIR"/0046-*.patch \
+                     "$ASK_PATCH_DIR"/0047-*.patch \
+                     "$ASK_PATCH_DIR"/0048-*.patch \
+                     "$ASK_PATCH_DIR"/0049-*.patch \
+                     "$ASK_PATCH_DIR"/0050-*.patch \
+                     "$ASK_PATCH_DIR"/0051-*.patch \
+                     "$ASK_PATCH_DIR"/0052-*.patch \
+                     "$ASK_PATCH_DIR"/0053-*.patch; do
         [ -f "$src_patch" ] || { echo "ERROR: missing $src_patch"; exit 1; }
         # Rename 0001-→1001-, 0002-→1002-, 0003-→1003-, 0004-→1004-,
         # 0005-→1005-, 0006-→1006-, 0007-→1007-, 0008-→1008-,
@@ -306,14 +317,25 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
             0040-*) dst="1040-${base#0040-}" ;;
             0041-*) dst="1041-${base#0041-}" ;;
             0042-*) dst="1042-${base#0042-}" ;;
+            0043-*) dst="1043-${base#0043-}" ;;
+            0044-*) dst="1044-${base#0044-}" ;;
+            0045-*) dst="1045-${base#0045-}" ;;
+            0046-*) dst="1046-${base#0046-}" ;;
+            0047-*) dst="1047-${base#0047-}" ;;
+            0048-*) dst="1048-${base#0048-}" ;;
+            0049-*) dst="1049-${base#0049-}" ;;
+            0050-*) dst="1050-${base#0050-}" ;;
+            0051-*) dst="1051-${base#0051-}" ;;
+            0052-*) dst="1052-${base#0052-}" ;;
+            0053-*) dst="1053-${base#0053-}" ;;
             *)      echo "ERROR: unexpected ASK patch name: $base"; exit 1 ;;
         esac
         echo "###   $base → $dst"
         cp "$src_patch" "$KERNEL_PATCHES/$dst"
         ASK_PATCH_COUNT=$((ASK_PATCH_COUNT + 1))
     done
-    if [ "$ASK_PATCH_COUNT" -ne 42 ]; then
-        echo "ERROR: expected 42 ASK kernel patches, staged $ASK_PATCH_COUNT"
+    if [ "$ASK_PATCH_COUNT" -ne 53 ]; then
+        echo "ERROR: expected 53 ASK kernel patches, staged $ASK_PATCH_COUNT"
         exit 1
     fi
     echo "### ASK2: $ASK_PATCH_COUNT in-tree kernel patches staged"

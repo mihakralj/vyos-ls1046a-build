@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: 2026-05-22T05:35:00Z
+Subject: [PATCH] patches/0043-fman-pcd-kg-graft-mode-nia.patch
+
+PR14z15 (2026-05-22): silicon-truth fix for the M2 acceptance gate
+CPU regression.  PR14z13 (patch 0042) grafts an ASK CC tree onto an
+existing kernel-owned KG scheme by writing KGSE_CCBS via the AR-
+mediated RMW primitive keygen_scheme_set_ccbs().  Live silicon
+regdump on 2026-05-22 (bin/ask-pcd-regdump.py against DUT
+192.168.1.190) confirmed KGSE_CCBS is correctly programmed on the
+grafted schemes -- but the M2 metric did not move (6.901 Gbps PASS /
+27.26%% kernel-net CPU FAIL vs. <=5%% threshold).
+
+KGSE_MODE NIA encoding (RM 8.7.4, confirmed against SDK
+fsl_fman_kg.h fm_kg_build_nia()):
+
+    bits[31]        EN
+    bits[30:24]     CCOBASE        (CC group base offset, 8 bits)
+    bits[22:18]     NIA engine     (mask 0x007C0000)
+                    FM_CTL = 0x00000000   <- route KG -> CC engine
+                    BMI    = 0x00500000   <- route KG -> BMI direct
+    bits[17:0]      NIA action     (mask 0x0003FFFF)
+
+The silicon dispatcher consults KGSE_CCBS ONLY when the NIA engine
+field equals FM_CTL.  With NIA = BMI the scheme enqueues directly to
+the kernel's per-CPU RX FQ and the CC engine is never invoked.
+keygen_scheme_setup() always sets kgse_mode = (KG_SCH_MODE_EN |
+ENQUEUE_KG_DFLT_NIA) at scheme-create time, and PR14z13's RMW touches
+ONLY kgse_ccbs -- so a freshly-grafted scheme has the CCBS pointer
+set but the NIA engine still routing past the CC engine.
+
+Fix: extend keygen_scheme_set_ccbs() to RMW kgse_mode in the SAME
+AR-mediated transaction as kgse_ccbs.  Two cases:
+
+  ccbs != 0 (graft):    NIA engine -> FM_CTL, NIA action cleared
+  ccbs == 0 (ungraft):  NIA engine -> BMI, action = ENQ_FRAME
+
+Two fields written inside the same indirect window flush as one
+atomic WRITE AR.
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+@@ -94,6 +94,16 @@
+ #define NIA_BMI_AC_ENQ_FRAME		0x00000002
+ #define ENQUEUE_KG_DFLT_NIA		(NIA_ENG_BMI | NIA_BMI_AC_ENQ_FRAME)
+ 
++/* PR14z15: KGSE_MODE NIA-engine / NIA-action field masks used by
++ * keygen_scheme_set_ccbs() to flip the NIA engine between BMI
++ * (default, no CC) and FM_CTL (graft active, CC engine invoked).
++ * Silicon ignores KGSE_CCBS unless NIA engine == FM_CTL.  See RM
++ * 8.7.4 and SDK fsl_fman_kg.h fm_kg_build_nia().
++ */
++#define KG_NIA_ENG_MASK			0x007C0000
++#define KG_NIA_AC_MASK			0x0003FFFF
++#define KG_NIA_ENG_FM_CTL		0x00000000
++
+ /* Hard-coded configuration:
+  * These values are used as hard-coded values for KeyGen configuration
+  * and they replace user selections for this hard-coded version
+@@ -609,6 +619,7 @@ int keygen_scheme_set_ccbs(struct fman_keygen *keygen, u8 scheme_id,
+ 	struct fman_kg_regs __iomem *regs;
+ 	struct keygen_scheme *scheme;
+ 	u32 ar_reg;
++	u32 mode;
+ 	int err;
+ 
+ 	if (!keygen)
+@@ -631,7 +642,22 @@ int keygen_scheme_set_ccbs(struct fman_keygen *keygen, u8 scheme_id,
+ 		return err;
+ 	}
+ 
+-	/* Modify only kgse_ccbs in the indirect window. */
++	/* PR14z15: rewrite KGSE_MODE NIA engine + action fields in the
++	 * indirect window before flushing.  Without this, a non-zero
++	 * KGSE_CCBS is silently ignored because the silicon dispatcher
++	 * still routes KG -> BMI (the default NIA programmed at
++	 * keygen_scheme_setup() time).  CCOBASE bits[30:24] and the EN
++	 * bit are preserved -- only the NIA engine field flips.
++	 */
++	mode = ioread32be(&regs->fmkg_sch.kgse_mode);
++	mode &= ~(KG_NIA_ENG_MASK | KG_NIA_AC_MASK);
++	if (ccbs != 0)
++		mode |= KG_NIA_ENG_FM_CTL;	/* graft: KG -> CC engine */
++	else
++		mode |= ENQUEUE_KG_DFLT_NIA;	/* ungraft: KG -> BMI default */
++	iowrite32be(mode, &regs->fmkg_sch.kgse_mode);
++
++	/* PR14z13: update KGSE_CCBS (CC tree MURAM offset / 0 to clear). */
+ 	iowrite32be(ccbs, &regs->fmkg_sch.kgse_ccbs);
+ 
+ 	/* WRITE phase: flush the modified image back. */

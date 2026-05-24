@@ -1,0 +1,300 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ask2 PR14z19 <ask2@local>
+Date: Sat, 23 May 2026 05:46:00 +0000
+Subject: fman_pcd: add pre-netdev hook + fman_port invoker (Path A)
+
+PR14z19 Path A architectural pivot. Replaces the post-probe KG-graft
+strategy (patches 0042 / 0043, archived) with a pre-netdev hook that
+intercepts fman_port_init() BEFORE the default keygen_port_hashing_init()
+call runs, so ASK2 can install its CC tree + KG scheme in place of the
+mainline RSS scheme rather than mutating a live one.
+
+Surface
+-------
+Public ABI (include/linux/fsl/fman_pcd.h):
+  typedef int (*fman_pcd_pre_netdev_hook_t)(struct fman_pcd *pcd,
+              u8 hwport_id, u32 default_base_fqid,
+              u32 default_hash_size, void *priv);
+  int  fman_pcd_register_pre_netdev_hook(struct fman_pcd *pcd,
+              fman_pcd_pre_netdev_hook_t hook, void *priv);
+  void fman_pcd_unregister_pre_netdev_hook(struct fman_pcd *pcd);
+
+Both register/unregister are EXPORT_SYMBOL_GPL so a built-in ask.ko
+fs_initcall can attach during fman_probe() but BEFORE dpaa_eth_probe().
+
+Internal helper (fman_pcd_internal.h, same-module):
+  int  fman_pcd_invoke_pre_netdev_hook(struct fman_pcd *pcd,
+              u8 hwport_id, u32 default_base_fqid,
+              u32 default_hash_size);
+
+Hook return-code semantics
+--------------------------
+   0      -> hook claims this port; caller skips default RSS init.
+  -ENOENT -> no hook registered for this port; caller falls through to
+             mainline keygen_port_hashing_init().
+  other negative -> fatal probe failure.
+
+fman_port_init() integration
+----------------------------
+The pcd_fqs_count != 0 branch now queries the hook first, then either
+short-circuits to fman_port_use_kg_hash(port, true) or falls through to
+mainline. No behavior change when no hook is registered.
+
+Locking
+-------
+Single hook slot per FMan instance, protected by pcd->lock during
+install/uninstall. The hook itself is invoked OUTSIDE the lock so it
+may sleep, allocate, and call back into PCD APIs.
+
+ invoker
+
+---
+ .../net/ethernet/freescale/fman/fman_pcd.c    | 89 ++++++++++++++++++-
+ .../freescale/fman/fman_pcd_internal.h        | 16 +++-
+ .../net/ethernet/freescale/fman/fman_port.c   | 42 +++++++--
+ include/linux/fsl/fman_pcd.h                  | 34 +++++++
+ 4 files changed, 170 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 2b4c1cd..eb6c2a5 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -118,7 +118,22 @@ struct list_head plcr_profiles;
+ struct list_head replic_groups;
+ struct list_head oh_ports;
+ 
+-	struct dentry *debugfs_dir;
++struct dentry *debugfs_dir;
++
++/*
++ * PR14z19 Path A: optional pre-netdev hook. When set, fman_port_init()
++ * calls this hook in lieu of the default keygen_port_hashing_init()
++ * for ports where the hook returns 0 (== "I own this port, skip
++ * default RSS"). Returning -ENOENT means "not my port, fall through".
++ * Any other negative value is treated as a fatal probe error.
++ *
++ * Single hook per FMan instance. Registered before dpaa_eth_probe()
++ * runs (ask.ko is built-in via Kconfig bool, so its module_init runs
++ * during fs_initcall before the dpaa_eth probe). pcd->lock protects
++ * the install/uninstall; the hook itself is invoked outside the lock.
++ */
++fman_pcd_pre_netdev_hook_t pre_netdev_hook;
++void *pre_netdev_hook_priv;
+ };
+ 
+ /*
+@@ -322,6 +337,78 @@ void fman_pcd_muram_free(struct fman_pcd *pcd, unsigned long offset,
+ 	mutex_unlock(&pcd->lock);
+ }
+ 
++/*
++ * PR14z19 Path A: pre-netdev hook register / unregister / invoke.
++ *
++ * fman_pcd_register_pre_netdev_hook() - install a callback that
++ *   fman_port_init() invokes for each port BEFORE the default
++ *   keygen_port_hashing_init(). The hook can claim the port (return 0)
++ *   or decline (return -ENOENT). Single hook per FMan instance; -EBUSY
++ *   if already registered.
++ *
++ * fman_pcd_unregister_pre_netdev_hook() - remove the hook. Idempotent.
++ *
++ * fman_pcd_invoke_pre_netdev_hook() - internal helper consumed by
++ *   fman_port_init() in fman_port.c. NOT exported; sibling translation
++ *   unit only. Returns the hook's rc, or -ENOENT if no hook installed
++ *   so the caller falls through to the default keygen path.
++ */
++int fman_pcd_register_pre_netdev_hook(struct fman_pcd *pcd,
++      fman_pcd_pre_netdev_hook_t hook,
++      void *priv)
++{
++if (!pcd || !hook)
++return -EINVAL;
++
++mutex_lock(&pcd->lock);
++if (pcd->pre_netdev_hook) {
++mutex_unlock(&pcd->lock);
++return -EBUSY;
++}
++pcd->pre_netdev_hook = hook;
++pcd->pre_netdev_hook_priv = priv;
++mutex_unlock(&pcd->lock);
++
++dev_info(fman_get_dev(pcd->fman),
++ "fman_pcd: pre-netdev hook registered (%ps)\n", hook);
++return 0;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_register_pre_netdev_hook);
++
++void fman_pcd_unregister_pre_netdev_hook(struct fman_pcd *pcd)
++{
++if (!pcd)
++return;
++
++mutex_lock(&pcd->lock);
++pcd->pre_netdev_hook = NULL;
++pcd->pre_netdev_hook_priv = NULL;
++mutex_unlock(&pcd->lock);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_unregister_pre_netdev_hook);
++
++int fman_pcd_invoke_pre_netdev_hook(struct fman_pcd *pcd, u8 hwport_id,
++    u32 default_base_fqid,
++    u32 default_hash_size)
++{
++fman_pcd_pre_netdev_hook_t hook;
++void *priv;
++
++if (!pcd)
++return -ENOENT;
++
++mutex_lock(&pcd->lock);
++hook = pcd->pre_netdev_hook;
++priv = pcd->pre_netdev_hook_priv;
++mutex_unlock(&pcd->lock);
++
++if (!hook)
++return -ENOENT;
++
++return hook(pcd, hwport_id, default_base_fqid,
++    default_hash_size, priv);
++}
++
+ /**
+  * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
+  * @fman: parent FMan controller.  Must have a live MURAM pool (mainline
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+index 66944e6..a5c97ca 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+@@ -103,6 +103,20 @@ u16 fman_pcd_plcr_profile_id_internal(
+  *   responsibility to check.
+  */
+ unsigned long fman_pcd_replic_group_source_td_off(
+-	const struct fman_pcd_replic_group *group);
++const struct fman_pcd_replic_group *group);
++
++/* fman_pcd_invoke_pre_netdev_hook:
++ *   PR14z19 Path A internal entry point used by fman_port_init() in
++ *   fman_port.c to query the registered ASK2 pre-netdev hook (if any)
++ *   before falling through to mainline's default keygen_port_hashing_init()
++ *   path.  Returns the hook's rc, -ENOENT if no hook is registered,
++ *   or any other negative errno propagated from the hook.  rc == 0
++ *   means the hook claimed the port and the caller MUST skip the
++ *   default RSS init.  Same-module symbol (no EXPORT_SYMBOL); the
++ *   public register/unregister surface is in <linux/fsl/fman_pcd.h>.
++ */
++int fman_pcd_invoke_pre_netdev_hook(struct fman_pcd *pcd, u8 hwport_id,
++    u32 default_base_fqid,
++    u32 default_hash_size);
+ 
+ #endif /* __FMAN_PCD_INTERNAL_H */
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index de43515..6c82f96 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -15,10 +15,13 @@
+ #include <linux/delay.h>
+ #include <linux/libfdt_env.h>
+ 
++#include <linux/fsl/fman_pcd.h>
++
+ #include "fman.h"
+ #include "fman_port.h"
+ #include "fman_sp.h"
+ #include "fman_keygen.h"
++#include "fman_pcd_internal.h"
+ 
+ /* Queue ID */
+ #define DFLT_FQ_ID		0x00FFFFFF
+@@ -1481,16 +1484,37 @@ int fman_port_init(struct fman_port *port)
+ 	if (err)
+ 		return err;
+ 
+-	if (port->cfg->pcd_fqs_count) {
+-		keygen = port->dts_params.fman->keygen;
+-		err = keygen_port_hashing_init(keygen, port->port_id,
+-					       port->cfg->pcd_base_fqid,
+-					       port->cfg->pcd_fqs_count);
+-		if (err)
+-			return err;
++if (port->cfg->pcd_fqs_count) {
++struct fman_pcd *pcd_hook;
+ 
+-		fman_port_use_kg_hash(port, true);
+-	}
++keygen = port->dts_params.fman->keygen;
++
++/*
++ * PR14z19 Path A: try the ASK2 pre-netdev hook first. If it
++ * claims the port (rc == 0), the hook has allocated and bound
++ * the KG scheme with our CC tree already wired in -- skip the
++ * default RSS init. If -ENOENT, no hook is registered for
++ * this port; fall through to mainline. Any other negative rc
++ * is fatal probe failure.
++ */
++pcd_hook = fman_get_pcd(port->dts_params.fman);
++err = fman_pcd_invoke_pre_netdev_hook(pcd_hook, port->port_id,
++     port->cfg->pcd_base_fqid,
++     port->cfg->pcd_fqs_count);
++if (err == 0) {
++fman_port_use_kg_hash(port, true);
++} else if (err == -ENOENT) {
++err = keygen_port_hashing_init(keygen, port->port_id,
++       port->cfg->pcd_base_fqid,
++       port->cfg->pcd_fqs_count);
++if (err)
++return err;
++
++fman_port_use_kg_hash(port, true);
++} else {
++return err;
++}
++}
+ 
+ 	kfree(port->cfg);
+ 	port->cfg = NULL;
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 4255cca..5a8bd2a 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -86,6 +86,40 @@ struct fman_pcd *fman_pcd_init(struct fman *fman);
+ void fman_pcd_release(struct fman_pcd *pcd);
+ struct fman_pcd_muram_budget fman_pcd_get_muram_budget(struct fman_pcd *pcd);
+ 
++/*
++ * PR14z19 Path A: pre-netdev hook.
++ *
++ * An OOT consumer (ask.ko, built-in via Kconfig bool so its
++ * module_init runs at fs_initcall, before the dpaa_eth probe) may
++ * register a single hook per FMan instance. The hook is invoked from
++ * fman_port_init() for every port that mainline would otherwise
++ * default-RSS-hash, *before* register_netdev(). The hook can:
++ *
++ *   - return 0     : "I claim this port. Skip default RSS hashing.
++ *                     The scheme has been allocated and bound by the
++ *                     hook; the netdev will come up downstream of an
++ *                     already-active PCD chain."
++ *   - return -ENOENT: "Not my port; fall through to default RSS."
++ *   - return any other negative value: fatal probe error; the port
++ *                     init fails and the netdev never registers.
++ *
++ * @pcd:                FMan PCD handle (fman_get_pcd() / fman_pcd_from_of_node()).
++ * @hwport_id:          BMI hardware port id (LS1046A: 0x01..0x31).
++ * @default_base_fqid:  Base FQID that mainline would have programmed.
++ * @default_hash_size:  Hash spread size that mainline would have used.
++ * @priv:               Cookie supplied at hook-register time.
++ */
++typedef int (*fman_pcd_pre_netdev_hook_t)(struct fman_pcd *pcd,
++  u8 hwport_id,
++  u32 default_base_fqid,
++  u32 default_hash_size,
++  void *priv);
++
++int fman_pcd_register_pre_netdev_hook(struct fman_pcd *pcd,
++      fman_pcd_pre_netdev_hook_t hook,
++      void *priv);
++void fman_pcd_unregister_pre_netdev_hook(struct fman_pcd *pcd);
++
+ /*
+  * OOT consumer entry points (PR14g-prep).
+  *

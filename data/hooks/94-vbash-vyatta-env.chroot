@@ -1,0 +1,93 @@
+#!/bin/sh -e
+# 94-vbash-vyatta-env.chroot — Prime VYATTA_* env vars on every interactive
+# vbash login so `configure` op-mode does not SIGABRT.
+#
+# ROOT CAUSE
+# ----------
+# VyOS ships `/etc/bash_completion.d/vyatta-cfg`, a 1200-line bash script that
+# defines the `configure` op-mode wiring AND, at lines 126 and 1157, calls
+#     eval "$(my_cli_shell_api getSessionEnv $$)"
+#     vyatta_cli_shell_api setupSession
+# to populate VYATTA_TEMP_CONFIG_DIR / VYATTA_CONFIG_TMP / VYATTA_CHANGES_ONLY_DIR
+# and create the per-shell config session directory under /opt/vyatta/config/tmp/.
+# That whole block is gated at line 38 by
+#     if [ "$_OFR_CONFIGURE" != "ok" ]; then return 0; fi
+# so it only runs when the shell is explicitly entering configure mode.
+#
+# The op-mode `configure` command (/opt/vyatta/share/vyatta-op/templates/configure/node.def)
+# sets `_OFR_CONFIGURE=ok` and runs `newgrp vyattacfg`, which exec's a fresh
+# vbash *login* shell as group vyattacfg. The post-newgrp login shell then
+# sources /etc/profile -> ~/.profile -> ~/.bashrc, which loads
+# /usr/share/bash-completion/bash_completion (the Debian bash-completion
+# loader), which in turn sources /etc/bash_completion.d/vyatta-cfg, this
+# time with `_OFR_CONFIGURE=ok` present in the environment so the gate
+# passes and getSessionEnv/setupSession run.
+#
+# That chain works reliably over SSH-with-PTY. On the LS1046A ttyS0 serial
+# console it sporadically fails: my_cli_shell_api setupSession aborts with
+#     terminate called after throwing an instance of 'std::out_of_range'
+#       what():  basic_string::erase: __pos (which is 18446744073709551615)
+#                > this->size() (which is 0)
+#     Failed to set up config session
+# This is libvyatta-cfg's UnionfsCstore::setupSession() doing
+#     work_string = work_root.path_cstr();
+#     work_base   = work_string.erase(work_string.find_last_of("/"));
+# with work_root empty: find_last_of returns npos, erase(npos) throws.
+# work_root is derived from $VYATTA_TEMP_CONFIG_DIR, which is unset when the
+# eval on line 126 of vyatta-cfg produced an empty string — a race condition
+# on the ttyS0 path that has not been root-caused upstream.
+#
+# FIX
+# ---
+# Drop /etc/profile.d/zz-vyatta-cfg-env.sh that, on every interactive vbash
+# login, force-sources /etc/bash_completion.d/vyatta-cfg with
+# `_OFR_CONFIGURE=ok` set, so the VYATTA_* env vars are populated DIRECTLY
+# in the user's login shell — not in some later post-newgrp grand-child.
+# When the user types `configure`, op-mode's newgrp-spawned shell inherits
+# the already-populated env via $PPID lookup in script-template's
+# vyatta_configure(), and setupSession finds a valid work_root every time.
+#
+# WHY profile.d AND NOT a vyos-1x patch
+# -------------------------------------
+# vyos-1x ships /etc/bash_completion.d/vyatta-cfg verbatim from the upstream
+# vyatta-cfg repo. Patching that 1200-line file would create a permanent
+# rebase burden on every VyOS upstream pull. A self-contained additive
+# drop-in in /etc/profile.d is forward-compatible and trivially auditable.
+#
+# WHY zz- prefix
+# --------------
+# /etc/profile sources /etc/profile.d/*.sh in glob/sort order. We need to
+# run AFTER /etc/profile.d/bash_completion.sh would have run (if it
+# existed — it doesn't on this ISO, see /etc/bash.bashrc which has the
+# bash_completion sourcing block commented out), and after every other
+# profile drop-in that might affect PATH/HOME. zz- guarantees last.
+#
+# IDEMPOTENT
+# ----------
+# Re-running this hook overwrites the same file with identical content.
+# Re-sourcing on every login is cheap (no setupSession created until the
+# guard inside vyatta-cfg passes, which it always does once env is primed).
+
+mkdir -p /etc/profile.d
+
+cat > /etc/profile.d/zz-vyatta-cfg-env.sh <<'EOF'
+# LS1046A: prime VYATTA_* env on interactive vbash login.
+# See data/hooks/94-vbash-vyatta-env.chroot for the full diagnosis.
+#
+# Guards:
+#   * Only on bash (not /bin/sh dash invocation).
+#   * Only when interactive (PS1 set).
+#   * Only when env not already primed (avoid double-source if the
+#     user types `configure` then `exit` then `configure` again).
+#   * vyatta-cfg must be readable (some minimal containers strip it).
+if [ -n "${BASH:-}" ] && [ -n "${PS1:-}" ] && [ -z "${VYATTA_TEMP_CONFIG_DIR:-}" ] && [ -r /etc/bash_completion.d/vyatta-cfg ]; then
+    export _OFR_CONFIGURE=ok
+    # shellcheck disable=SC1091
+    . /etc/bash_completion.d/vyatta-cfg 2>/dev/null || true
+    unset _OFR_CONFIGURE
+fi
+EOF
+
+chmod 0644 /etc/profile.d/zz-vyatta-cfg-env.sh
+
+exit 0
