@@ -685,6 +685,29 @@ int ask_hw_pcd_bringup(void)
         h->hook_registered = true;
 
         ask_hw_pcd_inst = h;
+
+        /*
+         * v1.1-A late-registration replay. Empirical M2 verification
+         * on 2026-05-24 (kernel 6.18.31-vyos) confirmed all five FMan
+         * MAC ports completed fman_port_init() BEFORE this point in
+         * ask_init() ran -- async/parallel platform probing plus the
+         * MODULE_SIG_FORCE startup cost stalled the hook registration
+         * past every fman_port probe. Without replay the hook never
+         * fires, ask_hw_flow_insert_v4_tcp() returns -ENODEV for every
+         * insert, and kernel-net CPU sits at 33.14 % during forwarding.
+         *
+         * Drive a one-shot drain of pcd->pending_ports right now so
+         * any port that captured (port_id, base_fqid, hash_size) on
+         * the -ENOENT fall-through gets its install hook replayed.
+         * Errors are non-fatal: a failure here only means HW offload
+         * is unavailable for some ports; the kernel still forwards
+         * via mainline RSS.
+         */
+        rc = fman_pcd_install_now_for_existing_ports(pcd);
+        if (rc && rc != -ENOENT)
+                ask_pr_warn("hw: install_now replay returned %d (some ports may stay on default RSS)\n",
+                            rc);
+
         put_device(&pdev->dev);
 
         ask_pr_info("hw: Path A pre-netdev hook armed; CC pipelines install on first fman_port_init\n");
