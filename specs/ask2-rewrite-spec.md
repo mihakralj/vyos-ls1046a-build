@@ -50,39 +50,16 @@ The architectural model — first packet through conntrack, flow promoted to FMa
 
 Three components, each with one clear job:
 
+```mermaid
+graph TD
+    OP["Operator UX<br/>nft flow add @f · ip xfrm add ... offload packet<br/>ynl --family ask --do dump-flows · node_exporter (textfile)"]
+    K["ask.ko (modern OOT module, ~2800 LOC C)<br/>YNL family 'ask' + RCU flow table + xfrmdev_ops + flow_block_cb<br/>ask_pcd_install() runs from fman_memac.c pre-register_netdev (Path A)<br/>per-flow updates → fman_pcd_cc_node_add_key (CC-table row mutation, no carrier flap)<br/>shares CAAM AEAD descriptors via caam_qi_ext_consumer_register()"]
+    HW["FMan 210 (QEF 210.10.1) + CAAM QI (silicon)<br/>KG schemes + CC trees + FORWARD_FQ_WITH_MANIP (inline NAT/TTL/cksum/L2-rewrite)<br/>CAAM crypto descriptors dequeue from FMan-targeted FQs (no OH-port detour)"]
+    OP -->|"standard mainline tools"| K
+    K -->|"in-tree FMan PCD API (drivers/net/ethernet/freescale/fman/fman_pcd*)"| HW
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                                                                  │
-│   askd (userspace, sd-event)                                     │
-│     • subscribes to rtnetlink, xfrm_user, conntrack events       │
-│     • applies policy (ALG excludes, VPP-promote ACLs)            │
-│     • sends genl commands to ask.ko                              │
-│     • exposes /run/askd.sock for ask-cli                         │
-│                                                                  │
-└──────────────────────────────────────┬───────────────────────────┘
-                                       │ genl_family "ask" v1
-                                       │ (Section 7)
-┌──────────────────────────────────────▼───────────────────────────┐
-│                                                                  │
-│   ask.ko (modern kernel module, ~3500 LOC C)                     │
-│     • genl_family + RCU flow table + xfrmdev_ops + flow_block_cb │
-│     • registers as flow_offload backend for dpaa_eth netdevs     │
-│     • talks to 210 ucode through fmd_host_cmd() abstraction      │
-│     • talks to caam_qi.ko through caam_qi_ext_consumer_*()       │
-│                                                                  │
-└──────────────────────────────────────┬───────────────────────────┘
-                                       │ fmd_host_cmd: opcode + payload
-                                       │ (Section 12)
-┌──────────────────────────────────────▼───────────────────────────┐
-│                                                                  │
-│   FMan 210 ucode + CAAM QI (silicon)                             │
-│     • dynamic flow tables in MURAM                               │
-│     • CAAM crypto descriptors registered via QI                  │
-│     • offline ports (OH) for L3-routing re-inject AND            │
-│       IPsec re-inject — single OH-port mechanism, two callers    │
-│                                                                  │
-└──────────────────────────────────────────────────────────────────┘
-```
+
+The control plane is **kernel-only**: no `askd` daemon, no `ask-cli` Python tool, no `libask_fci.so.1` ABI shim. The userspace surface is mainline tools (`nft`, `ip xfrm`, `ynl`) plus a YAML schema (`Documentation/netlink/specs/ask.yaml`) that auto-generates per-language clients. VyOS op-mode calls `ynl --family ask` from Python directly. See §3.5 (Operator UX) and §6 (v1.3 daemon-deletion rationale).
 
 Plus a four-patch in-tree series (was three in v0.8 — §12.9 added the fourth):
 
@@ -93,7 +70,7 @@ Plus a four-patch in-tree series (was three in v0.8 — §12.9 added the fourth)
 
 Total in-tree patch: ~10,600 lines across the four patches. Patches 0001/0002/0003 are upstream-candidates today. 0004 is upstream-aspirational — the right consumers (NXP FMan maintainers Madalin Bucur, Camelia Groza, plus anyone shipping LS1043/LS1046 in mainline products) exist, but the patch is large enough that landing it requires sustained review effort.
 
-No vendored SDK. No `cdx_ctrl` ioctl surface. No `NETLINK_KEY=32`. No `comcerto_fp_*`. No `dpa_app` UMH dance. No XML parsing in the load path. No FMC binary blob loading. No `fmlib` userspace dependency.
+No vendored SDK. No `cdx_ctrl` ioctl surface. No `NETLINK_KEY=32`. No `comcerto_fp_*`. No `dpa_app` UMH dance. No XML parsing in the load path. No FMC binary blob loading. No `fmlib` userspace dependency. **No `askd`, no `ask-cli`, no `libask_fci.so.1`** (v1.3).
 
 ---
 
@@ -460,171 +437,20 @@ We provide: the device callback that translates SA state into 210 + CAAM hardwar
 
 ---
 
-## 6. The userspace daemon — `askd`
+## 6. (Removed in v1.3 — userspace control surface collapses to YNL + nft + node_exporter)
 
-### 6.1 What it is
+The v1.0/v1.1/v1.2 spec carried a ~170-line "§6. The userspace daemon — `askd`" chapter specifying a ~4000 LOC C daemon (sd-event + libmnl) for promotion policy, bytes-back keepalive, an `ask-cli` Python operator tool, and a `/dev/cdx_ctrl` + `libfci.so.1` ABI-compatibility-rejection rationale. v1.3 deletes the daemon and the CLI entirely:
 
-A small daemon, ~4000 LOC C with sd-event and libmnl, doing exactly two things:
+- **Promotion policy** is operator-facing nftables — `nft add rule inet filter forward ip protocol tcp tcp dport != { 21, 5060 } flow add @f` — with `/etc/ask/exclude-alg.nft` shipped as the canonical example. No kernel-internal exclusion list.
+- **Bytes-back keepalive** is an in-kernel periodic timer in `ask_flow.c` calling `nf_ct_refresh_acct()` every 1 s. ~30 LOC. Replaces what was a userspace `sd-event` loop.
+- **Operator CLI** is `ynl --family ask --do dump-flows` (and similar). The YNL YAML schema lives at `Documentation/netlink/specs/ask.yaml` (spec §7.4). VyOS op-mode wraps the `ynl` calls from Python. No `ask-cli` binary.
+- **Prometheus metrics** is an in-kernel 5 s periodic write of `/run/ask/metrics.prom`, scraped by `node_exporter --collector.textfile`. ~50 LOC.
+- **VPP handoff** is deferred to v1.1 as a `Type=oneshot` `ask-vpp-promote` systemd unit (~600 LOC, the only userspace ASK2 surface that survives v1.3). Not in v1.0.
+- **Legacy ABI** — `/dev/cdx_ctrl`, `libfci.so.1`, `/etc/cdx_*.xml`, `/etc/config/fastforward` — is **FORBIDDEN** in v1.3 (§19). There are no surviving callers outside the archived legacy stack. No compat shim, no symlink, no XML parser.
 
-1. Subscribe to kernel events (rtnetlink, conntrack, xfrm_user) and decide whether each event becomes a flow promotion
-2. Implement operator-facing CLI and policy configuration
+Concretely, `ask.ko` is the entire offload control surface; the genl family `ask` (§7) is its only ABI; mainline Linux tools (`nft`, `ip xfrm`, `ynl`, `node_exporter`) are the entire operator UX. The v1.0/v1.1/v1.2 §6 chapter is preserved in git history if needed for archaeological reference; new development must not re-introduce a daemon.
 
-It does not duplicate kernel work. It does not parse routing tables from `/proc`. It does not run a control plane.
-
-### 6.2 Why askd exists at all
-
-The kernel module handles `nf_flow_table` promotions automatically once the operator's nftables ruleset says `flow add @f`. So askd is only needed for:
-
-- **Promotion policy** — decide WHICH conntrack flows are promotion-eligible based on ALG exclusion list, VPP-promote ACLs, etc.
-- **Bytes-back keepalive** — refresh conntrack last-used time so software conntrack doesn't expire hardware-active flows
-- **Operator CLI** — show flows, show stats, show MURAM, clear flows
-- **VPP handoff orchestration** — when a flow matches a VPP-promote ACL, set up memif handoff instead of direct hardware offload
-- **Metrics export** — Prometheus exporter on TCP /metrics
-
-Operators who want pure declarative configuration via nftables can run without askd. The kernel module is functional on its own. askd adds: policy, operator UX, and VPP integration.
-
-### 6.3 Architecture
-
-```
-askd/
-├── meson.build                                 # meson build, not autotools
-├── src/
-│   ├── main.c                                  # argv, sd_notify ready, signal handlers
-│   ├── event_loop.c                            # sd_event main loop
-│   ├── genl_client.c                           # libmnl wrapper for ask genl family
-│   ├── conntrack.c                             # libnetfilter_conntrack subscription
-│   ├── xfrm_events.c                           # xfrm_user RTM_NEWSA subscription
-│   ├── rtnl.c                                  # RTM_NEWROUTE / RTM_NEWNEIGH subscription
-│   ├── policy.c                                # ALG exclude, VPP-promote ACLs
-│   ├── promotion.c                             # decision: hw offload | vpp memif | leave to nft
-│   ├── vpp_memif.c                             # libmemif handoff to VPP
-│   ├── varlink_api.c                           # systemd Varlink API for ask-cli
-│   ├── prometheus.c                            # /metrics HTTP endpoint
-│   └── log.c                                   # structured journald output
-├── data/
-│   ├── askd.service                            # systemd service unit
-│   ├── askd.preset                             # systemd preset
-│   ├── askd.policy                             # polkit policy for varlink
-│   └── ask.conf                                # /etc/ask/ask.conf default
-├── tests/
-│   ├── test_promotion.c                        # cmocka unit tests
-│   ├── test_policy.c
-│   └── integration/
-│       └── test_e2e.py                         # pytest end-to-end on real hardware
-└── README.md
-```
-
-Modern choices vs NXP `cmm`:
-
-| `cmm` (legacy) | `askd` (2026) |
-|---|---|
-| autotools | meson |
-| glib event loop | sd-event |
-| libcli (1990s Cisco-style) | systemd Varlink for IPC |
-| `/proc/net/route` polling | rtnetlink subscription |
-| `/var/log/cmm.log` text logging | structured journald with fields |
-| Hand-rolled netlink message construction | libmnl with type-safe attribute helpers |
-| `fork()`-and-daemonize | sd_notify Type=notify |
-| No metrics | Prometheus /metrics exporter |
-| No IPC API | Varlink interface for ask-cli + scripts |
-
-### 6.4 Promotion decision logic
-
-```c
-/* Pseudocode — actual implementation in promotion.c */
-askd_promotion_decide(struct conntrack_event *ev)
-{
-    /* 1. Filter by protocol */
-    if (alg_exclusion_match(ev->proto, ev->src_port, ev->dst_port))
-        return PROMOTE_NONE;
-
-    /* 2. Resolve next-hop */
-    nh = rtnl_lookup_next_hop(ev->dst_ip);
-    if (!nh || !nh->reachable)
-        return PROMOTE_RETRY;
-
-    /* 3. Check egress interface offloadability */
-    if (!iface_offload_capable(nh->oif))
-        return PROMOTE_NONE;
-
-    /* 4. Check VPP-promote ACL */
-    if (vpp_promote_acl_match(ev))
-        return PROMOTE_VPP_MEMIF;
-
-    /* 5. Default: promote to hardware */
-    return PROMOTE_HARDWARE;
-}
-```
-
-Decisions flow to either `ASK_CMD_FLOW_ADD` over genl (hardware path) or `vpp_memif.c` (VPP path).
-
-### 6.5 systemd integration
-
-```ini
-# /lib/systemd/system/askd.service
-[Unit]
-Description=ASK2 promotion daemon
-Documentation=man:askd(8)
-After=network-pre.target systemd-modules-load.service
-Wants=network-pre.target
-ConditionPathExists=/sys/module/ask
-ConditionCapability=CAP_NET_ADMIN
-
-[Service]
-Type=notify
-NotifyAccess=main
-ExecStart=/usr/bin/askd
-ExecReload=/bin/kill -HUP $MAINPID
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=131072
-
-# Sandboxing
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-PrivateDevices=no
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
-RestrictNamespaces=yes
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation @obsolete @raw-io
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Compare to `cmm.service`: no `ConditionPathExists=/dev/cdx_ctrl`, no `ExecStartPre` to write sysfs hooks, no LimitMEMLOCK gymnastics, full systemd sandboxing.
-
-### 6.6 ask-cli (operator tool)
-
-A small CLI in Python that talks to askd over Varlink. Replaces `cmmctl` (1500 LOC C).
-
-```
-ask-cli flows list
-ask-cli flows show <flow-id>
-ask-cli stats summary
-ask-cli muram
-ask-cli events tail
-ask-cli policy show
-ask-cli policy reload
-```
-
-Python because: VyOS already pulls in Python, the CLI is not performance-critical, Varlink has a clean Python client (`varlink` package), and tabular output looks better with `rich`.
-
-### 6.7 No legacy ABI compatibility shim
-
-NXP 1.x had `/dev/cdx_ctrl` ioctls and `libfci.so.1`. Vendor tools linked against these. **We deliberately do not preserve this ABI.**
-
-Reasoning: there are no surviving vendor tools that depend on it outside Mono's own builds. Mono builds the entire stack; they recompile against the new genl interface. Preserving 30+ ioctl numbers and a parallel netlink protocol for hypothetical legacy tools adds ~500 LOC of pure compat shim that nobody uses.
-
-If a deployment surfaces that genuinely needs `cdx_ctrl` compatibility, ship a separate `libask-compat.so.1` that translates the legacy ioctl surface to genl. Optional, out-of-tree, not in v1.0.
+See also: `plans/ASK2-COURSE-CORRECTION.md` Phase 5 (the doc-lock commit that landed this deletion) and `plans/ASK2-MODERN-ARCHITECTURE-REVIEW.md` §6 (the architecture review that justified it).
 
 ---
 
@@ -1397,44 +1223,50 @@ The acceptance gates in Section 11.1 must pass on the Mono test rig before v1.0 
 
 ## 15. Effort estimation
 
-### 15.1 LOC estimate
+### 15.1 LOC estimate (v1.3 — per `plans/ASK2-COURSE-CORRECTION.md` §3)
 
-| Component | LOC | Notes |
-|---|---|---|
-| ask.ko (kernel module) | 1500 | Modern C, RCU/u64_stats_sync, YNL-driven. **v1.3 deletes** ~1500 LOC of v1.2 graft logic (`ask_hw.c`), ~200 LOC `ask_neigh.c` deferred-resolve, ~1000 LOC `ask_hostcmd.c` (now §12 dead code) — Path A install-pre-`register_netdev()` is the simpler replacement. |
-| ask_bridge.ko (L2 bridge offload) | 400 | switchdev_notifier consumer; separate .ko per v1.3 §13 split |
-| In-tree patches 0001/0002 | 500 | `caam_qi_ext_consumer_register` + `dpaa_eth flow_block_cb`. v1.3 deletes patch 0003 (`fman-host-command-api`) — not used by Path A. |
-| **In-tree patch 0004 — FMan PCD subsystem (§13)** | **7800** | **v1.3 reverts v1.2's +2400 OH-port expansion.** 7 .c + 1 .h (KG/CC-with-FORWARD_FQ_WITH_MANIP/manip/plcr/prs/replic/orchestration). `fman_pcd_oh.c` deleted; `fman_pcd_manip.c` reverts 1600→1200 (drops L2-rewrite tags); `fman_port.c` OH-instantiation hook deleted. |
-| In-tree patch 0044 — `fman_memac.c` Path A hook | 100 | Single pre-`register_netdev()` callback into `ask_pcd_install()`. v1.3 NEW. |
-| YNL schema `Documentation/netlink/specs/ask.yaml` | 300 | Auto-generates ynl C + Python clients. v1.3 NEW — replaces askd + ask-cli + libask_fci.so.1 wholesale. |
-| VyOS CLI integration | 1200 | XML defs + conf_mode + op_mode (op_mode calls kernel via `ynl` Python module directly — no daemon, no Varlink, no libfci) |
-| Build pipeline | 600 | bin/ci-build-ask-*.sh, hooks |
-| Test suite (kunit + pytest) | 2000 | Unit + integration + fuzzing harness. v1.3 deletes `fman_pcd_oh_test.c` + `test_v4_forward_oh.py` + ask_hostcmd_test.c golden-hex tests. |
-| Documentation | 350 | YAML schema doc + `ynl --do` examples + spec §3.5 Operator UX. v1.3 deletes man pages for askd/ask-cli (deleted components). |
-| **Total** | **~14750 LOC** | Same envelope as v0.8 (pre-OH-port). v1.3's three reductions (Path A, FORWARD_FQ_WITH_MANIP, no-userspace) net out to roughly the original v1.0 budget — but with carrier-flap-free per-flow updates and no userspace daemon. |
+| Component | LOC (v1.3) | Was (v1.2) | Notes |
+|---|---|---|---|
+| ask.ko (OOT module) | **2800** | 3700 | Modern C, RCU/u64_stats_sync, YNL-driven. v1.3 deletes ~1500 LOC of v1.2 graft logic (`ask_hw.c`), ~200 LOC `ask_neigh.c` deferred-resolve, ~1000 LOC `ask_hostcmd.c` — Path A pre-`register_netdev()` install is the simpler replacement. |
+| ask_bridge.ko (L2 bridge offload) | 400 | 400 | switchdev_notifier consumer; separate .ko |
+| In-tree patches 0001/0002 | 500 | 500 | `caam_qi_ext_consumer_register` + `dpaa_eth flow_block_cb`. v1.3 deletes patch 0003 (`fman-host-command-api`) — not used by Path A. |
+| **In-tree patch 0004 — FMan PCD subsystem (§13)** | **5500** | 10000 | **v1.3 reverts v1.2's OH-port expansion.** 7 .c + 1 .h (KG / CC-with-`FORWARD_FQ_WITH_MANIP` / manip / plcr / prs / replic / orchestration). `fman_pcd_oh.c` deleted; `fman_pcd_manip.c` reverts 1600→1200 (drops L2-rewrite tags); `fman_port.c` OH-instantiation hook deleted. |
+| **In-tree patch 0005 — `FORWARD_FQ_WITH_MANIP` CC-action** | **150** | (NEW) | New CC-action type per RM §8.7.3.4 + SDK `e_FM_PCD_CC_KEY_FLAG_DO_MANIP_BEFORE_NE`. Inline NAT/TTL/checksum MANIP chain fired by CC-key hit in one atom — no OH-port detour. |
+| In-tree patch 0044 — `fman_memac.c` Path A hook | 100 | (NEW) | Single pre-`register_netdev()` callback into `ask_pcd_install()`. |
+| YNL schema `Documentation/netlink/specs/ask.yaml` | 300 | 300 | Auto-generates ynl C + Python clients. Replaces askd + ask-cli + libask_fci.so.1 wholesale. |
+| `askd` userspace daemon | **0** | 4000 | **DELETED in v1.3.** Promotion logic lives in kernel (`nf_flow_table` + `xfrmdev_ops`); operator UX via `ynl` + `nft` + `node_exporter`. |
+| `ask-cli` Python tool | **0** | 800 | **DELETED in v1.3.** `ynl --family ask --do …` is the operator surface; VyOS op-mode wraps it. |
+| `libask_fci.so.1` ABI shim | **0** | 800 | **DELETED in v1.3.** Spec §19 lists it as FORBIDDEN. |
+| `ask-load` early-init binary | **0** | 1200 | **DELETED in v1.3.** Path A pre-`register_netdev()` hook subsumes the role. |
+| VyOS CLI integration | 1200 | 1200 | XML defs + conf_mode + op_mode (op_mode calls kernel via `ynl` Python module directly — no daemon, no Varlink, no libfci) |
+| Build pipeline | 600 | 600 | bin/ci-build-ask-*.sh, hooks |
+| Test suite (kunit + pytest) | **1600** | 2700 | Unit + integration + fuzzing harness. v1.3 deletes `fman_pcd_oh_test.c` + `test_v4_forward_oh.py` + `ask_hostcmd_test.c` golden-hex tests. |
+| Documentation | **1000** | 1500 | YAML schema doc + `ynl --do` examples + spec §3.5 Operator UX. v1.3 deletes man pages for askd/ask-cli (deleted components). |
+| **Total** | **~12700 LOC** | ~25000 | **49 % reduction.** v1.3's three concurrent reductions (Path A, `FORWARD_FQ_WITH_MANIP`, no-userspace) eliminate the OH-port subsystem, the wire-format layer, and the entire userspace control plane. |
 
-The PCD subsystem (§13) is the single largest component and the gating block for §11.1 perf gates. It is still **~9,250 LOC smaller** than a forward-port of the deleted SDK PCD code (~30,000 LOC vendor C) would have been — see §12.9 cost survey and §13.1 savings table.
+The PCD subsystem (§13) at 5500 LOC remains the single largest component and the gating block for §11.1 perf gates. It is **~24,500 LOC smaller** than a forward-port of the deleted SDK PCD code (~30,000 LOC vendor C) would have been — see §13.1 savings table.
 
-### 15.2 Implementation time (spec-driven)
+### 15.2 Implementation time (spec-driven, v1.3)
 
 Given the spec is concrete and the design uses standard mainline patterns, productivity is bounded by the strength of mainline precedent for each component:
 
 | Component | Precedent strength | Productivity (LOC/day) | Eng-days |
 |---|---|---|---|
-| ask.ko core (flow table, RCU, genl) | Very strong (mlx5, nfp examples) | 600 | 6 |
+| ask.ko core (flow table, RCU, genl, Path A `ask_pcd_install()`) | Very strong (mlx5, nfp examples) | 600 | 5 |
 | ask.ko offload (flow_block, xfrmdev) | Strong (mainline patterns) | 400 | 5 |
-| ask.ko hostcmd (wire protocol) | Strong (Section 12 specification) | 500 | 3 |
 | ask.ko CAAM glue | Medium (one in-tree patch) | 300 | 2 |
-| In-tree patches 0001/0002/0003 | Strong (mainline conventions) | 200 | 4 |
-| **In-tree patch 0004 — FMan PCD (§13), RX-port scope (PR14a-g)** | **Medium (RM §8.7–8.10, no upstream precedent)** | **300** | **26** |
-| **In-tree patch 0004 — OH-port + L2-rewrite extension (§13.3 oh / manip-v1.2, PR14h-j)** | **Medium-low (RM §8.11, SDK devoh.c as cross-ref, no upstream precedent)** | **250** | **9** |
-| askd | Very strong (modern daemon patterns) | 800 | 5 |
-| ask-cli | Very strong (Python Varlink client) | 1000 | 1 |
-| VyOS CLI | Very strong (VPP precedent) | 600 | 2 |
+| In-tree patches 0001/0002 | Strong (mainline conventions) | 200 | 3 |
+| In-tree patch 0044 (`fman_memac.c` Path A hook) | Strong | 100 | 1 |
+| **In-tree patch 0004 — FMan PCD (§13), v1.3 scope (~5500 LOC)** | **Medium (RM §8.7–8.10, no upstream precedent)** | **300** | **18** |
+| **In-tree patch 0005 — `FORWARD_FQ_WITH_MANIP` CC-action (~150 LOC)** | **Medium (RM §8.7.3.4 + SDK `e_FM_PCD_CC_KEY_FLAG_DO_MANIP_BEFORE_NE` cross-ref)** | **150** | **1** |
+| YNL schema `Documentation/netlink/specs/ask.yaml` | Strong (mainline precedent: ethtool, dpll, mptcp) | 300 | 1 |
+| VyOS CLI integration (XML + conf_mode + op_mode calling `ynl` directly) | Very strong (VPP precedent) | 600 | 2 |
 | Build pipeline | Strong | 400 | 2 |
-| Test suite | Strong | 500 | 5 |
-| Documentation | Strong | 800 | 2 |
-| **Subtotal spec-implementable** | | | **63 eng-days** |
+| Test suite (kunit + pytest, v1.3 — no askd/ask-cli/golden-hex tests) | Strong | 500 | 3 |
+| Documentation | Strong | 800 | 1 |
+| **Subtotal spec-implementable (v1.3)** | | | **44 eng-days** |
+
+v1.3 drops `askd` (5 eng-days), `ask-cli` (1 eng-day), `ask.ko hostcmd` (3 eng-days), and OH-port extension PR14h-j (9 eng-days) — net **~19 eng-days saved** vs v1.2. `FORWARD_FQ_WITH_MANIP` (1 eng-day) and Path A `fman_memac.c` hook (1 eng-day) are the v1.3 additions.
 
 ### 15.3 Hardware-bound and review-bound work
 
@@ -1450,20 +1282,20 @@ These items require live silicon, a traffic generator, or upstream review and ru
 | Code review and integration | 3 |
 | **Subtotal calendar (mostly parallel)** | **12-14 weeks** |
 
-### 15.4 Realistic total
+### 15.4 Realistic total (v1.3)
 
 Combining the spec-implementable work with the hardware-bound and review-bound calendar:
 
-- **Months 1-2**: ask.ko core + in-tree patches 0001/0002/0003 + skeleton ask.ko on hardware. M1 gate: `modprobe ask` succeeds, `ASK_CMD_GET_INFO` round-trip works. **[Done 2026-05-13.]**
-- **Months 2-3**: **FMan PCD subsystem (§13 / patch 0004) RX-port scope** — orchestration, KG schemes (match_vector ≠ 0), CC match trees, manip (NAT/VLAN/TTL only), plcr, prs, replic, end-to-end RX-port wire-up. PR14a–g. **M2-classification sub-gate**: nft `flow add` → CC-node hit counter increments at line rate (validates classification fires). **[Done 2026-05-16; M2-classification sub-gate met; M2-perf sub-gate deferred to OH-port path.]**
-- **Month 4**: **OH-port subsystem (v1.2 §13.3 `fman_pcd_oh.c` + manip v1.2 + `fman_port.c` OH-instantiation + DT bindings)** — PR14h (OH-port driver), PR14i (MANIP v1.2 — `RMV_ETHERNET` + `INSRT_GENERIC` + `FIELD_UPDATE_IPV4_FORWARD`), PR14j (ask.ko two-stage chain wire-up per §13.5). **M2-perf gate**: nft `flow add` → packet traverses OH-port re-injection on real hardware → §11.1 IPv4-forwarding 1518 B ≥ 18 Gbps + CPU < 20 % at 17 Gbps.
-- **Month 5**: All non-IPsec flow types + L2-bridge + xfrm packet-mode + CAAM integration (the OH-port driver is already in place from Month 4 — IPsec re-inject re-uses the same `fman_pcd_oh.c` infrastructure with a different MANIP chain per §13.3). M3+M4 gates: NAT works, L2-bridge offload works, AES-GCM-128 IPsec at 3 Gbps.
-- **Months 6-7**: askd + ask-cli + VyOS CLI + soak. M5 gate: vanilla Mono Gateway DK boots VyOS rolling with `set system offload ask` and forwards at line rate.
-- **Months 8-9**: VPP coexistence, performance tuning, soak testing, v1.0 RC. Buffer absorbs hardware-discovered OH-port edge cases (e.g. MURAM AD-chain alignment, OH-port IRQ routing, MANIP-chain ordering against the IPv4 ID-field rewrite).
+- **Months 1-2**: ask.ko core + in-tree patches 0001/0002 + skeleton ask.ko on hardware. M1 gate: `modprobe ask` succeeds, `ASK_CMD_GET_INFO` round-trip works. **[Done 2026-05-13.]**
+- **Months 2-3**: **FMan PCD subsystem (§13 / patch 0004)** — orchestration, KG schemes (match_vector ≠ 0), CC match trees, manip (NAT/VLAN/TTL), plcr, prs, replic. PR14a–g. **M2-classification sub-gate**: nft `flow add` → CC-node hit counter increments at line rate (validates classification fires). **[Done 2026-05-16.]**
+- **Month 4 (v1.3 — replaces v1.2's OH-port month)**: **Path A boot-time PCD install + `FORWARD_FQ_WITH_MANIP` inline CC-action.** Patch 0044 wires `ask_pcd_install()` into `fman_memac.c` pre-`register_netdev()`; patch 0005 adds the `FORWARD_FQ_WITH_MANIP` CC-action type (RM §8.7.3.4 + SDK `e_FM_PCD_CC_KEY_FLAG_DO_MANIP_BEFORE_NE`). `ask_hw.c` graft logic and `ask_neigh.c` deferred-resolve are deleted. **M2-perf gate**: nft `flow add` → CC-key hit fires inline MANIP chain (RMV_ETHERNET + INSRT_GENERIC L2 + FIELD_UPDATE_IPV4_FORWARD) and enqueues to peer TX FQ — all in one FMan pass, no OH-port detour, no A72 cycles per packet. Target: §11.1 IPv4-forwarding 1518 B ≥ 18 Gbps + CPU < 20 % at 17 Gbps.
+- **Month 5**: All non-IPsec flow types + L2-bridge + xfrm packet-mode + CAAM integration. M3+M4 gates: NAT works, L2-bridge offload works, AES-GCM-128 IPsec at 3 Gbps.
+- **Months 6-7**: YNL schema + VyOS CLI (op_mode calls `ynl --family ask` from Python directly) + soak. M5 gate: vanilla Mono Gateway DK boots VyOS rolling with `set system offload ask` and forwards at line rate.
+- **Months 7-8**: VPP coexistence, performance tuning, soak testing, v1.0 RC. Buffer absorbs hardware-discovered `FORWARD_FQ_WITH_MANIP` edge cases (e.g. MANIP-chain ordering against IPv4 ID-field rewrite, CC-key-action atom timing).
 
-**Total: 8-9 months end-to-end.** v0.8 estimated 6 months on the (incorrect) assumption that the in-tree FMan PCD existed; v1.0 bumped to 7 months for the RX-port PCD scope; **v1.2 bumps to 8-9 months for the OH-port subsystem that PR14g hardware bring-up proved necessary** to actually meet the §11.1 perf gates.
+**Total: 7 months end-to-end (v1.3).** v0.8 estimated 6 months on the (incorrect) assumption that the in-tree FMan PCD existed; v1.0 bumped to 7 months for the RX-port PCD scope; v1.2 bumped to 8-9 months for the OH-port subsystem; **v1.3 reverts to 7 months** by replacing OH-port indirection with the inline `FORWARD_FQ_WITH_MANIP` CC-action atom and by collapsing the userspace control plane (askd / ask-cli / libfci) into the YNL family + nft + `node_exporter`.
 
-If hardware verification of the OH-port subsystem reveals RM-§8.11-undocumented edge cases (e.g. AD-chain MURAM alignment on r1.0 silicon vs r1.1, OH-port IRQ vector mapping different per board revision), add 1 month. If upstream patch review delays affect critical path, those happen in parallel — they don't gate v1.0 GA.
+If hardware verification reveals that `FORWARD_FQ_WITH_MANIP` does not behave as RM §8.7.3.4 documents (Risk #1 in `plans/ASK2-COURSE-CORRECTION.md`), fall back to the OH-port subsystem from `kernel/flavors/ask/patches/archived/` as a **v1.1 follow-up** (~1 day to restore). Cost is bounded. If upstream patch review delays affect critical path, those happen in parallel — they don't gate v1.0 GA.
 
 ---
 
