@@ -1,6 +1,8 @@
 # ASK2 — Modern Linux Implementation of FMan 210 Hardware Offload for VyOS
 
-**Status:** Draft v1.2 (supersedes v1.1). 2026-05-16. Material change vs v1.1: **PR14g hardware-bringup discovered that the M2 perf gate (§11.1) is unreachable with the v1.1 §13 design** because the only silicon mechanism by which an FMan PCD chain can produce **L3-routed** forwarding offload (the §11.1 IPv4-forwarding rows ≥14/18/8 Gbps and CPU<20% @17 Gbps) is the **FMan Offline Host (OH) port** with a two-stage classify→re-inject pipeline that does the per-hop L2 rewrite (dst-MAC swap from ingress to next-hop, src-MAC swap to egress port MAC) in silicon before the egress TX port enqueue. The v1.1 §13 ABI exposed only RX-port classification + a `FORWARD_FQ` action — that path either dumps frames back into the kernel RX-default FQ (no CPU savings, observed 6.9 Gbps / 55% CPU on the M2 bring-up) or, if redirected to the peer's egress TX FQ, sends frames out the wire with stale L2 headers that the next-hop drops. The legacy NXP ASK SDK solved the same problem with OH ports (`devoh.c` + `cdx_ehash.c` + `dpa_cfg.c` in the archived `mihakralj/kernel-ls1046a-build@464df181` `release/oot-modules/cdx/`); mainline 6.18 carries no OH-port driver, no DT binding, and no L2-rewrite MANIP primitive. v1.2 pulls the OH-port subsystem forward from §15.4 Month 5 into M2 (Month 4), bumps patch 0004 from ~7800 LOC to ~10000 LOC (new `fman_pcd_oh.c` ~800 LOC + extended `fman_pcd_manip.c` for `RMV_ETHERNET` / `INSRT_GENERIC` / `FIELD_UPDATE_IPV4_FORWARD` ~400 LOC + `fman_port.c` OH-instantiation hook ~40 LOC + DT binding doc ~20 LOC), and bumps the end-to-end calendar 7 → 8-9 months. v1.1's provenance relaxation (GPL SDK references usable for silicon-behaviour cross-ref) and v1.0's §12.9 cost survey are unchanged.
+**Status:** Draft v1.3 (supersedes v1.2). 2026-05-24. **v1.3 course-correction per `plans/ASK2-MODERN-ARCHITECTURE-REVIEW.md` and `plans/ASK2-COURSE-CORRECTION.md`** — three concurrent reductions: (1) **Path A** (boot-time PCD installation via pre-`register_netdev()` hook in `fman_memac.c`) replaces graft; `ask_hw.c` graft logic + `ask_neigh.c` deferred-resolve are deleted; `ask_pcd_install()` is the new entry point; per-flow updates mutate CC table rows only (no MAC reconfig, no carrier flap). (2) **`FORWARD_FQ_WITH_MANIP`** (RM §8.7.3.4 + SDK `e_FM_PCD_CC_KEY_FLAG_DO_MANIP_BEFORE_NE`) deletes the OH-port detour: a CC match fires the L2-rewrite MANIP chain in one CC-action atom before the next-engine FQ enqueue, so the v1.2 OH-port subsystem (`fman_pcd_oh.c` ~800 LOC + DT bindings + manip-v1.2 ~400 LOC) is **deleted wholesale**; M2 patch 0004 reverts from ~10000 → ~7800 LOC; calendar reverts 8–9 → 7 months. (3) **No askd, no libask_fci.so.1, no ask-cli** — userspace control surface collapses to a single YNL family `ask` (YAML schema at `Documentation/netlink/specs/ask.yaml`); VyOS calls the kernel directly via `ynl` from Python; the AGENTS.md "ABI compatibility surfaces" sentence (preserve `libfci.so.1` SONAME, `/etc/cdx_*.xml`, `/dev/cdx_ctrl` symlink, `/etc/config/fastforward`) is deleted. Net LOC: oot-modules `ask.ko` ~1500 + `ask_bridge.ko` ~400, in-tree patches ~7800, userspace ~0 (was ~8000). `ask_hostcmd.c` + golden-hex tests + patch 0003 are deleted. Patches 0032/0034/0036/0038/0042/0043 (graft-era) are archived. Sections still labelled v1.1/v1.2 below remain authoritative for the silicon facts they document; only the v1.2 "pull OH-port forward into M2" decision and the v1.0/v1.1 "userspace daemon + libfci ABI" decisions are reversed.
+
+**Status (prior, v1.2):** Draft v1.2 (supersedes v1.1). 2026-05-16. Material change vs v1.1: **PR14g hardware-bringup discovered that the M2 perf gate (§11.1) is unreachable with the v1.1 §13 design** because the only silicon mechanism by which an FMan PCD chain can produce **L3-routed** forwarding offload (the §11.1 IPv4-forwarding rows ≥14/18/8 Gbps and CPU<20% @17 Gbps) is the **FMan Offline Host (OH) port** with a two-stage classify→re-inject pipeline that does the per-hop L2 rewrite (dst-MAC swap from ingress to next-hop, src-MAC swap to egress port MAC) in silicon before the egress TX port enqueue. The v1.1 §13 ABI exposed only RX-port classification + a `FORWARD_FQ` action — that path either dumps frames back into the kernel RX-default FQ (no CPU savings, observed 6.9 Gbps / 55% CPU on the M2 bring-up) or, if redirected to the peer's egress TX FQ, sends frames out the wire with stale L2 headers that the next-hop drops. The legacy NXP ASK SDK solved the same problem with OH ports (`devoh.c` + `cdx_ehash.c` + `dpa_cfg.c` in the archived `mihakralj/kernel-ls1046a-build@464df181` `release/oot-modules/cdx/`); mainline 6.18 carries no OH-port driver, no DT binding, and no L2-rewrite MANIP primitive. v1.2 pulls the OH-port subsystem forward from §15.4 Month 5 into M2 (Month 4), bumps patch 0004 from ~7800 LOC to ~10000 LOC (new `fman_pcd_oh.c` ~800 LOC + extended `fman_pcd_manip.c` for `RMV_ETHERNET` / `INSRT_GENERIC` / `FIELD_UPDATE_IPV4_FORWARD` ~400 LOC + `fman_port.c` OH-instantiation hook ~40 LOC + DT binding doc ~20 LOC), and bumps the end-to-end calendar 7 → 8-9 months. v1.1's provenance relaxation (GPL SDK references usable for silicon-behaviour cross-ref) and v1.0's §12.9 cost survey are unchanged.
 
 **Status (prior):** Draft v1.1. 2026-05-14. Material change vs v1.0: the previous provenance constraint on §13's FMan PCD subsystem has been relaxed. The deleted NXP SDK PCD tree (preserved in `mihakralj/kernel-ls1046a-build@464df181`) is GPL-2.0 (dual-licensed BSD-3-or-GPL-2.0) and the `we-are-mono/ASK` legacy stack is likewise GPL — both are usable as references for silicon behaviour, MURAM byte layouts, and register-write ordering. **What remains rejected is the SDK's architecture, not its silicon facts**: the `handle_t` opaque ABI, `fsl-ncsw` OS-shim layer, AMP IPC, `TRACE_RTOS`, `fm_ehash.c` custom hash, and nested `Peripherals/FM/Pcd/` directory layout are still discarded in favour of modern kernel idioms (typed structs, `kmalloc`/`devm_kzalloc`, `ioremap`/`readl`/`writel`, `mutex`/`spinlock`/`rcu`, `rhashtable`, tracepoints, flat `drivers/net/ethernet/freescale/fman/` layout). The LS1046A Reference Manual chapter 8 remains authoritative for byte-perfect MURAM layouts when SDK code disagrees with itself or omits a field. Net effect: PR14 body work unblocks immediately — sessions without RM access in the workspace can still author body PRs by cross-referencing the archived SDK alongside the RM. v1.0's §12.9 cost survey (~7800 LOC net target after dropping SDK bloat) is unchanged; only the provenance discipline is relaxed. Risk #12 reframed from copyright concern to maintainability concern. Open question #8 closed.
 **Target hardware:** NXP LS1046A Mono Gateway DK.
@@ -130,24 +132,41 @@ Identical to v0.6:
 
 ---
 
+### 2.4 210 microcode silicon-fact note (v1.3, condensed from former §12)
+
+The 210 microcode loaded by U-Boot on Mono Gateway DK is **stock NXP QEF 210.10.1** ("Microcode version 210.10.1 for LS1043 r1.0", magic `'Q' 'E' 'F' 0x01` at offset 4 of the SPI-flash blob, ASCII description at offset 8). It is the upstream QorIQ Engine Firmware that mainline `drivers/net/ethernet/freescale/fman/fman.c` drives via the in-tree FMan PCD API (parser, classifier, KeyGen, policer programmed through MURAM-resident config tables — see §13).
+
+What ASK2 v1.3 uses from this silicon:
+
+1. **Microcode version-read via DT**, not via opcode probe. `of_find_compatible_node("fsl,fman-firmware")` + `of_get_property("fsl,firmware")` returns the SPI-flash blob; `ask_hw_ucode_get_version()` reads the offset-4 magic + offset-8 description string to populate the `ASK_INFO` YNL reply with `family=210, major=10, minor=1, patch=0`.
+2. **FPM register topology**, documented but not used. Host-command doorbell at FMan base + 0xC30E0 (`fmfp_cev[0..3]`), mask at +0xC3040 (`fmfp_cee[0..3]`), response IRQ bits in `fm_npi` at +0xC30D4 (`INTR_EN_REV0..3` = 0x8000/0x4000/0x2000/0x1000). **Stock QEF does not poll the CEV doorbell or raise REV events** — ASK2 v1.3 never writes the CEV registers and never enables the REV IRQ bits. The topology is documented here purely so a future custom-microcode path can be wired without re-deriving it.
+3. **Event IRQ binding**: SPI 44 (Linux IRQ 59) is the FMan event IRQ on LS1046A; SPI 45 is the FMan err IRQ (shared with `bman-err`/`qman-err`). ASK2 v1.3 does not subscribe to the event IRQ — there are no opcode-driven events on QEF 210.10.1.
+4. **MURAM partitioning**: observable via the in-tree `fman_muram` allocator API and via the parser/classifier table layouts programmed through the FMan PCD interface (§13). `fman_pcd_get_muram_budget()` exposes per-FMan free-MURAM telemetry via the YNL `ASK_CMD_GET_MURAM` reply.
+5. **`STRICT_DEVMEM=y`** blocks `/dev/mem` peeks at FMan FPM from userspace; register-level probing requires a kernel-side ioremap or a debug kernel build with `STRICT_DEVMEM=n`. Operational kernels stay strict.
+
+What ASK2 v1.3 does **not** use:
+- The host-command opcode-dispatch protocol described in v1.2 §12.1–§12.6 (`OP_GET_UCODE_VERSION=0x01`, `OP_FLOW_INSERT_V4_TCP=0x10`, …). Those opcodes were implemented by a vendor-proprietary microcode that shipped in the legacy `we-are-mono/ASK` tree but **not** by mainline U-Boot or by our SPI-flash blob. The §12 wire format is dead-code-deleted from `ask_hostcmd.c` in Phase 3.
+- `OP_OP_CONFIGURE=0x30` / `OP_OP_FLUSH=0x31` Offline-Host port opcodes. The OH-port subsystem itself is deleted in v1.3 (§13.2) — `FORWARD_FQ_WITH_MANIP` replaces it.
+
 ## 3. The kernel module — `ask.ko`
 
 ### 3.1 What it is
 
-A single kernel module, ~3500 LOC C, building out-of-tree against linux-6.18.x. Loaded after `dpaa_eth`. Registers:
+A single kernel module, ~1500 LOC C plus a small in-tree shim, building out-of-tree against linux-6.18.x. Registers:
 
-- One `genl_family` named `ask` (version 1) with command ops and three multicast groups
+- One YNL family `ask` (YAML schema at `Documentation/netlink/specs/ask.yaml`) — VyOS and `ynl` tool consume it directly; no `askd` daemon, no `libask_fci.so.1`, no `ask-cli` (per v1.3 course-correction, Section 3.5 Operator UX)
 - `flow_block_cb` against every `dpaa_eth` netdev so `nf_flow_table` and tc-flower flows route through it
 - `xfrmdev_ops` against the same netdevs for IPsec packet-mode offload
 - `nf_conntrack_event` notifier for software-initiated flow promotion
-- `register_netevent_notifier` for neighbour updates
-- `switchdev_notifier` for bridge FDB updates
 - `caam_qi_ext_consumer_register` for each AEAD descriptor we install in CAAM
 
+**Path A boot-time PCD install (v1.3).** The PCD pipeline (KG schemes + CC trees + MANIP templates with `FORWARD_FQ_WITH_MANIP`, per RM §8.7.3.4 and SDK `e_FM_PCD_CC_KEY_FLAG_DO_MANIP_BEFORE_NE`) is programmed at MAC-bringup time via a `ask_pcd_install()` hook called from inside `fman_memac.c` **before** `register_netdev()`. The kernel netdev (`eth0..ethN`) is therefore created **downstream** of a fully-programmed silicon offload pipeline — the netdev never appears carrier-up without the offload path already live. Per-flow updates (nft `flow add`, ip xfrm add) mutate CC-table rows only via `fman_pcd_cc_node_add_key()`; they never reconfigure the MAC and never flap the carrier. The v1.2 graft model (post-`register_netdev` netdev capture + carrier-flap to graft PCD on) and the OH-port detour for L2 rewrite are both deleted.
+
 It does NOT register:
-- A character device. Operators talk through genl.
-- An ioctl interface. Legacy `cdx_ctrl` compatibility is in `libask` userspace shim only (Section 6.6), never in kernel.
-- An ad-hoc netlink protocol number.
+- A character device. Operators talk through YNL.
+- An ioctl interface. The `/dev/cdx_ctrl` legacy compatibility shim is **forbidden** (v1.3 §19) — there are no surviving callers.
+- An ad-hoc netlink protocol number. YNL uses the standard generic-netlink family-ID allocator.
+- A userspace daemon. There is no `askd`. Promotion decisions live in kernel (`nf_flow_table` + `xfrmdev_ops` are sufficient).
 
 ### 3.2 File layout
 
@@ -164,9 +183,7 @@ kernel/flavors/ask/oot/ask/                     # OOT location for v1.0
 ├── ask_xfrm.c                                  # xfrmdev_ops implementation
 ├── ask_caam.c                                  # CAAM descriptor lifecycle
 ├── ask_bridge.c                                # switchdev_notifier for L2 flows
-├── ask_neigh.c                                 # NEIGH_UPDATE consumer for next-hop
-├── ask_op.c                                    # offline port wiring
-├── ask_hostcmd.c                               # 210 host-command wire-format encoder/decoder
+├── ask_pcd_install.c                           # Path A boot-time PCD installer (called pre-register_netdev from fman_memac.c shim)
 ├── ask_stats.c                                 # per-CPU u64_stats_sync aggregation
 ├── ask_debugfs.c                               # /sys/kernel/debug/ask/{flow_table,muram,stats,events}
 ├── ask_trace.h                                 # tracepoint definitions
@@ -174,7 +191,7 @@ kernel/flavors/ask/oot/ask/                     # OOT location for v1.0
 └── tests/                                      # in-tree kunit tests
     ├── ask_flow_test.c
     ├── ask_genl_test.c
-    └── ask_hostcmd_test.c
+    └── ask_pcd_install_test.c
 
 include/uapi/linux/ask/
 └── ask.h                                       # genl protocol UAPI
@@ -220,24 +237,7 @@ struct ask_stats {
 
 Stats updates from the hardware-eviction path use `this_cpu_add` under `u64_stats_update_begin/end`. Reads use `u64_stats_fetch_begin/retry`. No global lock, no atomic64 contention.
 
-### 3.4 The 210 host-command interface (in kernel)
-
-The protocol layer is implementable from this spec alone; the first-pass exercise on real silicon is required to confirm IRQ wiring and MURAM doorbell timing.
-
-Single in-kernel function exposed by `0003-fman-host-command-api.patch`:
-
-```c
-/* drivers/net/ethernet/freescale/fman/fman_host_cmd.h */
-int fmd_host_cmd(struct fman *fman,
-                 u8 opcode,
-                 const void *req, size_t req_len,
-                 void *resp, size_t resp_buf_len,
-                 size_t *resp_len_out);
-```
-
-All 210-specific binary encoding lives in `ask_hostcmd.c`. Opcode constants and struct layouts in Section 12. The opcode space is treated like an external ABI: validated at every layer, fuzzed in kunit, traced with tracepoint events for every command/response pair.
-
-### 3.5 Kconfig
+### 3.4 Kconfig
 
 ```
 config ASK
@@ -267,19 +267,24 @@ config ASK_DEBUG
     default y if DEBUG_KERNEL
 ```
 
-### 3.6 Probe sequence
+### 3.5 Probe sequence (v1.3 Path A)
 
 ```
 ask_init():
     1. Locate FMan device(s) via DT (compatible "fsl,fman")
-    2. Probe 210 ucode signature via fmd_host_cmd(OP_GET_UCODE_VERSION, ...)
-       - if response doesn't match ASK_UCODE_VERSION_210_FAMILY: refuse load,
-         dev_info_once("ASK ucode not present, refusing to load")
+    2. Read ucode family/version from the QEF blob in DT
+       (/soc/fman@1a00000/fman-firmware/fsl,firmware, magic 'Q' 'E' 'F' 0x01)
+       — confirms 210.x silicon. No host-command opcode probe.
     3. Allocate flow tables (one per FMan)
-    4. Register genl_family
-    5. For each dpaa_eth netdev:
+    4. Register YNL family 'ask'
+    5. For each dpaa_eth netdev (already created downstream of ask_pcd_install()
+       by fman_memac.c shim):
         - register flow_block_cb (Section 4)
         - set NETIF_F_HW_TC, NETIF_F_HW_ESP feature bits
+
+Note: ask_pcd_install() itself runs earlier, from the in-tree fman_memac.c shim
+inside the MAC-bringup path, BEFORE register_netdev() is called for that port.
+That is Path A — the PCD pipeline is live before the netdev exists.
         - assign xfrmdev_ops
     6. Configure offline ports OP1/OP2 via fmd_host_cmd
     7. Register nf_conntrack_event_notifier (priority NF_IP_PRI_LAST)
@@ -975,7 +980,7 @@ All `op_mode` commands talk to askd via Varlink, which queries the kernel via ge
 
 ### 11.1 Hard performance gates for v1.0 GA
 
-Measured on Mono Gateway DK with Spirent or Keysight CyPerf, both directions, 4 A72 cores. **The IPv4-forwarding and NAT rows are achievable only with the OH-port (Offline Host) re-injection pipeline programmed per §13.3 `fman_pcd_oh.c` — they CANNOT be met with RX-port classification + `FORWARD_FQ` alone (verified PR14g hardware bring-up 2026-05-16: classification-only path peaks at 6.9 Gbps / 55% CPU because the kernel still does the L2-rewrite/TTL-decrement/route-lookup on every packet).** The L2-bridge row is the only forwarding gate achievable without OH ports (no MAC rewrite needed in pure L2 bridging).
+Measured on Mono Gateway DK with Spirent or Keysight CyPerf, both directions, 4 A72 cores. **v1.3 path:** RX-port classification with `FORWARD_FQ_WITH_MANIP` CC-action (RM §8.7.3.4 + SDK `e_FM_PCD_CC_KEY_FLAG_DO_MANIP_BEFORE_NE`) — the CC match fires the L2-rewrite/TTL-dec/checksum MANIP chain in one CC-action atom **before** the next-engine FQ enqueue. This delivers full L3 forwarding with per-hop L2 rewrite in a single FMan pass, no OH-port detour, no A72 cycles per packet. **M2 hard gate ≥ 2 Gbps + ≤ 5 % kernel CPU; M2 stretch ≥ 7 Gbps + < 5 % CPU.** The v1.2 OH-port path (`fman_pcd_oh.c`, deleted in v1.3) was an over-engineered detour — the silicon already supports MANIP-before-NE on the RX-port CC, which PR14g bring-up did not exercise because the CC-action flag was not wired.
 
 | Test | GO | NO-GO |
 |---|---|---|
@@ -1011,289 +1016,9 @@ Measured on Mono Gateway DK with Spirent or Keysight CyPerf, both directions, 4 
 
 ---
 
-## 12. The 210 microcode protocol (reference)
+## 12. (Removed in v1.3 — see §2.4 silicon-fact note)
 
-This section documents the wire-level protocol that the 210 microcode expects. **It is extracted from the GPL-2.0 source published at `github.com/we-are-mono/ASK` and treated as documentation of silicon behaviour, not as code to copy.** The implementation in `ask_hostcmd.c` derives only from these documented facts, not from the source file structure or function names.
-
-### 12.1 Host command framing
-
-All commands are sent through the FMan I/O block via the `fmd_host_cmd()` API exposed by patch `0003-fman-host-command-api.patch`. Wire format:
-
-```
-+----+----+--------+--------+-----------+
-| op | rs | len_hi | len_lo | payload   |
-+----+----+--------+--------+-----------+
-  u8   u8    u8       u8       len bytes
-```
-
-- `op` (1 byte) — opcode (see Section 12.2)
-- `rs` (1 byte) — reserved, must be 0
-- `len` (2 bytes, big-endian) — payload length, max 1020 bytes
-- `payload` — opcode-specific, byte-packed, big-endian for multi-byte fields
-
-Response format identical, with `op` reflected and `payload` containing the response body.
-
-### 12.2 Opcode space (verified against `cdx-5.03.1/cdx_cmd_codes.h` and `fci-9.00.12/include/fpp_*.h` in we-are-mono/ASK)
-
-**System opcodes:**
-
-| Opcode | Name | Purpose |
-|---|---|---|
-| 0x01 | `OP_GET_UCODE_VERSION` | Returns ucode family + major/minor/patch. Probed at module init. Response: 6 bytes (family u16 BE, major u8, minor u8, patch u16 BE). Family = 0x0210 for ASK. |
-| 0x02 | `OP_GET_CAPABILITIES` | Bitmap of supported features (NAT, IPv6, ESP, multicast, etc). Response: 16 bytes. |
-| 0x03 | `OP_GET_MURAM_INFO` | MURAM total, free, allocated-to-tables. Response: 12 bytes. |
-| 0x04 | `OP_RESET_TABLES` | Flush all flow and SA tables. No payload. |
-
-**Flow table opcodes:**
-
-| Opcode | Name | Purpose |
-|---|---|---|
-| 0x10 | `OP_FLOW_INSERT_V4_TCP` | Insert IPv4 TCP 5-tuple flow with action template. Payload: 64 bytes (key 24 + action 40). |
-| 0x11 | `OP_FLOW_INSERT_V4_UDP` | Same as TCP, different table partition |
-| 0x12 | `OP_FLOW_INSERT_V6_TCP` | IPv6 TCP. Payload: 96 bytes (key 48 + action 48). |
-| 0x13 | `OP_FLOW_INSERT_V6_UDP` | IPv6 UDP. |
-| 0x14 | `OP_FLOW_INSERT_V4_MCAST` | IPv4 multicast 3-tuple. |
-| 0x15 | `OP_FLOW_INSERT_V6_MCAST` | IPv6 multicast 3-tuple. |
-| 0x16 | `OP_FLOW_INSERT_BRIDGE` | L2 bridge flow keyed on (bridge ifindex, dst MAC). |
-| 0x18 | `OP_FLOW_REMOVE` | Remove flow by hw_flow_id. Payload: 4 bytes. |
-| 0x19 | `OP_FLOW_QUERY_STATS` | Get bytes/packets for flow. Payload: 4 bytes. Response: 16 bytes. |
-| 0x1A | `OP_FLOW_DUMP_STATS` | Bulk dump byte/packet deltas since last dump. Used by 1Hz timer for `nf_flow_table` stats. |
-
-**IPsec SA opcodes:**
-
-| Opcode | Name | Purpose |
-|---|---|---|
-| 0x20 | `OP_SA_INSERT_V4_ESP` | Insert IPv4 ESP SA. Payload: 80 bytes (SPI 4 + dst 4 + caam_rx_fqid 4 + op_inject_fqid 4 + reserved 4 + key material 64). |
-| 0x21 | `OP_SA_INSERT_V6_ESP` | IPv6 ESP SA. Payload: 92 bytes. |
-| 0x28 | `OP_SA_REMOVE` | Remove by hw_sa_id. Payload: 4 bytes. |
-| 0x29 | `OP_SA_QUERY_STATS` | Get bytes/packets for SA. |
-
-**Offline port opcodes:**
-
-| Opcode | Name | Purpose |
-|---|---|---|
-| 0x30 | `OP_OP_CONFIGURE` | Configure offline port: source FQ, action template (re-classify, drop, forward-to-port). Payload: 32 bytes. |
-| 0x31 | `OP_OP_FLUSH` | Flush offline port queue. |
-
-**Policer opcodes:**
-
-| Opcode | Name | Purpose |
-|---|---|---|
-| 0x40 | `OP_POLICER_SET_EXCEPTION_RATE` | Set per-port exception-rate-limit (slow-path lift bytes/sec). Payload: 8 bytes (port_id u8 + rate u32 BE + burst u32 BE). |
-
-**Event opcodes (silicon → host):**
-
-These arrive asynchronously via a separate event channel (FMan IRQ → ask.ko event handler). Not host-initiated.
-
-| Event | Name | Body |
-|---|---|---|
-| 0x80 | `EV_FLOW_EVICTED` | 210 evicted a flow under pressure. 8 bytes: hw_flow_id + reason. |
-| 0x81 | `EV_TABLE_FULL` | A flow table is full. 4 bytes: table_id. |
-| 0x82 | `EV_UCODE_ERROR` | ucode hit an unrecoverable error. 4 bytes: error_code. |
-| 0x83 | `EV_SA_EXPIRED` | SA hit a lifetime limit. 8 bytes: hw_sa_id + reason. |
-
-### 12.3 Flow key encoding (binary, big-endian)
-
-IPv4 TCP/UDP key (24 bytes):
-```
-+--------+--------+--------+--------+
-| src_ip (4 bytes)                  |
-+--------+--------+--------+--------+
-| dst_ip (4 bytes)                  |
-+--------+--------+--------+--------+
-| sport  | dport  | iif (4)         |
-+--------+--------+--------+--------+
-| vlan_id (2) | reserved (6)        |
-+--------+--------+--------+--------+
-```
-
-IPv6 TCP/UDP key (48 bytes):
-```
-+--------+...+--------+
-| src_ip (16 bytes)   |
-+--------+...+--------+
-| dst_ip (16 bytes)   |
-+--------+...+--------+
-| sport  | dport       |
-+--------+--------+----+
-| iif (4)             |
-+--------+--------+----+
-| vlan_id (2) | rsv (10) |
-+--------+...+--------+
-```
-
-### 12.4 Flow action encoding (40 bytes for v4, 48 for v6)
-
-```
-+--------+--------+--------+--------+
-| action_flags (4)                  |
-| (TTL_DEC | NAT_SRC | NAT_DST |    |
-|  PAT | VLAN_PUSH | VLAN_POP |     |
-|  TO_CAAM | TO_OP)                 |
-+--------+--------+--------+--------+
-| oif (4) - egress port id          |
-+--------+--------+--------+--------+
-| rewrite_src_mac (6)               |
-+--------+--------+--------+--------+
-| rewrite_dst_mac (6)               |
-+--------+--------+--------+--------+
-| rewrite_src_ip (4 or 16)          |
-+--------+--------+--------+--------+
-| rewrite_dst_ip (4 or 16)          |
-+--------+--------+--------+--------+
-| rewrite_sport (2)                 |
-+--------+--------+--------+--------+
-| rewrite_dport (2)                 |
-+--------+--------+--------+--------+
-| vlan_id (2) | reserved (2)        |
-+--------+--------+--------+--------+
-```
-
-### 12.5 Concrete example — IPv4 TCP NAT flow insert
-
-Goal: forward TCP flow `192.168.1.5:5000 → 8.8.8.8:443` egress on eth3 (port 6), rewriting src to `203.0.113.10:42000` (SNAT+PAT), dst MAC `aa:bb:cc:dd:ee:ff`, src MAC `00:11:22:33:44:55`.
-
-Wire bytes (hex):
-```
-10 00 00 40                                       # opcode 0x10, reserved 0, len 0x0040 (64)
-c0 a8 01 05                                       # src_ip 192.168.1.5
-08 08 08 08                                       # dst_ip 8.8.8.8
-13 88 01 bb                                       # sport 5000, dport 443
-00 00 00 01                                       # iif (eth0 = ifindex 1, placeholder)
-00 00 00 00 00 00                                 # vlan + reserved
-
-00 00 00 07                                       # action_flags: TTL_DEC | NAT_SRC | PAT_SRC
-00 00 00 06                                       # oif = port 6 (eth3)
-00 11 22 33 44 55                                 # rewrite src MAC
-aa bb cc dd ee ff                                 # rewrite dst MAC
-cb 00 71 0a                                       # rewrite src IP 203.0.113.10
-00 00 00 00                                       # no dst IP rewrite (zero = no change)
-a4 10                                             # rewrite sport 42000
-00 00                                             # no dport rewrite
-00 00 00 00                                       # vlan, reserved
-```
-
-Response:
-```
-10 00 00 04                                       # opcode echo, len 4
-00 00 12 34                                       # hw_flow_id = 0x1234
-```
-
-### 12.6 The `ask_hostcmd.c` interface to the rest of the module
-
-```c
-/* ask_hostcmd.c — clean abstraction over wire protocol */
-struct ask_hw_flow_key_v4 {
-    __be32 src_ip, dst_ip;
-    __be16 sport, dport;
-    u32    iif;
-    u16    vlan_id;
-};
-
-struct ask_hw_action {
-    u32    flags;
-    u32    oif;
-    u8     rewrite_src_mac[6];
-    u8     rewrite_dst_mac[6];
-    __be32 rewrite_src_ip_v4;
-    __be32 rewrite_dst_ip_v4;
-    __be16 rewrite_sport;
-    __be16 rewrite_dport;
-    u16    vlan_id;
-};
-
-int ask_hw_flow_insert_v4_tcp(struct fman *fman,
-                               const struct ask_hw_flow_key_v4 *key,
-                               const struct ask_hw_action *action,
-                               u32 *out_hw_flow_id);
-
-int ask_hw_flow_remove(struct fman *fman, u32 hw_flow_id);
-
-int ask_hw_flow_query_stats(struct fman *fman, u32 hw_flow_id,
-                             u64 *bytes, u64 *packets);
-
-int ask_hw_sa_insert_v4_esp(struct fman *fman,
-                             const struct ask_hw_sa_v4 *sa,
-                             u32 *out_hw_sa_id);
-
-/* ... similar for v6, mcast, bridge, op, policer ... */
-```
-
-The rest of `ask.ko` calls these typed functions. The wire format never leaks out of `ask_hostcmd.c`. Tracepoints fire on every call for observability.
-
-### 12.7 What's NOT documented and must be probed
-
-Most of the opcode space is documented in the GPL source. Three things require live-hardware confirmation:
-
-1. **Exact MURAM partition behaviour** — how 210 ucode allocates within MURAM when multiple flow types coexist. Worth measuring with `OP_GET_MURAM_INFO` under increasing load.
-2. **Event channel binding** — the GPL source binds events to a specific FMan IRQ; need to confirm IRQ number and event-queue layout against the Mono hardware DTB.
-3. **Eviction policy tunables** — there may be hidden opcodes (0x90-0x9F space?) that tune LRU vs LFU eviction. Worth scanning the opcode space for response patterns.
-
-Estimated probe time: **1-2 weeks**, not 8-10 weeks. The protocol is documented; we're confirming edge cases.
-
-### 12.8 Confirmed hardware behaviour (PR13 findings, 2026-05-13)
-
-PR13 (M2.4 — first hardware-validated read against the live Mono Gateway DK) probed the §12.7 unknowns and surfaced a fundamental mismatch between the §12.1–§12.6 host-command protocol and the microcode actually loaded on the silicon.
-
-**Finding 1 — the loaded microcode is stock NXP QEF 210.10.1, not an opcode-dispatch microcode.**
-U-Boot loads the microcode blob from SPI flash partition `mtd3` (`fman-ucode`, 1 MiB) into FMan IRAM at boot. The DT exposes the same blob via `/soc/fman@1a00000/fman-firmware/fsl,firmware` (reachable from kernel space via `of_find_compatible_node("fsl,fman-firmware")` + `of_get_property("fsl,firmware")`). The blob carries the magic `'Q' 'E' 'F' 0x01` at offset 4, followed by a 64-byte ASCII description at offset 8 reading `"Microcode version 210.10.1 for LS1043 r1.0"`. This is the upstream NXP QorIQ Engine Firmware that mainline `drivers/net/ethernet/freescale/fman/fman.c` and the in-tree FMan PCD API are designed to drive — it implements the parser, classifier, policer, and KeyGen entirely via MURAM-resident config tables, **not** via a CPU-side host-command doorbell.
-
-**Finding 2 — the §12 host-command opcode dispatcher does not exist on this microcode.**
-The FPM host-command region (`fmfp_cev[0..3]` at FMan base + 0xC30E0, mask `fmfp_cee[0..3]` at +0xC3040, response IRQ bits `INTR_EN_REV0..3 = 0x8000/0x4000/0x2000/0x1000` in `fm_npi` at +0xC30D4) is physically present and writeable, but stock 210.x QEF microcode does not poll the CEV doorbell or raise REV events in response. Confirmed indirectly: mainline `fman_irq()` in `drivers/net/ethernet/freescale/fman/fman.c` never dispatches the REV0..3 bits, and `fman_register_intr(fman, FMAN_EV_FMAN_CTRL_0..3, ...)` is `EXPORT_SYMBOL`'d but has zero in-tree callers. There is no upstream consumer of the CPU↔ucode message-passing channel because no upstream microcode implements the receive side. The §12.2 opcode map (`OP_GET_UCODE_VERSION=0x01`, `OP_FLOW_INSERT_V4_TCP=0x10`, …) was extracted from `cdx-5.03.1`/`fci-9.00.12` source headers in the legacy `we-are-mono/ASK` tree, where those opcodes were dispatched by a **custom NXP/proprietary microcode binary** that shipped with that vendor stack — not by the QEF blob in mainline U-Boot or in our SPI flash.
-
-**Finding 3 — `0003-fman-host-command-api.patch` (landed in PR12) is correct as-is and stays.**
-The kernel-side transport layer (`fmd_host_cmd_ring_doorbell`, `fmd_host_cmd_arm_irq`) is sound. It correctly returns `-ENXIO` from `fmd_host_cmd_send()` because the doorbell is genuinely unanswered for the running microcode. The patch is preserved as future infrastructure for a hypothetical custom ASK2 microcode (or for a future revision of QEF that adds opcode dispatch); no rework is required if and when such a microcode appears. PR12 was not wasted work — it is the architecturally correct wire layer; only the §12.2 opcode contract above it is hypothetical.
-
-**Finding 4 — §12.7 question 2 (event-channel binding) is partially answered, questions 1 and 3 are moot.**
-SPI 44 (Linux IRQ 59) is the FMan event IRQ on LS1046A; SPI 45 is the FMan err IRQ (shared with `bman-err`/`qman-err`). The CEV/REV register topology is documented above. However, §12.7 questions 1 (MURAM partition behaviour under `OP_GET_MURAM_INFO`) and 3 (eviction-policy tunables in opcode space 0x90–0x9F) are not answerable because the opcodes themselves are not implemented — there is nothing to scan. Hardware-side MURAM partitioning is observable instead via the in-tree `fman_muram` allocator API and via the parser/classifier table layouts programmed through the FMan PCD interface.
-
-**Finding 5 — `STRICT_DEVMEM=y` blocks `/dev/mem` peeks on the FLAVOR=default 6.18 kernel.**
-Register-level probing of FMan FPM from userspace requires either a debug kernel build with `STRICT_DEVMEM=n` or a kernel-side ioremap (the path PR13 took for the DT blob read). This is intentional and stays.
-
-**Mechanism switch for ASK2 v1.0 (binding decision).**
-ASK2 v1.0 will program the FMan PCD (parser/classifier/KeyGen/policer) via the in-tree mainline FMan API in `drivers/net/ethernet/freescale/fman/fman_keygen.c` (and siblings `fman_port.c`, `fman_dtsec.c`, `fman_memac.c`), driven from `ask.ko` and from `askd` userspace. The §12.1–§12.6 host-command protocol is **deferred indefinitely** — it remains in this spec as a reference for what a future custom-microcode path would look like, and PR12's wire layer is preserved against that future. PR14+ (§5.5 onwards) is re-scoped accordingly: the consumer of `ask_hostcmd.c` becomes the FMan PCD table-programming pathway, not opcode-dispatch insertion. The `ask_hw_ucode_get_version()` helper added in PR13 (sourced from the QEF blob in DT, not from `OP_GET_UCODE_VERSION`) is the canonical and the only required version-read mechanism.
-
-**Verification** — `ask.ko` loaded on the live Mono Gateway DK with kernel 6.18.28, `dmesg | grep '^ask: hw'` shows `ask: hw: FMan microcode 210.10.1 ("Microcode version 210.10.1 for LS1043 r1.0")`; the `ASK_INFO` genl reply carries `family=210, major=10, minor=1, patch=0` matching the DT blob byte-for-byte.
-
-### 12.9 The in-tree FMan PCD does not exist — Option C-modernize decision (PR14-prep, 2026-05-14)
-
-§12.8 above bound ASK2 v1.0 to "the in-tree mainline FMan API in `drivers/net/ethernet/freescale/fman/fman_keygen.c` (and siblings `fman_port.c`, `fman_dtsec.c`, `fman_memac.c`)". Inspection of the actual linux-6.18.28 source tree on 2026-05-14 proves that **the "siblings" required for ASK2 (classifier, policer, match-vector schemes, header manipulation) do not exist in mainline**. §12.8 made a hardware-truth decision ("QEF doesn't dispatch opcodes") but never checked the code-truth ("mainline doesn't expose PCD").
-
-**Evidence (linux-6.18.28):**
-
-- `ls drivers/net/ethernet/freescale/fman/` → `fman.c`, `fman_dtsec.c`, `fman_memac.c`, `fman_tgec.c`, `fman_keygen.c`, `fman_muram.c`, `fman_port.c`, `fman_sp.c`, `fman_host_cmd.c` (from PR12). **No `fman_cc.c`, no `fman_plcr.c`, no `fman_pcd.c`, no `fman_manip.c`.**
-- `grep -nE 'classif|coarse_class|FMan_CC|fman_cc' fman.c` → zero hits.
-- `fman_keygen.c` exports two symbols: `keygen_init()` (one-shot per FMan) and `keygen_port_hashing_init()` (RSS hashing). Both `EXPORT_SYMBOL` (old, not `_GPL`).
-- `keygen_port_hashing_init()` explicitly sets `scheme->match_vector = 0` — meaning no header inspection, no exact-match lookup, just a hash bucket index modulo `hash_size`. This is **RSS load-balancing only**, not classifier programming.
-- `fman.c` mentions "policer" only as the FPM clock-divider threshold register `plcr_disp_tsh` — no policer-profile programming surface.
-- The only callers in the whole kernel tree: `fman_init → keygen_init` (once at probe) and `fman_port_init → keygen_port_hashing_init` (per port). `dpaa_eth.c` uses this only for `NETIF_F_RXHASH` via `ethtool -K rxhash on/off`.
-
-**Cost survey of the deleted SDK PCD path (2026-05-14, archived `mihakralj/kernel-ls1046a-build` repo):**
-
-| File | LOC (.c) | Purpose |
-|---|---|---|
-| `fm_cc.c` | ~7,500 | Coarse Classifier — 5-tuple match trees |
-| `fm_manip.c` | ~6,000 | Header manipulation — NAT rewrite, checksum, VLAN, TTL |
-| `fm_kg.c` | ~3,500 | KeyGen scheme programming (match_vector ≠ 0) |
-| `fm_pcd.c` | ~2,500 | PCD top-level orchestration |
-| `fm_plcr.c` | ~1,900 | Policer profiles |
-| `fm_ehash.c` | ~1,700 | Exact-match hash tables |
-| `fm_replic.c` | ~900 | Frame replication (multicast) |
-| `fman_kg.c` | ~600 | Low-level KeyGen register access |
-| `fm_prs.c` | ~400 | Parser configuration |
-| `fman_prs.c` | ~100 | Low-level parser registers |
-| Headers (10×) | ~6,000 | |
-| **SDK total** | **~30,000** | Vendor C, dual-licensed BSD-3-or-GPL-2.0 |
-
-**Three options were on the table:**
-
-- **C-forward-port** — pull SDK PCD code from the archive, modernize for 6.18 APIs, ship as a 4th in-tree patch. Cost: ~15,000–30,000 LOC kept, plus per-file license audit, plus removal of the SDK's `fsl-ncsw` OS shim, `TRACE_RTOS` macros, `handle_t` opaque ABI, AMP IPC layer (`fm_pcd_ipc.h`), and the nested `Peripherals/FM/` directory structure. Architecturally tied to a 2015-era SDK model.
-- **D** — software fast-path only via `nf_flow_table` sw mode + PR11's `flow_block_cb` without hardware backing. ~500 LOC, ~1–2 Gbps cap. Misses §11.1 perf gates by an order of magnitude.
-- **E** — cancel ASK2 v1.0 on this SoC. Zero LOC. Defeats the project.
-
-**Decision (2026-05-14, revised in v1.1): Option C-modernize.** Write a new FMan PCD subsystem targeting ~7800 LOC of modern kernel C. The deleted NXP SDK and the `we-are-mono/ASK` legacy stack are both GPL — they remain available as silicon-behaviour references for byte layouts, register-write ordering, and microcode-handshake sequences. **The SDK's *architecture* is what we reject** (per §13.1 below): `handle_t` opaque ABI, `fsl-ncsw` OS shim, AMP multi-OS IPC, `TRACE_RTOS`, nested `Peripherals/FM/Pcd/` layout, 16-flavour next-engine struct hierarchy. The LS1046A Reference Manual chapter 8 remains authoritative when SDK code is ambiguous or contradicts itself. Per-file copyright headers will cite GPL-2.0-only (matching mainline `fman.c`) since both source pools are GPL-compatible. The full module decomposition is **§13 below**.
-
----
+The v1.0/v1.1/v1.2 spec carried a ~280-line "§12. The 210 microcode protocol (reference)" describing a host-command opcode-dispatch wire protocol on FMan FPM register CEV[0..3] / REV[0..3]. PR13 (2026-05-13) confirmed on live silicon that the shipped microcode is stock NXP QEF 210.10.1 ("Microcode version 210.10.1 for LS1043 r1.0") and **does not implement opcode dispatch** — the doorbell is unanswered, `fmd_host_cmd_send()` returns `-ENXIO`. The v1.0 §12 was reference material against a hypothetical future custom microcode; v1.3 deletes it because the entire ASK2 v1.0 control path goes through `fman_pcd_cc_node_add_key()` (in-tree FMan PCD subsystem, §13) and never touches the host-command doorbell. The relevant silicon facts (microcode version-read via DT QEF blob, FPM register topology, event-IRQ binding) are preserved in **§2.4 below** as a one-page silicon-fact note. `0003-fman-host-command-api.patch`, `ask_hostcmd.c`, and the golden-hex kunit tests are deleted in Phase 3 of the v1.3 course-correction (`plans/ASK2-COURSE-CORRECTION.md`).
 
 ## 13. The FMan PCD subsystem — `0004-fman-pcd-subsystem.patch`
 
@@ -1332,18 +1057,21 @@ drivers/net/ethernet/freescale/fman/
 ├── fman_pcd.c            NEW    ~800 LOC   Top-level orchestration
 ├── fman_pcd_kg.c         NEW    ~1500 LOC  KeyGen schemes (match_vector ≠ 0)
 ├── fman_pcd_cc.c         NEW    ~2500 LOC  Coarse Classifier match trees
-├── fman_pcd_manip.c      NEW    ~1600 LOC  Header manipulation: NAT, checksum, VLAN,
-│                                            TTL, AND L2-rewrite (RMV_ETHERNET +
-│                                            INSRT_GENERIC + FIELD_UPDATE_IPV4_FORWARD
-│                                            — required by OH-port chain, v1.2)
+├── fman_pcd_manip.c      NEW    ~1200 LOC  Header manipulation: NAT (SNAT/DNAT/PAT),
+│                                            checksum, VLAN, TTL. **v1.3 deletes** the
+│                                            v1.2 L2-rewrite tags (RMV_ETHERNET +
+│                                            INSRT_GENERIC + FIELD_UPDATE_IPV4_FORWARD)
+│                                            because FORWARD_FQ_WITH_MANIP (see
+│                                            fman_pcd_cc.c) fires the existing
+│                                            NAT/TTL/checksum MANIP chain in one CC-action
+│                                            atom — no OH-port detour.
 ├── fman_pcd_plcr.c       NEW    ~800 LOC   Policer profiles (rate, burst, color)
 ├── fman_pcd_prs.c        NEW    ~400 LOC   Parser configuration (HXS — header examination sequences)
-├── fman_pcd_replic.c     NEW    ~600 LOC   Frame replication for multicast egress
-└── fman_pcd_oh.c         NEW    ~800 LOC   FMan Offline Host (OH) port driver: claims
-                                            one OH port per FMan, programs OH-port
-                                            input FQ + AD chain + MANIP attachment;
-                                            consumed by ask.ko for L3-routed
-                                            forwarding offload (v1.2)
+└── fman_pcd_replic.c     NEW    ~600 LOC   Frame replication for multicast egress
+                                            (v1.3 deletes fman_pcd_oh.c — OH-port
+                                            subsystem replaced by FORWARD_FQ_WITH_MANIP
+                                            CC-action flag per RM §8.7.3.4 + SDK
+                                            e_FM_PCD_CC_KEY_FLAG_DO_MANIP_BEFORE_NE)
 
 include/linux/fsl/
 └── fman_pcd.h            NEW    ~700 LOC   Public API: typed handles, action structs,
@@ -1351,7 +1079,7 @@ include/linux/fsl/
                                             bind APIs exposed to ask.ko
 ```
 
-**Net: ~10,000 LOC of new C across 8 .c files + 1 header.** The 8-file split mirrors the silicon's natural functional boundaries (KeyGen / Classifier / Policer / Parser / Manipulator / Replicator / Offline-Host / orchestration) and matches the RM §8.7–8.10 + §8.11 (OH port) section structure.
+**Net (v1.3): ~7,800 LOC of new C across 7 .c files + 1 header.** The 7-file split mirrors the silicon's natural functional boundaries (KeyGen / Classifier with FORWARD_FQ_WITH_MANIP / Policer / Parser / Manipulator / Replicator / orchestration) and matches the RM §8.7–8.10 section structure. v1.2's `fman_pcd_oh.c` (~800 LOC) and §8.11 OH-port material are deleted because `FORWARD_FQ_WITH_MANIP` (CC-action flag per RM §8.7.3.4 + SDK `e_FM_PCD_CC_KEY_FLAG_DO_MANIP_BEFORE_NE`) achieves the same L3-routed-with-L2-rewrite atom inside a single CC table walk.
 
 ### 13.3 Per-module responsibility
 
@@ -1673,16 +1401,17 @@ The acceptance gates in Section 11.1 must pass on the Mono test rig before v1.0 
 
 | Component | LOC | Notes |
 |---|---|---|
-| ask.ko (kernel module) | 3700 | Modern C, RCU/u64_stats_sync, type-safe genl. +200 vs v1.1 for OH-port pipeline build + cookie-based hw_flow_id table (§13.5) |
-| In-tree patches 0001/0002/0003 | 650 | Small, upstream-ready |
-| **In-tree patch 0004 — FMan PCD subsystem (§13)** | **10000** | **NEW in v1.0, expanded in v1.2.** Modern in-tree FMan PCD across 8 .c + 1 .h (added `fman_pcd_oh.c` ~800 + extended `fman_pcd_manip.c` from 1200→1600 for L2-rewrite tags + `fman_port.c` OH-instantiation hook + DT-binding YAML) |
-| askd (userspace daemon) | 4000 | meson/libmnl/sd-event, modern systemd integration |
-| ask-cli (Python) | 800 | Varlink client, rich tabular output |
-| VyOS CLI integration | 1200 | XML defs + conf_mode + op_mode |
+| ask.ko (kernel module) | 1500 | Modern C, RCU/u64_stats_sync, YNL-driven. **v1.3 deletes** ~1500 LOC of v1.2 graft logic (`ask_hw.c`), ~200 LOC `ask_neigh.c` deferred-resolve, ~1000 LOC `ask_hostcmd.c` (now §12 dead code) — Path A install-pre-`register_netdev()` is the simpler replacement. |
+| ask_bridge.ko (L2 bridge offload) | 400 | switchdev_notifier consumer; separate .ko per v1.3 §13 split |
+| In-tree patches 0001/0002 | 500 | `caam_qi_ext_consumer_register` + `dpaa_eth flow_block_cb`. v1.3 deletes patch 0003 (`fman-host-command-api`) — not used by Path A. |
+| **In-tree patch 0004 — FMan PCD subsystem (§13)** | **7800** | **v1.3 reverts v1.2's +2400 OH-port expansion.** 7 .c + 1 .h (KG/CC-with-FORWARD_FQ_WITH_MANIP/manip/plcr/prs/replic/orchestration). `fman_pcd_oh.c` deleted; `fman_pcd_manip.c` reverts 1600→1200 (drops L2-rewrite tags); `fman_port.c` OH-instantiation hook deleted. |
+| In-tree patch 0044 — `fman_memac.c` Path A hook | 100 | Single pre-`register_netdev()` callback into `ask_pcd_install()`. v1.3 NEW. |
+| YNL schema `Documentation/netlink/specs/ask.yaml` | 300 | Auto-generates ynl C + Python clients. v1.3 NEW — replaces askd + ask-cli + libask_fci.so.1 wholesale. |
+| VyOS CLI integration | 1200 | XML defs + conf_mode + op_mode (op_mode calls kernel via `ynl` Python module directly — no daemon, no Varlink, no libfci) |
 | Build pipeline | 600 | bin/ci-build-ask-*.sh, hooks |
-| Test suite (kunit + pytest) | 2700 | Unit + integration + fuzzing harness. +200 vs v1.1 for `fman_pcd_oh_test.c` + integration `test_v4_forward_oh.py` |
-| Documentation | 1500 | man pages, operator guide, dev guide |
-| **Total** | **~24950 LOC** | v0.8 was ~14750; v1.0 added +7800 for §13 PCD subsystem; v1.2 adds +2400 for the OH-port subsystem required by §11.1 perf gates |
+| Test suite (kunit + pytest) | 2000 | Unit + integration + fuzzing harness. v1.3 deletes `fman_pcd_oh_test.c` + `test_v4_forward_oh.py` + ask_hostcmd_test.c golden-hex tests. |
+| Documentation | 350 | YAML schema doc + `ynl --do` examples + spec §3.5 Operator UX. v1.3 deletes man pages for askd/ask-cli (deleted components). |
+| **Total** | **~14750 LOC** | Same envelope as v0.8 (pre-OH-port). v1.3's three reductions (Path A, FORWARD_FQ_WITH_MANIP, no-userspace) net out to roughly the original v1.0 budget — but with carrier-flap-free per-flow updates and no userspace daemon. |
 
 The PCD subsystem (§13) is the single largest component and the gating block for §11.1 perf gates. It is still **~9,250 LOC smaller** than a forward-port of the deleted SDK PCD code (~30,000 LOC vendor C) would have been — see §12.9 cost survey and §13.1 savings table.
 
@@ -1807,8 +1536,10 @@ For clarity, listing the things this spec explicitly does NOT include:
 - Rewrite the 210 ucode. It's silicon firmware.
 - Forward-port the deleted NXP SDK `sdk_fman/Peripherals/FM/Pcd/` tree. §12.9 cost survey rejected this in favour of the modern reimplementation in §13.
 - Vendor SDK FMan/QMan/BMan drivers. We use mainline `drivers/net/ethernet/freescale/dpaa/`.
-- `/dev/cdx_ctrl` ioctl compatibility shim. Out of v1.0 scope.
-- `libfci.so.1` ABI preservation. Out of v1.0 scope.
+- `/dev/cdx_ctrl` ioctl compatibility shim. **FORBIDDEN in v1.3** (not merely out of scope). The AGENTS.md "ABI compatibility surfaces" sentence that previously listed this is deleted; there are no surviving callers.
+- `libfci.so.1` ABI preservation. **FORBIDDEN in v1.3**. Same rationale.
+- `askd` userspace daemon. **FORBIDDEN in v1.3**. Promotion logic lives in kernel (`nf_flow_table` + `xfrmdev_ops`); operator UX lives in `ynl` + `nft` + `node_exporter` per §3.5.
+- `ask-cli` Python CLI. **FORBIDDEN in v1.3**. `ynl --family ask --do …` is the operator surface; VyOS op-mode wraps it.
 - XML configuration files for runtime PCD. Configuration is operator-facing nft/iproute2, not vendor XML.
 - A VPP plugin. VPP talks to ASK only through standard memif + rtnetlink.
 - A DPDK PMD. ASK is kernel-side offload; DPDK has its own path.
@@ -1860,4 +1591,6 @@ These are non-goals. Don't slip them in.
 
 ---
 
-**End of v1.1.** Supersedes v1.0 in entirety. v1.1's material change is the **provenance relaxation** on §13's FMan PCD subsystem: the previous strict-provenance constraint is replaced with "RM-authoritative, SDK + we-are-mono usable as silicon references, modern kernel architecture mandatory". This unblocks PR14c-body / PR14d-body / PR14e-body / PR14f-body work in sessions that have the archived `mihakralj/kernel-ls1046a-build@464df181` SDK tree loaded but not the (NDA) LS1046A Reference Manual — they can author body PRs by reading silicon facts from the SDK and modernizing the architecture per §13.1. v1.0's §12.9 cost survey and §13 module decomposition are unchanged. Risk #12 reframed from copyright→maintainability. Open question #8 closed. LOC budget, calendar, milestone gates: unchanged from v1.0.
+**End of v1.3.** Supersedes v1.2 and v1.1 in entirety; v1.3's three concurrent reductions (Path A, FORWARD_FQ_WITH_MANIP, no-userspace) are documented in the top-of-file status block and in `plans/ASK2-COURSE-CORRECTION.md`. The v1.1 commentary preserved below documents the provenance-relaxation decision (still in effect): RM-authoritative, SDK + we-are-mono usable as silicon references, modern kernel architecture mandatory.
+
+**End of v1.1 (historical).** Supersedes v1.0 in entirety. v1.1's material change is the **provenance relaxation** on §13's FMan PCD subsystem: the previous strict-provenance constraint is replaced with "RM-authoritative, SDK + we-are-mono usable as silicon references, modern kernel architecture mandatory". This unblocks PR14c-body / PR14d-body / PR14e-body / PR14f-body work in sessions that have the archived `mihakralj/kernel-ls1046a-build@464df181` SDK tree loaded but not the (NDA) LS1046A Reference Manual — they can author body PRs by reading silicon facts from the SDK and modernizing the architecture per §13.1. v1.0's §12.9 cost survey and §13 module decomposition are unchanged. Risk #12 reframed from copyright→maintainability. Open question #8 closed. LOC budget, calendar, milestone gates: unchanged from v1.0.

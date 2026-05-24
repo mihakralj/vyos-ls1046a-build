@@ -96,3 +96,6 @@ ASK/fci/lib/src/*.la
 .clinehooks/
 .clineskills/
 .clineworkflows/.vscode/
+
+# Per-developer VS Code editor settings
+.vscode/

@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Sun, 24 May 2026 06:59:09 +0000
+Subject: [PATCH] fman-pcd-manip: record hmct_used for TTL_DEC + IPV4_FORWARD
+
+---
+ drivers/net/ethernet/freescale/fman/fman_pcd_manip.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+index 871a9f2..fe5a3a1 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+@@ -524,6 +524,7 @@ manip_encode_ttl_dec(struct fman_pcd_manip *manip, u8 *out_op)
+ 
+ 	iowrite32be(cmd, hmct);
+ 
++	manip->hmct_used = 4; /* PR14z: cmd word, no payload */
+ 	*out_op = FMAN_PCD_HMAN_OC_IP_MANIP;
+ 	return hmct;
+ }
+@@ -584,6 +585,7 @@ manip_encode_field_update_ipv4_forward(struct fman_pcd_manip *manip,
+ 		iowrite32be(payload, hmct + 4);
+ 	}
+ 
++	manip->hmct_used = emit_payload ? 8 : 4; /* PR14z: cmd + optional DSCP word */
+ 	*out_op = FMAN_PCD_HMAN_OC_IP_MANIP;
+ 	return hmct;
+ }

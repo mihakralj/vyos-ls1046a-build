@@ -27,8 +27,6 @@ Until the ASK2 components land (`ask.ko` ~1500 LOC, `ask_bridge.ko` ~400 LOC, `a
 - All flavors (`default | ask | vpp`) currently track the same mainline kernel via `vyos-build/data/defaults.toml` → `kernel/common/scripts/sync-kernel-version.sh`. Currently `linux-6.18.28`.
 - `version-ask.json` is still published per release so that anyone running an ASK2 image once it ships will receive the right update stream.
 
-ABI compatibility surfaces to be preserved by the ASK2 implementation when it lands (per the spec): `/etc/cdx_*.xml` config-file format, `/dev/cdx_ctrl` chardev (as a symlink to the new node), `libfci.so.1` SONAME, `/etc/config/fastforward` runtime toggle.
-
 For historical context on the deleted ASK 1.x stack (per-askN iteration trail back to ask6 SDK refresh, the 35 ASK-edit markers, the two-chain failure model with `cmm.service`/`dpa_app rc=65280`/MURAM exhaustion etc.), consult the frozen archived `mihakralj/kernel-ls1046a-build` repo's `AGENTS.md`. New ASK2 development happens here per the spec.
 
 ## Project
