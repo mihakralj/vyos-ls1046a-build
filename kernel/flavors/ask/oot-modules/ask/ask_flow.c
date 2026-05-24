@@ -9,10 +9,12 @@
  *
  * No hardware in this PR: hw_flow_id is faked from an atomic counter
  * incremented on every successful insert. PR14 (M2.5) replaces the
- * fake with the value the 210 microcode hands back from
- * OP_FLOW_INSERT_V4_TCP. The wire path is already shaped by PR6's
- * ask_hostcmd encoders; this PR only owns the software bookkeeping
- * that sits between flow_block_cb (PR8) and the hostcmd sender.
+ * fake with the value the 210 microcode hands back from the FMan PCD
+ * keygen/CC tree (CC bucket index post-add). v1.3 Path A bypasses
+ * the §12 host-command wire format entirely: ask_hw_flow_insert_v4_tcp
+ * calls fman_pcd_cc_node_add_key() directly. This PR only owns the
+ * software bookkeeping that sits between flow_block_cb (PR8) and the
+ * ask_hw_flow_insert() hardware entry point.
  *
  * Concurrency model:
  *
