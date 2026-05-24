@@ -1,0 +1,277 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ask2 PR14z19 <ask2@local>
+Date: Sat, 23 May 2026 05:40:00 +0000
+Subject: fman_pcd: add debugfs regdump surface (kg_schemes, port_sp)
+
+PR14z19 Path A inspection surface. Two non-destructive forensic views
+exposed under /sys/kernel/debug/fman_pcd/<id>/ :
+
+  kg_schemes - one line per used KG scheme with its KGSE_* register
+               block (MODE/EKFC/FQB/HC/PPC/SPC/CCBS/MV).
+               update_counter=false so KGSE_SPC is NOT cleared by
+               the dump.
+
+  port_sp    - one line per BMI hwport (1..0x3F) with its raw
+               fmkg_pe_sp vector and decoded scheme-ID list.
+
+Both reads go through the AR-mediated indirect-access window via two
+new helpers in fman_keygen.c (keygen_dump_scheme_regs and
+keygen_dump_port_sp), with prototypes in fman_keygen_internal.h.
+
+These are the inspection points needed to diagnose silicon residue from
+graft/ungraft cycles (PR14z13/z15/z18), and to verify that the Path A
+pre-netdev hook in 0044 actually wires KGSE_MODE.NIA=FM_CTL and
+KGSE_CCBS=cc_tree at scheme-create time without subsequent rewrites.
+
+Read-only; no writes; safe to cat at any time including under load.
+
+Signed-off-by: ask2 PR14z19 <ask2@local>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+index f0d3e0b..9dd68d7 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+@@ -914,3 +914,91 @@ found:
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(keygen_lookup_port_scheme);
++
++/* keygen_dump_scheme_regs
++ *
++ * PR14z19 / patch 0046: forensic register snapshot of one KG scheme via
++ * the AR-mediated SCHEME_ENTRY READ window. Used by the new
++ * /sys/kernel/debug/fman_pcd/<id>/kg_schemes debugfs file to support
++ * post-hoc diagnosis of silicon mutation events (graft/ungraft residue,
++ * BMI/parser leak detection, etc).
++ *
++ * Reading a scheme via AR uses the same indirect-access pattern as
++ * keygen_scheme_setup() in WRITE mode but with the RW bit clear. After
++ * the AR latches into the fmkg_sch shadow block, every KGSE_* slot is
++ * memory-mappable as a plain ioread32be(). update_counter MUST be false
++ * here so the read does not clear KGSE_SPC -- forensic dumps must be
++ * non-destructive.
++ *
++ * @keygen:    KeyGen handle (NULL-safe; returns -EINVAL).
++ * @scheme_id: 0..31 (FM_KG_MAX_NUM_OF_SCHEMES-1).
++ * @out:       caller-owned buffer; 8 u32 slots filled in this order:
++ *             [0]=KGSE_MODE [1]=KGSE_EKFC [2]=KGSE_FQB [3]=KGSE_HC
++ *             [4]=KGSE_PPC  [5]=KGSE_SPC  [6]=KGSE_CCBS [7]=KGSE_MV
++ *
++ * Return: 0 on success, -EINVAL on bad args, -EIO on AR timeout/error.
++ */
++int keygen_dump_scheme_regs(struct fman_keygen *keygen, u8 scheme_id,
++			    u32 *out)
++{
++	struct fman_kg_regs __iomem *regs;
++	u32 ar_reg;
++	int err;
++
++	if (!keygen || !out || scheme_id >= FM_KG_MAX_NUM_OF_SCHEMES)
++		return -EINVAL;
++	regs = keygen->keygen_regs;
++
++	ar_reg = build_ar_scheme(scheme_id, false, false);
++	err = keygen_write_ar_wait(regs, ar_reg);
++	if (err)
++		return err;
++
++	out[0] = ioread32be(&regs->fmkg_sch.kgse_mode);
++	out[1] = ioread32be(&regs->fmkg_sch.kgse_ekfc);
++	out[2] = ioread32be(&regs->fmkg_sch.kgse_fqb);
++	out[3] = ioread32be(&regs->fmkg_sch.kgse_hc);
++	out[4] = ioread32be(&regs->fmkg_sch.kgse_ppc);
++	out[5] = ioread32be(&regs->fmkg_sch.kgse_spc);
++	out[6] = ioread32be(&regs->fmkg_sch.kgse_ccbs);
++	out[7] = ioread32be(&regs->fmkg_sch.kgse_mv);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(keygen_dump_scheme_regs);
++
++/* keygen_dump_port_sp
++ *
++ * PR14z19 / patch 0046: read the fmkg_pe_sp port-to-scheme partition
++ * vector for a given BMI hwport via SEL_PORT_ENTRY READ AR. The decoded
++ * scheme list is left to the caller (bit N set -> scheme (31 - N) per
++ * keygen_bind_port_to_schemes()).
++ *
++ * @keygen:    KeyGen handle (NULL-safe).
++ * @hwport_id: BMI hwport (1..0x3F valid on LS1046A; 0 invalid).
++ * @sp_out:    caller-owned u32; raw fmkg_pe_sp vector on success.
++ *
++ * Return: 0 on success, -EINVAL on bad args, -EIO on AR error.
++ */
++int keygen_dump_port_sp(struct fman_keygen *keygen, u8 hwport_id,
++			u32 *sp_out)
++{
++	struct fman_kg_regs __iomem *regs;
++	u32 ar_reg;
++	int err;
++
++	if (!keygen || !sp_out)
++		return -EINVAL;
++	if (hwport_id == 0 || hwport_id > 0x3F)
++		return -EINVAL;
++	regs = keygen->keygen_regs;
++
++	ar_reg = build_ar_bind_scheme(hwport_id, false);
++	err = keygen_write_ar_wait(regs, ar_reg);
++	if (err)
++		return err;
++
++	*sp_out = ioread32be(&regs->fmkg_pe.fmkg_pe_sp);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(keygen_dump_port_sp);
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h b/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
+index fe43fc8..9a2a6f7 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
+@@ -126,4 +126,21 @@ bool bind);
+ int keygen_lookup_port_scheme(struct fman_keygen *keygen, u8 hwport_id,
+       u8 *scheme_id, u32 *base_fqid);
+ 
++
++/* keygen_dump_scheme_regs / keygen_dump_port_sp:
++ *   PR14z19 patch 0046 — non-destructive forensic readers used by the
++ *   fman_pcd debugfs regdump surface.  The scheme reader returns 8 u32
++ *   slots in this fixed order:
++ *     [0]=KGSE_MODE [1]=KGSE_EKFC [2]=KGSE_FQB [3]=KGSE_HC
++ *     [4]=KGSE_PPC  [5]=KGSE_SPC  [6]=KGSE_CCBS [7]=KGSE_MV
++ *   The port reader returns the raw fmkg_pe_sp vector for hwport
++ *   (decoding is the caller's responsibility: set bit N -> scheme
++ *   31 - N).  Both use the AR indirect-access window with
++ *   update_counter=false so the read does NOT clear KGSE_SPC.
++ */
++int keygen_dump_scheme_regs(struct fman_keygen *keygen, u8 scheme_id,
++    u32 *out);
++int keygen_dump_port_sp(struct fman_keygen *keygen, u8 hwport_id,
++u32 *sp_out);
++
+ #endif /* __FMAN_KEYGEN_INTERNAL_H */
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 7d078b5..2b4c1cd 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -40,6 +40,7 @@
+ #include "fman_pcd_internal.h"
+ 
+ #include "fman.h"
++#include "fman_keygen_internal.h"
+ #include "fman_muram.h"
+ 
+ /*
+@@ -180,6 +181,94 @@ static int fman_pcd_muram_budget_show(struct seq_file *s, void *unused)
+ }
+ DEFINE_SHOW_ATTRIBUTE(fman_pcd_muram_budget);
+ 
++/*
++ * PR14z19 patch 0046 — debugfs regdump surface.
++ *
++ * Two non-destructive forensic views exposed under
++ * /sys/kernel/debug/fman_pcd/<id>/ :
++ *
++ *   kg_schemes — one line per used KG scheme with its KGSE_*
++ *                register block (MODE/EKFC/FQB/HC/PPC/SPC/CCBS/MV).
++ *                update_counter=false on the AR read so KGSE_SPC is
++ *                NOT cleared by the dump.
++ *
++ *   port_sp    — one line per BMI hwport (1..0x3F) with its raw
++ *                fmkg_pe_sp vector and decoded scheme-ID list.
++ *
++ * These are the inspection points the operator asked for to diagnose
++ * graft/ungraft residue. Read-only; no writes; safe to cat at any
++ * time including under load.
++ */
++static int fman_pcd_kg_schemes_show(struct seq_file *m, void *unused)
++{
++	struct fman_pcd *pcd = m->private;
++	struct fman_keygen *keygen;
++	u32 regs[8];
++	u8 sid;
++	int err;
++
++	if (!pcd || !pcd->fman || !pcd->fman->keygen) {
++		seq_puts(m, "# keygen not initialised\n");
++		return 0;
++	}
++	keygen = pcd->fman->keygen;
++
++	seq_puts(m, "# scheme MODE     EKFC     FQB      HC       PPC      SPC      CCBS     MV\n");
++	mutex_lock(&pcd->lock);
++	for (sid = 0; sid < FM_KG_MAX_NUM_OF_SCHEMES; sid++) {
++		if (!keygen->schemes[sid].used)
++			continue;
++		err = keygen_dump_scheme_regs(keygen, sid, regs);
++		if (err) {
++			seq_printf(m, "%3u err=%d\n", sid, err);
++			continue;
++		}
++		seq_printf(m,
++			   "%3u %08x %08x %08x %08x %08x %08x %08x %08x\n",
++			   sid, regs[0], regs[1], regs[2], regs[3],
++			   regs[4], regs[5], regs[6], regs[7]);
++	}
++	mutex_unlock(&pcd->lock);
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(fman_pcd_kg_schemes);
++
++static int fman_pcd_port_sp_show(struct seq_file *m, void *unused)
++{
++	struct fman_pcd *pcd = m->private;
++	struct fman_keygen *keygen;
++	u32 sp_vec;
++	u8 hwport;
++	int err;
++	int bit;
++
++	if (!pcd || !pcd->fman || !pcd->fman->keygen) {
++		seq_puts(m, "# keygen not initialised\n");
++		return 0;
++	}
++	keygen = pcd->fman->keygen;
++
++	seq_puts(m, "# hwport fmkg_pe_sp  schemes\n");
++	mutex_lock(&pcd->lock);
++	for (hwport = 1; hwport <= 0x3F; hwport++) {
++		err = keygen_dump_port_sp(keygen, hwport, &sp_vec);
++		if (err)
++			continue;
++		if (sp_vec == 0)
++			continue;
++		seq_printf(m, "  0x%02x  0x%08x ", hwport, sp_vec);
++		for (bit = 31; bit >= 0; bit--) {
++			if (sp_vec & (1u << bit))
++				seq_printf(m, "%u ", 31 - bit);
++		}
++		seq_putc(m, '\n');
++	}
++	mutex_unlock(&pcd->lock);
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(fman_pcd_port_sp);
++
++
+ /*
+  * Internal MURAM allocator wrappers consumed by PR14b-f siblings (NOT
+  * EXPORT_SYMBOL - same module, fsl_dpaa_fman.ko, per spec 13.6).  Budget
+@@ -296,10 +385,17 @@ INIT_LIST_HEAD(&pcd->oh_ports);
+ 		snprintf(name, sizeof(name), "%d", fman_get_id(fman));
+ 		pcd->debugfs_dir = debugfs_create_dir(name,
+ 					      fman_pcd_debugfs_root);
+-		if (!IS_ERR_OR_NULL(pcd->debugfs_dir))
++		if (!IS_ERR_OR_NULL(pcd->debugfs_dir)) {
+ 			debugfs_create_file("muram_budget", 0444,
+ 					    pcd->debugfs_dir, pcd,
+ 					    &fman_pcd_muram_budget_fops);
++			debugfs_create_file("kg_schemes", 0444,
++					    pcd->debugfs_dir, pcd,
++					    &fman_pcd_kg_schemes_fops);
++			debugfs_create_file("port_sp", 0444,
++					    pcd->debugfs_dir, pcd,
++					    &fman_pcd_port_sp_fops);
++		}
+ 	}
+ 
+ 	dev_info(fman_get_dev(fman),

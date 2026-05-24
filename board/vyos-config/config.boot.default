@@ -1,5 +1,5 @@
 interfaces {
-    ethernet e3 {
+    ethernet eth0 {
         address dhcp
         description "MGMT (left RJ45)"
     }

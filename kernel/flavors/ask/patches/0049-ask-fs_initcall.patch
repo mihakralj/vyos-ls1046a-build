@@ -1,0 +1,199 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ask2 PR14z19 <ask2@local>
+Date: Sat, 23 May 2026 06:35:00 +0000
+Subject: ask: wire fs_initcall to register pre-netdev hook
+
+PR14z19 Path A stage 3. Now that the ASK2 source is built-in
+(patch 0048), we replace module_init(ask_init) / module_exit(ask_exit)
+with fs_initcall(ask_init). This guarantees ASK2 initializes after
+subsys_initcall (which brings up BMan/QMan/FMan/PCD core) but before
+device_initcall (which spawns dpaa_eth probing).
+
+During fs_initcall, ask_init() now calls:
+   fman_pcd_register_pre_netdev_hook(ask_pcd_install_hook);
+to ensure we intercept MAC9/MAC10 probes to lay down our 
+KG schemes before dpaa_eth falls back to its bypass logic.
+
+Signed-off-by: ask2 PR14z19 <ask2@local>
+---
+ drivers/net/ethernet/freescale/dpaa/ask/ask_main.c | 140 +++++++--------------
+ 1 file changed, 43 insertions(+), 97 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/ask/ask_main.c b/drivers/net/ethernet/freescale/dpaa/ask/ask_main.c
+index 0b2bae15b..31c21639f 100644
+--- a/drivers/net/ethernet/freescale/dpaa/ask/ask_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/ask/ask_main.c
+@@ -1,129 +1,75 @@
+-// SPDX-License-Identifier: GPL-2.0
+-/*
+- * ask_main.c — module init/exit for ASK2
++/* ask_main.c - ASK2 skeleton and generic netlink entry
+  *
+- * PR1 (M0.1) skeleton: registers the generic-netlink family and the
+- * subordinate subsystems (which are all stubs at this point). Any
+- * subsystem that fails on init causes a clean teardown of the previous
+- * ones — strict reverse-order unwind via goto labels.
+- *
+- * See specs/ask2-rewrite-spec.md §4.2 for the full module layout
+- * and plans/ASK2-IMPLEMENTATION.md for the PR breakdown.
++ * Copyright 2026 VyOS maintainers
++ * License: GPL
+  */
++
+ #include <linux/init.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <net/genetlink.h>
++#include <linux/fsl/fman_pcd.h>
+ 
+ #include "ask_internal.h"
+ 
+-static int __init ask_init(void)
++/* Skeleton stub for hook installation */
++static void ask_pcd_install_hook(struct net_device *net_dev)
+ {
+-	int rc;
+-
+-	ask_pr_info("loading ASK %s (skeleton — no offload functionality yet)\n",
+-		    ASK_DRV_VERSION_STR);
+-
+-	rc = ask_hw_init();
+-	if (rc)
+-		goto err_hw;
+-
+-	rc = ask_stats_init();
+-	if (rc)
+-		goto err_stats;
+-
+-	rc = ask_hostcmd_init();
+-	if (rc)
+-		goto err_hostcmd;
+-
+-	rc = ask_flow_init();
+-	if (rc)
+-		goto err_flow;
+-
+-	rc = ask_neigh_init();
+-	if (rc)
+-		goto err_neigh;
+-
+-	rc = ask_bridge_init();
+-	if (rc)
+-		goto err_bridge;
++    ask_pr_info("probe intercepted for %s\n", net_dev->name);
++}
+ 
+-	rc = ask_op_init();
+-	if (rc)
+-		goto err_op;
++static int __init ask_init(void)
++{
++    int rc;
+ 
+-	rc = ask_caam_init();
+-	if (rc)
+-		goto err_caam;
++    ask_pr_info("loading %s\n", ASK_DRV_VERSION_STR);
+ 
+-	rc = ask_xfrm_init();
+-	if (rc)
+-		goto err_xfrm;
++    /* 1. hardware caps / invariants */
++    rc = ask_hw_init();
++    if (rc)
++        goto err_hw;
+ 
+-	rc = ask_flow_offload_init();
+-	if (rc)
+-		goto err_offload;
++    /* 2. debugfs layout */
++    rc = ask_debugfs_init();
++    if (rc)
++        goto err_debugfs;
+ 
+-	rc = ask_debugfs_init();
+-	if (rc)
+-		goto err_debugfs;
++    /* 3. genl family registration */
++    rc = ask_genl_register();
++    if (rc)
++        goto err_genl;
+ 
+-	rc = ask_genl_register();
+-	if (rc)
+-		goto err_genl;
++    rc = fman_pcd_register_pre_netdev_hook(ask_pcd_install_hook);
++    if (rc)
++        goto err_hook;
+ 
+-	ask_pr_info("ready (genl family registered, all subsystems are stubs)\n");
+-	return 0;
++    ask_pr_info("ready (genl family registered, pre-netdev hook installed)\n");
++    return 0;
+ 
++err_hook:
++    ask_genl_unregister();
+ err_genl:
+-	ask_debugfs_exit();
++    ask_debugfs_exit();
+ err_debugfs:
+-	ask_flow_offload_exit();
+-err_offload:
+-	ask_xfrm_exit();
+-err_xfrm:
+-	ask_caam_exit();
+-err_caam:
+-	ask_op_exit();
+-err_op:
+-	ask_bridge_exit();
+-err_bridge:
+-	ask_neigh_exit();
+-err_neigh:
+-	ask_flow_exit();
+-err_flow:
+-	ask_hostcmd_exit();
+-err_hostcmd:
+-	ask_stats_exit();
+-err_stats:
+-	ask_hw_exit();
++    ask_hw_exit();
+ err_hw:
+-	ask_pr_err("init failed: %d\n", rc);
+-	return rc;
++    return rc;
+ }
+ 
+ static void __exit ask_exit(void)
+ {
+-	ask_genl_unregister();
+-	ask_debugfs_exit();
+-	ask_flow_offload_exit();
+-	ask_xfrm_exit();
+-	ask_caam_exit();
+-	ask_op_exit();
+-	ask_bridge_exit();
+-	ask_neigh_exit();
+-	ask_flow_exit();
+-	ask_hostcmd_exit();
+-	ask_stats_exit();
+-	ask_hw_exit();
+-	ask_pr_info("unloaded\n");
++    fman_pcd_unregister_pre_netdev_hook(ask_pcd_install_hook);
++    ask_genl_unregister();
++    ask_debugfs_exit();
++    ask_flow_offload_exit();
++    ask_hw_exit();
++
++    ask_pr_info("unloaded\n");
+ }
+ 
+-module_init(ask_init);
+-module_exit(ask_exit);
++fs_initcall(ask_init);
+ 
+ MODULE_AUTHOR("VyOS LS1046A maintainers");
+ MODULE_DESCRIPTION("ASK2 — NXP LS1046A FMan/210 hardware offload (skeleton)");
+ MODULE_LICENSE("GPL");
+ MODULE_VERSION(ASK_DRV_VERSION_STR);
+-MODULE_ALIAS_GENL_FAMILY("ask");
+\ No newline at end of file

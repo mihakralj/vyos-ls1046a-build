@@ -51,6 +51,16 @@
 #   THRESHOLD_GBPS — minimum throughput to pass         [2.0]
 #   THRESHOLD_CPU  — maximum %CPU usage to pass         [5.0]
 #                    (reported as 100 - %idle from mpstat)
+#   RATE          — per-stream iperf3 -b rate cap        [0=unrated]
+#                    Set to a value like "625M" only if explicitly
+#                    rate-limiting the generator for diagnostic
+#                    workload-shape experiments.  Default is
+#                    unrated because the M2 gate's CPU threshold is
+#                    a *quality* signal: at ≥7 Gbps unrated, only a
+#                    working silicon offload (HW path) can stay
+#                    under 5% net CPU.  Rate-capping to land below
+#                    the threshold on the SW kernel forward plane
+#                    is explicitly NOT how M2 is intended to pass.
 #
 # Exit status:
 #   0 — gate passed (≥THRESHOLD_GBPS at ≤THRESHOLD_CPU %CPU)
@@ -88,6 +98,7 @@ DURATION="${DURATION:-30}"
 PARALLEL="${PARALLEL:-8}"
 THRESHOLD_GBPS="${THRESHOLD_GBPS:-2.0}"
 THRESHOLD_CPU="${THRESHOLD_CPU:-5.0}"
+RATE="${RATE:-0}"
 
 # ------------------------------------------------------------ helpers
 log()  { printf '[verify-ask-flow] %s\n' "$*" >&2; }
@@ -184,8 +195,18 @@ log "starting mpstat sampler on DUT for ${DURATION} s"
 ssh_dut "sudo -n mpstat 1 $DURATION > /tmp/verify-ask-mpstat.txt 2>&1 &"
 MPSTAT_REMOTE_PID=$(ssh_dut 'pgrep -f "sudo -n mpstat 1 '"$DURATION"'" | head -1' || true)
 
-log "starting iperf3 client on $GEN_HOST → $SINK_IP for ${DURATION} s with -P $PARALLEL"
-ssh_gen "iperf3 -c $SINK_IP -t $DURATION -P $PARALLEL -J" \
+# Build the iperf3 rate-limit flag.  RATE=0 disables the cap so the
+# harness can drive unconstrained throughput (used when verifying HW
+# offload, where the outcome of interest is "high Gbps at low CPU"
+# rather than "modest Gbps at very low CPU").
+if [ "$RATE" = "0" ] || [ -z "$RATE" ]; then
+        IPERF_RATE_ARG=""
+        log "starting iperf3 client on $GEN_HOST → $SINK_IP for ${DURATION} s with -P $PARALLEL (unrated)"
+else
+        IPERF_RATE_ARG="-b $RATE"
+        log "starting iperf3 client on $GEN_HOST → $SINK_IP for ${DURATION} s with -P $PARALLEL -b $RATE per stream"
+fi
+ssh_gen "iperf3 -c $SINK_IP -t $DURATION -P $PARALLEL $IPERF_RATE_ARG -J" \
 > "$TMPDIR/iperf3.json" 2>"$TMPDIR/iperf3.err" \
 || fail "iperf3 client failed; stderr: $(cat "$TMPDIR/iperf3.err")"
 
