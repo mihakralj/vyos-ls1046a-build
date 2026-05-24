@@ -232,13 +232,94 @@ For every phase:
 
 For Phase 4 specifically:
 
-- [ ] ISO flashed to mono DUT, boots to login banner < 90 s.
-- [ ] `dmesg | grep ask:` shows `pcd install: schemes 3+4 claimed` BEFORE first `dpaa_eth … eth3` register banner.
-- [ ] `dmesg | grep -i graft` returns empty (PR14z13/z15/z18 lines are gone).
-- [ ] `ask-pcd-regdump.py` shows KGSE_SPC counting on schemes 3 + 4 at idle.
-- [ ] `bin/verify-ask-flow-offload.sh` → throughput ≥ 2 Gbps AND CPU ≤ 5% (M2 hard gate from spec §11.1).
-- [ ] Stretch: throughput ≥ 7 Gbps AND CPU < 5% (the review's claim for inline-MANIP CC-key action).
-- [ ] 10-cycle stress (nft flow add → measure → nft flow del → measure SW-only → repeat) with **zero** silicon wedge, **zero** reboot needed.
+- [x] ISO flashed to mono DUT, boots to login banner < 90 s. (verified 2026-05-24, DUT 192.168.1.190)
+- [ ] ❌ `dmesg | grep ask:` shows `pcd install: schemes 3+4 claimed` BEFORE first `dpaa_eth … eth3` register banner. **FAILED** — banner absent; hook armed but never fires (see §5.1 below).
+- [x] `dmesg | grep -i graft` returns empty (PR14z13/z15/z18 lines are gone). (verified 2026-05-24)
+- [x] `ask-pcd-regdump.py` shows KGSE_SPC counting on schemes 3 + 4 at idle. (verified 2026-05-24: scheme 3 fqb=0x200, scheme 4 fqb=0x300, both active, +5.97M / +334K pkts per 10s iperf3 — but `kgse_ccbs=0` so RX-hash only, no CC-tree)
+- [ ] ❌ `bin/verify-ask-flow-offload.sh` → throughput ≥ 2 Gbps AND CPU ≤ 5% (M2 hard gate from spec §11.1). **PARTIAL FAIL** — throughput **6.861 Gbps ✅** but kernel-net CPU **33.14 % ❌** (softirq 32.4 %, sys 0.73 %). All `ask_hw_flow_insert_v4_tcp` calls return `-ENODEV`, all forwarding stays on kernel SW fast path.
+- [ ] Stretch: throughput ≥ 7 Gbps AND CPU < 5% (the review's claim for inline-MANIP CC-key action). Deferred behind v1.1 fix.
+- [ ] 10-cycle stress (nft flow add → measure → nft flow del → measure SW-only → repeat) with **zero** silicon wedge, **zero** reboot needed. Deferred — pointless until silicon path actually engages.
+
+### 5.1 M2 acceptance gate finding — Path A loading-order blocker (v1.1)
+
+The 2026-05-24 M2 run on commit `df3fbda` revealed an architectural ordering bug
+that prevents the silicon fast path from ever engaging on a stock boot:
+
+```
+1. kernel: fman_pcd_init             [in-tree, postcore_initcall]
+2. kernel: fsl_fman driver probe     [in-tree, device_initcall]
+3. kernel: fman_port_init × 5 MACs   ← pre-netdev hook callback would fire HERE
+4. kernel: register_netdev × 5
+5. systemd userspace start
+6. systemd-modules-load.service: insmod ask.ko
+7. ask.ko: fman_pcd_register_pre_netdev_hook()  ← TOO LATE
+```
+
+Steps 1–4 complete before `ask.ko` is even loaded. The hook is registered at
+step 7 but its callback only fires inside step 3, which has already happened.
+Symptoms:
+
+- dmesg shows `pre-netdev hook registered` but never the corresponding
+  `ask: pcd install: schemes 3+4 claimed` banner.
+- `kgse_ccbs = 0` and `kgse_mv = 0` on schemes 3 + 4 — schemes are doing pure
+  RX-hash distribution, not the v1.3 inline-MANIP CC-key action.
+- `ask_hw_flow_insert_v4_tcp()` returns `-ENODEV` because the CC-tree handle
+  it expects to add keys to does not exist.
+- Kernel softirq forwarding takes the full traffic load → CPU gate fails even
+  though every other layer of the offload pipeline (`flow_offload_ops`
+  callback, PR14z11 next-hop resolve, xarray cookie indirection, Phase 4.10
+  egress-side echo dedup) is working as designed.
+
+Path A is structurally correct as the review describes it. The bug is purely
+in the timing of when the hook registration takes effect. Three v1.1
+remediation options, in order of increasing surgical invasiveness:
+
+1. **(a) initramfs preload.** Add `ask` to `/etc/initramfs-tools/modules`
+   so `modprobe ask` runs from `init-bottom` before pivot-root. The
+   in-tree `fsl_fman` driver still probes via `device_initcall` during
+   kernel init proper, so the race is not guaranteed won. Cheapest to
+   try; verify with the `pcd install: schemes 3+4 claimed` banner
+   appearing before `dpaa_eth ... eth3` in dmesg.
+2. **(c) Late-install API on `fman_pcd`.** Add
+   `fman_pcd_install_now_for_existing_ports()` that `ask.ko` calls
+   immediately after `fman_pcd_register_pre_netdev_hook()`. The fman_pcd
+   subsystem walks its already-registered `fman_port` list and
+   synthesizes the missed callback retroactively. ~50 LOC delta to
+   patch `0004-fman-pcd-subsystem.patch`. Preserves OOT-module property
+   of `ask.ko`, matches v1.3 spec intent. **Recommended.**
+3. **(b) Built-in `ask.ko`.** Promote ASK from OOT to in-tree at
+   `drivers/net/ethernet/freescale/dpaa/ask/`, register the hook via a
+   `postcore_initcall` ordered after `fman_pcd_init` but before
+   `fsl_fman_init`. Definitive fix, matches the spec's "patch 0005
+   lands ask.ko in-tree" trajectory. Loses OOT property and ties every
+   kernel build to ASK code.
+
+Throughput evidence the silicon path is genuinely worth fixing — the kernel
+SW flowtable alone already delivers a +90 % uplift over plain SW forward:
+
+| Configuration | Throughput |
+|---|---:|
+| Plain SW forward (no flowtable) | 3.603 Gbps |
+| Kernel SW flowtable + ASK driver SW-fallback | 6.861 Gbps |
+| Kernel SW flowtable + silicon `FORWARD_FQ_WITH_MANIP` (target) | ≥ 7 Gbps at < 5 % CPU |
+
+The 6.861 → ≥ 7 Gbps gap is the M2 stretch goal; the 33.14 % → < 5 % CPU
+collapse is the M2 hard goal — both unlock together once the hook fires.
+
+Note also that this is exactly the failure mode the review flagged as
+Risk #1 ("inline MANIP doesn't work as documented in RM §8.7.3.4"); but
+the hardware never got the chance to prove or disprove RM §8.7.3.4
+because the CC-tree was never installed. Risk #1 remains untested.
+
+The Phase 4 commit chain (`e300839 … df3fbda`) is **not rolled back** per
+plan §4.9 — Path A is structurally correct, only the boot-time activation
+is broken.
+
+### 5.2 Other deferred test-gate items
+
+- 10-cycle nft flow add/del stress test — pointless until §5.1 lands.
+- Plan-file Phase 1.1–1.11, 2.1–2.5, 3.1–3.7, 4.1–4.10 checkbox sync — housekeeping commit pending.
+>>>>>>> NEW
 
 ---
 
