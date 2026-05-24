@@ -164,20 +164,15 @@ Goal: implement the **architectural win** of the review — replace the OH-port 
 
 Exit gate: ISO boots, `ask.ko` installs PCD chain before `register_netdev`, M2 gate passes OR a single clear regression note is filed; the graft-related dmesg lines (`PR14z13 graft active`, `port 0xNN dir N → scheme_id=…`) are **gone**.
 
-### Phase 5 — Delete `askd`/`ask-cli`/`libask_fci.so.1` budget; commit to `ynl` + `nft` (≤ 1 day, doc-only)
+### Phase 5 — Delete `askd`/`ask-cli`/`libask_fci.so.1` budget; commit to `ynl` + `nft` (≤ 1 day, doc-only) ✅ landed 2026-05-24
 
 Goal: lock in the deletion of the userspace daemon, Python CLI, and FCI compat library from the project's roadmap. These are **not** in the current tree, so this is doc-only — but the doc reconciliation is the gating step that prevents them being re-spawned in a future planning round.
 
-- [ ] **5.1** In spec §6 / §7 / §19, replace every "askd shall …" / "ask-cli shall …" sentence with the corresponding mainline-tool answer:
-  - Promotion policy / ALG exclusion → `nft add rule inet filter forward ip protocol tcp tcp dport != { 21, 5060 } flow add @f` (ship `/etc/ask/exclude-alg.nft` as canonical example).
-  - Bytes-back keepalive → in-kernel 1 Hz timer in `ask_flow.c` calling `nf_ct_refresh_acct()`. ~30 LOC.
-  - Operator CLI `show flows / show stats / show muram` → `ynl --family ask --do dump-flows` (ship `ask.yaml` schema in spec §7.4).
-  - VPP handoff → **deferred to v1.1** as `ask-vpp-promote` (Trajectory B from the review), `Type=oneshot`, ~600 LOC. Not in v1.0.
-  - Prometheus metrics → write `/run/ask/metrics.prom` from a 5 s in-kernel periodic, scrape via `node_exporter --collector.textfile`. ~50 LOC.
-- [ ] **5.2** In **`AGENTS.md`** ASK2 section, remove any LOC budget line for `askd`, `ask-cli`, `ask-load`, `libask_fci.so.1`. The "Until the ASK2 components land" sentence stays but trims to: *"Until ASK2 components land (`ask.ko` ~2800 LOC, in-tree `fman_pcd` ~5500 LOC across drivers/net/.../fman/), `kernel/flavors/ask/` is scaffold only…"*.
-- [ ] **5.3** Ship `ask.yaml` netlink-family schema (spec §7.4) in `kernel/flavors/ask/uapi/` so that `tools/net/ynl/ynl-gen-c.py ask.yaml` produces a typed C client and `ynl` CLI works out-of-box.
-- [ ] **5.4** Add a one-paragraph **§3.5 "Operator UX"** to the spec describing the `ynl`/`nft`/`node_exporter` triad as the operator-facing surface, with one worked example per tool.
-- [ ] **5.5** Commit: `docs(ask2): v1.3 — no daemon, no Python CLI, no FCI shim; UX via ynl/nft/node_exporter`.
+- [x] **5.1** Spec §6 rewritten as a v1.3 "Removed" stub mapping each former askd/ask-cli responsibility to its mainline-tool replacement (nft, ynl, in-kernel timer, node_exporter, ask-vpp-promote oneshot deferred to v1.1). Landed in Phase 3 commit `91a44a2`.
+- [x] **5.2** AGENTS.md ASK2 LOC budget line updated in Phase 1 commit `aef5a11` — `askd`/`ask-cli`/`ask-load`/`libask_fci.so.1` removed; "Until ASK2 components land" now reads `(ask.ko ~2800 LOC in-tree, plus patch 0004 ~5500 LOC across drivers/net/ethernet/freescale/fman/)`.
+- [x] **5.3** `ask.yaml` shipped at `kernel/flavors/ask/uapi/ask.yaml` — full YNL schema (genetlink-legacy, 8 operations, 3 mcast groups, 7 attribute-sets, 2 typed definitions). When the ask.ko series upstreams, file lands at `Documentation/netlink/specs/ask.yaml`.
+- [x] **5.4** Spec §3.6 "Operator UX (v1.3)" added — three-tool table (`nft`/`ynl`/`node_exporter`) with one worked example per tool, plus an explicit "no askd, no ask-cli, no libask_fci.so.1" footer. (Numbered §3.6 rather than §3.5 because §3.5 was already taken by the Path A probe sequence.)
+- [x] **5.5** Commit: `docs(ask2): v1.3 Phase 5 — ship ask.yaml YNL schema + §3.6 Operator UX`.
 
 Exit gate: `grep -rn 'askd\|ask-cli\|libask_fci\|libfci.so.1\|cdx_ctrl' specs/ AGENTS.md plans/ASK2-*.md` returns only historical-context mentions (clearly tagged as such) — no live "shall implement" sentences.
 
