@@ -271,7 +271,8 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
                      "$ASK_PATCH_DIR"/0055-*.patch \
                      "$ASK_PATCH_DIR"/0056-*.patch \
                      "$ASK_PATCH_DIR"/0057-*.patch \
-                     "$ASK_PATCH_DIR"/0058-*.patch; do
+                     "$ASK_PATCH_DIR"/0058-*.patch \
+                     "$ASK_PATCH_DIR"/0060-*.patch; do
         [ -f "$src_patch" ] || { echo "ERROR: missing $src_patch"; exit 1; }
         # Rename 0001-→1001-, 0002-→1002-, 0003-→1003-, 0004-→1004-,
         # 0005-→1005-, 0006-→1006-, 0007-→1007-, 0008-→1008-,
@@ -326,13 +327,14 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
             0056-*) dst="1056-${base#0056-}" ;;
             0057-*) dst="1057-${base#0057-}" ;;
             0058-*) dst="1058-${base#0058-}" ;;
+            0060-*) dst="1060-${base#0060-}" ;;
             *)      echo "ERROR: unexpected ASK patch name: $base"; exit 1 ;;
         esac
         echo "###   $base → $dst"
         cp "$src_patch" "$KERNEL_PATCHES/$dst"
         ASK_PATCH_COUNT=$((ASK_PATCH_COUNT + 1))
     done
-    # Expected count: 45 (Phase 2 Option C2 result — see
+    # Expected count: 48 (Phase 2 Option C2 result + v1.1-A — see
     # plans/ASK2-PHASE2-PATCH-TRIAGE.md §5 for arithmetic):
     #   53 original
     # -  8 archived 2026-05-24 stage 1 (0032/0033-RMV/0034/0036/0037-RMV/
@@ -341,9 +343,10 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
     #                                   keygen.c cross-file deps; 0046
     #                                   PARTIAL-split; 0051 orphaned)
     # +  3 new KEEP-half patches (0054 ex-0033, 0055 ex-0037, 0056 ex-0046)
-    # = 45 active.
-    if [ "$ASK_PATCH_COUNT" -ne 47 ]; then
-        echo "ERROR: expected 47 ASK kernel patches, staged $ASK_PATCH_COUNT"
+    # +  1 v1.1-A late-registration replay (0060)
+    # = 48 active.
+    if [ "$ASK_PATCH_COUNT" -ne 48 ]; then
+        echo "ERROR: expected 48 ASK kernel patches, staged $ASK_PATCH_COUNT"
         exit 1
     fi
     echo "### ASK2: $ASK_PATCH_COUNT in-tree kernel patches staged"
