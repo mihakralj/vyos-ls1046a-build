@@ -272,7 +272,8 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
                      "$ASK_PATCH_DIR"/0056-*.patch \
                      "$ASK_PATCH_DIR"/0057-*.patch \
                      "$ASK_PATCH_DIR"/0058-*.patch \
-                     "$ASK_PATCH_DIR"/0060-*.patch; do
+                     "$ASK_PATCH_DIR"/0060-*.patch \
+                     "$ASK_PATCH_DIR"/0061-*.patch; do
         [ -f "$src_patch" ] || { echo "ERROR: missing $src_patch"; exit 1; }
         # Rename 0001-→1001-, 0002-→1002-, 0003-→1003-, 0004-→1004-,
         # 0005-→1005-, 0006-→1006-, 0007-→1007-, 0008-→1008-,
@@ -328,6 +329,7 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
             0057-*) dst="1057-${base#0057-}" ;;
             0058-*) dst="1058-${base#0058-}" ;;
             0060-*) dst="1060-${base#0060-}" ;;
+            0061-*) dst="1061-${base#0061-}" ;;
             *)      echo "ERROR: unexpected ASK patch name: $base"; exit 1 ;;
         esac
         echo "###   $base → $dst"
@@ -344,9 +346,10 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
     #                                   PARTIAL-split; 0051 orphaned)
     # +  3 new KEEP-half patches (0054 ex-0033, 0055 ex-0037, 0056 ex-0046)
     # +  1 v1.1-A late-registration replay (0060)
-    # = 48 active.
-    if [ "$ASK_PATCH_COUNT" -ne 48 ]; then
-        echo "ERROR: expected 48 ASK kernel patches, staged $ASK_PATCH_COUNT"
+    # +  1 v1.1-A bugfix: INIT_LIST_HEAD pending_ports (0061)
+    # = 49 active.
+    if [ "$ASK_PATCH_COUNT" -ne 49 ]; then
+        echo "ERROR: expected 49 ASK kernel patches, staged $ASK_PATCH_COUNT"
         exit 1
     fi
     echo "### ASK2: $ASK_PATCH_COUNT in-tree kernel patches staged"
@@ -609,6 +612,16 @@ for patch in $(find "${PATCH_DIR}" -maxdepth 1 -type f -name '*.patch' | sort); 
         echo "::error::Kernel patch FAILED to apply (git apply --3way): $pname" >&2
         PATCH_FAIL=$((PATCH_FAIL + 1))
         PATCH_FAIL_LIST="$PATCH_FAIL_LIST $pname"
+    else
+        # Commit each successfully-applied patch so that subsequent patches'
+        # `git apply --3way` sees the cumulative on-disk state as their merge
+        # base. Without this commit step, every patch re-bases against the
+        # original pristine commit and effectively falls through to a plain
+        # direct apply that requires exact context match — which fails after
+        # earlier patches have shifted line numbers (e.g. 1060's context in
+        # fman_pcd.c after 1044's pre-netdev-hook insertions).
+        git -c user.email=ci@local -c user.name=ci add -A
+        git -c user.email=ci@local -c user.name=ci commit -q --allow-empty -m "applied: $pname" || true
     fi
 done
 

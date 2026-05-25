@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Mon, 25 May 2026 00:13:00 +0000
+Subject: [PATCH] fman_pcd: v1.1-A bugfix -- INIT_LIST_HEAD pending_ports in
+ fman_pcd_init()
+
+Empirical M2 acceptance-gate verification on 2026-05-25 (kernel
+6.18.31-vyos) revealed that patch 0060 forgot to initialise the new
+pcd->pending_ports list in fman_pcd_init(), even though it added
+the field to struct fman_pcd and used it from
+fman_pcd_record_pending_port(),
+fman_pcd_install_now_for_existing_ports(), and fman_pcd_release().
+
+Symptom: the new vmlinuz failed to boot on the DUT and never came
+back on the network. fman_port_init() runs early during the DPAA
+platform probe; the first port hitting the -ENOENT fall-through
+(i.e. ask hook not yet registered, which is the whole point of
+v1.1-A's retroactive-replay design) called
+fman_pcd_record_pending_port() -> list_add_tail(&p->node,
+&pcd->pending_ports), and because pcd->pending_ports.next/prev
+were zero-initialised by kzalloc, list_add_tail() dereferenced a
+NULL pointer -> early kernel panic during platform probe, well
+before serial console / network came up. DUT bricked, recovery
+required physical serial-console intervention.
+
+This adds the missing INIT_LIST_HEAD adjacent to the other five
+existing INIT_LIST_HEAD calls in fman_pcd_init(), so the list is
+in valid empty-list state before fman_port_init() can race ahead
+of ask_init() on the platform bus.
+
+Acceptance signature: kernel now boots; the rest of the v1.1-A
+flow (record -> install_now -> claimed/declined/failed log line)
+proceeds as designed in patch 0060.
+---
+ drivers/net/ethernet/freescale/fman/fman_pcd.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 128a94e..226f28c 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -531,6 +531,7 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 	INIT_LIST_HEAD(&pcd->manip_profiles);
+ 	INIT_LIST_HEAD(&pcd->plcr_profiles);
+ 	INIT_LIST_HEAD(&pcd->replic_groups);
++	INIT_LIST_HEAD(&pcd->pending_ports);
+ 
+ 	pcd->muram_offset = fman_muram_alloc(muram,
+ 				     FMAN_PCD_MURAM_RESERVED_BYTES);
+-- 
+2.39.5
