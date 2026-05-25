@@ -1,0 +1,242 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Mon, 25 May 2026 16:53:00 +0000
+Subject: patches/0063-fman-pcd-manip-instrument-muram-gen-pool.patch
+
+PR14z22: instrument MURAM gen_pool to localise residual chain_create -ENOMEM.
+
+PR14z21 (commit 59f7209, patch 0062) skipped the bogus 64 KiB MURAM
+pre-reservation in fman_pcd_init() and unblocked Path A boot-time
+PCD activation on the mono LS1046A (claimed=5 declined=0 failed=0).
+The M2 gate run on 2026-05-25 then PASSed throughput (6.955 Gbps,
+target >= 2 Gbps) but FAILed kernel-net CPU (21.40 %, target <= 5 %)
+because per-flow MANIP chain insert hard-fails 327 times with
+fman_pcd_manip_chain_create(3 manips) failed: -12 (-ENOMEM), so
+per-hop L2 rewrite never enters silicon and the CPU still does it.
+
+This patch adds non-invasive gen_pool accounting at four checkpoints
+to identify which of three v1.4 hypotheses applies (specs/ask2-rewrite
+-spec.md v1.4 §13.3 + §16 Risk #13):
+
+  (a) boot-time CC trees consume the 384 KiB pool before per-flow
+      chains can be allocated;
+  (b) chain_create byte-size math is wrong (3 manips should fit
+      ~1 KiB, not exhaust 384 KiB);
+  (c) per-manip pre-alloc leak introduced by the v1.3 manip-chain
+      refactor.
+
+Checkpoints
+-----------
+
+  CP-postinstall (fman_pcd.c, fman_pcd_install_now_for_existing_ports
+                  epilogue):
+      "fman_pcd: install_now: muram pool size=%zu B avail=%zu B
+       (post boot-time PCD install)"
+
+  CP1 (fman_pcd_manip.c, fman_pcd_manip_chain_create entry, first call):
+      "fman_pcd_manip_chain_create CP1 first-call: muram pool size=%zu B
+       avail=%zu B (after boot-time PCD install) n_manips=%u
+       total_bytes=%zu (HMTD=%u HMCT_CHAIN=%u)"
+
+  CP2-fail (HMTD-alloc failure):
+      "fman_pcd_manip_chain_create CP2-fail HMTD-alloc: muram pool
+       size=%zu B avail=%zu B err=%ld (HMTD=%u, n_manips=%u,
+       total_bytes=%zu)"
+
+  CP3-fail (HMCT-alloc failure):
+      "fman_pcd_manip_chain_create CP3-fail HMCT-alloc: muram pool
+       size=%zu B avail=%zu B err=%ld (HMCT_CHAIN=%u, HMTD-already-OK,
+       n_manips=%u, total_bytes=%zu)"
+
+  CP4 (every 64th successful chain_create call):
+      "fman_pcd_manip_chain_create CP4 n=%u: muram pool size=%zu B
+       avail=%zu B"
+
+Expected baseline per 3-manip chain = HMTD 16 B + HMCT 256 B = 272 B,
+rounded up to gen_pool min_alloc_order=6 (64 B) = 320 B per chain.
+Pool total is gen_pool_size() of the muram region added by
+fman_muram_init() (LS1046A: 384 KiB).
+
+Diagnostic protocol on the mono DUT
+-----------------------------------
+
+  1. Reboot into this kernel.
+  2. dmesg | grep -E 'fman_pcd: install_now: muram pool' to read
+     CP-postinstall avail (= total pool - boot-time-CC-tree cost).
+  3. Run the M2 traffic gate (iperf3 -P 8 -t 30 with 1518 B).
+  4. dmesg | grep -E 'fman_pcd_manip_chain_create CP[1-4]' to read
+     CP1 (== CP-postinstall expected), then CP2-fail / CP3-fail.
+
+Verdict logic (matches specs/ask2-rewrite-spec.md v1.4 §16 Risk #13):
+
+  Hypothesis (a) CONFIRMED if:
+    CP-postinstall avail < ~80 KiB AND CP3-fail avail < 256 B.
+
+  Hypothesis (b) CONFIRMED if:
+    CP-postinstall avail >= ~200 KiB AND CP3-fail avail >= 1 KiB
+    (i.e. plenty of pool, alloc still fails -> driver-side math bug).
+
+  Hypothesis (c) CONFIRMED if:
+    CP4 avail decreases by more than 320 B per chain (e.g. 4-8 KiB
+    per chain) -> per-manip pre-alloc leak.
+
+Cost: 4 new pr_info-class kprintf sites (1 once via static atomic_t,
+3 ratelimited), 1 static atomic_t, 1 new exported accessor
+fman_muram_pool_stats().  No fast-path overhead in steady state
+(all sites are on slowpath or rate-limited).  Diagnostic-only;
+revert before v1.0 release.
+
+Acceptance: with this patch on the mono DUT, dmesg shows at least
+one CP3-fail line with concrete avail-bytes numbers that decide
+between (a) / (b) / (c).
+
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_muram.c b/drivers/net/ethernet/freescale/fman/fman_muram.c
+index 1ed245a..f366614 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_muram.c
++++ b/drivers/net/ethernet/freescale/fman/fman_muram.c
+@@ -129,3 +129,25 @@ void fman_muram_free_mem(struct muram_info *muram, unsigned long offset,
+ 
+ 	gen_pool_free(muram->pool, addr, size);
+ }
++
++/**
++ * fman_muram_pool_stats() - read gen_pool size and avail.
++ * @muram:	FM-MURAM module pointer.
++ * @size:	out: total pool size in bytes (NULL-safe).
++ * @avail:	out: currently-free bytes (NULL-safe).
++ *
++ * v1.3 Phase 5 diagnostic accessor (PR14z22, 2026-05-25) used by the
++ * PCD subsystem to log gen_pool accounting at boot-time and per-flow
++ * checkpoints.  Best-effort: gen_pool_avail() is racy w.r.t.
++ * concurrent alloc/free; callers are expected to serialise.
++ */
++void fman_muram_pool_stats(struct muram_info *muram,
++			   size_t *size, size_t *avail)
++{
++	if (!muram || !muram->pool)
++		return;
++	if (size)
++		*size = gen_pool_size(muram->pool);
++	if (avail)
++		*avail = gen_pool_avail(muram->pool);
++}
+diff --git a/drivers/net/ethernet/freescale/fman/fman_muram.h b/drivers/net/ethernet/freescale/fman/fman_muram.h
+index 3643af6..87d21d4 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_muram.h
++++ b/drivers/net/ethernet/freescale/fman/fman_muram.h
+@@ -23,4 +23,21 @@ unsigned long fman_muram_alloc(struct muram_info *muram, size_t size);
+ void fman_muram_free_mem(struct muram_info *muram, unsigned long offset,
+ 			 size_t size);
+ 
++/*
++ * v1.3 Phase 5 diagnostic accessor (PR14z22, 2026-05-25).
++ *
++ * Exposes the underlying gen_pool's total size (sum of regions added
++ * via gen_pool_add_virt() during fman_muram_init()) and currently-free
++ * byte count.  Used by fman_pcd_manip_chain_create() and fman_pcd_init()
++ * to log MURAM gen_pool accounting at boot-time and per-flow-insert
++ * checkpoints to localise the residual -ENOMEM source observed after
++ * PR14z21 (commit 59f7209) on LS1046A.
++ *
++ * Best-effort: gen_pool_avail() is racy w.r.t. concurrent alloc/free,
++ * but ask.ko serialises its inserts so the diagnostic is meaningful.
++ */
++void fman_muram_pool_stats(struct muram_info *muram,
++			   size_t *size, size_t *avail);
++
++
+ #endif /* __FM_MURAM_EXT */
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 67ffef8..e4fcc5e 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -487,6 +487,24 @@ int fman_pcd_install_now_for_existing_ports(struct fman_pcd *pcd)
+ 	dev_info(fman_get_dev(pcd->fman),
+ 	"fman_pcd: install_now: claimed=%u declined=%u failed=%u\n",
+ 	claimed, declined, failed);
++
++	{
++		/*
++		 * v1.4 Phase 5 diagnostic (PR14z22, 2026-05-25): log MURAM
++		 * gen_pool state immediately after the boot-time CC-tree
++		 * install completes.  Comparing this value against the CP1
++		 * reading from fman_pcd_manip_chain_create() pins down
++		 * whether boot-time CC trees alone exhaust the pool, or
++		 * whether the residual -ENOMEM is per-flow chain churn.
++		 */
++		struct muram_info *m = fman_get_muram(pcd->fman);
++		size_t ps = 0, pa = 0;
++
++		fman_muram_pool_stats(m, &ps, &pa);
++		dev_info(fman_get_dev(pcd->fman),
++			 "fman_pcd: install_now: muram pool size=%zu B avail=%zu B (post boot-time PCD install)\n",
++			 ps, pa);
++	}
+ 	
+ 	return first_err;
+ }
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+index 7165c98..b9002bc 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+@@ -1069,6 +1069,30 @@ fman_pcd_manip_chain_create(struct fman_pcd *pcd,
+ 	if (!muram)
+ 		return ERR_PTR(-ENXIO);
+ 
++	{
++		/*
++		 * v1.4 Phase 5 diagnostic (PR14z22, 2026-05-25): log MURAM
++		 * gen_pool state on first call (CP1) and every 64th call (CP4)
++		 * to localise the residual -ENOMEM source observed in this
++		 * function after PR14z21 (commit 59f7209) on LS1046A.  Expected
++		 * cost per 3-manip chain = HMTD 16 B + HMCT 256 B = 272 B,
++		 * gen_pool min_alloc_order=6 (64 B) rounds to 320 B.
++		 */
++		static atomic_t fman_pcd_manip_chain_create_n = ATOMIC_INIT(0);
++		unsigned int cn = atomic_inc_return(&fman_pcd_manip_chain_create_n);
++		size_t pool_size = 0, pool_avail = 0;
++
++		fman_muram_pool_stats(muram, &pool_size, &pool_avail);
++		if (cn == 1)
++			pr_info("fman_pcd_manip_chain_create CP1 first-call: muram pool size=%zu B avail=%zu B (after boot-time PCD install) n_manips=%u total_bytes=%zu (HMTD=%u HMCT_CHAIN=%u)\n",
++				pool_size, pool_avail, n_manips,
++				total_bytes, FMAN_PCD_HMTD_SIZE,
++				FMAN_PCD_HMCT_CHAIN_SIZE);
++		else if ((cn & 0x3f) == 0)
++			pr_info("fman_pcd_manip_chain_create CP4 n=%u: muram pool size=%zu B avail=%zu B\n",
++				cn, pool_size, pool_avail);
++	}
++
+ 	chain = kzalloc(sizeof(*chain), GFP_KERNEL);
+ 	if (!chain)
+ 		return ERR_PTR(-ENOMEM);
+@@ -1080,6 +1104,13 @@ fman_pcd_manip_chain_create(struct fman_pcd *pcd,
+ 
+ 	off = fman_pcd_muram_alloc(pcd, FMAN_PCD_HMTD_SIZE);
+ 	if (IS_ERR_VALUE(off)) {
++		struct muram_info *m = fman_get_muram(fman_pcd_get_fman(pcd));
++		size_t ps = 0, pa = 0;
++
++		fman_muram_pool_stats(m, &ps, &pa);
++		pr_warn_ratelimited("fman_pcd_manip_chain_create CP2-fail HMTD-alloc: muram pool size=%zu B avail=%zu B err=%ld (HMTD=%u, n_manips=%u, total_bytes=%zu)\n",
++			ps, pa, (long)off, FMAN_PCD_HMTD_SIZE,
++			n_manips, total_bytes);
+ 		err = (long)off;
+ 		kfree(chain);
+ 		return ERR_PTR(err);
+@@ -1096,6 +1127,14 @@ fman_pcd_manip_chain_create(struct fman_pcd *pcd,
+ 
+ 	off = fman_pcd_muram_alloc(pcd, FMAN_PCD_HMCT_CHAIN_SIZE);
+ 	if (IS_ERR_VALUE(off)) {
++		struct muram_info *m = fman_get_muram(fman_pcd_get_fman(pcd));
++		size_t ps = 0, pa = 0;
++
++		fman_muram_pool_stats(m, &ps, &pa);
++		pr_warn_ratelimited("fman_pcd_manip_chain_create CP3-fail HMCT-alloc: muram pool size=%zu B avail=%zu B err=%ld (HMCT_CHAIN=%u, HMTD-already-OK, n_manips=%u, total_bytes=%zu)\n",
++			ps, pa, (long)off,
++			FMAN_PCD_HMCT_CHAIN_SIZE, n_manips,
++			total_bytes);
+ 		err = (long)off;
+ 		fman_pcd_muram_free(pcd, chain->hmtd_off,
+ 					FMAN_PCD_HMTD_SIZE);
