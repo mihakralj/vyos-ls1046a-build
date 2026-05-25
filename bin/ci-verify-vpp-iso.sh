@@ -25,13 +25,14 @@ fail() {
 [[ -s "$PKG_MANIFEST" ]] || fail "missing package manifest: $PKG_MANIFEST"
 [[ -s "$CONFIG_DEFAULT" ]] || fail "missing staged default config: $CONFIG_DEFAULT"
 
+# AF_XDP-only on DPAA1 (see plans/VPP.md). vpp-plugin-dpdk is intentionally
+# NOT required — the dpdk block in startup.conf is unused on this flavor.
 required_packages=(
     libvppinfra
     python3-vpp-api
     vpp
     vpp-crypto-engines
     vpp-plugin-core
-    vpp-plugin-dpdk
 )
 
 for pkg in "${required_packages[@]}"; do
@@ -40,13 +41,15 @@ for pkg in "${required_packages[@]}"; do
     fi
 done
 
-for iface in eth1 eth2 eth3 eth4; do
+# DPAA1 predictable naming on the Mono Gateway DK: e3 = left RJ45 (mgmt, kernel),
+# e2 = center RJ45, e4 = right RJ45, e5 = left SFP+, e6 = right SFP+ (all VPP).
+for iface in e2 e4 e5 e6; do
     grep -Eq "^[[:space:]]*interface ${iface}[[:space:]]*\{" "$CONFIG_DEFAULT" \
         || fail "VPP default config does not enable $iface"
 done
 
-if grep -Eq '^[[:space:]]*interface eth0[[:space:]]*\{' "$CONFIG_DEFAULT"; then
-    fail "VPP default config must leave eth0 out of vpp settings"
+if grep -Eq '^[[:space:]]*interface e3[[:space:]]*\{' "$CONFIG_DEFAULT"; then
+    fail "VPP default config must leave e3 (mgmt RJ45) out of vpp settings"
 fi
 
 grep -q 'allow-unsupported-nics' "$CONFIG_DEFAULT" || fail "missing VPP allow-unsupported-nics setting"
