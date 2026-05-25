@@ -920,6 +920,9 @@ static int ask_hw_build_manip_chain(struct ask_hw_pcd *h,
         __be16 etype = htons(ETH_P_IP);
         int rc;
 
+        ask_pr_dbg("hw: build_manip_chain: enter nh=%pM em=%pM\n",
+                   key->next_hop_mac, key->egress_mac);
+
         /* 1. RMV_ETHERNET — strip 14-byte ingress L2 header. */
         memset(&p, 0, sizeof(p));
         p.type = FMAN_PCD_MANIP_RMV_ETHERNET;
@@ -927,6 +930,7 @@ static int ask_hw_build_manip_chain(struct ask_hw_pcd *h,
         if (IS_ERR_OR_NULL(m_rmv)) {
                 rc = m_rmv ? PTR_ERR(m_rmv) : -ENOMEM;
                 m_rmv = NULL;
+                ask_pr_warn("hw: build_manip_chain: RMV_ETHERNET create failed: %d\n", rc);
                 goto err;
         }
 
@@ -941,6 +945,7 @@ static int ask_hw_build_manip_chain(struct ask_hw_pcd *h,
         if (IS_ERR_OR_NULL(m_insrt)) {
                 rc = m_insrt ? PTR_ERR(m_insrt) : -ENOMEM;
                 m_insrt = NULL;
+                ask_pr_warn("hw: build_manip_chain: INSRT_GENERIC create failed: %d\n", rc);
                 goto err;
         }
 
@@ -952,6 +957,7 @@ static int ask_hw_build_manip_chain(struct ask_hw_pcd *h,
         if (IS_ERR_OR_NULL(m_ipv4)) {
                 rc = m_ipv4 ? PTR_ERR(m_ipv4) : -ENOMEM;
                 m_ipv4 = NULL;
+                ask_pr_warn("hw: build_manip_chain: FIELD_UPDATE_IPV4_FORWARD create failed: %d\n", rc);
                 goto err;
         }
 
@@ -963,6 +969,7 @@ static int ask_hw_build_manip_chain(struct ask_hw_pcd *h,
         if (IS_ERR_OR_NULL(chain)) {
                 rc = chain ? PTR_ERR(chain) : -ENOMEM;
                 chain = NULL;
+                ask_pr_warn("hw: build_manip_chain: chain_create(3 manips) failed: %d\n", rc);
                 goto err;
         }
 
