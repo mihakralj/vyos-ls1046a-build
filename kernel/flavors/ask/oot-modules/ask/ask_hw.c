@@ -428,10 +428,31 @@ static void ask_hw_kg_params_fill(struct fman_pcd_kg_scheme_params *kg,
 /*
  * Create one empty CC node attached to @tree. miss_action targets
  * @miss_fqid so unmatched frames go to the kernel's RX FQ pool.
- * num_keys = 127 pre-sizes the MURAM key table for the M2 workload
- * (16 active 5-tuples) with substantial headroom; the per-port
- * MURAM cost is (127+1) × (2×16 + 16) = 6,144 B, well within the
- * 384 KiB FMan MURAM budget even across all 8 BMI RX ports.
+ *
+ * v1.1-A.2 (2026-05-25): num_keys reduced 127 → 31 per node.
+ *
+ * Empirical M2 verification (build #7, kernel 6.18.31-vyos) showed that
+ * with num_keys=127 the install hook successfully claims port 0x09 (both
+ * cc_v4_tcp + cc_v4_udp + scheme + cc_tree all allocated) but the SECOND
+ * port (0x0c) hits -ENOMEM on its cc_v4_udp create even though the PCD
+ * debugfs reports free=52,992 B of the 64 KiB reservation. Root cause:
+ * fman_pcd_muram_alloc() is a thin wrapper around the global FMan MURAM
+ * gen_pool (not a sub-pool of the 64 KiB PCD reservation); after mainline
+ * CAM + per-port Rx/Tx FIFO reservations the free chunk distribution in
+ * the global pool fragments so that 6 KiB requests (4096 B match-table +
+ * 2048 B AD-table per cc_node, alternating) cannot find a contiguous slot
+ * after ~2 cc_nodes' worth of fragmentation.
+ *
+ * num_keys=31 yields per cc_node: (31+1)×(2×16+16) = 32×48 = 1,536 B.
+ * Per port: 2 cc_nodes = 3,072 B. 5 ports total = 15,360 B — fits even
+ * in heavily fragmented pool conditions. M2 workload is 16 active
+ * 5-tuples per port; 31 slots gives nearly 2× headroom.
+ *
+ * If we later need >31 keys per port we have two options: (a) raise the
+ * per-port budget by allocating BIGGER chunks (1024 → 4096 B blocks)
+ * via a custom buddy allocator, or (b) consolidate cc_v4_tcp + cc_v4_udp
+ * into one CC node using L4-protocol bytes in the key. Both deferred to
+ * v1.2+.
  */
 static struct fman_pcd_cc_node *
 ask_hw_create_empty_cc_node(struct fman_pcd_cc_tree *tree, u32 miss_fqid)
@@ -445,7 +466,7 @@ ask_hw_create_empty_cc_node(struct fman_pcd_cc_tree *tree, u32 miss_fqid)
         extract.size   = ASK_HW_V4_KEY_WIDTH;
 
         memset(&keys, 0, sizeof(keys));
-        keys.num_keys                    = 127;
+        keys.num_keys                    = 31;
         keys.keys                        = NULL;        /* pre-allocate empty */
         keys.miss_action.type            = FMAN_PCD_ACTION_FORWARD_FQ;
         keys.miss_action.forward_fq.fqid = miss_fqid;

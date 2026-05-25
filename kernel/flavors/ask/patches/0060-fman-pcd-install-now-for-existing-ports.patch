@@ -3,9 +3,6 @@ From: ci <ci@local>
 Date: Sun, 24 May 2026 23:29:04 +0000
 Subject: [PATCH] fman_pcd: v1.1-A install-now-for-existing-ports
  (late-registration replay)
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
 Empirical M2 acceptance-gate verification on 2026-05-24 (kernel
 6.18.31-vyos) revealed that ask_init()'s fs_initcall completes AFTER
@@ -14,134 +11,62 @@ built-in. Root cause: async/parallel platform-bus probe plus the
 MODULE_SIG_FORCE startup cost stall ask_init past every fman_port
 probe, so by the time ask calls fman_pcd_register_pre_netdev_hook()
 the hook table is updated but the hook itself never fires for the
-already-initialised ports. Result: throughput 6.861 Gbps with
-kernel-net CPU 33.14 %% (M2 gate is ≤ 5 %%).
+already-initialised ports.
 
 This patch lands option (c) from the failure analysis -- retroactive
 replay -- preserving ask.ko's OOT property without forcing the hook
-registration earlier in the boot sequence:
+registration earlier in the boot sequence.
 
-  - Add pcd->pending_ports list and struct fman_pcd_pending_port to
-    fman_pcd.c so each -ENOENT fall-through in fman_port_init() can
-    record (port_id, default_base_fqid, default_hash_size).
-
-  - fman_pcd_record_pending_port() (NOT exported, same TU as
-    fman_port.c) appends one record per untouched port. Failure is
-    non-fatal; the port simply will not be retroactively re-claimed.
-
-  - fman_pcd_install_now_for_existing_ports() (EXPORT_SYMBOL_GPL)
-    drains the queue by splicing it onto a local list (so the hook
-    can sleep / call back into PCD APIs without recursive lock),
-    invoking the registered hook for each captured port, removing
-    claimed entries (rc == 0), splicing declined ones (-ENOENT)
-    back, and dropping fatal entries to prevent retry loops.
-    Returns the first fatal errno or 0 on success.
-
-  - fman_port.c -ENOENT branch now calls
-    fman_pcd_record_pending_port() before falling through to
-    mainline keygen_port_hashing_init(). Warn-and-continue on
-    record failure -- mainline RSS still applies.
-
-  - ask_hw.c immediately after fman_pcd_register_pre_netdev_hook()
-    calls fman_pcd_install_now_for_existing_ports(). Errors are
-    non-fatal -- the kernel still forwards via mainline RSS for
-    any port the replay could not claim.
-
-  - fman_pcd_release() drains any unclaimed pending_port records
-    on subsystem teardown.
-
-Acceptance signature: 'dmesg | grep fman_pcd' shows
-'install_now: claimed=N declined=M failed=K' with N matching the
-count of FMan RX ports ask is configured to own; bin/ask-pcd-regdump.py
-shows non-zero kgse_ccbs on claimed schemes; M2 acceptance gate
-expected to flip throughput 6.861 -> >=7 Gbps and kernel-net CPU
-33.14 %% -> < 5 %%.
+NOTE: this regenerated patch was produced via 'git diff' on a clean
+post-1058 tree after hand-applying the original tab-corrupted edit;
+indentation is preserved as-applied (some closing braces and comment
+asterisks are tab-indented; ugly but compiles cleanly).
 ---
- .../net/ethernet/freescale/fman/fman_pcd.c    | 222 ++++++++++++++++--
- .../freescale/fman/fman_pcd_internal.h        |  19 +-
- .../net/ethernet/freescale/fman/fman_port.c   |  36 ++-
- include/linux/fsl/fman_pcd.h                  |  37 ++-
- 4 files changed, 284 insertions(+), 30 deletions(-)
-
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index 49d675f..128a94e 100644
+index 49d675f28..4e2485361 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -114,24 +114,61 @@ struct fman_pcd {
- 	struct list_head cc_trees;
- 	struct list_head manip_profiles;
- 	struct list_head plcr_profiles;
--	struct list_head replic_groups;
-+struct list_head replic_groups;
- 
--	struct dentry *debugfs_dir;
-+struct dentry *debugfs_dir;
- 
--	/*
--	 * PR14z19 Path A: optional pre-netdev hook. When set, fman_port_init()
--	 * calls this hook in lieu of the default keygen_port_hashing_init()
--	 * for ports where the hook returns 0 (== "I own this port, skip
--	 * default RSS"). Returning -ENOENT means "not my port, fall through".
--	 * Any other negative value is treated as a fatal probe error.
--	 *
--	 * Single hook per FMan instance. Registered before dpaa_eth_probe()
--	 * runs (ask.ko is built-in via Kconfig bool, so its module_init runs
--	 * during fs_initcall before the dpaa_eth probe). pcd->lock protects
--	 * the install/uninstall; the hook itself is invoked outside the lock.
--	 */
--	fman_pcd_pre_netdev_hook_t pre_netdev_hook;
--	void *pre_netdev_hook_priv;
-+/*
-+ * PR14z19 Path A: optional pre-netdev hook. When set, fman_port_init()
-+ * calls this hook in lieu of the default keygen_port_hashing_init()
-+ * for ports where the hook returns 0 (== "I own this port, skip
-+ * default RSS"). Returning -ENOENT means "not my port, fall through".
-+ * Any other negative value is treated as a fatal probe error.
-+ *
-+ * Single hook per FMan instance. Registered before dpaa_eth_probe()
-+ * runs (ask.ko is built-in via Kconfig bool, so its module_init runs
-+ * during fs_initcall before the dpaa_eth probe). pcd->lock protects
-+ * the install/uninstall; the hook itself is invoked outside the lock.
-+ */
-+fman_pcd_pre_netdev_hook_t pre_netdev_hook;
-+void *pre_netdev_hook_priv;
-+
-+/*
-+ * v1.1-A late-registration replay queue.
-+ *
-+ * Even though ask is built-in and ask_init() runs at fs_initcall,
-+ * empirical M2 verification (2026-05-24) showed that fman_port_init()
-+ * for all five MACs frequently completes BEFORE the hook is
-+ * registered: the FMan platform driver's probe schedules port probes
-+ * during device_initcall, and on parallel/async probe paths some of
-+ * those probes can race ahead of ask's hook registration --
-+ * especially when MODULE_SIG_FORCE verification stalls ask_init.
-+ *
-+ * Solution: whenever fman_port_init() falls through to mainline
-+ * keygen_port_hashing_init() (i.e. invoke_pre_netdev_hook returned
-+ * -ENOENT because no hook was yet installed), we record the port's
-+ * (port_id, default_base_fqid, default_hash_size) tuple on this
-+ * list. Later, when ask finally calls
-+ * fman_pcd_register_pre_netdev_hook(), it ALSO calls
-+ * fman_pcd_install_now_for_existing_ports() which drains this list
-+ * by invoking the freshly-registered hook for each captured port.
-+ *
-+ * Each successfully-claimed port (hook returns 0) is removed from
-+ * the list; -ENOENT or fatal errors leave the entry in place (or
-+ * are propagated to the caller, respectively).
-+ *
-+ * Locking: pcd->lock protects the list during append/drain. The
-+ * hook callback runs OUTSIDE the lock so it may sleep and call back
-+ * into PCD APIs.
-+ */
-+struct list_head pending_ports;
-+};
-+
-+struct fman_pcd_pending_port {
-+struct list_head node;
-+u8 hwport_id;
-+u32 default_base_fqid;
-+u32 default_hash_size;
+@@ -132,6 +132,43 @@ struct fman_pcd {
+ 	 */
+ 	fman_pcd_pre_netdev_hook_t pre_netdev_hook;
+ 	void *pre_netdev_hook_priv;
++	
++	/*
++	* v1.1-A late-registration replay queue.
++	*
++	* Even though ask is built-in and ask_init() runs at fs_initcall,
++	* empirical M2 verification (2026-05-24) showed that fman_port_init()
++	* for all five MACs frequently completes BEFORE the hook is
++	* registered: the FMan platform driver's probe schedules port probes
++	* during device_initcall, and on parallel/async probe paths some of
++	* those probes can race ahead of ask's hook registration --
++	* especially when MODULE_SIG_FORCE verification stalls ask_init.
++	*
++	* Solution: whenever fman_port_init() falls through to mainline
++	* keygen_port_hashing_init() (i.e. invoke_pre_netdev_hook returned
++	* -ENOENT because no hook was yet installed), we record the port's
++	* (port_id, default_base_fqid, default_hash_size) tuple on this
++	* list. Later, when ask finally calls
++	* fman_pcd_register_pre_netdev_hook(), it ALSO calls
++	* fman_pcd_install_now_for_existing_ports() which drains this list
++	* by invoking the freshly-registered hook for each captured port.
++	*
++	* Each successfully-claimed port (hook returns 0) is removed from
++	* the list; -ENOENT or fatal errors leave the entry in place (or
++	* are propagated to the caller, respectively).
++	*
++	* Locking: pcd->lock protects the list during append/drain. The
++	* hook callback runs OUTSIDE the lock so it may sleep and call back
++	* into PCD APIs.
++	*/
++	struct list_head pending_ports;
++	};
++	
++	struct fman_pcd_pending_port {
++		struct list_head node;
++		u8 hwport_id;
++		u32 default_base_fqid;
++		u32 default_hash_size;
  };
  
  /*
@@ -150,81 +75,81 @@ index 49d675f..128a94e 100644
  }
  
 +/*
-+ * v1.1-A: fman_pcd_record_pending_port() - same-module helper consumed
-+ * by fman_port.c whenever fman_port_init() falls through to the
-+ * mainline keygen_port_hashing_init() path because no pre-netdev hook
-+ * was registered at that moment. We capture
-+ * (port_id, base_fqid, hash_size) so a later
-+ * fman_pcd_install_now_for_existing_ports() call from ask can replay
-+ * the hook for ports that probed before ask_init() ran.
-+ *
-+ * Failures are non-fatal: a -ENOMEM means this particular port will
-+ * not be retroactively re-claimed. The caller logs and continues.
-+ *
-+ * Locking: callable from process context. kzalloc(GFP_KERNEL) is
-+ * outside pcd->lock; the list append is inside.
-+ */
++* v1.1-A: fman_pcd_record_pending_port() - same-module helper consumed
++* by fman_port.c whenever fman_port_init() falls through to the
++* mainline keygen_port_hashing_init() path because no pre-netdev hook
++* was registered at that moment. We capture
++* (port_id, base_fqid, hash_size) so a later
++* fman_pcd_install_now_for_existing_ports() call from ask can replay
++* the hook for ports that probed before ask_init() ran.
++*
++* Failures are non-fatal: a -ENOMEM means this particular port will
++* not be retroactively re-claimed. The caller logs and continues.
++*
++* Locking: callable from process context. kzalloc(GFP_KERNEL) is
++* outside pcd->lock; the list append is inside.
++*/
 +int fman_pcd_record_pending_port(struct fman_pcd *pcd, u8 hwport_id,
-+				 u32 default_base_fqid,
-+				 u32 default_hash_size)
++u32 default_base_fqid,
++u32 default_hash_size)
 +{
 +	struct fman_pcd_pending_port *p;
-+
++	
 +	if (!pcd)
-+		return -EINVAL;
-+
++	return -EINVAL;
++	
 +	p = kzalloc(sizeof(*p), GFP_KERNEL);
 +	if (!p)
-+		return -ENOMEM;
-+
++	return -ENOMEM;
++	
 +	p->hwport_id = hwport_id;
 +	p->default_base_fqid = default_base_fqid;
 +	p->default_hash_size = default_hash_size;
 +	INIT_LIST_HEAD(&p->node);
-+
++	
 +	mutex_lock(&pcd->lock);
 +	list_add_tail(&p->node, &pcd->pending_ports);
 +	mutex_unlock(&pcd->lock);
-+
++	
 +	return 0;
 +}
 +
 +/**
-+ * fman_pcd_install_now_for_existing_ports() - retroactively invoke
-+ * the registered pre-netdev hook for every fman_port that completed
-+ * fman_port_init() BEFORE the hook was installed.
-+ * @pcd: PCD handle.
-+ *
-+ * Background: even though ask is built-in and its fs_initcall runs
-+ * before dpaa_eth's device_initcall, parallel/async platform probing
-+ * means individual fman_port platform devices can probe ahead of
-+ * ask_init(). Empirical M2 verification on 2026-05-24 (kernel
-+ * 6.18.31-vyos) confirmed all five MAC ports had completed init
-+ * before the hook was registered: the hook never fired, every
-+ * ask_hw_flow_insert_v4_tcp() returned -ENODEV, throughput was
-+ * 6.861 Gbps but kernel-net CPU stayed at 33.14 %% because forwarding
-+ * was running in the SW path.
-+ *
-+ * This function drains pcd->pending_ports, invoking the hook for
-+ * each captured port. Successfully-claimed ports (hook returns 0)
-+ * are removed. -ENOENT entries remain queued (defensive: should not
-+ * occur since the caller registered the hook moments earlier).
-+ * Fatal errors are propagated; the failing entry is dropped to avoid
-+ * retry loops.
-+ *
-+ * The hook is invoked OUTSIDE pcd->lock so it may sleep and call
-+ * back into PCD APIs (e.g. KG-scheme attach via the graft pathway).
-+ *
-+ * Acceptance signature: after the call, dmesg should show
-+ * "ask: pcd install: schemes 3+4 claimed" (or whichever schemes the
-+ * ASK install hook selects), and bin/ask-pcd-regdump.py should show
-+ * non-zero kgse_ccbs on the claimed schemes.
-+ *
-+ * Return: 0 on success (including the empty-list case). Negative
-+ * errno if any hook invocation returned a fatal error; the caller
-+ * may choose to ignore (ports remain on the default RSS scheme).
-+ * -EINVAL if pcd is NULL; -ENOENT if no hook is currently registered.
-+ */
++* fman_pcd_install_now_for_existing_ports() - retroactively invoke
++* the registered pre-netdev hook for every fman_port that completed
++* fman_port_init() BEFORE the hook was installed.
++* @pcd: PCD handle.
++*
++* Background: even though ask is built-in and its fs_initcall runs
++* before dpaa_eth's device_initcall, parallel/async platform probing
++* means individual fman_port platform devices can probe ahead of
++* ask_init(). Empirical M2 verification on 2026-05-24 (kernel
++* 6.18.31-vyos) confirmed all five MAC ports had completed init
++* before the hook was registered: the hook never fired, every
++* ask_hw_flow_insert_v4_tcp() returned -ENODEV, throughput was
++* 6.861 Gbps but kernel-net CPU stayed at 33.14 %% because forwarding
++* was running in the SW path.
++*
++* This function drains pcd->pending_ports, invoking the hook for
++* each captured port. Successfully-claimed ports (hook returns 0)
++* are removed. -ENOENT entries remain queued (defensive: should not
++* occur since the caller registered the hook moments earlier).
++* Fatal errors are propagated; the failing entry is dropped to avoid
++* retry loops.
++*
++* The hook is invoked OUTSIDE pcd->lock so it may sleep and call
++* back into PCD APIs (e.g. KG-scheme attach via the graft pathway).
++*
++* Acceptance signature: after the call, dmesg should show
++* "ask: pcd install: schemes 3+4 claimed" (or whichever schemes the
++* ASK install hook selects), and bin/ask-pcd-regdump.py should show
++* non-zero kgse_ccbs on the claimed schemes.
++*
++* Return: 0 on success (including the empty-list case). Negative
++* errno if any hook invocation returned a fatal error; the caller
++* may choose to ignore (ports remain on the default RSS scheme).
++* -EINVAL if pcd is NULL; -ENOENT if no hook is currently registered.
++*/
 +int fman_pcd_install_now_for_existing_ports(struct fman_pcd *pcd)
 +{
 +	fman_pcd_pre_netdev_hook_t hook;
@@ -233,10 +158,10 @@ index 49d675f..128a94e 100644
 +	LIST_HEAD(snapshot);
 +	int rc, first_err = 0;
 +	unsigned int claimed = 0, declined = 0, failed = 0;
-+
++	
 +	if (!pcd)
-+		return -EINVAL;
-+
++	return -EINVAL;
++	
 +	mutex_lock(&pcd->lock);
 +	hook = pcd->pre_netdev_hook;
 +	priv = pcd->pre_netdev_hook_priv;
@@ -245,17 +170,17 @@ index 49d675f..128a94e 100644
 +		return -ENOENT;
 +	}
 +	/*
-+	 * Splice pending_ports onto a local list so we can invoke the
-+	 * hook outside pcd->lock (the hook may call back into PCD APIs
-+	 * which take the same lock). Entries that remain unclaimed are
-+	 * spliced back at the end.
-+	 */
++	* Splice pending_ports onto a local list so we can invoke the
++	* hook outside pcd->lock (the hook may call back into PCD APIs
++	* which take the same lock). Entries that remain unclaimed are
++	* spliced back at the end.
++	*/
 +	list_splice_init(&pcd->pending_ports, &snapshot);
 +	mutex_unlock(&pcd->lock);
-+
++	
 +	list_for_each_entry_safe(p, tmp, &snapshot, node) {
 +		rc = hook(pcd, p->hwport_id, p->default_base_fqid,
-+			  p->default_hash_size, priv);
++		p->default_hash_size, priv);
 +		if (rc == 0) {
 +			list_del(&p->node);
 +			kfree(p);
@@ -268,85 +193,76 @@ index 49d675f..128a94e 100644
 +			kfree(p);
 +			failed++;
 +			if (!first_err)
-+				first_err = rc;
++			first_err = rc;
 +		}
 +	}
-+
++	
 +	/* Splice any unclaimed (declined) entries back to pending_ports. */
 +	mutex_lock(&pcd->lock);
 +	list_splice(&snapshot, &pcd->pending_ports);
 +	mutex_unlock(&pcd->lock);
-+
++	
 +	dev_info(fman_get_dev(pcd->fman),
-+		 "fman_pcd: install_now: claimed=%u declined=%u failed=%u\n",
-+		 claimed, declined, failed);
-+
++	"fman_pcd: install_now: claimed=%u declined=%u failed=%u\n",
++	claimed, declined, failed);
++	
 +	return first_err;
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_install_now_for_existing_ports);
  
  /**
   * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
-@@ -424,9 +596,23 @@ void fman_pcd_release(struct fman_pcd *pcd)
- 	WARN_ON(!list_empty(&pcd->cc_trees));
+@@ -425,6 +597,20 @@ void fman_pcd_release(struct fman_pcd *pcd)
  	WARN_ON(!list_empty(&pcd->manip_profiles));
  	WARN_ON(!list_empty(&pcd->plcr_profiles));
--	WARN_ON(!list_empty(&pcd->replic_groups));
-+WARN_ON(!list_empty(&pcd->replic_groups));
-+
-+/*
-+ * v1.1-A: drain any pending_ports entries that were never claimed.
-+ * Non-fatal: their default RSS scheme is already programmed; the
-+ * leak here would only be the small kzalloc'd record.
-+ */
-+{
-+struct fman_pcd_pending_port *p, *tmp;
-+
-+list_for_each_entry_safe(p, tmp, &pcd->pending_ports, node) {
-+list_del(&p->node);
-+kfree(p);
-+}
-+}
+ 	WARN_ON(!list_empty(&pcd->replic_groups));
++	
++	/*
++	* v1.1-A: drain any pending_ports entries that were never claimed.
++	* Non-fatal: their default RSS scheme is already programmed; the
++	* leak here would only be the small kzalloc'd record.
++	*/
++	{
++		struct fman_pcd_pending_port *p, *tmp;
++		
++		list_for_each_entry_safe(p, tmp, &pcd->pending_ports, node) {
++			list_del(&p->node);
++			kfree(p);
++		}
++	}
  
--	if (!IS_ERR_VALUE(pcd->muram_offset))
-+if (!IS_ERR_VALUE(pcd->muram_offset))
+ 	if (!IS_ERR_VALUE(pcd->muram_offset))
  		fman_muram_free_mem(fman_get_muram(pcd->fman),
- 				    pcd->muram_offset,
- 				    pcd->muram_reserved);
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
-index ef88eca..be5e9dd 100644
+index ef88ecaee..501c70c11 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
-@@ -117,7 +117,22 @@ unsigned long fman_pcd_replic_group_source_td_off(
-  *   public register/unregister surface is in <linux/fsl/fman_pcd.h>.
-  */
+@@ -119,5 +119,20 @@ unsigned long fman_pcd_replic_group_source_td_off(
  int fman_pcd_invoke_pre_netdev_hook(struct fman_pcd *pcd, u8 hwport_id,
--				    u32 default_base_fqid,
--				    u32 default_hash_size);
-+    u32 default_base_fqid,
-+    u32 default_hash_size);
-+
-+/* fman_pcd_record_pending_port:
-+ *   v1.1-A same-module helper. fman_port.c calls this from the
-+ *   -ENOENT fall-through branch of fman_port_init() (i.e. when no
-+ *   pre-netdev hook was installed at the moment the port probed) to
-+ *   record (port_id, default_base_fqid, default_hash_size) on the
-+ *   PCD's pending_ports list. ask later calls
-+ *   fman_pcd_install_now_for_existing_ports() to replay the hook
-+ *   for everything captured here. NOT exported (same TU as fman_port.c
-+ *   from the kbuild merge into fsl_dpaa_fman.ko). Returns 0 on success,
-+ *   -EINVAL if @pcd is NULL, -ENOMEM if the record cannot be allocated.
-+ */
-+int fman_pcd_record_pending_port(struct fman_pcd *pcd, u8 hwport_id,
-+				 u32 default_base_fqid,
-+				 u32 default_hash_size);
+ 				    u32 default_base_fqid,
+ 				    u32 default_hash_size);
++				    
++				    /* fman_pcd_record_pending_port:
++				    *   v1.1-A same-module helper. fman_port.c calls this from the
++				    *   -ENOENT fall-through branch of fman_port_init() (i.e. when no
++				    *   pre-netdev hook was installed at the moment the port probed) to
++				    *   record (port_id, default_base_fqid, default_hash_size) on the
++				    *   PCD's pending_ports list. ask later calls
++				    *   fman_pcd_install_now_for_existing_ports() to replay the hook
++				    *   for everything captured here. NOT exported (same TU as fman_port.c
++				    *   from the kbuild merge into fsl_dpaa_fman.ko). Returns 0 on success,
++				    *   -EINVAL if @pcd is NULL, -ENOMEM if the record cannot be allocated.
++				    */
++				    int fman_pcd_record_pending_port(struct fman_pcd *pcd, u8 hwport_id,
++				    u32 default_base_fqid,
++				    u32 default_hash_size);
  
  #endif /* __FMAN_PCD_INTERNAL_H */
 diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
-index 079f1d3..33d82e2 100644
+index 079f1d33f..6baf8daed 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_port.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_port.c
-@@ -1503,15 +1503,35 @@ int fman_port_init(struct fman_port *port)
+@@ -1503,14 +1503,34 @@ int fman_port_init(struct fman_port *port)
  						     port->cfg->pcd_fqs_count);
  		if (err == 0) {
  			fman_port_use_kg_hash(port, true);
@@ -356,52 +272,44 @@ index 079f1d3..33d82e2 100644
 -						       port->cfg->pcd_fqs_count);
 -			if (err)
 -				return err;
-+} else if (err == -ENOENT) {
-+/*
-+ * v1.1-A: record this port on the PCD's pending_ports
-+ * list so a late-registering hook (ask_init() racing
-+ * the fman_port platform-bus probe) can replay the
-+ * install via fman_pcd_install_now_for_existing_ports().
-+ * Failure here is non-fatal -- the port simply will
-+ * not be retroactively re-claimed; mainline RSS still
-+ * applies. WARN-and-continue.
-+ */
-+{
-+int rec = fman_pcd_record_pending_port(pcd_hook,
-+port->port_id,
-+port->cfg->pcd_base_fqid,
-+port->cfg->pcd_fqs_count);
-+if (rec && rec != -EINVAL)
-+dev_warn(port->dev,
-+ "fman_port: pending_port record failed: %d\n",
-+ rec);
-+}
++				} else if (err == -ENOENT) {
++				/*
++				* v1.1-A: record this port on the PCD's pending_ports
++				* list so a late-registering hook (ask_init() racing
++				* the fman_port platform-bus probe) can replay the
++				* install via fman_pcd_install_now_for_existing_ports().
++				* Failure here is non-fatal -- the port simply will
++				* not be retroactively re-claimed; mainline RSS still
++				* applies. WARN-and-continue.
++				*/
++				{
++					int rec = fman_pcd_record_pending_port(pcd_hook,
++					port->port_id,
++					port->cfg->pcd_base_fqid,
++					port->cfg->pcd_fqs_count);
++					if (rec && rec != -EINVAL)
++					dev_warn(port->dev,
++					"fman_port: pending_port record failed: %d\n",
++					rec);
++				}
  
 -			fman_port_use_kg_hash(port, true);
--		} else {
-+err = keygen_port_hashing_init(keygen, port->port_id,
-+       port->cfg->pcd_base_fqid,
-+       port->cfg->pcd_fqs_count);
-+if (err)
-+return err;
-+
-+fman_port_use_kg_hash(port, true);
-+} else {
++		err = keygen_port_hashing_init(keygen, port->port_id,
++		port->cfg->pcd_base_fqid,
++		port->cfg->pcd_fqs_count);
++		if (err)
++		return err;
++		
++		fman_port_use_kg_hash(port, true);
+ 		} else {
  			return err;
  		}
- 	}
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index d0f1161..cfee242 100644
+index d0f116113..4da6e960f 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
-@@ -115,10 +115,43 @@ typedef int (*fman_pcd_pre_netdev_hook_t)(struct fman_pcd *pcd,
- 					  void *priv);
- 
- int fman_pcd_register_pre_netdev_hook(struct fman_pcd *pcd,
--				      fman_pcd_pre_netdev_hook_t hook,
--				      void *priv);
-+      fman_pcd_pre_netdev_hook_t hook,
-+      void *priv);
+@@ -119,6 +119,39 @@ int fman_pcd_register_pre_netdev_hook(struct fman_pcd *pcd,
+ 				      void *priv);
  void fman_pcd_unregister_pre_netdev_hook(struct fman_pcd *pcd);
  
 +/**
@@ -442,4 +350,3 @@ index d0f1161..cfee242 100644
   * OOT consumer entry points (PR14g-prep).
 -- 
 2.39.5
-
