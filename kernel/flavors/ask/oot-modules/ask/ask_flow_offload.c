@@ -1030,6 +1030,28 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                 return rc;
         }
 
+        /*
+         * PR14z19 (2026-05-25): populate key.iif from the block_cb's
+         * ingress_dev BEFORE handing the key down to ask_flow_insert()
+         * → ask_hw_flow_insert().  The HW insert path resolves the
+         * ingress FMan port id via dev_get_by_index(&init_net, key.iif)
+         * and uses that to look up the per-port cc_v4_tcp / cc_v4_udp
+         * node where this 5-tuple's match must land.  Without this
+         * line key.iif stays 0, dev_get_by_index returns NULL, and
+         * every flow falls into the silent SW-fallback path (M2 gate
+         * 2026-05-24 measured 6.950 Gbps / 26.17 % CPU exactly because
+         * of this — every dmesg "hw_insert=-19 (SW-fallback)" entry
+         * was an -ENODEV from that lookup).
+         *
+         * The deferred-insert PR14y / poll-replay PR14z9 paths copy
+         * the key wholesale via `p->key = *key` in
+         * ask_flow_pending_enqueue(), so setting iif here also
+         * propagates into the replay path automatically — no separate
+         * fix needed in ask_flow_pending_poll_fn().
+         */
+        if (ingress_dev)
+                key.iif = ingress_dev->ifindex;
+
         rc = ask_parse_action(f, &action_flags, &oif, &egress_dev);
         if (rc) {
                 pr_info_ratelimited("ask: flow_offload: REPLACE early-return (parse_action=%d) cookie=0x%lx\n",
