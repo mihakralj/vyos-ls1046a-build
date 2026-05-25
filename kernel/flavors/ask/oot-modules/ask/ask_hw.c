@@ -382,7 +382,27 @@ static void ask_hw_kg_params_fill(struct fman_pcd_kg_scheme_params *kg,
         kg->id            = -1;          /* let driver allocate next free */
         kg->use_hash      = true;
         kg->default_fqid  = default_fqid;
-        kg->num_extracts  = 5;
+
+        /*
+         * v1.1-A.1 (2026-05-25): dropped the speculative IPSEC_SPI slot
+         * (former extracts[2], PARSE_RESULT offset 32). Empirical DUT
+         * verification on kernel 6.18.31-vyos with patches 0060+0061
+         * showed that fman_pcd_kg_scheme_create() returns -EOPNOTSUPP
+         * for offset 32 — the in-tree fman_pcd_kg convert-extract
+         * switch (patch 0006-fman-pcd-kg-body.patch) only whitelists
+         * the canonical IPV4_SIP/DIP and L4_SPORT/DPORT offsets.
+         *
+         * Symptom before this fix: "ask: hw: pcd_install hook: port
+         * 0x%02x scheme_create failed: -95" repeated for all 5 BMI
+         * ports, then "fman_pcd: install_now: claimed=0 declined=0
+         * failed=5"; kgse_ccbs stayed 0 across the regdump; M2 gate
+         * stuck at 6.861 Gbps / 33.14% kernel-net CPU.
+         *
+         * M2 scope is non-IPSec TCP/UDP only; v1.1 will widen the
+         * recipe AND the KG offset whitelist together (see qdrant memo
+         * dated 2026-05-25, tags: ASK2 v1.1-A IPSEC_SPI kg-extract).
+         */
+        kg->num_extracts  = 4;
 
         kg->extracts[0].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
         kg->extracts[0].offset = ASK_HW_PR_OFF_IPV4_SIP;
@@ -394,34 +414,15 @@ static void ask_hw_kg_params_fill(struct fman_pcd_kg_scheme_params *kg,
         kg->extracts[1].size   = 4;
         kg->extracts[1].mask   = 0xff;
 
-        /*
-         * IPSEC_SPI slot — silicon zero-fills for TCP/UDP frames; CC
-         * keys later install with bytes 8..11=0, mask 0xff so non-IPSec
-         * frames match and IPSec frames implicitly miss.
-         *
-         * No public KG extract enum for IPSEC_SPI in the in-tree ABI;
-         * we use a PARSE_RESULT extract at the SPI byte offset. The
-         * silicon parse result places SPI at PR offset 32 for IPv4
-         * ESP, but for non-IPSec frames the bytes there are
-         * indeterminate. The downstream CC tree's mask-0xff equality
-         * check therefore drops anything where those bytes happen to
-         * look non-zero — acceptable for the M2 scope (non-IPSec
-         * TCP/UDP only). v1.1 will widen the recipe for IPSec.
-         */
         kg->extracts[2].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
-        kg->extracts[2].offset = 32;   /* IPv4 ESP SPI offset, RM 8.7.3 */
-        kg->extracts[2].size   = 4;
+        kg->extracts[2].offset = ASK_HW_PR_OFF_L4_SPORT;
+        kg->extracts[2].size   = 2;
         kg->extracts[2].mask   = 0xff;
 
         kg->extracts[3].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
-        kg->extracts[3].offset = ASK_HW_PR_OFF_L4_SPORT;
+        kg->extracts[3].offset = ASK_HW_PR_OFF_L4_DPORT;
         kg->extracts[3].size   = 2;
         kg->extracts[3].mask   = 0xff;
-
-        kg->extracts[4].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
-        kg->extracts[4].offset = ASK_HW_PR_OFF_L4_DPORT;
-        kg->extracts[4].size   = 2;
-        kg->extracts[4].mask   = 0xff;
 }
 
 /*
