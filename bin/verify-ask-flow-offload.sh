@@ -168,28 +168,45 @@ trap 'rm -rf "$TMPDIR"' EXIT
 # Baseline measurement.
 #
 # We capture TWO baselines:
-#   BASE_CPU      = 100 - %idle  (legacy whole-CPU baseline, kept for the
-#                                 informational header line so operators see
-#                                 absolute machine load)
-#   BASE_NET_CPU  = %sys + %soft (kernel network-stack baseline; this is the
-#                                 ONE that gets subtracted from the in-test
-#                                 reading to produce the gate's NET_CPU)
+#   BASE_CPU      = 100 - %idle      (legacy whole-CPU baseline, kept for the
+#                                     informational header line so operators
+#                                     see absolute machine load)
+#   BASE_NET_CPU  = %sys + %irq + %soft (kernel network-stack baseline; this
+#                                     is the ONE that gets subtracted from
+#                                     the in-test reading to produce the
+#                                     gate's NET_CPU)
 #
 # Rationale: the M2 spec budgets "<5% CPU at >=2 Gbps" against the kernel
 # forward plane, NOT against the management plane.  Userspace CPU (%usr) and
 # SSH-channel overhead from the harness itself (the mpstat output is shipped
 # back over ssh, which alone consumes ~4% of one core on the DUT during the
 # 30s window — see ps -eo pid,pcpu showing sshd at 4.0% PCPU post-test) are
-# measurement artifacts unrelated to packet forwarding.  Kernel forwarding
-# work lives in %soft (NET_RX/NET_TX softirqs) + a small slice of %sys
-# (skb alloc, conntrack, flowtable lookup).  By summing only those two
-# columns and baseline-subtracting them, we measure what we actually budget.
+# measurement artifacts unrelated to packet forwarding.
+#
+# Kernel forwarding work lives in three columns on this platform:
+#   - %soft  — NET_RX/NET_TX softirq (typical NAPI poll path on most NICs)
+#   - %sys   — skb alloc, conntrack, flowtable lookup, route lookup
+#   - %irq   — hardware IRQ handler. DPAA1 on LS1046A drains qman_portal
+#              consumer queues from hard-IRQ context rather than softirq,
+#              so this column carries the bulk of packet-forwarding work
+#              on this board. Diagnosed 2026-05-25: under 4.7 Gbps iperf3
+#              load, %soft=0, %irq=48-78%/core averaged. Excluding %irq
+#              produced the bogus "sys=0% soft=0% but whole-machine=31%"
+#              result that motivated this fix.
+#
+# By summing %sys + %irq + %soft and baseline-subtracting, we measure what
+# we actually budget on this hardware. Spec §11.1 budget is preserved; only
+# the column set has changed to match the platform's IRQ model.
+#
+# mpstat sysstat 12.x column layout on linux-6.18.31:
+#   $1=time $2=CPU $3=%usr $4=%nice $5=%sys $6=%iowait $7=%irq
+#   $8=%soft $9=%steal $10=%guest $11=%gnice $12=%idle ($NF)
 log "capturing baseline CPU on DUT (3 s)"
-read -r BASE_IDLE BASE_SYS BASE_SOFT < <(ssh_dut "sudo -n mpstat 1 3 | awk '/Average:.*all/ {print \$NF, \$5, \$8; exit}'")
+read -r BASE_IDLE BASE_SYS BASE_IRQ BASE_SOFT < <(ssh_dut "sudo -n mpstat 1 3 | awk '/Average:.*all/ {print \$NF, \$5, \$7, \$8; exit}'")
 BASE_CPU=$(awk     -v idle="$BASE_IDLE" 'BEGIN{printf "%.2f", 100.0 - idle}')
-BASE_NET_CPU=$(awk -v s="$BASE_SYS" -v f="$BASE_SOFT" 'BEGIN{printf "%.2f", s+f}')
-log "baseline whole-CPU       = ${BASE_CPU} % (idle ${BASE_IDLE} %)"
-log "baseline %sys+%soft (net) = ${BASE_NET_CPU} %  (sys=${BASE_SYS}% soft=${BASE_SOFT}%)"
+BASE_NET_CPU=$(awk -v s="$BASE_SYS" -v i="$BASE_IRQ" -v f="$BASE_SOFT" 'BEGIN{printf "%.2f", s+i+f}')
+log "baseline whole-CPU              = ${BASE_CPU} % (idle ${BASE_IDLE} %)"
+log "baseline %sys+%irq+%soft (net)  = ${BASE_NET_CPU} %  (sys=${BASE_SYS}% irq=${BASE_IRQ}% soft=${BASE_SOFT}%)"
 
 log "starting mpstat sampler on DUT for ${DURATION} s"
 ssh_dut "sudo -n mpstat 1 $DURATION > /tmp/verify-ask-mpstat.txt 2>&1 &"
@@ -233,7 +250,7 @@ GBPS=$(awk -v b="$BPS" 'BEGIN{printf "%.3f", b/1e9}')
 # CPU: two parallel computations from the same mpstat sample.
 #
 # 1. TEST_CPU      = mean (100 - %idle) — informational whole-machine load.
-# 2. TEST_NET_CPU  = mean (%sys + %soft) — kernel network-stack load.
+# 2. TEST_NET_CPU  = mean (%sys + %irq + %soft) — kernel network-stack load.
 #                    This is what the gate threshold compares against
 #                    because the M2 budget targets the FORWARD plane,
 #                    not the management plane. (sshd carrying the
@@ -241,8 +258,15 @@ GBPS=$(awk -v b="$BPS" 'BEGIN{printf "%.3f", b/1e9}')
 #                    SSH channel runs ~4% of one core; that overhead
 #                    appears in %usr and would otherwise poison the gate.)
 #
-# mpstat column layout (sysstat 12.x): CPU %usr %nice %sys %iowait %irq %soft
-#                                        $2   $3    $4   $5    $6      $7   $8
+#                    %irq is included because DPAA1 on LS1046A drives
+#                    packet processing from hard-IRQ context (qman_portal),
+#                    so the bulk of forwarding work shows in %irq rather
+#                    than %soft on this board. See baseline-capture
+#                    comment block above for the diagnostic event.
+#
+# mpstat column layout (sysstat 12.x):
+#   $1=time $2=CPU $3=%usr $4=%nice $5=%sys $6=%iowait $7=%irq
+#   $8=%soft $9=%steal $10=%guest $11=%gnice $12=%idle ($NF)
 # We skip header rows (don't contain "all"), skip the "Average:" trailer
 # (mpstat's own mean is weighted differently and isn't useful here), and
 # take the per-second arithmetic mean.
@@ -250,14 +274,16 @@ MEAN_IDLE=$(awk '/all/ && !/^Average/ {sum+=$NF; n++} END{if(n>0) printf "%.2f",
 "$TMPDIR/mpstat.txt")
 MEAN_SYS=$(awk  '/all/ && !/^Average/ {sum+=$5;  n++} END{if(n>0) printf "%.2f", sum/n; else print "0.00"}' \
 "$TMPDIR/mpstat.txt")
+MEAN_IRQ=$(awk  '/all/ && !/^Average/ {sum+=$7;  n++} END{if(n>0) printf "%.2f", sum/n; else print "0.00"}' \
+"$TMPDIR/mpstat.txt")
 MEAN_SOFT=$(awk '/all/ && !/^Average/ {sum+=$8;  n++} END{if(n>0) printf "%.2f", sum/n; else print "0.00"}' \
 "$TMPDIR/mpstat.txt")
 TEST_CPU=$(awk     -v idle="$MEAN_IDLE" 'BEGIN{printf "%.2f", 100.0 - idle}')
-TEST_NET_CPU=$(awk -v s="$MEAN_SYS" -v f="$MEAN_SOFT" 'BEGIN{printf "%.2f", s+f}')
+TEST_NET_CPU=$(awk -v s="$MEAN_SYS" -v i="$MEAN_IRQ" -v f="$MEAN_SOFT" 'BEGIN{printf "%.2f", s+i+f}')
 
 # Whole-machine net CPU (legacy, informational): load - baseline.
 NET_CPU=$(awk -v t="$TEST_CPU" -v b="$BASE_CPU" 'BEGIN{v=t-b; if(v<0)v=0; printf "%.2f", v}')
-# Kernel-network net CPU (the gate metric): (%sys+%soft load) - (%sys+%soft baseline).
+# Kernel-network net CPU (the gate metric): (%sys+%irq+%soft load) - (%sys+%irq+%soft baseline).
 NET_KERNEL_CPU=$(awk -v t="$TEST_NET_CPU" -v b="$BASE_NET_CPU" 'BEGIN{v=t-b; if(v<0)v=0; printf "%.2f", v}')
 
 # ------------------------------------------------------------ verdict
@@ -270,8 +296,8 @@ log "  whole-machine CPU baseline        : ${BASE_CPU} %   (100 - %idle)"
 log "  whole-machine CPU under load      : ${TEST_CPU} %"
 log "  whole-machine net (load - base)   : ${NET_CPU} %   (informational — includes sshd/dbus/journald/FRR)"
 log "----------------------------------------------------------"
-log "  kernel-net CPU baseline           : ${BASE_NET_CPU} %  (%sys + %soft)"
-log "  kernel-net CPU under load         : ${TEST_NET_CPU} %  (sys=${MEAN_SYS}% soft=${MEAN_SOFT}%)"
+log "  kernel-net CPU baseline           : ${BASE_NET_CPU} %  (%sys + %irq + %soft)"
+log "  kernel-net CPU under load         : ${TEST_NET_CPU} %  (sys=${MEAN_SYS}% irq=${MEAN_IRQ}% soft=${MEAN_SOFT}%)"
 log "  kernel-net net (load - base)      : ${NET_KERNEL_CPU} %  ← GATE METRIC  (threshold ≤ ${THRESHOLD_CPU})"
 log "=========================================================="
 

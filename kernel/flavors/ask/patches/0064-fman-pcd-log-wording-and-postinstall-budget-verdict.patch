@@ -1,0 +1,149 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Mon, 25 May 2026 18:50:00 +0000
+Subject: patches/0064-fman-pcd-log-wording-and-postinstall-budget-verdict.patch
+
+PR14z23: fix two PR14z22 diagnostic-log defects exposed by the 2026-05-25
+hardware run, and bake the v1.4 §16 Risk #13 hypothesis-(a) verdict
+threshold into the kernel log so the operator does not have to compute
+it from raw numbers.
+
+Background
+----------
+
+PR14z21 (patch 0062) skipped a bogus 64 KiB MURAM pre-reservation in
+fman_pcd_init() by setting pcd->muram_offset = (unsigned long)-EINVAL.
+The IS_ERR_VALUE() check on the release path then correctly avoids
+fman_muram_free of a never-reserved region.
+
+PR14z22 (patch 0063) instrumented the MURAM gen_pool to localise the
+residual -ENOMEM previously observed in fman_pcd_manip_chain_create().
+
+The 2026-05-25 hardware run (kernel 6.18.31-vyos with 0062+0063 applied)
+on the LS1046A Mono Gateway DK produced two surprising findings that
+this patch addresses:
+
+  Finding 1 (cosmetic but confusing):
+    The "ready" line at the bottom of fman_pcd_init() unconditionally
+    formats pcd->muram_offset as a hex pointer:
+
+      fsl-fman 1a00000.fman: fman_pcd: ready (64 KiB MURAM reserved at \
+                              offset 0xffffffffffffffea)
+
+    On the SKIP path (which is now the default since 0062), the offset
+    is the -EINVAL sentinel (0xffff...ea), and "64 KiB reserved" is
+    actively misleading - no 64 KiB has been reserved.  An operator
+    reading dmesg sees an apparent reservation at a clearly-bogus
+    address and reasonably concludes the PCD subsystem is broken when
+    in fact it is correctly skipping a reservation that should never
+    have existed.  Fix the message to reflect the SKIP path explicitly.
+
+  Finding 2 (operationally important):
+    The CP-postinstall accounting line from 0063 prints raw "size=%zu B
+    avail=%zu B" numbers and leaves the (a) / (b) / (c) verdict
+    computation to the operator.  After 0062 unblocked the Path A
+    boot-time install (claimed=5 declined=0 failed=0), the gen_pool
+    avail dropped to 70400 B out of 393216 B (~17.9%, well below the
+    ~80 KiB threshold from 0063's verdict logic).  Bake the verdict
+    threshold into the log so subsequent regressions (or unexpected
+    pool reclamations) flag themselves at boot.
+
+Behavioural change
+------------------
+
+The "ready" log line now branches on IS_ERR_VALUE(pcd->muram_offset):
+
+  SKIP path (default after 0062):
+    fman_pcd: ready (MURAM pre-reservation SKIPPED - per PR14z21; \
+              per-flow allocs use the full gen_pool)
+
+  RESERVED path (kept for future re-enablement / out-of-tree forks):
+    fman_pcd: ready (%u KiB MURAM reserved at offset 0x%lx)
+
+The CP-postinstall line now appends a v1.4 §16 Risk #13 verdict tag
+when avail drops below 80 KiB (= ~20% of the 384 KiB LS1046A pool):
+
+  fman_pcd: install_now: muram pool size=393216 B avail=70400 B \
+            (post boot-time PCD install) [VERDICT: hypothesis-(a) \
+            POOL-ALREADY-TIGHT - boot-time CC trees consumed >=80% \
+            of MURAM; per-flow chain_create will be at risk]
+
+If avail >= 80 KiB the tag becomes "[budget-OK]" so a clean run is
+also self-documenting.
+
+Diagnostic-only.  No fast-path overhead (both sites are one-shot at
+fman_pcd_init() / fman_pcd_install_now_for_existing_ports() epilogue).
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index e4fcc5e..b2f4821 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -497,14 +497,31 @@ int fman_pcd_install_now_for_existing_ports(struct fman_pcd *pcd)
+ 		 * whether boot-time CC trees alone exhaust the pool, or
+ 		 * whether the residual -ENOMEM is per-flow chain churn.
+ 		 */
+-		struct muram_info *m = fman_get_muram(pcd->fman);
+-		size_t ps = 0, pa = 0;
+-
+-		fman_muram_pool_stats(m, &ps, &pa);
+-		dev_info(fman_get_dev(pcd->fman),
+-			 "fman_pcd: install_now: muram pool size=%zu B avail=%zu B (post boot-time PCD install)\n",
+-			 ps, pa);
+-	}
++struct muram_info *m = fman_get_muram(pcd->fman);
++size_t ps = 0, pa = 0;
++const char *verdict;
++/*
++ * v1.4 Phase 5 diagnostic (PR14z23, 2026-05-25): bake the
++ * v1.4 §16 Risk #13 hypothesis-(a) verdict threshold into
++ * the log so subsequent regressions (or unexpected pool
++ * reclamations) flag themselves at boot.  Threshold (80 KiB
++ * = ~20% of the LS1046A 384 KiB pool) matches 0063's
++ * "Hypothesis (a) CONFIRMED if CP-postinstall avail <
++ * ~80 KiB" verdict criterion.
++ */
++#define FMAN_PCD_POSTINSTALL_BUDGET_WARN_BYTES (80U * 1024U)
++
++fman_muram_pool_stats(m, &ps, &pa);
++if (pa < FMAN_PCD_POSTINSTALL_BUDGET_WARN_BYTES)
++verdict = " [VERDICT: hypothesis-(a) POOL-ALREADY-TIGHT - "
++  "boot-time CC trees consumed >=80% of MURAM; "
++  "per-flow chain_create will be at risk]";
++else
++verdict = " [budget-OK]";
++dev_info(fman_get_dev(pcd->fman),
++ "fman_pcd: install_now: muram pool size=%zu B avail=%zu B (post boot-time PCD install)%s\n",
++ ps, pa, verdict);
++}
+ 	
+ 	return first_err;
+ }
+@@ -594,12 +611,22 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 					    &fman_pcd_muram_budget_fops);
+ 	}
+ 
+-	dev_info(fman_get_dev(fman),
+-		 "fman_pcd: ready (%u KiB MURAM reserved at offset 0x%lx)\n",
+-		 FMAN_PCD_MURAM_RESERVED_BYTES / 1024U,
+-		 pcd->muram_offset);
+-
+-	return pcd;
++/*
++ * v1.4 Phase 5 fix (PR14z23, 2026-05-25): branch on the -EINVAL
++ * sentinel set by PR14z21 (patch 0062) so the SKIP path doesn't
++ * print a misleading "64 KiB reserved at 0xffff...ea" line that
++ * looks like a real reservation at a bogus address.
++ */
++if (IS_ERR_VALUE(pcd->muram_offset))
++dev_info(fman_get_dev(fman),
++ "fman_pcd: ready (MURAM pre-reservation SKIPPED - per PR14z21; per-flow allocs use the full gen_pool)\n");
++else
++dev_info(fman_get_dev(fman),
++ "fman_pcd: ready (%u KiB MURAM reserved at offset 0x%lx)\n",
++ FMAN_PCD_MURAM_RESERVED_BYTES / 1024U,
++ pcd->muram_offset);
++
++return pcd;
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_init);
+ 
