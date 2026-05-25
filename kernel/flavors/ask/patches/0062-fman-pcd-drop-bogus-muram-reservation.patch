@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Mon, 25 May 2026 04:30:00 +0000
+Subject: patches/0062-fman-pcd-drop-bogus-muram-reservation.patch
+
+PR14z21: skip the bogus 64 KiB pre-reservation that starves PCD allocs.
+
+fman_pcd_muram_alloc() (the sub-allocator used by every CC/KG/manip/PLCR
+create) calls fman_muram_alloc() on the GLOBAL muram pool — it does NOT
+sub-allocate from the pcd->muram_offset chunk reserved at init.  The
+reserved 64 KiB was therefore permanently held hostage, starving the
+exact allocations the reservation was supposed to protect.
+
+Empirical proof on LS1046A 2026-05-25 (kernel 6.18.31-vyos): with the
+reservation active, after the pre-netdev hook installs 5-port CC
+pipelines the global pool has ~1.5 KiB free; every
+fman_pcd_manip_chain_create() in the per-flow insert path returns
+-ENOMEM on the chain HMTD+HMCT pair while the 3 prior per-manip allocs
+succeed.  M2 gate stuck at 6.932 Gbps / 23.25 %% CPU.
+
+Skipping the alloc returns the full ~64 KiB to the global pool for the
+same PCD subsystem to consume on demand.  pcd->muram_reserved is kept
+for debugfs accounting display; pcd->muram_offset is parked at a
+sentinel (-EINVAL) so the release path's IS_ERR_VALUE() guard skips
+fman_muram_free.  The err_free: label becomes unreachable and is
+removed to silence -Wunused-label.
+
+---
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -533,15 +533,30 @@
+ 	INIT_LIST_HEAD(&pcd->replic_groups);
+ 	INIT_LIST_HEAD(&pcd->pending_ports);
+ 
+-	pcd->muram_offset = fman_muram_alloc(muram,
+-				     FMAN_PCD_MURAM_RESERVED_BYTES);
+-	if (IS_ERR_VALUE(pcd->muram_offset)) {
+-		err = (int)pcd->muram_offset;
+-		dev_err(fman_get_dev(fman),
+-			"fman_pcd: cannot reserve %u bytes MURAM (err %d)\n",
+-			FMAN_PCD_MURAM_RESERVED_BYTES, err);
+-		goto err_free;
+-	}
++	/*
++	 * v1.3 Phase 5 (PR14z21, 2026-05-25): the pre-reservation here
++	 * was a bug.  fman_pcd_muram_alloc() (the sub-allocator used by
++	 * every CC/KG/manip/PLCR create) calls fman_muram_alloc() on
++	 * the GLOBAL muram pool -- it does NOT sub-allocate from this
++	 * pre-reserved chunk.  The reserved bytes were therefore
++	 * permanently held hostage, starving the exact allocations the
++	 * reservation was supposed to protect.
++	 *
++	 * Empirical proof on LS1046A 2026-05-25 (kernel 6.18.31-vyos):
++	 * with the 64 KiB reservation active, after the pre-netdev hook
++	 * installs 5-port CC pipelines the global pool has ~1.5 KiB
++	 * free; every fman_pcd_manip_chain_create() in the per-flow
++	 * insert path returns -ENOMEM on the chain HMTD+HMCT pair while
++	 * the 3 prior per-manip allocs succeed.  M2 gate stuck at
++	 * 6.932 Gbps / 23.25 %% CPU because every HW insert hard-fails.
++	 *
++	 * Skipping the alloc returns the full ~64 KiB to the global
++	 * pool for the same PCD subsystem to consume on demand.  The
++	 * pcd->muram_reserved field is kept for debugfs accounting
++	 * display; pcd->muram_offset is parked at a sentinel so the
++	 * release path's IS_ERR_VALUE() check skips fman_muram_free.
++	 */
++	pcd->muram_offset = (unsigned long)-EINVAL;
+ 
+ 	err = fman_pcd_debugfs_root_get();
+ 	if (err) {
+@@ -567,11 +582,6 @@
+ 		 pcd->muram_offset);
+ 
+ 	return pcd;
+-
+-err_free:
+-	mutex_destroy(&pcd->lock);
+-	kfree(pcd);
+-	return ERR_PTR(err);
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_init);
+ 
+
