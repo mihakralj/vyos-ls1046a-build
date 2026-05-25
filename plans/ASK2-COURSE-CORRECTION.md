@@ -317,9 +317,96 @@ is broken.
 
 ### 5.2 Other deferred test-gate items
 
-- 10-cycle nft flow add/del stress test — pointless until §5.1 lands.
-- Plan-file Phase 1.1–1.11, 2.1–2.5, 3.1–3.7, 4.1–4.10 checkbox sync — housekeeping commit pending.
->>>>>>> NEW
+- 10-cycle nft flow add/del stress test — pointless until §5.3 ENOMEM blocker is resolved.
+
+### 5.3 PR14z21 result — Path A activation works, secondary -ENOMEM blocker found (2026-05-25)
+
+Build: commit `59f7209` on `ask20`, kernel `6.18.31-vyos`, VyOS
+`2026.05.25-0359-rolling`. Patch stack: `ASK_PATCH_COUNT = 50`, slot
+`0062-fman-pcd-drop-bogus-muram-reservation.patch` active.
+
+**Path A activation — FIXED.** §5.1 hook-ordering bug fully resolved by
+the `fman_pcd_install_now_for_existing_ports()` retroactive-callback API
+(landed pre-PR14z21). Boot dmesg at T+16.7 s shows:
+
+```
+fsl-fman 1a00000.fman: fman_pcd: pre-netdev hook registered (ask_pcd_install_hook [ask])
+fsl-fman 1a00000.fman: fman_pcd: install_now: claimed=5 declined=0 failed=0
+```
+
+All 5 MAC ports have the CC pipeline pre-installed before `register_netdev`.
+
+**M2 gate measurement on commit 59f7209:**
+
+| Metric | Value | Threshold | Verdict |
+|---|---:|---:|:---:|
+| Throughput | **6.955 Gbps** | ≥ 2.0 Gbps | ✅ M2 hard / ❌ < 7 stretch |
+| Kernel-net CPU | **21.40 %** | ≤ 5.0 % | ❌ FAIL |
+| ⤷ %soft (NET_RX/TX) | 20.58 % | — | dominant |
+| ⤷ %sys | 0.90 % | — | negligible |
+| Whole-machine baseline | 0.17 % | — | — |
+| Whole-machine under load | 22.12 % | — | — |
+
+**Trend vs prior baseline:** kernel-net CPU 33.14 % → 21.40 % (-11.7 pp);
+throughput 6.861 → 6.955 Gbps (+0.094 Gbps). The CPU drop is attributable
+to Path A's pre-installed RX-hash distribution on schemes 3+4 reducing
+kernel softirq churn — **not** to HW flow keys being installed (zero are).
+
+**Residual blocker — per-flow chain_create -ENOMEM.** Dmesg after the
+30 s iperf3 burst:
+
+```
+$ sudo dmesg | grep -c 'chain_create.*failed'
+327
+$ sudo dmesg | grep chain_create | head -2
+[3302.997135] ask: hw: build_manip_chain: chain_create(3 manips) failed: -12
+[3302.997177] ask: hw: build_manip_chain: chain_create(3 manips) failed: -12
+```
+
+Patch 0062 dropped the bogus 64 KiB MURAM pre-reservation that
+`fman_pcd_init()` was holding hostage from `fman_pcd_muram_alloc()` — and
+that *does* free the reservation back into the global pool — but every
+per-flow `fman_pcd_manip_chain_create()` STILL returns `-ENOMEM`. Patch
+0062 alone is therefore necessary but not sufficient.
+
+**Hypotheses (next-session diagnostic targets):**
+
+1. **Boot-time CC trees consume the entire pool.** The Path A
+   `ask_pcd_install()` callback now runs on 5 ports × N protocols ×
+   `cc_node_capacity` empty slots. With empty CC node capacity of 255 keys
+   each (per PR14r), boot-time pool consumption could exceed what the
+   per-flow path expects to find free.
+2. **`chain_create` size math is wrong.** The chain HMCT memcpy
+   concatenates N source HMCTs (HMCD_LAST cleared on intermediates) plus
+   a 16-byte HMTD. With 3 source manips that's roughly
+   16 + 3 × 256 = 784 B requested, which rounds to 1024 B at
+   `min_alloc_order = 8`. If the size calculation in
+   `fman_pcd_manip_chain_create()` over-asks (e.g. multiplies each source
+   HMCT by 1024 instead of summing actual bytes), the pool exhausts much
+   faster than the apparent 784 B/flow.
+3. **Per-manip pre-allocations leak.** Each of the three source manips
+   (`m_rmv`, `m_insrt`, `m_ipv4`) calls `fman_pcd_manip_create()`
+   independently — and if the rollback path on `chain_create` failure
+   doesn't release the three pre-existing manips, every failed insert
+   leaks ~3 × 256 B until pool exhaustion. (Less likely — would degrade
+   over time rather than fail on the very first insert as observed.)
+
+**Diagnostic step for next session (out of scope of PR14z21):**
+instrument the `-ENOMEM` site in `fman_pcd_manip_chain_create()` to print
+`pool_size`, `bytes_used`, and `requested_bytes` at the point of failure
+(one-shot `ratelimit(1, 0)` so we get exactly the first failing call's
+numbers without flooding). This will discriminate hypothesis (1) from (2)
+from (3). The PR14z20 instrumentation only proved the failure was *in*
+`chain_create`; we now need allocator-side numbers.
+
+**Risk #1 (RM §8.7.3.4 inline-MANIP behaviour) — still untested.** Cannot
+probe the silicon `FORWARD_FQ_WITH_MANIP` action atom while every
+attempt to construct the MANIP chain fails before the action descriptor
+is even written.
+
+**Phase 4 commit chain is NOT rolled back** (per plan §4.9): Path A is
+structurally correct, only the per-flow allocator path has a residual
+exhaustion bug.
 
 ---
 
