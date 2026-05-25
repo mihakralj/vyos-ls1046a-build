@@ -163,7 +163,20 @@ struct ask_hw_port {
         struct fman_pcd_cc_tree   *cc_tree;
         struct fman_pcd_cc_node   *cc_v4_tcp;
         struct fman_pcd_cc_node   *cc_v4_udp;
-        struct fman_pcd_kg_scheme *scheme;
+        /*
+         * v1.1-B (patch 0065): ASK no longer allocates its own KG
+         * scheme.  Instead we GRAFT our CC tree onto the kernel-owned
+         * scheme that dpaa_eth's keygen_port_hashing_init() programmed
+         * at MAC probe time.  We record its scheme_id here so module
+         * unload can call fman_pcd_kg_ungraft_cc() to clear KGSE_CCBS
+         * back to 0 and restore the kernel's default RX hash dispatch.
+         *
+         * kernel_scheme_valid distinguishes "graft installed" (true)
+         * from "no graft yet / already ungrafted" (false) so the
+         * teardown path is idempotent.
+         */
+        u8                         kernel_scheme_id;
+        bool                       kernel_scheme_valid;
 };
 
 struct ask_hw_pcd {
@@ -364,66 +377,29 @@ EXPORT_SYMBOL_GPL(ask_hw_cookie_free);
 /* ------------------------------------------------------------------------- */
 
 /*
- * Build the per-port KG extract recipe. The kernel's default scheme
- * uses (IPSRC1, IPDST1, IPSEC_SPI, L4PSRC, L4PDST). We replicate that
- * exactly so the downstream CC key layout matches stock RSS — any
- * out-of-band test that puts the scheme back into hash mode should
- * see identical CPU steering.
+ * v1.1-B (patch 0065): ask_hw_kg_params_fill() removed.
  *
- * default_fqid is the miss-action FQID — frames that don't match any
- * CC key fall into this FQ. We point it at the FQID mainline would
- * have programmed (handed to us by the hook), preserving the kernel
- * control plane.
+ * Under the graft architecture ASK no longer allocates its own KG
+ * scheme — it reuses the one dpaa_eth's keygen_port_hashing_init()
+ * already programmed for each port and just writes KGSE_CCBS on it
+ * to point at our CC tree (see ask_pcd_install_hook() →
+ * fman_pcd_kg_lookup_port_scheme + fman_pcd_kg_graft_cc).
+ *
+ * The kernel scheme's extract recipe is fine for our purposes
+ * because keygen_port_hashing_init() programs
+ * DEFAULT_HASH_KEY_EXTRACT_FIELDS = IPSRC1 | IPDST1 | IPSEC_SPI |
+ * L4PSRC | L4PDST — exactly the 16-byte layout the downstream CC
+ * tree expects [SIP:4][DIP:4][SPI:4][SP:2][DP:2].  The CC key built
+ * by ask_hw_build_cc_key_v4() leaves the SPI slot zero with mask
+ * 0xff so non-IPSec frames match cleanly; the silicon parse-result
+ * fills the kernel-scheme key buffer identically to what our
+ * deleted custom recipe would have produced.
+ *
+ * The historical ASK_HW_PR_OFF_* and ASK_HW_V4_KEY_WIDTH macros
+ * above are KEPT — ask_hw_build_cc_key_v4() still uses
+ * ASK_HW_V4_KEY_WIDTH, and the offset symbols document the
+ * silicon-truth layout for future readers.
  */
-static void ask_hw_kg_params_fill(struct fman_pcd_kg_scheme_params *kg,
-                                  u32 default_fqid)
-{
-        memset(kg, 0, sizeof(*kg));
-        kg->id            = -1;          /* let driver allocate next free */
-        kg->use_hash      = true;
-        kg->default_fqid  = default_fqid;
-
-        /*
-         * v1.1-A.1 (2026-05-25): dropped the speculative IPSEC_SPI slot
-         * (former extracts[2], PARSE_RESULT offset 32). Empirical DUT
-         * verification on kernel 6.18.31-vyos with patches 0060+0061
-         * showed that fman_pcd_kg_scheme_create() returns -EOPNOTSUPP
-         * for offset 32 — the in-tree fman_pcd_kg convert-extract
-         * switch (patch 0006-fman-pcd-kg-body.patch) only whitelists
-         * the canonical IPV4_SIP/DIP and L4_SPORT/DPORT offsets.
-         *
-         * Symptom before this fix: "ask: hw: pcd_install hook: port
-         * 0x%02x scheme_create failed: -95" repeated for all 5 BMI
-         * ports, then "fman_pcd: install_now: claimed=0 declined=0
-         * failed=5"; kgse_ccbs stayed 0 across the regdump; M2 gate
-         * stuck at 6.861 Gbps / 33.14% kernel-net CPU.
-         *
-         * M2 scope is non-IPSec TCP/UDP only; v1.1 will widen the
-         * recipe AND the KG offset whitelist together (see qdrant memo
-         * dated 2026-05-25, tags: ASK2 v1.1-A IPSEC_SPI kg-extract).
-         */
-        kg->num_extracts  = 4;
-
-        kg->extracts[0].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
-        kg->extracts[0].offset = ASK_HW_PR_OFF_IPV4_SIP;
-        kg->extracts[0].size   = 4;
-        kg->extracts[0].mask   = 0xff;
-
-        kg->extracts[1].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
-        kg->extracts[1].offset = ASK_HW_PR_OFF_IPV4_DIP;
-        kg->extracts[1].size   = 4;
-        kg->extracts[1].mask   = 0xff;
-
-        kg->extracts[2].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
-        kg->extracts[2].offset = ASK_HW_PR_OFF_L4_SPORT;
-        kg->extracts[2].size   = 2;
-        kg->extracts[2].mask   = 0xff;
-
-        kg->extracts[3].src    = FMAN_PCD_KG_EXTRACT_FROM_PARSE_RESULT;
-        kg->extracts[3].offset = ASK_HW_PR_OFF_L4_DPORT;
-        kg->extracts[3].size   = 2;
-        kg->extracts[3].mask   = 0xff;
-}
 
 /*
  * Create one empty CC node attached to @tree. miss_action targets
@@ -477,15 +453,25 @@ ask_hw_create_empty_cc_node(struct fman_pcd_cc_tree *tree, u32 miss_fqid)
 /*
  * Tear down a port's pipeline. Called from teardown and from the
  * install-error path. NULL-safe on every field.
+ *
+ * v1.1-B (patch 0065): order matters.  Ungraft the kernel scheme
+ * FIRST (clears KGSE_CCBS back to 0 so the silicon stops walking
+ * our CC tree) before destroying the CC tree itself.  Skipping
+ * this would leave the kernel scheme briefly pointing at a freed
+ * group-table.  Then destroy the CC nodes + tree.  Note we do NOT
+ * destroy any KG scheme handle -- the kernel owns it and dpaa_eth
+ * will free it on its own teardown path.
  */
 static void ask_hw_port_destroy(struct ask_hw_port *p)
 {
+        struct ask_hw_pcd *h = ask_hw_pcd_inst;
+
         if (!p)
                 return;
 
-        if (p->scheme) {
-                fman_pcd_kg_scheme_destroy(p->scheme);
-                p->scheme = NULL;
+        if (p->kernel_scheme_valid && h && h->pcd) {
+                (void)fman_pcd_kg_ungraft_cc(h->pcd, p->kernel_scheme_id);
+                p->kernel_scheme_valid = false;
         }
         if (p->cc_v4_udp) {
                 fman_pcd_cc_node_destroy(p->cc_v4_udp);
@@ -524,9 +510,12 @@ static int ask_pcd_install_hook(struct fman_pcd *pcd, u8 hwport_id,
                                 void *priv)
 {
         struct ask_hw_pcd *h = priv;
-        struct fman_pcd_kg_scheme_params kg;
         struct ask_hw_port *p;
         unsigned int slot;
+        u8 kernel_sid = 0;
+        u32 kernel_fqb = 0;
+        u32 miss_fqid;
+        bool have_kernel_scheme = false;
         int rc;
 
         if (!h || h->pcd != pcd) {
@@ -547,11 +536,44 @@ static int ask_pcd_install_hook(struct fman_pcd *pcd, u8 hwport_id,
         p->in_use            = true;
         p->hwport_id         = hwport_id;
         p->default_base_fqid = default_base_fqid;
+        p->kernel_scheme_valid = false;
         h->next_slot++;
         mutex_unlock(&h->lock);
 
-        ask_pr_info("hw: pcd_install hook: port 0x%02x base_fqid=0x%x hash_size=%u — claiming\n",
+        ask_pr_info("hw: pcd_install hook: port 0x%02x base_fqid=0x%x hash_size=%u — claiming via graft\n",
                     hwport_id, default_base_fqid, default_hash_size);
+
+        /*
+         * v1.1-B (patch 0065): discover the kernel-owned KG scheme
+         * that dpaa_eth allocated for this hwport.  We will graft our
+         * CC tree onto that scheme via KGSE_CCBS rather than
+         * allocating a competing scheme that would lose the FMan KG
+         * arbitration (lowest-ID-bound scheme wins per packet).
+         *
+         * If the kernel hasn't bound a scheme yet (-ENOENT), use the
+         * hook-supplied default_base_fqid as the miss FQ.  In practice
+         * this branch should not fire because the in-tree hook
+         * (patch 0044) is invoked from fman_port_init() AFTER
+         * keygen_port_hashing_init() has already programmed schemes
+         * 0..4 -- but be defensive in case the late-replay path
+         * (patch 0060 install_now) hits ports in a different order.
+         */
+        rc = fman_pcd_kg_lookup_port_scheme(pcd, hwport_id,
+                                            &kernel_sid, &kernel_fqb);
+        if (rc == 0) {
+                have_kernel_scheme = true;
+                miss_fqid = kernel_fqb;
+                ask_pr_info("hw: pcd_install hook: port 0x%02x kernel scheme=%u base_fqid=0x%x — will graft\n",
+                            hwport_id, kernel_sid, kernel_fqb);
+        } else if (rc == -ENOENT) {
+                miss_fqid = default_base_fqid;
+                ask_pr_info("hw: pcd_install hook: port 0x%02x no kernel scheme bound yet — using hook-supplied fqid=0x%x as miss target (no graft will be performed)\n",
+                            hwport_id, default_base_fqid);
+        } else {
+                ask_pr_warn("hw: pcd_install hook: port 0x%02x lookup_port_scheme failed: %d\n",
+                            hwport_id, rc);
+                goto err;
+        }
 
         /* Build per-port CC tree (one group). */
         p->cc_tree = fman_pcd_cc_tree_create(pcd, 1);
@@ -564,11 +586,12 @@ static int ask_pcd_install_hook(struct fman_pcd *pcd, u8 hwport_id,
         }
 
         /*
-         * Empty v4-TCP CC node. miss_action → default_base_fqid so
-         * unmatched frames go to the kernel RX FQ.
+         * Empty v4-TCP CC node. miss_action → miss_fqid (the kernel
+         * scheme's base_fqid when grafting, or the hook-supplied
+         * default otherwise) so unmatched frames go to the kernel RX
+         * FQ.
          */
-        p->cc_v4_tcp = ask_hw_create_empty_cc_node(p->cc_tree,
-                                                   default_base_fqid);
+        p->cc_v4_tcp = ask_hw_create_empty_cc_node(p->cc_tree, miss_fqid);
         if (IS_ERR_OR_NULL(p->cc_v4_tcp)) {
                 rc = p->cc_v4_tcp ? PTR_ERR(p->cc_v4_tcp) : -ENOMEM;
                 p->cc_v4_tcp = NULL;
@@ -578,8 +601,7 @@ static int ask_pcd_install_hook(struct fman_pcd *pcd, u8 hwport_id,
         }
 
         /* Empty v4-UDP CC node (Phase 4.10 will install per-flow keys). */
-        p->cc_v4_udp = ask_hw_create_empty_cc_node(p->cc_tree,
-                                                   default_base_fqid);
+        p->cc_v4_udp = ask_hw_create_empty_cc_node(p->cc_tree, miss_fqid);
         if (IS_ERR_OR_NULL(p->cc_v4_udp)) {
                 rc = p->cc_v4_udp ? PTR_ERR(p->cc_v4_udp) : -ENOMEM;
                 p->cc_v4_udp = NULL;
@@ -588,35 +610,33 @@ static int ask_pcd_install_hook(struct fman_pcd *pcd, u8 hwport_id,
                 goto err;
         }
 
-        /* Allocate and program our own KG scheme. */
-        ask_hw_kg_params_fill(&kg, default_base_fqid);
-        p->scheme = fman_pcd_kg_scheme_create(pcd, &kg);
-        if (IS_ERR_OR_NULL(p->scheme)) {
-                rc = p->scheme ? PTR_ERR(p->scheme) : -ENOMEM;
-                p->scheme = NULL;
-                ask_pr_warn("hw: pcd_install hook: port 0x%02x scheme_create failed: %d\n",
-                            hwport_id, rc);
-                goto err;
+        /*
+         * v1.1-B (patch 0065): graft the CC tree onto the kernel
+         * scheme by ID, writing KGSE_CCBS on the kernel-owned scheme.
+         * Skip if no kernel scheme was found (-ENOENT above) -- in
+         * that case the CC tree exists but is unreachable from the
+         * silicon dispatch path; the per-flow CC-key inserts that
+         * follow will still succeed (they don't depend on graft
+         * having been performed), and the next replay pass should
+         * pick up the kernel scheme once it lands.
+         */
+        if (have_kernel_scheme) {
+                rc = fman_pcd_kg_graft_cc(pcd, kernel_sid, p->cc_tree);
+                if (rc) {
+                        ask_pr_warn("hw: pcd_install hook: port 0x%02x graft_cc on kernel scheme %u failed: %d\n",
+                                    hwport_id, kernel_sid, rc);
+                        goto err;
+                }
+                p->kernel_scheme_id    = kernel_sid;
+                p->kernel_scheme_valid = true;
+
+                ask_pr_info("hw: pcd_install hook: port 0x%02x GRAFTED onto kernel scheme %u, miss→FQ 0x%x, ready for per-flow CC keys\n",
+                            hwport_id, kernel_sid, miss_fqid);
+        } else {
+                ask_pr_info("hw: pcd_install hook: port 0x%02x no kernel scheme — CC tree installed without graft (per-flow keys still work, silicon dispatch deferred)\n",
+                            hwport_id);
         }
 
-        /* Attach our CC tree to the scheme (writes KGSE_CCBS). */
-        rc = fman_pcd_kg_attach_cc(p->scheme, p->cc_tree);
-        if (rc) {
-                ask_pr_warn("hw: pcd_install hook: port 0x%02x attach_cc failed: %d\n",
-                            hwport_id, rc);
-                goto err;
-        }
-
-        /* Bind the scheme to this port (writes KGSE_MV). */
-        rc = fman_pcd_kg_bind_port(p->scheme, hwport_id);
-        if (rc) {
-                ask_pr_warn("hw: pcd_install hook: port 0x%02x bind_port failed: %d\n",
-                            hwport_id, rc);
-                goto err;
-        }
-
-        ask_pr_info("hw: pcd_install hook: port 0x%02x INSTALLED — empty cc_v4_tcp + cc_v4_udp trees, miss→FQ 0x%x, ready for per-flow CC keys\n",
-                    hwport_id, default_base_fqid);
         return 0;
 
 err:

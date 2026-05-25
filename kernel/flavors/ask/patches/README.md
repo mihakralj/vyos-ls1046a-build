@@ -106,3 +106,58 @@ silently shipped vN+1's new field, and then mis-validates a chain at
 runtime in a way that only triggers on real traffic. PR14z's
 `hmct_bytes_used` was found by validator `-EINVAL` at module init —
 the next break may not be so visible.
+
+## Patch 0065 — graft-on-kernel-scheme (ASK2 v1.1-B, 2026-05-25)
+
+`0065-fman-pcd-graft-kernel-scheme.patch` resurrects the PR14z13 graft
+API from archived `archive-grafted-2026-05-24/0042-fman-pcd-kg-graft-cc.patch`.
+Fixes the H6 KG-priority-race root cause discovered 2026-05-25 on
+hardware: Path A (patches 0044/0049/0050/0060/0061) was installing the
+pre-`register_netdev` hook correctly but ASK was allocating a *new*
+scheme (ID 5..9) that lost the FMan KG arbitration race against the
+kernel-owned scheme (ID 0..4, allocated earlier by
+`keygen_port_hashing_init()`). FMan KG dispatches lowest-ID-bound
+scheme per packet (RM §8.7.4 + `fmkg_pe_sp` reverse-bit encoding) →
+kernel scheme always won → ASK's CC tree was never walked →
+`kgse_spc=0` on ASK schemes, `kgse_spc=18M` on kernel schemes, M2
+kernel-net CPU 30.5 % (gate ≤ 5 %).
+
+**Architectural fix (Option A):** ASK no longer creates its own
+schemes. Instead, ASK GRAFTS its CC tree onto the existing
+kernel-owned scheme by RMW-ing only `KGSE_CCBS` on it. The kernel's
+parser/extract recipe (`IPSRC1|IPDST1|IPSEC_SPI|L4PSRC|L4PDST` hash)
+is preserved; only CC walking is added. CC miss-action =
+`FORWARD_FQ(kernel_scheme->base_fqid)` keeps kernel control plane RX
+working unchanged for unmatched packets.
+
+**Three new public ABI entry points in `include/linux/fsl/fman_pcd.h`:**
+
+| Function | Purpose |
+|---|---|
+| `fman_pcd_kg_lookup_port_scheme(pcd, port_id, &sid, &fqb)` | Discover lowest-bound scheme ID on a port + its `KGSE_FQB` base_fqid |
+| `fman_pcd_kg_graft_cc(pcd, scheme_id, cc_tree)` | RMW `KGSE_CCBS` on existing scheme (by ID, not handle) to point at CC tree's group table |
+| `fman_pcd_kg_ungraft_cc(pcd, scheme_id)` | Idempotent inverse: clear `KGSE_CCBS` back to 0 |
+
+**`KGSE_MODE` is INTENTIONALLY left untouched.** The companion
+archived 0043 (PR14z15) flipped NIA engine from BMI to FM_CTL inside
+`keygen_scheme_set_ccbs()`; hardware verification 2026-05-23
+disproved that hypothesis (kernel's working schemes have
+`kgse_mode=0x80500002` with NIA=BMI|ENQ_FRAME and `kgse_ccbs=0`
+actively counting; the NIA-flipped grafted schemes stalled at
+`kgse_spc≈0`). SDK reference USDPAA also keeps NIA=BMI when
+grafting. Patch 0051 reverted 0043. **This patch resurrects ONLY 0042
+(`KGSE_CCBS`-only RMW), not 0043.**
+
+The companion ASK-side rewrite of `ask_pcd_install_hook()` in
+`kernel/flavors/ask/oot-modules/ask/ask_hw.c` (call lookup_port_scheme
++ graft_cc instead of scheme_create + bind_port) is a **direct OOT
+in-source edit**, not a kernel patch (consistent with how every other
+ask_*.c file in this repo is maintained). The dead
+`ask_hw_kg_params_fill()` static helper was removed since ASK no
+longer fills its own scheme params.
+
+**ABI version:** no bump required. `fman_pcd_kg_graft_cc()` /
+`fman_pcd_kg_ungraft_cc()` / `fman_pcd_kg_lookup_port_scheme()` are
+NEW exports — they don't break existing OOT callers; they only add a
+new "use the kernel scheme" path that didn't exist before. Per the
+rule above, new exports are not an ABI break.
