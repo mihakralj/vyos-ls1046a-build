@@ -13,7 +13,7 @@ to mainline when no flavor module is loaded.
      #define DPAA1_XSK_INITIAL_SEED      8192
      #define DPAA1_XSK_REFILL_THRESHOLD  256
      #define DPAA1_XSK_MIN_DEPTH         64
-     #define DPAA1_MIN_UMEM_CHUNK        4096
+     #define DPAA1_MIN_UMEM_CHUNK        3840
 
      struct xsk_buff_pool __rcu *xsk_pool[DPAA1_XSK_MAX_QBANDS];
      int                         xsk_bpid[DPAA1_XSK_MAX_QBANDS];
@@ -158,7 +158,7 @@ index bb955aa87..16571fab1 100644
 +#define DPAA1_XSK_INITIAL_SEED      8192
 +#define DPAA1_XSK_REFILL_THRESHOLD  256
 +#define DPAA1_XSK_MIN_DEPTH         64
-+#define DPAA1_MIN_UMEM_CHUNK        4096
++#define DPAA1_MIN_UMEM_CHUNK        3840
 +
  struct dpaa_priv {
  	struct dpaa_percpu_priv __percpu *percpu_priv;
