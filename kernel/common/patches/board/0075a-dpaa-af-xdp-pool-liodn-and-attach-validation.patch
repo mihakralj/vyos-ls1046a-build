@@ -89,7 +89,7 @@ index 7f92e5a4f..c8b345df0 100644
 + *   Hard constraints (fail closed, no copy-mode silent demotion):
 + *     - queue_id < priv->xsk_max_qbands (DPAA1_XSK_MAX_QBANDS = 4)
 + *     - dev->mtu <= 3290 (DPAA1 BP slot size cap, spec sec 1.2)
-+ *     - xsk_pool_get_rx_frame_size(pool) >= DPAA1_MIN_UMEM_CHUNK (4096)
++ *     - xsk_pool_get_rx_frame_size(pool) >= DPAA1_MIN_UMEM_CHUNK (3840)
 + *     - xsk_pool_get_headroom(pool)      >= priv->tx_headroom
 + *     - non-zero LIODN resolved from the RX fman_port (DTS sanity)
 + *
