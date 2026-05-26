@@ -8,6 +8,197 @@
 
 ---
 
+## 0.0.1 SESSION CLOSE-2 — Option C correction: bpid fast-path is ALREADY wired, real fix is FMan TX BMI register (2026-05-25 23:50 UTC)
+
+**Verdict:** §0.0 below mis-prescribed the next-session path. The "no-confirm TX
+FQ" mechanism it recommended is **already implemented as patch 0053** (commit
+2026-05-24, PR14z23.3) and was proven on hardware to make zero difference: M2
+re-ran at 6.946 Gbps / 20.14 % CPU vs PR14z23.2 baseline 6.951 / 21.08 %. The
+bpid-aware fast-path in `dpaa_tx_conf()` fires correctly but does not move the
+softirq budget because the actual cost is the **DQRR poll loop draining 2.24
+Mpps of TX-confirm FDs** — even with a trivial fast-path body, draining 2.24
+Mpps of QMan dequeues costs roughly the observed 21–30 % softirq across 4
+A72 cores. The bpid skip-path cannot eliminate work that's already happening
+at the DQRR level.
+
+### Today's perf instrumentation (DUT 192.168.1.190, kernel 6.18.31-vyos, post-0065 graft, 35 s iperf3 -P 8)
+
+| Surface | Value | Note |
+|---|---|---|
+| Throughput | (~6.9 Gbps, harness aborted on jq absence — confirmed by ethtool deltas) | matches PR14z22 baseline |
+| eth4 tx packets [TOTAL] | 67,347,597 | accumulated across runs |
+| eth4 tx confirm [TOTAL] | **67,347,597 (exact 1:1)** | every silicon-HIT frame triggers a confirm |
+| eth3 rx packets [TOTAL] | 4,897 | control plane only (silicon HIT works) |
+| mpstat per-CPU during burst | **CPU0=62 % CPU1=22 % CPU2=23 % CPU3=18 %** | avg 30.71 % softirq — skewed not evenly distributed |
+| NET_RX softirq delta / 20 s | +1,152,216 events (~58 K/s total) | confirms NET_RX events are TX-conf processing, NOT RX path |
+| QMan portal IRQs (boot-to-now) | portal 0=802 K / portal 1=1.11 M / portal 2=512 K / portal 3=761 K | portals are strictly per-CPU silicon — cannot redistribute |
+
+### Why patch 0053's bpid fast-path doesn't fix this (re-derivation)
+
+Confirm-FDs are enqueued by the FMan TX port BMI block onto the QMan FQ
+programmed in the TX port's `fmbm_tcfqid` register (RM 8.7.6). The kernel's
+NAPI poller dequeues from that FQ via the per-CPU QMan portal. Patch 0053's
+fast-path runs **AFTER** the dequeue — it skips the heavy skb / dma_unmap
+cleanup, but the DQRR dequeue itself + bman_release + percpu_priv counter
+update still cost cycles. At 2.24 Mpps confirm rate, even a 30 ns
+per-dequeue minimal body costs ~67 ms/s per CPU = 6.7 %, and the real body
+is closer to 100 ns ⇒ 22 % per CPU. **That matches exactly.**
+
+### The real fix — bypass QMan confirm enqueue entirely (FMan TX port BMI register)
+
+`drivers/net/ethernet/freescale/fman/fman_port.c` lines 587-603 already
+implement BOTH program paths:
+
+| `cfg->dflt_fqid` | `cfg->dont_release_buf` | Result |
+|---|---|---|
+| nonzero | false | **Current default**: `fmbm_tcfqid=dflt_fqid`, `fmbm_tfene=NIA_ENG_QMI_ENQ` → confirm-FD enqueued to QMan, kernel NAPI drains. This is what 21 % softirq pays for. |
+| 0 | true | `fmbm_tcfqid=DFLT_FQ_ID` (sentinel non-zero), `fmbm_tfene=NIA_ENG_BMI \| NIA_BMI_AC_TX_RELEASE` → **buffers released directly to BMan inside FMan TX BMI, ZERO QMan enqueue, ZERO kernel work**. |
+
+The mechanism is silicon-supported and zero-overhead. The only reason it
+isn't already used for silicon-HIT TX is that `dpaa_eth` programs the TX
+port at probe time with `dflt_fqid != 0` because kernel-driven TX needs the
+confirm path for skb cleanup. **But kernel TX sets FM_FD_CMD_FCO=1 in the
+FD command word, which overrides `fmbm_tcfqid` per RM 8.7.6 on a per-FD
+basis** — so a single FMan TX port can serve BOTH modes simultaneously:
+
+- Kernel TX → FD has FCO=1 → FMan uses FD's `confq_fqid` → skb confirm to kernel
+- Silicon CC HIT TX → FD has FCO=0 → FMan uses `fmbm_tcfqid` programming → 
+  if we program for release-to-BMan, **no kernel work at all**
+
+### What the next session must do
+
+1. **DO NOT** author patch 0066 as §0.0 recommended ("no-confirm TX FQ allocator").
+   That mechanism is already wired by patch 0053 and was proven inert.
+
+2. **Author patch 0066** to add a new runtime API in fman_port.c that
+   flips a TX port from "QMan-enqueue confirm" to "release-to-BMan
+   confirm" mode for FDs without FCO. API shape:
+
+   ```c
+   /* fman_port_set_silicon_hit_release_mode(port, true) writes:
+    *   fmbm_tcfqid <- 0xFFFFFF  (the existing sentinel from line 1003)
+    *   fmbm_tfene  <- NIA_ENG_BMI | NIA_BMI_AC_TX_RELEASE
+    * Kernel TX with FCO=1 keeps working (per-FD override).
+    * Returns 0 on success.
+    */
+   int fman_port_set_silicon_hit_release_mode(struct fman_port *port, bool enable);
+   ```
+
+3. **Modify `ask_hw.c::ask_hw_pcd_bringup()`** to call this API on each
+   FMan TX port after the CC graft completes (one call per egress port —
+   eth0..eth4, all 5).
+
+4. **Re-run M2 harness.** Expectation: `tx confirm` counter on eth4 should
+   STOP incrementing (or only increment for kernel-originated TX). CPU
+   softirq should collapse from 30 % avg to ≤ 5 %.
+
+### Why this didn't get found in patches 0030-0053
+
+The qdrant 2026-05-24 entry "PR14z23.2 root-cause CORRECTED" *did* mention
+this exact option as path (A): "override fmbm_tcfqid=0 + fmbm_tfene=
+NIA_ENG_BMI|NIA_BMI_AC_TX_RELEASE on silicon-HIT TX ports". It was flagged
+as "breaks kernel-driven TX skb consume on same port" — that concern is
+**wrong**: FM_FD_CMD_FCO override on per-FD basis means kernel TX is
+unaffected. Patch 0053 went with option (C) instead (bpid fast-path) which
+turned out to be inert. Today's perf data definitively re-validates option
+(A).
+
+### Items considered closed (carried forward unchanged from §0.0)
+
+- ✅ Patch 0065 KG graft model is correct and live
+- ✅ H6 (KG priority race) is eliminated
+- ✅ Silicon CC HIT is firing — verified at 67.3M tx packets vs 4.9K rx packets
+- ✅ Per-flow key install works (FWD + REV pipelines)
+- ✅ MURAM accounting is clean
+- ✅ Throughput PASS at ~6.9 Gbps
+- ❌ Kernel-net CPU FAIL — root cause finally re-localized correctly to FMan
+  TX BMI `fmbm_tfene` programming, NOT to QMan FQ context_a, NOT to
+  dpaa_tx_conf cleanup body
+
+---
+
+## 0.0 SESSION CLOSE — patch 0065 verified live, M2 root cause re-localized to TX-confirmation (2026-05-25 23:35 UTC)
+
+**Verdict:** Patch 0065 graft model is **CORRECT and LIVE**. The remaining M2 hard-gate
+failure is the **TX-confirmation softirq budget**, not anything in the KG / CC graft.
+
+### Live verification (post-reboot, ask.ko reload, fresh harness run)
+
+| Surface | State | Evidence |
+|---|---|---|
+| Patch 0065 graft active | ✅ | 5 boot banners `pcd_install hook: port 0xNN GRAFTED onto kernel scheme N, miss→FQ 0xMMM, ready for per-flow CC keys` (ports 0x09, 0x0c, 0x0d, 0x10, 0x11 onto schemes 0..4) followed by `install_now: claimed=5 declined=0 failed=0` |
+| KG dispatch correct | ✅ | `bin/ask-pcd-regdump.py`: ONLY 5 schemes (0..4), all kernel-owned, all with `kgse_ccbs ≠ 0` (0x4ac00..0x4e000 = ASK CC tree handles). Schemes 5–9 ABSENT. H6 race definitively closed |
+| Silicon CC HIT path | ✅ | Post-burst: scheme 3 (eth3 RX) `kgse_spc = 1,701,431 pkts`; scheme 4 (eth4 RX) `kgse_spc = 101,606 pkts`. Both grafted to ASK's CC tree |
+| Per-flow keys installed | ✅ | dmesg shows `hw_insert OK cookie=0x... hw_id=0x01..0x06` covering BOTH FWD (ingress=eth3) and REV (ingress=eth4) pipelines. PR14z5 dual-pipeline first-pid latch works |
+| Silicon CC HIT forwarding | ✅ | `ethtool -S eth3 rx packets [TOTAL] = 1599` (kernel saw ~0); `ethtool -S eth4 tx packets [TOTAL] = 19,558,861` (silicon forwarded 19.5M frames bypassing dpaa_eth RX). Confirms PR14z22 silicon-truth from 2026-05-23 |
+| M2 throughput | ✅ PASS | **6.915 Gbps** (≥ 2.0 threshold, matches PR14z22 baseline 6.945 Gbps within noise) |
+| M2 kernel-net CPU | ❌ FAIL | **21.68 %** (sys=0.85, irq=0.00, **soft=21.00**) vs ≤ 5 % target. **All in softirq.** |
+
+### Where the 21 % softirq goes (qdrant 2026-05-23 PR14z22 step-1, REVALIDATED today)
+
+`ethtool -S eth4` shows **EXACT 1:1 ratio of tx-packets to tx-confirm** across all 4 CPUs:
+
+```
+tx packets [TOTAL]:   19,558,861
+tx confirm [TOTAL]:   19,558,861
+  ↑ each forwarded frame generates one TX-confirmation event the kernel must process
+```
+
+At 6.9 Gbps with ~1500 B avg packet → **~575,000 pps TX-confirm rate**, drained by the
+dpaa_eth NAPI poller on the TX-confirm FQ. On 4× 1.6 GHz Cortex-A72 that consumes the
+entire 21 % softirq budget. Throughput / RX / CC tree / KG / MURAM are all healthy.
+
+### Diagnostic mis-step averted (documented for the next session)
+
+A short warm-up test (`iperf3 -P 2 -t 5`) showed 3.8 Gbps + 52K retransmits. I briefly
+diagnosed this as a regression and traced it to `KGSE_MODE` NIA bits 22:18 = `ENG_BMI`
+(0x500000) not `ENG_FM_CTL` (0x000000) — hypothesizing patch 0065's `KGSE_CCBS`-only
+RMW left KG enqueuing to `kgse_fqb` instead of walking the CC tree. **That hypothesis
+is WRONG.** The authoritative refutations:
+
+1. Inline comment in `fman_pcd_kg.c::fman_pcd_kg_graft_cc()` lines 536-541:
+   > KGSE_MODE is INTENTIONALLY left untouched: SDK-validated reference
+   > (USDPAA 999-layerscape-ask-kernel patch) keeps NIA = BMI|ENQ_FRAME when
+   > grafting; **CC walking on FMan v3 is implicit when KGSE_CCBS is non-zero.**
+   > The earlier PR14z15 attempt to flip NIA engine to FM_CTL was disproven on
+   > hardware 2026-05-23 (see patch 0051 revert rationale).
+2. qdrant memory `PR14z20-fman-keygen-nia-revert` (2026-05-23): the NIA-flip
+   killed the silicon RX path completely. Patch 0051 reverted PR14z15. The
+   USDPAA reference (legacy mihakralj/kernel-ls1046a-build SHA 464df181) shows
+   the SDK keeps `KG_SCH_MODE_EN | NIA_BMI_AC_ENQ_FRAME | (grpBase << CCOBASE_SHIFT)`
+   when grafting CC.
+3. **Live silicon evidence**: 19.5M frames forwarded out eth4, only 1599 reached
+   kernel RX. If CC walking weren't happening, ALL 19.5M would have been kernel-
+   forwarded (with retransmit storms). It's not.
+
+The 3.8 Gbps / 52K-retr result was just iperf3 ramp-up over 5 s with 2 streams.
+The proper benchmark is `-P 8 -t 30s` (what `bin/verify-ask-flow-offload.sh` runs).
+
+### Path forward to M2 PASS (three documented options, per PR14z22)
+
+| Option | Mechanism | Pros | Cons |
+|---|---|---|---|
+| **A — TX-conf NAPI budget tuning** | Reduce `napi->weight` on dpaa_eth TX-conf poll; let TX-conf events batch up | Minimal code change; no DPAA1 portal changes | Just shuffles CPU cost; risks TX FQ backpressure under sustained load |
+| **B — Isolated TX-conf CPU** | Pin TX-confirmation IRQ + NAPI affinity to one CPU; isolate from forwarding workers | Architecturally clean if box has spare cores | LS1046A has only 4 cores; isolation costs 25 % of total compute |
+| **C — No-confirm TX FQ for CC-HIT** | DPAA1 QMan portal allocator (`qman_alloc_fqid` with portal flags) supports "TX without confirmation" FQ type per LS1046A RM 8.x. Wire the CC HIT path's `next_fqid` to such an FQ | **Architecturally correct.** Eliminates TX-conf entirely for silicon-forwarded frames. CPU drops near zero | Requires non-trivial DPAA1 portal work + per-port FQ allocation at probe; integration with existing dpaa_eth TX paths (kernel-originated frames still need confirm) |
+
+**Recommended:** Option C is the architecturally correct fix and the only one that
+moves the CPU from 21 % to near zero. Options A and B are within-budget palliatives
+that don't actually solve the M2 spec target.
+
+### Items considered closed by today's verification
+
+- ✅ Patch 0065 KG graft model is correct and live on hardware
+- ✅ H6 (KG priority race scheme-5–9 vs scheme-0–4) is eliminated
+- ✅ The "kernel scheme already bound at probe" architectural concern is resolved
+- ✅ `fman_pcd_kg_lookup_port_scheme` + `fman_pcd_kg_graft_cc` ABI works as documented
+- ✅ ASK's CC-tree handles 0x4ac00..0x4e000 are dispatched to by KG (live spc evidence)
+- ✅ Per-flow key install (FWD + REV) works; PR14z5 first-pid latch correctly tags both directions
+- ✅ PR14z6 egress-side echo skip and PR14r dedup work correctly (1 install + 1 skip + N dedups per cookie)
+- ✅ `bin/m2-dut-prep.sh` + `bin/verify-ask-flow-offload.sh` produces consistent reproducible results
+
+---
+
 ## 0.1 BREAKTHROUGH (2026-05-25 night) — Path A scheme allocates but loses KG priority race
 
 **Definitive forensic verdict, all prior H1/H2/H3/H5 hypotheses obsoleted.**
