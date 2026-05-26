@@ -62,16 +62,16 @@ index 7ed659e..5e9cc55 100644
  	struct dpaa_percpu_priv __percpu *percpu_priv;
  	struct dpaa_bp *dpaa_bp;
 @@ -173,6 +176,13 @@ struct dpaa_priv {
- 	bool rx_tstamp; /* Rx timestamping enabled */
+ bool rx_tstamp; /* Rx timestamping enabled */
  
- 	struct bpf_prog *xdp_prog;
+ struct bpf_prog *xdp_prog;
 +
-+	/* Flavor ops abstraction (M0). NULL on stock mainline behaviour;
-+	 * populated by an optional flavor module (FLAVOR=vpp, FLAVOR=ask2).
-+	 */
-+	const struct dpaa_pcd_ops   __rcu *pcd_ops;
-+	const struct dpaa_qmgmt_ops __rcu *qmgmt_ops;
-+	void *flavor_priv;
++/* Flavor ops abstraction (M0). NULL on stock mainline behaviour;
++ * populated by an optional flavor module (FLAVOR=vpp, FLAVOR=ask2).
++ */
++const struct dpaa_pcd_ops   __rcu *pcd_ops;
++const struct dpaa_qmgmt_ops __rcu *qmgmt_ops;
++void *flavor_priv;
  };
  
  /* from dpaa_ethtool.c */
