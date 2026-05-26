@@ -296,6 +296,30 @@ Pure structural refactor: introduce `struct dpaa_pcd_ops` and `struct dpaa_qmgmt
 
 Mainline-suitable as a standalone series: zero behavioural change, ~120 lines net, framed in the cover letter as the in-tree replacement for the removed `sdk_dpaa` `FM_PORT_SetPCD()` callback. Cc: Madalin Bucur, Camelia Groza, Sean Anderson, Ioana Ciornei.
 
+**Microcode capability-detection layer (M0).** A `dev_warn()` on a downgrade from ucode 210 → ucode 106 is too soft: even with a warning, a `pcd_ops->install` that blindly writes to MURAM offsets defined by ucode 210's layout will silently corrupt MURAM on ucode 106 instead of failing cleanly. M0 introduces a capability bitmask populated at probe by reading FMan version registers:
+
+```c
+/* drivers/net/ethernet/freescale/fman/fman.h */
+#define FMAN_CAP_CC_EXACT_MATCH   BIT(0)  /* ucode-210 exact-match CC nodes      */
+#define FMAN_CAP_HM_NODES         BIT(1)  /* ucode-210 Header-Manipulation nodes */
+#define FMAN_CAP_POLICER_TRTCM    BIT(2)  /* ucode-210 trTCM 256-profile policer */
+#define FMAN_CAP_HC_DISPATCH      BIT(3)  /* ucode-210 Host Command dispatch     */
+/* … room for future cap bits as new ucode features surface … */
+
+/* struct dpaa_priv — populated by mac_dev probe via fman_get_caps(priv->mac_dev->fman) */
+u32 fman_caps;
+```
+
+Each exported install helper takes `priv` and returns `-ENOTSUPP` if the corresponding cap bit is not set, **before** touching MURAM:
+
+```c
+int fman_cc_tree_install (struct dpaa_priv *priv, …);  /* needs FMAN_CAP_CC_EXACT_MATCH */
+int fman_hm_node_install (struct dpaa_priv *priv, …);  /* needs FMAN_CAP_HM_NODES      */
+int fman_policer_install (struct dpaa_priv *priv, …);  /* needs FMAN_CAP_POLICER_TRTCM */
+```
+
+Phase 3b–e flavor code is structured as `install → if (-ENOTSUPP) { priv->hw_offload_unavailable++; continue; }` — fail-soft. Basic RSS (KeyGen, ucode-106-compatible) still works on a ucode-106 boot; only the optional 210-gated features are skipped. This is exercised by validation matrix row "Boot on ucode 106: Phase 3b–e install returns `-ENOTSUPP`, no MURAM writes, RSS works" (§6.1) — verified by reading a constant value from `/sys/kernel/debug/fman_muram/used` across the install attempts.
+
 **Acceptance gate M0:**
 
 1. `modprobe fsl_dpaa_eth` without any flavor module: zero behavioural change. All eth interfaces come up; iperf3 line-rate works.
