@@ -134,8 +134,8 @@ find "$KERNEL_PATCHES" -maxdepth 1 -type f -name '*.patch' \
 
 echo "### Staging LS1046A board patches from $BOARD_PATCH_DIR"
 cp "$BOARD_PATCH_DIR/0068-dpaa-flavor-ops.patch"              "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0068a-dpaa-flavor-ops-retro-attach.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0069-dpaa-flavor-hooks.patch"            "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0069a-dpaa-flavor-ops-retro-attach.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0070-dpaa1-xsk-wakeup.patch"             "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0071-dpaa1-xsk-pool-setup.patch"         "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0072-dpaa1-xsk-zc-datapath-scaffold.patch" "$KERNEL_PATCHES/"
