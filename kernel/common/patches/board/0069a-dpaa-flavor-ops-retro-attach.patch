@@ -1,19 +1,19 @@
 From: vyos-ls1046a-build M0 fix <noreply@vyos-ls1046a-build>
 Date: 2026-05-26
-Subject: [PATCH] dpaa: retro-attach flavor ops to priv list on register
+Subject: [PATCH] dpaa: retro-attach flavor ops to all probed privs on register
 
 The init-order bug fixed here:
 
 LS1046A has DPAA1 built-in (CONFIG_FSL_DPAA=y, mandatory per AGENTS.md).
 All five FMan MACs probe at boot, each calling
 dpaa_priv_attach_flavor_ops(priv) while dpaa_{pcd,qmgmt}_ops_global are
-still NULL — every per-priv ops slot is therefore permanently NULL.
+still NULL -- every per-priv ops slot is therefore permanently NULL.
 
 When af_xdp_pool.ko later loads via udev (T+638s on the DUT) it
 populates the globals via dpaa_register_flavor_ops(), but the per-priv
 RCU slots are never refreshed. dpaa_setup_xsk_pool() then takes the
 first NULL-ops bail and returns -EOPNOTSUPP, which the kernel XSK core
-translates into "XDP_ZEROCOPY not available" — userspace bind() with
+translates into "XDP_ZEROCOPY not available" -- userspace bind() with
 XDP_ZEROCOPY fails with -EOPNOTSUPP.
 
 Root cause confirmed via kprobes on the live DUT (run 26469108527,
@@ -26,26 +26,32 @@ image 2026.05.26-1904-rolling):
     first NULL-ops bail before reaching the flavor callback.
 
 Fix:
-  1. Add a LIST_HEAD(dpaa_priv_list) registry plus a spinlock in
-     dpaa_flavor.c. Every priv adds itself on attach and removes on
-     detach. The list is walked under spinlock by register/unregister
-     of flavor ops to rcu_assign_pointer() the new ops into every
-     priv (or NULL them out on unregister).
-  2. Add `struct list_head flavor_list;` to struct dpaa_priv so each
-     priv can sit on the registry.
-  3. INIT_LIST_HEAD(&priv->flavor_list) in dpaa_eth_probe() so the
-     list node is sane before the first attach.
+
+Use a private heap-allocated tracker node in dpaa_flavor.c so we do
+not need to add ANY field to struct dpaa_priv (which would shift line
+numbers in dpaa_eth.h and break follow-on patches 0071/0072/0075b).
+On attach we kzalloc a small `struct dpaa_priv_tracker { list_head;
+priv*; }` and insert it onto a static LIST_HEAD under a spinlock; on
+detach we walk the list, free the node and remove. When
+dpaa_register_flavor_ops() runs (potentially long after every priv
+has already probed), it walks the tracker list under the spinlock
+and rcu_assign_pointer's the new ops into every priv. Unregister
+does the inverse, NULL-ing every priv's ops and clearing flavor_priv.
 
 Locking model:
-  - dpaa_flavor_lock (mutex, existing) serialises register/unregister
-    against each other and the priv-list-walk.
-  - dpaa_priv_list_lock (new spinlock) protects the priv_list itself
-    against probe/remove. rcu_assign_pointer is non-blocking so
-    holding the spinlock during the walk is safe.
+  - dpaa_flavor_lock (mutex, existing) serialises
+    register/unregister against each other.
+  - dpaa_priv_list_lock (new spinlock) protects the tracker list
+    against probe/remove. rcu_assign_pointer is non-blocking, so
+    walking the list under the spinlock is safe.
+  - kzalloc must NOT be called inside the spinlock; the tracker is
+    allocated BEFORE the spinlock is taken on attach.
 
 With no flavor module loaded (default + ASK2 flavors), behaviour is
 byte-identical to the post-0068+0069 baseline: probes attach to the
-list and rcu_assign NULL ops; no register/unregister ever happens.
+tracker list and rcu_assign NULL ops; no register/unregister ever
+happens. The only added cost is one 32-byte kzalloc per dpaa_priv
+at probe time (5 allocs on LS1046A).
 
 The acceptance gate that this fix unlocks:
   sudo /tmp/xsk_bind_test eth4 0 --zerocopy   # must print "bind() SUCCESS"
@@ -54,42 +60,11 @@ Depends-on: 0068-dpaa-flavor-ops.patch, 0069-dpaa-flavor-hooks.patch.
 
 Signed-off-by: vyos-ls1046a-build <noreply@vyos-ls1046a-build>
 ---
-diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-index b0a325829..b0a325830 100644
---- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-+++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-@@ -3893,6 +3893,11 @@ static int dpaa_eth_probe(struct platform_device *pdev)
- 	netif_set_real_num_tx_queues(net_dev,
- 				     priv->num_tc * dpaa_num_txqs_per_tc());
- 
-+	/* M0 retro-attach: initialise the priv's list node BEFORE
-+	 * dpaa_priv_attach_flavor_ops() adds it to dpaa_priv_list.
-+	 */
-+	INIT_LIST_HEAD(&priv->flavor_list);
-+
- 	/* M0: attach flavor ops, then run pcd_ops->install before
- 	 * register_netdev() makes the netdev visible to userspace.
- 	 */
-diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
-index 5e9cc55..5e9cc56 100644
---- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
-+++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
-@@ -180,6 +180,10 @@ struct dpaa_priv {
- 	const struct dpaa_pcd_ops   __rcu *pcd_ops;
- 	const struct dpaa_qmgmt_ops __rcu *qmgmt_ops;
- 	void *flavor_priv;
-+	/* M0 retro-attach: registry node so dpaa_register_flavor_ops()
-+	 * can walk all probed privs and rcu_assign the new ops in.
-+	 */
-+	struct list_head flavor_list;
- };
- 
- /* from dpaa_ethtool.c */
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.c b/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.c
 index 27931f0..27931f1 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.c
-@@ -11,21 +11,36 @@
+@@ -11,21 +11,52 @@
   */
  
  #include <linux/export.h>
@@ -97,6 +72,7 @@ index 27931f0..27931f1 100644
  #include <linux/module.h>
  #include <linux/mutex.h>
  #include <linux/rcupdate.h>
++#include <linux/slab.h>
 +#include <linux/spinlock.h>
  
  #include "dpaa_eth.h"
@@ -104,105 +80,124 @@ index 27931f0..27931f1 100644
  
  static DEFINE_MUTEX(dpaa_flavor_lock);
  
-+/* Registry of probed dpaa_priv instances. Inserted by
-+ * dpaa_priv_attach_flavor_ops(), removed by dpaa_priv_detach_flavor_ops().
-+ * Walked under spinlock by register/unregister of flavor ops to refresh
-+ * per-priv pointers (the LS1046A built-in-DPAA1 path: every priv is
-+ * probed at boot with ops_global still NULL, then the af_xdp_pool module
-+ * loads later via udev and needs to populate the per-priv slots).
++/* Tracker node: one per probed dpaa_priv. Allocated in
++ * dpaa_priv_attach_flavor_ops(), freed in dpaa_priv_detach_flavor_ops().
++ * Stored as a private list in dpaa_flavor.c so we do not need to add a
++ * struct list_head field to struct dpaa_priv (which would shift line
++ * numbers in dpaa_eth.h and break follow-on patches that add their own
++ * fields to struct dpaa_priv).
 + */
-+static LIST_HEAD(dpaa_priv_list);
++struct dpaa_priv_tracker {
++struct list_head node;
++struct dpaa_priv *priv;
++};
++
++static LIST_HEAD(dpaa_priv_trackers);
 +static DEFINE_SPINLOCK(dpaa_priv_list_lock);
 +
  static const struct dpaa_pcd_ops   __rcu *dpaa_pcd_ops_global;
  static const struct dpaa_qmgmt_ops __rcu *dpaa_qmgmt_ops_global;
  
  int dpaa_register_flavor_ops(const struct dpaa_pcd_ops *pcd_ops,
- 			     const struct dpaa_qmgmt_ops *qmgmt_ops)
+      const struct dpaa_qmgmt_ops *qmgmt_ops)
  {
-+	struct dpaa_priv *p;
-+	unsigned long flags;
++struct dpaa_priv_tracker *t;
++unsigned long flags;
 +
- 	if (!pcd_ops && !qmgmt_ops)
- 		return -EINVAL;
+ if (!pcd_ops && !qmgmt_ops)
+ return -EINVAL;
  
 @@ -37,6 +52,21 @@ int dpaa_register_flavor_ops(const struct dpaa_pcd_ops *pcd_ops,
- 	}
- 	rcu_assign_pointer(dpaa_pcd_ops_global,   pcd_ops);
- 	rcu_assign_pointer(dpaa_qmgmt_ops_global, qmgmt_ops);
+ }
+ rcu_assign_pointer(dpaa_pcd_ops_global,   pcd_ops);
+ rcu_assign_pointer(dpaa_qmgmt_ops_global, qmgmt_ops);
 +
-+	/* Retro-attach to every priv that probed before us (the
-+	 * LS1046A built-in-driver path). rcu_assign_pointer is
-+	 * non-blocking and safe inside the spinlock. The pcd_ops /
-+	 * qmgmt_ops local arguments are stable here because no
-+	 * concurrent register/unregister can run (we hold the mutex)
-+	 * and the caller guarantees the pointers' validity until
-+	 * dpaa_unregister_flavor_ops() returns.
-+	 */
-+	spin_lock_irqsave(&dpaa_priv_list_lock, flags);
-+	list_for_each_entry(p, &dpaa_priv_list, flavor_list) {
-+		rcu_assign_pointer(p->pcd_ops,   pcd_ops);
-+		rcu_assign_pointer(p->qmgmt_ops, qmgmt_ops);
-+	}
-+	spin_unlock_irqrestore(&dpaa_priv_list_lock, flags);
- 	mutex_unlock(&dpaa_flavor_lock);
- 	return 0;
++/* Retro-attach to every priv that probed before us (the
++ * LS1046A built-in-driver path). rcu_assign_pointer is
++ * non-blocking and safe inside the spinlock. The pcd_ops /
++ * qmgmt_ops local arguments are stable here because no
++ * concurrent register/unregister can run (we hold the mutex)
++ * and the caller guarantees the pointers' validity until
++ * dpaa_unregister_flavor_ops() returns.
++ */
++spin_lock_irqsave(&dpaa_priv_list_lock, flags);
++list_for_each_entry(t, &dpaa_priv_trackers, node) {
++rcu_assign_pointer(t->priv->pcd_ops,   pcd_ops);
++rcu_assign_pointer(t->priv->qmgmt_ops, qmgmt_ops);
++}
++spin_unlock_irqrestore(&dpaa_priv_list_lock, flags);
+ mutex_unlock(&dpaa_flavor_lock);
+ return 0;
  }
 @@ -44,9 +74,23 @@ EXPORT_SYMBOL_GPL(dpaa_register_flavor_ops);
  
  void dpaa_unregister_flavor_ops(void)
  {
-+	struct dpaa_priv *p;
-+	unsigned long flags;
++struct dpaa_priv_tracker *t;
++unsigned long flags;
 +
- 	mutex_lock(&dpaa_flavor_lock);
- 	rcu_assign_pointer(dpaa_pcd_ops_global,   NULL);
- 	rcu_assign_pointer(dpaa_qmgmt_ops_global, NULL);
+ mutex_lock(&dpaa_flavor_lock);
+ rcu_assign_pointer(dpaa_pcd_ops_global,   NULL);
+ rcu_assign_pointer(dpaa_qmgmt_ops_global, NULL);
 +
-+	/* Clear every per-priv pointer that referenced the
-+	 * about-to-be-freed flavor-module text.
-+	 */
-+	spin_lock_irqsave(&dpaa_priv_list_lock, flags);
-+	list_for_each_entry(p, &dpaa_priv_list, flavor_list) {
-+		rcu_assign_pointer(p->pcd_ops,   NULL);
-+		rcu_assign_pointer(p->qmgmt_ops, NULL);
-+		p->flavor_priv = NULL;
-+	}
-+	spin_unlock_irqrestore(&dpaa_priv_list_lock, flags);
- 	mutex_unlock(&dpaa_flavor_lock);
- 	synchronize_rcu();
++/* Clear every per-priv pointer that referenced the
++ * about-to-be-freed flavor-module text.
++ */
++spin_lock_irqsave(&dpaa_priv_list_lock, flags);
++list_for_each_entry(t, &dpaa_priv_trackers, node) {
++rcu_assign_pointer(t->priv->pcd_ops,   NULL);
++rcu_assign_pointer(t->priv->qmgmt_ops, NULL);
++t->priv->flavor_priv = NULL;
++}
++spin_unlock_irqrestore(&dpaa_priv_list_lock, flags);
+ mutex_unlock(&dpaa_flavor_lock);
+ synchronize_rcu();
  }
 @@ -54,6 +98,17 @@ EXPORT_SYMBOL_GPL(dpaa_unregister_flavor_ops);
  
  void dpaa_priv_attach_flavor_ops(struct dpaa_priv *priv)
  {
-+	unsigned long flags;
++struct dpaa_priv_tracker *t;
++unsigned long flags;
 +
-+	/* Add to registry (idempotent). list_empty() check makes
-+	 * this safe to call from a re-probe path that did not
-+	 * subsequently call dpaa_priv_detach_flavor_ops().
-+	 */
-+	spin_lock_irqsave(&dpaa_priv_list_lock, flags);
-+	if (list_empty(&priv->flavor_list))
-+		list_add(&priv->flavor_list, &dpaa_priv_list);
-+	spin_unlock_irqrestore(&dpaa_priv_list_lock, flags);
++/* Allocate the tracker BEFORE taking the spinlock; kzalloc
++ * may sleep. GFP_KERNEL is safe at probe time.
++ */
++t = kzalloc(sizeof(*t), GFP_KERNEL);
++if (t) {
++t->priv = priv;
++spin_lock_irqsave(&dpaa_priv_list_lock, flags);
++list_add(&t->node, &dpaa_priv_trackers);
++spin_unlock_irqrestore(&dpaa_priv_list_lock, flags);
++}
 +
- 	rcu_read_lock();
- 	rcu_assign_pointer(priv->pcd_ops,
- 			   rcu_dereference(dpaa_pcd_ops_global));
-@@ -64,6 +119,13 @@ void dpaa_priv_attach_flavor_ops(struct dpaa_priv *priv)
+ rcu_read_lock();
+ rcu_assign_pointer(priv->pcd_ops,
+    rcu_dereference(dpaa_pcd_ops_global));
+@@ -64,6 +119,21 @@ void dpaa_priv_attach_flavor_ops(struct dpaa_priv *priv)
  
  void dpaa_priv_detach_flavor_ops(struct dpaa_priv *priv)
  {
-+	unsigned long flags;
++struct dpaa_priv_tracker *t, *tmp;
++unsigned long flags;
 +
-+	spin_lock_irqsave(&dpaa_priv_list_lock, flags);
-+	if (!list_empty(&priv->flavor_list))
-+		list_del_init(&priv->flavor_list);
-+	spin_unlock_irqrestore(&dpaa_priv_list_lock, flags);
++/* Walk-and-prune the tracker list under the spinlock. The
++ * matching node must be removed from the list before kfree.
++ */
++spin_lock_irqsave(&dpaa_priv_list_lock, flags);
++list_for_each_entry_safe(t, tmp, &dpaa_priv_trackers, node) {
++if (t->priv == priv) {
++list_del(&t->node);
++spin_unlock_irqrestore(&dpaa_priv_list_lock, flags);
++kfree(t);
++goto cleared;
++}
++}
++spin_unlock_irqrestore(&dpaa_priv_list_lock, flags);
++cleared:
 +
- 	rcu_assign_pointer(priv->pcd_ops,   NULL);
- 	rcu_assign_pointer(priv->qmgmt_ops, NULL);
- 	priv->flavor_priv = NULL;
+ rcu_assign_pointer(priv->pcd_ops,   NULL);
+ rcu_assign_pointer(priv->qmgmt_ops, NULL);
+ priv->flavor_priv = NULL;
 -- 
 2.39.5
