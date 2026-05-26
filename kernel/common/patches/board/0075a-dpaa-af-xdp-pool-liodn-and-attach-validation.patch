@@ -17,116 +17,37 @@ What 0075a does:
    drivers/net/ethernet/freescale/fman/fman_port.{c,h}.  It returns
    port->dts_params.fman->liodn_base[port->port_id], which the parent
    FMan populates at probe time from device-tree `fsl,liodn`
-   properties.  `struct fman_port` is opaque outside fman_port.c so
-   external callers cannot read this field directly; the accessor is
-   the canonical way for sibling drivers to know the LIODN that the
-   FMan presents to PAMU as the DMA master ID.
+   properties.
 
-   Used immediately by af_xdp_pool as a DTS sanity check on every
-   XSK_POOL attach; will be consumed by future diagnostics (spec
-   sec 6) as well.
+2) Adds the fman_port.h and mac.h includes to af_xdp_pool_main.c
+   (linux/netdevice.h, net/xdp_sock_drv.h, and dpaa_eth.h were already
+   added by patch 0074).
 
-2) Replaces the xsk_pool_attach -EOPNOTSUPP stub in
-   drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
-   with a 5-arm fail-closed validation pipeline:
+3) Replaces the xsk_pool_attach -EOPNOTSUPP stub with a 5-arm
+   fail-closed validation pipeline (queue_id, MTU, frame size,
+   headroom, fman_port + LIODN), then returns -EOPNOTSUPP so the
+   kernel XSK core falls back to copy-mode (M2 baseline gate
+   semantics).  Patch 0075b will replace the final -EOPNOTSUPP with
+   steps 2-7 from the spec.
 
-     a) queue_id < min(priv->xsk_max_qbands, DPAA1_XSK_MAX_QBANDS)
-     b) net_dev->mtu <= 3290 (DPAA1 BP slot-size cap, spec sec 1.2;
-        the same hard limit that fsl_dpaa_mac enforces for XDP)
-     c) xsk_pool_get_rx_frame_size(pool) >= DPAA1_MIN_UMEM_CHUNK (4096)
-     d) xsk_pool_get_headroom(pool) >= priv->tx_headroom
-     e) priv->mac_dev present, RX fman_port resolvable, LIODN non-zero
-
-   Each failure bumps the specific priv->xsk_*_reject counter AND
-   priv->xsk_pool_attach_fail (ethtool surfaces both per spec sec 6
-   patch 0071).  After all 5 arms pass, the function returns
-   -EOPNOTSUPP so the kernel XSK core continues to fall back to
-   copy-mode exactly as it does today (M2 baseline gate semantics,
-   PASS verified on the live DUT 2026-05-26).
-
-   Patch 0075b will replace the final -EOPNOTSUPP with steps 2-7
-   from the spec (xsk_pool_dma_map, dedicated BMan bpid allocation,
-   8192-chunk fill-ring seed loop, MEM_TYPE_XSK_BUFF_POOL rxq
-   registration, RCU publish into priv->xsk_pool[]).
-
-Note on PAMU (spec sec 4.6):
-
-   The spec assumed an arm64-buildable `fsl_pamu_window_create()` /
-   `fsl_pamu_window_destroy()` API exported by drivers/iommu/fsl_pamu.c.
-   This assumption is wrong: mainline 6.18.31's FSL_PAMU Kconfig is
-   gated by `depends on PPC_E500MC || (COMPILE_TEST && PPC)`, i.e. the
-   driver only compiles on PowerPC.  On arm64 LS1046A the PAMU runs in
-   firmware-programmed bypass and FMan masters DMA directly to
-   physical RAM via dma-direct; xsk_pool_dma_map() in 0075b will be
-   sufficient and no per-window PAMU programming is required.  The
-   spec will be updated to v4.2 to reflect this.  The kernel header
-   include/linux/fsl/fsl_pamu_window.h that the previous spec revision
-   anticipated is NOT introduced by this patch.
-
-Behaviour with 0075a applied:
-  - The af_xdp_pool flavor module loads exactly as before.
-  - Userspace XDP_BIND with XDP_ZEROCOPY on a DPAA1 ethN still
-    returns -EOPNOTSUPP exactly as before (kernel XSK core falls
-    back to copy-mode exactly as before).
-  - Net behaviour is byte-identical to pre-0075a; what 0075a buys
-    us is the validation arms + LIODN sanity check actually being
-    exercised at every XSK attach attempt, with all counter
-    increments visible in `ethtool -S ethN | grep xsk_`.
-
-Build verification (native arm64, kernel 6.18.31-vyos):
-  - drivers/net/ethernet/freescale/fman/fman_port.o:
-      clean CC, fman_port_get_liodn is `T` with
-      __export_symbol_fman_port_get_liodn and
-      __UNIQUE_ID___addressable_fman_port_get_liodn.
-  - drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool.o:
-      clean CC[M]+LD[M], one new `U fman_port_get_liodn` on top of
-      the 0074 baseline (which had U: __napi_schedule_irqoff,
-      napi_schedule_prep, dpaa_register_flavor_ops,
-      dpaa_unregister_flavor_ops).
-  - No new build warnings.
-
-Acceptance gate (deferred to DUT):
-  - Operator action: load af_xdp_pool, bind an AF_XDP socket with
-    intentionally bad headroom / oversized MTU / out-of-range
-    queue_id, observe -EINVAL plus the matching xsk_*_reject++ in
-    `ethtool -S ethN`.  Each bad-input path should fail closed, not
-    silently demote to copy-mode.
+Build-verified clean against linux-6.18.31.
 
 Signed-off-by: VyOS LS1046A maintainers <ls1046a@vyos.local>
 ---
- .../dpaa/af_xdp_pool/af_xdp_pool_main.c       | 160 +++++++++++++++++-
- .../net/ethernet/freescale/fman/fman_port.c   |  23 ++-
- .../net/ethernet/freescale/fman/fman_port.h   |  13 ++
- 3 files changed, 192 insertions(+), 4 deletions(-)diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
-index 73b3fe6..c8b345d 100644
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+index 7f92e5a4f..c8b345df0 100644
 --- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
 +++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
-@@ -13,7 +13,7 @@
-  *
-  * Subsequent patches (0074-0080) replace each stub with the real
-  * implementation:
-- *   0074 - xsk_wakeup        : NAPI kick
-+ *   0074 - xsk_wakeup        : NAPI kick (LANDED)
-  *   0075 - xsk_pool_attach   : UMEM-backed BMan pool + PAMU window
-  *   0076 - xsk_pool_detach   : FMan BMI quiescence
-  *   0077 - rx_hook           : ZC RX with xdp_do_redirect
-@@ -28,10 +28,14 @@
- #include <linux/types.h>
- #include <linux/errno.h>
- #include <linux/printk.h>
-+#include <linux/netdevice.h>
-+#include <net/xdp_sock_drv.h>
+@@ -33,6 +33,8 @@
  
  #include "dpaa_flavor.h"
-+#include "dpaa_eth.h"
+ #include "dpaa_eth.h"
 +#include "../../fman/fman_port.h"
 +#include "../../fman/mac.h"
  
--struct dpaa_priv;
  struct qman_fq;
  struct qm_dqrr_entry;
- struct xsk_buff_pool;
-@@ -54,10 +58,127 @@ const struct qm_dqrr_entry *dq)
+@@ -56,10 +58,127 @@ const struct qm_dqrr_entry *dq)
  return false;
  }
  
@@ -254,53 +175,8 @@ index 73b3fe6..c8b345d 100644
  return -EOPNOTSUPP;
  }
  
-@@ -66,10 +187,43 @@ static int af_xdp_pool_xsk_pool_detach(struct dpaa_priv *priv, u16 queue_id)
- return -EOPNOTSUPP;
- }
- 
-+/*
-+ * af_xdp_pool_xsk_wakeup - kick the NAPI/QMan portal for an XSK queue
-+ *
-+ * Patch 0074 (Phase 1 hot-path wake gate, spec sec 5.2):
-+ *   For XDP_WAKEUP_RX, resolve the NAPI associated with the qband and
-+ *   schedule it via napi_schedule_irqoff() so the dpaa_eth_poll() loop
-+ *   re-runs and drains any pending DQRR entries into the XSK fill ring.
-+ *
-+ *   The qmap[].napi slot is populated by the flavor module's future
-+ *   xsk_pool_attach (patch 0075) once the dedicated XSK BMan channel
-+ *   and its NAPI context have been brought up.  Until that lands, the
-+ *   slot reads NULL and we return -ENOENT so the XSK core sees a clean
-+ *   error (no NAPI bound on this qband) instead of NULL-deref'ing in
-+ *   the IRQ-off scheduler path.  XDP_WAKEUP_TX handling lands with
-+ *   patch 0078 (qman_p_irqsource_add poke of the egress portal).
-+ */
- static int af_xdp_pool_xsk_wakeup(struct dpaa_priv *priv, u32 queue_id,
-   u32 flags)
- {
--return -EOPNOTSUPP;
-+struct napi_struct *napi;
-+
-+if (!priv)
-+return -EINVAL;
-+if (queue_id >= DPAA1_XSK_MAX_QBANDS)
-+return -EINVAL;
-+
-+napi = READ_ONCE(priv->qmap[queue_id].napi);
-+if (!napi)
-+return -ENOENT;
-+
-+if (flags & XDP_WAKEUP_RX) {
-+if (!napi_if_scheduled_mark_missed(napi))
-+napi_schedule_irqoff(napi);
-+}
-+
-+/* XDP_WAKEUP_TX path arrives with patch 0078. */
-+return 0;
- }
- 
- static void af_xdp_pool_xsk_set_rx_need_wakeup(struct dpaa_priv *priv,
 diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
-index e977389..255360d 100644
+index e977389f7..255360de9 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_port.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_port.c
 @@ -1698,10 +1698,31 @@ EXPORT_SYMBOL(fman_port_bind);
@@ -337,7 +213,7 @@ index e977389..255360d 100644
   * fman_port_get_device
   * @port:	Pointer to the FMan port device
 diff --git a/drivers/net/ethernet/freescale/fman/fman_port.h b/drivers/net/ethernet/freescale/fman/fman_port.h
-index 4917fe8..129dcc3 100644
+index 4917fe8f0..129dcc3ec 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_port.h
 +++ b/drivers/net/ethernet/freescale/fman/fman_port.h
 @@ -132,4 +132,17 @@ struct fman_port *fman_port_bind(struct device *dev);
@@ -358,6 +234,3 @@ index 4917fe8..129dcc3 100644
 +u32 fman_port_get_liodn(struct fman_port *port);
 +
  #endif /* __FMAN_PORT_H */
--- 
-2.39.5
-
