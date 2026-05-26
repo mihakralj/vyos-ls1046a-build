@@ -1,0 +1,59 @@
+From: VyOS LS1046A maintainers <noreply@example.com>
+Date: Tue, 26 May 2026 22:00:00 +0000
+Subject: [PATCH] dpaa: default priv->xsk_max_qbands=4 at probe; update
+ af_xdp_pool banner
+
+Per spec §5.1, priv->xsk_max_qbands is zero-initialised at probe time and
+was meant to be set by a flavor module's pcd_ops->install callback. The
+current Phase-2 skeleton af_xdp_pool.ko only registers qmgmt_ops (no
+pcd_ops), so xsk_max_qbands stays 0 and every bind(XDP_ZEROCOPY) hits the
+queue_id validator in 0075a (queue_id >= priv->xsk_max_qbands -> -EINVAL)
+even when the caller passes a valid qid.
+
+Default xsk_max_qbands to DPAA1_XSK_MAX_QBANDS (4) at probe so the
+M2 (qmgmt-only) DUT verification gate can clear bind(). A future flavor
+module that registers pcd_ops may refine this value downward based on
+CEETM/PCD topology.
+
+Also refresh the stale af_xdp_pool registration banner: 0075a and 0075b
+layered real attach/detach validators on top of the original skeleton,
+so the "all callbacks stubbed -EOPNOTSUPP" wording is no longer accurate.
+
+Signed-off-by: VyOS LS1046A maintainers <noreply@example.com>
+---
+ drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c | 2 +-
+ drivers/net/ethernet/freescale/dpaa/dpaa_eth.c                     | 6 ++++++
+ 2 files changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+index 0000000000aa..0000000000bb 100644
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -231,7 +231,7 @@ static int __init af_xdp_pool_init(void)
+ 		return err;
+ 	}
+ 
+-	pr_info("af_xdp_pool: registered (skeleton, all callbacks stubbed -EOPNOTSUPP)\n");
++	pr_info("af_xdp_pool: registered (attach/detach validators active; rx_hook/wakeup still stubbed)\n");
+ 	return 0;
+ }
+ 
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 0000000000cc..0000000000dd 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -3474,6 +3474,12 @@ static int dpaa_eth_probe(struct platform_device *pdev)
+ 
+ 	priv->msg_enable = netif_msg_init(debug, DPAA_MSG_DEFAULT);
+ 
++	/* Default to spec-max qbands so M2 (qmgmt-only) bind() can pass the
++	 * queue_id validator before any pcd_ops->install runs. A flavor
++	 * module's pcd_ops->install may later refine this downward.
++	 */
++	priv->xsk_max_qbands = DPAA1_XSK_MAX_QBANDS;
++
+ 	priv->egress_fqs = devm_kcalloc(dev, dpaa_max_num_txqs(),
+ 					sizeof(*priv->egress_fqs),
+ 					GFP_KERNEL);
+-- 
+2.39.5
