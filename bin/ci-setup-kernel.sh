@@ -133,6 +133,16 @@ find "$KERNEL_PATCHES" -maxdepth 1 -type f -name '*.patch' \
   ! -name '0001-*' ! -name '0003-*' -print -delete
 
 echo "### Staging LS1046A board patches from $BOARD_PATCH_DIR"
+cp "$BOARD_PATCH_DIR/0068-dpaa-flavor-ops.patch"              "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0069-dpaa-flavor-hooks.patch"            "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0070-dpaa1-xsk-wakeup.patch"             "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0071-dpaa1-xsk-pool-setup.patch"         "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0072-dpaa1-xsk-zc-datapath-scaffold.patch" "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0073-dpaa-af-xdp-pool-skeleton.patch"    "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0074-dpaa-af-xdp-pool-wakeup.patch"      "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0075a-dpaa-af-xdp-pool-liodn-and-attach-validation.patch" "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0075b-dpaa-af-xdp-pool-attach-bman-seed-rcu.patch"        "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0076-dpaa-af-xdp-pool-detach.patch"      "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
