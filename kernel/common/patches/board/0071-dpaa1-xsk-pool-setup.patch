@@ -1,0 +1,205 @@
+From: vyos-ls1046a-build M2 implementation <noreply@vyos-ls1046a-build>
+Date: 2026-05-26
+Subject: [PATCH] dpaa: Phase 2 — AF_XDP XSK pool fields + XDP_SETUP_XSK_POOL dispatch
+
+Phase 2 driver-side scaffold for the AF_XDP zerocopy plumbing described
+in spec sec 5.3. Lands two pieces that ALL flavor modules and the future
+ZC datapath (Phase 3) depend on, while keeping behaviour byte-identical
+to mainline when no flavor module is loaded.
+
+1. struct dpaa_priv gains the AF_XDP ZC pool state and counters:
+
+     #define DPAA1_XSK_MAX_QBANDS        4
+     #define DPAA1_XSK_INITIAL_SEED      8192
+     #define DPAA1_XSK_REFILL_THRESHOLD  256
+     #define DPAA1_XSK_MIN_DEPTH         64
+     #define DPAA1_MIN_UMEM_CHUNK        4096
+
+     struct xsk_buff_pool __rcu *xsk_pool[DPAA1_XSK_MAX_QBANDS];
+     int                         xsk_bpid[DPAA1_XSK_MAX_QBANDS];
+     void                       *xsk_pamu_win[DPAA1_XSK_MAX_QBANDS];
+     unsigned int                xsk_max_qbands;
+
+     /* attach/detach/seed/dma/align/headroom/mtu/pamu counters; the
+      * bman_starve and tx_backpressure fields are reserved for Phase 3
+      * but declared now so the layout is stable for ethtool / debugfs.
+      */
+     u64 xsk_pool_attach_ok / fail;
+     u64 xsk_pool_detach_ok / timeout;
+     u64 xsk_bman_seed_short;
+     u64 xsk_bman_starve;           /* Phase 3 */
+     u64 xsk_tx_backpressure;       /* Phase 3 */
+     u64 xsk_dma_map_fail;
+     u64 xsk_align_reject;
+     u64 xsk_headroom_reject;
+     u64 xsk_mtu_reject;
+     u64 xsk_pamu_window_fail;
+
+   The xsk_pamu_win[] slot is declared as void* — the flavor module
+   owns the concrete struct pamu_window type. This keeps the iommu API
+   surface (drivers/iommu/fsl_pamu.{c,h} additions) out of the core
+   driver patch and confined to the flavor module that actually uses it.
+
+2. dpaa_xdp() gains an XDP_SETUP_XSK_POOL switch arm dispatching to a
+   new dpaa_setup_xsk_pool() which:
+     - takes rcu_read_lock + rcu_dereference(priv->qmgmt_ops)
+     - NULL qmgmt_ops or NULL xsk_pool_attach/_detach → -EOPNOTSUPP
+     - xdp->xsk.pool != NULL  → ops->xsk_pool_attach(priv, pool, queue_id)
+     - xdp->xsk.pool == NULL  → ops->xsk_pool_detach(priv, queue_id)
+
+   With no flavor module loaded the dereference of qmgmt_ops is NULL
+   and the syscall returns -EOPNOTSUPP, which the kernel XSK core
+   translates into copy-mode fallback — identical to mainline.
+
+The XSK fill-ring -> BMan seeding loop, the PAMU window create/destroy,
+the dma_map / dma_unmap, the dedicated BMan pool allocation, the NAPI-
+hooked refill, the FMan port disable/enable detach quiescence, and the
+af_xdp_pool.ko module skeleton are ALL flavor-module responsibilities
+per spec sec 3 ("FLAVOR=vpp populates them"). They land alongside the
+VPP flavor module, not in this core-driver patch — keeps the in-tree
+core change small enough to be a mainline candidate.
+
+Acceptance gate (spec §5.3):
+
+  1. ip -d link show fm1-mac3 reports xsk_zerocopy in xdp-features
+     (lands via patch 0070's NETDEV_XDP_ACT_XSK_ZEROCOPY bit).
+  2. With no flavor module: XDP_SETUP_XSK_POOL returns -EOPNOTSUPP and
+     AF_XDP falls back to copy mode exactly as mainline. Verified by
+     'xdpsock -i fm1-mac3 -q 0 -z -r' returning -EOPNOTSUPP at bind().
+  3. attach/detach >= 100 stress loop with the flavor module loaded
+     does not crash the core driver. (Stress test is a flavor-module
+     deliverable; the core driver provides the dispatch surface.)
+
+The xsk_max_qbands field is zero-initialised at probe time and set by
+the flavor module's pcd_ops->install when it knows the qband mapping.
+Phase 3 will set it to 4 for 4-core LS1046A (one qband per A72 core).
+
+Spec reference: specs/dpaa1-afxdp-modernization-spec.md sec 5.3.
+Depends on: 0068-dpaa-flavor-ops.patch, 0069-dpaa-flavor-hooks.patch,
+0070-dpaa1-xsk-wakeup.patch.
+
+Signed-off-by: vyos-ls1046a-build <noreply@vyos-ls1046a-build>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index baf384ff6..67154e5e4 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -3444,11 +3444,60 @@ static int dpaa_setup_xdp(struct net_device *net_dev, struct netdev_bpf *bpf)
+ 	return 0;
+ }
+ 
++/* M2 (Phase 2): AF_XDP zerocopy pool setup/teardown dispatch.
++ *
++ * XDP_SETUP_XSK_POOL is delivered by the kernel XSK core when userspace
++ * calls bind() on an XDP socket with XDP_USE_NEED_WAKEUP (or any time
++ * an XSK is created/destroyed against this netdev,queue_id pair).
++ * xdp->xsk.pool != NULL is "attach"; xdp->xsk.pool == NULL is "detach".
++ *
++ * The core driver does not own the BMan-pool / PAMU / dma-map plumbing —
++ * the optional flavor module does. We dispatch under RCU to
++ * qmgmt_ops->xsk_pool_attach / xsk_pool_detach. With no flavor module
++ * loaded the dereferences are NULL and we return -EOPNOTSUPP, which the
++ * kernel XSK core translates into copy-mode fallback.
++ *
++ * Spec: specs/dpaa1-afxdp-modernization-spec.md sec 5.3 (Phase 2).
++ */
++static int dpaa_setup_xsk_pool(struct net_device *net_dev,
++			       struct netdev_bpf *xdp)
++{
++	struct dpaa_priv *priv = netdev_priv(net_dev);
++	const struct dpaa_qmgmt_ops *ops;
++	u16 queue_id = xdp->xsk.queue_id;
++	int ret;
++
++	rcu_read_lock();
++	ops = rcu_dereference(priv->qmgmt_ops);
++	if (!ops) {
++		rcu_read_unlock();
++		return -EOPNOTSUPP;
++	}
++
++	if (xdp->xsk.pool) {
++		if (!ops->xsk_pool_attach) {
++			rcu_read_unlock();
++			return -EOPNOTSUPP;
++		}
++		ret = ops->xsk_pool_attach(priv, xdp->xsk.pool, queue_id);
++	} else {
++		if (!ops->xsk_pool_detach) {
++			rcu_read_unlock();
++			return -EOPNOTSUPP;
++		}
++		ret = ops->xsk_pool_detach(priv, queue_id);
++	}
++	rcu_read_unlock();
++	return ret;
++}
++
+ static int dpaa_xdp(struct net_device *net_dev, struct netdev_bpf *xdp)
+ {
+ 	switch (xdp->command) {
+ 	case XDP_SETUP_PROG:
+ 		return dpaa_setup_xdp(net_dev, xdp);
++	case XDP_SETUP_XSK_POOL:
++		return dpaa_setup_xsk_pool(net_dev, xdp);
+ 	default:
+ 		return -EINVAL;
+ 	}
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+index bb955aa87..16571fab1 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -131,6 +131,13 @@ struct dpaa_eth_swbp {
+ struct dpaa_pcd_ops;
+ struct dpaa_qmgmt_ops;
+ 
++/* AF_XDP zerocopy constants (Phase 2). See spec sec 5.3. */
++#define DPAA1_XSK_MAX_QBANDS        4
++#define DPAA1_XSK_INITIAL_SEED      8192
++#define DPAA1_XSK_REFILL_THRESHOLD  256
++#define DPAA1_XSK_MIN_DEPTH         64
++#define DPAA1_MIN_UMEM_CHUNK        4096
++
+ struct dpaa_priv {
+ 	struct dpaa_percpu_priv __percpu *percpu_priv;
+ 	struct dpaa_bp *dpaa_bp;
+@@ -184,6 +191,39 @@ struct dpaa_priv {
+ 	const struct dpaa_pcd_ops   __rcu *pcd_ops;
+ 	const struct dpaa_qmgmt_ops __rcu *qmgmt_ops;
+ 	void *flavor_priv;
++
++	/* M2 (Phase 2): AF_XDP zerocopy pool state.
++	 *
++	 * Slots are populated by the flavor module's xsk_pool_attach
++	 * callback via XDP_SETUP_XSK_POOL. With no flavor module loaded
++	 * all slots remain NULL / -1 and dpaa_xdp() rejects XDP_SETUP_XSK_POOL
++	 * with -EOPNOTSUPP — identical to mainline behaviour.
++	 *
++	 * Spec: specs/dpaa1-afxdp-modernization-spec.md sec 5.3.
++	 */
++	struct xsk_buff_pool __rcu *xsk_pool[DPAA1_XSK_MAX_QBANDS];
++	int                         xsk_bpid[DPAA1_XSK_MAX_QBANDS];
++	void                       *xsk_pamu_win[DPAA1_XSK_MAX_QBANDS];
++	unsigned int                xsk_max_qbands;
++
++	/* AF_XDP zerocopy ethtool / debugfs counters. Bumped by the
++	 * flavor module's attach/detach/NAPI paths. Phase 2 introduces
++	 * attach/detach/seed/dma/align/headroom/mtu/pamu counters;
++	 * Phase 3 (patch 0072) adds bman_starve and tx_backpressure
++	 * once the NAPI ZC datapath lands.
++	 */
++	u64 xsk_pool_attach_ok;
++	u64 xsk_pool_attach_fail;
++	u64 xsk_pool_detach_ok;
++	u64 xsk_pool_detach_timeout;
++	u64 xsk_bman_seed_short;
++	u64 xsk_bman_starve;          /* Phase 3 */
++	u64 xsk_tx_backpressure;      /* Phase 3 */
++	u64 xsk_dma_map_fail;
++	u64 xsk_align_reject;
++	u64 xsk_headroom_reject;
++	u64 xsk_mtu_reject;
++	u64 xsk_pamu_window_fail;
+ };
+ 
+ /* from dpaa_ethtool.c */
