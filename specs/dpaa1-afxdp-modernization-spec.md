@@ -374,7 +374,7 @@ Attach sequence (`af_xdp_pool.ko`'s `xsk_pool_attach`):
 
 1. **Validate constraints, fail closed.**
    - `dev->mtu <= 3290`
-   - `xsk_pool_get_rx_frame_size(pool) >= DPAA1_MIN_UMEM_CHUNK` (4096)
+   - `xsk_pool_get_rx_frame_size(pool) >= DPAA1_MIN_UMEM_CHUNK` (3840 — derived from MTU 3290 + L2 14 B + DPAA_FD ≤ 64 B + 64 B alignment slack, comfortably fits an Ethernet frame at the spec MTU ceiling. Previously 4096; lowered in v4.3 because the kernel XSK core enforces `chunk_size ≤ PAGE_SIZE` and `xsk_pool_get_rx_frame_size() = chunk_size − headroom − XDP_PACKET_HEADROOM(256)`, capping `frame_size` at 3840 on arm64 4K-page kernels. The 4096 floor was a round number, not a hardware requirement.)
    - First UMEM chunk satisfies `IS_ALIGNED(addr, DPAA_FD_DATA_ALIGNMENT)` (64 B on FMan v3 Rev>1)
    - `xsk_pool_get_headroom(pool) >= priv->tx_headroom`
    - `queue_id < priv->xsk_max_qbands` (4)
