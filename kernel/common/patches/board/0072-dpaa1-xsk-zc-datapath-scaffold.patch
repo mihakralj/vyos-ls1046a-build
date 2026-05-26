@@ -155,7 +155,7 @@ index 2de6626..4c6211c 100644
 @@ -136,6 +137,30 @@ struct dpaa_qmgmt_ops;
  #define DPAA1_XSK_REFILL_THRESHOLD  256
  #define DPAA1_XSK_MIN_DEPTH         64
- #define DPAA1_MIN_UMEM_CHUNK        4096
+ #define DPAA1_MIN_UMEM_CHUNK        3840
 +/* Phase 3a TX backpressure thresholds (spec sec 5.4 "Strict Tx
 + * backpressure"). At 7 Gbps / 1500 B = 583 Kpps; 1024 in-flight FDs =
 + * ~1.75 ms of buffering at line rate. LOW_WATER at half gives hysteresis
