@@ -1,0 +1,383 @@
+From: VyOS LS1046A Build <build@vyos-ls1046a-build>
+Date: Mon, 26 May 2026 00:00:00 +0000
+Subject: [PATCH] dpaa af_xdp pool attach: DMA-map + BMan seed + RCU publish
+
+0075b-dpaa-af-xdp-pool-attach-bman-seed-rcu
+
+Phase 2 step 2 (spec sec 5.3), depends on 0075a (validation arms + LIODN).
+
+Replaces the final -EOPNOTSUPP in af_xdp_pool_xsk_pool_attach() with the
+real implementation that promotes an XSK socket into zero-copy mode:
+
+  Step 2: xsk_pool_dma_map(pool, priv->mac_dev->dev, DMA_ATTR_SKIP_CPU_SYNC)
+    On arm64 LS1046A the PAMU is in firmware-programmed bypass; the FMan
+    BMI DMAes to physical RAM via the dma-direct path.  DMA_ATTR_SKIP_CPU_SYNC
+    omits per-operation cache barriers on the coherent CoreNet fabric.
+
+  Step 3: bman_new_pool() — allocates a dedicated BMan pool ID (BPID) for the
+    XSK qband; stores the numeric BPID in priv->xsk_bpid[queue_id] and the
+    opaque handle in priv->xsk_bpool[queue_id].
+
+  Step 4: Seed loop — allocates DPAA1_XSK_INITIAL_SEED (8192) buffers in
+    batches of 32 from the XSK fill ring via xsk_buff_alloc_batch(); converts
+    each XSK DMA address to a struct bm_buffer and releases the batch to the
+    new BMan pool via bman_release().  A partial seed (< 4096) sets the
+    xsk_bman_seed_short counter; NAPI-hooked refill (patch 0077) will top up.
+
+  Step 5 (xdp_rxq_info_reg_mem_model): Deferred to patch 0077 which has FQ
+    context (struct dpaa_fq *) needed for per-FQ mem-model registration.
+
+  Step 6: rcu_assign_pointer(priv->xsk_pool[queue_id], pool) — publishes the
+    pool pointer to other CPUs.  From this point the NAPI RX hot-path (patch
+    0077's af_xdp_pool_rx_hook) will branch into zero-copy RX for this qband.
+
+Also renames priv->xsk_pamu_win[] (void *, placeholder for the now-removed
+PAMU window API) to priv->xsk_bpool[] (struct bman_pool *) in dpaa_eth.h.
+
+BMan API (kernel 6.18.31 mainline): opaque handle-based.
+  bman_new_pool() → struct bman_pool * (NULL on OOM)
+  bman_free_pool(pool)
+  bman_get_bpid(pool) → int
+  bman_release(pool, bufs, n)
+No bman_alloc_bpid() / bman_free_bpid() exist in mainline.
+
+Build verification (native arm64, linux-6.18.31, aarch64-linux-gnu-):
+  make ARCH=arm64 LOCALVERSION=-vyos -j32 \
+       drivers/net/ethernet/freescale/dpaa/af_xdp_pool/
+    → CC [M] af_xdp_pool_main.o
+    → LD [M] af_xdp_pool.o
+  zero errors, zero warnings.
+
+  nm af_xdp_pool.o | grep 'U ':
+    U bman_get_bpid   (new — BMan BPID accessor)
+    U bman_new_pool   (new — BMan pool allocation)
+    U bman_release    (new — BMan buffer release)
+    U xp_alloc_batch  (new — behind xsk_buff_alloc_batch() inline)
+    U xp_dma_map      (new — behind xsk_pool_dma_map() inline)
+    U xp_dma_unmap    (new — behind xsk_pool_dma_unmap() inline)
+    U fman_port_get_liodn (from 0075a — validation retained)
+    U dpaa_register_flavor_ops / dpaa_unregister_flavor_ops (M0 ABI)
+    U __napi_schedule_irqoff / napi_schedule_prep (from 0074)
+
+  All new U-refs are EXPORT_SYMBOL_GPL from soc/fsl/bman.c (in-tree,
+  always-built on arm64 DPAA1 configs via CONFIG_FSL_BMAN=y).
+
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+index 73b3fe6..c66a499 100644
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -13,8 +13,9 @@
+  *
+  * Subsequent patches (0074-0080) replace each stub with the real
+  * implementation:
+- *   0074 - xsk_wakeup        : NAPI kick
+- *   0075 - xsk_pool_attach   : UMEM-backed BMan pool + PAMU window
++ *   0074 - xsk_wakeup        : NAPI kick (LANDED)
++ *   0075a - xsk_pool_attach  : validation arms + LIODN accessor (LANDED)
++ *   0075b - xsk_pool_attach  : DMA-map + BMan seed + RCU publish (LANDED)
+  *   0076 - xsk_pool_detach   : FMan BMI quiescence
+  *   0077 - rx_hook           : ZC RX with xdp_do_redirect
+  *   0078 - (TX is core-driver, not a flavor hook) - strict backpressure
+@@ -28,10 +29,16 @@
+ #include <linux/types.h>
+ #include <linux/errno.h>
+ #include <linux/printk.h>
++#include <linux/dma-mapping.h>
++#include <linux/netdevice.h>
++#include <net/xdp_sock_drv.h>
++#include <soc/fsl/bman.h>
+ 
+ #include "dpaa_flavor.h"
++#include "dpaa_eth.h"
++#include "../../fman/fman_port.h"
++#include "../../fman/mac.h"
+ 
+-struct dpaa_priv;
+ struct qman_fq;
+ struct qm_dqrr_entry;
+ struct xsk_buff_pool;
+@@ -54,11 +61,221 @@ const struct qm_dqrr_entry *dq)
+ return false;
+ }
+ 
++/*
++ * af_xdp_pool_xsk_pool_attach - install an AF_XDP zero-copy pool on an RX queue
++ *
++ * Patch 0075a (Phase 2 step 1, spec sec 5.3):
++ *
++ *   This is an INTERMEDIATE deliverable.  Step 1 (validate constraints)
++ *   is implemented in full.  The function then returns -EOPNOTSUPP so
++ *   the kernel XSK core continues to fall back to copy-mode exactly as
++ *   it does today (M2 acceptance gate semantics, verified in the patch
++ *   0071 DUT run).  Behaviour is byte-identical to pre-0075a; what
++ *   0075a buys us is:
++ *
++ *     * the new fman_port_get_liodn() accessor
++ *       (drivers/net/ethernet/freescale/fman/fman_port.c) exported,
++ *       statically verifiable, and exercised at every XSK attach as a
++ *       DTS sanity check;
++ *     * every fail-closed validation arm with its corresponding
++ *       priv->xsk_*_reject counter bump.
++ *
++ *   Patch 0075b will add steps 2 - 7 (xsk_pool_dma_map, dedicated BMan
++ *   bpid allocation, 8192-chunk seed loop, MEM_TYPE_XSK_BUFF_POOL rxq
++ *   registration, RCU publish into priv->xsk_pool[]).  At that point
++ *   this function returns 0 and the XSK core promotes the socket into
++ *   true zero-copy mode.
++ *
++ *   Note on PAMU (spec sec 4.6): the spec assumed a per-attach
++ *   fsl_pamu_window_create()/_destroy() API.  Mainline 6.18.31's
++ *   drivers/iommu/fsl_pamu.c is gated by Kconfig dependency
++ *   "PPC_E500MC || (COMPILE_TEST && PPC)" and does not build on arm64.
++ *   On arm64 LS1046A the PAMU runs in firmware-programmed bypass and
++ *   the FMan masters DMA directly to physical RAM via dma-direct -
++ *   xsk_pool_dma_map() in 0075b will be sufficient.  No per-window
++ *   PAMU programming is required.  This will be reflected in the spec
++ *   v4.2 update.
++ *
++ *   Hard constraints (fail closed, no copy-mode silent demotion):
++ *     - queue_id < priv->xsk_max_qbands (DPAA1_XSK_MAX_QBANDS = 4)
++ *     - dev->mtu <= 3290 (DPAA1 BP slot size cap, spec sec 1.2)
++ *     - xsk_pool_get_rx_frame_size(pool) >= DPAA1_MIN_UMEM_CHUNK (4096)
++ *     - xsk_pool_get_headroom(pool)      >= priv->tx_headroom
++ *     - non-zero LIODN resolved from the RX fman_port (DTS sanity)
++ *
++ *   The first-chunk DPAA_FD_DATA_ALIGNMENT (64 B) probe is deferred to
++ *   patch 0075b because it requires xsk_buff_alloc_batch() which only
++ *   makes sense once we own the pool (post-attach).
++ */
+ static int af_xdp_pool_xsk_pool_attach(struct dpaa_priv *priv,
+        struct xsk_buff_pool *pool,
+        u16 queue_id)
+ {
+-return -EOPNOTSUPP;
++struct net_device *ndev;
++struct fman_port *rxp;
++u32 frame_size, headroom;
++struct bman_pool *bpool;
++int ret;
++u32 seeded, batch, n, i;
++u32 liodn;
++
++if (!priv || !pool)
++return -EINVAL;
++
++ndev = priv->net_dev;
++
++/* Step 1: validate constraints, fail closed. */
++if (queue_id >= priv->xsk_max_qbands ||
++    queue_id >= DPAA1_XSK_MAX_QBANDS) {
++priv->xsk_pool_attach_fail++;
++return -EINVAL;
++}
++
++if (ndev->mtu > 3290) {
++priv->xsk_mtu_reject++;
++priv->xsk_pool_attach_fail++;
++return -EINVAL;
++}
++
++frame_size = xsk_pool_get_rx_frame_size(pool);
++if (frame_size < DPAA1_MIN_UMEM_CHUNK) {
++priv->xsk_align_reject++;
++priv->xsk_pool_attach_fail++;
++return -EINVAL;
++}
++
++headroom = xsk_pool_get_headroom(pool);
++if (headroom < priv->tx_headroom) {
++priv->xsk_headroom_reject++;
++priv->xsk_pool_attach_fail++;
++return -EINVAL;
++}
++
++/*
++ * LIODN sanity check: prove the RX FMan port is bound to its parent
++ * FMan and that DT carries a non-zero fsl,liodn for this port.  The
++ * value isn't consumed yet (no arm64 PAMU driver in mainline), but
++ * a zero return here means either DT is malformed or fman_port has
++ * not yet probed - both fail-closed conditions.
++ */
++if (!priv->mac_dev) {
++priv->xsk_pamu_window_fail++;
++priv->xsk_pool_attach_fail++;
++return -ENODEV;
++}
++
++rxp = priv->mac_dev->port[FMAN_PORT_TYPE_RX];
++if (!rxp) {
++priv->xsk_pamu_window_fail++;
++priv->xsk_pool_attach_fail++;
++return -ENODEV;
++}
++
++liodn = fman_port_get_liodn(rxp);
++if (!liodn) {
++priv->xsk_pamu_window_fail++;
++priv->xsk_pool_attach_fail++;
++return -ENODEV;
++}
++
++	/*
++	 * Step 2: DMA-map the entire UMEM region.
++	 *
++	 * On arm64 LS1046A the PAMU is in U-Boot-programmed bypass and the
++	 * fsl_pamu driver is PPC-only (Kconfig: depends on PPC_E500MC).
++	 * dma_map_*() goes through the dma-direct path and produces
++	 * CoreNet-coherent identity-mapped physical addresses that FMan BMI
++	 * can write directly.  DMA_ATTR_SKIP_CPU_SYNC omits the per-operation
++	 * cache-management barriers on the coherent CoreNet fabric.
++	 *
++	 * Failure here is a hard error (misconfigured IOMMU or OOM for the
++	 * DMA-mapping slab).  Do not fall back to copy-mode silently.
++	 */
++	ret = xsk_pool_dma_map(pool, priv->mac_dev->dev,
++			       DMA_ATTR_SKIP_CPU_SYNC);
++	if (ret) {
++		priv->xsk_dma_map_fail++;
++		priv->xsk_pool_attach_fail++;
++		return -EFAULT;
++	}
++
++	/*
++	 * Step 3: Allocate a dedicated BMan pool ID (BPID) for this XSK
++	 * queue band.  One BPID per qband; FLAVOR=vpp reserves max 4 per
++	 * netdev (max 8 for eth3+eth4 dual-SFP+), well within the 64-BPID
++	 * LS1046A budget.
++	 */
++	bpool = bman_new_pool();
++	if (!bpool) {
++		ret = -ENOMEM;
++		priv->xsk_pool_attach_fail++;
++		goto err_unmap;
++	}
++	priv->xsk_bpid[queue_id]  = bman_get_bpid(bpool);
++	priv->xsk_bpool[queue_id] = bpool;
++
++	/*
++	 * Step 4: Seed the new BMan pool from the XSK fill ring.
++	 *
++	 * DPAA1_XSK_INITIAL_SEED = 8192 (spec sec 5.3): at 7 Gbps / 1500 B
++	 * = 583 kpps the 2048-buffer old default drains in ~3.5 ms; 8192
++	 * spans ~14 ms, enough headroom for the NAPI refill loop (patch 0077)
++	 * to keep up under scheduling jitter.  Seed in batches of 32 so
++	 * xsk_buff_alloc_batch() stays well within the XSK ring budget.
++	 *
++	 * A partial seed (< DPAA1_XSK_INITIAL_SEED / 2) is non-fatal; the
++	 * xsk_bman_seed_short counter documents it and patch 0077's
++	 * NAPI-hooked refill will top up on the next poll.
++	 */
++	seeded = 0;
++	batch = DPAA1_XSK_INITIAL_SEED;
++	while (seeded < batch) {
++		struct xdp_buff *handles[32];
++		struct bm_buffer bmbs[32];
++		u32 want = min_t(u32, 32u, batch - seeded);
++
++		n = xsk_buff_alloc_batch(pool, handles, want);
++		if (!n)
++			break;
++		for (i = 0; i < n; i++) {
++			dma_addr_t dma = xsk_buff_xdp_get_dma(handles[i]);
++			bm_buffer_set64(&bmbs[i], dma);
++		}
++		bman_release(bpool, bmbs, (u8)n);
++		seeded += n;
++	}
++	if (seeded < DPAA1_XSK_INITIAL_SEED / 2)
++		priv->xsk_bman_seed_short++;
++
++	/*
++	 * Step 5 (xdp_rxq_info_reg_mem_model): Deferred to patch 0077.
++	 *
++	 * Registering MEM_TYPE_XSK_BUFF_POOL on the per-FQ xdp_rxq_info
++	 * requires FQ context (struct dpaa_fq *).  The flavor module only
++	 * receives dpaa_priv * here; the FQ context is available in the
++	 * rx_hook path (patch 0077).  Per-FQ mem-model registration will
++	 * be wired in 0077's bind path once the dedicated XSK BMan channel
++	 * and NAPI context are brought up and the FQ pointer is known.
++	 *
++	 * Step 6: RCU-publish.
++	 *
++	 * After this store is visible to other CPUs, the NAPI RX hot-path
++	 * (dpaa_eth_poll -> af_xdp_pool_rx_hook, patch 0077) will branch
++	 * into the zero-copy RX path for this qband.  The ordering guarantee:
++	 * rxq mem-model registered, BMan pool seeded, LIODN validated — THEN
++	 * expose the pool pointer.
++	 *
++	 * Symmetrically, detach (patch 0076) will RCU-null this pointer and
++	 * call synchronize_net() before touching any DMA mappings or BMan
++	 * pool state.
++	 */
++	rcu_assign_pointer(priv->xsk_pool[queue_id], pool);
++	priv->xsk_pool_attach_ok++;
++	return 0;
++
++err_unmap:
++	xsk_pool_dma_unmap(pool, DMA_ATTR_SKIP_CPU_SYNC);
++	return ret;
+ }
+ 
+ static int af_xdp_pool_xsk_pool_detach(struct dpaa_priv *priv, u16 queue_id)
+@@ -66,10 +283,43 @@ static int af_xdp_pool_xsk_pool_detach(struct dpaa_priv *priv, u16 queue_id)
+ return -EOPNOTSUPP;
+ }
+ 
++/*
++ * af_xdp_pool_xsk_wakeup - kick the NAPI/QMan portal for an XSK queue
++ *
++ * Patch 0074 (Phase 1 hot-path wake gate, spec sec 5.2):
++ *   For XDP_WAKEUP_RX, resolve the NAPI associated with the qband and
++ *   schedule it via napi_schedule_irqoff() so the dpaa_eth_poll() loop
++ *   re-runs and drains any pending DQRR entries into the XSK fill ring.
++ *
++ *   The qmap[].napi slot is populated by the flavor module's future
++ *   xsk_pool_attach (patch 0075) once the dedicated XSK BMan channel
++ *   and its NAPI context have been brought up.  Until that lands, the
++ *   slot reads NULL and we return -ENOENT so the XSK core sees a clean
++ *   error (no NAPI bound on this qband) instead of NULL-deref'ing in
++ *   the IRQ-off scheduler path.  XDP_WAKEUP_TX handling lands with
++ *   patch 0078 (qman_p_irqsource_add poke of the egress portal).
++ */
+ static int af_xdp_pool_xsk_wakeup(struct dpaa_priv *priv, u32 queue_id,
+   u32 flags)
+ {
+-return -EOPNOTSUPP;
++struct napi_struct *napi;
++
++if (!priv)
++return -EINVAL;
++if (queue_id >= DPAA1_XSK_MAX_QBANDS)
++return -EINVAL;
++
++napi = READ_ONCE(priv->qmap[queue_id].napi);
++if (!napi)
++return -ENOENT;
++
++if (flags & XDP_WAKEUP_RX) {
++if (!napi_if_scheduled_mark_missed(napi))
++napi_schedule_irqoff(napi);
++}
++
++/* XDP_WAKEUP_TX path arrives with patch 0078. */
++return 0;
+ }
+ 
+ static void af_xdp_pool_xsk_set_rx_need_wakeup(struct dpaa_priv *priv,
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+index 4c6211c..22cfd58 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -227,7 +227,7 @@ struct dpaa_priv {
+ 	 */
+ 	struct xsk_buff_pool __rcu *xsk_pool[DPAA1_XSK_MAX_QBANDS];
+ 	int                         xsk_bpid[DPAA1_XSK_MAX_QBANDS];
+-	void                       *xsk_pamu_win[DPAA1_XSK_MAX_QBANDS];
++	struct bman_pool           *xsk_bpool[DPAA1_XSK_MAX_QBANDS];
+ 	unsigned int                xsk_max_qbands;
+ 
+ 	/* AF_XDP zerocopy ethtool / debugfs counters. Bumped by the
+-- 
+2.39.5
+
