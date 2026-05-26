@@ -2,58 +2,29 @@ From: vyos-ls1046a-build M0 fix <noreply@vyos-ls1046a-build>
 Date: 2026-05-26
 Subject: [PATCH] dpaa: retro-attach flavor ops to all probed privs on register
 
-The init-order bug fixed here:
+The init-order bug: LS1046A has DPAA1 built-in. All five FMan MACs probe
+at boot calling dpaa_priv_attach_flavor_ops() while dpaa_*_ops_global are
+still NULL. When af_xdp_pool.ko loads later via udev (T+638s on the DUT)
+it populates the globals but the per-priv RCU slots are never refreshed.
+dpaa_setup_xsk_pool() then takes the first NULL-ops bail and returns
+-EOPNOTSUPP -> userspace bind(XDP_ZEROCOPY) fails -95.
 
-LS1046A has DPAA1 built-in (CONFIG_FSL_DPAA=y, mandatory per AGENTS.md).
-All five FMan MACs probe at boot, each calling
-dpaa_priv_attach_flavor_ops(priv) while dpaa_{pcd,qmgmt}_ops_global are
-still NULL -- every per-priv ops slot is therefore permanently NULL.
+Confirmed via kprobes on DUT image 2026.05.26-1904-rolling (run 26469108527):
+  - xp_assign_dev rc=-95
+  - dpaa_xdp entered, returns -95 (xdp_features bit OK)
+  - af_xdp_pool_xsk_pool_attach NEVER fires during bind
 
-When af_xdp_pool.ko later loads via udev (T+638s on the DUT) it
-populates the globals via dpaa_register_flavor_ops(), but the per-priv
-RCU slots are never refreshed. dpaa_setup_xsk_pool() then takes the
-first NULL-ops bail and returns -EOPNOTSUPP, which the kernel XSK core
-translates into "XDP_ZEROCOPY not available" -- userspace bind() with
-XDP_ZEROCOPY fails with -EOPNOTSUPP.
+Fix: use a private heap-allocated tracker list inside dpaa_flavor.c, so
+no struct dpaa_priv field has to be added (which would shift follow-on
+patches 0071/0072/0075b). On attach we kzalloc a small tracker node and
+add it to a LIST_HEAD under a spinlock. On register, walk the trackers
+and rcu_assign new ops into every priv. Unregister does the inverse.
 
-Root cause confirmed via kprobes on the live DUT (run 26469108527,
-image 2026.05.26-1904-rolling):
-  - kprobe on xp_assign_dev shows rc=-95 (EOPNOTSUPP)
-  - kprobe on dpaa_xdp shows it IS entered (so xdp_features bit OK)
-    and returns rc=-95
-  - return-kprobe on af_xdp_pool_xsk_pool_attach NEVER fires during
-    the bind attempt, proving dpaa_setup_xsk_pool() returns from the
-    first NULL-ops bail before reaching the flavor callback.
+With no flavor module loaded, behaviour is byte-identical to the
+post-0068+0069 baseline. One ~32-byte kzalloc per probed dpaa_priv
+(5 allocs on LS1046A) is the only added cost.
 
-Fix:
-
-Use a private heap-allocated tracker node in dpaa_flavor.c so we do
-not need to add ANY field to struct dpaa_priv (which would shift line
-numbers in dpaa_eth.h and break follow-on patches 0071/0072/0075b).
-On attach we kzalloc a small `struct dpaa_priv_tracker { list_head;
-priv*; }` and insert it onto a static LIST_HEAD under a spinlock; on
-detach we walk the list, free the node and remove. When
-dpaa_register_flavor_ops() runs (potentially long after every priv
-has already probed), it walks the tracker list under the spinlock
-and rcu_assign_pointer's the new ops into every priv. Unregister
-does the inverse, NULL-ing every priv's ops and clearing flavor_priv.
-
-Locking model:
-  - dpaa_flavor_lock (mutex, existing) serialises
-    register/unregister against each other.
-  - dpaa_priv_list_lock (new spinlock) protects the tracker list
-    against probe/remove. rcu_assign_pointer is non-blocking, so
-    walking the list under the spinlock is safe.
-  - kzalloc must NOT be called inside the spinlock; the tracker is
-    allocated BEFORE the spinlock is taken on attach.
-
-With no flavor module loaded (default + ASK2 flavors), behaviour is
-byte-identical to the post-0068+0069 baseline: probes attach to the
-tracker list and rcu_assign NULL ops; no register/unregister ever
-happens. The only added cost is one 32-byte kzalloc per dpaa_priv
-at probe time (5 allocs on LS1046A).
-
-The acceptance gate that this fix unlocks:
+Acceptance gate this unlocks:
   sudo /tmp/xsk_bind_test eth4 0 --zerocopy   # must print "bind() SUCCESS"
 
 Depends-on: 0068-dpaa-flavor-ops.patch, 0069-dpaa-flavor-hooks.patch.
@@ -64,7 +35,7 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.c b/drivers/net/eth
 index 27931f0..27931f1 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.c
-@@ -11,21 +11,52 @@
+@@ -11,60 +11,131 @@
   */
  
  #include <linux/export.h>
@@ -99,46 +70,61 @@ index 27931f0..27931f1 100644
  static const struct dpaa_qmgmt_ops __rcu *dpaa_qmgmt_ops_global;
  
  int dpaa_register_flavor_ops(const struct dpaa_pcd_ops *pcd_ops,
-      const struct dpaa_qmgmt_ops *qmgmt_ops)
+-			     const struct dpaa_qmgmt_ops *qmgmt_ops)
++     const struct dpaa_qmgmt_ops *qmgmt_ops)
  {
+-	if (!pcd_ops && !qmgmt_ops)
+-		return -EINVAL;
 +struct dpaa_priv_tracker *t;
 +unsigned long flags;
-+
- if (!pcd_ops && !qmgmt_ops)
- return -EINVAL;
  
-@@ -37,6 +52,21 @@ int dpaa_register_flavor_ops(const struct dpaa_pcd_ops *pcd_ops,
- }
- rcu_assign_pointer(dpaa_pcd_ops_global,   pcd_ops);
- rcu_assign_pointer(dpaa_qmgmt_ops_global, qmgmt_ops);
+-	mutex_lock(&dpaa_flavor_lock);
+-	if (rcu_access_pointer(dpaa_pcd_ops_global) ||
+-	    rcu_access_pointer(dpaa_qmgmt_ops_global)) {
+-		mutex_unlock(&dpaa_flavor_lock);
+-		return -EBUSY;
+-	}
+-	rcu_assign_pointer(dpaa_pcd_ops_global,   pcd_ops);
+-	rcu_assign_pointer(dpaa_qmgmt_ops_global, qmgmt_ops);
+-	mutex_unlock(&dpaa_flavor_lock);
+-	return 0;
++if (!pcd_ops && !qmgmt_ops)
++return -EINVAL;
 +
-+/* Retro-attach to every priv that probed before us (the
-+ * LS1046A built-in-driver path). rcu_assign_pointer is
-+ * non-blocking and safe inside the spinlock. The pcd_ops /
-+ * qmgmt_ops local arguments are stable here because no
-+ * concurrent register/unregister can run (we hold the mutex)
-+ * and the caller guarantees the pointers' validity until
-+ * dpaa_unregister_flavor_ops() returns.
-+ */
++mutex_lock(&dpaa_flavor_lock);
++if (rcu_access_pointer(dpaa_pcd_ops_global) ||
++    rcu_access_pointer(dpaa_qmgmt_ops_global)) {
++mutex_unlock(&dpaa_flavor_lock);
++return -EBUSY;
++}
++rcu_assign_pointer(dpaa_pcd_ops_global,   pcd_ops);
++rcu_assign_pointer(dpaa_qmgmt_ops_global, qmgmt_ops);
++
++/* Retro-attach to every priv that probed before us. */
 +spin_lock_irqsave(&dpaa_priv_list_lock, flags);
 +list_for_each_entry(t, &dpaa_priv_trackers, node) {
 +rcu_assign_pointer(t->priv->pcd_ops,   pcd_ops);
 +rcu_assign_pointer(t->priv->qmgmt_ops, qmgmt_ops);
 +}
 +spin_unlock_irqrestore(&dpaa_priv_list_lock, flags);
- mutex_unlock(&dpaa_flavor_lock);
- return 0;
++mutex_unlock(&dpaa_flavor_lock);
++return 0;
  }
-@@ -44,9 +74,23 @@ EXPORT_SYMBOL_GPL(dpaa_register_flavor_ops);
+ EXPORT_SYMBOL_GPL(dpaa_register_flavor_ops);
  
  void dpaa_unregister_flavor_ops(void)
  {
+-	mutex_lock(&dpaa_flavor_lock);
+-	rcu_assign_pointer(dpaa_pcd_ops_global,   NULL);
+-	rcu_assign_pointer(dpaa_qmgmt_ops_global, NULL);
+-	mutex_unlock(&dpaa_flavor_lock);
+-	synchronize_rcu();
 +struct dpaa_priv_tracker *t;
 +unsigned long flags;
 +
- mutex_lock(&dpaa_flavor_lock);
- rcu_assign_pointer(dpaa_pcd_ops_global,   NULL);
- rcu_assign_pointer(dpaa_qmgmt_ops_global, NULL);
++mutex_lock(&dpaa_flavor_lock);
++rcu_assign_pointer(dpaa_pcd_ops_global,   NULL);
++rcu_assign_pointer(dpaa_qmgmt_ops_global, NULL);
 +
 +/* Clear every per-priv pointer that referenced the
 + * about-to-be-freed flavor-module text.
@@ -150,13 +136,19 @@ index 27931f0..27931f1 100644
 +t->priv->flavor_priv = NULL;
 +}
 +spin_unlock_irqrestore(&dpaa_priv_list_lock, flags);
- mutex_unlock(&dpaa_flavor_lock);
- synchronize_rcu();
++mutex_unlock(&dpaa_flavor_lock);
++synchronize_rcu();
  }
-@@ -54,6 +98,17 @@ EXPORT_SYMBOL_GPL(dpaa_unregister_flavor_ops);
+ EXPORT_SYMBOL_GPL(dpaa_unregister_flavor_ops);
  
  void dpaa_priv_attach_flavor_ops(struct dpaa_priv *priv)
  {
+-	rcu_read_lock();
+-	rcu_assign_pointer(priv->pcd_ops,
+-			   rcu_dereference(dpaa_pcd_ops_global));
+-	rcu_assign_pointer(priv->qmgmt_ops,
+-			   rcu_dereference(dpaa_qmgmt_ops_global));
+-	rcu_read_unlock();
 +struct dpaa_priv_tracker *t;
 +unsigned long flags;
 +
@@ -171,33 +163,37 @@ index 27931f0..27931f1 100644
 +spin_unlock_irqrestore(&dpaa_priv_list_lock, flags);
 +}
 +
- rcu_read_lock();
- rcu_assign_pointer(priv->pcd_ops,
-    rcu_dereference(dpaa_pcd_ops_global));
-@@ -64,6 +119,21 @@ void dpaa_priv_attach_flavor_ops(struct dpaa_priv *priv)
++rcu_read_lock();
++rcu_assign_pointer(priv->pcd_ops,
++   rcu_dereference(dpaa_pcd_ops_global));
++rcu_assign_pointer(priv->qmgmt_ops,
++   rcu_dereference(dpaa_qmgmt_ops_global));
++rcu_read_unlock();
+ }
  
  void dpaa_priv_detach_flavor_ops(struct dpaa_priv *priv)
  {
+-	rcu_assign_pointer(priv->pcd_ops,   NULL);
+-	rcu_assign_pointer(priv->qmgmt_ops, NULL);
+-	priv->flavor_priv = NULL;
 +struct dpaa_priv_tracker *t, *tmp;
 +unsigned long flags;
 +
-+/* Walk-and-prune the tracker list under the spinlock. The
-+ * matching node must be removed from the list before kfree.
-+ */
++/* Walk-and-prune the tracker list under the spinlock. */
 +spin_lock_irqsave(&dpaa_priv_list_lock, flags);
 +list_for_each_entry_safe(t, tmp, &dpaa_priv_trackers, node) {
 +if (t->priv == priv) {
 +list_del(&t->node);
-+spin_unlock_irqrestore(&dpaa_priv_list_lock, flags);
 +kfree(t);
-+goto cleared;
-+}
++break;
+ }
 +}
 +spin_unlock_irqrestore(&dpaa_priv_list_lock, flags);
-+cleared:
 +
- rcu_assign_pointer(priv->pcd_ops,   NULL);
- rcu_assign_pointer(priv->qmgmt_ops, NULL);
- priv->flavor_priv = NULL;
++rcu_assign_pointer(priv->pcd_ops,   NULL);
++rcu_assign_pointer(priv->qmgmt_ops, NULL);
++priv->flavor_priv = NULL;
++}
+\ No newline at end of file
 -- 
 2.39.5
