@@ -1,0 +1,133 @@
+From: vyos-ls1046a-build M1 implementation <noreply@vyos-ls1046a-build>
+Date: 2026-05-26
+Subject: [PATCH] dpaa: Phase 1 — advertise XSK_ZEROCOPY + wire ndo_xsk_wakeup trampoline
+
+Mainline DPAA1 6.18.x exposes XDP_DROP/PASS/TX/REDIRECT and ndo_xdp_xmit
+but does NOT advertise NETDEV_XDP_ACT_XSK_ZEROCOPY and does NOT implement
+ndo_xsk_wakeup. As a result AF_XDP can only run in copy mode through the
+generic XDP layer, and userspace must busy-poll the rings — on the
+LS1046A's lightly-cooled 4xA72 cluster the VPP af_xdp worker pegs at
+100% even when idle, blocking thermal recovery.
+
+Phase 1 closes the "no wakeup" gap WITHOUT touching the buffer-pool
+plumbing (Phase 2) or the ZC datapath (Phase 3):
+
+  1. Advertise NETDEV_XDP_ACT_XSK_ZEROCOPY in net_dev->xdp_features.
+     This is what tells the kernel's XSK core "this driver claims a
+     zerocopy mode is available"; absence of the bit forces copy mode.
+
+  2. Implement dpaa_xsk_wakeup() as a thin RCU-safe trampoline to
+     priv->qmgmt_ops->xsk_wakeup. With no flavor module loaded
+     (FLAVOR=default), qmgmt_ops is NULL — the trampoline returns
+     -EOPNOTSUPP and userspace falls back to busy-poll exactly as it
+     does on mainline. Behaviour change is therefore zero for
+     FLAVOR=default; the slot is the seed Phase 2/3 attach into.
+
+  3. Wire .ndo_xsk_wakeup = dpaa_xsk_wakeup in the dpaa_ops netdev_ops
+     table.
+
+  4. Add <net/xdp_sock_drv.h> for the XDP_WAKEUP_RX/TX flag definitions
+     consumed by the flavor module's xsk_wakeup callback.
+
+The NAPI-side xsk_set_rx_need_wakeup() / TX completion kick described
+in the spec is NOT wired here: priv->xsk_pool[] does not yet exist in
+struct dpaa_priv (it lands in patch 0071, Phase 2). Wiring it now would
+be a no-op (all xsk_pool[] dereferences would be NULL) and would create
+dead code on the hot path. The NAPI wiring lands with the rest of the
+ZC datapath in patch 0072 (Phase 3).
+
+Acceptance gate (spec §5.2):
+
+  1. VPP af_xdp in copy mode runs WITHOUT 'set vpp settings unix
+     poll-sleep-usec 100'.
+  2. Idle CPU on VPP main worker drops from ~100% to < 10% (mpstat
+     -P ALL 1; thermal_zone0 stays in fan-pid COOL band).
+  3. xsk_ring_prod__needs_wakeup(&xsk->tx) returns 1 when the driver
+     wants a kick.
+
+With no flavor module loaded the trampoline short-circuits to
+-EOPNOTSUPP and behaviour is byte-identical to mainline (M1 baseline
+gate).
+
+Spec reference: specs/dpaa1-afxdp-modernization-spec.md sec 5.2.
+Depends on: 0068-dpaa-flavor-ops.patch, 0069-dpaa-flavor-hooks.patch.
+
+Signed-off-by: vyos-ls1046a-build <noreply@vyos-ls1046a-build>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index b0a325829..baf384ff6 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -30,6 +30,7 @@
+ #include <linux/sort.h>
+ #include <linux/bpf.h>
+ #include <linux/bpf_trace.h>
++#include <net/xdp_sock_drv.h>
+ #include "dpaa_flavor.h"
+ #include <soc/fsl/bman.h>
+ #include <soc/fsl/qman.h>
+@@ -259,7 +260,8 @@ static int dpaa_netdev_init(struct net_device *net_dev,
+ 
+ 	net_dev->xdp_features = NETDEV_XDP_ACT_BASIC |
+ 				NETDEV_XDP_ACT_REDIRECT |
+-				NETDEV_XDP_ACT_NDO_XMIT;
++				NETDEV_XDP_ACT_NDO_XMIT |
++				NETDEV_XDP_ACT_XSK_ZEROCOPY;
+ 
+ 	if (is_valid_ether_addr(mac_addr)) {
+ 		memcpy(net_dev->perm_addr, mac_addr, net_dev->addr_len);
+@@ -3529,6 +3531,46 @@ static int dpaa_ioctl(struct net_device *net_dev, struct ifreq *rq, int cmd)
+ 	return phylink_mii_ioctl(priv->mac_dev->phylink, rq, cmd);
+ }
+ 
++/* M1 (Phase 1): ndo_xsk_wakeup trampoline.
++ *
++ * Mainline DPAA1 has no AF_XDP wakeup path. Without it, a userspace XSK
++ * application must busy-poll the rings (VPP af_xdp plugin in copy mode
++ * pegs the worker thread at 100% even when idle, blocking thermal
++ * recovery on the LS1046A's passively/lightly-cooled 4xA72 cluster).
++ *
++ * The trampoline dereferences priv->qmgmt_ops under RCU and dispatches
++ * to the flavor module's wakeup callback. With no flavor module loaded
++ * (FLAVOR=default), qmgmt_ops is NULL and the syscall returns
++ * -EOPNOTSUPP, which userspace treats as "no wakeup support, fall back
++ * to busy-poll" — identical to mainline behaviour.
++ *
++ * Phase 1 only advertises NETDEV_XDP_ACT_XSK_ZEROCOPY and wires the
++ * trampoline. The NAPI-side xsk_set_rx_need_wakeup() / TX completion
++ * kick is harmless without a bound xsk_pool[] (introduced in Phase 2)
++ * and is wired in patch 0072 (Phase 3) when the ZC datapath lands.
++ *
++ * Spec: specs/dpaa1-afxdp-modernization-spec.md sec 5.2.
++ */
++static int dpaa_xsk_wakeup(struct net_device *ndev, u32 queue_id, u32 flags)
++{
++	struct dpaa_priv *priv = netdev_priv(ndev);
++	const struct dpaa_qmgmt_ops *ops;
++	int ret;
++
++	if (unlikely(!netif_running(ndev)))
++		return -ENETDOWN;
++
++	rcu_read_lock();
++	ops = rcu_dereference(priv->qmgmt_ops);
++	if (!ops || !ops->xsk_wakeup) {
++		rcu_read_unlock();
++		return -EOPNOTSUPP;
++	}
++	ret = ops->xsk_wakeup(priv, queue_id, flags);
++	rcu_read_unlock();
++	return ret;
++}
++
+ static const struct net_device_ops dpaa_ops = {
+ 	.ndo_open = dpaa_open,
+ 	.ndo_start_xmit = dpaa_start_xmit,
+@@ -3543,6 +3585,7 @@ static const struct net_device_ops dpaa_ops = {
+ 	.ndo_change_mtu = dpaa_change_mtu,
+ 	.ndo_bpf = dpaa_xdp,
+ 	.ndo_xdp_xmit = dpaa_xdp_xmit,
++	.ndo_xsk_wakeup = dpaa_xsk_wakeup,
+ 	.ndo_hwtstamp_get = dpaa_hwtstamp_get,
+ 	.ndo_hwtstamp_set = dpaa_hwtstamp_set,
+ };

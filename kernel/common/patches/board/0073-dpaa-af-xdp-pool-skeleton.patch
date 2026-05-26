@@ -1,0 +1,253 @@
+From: vyos-ls1046a-build M3.1 implementation <noreply@vyos-ls1046a-build>
+Date: 2026-05-26
+Subject: [PATCH] dpaa: Phase 3.1 - af_xdp_pool.ko flavor module skeleton
+
+M3.1 deliverable per specs/dpaa1-afxdp-modernization-spec.md sec 5.4.
+
+Adds a new tristate kernel module drivers/net/ethernet/freescale/dpaa/
+af_xdp_pool/af_xdp_pool.ko that registers a struct dpaa_qmgmt_ops
+table with the fsl_dpa core driver via the M0 flavor-ops abstraction
+(CONFIG_DPAA_FLAVOR_OPS, landed in patch 0068).
+
+This is a deliberate skeleton: every callback returns -EOPNOTSUPP (the
+rx_hook returns false, xsk_set_rx_need_wakeup is a no-op). Loading the
+module is therefore behaviour-equivalent to not loading it - every XSK
+setsockopt(XDP_BIND, XDP_ZEROCOPY) still falls back to copy-mode exactly
+as mainline does today, because dpaa_setup_xsk_pool() returns whatever
+the qmgmt_ops->xsk_pool_attach hook returns, and -EOPNOTSUPP triggers
+the kernel XSK core's copy-mode fallback path identical to mainline pre-M2.
+
+The skeleton's purpose is purely to (a) prove the Kbuild/Kconfig wiring
+into the dpaa subdirectory is correct, (b) prove the
+dpaa_register_flavor_ops()/dpaa_unregister_flavor_ops() symbol exports
+from patch 0068 are reachable from a loadable .ko, and (c) provide a
+single review-able landing pad so subsequent patches (0074-0080) can
+replace one callback at a time:
+
+  0074 - xsk_wakeup            (NAPI kick; spec sec 5.2 acceptance gate)
+  0075 - xsk_pool_attach       (UMEM-backed BMan pool + PAMU window)
+  0076 - xsk_pool_detach       (FMan BMI quiescence)
+  0077 - rx_hook               (ZC RX with xdp_do_redirect)
+  0079 - xsk_set_rx_need_wakeup
+  0080 - alloc_rx_fqs          (dedicated XSK BMan channels)
+
+The TX hot path (spec 0078) lives in core-driver code, not in this
+flavor module, because TX FQ ownership belongs to dpaa_eth.
+
+Files added:
+  drivers/net/ethernet/freescale/dpaa/af_xdp_pool/Kconfig
+  drivers/net/ethernet/freescale/dpaa/af_xdp_pool/Makefile
+  drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+
+Files modified:
+  drivers/net/ethernet/freescale/dpaa/Kconfig   - source the subdir
+  drivers/net/ethernet/freescale/dpaa/Makefile  - obj-$(...) += af_xdp_pool/
+
+Spec: specs/dpaa1-afxdp-modernization-spec.md sec 5.4
+Depends-on: 0068-dpaa-flavor-ops.patch (defines dpaa_register_flavor_ops,
+            CONFIG_DPAA_FLAVOR_OPS, struct dpaa_qmgmt_ops).
+
+Acceptance (M3.1 gate):
+  - module loads: modprobe af_xdp_pool ; lsmod | grep af_xdp_pool -> refcnt 1
+  - dmesg shows: af_xdp_pool: registered (skeleton, all callbacks stubbed)
+  - XSK ZC bind still fails with -EOPNOTSUPP (because stubs):
+      python3 -c "import socket,ctypes; ..." with XDP_ZEROCOPY -> falls
+      back to copy-mode identical to module-not-loaded baseline
+  - rmmod af_xdp_pool succeeds; dmesg shows: af_xdp_pool: unregistered
+  - all five netdevs eth0..eth4 still up across load/unload cycle
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/Kconfig b/drivers/net/ethernet/freescale/dpaa/Kconfig
+index 14d3905..09c99af 100644
+--- a/drivers/net/ethernet/freescale/dpaa/Kconfig
++++ b/drivers/net/ethernet/freescale/dpaa/Kconfig
+@@ -19,3 +19,5 @@ config DPAA_FLAVOR_OPS
+ 	  hooks so an out-of-tree or in-tree flavor module can attach PCD trees
+ 	  and XSK pool management to dpaa_eth without touching core code.
+ 	  Safe to leave on: with no flavor module loaded, behaviour is unchanged.
++
++source "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/Kconfig"
+diff --git a/drivers/net/ethernet/freescale/dpaa/Makefile b/drivers/net/ethernet/freescale/dpaa/Makefile
+index 0926c74..fe4bbca 100644
+--- a/drivers/net/ethernet/freescale/dpaa/Makefile
++++ b/drivers/net/ethernet/freescale/dpaa/Makefile
+@@ -12,3 +12,5 @@ obj-$(CONFIG_FSL_DPAA_ETH) += fsl_dpa.o
+ fsl_dpa-objs += dpaa_eth.o dpaa_ethtool.o dpaa_eth_sysfs.o
+ fsl_dpa-$(CONFIG_DPAA_FLAVOR_OPS) += dpaa_flavor.o
+ CFLAGS_dpaa_eth.o := -I$(src)
++
++obj-$(CONFIG_DPAA_AF_XDP_POOL) += af_xdp_pool/
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/Kconfig b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/Kconfig
+new file mode 100644
+index 0000000..5ee8000
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/Kconfig
+@@ -0,0 +1,20 @@
++# SPDX-License-Identifier: GPL-2.0-only
++config DPAA_AF_XDP_POOL
++	tristate "DPAA1: AF_XDP zero-copy pool flavor module (af_xdp_pool.ko)"
++	depends on FSL_DPAA_ETH && DPAA_FLAVOR_OPS && XDP_SOCKETS
++	default m
++	help
++	  Flavor module that populates the DPAA1 dpaa_qmgmt_ops table with
++	  AF_XDP zero-copy callbacks: per-queue UMEM-backed BMan pool,
++	  PAMU window create/destroy, dedicated BMan channels, NAPI-hooked
++	  refill, and a strict TX backpressure path.
++
++	  At M3.1 (this scaffold), all callbacks return -EOPNOTSUPP so
++	  behaviour is byte-identical to a kernel built without this module.
++	  Subsequent patches (0074+) implement the wakeup kick, pool
++	  attach/detach, and the ZC RX/TX hot paths per spec sec 5.2-5.4.
++
++	  Spec: specs/dpaa1-afxdp-modernization-spec.md sec 5.4.
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called af_xdp_pool.
+\ No newline at end of file
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/Makefile b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/Makefile
+new file mode 100644
+index 0000000..f29464f
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/Makefile
+@@ -0,0 +1,12 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# DPAA1 AF_XDP zero-copy pool flavor module
++#
++
++FMAN = $(srctree)/drivers/net/ethernet/freescale/fman
++DPAA = $(srctree)/drivers/net/ethernet/freescale/dpaa
++ccflags-y += -I$(FMAN) -I$(DPAA)
++
++obj-$(CONFIG_DPAA_AF_XDP_POOL) += af_xdp_pool.o
++
++af_xdp_pool-objs := af_xdp_pool_main.o
+\ No newline at end of file
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+new file mode 100644
+index 0000000..73b3fe6
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -0,0 +1,119 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * af_xdp_pool_main.c - DPAA1 AF_XDP zero-copy pool flavor module (skeleton)
++ *
++ * M3.1 deliverable per specs/dpaa1-afxdp-modernization-spec.md sec 5.4.
++ *
++ * This module registers a dpaa_qmgmt_ops table with the fsl_dpa core driver
++ * via the M0 flavor-ops abstraction (CONFIG_DPAA_FLAVOR_OPS).  At this
++ * skeleton stage every callback returns -EOPNOTSUPP so behaviour with the
++ * module loaded is byte-identical to behaviour with it absent: every XSK
++ * setsockopt(XDP_BIND, XDP_ZEROCOPY) falls back to copy-mode exactly as
++ * mainline does today.
++ *
++ * Subsequent patches (0074-0080) replace each stub with the real
++ * implementation:
++ *   0074 - xsk_wakeup        : NAPI kick
++ *   0075 - xsk_pool_attach   : UMEM-backed BMan pool + PAMU window
++ *   0076 - xsk_pool_detach   : FMan BMI quiescence
++ *   0077 - rx_hook           : ZC RX with xdp_do_redirect
++ *   0078 - (TX is core-driver, not a flavor hook) - strict backpressure
++ *   0079 - xsk_set_rx_need_wakeup
++ *   0080 - alloc_rx_fqs      : dedicated XSK BMan channels
++ */
++
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/types.h>
++#include <linux/errno.h>
++#include <linux/printk.h>
++
++#include "dpaa_flavor.h"
++
++struct dpaa_priv;
++struct qman_fq;
++struct qm_dqrr_entry;
++struct xsk_buff_pool;
++struct dpaa_napi_portal;
++struct list_head;
++
++/* ---------- Stub callbacks: every entry returns -EOPNOTSUPP ---------- */
++
++static int af_xdp_pool_alloc_rx_fqs(struct dpaa_priv *priv,
++struct list_head *list)
++{
++return -EOPNOTSUPP;
++}
++
++static bool af_xdp_pool_rx_hook(struct dpaa_priv *priv,
++struct qman_fq *fq,
++const struct qm_dqrr_entry *dq)
++{
++/* false = do not consume the frame; let the default RX path handle it. */
++return false;
++}
++
++static int af_xdp_pool_xsk_pool_attach(struct dpaa_priv *priv,
++       struct xsk_buff_pool *pool,
++       u16 queue_id)
++{
++return -EOPNOTSUPP;
++}
++
++static int af_xdp_pool_xsk_pool_detach(struct dpaa_priv *priv, u16 queue_id)
++{
++return -EOPNOTSUPP;
++}
++
++static int af_xdp_pool_xsk_wakeup(struct dpaa_priv *priv, u32 queue_id,
++  u32 flags)
++{
++return -EOPNOTSUPP;
++}
++
++static void af_xdp_pool_xsk_set_rx_need_wakeup(struct dpaa_priv *priv,
++       struct dpaa_napi_portal *np)
++{
++/* Nothing to do until the ZC datapath lands in patch 0079. */
++}
++
++/* ---------- Ops tables ---------- */
++
++static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
++.alloc_rx_fqs           = af_xdp_pool_alloc_rx_fqs,
++.rx_hook                = af_xdp_pool_rx_hook,
++.xsk_pool_attach        = af_xdp_pool_xsk_pool_attach,
++.xsk_pool_detach        = af_xdp_pool_xsk_pool_detach,
++.xsk_wakeup             = af_xdp_pool_xsk_wakeup,
++.xsk_set_rx_need_wakeup = af_xdp_pool_xsk_set_rx_need_wakeup,
++};
++
++/* ---------- Module init / exit ---------- */
++
++static int __init af_xdp_pool_init(void)
++{
++int err;
++
++err = dpaa_register_flavor_ops(NULL, &af_xdp_pool_qmgmt_ops);
++if (err) {
++pr_err("af_xdp_pool: dpaa_register_flavor_ops() failed: %d\n", err);
++return err;
++}
++
++pr_info("af_xdp_pool: registered (skeleton, all callbacks stubbed -EOPNOTSUPP)\n");
++return 0;
++}
++
++static void __exit af_xdp_pool_exit(void)
++{
++dpaa_unregister_flavor_ops();
++pr_info("af_xdp_pool: unregistered\n");
++}
++
++module_init(af_xdp_pool_init);
++module_exit(af_xdp_pool_exit);
++
++MODULE_AUTHOR("VyOS LS1046A maintainers");
++MODULE_DESCRIPTION("DPAA1 AF_XDP zero-copy pool flavor module (skeleton)");
++MODULE_LICENSE("GPL v2");
+\ No newline at end of file
+-- 
+2.39.5
+

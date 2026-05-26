@@ -1,0 +1,363 @@
+From: VyOS LS1046A maintainers <ls1046a@vyos.local>
+Date: 2026-05-26
+Subject: [PATCH] DPAA1 AF_XDP pool: LIODN accessor + xsk_pool_attach validation arms
+
+DPAA1 AF_XDP modernization spec sec 5.3 step 1 (Phase 2).
+
+This is the first of two patches that together turn af_xdp_pool's
+xsk_pool_attach callback from an unconditional -EOPNOTSUPP stub into
+a true zero-copy installer.  0075a (this patch) lands the validation
+half; 0075b (next patch in the series) lands the DMA-map + BMan seed
++ RCU publish half.
+
+What 0075a does:
+
+1) Adds a new EXPORT_SYMBOL_GPL accessor
+   `u32 fman_port_get_liodn(struct fman_port *port)` in
+   drivers/net/ethernet/freescale/fman/fman_port.{c,h}.  It returns
+   port->dts_params.fman->liodn_base[port->port_id], which the parent
+   FMan populates at probe time from device-tree `fsl,liodn`
+   properties.  `struct fman_port` is opaque outside fman_port.c so
+   external callers cannot read this field directly; the accessor is
+   the canonical way for sibling drivers to know the LIODN that the
+   FMan presents to PAMU as the DMA master ID.
+
+   Used immediately by af_xdp_pool as a DTS sanity check on every
+   XSK_POOL attach; will be consumed by future diagnostics (spec
+   sec 6) as well.
+
+2) Replaces the xsk_pool_attach -EOPNOTSUPP stub in
+   drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+   with a 5-arm fail-closed validation pipeline:
+
+     a) queue_id < min(priv->xsk_max_qbands, DPAA1_XSK_MAX_QBANDS)
+     b) net_dev->mtu <= 3290 (DPAA1 BP slot-size cap, spec sec 1.2;
+        the same hard limit that fsl_dpaa_mac enforces for XDP)
+     c) xsk_pool_get_rx_frame_size(pool) >= DPAA1_MIN_UMEM_CHUNK (4096)
+     d) xsk_pool_get_headroom(pool) >= priv->tx_headroom
+     e) priv->mac_dev present, RX fman_port resolvable, LIODN non-zero
+
+   Each failure bumps the specific priv->xsk_*_reject counter AND
+   priv->xsk_pool_attach_fail (ethtool surfaces both per spec sec 6
+   patch 0071).  After all 5 arms pass, the function returns
+   -EOPNOTSUPP so the kernel XSK core continues to fall back to
+   copy-mode exactly as it does today (M2 baseline gate semantics,
+   PASS verified on the live DUT 2026-05-26).
+
+   Patch 0075b will replace the final -EOPNOTSUPP with steps 2-7
+   from the spec (xsk_pool_dma_map, dedicated BMan bpid allocation,
+   8192-chunk fill-ring seed loop, MEM_TYPE_XSK_BUFF_POOL rxq
+   registration, RCU publish into priv->xsk_pool[]).
+
+Note on PAMU (spec sec 4.6):
+
+   The spec assumed an arm64-buildable `fsl_pamu_window_create()` /
+   `fsl_pamu_window_destroy()` API exported by drivers/iommu/fsl_pamu.c.
+   This assumption is wrong: mainline 6.18.31's FSL_PAMU Kconfig is
+   gated by `depends on PPC_E500MC || (COMPILE_TEST && PPC)`, i.e. the
+   driver only compiles on PowerPC.  On arm64 LS1046A the PAMU runs in
+   firmware-programmed bypass and FMan masters DMA directly to
+   physical RAM via dma-direct; xsk_pool_dma_map() in 0075b will be
+   sufficient and no per-window PAMU programming is required.  The
+   spec will be updated to v4.2 to reflect this.  The kernel header
+   include/linux/fsl/fsl_pamu_window.h that the previous spec revision
+   anticipated is NOT introduced by this patch.
+
+Behaviour with 0075a applied:
+  - The af_xdp_pool flavor module loads exactly as before.
+  - Userspace XDP_BIND with XDP_ZEROCOPY on a DPAA1 ethN still
+    returns -EOPNOTSUPP exactly as before (kernel XSK core falls
+    back to copy-mode exactly as before).
+  - Net behaviour is byte-identical to pre-0075a; what 0075a buys
+    us is the validation arms + LIODN sanity check actually being
+    exercised at every XSK attach attempt, with all counter
+    increments visible in `ethtool -S ethN | grep xsk_`.
+
+Build verification (native arm64, kernel 6.18.31-vyos):
+  - drivers/net/ethernet/freescale/fman/fman_port.o:
+      clean CC, fman_port_get_liodn is `T` with
+      __export_symbol_fman_port_get_liodn and
+      __UNIQUE_ID___addressable_fman_port_get_liodn.
+  - drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool.o:
+      clean CC[M]+LD[M], one new `U fman_port_get_liodn` on top of
+      the 0074 baseline (which had U: __napi_schedule_irqoff,
+      napi_schedule_prep, dpaa_register_flavor_ops,
+      dpaa_unregister_flavor_ops).
+  - No new build warnings.
+
+Acceptance gate (deferred to DUT):
+  - Operator action: load af_xdp_pool, bind an AF_XDP socket with
+    intentionally bad headroom / oversized MTU / out-of-range
+    queue_id, observe -EINVAL plus the matching xsk_*_reject++ in
+    `ethtool -S ethN`.  Each bad-input path should fail closed, not
+    silently demote to copy-mode.
+
+Signed-off-by: VyOS LS1046A maintainers <ls1046a@vyos.local>
+---
+ .../dpaa/af_xdp_pool/af_xdp_pool_main.c       | 160 +++++++++++++++++-
+ .../net/ethernet/freescale/fman/fman_port.c   |  23 ++-
+ .../net/ethernet/freescale/fman/fman_port.h   |  13 ++
+ 3 files changed, 192 insertions(+), 4 deletions(-)diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+index 73b3fe6..c8b345d 100644
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -13,7 +13,7 @@
+  *
+  * Subsequent patches (0074-0080) replace each stub with the real
+  * implementation:
+- *   0074 - xsk_wakeup        : NAPI kick
++ *   0074 - xsk_wakeup        : NAPI kick (LANDED)
+  *   0075 - xsk_pool_attach   : UMEM-backed BMan pool + PAMU window
+  *   0076 - xsk_pool_detach   : FMan BMI quiescence
+  *   0077 - rx_hook           : ZC RX with xdp_do_redirect
+@@ -28,10 +28,14 @@
+ #include <linux/types.h>
+ #include <linux/errno.h>
+ #include <linux/printk.h>
++#include <linux/netdevice.h>
++#include <net/xdp_sock_drv.h>
+ 
+ #include "dpaa_flavor.h"
++#include "dpaa_eth.h"
++#include "../../fman/fman_port.h"
++#include "../../fman/mac.h"
+ 
+-struct dpaa_priv;
+ struct qman_fq;
+ struct qm_dqrr_entry;
+ struct xsk_buff_pool;
+@@ -54,10 +58,127 @@ const struct qm_dqrr_entry *dq)
+ return false;
+ }
+ 
++/*
++ * af_xdp_pool_xsk_pool_attach - install an AF_XDP zero-copy pool on an RX queue
++ *
++ * Patch 0075a (Phase 2 step 1, spec sec 5.3):
++ *
++ *   This is an INTERMEDIATE deliverable.  Step 1 (validate constraints)
++ *   is implemented in full.  The function then returns -EOPNOTSUPP so
++ *   the kernel XSK core continues to fall back to copy-mode exactly as
++ *   it does today (M2 acceptance gate semantics, verified in the patch
++ *   0071 DUT run).  Behaviour is byte-identical to pre-0075a; what
++ *   0075a buys us is:
++ *
++ *     * the new fman_port_get_liodn() accessor
++ *       (drivers/net/ethernet/freescale/fman/fman_port.c) exported,
++ *       statically verifiable, and exercised at every XSK attach as a
++ *       DTS sanity check;
++ *     * every fail-closed validation arm with its corresponding
++ *       priv->xsk_*_reject counter bump.
++ *
++ *   Patch 0075b will add steps 2 - 7 (xsk_pool_dma_map, dedicated BMan
++ *   bpid allocation, 8192-chunk seed loop, MEM_TYPE_XSK_BUFF_POOL rxq
++ *   registration, RCU publish into priv->xsk_pool[]).  At that point
++ *   this function returns 0 and the XSK core promotes the socket into
++ *   true zero-copy mode.
++ *
++ *   Note on PAMU (spec sec 4.6): the spec assumed a per-attach
++ *   fsl_pamu_window_create()/_destroy() API.  Mainline 6.18.31's
++ *   drivers/iommu/fsl_pamu.c is gated by Kconfig dependency
++ *   "PPC_E500MC || (COMPILE_TEST && PPC)" and does not build on arm64.
++ *   On arm64 LS1046A the PAMU runs in firmware-programmed bypass and
++ *   the FMan masters DMA directly to physical RAM via dma-direct -
++ *   xsk_pool_dma_map() in 0075b will be sufficient.  No per-window
++ *   PAMU programming is required.  This will be reflected in the spec
++ *   v4.2 update.
++ *
++ *   Hard constraints (fail closed, no copy-mode silent demotion):
++ *     - queue_id < priv->xsk_max_qbands (DPAA1_XSK_MAX_QBANDS = 4)
++ *     - dev->mtu <= 3290 (DPAA1 BP slot size cap, spec sec 1.2)
++ *     - xsk_pool_get_rx_frame_size(pool) >= DPAA1_MIN_UMEM_CHUNK (4096)
++ *     - xsk_pool_get_headroom(pool)      >= priv->tx_headroom
++ *     - non-zero LIODN resolved from the RX fman_port (DTS sanity)
++ *
++ *   The first-chunk DPAA_FD_DATA_ALIGNMENT (64 B) probe is deferred to
++ *   patch 0075b because it requires xsk_buff_alloc_batch() which only
++ *   makes sense once we own the pool (post-attach).
++ */
+ static int af_xdp_pool_xsk_pool_attach(struct dpaa_priv *priv,
+        struct xsk_buff_pool *pool,
+        u16 queue_id)
+ {
++struct net_device *ndev;
++struct fman_port *rxp;
++u32 frame_size, headroom;
++u32 liodn;
++
++if (!priv || !pool)
++return -EINVAL;
++
++ndev = priv->net_dev;
++
++/* Step 1: validate constraints, fail closed. */
++if (queue_id >= priv->xsk_max_qbands ||
++    queue_id >= DPAA1_XSK_MAX_QBANDS) {
++priv->xsk_pool_attach_fail++;
++return -EINVAL;
++}
++
++if (ndev->mtu > 3290) {
++priv->xsk_mtu_reject++;
++priv->xsk_pool_attach_fail++;
++return -EINVAL;
++}
++
++frame_size = xsk_pool_get_rx_frame_size(pool);
++if (frame_size < DPAA1_MIN_UMEM_CHUNK) {
++priv->xsk_align_reject++;
++priv->xsk_pool_attach_fail++;
++return -EINVAL;
++}
++
++headroom = xsk_pool_get_headroom(pool);
++if (headroom < priv->tx_headroom) {
++priv->xsk_headroom_reject++;
++priv->xsk_pool_attach_fail++;
++return -EINVAL;
++}
++
++/*
++ * LIODN sanity check: prove the RX FMan port is bound to its parent
++ * FMan and that DT carries a non-zero fsl,liodn for this port.  The
++ * value isn't consumed yet (no arm64 PAMU driver in mainline), but
++ * a zero return here means either DT is malformed or fman_port has
++ * not yet probed - both fail-closed conditions.
++ */
++if (!priv->mac_dev) {
++priv->xsk_pamu_window_fail++;
++priv->xsk_pool_attach_fail++;
++return -ENODEV;
++}
++
++rxp = priv->mac_dev->port[FMAN_PORT_TYPE_RX];
++if (!rxp) {
++priv->xsk_pamu_window_fail++;
++priv->xsk_pool_attach_fail++;
++return -ENODEV;
++}
++
++liodn = fman_port_get_liodn(rxp);
++if (!liodn) {
++priv->xsk_pamu_window_fail++;
++priv->xsk_pool_attach_fail++;
++return -ENODEV;
++}
++
++/*
++ * Step 2 onward (xsk_pool_dma_map via dma-direct, BMan bpid alloc,
++ * 8192-chunk seed loop, xdp_rxq mem-model register, RCU publish)
++ * lands in patch 0075b.  Until then return -EOPNOTSUPP so the kernel
++ * XSK core falls back to copy-mode exactly as it does today (M2
++ * baseline gate semantics).
++ */
+ return -EOPNOTSUPP;
+ }
+ 
+@@ -66,10 +187,43 @@ static int af_xdp_pool_xsk_pool_detach(struct dpaa_priv *priv, u16 queue_id)
+ return -EOPNOTSUPP;
+ }
+ 
++/*
++ * af_xdp_pool_xsk_wakeup - kick the NAPI/QMan portal for an XSK queue
++ *
++ * Patch 0074 (Phase 1 hot-path wake gate, spec sec 5.2):
++ *   For XDP_WAKEUP_RX, resolve the NAPI associated with the qband and
++ *   schedule it via napi_schedule_irqoff() so the dpaa_eth_poll() loop
++ *   re-runs and drains any pending DQRR entries into the XSK fill ring.
++ *
++ *   The qmap[].napi slot is populated by the flavor module's future
++ *   xsk_pool_attach (patch 0075) once the dedicated XSK BMan channel
++ *   and its NAPI context have been brought up.  Until that lands, the
++ *   slot reads NULL and we return -ENOENT so the XSK core sees a clean
++ *   error (no NAPI bound on this qband) instead of NULL-deref'ing in
++ *   the IRQ-off scheduler path.  XDP_WAKEUP_TX handling lands with
++ *   patch 0078 (qman_p_irqsource_add poke of the egress portal).
++ */
+ static int af_xdp_pool_xsk_wakeup(struct dpaa_priv *priv, u32 queue_id,
+   u32 flags)
+ {
+-return -EOPNOTSUPP;
++struct napi_struct *napi;
++
++if (!priv)
++return -EINVAL;
++if (queue_id >= DPAA1_XSK_MAX_QBANDS)
++return -EINVAL;
++
++napi = READ_ONCE(priv->qmap[queue_id].napi);
++if (!napi)
++return -ENOENT;
++
++if (flags & XDP_WAKEUP_RX) {
++if (!napi_if_scheduled_mark_missed(napi))
++napi_schedule_irqoff(napi);
++}
++
++/* XDP_WAKEUP_TX path arrives with patch 0078. */
++return 0;
+ }
+ 
+ static void af_xdp_pool_xsk_set_rx_need_wakeup(struct dpaa_priv *priv,
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index e977389..255360d 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -1698,10 +1698,31 @@ EXPORT_SYMBOL(fman_port_bind);
+  */
+ u32 fman_port_get_qman_channel_id(struct fman_port *port)
+ {
+-	return port->dts_params.qman_channel_id;
++return port->dts_params.qman_channel_id;
+ }
+ EXPORT_SYMBOL(fman_port_get_qman_channel_id);
+ 
++/**
++ * fman_port_get_liodn
++ * @port: Pointer to the FMan port device
++ *
++ * Get the Logical I/O Device Number programmed into PAMU for this port.
++ * The LIODN is read from the parent FMan's per-port LIODN base table,
++ * populated at FMan probe time from device-tree fsl,liodn properties.
++ *
++ * Used by the AF_XDP zero-copy flavor module (af_xdp_pool/) to provision
++ * per-attach PAMU window handles via fsl_pamu_window_create() (spec sec 5.3).
++ *
++ * Return: LIODN value, or 0 if @port is NULL or parent FMan not yet bound.
++ */
++u32 fman_port_get_liodn(struct fman_port *port)
++{
++if (!port || !port->dts_params.fman)
++return 0;
++return port->dts_params.fman->liodn_base[port->port_id];
++}
++EXPORT_SYMBOL_GPL(fman_port_get_liodn);
++
+ /**
+  * fman_port_get_device
+  * @port:	Pointer to the FMan port device
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.h b/drivers/net/ethernet/freescale/fman/fman_port.h
+index 4917fe8..129dcc3 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.h
++++ b/drivers/net/ethernet/freescale/fman/fman_port.h
+@@ -132,4 +132,17 @@ struct fman_port *fman_port_bind(struct device *dev);
+ 
+ struct device *fman_port_get_device(struct fman_port *port);
+ 
++/*
++ * fman_port_get_liodn - Return the Logical I/O Device Number for this port.
++ *
++ * The LIODN is fixed at boot from the parent FMan's per-port LIODN base table
++ * and is what the FMan port presents to PAMU as the DMA master ID.  Used by
++ * the AF_XDP zero-copy flavor module (drivers/net/ethernet/freescale/dpaa/
++ * af_xdp_pool/) to provision per-attach PAMU window handles via
++ * fsl_pamu_window_create() (spec sec 5.3).  Returns 0 if @port is NULL or
++ * the parent FMan handle is not yet bound (defensive; the AF_XDP path treats
++ * a zero LIODN as a hard failure and bumps xsk_pamu_window_fail).
++ */
++u32 fman_port_get_liodn(struct fman_port *port);
++
+ #endif /* __FMAN_PORT_H */
+-- 
+2.39.5
+

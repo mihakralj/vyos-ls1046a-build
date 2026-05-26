@@ -1,0 +1,92 @@
+From: vyos-ls1046a-build M0 implementation <noreply@vyos-ls1046a-build>
+Date: 2026-05-26
+Subject: [PATCH 2/2] dpaa: wire flavor-ops install/teardown into probe/remove
+
+With the abstraction landed in patch 0068, wire two call sites:
+
+  dpaa_eth_probe():
+    - call dpaa_priv_attach_flavor_ops(priv) right after num_tc / TX
+      queue setup
+    - if priv->pcd_ops->install is non-NULL, call it BEFORE NAPI add
+      and dpaa_netdev_init() (i.e. before register_netdev() runs). A
+      non-zero return aborts probe; goto the existing delete_dpaa_napi
+      unwind label.
+
+  dpaa_remove():
+    - if priv->pcd_ops->teardown is non-NULL, call it BEFORE
+      unregister_netdev().
+    - call dpaa_priv_detach_flavor_ops(priv) after dpaa_napi_del().
+
+With no flavor module loaded, both ops pointers are NULL, the NULL
+checks short-circuit, and behaviour is byte-identical to mainline.
+
+Spec reference: specs/dpaa1-afxdp-modernization-spec.md sec 3.2 + sec 5.1
+(M0 acceptance gate: "modprobe fsl_dpaa_eth without any flavor module:
+zero behavioural change").
+
+Signed-off-by: vyos-ls1046a-build <noreply@vyos-ls1046a-build>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 4c0bb5db2..b0a325829 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -30,6 +30,7 @@
+ #include <linux/sort.h>
+ #include <linux/bpf.h>
+ #include <linux/bpf_trace.h>
++#include "dpaa_flavor.h"
+ #include <soc/fsl/bman.h>
+ #include <soc/fsl/qman.h>
+ #include "fman.h"
+@@ -3893,6 +3894,24 @@ static int dpaa_eth_probe(struct platform_device *pdev)
+ 	netif_set_real_num_tx_queues(net_dev,
+ 				     priv->num_tc * dpaa_num_txqs_per_tc());
+ 
++	/* M0: attach flavor ops, then run pcd_ops->install before
++	 * register_netdev() makes the netdev visible to userspace.
++	 */
++	dpaa_priv_attach_flavor_ops(priv);
++	{
++		const struct dpaa_pcd_ops *pops =
++			rcu_dereference_protected(priv->pcd_ops,
++				lockdep_is_held(&dev->mutex));
++		if (pops && pops->install) {
++			err = pops->install(priv);
++			if (err) {
++				dev_err(dev, "flavor pcd_ops->install() = %d\n",
++					err);
++				goto delete_dpaa_napi;
++			}
++		}
++	}
++
+ 	/* Initialize NAPI */
+ 	err = dpaa_napi_add(net_dev);
+ 	if (err < 0)
+@@ -3941,6 +3960,17 @@ static void dpaa_remove(struct platform_device *pdev)
+ 
+ 	dpaa_eth_sysfs_remove(dev);
+ 
++	/* M0: tear down flavor PCD configuration before the netdev becomes
++	 * invisible to userspace.
++	 */
++	{
++		const struct dpaa_pcd_ops *pops =
++			rcu_dereference_protected(priv->pcd_ops,
++				lockdep_is_held(&dev->mutex));
++		if (pops && pops->teardown)
++			pops->teardown(priv);
++	}
++
+ 	dev_set_drvdata(dev, NULL);
+ 	unregister_netdev(net_dev);
+ 	phylink_destroy(priv->mac_dev->phylink);
+@@ -3957,6 +3987,8 @@ static void dpaa_remove(struct platform_device *pdev)
+ 
+ 	dpaa_napi_del(net_dev);
+ 
++	dpaa_priv_detach_flavor_ops(priv);
++
+ 	dpaa_bps_free(priv);
+ 
+ 	free_netdev(net_dev);

@@ -1,0 +1,154 @@
+From: vyos-ls1046a-build Phase 1 implementation <noreply@vyos-ls1046a-build>
+Date: 2026-05-26
+Subject: [PATCH] dpaa: af_xdp_pool - implement xsk_wakeup NAPI kick (Phase 1 wake gate)
+
+Phase 1 wake-gate deliverable per specs/dpaa1-afxdp-modernization-spec.md
+sec 5.2.  Replaces the -EOPNOTSUPP stub installed by patch 0073 with the
+real xsk_wakeup() implementation for the af_xdp_pool flavor module.
+
+What this patch does
+--------------------
+
+For XDP_WAKEUP_RX, the flavor module resolves the NAPI context bound to
+the requested qband via priv->qmap[queue_id].napi (the slot added to
+struct dpaa_priv by patch 0072 Phase 3a) and kicks it through the
+combo napi_if_scheduled_mark_missed() + napi_schedule_irqoff() pattern.
+This is the standard IRQ-off wakeup idiom used by every modern XSK
+driver (mlx5, ice, i40e) and lets a userspace AF_XDP socket in
+need-wakeup mode resume the DQRR drain loop without taking the cost of
+a full IRQ delivery cycle.
+
+The XDP_WAKEUP_TX branch is intentionally left as a no-op return 0;
+the qman_p_irqsource_add() poke of the egress portal lands with patch
+0078 once the TX hot path is wired.
+
+NULL-safety for the not-yet-attached case
+-----------------------------------------
+
+priv->qmap[].napi is populated by the flavor module's future
+xsk_pool_attach (patch 0075) at the moment a dedicated XSK BMan
+channel and its NAPI instance have been brought up.  Until that lands,
+or simply for qbands that no application has bound a socket against,
+the slot reads NULL.  We treat that explicitly and return -ENOENT
+rather than calling napi_schedule_irqoff() on a NULL pointer.  The XSK
+core relays the errno to userspace, where it surfaces as a clean
+"no NAPI bound on this queue" rather than the kernel NULL-deref that
+the unguarded path would have produced.  This keeps the module loadable
+and the syscall surface well-formed even before patches 0075-0080 land.
+
+Includes added
+--------------
+
+  linux/netdevice.h      - napi_struct, napi_schedule_irqoff,
+                           napi_if_scheduled_mark_missed
+  net/xdp_sock_drv.h     - XDP_WAKEUP_RX flag bit
+  dpaa_eth.h             - struct dpaa_priv full layout (replaces the
+                           prior forward declaration so we can reach
+                           priv->qmap[].napi)
+
+Verification
+------------
+
+  * native arm64 build of the af_xdp_pool subdir succeeds clean:
+      CC [M] drivers/.../af_xdp_pool/af_xdp_pool_main.o
+      LD [M] drivers/.../af_xdp_pool/af_xdp_pool.o
+    no warnings.
+
+  * nm of the resulting object shows exactly the expected new
+    undefined references on top of the patch-0073 baseline:
+      U __napi_schedule_irqoff   (added by this patch)
+      U napi_schedule_prep       (added by this patch)
+      U _printk
+      U alt_cb_patch_nops
+      U dpaa_register_flavor_ops
+      U dpaa_unregister_flavor_ops
+
+  * functional check (the M3.2 acceptance gate per spec sec 5.2) is a
+    DUT operator task: with af_xdp_pool.ko loaded and an AF_XDP socket
+    bound in need-wakeup mode against eth3/eth4, sendto(MSG_DONTWAIT)
+    by an idle userspace must produce non-zero NAPI re-schedules
+    visible in /proc/interrupts.  Until patches 0075+ wire qmap[].napi
+    this gate naturally returns -ENOENT, which is the correct
+    behaviour for an unbound qband and the agreed phase-gate signal
+    for "Phase 1 wake plumbing reaches the flavor module cleanly".
+
+This patch is independent of patches 0075-0080 and can be reverted on
+its own without touching any other Phase 3 work.
+
+Signed-off-by: vyos-ls1046a-build Phase 1 implementation <noreply@vyos-ls1046a-build>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+index 73b3fe6..7f92e5a 100644
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -13,7 +13,7 @@
+  *
+  * Subsequent patches (0074-0080) replace each stub with the real
+  * implementation:
+- *   0074 - xsk_wakeup        : NAPI kick
++ *   0074 - xsk_wakeup        : NAPI kick (LANDED)
+  *   0075 - xsk_pool_attach   : UMEM-backed BMan pool + PAMU window
+  *   0076 - xsk_pool_detach   : FMan BMI quiescence
+  *   0077 - rx_hook           : ZC RX with xdp_do_redirect
+@@ -28,10 +28,12 @@
+ #include <linux/types.h>
+ #include <linux/errno.h>
+ #include <linux/printk.h>
++#include <linux/netdevice.h>
++#include <net/xdp_sock_drv.h>
+ 
+ #include "dpaa_flavor.h"
++#include "dpaa_eth.h"
+ 
+-struct dpaa_priv;
+ struct qman_fq;
+ struct qm_dqrr_entry;
+ struct xsk_buff_pool;
+@@ -66,10 +68,43 @@ static int af_xdp_pool_xsk_pool_detach(struct dpaa_priv *priv, u16 queue_id)
+ return -EOPNOTSUPP;
+ }
+ 
++/*
++ * af_xdp_pool_xsk_wakeup - kick the NAPI/QMan portal for an XSK queue
++ *
++ * Patch 0074 (Phase 1 hot-path wake gate, spec sec 5.2):
++ *   For XDP_WAKEUP_RX, resolve the NAPI associated with the qband and
++ *   schedule it via napi_schedule_irqoff() so the dpaa_eth_poll() loop
++ *   re-runs and drains any pending DQRR entries into the XSK fill ring.
++ *
++ *   The qmap[].napi slot is populated by the flavor module's future
++ *   xsk_pool_attach (patch 0075) once the dedicated XSK BMan channel
++ *   and its NAPI context have been brought up.  Until that lands, the
++ *   slot reads NULL and we return -ENOENT so the XSK core sees a clean
++ *   error (no NAPI bound on this qband) instead of NULL-deref'ing in
++ *   the IRQ-off scheduler path.  XDP_WAKEUP_TX handling lands with
++ *   patch 0078 (qman_p_irqsource_add poke of the egress portal).
++ */
+ static int af_xdp_pool_xsk_wakeup(struct dpaa_priv *priv, u32 queue_id,
+   u32 flags)
+ {
+-return -EOPNOTSUPP;
++struct napi_struct *napi;
++
++if (!priv)
++return -EINVAL;
++if (queue_id >= DPAA1_XSK_MAX_QBANDS)
++return -EINVAL;
++
++napi = READ_ONCE(priv->qmap[queue_id].napi);
++if (!napi)
++return -ENOENT;
++
++if (flags & XDP_WAKEUP_RX) {
++if (!napi_if_scheduled_mark_missed(napi))
++napi_schedule_irqoff(napi);
++}
++
++/* XDP_WAKEUP_TX path arrives with patch 0078. */
++return 0;
+ }
+ 
+ static void af_xdp_pool_xsk_set_rx_need_wakeup(struct dpaa_priv *priv,
+-- 
+2.39.5
+

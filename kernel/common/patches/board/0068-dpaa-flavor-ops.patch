@@ -1,0 +1,243 @@
+From: vyos-ls1046a-build M0 implementation <noreply@vyos-ls1046a-build>
+Date: 2026-05-26
+Subject: [PATCH 1/2] dpaa: introduce pcd_ops / qmgmt_ops flavor abstraction
+
+Introduce two ops tables (struct dpaa_pcd_ops, struct dpaa_qmgmt_ops) and a
+flavor_priv void pointer in struct dpaa_priv. The two ops tables are
+RCU-protected singletons registered by an optional flavor module via
+dpaa_register_flavor_ops() / dpaa_unregister_flavor_ops(). When no flavor
+module is loaded, both ops pointers are NULL and the core dpaa driver
+exhibits zero behavioural change vs. mainline.
+
+This is the in-tree replacement for the removed sdk_dpaa FM_PORT_SetPCD()
+callback. Future flavor modules (FLAVOR=vpp AF_XDP zero-copy, FLAVOR=ask2
+nft flowtable offload) implement these tables to install PCD trees, manage
+XSK pools, etc. without touching dpaa_eth core code.
+
+Spec reference: specs/dpaa1-afxdp-modernization-spec.md sec 3 + sec 5.1 (M0).
+No call sites are wired in this patch -- that lands in 0069.
+
+Signed-off-by: vyos-ls1046a-build <noreply@vyos-ls1046a-build>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/Kconfig b/drivers/net/ethernet/freescale/dpaa/Kconfig
+index 2b56066..14d3905 100644
+--- a/drivers/net/ethernet/freescale/dpaa/Kconfig
++++ b/drivers/net/ethernet/freescale/dpaa/Kconfig
+@@ -9,3 +9,13 @@ menuconfig FSL_DPAA_ETH
+ 	  supporting the Freescale QorIQ chips.
+ 	  Depends on Freescale Buffer Manager and Queue Manager
+ 	  driver and Frame Manager Driver.
++
++config DPAA_FLAVOR_OPS
++	bool "DPAA: enable flavor ops abstraction (pcd_ops / qmgmt_ops)"
++	depends on FSL_DPAA_ETH
++	default y
++	help
++	  Compile in the dpaa_register_flavor_ops() / dpaa_unregister_flavor_ops()
++	  hooks so an out-of-tree or in-tree flavor module can attach PCD trees
++	  and XSK pool management to dpaa_eth without touching core code.
++	  Safe to leave on: with no flavor module loaded, behaviour is unchanged.
+diff --git a/drivers/net/ethernet/freescale/dpaa/Makefile b/drivers/net/ethernet/freescale/dpaa/Makefile
+index 4f23e79..0926c74 100644
+--- a/drivers/net/ethernet/freescale/dpaa/Makefile
++++ b/drivers/net/ethernet/freescale/dpaa/Makefile
+@@ -10,4 +10,5 @@ ccflags-y += -I$(FMAN)
+ obj-$(CONFIG_FSL_DPAA_ETH) += fsl_dpa.o
+ 
+ fsl_dpa-objs += dpaa_eth.o dpaa_ethtool.o dpaa_eth_sysfs.o
++fsl_dpa-$(CONFIG_DPAA_FLAVOR_OPS) += dpaa_flavor.o
+ CFLAGS_dpaa_eth.o := -I$(src)
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+index 7ed659e..5e9cc55 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -127,6 +127,9 @@ struct dpaa_eth_swbp {
+ 	struct xdp_frame *xdpf;
+ };
+ 
++struct dpaa_pcd_ops;
++struct dpaa_qmgmt_ops;
++
+ struct dpaa_priv {
+ 	struct dpaa_percpu_priv __percpu *percpu_priv;
+ 	struct dpaa_bp *dpaa_bp;
+@@ -173,6 +176,13 @@ struct dpaa_priv {
+ 	bool rx_tstamp; /* Rx timestamping enabled */
+ 
+ 	struct bpf_prog *xdp_prog;
++
++	/* Flavor ops abstraction (M0). NULL on stock mainline behaviour;
++	 * populated by an optional flavor module (FLAVOR=vpp, FLAVOR=ask2).
++	 */
++	const struct dpaa_pcd_ops   __rcu *pcd_ops;
++	const struct dpaa_qmgmt_ops __rcu *qmgmt_ops;
++	void *flavor_priv;
+ };
+ 
+ /* from dpaa_ethtool.c */
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.c b/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.c
+new file mode 100644
+index 0000000..27931f0
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.c
+@@ -0,0 +1,70 @@
++// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0-or-later
++/*
++ * dpaa_flavor.c - flavor ops registration for fsl_dpa
++ *
++ * Two RCU-protected singletons (dpaa_pcd_ops, dpaa_qmgmt_ops) plus a single
++ * registration mutex. At most one flavor module may be registered at a
++ * time; second registrant gets -EBUSY. Unregister is synchronous and
++ * waits for in-flight RCU readers via synchronize_rcu().
++ *
++ * Spec: specs/dpaa1-afxdp-modernization-spec.md sec 3 + sec 5.1 (M0).
++ */
++
++#include <linux/export.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/rcupdate.h>
++
++#include "dpaa_eth.h"
++#include "dpaa_flavor.h"
++
++static DEFINE_MUTEX(dpaa_flavor_lock);
++
++static const struct dpaa_pcd_ops   __rcu *dpaa_pcd_ops_global;
++static const struct dpaa_qmgmt_ops __rcu *dpaa_qmgmt_ops_global;
++
++int dpaa_register_flavor_ops(const struct dpaa_pcd_ops *pcd_ops,
++			     const struct dpaa_qmgmt_ops *qmgmt_ops)
++{
++	if (!pcd_ops && !qmgmt_ops)
++		return -EINVAL;
++
++	mutex_lock(&dpaa_flavor_lock);
++	if (rcu_access_pointer(dpaa_pcd_ops_global) ||
++	    rcu_access_pointer(dpaa_qmgmt_ops_global)) {
++		mutex_unlock(&dpaa_flavor_lock);
++		return -EBUSY;
++	}
++	rcu_assign_pointer(dpaa_pcd_ops_global,   pcd_ops);
++	rcu_assign_pointer(dpaa_qmgmt_ops_global, qmgmt_ops);
++	mutex_unlock(&dpaa_flavor_lock);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(dpaa_register_flavor_ops);
++
++void dpaa_unregister_flavor_ops(void)
++{
++	mutex_lock(&dpaa_flavor_lock);
++	rcu_assign_pointer(dpaa_pcd_ops_global,   NULL);
++	rcu_assign_pointer(dpaa_qmgmt_ops_global, NULL);
++	mutex_unlock(&dpaa_flavor_lock);
++	synchronize_rcu();
++}
++EXPORT_SYMBOL_GPL(dpaa_unregister_flavor_ops);
++
++void dpaa_priv_attach_flavor_ops(struct dpaa_priv *priv)
++{
++	rcu_read_lock();
++	rcu_assign_pointer(priv->pcd_ops,
++			   rcu_dereference(dpaa_pcd_ops_global));
++	rcu_assign_pointer(priv->qmgmt_ops,
++			   rcu_dereference(dpaa_qmgmt_ops_global));
++	rcu_read_unlock();
++}
++
++void dpaa_priv_detach_flavor_ops(struct dpaa_priv *priv)
++{
++	rcu_assign_pointer(priv->pcd_ops,   NULL);
++	rcu_assign_pointer(priv->qmgmt_ops, NULL);
++	priv->flavor_priv = NULL;
++}
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h b/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h
+new file mode 100644
+index 0000000..a176ad4
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h
+@@ -0,0 +1,84 @@
++/* SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0-or-later */
++/*
++ * dpaa_flavor.h - flavor ops abstraction for fsl_dpa
++ *
++ * Two RCU-protected ops tables let an optional in-tree flavor module attach
++ * extra behaviour to fsl_dpa without touching dpaa_eth core:
++ *   - struct dpaa_pcd_ops   : probe-/remove-time PCD setup (CC trees, HM
++ *                              nodes, Policer profiles, CEETM, etc.).
++ *   - struct dpaa_qmgmt_ops : per-queue ingress hooks, XSK pool attach /
++ *                              detach / wakeup.
++ *
++ * With no flavor module loaded both ops pointers are NULL and the core
++ * driver behaves exactly as in mainline.
++ *
++ * Spec: specs/dpaa1-afxdp-modernization-spec.md sec 3 + sec 5.1 (M0).
++ */
++
++#ifndef __DPAA_FLAVOR_H
++#define __DPAA_FLAVOR_H
++
++#include <linux/types.h>
++#include <linux/list.h>
++#include <linux/seq_file.h>
++#include <linux/netlink.h>
++
++struct dpaa_priv;
++struct qman_fq;
++struct qm_dqrr_entry;
++struct xsk_buff_pool;
++
++/**
++ * struct dpaa_pcd_ops - PCD lifecycle operations
++ * @install:     Called from dpaa_eth_probe() AFTER FMan port setup and FQ
++ *               init, BEFORE register_netdev(). Returning non-zero aborts
++ *               probe.
++ * @teardown:    Called from dpaa_remove() BEFORE unregister_netdev().
++ * @reconfig:    Optional runtime reconfiguration (e.g. VyOS commit).
++ * @dump_state:  Optional debugfs / ethtool dump helper.
++ */
++struct dpaa_pcd_ops {
++	int  (*install)(struct dpaa_priv *priv);
++	void (*teardown)(struct dpaa_priv *priv);
++	int  (*reconfig)(struct dpaa_priv *priv, struct nlattr *params);
++	int  (*dump_state)(struct dpaa_priv *priv, struct seq_file *m);
++};
++
++/**
++ * struct dpaa_qmgmt_ops - per-queue management operations
++ * @alloc_rx_fqs:     Optional: append flavor-specific RX FQs at probe time.
++ * @rx_hook:          Optional per-frame hook called from the QMan DQRR
++ *                    callback BEFORE the normal RX path. Return true to
++ *                    consume the frame; return false to let the default
++ *                    path handle it.
++ * @xsk_pool_attach:  XDP_SETUP_XSK_POOL attach. NULL = AF_XDP ZC unsupported.
++ * @xsk_pool_detach:  XDP_SETUP_XSK_POOL detach.
++ * @xsk_wakeup:       ndo_xsk_wakeup backend.
++ */
++struct dpaa_qmgmt_ops {
++	int  (*alloc_rx_fqs)(struct dpaa_priv *priv, struct list_head *list);
++	bool (*rx_hook)(struct dpaa_priv *priv, struct qman_fq *fq,
++			const struct qm_dqrr_entry *dq);
++	int  (*xsk_pool_attach)(struct dpaa_priv *priv,
++				struct xsk_buff_pool *pool, u16 queue_id);
++	int  (*xsk_pool_detach)(struct dpaa_priv *priv, u16 queue_id);
++	int  (*xsk_wakeup)(struct dpaa_priv *priv, u32 queue_id, u32 flags);
++};
++
++#ifdef CONFIG_DPAA_FLAVOR_OPS
++
++int  dpaa_register_flavor_ops(const struct dpaa_pcd_ops *pcd_ops,
++			      const struct dpaa_qmgmt_ops *qmgmt_ops);
++void dpaa_unregister_flavor_ops(void);
++
++void dpaa_priv_attach_flavor_ops(struct dpaa_priv *priv);
++void dpaa_priv_detach_flavor_ops(struct dpaa_priv *priv);
++
++#else  /* !CONFIG_DPAA_FLAVOR_OPS */
++
++static inline void dpaa_priv_attach_flavor_ops(struct dpaa_priv *priv) {}
++static inline void dpaa_priv_detach_flavor_ops(struct dpaa_priv *priv) {}
++
++#endif /* CONFIG_DPAA_FLAVOR_OPS */
++
++#endif /* __DPAA_FLAVOR_H */

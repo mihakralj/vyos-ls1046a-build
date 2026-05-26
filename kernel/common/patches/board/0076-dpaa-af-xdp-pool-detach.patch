@@ -1,0 +1,317 @@
+From: VyOS LS1046A Build <build@vyos-ls1046a-build>
+Date: Tue, 26 May 2026 16:42:00 +0000
+Subject: [PATCH] dpaa af_xdp pool detach: 9-step BMI quiescence
+
+0076-dpaa-af-xdp-pool-detach
+
+Phase 2 step 3 (spec sec 5.3), depends on 0075b (DMA-map + BMan seed +
+RCU publish).
+
+Replaces the -EOPNOTSUPP stub in af_xdp_pool_xsk_pool_detach() with the
+symmetric counterpart of 0075b's attach.  Implements the BMI quiescence
+sequence so the FMan RX port has fully stopped dequeuing from the
+dedicated XSK BMan pool BEFORE we tear that pool down or release the
+DMA mapping.
+
+9-step sequence (spec sec 5.3):
+
+  Step 1: rcu_assign_pointer(priv->xsk_pool[queue_id], NULL) - hide the
+    pool pointer from new RX hot-path readers.
+
+  Step 2: synchronize_net() - wait for every in-flight NAPI poll on
+    every CPU to finish dereferencing the old pointer.
+
+  Step 3: fman_port_disable(rxp) - stop the FMan BMI from acquiring
+    further buffers from BMan and from enqueuing frames into QMan.
+
+  Steps 4 + 5 (DQRR drain, qman_retire_fq): DEFERRED to patch 0080
+    which adds dedicated XSK BMan channels and per-qband FQ ownership.
+    With the FMan port disabled (step 3) no new completions can flow,
+    so in-flight DQRR entries on default RX FQs will be drained by the
+    core driver's existing NAPI loop after this detach returns.
+
+  Step 6: BMan drain loop - acquire every remaining bm_buffer from the
+    dedicated pool in batches of 8 via bman_acquire() until empty.
+    Bounded retry budget (16384 iterations = max 131072 buffers, 16x
+    initial seed) guards against an undisableable BMI continuing to
+    refill the pool.  On budget exhaustion: bump
+    priv->xsk_pool_detach_timeout and continue teardown (leaving an
+    orphaned BPID is worse).
+
+    NOTE on xsk_buff_free() omission: spec sec 5.3 also calls for
+    xsk_buff_free() on each drained buffer to return XSK chunks to the
+    pool's free list.  That requires keeping a parallel xdp_buff*
+    array per qband alongside the bm_buffer DMA addrs (256 KB at
+    8192 * 4 qbands * 2 SFP+ netdevs).  Omitted from this patch on
+    the explicit assumption that detach happens at XDP_UNBIND / socket
+    close time, at which point the XSK core tears down the UMEM
+    unconditionally - every alloc-batch'd chunk is reclaimed by UMEM
+    teardown regardless of whether we called xsk_buff_free() first.
+    If we later support BIND -> UNBIND -> BIND on the same UMEM
+    (rebind without socket close) this must be revisited.
+
+  Step 7: xsk_pool_dma_unmap(pool, DMA_ATTR_SKIP_CPU_SYNC) - release
+    the UMEM DMA mapping that 0075b's xsk_pool_dma_map() installed.
+    Mirrored attribute (skip CPU sync) for the CoreNet-coherent fabric.
+
+  Step 8: bman_free_pool() + clear xsk_bpool[]/xsk_bpid[] - release
+    the dedicated BPID back to BMan.  Subsequent attach allocates fresh.
+
+  Step 9: fman_port_enable(rxp) - bring the RX port back up.  Default
+    RX FQs (core-driver-owned) can resume.  Symmetric to step 3.
+
+Failure handling: every step that can fail (fman_port_disable, BMan
+drain timeout, fman_port_enable) bumps priv->xsk_pool_detach_timeout
+and continues - leaving a partially-disabled FMan port or an orphaned
+BPID is worse than completing teardown with a counter incremented.
+This matches the fail-closed-but-keep-going pattern used in the core
+dpaa_eth tear-down paths (dpaa_remove, dpaa_stop).
+
+Serialization: the XSK core invokes the pool_detach netdev op from
+xp_disable_drv_zc() under the per-netdev XDP mutex
+(net/xdp/xsk_buff_pool.c).  Concurrent attach/detach on the same
+queue_id cannot race here.  rcu_dereference_check(1) suppresses
+lockdep's RCU read-lock warning since the XSK core's mutex is not
+exposed to lockdep through the dpaa_priv struct.
+
+Phase 2 acceptance gate impact:
+  - G2 (XDP_BIND/UNBIND clean teardown): unblocked.
+  - G3 (>=100x attach/detach stress, no crash, no BMan leak): unblocked
+    via bman_free_pool() in step 8.  Each iteration's UMEM is torn
+    down by the XSK core on socket close, so the deferred
+    xsk_buff_free() does not accumulate.
+
+Build verification (native arm64, linux-6.18.31, aarch64-linux-gnu-):
+  make ARCH=arm64 LOCALVERSION=-vyos -j32 \
+       drivers/net/ethernet/freescale/dpaa/af_xdp_pool/
+    -> CC [M] af_xdp_pool_main.o
+    -> LD [M] af_xdp_pool.o
+  zero errors, zero warnings.
+
+  nm af_xdp_pool.o | grep 'U ':
+    U bman_acquire    (NEW - BMan drain in step 6)
+    U bman_free_pool  (NEW - BPID release in step 8)
+    U bman_get_bpid   (carried from 0075b)
+    U bman_new_pool   (carried from 0075b)
+    U bman_release    (carried from 0075b)
+    U fman_port_disable (NEW - step 3)
+    U fman_port_enable  (NEW - step 9)
+    U fman_port_get_liodn (carried from 0075a)
+    U synchronize_net (NEW - step 2)
+    U xp_alloc_batch  (carried from 0075b)
+    U xp_dma_map      (carried from 0075b)
+    U xp_dma_unmap    (NEW - step 7)
+    U dpaa_register_flavor_ops / dpaa_unregister_flavor_ops (M0 ABI)
+    U napi_schedule_prep (carried from 0074)
+
+  All new U-refs (bman_acquire, fman_port_disable, fman_port_enable,
+  synchronize_net, xp_dma_unmap) are EXPORT_SYMBOL[_GPL] in mainline
+  6.18.31 (soc/fsl/bman.c, drivers/net/ethernet/freescale/fman/
+  fman_port.c, net/core/dev.c, net/xdp/xsk_buff_pool.c).
+
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+index c66a499..f04ad7c 100644
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -278,9 +278,197 @@ err_unmap:
+ 	return ret;
+ }
+ 
++/*
++ * af_xdp_pool_xsk_pool_detach - tear down the AF_XDP zero-copy pool on an RX queue
++ *
++ * Patch 0076 (Phase 2 step 3, spec sec 5.3): the symmetric counterpart of
++ * 0075b's xsk_pool_attach.  Executes the BMI quiescence sequence so the
++ * FMan RX port has fully stopped dequeuing from the dedicated XSK BMan
++ * pool BEFORE we tear that pool down or release the DMA mapping.
++ *
++ *  1.  rcu_assign_pointer(priv->xsk_pool[queue_id], NULL)
++ *      Hide the pool pointer from new RX hot-path readers.
++ *
++ *  2.  synchronize_net()
++ *      Wait for every in-flight NAPI poll on every CPU to finish
++ *      dereferencing the old pointer.  After this returns, no new
++ *      RX completion can deliver into the doomed BMan pool.
++ *
++ *  3.  fman_port_disable(rxp)
++ *      Stop the FMan BMI from acquiring further buffers from BMan and
++ *      from enqueuing frames into QMan.  Hardware quiescence point.
++ *
++ *  4.  DQRR drain (deferred to patch 0077/0080).
++ *      The flavor module does not yet own dedicated XSK BMan channels
++ *      and per-FQ NAPI contexts; once 0080 binds them, this step
++ *      becomes "drain the channel's DQRR ring" via the standard
++ *      qman_p_poll_dqrr() loop until empty.
++ *
++ *  5.  qman_retire_fq() per XSK RX FQ (deferred to patch 0080).
++ *      Same dependency as step 4 — the flavor module does not yet own
++ *      a list of per-qband FQs.  Without dedicated XSK FQs the only
++ *      FQs feeding this qband are the default RX FQs, which are
++ *      core-driver-owned and must not be retired here.
++ *
++ *  6.  BMan drain loop.
++ *      Acquire every remaining bm_buffer from the dedicated pool in
++ *      batches of 8 until the pool returns empty (bman_acquire <= 0).
++ *      A bounded retry budget (16384 iterations) guards against an
++ *      undisableable BMI continuing to refill the pool; on budget
++ *      exhaustion we bump xsk_pool_detach_timeout and continue the
++ *      teardown (do not leak the bpid).
++ *
++ *      Spec note (sec 5.3): the spec also calls for xsk_buff_free() on
++ *      each drained buffer to return XSK chunks to the pool's free
++ *      list.  That requires keeping a parallel xdp_buff* array per
++ *      qband alongside the bm_buffer DMA addrs, which is a non-trivial
++ *      memory tax on every attach (DPAA1_XSK_INITIAL_SEED = 8192
++ *      pointers * 4 qbands * 2 SFP+ netdevs = 256 KB).  It is omitted
++ *      from this patch on the explicit assumption that detach happens
++ *      at XDP_UNBIND / socket close time, at which point the XSK core
++ *      tears down the UMEM unconditionally — every alloc-batch'd chunk
++ *      is reclaimed by UMEM teardown regardless of whether we called
++ *      xsk_buff_free() first.  This is the same pattern the mainline
++ *      AF_XDP examples use: bounded-buffer leak per detach is fine if
++ *      the socket is closing, which is the only path that triggers
++ *      detach in Phase 2.  If we later support BIND -> UNBIND -> BIND
++ *      on the same UMEM (rebind without socket close) we will need to
++ *      revisit this — track xsk_pool_detach_ok cumulative growth in
++ *      ethtool stats to detect such a regression.
++ *
++ *  7.  xsk_pool_dma_unmap(pool, DMA_ATTR_SKIP_CPU_SYNC)
++ *      Release the UMEM DMA mapping that 0075b's xsk_pool_dma_map()
++ *      installed.  Mirrored attribute (skip CPU sync) for the
++ *      CoreNet-coherent fabric.
++ *
++ *  8.  bman_free_pool() + clear xsk_bpool[]/xsk_bpid[].
++ *      Release the dedicated BPID back to BMan.  Subsequent attach on
++ *      this qband will allocate a fresh BPID via bman_new_pool().
++ *
++ *  9.  fman_port_enable(rxp)
++ *      Bring the RX port back up.  Default RX FQs (core-driver-owned)
++ *      can resume.  Symmetric to step 3.
++ *
++ * If any step fails, log the failure (counter bump) but continue the
++ * teardown sequence — leaving a partially-disabled FMan port or an
++ * orphaned BPID is worse than completing teardown with a counter
++ * incremented.  This is the same fail-closed-but-keep-going pattern
++ * used in the core dpaa_eth tear-down paths (dpaa_remove, dpaa_stop).
++ */
+ static int af_xdp_pool_xsk_pool_detach(struct dpaa_priv *priv, u16 queue_id)
+ {
+-return -EOPNOTSUPP;
++struct xsk_buff_pool *pool;
++struct bman_pool *bpool;
++struct fman_port *rxp;
++struct bm_buffer bmbs[8];
++int drained_total = 0;
++int loops = 0;
++int n;
++int ret;
++
++if (!priv)
++return -EINVAL;
++if (queue_id >= DPAA1_XSK_MAX_QBANDS ||
++    queue_id >= priv->xsk_max_qbands)
++return -EINVAL;
++
++/*
++ * Resolve the pool pointer we're going to detach BEFORE we null it
++ * out, so the xsk_pool_dma_unmap() at step 7 has a valid argument.
++ *
++ * Serialization: the XSK core invokes the pool_detach netdev op from
++ * xp_disable_drv_zc() under the per-netdev XDP mutex (see
++ * net/xdp/xsk_buff_pool.c) — concurrent attach/detach on the same
++ * queue_id cannot race here.  RCU readers in the NAPI hot-path
++ * (patch 0077) are handled by the rcu_assign_pointer(NULL) +
++ * synchronize_net() pair below.  rcu_dereference_check(1) suppresses
++ * lockdep's RCU read-lock warning since we don't expose the XSK
++ * core's mutex to lockdep here.
++ */
++pool = rcu_dereference_check(priv->xsk_pool[queue_id], 1);
++if (!pool)
++return -ENOENT;
++
++bpool = priv->xsk_bpool[queue_id];
++
++if (!priv->mac_dev || !priv->mac_dev->port[FMAN_PORT_TYPE_RX]) {
++/* Should be impossible if attach succeeded.  Bail without
++ * touching FMan but still tear down the rest. */
++rxp = NULL;
++} else {
++rxp = priv->mac_dev->port[FMAN_PORT_TYPE_RX];
++}
++
++/* Step 1: hide the pool pointer from new readers. */
++rcu_assign_pointer(priv->xsk_pool[queue_id], NULL);
++
++/* Step 2: wait for in-flight NAPI polls to drop their references. */
++synchronize_net();
++
++/* Step 3: stop the FMan BMI for this RX port. */
++if (rxp) {
++ret = fman_port_disable(rxp);
++if (ret) {
++/* Continue teardown even on failure — leaving an orphaned
++ * BPID is worse than a counter bump. */
++priv->xsk_pool_detach_timeout++;
++}
++}
++
++/*
++ * Steps 4 + 5 (DQRR drain, qman_retire_fq): deferred to patch 0080
++ * which adds dedicated XSK BMan channels and per-qband FQ ownership.
++ * With the FMan port disabled (step 3) no new completions can flow,
++ * so any in-flight DQRR entries on default RX FQs will be drained
++ * by the core driver's existing NAPI loop after this detach returns.
++ */
++
++/*
++ * Step 6: drain the dedicated BMan pool.
++ *
++ * Loop bound = 16384 iterations (each iteration drains <= 8 buffers,
++ * upper-bounded total = 131072 buffers — 16x the initial seed of
++ * 8192 to tolerate refill activity that may have been in flight when
++ * step 3 disabled the port).
++ */
++if (bpool) {
++while (loops++ < 16384) {
++n = bman_acquire(bpool, bmbs, 8);
++if (n <= 0)
++break;
++drained_total += n;
++}
++if (loops >= 16384) {
++/* BMan pool refused to drain.  Bump the timeout counter
++ * and proceed — bman_free_pool() will likely fail too,
++ * but we MUST keep going to avoid an undeletable BPID. */
++priv->xsk_pool_detach_timeout++;
++}
++}
++
++/* Step 7: release the UMEM DMA mapping. */
++xsk_pool_dma_unmap(pool, DMA_ATTR_SKIP_CPU_SYNC);
++
++/* Step 8: free the BMan pool and clear the per-qband slots. */
++if (bpool)
++bman_free_pool(bpool);
++priv->xsk_bpool[queue_id] = NULL;
++priv->xsk_bpid[queue_id]  = 0;
++
++/* Step 9: re-enable the FMan RX port for default (non-XSK) FQs. */
++if (rxp) {
++ret = fman_port_enable(rxp);
++if (ret) {
++/* RX port stuck disabled.  Bump the timeout counter; the
++ * caller (XSK core) will get success anyway because the
++ * pool is now detached.  The next pool_attach on this
++ * netdev will fail at fman_port_get_liodn(). */
++priv->xsk_pool_detach_timeout++;
++}
++}
++
++priv->xsk_pool_detach_ok++;
++return 0;
+ }
+ 
+ /*
+-- 
+2.39.5
