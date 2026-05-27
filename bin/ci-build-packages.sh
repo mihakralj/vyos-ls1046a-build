@@ -84,9 +84,20 @@ for package in $packages; do
     KERNEL_HASH=$( {
       find "$GITHUB_WORKSPACE/data/kernel-config" -maxdepth 1 -name '*.config' -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
       find "$GITHUB_WORKSPACE/data/kernel-patches" -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
+      # kernel/common/ is the canonical home for kernel config fragments and
+      # patches (board/, fixes/, vyos/). Any change here MUST bust the cache;
+      # leaving it out caused CI run 26488626587 to silently hit a stale
+      # cache entry that predated patches 0078+0079 and was missing the DTB.
+      find "$GITHUB_WORKSPACE/kernel/common/kernel-config" -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
+      find "$GITHUB_WORKSPACE/kernel/common/vyos-base"     -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
+      find "$GITHUB_WORKSPACE/kernel/common/patches"       -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
+      find "$GITHUB_WORKSPACE/kernel/common/files"         -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
+      find "$GITHUB_WORKSPACE/kernel/common/scripts"       -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
       cat "$GITHUB_WORKSPACE/bin/ci-setup-kernel.sh" 2>/dev/null
+      cat "$GITHUB_WORKSPACE/bin/ci-stage-kernel.sh" 2>/dev/null
       cat "$GITHUB_WORKSPACE/bin/ci-setup-vyos-build.sh" 2>/dev/null
       cat "$GITHUB_WORKSPACE/bin/ci-build-accel-ppp.sh" 2>/dev/null
+      cat "$GITHUB_WORKSPACE/bin/ci-compile-mono-dtb.sh" 2>/dev/null
       find "$GITHUB_WORKSPACE/board/dtb" -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
     } | sha256sum | cut -c1-16)
     KERNEL_CACHE_ROOT="${RUNNER_TOOL_CACHE:-/tmp}/linux-kernel-cache"
