@@ -153,6 +153,12 @@ cp "$BOARD_PATCH_DIR/0077-dpaa-xsk-max-qbands-default.patch"  "$KERNEL_PATCHES/"
 # instead — af_xdp_pool_init() runs at late_initcall before
 # dpaa_eth_probe()'s register_netdev().
 cp "$BOARD_PATCH_DIR/0079-dpaa-ethtool-expose-xsk-counters.patch" "$KERNEL_PATCHES/"
+# M3-3 step 1: bind a real NAPI to qmap[].napi at xsk_pool_attach time
+# (BSP cpu 0's per-CPU NAPI portal) and stop xsk_set_rx_need_wakeup being
+# a stub. First reviewable slice of Phase 3 per spec sec 5.2 final paragraph
+# + sec 5.4 RX path step 5. No throughput change yet — control-plane
+# wiring; ZC RX/TX datapath lands in 0081+.
+cp "$BOARD_PATCH_DIR/0080-dpaa-af-xdp-pool-bind-napi-and-arm-rx-need-wakeup.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
