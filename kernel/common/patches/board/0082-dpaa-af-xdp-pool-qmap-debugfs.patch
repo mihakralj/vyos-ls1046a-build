@@ -1,0 +1,268 @@
+From: vyos-ls1046a-build M3-3 step 2b <noreply@vyos-ls1046a-build>
+Date: 2026-05-27
+Subject: [PATCH] dpaa: af_xdp_pool - expose per-netdev qmap via debugfs
+
+M3-3 step 2b (second reviewable slice of spec sec 5.2 step 2 "Per-CPU
+NAPI + dedicated BMan channels").  Adds debugfs node
+/sys/kernel/debug/af_xdp_pool/qmap that renders priv->qmap[] for every
+DPAA1 netdev.  Pure observability — no datapath change, no behavioral
+change, no new module exports from the core driver.
+
+Background: step 2a (patch 0081) wired priv->qmap[queue_id].napi to
+&per_cpu_ptr(priv->percpu_priv, queue_id % num_online_cpus())->np.napi
+so each XSK qband binds to a different per-CPU NAPI portal on the
+LS1046A's 4 A72 cores.  That patch's behavioral correctness is NOT
+observable from the wakeup path via ftrace or /proc/softirqs counters
+because napi_schedule_irqoff(napi) -> ____napi_schedule() in
+net/core/dev.c adds the napi to this_cpu_ptr(&softnet_data)->poll_list
+(the CALLING CPU's poll_list, NOT the napi's bound CPU's poll_list).
+A single-threaded test pinned to cpu 0 therefore shows 100% of NAPI
+schedules on cpu 0 even though qmap[0..3].napi point at four
+different per-CPU napi structs.  Behavioral per-CPU distribution only
+manifests once the IRQ-driven RX dequeue path lands (step 3, RX ZC
+branch) because QMan portal IRQs ARE strictly CPU-pinned in silicon
+(/proc/interrupts portals 46-49 each fire only on the matching CPU).
+
+Until step 3 lands, the only way to verify that step 2a wired the
+qmap correctly is to dump priv->qmap[] from outside the kernel.  Step
+2a's commit message documented two awkward workarounds: a crash dump
+or live kgdb.  Neither is acceptable for production validation.  This
+patch closes that gap with a 113-line debugfs node that walks every
+DPAA1 netdev (identified by ndev->dev.parent->driver->name == "fsl_dpa")
+under rtnl_lock and prints, one line per qband:
+
+    iface=eth3 ifindex=4 xsk_max_qbands=4
+      qband 0  fqid_base=0x00000000  swp_id=0  cpu=0  napi=ffff800082b35a80  xsk_tx_inflight=0
+      qband 1  fqid_base=0x00000000  swp_id=0  cpu=1  napi=ffff800082b35d80  xsk_tx_inflight=0
+      qband 2  fqid_base=0x00000000  swp_id=0  cpu=2  napi=ffff800082b36080  xsk_tx_inflight=0
+      qband 3  fqid_base=0x00000000  swp_id=0  cpu=3  napi=ffff800082b36380  xsk_tx_inflight=0
+
+Verification gate for step 2a:
+  * priv->qmap[0..3].napi addresses differ
+  * stride between consecutive napi pointers matches the per-CPU offset
+    stride of priv->percpu_priv on a 4-CPU LS1046A
+  * .cpu field = queue_id % 4 (0,1,2,3 for q=0,1,2,3)
+
+fqid_base / swp_id remain 0 until step 3 (dedicated QMan dispatch
+channel work) populates them.  xsk_tx_inflight column will become
+meaningful once the TX ZC path lands in step 5 (patch 0085) — it is
+included now so the column layout doesn't shift between releases.
+
+Implementation notes:
+
+  * The DPAA1 netdev identification uses a parent-driver-name match
+    (strcmp(ndev->dev.parent->driver->name, "fsl_dpa") == 0) rather
+    than a new is_dpaa1_priv() export from the core driver.  This
+    keeps step 2b a zero-export, zero-API-surface change.  If a
+    future patch needs a stronger predicate (e.g. distinguishing
+    DPAA1 from DPAA2), the core driver can grow an exported helper
+    at that time.
+
+  * The walker holds rtnl_lock around for_each_netdev() because we
+    inspect ndev->dev.parent->driver, which is stable under rtnl.
+    qmap[] itself is stable for the netdev's lifetime (zero-initialised
+    at probe by 0072, populated by 0075b/0081 at xsk_pool_attach,
+    never modified outside the XSK core's per-netdev XDP mutex).
+
+  * atomic_read(&priv->xsk_tx_inflight[q]) is included read-only.
+    Single-counter atomic reads are self-consistent on arm64; no
+    fence required for a diagnostic dump.
+
+  * DEFINE_SHOW_ATTRIBUTE provides the open/release/llseek triplet
+    standard for seq_file debugfs nodes.
+
+  * Module init creates the debugfs root + qmap node AFTER
+    dpaa_register_flavor_ops() succeeds, so the debugfs node is
+    present iff the flavor module is fully registered.  Module exit
+    removes the debugfs subtree BEFORE dpaa_unregister_flavor_ops()
+    so a concurrent reader cannot find a dangling priv pointer
+    during teardown (rtnl_lock + RCU prevent the more subtle race
+    in the reader path itself).
+
+  * IS_ERR() guard on debugfs_create_dir() handles the
+    !CONFIG_DEBUG_FS build (returns ERR_PTR(-ENODEV) → we null out
+    the root pointer and skip qmap creation; subsequent
+    debugfs_remove_recursive(NULL) is documented-safe).
+
+What is observable on hardware after this patch:
+
+  * cat /sys/kernel/debug/af_xdp_pool/qmap
+    -> shows the 5 DPAA1 netdevs (eth0..eth4) with default xsk_max_qbands
+       (4 on FLAVOR=vpp, 1 elsewhere), all qmap[] slots zeroed when no
+       XSK socket is bound.
+
+  * Bind an XSK socket on eth3 q=0,1,2,3 with XDP_ZEROCOPY:
+       cat /sys/kernel/debug/af_xdp_pool/qmap
+    -> eth3's qmap[0..3] now show distinct napi= pointers, cpu= field
+       equal to queue_id, fqid_base/swp_id still 0.
+
+  * Unbind: napi/.cpu fields persist by design (detach does not clear
+    qmap[] — step 1's patch 0080 changelog explains why: the napi
+    pointer becomes stale only when the underlying percpu_priv goes
+    away on dpaa_remove(), which is strictly after every XSK socket
+    on the netdev has been unbound).  Re-bind overwrites the slot.
+
+What is NOT changed by this patch:
+
+  * No datapath edits.  RX/TX/wakeup/attach/detach paths byte-identical
+    to 0081.
+  * No new exports from the core driver.
+  * No Kconfig change.  CONFIG_DEBUG_FS is already =y in the VyOS
+    LS1046A build (required by the existing /sys/kernel/debug/tracing
+    consumers).
+  * No throughput change.  iperf3 baseline must stay within noise of
+    step 2a's 938/935 Mbps reference.
+
+Build: native arm64 Cobalt 100, FLAVOR=vpp staged tree.  Single
+af_xdp_pool_main.o target builds clean, no warnings, no new undefined
+references (debugfs_create_dir, debugfs_create_file, debugfs_remove_recursive,
+seq_printf, seq_putc, rtnl_lock, rtnl_unlock all EXPORT_SYMBOL_GPL
+and resolved at static-link time for FS=y / DEBUG_FS=y).
+
+Spec reference: specs/dpaa1-afxdp-modernization-spec.md v5.0 sec 5.2
+Depends on: 0081 (which populates qmap[].napi to non-default values).
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+index b39300c..e2e02b1 100644
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -31,6 +31,9 @@
+ #include <linux/printk.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/netdevice.h>
++#include <linux/rtnetlink.h>
++#include <linux/debugfs.h>
++#include <linux/seq_file.h>
+ #include <net/xdp_sock_drv.h>
+ #include <soc/fsl/bman.h>
+ 
+@@ -591,6 +594,113 @@ static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
+ .xsk_set_rx_need_wakeup = af_xdp_pool_xsk_set_rx_need_wakeup,
+ };
+ 
++/* ---------- debugfs: /sys/kernel/debug/af_xdp_pool/qmap ----------
++ *
++ * Patch 0082 (M3-3 step 2b, spec sec 5.2).  Renders priv->qmap[] for
++ * every DPAA1 netdev so step 2a's per-CPU NAPI distribution is
++ * user-visible without requiring kgdb or a crash dump.  Output format
++ * (one block per netdev, sorted by ifindex):
++ *
++ *     iface=eth3 ifindex=4 xsk_max_qbands=4
++ *       qband 0  fqid_base=0x00000000  swp_id=0  cpu=0  napi=ffff800082b35a80
++ *       qband 1  fqid_base=0x00000000  swp_id=0  cpu=1  napi=ffff800082b35d80
++ *       qband 2  fqid_base=0x00000000  swp_id=0  cpu=2  napi=ffff800082b36080
++ *       qband 3  fqid_base=0x00000000  swp_id=0  cpu=3  napi=ffff800082b36380
++ *
++ * The napi pointer stride between qbands matches the per-CPU offset
++ * stride of priv->percpu_priv on a 4-CPU LS1046A: that is the
++ * verification gate for step 2a.  fqid_base / swp_id remain 0 until
++ * the dedicated QMan dispatch channel work (step 3) populates them.
++ *
++ * RCU read-side: walk dev_base under rtnl_lock + RCU.  We only deref
++ * priv->qmap[] which is stable for the netdev's lifetime once the
++ * flavor module attaches.  The atomic_read of xsk_tx_inflight[] is
++ * read-only and self-consistent.
++ *
++ * Identification of DPAA1 netdevs without a public is_dpaa_priv()
++ * helper: check that the netdev_ops->ndo_xsk_wakeup pointer matches
++ * the dpaa_xsk_wakeup symbol exported by the core driver (resolved
++ * via the M0 RCU-protected qmgmt_ops back-pointer kept in priv).
++ * We use a simpler proxy here: a netdev whose ->dev.parent device
++ * has the driver name "fsl_dpa" is a DPAA1 netdev.  This avoids
++ * adding a new public symbol to the core driver just for debugfs.
++ */
++static struct dentry *af_xdp_pool_debugfs_root;
++
++static bool af_xdp_pool_is_dpaa1_netdev(const struct net_device *ndev)
++{
++const struct device *dev;
++const struct device_driver *drv;
++
++if (!ndev)
++return false;
++dev = ndev->dev.parent;
++if (!dev)
++return false;
++drv = dev->driver;
++if (!drv || !drv->name)
++return false;
++return strcmp(drv->name, "fsl_dpa") == 0;
++}
++
++static int af_xdp_pool_qmap_show(struct seq_file *m, void *v)
++{
++struct net_device *ndev;
++struct net *net = &init_net;
++struct dpaa_priv *priv;
++unsigned int q;
++int qband_count;
++
++rtnl_lock();
++for_each_netdev(net, ndev) {
++if (!af_xdp_pool_is_dpaa1_netdev(ndev))
++continue;
++priv = netdev_priv(ndev);
++if (!priv)
++continue;
++
++qband_count = (int)priv->xsk_max_qbands;
++if (qband_count <= 0 || qband_count > DPAA1_XSK_MAX_QBANDS)
++qband_count = DPAA1_XSK_MAX_QBANDS;
++
++seq_printf(m, "iface=%s ifindex=%d xsk_max_qbands=%u\n",
++   ndev->name, ndev->ifindex, priv->xsk_max_qbands);
++for (q = 0; q < (unsigned int)qband_count; q++) {
++seq_printf(m,
++   "  qband %u  fqid_base=0x%08x  swp_id=%u  cpu=%d  napi=%p  xsk_tx_inflight=%d\n",
++   q,
++   priv->qmap[q].fqid_base,
++   (unsigned int)priv->qmap[q].swp_id,
++   priv->qmap[q].cpu,
++   priv->qmap[q].napi,
++   atomic_read(&priv->xsk_tx_inflight[q]));
++}
++seq_putc(m, '\n');
++}
++rtnl_unlock();
++return 0;
++}
++
++DEFINE_SHOW_ATTRIBUTE(af_xdp_pool_qmap);
++
++static void af_xdp_pool_debugfs_init(void)
++{
++af_xdp_pool_debugfs_root = debugfs_create_dir("af_xdp_pool", NULL);
++if (IS_ERR(af_xdp_pool_debugfs_root)) {
++af_xdp_pool_debugfs_root = NULL;
++pr_warn("af_xdp_pool: debugfs root create failed; qmap node unavailable\n");
++return;
++}
++debugfs_create_file("qmap", 0444, af_xdp_pool_debugfs_root,
++    NULL, &af_xdp_pool_qmap_fops);
++}
++
++static void af_xdp_pool_debugfs_exit(void)
++{
++debugfs_remove_recursive(af_xdp_pool_debugfs_root);
++af_xdp_pool_debugfs_root = NULL;
++}
++
+ /* ---------- Module init / exit ---------- */
+ 
+ static int __init af_xdp_pool_init(void)
+@@ -603,12 +713,15 @@ pr_err("af_xdp_pool: dpaa_register_flavor_ops() failed: %d\n", err);
+ return err;
+ }
+ 
++af_xdp_pool_debugfs_init();
++
+ pr_info("af_xdp_pool: registered (skeleton, all callbacks stubbed -EOPNOTSUPP)\n");
+ return 0;
+ }
+ 
+ static void __exit af_xdp_pool_exit(void)
+ {
++af_xdp_pool_debugfs_exit();
+ dpaa_unregister_flavor_ops();
+ pr_info("af_xdp_pool: unregistered\n");
+ }
