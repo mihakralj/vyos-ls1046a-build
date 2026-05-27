@@ -171,6 +171,7 @@ cp "$BOARD_PATCH_DIR/0081-dpaa-af-xdp-pool-distribute-napi-across-cpus.patch" "$
 # be verified per-netdev without kgdb or a crash dump. Pure observability —
 # zero datapath change, zero new core-driver exports. Spec sec 5.2.
 cp "$BOARD_PATCH_DIR/0082-dpaa-af-xdp-pool-qmap-debugfs.patch" "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0082b-dpaa-dedicated-qman-channels-per-qband.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
