@@ -58,7 +58,7 @@ Single source of truth for "where are we?" across sessions. Each milestone maps 
 | **M0**    | Shared abstraction (`pcd_ops` + `qmgmt_ops` + flavor-attach hooks + retro-attach + `NETDEV_XDP_ACT_XSK_ZEROCOPY` advertise) | 3.1, 3.2, 3.3, 5.1 | **dut-validated** | Patches 0068/0069a/0070/0072; verified on DUT 2026-05-26 (kernel 6.18.31-vyos), iperf3 13.1 Gbps baseline, kallsyms shows ksymtab anchors |
 | **M1**    | Phase 1 — `ndo_xsk_wakeup` trampoline + `af_xdp_pool.ko` skeleton (copy-mode AF_XDP, thermal/idle win) | 5.2, 5.4 | **dut-validated** | Patches 0073 (skeleton) + 0074 (wakeup NAPI kick); `af_xdp_pool: registered` banner at t≈0.88 s |
 | **M2-s1** | Phase 2 stage-1 — XSK pool attach gate: kconfig autoload (Option B, `CONFIG_DPAA_AF_XDP_POOL=y`), ethtool xsk_* counters, attach-side BMan pool seed + PAMU window + DMA map | 5.3 step 1, 5.3 step 2 | **dut-validated** | Patches 0071/0075a/0075b/0075c/0077/0079 + Option B kconfig (commit 7dc1768). DUT 2026-05-27: `bind(XDP_ZEROCOPY)=0`, 12 counters exposed |
-| **M2-s2** | Phase 2 stage-2 — XSK pool detach safety + RX-ring drain validation + 100× bind/unbind churn | 5.3 step 3, 5.3 step 4 | **in-progress** | Patch 0076 detach landed. Sleep-in-RCU bug found 2026-05-27 (dispatcher held RCU read lock around sleeping callback → `tree_plugin.h:332` WARN → watchdog reset); fix in commit 039a50c (in-place amend of 0071). CI run 26491829912 building. After deploy: stage-2 hold probe + churn loop + counter sanity |
+| **M2-s2** | Phase 2 stage-2 — XSK pool detach safety + RX-ring drain validation + 100× bind/unbind churn | 5.3 step 3, 5.3 step 4 | **dut-validated** | Patch 0076 detach + commit `039a50c` sleep-in-RCU fix (dispatcher captures fn pointers under RCU then drops the lock before invoking the sleeping callback). DUT 2026-05-27 ISO `2026.05.27-0501-rolling` kernel `6.18.33-vyos`: stage-1 bind `rc=0`, stage-2 `--hold 30` clean detach, **100× churn** → attach_ok=102 / detach_ok=102, zero fails, zero timeouts, zero RCU WARN, zero stall, zero oops. RX drain count 0 (expected — XSKMAP redirect is M3-3 territory). |
 | **M3-3**  | Phase 3 — True ZC RX/TX NAPI datapath, NAPI-hooked refill, `xsk_bman_starve` watchdog, `xsk_tx_inflight` backpressure, qband mapping, cluster-aware NAPI pin | 5.4 | **planned** | Phase 3a scaffold (patch 0072) landed M0. Remaining work: real `rx_hook`, `xsk_xmit`, refill loop in `dpaa_eth_napi_poll`, TX-inflight budget, hits ≥ 7 Gbps acceptance gate |
 | **M3-3b** | Phase 3b — CC steering (exact-match), Parser→CC→HM→QMan ordering | 5.5 | **planned** | ucode-210 gated; requires `priv->fman_caps` capability layer (M0 augmentation TBD) |
 | **M3-3c** | Phase 3c — HM offload (VLAN/MPLS strip-insert) | 5.6 | **planned** | ucode-210 gated |
@@ -68,7 +68,7 @@ Single source of truth for "where are we?" across sessions. Each milestone maps 
 
 ### Current execution focus
 
-**M2-s2** is the active milestone. CI run **26491829912** is building the fix for the M2-s2 sleep-in-RCU regression (commit `039a50c` on branch `dpaa1`). Once the ISO is on the DUT and a clean bind→close→detach cycle is verified, M2-s2 advances to dut-validated and we open M3-3.
+**M3-3** is the active milestone. M2-s2 closed on 2026-05-27 with commit `039a50c` (sleep-in-RCU dispatcher fix) shipped in ISO `2026.05.27-0501-rolling` and validated on the DUT: 102 attach / 102 detach across stage-1, stage-2 (`--hold 30`), and 100× churn loop — zero error-counter bumps, zero RCU WARN, zero stall. The Phase 2 control-plane is structurally complete. M3-3 (true ZC RX/TX datapath: real `rx_hook`, `xsk_xmit`, NAPI-hooked refill, qband mapping, ≥ 7 Gbps acceptance gate) is now open.
 
 ### Reviewer-feedback delta coverage (audit table)
 
@@ -78,7 +78,7 @@ The seven reviewer deltas from the v4.2 audit are implementation requirements th
 |---|---|---|---|
 | 1. NAPI-hooked refill + `xsk_bman_starve` + batch 32→256 escalation | M3-3 | planned | §5.4 (lines 18, 403, 405, 411, 413, 633) |
 | 2. CEETM CGR HW tail-drop + `xsk_tx_inflight` ≤ 1024 + low-water 512 + `XDP_USE_NEED_WAKEUP` | M3-3 + M3-3e | planned | §5.4 + §5.8 (lines 233, 403, 467, 468, 609, 634, 736) |
-| 3. 9-step `fman_port_disable(rxp)`-anchored detach, 10 ms link bounce accepted | M2-s2 | **in-progress** (sleep-in-RCU fix is its prerequisite) | §5.3 step 3 (lines 18, 260, 391, 399) |
+| 3. 9-step `fman_port_disable(rxp)`-anchored detach, 10 ms link bounce accepted | M2-s2 | **dut-validated** (sleep-in-RCU fix `039a50c` 2026-05-27, 100× churn clean) | §5.3 step 3 (lines 18, 260, 391, 399) |
 | 4. `DPAA1_XSK_INITIAL_SEED=8192` + Open Question 9 rate-scaling | M2-s1 | landed | §5.3 step 2 (lines 383, 415) |
 | 5. `priv->fman_caps` bitmask + per-cap `-ENOTSUPP` + `hw_offload_unavailable` counter + ucode-106 row | M0 augmentation, gates M3-3b/3c/3d/3e | planned | §5.1 (lines 205, 208–212, 303–306, 310, 316–318) |
 | 6. Parser→CC→HM→QMan ordering normative; OQ5 closed | M3-3b doc | landed (doc) | §5.5 (lines 493, 731) |
