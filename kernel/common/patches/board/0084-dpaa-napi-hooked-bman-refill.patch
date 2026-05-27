@@ -1,6 +1,6 @@
-From: vyos-ls1046a-build M3-3 step 4 <noreply@vyos-ls1046a-build>
+From: vyos-ls1046a-build M3-3 step 4 v2 <noreply@vyos-ls1046a-build>
 Date: 2026-05-27
-Subject: [PATCH] dpaa: NAPI-hooked BMan refill from the XSK fill ring
+Subject: [PATCH] dpaa: NAPI-hooked BMan refill from the XSK fill ring (v2: single-CPU pinned)
 
 M3-3 step 4 (spec sec 6.1.3, "NAPI-hooked BMan refill"). Wires the
 xsk_pool fill-ring -> BMan-pool top-up loop into the per-CPU NAPI
@@ -102,15 +102,39 @@ Files touched:
     - implement af_xdp_pool_napi_refill()
     - wire .napi_refill into af_xdp_pool_qmgmt_ops
 
+v2 (2026-05-27) — option-c single-CPU pinning. v1 (which lacked the
+pin) hard-hung the DUT under sustained load: per-CPU NAPI tails (up
+to 4 CPUs concurrently) raced on the XSK fill ring's single-producer
+cursor (the XSK xp_alloc_batch_apply path is SPSC by uapi/linux/if_xdp.h
+contract), corrupting handles[] entries and feeding bogus DMA cookies
+to bman_release(). BMan CCSR rejected the resulting buffer enqueue
+with "Invalid Command Verb"; the lockup cascaded into an RCU stall on
+CPU#3 + indefinite soft-lockup requiring power-cycle (observed DUT
+2026-05-27 with vpp-flavor ISO + xsk_bind_test eth4 0 --hold 20 +
+peer ping flood). The fix: each qband has a single owner CPU
+(priv->qmap[q].cpu, populated by M3-3 step 2a's per_cpu_ptr() wiring).
+Add an early-return `if (raw_smp_processor_id() != priv->qmap[q].cpu)
+continue;` inside the per-qband loop body so only the qband's owner
+CPU drives xsk_buff_alloc_batch() + bman_release() for that qband.
+Single-writer no-atomic, no shared cursor race, zero lock overhead.
+
+Other CPUs simply skip the qband — they will service their own
+qbands on their own NAPI completion (per-CPU NAPI distribution is
+the whole point of M3-3 step 2a; this v2 patch is the consumer that
+finally exploits it). With 4 qbands × 4 CPUs (the LS1046A maximum)
+each refill burst on each CPU iterates over exactly one qband body;
+the other three iterations short-circuit.
+
 Spec reference: specs/dpaa1-afxdp-modernization-spec.md v5.0 sec 6.1.3.
-Depends on: 0068..0083 (full M0+M1+M2+M3-3-step-1+2a+2b+2c+3 stack).
+Depends on: 0068..0083 (full M0+M1+M2+M3-3-step-1+2a+2b+2c+3 stack);
+the .cpu field is populated by step 2a (0081) at xsk_pool_attach time.
 
 
 diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
 index 06273ec..a78a3a4 100644
 --- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
 +++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
-@@ -583,6 +583,72 @@ xsk_set_rx_need_wakeup(pool);
+@@ -583,6 +583,88 @@ xsk_set_rx_need_wakeup(pool);
  }
  }
  
@@ -135,13 +159,22 @@ index 06273ec..a78a3a4 100644
 + * internally serialises 8 at a time, so the burst size is a
 + * scheduling rather than a hardware constraint.
 + *
-+ * Strictly NAPI-context. No additional locking required:
++ * Strictly NAPI-context. v2 single-CPU pinning: only the CPU that
++ * owns the qband (priv->qmap[q].cpu, wired by M3-3 step 2a) runs
++ * the xsk_buff_alloc_batch + bman_release body for that qband.
++ * Other CPUs short-circuit via the early-return below. This makes
++ * each qband's XSK fill ring single-writer (no cursor race) and
++ * eliminates the BMan "Invalid Command Verb" hang observed with v1.
++ *
++ * No additional locking required:
 + *   - priv->xsk_bpool[] is mutated only at attach/detach time,
 + *     which is rtnl-serialised; the dpaa_eth_poll() reader sees
 + *     a stable pointer.
 + *   - priv->xsk_pool[] is RCU-protected; rcu_dereference inside
 + *     the caller's read-section.
 + *   - bman_release() is NAPI-safe per soc/fsl/bman.h.
++ *   - priv->qmap[q].cpu is stable for the netdev's lifetime once
++ *     xsk_pool_attach() has run (M3-3 step 2a invariant).
 + *
 + * Note: the public BMan API does NOT expose a pool depth query,
 + * so depth-driven gating (DPAA1_XSK_REFILL_THRESHOLD / MIN_DEPTH)
@@ -170,6 +203,13 @@ index 06273ec..a78a3a4 100644
 +if (!pool)
 +continue;
 +
++/* v2: single-CPU pin. Only the qband-owner CPU drives this
++ * qband's XSK fill-ring -> BMan refill. Other CPUs skip,
++ * making each qband's fill ring single-producer.
++ */
++if (raw_smp_processor_id() != priv->qmap[q].cpu)
++continue;
++
 +n = xsk_buff_alloc_batch(pool, handles, ARRAY_SIZE(handles));
 +for (i = 0; i < n; i++)
 +bm_buffer_set64(&bmbs[i], xsk_buff_xdp_get_dma(handles[i]));
@@ -183,7 +223,7 @@ index 06273ec..a78a3a4 100644
  /* ---------- Ops tables ---------- */
  
  static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
-@@ -592,6 +658,7 @@ static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
+@@ -592,6 +674,7 @@ static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
  .xsk_pool_detach        = af_xdp_pool_xsk_pool_detach,
  .xsk_wakeup             = af_xdp_pool_xsk_wakeup,
  .xsk_set_rx_need_wakeup = af_xdp_pool_xsk_set_rx_need_wakeup,
