@@ -146,6 +146,13 @@ cp "$BOARD_PATCH_DIR/0075b-dpaa-af-xdp-pool-attach-bman-seed-rcu.patch"        "
 cp "$BOARD_PATCH_DIR/0075c-dpaa-af-xdp-pool-remove-liodn-gate.patch"           "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0076-dpaa-af-xdp-pool-detach.patch"      "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0077-dpaa-xsk-max-qbands-default.patch"  "$KERNEL_PATCHES/"
+# 0078 (dpaa MODULE_SOFTDEP on af_xdp_pool) intentionally NOT staged:
+# under CONFIG_FSL_DPAA_ETH=y and CONFIG_DPAA_AF_XDP_POOL=y the softdep
+# is unreachable (modprobe never loads either of them). Autoload is
+# guaranteed by the =y flip in kernel/common/kernel-config/08-dpaa1.config
+# instead — af_xdp_pool_init() runs at late_initcall before
+# dpaa_eth_probe()'s register_netdev().
+cp "$BOARD_PATCH_DIR/0079-dpaa-ethtool-expose-xsk-counters.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
