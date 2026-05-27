@@ -164,12 +164,14 @@ index b39300c..e2e02b1 100644
 + * read-only and self-consistent.
 + *
 + * Identification of DPAA1 netdevs without a public is_dpaa_priv()
-+ * helper: check that the netdev_ops->ndo_xsk_wakeup pointer matches
-+ * the dpaa_xsk_wakeup symbol exported by the core driver (resolved
-+ * via the M0 RCU-protected qmgmt_ops back-pointer kept in priv).
-+ * We use a simpler proxy here: a netdev whose ->dev.parent device
-+ * has the driver name "fsl_dpa" is a DPAA1 netdev.  This avoids
-+ * adding a new public symbol to the core driver just for debugfs.
++ * helper: a DPAA1 netdev's ->dev.parent points at the fsl_dpaa_mac
++ * platform device (per AGENTS.md "DPAA1 driver split": two drivers
++ * cooperate — fsl_dpaa_mac owns the MAC, fsl_dpa registers the netdev
++ * and owns netdev_priv as struct dpaa_priv).  So the predicate is
++ * "parent device driver name == fsl_dpaa_mac".  The original
++ * "fsl_dpa" guess was wrong — that driver name belongs to the child
++ * dpaa-ethernet.N platform device, which is NOT what ndev->dev.parent
++ * points to on LS1046A 6.18.x.  Verified on DUT 2026-05-27.
 + */
 +static struct dentry *af_xdp_pool_debugfs_root;
 +
@@ -186,7 +188,7 @@ index b39300c..e2e02b1 100644
 +drv = dev->driver;
 +if (!drv || !drv->name)
 +return false;
-+return strcmp(drv->name, "fsl_dpa") == 0;
++return strcmp(drv->name, "fsl_dpaa_mac") == 0;
 +}
 +
 +static int af_xdp_pool_qmap_show(struct seq_file *m, void *v)
