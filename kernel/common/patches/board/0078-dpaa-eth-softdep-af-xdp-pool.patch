@@ -1,0 +1,102 @@
+From: VyOS LS1046A maintainers <ls1046a@vyos.local>
+Date: 2026-05-27
+Subject: [PATCH] dpaa: declare softdep on af_xdp_pool so it autoloads with the netdev
+
+Spec section 3.3 (dpaa1-afxdp-modernization-spec.md v4.4) prescribes
+MODULE_SOFTDEP("pre: af_xdp_pool") on dpaa_eth.ko so that any module
+autoload that pulls in fsl_dpaa_eth (uevent for the FMan platform
+device, "ip link set fm1-mac3 up", systemd network bring-up) also
+pulls in af_xdp_pool.ko before dpaa_eth.ko's register_netdev() runs.
+
+Without this softdep, the observed behaviour on the deployed v4.4 ISO
+(2026.05.27-0151-rolling, kernel 6.18.33-vyos) is:
+
+  1. fsl_dpaa_eth.ko is autoloaded by the FMan platform-device uevent
+     at boot.  af_xdp_pool.ko is NOT autoloaded - nothing in modules.dep
+     or modules.alias references it.
+  2. dpaa_eth_probe() calls register_netdev() with priv->qmgmt_ops==NULL
+     (no flavor module registered yet).  net_dev->xdp_features therefore
+     lacks NETDEV_XDP_ACT_XSK_ZEROCOPY.
+  3. Userspace bind(XDP_ZEROCOPY) on the netdev fails at the XSK core
+     layer with -EOPNOTSUPP (95), before any DPAA1 code runs, because
+     xdp_features doesn't advertise the capability.
+  4. An operator who knows the answer does `modprobe af_xdp_pool` once.
+     af_xdp_pool_init() calls dpaa_register_flavor_ops(), the
+     0069a-dpaa-flavor-ops-retro-attach.patch retro-attach path walks
+     every existing dpaa_priv and republishes xdp_features with
+     NETDEV_XDP_ACT_XSK_ZEROCOPY set, and subsequent binds succeed.
+
+That "do modprobe once per boot" step is the gap.  Three options were
+considered:
+
+  (a) CONFIG_DPAA_AF_XDP_POOL=m -> =y in 08-dpaa1.config.
+      Forces the flavor module into the kernel image.  Costs ~few KB
+      of kernel text on every flavor (default, vpp, ask) regardless of
+      whether AF_XDP zero-copy is ever used.  Hardest to revert.
+
+  (b) /etc/modules-load.d/dpaa-af-xdp-pool.conf via a chroot hook.
+      ISO-only fix.  Doesn't help anyone running this kernel patch
+      series on a stock distro without the VyOS image.  Bypasses the
+      kernel-side fix.
+
+  (c) MODULE_SOFTDEP("pre: af_xdp_pool") in dpaa_eth.c.  This patch.
+      In-tree fix.  modprobe(8) honours softdep via depmod-generated
+      modules.softdep; the chain "load fsl_dpaa_eth" -> "first
+      pre-load af_xdp_pool" is enforced wherever modprobe is the
+      loader.  Empty cost for !DPAA setups (the softdep is only
+      consulted if dpaa_eth is being loaded).  Reversible by removing
+      one line.  Upstreamable.
+
+We pick (c).  Precedent: lib/libcrc32c.c carries
+MODULE_SOFTDEP("pre: crc32c") for the same reason (consumer wants the
+provider loaded first, but the provider isn't a hard link-time
+dependency).
+
+Effect after this patch:
+
+  - depmod produces a modules.softdep line:
+        softdep fsl_dpaa_eth pre: af_xdp_pool
+  - The uevent autoload of fsl_dpaa_eth now first triggers
+    `modprobe af_xdp_pool` (via kmod_module_probe_insert_module's
+    softdep walker), which runs af_xdp_pool_init() and registers
+    qmgmt_ops BEFORE dpaa_eth_probe() runs register_netdev().
+  - dpaa_eth_probe() sees qmgmt_ops != NULL, sets
+    NETDEV_XDP_ACT_XSK_ZEROCOPY in net_dev->xdp_features in the
+    initial publish, and the post-up bind(XDP_ZEROCOPY) probe
+    succeeds without the manual modprobe step.
+
+Verification on the next ISO build:
+
+  1. lsmod shortly after boot must show af_xdp_pool present BEFORE
+     any user runs modprobe.  Check via
+        sudo systemd-analyze critical-chain network-online.target
+     plus `journalctl -k | grep -E 'af_xdp_pool|fsl_dpaa_eth' | head`.
+  2. ip -d link show eth4 | grep xdp-features must include
+     'xsk-zerocopy' (or equivalent, depending on iproute2 version)
+     immediately after boot, BEFORE any manual modprobe.
+  3. bin/dpaa1-xsk-bind-probe.py eth4 0 4096 must return rc=0 on a
+     freshly booted system with NO `modprobe af_xdp_pool` step.
+
+Backwards compatibility: a kernel without af_xdp_pool.ko available
+(e.g. CONFIG_DPAA_AF_XDP_POOL is not set) sees the softdep, fails to
+find the module, logs a warning via modprobe, and continues loading
+dpaa_eth.  Same end-state as today: dpaa_eth runs without flavor ops
+and netdev comes up without NETDEV_XDP_ACT_XSK_ZEROCOPY.  No
+regression for !DPAA-AF_XDP setups.
+
+Signed-off-by: VyOS LS1046A maintainers <ls1046a@vyos.local>
+---
+ drivers/net/ethernet/freescale/dpaa/dpaa_eth.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 1111111111aa..1111111111bb 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -3,3 +3,4 @@ module_exit(dpaa_unload);
+ 
+ MODULE_LICENSE("Dual BSD/GPL");
+ MODULE_DESCRIPTION("FSL DPAA Ethernet driver");
++MODULE_SOFTDEP("pre: af_xdp_pool");
+-- 
+2.39.5
