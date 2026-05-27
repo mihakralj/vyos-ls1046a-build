@@ -110,7 +110,7 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c 
 index 06273ec..a78a3a4 100644
 --- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
 +++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
-@@ -583,6 +583,77 @@ xsk_set_rx_need_wakeup(pool);
+@@ -583,6 +583,72 @@ xsk_set_rx_need_wakeup(pool);
  }
  }
  
@@ -141,16 +141,22 @@ index 06273ec..a78a3a4 100644
 + *     a stable pointer.
 + *   - priv->xsk_pool[] is RCU-protected; rcu_dereference inside
 + *     the caller's read-section.
-+ *   - bman_pool_get_count() and bman_release() are NAPI-safe
-+ *     per soc/fsl/bman.h.
++ *   - bman_release() is NAPI-safe per soc/fsl/bman.h.
++ *
++ * Note: the public BMan API does NOT expose a pool depth query,
++ * so depth-driven gating (DPAA1_XSK_REFILL_THRESHOLD / MIN_DEPTH)
++ * is not used here. Refill is unconditional, naturally rate-
++ * limited by the XSK fill ring -- xsk_buff_alloc_batch() returns
++ * 0 when userspace has not deposited any free chunks, in which
++ * case we skip bman_release() and the counter does not increment.
 + */
 +static void af_xdp_pool_napi_refill(struct dpaa_priv *priv)
 +{
-+struct xdp_buff *handles[256];
-+struct bm_buffer bmbs[256];
++struct xdp_buff *handles[32];
++struct bm_buffer bmbs[32];
 +struct xsk_buff_pool *pool;
 +struct bman_pool *bpool;
-+u32 depth, want, n, i;
++u32 n, i;
 +u16 q;
 +
 +if (!priv)
@@ -164,18 +170,7 @@ index 06273ec..a78a3a4 100644
 +if (!pool)
 +continue;
 +
-+depth = bman_pool_get_count(bpool);
-+if (depth >= DPAA1_XSK_REFILL_THRESHOLD)
-+continue;
-+
-+if (depth < DPAA1_XSK_MIN_DEPTH) {
-+priv->xsk_bman_starve++;
-+want = 256;
-+} else {
-+want = 32;
-+}
-+
-+n = xsk_buff_alloc_batch(pool, handles, want);
++n = xsk_buff_alloc_batch(pool, handles, ARRAY_SIZE(handles));
 +for (i = 0; i < n; i++)
 +bm_buffer_set64(&bmbs[i], xsk_buff_xdp_get_dma(handles[i]));
 +if (n) {
@@ -188,7 +183,7 @@ index 06273ec..a78a3a4 100644
  /* ---------- Ops tables ---------- */
  
  static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
-@@ -592,6 +663,7 @@ static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
+@@ -592,6 +658,7 @@ static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
  .xsk_pool_detach        = af_xdp_pool_xsk_pool_detach,
  .xsk_wakeup             = af_xdp_pool_xsk_wakeup,
  .xsk_set_rx_need_wakeup = af_xdp_pool_xsk_set_rx_need_wakeup,
