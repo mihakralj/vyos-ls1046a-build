@@ -1,0 +1,176 @@
+From: vyos-ls1046a-build M3-3 step 1 <noreply@vyos-ls1046a-build>
+Date: 2026-05-27
+Subject: [PATCH] dpaa: af_xdp_pool - bind NAPI to qmap + arm rx-need-wakeup
+
+M3-3 step 1 (first reviewable slice of Phase 3) per spec sec 5.2 final
+paragraph and sec 5.4 RX path step 5.  Two minimal, runtime-observable
+behaviour changes inside the af_xdp_pool.ko flavor module:
+
+1. xsk_pool_attach now populates priv->qmap[queue_id].napi with a real
+   NAPI context (BSP cpu 0's per-CPU NAPI portal) and sets
+   priv->qmap[queue_id].cpu = 0.  Detach already clears the slot via
+   the RCU-null + synchronize_net() path that the existing
+   xsk_pool_dma_unmap predecessor provides; the napi pointer becomes
+   stale only after the percpu_priv goes away on dpaa_remove(), which
+   is strictly after every XSK socket on the netdev has been
+   unbound -- so READ_ONCE() in xsk_wakeup is safe across the netdev
+   lifetime.
+
+   Effect: af_xdp_pool_xsk_wakeup() no longer returns -ENOENT for a
+   bound XSK socket.  napi_schedule_irqoff() is now reachable on
+   sendto(MSG_DONTWAIT).  Until dedicated per-qband BMan channels +
+   per-qband NAPI contexts land in a later M3-3 subpatch, all four
+   qbands share cpu 0's NAPI; this is correct because dpaa_fq_to_qband()
+   is still the Phase 3a stub that returns 0 for every FQID, so every
+   bound qband currently maps to the same RX FQ-set served by cpu 0's
+   portal anyway.  Spec sec 5.4 "Queue mapping correctness" items 3-5.
+
+2. af_xdp_pool_xsk_set_rx_need_wakeup() stops being a stub.  For each
+   bound xsk_pool[qband] that requested XDP_USE_NEED_WAKEUP at bind
+   time (xsk_uses_need_wakeup(pool) == true), assert the rx
+   need-wakeup flag via xsk_set_rx_need_wakeup(pool).  Called from
+   dpaa_eth_poll() AFTER napi_complete_done() (see core patch 0072).
+
+   Effect: userspace xsk_ring_prod__needs_wakeup() on the fill ring
+   now reports 1 when the driver is idle and is waiting for an
+   explicit wakeup.  The matching xsk_clear_rx_need_wakeup() lives in
+   the RX hot-path branch (later M3-3 subpatch) where it is cleared
+   the moment we dequeue any descriptor for a given qband.  Until that
+   lands the flag stays asserted across consecutive idle polls -- which
+   is correct: there is no ZC RX datapath yet, so the driver IS idle
+   and userspace MUST issue an explicit wakeup to resume RX servicing.
+
+This patch is INTENTIONALLY narrow.  It does NOT introduce:
+  * the qband RX ZC branch in the per-FD dequeue callback
+    (xdp_buff translation + bpf_prog_run_xdp + xdp_do_redirect)
+  * NAPI-hooked BMan refill (xsk_buff_alloc_batch + bman_release)
+  * the TX ZC path (xsk_tx_peek_release_desc_batch + qman_enqueue)
+  * the TxConf -> XSK Completion Ring recycle
+  * the xsk_tx_inflight backpressure budget
+  * dedicated XSK BMan channels
+  * cluster-aware NAPI / CPU pinning
+
+Those land in 0081+ subpatches and gate the >= 7 Gbps M3-3 acceptance.
+
+What is observable on hardware after this patch alone:
+  * Existing M2-s2 attach/detach 100x churn loop still passes
+    (attach_ok = 102 / detach_ok = 102, no error counter bumps).
+  * sudo /tmp/xsk_bind_test eth4 0 --zerocopy --hold 30 returns
+    bind() rc = 0 (unchanged from M2-s2).
+  * sendto(xsk_fd, ..., MSG_DONTWAIT, ...) now returns 0 instead of
+    -ENXIO (-ENOENT mapped) while the socket is bound with
+    XDP_USE_NEED_WAKEUP.  Trace this via
+    /sys/kernel/tracing/events/napi/napi_poll: a poll event MUST
+    fire on cpu 0 within 1 ms of every wakeup.
+  * xsk_ring_prod__needs_wakeup(&xsk->fr) returns 1 after each idle
+    poll completes when XDP_USE_NEED_WAKEUP was set at bind time.
+
+No throughput change is expected: there is no ZC RX/TX datapath yet.
+The patch is a control-plane wiring deliverable.  iperf3 baseline on
+DUT must stay within noise of the M2-s2 reference (~945 Mbps on RJ45
+eth0 management interface, no FMan ZC traffic).
+
+Build: native arm64 Cobalt 100, FLAVOR=vpp staged tree.  Single .o
+target builds clean, no warnings, no new undefined references beyond
+the existing M2-s2 set (xsk_set_rx_need_wakeup is a static-inline in
+<net/xdp_sock_drv.h>).
+
+Spec reference: specs/dpaa1-afxdp-modernization-spec.md v4.3 sec 5.2
+final paragraph + sec 5.4 RX path step 5.
+Depends on: 0068, 0069, 0070, 0071, 0072, 0073, 0074, 0075a, 0075b,
+            0075c, 0076, 0077, 0079.
+
+Signed-off-by: vyos-ls1046a-build <noreply@vyos-ls1046a-build>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+index 16afb1d..bfc1506 100644
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -263,9 +263,30 @@ return -ENODEV;
+ 	 * call synchronize_net() before touching any DMA mappings or BMan
+ 	 * pool state.
+ 	 */
+-	rcu_assign_pointer(priv->xsk_pool[queue_id], pool);
+-	priv->xsk_pool_attach_ok++;
+-	return 0;
++rcu_assign_pointer(priv->xsk_pool[queue_id], pool);
++
++/*
++ * M3-3 step 1: bind a real NAPI context to this qband so
++ * af_xdp_pool_xsk_wakeup() can schedule it on the userspace
++ * sendto(MSG_DONTWAIT) wakeup path.  Until dedicated per-qband
++ * BMan channels + per-qband NAPI contexts land (later M3-3
++ * subpatch), DPAA1 has one NAPI per online CPU and any of them
++ * will service this qband's RX FQs.  Pick the BSP CPU's NAPI
++ * (cpu 0) — it always exists, and napi_schedule_irqoff() is
++ * cross-CPU safe.  qmap[].cpu/.swp_id/.fqid_base remain 0 for
++ * now; the cluster-aware pin lands with the dedicated channel
++ * subpatch.  Spec sec 5.4 "Queue mapping correctness" item 3-5.
++ */
++{
++struct dpaa_percpu_priv *pcpu;
++
++pcpu = per_cpu_ptr(priv->percpu_priv, 0);
++WRITE_ONCE(priv->qmap[queue_id].napi, &pcpu->np.napi);
++WRITE_ONCE(priv->qmap[queue_id].cpu, 0);
++}
++
++priv->xsk_pool_attach_ok++;
++return 0;
+ 
+ err_unmap:
+ 	xsk_pool_dma_unmap(pool, DMA_ATTR_SKIP_CPU_SYNC);
+@@ -504,10 +525,52 @@ napi_schedule_irqoff(napi);
+ return 0;
+ }
+ 
++/*
++ * af_xdp_pool_xsk_set_rx_need_wakeup - arm the XSK rx-need-wakeup flag
++ *
++ * Called from dpaa_eth_poll() AFTER napi_complete_done() and BEFORE
++ * re-arming the QMan DQRR interrupt (see dpaa_eth.c patch 0072).
++ *
++ * For each bound xsk_pool[qband] that requested XDP_USE_NEED_WAKEUP at
++ * bind time (xsk_uses_need_wakeup(pool) == true), assert the rx
++ * need-wakeup flag.  Userspace sees the flag via
++ * xsk_ring_prod__needs_wakeup() on the fill ring and issues
++ * sendto(MSG_DONTWAIT) which lands in af_xdp_pool_xsk_wakeup() and
++ * schedules the NAPI captured in priv->qmap[queue_id].napi.
++ *
++ * The matching xsk_clear_rx_need_wakeup() lives in the RX hot-path
++ * branch (later M3-3 subpatch) where it is cleared the moment we
++ * dequeue any descriptor for a given qband.  Until that lands the
++ * flag stays asserted across consecutive idle polls — which is
++ * correct: userspace knows the driver is idle and that an explicit
++ * wakeup is required to resume RX servicing.
++ *
++ * @np is the per-CPU NAPI portal that just completed its poll; the
++ * spec calls for arming the flag on any pool routed to this portal.
++ * Phase 3a maps every FQID to qband 0 (dpaa_fq_to_qband stub), so
++ * any portal completing a poll arms ALL bound qbands.  Once the
++ * flavor module wires the real qband→portal map (dedicated XSK
++ * BMan channels), this iteration narrows to the portal's qbands.
++ *
++ * Spec sec 5.2 final paragraph + sec 5.4 RX path step 5.
++ */
+ static void af_xdp_pool_xsk_set_rx_need_wakeup(struct dpaa_priv *priv,
+        struct dpaa_napi_portal *np)
+ {
+-/* Nothing to do until the ZC datapath lands in patch 0079. */
++struct xsk_buff_pool *pool;
++u16 q;
++
++if (!priv)
++return;
++
++for (q = 0; q < priv->xsk_max_qbands && q < DPAA1_XSK_MAX_QBANDS; q++) {
++pool = rcu_dereference(priv->xsk_pool[q]);
++if (!pool)
++continue;
++if (!xsk_uses_need_wakeup(pool))
++continue;
++xsk_set_rx_need_wakeup(pool);
++}
+ }
+ 
+ /* ---------- Ops tables ---------- */
