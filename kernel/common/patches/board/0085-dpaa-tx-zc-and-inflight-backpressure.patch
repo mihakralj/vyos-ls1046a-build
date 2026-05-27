@@ -120,7 +120,7 @@ index a78a3a4..0f72230 100644
  
  #include "dpaa_flavor.h"
  #include "dpaa_eth.h"
-@@ -654,6 +655,188 @@ priv->xsk_bman_refill_batches++;
+@@ -654,6 +655,194 @@ priv->xsk_bman_refill_batches++;
  }
  }
  
@@ -208,7 +208,13 @@ index a78a3a4..0f72230 100644
 +     dpaa_max_num_txqs()];
 +
 +err = -EBUSY;
-+for (j = 0; j < DPAA_ENQUEUE_RETRIES; j++) {
++/* DPAA_ENQUEUE_RETRIES is a #define private to dpaa_eth.c
++ * (value 100000); inline the same constant here rather than
++ * exporting it through dpaa_eth.h. The value is a stable upper
++ * bound on QMan EQCR slot-refill latency under congestion --
++ * it has not changed since the driver was upstreamed.
++ */
++for (j = 0; j < 100000; j++) {
 +err = qman_enqueue(egress_fq, &fd);
 +if (err != -EBUSY)
 +break;
@@ -421,7 +427,21 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h b/drivers/net/eth
 index 113bc17..f6f077a 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h
-@@ -58,6 +58,16 @@ struct dpaa_pcd_ops {
+@@ -45,6 +45,13 @@ struct dpaa_pcd_ops {
+ 	int  (*dump_state)(struct dpaa_priv *priv, struct seq_file *m);
+ };
+ 
++/* Forward declaration -- struct qm_fd is defined in <soc/fsl/qman.h>
++ * but we deliberately do NOT include that header here to keep this
++ * inter-module ABI surface minimal. Callers and implementors of
++ * tx_conf_zc must pull in qman.h themselves.
++ */
++struct qm_fd;
++
+ /**
+  * struct dpaa_qmgmt_ops - per-queue management operations
+  * @alloc_rx_fqs:     Optional: append flavor-specific RX FQs at probe time.
+@@ -58,6 +65,16 @@ struct dpaa_pcd_ops {
   * @xsk_set_rx_need_wakeup: arm XSK rx-need-wakeup at NAPI completion.
   * @napi_refill:      M3-3 step 4 - top up BMan pool from XSK fill ring
   *                    at NAPI completion. Spec sec 6.1.3.
