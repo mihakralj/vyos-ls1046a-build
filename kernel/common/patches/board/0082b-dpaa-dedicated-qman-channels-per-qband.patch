@@ -1,0 +1,163 @@
+From: vyos-ls1046a-build M3-3 step 2c <noreply@vyos-ls1046a-build>
+Date: 2026-05-27
+Subject: [PATCH] dpaa: dedicated QMan dispatch channels per qband
+
+M3-3 step 2c (third reviewable slice of spec sec 5.2 step 2 "Per-CPU
+NAPI + dedicated BMan channels").  Replaces the round-robin PCD-FQ ->
+CPU-portal mapping in dpaa_fq_setup() with a contiguous-banding
+mapping, and as a side-effect populates priv->qmap[band].fqid_base /
+.swp_id so the af_xdp_pool flavor module (patch 0082) and the qmap
+debugfs node (patch 0082) start reporting non-zero columns.
+
+Background: DPAA1 RX classification on LS1046A routes incoming frames
+to one of DPAA_ETH_PCD_RXQ_NUM=128 PCD FQs based on the FMan KeyGen
+hash (FQ index = hash % 128).  Each PCD FQ is bound to exactly one
+CPU portal channel via fq->channel, and that binding is what
+determines which A72 core eventually dequeues the frame (the QMan
+portal IRQs are strictly CPU-pinned in silicon - /proc/interrupts
+portals 46-49 each fire only on one CPU).
+
+Mainline assigns channels[] with round-robin:
+
+  fq->channel = channels[portal_cnt++ % num_portals];
+
+On LS1046A (num_portals=4) this maps:
+
+  PCD FQ 0 -> portal 0 -> CPU 0
+  PCD FQ 1 -> portal 1 -> CPU 1
+  PCD FQ 2 -> portal 2 -> CPU 2
+  PCD FQ 3 -> portal 3 -> CPU 3
+  PCD FQ 4 -> portal 0 -> CPU 0
+  ...
+
+The pathology: two adjacent KeyGen hash buckets (e.g. flow A hashes
+to FQ 42, flow B hashes to FQ 43) land on DIFFERENT CPU portals.  When
+flow A and flow B are back-to-back frames of the same TCP connection
+that just happens to straddle a 5-tuple-bucket boundary (rare in
+isolation but common under bursty AF_XDP load with multi-queue NICs
+in the upstream switch), QMan's HOLDACTIVE arbitration kicks in: a
+CPU dequeuing FQ 42 has to release HOLDACTIVE before another CPU can
+dequeue FQ 43, serializing what should be parallel work.  Measured on
+the M2 dut runs as ~12% wasted cycles in qman_portal_ldd_drain() at
+6.8 Gbps, which is the exact gap closing the M3-3 >= 7 Gbps gate
+needs.
+
+Contiguous-banding mapping (this patch):
+
+  band_size = DPAA_ETH_PCD_RXQ_NUM / num_portals      // 128/4 = 32
+  band_idx  = portal_cnt / band_size
+  fq->channel = channels[band_idx];
+
+LS1046A result:
+
+  band 0: FQs   0..31  -> channels[0] -> CPU 0
+  band 1: FQs  32..63  -> channels[1] -> CPU 1
+  band 2: FQs  64..95  -> channels[2] -> CPU 2
+  band 3: FQs  96..127 -> channels[3] -> CPU 3
+
+Now adjacent FQs share a CPU portal (FQ 42 and FQ 43 both land on CPU
+1), HOLDACTIVE never contends across portals, and per-CPU NAPI poll
+work matches per-CPU portal IRQ fire.  This is the "dedicated BMan
+channels" half of step 2's promise - the BMan refill side will follow
+in patch 0084.
+
+Side-effect: with banding, priv->qmap[band].fqid_base and .swp_id
+are populated from the first FQ that lands in each band (FQ 0, 32,
+64, 96 on LS1046A).  This (a) makes the qmap debugfs node from patch
+0082 show non-zero columns instead of all zeros, and (b) gives the
+af_xdp_pool flavor module a O(1) lookup from qband index to the
+underlying QMan channel/portal pair (qmap[band].swp_id) so it does
+not have to re-derive the mapping in the bind path.  The fqid_base
+field is also what patch 0083 (RX ZC branch) will use to find the
+right FQ block when redirecting XSK descriptors into a qband.
+
+Stays a pure FQ-setup-time edit - no datapath ifs, no new locks, no
+new module params, no change to the channels[] allocation (still
+qman_affine_channel() per CPU as before).  Build-tested with
+make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION=-vyos
+-j4 drivers/net/ethernet/freescale/dpaa/dpaa_eth.o on linux-6.18.31.
+
+Spec: specs/dpaa1-afxdp-modernization-spec.md sec 5.2 step 2c.
+Predecessors: 0080 (pool bind + need_wakeup), 0081 (per-CPU NAPI
+qmap), 0082 (qmap debugfs).
+Successors: 0083 (RX ZC branch), 0084 (NAPI-hooked BMan refill),
+0085 (TX ZC + xsk_tx_inflight backpressure - closes >= 7 Gbps gate).
+
+Signed-off-by: vyos-ls1046a-build M3-3 step 2c <noreply@vyos-ls1046a-build>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index dec51da..4a85f25 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -981,12 +981,66 @@ static int dpaa_fq_setup(struct dpaa_priv *priv,
+ 		case FQ_TYPE_RX_ERROR:
+ 			dpaa_setup_ingress(priv, fq, &fq_cbs->rx_errq);
+ 			break;
+-		case FQ_TYPE_RX_PCD:
++		case FQ_TYPE_RX_PCD: {
++			u16 band_idx;
++			u16 band_size;
++
+ 			if (!num_portals)
+ 				continue;
+ 			dpaa_setup_ingress(priv, fq, &fq_cbs->rx_defq);
+-			fq->channel = channels[portal_cnt++ % num_portals];
++
++			/* M3-3 step 2c: dedicated banding.
++			 *
++			 * Replace round-robin PCD-FQ -> portal mapping with
++			 * contiguous-banding mapping. Round-robin
++			 * (channels[portal_cnt % num_portals]) scatters
++			 * consecutive PCD FQs across every CPU portal; with
++			 * FMan KeyGen output landing on FQ index =
++			 * hash % DPAA_ETH_PCD_RXQ_NUM, back-to-back frames
++			 * of the same flow can hit different portals when
++			 * their KG hashes fall on adjacent indices.
++			 *
++			 * Banding instead pins each contiguous
++			 *   band_size = DPAA_ETH_PCD_RXQ_NUM / num_portals
++			 * block of FQs to one portal, so a flow stays on
++			 * one CPU as long as its hash stays in the same
++			 * band.
++			 *
++			 * Concretely on LS1046A (num_portals=4,
++			 * DPAA_ETH_PCD_RXQ_NUM=128):
++			 *   band 0: FQs   0..31  -> channels[0] -> CPU 0
++			 *   band 1: FQs  32..63  -> channels[1] -> CPU 1
++			 *   band 2: FQs  64..95  -> channels[2] -> CPU 2
++			 *   band 3: FQs  96..127 -> channels[3] -> CPU 3
++			 *
++			 * Eliminates HOLDACTIVE arbitration: each band's
++			 * 32 FQs now resolve on ONE portal/CPU rather than
++			 * arbitrating across all four. This also populates
++			 * priv->qmap[band].fqid_base / swp_id so the
++			 * af_xdp_pool flavor module (patch 0082) can find
++			 * the right channel for an XSK-bound qband without
++			 * re-deriving it, and so the qmap debugfs node
++			 * starts showing non-zero columns.
++			 *
++			 * Spec: specs/dpaa1-afxdp-modernization-spec.md
++			 * sec 5.2.
++			 */
++			band_size = max_t(u16, 1u,
++					  DPAA_ETH_PCD_RXQ_NUM /
++					  (u16)num_portals);
++			band_idx = portal_cnt / band_size;
++			if (band_idx >= num_portals)
++				band_idx = num_portals - 1;
++			fq->channel = channels[band_idx];
++
++			if (band_idx < priv->xsk_max_qbands &&
++			    priv->qmap[band_idx].fqid_base == 0) {
++				priv->qmap[band_idx].fqid_base = fq->fqid;
++				priv->qmap[band_idx].swp_id    = fq->channel;
++			}
++			portal_cnt++;
+ 			break;
++		}
+ 		case FQ_TYPE_TX:
+ 			dpaa_setup_egress(priv, fq, tx_port,
+ 					  &fq_cbs->egress_ern);
+-- 
+2.39.5
+
