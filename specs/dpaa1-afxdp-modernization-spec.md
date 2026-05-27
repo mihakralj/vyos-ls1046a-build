@@ -4,8 +4,22 @@
 **Kernel base:** Linux 6.18.x mainline (VyOS rolling release)
 **Silicon:** NXP LS1046A — Cortex-A72 ×4 (2 clusters of 2 over CCI-400), FMan v3 Rev>1, QMan, BMan, MURAM (384 KiB), PAMU, SEC 5.4 (CAAM), CEETM, SerDes/XFI PCS, CoreNet
 **FMan microcode:** package `fsl_fman_ucode_ls1046a_r1.0_210.x.bin` (NXP LSDK, available on the DUT, loaded by U-Boot from SPI `mtd4` at boot)
-**Document version:** v4.2, 2026-05-26
-**Supersedes:** v4.1, v4.0, v3.0 (unified vpp+ask2), v0.9, v2.0, v2.1
+**Document version:** v4.4, 2026-05-27
+**Supersedes:** v4.3, v4.2, v4.1, v4.0, v3.0 (unified vpp+ask2), v0.9, v2.0, v2.1
+
+**What changed in v4.4 (2026-05-27):**
+
+- **M2-stage-1 hardware validation PASS recorded.** Patches `0075a` (validation arms + LIODN accessor), `0075b` (DMA-map + BMan seed + RCU publish), and `0075c` (LIODN gate removal) landed on the `dpaa1` branch and are functionally verified on the live DUT (LS1046A Mono Gateway DK, ISO `vyos-2026.05.27-0151-rolling-LS1046A-default-arm64.iso`, kernel `6.18.33-vyos`). `bind(XDP_ZEROCOPY)` on `eth4` queue 0 with `chunk_size=4096` returns `rc=0` — `af_xdp_pool_xsk_pool_attach` is reached, all five surviving validation arms pass, `xsk_pool_dma_map()` succeeds on dma-direct (PAMU in firmware bypass), `bman_new_pool()` succeeds, the seed loop completes, and `rcu_assign_pointer(priv->xsk_pool[0], pool)` publishes. See `bin/dpaa1-xsk-bind-probe.py` (130-line Python `ctypes` probe, no `libxdp`/`libbpf` dependency) and qdrant memory `dpaa1-af-xdp-zero-copy M2-stage-1 PASS 2026-05-27`.
+- **`chunk_size` vs `frame_size` clarified for userspace integrators.** `DPAA1_MIN_UMEM_CHUNK = 3840` is the **kernel-visible** `xsk_pool_get_rx_frame_size()` value, which is what the driver's validation arm compares. Userspace `XDP_UMEM_REG` callers pass the raw `chunk_size`, which the XSK core (`net/xdp/xdp_umem.c`) requires to be a power-of-2 ≤ PAGE_SIZE. On arm64 with a 4 KiB page kernel the **only valid `chunk_size` is 4096**; it yields `frame_size = 4096 − headroom(0) − XDP_PACKET_HEADROOM(256) = 3840`, which exactly equals `DPAA1_MIN_UMEM_CHUNK`. §5.3 step 1 is the kernel-side check; integrators must use `chunk_size=4096` in their `xdp_umem_reg` struct or `XDP_UMEM_REG` returns `-EINVAL` before the driver is even called. Documented in §5.3.
+- **Implementation status of `MODULE_SOFTDEP("pre: af_xdp_pool")` (§3.3).** As of 2026-05-27 the soft-dep is **specified but not yet wired** in `dpaa_eth.c`. Consequence on the deployed ISO: `bind(XDP_ZEROCOPY)` on a DPAA1 netdev returns `-EOPNOTSUPP` (95) at the XSK core layer until an operator runs `modprobe af_xdp_pool` once per boot, because `dev->xdp_features` lacks `NETDEV_XDP_ACT_XSK_ZEROCOPY` until `af_xdp_pool_init()` registers `af_xdp_pool_qmgmt_ops`. Three remediation paths (decision pending — option (b) preferred as zero-kernel-change):
+  - (a) Flip `CONFIG_DPAA_AF_XDP_POOL` from `=m` to `=y` in `kernel/common/kernel-config/08-dpaa1.config` (kernel rebuild).
+  - (b) Ship `/etc/modules-load.d/dpaa-af-xdp-pool.conf` via a chroot hook (ISO-only, no kernel touch).
+  - (c) Add the soft-dep tag — `MODULE_SOFTDEP("pre: af_xdp_pool")` — alongside the existing `MODULE_DEVICE_TABLE(of, dpaa_match)` in `dpaa_eth.c`. This is what §3.3 already prescribes; it just hasn't been written. A small follow-up patch (≤5 lines) on the `dpaa1` branch.
+
+**What changed in v4.3 (2026-05-26):**
+
+- §5.3 `DPAA1_MIN_UMEM_CHUNK` value formally **lowered from 4096 to 3840** (the actual kernel-derived `frame_size` on arm64 4K-page kernels), reconciling the previously-floating "v4.3" reference in §5.3 line 377 with the header version banner. No behavioural change; this is a documentation-only correction of an off-by-`XDP_PACKET_HEADROOM` in the v4.1/4.2 text.
+- Driver-side LIODN sanity gate (`if (!fman_port_get_liodn(rxp)) return -ENODEV`) removed as patch `0075c` after on-DUT diagnosis: the gate was a holdover from the PPC reference design (LIODN==0 ⇒ unprobed port). On arm64 Mono Gateway DK, `fsl,liodn` is absent from every FMan-port DT node (verified in `arch/arm64/boot/dts/freescale/fsl-ls1046a.dtsi`) and `fsl_pamu` is PPC-only (`depends on PPC_E500MC`), so `fman_port_get_liodn()` always returns 0 in steady state and the gate fail-closed every single attach. The accessor itself (`fman_port_get_liodn` global, introduced in `0075a`) is retained as an observability hook for future Phase 4 single-MAC dual-flavor coexistence (where it would feed a VSP-bifurcated LIODN map).
 
 **What changed in v4.2:**
 
