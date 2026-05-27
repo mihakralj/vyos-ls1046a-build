@@ -1,0 +1,136 @@
+From: vyos-ls1046a-build M3-3 step 2a <noreply@vyos-ls1046a-build>
+Date: 2026-05-27
+Subject: [PATCH] dpaa: af_xdp_pool - distribute qband NAPI across online CPUs
+
+M3-3 step 2a (first reviewable slice of spec sec 5.2 "Per-CPU NAPI +
+dedicated BMan channels").  Single behavioural change inside
+af_xdp_pool_xsk_pool_attach():
+
+Patch 0080 (M3-3 step 1) populated priv->qmap[queue_id].napi with the
+BSP cpu 0's per-CPU NAPI portal unconditionally — a deliberate stopgap.
+With four qbands (DPAA1_XSK_MAX_QBANDS=4) and four online cores
+(NR_CPUS=4 on LS1046A), every bound XSK ended up on the same NAPI on
+the same QMan SWP, defeating the per-CPU portal model.  Step 2a fixes
+this by distributing qbands across the available CPUs:
+
+    target_cpu = (int)queue_id % num_online_cpus();
+
+This is the simplest correct mapping:
+
+  * queue_id 0 -> cpu 0 (cluster 0)
+  * queue_id 1 -> cpu 1 (cluster 0)
+  * queue_id 2 -> cpu 2 (cluster 1)
+  * queue_id 3 -> cpu 3 (cluster 1)
+
+LS1046A's CCI-400 fabric (spec sec 4.7) groups cores 0-1 and 2-3 into
+two clusters.  The trivial modulo mapping above keeps the first two
+qbands on cluster 0 and the last two on cluster 1 — adequate for the
+4-queue=4-cpu common case.  A cluster-aware refinement that explicitly
+prefers same-cluster RX qband + consumer CPU lives in spec sec 5.2
+item 5 and is deferred to a later subpatch that lands together with
+the consumer-CPU advisory sysfs (/sys/class/net/<iface>/dpaa/cluster_map).
+
+Per-CPU NAPI is reachable today because dpaa_eth.c's percpu_priv is
+allocated via alloc_percpu(struct dpaa_percpu_priv) — every online
+CPU has its own &per_cpu_ptr(priv->percpu_priv, cpu)->np.napi already
+servicing that CPU's QMan SWP.  Calling napi_schedule_irqoff() against
+a NAPI bound to a remote CPU is documented-safe (the schedule itself
+is cross-CPU; the poll runs on the owning CPU's softirq).
+
+Detach symmetry: af_xdp_pool_xsk_pool_detach() does not touch qmap[].
+That is intentional — the NAPI pointer becomes stale only when the
+underlying percpu_priv goes away on dpaa_remove(), which is strictly
+after every XSK socket on the netdev has been unbound.  READ_ONCE() in
+af_xdp_pool_xsk_wakeup() therefore remains safe across the netdev
+lifetime; subsequent re-bind on the same queue_id overwrites the slot.
+
+What is observable on hardware after this patch alone (versus 0080):
+
+  * /tmp/xsk_bind_test eth4 q=0..3 with XDP_USE_NEED_WAKEUP and a
+    100x sendto(MSG_DONTWAIT) burst PER queue_id.  ftrace
+    napi_schedule_irqoff events MUST fire on:
+      cpu 0 for q=0, cpu 1 for q=1, cpu 2 for q=2, cpu 3 for q=3
+    (was: 100% on cpu 0 for every queue_id under 0080).
+  * /proc/interrupts QMan portal lines 46-49 distribute across CPUs
+    1:1 with the qbands you bind.
+  * Existing M2-s2 100x churn loop still passes (attach_ok=detach_ok,
+    zero error counters, zero RCU/WARN/oops).
+
+What is NOT done in this patch (lands in later subpatches):
+
+  * Dedicated BMan channels per qband.  Today every qband still
+    consumes priv->bp[0] (the kernel default pool); the FMan port's
+    RX BMI continues to dispatch via the existing pool channel +
+    HOLDACTIVE discipline.  Step 2b replaces with one bman_new_pool()
+    per qband.
+  * Cluster-aware refinement (CCI-400 same-cluster preference for
+    consumer pinning).
+  * NAPI IRQ affinity hint (netif_set_napi_irq_affinity_hint).
+    Spec sec 5.2 item 4.
+
+No throughput change is expected on a single-queue test: there is
+still no ZC RX/TX datapath.  iperf3 baseline on the DUT must stay
+within noise of the M3-3 step 1 reference (~942 Mbps on RJ45 eth0).
+
+Build: native arm64 Cobalt 100, FLAVOR=vpp staged tree.  Single .o
+target builds clean, no warnings, num_online_cpus() is a kernel
+static-inline in <linux/cpumask.h> already included via
+<linux/netdevice.h> in af_xdp_pool_main.c's existing include set.
+
+Spec reference: specs/dpaa1-afxdp-modernization-spec.md v5.0 sec 5.2
+"Per-CPU NAPI + dedicated BMan channels" - queue mapping correctness
+items 3-5.
+Depends on: 0068, 0069, 0069a, 0070, 0071, 0072, 0073, 0074, 0075a,
+            0075b, 0075c, 0076, 0077, 0079, 0080.
+
+Signed-off-by: vyos-ls1046a-build <noreply@vyos-ls1046a-build>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -266,22 +266,30 @@
+ rcu_assign_pointer(priv->xsk_pool[queue_id], pool);
+ 
+ /*
+- * M3-3 step 1: bind a real NAPI context to this qband so
+- * af_xdp_pool_xsk_wakeup() can schedule it on the userspace
+- * sendto(MSG_DONTWAIT) wakeup path.  Until dedicated per-qband
+- * BMan channels + per-qband NAPI contexts land (later M3-3
+- * subpatch), DPAA1 has one NAPI per online CPU and any of them
+- * will service this qband's RX FQs.  Pick the BSP CPU's NAPI
+- * (cpu 0) — it always exists, and napi_schedule_irqoff() is
+- * cross-CPU safe.  qmap[].cpu/.swp_id/.fqid_base remain 0 for
+- * now; the cluster-aware pin lands with the dedicated channel
+- * subpatch.  Spec sec 5.4 "Queue mapping correctness" item 3-5.
++ * M3-3 step 2a: distribute qband NAPI across online CPUs.
++ *
++ * DPAA1 has one NAPI portal per online CPU servicing that CPU's
++ * QMan SWP (drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++ * allocates priv->percpu_priv via alloc_percpu).  Map each
++ * queue_id round-robin onto an online CPU so wakeups land on
++ * distinct portals.  On LS1046A (NR_CPUS=4) with
++ * DPAA1_XSK_MAX_QBANDS=4 this becomes a 1:1 fan-out:
++ *   q=0 -> cpu 0, q=1 -> cpu 1, q=2 -> cpu 2, q=3 -> cpu 3
++ * CCI-400 cluster-aware refinement (prefer same-cluster
++ * consumer) and IRQ affinity hint are deferred to step 2b/2c.
++ * Spec sec 5.2 "Queue mapping correctness" items 3-5.
+  */
+ {
+ struct dpaa_percpu_priv *pcpu;
++int target_cpu;
++int n_online = num_online_cpus();
+ 
+-pcpu = per_cpu_ptr(priv->percpu_priv, 0);
+-WRITE_ONCE(priv->qmap[queue_id].napi, &pcpu->np.napi);
+-WRITE_ONCE(priv->qmap[queue_id].cpu, 0);
++if (unlikely(n_online <= 0))
++target_cpu = 0;
++else
++target_cpu = (int)queue_id % n_online;
++
++pcpu = per_cpu_ptr(priv->percpu_priv, target_cpu);
++WRITE_ONCE(priv->qmap[queue_id].napi, &pcpu->np.napi);
++WRITE_ONCE(priv->qmap[queue_id].cpu, target_cpu);
+ }
+ 
+ priv->xsk_pool_attach_ok++;
