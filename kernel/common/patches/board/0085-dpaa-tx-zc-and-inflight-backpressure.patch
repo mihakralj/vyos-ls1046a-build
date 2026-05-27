@@ -1,6 +1,6 @@
 From: vyos-ls1046a-build M3-3 step 5 <noreply@vyos-ls1046a-build>
 Date: 2026-05-27
-Subject: [PATCH] dpaa: TX ZC submission, xsk_tx_inflight backpressure, TxConf round-trip closure
+Subject: [PATCH] dpaa: TX ZC submission, xsk_tx_inflight backpressure, TxConf round-trip closure (v2: single-CPU pinned submit)
 
 M3-3 step 5 (spec sec 6.1.4, "TX ZC + backpressure + round-trip closure").
 Closes the AF_XDP zero-copy datapath by wiring three new flavor ops into
@@ -64,6 +64,29 @@ Strictly NAPI-context on submit; RCU read-section on TxConf. No new
 locks: xsk_tx_inflight[] is atomic_t (added in 0070 alongside
 xsk_bpid[]) to be lockless against the cross-CPU TxConf path.
 
+v2 (2026-05-27) — option-c single-CPU pinning on the submit side, for
+the same reason as 0084v2: xsk_tx_peek_release_desc_batch() advances
+the XSK Tx ring's SPSC consumer cursor (uapi/linux/if_xdp.h contract),
+so concurrent per-CPU NAPI tails racing on the same qband would
+corrupt that cursor identically to how v1 0084 corrupted the fill
+ring's producer cursor. Mirror the 0084v2 fix exactly: each qband
+has a single owner CPU (priv->qmap[q].cpu, populated by M3-3 step 2a's
+per_cpu_ptr() wiring at xsk_pool_attach time). Add an early-return
+`if (raw_smp_processor_id() != priv->qmap[q].cpu) continue;` inside
+the per-qband loop body of af_xdp_pool_napi_tx_zc() BEFORE the
+xsk_tx_peek_release_desc_batch() call — only the qband-owner CPU
+drains that qband's Tx ring and submits to QMan. Other CPUs short-
+circuit; they will drain their own qbands on their own NAPI completion.
+
+CRITICAL: tx_conf_zc() is NOT gated. The whole bpid-claim scheme is
+designed for cross-CPU demux — TxConf FDs come back on whichever CPU
+the QMan TxConf FQ is bound to, which is independent of the submitting
+CPU. Adding a CPU check to tx_conf_zc() would silently drop FDs whose
+matching qband-owner CPU is not the current CPU, leaking inflight
+budget and never advancing the userspace CQ head. xsk_tx_inflight[]
+is atomic_t precisely to be lockless under this asymmetry; the
+xsk_tx_completed(pool, 1) call is XSK-API-internally serialized.
+
 Validation gates (DUT):
 
   G1 (default flavor): priv->xsk_tx_zc_submit and priv->xsk_tx_conf_zc
@@ -120,7 +143,7 @@ index a78a3a4..0f72230 100644
  
  #include "dpaa_flavor.h"
  #include "dpaa_eth.h"
-@@ -654,6 +655,194 @@ priv->xsk_bman_refill_batches++;
+@@ -654,6 +655,205 @@ priv->xsk_bman_refill_batches++;
  }
  }
  
@@ -174,6 +197,17 @@ index a78a3a4..0f72230 100644
 +continue;
 +pool = rcu_dereference(priv->xsk_pool[q]);
 +if (!pool)
++continue;
++
++/* v2: single-CPU pin. Only the qband-owner CPU drains this
++ * qband's XSK Tx ring -> QMan enqueue. Other CPUs skip,
++ * making each qband's Tx ring single-consumer (matches the
++ * XSK SPSC cursor contract). Mirror of the 0084v2 fix on the
++ * fill-ring side; same race, same one-line fix. The TxConf
++ * side (af_xdp_pool_tx_conf_zc) is intentionally NOT pinned
++ * — its bpid-claim scheme is designed for cross-CPU demux.
++ */
++if (raw_smp_processor_id() != priv->qmap[q].cpu)
 +continue;
 +
 +inflight = atomic_read(&priv->xsk_tx_inflight[q]);
@@ -315,7 +349,7 @@ index a78a3a4..0f72230 100644
  /* ---------- Ops tables ---------- */
  
  static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
-@@ -664,6 +847,9 @@ static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
+@@ -664,6 +858,9 @@ static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
  .xsk_wakeup             = af_xdp_pool_xsk_wakeup,
  .xsk_set_rx_need_wakeup = af_xdp_pool_xsk_set_rx_need_wakeup,
  .napi_refill            = af_xdp_pool_napi_refill,
