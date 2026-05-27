@@ -159,6 +159,13 @@ cp "$BOARD_PATCH_DIR/0079-dpaa-ethtool-expose-xsk-counters.patch" "$KERNEL_PATCH
 # + sec 5.4 RX path step 5. No throughput change yet — control-plane
 # wiring; ZC RX/TX datapath lands in 0081+.
 cp "$BOARD_PATCH_DIR/0080-dpaa-af-xdp-pool-bind-napi-and-arm-rx-need-wakeup.patch" "$KERNEL_PATCHES/"
+# M3-3 step 2a: distribute qband NAPI across online CPUs.  Promotes
+# the cpu=0 stopgap from 0080 to (queue_id % num_online_cpus()) so
+# four-qband bindings fan out across all four LS1046A A72 cores
+# instead of piling onto cpu 0's QMan SWP.  Still no dedicated BMan
+# channels (step 2b) and no cluster-aware refinement (step 2c).
+# Spec sec 5.2 "Queue mapping correctness" items 3-5.
+cp "$BOARD_PATCH_DIR/0081-dpaa-af-xdp-pool-distribute-napi-across-cpus.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
