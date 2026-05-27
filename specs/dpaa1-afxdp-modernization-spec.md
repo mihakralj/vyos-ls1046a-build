@@ -49,6 +49,43 @@
 
 ---
 
+## Milestone Tracker
+
+Single source of truth for "where are we?" across sessions. Each milestone maps to one or more sections of this spec. Status field is one of: **planned**, **in-progress**, **landed** (in-tree on `dpaa1` branch and patch-health-clean), **dut-validated** (proven on hardware), **blocked**.
+
+| ID | Milestone | Spec § | Status | Notes |
+|---|---|---|---|---|
+| **M0**    | Shared abstraction (`pcd_ops` + `qmgmt_ops` + flavor-attach hooks + retro-attach + `NETDEV_XDP_ACT_XSK_ZEROCOPY` advertise) | 3.1, 3.2, 3.3, 5.1 | **dut-validated** | Patches 0068/0069a/0070/0072; verified on DUT 2026-05-26 (kernel 6.18.31-vyos), iperf3 13.1 Gbps baseline, kallsyms shows ksymtab anchors |
+| **M1**    | Phase 1 — `ndo_xsk_wakeup` trampoline + `af_xdp_pool.ko` skeleton (copy-mode AF_XDP, thermal/idle win) | 5.2, 5.4 | **dut-validated** | Patches 0073 (skeleton) + 0074 (wakeup NAPI kick); `af_xdp_pool: registered` banner at t≈0.88 s |
+| **M2-s1** | Phase 2 stage-1 — XSK pool attach gate: kconfig autoload (Option B, `CONFIG_DPAA_AF_XDP_POOL=y`), ethtool xsk_* counters, attach-side BMan pool seed + PAMU window + DMA map | 5.3 step 1, 5.3 step 2 | **dut-validated** | Patches 0071/0075a/0075b/0075c/0077/0079 + Option B kconfig (commit 7dc1768). DUT 2026-05-27: `bind(XDP_ZEROCOPY)=0`, 12 counters exposed |
+| **M2-s2** | Phase 2 stage-2 — XSK pool detach safety + RX-ring drain validation + 100× bind/unbind churn | 5.3 step 3, 5.3 step 4 | **in-progress** | Patch 0076 detach landed. Sleep-in-RCU bug found 2026-05-27 (dispatcher held RCU read lock around sleeping callback → `tree_plugin.h:332` WARN → watchdog reset); fix in commit 039a50c (in-place amend of 0071). CI run 26491829912 building. After deploy: stage-2 hold probe + churn loop + counter sanity |
+| **M3-3**  | Phase 3 — True ZC RX/TX NAPI datapath, NAPI-hooked refill, `xsk_bman_starve` watchdog, `xsk_tx_inflight` backpressure, qband mapping, cluster-aware NAPI pin | 5.4 | **planned** | Phase 3a scaffold (patch 0072) landed M0. Remaining work: real `rx_hook`, `xsk_xmit`, refill loop in `dpaa_eth_napi_poll`, TX-inflight budget, hits ≥ 7 Gbps acceptance gate |
+| **M3-3b** | Phase 3b — CC steering (exact-match), Parser→CC→HM→QMan ordering | 5.5 | **planned** | ucode-210 gated; requires `priv->fman_caps` capability layer (M0 augmentation TBD) |
+| **M3-3c** | Phase 3c — HM offload (VLAN/MPLS strip-insert) | 5.6 | **planned** | ucode-210 gated |
+| **M3-3d** | Phase 3d — Policer (per-flow ingress rate-limit) | 5.7 | **planned** | ucode-210 gated |
+| **M3-3e** | Phase 3e — CEETM egress shaping + per-class CGR tail-drop + VPP-shaper exclusion (VyOS validator + `ceetm_active` sysfs sentinel) | 5.8 | **planned** | ucode-210 gated; mutually exclusive with VPP internal shaping |
+| **M4**    | Phase 4 (optional) — Single-MAC dual-flavor coexistence via surgical FMan Host Command "Disable BMI single port" (ucode-210 opcode) | Appendix A | **deferred** | Avoids the ~10 ms link bounce that Phase 2/3 accept on detach |
+
+### Current execution focus
+
+**M2-s2** is the active milestone. CI run **26491829912** is building the fix for the M2-s2 sleep-in-RCU regression (commit `039a50c` on branch `dpaa1`). Once the ISO is on the DUT and a clean bind→close→detach cycle is verified, M2-s2 advances to dut-validated and we open M3-3.
+
+### Reviewer-feedback delta coverage (audit table)
+
+The seven reviewer deltas from the v4.2 audit are implementation requirements that span M2-s2 and M3. Tracked here so a future session can grep for "delta" and see status without re-reading the audit log.
+
+| Delta | Lives in milestone | Status | Anchor in spec |
+|---|---|---|---|
+| 1. NAPI-hooked refill + `xsk_bman_starve` + batch 32→256 escalation | M3-3 | planned | §5.4 (lines 18, 403, 405, 411, 413, 633) |
+| 2. CEETM CGR HW tail-drop + `xsk_tx_inflight` ≤ 1024 + low-water 512 + `XDP_USE_NEED_WAKEUP` | M3-3 + M3-3e | planned | §5.4 + §5.8 (lines 233, 403, 467, 468, 609, 634, 736) |
+| 3. 9-step `fman_port_disable(rxp)`-anchored detach, 10 ms link bounce accepted | M2-s2 | **in-progress** (sleep-in-RCU fix is its prerequisite) | §5.3 step 3 (lines 18, 260, 391, 399) |
+| 4. `DPAA1_XSK_INITIAL_SEED=8192` + Open Question 9 rate-scaling | M2-s1 | landed | §5.3 step 2 (lines 383, 415) |
+| 5. `priv->fman_caps` bitmask + per-cap `-ENOTSUPP` + `hw_offload_unavailable` counter + ucode-106 row | M0 augmentation, gates M3-3b/3c/3d/3e | planned | §5.1 (lines 205, 208–212, 303–306, 310, 316–318) |
+| 6. Parser→CC→HM→QMan ordering normative; OQ5 closed | M3-3b doc | landed (doc) | §5.5 (lines 493, 731) |
+| 7. Two-layer VPP shaper exclusion (VyOS validator + `ceetm_active` sysfs sentinel) | M3-3e | planned | §5.8 (lines 613, 614) |
+
+---
+
 ## 1. Purpose and Scope
 
 This document specifies the kernel-side changes to `drivers/net/ethernet/freescale/dpaa/` and related FMan/QMan/BMan support code required to ship FLAVOR=vpp in the `mihakralj/vyos-ls1046a-build` VyOS rolling image. The deliverable is a `dpaa_eth.ko` (plus optional `af_xdp_pool.ko`) that:
