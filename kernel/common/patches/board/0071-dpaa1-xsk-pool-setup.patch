@@ -84,7 +84,7 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethern
 index baf384ff6..67154e5e4 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-@@ -3444,11 +3444,60 @@ static int dpaa_setup_xdp(struct net_device *net_dev, struct netdev_bpf *bpf)
+@@ -3444,11 +3444,80 @@ static int dpaa_setup_xdp(struct net_device *net_dev, struct netdev_bpf *bpf)
  	return 0;
  }
  
@@ -104,35 +104,55 @@ index baf384ff6..67154e5e4 100644
 + * Spec: specs/dpaa1-afxdp-modernization-spec.md sec 5.3 (Phase 2).
 + */
 +static int dpaa_setup_xsk_pool(struct net_device *net_dev,
-+			       struct netdev_bpf *xdp)
++       struct netdev_bpf *xdp)
 +{
-+	struct dpaa_priv *priv = netdev_priv(net_dev);
-+	const struct dpaa_qmgmt_ops *ops;
-+	u16 queue_id = xdp->xsk.queue_id;
-+	int ret;
++struct dpaa_priv *priv = netdev_priv(net_dev);
++const struct dpaa_qmgmt_ops *ops;
++u16 queue_id = xdp->xsk.queue_id;
++int (*attach_fn)(struct dpaa_priv *, struct xsk_buff_pool *, u16);
++int (*detach_fn)(struct dpaa_priv *, u16);
++struct xsk_buff_pool *pool = xdp->xsk.pool;
 +
-+	rcu_read_lock();
-+	ops = rcu_dereference(priv->qmgmt_ops);
-+	if (!ops) {
-+		rcu_read_unlock();
-+		return -EOPNOTSUPP;
-+	}
++/*
++ * Capture the callback function pointers under RCU then drop the
++ * read lock BEFORE invoking the (potentially sleeping) flavor
++ * callback.  ops->xsk_pool_attach() calls bman_new_pool() and
++ * xsk_pool_dma_map() under GFP_KERNEL; ops->xsk_pool_detach()
++ * calls synchronize_net().  Both schedule, and a voluntary
++ * schedule inside rcu_read_lock() trips PREEMPT_RCU's
++ * tree_plugin.h:332 WARN ("Voluntary context switch within RCU
++ * read-side critical section!") followed by an indefinite RCU
++ * stall in the xp_release_deferred kworker (the grace period
++ * waits for the very kworker that is blocked on it) - then the
++ * watchdog reboots.  Reproduced on the DUT 2026-05-27.
++ *
++ * Lifetime safety after rcu_read_unlock(): the af_xdp_pool flavor
++ * module installs its ops table with rcu_assign_pointer() and
++ * cannot return from module_exit() until dpaa_unregister_flavor_ops()
++ * has cleared the slot AND a subsequent synchronize_rcu() has
++ * drained all in-flight readers.  XDP_SETUP_XSK_POOL is invoked
++ * from process context with RTNL held, so the ops table and the
++ * function pointers we captured remain valid for the duration of
++ * the call.
++ */
++rcu_read_lock();
++ops = rcu_dereference(priv->qmgmt_ops);
++if (!ops) {
++rcu_read_unlock();
++return -EOPNOTSUPP;
++}
++attach_fn = ops->xsk_pool_attach;
++detach_fn = ops->xsk_pool_detach;
++rcu_read_unlock();
 +
-+	if (xdp->xsk.pool) {
-+		if (!ops->xsk_pool_attach) {
-+			rcu_read_unlock();
-+			return -EOPNOTSUPP;
-+		}
-+		ret = ops->xsk_pool_attach(priv, xdp->xsk.pool, queue_id);
-+	} else {
-+		if (!ops->xsk_pool_detach) {
-+			rcu_read_unlock();
-+			return -EOPNOTSUPP;
-+		}
-+		ret = ops->xsk_pool_detach(priv, queue_id);
-+	}
-+	rcu_read_unlock();
-+	return ret;
++if (pool) {
++if (!attach_fn)
++return -EOPNOTSUPP;
++return attach_fn(priv, pool, queue_id);
++}
++if (!detach_fn)
++return -EOPNOTSUPP;
++return detach_fn(priv, queue_id);
 +}
 +
  static int dpaa_xdp(struct net_device *net_dev, struct netdev_bpf *xdp)
