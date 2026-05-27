@@ -172,6 +172,10 @@ cp "$BOARD_PATCH_DIR/0081-dpaa-af-xdp-pool-distribute-napi-across-cpus.patch" "$
 # zero datapath change, zero new core-driver exports. Spec sec 5.2.
 cp "$BOARD_PATCH_DIR/0082-dpaa-af-xdp-pool-qmap-debugfs.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0082b-dpaa-dedicated-qman-channels-per-qband.patch" "$KERNEL_PATCHES/"
+# M3-3 step 3: real dpaa_fq_to_qband() + xsk_rx_branch counter +
+# observational RX hot-path eligibility probe. Strictly diagnostic --
+# no datapath change. ZC redirect lands in 0084+. Spec sec 6.1.2.
+cp "$BOARD_PATCH_DIR/0083-dpaa-rx-xsk-branch-eligibility-probe.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
