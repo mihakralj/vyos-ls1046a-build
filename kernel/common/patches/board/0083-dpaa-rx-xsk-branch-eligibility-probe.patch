@@ -1,0 +1,218 @@
+From: vyos-ls1046a-build M3-3 step 3 <noreply@vyos-ls1046a-build>
+Date: 2026-05-27
+Subject: [PATCH] dpaa: rx xsk-branch eligibility probe + real dpaa_fq_to_qband
+
+M3-3 step 3 (spec sec 6.1.2, "RX ZC datapath"). First reviewable slice
+of the kernel-side RX zero-copy plumbing. Strictly observational --
+no change to packet handling. The actual ZC redirect (xdp_buff recovery
++ bpf_prog_run_xdp + xdp_do_redirect into the XSK RX ring) lands in
+patch 0084+.
+
+Three coordinated changes:
+
+  1. Real dpaa_fq_to_qband().
+
+     Replaces the Phase 3a stub (which returned 0 unconditionally,
+     awaiting flavor-module wiring of PCD FQID base + stride) with a
+     real contiguous-banding lookup against priv->qmap[band].fqid_base.
+     Patch 0082b populates qmap[band].fqid_base at probe time by walking
+     the FQ_TYPE_RX_PCD allocation in dpaa_fq_setup(). On LS1046A
+     (DPAA_ETH_PCD_RXQ_NUM=128, num_portals=4) each band owns 32
+     contiguous FQIDs:
+
+       band 0 = [base0 .. base0 + 31]
+       band 1 = [base1 .. base1 + 31]
+       band 2 = [base2 .. base2 + 31]
+       band 3 = [base3 .. base3 + 31]
+
+     FQIDs outside every band's range (kernel-domain default FQs --
+     rx_default_fq, rx_error_fq, tx_default_fq, tx_error_fq, tx_conf_fq)
+     map to band 0, the kernel-domain default. The result is always a
+     valid array index into priv->xsk_pool[].
+
+  2. New u64 xsk_rx_branch counter.
+
+     Added to struct dpaa_priv right after xsk_pamu_window_fail (the
+     contiguous u64 block whose order is mirrored by dpaa_stats_xsk[]
+     in dpaa_ethtool.c). Exposed via ethtool -S as "xsk_rx_branch".
+
+  3. RX hot-path probe.
+
+     rx_default_dqrr() picks up the FD's FQID via fq->fqid (same idiom
+     as the existing dpaa_fq->fqid populated by dpaa_fq_setup()), maps
+     it to a qband, RCU-derefs priv->xsk_pool[band], and bumps the
+     counter when a pool is bound. Strictly diagnostic -- the FD then
+     continues through the unchanged mainline skbuf path. Cost is two
+     dependent loads + one RCU read-section per FD; negligible under
+     line rate.
+
+Validation gates (DUT):
+
+  G1 (default flavor, no XSK pool ever bound): xsk_rx_branch stays 0
+     across kernel-skbuf line-rate iperf3. Confirms the rcu_dereference
+     short-circuits to NULL and the branch is dead code in production.
+  G2 dmesg clean, no WARN/BUG/Oops/probe errors.
+  G3 ethtool -S eth4 | grep xsk_rx_branch shows the new counter.
+  G4 No regression vs patch 0082b's 926/925 Mbps eth1->lxc200 reference
+     (iperf3 within single-run jitter -- expected since the probe is one
+     extra RCU read-section per FD, ~ns level).
+  G5 (vpp flavor with /tmp/xsk_bind_test eth4 0 --zerocopy bound):
+     xsk_pool[0] non-NULL -> ANY FD landing in eth4's band 0 FQID range
+     [qmap[0].fqid_base .. qmap[0].fqid_base+31] bumps the counter.
+     Generic background traffic on band 0 (from FMan KeyGen hash bucket
+     0) will produce non-zero hits; bands 1..3 see NULL -> no bump.
+
+Carries forward the qmap[] = .fqid_base + .swp_id population from 0082b
+into the live RX path with O(qbands) lookup -- on LS1046A that is 4
+loads + 4 compares per FD, fits in a single cache line.
+
+The macro #define DPAA_ETH_PCD_RXQ_NUM 128 is moved from dpaa_eth.c
+to dpaa_eth.h so the inline dpaa_fq_to_qband() declared in the header
+can reference it. The c file's allocation site (dpaa_alloc_all_fqs()
++ dpaa_fq_setup()) sees the same symbol via the header include.
+
+Files touched:
+
+  drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+    - move DPAA_ETH_PCD_RXQ_NUM macro from .c
+    - add u64 xsk_rx_branch
+    - replace stub dpaa_fq_to_qband() with real lookup
+  drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+    - drop now-duplicate DPAA_ETH_PCD_RXQ_NUM macro
+    - add RX branch-eligibility probe in rx_default_dqrr()
+  drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+    - append "xsk_rx_branch" to dpaa_stats_xsk[]
+
+Spec reference: specs/dpaa1-afxdp-modernization-spec.md v5.0 sec 6.1.2.
+Depends on: 0068..0082b (full M0+M1+M2+M3-3-step-1+2a+2b+2c stack).
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 4a85f25..4429bcb 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -166,8 +166,6 @@ MODULE_PARM_DESC(tx_timeout, "The Tx timeout in ms");
+ #define DPAA_RX_PRIV_DATA_SIZE DPAA_RX_PRIV_DATA_DEFAULT_SIZE
+ #endif
+ 
+-#define DPAA_ETH_PCD_RXQ_NUM	128
+-
+ #define DPAA_ENQUEUE_RETRIES	100000
+ 
+ enum port_type {RX, TX};
+@@ -2787,6 +2785,27 @@ static enum qman_cb_dqrr_result rx_default_dqrr(struct qman_portal *portal,
+ 	if (!dpaa_bp)
+ 		return qman_cb_dqrr_consume;
+ 
++	/* M3-3 step 3 (patch 0083): observational xsk-RX branch-eligibility
++	 * probe. Map the FD's FQID to a qband via the qmap[] populated by
++	 * dpaa_fq_setup() (patch 0082b), then RCU-deref priv->xsk_pool[band].
++	 * If a pool is bound, bump priv->xsk_rx_branch. Strictly diagnostic --
++	 * no change to packet handling. The actual ZC redirect (xdp_buff
++	 * recovery + bpf_prog_run_xdp + xdp_do_redirect into the XSK RX ring)
++	 * lands in patch 0084+. With no XSK pool ever bound (default flavor)
++	 * the rcu_dereference returns NULL on every FD and this branch is
++	 * effectively dead code, preserving byte-identical mainline behaviour.
++	 */
++	{
++		u16 _band = dpaa_fq_to_qband(priv, fq->fqid);
++		struct xsk_buff_pool *_xp;
++
++		rcu_read_lock();
++		_xp = rcu_dereference(priv->xsk_pool[_band]);
++		if (_xp)
++			priv->xsk_rx_branch++;
++		rcu_read_unlock();
++	}
++
+ 	/* Trace the Rx fd */
+ 	trace_dpaa_rx_fd(net_dev, fq, &dq->fd);
+ 
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+index 0e0d25c..3aa6ba4 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -133,6 +133,13 @@ struct dpaa_qmgmt_ops;
+ 
+ /* AF_XDP zerocopy constants (Phase 2). See spec sec 5.3. */
+ #define DPAA1_XSK_MAX_QBANDS        4
++
++/* PCD RX FQ count per netdev (shared with dpaa_eth.c).
++ * FMan KeyGen distributes ingress across this many FQs via
++ * 5-tuple hash mod DPAA_ETH_PCD_RXQ_NUM. Used by dpaa_fq_to_qband()
++ * (below) and by dpaa_fq_setup() FQ allocation in dpaa_eth.c.
++ */
++#define DPAA_ETH_PCD_RXQ_NUM        128
+ #define DPAA1_XSK_INITIAL_SEED      8192
+ #define DPAA1_XSK_REFILL_THRESHOLD  256
+ #define DPAA1_XSK_MIN_DEPTH         64
+@@ -249,6 +256,13 @@ struct dpaa_priv {
+ 	u64 xsk_mtu_reject;
+ 	u64 xsk_pamu_window_fail;
+ 
++	/* M3-3 step 3 (patch 0083): per-FD observation that an FD
++	 * arrived on a qband with a bound XSK pool. Bumped from the
++	 * rx_default_dqrr branch-eligibility probe. Currently strictly
++	 * observational -- the actual ZC redirect lands in 0084+.
++	 */
++	u64 xsk_rx_branch;
++
+ 	/* M3 (Phase 3a): qband -> { FQ base, SWP, CPU, NAPI } resource map.
+ 	 * Populated by the flavor module's pcd_ops->install. With no flavor
+ 	 * module loaded the array stays zeroed and the spec's "qmap[]
+@@ -275,12 +289,36 @@ struct dpaa_priv {
+  */
+ static inline u16 dpaa_fq_to_qband(struct dpaa_priv *priv, u32 fqid)
+ {
+-	/* Phase 3a: until the flavor module wires up the PCD FQID base
+-	 * and per-qband distribution stride, every FQID maps to qband 0
+-	 * (kernel-domain default). The flavor module replaces this
+-	 * inline at runtime via the qmgmt_ops dispatch (spec sec 5.4).
++	/* M3-3 step 3 (patch 0083): real PCD-FQID -> qband mapping using
++	 * the contiguous-banding qmap[].fqid_base populated by dpaa_fq_setup()
++	 * at probe time (patch 0082b). Each band owns DPAA_ETH_PCD_RXQ_NUM /
++	 * priv->xsk_max_qbands contiguous FQIDs starting at qmap[band].fqid_base.
++	 * For LS1046A defaults (DPAA_ETH_PCD_RXQ_NUM=128, xsk_max_qbands=4):
++	 *   band 0 = [base0 .. base0+31]
++	 *   band 1 = [base1 .. base1+31]
++	 *   band 2 = [base2 .. base2+31]
++	 *   band 3 = [base3 .. base3+31]
++	 * FQIDs outside every band's range (kernel-domain default FQs etc.)
++	 * map to band 0 -- the kernel-domain default -- so callers can safely
++	 * use the result as an array index into priv->xsk_pool[].
+ 	 */
+-	(void)fqid;
++	unsigned int n = priv->xsk_max_qbands;
++	u32 stride;
++	u16 b;
++
++	if (!n || n > DPAA1_XSK_MAX_QBANDS)
++		return 0;
++	stride = DPAA_ETH_PCD_RXQ_NUM / n;
++	if (!stride)
++		return 0;
++	for (b = 0; b < n; b++) {
++		u32 base = priv->qmap[b].fqid_base;
++
++		if (!base)
++			continue;
++		if (fqid >= base && fqid < base + stride)
++			return b;
++	}
+ 	return 0;
+ }
+ 
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+index 5d34aab..88ceffc 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+@@ -67,6 +67,7 @@ static char dpaa_stats_xsk[][ETH_GSTRING_LEN] = {
+ 	"xsk_headroom_reject",
+ 	"xsk_mtu_reject",
+ 	"xsk_pamu_window_fail",
++	"xsk_rx_branch",
+ };
+ 
+ #define DPAA_STATS_PERCPU_LEN ARRAY_SIZE(dpaa_stats_percpu)
+-- 
+2.39.5
+
