@@ -15,7 +15,7 @@
 - **No technical content from v4.4 is dropped.** All previously-validated facts (M0/M1/M2-s1/M2-s2 dut-validated status, M3-3 step 1 patch 0080 landed, `DPAA1_MIN_UMEM_CHUNK=3840`, `fman_port_disable`-anchored detach, MURAM budget < 8 KiB for VPP / < 52 KiB combined, A050385 headroom requirement, CCI-400 cluster pinning, etc.) carry forward.
 
 **Scope:** All three FLAVORs (`default`, `vpp`, `ask`) of `mihakralj/vyos-ls1046a-build`. ASK2 userspace remains in `specs/ask2-rewrite-spec.md`; this spec defines the kernel-side primitives ASK2 consumes. Phase 4 (single-MAC dual-flavor via VSP bifurcation) is a deferred appendix.
-**Status:** Implementation-ready. M0 / M1 / M2-s1 / M2-s2 dut-validated; M3-3 step 1 landed; M3-3 steps 2–5 in design.
+**Status:** Implementation-ready. M0 / M1 / M2-s1 / M2-s2 / **M3-3 step 1** dut-validated; M3-3 steps 2–5 in design.
 
 ---
 
@@ -41,7 +41,7 @@ Single source of truth across sessions. Each milestone tracks the cross-flavor k
 | **M1**    | `ndo_xsk_wakeup` trampoline + `af_xdp_pool.ko` skeleton + thermal/idle fix | 5.3 | **dut-validated** | default: any AF_XDP app benefits; vpp: VPP drops `poll-sleep-usec`; ask: latent | Patches 0073/0074; `af_xdp_pool: registered` at t≈0.88s |
 | **M2-s1** | XSK pool attach gate: kconfig autoload, `xsk_*` counters, BMan seed + DMA map | 6.1 | **dut-validated** | vpp-only | Patches 0071/0075a/0075b/0075c/0077/0079 + `CONFIG_DPAA_AF_XDP_POOL=y` (7dc1768). DUT 2026-05-27: `bind(XDP_ZEROCOPY)=0`, 12 counters exposed |
 | **M2-s2** | XSK pool detach safety + RX-ring drain + 100× bind/unbind churn | 6.1 | **dut-validated** | vpp-only | Patch 0076 + sleep-in-RCU fix `039a50c`. ISO `2026.05.27-0501-rolling` kernel `6.18.33-vyos`: 100× churn → attach_ok=102/detach_ok=102, zero fails/timeouts/RCU WARN |
-| **M3-3 step 1** | NAPI bind in `qmap[]` + `xsk_set_rx_need_wakeup` body | 5.2, 6.1 | **landed** | vpp (immediate); default/ask (latent) | Patch **0080** = commit `3e9bb83`; CI run 26495548617 in flight |
+| **M3-3 step 1** | NAPI bind in `qmap[]` + `xsk_set_rx_need_wakeup` body | 5.2, 6.1 | **dut-validated** | vpp (immediate); default/ask (latent) | Patch **0080** = commit `3e9bb83`; ISO `2026.05.27-0648-rolling`. DUT 2026-05-27: `xsk_bind_test eth4 q=0` ZC+NEED_WAKEUP bind OK, 100/100 sendto wakeups returned 0 (pre-0080 was ENXIO), 100× churn `delta_attach=100/delta_detach=100` clean, ftrace caught 101 hits on `af_xdp_pool_xsk_wakeup<-dpaa_xsk_wakeup`, iperf3 942 Mbps within 0.3% of M2-s2 reference |
 | **M3-3 step 2** | **Per-CPU NAPI + dedicated BMan channel restructure** | 5.2 | **planned** | **default: faster skbuf RX (HOLDACTIVE elimination)**; vpp: pre-req for ZC RX branch; ask: same as default | Subpatch 0081; biggest cross-flavor win |
 | **M3-3 step 3** | RX ZC branch (xdp_buff translation + bpf_prog_run_xdp + xdp_do_redirect) | 6.1 | **planned** | vpp-only | Subpatch 0082 |
 | **M3-3 step 4** | NAPI-hooked BMan refill | 6.1 | **planned** | vpp-only | Subpatch 0083 |
@@ -54,7 +54,7 @@ Single source of truth across sessions. Each milestone tracks the cross-flavor k
 
 ### Current execution focus
 
-**M3-3 step 1 landed 2026-05-27** as patch `0080` (commit `3e9bb83`). `priv->qmap[queue_id].napi` is populated at attach with `&per_cpu_ptr(priv->percpu_priv, 0)->np.napi`; the previously-stub `af_xdp_pool_xsk_set_rx_need_wakeup` body now iterates `xsk_pool[0..xsk_max_qbands]` under RCU and arms `XDP_USE_NEED_WAKEUP` on every bound pool. CI dispatch in flight; DUT runtime gate pending.
+**M3-3 step 1 dut-validated 2026-05-27** as patch `0080` (commit `3e9bb83`, ISO `2026.05.27-0648-rolling`). `priv->qmap[queue_id].napi` is populated at attach with `&per_cpu_ptr(priv->percpu_priv, 0)->np.napi`; the previously-stub `af_xdp_pool_xsk_set_rx_need_wakeup` body iterates `xsk_pool[0..xsk_max_qbands]` under RCU and arms `XDP_USE_NEED_WAKEUP` on every bound pool. DUT gates: 100/100 sendto wakeups returned 0 (pre-0080 was ENXIO); 100× attach/detach churn `delta_attach=100/delta_detach=100` with zero error counters; ftrace caught 101 hits on `af_xdp_pool_xsk_wakeup<-dpaa_xsk_wakeup` per single bind-test run (1 attach probe + 100 sendto wakeups, all via M0 RCU trampoline); iperf3 eth1→lxc200 942 Mbps (within 0.3% of M2-s2 baseline); thermals 48–50 °C across all 5 zones, no rise.
 
 **Next subpatch: M3-3 step 2 (0081)** promotes the cross-flavor BMan + NAPI restructure: one dedicated BMan channel per qband (4 per netdev); per-qband NAPI affined to the QMan SWP that owns the qband's channel. Largest cross-flavor win — `default` and `ask` get measurable skbuf RX gains.
 
