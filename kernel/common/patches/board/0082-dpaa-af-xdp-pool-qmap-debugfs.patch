@@ -136,7 +136,7 @@ index b39300c..e2e02b1 100644
  #include <net/xdp_sock_drv.h>
  #include <soc/fsl/bman.h>
  
-@@ -591,6 +594,105 @@ static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
+@@ -591,6 +594,115 @@ static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
  .xsk_set_rx_need_wakeup = af_xdp_pool_xsk_set_rx_need_wakeup,
  };
  
@@ -252,7 +252,7 @@ index b39300c..e2e02b1 100644
  /* ---------- Module init / exit ---------- */
  
  static int __init af_xdp_pool_init(void)
-@@ -603,12 +702,14 @@ pr_err("af_xdp_pool: dpaa_register_flavor_ops() failed: %d\n", err);
+@@ -603,12 +715,15 @@ pr_err("af_xdp_pool: dpaa_register_flavor_ops() failed: %d\n", err);
  return err;
  }
  
