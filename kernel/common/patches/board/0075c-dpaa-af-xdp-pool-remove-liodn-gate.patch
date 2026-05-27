@@ -1,0 +1,145 @@
+From: VyOS LS1046A maintainers <ls1046a@vyos.local>
+Date: 2026-05-27
+Subject: [PATCH] DPAA1 AF_XDP pool: remove LIODN sanity gate (arm64 has no fsl,liodn)
+
+Patch 0075a added a LIODN sanity arm to af_xdp_pool_xsk_pool_attach()
+that rejected an XSK pool attach if fman_port_get_liodn(rxp) returned 0,
+on the assumption that this would indicate a malformed DT or an
+unprobed fman_port.
+
+That assumption was wrong on arm64 LS1046A.  On this platform:
+
+  * The PAMU IOMMU is programmed by U-Boot at boot into firmware bypass
+    mode.  The Linux fsl_pamu driver (drivers/iommu/fsl_pamu.c) is gated
+    by Kconfig "PPC_E500MC || (COMPILE_TEST && PPC)" and does not build
+    on arm64.  No per-LIODN window programming happens from Linux.
+
+  * The Mono Gateway DT (mono-gateway-dk.dts + fsl-ls1046a.dtsi) carries
+    NO fsl,liodn properties on any FMan port.  Verified on a v4.3 ISO
+    DUT by walking /proc/device-tree/soc/fman@1a00000/port@*/ -- only
+    cell-index, compatible, name, phandle, reg are present.  Zero
+    fsl,liodn nodes.
+
+  * Therefore port->dts_params.fman->liodn_base[port_id] is 0 and
+    fman_port_get_liodn() returns 0.  The 0075a `!liodn` branch fires
+    on EVERY XSK pool attach, returning -ENODEV.
+
+This was caught at M2 validation on 2026-05-27, ISO 2026.05.26-2338,
+kernel 6.18.33-vyos: bind(XDP_ZEROCOPY) on eth4 q0 returned -ENODEV(19)
+because dpaa_setup_xsk_pool -> ops->xsk_pool_attach -> 0075a `!liodn`
+arm short-circuited the path before xsk_pool_dma_map() in 0075b could
+run.
+
+The 0075a patch header itself anticipated this:
+
+  "Note on PAMU (spec sec 4.6): the spec assumed a per-attach
+   fsl_pamu_window_create()/_destroy() API.  Mainline 6.18.31's
+   drivers/iommu/fsl_pamu.c is gated by Kconfig dependency
+   'PPC_E500MC || (COMPILE_TEST && PPC)' and does not build on arm64.
+   On arm64 LS1046A the PAMU runs in firmware-programmed bypass and
+   the FMan masters DMA directly to physical RAM via dma-direct -
+   xsk_pool_dma_map() in 0075b will be sufficient.  No per-window
+   PAMU programming is required."
+
+...but the same patch kept the LIODN check as a "DTS sanity gate".
+That gate is incompatible with the documented arm64 DT shape.
+
+This patch removes the LIODN read + check entirely.  Rationale:
+
+  1. The value was never going to be consumed -- no caller of
+     fman_port_get_liodn() in the AF_XDP path uses the returned value
+     for anything (PAMU window programming was the only consumer and
+     it does not exist on arm64).
+
+  2. A non-zero liodn would not have indicated anything useful either:
+     the DT could carry an arbitrary fsl,liodn value and bypass-mode
+     PAMU would ignore it.  So as a sanity check the arm is also
+     value-free.
+
+  3. The fman_port * + priv->mac_dev * sanity checks immediately above
+     still cover the "fman_port unprobed" and "mac_dev unbound" failure
+     modes (those return -ENODEV with xsk_pamu_window_fail bumped, as
+     before).  Removing the LIODN arm does not weaken the defence
+     against those genuine misconfigurations.
+
+  4. The fman_port_get_liodn() accessor and its EXPORT_SYMBOL_GPL stay
+     in fman_port.c (added by 0075a).  Removing it from arm64 callers
+     does not regress any other in-tree user; there are none today.
+     A future PowerPC port of this code (or an arm64 fsl_pamu driver
+     reintroduction) can reintroduce the check then -- ideally as a
+     warn-once + degraded mode rather than fail-closed.
+
+Behaviour after this patch:
+
+  * bind(XDP_ZEROCOPY) on eth4 q0 progresses past the LIODN arm.
+  * The next gate is queue_id < priv->xsk_max_qbands, which is set to
+    4 at probe by patch 0077.  q0..q3 are accepted; q4+ rejected with
+    -EINVAL and xsk_pool_attach_fail bumped (correct behaviour).
+  * 0075b's xsk_pool_dma_map(), bman_new_pool(), 8192-chunk seed loop,
+    and rcu_assign_pointer(priv->xsk_pool[queue_id], pool) all run as
+    designed.  priv->xsk_pool_attach_ok increments on success.
+
+Spec impact: section 5.3 step 1 ("validate constraints") drops the
+LIODN bullet.  The xsk_pamu_window_fail counter is now only bumped by
+the `!priv->mac_dev` and `!rxp` arms above -- both genuine error
+conditions that should be debugged at the DT level if they ever fire.
+
+Acceptance gate (M2):
+  - bind(XDP_ZEROCOPY) on eth4 q0 returns 0 with eth4 MTU <= 3290
+    and chunk_size=4096 headroom=0 (frame_size 3840 == DPAA1_MIN_UMEM_CHUNK).
+  - 100x attach/detach stress on the same UMEM does not crash the
+    core driver or leak BMan pools (verified via bman_get_count() on
+    a private BPID, after the dedicated XSK BMan channel work in 0080).
+
+Build-verified clean against linux-6.18.31 with the full 0068..0077
+patch series applied first.
+
+Signed-off-by: VyOS LS1046A maintainers <ls1046a@vyos.local>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+index 0e3f7b980..16afb1dcd 100644
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -117,7 +117,6 @@ u32 frame_size, headroom;
+ struct bman_pool *bpool;
+ int ret;
+ u32 seeded, batch, n, i;
+-u32 liodn;
+ 
+ if (!priv || !pool)
+ return -EINVAL;
+@@ -152,11 +151,13 @@ return -EINVAL;
+ }
+ 
+ /*
+- * LIODN sanity check: prove the RX FMan port is bound to its parent
+- * FMan and that DT carries a non-zero fsl,liodn for this port.  The
+- * value isn't consumed yet (no arm64 PAMU driver in mainline), but
+- * a zero return here means either DT is malformed or fman_port has
+- * not yet probed - both fail-closed conditions.
++ * fman_port + mac_dev sanity checks: prove the RX FMan port is bound to
++ * its parent FMan.  The LIODN sanity arm that used to follow was removed
++ * by patch 0075c: on arm64 LS1046A the Mono Gateway DT carries no
++ * fsl,liodn properties on FMan ports, the fsl_pamu driver is PPC-only,
++ * and the value was never consumed in our DMA path (xsk_pool_dma_map()
++ * via dma-direct in step 2 below is sufficient on the CoreNet-coherent
++ * fabric).
+  */
+ if (!priv->mac_dev) {
+ priv->xsk_pamu_window_fail++;
+@@ -169,13 +170,6 @@ if (!rxp) {
+ priv->xsk_pamu_window_fail++;
+ priv->xsk_pool_attach_fail++;
+ return -ENODEV;
+-}
+-
+-liodn = fman_port_get_liodn(rxp);
+-if (!liodn) {
+-priv->xsk_pamu_window_fail++;
+-priv->xsk_pool_attach_fail++;
+-return -ENODEV;
+ }
+ 
+ 	/*
+-- 
+2.39.5
