@@ -176,6 +176,21 @@ cp "$BOARD_PATCH_DIR/0082b-dpaa-dedicated-qman-channels-per-qband.patch" "$KERNE
 # observational RX hot-path eligibility probe. Strictly diagnostic --
 # no datapath change. ZC redirect lands in 0084+. Spec sec 6.1.2.
 cp "$BOARD_PATCH_DIR/0083-dpaa-rx-xsk-branch-eligibility-probe.patch" "$KERNEL_PATCHES/"
+# M3-3 step 4: NAPI-hooked BMan refill from the XSK fill ring + new
+# xsk_bman_refill_batches counter. Folded into the existing rcu_read_lock()
+# block in dpaa_eth_poll() right after xsk_set_rx_need_wakeup. With no XSK
+# pool bound (default flavor) the new ops->napi_refill callback walks zero
+# bound qbands and returns; no datapath cost. Spec sec 6.1.3.
+cp "$BOARD_PATCH_DIR/0084-dpaa-napi-hooked-bman-refill.patch" "$KERNEL_PATCHES/"
+# M3-3 step 5: TX ZC submission + xsk_tx_inflight backpressure + TxConf
+# round-trip closure. Three new flavor ops (napi_tx_zc, xsk_set_tx_need_wakeup,
+# tx_conf_zc) wired into dpaa_eth_poll() tail (same RCU section as 0084) and
+# dpaa_tx_conf() head. Two new ethtool counters (xsk_tx_zc_submit,
+# xsk_tx_conf_zc). With no XSK pool bound (default flavor) all three ops
+# walk zero bound qbands and the tx_conf_zc claim probe returns false on
+# bpid mismatch -- skb fast path unchanged. ≥ 7 Gbps acceptance gate on
+# vpp flavor. Spec sec 6.1.4.
+cp "$BOARD_PATCH_DIR/0085-dpaa-tx-zc-and-inflight-backpressure.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
