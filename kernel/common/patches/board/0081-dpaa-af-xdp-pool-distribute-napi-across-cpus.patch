@@ -44,15 +44,49 @@ lifetime; subsequent re-bind on the same queue_id overwrites the slot.
 
 What is observable on hardware after this patch alone (versus 0080):
 
-  * /tmp/xsk_bind_test eth4 q=0..3 with XDP_USE_NEED_WAKEUP and a
-    100x sendto(MSG_DONTWAIT) burst PER queue_id.  ftrace
-    napi_schedule_irqoff events MUST fire on:
-      cpu 0 for q=0, cpu 1 for q=1, cpu 2 for q=2, cpu 3 for q=3
-    (was: 100% on cpu 0 for every queue_id under 0080).
-  * /proc/interrupts QMan portal lines 46-49 distribute across CPUs
-    1:1 with the qbands you bind.
-  * Existing M2-s2 100x churn loop still passes (attach_ok=detach_ok,
-    zero error counters, zero RCU/WARN/oops).
+  * Control-plane wiring (the only thing this patch changes):
+    debugfs /sys/kernel/debug/dpaa-eth/<iface>/qmap (when wired in
+    step 2b) shows qmap[q].cpu = q % num_online_cpus and qmap[q].napi
+    pointing at &per_cpu_ptr(priv->percpu_priv, q%N)->np.napi.  Until
+    the debugfs node lands, the same information is recoverable from
+    a crash dump or live kgdb: priv->qmap[0..3].napi addresses must
+    differ by exactly the per-CPU offset stride.
+  * Existing M2-s2 / step 1 attach/detach 100x churn loop still passes
+    (attach_ok = detach_ok, zero error counters, zero RCU/WARN/oops).
+  * bind(XDP_ZEROCOPY | XDP_USE_NEED_WAKEUP) on q = 0..3 still
+    succeeds; sendto(MSG_DONTWAIT) bursts still return 0 (no -ENXIO).
+  * iperf3 baseline on RJ45 eth1->lxc200 stays within noise of the
+    step 1 reference (~942 Mbps, ~1% jitter band).
+
+What is explicitly NOT observable from this patch alone, even though
+it is the obvious thing to look for:
+
+  * Per-CPU distribution of napi_schedule_irqoff events via ftrace or
+    /proc/softirqs deltas.  napi_schedule_irqoff(napi) -> ____napi_schedule()
+    in net/core/dev.c adds the napi to this_cpu_ptr(&softnet_data)->poll_list,
+    i.e. the CALLING CPU's poll list — NOT the napi's bound CPU.  The
+    wakeup path (sendto -> ndo_xsk_wakeup -> napi_schedule_irqoff) is
+    always sourced from the userspace caller's CPU, so a single-threaded
+    test pinned to cpu 0 will show 100% of poll_list inserts on cpu 0
+    even after this patch.  This is not a regression; it is kernel
+    NAPI semantics.
+
+    Behavioral per-CPU steering becomes observable in later subpatches:
+    - step 2b (0082): dedicated QMan dispatch channels per qband mean
+      each qband's portal IRQ fires on a different CPU (portals 46-49
+      are already CPU-pinned in /proc/interrupts).  Once the RX FQ
+      dequeue is sourced from the portal IRQ instead of a userspace
+      wakeup, napi_schedule from IRQ context correctly steers to the
+      portal's CPU and ftrace counters distribute.
+    - step 3+ (0083+): RX ZC branch closes the loop with napi_complete
+      on the per-cpu napi, making the distribution show up in
+      /proc/net/softnet_stat per-CPU deltas under sustained load.
+
+This patch's contribution is the necessary control-plane wiring that
+makes those later subpatches' behavioral changes possible.  Without
+it qmap[q].napi would still point at cpu 0's napi for every qband and
+the IRQ-driven dequeue in step 2b would funnel all 4 qbands' completion
+work back through cpu 0's softirq.
 
 What is NOT done in this patch (lands in later subpatches):
 

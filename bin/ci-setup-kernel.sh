@@ -166,6 +166,11 @@ cp "$BOARD_PATCH_DIR/0080-dpaa-af-xdp-pool-bind-napi-and-arm-rx-need-wakeup.patc
 # channels (step 2b) and no cluster-aware refinement (step 2c).
 # Spec sec 5.2 "Queue mapping correctness" items 3-5.
 cp "$BOARD_PATCH_DIR/0081-dpaa-af-xdp-pool-distribute-napi-across-cpus.patch" "$KERNEL_PATCHES/"
+# M3-3 step 2b: observability for step 2a's pointer wiring. Adds the
+# /sys/kernel/debug/af_xdp_pool/qmap node so priv->qmap[].napi/.cpu can
+# be verified per-netdev without kgdb or a crash dump. Pure observability —
+# zero datapath change, zero new core-driver exports. Spec sec 5.2.
+cp "$BOARD_PATCH_DIR/0082-dpaa-af-xdp-pool-qmap-debugfs.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
