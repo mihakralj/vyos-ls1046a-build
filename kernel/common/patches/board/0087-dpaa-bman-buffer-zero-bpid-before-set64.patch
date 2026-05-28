@@ -1,0 +1,77 @@
+From: vyos-ls1046a-build M3-3 step 6 <noreply@vyos-ls1046a-build>
+Date: 2026-05-28
+Subject: [PATCH] dpaa: zero bmbs[i].data before bm_buffer_set64 (fix BMan ErrInt residue)
+
+M3-3 step 6 blocker A residue (spec sec 6.1.5, "BMan Invalid Command
+Verb"). Companion to patch 0086.
+
+Root cause: bman.c::bman_release() composes the RCR slot as follows:
+  bm_buffer_set64(r->bufs, bm_buffer_get64(bufs));   // slot 0 addr only
+  bm_buffer_set_bpid(r->bufs, pool->bpid);            // slot 0 bpid
+  if (i)
+      memcpy(&r->bufs[1], &bufs[1], i * sizeof(bufs[0]));  // slots 1..n-1
+
+Only RCR slot 0 gets the pool->bpid override. Slots 1..n-1 are memcpied
+verbatim from the caller's bm_buffer array, **including** the bpid bits
+in their high word. If the caller's bm_buffer was allocated on the stack
+without zeroing, those bpid bytes contain whatever the compiler/CPU
+last left on the stack, which the BMan validates and rejects as
+"ErrInt: Invalid Command Verb".
+
+Mainline dpaa_eth.c handles this in two ways:
+  - dpaa_release_sgt_members() does `memset(bmb, 0, sizeof(bmb));` once
+    before the populate loop (drivers/.../dpaa_eth.c:1429).
+  - dpaa_bp_add_8_bufs() does `bmb[i].data = 0;` immediately before
+    `bm_buffer_set64(&bmb[i], addr);` (drivers/.../dpaa_eth.c:1639).
+
+Our AF_XDP refill paths in af_xdp_pool_main.c called bm_buffer_set64()
+on slots 1..n-1 without first clearing their bpid bytes. After
+0086 chunked the release in 8-buffer batches the residual ErrInts
+observed on the DUT (G5 reproducer 2026-05-28) are caused by this
+slot-1..7 bpid garbage.
+
+Apply the same idiom as mainline `dpaa_bp_add_8_bufs()`: set
+`bmbs[i].data = 0;` immediately before each `bm_buffer_set64()` at
+both refill call sites.
+
+Spec ref: M3-3 step 6 blocker A residue.
+Predecessor: 0086 (bman_release() 8-buffer chunking).
+Verification: DUT G5 (xsk-bind-probe + iperf3 UDP flood); expected
+to drop `bman_ccsr 1890000.bman: ErrInt: Invalid Command Verb` count
+from the post-0086 residue to zero. `rx_packets=0` will remain until
+the XSKMAP redirect into `rx_default_dqrr` is wired (separate blocker
+B, patch 0088+).
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+index aa71116..fa1f50f 100644
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -237,6 +237,13 @@ return -ENODEV;
+ 			break;
+ 		for (i = 0; i < n; i++) {
+ 			dma_addr_t dma = xsk_buff_xdp_get_dma(handles[i]);
++			/* Zero bmbs[i].data first: bman_release() memcpies entries
++			 * 1..num-1 including their bpid bits into the RCR. Stack
++			 * garbage in bpid produces BMan 'ErrInt: Invalid Command
++			 * Verb'. Mirrors mainline dpaa_eth.c::dpaa_bp_add_8_bufs().
++			 * Patch 0087.
++			 */
++			bmbs[i].data = 0;
+ 			bm_buffer_set64(&bmbs[i], dma);
+ 		}
+ 		/* BMan RCR verb byte BUFCOUNT_MASK = 0x0f, HW-valid range 1..8
+@@ -651,8 +658,13 @@ if (!pool)
+ continue;
+ 
+ n = xsk_buff_alloc_batch(pool, handles, ARRAY_SIZE(handles));
+-for (i = 0; i < n; i++)
++for (i = 0; i < n; i++) {
++/* Zero bmbs[i].data first; see attach-time seed loop comment.
++ * Patch 0087.
++ */
++bmbs[i].data = 0;
+ bm_buffer_set64(&bmbs[i], xsk_buff_xdp_get_dma(handles[i]));
++}
+ if (n) {
+ /* Chunk bman_release() in 8-buffer batches; HW BUFCOUNT field is
+  * 4 bits and rejects num > 8 as Invalid Command Verb. XSK-side
