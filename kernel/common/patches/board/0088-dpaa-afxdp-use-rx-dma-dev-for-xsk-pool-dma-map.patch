@@ -1,0 +1,105 @@
+From: vyos-ls1046a-build M3-3 step 6 <noreply@vyos-ls1046a-build>
+Date: 2026-05-28
+Subject: [PATCH] dpaa: use priv->rx_dma_dev for xsk_pool_dma_map (fix BMan ErrInt)
+
+M3-3 step 6 blocker A residual root cause (spec sec 6.1.5,
+"BMan Invalid Command Verb"). After patches 0086 (8-buffer chunked
+release) and 0087 (zero bpid bytes before bm_buffer_set64), the BMan
+err-IRQ "Invalid Command Verb" (BM_EIRQ_IVCI, bman_ccsr.c:55) still
+fires 1:1 with xsk_bman_refill_batches on the DUT G5 reproducer
+(verified 2026-05-28 on kernel 6.18.33-vyos commit 34b7c50).
+
+Both prior hypotheses rejected by hardware:
+  - 0086: bman_release num>8 BUFCOUNT overflow (chunking applied, still fires)
+  - 0087: stack-residue bpid bytes (mainline idiom applied, still fires)
+
+True root cause: DMA device mismatch between the XSK pool map and the
+BMan FBPR validation domain.
+
+Mainline dpaa_eth.c probes the RX DMA device from the FMan RX port,
+NOT the parent MAC device:
+
+  drivers/net/ethernet/freescale/dpaa/dpaa_eth.c:3649
+    priv->rx_dma_dev = fman_port_get_device(mac_dev->port[RX]);
+    priv->tx_dma_dev = fman_port_get_device(mac_dev->port[TX]);
+    err = dma_coerce_mask_and_coherent(priv->rx_dma_dev, DMA_BIT_MASK(40));
+
+Every mainline DMA mapping for buffers that go through BMan uses this
+40-bit-mask FMan-port device:
+
+  dpaa_eth.c:1474  dma_map_page(dpaa_bp->priv->rx_dma_dev, ...) [skb path]
+  dpaa_eth.c:1631  dma_map_page(dpaa_bp->priv->rx_dma_dev, ...) [bp_add_8_bufs]
+  dpaa_eth.c:2888  dma_unmap_page(dpaa_bp->priv->rx_dma_dev, ...) [bp drain]
+  dpaa_eth.c:3450  dma_unmap_page(bp->priv->rx_dma_dev, ...)      [bp free]
+
+Our AF_XDP pool DMA-mapped the entire UMEM region against the WRONG
+device:
+
+  af_xdp_pool/af_xdp_pool_main.c:192
+    xsk_pool_dma_map(pool, priv->mac_dev->dev, DMA_ATTR_SKIP_CPU_SYNC);
+                            ^^^^^^^^^^^^^^^^^
+                            parent MAC device, default 32-bit DMA mask,
+                            different of_node / iommu group than the
+                            FMan port device that owns the BMan FBPR
+                            window programmed by U-Boot.
+
+The dma_addr_t values returned by xsk_buff_xdp_get_dma() are therefore
+valid IOVAs for the MAC device but BMan validates incoming buffer
+addresses against the FBPR window scoped to the FMan port device.
+The address resolves outside that window and the BMan rejects the
+release verb with IVCI ("Invalid Command Verb"), even though the
+verb-byte itself, the bpid, and the buffer count are well-formed.
+
+This explains why both 0086 and 0087 - which addressed only the verb
+layout and the bpid bytes - failed to silence the ErrInt: the bytes
+in the RCR ring were correct from BMan's perspective; it was the
+40-bit address in slot N's hi+lo that was unreachable through the
+FBPR window.
+
+Fix: use priv->rx_dma_dev (same device mainline uses for its
+dma_map_page() in dpaa_bp_add_8_bufs) as the xsk_pool_dma_map() target.
+priv->rx_dma_dev is populated in dpaa_netdev_setup() (dpaa_eth.c:3649),
+which runs during dpaa_eth_probe() well before any XSK attach call,
+so the field is always non-NULL at xsk_pool_attach time. The added
+WARN_ON serves as defense-in-depth if dpaa_netdev_setup() ever changes
+ordering relative to xsk_pool_attach.
+
+The DMA_ATTR_SKIP_CPU_SYNC attribute is preserved: the CoreNet fabric
+is cache-coherent for the FMan masters on LS1046A so the
+per-operation barriers are unnecessary; this matches mainline's
+behaviour for the skb-path BP refill (it uses the streaming-DMA
+default, which on CoreNet-coherent arm64 is also a no-op for the
+sync arms).
+
+The XSK pool detach path will automatically call xsk_pool_dma_unmap()
+against the same device (the pool stores the cookie internally), so
+no companion change is required in af_xdp_pool_xsk_pool_detach().
+
+Spec ref: M3-3 step 6 blocker A true root cause.
+Predecessors: 0086 (verb-count chunking, retained), 0087 (bpid zero, retained).
+Verification: DUT G5 (xsk-bind-probe + iperf3 UDP flood);
+expected outcomes:
+  - `bman_ccsr 1890000.bman: ErrInt: Invalid Command Verb` count -> 0
+  - xsk_bman_refill_batches counter continues to increment normally
+  - rx_packets=0 will remain until the XSKMAP redirect into
+    rx_default_dqrr is wired (separate blocker B, patch 0089+).
+Failure-mode if hypothesis wrong: ErrInt count unchanged; next
+candidate is enabling CONFIG_FSL_DPAA_CHECKING=y to convert
+DPAA_ASSERT into BUG() and extract the failing num+bpid+bufs[0].lo
+on the stack.
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+index fa1f50f..9565b46 100644
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -189,7 +189,8 @@ return -ENODEV;
+ 	 * Failure here is a hard error (misconfigured IOMMU or OOM for the
+ 	 * DMA-mapping slab).  Do not fall back to copy-mode silently.
+ 	 */
+-	ret = xsk_pool_dma_map(pool, priv->mac_dev->dev,
++	WARN_ON(!priv->rx_dma_dev);
++ret = xsk_pool_dma_map(pool, priv->rx_dma_dev,
+ 			       DMA_ATTR_SKIP_CPU_SYNC);
+ 	if (ret) {
+ 		priv->xsk_dma_map_fail++;
