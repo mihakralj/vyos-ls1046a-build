@@ -191,6 +191,16 @@ cp "$BOARD_PATCH_DIR/0084-dpaa-napi-hooked-bman-refill.patch" "$KERNEL_PATCHES/"
 # bpid mismatch -- skb fast path unchanged. ≥ 7 Gbps acceptance gate on
 # vpp flavor. Spec sec 6.1.4.
 cp "$BOARD_PATCH_DIR/0085-dpaa-tx-zc-and-inflight-backpressure.patch" "$KERNEL_PATCHES/"
+# M3-3b: FMan PCD capability detection + CC-steering stub API. Adds
+# CONFIG_DPAA_HW_CC_STEERING (default y), priv->fman_caps snapshot via
+# dpaa_fman_get_caps() at probe, one-shot KERN_INFO log, hw_offload_unavailable
+# ethtool counter, and the four fman_cc_tree_*() stubs returning -ENOTSUPP.
+# Observability-only -- mainline ucode 106 silicon shows caps=0x00 and every
+# productive call short-circuits. dpaa_fman_caps.force= module parameter
+# lets developers simulate ucode 210 for unit testing downstream consumers
+# (af_xdp_pool qband-select, ASK2 flowtable bridge, vyos-1x classify CLI).
+# Spec sec 3.5 + sec 5.4.
+cp "$BOARD_PATCH_DIR/0086-dpaa-fman-caps-detection-and-cc-stub.patch" "$KERNEL_PATCHES/"
 # M3-3 step 6 blocker A residual: DMA device mismatch between the XSK
 # pool map (was: parent MAC device, 32-bit mask) and the BMan FBPR
 # validation domain (FMan RX port device, 40-bit mask). Switches
