@@ -7,25 +7,6 @@
 **Document version:** v5.1, 2026-05-28
 **Supersedes:** v5.0, v4.4, v4.3, v4.2, v4.1, v4.0, v3.0, v2.x, v0.9
 
-**What changed in v5.1 (2026-05-28) — cleanup pass:**
-
-- **Milestone tracker simplified.** Dropped the "Per-flavor consumer" column (DPAA1 driver work is cross-flavor by construction — see §1.3 / §7 — so the column was always noise). Per-row "Notes" condensed to one line each: patch + commit + status anchor only. Full per-milestone validation detail (M0/M1/M2-s1/M2-s2 dut-validation, M3-3 step 1/2a/2b/2c/3/4/5 narratives, blocker-A root-cause forensics, M3-3b stub deliverable surface) is archived in Qdrant under `topic=dpaa1-afxdp-spec-milestone-archive`; long-form prose for the in-flight work stays in §6.1.x where it informs future design.
-- **M3-3 step 4/5 productive closure recorded.** Step 4 row now reflects blocker-A closure (`0086`+`0087`+`0088`, root cause: wrong DMA device — `priv->rx_dma_dev` fix); step 5 row clarifies hang-fix landed and productive TX waits on a TX-capable XSK producer.
-- **M3-3b stub landed.** Patch `0086` (FMAN cap detection + four `-ENOTSUPP` CC stubs + `hw_offload_unavailable` ethtool counter) committed as `c36e6c0`. Tracker row + reviewer-feedback delta row #5 updated to `stub-landed` / `landed (stub-only)`.
-- **Patch-number renumber reinforced.** Slots `0086`/`0087`/`0088` were reused during blocker-A debugging (originally reserved for HM/Policer/CEETM productive installs in §5.5–§5.7). HM/Policer/CEETM renumbered to `0090`/`0091`/`0092` — §5.5/§5.6/§5.7 + §6.1.6 already cross-reference correctly.
-- **"Current execution focus" replaced** with a tight closure-summary subsection. The blow-by-blow step-2a-through-step-3 prose moved to Qdrant; the post-2026-05-27 closures stay because they describe the *current* in-flight state.
-- No technical content from v5.0 is dropped — only relocated.
-
-**What changed in v5.0 (2026-05-27):**
-
-- **Spec reorganized along a cross-flavor / flavor-specific axis.** The driver-side work was always more general than its v4.x "FLAVOR=vpp" framing implied. The M0 abstraction, the per-CPU NAPI + dedicated BMan channel restructure (§5.2), `ndo_xsk_wakeup` (§5.3), the CC/HM/Policer/CEETM HW-offload primitives (§5.4–§5.7), and the DCSR observability (§5.8) are all **flavor-neutral kernel capabilities** that `default`, `vpp`, and `ask` consume in different ways. Only the AF_XDP zero-copy datapath (XSK-backed BMan pool, ZC RX/TX branches, `xsk_tx_inflight` backpressure) is genuinely VPP-specific; the ASK2 dynamic CC tree + Host Command reconfig is ASK2-specific. New §5 collects all cross-flavor capabilities; new §6 splits the flavor-specific consumers; new §7 documents the co-existence rules that let all three flavors share one kernel binary.
-- **M0 augmentation specified: per-netdev flavor-ops.** v4.x assumed a single global `dpaa_register_flavor_ops()` because only one flavor module was expected per kernel boot. v5.0 makes ops registration per-`dpaa_priv` (keyed on the netdev the flavor module is claiming) so an operator can in principle run VPP on eth3/eth4 and ASK2 on eth0/eth1/eth2 from a single kernel binary. The global helper stays as a thin wrapper for the common case. See §3.4.
-- **Documented `default` flavor benefits explicitly.** §5.2 datapath restructure improves *kernel skbuf RX*, not just AF_XDP. §5.4 CC steering backs RPS replacement (`ndo_rx_flow_steer`). §5.5 HM offload backs `NETIF_F_HW_VLAN_CTAG_*`. §5.6 Policer backs tc/nftables ingress offload. §5.7 CEETM is already a tc qdisc waiting to be activated.
-- **No technical content from v4.4 is dropped.** All previously-validated facts (M0/M1/M2-s1/M2-s2 dut-validated status, M3-3 step 1 patch 0080 landed, `DPAA1_MIN_UMEM_CHUNK=3840`, `fman_port_disable`-anchored detach, MURAM budget < 8 KiB for VPP / < 52 KiB combined, A050385 headroom requirement, CCI-400 cluster pinning, etc.) carry forward.
-
-**Scope:** All three FLAVORs (`default`, `vpp`, `ask`) of `mihakralj/vyos-ls1046a-build`. ASK2 userspace remains in `specs/ask2-rewrite-spec.md`; this spec defines the kernel-side primitives ASK2 consumes. Phase 4 (single-MAC dual-flavor via VSP bifurcation) is a deferred appendix.
-**Status:** Implementation-ready. M0 / M1 / M2-s1 / M2-s2 / M3-3 step 1 / 2a / 2b / 2c / 3 / 4 / 5 / 6 dut-validated; M3-3b stub landed (`0086` = `c36e6c0`); blocker A (BMan IVCI) + blocker B (XSKMAP redirect) closed 2026-05-28 (§6.1.6, §6.1.7); productive TX-side XSK producer pending (step 5 G5); ≥7 Gbps gate next-session methodology investigation per §6.1.8 Options A/B/C (step 7 only if those fail).
-
 ---
 
 ## TL;DR
@@ -42,7 +23,7 @@
 
 ## Milestone Tracker
 
-Single source of truth across sessions. DPAA1 driver work is cross-flavor by construction (see §1.3, §7) — `default` / `vpp` / `ask` all share the same kernel binary; whether a given milestone *manifests behavior* on a flavor depends solely on whether that flavor has a userspace consumer loaded (AF_XDP socket, VPP `af_xdp` plugin, ASK2 module). Status: **planned**, **in-progress**, **landed** (in-tree, patch-health-clean), **dut-validated**, **stub-landed**, **blocked**, **deferred**.
+DPAA1 driver work is cross-flavor by construction (see §1.3, §7) — `default` / `vpp` / `ask` all share the same kernel binary; whether a given milestone *manifests behavior* on a flavor depends solely on whether that flavor has a userspace consumer loaded (AF_XDP socket, VPP `af_xdp` plugin, ASK2 module). Status: **planned**, **in-progress**, **landed** (in-tree, patch-health-clean), **dut-validated**, **stub-landed**, **blocked**, **deferred**.
 
 Full per-row validation detail (DUT counter readings, ftrace evidence, iperf3 numbers, gate pass/fail per port class) is archived in Qdrant under `topic=dpaa1-afxdp-spec-milestone-archive`. The Notes column below carries only the patch reference, commit SHA, and one-line outcome anchor.
 
@@ -80,18 +61,6 @@ In-flight state as of **2026-05-28**. Pre-2026-05-27 per-step DUT validation pro
 **Next-session entry point for ≥7 Gbps gate-3 closure** (per §6.1.8): try Options A (`XDP_PASS` counter under driven load), B (`xdp-tools xdpsock -r -q 0`), C (`-P 4` parallel iperf3 server) BEFORE committing to step 7 — the driver-capacity cross-check already proves the fabric does 7.5 Gbit/s clean; gate 3 may close at the existing copy-mode datapath with only a measurement-methodology change.
 
 **Operator-visible non-issue noted on the eth0/eth1/eth2 management LAN:** three RJ45 ports DHCP-active on the same `192.168.1.0/24` switch produce martian-source storms. VyOS config / cabling issue, NOT a driver regression. Fix: leave only eth0 plugged in or `set interfaces ethernet ethN address dhcp` on a single port.
-
-### Reviewer-feedback delta coverage
-
-| Delta | Milestone | Status | Anchor |
-|---|---|---|---|
-| 1. NAPI-hooked refill + `xsk_bman_starve` + batch 32→256 escalation | M3-3 step 4 | landed (0084 v2 dut-validated); blocker A CLOSED 2026-05-28 by 0086+0087+0088 chain (DUT G5 60 s hold: 0 IVCI, 0 BUG/WARN/softlock, 16 refill batches — see §6.1.6) | §6.1.3 |
-| 2. CEETM CGR HW tail-drop + `xsk_tx_inflight` ≤ 1024 + low-water 512 + `XDP_USE_NEED_WAKEUP` | M3-3 step 5 + M3-3e | partial — `XDP_USE_NEED_WAKEUP` wired in 0080; `xsk_tx_inflight` planned (0084) | §6.1.4, §5.7 |
-| 3. 9-step `fman_port_disable(rxp)`-anchored detach, 10 ms link bounce accepted | M2-s2 | **dut-validated** (sleep-in-RCU fix `039a50c`, 100× churn clean) | §6.1.1 |
-| 4. `DPAA1_XSK_INITIAL_SEED=8192` + OQ9 rate-scaling | M2-s1 | landed | §6.1.1 |
-| 5. `priv->fman_caps` bitmask + `hw_offload_unavailable` counter + ucode-106 row | M0 augmentation, gates M3-3b–e | **landed (productive DT probe)** — `0086` exposes counter via `ethtool -S`; `0086a` (2026-05-28) auto-populates caps from the DT firmware blob (`qe_firmware.id` major-version parser, ucode 210.10.1 verified on DUT lights up CC+HM+POL+PARSER, HC stays off per PR13); HM stub API landed as `0090` per §5.5 | §3.5, §4.1, §5.4, §5.5 |
-| 6. Parser→CC→HM→QMan ordering normative; OQ5 closed | M3-3b doc | landed (doc) | §5.4 |
-| 7. Two-layer VPP shaper exclusion (VyOS validator + `ceetm_active` sysfs) | M3-3e + §7.4 | planned | §5.7, §7.4 |
 
 ---
 
