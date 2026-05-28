@@ -403,7 +403,7 @@ For `XDP_WAKEUP_RX`, kick NAPI via `napi_schedule()`. For `XDP_WAKEUP_TX`, poke 
 
 ### 5.4 CC steering (M3-3b)
 
-**Patch:** `0085` (planned). **Status:** planned (ucode-210 gated). **CC + HM chain ordering (resolves former OQ5):** Parser → CC (unmodified ingress) → HM (egress from matching CC node) → QMan. CC keys match wire-format; consumers receive post-HM frames.
+**Patch:** `0086` (observability-only stub landed; productive CC install gated). **Status:** stub-landed (FMAN_CAP_* detection + `fman_cc_tree_*` decls + four `-ENOTSUPP` stubs + `hw_offload_unavailable` counter exposed via `ethtool -S`; productive CC install still ucode-210 gated). **CC + HM chain ordering (resolves former OQ5):** Parser → CC (unmodified ingress) → HM (egress from matching CC node) → QMan. CC keys match wire-format; consumers receive post-HM frames.
 
 ```c
 int  fman_cc_tree_install (struct fman *fm, u8 port_id,
