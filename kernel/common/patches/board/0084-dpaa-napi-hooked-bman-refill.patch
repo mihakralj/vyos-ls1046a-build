@@ -1,26 +1,23 @@
-From: vyos-ls1046a-build M3-3 step 4 v2 <noreply@vyos-ls1046a-build>
-Date: 2026-05-27
-Subject: [PATCH] dpaa: NAPI-hooked BMan refill from the XSK fill ring (v2: single-CPU pinned)
+From: vyos-ls1046a-build M3-3 step 4 v3 <noreply@vyos-ls1046a-build>
+Date: 2026-05-28
+Subject: [PATCH] dpaa: NAPI-hooked BMan refill from the XSK fill ring (v3: stand-alone, absorbs 0086+0087)
 
 M3-3 step 4 (spec sec 6.1.3, "NAPI-hooked BMan refill"). Wires the
 xsk_pool fill-ring -> BMan-pool top-up loop into the per-CPU NAPI
-poll's tail, immediately after xsk_set_rx_need_wakeup arming.
-Pure additive change; with no XSK pool bound (default flavor) the
-new flavor-op callback is a NULL deref under RCU and the rest of the
+poll's tail, immediately after xsk_set_rx_need_wakeup arming. Pure
+additive change; with no XSK pool bound (default flavor) the new
+flavor-op callback is a NULL deref under RCU and the rest of the
 loop walks zero qbands. With a pool bound (vpp flavor + xsk_bind),
-the callback measures bman_pool_get_count() and tops the BMan pool
-back up from the XSK fill ring whenever depth < refill threshold.
+the callback drains the XSK fill ring into the BMan pool in
+hardware-correct 8-buffer release windows.
 
 Three coordinated changes:
 
   1. New ops->napi_refill callback on struct dpaa_qmgmt_ops.
-
-     Added to dpaa_flavor.h after xsk_set_rx_need_wakeup, same
-     calling convention (priv pointer only -- no per-queue context).
-     The flavor module iterates priv->xsk_bpool[] internally.
+     Added to dpaa_flavor.h after xsk_set_rx_need_wakeup. The
+     flavor module iterates priv->xsk_bpool[] internally.
 
   2. Call site in dpaa_eth_poll().
-
      Folded into the EXISTING rcu_read_lock() region that hosts the
      xsk_set_rx_need_wakeup call. No additional RCU section, no
      additional ops dereference -- the local `ops` from the prior
@@ -28,65 +25,114 @@ Three coordinated changes:
 
   3. New u64 xsk_bman_refill_batches counter on struct dpaa_priv,
      exposed via ethtool -S as "xsk_bman_refill_batches".
+     Bumped once per non-empty xsk_buff_alloc_batch() round-trip
+     (the 8-buffer BMan release chunks within one round-trip count
+     as a single batch).
 
-     Bumped once per non-empty xsk_buff_alloc_batch() -> bman_release()
-     round-trip. The pre-existing xsk_bman_starve counter (defined by
-     patch 0079, never wired before) is now bumped whenever
-     bman_pool_get_count() < DPAA1_XSK_MIN_DEPTH at refill time, giving
-     operators an early warning that the fill ring is draining faster
-     than the kernel can top up.
+Flavor-module body (af_xdp_pool_main.c) -- af_xdp_pool_napi_refill():
 
-Flavor-module body (af_xdp_pool_main.c):
+  Walks priv->xsk_max_qbands. For each bound (priv->xsk_bpool[qband]
+  non-NULL) qband:
+    - Single-CPU pin: only priv->qmap[q].cpu drives this qband
+      (raw_smp_processor_id() check) so the XSK FILL ring's SPSC
+      producer cursor stays single-writer.
+    - RCU-deref priv->xsk_pool[qband]; skip if NULL.
+    - xsk_buff_alloc_batch() into stack handles[32]/bmbs[32]
+      (10 KiB per-call stack footprint, well within NAPI budget).
+    - For each handle: pre-zero bmbs[i].data (CRITICAL: see below),
+      then bm_buffer_set64() with the XSK chunk's DMA address.
+    - Release in 8-buffer chunks (CRITICAL: see below).
+    - Bump priv->xsk_bman_refill_batches if n > 0.
 
-     af_xdp_pool_napi_refill() walks priv->xsk_max_qbands. For each
-     bound (priv->xsk_bpool[qband] non-NULL) qband:
-       - RCU-deref priv->xsk_pool[qband] (skip if NULL)
-       - Read bman_pool_get_count(bpool); skip if >= DPAA1_XSK_REFILL_THRESHOLD
-       - Bump priv->xsk_bman_starve if depth < DPAA1_XSK_MIN_DEPTH
-       - Compute batch size: 256 if starving, 32 otherwise
-       - xsk_buff_alloc_batch() into local handles[] (stack-allocated)
-       - Translate each xdp_buff DMA to bm_buffer via bm_buffer_set64()
-       - bman_release() the batch
-       - Bump priv->xsk_bman_refill_batches if n > 0
+THREE BMAN HW CONTRACTS, all enforced in this single patch:
 
-     The 256-entry batch ceiling matches the per-call stack budget
-     (256 x sizeof(struct bm_buffer) = 8 KiB + 256 x sizeof(struct
-     xdp_buff *) = 2 KiB = 10 KiB) and matches BMan's 8-buffer
-     release window (bman_release() loops internally in 8-deep
-     chunks). On steady state with 32-deep refills running once
-     per NAPI completion, the cost is O(32) DMA accesses on a path
-     that already touched O(64) DQRR slots -- negligible overhead.
+  (a) BMan RCR (Release Command Ring) verb byte BUFCOUNT field is
+      4 bits wide (bman.c:116 BUFCOUNT_MASK = 0x0f). bman_release()
+      asserts num in [1,8] (bman.c:746). Any value > 8 produces a
+      malformed RCR command verb that the QBMan portal silently
+      rejects with "ErrInt: Invalid Command Verb" (BM_EIRQ_IVCI).
+      DPAA_ASSERT() is a no-op without CONFIG_FSL_DPAA_CHECKING=y
+      so this corruption is silent on production builds. The
+      release loop below releases at most 8 buffers per
+      bman_release() call. Mainline dpaa_eth.c:1624 uses the same
+      8-buffer chunk pattern.
+
+  (b) bman_release() composes the RCR slot as follows:
+        bm_buffer_set64(r->bufs, bm_buffer_get64(bufs));   // slot 0 addr
+        bm_buffer_set_bpid(r->bufs, pool->bpid);            // slot 0 bpid
+        if (i)
+            memcpy(&r->bufs[1], &bufs[1], i * sizeof(bufs[0]));
+      Only slot 0 gets the pool->bpid override. Slots 1..n-1 are
+      memcpied verbatim -- INCLUDING the bpid bits in their high
+      word. If the caller's bm_buffer was allocated on the stack
+      without zeroing, those bpid bytes contain stack residue
+      which BMan validates and rejects as IVCI. The pre-zero
+      `bmbs[i].data = 0;` below mirrors mainline's
+      dpaa_bp_add_8_bufs() idiom (dpaa_eth.c:1639).
+
+  (c) FILL-ring empty / double-release invariant (spec sec 6.1.8).
+      The userspace probe oops on 2026-05-28 demonstrated that a
+      broken userspace recycle (writing to FILL without checking
+      its own consumer cursor) can deposit the same UMEM chunk
+      twice. xsk_buff_alloc_batch() then returns the same xdp_buff
+      twice, and a naive driver would issue bman_release() with two
+      copies of the same DMA address. That would land in the BMan
+      pool twice -> double-free -> next ingress overwrites the
+      first copy still in flight on the RX FQ. The driver-side
+      protection is structural: xsk_buff_alloc_batch() returns 0
+      cleanly when the FILL ring is empty, and the consumer cursor
+      it maintains is the SOLE source of truth for what to deposit
+      into BMan. A broken userspace can starve this loop (returns
+      0 -> we skip bman_release()), and a broken userspace can
+      hand us a duplicate chunk (xsk_buff_alloc_batch() returns it
+      twice -> we release it to BMan twice -> BMan validates and
+      may IVCI on the second copy, OR worse, silently accepts it
+      and we get RX corruption). The driver cannot detect a
+      userspace duplicate; that detection belongs in xsk_buff
+      core or in disciplined userspace. THIS LOOP IS CORRECT
+      under the SPSC contract; if §6.1.8 recurs the root cause is
+      userspace, not this code.
 
 Validation gates (DUT, default-flavor ISO):
 
   G1: priv->xsk_bman_refill_batches and priv->xsk_bman_starve both
       stay 0 across kernel-skbuf line-rate iperf3. Confirms the
       ops->napi_refill walk short-circuits on the
-      priv->xsk_bpool[qband] == NULL test (no XSK pool ever bound on
-      default flavor -> xsk_bpool stays NULL on all qbands -> the
-      inner xsk_buff_alloc_batch / bman_release is never reached).
-  G2: dmesg clean, no WARN/BUG/Oops/probe errors.
-  G3: ethtool -S eth1 shows both new counter lines
-      ("xsk_bman_refill_batches", and "xsk_bman_starve" which 0079
-      registered but until this patch was never incremented).
+      priv->xsk_bpool[qband] == NULL test.
+  G2: dmesg clean, no WARN/BUG/Oops/probe errors, NO
+      "bman_ccsr 1890000.bman: ErrInt: Invalid Command Verb".
+  G3: ethtool -S eth1 shows "xsk_bman_refill_batches" line.
   G4: iperf3 eth1->lxc200 within single-run jitter of patch 0083's
-      929/928 Mbps reference. The new call adds at most one RCU read-
-      section deref + one function-pointer comparison per NAPI
-      completion (~ns level).
-  G5 (deferred, vpp flavor): with /tmp/xsk_bind_test eth4 0 --zerocopy
-      bound and iperf3 traffic flowing on band 0, xsk_bman_refill_batches
-      MUST increment, and xsk_bman_starve MUST stay 0 as long as the
-      kernel keeps up. Verifies steady-state refill actually drives
-      BMan.
+      929/928 Mbps reference.
+  G5 (vpp flavor + xsk_bind): xsk_bman_refill_batches increments,
+      xsk_bman_starve stays 0 as long as the userspace recycle
+      keeps up, BMan IVCI count stays 0.
 
-Carries forward the strict ordering of the spec sec 6.1.3 "refill
-discipline": refill happens AFTER napi_complete_done() and AFTER
-xsk_set_rx_need_wakeup arming, so any userspace wakeup arriving in
-the interim still finds need_wakeup asserted (the matching
-xsk_clear_rx_need_wakeup will land with the ZC RX hot-path in 0085).
+v2 (2026-05-27) -- option-c single-CPU pinning. v1 hard-hung the
+DUT under sustained load: per-CPU NAPI tails (up to 4 CPUs
+concurrently) raced on the XSK fill ring's single-producer cursor
+(SPSC by uapi/linux/if_xdp.h contract), corrupting handles[] and
+feeding bogus DMA cookies to bman_release(). BMan CCSR rejected
+with IVCI; the lockup cascaded into an RCU stall on CPU#3 +
+indefinite soft-lockup requiring power-cycle. Fix: each qband
+has a single owner CPU (priv->qmap[q].cpu, populated by M3-3 step
+2a's per_cpu_ptr() wiring); early-return if raw_smp_processor_id()
+!= priv->qmap[q].cpu.
 
-The macro DPAA1_XSK_REFILL_THRESHOLD (256) and DPAA1_XSK_MIN_DEPTH
-(64) are defined in dpaa_eth.h since patch 0071.
+v3 (2026-05-28) -- stand-alone redesign. Absorbs the two post-v2
+hot-fix patches (0086 chunked release-by-8, 0087 pre-zero
+bmbs[i].data) directly into the seed loop and the napi_refill
+loop. v3 also folds in the §6.1.8 FILL-ring invariant comment
+and corrects the kerneldoc: the v2 changelog claimed 256-entry
+batches but the code declared handles[32]/bmbs[32] (the 32-entry
+batch is correct -- 32 chunks * 256-byte XDP buffers = 8 KiB
+matching BMan's per-pool stride, and 32 / 8 = 4 release chunks
+per round-trip, well within QMan SWP egress depth). Obsolete
+references to DPAA1_XSK_REFILL_THRESHOLD / DPAA1_XSK_MIN_DEPTH
+are dropped: the public BMan API does not expose a pool depth
+query, so depth-driven gating is impossible from this path;
+xsk_buff_alloc_batch() return value (0 on empty FILL) is the
+natural rate-limit and the only feedback signal available.
 
 Files touched:
 
@@ -99,42 +145,51 @@ Files touched:
   drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
     - append "xsk_bman_refill_batches" to dpaa_stats_xsk[]
   drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
-    - implement af_xdp_pool_napi_refill()
+    - update attach-time BMan seed loop: pre-zero + 8-chunk release
+    - implement af_xdp_pool_napi_refill() with the same discipline
     - wire .napi_refill into af_xdp_pool_qmgmt_ops
 
-v2 (2026-05-27) — option-c single-CPU pinning. v1 (which lacked the
-pin) hard-hung the DUT under sustained load: per-CPU NAPI tails (up
-to 4 CPUs concurrently) raced on the XSK fill ring's single-producer
-cursor (the XSK xp_alloc_batch_apply path is SPSC by uapi/linux/if_xdp.h
-contract), corrupting handles[] entries and feeding bogus DMA cookies
-to bman_release(). BMan CCSR rejected the resulting buffer enqueue
-with "Invalid Command Verb"; the lockup cascaded into an RCU stall on
-CPU#3 + indefinite soft-lockup requiring power-cycle (observed DUT
-2026-05-27 with vpp-flavor ISO + xsk_bind_test eth4 0 --hold 20 +
-peer ping flood). The fix: each qband has a single owner CPU
-(priv->qmap[q].cpu, populated by M3-3 step 2a's per_cpu_ptr() wiring).
-Add an early-return `if (raw_smp_processor_id() != priv->qmap[q].cpu)
-continue;` inside the per-qband loop body so only the qband's owner
-CPU drives xsk_buff_alloc_batch() + bman_release() for that qband.
-Single-writer no-atomic, no shared cursor race, zero lock overhead.
-
-Other CPUs simply skip the qband — they will service their own
-qbands on their own NAPI completion (per-CPU NAPI distribution is
-the whole point of M3-3 step 2a; this v2 patch is the consumer that
-finally exploits it). With 4 qbands × 4 CPUs (the LS1046A maximum)
-each refill burst on each CPU iterates over exactly one qband body;
-the other three iterations short-circuit.
-
-Spec reference: specs/dpaa1-afxdp-modernization-spec.md v5.0 sec 6.1.3.
+Spec reference: specs/dpaa1-afxdp-modernization-spec.md v5.0 sec 6.1.3
+(NAPI-hooked refill), sec 6.1.5 (Blocker A closure -- IVCI),
+sec 6.1.8 (FILL-ring producer/consumer invariant).
 Depends on: 0068..0083 (full M0+M1+M2+M3-3-step-1+2a+2b+2c+3 stack);
 the .cpu field is populated by step 2a (0081) at xsk_pool_attach time.
-
+Supersedes: 0086 (chunked release), 0087 (pre-zero bpid) -- both are
+git-rm'd after this patch lands.
 
 diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
-index 06273ec..a78a3a4 100644
+index 06273ec..92b2588 100644
 --- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
 +++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
-@@ -583,6 +583,88 @@ xsk_set_rx_need_wakeup(pool);
+@@ -236,9 +236,26 @@ return -ENODEV;
+ 			break;
+ 		for (i = 0; i < n; i++) {
+ 			dma_addr_t dma = xsk_buff_xdp_get_dma(handles[i]);
++			/* Zero bmbs[i].data first: bman_release() memcpies entries
++			 * 1..num-1 including their bpid bits into the RCR. Stack
++			 * garbage in bpid produces BMan 'ErrInt: Invalid Command
++			 * Verb'. Mirrors mainline dpaa_eth.c::dpaa_bp_add_8_bufs().
++			 * Patch 0087.
++			 */
++			bmbs[i].data = 0;
+ 			bm_buffer_set64(&bmbs[i], dma);
+ 		}
+-		bman_release(bpool, bmbs, (u8)n);
++		/* BMan RCR verb byte BUFCOUNT_MASK = 0x0f, HW-valid range 1..8
++		 * only (bman.c:746 DPAA_ASSERT). Mirror the mainline dpaa_eth.c
++		 * refill contract (8 at a time). Spec M3-3 step 6, patch 0086.
++		 */
++		{
++			u32 chunk_off;
++			for (chunk_off = 0; chunk_off < n; chunk_off += 8) {
++				u8 chunk = (u8)min_t(u32, 8u, n - chunk_off);
++				bman_release(bpool, &bmbs[chunk_off], chunk);
++			}
++		}
+ 		seeded += n;
+ 	}
+ 	if (seeded < DPAA1_XSK_INITIAL_SEED / 2)
+@@ -583,6 +600,104 @@ xsk_set_rx_need_wakeup(pool);
  }
  }
  
@@ -211,10 +266,26 @@ index 06273ec..a78a3a4 100644
 +continue;
 +
 +n = xsk_buff_alloc_batch(pool, handles, ARRAY_SIZE(handles));
-+for (i = 0; i < n; i++)
++for (i = 0; i < n; i++) {
++/* Zero bmbs[i].data first; see attach-time seed loop comment.
++ * Patch 0087.
++ */
++bmbs[i].data = 0;
 +bm_buffer_set64(&bmbs[i], xsk_buff_xdp_get_dma(handles[i]));
++}
 +if (n) {
-+bman_release(bpool, bmbs, (u8)n);
++/* Chunk bman_release() in 8-buffer batches; HW BUFCOUNT field is
++ * 4 bits and rejects num > 8 as Invalid Command Verb. XSK-side
++ * counter still bumps once per non-empty alloc batch. Mirror of
++ * attach-time seed loop. Spec M3-3 step 6, patch 0086.
++ */
++{
++u32 chunk_off;
++for (chunk_off = 0; chunk_off < n; chunk_off += 8) {
++u8 chunk = (u8)min_t(u32, 8u, n - chunk_off);
++bman_release(bpool, &bmbs[chunk_off], chunk);
++}
++}
 +priv->xsk_bman_refill_batches++;
 +}
 +}
@@ -223,7 +294,7 @@ index 06273ec..a78a3a4 100644
  /* ---------- Ops tables ---------- */
  
  static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
-@@ -592,6 +674,7 @@ static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
+@@ -592,6 +707,7 @@ static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
  .xsk_pool_detach        = af_xdp_pool_xsk_pool_detach,
  .xsk_wakeup             = af_xdp_pool_xsk_wakeup,
  .xsk_set_rx_need_wakeup = af_xdp_pool_xsk_set_rx_need_wakeup,
@@ -232,7 +303,7 @@ index 06273ec..a78a3a4 100644
  
  /* ---------- debugfs: /sys/kernel/debug/af_xdp_pool/qmap ----------
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-index 4429bcb..69db5e2 100644
+index acb97e4..e994a84 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 @@ -2506,11 +2506,22 @@ static int dpaa_eth_poll(struct napi_struct *napi, int budget)

@@ -1,6 +1,6 @@
-From: vyos-ls1046a-build M3-3 step 5 <noreply@vyos-ls1046a-build>
-Date: 2026-05-27
-Subject: [PATCH] dpaa: TX ZC submission, xsk_tx_inflight backpressure, TxConf round-trip closure (v2: single-CPU pinned submit)
+From: vyos-ls1046a-build M3-3 step 5 v3 <noreply@vyos-ls1046a-build>
+Date: 2026-05-28
+Subject: [PATCH] dpaa: TX ZC submission, xsk_tx_inflight backpressure, TxConf round-trip closure (v3: stand-alone)
 
 M3-3 step 5 (spec sec 6.1.4, "TX ZC + backpressure + round-trip closure").
 Closes the AF_XDP zero-copy datapath by wiring three new flavor ops into
@@ -64,7 +64,73 @@ Strictly NAPI-context on submit; RCU read-section on TxConf. No new
 locks: xsk_tx_inflight[] is atomic_t (added in 0070 alongside
 xsk_bpid[]) to be lockless against the cross-CPU TxConf path.
 
-v2 (2026-05-27) — option-c single-CPU pinning on the submit side, for
+THREE INVARIANTS THAT MAKE THE bpid CLAIM SAFE:
+
+  (a) priv->xsk_bpid[q] uniqueness WITHIN a netdev. Each bound qband
+      on the same netdev MUST hold a distinct bpid (allocated by the
+      flavor module's xsk_pool_attach -- see patch 0075b). Without
+      this, two qbands' TxConf streams would alias on bpid match and
+      the wrong qband would receive the atomic_dec. The flavor
+      module's BMan pool allocator (bman_new_pool()) enforces
+      bpid uniqueness across the system -- two concurrently-bound
+      XSK pools on the same netdev cannot share a bpid.
+
+  (b) priv->xsk_bpid[q] disambiguation ACROSS netdevs. Two DPAA1
+      netdevs (e.g. eth3 and eth4 both running AF_XDP) can hold
+      bpids from disjoint subsets of the global BMan bpid space.
+      TxConf FDs are dequeued from each netdev's own TxConf FQs
+      (priv->egress_fqs[]) -- the FQ-ID demux is the FIRST level of
+      separation, and bpid match is checked only against THIS
+      netdev's xsk_bpid[] array. So even if two netdevs happen to
+      reuse the same bpid value (impossible under bman_new_pool()
+      but worth being explicit about), the tx_conf_zc hook would
+      never see another netdev's FD.
+
+  (c) priv->xsk_bpid[q] vs the skb-path BMan pool bpid. The
+      mainline RX path's dpaa_bp (priv->dpaa_bp) holds its own
+      bpid for skb-mode RX. Could fd->bpid on a TxConf path EVER
+      equal that bpid by coincidence? No: TX FDs only carry a
+      bpid in fd->bpid if the caller set it (the skb TX path
+      DOES set it -- the bpid of the SG-frame pool used to build
+      the FD), so we must NOT match against the skb-pool's bpid.
+      The check is structural: only priv->xsk_bpool[q] non-NULL
+      qbands are considered, and priv->xsk_bpid[q] is set ONLY by
+      af_xdp_pool_xsk_pool_attach() after a successful XSK pool
+      allocation. There is no path that would write a non-XSK bpid
+      into priv->xsk_bpid[].
+
+PERFORMANCE COSTS, ALL BOUNDED:
+
+  - Per-FD RCU read-lock in dpaa_tx_conf(). The mainline TxConf
+    path is already a hot path (~7+ Gbps = ~600 k FD/s on 10 GbE),
+    so a per-FD rcu_read_lock() adds ~5 ns of locked-section cost
+    (RCU read-side is a per-CPU counter bump on modern arm64).
+    This is acceptable for two reasons: (1) tx_conf_zc returns
+    early-true on the first qband match, so the RCU section is
+    short; (2) batching the rcu_dereference across a TxConf NAPI
+    dequeue burst would require restructuring dpaa_tx_conf() to
+    accept a batch (not currently the case) -- the per-FD cost is
+    the design choice mainline already makes for every other hook
+    in this path.
+
+  - O(qbands) bpid scan in tx_conf_zc. Bounded by
+    DPAA1_XSK_MAX_QBANDS = 4. At ~600 k FD/s with 4 qbands, that
+    is ~2.4 M loop iterations per second -- ~10 ns per FD on
+    Cortex-A72, totally negligible relative to the FD's own cost
+    (DMA unmap, percpu_priv accounting, network stack handoff).
+
+  - egress_fq selection by raw_smp_processor_id() % dpaa_max_num_txqs().
+    Under v2 single-CPU pinning the submit side only runs on
+    priv->qmap[q].cpu, so this modulo always produces the same FQ
+    index for a given qband. That is exactly the desired property:
+    each qband's XSK Tx stream lands on a single TX FQ, so QMan
+    SWP scheduling stays single-producer per FQ (no per-FQ
+    serialization contention). Documented; do not "improve" this
+    to per-qband fixed FQ assignment without measuring -- the
+    current expression is equivalent for the pinned submit path
+    and works correctly if cross-CPU submit is ever re-introduced.
+
+v2 (2026-05-27) -- option-c single-CPU pinning on the submit side, for
 the same reason as 0084v2: xsk_tx_peek_release_desc_batch() advances
 the XSK Tx ring's SPSC consumer cursor (uapi/linux/if_xdp.h contract),
 so concurrent per-CPU NAPI tails racing on the same qband would
@@ -74,18 +140,29 @@ has a single owner CPU (priv->qmap[q].cpu, populated by M3-3 step 2a's
 per_cpu_ptr() wiring at xsk_pool_attach time). Add an early-return
 `if (raw_smp_processor_id() != priv->qmap[q].cpu) continue;` inside
 the per-qband loop body of af_xdp_pool_napi_tx_zc() BEFORE the
-xsk_tx_peek_release_desc_batch() call — only the qband-owner CPU
-drains that qband's Tx ring and submits to QMan. Other CPUs short-
-circuit; they will drain their own qbands on their own NAPI completion.
+xsk_tx_peek_release_desc_batch() call.
 
-CRITICAL: tx_conf_zc() is NOT gated. The whole bpid-claim scheme is
-designed for cross-CPU demux — TxConf FDs come back on whichever CPU
-the QMan TxConf FQ is bound to, which is independent of the submitting
-CPU. Adding a CPU check to tx_conf_zc() would silently drop FDs whose
-matching qband-owner CPU is not the current CPU, leaking inflight
-budget and never advancing the userspace CQ head. xsk_tx_inflight[]
-is atomic_t precisely to be lockless under this asymmetry; the
-xsk_tx_completed(pool, 1) call is XSK-API-internally serialized.
+CRITICAL: tx_conf_zc() is NOT gated by CPU. The whole bpid-claim
+scheme is designed for cross-CPU demux -- TxConf FDs come back on
+whichever CPU the QMan TxConf FQ is bound to, which is independent
+of the submitting CPU. Adding a CPU check to tx_conf_zc() would
+silently drop FDs whose matching qband-owner CPU is not the current
+CPU, leaking inflight budget and never advancing the userspace CQ
+head. xsk_tx_inflight[] is atomic_t precisely to be lockless under
+this asymmetry; the xsk_tx_completed(pool, 1) call is XSK-API-
+internally serialized.
+
+v3 (2026-05-28) -- stand-alone redesign. The v2 patch was correct
+on the wire but the changelog left several invariants implicit:
+the bpid-uniqueness rules (a/b/c above), the per-FD RCU cost
+justification, the O(qbands) scan bound, and the egress-FQ-vs-pinning
+relationship. v3 makes all of these explicit in the kerneldoc so
+that future changes to the TxConf path (e.g. M3-3 step 6+ true ZC
+RX, which may add more flavor-op hooks to dpaa_tx_conf) do not
+accidentally violate them. The DPAA_ENQUEUE_RETRIES = 100000
+inline constant is documented as a stable upper bound on QMan EQCR
+slot-refill latency -- the value has not changed in dpaa_eth.c
+since the driver was upstreamed in 4.16. No code changes vs v2.
 
 Validation gates (DUT):
 
@@ -129,10 +206,12 @@ Files touched:
     - wire the three new ops into af_xdp_pool_qmgmt_ops
 
 Spec reference: specs/dpaa1-afxdp-modernization-spec.md v5.0 sec 6.1.4.
-Depends on: 0068..0084 (full M0+M1+M2+M3-3-step-1+2a+2b+2c+3+4 stack).
+Depends on: 0068..0084 (full M0+M1+M2+M3-3-step-1+2a+2b+2c+3+4 stack);
+0084 v3 must land first because this patch's call sites build on the
+RCU section it establishes.
 
 diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
-index a78a3a4..0f72230 100644
+index 92b2588..b4a5d18 100644
 --- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
 +++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
 @@ -36,6 +36,7 @@
@@ -143,7 +222,7 @@ index a78a3a4..0f72230 100644
  
  #include "dpaa_flavor.h"
  #include "dpaa_eth.h"
-@@ -654,6 +655,205 @@ priv->xsk_bman_refill_batches++;
+@@ -698,6 +699,205 @@ priv->xsk_bman_refill_batches++;
  }
  }
  
@@ -349,7 +428,7 @@ index a78a3a4..0f72230 100644
  /* ---------- Ops tables ---------- */
  
  static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
-@@ -664,6 +858,9 @@ static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
+@@ -708,6 +908,9 @@ static const struct dpaa_qmgmt_ops af_xdp_pool_qmgmt_ops = {
  .xsk_wakeup             = af_xdp_pool_xsk_wakeup,
  .xsk_set_rx_need_wakeup = af_xdp_pool_xsk_set_rx_need_wakeup,
  .napi_refill            = af_xdp_pool_napi_refill,
@@ -360,7 +439,7 @@ index a78a3a4..0f72230 100644
  
  /* ---------- debugfs: /sys/kernel/debug/af_xdp_pool/qmap ----------
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-index 69db5e2..2b34c6c 100644
+index e994a84..7f77bc2 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 @@ -2521,6 +2521,19 @@ ops->xsk_set_rx_need_wakeup(priv, np);
@@ -458,7 +537,7 @@ index f4c7c77..76e1eb1 100644
  
  #define DPAA_STATS_PERCPU_LEN ARRAY_SIZE(dpaa_stats_percpu)
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h b/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h
-index 113bc17..f6f077a 100644
+index 113bc17..4b40f4a 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_flavor.h
 @@ -45,6 +45,13 @@ struct dpaa_pcd_ops {
@@ -492,7 +571,7 @@ index 113bc17..f6f077a 100644
   */
  struct dpaa_qmgmt_ops {
  	int  (*alloc_rx_fqs)(struct dpaa_priv *priv, struct list_head *list);
-@@ -70,6 +80,10 @@ struct dpaa_qmgmt_ops {
+@@ -70,6 +87,10 @@ struct dpaa_qmgmt_ops {
  void (*xsk_set_rx_need_wakeup)(struct dpaa_priv *priv,
         struct dpaa_napi_portal *np);
  void (*napi_refill)(struct dpaa_priv *priv);
