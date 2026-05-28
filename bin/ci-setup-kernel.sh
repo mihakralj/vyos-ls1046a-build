@@ -191,6 +191,14 @@ cp "$BOARD_PATCH_DIR/0084-dpaa-napi-hooked-bman-refill.patch" "$KERNEL_PATCHES/"
 # bpid mismatch -- skb fast path unchanged. ≥ 7 Gbps acceptance gate on
 # vpp flavor. Spec sec 6.1.4.
 cp "$BOARD_PATCH_DIR/0085-dpaa-tx-zc-and-inflight-backpressure.patch" "$KERNEL_PATCHES/"
+# M3-3 step 6 blocker A: BMan "Invalid Command Verb" residue after RX ZC
+# branch lights up. Three-patch chain attacking the verb-byte layout, the
+# bpid stack-residue, and (true root cause) the DMA device mismatch
+# between the XSK pool map and the BMan FBPR validation domain. Spec
+# sec 6.1.5 / 6.1.6.
+cp "$BOARD_PATCH_DIR/0086-dpaa-bman-release-chunked-by-8.patch" "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0087-dpaa-bman-buffer-zero-bpid-before-set64.patch" "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0088-dpaa-afxdp-use-rx-dma-dev-for-xsk-pool-dma-map.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
