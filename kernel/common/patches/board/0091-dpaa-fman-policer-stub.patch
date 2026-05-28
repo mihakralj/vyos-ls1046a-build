@@ -13,32 +13,32 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/Kconfig b/drivers/net/ethernet/
 index 3c19f41..7b8a902 100644
 --- a/drivers/net/ethernet/freescale/dpaa/Kconfig
 +++ b/drivers/net/ethernet/freescale/dpaa/Kconfig
-@@ -57,4 +57,27 @@ help
-   now so downstream consumers can wire calls today.
-   Safe to leave on: zero runtime cost without FMAN_CAP_HM_NODES.
+@@ -57,4 +57,27 @@ config DPAA_HW_HM_OFFLOAD
+ 	  now so downstream consumers can wire calls today.
+ 	  Safe to leave on: zero runtime cost without FMAN_CAP_HM_NODES.
  
 +
 +config DPAA_HW_POLICER_OFFLOAD
-+bool "DPAA: FMan PCD Policer stubs (M3-3d)"
-+depends on DPAA_HW_CC_STEERING
-+default y
-+help
-+  Compile in the FMan PCD Policer stub API
-+  (fman_policer_install / fman_policer_destroy /
-+  fman_policer_caps_supported) per
-+  specs/dpaa1-afxdp-modernization-spec.md sec 5.6.
++	bool "DPAA: FMan PCD Policer stubs (M3-3d)"
++	depends on DPAA_HW_CC_STEERING
++	default y
++	help
++	  Compile in the FMan PCD Policer stub API
++	  (fman_policer_install / fman_policer_destroy /
++	  fman_policer_caps_supported) per
++	  specs/dpaa1-afxdp-modernization-spec.md sec 5.6.
 +
-+  Policer profiles program the FMan PCD Policer block to do
-+  per-qband or per-flow ingress rate-limit using srTCM/trTCM
-+  colour-aware marking entirely in silicon. Yellow/red drop
-+  decisions are made in FMan; surviving FDs carry colour state
-+  in their status field for downstream PCD steering.
++	  Policer profiles program the FMan PCD Policer block to do
++	  per-qband or per-flow ingress rate-limit using srTCM/trTCM
++	  colour-aware marking entirely in silicon. Yellow/red drop
++	  decisions are made in FMan; surviving FDs carry colour state
++	  in their status field for downstream PCD steering.
 +
-+  All stubs return -ENOTSUPP on builds without ucode 210 and
-+  bump the hw_offload_unavailable ethtool counter. Productive
-+  implementations land in follow-up patches; the API is fixed
-+  now so downstream consumers can wire calls today.
-+  Safe to leave on: zero runtime cost without FMAN_CAP_POLICER_TRTCM.
++	  All stubs return -ENOTSUPP on builds without ucode 210 and
++	  bump the hw_offload_unavailable ethtool counter. Productive
++	  implementations land in follow-up patches; the API is fixed
++	  now so downstream consumers can wire calls today.
++	  Safe to leave on: zero runtime cost without FMAN_CAP_POLICER_TRTCM.
 +
  source "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/Kconfig"
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
