@@ -191,13 +191,14 @@ cp "$BOARD_PATCH_DIR/0084-dpaa-napi-hooked-bman-refill.patch" "$KERNEL_PATCHES/"
 # bpid mismatch -- skb fast path unchanged. ≥ 7 Gbps acceptance gate on
 # vpp flavor. Spec sec 6.1.4.
 cp "$BOARD_PATCH_DIR/0085-dpaa-tx-zc-and-inflight-backpressure.patch" "$KERNEL_PATCHES/"
-# M3-3 step 6 blocker A: BMan "Invalid Command Verb" residue after RX ZC
-# branch lights up. Three-patch chain attacking the verb-byte layout, the
-# bpid stack-residue, and (true root cause) the DMA device mismatch
-# between the XSK pool map and the BMan FBPR validation domain. Spec
+# M3-3 step 6 blocker A residual: DMA device mismatch between the XSK
+# pool map (was: parent MAC device, 32-bit mask) and the BMan FBPR
+# validation domain (FMan RX port device, 40-bit mask). Switches
+# xsk_pool_dma_map() to priv->rx_dma_dev, the same device mainline uses
+# for dpaa_bp_add_8_bufs(). The two earlier blocker-A hot-fixes
+# (0086 chunked release-by-8, 0087 pre-zero bmbs[i].data) were absorbed
+# into 0084 v3 directly -- the patch stack is now stand-alone. Spec
 # sec 6.1.5 / 6.1.6.
-cp "$BOARD_PATCH_DIR/0086-dpaa-bman-release-chunked-by-8.patch" "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0087-dpaa-bman-buffer-zero-bpid-before-set64.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0088-dpaa-afxdp-use-rx-dma-dev-for-xsk-pool-dma-map.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
@@ -324,15 +325,9 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
                      "$ASK_PATCH_DIR"/0031-*.patch \
                      "$ASK_PATCH_DIR"/0035-*.patch \
                      "$ASK_PATCH_DIR"/0039-*.patch \
-                     "$ASK_PATCH_DIR"/0040-*.patch \
                      "$ASK_PATCH_DIR"/0041-*.patch \
                      "$ASK_PATCH_DIR"/0044-*.patch \
-                     "$ASK_PATCH_DIR"/0047-*.patch \
-                     "$ASK_PATCH_DIR"/0048-*.patch \
-                     "$ASK_PATCH_DIR"/0049-*.patch \
                      "$ASK_PATCH_DIR"/0050-*.patch \
-                     "$ASK_PATCH_DIR"/0052-*.patch \
-                     "$ASK_PATCH_DIR"/0053-*.patch \
                      "$ASK_PATCH_DIR"/0054-*.patch \
                      "$ASK_PATCH_DIR"/0055-*.patch \
                      "$ASK_PATCH_DIR"/0056-*.patch \
@@ -382,15 +377,9 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
             0031-*) dst="1031-${base#0031-}" ;;
             0035-*) dst="1035-${base#0035-}" ;;
             0039-*) dst="1039-${base#0039-}" ;;
-            0040-*) dst="1040-${base#0040-}" ;;
             0041-*) dst="1041-${base#0041-}" ;;
             0044-*) dst="1044-${base#0044-}" ;;
-            0047-*) dst="1047-${base#0047-}" ;;
-            0048-*) dst="1048-${base#0048-}" ;;
-            0049-*) dst="1049-${base#0049-}" ;;
             0050-*) dst="1050-${base#0050-}" ;;
-            0052-*) dst="1052-${base#0052-}" ;;
-            0053-*) dst="1053-${base#0053-}" ;;
             0054-*) dst="1054-${base#0054-}" ;;
             0055-*) dst="1055-${base#0055-}" ;;
             0056-*) dst="1056-${base#0056-}" ;;
@@ -406,22 +395,32 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
         cp "$src_patch" "$KERNEL_PATCHES/$dst"
         ASK_PATCH_COUNT=$((ASK_PATCH_COUNT + 1))
     done
-    # Expected count: 48 (Phase 2 Option C2 result + v1.1-A — see
-    # plans/ASK2-PHASE2-PATCH-TRIAGE.md §5 for arithmetic):
+    # Expected count: 45 (Phase 2 Option C2 + v1.1-A + DPAA1 supersession):
     #   53 original
     # -  8 archived 2026-05-24 stage 1 (0032/0033-RMV/0034/0036/0037-RMV/
     #                                   0038/0042/0043)
-    # -  3 archived 2026-05-24 stage 2 (Option C2: 0045 wholesale due to
-    #                                   keygen.c cross-file deps; 0046
+    # -  3 archived 2026-05-24 stage 2 (Option C2: 0045 wholesale; 0046
     #                                   PARTIAL-split; 0051 orphaned)
     # +  3 new KEEP-half patches (0054 ex-0033, 0055 ex-0037, 0056 ex-0046)
     # +  1 v1.1-A late-registration replay (0060)
     # +  1 v1.1-A bugfix: INIT_LIST_HEAD pending_ports (0061)
     # +  1 v1.3 Phase 5 PR14z21 muram reservation fix (0062)
     # +  1 v1.1-B PR14z13 graft-on-kernel-scheme KGSE_CCBS API (0065)
-    # = 51 active.
-    if [ "$ASK_PATCH_COUNT" -ne 51 ]; then
-        echo "ERROR: expected 51 ASK kernel patches, staged $ASK_PATCH_COUNT"
+    # -  6 deleted 2026-05-28 DPAA1 supersession (DPAA1 AF_XDP M3-3 work
+    #                                   under kernel/common/patches/board/
+    #                                   conflicts with — and supersedes —
+    #                                   these legacy ASK PCD patches per
+    #                                   user directive 2026-05-28 and
+    #                                   AGENTS.md "ASK2 (rewrite-in-progress)":
+    #                                   0040 fman-port-id-use-bmi-hwport
+    #                                   0047 ask-in-tree-skeleton
+    #                                   0048 ask-in-tree-source-migration
+    #                                   0049 ask-fs_initcall
+    #                                   0052 uapi-ask-spdx-syscall-note
+    #                                   0053 dpaa-noconfirm-offload-tx-fq)
+    # = 45 active.
+    if [ "$ASK_PATCH_COUNT" -ne 45 ]; then
+        echo "ERROR: expected 45 ASK kernel patches, staged $ASK_PATCH_COUNT"
         exit 1
     fi
     echo "### ASK2: $ASK_PATCH_COUNT in-tree kernel patches staged"
