@@ -82,7 +82,7 @@ Single source of truth across sessions. Each milestone tracks the cross-flavor k
 
 | Delta | Milestone | Status | Anchor |
 |---|---|---|---|
-| 1. NAPI-hooked refill + `xsk_bman_starve` + batch 32→256 escalation | M3-3 step 4 | planned (0083) | §6.1.3 |
+| 1. NAPI-hooked refill + `xsk_bman_starve` + batch 32→256 escalation | M3-3 step 4 | landed (0084 v2 dut-validated); blocker-A residue under triage (0086/0087/0088 chain — see §6.1.6) | §6.1.3 |
 | 2. CEETM CGR HW tail-drop + `xsk_tx_inflight` ≤ 1024 + low-water 512 + `XDP_USE_NEED_WAKEUP` | M3-3 step 5 + M3-3e | partial — `XDP_USE_NEED_WAKEUP` wired in 0080; `xsk_tx_inflight` planned (0084) | §6.1.4, §5.7 |
 | 3. 9-step `fman_port_disable(rxp)`-anchored detach, 10 ms link bounce accepted | M2-s2 | **dut-validated** (sleep-in-RCU fix `039a50c`, 100× churn clean) | §6.1.1 |
 | 4. `DPAA1_XSK_INITIAL_SEED=8192` + OQ9 rate-scaling | M2-s1 | landed | §6.1.1 |
@@ -429,7 +429,7 @@ void fman_cc_tree_destroy (struct fman *fm, u8 port_id);
 
 ### 5.5 HM offload (M3-3c)
 
-**Patch:** `0086` (planned). **Status:** planned (ucode-210 gated).
+**Patch:** `0090` (planned, renumbered from `0086` per §6.1.6). **Status:** planned (ucode-210 gated).
 
 ```c
 int  fman_hm_node_install(struct fman *fm, u8 port_id,
@@ -450,7 +450,7 @@ void fman_hm_node_destroy(struct fman *fm, u8 port_id);
 
 ### 5.6 Policer (M3-3d)
 
-**Patch:** `0087` (planned). **Status:** planned (ucode-210 gated).
+**Patch:** `0091` (planned, renumbered from `0087` per §6.1.6). **Status:** planned (ucode-210 gated).
 
 ```c
 int  fman_policer_install(struct fman *fm, u8 port_id, u8 profile_id,
@@ -471,7 +471,7 @@ Per-qband or per-flow ingress rate-limit using srTCM/trTCM. Yellow/red drop in F
 
 ### 5.7 CEETM egress shaping (M3-3e)
 
-**Patch:** `0088` (planned). **Status:** planned (ucode-210 gated for color-aware drop; CEETM scheduler works on ucode 106).
+**Patch:** `0092` (planned, renumbered from `0088` per §6.1.6). **Status:** planned (ucode-210 gated for color-aware drop; CEETM scheduler works on ucode 106).
 
 Wires `dpaa_eth_ceetm.c` as a root qdisc replacement. Sub-µs accuracy + zero CPU cost vs. software token bucket.
 
@@ -569,6 +569,30 @@ Per-frame dequeue callback:
 #### 6.1.5 A050385 erratum interaction
 
 XDP workaround relocates Tx frames within 64 B of a 4 KB boundary. XSK cannot relocate (UMEM is app-owned), so we require UMEM ≥ 64 B headroom and refuse `bind(XDP_ZEROCOPY)` otherwise. VPP defaults `XDP_PACKET_HEADROOM = 256`.
+
+#### 6.1.6 Blocker A debugging series (BMan "Invalid Command Verb") — 2026-05-28
+
+Patches `0086`/`0087`/`0088` (board patch series) were **reused** during M3-3 step 6 bring-up to address the BMan err-IRQ `BM_EIRQ_IVCI` ("Invalid Command Verb", bman_ccsr.c:55) observed on the DUT G5 reproducer (xsk-bind-probe + iperf3 UDP flood). The original spec reservation of 0086/0087 for HM offload (§5.5) and Policer (§5.6) is **superseded** — those features re-number to `0090`/`0091` when M3-3c/d work begins.
+
+Diagnosis chain:
+
+1. **0086** — `bman_release()` 8-buffer chunked release. BMan RCR verb byte `BUFCOUNT_MASK = 0x0f`, hardware-valid range 1..8 only (`bman.c:746` DPAA_ASSERT). Our 32-buffer `xsk_buff_alloc_batch()` returned counts up to 32 directly to `bman_release()`. Hypothesis: BUFCOUNT overflow ≥ 9 produces IVCI. **Necessary but insufficient** — chunking applied, ErrInts still fired 1:1 with `xsk_bman_refill_batches`.
+
+2. **0087** — Zero `bmbs[i].data = 0;` before each `bm_buffer_set64()`. `bman.c::bman_release()` stamps `pool->bpid` into RCR slot 0 only; slots 1..n-1 are `memcpy`'d verbatim from the caller's stack-allocated `bm_buffer[]` array, **including** the bpid bits in the high word. Stack garbage in those bytes is validated by BMan and rejected as IVCI. Mainline `dpaa_eth.c::dpaa_bp_add_8_bufs()` (line 1639) uses exactly this idiom. **Hypothesis rejected by hardware** — applied verbatim, ErrInts unchanged.
+
+3. **0088** — Use `priv->rx_dma_dev` (the FMan RX port device, populated from `fman_port_get_device(mac_dev->port[RX])` in `dpaa_eth.c:3649`) as the `xsk_pool_dma_map()` target, instead of `priv->mac_dev->dev`. **True root cause:** the parent MAC device has a different `of_node` / IOMMU group than the FMan port device that owns the BMan FBPR window programmed by U-Boot, and a default 32-bit DMA mask vs. the FMan port's `dma_coerce_mask_and_coherent(..., DMA_BIT_MASK(40))`. `dma_addr_t` values returned by `xsk_buff_xdp_get_dma()` are valid IOVAs for the MAC device but resolve outside BMan's FBPR window, so the buffer-address bytes in RCR slots are rejected as IVCI even though the verb byte and bpid are well-formed. This explains why 0086 (verb arithmetic) and 0087 (bpid bytes) both failed to silence the ErrInt — the broken field was the 40-bit address in `bm_buffer.{hi,lo}`.
+
+Verification matrix:
+
+| Patch | Hypothesis | Apply | DUT result |
+|-------|-----------|-------|------------|
+| 0086  | `num > 8` BUFCOUNT overflow | ✓ | ErrInts persist (necessary, insufficient) |
+| 0087  | Stack bpid residue in slots 1..n-1 | ✓ | ErrInts unchanged (rejected) |
+| 0088  | Wrong DMA device → wrong FBPR window | ✓ | **expected: ErrInt count → 0** (verifying) |
+
+Diagnostic fallback if 0088 fails: enable `CONFIG_FSL_DPAA_CHECKING=y` to convert `DPAA_ASSERT` into `BUG()` and capture the failing `num + bpid + bufs[0].lo` on the stack via the resulting kernel oops.
+
+After 0088 silences blocker A, blocker B (XSKMAP redirect into `rx_default_dqrr` to wire productive RX, currently `rx_packets=0`) remains to be addressed by patch `0089`+ before the ≥ 7 Gbps M3 acceptance gate can be claimed.
 
 **Acceptance gate M3-3 (full VPP datapath):**
 1. `xdp-features` reports `NETDEV_XDP_ACT_XSK_ZEROCOPY`.
