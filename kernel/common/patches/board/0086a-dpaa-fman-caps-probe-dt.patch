@@ -1,0 +1,148 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Thu, 28 May 2026 18:22:56 +0000
+Subject: [PATCH 1/2] 0086a productive DT ucode probe
+
+---
+ .../ethernet/freescale/dpaa/dpaa_fman_caps.c  | 112 +++++++++++++++++-
+ 1 file changed, 110 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+index 5aa6ca8..da5223d 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -21,6 +21,8 @@
+ #include <linux/printk.h>
+ #include <linux/types.h>
+ 
++#include <linux/of.h>
++#include <linux/string.h>
+ #include "dpaa_fman_caps.h"
+ 
+ /* dpaa_fman_caps.force=<u32>
+@@ -37,9 +39,115 @@ MODULE_PARM_DESC(force,
+  "Force FMan PCD capability bitmask (FMAN_CAP_* bits) for dev/CI. "
+  "Default 0 = no PCD offload (mainline ucode 106 behaviour).");
+ 
++/* Cached after first successful DT probe so subsequent dpaa_eth_probe()
++ * calls (one per netdev, 5x on Mono Gateway DK) don't re-walk the DT
++ * for the same firmware blob. -1 = not yet probed; >=0 = cached bitmask.
++ */
++static int dpaa_fman_caps_cached = -1;
++
++/* Map an ASCII version string from the FMan ucode header id field to
++ * the FMAN_CAP_* bitmask documented in spec sec 3.5.  The NXP QEF
++ * header id is always of the form
++ *
++ *   "Microcode version <maj>.<min>.<rev> for <SoC> <rev>"
++ *
++ * with a NUL terminator. We only need <maj> here:
++ *   maj >= 210: PCD primitives are present (CC, HM, POL, PARSER)
++ *               but NOT host-command dispatch (per PR13 hardware probe
++ *               on Mono Gateway DK 2026-05-13 — the standard 210.10.1
++ *               QEF ucode does not implement the HC doorbell).
++ *   maj == 106 (or anything < 210): no PCD primitives.
++ *
++ * Returns the bitmask, or 0 if the id string is unparseable.
++ */
++static u32 dpaa_fman_caps_from_id(const char *id, size_t id_len)
++{
++	const char prefix[] = "Microcode version ";
++	unsigned int major = 0;
++	size_t i;
++
++	if (id_len < sizeof(prefix))
++		return 0;
++	if (memcmp(id, prefix, sizeof(prefix) - 1) != 0)
++		return 0;
++
++	i = sizeof(prefix) - 1;
++	while (i < id_len && id[i] >= '0' && id[i] <= '9') {
++		major = major * 10 + (id[i] - '0');
++		if (major > 9999)
++			return 0;
++		i++;
++}
++	if (i == sizeof(prefix) - 1 || (id[i] != '.' && id[i] != ' '))
++		return 0;
++
++	if (major >= 210)
++		return FMAN_CAP_CC_EXACT_MATCH | FMAN_CAP_HM_NODES |
++		       FMAN_CAP_POLICER_TRTCM | FMAN_CAP_PARSER_SOFTSEQ;
++	return 0;
++}
++
++/* Walk the device tree looking for the FMan firmware blob U-Boot loaded
++ * into MURAM. Layout (see include/soc/fsl/qe/qe.h struct qe_firmware):
++ *   bytes 0..3  __be32 length
++ *   bytes 4..6  magic "QEF"
++ *   byte  7     version (==1 today)
++ *   bytes 8..69 id[62]  NUL-terminated ASCII version string
++ *
++ * On Mono Gateway DK with U-Boot loading from SPI mtd4, this property
++ * is at /soc/fman@1a00000/fman-firmware/fsl,firmware and the id reads
++ * exactly "Microcode version 210.10.1 for LS1043 r1.0".
++ *
++ * Returns the cap bitmask on success, 0 on any DT error / missing blob /
++ * unparseable header. Safe to call before any FMan driver probe.
++ */
++static u32 dpaa_fman_caps_probe_dt(void)
++{
++	struct device_node *fman_np, *fw_np;
++	const u8 *fw;
++	int fw_len;
++	u32 caps;
++
++	fman_np = of_find_compatible_node(NULL, NULL, "fsl,fman");
++	if (!fman_np)
++		return 0;
++
++	fw_np = of_get_child_by_name(fman_np, "fman-firmware");
++	of_node_put(fman_np);
++	if (!fw_np)
++		return 0;
++
++	fw = of_get_property(fw_np, "fsl,firmware", &fw_len);
++	if (!fw || fw_len < 70 /* header(8) + id[62] */) {
++		of_node_put(fw_np);
++		return 0;
++}
++
++	if (fw[4] != 'Q' || fw[5] != 'E' || fw[6] != 'F') {
++		of_node_put(fw_np);
++		return 0;
++}
++
++	/* id field is bytes 8..69 (62 bytes), NUL-terminated. */
++	caps = dpaa_fman_caps_from_id((const char *)&fw[8], 62);
++	of_node_put(fw_np);
++	return caps;
++}
++
+ u32 dpaa_fman_get_caps(void)
+ {
+-return dpaa_fman_caps_force & FMAN_CAP_ALL;
++	u32 caps;
++
++	/* Operator override (dev/CI) always wins. */
++	if (dpaa_fman_caps_force)
++		return dpaa_fman_caps_force & FMAN_CAP_ALL;
++
++	if (dpaa_fman_caps_cached >= 0)
++		return (u32)dpaa_fman_caps_cached;
++
++	caps = dpaa_fman_caps_probe_dt();
++	dpaa_fman_caps_cached = (int)caps;
++	return caps;
+ }
+ EXPORT_SYMBOL_GPL(dpaa_fman_get_caps);
+ 
+@@ -53,7 +161,7 @@ logged = true;
+ 
+ if (!caps) {
+ dev_info(dev,
+- "FMan PCD caps = 0x00 (mainline ucode 106 / no PCD offload)\n");
++ "FMan PCD caps = 0x00 (ucode <210 or DT probe failed; no PCD offload)\n");
+ return;
+ }
+ 

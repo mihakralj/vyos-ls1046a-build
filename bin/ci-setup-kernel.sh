@@ -210,6 +210,29 @@ cp "$BOARD_PATCH_DIR/0086-dpaa-fman-caps-detection-and-cc-stub.patch" "$KERNEL_P
 # into 0084 v3 directly -- the patch stack is now stand-alone. Spec
 # sec 6.1.5 / 6.1.6.
 cp "$BOARD_PATCH_DIR/0088-dpaa-afxdp-use-rx-dma-dev-for-xsk-pool-dma-map.patch" "$KERNEL_PATCHES/"
+# M3-3b productive: replace the dpaa_fman_caps.force= stub body of
+# dpaa_fman_get_caps() with a real DT walk of the FMan firmware blob
+# (/proc/device-tree/soc/fman@1a00000/fman-firmware/fsl,firmware,
+# struct qe_firmware id field at bytes 8..69). Parses the "Microcode
+# version <maj>.<min>.<rev> ..." string and lights up
+# FMAN_CAP_CC_EXACT_MATCH | FMAN_CAP_HM_NODES | FMAN_CAP_POLICER_TRTCM
+# | FMAN_CAP_PARSER_SOFTSEQ when major >= 210 (verified on Mono Gateway
+# DK 2026-05-28: u-boot loads 210.10.1 from SPI mtd4). HC_DISPATCH stays
+# off per PR13 finding -- the stock 210.10.1 QEF blob does not implement
+# the HC doorbell. force= still wins as operator override. Caps are
+# cached after first DT probe so subsequent dpaa_eth_probe() calls (5x
+# on this board) don't re-walk. Spec sec 3.5.
+cp "$BOARD_PATCH_DIR/0086a-dpaa-fman-caps-probe-dt.patch"      "$KERNEL_PATCHES/"
+# M3-3c: HM (Header Manipulation) stub API. Mirrors the 0086 cadence
+# exactly -- fman_hm_node_install/destroy stubs return -ENOTSUPP,
+# fman_hm_caps_supported() wraps (caps & FMAN_CAP_HM_NODES). Adds
+# CONFIG_DPAA_HW_HM_OFFLOAD (default y, depends on DPAA_HW_CC_STEERING)
+# and struct fman_hm_spec opaque type. Productive impl lands in a
+# follow-up patch; API is fixed now so downstream consumers (af_xdp_pool
+# egress rewrite, vyos-1x NAT offload CLI, ASK2 flowtable bridge) can
+# wire calls today and gracefully degrade on ucode <210 silicon. Spec
+# sec 5.5.
+cp "$BOARD_PATCH_DIR/0090-dpaa-fman-hm-stub.patch"              "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
