@@ -300,10 +300,11 @@ def bpf_xskmap_update(libc, xskmap_fd, key, xsk_fd):
     val_buf = ctypes.create_string_buffer(struct.pack("=I", xsk_fd), 4)
     # struct bpf_attr.map_elem:
     #   u32 map_fd;
+    #   /* 4 bytes pad (kernel uses __aligned_u64 -> next field 8-byte aligned) */
     #   u64 key;
     #   union { u64 value; u64 next_key; };
     #   u64 flags;
-    attr = struct.pack("=I QQQ",
+    attr = struct.pack("=I 4x QQQ",
                        xskmap_fd,
                        ctypes.addressof(key_buf),
                        ctypes.addressof(val_buf),
@@ -342,11 +343,14 @@ def attach_xdp_prog(ifindex, prog_fd, drv_first=True):
                           NLM_F_REQUEST | NLM_F_ACK, 1, 0)
         return hdr + body
 
+    # No XDP_FLAGS_UPDATE_IF_NOEXIST -- we want the second/third run of the
+    # probe to be able to replace any prog left behind by a crashed prior
+    # invocation. Plain replace semantics are what we want.
     last_err = None
     modes = []
     if drv_first:
-        modes.append(("DRV", XDP_FLAGS_UPDATE_IF_NOEXIST | XDP_FLAGS_DRV_MODE))
-    modes.append(("SKB", XDP_FLAGS_UPDATE_IF_NOEXIST | XDP_FLAGS_SKB_MODE))
+        modes.append(("DRV", XDP_FLAGS_DRV_MODE))
+    modes.append(("SKB", XDP_FLAGS_SKB_MODE))
     for mode_name, flags in modes:
         nl.send(_build(flags))
         reply = nl.recv(4096)
