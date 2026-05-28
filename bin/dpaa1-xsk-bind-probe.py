@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: GPL-2.0
 #
 # dpaa1-xsk-bind-probe.py - XDP_ZEROCOPY bind + RX-ring drain probe for
-# DPAA1 M2 validation (stage-1 attach + stage-2 datapath).
+# DPAA1 M2/M3-3 validation (stage-1 attach + stage-2 datapath
+# + stage-3 XSKMAP redirect for blocker B / rx_packets > 0).
 #
 # Stage-1 (default): performs socket()+UMEM_REG+ring sizing+bind() and
 # reports the bind() return code. Drives priv->xsk_pool_attach_ok /
@@ -15,17 +16,40 @@
 # to end (BMan seed -> FMan port classifier -> dpaa NAPI -> XSKMAP ->
 # xdp_xmit_to_xsk).
 #
+# Stage-3 (--xskmap with --hold): M3-3 blocker B closure. Before bind(),
+# creates a BPF_MAP_TYPE_XSKMAP, loads a minimal eBPF XDP program that
+# returns `bpf_redirect_map(&xsks_map, ctx->rx_queue_index, XDP_PASS)`,
+# attaches it to the netdev as the XDP program (DRV mode if supported,
+# otherwise SKB), then populates xsks_map[queue_id] = xsk_socket_fd
+# after bind(). Without this stage, an XSK-bound socket receives nothing
+# because dpaa_run_xdp() in the driver early-returns XDP_PASS when no
+# XDP program is attached -- the FD travels the skbuf path and rx_packets
+# stays at 0. With this stage, rx_default_dqrr -> dpaa_run_xdp ->
+# bpf_prog_run_xdp() returns XDP_REDIRECT, xdp_do_redirect() consults
+# xsks_map[ctx->rx_queue_index] and copies the page-backed xdp_buff into
+# the XSK socket's RX ring (copy mode -- a kernel-page-backed xdp_buff is
+# not an XSK UMEM chunk, so the redirect is copy-mode by definition;
+# true zero-copy requires the FMan port to RX directly into XSK pool
+# chunks, which is a separate follow-on patch beyond rx_packets > 0).
+#
+# Patch 4006 ('dpaa-xdp-rxq-queue-index') forces every FQ's
+# xdp_rxq_info.queue_index to 0 so xsks_map only needs a single entry
+# at index 0 regardless of which PCD FQ the FD landed on -- without 4006
+# the FQID (~ 65536+) would exceed XSKMAP max_entries.
+#
 # Usage:
 #   sudo python3 dpaa1-xsk-bind-probe.py <ifname> [queue_id] [chunk_size]
-#                                        [--hold SECS]
-# Defaults: queue_id=0 chunk_size=4096 hold=0
+#                                        [--hold SECS] [--xskmap]
+# Defaults: queue_id=0 chunk_size=4096 hold=0 xskmap=off
 #
-# Verification matrix (M2-stage-1 closure ISO):
-#   sudo bin/dpaa1-xsk-bind-probe.py eth4 0 4096
-#     -> rc=0 ; ethtool -S eth4 | grep xsk_pool_attach_ok shows +1
-#   sudo bin/dpaa1-xsk-bind-probe.py eth4 0 4096 --hold 30
-#     -> rc=0 ; rx_packets > 0 with traffic from a peer ; rx_packets == 0
-#        if no peer traffic, but rings stay alive (no detach_timeout bump)
+# Verification matrix:
+#   sudo bin/dpaa1-xsk-bind-probe.py eth3 0 4096
+#     -> rc=0 ; ethtool -S eth3 | grep xsk_pool_attach_ok shows +1
+#   sudo bin/dpaa1-xsk-bind-probe.py eth3 0 4096 --hold 30
+#     -> rc=0 ; rx_packets == 0 (no XDP prog attached -> driver returns
+#        XDP_PASS at line 2723; FD travels skbuf path)
+#   sudo bin/dpaa1-xsk-bind-probe.py eth3 0 4096 --hold 30 --xskmap
+#     -> rc=0 ; rx_packets > 0 under peer traffic (M3-3 blocker B closed)
 
 import ctypes
 import ctypes.util
@@ -58,36 +82,346 @@ XDP_DESC_SIZE   = 16
 # Total: 4 rings * 4 u64 = 128 bytes.
 XDP_OFFSETS_SIZE = 128
 
+# ===== bpf() syscall + XDP_LINK plumbing (added for --xskmap / stage-3) =====
+#
+# We do not link against libbpf so all syscalls go through libc's syscall().
+# The minimum surface we need:
+#   bpf(BPF_MAP_CREATE, ...)        -> XSKMAP fd
+#   bpf(BPF_PROG_LOAD,  ...)        -> minimal XDP redirect prog fd
+#   bpf(BPF_MAP_UPDATE_ELEM, ...)   -> populate xsks_map[queue_id] = xsk_fd
+#   AF_NETLINK RTM_SETLINK IFLA_XDP -> attach prog to netdev
+#
+# All struct layouts mirror include/uapi/linux/bpf.h on 6.18.x (no churn
+# on the fields we use across the last decade of kernel releases).
+
+__NR_bpf_arm64 = 280
+BPF_MAP_CREATE      = 0
+BPF_MAP_UPDATE_ELEM = 2
+BPF_PROG_LOAD       = 5
+
+BPF_MAP_TYPE_XSKMAP = 17
+
+BPF_PROG_TYPE_XDP = 6
+
+BPF_ANY = 0
+
+# eBPF instruction encoding (8 bytes per insn):
+#   u8  opcode, u8 dst_reg:4 + src_reg:4, s16 off, s32 imm
+# Helpers (see kernel/bpf/disasm.c).
+def _insn(opc, dst, src, off, imm):
+    return struct.pack("=BBhi", opc, (src << 4) | dst, off, imm)
+
+# Opcodes (subset)
+BPF_LDX_MEM_W    = 0x61   # ldxw r2, [r1 + off]
+BPF_LD_IMM64_DW  = 0x18   # lddw r1, imm64  (8-byte insn that takes 16 bytes -- second slot is _insn(0,0,0,0,imm_hi))
+BPF_ALU64_MOV_K  = 0xb7   # mov64 dst, imm
+BPF_JMP_CALL     = 0x85   # call helper
+BPF_JMP_EXIT     = 0x95   # exit
+
+BPF_PSEUDO_MAP_FD = 1     # src_reg marker for LD_IMM64 referring to a map fd
+
+# eBPF helper IDs (see include/uapi/linux/bpf.h)
+BPF_FUNC_redirect_map = 51
+
+# XDP action codes
+XDP_PASS    = 2
+XDP_REDIRECT = 4
+
+# Netlink for XDP attach
+NETLINK_ROUTE = 0
+RTM_SETLINK   = 19
+NLM_F_REQUEST = 0x01
+NLM_F_ACK     = 0x04
+IFLA_XDP      = 43
+IFLA_XDP_FD            = 1
+IFLA_XDP_FLAGS         = 3
+XDP_FLAGS_UPDATE_IF_NOEXIST = (1 << 0)
+XDP_FLAGS_DRV_MODE          = (1 << 2)
+XDP_FLAGS_SKB_MODE          = (1 << 1)
+
+# struct bpf_attr is a tagged union -- we just pass the bytes the kernel
+# expects for the command we are running, padded to the longest variant
+# the kernel sees. 144 bytes is the upper bound for 6.18.
+BPF_ATTR_SIZE = 144
+
+
+def bpf(libc, cmd, attr_bytes):
+    """Issue the bpf() syscall via libc's syscall() wrapper."""
+    buf = ctypes.create_string_buffer(BPF_ATTR_SIZE)
+    n = min(len(attr_bytes), BPF_ATTR_SIZE)
+    ctypes.memmove(buf, attr_bytes, n)
+    libc.syscall.restype = ctypes.c_long
+    return libc.syscall(__NR_bpf_arm64, ctypes.c_int(cmd),
+                        ctypes.byref(buf), ctypes.c_uint(BPF_ATTR_SIZE))
+
+
+def bpf_map_create_xskmap(libc, max_entries=64):
+    """BPF_MAP_CREATE: BPF_MAP_TYPE_XSKMAP with key=u32 fd=u32."""
+    # struct bpf_attr.map_create (first union arm):
+    #   u32 map_type;
+    #   u32 key_size;
+    #   u32 value_size;
+    #   u32 max_entries;
+    #   u32 map_flags;
+    #   u32 inner_map_fd;
+    #   u32 numa_node;
+    #   char map_name[16];
+    #   u32 map_ifindex;
+    #   u32 btf_fd;
+    #   u32 btf_key_type_id;
+    #   u32 btf_value_type_id;
+    #   u32 btf_vmlinux_value_type_id;
+    #   ...
+    attr = struct.pack("=IIIIII I 16s I I I I I",
+                       BPF_MAP_TYPE_XSKMAP, 4, 4, max_entries,
+                       0, 0, 0,
+                       b"xsks_map\0\0\0\0\0\0\0\0",
+                       0, 0, 0, 0, 0)
+    rc = bpf(libc, BPF_MAP_CREATE, attr)
+    if rc < 0:
+        e = ctypes.get_errno()
+        raise OSError(e,
+            f"bpf(BPF_MAP_CREATE,XSKMAP) errno={e} ({errno.errorcode.get(e,'?')}: {os.strerror(e)})")
+    return rc
+
+
+def build_xdp_redirect_prog(xsks_map_fd):
+    """Return eBPF bytecode that does:
+       r2 = ctx->rx_queue_index
+       r1 = map_fd_pseudo(xsks_map_fd)   (lddw)
+       r3 = XDP_PASS                     (default if entry missing)
+       call BPF_FUNC_redirect_map
+       exit
+    On the AArch64 verifier, this is 6 insns / 56 bytes (lddw is 16 bytes
+    because the imm64 is split across two adjacent 8-byte slots).
+
+    Layout of struct xdp_md:
+       u32 data;
+       u32 data_end;
+       u32 data_meta;
+       u32 ingress_ifindex;
+       u32 rx_queue_index;   <-- offset 16
+       u32 egress_ifindex;
+    """
+    XDP_MD_RX_QUEUE_INDEX = 16
+
+    code = b""
+    # r2 = *(u32 *)(r1 + 16)
+    code += _insn(BPF_LDX_MEM_W, dst=2, src=1, off=XDP_MD_RX_QUEUE_INDEX, imm=0)
+    # r1 = xsks_map_fd  (lddw, two 8-byte insn slots; first slot holds low
+    # 32 bits, second slot holds high 32 bits)
+    code += _insn(BPF_LD_IMM64_DW, dst=1, src=BPF_PSEUDO_MAP_FD,
+                  off=0, imm=xsks_map_fd)
+    code += _insn(0, dst=0, src=0, off=0, imm=0)  # second half of lddw
+    # r3 = XDP_PASS
+    code += _insn(BPF_ALU64_MOV_K, dst=3, src=0, off=0, imm=XDP_PASS)
+    # call BPF_FUNC_redirect_map
+    code += _insn(BPF_JMP_CALL, dst=0, src=0, off=0, imm=BPF_FUNC_redirect_map)
+    # exit
+    code += _insn(BPF_JMP_EXIT, dst=0, src=0, off=0, imm=0)
+    return code
+
+
+def bpf_prog_load_xdp(libc, prog_bytes):
+    """BPF_PROG_LOAD: BPF_PROG_TYPE_XDP, GPL license."""
+    n_insns = len(prog_bytes) // 8
+    insns_buf = ctypes.create_string_buffer(prog_bytes, len(prog_bytes))
+    license_buf = ctypes.create_string_buffer(b"GPL")
+    log_buf_sz = 64 * 1024
+    log_buf = ctypes.create_string_buffer(log_buf_sz)
+
+    # struct bpf_attr.prog_load:
+    #   u32 prog_type;
+    #   u32 insn_cnt;
+    #   u64 insns;        (pointer)
+    #   u64 license;      (pointer)
+    #   u32 log_level;
+    #   u32 log_size;
+    #   u64 log_buf;      (pointer)
+    #   u32 kern_version;
+    #   u32 prog_flags;
+    #   char prog_name[16];
+    #   u32 prog_ifindex;
+    #   u32 expected_attach_type;
+    #   u32 prog_btf_fd;
+    #   u32 func_info_rec_size;
+    #   u64 func_info;
+    #   u32 func_info_cnt;
+    #   u32 line_info_rec_size;
+    #   u64 line_info;
+    #   u32 line_info_cnt;
+    #   u32 attach_btf_id;
+    #   u32 attach_prog_fd;
+    #   u32 core_relo_cnt;
+    #   u64 fd_array;
+    #   u64 core_relos;
+    #   u32 core_relo_rec_size;
+    #   ...
+    attr = struct.pack(
+        "=IIQQII Q II 16s I I I I Q I I Q I I I I Q Q I",
+        BPF_PROG_TYPE_XDP,                 # prog_type
+        n_insns,                           # insn_cnt
+        ctypes.addressof(insns_buf),       # insns
+        ctypes.addressof(license_buf),     # license
+        1,                                 # log_level
+        log_buf_sz,                        # log_size
+        ctypes.addressof(log_buf),         # log_buf
+        0,                                 # kern_version
+        0,                                 # prog_flags
+        b"dpaa1_xskmap\0\0\0\0",           # prog_name (16 B)
+        0,                                 # prog_ifindex
+        0,                                 # expected_attach_type
+        0,                                 # prog_btf_fd
+        0,                                 # func_info_rec_size
+        0,                                 # func_info
+        0,                                 # func_info_cnt
+        0,                                 # line_info_rec_size
+        0,                                 # line_info
+        0,                                 # line_info_cnt
+        0,                                 # attach_btf_id
+        0,                                 # attach_prog_fd
+        0,                                 # core_relo_cnt
+        0,                                 # fd_array
+        0,                                 # core_relos
+        0,                                 # core_relo_rec_size
+    )
+    rc = bpf(libc, BPF_PROG_LOAD, attr)
+    if rc < 0:
+        e = ctypes.get_errno()
+        log = log_buf.value.decode(errors="replace").strip()
+        raise OSError(e,
+            f"bpf(BPF_PROG_LOAD,XDP) errno={e} ({errno.errorcode.get(e,'?')}: {os.strerror(e)})\nverifier log:\n{log}")
+    return rc
+
+
+def bpf_xskmap_update(libc, xskmap_fd, key, xsk_fd):
+    """BPF_MAP_UPDATE_ELEM: xsks_map[key] = xsk_fd."""
+    key_buf = ctypes.create_string_buffer(struct.pack("=I", key), 4)
+    val_buf = ctypes.create_string_buffer(struct.pack("=I", xsk_fd), 4)
+    # struct bpf_attr.map_elem:
+    #   u32 map_fd;
+    #   u64 key;
+    #   union { u64 value; u64 next_key; };
+    #   u64 flags;
+    attr = struct.pack("=I QQQ",
+                       xskmap_fd,
+                       ctypes.addressof(key_buf),
+                       ctypes.addressof(val_buf),
+                       BPF_ANY)
+    rc = bpf(libc, BPF_MAP_UPDATE_ELEM, attr)
+    if rc < 0:
+        e = ctypes.get_errno()
+        raise OSError(e,
+            f"bpf(BPF_MAP_UPDATE_ELEM,XSKMAP) errno={e} ({errno.errorcode.get(e,'?')}: {os.strerror(e)})")
+    return rc
+
+
+def attach_xdp_prog(ifindex, prog_fd, drv_first=True):
+    """Attach an XDP program to a netdev via rtnetlink IFLA_XDP.
+    Try DRV mode first (kernel-fast-path), fall back to SKB mode (generic
+    XDP via netif_receive_skb) if DRV is rejected."""
+    nl = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_ROUTE)
+    nl.bind((0, 0))
+
+    def _build(flags):
+        # struct ifinfomsg: u8 family, u8 _pad, u16 type, s32 index, u32 flags, u32 change
+        ifi = struct.pack("=BBHiII", 0, 0, 0, ifindex, 0, 0)
+        # IFLA_XDP_FD attribute
+        fd_attr = struct.pack("=HH i", 8, IFLA_XDP_FD, prog_fd)
+        # IFLA_XDP_FLAGS attribute
+        fl_attr = struct.pack("=HH I", 8, IFLA_XDP_FLAGS, flags)
+        # Nested IFLA_XDP container
+        nested_payload = fd_attr + fl_attr
+        nested = struct.pack("=HH", 4 + len(nested_payload), IFLA_XDP) + nested_payload
+        # Pad nested to 4 bytes (already aligned in our case)
+        body = ifi + nested
+        nl_hdr_len = 16
+        total = nl_hdr_len + len(body)
+        # struct nlmsghdr: u32 len, u16 type, u16 flags, u32 seq, u32 pid
+        hdr = struct.pack("=IHHII", total, RTM_SETLINK,
+                          NLM_F_REQUEST | NLM_F_ACK, 1, 0)
+        return hdr + body
+
+    last_err = None
+    modes = []
+    if drv_first:
+        modes.append(("DRV", XDP_FLAGS_UPDATE_IF_NOEXIST | XDP_FLAGS_DRV_MODE))
+    modes.append(("SKB", XDP_FLAGS_UPDATE_IF_NOEXIST | XDP_FLAGS_SKB_MODE))
+    for mode_name, flags in modes:
+        nl.send(_build(flags))
+        reply = nl.recv(4096)
+        # NLMSG_ERROR has type 2; error code at offset 16 (after nlmsghdr).
+        if len(reply) >= 20:
+            nl_type = struct.unpack_from("=H", reply, 4)[0]
+            if nl_type == 2:  # NLMSG_ERROR
+                err = struct.unpack_from("=i", reply, 16)[0]
+                if err == 0:
+                    nl.close()
+                    return mode_name
+                last_err = err
+                continue
+        nl.close()
+        return mode_name + "?"
+    nl.close()
+    raise OSError(-last_err if last_err else errno.EIO,
+        f"IFLA_XDP attach failed in both DRV and SKB modes "
+        f"(last errno={-last_err if last_err else '?'})")
+
+
+# ===== existing probe (unchanged below this point except for arg parsing
+#       and a stage-3 XSKMAP call sequence around bind()) =====
 
 def errmsg(rc):
     e = ctypes.get_errno()
     return f"rc={rc} errno={e} ({errno.errorcode.get(e,'?')}: {os.strerror(e)})"
 
-
 def parse_args():
     args = sys.argv[1:]
     hold_secs = 0
+    use_xskmap = False
     while "--hold" in args:
         i = args.index("--hold")
         hold_secs = int(args[i + 1])
         del args[i:i + 2]
+    if "--xskmap" in args:
+        use_xskmap = True
+        args.remove("--xskmap")
     if not args:
         print("usage: dpaa1-xsk-bind-probe.py <ifname> [queue_id] "
-              "[chunk_size] [--hold SECS]", file=sys.stderr)
+              "[chunk_size] [--hold SECS] [--xskmap]", file=sys.stderr)
         sys.exit(2)
     ifname    = args[0]
     queue_id  = int(args[1]) if len(args) > 1 else 0
     chunk     = int(args[2]) if len(args) > 2 else 4096
-    return ifname, queue_id, chunk, hold_secs
-
+    return ifname, queue_id, chunk, hold_secs, use_xskmap
 
 def main():
-    ifname, queue_id, chunk, hold_secs = parse_args()
+    ifname, queue_id, chunk, hold_secs, use_xskmap = parse_args()
     ifindex = socket.if_nametoindex(ifname)
     print(f"[probe] ifname={ifname} ifindex={ifindex} queue_id={queue_id} "
-          f"chunk_size={chunk} hold={hold_secs}s")
+          f"chunk_size={chunk} hold={hold_secs}s xskmap={use_xskmap}")
 
     libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+
+    # ===== Stage-3a: XSKMAP creation + XDP redirect prog load + attach =====
+    # Must happen BEFORE bind() because IFLA_XDP attach binds a program to
+    # the netdev as a whole; bind() then only matters for the per-socket
+    # ring plumbing.
+    xskmap_fd = None
+    if use_xskmap:
+        try:
+            xskmap_fd = bpf_map_create_xskmap(libc, max_entries=64)
+            print(f"[probe] BPF_MAP_CREATE(XSKMAP) fd={xskmap_fd} "
+                  f"max_entries=64")
+            prog_bytes = build_xdp_redirect_prog(xskmap_fd)
+            prog_fd = bpf_prog_load_xdp(libc, prog_bytes)
+            print(f"[probe] BPF_PROG_LOAD(XDP redirect) fd={prog_fd} "
+                  f"insns={len(prog_bytes)//8}")
+            mode = attach_xdp_prog(ifindex, prog_fd)
+            print(f"[probe] IFLA_XDP attached to {ifname} in {mode} mode")
+        except OSError as ex:
+            print(f"[probe] FAIL: XSKMAP stage-3 setup: {ex}")
+            sys.exit(1)
 
     # 1. socket(AF_XDP)
     fd = libc.socket(AF_XDP, socket.SOCK_RAW, 0)
@@ -167,6 +501,16 @@ def main():
 
     print("[probe] PASS (stage-1): bind(XDP_ZEROCOPY) succeeded - "
           "attach_ok counter incremented")
+
+    # ===== Stage-3b: populate XSKMAP[queue_id] = xsk_fd (after bind) =====
+    if use_xskmap:
+        try:
+            bpf_xskmap_update(libc, xskmap_fd, queue_id, fd)
+            print(f"[probe] xsks_map[{queue_id}] = xsk_fd {fd} populated")
+        except OSError as ex:
+            print(f"[probe] FAIL: XSKMAP update: {ex}")
+            sys.exit(1)
+
     if hold_secs == 0:
         sys.exit(0)
 
@@ -277,11 +621,18 @@ def main():
     print(f"[probe] PASS (stage-2): held socket {hold_secs}s, "
           f"rx_packets={rx_packets} rx_bytes={rx_bytes}")
     if rx_packets == 0:
-        print("[probe] NOTE: no packets received - either no peer traffic on "
-              f"{ifname} q{queue_id}, or XSKMAP redirect not yet wired in "
-              "Phase 3 NAPI ZC datapath.")
+        if use_xskmap:
+            print("[probe] NOTE: no packets received under --xskmap - "
+                  "verify peer traffic is hitting the bound queue. "
+                  "Check `ethtool -S ifname | grep xsk_rx_branch` to "
+                  "confirm FDs are landing in the bound qband.")
+        else:
+            print("[probe] NOTE: no packets received - no XDP redirect "
+                  "program attached. Re-run with --xskmap to wire the "
+                  "XSKMAP redirect (M3-3 blocker B). Without --xskmap, "
+                  "dpaa_run_xdp() returns XDP_PASS and FDs travel the "
+                  "skbuf path -- rx_packets stays 0 by design.")
     sys.exit(0)
-
 
 if __name__ == "__main__":
     main()
