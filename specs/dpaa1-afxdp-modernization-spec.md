@@ -82,7 +82,7 @@ Single source of truth across sessions. Each milestone tracks the cross-flavor k
 
 | Delta | Milestone | Status | Anchor |
 |---|---|---|---|
-| 1. NAPI-hooked refill + `xsk_bman_starve` + batch 32→256 escalation | M3-3 step 4 | landed (0084 v2 dut-validated); blocker-A residue under triage (0086/0087/0088 chain — see §6.1.6) | §6.1.3 |
+| 1. NAPI-hooked refill + `xsk_bman_starve` + batch 32→256 escalation | M3-3 step 4 | landed (0084 v2 dut-validated); blocker A CLOSED 2026-05-28 by 0086+0087+0088 chain (DUT G5 60 s hold: 0 IVCI, 0 BUG/WARN/softlock, 16 refill batches — see §6.1.6) | §6.1.3 |
 | 2. CEETM CGR HW tail-drop + `xsk_tx_inflight` ≤ 1024 + low-water 512 + `XDP_USE_NEED_WAKEUP` | M3-3 step 5 + M3-3e | partial — `XDP_USE_NEED_WAKEUP` wired in 0080; `xsk_tx_inflight` planned (0084) | §6.1.4, §5.7 |
 | 3. 9-step `fman_port_disable(rxp)`-anchored detach, 10 ms link bounce accepted | M2-s2 | **dut-validated** (sleep-in-RCU fix `039a50c`, 100× churn clean) | §6.1.1 |
 | 4. `DPAA1_XSK_INITIAL_SEED=8192` + OQ9 rate-scaling | M2-s1 | landed | §6.1.1 |
@@ -588,9 +588,22 @@ Verification matrix:
 |-------|-----------|-------|------------|
 | 0086  | `num > 8` BUFCOUNT overflow | ✓ | ErrInts persist (necessary, insufficient) |
 | 0087  | Stack bpid residue in slots 1..n-1 | ✓ | ErrInts unchanged (rejected) |
-| 0088  | Wrong DMA device → wrong FBPR window | ✓ | **expected: ErrInt count → 0** (verifying) |
+| 0088  | Wrong DMA device → wrong FBPR window | ✓ | **CLOSED 2026-05-28**: 60 s G5 hold ErrInt count = 0 ✓ |
 
-Diagnostic fallback if 0088 fails: enable `CONFIG_FSL_DPAA_CHECKING=y` to convert `DPAA_ASSERT` into `BUG()` and capture the failing `num + bpid + bufs[0].lo` on the stack via the resulting kernel oops.
+Diagnostic fallback if 0088 fails: enable `CONFIG_FSL_DPAA_CHECKING=y` to convert `DPAA_ASSERT` into `BUG()` and capture the failing `num + bpid + bufs[0].lo` on the stack via the resulting kernel oops. (Not needed — 0088 closed blocker A on first DUT test.)
+
+**Closure verification (ISO 2026.05.28-0149, commit `d1b6e30`, run 26549682211):**
+
+- 60 s G5 hold (`sudo bin/dpaa1-xsk-bind-probe.py eth3 0 4096 --hold 60`)
+- `dmesg | grep -c 'Invalid Command Verb'` = **0** (was 1:1 with refill batches on the 0085 baseline)
+- `dmesg | grep -ciE 'BUG|WARN|softlock|stall|panic|oops'` = **0** (was a CPU#0 stall + 52 s soft lockup at t=307 on the 0085 baseline)
+- `xsk_bman_refill_batches` = 16 (8 per attach cycle, refill working)
+- `xsk_rx_branch` = 86 (RX eligibility probe firing)
+- `xsk_dma_map_fail` = 0, `xsk_pamu_window_fail` = 0, `xsk_pool_detach_timeout` = 0
+- `xsk_pool_attach_ok` = 2, `xsk_pool_detach_ok` = 2 (clean attach/detach both cycles)
+
+**CI-pipeline invariant discovered during this work** (now also in qdrant and AGENTS.md candidate):
+`bin/ci-setup-kernel.sh` stages `kernel/common/patches/board/*.patch` via explicit `cp` lines per patch — it does NOT glob. `patch-health.sh` validates each patch against the post-prior-patches staged tree but does NOT cross-check that `ci-setup-kernel.sh` actually stages them. ISO 2026.05.28-0116 (commit `b57dd6a`) silently shipped without ANY of 0086/0087/0088 applied because the `cp` lines were missing — patch-health reported Pass:22 for all three. Fix: every new board patch requires a matching `cp` line addition in `ci-setup-kernel.sh` AND a post-build grep of `/mnt/nvme/_work/.../linux-<ver>/<file>` for the expected post-patch token before deploying to DUT.
 
 After 0088 silences blocker A, blocker B (XSKMAP redirect into `rx_default_dqrr` to wire productive RX, currently `rx_packets=0`) remains to be addressed by patch `0089`+ before the ≥ 7 Gbps M3 acceptance gate can be claimed.
 
