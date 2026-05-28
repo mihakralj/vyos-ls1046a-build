@@ -86,7 +86,7 @@ index 2b34c6c..8ec0f9f 100644
 +priv->xsk_max_qbands = DPAA1_XSK_MAX_QBANDS;
 +
 +/* M3-3b (patch 0086): snapshot the FMan PCD capability bitmask
-+ * once per netdev so subsequent fman_cc_*/fman_hm_*/fman_pol_*
++ * once per netdev so subsequent fman_cc_/fman_hm_/fman_pol_
 + * helpers can short-circuit to -ENOTSUPP without re-probing.
 + * dpaa_fman_caps_log() emits one KERN_INFO line for the first
 + * netdev only (internal one-shot guard) so the boot log records
@@ -110,7 +110,7 @@ index 2bc4ac0..f6d5bc2 100644
  
 +/* M3-3b (patch 0086): FMan PCD capability bitmask snapshot taken
 + * at probe via dpaa_fman_get_caps(). 0 on mainline ucode 106 ->
-+ * all fman_cc_tree_*/fman_hm_*/fman_pol_* helpers short-circuit
++ * all fman_cc_tree_/fman_hm_/fman_pol_ helpers short-circuit
 + * to -ENOTSUPP and bump hw_offload_unavailable. Non-zero only
 + * when ucode 210+ is loaded (or simulated via
 + * dpaa_fman_caps.force=). Spec sec 3.5 capability layer.
@@ -143,7 +143,7 @@ index 76e1eb1..28af7c7 100644
 +/* HW-offload (PCD-cap) counters (M3-3b / patch 0086). Order MUST match
 + * the u64 block at &priv->hw_offload_unavailable in struct dpaa_priv
 + * (dpaa_eth.h). One bumped-on-ENOTSUPP counter today; the productive
-+ * implementations of fman_cc_*/fman_hm_*/fman_pol_*/fman_hc_* in
++ * implementations of fman_cc_/fman_hm_/fman_pol_/fman_hc_ in
 + * follow-up patches will add per-block success/fail counters keeping
 + * the same contiguous-block-of-u64 layout.
 + * Spec: specs/dpaa1-afxdp-modernization-spec.md sec 3.5 + sec 5.4.

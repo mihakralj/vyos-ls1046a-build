@@ -60,8 +60,8 @@ Full per-row validation detail (DUT counter readings, ftrace evidence, iperf3 nu
 | **M3-3 step 4** | NAPI-hooked BMan refill                                                          | 6.1     | **dut-validated**         | `0084 v2` (option-c single-CPU pin) + blocker-A chain `0086`+`0087`+`0088` (`d1b6e30`, ISO `2026.05.28-0149`, run 26549682211) — §6.1.6; 60 s G5 hold: 0 IVCI / 0 BUG/WARN/softlock / 16 refill batches |
 | **M3-3 step 5** | TX ZC submit + TxConf recycle + `xsk_tx_inflight` backpressure                   | 6.1     | **dut-validated (hang-fix)** | `0085 v2` — kernel path wired; productive TX waits on TX-capable XSK producer (`xdpsock -t` / VPP `af_xdp` / custom) |
 | **M3-3 step 6** | Productive XSK RX delivery via XSKMAP redirect                                   | 6.1     | **dut-validated**         | `0089` (userspace probe stage-3, no kernel change) — §6.1.7; copy-mode `rx_packets`=30 incidental → 296,716 under load (§6.1.8) |
-| **M3-3b**       | CC steering — exact-match HW classifier kernel API                               | 5.4     | **stub-landed**           | `0086` = `c36e6c0` — FMAN_CAP_* detection + four `-ENOTSUPP` stubs + `hw_offload_unavailable` ethtool counter; productive install gated on ucode-210 cap-bit confirmation |
-| **M3-3c**       | HM offload — VLAN/MPLS strip-insert kernel API                                   | 5.5     | **planned**               | `0090` (renumbered from `0086` per §6.1.6); ucode-210 gated |
+| **M3-3b**       | CC steering — exact-match HW classifier kernel API                               | 5.4     | **cap-bit-detection-live** | `0086` = `c36e6c0` (CC stubs + counter) + `0086a` (productive DT ucode-210 probe, 2026-05-28 — caps auto-populate from `/proc/device-tree/soc/fman@1a00000/fman-firmware/fsl,firmware` `qe_firmware.id`); productive CC install still pending |
+| **M3-3c**       | HM offload — VLAN/MPLS strip-insert kernel API                                   | 5.5     | **stub-landed**           | `0090` — `fman_hm_node_install/destroy/caps_supported` `-ENOTSUPP` stubs + `CONFIG_DPAA_HW_HM_OFFLOAD`; productive HM node install pending |
 | **M3-3d**       | Policer — per-flow HW ingress rate-limit                                         | 5.6     | **planned**               | `0091` (renumbered from `0087` per §6.1.6); ucode-210 gated |
 | **M3-3e**       | CEETM — HW hierarchical egress shaping as tc qdisc                               | 5.7     | **planned**               | `0092` (renumbered from `0088` per §6.1.6); ucode-210 gated for color-aware drop, scheduler works on ucode 106 |
 | **M3-3 step 7** | True ZC RX (FMan DMAs into XSK-pool BMan chunks via `priv->xsk_bpid` match)      | 6.1     | **planned**               | `0093+` — only required if §6.1.8 Options A/B/C fail to close ≥7 Gbps gate at copy-mode |
@@ -89,7 +89,7 @@ In-flight state as of **2026-05-28**. Pre-2026-05-27 per-step DUT validation pro
 | 2. CEETM CGR HW tail-drop + `xsk_tx_inflight` ≤ 1024 + low-water 512 + `XDP_USE_NEED_WAKEUP` | M3-3 step 5 + M3-3e | partial — `XDP_USE_NEED_WAKEUP` wired in 0080; `xsk_tx_inflight` planned (0084) | §6.1.4, §5.7 |
 | 3. 9-step `fman_port_disable(rxp)`-anchored detach, 10 ms link bounce accepted | M2-s2 | **dut-validated** (sleep-in-RCU fix `039a50c`, 100× churn clean) | §6.1.1 |
 | 4. `DPAA1_XSK_INITIAL_SEED=8192` + OQ9 rate-scaling | M2-s1 | landed | §6.1.1 |
-| 5. `priv->fman_caps` bitmask + `hw_offload_unavailable` counter + ucode-106 row | M0 augmentation, gates M3-3b–e | **landed (stub-only)** — patch 0086 (commit `c36e6c0`) exposes both via `ethtool -S`; productive install gated on ucode-210 cap-bit confirmation | §3.5, §4.1, §5.4 |
+| 5. `priv->fman_caps` bitmask + `hw_offload_unavailable` counter + ucode-106 row | M0 augmentation, gates M3-3b–e | **landed (productive DT probe)** — `0086` exposes counter via `ethtool -S`; `0086a` (2026-05-28) auto-populates caps from the DT firmware blob (`qe_firmware.id` major-version parser, ucode 210.10.1 verified on DUT lights up CC+HM+POL+PARSER, HC stays off per PR13); HM stub API landed as `0090` per §5.5 | §3.5, §4.1, §5.4, §5.5 |
 | 6. Parser→CC→HM→QMan ordering normative; OQ5 closed | M3-3b doc | landed (doc) | §5.4 |
 | 7. Two-layer VPP shaper exclusion (VyOS validator + `ceetm_active` sysfs) | M3-3e + §7.4 | planned | §5.7, §7.4 |
 
@@ -256,6 +256,8 @@ Pointers RCU-protected; `synchronize_rcu()` in detach/unregister. Conflict resol
 ```
 
 Each exported `fman_*_install()` helper returns `-ENOTSUPP` if the corresponding cap bit is clear, **before** touching MURAM. Phase 3b–e flavor code: `install → if (-ENOTSUPP) { priv->hw_offload_unavailable++; continue; }` — fail-soft.
+
+**Productive detection (patch `0086a`, 2026-05-28).** Cap bits auto-populate from a DT walk of the FMan firmware blob U-Boot loaded into MURAM from SPI mtd4. Layout per `include/soc/fsl/qe/qe.h struct qe_firmware`: bytes 0..3 `__be32 length`, bytes 4..6 magic `"QEF"`, byte 7 version, bytes 8..69 `id[62]` NUL-terminated ASCII. On Mono Gateway DK the property lives at `/proc/device-tree/soc/fman@1a00000/fman-firmware/fsl,firmware` (51652 bytes) and the id reads exactly `"Microcode version 210.10.1 for LS1043 r1.0"` (verified by `od -c` on DUT 2026-05-28). A string parser extracts the major version (210) and lights up `CC_EXACT_MATCH | HM_NODES | POLICER_TRTCM | PARSER_SOFTSEQ`. `HC_DISPATCH` deliberately stays off: per PR13 hardware probe (2026-05-13), the standard 210.10.1 QEF blob does not implement the Host Command doorbell — only the dedicated `qe_firmware` ucode variant does, and we do not ship that. Result on this board is `caps = 0x17` (CC+HM+POL+PARSER). The result is cached in a file-scope `static int` after first probe so the 5× `dpaa_eth_probe()` calls (one per MAC) don't re-walk the DT. The `dpaa_fman_caps.force=<u32>` module parameter still wins as an operator override for dev/CI on hardware where the DT walk would otherwise return 0.
 
 **MURAM budget:**
 
@@ -432,12 +434,15 @@ void fman_cc_tree_destroy (struct fman *fm, u8 port_id);
 
 ### 5.5 HM offload (M3-3c)
 
-**Patch:** `0090` (planned, renumbered from `0086` per §6.1.6). **Status:** planned (ucode-210 gated).
+**Patch:** `0090` (stub-landed 2026-05-28, renumbered from `0086` per §6.1.6). **Status:** stub-landed — `fman_hm_node_install/destroy/caps_supported` `-ENOTSUPP` stubs + `CONFIG_DPAA_HW_HM_OFFLOAD` Kconfig + opaque `struct fman_hm_spec`; productive HM-node install pending (ucode-210 gated, will light up via the §3.5 productive DT probe in patch `0086a`).
+
+The stub API mirrors §5.4 CC-steering cadence exactly: `fman_hm_node_install()` returns `-ENOTSUPP` and writes `0` to `*handle` (or `-EINVAL` if `handle == NULL`); `fman_hm_node_destroy()` is an idempotent no-op returning `0`; `fman_hm_caps_supported()` wraps `(dpaa_fman_get_caps() & FMAN_CAP_HM_NODES) != 0`. All three are `EXPORT_SYMBOL_GPL`. The opaque `struct fman_hm_spec` keeps the productive layout (per-op TLV array) deferred to the follow-up productive patch so downstream consumers (`af_xdp_pool` egress rewrite, ASK2 flowtable bridge, vyos-1x NAT offload CLI) can wire calls today and degrade gracefully on ucode <210.
 
 ```c
 int  fman_hm_node_install(struct fman *fm, u8 port_id,
-                          const struct fman_hm_spec *spec);
-void fman_hm_node_destroy(struct fman *fm, u8 port_id);
+                          const struct fman_hm_spec *spec, u32 *handle);
+int  fman_hm_node_destroy(struct fman *fm, u8 port_id, u32 handle);
+bool fman_hm_caps_supported(void);
 ```
 
 `HM_OP_VLAN_STRIP`, `HM_OP_VLAN_INSERT(vlan_id, tpid)`, `HM_OP_MPLS_PUSH(label, tc, s, ttl)`, `HM_OP_MPLS_POP`. Chains with §5.4 CC tree.
