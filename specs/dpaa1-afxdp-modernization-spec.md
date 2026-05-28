@@ -607,6 +607,50 @@ Diagnostic fallback if 0088 fails: enable `CONFIG_FSL_DPAA_CHECKING=y` to conver
 
 After 0088 silences blocker A, blocker B (XSKMAP redirect into `rx_default_dqrr` to wire productive RX, currently `rx_packets=0`) remains to be addressed by patch `0089`+ before the ≥ 7 Gbps M3 acceptance gate can be claimed.
 
+#### 6.1.7 Blocker B — productive RX delivery via XSKMAP redirect — 2026-05-28
+
+**Diagnosis.** Pre-`0089` an `XDP_ZEROCOPY`-bound AF_XDP socket on DPAA1 observes `rx_packets = 0` even when the upstream driver mechanics are healthy (the §6.1.6 closure run measured `xsk_rx_branch = 86`, `xsk_pool_attach_ok = 2`, refill batches = 16, zero IVCIs, zero CPU stalls). The reason is a userspace gap, not a kernel one:
+
+1. `rx_default_dqrr()` already calls `dpaa_run_xdp()` for every contig FD.
+2. `dpaa_run_xdp()` (line 2723) early-returns `XDP_PASS` when `READ_ONCE(priv->xdp_prog) == NULL` — no XDP program means no `xdp_do_redirect()` invocation.
+3. The FD then travels the unchanged mainline skbuf path (`contig_fd_to_skb()` → `napi_gro_receive()`), so the kernel receives the packet but the bound XSK socket sees nothing.
+
+The driver-side prerequisites for productive XSK RX were all already in place before this session:
+
+| Component | Patch | Effect |
+|-----------|-------|--------|
+| `xdp_rxq_info.queue_index = 0` for every RX FQ | `4006` | XSK socket's `xs->queue_id == xdp->rxq->queue_index` check passes for any FD without needing per-FQID XSKMAP entries |
+| `xsk_rx_branch` eligibility probe in `rx_default_dqrr()` | `0083` | Confirms FDs reach the qband owning the bound XSK pool |
+| `xsk_pool_dma_map(priv->rx_dma_dev, …)` | `0088` | Buffer DMA addresses resolve inside BMan's FBPR window (blocker A closure) |
+| NAPI-hooked BMan refill from XSK FILL ring | `0084 v2` | XSK chunks return to BMan after the kernel consumes them |
+
+**Patch `0089` — userspace probe stage-3 (no kernel change).** Extends `bin/dpaa1-xsk-bind-probe.py` with an opt-in `--xskmap` flag. When the flag is present the probe:
+
+1. `bpf(BPF_MAP_CREATE, BPF_MAP_TYPE_XSKMAP)` → `xsks_map` fd (max_entries = 64).
+2. `bpf(BPF_PROG_LOAD, BPF_PROG_TYPE_XDP)` with a 6-insn (56-byte) hand-encoded eBPF program that returns `bpf_redirect_map(&xsks_map, ctx->rx_queue_index, XDP_PASS)`.
+3. `rtnetlink RTM_SETLINK IFLA_XDP` to attach the program to the netdev — DRV mode first (kernel fast-path), SKB-mode fallback (generic XDP via `netif_receive_skb`) if the driver refuses DRV.
+4. `bind(XDP_ZEROCOPY)` (unchanged from stage-1).
+5. `bpf(BPF_MAP_UPDATE_ELEM, xsks_map, queue_id, xsk_socket_fd)` — XSKMAP demands a fully bound XSK socket as the value, so the update must happen after `bind()`.
+
+Stage-3 is strictly additive: omitting `--xskmap` preserves the original M2-stage-1 / M2-stage-2 behaviour byte-for-byte. No `bin/ci-setup-kernel.sh` changes; no kernel rebuild required.
+
+**Mode is copy-mode, not zero-copy.** `xdp_do_redirect()` consults `xsks_map[ctx->rx_queue_index]` and pushes the page-backed `xdp_buff` into the XSK socket's RX ring. Because the buffer was allocated by `dpaa_bp` (kernel page) rather than by `xsk_buff_alloc()`, the XSK core copies it into a free UMEM chunk pulled from the FILL ring. This unblocks `rx_packets > 0` on the existing stack but does NOT meet acceptance-gate item 4 (`perf top` clean of `__alloc_skb` / `memcpy`) — that requires the FMan RX port to DMA directly into XSK-pool BMan chunks (the §6.1.3 / `0084` refill path is wired but the FMan port's BPID-program step is still mainline default). True ZC is the follow-on M3-3 step 7 work scoped to patches `0093+`:
+
+- Recognise XSK-pool-sourced FDs in `rx_default_dqrr()` by matching `fd->bpid` against `priv->xsk_bpid[band]`.
+- Recover the `xdp_buff` from the XSK chunk via `xsk_buff_recv(pool, dma_addr)` instead of `phys_to_virt(addr) + build_skb()`.
+- Program the FMan RX port's primary BPID to the XSK pool's BPID when `xsk_pool_attach()` succeeds, so FMan DMAs directly into XSK chunks.
+
+**Verification matrix (planned DUT G5):**
+
+| Gate | Pre-`0089` (no `--xskmap`) | Post-`0089` (`--xskmap`) | Notes |
+|------|----------------------------|--------------------------|-------|
+| `rx_packets` after 30 s of peer flood | 0 | > 0 | Closes blocker B |
+| `xsk_rx_branch` ethtool counter | non-zero | non-zero | Unchanged — still observational |
+| `xsk_pool_detach_timeout` | 0 | 0 | XDP detach order before XSK detach |
+| dmesg `Invalid Command Verb` / `BUG` / `softlock` | 0 | 0 | No regression vs blocker A closure |
+| `perf top -p probe` for `__alloc_skb` / `memcpy` | n/a (no RX) | present (copy-mode signature) | Confirms copy-mode; gate item 4 stays open |
+| ≥ 7 Gbps single-stream | n/a | not reached | Acceptance gate remains pending true ZC follow-on |
+
 **Acceptance gate M3-3 (full VPP datapath):**
 1. `xdp-features` reports `NETDEV_XDP_ACT_XSK_ZEROCOPY`.
 2. `xdpsock -i ethX -q 3 -z -r` receives traffic. Queue-0 alias dead.
