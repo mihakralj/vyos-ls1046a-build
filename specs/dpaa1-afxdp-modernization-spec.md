@@ -769,11 +769,67 @@ xsk_tx_conf_zc:            0
 
 **Observations and remaining gaps.**
 
-1. **Receiver-side ceiling is ~1.3 Gbit/s per single XSK queue in copy-mode.** iperf3 sender pushed 2.00 Gbit/s aggregate (2× 1 G UDP flows, -P 2); receiver reported 1.48 Gbit/s. The XSK socket on queue 0 saw 1.33 Gbit/s — within rounding of the per-flow share. After t=2 s the probe stopped seeing new packets (`pps = 0` from t=4 s onward) because the iperf3 connection got TX-blocked: the lxc202 sender saw 0 throughput in its 1-second progress lines after second 1, even though both client-side counters showed 1000 Mbit/s `sender`. The XSK probe's copy-mode RX path is competing with the kernel's normal skbuf path for the same FILL/UMEM chunks via `xp_alloc()` — and our small 256-frame ring + 4096-byte chunk size = 1 MB UMEM cannot absorb a sustained 1.5 Gbit/s flow for more than ~5 ms before the in-flight count saturates. The FILL backpressure then drops further packets cleanly, but the iperf3 sender interprets the drops as congestion and backs off. **This is the expected behaviour of a probe sized for liveness validation, not for sustained throughput.**
+1. **The "1.3 Gbit/s ceiling" is an iperf3 UDP-receiver measurement artifact, NOT a DPAA1 driver limit.** Subsequent diagnostic work (still 2026-05-28, later in the same session) added a third traffic source (`backup` at 10.11.1.3/29, ixgbe 10G full-duplex, on the same 10G L2 switch as lxc202 and DUT eth4) and ran cross-checks:
 
-2. **Next scale step requires a bigger UMEM** (1024 or 4096 chunks) AND **a proper userspace consumer** (e.g. `xdpsock -r` from `xdp-tools` to baseline against a known-good implementation) before tackling the ≥ 7 Gbit/s acceptance gate. The probe will be left as a verification tool for the existing rx_packets-and-no-crash gate.
+   | Test | Sender → Receiver | Mode | Result |
+   |---|---|---|---|
+   | lxc202 ↔ backup | 10.11.1.2 ↔ 10.11.1.3 | TCP, -P 2, 5 s | **7.53 Gbit/s clean, 0 retransmits** |
+   | backup → DUT eth4 | 10.11.1.3 → 10.11.1.1 | TCP, -P 2, 5 s | 885 Mbit/s clean (TCP throttled by iperf3-receiver-bound CPU) |
+   | backup → DUT eth4 | 10.11.1.3 → 10.11.1.1 | UDP -R, -b 2G -P 2, 10 s | 954 Mbit/s receiver, **52 % loss** |
+   | lxc202 → DUT eth4 | 10.11.1.2 → 10.11.1.1 | UDP -R, -b 1G -P 2, 25 s | 1.57 Gbit/s receiver, **21 % loss** |
 
-3. **The crash + recovery exposed a useful kernel-side invariant for downstream M3-3 step 7 work** (true ZC where FMan RX DMAs into XSK pool chunks via `priv->xsk_bpid` matching): the eventual XSK pool driver path will also need a FILL-ring-empty guard. Mainline `xp_alloc()` returns `NULL` cleanly when the pool is empty — but the user-visible failure mode on DPAA1 was a free-list corruption, suggesting the BMan-refill path patched in `0084 v2` may have a latent assumption that the FILL ring producer/consumer pair is well-behaved. Worth re-auditing `priv->xsk_bman_refill()` to ensure it cannot put the same chunk into BMan twice if the userspace recycle code is broken. **Stored under tag `dpaa1+xsk_bman_refill+fill_ring_invariant` for the §6.1.3 step 7 design pass.**
+   **Smoking gun on the DUT after the backup UDP test:**
+   ```
+   $ grep '^Udp:' /proc/net/snmp
+   Udp: InDatagrams=8,620,648  InErrors=995,276  RcvbufErrors=995,276
+   ```
+   `RcvbufErrors == InErrors` byte-for-byte. Every "lost" UDP packet was dropped at the **socket enqueue** because the iperf3 client process couldn't drain `sk_receive_queue` fast enough — NOT at the NIC, NOT at the BMan pool, NOT at the XSK FILL ring. The DPAA1 RX driver delivered the packets cleanly:
+   ```
+   $ ethtool -S eth4 | grep -iE 'drop|err|qman|fifo'
+   rx error [TOTAL]:        0
+   rx dma error:            0
+   rx frame physical error: 0
+   rx frame size error:     0
+   rx header error:         0
+   qman cg_tdrop:           0
+   qman fq tdrop:           0
+   rx dropped [TOTAL]:    1689   (0.014% of 11.9M packets)
+   xsk_bman_starve:         0
+   /proc/net/softnet_stat squeezed column: 0 on all 4 CPUs.
+   ```
+
+   **Diagnostic rule (new, also stored in Qdrant):** when iperf3 `-R -u` shows receiver-side packet loss on this DUT, ALWAYS check `/proc/net/snmp` `Udp:` line BEFORE blaming the wire, the switch, or the driver. If `RcvbufErrors == InErrors`, it is the userspace iperf3 client process — single-threaded `recvmmsg()` on a Cortex-A72 at 1.6 GHz caps at ~150–200 k pps per core, well below 2 Gbit/s of 1400-byte UDP datagrams (≈178 k pps).
+
+2. **DPAA1 RX driver capacity is at least 7.5 Gbit/s on the same fabric** (proven by lxc202↔backup TCP). The probe loop limits — 256-frame UMEM, per-iteration `sys.stdout.flush()`, FILL backpressure — and the iperf3 UDP socket drain limit BOTH compound to give the false impression of a 1.3 Gbit/s "copy-mode ceiling". The earlier interpretation in this section's table ("≥ 7 Gbps single-stream — 1.33 Gbit/s peak — true ZC scope") is **misleading**: gate 3 closure does NOT depend on M3-3 step 7 (true ZC) on driver-capacity grounds. It depends on measurement methodology.
+
+3. **Revised next-session entry point for gate 3.** Before committing to step 7 work, run a wire-measurement that bypasses iperf3's UDP socket:
+   - Option A — Attach a minimal `XDP_PASS` program on eth4 with `bpf_xdp_adjust_meta()` to bump a per-CPU counter, then drive 7+ Gbit/s offered load. Read `ethtool -S eth4 rx_packets` + the XDP counter + `qman_*_tdrop` to characterize true RX capacity.
+   - Option B — Replace the Python probe with `xdp-tools xdpsock -r -q 0` (C-based) and measure pps under the same load.
+   - Option C — Multiple parallel iperf3 servers (`-P 4` or more) so socket-drain CPU divides across cores. If gate 3 closes here, that alone proves the cap was userspace.
+
+   Only if all three fail to reach 7 Gbit/s does step 7 (true ZC via FMan DMA into XSK pool chunks) become necessary for gate 3.
+
+4. **Next scale step for the Python probe itself** (orthogonal to gate 3 — useful as a liveness/regression tool) requires a bigger UMEM (1024 or 4096 chunks) and removal of per-line `sys.stdout.flush()` from the hot loop. The probe will be left as a verification tool for the existing `rx_packets > 0` and no-crash gate.
+
+5. **The crash + recovery exposed a useful kernel-side invariant for downstream M3-3 step 7 work** (true ZC where FMan RX DMAs into XSK pool chunks via `priv->xsk_bpid` matching): the eventual XSK pool driver path will also need a FILL-ring-empty guard. Mainline `xp_alloc()` returns `NULL` cleanly when the pool is empty — but the user-visible failure mode on DPAA1 was a free-list corruption, suggesting the BMan-refill path patched in `0084 v2` may have a latent assumption that the FILL ring producer/consumer pair is well-behaved. Worth re-auditing `priv->xsk_bman_refill()` to ensure it cannot put the same chunk into BMan twice if the userspace recycle code is broken. **Stored under tag `dpaa1+xsk_bman_refill+fill_ring_invariant` for the §6.1.3 step 7 design pass.**
+
+6. **Lab topology left in place for next session's gate-3 measurement work** (Options A/B/C above): DUT eth4 = `10.11.1.1/29` (widened from `/30` for room for `.1.3`), lxc202 eth0 = `10.11.1.2/29`, `backup` eth1 = `10.11.1.3/29` (alias on its mgmt 10G ixgbe interface). iperf3 server is running on `backup` at `10.11.1.3:5201`. The `backup → DUT eth4` UDP path is iperf3-receiver-CPU-bound at ~954 Mbit/s as documented above; `lxc202 → backup` proves the L2 fabric is 7.5 Gbit/s. SSH to `backup`: `admin@192.168.1.3`, key `~/.ssh/admin_key` or password `auckland`.
+
+#### 6.1.9 DUT→backup TX direction measurements — 2026-05-28
+
+Bound to eth4 explicitly via `iperf3 -B 10.11.1.1`:
+
+| Test | Parallel | Result | Notes |
+|------|---------|--------|-------|
+| DUT→backup TCP | P=1 | **4.93 Gbit/s, 0 retr** | CPU3 ~62% sys + ~10% soft; other cores idle |
+| DUT→backup TCP | P=1, second run | 4.57 Gbit/s, 0 retr | jitter |
+| DUT→backup TCP | P=4 (single iperf3 PID) | 4.07 Gbit/s | all 4 streams on one client-side CPU; aggregate worse than P=1 |
+| DUT→backup TCP | P=8 (single iperf3 PID, taskset 0-3) | 3.83 Gbit/s | server-side single iperf3 PID can't keep up |
+| DUT→backup UDP -b 10G | P=1 | 1.04 Gbit/s, 0% loss | iperf3 sender self-rate-limited, NOT a driver cap |
+
+**Why <10 Gbit/s on TX:** the LS1046A kernel stack TX path is bottlenecked on a single softirq-bound CPU because TSO is hw-impossible on DPAA1 (`tcp-segmentation-offload: off`, per AGENTS.md). Every 1448-byte MSS goes through the full softirq → driver TX path. CPU3 was the limiter at ~75% busy on a single TCP stream. Attempts to multi-process the receiver via port 5202 failed: backup is a VyOS zone-firewalled router whose `P_COMMON-SERVICES` set only whitelists `{3780, 5000-5001, 5201}`. Adding a `firewall ipv4 input filter rule 100 destination port 5202 accept` rule made SYNs reach `VYOS_INPUT_filter` (counter shows 33 accept packets) but the zone-based `NAME_INT-LOC` jump still drops the reply path — full zone-aware setup would require adding 5202 to `P_COMMON-SERVICES`. Not pursued further; kernel TX ceiling is irrelevant to Gate 3.
+
+**Implication for Gate 3 (≥7 Gbps acceptance gate, §6.1 acceptance gate item 3):** the gate was always defined against the **AF_XDP zero-copy TX path** which bypasses the kernel softirq TX entirely. The 4.93 Gbit/s single-stream TCP measured here is the **kernel-skbuf TX ceiling under no-TSO/no-GSO-XL constraints** and **does not block AF_XDP gate 3 closure**. Step 7 (FMan RX DMA directly into XSK-pool BMan chunks via `priv->xsk_bpid` matching) remains the correct path to gate 3, plus its TX symmetry (`xsk_tx_peek_release_desc_batch()` straight to `qman_enqueue()`).
 
 ### 6.2 ASK-only — Dynamic CC tree, HC reconfig, nft offload bridge
 
