@@ -233,6 +233,16 @@ cp "$BOARD_PATCH_DIR/0086a-dpaa-fman-caps-probe-dt.patch"      "$KERNEL_PATCHES/
 # wire calls today and gracefully degrade on ucode <210 silicon. Spec
 # sec 5.5.
 cp "$BOARD_PATCH_DIR/0090-dpaa-fman-hm-stub.patch"              "$KERNEL_PATCHES/"
+# M3-3d: Policer (srTCM/trTCM) stub API. Mirrors the 0090 cadence exactly --
+# fman_policer_install returns -ENOTSUPP, fman_policer_destroy is an
+# idempotent void no-op, fman_policer_caps_supported() wraps
+# (caps & FMAN_CAP_POLICER_TRTCM). Adds CONFIG_DPAA_HW_POLICER_OFFLOAD
+# (default y, depends on DPAA_HW_CC_STEERING) and opaque struct
+# fman_policer_profile. Productive impl lands in a follow-up patch; API is
+# fixed now so downstream consumers (vyos-1x firewall limit offload CLI,
+# VPP per-qband rate-limit, ASK2 nft limit offload backend) can wire calls
+# today and gracefully degrade on ucode <210 silicon. Spec sec 5.6.
+cp "$BOARD_PATCH_DIR/0091-dpaa-fman-policer-stub.patch"         "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"

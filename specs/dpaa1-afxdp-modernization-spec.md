@@ -43,7 +43,7 @@ Full per-row validation detail (DUT counter readings, ftrace evidence, iperf3 nu
 | **M3-3 step 6** | Productive XSK RX delivery via XSKMAP redirect                                   | 6.1     | **dut-validated**         | `0089` (userspace probe stage-3, no kernel change) — §6.1.7; copy-mode `rx_packets`=30 incidental → 296,716 under load (§6.1.8) |
 | **M3-3b**       | CC steering — exact-match HW classifier kernel API                               | 5.4     | **cap-bit-detection-live** | `0086` = `c36e6c0` (CC stubs + counter) + `0086a` (productive DT ucode-210 probe, 2026-05-28 — caps auto-populate from `/proc/device-tree/soc/fman@1a00000/fman-firmware/fsl,firmware` `qe_firmware.id`); productive CC install still pending |
 | **M3-3c**       | HM offload — VLAN/MPLS strip-insert kernel API                                   | 5.5     | **stub-landed**           | `0090` — `fman_hm_node_install/destroy/caps_supported` `-ENOTSUPP` stubs + `CONFIG_DPAA_HW_HM_OFFLOAD`; productive HM node install pending |
-| **M3-3d**       | Policer — per-flow HW ingress rate-limit                                         | 5.6     | **planned**               | `0091` (renumbered from `0087` per §6.1.6); ucode-210 gated |
+| **M3-3d**       | Policer — per-flow HW ingress rate-limit                                         | 5.6     | **stub-landed**           | `0091` — `fman_policer_install` `-ENOTSUPP` / `fman_policer_destroy` void no-op / `fman_policer_caps_supported` wraps `caps & FMAN_CAP_POLICER_TRTCM`; adds `CONFIG_DPAA_HW_POLICER_OFFLOAD`; productive srTCM/trTCM programming pending |
 | **M3-3e**       | CEETM — HW hierarchical egress shaping as tc qdisc                               | 5.7     | **planned**               | `0092` (renumbered from `0088` per §6.1.6); ucode-210 gated for color-aware drop, scheduler works on ucode 106 |
 | **M3-3 step 7** | True ZC RX (FMan DMAs into XSK-pool BMan chunks via `priv->xsk_bpid` match)      | 6.1     | **planned**               | `0093+` — only required if §6.1.8 Options A/B/C fail to close ≥7 Gbps gate at copy-mode |
 | **M4**          | Single-MAC dual-flavor coexistence via VSP bifurcation                           | App. A  | **deferred**              | Typical deployment uses per-port flavor selection (§7.1) — Phase 4 only needed for kernel+VPP on the SAME MAC |
@@ -427,7 +427,7 @@ bool fman_hm_caps_supported(void);
 
 ### 5.6 Policer (M3-3d)
 
-**Patch:** `0091` (planned, renumbered from `0087` per §6.1.6). **Status:** planned (ucode-210 gated).
+**Patch:** `0091` (renumbered from `0087` per §6.1.6). **Status:** **stub-landed** 2026-05-28 — `fman_policer_install` returns `-ENOTSUPP`, `fman_policer_destroy` is an idempotent void no-op, `fman_policer_caps_supported()` wraps `(dpaa_fman_get_caps() & FMAN_CAP_POLICER_TRTCM)`. `CONFIG_DPAA_HW_POLICER_OFFLOAD` (default y, depends on `DPAA_HW_CC_STEERING`) gates the build. Opaque `struct fman_policer_profile` reserved for srTCM/trTCM mode + CIR/PIR/CBS/PBS + colour-aware flag; concrete layout lands with productive implementation. Cap-bit auto-detected by `0086a` DT probe on Mono Gateway DK ucode 210.10.1 (`caps & FMAN_CAP_POLICER_TRTCM` = true). Productive programming pending.
 
 ```c
 int  fman_policer_install(struct fman *fm, u8 port_id, u8 profile_id,
