@@ -640,16 +640,47 @@ Stage-3 is strictly additive: omitting `--xskmap` preserves the original M2-stag
 - Recover the `xdp_buff` from the XSK chunk via `xsk_buff_recv(pool, dma_addr)` instead of `phys_to_virt(addr) + build_skb()`.
 - Program the FMan RX port's primary BPID to the XSK pool's BPID when `xsk_pool_attach()` succeeds, so FMan DMAs directly into XSK chunks.
 
-**Verification matrix (planned DUT G5):**
+**Verification matrix — DUT G5 result 2026-05-28 (ISO 2026.05.28-0149, eth3, q=0, 30 s hold, light incidental background traffic only — lxc202 flood-ping was permission-denied so the segment carried only ARP / IPv6 ND / mDNS / multicast):**
 
-| Gate | Pre-`0089` (no `--xskmap`) | Post-`0089` (`--xskmap`) | Notes |
-|------|----------------------------|--------------------------|-------|
-| `rx_packets` after 30 s of peer flood | 0 | > 0 | Closes blocker B |
-| `xsk_rx_branch` ethtool counter | non-zero | non-zero | Unchanged — still observational |
-| `xsk_pool_detach_timeout` | 0 | 0 | XDP detach order before XSK detach |
-| dmesg `Invalid Command Verb` / `BUG` / `softlock` | 0 | 0 | No regression vs blocker A closure |
-| `perf top -p probe` for `__alloc_skb` / `memcpy` | n/a (no RX) | present (copy-mode signature) | Confirms copy-mode; gate item 4 stays open |
-| ≥ 7 Gbps single-stream | n/a | not reached | Acceptance gate remains pending true ZC follow-on |
+| Gate | Pre-`0089` (no `--xskmap`) | Post-`0089` (`--xskmap`) | Observed | Status |
+|------|----------------------------|--------------------------|----------|--------|
+| `rx_packets` after 30 s | 0 | > 0 | **30** (`rx_bytes = 3434`) | ✅ Closes blocker B |
+| `xsk_pool_attach_ok / fail` | counter inc / 0 | counter inc / 0 | **5 / 0** (across all today's runs) | ✅ |
+| `xsk_pool_detach_ok / timeout` | inc / 0 | inc / 0 | **5 / 0** | ✅ |
+| `xsk_dma_map_fail`, `xsk_pamu_window_fail` | 0 / 0 | 0 / 0 | **0 / 0** | ✅ blocker A invariants hold under XSKMAP load |
+| `xsk_rx_branch` delta during run | grows | grows | **+22** (88 → 110) | ✅ FDs reach bound qband during XSKMAP redirect |
+| dmesg `Invalid Command Verb` / `BUG` / `WARN` / softlock / stall / oops | 0 | 0 | **0** (only expected SFP cage link bounces + pre-existing hwmon thermal probe info) | ✅ |
+| IFLA_XDP attach mode | n/a | DRV preferred, SKB fallback | **DRV mode** (`prog/xdp id 224`) | ✅ DPAA1 honours native XDP attach |
+| `perf top -p probe` for `__alloc_skb` / `memcpy` | n/a | present (copy-mode signature) | not measured this run | gate item 4 stays open (true ZC scope) |
+| ≥ 7 Gbps single-stream | n/a | not reached | not measured this run | Acceptance gate remains pending true ZC follow-on |
+
+**Two probe-side fixes uncovered during the verification run (both folded into the `bin/dpaa1-xsk-bind-probe.py` shipped at commit `9fda744`+):**
+
+1. `BPF_MAP_UPDATE_ELEM` first failed with `EFAULT`. Cause: `bpf_attr.map_elem` uses `__aligned_u64` for the `key` pointer, requiring a 4-byte pad after the leading `u32 map_fd`. The `struct.pack("=I QQQ", …)` form omits this pad → kernel reads the key pointer from offset 4 instead of 8. Fix: `struct.pack("=I 4x QQQ", …)`. This alignment pad applies to every `bpf_attr` arm whose first field is `u32` followed by `__aligned_u64` — worth grepping for if any future `bpf()` plumbing is added.
+2. The DRV-mode attach used `XDP_FLAGS_UPDATE_IF_NOEXIST`, which made re-runs of the probe after a clean exit fail with `EEXIST` because the DRV-mode XDP attach **persists on the netdev across process exit** (it lives on the kernel `net_device` not on the open fd). Fix: drop `XDP_FLAGS_UPDATE_IF_NOEXIST` from both DRV and SKB flag sets so a re-run replaces any prog left behind by the previous invocation. Alternative would have been calling `ip link set dev <if> xdp off` before each run, but plain-replace semantics are the right ergonomics for a diagnostic probe.
+
+**Counter snapshot — final state at end of session:**
+
+```
+xsk_pool_attach_ok:        5
+xsk_pool_attach_fail:      0
+xsk_pool_detach_ok:        5
+xsk_pool_detach_timeout:   0
+xsk_bman_seed_short:       5
+xsk_bman_starve:           0
+xsk_tx_backpressure:       0
+xsk_dma_map_fail:          0
+xsk_align_reject:          0
+xsk_headroom_reject:       0
+xsk_mtu_reject:            0
+xsk_pamu_window_fail:      0
+xsk_rx_branch:             110     (+24 vs §6.1.6 baseline of 86)
+xsk_bman_refill_batches:   26      (+10 vs §6.1.6 baseline of 16)
+xsk_tx_zc_submit:          0
+xsk_tx_conf_zc:            0
+```
+
+XDP prog was detached at end of session (`ip link set dev eth3 xdp off`) to leave the DUT in a sane state for the next iteration.
 
 **Acceptance gate M3-3 (full VPP datapath):**
 1. `xdp-features` reports `NETDEV_XDP_ACT_XSK_ZEROCOPY`.
