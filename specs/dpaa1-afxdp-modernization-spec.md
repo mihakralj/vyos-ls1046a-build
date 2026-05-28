@@ -4,8 +4,17 @@
 **Kernel base:** Linux 6.18.x mainline (VyOS rolling release)
 **Silicon:** NXP LS1046A — Cortex-A72 ×4 (2 clusters of 2 over CCI-400), FMan v3 Rev>1, QMan, BMan, MURAM (384 KiB), PAMU, SEC 5.4 (CAAM), CEETM, SerDes/XFI PCS, CoreNet
 **FMan microcode:** package `fsl_fman_ucode_ls1046a_r1.0_210.x.bin` (NXP LSDK, U-Boot loads from SPI `mtd4`)
-**Document version:** v5.0, 2026-05-27
-**Supersedes:** v4.4, v4.3, v4.2, v4.1, v4.0, v3.0, v2.x, v0.9
+**Document version:** v5.1, 2026-05-28
+**Supersedes:** v5.0, v4.4, v4.3, v4.2, v4.1, v4.0, v3.0, v2.x, v0.9
+
+**What changed in v5.1 (2026-05-28) — cleanup pass:**
+
+- **M3-3 step 4/5 hang-fix closure recorded.** Milestone tracker rows updated from "dut-validated (hang-fix; productive RX/TX path NOT wired)" to reference the closure chain in §6.1.6/§6.1.7/§6.1.8. Blocker A (BMan IVCI) closed by `0086`+`0087`+`0088`; blocker B (XSKMAP redirect) closed by `0089` (userspace probe). Under-load FILL-ring backpressure stabilized.
+- **M3-3b stub landed.** Patch `0086` (FMAN cap detection + four `-ENOTSUPP` CC stubs + `hw_offload_unavailable` counter exposed via `ethtool -S`) committed as `c36e6c0`. Milestone tracker row updated from `planned` → `stub-landed`. Reviewer-feedback delta row #5 updated to match.
+- **Patch-number renumber reinforced.** Slots `0086`/`0087`/`0088` were *reused* during blocker-A debugging (originally reserved for HM/Policer/CEETM productive installs in §5.5–§5.7). HM/Policer/CEETM productive installs renumbered to `0090`/`0091`/`0092` — cross-references in §5.5/§5.6/§5.7 and §6.1.6 are consistent. M3-3b stub now occupies slot `0086`.
+- **Current execution focus** appended with three new dut-validated subsections covering blocker-A closure, blocker-B closure, under-load probe stabilization, M3-3b stub landing.
+- **§6.1.6 condensed.** Failed-hypothesis prose (0086/0087 rejection forensics) trimmed; the CI-pipeline invariant block and 0088 root-cause prose retained because both are reusable beyond this incident. Full per-hypothesis blow-by-blow lives in Qdrant for next-session triage.
+- No technical content from v5.0 is dropped.
 
 **What changed in v5.0 (2026-05-27):**
 
@@ -76,7 +85,14 @@ Single source of truth across sessions. Each milestone tracks the cross-flavor k
 2. **(blocker for RX delivery)** Wire `xdp_do_redirect()` into `rx_default_dqrr()` for FDs landing in qbands with `priv->xsk_pool[band] != NULL`. Need: XSKMAP creation (1 map per qband, populated at attach time with `bpf_map_update_elem(xsks_map, queue_id, sock_fd)`), a minimal BPF prog (returns `XDP_REDIRECT` to map[ctx->rx_queue_index]), and the upstream-DPAA `xdp_rxq_info_reg()` queue_index workaround (see `data/kernel-patches/patch-dpaa-xdp-queue-index.py` — already in this build, maps all RX FQs to queue 0, so the XSKMAP only needs a single entry for now).
 
 **Operator-visible non-issue noted:** during the test, three RJ45 ports (eth0/eth1/eth2 — `192.168.1.190/16`, `.185/16`, `.189/16`) were all DHCP-active on the same `192.168.1.0/24` switch, producing martian-source storms on the management LAN. This is a **VyOS config / cabling issue**, NOT a kernel regression from 0084v2/0085v2. Fix: leave only eth0 plugged in for management, or set `address dhcp` on a single interface only.
-[Response interrupted - new edits below were not applied]
+
+**Post-2026-05-27 closure summary (2026-05-28 work, detail in §6.1.6 / §6.1.7 / §6.1.8):**
+
+1. **Blocker A — BMan "Invalid Command Verb" CLOSED** (§6.1.6). Chain 0086→0087→0088 isolated three hypotheses; 0088 fix (use `priv->rx_dma_dev` not `priv->mac_dev->dev` for `xsk_pool_dma_map()`) closed it. ISO 2026.05.28-0149 (commit `d1b6e30`, run 26549682211): 60 s G5 hold — 0 IVCI, 0 BUG/WARN/softlock/stall/oops, 16 refill batches, attach/detach clean. CI-pipeline invariant discovered: `bin/ci-setup-kernel.sh` does NOT glob — every new board patch needs an explicit `cp` line (one earlier ISO silently shipped without the chain applied).
+2. **Blocker B — productive XSK RX delivery CLOSED** (§6.1.7). Userspace probe stage-3 (patch 0089) adds opt-in `--xskmap` flag — creates XSKMAP, loads 6-insn eBPF `redirect_map` prog, attaches DRV-mode XDP, populates map after `bind()`. DUT 2026-05-28: `rx_packets=30` from incidental traffic on eth3, escalates to **296,716 packets / 427.86 MB** under iperf3-R load (§6.1.8). Two probe-side fixes: `bpf_attr` 4-byte alignment pad after `u32 map_fd`; drop `XDP_FLAGS_UPDATE_IF_NOEXIST` for re-runs. Mode is copy-mode (XSK core copies page-backed `xdp_buff` into UMEM); true ZC (FMan DMAs into XSK-pool BMan chunks) is M3-3 step 7 / patch 0093+ scope.
+3. **Under-load FILL-ring backpressure stabilized** (§6.1.8). Pre-fix probe crashed kernel softirq at ≥5 Gbit/s with `list_add corruption` in `xp_alloc()` (same UMEM chunk written to FILL twice → free-list pointer corruption → `dcache_clean_poc` fault). Fix: probe checks `fill_consumer` live before producing; `MAX_BATCH=64` (was 256); `skipped_recycle` counter. Cross-check `lxc202↔backup` TCP = **7.53 Gbit/s clean** proves DPAA1 RX driver capacity is ≥7.5 Gbit/s; the "1.33 Gbit/s ceiling" observed at the probe is an iperf3-receiver single-core artifact (smoking gun: `/proc/net/snmp` `RcvbufErrors == InErrors` byte-for-byte).
+4. **TX direction characterized** (§6.1.9). Kernel-skbuf single-stream TCP eth4→backup = **4.93 Gbit/s** ceiling (no TSO/LSO available — verified across mainline + NXP-SDK + DPDK; `NETIF_F_TSO` advertised nowhere on FMan v3 Linux). This is the kernel-stack TX ceiling, NOT the AF_XDP-ZC TX ceiling, which bypasses softirq entirely.
+5. **M3-3b stub landed** (§5.4). Patch 0086 (this slot reused post-blocker-A closure) = commit `c36e6c0`. Productive CC install (HM/Policer/CEETM) renumbered to 0090/0091/0092.
 
 ### Reviewer-feedback delta coverage
 
@@ -86,7 +102,7 @@ Single source of truth across sessions. Each milestone tracks the cross-flavor k
 | 2. CEETM CGR HW tail-drop + `xsk_tx_inflight` ≤ 1024 + low-water 512 + `XDP_USE_NEED_WAKEUP` | M3-3 step 5 + M3-3e | partial — `XDP_USE_NEED_WAKEUP` wired in 0080; `xsk_tx_inflight` planned (0084) | §6.1.4, §5.7 |
 | 3. 9-step `fman_port_disable(rxp)`-anchored detach, 10 ms link bounce accepted | M2-s2 | **dut-validated** (sleep-in-RCU fix `039a50c`, 100× churn clean) | §6.1.1 |
 | 4. `DPAA1_XSK_INITIAL_SEED=8192` + OQ9 rate-scaling | M2-s1 | landed | §6.1.1 |
-| 5. `priv->fman_caps` bitmask + `hw_offload_unavailable` counter + ucode-106 row | M0 augmentation, gates M3-3b–e | planned | §3.5, §4.1 |
+| 5. `priv->fman_caps` bitmask + `hw_offload_unavailable` counter + ucode-106 row | M0 augmentation, gates M3-3b–e | **landed (stub-only)** — patch 0086 (commit `c36e6c0`) exposes both via `ethtool -S`; productive install gated on ucode-210 cap-bit confirmation | §3.5, §4.1, §5.4 |
 | 6. Parser→CC→HM→QMan ordering normative; OQ5 closed | M3-3b doc | landed (doc) | §5.4 |
 | 7. Two-layer VPP shaper exclusion (VyOS validator + `ceetm_active` sysfs) | M3-3e + §7.4 | planned | §5.7, §7.4 |
 
