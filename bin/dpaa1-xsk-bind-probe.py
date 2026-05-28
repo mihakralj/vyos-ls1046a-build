@@ -589,12 +589,50 @@ def main():
     rx_cons_off = rx_off[1]
     rx_desc_off = rx_off[2]
 
+    # FILL ring producer/consumer tracking for recycle path.
+    # We seeded N_FRAMES descriptors above so initial FILL producer is at
+    # N_FRAMES. The kernel's FILL consumer chases it. For each RX completion
+    # we recycle the chunk back to FILL by writing its addr at
+    # (fill_producer & MASK) and bumping fill_producer.
+    # Without this recycle, all UMEM chunks get consumed in the first burst
+    # and the kernel falls back to copy-mode-drop (FILL empty -> no chunk
+    # available to copy into) and the probe plateaus at N_FRAMES.
+    fill_producer = N_FRAMES  # initial seeded count
+    FILL_MASK = N_FRAMES - 1  # N_FRAMES is power of 2 (256)
+    fill_cons_addr = (ctypes.c_uint32).from_address(
+        fill_addr + fill_off[1])
+
     poll = select.poll()
     poll.register(fd, select.POLLIN)
     start = time.monotonic()
     last_print = start
     rx_packets = 0
     rx_bytes = 0
+    last_rx_packets = 0
+    # Safety cap: at most MAX_BATCH descriptors processed per poll wakeup so
+    # the loop can yield back to poll.poll() under sustained line-rate load.
+    # Without this cap, a continuously-producing kernel can keep prod ahead
+    # of cons indefinitely and Python's ctypes loop spins forever, never
+    # returning to the outer time.monotonic() check or flushing stdout.
+    # 64 << N_FRAMES (256) so we round-trip the outer poll() at least 4x per
+    # ring-full.
+    MAX_BATCH = 64
+    # FILL backpressure: NEVER let (fill_producer - fill_cons) exceed
+    # N_FRAMES. Overrunning the kernel's FILL consumer pointer makes us
+    # re-add the same UMEM chunk into the FILL ring while the kernel still
+    # has it in flight -> xp_alloc() dequeues the same chunk twice ->
+    # xsk_buff_pool free-list (struct list_head) corruption ->
+    # `list_add corruption. prev->next should be X, but was X` warning ->
+    # next allocation returns garbage VA -> dcache_clean_poc() faults ->
+    # kernel panic in softirq. Observed under 5 Gbps iperf3 flood
+    # (2026-05-28). The recycle inner loop now blocks (drops the descriptor
+    # without recycling, kernel will see FILL empty and drop the next RX
+    # which is fine -- xsk_bman_starve will tick) when the in-flight
+    # window is full.
+    skipped_recycle = 0
+    print(f"[probe] entering RX drain loop (MAX_BATCH={MAX_BATCH}, "
+          f"FILL_SIZE={N_FRAMES})", flush=True)
+    sys.stdout.flush()
     while time.monotonic() - start < hold_secs:
         events = poll.poll(1000)  # 1s timeout
         # Read producer (atomic-load-acquire).
@@ -602,7 +640,9 @@ def main():
         cons_buf = (ctypes.c_uint32).from_address(rx_addr + rx_cons_off)
         prod = prod_buf.value
         cons = cons_buf.value
-        while cons != prod:
+        recycled = 0
+        batch = 0
+        while cons != prod and batch < MAX_BATCH:
             idx  = cons & (N_FRAMES - 1)
             desc_addr = rx_addr + rx_desc_off + idx * XDP_DESC_SIZE
             d_addr, d_len, d_opts = struct.unpack_from(
@@ -610,16 +650,46 @@ def main():
             rx_packets += 1
             rx_bytes += d_len
             cons += 1
-        # Update consumer (release).
+            batch += 1
+            # FILL backpressure: re-read fill_cons every iteration via the
+            # ctypes view that maps directly to the kernel-written word.
+            # Only recycle if (fill_producer - fill_cons) < N_FRAMES, i.e.
+            # the in-flight count stays bounded by the ring size. Note the
+            # subtraction is in u32 wrap-around space; on 64-bit Python the
+            # values are widened to int, so we mask back to u32 before
+            # comparing.
+            fc = fill_cons_addr.value
+            in_flight = (fill_producer - fc) & 0xFFFFFFFF
+            if in_flight >= N_FRAMES:
+                skipped_recycle += 1
+                continue
+            chunk_base = d_addr & ~(chunk - 1)
+            fill_slot = fill_producer & FILL_MASK
+            ctypes.memmove(fill_addr + fill_off[2] + fill_slot * 8,
+                           struct.pack("=Q", chunk_base), 8)
+            fill_producer += 1
+            recycled += 1
+        # Update RX consumer (release).
         ctypes.memmove(rx_addr + rx_cons_off,
                        struct.pack("=I", cons & 0xFFFFFFFF), 4)
-        # Recycle drained frames back into FILL.
-        # (For a probe we just leave the FILL ring static-seeded; kernel
-        # tail-drops once FILL drains, which is fine for an idle hold.)
+        # Update FILL producer (release) if we recycled any chunks.
+        if recycled:
+            ctypes.memmove(fill_addr + fill_off[0],
+                           struct.pack("=I", fill_producer & 0xFFFFFFFF), 4)
         now = time.monotonic()
-        if now - last_print >= 5:
-            print(f"[probe] t={int(now-start)}s rx_packets={rx_packets} "
-                  f"rx_bytes={rx_bytes}")
+        if now - last_print >= 2:
+            elapsed = now - start
+            delta = rx_packets - last_rx_packets
+            last_rx_packets = rx_packets
+            pps = delta / max(1e-9, (now - last_print))
+            bps = (rx_bytes * 8) / max(1e-9, elapsed)
+            print(f"[probe] t={int(elapsed)}s rx_packets={rx_packets} "
+                  f"rx_bytes={rx_bytes} pps={int(pps)} "
+                  f"avg_bps={bps/1e9:.2f}G fill_prod={fill_producer} "
+                  f"fill_cons={fill_cons_addr.value} "
+                  f"last_batch={batch} skipped_recycle={skipped_recycle}",
+                  flush=True)
+            sys.stdout.flush()
             last_print = now
 
     print(f"[probe] PASS (stage-2): held socket {hold_secs}s, "
