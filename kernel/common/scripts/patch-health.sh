@@ -239,9 +239,13 @@ for p in "${PATCHES[@]}"; do
     parent="$(basename "$(dirname "$p")")"
     name="$parent/$(basename "$p")"
 
-    if [[ "$parent" == "patches" ]]; then
+    if [[ "$parent" == "patches" || "$parent" == "board" ]]; then
         # Cumulative apply mode: actually apply + commit so the next
         # patch in the series can rely on the prior one's blobs.
+        # board/ is a stacked AF_XDP development series (0068..0088 etc.)
+        # where each patch builds on its predecessor — independent
+        # dry-run against pristine would always fail for everything
+        # after the first.
         if out=$(git -C "$KDIR" apply --3way -p1 "$p" 2>&1); then
             git -C "$KDIR" add -A >/dev/null 2>&1 || true
             git -C "$KDIR" -c user.email=patch-health@local \
@@ -258,13 +262,19 @@ for p in "${PATCHES[@]}"; do
             printf '%s\n' "$out" | sed 's/^/      /' | tee -a "$SUMMARY"
             FAIL=$((FAIL+1))
             FAILED+=("$name")
-            # Reset the tree to the pristine baseline so a failing patch
-            # in the middle of the stack doesn't poison the rest of the
-            # series. MUST target $BASELINE_REF explicitly — `git reset
-            # --hard` with no ref defaults to HEAD which by now is the
-            # last successful stack-applied commit, not the baseline.
-            git -C "$KDIR" reset --hard "$BASELINE_REF" -q >/dev/null 2>&1 || true
-            git -C "$KDIR" clean -fdq                       >/dev/null 2>&1 || true
+            # Reset the tree to the LAST SUCCESSFUL commit (HEAD), not
+            # to BASELINE_REF. Resetting all the way to baseline would
+            # throw away every prior successful stack apply (e.g. patch
+            # 0004 that creates include/linux/fsl/fman_pcd.h) and cause
+            # every subsequent patch that touches those files to falsely
+            # fail with "does not exist in index". `git apply --3way`
+            # may have written conflict markers into files when it
+            # decided it could not merge cleanly; `reset --hard HEAD`
+            # discards those markers and leaves the tree at the last
+            # known-good cumulative state so the NEXT patch in the
+            # series gets a fair shot.
+            git -C "$KDIR" reset --hard HEAD -q >/dev/null 2>&1 || true
+            git -C "$KDIR" clean -fdq           >/dev/null 2>&1 || true
         fi
     else
         # Independent dry-run mode: --check against the current tree.
