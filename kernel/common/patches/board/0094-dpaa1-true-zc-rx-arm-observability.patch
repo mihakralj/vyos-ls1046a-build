@@ -1,0 +1,154 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Thu, 29 May 2026 05:30:00 +0000
+Subject: [PATCH] dpaa1: M3-3 step 7 sub-increment 2 - true-ZC RX arm
+ observability (xsk_zc_rx_armed counter, dormant reprogram read-side)
+
+M3-3 step 7 (true zero-copy RX, spec sec 6.1.7) has a three-mechanism plan:
+(1) Recognise XSK-pool-sourced FDs by matching fd->bpid against
+priv->xsk_bpid[band]; (2) Recover the xdp_buff via xsk_buff_recv() on the
+XSK chunk; (3) reProgram the FMan RX port's primary BPID to the XSK pool's
+BPID at xsk_pool_attach() so FMan DMAs directly into XSK chunks.
+
+Sub-increment 1 (patch 0093) landed mechanism 1's recognition arithmetic
+(fd->bpid == priv->xsk_bpid[band]) as the strictly-diagnostic
+xsk_zc_eligible RX-hot-path counter, proving the recognition test is sound
+with zero datapath change.
+
+Mechanism 3 is the hardware-risky step: spec sec 6.1.8 records three DUT
+crashes from under-load XSK RX work (list_add free-list corruption in
+xp_alloc(), a dcache_clean_poc paging fault, and a 52 s soft-lockup). Per
+the de-risking cadence that landed the observational xsk_rx_branch (0083)
+BEFORE the productive RX branch (0084), and xsk_zc_eligible (0093) BEFORE
+this, sub-increment 2 lands ONLY the *read side* of mechanism 3 as an
+attach-time observability counter -- it does NOT reprogram the FMan RX
+port and does NOT touch the datapath. The actual MURAM/BPID reprogram
+write plus the xsk_buff_recv() recovery (mechanism 2) become the
+hardware-risky sub-increment 3, gated behind the FILL-ring-empty guard
+audit (spec sec 6.1.8 item 5) and DUT-validated under load.
+
+What 0094 does (two additive, datapath-neutral edits):
+
+  - dpaa_eth.h: u64 xsk_zc_rx_armed; appended to the contiguous xsk_*
+    counter block (after xsk_zc_eligible from 0093). 18th xsk_* counter.
+
+  - dpaa_ethtool.c: "xsk_zc_rx_armed" appended to dpaa_stats_xsk[]
+    (the value-emit loop is length-driven; no loop edit needed).
+
+  - af_xdp_pool_main.c: at xsk_pool_attach() success -- AFTER the BMan
+    pool is created and seeded and AFTER rcu_assign_pointer() publishes
+    the pool, but BEFORE return 0 -- the flavor module compares the
+    freshly-allocated dedicated XSK BPID (priv->xsk_bpid[queue_id])
+    against the kernel page-pool BPID that the FMan RX port is currently
+    programmed to DMA into (priv->dpaa_bp->bpid). When the two differ
+    (the normal case: the XSK pool got its own BPID), the band is
+    "armed" for a future true-ZC reprogram -- record that fact in
+    xsk_zc_rx_armed and emit a one-line dev_info documenting the
+    current-vs-target BPID pair. This is the exact read that
+    sub-increment 3's reprogram write will consume to decide the FMan
+    port's new primary pool. NO fman_port write happens here.
+
+Why this is byte-identical to mainline on default/vpp: the entire
+af_xdp_pool attach path is only reached when a userspace AF_XDP socket
+binds XDP_ZEROCOPY on a DPAA1 netdev, which never happens on the default
+flavor (no XSK consumer) -- the counter stays 0 and the RX/TX datapaths
+are untouched. Even on a future vpp flavor that binds XDP_ZEROCOPY, this
+patch only *reads* two BPIDs already living in struct dpaa_priv and bumps
+a counter; FMan continues DMAing into the kernel page pool exactly as
+before, so copy-mode RX (patch 0089) is preserved bit-for-bit until
+sub-increment 3 performs the reprogram.
+
+Why it is the right next move: it makes the reprogram *target* arithmetic
+observable from userspace (ethtool -S | grep xsk_zc_rx_armed) at attach
+time, before any FMan MURAM write touches live hardware. A non-zero
+xsk_zc_rx_armed after a bind proves the dedicated XSK BPID was allocated
+distinct from the kernel pool BPID -- the precondition for the
+sub-increment-3 reprogram to have a meaningful effect. A zero value after
+a successful attach would mean the dedicated BPID collided with the
+kernel pool BPID (a bman_new_pool() anomaly) and the reprogram must be
+suppressed -- caught here, dormant, before it can crash the DUT.
+
+Spec sec 6.1.7 true-ZC mechanism 3 (read side) + sec 6.1.11.
+
+Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
+---
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -156,6 +156,42 @@
+ rcu_assign_pointer(priv->xsk_pool[queue_id], pool);
+ priv->xsk_pool_attach_ok++;
++
++/*
++ * M3-3 step 7 sub-increment 2 (patch 0094): true-ZC RX arm
++ * observability -- the READ side of mechanism 3 (reprogram the
++ * FMan RX port's primary BPID), with NO datapath change.
++ *
++ * priv->xsk_bpid[queue_id] is the dedicated BPID just allocated
++ * by bman_new_pool() (step 3 above) and seeded with XSK UMEM
++ * chunks (step 4). priv->dpaa_bp->bpid is the kernel page-pool
++ * BPID that the FMan RX port is CURRENTLY programmed to DMA into.
++ *
++ * For true ZC, sub-increment 3 will reprogram the FMan RX port's
++ * primary pool from dpaa_bp->bpid to xsk_bpid[queue_id] (the
++ * hardware-risky MURAM write -- spec sec 6.1.8 records three DUT
++ * crashes from under-load XSK RX, so the write stays out of this
++ * patch). Here we only OBSERVE that the two BPIDs differ, i.e.
++ * the dedicated XSK pool got its own BPID and the reprogram would
++ * have a meaningful, distinct target. We bump xsk_zc_rx_armed and
++ * log the current-vs-target pair so the reprogram precondition is
++ * verifiable from userspace (ethtool -S | grep xsk_zc_rx_armed)
++ * BEFORE any FMan write touches live hardware.
++ *
++ * On default/vpp this path is unreached (no XDP_ZEROCOPY bind);
++ * even under a future ZC consumer FMan keeps DMAing into the
++ * kernel page pool, so copy-mode RX (patch 0089) is preserved
++ * bit-for-bit until sub-increment 3 lands the reprogram.
++ */
++if (priv->dpaa_bp &&
++    priv->xsk_bpid[queue_id] != (int)priv->dpaa_bp->bpid) {
++priv->xsk_zc_rx_armed++;
++dev_info(ndev->dev.parent,
++ "af_xdp_pool: qband %u armed for true-ZC RX (xsk_bpid=%d, fman rx port primary bpid=%u; reprogram deferred to sub-increment 3)\n",
++ queue_id, priv->xsk_bpid[queue_id],
++ priv->dpaa_bp->bpid);
++}
++
+ return 0;
+ 
+ err_unmap:
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -304,6 +304,23 @@
+  */
+ u64 xsk_zc_eligible;
+ 
++/* M3-3 step 7 sub-increment 2 (patch 0094): true-ZC RX arm
++ * observability -- the read side of mechanism 3 (FMan RX port
++ * BPID reprogram). Bumped once per successful xsk_pool_attach()
++ * when the dedicated XSK BPID (xsk_bpid[band]) differs from the
++ * kernel page-pool BPID the FMan RX port currently DMAs into
++ * (dpaa_bp->bpid) -- i.e. the reprogram that sub-increment 3 will
++ * perform has a distinct, meaningful target. Strictly diagnostic,
++ * mirroring xsk_rx_branch (0083) and xsk_zc_eligible (0093): it
++ * proves the reprogram-target precondition is satisfied BEFORE the
++ * hardware-risky MURAM write (sub-increment 3) touches live FMan.
++ * Unreached on default/vpp (no XDP_ZEROCOPY bind); even under a ZC
++ * consumer FMan keeps DMAing into the kernel page pool, so the RX
++ * datapath is byte-identical to mainline until sub-increment 3.
++ * Spec sec 6.1.7 true-ZC mechanism 3 (read side) + sec 6.1.11.
++ */
++u64 xsk_zc_rx_armed;
++
+ /* M3-3b (patch 0086): FMan PCD capability bitmask snapshot taken
+  * at probe via dpaa_fman_get_caps(). 0 on mainline ucode 106 ->
+  * all fman_cc_tree_/fman_hm_/fman_pol_ helpers short-circuit
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+@@ -72,6 +72,7 @@
+ "xsk_tx_zc_submit",
+ "xsk_tx_conf_zc",
+ "xsk_zc_eligible",
++"xsk_zc_rx_armed",
+ };
+ 
+ /* HW-offload (PCD-cap) counters (M3-3b / patch 0086). Order MUST match

@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# xsk-zc-check — print the DPAA1 AF_XDP true-zero-copy RX gate-counter suite
+# for the LS1046A Mono Gateway DK, with sub-increment-4 entry-gate verdict.
+#
+# Usage:   xsk-zc-check [if0 if1 ...]      (default: eth3 eth4 — the SFP+ ports)
+#
+# Background (spec specs/dpaa1-afxdp-modernization-spec.md §6.1.7 / §6.1.10
+# .. §6.1.13). True-zero-copy RX on DPAA1 has a three-mechanism plan:
+#   1. Recognise — match fd->bpid against priv->xsk_bpid[band]   (counter
+#                  xsk_zc_eligible, patch 0093)
+#   2. Recover   — pull the xdp_buff from the XSK chunk + redirect (read-side
+#                  observability counter xsk_zc_rx_recovered, patch 0096;
+#                  productive body is the deferred sub-increment 4)
+#   3. reProgram — point the FMan RX port's primary BPID at the XSK pool
+#                  (read-side observability counter xsk_zc_rx_armed, patch
+#                  0094; the hardware-risky MURAM WRITE is sub-increment 4)
+# Plus a crash-defence gate:
+#   - xsk_fill_guard_block (patch 0095) — an in-driver FILL-ring single-
+#     producer assertion. MUST stay 0 under load; a non-zero value is the
+#     audit red-flag that the FILL producer is misbehaving and the
+#     sub-increment-4 reprogram WRITE must NOT be enabled.
+#
+# This script reads the four gate counters (plus the wider xsk_* block for
+# context) from `ethtool -S <iface>` and renders the sub-increment-4 entry
+# verdict the spec gates on (§6.1.12 "Sub-increment 3 entry conditions"):
+#   (1) xsk_zc_rx_armed   > 0   after a ZERO_COPY bind  (reprogram has a target)
+#   (2) xsk_fill_guard_block == 0 under load            (FILL producer sane)
+#   (3) xsk_zc_eligible    growing after the reprogram lands (per-FD oracle)
+# On the shipping default/vpp image NO XSK pool is bound, so every xsk_zc_*
+# counter is 0 and the verdict is "dormant (no ZC bind)" — that is the
+# expected, correct state until an AF_XDP ZERO_COPY producer is attached.
+#
+# Designed to mirror the style of `sfp-check`, `fan-check`, `caam-check`:
+# human-readable table with [OK]/[WARN]/[FAIL]/[SKIP] tags, colour where
+# the tty supports it.
+#
+# Exit codes:
+#   0 — all probed interfaces healthy: either dormant (no ZC bind, all
+#       counters 0) OR ZC-armed with xsk_fill_guard_block == 0
+#   1 — at least one interface has xsk_fill_guard_block > 0 (FILL-ring
+#       producer misbehaving — sub-increment-4 reprogram MUST stay disabled)
+#       or xsk_pool_attach_fail / xsk_dma_map_fail / xsk_pamu_window_fail > 0
+#   2 — board is not LS1046A, or no probed interface exposes xsk_* counters
+#       (kernel built without the AF_XDP datapath patches)
+
+set -u
+
+# ---------------------------------------------------------------------------
+# Colour escapes (TTY only). Same convention as caam-check / fan-check.
+# ---------------------------------------------------------------------------
+if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]; then
+    C_RST=$'\033[0m'
+    C_BOLD=$'\033[1m'
+    C_DIM=$'\033[2m'
+    C_GREEN=$'\033[1;32m'
+    C_YELLOW=$'\033[1;33m'
+    C_RED=$'\033[1;31m'
+    C_BLUE=$'\033[1;34m'
+else
+    C_RST='' C_BOLD='' C_DIM='' C_GREEN='' C_YELLOW='' C_RED='' C_BLUE=''
+fi
+
+ok()    { printf "  [%sOK%s]   %s\n"   "$C_GREEN"  "$C_RST" "$*"; }
+warn()  { printf "  [%sWARN%s] %s\n"   "$C_YELLOW" "$C_RST" "$*"; }
+fail()  { printf "  [%sFAIL%s] %s\n"   "$C_RED"    "$C_RST" "$*"; }
+skip()  { printf "  [%sSKIP%s] %s\n"   "$C_BLUE"   "$C_RST" "$*"; }
+note()  { printf "         %s%s%s\n"   "$C_DIM"    "$*"     "$C_RST"; }
+hdr()   { printf "\n%s%s%s\n"          "$C_BOLD"   "$*"     "$C_RST"; }
+
+EXIT=0
+mark_fail() { EXIT=1; }
+
+# ---------------------------------------------------------------------------
+# Board gate. Same idiom as caam-check / fan-check / vyos-postinstall.
+# ---------------------------------------------------------------------------
+if [ ! -f /proc/device-tree/compatible ] \
+   || ! tr '\0' '\n' < /proc/device-tree/compatible | grep -q 'fsl,ls1046a'; then
+    echo "xsk-zc-check: not LS1046A — nothing to report" >&2
+    exit 2
+fi
+
+if ! command -v ethtool >/dev/null 2>&1; then
+    echo "xsk-zc-check: ethtool not found in PATH" >&2
+    exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# Interface list. Default to the two SFP+ ports (eth3/eth4) since those are
+# the only ones an AF_XDP ZERO_COPY producer is expected to bind on this
+# board (RJ45 eth0/eth1/eth2 stay kernel-managed — spec §7.1).
+# ---------------------------------------------------------------------------
+if [ "$#" -gt 0 ]; then
+    IFACES=("$@")
+else
+    IFACES=(eth3 eth4)
+fi
+
+printf "%sxsk-zc-check%s — DPAA1 AF_XDP true-ZC RX gate counters\n" \
+    "$C_BOLD" "$C_RST"
+
+# The four gate counters (spec §6.1.12 entry conditions + §6.1.13) plus the
+# wider xsk_* context block. Order chosen for readability, not the in-driver
+# struct order.
+GATE_COUNTERS=(xsk_zc_eligible xsk_zc_rx_armed xsk_zc_rx_recovered \
+               xsk_fill_guard_block)
+ERR_COUNTERS=(xsk_pool_attach_fail xsk_pool_detach_timeout xsk_dma_map_fail \
+              xsk_pamu_window_fail xsk_align_reject xsk_headroom_reject \
+              xsk_mtu_reject xsk_bman_seed_short xsk_bman_starve)
+CTX_COUNTERS=(xsk_pool_attach_ok xsk_pool_detach_ok xsk_rx_branch \
+              xsk_bman_refill_batches xsk_tx_zc_submit xsk_tx_conf_zc \
+              xsk_tx_backpressure)
+
+ANY_IFACE_HAS_XSK=0
+
+for IF in "${IFACES[@]}"; do
+    hdr "interface ${IF}"
+
+    if [ ! -e "/sys/class/net/${IF}" ]; then
+        skip "${IF}: no such netdev"
+        continue
+    fi
+
+    # Pull the whole -S block once; grep the individual counters out of it.
+    STATS=$(ethtool -S "$IF" 2>/dev/null)
+    if [ -z "$STATS" ]; then
+        skip "${IF}: ethtool -S returned nothing"
+        continue
+    fi
+
+    if ! printf '%s\n' "$STATS" | grep -q 'xsk_'; then
+        fail "${IF}: no xsk_* counters — kernel lacks the AF_XDP datapath patches"
+        mark_fail
+        continue
+    fi
+    ANY_IFACE_HAS_XSK=1
+
+    # Helper: read one counter value (default 0 if absent — a counter added
+    # by a later patch may be missing on an older kernel).
+    cval() {
+        local name="$1" v
+        v=$(printf '%s\n' "$STATS" \
+            | sed -n "s/^[[:space:]]*${name}:[[:space:]]*\([0-9]\+\).*/\1/p" \
+            | head -n1)
+        printf '%s' "${v:-0}"
+    }
+
+    # --- gate counters -----------------------------------------------------
+    zc_eligible=$(cval xsk_zc_eligible)
+    zc_armed=$(cval xsk_zc_rx_armed)
+    zc_recovered=$(cval xsk_zc_rx_recovered)
+    fill_guard=$(cval xsk_fill_guard_block)
+    attach_ok=$(cval xsk_pool_attach_ok)
+
+    printf "       %s%-24s %-24s%s\n" "$C_DIM" "counter" "value" "$C_RST"
+    for c in "${GATE_COUNTERS[@]}"; do
+        printf "       %-24s %s\n" "$c" "$(cval "$c")"
+    done
+
+    # --- FILL-ring guard verdict (the hard safety precondition) ------------
+    if [ "$fill_guard" -gt 0 ] 2>/dev/null; then
+        fail "${IF}: xsk_fill_guard_block = ${fill_guard} > 0 — FILL-ring producer misbehaving"
+        note "sub-increment-4 reprogram WRITE MUST stay disabled until root-caused (spec §6.1.12)"
+        mark_fail
+    else
+        ok "${IF}: xsk_fill_guard_block = 0 — FILL-ring single-producer invariant holds"
+    fi
+
+    # --- error counters ----------------------------------------------------
+    err_total=0
+    for c in "${ERR_COUNTERS[@]}"; do
+        v=$(cval "$c")
+        if [ "$v" -gt 0 ] 2>/dev/null; then
+            err_total=$((err_total + v))
+            case "$c" in
+                xsk_pool_attach_fail|xsk_dma_map_fail|xsk_pamu_window_fail)
+                    fail "${IF}: ${c} = ${v} (hard attach/DMA error)"; mark_fail ;;
+                xsk_bman_seed_short|xsk_bman_starve)
+                    warn "${IF}: ${c} = ${v} (BMan pool pressure — tune seed/refill)" ;;
+                *)
+                    warn "${IF}: ${c} = ${v}" ;;
+            esac
+        fi
+    done
+    [ "$err_total" -eq 0 ] && ok "${IF}: all xsk_* error counters 0"
+
+    # --- sub-increment-4 entry verdict (spec §6.1.12) ----------------------
+    if [ "$attach_ok" -eq 0 ] 2>/dev/null && [ "$zc_armed" -eq 0 ] 2>/dev/null; then
+        ok "${IF}: dormant (no ZERO_COPY bind) — all xsk_zc_* counters 0, expected on shipping image"
+        note "bind an AF_XDP XDP_ZEROCOPY producer (xdpsock -z / VPP af_xdp) to exercise the gate"
+    elif [ "$zc_armed" -gt 0 ] 2>/dev/null; then
+        ok "${IF}: ZC-armed — xsk_zc_rx_armed = ${zc_armed} (reprogram has a distinct target, 0094)"
+        if [ "$fill_guard" -eq 0 ] 2>/dev/null; then
+            ok "${IF}: sub-increment-4 PRECONDITIONS (1)+(2) MET — armed AND FILL-guard clean"
+            note "remaining gates: xsk_zc_eligible must grow once the FMan-port BPID reprogram lands (sub-inc 4),"
+            note "plus the FMan-port-BPID reprogram accessor forward-port (spec §6.1.13 scope finding)"
+        fi
+        if [ "$zc_recovered" -gt 0 ] 2>/dev/null; then
+            note "xsk_zc_rx_recovered = ${zc_recovered} climbing — Recover decision taken (expected only after sub-inc 4)"
+        fi
+    else
+        warn "${IF}: bound (attach_ok=${attach_ok}) but xsk_zc_rx_armed = 0 — dedicated BPID may equal kernel pool BPID"
+        note "bman_new_pool() anomaly: sub-increment-4 reprogram must suppress (spec §6.1.11)"
+    fi
+
+    # --- context counters (dim, informational) -----------------------------
+    note "context: attach_ok=${attach_ok} detach_ok=$(cval xsk_pool_detach_ok) rx_branch=$(cval xsk_rx_branch) refill_batches=$(cval xsk_bman_refill_batches) zc_eligible=${zc_eligible} zc_recovered=${zc_recovered}"
+done
+
+if [ "$ANY_IFACE_HAS_XSK" -eq 0 ]; then
+    hdr "verdict"
+    fail "no probed interface exposes xsk_* counters — AF_XDP datapath not in this kernel"
+    exit 2
+fi
+
+hdr "verdict"
+if [ "$EXIT" -eq 0 ]; then
+    ok "all probed interfaces healthy (dormant or ZC-armed with FILL-guard clean)"
+else
+    fail "one or more interfaces flagged a fault — see above"
+fi
+exit "$EXIT"

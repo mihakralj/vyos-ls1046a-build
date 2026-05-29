@@ -1,0 +1,174 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Thu, 29 May 2026 05:45:00 +0000
+Subject: [PATCH] dpaa1: M3-3 step 7 sub-increment 3 GATE - XSK FILL-ring
+ double-release guard audit (xsk_fill_guard_block counter)
+
+M3-3 step 7 sub-increment 3 will perform the hardware-risky true-ZC RX
+WRITE: reprogram the FMan RX port primary BPID to the XSK pool's BPID
+(MURAM write) and recover the xdp_buff via xsk_buff_recv() in
+rx_default_dqrr(). Spec sec 6.1.8 records three DUT crashes from
+under-load XSK RX work; the root cause (sec 6.1.8 line ~715) was a
+FILL-ring producer outrunning the consumer so the SAME UMEM chunk was
+handed to xp_alloc() twice -> xsk_buff_pool free-list (list_head)
+corruption -> dcache_clean_poc() paging fault -> softirq panic.
+
+0084's af_xdp_pool_napi_refill() v3 changelog (BMAN HW CONTRACT (c),
+spec sec 6.1.8) explicitly documents that "the driver cannot detect a
+userspace duplicate" -- it relies entirely on xsk_buff_alloc_batch()
+honouring the SPSC contract. That is acceptable for the COPY-mode RX
+datapath that ships today (0089), where a duplicated chunk at worst
+costs an IVCI on the second bman_release(). It is NOT acceptable as a
+precondition for sub-increment 3: once FMan DMAs DIRECTLY into XSK pool
+chunks, a duplicate chunk in the BMan pool means FMan can write a frame
+into a chunk userspace still believes is free -> the exact in-flight
+overwrite sec 6.1.8 line ~80 (0084 contract (c)) warns about, now at
+hardware DMA speed instead of a userspace recycle bug.
+
+This patch is the GATE for sub-increment 3, mirroring the strict
+observe/assert-before-write cadence (0083 before 0084; 0093/0094 before
+the reprogram WRITE). It adds an in-driver assertion of the FILL-ring
+single-producer invariant: detect a duplicate DMA address WITHIN a
+single xsk_buff_alloc_batch() round, and if found, BLOCK the whole
+round's bman_release() (bump a counter, log ratelimited, refill cleanly
+next NAPI) rather than depositing the duplicate into BMan. NO datapath
+change on the shipping path: on default/vpp with no XSK pool bound,
+af_xdp_pool_napi_refill() walks zero qbands and the new code is never
+reached; even with a pool bound, xsk_buff_alloc_batch() honouring SPSC
+means no duplicate is ever seen and the guard counter stays 0 -- the
+release path is byte-identical to 0084 v3.
+
+Two additive, datapath-neutral edits:
+
+  - dpaa_eth.h: u64 xsk_fill_guard_block; appended to the contiguous
+    xsk_* counter block (after xsk_zc_rx_armed from 0094). 19th xsk_*
+    counter.
+
+  - dpaa_ethtool.c: "xsk_fill_guard_block" appended to dpaa_stats_xsk[]
+    (length-driven value-emit loop; no loop edit).
+
+  - af_xdp_pool_main.c: inside af_xdp_pool_napi_refill(), after the
+    per-handle dma is computed, scan the bmbs[] entries already filled
+    in THIS round for the same 64-bit DMA address. On a hit, set a
+    per-round `dup` flag, bump priv->xsk_fill_guard_block, and emit a
+    dev_warn_ratelimited(). When `dup` is set, the round's chunked
+    bman_release() is skipped entirely -- the freed-twice chunk(s) are
+    not deposited into BMan, breaking the double-release at the driver
+    boundary. The FILL ring refills on the next NAPI tail.
+
+Why block the whole round rather than just the duplicate: the duplicate
+is proof the SPSC cursor is already inconsistent for this fill cycle, so
+the OTHER addresses in the same batch are no longer trustworthy either
+(a corrupted producer cursor can return arbitrary stale handles). The
+conservative, crash-proof action is to drop the entire batch and let
+the next clean alloc cycle repopulate -- the same "drop > corrupt"
+principle the spec sec 6.1.8 probe fix (skipped_recycle) applies on the
+userspace side, now enforced in-driver.
+
+What this is NOT: it is not the duplicate-detection that belongs in the
+xsk_buff core (0084 contract (c) is correct that the SPSC contract makes
+duplicates a userspace/core bug, not a driver bug). It is a defensive
+DUT-safety assertion specific to the LS1046A true-ZC path, because here
+a duplicate escalates from "drop a packet" to "FMan DMA overwrite of a
+live chunk". A non-zero xsk_fill_guard_block on a DUT run is a red flag
+that the FILL-ring producer is misbehaving and sub-increment 3 must NOT
+be enabled until it is root-caused -- exactly the audit signal this gate
+exists to provide.
+
+Spec sec 6.1.8 item 5 (FILL-ring-empty guard) + sec 6.1.12.
+
+Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
+---
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -244,6 +244,7 @@ static void af_xdp_pool_napi_refill(struct dpaa_priv *priv)
+ struct bm_buffer bmbs[32];
+ struct xsk_buff_pool *pool;
+ struct bman_pool *bpool;
++bool dup;
+ u32 n, i;
+ u16 q;
+ 
+@@ -266,15 +267,40 @@ static void af_xdp_pool_napi_refill(struct dpaa_priv *priv)
+ continue;
+ 
+ n = xsk_buff_alloc_batch(pool, handles, ARRAY_SIZE(handles));
++dup = false;
+ for (i = 0; i < n; i++) {
++dma_addr_t dma = xsk_buff_xdp_get_dma(handles[i]);
++u32 j;
++
++/* M3-3 step 7 sub-increment 3 GATE (patch 0095): FILL-ring
++ * double-release guard. Scan the addresses already filled in
++ * THIS batch for the same 64-bit DMA cookie. A duplicate means
++ * the XSK FILL ring's single-producer cursor is inconsistent
++ * for this fill cycle (spec sec 6.1.8 root cause): the same
++ * UMEM chunk was deposited twice. Releasing it into BMan twice
++ * is a double-free that, once sub-increment 3 makes FMan DMA
++ * directly into XSK chunks, lets FMan overwrite a chunk
++ * userspace still believes is free. Block the whole round
++ * (drop > corrupt) and let the next NAPI tail refill cleanly.
++ */
++for (j = 0; j < i; j++) {
++if (bm_buffer_get64(&bmbs[j]) == (u64)dma) {
++dup = true;
++break;
++}
++}
+ /* Zero bmbs[i].data first; see attach-time seed loop comment.
+  * Patch 0087.
+  */
+ bmbs[i].data = 0;
+-bm_buffer_set64(&bmbs[i], xsk_buff_xdp_get_dma(handles[i]));
++bm_buffer_set64(&bmbs[i], dma);
++if (dup)
++break;
+ }
+-if (n) {
++if (dup) {
++priv->xsk_fill_guard_block++;
++dev_warn_ratelimited(priv->net_dev->dev.parent,
++ "af_xdp_pool: qband %u FILL-ring duplicate chunk detected; round dropped (xsk_fill_guard_block), sub-increment-3 reprogram must stay disabled\n",
++ q);
++} else if (n) {
+ /* Chunk bman_release() in 8-buffer batches; HW BUFCOUNT field is
+  * 4 bits and rejects num > 8 as Invalid Command Verb. XSK-side
+  * counter still bumps once per non-empty alloc batch. Mirror of
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -321,6 +321,23 @@
+  */
+ u64 xsk_zc_rx_armed;
+ 
++/* M3-3 step 7 sub-increment 3 GATE (patch 0095): in-driver
++ * assertion of the XSK FILL-ring single-producer invariant.
++ * Bumped (and the whole refill round dropped) by
++ * af_xdp_pool_napi_refill() when a duplicate DMA cookie is seen
++ * within one xsk_buff_alloc_batch() round -- i.e. the FILL ring
++ * deposited the same UMEM chunk twice (spec sec 6.1.8 root
++ * cause). Strictly diagnostic + crash-defensive: it never fires
++ * under a correct SPSC producer, so the bman_release() path is
++ * byte-identical to 0084 v3 on the shipping copy-mode RX path.
++ * A non-zero value is the audit red-flag that gates true-ZC RX
++ * sub-increment 3 (the FMan-port-BPID MURAM reprogram WRITE +
++ * xsk_buff_recv() recover): a misbehaving FILL producer escalates
++ * from a dropped packet to an FMan DMA overwrite of a live chunk,
++ * so the reprogram must stay disabled until this stays 0 under
++ * load. Unreached on default/vpp (no XDP_ZEROCOPY bind).
++ * Spec sec 6.1.8 item 5 + sec 6.1.12.
++ */
++u64 xsk_fill_guard_block;
++
+ /* M3-3b (patch 0086): FMan PCD capability bitmask snapshot taken
+  * at probe via dpaa_fman_get_caps(). 0 on mainline ucode 106 ->
+  * all fman_cc_tree_/fman_hm_/fman_pol_ helpers short-circuit
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+@@ -73,6 +73,7 @@
+ "xsk_tx_conf_zc",
+ "xsk_zc_eligible",
+ "xsk_zc_rx_armed",
++"xsk_fill_guard_block",
+ };
+ 
+ /* HW-offload (PCD-cap) counters (M3-3b / patch 0086). Order MUST match

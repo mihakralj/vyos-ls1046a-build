@@ -1,0 +1,173 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Thu, 29 May 2026 06:10:00 +0000
+Subject: [PATCH] dpaa1: M3-3 step 7 sub-increment 3 - true-ZC RX Recover
+ read-side (xsk_zc_rx_recovered counter, dormant recovery branch)
+
+M3-3 step 7 (true zero-copy RX, spec sec 6.1.7) has a three-mechanism
+plan: (1) Recognise XSK-pool-sourced FDs by matching fd->bpid against
+priv->xsk_bpid[band]; (2) Recover the xdp_buff from the XSK chunk via the
+xsk_buff path instead of the kernel-page build_skb() path; (3) reProgram
+the FMan RX port's primary BPID to the XSK pool's BPID so FMan DMAs
+directly into XSK chunks (the hardware-risky MURAM write).
+
+The de-risking cadence so far:
+  - 0083  observational xsk_rx_branch (FD reached the bound qband)
+  - 0093  sub-increment 1: xsk_zc_eligible (mechanism-1 Recognise
+          arithmetic in the RX hot path) -- 17th xsk_* counter
+  - 0094  sub-increment 2: xsk_zc_rx_armed (mechanism-3 reprogram READ
+          side at attach time, no FMan write) -- 18th xsk_* counter
+  - 0095  sub-increment 3 GATE: xsk_fill_guard_block (FILL-ring
+          double-release guard, crash-defense) -- 19th xsk_* counter
+
+This patch lands the READ side of mechanism 2 (Recover): the recovery
+branch in rx_default_dqrr(), wired but DORMANT. It is the mirror of how
+0094 landed mechanism-3's read side before its write: the recovery code
+path is compiled, reachable, and arithmetically proven, but it can NEVER
+fire on the shipping datapath because mechanism 3 (the FMan RX port BPID
+reprogram, spec sec 6.1.7 line "Program") has NOT run. While FMan
+continues to DMA into the kernel page pool (priv->dpaa_bp->bpid), every
+live FD carries the kernel page BPID, so fd->bpid == priv->xsk_bpid[band]
+is false and the recovery branch is dead code -- exactly as on the
+default/vpp shipping path today.
+
+Why land a dormant Recover branch now, before the reprogram write:
+
+  - It closes the last *read-only* gap in the three-mechanism plan.
+    After this, all three mechanisms have their observable half landed
+    (Recognise=0093, reProgram-read=0094, Recover-read=0096) and only
+    the single hardware-risky reProgram WRITE (the MURAM BPID swap) plus
+    the productive xsk_buff_recv()/xdp_do_redirect() body remain -- to be
+    authored as the final sub-increment 4 ONLY after the 0093/0094/0095
+    gate counters are DUT-validated under load (spec sec 6.1.12 entry
+    preconditions: xsk_zc_rx_armed > 0 AND xsk_fill_guard_block == 0).
+
+  - It makes the Recover *decision point* observable from userspace
+    (ethtool -S | grep xsk_zc_rx_recovered) so that, the instant the
+    sub-increment-4 reprogram lands and FMan starts DMAing into XSK
+    chunks, this counter begins to climb in lock-step with xsk_zc_eligible
+    -- proving the Recover branch is taken for exactly the FDs the
+    Recognise test flags, with zero datapath risk added by THIS patch.
+
+What 0096 does (three additive, datapath-neutral edits):
+
+  - dpaa_eth.c: inside the existing 0083/0093 RCU read-section in
+    rx_default_dqrr(), within the `if (_xp)` arm, AFTER the 0093
+    `if (fd->bpid == priv->xsk_bpid[_band]) priv->xsk_zc_eligible++;`
+    recognition test, add a guarded Recover decision: when the FD is
+    XSK-pool-sourced (same bpid match) AND the band is armed for true-ZC
+    (priv->xsk_zc_rx_armed) AND the FILL-ring guard has never fired
+    (!priv->xsk_fill_guard_block), bump priv->xsk_zc_rx_recovered. The FD
+    then continues through the UNCHANGED mainline skbuf path -- no
+    xsk_buff_recv(), no xdp_do_redirect(), no datapath divergence. The
+    productive recovery body (recover the xdp_buff from the XSK chunk and
+    redirect into the XSKMAP instead of build_skb()) is the deferred
+    sub-increment-4 work, gated behind the DUT validation of 0093/0094/
+    0095 and the FMan-port reprogram WRITE.
+
+  - dpaa_eth.h: u64 xsk_zc_rx_recovered; appended to the contiguous xsk_*
+    counter block (after xsk_fill_guard_block from 0095). 20th xsk_*
+    counter.
+
+  - dpaa_ethtool.c: "xsk_zc_rx_recovered" appended to dpaa_stats_xsk[]
+    (the value-emit loop is length-driven; no loop edit needed).
+
+Why this is byte-identical to mainline / 0095 on default/vpp: on the
+default flavor no XSK pool is ever bound, so priv->xsk_bpid stays 0 while
+a live FD always carries a non-zero kernel page BPID -- the bpid-match
+test is false and the Recover branch is dead code. Even on a future vpp
+flavor that binds XDP_ZEROCOPY, until sub-increment 4 reprograms the FMan
+RX port BPID the FMan keeps DMAing into the kernel page pool, so fd->bpid
+remains the kernel BPID, the branch still never fires, and copy-mode RX
+(patch 0089) is preserved bit-for-bit. The added cost on the hot path is
+a single integer compare already dominated by the 0093 test it extends.
+
+Spec sec 6.1.7 true-ZC mechanism 2 (Recover, read side) + sec 6.1.13.
+
+Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
+---
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -2851,20 +2851,42 @@
+ 
+ rcu_read_lock();
+ _xp = rcu_dereference(priv->xsk_pool[_band]);
+ if (_xp) {
+ priv->xsk_rx_branch++;
+ /* M3-3 step 7 sub-increment 1 (patch 0093): the FD
+  * reached a qband with a bound XSK pool. If FMan also
+  * DMA'd it into an XSK-pool BMan chunk, fd->bpid equals
+  * the dedicated BPID recorded by xsk_pool_attach().
+  * Until sub-increment 2 reprograms the FMan RX port's
+  * primary BPID, fd->bpid stays the kernel page BPID and
+  * this stays 0 -- proving the recognition path is sound
+  * with zero datapath risk. Spec sec 6.1.7 / 6.1.10.
+  */
+-if (fd->bpid == priv->xsk_bpid[_band])
+-priv->xsk_zc_eligible++;
++if (fd->bpid == priv->xsk_bpid[_band]) {
++priv->xsk_zc_eligible++;
++/* M3-3 step 7 sub-increment 3 (patch 0096): true-ZC RX
++ * Recover read-side. The FD was DMA'd by FMan into an
++ * XSK-pool BMan chunk (recognised just above) AND the band
++ * was armed for true-ZC at attach (xsk_zc_rx_armed, 0094)
++ * AND the FILL-ring double-release guard has never fired
++ * (xsk_fill_guard_block == 0, 0095). Under those conditions
++ * sub-increment 4 will Recover the xdp_buff from the XSK
++ * chunk and xdp_do_redirect() it into the XSKMAP instead of
++ * the kernel build_skb() path. Here we only OBSERVE that the
++ * Recover decision would be taken -- the FD still travels
++ * the unchanged mainline skbuf path below, so there is NO
++ * datapath change. This counter stays 0 until sub-increment
++ * 4 reprograms the FMan RX port BPID (the hardware-risky
++ * MURAM write, gated on DUT validation of 0094/0095 per
++ * spec sec 6.1.12); once it does, this climbs in lock-step
++ * with xsk_zc_eligible, proving Recover fires for exactly
++ * the recognised FDs. Spec sec 6.1.7 / 6.1.13.
++ */
++if (priv->xsk_zc_rx_armed &&
++    !priv->xsk_fill_guard_block)
++priv->xsk_zc_rx_recovered++;
++}
+ }
+ rcu_read_unlock();
+ }
+ 
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -338,6 +338,23 @@
+  */
+ u64 xsk_fill_guard_block;
+ 
++/* M3-3 step 7 sub-increment 3 (patch 0096): true-ZC RX Recover
++ * read-side. Bumped in rx_default_dqrr() when an FD is
++ * recognised as XSK-pool-sourced (fd->bpid == xsk_bpid[band],
++ * the 0093 test) AND the band is armed for true-ZC
++ * (xsk_zc_rx_armed, 0094) AND the FILL-ring guard has never
++ * fired (xsk_fill_guard_block == 0, 0095) -- i.e. the Recover
++ * decision would be taken. Strictly diagnostic: the FD still
++ * travels the unchanged mainline skbuf path, so the RX datapath
++ * is byte-identical to mainline. Stays 0 until sub-increment 4
++ * reprograms the FMan RX port's primary BPID (the hardware-risky
++ * MURAM write); once FMan DMAs into XSK chunks this climbs in
++ * lock-step with xsk_zc_eligible, proving the Recover branch is
++ * taken for exactly the recognised FDs before the productive
++ * xsk_buff_recv()/xdp_do_redirect() body is wired. Unreached on
++ * default/vpp (no XDP_ZEROCOPY bind / no reprogram).
++ * Spec sec 6.1.7 true-ZC mechanism 2 (Recover) + sec 6.1.13.
++ */
++u64 xsk_zc_rx_recovered;
++
+ /* M3-3b (patch 0086): FMan PCD capability bitmask snapshot taken
+  * at probe via dpaa_fman_get_caps(). 0 on mainline ucode 106 ->
+  * all fman_cc_tree_/fman_hm_/fman_pol_ helpers short-circuit
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+@@ -73,6 +73,7 @@
+ "xsk_zc_eligible",
+ "xsk_zc_rx_armed",
+ "xsk_fill_guard_block",
++"xsk_zc_rx_recovered",
+ };
+ 
+ /* HW-offload (PCD-cap) counters (M3-3b / patch 0086). Order MUST match
