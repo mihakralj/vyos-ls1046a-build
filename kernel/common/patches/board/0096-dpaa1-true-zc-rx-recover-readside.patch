@@ -88,51 +88,38 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 ---
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-@@ -2851,20 +2851,42 @@
- 
- rcu_read_lock();
- _xp = rcu_dereference(priv->xsk_pool[_band]);
- if (_xp) {
- priv->xsk_rx_branch++;
- /* M3-3 step 7 sub-increment 1 (patch 0093): the FD
-  * reached a qband with a bound XSK pool. If FMan also
-  * DMA'd it into an XSK-pool BMan chunk, fd->bpid equals
-  * the dedicated BPID recorded by xsk_pool_attach().
-  * Until sub-increment 2 reprograms the FMan RX port's
-  * primary BPID, fd->bpid stays the kernel page BPID and
-  * this stays 0 -- proving the recognition path is sound
-  * with zero datapath risk. Spec sec 6.1.7 / 6.1.10.
-  */
--if (fd->bpid == priv->xsk_bpid[_band])
--priv->xsk_zc_eligible++;
-+if (fd->bpid == priv->xsk_bpid[_band]) {
-+priv->xsk_zc_eligible++;
-+/* M3-3 step 7 sub-increment 3 (patch 0096): true-ZC RX
-+ * Recover read-side. The FD was DMA'd by FMan into an
-+ * XSK-pool BMan chunk (recognised just above) AND the band
-+ * was armed for true-ZC at attach (xsk_zc_rx_armed, 0094)
-+ * AND the FILL-ring double-release guard has never fired
-+ * (xsk_fill_guard_block == 0, 0095). Under those conditions
-+ * sub-increment 4 will Recover the xdp_buff from the XSK
-+ * chunk and xdp_do_redirect() it into the XSKMAP instead of
-+ * the kernel build_skb() path. Here we only OBSERVE that the
-+ * Recover decision would be taken -- the FD still travels
-+ * the unchanged mainline skbuf path below, so there is NO
-+ * datapath change. This counter stays 0 until sub-increment
-+ * 4 reprograms the FMan RX port BPID (the hardware-risky
-+ * MURAM write, gated on DUT validation of 0094/0095 per
-+ * spec sec 6.1.12); once it does, this climbs in lock-step
-+ * with xsk_zc_eligible, proving Recover fires for exactly
-+ * the recognised FDs. Spec sec 6.1.7 / 6.1.13.
-+ */
-+if (priv->xsk_zc_rx_armed &&
-+    !priv->xsk_fill_guard_block)
-+priv->xsk_zc_rx_recovered++;
-+}
- }
- rcu_read_unlock();
- }
- 
+@@ -2862,8 +2862,30 @@ static enum qman_cb_dqrr_result rx_default_dqrr(struct qman_portal *portal,
+ 			 * this stays 0 -- proving the recognition path is sound
+ 			 * with zero datapath risk. Spec sec 6.1.7 / 6.1.10.
+ 			 */
+-			if (fd->bpid == priv->xsk_bpid[_band])
++			if (fd->bpid == priv->xsk_bpid[_band]) {
+ 				priv->xsk_zc_eligible++;
++				/* M3-3 step 7 sub-increment 3 (patch 0096): true-ZC RX
++				 * Recover read-side. The FD was DMA'd by FMan into an
++				 * XSK-pool BMan chunk (recognised just above) AND the band
++				 * was armed for true-ZC at attach (xsk_zc_rx_armed, 0094)
++				 * AND the FILL-ring double-release guard has never fired
++				 * (xsk_fill_guard_block == 0, 0095). Under those conditions
++				 * sub-increment 4 will Recover the xdp_buff from the XSK
++				 * chunk and xdp_do_redirect() it into the XSKMAP instead of
++				 * the kernel build_skb() path. Here we only OBSERVE that the
++				 * Recover decision would be taken -- the FD still travels
++				 * the unchanged mainline skbuf path below, so there is NO
++				 * datapath change. This counter stays 0 until sub-increment
++				 * 4 reprograms the FMan RX port BPID (the hardware-risky
++				 * MURAM write, gated on DUT validation of 0094/0095 per
++				 * spec sec 6.1.12); once it does, this climbs in lock-step
++				 * with xsk_zc_eligible, proving Recover fires for exactly
++				 * the recognised FDs. Spec sec 6.1.7 / 6.1.13.
++				 */
++				if (priv->xsk_zc_rx_armed &&
++				    !priv->xsk_fill_guard_block)
++					priv->xsk_zc_rx_recovered++;
++			}
+ 		}
+ 		rcu_read_unlock();
+ 	}
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
 @@ -338,6 +338,25 @@
@@ -163,11 +150,9 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
   * all fman_cc_tree_/fman_hm_/fman_pol_ helpers short-circuit
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
-@@ -73,6 +73,7 @@
+@@ -73,4 +73,5 @@
  "xsk_zc_eligible",
  "xsk_zc_rx_armed",
  "xsk_fill_guard_block",
 +"xsk_zc_rx_recovered",
  };
- 
- /* HW-offload (PCD-cap) counters (M3-3b / patch 0086). Order MUST match

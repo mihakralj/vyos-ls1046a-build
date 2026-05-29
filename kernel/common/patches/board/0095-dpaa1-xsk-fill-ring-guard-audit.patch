@@ -4,7 +4,7 @@ Date: Thu, 29 May 2026 05:45:00 +0000
 Subject: [PATCH] dpaa1: M3-3 step 7 sub-increment 3 GATE - XSK FILL-ring
  double-release guard audit (xsk_fill_guard_block counter)
 
-M3-3 step 7 sub-increment 3 will perform the hardware-risky true-ZC RX
+M3-3 step 7 sub-increment 4 will perform the hardware-risky true-ZC RX
 WRITE: reprogram the FMan RX port primary BPID to the XSK pool's BPID
 (MURAM write) and recover the xdp_buff via xsk_buff_recv() in
 rx_default_dqrr(). Spec sec 6.1.8 records three DUT crashes from
@@ -19,13 +19,13 @@ userspace duplicate" -- it relies entirely on xsk_buff_alloc_batch()
 honouring the SPSC contract. That is acceptable for the COPY-mode RX
 datapath that ships today (0089), where a duplicated chunk at worst
 costs an IVCI on the second bman_release(). It is NOT acceptable as a
-precondition for sub-increment 3: once FMan DMAs DIRECTLY into XSK pool
+precondition for sub-increment 4: once FMan DMAs DIRECTLY into XSK pool
 chunks, a duplicate chunk in the BMan pool means FMan can write a frame
 into a chunk userspace still believes is free -> the exact in-flight
 overwrite sec 6.1.8 line ~80 (0084 contract (c)) warns about, now at
 hardware DMA speed instead of a userspace recycle bug.
 
-This patch is the GATE for sub-increment 3, mirroring the strict
+This patch is the GATE for sub-increment 4, mirroring the strict
 observe/assert-before-write cadence (0083 before 0084; 0093/0094 before
 the reprogram WRITE). It adds an in-driver assertion of the FILL-ring
 single-producer invariant: detect a duplicate DMA address WITHIN a
@@ -71,7 +71,7 @@ duplicates a userspace/core bug, not a driver bug). It is a defensive
 DUT-safety assertion specific to the LS1046A true-ZC path, because here
 a duplicate escalates from "drop a packet" to "FMan DMA overwrite of a
 live chunk". A non-zero xsk_fill_guard_block on a DUT run is a red flag
-that the FILL-ring producer is misbehaving and sub-increment 3 must NOT
+that the FILL-ring producer is misbehaving and sub-increment 4 must NOT
 be enabled until it is root-caused -- exactly the audit signal this gate
 exists to provide.
 
@@ -81,7 +81,7 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 ---
 --- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
 +++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
-@@ -244,6 +244,7 @@ static void af_xdp_pool_napi_refill(struct dpaa_priv *priv)
+@@ -653,6 +653,7 @@ static void af_xdp_pool_napi_refill(struct dpaa_priv *priv)
  struct bm_buffer bmbs[32];
  struct xsk_buff_pool *pool;
  struct bman_pool *bpool;
@@ -89,7 +89,7 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
  u32 n, i;
  u16 q;
  
-@@ -266,14 +267,42 @@ static void af_xdp_pool_napi_refill(struct dpaa_priv *priv)
+@@ -675,14 +676,42 @@ static void af_xdp_pool_napi_refill(struct dpaa_priv *priv)
  continue;
  
  n = xsk_buff_alloc_batch(pool, handles, ARRAY_SIZE(handles));
@@ -104,7 +104,7 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 + * the XSK FILL ring's single-producer cursor is inconsistent
 + * for this fill cycle (spec sec 6.1.8 root cause): the same
 + * UMEM chunk was deposited twice. Releasing it into BMan twice
-+ * is a double-free that, once sub-increment 3 makes FMan DMA
++ * is a double-free that, once sub-increment 4 makes FMan DMA
 + * directly into XSK chunks, lets FMan overwrite a chunk
 + * userspace still believes is free. Block the whole round
 + * (drop > corrupt) and let the next NAPI tail refill cleanly.
@@ -128,7 +128,7 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 +if (dup) {
 +priv->xsk_fill_guard_block++;
 +dev_warn_ratelimited(priv->net_dev->dev.parent,
-+ "af_xdp_pool: qband %u FILL-ring duplicate chunk detected; round dropped (xsk_fill_guard_block), sub-increment-3 reprogram must stay disabled\n",
++ "af_xdp_pool: qband %u FILL-ring duplicate chunk detected; round dropped (xsk_fill_guard_block), sub-increment-4 reprogram must stay disabled\n",
 + q);
 +} else if (n) {
  /* Chunk bman_release() in 8-buffer batches; HW BUFCOUNT field is
@@ -150,7 +150,7 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 + * under a correct SPSC producer, so the bman_release() path is
 + * byte-identical to 0084 v3 on the shipping copy-mode RX path.
 + * A non-zero value is the audit red-flag that gates true-ZC RX
-+ * sub-increment 3 (the FMan-port-BPID MURAM reprogram WRITE +
++ * sub-increment 4 (the FMan-port-BPID MURAM reprogram WRITE +
 + * xsk_buff_recv() recover): a misbehaving FILL producer escalates
 + * from a dropped packet to an FMan DMA overwrite of a live chunk,
 + * so the reprogram must stay disabled until this stays 0 under
@@ -164,11 +164,10 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
   * all fman_cc_tree_/fman_hm_/fman_pol_ helpers short-circuit
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
-@@ -73,6 +73,7 @@
+@@ -72,5 +72,6 @@
+ "xsk_tx_zc_submit",
  "xsk_tx_conf_zc",
  "xsk_zc_eligible",
  "xsk_zc_rx_armed",
 +"xsk_fill_guard_block",
  };
- 
- /* HW-offload (PCD-cap) counters (M3-3b / patch 0086). Order MUST match
