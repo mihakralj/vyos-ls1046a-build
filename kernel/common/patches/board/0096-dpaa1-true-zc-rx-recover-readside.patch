@@ -135,7 +135,7 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
  
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
-@@ -338,6 +338,23 @@
+@@ -338,6 +338,25 @@
   */
  u64 xsk_fill_guard_block;
  
