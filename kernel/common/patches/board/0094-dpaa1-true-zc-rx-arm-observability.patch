@@ -36,17 +36,18 @@ What 0094 does (three additive, datapath-neutral edits):
     (the value-emit loop is length-driven; no loop edit needed).
 
   - af_xdp_pool_main.c: at xsk_pool_attach() success -- AFTER the BMan
-    pool is created and seeded and AFTER rcu_assign_pointer() publishes
-    the pool, but BEFORE return 0 -- the flavor module compares the
-    freshly-allocated dedicated XSK BPID (priv->xsk_bpid[queue_id])
-    against the kernel page-pool BPID that the FMan RX port is currently
-    programmed to DMA into (priv->dpaa_bp->bpid). When the two differ
-    (the normal case: the XSK pool got its own BPID), the band is
-    "armed" for a future true-ZC reprogram -- record that fact in
-    xsk_zc_rx_armed and emit a one-line dev_info documenting the
-    current-vs-target BPID pair. This is the exact read that
-    sub-increment 4's reprogram write will consume to decide the FMan
-    port's new primary pool. NO fman_port write happens here.
+    pool is created and seeded, AFTER rcu_assign_pointer() publishes the
+    pool and the NAPI context is bound, and AFTER xsk_pool_attach_ok++
+    but BEFORE return 0 -- the flavor module compares the freshly-
+    allocated dedicated XSK BPID (priv->xsk_bpid[queue_id]) against the
+    kernel page-pool BPID that the FMan RX port is currently programmed
+    to DMA into (priv->dpaa_bp->bpid). When the two differ (the normal
+    case: the XSK pool got its own BPID), the band is "armed" for a
+    future true-ZC reprogram -- record that fact in xsk_zc_rx_armed and
+    emit a one-line dev_info documenting the current-vs-target BPID pair.
+    This is the exact read that sub-increment 4's reprogram write will
+    consume to decide the FMan port's new primary pool. NO fman_port
+    write happens here.
 
 Why this is byte-identical to mainline on default/vpp: the entire
 af_xdp_pool attach path is only reached when a userspace AF_XDP socket
@@ -74,8 +75,9 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 ---
 --- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
 +++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
-@@ -156,5 +156,41 @@
- rcu_assign_pointer(priv->xsk_pool[queue_id], pool);
+@@ -315,6 +315,42 @@
+ }
+ 
  priv->xsk_pool_attach_ok++;
 +
 +/*
@@ -107,7 +109,7 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 +if (priv->dpaa_bp &&
 +    priv->xsk_bpid[queue_id] != (int)priv->dpaa_bp->bpid) {
 +priv->xsk_zc_rx_armed++;
-+dev_info(ndev->dev.parent,
++dev_info(priv->net_dev->dev.parent,
 + "af_xdp_pool: qband %u armed for true-ZC RX (xsk_bpid=%d, fman rx port primary bpid=%u; reprogram deferred to sub-increment 4)\n",
 + queue_id, priv->xsk_bpid[queue_id],
 + priv->dpaa_bp->bpid);
