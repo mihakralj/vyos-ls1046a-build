@@ -4,8 +4,8 @@
 **Kernel base:** Linux 6.18.x mainline (VyOS rolling release)
 **Silicon:** NXP LS1046A — Cortex-A72 ×4 (2 clusters of 2 over CCI-400), FMan v3 Rev>1, QMan, BMan, MURAM (384 KiB), PAMU, SEC 5.4 (CAAM), CEETM, SerDes/XFI PCS, CoreNet
 **FMan microcode:** package `fsl_fman_ucode_ls1046a_r1.0_210.x.bin` (NXP LSDK, U-Boot loads from SPI `mtd4`)
-**Document version:** v5.3, 2026-05-29
-**Supersedes:** v5.2, v5.1, v5.0, v4.4, v4.3, v4.2, v4.1, v4.0, v3.0, v2.x, v0.9
+**Document version:** v5.4, 2026-05-29
+**Supersedes:** v5.3, v5.2, v5.1, v5.0, v4.4, v4.3, v4.2, v4.1, v4.0, v3.0, v2.x, v0.9
 
 ---
 
@@ -571,430 +571,91 @@ Per-frame dequeue callback:
 
 XDP workaround relocates Tx frames within 64 B of a 4 KB boundary. XSK cannot relocate (UMEM is app-owned), so we require UMEM ≥ 64 B headroom and refuse `bind(XDP_ZEROCOPY)` otherwise. VPP defaults `XDP_PACKET_HEADROOM = 256`.
 
-#### 6.1.6 Blocker A debugging series (BMan "Invalid Command Verb") — 2026-05-28
+#### 6.1.6 Blocker A — BMan "Invalid Command Verb" (patches `0086`/`0087`/`0088`) — 2026-05-28
 
-Patches `0086`/`0087`/`0088` (board patch series) were **reused** during M3-3 step 6 bring-up to address the BMan err-IRQ `BM_EIRQ_IVCI` ("Invalid Command Verb", bman_ccsr.c:55) observed on the DUT G5 reproducer (xsk-bind-probe + iperf3 UDP flood). The original spec reservation of 0086/0087 for HM offload (§5.5) and Policer (§5.6) is **superseded** — those features re-number to `0090`/`0091` when M3-3c/d work begins.
+Board patches `0086`/`0087`/`0088` closed the BMan err-IRQ `BM_EIRQ_IVCI` ("Invalid Command Verb") seen on the DUT G5 reproducer (xsk-bind-probe + iperf3 UDP flood). **Root cause (`0088`):** `xsk_pool_dma_map()` must target `priv->rx_dma_dev` (the FMan RX port device with the 40-bit DMA mask owning the BMan FBPR window programmed by U-Boot), NOT `priv->mac_dev->dev` (32-bit mask, wrong IOMMU group) — DMA addresses resolved outside BMan's FBPR window so the 40-bit address bytes in RCR slots were rejected as IVCI. `0086` (8-buffer chunked release) and `0087` (zero stack bpid residue) were necessary-but-insufficient precursors. **Closed 2026-05-28** (ISO 2026.05.28-0149, commit `d1b6e30`, run 26549682211): 60 s G5 hold → 0 IVCIs, 0 BUG/WARN/stall, clean attach/detach both cycles.
 
-Diagnosis chain:
+**CI-pipeline invariant discovered here:** `bin/ci-setup-kernel.sh` stages board patches via explicit per-patch `cp` lines (no glob); `patch-health.sh` does NOT cross-check that the `cp` line exists, so a missing `cp` silently ships an ISO without the patch (ISO 2026.05.28-0116 / commit `b57dd6a` shipped without any of 0086/0087/0088). Every new board patch requires a matching `cp` line AND a post-build grep of the staged source for the expected token. (Original 0086/0087 reservation for HM/Policer is superseded — those re-numbered to `0090`/`0091`.)
 
-1. **0086** — `bman_release()` 8-buffer chunked release. BMan RCR verb byte `BUFCOUNT_MASK = 0x0f`, hardware-valid range 1..8 only (`bman.c:746` DPAA_ASSERT). Our 32-buffer `xsk_buff_alloc_batch()` returned counts up to 32 directly to `bman_release()`. Hypothesis: BUFCOUNT overflow ≥ 9 produces IVCI. **Necessary but insufficient** — chunking applied, ErrInts still fired 1:1 with `xsk_bman_refill_batches`.
+> Full diagnosis chain, verification matrix, and counter snapshots: Qdrant `topic=dpaa1-afxdp-spec-milestone-archive`.
 
-2. **0087** — Zero `bmbs[i].data = 0;` before each `bm_buffer_set64()`. `bman.c::bman_release()` stamps `pool->bpid` into RCR slot 0 only; slots 1..n-1 are `memcpy`'d verbatim from the caller's stack-allocated `bm_buffer[]` array, **including** the bpid bits in the high word. Stack garbage in those bytes is validated by BMan and rejected as IVCI. Mainline `dpaa_eth.c::dpaa_bp_add_8_bufs()` (line 1639) uses exactly this idiom. **Hypothesis rejected by hardware** — applied verbatim, ErrInts unchanged.
+#### 6.1.7 Blocker B — productive RX delivery via XSKMAP redirect (patch `0089`) — 2026-05-28
 
-3. **0088** — Use `priv->rx_dma_dev` (the FMan RX port device, populated from `fman_port_get_device(mac_dev->port[RX])` in `dpaa_eth.c:3649`) as the `xsk_pool_dma_map()` target, instead of `priv->mac_dev->dev`. **True root cause:** the parent MAC device has a different `of_node` / IOMMU group than the FMan port device that owns the BMan FBPR window programmed by U-Boot, and a default 32-bit DMA mask vs. the FMan port's `dma_coerce_mask_and_coherent(..., DMA_BIT_MASK(40))`. `dma_addr_t` values returned by `xsk_buff_xdp_get_dma()` are valid IOVAs for the MAC device but resolve outside BMan's FBPR window, so the buffer-address bytes in RCR slots are rejected as IVCI even though the verb byte and bpid are well-formed. This explains why 0086 (verb arithmetic) and 0087 (bpid bytes) both failed to silence the ErrInt — the broken field was the 40-bit address in `bm_buffer.{hi,lo}`.
+Pre-`0089` an `XDP_ZEROCOPY`-bound AF_XDP socket on DPAA1 observed `rx_packets = 0` despite healthy driver mechanics: `dpaa_run_xdp()` early-returns `XDP_PASS` when no XDP program is attached, so the FD travelled the unchanged skbuf path and the bound XSK socket saw nothing. **`0089` (userspace probe stage-3, no kernel change)** adds an opt-in `--xskmap` flag to `bin/dpaa1-xsk-bind-probe.py` that creates an XSKMAP, loads a 6-insn `bpf_redirect_map()` XDP program (DRV-mode attach, SKB fallback), binds `XDP_ZEROCOPY`, then `BPF_MAP_UPDATE_ELEM`s the bound socket into the map. **Closed blocker B** (DUT G5, ISO 2026.05.28-0149): `rx_packets` 0 → 30, DRV-mode attach honoured, 0 IVCI/BUG/stall, blocker-A invariants held under XSKMAP load.
 
-Verification matrix:
+**Mode is copy-mode, not zero-copy.** The page-backed `xdp_buff` is copied into a UMEM chunk; true ZC (FMan DMA directly into XSK-pool BMan chunks) is the follow-on M3-3 step 7 work scoped to patches `0093+`, structured as the three-mechanism plan — **Recognise** (match `fd->bpid` against `priv->xsk_bpid[band]`), **Recover** (`xsk_buff_recv()` instead of `build_skb()`), **reProgram** (set the FMan RX port primary BPID to the XSK pool BPID).
 
-| Patch | Hypothesis | Apply | DUT result |
-|-------|-----------|-------|------------|
-| 0086  | `num > 8` BUFCOUNT overflow | ✓ | ErrInts persist (necessary, insufficient) |
-| 0087  | Stack bpid residue in slots 1..n-1 | ✓ | ErrInts unchanged (rejected) |
-| 0088  | Wrong DMA device → wrong FBPR window | ✓ | **CLOSED 2026-05-28**: 60 s G5 hold ErrInt count = 0 ✓ |
+**Acceptance gate M3-3 (full VPP datapath):** (1) `xdp-features` reports `NETDEV_XDP_ACT_XSK_ZEROCOPY`; (2) `xdpsock -i ethX -q 3 -z -r` receives traffic; (3) ≥ 7 Gbps single-stream IPv4 fwd at < 5% kernel-net CPU/worker; (4) `perf top` clean of `dpaa_rx`/`__alloc_skb`/`memcpy`; (5) 4-worker aggregate ≥ 14 Gbps dual-SFP+; (6) 24 h iperf3 stress no oops/leak/stall.
 
-Diagnostic fallback if 0088 fails: enable `CONFIG_FSL_DPAA_CHECKING=y` to convert `DPAA_ASSERT` into `BUG()` and capture the failing `num + bpid + bufs[0].lo` on the stack via the resulting kernel oops. (Not needed — 0088 closed blocker A on first DUT test.)
+> Probe-side fixes (`bpf_attr` `__aligned_u64` pad, `XDP_FLAGS_UPDATE_IF_NOEXIST` removal), full verification matrix, counter snapshots: Qdrant `topic=dpaa1-afxdp-spec-milestone-archive`.
 
-**Closure verification (ISO 2026.05.28-0149, commit `d1b6e30`, run 26549682211):**
+#### 6.1.8 Blocker B — under-load FILL-ring backpressure crash + fix — 2026-05-28
 
-- 60 s G5 hold (`sudo bin/dpaa1-xsk-bind-probe.py eth3 0 4096 --hold 60`)
-- `dmesg | grep -c 'Invalid Command Verb'` = **0** (was 1:1 with refill batches on the 0085 baseline)
-- `dmesg | grep -ciE 'BUG|WARN|softlock|stall|panic|oops'` = **0** (was a CPU#0 stall + 52 s soft lockup at t=307 on the 0085 baseline)
-- `xsk_bman_refill_batches` = 16 (8 per attach cycle, refill working)
-- `xsk_rx_branch` = 86 (RX eligibility probe firing)
-- `xsk_dma_map_fail` = 0, `xsk_pamu_window_fail` = 0, `xsk_pool_detach_timeout` = 0
-- `xsk_pool_attach_ok` = 2, `xsk_pool_detach_ok` = 2 (clean attach/detach both cycles)
+The first under-load probe run (5 Gbit/s UDP flood) panicked in softirq: an unconstrained userspace recycle loop bumped `fill_producer` without checking `fill_consumer`, overran the 256-slot FILL ring, and handed the same UMEM chunk to `xp_alloc()` twice → `xsk_buff_pool` free-list corruption (`list_add corruption` → `dcache_clean_poc` paging fault → 52 s soft-lockup). **Probe fix (no kernel change):** read the kernel `fill_consumer` every iteration and refuse to write a FILL slot when in-flight `>= N_FRAMES` (`skipped_recycle` counter; "drop > corrupt"); plus `MAX_BATCH=64` and per-line flush. Post-fix DUT run sustained `rx_packets = 296 716` / 427 MB clean, 0 crashes, 0 `xsk_bman_starve`.
 
-**CI-pipeline invariant discovered during this work** (now also in qdrant and AGENTS.md candidate):
-`bin/ci-setup-kernel.sh` stages `kernel/common/patches/board/*.patch` via explicit `cp` lines per patch — it does NOT glob. `patch-health.sh` validates each patch against the post-prior-patches staged tree but does NOT cross-check that `ci-setup-kernel.sh` actually stages them. ISO 2026.05.28-0116 (commit `b57dd6a`) silently shipped without ANY of 0086/0087/0088 applied because the `cp` lines were missing — patch-health reported Pass:22 for all three. Fix: every new board patch requires a matching `cp` line addition in `ci-setup-kernel.sh` AND a post-build grep of `/mnt/nvme/_work/.../linux-<ver>/<file>` for the expected post-patch token before deploying to DUT.
+**Key finding — the "1.3 Gbit/s ceiling" is an iperf3 UDP-receiver artifact, not a driver limit.** `/proc/net/snmp` showed `RcvbufErrors == InErrors` byte-for-byte (loss at socket enqueue, single-threaded `recvmmsg()` on a 1.6 GHz Cortex-A72 caps ~150–200 kpps/core), while `ethtool -S` showed 0 NIC/BMan/FQ drops and `lxc202↔backup` TCP proved the L2 fabric does 7.5 Gbit/s. **Diagnostic rule:** on receiver-side UDP loss, check `/proc/net/snmp Udp:` BEFORE blaming wire/switch/driver — `RcvbufErrors == InErrors` means it is the userspace consumer.
 
-After 0088 silences blocker A, blocker B (XSKMAP redirect into `rx_default_dqrr` to wire productive RX, currently `rx_packets=0`) remains to be addressed by patch `0089`+ before the ≥ 7 Gbps M3 acceptance gate can be claimed.
+**Crash exposed a kernel-side invariant for step 7:** the eventual true-ZC path needs a FILL-ring-empty/double-release guard (the under-load failure mode here was free-list corruption, not a clean `NULL` from `xp_alloc()`). Stored under tag `dpaa1+xsk_bman_refill+fill_ring_invariant` for the step-7 design pass (addressed by `0095`, §6.1.12). Gate-3 entry options for the next session: **A** XDP_DROP driver-only capacity (§6.1.8a), **B** `xdpsock` C-based probe, **C** multi-process iperf3 (§6.1.8b).
 
-#### 6.1.7 Blocker B — productive RX delivery via XSKMAP redirect — 2026-05-28
+> Full crash trace, probe-fix detail, cross-check measurement table, and lab topology/creds: Qdrant `topic=dpaa1-afxdp-spec-milestone-archive`.
 
-**Diagnosis.** Pre-`0089` an `XDP_ZEROCOPY`-bound AF_XDP socket on DPAA1 observes `rx_packets = 0` even when the upstream driver mechanics are healthy (the §6.1.6 closure run measured `xsk_rx_branch = 86`, `xsk_pool_attach_ok = 2`, refill batches = 16, zero IVCIs, zero CPU stalls). The reason is a userspace gap, not a kernel one:
+#### 6.1.8a Option A — XDP_DROP driver-only RX capacity (tool `bin/dpaa1-xdp-rxcap.py`) — 2026-05-28
 
-1. `rx_default_dqrr()` already calls `dpaa_run_xdp()` for every contig FD.
-2. `dpaa_run_xdp()` (line 2723) early-returns `XDP_PASS` when `READ_ONCE(priv->xdp_prog) == NULL` — no XDP program means no `xdp_do_redirect()` invocation.
-3. The FD then travels the unchanged mainline skbuf path (`contig_fd_to_skb()` → `napi_gro_receive()`), so the kernel receives the packet but the bound XSK socket sees nothing.
-
-The driver-side prerequisites for productive XSK RX were all already in place before this session:
-
-| Component | Patch | Effect |
-|-----------|-------|--------|
-| `xdp_rxq_info.queue_index = 0` for every RX FQ | `4006` | XSK socket's `xs->queue_id == xdp->rxq->queue_index` check passes for any FD without needing per-FQID XSKMAP entries |
-| `xsk_rx_branch` eligibility probe in `rx_default_dqrr()` | `0083` | Confirms FDs reach the qband owning the bound XSK pool |
-| `xsk_pool_dma_map(priv->rx_dma_dev, …)` | `0088` | Buffer DMA addresses resolve inside BMan's FBPR window (blocker A closure) |
-| NAPI-hooked BMan refill from XSK FILL ring | `0084 v2` | XSK chunks return to BMan after the kernel consumes them |
-
-**Patch `0089` — userspace probe stage-3 (no kernel change).** Extends `bin/dpaa1-xsk-bind-probe.py` with an opt-in `--xskmap` flag. When the flag is present the probe:
-
-1. `bpf(BPF_MAP_CREATE, BPF_MAP_TYPE_XSKMAP)` → `xsks_map` fd (max_entries = 64).
-2. `bpf(BPF_PROG_LOAD, BPF_PROG_TYPE_XDP)` with a 6-insn (56-byte) hand-encoded eBPF program that returns `bpf_redirect_map(&xsks_map, ctx->rx_queue_index, XDP_PASS)`.
-3. `rtnetlink RTM_SETLINK IFLA_XDP` to attach the program to the netdev — DRV mode first (kernel fast-path), SKB-mode fallback (generic XDP via `netif_receive_skb`) if the driver refuses DRV.
-4. `bind(XDP_ZEROCOPY)` (unchanged from stage-1).
-5. `bpf(BPF_MAP_UPDATE_ELEM, xsks_map, queue_id, xsk_socket_fd)` — XSKMAP demands a fully bound XSK socket as the value, so the update must happen after `bind()`.
-
-Stage-3 is strictly additive: omitting `--xskmap` preserves the original M2-stage-1 / M2-stage-2 behaviour byte-for-byte. No `bin/ci-setup-kernel.sh` changes; no kernel rebuild required.
-
-**Mode is copy-mode, not zero-copy.** `xdp_do_redirect()` consults `xsks_map[ctx->rx_queue_index]` and pushes the page-backed `xdp_buff` into the XSK socket's RX ring. Because the buffer was allocated by `dpaa_bp` (kernel page) rather than by `xsk_buff_alloc()`, the XSK core copies it into a free UMEM chunk pulled from the FILL ring. This unblocks `rx_packets > 0` on the existing stack but does NOT meet acceptance-gate item 4 (`perf top` clean of `__alloc_skb` / `memcpy`) — that requires the FMan RX port to DMA directly into XSK-pool BMan chunks (the §6.1.3 / `0084` refill path is wired but the FMan port's BPID-program step is still mainline default). True ZC is the follow-on M3-3 step 7 work scoped to patches `0093+`:
-
-- Recognise XSK-pool-sourced FDs in `rx_default_dqrr()` by matching `fd->bpid` against `priv->xsk_bpid[band]`.
-- Recover the `xdp_buff` from the XSK chunk via `xsk_buff_recv(pool, dma_addr)` instead of `phys_to_virt(addr) + build_skb()`.
-- Program the FMan RX port's primary BPID to the XSK pool's BPID when `xsk_pool_attach()` succeeds, so FMan DMAs directly into XSK chunks.
-
-**Verification matrix — DUT G5 result 2026-05-28 (ISO 2026.05.28-0149, eth3, q=0, 30 s hold, light incidental background traffic only — lxc202 flood-ping was permission-denied so the segment carried only ARP / IPv6 ND / mDNS / multicast):**
-
-| Gate | Pre-`0089` (no `--xskmap`) | Post-`0089` (`--xskmap`) | Observed | Status |
-|------|----------------------------|--------------------------|----------|--------|
-| `rx_packets` after 30 s | 0 | > 0 | **30** (`rx_bytes = 3434`) | ✅ Closes blocker B |
-| `xsk_pool_attach_ok / fail` | counter inc / 0 | counter inc / 0 | **5 / 0** (across all today's runs) | ✅ |
-| `xsk_pool_detach_ok / timeout` | inc / 0 | inc / 0 | **5 / 0** | ✅ |
-| `xsk_dma_map_fail`, `xsk_pamu_window_fail` | 0 / 0 | 0 / 0 | **0 / 0** | ✅ blocker A invariants hold under XSKMAP load |
-| `xsk_rx_branch` delta during run | grows | grows | **+22** (88 → 110) | ✅ FDs reach bound qband during XSKMAP redirect |
-| dmesg `Invalid Command Verb` / `BUG` / `WARN` / softlock / stall / oops | 0 | 0 | **0** (only expected SFP cage link bounces + pre-existing hwmon thermal probe info) | ✅ |
-| IFLA_XDP attach mode | n/a | DRV preferred, SKB fallback | **DRV mode** (`prog/xdp id 224`) | ✅ DPAA1 honours native XDP attach |
-| `perf top -p probe` for `__alloc_skb` / `memcpy` | n/a | present (copy-mode signature) | not measured this run | gate item 4 stays open (true ZC scope) |
-| ≥ 7 Gbps single-stream | n/a | not reached | not measured this run | Acceptance gate remains pending true ZC follow-on |
-
-**Two probe-side fixes uncovered during the verification run (both folded into the `bin/dpaa1-xsk-bind-probe.py` shipped at commit `9fda744`+):**
-
-1. `BPF_MAP_UPDATE_ELEM` first failed with `EFAULT`. Cause: `bpf_attr.map_elem` uses `__aligned_u64` for the `key` pointer, requiring a 4-byte pad after the leading `u32 map_fd`. The `struct.pack("=I QQQ", …)` form omits this pad → kernel reads the key pointer from offset 4 instead of 8. Fix: `struct.pack("=I 4x QQQ", …)`. This alignment pad applies to every `bpf_attr` arm whose first field is `u32` followed by `__aligned_u64` — worth grepping for if any future `bpf()` plumbing is added.
-2. The DRV-mode attach used `XDP_FLAGS_UPDATE_IF_NOEXIST`, which made re-runs of the probe after a clean exit fail with `EEXIST` because the DRV-mode XDP attach **persists on the netdev across process exit** (it lives on the kernel `net_device` not on the open fd). Fix: drop `XDP_FLAGS_UPDATE_IF_NOEXIST` from both DRV and SKB flag sets so a re-run replaces any prog left behind by the previous invocation. Alternative would have been calling `ip link set dev <if> xdp off` before each run, but plain-replace semantics are the right ergonomics for a diagnostic probe.
-
-**Counter snapshot — final state at end of session:**
-
-```
-xsk_pool_attach_ok:        5
-xsk_pool_attach_fail:      0
-xsk_pool_detach_ok:        5
-xsk_pool_detach_timeout:   0
-xsk_bman_seed_short:       5
-xsk_bman_starve:           0
-xsk_tx_backpressure:       0
-xsk_dma_map_fail:          0
-xsk_align_reject:          0
-xsk_headroom_reject:       0
-xsk_mtu_reject:            0
-xsk_pamu_window_fail:      0
-xsk_rx_branch:             110     (+24 vs §6.1.6 baseline of 86)
-xsk_bman_refill_batches:   26      (+10 vs §6.1.6 baseline of 16)
-xsk_tx_zc_submit:          0
-xsk_tx_conf_zc:            0
-```
-
-XDP prog was detached at end of session (`ip link set dev eth3 xdp off`) to leave the DUT in a sane state for the next iteration.
-
-**Acceptance gate M3-3 (full VPP datapath):**
-1. `xdp-features` reports `NETDEV_XDP_ACT_XSK_ZEROCOPY`.
-2. `xdpsock -i ethX -q 3 -z -r` receives traffic. Queue-0 alias dead.
-3. ≥ 7 Gbps single-stream IPv4 forwarding at < 5% kernel-net CPU per worker.
-4. `perf top -p $(pidof vpp_main)` no `dpaa_rx`, `__alloc_skb`, `skb_copy_from_linear_data`, `memcpy` in top 10.
-5. 4-worker scaling: aggregate ≥ 14 Gbps for 1500 B IPv4 on dual SFP+.
-6. 24 h iperf3 stress: no oops, no `kmemleak`, no RCU stall.
-
-#### 6.1.8 Blocker B — under-load probe measurement (FILL ring backpressure) — 2026-05-28
-
-**Context.** §6.1.7 closed blocker B with `rx_packets = 30` under incidental traffic (ARP / ND / mDNS only on the eth3 segment). To begin attacking acceptance-gate item 3 (≥ 7 Gbps single-stream) the probe needed to be validated under a productive iperf3 UDP load on the eth4 ↔ lxc202 segment (10.11.1.0/30, 10G SFP+ copper, MTU 1500, payload 1400). Three crashes and two probe fixes later this section captures the *safe* operating envelope of the copy-mode XSKMAP probe.
-
-**Topology recap.** `lxc202` is a Proxmox unprivileged LXC reached via Tailscale through `heidi` (192.168.1.15) and exposes a permanent iperf3 server bound to `10.11.1.2:5201` (the LXC end of the DUT eth4 segment). The DUT runs iperf3 as **client** with `-R` (reverse mode), so the lxc202-side server pushes UDP into the DUT — this is the only path that produces a controllable, sustained ingress flood on eth4 without DPDK / pktgen on lxc202 (which is blocked by missing `/dev/uio` / `/dev/vfio` and no apt egress through the DUT, see §6.1.7 notes on the "best" variant).
-
-**The crash: FILL-ring producer overrun on the first under-load run.** With `bin/dpaa1-xsk-bind-probe.py` carrying only the §6.1.7 stage-3 logic and an unconstrained recycle loop (`while cons != prod: ...; fill_producer += 1`), the very first probe run under a 5 Gbit/s UDP flood produced a kernel `Oops` in softirq:
-
-```
-list_add corruption. prev->next should be next (ffff00080107b4e8),
-                                  but was ffff00080107b4e8. (prev=ffff000809eb1f58).
-Unable to handle kernel paging request at virtual address ffffffff80000000
-pc : dcache_clean_poc+0x20/0x38
-lr : arch_sync_dma_for_device+0x2c/0x40
-Call trace:
-  dcache_clean_poc+0x20/0x38 (P)
-  __dma_sync_single_for_device+0x1a0/0x1c8
-  xp_alloc+0x1d4/0x208
-  __xsk_rcv+0x174/0x310
-  __xsk_map_redirect+0xb8/0x390
-  xdp_do_redirect+0x5c/0x4a0
-  rx_default_dqrr+0x40c/0xd88
-  qman_p_poll_dqrr+0x194/0x1c0
-  dpaa_eth_poll+0x34/0x128
-  __napi_poll+0x40/0x228
-  net_rx_action+0x128/0x2b8
-  handle_softirqs+0x100/0x348
-Kernel panic - not syncing: Oops: Fatal exception in interrupt
-```
-
-Root cause: the probe's userspace recycle loop was bumping `fill_producer` without checking `fill_consumer`. At 5 Gbit/s the in-flight count outran a 256-slot FILL ring within milliseconds, so the same UMEM chunk was written back into the FILL ring while the kernel still held it. `xp_alloc()` then dequeued the same chunk twice → `xsk_buff_pool` free list (`struct list_head`) corrupted → next allocation returned the corrupted next-pointer `0xffffffff80000000` → `dcache_clean_poc()` faulted trying to flush a non-existent VA → softirq panic. The DUT auto-rebooted under `panic=60` and came back clean (uptime 2 min, all 5 interfaces UP, kernel command line unchanged). Stored in Qdrant under tag `xsk_probe + xp_alloc + list_add_corruption + fill_ring` for future-session triage.
-
-**Probe fix (no kernel change).** `bin/dpaa1-xsk-bind-probe.py` now reads the kernel-written `fill_consumer` pointer **on every iteration** through a live `ctypes.c_uint32.from_address(fill_addr + fill_off[1])` view and refuses to write a new FILL slot when `(fill_producer - fill_consumer) & 0xFFFFFFFF >= N_FRAMES`. A `skipped_recycle` counter increments instead. Skipped descriptors are dropped on the userspace side; the kernel will see FILL empty and bump `xsk_bman_starve` — which is the *correct* AF_XDP behaviour (drop > silently corrupt a shared free list). Two additional safeties were folded into the same change:
-
-- `MAX_BATCH = 64` (was 256) — caps the inner `while cons != prod` loop so the outer `time.monotonic()` deadline + `poll.poll(1000)` yield is exercised at least 4× per FILL-ring fill cycle; this prevents the SSH stdout pipe from appearing hung and prevents the Python loop from starving even when the kernel keeps `rx_prod` ahead of `rx_cons`.
-- `print(..., flush=True)` + explicit `sys.stdout.flush()` after each progress line, so a backgrounded probe over SSH always shows the current ring state instead of buffering N×8KB before flushing.
-
-**Verification matrix — DUT 2026-05-28 under iperf3 reverse-mode UDP load (eth4 ↔ lxc202, 2 Gbit/s sender / 1.48 Gbit/s receiver, `-l 1400 -P 2 -R -t 25`, 10 s probe hold, copy-mode XSKMAP redirect via `0089`):**
-
-| Gate | Pre-fix (unconstrained recycle) | Post-fix (FILL backpressure) | Observed | Status |
-|------|--------------------------------|------------------------------|----------|--------|
-| Kernel `Oops` / `list_add corruption` / `xp_alloc` panic | reproducible at ≥ 5 Gbit/s ingress | none expected | **0** (clean `dmesg`, no `list_add`, no `WARN`, no `BUG`) | ✅ Safe |
-| `rx_packets` over 10 s probe hold | crashed before measurable | > 256 (escapes ring-size plateau) | **296 716** | ✅ Productive XSK delivery sustained |
-| `rx_bytes` over 10 s probe hold | n/a | n/a | **427.86 MB** | ✅ |
-| Peak `pps` in first 2 s window | n/a | n/a | **115 361** | ✅ |
-| Peak `avg_bps` | n/a | n/a | **1.33 Gbit/s** (matches sender share into XSK queue 0) | ✅ |
-| `xsk_pool_attach_ok / fail` | n/a | inc / 0 | **4 / 0** (over 4 back-to-back runs) | ✅ |
-| `xsk_pool_detach_ok / timeout` | n/a | inc / 0 | **4 / 0** | ✅ Clean teardown |
-| `xsk_dma_map_fail`, `xsk_pamu_window_fail` | n/a | 0 / 0 | **0 / 0** | ✅ Blocker A invariants hold |
-| `xsk_rx_branch` delta during run | n/a | grows | **+27** | ✅ FDs land in bound qband |
-| `xsk_bman_starve` | n/a | may grow under load | **0** | ✅ FILL backpressure didn't trigger starve (in-flight stayed < 256) |
-| `skipped_recycle` reported by probe | n/a | safety knob | **0** | ✅ 64-batch cap + 1.5 Gbit/s receive rate kept inflight < ring size |
-| `last_batch` reaching MAX_BATCH | n/a | demonstrates non-spin | **64 then 0** | ✅ Loop yielded after one batch then drained ahead of producer |
-| dmesg softlock / stall / RCU warning | crashed | 0 | **0** (only fan / SFP link-up / journald replay) | ✅ |
-| ≥ 7 Gbps single-stream | n/a | not reached this run | **1.33 Gbit/s peak** (single XSK queue + copy-mode) | ⏳ Acceptance gate 3 still open — true ZC scope |
-
-**Counter snapshot — final state at end of session (cumulative across 4 probe runs + 3 crashes earlier in the day):**
-
-```
-xsk_pool_attach_ok:        4
-xsk_pool_attach_fail:      0
-xsk_pool_detach_ok:        4
-xsk_pool_detach_timeout:   0
-xsk_bman_seed_short:       4
-xsk_bman_starve:           0
-xsk_tx_backpressure:       0
-xsk_dma_map_fail:          0
-xsk_align_reject:          0
-xsk_headroom_reject:       0
-xsk_mtu_reject:            0
-xsk_pamu_window_fail:      0
-xsk_rx_branch:             27
-xsk_bman_refill_batches:   2
-xsk_tx_zc_submit:          0
-xsk_tx_conf_zc:            0
-```
-
-**Observations and remaining gaps.**
-
-1. **The "1.3 Gbit/s ceiling" is an iperf3 UDP-receiver measurement artifact, NOT a DPAA1 driver limit.** Subsequent diagnostic work (still 2026-05-28, later in the same session) added a third traffic source (`backup` at 10.11.1.3/29, ixgbe 10G full-duplex, on the same 10G L2 switch as lxc202 and DUT eth4) and ran cross-checks:
-
-   | Test | Sender → Receiver | Mode | Result |
-   |---|---|---|---|
-   | lxc202 ↔ backup | 10.11.1.2 ↔ 10.11.1.3 | TCP, -P 2, 5 s | **7.53 Gbit/s clean, 0 retransmits** |
-   | backup → DUT eth4 | 10.11.1.3 → 10.11.1.1 | TCP, -P 2, 5 s | 885 Mbit/s clean (TCP throttled by iperf3-receiver-bound CPU) |
-   | backup → DUT eth4 | 10.11.1.3 → 10.11.1.1 | UDP -R, -b 2G -P 2, 10 s | 954 Mbit/s receiver, **52 % loss** |
-   | lxc202 → DUT eth4 | 10.11.1.2 → 10.11.1.1 | UDP -R, -b 1G -P 2, 25 s | 1.57 Gbit/s receiver, **21 % loss** |
-
-   **Smoking gun on the DUT after the backup UDP test:**
-   ```
-   $ grep '^Udp:' /proc/net/snmp
-   Udp: InDatagrams=8,620,648  InErrors=995,276  RcvbufErrors=995,276
-   ```
-   `RcvbufErrors == InErrors` byte-for-byte. Every "lost" UDP packet was dropped at the **socket enqueue** because the iperf3 client process couldn't drain `sk_receive_queue` fast enough — NOT at the NIC, NOT at the BMan pool, NOT at the XSK FILL ring. The DPAA1 RX driver delivered the packets cleanly:
-   ```
-   $ ethtool -S eth4 | grep -iE 'drop|err|qman|fifo'
-   rx error [TOTAL]:        0
-   rx dma error:            0
-   rx frame physical error: 0
-   rx frame size error:     0
-   rx header error:         0
-   qman cg_tdrop:           0
-   qman fq tdrop:           0
-   rx dropped [TOTAL]:    1689   (0.014% of 11.9M packets)
-   xsk_bman_starve:         0
-   /proc/net/softnet_stat squeezed column: 0 on all 4 CPUs.
-   ```
-
-   **Diagnostic rule (new, also stored in Qdrant):** when iperf3 `-R -u` shows receiver-side packet loss on this DUT, ALWAYS check `/proc/net/snmp` `Udp:` line BEFORE blaming the wire, the switch, or the driver. If `RcvbufErrors == InErrors`, it is the userspace iperf3 client process — single-threaded `recvmmsg()` on a Cortex-A72 at 1.6 GHz caps at ~150–200 k pps per core, well below 2 Gbit/s of 1400-byte UDP datagrams (≈178 k pps).
-
-2. **DPAA1 RX driver capacity is at least 7.5 Gbit/s on the same fabric** (proven by lxc202↔backup TCP). The probe loop limits — 256-frame UMEM, per-iteration `sys.stdout.flush()`, FILL backpressure — and the iperf3 UDP socket drain limit BOTH compound to give the false impression of a 1.3 Gbit/s "copy-mode ceiling". The earlier interpretation in this section's table ("≥ 7 Gbps single-stream — 1.33 Gbit/s peak — true ZC scope") is **misleading**: gate 3 closure does NOT depend on M3-3 step 7 (true ZC) on driver-capacity grounds. It depends on measurement methodology.
-
-3. **Revised next-session entry point for gate 3.** Before committing to step 7 work, run a wire-measurement that bypasses iperf3's UDP socket:
-   - Option A — **EXECUTED 2026-05-28, see §6.1.8a.** Attach a minimal `XDP_DROP` program on eth4 (drops in-driver → no skb/socket/userspace), drive blind UDP load, read `ethtool -S eth4` rx_packets/rx_bytes + `qman_*_tdrop` + dma/fifo error deltas across a hold window. Tool: `bin/dpaa1-xdp-rxcap.py`. Result: driver dropped **0%** at every offered rate the lab could generate, but the literal ≥7 Gbit/s number could not be hit (generator-limited, not driver-limited — see §6.1.8a).
-   - Option B — Replace the Python probe with `xdp-tools xdpsock -r -q 0` (C-based) and measure pps under the same load.
-   - Option C — Multiple parallel iperf3 servers (`-P 4` or more) so socket-drain CPU divides across cores. If gate 3 closes here, that alone proves the cap was userspace.
-
-   Only if all three fail to reach 7 Gbit/s does step 7 (true ZC via FMan DMA into XSK pool chunks) become necessary for gate 3.
-
-4. **Next scale step for the Python probe itself** (orthogonal to gate 3 — useful as a liveness/regression tool) requires a bigger UMEM (1024 or 4096 chunks) and removal of per-line `sys.stdout.flush()` from the hot loop. The probe will be left as a verification tool for the existing `rx_packets > 0` and no-crash gate.
-
-5. **The crash + recovery exposed a useful kernel-side invariant for downstream M3-3 step 7 work** (true ZC where FMan RX DMAs into XSK pool chunks via `priv->xsk_bpid` matching): the eventual XSK pool driver path will also need a FILL-ring-empty guard. Mainline `xp_alloc()` returns `NULL` cleanly when the pool is empty — but the user-visible failure mode on DPAA1 was a free-list corruption, suggesting the BMan-refill path patched in `0084 v2` may have a latent assumption that the FILL ring producer/consumer pair is well-behaved. Worth re-auditing `priv->xsk_bman_refill()` to ensure it cannot put the same chunk into BMan twice if the userspace recycle code is broken. **Stored under tag `dpaa1+xsk_bman_refill+fill_ring_invariant` for the §6.1.3 step 7 design pass.**
-
-6. **Lab topology left in place for next session's gate-3 measurement work** (Options A/B/C above): DUT eth4 = `10.11.1.1/29` (widened from `/30` for room for `.1.3`), lxc202 eth0 = `10.11.1.2/29`, `backup` eth1 = `10.11.1.3/29` (alias on its mgmt 10G ixgbe interface). iperf3 server is running on `backup` at `10.11.1.3:5201`. The `backup → DUT eth4` UDP path is iperf3-receiver-CPU-bound at ~954 Mbit/s as documented above; `lxc202 → backup` proves the L2 fabric is 7.5 Gbit/s. SSH to `backup`: `admin@192.168.1.3`, key `~/.ssh/admin_key` or password `auckland`.
-
-#### 6.1.8b Option C executed — multi-flow TCP `-R` RX scaling — 2026-05-29
-
-**Setup.** Installed DUT image `6.18.33-vyos` (built 2026-05-28 21:16, the blocker-A/B-closure build) — verified to carry the full AF_XDP datapath live: `ethtool -S eth4` shows **16 `xsk_*` counters**, `/sys/kernel/debug/af_xdp_pool/qmap` present, dmesg `FMan PCD caps = 0x17 (CC HM POL PARSER)` (so `0086a` ucode-210 probe live) + `af_xdp_pool: registered`. **No new ISO was needed** to run Option C — it is a pure userspace measurement, and the M3-3b/c/d struct-contract patches committed `fe3e56d` are header-only `-ENOTSUPP` edits that do not touch the datapath. Both SFP+ up at 10G; generator `10.11.1.2` (eth4 `/29` segment) has a single iperf3 server on `:5201`. The DUT can only act as iperf3 *client* (no SSH creds to the generator to spawn additional server ports — `root@10.11.1.2: Permission denied`).
-
-**Results (DUT = receiver via `iperf3 -c 10.11.1.2 -R`):**
-
-| Streams | Aggregate RX `[SUM]` receiver |
-|---|---|
-| `-P 4`  | **5.57 Gbit/s** |
-| `-P 8`  | 4.12 Gbit/s |
-| `-P 16` | 3.75 Gbit/s |
-
-Throughput **peaks at `-P 4` (5.57 Gbit/s)** and *declines* beyond it. The decline is single-iperf3-**server**-process contention on the generator: one `iperf3 -s` process muxing 8/16 streams becomes the bottleneck (and a 4-way `taskset`-pinned client experiment failed — iperf3 runs one test session per server at a time, so 3 of 4 pinned clients were refused).
-
-**`mpstat -P ALL` per-core during `-P 16` (the diagnostic that matters):**
-
-| CPU | %soft | %sys | %idle | role |
-|---|---|---|---|---|
-| 0 | 79.9 | 0.3 | 19.8 | RX softirq |
-| 1 | 97.6 | 0.0 | 2.4 | RX softirq |
-| 2 | 49.1 | 0.3 | 50.6 | RX softirq (headroom) |
-| 3 | 6.0 | 84.2 | 6.5 | iperf3 receiver app (single proc) |
-
-**Conclusions.**
-1. **The per-CPU NAPI + contiguous-banding work (M3-3 steps 2a–2c) is doing its job:** RX softirq genuinely distributes across CPU0/1/2 (79.9 / 97.6 / 49.1 %soft), with CPU2 still holding ~50% headroom. The RX *driver* path is NOT saturated.
-2. **The bottleneck at scale is the single userspace receiver process** (CPU3 = 84% sys), exactly the §6.1.8 / §6.1.8a "userspace socket-drain, not driver" finding — now reconfirmed with TCP (not just UDP) and per-core softirq evidence.
-3. **5.57 Gbit/s is the achievable aggregate from the DUT-as-client side**, receiver-process-bound. A literal ≥7 Gbit/s number is blocked by the lab topology, not the driver: it needs *multiple iperf3 server processes on the generator* (so the receiver side also divides across cores), which requires the operator's generator-side credentials (`backup` at `admin@192.168.1.3`, key `~/.ssh/admin_key` / password `auckland`, per §6.1.8 item 6) — or the wire-rate generator (TRex/DPDK-pktgen) called for in §6.1.8a.
-
-**Gate-3 status after Options A + C:** the driver demonstrably (a) drops 0% of every frame the fabric delivers (Option A, §6.1.8a), and (b) scales RX softirq across cores to 5.57 Gbit/s aggregate TCP with headroom on CPU2 (Option C). Both options independently confirm Gate 3 is **consumer/methodology-bound, not driver-bound**. Closing the gate with a *literal* ≥7 Gbit/s figure still needs either generator-side multi-process iperf3 or a wire-rate generator — a lab-provisioning task, not a kernel-code task. M3-3 step 7 (true ZC) is **not** required for Gate 3 on driver-capacity grounds.
-
-#### 6.1.8a Option A executed — XDP_DROP driver-only RX capacity — 2026-05-28
-
-**Tool: `bin/dpaa1-xdp-rxcap.py`** (standalone, no libbpf/clang). Loads a 2-insn XDP program (`r0 = XDP_DROP; exit`) via raw `bpf(BPF_PROG_LOAD, BPF_PROG_TYPE_XDP)` (the exact `bpf_attr` encoding proven by `bin/dpaa1-xsk-bind-probe.py`), attaches DRV-mode via rtnetlink `RTM_SETLINK`/`IFLA_XDP` (SKB fallback), and samples `/sys/class/net/eth4/statistics/{rx_packets,rx_bytes,rx_dropped}` plus `ethtool -S eth4` (`rx error [TOTAL]`, `rx dma error`, `rx frame physical error`, `rx fifo error`, `qman cg_tdrop`, `qman fq tdrop`) deltas across a hold window. XDP_DROP frees each frame in-driver (recycle to BMan) — **no skb, no socket, no userspace consumer** — so the only thing that advances is the driver RX path. A selective `--drop-udp` variant (parses Ethernet+IPv4, drops only IP proto 17, passes TCP/ARP/ND) was also built so iperf3's control channel could survive; it passes the eBPF verifier and attaches in DRV mode, but see the methodology note below for why iperf3 still cannot coexist. Auto-detaches on exit (verified `ip -d link show eth4` clean), no `XDP_FLAGS_UPDATE_IF_NOEXIST` so re-runs replace cleanly.
-
-**Result matrix (DUT eth4, kernel 6.18.33-vyos):**
-
-| Run | Load generator | Offered | Driver `rx_packets` | Driver rate | qman/dma/fifo drops | net-core `rx_dropped` |
-|-----|----------------|---------|---------------------|-------------|---------------------|------------------------|
-| Kernel-socket baseline (NO XDP) | iperf3 fwd UDP `backup→DUT` `-b 2G -l 1400` | 2.00 Gbit/s (0% sender loss) | n/a (skbuf path) | **953 Mbit/s drained, 51% socket loss** (176639/346891 datagrams) | — |
-| XDP_DROP + 1× nping blind UDP | nping `--rate 5M -c 0` | ~0.69 Gbit/s (nping-capped) | 974,133 / 1.4 GB | peak 60,041 pps / 0.69 Gbit/s | **0 / 0 / 0** | **0** |
-| XDP_DROP + 16× parallel nping | 16× nping concurrent | ~0.98 Gbit/s (still nping-capped) | 1,426,751 / 2.06 GB | peak 85,266 pps / 0.984 Gbit/s | **0 / 0 / 0** | **0** |
-
-**Findings:**
-
-1. **The driver RX path drops 0% at every offered rate the lab can generate.** Both XDP_DROP runs show zero `qman cg_tdrop`, zero `qman fq tdrop`, zero `rx dma error`, zero `rx fifo error`, zero `rx error [TOTAL]`, zero net-core `rx_dropped` — the DPAA1 FMan/BMan/QMan RX pipeline absorbed 100% of offered frames. Contrast the kernel-socket baseline at 2 Gbit/s offered: **51% loss, entirely at socket enqueue** (the §6.1.8 `RcvbufErrors == InErrors` artifact, reproduced). This is direct, counter-level proof that **Gate 3 is consumer/methodology-bound, not driver-bound.**
-
-2. **The literal ≥7 Gbit/s number could not be hit — generator-limited, not driver-limited.** No traffic source in the lab can offer ≥7 Gbit/s of small-packet UDP at the DUT's eth4 RX:
-   - **iperf3 is structurally incompatible with XDP_DROP.** Forward mode: the DUT iperf3 *server* must drain UDP to advance its state machine and emit control-channel feedback; XDP eating the data stalls the control stream → client aborts `unable to read from stream socket: Resource temporarily unavailable`. Reverse mode: the DUT *client* reads UDP data; XDP eating it → same abort. The selective `--drop-udp` prog (pass TCP control) does not help because the *server side* also needs UDP payload to feed control feedback.
-   - **nping is CPU-bound at ~1 Gbit/s** on the VyOS 6.6.137 backup and does **not** scale with parallelism (16× procs reached only 85 kpps vs 60 kpps for 1×) — all contend on the single raw-socket TX softirq/lock.
-   - **No kernel pktgen** on the backup (`Module pktgen not found in /lib/modules/6.6.137-vyos`).
-
-3. **Conclusion.** Option A definitively establishes the driver RX path drops 0% while the userspace socket path drops 51% at 2 Gbit/s. To produce a *literal* ≥7 Gbit/s offered-load number for a formal Gate-3 pass, future work needs a wire-rate generator (TRex/DPDK-pktgen on an x86 box, or a kernel-pktgen-capable sender on the eth4 segment). Alternatively, Gate 3 can be closed on driver-capacity grounds: the driver demonstrably forwards 100% of every frame the fabric delivers, with zero hardware-stage drops, and the only loss is the userspace socket drain — which the production AF_XDP zero-copy datapath (M3-3) bypasses entirely. The `bin/dpaa1-xdp-rxcap.py` tool is proven correct and reusable for the wire-rate re-measurement when a faster generator is available.
-
-**Lab creds/recipe that worked (for the re-run):** DUT iperf3 server must be `nohup iperf3 -s -B 10.11.1.1 &` (NOT `-1` one-shot, NOT a bare `&` inside an SSH command — both die on session close); backup is `ssh -i ~/.ssh/admin_key admin@192.168.1.3` (owns `10.11.1.3/29` + mgmt `192.168.1.3/16`); backup iperf3 client MUST source-bind `-B 10.11.1.3` (else `Cannot assign requested address`); nping needs `sudo` + explicit `--dest-mac e8:f6:d7:00:16:03` (DUT eth4 MAC). Stored in Qdrant under `topic=dpaa1-afxdp-gate3-option-a-measurement`.
+`bin/dpaa1-xdp-rxcap.py` (standalone, no libbpf/clang) attaches a 2-insn `XDP_DROP` program (DRV-mode, SKB fallback) and samples driver `rx_packets`/`rx_bytes` + `qman cg_tdrop`/`qman fq tdrop`/`rx dma error`/`rx fifo error` deltas across a hold window. XDP_DROP frees each frame in-driver with no skb/socket/userspace consumer, so only the driver RX path advances. **Finding: the driver dropped 0% at every offered rate the lab could generate** (zero qman/dma/fifo drops, zero net-core `rx_dropped`), while the kernel-socket baseline at 2 Gbit/s offered lost 51% entirely at socket enqueue — direct counter-level proof that **Gate 3 is consumer/methodology-bound, not driver-bound.** The literal ≥7 Gbit/s number could not be hit because no lab traffic source reaches it: iperf3 is structurally incompatible with XDP_DROP (control channel stalls), nping is CPU-bound ~1 Gbit/s and doesn't scale with parallelism, no kernel pktgen on the backup. A wire-rate generator (TRex/DPDK-pktgen) is needed for a *literal* Gate-3 pass; the tool is proven and reusable for that re-measurement.
+
+> Full result matrix, methodology notes, and lab creds/recipe: Qdrant `topic=dpaa1-afxdp-gate3-option-a-measurement`.
+
+#### 6.1.8b Option C — multi-flow TCP `-R` RX scaling — 2026-05-29
+
+Ran on DUT image `6.18.33-vyos` (full AF_XDP datapath live: 16 `xsk_*` counters, `FMan PCD caps = 0x17`, `af_xdp_pool: registered`) — pure userspace measurement, no new ISO needed. DUT-as-receiver TCP `-R` aggregate **peaks at `-P 4` = 5.57 Gbit/s** then declines (`-P 8` 4.12, `-P 16` 3.75) due to single-iperf3-server contention on the generator. `mpstat -P ALL` during `-P 16`: RX softirq genuinely distributed across CPU0/1/2 (79.9 / 97.6 / 49.1 %soft, CPU2 ~50% headroom) while the single userspace receiver process saturated CPU3 (84% sys) — reconfirming the §6.1.8/§6.1.8a "userspace socket-drain, not driver" finding with TCP and per-core evidence. The per-CPU NAPI + contiguous-banding work (M3-3 steps 2a–2c) is doing its job.
+
+**Gate-3 status after Options A + C:** the driver (a) drops 0% of every frame the fabric delivers and (b) scales RX softirq across cores to 5.57 Gbit/s aggregate TCP with headroom. Gate 3 is **consumer/methodology-bound, not driver-bound**; a literal ≥7 Gbit/s figure needs generator-side multi-process iperf3 or a wire-rate generator (a lab-provisioning task, not kernel code). **M3-3 step 7 (true ZC) is not required for Gate 3 on driver-capacity grounds.**
+
+> Per-stream results, full `mpstat` table, generator-credential detail: Qdrant `topic=dpaa1-afxdp-spec-milestone-archive`.
 
 #### 6.1.9 DUT→backup TX direction measurements — 2026-05-28
 
-Bound to eth4 explicitly via `iperf3 -B 10.11.1.1`:
+DUT-as-sender TX peaks at **4.93 Gbit/s single-stream TCP (0 retr)**, CPU3-bound. Root cause: **no in-tree, NXP-SDK, or DPDK driver exposes TSO/LSO for FMan v3 on Linux** (verified across mainline `dpaa_eth.c`, NXP SDK `sdk_dpaa/dpaa_eth.c`, DPDK 25.03 DPAA PMD docs, and NXP's own `dpaa.rst`). The AGENTS.md shorthand "TSO is hardware-impossible on DPAA1" is conclusion-correct but mechanism-imprecise: more accurately, **TSO is driver-unimplemented across every NXP-authored datapath driver and not advertised by any FMan v3 BMI capability bit consulted by Linux**. Net effect: `tcp-segmentation-offload: off [fixed]`, software GSO active, every MSS traverses the full softirq→driver TX path one skb at a time.
 
-| Test | Parallel | Result | Notes |
-|------|---------|--------|-------|
-| DUT→backup TCP | P=1 | **4.93 Gbit/s, 0 retr** | CPU3 ~62% sys + ~10% soft; other cores idle |
-| DUT→backup TCP | P=1, second run | 4.57 Gbit/s, 0 retr | jitter |
-| DUT→backup TCP | P=4 (single iperf3 PID) | 4.07 Gbit/s | all 4 streams on one client-side CPU; aggregate worse than P=1 |
-| DUT→backup TCP | P=8 (single iperf3 PID, taskset 0-3) | 3.83 Gbit/s | server-side single iperf3 PID can't keep up |
-| DUT→backup UDP -b 10G | P=1 | 1.04 Gbit/s, 0% loss | iperf3 sender self-rate-limited, NOT a driver cap |
+**Implication for Gate 3:** the gate is defined against the AF_XDP zero-copy TX path which bypasses the kernel softirq TX entirely. The 4.93 Gbit/s kernel-skbuf TX ceiling **does not block AF_XDP Gate-3 closure**; step 7 (FMan RX DMA into XSK-pool chunks via `priv->xsk_bpid` matching, plus TX symmetry via `xsk_tx_peek_release_desc_batch()` → `qman_enqueue()`) remains the correct ZC path.
 
-**Why <10 Gbit/s on TX:** the LS1046A kernel stack TX path is bottlenecked on a single softirq-bound CPU because **no in-tree, NXP-SDK, or DPDK driver exposes TSO/LSO for FMan v3 on Linux** (verified 2026-05-28). Sources:
-
-- Mainline `drivers/net/ethernet/freescale/dpaa/dpaa_eth.c` declares only `NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM | NETIF_F_RXHASH | NETIF_F_SG | NETIF_F_HIGHDMA | NETIF_F_GSO | NETIF_F_RXCSUM` (lines ~230–246). `NETIF_F_GSO` is *software* GSO; there is no `NETIF_F_TSO`.
-- NXP SDK `sdk_dpaa/dpaa_eth.c` (vendor driver, archived in `kernel-ls1046a-build/release/patches/`) declares the same feature set — `grep -n NETIF_F_TSO` returns zero hits.
-- DPDK 25.03 DPAA PMD documentation (`doc.dpdk.org/guides-25.03/nics/dpaa.html`, §15.2.2.1 Features) lists "Multiple queues for TX and RX / Receive Side Scaling (RSS) / Packet type information / Checksum offload / Promiscuous mode / IEEE1588 PTP / OH Port / ONIC virtual port" — no `RTE_ETH_TX_OFFLOAD_TCP_TSO`/`UDP_TSO` capability.
-- NXP `Documentation/networking/device_drivers/ethernet/freescale/dpaa.rst` (authored by Madalin Bucur and Camelia Groza at NXP) describes only "Rx and Tx checksum offloading for UDP and TCP", "rx-flow-hash", "multiple prioritized Tx traffic classes via mqprio", and "RSS via FMan KeyGen". No TSO is documented as implemented or in-progress; the FMan BMI offers IP fragmentation/reassembly (USDPAA `fragmentation_demo` / `reassembly_demo`) but not L4 TCP segmentation.
-
-The AGENTS.md shorthand "TSO is hardware-impossible on DPAA1" is **conclusion-correct but mechanism-imprecise**: more accurately, **TSO is driver-unimplemented across every NXP-authored datapath driver and not advertised by any FMan v3 BMI capability bit consulted by Linux**. Whether the FMan v3 BMI silicon could be wired up to do hardware segmentation is moot — 10+ years of upstream maintenance and NXP-authored vendor drivers have not exposed it, and no patches proposing TSO have appeared on netdev/lkml. Net effect on this DUT: `tcp-segmentation-offload: off [fixed]` in `ethtool -k`, software GSO active (`generic-segmentation-offload: on`, kernel coalesces large send buffers and segments late, amortizing TCP-stack overhead), but every 1448-byte MSS still traverses the full softirq → driver TX path one skb at a time. CPU3 was the limiter at ~75% busy on a single TCP stream.
-
-Attempts to multi-process the receiver via port 5202 failed: backup is a VyOS zone-firewalled router whose `P_COMMON-SERVICES` set only whitelists `{3780, 5000-5001, 5201}`. Adding a `firewall ipv4 input filter rule 100 destination port 5202 accept` rule made SYNs reach `VYOS_INPUT_filter` (counter shows 33 accept packets) but the zone-based `NAME_INT-LOC` jump still drops the reply path — full zone-aware setup would require adding 5202 to `P_COMMON-SERVICES`. Not pursued further; kernel TX ceiling is irrelevant to Gate 3 (see Implication paragraph below).
-
-**Implication for Gate 3 (≥7 Gbps acceptance gate, §6.1 acceptance gate item 3):** the gate was always defined against the **AF_XDP zero-copy TX path** which bypasses the kernel softirq TX entirely. The 4.93 Gbit/s single-stream TCP measured here is the **kernel-skbuf TX ceiling under no-TSO/no-GSO-XL constraints** and **does not block AF_XDP gate 3 closure**. Step 7 (FMan RX DMA directly into XSK-pool BMan chunks via `priv->xsk_bpid` matching) remains the correct path to gate 3, plus its TX symmetry (`xsk_tx_peek_release_desc_batch()` straight to `qman_enqueue()`).
+> Full TX measurement table and TSO source citations: Qdrant `topic=dpaa1-afxdp-spec-milestone-archive`.
 
 #### 6.1.10 True-ZC RX sub-increment 1 — `xsk_zc_eligible` recognition probe (patch `0093`) — 2026-05-29
 
-Step 7 (true zero-copy RX, §6.1.7 three-mechanism plan: *Recognise / Recover / Program*) is the only unblocked kernel-code milestone after the M3-3b/c/d struct contracts landed (`0086b`/`0090a`/`0091a`) and Gate 3 was shown methodology-bound rather than driver-bound (§6.1.8a / §6.1.8b). Mechanism 3 (reprogram the FMan RX port's primary BPID to the XSK pool's BPID) is the **hardware-risky** step — §6.1.8 records three DUT crashes from under-load XSK RX (`list_add` free-list corruption in `xp_alloc()`, a `dcache_clean_poc` paging fault, and a 52 s soft-lockup). Per the de-risking cadence that landed the observational `xsk_rx_branch` counter (`0083`) *before* the productive RX branch (`0084`), step 7 is split into small individually-DUT-validated sub-increments, and this is **sub-increment 1: mechanism 1 (Recognise) only, as a strictly-diagnostic counter with zero datapath change.**
+Step 7 is split into small individually-DUT-validated sub-increments because mechanism 3 (FMan RX-port BPID reprogram) is hardware-risky (§6.1.8 records three under-load crashes). **Sub-increment 1 = mechanism 1 (Recognise) only**, a strictly-diagnostic counter with zero datapath change. `0093` adds the 17th `xsk_*` ethtool counter `xsk_zc_eligible`, bumped inside the existing `0083` RCU read-section in `rx_default_dqrr()` when an FD reaches a band with a bound XSK pool AND `fd->bpid == priv->xsk_bpid[_band]` — the exact arithmetic mechanism 2 (Recover) will rely on. Byte-identical to mainline on `default`/`vpp` (no XSK pool → equality never holds → dead code). It proves the FD-recognition arithmetic in the live hot path is correct before any hardware-risky reprogram, and becomes the observability oracle once the reprogram lands.
 
-**What `0093` does.** A 17th `xsk_*` ethtool counter, `xsk_zc_eligible`, is added to the contiguous `u64` block in `struct dpaa_priv` (after `xsk_tx_conf_zc`) and to `dpaa_stats_xsk[]` (the value-emit loop is length-driven, so no loop edit is needed). It is bumped inside the **existing `0083` RCU read-section** in `rx_default_dqrr()`: when an FD reaches a qband with a bound XSK pool (`rcu_dereference(priv->xsk_pool[_band]) != NULL`, already tested by `0083`'s `xsk_rx_branch`), the new arm additionally tests `fd->bpid == priv->xsk_bpid[_band]`. That equality is the exact arithmetic mechanism-2 (Recover) will rely on to decide whether an FD was DMA'd by FMan into an XSK-pool BMan chunk versus a kernel page.
-
-**Why it is byte-identical to mainline on `default`/`vpp`.** No XSK pool is ever bound on the `default` flavor, so `priv->xsk_bpid[band]` stays `0` while a live FD always carries a non-zero kernel BPID — the equality never holds, the counter never fires, and packet handling is unchanged. The probe is RCU-safe (reuses `0083`'s `rcu_read_lock()`/`rcu_dereference()` already proven on the DUT) and dead code on the only flavor `dpaa1` CI currently builds.
-
-**Why it is the right next move.** It proves the FD-recognition arithmetic in the live RX hot path is correct **before** any hardware-risky FMan-port-BPID reprogram (sub-increment 2) is wired into the datapath. Once sub-increment 2 lands, this counter immediately becomes the observability oracle for whether the BPID reprogram actually caused FMan to DMA into XSK chunks — a non-zero `xsk_zc_eligible` after the reprogram is the success signal; a zero value means the reprogram silently failed and true ZC is not active.
-
-**Validation (host, 2026-05-29):** patch applies cleanly via `git apply --whitespace=nowarn` on the cumulative `0068…0091a` stack baseline; `dpaa_eth.o` + `dpaa_ethtool.o` cross-compile clean (`LOCALVERSION=-vyos`, arm64); comment-terminator hazard grep (`\*/[a-zA-Z]`) empty; drift-hunk grep empty. The bare `patch-health.sh --flavor default` per-patch-against-pristine run lists `0093` among the 22 stack-dependent "fails" — expected, because `0093`'s context (`xsk_tx_conf_zc` at `dpaa_eth.h:288`, the `0083` probe block) only exists after `0083`/`0085` apply; the meaningful signal is the clean cumulative apply + compile.
-
-**Sub-increment 2 (read side, patch `0094`) + sub-increment 3 (write side, future):** see §6.1.11. Following the same de-risking cadence, the originally-monolithic "sub-increment 2 = reprogram WRITE + `xsk_buff_recv()` recover" was split: `0094` lands only the *read side* of mechanism 3 (observe that the reprogram target BPID is distinct, zero datapath change); the hardware-risky reprogram WRITE plus the recover path move to sub-increment 3, gated behind the FILL-ring-empty guard audit flagged in §6.1.8 item 5 (`dpaa1+xsk_bman_refill+fill_ring_invariant`) and DUT-validated under load incrementally.
+> Host validation detail (cumulative apply/compile, patch-health stack-dependent-fail rationale): Qdrant `topic=dpaa1-afxdp-spec-milestone-archive`.
 
 #### 6.1.11 True-ZC RX sub-increment 2 — `xsk_zc_rx_armed` attach-time arm observability (patch `0094`) — 2026-05-29
 
-Sub-increment 1 (`0093`, §6.1.10) proved mechanism-1 (*Recognise*) arithmetic in the live RX hot path. The §6.1.10 plan named "sub-increment 2" as mechanism-3's FMan-port-BPID reprogram WRITE *plus* mechanism-2's `xsk_buff_recv()` recover, landed together. Re-applying the exact `0083`→`0084` / `0093` de-risking discipline (observe before write), that monolith is **split**: `0094` is the strictly-diagnostic *read side* of mechanism 3, and the hardware-risky reprogram WRITE + recover becomes **sub-increment 3**.
+Re-applying the observe-before-write discipline, the original monolithic "sub-increment 2 = reprogram WRITE + recover" is split: `0094` is the strictly-diagnostic *read side* of mechanism 3, the hardware-risky WRITE moves to a later sub-increment. `0094` adds the 18th counter `xsk_zc_rx_armed`, bumped once per successful `xsk_pool_attach()` when the dedicated XSK BPID (`priv->xsk_bpid[queue_id]`) differs from the kernel page-pool BPID the FMan RX port currently DMAs into (`priv->dpaa_bp->bpid`). **No `fman_port` write happens** — copy-mode RX is preserved bit-for-bit. It proves, from userspace at attach time before any hardware write, that the reprogram has a distinct, meaningful target (`xsk_bpid != dpaa_bp->bpid`); a zero value would catch a `bman_new_pool()` BPID collision dormant, before it could crash the DUT.
 
-**What `0094` does.** An 18th `xsk_*` ethtool counter, `xsk_zc_rx_armed`, is added to the contiguous `u64` block in `struct dpaa_priv` (after `xsk_zc_eligible`) and to `dpaa_stats_xsk[]` (length-driven value-emit loop, no loop edit). It is bumped **once per successful `xsk_pool_attach()`** in `af_xdp_pool_main.c` — after the BMan pool is created/seeded (`0075b` steps 3–4) and after `rcu_assign_pointer()` publishes the pool, but before `return 0` — when the dedicated XSK BPID just allocated (`priv->xsk_bpid[queue_id]`, via `bman_new_pool()`) differs from the kernel page-pool BPID the FMan RX port is *currently* programmed to DMA into (`priv->dpaa_bp->bpid`). A one-line `dev_info(ndev->dev.parent, …)` records the current-vs-target BPID pair. **No `fman_port` write happens** — FMan keeps DMAing into the kernel page pool, so copy-mode RX (`0089`) is preserved bit-for-bit.
+> Host validation detail and CI `cp`-line wiring: Qdrant `topic=dpaa1-afxdp-spec-milestone-archive`.
 
-**Why this is the read side of mechanism 3.** True ZC needs FMan's RX port primary pool reprogrammed from `dpaa_bp->bpid` to `xsk_bpid[band]` (the MURAM write that §6.1.8 records three DUT crashes around). `0094` performs exactly the *read* that the sub-increment-3 WRITE will consume to choose the new primary pool, and proves — from userspace, at attach time, before any hardware write — that the reprogram has a **distinct, meaningful target** (`xsk_bpid != dpaa_bp->bpid`). A non-zero `xsk_zc_rx_armed` after a bind is the precondition signal; a zero value would mean the dedicated BPID collided with the kernel pool BPID (a `bman_new_pool()` anomaly) and sub-increment 3 must suppress the reprogram — caught here, dormant, before it can crash the DUT.
+#### 6.1.12 True-ZC RX sub-increment 3 GATE — `xsk_fill_guard_block` FILL-ring double-release guard (patch `0095`) — 2026-05-29
 
-**Why it is byte-identical to mainline on `default`/`vpp`.** The entire `af_xdp_pool` attach path is only reached on an `XDP_ZEROCOPY` bind, which never happens on the `default` flavor — the counter stays 0 and RX/TX are untouched. Even under a future ZC consumer, `0094` only *reads* two BPIDs already in `struct dpaa_priv` and bumps a counter; the datapath is unchanged.
+Before the hardware-risky WRITE lands, the observe/assert-before-write cadence requires an in-driver assertion that the XSK FILL-ring single-producer invariant actually holds. The §6.1.8 root cause (a FILL-ring producer outrunning the consumer hands the same chunk to `xp_alloc()` twice) escalates from a dropped packet (copy-mode) to an **FMan DMA overwrite of a live chunk** once FMan DMAs directly into XSK-pool chunks. `0095` adds the 19th counter `xsk_fill_guard_block`: inside `af_xdp_pool_napi_refill()`, after `xsk_buff_alloc_batch()`, each per-handle DMA cookie is scanned against the `bmbs[]` already filled this batch; on a duplicate it bumps the counter, warns rate-limited, and **skips the whole round's `bman_release()`** (drop > corrupt — a duplicate proves the SPSC cursor is already inconsistent so the whole batch is untrusted). Byte-identical to `0084` v3 under a correct producer; the guard never fires.
 
-**Validation (host, 2026-05-29):** the three additive edits land in `af_xdp_pool_main.c` (attach success arm, using the in-scope `ndev` from `0075a`), `dpaa_eth.h` (field after `xsk_zc_eligible`), and `dpaa_ethtool.c` (string after `"xsk_zc_eligible"`). Comment-terminator hazard grep (`\*/[a-zA-Z]`) empty; CI wiring added a `cp` line for `0094` between the `0093` and `101-sfp-rollball` lines in `bin/ci-setup-kernel.sh` (sort order `0093 < 0094 < 101` preserved). As with `0093`, the bare `patch-health.sh` per-patch-against-pristine run will list `0094` among the stack-dependent "fails" (its context — `xsk_zc_eligible` from `0093`, the `0075b` attach success block — only exists after the cumulative stack applies); the meaningful signal is the clean cumulative apply + compile on the DUT build.
+**Sub-increment 4 entry conditions after `0095`** (all observable from userspace before any MURAM write): (1) `xsk_zc_rx_armed > 0` after a bind (`0094` — distinct target); (2) `xsk_fill_guard_block == 0` under sustained load (`0095` — FILL producer well-behaved); (3) `xsk_zc_eligible` (`0093`) growing after the reprogram lands (per-FD success oracle).
 
-**Sub-increment 3 (not in `0094`, hardware-risky — the actual WRITE):** on `xsk_pool_attach()` success, reprogram the FMan RX port's primary BPID to `priv->xsk_bpid[band]` (the MURAM write), and recover the `xdp_buff` from the XSK chunk via `xsk_buff_recv(pool, dma_addr)` in `rx_default_dqrr()` instead of `phys_to_virt(addr) + build_skb()`. Must be gated behind the FILL-ring double-release guard audit (`0095`, §6.1.12) and the FILL-ring-empty guard (§6.1.8 item 5, `dpaa1+xsk_bman_refill+fill_ring_invariant`), use `xsk_zc_rx_armed` (this patch) as the arm precondition and `xsk_zc_eligible` (`0093`) as the per-FD success oracle, and be DUT-validated under load incrementally with a short hold first. The `0095` gate (`xsk_fill_guard_block` staying 0 under load) is the hard safety precondition: once the reprogram lets FMan DMA into XSK chunks, a FILL-ring duplicate escalates from a dropped packet to an FMan overwrite of a live chunk.
-
-#### 6.1.12 True-ZC RX sub-increment 3 GATE — `xsk_fill_guard_block` FILL-ring double-release guard audit (patch `0095`) — 2026-05-29
-
-Sub-increment 3 is the hardware-risky true-ZC RX WRITE: reprogram the FMan RX port's primary BPID to the XSK pool's BPID (the MURAM write §6.1.8 records three DUT crashes around) and recover the `xdp_buff` via `xsk_buff_recv()` in `rx_default_dqrr()`. Before that write lands, the strict observe/assert-before-write cadence (`0083`→`0084`, `0093`→`0094`→this) requires one more **gate**: an in-driver assertion that the XSK FILL-ring single-producer invariant actually holds on this hardware. `0095` is that gate — a strictly-diagnostic + crash-defensive guard, no datapath change on any shipping path.
-
-**Why the gate exists — the §6.1.8 root cause becomes a DMA-speed hazard.** §6.1.8 records that the under-load XSK RX crashes (`list_add` free-list corruption in `xp_alloc()`, a `dcache_clean_poc` paging fault, a 52 s soft-lockup) all traced to a FILL-ring producer outrunning the consumer so the **same UMEM chunk was handed to `xp_alloc()` twice** → free-list corruption → softirq panic. The probe-side fix added userspace `skipped_recycle` backpressure ("drop > corrupt"). But `0084`'s `af_xdp_pool_napi_refill()` v3 BMAN HW CONTRACT (c) explicitly documents that "the driver cannot detect a userspace duplicate" — it relies entirely on `xsk_buff_alloc_batch()` honouring the SPSC contract. That is acceptable for the copy-mode RX datapath shipping today (`0089`): a duplicate chunk at worst costs an IVCI on the second `bman_release()`. It is **not** acceptable as a precondition for sub-increment 3: once FMan DMAs directly into XSK-pool chunks, a duplicate chunk in the BMan pool means FMan can write a frame into a chunk userspace still believes is free — the §6.1.8 in-flight overwrite, now at hardware DMA speed instead of a userspace recycle bug.
-
-**What `0095` does.** A 19th `xsk_*` ethtool counter, `xsk_fill_guard_block`, is added to the contiguous `u64` block in `struct dpaa_priv` (after `xsk_zc_rx_armed`) and to `dpaa_stats_xsk[]` (length-driven value-emit loop, no loop edit). Inside `af_xdp_pool_napi_refill()`, after `n = xsk_buff_alloc_batch(pool, handles, ARRAY_SIZE(handles))`, each per-handle DMA cookie is scanned against the `bmbs[]` entries already filled **in this batch**. On a duplicate hit it sets a per-round `dup` flag, bumps `priv->xsk_fill_guard_block`, emits a `dev_warn_ratelimited()`, and — critically — **skips the whole round's chunked `bman_release()`** so the freed-twice chunk(s) are never deposited into BMan. The FILL ring refills cleanly on the next NAPI tail.
-
-**Why block the whole round rather than just the duplicate.** A duplicate is proof the SPSC cursor is already inconsistent for this fill cycle, so the *other* addresses in the same batch are no longer trustworthy either (a corrupted producer cursor can return arbitrary stale handles). The conservative, crash-proof action is to drop the entire batch and let the next clean alloc cycle repopulate — the same "drop > corrupt" principle the §6.1.8 probe fix (`skipped_recycle`) applies on the userspace side, now enforced in-driver at the `bman_release()` boundary.
-
-**Why it is byte-identical to mainline / `0084` v3 on `default`/`vpp`.** On `default`/`vpp` with no XSK pool bound, `af_xdp_pool_napi_refill()` walks zero qbands and the new code is never reached. Even with a pool bound, `xsk_buff_alloc_batch()` honouring SPSC means no duplicate is ever seen, `dup` stays false, and the release path is byte-identical to `0084` v3. The guard never fires under a correct producer.
-
-**What this is NOT.** It is not the duplicate-detection that belongs in the `xsk_buff` core (`0084` contract (c) is correct that the SPSC contract makes duplicates a userspace/core bug, not a driver bug). It is a defensive DUT-safety assertion specific to the LS1046A true-ZC path, because here a duplicate escalates from "drop a packet" to "FMan DMA overwrite of a live chunk". A non-zero `xsk_fill_guard_block` on a DUT run is the audit red-flag that the FILL-ring producer is misbehaving and sub-increment 3 must NOT be enabled until it is root-caused — exactly the audit signal this gate exists to provide.
-
-**Validation (host, 2026-05-29):** three additive edits land in `af_xdp_pool_main.c` (the `dup` local + the per-batch duplicate scan + the `if (dup) {...} else if (n) {...}` release-gate, using `priv->net_dev->dev.parent` for the warn since `af_xdp_pool_napi_refill()` has no in-scope `ndev`), `dpaa_eth.h` (field after `xsk_zc_rx_armed`), and `dpaa_ethtool.c` (string after `"xsk_zc_rx_armed"`). Comment-terminator hazard grep (`\*/[a-zA-Z]`) empty; CI wiring added a `cp` line for `0095` between the `0094` and `101-sfp-rollball` lines in `bin/ci-setup-kernel.sh` (sort order `0093 < 0094 < 0095 < 101` preserved). The anchor `n = xsk_buff_alloc_batch(pool, handles, ARRAY_SIZE(handles));` is unique to `af_xdp_pool_napi_refill()` and disambiguates from the structurally-similar attach-time seed loop (`0075b`) that also does `bmbs[i].data = 0;` + `bm_buffer_set64()`. As with `0093`/`0094`, the bare `patch-health.sh` per-patch-against-pristine run will list `0095` among the stack-dependent "fails" (its `af_xdp_pool_main.c` / `dpaa_eth.h` / `dpaa_ethtool.c` context only exists after the cumulative `0068…0094` stack applies); the meaningful signal is the clean cumulative apply + compile on the DUT build.
-
-**Sub-increment 3 entry conditions after `0095`.** The hardware-risky reprogram WRITE is now gated behind THREE preconditions, all observable from userspace before any MURAM write: (1) `xsk_zc_rx_armed > 0` after a bind (`0094` — the reprogram has a distinct target); (2) `xsk_fill_guard_block == 0` under sustained load (`0095` — the FILL producer is well-behaved, so FMan DMA into XSK chunks cannot overwrite a live chunk); and (3) the per-FD success oracle `xsk_zc_eligible` (`0093`) growing after the reprogram lands. Only when (1) and (2) both hold on a DUT run does the productive reprogram WRITE + `xsk_buff_recv()` recover (now reclassified as **sub-increment 4**, see §6.1.13) become safe to enable, incrementally with a short hold first.
+> Host validation detail, anchor-disambiguation note, and CI `cp`-line wiring: Qdrant `topic=dpaa1-afxdp-spec-milestone-archive`.
 
 #### 6.1.13 True-ZC RX sub-increment 3 — `xsk_zc_rx_recovered` Recover read-side, dormant (patch `0096`) — 2026-05-29
 
-The true-ZC RX plan (§6.1.7) has three mechanisms: **Recognise** (mechanism 1), **Recover** (mechanism 2), **reProgram** (mechanism 3). The observe/assert-before-write cadence has now landed the observable half of two of them — Recognise (`0093` `xsk_zc_eligible`) and reProgram-read (`0094` `xsk_zc_rx_armed`) — plus the FILL-ring crash-defense gate (`0095` `xsk_fill_guard_block`). `0096` lands the last *read-only* mechanism: the dormant read side of mechanism 2 (Recover), a 20th `xsk_*` counter `xsk_zc_rx_recovered`. After `0096`, every one of the three mechanisms has its observable half landed and only a single hardware-risky reProgram WRITE plus the productive recover body remains.
+`0096` lands the last *read-only* mechanism — the dormant read side of mechanism 2 (Recover) — as the 20th counter `xsk_zc_rx_recovered`. Inside the `0083`/`0093` RCU read-section, after the recognition test, a guarded Recover decision bumps the counter when the band is armed (`xsk_zc_rx_armed`, `0094`) AND the FILL guard has never fired (`!xsk_fill_guard_block`, `0095`); the FD then continues through the UNCHANGED skbuf path (no `xsk_buff_recv()`, no `xdp_do_redirect()`). After `0096` every one of the three mechanisms has its observable half landed and only the hardware-risky reProgram WRITE plus the productive recover body remains. Byte-identical to mainline on `default`/`vpp` (bpid-match false → dead code) — the cost is a single integer compare extending the `0093` test.
 
-**Why land a dormant Recover branch before the reprogram WRITE.** This mirrors exactly how `0094` landed mechanism-3's read side before its write: the recovery decision is compiled, reachable, and arithmetically proven, but it can NEVER fire on the shipping datapath because mechanism 3 (the FMan RX port BPID reprogram, §6.1.7 line "Program") has not run. While FMan keeps DMAing into the kernel page pool (`priv->dpaa_bp->bpid`), every live FD carries the kernel page BPID, so `fd->bpid == priv->xsk_bpid[band]` is false and the Recover branch is dead code — exactly as on the `default`/`vpp` shipping path today. Landing it now closes the last read-only gap and makes the Recover *decision point* observable from userspace (`ethtool -S | grep xsk_zc_rx_recovered`), so the instant the future reprogram lands and FMan starts DMAing into XSK chunks, this counter climbs in lock-step with `xsk_zc_eligible` — proving the Recover branch is taken for exactly the FDs the Recognise test flags, with zero datapath risk added by `0096` itself.
+**Scope finding (the original blocker) — and its resolution.** During `0096` authoring it was confirmed that no FMan RX-port external-BPID-reprogram API existed in the dpaa1 board stack — the productive FMan PCD subsystem (`fman_pcd_*`) lived ONLY in the ASK flavor patches. **This forward-port is now LANDED:** commit `f307193` (board patches `0092`/`0097`/`0098`/`0099`/`0100`) forward-ported the FMan PCD subsystem into the common board stack via the bridge idiom (fman-side TU defines silicon + EXPORTs neutral-spec `_install`/`_destroy`, owns MURAM; dpaa-side `dpaa_fman_caps.c` gates on caps and delegates; public `include/linux/fsl/fman_pcd.h` carries the neutral contract). The `fman_pcd_*` accessors that sub-increment 4 needs now exist in the common board stack, so **sub-increment 4 is no longer blocked on the forward-port** — it remains gated only on the three userspace-observable preconditions above (§6.1.12) plus incremental DUT validation with a short hold first.
 
-**What `0096` does (three additive, datapath-neutral edits).** (a) `dpaa_eth.c`: inside the existing `0083`/`0093` RCU read-section in `rx_default_dqrr()`, within the `if (_xp)` arm, the `0093` recognition test `if (fd->bpid == priv->xsk_bpid[_band])` is rebraced to a block; after the `priv->xsk_zc_eligible++;` line a guarded Recover decision is added — when the band is armed for true-ZC (`priv->xsk_zc_rx_armed`, `0094`) AND the FILL-ring guard has never fired (`!priv->xsk_fill_guard_block`, `0095`), bump `priv->xsk_zc_rx_recovered`. The FD then continues through the UNCHANGED mainline skbuf path — no `xsk_buff_recv()`, no `xdp_do_redirect()`, no datapath divergence. (b) `dpaa_eth.h`: `u64 xsk_zc_rx_recovered;` appended to the contiguous `xsk_*` counter block (after `xsk_fill_guard_block`). (c) `dpaa_ethtool.c`: `"xsk_zc_rx_recovered"` appended to `dpaa_stats_xsk[]` (length-driven value-emit loop, no loop edit). The productive recovery body (recover the `xdp_buff` from the XSK chunk and `xdp_do_redirect()` into the XSKMAP instead of `build_skb()`) is the deferred **sub-increment 4** work.
+**Operator DUT gate reader — `xsk-zc-check`.** The four sub-increment-4 entry-gate counters (`xsk_zc_eligible`, `xsk_zc_rx_armed`, `xsk_fill_guard_block`, `xsk_zc_rx_recovered`) are surfaced to `board/scripts/xsk-zc-check` (installed to `/usr/local/bin/xsk-zc-check`). It reads the 20-counter `xsk_*` suite via `ethtool -S` on eth3/eth4 and renders the §6.1.12 verdict — **dormant** (no ZC bind, all `xsk_zc_*` 0, the expected shipping state), **ZC-armed** (`xsk_zc_rx_armed > 0` AND `xsk_fill_guard_block == 0` → preconditions (1)+(2) MET), or **fault** (`xsk_fill_guard_block > 0` / hard attach/DMA error → WRITE must stay disabled). Exit 0/1/2 — usable as a Nagios/monit probe and the single command to confirm gate state before sub-increment 4 lands.
 
-**Why byte-identical to mainline / `0095` on default/vpp.** On `default` no XSK pool is ever bound, so `priv->xsk_bpid` stays 0 while a live FD always carries a non-zero kernel page BPID — the bpid-match test is false and the Recover branch is dead code. Even on a future `vpp` flavor that binds `XDP_ZEROCOPY`, until sub-increment 4 reprograms the FMan RX port BPID the FMan keeps DMAing into the kernel page pool, so `fd->bpid` remains the kernel BPID, the branch still never fires, and copy-mode RX (`0089`) is preserved bit-for-bit. The added hot-path cost is a single integer compare already dominated by the `0093` test it extends.
-
-**Scope finding — the reprogram WRITE requires an FMan-accessor forward-port.** During `0096` authoring it was confirmed that **no mainline FMan RX-port external-BPID-reprogram API exists in the dpaa1 board stack** — the productive FMan PCD subsystem (`fman_pcd_*`) lives ONLY in the ASK flavor patches (`kernel/flavors/ask/patches/0004…0065`), NOT in the board AF_XDP stack. Implementing the actual mechanism-3 MURAM write therefore requires a multi-week forward-port (the same effort the M3-3b/c/d struct-contract sessions deferred). This reclassifies the original "sub-increment 3 WRITE" as **sub-increment 4**, gated behind: (1) `xsk_zc_rx_armed > 0` (`0094`), (2) `xsk_fill_guard_block == 0` under load (`0095`), (3) the FILL-ring-empty guard (§6.1.8 item 5), (4) the FMan-port-BPID reprogram accessor forward-port, plus DUT validation incrementally with a short hold first.
-
-**Validation (host, 2026-05-29):** three additive edits land in `dpaa_eth.c` (the `0093` test rebraced to a block + the guarded `xsk_zc_rx_recovered++` Recover decision; hunk header `@@ -2851,20 +2851,42 @@`, OLD = 18 context + 2 deletions = 20, NEW = 18 context + 24 additions = 42), `dpaa_eth.h` (field after `xsk_fill_guard_block`, hunk `@@ -338,6 +338,23 @@`), and `dpaa_ethtool.c` (string after `"xsk_fill_guard_block"`, hunk `@@ -73,6 +73,7 @@`). The `0093` recognition test in the post-`0093` tree is UNBRACED, so `0096` deletes the two unbraced lines (`if (fd->bpid == priv->xsk_bpid[_band])` and `priv->xsk_zc_eligible++;`) and re-adds them braced — the header totals are unchanged by the rebrace (only per-line `+`/`-`/` ` prefixes flip). Comment-terminator hazard grep (`\*/[a-zA-Z]`) empty; CI wiring added a `cp` line for `0096` between the `0095` and `101-sfp-rollball` lines in `bin/ci-setup-kernel.sh` (sort order `0093 < 0094 < 0095 < 0096 < 101` preserved). As with `0093`/`0094`/`0095`, the bare `patch-health.sh` per-patch-against-pristine run will list `0096` among the stack-dependent "fails" (its context only exists after the cumulative `0068…0095` stack applies); the meaningful signal is the clean cumulative apply + compile on the DUT build.
-
-**Operator DUT gate reader — `xsk-zc-check`.** The four sub-increment-4 entry-gate counters (`xsk_zc_eligible` 0093, `xsk_zc_rx_armed` 0094, `xsk_fill_guard_block` 0095, `xsk_zc_rx_recovered` 0096) are surfaced to a single operator command, `board/scripts/xsk-zc-check`, installed to `/usr/local/bin/xsk-zc-check` by `bin/ci-setup-vyos-build.sh` (mirroring the `sfp-check`/`fan-check`/`caam-check` install convention). It reads the 20-counter `xsk_*` suite via `ethtool -S` on `eth3`/`eth4` (override with explicit interface args) and renders the §6.1.12 entry verdict: **dormant** (no ZC bind — every `xsk_zc_*` counter 0, the expected and correct state on a shipping `default`/`vpp` image), **ZC-armed** (`xsk_zc_rx_armed > 0` AND `xsk_fill_guard_block == 0` → sub-increment-4 preconditions (1)+(2) MET), or **fault** (`xsk_fill_guard_block > 0`, or a hard `xsk_pool_attach_fail`/`xsk_dma_map_fail`/`xsk_pamu_window_fail` — sub-increment-4 reprogram WRITE must stay disabled). Exit 0 healthy / 1 fault / 2 not-LS1046A-or-no-`xsk_*`-counters, so it doubles as a Nagios/monit probe and as the single command an operator runs to confirm the §6.1.12/§6.1.13 gate state before the sub-increment-4 forward-port lands. It is the read-side companion to the four counters: the patches make the gate *observable in the kernel*, this script makes the gate *checkable on the DUT*.
+> Host validation detail (hunk arithmetic, rebrace note) and CI `cp`-line wiring: Qdrant `topic=dpaa1-afxdp-spec-milestone-archive`.
 
 #### 6.1.14 True-ZC RX sub-increments 1–3 — DUT validation (dormant read-side) — 2026-05-29
 
-Sub-increments 1–3 (the Recognise/Recover read-side observability counters
-`0093`–`0096`) are now **dut-validated** on real LS1046A hardware (tracker
-status bumped from `landed`). Sub-increment 4 (the FMan-port-BPID MURAM
-reprogram WRITE plus `xsk_buff_recv()`) remains **deferred** pending an
-`fman_pcd_*` forward-port — no datapath WRITE was exercised in this run.
+Sub-increments 1–3 (Recognise/Recover read-side counters `0093`–`0096`) are **dut-validated** on real LS1046A hardware. Build under test: ISO `vyos-2026.05.29-1554-rolling-LS1046A-vpp-arm64`, kernel `6.18.33-vyos`, CI run `26647449274` (`dpaa1`, `FLAVOR=vpp`). All five gates GREEN: G1 eth0–eth4 expose the full 20-entry `xsk_*` suite; G2 the four entry-gate counters read 0 (expected dormant/no-ZC-bind state); G3 `/usr/local/bin/xsk-zc-check` reports healthy, exits 0; G4 dmesg clean of IVCI/`list_add`/lockup/Oops/BUG, `xsk_fill_guard_block` 0 on all ports; G5 thermal 54–55 °C all zones. Sub-increment 4 (the FMan-port-BPID MURAM reprogram WRITE plus `xsk_buff_recv()`) is now unblocked by the `f307193` PCD forward-port (§6.1.13) and remains the only outstanding step-7 work.
 
-**Build under test:** ISO `vyos-2026.05.29-1554-rolling-LS1046A-vpp-arm64`,
-kernel `6.18.33-vyos` (build stamp Fri May 29 15:57:07 UTC 2026), CI run
-`26647449274` (branch `dpaa1`, `FLAVOR=vpp`).
-
-**Gate results (all GREEN):**
-
-- **G1 — counter surface:** eth0–eth4 all bound to `fsl_dpa`; each port
-  exposes the full 20-entry `xsk_*` ethtool suite via
-  `/usr/sbin/ethtool -S <iface>`.
-- **G2 — dormant gate counters:** the four entry-gate counters
-  (`xsk_zc_eligible`, `xsk_zc_rx_armed`, `xsk_fill_guard_block`,
-  `xsk_zc_rx_recovered`) read 0 on both eth3 and eth4 — the expected
-  shipping (no-ZC-bind) state.
-- **G3 — health probe:** `/usr/local/bin/xsk-zc-check` (10032 bytes) reports
-  "all probed interfaces healthy (dormant or ZC-armed with FILL-guard clean)"
-  and exits 0.
-- **G4 — kernel cleanliness:** `sudo dmesg` grep for
-  `Invalid Command Verb|list_add|soft lockup|rcu_sched|Unable to handle|Oops|BUG:|free-list`
-  is empty; `xsk_fill_guard_block` is 0 on all five ports.
-- **G5 — thermal:** ddr 55, serdes 54, fman 55, cluster 55, sec 54 °C
-  (54–55 °C across all zones).
-
-**vbash gotcha:** on the DUT, a bare `ethtool` is intercepted by VyOS op-mode
-("Invalid command: [ethtool]"); always invoke the absolute path
-`/usr/sbin/ethtool` from a config/op-mode shell.
-
-Full per-port counter dumps, ftrace evidence, and gate pass/fail detail are
-archived in Qdrant under `topic=dpaa1-afxdp-spec-milestone-archive` (per the
-milestone-tracker convention in line 28 of this spec).
+> Full per-port counter dumps, ftrace evidence, and gate pass/fail detail: Qdrant `topic=dpaa1-afxdp-spec-milestone-archive`. (vbash gotcha: invoke `/usr/sbin/ethtool` by absolute path — a bare `ethtool` is intercepted by VyOS op-mode.)
 
 ### 6.2 ASK-only — Dynamic CC tree, HC reconfig, nft offload bridge
 
