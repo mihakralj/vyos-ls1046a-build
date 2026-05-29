@@ -1,0 +1,128 @@
+From: ci <ci@local>
+Date: Thu, 28 May 2026 23:40:00 +0000
+Subject: [PATCH] dpaa: FMan CC productive key/tree struct layout (M3-3b)
+
+Replaces the opaque `struct fman_cc_static_tree`/`struct fman_cc_key`
+`{ u32 reserved; }` placeholders from 0086 with the productive 5-tuple
+classification-key and static-tree layouts per spec sec 5.4.  This fixes
+the CC steering API *contract* (the documented "API is fixed now so
+downstream consumers can wire calls today" precondition) so consumers
+(af_xdp_pool qband-select, vyos-1x set-system-offload-classify CLI, ASK2
+flowtable bridge) can build real specs against stable field names.
+
+The four `fman_cc_tree_*` entry points remain `-ENOTSUPP` stubs: the
+silicon AD-table / group-table CONT_LOOKUP encoding (LS1046A RM 8.7.4.1)
+lands in the productive install/add_key bodies in a follow-up patch.
+
+  - FMAN_CC_PROTO_* / FMAN_CC_ETHERTYPE_* selectors
+  - struct fman_cc_key: ethertype/proto/is_ipv6 + v4/v6 addr+mask +
+    ports + target_qband + hm_handle (chains to spec sec 5.5 HM node)
+  - struct fman_cc_static_tree: num_keys + miss_qband + keys[32]
+    (FMAN_CC_MAX_STATIC_KEYS bounds the ~5 KiB MURAM static budget)
+
+Header compiles clean (dpaa_fman_caps.o, ARCH=arm64, zero warnings).
+
+Spec: specs/dpaa1-afxdp-modernization-spec.md sec 5.4.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+index 9c6cc8d..79bc611 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+@@ -101,16 +101,88 @@ int  fman_cc_tree_add_key(struct fman *fm, u8 port_id,
+ int  fman_cc_tree_remove_key(struct fman *fm, u8 port_id, u32 handle);
+ void fman_cc_tree_destroy(struct fman *fm, u8 port_id);
+ 
+-/* Opaque types referenced by the stub signatures; concrete layout
+- * lands with the productive implementation.  Declaring them here keeps
+- * callers source-compatible across the stub -> productive transition.
++/* Productive CC (Coarse Classification) data structures (spec sec 5.4).
++ *
++ * The FMan PCD Custom Classifier matches a fixed 5-tuple extracted by
++ * the Parser (post-HXS) against a table of keys held in MURAM; each key
++ * that hits steers the frame to a target RX FQ (and thereby a qband /
++ * CPU per spec sec 5.2). These structs describe the key/tree at the API
++ * boundary; the silicon AD-table / group-table encoding (CONT_LOOKUP AD
++ * format per LS1046A RM 8.7.4.1) is built inside the productive
++ * fman_cc_tree_install()/add_key() bodies (follow-up patch).
++ *
++ * Match semantics: a field participates in the match iff the
++ * corresponding *_mask bit(s) are set; mask 0 = wildcard (don't-care).
++ * All multi-byte fields are host-endian at the API; the install body
++ * converts to the FMan big-endian MURAM layout.
+  */
+-struct fman_cc_static_tree {
+-	u32 reserved;          /* productive layout TBD per spec sec 5.4 */
+-};
+ 
++/* L4 protocol selector for fman_cc_key.proto (IANA numbers). 0 = any. */
++#define FMAN_CC_PROTO_ANY	0
++#define FMAN_CC_PROTO_TCP	6
++#define FMAN_CC_PROTO_UDP	17
++
++/* EtherType selector for fman_cc_key.ethertype (host-endian). 0 = any. */
++#define FMAN_CC_ETHERTYPE_ANY	0x0000
++#define FMAN_CC_ETHERTYPE_IPV4	0x0800
++#define FMAN_CC_ETHERTYPE_IPV6	0x86dd
++
++/**
++ * struct fman_cc_key - one exact/masked CC classification key
++ * @ethertype:    L2 EtherType to match (host-endian), 0 = wildcard
++ * @proto:        L4 protocol (FMAN_CC_PROTO_*), 0 = wildcard
++ * @src_ip:       source IPv4 (host-endian); IPv6 uses src_ip6 instead
++ * @dst_ip:       destination IPv4 (host-endian)
++ * @src_ip6:      source IPv6 (network byte order, 16 bytes)
++ * @dst_ip6:      destination IPv6 (network byte order, 16 bytes)
++ * @src_port:     L4 source port (host-endian), 0 = wildcard
++ * @dst_port:     L4 destination port (host-endian), 0 = wildcard
++ * @src_ip_mask:  prefix-style mask for src_ip (host-endian); 0 = any
++ * @dst_ip_mask:  prefix-style mask for dst_ip (host-endian); 0 = any
++ * @target_qband: qband [0 .. xsk_max_qbands-1] to steer matching frames
++ * @hm_handle:    HM node handle to chain after match (0 = no HM); the
++ *                value returned by fman_hm_node_install() per spec sec 5.5
++ * @is_ipv6:      when true, match src_ip6/dst_ip6 instead of src_ip/dst_ip
++ *
++ * A field is matched iff it (or its mask) is non-zero. The productive
++ * add_key() body rejects a key whose target_qband >= priv->xsk_max_qbands
++ * with -ERANGE and one whose hm_handle is non-zero on a build without
++ * FMAN_CAP_HM_NODES with -ENOTSUPP.
++ */
+ struct fman_cc_key {
+-	u32 reserved;          /* productive layout TBD per spec sec 5.4 */
++	u16 ethertype;
++	u8  proto;
++	u8  is_ipv6;
++	u32 src_ip;
++	u32 dst_ip;
++	u32 src_ip_mask;
++	u32 dst_ip_mask;
++	u8  src_ip6[16];
++	u8  dst_ip6[16];
++	u16 src_port;
++	u16 dst_port;
++	u16 target_qband;
++	u32 hm_handle;
++};
++
++/**
++ * struct fman_cc_static_tree - a port's complete static CC table
++ * @num_keys: number of valid entries in @keys
++ * @miss_qband: qband for frames matching no key (the tree's miss action);
++ *              default 0 maps to the existing RSS-hash default path
++ * @keys: the key array, evaluated in order; first match wins
++ *
++ * Passed to fman_cc_tree_install() for the static (default/vpp) lifecycle.
++ * The dynamic (ask) lifecycle builds the same key one-at-a-time via
++ * fman_cc_tree_add_key(). FMAN_CC_MAX_STATIC_KEYS bounds the static tree
++ * at the ~5 KiB MURAM budget from spec sec 3.5 (32 keys x ~150 B).
++ */
++#define FMAN_CC_MAX_STATIC_KEYS	32
++
++struct fman_cc_static_tree {
++	u16 num_keys;
++	u16 miss_qband;
++	struct fman_cc_key keys[FMAN_CC_MAX_STATIC_KEYS];
+ };
+ 
+ /* ------------------------------------------------------------------ *
