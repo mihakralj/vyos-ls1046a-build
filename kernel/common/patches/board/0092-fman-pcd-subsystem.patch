@@ -11,7 +11,7 @@ the dpaa1 M3-3b/M3-3c/M3-3d milestones (CC steering, HM offload,
 Policer) whose entry points currently return -ENOTSUPP.
 
 The subsystem introduces struct fman_pcd (per-FMan PCD state with a
-96 KiB MURAM budget and six per-engine list-heads), the lifecycle
+64 KiB MURAM budget and six per-engine list-heads), the lifecycle
 fman_pcd_init/release wired into fman_probe via
 devm_add_action_or_reset, the public accessors fman_get_pcd /
 fman_get_dev / fman_get_id, a MURAM-budget accessor, seven internal
@@ -267,13 +267,13 @@ index 0000000..e7a4ec8
 + *   parser HXS records              ~  4 KiB
 + *   replicator group records        ~  8 KiB
 + *
-+ * Total worst-case ~100 KiB. We reserve a 96 KiB partition; mainline's
-+ * fman_muram_alloc rounds up to 256-byte (gen_pool min_alloc_order=8) so
-+ * 98304 is an exact multiple. FMan v3 (LS1043/LS1046) has 384 KiB total
-+ * MURAM with mainline reserving the CAM and FIFO regions in fman.c, so
-+ * 96 KiB leaves headroom for future microcode revisions.
++ * Total worst-case ~100 KiB. The full 96 KiB partition does not fit the
++ * post-CAM/FIFO free MURAM window on LS1046A (6x1G + 2x10G ports) and is
++ * rejected with -ENOMEM at probe (PR14b regression). We reserve a 64 KiB
++ * partition; fman_muram_alloc rounds up to 256-byte (gen_pool
++ * min_alloc_order=8) so 65536 is an exact multiple.
 + */
-+#define FMAN_PCD_MURAM_RESERVED_BYTES	(96U * 1024U)
++#define FMAN_PCD_MURAM_RESERVED_BYTES	(64U * 1024U)
 +
 +/*
 + * Per-FMan PCD state. Allocated and freed by fman_pcd_init/release.

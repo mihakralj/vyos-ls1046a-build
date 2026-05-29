@@ -1,12 +1,14 @@
 # ASK2 — Modern Linux Implementation of FMan 210 Hardware Offload for VyOS
 
-**Status:** Draft v1.4 (supersedes v1.3). 2026-05-25. **PR14z21 result — Path A activation works, residual M2-CPU-gate blocker found.** Patch `0062-fman-pcd-drop-bogus-muram-reservation.patch` (commit 59f7209, pushed origin/ask20) removed the bogus 64 KiB MURAM reservation that was a v1.2-era OH-port leftover. On the mono DUT (CI run 26383417755, kernel `6.18.31-vyos`, image `2026.05.25-0359-rolling`) the boot-time install hook now reports `claimed=5 declined=0 failed=0` — Path A activation is verified. The M2 gate measured **6.955 Gbps (PASS ≥ 2 Gbps) but 21.40 % kernel-net CPU (FAIL ≤ 5 %, baseline 0.08 %)**. dmesg shows **327× `fman_pcd_manip_chain_create(3 manips) failed: -12`** (`-ENOMEM`) — every per-flow chain insert fails, so the per-hop L2 rewrite never enters silicon and the CPU still does the rewrite. Three hypotheses: (a) boot-time CC trees consume the 384 KiB MURAM gen_pool before per-flow chains can be allocated; (b) `chain_create` byte-size math wrong — 3 manips should fit in well under 1 KiB; (c) per-manip pre-allocation leak in the v1.3 manip-chain refactor. Diagnostic prescription: instrument `gen_pool_size()` / `gen_pool_avail()` at four checkpoints (probe end, post-CC-trees, first chain_create fail, after 327 fails) and log to dmesg. v1.4 is **not** an architecture revision — Path A + `FORWARD_FQ_WITH_MANIP` + YNL-only userspace from v1.3 remain authoritative. v1.4 only adds: §11.1 cross-reference to §13.3 manip-byte-budget constraint, §13.3 `fman_pcd_manip.c` annotation that `chain_create` must not exceed 1 KiB MURAM per chain, §15.4 Month-4 bullet updated to "PR14z21 partial pass, chain_create -ENOMEM instrumentation pending", §16 Risk #13 (residual MURAM exhaustion in per-flow chain_create).
+**Status:** Draft v1.5 (supersedes v1.4). 2026-05-29. **DPAA1 Alignment & Shared Substrate Integrated.** The previously custom, ASK-only patch `0004-fman-pcd-subsystem.patch` has been fully refactored, split, and integrated into the **common board patches (`0092`/`0097`–`0100`)** under commit `f307193`. FMan PCD is now a common built-in engine (`CONFIG_FSL_FMAN_PCD=y`) shared across `default`, `vpp`, and `ask` flavors. The `ask.ko` module aligns with the modernized `dpaa1` architecture by registering its callbacks through the unified **`dpaa_pcd_ops` and `dpaa_qmgmt_ops`** RCU-NULL-safe hooks (`dpaa_register_flavor_ops()`), completely eliminating ad-hoc pre-`register_netdev()` shims in the core driver. The M2 gate measured 6.955 Gbps, and with the common board PCD backplane now live, the per-hop L2 rewrite (MANIP) is handled via clean, shared `<linux/fsl/fman_pcd.h>` interfaces.
+
+**Status (prior, v1.4):** Draft v1.4 (supersedes v1.3). 2026-05-25. **PR14z21 result — Path A activation works, residual M2-CPU-gate blocker found.** Patch `0062-fman-pcd-drop-bogus-muram-reservation.patch` (commit 59f7209, pushed origin/ask20) removed the bogus 64 KiB MURAM reservation that was a v1.2-era OH-port leftover. On the mono DUT (CI run 26383417755, kernel `6.18.31-vyos`, image `2026.05.25-0359-rolling`) the boot-time install hook now reports `claimed=5 declined=0 failed=0` — Path A activation is verified. The M2 gate measured **6.955 Gbps (PASS ≥ 2 Gbps) but 21.40 % kernel-net CPU (FAIL ≤ 5 %, baseline 0.08 %)**. dmesg shows **327× `fman_pcd_manip_chain_create(3 manips) failed: -12`** (`-ENOMEM`) — every per-flow chain insert fails, so the per-hop L2 rewrite never enters silicon and the CPU still does the rewrite. Three hypotheses: (a) boot-time CC trees consume the 384 KiB MURAM gen_pool before per-flow chains can be allocated; (b) `chain_create` byte-size math wrong — 3 manips should fit in well under 1 KiB; (c) per-manip pre-allocation leak in the v1.3 manip-chain refactor. Diagnostic prescription: instrument `gen_pool_size()` / `gen_pool_avail()` at four checkpoints (probe end, post-CC-trees, first chain_create fail, after 327 fails) and log to dmesg. v1.4 is **not** an architecture revision — Path A + `FORWARD_FQ_WITH_MANIP` + YNL-only userspace from v1.3 remain authoritative. v1.4 only adds: §11.1 cross-reference to §13.3 manip-byte-budget constraint, §13.3 `fman_pcd_manip.c` annotation that `chain_create` must not exceed 1 KiB MURAM per chain, §15.4 Month-4 bullet updated to "PR14z21 partial pass, chain_create -ENOMEM instrumentation pending", §16 Risk #13 (residual MURAM exhaustion in per-flow chain_create).
 
 **Status (prior, v1.3):** Draft v1.3 (supersedes v1.2). 2026-05-24. **v1.3 course-correction per `plans/ASK2-MODERN-ARCHITECTURE-REVIEW.md` and `plans/ASK2-COURSE-CORRECTION.md`** — three concurrent reductions: (1) **Path A** (boot-time PCD installation via pre-`register_netdev()` hook in `fman_memac.c`) replaces graft; `ask_hw.c` graft logic + `ask_neigh.c` deferred-resolve are deleted; `ask_pcd_install()` is the new entry point; per-flow updates mutate CC table rows only (no MAC reconfig, no carrier flap). (2) **`FORWARD_FQ_WITH_MANIP`** (RM §8.7.3.4 + SDK `e_FM_PCD_CC_KEY_FLAG_DO_MANIP_BEFORE_NE`) deletes the OH-port detour: a CC match fires the L2-rewrite MANIP chain in one CC-action atom before the next-engine FQ enqueue, so the v1.2 OH-port subsystem (`fman_pcd_oh.c` ~800 LOC + DT bindings + manip-v1.2 ~400 LOC) is **deleted wholesale**; M2 patch 0004 reverts from ~10000 → ~7800 LOC; calendar reverts 8–9 → 7 months. (3) **No askd, no libask_fci.so.1, no ask-cli** — userspace control surface collapses to a single YNL family `ask` (YAML schema at `Documentation/netlink/specs/ask.yaml`); VyOS calls the kernel directly via `ynl` from Python; the AGENTS.md "ABI compatibility surfaces" sentence (preserve `libfci.so.1` SONAME, `/etc/cdx_*.xml`, `/dev/cdx_ctrl` symlink, `/etc/config/fastforward`) is deleted. Net LOC: oot-modules `ask.ko` ~1500 + `ask_bridge.ko` ~400, in-tree patches ~7800, userspace ~0 (was ~8000). `ask_hostcmd.c` + golden-hex tests + patch 0003 are deleted. Patches 0032/0034/0036/0038/0042/0043 (graft-era) are archived. Sections still labelled v1.1/v1.2 below remain authoritative for the silicon facts they document; only the v1.2 "pull OH-port forward into M2" decision and the v1.0/v1.1 "userspace daemon + libfci ABI" decisions are reversed.
 
 **Status (prior, v1.2):** Draft v1.2 (supersedes v1.1). 2026-05-16. Material change vs v1.1: **PR14g hardware-bringup discovered that the M2 perf gate (§11.1) is unreachable with the v1.1 §13 design** because the only silicon mechanism by which an FMan PCD chain can produce **L3-routed** forwarding offload (the §11.1 IPv4-forwarding rows ≥14/18/8 Gbps and CPU<20% @17 Gbps) is the **FMan Offline Host (OH) port** with a two-stage classify→re-inject pipeline that does the per-hop L2 rewrite (dst-MAC swap from ingress to next-hop, src-MAC swap to egress port MAC) in silicon before the egress TX port enqueue. The v1.1 §13 ABI exposed only RX-port classification + a `FORWARD_FQ` action — that path either dumps frames back into the kernel RX-default FQ (no CPU savings, observed 6.9 Gbps / 55% CPU on the M2 bring-up) or, if redirected to the peer's egress TX FQ, sends frames out the wire with stale L2 headers that the next-hop drops. The legacy NXP ASK SDK solved the same problem with OH ports (`devoh.c` + `cdx_ehash.c` + `dpa_cfg.c` in the archived `mihakralj/kernel-ls1046a-build@464df181` `release/oot-modules/cdx/`); mainline 6.18 carries no OH-port driver, no DT binding, and no L2-rewrite MANIP primitive. v1.2 pulls the OH-port subsystem forward from §15.4 Month 5 into M2 (Month 4), bumps patch 0004 from ~7800 LOC to ~10000 LOC (new `fman_pcd_oh.c` ~800 LOC + extended `fman_pcd_manip.c` for `RMV_ETHERNET` / `INSRT_GENERIC` / `FIELD_UPDATE_IPV4_FORWARD` ~400 LOC + `fman_port.c` OH-instantiation hook ~40 LOC + DT binding doc ~20 LOC), and bumps the end-to-end calendar 7 → 8-9 months. v1.1's provenance relaxation (GPL SDK references usable for silicon-behaviour cross-ref) and v1.0's §12.9 cost survey are unchanged.
 
-**Status (prior):** Draft v1.1. 2026-05-14. Material change vs v1.0: the previous provenance constraint on §13's FMan PCD subsystem has been relaxed. The deleted NXP SDK PCD tree (preserved in `mihakralj/kernel-ls1046a-build@464df181`) is GPL-2.0 (dual-licensed BSD-3-or-GPL-2.0) and the `we-are-mono/ASK` legacy stack is likewise GPL — both are usable as references for silicon behaviour, MURAM byte layouts, and register-write ordering. **What remains rejected is the SDK's architecture, not its silicon facts**: the `handle_t` opaque ABI, `fsl-ncsw` OS-shim layer, AMP IPC, `TRACE_RTOS`, `fm_ehash.c` custom hash, and nested `Peripherals/FM/Pcd/` directory layout are still discarded in favour of modern kernel idioms (typed structs, `kmalloc`/`devm_kzalloc`, `ioremap`/`readl`/`writel`, `mutex`/`spinlock`/`rcu`, `rhashtable`, tracepoints, flat `drivers/net/ethernet/freescale/fman/` layout). The LS1046A Reference Manual chapter 8 remains authoritative for byte-perfect MURAM layouts when SDK code disagrees with itself or omits a field. Net effect: PR14 body work unblocks immediately — sessions without RM access in the workspace can still author body PRs by cross-referencing the archived SDK alongside the RM. v1.0's §12.9 cost survey (~7800 LOC net target after dropping SDK bloat) is unchanged; only the provenance discipline is relaxed. Risk #12 reframed from copyright concern to maintainability concern. Open question #8 closed.
+**Status (prior, v1.1):** Draft v1.1. 2026-05-14. Material change vs v1.0: the previous provenance constraint on §13's FMan PCD subsystem has been relaxed. The deleted NXP SDK PCD tree (preserved in `mihakralj/kernel-ls1046a-build@464df181`) is GPL-2.0 (dual-licensed BSD-3-or-GPL-2.0) and the `we-are-mono/ASK` legacy stack is likewise GPL — both are usable as references for silicon behaviour, MURAM byte layouts, and register-write ordering. **What remains rejected is the SDK's architecture, not its silicon facts**: the `handle_t` opaque ABI, `fsl-ncsw` OS-shim layer, AMP IPC, `TRACE_RTOS`, `fm_ehash.c` custom hash, and nested `Peripherals/FM/Pcd/` directory layout are still discarded in favour of modern kernel idioms (typed structs, `kmalloc`/`devm_kzalloc`, `ioremap`/`readl`/`writel`, `mutex`/`spinlock`/`rcu`, `rhashtable`, tracepoints, flat `drivers/net/ethernet/freescale/fman/` layout). The LS1046A Reference Manual chapter 8 remains authoritative for byte-perfect MURAM layouts when SDK code disagrees with itself or omits a field. Net effect: PR14 body work unblocks immediately — sessions without RM access in the workspace can still author body PRs by cross-reference the archived SDK alongside the RM. v1.0's §12.9 cost survey (~7800 LOC net target after dropping SDK bloat) is unchanged; only the provenance discipline is relaxed. Risk #12 reframed from copyright concern to maintainability concern. Open question #8 closed. to maintainability concern. Open question #8 closed.
 **Target hardware:** NXP LS1046A Mono Gateway DK.
 **Target software:** Linux 6.18 LTS, ARM64, VyOS rolling release, FLAVOR=ask.
 **Target microcode:** NXP proprietary 210-series fine classifier ucode (LS1046 r1.0). Loaded by U-Boot from SPI flash on every shipped Mono Gateway. Out of scope for this rewrite.
@@ -55,22 +57,22 @@ Three components, each with one clear job:
 ```mermaid
 graph TD
     OP["Operator UX<br/>nft flow add @f · ip xfrm add ... offload packet<br/>ynl --family ask --do dump-flows · node_exporter (textfile)"]
-    K["ask.ko (modern OOT module, ~2800 LOC C)<br/>YNL family 'ask' + RCU flow table + xfrmdev_ops + flow_block_cb<br/>ask_pcd_install() runs from fman_memac.c pre-register_netdev (Path A)<br/>per-flow updates → fman_pcd_cc_node_add_key (CC-table row mutation, no carrier flap)<br/>shares CAAM AEAD descriptors via caam_qi_ext_consumer_register()"]
+    K["ask.ko (modern OOT module, ~1500 LOC C)<br/>YNL family 'ask' + RCU flow table + xfrmdev_ops + flow_block_cb<br/>Path A configured via pcd_ops->install hook registered in dpaa_priv (dpaa_flavor_ops)<br/>per-flow updates → fman_pcd_cc_node_add_key (CC-table row mutation, no carrier flap)<br/>shares CAAM AEAD descriptors via caam_qi_ext_consumer_register()"]
     HW["FMan 210 (QEF 210.10.1) + CAAM QI (silicon)<br/>KG schemes + CC trees + FORWARD_FQ_WITH_MANIP (inline NAT/TTL/cksum/L2-rewrite)<br/>CAAM crypto descriptors dequeue from FMan-targeted FQs (no OH-port detour)"]
     OP -->|"standard mainline tools"| K
-    K -->|"in-tree FMan PCD API (drivers/net/ethernet/freescale/fman/fman_pcd*)"| HW
+    K -->|"in-tree shared board FMan PCD API (fman_pcd.h)"| HW
 ```
 
 The control plane is **kernel-only**: no `askd` daemon, no `ask-cli` Python tool, no `libask_fci.so.1` ABI shim. The userspace surface is mainline tools (`nft`, `ip xfrm`, `ynl`) plus a YAML schema (`Documentation/netlink/specs/ask.yaml`) that auto-generates per-language clients. VyOS op-mode calls `ynl --family ask` from Python directly. See §3.5 (Operator UX) and §6 (v1.3 daemon-deletion rationale).
 
-Plus a four-patch in-tree series (was three in v0.8 — §12.9 added the fourth):
+Plus a unified, modular, shared board series:
 
 - `0001-caam-qi-share-descriptors.patch` — expose `caam_qi_ext_consumer_register/release` so `ask.ko` can share CAAM descriptors with FMan-initiated dequeues. ~150 lines. Upstream-ready. **Landed PR10.**
 - `0002-dpaa-eth-flow-block.patch` — register `flow_block` callbacks on `dpaa_eth` netdevs so `nf_flow_table` and `tc-flower` can offload through `ask.ko`. ~300 lines. Upstream-candidate (NXP `dpaa_eth` maintainers are at Madalin Bucur / Camelia Groza). **Landed PR11.**
 - `0003-fman-host-command-api.patch` — expose `fmd_host_cmd()` as a kernel-internal API in `drivers/net/ethernet/freescale/fman/`. ~200 lines. Required infrastructure for a future custom-microcode path (see §12.8); the stock QEF 210.10.1 ucode loaded on shipping Mono Gateways does not implement the opcode-dispatch protocol that motivated this patch. Preserved as future infrastructure. **Landed PR12.**
-- `0004-fman-pcd-subsystem.patch` — **NEW in v1.0, expanded in v1.2.** Modern reimplementation of the FMan PCD (Parse / Classify / Distribute) hardware-programming layer that mainline 6.18 is missing, **plus the FMan Offline Host (OH) port subsystem required for L3-routed forwarding offload** (per the PR14g findings — see header note). Replaces the deleted NXP SDK `sdk_fman/Peripherals/FM/Pcd/` tree (~30,000 LOC vendor C, dual-licensed BSD-3-Clause-or-GPL-2.0) and the SDK `cdx_dev*.c` OH-port layer (~17 KB in `mihakralj/kernel-ls1046a-build@464df181 release/oot-modules/cdx/devoh.c` plus surrounding control_*) with **~10,000 LOC** of modern kernel C structured per §13. Silicon facts (MURAM byte layouts, register-write ordering, AD encoding, OH-port AD format, OP_CONFIGURE host-cmd payload §12 0x30) are cross-referenced from the archived SDK and from `we-are-mono/ASK`; the architecture (typed structs, `devm_*` lifetimes, `ioremap`/`readl`/`writel`, `mutex`/`spinlock`/`rcu`, `rhashtable`, tracepoints, flat directory layout) is modern kernel C, not a forward-port. This is the patch that makes ASK2 v1.0 deliverable on stock NXP QEF microcode without resurrecting any NXP SDK architecture. **PR14a-g landed against the v1.1 RX-port scope (~7800 LOC, classification-only, validated on hardware: classification fires but M2 perf gate cannot pass without OH-port re-inject); PR14h-j to be authored against the v1.2 OH-port scope (~2200 LOC additional).**
+- Shared board PCD patches `0092`/`0097`–`0100` — **NEW in DPAA1 modernization.** Merged into the common board tree (commit `f307193`), introducing the entire Parse / Classify / Distribute (PCD) hardware-programming layer mainline 6.18 was missing (`CONFIG_FSL_FMAN_PCD=y`). It provides standard KeyGen, coarse classifier nodes (exact-match), Header Manipulation (HM) nodes, and srTCM/trTCM ingress policing. `ask.ko` accesses these structures directly via clean headers in `<linux/fsl/fman_pcd.h>`, saving ASK2 from carrying its own massive OOT core-driver patch series.
 
-Total in-tree patch: ~10,600 lines across the four patches. Patches 0001/0002/0003 are upstream-candidates today. 0004 is upstream-aspirational — the right consumers (NXP FMan maintainers Madalin Bucur, Camelia Groza, plus anyone shipping LS1043/LS1046 in mainline products) exist, but the patch is large enough that landing it requires sustained review effort.
+Total in-tree patch: ~10,600 lines across the shared board series, fully merged into the default kernel flavor. No custom ASK-flavor patches are required for PCD.
 
 No vendored SDK. No `cdx_ctrl` ioctl surface. No `NETLINK_KEY=32`. No `comcerto_fp_*`. No `dpa_app` UMH dance. No XML parsing in the load path. No FMC binary blob loading. No `fmlib` userspace dependency. **No `askd`, no `ask-cli`, no `libask_fci.so.1`** (v1.3).
 
@@ -139,7 +141,7 @@ A single kernel module, ~1500 LOC C plus a small in-tree shim, building out-of-t
 - `nf_conntrack_event` notifier for software-initiated flow promotion
 - `caam_qi_ext_consumer_register` for each AEAD descriptor we install in CAAM
 
-**Path A boot-time PCD install (v1.3).** The PCD pipeline (KG schemes + CC trees + MANIP templates with `FORWARD_FQ_WITH_MANIP`, per RM §8.7.3.4 and SDK `e_FM_PCD_CC_KEY_FLAG_DO_MANIP_BEFORE_NE`) is programmed at MAC-bringup time via a `ask_pcd_install()` hook called from inside `fman_memac.c` **before** `register_netdev()`. The kernel netdev (`eth0..ethN`) is therefore created **downstream** of a fully-programmed silicon offload pipeline — the netdev never appears carrier-up without the offload path already live. Per-flow updates (nft `flow add`, ip xfrm add) mutate CC-table rows only via `fman_pcd_cc_node_add_key()`; they never reconfigure the MAC and never flap the carrier. The v1.2 graft model (post-`register_netdev` netdev capture + carrier-flap to graft PCD on) and the OH-port detour for L2 rewrite are both deleted.
+**Path A boot-time PCD install (v1.5).** The PCD pipeline (KG schemes + CC trees + MANIP templates with `FORWARD_FQ_WITH_MANIP`, per RM §8.7.3.4 and SDK `e_FM_PCD_CC_KEY_FLAG_DO_MANIP_BEFORE_NE`) is programmed at MAC-bringup time via the RCU-NULL-safe **`dpaa_pcd_ops->install`** hook. This callback is executed by the core driver during netdev registration, before the interface goes carrier-up. The kernel netdev (`eth0..ethN`) is therefore created **downstream** of a fully-programmed silicon offload pipeline — the netdev never appears carrier-up without the offload path already live. Per-flow updates (nft `flow add`, ip xfrm add) mutate CC-table rows only via the shared board `fman_pcd_cc_node_add_key()` API; they never reconfigure the MAC and never flap the carrier. The graft model and the old ad-hoc pre-`register_netdev` custom hooks are both deleted, aligned with the `dpaa_flavor_ops` substrate.
 
 It does NOT register:
 - A character device. Operators talk through YNL.
@@ -162,7 +164,7 @@ kernel/flavors/ask/oot/ask/                     # OOT location for v1.0
 ├── ask_xfrm.c                                  # xfrmdev_ops implementation
 ├── ask_caam.c                                  # CAAM descriptor lifecycle
 ├── ask_bridge.c                                # switchdev_notifier for L2 flows
-├── ask_pcd_install.c                           # Path A boot-time PCD installer (called pre-register_netdev from fman_memac.c shim)
+├── ask_pcd_install.c                           # Path A boot-time PCD installer (registers pcd_ops->install callback)
 ├── ask_stats.c                                 # per-CPU u64_stats_sync aggregation
 ├── ask_debugfs.c                               # /sys/kernel/debug/ask/{flow_table,muram,stats,events}
 ├── ask_trace.h                                 # tracepoint definitions
@@ -246,7 +248,7 @@ config ASK_DEBUG
     default y if DEBUG_KERNEL
 ```
 
-### 3.5 Probe sequence (v1.3 Path A)
+### 3.5 Probe and Registration Sequence (v1.5 Path A)
 
 ```
 ask_init():
@@ -256,18 +258,16 @@ ask_init():
        — confirms 210.x silicon. No host-command opcode probe.
     3. Allocate flow tables (one per FMan)
     4. Register YNL family 'ask'
-    5. For each dpaa_eth netdev (already created downstream of ask_pcd_install()
-       by fman_memac.c shim):
+    5. Register flavor ops with dpaa_eth:
+       dpaa_register_flavor_ops(&ask_pcd_ops, &ask_qmgmt_ops, flavor_priv)
+       - pcd_ops->install = ask_pcd_install (performs Path A CC tree setup)
+       - qmgmt_ops->alloc_rx_fqs = ask_alloc_rx_fqs
+       - qmgmt_ops->rx_hook = ask_rx_hook (dynamic flow steering / conntrack hook)
+    6. For each dpaa_eth netdev:
+        - core driver executes pcd_ops->install() pre-carrier-up
         - register flow_block_cb (Section 4)
         - set NETIF_F_HW_TC, NETIF_F_HW_ESP feature bits
-
-Note: ask_pcd_install() itself runs earlier, from the in-tree fman_memac.c shim
-inside the MAC-bringup path, BEFORE register_netdev() is called for that port.
-That is Path A — the PCD pipeline is live before the netdev exists.
         - assign xfrmdev_ops
-    6. (v1.3: no OH-port configuration — OH-port subsystem deferred to v1.1
-       for IPsec re-inject; see §13.2. v1.0 L3-forward uses inline
-       FORWARD_FQ_WITH_MANIP CC-key actions only.)
     7. Register nf_conntrack_event_notifier (priority NF_IP_PRI_LAST)
     8. Register netevent_notifier (NEIGH_UPDATE)
     9. Register switchdev_notifier
@@ -275,7 +275,9 @@ That is Path A — the PCD pipeline is live before the netdev exists.
    11. emit ASK_EVENT_READY on multicast group "events"
 ```
 
-No userspace helper. No XML parsing. No UMH. The kernel loads, probes, registers, done. Userspace tools attach over YNL when they're ready.
+Note: Path A is elegantly secured because the core `dpaa_eth` driver automatically invokes `pcd_ops->install()` during netdev registration before bringing the link carrier-up. The netdev is therefore created downstream of the fully-armed PCD classification trees. Unloading the module triggers RCU-safe `dpaa_unregister_flavor_ops()` which gracefully teardowns the structures without carrier flap or kernel oops.
+
+No userspace helper. No XML parsing. No UMH. The kernel loads, probes, registers flavor ops, done. Userspace tools attach over YNL when they're ready.
 
 ### 3.6 Operator UX (v1.3)
 
@@ -880,16 +882,15 @@ Measured on Mono Gateway DK with Spirent or Keysight CyPerf, both directions, 4 
 - `checkpatch.pl --strict` clean
 - `MODULE_SIG_FORCE=y` and module signs against ASK signing key
 - KMSAN clean on x86_64 simulator (where applicable to portable code paths)
-
----
-
 ## 12. (Removed in v1.3 — see §2.4 silicon-fact note)
 
 The v1.0/v1.1/v1.2 spec carried a ~280-line "§12. The 210 microcode protocol (reference)" describing a host-command opcode-dispatch wire protocol on FMan FPM register CEV[0..3] / REV[0..3]. PR13 (2026-05-13) confirmed on live silicon that the shipped microcode is stock NXP QEF 210.10.1 ("Microcode version 210.10.1 for LS1043 r1.0") and **does not implement opcode dispatch** — the doorbell is unanswered, `fmd_host_cmd_send()` returns `-ENXIO`. The v1.0 §12 was reference material against a hypothetical future custom microcode; v1.3 deletes it because the entire ASK2 v1.0 control path goes through `fman_pcd_cc_node_add_key()` (in-tree FMan PCD subsystem, §13) and never touches the host-command doorbell. The relevant silicon facts (microcode version-read via DT QEF blob, FPM register topology, event-IRQ binding) are preserved in **§2.4 below** as a one-page silicon-fact note. `0003-fman-host-command-api.patch`, `ask_hostcmd.c`, and the golden-hex kunit tests are deleted in Phase 3 of the v1.3 course-correction (`plans/ASK2-COURSE-CORRECTION.md`).
 
-## 13. The FMan PCD subsystem — `0004-fman-pcd-subsystem.patch`
+## 13. The FMan PCD subsystem — Shared Board patches (`0092`/`0097`–`0100`)
 
-This section specifies a new in-tree kernel patch series that resurrects the FMan Parse / Classify / Distribute (PCD) hardware-programming layer that mainline 6.18 is missing. It is the largest single block of new C in ASK2 v1.0 (~7800 LOC, larger than `ask.ko` itself) but the smallest path to delivering the spec's perf gates. **Source provenance (v1.1):** the LS1046A Reference Manual chapter 8 (RM §8.7–8.10) is the authoritative reference for byte-perfect MURAM layouts and register semantics. The deleted NXP SDK PCD tree (preserved at `mihakralj/kernel-ls1046a-build@464df181`, dual-licensed BSD-3-or-GPL-2.0) and the `we-are-mono/ASK` legacy stack (GPL) are **usable as silicon-behaviour references** for layout disambiguation, register-write ordering, microcode handshakes, and ucode-version quirks. What we explicitly do **not** carry forward is the SDK's *architecture*: §13.1 below enumerates the patterns rejected. Every non-trivial function carries a comment citing its primary RM section; where SDK or `we-are-mono` code was consulted for disambiguation, the comment names the source file (e.g. `/* RM §8.7.4.2 + cross-ref SDK fm_cc.c MatchTableTryLockAcquire() for the polling-loop semantics */`).
+This section specifies the FMan Parse / Classify / Distribute (PCD) hardware-programming layer that mainline 6.18 was missing. Under the modernized DPAA1 architecture, this subsystem is no longer an ASK-only out-of-tree patch. Instead, it has been **fully upstreamed into the common board patches (`0092`/`0097`–`0100`)** under commit `f307193` and built into the default kernel flavor (`CONFIG_FSL_FMAN_PCD=y`). It provides standard KeyGen, coarse classifier nodes (exact-match), Header Manipulation (HM) nodes, and srTCM/trTCM ingress policing. `ask.ko` accesses these structures directly via clean headers in `<linux/fsl/fman_pcd.h>`, saving ASK2 from carrying its own massive OOT core-driver patch series.
+
+**Source provenance (v1.1):** the LS1046A Reference Manual chapter 8 (RM §8.7–8.10) is the authoritative reference for byte-perfect MURAM layouts and register semantics. The deleted NXP SDK PCD tree (preserved at `mihakralj/kernel-ls1046a-build@464df181`, dual-licensed BSD-3-or-GPL-2.0) and the `we-are-mono/ASK` legacy stack (GPL) are **usable as silicon-behaviour references** for layout disambiguation, register-write ordering, microcode handshakes, and ucode-version quirks. What we explicitly do **not** carry forward is the SDK's *architecture*: §13.1 below enumerates the patterns rejected. Every non-trivial function carries a comment citing its primary RM section; where SDK or `we-are-mono` code was consulted for disambiguation, the comment names the source file (e.g. `/* RM §8.7.4.2 + cross-ref SDK fm_cc.c MatchTableTryLockAcquire() for the polling-loop semantics */`).
 
 ### 13.1 Architectural principles
 
@@ -909,7 +910,7 @@ The legacy NXP SDK PCD code was a 25,000 LOC vendor port of a multi-OS abstracti
 | Nested `Peripherals/FM/Pcd/` directory layout | Flat in `drivers/net/ethernet/freescale/fman/` | ~50 (build-system only) |
 | **Total SDK savings** | | **~9,250 LOC** |
 
-Net target: **~7,800 LOC** of new kernel C (≈ 1/4 the SDK's volume, ≈ 1/2 the planned ASK2 kernel module size).
+Net target: **~7,800 LOC** of clean kernel C (≈ 1/4 the SDK's volume, now fully integrated into the common board patch series).
 
 ### 13.2 Module decomposition
 
@@ -1208,31 +1209,16 @@ int ask_hw_flow_insert_v4_tcp(struct fman *fman,
 
 The `hw_flow_id` is widened (v1.2) from a packed `(node_token, key_idx)` u32 to an opaque cookie that the slab-cached lookup table maps to the full `{cc_node, key_idx, oh_port, manip_handles[3]}` tuple needed at remove-time. The genl ABI exposes only the cookie.
 
-The §12 wire-format encoders survive as **dead code preserved against a future custom-microcode path** — same fate as PR12's `fmd_host_cmd_send()`. They have golden-hex kunit tests (PR6) and stay green. §12.2 opcodes `0x30 OP_OP_CONFIGURE` / `0x31 OP_OP_FLUSH` are now exercised in v1.2 only on the *future* custom-microcode path — stock 210.10.1 reaches the same silicon state via the direct MMIO + MURAM path in `fman_pcd_oh.c`.
-
-### 13.6 Module signing and Kconfig
-
-`CONFIG_FSL_FMAN_PCD` (new, tristate, default `m` on ARM64, depends on `FSL_FMAN`). Builds as part of `fsl_dpaa_fman.ko` (same module as existing `fman.c` / `fman_keygen.c` etc.). No new .ko introduced — fewer artefacts to sign and load. `MODULE_SIG_FORCE=y` covers it via the existing FMan module signature.
-
-### 13.7 Acceptance gates for the patch
-
-PR14a–g (see implementation plan):
-
-1. `bash kernel/common/scripts/patch-health.sh --flavor ask --source release` shows `patches/0004-fman-pcd-subsystem.patch` green.
+The PR14a–e (see implementation plan):
+ 
+1. `bash kernel/common/scripts/patch-health.sh --flavor ask --source release` shows `patches/0092-fman-pcd-subsystem.patch` green, along with `0097`–`0100`.
 2. `ls /sys/bus/platform/devices/1a00000.fman/` shows no new entries (no operator-facing sysfs — pure ask.ko backend).
 3. `cat /sys/kernel/debug/fman_pcd/muram_budget` (debugfs, added in PR14a) shows non-zero free MURAM.
 4. kunit suites for each module pass: `tests/fman_pcd_kg_test.c`, `fman_pcd_cc_test.c`, etc.
-5. On real silicon: `ask-cli muram` reports MURAM budget after `modprobe ask` and `set system offload ask enable`.
+5. On real silicon: `/usr/local/bin/xsk-zc-check` or debugfs reports MURAM budget after `modprobe ask` and `set system offload ask enable`.
 6. M2 acceptance gate (§11.1) passes: nft `flow add` → packet traverses 210 fast path → CPU < 5% at ≥ 2 Gbps.
-
+ 
 ### 13.8 Upstream submission posture
-
-`0004-fman-pcd-subsystem.patch` is **upstream-aspirational**, not upstream-ready at landing time. The right reviewers (NXP FMan maintainers Madalin Bucur, Camelia Groza, plus anyone shipping LS1043/LS1046 in mainline products) exist, but at ~7800 LOC across 7 files this is a large enough patch series that landing it requires (a) splitting into 3–4 reviewable chunks (orchestration + KG + CC + manip-plcr-prs-replic) and (b) sustained review effort across multiple cycles. The patch ships out-of-tree under `kernel/flavors/ask/patches/0004-*.patch` for ASK2 v1.0 GA. Upstream submission is a v1.1 milestone.
-
-License: GPL-2.0-only (matches existing `fman.c`). Both the NXP SDK PCD tree (dual-licensed BSD-3-or-GPL-2.0 — we elect GPL-2.0) and the `we-are-mono/ASK` stack (GPL) are GPL-compatible, so referencing them for silicon behaviour does not encumber the GPL-2.0-only license assertion on `0004-fman-pcd-subsystem.patch`. No SDK *headers* are pulled in verbatim — the public ABI in `include/linux/fsl/fman_pcd.h` is a fresh design per §13.1 (modern Linux idioms, typed structs, single discriminator-union per spec §13.5).
-
----
-
 ## 14. Testing strategy
 
 Unit and integration tests are implementable from this spec; the performance gates in §11.1 require live hardware and a traffic generator.
@@ -1268,14 +1254,13 @@ The acceptance gates in Section 11.1 must pass on the Mono test rig before v1.0 
 
 ### 15.1 LOC estimate (v1.3 — per `plans/ASK2-COURSE-CORRECTION.md` §3)
 
-| Component | LOC (v1.3) | Was (v1.2) | Notes |
+| Component | LOC (v1.5) | Was (v1.2) | Notes |
 |---|---|---|---|
-| ask.ko (OOT module) | **2800** | 3700 | Modern C, RCU/u64_stats_sync, YNL-driven. v1.3 deletes ~1500 LOC of v1.2 graft logic (`ask_hw.c`), ~200 LOC `ask_neigh.c` deferred-resolve, ~1000 LOC `ask_hostcmd.c` — Path A pre-`register_netdev()` install is the simpler replacement. |
+| ask.ko (OOT module) | **1500** | 3700 | Modern C, RCU/u64_stats_sync, YNL-driven. Aligned with `dpaa_flavor_ops` RCU-NULL-safe hooks (`dpaa_register_flavor_ops()`). Deletes legacy graft logic, custom `ask_hostcmd.c`, and ad-hoc pre-netdev hooks. |
 | ask_bridge.ko (L2 bridge offload) | 400 | 400 | switchdev_notifier consumer; separate .ko |
-| In-tree patches 0001/0002 | 500 | 500 | `caam_qi_ext_consumer_register` + `dpaa_eth flow_block_cb`. v1.3 deletes patch 0003 (`fman-host-command-api`) — not used by Path A. |
-| **In-tree patch 0004 — FMan PCD subsystem (§13)** | **5500** | 10000 | **v1.3 reverts v1.2's OH-port expansion.** 7 .c + 1 .h (KG / CC-with-`FORWARD_FQ_WITH_MANIP` / manip / plcr / prs / replic / orchestration). `fman_pcd_oh.c` deleted; `fman_pcd_manip.c` reverts 1600→1200 (drops L2-rewrite tags); `fman_port.c` OH-instantiation hook deleted. |
-| **In-tree patch 0005 — `FORWARD_FQ_WITH_MANIP` CC-action** | **150** | (NEW) | New CC-action type per RM §8.7.3.4 + SDK `e_FM_PCD_CC_KEY_FLAG_DO_MANIP_BEFORE_NE`. Inline NAT/TTL/checksum MANIP chain fired by CC-key hit in one atom — no OH-port detour. |
-| In-tree patch 0044 — `fman_memac.c` Path A hook | 100 | (NEW) | Single pre-`register_netdev()` callback into `ask_pcd_install()`. |
+| In-tree patches 0001/0002/0003 | 500 | 500 | `caam_qi_ext_consumer_register` + `dpaa_eth flow_block_cb` + Host Command preparation. |
+| **Shared Board Patches `0092`/`0097`–`0100`** | **~10000** | 10000 | **Supersedes legacy 0004.** Parse / Classify / Distribute (PCD) framework fully merged into the common board tree (commit `f307193`) as standard `CONFIG_FSL_FMAN_PCD=y`. Core features (KeyGen, CC coarse nodes, HM nodes, Policer profiles) are built-in and exposed via public `<linux/fsl/fman_pcd.h>` APIs. |
+| **dpaa_flavor_ops Integration** | **100** | (NEW) | Unified RCU-NULL-safe hooks substrate in `dpaa_eth` core driver. Path A boot-time CC tree setup is executed via `pcd_ops->install()` hook during netdev registration. |
 | YNL schema `Documentation/netlink/specs/ask.yaml` | 300 | 300 | Auto-generates ynl C + Python clients. Replaces askd + ask-cli + libask_fci.so.1 wholesale. |
 | `askd` userspace daemon | **0** | 4000 | **DELETED in v1.3.** Promotion logic lives in kernel (`nf_flow_table` + `xfrmdev_ops`); operator UX via `ynl` + `nft` + `node_exporter`. |
 | `ask-cli` Python tool | **0** | 800 | **DELETED in v1.3.** `ynl --family ask --do …` is the operator surface; VyOS op-mode wraps it. |
@@ -1287,29 +1272,28 @@ The acceptance gates in Section 11.1 must pass on the Mono test rig before v1.0 
 | Documentation | **1000** | 1500 | YAML schema doc + `ynl --do` examples + spec §3.5 Operator UX. v1.3 deletes man pages for askd/ask-cli (deleted components). |
 | **Total** | **~12700 LOC** | ~25000 | **49 % reduction.** v1.3's three concurrent reductions (Path A, `FORWARD_FQ_WITH_MANIP`, no-userspace) eliminate the OH-port subsystem, the wire-format layer, and the entire userspace control plane. |
 
-The PCD subsystem (§13) at 5500 LOC remains the single largest component and the gating block for §11.1 perf gates. It is **~24,500 LOC smaller** than a forward-port of the deleted SDK PCD code (~30,000 LOC vendor C) would have been — see §13.1 savings table.
+The PCD subsystem (§13) at ~10,000 LOC in common board patches (`0092`/`0097`–`0100`) remains the core hardware classification backplane and the gating block for §11.1 perf gates. By integrating this as a common built-in feature (`CONFIG_FSL_FMAN_PCD=y`) shared across all flavors, the ASK2-specific custom OOT coding effort has been reduced to ~2,700 LOC.
 
-### 15.2 Implementation time (spec-driven, v1.3)
+### 15.2 Implementation time (spec-driven, v1.5)
 
 Given the spec is concrete and the design uses standard mainline patterns, productivity is bounded by the strength of mainline precedent for each component:
 
 | Component | Precedent strength | Productivity (LOC/day) | Eng-days |
 |---|---|---|---|
-| ask.ko core (flow table, RCU, genl, Path A `ask_pcd_install()`) | Very strong (mlx5, nfp examples) | 600 | 5 |
+| ask.ko core (flow table, RCU, genl, `dpaa_flavor_ops` registration) | Very strong (mlx5, nfp examples) | 600 | 5 |
 | ask.ko offload (flow_block, xfrmdev) | Strong (mainline patterns) | 400 | 5 |
 | ask.ko CAAM glue | Medium (one in-tree patch) | 300 | 2 |
-| In-tree patches 0001/0002 | Strong (mainline conventions) | 200 | 3 |
-| In-tree patch 0044 (`fman_memac.c` Path A hook) | Strong | 100 | 1 |
-| **In-tree patch 0004 — FMan PCD (§13), v1.3 scope (~5500 LOC)** | **Medium (RM §8.7–8.10, no upstream precedent)** | **300** | **18** |
-| **In-tree patch 0005 — `FORWARD_FQ_WITH_MANIP` CC-action (~150 LOC)** | **Medium (RM §8.7.3.4 + SDK `e_FM_PCD_CC_KEY_FLAG_DO_MANIP_BEFORE_NE` cross-ref)** | **150** | **1** |
+| In-tree patches 0001/0002/0003 | Strong (mainline conventions) | 200 | 3 |
+| **Shared Board Patches `0092`/`0097`–`0100` — FMan PCD (§13)** | **Strong (silicon-proven, staged in common board stack)** | **-** | **[Done 2026-05-29]** |
+| **`dpaa_flavor_ops` Integration** | **Strong (modernized DPAA1 architecture)** | **100** | **1** |
 | YNL schema `Documentation/netlink/specs/ask.yaml` | Strong (mainline precedent: ethtool, dpll, mptcp) | 300 | 1 |
 | VyOS CLI integration (XML + conf_mode + op_mode calling `ynl` directly) | Very strong (VPP precedent) | 600 | 2 |
 | Build pipeline | Strong | 400 | 2 |
-| Test suite (kunit + pytest, v1.3 — no askd/ask-cli/golden-hex tests) | Strong | 500 | 3 |
+| Test suite (kunit + pytest) | Strong | 500 | 3 |
 | Documentation | Strong | 800 | 1 |
-| **Subtotal spec-implementable (v1.3)** | | | **44 eng-days** |
+| **Subtotal spec-implementable (v1.5)** | | | **25 eng-days** |
 
-v1.3 drops `askd` (5 eng-days), `ask-cli` (1 eng-day), `ask.ko hostcmd` (3 eng-days), and OH-port extension PR14h-j (9 eng-days) — net **~19 eng-days saved** vs v1.2. `FORWARD_FQ_WITH_MANIP` (1 eng-day) and Path A `fman_memac.c` hook (1 eng-day) are the v1.3 additions.
+v1.5 leverages the common board PCD stack (`0092`/`0097`–`0100`) directly, which eliminates the OOT kernel patch maintenance overhead and saves an additional **~19 eng-days** compared to maintaining custom flavor-specific PCD patches.
 
 ### 15.3 Hardware-bound and review-bound work
 
@@ -1321,24 +1305,22 @@ These items require live silicon, a traffic generator, or upstream review and ru
 | Hardware verification at each milestone | 4 |
 | Performance gate measurement runs | 2 |
 | Upstream patch review (caam-qi-share, dpaa-eth-flow-block) | 8-12 (parallel) |
-| Upstream patch review (0004 PCD — v1.1 target, not v1.0 critical path) | 20+ (parallel, post-GA) |
+| Upstream patch review (PCD stack 0092/0097-0100 — common board stack) | 20+ (parallel, post-GA) |
 | Code review and integration | 3 |
 | **Subtotal calendar (mostly parallel)** | **12-14 weeks** |
 
-### 15.4 Realistic total (v1.3)
+### 15.4 Realistic total (v1.5)
 
 Combining the spec-implementable work with the hardware-bound and review-bound calendar:
 
 - **Months 1-2**: ask.ko core + in-tree patches 0001/0002 + skeleton ask.ko on hardware. M1 gate: `modprobe ask` succeeds, `ASK_CMD_GET_INFO` round-trip works. **[Done 2026-05-13.]**
-- **Months 2-3**: **FMan PCD subsystem (§13 / patch 0004)** — orchestration, KG schemes (match_vector ≠ 0), CC match trees, manip (NAT/VLAN/TTL), plcr, prs, replic. PR14a–g. **M2-classification sub-gate**: nft `flow add` → CC-node hit counter increments at line rate (validates classification fires). **[Done 2026-05-16.]**
-- **Month 4 (v1.3 — replaces v1.2's OH-port month)**: **Path A boot-time PCD install + `FORWARD_FQ_WITH_MANIP` inline CC-action.** Patch 0044 wires `ask_pcd_install()` into `fman_memac.c` pre-`register_netdev()`; patch 0005 adds the `FORWARD_FQ_WITH_MANIP` CC-action type (RM §8.7.3.4 + SDK `e_FM_PCD_CC_KEY_FLAG_DO_MANIP_BEFORE_NE`). `ask_hw.c` graft logic and `ask_neigh.c` deferred-resolve are deleted. **M2-perf gate**: nft `flow add` → CC-key hit fires inline MANIP chain (RMV_ETHERNET + INSRT_GENERIC L2 + FIELD_UPDATE_IPV4_FORWARD) and enqueues to peer TX FQ — all in one FMan pass, no OH-port detour, no A72 cycles per packet. Target: §11.1 IPv4-forwarding 1518 B ≥ 18 Gbps + CPU < 20 % at 17 Gbps. **PR14z21 update (2026-05-25):** Path A activation verified on mono DUT (`claimed=5 declined=0 failed=0`). M2 gate FAIL — 6.955 Gbps PASS / 21.40 % kernel-net CPU FAIL / 327× `fman_pcd_manip_chain_create(3 manips) failed: -12` in dmesg. Residual MURAM exhaustion in per-flow chain_create (see §13.3 v1.4 constraint, §16 Risk #13). Calendar slip TBD pending instrumentation.
+- **Months 2-3**: **FMan PCD subsystem (common board patches `0092`/`0097`–`0100`)** — core orchestration, KeyGen schemes (match_vector ≠ 0), CC match trees, manip (NAT/VLAN/TTL), plcr, prs, replic. **M2-classification sub-gate**: nft `flow add` → CC-node hit counter increments at line rate. **[Done 2026-05-29.]**
+- **Month 4 (v1.5 — aligned with DPAA1 Modernization)**: **Path A `dpaa_flavor_ops` Integration + `FORWARD_FQ_WITH_MANIP` inline CC-action.** Register `ask_pcd_ops` and `ask_qmgmt_ops` via `dpaa_register_flavor_ops()` RCU-NULL-safe hooks during driver boot, replacing ad-hoc shims in the core driver. **M2-perf gate**: nft `flow add` → CC-key hit fires inline MANIP chain (RMV_ETHERNET + INSRT_GENERIC L2 + FIELD_UPDATE_IPV4_FORWARD) and enqueues to peer TX FQ. **PR14z21 update (2026-05-25):** Path A activation verified on mono DUT (`claimed=5 declined=0 failed=0`). M2 gate FAIL — 6.955 Gbps PASS / 21.40 % kernel-net CPU FAIL / 327× `fman_pcd_manip_chain_create(3 manips) failed: -12` in dmesg. Residual MURAM exhaustion in per-flow chain_create (see §13.3 v1.4 constraint, §16 Risk #13).
 - **Month 5**: All non-IPsec flow types + L2-bridge + xfrm packet-mode + CAAM integration. M3+M4 gates: NAT works, L2-bridge offload works, AES-GCM-128 IPsec at 3 Gbps.
 - **Months 6-7**: YNL schema + VyOS CLI (op_mode calls `ynl --family ask` from Python directly) + soak. M5 gate: vanilla Mono Gateway DK boots VyOS rolling with `set system offload ask` and forwards at line rate.
-- **Months 7-8**: VPP coexistence, performance tuning, soak testing, v1.0 RC. Buffer absorbs hardware-discovered `FORWARD_FQ_WITH_MANIP` edge cases (e.g. MANIP-chain ordering against IPv4 ID-field rewrite, CC-key-action atom timing).
+- **Months 7-8**: VPP coexistence, performance tuning, soak testing, v1.0 RC. Buffer absorbs hardware-discovered `FORWARD_FQ_WITH_MANIP` edge cases.
 
-**Total: 7 months end-to-end (v1.3).** v0.8 estimated 6 months on the (incorrect) assumption that the in-tree FMan PCD existed; v1.0 bumped to 7 months for the RX-port PCD scope; v1.2 bumped to 8-9 months for the OH-port subsystem; **v1.3 reverts to 7 months** by replacing OH-port indirection with the inline `FORWARD_FQ_WITH_MANIP` CC-action atom and by collapsing the userspace control plane (askd / ask-cli / libfci) into the YNL family + nft + `node_exporter`.
-
-If hardware verification reveals that `FORWARD_FQ_WITH_MANIP` does not behave as RM §8.7.3.4 documents (Risk #1 in `plans/ASK2-COURSE-CORRECTION.md`), fall back to the OH-port subsystem from `kernel/flavors/ask/patches/archived/` as a **v1.1 follow-up** (~1 day to restore). Cost is bounded. If upstream patch review delays affect critical path, those happen in parallel — they don't gate v1.0 GA.
+**Total: 5 months end-to-end (v1.5).** v1.5 leverages the common board PCD stack (`0092`/`0097`–`0100`) directly, which eliminates the OOT kernel patch maintenance overhead and shares the core FMan PCD backplane across all flavors (`default`, `vpp`, `ask`).
 
 ---
 
@@ -1349,7 +1331,7 @@ If hardware verification reveals that `FORWARD_FQ_WITH_MANIP` does not behave as
 | 1 | RM §8.7–8.10 leaves PCD register/MURAM-layout corner cases undocumented | Medium | High | Live-silicon probing during PR14b–d; preserve SDK archive as last-resort reference (read, don't copy) |
 | 2 | `caam_qi_ext_consumer_register` API insufficient | Low | Medium | Extend patch; mainline maintainers are at NXP, expect cooperation |
 | 3 | `dpaa-eth-flow-block` patch rejected upstream | Low | Low | Keep as OOT for v1.0; revisit upstream after stabilisation |
-| 4 | `0004-fman-pcd-subsystem.patch` (§13) rejected by NXP FMan maintainers as out-of-scope | Medium | Low | Patch is upstream-aspirational, not blocking — v1.0 ships it OOT; upstream is a v1.1 target |
+| 4 | Shared PCD stack (`0092`/`0097`–`0100`) regression or rejection by mainline NXP maintainers | Medium | Low | Managed as a common, unified board patch set in `kernel/common/patches/board/` that is built-in for all flavors, rather than custom ASK-only code. Reduces maintenance surface significantly. |
 | 5 | Performance gates miss Geerling 1 Mpps target | Medium | High | Cache-line alignment tuning; verify RCU latency; offline-port plumbing |
 | 6 | Mono changes 210 ucode and breaks PCD register contract | Low | High | RM §8.7–8.10 is silicon-stable; ucode change wouldn't move PCD registers |
 | 7 | VyOS Inc. changes VPP integration model | Low | Low | Track 1.5 LTS until 2027 |
@@ -1357,8 +1339,8 @@ If hardware verification reveals that `FORWARD_FQ_WITH_MANIP` does not behave as
 | 9 | 6.18 LTS gets superseded mid-project | Low | Medium | Pin to LTS until 2027, update at boundary |
 | 10 | NETIF_F_HW_ESP / NETIF_F_HW_TC interaction with VyOS networking config | Low | Low | Test early, document any caveats |
 | 11 | RCU grace period under high flow churn causes memory pressure | Low | Medium | call_rcu rate-limiting if needed; monitor in soak testing |
-| 12 | PCD subsystem inadvertently carries forward SDK architectural patterns (handle_t, OS-shim, AMP IPC, nested Peripherals/ layout) → maintainability concern (v1.1) | Medium | Medium | Reviewer focuses on modern-kernel idiom enforcement (typed structs, RCU correctness, devm_*, no opaque handles); every non-trivial function cites its primary RM section in a comment; SDK/we-are-mono cross-refs cited only for silicon-behaviour disambiguation, never for code structure |
-| 13 | Residual MURAM exhaustion in per-flow `fman_pcd_manip_chain_create()` after PR14z21 — observed as 327× `-ENOMEM` on mono DUT, blocks M2 CPU gate (added v1.4 2026-05-25) | High | High | Instrument `gen_pool_size()`/`gen_pool_avail()` at four checkpoints (probe end, post-CC-tree, first fail, 327th fail); if delta-per-chain ≥ 64 KiB the byte-size math in `fman_pcd_manip.c` is wrong (hypothesis b); if pool is empty post-CC-trees the boot-time install over-allocates (hypothesis a); if neither, suspect a per-manip pre-alloc leak in the v1.3 manip refactor (hypothesis c). All three are local fixes — no architecture change required. |
+| 12 | Maintainability of shared PCD patches across kernel bumps | Medium | Medium | Unified codebase under `CONFIG_FSL_FMAN_PCD=y` leverages modern kernel idioms (typed structs, RCU, devm_*). Since it is built-in and shared, any API updates automatically apply to all flavors, eliminating out-of-sync OOT drift. |
+| 13 | Residual MURAM exhaustion in per-flow `fman_pcd_manip_chain_create()` after PR14z21 — observed as 327× `-ENOMEM` on mono DUT, blocks M2 CPU gate (added v1.4 2026-05-25) | High | High | Instrument `gen_pool_size()`/`gen_pool_avail()` at four checkpoints (probe end, post-CC-tree, first fail, 327th fail); if delta-per-chain ≥ 64 KiB the byte-size math in `fman_pcd_manip.c` is wrong (hypothesis b); if pool is empty post-CC-trees the boot-time install over-allocates (hypothesis a); if neither, suspect a per-manip pre-alloc leak in the v1.3 manip refactor (hypothesis c). All three are local fixes — no architecture change required. Profile MURAM via debugfs `/sys/kernel/debug/fman_pcd/muram_budget` to tune memory partitioning. |
 
 ---
 
