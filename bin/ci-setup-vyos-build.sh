@@ -462,6 +462,24 @@ chmod +x "$CHROOT/usr/local/bin/fan-check"
 cp board/scripts/caam-check "$CHROOT/usr/local/bin/caam-check"
 chmod +x "$CHROOT/usr/local/bin/caam-check"
 
+### DPAA1 AF_XDP true-ZC RX gate-counter reader: `xsk-zc-check` reads the
+### 20-counter xsk_* ethtool suite (in particular the four sub-increment-4
+### entry-gate counters: xsk_zc_eligible / xsk_zc_rx_armed /
+### xsk_zc_rx_recovered / xsk_fill_guard_block — patches 0093/0094/0095/0096
+### under kernel/common/patches/board/) on eth3/eth4 and renders the
+### sub-increment-4 entry verdict the spec gates on (§6.1.12/§6.1.13 of
+### specs/dpaa1-afxdp-modernization-spec.md): dormant (no ZC bind, all
+### xsk_zc_* counters 0 — the expected shipping state), ZC-armed (armed AND
+### xsk_fill_guard_block==0 → preconditions met), or fault (fill_guard>0 /
+### hard attach-DMA error). Exit 0 healthy / 1 fault / 2 not-LS1046A-or-no-
+### xsk-counters — usable as a Nagios/monit probe. Mirrors sfp-check /
+### fan-check / caam-check style. Flavor-agnostic: the AF_XDP datapath
+### patches are in the common board patch set, so the counters exist on
+### every flavor; on a shipping image with no ZC producer bound the verdict
+### is the expected "dormant".
+cp board/scripts/xsk-zc-check "$CHROOT/usr/local/bin/xsk-zc-check"
+chmod +x "$CHROOT/usr/local/bin/xsk-zc-check"
+
 ### ASK2 stack health helper: `ask-check` reports the landed state of the
 ### ASK2 in-tree kernel patches (0001 caam-qi-share, 0002 dpaa-eth-flow-block,
 ### 0003 fman-host-command-api, 0004 fman-pcd-subsystem incl. PR14a-PR14g-prep

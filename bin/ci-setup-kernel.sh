@@ -270,6 +270,9 @@ cp "$BOARD_PATCH_DIR/0090a-dpaa-fman-hm-productive-structs.patch" "$KERNEL_PATCH
 # dpaa_fman_caps.h). Spec sec 5.6.
 cp "$BOARD_PATCH_DIR/0091a-dpaa-fman-policer-productive-structs.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0093-dpaa1-true-zc-rx-eligibility-probe.patch" "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0094-dpaa1-true-zc-rx-arm-observability.patch" "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0095-dpaa1-xsk-fill-ring-guard-audit.patch" "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0096-dpaa1-true-zc-rx-recover-readside.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
