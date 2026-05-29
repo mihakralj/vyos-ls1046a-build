@@ -89,7 +89,7 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
  u32 n, i;
  u16 q;
  
-@@ -266,15 +267,40 @@ static void af_xdp_pool_napi_refill(struct dpaa_priv *priv)
+@@ -266,14 +267,42 @@ static void af_xdp_pool_napi_refill(struct dpaa_priv *priv)
  continue;
  
  n = xsk_buff_alloc_batch(pool, handles, ARRAY_SIZE(handles));
@@ -136,7 +136,7 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
   * counter still bumps once per non-empty alloc batch. Mirror of
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
-@@ -321,6 +321,23 @@
+@@ -321,6 +321,25 @@
   */
  u64 xsk_zc_rx_armed;
  
