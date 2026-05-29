@@ -27,7 +27,7 @@ Spec: specs/dpaa1-afxdp-modernization-spec.md sec 5.4.
 Signed-off-by: vyos-ls1046a-build CI <ci@local>
 ---
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
-index 9c6cc8d..79bc611 100644
+index a9b3d2f..aa97658 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
 @@ -101,16 +101,88 @@ int  fman_cc_tree_add_key(struct fman *fm, u8 port_id,
@@ -125,4 +125,5 @@ index 9c6cc8d..79bc611 100644
 +	struct fman_cc_key keys[FMAN_CC_MAX_STATIC_KEYS];
  };
  
- /* ------------------------------------------------------------------ *
+ #endif /* __DPAA_FMAN_CAPS_H */
+\ No newline at end of file
