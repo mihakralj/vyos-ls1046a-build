@@ -1,0 +1,102 @@
+From: ci <ci@local>
+Date: Thu, 28 May 2026 23:55:00 +0000
+Subject: [PATCH] dpaa: FMan Policer productive srTCM/trTCM profile struct (M3-3d)
+
+Replaces the opaque `struct fman_policer_profile { u32 reserved; }`
+placeholder from 0091 with the productive srTCM/trTCM metering layout
+per spec sec 5.6.  This fixes the Policer API *contract* (the documented
+"API is fixed now so downstream consumers can wire calls today"
+precondition from the 0091 stub comment) so consumers (vyos-1x firewall
+`limit offload` CLI, VPP per-qband rate-limit, ASK2 nft `limit` offload
+backend) build real profiles against stable field names today.
+
+The four `fman_policer_*` entry points remain `-ENOTSUPP` stubs from
+0091: the FMan exponent/mantissa rate-field encoding and 16-byte MURAM
+profile-record write (LS1046A RM 8.7.6) land in the productive install
+body in a follow-up patch.
+
+  - enum fman_policer_mode: SRTCM (RFC 2697) / TRTCM (RFC 2698)
+  - enum fman_policer_color_mode: BLIND / AWARE
+  - struct fman_policer_profile: mode + color_mode + cir_bps + cbs_bytes
+    + pir_bps + pbs_bytes (CIR/PIR bits/sec, CBS/PBS bytes; pir/pbs are
+    the trTCM PIR/PBS or the srTCM EBS)
+
+Applies on top of 0090a (both edit dpaa_fman_caps.h; staged in lexical
+order 0086b -> 0090a -> 0091a).  Header compiles clean (dpaa_fman_caps.o,
+ARCH=arm64, zero warnings).
+
+Spec: specs/dpaa1-afxdp-modernization-spec.md sec 5.6.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+index 06ff5f8..23516a2 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+@@ -351,12 +351,62 @@ bool fman_hm_caps_supported(void);
+  * today and gracefully degrade on ucode-106 silicon.
+  * ------------------------------------------------------------------ */
+ 
+-/* Opaque type referenced by the Policer stub signatures; the concrete
+- * layout (srTCM/trTCM mode + CIR/PIR/CBS/PBS + colour-aware flag)
+- * lands with the productive implementation.
++/* Productive Policer profile (spec sec 5.6).
++ *
++ * One profile programs the FMan PCD Policer block to meter a flow (or a
++ * whole qband) with a three-colour marker and drop/recolour out-of-profile
++ * traffic in silicon, before QMan enqueue. The marker runs in the
++ * Parser -> CC -> Policer -> HM -> QMan chain (spec sec 5.4): a CC action
++ * whose policer-pointer field carries this profile's slot id arms the
++ * meter for every frame the key matched.
++ *
++ * @mode selects single-rate three-colour (srTCM, RFC 2697 -- CIR + CBS +
++ * EBS, @pir_bps/@pbs_bytes ignored) or two-rate three-colour (trTCM,
++ * RFC 2698 -- CIR + CBS + PIR + PBS). @color_mode selects colour-blind
++ * (ignore any pre-colour the frame already carries) or colour-aware
++ * (honour the incoming colour as the marker's starting point).
++ *
++ * Rates are bits-per-second and bursts are bytes at the API; the
++ * productive install body converts to the FMan exponent/mantissa
++ * rate-field encoding (LS1046A RM 8.7.6: rate exp<<29 | mant<<13,
++ * burst quantised to 256-byte units) and writes the 16-byte MURAM
++ * profile record. The four fman_policer_* entry points stay -ENOTSUPP
++ * stubs until that encoder lands (follow-up patch).
++ */
++
++/* Metering algorithm for fman_policer_profile.mode. */
++enum fman_policer_mode {
++	FMAN_POLICER_MODE_SRTCM= 0,/* RFC 2697: CIR + CBS + EBS */
++	FMAN_POLICER_MODE_TRTCM= 1,/* RFC 2698: CIR + CBS + PIR + PBS */
++};
++
++/* Colour-awareness for fman_policer_profile.color_mode. */
++enum fman_policer_color_mode {
++	FMAN_POLICER_COLOR_BLIND= 0,/* ignore any pre-existing frame colour */
++	FMAN_POLICER_COLOR_AWARE= 1,/* honour the incoming frame colour */
++};
++
++/**
++ * struct fman_policer_profile - one srTCM/trTCM metering profile
++ * @mode:       srTCM or trTCM (enum fman_policer_mode)
++ * @color_mode: colour-blind or colour-aware (enum fman_policer_color_mode)
++ * @cir_bps:    committed information rate, bits/sec (both modes)
++ * @cbs_bytes:  committed burst size, bytes (both modes)
++ * @pir_bps:    peak information rate, bits/sec (trTCM only; 0 for srTCM)
++ * @pbs_bytes:  peak/excess burst size, bytes (trTCM PBS / srTCM EBS)
++ *
++ * The productive install body rejects @cir_bps == 0 with -EINVAL, a
++ * trTCM profile whose @pir_bps < @cir_bps with -ERANGE, and a rate that
++ * overflows the FMan exponent/mantissa field by saturating at the
++ * silicon ceiling (RM 8.7.6).
+  */
+ struct fman_policer_profile {
+-u32 reserved;/* productive layout TBD per spec sec 5.6 */
++	enum fman_policer_mode       mode;
++	enum fman_policer_color_mode color_mode;
++	u64 cir_bps;
++	u32 cbs_bytes;
++	u64 pir_bps;
++	u32 pbs_bytes;
+ };
+ 
+ /**

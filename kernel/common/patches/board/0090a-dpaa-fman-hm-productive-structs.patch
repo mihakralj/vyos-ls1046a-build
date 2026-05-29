@@ -1,0 +1,120 @@
+From: ci <ci@local>
+Date: Thu, 28 May 2026 23:41:00 +0000
+Subject: [PATCH] dpaa: FMan HM productive op-list struct layout (M3-3c)
+
+Replaces the opaque `struct fman_hm_spec { u32 reserved; }` placeholder
+from 0090 with the productive ordered-op-list layout per spec sec 5.5.
+Fixes the HM API *contract* so consumers (af_xdp_pool egress rewrite,
+ASK2 flowtable bridge, vyos-1x NAT/VLAN offload CLI) can build real HM
+specs against stable field names while the productive install body
+(HMCT/HMTD MURAM encoding) remains a follow-up.
+
+The three `fman_hm_*` entry points are unchanged -ENOTSUPP stubs from
+0090; only the spec struct gains its real shape.
+
+  - enum fman_hm_op_type: VLAN_STRIP / VLAN_INSERT / MPLS_PUSH / MPLS_POP
+    (spec sec 5.5 op list; values encode into the HMCT opcode)
+  - struct fman_hm_vlan_insert: vlan_id / tpid / pcp
+  - struct fman_hm_mpls_push: label / tc / s / ttl
+  - struct fman_hm_op: type + union { vlan_insert; mpls_push; }
+  - struct fman_hm_spec: num_ops + ops[8] (FMAN_HM_MAX_OPS bounds the
+    ~1 KiB MURAM HM budget from spec sec 3.5)
+
+Applies on top of 0086b (both edit dpaa_fman_caps.h; staged in that
+order). Header compiles clean (dpaa_fman_caps.o, ARCH=arm64, 0 warnings).
+
+Spec: specs/dpaa1-afxdp-modernization-spec.md sec 5.5.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+index 79bc611..06ff5f8 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+@@ -208,11 +208,83 @@ struct fman_cc_static_tree {
+  * ucode-106 silicon.
+  * ------------------------------------------------------------------ */
+ 
+-/* Opaque type referenced by the HM stub signatures; the concrete
+- * layout (per-op TLV array) lands with the productive implementation.
++/* Productive HM (Header Manipulation) spec (spec sec 5.5).
++ *
++ * An HM node is an ordered list of header-mutation operations the FMan
++ * PCD HM block applies in silicon after a CC match and before QMan
++ * enqueue (Parser -> CC -> HM -> QMan). Each op is one TLV entry; the
++ * productive fman_hm_node_install() body walks @ops[0 .. num_ops-1] and
++ * emits the matching HMCT (Header Manipulation Command Table) records
++ * into MURAM, finalising one HMTD (Header Manipulation Table Descriptor)
++ * whose offset becomes the returned @handle (the value a CC action's
++ * HM-pointer field carries per spec sec 5.4).
+  */
++
++/**
++ * enum fman_hm_op_type - one header-manipulation operation kind
++ * @FMAN_HM_OP_VLAN_STRIP:  pop the outermost VLAN tag (ingress)
++ * @FMAN_HM_OP_VLAN_INSERT: push a VLAN tag (uses .vlan_insert)
++ * @FMAN_HM_OP_MPLS_PUSH:   push an MPLS label (uses .mpls_push)
++ * @FMAN_HM_OP_MPLS_POP:    pop the outermost MPLS label
++ *
++ * Per spec sec 5.5 op list: VLAN_STRIP, VLAN_INSERT(vlan_id, tpid),
++ * MPLS_PUSH(label, tc, s, ttl), MPLS_POP. Add new ops at the end; do not
++ * renumber (the value is encoded into the HMCT opcode by the install
++ * body).
++ */
++enum fman_hm_op_type {
++	FMAN_HM_OP_VLAN_STRIP	= 0,
++	FMAN_HM_OP_VLAN_INSERT	= 1,
++	FMAN_HM_OP_MPLS_PUSH	= 2,
++	FMAN_HM_OP_MPLS_POP	= 3,
++};
++
++/* Parameters for FMAN_HM_OP_VLAN_INSERT. */
++struct fman_hm_vlan_insert {
++	u16 vlan_id;		/* 12-bit VID in the low bits (host-endian) */
++	u16 tpid;		/* 0x8100 C-VLAN or 0x88a8 S-VLAN (host-endian) */
++	u8  pcp;		/* 3-bit priority code point */
++};
++
++/* Parameters for FMAN_HM_OP_MPLS_PUSH. */
++struct fman_hm_mpls_push {
++	u32 label;		/* 20-bit MPLS label (host-endian) */
++	u8  tc;			/* 3-bit traffic class */
++	u8  s;			/* bottom-of-stack bit */
++	u8  ttl;		/* MPLS TTL */
++};
++
++/**
++ * struct fman_hm_op - one entry in an HM node's op list
++ * @type:        which mutation (enum fman_hm_op_type)
++ * @vlan_insert: parameters when @type == FMAN_HM_OP_VLAN_INSERT
++ * @mpls_push:   parameters when @type == FMAN_HM_OP_MPLS_PUSH
++ *
++ * STRIP / POP ops carry no parameters. The union keeps the per-op
++ * footprint small while remaining extensible.
++ */
++struct fman_hm_op {
++	enum fman_hm_op_type type;
++	union {
++		struct fman_hm_vlan_insert vlan_insert;
++		struct fman_hm_mpls_push   mpls_push;
++	};
++};
++
++/**
++ * struct fman_hm_spec - an ordered HM operation list for one node
++ * @num_ops: number of valid entries in @ops
++ * @ops: the operations, applied in array order
++ *
++ * FMAN_HM_MAX_OPS bounds a single node at the ~1 KiB MURAM HM budget
++ * from spec sec 3.5. The productive install body rejects num_ops == 0
++ * or > FMAN_HM_MAX_OPS with -EINVAL.
++ */
++#define FMAN_HM_MAX_OPS	8
++
+ struct fman_hm_spec {
+-	u32 reserved;		/* productive layout TBD per spec sec 5.5 */
++	u8 num_ops;
++	struct fman_hm_op ops[FMAN_HM_MAX_OPS];
+ };
+ 
+ /**

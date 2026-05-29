@@ -243,6 +243,32 @@ cp "$BOARD_PATCH_DIR/0090-dpaa-fman-hm-stub.patch"              "$KERNEL_PATCHES
 # VPP per-qband rate-limit, ASK2 nft limit offload backend) can wire calls
 # today and gracefully degrade on ucode <210 silicon. Spec sec 5.6.
 cp "$BOARD_PATCH_DIR/0091-dpaa-fman-policer-stub.patch"         "$KERNEL_PATCHES/"
+# M3-3b productive struct contract: replaces the opaque {u32 reserved;}
+# placeholders for struct fman_cc_key / fman_cc_static_tree (from 0086)
+# with the real 5-tuple key + static-tree layout per spec sec 5.4. The
+# four fman_cc_tree_* entry points stay -ENOTSUPP stubs; only the API
+# struct shape becomes productive so downstream consumers (af_xdp_pool
+# qband-select, vyos-1x classify CLI, ASK2 flowtable bridge) can build
+# real specs. The silicon AD/group-table CONT_LOOKUP encoding lands in a
+# follow-up. Applies on the final post-0091 dpaa_fman_caps.h. Spec sec 5.4.
+cp "$BOARD_PATCH_DIR/0086b-dpaa-fman-cc-productive-structs.patch" "$KERNEL_PATCHES/"
+# M3-3c productive struct contract: replaces the opaque struct
+# fman_hm_spec {u32 reserved;} placeholder (from 0090) with the real
+# ordered-op-list layout (enum fman_hm_op_type + VLAN/MPLS op params +
+# ops[8]) per spec sec 5.5. fman_hm_* entry points stay -ENOTSUPP stubs.
+# Must apply AFTER 0086b (both edit dpaa_fman_caps.h). Spec sec 5.5.
+cp "$BOARD_PATCH_DIR/0090a-dpaa-fman-hm-productive-structs.patch" "$KERNEL_PATCHES/"
+# M3-3d productive struct contract: replaces the opaque struct
+# fman_policer_profile {u32 reserved;} placeholder (from 0091) with the
+# real srTCM/trTCM metering layout (enum fman_policer_mode +
+# enum fman_policer_color_mode + cir/cbs/pir/pbs) per spec sec 5.6.
+# fman_policer_* entry points stay -ENOTSUPP stubs; only the API struct
+# shape becomes productive so consumers (vyos-1x firewall limit offload,
+# VPP per-qband rate-limit, ASK2 nft limit offload) can build real
+# profiles. The FMan exp/mant rate-field + MURAM record encoding (RM
+# 8.7.6) lands in a follow-up. Must apply AFTER 0090a (both edit
+# dpaa_fman_caps.h). Spec sec 5.6.
+cp "$BOARD_PATCH_DIR/0091a-dpaa-fman-policer-productive-structs.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
