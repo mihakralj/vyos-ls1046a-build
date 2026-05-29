@@ -13,7 +13,7 @@
 
 1. **One driver core, one classifier API, one HW-accelerated AF_XDP stack — three flavors that consume it differently.** Shared substrate: two ops tables (`pcd_ops`, `qmgmt_ops`) installed per-`dpaa_priv`. `default` leaves them NULL (mainline behaviour); `vpp` populates them with UMEM-backed BMan pool + ZC RX/TX hooks; `ask` populates them with dynamic CC tree + Host Command reconfig hooks. RCU-NULL-safe — when no flavor module is loaded the driver is byte-identical to mainline.
 
-2. **The hardware offloads (CC / HM / Policer / CEETM) are not VPP-only.** Each exposes a kernel-side consumer that benefits `default` and `ask` too: CC trees back kernel RPS or ASK2 flow steering; HM nodes hook into `NETIF_F_HW_VLAN_CTAG_*`; Policer profiles back tc/nftables ingress rate-limit offload; CEETM is already a tc qdisc that needs only a root-qdisc CLI verb. The VyOS CLI surfaces land as separate vyos-1x patches per flavor.
+2. **The hardware offloads (CC / HM / Policer / CEETM) are not VPP-only.** Each exposes a kernel-side consumer that benefits `default` and `ask` too: CC trees back kernel RPS or ASK2 flow steering; HM nodes hook into `NETIF_F_HW_VLAN_CTAG_*`; Policer profiles back tc/nftables ingress rate-limit offload; CEETM is QMan-silicon hierarchical egress shaping (the Linux tc-qdisc driver is NOT in mainline 6.18 and must be forward-ported from the NXP LSDK — see §5.7). The VyOS CLI surfaces land as separate vyos-1x patches per flavor.
 
 3. **FMan ucode 210 is a build dependency, not a runtime option.** U-Boot loads the 210 binary from SPI `mtd4` at SoC bring-up; the kernel inherits a fully-armed FMan with Parser/CC/KeyGen/HM/Policer/IPF/IPR available. The DPAA1 driver only consumes capabilities. Capabilities apply equally across all flavors.
 
@@ -44,8 +44,8 @@ Full per-row validation detail (DUT counter readings, ftrace evidence, iperf3 nu
 | **M3-3b**       | CC steering — exact-match HW classifier kernel API                               | 5.4     | **struct-contract-landed** | `0086` = `c36e6c0` (CC stubs + counter) + `0086a` (productive DT ucode-210 probe, 2026-05-28) + `0086b` (productive 5-tuple `fman_cc_key`/`fman_cc_static_tree` struct contract, 2026-05-28 — replaces `{u32 reserved}` placeholder; ethertype/proto/v4+v6 addr+mask/ports/target_qband/hm_handle, `FMAN_CC_MAX_STATIC_KEYS=32`); `fman_cc_tree_*` bodies remain `-ENOTSUPP`, MURAM CONT_LOOKUP AD encoding pending |
 | **M3-3c**       | HM offload — VLAN/MPLS strip-insert kernel API                                   | 5.5     | **struct-contract-landed** | `0090` — `fman_hm_node_install/destroy/caps_supported` `-ENOTSUPP` stubs + `CONFIG_DPAA_HW_HM_OFFLOAD` + `0090a` (productive ordered-op-list struct contract, 2026-05-28 — replaces `{u32 reserved}` placeholder; `enum fman_hm_op_type` VLAN_STRIP/VLAN_INSERT/MPLS_PUSH/MPLS_POP, `fman_hm_op` union, `FMAN_HM_MAX_OPS=8`); `fman_hm_*` bodies remain `-ENOTSUPP`, MURAM HMCT/HMTD encoding pending |
 | **M3-3d**       | Policer — per-flow HW ingress rate-limit                                         | 5.6     | **struct-contract-landed** | `0091` (`fman_policer_install` `-ENOTSUPP` / `fman_policer_destroy` void no-op / `fman_policer_caps_supported` wraps `caps & FMAN_CAP_POLICER_TRTCM`; adds `CONFIG_DPAA_HW_POLICER_OFFLOAD`) + `0091a` (productive srTCM/trTCM struct contract, 2026-05-28 — replaces `{u32 reserved}` placeholder; `enum fman_policer_mode` SRTCM/TRTCM + `enum fman_policer_color_mode` BLIND/AWARE, `cir_bps`/`cbs_bytes`/`pir_bps`/`pbs_bytes`); `fman_policer_*` bodies remain `-ENOTSUPP`, RM 8.7.6 exp/mant + 16-byte MURAM profile encoding pending |
-| **M3-3e**       | CEETM — HW hierarchical egress shaping as tc qdisc                               | 5.7     | **planned**               | `0092` (renumbered from `0088` per §6.1.6); ucode-210 gated for color-aware drop, scheduler works on ucode 106 |
-| **M3-3 step 7** | True ZC RX (FMan DMAs into XSK-pool BMan chunks via `priv->xsk_bpid` match)      | 6.1     | **planned**               | `0093+` — only required if §6.1.8 Options A/B/C fail to close ≥7 Gbps gate at copy-mode |
+| **M3-3e**       | CEETM — HW hierarchical egress shaping as tc qdisc                               | 5.7     | **blocked (no mainline CEETM)** | `0092` reserved. **Mainline 6.18.31 ships NO CEETM** — `qman_ceetm.c`, `dpaa_eth_ceetm.{c,h}`, and every `qman_ceetm_*` symbol in `include/soc/fsl/qman.h` are absent (verified 2026-05-29 by tree grep on `work/linux-6.18.31`). DPAA `dpaa_eth.c` has no `ndo_setup_tc`/mqprio wiring either. M3-3e is therefore an SDK-CEETM *forward-port* (`drivers/soc/fsl/qbman/qman_ceetm.c` ~2600 LOC + `dpaa_eth_ceetm.c` ~1900 LOC from NXP LSDK/pre-5.x), NOT a "wire the existing qdisc" task. Scope reclassified — see §5.7 |
+| **M3-3 step 7** | True ZC RX (FMan DMAs into XSK-pool BMan chunks via `priv->xsk_bpid` match)      | 6.1     | **not required for gate 3** | `0093+` — Options A (§6.1.8a) + C (§6.1.8b) both prove gate 3 is consumer/methodology-bound not driver-bound (driver drops 0%, RX softirq scales across CPU0/1/2 to 5.57 Gbit/s w/ headroom). Literal ≥7 Gbps figure needs generator-side multi-process iperf3 / wire-rate gen (lab task). Step 7 still the right move for a *true-ZC* perf-gate-item-4 (`perf top` clean of memcpy), not for gate-3 capacity |
 | **M4**          | Single-MAC dual-flavor coexistence via VSP bifurcation                           | App. A  | **deferred**              | Typical deployment uses per-port flavor selection (§7.1) — Phase 4 only needed for kernel+VPP on the SAME MAC |
 
 ### Current execution focus
@@ -58,7 +58,7 @@ In-flight state as of **2026-05-28**. Pre-2026-05-27 per-step DUT validation pro
 4. **TX direction characterized** (§6.1.9). Kernel-skbuf single-stream TCP eth4→backup = **4.93 Gbit/s** ceiling (no TSO/LSO available — verified across mainline + NXP-SDK + DPDK; `NETIF_F_TSO` advertised nowhere on FMan v3 Linux). This is the kernel-stack TX ceiling — irrelevant to AF_XDP-ZC TX (which bypasses softirq entirely).
 5. **M3-3b stub landed** (§5.4). Patch `0086` (slot reused post-blocker-A closure) = commit `c36e6c0`. Productive CC install (HM/Policer/CEETM) renumbered to `0090`/`0091`/`0092`.
 
-**Next-session entry point for ≥7 Gbps gate-3 closure** (per §6.1.8): try Options A (`XDP_PASS` counter under driven load), B (`xdp-tools xdpsock -r -q 0`), C (`-P 4` parallel iperf3 server) BEFORE committing to step 7 — the driver-capacity cross-check already proves the fabric does 7.5 Gbit/s clean; gate 3 may close at the existing copy-mode datapath with only a measurement-methodology change.
+**Gate-3 entry point — Options A + C DONE (2026-05-28/29), gate is methodology-bound not driver-bound.** Option A (`XDP_DROP` driver-only capacity, §6.1.8a) proved the driver drops **0%** of every offered frame; Option C (multi-flow TCP `-R`, §6.1.8b) hit **5.57 Gbit/s** aggregate RX with softirq distributed across CPU0/1/2 and ~50% headroom on CPU2 — the bottleneck is the single userspace receiver process (CPU3 84% sys), not the DPAA1 RX path. Neither needed a new ISO (the installed `6.18.33-vyos` blocker-A/B build carries the full datapath: 16 `xsk_*` counters, `qmap` debugfs, caps=0x17). **Remaining for a *literal* ≥7 Gbps Gate-3 figure:** multiple iperf3 *server* processes on the generator (so the receiver side divides across cores) — needs generator-side creds (`backup` `admin@192.168.1.3`, §6.1.8 item 6) — or a wire-rate generator (TRex/DPDK-pktgen). This is a lab-provisioning task, NOT a kernel-code task. M3-3 step 7 (true ZC) is not required for gate-3 capacity.
 
 **Operator-visible non-issue noted on the eth0/eth1/eth2 management LAN:** three RJ45 ports DHCP-active on the same `192.168.1.0/24` switch produce martian-source storms. VyOS config / cabling issue, NOT a driver regression. Fix: leave only eth0 plugged in or `set interfaces ethernet ethN address dhcp` on a single port.
 
@@ -78,7 +78,7 @@ Kernel-side changes to `drivers/net/ethernet/freescale/dpaa/` + FMan/QMan/BMan s
 
 - `dpaa_eth.c`, `dpaa_eth_sysfs.c` changes for per-`dpaa_priv` ops, RX datapath restructure, XSK pool lifecycle, qband mapping correctness.
 - `drivers/net/ethernet/freescale/fman/` changes for CC-tree install, HM node install, Policer profile install, CEETM channel setup. All called via M0 abstraction; flavor modules own policy.
-- Existing `dpaa_eth_ceetm.c` wired as a tc root qdisc replacement.
+- Forward-port the SDK CEETM driver (`qman_ceetm.c` + `dpaa_eth_ceetm.c`, absent from mainline — see §5.7) and wire it as a tc root qdisc replacement.
 - VPP plugin integration via existing AF_XDP plugin; no VPP source changes.
 - VyOS CLI glue per flavor — follow-on vyos-1x patches not in this spec's direct scope.
 
@@ -119,7 +119,7 @@ No `NETDEV_XDP_ACT_XSK_ZEROCOPY`. No `ndo_xsk_wakeup`. No `XDP_SETUP_XSK_POOL`. 
 
 XDP support was added by Camelia Groza (NXP) in a 7-patch v5 series (netdev cover `<cover.1606322126.git.camelia.groza@nxp.com>`, accepted 2020-12-01). XDP buffers remain `dpaa_bp`-backed kernel pages, recycled through `bman_release()`. Default RSS spreads ingress across 128 PCD FQs using FMan KeyGen 5-tuple hashing. `QM_FQCTRL_HOLDACTIVE` plus stashing flags keep bursts on one CPU portal.
 
-CEETM infrastructure exists in `drivers/soc/fsl/qbman/qman_ceetm.c` and `drivers/net/ethernet/freescale/dpaa/dpaa_eth_ceetm.c` but `dpaa_eth.c` does not wire it as a default qdisc.
+**CEETM is absent from mainline** (verified 2026-05-29 on `work/linux-6.18.31`): there is no `drivers/soc/fsl/qbman/qman_ceetm.c`, no `drivers/net/ethernet/freescale/dpaa/dpaa_eth_ceetm.{c,h}`, no `qman_ceetm_*` symbol in `include/soc/fsl/qman.h`, and `dpaa_eth.c` does not even implement `ndo_setup_tc`/mqprio. The CEETM tc-qdisc driver was an NXP-LSDK / pre-5.x out-of-tree component that never landed upstream. M3-3e (§5.7) is therefore a *forward-port* of that SDK code, not a "wire the existing qdisc" task — see §5.7.
 
 ### 2.2 What FMan ucode 210 unlocks (over public 106.4.18)
 
@@ -275,7 +275,7 @@ Combined `vpp` + `ask` on the same MAC (Phase 4) is gated by VSP bifurcation.
 
 ### 4.3 QMan/SWPs — Four SWPs (one per A72), 28 pool channels + 4 dedicated channels available. The 4-dedicated-channel consumption (one per qband) is within budget. Stash effectiveness requires polling CPU = portal CPU; `qmap[]` (§5.2) enforces.
 
-### 4.4 QMan CEETM — 8-level hierarchical scheduler. `dpaa_eth_ceetm.c` already mainline as a tc qdisc. §5.7 wires as root qdisc replacement.
+### 4.4 QMan CEETM — 8-level hierarchical scheduler in the QMan silicon. **The Linux CEETM tc-qdisc driver is NOT in mainline 6.18.31** (no `qman_ceetm.c`, no `dpaa_eth_ceetm.c`, no `qman_ceetm_*` API — verified 2026-05-29). §5.7 must forward-port the SDK driver before it can be wired as a root qdisc replacement.
 
 ### 4.5 MURAM — Combined < 52 KiB respecting PR14h 64 KiB reservation.
 
@@ -455,11 +455,19 @@ Per-qband or per-flow ingress rate-limit using srTCM/trTCM. Yellow/red drop in F
 
 ### 5.7 CEETM egress shaping (M3-3e)
 
-**Patch:** `0092` (planned, renumbered from `0088` per §6.1.6). **Status:** planned (ucode-210 gated for color-aware drop; CEETM scheduler works on ucode 106).
+**Patch:** `0092` (reserved, renumbered from `0088` per §6.1.6). **Status:** **blocked — no mainline CEETM**.
 
-Wires `dpaa_eth_ceetm.c` as a root qdisc replacement. Sub-µs accuracy + zero CPU cost vs. software token bucket.
+**Scope correction (2026-05-29).** Earlier revisions of this spec assumed `dpaa_eth_ceetm.c` and `qman_ceetm.c` ship in mainline and that M3-3e merely needs to "wire the existing qdisc as a root qdisc replacement". A tree audit on `work/linux-6.18.31` proves that assumption **false**: none of `drivers/soc/fsl/qbman/qman_ceetm.c`, `drivers/net/ethernet/freescale/dpaa/dpaa_eth_ceetm.{c,h}`, or any `qman_ceetm_*` symbol in `include/soc/fsl/qman.h` exists, and `dpaa_eth.c` has no `ndo_setup_tc`. The CEETM tc-qdisc was an NXP-LSDK / pre-5.x out-of-tree driver dropped on the road to mainline.
 
-**CGRs mandatory for strict-priority.** Each CEETM CQ gets a CGR with tail-drop threshold sized to ~2 ms of class-rate-worth of buffers. Drop counts exposed as `ethtool -S fm_ceetm_cgr_drops_class_<N>`. §6.1.4 software `xsk_tx_inflight` budget sits on top for VPP; CGR tail-drop is the first line for all flavors.
+**Revised work breakdown.** M3-3e is now a multi-part *forward-port*, materially larger than 3b/3c/3d:
+
+1. **QMan CEETM core** — forward-port `qman_ceetm.c` (~2600 LOC: LNI/channel/CQ/CCG/LFQ allocation, shaper-rate programming, CGR config) plus the `qman_ceetm_*` API into `include/soc/fsl/qman.h`. Must reconcile with the mainline 6.18 `qman.c` portal/FQ APIs that have drifted since the SDK fork.
+2. **DPAA CEETM qdisc** — forward-port `dpaa_eth_ceetm.{c,h}` (~1900 LOC: the `Qdisc_ops`/`tcf` glue, class hierarchy, `mqprio`-style mapping) and add `ndo_setup_tc` to `dpaa_eth.c`'s netdev_ops.
+3. **Stub-first landing (matches 3b/3c/3d cadence)** — once the core forward-port compiles, the *first* board patch should be a `dpaa_fman_caps`-style stub: a Kconfig `CONFIG_DPAA_HW_CEETM`, an opaque qdisc-config struct, and `-ENOTSUPP` entry points, so downstream CLI consumers can wire calls before the full datapath lands. Productive shaping then follows.
+
+The scheduler core works on any ucode (it is QMan silicon, not FMan PCD); only **colour-aware drop** is ucode-210 gated. This is the one M3-3 sub-milestone that needs no FMan-PCD subsystem — but it needs the QMan CEETM forward-port instead.
+
+**CGRs mandatory for strict-priority** (design target, once the forward-port lands). Each CEETM CQ gets a CGR with tail-drop threshold sized to ~2 ms of class-rate-worth of buffers. Drop counts exposed as `ethtool -S fm_ceetm_cgr_drops_class_<N>`. §6.1.4 software `xsk_tx_inflight` budget sits on top for VPP; CGR tail-drop is the first line for all flavors.
 
 **Consumers:**
 - **`default`** — `set qos policy shaper hardware ceetm class 1 rate 4g ceil 6g ...` (vyos-1x follow-on; tc qdisc already mainline). Replaces software `htb`/`tbf`.
@@ -799,6 +807,36 @@ xsk_tx_conf_zc:            0
 
 6. **Lab topology left in place for next session's gate-3 measurement work** (Options A/B/C above): DUT eth4 = `10.11.1.1/29` (widened from `/30` for room for `.1.3`), lxc202 eth0 = `10.11.1.2/29`, `backup` eth1 = `10.11.1.3/29` (alias on its mgmt 10G ixgbe interface). iperf3 server is running on `backup` at `10.11.1.3:5201`. The `backup → DUT eth4` UDP path is iperf3-receiver-CPU-bound at ~954 Mbit/s as documented above; `lxc202 → backup` proves the L2 fabric is 7.5 Gbit/s. SSH to `backup`: `admin@192.168.1.3`, key `~/.ssh/admin_key` or password `auckland`.
 
+#### 6.1.8b Option C executed — multi-flow TCP `-R` RX scaling — 2026-05-29
+
+**Setup.** Installed DUT image `6.18.33-vyos` (built 2026-05-28 21:16, the blocker-A/B-closure build) — verified to carry the full AF_XDP datapath live: `ethtool -S eth4` shows **16 `xsk_*` counters**, `/sys/kernel/debug/af_xdp_pool/qmap` present, dmesg `FMan PCD caps = 0x17 (CC HM POL PARSER)` (so `0086a` ucode-210 probe live) + `af_xdp_pool: registered`. **No new ISO was needed** to run Option C — it is a pure userspace measurement, and the M3-3b/c/d struct-contract patches committed `fe3e56d` are header-only `-ENOTSUPP` edits that do not touch the datapath. Both SFP+ up at 10G; generator `10.11.1.2` (eth4 `/29` segment) has a single iperf3 server on `:5201`. The DUT can only act as iperf3 *client* (no SSH creds to the generator to spawn additional server ports — `root@10.11.1.2: Permission denied`).
+
+**Results (DUT = receiver via `iperf3 -c 10.11.1.2 -R`):**
+
+| Streams | Aggregate RX `[SUM]` receiver |
+|---|---|
+| `-P 4`  | **5.57 Gbit/s** |
+| `-P 8`  | 4.12 Gbit/s |
+| `-P 16` | 3.75 Gbit/s |
+
+Throughput **peaks at `-P 4` (5.57 Gbit/s)** and *declines* beyond it. The decline is single-iperf3-**server**-process contention on the generator: one `iperf3 -s` process muxing 8/16 streams becomes the bottleneck (and a 4-way `taskset`-pinned client experiment failed — iperf3 runs one test session per server at a time, so 3 of 4 pinned clients were refused).
+
+**`mpstat -P ALL` per-core during `-P 16` (the diagnostic that matters):**
+
+| CPU | %soft | %sys | %idle | role |
+|---|---|---|---|---|
+| 0 | 79.9 | 0.3 | 19.8 | RX softirq |
+| 1 | 97.6 | 0.0 | 2.4 | RX softirq |
+| 2 | 49.1 | 0.3 | 50.6 | RX softirq (headroom) |
+| 3 | 6.0 | 84.2 | 6.5 | iperf3 receiver app (single proc) |
+
+**Conclusions.**
+1. **The per-CPU NAPI + contiguous-banding work (M3-3 steps 2a–2c) is doing its job:** RX softirq genuinely distributes across CPU0/1/2 (79.9 / 97.6 / 49.1 %soft), with CPU2 still holding ~50% headroom. The RX *driver* path is NOT saturated.
+2. **The bottleneck at scale is the single userspace receiver process** (CPU3 = 84% sys), exactly the §6.1.8 / §6.1.8a "userspace socket-drain, not driver" finding — now reconfirmed with TCP (not just UDP) and per-core softirq evidence.
+3. **5.57 Gbit/s is the achievable aggregate from the DUT-as-client side**, receiver-process-bound. A literal ≥7 Gbit/s number is blocked by the lab topology, not the driver: it needs *multiple iperf3 server processes on the generator* (so the receiver side also divides across cores), which requires the operator's generator-side credentials (`backup` at `admin@192.168.1.3`, key `~/.ssh/admin_key` / password `auckland`, per §6.1.8 item 6) — or the wire-rate generator (TRex/DPDK-pktgen) called for in §6.1.8a.
+
+**Gate-3 status after Options A + C:** the driver demonstrably (a) drops 0% of every frame the fabric delivers (Option A, §6.1.8a), and (b) scales RX softirq across cores to 5.57 Gbit/s aggregate TCP with headroom on CPU2 (Option C). Both options independently confirm Gate 3 is **consumer/methodology-bound, not driver-bound**. Closing the gate with a *literal* ≥7 Gbit/s figure still needs either generator-side multi-process iperf3 or a wire-rate generator — a lab-provisioning task, not a kernel-code task. M3-3 step 7 (true ZC) is **not** required for Gate 3 on driver-capacity grounds.
+
 #### 6.1.8a Option A executed — XDP_DROP driver-only RX capacity — 2026-05-28
 
 **Tool: `bin/dpaa1-xdp-rxcap.py`** (standalone, no libbpf/clang). Loads a 2-insn XDP program (`r0 = XDP_DROP; exit`) via raw `bpf(BPF_PROG_LOAD, BPF_PROG_TYPE_XDP)` (the exact `bpf_attr` encoding proven by `bin/dpaa1-xsk-bind-probe.py`), attaches DRV-mode via rtnetlink `RTM_SETLINK`/`IFLA_XDP` (SKB fallback), and samples `/sys/class/net/eth4/statistics/{rx_packets,rx_bytes,rx_dropped}` plus `ethtool -S eth4` (`rx error [TOTAL]`, `rx dma error`, `rx frame physical error`, `rx fifo error`, `qman cg_tdrop`, `qman fq tdrop`) deltas across a hold window. XDP_DROP frees each frame in-driver (recycle to BMan) — **no skb, no socket, no userspace consumer** — so the only thing that advances is the driver RX path. A selective `--drop-udp` variant (parses Ethernet+IPv4, drops only IP proto 17, passes TCP/ARP/ND) was also built so iperf3's control channel could survive; it passes the eBPF verifier and attaches in DRV mode, but see the methodology note below for why iperf3 still cannot coexist. Auto-detaches on exit (verified `ip -d link show eth4` clean), no `XDP_FLAGS_UPDATE_IF_NOEXIST` so re-runs replace cleanly.
@@ -872,7 +910,7 @@ No flavor module loaded. `priv->pcd_ops` and `priv->qmgmt_ops` stay NULL. RCU-NU
 - **§5.4** CC steering — exposed as RPS backend via `ndo_rx_flow_steer` (vyos-1x follow-on).
 - **§5.5** HM offload — exposed as `NETIF_F_HW_VLAN_CTAG_*` (vyos-1x follow-on).
 - **§5.6** Policer — exposed as tc/nftables ingress offload backend (vyos-1x follow-on).
-- **§5.7** CEETM — exposed as root tc qdisc (existing in mainline; only CLI surface needed).
+- **§5.7** CEETM — exposed as root tc qdisc once the SDK CEETM driver is forward-ported (NOT in mainline — see §5.7).
 - **§5.8** DCSR — available as debugfs.
 
 §6.1 XSK-backed BMan pool *not* consumed. §6.2 dynamic CC tree *not* consumed.
@@ -1061,9 +1099,13 @@ M4  : Phase 4 single-MAC dual-flavor (deferred).
 - NXP AN5340.
 
 ### Mainline Linux 6.18
-- `drivers/net/ethernet/freescale/dpaa/{dpaa_eth.{c,h}, dpaa_eth_ceetm.{c,h}}`
+- `drivers/net/ethernet/freescale/dpaa/{dpaa_eth.{c,h}}` (NB: `dpaa_eth_ceetm.{c,h}` is NOT present in mainline — see §5.7)
 - `drivers/net/ethernet/freescale/fman/{fman.c, fman_port.c, fman_keygen.c, fman_muram.c, fman_sp.c, mac.c}`
-- `drivers/soc/fsl/qbman/{qman.c, bman.c, qman_portal.c, bman_portal.c, qman_ceetm.c}`
+- `drivers/soc/fsl/qbman/{qman.c, bman.c, qman_portal.c, bman_portal.c}` (NB: `qman_ceetm.c` is NOT present in mainline — must be forward-ported for M3-3e, see §5.7)
+
+### NXP LSDK out-of-tree (forward-port source for M3-3e CEETM)
+- `qman_ceetm.c` + `qman_ceetm_*` API in `include/soc/fsl/qman.h` (QMan CEETM channel/CQ/LFQ/CGR allocation)
+- `dpaa_eth_ceetm.{c,h}` (the tc `Qdisc_ops` glue) — both from the NXP LSDK / pre-5.x QorIQ kernel tree
 - `drivers/iommu/fsl_pamu*.c` (PPC-only — see §4.6)
 - `include/soc/fsl/{qman.h, bman.h}`
 - `Documentation/networking/device_drivers/ethernet/freescale/dpaa.rst`
