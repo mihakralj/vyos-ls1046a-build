@@ -28,7 +28,7 @@ Spec: specs/dpaa1-afxdp-modernization-spec.md sec 5.5.
 Signed-off-by: vyos-ls1046a-build CI <ci@local>
 ---
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
-index 79bc611..06ff5f8 100644
+index 3093bd8..1234696 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
 @@ -208,11 +208,83 @@ struct fman_cc_static_tree {
@@ -47,7 +47,7 @@ index 79bc611..06ff5f8 100644
 + * into MURAM, finalising one HMTD (Header Manipulation Table Descriptor)
 + * whose offset becomes the returned @handle (the value a CC action's
 + * HM-pointer field carries per spec sec 5.4).
-  */
++ */
 +
 +/**
 + * enum fman_hm_op_type - one header-manipulation operation kind
@@ -70,17 +70,17 @@ index 79bc611..06ff5f8 100644
 +
 +/* Parameters for FMAN_HM_OP_VLAN_INSERT. */
 +struct fman_hm_vlan_insert {
-+	u16 vlan_id;		/* 12-bit VID in the low bits (host-endian) */
-+	u16 tpid;		/* 0x8100 C-VLAN or 0x88a8 S-VLAN (host-endian) */
-+	u8  pcp;		/* 3-bit priority code point */
++	u16 vlan_id;/* 12-bit VID in the low bits (host-endian) */
++	u16 tpid;/* 0x8100 C-VLAN or 0x88a8 S-VLAN (host-endian) */
++	u8  pcp;/* 3-bit priority code point */
 +};
 +
 +/* Parameters for FMAN_HM_OP_MPLS_PUSH. */
 +struct fman_hm_mpls_push {
-+	u32 label;		/* 20-bit MPLS label (host-endian) */
-+	u8  tc;			/* 3-bit traffic class */
-+	u8  s;			/* bottom-of-stack bit */
-+	u8  ttl;		/* MPLS TTL */
++	u32 label;/* 20-bit MPLS label (host-endian) */
++	u8  tc;/* 3-bit traffic class */
++	u8  s;/* bottom-of-stack bit */
++	u8  ttl;/* MPLS TTL */
 +};
 +
 +/**
@@ -108,7 +108,7 @@ index 79bc611..06ff5f8 100644
 + * FMAN_HM_MAX_OPS bounds a single node at the ~1 KiB MURAM HM budget
 + * from spec sec 3.5. The productive install body rejects num_ops == 0
 + * or > FMAN_HM_MAX_OPS with -EINVAL.
-+ */
+  */
 +#define FMAN_HM_MAX_OPS	8
 +
  struct fman_hm_spec {

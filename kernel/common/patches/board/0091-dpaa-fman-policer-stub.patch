@@ -9,88 +9,11 @@ Subject: [PATCH] 0091 M3-3d Policer stub
  .../ethernet/freescale/dpaa/dpaa_fman_caps.h  | 78 +++++++++++++++++++
  3 files changed, 135 insertions(+)
 
-diff --git a/drivers/net/ethernet/freescale/dpaa/Kconfig b/drivers/net/ethernet/freescale/dpaa/Kconfig
-index 3c19f41..7b8a902 100644
---- a/drivers/net/ethernet/freescale/dpaa/Kconfig
-+++ b/drivers/net/ethernet/freescale/dpaa/Kconfig
-@@ -57,4 +57,27 @@ config DPAA_HW_HM_OFFLOAD
- 	  now so downstream consumers can wire calls today.
- 	  Safe to leave on: zero runtime cost without FMAN_CAP_HM_NODES.
- 
-+
-+config DPAA_HW_POLICER_OFFLOAD
-+	bool "DPAA: FMan PCD Policer stubs (M3-3d)"
-+	depends on DPAA_HW_CC_STEERING
-+	default y
-+	help
-+	  Compile in the FMan PCD Policer stub API
-+	  (fman_policer_install / fman_policer_destroy /
-+	  fman_policer_caps_supported) per
-+	  specs/dpaa1-afxdp-modernization-spec.md sec 5.6.
-+
-+	  Policer profiles program the FMan PCD Policer block to do
-+	  per-qband or per-flow ingress rate-limit using srTCM/trTCM
-+	  colour-aware marking entirely in silicon. Yellow/red drop
-+	  decisions are made in FMan; surviving FDs carry colour state
-+	  in their status field for downstream PCD steering.
-+
-+	  All stubs return -ENOTSUPP on builds without ucode 210 and
-+	  bump the hw_offload_unavailable ethtool counter. Productive
-+	  implementations land in follow-up patches; the API is fixed
-+	  now so downstream consumers can wire calls today.
-+	  Safe to leave on: zero runtime cost without FMAN_CAP_POLICER_TRTCM.
-+
- source "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/Kconfig"
-diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
-index 2c468e7..a1f4d20 100644
---- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
-+++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
-@@ -244,5 +244,39 @@ bool fman_hm_caps_supported(void)
- }
- EXPORT_SYMBOL_GPL(fman_hm_caps_supported);
- 
-+
-+/* ------------------------------------------------------------------ *
-+ * M3-3d stub: Policer (srTCM/trTCM) API.
-+ *
-+ * Productive implementation replaces these bodies in a follow-up patch
-+ * per spec sec 5.6. Until then fman_policer_install() returns -ENOTSUPP
-+ * and fman_policer_destroy() is an idempotent void no-op; downstream
-+ * callers bump the dpaa_priv hw_offload_unavailable counter on the
-+ * install failure. Spec sec 5.6.
-+ * ------------------------------------------------------------------ */
-+
-+int fman_policer_install(struct fman *fm, u8 port_id, u8 profile_id,
-+ const struct fman_policer_profile *prof)
-+{
-+if (!prof)
-+return -EINVAL;
-+return -ENOTSUPP;
-+}
-+EXPORT_SYMBOL_GPL(fman_policer_install);
-+
-+void fman_policer_destroy(struct fman *fm, u8 port_id, u8 profile_id)
-+{
-+/* idempotent no-op on stub; productive impl will validate slot and
-+ * detach the policer profile from any CC actions still referencing it.
-+ */
-+}
-+EXPORT_SYMBOL_GPL(fman_policer_destroy);
-+
-+bool fman_policer_caps_supported(void)
-+{
-+return (dpaa_fman_get_caps() & FMAN_CAP_POLICER_TRTCM) != 0;
-+}
-+EXPORT_SYMBOL_GPL(fman_policer_caps_supported);
-+
- MODULE_LICENSE("Dual BSD/GPL");
- MODULE_DESCRIPTION("DPAA1 FMan PCD capability detection + HW-offload stubs");
-\ No newline at end of file
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
-index 9e5a03b..d8e1f5c 100644
+index 1234696..bf40954 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
-@@ -180,4 +180,82 @@ int  fman_hm_node_destroy(struct fman *fm, u8 port_id, u32 handle);
+@@ -324,5 +324,83 @@ int  fman_hm_node_destroy(struct fman *fm, u8 port_id, u32 handle);
   */
  bool fman_hm_caps_supported(void);
  
@@ -172,5 +95,83 @@ index 9e5a03b..d8e1f5c 100644
 + */
 +bool fman_policer_caps_supported(void);
 +
+ 
  #endif /* __DPAA_FMAN_CAPS_H */
+\ No newline at end of file
+diff --git a/drivers/net/ethernet/freescale/dpaa/Kconfig b/drivers/net/ethernet/freescale/dpaa/Kconfig
+index 3c19f41..7b8a902 100644
+--- a/drivers/net/ethernet/freescale/dpaa/Kconfig
++++ b/drivers/net/ethernet/freescale/dpaa/Kconfig
+@@ -57,4 +57,27 @@ config DPAA_HW_HM_OFFLOAD
+ 	  now so downstream consumers can wire calls today.
+ 	  Safe to leave on: zero runtime cost without FMAN_CAP_HM_NODES.
+ 
++
++config DPAA_HW_POLICER_OFFLOAD
++	bool "DPAA: FMan PCD Policer stubs (M3-3d)"
++	depends on DPAA_HW_CC_STEERING
++	default y
++	help
++	  Compile in the FMan PCD Policer stub API
++	  (fman_policer_install / fman_policer_destroy /
++	  fman_policer_caps_supported) per
++	  specs/dpaa1-afxdp-modernization-spec.md sec 5.6.
++
++	  Policer profiles program the FMan PCD Policer block to do
++	  per-qband or per-flow ingress rate-limit using srTCM/trTCM
++	  colour-aware marking entirely in silicon. Yellow/red drop
++	  decisions are made in FMan; surviving FDs carry colour state
++	  in their status field for downstream PCD steering.
++
++	  All stubs return -ENOTSUPP on builds without ucode 210 and
++	  bump the hw_offload_unavailable ethtool counter. Productive
++	  implementations land in follow-up patches; the API is fixed
++	  now so downstream consumers can wire calls today.
++	  Safe to leave on: zero runtime cost without FMAN_CAP_POLICER_TRTCM.
++
+ source "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/Kconfig"
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+index 2c468e7..a1f4d20 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -244,5 +244,39 @@ bool fman_hm_caps_supported(void)
+ }
+ EXPORT_SYMBOL_GPL(fman_hm_caps_supported);
+ 
++
++/* ------------------------------------------------------------------ *
++ * M3-3d stub: Policer (srTCM/trTCM) API.
++ *
++ * Productive implementation replaces these bodies in a follow-up patch
++ * per spec sec 5.6. Until then fman_policer_install() returns -ENOTSUPP
++ * and fman_policer_destroy() is an idempotent void no-op; downstream
++ * callers bump the dpaa_priv hw_offload_unavailable counter on the
++ * install failure. Spec sec 5.6.
++ * ------------------------------------------------------------------ */
++
++int fman_policer_install(struct fman *fm, u8 port_id, u8 profile_id,
++ const struct fman_policer_profile *prof)
++{
++if (!prof)
++return -EINVAL;
++return -ENOTSUPP;
++}
++EXPORT_SYMBOL_GPL(fman_policer_install);
++
++void fman_policer_destroy(struct fman *fm, u8 port_id, u8 profile_id)
++{
++/* idempotent no-op on stub; productive impl will validate slot and
++ * detach the policer profile from any CC actions still referencing it.
++ */
++}
++EXPORT_SYMBOL_GPL(fman_policer_destroy);
++
++bool fman_policer_caps_supported(void)
++{
++return (dpaa_fman_get_caps() & FMAN_CAP_POLICER_TRTCM) != 0;
++}
++EXPORT_SYMBOL_GPL(fman_policer_caps_supported);
++
+ MODULE_LICENSE("Dual BSD/GPL");
+ MODULE_DESCRIPTION("DPAA1 FMan PCD capability detection + HW-offload stubs");
 \ No newline at end of file

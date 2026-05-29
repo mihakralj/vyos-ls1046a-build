@@ -30,7 +30,7 @@ Spec: specs/dpaa1-afxdp-modernization-spec.md sec 5.6.
 Signed-off-by: vyos-ls1046a-build CI <ci@local>
 ---
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
-index 06ff5f8..23516a2 100644
+index bf40954..bb6a42f 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
 @@ -351,12 +351,62 @@ bool fman_hm_caps_supported(void);
@@ -65,14 +65,14 @@ index 06ff5f8..23516a2 100644
 +
 +/* Metering algorithm for fman_policer_profile.mode. */
 +enum fman_policer_mode {
-+	FMAN_POLICER_MODE_SRTCM= 0,/* RFC 2697: CIR + CBS + EBS */
-+	FMAN_POLICER_MODE_TRTCM= 1,/* RFC 2698: CIR + CBS + PIR + PBS */
++	FMAN_POLICER_MODE_SRTCM	= 0,/* RFC 2697: CIR + CBS + EBS */
++	FMAN_POLICER_MODE_TRTCM	= 1,/* RFC 2698: CIR + CBS + PIR + PBS */
 +};
 +
 +/* Colour-awareness for fman_policer_profile.color_mode. */
 +enum fman_policer_color_mode {
-+	FMAN_POLICER_COLOR_BLIND= 0,/* ignore any pre-existing frame colour */
-+	FMAN_POLICER_COLOR_AWARE= 1,/* honour the incoming frame colour */
++	FMAN_POLICER_COLOR_BLIND	= 0,/* ignore any pre-existing frame colour */
++	FMAN_POLICER_COLOR_AWARE	= 1,/* honour the incoming frame colour */
 +};
 +
 +/**
