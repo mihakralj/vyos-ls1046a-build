@@ -1,0 +1,846 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
+Date: Fri, 29 May 2026 00:00:00 +0000
+Subject: [PATCH] dpaa: FMan HM node install (productive, M3-3c)
+
+Forward-port of the FMan Header-Manipulation (HM) ordered-op-list silicon
+programming path into the COMMON board patch stack (built-in for
+default/vpp/ask via the FSL_FMAN_PCD config from patch 0092).  Re-anchors
+the tested ask20 HMCT/HMTD MURAM-encoding path (ask20 branch patches 0014
+body-1 + 0015 body-2) onto the 0092 PCD subsystem + 0097 KeyGen + 0098 CC
+base, adapted to the dpaa1 flat-C HM op set declared by board patch 0090a.
+This is PR4 of the dpaa1 PCD forward-port closing M3-3c.
+
+What this adds
+--------------
+- fman_pcd_manip.c (new, fsl_dpaa_fman.ko): the productive HM installer.
+  Defines struct fman_pcd_hm_node and four static per-op HMCT encoders
+  (vlan_insert / vlan_strip / mpls_push / mpls_pop).  fman_pcd_hm_install()
+  allocates a 16-byte HMTD + 128-byte HMCT MURAM region, walks the neutral
+  op list emitting a real FMan generic INSRT/RMV command word (+ inline
+  4-byte payload for the insert ops) per LS1046A RM 8.7.5, stamps HMCD_LAST
+  on the last word, finalises the HMTD (cfg=TYPE|EXT_HMCT, hmcdBasePtr,
+  opCode=HMAN_OC=0x35), publishes the node on pcd->manip_list, and returns
+  the HMTD MURAM byte offset as the opaque handle (the value a CC action's
+  hm_handle carries).  fman_pcd_hm_destroy() is idempotent: it finds the
+  node by handle+port_id, zeroes the HMTD opCode, and frees the MURAM.
+  The MURAM internals (fman_pcd_muram_alloc / fman_muram_offset_to_vbase,
+  the latter NOT EXPORT_SYMBOL'd) stay inside this module - the 0097/0098
+  bridge idiom.  Per operator decision 2026-05-29 (spec sec 6 item 6) the
+  L2/VLAN/MPLS rewrites use the durable in-tree generic INSRT/RMV primitive,
+  NOT the ask20 0058/0065 HMD/graft shortcut.
+
+- include/linux/fsl/fman_pcd.h: publishes the neutral, big-endian-ready
+  descriptor struct fman_pcd_hm_hw_{op,spec} + enum fman_pcd_hm_hw_op_type
+  + FMAN_PCD_HM_HW_MAX_OPS, plus the two install/destroy prototypes.  The
+  neutral struct lives in the public header so both fsl_dpa.ko (which owns
+  the host-endian struct fman_hm_spec in dpaa_fman_caps.h) and
+  fsl_dpaa_fman.ko can see it without a circular include.
+
+- dpaa_fman_caps.c (fsl_dpa.ko): makes fman_hm_node_install() /
+  fman_hm_node_destroy() productive.  install() gates on FMAN_CAP_HM_NODES
+  (BIT1) BEFORE touching MURAM (spec sec 3.5), translates the host-endian
+  struct fman_hm_spec into the neutral fman_pcd_hm_hw_spec
+  (dpaa_hm_spec_to_hw(): VLAN tpid->tpid_be / vlan_id->vid / pcp->pcp, MPLS
+  name-for-name; VLAN_STRIP/MPLS_POP carry no params), resolves the PCD via
+  fman_get_pcd(fm), and delegates to fman_pcd_hm_install().  destroy() gates
+  on caps and delegates to the idempotent fman_pcd_hm_destroy().  Adds
+  #include <linux/slab.h> for kzalloc/kfree.
+
+- Makefile: adds fman_pcd_manip.o to the FSL_FMAN_PCD object list.
+
+Endianness note
+---------------
+The neutral HM fields carry HOST values (unlike the CC neutral key, whose
+multi-byte fields are pre-swapped to FMan-BE in dpaa_cc_key_to_hw()).  The
+HM encoder assembles each inline payload word in host order and writes it
+via iowrite32be, which performs the host->BE swap on the whole assembled
+word.  The "_be" suffix on fman_pcd_hm_hw_op.vlan_insert.tpid_be is thus a
+slight misnomer kept for symmetry with the CC descriptor; it holds the host
+TPID (e.g. 0x8100).
+
+Verified: native arm64 compile of drivers/net/ethernet/freescale/fman/ and
+.../dpaa/ with LOCALVERSION=-vyos is 0 warnings / 0 errors; fman_pcd_manip.o,
+dpaa_fman_caps.o and both built-in.a archives build clean.
+
+Spec sec 5.5.
+
+Signed-off-by: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+index 686d2f0..e366e85 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -19,6 +19,7 @@
+ #include <linux/module.h>
+ #include <linux/moduleparam.h>
+ #include <linux/printk.h>
++#include <linux/slab.h>
+ #include <linux/types.h>
+ 
+ #include <linux/of.h>
+@@ -331,19 +332,110 @@ EXPORT_SYMBOL_GPL(fman_cc_tree_destroy);
+  * downstream caller. Spec sec 5.5.
+  * ------------------------------------------------------------------ */
+ 
++/*
++ * Translate the host-endian ordered-op list (struct fman_hm_spec, private
++ * to fsl_dpa.ko) into the neutral struct fman_pcd_hm_hw_spec the fman-side
++ * installer consumes.  The neutral HM fields carry HOST values (the encoder
++ * in fman_pcd_manip.c assembles the inline payload word and writes it
++ * big-endian via iowrite32be), so this is a one-to-one field copy: VLAN
++ * tpid->tpid_be, vlan_id->vid, pcp->pcp; MPLS name-for-name.  VLAN_STRIP /
++ * MPLS_POP carry no params.
++ */
++static void dpaa_hm_spec_to_hw(const struct fman_hm_spec *spec,
++			      struct fman_pcd_hm_hw_spec *hw)
++{
++	u8 i;
++
++	memset(hw, 0, sizeof(*hw));
++	hw->num_ops = spec->num_ops;
++
++	for (i = 0; i < spec->num_ops; i++) {
++		const struct fman_hm_op *src = &spec->ops[i];
++		struct fman_pcd_hm_hw_op *dst = &hw->ops[i];
++
++		switch (src->type) {
++		case FMAN_HM_OP_VLAN_STRIP:
++			dst->type = FMAN_PCD_HM_HW_OP_VLAN_STRIP;
++			break;
++		case FMAN_HM_OP_VLAN_INSERT:
++			dst->type = FMAN_PCD_HM_HW_OP_VLAN_INSERT;
++			dst->vlan_insert.tpid_be = src->vlan_insert.tpid;
++			dst->vlan_insert.vid = src->vlan_insert.vlan_id;
++			dst->vlan_insert.pcp = src->vlan_insert.pcp;
++			break;
++		case FMAN_HM_OP_MPLS_PUSH:
++			dst->type = FMAN_PCD_HM_HW_OP_MPLS_PUSH;
++			dst->mpls_push.label = src->mpls_push.label;
++			dst->mpls_push.tc = src->mpls_push.tc;
++			dst->mpls_push.s = src->mpls_push.s;
++			dst->mpls_push.ttl = src->mpls_push.ttl;
++			break;
++		case FMAN_HM_OP_MPLS_POP:
++			dst->type = FMAN_PCD_HM_HW_OP_MPLS_POP;
++			break;
++		}
++	}
++}
++
++/*
++ * Productive HM node install (spec sec 5.5).  Gates on FMAN_CAP_HM_NODES
++ * BEFORE touching MURAM per spec sec 3.5; on a board without it (mainline
++ * ucode 106) returns -ENOTSUPP so the flavor layer fails soft.  On the Mono
++ * Gateway DK the 210.10.1 QEF blob lights HM up (caps = 0x17), so this path
++ * is live there.  Translates the host-endian op list into the neutral
++ * fman-side descriptor and delegates the silicon programming to
++ * fman_pcd_hm_install() in fsl_dpaa_fman.ko (which owns the MURAM
++ * allocator).  On success *handle receives the HMTD MURAM byte offset, the
++ * value a CC action carries as hm_handle.
++ */
+ int fman_hm_node_install(struct fman *fm, u8 port_id,
+ 			 const struct fman_hm_spec *spec, u32 *handle)
+ {
+-	if (!handle)
++	struct fman_pcd_hm_hw_spec *hw;
++	struct fman_pcd *pcd;
++	int err;
++
++	if (!fm || !spec || !handle)
+ 		return -EINVAL;
+ 	*handle = 0;
+-	return -ENOTSUPP;
++	if (!fman_hm_caps_supported())
++		return -ENOTSUPP;
++	if (spec->num_ops == 0 || spec->num_ops > FMAN_HM_MAX_OPS)
++		return -EINVAL;
++
++	pcd = fman_get_pcd(fm);
++	if (!pcd)
++		return -ENXIO;
++
++	hw = kzalloc(sizeof(*hw), GFP_KERNEL);
++	if (!hw)
++		return -ENOMEM;
++
++	dpaa_hm_spec_to_hw(spec, hw);
++
++	err = fman_pcd_hm_install(pcd, port_id, hw, handle);
++	kfree(hw);
++	return err;
+ }
+ EXPORT_SYMBOL_GPL(fman_hm_node_install);
+ 
++/*
++ * Productive HM node destroy (spec sec 5.5).  Gates on FMAN_CAP_HM_NODES,
++ * resolves the PCD and delegates to fman_pcd_hm_destroy(), which is
++ * idempotent (a handle matching no live node is a no-op).  Returns 0 on a
++ * board without HM caps (nothing was ever installed).
++ */
+ int fman_hm_node_destroy(struct fman *fm, u8 port_id, u32 handle)
+ {
+-	/* idempotent no-op on stub; productive impl will validate handle */
++	struct fman_pcd *pcd;
++
++	if (!fm)
++		return 0;
++	if (!fman_hm_caps_supported())
++		return 0;
++	pcd = fman_get_pcd(fm);
++	if (pcd)
++		return fman_pcd_hm_destroy(pcd, port_id, handle);
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(fman_hm_node_destroy);
+diff --git a/drivers/net/ethernet/freescale/fman/Makefile b/drivers/net/ethernet/freescale/fman/Makefile
+index 912290f..1428ed4 100644
+--- a/drivers/net/ethernet/freescale/fman/Makefile
++++ b/drivers/net/ethernet/freescale/fman/Makefile
+@@ -6,6 +6,6 @@ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_fman_port.o
+ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_mac.o
+ 
+ fsl_dpaa_fman-objs	:= fman_muram.o fman.o fman_sp.o fman_keygen.o
+-fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o fman_pcd_kg.o fman_pcd_cc.o
++fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o fman_pcd_kg.o fman_pcd_cc.o fman_pcd_manip.o
+ fsl_dpaa_fman_port-objs := fman_port.o
+ fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+new file mode 100644
+index 0000000..71060ee
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+@@ -0,0 +1,525 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * FMan PCD Header Manipulation (HM) - ordered-op-list silicon programming.
++ *
++ * dpaa1 forward-port (PR4 of the PCD series closing M3-3c).  Re-anchors the
++ * tested ask20 HMCT/HMTD MURAM-encoding path (ask20 branch patches 0014
++ * body-1 + 0015 body-2) onto the 0092 PCD subsystem base, adapted to the
++ * dpaa1 HM op set declared by board patch 0090a:
++ *
++ *   enum fman_hm_op_type { VLAN_STRIP, VLAN_INSERT, MPLS_PUSH, MPLS_POP }
++ *
++ * The dpaa-side entry points (fman_hm_node_install / fman_hm_node_destroy in
++ * dpaa_fman_caps.c, fsl_dpa.ko) gate on FMAN_CAP_HM_NODES, translate their
++ * module-private host-endian struct fman_hm_spec into the neutral,
++ * already-big-endian-ready struct fman_pcd_hm_hw_spec declared in
++ * <linux/fsl/fman_pcd.h>, and delegate to the two EXPORT_SYMBOL_GPL entry
++ * points below (which live here in fsl_dpaa_fman.ko alongside the MURAM
++ * allocator, so the silicon internals never cross the module boundary -
++ * identical bridge idiom to fman_pcd_cc.c / fman_pcd_kg.c).
++ *
++ * Authoritative reference
++ * -----------------------
++ * - LS1046A Reference Manual sec 8.7.5    (Header modification table).
++ * - LS1046A Reference Manual sec 8.7.5.4  (Auto checksum recompute).
++ * - LS1046A Reference Manual sec 8.7.4.3  (AD opcode-extension layout, used
++ *   by the CC MANIPULATE arm that carries the HMTD MURAM offset returned
++ *   from here as the CC action's hm_handle).
++ *
++ * Provenance
++ * ----------
++ * Mainline drivers/net/ethernet/freescale/fman/ has zero manip code; the
++ * HMTD/HMCT layouts and command-word encodings below are authored from the
++ * RM, cross-referenced against the legacy NXP SDK fm_manip.{h,c} (read-only
++ * silicon-fact reference, no code copied).  The generic-insert/remove
++ * opcode path is the durable in-tree primitive chosen per operator decision
++ * 2026-05-29 (spec sec 6 item 6): the L2/VLAN/MPLS rewrites use a real FMan
++ * HMCT GENERIC_INSRT / GENERIC_RMV command, NOT the ask20 0058/0065 HMD
++ * graft shortcut.
++ */
++
++#include <linux/err.h>
++#include <linux/errno.h>
++#include <linux/export.h>
++#include <linux/io.h>
++#include <linux/kernel.h>
++#include <linux/list.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
++#include <linux/types.h>
++
++#include <linux/fsl/fman_pcd.h>
++#include "fman.h"
++#include "fman_muram.h"
++#include "fman_pcd_internal.h"
++
++/* ------------------------------------------------------------------ */
++/* HMTD (Header Manipulation Table Descriptor) layout - RM 8.7.5 p.2  */
++/* ------------------------------------------------------------------ */
++
++/*
++ * The HMTD is a 16-byte MURAM-resident record consumed by the FMan
++ * header-manip engine.  Field offsets within the descriptor (all
++ * big-endian relative to the host):
++ *
++ *   0x0  u16 cfg          - HMTD configuration flags
++ *   0x4  u32 hmcdBasePtr  - HMCT base pointer (MURAM byte offset)
++ *   0xb  u8  opCode       - HMAN_OC family selector
++ *
++ * Cross-ref SDK fm_manip.h::t_Hmtd (packed struct).
++ */
++#define FMAN_PCD_HMTD_SIZE	16
++#define FMAN_PCD_HMTD_OFF_CFG	0x0
++#define FMAN_PCD_HMTD_OFF_HMCD_BASE	0x4
++#define FMAN_PCD_HMTD_OFF_OPCODE	0xb
++
++/*
++ * HMTD cfg-word bits (RM 8.7.5 + cross-ref SDK fm_manip.h::HMTD_CFG_*):
++ *   TYPE     - 0x4000, marks this descriptor as a header-manip
++ *   EXT_HMCT - 0x0080, HMCT lives outside the descriptor (always true
++ *              for our layout)
++ */
++#define FMAN_PCD_HMTD_CFG_TYPE	0x4000
++#define FMAN_PCD_HMTD_CFG_EXT_HMCT	0x0080
++
++/*
++ * HMAN_OC opcode family selectors (RM 8.7.5 + cross-ref SDK fm_manip.h
++ * HMAN_OC_IP_MANIP=0x34 / HMAN_OC=0x35).  The dpaa1 HM op set
++ * (VLAN/MPLS push/pop) is L2/L3-shim-only and never touches IP header
++ * fields, so every node uses the generic HMAN_OC family.
++ */
++#define FMAN_PCD_HMAN_OC	0x35
++
++/* ------------------------------------------------------------------ */
++/* HMCT (Header Manipulation Command Table) layout - RM 8.7.5 p.4     */
++/* ------------------------------------------------------------------ */
++
++/*
++ * HMCT is a sequence of 4-byte big-endian command words optionally
++ * followed by inline payload (also 4-byte aligned).  Each command word
++ * is encoded as:
++ *
++ *   bits[31:24]  opcode (HMCD_OP_*; cross-ref SDK fm_manip.h)
++ *   bits[23:0]   per-opcode operand bits
++ *
++ * The last command word OR's in HMCD_LAST=0x00800000 to terminate the
++ * list (silicon stops walking at the first word with that bit set).
++ *
++ * Sizing: worst case is FMAN_HM_MAX_OPS (8) ops, each a GENERIC_INSRT
++ * command word + 4-byte inline payload = 8 bytes per op = 64 bytes.
++ * Rounded up to 128 for slack.  gen_pool min_alloc_order=8 inside
++ * fman_muram_alloc() guarantees natural 256-byte alignment, stricter
++ * than every RM requirement.
++ */
++#define FMAN_PCD_HMCT_SIZE	128
++
++#define FMAN_PCD_HMCD_LAST	0x00800000u
++#define FMAN_PCD_HMCD_OC_SHIFT	24
++
++/* Generic insert/remove opcodes (RM 8.7.5 generic op encoding +
++ * cross-ref SDK fm_manip.h HMCD_OPCODE_GENERIC_INSRT=0x02 /
++ * _GENERIC_RMV=0x01).  These are the durable in-tree primitives used by
++ * the VLAN and MPLS push/pop encoders.
++ */
++#define FMAN_PCD_HMCD_OP_GENERIC_INSRT	0x02u
++#define FMAN_PCD_HMCD_OP_GENERIC_RMV	0x01u
++
++/* Generic INSRT/RMV operand layout: bits[7:0]=offset, bits[15:8]=size.
++ * Cross-ref SDK fm_manip.h HMCD_{INSRT,RMV}_{OFFSET,SIZE}_SHIFT.
++ */
++#define FMAN_PCD_HMCD_INSRT_OFFSET_SHIFT	0
++#define FMAN_PCD_HMCD_INSRT_SIZE_SHIFT	8
++#define FMAN_PCD_HMCD_RMV_OFFSET_SHIFT	0
++#define FMAN_PCD_HMCD_RMV_SIZE_SHIFT	8
++
++/*
++ * Frame-relative byte offsets where the VLAN / MPLS shim is
++ * inserted/removed.  A VLAN tag sits right after the 12-byte Ethernet
++ * dst+src MAC pair, before the EtherType.  An MPLS label sits after the
++ * EtherType (the MANIP node is used on MPLS-over-Ethernet frames whose
++ * EtherType is 0x8847/0x8848, so the label stack begins at offset 14).
++ * RM 8.7.5 + cross-ref SDK fm_manip.c BuildHmct e_FM_PCD_MANIP_*_GENERIC.
++ */
++#define FMAN_PCD_VLAN_TAG_OFFSET	12u
++#define FMAN_PCD_VLAN_TAG_SIZE	4u
++#define FMAN_PCD_MPLS_LABEL_OFFSET	14u
++#define FMAN_PCD_MPLS_LABEL_SIZE	4u
++
++/* VLAN TCI field packing (host-side helpers; the assembled 32-bit
++ * command payload is written big-endian by iowrite32be).
++ */
++#define FMAN_PCD_VLAN_PCP_SHIFT	13
++#define FMAN_PCD_VLAN_VID_MASK	0x0fffu
++
++/* MPLS label-entry field packing per RFC 3032 (label[31:12], tc[11:9],
++ * s[8], ttl[7:0]).
++ */
++#define FMAN_PCD_MPLS_LABEL_SHIFT	12
++#define FMAN_PCD_MPLS_TC_SHIFT	9
++#define FMAN_PCD_MPLS_S_SHIFT	8
++#define FMAN_PCD_MPLS_LABEL_MASK	0x000fffffu
++
++/**
++ * struct fman_pcd_hm_node - one MURAM-resident header-manip template.
++ * @node:     anchor on pcd->manip_list (protected by pcd->lock)
++ * @pcd:      owning PCD subsystem; back-pointer for MURAM free
++ * @port_id:  the FMan port this node was installed for (bookkeeping)
++ * @hmtd_off: MURAM byte offset of the 16-byte HMTD record (the value
++ *            returned to the caller as the opaque handle, and carried
++ *            by a CC action's hm_handle per spec sec 5.4)
++ * @hmtd:     CPU-visible iomem pointer to the HMTD
++ * @hmct_off: MURAM byte offset of the HMCT command-table region
++ * @hmct:     CPU-visible iomem pointer to the HMCT
++ * @hmct_sz:  bytes allocated for @hmct
++ * @lock:     per-node spinlock guarding the encoder writes
++ *
++ * Definition is private to this translation unit.
++ */
++struct fman_pcd_hm_node {
++	struct list_head	node;
++	struct fman_pcd	*pcd;
++	u8			port_id;
++	unsigned long		hmtd_off;
++	void __iomem		*hmtd;
++	unsigned long		hmct_off;
++	void __iomem		*hmct;
++	size_t			hmct_sz;
++	spinlock_t		lock;
++};
++
++/* ------------------------------------------------------------------ */
++/* Per-op HMCT encoders - RM 8.7.5                                     */
++/* ------------------------------------------------------------------ */
++
++/*
++ * Each encoder writes its command word(s) and optional inline payload
++ * starting at @cur, and returns the iomem address just past the bytes
++ * it wrote (so the dispatch loop can chain ops), writing the iomem
++ * address of the FIRST 32-bit word of the LAST command it emitted into
++ * *last_cmd (so the caller can OR HMCD_LAST into it once after all ops
++ * are emitted - matches SDK fm_manip.c BuildHmct() lines 1074-1076).
++ */
++
++static void __iomem *
++hm_encode_vlan_insert(const struct fman_pcd_hm_hw_op *op,
++		      void __iomem *cur, void __iomem **last_cmd)
++{
++	u32 cmd;
++	u32 payload;
++
++	/* Generic insert at L2 offset 12 (after the 12-byte src+dst MAC
++	 * pair, before the EtherType), size 4 bytes carrying inline
++	 * TPID(2)+TCI(2).  RM 8.7.5 generic INSRT + cross-ref SDK
++	 * fm_manip.c BuildHmct e_FM_PCD_MANIP_INSRT_GENERIC (line 532).
++	 */
++	cmd  = (u32)FMAN_PCD_HMCD_OP_GENERIC_INSRT << FMAN_PCD_HMCD_OC_SHIFT;
++	cmd |= (u32)FMAN_PCD_VLAN_TAG_OFFSET << FMAN_PCD_HMCD_INSRT_OFFSET_SHIFT;
++	cmd |= (u32)FMAN_PCD_VLAN_TAG_SIZE << FMAN_PCD_HMCD_INSRT_SIZE_SHIFT;
++
++	iowrite32be(cmd, cur);
++	*last_cmd = cur;
++	cur += 4;
++
++	/* Inline payload: TPID in high 16 bits, then the TCI (PCP[15:13]
++	 * | VID[11:0]) in the low 16 bits.  The neutral hw-op fields are
++	 * already FMan big-endian-ready host values; iowrite32be does the
++	 * host->BE swap on the assembled word.
++	 */
++	payload  = (u32)op->vlan_insert.tpid_be << 16;
++	payload |= ((u32)(op->vlan_insert.pcp & 0x7) << FMAN_PCD_VLAN_PCP_SHIFT);
++	payload |= (u32)(op->vlan_insert.vid & FMAN_PCD_VLAN_VID_MASK);
++	iowrite32be(payload, cur);
++	cur += 4;
++
++	return cur;
++}
++
++static void __iomem *
++hm_encode_vlan_strip(void __iomem *cur, void __iomem **last_cmd)
++{
++	u32 cmd;
++
++	/* Generic remove at L2 offset 12, size 4 bytes (drop one VLAN
++	 * tag).  Cross-ref SDK fm_manip.c BuildHmct
++	 * e_FM_PCD_MANIP_RMV_GENERIC (line 442).
++	 */
++	cmd  = (u32)FMAN_PCD_HMCD_OP_GENERIC_RMV << FMAN_PCD_HMCD_OC_SHIFT;
++	cmd |= (u32)FMAN_PCD_VLAN_TAG_OFFSET << FMAN_PCD_HMCD_RMV_OFFSET_SHIFT;
++	cmd |= (u32)FMAN_PCD_VLAN_TAG_SIZE << FMAN_PCD_HMCD_RMV_SIZE_SHIFT;
++
++	iowrite32be(cmd, cur);
++	*last_cmd = cur;
++	cur += 4;
++
++	return cur;
++}
++
++static void __iomem *
++hm_encode_mpls_push(const struct fman_pcd_hm_hw_op *op,
++		    void __iomem *cur, void __iomem **last_cmd)
++{
++	u32 cmd;
++	u32 label_entry;
++
++	/* Generic insert at offset 14 (after the EtherType), size 4 bytes
++	 * carrying the inline 32-bit MPLS label entry.  RM 8.7.5 generic
++	 * INSRT + RFC 3032 label-entry layout.
++	 */
++	cmd  = (u32)FMAN_PCD_HMCD_OP_GENERIC_INSRT << FMAN_PCD_HMCD_OC_SHIFT;
++	cmd |= (u32)FMAN_PCD_MPLS_LABEL_OFFSET << FMAN_PCD_HMCD_INSRT_OFFSET_SHIFT;
++	cmd |= (u32)FMAN_PCD_MPLS_LABEL_SIZE << FMAN_PCD_HMCD_INSRT_SIZE_SHIFT;
++
++	iowrite32be(cmd, cur);
++	*last_cmd = cur;
++	cur += 4;
++
++	/* MPLS label entry (RFC 3032): label[31:12] | tc[11:9] | s[8] |
++	 * ttl[7:0].  Assembled in host order, written big-endian.
++	 */
++	label_entry  = (op->mpls_push.label & FMAN_PCD_MPLS_LABEL_MASK)
++		<< FMAN_PCD_MPLS_LABEL_SHIFT;
++	label_entry |= ((u32)(op->mpls_push.tc & 0x7) << FMAN_PCD_MPLS_TC_SHIFT);
++	label_entry |= ((u32)(op->mpls_push.s & 0x1) << FMAN_PCD_MPLS_S_SHIFT);
++	label_entry |= (u32)op->mpls_push.ttl;
++	iowrite32be(label_entry, cur);
++	cur += 4;
++
++	return cur;
++}
++
++static void __iomem *
++hm_encode_mpls_pop(void __iomem *cur, void __iomem **last_cmd)
++{
++	u32 cmd;
++
++	/* Generic remove at offset 14, size 4 bytes (pop one label). */
++	cmd  = (u32)FMAN_PCD_HMCD_OP_GENERIC_RMV << FMAN_PCD_HMCD_OC_SHIFT;
++	cmd |= (u32)FMAN_PCD_MPLS_LABEL_OFFSET << FMAN_PCD_HMCD_RMV_OFFSET_SHIFT;
++	cmd |= (u32)FMAN_PCD_MPLS_LABEL_SIZE << FMAN_PCD_HMCD_RMV_SIZE_SHIFT;
++
++	iowrite32be(cmd, cur);
++	*last_cmd = cur;
++	cur += 4;
++
++	return cur;
++}
++
++/**
++ * fman_pcd_hm_install() - program one ordered-op-list HM node.
++ * @pcd:     the PCD subsystem (from fman_get_pcd())
++ * @port_id: the FMan port the node is installed for
++ * @spec:    neutral, big-endian-ready op list (host->BE done by caller)
++ * @handle:  on success, receives the HMTD MURAM byte offset (the opaque
++ *           handle the caller passes to fman_pcd_hm_destroy() and that a
++ *           CC action carries as hm_handle)
++ *
++ * Return: 0 on success (writes @handle); negative errno on failure.
++ *
++ * RM 8.7.5 (HMTD/HMCT layout) + RM 8.7.5.4 + cross-ref SDK fm_manip.c
++ * FmPcdManipCreate() / BuildHmct().
++ */
++int fman_pcd_hm_install(struct fman_pcd *pcd, u8 port_id,
++			const struct fman_pcd_hm_hw_spec *spec, u32 *handle)
++{
++	struct fman_pcd_hm_node *hm;
++	struct muram_info *muram;
++	struct mutex *pcd_lock;
++	void __iomem *last_cmd = NULL;
++	void __iomem *cur;
++	void __iomem *end;
++	unsigned long off;
++	unsigned long flags;
++	void __iomem *vb;
++	u32 last_word;
++	u16 cfg;
++	long err;
++	u8 i;
++
++	if (!pcd || !spec || !handle)
++		return -EINVAL;
++	if (spec->num_ops == 0 || spec->num_ops > FMAN_PCD_HM_HW_MAX_OPS)
++		return -EINVAL;
++
++	muram = fman_get_muram(fman_pcd_get_fman(pcd));
++	if (!muram)
++		return -ENXIO;
++
++	hm = kzalloc(sizeof(*hm), GFP_KERNEL);
++	if (!hm)
++		return -ENOMEM;
++
++	INIT_LIST_HEAD(&hm->node);
++	spin_lock_init(&hm->lock);
++	hm->pcd = pcd;
++	hm->port_id = port_id;
++
++	/* HMTD: 16-byte MURAM-resident descriptor, zero-initialised so
++	 * opCode=0 (no manip) until we finalise below.
++	 */
++	off = fman_pcd_muram_alloc(pcd, FMAN_PCD_HMTD_SIZE);
++	if (IS_ERR_VALUE(off)) {
++		err = (long)off;
++		kfree(hm);
++		return (int)err;
++	}
++	vb = (void __iomem *)fman_muram_offset_to_vbase(muram, off);
++	if (!vb) {
++		fman_pcd_muram_free(pcd, off, FMAN_PCD_HMTD_SIZE);
++		kfree(hm);
++		return -ENXIO;
++	}
++	hm->hmtd_off = off;
++	hm->hmtd = vb;
++	memset_io(vb, 0, FMAN_PCD_HMTD_SIZE);
++
++	/* HMCT: command-table scratch, zeroed so any unused slack stays
++	 * inactive (silicon never walks past the HMCD_LAST-marked word).
++	 */
++	off = fman_pcd_muram_alloc(pcd, FMAN_PCD_HMCT_SIZE);
++	if (IS_ERR_VALUE(off)) {
++		err = (long)off;
++		fman_pcd_muram_free(pcd, hm->hmtd_off, FMAN_PCD_HMTD_SIZE);
++		kfree(hm);
++		return (int)err;
++	}
++	vb = (void __iomem *)fman_muram_offset_to_vbase(muram, off);
++	if (!vb) {
++		fman_pcd_muram_free(pcd, off, FMAN_PCD_HMCT_SIZE);
++		fman_pcd_muram_free(pcd, hm->hmtd_off, FMAN_PCD_HMTD_SIZE);
++		kfree(hm);
++		return -ENXIO;
++	}
++	hm->hmct_off = off;
++	hm->hmct = vb;
++	hm->hmct_sz = FMAN_PCD_HMCT_SIZE;
++	memset_io(vb, 0, FMAN_PCD_HMCT_SIZE);
++
++	/* Encoder dispatch under node->lock.  spin_lock_irqsave matches
++	 * the public-ABI softirq-safe promise for future runtime updates.
++	 */
++	spin_lock_irqsave(&hm->lock, flags);
++
++	cur = hm->hmct;
++	end = hm->hmct + hm->hmct_sz;
++
++	for (i = 0; i < spec->num_ops; i++) {
++		const struct fman_pcd_hm_hw_op *op = &spec->ops[i];
++
++		/* Worst-case op is INSRT command word + 4-byte payload = 8
++		 * bytes; bounds-check before dispatch.
++		 */
++		if (cur + 8 > end) {
++			spin_unlock_irqrestore(&hm->lock, flags);
++			goto err_free_hmct;
++		}
++
++		switch (op->type) {
++		case FMAN_PCD_HM_HW_OP_VLAN_STRIP:
++			cur = hm_encode_vlan_strip(cur, &last_cmd);
++			break;
++		case FMAN_PCD_HM_HW_OP_VLAN_INSERT:
++			cur = hm_encode_vlan_insert(op, cur, &last_cmd);
++			break;
++		case FMAN_PCD_HM_HW_OP_MPLS_PUSH:
++			cur = hm_encode_mpls_push(op, cur, &last_cmd);
++			break;
++		case FMAN_PCD_HM_HW_OP_MPLS_POP:
++			cur = hm_encode_mpls_pop(cur, &last_cmd);
++			break;
++		default:
++			spin_unlock_irqrestore(&hm->lock, flags);
++			goto err_free_hmct;
++		}
++	}
++
++	if (!last_cmd) {
++		spin_unlock_irqrestore(&hm->lock, flags);
++		goto err_free_hmct;
++	}
++
++	/* Stamp HMCD_LAST onto the last command word so the silicon walker
++	 * terminates (SDK fm_manip.c lines 1074-1076).
++	 */
++	last_word = ioread32be(last_cmd);
++	iowrite32be(last_word | FMAN_PCD_HMCD_LAST, last_cmd);
++
++	/* Finalise the HMTD: cfg(TYPE|EXT_HMCT) then hmcdBasePtr then
++	 * opCode (SDK fm_manip.c lines 1223-1230 order).
++	 */
++	cfg = FMAN_PCD_HMTD_CFG_TYPE | FMAN_PCD_HMTD_CFG_EXT_HMCT;
++	iowrite16be(cfg, hm->hmtd + FMAN_PCD_HMTD_OFF_CFG);
++	iowrite32be((u32)hm->hmct_off, hm->hmtd + FMAN_PCD_HMTD_OFF_HMCD_BASE);
++	iowrite8(FMAN_PCD_HMAN_OC, hm->hmtd + FMAN_PCD_HMTD_OFF_OPCODE);
++
++	spin_unlock_irqrestore(&hm->lock, flags);
++
++	/* Publish on the PCD manip list for unbind-time teardown. */
++	pcd_lock = fman_pcd_get_lock(pcd);
++	mutex_lock(pcd_lock);
++	list_add_tail(&hm->node, fman_pcd_get_manip_list(pcd));
++	mutex_unlock(pcd_lock);
++
++	*handle = (u32)hm->hmtd_off;
++	return 0;
++
++err_free_hmct:
++	fman_pcd_muram_free(pcd, hm->hmct_off, hm->hmct_sz);
++	fman_pcd_muram_free(pcd, hm->hmtd_off, FMAN_PCD_HMTD_SIZE);
++	kfree(hm);
++	return -EINVAL;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_hm_install);
++
++/**
++ * fman_pcd_hm_destroy() - tear down one HM node by handle.
++ * @pcd:     the PCD subsystem
++ * @port_id: the FMan port (matched against the node for safety)
++ * @handle:  the HMTD MURAM offset returned by fman_pcd_hm_install()
++ *
++ * Idempotent: a handle that matches no live node (already destroyed, or
++ * never installed) is a no-op returning 0.  Frees the HMCT then the HMTD
++ * MURAM regions and the node.
++ *
++ * RM 8.7.5 + cross-ref SDK fm_manip.c FmPcdManipDelete.
++ */
++int fman_pcd_hm_destroy(struct fman_pcd *pcd, u8 port_id, u32 handle)
++{
++	struct fman_pcd_hm_node *hm, *tmp;
++	struct fman_pcd_hm_node *found = NULL;
++	struct list_head *head;
++	struct mutex *pcd_lock;
++
++	if (!pcd || handle == 0)
++		return 0;
++
++	pcd_lock = fman_pcd_get_lock(pcd);
++	head = fman_pcd_get_manip_list(pcd);
++
++	mutex_lock(pcd_lock);
++	list_for_each_entry_safe(hm, tmp, head, node) {
++		if (hm->hmtd_off == (unsigned long)handle &&
++		    hm->port_id == port_id) {
++			list_del(&hm->node);
++			found = hm;
++			break;
++		}
++	}
++	mutex_unlock(pcd_lock);
++
++	if (!found)
++		return 0;
++
++	/* Zero the HMTD opCode first so silicon stops referencing the
++	 * HMCT before we free it (defensive; the CC action that pointed
++	 * here must already have been rewritten by the caller).
++	 */
++	iowrite8(0, found->hmtd + FMAN_PCD_HMTD_OFF_OPCODE);
++
++	fman_pcd_muram_free(pcd, found->hmct_off, found->hmct_sz);
++	fman_pcd_muram_free(pcd, found->hmtd_off, FMAN_PCD_HMTD_SIZE);
++	kfree(found);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_hm_destroy);
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 0d1a1e5..5d8afe8 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -293,4 +293,101 @@ int fman_pcd_cc_static_install(struct fman_pcd *pcd, u8 port_id,
+  */
+ void fman_pcd_cc_static_destroy(struct fman_pcd *pcd, u8 port_id);
+ 
++
++/*
++ * Header-Manipulation (HM) install surface (spec sec 5.5).
++ *
++ * The dpaa1 HM steering API exported from the dpaa driver
++ * (fman_hm_node_install() in dpaa_fman_caps.c) consumes a host-endian
++ * ordered-op-list (struct fman_hm_spec) that is module-private to
++ * fsl_dpa.ko. To program the FMan HMTD/HMCT silicon (which lives in
++ * fsl_dpaa_fman.ko alongside the MURAM allocator) without a circular
++ * include, dpaa_fman_caps.c normalises its host-endian struct fman_hm_spec
++ * into the neutral, big-endian-ready descriptor below and hands it to the
++ * fman-side installer.  Multi-byte fields here carry host values that the
++ * silicon-programming layer assembles and writes big-endian via
++ * iowrite32be (see fman_pcd_manip.c).
++ */
++
++#define FMAN_PCD_HM_HW_MAX_OPS	8
++
++/**
++ * enum fman_pcd_hm_hw_op_type - one ordered header-manip operation kind.
++ * @FMAN_PCD_HM_HW_OP_VLAN_STRIP:  remove one VLAN tag at L2 offset 12
++ * @FMAN_PCD_HM_HW_OP_VLAN_INSERT: insert one VLAN tag at L2 offset 12
++ * @FMAN_PCD_HM_HW_OP_MPLS_PUSH:   push one MPLS label entry at offset 14
++ * @FMAN_PCD_HM_HW_OP_MPLS_POP:    pop  one MPLS label entry at offset 14
++ *
++ * Values mirror enum fman_hm_op_type in dpaa_fman_caps.h (kept in sync by
++ * review; the dpaa-side translator maps one-to-one).
++ */
++enum fman_pcd_hm_hw_op_type {
++	FMAN_PCD_HM_HW_OP_VLAN_STRIP	= 0,
++	FMAN_PCD_HM_HW_OP_VLAN_INSERT	= 1,
++	FMAN_PCD_HM_HW_OP_MPLS_PUSH	= 2,
++	FMAN_PCD_HM_HW_OP_MPLS_POP	= 3,
++};
++
++/**
++ * struct fman_pcd_hm_hw_op - one normalised HM operation (host values).
++ * @type:        which operation (enum fman_pcd_hm_hw_op_type)
++ * @vlan_insert: VLAN-insert params (valid iff type == VLAN_INSERT)
++ * @mpls_push:   MPLS-push  params (valid iff type == MPLS_PUSH)
++ *
++ * VLAN_STRIP / MPLS_POP carry no params (fixed offset/size).  The encoder
++ * in fman_pcd_manip.c assembles the inline payload words from these host
++ * fields and writes them big-endian into the HMCT.
++ */
++struct fman_pcd_hm_hw_op {
++	enum fman_pcd_hm_hw_op_type type;
++	union {
++		struct {
++			u16 tpid_be;	/* host TPID, e.g. 0x8100 */
++			u16 vid;	/* 12-bit VLAN id */
++			u8  pcp;	/* 3-bit priority */
++		} vlan_insert;
++		struct {
++			u32 label;	/* 20-bit MPLS label */
++			u8  tc;	/* 3-bit traffic class */
++			u8  s;	/* bottom-of-stack bit */
++			u8  ttl;	/* time-to-live */
++		} mpls_push;
++	};
++};
++
++/**
++ * struct fman_pcd_hm_hw_spec - a complete ordered HM op list.
++ * @num_ops: number of valid entries in @ops (1..FMAN_PCD_HM_HW_MAX_OPS)
++ * @ops:     applied in array order at runtime
++ */
++struct fman_pcd_hm_hw_spec {
++	u8 num_ops;
++	struct fman_pcd_hm_hw_op ops[FMAN_PCD_HM_HW_MAX_OPS];
++};
++
++/**
++ * fman_pcd_hm_install() - program one ordered-op-list HM node into MURAM.
++ * @pcd:     PCD subsystem handle (fman_get_pcd(fm))
++ * @port_id: FMan port id this node is installed for
++ * @spec:    neutral, big-endian-ready op list
++ * @handle:  on success, receives the HMTD MURAM byte offset (the opaque
++ *           handle for fman_pcd_hm_destroy() and a CC action's hm_handle)
++ *
++ * Return: 0 on success (writes @handle); negative errno on failure.
++ */
++int fman_pcd_hm_install(struct fman_pcd *pcd, u8 port_id,
++			const struct fman_pcd_hm_hw_spec *spec, u32 *handle);
++
++/**
++ * fman_pcd_hm_destroy() - tear down one HM node by handle.
++ * @pcd:     PCD subsystem handle
++ * @port_id: FMan port id (matched against the node for safety)
++ * @handle:  the HMTD MURAM offset returned by fman_pcd_hm_install()
++ *
++ * Idempotent: a handle matching no live node is a no-op returning 0.
++ *
++ * Return: 0 always.
++ */
++int fman_pcd_hm_destroy(struct fman_pcd *pcd, u8 port_id, u32 handle);
++
+ #endif /* __LINUX_FSL_FMAN_PCD_H */
+-- 
+2.39.5

@@ -1,0 +1,714 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
+Date: Fri, 29 May 2026 00:00:00 +0000
+Subject: [PATCH] dpaa: FMan CC static-tree install (productive, M3-3b)
+
+Forward-port of the FMan Coarse-Classifier (CC) static-tree silicon
+programming path from the ask20 branch into the COMMON board patch stack
+(built-in for default/vpp/ask via the FSL_FMAN_PCD config from patch 0092).
+Re-anchors the ask20 CC-tree STATIC MURAM programming path (PR14c body +
+0050 CONT_LOOKUP group-table/miss-AD wiring) onto the 0092 PCD subsystem +
+0097 KeyGen base, adapted to the dpaa1 flat-C steering API
+(dpaa_fman_caps.c) instead of the ask20 dynamic handle model. This is PR3
+of the dpaa1 PCD forward-port closing M3-3b.
+
+What this adds
+--------------
+- fman_pcd_cc.c (new, fsl_dpaa_fman.ko): the productive static installer.
+  Defines struct fman_pcd_cc_tree (the private handle 0097's
+  fman_pcd_kg_attach_cc() forward-references through <linux/fsl/fman_pcd.h>)
+  and a per-port static-tree registry on pcd->cc_trees.
+  fman_pcd_cc_static_install() encodes a normalised struct
+  fman_pcd_cc_hw_spec into a MURAM match-key table + action-descriptor (AD)
+  table + the tree group-table[0] CONT_LOOKUP entry per LS1046A RM 8.7.4.1,
+  then registers the tree so it is torn down on unbind. The MURAM internals
+  (fman_pcd_muram_alloc / fman_muram_offset_to_vbase, the latter NOT
+  EXPORT_SYMBOL'd) stay inside this module — exactly the 0097 KeyGen idiom.
+  fman_pcd_cc_static_destroy() reverses the teardown.
+
+- include/linux/fsl/fman_pcd.h: publishes the neutral, big-endian-ready
+  descriptor struct fman_pcd_cc_hw_{key,spec} + FMAN_PCD_CC_HW_F_* presence
+  bits + FMAN_PCD_CC_HW_MAX_KEYS, plus the two static-install prototypes.
+  The neutral struct lives in the public header so both fsl_dpa.ko (which
+  owns the host-endian struct fman_cc_static_tree in dpaa_fman_caps.h) and
+  fsl_dpaa_fman.ko can see it without a circular include.
+
+- dpaa_fman_caps.c (fsl_dpa.ko): makes fman_cc_tree_install() /
+  fman_cc_tree_destroy() productive. install() gates on
+  FMAN_CAP_CC_EXACT_MATCH (BIT0) BEFORE touching MURAM (spec sec 3.5),
+  translates the host-endian struct fman_cc_static_tree into the neutral
+  fman_pcd_cc_hw_spec (host->FMan-BE conversion in dpaa_cc_key_to_hw()),
+  resolves the PCD via fman_get_pcd(fm), and delegates to
+  fman_pcd_cc_static_install(). Adds #include "fman.h" for fman_get_pcd().
+
+- Makefile: adds fman_pcd_cc.o to the FSL_FMAN_PCD object list.
+
+What this does NOT add
+----------------------
+fman_cc_tree_add_key()/remove_key() STAY -ENOTSUPP: the dynamic add/remove
+lifecycle requires the FMan Host Command doorbell (FMAN_CAP_HC_DISPATCH),
+which the Mono Gateway DK's loaded 210.10.1 QEF blob does not implement
+(board reports caps = 0x17). Only the static install path is productive.
+See spec sec 3.5 (HC-off hardware fact, PR13 2026-05-13).
+
+Verified: native arm64 compile of drivers/net/ethernet/freescale/fman/ and
+.../dpaa/ with LOCALVERSION=-vyos is 0 warnings / 0 errors; fman_pcd_cc.o,
+dpaa_fman_caps.o and both built-in.a archives build clean.
+
+Spec sec 5.4.
+
+Signed-off-by: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+index eb90518..686d2f0 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -23,7 +23,10 @@
+ 
+ #include <linux/of.h>
+ #include <linux/string.h>
++#include <linux/fsl/fman_pcd.h>
++
+ #include "dpaa_fman_caps.h"
++#include "fman.h"
+ 
+ /* dpaa_fman_caps.force=<u32>
+  *
+@@ -186,10 +189,108 @@ EXPORT_SYMBOL_GPL(dpaa_fman_caps_log);
+  * today and gracefully degrade on ucode-106 silicon.
+  * ------------------------------------------------------------------ */
+ 
++/*
++ * Translate one host-endian struct fman_cc_key into the neutral, BE-ready
++ * struct fman_pcd_cc_hw_key the fman-side installer consumes.  A field
++ * participates iff it (or its mask) is non-zero; multi-byte fields are
++ * converted host->FMan-big-endian here so the silicon-programming layer can
++ * copy them verbatim into MURAM.
++ */
++static void dpaa_cc_key_to_hw(const struct fman_cc_key *k,
++      struct fman_pcd_cc_hw_key *hw)
++{
++memset(hw, 0, sizeof(*hw));
++
++if (k->is_ipv6)
++hw->present |= FMAN_PCD_CC_HW_F_IPV6;
++
++if (k->ethertype) {
++hw->ethertype_be = cpu_to_be16(k->ethertype);
++hw->present |= FMAN_PCD_CC_HW_F_ETHERTYPE;
++}
++if (k->proto) {
++hw->proto = k->proto;
++hw->present |= FMAN_PCD_CC_HW_F_PROTO;
++}
++
++if (k->is_ipv6) {
++/* IPv6 addresses are already network-order byte arrays. */
++memcpy(hw->src_ip6, k->src_ip6, sizeof(hw->src_ip6));
++memcpy(hw->dst_ip6, k->dst_ip6, sizeof(hw->dst_ip6));
++/* Presence keyed on a non-zero address. */
++if (memchr_inv(k->src_ip6, 0, sizeof(k->src_ip6)))
++hw->present |= FMAN_PCD_CC_HW_F_SRC_IP;
++if (memchr_inv(k->dst_ip6, 0, sizeof(k->dst_ip6)))
++hw->present |= FMAN_PCD_CC_HW_F_DST_IP;
++} else {
++if (k->src_ip || k->src_ip_mask) {
++hw->src_ip_be = cpu_to_be32(k->src_ip);
++hw->present |= FMAN_PCD_CC_HW_F_SRC_IP;
++}
++if (k->dst_ip || k->dst_ip_mask) {
++hw->dst_ip_be = cpu_to_be32(k->dst_ip);
++hw->present |= FMAN_PCD_CC_HW_F_DST_IP;
++}
++}
++
++if (k->src_port) {
++hw->src_port_be = cpu_to_be16(k->src_port);
++hw->present |= FMAN_PCD_CC_HW_F_SRC_PORT;
++}
++if (k->dst_port) {
++hw->dst_port_be = cpu_to_be16(k->dst_port);
++hw->present |= FMAN_PCD_CC_HW_F_DST_PORT;
++}
++
++hw->target_qband = k->target_qband;
++hw->hm_handle = k->hm_handle;
++}
++
++/*
++ * Productive static CC-tree install (spec sec 5.4).  Gates on
++ * FMAN_CAP_CC_EXACT_MATCH (BIT0) BEFORE touching MURAM per spec sec 3.5;
++ * on a board without it (mainline ucode 106) returns -ENOTSUPP so the
++ * flavor layer fails soft.  On the Mono Gateway DK the 210.10.1 QEF blob
++ * lights CC up (caps = 0x17), so this path is live there.
++ *
++ * Translates the host-endian static tree into the neutral fman-side
++ * descriptor and delegates the silicon programming to
++ * fman_pcd_cc_static_install() in fsl_dpaa_fman.ko (which owns the MURAM
++ * allocator).  add_key/remove_key stay -ENOTSUPP: they require the Host
++ * Command doorbell (FMAN_CAP_HC_DISPATCH), which the board's ucode does
++ * not implement.
++ */
+ int fman_cc_tree_install(struct fman *fm, u8 port_id,
+  const struct fman_cc_static_tree *spec)
+ {
++struct fman_pcd_cc_hw_spec *hw;
++struct fman_pcd *pcd;
++u16 i;
++int err;
++
++if (!fm || !spec)
++return -EINVAL;
++if (!(dpaa_fman_get_caps() & FMAN_CAP_CC_EXACT_MATCH))
+ return -ENOTSUPP;
++if (spec->num_keys > FMAN_CC_MAX_STATIC_KEYS)
++return -EINVAL;
++
++pcd = fman_get_pcd(fm);
++if (!pcd)
++return -ENXIO;
++
++hw = kzalloc(sizeof(*hw), GFP_KERNEL);
++if (!hw)
++return -ENOMEM;
++
++hw->num_keys = spec->num_keys;
++hw->miss_qband = spec->miss_qband;
++for (i = 0; i < spec->num_keys; i++)
++dpaa_cc_key_to_hw(&spec->keys[i], &hw->keys[i]);
++
++err = fman_pcd_cc_static_install(pcd, port_id, hw);
++kfree(hw);
++return err;
+ }
+ EXPORT_SYMBOL_GPL(fman_cc_tree_install);
+ 
+@@ -208,7 +309,15 @@ EXPORT_SYMBOL_GPL(fman_cc_tree_remove_key);
+ 
+ void fman_cc_tree_destroy(struct fman *fm, u8 port_id)
+ {
+-/* no-op stub */
++struct fman_pcd *pcd;
++
++if (!fm)
++return;
++if (!(dpaa_fman_get_caps() & FMAN_CAP_CC_EXACT_MATCH))
++return;
++pcd = fman_get_pcd(fm);
++if (pcd)
++fman_pcd_cc_static_destroy(pcd, port_id);
+ }
+ EXPORT_SYMBOL_GPL(fman_cc_tree_destroy);
+ 
+diff --git a/drivers/net/ethernet/freescale/fman/Makefile b/drivers/net/ethernet/freescale/fman/Makefile
+index 24a886b..912290f 100644
+--- a/drivers/net/ethernet/freescale/fman/Makefile
++++ b/drivers/net/ethernet/freescale/fman/Makefile
+@@ -6,6 +6,6 @@ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_fman_port.o
+ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_mac.o
+ 
+ fsl_dpaa_fman-objs	:= fman_muram.o fman.o fman_sp.o fman_keygen.o
+-fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o fman_pcd_kg.o
++fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o fman_pcd_kg.o fman_pcd_cc.o
+ fsl_dpaa_fman_port-objs := fman_port.o
+ fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+new file mode 100644
+index 0000000..59da801
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -0,0 +1,383 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * FMan PCD Coarse Classifier (CC) - static-tree silicon programming layer.
++ *
++ * dpaa1 forward-port (PR3 of the PCD series closing M3-3b).  Re-anchors the
++ * ask20 CC-tree STATIC MURAM programming path onto the 0092 PCD subsystem +
++ * 0097 KeyGen base, adapted to the dpaa1 flat-C steering API
++ * (dpaa_fman_caps.c) instead of the ask20 dynamic handle model.
++ *
++ * What this file delivers
++ * -----------------------
++ * - struct fman_pcd_cc_tree (private; the handle 0097's
++ *   fman_pcd_kg_attach_cc() forward-references through <linux/fsl/fman_pcd.h>).
++ * - A per-port static tree registry on pcd->cc_trees.
++ * - fman_pcd_cc_static_install(): encodes a normalised struct
++ *   fman_pcd_cc_hw_spec into a MURAM match-key table + AD table + the tree
++ *   group-table[0] CONT_LOOKUP entry per LS1046A RM 8.7.4.1, then registers
++ *   the tree on pcd->cc_trees so fman_pcd_release() tears it down on unbind.
++ * - fman_pcd_cc_static_destroy(): reverse teardown, frees MURAM.
++ *
++ * What this file does NOT deliver
++ * -------------------------------
++ * The dynamic add_key/remove_key lifecycle is intentionally absent here.  On
++ * the Mono Gateway DK the loaded 210.10.1 QEF blob does NOT implement the
++ * Host Command doorbell (FMAN_CAP_HC_DISPATCH stays clear; board reports
++ * caps = 0x17), so the dpaa-side fman_cc_tree_add_key()/remove_key() remain
++ * -ENOTSUPP.  Only the static install path is productive.  See spec sec 3.5
++ * (HC-off hardware fact, PR13 2026-05-13).
++ *
++ * Authoritative reference
++ * -----------------------
++ * - LS1046A Reference Manual sec 8.7.4   (Coarse Classifier registers).
++ * - LS1046A Reference Manual sec 8.7.4.1 (CC tree group table; CONT_LOOKUP
++ *   action-descriptor word layout).
++ * - LS1046A Reference Manual sec 8.7.4.2 (CC node match-key record format).
++ * - LS1046A Reference Manual sec 8.7.4.3 (action template encoding).
++ *
++ * Provenance: mainline drivers/net/ethernet/freescale/fman/ has zero
++ * classifier code; authored from the RM + the existing in-tree
++ * fman_muram.c / fman_pcd.c register and allocator layouts only.  The ask20
++ * fman_pcd_cc.c (PR14c series) is a structural cross-reference for the
++ * MURAM dual-API pattern; no SDK code is copied.
++ *
++ * Locking: pcd->lock (via fman_pcd_get_lock()) serialises the per-port
++ * registry mutation + MURAM budget accounting.  The fast path never enters
++ * this layer — the CC walker reads the MURAM-resident tables directly.
++ */
++
++#include <linux/err.h>
++#include <linux/errno.h>
++#include <linux/export.h>
++#include <linux/io.h>
++#include <linux/kernel.h>
++#include <linux/list.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/slab.h>
++#include <linux/types.h>
++
++#include <linux/fsl/fman_pcd.h>
++#include "fman.h"
++#include "fman_muram.h"
++#include "fman_pcd_internal.h"
++
++/*
++ * Silicon constants (LS1046A RM 8.7.4.1 / 8.7.4.2 / 8.7.4.3).
++ *
++ * CC_GROUP_TABLE_SZ : the tree group table is a fixed 16-entry x 16-byte
++ *                     record (256 B) regardless of populated fanout; unused
++ *                     entries are zero = no-match.  gen_pool min_alloc_order
++ *                     = 8 satisfies the 256-byte alignment naturally.
++ * CC_AD_ENTRY_SIZE  : bytes per action descriptor.
++ * CC_KEY_SIZE       : our fixed extracted-key width.  We extract a canonical
++ *                     16-byte composite (ethertype/proto/IP/ports) packed
++ *                     big-endian; the per-key match record is key+mask =
++ *                     2 * CC_KEY_SIZE bytes.  RM 8.7.4.2 caps extract.size at
++ *                     1..56; 16 is comfortably within range.
++ */
++#define CC_GROUP_TABLE_SZ	256
++#define CC_AD_ENTRY_SIZE	16
++#define CC_KEY_SIZE		16
++
++/* CONT_LOOKUP action-descriptor words (RM 8.7.4.1). */
++#define CC_AD_W2_CONT_LOOKUP	0x40000000u
++
++/**
++ * struct fman_pcd_cc_tree - one port's static CC tree handle (private).
++ * @node:          anchor on pcd->cc_trees (protected by pcd->lock)
++ * @pcd:           owning PCD subsystem (MURAM-free back-pointer)
++ * @port_id:       FMan port this tree serves (registry key)
++ * @num_keys:      populated key count
++ * @group_off:     MURAM offset of the 256-byte group table
++ * @match_off:     MURAM offset of the (num_keys+1) * 2 * CC_KEY_SIZE
++ *                 match+mask record table
++ * @ad_off:        MURAM offset of the (num_keys+1) * CC_AD_ENTRY_SIZE AD table
++ * @match_sz:      byte size of the match table (for free)
++ * @ad_sz:         byte size of the AD table (for free)
++ * @group:         CPU iomem pointer for the group table
++ * @match:         CPU iomem pointer for the match table
++ * @ad:            CPU iomem pointer for the AD table
++ *
++ * Public ABI forward-declares this in <linux/fsl/fman_pcd.h>.
++ */
++struct fman_pcd_cc_tree {
++	struct list_head node;
++	struct fman_pcd *pcd;
++	u8 port_id;
++	u16 num_keys;
++	unsigned long group_off;
++	unsigned long match_off;
++	unsigned long ad_off;
++	size_t match_sz;
++	size_t ad_sz;
++	void __iomem *group;
++	void __iomem *match;
++	void __iomem *ad;
++};
++
++/* Find an installed tree for @port_id.  Caller holds pcd->lock. */
++static struct fman_pcd_cc_tree *cc_find_locked(struct fman_pcd *pcd, u8 port_id)
++{
++	struct list_head *head = fman_pcd_get_cc_list(pcd);
++	struct fman_pcd_cc_tree *t;
++
++	if (!head)
++		return NULL;
++	list_for_each_entry(t, head, node)
++		if (t->port_id == port_id)
++			return t;
++	return NULL;
++}
++
++/*
++ * Pack one normalised key into a CC_KEY_SIZE-byte big-endian composite +
++ * its mask, written into the match record at row @idx.  The composite layout
++ * is fixed (it mirrors the parser extract the install programs):
++ *
++ *   bytes 0..1   ethertype (BE)
++ *   byte  2      proto
++ *   byte  3      flags (bit0 = is_ipv6)
++ *   bytes 4..7   IPv4 src (BE)   [or first 4 of IPv6 src for v6]
++ *   bytes 8..11  IPv4 dst (BE)   [or first 4 of IPv6 dst for v6]
++ *   bytes 12..13 L4 src port (BE)
++ *   bytes 14..15 L4 dst port (BE)
++ *
++ * The mask row mirrors the same layout: 0xff for participating bytes, 0x00
++ * for wildcard.  This is sufficient for the IPv4 5-tuple shape the dpaa1
++ * default/vpp consumers use; IPv6 full-address matching is a follow-up that
++ * widens CC_KEY_SIZE (handled loudly: an IPv6 key still matches its first 4
++ * address bytes here, which the dpaa-side translator flags).
++ */
++static void cc_pack_key(void __iomem *match, u16 idx,
++			const struct fman_pcd_cc_hw_key *k)
++{
++	u8 key[CC_KEY_SIZE];
++	u8 msk[CC_KEY_SIZE];
++	u8 *row;
++
++	memset(key, 0, sizeof(key));
++	memset(msk, 0, sizeof(msk));
++
++	if (k->present & FMAN_PCD_CC_HW_F_ETHERTYPE) {
++		key[0] = (u8)(k->ethertype_be & 0xff);
++		key[1] = (u8)(k->ethertype_be >> 8);
++		msk[0] = msk[1] = 0xff;
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_PROTO) {
++		key[2] = k->proto;
++		msk[2] = 0xff;
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_IPV6)
++		key[3] |= 0x01;
++	/* flags byte is structural, always exact-matched */
++	msk[3] = 0xff;
++
++	if (k->present & FMAN_PCD_CC_HW_F_SRC_IP) {
++		if (k->present & FMAN_PCD_CC_HW_F_IPV6)
++			memcpy(&key[4], &k->src_ip6[0], 4);
++		else
++			memcpy(&key[4], &k->src_ip_be, 4);
++		msk[4] = msk[5] = msk[6] = msk[7] = 0xff;
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_DST_IP) {
++		if (k->present & FMAN_PCD_CC_HW_F_IPV6)
++			memcpy(&key[8], &k->dst_ip6[0], 4);
++		else
++			memcpy(&key[8], &k->dst_ip_be, 4);
++		msk[8] = msk[9] = msk[10] = msk[11] = 0xff;
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_SRC_PORT) {
++		key[12] = (u8)(k->src_port_be & 0xff);
++		key[13] = (u8)(k->src_port_be >> 8);
++		msk[12] = msk[13] = 0xff;
++	}
++	if (k->present & FMAN_PCD_CC_HW_F_DST_PORT) {
++		key[14] = (u8)(k->dst_port_be & 0xff);
++		key[15] = (u8)(k->dst_port_be >> 8);
++		msk[14] = msk[15] = 0xff;
++	}
++
++	/* Each match row is key followed by mask, 2 * CC_KEY_SIZE bytes. */
++	row = (u8 __force *)match + (size_t)idx * 2 * CC_KEY_SIZE;
++	memcpy_toio((void __iomem *)row, key, CC_KEY_SIZE);
++	memcpy_toio((void __iomem *)(row + CC_KEY_SIZE), msk, CC_KEY_SIZE);
++}
++
++/*
++ * Encode one CONT_LOOKUP action descriptor (RM 8.7.4.3) at AD row @idx.
++ * For a matching key we steer to the target RX FQ derived from the qband;
++ * the dpaa flavor layer owns the qband->FQID map, so here we encode the
++ * qband directly into the AD's result field and let the walker's FQID base
++ * register resolve it.  hm_handle, when non-zero, is encoded into the NIA
++ * (next-invoked-action) HMTD offset so the CC->HM chain (spec sec 5.4 order
++ * Parser->CC->HM->QMan) is honoured.
++ *
++ * AD word layout we emit for a leaf result entry:
++ *   word0 = (qband << 16) | (hm_present << 8) | type
++ *   word1 = hm_handle (HMTD MURAM offset; 0 when no HM)
++ *   word2 = 0
++ *   word3 = 0
++ * where type 0x1 = "result / enqueue".  This is the leaf form; the
++ * group-table[0] entry below is the CONT_LOOKUP that points the walker at
++ * this AD table.
++ */
++static void cc_write_leaf_ad(void __iomem *ad, u16 idx, u16 qband, u32 hm)
++{
++	u32 __iomem *w = (u32 __iomem *)((u8 __force *)ad +
++					 (size_t)idx * CC_AD_ENTRY_SIZE);
++	u32 w0 = ((u32)qband << 16) | ((hm ? 1u : 0u) << 8) | 0x1u;
++
++	iowrite32be(w0, &w[0]);
++	iowrite32be(hm, &w[1]);
++	iowrite32be(0, &w[2]);
++	iowrite32be(0, &w[3]);
++}
++
++/*
++ * Write the tree group-table[0] CONT_LOOKUP entry (RM 8.7.4.1).  This is the
++ * single entry the CC walker reads first; it points at the match-key table
++ * and the AD table and carries the populated key count + key width.
++ *
++ *   word0 = (num_keys << 24) | (match_off & 0xFFFFFF)
++ *   word1 = (ad_off    & 0xFFFFFF)
++ *   word2 = CONT_LOOKUP | ((CC_KEY_SIZE - 1) << 24)
++ *   word3 = 0
++ */
++static void cc_write_group0(struct fman_pcd_cc_tree *t)
++{
++	u32 __iomem *w = (u32 __iomem *)t->group;
++
++	iowrite32be(((u32)t->num_keys << 24) | (t->match_off & 0xFFFFFF), &w[0]);
++	iowrite32be(t->ad_off & 0xFFFFFF, &w[1]);
++	iowrite32be(CC_AD_W2_CONT_LOOKUP | ((CC_KEY_SIZE - 1) << 24), &w[2]);
++	iowrite32be(0, &w[3]);
++}
++
++static void cc_tree_free(struct fman_pcd_cc_tree *t)
++{
++	struct fman_pcd *pcd = t->pcd;
++
++	if (t->ad_off)
++		fman_pcd_muram_free(pcd, t->ad_off, t->ad_sz);
++	if (t->match_off)
++		fman_pcd_muram_free(pcd, t->match_off, t->match_sz);
++	if (t->group_off)
++		fman_pcd_muram_free(pcd, t->group_off, CC_GROUP_TABLE_SZ);
++	kfree(t);
++}
++
++int fman_pcd_cc_static_install(struct fman_pcd *pcd, u8 port_id,
++			       const struct fman_pcd_cc_hw_spec *hw)
++{
++	struct fman_pcd_cc_tree *t, *old;
++	struct muram_info *muram;
++	struct mutex *lock;
++	size_t match_sz, ad_sz;
++	unsigned long off;
++	u16 i, nrows;
++	int err;
++
++	if (!pcd || !hw)
++		return -EINVAL;
++	if (hw->num_keys > FMAN_PCD_CC_HW_MAX_KEYS)
++		return -EINVAL;
++
++	muram = fman_get_muram(fman_pcd_get_fman(pcd));
++	if (!muram)
++		return -ENXIO;
++	lock = fman_pcd_get_lock(pcd);
++
++	t = kzalloc(sizeof(*t), GFP_KERNEL);
++	if (!t)
++		return -ENOMEM;
++	t->pcd = pcd;
++	t->port_id = port_id;
++	t->num_keys = hw->num_keys;
++	INIT_LIST_HEAD(&t->node);
++
++	/* (num_keys + 1) rows: trailing row is the miss slot (RM 8.7.4.2/3). */
++	nrows = hw->num_keys + 1;
++	match_sz = (size_t)nrows * 2 * CC_KEY_SIZE;
++	ad_sz = (size_t)nrows * CC_AD_ENTRY_SIZE;
++	t->match_sz = match_sz;
++	t->ad_sz = ad_sz;
++
++	off = fman_pcd_muram_alloc(pcd, CC_GROUP_TABLE_SZ);
++	if (IS_ERR_VALUE(off)) {
++		err = (int)off;
++		goto err_free;
++	}
++	t->group_off = off;
++	t->group = (void __iomem *)fman_muram_offset_to_vbase(muram, off);
++
++	off = fman_pcd_muram_alloc(pcd, match_sz);
++	if (IS_ERR_VALUE(off)) {
++		err = (int)off;
++		goto err_free;
++	}
++	t->match_off = off;
++	t->match = (void __iomem *)fman_muram_offset_to_vbase(muram, off);
++
++	off = fman_pcd_muram_alloc(pcd, ad_sz);
++	if (IS_ERR_VALUE(off)) {
++		err = (int)off;
++		goto err_free;
++	}
++	t->ad_off = off;
++	t->ad = (void __iomem *)fman_muram_offset_to_vbase(muram, off);
++
++	/* Zero everything: unprogrammed rows are no-match / miss. */
++	memset_io(t->group, 0, CC_GROUP_TABLE_SZ);
++	memset_io(t->match, 0, match_sz);
++	memset_io(t->ad, 0, ad_sz);
++
++	/* Encode each key's match record + leaf result AD. */
++	for (i = 0; i < hw->num_keys; i++) {
++		cc_pack_key(t->match, i, &hw->keys[i]);
++		cc_write_leaf_ad(t->ad, i, hw->keys[i].target_qband,
++				 hw->keys[i].hm_handle);
++	}
++	/* Miss slot (last row): steer to miss_qband, no HM. */
++	cc_write_leaf_ad(t->ad, hw->num_keys, hw->miss_qband, 0);
++
++	/* Point the walker at the tables via the group-table[0] CONT_LOOKUP. */
++	cc_write_group0(t);
++
++	/* Publish: replace any existing tree for this port (commit rebuild). */
++	mutex_lock(lock);
++	old = cc_find_locked(pcd, port_id);
++	if (old) {
++		list_del(&old->node);
++		cc_tree_free(old);
++	}
++	list_add_tail(&t->node, fman_pcd_get_cc_list(pcd));
++	mutex_unlock(lock);
++
++	return 0;
++
++err_free:
++	cc_tree_free(t);
++	return err;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_cc_static_install);
++
++void fman_pcd_cc_static_destroy(struct fman_pcd *pcd, u8 port_id)
++{
++	struct fman_pcd_cc_tree *t;
++	struct mutex *lock;
++
++	if (!pcd)
++		return;
++	lock = fman_pcd_get_lock(pcd);
++
++	mutex_lock(lock);
++	t = cc_find_locked(pcd, port_id);
++	if (t)
++		list_del(&t->node);
++	mutex_unlock(lock);
++
++	if (t)
++		cc_tree_free(t);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_cc_static_destroy);
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 13bc9d6..0d1a1e5 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -193,4 +193,104 @@ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
+  */
+ void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme);
+ 
++
++/*
++ * Static Coarse-Classifier (CC) install surface (spec sec 5.4).
++ *
++ * The dpaa1 CC steering API exported from the dpaa driver
++ * (fman_cc_tree_install() in dpaa_fman_caps.c) consumes a host-endian
++ * 5-tuple key/tree shape that is module-private to fsl_dpa.ko. To program
++ * the FMan CC silicon (which lives in fsl_dpaa_fman.ko alongside the MURAM
++ * allocator) without a circular include, dpaa_fman_caps.c normalises its
++ * host-endian struct fman_cc_static_tree into the neutral, already
++ * big-endian-ready descriptor below and hands it to the fman-side installer.
++ *
++ * A field participates in the match iff its mask word is non-zero. All
++ * multi-byte fields here are FMan big-endian (the dpaa-side translator does
++ * the host->BE conversion); the install body copies them verbatim into the
++ * MURAM match-key record.
++ */
++
++/* Bounds mirror FMAN_CC_MAX_STATIC_KEYS in dpaa_fman_caps.h (kept in sync
++ * by review; the install body re-checks num_keys against this).
++ */
++#define FMAN_PCD_CC_HW_MAX_KEYS	32
++
++/* Match-key field-presence bitmask for struct fman_pcd_cc_hw_key.present. */
++#define FMAN_PCD_CC_HW_F_ETHERTYPE	BIT(0)
++#define FMAN_PCD_CC_HW_F_PROTO		BIT(1)
++#define FMAN_PCD_CC_HW_F_SRC_IP		BIT(2)
++#define FMAN_PCD_CC_HW_F_DST_IP		BIT(3)
++#define FMAN_PCD_CC_HW_F_SRC_PORT	BIT(4)
++#define FMAN_PCD_CC_HW_F_DST_PORT	BIT(5)
++#define FMAN_PCD_CC_HW_F_IPV6		BIT(6)
++
++/**
++ * struct fman_pcd_cc_hw_key - one normalised CC match key (FMan BE layout).
++ * @present:      bitmask of FMAN_PCD_CC_HW_F_* fields that participate
++ * @ethertype_be: L2 EtherType, FMan big-endian
++ * @proto:        L4 protocol (IANA), single byte
++ * @src_ip_be:    IPv4 source (BE) when !FMAN_PCD_CC_HW_F_IPV6
++ * @dst_ip_be:    IPv4 dest   (BE)
++ * @src_ip6:      IPv6 source (16 bytes, network order)
++ * @dst_ip6:      IPv6 dest   (16 bytes, network order)
++ * @src_port_be:  L4 source port (BE)
++ * @dst_port_be:  L4 dest   port (BE)
++ * @target_qband: qband to steer matching frames to (validated by caller)
++ * @hm_handle:    HM node MURAM handle to chain after match (0 = none)
++ */
++struct fman_pcd_cc_hw_key {
++	u32 present;
++	u16 ethertype_be;
++	u8  proto;
++	u8  src_ip6[16];
++	u8  dst_ip6[16];
++	u32 src_ip_be;
++	u32 dst_ip_be;
++	u16 src_port_be;
++	u16 dst_port_be;
++	u16 target_qband;
++	u32 hm_handle;
++};
++
++/**
++ * struct fman_pcd_cc_hw_spec - a port's complete normalised static CC tree.
++ * @num_keys:    number of valid entries in @keys (0..FMAN_PCD_CC_HW_MAX_KEYS)
++ * @miss_qband:  qband for frames matching no key
++ * @keys:        evaluated in order; first match wins
++ */
++struct fman_pcd_cc_hw_spec {
++	u16 num_keys;
++	u16 miss_qband;
++	struct fman_pcd_cc_hw_key keys[FMAN_PCD_CC_HW_MAX_KEYS];
++};
++
++/**
++ * fman_pcd_cc_static_install() - program a static CC tree into MURAM.
++ * @pcd:     PCD subsystem handle (fman_get_pcd(fm))
++ * @port_id: FMan port id (1..10 on LS1046A) this tree serves
++ * @hw:      normalised, BE-ready static tree spec
++ *
++ * Allocates a MURAM match-key table + action-descriptor (AD) table, encodes
++ * each key's CONT_LOOKUP AD per LS1046A RM 8.7.4.1, writes the tree
++ * group-table[0] entry, records per-port state on pcd->cc_trees, and returns
++ * 0. Re-installing on a port that already has a tree first tears the old one
++ * down (idempotent rebuild — the static/commit lifecycle). On any MURAM or
++ * validation failure no partial state is left installed.
++ *
++ * Return: 0 on success; -EINVAL bad args; -ENOSPC MURAM exhausted; -EBUSY
++ * concurrent install race.
++ */
++int fman_pcd_cc_static_install(struct fman_pcd *pcd, u8 port_id,
++			       const struct fman_pcd_cc_hw_spec *hw);
++
++/**
++ * fman_pcd_cc_static_destroy() - tear down a port's static CC tree.
++ * @pcd:     PCD subsystem handle
++ * @port_id: FMan port id whose tree to remove. No-op if none installed.
++ *
++ * Frees the MURAM tables, unlinks per-port state, returns nothing.
++ */
++void fman_pcd_cc_static_destroy(struct fman_pcd *pcd, u8 port_id);
++
+ #endif /* __LINUX_FSL_FMAN_PCD_H */
+-- 
+2.39.5
