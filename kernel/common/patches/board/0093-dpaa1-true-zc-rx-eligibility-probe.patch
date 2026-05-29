@@ -1,0 +1,96 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Thu, 29 May 2026 04:00:00 +0000
+Subject: [PATCH] dpaa1: M3-3 step 7 sub-increment 1 - true-ZC RX eligibility
+ probe (xsk_zc_eligible counter)
+
+M3-3 step 7 (true zero-copy RX, spec sec 6.1.7 mechanism 1) is the only
+unblocked kernel-code milestone remaining after the M3-3b/c/d struct
+contracts landed and gate 3 was shown methodology-bound (sec 6.1.8a/b).
+Productive true-ZC has three mechanisms (sec 6.1.7 lines "Recognise /
+Recover / Program"): (1) recognise XSK-pool-sourced FDs by matching
+fd->bpid against priv->xsk_bpid[band]; (2) recover the xdp_buff from the
+XSK chunk; (3) reprogram the FMan RX port's primary BPID to the XSK pool.
+Mechanism 3 is hardware-risky (the sec 6.1.8 history records three DUT
+crashes from under-load XSK RX work). Following the de-risking cadence
+that landed 0083 (observational xsk_rx_branch) before 0084's productive
+branch, this sub-increment lands ONLY mechanism 1's recognition test as a
+strictly-diagnostic counter, with zero datapath change.
+
+A 17th xsk_* counter, xsk_zc_eligible, is bumped inside the existing 0083
+RCU read-section in rx_default_dqrr() whenever an FD reaches a qband with
+a bound XSK pool AND fd->bpid equals priv->xsk_bpid[band]. On the default
+flavor no XSK pool is ever bound and xsk_bpid stays 0 while a live FD
+always carries a non-zero kernel BPID, so the test never fires and packet
+handling is byte-identical to mainline. Once sub-increment 2 reprograms
+the FMan RX port BPID, this counter will track FDs that FMan DMA'd
+directly into XSK-pool BMan chunks - proving the recognition arithmetic
+before the risky reprogram is wired into the datapath.
+
+Three edits, all additive:
+  - dpaa_eth.h:    u64 xsk_zc_eligible; appended to the xsk_* counter block
+  - dpaa_ethtool.c: "xsk_zc_eligible" appended to dpaa_stats_xsk[]
+                    (value-emit loop is length-driven, no change needed)
+  - dpaa_eth.c:    bpid-match test added inside the 0083 _xp != NULL arm
+
+Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
+---
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -2851,8 +2851,20 @@
+ 
+ 		rcu_read_lock();
+ 		_xp = rcu_dereference(priv->xsk_pool[_band]);
+-		if (_xp)
++		if (_xp) {
+ 			priv->xsk_rx_branch++;
++			/* M3-3 step 7 sub-increment 1 (patch 0093): the FD
++			 * reached a qband with a bound XSK pool. If FMan also
++			 * DMA'd it into an XSK-pool BMan chunk, fd->bpid equals
++			 * the dedicated BPID recorded by xsk_pool_attach().
++			 * Until sub-increment 2 reprograms the FMan RX port's
++			 * primary BPID, fd->bpid stays the kernel page BPID and
++			 * this stays 0 -- proving the recognition path is sound
++			 * with zero datapath risk. Spec sec 6.1.7 / 6.1.10.
++			 */
++			if (fd->bpid == priv->xsk_bpid[_band])
++				priv->xsk_zc_eligible++;
++		}
+ 		rcu_read_unlock();
+ 	}
+ 
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -288,6 +288,22 @@
+  */
+ u64 xsk_tx_conf_zc;
+ 
++/* M3-3 step 7 sub-increment 1 (patch 0093): observational
++ * true-ZC RX eligibility probe. Bumped in rx_default_dqrr()
++ * when an FD's bpid equals priv->xsk_bpid[band] for a band
++ * with a bound XSK pool -- i.e. the FD was DMA'd by FMan into
++ * an XSK-pool BMan chunk rather than a kernel page. Strictly
++ * diagnostic, mirroring xsk_rx_branch (0083): it proves the
++ * FD-recognition arithmetic (fd->bpid vs xsk_bpid[band]) is
++ * correct BEFORE the hardware-risky sub-increment 2 reprograms
++ * the FMan RX port's primary BPID to the XSK pool. With no XSK
++ * pool bound (default flavor) xsk_bpid stays 0 while a live FD
++ * always carries a non-zero kernel BPID, so this never fires
++ * and packet handling is byte-identical to mainline. Spec sec
++ * 6.1.7 true-ZC mechanism 1 + sec 6.1.10.
++ */
++u64 xsk_zc_eligible;
++
+ /* M3-3b (patch 0086): FMan PCD capability bitmask snapshot taken
+  * at probe via dpaa_fman_get_caps(). 0 on mainline ucode 106 ->
+  * all fman_cc_tree_/fman_hm_/fman_pol_ helpers short-circuit
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+@@ -71,6 +71,7 @@
+ "xsk_bman_refill_batches",
+ "xsk_tx_zc_submit",
+ "xsk_tx_conf_zc",
++"xsk_zc_eligible",
+ };
+ 
+ /* HW-offload (PCD-cap) counters (M3-3b / patch 0086). Order MUST match
