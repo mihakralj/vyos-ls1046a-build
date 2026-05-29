@@ -9,6 +9,84 @@ Subject: [PATCH 2/2] 0090 M3-3c HM stub
  .../ethernet/freescale/dpaa/dpaa_fman_caps.h  | 67 +++++++++++++++++++
  3 files changed, 122 insertions(+)
 
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+index aa97658..3093bd8 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+@@ -185,4 +185,72 @@ struct fman_cc_static_tree {
+ 	struct fman_cc_key keys[FMAN_CC_MAX_STATIC_KEYS];
+ };
+ 
++/* ------------------------------------------------------------------ *
++ * M3-3c STUB API  (spec sec 5.5 Header Manipulation)
++ *
++ * Header Manipulation (HM) nodes program the FMan PCD HM block to
++ * mutate L2/L3 headers (VLAN push/pop, MAC rewrite, IPv4/IPv6 NAT,
++ * TTL decrement, DSCP rewrite) entirely in silicon after CC matching
++ * and before QMan enqueue. Per spec sec 5.4 chain ordering:
++ *
++ *   Parser \u2192 CC \u2192 HM \u2192 QMan
++ *
++ * Gated on FMAN_CAP_HM_NODES which lights up automatically on ucode
++ * 210+ silicon (verified on Mono Gateway DK 2026-05-28 — "Microcode
++ * version 210.10.1 for LS1043 r1.0" advertises HM_NODES per the
++ * dpaa_fman_caps_from_id() string parser).
++ *
++ * All three helpers below are unconditional -ENOTSUPP stubs in this
++ * patch; the productive implementation lands in a follow-up patch
++ * per spec sec 5.5. The API contract is fixed now so consumers
++ * (af_xdp_pool egress rewrite, ASK2 flowtable bridge, vyos-1x NAT
++ * offload CLI) can wire calls today and gracefully degrade on
++ * ucode-106 silicon.
++ * ------------------------------------------------------------------ */
++
++/* Opaque type referenced by the HM stub signatures; the concrete
++ * layout (per-op TLV array) lands with the productive implementation.
++ */
++struct fman_hm_spec {
++	u32 reserved;		/* productive layout TBD per spec sec 5.5 */
++};
++
++/**
++ * fman_hm_node_install - allocate and program a HM node for @port_id
++ *
++ * On success the returned @handle is opaque and must be passed back to
++ * fman_hm_node_destroy() for cleanup. The handle is also the value a
++ * matching CC action's HM-pointer field must carry per spec sec 5.4
++ * chain encoding (Parser \u2192 CC \u2192 HM \u2192 QMan).
++ *
++ * Returns 0 on success and writes @handle; -ENOTSUPP on stub build /
++ * unsupported silicon (will bump priv->hw_offload_unavailable on the
++ * caller side, mirroring the CC steering convention).
++ *
++ * Spec sec 5.5: HM API.
++ */
++int  fman_hm_node_install(struct fman *fm, u8 port_id,
++			  const struct fman_hm_spec *spec, u32 *handle);
++
++/**
++ * fman_hm_node_destroy - release a HM node previously installed
++ *
++ * Idempotent — destroying an already-released or never-installed handle
++ * is a no-op and returns 0. Detaches the node from any CC actions that
++ * still reference it (their AD records are rewritten to bypass HM).
++ *
++ * Spec sec 5.5: HM API.
++ */
++int  fman_hm_node_destroy(struct fman *fm, u8 port_id, u32 handle);
++
++/**
++ * fman_hm_caps_supported - returns true when ucode advertises HM
++ *
++ * Cheap wrapper around (dpaa_fman_get_caps() & FMAN_CAP_HM_NODES).
++ * Provided so consumers can early-skip building HM specs they can't
++ * install anyway.
++ */
++bool fman_hm_caps_supported(void);
++
++
+ #endif /* __DPAA_FMAN_CAPS_H */
+\ No newline at end of file
 diff --git a/drivers/net/ethernet/freescale/dpaa/Kconfig b/drivers/net/ethernet/freescale/dpaa/Kconfig
 index 0e52cda..3c19f41 100644
 --- a/drivers/net/ethernet/freescale/dpaa/Kconfig
@@ -83,81 +161,4 @@ index da5223d..2c468e7 100644
 +
  MODULE_LICENSE("Dual BSD/GPL");
  MODULE_DESCRIPTION("DPAA1 FMan PCD capability detection + HW-offload stubs");
-\ No newline at end of file
-diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
-index a9b3d2f..9e5a03b 100644
---- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
-+++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
-@@ -113,4 +113,71 @@ struct fman_cc_key {
- 	u32 reserved;          /* productive layout TBD per spec sec 5.4 */
- };
- 
-+/* ------------------------------------------------------------------ *
-+ * M3-3c STUB API  (spec sec 5.5 Header Manipulation)
-+ *
-+ * Header Manipulation (HM) nodes program the FMan PCD HM block to
-+ * mutate L2/L3 headers (VLAN push/pop, MAC rewrite, IPv4/IPv6 NAT,
-+ * TTL decrement, DSCP rewrite) entirely in silicon after CC matching
-+ * and before QMan enqueue. Per spec sec 5.4 chain ordering:
-+ *
-+ *   Parser \u2192 CC \u2192 HM \u2192 QMan
-+ *
-+ * Gated on FMAN_CAP_HM_NODES which lights up automatically on ucode
-+ * 210+ silicon (verified on Mono Gateway DK 2026-05-28 — "Microcode
-+ * version 210.10.1 for LS1043 r1.0" advertises HM_NODES per the
-+ * dpaa_fman_caps_from_id() string parser).
-+ *
-+ * All three helpers below are unconditional -ENOTSUPP stubs in this
-+ * patch; the productive implementation lands in a follow-up patch
-+ * per spec sec 5.5. The API contract is fixed now so consumers
-+ * (af_xdp_pool egress rewrite, ASK2 flowtable bridge, vyos-1x NAT
-+ * offload CLI) can wire calls today and gracefully degrade on
-+ * ucode-106 silicon.
-+ * ------------------------------------------------------------------ */
-+
-+/* Opaque type referenced by the HM stub signatures; the concrete
-+ * layout (per-op TLV array) lands with the productive implementation.
-+ */
-+struct fman_hm_spec {
-+	u32 reserved;		/* productive layout TBD per spec sec 5.5 */
-+};
-+
-+/**
-+ * fman_hm_node_install - allocate and program a HM node for @port_id
-+ *
-+ * On success the returned @handle is opaque and must be passed back to
-+ * fman_hm_node_destroy() for cleanup. The handle is also the value a
-+ * matching CC action's HM-pointer field must carry per spec sec 5.4
-+ * chain encoding (Parser \u2192 CC \u2192 HM \u2192 QMan).
-+ *
-+ * Returns 0 on success and writes @handle; -ENOTSUPP on stub build /
-+ * unsupported silicon (will bump priv->hw_offload_unavailable on the
-+ * caller side, mirroring the CC steering convention).
-+ *
-+ * Spec sec 5.5: HM API.
-+ */
-+int  fman_hm_node_install(struct fman *fm, u8 port_id,
-+			  const struct fman_hm_spec *spec, u32 *handle);
-+
-+/**
-+ * fman_hm_node_destroy - release a HM node previously installed
-+ *
-+ * Idempotent — destroying an already-released or never-installed handle
-+ * is a no-op and returns 0. Detaches the node from any CC actions that
-+ * still reference it (their AD records are rewritten to bypass HM).
-+ *
-+ * Spec sec 5.5: HM API.
-+ */
-+int  fman_hm_node_destroy(struct fman *fm, u8 port_id, u32 handle);
-+
-+/**
-+ * fman_hm_caps_supported - returns true when ucode advertises HM
-+ *
-+ * Cheap wrapper around (dpaa_fman_get_caps() & FMAN_CAP_HM_NODES).
-+ * Provided so consumers can early-skip building HM specs they can't
-+ * install anyway.
-+ */
-+bool fman_hm_caps_supported(void);
-+
- #endif /* __DPAA_FMAN_CAPS_H */
 \ No newline at end of file
