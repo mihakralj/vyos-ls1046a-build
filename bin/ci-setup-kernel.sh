@@ -273,6 +273,47 @@ cp "$BOARD_PATCH_DIR/0093-dpaa1-true-zc-rx-eligibility-probe.patch" "$KERNEL_PAT
 cp "$BOARD_PATCH_DIR/0094-dpaa1-true-zc-rx-arm-observability.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0095-dpaa1-xsk-fill-ring-guard-audit.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0096-dpaa1-true-zc-rx-recover-readside.patch" "$KERNEL_PATCHES/"
+# FMan PCD (Parse/Classify/Distribute) orchestration subsystem — COMMON
+# (all flavors). Forward-port of the ask20 0004 skeleton re-anchored to
+# 6.18.31: new files fman_pcd.c / fman_pcd_internal.h /
+# include/linux/fsl/fman_pcd.h, the fman_get_muram/pcd/dev/id accessors,
+# struct fman.pcd member, and fman_pcd_init/release wired into fman_probe
+# via devm_add_action_or_reset. FSL_FMAN_PCD defaults y so it is built-in
+# for default/vpp/ask alike. Purely additive (new TUs + additive fman.c/.h
+# hunks) — independent of the 0086/0090/0091 dpaa_fman_caps.h stub chain,
+# applies last among board patches by sort order. Unblocks M3-3b/c/d:
+# the per-engine CC/HM/Policer bodies (follow-up patches) reach the FMan
+# MURAM/registers through this subsystem instead of -ENOTSUPP. The
+# ASK2-only fman_host_cmd.c microcode-doorbell transport is intentionally
+# NOT forward-ported. Spec sec 5.4/5.5/5.6.
+cp "$BOARD_PATCH_DIR/0092-fman-pcd-subsystem.patch"             "$KERNEL_PATCHES/"
+# 0097 (PR2): FMan PCD KeyGen exact-match scheme API. Builds on 0092 —
+# promotes struct keygen_scheme / struct fman_keygen to a new module-internal
+# fman_keygen_internal.h and exports the two existing keygen_scheme_setup /
+# keygen_bind_port_to_schemes helpers, then adds fman_pcd_kg.c + the public
+# fman_pcd_kg_* KG surface (scheme_create/bind_port/attach_cc/scheme_destroy).
+# IPv4 5-tuple match-vector via KGSE_MV (RM 8.7.4); attach_cc stays -EOPNOTSUPP
+# until the CC tree subsystem lands. Common (built-in via FSL_FMAN_PCD) for
+# default/vpp/ask alike. Numbered 0097 (not 0093) to avoid colliding with the
+# pre-existing 0093-dpaa1-true-zc-rx-eligibility-probe.patch; 0097 sorts after
+# 0092 (PCD skeleton) AND after the unrelated 0093-0096 true-ZC patches (which
+# do not touch Makefile/fman_pcd.h/fman_keygen.c), so the KeyGen delta still
+# applies on top of the 0092 PCD skeleton. Spec sec 5.4/5.5/5.6.
+cp "$BOARD_PATCH_DIR/0097-fman-pcd-keygen.patch"                "$KERNEL_PATCHES/"
+# 0098 (PR3): FMan CC static-tree install (productive, M3-3b). Builds on
+# 0092 (PCD subsystem) + 0097 (KeyGen) — adds the new fman_pcd_cc.c
+# silicon-programming TU (struct fman_pcd_cc_tree + fman_pcd_cc_static_install/
+# _destroy, MURAM match-key + AD tables + CONT_LOOKUP group-table[0] per
+# LS1046A RM 8.7.4.1), publishes the neutral struct fman_pcd_cc_hw_{key,spec}
+# in the public include/linux/fsl/fman_pcd.h, and makes the dpaa-side
+# fman_cc_tree_install()/destroy() productive (gate on FMAN_CAP_CC_EXACT_MATCH,
+# host->BE translate, delegate via fman_get_pcd()). add_key/remove_key stay
+# -ENOTSUPP (HC-dispatch gated; board caps=0x17, HC bit clear). Common
+# (built-in via FSL_FMAN_PCD) for default/vpp/ask alike. Sorts after 0097 so
+# the Makefile/fman_pcd.h deltas apply on top of the KeyGen base. Spec sec 5.4.
+cp "$BOARD_PATCH_DIR/0098-fman-pcd-cc-static-install.patch"     "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0099-fman-pcd-hm-install.patch"            "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0100-fman-pcd-plcr-install.patch"          "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
