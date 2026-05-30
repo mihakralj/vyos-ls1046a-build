@@ -1,0 +1,191 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Sat, 30 May 2026 03:20:00 +0000
+Subject: [PATCH] fman_port: add dormant fman_port_set_rx_bpool() reprogram
+ primitive (M3-3 step 7 sub-increment 4, write mechanism, no caller)
+
+M3-3 step 7 (true zero-copy RX, spec sec 6.1.7) has a three-mechanism
+plan: (1) Recognise XSK-pool-sourced FDs (fd->bpid == priv->xsk_bpid[band],
+landed observational as xsk_zc_eligible, patch 0093); (2) Recover the
+xdp_buff from the XSK chunk instead of build_skb() (read side landed
+dormant as xsk_zc_rx_recovered, patch 0096); (3) reProgram the FMan RX
+port's primary BMan pool ID from the kernel page-pool BPID
+(priv->dpaa_bp->bpid) to the dedicated XSK pool BPID
+(priv->xsk_bpid[band]) so FMan DMAs directly into XSK chunks (read side
+landed dormant as xsk_zc_rx_armed, patch 0094).
+
+Mechanism 3's WRITE is the single hardware-riskiest action in the entire
+step-7 plan: spec sec 6.1.8 records three under-load DUT crashes from XSK
+RX work (list_add free-list corruption in xp_alloc(), a dcache_clean_poc
+paging fault, a 52 s soft-lockup). Per spec sec 6.1.12 the WRITE must not
+fire until the read-side gate counters are DUT-confirmed under a live
+XDP_ZEROCOPY bind: xsk_zc_rx_armed > 0 (distinct reprogram target) AND
+xsk_fill_guard_block == 0 (FILL-ring single-producer invariant holds).
+
+Surveying mainline 6.18.31 confirms there is NO exported API to reprogram
+a live FMan RX port's BMan pool: set_bpools() (fman_port.c:744, writes the
+BMI FMBM_REBM/bpool register set) and its caller set_ext_buffer_pools()
+(fman_port.c:891) are both `static` and run exactly once during
+fman_port_init(). The bpool table itself lives in
+port->cfg->ext_buf_pools.ext_buf_pool[] (struct fman_ext_pool_params
+{ u8 id; u16 size; }, fman.h:171). fman_port_disable()/fman_port_enable()
+ARE exported (fman_port.h:121/123) and are already used by the dpaa
+detach path (dpaa_eth.c:332) and the XSK pool detach sequence (spec
+sec 6.1.1 step 3) to quiesce the BMI before touching pool state.
+
+This patch lands the durable in-tree WRITE primitive, DORMANT:
+
+  int fman_port_set_rx_bpool(struct fman_port *port, u8 old_bpid,
+                             u8 new_bpid);
+
+It walks port->cfg->ext_buf_pools.ext_buf_pool[], swaps the entry whose
+.id == old_bpid to new_bpid (preserving .size), and re-invokes
+set_ext_buffer_pools() to rewrite the BMI bpool registers from the
+mutated cfg. The caller is REQUIRED to have already fman_port_disable()d
+the RX port (the BMI must be quiesced before its pool registers are
+rewritten) and to fman_port_enable() it afterwards -- exactly the
+disable/enable bracket the XSK detach sequence already establishes. The
+function validates: non-NULL port, RX port type, old_bpid actually
+present in the table (else -ENOENT, so a mis-paired call can never
+silently corrupt an unrelated pool slot), and new_bpid != old_bpid
+(else -EALREADY, idempotent no-op rejection).
+
+Why land it dormant now, with NO caller:
+
+  - It is the last *mechanism* of the three-mechanism plan to land. After
+    0093 (Recognise), 0094 (reProgram read), 0095 (FILL guard), 0096
+    (Recover read), every read side plus the FILL-ring crash guard is in
+    tree; this adds the reviewable WRITE body without firing it. The
+    productive call-site wiring (invoke fman_port_set_rx_bpool() inside
+    the af_xdp_pool attach disable/enable bracket, then flip the dormant
+    0096 Recover branch to xsk_buff/xdp_do_redirect()) becomes the FINAL
+    sub-increment, authored ONLY after spec sec 6.1.12's gate counters
+    are DUT-confirmed non-zero under a real ZC producer.
+
+  - It mirrors the exact cadence every prior offload primitive followed:
+    fman_hm_node_install (0090) and fman_policer_install (0091) shipped
+    as exported entry points with no productive caller before their
+    bodies (0099/0100) and consumers landed. A reviewable, compiled,
+    EXPORT_SYMBOL_GPL'd primitive with zero call sites is the standard
+    de-risking step here.
+
+Why this is byte-identical to mainline on every flavor: the symbol is
+exported but called by nobody in this patch, so no FMan register is ever
+written by it. The RX/TX datapaths, the af_xdp_pool attach/detach paths,
+and fman_port_init() are all untouched. `nm` will show the export; the
+running kernel behaves exactly as the 0101 build does.
+
+Spec sec 6.1.7 true-ZC mechanism 3 (reProgram, WRITE primitive) +
+sec 6.1.11 / sec 6.1.12.
+
+Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 255360d..47538e1 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -962,6 +962,84 @@ static int set_ext_buffer_pools(struct fman_port *port)
+ 	return 0;
+ }
+ 
++/**
++ * fman_port_set_rx_bpool() - reprogram a live RX port's primary BMan pool ID
++ * @port: the FMan RX port (mac_dev->port[RX])
++ * @old_bpid: the BPID currently programmed into the port's bpool table
++ *  (normally the kernel page-pool BPID, priv->dpaa_bp->bpid)
++ * @new_bpid: the BPID to swap in (normally the dedicated XSK pool BPID,
++ *  priv->xsk_bpid[band])
++ *
++ * M3-3 step 7 sub-increment 4 (patch 0102): the WRITE half of mechanism 3
++ * (reProgram) in the true-ZC RX plan (spec sec 6.1.7). Mutates the port's
++ * cached external-buffer-pool table (port->cfg->ext_buf_pools.ext_buf_pool[])
++ * by replacing the entry whose .id == @old_bpid with @new_bpid (the .size is
++ * preserved), then re-runs set_ext_buffer_pools() to rewrite the BMI bpool
++ * registers. After this, FMan RX BMI DMAs ingress frames into @new_bpid.
++ *
++ * CONTRACT: the caller MUST have already fman_port_disable()d @port before
++ * calling this (the BMI must be quiesced before its pool registers are
++ * rewritten) and MUST fman_port_enable() it afterwards -- the same
++ * disable/enable bracket the XSK pool detach sequence (spec sec 6.1.1)
++ * already establishes around fman_port_disable(rxp).
++ *
++ * Returns 0 on success, -EINVAL on a NULL or non-RX port, -ENOENT if
++ * @old_bpid is not present in the port's pool table, -EALREADY if
++ * @new_bpid == @old_bpid, or the set_ext_buffer_pools() error otherwise.
++ *
++ * DORMANT as of patch 0102 -- exported but with no caller; the productive
++ * af_xdp_pool attach-time call site is the gated final sub-increment
++ * (spec sec 6.1.12).
++ */
++int fman_port_set_rx_bpool(struct fman_port *port, u8 old_bpid, u8 new_bpid)
++{
++	struct fman_ext_pools *ext_pools;
++	int i, slot = -1, err;
++
++	if (!port || port->port_type != FMAN_PORT_TYPE_RX)
++		return -EINVAL;
++
++	if (new_bpid == old_bpid)
++		return -EALREADY;
++
++	ext_pools = &port->cfg->ext_buf_pools;
++
++	for (i = 0; i < ext_pools->num_of_pools_used; i++) {
++		if (ext_pools->ext_buf_pool[i].id == old_bpid) {
++			slot = i;
++			break;
++		}
++	}
++
++	if (slot < 0) {
++		dev_err(port->dev,
++			"%s: old_bpid %u not present in RX pool table\n",
++			__func__, old_bpid);
++		return -ENOENT;
++	}
++
++	ext_pools->ext_buf_pool[slot].id = new_bpid;
++
++	err = set_ext_buffer_pools(port);
++	if (err) {
++		/* roll the cached table back so a retry sees a consistent
++		 * state; the BMI registers were not committed on the failure
++		 * path of set_bpools().
++		 */
++		ext_pools->ext_buf_pool[slot].id = old_bpid;
++		dev_err(port->dev,
++			"%s: set_ext_buffer_pools() failed (%d), bpid reverted\n",
++			__func__, err);
++		return err;
++	}
++
++	dev_info(port->dev,
++		 "fman_port: RX primary bpool reprogrammed %u -> %u\n",
++		 old_bpid, new_bpid);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_port_set_rx_bpool);
++
+ static int init_low_level_driver(struct fman_port *port)
+ {
+ 	struct fman_port_cfg *cfg = port->cfg;
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.h b/drivers/net/ethernet/freescale/fman/fman_port.h
+index 129dcc3..cc39538 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.h
++++ b/drivers/net/ethernet/freescale/fman/fman_port.h
+@@ -124,6 +124,15 @@ int fman_port_enable(struct fman_port *port);
+ 
+ u32 fman_port_get_qman_channel_id(struct fman_port *port);
+ 
++/* M3-3 step 7 sub-increment 4 (patch 0102): reprogram a live RX port's
++ * primary BMan pool ID (the WRITE half of true-ZC mechanism 3, spec
++ * sec 6.1.7). The caller MUST fman_port_disable() the port first and
++ * fman_port_enable() it afterwards. DORMANT as of 0102 (exported, no
++ * caller); the productive af_xdp_pool attach call site is the gated
++ * final sub-increment (spec sec 6.1.12).
++ */
++int fman_port_set_rx_bpool(struct fman_port *port, u8 old_bpid, u8 new_bpid);
++
+ int fman_port_get_hash_result_offset(struct fman_port *port, u32 *offset);
+ 
+ int fman_port_get_tstamp(struct fman_port *port, const void *data, u64 *tstamp);
