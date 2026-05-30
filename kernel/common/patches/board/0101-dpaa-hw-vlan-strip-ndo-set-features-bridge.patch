@@ -27,12 +27,16 @@ What this adds
   0->1 transition of NETIF_F_HW_VLAN_CTAG_RX it installs a single-op HM
   node {num_ops=1, ops[0].type=FMAN_HM_OP_VLAN_STRIP} and stores the
   handle; on 1->0 it destroys it. struct fman * and the FMan port id are
-  resolved exactly as the caps probe does: fman_bind(mac_dev->fman_dev)
-  and fman_mac_get_hw_id(mac_dev). No-op when the requested state already
-  matches. Wired into dpaa_ops next to .ndo_xsk_wakeup.
+  resolved with existing in-tree APIs: fman_bind(mac_dev->fman_dev) for
+  the struct fman *, and fman_port_get_qman_channel_id(mac_dev->port[RX])
+  (the same getter the driver already uses in dpaa_fq_setup()) for the
+  opaque per-port id the install body forwards to fman_pcd_hm_install().
+  No-op when the requested state already matches. Wired into dpaa_ops next
+  to .ndo_xsk_wakeup.
 
 No new includes: dpaa_eth.c already pulls in dpaa_fman_caps.h (the HM API
-+ struct fman_hm_spec), fman.h (fman_bind), and mac.h (fman_mac_get_hw_id).
++ struct fman_hm_spec), fman.h (fman_bind), fman_port.h
+(fman_port_get_qman_channel_id), and mac.h (struct mac_device, RX enum).
 
 Byte-identical to mainline on boards without HM caps. Spec sec 5.5.
 
@@ -60,7 +64,7 @@ index dcfd075..6505142 100644
  	/* The kernels enables GSO automatically, if we declare NETIF_F_SG.
  	 * For conformity, we'll still declare GSO explicitly.
  	 */
-@@ -3429,6 +3440,66 @@ static int dpaa_xsk_wakeup(struct net_device *ndev, u32 queue_id, u32 flags)
+@@ -3429,6 +3440,67 @@ static int dpaa_xsk_wakeup(struct net_device *ndev, u32 queue_id, u32 flags)
  	return ret;
  }
  
@@ -70,9 +74,10 @@ index dcfd075..6505142 100644
 + * (e.g. 'ethtool -K ethX rxvlan on/off', driven by the VyOS
 + * 'set interfaces ethernet ethX hw-offload vlan-strip' CLI), install or
 + * destroy a single-op FMan HM node that strips one VLAN tag at L2
-+ * offset 12.  The struct fman * and FMan port id are resolved the same
-+ * way the caps probe does: fman_bind(priv->mac_dev->fman_dev) and
-+ * fman_mac_get_hw_id(priv->mac_dev).  The returned HMTD MURAM offset is
++ * offset 12.  The struct fman * and FMan port id are resolved with
++ * existing in-tree APIs: fman_bind(priv->mac_dev->fman_dev) and
++ * fman_port_get_qman_channel_id(priv->mac_dev->port[RX]).  The returned
++ * HMTD MURAM offset is
 + * stashed in priv->hm_vlan_strip_handle (0 = not installed).
 + *
 + * Fail-soft: on a board without FMAN_CAP_HM_NODES the feature was never
@@ -99,7 +104,7 @@ index dcfd075..6505142 100644
 +fm = fman_bind(priv->mac_dev->fman_dev);
 +if (!fm)
 +return -ENODEV;
-+port_id = (u8)fman_mac_get_hw_id(priv->mac_dev);
++port_id = (u8)fman_port_get_qman_channel_id(priv->mac_dev->port[RX]);
 +
 +if (want_strip) {
 +struct fman_hm_spec spec = {
