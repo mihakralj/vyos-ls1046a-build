@@ -314,6 +314,14 @@ cp "$BOARD_PATCH_DIR/0097-fman-pcd-keygen.patch"                "$KERNEL_PATCHES
 cp "$BOARD_PATCH_DIR/0098-fman-pcd-cc-static-install.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0099-fman-pcd-hm-install.patch"            "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0100-fman-pcd-plcr-install.patch"          "$KERNEL_PATCHES/"
+# 0101 (M3-3c bridge): wire NETIF_F_HW_VLAN_CTAG_RX -> fman_hm_node_install via
+# a new dpaa_set_features() .ndo_set_features handler in dpaa_eth.c, so the
+# dormant HM install body (0099) is reachable from userspace (ethtool -K /
+# the vyos-1x 'set interfaces ethernet ethX hw-offload vlan-strip' CLI).
+# Depends on 0099 (fman_hm_node_install productive) + 0090a (struct fman_hm_spec)
+# + 0086a (fman_hm_caps_supported), so it MUST sort after 0100. Common
+# (built-in) for default/vpp/ask. Spec sec 5.5.
+cp "$BOARD_PATCH_DIR/0101-dpaa-hw-vlan-strip-ndo-set-features-bridge.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
