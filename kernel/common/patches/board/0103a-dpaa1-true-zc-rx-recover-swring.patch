@@ -69,6 +69,17 @@ change is xsk_zc_recover_lookup ticking up by a small fixed amount per
 XDP_ZEROCOPY attach (the self-test), never growing with traffic until
 0103b lands.
 
+The 21st xsk_* ethtool counter is surfaced by extending the SEPARATE
+string table dpaa_stats_xsk[] in dpaa_ethtool.c (the value-collection
+loop is already ARRAY_SIZE(dpaa_stats_xsk)-driven and memcpy's the
+contiguous u64 block at &priv->xsk_pool_attach_ok, so the new
+xsk_zc_recover_lookup field -- placed immediately after
+xsk_zc_rx_recovered in dpaa_eth.h, the 21st contiguous u64 -- maps
+1:1 to the new string). Without this the field exists and is bumped
+but ethtool -S never lists it (the get-strings/get-stats walk stops at
+the 20-entry table). dpaa_get_sset_count() already adds
+DPAA_STATS_XSK_LEN so the count stays consistent.
+
 Native cross-compile verified: af_xdp_pool_main.o (CC [M]) and dpaa_eth.o
 both build clean with LOCALVERSION=-vyos, zero warnings, no
 -Wunused-function on the new static helpers.
@@ -242,3 +253,19 @@ index d9b782f..eef321a 100644
  /* M3-3b (patch 0086): FMan PCD capability bitmask snapshot taken
   * at probe via dpaa_fman_get_caps(). 0 on mainline ucode 106 ->
   * all fman_cc_tree_/fman_hm_/fman_pol_ helpers short-circuit
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+index dbc3720..4ac4583 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+@@ -75,6 +75,7 @@ static char dpaa_stats_xsk[][ETH_GSTRING_LEN] = {
+ "xsk_zc_rx_armed",
+ "xsk_fill_guard_block",
+ "xsk_zc_rx_recovered",
++"xsk_zc_recover_lookup",
+ };
+ 
+ /* HW-offload (PCD-cap) counters (M3-3b / patch 0086). Order MUST match
+
+-- 
+2.43.0
+
