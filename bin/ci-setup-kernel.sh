@@ -333,6 +333,15 @@ cp "$BOARD_PATCH_DIR/0102-fman-port-set-rx-bpool-primitive.patch" "$KERNEL_PATCH
 # primitive). Self-tested at attach; byte-identical datapath to 0102.
 # Spec sec 6.1.15 (corrected) / 6.1.16 (API gap).
 cp "$BOARD_PATCH_DIR/0103a-dpaa1-true-zc-rx-recover-swring.patch" "$KERNEL_PATCHES/"
+# 0103b: PRODUCTIVE true-ZC RX -- the INSEPARABLE reprogram-WRITE +
+# Recover-redirect pair (M3-3 step 7 sub-increment 4b). Fires the FMan
+# RX-port BPID swap (fman_port_set_rx_bpool, 0102) at attach AND wires the
+# rx_hook (rx_default_dqrr dispatch) that Recovers the xdp_buff from the bare
+# chunk DMA cookie via the 0103a reverse map and xdp_do_redirect()s it into
+# the XSKMAP (xsk_zc_rx_redirect, 22nd xsk_* counter). Both halves MUST land
+# together (firing either alone -> sec 6.1.8 crash class). Byte-identical on
+# default/vpp (only reached on XDP_ZEROCOPY bind). Spec sec 6.1.16.
+cp "$BOARD_PATCH_DIR/0103b-dpaa1-true-zc-rx-reprogram-redirect.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"

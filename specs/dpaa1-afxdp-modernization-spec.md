@@ -4,7 +4,7 @@
 **Kernel base:** Linux 6.18.x mainline (VyOS rolling release)
 **Silicon:** NXP LS1046A — Cortex-A72 ×4 (2 clusters of 2 over CCI-400), FMan v3 Rev>1, QMan, BMan, MURAM (384 KiB), PAMU, SEC 5.4 (CAAM), CEETM, SerDes/XFI PCS, CoreNet
 **FMan microcode:** package `fsl_fman_ucode_ls1046a_r1.0_210.x.bin` (NXP LSDK, U-Boot loads from SPI `mtd4`)
-**Document version:** v5.8, 2026-05-30 (consolidation pass — passed-gate §5.4–5.6 and §6.1.6–6.1.16 prose collapsed to terse anchors; full DUT detail lives in Qdrant `topic=dpaa1-afxdp-spec-milestone-archive`. State of record: `0103a` dormant reverse-map landed/DUT-validated; productive `0103b` is the only outstanding step-7 work)
+**Document version:** v5.9, 2026-05-30 (productive `0103b` landed — the INSEPARABLE reprogram-WRITE + Recover-redirect pair, host compile-verified, §6.1.17; full DUT detail lives in Qdrant `topic=dpaa1-afxdp-spec-milestone-archive`. State of record: M3-3 step 7 code-complete on host; awaits DUT validation under a live `XDP_ZEROCOPY` producer)
 **Supersedes:** v5.7, v5.6, v5.5, v5.4, v5.3, v5.2, v5.1, v5.0, v4.x, v3.0, v2.x, v0.9
 
 ---
@@ -683,9 +683,25 @@ Sub-increments 1–3 (Recognise/Recover read-side counters `0093`–`0096`) are 
 
 **Why dormant with no consumer.** Same cadence as `fman_hm_node_install` (`0090`), `fman_policer_install` (`0091`), and `fman_port_set_rx_bpool` (`0102`): the infrastructure ships exported/wired but **no FMan register is written and no live packet path changed** — the running kernel is bit-identical to the `0102` build on every flavor. Validation: `af_xdp_pool_main.o` compiles `CC [M]` clean (both static helpers referenced via the self-test → no `-Wunused-function`), `dpaa_eth.o` clean, `git apply --3way --check` passes on both `dpaa_eth.h` and `af_xdp_pool_main.c` against the `0102` base. CI `cp`-line wired in `bin/ci-setup-kernel.sh` (board patches are not globbed — each needs an explicit `cp`).
 
-**Deferred `0103b`.** The coupled reprogram-WRITE (`fman_port_set_rx_bpool()` productive call) + Recover-redirect (record-on-FILL into `xsk_chunk_map[]`, lookup-on-RX, `xdp_do_redirect()`) stays gated on the §6.1.12 DUT preconditions. Firing the WRITE before Recover works is a guaranteed §6.1.8 crash, so the two halves land together or not at all.
+**Productive `0103b` — LANDED (compile-verified, host) 2026-05-30, §6.1.17.** The coupled reprogram-WRITE + Recover-redirect now ships as patch `0103b`. Entry gate (§6.1.12) was DUT-MET first (`xsk_zc_rx_armed=2`, `xsk_fill_guard_block=0` under 30s load).
 
 > Host validation detail (mixed-indentation anchor map: `dpaa_eth.h` struct fields leading-TAB, counter block + attach arm-block column-0, attach `kcalloc` anchor TAB-indented at line 214, detach free anchor column-0 at lines 535–536), the `apply_0103a.py` in-place editor, and the work-tree `CONFIG_XDP_SOCKETS`+`CONFIG_DPAA_AF_XDP_POOL=m` compile-verify note: Qdrant `topic=dpaa1-afxdp-spec-milestone-archive`.
+
+#### 6.1.17 True-ZC RX sub-increment 4b — productive reprogram-WRITE + Recover-redirect (patch `0103b`) — 2026-05-30
+
+**The INSEPARABLE productive pair** that flips DPAA1 AF_XDP RX from copy-mode (`0089` `--xskmap`) to true zero-copy. Both halves are wired in one patch because firing either alone guarantees the §6.1.8 hardware-crash class (FMan DMAs into XSK chunks that `build_skb()` consumes as page-pool pages → `xp_alloc` free-list corruption / `dcache_clean_poc` fault / soft-lockup).
+
+**reProgram-WRITE half (attach).** Inside the existing arm/observe block of `af_xdp_pool_xsk_pool_attach()` (gated on `priv->dpaa_bp && priv->xsk_bpid[queue_id] != priv->dpaa_bp->bpid`), after bumping `xsk_zc_rx_armed`, the FMan RX port's primary BMan pool is swapped from the kernel page-pool BPID to the dedicated XSK BPID: `fman_port_disable(rxp)` → `fman_port_set_rx_bpool(rxp, (u8)priv->dpaa_bp->bpid, (u8)priv->xsk_bpid[queue_id])` (the `0102` `EXPORT_SYMBOL_GPL` primitive, whose contract REQUIRES the port be disabled across the write) → `fman_port_enable(rxp)`. On failure the port rolls back enabled (keeps the kernel page-pool BPID), `xsk_pool_attach_fail` bumps, and the band stays armed-but-not-reprogrammed (`xsk_zc_eligible` stays 0, the success oracle).
+
+**Recover-redirect half (`af_xdp_pool_rx_hook`, dispatched from `rx_default_dqrr` via `priv->qmgmt_ops->rx_hook`, model = `tx_conf_zc`).** Because 6.18.31 has no `xsk_buff_recv()` (§6.1.16), the hook consumes the `0103a` reverse-map infrastructure made productive here: **Recognise** (`fd->bpid == priv->xsk_bpid[band]`) → **Recover** (`dpaa_xsk_chunk_head_from_dma()` O(log n) `bsearch` over the sorted per-band `dma_addr_t → head-index` array built at attach by `dpaa_xsk_build_dma_index()`, then `dpaa_xsk_chunk_lookup()` reads the `xdp_buff*` recorded at FILL-release) → `xsk_buff_set_size()` + `xsk_buff_dma_sync_for_cpu()` → `bpf_prog_run_xdp()` → `xdp_do_redirect()` into the XSKMAP (bumps the **22nd** `xsk_*` counter `xsk_zc_rx_redirect`). Any miss (no reverse-map hit, no XDP prog, redirect failure, `XDP_PASS`/`TX`/`ABORTED`) returns `false` → unchanged skbuf path; NEVER frees or double-handles the chunk.
+
+**Design A (head-index reverse map).** Keyed by the XSK pool head-index `(xskb - pool->heads)`, with a sorted `dma_addr_t → head-index` `bsearch` array built once at attach (after `xsk_pool_dma_map()` populates every `pool->heads[i].dma`). Correct for BOTH aligned-contiguous AND fragmented UMEMs — no subtract+shift contiguity assumption (the §6.1.8 crash class). `dpaa_xsk_chunk_record()` runs at every FILL-release (attach seed loop + `napi_refill`); the dma-index array + record array are both `kfree`d in detach.
+
+**Forward-reference fix.** The productive `af_xdp_pool_rx_hook` was relocated (no body change) from the original top-of-file stub position to immediately BEFORE `af_xdp_pool_xsk_pool_attach`, AFTER its helpers (`dpaa_xsk_chunk_lookup`, `dpaa_xsk_chunk_head_from_dma`, `dpaa_xsk_build_dma_index`) — the C single-pass compiler needs those definitions first, and the hook still precedes the `qmgmt_ops` table that names it. Without the move: `implicit declaration` + `conflicting types`.
+
+**Byte-identical on default/vpp.** The `af_xdp_pool` attach path is only reached on `XDP_ZEROCOPY` bind (never on default flavor); until the reprogram-WRITE runs no FD carries the XSK BPID, so the rx_hook returns `false` for every frame.
+
+**Host validation.** `dpaa_eth.o`, `dpaa_ethtool.o`, `af_xdp_pool_main.o` compile `CC [M]` clean (0 warn/0 err, native arm64, `LOCALVERSION=-vyos`). New undefined refs in `af_xdp_pool_main.o`: `xdp_do_redirect`, `fman_port_set_rx_bpool`, `fman_port_disable`, `fman_port_enable`, `bsearch` (`bpf_prog_run_xdp`/`xsk_buff_set_size` inlined). Comment-terminator hazard grep CLEAN. `git apply --3way --check` passes on all 4 files against the `0103a` base. CI `cp`-line wired in `bin/ci-setup-kernel.sh` between `0103a` and `101-sfp` (board patches are not globbed). NO commit/push (staged for review per AGENTS.md). DUT gate-reader `/usr/local/bin/xsk-zc-check` will read `xsk_zc_rx_redirect` growing post-bind as the productive-ZC success oracle.
 
 ### 6.2 ASK-only — Dynamic CC tree, HC reconfig, nft offload bridge
 
@@ -957,4 +973,26 @@ If/when Phase 4 lands, it reuses:
 - `fman_hm_node_install()` (§5.5) per-VSP HM nodes.
 - `fman_policer_install()` (§5.6) per-VSP profiles.
 - SEC FQ protected-set discipline (ASK2 spec).
-- ucode-210 "Disable BMI single port" HC opcode to avoid full `fman_port_disable()` link bounce on per-VSP detach.
+
+## Appendix B — Future enhancement (deferred, HIGH-RISK): 64KB-page kernel (`CONFIG_ARM64_64K_PAGES=y`)
+
+**Status: NOT adopted. Documented here as a future enhancement only. Do not flip as a default.**
+
+### Idea
+Switch the arm64 kernel from the stock 4KB page size to 64KB pages. This raises the AF_XDP UMEM `chunk_size` cap from `PAGE_SIZE`=4096 to 65536, which would let VPP use ~16KB chunks and, in principle, lift the AF_XDP MTU to a full 9578 with zero driver-level complexity. The cost is a system-wide memory-footprint increase from internal fragmentation (every sub-page allocation rounds up to 64KB).
+
+### Why it is the "obvious" fix for the UMEM chunk-cap block
+On the current 4KB-page kernel, mainline 6.18 `net/xdp/xdp_umem.c::xdp_umem_reg()` rejects `chunk_size > PAGE_SIZE` in **both** aligned and unaligned mode (`XDP_UMEM_UNALIGNED_CHUNK_FLAG` does **not** lift the cap). The achievable RX frame size is therefore `4096 − XDP_PACKET_HEADROOM(256) = 3840`. This is the original M2 attach-gate blocker. 64KB pages (resolution **path b**) would remove the cap outright. The project instead took the least-invasive **path a**: lower `DPAA1_MIN_UMEM_CHUNK` 4096→3840 (commit `8f2d12e`, spec v4.3), which fits the §1.2 MTU=3290 hard cap with headroom. Path b was deliberately rejected for the reasons below.
+
+### Why it is HIGH-RISK on this platform (VyOS / LS1046A / 8GB RAM)
+1. **The 9578-MTU benefit is not actually deliverable today.** Two unrelated limits bind first: (a) `fsl_dpaa_mac` enforces a hard **XDP MTU limit of 3290** independent of UMEM chunk size, and (b) the validated SFP+ test path is **switch-capped at 1500** (no jumbo). So 64KB pages alone yield no usable jumbo AF_XDP throughput without *also* lifting the driver's 3290 XDP cap and provisioning a jumbo-capable switch.
+2. **Memory footprint on 8GB is non-linear and collides with VPP.** 16× allocation granularity inflates page-cache, slab, per-skb, and especially DPAA1 BMan pool seeds (8192-buffer batches per XSK queue), alongside VPP's ~416MB of 2MB hugepages — on a box already near the MURAM/MTU/hugepage edge.
+3. **kexec + hugepage fragility.** VyOS triggers a one-time kexec to apply hugepages when VPP is configured; kexec on DPAA1/QBMan is already delicate (required the mainline `bman_requires_cleanup()` fix). A 64KB-page kernel through that path is untested here.
+4. **DTB / DPAA1 reserved-memory + booti-only boot.** Reserved-memory nodes and U-Boot FMan-firmware injection assume 4KB granularity; `bootefi`/GRUB already OOMs on DPAA1 reserved-memory nodes and `booti` is the only working path. 64KB-alignment of reserved regions risks reopening that.
+5. **Silent config-merge breakage.** `CONFIG_ARM64_64K_PAGES` ripples through `PAGE_SHIFT`, `FORCE_MAX_ZONEORDER`, THP, etc. across `vyos_defconfig` + the 9 `kernel/common/kernel-config/*.config` fragments. Per AGENTS.md, inapplicable kernel symbols are **silently ignored** — breakage produces no error.
+6. **Invalidates the validated AF_XDP stack.** The entire `0068`→`0103a+` patch series, the `DPAA1_MIN_UMEM_CHUNK=3840` constant, the `0075a` frame-size validator, and every DUT-validated milestone (M0–M3-3) were proven on the 4KB-page kernel. Switching to 64KB invalidates all of them and forces a full re-run of the bind/churn/iperf3 gate suite.
+
+### Pre-conditions before this could even be reconsidered
+- Lift the `fsl_dpaa_mac` 3290 XDP-MTU limit (driver work).
+- Provision a jumbo-capable switch path end-to-end.
+- Gate it as a **build-time experimental flavor**, never a default page-size flip, so the 4KB-page default (and all M0–M3-3 validation) remains intact.
