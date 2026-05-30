@@ -561,18 +561,43 @@ for package in $packages; do
         cp "$built" "$KERNEL_CACHE_STAGE/$(basename "$built")"
         cached_count=$((cached_count + 1))
       done
-      # Mainline DTB (default/vpp ship this — ask flavor is excluded from cache)
+      # DTB for the cache. The cache-HIT replay path (above) REQUIRES a
+      # mono-gateway-dk.dtb in the entry and FATALs without it. Prefer the
+      # in-tree-built mainline DTB ($MONO_DTB); but when the in-tree `make
+      # freescale/mono-gateway-dk.dtb` failed (rc=2 — bindeb-pkg wipes
+      # .config after packaging) the DTB-selection block above already fell
+      # back to the pre-compiled board/dtb/mono-gw.dtb and copied it to
+      # $INCLUDES_BIN/mono-gw.dtb. Cache THAT shipped DTB so the entry is
+      # always self-consistent. Without this fallback, a DTB-build failure
+      # produced a poisoned cache entry (.debs but no DTB) that the next run
+      # HIT and FATAL'd on — a self-perpetuating loop (CI runs 26693861376 /
+      # 26693929733 / 26694069303, 2026-05-30).
+      DTB_FOR_CACHE=""
       if [ -n "${MONO_DTB:-}" ] && [ -f "$MONO_DTB" ]; then
-        cp "$MONO_DTB" "$KERNEL_CACHE_STAGE/mono-gateway-dk.dtb"
+        DTB_FOR_CACHE="$MONO_DTB"
+      elif [ -f "${INCLUDES_BIN:-}/mono-gw.dtb" ]; then
+        DTB_FOR_CACHE="$INCLUDES_BIN/mono-gw.dtb"
+      fi
+      dtb_staged=0
+      if [ -n "$DTB_FOR_CACHE" ]; then
+        cp "$DTB_FOR_CACHE" "$KERNEL_CACHE_STAGE/mono-gateway-dk.dtb"
+        dtb_staged=1
         cached_count=$((cached_count + 1))
       fi
-      if [ "$cached_count" -gt 0 ]; then
+      # INVARIANT: never create a cache entry without a DTB. The replay path
+      # FATALs on a DTB-less entry, so a poisoned entry blocks every
+      # subsequent run until manually rm -rf'd. Require BOTH .debs AND a DTB.
+      if [ "$cached_count" -gt 0 ] && [ "$dtb_staged" -eq 1 ]; then
         mv "$KERNEL_CACHE_STAGE" "$KERNEL_CACHE_NEW_DIR"
         echo "### Cached $cached_count linux-kernel artifact(s) under key $KERNEL_CACHE_KEY"
         ls -lh "$KERNEL_CACHE_NEW_DIR"/ 2>/dev/null || true
       else
         rm -rf "$KERNEL_CACHE_STAGE"
-        echo "### WARNING: linux-kernel build produced nothing cacheable under key $KERNEL_CACHE_KEY"
+        if [ "$dtb_staged" -eq 0 ]; then
+          echo "### WARNING: refusing to cache linux-kernel under key $KERNEL_CACHE_KEY — no DTB available to stage (would poison the cache; replay path FATALs without a DTB)"
+        else
+          echo "### WARNING: linux-kernel build produced nothing cacheable under key $KERNEL_CACHE_KEY"
+        fi
       fi
     fi
   fi
