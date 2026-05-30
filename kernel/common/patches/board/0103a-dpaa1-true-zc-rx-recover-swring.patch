@@ -1,0 +1,244 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Fri, 30 May 2026 04:26:00 +0000
+Subject: [PATCH] dpaa/af_xdp_pool: add dormant true-ZC RX Recover sw-ring
+ reverse-map (M3-3 step 7 sub-increment 4a, infrastructure, no datapath
+ consumer)
+
+M3-3 step 7 (true zero-copy RX, spec sec 6.1.7) couples two inseparable
+write-side mechanisms that must land together (sub-increment 4b / patch
+0103b): the reProgram WRITE -- fman_port_set_rx_bpool() from patch 0102 --
+that points the live FMan RX port at the dedicated XSK BMan pool, and the
+Recover redirect that turns each XSK-pool-sourced FD into an
+xdp_do_redirect() into the AF_XDP socket. Firing the reProgram WITHOUT a
+working Recover is a guaranteed crash (spec sec 6.1.8 class: list_add
+free-list corruption in xp_alloc(), dcache_clean_poc paging fault, 52 s
+soft-lockup) because FMan would DMA into XSK chunks that the build_skb()
+skbuf path then consumes as page-pool pages.
+
+The Recover redirect needs to turn a BMan-returned chunk DMA cookie
+(qm_fd_addr(fd), the only datum available at rx_default_dqrr) back into the
+originating struct xdp_buff *. The spec sec 6.1.15 prose named
+xsk_buff_recv() as the API for this -- but an API survey of kernel 6.18.31
+confirms NO such primitive exists (`grep -rn xsk_buff_recv include/net/
+include/net/xdp/` = zero hits). The present xsk_buff_* surface is
+xsk_buff_alloc / xsk_buff_alloc_batch / xsk_buff_set_size /
+xsk_buff_dma_sync_for_cpu / xsk_buff_xdp_get_dma / xsk_buff_free /
+xsk_pool_dma_map -- there is no retrieve-by-dma call. This is the same
+class of gap as the earlier 0075b xsk_pool_get_nentries() non-existence
+finding (spec sec 6.1.16).
+
+Mainline ZC drivers (i40e/ice/mlx5) sidestep this by keeping a per-RX-ring
+software array of the xsk_buff_alloc() handles indexed by descriptor, and
+retrieving the handle at RX. DPAA1's FILL -> BMan-release path
+(af_xdp_pool_main.c) currently calls xsk_buff_alloc_batch() then IMMEDIATELY
+extracts xsk_buff_xdp_get_dma(handle) and bman_release()es the raw DMA
+address -- the xdp_buff * handle is DISCARDED. There is no way to recover
+it at RX without first preserving it.
+
+This patch (0103a) builds that missing infrastructure -- and ONLY the
+infrastructure -- so the hardware-risky coupled write (0103b) becomes a
+small, reviewable, single-purpose follow-up:
+
+  * struct dpaa_priv gains xsk_chunk_map[DPAA1_XSK_MAX_QBANDS] (a per-qband
+    flat array of struct xdp_buff * keyed by UMEM chunk index, O(1) lookup,
+    no hash collisions) and xsk_chunk_map_len[] (allocated slot count;
+    0 = dormant).
+
+  * Two static helpers, dpaa_xsk_chunk_record() and dpaa_xsk_chunk_lookup(),
+    perform the record (chunk_idx -> xdp_buff) and lookup with bounds and
+    NULL-map guards. _lookup() bumps a new diagnostic counter
+    xsk_zc_recover_lookup (21st xsk_* line) on a successful resolve.
+
+  * attach allocates the map (kcalloc, non-fatal on failure -- the map
+    stays NULL and both helpers early-return, leaving the datapath on the
+    unchanged skbuf path, exactly 0102); detach frees it.
+
+  * A one-shot self-test in attach records a stack sentinel at slot 0,
+    looks it back, asserts equality, and clears it -- proving the
+    record/lookup round-trip and exercising both static helpers (so no
+    -Wunused-function) WITHOUT touching any hardware or live chunk.
+
+CRITICALLY this patch adds NO datapath caller: the FILL-release path does
+NOT yet record into the map, and rx_default_dqrr does NOT yet consult it.
+The reProgram WRITE stays unfired. Per the dormant-primitive cadence used
+for every prior offload primitive (fman_hm_node_install 0090,
+fman_policer_install 0091, fman_port_set_rx_bpool 0102), the running kernel
+is byte-identical to the 0102 build on every flavor -- the only observable
+change is xsk_zc_recover_lookup ticking up by a small fixed amount per
+XDP_ZEROCOPY attach (the self-test), never growing with traffic until
+0103b lands.
+
+Native cross-compile verified: af_xdp_pool_main.o (CC [M]) and dpaa_eth.o
+both build clean with LOCALVERSION=-vyos, zero warnings, no
+-Wunused-function on the new static helpers.
+
+Spec: specs/dpaa1-afxdp-modernization-spec.md sec 6.1.15 (corrected),
+sec 6.1.16 (API gap), sub-increment 4a.
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+index dcb69be..0a5fa49 100644
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -26,6 +26,7 @@
+ #include <linux/init.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
++#include <linux/slab.h>
+ #include <linux/types.h>
+ #include <linux/errno.h>
+ #include <linux/printk.h>
+@@ -111,6 +112,40 @@ return false;
+  *   patch 0075b because it requires xsk_buff_alloc_batch() which only
+  *   makes sense once we own the pool (post-attach).
+  */
++/*
++ * dpaa_xsk_chunk_record / dpaa_xsk_chunk_lookup (patch 0103a)
++ *
++ * DORMANT Recover sw-ring reverse-map helpers.  0103b will call
++ * _record() at FILL-release time (preserving the xdp_buff handle that
++ * the BMan-release path currently discards) and _lookup() at RX to turn
++ * a chunk DMA cookie back into its xdp_buff for xsk_buff_set_size() +
++ * xsk_buff_dma_sync_for_cpu() + xdp_do_redirect().  Until 0103b these
++ * are exercised ONLY by the one-shot self-test in attach (below); the
++ * datapath never calls them, so behaviour is byte-identical to 0102.
++ */
++static void dpaa_xsk_chunk_record(struct dpaa_priv *priv, u16 band,
++			  u32 chunk_idx, struct xdp_buff *xdp)
++{
++	if (unlikely(!priv->xsk_chunk_map[band] ||
++		     chunk_idx >= priv->xsk_chunk_map_len[band]))
++		return;
++	priv->xsk_chunk_map[band][chunk_idx] = xdp;
++}
++
++static struct xdp_buff *dpaa_xsk_chunk_lookup(struct dpaa_priv *priv,
++				      u16 band, u32 chunk_idx)
++{
++	struct xdp_buff *xdp;
++
++	if (unlikely(!priv->xsk_chunk_map[band] ||
++		     chunk_idx >= priv->xsk_chunk_map_len[band]))
++		return NULL;
++	xdp = priv->xsk_chunk_map[band][chunk_idx];
++	if (xdp)
++		priv->xsk_zc_recover_lookup++;
++	return xdp;
++}
++
+ static int af_xdp_pool_xsk_pool_attach(struct dpaa_priv *priv,
+        struct xsk_buff_pool *pool,
+        u16 queue_id)
+@@ -213,6 +248,18 @@ ret = xsk_pool_dma_map(pool, priv->rx_dma_dev,
+ 	priv->xsk_bpid[queue_id]  = bman_get_bpid(bpool);
+ 	priv->xsk_bpool[queue_id] = bpool;
+ 
++	/* 0103a: allocate the DORMANT Recover reverse-map for this qband.
++	 * One xdp_buff* slot per initial-seed chunk.  Failure is non-fatal
++	 * -- the map stays NULL and _record/_lookup early-return, leaving
++	 * the datapath on the unchanged skbuf path (exactly 0102).  Freed
++	 * in detach.
++	 */
++	priv->xsk_chunk_map[queue_id] =
++		kcalloc(DPAA1_XSK_INITIAL_SEED, sizeof(struct xdp_buff *),
++			GFP_KERNEL);
++	priv->xsk_chunk_map_len[queue_id] =
++		priv->xsk_chunk_map[queue_id] ? DPAA1_XSK_INITIAL_SEED : 0;
++
+ 	/*
+ 	 * Step 4: Seed the new BMan pool from the XSK fill ring.
+ 	 *
+@@ -351,6 +398,25 @@ dev_info(priv->net_dev->dev.parent,
+  priv->dpaa_bp->bpid);
+ }
+ 
++/* 0103a: one-shot DORMANT self-test of the Recover reverse-map.
++ * Record a sentinel xdp_buff pointer at slot 0, look it back, and
++ * clear it -- proving _record/_lookup round-trip and bumping
++ * xsk_zc_recover_lookup exactly once per successful attach.  This
++ * touches NO hardware and NO live chunk; it only writes/reads the
++ * driver-private array.  0103b replaces this self-test with the
++ * real FILL-release record + RX lookup.
++ */
++if (priv->xsk_chunk_map[queue_id]) {
++struct xdp_buff sentinel;
++
++dpaa_xsk_chunk_record(priv, queue_id, 0, &sentinel);
++if (dpaa_xsk_chunk_lookup(priv, queue_id, 0) != &sentinel)
++dev_warn(priv->net_dev->dev.parent,
++ "af_xdp_pool: qband %u Recover reverse-map self-test FAILED\n",
++ queue_id);
++dpaa_xsk_chunk_record(priv, queue_id, 0, NULL);
++}
++
+ return 0;
+ 
+ err_unmap:
+@@ -535,6 +601,11 @@ bman_free_pool(bpool);
+ priv->xsk_bpool[queue_id] = NULL;
+ priv->xsk_bpid[queue_id]  = 0;
+ 
++/* 0103a: free the Recover reverse-map. */
++kfree(priv->xsk_chunk_map[queue_id]);
++priv->xsk_chunk_map[queue_id]     = NULL;
++priv->xsk_chunk_map_len[queue_id] = 0;
++
+ /* Step 9: re-enable the FMan RX port for default (non-XSK) FQs. */
+ if (rxp) {
+ ret = fman_port_enable(rxp);
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+index d9b782f..eef321a 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -242,6 +242,32 @@ u32 hm_vlan_strip_handle;
+ 	struct bman_pool           *xsk_bpool[DPAA1_XSK_MAX_QBANDS];
+ 	unsigned int                xsk_max_qbands;
+ 
++	/* M3-3 step 7 sub-increment 4a (patch 0103a): true-ZC RX Recover
++	 * sw-ring reverse-map -- DORMANT infrastructure with no datapath
++	 * consumer.  The productive Recover redirect (0103b) needs to turn a
++	 * BMan-returned chunk DMA cookie (qm_fd_addr(fd)) back into the
++	 * originating struct xdp_buff *, but kernel 6.18.31 has no
++	 * xsk_buff_recv()/retrieve-by-dma primitive (the spec sec 6.1.15
++	 * prose named an API that does not exist -- see sec 6.1.16).  Mainline
++	 * ZC drivers (i40e/ice/mlx5) keep a per-RX-ring sw array of the
++	 * xsk_buff_alloc() handles indexed by descriptor; DPAA1's FILL ->
++	 * BMan-release path discards the handle after xsk_buff_xdp_get_dma().
++	 * This array restores that mapping: at FILL-release time 0103b will
++	 * record (chunk_dma -> xdp_buff) here; at RX it will look the cookie
++	 * up.  Allocated/seeded/freed in attach/detach (0103a), but NEITHER
++	 * recorded into NOR consulted by the datapath until 0103b flips the
++	 * reprogram WRITE + redirect on -- so the running kernel is
++	 * byte-identical to the 0102 build on every flavor.
++	 *
++	 * Indexed by qband; each entry is a flat array of
++	 * DPAA1_XSK_INITIAL_SEED struct xdp_buff * slots keyed by UMEM chunk
++	 * index, giving O(1) lookup with no hash collisions.
++	 * xsk_chunk_map_len records the slot count actually allocated
++	 * (0 = dormant/unallocated).
++	 */
++	struct xdp_buff           **xsk_chunk_map[DPAA1_XSK_MAX_QBANDS];
++	u32                         xsk_chunk_map_len[DPAA1_XSK_MAX_QBANDS];
++
+ 	/* AF_XDP zerocopy ethtool / debugfs counters. Bumped by the
+ 	 * flavor module's attach/detach/NAPI paths. Phase 2 introduces
+ 	 * attach/detach/seed/dma/align/headroom/mtu/pamu counters;
+@@ -364,6 +390,18 @@ u64 xsk_fill_guard_block;
+  */
+ u64 xsk_zc_rx_recovered;
+ 
++/* M3-3 step 7 sub-increment 4a (patch 0103a): Recover sw-ring
++ * reverse-map diagnostic.  Bumped by dpaa_xsk_chunk_lookup() when a
++ * chunk DMA cookie is successfully resolved back to its xdp_buff.
++ * DORMANT: the lookup helper is exercised by a one-shot self-test at
++ * attach time (record N, look the same N back, free), but the RX
++ * hot-path does NOT call it until 0103b.  Increments exactly once
++ * per successful attach (the self-test) -- 0 until the first
++ * XDP_ZEROCOPY bind, then a small fixed number, never growing with
++ * traffic until 0103b.  21st xsk_* line.
++ */
++u64 xsk_zc_recover_lookup;
++
+ /* M3-3b (patch 0086): FMan PCD capability bitmask snapshot taken
+  * at probe via dpaa_fman_get_caps(). 0 on mainline ucode 106 ->
+  * all fman_cc_tree_/fman_hm_/fman_pol_ helpers short-circuit

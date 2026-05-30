@@ -326,6 +326,13 @@ cp "$BOARD_PATCH_DIR/0101-dpaa-hw-vlan-strip-ndo-set-features-bridge.patch" "$KE
 # (M3-3 step 7 sub-increment 4, WRITE mechanism, no caller). Edits
 # fman_port.c/.h only; independent of the 0092-0100 PCD stack. Spec sec 6.1.7.
 cp "$BOARD_PATCH_DIR/0102-fman-port-set-rx-bpool-primitive.patch" "$KERNEL_PATCHES/"
+# 0103a: dormant true-ZC RX Recover sw-ring reverse-map (M3-3 step 7
+# sub-increment 4a, infrastructure only, NO datapath consumer). Adds the
+# per-qband chunk-DMA -> xdp_buff reverse map + record/lookup helpers that
+# 0103b needs (kernel 6.18.31 has no xsk_buff_recv() retrieve-by-dma
+# primitive). Self-tested at attach; byte-identical datapath to 0102.
+# Spec sec 6.1.15 (corrected) / 6.1.16 (API gap).
+cp "$BOARD_PATCH_DIR/0103a-dpaa1-true-zc-rx-recover-swring.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
