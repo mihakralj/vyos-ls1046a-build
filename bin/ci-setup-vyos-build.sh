@@ -98,6 +98,46 @@ for p in data/vyos-build-005-add_vim_link.patch data/vyos-build-007-no_sbsign.pa
   fi
 done
 
+### build-vyos-image: vyos-1x branch checkout fallback (current -> rolling).
+#
+# build-vyos-image clones github.com/vyos/vyos-1x and does
+#   repo_vyos_1x.git.checkout(build_defaults['vyos_branch'])
+# purely to read vyos-1x/python for version-stamping / changelog. As of
+# 2026-05-30 upstream vyos-1x RENAMED its default branch `current` -> `rolling`
+# (the `current` branch no longer exists). defaults.toml still pins
+# `vyos_branch = "current"` — and that value is ALSO used for the apt repo
+# entry `deb {vyos_mirror} {vyos_branch} main`, where the VyOS apt dist IS
+# still `current/`. So we must NOT rewrite `vyos_branch` in defaults.toml.
+# Instead, patch only the git.checkout() call in the cloned build-vyos-image
+# so a failed `checkout current` falls back to `rolling`. Idempotent: guarded
+# by a grep for the sentinel marker we inject.
+BVI=vyos-build/scripts/image-build/build-vyos-image
+if [ -f "$BVI" ] && ! grep -q 'LS1046A-branch-fallback' "$BVI"; then
+  python3 - "$BVI" <<'PYBVI'
+import sys
+path = sys.argv[1]
+with open(path) as f:
+    s = f.read()
+old = "        repo_vyos_1x.git.checkout(branch_name)\n"
+new = (
+    "        # LS1046A-branch-fallback: vyos-1x renamed current->rolling\n"
+    "        try:\n"
+    "            repo_vyos_1x.git.checkout(branch_name)\n"
+    "        except Exception:\n"
+    "            repo_vyos_1x.git.checkout('rolling')\n"
+)
+if old not in s:
+    sys.stderr.write('FATAL: checkout(branch_name) line not found in build-vyos-image\n')
+    sys.exit(1)
+s = s.replace(old, new, 1)
+with open(path, 'w') as f:
+    f.write(s)
+print('### Patched build-vyos-image vyos-1x checkout with current->rolling fallback')
+PYBVI
+else
+  echo "### build-vyos-image vyos-1x checkout fallback already present (or file missing) — skipping"
+fi
+
 ### Remove --uefi-secure-boot from grub-install
 # U-Boot boots via booti (not bootefi) so no EFI runtime is present.
 # grub-install --uefi-secure-boot calls efibootmgr which fails with exit 1
