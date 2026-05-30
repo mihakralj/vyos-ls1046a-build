@@ -322,6 +322,10 @@ cp "$BOARD_PATCH_DIR/0100-fman-pcd-plcr-install.patch"          "$KERNEL_PATCHES
 # + 0086a (fman_hm_caps_supported), so it MUST sort after 0100. Common
 # (built-in) for default/vpp/ask. Spec sec 5.5.
 cp "$BOARD_PATCH_DIR/0101-dpaa-hw-vlan-strip-ndo-set-features-bridge.patch" "$KERNEL_PATCHES/"
+# 0102: dormant exported fman_port_set_rx_bpool() reprogram primitive
+# (M3-3 step 7 sub-increment 4, WRITE mechanism, no caller). Edits
+# fman_port.c/.h only; independent of the 0092-0100 PCD stack. Spec sec 6.1.7.
+cp "$BOARD_PATCH_DIR/0102-fman-port-set-rx-bpool-primitive.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
