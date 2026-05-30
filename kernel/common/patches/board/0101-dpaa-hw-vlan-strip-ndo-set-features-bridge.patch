@@ -39,13 +39,13 @@ Byte-identical to mainline on boards without HM caps. Spec sec 5.5.
 Signed-off-by: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
 ---
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-index f696537..d0db902 100644
+index dcfd075..6505142 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-@@ -243,6 +243,18 @@ static int dpaa_netdev_init(struct net_device *net_dev,
- 	 * back to software flow_offload.
- 	 */
- 	net_dev->hw_features |= NETIF_F_HW_TC;
+@@ -232,6 +232,17 @@ static int dpaa_netdev_init(struct net_device *net_dev,
+ 				 NETIF_F_RXHASH);
+ 
+ 	net_dev->hw_features |= NETIF_F_SG | NETIF_F_HIGHDMA;
 +
 +	/* HM offload (spec sec 5.5): on ucode-210 boards the FMan
 +	 * Header-Manipulation engine can strip a VLAN tag in hardware.
@@ -57,11 +57,10 @@ index f696537..d0db902 100644
 +	 */
 +	if (fman_hm_caps_supported())
 +		net_dev->hw_features |= NETIF_F_HW_VLAN_CTAG_RX;
-+
  	/* The kernels enables GSO automatically, if we declare NETIF_F_SG.
  	 * For conformity, we'll still declare GSO explicitly.
  	 */
-@@ -3698,6 +3710,66 @@ static int dpaa_xsk_wakeup(struct net_device *ndev, u32 queue_id, u32 flags)
+@@ -3429,6 +3440,66 @@ static int dpaa_xsk_wakeup(struct net_device *ndev, u32 queue_id, u32 flags)
  	return ret;
  }
  
@@ -82,73 +81,73 @@ index f696537..d0db902 100644
 + * -ENOTSUPP and we propagate it so the ethtool set fails cleanly.
 + */
 +static int dpaa_set_features(struct net_device *net_dev,
-+			    netdev_features_t features)
++    netdev_features_t features)
 +{
-+	struct dpaa_priv *priv = netdev_priv(net_dev);
-+	bool want_strip = !!(features & NETIF_F_HW_VLAN_CTAG_RX);
-+	bool have_strip = priv->hm_vlan_strip_handle != 0;
-+	struct fman *fm;
-+	u8 port_id;
-+	int err;
++struct dpaa_priv *priv = netdev_priv(net_dev);
++bool want_strip = !!(features & NETIF_F_HW_VLAN_CTAG_RX);
++bool have_strip = priv->hm_vlan_strip_handle != 0;
++struct fman *fm;
++u8 port_id;
++int err;
 +
-+	if (want_strip == have_strip)
-+		return 0;
++if (want_strip == have_strip)
++return 0;
 +
-+	if (!priv->mac_dev)
-+		return -ENODEV;
++if (!priv->mac_dev)
++return -ENODEV;
 +
-+	fm = fman_bind(priv->mac_dev->fman_dev);
-+	if (!fm)
-+		return -ENODEV;
-+	port_id = (u8)fman_mac_get_hw_id(priv->mac_dev);
++fm = fman_bind(priv->mac_dev->fman_dev);
++if (!fm)
++return -ENODEV;
++port_id = (u8)fman_mac_get_hw_id(priv->mac_dev);
 +
-+	if (want_strip) {
-+		struct fman_hm_spec spec = {
-+			.num_ops = 1,
-+			.ops[0] = { .type = FMAN_HM_OP_VLAN_STRIP },
-+		};
-+		u32 handle = 0;
++if (want_strip) {
++struct fman_hm_spec spec = {
++.num_ops = 1,
++.ops[0] = { .type = FMAN_HM_OP_VLAN_STRIP },
++};
++u32 handle = 0;
 +
-+		err = fman_hm_node_install(fm, port_id, &spec, &handle);
-+		if (err) {
-+			netif_err(priv, drv, net_dev,
-+				  "hw vlan-strip install failed: %d\n", err);
-+			return err;
-+		}
-+		priv->hm_vlan_strip_handle = handle;
-+	} else {
-+		fman_hm_node_destroy(fm, port_id,
-+				     priv->hm_vlan_strip_handle);
-+		priv->hm_vlan_strip_handle = 0;
-+	}
++err = fman_hm_node_install(fm, port_id, &spec, &handle);
++if (err) {
++netif_err(priv, drv, net_dev,
++  "hw vlan-strip install failed: %d\n", err);
++return err;
++}
++priv->hm_vlan_strip_handle = handle;
++} else {
++fman_hm_node_destroy(fm, port_id,
++     priv->hm_vlan_strip_handle);
++priv->hm_vlan_strip_handle = 0;
++}
 +
-+	return 0;
++return 0;
 +}
 +
  static const struct net_device_ops dpaa_ops = {
  	.ndo_open = dpaa_open,
  	.ndo_start_xmit = dpaa_start_xmit,
-@@ -3713,6 +3785,7 @@ static const struct net_device_ops dpaa_ops = {
+@@ -3444,6 +3515,7 @@ static const struct net_device_ops dpaa_ops = {
  	.ndo_bpf = dpaa_xdp,
  	.ndo_xdp_xmit = dpaa_xdp_xmit,
  	.ndo_xsk_wakeup = dpaa_xsk_wakeup,
-+	.ndo_set_features = dpaa_set_features,
++.ndo_set_features = dpaa_set_features,
  	.ndo_hwtstamp_get = dpaa_hwtstamp_get,
  	.ndo_hwtstamp_set = dpaa_hwtstamp_set,
  };
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
-index 5ad97f9..c545d29 100644
+index 5ad97f9..d9b782f 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
 @@ -188,6 +188,11 @@ struct dpaa_priv {
  
  	u8 num_tc;
  	bool keygen_in_use;
-+	/* HM VLAN-strip node handle (0 = not installed). Bridges
-+	 * NETIF_F_HW_VLAN_CTAG_RX -> fman_hm_node_install(VLAN_STRIP).
-+	 * Spec sec 5.5; board patch 0101.
-+	 */
-+	u32 hm_vlan_strip_handle;
++/* HM VLAN-strip node handle (0 = not installed). Bridges
++ * NETIF_F_HW_VLAN_CTAG_RX -> fman_hm_node_install(VLAN_STRIP).
++ * Spec sec 5.5; board patch 0101.
++ */
++u32 hm_vlan_strip_handle;
  	u32 msg_enable;	/* net_device message level */
  
  	struct {
