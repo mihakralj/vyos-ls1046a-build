@@ -189,27 +189,21 @@ def bpf_map_create_xskmap(libc, max_entries=64):
 
 def build_xdp_redirect_prog(xsks_map_fd):
     """Return eBPF bytecode that does:
-       r2 = ctx->rx_queue_index
-       r1 = map_fd_pseudo(xsks_map_fd)   (lddw)
-       r3 = XDP_PASS                     (default if entry missing)
+       r2 = 0                          (hardcoded XSKMAP slot 0)
+       r1 = map_fd_pseudo(xsks_map_fd) (lddw)
+       r3 = XDP_PASS                   (fallback if entry empty)
        call BPF_FUNC_redirect_map
        exit
-    On the AArch64 verifier, this is 6 insns / 56 bytes (lddw is 16 bytes
-    because the imm64 is split across two adjacent 8-byte slots).
 
-    Layout of struct xdp_md:
-       u32 data;
-       u32 data_end;
-       u32 data_meta;
-       u32 ingress_ifindex;
-       u32 rx_queue_index;   <-- offset 16
-       u32 egress_ifindex;
+    Simplified to always redirect to XSKMAP[0] because FMan distributes
+    ingress across 128 PCD FQs with different FQIDs; the old
+    `rx_queue_index & 0x3f` approach populated different XSKMAP slots,
+    but only slot 0 has the bound fd — all other slots redirect to NULL
+    → XDP_PASS → kernel skbuf path → probe rx_packets stays 0.
     """
-    XDP_MD_RX_QUEUE_INDEX = 16
-
     code = b""
-    # r2 = *(u32 *)(r1 + 16)
-    code += _insn(BPF_LDX_MEM_W, dst=2, src=1, off=XDP_MD_RX_QUEUE_INDEX, imm=0)
+    # r2 = 0  (XSKMAP key = 0).  mov64 r2, 0
+    code += _insn(BPF_ALU64_MOV_K, dst=2, src=0, off=0, imm=0)
     # r1 = xsks_map_fd  (lddw, two 8-byte insn slots; first slot holds low
     # 32 bits, second slot holds high 32 bits)
     code += _insn(BPF_LD_IMM64_DW, dst=1, src=BPF_PSEUDO_MAP_FD,
