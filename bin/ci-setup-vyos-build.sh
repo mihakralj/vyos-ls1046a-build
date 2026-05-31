@@ -502,6 +502,11 @@ chmod +x "$CHROOT/usr/local/bin/fan-check"
 cp board/scripts/caam-check "$CHROOT/usr/local/bin/caam-check"
 chmod +x "$CHROOT/usr/local/bin/caam-check"
 
+### DPAA1 status helper: `dpaa1-check` reports all networking elements.
+echo "### Installing dpaa1-check"
+cp board/scripts/dpaa1-check "$CHROOT/usr/local/bin/dpaa1-check"
+chmod +x "$CHROOT/usr/local/bin/dpaa1-check"
+
 ### DPAA1 AF_XDP true-ZC RX gate-counter reader: `xsk-zc-check` reads the
 ### 20-counter xsk_* ethtool suite (in particular the four sub-increment-4
 ### entry-gate counters: xsk_zc_eligible / xsk_zc_rx_armed /
