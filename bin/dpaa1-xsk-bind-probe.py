@@ -72,6 +72,8 @@ XDP_UMEM_FILL_RING       = 5
 XDP_UMEM_COMPLETION_RING = 6
 XDP_STATISTICS           = 7
 XDP_ZEROCOPY             = (1 << 2)
+XDP_USE_NEED_WAKEUP      = (1 << 3)
+XDP_WAKEUP_RX            = 1
 
 # struct xdp_desc { __u64 addr; __u32 len; __u32 options; } -> 16 bytes
 XDP_DESC_SIZE   = 16
@@ -435,7 +437,7 @@ def main():
     print(f"[probe] xsk socket fd={fd}")
 
     # 2. UMEM mmap
-    N_FRAMES   = 256
+    N_FRAMES   = 8192
     umem_size  = chunk * N_FRAMES
     PROT_READ, PROT_WRITE = 1, 2
     MAP_PRIVATE, MAP_ANON = 0x02, 0x20
@@ -479,7 +481,7 @@ def main():
     print(f"[probe] FILL/COMP/RX/TX rings sized {N_FRAMES}")
 
     # 5. bind(XDP_ZEROCOPY)
-    sa = struct.pack("=HHIII", AF_XDP, XDP_ZEROCOPY, ifindex, queue_id, 0)
+    sa = struct.pack("=HHIII", AF_XDP, XDP_ZEROCOPY | XDP_USE_NEED_WAKEUP, ifindex, queue_id, 0)
     rc = libc.bind(fd, ctypes.c_char_p(sa), len(sa))
     if rc != 0:
         e = ctypes.get_errno()
@@ -583,6 +585,32 @@ def main():
     new_prod = struct.pack("=I", N_FRAMES)
     ctypes.memmove(fill_addr + fill_prod_off, new_prod, 4)
     print(f"[probe] seeded {N_FRAMES} descriptors into FILL ring")
+
+    # 8b. Kick NAPI via sendto(MSG_DONTWAIT, XDP_WAKEUP_RX) WITH RETRIES
+    #     to break the circular dependency: FMan drops because BMan XSK
+    #     pool is empty (bind-time seed found empty FILL ring →
+    #     xsk_bman_seed_short), the wakeup IPIs NAPI to CPU 0
+    #     asynchronously, and napi_refill pulls chunks from the now-seeded
+    #     FILL ring into BMan.  Without the retry+dwell, the drain loop
+    #     races ahead before the IPI lands and refill completes.
+    #     Sub-increment 5 of M3-3 step 7 (0103c).
+    #     NOTE: passes XDP_WAKEUP_RX (1), NOT XDP_ZEROCOPY (4) — the
+    #     kernel xsk_sendmsg() gates on sxdp_flags & XDP_WAKEUP_RX.
+    MSG_DONTWAIT = 0x40
+    sockaddr_xdp = struct.pack("=HHIII", AF_XDP, XDP_WAKEUP_RX,
+                               ifindex, queue_id, 0)
+    for attempt in (1, 2, 3):
+        rc = libc.sendto(fd, None, 0, MSG_DONTWAIT,
+                         sockaddr_xdp, len(sockaddr_xdp))
+        if rc < 0:
+            e = ctypes.get_errno()
+            if e != errno.ENOENT:
+                print(f"[probe] WARNING: sendto(XDP_WAKEUP) attempt "
+                      f"{attempt} {errmsg(rc)}")
+        else:
+            print(f"[probe] NAPI wakeup attempt {attempt} sent "
+                  f"(sendto returned {rc})")
+        time.sleep(0.5)  # let IPI-NAPI poll + refill complete asynchronously
 
     # 9. Poll RX ring for hold_secs.
     rx_prod_off = rx_off[0]
