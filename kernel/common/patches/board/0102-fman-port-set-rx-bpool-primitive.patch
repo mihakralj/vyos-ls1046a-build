@@ -78,13 +78,27 @@ running kernel behaves exactly as the 0101 build does.
 Spec sec 6.1.7 true-ZC mechanism 3 (reProgram, WRITE primitive) +
 sec 6.1.11 / sec 6.1.12.
 
+v2 (persistent-table fix): the original v1 body operated on
+port->cfg->ext_buf_pools and re-invoked the static set_ext_buffer_pools().
+fman_port_init() does kfree(port->cfg); port->cfg = NULL; at the end of
+init, so on a LIVE post-init RX port port->cfg is NULL. v1 therefore
+dereferenced a freed/NULL cfg at attach time and set_ext_buffer_pools()
+(which also reads port->cfg->{ext_buf_pools,buf_pool_depletion}) saw
+garbage, making set_bpools() reject the live re-commit with -EINVAL (-22)
+-- the exact failure observed on DUT 192.168.1.190 with the productive
+0103b caller. v2 operates on the PERSISTENT port->ext_buf_pools (memcpy'd
+into struct fman_port during init, survives the kfree) and rebuilds the
+BMI bpool registers by calling the static set_bpools() directly, bypassing
+the dead-cfg dereference. set_bpools() reads only persistent state
+(port->ext_pools_num, port->port_type, port->bmi_regs, plus its bp arg).
+
 Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 ---
 diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
-index 255360d..47538e1 100644
+index 255360d..91de052 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_port.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_port.c
-@@ -962,6 +962,84 @@ static int set_ext_buffer_pools(struct fman_port *port)
+@@ -962,6 +962,122 @@ static int set_ext_buffer_pools(struct fman_port *port)
  	return 0;
  }
  
@@ -92,16 +106,28 @@ index 255360d..47538e1 100644
 + * fman_port_set_rx_bpool() - reprogram a live RX port's primary BMan pool ID
 + * @port: the FMan RX port (mac_dev->port[RX])
 + * @old_bpid: the BPID currently programmed into the port's bpool table
-+ *  (normally the kernel page-pool BPID, priv->dpaa_bp->bpid)
++ *	  (normally the kernel page-pool BPID, priv->dpaa_bp->bpid)
 + * @new_bpid: the BPID to swap in (normally the dedicated XSK pool BPID,
-+ *  priv->xsk_bpid[band])
++ *	  priv->xsk_bpid[band])
 + *
 + * M3-3 step 7 sub-increment 4 (patch 0102): the WRITE half of mechanism 3
 + * (reProgram) in the true-ZC RX plan (spec sec 6.1.7). Mutates the port's
-+ * cached external-buffer-pool table (port->cfg->ext_buf_pools.ext_buf_pool[])
++ * PERSISTENT external-buffer-pool table (port->ext_buf_pools.ext_buf_pool[])
 + * by replacing the entry whose .id == @old_bpid with @new_bpid (the .size is
-+ * preserved), then re-runs set_ext_buffer_pools() to rewrite the BMI bpool
-+ * registers. After this, FMan RX BMI DMAs ingress frames into @new_bpid.
++ * preserved), then rewrites the BMI bpool registers via set_bpools(). After
++ * this, FMan RX BMI DMAs ingress frames into @new_bpid.
++ *
++ * IMPORTANT (the 0103b -22 root cause): this MUST operate on the persistent
++ * port->ext_buf_pools, NOT on port->cfg->ext_buf_pools. fman_port_init()
++ * does kfree(port->cfg); port->cfg = NULL; (see end of fman_port_init), so
++ * on a live post-init port port->cfg is NULL. The init-time helper
++ * set_ext_buffer_pools() reads port->cfg->{ext_buf_pools,buf_pool_depletion}
++ * and therefore cannot be reused here -- it would dereference the freed cfg
++ * and the resulting garbage num_of_pools_used / non-ascending sizes make
++ * set_bpools() reject the live re-commit with -EINVAL. We instead rebuild
++ * the ordered bpools struct from the persistent table and call set_bpools()
++ * directly (set_bpools() touches only persistent state: port->ext_pools_num,
++ * port->port_type, port->bmi_regs, and its bp argument).
 + *
 + * CONTRACT: the caller MUST have already fman_port_disable()d @port before
 + * calling this (the BMI must be quiesced before its pool registers are
@@ -109,17 +135,20 @@ index 255360d..47538e1 100644
 + * disable/enable bracket the XSK pool detach sequence (spec sec 6.1.1)
 + * already establishes around fman_port_disable(rxp).
 + *
++ * Pool-depletion (FMBM_RMPD) is intentionally left as init programmed it:
++ * swapping the primary pool's BPID does not change depletion topology, and
++ * the depletion config lived in the now-freed port->cfg.
++ *
 + * Returns 0 on success, -EINVAL on a NULL or non-RX port, -ENOENT if
 + * @old_bpid is not present in the port's pool table, -EALREADY if
-+ * @new_bpid == @old_bpid, or the set_ext_buffer_pools() error otherwise.
-+ *
-+ * DORMANT as of patch 0102 -- exported but with no caller; the productive
-+ * af_xdp_pool attach-time call site is the gated final sub-increment
-+ * (spec sec 6.1.12).
++ * @new_bpid == @old_bpid, or the set_bpools() error otherwise.
 + */
 +int fman_port_set_rx_bpool(struct fman_port *port, u8 old_bpid, u8 new_bpid)
 +{
 +	struct fman_ext_pools *ext_pools;
++	u8 ordered_array[FMAN_PORT_MAX_EXT_POOLS_NUM];
++	u16 sizes_array[BM_MAX_NUM_OF_POOLS];
++	struct fman_port_bpools bpools;
 +	int i, slot = -1, err;
 +
 +	if (!port || port->port_type != FMAN_PORT_TYPE_RX)
@@ -128,7 +157,8 @@ index 255360d..47538e1 100644
 +	if (new_bpid == old_bpid)
 +		return -EALREADY;
 +
-+	ext_pools = &port->cfg->ext_buf_pools;
++	/* Use the PERSISTENT pool table -- port->cfg was freed at init. */
++	ext_pools = &port->ext_buf_pools;
 +
 +	for (i = 0; i < ext_pools->num_of_pools_used; i++) {
 +		if (ext_pools->ext_buf_pool[i].id == old_bpid) {
@@ -146,22 +176,44 @@ index 255360d..47538e1 100644
 +
 +	ext_pools->ext_buf_pool[slot].id = new_bpid;
 +
-+	err = set_ext_buffer_pools(port);
++	/* Rebuild the BMI bpool registers from the persistent table without
++	 * going through set_ext_buffer_pools() (which reads the freed cfg).
++	 */
++	memset(ordered_array, 0, sizeof(ordered_array));
++	memset(sizes_array, 0, sizeof(sizes_array));
++	fman_sp_set_buf_pools_in_asc_order_of_buf_sizes(ext_pools,
++						       ordered_array,
++						       sizes_array);
++
++	memset(&bpools, 0, sizeof(bpools));
++	bpools.count = ext_pools->num_of_pools_used;
++	bpools.counters_enable = true;
++	for (i = 0; i < ext_pools->num_of_pools_used; i++) {
++		bpools.bpool[i].bpid = ordered_array[i];
++		bpools.bpool[i].size = sizes_array[ordered_array[i]];
++	}
++
++	/* Keep rx_pools_params consistent for any later size-dependent path. */
++	port->rx_pools_params.num_of_pools = ext_pools->num_of_pools_used;
++	port->rx_pools_params.largest_buf_size =
++		sizes_array[ordered_array[ext_pools->num_of_pools_used - 1]];
++
++	err = set_bpools(port, &bpools);
 +	if (err) {
 +		/* roll the cached table back so a retry sees a consistent
-+		 * state; the BMI registers were not committed on the failure
-+		 * path of set_bpools().
++		 * state; set_bpools() commits registers only after its
++		 * ascending-order validation passes.
 +		 */
 +		ext_pools->ext_buf_pool[slot].id = old_bpid;
 +		dev_err(port->dev,
-+			"%s: set_ext_buffer_pools() failed (%d), bpid reverted\n",
++			"%s: set_bpools() failed (%d), bpid reverted\n",
 +			__func__, err);
 +		return err;
 +	}
 +
 +	dev_info(port->dev,
-+		 "fman_port: RX primary bpool reprogrammed %u -> %u\n",
-+		 old_bpid, new_bpid);
++	 "fman_port: RX primary bpool reprogrammed %u -> %u\n",
++	 old_bpid, new_bpid);
 +	return 0;
 +}
 +EXPORT_SYMBOL_GPL(fman_port_set_rx_bpool);
@@ -189,3 +241,5 @@ index 129dcc3..cc39538 100644
  int fman_port_get_hash_result_offset(struct fman_port *port, u32 *offset);
  
  int fman_port_get_tstamp(struct fman_port *port, const void *data, u64 *tstamp);
+-- 
+2.43.0

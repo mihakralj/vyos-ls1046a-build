@@ -1,0 +1,95 @@
+diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
+index e981481..5385916 100644
+--- a/interface-definitions/interfaces_ethernet.xml.in
++++ b/interface-definitions/interfaces_ethernet.xml.in
+@@ -131,6 +131,12 @@
+                   <valueless/>
+                 </properties>
+               </leafNode>
++              <leafNode name="vlan-strip">
++                <properties>
++                  <help>Enable hardware VLAN tag stripping on receive (NXP LS1046A FMan Header Manipulation offload)</help>
++                  <valueless/>
++                </properties>
++              </leafNode>
+             </children>
+           </node>
+           <leafNode name="speed">
+diff --git a/python/vyos/ethtool.py b/python/vyos/ethtool.py
+index 34c884e..660c3aa 100644
+--- a/python/vyos/ethtool.py
++++ b/python/vyos/ethtool.py
+@@ -177,6 +177,9 @@ def get_scatter_gather(self):
+     def get_tcp_segmentation_offload(self):
+         return self._get_generic('tcp-segmentation-offload')
+ 
++    def get_rx_vlan_offload(self):
++        return self._get_generic('rx-vlan-offload')
++
+     def get_ring_buffer_max(self, rx_tx):
+         # Configuration of RX/TX ring-buffers is not supported on every device,
+         # thus when it's impossible return None
+diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
+index 3c4c86f..02d4b76 100644
+--- a/python/vyos/ifconfig/ethernet.py
++++ b/python/vyos/ifconfig/ethernet.py
+@@ -78,6 +78,10 @@ def feature(ifname, option, value):
+                 'validate': lambda v: assert_list(v, ['on', 'off']),
+                 'possible': lambda i, v: EthernetIf.feature(i, 'tso', v),
+             },
++            'rxvlan': {
++                'validate': lambda v: assert_list(v, ['on', 'off']),
++                'possible': lambda i, v: EthernetIf.feature(i, 'rxvlan', v),
++            },
+         },
+     }
+ 
+@@ -107,6 +111,7 @@ def get_bond_member_allowed_options() -> list:
+             'offload.rps',
+             'offload.sg',
+             'offload.tso',
++            'offload.vlan-strip',
+             'redirect',
+             'ring_buffer.rx',
+             'ring_buffer.tx',
+@@ -335,6 +340,30 @@ def set_lro(self, state):
+                 )
+         return False
+ 
++    def set_vlan_strip(self, state):
++        """
++        Enable hardware VLAN tag stripping on receive. State can be either
++        True or False. On the NXP LS1046A this drives the DPAA1 FMan Header
++        Manipulation offload via the dpaa_set_features() .ndo_set_features
++        bridge (NETIF_F_HW_VLAN_CTAG_RX).
++        Example:
++        >>> from vyos.ifconfig import EthernetIf
++        >>> i = EthernetIf('eth0')
++        >>> i.set_vlan_strip(True)
++        """
++        if not isinstance(state, bool):
++            raise ValueError('Value out of range')
++
++        enabled, fixed = self.ethtool.get_rx_vlan_offload()
++        if enabled != state:
++            if not fixed:
++                return self.set_interface('rxvlan', 'on' if state else 'off')
++            else:
++                print(
++                    'Adapter does not support changing rx-vlan-offload settings!'
++                )
++        return False
++
+     def set_rps(self, state):
+         if not isinstance(state, bool):
+             raise ValueError('Value out of range')
+@@ -571,6 +600,9 @@ def update(self, config):
+         # LRO (large receive offload)
+         self.set_lro(dict_search('offload.lro', config) is not None)
+ 
++        # Hardware VLAN tag stripping on receive (DPAA1 FMan HM offload)
++        self.set_vlan_strip(dict_search('offload.vlan_strip', config) is not None)
++
+         # RPS - Receive Packet Steering
+         self.set_rps(dict_search('offload.rps', config) is not None)
+ 
