@@ -232,12 +232,12 @@ index c66a499..f04ad7c 100644
 +
 +bpool = priv->xsk_bpool[queue_id];
 +
-+if (!priv->mac_dev || !priv->mac_dev->port[FMAN_PORT_TYPE_RX]) {
++if (!priv->mac_dev || !priv->mac_dev->port[DPAA_MAC_PORT_RX]) {
 +/* Should be impossible if attach succeeded.  Bail without
 + * touching FMan but still tear down the rest. */
 +rxp = NULL;
 +} else {
-+rxp = priv->mac_dev->port[FMAN_PORT_TYPE_RX];
++rxp = priv->mac_dev->port[DPAA_MAC_PORT_RX];
 +}
 +
 +/* Step 1: hide the pool pointer from new readers. */

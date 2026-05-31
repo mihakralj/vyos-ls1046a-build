@@ -1,0 +1,174 @@
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+index b26af44..4ce0c0d 100644
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -623,6 +623,20 @@ ret = xsk_pool_dma_map(pool, priv->rx_dma_dev,
+ 	 */
+ rcu_assign_pointer(priv->xsk_pool[queue_id], pool);
+ 
++	/* M3-3 step 7 sub-increment 5 (0103c): pre-arm the NEED_WAKEUP
++	 * flag at attach time.  xsk_set_rx_need_wakeup() normally arms
++	 * it in dpaa_eth_poll() under `if (cleaned < budget)`, but a
++	 * flooded DQRR never enters that branch, so cached_need_wakeup
++	 * stays 0 forever, xsk_sendmsg() skips xsk_wakeup(), and the
++	 * ndo_xsk_wakeup → dpaa_eth_poll() → napi_refill chain never
++	 * fires.  Without refill, the BMan XSK pool stays empty and
++	 * the reprogrammed FMan port drops all ingress at hardware
++	 * (circular deadlock).  Pre-arming here guarantees the first
++	 * userspace sendto(MSG_DONTWAIT) always reaches xsk_wakeup.
++	 */
++	if (xsk_uses_need_wakeup(pool))
++		xsk_set_rx_need_wakeup(pool);
++
+ /* 0103b: build the sorted dma_addr_t -> head-index lookup now that
+  * the pool is DMA-mapped (every pool->heads[i].dma is populated and
+  * stable for the pool's lifetime).  Non-fatal on -ENOMEM (the RX
+@@ -874,14 +888,49 @@ rcu_assign_pointer(priv->xsk_pool[queue_id], NULL);
+ synchronize_net();
+ 
+ /* Step 3: stop the FMan BMI for this RX port. */
+-if (rxp) {
+-ret = fman_port_disable(rxp);
+-if (ret) {
+-/* Continue teardown even on failure — leaving an orphaned
+- * BPID is worse than a counter bump. */
+-priv->xsk_pool_detach_timeout++;
+-}
+-}
++	if (rxp) {
++		ret = fman_port_disable(rxp);
++		if (ret) {
++			/* Continue teardown even on failure — leaving an
++			 * orphaned BPID is worse than a counter bump.
++			 */
++			priv->xsk_pool_detach_timeout++;
++		}
++
++		/* M3-3 step 7 sub-increment 6 (0103c part 2): restore the
++		 * FMan RX port's primary BPID from the XSK pool back to
++		 * the kernel page-pool BPID BEFORE we free bman_new_pool()'s
++		 * handle and BEFORE we re-enable the port.  Without this,
++		 * the port stays at the now-freed XSK BPID after detach,
++		 * FMan DMAs into an orphaned pool, kernel default FQs get
++		 * no buffers, and subsequent attach fails with
++		 * "old_bpid 3 not present in RX pool table" because the
++		 * HW register still holds the stale XSK BPID value.
++		 *
++		 * The port is disabled (BMI paused) across the write, so
++		 * this is atomic from the hardware's perspective.
++		 */
++		if (priv->dpaa_bp && bpool) {
++			u32 kernel_bpid = priv->dpaa_bp->bpid;
++			int wret;
++
++			wret = fman_port_set_rx_bpool(rxp,
++					priv->xsk_bpid[queue_id],
++					kernel_bpid);
++			if (wret)
++				dev_warn(priv->net_dev->dev.parent,
++					"af_xdp_pool: qband %u BPID restore %d -> %u failed (%d); subsequent attach will need cold reboot\n",
++					queue_id,
++					priv->xsk_bpid[queue_id],
++					kernel_bpid, wret);
++			else
++				dev_info(priv->net_dev->dev.parent,
++					"af_xdp_pool: qband %u RX port BPID restored %d -> %u\n",
++					queue_id,
++					priv->xsk_bpid[queue_id],
++					kernel_bpid);
++		}
++	}
+ 
+ /*
+  * Steps 4 + 5 (DQRR drain, qman_retire_fq): deferred to patch 0080
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 51e36aa..b41fd41 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -2509,7 +2509,7 @@ static int dpaa_eth_poll(struct napi_struct *napi, int budget)
+ 	if (np->xdp_act & XDP_REDIRECT)
+ 		xdp_do_flush();
+ 
+-	if (cleaned < budget) {
++if (cleaned < budget) {
+ 		napi_complete_done(napi, cleaned);
+ 
+ 		/* Phase 3a: give the flavor module a chance to arm the
+@@ -2518,41 +2518,49 @@ static int dpaa_eth_poll(struct napi_struct *napi, int budget)
+ 		 * a single NULL deref under RCU, no behaviour change.
+ 		 * Spec sec 5.4 RX path step 5.
+ 		 */
+-rcu_read_lock();
+-ops = rcu_dereference(priv->qmgmt_ops);
+-if (ops && ops->xsk_set_rx_need_wakeup)
+-ops->xsk_set_rx_need_wakeup(priv, np);
+-
+-/* M3-3 step 4 (patch 0084): NAPI-hooked BMan refill from the
+- * XSK fill ring. Reuses the local `ops` (no second
+- * rcu_dereference), folded into the same RCU read-section as
+- * xsk_set_rx_need_wakeup. With no XSK pool bound the callback
+- * walks zero bound qbands and returns immediately. Spec sec
+- * 6.1.3.
+- */
+-if (ops && ops->napi_refill)
+-ops->napi_refill(priv);
+-
+-/* M3-3 step 5 (patch 0085): NAPI-hooked TX ZC submission and
+- * tx-need-wakeup arming. Same RCU read-section, reuses the
+- * local `ops`. napi_tx_zc drains the XSK Tx ring into the
+- * DPAA1 egress FQs (xsk_tx_peek_release_desc_batch ->
+- * qman_enqueue) honouring the software xsk_tx_inflight budget.
+- * xsk_set_tx_need_wakeup arms tx-need-wakeup when the budget
+- * is exhausted OR the Tx ring drained. Spec sec 6.1.4.
+- */
+-if (ops && ops->napi_tx_zc)
+-ops->napi_tx_zc(priv);
+-if (ops && ops->xsk_set_tx_need_wakeup)
+-ops->xsk_set_tx_need_wakeup(priv, np);
++	rcu_read_lock();
++	ops = rcu_dereference(priv->qmgmt_ops);
++	if (ops && ops->xsk_set_rx_need_wakeup)
++	ops->xsk_set_rx_need_wakeup(priv, np);
++
++	/* M3-3 step 5 (patch 0085): NAPI-hooked TX ZC submission and
++	 * tx-need-wakeup arming. Same RCU read-section, reuses the
++	 * local `ops`. napi_tx_zc drains the XSK Tx ring into the
++	 * DPAA1 egress FQs (xsk_tx_peek_release_desc_batch ->
++	 * qman_enqueue) honouring the software xsk_tx_inflight budget.
++	 * xsk_set_tx_need_wakeup arms tx-need-wakeup when the budget
++	 * is exhausted OR the Tx ring drained. Spec sec 6.1.4.
++	 */
++	if (ops && ops->napi_tx_zc)
++	ops->napi_tx_zc(priv);
++	if (ops && ops->xsk_set_tx_need_wakeup)
++	ops->xsk_set_tx_need_wakeup(priv, np);
+ 
+-rcu_read_unlock();
++	rcu_read_unlock();
+ 
+ 		qman_p_irqsource_add(np->p, QM_PIRQ_DQRI);
+ 	} else if (np->down) {
+ 		qman_p_irqsource_add(np->p, QM_PIRQ_DQRI);
+ 	}
+ 
++	/* M3-3 step 4 (patch 0084) / step 7 sub-increment 5 (0103c):
++	 * NAPI-hooked BMan refill from the XSK fill ring.  Runs on
++	 * EVERY poll completion (not just the idle tail), because
++	 * sustained ingress traffic keeps cleaned == budget and the
++	 * idle-tail block above would never execute the refill.
++	 * Without this unconditional refill, the reprogrammed FMan RX
++	 * port drops all XSK-BPID frames at hardware level (BMan pool
++	 * stays empty from the bind-time seed short), and the oracles
++	 * (xsk_zc_eligible / xsk_zc_rx_redirect) stay pinned at 0
++	 * despite successful attach and NAPI wakeup.  Same
++	 * rcu_read_lock() contract; second dereference is cheap.
++	 */
++	rcu_read_lock();
++	ops = rcu_dereference(priv->qmgmt_ops);
++	if (ops && ops->napi_refill)
++		ops->napi_refill(priv);
++	rcu_read_unlock();
++
+ 	return cleaned;
+ }
+ 
