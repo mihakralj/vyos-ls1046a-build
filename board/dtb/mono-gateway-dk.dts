@@ -46,6 +46,24 @@ compatible = "fsl,usdpaa-mem";
 reg = <0x0 0xc0000000 0x0 0x10000000>;
 no-map;
 };
+
+/* Ramoops persistent crash store (diagnostic) — 1 MB at 0xb0000000.
+ * Inside the first System RAM bank (0x80000000-0xbfffffff), clear of the
+ * usdpaa pool (0xc0000000) and the dynamic DPAA reserved chunks. Captures
+ * panic backtrace + console across the panic=60 reboot so dumps land in
+ * /sys/fs/pstore on the next boot (this U-Boot board has no other
+ * persistent crash path). Not no-map: memblock_reserve keeps it mapped
+ * cached for best cross-reboot retention. Requires CONFIG_PSTORE_RAM=y.
+ */
+ramoops@b0000000 {
+compatible = "ramoops";
+reg = <0x0 0xb0000000 0x0 0x100000>;
+record-size = <0x20000>;
+console-size = <0x40000>;
+pmsg-size = <0x20000>;
+max-reason = <5>;
+ecc-size = <16>;
+};
 };
 };
 
