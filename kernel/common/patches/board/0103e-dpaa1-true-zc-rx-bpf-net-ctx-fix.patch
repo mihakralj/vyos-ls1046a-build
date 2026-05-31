@@ -1,0 +1,62 @@
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+index 43cfbe2..ac83c37 100644
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -398,33 +398,32 @@ if (!prog) {
+ goto out_unlock;
+ }
+ 
+-act = bpf_prog_run_xdp(prog, xdp);
+-switch (act) {
+-case XDP_REDIRECT:
+-if (xdp_do_redirect(priv->net_dev, xdp, prog) == 0) {
+-priv->xsk_zc_rx_redirect++;
+-consumed = true;
+-}
+-break;
+-case XDP_DROP:
+-/* Program asked to drop: consume the FD (do not build an
+- * skb).  The chunk returns to the XSK pool free list.
+- */
+-consumed = true;
+-break;
+-case XDP_PASS:
+-default:
+-/* XDP_PASS / XDP_TX / XDP_ABORTED: we have no skbuf-building
+- * path for an XSK chunk here, so fall back to the mainline
+- * skbuf path (return false).  The reverse-map slot stays
+- * valid; no double handling.
+- */
+-break;
+-}
++{
++		struct bpf_net_context __bpf_net_ctx, *bpf_net_ctx;
++
++		bpf_net_ctx = bpf_net_ctx_set(&__bpf_net_ctx);
++		act = bpf_prog_run_xdp(prog, xdp);
++		switch (act) {
++		case XDP_REDIRECT:
++			if (xdp_do_redirect(priv->net_dev, xdp, prog) == 0) {
++				priv->xsk_zc_rx_redirect++;
++				consumed = true;
++			}
++			break;
++		case XDP_DROP:
++			consumed = true;
++			break;
++		case XDP_PASS:
++		default:
++			break;
++		}
++		if (bpf_net_ctx)
++			bpf_net_ctx_clear(bpf_net_ctx);
++	}
+ 
+ out_unlock:
+-rcu_read_unlock();
+-return consumed;
++	rcu_read_unlock();
++	return consumed;
+ }
+ 
+ static int af_xdp_pool_xsk_pool_attach(struct dpaa_priv *priv,
