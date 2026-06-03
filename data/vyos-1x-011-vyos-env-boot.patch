@@ -51,6 +51,6 @@ index 68db05f..dbc3685 100755
 +            except Exception:
 +                pass
 +
-        if is_raid_install(install_target):
-            write_dir: str = f'{DIR_DST_ROOT}/boot/{image_name}/rw'
-            raid.update_default(write_dir)
+         if is_raid_install(install_target):
+             write_dir: str = f'{DIR_DST_ROOT}/boot/{image_name}/rw'
+             raid.update_default(write_dir)
