@@ -27,7 +27,7 @@ install -m 0644 vyos-build/docker/vyos-dev.key \
   /usr/share/keyrings/vyos-dev-archive-keyring.asc
 
 # Override the shipped vyos-dev.list to add `trusted=yes`.
-echo 'deb [trusted=yes signed-by=/usr/share/keyrings/vyos-dev-archive-keyring.asc] https://packages.vyos.net/repositories/current current main' \
+echo 'deb [trusted=yes signed-by=/usr/share/keyrings/vyos-dev-archive-keyring.asc] https://packages.vyos.net/repositories/rolling rolling main' \
   > /etc/apt/sources.list.d/vyos-dev.list
 cat /etc/apt/sources.list.d/vyos-dev.list
 

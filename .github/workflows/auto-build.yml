@@ -44,7 +44,7 @@ on:
 env:
   DEBIAN_MIRROR: http://deb.debian.org/debian/
   DEBIAN_SECURITY_MIRROR: http://deb.debian.org/debian-security
-  VYOS_MIRROR: https://packages.vyos.net/repositories/current/
+  VYOS_MIRROR: https://packages.vyos.net/repositories/rolling/
   # vyos-1x's debian/rules and python/setup.py both look up
   # /opt/opam/${OCAML_VERSION}/share/vyconf/{vyconf.proto,vyconfd.conf}
   # to (a) ship vyconf.proto inside the libvyosconfig .deb and
