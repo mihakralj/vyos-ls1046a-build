@@ -58,7 +58,7 @@ fi
 # Top-level workflow env vars (auto-build.yml `env:` block)
 export DEBIAN_MIRROR="http://deb.debian.org/debian/"
 export DEBIAN_SECURITY_MIRROR="http://deb.debian.org/debian-security"
-export VYOS_MIRROR="https://packages.vyos.net/repositories/current/"
+export VYOS_MIRROR="https://packages.vyos.net/repositories/rolling/"
 export OCAML_VERSION="4.14.2"
 
 # Fake GitHub Actions env so ci-set-version.sh and friends work
@@ -117,7 +117,7 @@ fi
 
 step "Install vyos-1x build deps (VyOS apt repo)" bash -c '
 install -m 0644 vyos-build/docker/vyos-dev.key /usr/share/keyrings/vyos-dev-archive-keyring.asc
-echo "deb [trusted=yes signed-by=/usr/share/keyrings/vyos-dev-archive-keyring.asc] https://packages.vyos.net/repositories/current current main" \
+echo "deb [trusted=yes signed-by=/usr/share/keyrings/vyos-dev-archive-keyring.asc] https://packages.vyos.net/repositories/rolling rolling main" \
   > /etc/apt/sources.list.d/vyos-dev.list
 apt-get update -qq
 apt-get install -y --no-install-recommends \

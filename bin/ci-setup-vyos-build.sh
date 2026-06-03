@@ -256,7 +256,7 @@ sed -i 's/ttyAMA0/ttyS0/g' \
 # config/package-lists/custom.list.chroot. As of 2026-05-11 the upstream
 # vyos.net apt repo no longer publishes `vyos-ipt-netflow*` for arm64
 # (verified by curling
-#   https://packages.vyos.net/repositories/current/dists/current/main/binary-arm64/Packages.gz
+#   https://packages.vyos.net/repositories/rolling/dists/rolling/main/binary-arm64/Packages.gz
 # and grepping — only `pmacct` matches "netflow", no `vyos-ipt-netflow*`
 # package stanza exists). Live-build's `lb chroot_install-packages` then
 # fails with:
