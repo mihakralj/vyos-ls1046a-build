@@ -343,6 +343,7 @@ cp "$BOARD_PATCH_DIR/0103a-dpaa1-true-zc-rx-recover-swring.patch" "$KERNEL_PATCH
 # default/vpp (only reached on XDP_ZEROCOPY bind). Spec sec 6.1.16.
 cp "$BOARD_PATCH_DIR/0103b-dpaa1-true-zc-rx-reprogram-redirect.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4007-xhci-ls1046a-dwc3-quirks.patch"     "$KERNEL_PATCHES/"
@@ -680,6 +681,7 @@ scripts/config --set-val CONFIG_NLS_ISO8859_1 y
 scripts/config --set-val CONFIG_NLS_UTF8 y
 scripts/config --set-val CONFIG_SQUASHFS y
 scripts/config --set-val CONFIG_OVERLAY_FS y
+scripts/config --set-val CONFIG_FUSE_FS y
 scripts/config --set-val CONFIG_QORIQ_CPUFREQ y
 scripts/config --set-val CONFIG_FSL_EDMA y
 scripts/config --set-val CONFIG_SERIAL_OF_PLATFORM y
