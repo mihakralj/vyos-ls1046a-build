@@ -94,3 +94,11 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
     echo "### FLAVOR=ask validation OK: $ASK_MOD_PKGS ASK OOT module .deb(s) in packages/"
     find packages -name 'ask-modules-*.deb' -exec ls -lh {} \;
 fi
+
+### HOTFIX: Debian bookworm-backports is currently missing libhtp2 arm64 binary
+### but suricata from bookworm-backports depends on it. We fetch it from snapshot.
+echo "### Fetching missing libhtp2 from snapshot.debian.org..."
+curl -sSfL "https://snapshot.debian.org/archive/debian/20260529T053103Z/pool/main/libh/libhtp/libhtp2_0.5.53-1~bpo12%2B1_arm64.deb" -o packages/libhtp2_0.5.53-1~bpo12+1_arm64.deb
+echo "### Downloaded libhtp2:"
+ls -l packages/libhtp2_0.5.53-1~bpo12+1_arm64.deb
+
