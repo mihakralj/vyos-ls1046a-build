@@ -4,16 +4,16 @@ Date: Sun, 7 Jun 2026 06:05:59 +0000
 Subject: [PATCH] ethernet: hw ingress-policer (DPAA1 FMan Policer offload)
 
 ---
- .../interfaces_ethernet.xml.in                | 87 +++++++++++++++++++
+ .../interfaces_ethernet.xml.in                | 86 ++++++++++++++++++++
  python/vyos/ifconfig/ethernet.py              | 59 +++++++++++++
  src/conf_mode/interfaces_ethernet.py          | 19 ++++
- 3 files changed, 165 insertions(+)
+ 3 files changed, 164 insertions(+)
 
 diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
 index 5385916..34d5879 100644
 --- a/interface-definitions/interfaces_ethernet.xml.in
 +++ b/interface-definitions/interfaces_ethernet.xml.in
-@@ -139,6 +139,93 @@
+@@ -139,6 +139,92 @@
                </leafNode>
              </children>
            </node>
@@ -67,7 +67,6 @@ index 5385916..34d5879 100644
 +                    <description>Bytes with scaling suffix (kb, mb, gb)</description>
 +                  </valueHelp>
 +                </properties>
-+                <defaultValue>15k</defaultValue>
 +              </leafNode>
 +              <leafNode name="peak-bandwidth">
 +                <properties>
