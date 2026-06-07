@@ -1,0 +1,90 @@
+From: VyOS LS1046A build <noreply@vyos-ls1046a>
+Date: Sun, 07 Jun 2026 00:00:00 +0000
+Subject: [PATCH] hwmon: ina2xx: add TI INA234 support
+
+The Mono Gateway DK populates 8x TI INA234 power monitors behind a
+pca9545 i2c mux (buses 12/13, addr 0x40-0x43). Mainline 6.18.x ina2xx
+does NOT carry an "ti,ina234" OF match (contrary to a long-standing note
+claiming native support since 6.10), so all 8 power_sensor@4x DT nodes
+stay unbound (driver: empty, manual bind -> -ENODEV).
+
+INA234 is register-compatible with INA226 but uses different scaling:
+the 6.18 conversion is (regval >> bus_voltage_shift) * bus_voltage_lsb,
+so the 12-bit bus-voltage result in bits[15:4] needs shift=4 and
+lsb=1600 uV (1.6 mV effective). Power coefficient is 32 (vs 25 on
+INA226). Alert attributes are exposed automatically via has_alerts in
+the per-chip config (no probe-side group wiring in the 6.18 driver).
+
+Signed-off-by: VyOS LS1046A build <noreply@vyos-ls1046a>
+---
+diff --git a/drivers/hwmon/Kconfig b/drivers/hwmon/Kconfig
+index 2a71b6e..4af154f 100644
+--- a/drivers/hwmon/Kconfig
++++ b/drivers/hwmon/Kconfig
+@@ -2272,7 +2272,7 @@ config SENSORS_INA2XX
+ 	select REGMAP_I2C
+ 	help
+ 	  If you say yes here you get support for INA219, INA220, INA226,
+-	  INA230, INA231, INA260, and SY24655 power monitor chips.
++	  INA230, INA231, INA234, INA260, and SY24655 power monitor chips.
+ 
+ 	  The INA2xx driver is configured for the default configuration of
+ 	  the part as described in the datasheet.
+diff --git a/drivers/hwmon/ina2xx.c b/drivers/hwmon/ina2xx.c
+index bc3c1f7..d07eb64 100644
+--- a/drivers/hwmon/ina2xx.c
++++ b/drivers/hwmon/ina2xx.c
+@@ -135,7 +135,7 @@ static const struct regmap_config ina2xx_regmap_config = {
+ 	.writeable_reg = ina2xx_writeable_reg,
+ };
+ 
+-enum ina2xx_ids { ina219, ina226, ina260, sy24655 };
++enum ina2xx_ids { ina219, ina226, ina260, sy24655, ina234 };
+ 
+ struct ina2xx_config {
+ 	u16 config_default;
+@@ -205,6 +205,25 @@ static const struct ina2xx_config ina2xx_config[] = {
+ 		.has_ishunt = false,
+ 		.has_power_average = true,
+ 	},
++	[ina234] = {
++		/*
++		 * INA234 is register-compatible with INA226 (different
++		 * manufacturer/die-id registers). The bus voltage register
++		 * holds a 12-bit ADC result in bits[15:4] (bits[3:0] zero),
++		 * so bus_voltage_shift=4 and bus_voltage_lsb=1600 uV gives an
++		 * effective 1.6 mV/bit. Power coefficient is 32 (vs 25 for
++		 * INA226) per the INA234 datasheet.
++		 */
++		.config_default = INA226_CONFIG_DEFAULT,
++		.calibration_value = 2048,
++		.shunt_div = 400,
++		.bus_voltage_shift = 4,
++		.bus_voltage_lsb = 1600,
++		.power_lsb_factor = 32,
++		.has_alerts = true,
++		.has_ishunt = false,
++		.has_power_average = false,
++	},
+ };
+ 
+ /*
+@@ -990,6 +1009,7 @@ static const struct i2c_device_id ina2xx_id[] = {
+ 	{ "ina226", ina226 },
+ 	{ "ina230", ina226 },
+ 	{ "ina231", ina226 },
++	{ "ina234", ina234 },
+ 	{ "ina260", ina260 },
+ 	{ "sy24655", sy24655 },
+ 	{ }
+@@ -1021,6 +1041,10 @@ static const struct of_device_id __maybe_unused ina2xx_of_match[] = {
+ 		.compatible = "ti,ina231",
+ 		.data = (void *)ina226
+ 	},
++	{
++		.compatible = "ti,ina234",
++		.data = (void *)ina234
++	},
+ 	{
+ 		.compatible = "ti,ina260",
+ 		.data = (void *)ina260

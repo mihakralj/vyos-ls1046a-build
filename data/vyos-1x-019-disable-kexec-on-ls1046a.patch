@@ -1,20 +1,3 @@
-diff --git a/python/vyos/system/disk.py.rej b/python/vyos/system/disk.py.rej
-new file mode 100644
-index 0000000..0b49c5b
---- /dev/null
-+++ b/python/vyos/system/disk.py.rej
-@@ -0,0 +1,11 @@
-+--- python/vyos/system/disk.py
-++++ python/vyos/system/disk.py
-+@@ -171,7 +171,7 @@
-+     """
-+     if fsype in ['squashfs', 'iso9660']:
-+         command: str = f'mount -o loop,ro -t {fsype} {partition} {path}'
-+-    if fsype == 'overlay' and overlay_params:
-++    elif fsype == 'overlay' and overlay_params:
-+         command: str = f'mount -t overlay -o noatime,\
-+             upperdir={overlay_params["upperdir"]},\
-+ 
 diff --git a/src/conf_mode/system_option.py b/src/conf_mode/system_option.py
 index 003e8c9..634abb2 100755
 --- a/src/conf_mode/system_option.py
