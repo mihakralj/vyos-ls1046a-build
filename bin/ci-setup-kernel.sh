@@ -359,6 +359,16 @@ cp "$BOARD_PATCH_DIR/0103e-dpaa1-true-zc-rx-bpf-net-ctx-fix.patch" "$KERNEL_PATC
 # 0103e, before 101-sfp. This is the kernel backend for the vyos-1x-025
 # `set interfaces ethernet ethX ingress-policer` CLI. Spec sec 5.6.
 cp "$BOARD_PATCH_DIR/0104-dpaa-ingress-policer-tc-matchall-bridge.patch" "$KERNEL_PATCHES/"
+# 0104a: advertise NETIF_F_HW_TC in dpaa_netdev_init() so tc_can_offload() is
+# true and the tc core actually routes an ingress `matchall action police`
+# filter to 0104's TC_SETUP_BLOCK handler. Without it the netdev shows
+# `hw-tc-offload: off [fixed]`, skip_sw filters are rejected and non-skip_sw
+# filters install software-only (not_in_hw) -- the handler never runs. Gated
+# on fman_policer_caps_supported() (decl from 0091), mirrors the HM /
+# NETIF_F_HW_VLAN_CTAG_RX block 0101 adds just above. Touches only
+# dpaa_netdev_init() (no overlap with 0104's hunks); sorts after 0104, before
+# 101-sfp. Spec sec 5.6.
+cp "$BOARD_PATCH_DIR/0104a-dpaa-netdev-advertise-hw-tc.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
