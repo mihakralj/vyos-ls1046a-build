@@ -4,16 +4,16 @@ Date: Sun, 7 Jun 2026 06:05:59 +0000
 Subject: [PATCH] ethernet: hw ingress-policer (DPAA1 FMan Policer offload)
 
 ---
- .../interfaces_ethernet.xml.in                | 86 ++++++++++++++++++++
+ .../interfaces_ethernet.xml.in                | 90 +++++++++++++++++++++
  python/vyos/ifconfig/ethernet.py              | 59 +++++++++++++
  src/conf_mode/interfaces_ethernet.py          | 19 ++++
- 3 files changed, 164 insertions(+)
+ 3 files changed, 168 insertions(+)
 
 diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
 index 5385916..34d5879 100644
 --- a/interface-definitions/interfaces_ethernet.xml.in
 +++ b/interface-definitions/interfaces_ethernet.xml.in
-@@ -139,6 +139,92 @@
+@@ -139,6 +139,96 @@
                </leafNode>
              </children>
            </node>
@@ -66,6 +66,10 @@ index 5385916..34d5879 100644
 +                    <format>&lt;number&gt;&lt;suffix&gt;</format>
 +                    <description>Bytes with scaling suffix (kb, mb, gb)</description>
 +                  </valueHelp>
++                  <constraint>
++                    <validator name="numeric" argument="--positive"/>
++                    <regex>\d+(b|kb|mb|gb)?</regex>
++                  </constraint>
 +                </properties>
 +              </leafNode>
 +              <leafNode name="peak-bandwidth">
@@ -135,10 +139,6 @@ index 02d4b76..2a87c79 100644
 +        ifname = self.ifname
 +        pref = '50'
 +
-+        # Ensure the ingress qdisc exists (shared with mirror/redirect). Adding
-+        # an already-present qdisc fails harmlessly - errors are ignored.
-+        self._popen(f'tc qdisc add dev {ifname} handle ffff: ingress 2>/dev/null')
-+
 +        # Always remove our own filter first so the call is idempotent and a
 +        # deleted policer leaves no stale hardware profile behind.
 +        self._popen(f'tc filter del dev {ifname} parent ffff: pref {pref} 2>/dev/null')
@@ -150,6 +150,10 @@ index 02d4b76..2a87c79 100644
 +        rate = policer.get('bandwidth')
 +        if not rate:
 +            return None
++
++        # Ensure the ingress qdisc exists (shared with mirror/redirect). Adding
++        # an already-present qdisc fails harmlessly - errors are ignored.
++        self._popen(f'tc qdisc add dev {ifname} handle ffff: ingress 2>/dev/null')
 +
 +        burst = policer.get('burst', '15k')
 +        peak = policer.get('peak_bandwidth')
