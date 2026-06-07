@@ -369,6 +369,14 @@ cp "$BOARD_PATCH_DIR/0104-dpaa-ingress-policer-tc-matchall-bridge.patch" "$KERNE
 # dpaa_netdev_init() (no overlap with 0104's hunks); sorts after 0104, before
 # 101-sfp. Spec sec 5.6.
 cp "$BOARD_PATCH_DIR/0104a-dpaa-netdev-advertise-hw-tc.patch" "$KERNEL_PATCHES/"
+# 0104b: M3-3e CEETM scaffold -- pins the QMan egress-shaper stub API
+# (dpaa_ceetm_qdisc_install / dpaa_ceetm_qdisc_destroy / dpaa_ceetm_supported)
+# + CONFIG_DPAA_HW_CEETM in dpaa_fman_caps.{c,h} + Kconfig. supported() returns
+# false and install() returns -ENOTSUPP until the productive QMan CEETM core
+# forward-port lands; fixes the VyOS CLI contract now. Touches only the tails
+# of caps.{c,h}/Kconfig (no overlap with 0104/0104a); sorts after 0104a, before
+# 101-sfp. Spec sec 5.7.
+cp "$BOARD_PATCH_DIR/0104b-dpaa-ceetm-stub.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
