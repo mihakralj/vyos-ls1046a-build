@@ -1,0 +1,172 @@
+diff --git a/drivers/net/ethernet/freescale/dpaa/Kconfig b/drivers/net/ethernet/freescale/dpaa/Kconfig
+index cfc3dd1..3b935ec 100644
+--- a/drivers/net/ethernet/freescale/dpaa/Kconfig
++++ b/drivers/net/ethernet/freescale/dpaa/Kconfig
+@@ -80,4 +80,33 @@ config DPAA_HW_POLICER_OFFLOAD
+ 	  now so downstream consumers can wire calls today.
+ 	  Safe to leave on: zero runtime cost without FMAN_CAP_POLICER_TRTCM.
+ 
++config DPAA_HW_CEETM
++	bool "DPAA: QMan CEETM egress-shaper scaffold (M3-3e)"
++	depends on DPAA_HW_CC_STEERING
++	default y
++	help
++	  Compile in the QMan CEETM egress-shaper scaffold API
++	  (dpaa_ceetm_qdisc_install / dpaa_ceetm_qdisc_destroy /
++	  dpaa_ceetm_supported) per
++	  specs/dpaa1-afxdp-modernization-spec.md sec 5.7.
++
++	  CEETM is QMan's hierarchical egress traffic manager: a class
++	  queue channel tree with strict-priority + weighted-fair
++	  sub-queues and per-channel/per-CQ CR/ER token-bucket shaping,
++	  optionally with colour-aware CGR tail-drop. It backs the VyOS
++	  `tc qdisc` CEETM offload (HTB / strict-priority -> hardware).
++
++	  Unlike the FMan PCD stubs, CEETM lives in QMan silicon and is
++	  NOT ucode-gated -- it works on any FMan microcode. This symbol
++	  controls only the scaffold: dpaa_ceetm_supported() returns
++	  false and install() returns -ENOTSUPP until the productive
++	  QMan CEETM core + ndo_setup_tc forward-port lands. The API is
++	  pinned now so the VyOS CLI consumer can compile against a
++	  stable contract. Safe to leave on: zero runtime cost.
++
++	  Depends on DPAA_HW_CC_STEERING because the scaffold object
++	  (dpaa_fman_caps.o) is gated by CONFIG_DPAA_HW_CC_STEERING in
++	  the Makefile; selecting CEETM without it would leave the
++	  exported symbols undefined at link time.
++
+ source "drivers/net/ethernet/freescale/dpaa/af_xdp_pool/Kconfig"
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+index 3bb03bb..063d3be 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -549,5 +549,39 @@ return (dpaa_fman_get_caps() & FMAN_CAP_POLICER_TRTCM) != 0;
+ }
+ EXPORT_SYMBOL_GPL(fman_policer_caps_supported);
+ 
++/*
++ * CEETM (Customer Edge Egress Traffic Management) -- M3-3e scaffold.
++ *
++ * Stub entry points for the QMan egress hierarchical shaper. CEETM is
++ * ucode-independent QMan silicon, so unlike the FMan PCD stubs above
++ * these do NOT consult dpaa_fman_get_caps(); they gate purely on
++ * whether the productive datapath has been compiled in. Until the
++ * QMan CEETM core + dpaa_eth ndo_setup_tc forward-port lands,
++ * dpaa_ceetm_supported() reports false and install() returns -ENOTSUPP,
++ * so the VyOS CLI consumer cleanly degrades to software qdiscs.
++ *
++ * Spec sec 5.7: CEETM API.
++ */
++int dpaa_ceetm_qdisc_install(struct net_device *dev,
++			     const struct dpaa_ceetm_config *cfg)
++{
++if (!dev || !cfg)
++return -EINVAL;
++return -ENOTSUPP;
++}
++EXPORT_SYMBOL_GPL(dpaa_ceetm_qdisc_install);
++
++void dpaa_ceetm_qdisc_destroy(struct net_device *dev)
++{
++/* No productive hierarchy to release in the scaffold; no-op. */
++}
++EXPORT_SYMBOL_GPL(dpaa_ceetm_qdisc_destroy);
++
++bool dpaa_ceetm_supported(void)
++{
++return false;
++}
++EXPORT_SYMBOL_GPL(dpaa_ceetm_supported);
++
+ MODULE_LICENSE("Dual BSD/GPL");
+ MODULE_DESCRIPTION("DPAA1 FMan PCD capability detection + HW-offload stubs");
+\ No newline at end of file
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+index bb6a42f..eb2aa1a 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+@@ -37,6 +37,7 @@ struct device;
+ struct fman;
+ struct fman_cc_static_tree;
+ struct fman_cc_key;
++struct net_device;
+ 
+ /* Spec sec 3.5: FMan PCD capability bitmask.  Each bit indicates that
+  * the loaded FMan microcode supports the corresponding PCD primitive.
+@@ -452,5 +453,75 @@ void fman_policer_destroy(struct fman *fm, u8 port_id, u8 profile_id);
+  */
+ bool fman_policer_caps_supported(void);
+ 
++/*
++ * CEETM (Customer Edge Egress Traffic Management) -- M3-3e scaffold.
++ *
++ * CEETM is QMan's egress hierarchical shaper: a class queue (CQ)
++ * channel hierarchy with strict-priority + weighted-fair sub-queues
++ * and per-channel/per-CQ shaping (CR/ER token buckets), plus optional
++ * colour-aware CGR tail-drop. It backs the VyOS `tc qdisc` CEETM
++ * offload contract (HTB/strict-priority -> hardware) per
++ * specs/dpaa1-afxdp-modernization-spec.md sec 5.7.
++ *
++ * Unlike the FMan PCD stubs above, CEETM lives in QMan silicon and is
++ * NOT gated on an FMan ucode capability bit -- it works on any ucode.
++ * The productive datapath (QMan CEETM core + dpaa_eth ndo_setup_tc
++ * binding) is a large LSDK forward-port that lands in follow-up
++ * patches; this scaffold fixes the API + Kconfig symbol now so the
++ * VyOS CLI consumer can be wired against a stable contract.
++ */
++
++/**
++ * struct dpaa_ceetm_config - opaque CEETM channel/CQ shaping request
++ * @reserved: placeholder; the productive forward-port replaces this
++ *            with the channel hierarchy, per-CQ weights, CR/ER token
++ *            bucket rates and CGR thresholds.
++ *
++ * Kept opaque on purpose: the scaffold pins the symbol and the
++ * by-pointer ABI so downstream consumers compile today without
++ * committing to the productive layout.
++ */
++struct dpaa_ceetm_config {
++	u32 reserved;
++};
++
++/**
++ * dpaa_ceetm_qdisc_install - attach a CEETM shaping hierarchy to a port
++ * @dev: the dpaa_eth net_device whose egress is to be shaped
++ * @cfg: requested channel/CQ shaping parameters
++ *
++ * Scaffold: returns -ENOTSUPP. The productive implementation claims a
++ * QMan CEETM logical network interface (LNI) for @dev's TX FQs, builds
++ * the class-queue channel hierarchy and programs CR/ER shapers.
++ *
++ * Spec sec 5.7: CEETM API.
++ */
++int dpaa_ceetm_qdisc_install(struct net_device *dev,
++			     const struct dpaa_ceetm_config *cfg);
++
++/**
++ * dpaa_ceetm_qdisc_destroy - tear down a port's CEETM hierarchy
++ * @dev: the dpaa_eth net_device to revert to its default TX FQs
++ *
++ * Scaffold: no-op. Idempotent -- destroying a port that never had a
++ * CEETM hierarchy installed is safe. The productive implementation
++ * releases the LNI, channels and CQs and restores the default 1:1
++ * TX FQ mapping.
++ *
++ * Spec sec 5.7: CEETM API.
++ */
++void dpaa_ceetm_qdisc_destroy(struct net_device *dev);
++
++/**
++ * dpaa_ceetm_supported - true when the CEETM offload datapath is present
++ *
++ * Scaffold: returns false unconditionally (the productive QMan CEETM
++ * core is not forward-ported yet). This is deliberately NOT an FMan
++ * capability check -- CEETM is QMan silicon and ucode-independent;
++ * the gate here is purely "is the productive code compiled in".
++ * Consumers MUST early-skip CEETM config when this returns false.
++ */
++bool dpaa_ceetm_supported(void);
++
+ 
+ #endif /* __DPAA_FMAN_CAPS_H */
+\ No newline at end of file
