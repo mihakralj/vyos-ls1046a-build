@@ -1,0 +1,290 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
+Date: Sat, 07 Jun 2026 00:00:00 +0000
+Subject: [PATCH] dpaa: ingress rate-limit policer via tc matchall+police -> fman_policer_install (M3-3d bridge)
+
+The productive FMan PCD Policer install body (board patch 0100,
+fman_policer_install/destroy in dpaa_fman_caps.c) is dormant on dpaa1:
+it is a kernel-C entry point with no userspace caller. Spec sec 5.6
+names the intended consumer -- back a tc/nftables ingress rate-limit
+offload -- but nothing wired it. This patch is that bridge: a
+.ndo_setup_tc TC_SETUP_BLOCK handler that accepts a single ingress
+'tc filter ... matchall action police' and maps it onto one FMan
+policer profile slot (slot 0) per netdev.
+
+What this adds
+--------------
+- dpaa_eth.h: struct dpaa_priv gains bool ingress_police_installed
+  (slot-0 bookkeeping; true between a successful TC_CLSMATCHALL_REPLACE
+  and its TC_CLSMATCHALL_DESTROY).
+
+- dpaa_eth.c: dpaa_setup_tc() is split. The existing MQPRIO body becomes
+  dpaa_setup_tc_mqprio(); a new TC_SETUP_BLOCK branch routes clsact
+  ingress blocks through flow_block_cb_setup_simple() (ingress_only=true)
+  to a matchall callback.
+
+- dpaa_setup_tc_matchall_replace(): validates exactly one FLOW_ACTION_POLICE
+  (bytes-mode only; exceed=drop; conform=accept/pipe/continue), resolves
+  struct fman * and the FMan port id the same way the HM bridge (patch
+  0101) does -- fman_bind(mac_dev->fman_dev) and
+  fman_port_get_qman_channel_id(mac_dev->port[RX]) -- builds a colour-blind
+  srTCM (peakrate absent) or trTCM (peakrate present) profile, converts the
+  tc bytes/s rates to FMan bits/s, and calls fman_policer_install() on
+  slot 0. matchall_destroy() releases the slot.
+
+- Gated on fman_policer_caps_supported(): a board whose ucode lacks
+  POLICER_TRTCM rejects the offload with -EOPNOTSUPP + an extack message,
+  so tc cleanly leaves the filter in software. Byte-identical behaviour to
+  mainline on such boards.
+
+Two new includes (net/pkt_cls.h, net/flow_offload.h) supply the tc
+matchall / flow_offload / flow_block APIs; the policer API and struct
+fman_policer_profile come from dpaa_fman_caps.h (already included).
+
+Spec sec 5.6: Policer offload.
+
+Signed-off-by: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index b41fd41..3b8f96a 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -31,6 +31,8 @@
+ #include <linux/bpf.h>
+ #include <linux/bpf_trace.h>
+ #include <net/xdp_sock_drv.h>
++#include <net/pkt_cls.h>
++#include <net/flow_offload.h>
+ #include "dpaa_flavor.h"
+ #include "dpaa_fman_caps.h"
+ #include <soc/fsl/bman.h>
+@@ -380,8 +382,7 @@ static void dpaa_get_stats64(struct net_device *net_dev,
+ 	}
+ }
+ 
+-static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
+-			 void *type_data)
++static int dpaa_setup_tc_mqprio(struct net_device *net_dev, void *type_data)
+ {
+ 	struct dpaa_priv *priv = netdev_priv(net_dev);
+ 	int num_txqs_per_tc = dpaa_num_txqs_per_tc();
+@@ -389,9 +390,6 @@ static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
+ 	u8 num_tc;
+ 	int i;
+ 
+-	if (type != TC_SETUP_QDISC_MQPRIO)
+-		return -EOPNOTSUPP;
+-
+ 	mqprio->hw = TC_MQPRIO_HW_OFFLOAD_TCS;
+ 	num_tc = mqprio->num_tc;
+ 
+@@ -421,6 +419,189 @@ out:
+ 	return 0;
+ }
+ 
++/* Ingress rate-limit policer offload (spec sec 5.6, board patch 0104).
++ *
++ * Bridges a single 'tc filter ... matchall action police' (or the
++ * equivalent nftables ingress rate-limit) onto the dormant FMan PCD
++ * Policer install body (fman_policer_install/destroy, board patch 0100).
++ * One profile slot per netdev (slot 0); the matchall classifier is the
++ * userspace surface the install body was missing.
++ *
++ * struct fman * and the FMan port id are resolved exactly as the HM
++ * VLAN-strip bridge (patch 0101) does: fman_bind(mac_dev->fman_dev) and
++ * fman_port_get_qman_channel_id(mac_dev->port[RX]).
++ *
++ * Fail-soft: gated on fman_policer_caps_supported() so a board whose
++ * ucode lacks POLICER_TRTCM rejects the offload with -EOPNOTSUPP and an
++ * extack message instead of a silent no-op; tc then leaves the filter in
++ * software.
++ */
++#define DPAA_POLICE_PROFILE_ID 0
++
++static int dpaa_setup_tc_matchall_replace(struct net_device *net_dev,
++					  struct tc_cls_matchall_offload *f)
++{
++	struct dpaa_priv *priv = netdev_priv(net_dev);
++	struct netlink_ext_ack *extack = f->common.extack;
++	struct fman_policer_profile prof = {};
++	const struct flow_action_entry *act;
++	struct fman *fm;
++	u8 port_id;
++	int err;
++
++	if (!fman_policer_caps_supported()) {
++		NL_SET_ERR_MSG_MOD(extack,
++				   "hardware policer not available on this ucode");
++		return -EOPNOTSUPP;
++	}
++
++	if (priv->ingress_police_installed) {
++		NL_SET_ERR_MSG_MOD(extack,
++				   "only one ingress policer per interface is supported");
++		return -EOPNOTSUPP;
++	}
++
++	if (!flow_offload_has_one_action(&f->rule->action)) {
++		NL_SET_ERR_MSG_MOD(extack,
++				   "matchall offload supports exactly one action");
++		return -EOPNOTSUPP;
++	}
++
++	if (!flow_action_basic_hw_stats_check(&f->rule->action, extack))
++		return -EOPNOTSUPP;
++
++	act = &f->rule->action.entries[0];
++	if (act->id != FLOW_ACTION_POLICE) {
++		NL_SET_ERR_MSG_MOD(extack,
++				   "matchall offload supports only the police action");
++		return -EOPNOTSUPP;
++	}
++
++	if (act->police.rate_pkt_ps) {
++		NL_SET_ERR_MSG_MOD(extack,
++				   "packet-per-second policing is not supported");
++		return -EOPNOTSUPP;
++	}
++
++	if (act->police.exceed.act_id != FLOW_ACTION_DROP) {
++		NL_SET_ERR_MSG_MOD(extack,
++				   "exceed action must be drop");
++		return -EOPNOTSUPP;
++	}
++
++	if (act->police.notexceed.act_id != FLOW_ACTION_ACCEPT &&
++	    act->police.notexceed.act_id != FLOW_ACTION_PIPE &&
++	    act->police.notexceed.act_id != FLOW_ACTION_CONTINUE) {
++		NL_SET_ERR_MSG_MOD(extack,
++				   "conform action must be accept/pipe/continue");
++		return -EOPNOTSUPP;
++	}
++
++	if (!priv->mac_dev)
++		return -ENODEV;
++
++	fm = fman_bind(priv->mac_dev->fman_dev);
++	if (!fm)
++		return -ENODEV;
++	port_id = (u8)fman_port_get_qman_channel_id(priv->mac_dev->port[RX]);
++
++	/* tc police rates are bytes/s, FMan profiles are bits/s; bursts are
++	 * bytes on both sides. peakrate present => trTCM (RFC 2698), else
++	 * srTCM (RFC 2697). Colour-blind: we do not honour an upstream colour.
++	 */
++	prof.color_mode = FMAN_POLICER_COLOR_BLIND;
++	prof.cir_bps    = act->police.rate_bytes_ps * 8;
++	prof.cbs_bytes  = act->police.burst;
++
++	if (act->police.peakrate_bytes_ps) {
++		prof.mode      = FMAN_POLICER_MODE_TRTCM;
++		prof.pir_bps   = act->police.peakrate_bytes_ps * 8;
++		prof.pbs_bytes = act->police.burst;
++	} else {
++		prof.mode      = FMAN_POLICER_MODE_SRTCM;
++	}
++
++	err = fman_policer_install(fm, port_id, DPAA_POLICE_PROFILE_ID, &prof);
++	if (err) {
++		NL_SET_ERR_MSG_MOD(extack, "policer install failed");
++		netif_err(priv, drv, net_dev,
++			  "ingress policer install failed: %d\n", err);
++		return err;
++	}
++
++	priv->ingress_police_installed = true;
++	return 0;
++}
++
++static int dpaa_setup_tc_matchall_destroy(struct net_device *net_dev)
++{
++	struct dpaa_priv *priv = netdev_priv(net_dev);
++	struct fman *fm;
++	u8 port_id;
++
++	if (!priv->ingress_police_installed)
++		return 0;
++
++	if (priv->mac_dev) {
++		fm = fman_bind(priv->mac_dev->fman_dev);
++		if (fm) {
++			port_id = (u8)fman_port_get_qman_channel_id(priv->mac_dev->port[RX]);
++			fman_policer_destroy(fm, port_id, DPAA_POLICE_PROFILE_ID);
++		}
++	}
++
++	priv->ingress_police_installed = false;
++	return 0;
++}
++
++static int dpaa_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
++				  void *cb_priv)
++{
++	struct net_device *net_dev = cb_priv;
++	struct tc_cls_matchall_offload *f = type_data;
++
++	if (type != TC_SETUP_CLSMATCHALL)
++		return -EOPNOTSUPP;
++
++	if (!tc_cls_can_offload_and_chain0(net_dev, type_data))
++		return -EOPNOTSUPP;
++
++	switch (f->command) {
++	case TC_CLSMATCHALL_REPLACE:
++		return dpaa_setup_tc_matchall_replace(net_dev, f);
++	case TC_CLSMATCHALL_DESTROY:
++		return dpaa_setup_tc_matchall_destroy(net_dev);
++	default:
++		return -EOPNOTSUPP;
++	}
++}
++
++static LIST_HEAD(dpaa_block_cb_list);
++
++static int dpaa_setup_tc_block(struct net_device *net_dev,
++			       struct flow_block_offload *f)
++{
++	if (f->binder_type != FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
++		return -EOPNOTSUPP;
++
++	return flow_block_cb_setup_simple(f, &dpaa_block_cb_list,
++					  dpaa_setup_tc_block_cb,
++					  net_dev, net_dev, true);
++}
++
++static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
++			 void *type_data)
++{
++	switch (type) {
++	case TC_SETUP_QDISC_MQPRIO:
++		return dpaa_setup_tc_mqprio(net_dev, type_data);
++	case TC_SETUP_BLOCK:
++		return dpaa_setup_tc_block(net_dev, type_data);
++	default:
++		return -EOPNOTSUPP;
++	}
++}
++
+ static struct mac_device *dpaa_mac_dev_get(struct platform_device *pdev)
+ {
+ 	struct dpaa_eth_data *eth_data;
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+index 9b8426b..5bb313a 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -193,6 +193,13 @@ struct dpaa_priv {
+  * Spec sec 5.5; board patch 0101.
+  */
+ u32 hm_vlan_strip_handle;
++	/* Ingress rate-limit policer installed via tc matchall+police
++	 * (.ndo_setup_tc TC_SETUP_BLOCK). True between a successful
++	 * TC_CLSMATCHALL_REPLACE and its TC_CLSMATCHALL_DESTROY. Bridges
++	 * the FMan PCD Policer (fman_policer_install(), profile slot 0).
++	 * Spec sec 5.6; board patch 0104.
++	 */
++	bool ingress_police_installed;
+ 	u32 msg_enable;	/* net_device message level */
+ 
+ 	struct {
+-- 
+2.39.5
