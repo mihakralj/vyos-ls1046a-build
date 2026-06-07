@@ -342,6 +342,23 @@ cp "$BOARD_PATCH_DIR/0103a-dpaa1-true-zc-rx-recover-swring.patch" "$KERNEL_PATCH
 # together (firing either alone -> sec 6.1.8 crash class). Byte-identical on
 # default/vpp (only reached on XDP_ZEROCOPY bind). Spec sec 6.1.16.
 cp "$BOARD_PATCH_DIR/0103b-dpaa1-true-zc-rx-reprogram-redirect.patch" "$KERNEL_PATCHES/"
+# 0103c: true-ZC RX stage-3 -- sub-increment-4 reorder + IPI wakeup +
+# unconditional NAPI refill + pre-arm RX NEED_WAKEUP + BPID restore on
+# detach. Makes the productive xsk_zc_rx_redirect oracle (0103b) actually
+# reachable under load. Edits af_xdp_pool_main.c (+ dpaa_eth) on top of
+# 0103b; sorts after 0103b, before 0104. Spec sec 6.1.17.
+cp "$BOARD_PATCH_DIR/0103c-dpaa1-true-zc-rx-classify-before-bpid-guard.patch" "$KERNEL_PATCHES/"
+# 0103e: bpf_net_ctx NULL-deref fix in af_xdp_pool_rx_hook (the rx_hook
+# runs outside the NAPI bpf_net_ctx the redirect path assumes). Stacks on
+# 0103c. Spec sec 6.1.17.
+cp "$BOARD_PATCH_DIR/0103e-dpaa1-true-zc-rx-bpf-net-ctx-fix.patch" "$KERNEL_PATCHES/"
+# 0104: PRODUCTIVE M3-3d policer consumer -- .ndo_setup_tc TC_SETUP_BLOCK
+# handler mapping a single ingress `tc filter matchall action police` onto
+# fman_policer_install() slot 0 (board 0100). Fail-soft -EOPNOTSUPP when
+# !fman_policer_caps_supported(). Edits dpaa_eth.c/.h only; sorts after
+# 0103e, before 101-sfp. This is the kernel backend for the vyos-1x-025
+# `set interfaces ethernet ethX ingress-policer` CLI. Spec sec 5.6.
+cp "$BOARD_PATCH_DIR/0104-dpaa-ingress-policer-tc-matchall-bridge.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
