@@ -1,57 +1,3 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
-Date: Fri, 29 May 2026 00:00:00 +0000
-Subject: [PATCH] fman: add PCD KeyGen exact-match scheme API (common, all
- flavors)
-
-Forward-port of the FMan PCD KeyGen layer from the ask20 branch into the
-COMMON board patch stack (built-in for default/vpp/ask via the
-FSL_FMAN_PCD config from patch 0092). Combines the ask20 0005
-(KeyGen public API + struct/helper promotion) and 0006 (KeyGen
-silicon-programming body) patches into a single re-anchored commit
-against 6.18.31. This is PR2 of the dpaa1 PCD forward-port closing
-M3-3b/M3-3c/M3-3d.
-
-What this adds
---------------
-- fman_keygen.c: promotes the previously file-static struct keygen_scheme
-  and struct fman_keygen to a new module-internal header
-  fman_keygen_internal.h, and demotes keygen_scheme_setup() /
-  keygen_bind_port_to_schemes() from file-static to EXPORT_SYMBOL_GPL so a
-  sibling translation unit can populate a scheme slot (match_vector != 0)
-  before delegating the KGSE_* register write to these existing helpers.
-  No silicon behaviour change for the existing RSS-hashing path
-  (keygen_port_hashing_init() etc.) - only linkage of two helpers changed.
-
-- fman_pcd_kg.c (new, ~399 LOC): the public KeyGen API.
-  fman_pcd_kg_scheme_create() allocates a free scheme id, builds the
-  KGSE_MV match-vector for the canonical IPv4 5-tuple shape (SIP/DIP/proto/
-  SPORT/DPORT via parse-result offsets 12/16/9/20/22, silicon bit values
-  per RM 8.7.4 KGSE_MV), populates keygen->schemes[id], and calls the
-  promoted keygen_scheme_setup() helper. fman_pcd_kg_bind_port() wires the
-  port-binding AR register via keygen_bind_port_to_schemes().
-  fman_pcd_kg_scheme_destroy() unbinds, disables, unlinks and frees.
-  fman_pcd_kg_attach_cc() is intentionally still -EOPNOTSUPP: the KGSE_CCBS
-  wiring depends on the CC tree subsystem (struct fman_pcd_cc_tree) which
-  lands in a follow-up PCD patch.
-
-- include/linux/fsl/fman_pcd.h: appends the public KG surface
-  (enum fman_pcd_kg_extract_from, struct fman_pcd_kg_extract_spec,
-  struct fman_pcd_kg_scheme_params, and the four entry points). All four
-  entry points are EXPORT_SYMBOL_GPL.
-
-- Makefile: adds fman_pcd_kg.o to the FSL_FMAN_PCD object list.
-
-The KG_SCH_KN_* match-vector bit constants are PRIVATE to fman_keygen.c
-upstream (defined inline, not exported in any header); they are
-replicated locally in fman_pcd_kg.c with the RM 8.7.4 KGSE_MV register
-citation as the silicon-fact source. The supported match-vector shape at
-this iteration is IPv4 5-tuple only; wider shapes (IPv6/MPLS/IPSEC)
-return -EOPNOTSUPP loudly and extend kg_build_match_vector() in a
-follow-up.
-
-Signed-off-by: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
----
 diff --git a/drivers/net/ethernet/freescale/fman/Makefile b/drivers/net/ethernet/freescale/fman/Makefile
 index cc0ba7e..24a886b 100644
 --- a/drivers/net/ethernet/freescale/fman/Makefile
@@ -65,7 +11,7 @@ index cc0ba7e..24a886b 100644
  fsl_dpaa_fman_port-objs := fman_port.o
  fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
 diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
-index e73f6ef..381d639 100644
+index e73f6ef..3377b70 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
 @@ -8,6 +8,7 @@
@@ -76,7 +22,25 @@ index e73f6ef..381d639 100644
  
  /* Maximum number of HW Ports */
  #define FMAN_MAX_NUM_OF_HW_PORTS		64
-@@ -193,44 +194,6 @@ struct fman_kg_regs {
+@@ -90,9 +91,17 @@
+ 
+ /* NIA values */
+ #define NIA_ENG_BMI			0x00500000
++#define NIA_ENG_PLCR			0x004C0000
+ #define NIA_BMI_AC_ENQ_FRAME		0x00000002
+ #define ENQUEUE_KG_DFLT_NIA		(NIA_ENG_BMI | NIA_BMI_AC_ENQ_FRAME)
+ 
++/* KGSE_MODE next-action selector: when set, the scheme's next engine is the
++ * Policer (the mode NIA points at NIA_ENG_PLCR and KGSE_PPC carries the
++ * absolute profile id). When clear, the default BMI-enqueue path is used.
++ * RM 8.7.4 (KGSE_MODE). 0xC04C0000 = EN | NIA_PLCR_SELECT | NIA_ENG_PLCR.
++ */
++#define KG_SCH_MODE_NIA_PLCR		0x40000000
++
+ /* Hard-coded configuration:
+  * These values are used as hard-coded values for KeyGen configuration
+  * and they replace user selections for this hard-coded version
+@@ -193,44 +202,6 @@ struct fman_kg_regs {
  	u32 fmkg_ar;	/* 0x1FC: KeyGen Action Register */
  };
  
@@ -121,7 +85,7 @@ index e73f6ef..381d639 100644
  
  /* keygen_write_ar_wait
   *
-@@ -455,7 +418,7 @@ static struct keygen_scheme *get_scheme(struct fman_keygen *keygen,
+@@ -455,7 +426,7 @@ static struct keygen_scheme *get_scheme(struct fman_keygen *keygen,
   *
   * Return: Zero for success or error code in case of failure
   */
@@ -130,7 +94,7 @@ index e73f6ef..381d639 100644
  				       u8 scheme_id,
  					bool bind)
  {
-@@ -495,6 +458,7 @@ static int keygen_bind_port_to_schemes(struct fman_keygen *keygen,
+@@ -495,6 +466,7 @@ static int keygen_bind_port_to_schemes(struct fman_keygen *keygen,
  
  	return 0;
  }
@@ -138,7 +102,7 @@ index e73f6ef..381d639 100644
  
  /* keygen_scheme_setup
   *
-@@ -506,7 +470,7 @@ static int keygen_bind_port_to_schemes(struct fman_keygen *keygen,
+@@ -506,7 +478,7 @@ static int keygen_bind_port_to_schemes(struct fman_keygen *keygen,
   *
   * Return: Zero for success or error code in case of failure
   */
@@ -147,7 +111,40 @@ index e73f6ef..381d639 100644
  			       bool enable)
  {
  	struct fman_kg_regs __iomem *keygen_regs = keygen->keygen_regs;
-@@ -611,6 +575,7 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+@@ -534,12 +506,30 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+ 	if (enable) {
+ 		/* Enable Scheme */
+ 		tmp_reg |= KG_SCH_MODE_EN;
+-		/* Enqueue frame NIA */
+-		tmp_reg |= ENQUEUE_KG_DFLT_NIA;
++		if (scheme->next_engine == 1) {
++			/* Next engine = Policer: route the frame to the
++			 * policer profile in scheme->policer_profile_id. The
++			 * profile's own per-colour NIA (programmed by
++			 * fman_pcd_plcr) then decides enqueue vs drop. The
++			 * destination FQID still comes from kgse_fqb below.
++			 */
++			tmp_reg |= KG_SCH_MODE_NIA_PLCR | NIA_ENG_PLCR;
++		} else {
++			/* Enqueue frame NIA */
++			tmp_reg |= ENQUEUE_KG_DFLT_NIA;
++		}
+ 	}
+ 
+ 	scheme_regs.kgse_mode = tmp_reg;
+ 
++	/* Policer Profile Command (KGSE_PPC): absolute profile id with no
++	 * shift/mask (action field 0 = "use the profile in this register").
++	 * Only meaningful when the mode NIA points at the policer; left at 0
++	 * (from the memset above) for the BMI-enqueue path.
++	 */
++	if (enable && scheme->next_engine == 1)
++		scheme_regs.kgse_ppc = scheme->policer_profile_id;
++
+ 	scheme_regs.kgse_mv = scheme->match_vector;
+ 
+ 	/* Scheme don't override StorageProfile:
+@@ -611,6 +601,7 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
  
  	return 0;
  }
@@ -157,10 +154,10 @@ index e73f6ef..381d639 100644
   *
 diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h b/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
 new file mode 100644
-index 0000000..0737e94
+index 0000000..bd8b868
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,114 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * FMan KeyGen — intra-module internal header.
@@ -234,6 +231,17 @@ index 0000000..0737e94
 +		 * use the 24 LSB's after shifting right
 +		 */
 +	u32 match_vector;	/* Match Vector */
++	u8 next_engine;
++		/* Post-KeyGen next-action engine for this scheme:
++		 *   0 = BMI enqueue (ENQUEUE_KG_DFLT_NIA, the default)
++		 *   1 = Policer    (NIA_ENG_PLCR, KGSE_PPC = policer_profile_id)
++		 * Mirrors enum fman_pcd_kg_next_engine in the public header;
++		 * kept as a plain u8 here so this module-internal header does
++		 * not depend on <linux/fsl/fman_pcd.h>.
++		 */
++	u8 policer_profile_id;	/* Absolute policer profile id, valid when
++				 * next_engine == 1 (programmed into KGSE_PPC).
++				 */
 +};
 +
 +/* KeyGen driver data. Mirrors the file-static definition formerly in
@@ -266,10 +274,10 @@ index 0000000..0737e94
 +#endif /* __FMAN_KEYGEN_INTERNAL_H */
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
 new file mode 100644
-index 0000000..904ea1f
+index 0000000..bb8ff11
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
-@@ -0,0 +1,399 @@
+@@ -0,0 +1,429 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * FMan PCD KeyGen (KG) - silicon-programming layer.
@@ -371,6 +379,8 @@ index 0000000..904ea1f
 +	struct fman_pcd_kg_extract_spec extracts[8];
 +	u32 default_fqid;
 +	bool use_hash;
++	u8 next_engine;		/* 0 = BMI enqueue, 1 = policer */
++	u8 policer_profile_id;	/* valid when next_engine == 1 */
 +};
 +
 +/*
@@ -486,7 +496,18 @@ index 0000000..904ea1f
 +
 +	if (!pcd || !params)
 +		return ERR_PTR(-EINVAL);
-+	if (params->num_extracts == 0 || params->num_extracts > 8)
++	if (params->num_extracts > 8)
++		return ERR_PTR(-EINVAL);
++	/*
++	 * num_extracts == 0 is only valid for a policer-pass-through
++	 * "catch-all" scheme: no key is extracted, match_vector is left 0 so
++	 * every frame on the bound port selects this scheme, and the frame is
++	 * handed straight to the policer (next_engine == PLCR). An ENQUEUE
++	 * scheme with no extracts would have nothing to match on and is
++	 * rejected.
++	 */
++	if (params->num_extracts == 0 &&
++	    params->next_engine != FMAN_PCD_KG_NEXT_ENGINE_PLCR)
 +		return ERR_PTR(-EINVAL);
 +	/*
 +	 * default_fqid is dispatched-to only when use_hash == false.  When
@@ -507,9 +528,20 @@ index 0000000..904ea1f
 +	keygen = fman->keygen;
 +	lock = fman_pcd_get_lock(pcd);
 +
-+	err = kg_build_match_vector(params, &match_vector);
-+	if (err)
-+		return ERR_PTR(err);
++	if (params->num_extracts == 0) {
++		/*
++		 * Catch-all policer-pass-through scheme: no key extraction.
++		 * match_vector = 0 means the scheme imposes no parser-result
++		 * match requirement, so every frame on the bound port selects
++		 * it (same "match everything" semantics the RSS-hashing path
++		 * relies on).
++		 */
++		match_vector = 0;
++	} else {
++		err = kg_build_match_vector(params, &match_vector);
++		if (err)
++			return ERR_PTR(err);
++	}
 +
 +	scheme = kzalloc(sizeof(*scheme), GFP_KERNEL);
 +	if (!scheme)
@@ -534,6 +566,9 @@ index 0000000..904ea1f
 +	slot->match_vector = match_vector;
 +	slot->base_fqid = params->default_fqid;
 +	slot->use_hashing = params->use_hash;
++	slot->next_engine =
++		(params->next_engine == FMAN_PCD_KG_NEXT_ENGINE_PLCR) ? 1 : 0;
++	slot->policer_profile_id = params->policer_profile_id;
 +	if (params->use_hash) {
 +		/* Conservative defaults for the first cut.  Field-level
 +		 * tuning (hash_fqid_count, symmetric_hash, hashShift)
@@ -560,6 +595,9 @@ index 0000000..904ea1f
 +	       params->num_extracts * sizeof(scheme->extracts[0]));
 +	scheme->default_fqid = params->default_fqid;
 +	scheme->use_hash     = params->use_hash;
++	scheme->next_engine  =
++		(params->next_engine == FMAN_PCD_KG_NEXT_ENGINE_PLCR) ? 1 : 0;
++	scheme->policer_profile_id = params->policer_profile_id;
 +	INIT_LIST_HEAD(&scheme->node);
 +	list_add_tail(&scheme->node, fman_pcd_get_kg_list(pcd));
 +
@@ -670,10 +708,10 @@ index 0000000..904ea1f
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_kg_scheme_destroy);
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index 442c49d..13bc9d6 100644
+index 442c49d..80ecfa9 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
-@@ -74,4 +74,123 @@ struct fman_pcd *fman_pcd_init(struct fman *fman);
+@@ -74,4 +74,150 @@ struct fman_pcd *fman_pcd_init(struct fman *fman);
  void fman_pcd_release(struct fman_pcd *pcd);
  struct fman_pcd_muram_budget fman_pcd_get_muram_budget(struct fman_pcd *pcd);
  
@@ -706,6 +744,25 @@ index 442c49d..13bc9d6 100644
 +};
 +
 +/**
++ * enum fman_pcd_kg_next_engine - post-KeyGen dispatch target for a scheme.
++ * @FMAN_PCD_KG_NEXT_ENGINE_ENQUEUE: enqueue the frame directly via BMI to the
++ *                                   scheme's FQID (the historical default).
++ * @FMAN_PCD_KG_NEXT_ENGINE_PLCR:    hand the frame to the policer profile in
++ *                                   @policer_profile_id (KGSE_PPC) before the
++ *                                   profile's own green/yellow/red NIA decides
++ *                                   enqueue-vs-drop. The destination FQID is
++ *                                   still taken from the scheme (@default_fqid).
++ *
++ * Mirrors the KGSE_MODE next-action-NIA encoding (RM 8.7.4): ENQUEUE selects
++ * NIA_ENG_BMI|ENQ_FRAME; PLCR selects the policer-engine NIA with the
++ * scheme's KGSE_PPC carrying the absolute profile id.
++ */
++enum fman_pcd_kg_next_engine {
++	FMAN_PCD_KG_NEXT_ENGINE_ENQUEUE = 0,
++	FMAN_PCD_KG_NEXT_ENGINE_PLCR,
++};
++
++/**
 + * struct fman_pcd_kg_extract_spec - one extract slot inside a scheme.
 + * @src:    where the byte run comes from (frame / parse result / default)
 + * @offset: starting byte offset (0..63 for parse result, 0..127 for frame)
@@ -732,6 +789,12 @@ index 442c49d..13bc9d6 100644
 + * @default_fqid: fallback FQID when CC chaining is not used
 + * @use_hash:   true = hash extracts and select target via CC; false = direct
 + *              FQID via @default_fqid only
++ * @next_engine: post-KeyGen dispatch target (enqueue vs policer). Defaults to
++ *              FMAN_PCD_KG_NEXT_ENGINE_ENQUEUE (value 0) for callers that
++ *              zero-initialise this struct, preserving the historical
++ *              enqueue-only behaviour.
++ * @policer_profile_id: absolute FMan policer profile id to route through when
++ *              @next_engine == FMAN_PCD_KG_NEXT_ENGINE_PLCR; ignored otherwise.
 + *
 + * Mainline LS1046A FMan v3 silicon has 32 KG schemes (8 per netcfg
 + * partition).  Each scheme is single-attach to a port.
@@ -742,6 +805,8 @@ index 442c49d..13bc9d6 100644
 +	struct fman_pcd_kg_extract_spec extracts[8];
 +	u32 default_fqid;
 +	bool use_hash;
++	enum fman_pcd_kg_next_engine next_engine;
++	u8 policer_profile_id;
 +};
 +
 +/**
@@ -797,5 +862,3 @@ index 442c49d..13bc9d6 100644
 +void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme);
 +
  #endif /* __LINUX_FSL_FMAN_PCD_H */
--- 
-2.39.5
