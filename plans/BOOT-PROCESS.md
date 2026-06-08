@@ -15,7 +15,7 @@ Both paths use `booti` (raw ARM64 `Image` format). `bootm` (uImage) and `bootefi
 
 ## U-Boot Environment
 
-Stored in SPI NOR flash at `/dev/mtd3` ("uboot-env", QSPI, 4 KiB erase sector, 8 KiB env size). Written automatically by `vyos-postinstall` Phase 1 (`setup_uboot_env_once`) via `fw_setenv` on first boot. Manual U-Boot console setup (INSTALL.md Step 4) is available as a fallback if `fw_setenv` fails. Config: `/etc/fw_env.config` → `/dev/mtd3 0x0 0x2000 0x1000`.
+Stored in SPI NOR flash at `/dev/mtd2` ("uboot-env", QSPI, 4 KiB erase sector, 8 KiB env size). Written automatically by `vyos-postinstall` Phase 1 (`setup_uboot_env_once`) via `fw_setenv` on first boot. Manual U-Boot console setup (INSTALL.md Step 4) is available as a fallback if `fw_setenv` fails. Config: `/etc/fw_env.config` → `/dev/mtd2 0x0 0x2000 0x1000`.
 
 ### Variables
 
@@ -307,7 +307,7 @@ For `add system image` (upgrade), patch 011 copies all `.dtb` files from the ISO
 
 VyOS `system_option.py` may trigger a kexec reboot if `/proc/cmdline` doesn't match `MANAGED_PARAMS` from `config.boot`. On this board:
 
-- `kexec-load.service` and `kexec.service` are **NOT masked** — mainline 6.6 QBMan kexec fix (`bman_requires_cleanup()` in `drivers/soc/fsl/qbman/`) allows kexec on DPAA1. VyOS managed-params self-healing works normally.
+- `kexec-load.service` and `kexec.service` are **NOT masked** — the mainline QBMan kexec fix (`bman_requires_cleanup()` in `drivers/soc/fsl/qbman/`, present in the 6.18.x kernel we ship) allows kexec on DPAA1. VyOS managed-params self-healing works normally.
 - The managed param `panic=60` is pre-baked into U-Boot bootargs to match `config.boot.default`. Hugepages are NOT in bootargs by default — they are added dynamically when VPP is configured via `set vpp settings`, which triggers a one-time kexec to apply them.
 
 ---
@@ -318,16 +318,16 @@ QSPI NOR flash (Micron mt25qu512a, 64 MiB, 4 KiB erase sector). Verified against
 
 | MTD | Offset | Name | Size | Contents |
 |-----|--------|------|------|---------|
-| mtd1 | `0x000000` | `rcw-bl2` | 1 MiB | RCW + BL2 |
-| mtd2 | `0x100000` | `uboot` | 2 MiB | U-Boot |
-| **mtd3** | **`0x300000`** | **`uboot-env`** | **1 MiB** | **U-Boot environment** (8 KiB env, 4 KiB sector) |
-| mtd4 | `0x400000` | `fman-ucode` | 1 MiB | FMan microcode (injected by U-Boot into DTB) |
-| mtd5 | `0x500000` | `recovery-dtb` | 1 MiB | Recovery device tree |
-| mtd6 | `0x600000` | `backup` | 4 MiB | Backup |
-| mtd7 | `0xa00000` | `kernel-initramfs` | 22 MiB | Recovery kernel + initramfs |
-| mtd8 | `0x2000000` | `unallocated` | 32 MiB | Remaining space |
+| mtd0 | `0x000000` | `rcw-bl2` | 1 MiB | RCW + BL2 |
+| mtd1 | `0x100000` | `uboot` | 2 MiB | U-Boot |
+| **mtd2** | **`0x300000`** | **`uboot-env`** | **1 MiB** | **U-Boot environment** (8 KiB env, 4 KiB sector) |
+| mtd3 | `0x400000` | `fman-ucode` | 1 MiB | FMan microcode (injected by U-Boot into DTB) |
+| mtd4 | `0x500000` | `recovery-dtb` | 1 MiB | Recovery device tree |
+| mtd5 | `0x600000` | `backup` | 4 MiB | Backup |
+| mtd6 | `0xa00000` | `kernel-initramfs` | 22 MiB | Recovery kernel + initramfs |
+| mtd7 | `0x2000000` | `unallocated` | 32 MiB | Remaining space |
 
-`/etc/fw_env.config` → `/dev/mtd3 0x0 0x2000 0x1000` (8 KiB env size, 4 KiB sector). Used by `fw_setenv`/`fw_printenv` from `libubootenv-tool`.
+`/etc/fw_env.config` → `/dev/mtd2 0x0 0x2000 0x1000` (8 KiB env size, 4 KiB sector). Used by `fw_setenv`/`fw_printenv` from `libubootenv-tool`. Numbering matches `/proc/mtd` on current builds (`mtd0=rcw-bl2 … mtd2=uboot-env … mtd3=fman-ucode`); older builds had `uboot-env` at `mtd3` — always verify with `cat /proc/mtd`.
 
 ---
 
@@ -342,7 +342,7 @@ QSPI NOR flash (Micron mt25qu512a, 64 MiB, 4 KiB erase sector). Verified against
 | `ERROR: Did not find a cmdline Flattened Device Tree` | DTB loaded at `0x90000000` (`kernel_comp_addr_r`) — overwritten by kernel decompression | Always use `${fdt_addr_r}` = `0x88000000` |
 | `Wrong Ramdisk Image Format` | `booti addr addr:size fdt` — missing `:${filesize}` colon-size suffix | Ensure initrd loads last; use `${ramdisk_addr_r}:${filesize}` |
 | Boot loops (kexec) | `panic` in bootargs doesn't match `config.boot` | Verify bootargs include `panic=60`. Hugepages are added dynamically by VPP — no need in base bootargs |
-| `fw_setenv` fails | `/dev/mtd3` missing — `CONFIG_SPI_FSL_QSPI` not built-in | Verify `CONFIG_SPI_FSL_QSPI=y` in kernel config |
+| `fw_setenv` fails | `/dev/mtd2` missing — `CONFIG_SPI_FSL_QSPI` not built-in | Verify `CONFIG_SPI_FSL_QSPI=y` in kernel config |
 | `fw_printenv` CRC error | DTS partition offsets don't match actual flash layout | Verify `cat /proc/mtd` matches DTS; check `fw_env.config` env_size matches U-Boot `CONFIG_ENV_SIZE` |
 | No network interfaces after boot | DPAA1 stack built as modules instead of `=y` | All `CONFIG_FSL_FMAN/DPAA/BMAN/QMAN/PAMU` must be `=y` |
 | CPU locked at 700 MHz | `CONFIG_QORIQ_CPUFREQ=m` — module loads too late, PLLs released | Set `CONFIG_QORIQ_CPUFREQ=y` |

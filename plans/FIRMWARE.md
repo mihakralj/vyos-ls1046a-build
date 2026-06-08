@@ -108,13 +108,13 @@ Verified against live `/proc/mtd` (2026-03-29, U-Boot 2025.04). Matches the `fix
 
 | MTD | Offset | Size | Content |
 |-----|--------|------|---------|
-| mtd1 | `0x000000` | 1 MiB | RCW + BL2 |
-| mtd2 | `0x100000` | 2 MiB | U-Boot |
-| **mtd3** | **`0x300000`** | **1 MiB** | **U-Boot env** — `fw_setenv` target (8 KiB env, 4 KiB sector) |
-| mtd4 | `0x400000` | 1 MiB | FMan microcode |
-| mtd5 | `0x500000` | 1 MiB | Recovery DTB |
-| mtd6 | `0x600000` | 4 MiB | Backup |
-| mtd7 | `0xa00000` | 22 MiB | Recovery kernel + initramfs |
-| mtd8 | `0x2000000` | 32 MiB | Unallocated |
+| mtd0 | `0x000000` | 1 MiB | RCW + BL2 |
+| mtd1 | `0x100000` | 2 MiB | U-Boot |
+| **mtd2** | **`0x300000`** | **1 MiB** | **U-Boot env** — `fw_setenv` target (8 KiB env, 4 KiB sector) |
+| mtd3 | `0x400000` | 1 MiB | FMan microcode |
+| mtd4 | `0x500000` | 1 MiB | Recovery DTB |
+| mtd5 | `0x600000` | 4 MiB | Backup |
+| mtd6 | `0xa00000` | 22 MiB | Recovery kernel + initramfs |
+| mtd7 | `0x2000000` | 32 MiB | Unallocated |
 
-`/etc/fw_env.config` → `/dev/mtd3 0x0 0x2000 0x1000` (8 KiB env, 4 KiB sector).
+`/etc/fw_env.config` → `/dev/mtd2 0x0 0x2000 0x1000` (8 KiB env, 4 KiB sector). Numbering matches `/proc/mtd` on current builds; older builds had `uboot-env` at `mtd3` — always verify with `cat /proc/mtd`.
