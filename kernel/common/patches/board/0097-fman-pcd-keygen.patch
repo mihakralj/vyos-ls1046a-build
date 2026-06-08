@@ -621,7 +621,7 @@ index 0000000..bb8ff11
 +
 +	if (!scheme)
 +		return -EINVAL;
-+	if (port_id == 0 || port_id > 10)
++	if (port_id == 0 || port_id > 0x3f)	/* max FMan v3 BMI hw port id */
 +		return -EINVAL;
 +
 +	fman = fman_pcd_get_fman(scheme->pcd);
