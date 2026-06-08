@@ -377,6 +377,16 @@ cp "$BOARD_PATCH_DIR/0104a-dpaa-netdev-advertise-hw-tc.patch" "$KERNEL_PATCHES/"
 # of caps.{c,h}/Kconfig (no overlap with 0104/0104a); sorts after 0104a, before
 # 101-sfp. Spec sec 5.7.
 cp "$BOARD_PATCH_DIR/0104b-dpaa-ceetm-stub.patch" "$KERNEL_PATCHES/"
+# 0105: dormant exported fman_port_set_cc_base() RX coarse-classification
+# base primitive (M3-3b keystone, WRITE mechanism, no caller). Programs the
+# BMI fmbm_rccb register -- the RAW MURAM offset of the 0098 CC tree root
+# (NO >>4) -- which mainline NEVER writes, the single missing port->CC link
+# that left M2/M3 static CC steering non-productive. The Parser->KeyGen half
+# is already wired by fman_port_use_kg_hash(). Edits fman_port.c/.h only;
+# independent of the 0092-0104b PCD stack (cross-module EXPORT consumed by
+# the future productive caller). Sorts after 0104b, before 101-sfp. Spec
+# sec 13.
+cp "$BOARD_PATCH_DIR/0105-fman-port-set-cc-base-primitive.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
