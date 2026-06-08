@@ -1,0 +1,141 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Sun, 08 Jun 2026 18:10:00 +0000
+Subject: [PATCH] fman_port: add dormant fman_port_set_cc_base() RX coarse-
+ classification base primitive (M3-3b keystone, write mechanism, no caller)
+
+M3-3b (per-flow exact-match RX FQ steering, spec sec 13) requires binding
+an FMan RX BMI port to the root of a Coarse-Classification (CC) tree so
+that, after the Parser hands frames to KeyGen, the matched key drives a
+CONT_LOOKUP into the static CC tree installed by patch 0098 and the frame
+is enqueued onto the per-flow RX FQ named in the matching CC action
+descriptor. Sourcing the NXP SDK (FM/Port/fm_port.c FM_PORT_SetPCD,
+fm_port.c:1256/1278) against mainline 6.18 established the single missing
+hardware link:
+
+  The port->KeyGen->CC routing has TWO halves. The Parser->KeyGen half is
+  ALREADY wired: fman_port_use_kg_hash() (fman_port.c:1511, exported,
+  already called by the AF_XDP RSS path at fman_port_init) writes
+  fmbm_rfpne = NIA_ENG_HWK so frames leave the Parser for KeyGen. The
+  KeyGen->CC half is the BMI "Rx Coarse Classification Base" register
+  fmbm_rccb (struct fman_port_rx_bmi_regs, fman_port.c:188). grep across
+  mainline confirms fmbm_rccb is NEVER written by any mainline code path
+  -- it stays 0 -- which is precisely why the M2/M3 static CC tree (0098)
+  installs into MURAM but never receives frames: the port has no pointer
+  to the tree root, so KeyGen's CC_EN scheme mode has nowhere to dispatch.
+
+Encoding (authoritative, SDK fm_port.c:1256/1278 + sdk_fm_cc.c
+FmPcdCcBindTree:5784): the value programmed into fmbm_rccb is the RAW
+MURAM byte offset of the CC tree root --
+ccTreePhysOffset = XX_VirtToPhys(ccTreeBaseAddr) - physicalMuramBase --
+with NO >>4 shift. (The >>4 applies only to AD next-pointers encoded
+INSIDE a CONT_LOOKUP descriptor, not to the port's tree-root base.) So
+the caller passes the CC tree's MURAM group offset directly; patch 0098's
+struct fman_pcd_cc_tree.group_off is exactly that value (a sibling getter
+lands alongside this primitive's productive consumer).
+
+Surveying mainline 6.18.33 confirms there is NO exported API to set a
+live RX port's CC base: struct fman_port and its bmi_regs are private to
+fman_port.c, and fmbm_rccb has no writer at all. This patch lands the
+durable in-tree WRITE primitive, DORMANT:
+
+  int fman_port_set_cc_base(struct fman_port *port, u32 cc_muram_off);
+
+It validates a non-NULL RX port and iowrite32be()s @cc_muram_off into
+port->bmi_regs->rx.fmbm_rccb. That is the entire keystone hardware write:
+once a caller passes the MURAM offset of the 0098 CC tree root, KeyGen's
+CC-mode scheme (the attach_cc CCOBASE/CCBS half landing in 0097) will
+dispatch matched frames into the tree and per-flow steering becomes
+productive.
+
+Why land it dormant now, with NO caller: it mirrors the exact cadence
+every prior FMan offload primitive followed on this board --
+fman_hm_node_install (0090), fman_policer_install (0091), and
+fman_port_set_rx_bpool (0102) all shipped as exported entry points with
+no productive caller before their consumers landed. A reviewable,
+compiled, EXPORT_SYMBOL_GPL'd primitive with zero call sites is the
+standard de-risking step here. The productive call site (invoke
+fman_port_set_cc_base() with fman_pcd_cc_tree.group_off, ordered FIRST in
+the SetPCD sequence per SDK FM_PORT_SetPCD, then bind the KeyGen CC-mode
+scheme) is the DUT-gated final sub-increment.
+
+Why this is byte-identical to mainline on every flavor: the symbol is
+exported but called by nobody in this patch, so fmbm_rccb is never
+written. The RX/TX datapaths and fman_port_init() are untouched. `nm`
+will show the export; the running kernel behaves exactly as the 0104b
+build does.
+
+Spec sec 13 (M3-3b CC steering keystone), fmbm_rccb WRITE primitive.
+
+Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 5248fe3..0fdad72 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -1520,6 +1520,46 @@ void fman_port_use_kg_hash(struct fman_port *port, bool enable)
+ }
+ EXPORT_SYMBOL(fman_port_use_kg_hash);
+ 
++/**
++ * fman_port_set_cc_base() - set a live RX port's Coarse-Classification base
++ * @port: the FMan RX port (mac_dev->port[RX])
++ * @cc_muram_off: the RAW MURAM byte offset of the CC tree root, i.e.
++ *	  patch 0098 struct fman_pcd_cc_tree.group_off (NO >>4 shift; the
++ *	  >>4 applies only to AD next-pointers inside a CONT_LOOKUP, not to
++ *	  this port-level tree-root base -- SDK fm_port.c:1256/1278).
++ *
++ * M3-3b keystone (patch 0105): the WRITE half of port->KeyGen->CC routing
++ * (spec sec 13). Programs the BMI "Rx Coarse Classification Base" register
++ * fmbm_rccb, which mainline NEVER writes (it stays 0, leaving the 0098
++ * static CC tree unreachable). After this write, frames that KeyGen
++ * dispatches in CC mode (the attach_cc CCOBASE/CCBS scheme half, patch
++ * 0097) walk the CC tree rooted at @cc_muram_off and enqueue onto the
++ * per-flow RX FQ named in the matching CC action descriptor.
++ *
++ * The Parser->KeyGen half is independent and already wired by
++ * fman_port_use_kg_hash() (fmbm_rfpne = NIA_ENG_HWK).
++ *
++ * DORMANT as of 0105 (exported, no caller). The productive call site is
++ * the DUT-gated final sub-increment: it must run FIRST in the SetPCD
++ * sequence (SDK FM_PORT_SetPCD order: bind CC tree -> write fmbm_rccb ->
++ * bind KeyGen schemes) and pass fman_pcd_cc_tree.group_off.
++ *
++ * Returns 0 on success, -EINVAL on a NULL or non-RX port.
++ */
++int fman_port_set_cc_base(struct fman_port *port, u32 cc_muram_off)
++{
++	if (!port || port->port_type != FMAN_PORT_TYPE_RX)
++		return -EINVAL;
++
++	iowrite32be(cc_muram_off, &port->bmi_regs->rx.fmbm_rccb);
++
++	dev_info(port->dev,
++		 "fman_port: RX coarse-classification base set to MURAM off 0x%x\n",
++		 cc_muram_off);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_port_set_cc_base);
++
+ /**
+  * fman_port_init
+  * @port:	A pointer to a FM Port module.
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.h b/drivers/net/ethernet/freescale/fman/fman_port.h
+index 9160c95..89143ba 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.h
++++ b/drivers/net/ethernet/freescale/fman/fman_port.h
+@@ -156,4 +156,14 @@ struct device *fman_port_get_device(struct fman_port *port);
+  */
+ u32 fman_port_get_liodn(struct fman_port *port);
+ 
++/* M3-3b keystone (patch 0105): set a live RX port's Coarse-Classification
++ * base register fmbm_rccb to the RAW MURAM byte offset of the CC tree root
++ * (patch 0098 fman_pcd_cc_tree.group_off, NO >>4). This is the port->CC
++ * WRITE half of CC steering (spec sec 13); the Parser->KeyGen half is wired
++ * by fman_port_use_kg_hash(). DORMANT as of 0105 (exported, no caller); the
++ * productive call site (ordered FIRST in SetPCD, before the KeyGen CC-mode
++ * scheme bind) is the DUT-gated final sub-increment.
++ */
++int fman_port_set_cc_base(struct fman_port *port, u32 cc_muram_off);
++
+ #endif /* __FMAN_PORT_H */

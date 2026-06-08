@@ -127,7 +127,7 @@ flowchart LR
     B --> F
 ```
 
-1. **Provision the lab generator first (parallel track).** A controllable source (802.1Q-capable, >2.5 Gbps, multi-core receiver) is the single most-leveraged unblock — it gates the HM wire test, the policer cap test, the gate-3 literal figure, the VPP benchmark, and the ASK2 M2 re-run. This is **provisioning, not engineering**, and can proceed alongside the kernel work.
+1. ~~**Provision the lab generator first.**~~ **DONE 2026-06-08** — the harness (heidi CT201/CT202, routed eth3→DUT→eth4) is live and validated (4.14 Gbps baseline); see §6 / `plans/TRAFFIC-HARNESS.md`. The functional gates are no longer lab-blocked for iperf3-class loads. Only the literal wire-rate ≥7 Gbps figure and the 802.1Q HM tagged source still want the deferred TRex/SR-IOV-VF upgrade.
 2. **FMan PCD subsystem forward-port (common)** — keystone; do it once.
 3. **MURAM budget instrumentation** on top of (2) — closes default M3-3b productive AND the ASK2 M2 `-ENOMEM`.
 4. **QMan-CEETM forward-port** — default M3-3e productive shaper.
@@ -136,19 +136,37 @@ flowchart LR
 
 ---
 
-## 6. The recurring blocker: the traffic harness
+## 6. The traffic harness — PROVISIONED 2026-06-08
 
-Five separate acceptance gates are currently **lab-blocked on the same missing piece** — a controllable traffic generator on the eth3 peer (`10.99.1.2`, currently undocumented and not SSH-able):
+Five separate acceptance gates were lab-blocked on the same missing piece — a
+controllable traffic generator on the DUT SFP+ peers. **This is now resolved.** The
+harness is two purpose-built Proxmox LXCs on **heidi** (`192.168.1.15`, root via
+`ssh heidi`), one per DUT SFP+ subnet, with the DUT as their L3 gateway so all
+CT201↔CT202 traffic is forced through the DUT router (eth3 → ip_forward → eth4).
+Full reference: **`plans/TRAFFIC-HARNESS.md`**.
 
-| Gate | Needs |
-|---|---|
-| M3-3c HM wire test | controllable 802.1Q tagged source |
-| M3-3d policer throughput cap | >2.5 Gbps offered source, red-drop visibility |
-| Gate-3 ≥7 Gbps literal | multi-core iperf3 server / wire-rate generator (TRex, DPDK-pktgen) |
-| VPP flavor benchmark | sustained >3.5 Gbps SFP+ source |
-| ASK2 M2 (≥7 Gbps @ ≤5% CPU) | eth3↔eth4 forwarding load at line rate |
+| Peer | LXC | IP / gw | DUT port |
+|---|---|---|---|
+| eth3 peer | CT201 `lxc201` | `10.99.1.2/30` → `10.99.1.1` | DUT eth3 |
+| eth4 peer | CT202 `lxc202` | `10.11.1.2/29` → `10.11.1.1` | DUT eth4 |
 
-**Action:** document and provision the `10.99.1.2` harness (creds, capabilities) as a standalone task. It is the highest-leverage non-kernel item in this plan.
+Both Debian 12 with **iperf3 preinstalled**, on the 10G `vmbr0`→`enp35s0f1` (ixgbe)
+bridge. **Validated end-to-end 2026-06-08:** `TTL=63` one-hop, 0% loss, **4.14 Gbit/s**
+@ 8 TCP streams routed through the DUT (default-flavor software-forwarding floor).
+
+| Gate | Needs | Harness coverage |
+|---|---|---|
+| M3-3c HM wire test | controllable 802.1Q tagged source | needs scapy/TRex (bridge is untagged) — see SR-IOV upgrade in harness doc |
+| M3-3d policer throughput cap | >2.5 Gbps offered source, red-drop visibility | `iperf3 -u -b 9G` ✅ |
+| Gate-3 ≥7 Gbps literal | multi-core iperf3 / wire-rate generator | `iperf3 -P`; TRex via SR-IOV VF for true line-rate |
+| VPP flavor benchmark | sustained >3.5 Gbps SFP+ source | ✅ (MTU ≤3290 on AF_XDP) |
+| ASK2 M2 (≥7 Gbps @ ≤5% CPU) | eth3↔eth4 forwarding load at line rate | CT201→DUT→CT202 ✅ |
+
+**Wire-rate / 802.1Q upgrade (deferred):** `enp35s0f1` exposes 63 SR-IOV VFs; pass a VF
+into a dedicated LXC for TRex/DPDK-pktgen when iperf3 cannot hit the literal ≥7 Gbps
+figure or when precise 802.1Q stateless generation is required. Do **not** bind the PF
+to DPDK (would drop the bridge + existing harness). `main` (production gateway) is
+off-limits as a generator.
 
 ---
 
