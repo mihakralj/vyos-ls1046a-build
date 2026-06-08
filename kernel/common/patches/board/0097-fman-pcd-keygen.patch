@@ -664,7 +664,7 @@ index 0000000..e91d024
 +
 +	if (!scheme)
 +		return -EINVAL;
-+	if (port_id == 0 || port_id > 10)
++	if (port_id < 0x08 || port_id >= 0x28)
 +		return -EINVAL;
 +
 +	fman = fman_pcd_get_fman(scheme->pcd);
@@ -907,7 +907,7 @@ index 442c49d..80ecfa9 100644
 +/**
 + * fman_pcd_kg_bind_port() - bind a scheme to an FMan ingress port.
 + * @scheme:  handle from fman_pcd_kg_scheme_create()
-+ * @port_id: FMan port id (1..8 for 1G, 9..10 for 10G on LS1046A)
++ * @port_id: FMan hardware BMI RX port id from fman_port_get_id() (0x08..0x27)
 + *
 + * Writes the scheme's match-vector bit for @port_id and updates the
 + * port's PCD configuration so that frames classified to this scheme

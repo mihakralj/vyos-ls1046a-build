@@ -5,9 +5,9 @@ Subject: [PATCH] ethernet: hw ingress-policer (DPAA1 FMan Policer offload)
 
 ---
  .../interfaces_ethernet.xml.in                | 90 +++++++++++++++++++++
- python/vyos/ifconfig/ethernet.py              | 59 +++++++++++++
+ python/vyos/ifconfig/ethernet.py              | 69 +++++++++++++++++++
  src/conf_mode/interfaces_ethernet.py          | 19 ++++
- 3 files changed, 168 insertions(+)
+ 3 files changed, 178 insertions(+)
 
 diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
 index 5385916..34d5879 100644
@@ -114,7 +114,7 @@ diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
 index 02d4b76..2a87c79 100644
 --- a/python/vyos/ifconfig/ethernet.py
 +++ b/python/vyos/ifconfig/ethernet.py
-@@ -364,6 +364,60 @@ def set_vlan_strip(self, state):
+@@ -364,6 +364,70 @@ def set_vlan_strip(self, state):
                  )
          return False
  
@@ -145,6 +145,9 @@ index 02d4b76..2a87c79 100644
 +
 +        policer = config.get('ingress_policer')
 +        if not policer:
++            # No policer configured: return hw-tc-offload to its default-off
++            # state so a deleted policer leaves no toggled feature behind.
++            self._popen(f'ethtool -K {ifname} hw-tc-offload off')
 +            return None
 +
 +        rate = policer.get('bandwidth')
@@ -154,6 +157,13 @@ index 02d4b76..2a87c79 100644
 +        # Ensure the ingress qdisc exists (shared with mirror/redirect). Adding
 +        # an already-present qdisc fails harmlessly - errors are ignored.
 +        self._popen(f'tc qdisc add dev {ifname} handle ffff: ingress 2>/dev/null')
++
++        # The matchall policer filter below is installed with 'skip_sw' (a
++        # hardware-only filter). The DPAA1 netdev advertises NETIF_F_HW_TC as a
++        # toggleable feature that defaults to OFF, so hw-tc-offload must be
++        # switched on first or the tc core rejects the filter with 'TC offload
++        # is disabled on net device' and no policing is applied.
++        self._popen(f'ethtool -K {ifname} hw-tc-offload on')
 +
 +        burst = policer.get('burst', '15k')
 +        peak = policer.get('peak_bandwidth')
@@ -175,7 +185,7 @@ index 02d4b76..2a87c79 100644
      def set_rps(self, state):
          if not isinstance(state, bool):
              raise ValueError('Value out of range')
-@@ -636,5 +690,10 @@ def update(self, config):
+@@ -636,5 +700,10 @@ def update(self, config):
          # call base class last
          super().update(config)
  
