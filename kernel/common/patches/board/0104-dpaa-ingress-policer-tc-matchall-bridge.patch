@@ -36,7 +36,7 @@ index 6fe417c..0981b9e 100644
  	mqprio->hw = TC_MQPRIO_HW_OFFLOAD_TCS;
  	num_tc = mqprio->num_tc;
  
-@@ -421,6 +420,280 @@ out:
+@@ -421,6 +420,285 @@ out:
  	return 0;
  }
  
@@ -159,7 +159,12 @@ index 6fe417c..0981b9e 100644
 +		prof.pir_bps   = act->police.peakrate_bytes_ps * 8;
 +		prof.pbs_bytes = act->police.burst;
 +	} else {
++		/* Single-rate (no peakrate): silicon lacks srTCM, so 0100 maps
++		 * this to RFC2698 with PIR==CIR/PBS==CBS; leaving them 0 would
++		 * red-mark and drop ALL frames. Mirror CIR/CBS to police, not drop. */
 +		prof.mode      = FMAN_POLICER_MODE_SRTCM;
++		prof.pir_bps   = prof.cir_bps;
++		prof.pbs_bytes = prof.cbs_bytes;
 +	}
 +
 +	err = fman_policer_install(fm, port_id, DPAA_POLICE_PROFILE_ID, &prof);
