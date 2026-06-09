@@ -11,7 +11,7 @@ index cc0ba7e..24a886b 100644
  fsl_dpaa_fman_port-objs := fman_port.o
  fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
 diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
-index e73f6ef..be63b13 100644
+index e73f6ef..5243a43 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
 @@ -8,6 +8,7 @@
@@ -130,7 +130,7 @@ index e73f6ef..be63b13 100644
  			       bool enable)
  {
  	struct fman_kg_regs __iomem *keygen_regs = keygen->keygen_regs;
-@@ -534,12 +525,52 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+@@ -534,12 +525,68 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
  	if (enable) {
  		/* Enable Scheme */
  		tmp_reg |= KG_SCH_MODE_EN;
@@ -142,10 +142,23 @@ index e73f6ef..be63b13 100644
 +			 * profile's own per-colour NIA (programmed by
 +			 * fman_pcd_plcr) then decides enqueue vs drop. The
 +			 * destination FQID still comes from kgse_fqb below.
-+			 * The profile id is RELATIVE: KGSE_PPC carries the id
-+			 * (shift=0/mask=0 => generated profile == id). 2026-06-09
++			 *
++			 * The profile id is ABSOLUTE (NIA_PLCR_ABSOLUTE set):
++			 * KGSE_PPC carries the id with shift=0/mask=0, and the
++			 * mode's absolute bit makes the KeyGen treat it as a
++			 * direct FMPL profile index rather than a RELATIVE id
++			 * that must be added to the per-port relative->absolute
++			 * window (FMBM_RPP). That window is never programmed by
++			 * this driver, so relative addressing resolved
++			 * relative-profile-0 to no valid profile and the frame
++			 * was dropped at PLCR *before* metering (BUG 3a: green/
++			 * yellow/red counters stayed 0, token bucket never
++			 * moved). Absolute addressing points straight at the
++			 * profile we programmed via fman_policer_create().
++			 * 2026-06-09
 +			 */
-+			tmp_reg |= KG_SCH_MODE_NIA_PLCR | NIA_ENG_PLCR;
++			tmp_reg |= KG_SCH_MODE_NIA_PLCR | NIA_ENG_PLCR |
++				   NIA_PLCR_ABSOLUTE;
 +			scheme_regs.kgse_ppc = scheme->policer_profile_id;
 +		} else if (scheme->next_engine == 2) {
 +			/* Next engine = Coarse Classification: route the
@@ -167,12 +180,15 @@ index e73f6ef..be63b13 100644
  
  	scheme_regs.kgse_mode = tmp_reg;
  
-+	/* Policer Profile Command (KGSE_PPC): the relative profile-generation
-+	 * register (base/shift/mask). For the policer path KGSE_PPC is set in
-+	 * the next_engine==1 branch above to policer_profile_id with shift=0
-+	 * and mask=0, so the generated profile equals the id (relative to the
-+	 * per-port FMPL_PMR window). NIA_PLCR_ABSOLUTE is NOT used. For the
-+	 * non-policer paths PPC stays 0 from the memset above.
++	/* Policer Profile Command (KGSE_PPC): the profile-generation register
++	 * (base/shift/mask). For the policer path KGSE_PPC is set in the
++	 * next_engine==1 branch above to policer_profile_id with shift=0 and
++	 * mask=0, so the generated profile equals the id. The mode's
++	 * NIA_PLCR_ABSOLUTE bit makes that id an ABSOLUTE FMPL profile index
++	 * (the per-port relative->absolute FMBM_RPP window is never programmed
++	 * by this driver, so relative addressing would resolve to no valid
++	 * profile - see BUG 3a above). For the non-policer paths PPC stays 0
++	 * from the memset above.
 +	 */
 +	/* Coarse Classification Bits Select (KGSE_CCBS): which hash bits index
 +	 * the CC group entry. Only meaningful when the mode NIA points at CC;
@@ -185,7 +201,7 @@ index e73f6ef..be63b13 100644
  	scheme_regs.kgse_mv = scheme->match_vector;
  
  	/* Scheme don't override StorageProfile:
-@@ -611,6 +642,7 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+@@ -611,6 +658,7 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
  
  	return 0;
  }
@@ -919,7 +935,7 @@ index 0000000..d260f66
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_kg_port_detach_policer);
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index 442c49d..97e7022 100644
+index 442c49d..0e86138 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
 @@ -74,4 +74,186 @@ struct fman_pcd *fman_pcd_init(struct fman *fman);

@@ -1,5 +1,5 @@
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-index 6fe417c..6eb9fec 100644
+index 6fe417c..54a7035 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 @@ -31,10 +31,13 @@
@@ -36,7 +36,7 @@ index 6fe417c..6eb9fec 100644
  	mqprio->hw = TC_MQPRIO_HW_OFFLOAD_TCS;
  	num_tc = mqprio->num_tc;
  
-@@ -421,6 +420,240 @@ out:
+@@ -421,6 +420,300 @@ out:
  	return 0;
  }
  
@@ -250,15 +250,75 @@ index 6fe417c..6eb9fec 100644
 +
 +static LIST_HEAD(dpaa_block_cb_list);
 +
++/* Block-unbind self-heal (BUG 3b).
++ *
++ * The ingress qdisc/block can be torn down WITHOUT the matchall filter's
++ * TC_CLSMATCHALL_DESTROY ever reaching this driver: net/sched/cls_api.c's
++ * __tcf_block_put() runs tcf_block_offload_unbind() (which removes our
++ * block-cb) BEFORE tcf_block_flush_all_chains() destroys the filter, so
++ * mall_destroy_hw_filter() -> tc_setup_cb_destroy() iterates over zero
++ * registered cbs and dpaa_setup_tc_matchall_destroy() is never called.
++ * VyOS hits exactly this path: ingress-policer update() runs
++ * super().update() -> set_mirror_redirect(), which deletes the whole
++ * ingress qdisc first. Without a revert here the FMan RX KeyGen scheme
++ * stays stuck in next-engine=PLCR and the port stays dead.
++ *
++ * flow_block_cb_alloc()'s release callback IS invoked on block-unbind
++ * (tcf_block_unbind() -> flow_block_cb_free() -> block_cb->release()),
++ * so reverting the policer scheme here guarantees recovery on every
++ * teardown path. dpaa_setup_tc_matchall_destroy() is idempotent
++ * (guards on priv->ingress_police_installed), so the normal
++ * TC_CLSMATCHALL_DESTROY path co-existing with this one is harmless.
++ *
++ * Do NOT take rtnl here: block-unbind runs from the qdisc teardown path
++ * which already holds rtnl, and the revert only touches FMan PCD
++ * registers (internally locked) plus the idempotent installed flag.
++ */
++static void dpaa_tc_block_release(void *cb_priv)
++{
++	struct net_device *net_dev = cb_priv;
++
++	dpaa_setup_tc_matchall_destroy(net_dev);
++}
++
 +static int dpaa_setup_tc_block(struct net_device *net_dev,
 +			       struct flow_block_offload *f)
 +{
++	struct flow_block_cb *block_cb;
++
 +	if (f->binder_type != FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
 +		return -EOPNOTSUPP;
 +
-+	return flow_block_cb_setup_simple(f, &dpaa_block_cb_list,
-+					  dpaa_setup_tc_block_cb,
-+					  net_dev, net_dev, true);
++	f->driver_block_list = &dpaa_block_cb_list;
++
++	switch (f->command) {
++	case FLOW_BLOCK_BIND:
++		if (flow_block_cb_is_busy(dpaa_setup_tc_block_cb, net_dev,
++					  &dpaa_block_cb_list))
++			return -EBUSY;
++
++		block_cb = flow_block_cb_alloc(dpaa_setup_tc_block_cb,
++					       net_dev, net_dev,
++					       dpaa_tc_block_release);
++		if (IS_ERR(block_cb))
++			return PTR_ERR(block_cb);
++
++		flow_block_cb_add(block_cb, f);
++		list_add_tail(&block_cb->driver_list, &dpaa_block_cb_list);
++		return 0;
++	case FLOW_BLOCK_UNBIND:
++		block_cb = flow_block_cb_lookup(f->block,
++						dpaa_setup_tc_block_cb,
++						net_dev);
++		if (!block_cb)
++			return -ENOENT;
++
++		flow_block_cb_remove(block_cb, f);
++		list_del(&block_cb->driver_list);
++		return 0;
++	default:
++		return -EOPNOTSUPP;
++	}
 +}
 +
 +static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
