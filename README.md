@@ -13,14 +13,12 @@ Behind the decision: I want to use NXP LS1046A, four Cortex-A72 cores at 1.8 GHz
 | I want to... | Go to |
 |---|---|
 | **Install VyOS** on the Mono Gateway | **[INSTALL.md](INSTALL.md)**: write USB image, `install image`, eMMC boot |
-| **Update board firmware** (bricked or fresh board) | [FIRMWARE.md](FIRMWARE.md): NOR + eMMC flash procedure, partition offset details |
-| **Understand the boot process** | [BOOT-PROCESS.md](BOOT-PROCESS.md): USB and eMMC paths, U-Boot env, `booti` sequence, failure modes |
-| **Understand what broke and how it got fixed** | [PORTING.md](PORTING.md): driver archaeology, DPAA1 architecture, boot flow |
-| **Push to 10 Gbps** with VPP acceleration | [VPP.md](VPP.md): DPAA1 + DPDK + VPP integration |
-| **Configure VPP** step by step | [VPP-SETUP.md](VPP-SETUP.md): enablement, configuration reference, troubleshooting |
-| **Debug at the U-Boot console** | [UBOOT.md](UBOOT.md): memory map, boot commands, clock tree, MTD layout |
-| **Check a raw boot log** for known messages | [captured_boot.md](captured_boot.md): full USB live-boot serial capture |
-| **See what changed** between releases | [CHANGELOG.md](CHANGELOG.md): per-build changelog |
+| **Update board firmware** (bricked or fresh board) | [plans/FIRMWARE.md](plans/FIRMWARE.md): NOR + eMMC flash procedure, partition offset details |
+| **Understand the boot process** | [plans/BOOT-PROCESS.md](plans/BOOT-PROCESS.md): USB and eMMC paths, U-Boot env, `booti` sequence, failure modes |
+| **Understand what broke and how it got fixed** | [plans/PORTING.md](plans/PORTING.md): driver archaeology, DPAA1 architecture, boot flow |
+| **Push to 10 Gbps** with VPP acceleration | [plans/VPP.md](plans/VPP.md): AF_XDP integration, `set vpp` CLI, thermal management, troubleshooting |
+| **Debug at the U-Boot console** | [plans/UBOOT.md](plans/UBOOT.md): memory map, boot commands, clock tree, MTD layout |
+| **See what changed** between releases | [plans/CHANGELOG.md](plans/CHANGELOG.md): per-build changelog |
 
 > Review the [open issues](https://github.com/mihakralj/vyos-ls1046a-build/issues) before installing. Some limitations are permanent hardware constraints. Better to know before you're three hours into a rack installation.
 
@@ -54,7 +52,7 @@ This is, as far as anyone can tell, the only VyOS build targeting bare-metal ARM
 
 **Zone-based firewall with nftables.** Interfaces join zones; policy applies per zone-pair. `set firewall zone DMZ from LAN firewall name LAN-DMZ-v4` replaces dozens of per-interface rules that multiply combinatorially as you add ports. Anyone who has managed large iptables rule sets knows exactly what that cost feels like.
 
-**VPP userspace dataplane.** VyOS 1.5 ships VPP (Vector Packet Processing): a kernel-bypass data plane that batches 256 packets per poll cycle, reads hardware queues directly, and treats the Frame Manager as a co-processor. Critically, VPP is not all-or-nothing: only interfaces explicitly assigned to VPP use the VPP forwarding path. eth3/eth4 (10G SFP+) go to VPP; eth0-eth2 (RJ45) stay with the kernel for management and routing. VPP is off by default. See [VPP-SETUP.md](VPP-SETUP.md). The CAAM crypto engine provides 128 hardware algorithms for IPsec AES-GCM offload at ~2-3 Gbps encrypted.
+**VPP userspace dataplane.** VyOS 1.5 ships VPP (Vector Packet Processing): a kernel-bypass data plane that batches 256 packets per poll cycle, reads hardware queues directly, and treats the Frame Manager as a co-processor. Critically, VPP is not all-or-nothing: only interfaces explicitly assigned to VPP use the VPP forwarding path. eth3/eth4 (10G SFP+) go to VPP; eth0-eth2 (RJ45) stay with the kernel for management and routing. VPP is off by default. See [plans/VPP.md](plans/VPP.md). The CAAM crypto engine provides 128 hardware algorithms for IPsec AES-GCM offload at ~2-3 Gbps encrypted.
 
 **Native containerization via Podman.** Containers are first-class config-tree citizens: image, network, environment variables, volumes, ports, memory limits, all defined with `set container name ...` and committed alongside routing and firewall config. Run AdGuard, a monitoring agent, or a DDNS updater directly on the router. Roll it back if you regret it.
 
@@ -212,7 +210,7 @@ Thirteen things were broken out of the box. Most failed silently. The worst ones
 | 12 | No QSPI flash access | `CONFIG_SPI_FSL_QSPI` not set | `=y` + DTS partition map |
 | 13 | VPP capped at 3290 MTU | AF_XDP max frame ~3304 bytes on DPAA1 | Split-plane: VPP on SFP+ (no jumbo), kernel on RJ45 (full 9578 MTU) |
 
-Full postmortem with driver archaeology and DPAA1 architecture deep-dive: [PORTING.md](PORTING.md).
+Full postmortem with driver archaeology and DPAA1 architecture deep-dive: [plans/PORTING.md](plans/PORTING.md).
 
 ## Known Boot Messages (Ignore These)
 
@@ -227,7 +225,7 @@ The boot log contains some alarming lines. All of them are fine.
 | `binfmt_misc.mount` FAILED | Expected on ARM64 target hardware. No binfmt emulation needed. |
 | kexec double-boot (USB live only) | Normal VyOS live-boot behavior. Installed eMMC systems boot once, straight through. |
 
-Full annotated boot log: [captured_boot.md](captured_boot.md).
+Full annotated boot sequences: [plans/BOOT-PROCESS.md](plans/BOOT-PROCESS.md).
 
 ## License
 
