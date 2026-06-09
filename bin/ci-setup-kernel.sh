@@ -326,6 +326,10 @@ cp "$BOARD_PATCH_DIR/0101-dpaa-hw-vlan-strip-ndo-set-features-bridge.patch" "$KE
 # (M3-3 step 7 sub-increment 4, WRITE mechanism, no caller). Edits
 # fman_port.c/.h only; independent of the 0092-0100 PCD stack. Spec sec 6.1.7.
 cp "$BOARD_PATCH_DIR/0102-fman-port-set-rx-bpool-primitive.patch" "$KERNEL_PATCHES/"
+# 0102b: one-shot dev_info FMBM_EBMPI register readback at reprogram time
+# (GAP-1 evidence that the 0102 BPID re-commit reached silicon). Diagnostic
+# only; stacks on 0102. Spec sec 6.1.17 / plans/ZC-RX-SCOPE.md GAP 1.
+cp "$BOARD_PATCH_DIR/0102b-fman-port-debug-readback.patch" "$KERNEL_PATCHES/"
 # 0103a: dormant true-ZC RX Recover sw-ring reverse-map (M3-3 step 7
 # sub-increment 4a, infrastructure only, NO datapath consumer). Adds the
 # per-qband chunk-DMA -> xdp_buff reverse map + record/lookup helpers that
@@ -352,6 +356,11 @@ cp "$BOARD_PATCH_DIR/0103c-dpaa1-true-zc-rx-classify-before-bpid-guard.patch" "$
 # runs outside the NAPI bpf_net_ctx the redirect path assumes). Stacks on
 # 0103c. Spec sec 6.1.17.
 cp "$BOARD_PATCH_DIR/0103e-dpaa1-true-zc-rx-bpf-net-ctx-fix.patch" "$KERNEL_PATCHES/"
+# 0103f: dispatch the qmgmt_ops->rx_hook BEFORE the dpaa_bpid2pool() NULL
+# guard in rx_default_dqrr. Without this, FDs carrying the XSK bpid resolve
+# to no kernel pool and are consumed/dropped at ~2855 before the 0103b hook
+# at ~2901 ever sees them -> xsk_zc_rx_redirect stuck at 0. Stacks on 0103e.
+cp "$BOARD_PATCH_DIR/0103f-dpaa1-true-zc-rx-rxhook-before-bpidpool.patch" "$KERNEL_PATCHES/"
 # 0104: PRODUCTIVE M3-3d policer consumer -- .ndo_setup_tc TC_SETUP_BLOCK
 # handler mapping a single ingress `tc filter matchall action police` onto
 # fman_policer_install() slot 0 (board 0100). Fail-soft -EOPNOTSUPP when
