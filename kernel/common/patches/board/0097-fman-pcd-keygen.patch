@@ -130,7 +130,7 @@ index e73f6ef..5243a43 100644
  			       bool enable)
  {
  	struct fman_kg_regs __iomem *keygen_regs = keygen->keygen_regs;
-@@ -534,12 +525,68 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+@@ -534,12 +525,67 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
  	if (enable) {
  		/* Enable Scheme */
  		tmp_reg |= KG_SCH_MODE_EN;
@@ -143,22 +143,21 @@ index e73f6ef..5243a43 100644
 +			 * fman_pcd_plcr) then decides enqueue vs drop. The
 +			 * destination FQID still comes from kgse_fqb below.
 +			 *
-+			 * The profile id is ABSOLUTE (NIA_PLCR_ABSOLUTE set):
-+			 * KGSE_PPC carries the id with shift=0/mask=0, and the
-+			 * mode's absolute bit makes the KeyGen treat it as a
-+			 * direct FMPL profile index rather than a RELATIVE id
-+			 * that must be added to the per-port relative->absolute
-+			 * window (FMBM_RPP). That window is never programmed by
-+			 * this driver, so relative addressing resolved
-+			 * relative-profile-0 to no valid profile and the frame
-+			 * was dropped at PLCR *before* metering (BUG 3a: green/
-+			 * yellow/red counters stayed 0, token bucket never
-+			 * moved). Absolute addressing points straight at the
-+			 * profile we programmed via fman_policer_create().
++			 * The profile id is RELATIVE (NIA_PLCR_ABSOLUTE clear,
++			 * mode 0xc04c0000): KGSE_PPC carries the id with
++			 * shift=0/mask=0, and the KeyGen resolves it through the
++			 * RX port's relative->absolute policer-profile window
++			 * FMPL_PMR[hwPortId-1], which plcr_set_port_window() in
++			 * fman_pcd_plcr programs at policer-attach (BASE=
++			 * profile_id, NUM=1, VALID).  The SDK uses relative
++			 * addressing for private per-port profiles and reserves
++			 * NIA_PLCR_ABSOLUTE for the PLCR->PLCR shared-profile
++			 * chaining case only.  Without the window programmed the
++			 * BMI has no valid profile for the port and drops every
++			 * frame *before* metering (BUG 3a: counters frozen at 0).
 +			 * 2026-06-09
 +			 */
-+			tmp_reg |= KG_SCH_MODE_NIA_PLCR | NIA_ENG_PLCR |
-+				   NIA_PLCR_ABSOLUTE;
++			tmp_reg |= KG_SCH_MODE_NIA_PLCR | NIA_ENG_PLCR;
 +			scheme_regs.kgse_ppc = scheme->policer_profile_id;
 +		} else if (scheme->next_engine == 2) {
 +			/* Next engine = Coarse Classification: route the
@@ -184,10 +183,10 @@ index e73f6ef..5243a43 100644
 +	 * (base/shift/mask). For the policer path KGSE_PPC is set in the
 +	 * next_engine==1 branch above to policer_profile_id with shift=0 and
 +	 * mask=0, so the generated profile equals the id. The mode's
-+	 * NIA_PLCR_ABSOLUTE bit makes that id an ABSOLUTE FMPL profile index
-+	 * (the per-port relative->absolute FMBM_RPP window is never programmed
-+	 * by this driver, so relative addressing would resolve to no valid
-+	 * profile - see BUG 3a above). For the non-policer paths PPC stays 0
++	 * mode's NIA_PLCR_ABSOLUTE bit is left CLEAR, so the id is
++	 * RELATIVE; the KeyGen resolves it via the RX port's
++	 * FMPL_PMR window that plcr_set_port_window() programs at
++	 * policer-attach (see BUG 3a above). For the non-policer paths PPC stays 0
 +	 * from the memset above.
 +	 */
 +	/* Coarse Classification Bits Select (KGSE_CCBS): which hash bits index
@@ -201,7 +200,7 @@ index e73f6ef..5243a43 100644
  	scheme_regs.kgse_mv = scheme->match_vector;
  
  	/* Scheme don't override StorageProfile:
-@@ -611,6 +658,7 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+@@ -611,6 +657,7 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
  
  	return 0;
  }
