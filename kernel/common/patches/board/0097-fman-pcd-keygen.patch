@@ -11,7 +11,7 @@ index cc0ba7e..24a886b 100644
  fsl_dpaa_fman_port-objs := fman_port.o
  fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
 diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
-index e73f6ef..5231160 100644
+index e73f6ef..be63b13 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
 @@ -8,6 +8,7 @@
@@ -326,10 +326,10 @@ index 0000000..ff96553
 +#endif /* __FMAN_KEYGEN_INTERNAL_H */
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
 new file mode 100644
-index 0000000..e91d024
+index 0000000..d260f66
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
-@@ -0,0 +1,465 @@
+@@ -0,0 +1,588 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * FMan PCD KeyGen (KG) - silicon-programming layer.
@@ -795,11 +795,134 @@ index 0000000..e91d024
 +	kfree(scheme);
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_kg_scheme_destroy);
++
++/*
++ * Locate the lowest-id KG scheme currently bound to @hw_port_id.  Caller
++ * must hold pcd->lock.  Every RX port is initialised with exactly one
++ * hard-coded RSS-hashing scheme (keygen_port_hashing_init()), and the
++ * silicon's scheme-select dispatches each frame to the lowest-id scheme
++ * whose port-binding matches - so this returns the slot the datapath
++ * actually uses.  Returns NULL (and leaves *id_out untouched) if the port
++ * has no bound scheme.
++ */
++static struct keygen_scheme *
++kg_find_port_scheme(struct fman_keygen *keygen, u8 hw_port_id, u8 *id_out)
++{
++	int i;
++
++	for (i = 0; i < FM_KG_MAX_NUM_OF_SCHEMES; i++) {
++		if (keygen->schemes[i].used &&
++		    keygen->schemes[i].hw_port_id == hw_port_id) {
++			*id_out = (u8)i;
++			return &keygen->schemes[i];
++		}
++	}
++	return NULL;
++}
++
++int fman_pcd_kg_port_attach_policer(struct fman_pcd *pcd, u8 hw_port_id,
++				    u8 profile_id)
++{
++	struct fman_keygen *keygen;
++	struct keygen_scheme *slot;
++	struct fman *fman;
++	struct mutex *lock;
++	u8 saved_engine, saved_profile, id;
++	int err;
++
++	if (!pcd)
++		return -EINVAL;
++	if (hw_port_id < 0x08 || hw_port_id >= 0x28)
++		return -EINVAL;
++
++	fman = fman_pcd_get_fman(pcd);
++	if (!fman || !fman->keygen)
++		return -ENXIO;
++	keygen = fman->keygen;
++	lock = fman_pcd_get_lock(pcd);
++
++	mutex_lock(lock);
++
++	slot = kg_find_port_scheme(keygen, hw_port_id, &id);
++	if (!slot) {
++		mutex_unlock(lock);
++		return -ENODEV;
++	}
++
++	saved_engine  = slot->next_engine;
++	saved_profile = slot->policer_profile_id;
++
++	slot->next_engine        = 1;
++	slot->policer_profile_id = profile_id;
++
++	/*
++	 * keygen_scheme_setup() rejects enable on an already-used scheme
++	 * (-EINVAL), so clear ->used for the in-place reprogram; setup() sets
++	 * it back to true on success.  use_hashing / base_fqid / match_vector
++	 * are untouched, so the scheme keeps spreading conforming frames over
++	 * the same hashed RX FQs while the next-engine now points at the
++	 * policer profile.
++	 */
++	slot->used = false;
++	err = keygen_scheme_setup(keygen, id, true);
++	if (err) {
++		/* Restore the previous next-engine on failure. */
++		slot->next_engine        = saved_engine;
++		slot->policer_profile_id = saved_profile;
++		slot->used = false;
++		(void)keygen_scheme_setup(keygen, id, true);
++		mutex_unlock(lock);
++		return err;
++	}
++
++	mutex_unlock(lock);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_kg_port_attach_policer);
++
++int fman_pcd_kg_port_detach_policer(struct fman_pcd *pcd, u8 hw_port_id)
++{
++	struct fman_keygen *keygen;
++	struct keygen_scheme *slot;
++	struct fman *fman;
++	struct mutex *lock;
++	u8 id;
++	int err;
++
++	if (!pcd)
++		return -EINVAL;
++	if (hw_port_id < 0x08 || hw_port_id >= 0x28)
++		return -EINVAL;
++
++	fman = fman_pcd_get_fman(pcd);
++	if (!fman || !fman->keygen)
++		return -ENXIO;
++	keygen = fman->keygen;
++	lock = fman_pcd_get_lock(pcd);
++
++	mutex_lock(lock);
++
++	slot = kg_find_port_scheme(keygen, hw_port_id, &id);
++	if (!slot) {
++		/* Nothing bound: detach is a no-op (idempotent teardown). */
++		mutex_unlock(lock);
++		return 0;
++	}
++
++	slot->next_engine        = 0;
++	slot->policer_profile_id = 0;
++
++	slot->used = false;
++	err = keygen_scheme_setup(keygen, id, true);
++	mutex_unlock(lock);
++	return err;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_kg_port_detach_policer);
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index 442c49d..80ecfa9 100644
+index 442c49d..97e7022 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
-@@ -74,4 +74,150 @@ struct fman_pcd *fman_pcd_init(struct fman *fman);
+@@ -74,4 +74,186 @@ struct fman_pcd *fman_pcd_init(struct fman *fman);
  void fman_pcd_release(struct fman_pcd *pcd);
  struct fman_pcd_muram_budget fman_pcd_get_muram_budget(struct fman_pcd *pcd);
  
@@ -925,6 +1048,42 @@ index 442c49d..80ecfa9 100644
 + * Return: 0 on success, -EINVAL on bad args, -EBUSY if already bound.
 + */
 +int fman_pcd_kg_bind_port(struct fman_pcd_kg_scheme *scheme, u8 port_id);
++
++/**
++ * fman_pcd_kg_port_attach_policer() - route an RX port's existing RSS
++ *                                     scheme through a policer profile.
++ * @pcd:        PCD handle for the owning FMan (fman_get_pcd()).
++ * @hw_port_id: BMI hardware RX port id (0x08-0x0d 1G, 0x10-0x11 10G).
++ * @profile_id: relative policer profile id to dispatch frames to.
++ *
++ * Every FMan RX port is initialised with a single hard-coded RSS-hashing
++ * KeyGen scheme (keygen_port_hashing_init()) that all ingress frames are
++ * dispatched to.  This reprograms THAT scheme's next-engine in place to
++ * the policer profile, preserving its hash spreading and FQID base, so
++ * conforming frames still reach the per-flow RX FQs while the policer
++ * meters and drops excess.  It deliberately does NOT create a second
++ * scheme: the silicon's scheme-select picks the lowest-id scheme bound to
++ * the port, so a competing higher-id scheme would never be consulted.
++ *
++ * Return: 0 on success, -ENODEV if the port has no RSS scheme, or a
++ * negative errno from the underlying KGSE_* reprogram.
++ */
++int fman_pcd_kg_port_attach_policer(struct fman_pcd *pcd, u8 hw_port_id,
++				    u8 profile_id);
++
++/**
++ * fman_pcd_kg_port_detach_policer() - restore an RX port's RSS scheme to
++ *                                     plain BMI-enqueue next-engine.
++ * @pcd:        PCD handle for the owning FMan (fman_get_pcd()).
++ * @hw_port_id: BMI hardware RX port id used in the matching attach call.
++ *
++ * Reverse of fman_pcd_kg_port_attach_policer().  The RSS scheme itself is
++ * left intact (it is the port's permanent hashing scheme); only its
++ * next-engine is reset to direct enqueue.  NULL/-ENODEV-safe.
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int fman_pcd_kg_port_detach_policer(struct fman_pcd *pcd, u8 hw_port_id);
 +
 +/**
 + * fman_pcd_kg_attach_cc() - chain a scheme to a Classifier-Continue tree.
