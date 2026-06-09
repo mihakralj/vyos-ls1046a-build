@@ -22,11 +22,18 @@ index e73f6ef..5231160 100644
  
  /* Maximum number of HW Ports */
  #define FMAN_MAX_NUM_OF_HW_PORTS		64
-@@ -90,9 +91,29 @@
+@@ -90,9 +91,36 @@
  
  /* NIA values */
  #define NIA_ENG_BMI			0x00500000
 +#define NIA_ENG_PLCR			0x004C0000
++/* KGSE_MODE NIA action bit: select the policer profile id in the low bits of
++ * the mode NIA as an ABSOLUTE (global) profile slot rather than a per-port
++ * relative index resolved through the (unprogrammed) FMPL_PMR window. Matches
++ * the SDK CC/keygen->policer path (fm_plcr.c: nia |= NIA_ENG_PLCR |
++ * NIA_PLCR_ABSOLUTE | absoluteProfileId). RM 8.7.4. Fits KG_NIA_AC_MASK.
++ */
++#define NIA_PLCR_ABSOLUTE		0x00008000
  #define NIA_BMI_AC_ENQ_FRAME		0x00000002
  #define ENQUEUE_KG_DFLT_NIA		(NIA_ENG_BMI | NIA_BMI_AC_ENQ_FRAME)
  
@@ -52,7 +59,7 @@ index e73f6ef..5231160 100644
  /* Hard-coded configuration:
   * These values are used as hard-coded values for KeyGen configuration
   * and they replace user selections for this hard-coded version
-@@ -193,44 +214,6 @@ struct fman_kg_regs {
+@@ -193,44 +221,6 @@ struct fman_kg_regs {
  	u32 fmkg_ar;	/* 0x1FC: KeyGen Action Register */
  };
  
@@ -97,7 +104,7 @@ index e73f6ef..5231160 100644
  
  /* keygen_write_ar_wait
   *
-@@ -455,7 +438,7 @@ static struct keygen_scheme *get_scheme(struct fman_keygen *keygen,
+@@ -455,7 +445,7 @@ static struct keygen_scheme *get_scheme(struct fman_keygen *keygen,
   *
   * Return: Zero for success or error code in case of failure
   */
@@ -106,7 +113,7 @@ index e73f6ef..5231160 100644
  				       u8 scheme_id,
  					bool bind)
  {
-@@ -495,6 +478,7 @@ static int keygen_bind_port_to_schemes(struct fman_keygen *keygen,
+@@ -495,6 +485,7 @@ static int keygen_bind_port_to_schemes(struct fman_keygen *keygen,
  
  	return 0;
  }
@@ -114,7 +121,7 @@ index e73f6ef..5231160 100644
  
  /* keygen_scheme_setup
   *
-@@ -506,7 +490,7 @@ static int keygen_bind_port_to_schemes(struct fman_keygen *keygen,
+@@ -506,7 +497,7 @@ static int keygen_bind_port_to_schemes(struct fman_keygen *keygen,
   *
   * Return: Zero for success or error code in case of failure
   */
@@ -123,7 +130,7 @@ index e73f6ef..5231160 100644
  			       bool enable)
  {
  	struct fman_kg_regs __iomem *keygen_regs = keygen->keygen_regs;
-@@ -534,12 +518,50 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+@@ -534,12 +525,52 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
  	if (enable) {
  		/* Enable Scheme */
  		tmp_reg |= KG_SCH_MODE_EN;
@@ -135,8 +142,11 @@ index e73f6ef..5231160 100644
 +			 * profile's own per-colour NIA (programmed by
 +			 * fman_pcd_plcr) then decides enqueue vs drop. The
 +			 * destination FQID still comes from kgse_fqb below.
++			 * The profile id is an ABSOLUTE slot (NIA_PLCR_ABSOLUTE)
++			 * so it does not depend on the per-port FMPL_PMR window.
 +			 */
-+			tmp_reg |= KG_SCH_MODE_NIA_PLCR | NIA_ENG_PLCR;
++			tmp_reg |= KG_SCH_MODE_NIA_PLCR | NIA_ENG_PLCR |
++				NIA_PLCR_ABSOLUTE | scheme->policer_profile_id;
 +		} else if (scheme->next_engine == 2) {
 +			/* Next engine = Coarse Classification: route the
 +			 * frame into the installed CC group table. CCOBASE
@@ -157,14 +167,13 @@ index e73f6ef..5231160 100644
  
  	scheme_regs.kgse_mode = tmp_reg;
  
-+	/* Policer Profile Command (KGSE_PPC): absolute profile id with no
-+	 * shift/mask (action field 0 = "use the profile in this register").
-+	 * Only meaningful when the mode NIA points at the policer; left at 0
-+	 * (from the memset above) for the BMI-enqueue path.
++	/* Policer Profile Command (KGSE_PPC): this is the HASH-based profile
++	 * GENERATION register (base/shift/mask), NOT the static profile
++	 * selector. The static absolute profile is carried in the mode NIA
++	 * (NIA_PLCR_ABSOLUTE | id) above, so PPC must stay 0 to bypass
++	 * hash-based generation (matches SDK bypass_pp_gen). Left at 0 from
++	 * the memset above for every path.
 +	 */
-+	if (enable && scheme->next_engine == 1)
-+		scheme_regs.kgse_ppc = scheme->policer_profile_id;
-+
 +	/* Coarse Classification Bits Select (KGSE_CCBS): which hash bits index
 +	 * the CC group entry. Only meaningful when the mode NIA points at CC;
 +	 * left at 0 (from the memset above) otherwise. For the static
@@ -176,7 +185,7 @@ index e73f6ef..5231160 100644
  	scheme_regs.kgse_mv = scheme->match_vector;
  
  	/* Scheme don't override StorageProfile:
-@@ -611,6 +633,7 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+@@ -611,6 +642,7 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
  
  	return 0;
  }
