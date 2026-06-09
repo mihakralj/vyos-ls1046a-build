@@ -210,7 +210,7 @@ U-Boot
         ├── tftp 0xb0000000 initrd.img   (TFTP initrd, loaded LAST for ${filesize})
         └── booti 0xa0000000 0xb0000000:${filesize} ${fdt_addr_r}
               │
-              ├── [T+0 → T+26s] TFTP kernel 6.6.129 boots
+              ├── [T+0 → T+26s] TFTP kernel 6.18.x boots
               │   ├── eMMC probes (mmcblk0 p1 p2 p3) at T+1.8s
               │   ├── FMan MACs eth0-eth4 at T+1.5s
               │   ├── squashfs mounted via loop0 at T+7.8s

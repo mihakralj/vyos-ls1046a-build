@@ -1,7 +1,7 @@
 # ASK2 implementation plan — PR breakdown
 
 **Status:** active. Drives the implementation of ASK2 per
-[`specs/ask2-rewrite-spec.md`](../specs/ask2-rewrite-spec.md) (v1.1,
+[`specs/ask2-rewrite-spec.md`](../../specs/ask2-rewrite-spec.md) (v1.1,
 2026-05-14 — provenance relaxation). All PRs target the `ask20` branch
 unless noted otherwise.
 
