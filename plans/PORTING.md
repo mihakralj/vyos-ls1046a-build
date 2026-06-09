@@ -3,7 +3,7 @@
 Technical analysis of what breaks when you drop a generic VyOS ARM64 ISO onto NXP Layerscape silicon. And the exact fixes that survived.
 
 > **Boot process specification** (U-Boot env variables, annotated USB and eMMC boot sequences, `vyos.env` mechanism, failure modes): **[BOOT-PROCESS.md](BOOT-PROCESS.md)**
-> **Install guide** (write USB image, run `install image`, eMMC boot): **[INSTALL.md](INSTALL.md)**
+> **Install guide** (write USB image, run `install image`, eMMC boot): **[INSTALL.md](../INSTALL.md)**
 
 ## The Problem
 
@@ -567,13 +567,11 @@ The `99-mask-services.chroot` hook runs inside the build chroot. The old approac
 
 ## Kernel Patches (`data/kernel-patches/`)
 
-Two patches plus one out-of-tree source file are applied on top of the VyOS `linux-6.6.y` kernel tree during build:
+One out-of-tree patch is documented here on top of the current mainline 6.18 kernel tree during build. (The DPAA1 HW-accelerated AF_XDP board-patch series — CC / HM / Policer / CEETM offloads — is tracked separately in [../specs/dpaa1-afxdp-modernization-spec.md](../specs/dpaa1-afxdp-modernization-spec.md). The earlier DPDK USDPAA chardev patch `9001` and `fsl_usdpaa_mainline.c` were removed per RC#31 when the DPDK DPAA PMD path was abandoned in favour of AF_XDP.)
 
 | File | Purpose |
 |------|---------|
-| `4002-hwmon-ina2xx-add-INA234-support.patch` | Adds `ti,ina234` to the kernel 6.6 `ina2xx` driver: OF match table, i2c_device_id, enum, config table with INA234-specific scaling (bus voltage LSB 1600 µV, power coefficient 32). Without this patch, the 8x INA234 power sensors on the board don't bind at all — no `ti,ina234` entry upstream. Prefix `4002-` avoids collision with the upstream VyOS `0002-inotify` kernel patch. |
-| `9001-usdpaa-bman-qman-exports-and-driver.patch` | Exports BMan/QMan kernel symbols for userspace DPAA1 PMD; stores portal physical addresses in portal config structs; adds `CONFIG_FSL_USDPAA_MAINLINE` Kconfig entry and Makefile hook. Required for DPDK DPAA1 userspace access via `/dev/fsl-usdpaa`. |
-| `fsl_usdpaa_mainline.c` | Clean-room `/dev/fsl-usdpaa` + `/dev/fsl-usdpaa-irq` character device driver (1453 lines). Implements 20 ioctls matching the NXP ABI for binary compatibility with DPDK `process.c`. Manages portals, DMA mappings, BPID/FQID/CGRID allocations per file descriptor with full cleanup on close. Too large for a unified diff — copied into `drivers/soc/fsl/qbman/` during build via an `awk`-injected line in `build-kernel.sh`. |
+| `4002-hwmon-ina2xx-add-INA234-support.patch` | Adds `ti,ina234` to the kernel `ina2xx` driver: OF match table, i2c_device_id, enum, config table with INA234-specific scaling (bus voltage LSB 1600 µV, power coefficient 32). Without this patch, the 8x INA234 power sensors on the board don't bind at all — no `ti,ina234` entry upstream. Prefix `4002-` avoids collision with the upstream VyOS `0002-inotify` kernel patch. |
 
 The INA234 patch (`4002-`) was previously numbered in `0002-` series but was renumbered to avoid collision with the upstream VyOS inotify patch.
 
@@ -630,11 +628,7 @@ CONFIG_SENSORS_EMC2305=y        # EMC2305 fan controller (Microchip, I2C 0x2e)
 CONFIG_SENSORS_INA2XX=y         # INA234 power sensors (8x on board, via kernel patch 4002)
 CONFIG_RTC_DRV_PCF2127=y        # PCF2131 RTC (NXP, I2C 0x53)
 
-# === DPDK USDPAA userspace PMD support (via kernel patch 9001) ===
-CONFIG_FSL_USDPAA_MAINLINE=y    # /dev/fsl-usdpaa chardev for DPDK DPAA1 PMD
-
-# === Disable STRICT_DEVMEM for DPDK DPAA PMD ===
-# DPDK fman_init() mmaps FMan CCSR registers via /dev/mem
+# === Disable STRICT_DEVMEM (FMan CCSR register mmap via /dev/mem) ===
 # CONFIG_STRICT_DEVMEM is not set
 # CONFIG_IO_STRICT_DEVMEM is not set
 
@@ -666,13 +660,11 @@ CONFIG_NLS_UTF8=y               # FAT UTF-8
 ## See Also
 
 - [BOOT-PROCESS.md](BOOT-PROCESS.md) -- complete boot path specification: U-Boot env variables, annotated USB and eMMC sequences, `vyos.env` mechanism, SPI NOR layout, failure modes
-- [DEV-LOCAL.md](DEV-LOCAL.md) -- local dev build: LXC setup, TFTP dev loop, `bin/build-local.sh` reference, U-Boot `dev_boot` setup
-- [INSTALL.md](INSTALL.md) -- step-by-step installation guide
+- [DEV-LOOP.md](DEV-LOOP.md) -- local dev build: TFTP dev loop, `bin/dev-build.sh` reference, U-Boot `dev_boot` setup
+- [INSTALL.md](../INSTALL.md) -- step-by-step installation guide
 - [UBOOT.md](UBOOT.md) -- U-Boot serial console reference: memory map, boot commands, clock tree, MTD layout
-- [README.md](README.md) -- project overview
-- [plans/DPAA1-DPDK-PMD.md](plans/DPAA1-DPDK-PMD.md) -- DPAA1 DPDK PMD build plan
-- [plans/USDPAA-IOCTL-SPEC.md](plans/USDPAA-IOCTL-SPEC.md) -- USDPAA ioctl ABI specification (20 ioctls, mainline implementation status)
-- [plans/MAINLINE-PATCH-SPEC.md](plans/MAINLINE-PATCH-SPEC.md) -- kernel patch design: export audit, DPDK call trace, 6-patch rationale
+- [README.md](../README.md) -- project overview
+- [../specs/dpaa1-afxdp-modernization-spec.md](../specs/dpaa1-afxdp-modernization-spec.md) -- DPAA1 HW-accelerated AF_XDP driver modernization: design, milestone tracker, FMan offload (CC/HM/Policer/CEETM) status (supersedes the abandoned DPDK PMD / USDPAA chardev path, removed per RC#31)
 - [Mono Gateway Getting Started](https://github.com/we-are-mono/meta-mono/blob/master/gateway-development-kit/getting-started.md) -- factory setup, serial console, Recovery Linux
 - [Mono Gateway Hardware Description](https://github.com/we-are-mono/meta-mono/blob/master/gateway-development-kit/hardware-description.md) -- port pinouts, GPIO, M.2, fan headers
 - [nix repo (Mono NixOS build)](https://github.com/nicator-company/nix) -- official DTS source, kernel patches (FMan ethernet-alias ordering, INA234 hwmon), defconfig
