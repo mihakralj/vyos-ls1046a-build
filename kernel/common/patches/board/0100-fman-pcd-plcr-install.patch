@@ -113,7 +113,7 @@ new file mode 100644
 index 0000000..3a3c90b
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
-@@ -0,0 +1,604 @@
+@@ -0,0 +1,645 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * FMan PCD Policer (RFC2698/single-rate) - three-colour-marker silicon
@@ -235,6 +235,23 @@ index 0000000..3a3c90b
 +#define FMAN_PLCR_PMR_OFFSET		0x204u		/* fmpl_pmr[0]         */
 +#define FMAN_PLCR_PMR_V			0x80000000u	/* window valid        */
 +#define FMAN_PLCR_PMR_BRN_SHIFT		16		/* log2(num profiles)  */
++
++/*
++ * FMan Policer General Configuration Register (FMPL_GCR, FMPL offset
++ * 0x000) - SDK fm_plcr.h FM_PCD_PLCR_GCR_*.  EN is the policer-block
++ * MASTER ENABLE: with it clear the silicon drops every KeyGen-routed
++ * frame BEFORE metering (BUG 3a - TPC frozen at 0, 100% loss, identical
++ * for absolute and relative profile addressing).  STEN enables the global
++ * colour packet counters.  The low 24 bits are the default-NIA the block
++ * applies to an uninitialised-profile frame; mainline fman init leaves
++ * them at GET_NIA_BMI_AC_ENQ_FRAME (0x00500002), which we preserve with a
++ * read-modify-write.  PROVEN on LS1046A hardware 2026-06-09: a live
++ * GCR <- (existing | EN | STEN) = 0xC0500002 flips policed ping from 100%
++ * loss to 0% and starts the TPC/RED counters moving.
++ */
++#define FMAN_PLCR_GCR_OFFSET		0x000u
++#define FMAN_PLCR_GCR_EN		0x80000000u	/* policer block enable */
++#define FMAN_PLCR_GCR_STEN		0x40000000u	/* global stats enable  */
 +
 +/*
 + * FMPL_PEMODE (profile entry mode) bits - SDK fm_plcr.h
@@ -478,6 +495,25 @@ index 0000000..3a3c90b
 +	return fman_pcd_get_fman(pcd)->base_addr + FMAN_PLCR_BLOCK_OFFSET;
 +}
 +
++/*
++ * Set FMPL_GCR PEN|STEN (read-modify-write, preserving the DEFNIA low bits
++ * mainline fman init programmed).  Idempotent: re-running on an already
++ * enabled block is a no-op.  Without this the policer engine stays disabled
++ * and drops every routed frame pre-meter (BUG 3a).
++ */
++static void plcr_enable_block(struct fman_pcd *pcd)
++{
++	void __iomem *gcr = plcr_fmpl_base(pcd) + FMAN_PLCR_GCR_OFFSET;
++	unsigned long flags;
++	u32 val;
++
++	spin_lock_irqsave(&plcr_hw_lock, flags);
++	val = ioread32be(gcr);
++	val |= FMAN_PLCR_GCR_EN | FMAN_PLCR_GCR_STEN;
++	iowrite32be(val, gcr);
++	spin_unlock_irqrestore(&plcr_hw_lock, flags);
++}
++
 +/* Write @par to FMPL_PAR and spin until the engine clears GO. */
 +static void plcr_write_par(void __iomem *fmpl, u32 par)
 +{
@@ -655,6 +691,11 @@ index 0000000..3a3c90b
 +	/* Encode then commit the silicon profile. */
 +	plcr_build_profile(hw, &regs);
 +	plcr_commit_profile(pcd, profile_id, &regs);
++
++	/* Master-enable the policer engine (PEN|STEN) - mainline fman left it
++	 * disabled, which drops every routed frame pre-meter (BUG 3a).
++	 */
++	plcr_enable_block(pcd);
 +
 +	/* Open the per-port relative->absolute profile window so the RELATIVE
 +	 * id KeyGen selects (KGSE_PPC, ABSOLUTE bit clear) resolves to this
