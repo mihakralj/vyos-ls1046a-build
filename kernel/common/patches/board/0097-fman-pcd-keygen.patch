@@ -142,11 +142,11 @@ index e73f6ef..5231160 100644
 +			 * profile's own per-colour NIA (programmed by
 +			 * fman_pcd_plcr) then decides enqueue vs drop. The
 +			 * destination FQID still comes from kgse_fqb below.
-+			 * The profile id is an ABSOLUTE slot (NIA_PLCR_ABSOLUTE)
-+			 * so it does not depend on the per-port FMPL_PMR window.
++			 * The profile id is RELATIVE: KGSE_PPC carries the id
++			 * (shift=0/mask=0 => generated profile == id). 2026-06-09
 +			 */
-+			tmp_reg |= KG_SCH_MODE_NIA_PLCR | NIA_ENG_PLCR |
-+				NIA_PLCR_ABSOLUTE | scheme->policer_profile_id;
++			tmp_reg |= KG_SCH_MODE_NIA_PLCR | NIA_ENG_PLCR;
++			scheme_regs.kgse_ppc = scheme->policer_profile_id;
 +		} else if (scheme->next_engine == 2) {
 +			/* Next engine = Coarse Classification: route the
 +			 * frame into the installed CC group table. CCOBASE
@@ -167,12 +167,12 @@ index e73f6ef..5231160 100644
  
  	scheme_regs.kgse_mode = tmp_reg;
  
-+	/* Policer Profile Command (KGSE_PPC): this is the HASH-based profile
-+	 * GENERATION register (base/shift/mask), NOT the static profile
-+	 * selector. The static absolute profile is carried in the mode NIA
-+	 * (NIA_PLCR_ABSOLUTE | id) above, so PPC must stay 0 to bypass
-+	 * hash-based generation (matches SDK bypass_pp_gen). Left at 0 from
-+	 * the memset above for every path.
++	/* Policer Profile Command (KGSE_PPC): the relative profile-generation
++	 * register (base/shift/mask). For the policer path KGSE_PPC is set in
++	 * the next_engine==1 branch above to policer_profile_id with shift=0
++	 * and mask=0, so the generated profile equals the id (relative to the
++	 * per-port FMPL_PMR window). NIA_PLCR_ABSOLUTE is NOT used. For the
++	 * non-policer paths PPC stays 0 from the memset above.
 +	 */
 +	/* Coarse Classification Bits Select (KGSE_CCBS): which hash bits index
 +	 * the CC group entry. Only meaningful when the mode NIA points at CC;
