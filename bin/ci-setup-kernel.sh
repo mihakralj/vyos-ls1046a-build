@@ -361,6 +361,10 @@ cp "$BOARD_PATCH_DIR/0103e-dpaa1-true-zc-rx-bpf-net-ctx-fix.patch" "$KERNEL_PATC
 # to no kernel pool and are consumed/dropped at ~2855 before the 0103b hook
 # at ~2901 ever sees them -> xsk_zc_rx_redirect stuck at 0. Stacks on 0103e.
 cp "$BOARD_PATCH_DIR/0103f-dpaa1-true-zc-rx-rxhook-before-bpidpool.patch" "$KERNEL_PATCHES/"
+# 0103g: register per-band MEM_TYPE_XSK_BUFF_POOL xdp_rxq_info at ZC attach
+# + xsk_pool_set_rxq_info; fixes the NULL xdp->rxq Oops in __xsk_map_redirect
+# on the first Recovered frame (HW serial capture 2026-06-09). Stacks on 0103f.
+cp "$BOARD_PATCH_DIR/0103g-dpaa1-true-zc-rx-register-zc-rxq.patch" "$KERNEL_PATCHES/"
 # 0104: PRODUCTIVE M3-3d policer consumer -- .ndo_setup_tc TC_SETUP_BLOCK
 # handler mapping a single ingress `tc filter matchall action police` onto
 # fman_policer_install() slot 0 (board 0100). Fail-soft -EOPNOTSUPP when
