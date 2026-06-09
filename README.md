@@ -13,14 +13,12 @@ Behind the decision: I want to use NXP LS1046A, four Cortex-A72 cores at 1.8 GHz
 | I want to... | Go to |
 |---|---|
 | **Install VyOS** on the Mono Gateway | **[INSTALL.md](INSTALL.md)**: write USB image, `install image`, eMMC boot |
-| **Update board firmware** (bricked or fresh board) | [FIRMWARE.md](FIRMWARE.md): NOR + eMMC flash procedure, partition offset details |
-| **Understand the boot process** | [BOOT-PROCESS.md](BOOT-PROCESS.md): USB and eMMC paths, U-Boot env, `booti` sequence, failure modes |
-| **Understand what broke and how it got fixed** | [PORTING.md](PORTING.md): driver archaeology, DPAA1 architecture, boot flow |
-| **Push to 10 Gbps** with VPP acceleration | [VPP.md](VPP.md): DPAA1 + DPDK + VPP integration |
-| **Configure VPP** step by step | [VPP-SETUP.md](VPP-SETUP.md): enablement, configuration reference, troubleshooting |
-| **Debug at the U-Boot console** | [UBOOT.md](UBOOT.md): memory map, boot commands, clock tree, MTD layout |
-| **Check a raw boot log** for known messages | [captured_boot.md](captured_boot.md): full USB live-boot serial capture |
-| **See what changed** between releases | [CHANGELOG.md](CHANGELOG.md): per-build changelog |
+| **Update board firmware** (bricked or fresh board) | [plans/FIRMWARE.md](plans/FIRMWARE.md): NOR + eMMC flash procedure, partition offset details |
+| **Understand the boot process** | [plans/BOOT-PROCESS.md](plans/BOOT-PROCESS.md): USB and eMMC paths, U-Boot env, `booti` sequence, failure modes |
+| **Understand what broke and how it got fixed** | [plans/PORTING.md](plans/PORTING.md): driver archaeology, DPAA1 architecture, boot flow |
+| **Push to 10 Gbps** with VPP acceleration | [plans/VPP.md](plans/VPP.md): AF_XDP integration, `set vpp` CLI, thermal management, troubleshooting |
+| **Debug at the U-Boot console** | [plans/UBOOT.md](plans/UBOOT.md): memory map, boot commands, clock tree, MTD layout |
+| **See what changed** between releases | [plans/CHANGELOG.md](plans/CHANGELOG.md): per-build changelog |
 
 > Review the [open issues](https://github.com/mihakralj/vyos-ls1046a-build/issues) before installing. Some limitations are permanent hardware constraints. Better to know before you're three hours into a rack installation.
 
@@ -44,17 +42,17 @@ This is, as far as anyone can tell, the only VyOS build targeting bare-metal ARM
 
 - **10G SFP+ with VPP kernel bypass.** AF_XDP on eth3/eth4 polls at 2.47M packets/sec. The stock kernel path grinds through ~3-5 Gbps on those same ports. Not a typo.
 - **CAAM hardware crypto.** IPsec AES-GCM offload via 3 Job Rings at ~2-3 Gbps encrypted throughput. WireGuard (ChaCha20-Poly1305) cannot use CAAM: it runs on ARM64 NEON SIMD instead, topping out around 1 Gbps. Pick your poison.
-- **DPAA1 Frame Manager.** Five-port hardware packet engine handles parsing, core distribution, and buffer management before the CPU sees a single byte. Jumbo frames at 9578 MTU on RJ45. SFP+ ports cap at 3290 MTU under AF_XDP (DPAA1 XDP hard limit), which disappears once the DPDK PMD path lands.
+- **DPAA1 Frame Manager.** Five-port hardware packet engine handles parsing, core distribution, and buffer management before the CPU sees a single byte. Jumbo frames at 9578 MTU on RJ45. SFP+ ports cap at 3290 MTU under AF_XDP (DPAA1 XDP hard limit on `fsl_dpaa_mac`).
 - **PTP hardware timestamping.** Nanosecond precision via `ptp_qoriq` on `/dev/ptp0`.
 - **U-Boot direct boot.** `vyos.env` on the ext4 partition selects the active image. No GRUB, no OOM, no overhead. Image upgrades write the file automatically.
 - **~80s cold boot to login prompt.** Single boot, no kexec double-reboot. `CONFIG_DEBUG_PREEMPT` suppressed saves ~20s of cosmetic scheduler spam.
-- **USDPAA chardev for DPDK.** Six kernel patches (1,453 lines) add `/dev/fsl-usdpaa` to mainline 6.6, enabling the DPAA1 DPDK PMD path to 10G wire-speed. Phase C (VPP integration) is tracked in [plans/DPAA1-DPDK-PMD.md](plans/DPAA1-DPDK-PMD.md).
+- **HW-accelerated AF_XDP datapath.** The DPAA1 driver is modernized into a cross-flavor kernel binary with `ndo_xsk_wakeup`, XSK-backed BMan pools, per-CPU NAPI on dedicated QMan channels, and FMan HW offloads (CC / HM / Policer / CEETM). The earlier DPDK DPAA PMD path was abandoned (RC#31: `dpaa_bus` probe globally disrupts kernel FMan interfaces); AF_XDP is the production kernel+VPP coexistence path. Design and milestone status: [specs/dpaa1-afxdp-modernization-spec.md](specs/dpaa1-afxdp-modernization-spec.md).
 
 ## Why VyOS?
 
 **Zone-based firewall with nftables.** Interfaces join zones; policy applies per zone-pair. `set firewall zone DMZ from LAN firewall name LAN-DMZ-v4` replaces dozens of per-interface rules that multiply combinatorially as you add ports. Anyone who has managed large iptables rule sets knows exactly what that cost feels like.
 
-**VPP userspace dataplane.** VyOS 1.5 ships VPP (Vector Packet Processing): a kernel-bypass data plane that batches 256 packets per poll cycle, reads hardware queues directly, and treats the Frame Manager as a co-processor. Critically, VPP is not all-or-nothing: only interfaces explicitly assigned to VPP use the VPP forwarding path. eth3/eth4 (10G SFP+) go to VPP; eth0-eth2 (RJ45) stay with the kernel for management and routing. VPP is off by default. See [VPP-SETUP.md](VPP-SETUP.md). The CAAM crypto engine provides 128 hardware algorithms for IPsec AES-GCM offload at ~2-3 Gbps encrypted.
+**VPP userspace dataplane.** VyOS 1.5 ships VPP (Vector Packet Processing): a kernel-bypass data plane that batches 256 packets per poll cycle, reads hardware queues directly, and treats the Frame Manager as a co-processor. Critically, VPP is not all-or-nothing: only interfaces explicitly assigned to VPP use the VPP forwarding path. eth3/eth4 (10G SFP+) go to VPP; eth0-eth2 (RJ45) stay with the kernel for management and routing. VPP is off by default. See [plans/VPP.md](plans/VPP.md). The CAAM crypto engine provides 128 hardware algorithms for IPsec AES-GCM offload at ~2-3 Gbps encrypted.
 
 **Native containerization via Podman.** Containers are first-class config-tree citizens: image, network, environment variables, volumes, ports, memory limits, all defined with `set container name ...` and committed alongside routing and firewall config. Run AdGuard, a monitoring agent, or a DDNS updater directly on the router. Roll it back if you regret it.
 
@@ -171,7 +169,26 @@ flowchart TB
   style PORTALS fill:#48a,stroke:#333,color:#fff
 ```
 
-The Frame Manager is the unsung hero. It handles packet parsing, core distribution, and buffer management in hardware before the CPU ever touches a byte. LS1046A has 10 BMan + 10 QMan portals total: kernel claims 4 (one per core), the remaining 6 sit idle, available for DPDK via the USDPAA chardev. That work is [in progress](plans/DPAA1-DPDK-PMD.md).
+The Frame Manager is the unsung hero. It handles packet parsing, core distribution, and buffer management in hardware before the CPU ever touches a byte. LS1046A has four QMan/BMan software portals (one per A72 core), plus 28 pool channels and 4 dedicated channels the modernization work claims for per-qband AF_XDP dispatch.
+
+### DPAA1 Driver Modernization
+
+An ongoing effort modernizes the mainline DPAA1 driver into a single cross-flavor kernel binary (consumed differently by `default` / `vpp` / `ask`) with HW-accelerated AF_XDP and four FMan/QMan hardware offloads. Full design and per-milestone status: [specs/dpaa1-afxdp-modernization-spec.md](specs/dpaa1-afxdp-modernization-spec.md).
+
+**Shipping and DUT-validated today:**
+
+- **Flavor-ops abstraction (M0)** — per-`dpaa_priv` ops tables, RCU-NULL-safe; byte-identical to mainline when no flavor module is loaded.
+- **AF_XDP zero-copy plumbing (M1–M3-3)** — `ndo_xsk_wakeup`, XSK-backed BMan pool, per-CPU NAPI + dedicated QMan channels per qband, cluster-aware pinning. Driver proven to drop **0%** at line rate; ~5.57 Gbit/s aggregate RX measured (bottleneck is the single userspace receiver, not the NIC).
+- **HW capability layer** — FMan PCD caps live-probed (`0x17` = CC HM POL PARSER on ucode 210).
+- **HM VLAN-strip offload (M3-3c)** — live on hardware (`ethtool -k` → `rx-vlan-offload: on`).
+- **Policer + CEETM scaffolds (M3-3d/e)** — install/stub APIs compiled in and cap-probed, stable contracts for the VyOS CLI consumers.
+
+**What remains for a feature-complete driver** (see the spec's "What remains for a complete DPAA1 driver" table):
+
+- **Two real kernel forward-ports** — the FMan PCD subsystem (unblocks CC steering and the productive HM/Policer datapaths) and the QMan-CEETM driver (~4500 LOC, absent from mainline 6.18, needed for HW egress shaping).
+- **Non-kernel glue** — vyos-1x CLI consumers for HM/Policer/CEETM, a traffic generator for the functional datapath gates, and a multi-core receiver to record the literal ≥7 Gbps figure.
+
+No further *architectural* work is required — the ops abstraction and capability layer already accommodate every remaining consumer.
 
 ## What This Build Fixes
 
@@ -193,7 +210,7 @@ Thirteen things were broken out of the box. Most failed silently. The worst ones
 | 12 | No QSPI flash access | `CONFIG_SPI_FSL_QSPI` not set | `=y` + DTS partition map |
 | 13 | VPP capped at 3290 MTU | AF_XDP max frame ~3304 bytes on DPAA1 | Split-plane: VPP on SFP+ (no jumbo), kernel on RJ45 (full 9578 MTU) |
 
-Full postmortem with driver archaeology and DPAA1 architecture deep-dive: [PORTING.md](PORTING.md).
+Full postmortem with driver archaeology and DPAA1 architecture deep-dive: [plans/PORTING.md](plans/PORTING.md).
 
 ## Known Boot Messages (Ignore These)
 
@@ -208,7 +225,7 @@ The boot log contains some alarming lines. All of them are fine.
 | `binfmt_misc.mount` FAILED | Expected on ARM64 target hardware. No binfmt emulation needed. |
 | kexec double-boot (USB live only) | Normal VyOS live-boot behavior. Installed eMMC systems boot once, straight through. |
 
-Full annotated boot log: [captured_boot.md](captured_boot.md).
+Full annotated boot sequences: [plans/BOOT-PROCESS.md](plans/BOOT-PROCESS.md).
 
 ## License
 

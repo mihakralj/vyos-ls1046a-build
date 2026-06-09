@@ -342,6 +342,51 @@ cp "$BOARD_PATCH_DIR/0103a-dpaa1-true-zc-rx-recover-swring.patch" "$KERNEL_PATCH
 # together (firing either alone -> sec 6.1.8 crash class). Byte-identical on
 # default/vpp (only reached on XDP_ZEROCOPY bind). Spec sec 6.1.16.
 cp "$BOARD_PATCH_DIR/0103b-dpaa1-true-zc-rx-reprogram-redirect.patch" "$KERNEL_PATCHES/"
+# 0103c: true-ZC RX stage-3 -- sub-increment-4 reorder + IPI wakeup +
+# unconditional NAPI refill + pre-arm RX NEED_WAKEUP + BPID restore on
+# detach. Makes the productive xsk_zc_rx_redirect oracle (0103b) actually
+# reachable under load. Edits af_xdp_pool_main.c (+ dpaa_eth) on top of
+# 0103b; sorts after 0103b, before 0104. Spec sec 6.1.17.
+cp "$BOARD_PATCH_DIR/0103c-dpaa1-true-zc-rx-classify-before-bpid-guard.patch" "$KERNEL_PATCHES/"
+# 0103e: bpf_net_ctx NULL-deref fix in af_xdp_pool_rx_hook (the rx_hook
+# runs outside the NAPI bpf_net_ctx the redirect path assumes). Stacks on
+# 0103c. Spec sec 6.1.17.
+cp "$BOARD_PATCH_DIR/0103e-dpaa1-true-zc-rx-bpf-net-ctx-fix.patch" "$KERNEL_PATCHES/"
+# 0104: PRODUCTIVE M3-3d policer consumer -- .ndo_setup_tc TC_SETUP_BLOCK
+# handler mapping a single ingress `tc filter matchall action police` onto
+# fman_policer_install() slot 0 (board 0100). Fail-soft -EOPNOTSUPP when
+# !fman_policer_caps_supported(). Edits dpaa_eth.c/.h only; sorts after
+# 0103e, before 101-sfp. This is the kernel backend for the vyos-1x-025
+# `set interfaces ethernet ethX ingress-policer` CLI. Spec sec 5.6.
+cp "$BOARD_PATCH_DIR/0104-dpaa-ingress-policer-tc-matchall-bridge.patch" "$KERNEL_PATCHES/"
+# 0104a: advertise NETIF_F_HW_TC in dpaa_netdev_init() so tc_can_offload() is
+# true and the tc core actually routes an ingress `matchall action police`
+# filter to 0104's TC_SETUP_BLOCK handler. Without it the netdev shows
+# `hw-tc-offload: off [fixed]`, skip_sw filters are rejected and non-skip_sw
+# filters install software-only (not_in_hw) -- the handler never runs. Gated
+# on fman_policer_caps_supported() (decl from 0091), mirrors the HM /
+# NETIF_F_HW_VLAN_CTAG_RX block 0101 adds just above. Touches only
+# dpaa_netdev_init() (no overlap with 0104's hunks); sorts after 0104, before
+# 101-sfp. Spec sec 5.6.
+cp "$BOARD_PATCH_DIR/0104a-dpaa-netdev-advertise-hw-tc.patch" "$KERNEL_PATCHES/"
+# 0104b: M3-3e CEETM scaffold -- pins the QMan egress-shaper stub API
+# (dpaa_ceetm_qdisc_install / dpaa_ceetm_qdisc_destroy / dpaa_ceetm_supported)
+# + CONFIG_DPAA_HW_CEETM in dpaa_fman_caps.{c,h} + Kconfig. supported() returns
+# false and install() returns -ENOTSUPP until the productive QMan CEETM core
+# forward-port lands; fixes the VyOS CLI contract now. Touches only the tails
+# of caps.{c,h}/Kconfig (no overlap with 0104/0104a); sorts after 0104a, before
+# 101-sfp. Spec sec 5.7.
+cp "$BOARD_PATCH_DIR/0104b-dpaa-ceetm-stub.patch" "$KERNEL_PATCHES/"
+# 0105: dormant exported fman_port_set_cc_base() RX coarse-classification
+# base primitive (M3-3b keystone, WRITE mechanism, no caller). Programs the
+# BMI fmbm_rccb register -- the RAW MURAM offset of the 0098 CC tree root
+# (NO >>4) -- which mainline NEVER writes, the single missing port->CC link
+# that left M2/M3 static CC steering non-productive. The Parser->KeyGen half
+# is already wired by fman_port_use_kg_hash(). Edits fman_port.c/.h only;
+# independent of the 0092-0104b PCD stack (cross-module EXPORT consumed by
+# the future productive caller). Sorts after 0104b, before 101-sfp. Spec
+# sec 13.
+cp "$BOARD_PATCH_DIR/0105-fman-port-set-cc-base-primitive.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
@@ -390,7 +435,7 @@ fi
 
 ### FLAVOR=ask: stage the ASK2 in-tree kernel patches
 #
-# Per plans/ASK2-IMPLEMENTATION.md PR2/PR3 and spec §10, the ASK2
+# Per plans/archive/ASK2-IMPLEMENTATION.md PR2/PR3 and spec §10, the ASK2
 # kernel surface needs three small patches (currently placeholder stubs;
 # real implementations land in M2):
 #   0001-caam-qi-share.patch        — caam_qi_ext_consumer_register/release
@@ -431,7 +476,7 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
     # debugfs regdump 0045 and the now-orphaned 0051 revert of archived
     # 0043). The KEEP halves of the PARTIAL splits of 0033 + 0037 + 0046
     # live in the active series as 0054 + 0055 + 0056 respectively.  See
-    # plans/ASK2-PHASE2-PATCH-TRIAGE.md for the full audit (Option C2).
+    # plans/archive/ASK2-PHASE2-PATCH-TRIAGE.md for the full audit (Option C2).
     # Archived patches are NOT applied at build time — the subdirectory
     # is not globbed below.
     ASK_PATCH_COUNT=0
