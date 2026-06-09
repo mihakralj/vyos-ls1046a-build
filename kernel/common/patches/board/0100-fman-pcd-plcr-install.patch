@@ -113,7 +113,7 @@ new file mode 100644
 index 0000000..3a3c90b
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
-@@ -0,0 +1,535 @@
+@@ -0,0 +1,604 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * FMan PCD Policer (RFC2698/single-rate) - three-colour-marker silicon
@@ -167,6 +167,7 @@ index 0000000..3a3c90b
 +#include <linux/io.h>
 +#include <linux/kernel.h>
 +#include <linux/list.h>
++#include <linux/log2.h>
 +#include <linux/math64.h>
 +#include <linux/module.h>
 +#include <linux/mutex.h>
@@ -218,6 +219,22 @@ index 0000000..3a3c90b
 +#define FMAN_PLCR_PAR_R			0x40000000u	/* read (clear = write) */
 +#define FMAN_PLCR_PAR_PNUM_SHIFT	16
 +#define FMAN_PLCR_PAR_PWSEL_MASK	0x0000FFFFu	/* select all 16 words  */
++
++/*
++ * Per-port relative->absolute profile-mapping window (SDK
++ * t_FmPcdPlcrRegs::fmpl_pmr[63], FMPL offset 0x204, +4 per port; index =
++ * BMI hw port id - 1).  KeyGen selects a RELATIVE policer profile id in
++ * KGSE_PPC with the mode ABSOLUTE bit clear; the silicon resolves it to an
++ * absolute FMPL profile through this window (absolute = BASE + relative),
++ * but ONLY while the window VALID bit is set.  If the window is left
++ * unprogrammed the BMI rejects every frame as an uninitialised profile and
++ * drops it BEFORE metering (BUG 3a: all colour counters frozen, token
++ * bucket never moves).  BRN = log2(window size).  RM sec 8.7; SDK
++ * PlcrSetPortProfiles()/PlcrClearPortProfiles().
++ */
++#define FMAN_PLCR_PMR_OFFSET		0x204u		/* fmpl_pmr[0]         */
++#define FMAN_PLCR_PMR_V			0x80000000u	/* window valid        */
++#define FMAN_PLCR_PMR_BRN_SHIFT		16		/* log2(num profiles)  */
 +
 +/*
 + * FMPL_PEMODE (profile entry mode) bits - SDK fm_plcr.h
@@ -533,6 +550,46 @@ index 0000000..3a3c90b
 +	spin_unlock_irqrestore(&plcr_hw_lock, flags);
 +}
 +
++/*
++ * Program the per-port FMPL profile-mapping window so the RELATIVE policer
++ * profile id KeyGen places in KGSE_PPC (ABSOLUTE bit clear) resolves to an
++ * absolute FMPL profile.  @base = absolute base profile, @num_profiles =
++ * window size (power of two; BRN = log2).  For the single per-port profile
++ * we install, base = profile_id and num = 1 (BRN = 0), so relative 0 maps to
++ * absolute profile_id.  @port_id is the BMI hw port id (1..63); the window
++ * index is port_id - 1.  Port of SDK PlcrSetPortProfiles().
++ */
++static void plcr_set_port_window(struct fman_pcd *pcd, u8 port_id,
++				 u16 base, u8 num_profiles)
++{
++	void __iomem *fmpl = plcr_fmpl_base(pcd);
++	void __iomem *pmr = fmpl + FMAN_PLCR_PMR_OFFSET + (port_id - 1) * 4;
++	u32 log2num = order_base_2(num_profiles);
++	u32 val = FMAN_PLCR_PMR_V |
++		  (log2num << FMAN_PLCR_PMR_BRN_SHIFT) | base;
++	unsigned long flags;
++
++	spin_lock_irqsave(&plcr_hw_lock, flags);
++	iowrite32be(val, pmr);
++	spin_unlock_irqrestore(&plcr_hw_lock, flags);
++}
++
++/*
++ * Close the per-port FMPL profile-mapping window (VALID bit -> 0) so the
++ * silicon stops resolving relative profile ids for this port.  Port of SDK
++ * PlcrClearPortProfiles().
++ */
++static void plcr_clear_port_window(struct fman_pcd *pcd, u8 port_id)
++{
++	void __iomem *fmpl = plcr_fmpl_base(pcd);
++	void __iomem *pmr = fmpl + FMAN_PLCR_PMR_OFFSET + (port_id - 1) * 4;
++	unsigned long flags;
++
++	spin_lock_irqsave(&plcr_hw_lock, flags);
++	iowrite32be(0, pmr);
++	spin_unlock_irqrestore(&plcr_hw_lock, flags);
++}
++
 +/* Find an installed profile for (@port_id, @profile_id).  Caller holds
 + * pcd->lock.
 + */
@@ -599,6 +656,14 @@ index 0000000..3a3c90b
 +	plcr_build_profile(hw, &regs);
 +	plcr_commit_profile(pcd, profile_id, &regs);
 +
++	/* Open the per-port relative->absolute profile window so the RELATIVE
++	 * id KeyGen selects (KGSE_PPC, ABSOLUTE bit clear) resolves to this
++	 * absolute profile.  base = profile_id, num = 1 (single per-port
++	 * profile).  Without this the BMI drops every frame BEFORE metering
++	 * (BUG 3a).  Mirrors SDK FmPcdPlcrAllocProfiles(port, profile_id, 1).
++	 */
++	plcr_set_port_window(pcd, port_id, profile_id, 1);
++
 +	/* Publish: replace any existing bookkeeping for this (port, slot). */
 +	pcd_lock = fman_pcd_get_lock(pcd);
 +	mutex_lock(pcd_lock);
@@ -644,7 +709,11 @@ index 0000000..3a3c90b
 +	if (!p)
 +		return;
 +
-+	/* Disarm the silicon profile, then free bookkeeping. */
++	/* Close the per-port profile window (VALID -> 0) so KeyGen stops
++	 * resolving the relative id, then disarm the silicon profile and free
++	 * bookkeeping.  Mirrors SDK FmPcdPlcrFreeProfiles().
++	 */
++	plcr_clear_port_window(pcd, port_id);
 +	plcr_invalidate_profile(pcd, profile_id);
 +	kfree(p);
 +}
