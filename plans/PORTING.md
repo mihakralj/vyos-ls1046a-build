@@ -3,7 +3,7 @@
 Technical analysis of what breaks when you drop a generic VyOS ARM64 ISO onto NXP Layerscape silicon. And the exact fixes that survived.
 
 > **Boot process specification** (U-Boot env variables, annotated USB and eMMC boot sequences, `vyos.env` mechanism, failure modes): **[BOOT-PROCESS.md](BOOT-PROCESS.md)**
-> **Install guide** (write USB image, run `install image`, eMMC boot): **[INSTALL.md](INSTALL.md)**
+> **Install guide** (write USB image, run `install image`, eMMC boot): **[INSTALL.md](../INSTALL.md)**
 
 ## The Problem
 
@@ -661,9 +661,9 @@ CONFIG_NLS_UTF8=y               # FAT UTF-8
 
 - [BOOT-PROCESS.md](BOOT-PROCESS.md) -- complete boot path specification: U-Boot env variables, annotated USB and eMMC sequences, `vyos.env` mechanism, SPI NOR layout, failure modes
 - [DEV-LOOP.md](DEV-LOOP.md) -- local dev build: TFTP dev loop, `bin/dev-build.sh` reference, U-Boot `dev_boot` setup
-- [INSTALL.md](INSTALL.md) -- step-by-step installation guide
+- [INSTALL.md](../INSTALL.md) -- step-by-step installation guide
 - [UBOOT.md](UBOOT.md) -- U-Boot serial console reference: memory map, boot commands, clock tree, MTD layout
-- [README.md](README.md) -- project overview
+- [README.md](../README.md) -- project overview
 - [../specs/dpaa1-afxdp-modernization-spec.md](../specs/dpaa1-afxdp-modernization-spec.md) -- DPAA1 HW-accelerated AF_XDP driver modernization: design, milestone tracker, FMan offload (CC/HM/Policer/CEETM) status (supersedes the abandoned DPDK PMD / USDPAA chardev path, removed per RC#31)
 - [Mono Gateway Getting Started](https://github.com/we-are-mono/meta-mono/blob/master/gateway-development-kit/getting-started.md) -- factory setup, serial console, Recovery Linux
 - [Mono Gateway Hardware Description](https://github.com/we-are-mono/meta-mono/blob/master/gateway-development-kit/hardware-description.md) -- port pinouts, GPIO, M.2, fan headers

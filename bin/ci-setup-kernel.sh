@@ -435,7 +435,7 @@ fi
 
 ### FLAVOR=ask: stage the ASK2 in-tree kernel patches
 #
-# Per plans/ASK2-IMPLEMENTATION.md PR2/PR3 and spec §10, the ASK2
+# Per plans/archive/ASK2-IMPLEMENTATION.md PR2/PR3 and spec §10, the ASK2
 # kernel surface needs three small patches (currently placeholder stubs;
 # real implementations land in M2):
 #   0001-caam-qi-share.patch        — caam_qi_ext_consumer_register/release
@@ -476,7 +476,7 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
     # debugfs regdump 0045 and the now-orphaned 0051 revert of archived
     # 0043). The KEEP halves of the PARTIAL splits of 0033 + 0037 + 0046
     # live in the active series as 0054 + 0055 + 0056 respectively.  See
-    # plans/ASK2-PHASE2-PATCH-TRIAGE.md for the full audit (Option C2).
+    # plans/archive/ASK2-PHASE2-PATCH-TRIAGE.md for the full audit (Option C2).
     # Archived patches are NOT applied at build time — the subdirectory
     # is not globbed below.
     ASK_PATCH_COUNT=0

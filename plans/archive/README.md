@@ -10,6 +10,7 @@ Historical design and forensic documents preserved for bisect/audit purposes. Th
 
 For current state, see (in order of authority):
 
+- `plans/ASK-PLANS.md` — **the ASK / ASK2 documentation hub — start here.** Single index of every ASK plan (active + archived), the source-of-truth hierarchy, canonical reading order, and the current M2 status snapshot.
 - `specs/dpaa1-afxdp-modernization-spec.md` — **the authoritative cross-flavor source-of-truth** (one DPAA1 driver core + `pcd_ops`/`qmgmt_ops`; the FMan PCD subsystem now lives in the common board stack, built-in for default/vpp/ask).
 - `specs/ask2-rewrite-spec.md` — ASK2 architectural source-of-truth (v1.6).
 - `specs/vpp-dpaa1-ls1046a-spec.md` — VPP-flavor (AF_XDP) design spec.
