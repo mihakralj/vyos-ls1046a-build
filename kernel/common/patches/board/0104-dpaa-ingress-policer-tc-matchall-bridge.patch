@@ -1,5 +1,5 @@
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-index 6fe417c..0981b9e 100644
+index 6fe417c..6eb9fec 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 @@ -31,10 +31,13 @@
@@ -36,7 +36,7 @@ index 6fe417c..0981b9e 100644
  	mqprio->hw = TC_MQPRIO_HW_OFFLOAD_TCS;
  	num_tc = mqprio->num_tc;
  
-@@ -421,6 +420,285 @@ out:
+@@ -421,6 +420,240 @@ out:
  	return 0;
  }
  
@@ -59,23 +59,6 @@ index 6fe417c..0981b9e 100644
 + */
 +#define DPAA_POLICE_PROFILE_ID 0
 +
-+/* Resolve this netdev's RX default Frame Queue ID - the FQID the kernel
-+ * (and the AF_XDP datapath) actually dequeues ingress frames from. The
-+ * catch-all KeyGen scheme must enqueue conforming (green/yellow) frames to
-+ * exactly this FQ so policed traffic still reaches the stack. Returns 0 if
-+ * the list has no RX-default FQ (scheme_create then rejects the 0 fqid).
-+ */
-+static u32 dpaa_get_rx_default_fqid(struct dpaa_priv *priv)
-+{
-+	struct dpaa_fq *fq;
-+
-+	list_for_each_entry(fq, &priv->dpaa_fq_list, list)
-+		if (fq->fq_type == FQ_TYPE_RX_DEFAULT)
-+			return fq->fqid;
-+
-+	return 0;
-+}
-+
 +static int dpaa_setup_tc_matchall_replace(struct net_device *net_dev,
 +					  struct tc_cls_matchall_offload *f)
 +{
@@ -83,10 +66,8 @@ index 6fe417c..0981b9e 100644
 +	struct netlink_ext_ack *extack = f->common.extack;
 +	struct fman_policer_profile prof = {};
 +	const struct flow_action_entry *act;
-+	struct fman_pcd_kg_scheme *scheme;
 +	struct fman_pcd *pcd;
 +	struct fman *fm;
-+	u32 rx_fqid;
 +	u8 port_id;
 +	int err;
 +
@@ -176,12 +157,18 @@ index 6fe417c..0981b9e 100644
 +	}
 +
 +	/* The profile is now programmed but unbound: nothing routes frames
-+	 * into it yet. Wire the datapath by creating a catch-all KeyGen
-+	 * scheme (no key extract, every frame matches) whose next-engine is
-+	 * the policer profile, bind it to this RX port, then flip the port's
-+	 * post-parser next-engine from direct-enqueue to KeyGen so frames
-+	 * actually traverse the scheme. Conforming frames are enqueued to the
-+	 * RX default FQ (rx_fqid) exactly as before policing.
++	 * into it yet. The RX port already has an RSS-hashing KeyGen scheme
++	 * (created at port init by keygen_port_hashing_init()) that every
++	 * ingress frame is dispatched to - that is why un-policed traffic
++	 * flows through KeyGen at all. Reprogram THAT existing scheme's
++	 * next-engine in place to the policer profile, preserving its hash
++	 * spreading and FQID base, so conforming (green/yellow) frames
++	 * continue to the same hashed RX FQs while the policer meters and
++	 * drops the excess. Creating a *separate* catch-all scheme does not
++	 * work: the silicon's scheme-select picks the lowest-id scheme bound
++	 * to the port, so the pre-existing hash scheme always wins selection
++	 * and a higher-id policer scheme is never consulted (confirmed on
++	 * hardware 2026-06-09: traffic stayed uncapped at line rate).
 +	 */
 +	pcd = fman_get_pcd(fm);
 +	if (!pcd) {
@@ -190,50 +177,18 @@ index 6fe417c..0981b9e 100644
 +		goto err_policer;
 +	}
 +
-+	rx_fqid = dpaa_get_rx_default_fqid(priv);
-+	if (!rx_fqid) {
-+		NL_SET_ERR_MSG_MOD(extack, "no RX default FQ to police into");
-+		err = -ENODEV;
-+		goto err_policer;
-+	}
-+
-+	scheme = fman_pcd_kg_scheme_create(pcd,
-+		&(struct fman_pcd_kg_scheme_params){
-+			.id                 = -1,
-+			.num_extracts       = 0,
-+			.use_hash           = false,
-+			.default_fqid       = rx_fqid,
-+			.next_engine        = FMAN_PCD_KG_NEXT_ENGINE_PLCR,
-+			.policer_profile_id = DPAA_POLICE_PROFILE_ID,
-+		});
-+	if (IS_ERR(scheme)) {
-+		err = PTR_ERR(scheme);
-+		NL_SET_ERR_MSG_MOD(extack, "policer KeyGen scheme create failed");
-+		netif_err(priv, drv, net_dev,
-+			  "policer scheme create failed: %d\n", err);
-+		goto err_policer;
-+	}
-+
-+	err = fman_pcd_kg_bind_port(scheme, port_id);
++	err = fman_pcd_kg_port_attach_policer(pcd, port_id,
++					      DPAA_POLICE_PROFILE_ID);
 +	if (err) {
-+		NL_SET_ERR_MSG_MOD(extack, "policer KeyGen scheme bind failed");
++		NL_SET_ERR_MSG_MOD(extack, "policer KeyGen attach failed");
 +		netif_err(priv, drv, net_dev,
-+			  "policer scheme bind failed: %d\n", err);
-+		goto err_scheme;
++			  "policer KeyGen attach failed: %d\n", err);
++		goto err_policer;
 +	}
 +
-+	/* Flip parser->KeyGen so the bound scheme is consulted. DPAA ports
-+	 * default to direct BMI enqueue (pcd_fqs_count == 0), which bypasses
-+	 * KeyGen entirely; without this the scheme never runs.
-+	 */
-+	fman_port_use_kg_hash(priv->mac_dev->port[RX], true);
-+
-+	priv->police_scheme = scheme;
 +	priv->ingress_police_installed = true;
 +	return 0;
 +
-+err_scheme:
-+	fman_pcd_kg_scheme_destroy(scheme);
 +err_policer:
 +	fman_policer_destroy(fm, port_id, DPAA_POLICE_PROFILE_ID);
 +	return err;
@@ -249,21 +204,21 @@ index 6fe417c..0981b9e 100644
 +		return 0;
 +
 +	if (priv->mac_dev) {
-+		/* Reverse of _replace in strict LIFO order: restore the port's
-+		 * direct-enqueue next-engine, tear down the catch-all scheme,
-+		 * then remove the policer profile.
++		/* Reverse of _replace: restore the RX port's existing RSS hash
++		 * scheme to plain BMI-enqueue next-engine, then remove the
++		 * policer profile. The scheme itself is NOT destroyed - it is
++		 * the port's permanent RSS-hashing scheme (created at port
++		 * init); _replace only flipped its next-engine to the policer.
 +		 */
-+		fman_port_use_kg_hash(priv->mac_dev->port[RX], false);
-+
-+		if (priv->police_scheme) {
-+			fman_pcd_kg_scheme_destroy(priv->police_scheme);
-+			priv->police_scheme = NULL;
-+		}
-+
 +		fm = fman_bind(priv->mac_dev->fman_dev);
 +		if (fm) {
++			struct fman_pcd *pcd = fman_get_pcd(fm);
++
 +			port_id = fman_port_get_id(priv->mac_dev->port[RX]);
-+			fman_policer_destroy(fm, port_id, DPAA_POLICE_PROFILE_ID);
++			if (pcd)
++				fman_pcd_kg_port_detach_policer(pcd, port_id);
++			fman_policer_destroy(fm, port_id,
++					     DPAA_POLICE_PROFILE_ID);
 +		}
 +	}
 +
