@@ -1,0 +1,340 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
+Date: Tue, 10 Jun 2026 14:00:00 +0000
+Subject: [PATCH] system offload classify - HW exact-match flow steering CLI
+ (M3-3b production consumer)
+
+Adds the production CLI consumer for the FMan PCD Coarse-Classifier
+flow-steering path (spec sec 5.4):
+
+  set system offload classify interface <ethN> rule <1-32> protocol (tcp|udp)
+  set system offload classify interface <ethN> rule <1-32> source address <a.b.c.d>
+  set system offload classify interface <ethN> rule <1-32> source port <1-65535>
+  set system offload classify interface <ethN> rule <1-32> destination address <a.b.c.d>
+  set system offload classify interface <ethN> rule <1-32> destination port <1-65535>
+  set system offload classify interface <ethN> rule <1-32> queue <0-127>
+
+The conf_mode script shells out to the NIC-neutral standard interface -
+ethtool ntuple (`ethtool -N <intf> flow-type ... action <queue> loc
+<rule-1>`) - mirroring the vyos-1x-025 ingress-policer pattern (CLI ->
+standard kernel tool -> driver bridge). On the LS1046A Mono Gateway the
+dpaa driver's rxnfc bridge (board patch 0109) rebuilds the port's FMan
+CC static tree on every rule mutation: matching flows are
+silicon-steered to the chosen RX frame queue (and thereby its servicing
+CPU) before the kernel RX path ever runs. On hardware without the
+capability ethtool fails with "Operation not supported" and commit
+aborts loudly - no silent no-op.
+
+Apply model: every commit flushes the ntuple rules of all interfaces
+present in either the old (effective) or new config (parse `ethtool -n`
+Filter: lines, delete each), then re-inserts the new rule set sorted by
+rule number; rule number is the match priority (lower wins, mapped to
+ethtool location rule-1). A hardware reject mid-commit rolls back every
+rule installed by that commit.
+
+Documented hardware limitation (also enforced nowhere - both spellings
+are accepted): the FMan KeyGen-extracted compare key carries no L4
+protocol byte, so a tcp and a udp rule with identical addresses/ports
+steer the SAME traffic on LS1046A.
+
+Purely additive: two new files (interface definition XML + conf_mode
+script), no upstream file is touched, so this patch is immune to
+upstream context drift. XML validated against
+schema/interface_definition.rng (RelaxNG: valid); script passes
+python3 -m py_compile.
+
+Signed-off-by: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
+---
+diff --git a/interface-definitions/system_offload.xml.in b/interface-definitions/system_offload.xml.in
+new file mode 100644
+index 0000000..37f98d3
+--- /dev/null
++++ b/interface-definitions/system_offload.xml.in
+@@ -0,0 +1,127 @@
++<?xml version="1.0"?>
++<interfaceDefinition>
++  <node name="system">
++    <children>
++      <node name="offload" owner="${vyos_conf_scripts_dir}/system_offload.py">
++        <properties>
++          <help>Hardware flow offload</help>
++          <priority>385</priority>
++        </properties>
++        <children>
++          <node name="classify">
++            <properties>
++              <help>Hardware exact-match ingress flow steering (NIC flow classifier)</help>
++            </properties>
++            <children>
++              <tagNode name="interface">
++                <properties>
++                  <help>Ingress interface to classify on</help>
++                  <completionHelp>
++                    <script>${vyos_completion_dir}/list_interfaces --type ethernet</script>
++                  </completionHelp>
++                  <valueHelp>
++                    <format>txt</format>
++                    <description>Ethernet interface name</description>
++                  </valueHelp>
++                  <constraint>
++                    #include <include/constraint/interface-name.xml.i>
++                  </constraint>
++                </properties>
++                <children>
++                  <tagNode name="rule">
++                    <properties>
++                      <help>Classification rule (lower numbers match first)</help>
++                      <valueHelp>
++                        <format>u32:1-32</format>
++                        <description>Rule number (lower number = higher match priority)</description>
++                      </valueHelp>
++                      <constraint>
++                        <validator name="numeric" argument="--range 1-32"/>
++                      </constraint>
++                      <constraintErrorMessage>Rule number must be in range 1 to 32</constraintErrorMessage>
++                    </properties>
++                    <children>
++                      <leafNode name="protocol">
++                        <properties>
++                          <help>Transport protocol of the flow</help>
++                          <completionHelp>
++                            <list>tcp udp</list>
++                          </completionHelp>
++                          <valueHelp>
++                            <format>tcp</format>
++                            <description>Transmission Control Protocol</description>
++                          </valueHelp>
++                          <valueHelp>
++                            <format>udp</format>
++                            <description>User Datagram Protocol</description>
++                          </valueHelp>
++                          <constraint>
++                            <regex>(tcp|udp)</regex>
++                          </constraint>
++                          <constraintErrorMessage>Protocol must be tcp or udp</constraintErrorMessage>
++                        </properties>
++                      </leafNode>
++                      <node name="source">
++                        <properties>
++                          <help>Source match criteria</help>
++                        </properties>
++                        <children>
++                          <leafNode name="address">
++                            <properties>
++                              <help>Source IPv4 address (exact match)</help>
++                              <valueHelp>
++                                <format>ipv4</format>
++                                <description>IPv4 source address</description>
++                              </valueHelp>
++                              <constraint>
++                                <validator name="ipv4-address"/>
++                              </constraint>
++                            </properties>
++                          </leafNode>
++                          #include <include/port-number.xml.i>
++                        </children>
++                      </node>
++                      <node name="destination">
++                        <properties>
++                          <help>Destination match criteria</help>
++                        </properties>
++                        <children>
++                          <leafNode name="address">
++                            <properties>
++                              <help>Destination IPv4 address (exact match)</help>
++                              <valueHelp>
++                                <format>ipv4</format>
++                                <description>IPv4 destination address</description>
++                              </valueHelp>
++                              <constraint>
++                                <validator name="ipv4-address"/>
++                              </constraint>
++                            </properties>
++                          </leafNode>
++                          #include <include/port-number.xml.i>
++                        </children>
++                      </node>
++                      <leafNode name="queue">
++                        <properties>
++                          <help>Hardware RX queue to steer matching flows to</help>
++                          <valueHelp>
++                            <format>u32:0-127</format>
++                            <description>RX queue index (determines servicing CPU)</description>
++                          </valueHelp>
++                          <constraint>
++                            <validator name="numeric" argument="--range 0-127"/>
++                          </constraint>
++                          <constraintErrorMessage>Queue must be in range 0 to 127</constraintErrorMessage>
++                        </properties>
++                      </leafNode>
++                    </children>
++                  </tagNode>
++                </children>
++              </tagNode>
++            </children>
++          </node>
++        </children>
++      </node>
++    </children>
++  </node>
++</interfaceDefinition>
+diff --git a/src/conf_mode/system_offload.py b/src/conf_mode/system_offload.py
+new file mode 100755
+index 0000000..065707d
+--- /dev/null
++++ b/src/conf_mode/system_offload.py
+@@ -0,0 +1,154 @@
++#!/usr/bin/env python3
++#
++# Copyright VyOS maintainers and contributors <maintainers@vyos.io>
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License version 2 or later as
++# published by the Free Software Foundation.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++#
++# system offload classify - hardware exact-match ingress flow steering.
++#
++# Drives the NIC's standard ethtool ntuple (rxnfc) interface:
++#
++#   ethtool -N <intf> flow-type (tcp4|udp4) [src-ip A] [dst-ip B]
++#           [src-port P] [dst-port Q] action <queue> loc <rule-1>
++#
++# On the LS1046A Mono Gateway the dpaa driver bridges these rules into an
++# FMan PCD Coarse-Classifier static tree (board patches 0098/0106/0108/0109):
++# a matching flow is silicon-steered to the chosen RX frame queue (and
++# thereby its servicing CPU) before the kernel ever sees the frame. On
++# hardware without the capability ethtool fails with "Operation not
++# supported" and commit aborts loudly.
++#
++# NOTE (documented hardware limitation): the FMan KeyGen-extracted compare
++# key carries no L4 protocol byte, so a tcp and a udp rule with identical
++# addresses/ports steer the SAME traffic on LS1046A.
++
++import re
++
++from sys import exit
++
++from vyos.config import Config
++from vyos.utils.process import cmd
++from vyos.utils.process import rc_cmd
++from vyos import ConfigError
++from vyos import airbag
++airbag.enable()
++
++def get_config(config=None):
++    if config:
++        conf = config
++    else:
++        conf = Config()
++    base = ['system', 'offload']
++
++    offload = conf.get_config_dict(base, key_mangling=('-', '_'),
++                                   get_first_key=True,
++                                   no_tag_node_value_mangle=True)
++
++    # Interfaces that carried rules in the previous (effective) config must
++    # be flushed even when they vanish from the new config.
++    effective = conf.get_config_dict(base, key_mangling=('-', '_'),
++                                     get_first_key=True,
++                                     no_tag_node_value_mangle=True,
++                                     effective=True)
++
++    old_ifaces = set(effective.get('classify', {}).get('interface', {}))
++    new_ifaces = set(offload.get('classify', {}).get('interface', {}))
++    offload['flush_interfaces'] = sorted(old_ifaces | new_ifaces)
++
++    return offload
++
++def verify(offload):
++    if not offload or 'classify' not in offload:
++        return None
++
++    for iface, iface_cfg in offload['classify'].get('interface', {}).items():
++        rules = iface_cfg.get('rule', {})
++        if not rules:
++            raise ConfigError(f'classify interface "{iface}" has no rules')
++        for num, rule in rules.items():
++            prefix = f'classify interface "{iface}" rule {num}'
++            if 'protocol' not in rule:
++                raise ConfigError(f'{prefix}: protocol is required')
++            if 'queue' not in rule:
++                raise ConfigError(f'{prefix}: queue is required')
++            has_match = False
++            for side in ('source', 'destination'):
++                side_cfg = rule.get(side, {})
++                if 'address' in side_cfg or 'port' in side_cfg:
++                    has_match = True
++            if not has_match:
++                raise ConfigError(
++                    f'{prefix}: at least one source/destination '
++                    'address or port is required')
++    return None
++
++def generate(offload):
++    return None
++
++def _flush_ntuple(iface):
++    """Delete every installed ntuple rule on @iface (best-effort)."""
++    rc, out = rc_cmd(f'ethtool -n {iface}')
++    if rc != 0:
++        return
++    for loc in re.findall(r'^Filter:\s+(\d+)', out, re.MULTILINE):
++        rc_cmd(f'ethtool -N {iface} delete {loc}')
++
++def apply(offload):
++    if not offload:
++        return None
++
++    for iface in offload.get('flush_interfaces', []):
++        _flush_ntuple(iface)
++
++    if 'classify' not in offload:
++        return None
++
++    for iface, iface_cfg in offload['classify'].get('interface', {}).items():
++        for num in sorted(iface_cfg.get('rule', {}), key=int):
++            rule = iface_cfg['rule'][num]
++            flow_type = 'tcp4' if rule['protocol'] == 'tcp' else 'udp4'
++            opts = f'flow-type {flow_type}'
++            src = rule.get('source', {})
++            dst = rule.get('destination', {})
++            if 'address' in src:
++                opts += f' src-ip {src["address"]}'
++            if 'port' in src:
++                opts += f' src-port {src["port"]}'
++            if 'address' in dst:
++                opts += f' dst-ip {dst["address"]}'
++            if 'port' in dst:
++                opts += f' dst-port {dst["port"]}'
++            # rule number is 1-based match priority; ethtool location is
++            # 0-based, lowest location matches first.
++            loc = int(num) - 1
++            rc, out = rc_cmd(f'ethtool -N {iface} {opts} '
++                             f'action {rule["queue"]} loc {loc}')
++            if rc != 0:
++                # Roll back anything we already installed on this commit.
++                for flushed in offload.get('flush_interfaces', []):
++                    _flush_ntuple(flushed)
++                raise ConfigError(
++                    f'classify interface "{iface}" rule {num}: hardware '
++                    f'rejected the rule: {out.strip()} (hardware flow '
++                    'steering unavailable on this platform?)')
++    return None
++
++if __name__ == '__main__':
++    try:
++        c = get_config()
++        verify(c)
++        generate(c)
++        apply(c)
++    except ConfigError as e:
++        print(e)
++        exit(1)
