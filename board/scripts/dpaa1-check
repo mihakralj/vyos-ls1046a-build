@@ -122,7 +122,10 @@ done
 # /soc (each holds the 4 per-CPU portal sub-nodes). Their presence confirms
 # the portal memory regions were carved out for the kernel QBMan drivers.
 for portal in qman bman; do
-    pnode=$(ls -d /proc/device-tree/soc/${portal}-portals* 2>/dev/null | head -1)
+    pnode=""
+    for d in /proc/device-tree/soc/${portal}-portals*; do
+        [ -d "$d" ] && { pnode=$d; break; }
+    done
     if [ -n "$pnode" ]; then
         ok "${portal}-portals region present ($(basename "$pnode"))"
     else
@@ -163,8 +166,10 @@ done
 hdr "3) FMan complex (controller / microcode / ports / MACs)"
 
 # 3a. FMan controller device bound to fsl-fman.
-FMAN_DEV=$(ls /sys/bus/platform/drivers/fsl-fman/ 2>/dev/null \
-           | grep -E '\.fman$' | head -1)
+FMAN_DEV=""
+for d in /sys/bus/platform/drivers/fsl-fman/*.fman; do
+    [ -e "$d" ] && { FMAN_DEV=$(basename "$d"); break; }
+done
 if [ -n "$FMAN_DEV" ]; then
     ok "FMan controller bound: $FMAN_DEV"
 else
@@ -175,9 +180,9 @@ fi
 # 3b. FMan microcode blob (loaded into MURAM at boot). The DT carries the
 # raw QE-firmware image under fman@1a00000/fman-firmware/fsl,firmware; its
 # embedded ASCII id string names the microcode version (this board ships the
-# fsl_fman_ucode_ls1046_r1.0_106_4_18 blob → "Microcode version 106.4.18",
-# which provides the KeyGen/CC/HM/Policer + SoftParser engines the PCD chain
-# drives). We just report whatever version is present.
+# LS1043-r1.0 ucode 210.10.1 → "Microcode version 210.10.1", which provides
+# the KeyGen/CC/HM/Policer + SoftParser engines the PCD chain drives —
+# PCD caps 0x17 in section 4). We just report whatever version is present.
 FW_BLOB=/proc/device-tree/soc/fman@1a00000/fman-firmware/fsl,firmware
 if [ -e "$FW_BLOB" ]; then
     ucode_ver=$( { strings "$FW_BLOB" 2>/dev/null || tr -c '[:print:]' '\n' < "$FW_BLOB"; } \
@@ -192,21 +197,26 @@ else
     warn "no fman-firmware DT blob — FMan running stock ROM ucode (PCD limited)"
 fi
 
-# 3c. BMI ports bound to fsl-fman-port. LS1046A FMan1 exposes RX+TX BMI
-# ports for the 1G MACs (1a08000..1a0d000.port) plus the 10G ports
-# (1a82000..1a84000.port) plus an offline/host-command port.
+# 3c. BMI ports bound to fsl-fman-port. The Mono Gateway DK DTS enables
+# RX+TX BMI ports for 6 1G MACs + 2 10G MACs = 16 port devices (a known-good
+# boot binds exactly 16). Fewer means part of the RX/TX datapath is missing.
 NPORTS=$(count_bound /sys/bus/platform/drivers/fsl-fman-port)
-if [ "$NPORTS" -ge 2 ]; then
+if [ "$NPORTS" -ge 16 ]; then
     ok "${NPORTS} FMan BMI port(s) bound (fsl-fman-port)"
+elif [ "$NPORTS" -ge 2 ]; then
+    warn "only ${NPORTS} FMan BMI port(s) bound (expected 16) — some ports missing"
 else
     fail "only ${NPORTS} FMan BMI port(s) bound — RX/TX datapath incomplete"
     mark_fail
 fi
 
-# 3d. MEMAC MACs bound to fsl_dpaa_mac (one per ethernet@ node).
+# 3d. MEMAC MACs bound to fsl_dpaa_mac (one per enabled ethernet@ node;
+# 5 on this board: 3x 1G RJ45 + 2x 10G SFP+).
 NMACS=$(count_bound /sys/bus/platform/drivers/fsl_dpaa_mac)
-if [ "$NMACS" -ge 1 ]; then
+if [ "$NMACS" -ge 5 ]; then
     ok "${NMACS} MEMAC MAC device(s) bound (fsl_dpaa_mac)"
+elif [ "$NMACS" -ge 1 ]; then
+    warn "only ${NMACS} MEMAC MAC device(s) bound (expected 5) — some ports missing"
 else
     fail "no MEMAC MAC devices bound — no ethernet ports will come up"
     mark_fail
@@ -231,14 +241,18 @@ hdr "4) FMan PCD (classify / header-manip / policer)"
 # dpaa_fman_caps.c (bit0 CC exact-match, bit1 HM nodes, bit2 Policer trTCM,
 # bit4 SoftParser → 0x17 on the 210.x ucode). The kernel ring buffer often
 # ages this out, so treat its presence as a bonus, not a requirement.
-PCD_CAPS=""
+#
+# Capture the kernel log ONCE here; section 9 reuses it (dmesg first, then
+# the kmsg journal as fallback — both best-effort).
+KLOG=""
 if command -v dmesg >/dev/null 2>&1; then
-    PCD_CAPS=$(dmesg 2>/dev/null | grep -oE 'FMan PCD caps = 0x[0-9a-fA-F]+.*' | tail -1)
+    KLOG=$(dmesg 2>/dev/null)
 fi
-if [ -z "$PCD_CAPS" ] && command -v journalctl >/dev/null 2>&1; then
-    PCD_CAPS=$(journalctl -k -b -o cat 2>/dev/null \
-               | grep -oE 'FMan PCD caps = 0x[0-9a-fA-F]+.*' | tail -1)
+if [ -z "$KLOG" ] && command -v journalctl >/dev/null 2>&1; then
+    KLOG=$(journalctl -k -b -o cat 2>/dev/null)
 fi
+PCD_CAPS=$(printf '%s\n' "$KLOG" \
+           | grep -oE 'FMan PCD caps = 0x[0-9a-fA-F]+.*' | tail -1)
 if [ -n "$PCD_CAPS" ]; then
     ok "PCD capabilities probed: ${PCD_CAPS}"
     note "(CC=exact-match classify, HM=header-manip, POL=trTCM policer, PARSER=softparse)"
@@ -282,8 +296,10 @@ fi
 # ---------------------------------------------------------------------------
 hdr "6) Network interfaces (eth0-eth4)"
 
-# eth0-eth2 = 1G RJ45 (MEMACs 1af0000/1af2000/1af4000), eth3/eth4 = 10G SFP+
-# (the left/right cages). The dpaa_eth (fsl_dpa) driver backs all of them.
+# eth0-eth2 = 1G RJ45 (MEMACs 1ae2000/1ae8000/1aea000), eth3/eth4 = 10G SFP+
+# (MEMACs 1af0000/1af2000, the left/right cages). The dpaa_eth (fsl_dpa)
+# netdev driver backs all of them; /sys/class/net/ethN/device points at the
+# PARENT fsl_dpaa_mac device, so 'drv' below normally reads fsl_dpaa_mac.
 found_eth=0
 for i in 0 1 2 3 4; do
     iface="eth${i}"
@@ -356,32 +372,36 @@ hdr "8) AF_XDP zero-copy (xsk_* counters)"
 
 # The dpaa_eth driver exports a contiguous block of xsk_* ethtool counters
 # (22 on the current true-ZC build, ending in xsk_zc_rx_redirect — the
-# productive zero-copy RX oracle). Probe eth3 (the validated 10G ZC port).
-ZC_IF=eth3
-if command -v ethtool >/dev/null 2>&1 && [ -d /sys/class/net/$ZC_IF ]; then
-    XSK=$(ethtool -S "$ZC_IF" 2>/dev/null | grep -E '^\s*xsk_')
-    if [ -n "$XSK" ]; then
-        nxsk=$(printf "%s\n" "$XSK" | grep -c xsk_)
+# productive zero-copy RX oracle). Probe both 10G ZC ports (eth3/eth4).
+if command -v ethtool >/dev/null 2>&1; then
+    xsk_seen=0
+    for ZC_IF in eth3 eth4; do
+        [ -d "/sys/class/net/$ZC_IF" ] || continue
+        XSK=$(ethtool -S "$ZC_IF" 2>/dev/null | grep -E '^\s*xsk_')
+        [ -n "$XSK" ] || continue
+        xsk_seen=1
+        nxsk=$(printf "%s\n" "$XSK" | wc -l)
         ok "${nxsk} xsk_* counter(s) exported on ${ZC_IF}"
         redir=$(printf "%s\n" "$XSK" | awk -F: '/xsk_zc_rx_redirect/{gsub(/ /,"",$2);print $2}')
         armed=$(printf "%s\n" "$XSK" | awk -F: '/xsk_zc_rx_armed/{gsub(/ /,"",$2);print $2}')
         guard=$(printf "%s\n" "$XSK" | awk -F: '/xsk_fill_guard_block/{gsub(/ /,"",$2);print $2}')
         if [ -n "$redir" ]; then
             if [ "$redir" -gt 0 ]; then
-                ok "true-ZC RX active: xsk_zc_rx_redirect=${redir} (frames redirected into XSKMAP)"
+                ok "${ZC_IF}: true-ZC RX active — xsk_zc_rx_redirect=${redir} (frames redirected into XSKMAP)"
             else
-                note "xsk_zc_rx_redirect=0 (no AF_XDP_ZEROCOPY socket bound — dormant, normal)"
+                note "${ZC_IF}: xsk_zc_rx_redirect=0 (no AF_XDP ZEROCOPY socket bound — dormant, normal)"
             fi
         fi
-        [ -n "$armed" ] && note "xsk_zc_rx_armed=${armed} (bands reprogrammed to an XSK BPID)"
+        [ -n "$armed" ] && [ "$armed" != "0" ] \
+            && note "${ZC_IF}: xsk_zc_rx_armed=${armed} (bands reprogrammed to an XSK BPID)"
         if [ -n "$guard" ] && [ "$guard" -gt 0 ]; then
-            warn "xsk_fill_guard_block=${guard} (FILL-ring single-producer guard fired)"
+            warn "${ZC_IF}: xsk_fill_guard_block=${guard} (FILL-ring single-producer guard fired)"
         fi
-    else
-        note "no xsk_* counters on ${ZC_IF} (AF_XDP not compiled into this dpaa_eth?)"
-    fi
+    done
+    [ "$xsk_seen" -eq 0 ] \
+        && note "no xsk_* counters on eth3/eth4 (AF_XDP not compiled into this dpaa_eth?)"
 else
-    skip "ethtool or ${ZC_IF} unavailable — AF_XDP counters not probed"
+    skip "ethtool unavailable — AF_XDP counters not probed"
 fi
 
 # Defer to the dedicated zero-copy verdict tool when present.
@@ -399,15 +419,10 @@ fi
 # ---------------------------------------------------------------------------
 hdr "9) dmesg banners (best-effort)"
 
-DMESG_OUT=""
-if command -v dmesg >/dev/null 2>&1; then
-    DMESG_OUT=$(dmesg 2>/dev/null | grep -iE 'fman|qman|bman|fsl_dpaa|dpaa_eth|Freescale FM' \
-                | grep -ivE 'xsk|af_xdp' || true)
-fi
-if [ -z "$DMESG_OUT" ] && command -v journalctl >/dev/null 2>&1; then
-    DMESG_OUT=$(journalctl -k -b -o cat 2>/dev/null \
-                | grep -iE 'fman|qman|bman|fsl_dpaa|dpaa_eth' | grep -ivE 'xsk|af_xdp' || true)
-fi
+# Reuses the KLOG captured once in section 4.
+DMESG_OUT=$(printf '%s\n' "$KLOG" \
+            | grep -iE 'fman|qman|bman|fsl_dpaa|dpaa_eth|Freescale FM' \
+            | grep -ivE 'xsk|af_xdp' || true)
 if [ -n "$DMESG_OUT" ]; then
     echo "$DMESG_OUT" | head -12 | while IFS= read -r line; do note "$line"; done
 else
