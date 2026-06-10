@@ -614,6 +614,9 @@ is the proven, working path.
 
 ## Related Documents
 
-- [VPP.md](VPP.md) — VPP integration details, CLI reference, thermal management
-- [PORTING.md](PORTING.md) — Kernel driver archaeology, DPAA1 boot sequence
-- [specs/dpaa1-afxdp-modernization-spec.md](../specs/dpaa1-afxdp-modernization-spec.md) — DPAA1 HW-accelerated AF_XDP modernization (supersedes the abandoned DPDK DPAA PMD path; the old VPP-DPAA-PMD-VS-AFXDP / ASK-ANALYSIS / FMD-SHIM-SPEC analyses were deleted — see git history)
+- [VPP.md](../VPP.md) — VPP integration details, CLI reference, thermal management
+- [VPP-SETUP.md](../VPP-SETUP.md) — User-facing VPP setup guide
+- [ASK-ANALYSIS.md](ASK-ANALYSIS.md) — Detailed ASK component analysis and implementation assessment
+- [VPP-DPAA-PMD-VS-AFXDP.md](VPP-DPAA-PMD-VS-AFXDP.md) — DPDK PMD vs AF_XDP cost-benefit analysis
+- [PORTING.md](../PORTING.md) — Kernel driver archaeology, DPAA1 boot sequence
+- [FMD-SHIM-SPEC.md](FMD-SHIM-SPEC.md) — FMD shim kernel module specification (CDX predecessor concept)
