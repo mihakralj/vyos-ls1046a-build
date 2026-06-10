@@ -1,6 +1,6 @@
 # Scope brief — Drive the DPAA1 true-ZC AF_XDP RX productive oracle (`xsk_zc_rx_redirect > 0`)
 
-**Status:** OPEN debug task — **no new feature code / no forward-port required.**
+**Status:** ✅ **FUNCTIONALLY RESOLVED 2026-06-10** — true-ZC RX is HW-validated: oracle `xsk_zc_rx_redirect` 0→7→8 reproducible (ISO `2026.06.10-0124-rolling`, kernel `6.18.34-vyos`, DUT `192.168.1.190`). GAP 1 closed (`0102b` BMI readback: `FMBM_EBMPI[0]` bpid 3→5 in silicon), GAP 1b closed (`0103g` NULL-`xdp.rxq` crash fixed, i40e `MEM_TYPE_XSK_BUFF_POOL` rxq registration), dispatch-placement fixed (`0103f`). Crash-free + reversible (serial-capture clean). **Only optimization remains:** GAP 2 = bulk-flow steering onto the XSK default FQ for a *high-rate* ZC throughput number (not gate-3-blocking — copy-mode already meets capacity). See spec §6.1.18. Original brief preserved below for the GAP-2 follow-up.
 **Owner:** (assign)
 **Branch:** `dpaa1` (do **not** disrupt `main`).
 **Authoritative spec:** `specs/dpaa1-afxdp-modernization-spec.md` §6.1.10–§6.1.17 (M3-3 step 7). This brief is a self-contained pointer; the spec is the source of truth. Cross-ref `plans/COMPLETION-PLAN.md` §4.3.
@@ -100,3 +100,48 @@ A **DRV-mode XDP redirect prog on eth3 hijacks the entire RX path**, so an `iper
 - **Do not guess register bits** — extract exact encodings from `fman_port.c` + the LS1046A RM / NXP SDK refs (`/tmp/kilo/sdk_*`, `fsl_fman_kg.h`).
 - No auto-commit/push without explicit user request — stage for review.
 - This is debug, not a forward-port: if you find yourself adding a new `fman_pcd_*` accessor, stop — the accessor (`0102`) and its caller (`0103b`) already exist; the gap is BMI-effectiveness + steering, not missing API.
+
+---
+
+## Addendum — 2026-06-09 late session (0103f + 0102b + 0103g landed)
+
+GAP 1 and the dispatch-placement defect are **resolved in code**; a NEW
+crash was found and fixed on hardware:
+
+1. **Dispatch placement defect (root cause of the stuck oracle):** the
+   committed `0103b` rx_hook dispatch sat at ~2901 in `rx_default_dqrr()`,
+   AFTER the `dpaa_bpid2pool(fd->bpid)` NULL-guard at ~2855 — XSK-bpid FDs
+   resolved to no kernel pool and were consumed/dropped before the hook ever
+   saw them. **`0103f`** moves the dispatch right after
+   `priv = netdev_priv(net_dev)`.
+2. **`0102b`** adds the GAP-1 `FMBM_EBMPI` register-readback `dev_info` at
+   reprogram time.
+3. **NEW crash (HW serial capture):** with 0103f live, the FIRST Recovered
+   frame NULL-derefs at `__xsk_map_redirect+0x6c` (lr `xdp_do_redirect`,
+   via `af_xdp_pool_rx_hook`) — `xsk_buff_alloc()` leaves `xdp.rxq` NULL
+   (driver-owned field) and `xsk_rcv_check` reads `xdp->rxq->dev` (offset 0
+   ⇒ fault at address 0). Dual-CPU interleaved Oops → instant reset, NO
+   pstore record — serial capture was mandatory.
+   **Fix `0103g`:** per-band `struct xdp_rxq_info xsk_zc_rxq[]` registered
+   at ZC attach with `MEM_TYPE_XSK_BUFF_POOL` + `xsk_pool_set_rxq_info()`
+   (i40e idiom — stamps `xdp.rxq` into every pool buffer once); the
+   reprogram-WRITE is gated on successful registration; unreg at detach.
+   `MEM_TYPE_XSK_BUFF_POOL` also routes `xsk_rcv()` down the true-ZC
+   branch instead of the copy fallback.
+
+**Test procedure refinements (hard-won):**
+
+- The XDP prog on eth3 eats ping replies — a DUT-side
+  `ping 10.99.1.2` during the hold drives ICMP echo-replies into eth3 RX
+  (no peer access needed), but the ping itself reports 100% loss while
+  redirect works. Judge by `ethtool -S eth3 | grep xsk_zc` (needs `sudo`).
+- Run a serial-relay logger (raw socket to `192.168.1.16:5555`) for the
+  WHOLE test window — this crash class leaves no pstore.
+- CI stages board patches via an EXPLICIT `cp` list in
+  `bin/ci-setup-kernel.sh` — new `kernel/common/patches/board/*.patch`
+  files are silently ignored until a `cp` line is added.
+
+**Status:** `0103f`+`0102b`+`0103g` committed on `dpaa1`, CI run
+`27242942698` building the validation ISO. Remaining after the crash fix
+is verified: GAP 2 (steering under flood — PCD/RSS FQs vs the default FQ)
+and the oracle-positive confirmation.
