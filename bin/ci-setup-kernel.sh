@@ -410,6 +410,15 @@ cp "$BOARD_PATCH_DIR/0105-fman-port-set-cc-base-primitive.patch" "$KERNEL_PATCHE
 # dpaa_fman_caps.c (install -> get_base -> graft; destroy detaches first).
 # Sorts after 0105, before 101-sfp. Spec sec 5.4 (M3-3b).
 cp "$BOARD_PATCH_DIR/0106-fman-pcd-cc-keygen-graft-wiring.patch" "$KERNEL_PATCHES/"
+# 0107: debugfs CC steering test harness -- /sys/kernel/debug/fman_pcd/<N>/
+# cc_test drives the EXACT 0106 productive sequence (static_install ->
+# get_base -> kg_port_attach_cc; clear = detach_cc -> static_destroy) so the
+# M3-3b acceptance gate can be exercised on the DUT before a real consumer
+# (vyos-1x classify CLI) lands. New TU fman_pcd_cc_test.c in
+# fsl_dpaa_fman.ko + intra-module fman_pcd_cc_seq_dump() helper; 0600
+# root-only node, zero datapath cost, no new EXPORT_SYMBOLs. Sorts after
+# 0106, before 101-sfp. Spec sec 5.4 (M3-3b DUT validation).
+cp "$BOARD_PATCH_DIR/0107-fman-pcd-cc-test-debugfs-harness.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
