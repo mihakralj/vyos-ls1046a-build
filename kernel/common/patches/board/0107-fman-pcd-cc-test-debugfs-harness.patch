@@ -1,0 +1,308 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Tue, 10 Jun 2026 01:20:00 +0000
+Subject: [PATCH] fman: add debugfs CC steering test harness (M3-3b
+ DUT-validation trigger)
+
+The fman_cc_tree_install() consumer API (0098 + 0106) has no in-tree
+caller yet, so the M3-3b acceptance gate (spec sec 5.4: tree installs,
+KGSE_CCBS grafts, exact-match key steers, miss falls through, detach
+restores) cannot be exercised on the DUT.  Add a per-FMan debugfs node
+
+  /sys/kernel/debug/fman_pcd/<N>/cc_test
+
+whose write handler drives the EXACT 0106 productive sequence:
+
+  install <hwport> <qband> <proto> <src_ip> <dst_ip> <dport>
+    -> fman_pcd_cc_static_install()   (one IPv4 exact-match key)
+    -> fman_pcd_cc_static_get_base()
+    -> fman_pcd_kg_port_attach_cc()   (the KGSE_CCBS graft)
+  clear <hwport>
+    -> fman_pcd_kg_port_detach_cc()   (detach FIRST)
+    -> fman_pcd_cc_static_destroy()
+
+and whose read handler prints one line per installed tree including the
+group-table MURAM offset (== the value grafted into KGSE_CCBS, for
+cross-checking against an ask-pcd-regdump.py scheme dump).
+
+New TU fman_pcd_cc_test.c links into fsl_dpaa_fman.ko alongside the
+other PCD TUs; the tree-walk lives in a new intra-module
+fman_pcd_cc_seq_dump() helper in fman_pcd_cc.c so struct
+fman_pcd_cc_tree stays private to that TU (no fragile shadow-struct).
+Hooked from fman_pcd_init()'s existing per-instance debugfs dir.
+Debug/bring-up surface only - 0600 root-only node, zero datapath cost
+when unused, no new EXPORT_SYMBOLs.
+
+Native arm64 compile of fman/: 0 warnings, 0 errors;
+fman_pcd_cc_test.o links into built-in.a.
+---
+diff --git a/drivers/net/ethernet/freescale/fman/Makefile b/drivers/net/ethernet/freescale/fman/Makefile
+index 660fdef..1a3a3d4 100644
+--- a/drivers/net/ethernet/freescale/fman/Makefile
++++ b/drivers/net/ethernet/freescale/fman/Makefile
+@@ -6,6 +6,6 @@ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_fman_port.o
+ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_mac.o
+ 
+ fsl_dpaa_fman-objs	:= fman_muram.o fman.o fman_sp.o fman_keygen.o
+-fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o fman_pcd_kg.o fman_pcd_cc.o fman_pcd_manip.o fman_pcd_plcr.o
++fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o fman_pcd_kg.o fman_pcd_cc.o fman_pcd_manip.o fman_pcd_plcr.o fman_pcd_cc_test.o
+ fsl_dpaa_fman_port-objs := fman_port.o
+ fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 0ac38e0..73becad 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -275,10 +275,12 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 		snprintf(name, sizeof(name), "%d", fman_get_id(fman));
+ 		pcd->debugfs_dir = debugfs_create_dir(name,
+ 						      fman_pcd_debugfs_root);
+-		if (!IS_ERR_OR_NULL(pcd->debugfs_dir))
++		if (!IS_ERR_OR_NULL(pcd->debugfs_dir)) {
+ 			debugfs_create_file("muram_budget", 0444,
+ 					    pcd->debugfs_dir, pcd,
+ 					    &fman_pcd_muram_budget_fops);
++			fman_pcd_cc_test_debugfs_init(pcd->debugfs_dir, pcd);
++		}
+ 	}
+ 
+ 	dev_info(fman_get_dev(fman),
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index cbf79c2..9ac649c 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -55,6 +55,7 @@
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+ #include <linux/slab.h>
++#include <linux/seq_file.h>
+ #include <linux/types.h>
+ 
+ #include <linux/fsl/fman_pcd.h>
+@@ -393,6 +394,32 @@ u32 fman_pcd_cc_tree_group_table_off(const struct fman_pcd_cc_tree *t)
+ 	return t ? (u32)t->group_off : 0;
+ }
+ 
++/*
++ * fman_pcd_cc_seq_dump() - one summary line per installed CC tree.
++ * Debug helper for the cc_test debugfs node (fman_pcd_cc_test.c); keeps
++ * struct fman_pcd_cc_tree private to this TU.  Intra-module, not exported.
++ */
++void fman_pcd_cc_seq_dump(struct fman_pcd *pcd, struct seq_file *m)
++{
++	struct fman_pcd_cc_tree *t;
++	struct list_head *head;
++
++	head = fman_pcd_get_cc_list(pcd);
++	if (!head)
++		return;
++
++	mutex_lock(fman_pcd_get_lock(pcd));
++	if (list_empty(head))
++		seq_puts(m, "(no CC trees installed)\n");
++	else
++		list_for_each_entry(t, head, node)
++			seq_printf(m,
++				   "port 0x%02x: %u keys, group=0x%lx match=0x%lx ad=0x%lx\n",
++				   t->port_id, t->num_keys, t->group_off,
++				   t->match_off, t->ad_off);
++	mutex_unlock(fman_pcd_get_lock(pcd));
++}
++
+ /*
+  * fman_pcd_cc_static_get_base() - fetch the MURAM byte offset of a port's
+  * installed static CC tree root (its group table).
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+new file mode 100644
+index 0000000..d9f4134
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+@@ -0,0 +1,173 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * fman_pcd_cc_test.c - debugfs CC steering test harness (M3-3b).
++ *
++ * The fman_cc_tree_install() consumer API (board patches 0098 + 0106) has
++ * no in-tree caller yet, so the M3-3b acceptance gate (spec sec 5.4: tree
++ * installs, KGSE_CCBS grafts, exact-match key steers, miss falls through,
++ * detach restores) cannot be exercised on hardware.  This TU adds a
++ * debugfs node per FMan instance:
++ *
++ *   /sys/kernel/debug/fman_pcd/<N>/cc_test
++ *
++ * Write commands (drives the EXACT 0106 productive sequence):
++ *   install <hwport> <qband> <proto> <src_ip> <dst_ip> <dport>
++ *       -> fman_pcd_cc_static_install() (one IPv4 exact-match key)
++ *       -> fman_pcd_cc_static_get_base()
++ *       -> fman_pcd_kg_port_attach_cc()   (the KGSE_CCBS graft)
++ *   clear <hwport>
++ *       -> fman_pcd_kg_port_detach_cc()
++ *       -> fman_pcd_cc_static_destroy()
++ *
++ * Read: one line per installed tree -
++ *   port 0x10: 1 keys, group=0x4ac40 match=0x4ac50 ad=0x4ad60
++ * (group == the MURAM offset grafted into KGSE_CCBS; cross-check with
++ *  ask-pcd-regdump.py scheme dump on the DUT.)
++ *
++ * Debug/bring-up only: gated by CONFIG_FSL_FMAN_PCD; the node only exists
++ * when debugfs is mounted.  Zero datapath cost when unused.
++ */
++
++#include <linux/debugfs.h>
++#include <linux/err.h>
++#include <linux/errno.h>
++#include <linux/inet.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/seq_file.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#include <linux/types.h>
++
++#include <linux/fsl/fman_pcd.h>
++#include "fman.h"
++#include "fman_pcd_internal.h"
++
++static int cc_test_show(struct seq_file *m, void *v)
++{
++	struct fman_pcd *pcd = m->private;
++
++	if (!pcd)
++		return 0;
++	fman_pcd_cc_seq_dump(pcd, m);
++	return 0;
++}
++
++static int cc_test_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, cc_test_show, inode->i_private);
++}
++
++static int cc_test_install(struct fman_pcd *pcd, const char *args)
++{
++	struct fman_pcd_cc_hw_spec *spec;
++	char src_str[40], dst_str[40];
++	u32 src_ip, dst_ip, cc_base;
++	u8 port_id, proto;
++	u16 qband, dport;
++	int n, err;
++
++	n = sscanf(args, "install %hhi %hu %hhu %39s %39s %hu",
++		   &port_id, &qband, &proto, src_str, dst_str, &dport);
++	if (n != 6)
++		return -EINVAL;
++
++	if (qband > 3 || !(proto == 6 || proto == 17))
++		return -EINVAL;
++
++	if (!in4_pton(src_str, -1, (u8 *)&src_ip, -1, NULL) ||
++	    !in4_pton(dst_str, -1, (u8 *)&dst_ip, -1, NULL))
++		return -EINVAL;
++
++	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
++	if (!spec)
++		return -ENOMEM;
++
++	spec->num_keys = 1;
++	spec->miss_qband = 0;
++	spec->keys[0].present = FMAN_PCD_CC_HW_F_ETHERTYPE |
++				FMAN_PCD_CC_HW_F_PROTO |
++				FMAN_PCD_CC_HW_F_SRC_IP |
++				FMAN_PCD_CC_HW_F_DST_IP |
++				FMAN_PCD_CC_HW_F_DST_PORT;
++	spec->keys[0].ethertype_be = cpu_to_be16(ETH_P_IP);
++	spec->keys[0].proto = proto;
++	/* in4_pton() already stored network byte order into the u32 */
++	spec->keys[0].src_ip_be = src_ip;
++	spec->keys[0].dst_ip_be = dst_ip;
++	spec->keys[0].dst_port_be = cpu_to_be16(dport);
++	spec->keys[0].target_qband = qband;
++
++	/* The exact 0106 productive sequence (fman_cc_tree_install()). */
++	err = fman_pcd_cc_static_install(pcd, port_id, spec);
++	kfree(spec);
++	if (err)
++		return err;
++
++	err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
++	if (!err)
++		err = fman_pcd_kg_port_attach_cc(pcd, port_id, cc_base);
++	if (err) {
++		fman_pcd_cc_static_destroy(pcd, port_id);
++		return err;
++	}
++
++	pr_info("fman_pcd cc_test: port 0x%02x tree installed, KGSE_CCBS grafted to 0x%x\n",
++		port_id, cc_base);
++	return 0;
++}
++
++static ssize_t cc_test_write(struct file *file, const char __user *buf,
++			     size_t count, loff_t *ppos)
++{
++	struct seq_file *m = file->private_data;
++	struct fman_pcd *pcd = m->private;
++	char *kbuf;
++	u8 port_id;
++	int ret;
++
++	if (!pcd || count == 0 || count > 256)
++		return -EINVAL;
++
++	kbuf = memdup_user_nul(buf, count);
++	if (IS_ERR(kbuf))
++		return PTR_ERR(kbuf);
++
++	kbuf[strcspn(kbuf, "\n")] = 0;
++
++	if (sscanf(kbuf, "clear %hhi", &port_id) == 1) {
++		/* 0106 teardown order: detach the graft FIRST. */
++		(void)fman_pcd_kg_port_detach_cc(pcd, port_id);
++		fman_pcd_cc_static_destroy(pcd, port_id);
++		pr_info("fman_pcd cc_test: port 0x%02x graft detached, tree destroyed\n",
++			port_id);
++		ret = count;
++	} else if (strncmp(kbuf, "install ", 8) == 0) {
++		ret = cc_test_install(pcd, kbuf);
++		if (ret == 0)
++			ret = count;
++	} else {
++		ret = -EINVAL;
++	}
++
++	kfree(kbuf);
++	return ret;
++}
++
++static const struct file_operations fman_pcd_cc_test_fops = {
++	.owner = THIS_MODULE,
++	.open = cc_test_open,
++	.read = seq_read,
++	.write = cc_test_write,
++	.llseek = seq_lseek,
++	.release = single_release,
++};
++
++void fman_pcd_cc_test_debugfs_init(struct dentry *parent,
++				   struct fman_pcd *pcd)
++{
++	if (IS_ERR_OR_NULL(parent) || !pcd)
++		return;
++	debugfs_create_file("cc_test", 0600, parent, pcd,
++			    &fman_pcd_cc_test_fops);
++}
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+index 66fdb71..a65d887 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+@@ -48,4 +48,11 @@ struct list_head *fman_pcd_get_replic_list(struct fman_pcd *pcd);
+ struct fman_pcd_cc_tree;
+ u32 fman_pcd_cc_tree_group_table_off(const struct fman_pcd_cc_tree *t);
+ 
++/* Debug helpers (fman_pcd_cc.c / fman_pcd_cc_test.c).  Intra-module. */
++struct seq_file;
++struct dentry;
++void fman_pcd_cc_seq_dump(struct fman_pcd *pcd, struct seq_file *m);
++void fman_pcd_cc_test_debugfs_init(struct dentry *parent,
++				   struct fman_pcd *pcd);
++
+ #endif /* __FMAN_PCD_INTERNAL_H */
