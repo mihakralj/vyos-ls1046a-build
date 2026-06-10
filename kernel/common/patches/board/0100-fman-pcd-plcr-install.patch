@@ -1,3 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
+Date: Fri, 29 May 2026 00:00:00 +0000
+Subject: [PATCH] dpaa: FMan policer profile install (productive, M3-3d)
+
+Forward-port of the FMan PCD Policer (srTCM/trTCM three-colour-marker)
+silicon programming path into the COMMON board patch stack (built-in for
+default/vpp/ask via the FSL_FMAN_PCD config from patch 0092).  Re-anchors
+the tested ask20 Policer-profile MURAM-encoding path (ask20 branch patches
+0018 body-1 create/destroy + 0019 body-2 rate-encoder) onto the 0092 PCD
+subsystem + 0097 KeyGen + 0098 CC + 0099 HM base, adapted to the dpaa1
+flat-C policer API declared by board patch 0090a.  This is PR5 of the
+dpaa1 PCD forward-port closing M3-3d.
+
+What this adds
+--------------
+- fman_pcd_plcr.c (new, fsl_dpaa_fman.ko): the productive srTCM/trTCM
+  profile installer.  Defines struct fman_pcd_plcr_profile + the 16-byte
+  MURAM profile-record layout (RM 8.7.6 p.5: mode @0x0, CIR @0x4, CBS @0x8,
+  EIR|EBS @0xc) and three static encoders: plcr_encode_rate() packs a
+  bits/sec rate into the FMan exp<<29|mant<<13 field (scaled =
+  ceil(bps*2^31/clk_hz), smallest exponent in [0..7] keeping the mantissa
+  16-bit, saturating at exp=7/mant=0xffff on overflow, zero rate -> 0);
+  plcr_encode_burst() quantises a byte burst to 256-byte units (round-up,
+  saturate 0xffff); plcr_build_mode() assembles the PMR word (srTCM sets
+  PIR_DISABLED, trTCM sets ALG_TRTCM, COLOR_AWARE honours frame colour).
+  fman_pcd_plcr_install() encodes the rate/burst/mode BEFORE touching MURAM
+  (CRITICAL: fman_get_clock_freq() returns u16 MHz so the body multiplies
+  by 1_000_000 to get Hz — the ask20 PR14e-body-2 gotcha), allocates the
+  16-byte record, writes it under a per-profile spinlock via four
+  iowrite32be stores, and publishes the profile on pcd->plcr_profiles
+  (replacing any existing (port, slot) — idempotent rebuild).
+  fman_pcd_plcr_destroy() is idempotent: finds by (port, slot), zeroes the
+  mode word to disarm metering, frees the MURAM, frees the handle.  The
+  MURAM internals (fman_pcd_muram_alloc / fman_muram_offset_to_vbase, the
+  latter NOT EXPORT_SYMBOL'd) stay inside this module — the 0097/0098/0099
+  bridge idiom.
+
+- include/linux/fsl/fman_pcd.h: publishes the neutral struct
+  fman_pcd_plcr_hw_profile (host bps/bytes: trtcm, color_aware, cir_bps,
+  cbs_bytes, pir_bps, pbs_bytes) + the two install/destroy prototypes.  The
+  neutral struct lives in the public header so both fsl_dpa.ko (which owns
+  the host-endian struct fman_policer_profile in dpaa_fman_caps.h) and
+  fsl_dpaa_fman.ko can see it without a circular include.
+
+- dpaa_fman_caps.c (fsl_dpa.ko): makes fman_policer_install() /
+  fman_policer_destroy() productive.  install() gates on
+  FMAN_CAP_POLICER_TRTCM (BIT2) BEFORE touching MURAM (spec sec 3.5),
+  validates the inputs (cir_bps == 0 -> -EINVAL; a trTCM profile whose
+  pir_bps < cir_bps -> -ERANGE), translates the host-endian struct
+  fman_policer_profile into the neutral fman_pcd_plcr_hw_profile
+  (dpaa_plcr_prof_to_hw(): mode TRTCM->trtcm, color AWARE->color_aware,
+  rates/bursts verbatim), resolves the PCD via fman_get_pcd(fm), and
+  delegates to fman_pcd_plcr_install().  destroy() gates on caps and
+  delegates to the idempotent fman_pcd_plcr_destroy().
+
+- Makefile: adds fman_pcd_plcr.o to the FSL_FMAN_PCD object list.
+
+Rate/burst encoding note
+------------------------
+Rates are bits/sec and bursts are bytes at both the dpaa-side host ABI and
+the neutral descriptor; the exp/mant rate-field quantisation and the
+256-byte burst quantisation happen entirely in the fman-side encoder
+(plcr_encode_rate / plcr_encode_burst), so the neutral struct carries plain
+host values.  For srTCM the EIR rate half of the EIR|EBS word stays 0
+(PIR_DISABLED is set in the mode word) and only the excess-burst (EBS)
+mantissa is meaningful; for trTCM the EIR half carries the encoded peak
+rate's high 16 bits.
+
+Verified: native arm64 compile of drivers/net/ethernet/freescale/fman/ and
+.../dpaa/ with LOCALVERSION=-vyos is 0 warnings / 0 errors; fman_pcd_plcr.o,
+dpaa_fman_caps.o and both built-in.a archives build clean; all four
+EXPORT_SYMBOL_GPL symbols (fman_pcd_plcr_install/destroy,
+fman_policer_install/destroy) resolve.
+
+Spec sec 5.6.
+
+Signed-off-by: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
+---
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
 index e366e85..3bb03bb 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
@@ -110,55 +189,47 @@ index 1428ed4..660fdef 100644
  fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
 new file mode 100644
-index 0000000..3a3c90b
+index 0000000..c145af4
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_plcr.c
-@@ -0,0 +1,645 @@
+@@ -0,0 +1,399 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
-+ * FMan PCD Policer (RFC2698/single-rate) - three-colour-marker silicon
-+ * programming via the FMPL indirect profile-access window.
++ * FMan PCD Policer (srTCM/trTCM) - three-colour-marker silicon programming.
 + *
-+ * dpaa1 forward-port (PR5 of the PCD series closing M3-3d).  This body
-+ * replaces the earlier MURAM-record encoding (which never matched the
-+ * silicon) with a faithful port of the NXP SDK fm_plcr.c profile path:
-+ * the policer profiles do NOT live in MURAM - they are 16-word records
-+ * inside the FMan Policer (FMPL) CCSR block, staged through a single
-+ * shared 16-word "profile entry" window and committed to a numbered
-+ * physical profile via the Profile Action Register (PAR) GO handshake.
++ * dpaa1 forward-port (PR5 of the PCD series closing M3-3d).  Re-anchors the
++ * tested ask20 Policer-profile MURAM-encoding path (ask20 branch patches
++ * 0018 body-1 create/destroy + 0019 body-2 rate-encoder) onto the 0092 PCD
++ * subsystem + 0097 KeyGen + 0098 CC + 0099 HM base, adapted to the dpaa1
++ * flat-C policer API declared by board patch 0090a:
 + *
-+ * The dpaa-side entry points (fman_policer_install / fman_policer_destroy
-+ * in dpaa_fman_caps.c, fsl_dpa.ko) gate on FMAN_CAP_POLICER_TRTCM,
-+ * translate their module-private host-endian struct fman_policer_profile
-+ * into the neutral struct fman_pcd_plcr_hw_profile declared in
++ *   enum fman_policer_mode { SRTCM, TRTCM }
++ *   struct fman_policer_profile { mode, color_mode, cir_bps, cbs_bytes,
++ *                                  pir_bps, pbs_bytes }
++ *
++ * The dpaa-side entry points (fman_policer_install / fman_policer_destroy in
++ * dpaa_fman_caps.c, fsl_dpa.ko) gate on FMAN_CAP_POLICER_TRTCM, translate
++ * their module-private host-endian struct fman_policer_profile into the
++ * neutral struct fman_pcd_plcr_hw_profile declared in
 + * <linux/fsl/fman_pcd.h>, and delegate to the two EXPORT_SYMBOL_GPL entry
-+ * points below (which live here in fsl_dpaa_fman.ko, so the silicon
-+ * internals never cross the module boundary - identical bridge idiom to
-+ * fman_pcd_cc.c / fman_pcd_manip.c / fman_pcd_kg.c).
++ * points below (which live here in fsl_dpaa_fman.ko alongside the MURAM
++ * allocator, so the silicon internals never cross the module boundary -
++ * identical bridge idiom to fman_pcd_cc.c / fman_pcd_manip.c / fman_pcd_kg.c).
 + *
 + * Authoritative reference
 + * -----------------------
-+ * - LS1046A Reference Manual sec 8.7 (FMan Policer, FMPL register block).
-+ * - NXP SDK drivers/net/ethernet/freescale/sdk_fman .../Peripherals/FM/Pcd/
-+ *   fm_plcr.{c,h} (read-only silicon-fact reference; algorithm ported,
-+ *   no code copied): GetInfoRateReg(), CalcRates(), CalcFPP(),
-+ *   BuildProfileRegs(), WritePar(), FM_PCD_PlcrProfileSet/Delete().
-+ * - RFC 2698 (trTCM) marker semantics.
++ * - LS1046A Reference Manual sec 8.7.6   (Policer profile registers).
++ * - LS1046A Reference Manual sec 8.7.6 p.5 (16-byte trTCM profile record).
++ * - RFC 2697 (srTCM) / RFC 2698 (trTCM) marker semantics.
 + *
-+ * FMPL block geometry (all offsets relative to the FMan CCSR base, which
-+ * struct fman::base_addr maps in full - mainline fman.c reaches KeyGen at
-+ * base_addr + KG_OFFSET = 0xC1000, and the Policer block is the 0x1000
-+ * region immediately below it at 0xC0000):
-+ *
-+ *   0xC0000 + 0x08C  FMPL_PAR    profile action register (GO handshake)
-+ *   0xC0000 + 0x090  FMPL_PEMODE \
-+ *   0xC0000 + 0x094  FMPL_PEGNIA  |
-+ *   ...               ...         |  16-word shared profile-entry window
-+ *   0xC0000 + 0x0CC  FMPL_PERRPC /
-+ *
-+ * A write of FMPL_PAR with GO|PNUM(id)|PWSEL=0xFFFF copies the staged
-+ * 16-word window into physical profile @id; the engine clears GO when the
-+ * copy completes.  All FMPL registers are CCSR big-endian.
++ * Provenance
++ * ----------
++ * Mainline drivers/net/ethernet/freescale/fman/ has zero policer code; the
++ * profile-record layout and the exp/mant rate-field encoding below are
++ * authored from the RM, cross-referenced against the legacy NXP SDK
++ * fm_plcr.{h,c} (read-only silicon-fact reference, no code copied).  The
++ * 16-byte profile record + PMR mode-word bits + rate exp<<29|mant<<13
++ * encoding mirror the validated ask20 fman_pcd_plcr.c PR14e bodies.
 + */
 +
 +#include <linux/err.h>
@@ -167,7 +238,6 @@ index 0000000..3a3c90b
 +#include <linux/io.h>
 +#include <linux/kernel.h>
 +#include <linux/list.h>
-+#include <linux/log2.h>
 +#include <linux/math64.h>
 +#include <linux/module.h>
 +#include <linux/mutex.h>
@@ -177,453 +247,185 @@ index 0000000..3a3c90b
 +
 +#include <linux/fsl/fman_pcd.h>
 +#include "fman.h"
++#include "fman_muram.h"
 +#include "fman_pcd_internal.h"
 +
 +/* ------------------------------------------------------------------ */
-+/* FMPL block geometry - RM sec 8.7 / SDK fm_plcr.h                    */
++/* Policer profile record layout - RM 8.7.6 p.5                        */
 +/* ------------------------------------------------------------------ */
 +
 +/*
-+ * Byte offset of the FMan Policer (FMPL) block within the FMan CCSR map.
-+ * Cross-ref mainline fman.c: KG_OFFSET = 0x000C1000; the Policer block is
-+ * the 0x1000 region immediately below KeyGen.
++ * The policer profile is a 16-byte MURAM-resident record consumed by the
++ * FMan policer engine.  Word offsets within the record (all big-endian
++ * relative to the host):
++ *
++ *   0x0  u32 mode  - PMR (profile mode register) bits
++ *   0x4  u32 cir   - committed information rate field (exp<<29|mant<<13)
++ *   0x8  u32 cbs   - committed burst size field (256-byte units)
++ *   0xc  u32 eir_ebs - peak/excess rate (hi 16) | peak/excess burst (lo 16)
++ *
++ * Cross-ref SDK fm_plcr.h::t_FmPcdPlcrProfileRegs (16-byte packed struct).
 + */
-+#define FMAN_PLCR_BLOCK_OFFSET		0x000C0000u
-+
-+/* Profile Action Register (FMPL_PAR) - SDK t_FmPcdPlcrRegs::fmpl_par. */
-+#define FMAN_PLCR_PAR_OFFSET		0x08Cu
++#define FMAN_PCD_PLCR_PROFILE_SIZE	16
++#define FMAN_PCD_PLCR_OFF_MODE	0x0
++#define FMAN_PCD_PLCR_OFF_CIR	0x4
++#define FMAN_PCD_PLCR_OFF_CBS	0x8
++#define FMAN_PCD_PLCR_OFF_EIR_EBS	0xc
 +
 +/*
-+ * 16-word shared profile-entry window (SDK t_FmPcdPlcrProfileRegs).
-+ * Offsets are relative to FMAN_PLCR_BLOCK_OFFSET.
++ * PMR (profile mode register) bits - RM 8.7.6 + cross-ref SDK fm_plcr.h
++ * FM_PCD_PLCR_PMR_*.  COLOR_AWARE honours the incoming frame colour;
++ * ALG_TRTCM selects the two-rate marker (clear = srTCM single-rate);
++ * PIR_DISABLED is set for srTCM so the engine ignores the EIR field.
 + */
-+#define FMAN_PLCR_PE_PEMODE		0x090u	/* profile entry mode */
-+#define FMAN_PLCR_PE_PEGNIA		0x094u	/* green  next-invoked-action */
-+#define FMAN_PLCR_PE_PEYNIA		0x098u	/* yellow next-invoked-action */
-+#define FMAN_PLCR_PE_PERNIA		0x09Cu	/* red    next-invoked-action */
-+#define FMAN_PLCR_PE_PECIR		0x0A0u	/* committed information rate  */
-+#define FMAN_PLCR_PE_PECBS		0x0A4u	/* committed burst size        */
-+#define FMAN_PLCR_PE_PEPEPIR_EIR	0x0A8u	/* peak/excess information rate */
-+#define FMAN_PLCR_PE_PEPBS_EBS		0x0ACu	/* peak/excess burst size      */
-+#define FMAN_PLCR_PE_PELTS		0x0B0u	/* last timestamp              */
-+#define FMAN_PLCR_PE_PECTS		0x0B4u	/* committed token status      */
-+#define FMAN_PLCR_PE_PEPTS_ETS		0x0B8u	/* peak/excess token status    */
-+#define FMAN_PLCR_PE_PEGPC		0x0BCu	/* green  packet counter       */
-+#define FMAN_PLCR_PE_PEYPC		0x0C0u	/* yellow packet counter       */
-+#define FMAN_PLCR_PE_PERPC		0x0C4u	/* red    packet counter       */
-+#define FMAN_PLCR_PE_PERYPC		0x0C8u	/* recoloured yellow counter   */
-+#define FMAN_PLCR_PE_PERRPC		0x0CCu	/* recoloured red counter      */
-+
-+/* FMPL_PAR fields - SDK fm_plcr.h FM_PCD_PLCR_PAR_*. */
-+#define FMAN_PLCR_PAR_GO		0x80000000u
-+#define FMAN_PLCR_PAR_R			0x40000000u	/* read (clear = write) */
-+#define FMAN_PLCR_PAR_PNUM_SHIFT	16
-+#define FMAN_PLCR_PAR_PWSEL_MASK	0x0000FFFFu	/* select all 16 words  */
++#define FMAN_PCD_PLCR_PMR_COLOR_AWARE	0x8000u
++#define FMAN_PCD_PLCR_PMR_ALG_TRTCM	0x2000u
++#define FMAN_PCD_PLCR_PMR_PACKET_MODE	0x1000u
++#define FMAN_PCD_PLCR_PMR_PIR_DISABLED	0x0040u
 +
 +/*
-+ * Per-port relative->absolute profile-mapping window (SDK
-+ * t_FmPcdPlcrRegs::fmpl_pmr[63], FMPL offset 0x204, +4 per port; index =
-+ * BMI hw port id - 1).  KeyGen selects a RELATIVE policer profile id in
-+ * KGSE_PPC with the mode ABSOLUTE bit clear; the silicon resolves it to an
-+ * absolute FMPL profile through this window (absolute = BASE + relative),
-+ * but ONLY while the window VALID bit is set.  If the window is left
-+ * unprogrammed the BMI rejects every frame as an uninitialised profile and
-+ * drops it BEFORE metering (BUG 3a: all colour counters frozen, token
-+ * bucket never moves).  BRN = log2(window size).  RM sec 8.7; SDK
-+ * PlcrSetPortProfiles()/PlcrClearPortProfiles().
++ * Rate-field exp/mant encoding (RM 8.7.6 + cross-ref SDK fm_plcr.h).  The
++ * rate register packs a 3-bit exponent at bit 29 and a 16-bit mantissa at
++ * bit 13.  The encoded value approximates:
++ *
++ *   rate_field ~= (bps * 2^31 / fman_clk_hz)
++ *
++ * scaled into the smallest exponent in [0..7] that keeps the mantissa
++ * within 16 bits; on overflow the field saturates at exp=7, mant=0xffff
++ * (the silicon ceiling).
 + */
-+#define FMAN_PLCR_PMR_OFFSET		0x204u		/* fmpl_pmr[0]         */
-+#define FMAN_PLCR_PMR_V			0x80000000u	/* window valid        */
-+#define FMAN_PLCR_PMR_BRN_SHIFT		16		/* log2(num profiles)  */
++#define FMAN_PCD_PLCR_RATE_EXP_SHIFT	29
++#define FMAN_PCD_PLCR_RATE_EXP_MAX	7
++#define FMAN_PCD_PLCR_RATE_MANT_SHIFT	13
++#define FMAN_PCD_PLCR_RATE_MANT_MAX	0xffffu
 +
-+/*
-+ * FMan Policer General Configuration Register (FMPL_GCR, FMPL offset
-+ * 0x000) - SDK fm_plcr.h FM_PCD_PLCR_GCR_*.  EN is the policer-block
-+ * MASTER ENABLE: with it clear the silicon drops every KeyGen-routed
-+ * frame BEFORE metering (BUG 3a - TPC frozen at 0, 100% loss, identical
-+ * for absolute and relative profile addressing).  STEN enables the global
-+ * colour packet counters.  The low 24 bits are the default-NIA the block
-+ * applies to an uninitialised-profile frame; mainline fman init leaves
-+ * them at GET_NIA_BMI_AC_ENQ_FRAME (0x00500002), which we preserve with a
-+ * read-modify-write.  PROVEN on LS1046A hardware 2026-06-09: a live
-+ * GCR <- (existing | EN | STEN) = 0xC0500002 flips policed ping from 100%
-+ * loss to 0% and starts the TPC/RED counters moving.
-+ */
-+#define FMAN_PLCR_GCR_OFFSET		0x000u
-+#define FMAN_PLCR_GCR_EN		0x80000000u	/* policer block enable */
-+#define FMAN_PLCR_GCR_STEN		0x40000000u	/* global stats enable  */
-+
-+/*
-+ * FMPL_PEMODE (profile entry mode) bits - SDK fm_plcr.h
-+ * FM_PCD_PLCR_PEMODE_*.  The silicon implements only pass-through,
-+ * RFC2698 and RFC4115 algorithms (there is NO native RFC2697/srTCM mode);
-+ * a single-rate limiter is realised as RFC2698 with CIR==PIR, CBS==PBS.
-+ */
-+#define FMAN_PLCR_PEMODE_PI		0x80000000u	/* profile initialised */
-+#define FMAN_PLCR_PEMODE_CBLND		0x40000000u	/* colour-blind        */
-+#define FMAN_PLCR_PEMODE_ALG_RFC2698	0x10000000u	/* MODE[ALG] = 01      */
-+#define FMAN_PLCR_PEMODE_PKT		0x00800000u	/* packet mode (clear = byte) */
-+#define FMAN_PLCR_PEMODE_FLS_L2		0x00003000u	/* frame-length = L2   */
-+#define FMAN_PLCR_PEMODE_FPP_SHIFT	16
-+
-+/*
-+ * Next-Invoked-Action (NIA) encodings - SDK fm_common.h NIA_ENG_xxx /
-+ * NIA_BMI_AC_xxx.  FM_PCD_PLCR_NIA_VALID gates the action; BMI enqueue
-+ * forwards the (already-FQID-stamped-by-KeyGen) frame, BMI discard drops.
-+ */
-+#define FMAN_PLCR_NIA_VALID		0x80000000u
-+#define FMAN_PLCR_NIA_ENG_BMI		0x00500000u
-+#define FMAN_PLCR_NIA_BMI_AC_ENQ	0x00000002u
-+#define FMAN_PLCR_NIA_BMI_AC_DISCARD	0x000000C1u
-+
-+#define FMAN_PLCR_NIA_ENQUEUE	(FMAN_PLCR_NIA_VALID | FMAN_PLCR_NIA_ENG_BMI | \
-+				 FMAN_PLCR_NIA_BMI_AC_ENQ)	/* 0x80500002 */
-+#define FMAN_PLCR_NIA_DISCARD	(FMAN_PLCR_NIA_VALID | FMAN_PLCR_NIA_ENG_BMI | \
-+				 FMAN_PLCR_NIA_BMI_AC_DISCARD)	/* 0x805000C1 */
-+
-+/*
-+ * Timestamp-unit scale for the rate calculation.  The FMan FPM timestamp
-+ * is enabled by mainline fman.c enable_time_stamp() with
-+ * count1_micro_bit = FM_TIMESTAMP_1_USEC_BIT = 8, i.e. one microsecond is
-+ * 2^8 = 256 timestamp ticks.  The SDK rate maths counts in tenths of a
-+ * nanosecond for precision: tsuInTenthNanos = 1000 * 10 / (1 << 8) = 39.
-+ */
-+#define FMAN_PLCR_TSU_TENTH_NANO	39ULL
-+
-+/*
-+ * Byte-mode rate divisor: 1e9 (nano) * 10 (tenth) * 8 (bit->byte) = 8e10.
-+ * NOTE: this is the NATIVE-bits-per-second form.  The SDK takes the rate
-+ * in Kbps and multiplies by 1000 inside GetInfoRateReg(); we feed bps
-+ * directly and so omit that *1000, keeping the divisor at 8e10.
-+ */
-+#define FMAN_PLCR_BYTE_DIV		80000000000ULL
-+
-+/*
-+ * Serialises access to the single shared FMPL profile-entry window + PAR
-+ * handshake across all profiles (one FMan).  Mirrors the SDK PlcrHwLock.
-+ */
-+static DEFINE_SPINLOCK(plcr_hw_lock);
++/* Burst sizes are quantised to 256-byte units (RM 8.7.6). */
++#define FMAN_PCD_PLCR_BURST_UNIT_BYTES	256u
++#define FMAN_PCD_PLCR_BURST_MANT_MAX	0xffffu
 +
 +/**
-+ * struct fman_pcd_plcr_profile - bookkeeping for one installed profile.
++ * struct fman_pcd_plcr_profile - one MURAM-resident policer profile.
 + * @node:        anchor on pcd->plcr_list (protected by pcd->lock)
-+ * @pcd:         owning PCD subsystem (back-pointer)
-+ * @port_id:     the FMan port this profile was installed for
-+ * @profile_id:  physical FMPL profile slot id (0..255)
++ * @pcd:         owning PCD subsystem; back-pointer for MURAM free
++ * @port_id:     the FMan port this profile was installed for (bookkeeping)
++ * @profile_id:  caller-chosen silicon slot id (0..255)
++ * @record_off:  MURAM byte offset of the 16-byte profile record (the value
++ *               a CC action's policer-pointer carries per spec sec 5.4)
++ * @record:      CPU-visible iomem pointer to the profile record
++ * @lock:        per-profile spinlock guarding the record writes
 + *
-+ * The profile contents live entirely in silicon (FMPL profile @profile_id);
-+ * this node exists only so fman_pcd_release() can reap profiles on unbind
-+ * and so destroy() can match a (port, slot).  Definition is private to
-+ * this translation unit.
++ * Definition is private to this translation unit.
 + */
 +struct fman_pcd_plcr_profile {
 +	struct list_head	node;
 +	struct fman_pcd	*pcd;
 +	u8		port_id;
 +	u8		profile_id;
-+};
-+
-+/* The 16-word staged profile image, in window order. */
-+struct plcr_profile_regs {
-+	u32 pemode;
-+	u32 pegnia;
-+	u32 peynia;
-+	u32 pernia;
-+	u32 pecir;
-+	u32 pecbs;
-+	u32 pepepir_eir;
-+	u32 pepbs_ebs;
-+	u32 pelts;
-+	u32 pects;
-+	u32 pepts_ets;
-+	u32 pegpc;
-+	u32 peypc;
-+	u32 perpc;
-+	u32 perypc;
-+	u32 perrpc;
++	unsigned long	record_off;
++	void __iomem	*record;
++	spinlock_t	lock;
 +};
 +
 +/* ------------------------------------------------------------------ */
-+/* Rate encoder - faithful port of SDK fm_plcr.c CalcRates()          */
++/* Rate / burst field encoders - RM 8.7.6                              */
 +/* ------------------------------------------------------------------ */
 +
 +/*
-+ * Convert the chosen floating-point-position shift into the MODE[FPP]
-+ * field value.  SDK CalcFPP(): the TS register splits into fraction
-+ * (low) and integer (high); the field maps 0..15 -> 16..31 and
-+ * 16..31 -> 0..15.
-+ */
-+static u32 plcr_calc_fpp(u32 fpp_shift)
-+{
-+	if (fpp_shift > 15)
-+		return 15 - (0x1f - fpp_shift);
-+	return 16 + fpp_shift;
-+}
-+
-+/*
-+ * Compute the integer (high 16 bits) and fraction (low 16 bits) halves of
-+ * a CIR/PIR rate field for @bps at floating-point shift @fpp_shift, in
-+ * byte mode.  Native-bps port of SDK GetInfoRateReg().
++ * Encode a bits-per-second rate into the FMan exp<<29|mant<<13 field.
 + *
-+ * OVERFLOW SAFETY: at high rates ((tmp << fpp_shift) << 16) overflows u64,
-+ * but so does ((integer << 16) * div) by the SAME modular amount, so their
-+ * unsigned (modular, well-defined in C) difference equals the true small
-+ * remainder (< div < 2^37).  Do NOT add intermediate clamps here - that
-+ * would break the cancellation.  See SDK GetInfoRateReg() comment.
++ * scaled = DIV_ROUND_UP(bps * 2^31, fman_clk_hz); then find the smallest
++ * exponent in [0..7] such that (scaled >> exp) fits in 16 bits.  Saturate
++ * at exp=7, mant=0xffff on overflow.  A zero rate encodes to 0x00000000.
++ *
++ * CRITICAL: fman_get_clock_freq() returns u16 MHz, NOT Hz - the caller
++ * multiplies by 1_000_000 before passing @clk_hz here (ask20 PR14e-body-2
++ * gotcha, 2026-05-14).
 + */
-+static void plcr_get_inforate(u64 bps, u32 fpp_shift,
-+			      u64 *p_integer, u64 *p_fraction)
++static u32 plcr_encode_rate(u64 bps, u64 clk_hz)
 +{
-+	u64 tmp = bps * FMAN_PLCR_TSU_TENTH_NANO;
-+	u64 div = FMAN_PLCR_BYTE_DIV;
-+	u64 shifted = tmp << fpp_shift;
++	u64 scaled;
++	u32 exp;
++	u64 mant;
 +
-+	*p_integer = div64_u64(shifted, div);
-+	*p_fraction = div64_u64((shifted << 16) - ((*p_integer << 16) * div),
-+				div);
-+}
++	if (bps == 0 || clk_hz == 0)
++		return 0;
 +
-+/*
-+ * Port of SDK fm_plcr.c CalcRates(): pick a single MODE[FPP] that suits
-+ * both rates (calibrated on the faster of the two), then encode CIR and
-+ * PIR as 16.16 fixed-point fields.  Burst sizes pass through unscaled
-+ * (the FMPL CBS/PBS registers are in bytes).
-+ */
-+static void plcr_calc_rates(u64 cir_bps, u64 pir_bps, u32 cbs_bytes,
-+			    u32 pbs_bytes, u32 *cir, u32 *cbs,
-+			    u32 *pir_eir, u32 *pbs_ebs, u32 *fpp)
-+{
-+	u64 integer, fraction;
-+	u64 faster = (cir_bps > pir_bps) ? cir_bps : pir_bps;
-+	u32 temp;
-+	u32 fpp_shift = 0;
++	/* scaled = ceil(bps * 2^31 / clk_hz). */
++	scaled = div64_u64((bps << 31) + clk_hz - 1, clk_hz);
 +
-+	/* Calibrate fpp on the faster rate at shift 0. */
-+	plcr_get_inforate(faster, 0, &integer, &fraction);
-+	temp = (u32)((integer << 16) & 0xFFFFFFFFULL);
-+
-+	if (temp != 0) {
-+		/* Integer non-zero: shift unused high zeroes into fraction. */
-+		while ((temp & 0x80000000u) == 0) {
-+			temp <<= 1;
-+			fpp_shift++;
-+		}
-+		/* Rate so high the TS cannot represent it: clamp at the
-+		 * silicon maximum integer resolution (faithful to the SDK
-+		 * error bound; our rates are <= 10G so this is defensive).
-+		 */
-+		if (fpp_shift > 15)
-+			fpp_shift = 15;
-+	} else {
-+		/* Integer zero: all resolution goes to the fraction. */
-+		temp = (u32)fraction;
-+		if (temp == 0) {
-+			fpp_shift = 31;
-+		} else {
-+			fpp_shift = 16;
-+			while ((temp & 0x8000u) == 0) {
-+				temp <<= 1;
-+				fpp_shift++;
-+			}
-+		}
++	for (exp = 0; exp <= FMAN_PCD_PLCR_RATE_EXP_MAX; exp++) {
++		mant = scaled >> exp;
++		if (mant <= FMAN_PCD_PLCR_RATE_MANT_MAX)
++			return ((u32)exp << FMAN_PCD_PLCR_RATE_EXP_SHIFT) |
++			       ((u32)mant << FMAN_PCD_PLCR_RATE_MANT_SHIFT);
 +	}
 +
-+	/* Re-encode both rates at the chosen shift. */
-+	plcr_get_inforate(cir_bps, fpp_shift, &integer, &fraction);
-+	*cir = (u32)((integer << 16) | (fraction & 0xFFFF));
-+	plcr_get_inforate(pir_bps, fpp_shift, &integer, &fraction);
-+	*pir_eir = (u32)((integer << 16) | (fraction & 0xFFFF));
-+
-+	*cbs = cbs_bytes;
-+	*pbs_ebs = pbs_bytes;
-+	*fpp = plcr_calc_fpp(fpp_shift);
-+}
-+
-+/* ------------------------------------------------------------------ */
-+/* Profile-image builder - port of SDK BuildProfileRegs()             */
-+/* ------------------------------------------------------------------ */
-+
-+/*
-+ * Assemble the 16-word profile image from the neutral profile.  The
-+ * silicon has no RFC2697 mode, so both the caller's trTCM and single-rate
-+ * requests are realised as RFC2698; the dpaa-side bridge sets
-+ * cir==pir / cbs==pbs for the single-rate (tc police rate/burst) case so
-+ * the yellow band is empty and over-rate frames go straight to red->drop.
-+ * Byte mode, L2 frame-length selection, green/yellow -> enqueue, red ->
-+ * discard.  Metering buckets start full (0xFFFFFFFF); counters start 0.
-+ */
-+static void plcr_build_profile(const struct fman_pcd_plcr_hw_profile *hw,
-+			       struct plcr_profile_regs *r)
-+{
-+	u32 cir, cbs, pir_eir, pbs_ebs, fpp;
-+	u32 pemode;
-+
-+	plcr_calc_rates(hw->cir_bps, hw->pir_bps, hw->cbs_bytes,
-+			hw->pbs_bytes, &cir, &cbs, &pir_eir, &pbs_ebs, &fpp);
-+
-+	pemode = FMAN_PLCR_PEMODE_PI | FMAN_PLCR_PEMODE_ALG_RFC2698;
-+	if (!hw->color_aware)
-+		pemode |= FMAN_PLCR_PEMODE_CBLND;	/* colour-blind */
-+	/* byte mode (PKT clear), L2 frame length, rollback L2 (RBFLS clear) */
-+	pemode |= FMAN_PLCR_PEMODE_FLS_L2;
-+	pemode |= (fpp << FMAN_PLCR_PEMODE_FPP_SHIFT);
-+
-+	r->pemode	= pemode;
-+	r->pegnia	= FMAN_PLCR_NIA_ENQUEUE;
-+	r->peynia	= FMAN_PLCR_NIA_ENQUEUE;
-+	r->pernia	= FMAN_PLCR_NIA_DISCARD;
-+	r->pecir	= cir;
-+	r->pecbs	= cbs;
-+	r->pepepir_eir	= pir_eir;
-+	r->pepbs_ebs	= pbs_ebs;
-+	r->pelts	= 0;
-+	r->pects	= 0xFFFFFFFFu;		/* committed bucket full */
-+	r->pepts_ets	= 0xFFFFFFFFu;		/* peak bucket full      */
-+	r->pegpc	= 0;
-+	r->peypc	= 0;
-+	r->perpc	= 0;
-+	r->perypc	= 0;
-+	r->perrpc	= 0;
-+}
-+
-+/* ------------------------------------------------------------------ */
-+/* FMPL indirect window access - port of SDK WritePar()               */
-+/* ------------------------------------------------------------------ */
-+
-+static void __iomem *plcr_fmpl_base(struct fman_pcd *pcd)
-+{
-+	return fman_pcd_get_fman(pcd)->base_addr + FMAN_PLCR_BLOCK_OFFSET;
++	/* Overflow: saturate at the silicon ceiling. */
++	return ((u32)FMAN_PCD_PLCR_RATE_EXP_MAX <<
++		FMAN_PCD_PLCR_RATE_EXP_SHIFT) |
++	       ((u32)FMAN_PCD_PLCR_RATE_MANT_MAX <<
++		FMAN_PCD_PLCR_RATE_MANT_SHIFT);
 +}
 +
 +/*
-+ * Set FMPL_GCR PEN|STEN (read-modify-write, preserving the DEFNIA low bits
-+ * mainline fman init programmed).  Idempotent: re-running on an already
-+ * enabled block is a no-op.  Without this the policer engine stays disabled
-+ * and drops every routed frame pre-meter (BUG 3a).
++ * Encode a burst size (bytes) into a 16-bit mantissa of 256-byte units.
++ * Rounds up so a burst is never under-provisioned; saturates at 0xffff.
 + */
-+static void plcr_enable_block(struct fman_pcd *pcd)
++static u16 plcr_encode_burst(u32 bytes)
 +{
-+	void __iomem *gcr = plcr_fmpl_base(pcd) + FMAN_PLCR_GCR_OFFSET;
-+	unsigned long flags;
-+	u32 val;
++	u32 units;
 +
-+	spin_lock_irqsave(&plcr_hw_lock, flags);
-+	val = ioread32be(gcr);
-+	val |= FMAN_PLCR_GCR_EN | FMAN_PLCR_GCR_STEN;
-+	iowrite32be(val, gcr);
-+	spin_unlock_irqrestore(&plcr_hw_lock, flags);
-+}
++	if (bytes == 0)
++		return 0;
 +
-+/* Write @par to FMPL_PAR and spin until the engine clears GO. */
-+static void plcr_write_par(void __iomem *fmpl, u32 par)
-+{
-+	void __iomem *par_reg = fmpl + FMAN_PLCR_PAR_OFFSET;
-+
-+	iowrite32be(par, par_reg);
-+	while (ioread32be(par_reg) & FMAN_PLCR_PAR_GO)
-+		cpu_relax();
++	units = DIV_ROUND_UP(bytes, FMAN_PCD_PLCR_BURST_UNIT_BYTES);
++	if (units > FMAN_PCD_PLCR_BURST_MANT_MAX)
++		units = FMAN_PCD_PLCR_BURST_MANT_MAX;
++	return (u16)units;
 +}
 +
 +/*
-+ * Stage the 16-word image into the shared profile-entry window and commit
-+ * it to physical profile @profile_id via the PAR GO handshake.  Holds
-+ * plcr_hw_lock across the whole window-write + commit so concurrent
-+ * profiles cannot corrupt the shared staging window.
++ * Assemble the PMR (profile mode register) word from the neutral profile.
++ * srTCM clears ALG_TRTCM and sets PIR_DISABLED; trTCM sets ALG_TRTCM.
++ * COLOR_AWARE is set when the caller requested colour-aware marking.
++ * Byte-mode metering is the default (PACKET_MODE clear).
 + */
-+static void plcr_commit_profile(struct fman_pcd *pcd, u8 profile_id,
-+				const struct plcr_profile_regs *r)
++static u32 plcr_build_mode(const struct fman_pcd_plcr_hw_profile *hw)
 +{
-+	void __iomem *fmpl = plcr_fmpl_base(pcd);
-+	unsigned long flags;
++	u32 pmr = 0;
 +
-+	spin_lock_irqsave(&plcr_hw_lock, flags);
++	if (hw->color_aware)
++		pmr |= FMAN_PCD_PLCR_PMR_COLOR_AWARE;
 +
-+	iowrite32be(r->pemode,		fmpl + FMAN_PLCR_PE_PEMODE);
-+	iowrite32be(r->pegnia,		fmpl + FMAN_PLCR_PE_PEGNIA);
-+	iowrite32be(r->peynia,		fmpl + FMAN_PLCR_PE_PEYNIA);
-+	iowrite32be(r->pernia,		fmpl + FMAN_PLCR_PE_PERNIA);
-+	iowrite32be(r->pecir,		fmpl + FMAN_PLCR_PE_PECIR);
-+	iowrite32be(r->pecbs,		fmpl + FMAN_PLCR_PE_PECBS);
-+	iowrite32be(r->pepepir_eir,	fmpl + FMAN_PLCR_PE_PEPEPIR_EIR);
-+	iowrite32be(r->pepbs_ebs,	fmpl + FMAN_PLCR_PE_PEPBS_EBS);
-+	iowrite32be(r->pelts,		fmpl + FMAN_PLCR_PE_PELTS);
-+	iowrite32be(r->pects,		fmpl + FMAN_PLCR_PE_PECTS);
-+	iowrite32be(r->pepts_ets,	fmpl + FMAN_PLCR_PE_PEPTS_ETS);
-+	iowrite32be(r->pegpc,		fmpl + FMAN_PLCR_PE_PEGPC);
-+	iowrite32be(r->peypc,		fmpl + FMAN_PLCR_PE_PEYPC);
-+	iowrite32be(r->perpc,		fmpl + FMAN_PLCR_PE_PERPC);
-+	iowrite32be(r->perypc,		fmpl + FMAN_PLCR_PE_PERYPC);
-+	iowrite32be(r->perrpc,		fmpl + FMAN_PLCR_PE_PERRPC);
++	if (hw->trtcm)
++		pmr |= FMAN_PCD_PLCR_PMR_ALG_TRTCM;
++	else
++		pmr |= FMAN_PCD_PLCR_PMR_PIR_DISABLED;
 +
-+	plcr_write_par(fmpl,
-+		       FMAN_PLCR_PAR_GO |
-+		       ((u32)profile_id << FMAN_PLCR_PAR_PNUM_SHIFT) |
-+		       FMAN_PLCR_PAR_PWSEL_MASK);
-+
-+	spin_unlock_irqrestore(&plcr_hw_lock, flags);
++	return pmr;
 +}
 +
 +/*
-+ * Invalidate physical profile @profile_id: stage PEMODE with the PI
-+ * (profile-initialised) bit cleared and commit.  Port of SDK
-+ * FM_PCD_PlcrProfileDelete(): it writes ~PI into the window PEMODE word
-+ * and commits all words - the other 15 stale window words are irrelevant
-+ * once PI is clear.
++ * Write the 16-byte profile record into MURAM (RM 8.7.6 p.5).  Four
++ * iowrite32be stores under the profile's spinlock.  The EIR/EBS word
++ * packs the peak/excess rate field in the high 16 bits and the
++ * peak/excess burst mantissa in the low 16 bits; for srTCM the rate
++ * half is zero (PIR_DISABLED is set in the mode word) and only the
++ * excess-burst (EBS) half is meaningful.
++ *
++ * NOTE: the four stores are not a single atomic transaction - a tearing
++ * window exists between them where the engine could observe a partial
++ * update.  This is acceptable because the profile is not armed until a
++ * CC action's policer-pointer references record_off (spec sec 5.4), which
++ * happens strictly after this writer returns.
 + */
-+static void plcr_invalidate_profile(struct fman_pcd *pcd, u8 profile_id)
++static void plcr_program_record(void __iomem *rec, u32 mode, u32 cir,
++				u32 cbs, u32 eir_ebs)
 +{
-+	void __iomem *fmpl = plcr_fmpl_base(pcd);
-+	unsigned long flags;
-+
-+	spin_lock_irqsave(&plcr_hw_lock, flags);
-+
-+	iowrite32be(~FMAN_PLCR_PEMODE_PI, fmpl + FMAN_PLCR_PE_PEMODE);
-+	plcr_write_par(fmpl,
-+		       FMAN_PLCR_PAR_GO |
-+		       ((u32)profile_id << FMAN_PLCR_PAR_PNUM_SHIFT) |
-+		       FMAN_PLCR_PAR_PWSEL_MASK);
-+
-+	spin_unlock_irqrestore(&plcr_hw_lock, flags);
-+}
-+
-+/*
-+ * Program the per-port FMPL profile-mapping window so the RELATIVE policer
-+ * profile id KeyGen places in KGSE_PPC (ABSOLUTE bit clear) resolves to an
-+ * absolute FMPL profile.  @base = absolute base profile, @num_profiles =
-+ * window size (power of two; BRN = log2).  For the single per-port profile
-+ * we install, base = profile_id and num = 1 (BRN = 0), so relative 0 maps to
-+ * absolute profile_id.  @port_id is the BMI hw port id (1..63); the window
-+ * index is port_id - 1.  Port of SDK PlcrSetPortProfiles().
-+ */
-+static void plcr_set_port_window(struct fman_pcd *pcd, u8 port_id,
-+				 u16 base, u8 num_profiles)
-+{
-+	void __iomem *fmpl = plcr_fmpl_base(pcd);
-+	void __iomem *pmr = fmpl + FMAN_PLCR_PMR_OFFSET + (port_id - 1) * 4;
-+	u32 log2num = order_base_2(num_profiles);
-+	u32 val = FMAN_PLCR_PMR_V |
-+		  (log2num << FMAN_PLCR_PMR_BRN_SHIFT) | base;
-+	unsigned long flags;
-+
-+	spin_lock_irqsave(&plcr_hw_lock, flags);
-+	iowrite32be(val, pmr);
-+	spin_unlock_irqrestore(&plcr_hw_lock, flags);
-+}
-+
-+/*
-+ * Close the per-port FMPL profile-mapping window (VALID bit -> 0) so the
-+ * silicon stops resolving relative profile ids for this port.  Port of SDK
-+ * PlcrClearPortProfiles().
-+ */
-+static void plcr_clear_port_window(struct fman_pcd *pcd, u8 port_id)
-+{
-+	void __iomem *fmpl = plcr_fmpl_base(pcd);
-+	void __iomem *pmr = fmpl + FMAN_PLCR_PMR_OFFSET + (port_id - 1) * 4;
-+	unsigned long flags;
-+
-+	spin_lock_irqsave(&plcr_hw_lock, flags);
-+	iowrite32be(0, pmr);
-+	spin_unlock_irqrestore(&plcr_hw_lock, flags);
++	iowrite32be(mode, rec + FMAN_PCD_PLCR_OFF_MODE);
++	iowrite32be(cir, rec + FMAN_PCD_PLCR_OFF_CIR);
++	iowrite32be(cbs, rec + FMAN_PCD_PLCR_OFF_CBS);
++	iowrite32be(eir_ebs, rec + FMAN_PCD_PLCR_OFF_EIR_EBS);
 +}
 +
 +/* Find an installed profile for (@port_id, @profile_id).  Caller holds
@@ -644,73 +446,102 @@ index 0000000..3a3c90b
 +}
 +
 +/**
-+ * fman_pcd_plcr_install() - program one RFC2698/single-rate policer profile.
++ * fman_pcd_plcr_install() - program one srTCM/trTCM policer profile.
 + * @pcd:     the PCD subsystem (from fman_get_pcd())
 + * @port_id: the FMan port the profile is installed for
-+ * @profile_id: physical FMPL profile slot id (0..255)
++ * @profile_id: caller-chosen silicon slot id (0..255)
 + * @hw:      neutral profile spec (host bps/bytes; this body encodes them)
 + *
-+ * Encodes the 16.16 CIR/PIR rate fields + byte burst sizes + PEMODE word +
-+ * per-colour NIAs per RM sec 8.7, stages them into the FMPL profile-entry
-+ * window and commits to physical profile @profile_id via the PAR GO
-+ * handshake, then registers the profile on pcd->plcr_list so
-+ * fman_pcd_release() reaps it on unbind.  Re-installing on a populated
-+ * slot for this port replaces the bookkeeping entry (idempotent rebuild).
++ * Allocates a 16-byte MURAM profile record, encodes the exp/mant rate
++ * fields + 256-byte burst mantissas + PMR mode word per RM 8.7.6, writes
++ * the record, and registers the profile on pcd->plcr_list so
++ * fman_pcd_release() reaps it on unbind.  Re-installing on a slot that is
++ * already populated for this port first tears the old profile down
++ * (idempotent rebuild).
 + *
 + * Return: 0 on success; negative errno on failure.
 + *
-+ * Port of SDK fm_plcr.c FM_PCD_PlcrProfileSet().
++ * RM 8.7.6 + cross-ref SDK fm_plcr.c FmPcdPlcrProfileSet().
 + */
 +int fman_pcd_plcr_install(struct fman_pcd *pcd, u8 port_id, u8 profile_id,
 +			  const struct fman_pcd_plcr_hw_profile *hw)
 +{
 +	struct fman_pcd_plcr_profile *p, *old;
-+	struct plcr_profile_regs regs;
++	struct muram_info *muram;
 +	struct mutex *pcd_lock;
++	unsigned long flags;
++	unsigned long off;
++	void __iomem *vb;
++	u32 mode, cir, cbs, eir_ebs;
++	u32 eir_field;
++	u16 ebs_mant;
++	u64 clk_hz;
++	long err;
 +
 +	if (!pcd || !hw)
 +		return -EINVAL;
 +
-+	/* Reject a zero committed rate (the silicon would never pass a
-+	 * frame); the dpaa-side bridge also screens this, belt-and-braces.
++	muram = fman_get_muram(fman_pcd_get_fman(pcd));
++	if (!muram)
++		return -ENXIO;
++
++	/* fman_get_clock_freq() returns u16 MHz; scale to Hz. */
++	clk_hz = (u64)fman_get_clock_freq(fman_pcd_get_fman(pcd)) * 1000000ULL;
++
++	/* Encode the rate / burst / mode fields before touching MURAM. */
++	mode = plcr_build_mode(hw);
++	cir = plcr_encode_rate(hw->cir_bps, clk_hz);
++	cbs = (u32)plcr_encode_burst(hw->cbs_bytes);
++
++	/* trTCM: EIR rate (hi 16) | PBS burst mantissa (lo 16).
++	 * srTCM: EIR rate field stays 0 (PIR_DISABLED set); only the EBS
++	 * burst mantissa half is meaningful.
 +	 */
-+	if (hw->cir_bps == 0)
-+		return -EINVAL;
-+	/* RFC2698 requires PIR >= CIR. */
-+	if (hw->trtcm && hw->pir_bps < hw->cir_bps)
-+		return -ERANGE;
++	if (hw->trtcm)
++		eir_field = plcr_encode_rate(hw->pir_bps, clk_hz) >> 16;
++	else
++		eir_field = 0;
++	ebs_mant = plcr_encode_burst(hw->pbs_bytes);
++	eir_ebs = (eir_field << 16) | (u32)ebs_mant;
 +
 +	p = kzalloc(sizeof(*p), GFP_KERNEL);
 +	if (!p)
 +		return -ENOMEM;
 +	INIT_LIST_HEAD(&p->node);
++	spin_lock_init(&p->lock);
 +	p->pcd = pcd;
 +	p->port_id = port_id;
 +	p->profile_id = profile_id;
 +
-+	/* Encode then commit the silicon profile. */
-+	plcr_build_profile(hw, &regs);
-+	plcr_commit_profile(pcd, profile_id, &regs);
++	off = fman_pcd_muram_alloc(pcd, FMAN_PCD_PLCR_PROFILE_SIZE);
++	if (IS_ERR_VALUE(off)) {
++		err = (long)off;
++		kfree(p);
++		return (int)err;
++	}
++	vb = (void __iomem *)fman_muram_offset_to_vbase(muram, off);
++	if (!vb) {
++		fman_pcd_muram_free(pcd, off, FMAN_PCD_PLCR_PROFILE_SIZE);
++		kfree(p);
++		return -ENXIO;
++	}
++	p->record_off = off;
++	p->record = vb;
 +
-+	/* Master-enable the policer engine (PEN|STEN) - mainline fman left it
-+	 * disabled, which drops every routed frame pre-meter (BUG 3a).
-+	 */
-+	plcr_enable_block(pcd);
++	/* Zero then program the record under the profile spinlock. */
++	spin_lock_irqsave(&p->lock, flags);
++	memset_io(vb, 0, FMAN_PCD_PLCR_PROFILE_SIZE);
++	plcr_program_record(vb, mode, cir, cbs, eir_ebs);
++	spin_unlock_irqrestore(&p->lock, flags);
 +
-+	/* Open the per-port relative->absolute profile window so the RELATIVE
-+	 * id KeyGen selects (KGSE_PPC, ABSOLUTE bit clear) resolves to this
-+	 * absolute profile.  base = profile_id, num = 1 (single per-port
-+	 * profile).  Without this the BMI drops every frame BEFORE metering
-+	 * (BUG 3a).  Mirrors SDK FmPcdPlcrAllocProfiles(port, profile_id, 1).
-+	 */
-+	plcr_set_port_window(pcd, port_id, profile_id, 1);
-+
-+	/* Publish: replace any existing bookkeeping for this (port, slot). */
++	/* Publish: replace any existing profile for this (port, slot). */
 +	pcd_lock = fman_pcd_get_lock(pcd);
 +	mutex_lock(pcd_lock);
 +	old = plcr_find_locked(pcd, port_id, profile_id);
 +	if (old) {
 +		list_del(&old->node);
++		fman_pcd_muram_free(pcd, old->record_off,
++				    FMAN_PCD_PLCR_PROFILE_SIZE);
 +		kfree(old);
 +	}
 +	list_add_tail(&p->node, fman_pcd_get_plcr_list(pcd));
@@ -724,18 +555,20 @@ index 0000000..3a3c90b
 + * fman_pcd_plcr_destroy() - tear down one policer profile by slot.
 + * @pcd:     the PCD subsystem
 + * @port_id: the FMan port (matched against the profile for safety)
-+ * @profile_id: the physical FMPL profile slot id to release
++ * @profile_id: the silicon slot id to release
 + *
-+ * Idempotent: a (port, slot) matching no live profile is a no-op.
-+ * Invalidates the silicon profile (clears PEMODE[PI] and commits) so the
-+ * engine stops metering, then drops the bookkeeping node.
++ * Idempotent: a (port, slot) matching no live profile is a no-op.  Zeroes
++ * the profile record's mode word first so the engine stops metering
++ * before the MURAM is freed (defensive; the CC action that pointed here
++ * must already have been rewritten by the caller).
 + *
-+ * Port of SDK fm_plcr.c FM_PCD_PlcrProfileDelete().
++ * RM 8.7.6 + cross-ref SDK fm_plcr.c FmPcdPlcrProfileDelete.
 + */
 +void fman_pcd_plcr_destroy(struct fman_pcd *pcd, u8 port_id, u8 profile_id)
 +{
 +	struct fman_pcd_plcr_profile *p;
 +	struct mutex *pcd_lock;
++	unsigned long flags;
 +
 +	if (!pcd)
 +		return;
@@ -750,20 +583,20 @@ index 0000000..3a3c90b
 +	if (!p)
 +		return;
 +
-+	/* Close the per-port profile window (VALID -> 0) so KeyGen stops
-+	 * resolving the relative id, then disarm the silicon profile and free
-+	 * bookkeeping.  Mirrors SDK FmPcdPlcrFreeProfiles().
-+	 */
-+	plcr_clear_port_window(pcd, port_id);
-+	plcr_invalidate_profile(pcd, profile_id);
++	/* Disarm: zero the mode word so the engine stops metering. */
++	spin_lock_irqsave(&p->lock, flags);
++	iowrite32be(0, p->record + FMAN_PCD_PLCR_OFF_MODE);
++	spin_unlock_irqrestore(&p->lock, flags);
++
++	fman_pcd_muram_free(pcd, p->record_off, FMAN_PCD_PLCR_PROFILE_SIZE);
 +	kfree(p);
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_plcr_destroy);
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index 30c5006..1726f6c 100644
+index 5d8afe8..7456f50 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
-@@ -417,4 +417,69 @@ int fman_pcd_hm_install(struct fman_pcd *pcd, u8 port_id,
+@@ -390,4 +390,69 @@ int fman_pcd_hm_install(struct fman_pcd *pcd, u8 port_id,
   */
  int fman_pcd_hm_destroy(struct fman_pcd *pcd, u8 port_id, u32 handle);
  
@@ -833,3 +666,5 @@ index 30c5006..1726f6c 100644
 +void fman_pcd_plcr_destroy(struct fman_pcd *pcd, u8 port_id, u8 profile_id);
 +
  #endif /* __LINUX_FSL_FMAN_PCD_H */
+-- 
+2.39.5

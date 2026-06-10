@@ -1,3 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
+Date: Fri, 29 May 2026 00:00:00 +0000
+Subject: [PATCH] fman: add PCD KeyGen exact-match scheme API (common, all
+ flavors)
+
+Forward-port of the FMan PCD KeyGen layer from the ask20 branch into the
+COMMON board patch stack (built-in for default/vpp/ask via the
+FSL_FMAN_PCD config from patch 0092). Combines the ask20 0005
+(KeyGen public API + struct/helper promotion) and 0006 (KeyGen
+silicon-programming body) patches into a single re-anchored commit
+against 6.18.31. This is PR2 of the dpaa1 PCD forward-port closing
+M3-3b/M3-3c/M3-3d.
+
+What this adds
+--------------
+- fman_keygen.c: promotes the previously file-static struct keygen_scheme
+  and struct fman_keygen to a new module-internal header
+  fman_keygen_internal.h, and demotes keygen_scheme_setup() /
+  keygen_bind_port_to_schemes() from file-static to EXPORT_SYMBOL_GPL so a
+  sibling translation unit can populate a scheme slot (match_vector != 0)
+  before delegating the KGSE_* register write to these existing helpers.
+  No silicon behaviour change for the existing RSS-hashing path
+  (keygen_port_hashing_init() etc.) - only linkage of two helpers changed.
+
+- fman_pcd_kg.c (new, ~399 LOC): the public KeyGen API.
+  fman_pcd_kg_scheme_create() allocates a free scheme id, builds the
+  KGSE_MV match-vector for the canonical IPv4 5-tuple shape (SIP/DIP/proto/
+  SPORT/DPORT via parse-result offsets 12/16/9/20/22, silicon bit values
+  per RM 8.7.4 KGSE_MV), populates keygen->schemes[id], and calls the
+  promoted keygen_scheme_setup() helper. fman_pcd_kg_bind_port() wires the
+  port-binding AR register via keygen_bind_port_to_schemes().
+  fman_pcd_kg_scheme_destroy() unbinds, disables, unlinks and frees.
+  fman_pcd_kg_attach_cc() is intentionally still -EOPNOTSUPP: the KGSE_CCBS
+  wiring depends on the CC tree subsystem (struct fman_pcd_cc_tree) which
+  lands in a follow-up PCD patch.
+
+- include/linux/fsl/fman_pcd.h: appends the public KG surface
+  (enum fman_pcd_kg_extract_from, struct fman_pcd_kg_extract_spec,
+  struct fman_pcd_kg_scheme_params, and the four entry points). All four
+  entry points are EXPORT_SYMBOL_GPL.
+
+- Makefile: adds fman_pcd_kg.o to the FSL_FMAN_PCD object list.
+
+The KG_SCH_KN_* match-vector bit constants are PRIVATE to fman_keygen.c
+upstream (defined inline, not exported in any header); they are
+replicated locally in fman_pcd_kg.c with the RM 8.7.4 KGSE_MV register
+citation as the silicon-fact source. The supported match-vector shape at
+this iteration is IPv4 5-tuple only; wider shapes (IPv6/MPLS/IPSEC)
+return -EOPNOTSUPP loudly and extend kg_build_match_vector() in a
+follow-up.
+
+Signed-off-by: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
+---
 diff --git a/drivers/net/ethernet/freescale/fman/Makefile b/drivers/net/ethernet/freescale/fman/Makefile
 index cc0ba7e..24a886b 100644
 --- a/drivers/net/ethernet/freescale/fman/Makefile
@@ -11,7 +65,7 @@ index cc0ba7e..24a886b 100644
  fsl_dpaa_fman_port-objs := fman_port.o
  fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
 diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
-index e73f6ef..5243a43 100644
+index e73f6ef..381d639 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
 @@ -8,6 +8,7 @@
@@ -22,44 +76,7 @@ index e73f6ef..5243a43 100644
  
  /* Maximum number of HW Ports */
  #define FMAN_MAX_NUM_OF_HW_PORTS		64
-@@ -90,9 +91,36 @@
- 
- /* NIA values */
- #define NIA_ENG_BMI			0x00500000
-+#define NIA_ENG_PLCR			0x004C0000
-+/* KGSE_MODE NIA action bit: select the policer profile id in the low bits of
-+ * the mode NIA as an ABSOLUTE (global) profile slot rather than a per-port
-+ * relative index resolved through the (unprogrammed) FMPL_PMR window. Matches
-+ * the SDK CC/keygen->policer path (fm_plcr.c: nia |= NIA_ENG_PLCR |
-+ * NIA_PLCR_ABSOLUTE | absoluteProfileId). RM 8.7.4. Fits KG_NIA_AC_MASK.
-+ */
-+#define NIA_PLCR_ABSOLUTE		0x00008000
- #define NIA_BMI_AC_ENQ_FRAME		0x00000002
- #define ENQUEUE_KG_DFLT_NIA		(NIA_ENG_BMI | NIA_BMI_AC_ENQ_FRAME)
- 
-+/* KGSE_MODE next-action selector: when set, the scheme's next engine is the
-+ * Policer (the mode NIA points at NIA_ENG_PLCR and KGSE_PPC carries the
-+ * absolute profile id). When clear, the default BMI-enqueue path is used.
-+ * RM 8.7.4 (KGSE_MODE). 0xC04C0000 = EN | NIA_PLCR_SELECT | NIA_ENG_PLCR.
-+ */
-+#define KG_SCH_MODE_NIA_PLCR		0x40000000
-+
-+/* KGSE_MODE next-action selector for Coarse Classification (CC): the mode NIA
-+ * points at the FMan-controller CC action (NIA_ENG_FM_CTL | NIA_FM_CTL_AC_CC)
-+ * and the CCOBASE field (bits 27:24) carries the CC group-table base index.
-+ * KGSE_CCBS carries the hash-bit selection. RM 8.7.4 (KGSE_MODE).
-+ * For the static single-group/single-entry CC tree (board patch 0098) both
-+ * CCOBASE and CCBS are 0, so KGSE_MODE(CC) = EN | NIA_ENG_FM_CTL |
-+ * NIA_FM_CTL_AC_CC = 0x80000006 and KGSE_CCBS = 0.
-+ */
-+#define NIA_ENG_FM_CTL			0x00000000
-+#define NIA_FM_CTL_AC_CC		0x00000006
-+#define KG_SCH_MODE_CCOBASE_SHIFT	24
-+
- /* Hard-coded configuration:
-  * These values are used as hard-coded values for KeyGen configuration
-  * and they replace user selections for this hard-coded version
-@@ -193,44 +221,6 @@ struct fman_kg_regs {
+@@ -193,44 +194,6 @@ struct fman_kg_regs {
  	u32 fmkg_ar;	/* 0x1FC: KeyGen Action Register */
  };
  
@@ -104,7 +121,7 @@ index e73f6ef..5243a43 100644
  
  /* keygen_write_ar_wait
   *
-@@ -455,7 +445,7 @@ static struct keygen_scheme *get_scheme(struct fman_keygen *keygen,
+@@ -455,7 +418,7 @@ static struct keygen_scheme *get_scheme(struct fman_keygen *keygen,
   *
   * Return: Zero for success or error code in case of failure
   */
@@ -113,7 +130,7 @@ index e73f6ef..5243a43 100644
  				       u8 scheme_id,
  					bool bind)
  {
-@@ -495,6 +485,7 @@ static int keygen_bind_port_to_schemes(struct fman_keygen *keygen,
+@@ -495,6 +458,7 @@ static int keygen_bind_port_to_schemes(struct fman_keygen *keygen,
  
  	return 0;
  }
@@ -121,7 +138,7 @@ index e73f6ef..5243a43 100644
  
  /* keygen_scheme_setup
   *
-@@ -506,7 +497,7 @@ static int keygen_bind_port_to_schemes(struct fman_keygen *keygen,
+@@ -506,7 +470,7 @@ static int keygen_bind_port_to_schemes(struct fman_keygen *keygen,
   *
   * Return: Zero for success or error code in case of failure
   */
@@ -130,77 +147,7 @@ index e73f6ef..5243a43 100644
  			       bool enable)
  {
  	struct fman_kg_regs __iomem *keygen_regs = keygen->keygen_regs;
-@@ -534,12 +525,67 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
- 	if (enable) {
- 		/* Enable Scheme */
- 		tmp_reg |= KG_SCH_MODE_EN;
--		/* Enqueue frame NIA */
--		tmp_reg |= ENQUEUE_KG_DFLT_NIA;
-+		if (scheme->next_engine == 1) {
-+			/* Next engine = Policer: route the frame to the
-+			 * policer profile in scheme->policer_profile_id. The
-+			 * profile's own per-colour NIA (programmed by
-+			 * fman_pcd_plcr) then decides enqueue vs drop. The
-+			 * destination FQID still comes from kgse_fqb below.
-+			 *
-+			 * The profile id is RELATIVE (NIA_PLCR_ABSOLUTE clear,
-+			 * mode 0xc04c0000): KGSE_PPC carries the id with
-+			 * shift=0/mask=0, and the KeyGen resolves it through the
-+			 * RX port's relative->absolute policer-profile window
-+			 * FMPL_PMR[hwPortId-1], which plcr_set_port_window() in
-+			 * fman_pcd_plcr programs at policer-attach (BASE=
-+			 * profile_id, NUM=1, VALID).  The SDK uses relative
-+			 * addressing for private per-port profiles and reserves
-+			 * NIA_PLCR_ABSOLUTE for the PLCR->PLCR shared-profile
-+			 * chaining case only.  Without the window programmed the
-+			 * BMI has no valid profile for the port and drops every
-+			 * frame *before* metering (BUG 3a: counters frozen at 0).
-+			 * 2026-06-09
-+			 */
-+			tmp_reg |= KG_SCH_MODE_NIA_PLCR | NIA_ENG_PLCR;
-+			scheme_regs.kgse_ppc = scheme->policer_profile_id;
-+		} else if (scheme->next_engine == 2) {
-+			/* Next engine = Coarse Classification: route the
-+			 * frame into the installed CC group table. CCOBASE
-+			 * (bits 27:24) selects the CC group; CCBS (kgse_ccbs
-+			 * below) selects which hash bits index the entry. The
-+			 * CC tree-root MURAM base is programmed separately at
-+			 * the BMI RX port (FMBM_RCCB) via
-+			 * fman_port_set_cc_base().
-+			 */
-+			tmp_reg |= NIA_ENG_FM_CTL | NIA_FM_CTL_AC_CC |
-+				(scheme->cc_base_offset <<
-+				 KG_SCH_MODE_CCOBASE_SHIFT);
-+		} else {
-+			/* Enqueue frame NIA */
-+			tmp_reg |= ENQUEUE_KG_DFLT_NIA;
-+		}
- 	}
- 
- 	scheme_regs.kgse_mode = tmp_reg;
- 
-+	/* Policer Profile Command (KGSE_PPC): the profile-generation register
-+	 * (base/shift/mask). For the policer path KGSE_PPC is set in the
-+	 * next_engine==1 branch above to policer_profile_id with shift=0 and
-+	 * mask=0, so the generated profile equals the id. The mode's
-+	 * mode's NIA_PLCR_ABSOLUTE bit is left CLEAR, so the id is
-+	 * RELATIVE; the KeyGen resolves it via the RX port's
-+	 * FMPL_PMR window that plcr_set_port_window() programs at
-+	 * policer-attach (see BUG 3a above). For the non-policer paths PPC stays 0
-+	 * from the memset above.
-+	 */
-+	/* Coarse Classification Bits Select (KGSE_CCBS): which hash bits index
-+	 * the CC group entry. Only meaningful when the mode NIA points at CC;
-+	 * left at 0 (from the memset above) otherwise. For the static
-+	 * single-entry tree this is 0.
-+	 */
-+	if (enable && scheme->next_engine == 2)
-+		scheme_regs.kgse_ccbs = scheme->cc_bits_sel;
-+
- 	scheme_regs.kgse_mv = scheme->match_vector;
- 
- 	/* Scheme don't override StorageProfile:
-@@ -611,6 +657,7 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+@@ -611,6 +575,7 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
  
  	return 0;
  }
@@ -210,10 +157,10 @@ index e73f6ef..5243a43 100644
   *
 diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h b/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
 new file mode 100644
-index 0000000..ff96553
+index 0000000..0737e94
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,103 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * FMan KeyGen — intra-module internal header.
@@ -287,28 +234,6 @@ index 0000000..ff96553
 +		 * use the 24 LSB's after shifting right
 +		 */
 +	u32 match_vector;	/* Match Vector */
-+	u8 next_engine;
-+		/* Post-KeyGen next-action engine for this scheme:
-+		 *   0 = BMI enqueue (ENQUEUE_KG_DFLT_NIA, the default)
-+		 *   1 = Policer    (NIA_ENG_PLCR, KGSE_PPC = policer_profile_id)
-+		 *   2 = Coarse Classification (NIA_FM_CTL_AC_CC,
-+		 *       KGSE_MODE CCOBASE = cc_base_offset,
-+		 *       KGSE_CCBS = cc_bits_sel)
-+		 * Mirrors enum fman_pcd_kg_next_engine in the public header;
-+		 * kept as a plain u8 here so this module-internal header does
-+		 * not depend on <linux/fsl/fman_pcd.h>.
-+		 */
-+	u8 policer_profile_id;	/* Absolute policer profile id, valid when
-+				 * next_engine == 1 (programmed into KGSE_PPC).
-+				 */
-+	u32 cc_base_offset;	/* CC group-table base index (CCOBASE),
-+				 * valid when next_engine == 2. 0 for the
-+				 * static single-group tree.
-+				 */
-+	u32 cc_bits_sel;	/* CC hash-bit selection (KGSE_CCBS), valid
-+				 * when next_engine == 2. 0 for the static
-+				 * single-entry tree.
-+				 */
 +};
 +
 +/* KeyGen driver data. Mirrors the file-static definition formerly in
@@ -341,10 +266,10 @@ index 0000000..ff96553
 +#endif /* __FMAN_KEYGEN_INTERNAL_H */
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
 new file mode 100644
-index 0000000..d260f66
+index 0000000..904ea1f
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
-@@ -0,0 +1,588 @@
+@@ -0,0 +1,399 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * FMan PCD KeyGen (KG) - silicon-programming layer.
@@ -376,12 +301,12 @@ index 0000000..d260f66
 + * hardware does the lookup directly against the MURAM-resident table
 + * programmed by the slow-path callers.
 + *
-+ * Coarse Classification chaining
-+ * ------------------------------
-+ * fman_pcd_kg_attach_cc() flips a scheme into CC next-engine mode by
-+ * rewriting KGSE_MODE (NIA_FM_CTL_AC_CC + CCOBASE) and KGSE_CCBS via
-+ * keygen_scheme_setup().  The CC tree-root MURAM base is programmed
-+ * separately at the BMI RX port (FMBM_RCCB) by fman_port_set_cc_base().
++ * What is intentionally still a stub
++ * ----------------------------------
++ * fman_pcd_kg_attach_cc() remains -EOPNOTSUPP here.  The CCBS (CC Base
++ * Scheme) wiring depends on the CC tree subsystem (struct
++ * fman_pcd_cc_tree) which lands in a follow-up patch.  When it lands
++ * we will revisit attach_cc and add the kgse_ccbs/cc_index programming.
 + */
 +
 +#include <linux/err.h>
@@ -446,8 +371,6 @@ index 0000000..d260f66
 +	struct fman_pcd_kg_extract_spec extracts[8];
 +	u32 default_fqid;
 +	bool use_hash;
-+	u8 next_engine;		/* 0 = BMI enqueue, 1 = policer, 2 = CC */
-+	u8 policer_profile_id;	/* valid when next_engine == 1 */
 +};
 +
 +/*
@@ -563,18 +486,7 @@ index 0000000..d260f66
 +
 +	if (!pcd || !params)
 +		return ERR_PTR(-EINVAL);
-+	if (params->num_extracts > 8)
-+		return ERR_PTR(-EINVAL);
-+	/*
-+	 * num_extracts == 0 is only valid for a policer-pass-through
-+	 * "catch-all" scheme: no key is extracted, match_vector is left 0 so
-+	 * every frame on the bound port selects this scheme, and the frame is
-+	 * handed straight to the policer (next_engine == PLCR). An ENQUEUE
-+	 * scheme with no extracts would have nothing to match on and is
-+	 * rejected.
-+	 */
-+	if (params->num_extracts == 0 &&
-+	    params->next_engine != FMAN_PCD_KG_NEXT_ENGINE_PLCR)
++	if (params->num_extracts == 0 || params->num_extracts > 8)
 +		return ERR_PTR(-EINVAL);
 +	/*
 +	 * default_fqid is dispatched-to only when use_hash == false.  When
@@ -595,20 +507,9 @@ index 0000000..d260f66
 +	keygen = fman->keygen;
 +	lock = fman_pcd_get_lock(pcd);
 +
-+	if (params->num_extracts == 0) {
-+		/*
-+		 * Catch-all policer-pass-through scheme: no key extraction.
-+		 * match_vector = 0 means the scheme imposes no parser-result
-+		 * match requirement, so every frame on the bound port selects
-+		 * it (same "match everything" semantics the RSS-hashing path
-+		 * relies on).
-+		 */
-+		match_vector = 0;
-+	} else {
-+		err = kg_build_match_vector(params, &match_vector);
-+		if (err)
-+			return ERR_PTR(err);
-+	}
++	err = kg_build_match_vector(params, &match_vector);
++	if (err)
++		return ERR_PTR(err);
 +
 +	scheme = kzalloc(sizeof(*scheme), GFP_KERNEL);
 +	if (!scheme)
@@ -633,9 +534,6 @@ index 0000000..d260f66
 +	slot->match_vector = match_vector;
 +	slot->base_fqid = params->default_fqid;
 +	slot->use_hashing = params->use_hash;
-+	slot->next_engine =
-+		(params->next_engine == FMAN_PCD_KG_NEXT_ENGINE_PLCR) ? 1 : 0;
-+	slot->policer_profile_id = params->policer_profile_id;
 +	if (params->use_hash) {
 +		/* Conservative defaults for the first cut.  Field-level
 +		 * tuning (hash_fqid_count, symmetric_hash, hashShift)
@@ -662,9 +560,6 @@ index 0000000..d260f66
 +	       params->num_extracts * sizeof(scheme->extracts[0]));
 +	scheme->default_fqid = params->default_fqid;
 +	scheme->use_hash     = params->use_hash;
-+	scheme->next_engine  =
-+		(params->next_engine == FMAN_PCD_KG_NEXT_ENGINE_PLCR) ? 1 : 0;
-+	scheme->policer_profile_id = params->policer_profile_id;
 +	INIT_LIST_HEAD(&scheme->node);
 +	list_add_tail(&scheme->node, fman_pcd_get_kg_list(pcd));
 +
@@ -688,7 +583,7 @@ index 0000000..d260f66
 +
 +	if (!scheme)
 +		return -EINVAL;
-+	if (port_id < 0x08 || port_id >= 0x28)
++	if (port_id == 0 || port_id > 10)
 +		return -EINVAL;
 +
 +	fman = fman_pcd_get_fman(scheme->pcd);
@@ -723,57 +618,21 @@ index 0000000..d260f66
 +int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
 +			  struct fman_pcd_cc_tree *cc)
 +{
-+	struct keygen_scheme *slot;
-+	struct fman *fman;
-+	struct fman_keygen *keygen;
-+	struct mutex *lock;
-+	int err;
-+
 +	if (!scheme || !cc)
 +		return -EINVAL;
 +
-+	fman = fman_pcd_get_fman(scheme->pcd);
-+	if (!fman || !fman->keygen)
-+		return -ENXIO;
-+	keygen = fman->keygen;
-+	lock = fman_pcd_get_lock(scheme->pcd);
-+
 +	/*
-+	 * Chain this KeyGen scheme into the installed Coarse Classification
-+	 * tree.  The scheme's hash output indexes the CC group table; the
-+	 * matched AD result then carries the destination RX FQID.  For the
-+	 * static single-group/single-entry tree (board patch 0098) both the
-+	 * CCOBASE group index and the CCBS hash-bit selection are 0.
-+	 *
-+	 * The CC tree-root MURAM base is programmed separately at the BMI RX
-+	 * port (FMBM_RCCB) via fman_port_set_cc_base(); this routine only
-+	 * flips the KeyGen scheme into CC next-engine mode.
-+	 *
-+	 * Same pattern as the policer (next_engine == 1) path: mutate the
-+	 * internal slot then re-run keygen_scheme_setup(enable = true) under
-+	 * pcd->lock to rewrite KGSE_MODE/KGSE_CCBS.  Permissive: the scheme
-+	 * need not be port-bound first.
++	 * Deferred to a follow-up: requires struct fman_pcd_cc_tree which
++	 * lands in the CC tree patch (fman_pcd_cc.c).  Programming target
++	 * is KGSE_CCBS (RM sec 8.7.4): hash output indexes into the CC
++	 * tree's key table.  When the CC subsystem lands we will:
++	 *   1. mutex_lock(pcd->lock)
++	 *   2. validate scheme->bound (cannot chain an unbound scheme)
++	 *   3. clear KG_SCH_MODE_EN, rewrite KGSE_CCBS, set CC chain bit,
++	 *      set KG_SCH_MODE_EN
++	 *   4. mutex_unlock
 +	 */
-+	mutex_lock(lock);
-+	slot = &keygen->schemes[scheme->id];
-+	slot->next_engine    = 2;
-+	slot->cc_base_offset = 0;
-+	slot->cc_bits_sel    = 0;
-+
-+	err = keygen_scheme_setup(keygen, (u8)scheme->id, true);
-+	if (err) {
-+		/* Roll back to the BMI-enqueue default on failure. */
-+		slot->next_engine    = 0;
-+		slot->cc_base_offset = 0;
-+		slot->cc_bits_sel    = 0;
-+		(void)keygen_scheme_setup(keygen, (u8)scheme->id, true);
-+		mutex_unlock(lock);
-+		return err;
-+	}
-+
-+	scheme->next_engine = 2;
-+	mutex_unlock(lock);
-+	return 0;
++	return -EOPNOTSUPP;
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_kg_attach_cc);
 +
@@ -810,134 +669,11 @@ index 0000000..d260f66
 +	kfree(scheme);
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_kg_scheme_destroy);
-+
-+/*
-+ * Locate the lowest-id KG scheme currently bound to @hw_port_id.  Caller
-+ * must hold pcd->lock.  Every RX port is initialised with exactly one
-+ * hard-coded RSS-hashing scheme (keygen_port_hashing_init()), and the
-+ * silicon's scheme-select dispatches each frame to the lowest-id scheme
-+ * whose port-binding matches - so this returns the slot the datapath
-+ * actually uses.  Returns NULL (and leaves *id_out untouched) if the port
-+ * has no bound scheme.
-+ */
-+static struct keygen_scheme *
-+kg_find_port_scheme(struct fman_keygen *keygen, u8 hw_port_id, u8 *id_out)
-+{
-+	int i;
-+
-+	for (i = 0; i < FM_KG_MAX_NUM_OF_SCHEMES; i++) {
-+		if (keygen->schemes[i].used &&
-+		    keygen->schemes[i].hw_port_id == hw_port_id) {
-+			*id_out = (u8)i;
-+			return &keygen->schemes[i];
-+		}
-+	}
-+	return NULL;
-+}
-+
-+int fman_pcd_kg_port_attach_policer(struct fman_pcd *pcd, u8 hw_port_id,
-+				    u8 profile_id)
-+{
-+	struct fman_keygen *keygen;
-+	struct keygen_scheme *slot;
-+	struct fman *fman;
-+	struct mutex *lock;
-+	u8 saved_engine, saved_profile, id;
-+	int err;
-+
-+	if (!pcd)
-+		return -EINVAL;
-+	if (hw_port_id < 0x08 || hw_port_id >= 0x28)
-+		return -EINVAL;
-+
-+	fman = fman_pcd_get_fman(pcd);
-+	if (!fman || !fman->keygen)
-+		return -ENXIO;
-+	keygen = fman->keygen;
-+	lock = fman_pcd_get_lock(pcd);
-+
-+	mutex_lock(lock);
-+
-+	slot = kg_find_port_scheme(keygen, hw_port_id, &id);
-+	if (!slot) {
-+		mutex_unlock(lock);
-+		return -ENODEV;
-+	}
-+
-+	saved_engine  = slot->next_engine;
-+	saved_profile = slot->policer_profile_id;
-+
-+	slot->next_engine        = 1;
-+	slot->policer_profile_id = profile_id;
-+
-+	/*
-+	 * keygen_scheme_setup() rejects enable on an already-used scheme
-+	 * (-EINVAL), so clear ->used for the in-place reprogram; setup() sets
-+	 * it back to true on success.  use_hashing / base_fqid / match_vector
-+	 * are untouched, so the scheme keeps spreading conforming frames over
-+	 * the same hashed RX FQs while the next-engine now points at the
-+	 * policer profile.
-+	 */
-+	slot->used = false;
-+	err = keygen_scheme_setup(keygen, id, true);
-+	if (err) {
-+		/* Restore the previous next-engine on failure. */
-+		slot->next_engine        = saved_engine;
-+		slot->policer_profile_id = saved_profile;
-+		slot->used = false;
-+		(void)keygen_scheme_setup(keygen, id, true);
-+		mutex_unlock(lock);
-+		return err;
-+	}
-+
-+	mutex_unlock(lock);
-+	return 0;
-+}
-+EXPORT_SYMBOL_GPL(fman_pcd_kg_port_attach_policer);
-+
-+int fman_pcd_kg_port_detach_policer(struct fman_pcd *pcd, u8 hw_port_id)
-+{
-+	struct fman_keygen *keygen;
-+	struct keygen_scheme *slot;
-+	struct fman *fman;
-+	struct mutex *lock;
-+	u8 id;
-+	int err;
-+
-+	if (!pcd)
-+		return -EINVAL;
-+	if (hw_port_id < 0x08 || hw_port_id >= 0x28)
-+		return -EINVAL;
-+
-+	fman = fman_pcd_get_fman(pcd);
-+	if (!fman || !fman->keygen)
-+		return -ENXIO;
-+	keygen = fman->keygen;
-+	lock = fman_pcd_get_lock(pcd);
-+
-+	mutex_lock(lock);
-+
-+	slot = kg_find_port_scheme(keygen, hw_port_id, &id);
-+	if (!slot) {
-+		/* Nothing bound: detach is a no-op (idempotent teardown). */
-+		mutex_unlock(lock);
-+		return 0;
-+	}
-+
-+	slot->next_engine        = 0;
-+	slot->policer_profile_id = 0;
-+
-+	slot->used = false;
-+	err = keygen_scheme_setup(keygen, id, true);
-+	mutex_unlock(lock);
-+	return err;
-+}
-+EXPORT_SYMBOL_GPL(fman_pcd_kg_port_detach_policer);
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index 442c49d..0e86138 100644
+index 442c49d..13bc9d6 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
-@@ -74,4 +74,186 @@ struct fman_pcd *fman_pcd_init(struct fman *fman);
+@@ -74,4 +74,123 @@ struct fman_pcd *fman_pcd_init(struct fman *fman);
  void fman_pcd_release(struct fman_pcd *pcd);
  struct fman_pcd_muram_budget fman_pcd_get_muram_budget(struct fman_pcd *pcd);
  
@@ -970,25 +706,6 @@ index 442c49d..0e86138 100644
 +};
 +
 +/**
-+ * enum fman_pcd_kg_next_engine - post-KeyGen dispatch target for a scheme.
-+ * @FMAN_PCD_KG_NEXT_ENGINE_ENQUEUE: enqueue the frame directly via BMI to the
-+ *                                   scheme's FQID (the historical default).
-+ * @FMAN_PCD_KG_NEXT_ENGINE_PLCR:    hand the frame to the policer profile in
-+ *                                   @policer_profile_id (KGSE_PPC) before the
-+ *                                   profile's own green/yellow/red NIA decides
-+ *                                   enqueue-vs-drop. The destination FQID is
-+ *                                   still taken from the scheme (@default_fqid).
-+ *
-+ * Mirrors the KGSE_MODE next-action-NIA encoding (RM 8.7.4): ENQUEUE selects
-+ * NIA_ENG_BMI|ENQ_FRAME; PLCR selects the policer-engine NIA with the
-+ * scheme's KGSE_PPC carrying the absolute profile id.
-+ */
-+enum fman_pcd_kg_next_engine {
-+	FMAN_PCD_KG_NEXT_ENGINE_ENQUEUE = 0,
-+	FMAN_PCD_KG_NEXT_ENGINE_PLCR,
-+};
-+
-+/**
 + * struct fman_pcd_kg_extract_spec - one extract slot inside a scheme.
 + * @src:    where the byte run comes from (frame / parse result / default)
 + * @offset: starting byte offset (0..63 for parse result, 0..127 for frame)
@@ -1015,12 +732,6 @@ index 442c49d..0e86138 100644
 + * @default_fqid: fallback FQID when CC chaining is not used
 + * @use_hash:   true = hash extracts and select target via CC; false = direct
 + *              FQID via @default_fqid only
-+ * @next_engine: post-KeyGen dispatch target (enqueue vs policer). Defaults to
-+ *              FMAN_PCD_KG_NEXT_ENGINE_ENQUEUE (value 0) for callers that
-+ *              zero-initialise this struct, preserving the historical
-+ *              enqueue-only behaviour.
-+ * @policer_profile_id: absolute FMan policer profile id to route through when
-+ *              @next_engine == FMAN_PCD_KG_NEXT_ENGINE_PLCR; ignored otherwise.
 + *
 + * Mainline LS1046A FMan v3 silicon has 32 KG schemes (8 per netcfg
 + * partition).  Each scheme is single-attach to a port.
@@ -1031,8 +742,6 @@ index 442c49d..0e86138 100644
 +	struct fman_pcd_kg_extract_spec extracts[8];
 +	u32 default_fqid;
 +	bool use_hash;
-+	enum fman_pcd_kg_next_engine next_engine;
-+	u8 policer_profile_id;
 +};
 +
 +/**
@@ -1054,7 +763,7 @@ index 442c49d..0e86138 100644
 +/**
 + * fman_pcd_kg_bind_port() - bind a scheme to an FMan ingress port.
 + * @scheme:  handle from fman_pcd_kg_scheme_create()
-+ * @port_id: FMan hardware BMI RX port id from fman_port_get_id() (0x08..0x27)
++ * @port_id: FMan port id (1..8 for 1G, 9..10 for 10G on LS1046A)
 + *
 + * Writes the scheme's match-vector bit for @port_id and updates the
 + * port's PCD configuration so that frames classified to this scheme
@@ -1063,42 +772,6 @@ index 442c49d..0e86138 100644
 + * Return: 0 on success, -EINVAL on bad args, -EBUSY if already bound.
 + */
 +int fman_pcd_kg_bind_port(struct fman_pcd_kg_scheme *scheme, u8 port_id);
-+
-+/**
-+ * fman_pcd_kg_port_attach_policer() - route an RX port's existing RSS
-+ *                                     scheme through a policer profile.
-+ * @pcd:        PCD handle for the owning FMan (fman_get_pcd()).
-+ * @hw_port_id: BMI hardware RX port id (0x08-0x0d 1G, 0x10-0x11 10G).
-+ * @profile_id: relative policer profile id to dispatch frames to.
-+ *
-+ * Every FMan RX port is initialised with a single hard-coded RSS-hashing
-+ * KeyGen scheme (keygen_port_hashing_init()) that all ingress frames are
-+ * dispatched to.  This reprograms THAT scheme's next-engine in place to
-+ * the policer profile, preserving its hash spreading and FQID base, so
-+ * conforming frames still reach the per-flow RX FQs while the policer
-+ * meters and drops excess.  It deliberately does NOT create a second
-+ * scheme: the silicon's scheme-select picks the lowest-id scheme bound to
-+ * the port, so a competing higher-id scheme would never be consulted.
-+ *
-+ * Return: 0 on success, -ENODEV if the port has no RSS scheme, or a
-+ * negative errno from the underlying KGSE_* reprogram.
-+ */
-+int fman_pcd_kg_port_attach_policer(struct fman_pcd *pcd, u8 hw_port_id,
-+				    u8 profile_id);
-+
-+/**
-+ * fman_pcd_kg_port_detach_policer() - restore an RX port's RSS scheme to
-+ *                                     plain BMI-enqueue next-engine.
-+ * @pcd:        PCD handle for the owning FMan (fman_get_pcd()).
-+ * @hw_port_id: BMI hardware RX port id used in the matching attach call.
-+ *
-+ * Reverse of fman_pcd_kg_port_attach_policer().  The RSS scheme itself is
-+ * left intact (it is the port's permanent hashing scheme); only its
-+ * next-engine is reset to direct enqueue.  NULL/-ENODEV-safe.
-+ *
-+ * Return: 0 on success or a negative errno.
-+ */
-+int fman_pcd_kg_port_detach_policer(struct fman_pcd *pcd, u8 hw_port_id);
 +
 +/**
 + * fman_pcd_kg_attach_cc() - chain a scheme to a Classifier-Continue tree.
@@ -1124,3 +797,5 @@ index 442c49d..0e86138 100644
 +void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme);
 +
  #endif /* __LINUX_FSL_FMAN_PCD_H */
+-- 
+2.39.5
