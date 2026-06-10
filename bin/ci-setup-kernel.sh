@@ -400,6 +400,16 @@ cp "$BOARD_PATCH_DIR/0104b-dpaa-ceetm-stub.patch" "$KERNEL_PATCHES/"
 # the future productive caller). Sorts after 0104b, before 101-sfp. Spec
 # sec 13.
 cp "$BOARD_PATCH_DIR/0105-fman-port-set-cc-base-primitive.patch" "$KERNEL_PATCHES/"
+# 0106: M3-3b productive CC steering wiring -- the HW-proven KGSE_CCBS graft
+# (silicon captures 2026-05-23/25: NIA stays BMI direct-enqueue 0x80500002,
+# a non-zero KGSE_CCBS = CC root group-table MURAM offset dispatches the CC
+# walk implicitly; the NIA-flip-to-FM_CTL alternative was DISPROVEN on HW).
+# Makes fman_pcd_kg_attach_cc() productive, adds the port-level graft pair
+# fman_pcd_kg_port_attach_cc()/detach_cc() (mirror of the BUG 3 policer
+# steering fix), and completes fman_cc_tree_install()/destroy() in
+# dpaa_fman_caps.c (install -> get_base -> graft; destroy detaches first).
+# Sorts after 0105, before 101-sfp. Spec sec 5.4 (M3-3b).
+cp "$BOARD_PATCH_DIR/0106-fman-pcd-cc-keygen-graft-wiring.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
