@@ -100,3 +100,12 @@ ASK/fci/lib/src/*.la
 
 # Per-developer VS Code editor settings
 .vscode/
+
+# Scratch / debug artifacts (DUT-side helpers + superseded debug patches; not durable repo content)
+/configure_vpp.sh
+/delete_vpp.sh
+/insert_readback.py
+/debug_readback.patch
+kernel/common/files/fman_pcd_plcr_test.c
+kernel/common/patches/board/0103d-dpaa1-true-zc-rx-readback-debug.patch
+data/vyos-1x-025-policer-offload.patch

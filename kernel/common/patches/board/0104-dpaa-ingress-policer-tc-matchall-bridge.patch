@@ -1,0 +1,421 @@
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 6fe417c..54a7035 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -31,10 +31,13 @@
+ #include <linux/bpf.h>
+ #include <linux/bpf_trace.h>
+ #include <net/xdp_sock_drv.h>
++#include <net/pkt_cls.h>
++#include <net/flow_offload.h>
+ #include "dpaa_flavor.h"
+ #include "dpaa_fman_caps.h"
+ #include <soc/fsl/bman.h>
+ #include <soc/fsl/qman.h>
++#include <linux/fsl/fman_pcd.h>
+ #include "fman.h"
+ #include "fman_port.h"
+ #include "mac.h"
+@@ -380,8 +383,7 @@ static void dpaa_get_stats64(struct net_device *net_dev,
+ 	}
+ }
+ 
+-static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
+-			 void *type_data)
++static int dpaa_setup_tc_mqprio(struct net_device *net_dev, void *type_data)
+ {
+ 	struct dpaa_priv *priv = netdev_priv(net_dev);
+ 	int num_txqs_per_tc = dpaa_num_txqs_per_tc();
+@@ -389,9 +391,6 @@ static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
+ 	u8 num_tc;
+ 	int i;
+ 
+-	if (type != TC_SETUP_QDISC_MQPRIO)
+-		return -EOPNOTSUPP;
+-
+ 	mqprio->hw = TC_MQPRIO_HW_OFFLOAD_TCS;
+ 	num_tc = mqprio->num_tc;
+ 
+@@ -421,6 +420,300 @@ out:
+ 	return 0;
+ }
+ 
++/* Ingress rate-limit policer offload (spec sec 5.6, board patch 0104).
++ *
++ * Bridges a single 'tc filter ... matchall action police' (or the
++ * equivalent nftables ingress rate-limit) onto the dormant FMan PCD
++ * Policer install body (fman_policer_install/destroy, board patch 0100).
++ * One profile slot per netdev (slot 0); the matchall classifier is the
++ * userspace surface the install body was missing.
++ *
++ * struct fman * and the FMan port id are resolved exactly as the HM
++ * VLAN-strip bridge (patch 0101) does: fman_bind(mac_dev->fman_dev) and
++ * fman_port_get_qman_channel_id(mac_dev->port[RX]).
++ *
++ * Fail-soft: gated on fman_policer_caps_supported() so a board whose
++ * ucode lacks POLICER_TRTCM rejects the offload with -EOPNOTSUPP and an
++ * extack message instead of a silent no-op; tc then leaves the filter in
++ * software.
++ */
++#define DPAA_POLICE_PROFILE_ID 0
++
++static int dpaa_setup_tc_matchall_replace(struct net_device *net_dev,
++					  struct tc_cls_matchall_offload *f)
++{
++	struct dpaa_priv *priv = netdev_priv(net_dev);
++	struct netlink_ext_ack *extack = f->common.extack;
++	struct fman_policer_profile prof = {};
++	const struct flow_action_entry *act;
++	struct fman_pcd *pcd;
++	struct fman *fm;
++	u8 port_id;
++	int err;
++
++	if (!fman_policer_caps_supported()) {
++		NL_SET_ERR_MSG_MOD(extack,
++				   "hardware policer not available on this ucode");
++		return -EOPNOTSUPP;
++	}
++
++	if (priv->ingress_police_installed) {
++		NL_SET_ERR_MSG_MOD(extack,
++				   "only one ingress policer per interface is supported");
++		return -EOPNOTSUPP;
++	}
++
++	if (!flow_offload_has_one_action(&f->rule->action)) {
++		NL_SET_ERR_MSG_MOD(extack,
++				   "matchall offload supports exactly one action");
++		return -EOPNOTSUPP;
++	}
++
++	if (!flow_action_basic_hw_stats_check(&f->rule->action, extack))
++		return -EOPNOTSUPP;
++
++	act = &f->rule->action.entries[0];
++	if (act->id != FLOW_ACTION_POLICE) {
++		NL_SET_ERR_MSG_MOD(extack,
++				   "matchall offload supports only the police action");
++		return -EOPNOTSUPP;
++	}
++
++	if (act->police.rate_pkt_ps) {
++		NL_SET_ERR_MSG_MOD(extack,
++				   "packet-per-second policing is not supported");
++		return -EOPNOTSUPP;
++	}
++
++	if (act->police.exceed.act_id != FLOW_ACTION_DROP) {
++		NL_SET_ERR_MSG_MOD(extack,
++				   "exceed action must be drop");
++		return -EOPNOTSUPP;
++	}
++
++	if (act->police.notexceed.act_id != FLOW_ACTION_ACCEPT &&
++	    act->police.notexceed.act_id != FLOW_ACTION_PIPE &&
++	    act->police.notexceed.act_id != FLOW_ACTION_CONTINUE) {
++		NL_SET_ERR_MSG_MOD(extack,
++				   "conform action must be accept/pipe/continue");
++		return -EOPNOTSUPP;
++	}
++
++	if (!priv->mac_dev)
++		return -ENODEV;
++
++	fm = fman_bind(priv->mac_dev->fman_dev);
++	if (!fm)
++		return -ENODEV;
++	port_id = fman_port_get_id(priv->mac_dev->port[RX]);
++
++	/* tc police rates are bytes/s, FMan profiles are bits/s; bursts are
++	 * bytes on both sides. peakrate present => trTCM (RFC 2698), else
++	 * srTCM (RFC 2697). Colour-blind: we do not honour an upstream colour.
++	 */
++	prof.color_mode = FMAN_POLICER_COLOR_BLIND;
++	prof.cir_bps    = act->police.rate_bytes_ps * 8;
++	prof.cbs_bytes  = act->police.burst;
++
++	if (act->police.peakrate_bytes_ps) {
++		prof.mode      = FMAN_POLICER_MODE_TRTCM;
++		prof.pir_bps   = act->police.peakrate_bytes_ps * 8;
++		prof.pbs_bytes = act->police.burst;
++	} else {
++		/* Single-rate (no peakrate): silicon lacks srTCM, so 0100 maps
++		 * this to RFC2698 with PIR==CIR/PBS==CBS; leaving them 0 would
++		 * red-mark and drop ALL frames. Mirror CIR/CBS to police, not drop. */
++		prof.mode      = FMAN_POLICER_MODE_SRTCM;
++		prof.pir_bps   = prof.cir_bps;
++		prof.pbs_bytes = prof.cbs_bytes;
++	}
++
++	err = fman_policer_install(fm, port_id, DPAA_POLICE_PROFILE_ID, &prof);
++	if (err) {
++		NL_SET_ERR_MSG_MOD(extack, "policer install failed");
++		netif_err(priv, drv, net_dev,
++			  "ingress policer install failed: %d\n", err);
++		return err;
++	}
++
++	/* The profile is now programmed but unbound: nothing routes frames
++	 * into it yet. The RX port already has an RSS-hashing KeyGen scheme
++	 * (created at port init by keygen_port_hashing_init()) that every
++	 * ingress frame is dispatched to - that is why un-policed traffic
++	 * flows through KeyGen at all. Reprogram THAT existing scheme's
++	 * next-engine in place to the policer profile, preserving its hash
++	 * spreading and FQID base, so conforming (green/yellow) frames
++	 * continue to the same hashed RX FQs while the policer meters and
++	 * drops the excess. Creating a *separate* catch-all scheme does not
++	 * work: the silicon's scheme-select picks the lowest-id scheme bound
++	 * to the port, so the pre-existing hash scheme always wins selection
++	 * and a higher-id policer scheme is never consulted (confirmed on
++	 * hardware 2026-06-09: traffic stayed uncapped at line rate).
++	 */
++	pcd = fman_get_pcd(fm);
++	if (!pcd) {
++		NL_SET_ERR_MSG_MOD(extack, "FMan PCD subsystem unavailable");
++		err = -ENODEV;
++		goto err_policer;
++	}
++
++	err = fman_pcd_kg_port_attach_policer(pcd, port_id,
++					      DPAA_POLICE_PROFILE_ID);
++	if (err) {
++		NL_SET_ERR_MSG_MOD(extack, "policer KeyGen attach failed");
++		netif_err(priv, drv, net_dev,
++			  "policer KeyGen attach failed: %d\n", err);
++		goto err_policer;
++	}
++
++	priv->ingress_police_installed = true;
++	return 0;
++
++err_policer:
++	fman_policer_destroy(fm, port_id, DPAA_POLICE_PROFILE_ID);
++	return err;
++}
++
++static int dpaa_setup_tc_matchall_destroy(struct net_device *net_dev)
++{
++	struct dpaa_priv *priv = netdev_priv(net_dev);
++	struct fman *fm;
++	u8 port_id;
++
++	if (!priv->ingress_police_installed)
++		return 0;
++
++	if (priv->mac_dev) {
++		/* Reverse of _replace: restore the RX port's existing RSS hash
++		 * scheme to plain BMI-enqueue next-engine, then remove the
++		 * policer profile. The scheme itself is NOT destroyed - it is
++		 * the port's permanent RSS-hashing scheme (created at port
++		 * init); _replace only flipped its next-engine to the policer.
++		 */
++		fm = fman_bind(priv->mac_dev->fman_dev);
++		if (fm) {
++			struct fman_pcd *pcd = fman_get_pcd(fm);
++
++			port_id = fman_port_get_id(priv->mac_dev->port[RX]);
++			if (pcd)
++				fman_pcd_kg_port_detach_policer(pcd, port_id);
++			fman_policer_destroy(fm, port_id,
++					     DPAA_POLICE_PROFILE_ID);
++		}
++	}
++
++	priv->ingress_police_installed = false;
++	return 0;
++}
++
++static int dpaa_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
++				  void *cb_priv)
++{
++	struct net_device *net_dev = cb_priv;
++	struct tc_cls_matchall_offload *f = type_data;
++
++	if (type != TC_SETUP_CLSMATCHALL)
++		return -EOPNOTSUPP;
++
++	if (!tc_cls_can_offload_and_chain0(net_dev, type_data))
++		return -EOPNOTSUPP;
++
++	switch (f->command) {
++	case TC_CLSMATCHALL_REPLACE:
++		return dpaa_setup_tc_matchall_replace(net_dev, f);
++	case TC_CLSMATCHALL_DESTROY:
++		return dpaa_setup_tc_matchall_destroy(net_dev);
++	default:
++		return -EOPNOTSUPP;
++	}
++}
++
++static LIST_HEAD(dpaa_block_cb_list);
++
++/* Block-unbind self-heal (BUG 3b).
++ *
++ * The ingress qdisc/block can be torn down WITHOUT the matchall filter's
++ * TC_CLSMATCHALL_DESTROY ever reaching this driver: net/sched/cls_api.c's
++ * __tcf_block_put() runs tcf_block_offload_unbind() (which removes our
++ * block-cb) BEFORE tcf_block_flush_all_chains() destroys the filter, so
++ * mall_destroy_hw_filter() -> tc_setup_cb_destroy() iterates over zero
++ * registered cbs and dpaa_setup_tc_matchall_destroy() is never called.
++ * VyOS hits exactly this path: ingress-policer update() runs
++ * super().update() -> set_mirror_redirect(), which deletes the whole
++ * ingress qdisc first. Without a revert here the FMan RX KeyGen scheme
++ * stays stuck in next-engine=PLCR and the port stays dead.
++ *
++ * flow_block_cb_alloc()'s release callback IS invoked on block-unbind
++ * (tcf_block_unbind() -> flow_block_cb_free() -> block_cb->release()),
++ * so reverting the policer scheme here guarantees recovery on every
++ * teardown path. dpaa_setup_tc_matchall_destroy() is idempotent
++ * (guards on priv->ingress_police_installed), so the normal
++ * TC_CLSMATCHALL_DESTROY path co-existing with this one is harmless.
++ *
++ * Do NOT take rtnl here: block-unbind runs from the qdisc teardown path
++ * which already holds rtnl, and the revert only touches FMan PCD
++ * registers (internally locked) plus the idempotent installed flag.
++ */
++static void dpaa_tc_block_release(void *cb_priv)
++{
++	struct net_device *net_dev = cb_priv;
++
++	dpaa_setup_tc_matchall_destroy(net_dev);
++}
++
++static int dpaa_setup_tc_block(struct net_device *net_dev,
++			       struct flow_block_offload *f)
++{
++	struct flow_block_cb *block_cb;
++
++	if (f->binder_type != FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
++		return -EOPNOTSUPP;
++
++	f->driver_block_list = &dpaa_block_cb_list;
++
++	switch (f->command) {
++	case FLOW_BLOCK_BIND:
++		if (flow_block_cb_is_busy(dpaa_setup_tc_block_cb, net_dev,
++					  &dpaa_block_cb_list))
++			return -EBUSY;
++
++		block_cb = flow_block_cb_alloc(dpaa_setup_tc_block_cb,
++					       net_dev, net_dev,
++					       dpaa_tc_block_release);
++		if (IS_ERR(block_cb))
++			return PTR_ERR(block_cb);
++
++		flow_block_cb_add(block_cb, f);
++		list_add_tail(&block_cb->driver_list, &dpaa_block_cb_list);
++		return 0;
++	case FLOW_BLOCK_UNBIND:
++		block_cb = flow_block_cb_lookup(f->block,
++						dpaa_setup_tc_block_cb,
++						net_dev);
++		if (!block_cb)
++			return -ENOENT;
++
++		flow_block_cb_remove(block_cb, f);
++		list_del(&block_cb->driver_list);
++		return 0;
++	default:
++		return -EOPNOTSUPP;
++	}
++}
++
++static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
++			 void *type_data)
++{
++	switch (type) {
++	case TC_SETUP_QDISC_MQPRIO:
++		return dpaa_setup_tc_mqprio(net_dev, type_data);
++	case TC_SETUP_BLOCK:
++		return dpaa_setup_tc_block(net_dev, type_data);
++	default:
++		return -EOPNOTSUPP;
++	}
++}
++
+ static struct mac_device *dpaa_mac_dev_get(struct platform_device *pdev)
+ {
+ 	struct dpaa_eth_data *eth_data;
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+index 9b8426b..64ab8dc 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -20,6 +20,11 @@
+ /* Number of prioritised traffic classes */
+ #define DPAA_TC_NUM		4
+ 
++/* Opaque KeyGen scheme handle (full type in <linux/fsl/fman_pcd.h>); held by
++ * struct dpaa_priv for the ingress-policer catch-all scheme.
++ */
++struct fman_pcd_kg_scheme;
++
+ /* More detailed FQ types - used for fine-grained WQ assignments */
+ enum dpaa_fq_type {
+ 	FQ_TYPE_RX_DEFAULT = 1, /* Rx Default FQs */
+@@ -193,6 +198,23 @@ struct dpaa_priv {
+  * Spec sec 5.5; board patch 0101.
+  */
+ u32 hm_vlan_strip_handle;
++	/* Ingress rate-limit policer installed via tc matchall+police
++	 * (.ndo_setup_tc TC_SETUP_BLOCK). True between a successful
++	 * TC_CLSMATCHALL_REPLACE and its TC_CLSMATCHALL_DESTROY. Bridges
++	 * the FMan PCD Policer (fman_policer_install(), profile slot 0).
++	 * Spec sec 5.6; board patch 0104.
++	 */
++	bool ingress_police_installed;
++	/* KeyGen catch-all scheme that routes every RX frame on this port
++	 * through the policer profile (next_engine = PLCR). NULL when no
++	 * ingress policer is installed. Created/bound in
++	 * dpaa_setup_tc_matchall_replace() alongside fman_policer_install()
++	 * and the fman_port_use_kg_hash() parser->KeyGen flip; torn down in
++	 * dpaa_setup_tc_matchall_destroy(). Without it the installed profile
++	 * is armed-but-unbound and never sees a frame. Spec sec 5.6; board
++	 * patch 0104.
++	 */
++	struct fman_pcd_kg_scheme *police_scheme;
+ 	u32 msg_enable;	/* net_device message level */
+ 
+ 	struct {
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 91de052..5248fe3 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -1818,6 +1818,24 @@ return port->dts_params.qman_channel_id;
+ }
+ EXPORT_SYMBOL(fman_port_get_qman_channel_id);
+ 
++/**
++ * fman_port_get_id
++ * @port: Pointer to the FMan port device
++ *
++ * Returns the FMan hardware port id (1..10 on LS1046A: 1G ports 1..8, 10G
++ * ports 9..10), i.e. port->dts_params.id as latched at fman_port_probe().
++ * This is the index the KeyGen port-bind AR register and the policer-profile
++ * record key are addressed by - distinct from the QMan channel id returned by
++ * fman_port_get_qman_channel_id() (a 0x800-range software-portal channel).
++ *
++ * Return: HW port id (1..10)
++ */
++u8 fman_port_get_id(struct fman_port *port)
++{
++	return port->port_id;
++}
++EXPORT_SYMBOL(fman_port_get_id);
++
+ /**
+  * fman_port_get_liodn
+  * @port: Pointer to the FMan port device
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.h b/drivers/net/ethernet/freescale/fman/fman_port.h
+index cc39538..9160c95 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.h
++++ b/drivers/net/ethernet/freescale/fman/fman_port.h
+@@ -124,6 +124,8 @@ int fman_port_enable(struct fman_port *port);
+ 
+ u32 fman_port_get_qman_channel_id(struct fman_port *port);
+ 
++u8 fman_port_get_id(struct fman_port *port);
++
+ /* M3-3 step 7 sub-increment 4 (patch 0102): reprogram a live RX port's
+  * primary BMan pool ID (the WRITE half of true-ZC mechanism 3, spec
+  * sec 6.1.7). The caller MUST fman_port_disable() the port first and

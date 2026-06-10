@@ -54,3 +54,15 @@ index 68db05f..dbc3685 100755
          if is_raid_install(install_target):
              write_dir: str = f'{DIR_DST_ROOT}/boot/{image_name}/rw'
              raid.update_default(write_dir)
+@@ -1453,6 +1478,11 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
+             if file.is_file() and file.suffix == '.dtb':
+                 copy(file, f'{root_dir}/boot/{image_name}/')
+ 
++        # Copy device tree blobs for U-Boot boards (e.g., LS1046A)
++        for file in Path(DIR_ISO_MOUNT).iterdir():
++            if file.is_file() and file.suffix == '.dtb':
++                copy(file, f'{root_dir}/boot/{image_name}/')
++
+         # unmount an ISO and cleanup
+         cleanup([str(iso_path)])
+ 

@@ -1,0 +1,116 @@
+dpaa1: true-ZC RX - register per-band MEM_TYPE_XSK_BUFF_POOL rxq (0103g)
+
+The 0103f reorder finally let XSK-bpid FDs reach af_xdp_pool_rx_hook,
+exposing a latent NULL deref on the FIRST Recovered frame: the
+xdp_buffs recovered via the 0103a chunk map come from xsk_buff_alloc(),
+which leaves xdp.rxq NULL (drivers own that field), and the XSK
+receive path dereferences it:
+
+  Unable to handle kernel NULL pointer dereference at 0000000000000000
+  pc : __xsk_map_redirect+0x6c/0x390     (xsk_rcv_check: xdp->rxq->dev)
+  lr : xdp_do_redirect+0x5c/0x4a0
+  Call trace: __xsk_map_redirect / xdp_do_redirect /
+              af_xdp_pool_rx_hook / rx_default_dqrr
+
+(HW-captured over the serial relay 2026-06-09, image 2026.06.09-2302,
+kernel 6.18.34-vyos, dual-CPU interleaved Oops, instant reboot.)
+
+Fix = the i40e ZC idiom, applied at ZC-attach time right before the
+reprogram-WRITE (and gating it):
+
+  - dpaa_eth.h: struct xdp_rxq_info xsk_zc_rxq[DPAA1_XSK_MAX_QBANDS]
+  - attach: xdp_rxq_info_reg(queue_index=queue_id, napi_id=0) +
+    xdp_rxq_info_reg_mem_model(MEM_TYPE_XSK_BUFF_POOL, NULL) +
+    xsk_pool_set_rxq_info(pool, rxq)  -- stamps xdp.rxq into every
+    pool buffer ONCE, so the hot rx_hook needs no per-frame work.
+    On failure: xsk_pool_attach_fail++, reprogram-WRITE skipped
+    (rxp = NULL) -- no rxq, no ZC, no crash.
+  - detach: xdp_rxq_info_unreg() (guarded by _is_reg) before the
+    BPID restore.
+
+MEM_TYPE_XSK_BUFF_POOL also routes xsk_rcv() down the true-ZC branch
+(xsk_rcv_zc) instead of the copy fallback. Native arm64 compile
+0 warn / 0 err; stacks on 0103f.
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+index ac83c37..5b426ca 100644
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -708,6 +708,41 @@ dev_info(priv->net_dev->dev.parent,
+  queue_id, priv->xsk_bpid[queue_id],
+  priv->dpaa_bp->bpid);
+ 
++/* 0103g: register the per-band ZC rxq BEFORE the reprogram-WRITE.
++ * The Recovered xdp_buffs are handed to bpf_prog_run_xdp() /
++ * xdp_do_redirect(), whose XSK receive path (xsk_rcv_check)
++ * dereferences xdp->rxq->dev.  xsk_buff_alloc() leaves xdp.rxq
++ * NULL (drivers own that field), so without this registration the
++ * first Recovered frame NULL-derefs in __xsk_map_redirect
++ * (HW-captured serial Oops, 2026-06-09: pc __xsk_map_redirect,
++ * lr xdp_do_redirect, af_xdp_pool_rx_hook in the call trace).
++ * i40e idiom: reg + MEM_TYPE_XSK_BUFF_POOL mem model +
++ * xsk_pool_set_rxq_info() stamping xdp.rxq into every pool buffer
++ * once, so the hot rx_hook needs no per-frame assignment.  The
++ * reprogram-WRITE below is gated on success -- no rxq, no ZC.
++ */
++{
++int rqret;
++
++rqret = xdp_rxq_info_reg(&priv->xsk_zc_rxq[queue_id],
++ priv->net_dev, queue_id, 0);
++if (!rqret) {
++rqret = xdp_rxq_info_reg_mem_model(&priv->xsk_zc_rxq[queue_id],
++   MEM_TYPE_XSK_BUFF_POOL, NULL);
++if (rqret)
++xdp_rxq_info_unreg(&priv->xsk_zc_rxq[queue_id]);
++}
++if (rqret) {
++priv->xsk_pool_attach_fail++;
++dev_warn(priv->net_dev->dev.parent,
++ "af_xdp_pool: qband %u ZC rxq register failed (%d); true-ZC RX disabled for this band\n",
++ queue_id, rqret);
++rxp = NULL; /* gate: skip the reprogram-WRITE */
++} else {
++xsk_pool_set_rxq_info(pool, &priv->xsk_zc_rxq[queue_id]);
++}
++}
++
+ /*
+  * 0103b reprogram-WRITE (mechanism 3, the hardware-risky half).
+  * Point the live FMan RX port's primary BMan pool from the kernel
+@@ -896,7 +931,14 @@ synchronize_net();
+ 			priv->xsk_pool_detach_timeout++;
+ 		}
+ 
+-		/* M3-3 step 7 sub-increment 6 (0103c part 2): restore the
++		/* 0103g: tear down the per-band ZC rxq.  The pool pointer was
++ * RCU-cleared earlier in detach, so the rx_hook can no longer
++ * reach Recovered frames referencing this rxq.
++ */
++if (xdp_rxq_info_is_reg(&priv->xsk_zc_rxq[queue_id]))
++xdp_rxq_info_unreg(&priv->xsk_zc_rxq[queue_id]);
++
++/* M3-3 step 7 sub-increment 6 (0103c part 2): restore the
+ 		 * FMan RX port's primary BPID from the XSK pool back to
+ 		 * the kernel page-pool BPID BEFORE we free bman_new_pool()'s
+ 		 * handle and BEFORE we re-enable the port.  Without this,
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+index 64ab8dc..fc8943b 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -261,6 +261,15 @@ u32 hm_vlan_strip_handle;
+ 	 */
+ 	struct xsk_buff_pool __rcu *xsk_pool[DPAA1_XSK_MAX_QBANDS];
+ 	int                         xsk_bpid[DPAA1_XSK_MAX_QBANDS];
++	/* 0103g: dedicated per-band rxq for true-ZC Recovered frames.
++	 * Registered MEM_TYPE_XSK_BUFF_POOL at ZC attach; stamped into
++	 * every pool xdp_buff via xsk_pool_set_rxq_info() so the rx_hook
++	 * needs no per-frame xdp->rxq assignment.  Without it the first
++	 * Recovered frame NULL-derefs in __xsk_map_redirect
++	 * (xsk_rcv_check reads xdp->rxq->dev; xsk_buff_alloc leaves
++	 * xdp.rxq NULL -- drivers own that field).
++	 */
++	struct xdp_rxq_info         xsk_zc_rxq[DPAA1_XSK_MAX_QBANDS];
+ 	struct bman_pool           *xsk_bpool[DPAA1_XSK_MAX_QBANDS];
+ 	unsigned int                xsk_max_qbands;
+ 

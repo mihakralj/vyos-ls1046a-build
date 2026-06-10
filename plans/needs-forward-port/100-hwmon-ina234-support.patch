@@ -1,0 +1,104 @@
+From: Ian Ray <ian.ray@gehealthcare.com>
+Date: Thu, 20 Feb 2026 11:20:24 +0000
+Subject: [PATCH] hwmon: (ina2xx) Add support for INA234 for kernel 6.6
+
+INA234 is register compatible to INA226 (excepting manufacturer and die
+or device id registers) but has different scaling.
+
+The INA234 bus voltage register stores a 12-bit ADC result in bits[15:4]
+with bits[3:0] always zero, giving an effective bus voltage LSB of 1.6 mV
+per raw register bit (bus_voltage_shift=4, bus_voltage_lsb=25600 uV).
+Without this patch, sensors bind as ina226 and read 1250 uV/bit instead of
+1600 uV/bit — a systematic 22% underread on all bus voltages.
+
+The power register coefficient for INA234 is 32 (vs 25 for INA226),
+per TI datasheet equation: Power_W = 32 * Current_LSB * Power_reg_count.
+
+Shunt voltage register format is identical to INA226 (shunt_div=400,
+effective 2.5 uV per raw bit), so current and shunt measurements are
+unaffected.
+
+Alert attributes (ina226_group) are exposed since INA234 implements the
+same MASK_ENABLE (0x06) and ALERT_LIMIT (0x07) registers as INA226.
+
+Calibration value 2048 matches INA226 for optimal truncation-error
+elimination (from TI INA234 datasheet eq. 3).
+
+Adapted from upstream LKML patch v3 by Ian Ray <ian.ray@gehealthcare.com>
+(Message-Id: 20260220112024.97446-4-ian.ray@gehealthcare.com) for the
+kernel 6.6 ina2xx driver structure (older driver lacks ina260/sy24655).
+
+Signed-off-by: Ian Ray <ian.ray@gehealthcare.com>
+---
+ drivers/hwmon/Kconfig  |  2 +-
+ drivers/hwmon/ina2xx.c | 23 ++++++++++++++++++++---
+ 2 files changed, 21 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/hwmon/Kconfig b/drivers/hwmon/Kconfig
+--- a/drivers/hwmon/Kconfig
++++ b/drivers/hwmon/Kconfig
+@@ -2018,7 +2018,7 @@ config SENSORS_INA2XX
+ 	select REGMAP_I2C
+ 	help
+ 	  If you say yes here you get support for INA219, INA220, INA226,
+-	  INA230, and INA231 power monitor chips.
++	  INA230, INA231, and INA234 power monitor chips.
+ 
+ 	  The INA2xx driver is configured for the default configuration of
+ 	  the part as described in the datasheet.
+diff --git a/drivers/hwmon/ina2xx.c b/drivers/hwmon/ina2xx.c
+--- a/drivers/hwmon/ina2xx.c
++++ b/drivers/hwmon/ina2xx.c
+@@ -98,7 +98,7 @@ static struct regmap_config ina2xx_regmap_config = {
+ 	.val_bits = 16,
+ };
+ 
+-enum ina2xx_ids { ina219, ina226 };
++enum ina2xx_ids { ina219, ina226, ina234 };
+ 
+ struct ina2xx_config {
+ 	u16 config_default;
+@@ -138,6 +138,15 @@ static const struct ina2xx_config ina2xx_config[] = {
+ 		.bus_voltage_lsb = 1250,
+ 		.power_lsb_factor = 25,
+ 	},
++	[ina234] = {
++		.config_default = INA226_CONFIG_DEFAULT,
++		.calibration_value = 2048,
++		.registers = INA226_REGISTERS,
++		.shunt_div = 400,		/* 2.5 uV/LSB raw ADC from INA2XX_SHUNT_VOLTAGE */
++		.bus_voltage_shift = 4,
++		.bus_voltage_lsb = 25600,	/* 25.6 mV/LSB; >>4 shift gives 1.6 mV effective */
++		.power_lsb_factor = 32,
++	},
+ };
+ 
+ /*
+@@ -667,7 +676,7 @@ static int ina2xx_probe(struct i2c_client *client)
+ 	}
+ 
+ 	data->groups[group++] = &ina2xx_group;
+-	if (chip == ina226)
++	if (chip == ina226 || chip == ina234)
+ 		data->groups[group++] = &ina226_group;
+ 
+ 	hwmon_dev = devm_hwmon_device_register_with_groups(dev, client->name,
+@@ -687,6 +696,7 @@ static const struct i2c_device_id ina2xx_id[] = {
+ 	{ "ina226", ina226 },
+ 	{ "ina230", ina226 },
+ 	{ "ina231", ina226 },
++	{ "ina234", ina234 },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(i2c, ina2xx_id);
+@@ -712,6 +722,10 @@ static const struct of_device_id __maybe_unused ina2xx_of_match[] = {
+ 		.compatible = "ti,ina231",
+ 		.data = (void *)ina226
+ 	},
++	{
++		.compatible = "ti,ina234",
++		.data = (void *)ina234
++	},
+ 	{ },
+ };
+ MODULE_DEVICE_TABLE(of, ina2xx_of_match);

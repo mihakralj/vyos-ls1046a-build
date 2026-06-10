@@ -5,20 +5,7 @@ have non-trivial context drift against the new 6.18.28 base.
 
 | Patch | Original target | 6.18.28 status | Action needed |
 |---|---|---|---|
-| _(none currently parked)_ | | | |
-
-## Completed forward-ports
-
-- **`100-hwmon-ina234-support.patch`** (linux-6.6.x) — forward-ported 2026-06-07
-  and re-introduced as
-  `kernel/common/patches/board/4002-hwmon-ina2xx-add-ina234-support.patch`
-  (linux-6.18.x). The 6.18 `ina2xx.c` is a config-table over chip IDs and
-  registers via `devm_hwmon_device_register_with_info`, so the 6.6 patch's
-  `ina226_group`/`data->groups[]` probe hunk was dropped (alerts now exposed
-  via `has_alerts`) and the bus-voltage scaling was corrected to
-  `bus_voltage_shift=4` + `bus_voltage_lsb=1600` (the 6.6 `lsb=25600` matched
-  the old `(regval*lsb)>>shift` formula and over-reads 16× under the new
-  `(regval>>shift)*lsb` math). See the INA234 bullet in `AGENTS.md`.
+| `100-hwmon-ina234-support.patch` | linux-6.6.x | drivers/hwmon/Kconfig + ina2xx.c restructured (now also handles ina260, sy24655). Hunk @2018 misses; hunk @98 misses. | Re-port against 6.18.28 ina2xx.c (which is now a switch over chip IDs); split INA234-specific scaling out. Ideally upstream the original Ian Ray patch via netdev. |
 
 ## When to handle
 
