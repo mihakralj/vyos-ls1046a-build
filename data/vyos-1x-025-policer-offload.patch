@@ -1,0 +1,93 @@
+diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
+index 5385916..d4e5f7c 100644
+--- a/interface-definitions/interfaces_ethernet.xml.in
++++ b/interface-definitions/interfaces_ethernet.xml.in
+@@ -136,6 +136,25 @@
+                   <help>Enable hardware VLAN tag stripping on receive (NXP LS1046A FMan Header Manipulation offload)</help>
+                   <valueless/>
+                 </properties>
++              </leafNode>
++              <node name="policer">
++                <properties>
++                  <help>Hardware ingress policer (srTCM/trTCM) via NXP LS1046A FMan PCD Policer offload</help>
++                </properties>
++                <children>
++                  <leafNode name="rate">
++                    <properties>
++                      <help>Committed Information Rate in bits/sec (e.g. 2500000000 for 2.5 Gbps)</help>
++                      <constraint>
++                        <validator name="numeric" argument="--range 1-40000000000"/>
++                      </constraint>
++                    </properties>
++                  </leafNode>
++                  <leafNode name="burst">
++                    <properties>
++                      <help>Committed Burst Size in bytes (e.g. 65536 for 64 KiB)</help>
++                      <constraint>
++                        <validator name="numeric" argument="--range 1-16777215"/>
++                      </constraint>
++                    </properties>
++                  </leafNode>
++                </children>
+               </leafNode>
+             </children>
+           </node>
+diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
+index 02d4b76..a9e3f1d 100644
+--- a/python/vyos/ifconfig/ethernet.py
++++ b/python/vyos/ifconfig/ethernet.py
+@@ -111,6 +111,7 @@ def get_bond_member_allowed_options() -> list:
+             'offload.sg',
+             'offload.tso',
+             'offload.vlan-strip',
++            'offload.policer',
+             'redirect',
+             'ring_buffer.rx',
+             'ring_buffer.tx',
+@@ -363,6 +364,37 @@ def set_vlan_strip(self, state):
+                     'Adapter does not support changing rx-vlan-offload settings!'
+                 )
+         return False
++
++    def set_policer_offload(self, config):
++        """
++        Configure hardware ingress policer on the NXP LS1046A FMan PCD Policer.
++        Config keys: offload.policer.rate (bps), offload.policer.burst (bytes)
++        If either key is absent, the policer is removed (idempotent destroy).
++        Writes to the debugfs plcr_test node (kernel 0100 policer API).
++        """
++        rate = dict_search('offload.policer.rate', config)
++        burst = dict_search('offload.policer.burst', config)
++
++        # Determine port_id from interface's FMan port
++        # This requires reading /sys/class/net/<iface>/device/of_node
++        # to map interface name → FMan port id.
++        # For now, use a helper that maps ethN → port_id (eth0=5, eth1=6,
++        # eth2=2, eth3=9, eth4=10 on the Mono Gateway DK).
++        port_map = {'eth0': 5, 'eth1': 6, 'eth2': 2, 'eth3': 9, 'eth4': 10}
++        port_id = port_map.get(self.ifname)
++        if port_id is None:
++            return  # not a DPAA1 interface
++
++        debugfs = '/sys/kernel/debug/fman_pcd/0/plcr_test'
++        if rate is not None and burst is not None:
++            # srTCM single-rate policer, slot 0, colour-blind
++            cmd = f'install {port_id} 0 0 {rate} {burst}'
++        else:
++            cmd = f'destroy {port_id} 0'
++
++        if os.path.exists(debugfs):
++            with open(debugfs, 'w') as f:
++                f.write(cmd)
+
+     def set_rps(self, state):
+         if not isinstance(state, bool):
+@@ -609,4 +641,7 @@ def update(self, config):
+         # Hardware VLAN tag stripping on receive (DPAA1 FMan HM offload)
+         self.set_vlan_strip(dict_search('offload.vlan_strip', config) is not None)
+
++        # Hardware ingress policer (DPAA1 FMan PCD Policer offload)
++        self.set_policer_offload(config)
++
+         # RPS - Receive Packet Steering
+         self.set_rps(dict_search('offload.rps', config) is not None)
