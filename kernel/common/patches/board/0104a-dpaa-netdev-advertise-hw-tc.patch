@@ -1,0 +1,55 @@
+dpaa1: board 0104a — advertise NETIF_F_HW_TC so the policer offload is reachable (M3-3d)
+
+Board 0104 added the .ndo_setup_tc TC_SETUP_BLOCK handler that maps an
+ingress `tc filter matchall action police` onto fman_policer_install
+slot 0, but the DPAA netdev never advertised NETIF_F_HW_TC. With the
+feature flag absent, tc_can_offload(net_dev) is false, so the tc core
+never routes the matchall filter to the handler:
+
+  * a `skip_sw` filter (the productive path used by the vyos-1x-025
+    `set interfaces ethernet ethX ingress-policer` CLI) is rejected
+    outright with "Error: TC offload is disabled on net device";
+  * a non-`skip_sw` filter installs software-only (`not_in_hw`) and the
+    handler is never invoked (no fman_policer_install, no in_hw).
+
+Verified on hardware 2026-06-07 (DUT 192.168.1.190, ISO
+2026.06.07-1957-rolling, kernel 6.18.34-vyos): `ethtool -k eth3` showed
+`hw-tc-offload: off [fixed]` even though the FMan PCD caps report POL
+(`fsl_dpa dpaa-ethernet.0: FMan PCD caps = 0x17 (CC HM POL PARSER)`),
+and a matchall police filter ran in software (`not_in_hw rule hit 25`).
+
+Advertise NETIF_F_HW_TC in dpaa_netdev_init(), gated on the same runtime
+policer capability the 0104 handler enforces (fman_policer_caps_supported),
+mirroring the existing fman_hm_caps_supported() / NETIF_F_HW_VLAN_CTAG_RX
+pattern a few lines above. This makes hw-tc-offload toggleable+on, so
+both skip_sw and non-skip_sw matchall filters reach dpaa_setup_tc()'s
+TC_SETUP_BLOCK branch; dpaa_setup_tc_block_cb() still fail-softs every
+unsupported tc type with -EOPNOTSUPP, so no other tc offload is exposed.
+Touches only dpaa_netdev_init() (no overlap with 0104's setup_tc hunks),
+so it stacks cleanly after 0104 and is byte-stable across 6.18.33/6.18.34.
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 3c4a5b6d..7e8f9a0b 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -245,6 +245,19 @@ static int dpaa_netdev_init(struct net_device *net_dev,
+ 	 */
+ 	if (fman_hm_caps_supported())
+ 		net_dev->hw_features |= NETIF_F_HW_VLAN_CTAG_RX;
++	/* Policer offload (spec sec 5.6 / board 0104): advertise NETIF_F_HW_TC
++	 * so tc_can_offload() is true and the tc core routes an ingress
++	 * `matchall action police` filter to dpaa_setup_tc()'s TC_SETUP_BLOCK
++	 * handler (-> fman_policer_install slot 0). Without it the netdev shows
++	 * `hw-tc-offload: off [fixed]`, skip_sw filters are rejected ("TC
++	 * offload is disabled on net device") and non-skip_sw filters install
++	 * software-only (not_in_hw). Gated on the runtime policer cap so
++	 * mainline-ucode boards never expose an offload the FMan can't perform;
++	 * dpaa_setup_tc_block_cb() still fail-softs unsupported tc types with
++	 * -EOPNOTSUPP.
++	 */
++	if (fman_policer_caps_supported())
++		net_dev->hw_features |= NETIF_F_HW_TC;
+ 	/* The kernels enables GSO automatically, if we declare NETIF_F_SG.
+ 	 * For conformity, we'll still declare GSO explicitly.
+ 	 */
+ 	net_dev->features |= NETIF_F_GSO;

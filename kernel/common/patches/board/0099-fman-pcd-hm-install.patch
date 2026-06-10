@@ -737,10 +737,10 @@ index 0000000..71060ee
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_hm_destroy);
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index 0d1a1e5..5d8afe8 100644
+index d4a0091..6aa345a 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
-@@ -293,4 +293,101 @@ int fman_pcd_cc_static_install(struct fman_pcd *pcd, u8 port_id,
+@@ -335,4 +335,101 @@ int fman_pcd_cc_static_get_base(struct fman_pcd *pcd, u8 port_id,
   */
  void fman_pcd_cc_static_destroy(struct fman_pcd *pcd, u8 port_id);
  
@@ -842,5 +842,3 @@ index 0d1a1e5..5d8afe8 100644
 +int fman_pcd_hm_destroy(struct fman_pcd *pcd, u8 port_id, u32 handle);
 +
  #endif /* __LINUX_FSL_FMAN_PCD_H */
--- 
-2.39.5

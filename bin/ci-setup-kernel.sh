@@ -326,6 +326,10 @@ cp "$BOARD_PATCH_DIR/0101-dpaa-hw-vlan-strip-ndo-set-features-bridge.patch" "$KE
 # (M3-3 step 7 sub-increment 4, WRITE mechanism, no caller). Edits
 # fman_port.c/.h only; independent of the 0092-0100 PCD stack. Spec sec 6.1.7.
 cp "$BOARD_PATCH_DIR/0102-fman-port-set-rx-bpool-primitive.patch" "$KERNEL_PATCHES/"
+# 0102b: one-shot dev_info FMBM_EBMPI register readback at reprogram time
+# (GAP-1 evidence that the 0102 BPID re-commit reached silicon). Diagnostic
+# only; stacks on 0102. Spec sec 6.1.17 / plans/ZC-RX-SCOPE.md GAP 1.
+cp "$BOARD_PATCH_DIR/0102b-fman-port-debug-readback.patch" "$KERNEL_PATCHES/"
 # 0103a: dormant true-ZC RX Recover sw-ring reverse-map (M3-3 step 7
 # sub-increment 4a, infrastructure only, NO datapath consumer). Adds the
 # per-qband chunk-DMA -> xdp_buff reverse map + record/lookup helpers that
@@ -352,6 +356,15 @@ cp "$BOARD_PATCH_DIR/0103c-dpaa1-true-zc-rx-classify-before-bpid-guard.patch" "$
 # runs outside the NAPI bpf_net_ctx the redirect path assumes). Stacks on
 # 0103c. Spec sec 6.1.17.
 cp "$BOARD_PATCH_DIR/0103e-dpaa1-true-zc-rx-bpf-net-ctx-fix.patch" "$KERNEL_PATCHES/"
+# 0103f: dispatch the qmgmt_ops->rx_hook BEFORE the dpaa_bpid2pool() NULL
+# guard in rx_default_dqrr. Without this, FDs carrying the XSK bpid resolve
+# to no kernel pool and are consumed/dropped at ~2855 before the 0103b hook
+# at ~2901 ever sees them -> xsk_zc_rx_redirect stuck at 0. Stacks on 0103e.
+cp "$BOARD_PATCH_DIR/0103f-dpaa1-true-zc-rx-rxhook-before-bpidpool.patch" "$KERNEL_PATCHES/"
+# 0103g: register per-band MEM_TYPE_XSK_BUFF_POOL xdp_rxq_info at ZC attach
+# + xsk_pool_set_rxq_info; fixes the NULL xdp->rxq Oops in __xsk_map_redirect
+# on the first Recovered frame (HW serial capture 2026-06-09). Stacks on 0103f.
+cp "$BOARD_PATCH_DIR/0103g-dpaa1-true-zc-rx-register-zc-rxq.patch" "$KERNEL_PATCHES/"
 # 0104: PRODUCTIVE M3-3d policer consumer -- .ndo_setup_tc TC_SETUP_BLOCK
 # handler mapping a single ingress `tc filter matchall action police` onto
 # fman_policer_install() slot 0 (board 0100). Fail-soft -EOPNOTSUPP when
@@ -387,6 +400,25 @@ cp "$BOARD_PATCH_DIR/0104b-dpaa-ceetm-stub.patch" "$KERNEL_PATCHES/"
 # the future productive caller). Sorts after 0104b, before 101-sfp. Spec
 # sec 13.
 cp "$BOARD_PATCH_DIR/0105-fman-port-set-cc-base-primitive.patch" "$KERNEL_PATCHES/"
+# 0106: M3-3b productive CC steering wiring -- the HW-proven KGSE_CCBS graft
+# (silicon captures 2026-05-23/25: NIA stays BMI direct-enqueue 0x80500002,
+# a non-zero KGSE_CCBS = CC root group-table MURAM offset dispatches the CC
+# walk implicitly; the NIA-flip-to-FM_CTL alternative was DISPROVEN on HW).
+# Makes fman_pcd_kg_attach_cc() productive, adds the port-level graft pair
+# fman_pcd_kg_port_attach_cc()/detach_cc() (mirror of the BUG 3 policer
+# steering fix), and completes fman_cc_tree_install()/destroy() in
+# dpaa_fman_caps.c (install -> get_base -> graft; destroy detaches first).
+# Sorts after 0105, before 101-sfp. Spec sec 5.4 (M3-3b).
+cp "$BOARD_PATCH_DIR/0106-fman-pcd-cc-keygen-graft-wiring.patch" "$KERNEL_PATCHES/"
+# 0107: debugfs CC steering test harness -- /sys/kernel/debug/fman_pcd/<N>/
+# cc_test drives the EXACT 0106 productive sequence (static_install ->
+# get_base -> kg_port_attach_cc; clear = detach_cc -> static_destroy) so the
+# M3-3b acceptance gate can be exercised on the DUT before a real consumer
+# (vyos-1x classify CLI) lands. New TU fman_pcd_cc_test.c in
+# fsl_dpaa_fman.ko + intra-module fman_pcd_cc_seq_dump() helper; 0600
+# root-only node, zero datapath cost, no new EXPORT_SYMBOLs. Sorts after
+# 0106, before 101-sfp. Spec sec 5.4 (M3-3b DUT validation).
+cp "$BOARD_PATCH_DIR/0107-fman-pcd-cc-test-debugfs-harness.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"

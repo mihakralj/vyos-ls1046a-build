@@ -98,9 +98,11 @@ export FLAVOR
 KVER=""
 [ -f vyos-build/data/defaults.toml ] && \
     KVER=$(awk -F'"' '/^kernel_version/ {print $2; exit}' vyos-build/data/defaults.toml)
+# versions.lock uses shell-assignment form `: "${KERNEL_VERSION:=X}"`, so
+# source it (in a subshell) rather than grepping a bare `KERNEL_VERSION=` line.
 [ -z "$KVER" ] && [ -f versions.lock ] && \
-    KVER=$(awk -F= '/^KERNEL_VERSION/ {gsub(/[" ]/,"",$2); print $2}' versions.lock)
-KVER="${KVER:-6.18.28}"
+    KVER=$(. versions.lock >/dev/null 2>&1; printf '%s' "$KERNEL_VERSION")
+KVER="${KVER:-6.18.34}"
 KSRC="$REPO_ROOT/work/linux-$KVER"
 
 # ── SSH/rsync wrappers ────────────────────────────────────────────────

@@ -29,6 +29,7 @@ system {
     }
     option {
         performance network-latency
+        reboot-on-panic
         reboot-on-upgrade-failure 5
         time-format 24-hour
     }

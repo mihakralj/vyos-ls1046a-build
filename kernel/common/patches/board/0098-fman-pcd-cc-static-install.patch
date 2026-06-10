@@ -214,10 +214,10 @@ index 24a886b..912290f 100644
  fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
 new file mode 100644
-index 0000000..59da801
+index 0000000..b9492be
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,419 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * FMan PCD Coarse Classifier (CC) - static-tree silicon programming layer.
@@ -601,11 +601,47 @@ index 0000000..59da801
 +		cc_tree_free(t);
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_cc_static_destroy);
++
++/*
++ * fman_pcd_cc_static_get_base() - fetch the MURAM byte offset of a port's
++ * installed static CC tree root (its group table).
++ *
++ * The returned value is the RAW MURAM byte offset (NO >>4 shift) suitable
++ * for writing straight into the BMI RX port FMBM_RCCB register via
++ * fman_port_set_cc_base() (board patch 0105). That port-bind is the
++ * productive consumer that points the silicon datapath at the tree this
++ * module installed in MURAM.
++ *
++ * Returns 0 and stores the offset in *cc_muram_off on success, -EINVAL on
++ * bad arguments, or -ENODEV if no CC tree is installed for @port_id.
++ */
++int fman_pcd_cc_static_get_base(struct fman_pcd *pcd, u8 port_id,
++				u32 *cc_muram_off)
++{
++	struct fman_pcd_cc_tree *t;
++	struct mutex *lock;
++	int err = 0;
++
++	if (!pcd || !cc_muram_off)
++		return -EINVAL;
++	lock = fman_pcd_get_lock(pcd);
++
++	mutex_lock(lock);
++	t = cc_find_locked(pcd, port_id);
++	if (t)
++		*cc_muram_off = (u32)t->group_off;
++	else
++		err = -ENODEV;
++	mutex_unlock(lock);
++
++	return err;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_cc_static_get_base);
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index 13bc9d6..0d1a1e5 100644
+index 80ecfa9..d4a0091 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
-@@ -193,4 +193,104 @@ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
+@@ -220,4 +220,119 @@ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
   */
  void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme);
  
@@ -701,6 +737,21 @@ index 13bc9d6..0d1a1e5 100644
 +			       const struct fman_pcd_cc_hw_spec *hw);
 +
 +/**
++ * fman_pcd_cc_static_get_base() - fetch a port's installed CC tree MURAM base.
++ * @pcd:          PCD subsystem handle
++ * @port_id:      FMan port id whose installed tree to query
++ * @cc_muram_off: out param - RAW MURAM byte offset of the tree root (no >>4)
++ *
++ * The offset is suitable for writing into the BMI RX port FMBM_RCCB register
++ * via fman_port_set_cc_base() (board patch 0105) - the productive port-bind
++ * that points the silicon datapath at the installed static CC tree.
++ *
++ * Returns 0 on success, -EINVAL on bad arguments, -ENODEV if no tree installed.
++ */
++int fman_pcd_cc_static_get_base(struct fman_pcd *pcd, u8 port_id,
++				u32 *cc_muram_off);
++
++/**
 + * fman_pcd_cc_static_destroy() - tear down a port's static CC tree.
 + * @pcd:     PCD subsystem handle
 + * @port_id: FMan port id whose tree to remove. No-op if none installed.
@@ -710,5 +761,3 @@ index 13bc9d6..0d1a1e5 100644
 +void fman_pcd_cc_static_destroy(struct fman_pcd *pcd, u8 port_id);
 +
  #endif /* __LINUX_FSL_FMAN_PCD_H */
--- 
-2.39.5

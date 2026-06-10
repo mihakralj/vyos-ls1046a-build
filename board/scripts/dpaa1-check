@@ -1,26 +1,50 @@
 #!/usr/bin/env bash
-# dpaa1-check — verify DPAA1 networking elements on the LS1046A Mono Gateway DK
+# dpaa1-check — full DPAA1 (Data Path Acceleration Architecture, gen 1)
+# networking status for the LS1046A Mono Gateway DK.
 #
 # Usage:   dpaa1-check
 #
-# Verifies:
-#   - DT nodes for FMan, QMan, BMan
-#   - FMan drivers loaded (fsl_fman, fsl_dpaa_mac, fsl_dpa)
-#   - Jumbo frame config (fsl_fm_max_frm)
-#   - FMan PHY drivers (mxl-gpy for RJ45, rollball/DAC for SFP+)
-#   - Network interfaces (eth0-eth4) existence and MTU
-#   - AF_XDP queues mapping (queue_index fix)
+# DPAA1 is the NXP hardware packet-processing complex on every Layerscape
+# LS1046A SoC. It is built from three cooperating controllers —
+#   FMan  (Frame Manager, 1a00000.fman)   — RX/TX BMI ports, the KeyGen /
+#         Custom-Classifier (CC) / Header-Manipulation (HM) / Policer (PLCR)
+#         PCD chain, and a SoftParser, all driven by a microcode blob loaded
+#         into FMan MURAM at boot.
+#   QMan  (Queue Manager, 1880000.qman)   — Frame-Queue (FQ) enqueue/dequeue
+#         engine, accessed per-CPU through software portals.
+#   BMan  (Buffer Manager, 1890000.bman)  — hardware buffer pools (BPIDs)
+#         that back both the kernel page pools and the AF_XDP UMEM pools.
+# On top of those sit the six MEMACs (1G ports eth0-eth2 + the 10G SFP+
+# ports eth3/eth4), the mEMAC MDIO buses, and the dpaa_eth driver that wires
+# them to the Linux netdev / XDP / AF_XDP stack.
+#
+# Reports (each section is independent; a hard failure sets exit 1):
+#   1) DT controllers   — FMan/QMan/BMan nodes + QMan/BMan software portals
+#   2) Kernel drivers   — fsl-fman, fsl-fman-port, fsl-fman_xmdio,
+#                         fsl_dpaa_mac, fsl_dpa (all built-in on this board)
+#   3) FMan complex     — controller device, microcode/MURAM, bound BMI
+#                         ports + MEMAC MACs + MDIO buses
+#   4) FMan PCD         — KeyGen/CC/HM/Policer capability posture + the
+#                         optional /sys/kernel/debug/fman_pcd classify harness
+#   5) Jumbo frames     — fsl_fm_max_frm bootarg
+#   6) Interfaces       — eth0-eth4 driver/MAC/operstate/MTU + AF_XDP MTU cap
+#   7) QMan / BMan      — portal + pool posture (DT-driven, early-boot)
+#   8) AF_XDP zero-copy — the 22 xsk_* counters + xsk-zc-check verdict
+#   9) dmesg (best-effort) — boot banners if still in the ring buffer
+#
+# Designed to mirror `caam-check`, `sfp-check`, `fan-check`: human-readable
+# [OK]/[WARN]/[FAIL]/[SKIP] table, colour where the tty supports it.
 #
 # Exit codes:
-#   0 — all elements healthy
-#   1 — failure detected
-#   2 — not LS1046A
+#   0 — DPAA1 controllers present, drivers bound, all eth ports enumerated
+#   1 — a DPAA1 controller/driver/port is missing (DPAA1 networking broken)
+#   2 — board is not LS1046A (sysfs/DT paths absent)
 
 set -u
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
 
 # ---------------------------------------------------------------------------
-# Colour escapes (TTY only)
+# Colour escapes (TTY only). Same convention as caam-check / fan-check.
 # ---------------------------------------------------------------------------
 if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]; then
     C_RST=$'\033[0m'
@@ -44,8 +68,22 @@ hdr()   { printf "\n%s%s%s\n"          "$C_BOLD"   "$*"     "$C_RST"; }
 EXIT=0
 mark_fail() { EXIT=1; }
 
+# Helper: count real bound device symlinks under a platform-driver dir
+# (skips the bind/unbind/uevent/module pseudo-entries).
+count_bound() {
+    local dir="$1" n=0 link base
+    [ -d "$dir" ] || { echo 0; return; }
+    for link in "$dir"/*; do
+        [ -e "$link" ] || continue
+        base=$(basename "$link")
+        case "$base" in bind|unbind|uevent|module) continue ;; esac
+        n=$((n + 1))
+    done
+    echo "$n"
+}
+
 # ---------------------------------------------------------------------------
-# Board gate
+# Board gate. Same idiom as caam-check / vyos-postinstall.
 # ---------------------------------------------------------------------------
 if [ ! -f /proc/device-tree/compatible ] \
    || ! tr '\0' '\n' < /proc/device-tree/compatible | grep -q 'fsl,ls1046a'; then
@@ -56,97 +94,339 @@ fi
 printf "%sdpaa1-check%s — LS1046A DPAA1 networking status\n" "$C_BOLD" "$C_RST"
 
 # ---------------------------------------------------------------------------
-# 1. SoC controller presence (devicetree)
+# 1. DPAA1 controllers (devicetree)
 # ---------------------------------------------------------------------------
 hdr "1) DPAA1 controllers (devicetree)"
 
+# FMan/QMan/BMan controller nodes. Each is mandatory: without it the whole
+# datapath cannot come up.
+declare -A CTRL=(
+    [fman@1a00000]="FMan (Frame Manager)"
+    [qman@1880000]="QMan (Queue Manager)"
+    [bman@1890000]="BMan (Buffer Manager)"
+)
 for block in fman@1a00000 qman@1880000 bman@1890000; do
     dt_node="/proc/device-tree/soc/${block}"
     if [ -d "$dt_node" ]; then
         compat=$(tr '\0' ' ' < "$dt_node/compatible" 2>/dev/null | sed 's/ *$//')
-        ok "DT node $block present"
+        ok "${CTRL[$block]} — DT node $block present"
         note "compatible = \"$compat\""
     else
-        fail "no $dt_node — $block not in DT"
+        fail "no $dt_node — ${CTRL[$block]} not in DT"
         mark_fail
     fi
 done
 
+# QMan/BMan software portals (per-CPU access windows). On LS1046A these are
+# the qman-portals-bus@500000000 / bman-portals-bus@508000000 children of
+# /soc (each holds the 4 per-CPU portal sub-nodes). Their presence confirms
+# the portal memory regions were carved out for the kernel QBMan drivers.
+for portal in qman bman; do
+    pnode=""
+    for d in /proc/device-tree/soc/${portal}-portals*; do
+        [ -d "$d" ] && { pnode=$d; break; }
+    done
+    if [ -n "$pnode" ]; then
+        ok "${portal}-portals region present ($(basename "$pnode"))"
+    else
+        warn "no ${portal}-portals* node — per-CPU QBMan portals may be unconfigured"
+    fi
+done
+
 # ---------------------------------------------------------------------------
-# 2. Driver / module posture
+# 2. DPAA1 kernel drivers
 # ---------------------------------------------------------------------------
 hdr "2) DPAA1 kernel drivers"
 
-DPAA_DRVS=(fsl-fman fsl_dpaa_mac fsl_dpa qman_ccsr bman_ccsr)
+# On this board the DPAA1 stack is built into the kernel (no .ko modules),
+# so we probe the platform *driver* directories rather than /sys/module.
+# These are the real driver names registered by the mainline FMan stack:
+#   fsl-fman              drivers/net/ethernet/freescale/fman/fman.c
+#   fsl-fman-port         fman_port.c   (one device per BMI RX/TX port)
+#   fsl-fman_xmdio        fman_memac.c / xgmac_mdio (the mEMAC MDIO buses)
+#   fsl_dpaa_mac          mac.c         (one device per MEMAC)
+#   fsl_dpa               dpaa_eth.c    (the netdev driver)
+# QMan/BMan have NO platform-driver sysfs dir — they are brought up by the
+# early-boot qbman portal drivers and surfaced only via DT (section 1) and
+# their portals (section 7), so they are intentionally not probed here.
+DPAA_DRVS=(fsl-fman fsl-fman-port fsl-fman_xmdio fsl_dpaa_mac fsl_dpa)
 for drv in "${DPAA_DRVS[@]}"; do
     if [ -d "/sys/bus/platform/drivers/${drv}" ]; then
-        ok "${drv} present (platform driver)"
+        nb=$(count_bound "/sys/bus/platform/drivers/${drv}")
+        ok "${drv} registered (${nb} device(s) bound)"
     else
-        fail "${drv} NOT loaded — DPAA1 unavailable"
+        fail "${drv} NOT registered — DPAA1 networking unavailable"
         mark_fail
     fi
 done
 
-# Check Maxlinear PHY driver
-if [ -d "/sys/bus/mdio_bus/drivers/Maxlinear Ethernet GPY115C" ]; then
-    ok "Maxlinear GPY115C PHY driver present"
+# ---------------------------------------------------------------------------
+# 3. FMan complex (controller, microcode, ports, MACs, MDIO)
+# ---------------------------------------------------------------------------
+hdr "3) FMan complex (controller / microcode / ports / MACs)"
+
+# 3a. FMan controller device bound to fsl-fman.
+FMAN_DEV=""
+for d in /sys/bus/platform/drivers/fsl-fman/*.fman; do
+    [ -e "$d" ] && { FMAN_DEV=$(basename "$d"); break; }
+done
+if [ -n "$FMAN_DEV" ]; then
+    ok "FMan controller bound: $FMAN_DEV"
 else
-    warn "Maxlinear PHY driver NOT found — RJ45 ports may fail SGMII negotiation"
+    fail "no *.fman device bound to fsl-fman — Frame Manager did not probe"
+    mark_fail
+fi
+
+# 3b. FMan microcode blob (loaded into MURAM at boot). The DT carries the
+# raw QE-firmware image under fman@1a00000/fman-firmware/fsl,firmware; its
+# embedded ASCII id string names the microcode version (this board ships the
+# LS1043-r1.0 ucode 210.10.1 → "Microcode version 210.10.1", which provides
+# the KeyGen/CC/HM/Policer + SoftParser engines the PCD chain drives —
+# PCD caps 0x17 in section 4). We just report whatever version is present.
+FW_BLOB=/proc/device-tree/soc/fman@1a00000/fman-firmware/fsl,firmware
+if [ -e "$FW_BLOB" ]; then
+    ucode_ver=$( { strings "$FW_BLOB" 2>/dev/null || tr -c '[:print:]' '\n' < "$FW_BLOB"; } \
+                 | grep -m1 -oE 'Microcode version [0-9.]+' )
+    if [ -n "$ucode_ver" ]; then
+        ok "FMan microcode present (${ucode_ver})"
+    else
+        ok "FMan microcode blob present (version string not parsed)"
+    fi
+    note "MURAM-loaded ucode drives KeyGen/CC/HM/Policer + SoftParser"
+else
+    warn "no fman-firmware DT blob — FMan running stock ROM ucode (PCD limited)"
+fi
+
+# 3c. BMI ports bound to fsl-fman-port. The Mono Gateway DK DTS enables
+# RX+TX BMI ports for 6 1G MACs + 2 10G MACs = 16 port devices (a known-good
+# boot binds exactly 16). Fewer means part of the RX/TX datapath is missing.
+NPORTS=$(count_bound /sys/bus/platform/drivers/fsl-fman-port)
+if [ "$NPORTS" -ge 16 ]; then
+    ok "${NPORTS} FMan BMI port(s) bound (fsl-fman-port)"
+elif [ "$NPORTS" -ge 2 ]; then
+    warn "only ${NPORTS} FMan BMI port(s) bound (expected 16) — some ports missing"
+else
+    fail "only ${NPORTS} FMan BMI port(s) bound — RX/TX datapath incomplete"
+    mark_fail
+fi
+
+# 3d. MEMAC MACs bound to fsl_dpaa_mac (one per enabled ethernet@ node;
+# 5 on this board: 3x 1G RJ45 + 2x 10G SFP+).
+NMACS=$(count_bound /sys/bus/platform/drivers/fsl_dpaa_mac)
+if [ "$NMACS" -ge 5 ]; then
+    ok "${NMACS} MEMAC MAC device(s) bound (fsl_dpaa_mac)"
+elif [ "$NMACS" -ge 1 ]; then
+    warn "only ${NMACS} MEMAC MAC device(s) bound (expected 5) — some ports missing"
+else
+    fail "no MEMAC MAC devices bound — no ethernet ports will come up"
+    mark_fail
+fi
+
+# 3e. mEMAC MDIO buses (RJ45 SGMII internal + SFP+ external management). The
+# LS1046A FMan exposes these through the fsl-fman_xmdio driver (one *.mdio
+# device per MAC's internal + external bus).
+NMDIO=$(count_bound /sys/bus/platform/drivers/fsl-fman_xmdio)
+if [ "$NMDIO" -ge 1 ]; then
+    ok "${NMDIO} mEMAC MDIO bus(es) bound (fsl-fman_xmdio)"
+else
+    warn "no mEMAC MDIO buses bound — PHY discovery/negotiation may fail"
 fi
 
 # ---------------------------------------------------------------------------
-# 3. FMan configuration
+# 4. FMan PCD (KeyGen / CC / HM / Policer) capability posture
 # ---------------------------------------------------------------------------
-hdr "3) FMan Configuration"
+hdr "4) FMan PCD (classify / header-manip / policer)"
 
-if grep -q 'fsl_dpaa_fman.fsl_fm_max_frm=9600' /proc/cmdline; then
-    ok "fsl_dpaa_fman.fsl_fm_max_frm=9600 found in bootargs (Jumbo frames enabled)"
+# The PCD capability bitmask is logged at boot as "FMan PCD caps = 0x.." by
+# dpaa_fman_caps.c (bit0 CC exact-match, bit1 HM nodes, bit2 Policer trTCM,
+# bit4 SoftParser → 0x17 on the 210.x ucode). The kernel ring buffer often
+# ages this out, so treat its presence as a bonus, not a requirement.
+#
+# Capture the kernel log ONCE here; section 9 reuses it (dmesg first, then
+# the kmsg journal as fallback — both best-effort).
+KLOG=""
+if command -v dmesg >/dev/null 2>&1; then
+    KLOG=$(dmesg 2>/dev/null)
+fi
+if [ -z "$KLOG" ] && command -v journalctl >/dev/null 2>&1; then
+    KLOG=$(journalctl -k -b -o cat 2>/dev/null)
+fi
+PCD_CAPS=$(printf '%s\n' "$KLOG" \
+           | grep -oE 'FMan PCD caps = 0x[0-9a-fA-F]+.*' | tail -1)
+if [ -n "$PCD_CAPS" ]; then
+    ok "PCD capabilities probed: ${PCD_CAPS}"
+    note "(CC=exact-match classify, HM=header-manip, POL=trTCM policer, PARSER=softparse)"
 else
-    warn "fsl_fm_max_frm=9600 not found in bootargs (Jumbo frames disabled)"
+    note "PCD caps banner not in ring buffer (aged out) — capability set is a"
+    note "build property of the FMan microcode; see section 3b for ucode version"
+fi
+
+# Optional runtime debugfs harness: /sys/kernel/debug/fman_pcd appears only
+# once a CC/classify or policer profile is installed (the 0107 test harness
+# or a `tc`/`set interfaces ... policer` offload). Absence is normal at idle.
+if [ -d /sys/kernel/debug/fman_pcd ]; then
+    npcd=$(ls /sys/kernel/debug/fman_pcd 2>/dev/null | wc -l)
+    ok "fman_pcd debugfs live (${npcd} instance dir(s)) — classify/policer active"
+    for inst in /sys/kernel/debug/fman_pcd/*/; do
+        [ -d "$inst" ] || continue
+        note "  $(basename "$inst"): $(ls "$inst" 2>/dev/null | tr '\n' ' ')"
+    done
+else
+    skip "fman_pcd debugfs absent (no CC/policer offload installed — normal at idle)"
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Network Interfaces
+# 5. Jumbo frame configuration
 # ---------------------------------------------------------------------------
-hdr "4) Network Interfaces (eth0-eth4)"
+hdr "5) FMan jumbo-frame configuration"
 
-for i in {0..4}; do
+maxfrm=$(grep -oE 'fsl_fm_max_frm=[0-9]+' /proc/cmdline | head -1 | cut -d= -f2)
+if [ -n "$maxfrm" ]; then
+    if [ "$maxfrm" -ge 9600 ]; then
+        ok "fsl_fm_max_frm=${maxfrm} (jumbo frames enabled)"
+    else
+        warn "fsl_fm_max_frm=${maxfrm} (below 9600 — jumbo frames limited)"
+    fi
+else
+    warn "fsl_fm_max_frm not in bootargs — FMan default frame size (jumbo off)"
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Network interfaces (eth0-eth4)
+# ---------------------------------------------------------------------------
+hdr "6) Network interfaces (eth0-eth4)"
+
+# eth0-eth2 = 1G RJ45 (MEMACs 1ae2000/1ae8000/1aea000), eth3/eth4 = 10G SFP+
+# (MEMACs 1af0000/1af2000, the left/right cages). The dpaa_eth (fsl_dpa)
+# netdev driver backs all of them; /sys/class/net/ethN/device points at the
+# PARENT fsl_dpaa_mac device, so 'drv' below normally reads fsl_dpaa_mac.
+found_eth=0
+for i in 0 1 2 3 4; do
     iface="eth${i}"
-    if [ -d "/sys/class/net/${iface}" ]; then
-        operstate=$(cat "/sys/class/net/${iface}/operstate" 2>/dev/null || echo "?")
-        mtu=$(cat "/sys/class/net/${iface}/mtu" 2>/dev/null || echo "?")
-        if [ "$operstate" = "up" ]; then
-            ok "${iface} is UP (MTU=${mtu})"
-        elif [ "$operstate" = "down" ]; then
-            note "${iface} is down (MTU=${mtu})"
-        else
-            note "${iface} operstate=${operstate} (MTU=${mtu})"
+    sysdir="/sys/class/net/${iface}"
+    if [ -d "$sysdir" ]; then
+        found_eth=$((found_eth + 1))
+        operstate=$(cat "$sysdir/operstate" 2>/dev/null || echo "?")
+        mtu=$(cat "$sysdir/mtu" 2>/dev/null || echo "?")
+        drv=$(basename "$(readlink "$sysdir/device/driver" 2>/dev/null)" 2>/dev/null)
+        mac=$(basename "$(readlink -f "$sysdir/device" 2>/dev/null)" 2>/dev/null)
+        kind="1G RJ45"; [ "$i" -ge 3 ] && kind="10G SFP+"
+        case "$operstate" in
+            up)   ok   "${iface} UP  (${kind}, MTU=${mtu}, drv=${drv:-?}, mac=${mac:-?})" ;;
+            down) note "${iface} down (${kind}, MTU=${mtu}, drv=${drv:-?}, mac=${mac:-?})" ;;
+            *)    note "${iface} ${operstate} (${kind}, MTU=${mtu}, drv=${drv:-?})" ;;
+        esac
+        # dpaa_eth's AF_XDP RX path requires the frame to fit a single BMan
+        # buffer; on the 10G ports the safe AF_XDP MTU ceiling is 3290.
+        if [ "$i" -ge 3 ] && [ "$mtu" != "?" ] && [ "$mtu" -gt 3290 ]; then
+            warn "  ${iface} MTU=${mtu} exceeds the AF_XDP single-buffer limit (3290)"
         fi
-        
-        # Determine port type based on iface
-        if [ "$i" -ge 3 ]; then
-            if [ "$mtu" -gt 3290 ]; then
-                warn "SFP+ port ${iface} MTU=${mtu} exceeds AF_XDP safe limit (3290)"
+        # All DPAA1 netdevs should be driven by fsl_dpa.
+        if [ -n "$drv" ] && [ "$drv" != "fsl_dpaa_mac" ] && [ "$drv" != "fsl_dpa" ]; then
+            warn "  ${iface} bound to unexpected driver '${drv}'"
+        fi
+    else
+        fail "interface ${iface} missing — MEMAC ${i} did not enumerate"
+        mark_fail
+    fi
+done
+[ "$found_eth" -eq 0 ] && { fail "no eth0-eth4 interfaces at all — dpaa_eth did not bind"; mark_fail; }
+
+# ---------------------------------------------------------------------------
+# 7. QMan / BMan runtime posture
+# ---------------------------------------------------------------------------
+hdr "7) QMan / BMan runtime posture"
+
+# QMan/BMan have no platform-driver sysfs; their health is reflected by the
+# fact that (a) their DT nodes + portals exist (sections 1) and (b) the
+# dpaa_eth ports actually carry FQ/BPID traffic. Surface any debugfs the
+# qbman drivers expose, and confirm the portals were claimed.
+qb_dbg=0
+for d in /sys/kernel/debug/qman /sys/kernel/debug/bman; do
+    if [ -d "$d" ]; then
+        qb_dbg=1
+        ok "$(basename "$d") debugfs present: $(ls "$d" 2>/dev/null | tr '\n' ' ')"
+    fi
+done
+if [ "$qb_dbg" -eq 0 ]; then
+    note "qman/bman debugfs not exposed in this build (CONFIG_FSL_*MAN debugfs off)"
+fi
+# A cheap liveness signal: if any eth port is UP and has moved packets, QMan
+# FQ dequeue + BMan buffer recycling are demonstrably working.
+moved=0
+for i in 0 1 2 3 4; do
+    rx=$(cat /sys/class/net/eth${i}/statistics/rx_packets 2>/dev/null || echo 0)
+    tx=$(cat /sys/class/net/eth${i}/statistics/tx_packets 2>/dev/null || echo 0)
+    moved=$((moved + rx + tx))
+done
+if [ "$moved" -gt 0 ]; then
+    ok "QMan/BMan datapath live (${moved} pkt(s) across eth0-eth4 FQs/pools)"
+else
+    note "no packets moved yet across any eth port (QMan/BMan idle but configured)"
+fi
+
+# ---------------------------------------------------------------------------
+# 8. AF_XDP zero-copy status
+# ---------------------------------------------------------------------------
+hdr "8) AF_XDP zero-copy (xsk_* counters)"
+
+# The dpaa_eth driver exports a contiguous block of xsk_* ethtool counters
+# (22 on the current true-ZC build, ending in xsk_zc_rx_redirect — the
+# productive zero-copy RX oracle). Probe both 10G ZC ports (eth3/eth4).
+if command -v ethtool >/dev/null 2>&1; then
+    xsk_seen=0
+    for ZC_IF in eth3 eth4; do
+        [ -d "/sys/class/net/$ZC_IF" ] || continue
+        XSK=$(ethtool -S "$ZC_IF" 2>/dev/null | grep -E '^\s*xsk_')
+        [ -n "$XSK" ] || continue
+        xsk_seen=1
+        nxsk=$(printf "%s\n" "$XSK" | wc -l)
+        ok "${nxsk} xsk_* counter(s) exported on ${ZC_IF}"
+        redir=$(printf "%s\n" "$XSK" | awk -F: '/xsk_zc_rx_redirect/{gsub(/ /,"",$2);print $2}')
+        armed=$(printf "%s\n" "$XSK" | awk -F: '/xsk_zc_rx_armed/{gsub(/ /,"",$2);print $2}')
+        guard=$(printf "%s\n" "$XSK" | awk -F: '/xsk_fill_guard_block/{gsub(/ /,"",$2);print $2}')
+        if [ -n "$redir" ]; then
+            if [ "$redir" -gt 0 ]; then
+                ok "${ZC_IF}: true-ZC RX active — xsk_zc_rx_redirect=${redir} (frames redirected into XSKMAP)"
+            else
+                note "${ZC_IF}: xsk_zc_rx_redirect=0 (no AF_XDP ZEROCOPY socket bound — dormant, normal)"
             fi
         fi
-    else
-        fail "interface ${iface} missing"
-        mark_fail
-    fi
-done
+        [ -n "$armed" ] && [ "$armed" != "0" ] \
+            && note "${ZC_IF}: xsk_zc_rx_armed=${armed} (bands reprogrammed to an XSK BPID)"
+        if [ -n "$guard" ] && [ "$guard" -gt 0 ]; then
+            warn "${ZC_IF}: xsk_fill_guard_block=${guard} (FILL-ring single-producer guard fired)"
+        fi
+    done
+    [ "$xsk_seen" -eq 0 ] \
+        && note "no xsk_* counters on eth3/eth4 (AF_XDP not compiled into this dpaa_eth?)"
+else
+    skip "ethtool unavailable — AF_XDP counters not probed"
+fi
 
-# ---------------------------------------------------------------------------
-# 5. AF_XDP & ZC Status
-# ---------------------------------------------------------------------------
-hdr "5) AF_XDP Zero-Copy Status"
-
+# Defer to the dedicated zero-copy verdict tool when present.
 if [ -x /usr/local/bin/xsk-zc-check ]; then
-    note "Calling xsk-zc-check..."
-    /usr/local/bin/xsk-zc-check | while IFS= read -r line; do
+    note "xsk-zc-check verdict:"
+    /usr/local/bin/xsk-zc-check 2>/dev/null | while IFS= read -r line; do
         note "  $line"
     done
 else
-    skip "xsk-zc-check script not found"
+    skip "xsk-zc-check helper not installed (detailed ZC verdict unavailable)"
+fi
+
+# ---------------------------------------------------------------------------
+# 9. dmesg banners (best-effort)
+# ---------------------------------------------------------------------------
+hdr "9) dmesg banners (best-effort)"
+
+# Reuses the KLOG captured once in section 4.
+DMESG_OUT=$(printf '%s\n' "$KLOG" \
+            | grep -iE 'fman|qman|bman|fsl_dpaa|dpaa_eth|Freescale FM' \
+            | grep -ivE 'xsk|af_xdp' || true)
+if [ -n "$DMESG_OUT" ]; then
+    echo "$DMESG_OUT" | head -12 | while IFS= read -r line; do note "$line"; done
+else
+    note "no DPAA1 dmesg lines available (kernel ring buffer aged out / no kmsg journal)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -154,7 +434,7 @@ fi
 # ---------------------------------------------------------------------------
 hdr "Summary"
 if [ "$EXIT" = "0" ]; then
-    ok "DPAA1 healthy"
+    ok "DPAA1 healthy — controllers, drivers, FMan ports/MACs and eth0-eth4 all present"
 else
     fail "DPAA1 check FAILED — see entries above"
 fi
