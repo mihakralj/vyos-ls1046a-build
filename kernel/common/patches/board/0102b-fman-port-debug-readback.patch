@@ -1,0 +1,21 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 97c8b25..7bcf8db 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -1085,6 +1085,16 @@ int fman_port_set_rx_bpool(struct fman_port *port, u8 old_bpid, u8 new_bpid)
+ 	dev_info(port->dev,
+ 	 "fman_port: RX primary bpool reprogrammed %u -> %u\n",
+ 	 old_bpid, new_bpid);
++
++	/* Read back the BPID registers to confirm hardware accepted the write */
++	for (i = 0; i < port->ext_pools_num; i++) {
++		u32 val = ioread32be(&port->bmi_regs->rx.fmbm_ebmpi[i]);
++		dev_info(port->dev, "fman_port: FMBM_EBMPI[%d] readback = 0x%08x (bpid %u, size %u, valid %u)\n",
++			 i, val,
++			 (val & BMI_EXT_BUF_POOL_ID_MASK) >> BMI_EXT_BUF_POOL_ID_SHIFT,
++			 val & 0xffff,
++			 (val & BMI_EXT_BUF_POOL_VALID) ? 1 : 0);
++	}
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(fman_port_set_rx_bpool);

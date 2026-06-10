@@ -1,0 +1,33 @@
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 6fe417c..e27abdd 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -2850,6 +2850,28 @@ static enum qman_cb_dqrr_result rx_default_dqrr(struct qman_portal *portal,
+ 	fd_format = qm_fd_get_format(fd);
+ 	net_dev = dpaa_fq->net_dev;
+ 	priv = netdev_priv(net_dev);
++	/* M3-3 step 7 sub-increment 4b fix (patch 0103f): true-ZC RX consume
++	 * MUST run BEFORE dpaa_bpid2pool(). The attached XSK BMan pool
++	 * (bpid=5) is not in dpaa_bp_array[] -- it is not a kernel page
++	 * pool -- so dpaa_bpid2pool(5) returns NULL and drops the FD.
++	 * This hook recognises the XSK bpid, Recovers the xdp_buff
++	 * from the 0103a reverse map, runs the XDP program, and
++	 * xdp_do_redirect()s into the XSKMAP -- consuming the FD without
++	 * ever needing a kernel page-pool lookup. With no flavor module
++	 * loaded (default flavor) ops is NULL and this branch is dead code
++	 * byte-identical to mainline.
++	 */
++	{
++		const struct dpaa_qmgmt_ops *ops;
++
++		rcu_read_lock();
++		ops = rcu_dereference(priv->qmgmt_ops);
++		if (ops && ops->rx_hook && ops->rx_hook(priv, fq, dq)) {
++			rcu_read_unlock();
++			return qman_cb_dqrr_consume;
++		}
++		rcu_read_unlock();
++	}
+ 	dpaa_bp = dpaa_bpid2pool(dq->fd.bpid);
+ 	if (!dpaa_bp)
+ 		return qman_cb_dqrr_consume;
