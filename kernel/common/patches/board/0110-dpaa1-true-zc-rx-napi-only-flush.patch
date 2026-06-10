@@ -1,0 +1,112 @@
+dpaa1 true-ZC RX: publish redirects via xdp_do_flush, NAPI-context only
+
+Two coupled fixes for the M3-3 step 7 sub-increment 4 true-ZC RX path
+(spec sec 6.1.18), both proven on LS1046A hardware 2026-06-10:
+
+1. MISSING FLUSH (frames invisible to userspace): xdp_do_redirect()
+   into an XSKMAP only queues the descriptor (xskq_prod_reserve_desc)
+   and parks the socket on the bpf_net_context flush list; the RX ring
+   producer pointer is only published by xsk_flush() when xdp_do_flush()
+   walks that list.  0103e's hook-local bpf_net_context was torn down
+   without flushing, so xsk_zc_rx_redirect climbed while the probe's
+   rx_packets stayed 0.  Fix: xdp_do_flush() in the redirect-success
+   branch of af_xdp_pool_rx_hook().
+
+2. HARD-IRQ PANIC (dual-CPU Oops in __xsk_map_flush): rx_default_dqrr
+   runs BOTH from portal_isr (hard IRQ, sched_napi=true) and from the
+   NAPI poller (softirq).  0103f dispatches the hook before mainline's
+   dpaa_eth_napi_schedule() deferral, so fix 1's flush executed in hard
+   IRQ concurrently with NAPI flushes of the same xsk -> flush-list
+   corruption -> fatal Oops (captured on serial console: __xsk_map_flush
+   <- xdp_do_flush <- af_xdp_pool_rx_hook <- rx_default_dqrr <-
+   portal_isr, two CPUs interleaved).  Fix: when a flavor rx_hook is
+   registered, mirror mainline ordering by deferring hard-IRQ deliveries
+   to NAPI BEFORE any hook processing (QMan re-delivers the DQRR entry
+   to the poller); belt-and-suspenders WARN_ON_ONCE(in_hardirq()) bail
+   at hook entry.
+
+Default flavor (ops NULL): both hunks are dead code, byte-identical
+mainline behaviour.  Supersedes the unreleased 0103h.
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+index 5b426ca..496e14c 100644
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -354,6 +354,17 @@ u16 band;
+ int act;
+ bool consumed = false;
+ 
++	/* 0110: the 0103f dispatch in rx_default_dqrr defers hard-IRQ
++	 * deliveries to NAPI before calling us, so we only ever run in
++	 * NAPI (softirq) context where xdp_do_redirect()/xdp_do_flush()
++	 * are legal.  If a future refactor breaks that invariant, bail
++	 * (frame falls through to the mainline path) rather than corrupt
++	 * the xsk flush list from hard IRQ (observed dual-CPU Oops in
++	 * __xsk_map_flush on LS1046A).
++	 */
++	if (WARN_ON_ONCE(in_hardirq()))
++		return false;
++
+ if (!priv)
+ return false;
+ 
+@@ -408,6 +419,19 @@ goto out_unlock;
+ 			if (xdp_do_redirect(priv->net_dev, xdp, prog) == 0) {
+ 				priv->xsk_zc_rx_redirect++;
+ 				consumed = true;
++				/* xdp_do_redirect() into an XSKMAP only queues
++				 * the descriptor (xskq_prod_reserve_desc); the
++				 * producer pointer is published by xsk_flush()
++				 * which only runs from xdp_do_flush() walking
++				 * this bpf_net_context's flush list.  We tear
++				 * the context down on hook exit, so flush here
++				 * or the frame never becomes visible to user
++				 * space (RX ring producer never advances).
++				 * Per-frame flush is the correctness baseline;
++				 * NAPI-level batching needs qmgmt_ops plumbing
++				 * for the portal's napi struct (np->xdp_act).
++				 */
++				xdp_do_flush();
+ 			}
+ 			break;
+ 		case XDP_DROP:
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index d4eedfc..38b6cbf 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -3172,9 +3172,32 @@ static enum qman_cb_dqrr_result rx_default_dqrr(struct qman_portal *portal,
+ 
+ 		rcu_read_lock();
+ 		ops = rcu_dereference(priv->qmgmt_ops);
+-		if (ops && ops->rx_hook && ops->rx_hook(priv, fq, dq)) {
+-			rcu_read_unlock();
+-			return qman_cb_dqrr_consume;
++		if (ops && ops->rx_hook) {
++			/* 0110: NEVER run the ZC hook in hard-IRQ context.
++			 * rx_default_dqrr is invoked both from portal_isr
++			 * (hard IRQ, sched_napi=true) and from the NAPI
++			 * poller (softirq, sched_napi=false). The hook
++			 * redirects into an XSKMAP and must xdp_do_flush(),
++			 * and __xsk_map_flush()/xsk_flush() are only safe in
++			 * NAPI context -- concurrent hard-IRQ + NAPI flushes
++			 * of the same xsk corrupt the flush list (observed
++			 * dual-CPU Oops in __xsk_map_flush on LS1046A).
++			 * Mirror mainline ordering: defer to NAPI BEFORE any
++			 * frame processing; QMan re-delivers this DQRR entry
++			 * to the NAPI poller where the hook runs safely.
++			 * With no flavor module (ops NULL) this branch is
++			 * dead code and the mainline deferral below applies
++			 * unchanged.
++			 */
++			if (unlikely(dpaa_eth_napi_schedule(this_cpu_ptr(priv->percpu_priv),
++							    portal, sched_napi))) {
++				rcu_read_unlock();
++				return qman_cb_dqrr_stop;
++			}
++			if (ops->rx_hook(priv, fq, dq)) {
++				rcu_read_unlock();
++				return qman_cb_dqrr_consume;
++			}
+ 		}
+ 		rcu_read_unlock();
+ 	}

@@ -419,6 +419,21 @@ cp "$BOARD_PATCH_DIR/0106-fman-pcd-cc-keygen-graft-wiring.patch" "$KERNEL_PATCHE
 # root-only node, zero datapath cost, no new EXPORT_SYMBOLs. Sorts after
 # 0106, before 101-sfp. Spec sec 5.4 (M3-3b DUT validation).
 cp "$BOARD_PATCH_DIR/0107-fman-pcd-cc-test-debugfs-harness.patch" "$KERNEL_PATCHES/"
+# 0110: true-ZC RX NAPI-only hook dispatch + xdp_do_flush (supersedes the
+# never-shipped 0103h). Fixes TWO coupled defects in the 0103e/0103f hook
+# path: (1) missing xdp_do_flush() after XSKMAP redirect -- the local
+# bpf_net_context was torn down without flushing so xskq_prod_submit()
+# never ran (redirect>0 but probe rx_packets=0); (2) FATAL hard-IRQ panic
+# in __xsk_map_flush -- 0103f dispatched the rx_hook BEFORE mainline's
+# dpaa_eth_napi_schedule() deferral, so the hook + flush ran in portal_isr
+# hard-IRQ context, corrupting the per-context xsk flush list across CPUs
+# (dual-CPU Oops, HW 2026-06-10). Fix: defer to NAPI first when a hook is
+# registered (qman_cb_dqrr_stop on hard IRQ; QMan re-delivers in NAPI),
+# plus WARN_ON_ONCE(in_hardirq()) bail at hook entry. HW-validated
+# 2026-06-10: functional PASS, SIGKILL-teardown stress PASS, 8-way flood
+# survival PASS. Diff base is post-0109 (dpaa_eth.c overlaps 0104/0109),
+# hence the 0110 number. Sorts after 0109, before 101-sfp. Spec sec 6.1.18.
+cp "$BOARD_PATCH_DIR/0110-dpaa1-true-zc-rx-napi-only-flush.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
