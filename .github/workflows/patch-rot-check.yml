@@ -25,27 +25,27 @@ jobs:
       - name: Check vyos-1x patches against latest current
         run: |
           set -e
-          git clone --branch rolling --depth 1 https://github.com/vyos/vyos-1x.git
+          git clone --branch current --depth 1 https://github.com/vyos/vyos-1x.git
           cd vyos-1x
           rc=0
           for p in ../data/vyos-1x-*.patch; do
               if ! git apply --3way --check --whitespace=nowarn "$p" 2>&1; then
-                  echo "::warning file=$p::Patch will not apply cleanly against latest vyos/vyos-1x rolling"
+                  echo "::warning file=$p::Patch will not apply cleanly against latest vyos/vyos-1x current"
                   rc=1
               fi
           done
           exit $rc
         continue-on-error: true
 
-      - name: Check vyos-build patches against latest rolling
+      - name: Check vyos-build patches against latest current
         run: |
           set -e
-          git clone --branch rolling --depth 1 https://github.com/vyos/vyos-build.git
+          git clone --branch current --depth 1 https://github.com/vyos/vyos-build.git
           cd vyos-build
           rc=0
           for p in ../data/vyos-build-*.patch; do
               if ! git apply --3way --check --whitespace=nowarn "$p" 2>&1; then
-                  echo "::warning file=$p::Patch will not apply cleanly against latest vyos/vyos-build rolling"
+                  echo "::warning file=$p::Patch will not apply cleanly against latest vyos/vyos-build current"
                   rc=1
               fi
           done
@@ -57,7 +57,7 @@ jobs:
           set -e
           # Kernel pin auto-tracked via vyos-build/data/defaults.toml.
           # We need vyos-build/ checked out for the sync script to read it.
-          git clone --branch rolling --depth 1 https://github.com/vyos/vyos-build.git vyos-build
+          git clone --branch current --depth 1 https://github.com/vyos/vyos-build.git vyos-build
           KERNEL_VERSION=$(bash -c '. kernel/common/scripts/sync-kernel-version.sh >/dev/null && echo $KERNEL_VERSION')
           KERNEL_TAG="v${KERNEL_VERSION}"
           echo "::notice::Probing kernel patches against $KERNEL_TAG"
