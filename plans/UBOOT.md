@@ -1,36 +1,21 @@
 # U-Boot Reference: Mono Gateway LS1046A
-**Version 1.0.0** · Updated 2026-04-17 · 2026-06-09 · HADS 1.0.0
+
+Low-level U-Boot reference and seamless boot specification. The stuff you need when you're staring at a serial console at 115200 baud wondering why nothing happened.
+
+Updated 2026-04-17.
+
+For boot architecture and kernel config rationale, see [PORTING.md](PORTING.md).
+For install instructions, see [INSTALL.md](INSTALL.md).
 
 ---
 
-## AI READING INSTRUCTION
+## Seamless Boot Architecture
 
-Read `[SPEC]` and `[BUG]` blocks for authoritative facts.
-Read `[NOTE]` only if additional context is needed.
-`[?]` blocks are unverified — treat with lower confidence.
+### Design: `/boot/vyos.env` Replaces `fw_setenv`
 
----
+The old approach wrote the image name into U-Boot's SPI flash via `fw_setenv` on every install and upgrade. This required `libubootenv-tool`, `/dev/mtd2`, a QSPI driver, and a helper script. Four moving parts for what is fundamentally a one-line config change.
 
-## 1. SCOPE
-
-**[SPEC]**
-- Low-level U-Boot reference and seamless-boot specification.
-- For boot architecture and kernel config rationale, see `PORTING.md`. For install instructions, see `INSTALL.md`.
-
-**[NOTE]**
-This is the stuff you need when you're staring at a serial console at 115200 baud wondering why nothing happened.
-
----
-
-## 2. SEAMLESS BOOT ARCHITECTURE
-
-### 2.1 Design: `/boot/vyos.env` replaces `fw_setenv`
-
-**[NOTE]**
-The old approach wrote the image name into U-Boot's SPI flash via `fw_setenv` on every install and upgrade — four moving parts (`libubootenv-tool`, `/dev/mtd2`, a QSPI driver, a helper script) for a one-line config change.
-
-**[SPEC]**
-- Current approach: U-Boot reads the default image name from a text file on the eMMC ext4 partition. VyOS writes this file as part of normal image management; no SPI flash writes after initial setup.
+**Current approach:** U-Boot reads the default image name from a text file on the eMMC ext4 partition. VyOS writes this file as part of its normal image management. No SPI flash writes needed after initial setup.
 
 ```
 eMMC partition 3 (ext4):
@@ -42,11 +27,10 @@ eMMC partition 3 (ext4):
       2026.03.24-0338-rolling.squashfs
 ```
 
-- U-Boot loads `/boot/vyos.env`, imports it via `env import -t`, and uses `${vyos_image}` to construct all paths. The `vyos` command is static: it never needs `fw_setenv` updates. Set once, boot forever.
+U-Boot loads `/boot/vyos.env`, imports it via `env import -t`, and uses `${vyos_image}` to construct all paths. The `vyos` command is **static**: it never needs `fw_setenv` updates. Set once, boot forever.
 
-### 2.2 Boot chain
+### Boot Chain
 
-**[SPEC]**
 ```mermaid
 flowchart TD
     PO["Power On"] --> UB["U-Boot 2025.04"]
@@ -65,19 +49,18 @@ flowchart TD
     style REC fill:#a84,stroke:#333,color:#fff
 ```
 
-### 2.3 When `fw_setenv` is used
+### When `fw_setenv` Is Used
 
-**[SPEC]**
-- Only during `install image` from USB live boot (forced every time via `vyos-postinstall --root`). It sets:
-  - `bootcmd` = `run usb_vyos || run vyos || run recovery`
-  - `vyos` = single combined variable: reads `/boot/vyos.env`, loads kernel/dtb/initrd, sets bootargs, calls `booti`
-  - `usb_vyos` = delegates to `boot.scr` on USB FAT32 (`usb start; if fatload usb 0:2 ${load_addr} boot.scr; then source ${load_addr}; fi`)
-- After this, all future installs and upgrades only write `/boot/vyos.env` — no SPI flash writes, no `fw_setenv`.
-- `boot.scr` does NOT write any U-Boot env vars; all SPI flash writes are done by `vyos-postinstall` Phase 1 via `fw_setenv`.
+Only during `install image` from USB live boot (forced every time via `vyos-postinstall --root`). It sets:
+- `bootcmd` = `run usb_vyos || run vyos || run recovery`
+- `vyos` = single combined variable: reads `/boot/vyos.env`, loads kernel/dtb/initrd, sets bootargs, calls `booti`
+- `usb_vyos` = delegates to `boot.scr` on USB FAT32 (`usb start; if fatload usb 0:2 ${load_addr} boot.scr; then source ${load_addr}; fi`)
 
-### 2.4 User experience
+After this, **all future installs and upgrades only write `/boot/vyos.env`**. No SPI flash writes. No `fw_setenv`. Just a text file.
 
-**[SPEC]**
+> `boot.scr` does NOT write any U-Boot env vars. All SPI flash writes are done by `vyos-postinstall` Phase 1 via `fw_setenv`.
+
+### User Experience
 
 | Operation | User Action | Automated |
 |-----------|------------|-----------|
@@ -91,11 +74,11 @@ flowchart TD
 
 ---
 
-## 3. U-BOOT ENVIRONMENT (TARGET STATE)
+## U-Boot Environment (Target State)
 
-**[SPEC]**
-- Set once during first `install image` by `vyos-postinstall` Phase 1 via `fw_setenv`. Re-written (forced) on every subsequent `install image`. Never modified by `boot.scr`.
-- Only 3 variables are written to SPI flash:
+Set once during first `install image` by `vyos-postinstall` Phase 1 via `fw_setenv`. Re-written (forced) on every subsequent `install image`. Never modified by `boot.scr`.
+
+Only **3 variables** are written to SPI flash:
 
 ```bash
 # Boot priority: USB → eMMC → SPI recovery
@@ -116,34 +99,32 @@ vyos=ext4load mmc 0:3 ${load_addr} /boot/vyos.env; env import -t ${load_addr} ${
 recovery=sf probe 0:0; sf read ${kernel_addr_r} ${kernel_addr} ${kernel_size}; sf read ${fdt_addr_r} ${fdt_addr} ${fdt_size}; booti ${kernel_addr_r} - ${fdt_addr_r}
 ```
 
-**[SPEC]**
-- Hugepages are NOT in default bootargs — added dynamically when VPP is configured via `set vpp settings`, which triggers a one-time kexec to apply `hugepagesz=2M hugepages=512`.
-- No `earlycon=` — stock VyOS does not use it; it adds uart8250 spam to the pre-userspace log. `quiet` limits kernel console to KERN_WARNING+ (loglevel 4), matching stock VyOS on amd64.
+> **Hugepages are NOT in default bootargs.** They are added dynamically when VPP is configured
+> via `set vpp settings`, which triggers a one-time kexec to apply `hugepagesz=2M hugepages=512`.
+>
+> **No `earlycon=`.** Stock VyOS does not use it; it adds uart8250 spam to pre-userspace log.
+> `quiet` limits kernel console to KERN_WARNING+ (loglevel 4), matching stock VyOS on amd64.
 
-### 3.1 `/boot/vyos.env` format
+### `/boot/vyos.env` Format
 
-**[SPEC]**
-Single line, U-Boot `env import -t` compatible (written by VyOS's image installer after every `install image` / `add system image`):
+Single line, U-Boot `env import -t` compatible:
 ```
 vyos_image=2026.03.24-0338-rolling
 ```
 
+Written by VyOS's image installer Python code after every `install image` or `add system image`.
+
 ---
 
-## 4. REFERENCE: U-BOOT VERSION
+## Reference: U-Boot Version
 
-**[SPEC]**
 ```
 U-Boot 2025.04-g9f13d11658f6 (Feb 06 2026 - 09:41:56 +0000)
 aarch64-oe-linux-gcc (GCC) 14.3.0
 GNU ld (GNU Binutils) 2.44.0.20250715
 ```
 
----
-
-## 5. MEMORY MAP
-
-**[SPEC]**
+## Memory Map
 
 | Variable | Address | Notes |
 |----------|---------|-------|
@@ -154,16 +135,15 @@ GNU ld (GNU Binutils) 2.44.0.20250715
 | `fdt_size` | `0x100000` | 1 MB reserved for FDT |
 | `load_addr` | `0xa0000000` | Generic load address |
 
-- DRAM: 8 GB total.
-  - Bank 0: `0x80000000` – `0xfbdfffff` (1982 MB)
-  - Bank 1: `0x880000000` – `0x9ffffffff` (6144 MB)
+**DRAM:** 8 GB total
 
----
+- Bank 0: `0x80000000` – `0xfbdfffff` (1982 MB)
+- Bank 1: `0x880000000` – `0x9ffffffff` (6144 MB)
 
-## 6. BOOT COMMANDS (DEPLOYED — vyos.env ARCHITECTURE)
+## Boot Commands (Deployed — vyos.env Architecture)
 
-**[SPEC]**
-- Set automatically by `vyos-postinstall` Phase 1 via `fw_setenv` during every `install image`. Manual paste is only needed for recovery if `fw_setenv` failed. Each `setenv` line stays under 500 chars.
+> **Status:** Set automatically by `vyos-postinstall` Phase 1 via `fw_setenv` during every `install image`.
+> Manual paste is only needed for recovery if `fw_setenv` failed. Each `setenv` line stays under 500 chars.
 
 ```bash
 # 1. eMMC boot — single variable: reads vyos.env, loads kernel+dtb+initrd, sets bootargs, boots.
@@ -181,56 +161,42 @@ setenv bootcmd 'run usb_vyos || run vyos || run recovery'
 saveenv
 ```
 
-- After `saveenv`, the board auto-boots from eMMC via `/boot/vyos.env` on every power cycle; inserting a USB with `boot.scr` boots from USB instead (live mode). Future `add system image` upgrades only update `/boot/vyos.env`.
+After `saveenv`, the board auto-boots from eMMC via `/boot/vyos.env` on every power cycle. If a USB with `boot.scr` is inserted, it boots from USB instead (live mode). No further U-Boot intervention needed. Future `add system image` upgrades only update `/boot/vyos.env`.
 
-**[SPEC]**
-Quoting note: `setenv bootargs` does NOT need double quotes around the value. U-Boot's `setenv` treats everything after the variable name as the value; removing `"..."` avoids nested quote parsing issues in the hush shell.
+> **Note on quoting:** `setenv bootargs` does NOT need double quotes around the value. U-Boot's
+> `setenv` treats everything after the variable name as the value. Removing `"..."` avoids nested
+> quote parsing issues in hush shell.
 
-**[SPEC]**
-Critical bootargs (get any wrong and the boot fails silently):
-- `BOOT_IMAGE=/boot/${vyos_image}/vmlinuz` — must be FIRST arg; VyOS `is_live_boot()` regex requires it (U-Boot's `booti` does not set it like GRUB does).
-- `boot=live` — initramfs uses live-boot mode.
-- `vyos-union=/boot/${vyos_image}` — squashfs overlay dir on p3 (also the `is_live_boot()` fallback for U-Boot boards).
-- `fsl_dpaa_fman.fsl_fm_max_frm=9600` — enables jumbo frames (max MTU 9578). Module name is `fsl_dpaa_fman`, NOT `fman`; the wrong name silently has no effect.
-- `panic=60` — MUST match config.boot.default or `system_option.py` triggers a kexec reboot.
-- `usbcore.autosuspend=-1` — required on LS1046A DWC3 xHCI to prevent USB autosuspend stalls.
+**Critical bootargs (get any of these wrong and the boot fails silently):**
+- `BOOT_IMAGE=/boot/${vyos_image}/vmlinuz`: must be FIRST arg. VyOS `is_live_boot()` regex requires it (U-Boot's `booti` does not set it like GRUB does)
+- `boot=live`: initramfs uses live-boot mode
+- `vyos-union=/boot/${vyos_image}`: squashfs overlay dir on p3 (also used as `is_live_boot()` fallback for U-Boot boards)
+- `fsl_dpaa_fman.fsl_fm_max_frm=9600`: enables jumbo frames (max MTU 9578). Module name is `fsl_dpaa_fman`, NOT `fman`. The wrong name silently has no effect.
+- `panic=60`: MUST match config.boot.default or `system_option.py` triggers a kexec reboot. Hugepages are NOT in default bootargs — added dynamically when VPP is configured.
+- `usbcore.autosuspend=-1`: required on LS1046A DWC3 xHCI to prevent USB autosuspend stalls
+- Missing `boot=live` or `vyos-union=` drops to initramfs BusyBox shell with no explanation
 
-**[BUG] Missing `boot=live` or `vyos-union=` drops to BusyBox**
-- Symptom: boot lands in an initramfs BusyBox shell with no explanation.
-- Cause: `boot=live` or `vyos-union=` absent from bootargs — the live-boot initramfs has nothing to mount.
-- Fix: ensure both `boot=live` and `vyos-union=/boot/${vyos_image}` are present.
+**Critical load order:**
+- Initrd must be loaded **LAST** so `${filesize}` captures the initrd size
+- Ramdisk arg MUST be `${ramdisk_addr_r}:${filesize}` (colon+size format)
 
-**[SPEC]**
-Critical load order: initrd must be loaded LAST so `${filesize}` captures the initrd size; the ramdisk arg MUST be `${ramdisk_addr_r}:${filesize}` (colon+size format).
+## Boot from USB (for initial install)
 
----
-
-## 7. BOOT FROM USB (FOR INITIAL INSTALL)
-
-**[SPEC]**
-- The USB is a hybrid ISO written via `dd`: partition 1 is ISO9660 (squashfs), partition 2 is FAT32 (boot files). One-liner via `boot.scr`:
+The USB is a hybrid ISO written via `dd`: partition 1 is ISO9660 (squashfs), partition 2 is FAT32 (boot files). Use `boot.scr` for a one-liner:
 
 ```bash
 usb start; fatload usb 0:2 ${load_addr} boot.scr; source ${load_addr}
 ```
 
-- `boot.scr` loads vmlinuz, DTB, and initrd from the FAT32 partition, sets bootargs (including `usbcore.autosuspend=-1` for DWC3 xHCI stability), and calls `booti`. Full source: `data/scripts/boot.cmd`.
+`boot.scr` loads vmlinuz, DTB, and initrd from the FAT32 partition, sets bootargs (including `usbcore.autosuspend=-1` for DWC3 xHCI stability), and calls `booti`. See `data/scripts/boot.cmd` for the full source.
 
-**[BUG] `usb 0:0` auto-detection fails on the hybrid MBR**
-- Symptom: USB boot fails when using `usb 0:0`.
-- Cause: LS1046A U-Boot auto-detection (`usb 0:0`) fails on the hybrid MBR.
-- Fix: always use `usb 0:2`.
+> **Always use `usb 0:2`** — auto-detection (`usb 0:0`) fails on LS1046A U-Boot with the hybrid MBR.
 
-**[BUG] `fatload` says "File not found"**
-- Symptom: `fatload` cannot find the kernel/initrd.
-- Cause: the kernel has a version suffix (e.g. `vmlinuz-6.6.128-vyos`).
-- Fix: run `fatls usb 0:2 live` and use the full name.
+> **If `fatload` says "File not found":** run `fatls usb 0:2 live` — if the
+> kernel has a version suffix (e.g. `vmlinuz-6.6.128-vyos`), use the full name.
 
----
+## Factory Boot Commands (OpenWrt — Pre-Install)
 
-## 8. FACTORY BOOT COMMANDS (OpenWrt — PRE-INSTALL)
-
-**[SPEC]**
 ```bash
 # Factory default: try eMMC OpenWrt, then SPI recovery
 bootcmd=run emmc || run recovery
@@ -247,40 +213,41 @@ recovery=sf probe 0:0; sf read ${kernel_addr_r} ${kernel_addr} ${kernel_size};
     booti ${kernel_addr_r} - ${fdt_addr_r}
 ```
 
----
+## EFI/GRUB: Not Available
 
-## 9. EFI/GRUB: NOT AVAILABLE
-
-**[SPEC]**
-- U-Boot on this board was compiled without EFI support (`CONFIG_CMD_EFIDEBUG` disabled). Confirmed 2026-04-17:
+U-Boot on this board was compiled **without EFI support** (`CONFIG_CMD_EFIDEBUG` disabled). Confirmed 2026-04-17:
 
 ```
 => efidebug devices
 Unknown command 'efidebug' - try 'help'
 ```
 
-- `bootefi` is listed in `help` (command stub exists) but cannot function without the EFI runtime. Even if EFI were compiled in, GRUB would OOM due to DPAA1 `reserved-memory` nodes consuming the EFI memory pool.
-- Use `booti` via `boot.scr` as the permanent boot method.
+`bootefi` is listed in `help` (command stub exists) but cannot function without the EFI runtime. Even if EFI were compiled in, GRUB would OOM due to DPAA1 `reserved-memory` nodes consuming the EFI memory pool.
 
----
+**Use `booti` via `boot.scr` as the permanent boot method.**
 
-## 10. FAILED BOOT ATTEMPTS (REFERENCE)
+## Failed Boot Attempts (Reference)
 
-**[BUG] `booti` without `:${filesize}` on ramdisk**
-- Symptom: "Wrong Ramdisk Image Format / Ramdisk image is corrupt or invalid" from `booti ${kernel_addr_r} ${ramdisk_addr_r} ${fdt_addr_r}`.
-- Cause: `booti` needs the ramdisk in `addr:size` format.
-- Fix: use `${ramdisk_addr_r}:${filesize}`.
+### `booti` without `:${filesize}` on ramdisk
+```bash
+booti ${kernel_addr_r} ${ramdisk_addr_r} ${fdt_addr_r}
+# "Wrong Ramdisk Image Format / Ramdisk image is corrupt or invalid"
+# Fix: use ${ramdisk_addr_r}:${filesize} — booti needs addr:size format
+```
 
-**[BUG] `booti` kernel-only (no initrd, stale bootargs)**
-- Symptom: kernel boots (all 5 FMan MACs probe) but hangs at "Waiting for root device /dev/mmcblk0p1...".
-- Cause: bootargs still `root=/dev/mmcblk0p1` from the factory env, and no initrd means no live-boot initramfs to mount the squashfs.
-- Fix: load the initrd and set the live-boot bootargs (`boot=live` + `vyos-union=`).
+### `booti` kernel-only (no initrd, stale bootargs)
+```bash
+booti ${kernel_addr_r} - ${fdt_addr_r}
+# Kernel boots (all 5 FMan MACs probe!) but hangs:
+#   "Waiting for root device /dev/mmcblk0p1..."
+# Cause: bootargs still "root=/dev/mmcblk0p1" from factory env.
+#   No initrd = no live-boot initramfs = can't mount squashfs.
+```
 
----
+## Ethernet Interfaces
 
-## 11. ETHERNET INTERFACES
-
-**[SPEC]**
+> ⚠️ Physical RJ45 port order differs from DT node address order.
+> Port remapping is handled by udev rule `10-fman-port-order.rules` which calls `fman-port-name` to set FMan MAC DT address → physical port name. On installed systems, VyOS `vyos_net_name` (hw-id matching) takes precedence.
 
 | Physical Position | DT Node | MAC Address | PHY Addr | VyOS Name | Type |
 |-------------------|---------|-------------|----------|-----------|------|
@@ -290,12 +257,7 @@ Unknown command 'efidebug' - try 'help'
 | SFP1 | `1af0000.ethernet` | `E8:F6:D7:00:16:02` | fixed-link | **eth3** | XGMII 10GBase-R |
 | SFP2 | `1af2000.ethernet` | `E8:F6:D7:00:16:03` | fixed-link | **eth4** | XGMII 10GBase-R |
 
-**[SPEC]**
-- Physical RJ45 port order differs from DT node address order. Port remapping is handled by udev rule `10-fman-port-order.rules`, which calls `fman-port-name` to map FMan MAC DT address → physical port name. On installed systems, VyOS `vyos_net_name` (hw-id matching) takes precedence.
-
-### 11.1 MAC addresses (from U-Boot env)
-
-**[SPEC]**
+### MAC Addresses (from U-Boot env)
 
 | Variable | Address | Interface |
 |----------|---------|-----------|
@@ -305,14 +267,11 @@ Unknown command 'efidebug' - try 'help'
 | `eth3addr` | `E8:F6:D7:00:16:02` | eth3 |
 | `eth4addr` | `E8:F6:D7:00:16:03` | eth4 |
 
-- MAC addresses are unique per board; yours will differ.
+MAC addresses are unique per board. Yours will differ.
 
----
+## Clock Tree & CPU Frequency
 
-## 12. CLOCK TREE & CPU FREQUENCY
-
-**[SPEC]**
-- sysclk: 100 MHz (oscillator).
+**sysclk:** 100 MHz (oscillator)
 
 | Clock | Rate | Source | Notes |
 |-------|------|--------|-------|
@@ -328,16 +287,10 @@ Unknown command 'efidebug' - try 'help'
 | `cg-hwaccel0` | 700 MHz | PLL2-div2 | FMan clock |
 | `cg-pll0-div2` | 300 MHz | PLL0 | SPI (DSPI controller) |
 
-**[BUG] CPU stuck at 700 MHz if CPUFREQ is a module**
-- Symptom: CPU runs at 700 MHz instead of 1800 MHz (raid6 neonx8 ~2056 MB/s vs ~4816 MB/s — not subtle).
-- Cause: `CONFIG_QORIQ_CPUFREQ=m` loads after `clk: Disabling unused clocks` (T+12s) releases the PLL clock parents.
-- Fix: `CONFIG_QORIQ_CPUFREQ=y` (built-in) claims PLL clock parents before the unused-clock disable runs.
+`CONFIG_QORIQ_CPUFREQ=y` (built-in) claims PLL clock parents before `clk: Disabling unused clocks` runs at T+12s. Confirmed: raid6 neonx8 2056 to 4816 MB/s. The difference between 700 MHz and 1800 MHz is not subtle.
 
----
+## SPI Flash (MTD) Layout
 
-## 13. SPI FLASH (MTD) LAYOUT
-
-**[SPEC]**
 ```
 1550000.spi (accessed via U-Boot sf commands only):
   1M(rcw-bl2)          — Reset Config Word + BL2
@@ -349,16 +302,14 @@ Unknown command 'efidebug' - try 'help'
  22M(kernel-initramfs) — Recovery kernel + initramfs
 ```
 
-**[BUG] `/proc/mtd` empty and `fw_setenv` fails without `CONFIG_SPI_FSL_QSPI=y`**
-- Symptom: `/proc/mtd` is empty and `fw_setenv` fails with "Configuration file wrong or corrupted."
-- Cause: `CONFIG_SPI_FSL_QSPI` not built-in, so the QSPI controller (hence MTD partitions) never appears.
-- Fix: set `CONFIG_SPI_FSL_QSPI=y`; MTD partitions then appear (`/dev/mtd0`–`/dev/mtdN`). `fw_setenv` uses `/dev/mtd2` (uboot-env). VyOS ships `libubootenv-tool` (not classic `u-boot-tools`), which requires its own `/etc/fw_env.config` format (`/dev/mtd2 0x0 0x2000 0x1000`).
+> **MTD visibility requires `CONFIG_SPI_FSL_QSPI=y`.** Without it, `/proc/mtd` is empty and
+> `fw_setenv` fails with "Configuration file wrong or corrupted." With QSPI enabled,
+> MTD partitions appear (`/dev/mtd0`–`/dev/mtdN`). `fw_setenv` uses `/dev/mtd2`
+> (uboot-env). VyOS ships `libubootenv-tool` (not classic `u-boot-tools`),
+> which requires its own `/etc/fw_env.config` format (`/dev/mtd2 0x0 0x2000 0x1000`).
 
----
+## USB Device Detection
 
-## 14. USB DEVICE DETECTION
-
-**[SPEC]**
 ```
 SanDisk 3.2Gen1 (USB 2.10 mode on XHCI)
 VID:PID = 0x0781:0x5581
@@ -366,9 +317,8 @@ Hybrid ISO: Partition 1 = ISO9660, Partition 2 = FAT32 (boot files)
 Access via: fatload usb 0:2 (auto-detection 0:0 fails on hybrid MBR)
 ```
 
-### 14.1 USB contents (from `fatls usb 0:2`)
+### USB Contents (from `fatls usb 0:2`)
 
-**[SPEC]**
 ```
 boot.scr                     (U-Boot boot script)
 live/vmlinuz                  (~10 MB, gzip-compressed Image.gz)
@@ -377,15 +327,12 @@ live/filesystem.squashfs      (~526 MB)
 mono-gw.dtb                   (94 KB)
 ```
 
----
+## Live System State (2026-03-24, eMMC installed)
 
-## 15. LIVE SYSTEM STATE (2026-03-24, eMMC INSTALLED)
-
-**[SPEC]**
-- Version: 2026.03.24-0338-rolling
-- Kernel: 6.6.128-vyos `#1 SMP PREEMPT_DYNAMIC`
-- FRRouting: 10.5.2
-- Boot source: eMMC installed (`vyos` booti from mmcblk0p3)
+**Version:** 2026.03.24-0338-rolling
+**Kernel:** 6.6.128-vyos `#1 SMP PREEMPT_DYNAMIC`
+**FRRouting:** 10.5.2
+**Boot source:** eMMC installed (`vyos` booti from mmcblk0p3)
 
 | Resource | Value |
 |----------|-------|

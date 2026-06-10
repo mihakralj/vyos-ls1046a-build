@@ -6,7 +6,7 @@
 # key, and packages the signed .ko as a Debian package that
 # bin/ci-pick-packages.sh will pull into the live-build chroot.
 #
-# Invariants relied upon (see AGENTS.md and plans/archive/ASK2-IMPLEMENTATION.md):
+# Invariants relied upon (see AGENTS.md and plans/ASK2-IMPLEMENTATION.md):
 #   - $KSRC must contain a complete built kernel tree with Module.symvers,
 #     vmlinux, scripts/sign-file, and certs/signing_key.{pem,x509}.
 #     bin/ci-build-packages.sh calls us BEFORE the post-build cleanup that
@@ -28,7 +28,7 @@
 # Outputs:
 #   ask-modules-${KVER}_${PKG_VER}_arm64.deb in $PKG_DIR
 #
-# Spec: plans/archive/ASK2-IMPLEMENTATION.md PR3 (M0.3 — wire build pipeline)
+# Spec: plans/ASK2-IMPLEMENTATION.md PR3 (M0.3 — wire build pipeline)
 set -ex -o pipefail
 
 KSRC="${1:?KSRC required as \$1}"
@@ -217,7 +217,7 @@ Description: ASK2 OOT kernel modules for LS1046A FMan/210 hardware offload
  proprietary cdx.ko / auto_bridge.ko stack.
  .
  See specs/ask2-rewrite-spec.md for the architecture and
- plans/archive/ASK2-IMPLEMENTATION.md for the implementation status.
+ plans/ASK2-IMPLEMENTATION.md for the implementation status.
 EOF
 
 # postinst: regenerate the modules.dep so insmod-by-name works on next boot.

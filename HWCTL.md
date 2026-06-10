@@ -261,11 +261,11 @@ $EDITOR /etc/fancontrol
 systemctl restart fancontrol
 ```
 
-> **Stale on current builds:** the lm-sensors `fancontrol` stack (and its
-> `fancontrol.conf` template) was removed and replaced by the multi-zone PID
-> daemon [board/scripts/fan-pid](board/scripts/fan-pid) (`fan-pid.service`).
-> Zone setpoints and gains are constants at the top of that script — edit it
-> in the source repo and rebuild the ISO for permanent changes.
+Note that `/etc/fancontrol` is **rewritten on every boot** by
+`fancontrol-setup.sh` from the template in
+[board/scripts/fancontrol.conf](board/scripts/fancontrol.conf). For
+permanent changes, edit that template in the source repo and rebuild
+the ISO — otherwise your tweaks survive only until the next reboot.
 
 ### 2.5 Power / fault check
 
