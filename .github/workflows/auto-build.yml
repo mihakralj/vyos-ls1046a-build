@@ -44,7 +44,13 @@ on:
 env:
   DEBIAN_MIRROR: http://deb.debian.org/debian/
   DEBIAN_SECURITY_MIRROR: http://deb.debian.org/debian-security
-  VYOS_MIRROR: https://packages.vyos.net/repositories/current/
+  # VyOS retired the `current/` apt path (its dist moved current->rolling). The
+  # apt entry is `deb {VYOS_MIRROR} {vyos_branch} main` and vyos_branch is now
+  # `rolling`, so the base MUST be `repositories/rolling/` to resolve
+  # rolling/dists/rolling/Release (200). The old `current/` base produced
+  # current/dists/rolling/Release -> 404 ("does not have a Release file") and
+  # aborted `lb build`. Matches bin/ci-install-vyos1x-deps.sh + bin/local-build.sh.
+  VYOS_MIRROR: https://packages.vyos.net/repositories/rolling/
   # vyos-1x's debian/rules and python/setup.py both look up
   # /opt/opam/${OCAML_VERSION}/share/vyconf/{vyconf.proto,vyconfd.conf}
   # to (a) ship vyconf.proto inside the libvyosconfig .deb and

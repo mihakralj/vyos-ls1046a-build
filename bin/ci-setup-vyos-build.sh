@@ -106,8 +106,11 @@ done
 # 2026-05-30 upstream vyos-1x RENAMED its default branch `current` -> `rolling`
 # (the `current` branch no longer exists). defaults.toml still pins
 # `vyos_branch = "current"` — and that value is ALSO used for the apt repo
-# entry `deb {vyos_mirror} {vyos_branch} main`, where the VyOS apt dist IS
-# still `current/`. So we must NOT rewrite `vyos_branch` in defaults.toml.
+# entry `deb {vyos_mirror} {vyos_branch} main`. As of 2026-06-10 the VyOS apt
+# dist ALSO moved `current/` -> `rolling/` (the old `current/dists/rolling`
+# 404s), so VYOS_MIRROR in auto-build.yml is now `repositories/rolling/` and
+# the effective suite is `rolling`. We still must NOT rewrite `vyos_branch` in
+# defaults.toml.
 # Instead, patch only the git.checkout() call in the cloned build-vyos-image
 # so a failed `checkout current` falls back to `rolling`. Idempotent: guarded
 # by a grep for the sentinel marker we inject.
