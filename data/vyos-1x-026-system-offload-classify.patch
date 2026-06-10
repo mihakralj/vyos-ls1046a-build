@@ -1,3 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
+Date: Tue, 10 Jun 2026 14:00:00 +0000
+Subject: [PATCH] system offload classify - HW exact-match flow steering CLI
+ (M3-3b production consumer)
+
+Adds the production CLI consumer for the FMan PCD Coarse-Classifier
+flow-steering path (spec sec 5.4):
+
+  set system offload classify interface <ethN> rule <1-32> protocol (tcp|udp)
+  set system offload classify interface <ethN> rule <1-32> source address <a.b.c.d>
+  set system offload classify interface <ethN> rule <1-32> source port <1-65535>
+  set system offload classify interface <ethN> rule <1-32> destination address <a.b.c.d>
+  set system offload classify interface <ethN> rule <1-32> destination port <1-65535>
+  set system offload classify interface <ethN> rule <1-32> queue <0-127>
+
+The conf_mode script shells out to the NIC-neutral standard interface -
+ethtool ntuple (`ethtool -N <intf> flow-type ... action <queue> loc
+<rule-1>`) - mirroring the vyos-1x-025 ingress-policer pattern (CLI ->
+standard kernel tool -> driver bridge). On the LS1046A Mono Gateway the
+dpaa driver's rxnfc bridge (board patch 0109) rebuilds the port's FMan
+CC static tree on every rule mutation: matching flows are
+silicon-steered to the chosen RX frame queue (and thereby its servicing
+CPU) before the kernel RX path ever runs. On hardware without the
+capability ethtool fails with "Operation not supported" and commit
+aborts loudly - no silent no-op.
+
+Apply model: every commit flushes the ntuple rules of all interfaces
+present in either the old (effective) or new config (parse `ethtool -n`
+Filter: lines, delete each), then re-inserts the new rule set sorted by
+rule number; rule number is the match priority (lower wins, mapped to
+ethtool location rule-1). A hardware reject mid-commit rolls back every
+rule installed by that commit.
+
+Documented hardware limitation (also enforced nowhere - both spellings
+are accepted): the FMan KeyGen-extracted compare key carries no L4
+protocol byte, so a tcp and a udp rule with identical addresses/ports
+steer the SAME traffic on LS1046A.
+
+Purely additive: two new files (interface definition XML + conf_mode
+script), no upstream file is touched, so this patch is immune to
+upstream context drift. XML validated against
+schema/interface_definition.rng (RelaxNG: valid); script passes
+python3 -m py_compile.
+
+Signed-off-by: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
+Rev 2 (2026-06-10): dropped unused `from vyos.utils.process import cmd`
+ (pylint W0611 fails the vyos-1x Makefile gate; CI run 27304735703).
+
+---
 diff --git a/interface-definitions/system_offload.xml.in b/interface-definitions/system_offload.xml.in
 new file mode 100644
 index 000000000..37f98d338
