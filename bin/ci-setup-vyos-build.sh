@@ -502,8 +502,17 @@ chmod +x "$CHROOT/usr/local/bin/fan-check"
 cp board/scripts/caam-check "$CHROOT/usr/local/bin/caam-check"
 chmod +x "$CHROOT/usr/local/bin/caam-check"
 
-### DPAA1 status helper: `dpaa1-check` reports all networking elements.
-echo "### Installing dpaa1-check"
+### DPAA1 networking status helper: `dpaa1-check` reports the full DPAA1
+### packet-processing complex — FMan/QMan/BMan DT controllers + per-CPU
+### portals, the built-in fsl-fman / fsl-fman-port / fsl-fman_xmdio /
+### fsl_dpaa_mac / fsl_dpa drivers, FMan microcode/MURAM, bound BMI ports +
+### MEMAC MACs + MDIO buses, the PCD (KeyGen/CC/HM/Policer) capability
+### posture incl. the /sys/kernel/debug/fman_pcd classify harness, jumbo
+### frames, eth0-eth4 (driver/MAC/MTU/AF_XDP cap), QMan/BMan liveness, and
+### the AF_XDP zero-copy xsk_* counters (chaining to xsk-zc-check). Exit
+### non-zero if a controller/driver/port is missing — mirrors sfp-check /
+### fan-check / caam-check so monit/Nagios can poll it. Flavor-agnostic
+### (DPAA1 is the same block on every LS1046A board).
 cp board/scripts/dpaa1-check "$CHROOT/usr/local/bin/dpaa1-check"
 chmod +x "$CHROOT/usr/local/bin/dpaa1-check"
 
