@@ -419,6 +419,44 @@ cp "$BOARD_PATCH_DIR/0106-fman-pcd-cc-keygen-graft-wiring.patch" "$KERNEL_PATCHE
 # root-only node, zero datapath cost, no new EXPORT_SYMBOLs. Sorts after
 # 0106, before 101-sfp. Spec sec 5.4 (M3-3b DUT validation).
 cp "$BOARD_PATCH_DIR/0107-fman-pcd-cc-test-debugfs-harness.patch" "$KERNEL_PATCHES/"
+# 0108: M3-3b close-out -- per-key FQ enqueue-AD + silicon-truth CC key
+# layout. Replaces 0098's soft leaf-AD encoding (qband<<16|hm<<8|type,
+# graceful fall-through) with the ask20-HW-PROVEN RM 8.7.4.3 hardware
+# enqueue-AD (fqid@0x0, RESULT_CF[|NADEN]@0x8, HMTD@0xc; PR14z20/z22: 24M+
+# frames silicon-forwarded) whenever a key carries a non-zero target_fqid,
+# and fixes cc_pack_key() to the KG-emitted composite the CC walker
+# actually compares under the 0106 KGSE_CCBS graft
+# ([SIP|DIP|SPI=0|SPORT|DPORT], PR14z14 silicon truth). Adds
+# target_fqid/miss_fqid plumbing through fman_cc_key/fman_cc_static_tree
+# and extends the 0107 cc_test harness with an optional [fqid-hex] arg.
+# fqid 0 keeps the DUT-validated fall-through byte-identical. Sorts after
+# 0107, before 101-sfp. Spec sec 5.4 (M3-3b).
+cp "$BOARD_PATCH_DIR/0108-fman-pcd-cc-per-key-fq-enqueue-ad.patch" "$KERNEL_PATCHES/"
+# 0109: M3-3b production consumer -- ethtool ntuple (rxnfc) -> FMan CC
+# static-tree bridge in dpaa_ethtool.c. ETHTOOL_SRXCLSRLINS/DEL rules
+# rebuild the port's CC tree via fman_cc_tree_destroy()+install() (the
+# 0106 graft sequence); action <queue> = Nth RX PCD FQ, resolved FQID
+# carried in target_fqid so the 0108 hardware enqueue-AD steers on HIT.
+# Driven by `ethtool -N`, whose config-mode consumer is vyos-1x-026
+# ('set system offload classify'). Mirrors the 0104 policer pattern
+# (userspace -> standard kernel tool -> driver bridge). Sorts after
+# 0108, before 101-sfp. Spec sec 5.4 (M3-3b production consumer).
+cp "$BOARD_PATCH_DIR/0109-dpaa-ethtool-ntuple-cc-steering-bridge.patch" "$KERNEL_PATCHES/"
+# 0110: true-ZC RX NAPI-only hook dispatch + xdp_do_flush (supersedes the
+# never-shipped 0103h). Fixes TWO coupled defects in the 0103e/0103f hook
+# path: (1) missing xdp_do_flush() after XSKMAP redirect -- the local
+# bpf_net_context was torn down without flushing so xskq_prod_submit()
+# never ran (redirect>0 but probe rx_packets=0); (2) FATAL hard-IRQ panic
+# in __xsk_map_flush -- 0103f dispatched the rx_hook BEFORE mainline's
+# dpaa_eth_napi_schedule() deferral, so the hook + flush ran in portal_isr
+# hard-IRQ context, corrupting the per-context xsk flush list across CPUs
+# (dual-CPU Oops, HW 2026-06-10). Fix: defer to NAPI first when a hook is
+# registered (qman_cb_dqrr_stop on hard IRQ; QMan re-delivers in NAPI),
+# plus WARN_ON_ONCE(in_hardirq()) bail at hook entry. HW-validated
+# 2026-06-10: functional PASS, SIGKILL-teardown stress PASS, 8-way flood
+# survival PASS. Diff base is post-0109 (dpaa_eth.c overlaps 0104/0109),
+# hence the 0110 number. Sorts after 0109, before 101-sfp. Spec sec 6.1.18.
+cp "$BOARD_PATCH_DIR/0110-dpaa1-true-zc-rx-napi-only-flush.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
