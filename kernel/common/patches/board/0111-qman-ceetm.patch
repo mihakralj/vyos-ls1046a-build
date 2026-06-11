@@ -1,8 +1,7 @@
-From 35670ed605e583704859b60069d0e4b86b366ffc Mon Sep 17 00:00:00 2001
+From 1829510e70c1b750a64d86e35296533b5fe394c6 Mon Sep 17 00:00:00 2001
 From: ci <ci@local>
 Date: Thu, 11 Jun 2026 05:57:12 +0000
-Subject: [PATCH 1/2] soc: fsl: qbman: add CEETM hierarchical egress shaper
- support
+Subject: [PATCH] soc: fsl: qbman: add CEETM hierarchical egress shaper support
 
 Port the QorIQ QMan CEETM (Customer Edge Egress Traffic Management) API
 from the legacy NXP SDK, modernised to mainline style. Provides
@@ -24,10 +23,10 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  drivers/soc/fsl/qbman/Makefile     |    1 +
  drivers/soc/fsl/qbman/qman.c       |  100 +++
  drivers/soc/fsl/qbman/qman_ccsr.c  |   76 +-
- drivers/soc/fsl/qbman/qman_ceetm.c | 1227 ++++++++++++++++++++++++++++
- drivers/soc/fsl/qbman/qman_priv.h  |  319 ++++++++
- include/soc/fsl/qman.h             |  536 ++++++++++++
- 7 files changed, 2264 insertions(+), 5 deletions(-)
+ drivers/soc/fsl/qbman/qman_ceetm.c | 1233 ++++++++++++++++++++++++++++
+ drivers/soc/fsl/qbman/qman_priv.h  |  319 +++++++
+ include/soc/fsl/qman.h             |  571 +++++++++++++
+ 7 files changed, 2305 insertions(+), 5 deletions(-)
  create mode 100644 drivers/soc/fsl/qbman/qman_ceetm.c
 
 diff --git a/drivers/soc/fsl/qbman/Kconfig b/drivers/soc/fsl/qbman/Kconfig
@@ -289,10 +288,10 @@ index aa5348f..13c2868 100644
  		.name = KBUILD_MODNAME,
 diff --git a/drivers/soc/fsl/qbman/qman_ceetm.c b/drivers/soc/fsl/qbman/qman_ceetm.c
 new file mode 100644
-index 0000000..ab52a8d
+index 0000000..fac5557
 --- /dev/null
 +++ b/drivers/soc/fsl/qbman/qman_ceetm.c
-@@ -0,0 +1,1227 @@
+@@ -0,0 +1,1233 @@
 +// SPDX-License-Identifier: (GPL-2.0 OR BSD-3-Clause)
 +/*
 + * Copyright 2008 - 2016 Freescale Semiconductor, Inc.
@@ -801,6 +800,22 @@ index 0000000..ab52a8d
 +	return ceetm_configure_mst(&opts);
 +}
 +
++int qman_ceetm_lni_set_commit_rate(struct qm_ceetm_lni *lni,
++				   const struct qm_ceetm_rate *token_rate,
++				   u16 max_burst_size)
++{
++	return lni_set_rate(lni, true, token_rate, max_burst_size);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_lni_set_commit_rate);
++
++int qman_ceetm_lni_set_excess_rate(struct qm_ceetm_lni *lni,
++				   const struct qm_ceetm_rate *token_rate,
++				   u16 max_burst_size)
++{
++	return lni_set_rate(lni, false, token_rate, max_burst_size);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_lni_set_excess_rate);
++
 +int qman_ceetm_lni_set_commit_rate_bps(struct qm_ceetm_lni *lni, u64 bps,
 +				       u16 max_burst_size)
 +{
@@ -1013,6 +1028,22 @@ index 0000000..ab52a8d
 +	return ceetm_configure_mst(&opts);
 +}
 +
++int qman_ceetm_channel_set_commit_rate(struct qm_ceetm_channel *channel,
++				       const struct qm_ceetm_rate *token_rate,
++				       u16 max_burst_size)
++{
++	return channel_set_rate(channel, true, token_rate, max_burst_size);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_channel_set_commit_rate);
++
++int qman_ceetm_channel_set_excess_rate(struct qm_ceetm_channel *channel,
++				       const struct qm_ceetm_rate *token_rate,
++				       u16 max_burst_size)
++{
++	return channel_set_rate(channel, false, token_rate, max_burst_size);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_channel_set_excess_rate);
++
 +int qman_ceetm_channel_set_commit_rate_bps(struct qm_ceetm_channel *channel,
 +					   u64 bps, u16 max_burst_size)
 +{
@@ -1038,32 +1069,6 @@ index 0000000..ab52a8d
 +	return channel_set_rate(channel, false, &token_rate, max_burst_size);
 +}
 +EXPORT_SYMBOL_GPL(qman_ceetm_channel_set_excess_rate_bps);
-+
-+int qman_ceetm_channel_set_weight(struct qm_ceetm_channel *channel,
-+				  u16 token_limit)
-+{
-+	struct qm_mcc_ceetm_mapping_shaper_tcfc_config opts = {0};
-+
-+	if (channel->shaper_enable) {
-+		pr_err("CEETM: channel %u is shaped; uFQ weight not applicable\n",
-+		       channel->idx);
-+		return -EINVAL;
-+	}
-+
-+	/*
-+	 * Unshaped channels participate in the LNI's unshaped fair-queuing
-+	 * (uFQ) algorithm: they are placed on the CR time-eligible list and
-+	 * the CR token bucket limit acts as their fair-queuing weight. A
-+	 * zero weight starves the channel completely, so this must be
-+	 * programmed before any traffic is enqueued.
-+	 */
-+	channel->cr_token_bucket_limit = token_limit;
-+	opts.cid = cpu_to_be16(CEETM_COMMAND_CHANNEL_SHAPER | channel->idx);
-+	opts.dcpid = channel->dcp_idx;
-+	opts.shaper_config.crtbl = cpu_to_be16(token_limit);
-+	return ceetm_configure_mst(&opts);
-+}
-+EXPORT_SYMBOL_GPL(qman_ceetm_channel_set_weight);
 +
 +static int channel_set_cq_eligibility(struct qm_ceetm_channel *channel,
 +				      unsigned int cq_level, int set, bool commit)
@@ -1848,7 +1853,7 @@ index fd1cf54..9b7f889 100644
 +int qman_ceetm_mc_exec(u8 verb, const void *cmd, size_t cmd_len,
 +		       void *rsp, size_t rsp_len);
 diff --git a/include/soc/fsl/qman.h b/include/soc/fsl/qman.h
-index 7f7a493..9973198 100644
+index 7f7a493..83436bb 100644
 --- a/include/soc/fsl/qman.h
 +++ b/include/soc/fsl/qman.h
 @@ -33,6 +33,7 @@
@@ -1859,7 +1864,7 @@ index 7f7a493..9973198 100644
  
  /* Hardware constants */
  #define QM_CHANNEL_SWPORTAL0 0
-@@ -1256,4 +1257,539 @@ void qman_portal_get_iperiod(struct qman_portal *portal, u32 *iperiod);
+@@ -1256,4 +1257,574 @@ void qman_portal_get_iperiod(struct qman_portal *portal, u32 *iperiod);
   */
  int qman_portal_set_iperiod(struct qman_portal *portal, u32 iperiod);
  
@@ -1913,6 +1918,13 @@ index 7f7a493..9973198 100644
 +	u16 whole;
 +	u16 fraction;
 +};
++
++/*
++ * All-ones token rate (whole 11 bits, fraction 13 bits) programs an
++ * infinite rate: the token bucket never limits, i.e. shaping disabled
++ * while the channel/LNI stays in shaped (CS=1) scheduling mode.
++ */
++#define QM_CEETM_RATE_INFINITE	((struct qm_ceetm_rate){ 0x7ff, 0x1fff })
 +
 +/* CEETM sub-portal */
 +struct qm_ceetm_sp {
@@ -2116,6 +2128,26 @@ index 7f7a493..9973198 100644
 +				       u16 max_burst_size);
 +
 +/**
++ * qman_ceetm_lni_set_commit_rate - set the LNI commit (CR) token rate
++ * @lni: the LNI
++ * @token_rate: CR token rate (use QM_CEETM_RATE_INFINITE to disable pacing)
++ * @max_burst_size: CR token bucket limit in bytes
++ */
++int qman_ceetm_lni_set_commit_rate(struct qm_ceetm_lni *lni,
++				   const struct qm_ceetm_rate *token_rate,
++				   u16 max_burst_size);
++
++/**
++ * qman_ceetm_lni_set_excess_rate - set the LNI excess (ER) token rate
++ * @lni: the LNI
++ * @token_rate: ER token rate
++ * @max_burst_size: ER token bucket limit in bytes
++ */
++int qman_ceetm_lni_set_excess_rate(struct qm_ceetm_lni *lni,
++				   const struct qm_ceetm_rate *token_rate,
++				   u16 max_burst_size);
++
++/**
 + * qman_ceetm_lni_set_excess_rate_bps - set the LNI excess (ER) rate
 + * @lni: the LNI
 + * @bps: excess rate in bits-per-second
@@ -2174,6 +2206,26 @@ index 7f7a493..9973198 100644
 +					   u64 bps, u16 max_burst_size);
 +
 +/**
++ * qman_ceetm_channel_set_commit_rate - set the channel CR token rate
++ * @channel: the channel
++ * @token_rate: CR token rate (use QM_CEETM_RATE_INFINITE to disable pacing)
++ * @max_burst_size: CR token bucket limit in bytes
++ */
++int qman_ceetm_channel_set_commit_rate(struct qm_ceetm_channel *channel,
++				       const struct qm_ceetm_rate *token_rate,
++				       u16 max_burst_size);
++
++/**
++ * qman_ceetm_channel_set_excess_rate - set the channel ER token rate
++ * @channel: the channel
++ * @token_rate: ER token rate (use QM_CEETM_RATE_INFINITE to disable pacing)
++ * @max_burst_size: ER token bucket limit in bytes
++ */
++int qman_ceetm_channel_set_excess_rate(struct qm_ceetm_channel *channel,
++				       const struct qm_ceetm_rate *token_rate,
++				       u16 max_burst_size);
++
++/**
 + * qman_ceetm_channel_set_excess_rate_bps - set the channel excess (ER) rate
 + * @channel: the channel
 + * @bps: excess rate in bits-per-second
@@ -2184,18 +2236,6 @@ index 7f7a493..9973198 100644
 +int qman_ceetm_channel_set_excess_rate_bps(struct qm_ceetm_channel *channel,
 +					   u64 bps, u16 max_burst_size);
 +
-+/**
-+ * qman_ceetm_channel_set_weight - set the uFQ weight of an unshaped channel
-+ * @channel: the unshaped channel
-+ * @token_limit: the weight, expressed as a CR token bucket limit (bytes)
-+ *
-+ * Unshaped channels compete in the LNI's unshaped fair-queuing (uFQ)
-+ * algorithm using the CR token bucket limit as their weight. Must be
-+ * non-zero or the channel is never scheduled. Returns -EINVAL if the
-+ * channel has its shaper enabled.
-+ */
-+int qman_ceetm_channel_set_weight(struct qm_ceetm_channel *channel,
-+				  u16 token_limit);
 +
 +/**
 + * qman_ceetm_channel_set_cq_cr_eligibility - set CQ commit-rate eligibility
@@ -2399,3 +2439,6 @@ index 7f7a493..9973198 100644
 +			   struct qm_ceetm_cq *cq, struct qm_ceetm_ccg *ccg);
 +
  #endif	/* __FSL_QMAN_H */
+-- 
+2.39.5
+
