@@ -1,3 +1,35 @@
+From 35670ed605e583704859b60069d0e4b86b366ffc Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Thu, 11 Jun 2026 05:57:12 +0000
+Subject: [PATCH 1/2] soc: fsl: qbman: add CEETM hierarchical egress shaper
+ support
+
+Port the QorIQ QMan CEETM (Customer Edge Egress Traffic Management) API
+from the legacy NXP SDK, modernised to mainline style. Provides
+hierarchical dual-rate shaping (LNI + channel), strict-priority class
+scheduling and byte/frame tail-drop congestion groups on the FMan egress
+path of DPAA1 SoCs, hard-coded for the LS1046A CEETM0 instance (DCP0).
+
+New optional symbol FSL_QMAN_CEETM (default n) builds qman_ceetm.c. CEETM
+management commands (verbs 0x70-0x7D) ride the existing affine-portal MC
+ring through one generic helper, qman_ceetm_mc_exec(), added to qman.c.
+The SDK bitfield wire structs are reimplemented with explicit __beN
+fields and big-endian byte arrays. CCSR additions (prescaler, sub-portal
+CEETM-mode enable/disable, qman_clk from DT clock-frequency) live in
+qman_ccsr.c.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ drivers/soc/fsl/qbman/Kconfig      |   10 +
+ drivers/soc/fsl/qbman/Makefile     |    1 +
+ drivers/soc/fsl/qbman/qman.c       |  100 +++
+ drivers/soc/fsl/qbman/qman_ccsr.c  |   76 +-
+ drivers/soc/fsl/qbman/qman_ceetm.c | 1227 ++++++++++++++++++++++++++++
+ drivers/soc/fsl/qbman/qman_priv.h  |  319 ++++++++
+ include/soc/fsl/qman.h             |  536 ++++++++++++
+ 7 files changed, 2264 insertions(+), 5 deletions(-)
+ create mode 100644 drivers/soc/fsl/qbman/qman_ceetm.c
+
 diff --git a/drivers/soc/fsl/qbman/Kconfig b/drivers/soc/fsl/qbman/Kconfig
 index 27774ec..8a5b1ac 100644
 --- a/drivers/soc/fsl/qbman/Kconfig
@@ -257,10 +289,10 @@ index aa5348f..13c2868 100644
  		.name = KBUILD_MODNAME,
 diff --git a/drivers/soc/fsl/qbman/qman_ceetm.c b/drivers/soc/fsl/qbman/qman_ceetm.c
 new file mode 100644
-index 0000000..f7a9df1
+index 0000000..ab52a8d
 --- /dev/null
 +++ b/drivers/soc/fsl/qbman/qman_ceetm.c
-@@ -0,0 +1,1117 @@
+@@ -0,0 +1,1227 @@
 +// SPDX-License-Identifier: (GPL-2.0 OR BSD-3-Clause)
 +/*
 + * Copyright 2008 - 2016 Freescale Semiconductor, Inc.
@@ -319,6 +351,11 @@ index 0000000..f7a9df1
 +	p[0] = (v >> 16) & 0xff;
 +	p[1] = (v >> 8) & 0xff;
 +	p[2] = v & 0xff;
++}
++
++static inline u32 be24_get(const u8 *p)
++{
++	return ((u32)p[0] << 16) | ((u32)p[1] << 8) | p[2];
 +}
 +
 +static inline u64 be40_get(const u8 *p)
@@ -466,6 +503,17 @@ index 0000000..f7a9df1
 +				  sizeof(q), res, sizeof(*res));
 +}
 +
++static int ceetm_query_cq(struct qm_ceetm_cq *cq,
++			  struct qm_mcr_ceetm_cq_query *res)
++{
++	struct qm_mcc_ceetm_cq_query q = {0};
++
++	q.cqid = cpu_to_be16((cq->parent->idx << 4) | cq->idx);
++	q.dcpid = cq->parent->dcp_idx;
++	return qman_ceetm_mc_exec(QM_CEETM_VERB_CQ_QUERY, &q, sizeof(q),
++				  res, sizeof(*res));
++}
++
 +/* ----------------------------------------------------------------------
 + * bps <-> token-rate conversion
 + * ---------------------------------------------------------------------- */
@@ -490,6 +538,8 @@ index 0000000..f7a9df1
 +	BUILD_BUG_ON(sizeof(struct qm_mcr_ceetm_cq_peek_pop_xsfdrread) != 64);
 +	BUILD_BUG_ON(sizeof(struct qm_mcc_ceetm_statistics_query_write) != 63);
 +	BUILD_BUG_ON(sizeof(struct qm_mcr_ceetm_statistics_query) != 64);
++	BUILD_BUG_ON(sizeof(struct qm_mcc_ceetm_cq_query) != 63);
++	BUILD_BUG_ON(sizeof(struct qm_mcr_ceetm_cq_query) != 64);
 +
 +	ret = qman_ceetm_get_prescaler(&pres);
 +	if (ret)
@@ -1376,13 +1426,105 @@ index 0000000..f7a9df1
 +}
 +EXPORT_SYMBOL_GPL(qman_ceetm_lfq_set_context);
 +
++
++/**
++ * qman_ceetm_dump_state - log a forensic snapshot of a CEETM sub-hierarchy
++ * @tag: label prefixed to every log line
++ * @sp: sub-portal to query, or NULL
++ * @lni: LNI to query, or NULL
++ * @channel: class-queue channel to query, or NULL
++ * @cq: class queue to query, or NULL
++ * @ccg: class congestion group to query, or NULL
++ *
++ * Pure-query diagnostic used to bisect egress blackholes: a CQ frame count
++ * stuck above zero means frames sit in QMan scheduling (mapping/prescaler);
++ * growing dequeue statistics without wire traffic implicate the FMan TX
++ * side (DCT context / port); growing CCG reject statistics mean congestion
++ * tail-drops. All commands are non-destructive queries.
++ */
++void qman_ceetm_dump_state(const char *tag, struct qm_ceetm_sp *sp,
++			   struct qm_ceetm_lni *lni,
++			   struct qm_ceetm_channel *channel,
++			   struct qm_ceetm_cq *cq, struct qm_ceetm_ccg *ccg)
++{
++	struct qm_mcr_ceetm_mapping_shaper_tcfc_query mst = {0};
++	struct qm_mcr_ceetm_class_scheduler_query csch = {0};
++	struct qm_mcr_ceetm_statistics_query stats = {0};
++	struct qm_mcr_ceetm_cq_query cqq = {0};
++	u16 pres = 0;
++	int ret;
++
++	qman_ceetm_get_prescaler(&pres);
++	pr_info("ceetm-dump[%s]: qman_clk %u pres 0x%04x\n", tag, qman_clk, pres);
++
++	if (sp) {
++		ret = ceetm_query_mst(CEETM_COMMAND_SP_MAPPING | sp->idx,
++				      sp->dcp_idx, &mst);
++		pr_info("ceetm-dump[%s]: sp %u map_ctl 0x%02x (ret %d)\n", tag,
++			sp->idx, mst.sp_mapping_query.map_ctl, ret);
++	}
++	if (lni) {
++		ret = ceetm_query_mst(CEETM_COMMAND_LNI_SHAPER | lni->idx,
++				      lni->dcp_idx, &mst);
++		pr_info("ceetm-dump[%s]: lni %u shaper ctl 0x%02x mps %u crtcr 0x%06x crtbl %u ertcr 0x%06x ertbl %u (ret %d)\n",
++			tag, lni->idx, mst.shaper_query.ctl, mst.shaper_query.mps,
++			be24_get(mst.shaper_query.crtcr),
++			be16_to_cpu(mst.shaper_query.crtbl),
++			be24_get(mst.shaper_query.ertcr),
++			be16_to_cpu(mst.shaper_query.ertbl), ret);
++	}
++	if (channel) {
++		ret = ceetm_query_mst(CEETM_COMMAND_CHANNEL_MAPPING |
++				      channel->idx, channel->dcp_idx, &mst);
++		pr_info("ceetm-dump[%s]: ch %u map_ctl 0x%02x (ret %d)\n", tag,
++			channel->idx, mst.channel_mapping_query.map_ctl, ret);
++		ret = ceetm_query_mst(CEETM_COMMAND_CHANNEL_SHAPER |
++				      channel->idx, channel->dcp_idx, &mst);
++		pr_info("ceetm-dump[%s]: ch %u shaper ctl 0x%02x crtcr 0x%06x crtbl %u ertcr 0x%06x ertbl %u (ret %d)\n",
++			tag, channel->idx, mst.shaper_query.ctl,
++			be24_get(mst.shaper_query.crtcr),
++			be16_to_cpu(mst.shaper_query.crtbl),
++			be24_get(mst.shaper_query.ertcr),
++			be16_to_cpu(mst.shaper_query.ertbl), ret);
++		ret = ceetm_query_csch(channel, &csch);
++		pr_info("ceetm-dump[%s]: ch %u csch gpc 0x%02x crem 0x%04x erem 0x%04x w %u %u %u %u %u %u %u %u (ret %d)\n",
++			tag, channel->idx, csch.gpc, be16_to_cpu(csch.crem),
++			be16_to_cpu(csch.erem), csch.w[0], csch.w[1], csch.w[2],
++			csch.w[3], csch.w[4], csch.w[5], csch.w[6], csch.w[7],
++			ret);
++	}
++	if (cq) {
++		u16 cqid = (cq->parent->idx << 4) | cq->idx;
++
++		ret = ceetm_query_cq(cq, &cqq);
++		pr_info("ceetm-dump[%s]: cq 0x%03x state 0x%04x ccgid %u frm_cnt %u (ret %d)\n",
++			tag, cqid, be16_to_cpu(cqq.state), be16_to_cpu(cqq.ccgid),
++			be24_get(cqq.frm_cnt), ret);
++		ret = ceetm_query_statistics(cqid, cq->parent->dcp_idx,
++					     CEETM_QUERY_DEQUEUE_STATISTICS,
++					     &stats);
++		pr_info("ceetm-dump[%s]: cq 0x%03x dequeued %llu frames %llu bytes (ret %d)\n",
++			tag, cqid, be40_get(stats.frm_cnt), be48_get(stats.byte_cnt),
++			ret);
++	}
++	if (ccg) {
++		ret = ceetm_query_statistics((ccg->parent->idx << 4) | ccg->idx,
++					     ccg->parent->dcp_idx,
++					     CEETM_QUERY_REJECT_STATISTICS, &stats);
++		pr_info("ceetm-dump[%s]: ccg %u rejected %llu frames %llu bytes (ret %d)\n",
++			tag, ccg->idx, be40_get(stats.frm_cnt),
++			be48_get(stats.byte_cnt), ret);
++	}
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_dump_state);
++
 +MODULE_LICENSE("Dual BSD/GPL");
 +MODULE_DESCRIPTION("QMan CEETM hierarchical egress shaper support");
 diff --git a/drivers/soc/fsl/qbman/qman_priv.h b/drivers/soc/fsl/qbman/qman_priv.h
-index fd1cf54..11a98d2 100644
+index fd1cf54..9b7f889 100644
 --- a/drivers/soc/fsl/qbman/qman_priv.h
 +++ b/drivers/soc/fsl/qbman/qman_priv.h
-@@ -280,3 +280,294 @@ int qman_shutdown_fq(u32 fqid);
+@@ -280,3 +280,322 @@ int qman_shutdown_fq(u32 fqid);
  int qman_requires_cleanup(void);
  void qman_done_cleanup(void);
  void qman_enable_irqs(void);
@@ -1662,6 +1804,34 @@ index fd1cf54..11a98d2 100644
 +	u8 __reserved3[32];
 +} __packed;
 +
++struct qm_mcc_ceetm_cq_query {
++	u8 __reserved1;
++	__be16 cqid;
++	u8 dcpid;
++	u8 __reserved2[59];
++} __packed;
++
++struct qm_mcr_ceetm_cq_query {
++	u8 verb;
++	u8 result;
++	u8 __reserved1[4];
++	__be16 ccgid;
++	__be16 state;
++	u8 pfdr_hptr[3];		/* 24-bit big-endian */
++	u8 pfdr_tptr[3];		/* 24-bit big-endian */
++	__be16 od1_xsfdr;
++	__be16 od2_xsfdr;
++	__be16 od3_xsfdr;
++	__be16 od4_xsfdr;
++	__be16 od5_xsfdr;
++	__be16 od6_xsfdr;
++	__be16 ra1_xsfdr;
++	__be16 ra2_xsfdr;
++	u8 __reserved2;
++	u8 frm_cnt[3];		/* 24-bit big-endian */
++	u8 __reserved3[28];
++} __packed;
++
 +/* QMan clock frequency (Hz), read from the DT 'clock-frequency' property */
 +extern u32 qman_clk;
 +
@@ -1678,7 +1848,7 @@ index fd1cf54..11a98d2 100644
 +int qman_ceetm_mc_exec(u8 verb, const void *cmd, size_t cmd_len,
 +		       void *rsp, size_t rsp_len);
 diff --git a/include/soc/fsl/qman.h b/include/soc/fsl/qman.h
-index 7f7a493..10ef43e 100644
+index 7f7a493..9973198 100644
 --- a/include/soc/fsl/qman.h
 +++ b/include/soc/fsl/qman.h
 @@ -33,6 +33,7 @@
@@ -1689,7 +1859,7 @@ index 7f7a493..10ef43e 100644
  
  /* Hardware constants */
  #define QM_CHANNEL_SWPORTAL0 0
-@@ -1256,4 +1257,521 @@ void qman_portal_get_iperiod(struct qman_portal *portal, u32 *iperiod);
+@@ -1256,4 +1257,539 @@ void qman_portal_get_iperiod(struct qman_portal *portal, u32 *iperiod);
   */
  int qman_portal_set_iperiod(struct qman_portal *portal, u32 iperiod);
  
@@ -2209,5 +2379,23 @@ index 7f7a493..10ef43e 100644
 + * Return: 0 on success, -ENODEV if the CCSR map is unavailable.
 + */
 +int qman_sp_disable_ceetm_mode(enum qm_dc_portal portal, u16 sub_portal);
++
++
++/**
++ * qman_ceetm_dump_state - log a forensic snapshot of a CEETM sub-hierarchy
++ * @tag: label prefixed to every log line
++ * @sp: sub-portal to query, or NULL
++ * @lni: LNI to query, or NULL
++ * @channel: class-queue channel to query, or NULL
++ * @cq: class queue to query, or NULL
++ * @ccg: class congestion group to query, or NULL
++ *
++ * Logs mapping/shaper/scheduler state plus live CQ occupancy and
++ * dequeue/reject statistics at pr_info level. Diagnostics only.
++ */
++void qman_ceetm_dump_state(const char *tag, struct qm_ceetm_sp *sp,
++			   struct qm_ceetm_lni *lni,
++			   struct qm_ceetm_channel *channel,
++			   struct qm_ceetm_cq *cq, struct qm_ceetm_ccg *ccg);
 +
  #endif	/* __FSL_QMAN_H */

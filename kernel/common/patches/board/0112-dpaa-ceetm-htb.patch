@@ -1,3 +1,56 @@
+From 78639b4696e139c6b3cba1a374e2b09a5f6bec20 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Thu, 11 Jun 2026 06:27:35 +0000
+Subject: [PATCH 2/2] dpaa: add CEETM HTB-offload egress shaper consumer
+
+Add a TC_SETUP_QDISC_HTB offload consumer that bridges the stock iproute2
+HTB-offload contract ("tc qdisc add dev ethX root handle 1: htb offload")
+to the QMan CEETM hierarchical egress traffic manager core added in the
+preceding commit. This replaces the legacy custom "ceetm" qdisc with the
+modern mlx5/nfp-style HTB offload pattern.
+
+New files dpaa_ceetm.{c,h} implement a flat root->leaf mapping:
+
+  - TC_HTB_CREATE claims a CEETM sub-portal + LNI, maps SP->LNI (enabling
+    CEETM mode on the FMan Tx port) and builds an unshaped default channel.
+  - each HTB leaf class -> its own CEETM channel on the shared LNI, with
+    the channel dual-rate shaper set to commit-rate = class rate and
+    excess-rate = class ceil, plus a single strict-priority class queue
+    and a byte-mode tail-drop CCG. The leaf is exposed as Tx queue
+    base + slot (base = dpaa_max_num_txqs()).
+  - TC_HTB_NODE_MODIFY reprograms the channel rates; TC_HTB_LEAF_DEL tears
+    a leaf down; TC_HTB_LEAF_QUERY_QUEUE maps classid -> Tx queue.
+  - TC_HTB_LEAF_TO_INNER and deeper hierarchies are rejected -EOPNOTSUPP.
+
+Because sp_set_lni() stops the conventional WQ egress FQs, dpaa_xmit()
+steers ALL egress (including the XDP Tx path) through the CEETM hierarchy
+while priv->ceetm is published: leaf Tx queues hit their own LFQ, every
+other queue falls back to the default channel. The netdev is allocated
+with DPAA_CEETM_MAX_TXQS (32) extra Tx queues and real_num_tx_queues is
+grown/restored as leaves come and go. CCG tail-drop rejections arrive as
+software ERNs and are counted as Tx drops.
+
+The dpaa_eth.c hooks are gated on CONFIG_DPAA_HW_CEETM with header stubs
+for the disabled build. count_ern()/dpaa_cleanup_tx_fd() are de-static'd
+and the enum port_type is promoted to dpaa_eth.h so the new file can share
+them. The 0104b CEETM scaffold (dpaa_ceetm_qdisc_install/destroy/supported
+and struct dpaa_ceetm_config) is removed from dpaa_fman_caps.{c,h} and the
+Kconfig entry is rewritten to depend on FSL_QMAN_CEETM.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ drivers/net/ethernet/freescale/dpaa/Kconfig   |  41 +-
+ drivers/net/ethernet/freescale/dpaa/Makefile  |   1 +
+ .../net/ethernet/freescale/dpaa/dpaa_ceetm.c  | 665 ++++++++++++++++++
+ .../net/ethernet/freescale/dpaa/dpaa_ceetm.h  |  79 +++
+ .../net/ethernet/freescale/dpaa/dpaa_eth.c    |  46 +-
+ .../net/ethernet/freescale/dpaa/dpaa_eth.h    |  18 +
+ .../ethernet/freescale/dpaa/dpaa_fman_caps.c  |  34 -
+ .../ethernet/freescale/dpaa/dpaa_fman_caps.h  |  71 --
+ 8 files changed, 821 insertions(+), 134 deletions(-)
+ create mode 100644 drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.c
+ create mode 100644 drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.h
+
 diff --git a/drivers/net/ethernet/freescale/dpaa/Kconfig b/drivers/net/ethernet/freescale/dpaa/Kconfig
 index 3b935ec..a66740a 100644
 --- a/drivers/net/ethernet/freescale/dpaa/Kconfig
@@ -67,10 +120,10 @@ index 51f194a..a9db711 100644
  obj-$(CONFIG_DPAA_AF_XDP_POOL) += af_xdp_pool/
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.c b/drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.c
 new file mode 100644
-index 0000000..ea78bc4
+index 0000000..81587dc
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.c
-@@ -0,0 +1,645 @@
+@@ -0,0 +1,665 @@
 +// SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
 +/*
 + * DPAA1 Ethernet -- QMan CEETM HTB-offload egress shaper consumer.
@@ -515,6 +568,8 @@ index 0000000..ea78bc4
 +	smp_store_release(&priv->ceetm, ceetm);
 +	netdev_info(net_dev, "CEETM HTB offload installed (sp %u, lni %u)\n",
 +		    ceetm->sp->idx, ceetm->lni->idx);
++	qman_ceetm_dump_state("install", ceetm->sp, ceetm->lni,
++			      ceetm->def.channel, ceetm->def.cq, ceetm->def.ccg);
 +	return 0;
 +
 +err_release_lni:
@@ -530,7 +585,25 @@ index 0000000..ea78bc4
 +static int dpaa_ceetm_htb_destroy(struct net_device *net_dev,
 +				  struct tc_htb_qopt_offload *opt)
 +{
-+	dpaa_ceetm_teardown(netdev_priv(net_dev));
++	struct dpaa_priv *priv = netdev_priv(net_dev);
++	struct dpaa_ceetm *ceetm = priv->ceetm;
++	int i;
++
++	/* Forensic snapshot before teardown (see qman_ceetm_dump_state). */
++	if (ceetm) {
++		qman_ceetm_dump_state("destroy", ceetm->sp, ceetm->lni,
++				      ceetm->def.channel, ceetm->def.cq,
++				      ceetm->def.ccg);
++		for (i = 0; i < DPAA_CEETM_MAX_TXQS; i++)
++			if (ceetm->leaf[i].used)
++				qman_ceetm_dump_state("leaf",
++						      NULL, NULL,
++						      ceetm->leaf[i].channel,
++						      ceetm->leaf[i].cq,
++						      ceetm->leaf[i].ccg);
++	}
++
++	dpaa_ceetm_teardown(priv);
 +	return 0;
 +}
 +
