@@ -257,10 +257,10 @@ index aa5348f..13c2868 100644
  		.name = KBUILD_MODNAME,
 diff --git a/drivers/soc/fsl/qbman/qman_ceetm.c b/drivers/soc/fsl/qbman/qman_ceetm.c
 new file mode 100644
-index 0000000..261c416
+index 0000000..f7a9df1
 --- /dev/null
 +++ b/drivers/soc/fsl/qbman/qman_ceetm.c
-@@ -0,0 +1,1091 @@
+@@ -0,0 +1,1117 @@
 +// SPDX-License-Identifier: (GPL-2.0 OR BSD-3-Clause)
 +/*
 + * Copyright 2008 - 2016 Freescale Semiconductor, Inc.
@@ -989,6 +989,32 @@ index 0000000..261c416
 +}
 +EXPORT_SYMBOL_GPL(qman_ceetm_channel_set_excess_rate_bps);
 +
++int qman_ceetm_channel_set_weight(struct qm_ceetm_channel *channel,
++				  u16 token_limit)
++{
++	struct qm_mcc_ceetm_mapping_shaper_tcfc_config opts = {0};
++
++	if (channel->shaper_enable) {
++		pr_err("CEETM: channel %u is shaped; uFQ weight not applicable\n",
++		       channel->idx);
++		return -EINVAL;
++	}
++
++	/*
++	 * Unshaped channels participate in the LNI's unshaped fair-queuing
++	 * (uFQ) algorithm: they are placed on the CR time-eligible list and
++	 * the CR token bucket limit acts as their fair-queuing weight. A
++	 * zero weight starves the channel completely, so this must be
++	 * programmed before any traffic is enqueued.
++	 */
++	channel->cr_token_bucket_limit = token_limit;
++	opts.cid = cpu_to_be16(CEETM_COMMAND_CHANNEL_SHAPER | channel->idx);
++	opts.dcpid = channel->dcp_idx;
++	opts.shaper_config.crtbl = cpu_to_be16(token_limit);
++	return ceetm_configure_mst(&opts);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_channel_set_weight);
++
 +static int channel_set_cq_eligibility(struct qm_ceetm_channel *channel,
 +				      unsigned int cq_level, int set, bool commit)
 +{
@@ -1652,7 +1678,7 @@ index fd1cf54..11a98d2 100644
 +int qman_ceetm_mc_exec(u8 verb, const void *cmd, size_t cmd_len,
 +		       void *rsp, size_t rsp_len);
 diff --git a/include/soc/fsl/qman.h b/include/soc/fsl/qman.h
-index 7f7a493..d896dfb 100644
+index 7f7a493..10ef43e 100644
 --- a/include/soc/fsl/qman.h
 +++ b/include/soc/fsl/qman.h
 @@ -33,6 +33,7 @@
@@ -1663,7 +1689,7 @@ index 7f7a493..d896dfb 100644
  
  /* Hardware constants */
  #define QM_CHANNEL_SWPORTAL0 0
-@@ -1256,4 +1257,508 @@ void qman_portal_get_iperiod(struct qman_portal *portal, u32 *iperiod);
+@@ -1256,4 +1257,521 @@ void qman_portal_get_iperiod(struct qman_portal *portal, u32 *iperiod);
   */
  int qman_portal_set_iperiod(struct qman_portal *portal, u32 iperiod);
  
@@ -1987,6 +2013,19 @@ index 7f7a493..d896dfb 100644
 + */
 +int qman_ceetm_channel_set_excess_rate_bps(struct qm_ceetm_channel *channel,
 +					   u64 bps, u16 max_burst_size);
++
++/**
++ * qman_ceetm_channel_set_weight - set the uFQ weight of an unshaped channel
++ * @channel: the unshaped channel
++ * @token_limit: the weight, expressed as a CR token bucket limit (bytes)
++ *
++ * Unshaped channels compete in the LNI's unshaped fair-queuing (uFQ)
++ * algorithm using the CR token bucket limit as their weight. Must be
++ * non-zero or the channel is never scheduled. Returns -EINVAL if the
++ * channel has its shaper enabled.
++ */
++int qman_ceetm_channel_set_weight(struct qm_ceetm_channel *channel,
++				  u16 token_limit);
 +
 +/**
 + * qman_ceetm_channel_set_cq_cr_eligibility - set CQ commit-rate eligibility
