@@ -1,7 +1,8 @@
-# Mono Gateway DK — LED & Fan Shell Cheatsheet
+# Mono Gateway DK — Hardware Control & Diagnostics Cheatsheet
 
 Hands-on shell recipes for the front-panel LP5812 status LEDs and the
-EMC2305 chassis fan on the LS1046A Mono Gateway running VyOS.
+EMC2305 chassis fan on the LS1046A Mono Gateway running VyOS, plus a
+reference for the built-in `*-check` diagnostic scripts (section 3).
 
 Both devices are exposed through standard Linux sysfs interfaces:
 
@@ -37,6 +38,12 @@ built as **loadable modules** in this kernel — only `none`,
 `disk-activity`, `disk-{read,write}`, `cpu`, `cpu0..3`, `panic`, and
 `mmc0` are visible by default. Load the rest on demand with
 `sudo modprobe ledtrig-<name>` before using sections 1.3 / 1.4.
+
+> **Day-to-day use:** prefer the shipped [`led`](board/scripts/led.py)
+> helper (section 1.6) — one command, fades, palette, no sysfs paths to
+> remember. The raw sysfs recipes in 1.1–1.5 are the underlying
+> mechanism and the fallback when you need triggers or per-channel
+> control the helper doesn't expose.
 
 ### 1.1 Discovery
 
@@ -133,7 +140,57 @@ echo 50     | sudo tee $LED/interval      # blink interval (ms)
 Use this to wire WAN-link, VPN-up, or per-port indicators without any
 userspace daemon.
 
-### 1.5 Boot-time defaults
+### 1.6 The `led` command (shipped helper)
+
+Every ISO installs [board/scripts/led.py](board/scripts/led.py) as
+**`/usr/local/bin/led`** — a flag-free, Python-stdlib-only CLI that
+treats the four LP5812 channels as one logical RGBW indicator. Every
+colour change **fades** from the current state to the target (linear
+interpolation in raw 8-bit PWM space, 50 ms total), and the helper
+forces `trigger=none` before writing, so it always works regardless of
+what trigger was active. Reads work as `vyos`; writes need `sudo`.
+
+```bash
+led                      # no args: print current state — "R G B W  #RRGGBBWW"
+sudo led off             # fade to all-off
+
+# Palette index (0–31, see below)
+sudo led 17
+
+# Explicit channels, decimal 0–255
+sudo led 255 0 0 0       # R G B W — pure red
+sudo led 0 128 255       # R G B   — W forced to 0
+
+# Hex
+sudo led '#33003300'     # RRGGBBWW (W = white channel, NOT alpha)
+sudo led '#336699'       # RRGGBB — W forced to 0
+
+# Demo / smoke-test modes (Ctrl-C stops and restores 'off')
+sudo led simulate        # jump to a random palette index every 0.1 s
+sudo led simulate 0.5    # ... every 0.5 s
+sudo led steps           # walk the palette 0→31→0 on a triangle wave
+```
+
+**Token disambiguation:** 8 hex digits always parse as `RRGGBBWW`;
+6 digits parse as hex only when `#`-prefixed or containing a hex letter
+(`a–f`) — a bare decimal token is a palette index. When in doubt,
+prefix hex with `#`.
+
+**The palette** is a baked-in 32-entry ramp designed as a
+network-load indicator: index 0 = faint grey idle baseline, 1–8 ramp
+through red, 9–15 orange/amber, 16–20 yellow→yellow-white, 21–25
+cooling whites, 26–31 blue-white "overdrive" up to maximum. Indices are
+stable across upgrades — scripts that hard-code an index keep working.
+
+**No runtime knobs by design:** fade time (`FADE_MS = 50`), frame rate,
+palette, and demo cadence are constants at the top of the script. There
+is no config file and no on-disk state — permanent re-tuning means
+editing `board/scripts/led.py` in this repo and rebuilding the ISO.
+
+**Exit codes:** `0` ok · `1` LP5812 driver missing · `2` bad arguments
+· `3` sysfs write failed (usually: forgot `sudo`).
+
+### 1.7 Boot-time defaults
 
 To make the LEDs come up in a known state on every boot, drop a oneshot
 unit on the running system:
@@ -289,13 +346,53 @@ sudo systemctl start fancontrol
 
 ---
 
+## 3. Built-in diagnostics — the `*-check` scripts
+
+Every ISO ships six self-contained diagnostic reporters in
+`/usr/local/bin/` (sources live in
+[board/scripts/](board/scripts/)). They share one convention:
+human-readable sectioned output with `[OK]`/`[WARN]`/`[FAIL]`/`[SKIP]`
+tags, colour when stdout is a tty, **exit 0 = healthy / 1 = fault /
+2 = wrong board or feature absent** — so each doubles as a
+Nagios/monit/cron probe. All run as the `vyos` user; a few sections
+inside them use `sudo` internally where root is needed (e.g. EEPROM and
+RNG reads).
+
+| Script | What it checks | Typical use |
+|--------|----------------|-------------|
+| `dpaa1-check` | Full DPAA1 networking posture: FMan/QMan/BMan DT nodes + portals, the five built-in drivers (`fsl-fman`, `fsl-fman-port`, `fsl-fman_xmdio`, `fsl_dpaa_mac`, `fsl_dpa`), microcode/MURAM, BMI ports, MEMACs + MDIO buses, PCD capability bits (KeyGen/CC/HM/Policer), jumbo bootarg, eth0–eth4 enumeration, and the AF_XDP counter block. | First stop when any network interface is missing or dead. Exit 1 pinpoints which layer of the DPAA1 stack broke. |
+| `sfp-check` | Decodes the EEPROM of every inserted SFP/SFP+ module (`ethtool -m`): vendor/PN/rev/serial, connector, transceiver class, bit rate, cable lengths — and prints a verdict plus a **paste-ready `SFP_QUIRK_F(...)` line** when it detects a copper 10GBASE-T rollball module masquerading as SR fiber. | Qualifying a new SFP module. If a module needs a kernel quirk, send the printed block to the maintainer; the patch line drops straight into the `sfp_quirks[]` array (patch `4009`/sibling). |
+| `fan-check` | All 5 thermal zones (ddr, serdes, fman, cluster, sec) tagged `[COOL]`/`[WARM]`/`[HOT]`/`[CRIT]` against the `fan-pid` setpoints, EMC2305 PWM duty (raw + %) and tach RPM, `fan-pid` daemon health + last log lines, and detection of a conflicting legacy `fancontrol`. | Thermal sanity check; exit 1 if `fan-pid` is dead or any zone is at/above crit. **Regression flag:** `pwm1=255 (100%)` here while the daemon journal says `pwm=51` means the broken sysfs PWM path is back in use. |
+| `caam-check` | CAAM (SEC 5.4) hardware crypto: DT controller node, driver posture (`caam`, `caam_jr` mandatory; `caamalg`/`caamhash`/`caamrng`/`caampkc` optional), active Job Ring count, dmesg banners, CAAM-backed algorithms in `/proc/crypto`, and the hardware RNG (`rng_current` = `caam-rng`, 16-byte sample read). FLAVOR=ask adds a CDX↔SEC FQ wiring section (self-skips elsewhere). | Verifying hardware crypto offload is alive — e.g. before relying on it for IPsec or `/dev/hwrng` entropy. |
+| `xsk-zc-check` | The AF_XDP true-zero-copy RX gate counters (`ethtool -S`, default eth3 eth4): `xsk_zc_eligible` / `xsk_zc_rx_armed` / `xsk_fill_guard_block` / `xsk_zc_rx_recovered` plus the wider `xsk_*` block, rendered as the spec §6.1.12 verdict — **dormant** (no ZC bind; the normal shipping state), **ZC-armed** (preconditions met), or **fault** (`xsk_fill_guard_block > 0` / attach-DMA errors — the ZC reprogram WRITE must stay disabled). | AF_XDP/VPP datapath debugging on the SFP+ ports. Accepts an interface list: `xsk-zc-check eth3`. |
+| `ask-check` | The full ASK2 fast-path chain, layer by layer in boot order: flavor/kernel posture, the four in-tree patches, `ask.ko`, `ask_bridge.ko`, FMan PCD subsystem, CAAM QI sharing, dpaa-eth flow_block, xfrm offload, `askd`, `ask-cli`, an nft `flags offload` round trip, and dmesg integrity. Uses an extra `[TODO]` tag for milestones not yet landed. | FLAVOR=ask images only (self-skips elsewhere). Tracks ASK2 bring-up progress — `[TODO]` failures map to specific PR rows in `plans/ASK2-IMPLEMENTATION.md`. |
+
+```bash
+# Run everything that applies to this board/flavor
+for c in dpaa1-check sfp-check fan-check caam-check xsk-zc-check ask-check; do
+    echo "== $c =="; "$c"; echo "rc=$?"
+done
+
+# Cron/monitoring probe example (alert on any non-zero exit)
+fan-check >/dev/null || logger -p user.err "fan-check failed rc=$?"
+```
+
+> When adding a new diagnostic, mirror this style (sectioned report,
+> tag set, 0/1/2 exit convention) and wire the install in
+> `bin/ci-setup-vyos-build.sh` alongside the existing six.
+
+---
+
 ## Quick reference
 
 ```bash
-# LED on
-echo 255 | sudo tee /sys/class/leds/status:red/brightness
+# LED: current state / colour / off (shipped helper, see 1.6)
+led
+sudo led '#336699'
+sudo led off
 
-# LED off
+# LED raw sysfs on/off
+echo 255 | sudo tee /sys/class/leds/status:red/brightness
 echo 0   | sudo tee /sys/class/leds/status:red/brightness
 
 # Fan full
