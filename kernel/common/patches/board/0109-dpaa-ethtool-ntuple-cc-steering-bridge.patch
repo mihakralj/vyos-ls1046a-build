@@ -1,0 +1,490 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
+Date: Tue, 10 Jun 2026 14:30:00 +0000
+Subject: [PATCH] dpaa: ethtool ntuple -> FMan CC static-tree bridge (M3-3b
+ production consumer)
+
+The fman_cc_tree_install() consumer API (0098/0106/0108) had no
+production caller - only the 0107 debugfs test harness. This patch adds
+the standard-kernel-interface bridge so userspace can drive FMan
+exact-match flow steering through ethtool ntuple (rxnfc), mirroring the
+0104 ingress-policer pattern (userspace -> standard kernel tool ->
+driver bridge):
+
+  ethtool -N ethX flow-type udp4 src-ip A dst-ip B dst-port P \
+          action <queue> loc <prio>
+
+The vyos-1x 'set system offload classify' CLI (vyos-1x-026) is the
+config-mode consumer that emits these ethtool invocations on commit.
+
+What this adds
+--------------
+- dpaa_ethtool.c: .get_rxnfc/.set_rxnfc. ETHTOOL_SRXCLSRLINS/SRXCLSRLDEL
+  accumulate per-port rules (struct dpaa_cls_rule, sorted by location =
+  match priority, lowest wins); every mutation rebuilds the port's
+  static CC tree via fman_cc_tree_destroy() + fman_cc_tree_install()
+  (the 0106 install -> get_base -> KGSE_CCBS-graft sequence; destroy
+  detaches the graft before freeing MURAM so silicon never walks a
+  stale tree - the brief steering gap falls back to the RSS path).
+  ETHTOOL_GRXCLSRLCNT/GRXCLSRULE/GRXCLSRLALL give `ethtool -n`
+  visibility; GRXRINGS reports DPAA_ETH_PCD_RXQ_NUM. A failed install
+  on rule insert rolls the rule list back so software state matches
+  silicon.
+
+- action semantics: the ethtool queue index [0..DPAA_ETH_PCD_RXQ_NUM)
+  selects the Nth FQ_TYPE_RX_PCD frame queue on priv->dpaa_fq_list; the
+  FQ's QMan channel determines the servicing CPU - the spec sec 5.4
+  "HW classifier -> right RX FQ -> right CPU" semantic. The resolved
+  FQID is carried in fman_cc_key.target_fqid so the 0108 leaf encoder
+  emits the real RM 8.7.4.3 hardware enqueue-AD. RX_CLS_FLOW_DISC
+  (drop) is rejected (-EOPNOTSUPP, no drop leaf encoding).
+
+- validation (documented limits, not silent): flow-type tcp4/udp4 only;
+  each field mask all-ones or all-zero (the CC record is exact-match -
+  no prefixes); at least one field must participate; at most
+  FMAN_CC_MAX_STATIC_KEYS (32) rules per port; location < 32 (or
+  RX_CLS_LOC_ANY -> lowest free). The KG-emitted compare key carries no
+  protocol byte (0108), so tcp4/udp4 rules with identical address/port
+  tuples match the SAME traffic - accepted, documented in the block
+  comment. Set-side gated on FMAN_CAP_CC_EXACT_MATCH so non-210-ucode
+  boards reject with -EOPNOTSUPP at the first ethtool call.
+
+- dpaa_eth.h: cls_rules/cls_rule_cnt/cls_tree_installed on dpaa_priv
+  (mutated only under rtnl - the rxnfc entry points); dpaa_cls_flush()
+  declaration.
+
+- dpaa_eth.c: INIT_LIST_HEAD(&priv->cls_rules) at probe;
+  dpaa_cls_flush() in dpaa_remove() (detaches the graft + frees the
+  tree before the FQs it steers to are freed).
+
+Native arm64 compile of drivers/net/ethernet/freescale/{dpaa,fman}/
+with LOCALVERSION=-vyos: 0 warnings / 0 errors.
+
+Spec sec 5.4 (M3-3b production consumer).
+
+Signed-off-by: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 48aa3b7..d4eedfc 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -4171,6 +4171,7 @@ priv->egress_fqs = devm_kcalloc(dev, dpaa_max_num_txqs(),
+ 	priv->dpaa_bp = dpaa_bp;
+ 
+ 	INIT_LIST_HEAD(&priv->dpaa_fq_list);
++	INIT_LIST_HEAD(&priv->cls_rules);
+ 
+ 	memset(&port_fqs, 0, sizeof(port_fqs));
+ 
+@@ -4328,6 +4329,11 @@ static void dpaa_remove(struct platform_device *pdev)
+ 	unregister_netdev(net_dev);
+ 	phylink_destroy(priv->mac_dev->phylink);
+ 
++	/* 0109: tear down the ethtool-ntuple CC steering tree (detaches the
++	 * KGSE_CCBS graft first) before the FQs it steers to are freed.
++	 */
++	dpaa_cls_flush(net_dev);
++
+ 	err = dpaa_fq_free(dev, &priv->dpaa_fq_list);
+ 	if (err)
+ 		dev_err(dev, "Failed to free FQs on remove (%pE)\n",
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+index fc8943b..bd3aa7e 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -205,6 +205,17 @@ u32 hm_vlan_strip_handle;
+ 	 * Spec sec 5.6; board patch 0104.
+ 	 */
+ 	bool ingress_police_installed;
++	/* M3-3b production consumer (patch 0109): ethtool ntuple -> FMan CC
++	 * static-tree bridge. cls_rules holds the ETHTOOL_SRXCLSRLINS rules
++	 * (struct dpaa_cls_rule, sorted by location); cls_rule_cnt counts
++	 * them; cls_tree_installed tracks whether a CC tree is currently
++	 * grafted for this port. Mutated only under rtnl (the rxnfc paths).
++	 * Spec sec 5.4; the CLI consumer is vyos-1x 'system offload classify'
++	 * shelling out to ethtool -N.
++	 */
++	struct list_head cls_rules;
++	unsigned int cls_rule_cnt;
++	bool cls_tree_installed;
+ 	/* KeyGen catch-all scheme that routes every RX frame on this port
+ 	 * through the policer profile (next_engine = PLCR). NULL when no
+ 	 * ingress policer is installed. Created/bound in
+@@ -550,6 +561,11 @@ static inline u16 dpaa_fq_to_qband(struct dpaa_priv *priv, u32 fqid)
+ /* from dpaa_ethtool.c */
+ extern const struct ethtool_ops dpaa_ethtool_ops;
+ 
++/* 0109: drop all ethtool ntuple classify rules + the grafted CC tree.
++ * Called from dpaa_remove() before the FQs are freed.
++ */
++void dpaa_cls_flush(struct net_device *net_dev);
++
+ /* from dpaa_eth_sysfs.c */
+ void dpaa_eth_sysfs_remove(struct device *dev);
+ void dpaa_eth_sysfs_init(struct device *dev);
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+index 781dab9..a9ed3fb 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ethtool.c
+@@ -11,8 +11,11 @@
+ #include <linux/platform_device.h>
+ #include <linux/net_tstamp.h>
+ #include <linux/fsl/ptp_qoriq.h>
++#include <linux/fsl/fman_pcd.h>
+ 
+ #include "dpaa_eth.h"
++#include "dpaa_fman_caps.h"
++#include "fman.h"
+ #include "mac.h"
+ 
+ static const char dpaa_stats_percpu[][ETH_GSTRING_LEN] = {
+@@ -535,6 +538,340 @@ revert_values:
+ 	return res;
+ }
+ 
++/* ------------------------------------------------------------------ *
++ * 0109: ethtool ntuple -> FMan CC static-tree bridge (M3-3b consumer).
++ *
++ * The production userspace surface for FMan exact-match flow steering:
++ * ETHTOOL_SRXCLSRLINS/SRXCLSRLDEL (`ethtool -N ethX flow-type udp4
++ * src-ip A dst-ip B dst-port P action Q loc N`) accumulate per-port
++ * rules; every mutation rebuilds the port's static CC tree via
++ * fman_cc_tree_destroy() + fman_cc_tree_install() (the 0106 dpaa-side
++ * install->get_base->KGSE_CCBS-graft sequence). The vyos-1x
++ * 'system offload classify' CLI drives this via ethtool.
++ *
++ * Semantics and limits (documented, not silent):
++ *  - flow-type tcp4/udp4 only. The KG-emitted 16-byte composite the CC
++ *    walker compares (0108: [SIP|DIP|SPI=0|SPORT|DPORT]) carries NO
++ *    protocol byte, so a tcp4 and a udp4 rule with identical
++ *    addresses+ports match the SAME traffic. Both spellings accepted.
++ *  - each field mask is all-ones (participates) or all-zero (wildcard);
++ *    partial prefixes are rejected (-EINVAL) - the CC record is
++ *    exact-match per masked byte and the KG composite is not prefix-
++ *    aligned.
++ *  - action = RX queue index [0 .. DPAA_ETH_PCD_RXQ_NUM), resolved to
++ *    the Nth FQ_TYPE_RX_PCD frame queue on priv->dpaa_fq_list; the FQ's
++ *    channel determines the servicing CPU (the spec sec 5.4 "HW
++ *    classifier -> right RX FQ -> right CPU" semantic). RX_CLS_FLOW_DISC
++ *    (drop) is not supported by the leaf AD encoder - rejected.
++ *  - at most FMAN_CC_MAX_STATIC_KEYS (32) rules per port; location is
++ *    the match priority (lowest wins, mirroring ethtool semantics).
++ *
++ * Locking: all rxnfc entry points run under rtnl; cls_rules is only
++ * touched here and in dpaa_cls_flush() (driver remove), so no extra
++ * lock is needed.
++ * ------------------------------------------------------------------ */
++
++struct dpaa_cls_rule {
++	struct list_head node;
++	struct ethtool_rx_flow_spec fs;
++};
++
++/* Resolve an ethtool action queue index to the Nth RX PCD FQID. */
++static int dpaa_cls_queue_to_fqid(struct dpaa_priv *priv, u64 ring_cookie,
++				  u32 *fqid)
++{
++	struct dpaa_fq *fq;
++	u64 queue;
++	u32 n = 0;
++
++	if (ring_cookie == RX_CLS_FLOW_DISC)
++		return -EOPNOTSUPP;
++	queue = ethtool_get_flow_spec_ring(ring_cookie);
++
++	list_for_each_entry(fq, &priv->dpaa_fq_list, list) {
++		if (fq->fq_type != FQ_TYPE_RX_PCD)
++			continue;
++		if (n == queue) {
++			*fqid = fq->fqid;
++			return 0;
++		}
++		n++;
++	}
++	return -EINVAL;
++}
++
++static struct dpaa_cls_rule *dpaa_cls_find(struct dpaa_priv *priv, u32 loc)
++{
++	struct dpaa_cls_rule *r;
++
++	list_for_each_entry(r, &priv->cls_rules, node)
++		if (r->fs.location == loc)
++			return r;
++	return NULL;
++}
++
++/* Validate one ethtool_rx_flow_spec against the 0108 key shape. */
++static int dpaa_cls_validate(struct dpaa_priv *priv,
++			     const struct ethtool_rx_flow_spec *fs)
++{
++	const struct ethtool_tcpip4_spec *m = &fs->m_u.tcp_ip4_spec;
++
++	if (fs->flow_type != TCP_V4_FLOW && fs->flow_type != UDP_V4_FLOW)
++		return -EOPNOTSUPP;
++
++	/* Exact-match-or-wildcard per field; no prefixes, no tos. */
++	if (m->ip4src != 0 && m->ip4src != cpu_to_be32(0xffffffff))
++		return -EINVAL;
++	if (m->ip4dst != 0 && m->ip4dst != cpu_to_be32(0xffffffff))
++		return -EINVAL;
++	if (m->psrc != 0 && m->psrc != cpu_to_be16(0xffff))
++		return -EINVAL;
++	if (m->pdst != 0 && m->pdst != cpu_to_be16(0xffff))
++		return -EINVAL;
++	if (m->tos)
++		return -EINVAL;
++	/* At least one field must participate. */
++	if (!m->ip4src && !m->ip4dst && !m->psrc && !m->pdst)
++		return -EINVAL;
++
++	if (fs->location >= FMAN_CC_MAX_STATIC_KEYS)
++		return -EINVAL;
++
++	return 0;
++}
++
++/* Rebuild + reinstall the port's static CC tree from cls_rules.
++ * Empty rule list tears the tree down (port reverts to plain RSS).
++ */
++static int dpaa_cls_reinstall(struct dpaa_priv *priv)
++{
++	struct fman_cc_static_tree *tree;
++	struct dpaa_cls_rule *r;
++	struct fman *fm;
++	u8 port_id;
++	int err;
++
++	if (!priv->mac_dev)
++		return -ENODEV;
++	fm = fman_bind(priv->mac_dev->fman_dev);
++	if (!fm)
++		return -ENODEV;
++	/* port[0] is the RX port (enum port_type {RX, TX} in dpaa_eth.c). */
++	port_id = fman_port_get_id(priv->mac_dev->port[0]);
++
++	/* Detach the graft + free the old tree FIRST (fman_cc_tree_destroy
++	 * clears KGSE_CCBS before freeing MURAM, so silicon never walks a
++	 * stale tree). Brief steering gap = frames take the normal RSS path.
++	 */
++	if (priv->cls_tree_installed) {
++		fman_cc_tree_destroy(fm, port_id);
++		priv->cls_tree_installed = false;
++	}
++
++	if (!priv->cls_rule_cnt)
++		return 0;
++
++	tree = kzalloc(sizeof(*tree), GFP_KERNEL);
++	if (!tree)
++		return -ENOMEM;
++
++	/* cls_rules is kept sorted by location = match priority. */
++	list_for_each_entry(r, &priv->cls_rules, node) {
++		const struct ethtool_tcpip4_spec *h = &r->fs.h_u.tcp_ip4_spec;
++		const struct ethtool_tcpip4_spec *m = &r->fs.m_u.tcp_ip4_spec;
++		struct fman_cc_key *k = &tree->keys[tree->num_keys];
++		u32 fqid;
++
++		err = dpaa_cls_queue_to_fqid(priv, r->fs.ring_cookie, &fqid);
++		if (err)
++			goto out_free;
++
++		k->proto = (r->fs.flow_type == TCP_V4_FLOW) ?
++			   FMAN_CC_PROTO_TCP : FMAN_CC_PROTO_UDP;
++		if (m->ip4src) {
++			k->src_ip = be32_to_cpu(h->ip4src);
++			k->src_ip_mask = 0xffffffff;
++		}
++		if (m->ip4dst) {
++			k->dst_ip = be32_to_cpu(h->ip4dst);
++			k->dst_ip_mask = 0xffffffff;
++		}
++		if (m->psrc)
++			k->src_port = be16_to_cpu(h->psrc);
++		if (m->pdst)
++			k->dst_port = be16_to_cpu(h->pdst);
++		k->target_fqid = fqid;
++		k->target_qband = dpaa_fq_to_qband(priv, fqid);
++		tree->num_keys++;
++	}
++	/* miss_fqid 0: non-matching traffic stays on the RSS path. */
++
++	err = fman_cc_tree_install(fm, port_id, tree);
++	if (!err)
++		priv->cls_tree_installed = true;
++
++out_free:
++	kfree(tree);
++	return err;
++}
++
++static int dpaa_cls_ins(struct dpaa_priv *priv,
++			const struct ethtool_rx_flow_spec *fs)
++{
++	struct dpaa_cls_rule *r, *pos, *replaced = NULL;
++	int err;
++
++	err = dpaa_cls_validate(priv, fs);
++	if (err)
++		return err;
++
++	r = kzalloc(sizeof(*r), GFP_KERNEL);
++	if (!r)
++		return -ENOMEM;
++	r->fs = *fs;
++
++	replaced = dpaa_cls_find(priv, fs->location);
++	if (replaced) {
++		list_del(&replaced->node);
++		priv->cls_rule_cnt--;
++	} else if (priv->cls_rule_cnt >= FMAN_CC_MAX_STATIC_KEYS) {
++		kfree(r);
++		return -ENOSPC;
++	}
++
++	/* Insert sorted by location (= priority, lowest first). */
++	list_for_each_entry(pos, &priv->cls_rules, node)
++		if (pos->fs.location > r->fs.location)
++			break;
++	list_add_tail(&r->node, &pos->node);
++	priv->cls_rule_cnt++;
++
++	err = dpaa_cls_reinstall(priv);
++	if (err) {
++		/* Roll the list back so state matches silicon. */
++		list_del(&r->node);
++		priv->cls_rule_cnt--;
++		kfree(r);
++		if (replaced) {
++			list_for_each_entry(pos, &priv->cls_rules, node)
++				if (pos->fs.location > replaced->fs.location)
++					break;
++			list_add_tail(&replaced->node, &pos->node);
++			priv->cls_rule_cnt++;
++			if (dpaa_cls_reinstall(priv))
++				netif_err(priv, drv, priv->net_dev,
++					  "classify rollback reinstall failed\n");
++		}
++		return err;
++	}
++
++	kfree(replaced);
++	return 0;
++}
++
++static int dpaa_cls_del(struct dpaa_priv *priv, u32 loc)
++{
++	struct dpaa_cls_rule *r = dpaa_cls_find(priv, loc);
++	int err;
++
++	if (!r)
++		return -ENOENT;
++	list_del(&r->node);
++	priv->cls_rule_cnt--;
++	err = dpaa_cls_reinstall(priv);
++	kfree(r);
++	return err;
++}
++
++void dpaa_cls_flush(struct net_device *net_dev)
++{
++	struct dpaa_priv *priv = netdev_priv(net_dev);
++	struct dpaa_cls_rule *r, *tmp;
++
++	list_for_each_entry_safe(r, tmp, &priv->cls_rules, node) {
++		list_del(&r->node);
++		kfree(r);
++	}
++	priv->cls_rule_cnt = 0;
++	if (priv->cls_tree_installed && priv->mac_dev) {
++		struct fman *fm = fman_bind(priv->mac_dev->fman_dev);
++
++		if (fm)
++			fman_cc_tree_destroy(fm,
++				fman_port_get_id(priv->mac_dev->port[0]));
++	}
++	priv->cls_tree_installed = false;
++}
++
++static int dpaa_get_rxnfc(struct net_device *net_dev,
++			  struct ethtool_rxnfc *cmd, u32 *rule_locs)
++{
++	struct dpaa_priv *priv = netdev_priv(net_dev);
++	struct dpaa_cls_rule *r;
++	u32 n = 0;
++
++	switch (cmd->cmd) {
++	case ETHTOOL_GRXRINGS:
++		cmd->data = DPAA_ETH_PCD_RXQ_NUM;
++		return 0;
++	case ETHTOOL_GRXCLSRLCNT:
++		cmd->rule_cnt = priv->cls_rule_cnt;
++		cmd->data = FMAN_CC_MAX_STATIC_KEYS;
++		cmd->data |= RX_CLS_LOC_SPECIAL;
++		return 0;
++	case ETHTOOL_GRXCLSRULE:
++		r = dpaa_cls_find(priv, cmd->fs.location);
++		if (!r)
++			return -ENOENT;
++		cmd->fs = r->fs;
++		return 0;
++	case ETHTOOL_GRXCLSRLALL:
++		list_for_each_entry(r, &priv->cls_rules, node) {
++			if (n >= cmd->rule_cnt)
++				return -EMSGSIZE;
++			rule_locs[n++] = r->fs.location;
++		}
++		cmd->rule_cnt = n;
++		cmd->data = FMAN_CC_MAX_STATIC_KEYS;
++		return 0;
++	default:
++		return -EOPNOTSUPP;
++	}
++}
++
++static int dpaa_set_rxnfc(struct net_device *net_dev,
++			  struct ethtool_rxnfc *cmd)
++{
++	struct dpaa_priv *priv = netdev_priv(net_dev);
++	struct ethtool_rx_flow_spec fs;
++
++	if (!(dpaa_fman_get_caps() & FMAN_CAP_CC_EXACT_MATCH))
++		return -EOPNOTSUPP;
++
++	switch (cmd->cmd) {
++	case ETHTOOL_SRXCLSRLINS:
++		fs = cmd->fs;
++		/* `ethtool -N` without `loc` passes RX_CLS_LOC_ANY: pick the
++		 * lowest free location.
++		 */
++		if (fs.location & RX_CLS_LOC_SPECIAL) {
++			u32 loc;
++
++			for (loc = 0; loc < FMAN_CC_MAX_STATIC_KEYS; loc++)
++				if (!dpaa_cls_find(priv, loc))
++					break;
++			if (loc == FMAN_CC_MAX_STATIC_KEYS)
++				return -ENOSPC;
++			fs.location = loc;
++		}
++		return dpaa_cls_ins(priv, &fs);
++	case ETHTOOL_SRXCLSRLDEL:
++		return dpaa_cls_del(priv, cmd->fs.location);
++	default:
++		return -EOPNOTSUPP;
++	}
++}
++
+ const struct ethtool_ops dpaa_ethtool_ops = {
+ 	.supported_coalesce_params = ETHTOOL_COALESCE_RX_USECS |
+ 				     ETHTOOL_COALESCE_RX_MAX_FRAMES,
+@@ -552,6 +889,8 @@ const struct ethtool_ops dpaa_ethtool_ops = {
+ 	.set_link_ksettings = dpaa_set_link_ksettings,
+ 	.get_rxfh_fields = dpaa_get_rxfh_fields,
+ 	.set_rxfh_fields = dpaa_set_rxfh_fields,
++	.get_rxnfc = dpaa_get_rxnfc,
++	.set_rxnfc = dpaa_set_rxnfc,
+ 	.get_ts_info = dpaa_get_ts_info,
+ 	.get_coalesce = dpaa_get_coalesce,
+ 	.set_coalesce = dpaa_set_coalesce,

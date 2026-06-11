@@ -1,0 +1,52 @@
+diff --git a/src/udev/vyos_net_name b/src/udev/vyos_net_name
+index 568734c..cc789d6 100755
+--- a/src/udev/vyos_net_name
++++ b/src/udev/vyos_net_name
+@@ -95,6 +95,37 @@ def get_biosdevname(ifname: str) -> str:
+     return intf if biosname == '' else biosname
+ 
+ 
++def get_fman_predefined(intf_name: str) -> str:
++    """NXP LS1046A (Mono Gateway DK): FMan MACs probe in DT unit-address
++    order, which does not match the physical front-panel port order. Map
++    the netdev's FMan MAC of_node to the canonical physical name so a
++    fresh install or live boot (no hw-id entries yet) enumerates eth0..eth4
++    left-to-right: eth0/eth1/eth2 = left/center/right RJ45, eth3/eth4 =
++    left/right SFP+. Returns '' on any other hardware (config-file hw-id
++    mapping always takes precedence over this fallback).
++    """
++    try:
++        with open('/proc/device-tree/compatible', 'rb') as f:
++            if b'fsl,ls1046a' not in f.read():
++                return ''
++    except OSError:
++        return ''
++    fman_map = {
++        'ethernet@e8000': 'eth0',  # FMan MAC5,  left RJ45
++        'ethernet@ea000': 'eth1',  # FMan MAC6,  center RJ45
++        'ethernet@e2000': 'eth2',  # FMan MAC2,  right RJ45
++        'ethernet@f0000': 'eth3',  # FMan MAC9,  left SFP+
++        'ethernet@f2000': 'eth4',  # FMan MAC10, right SFP+
++    }
++    try:
++        of_node = os.path.basename(
++            os.path.realpath(f'/sys/class/net/{intf_name}/device/of_node')
++        )
++    except OSError:
++        return ''
++    return fman_map.get(of_node, '')
++
++
+ def leave_rescan_hint(intf_name: str, hwid: str):
+     """Write interface information reported by udev
+ 
+@@ -221,6 +252,9 @@ def on_boot_event(intf_name: str, hwid: str, predefined: str = '') -> str:
+     add_assigned_interfaces(interfaces)
+     logger.debug(f'adding assigned interfaces: {interfaces}')
+ 
++    if not predefined:
++        predefined = get_fman_predefined(intf_name)
++
+     if predefined:
+         newname = predefined
+         logger.info(f"predefined interface name for '{intf_name}' is '{newname}'")

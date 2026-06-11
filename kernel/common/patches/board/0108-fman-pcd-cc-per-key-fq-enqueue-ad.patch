@@ -1,0 +1,522 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Tue, 10 Jun 2026 12:00:00 +0000
+Subject: [PATCH] fman: per-key FQ enqueue-AD + silicon-truth CC key layout
+ (M3-3b close-out)
+
+Closes the last M3-3b gap (spec sec 5.4): a CC key can now steer a
+specific 5-tuple to a SPECIFIC target frame queue.  The 0107 lifecycle
+validation (2026-06-10) proved install/graft/traffic/detach on silicon
+but left two known deficiencies in the 0098 static installer; this patch
+fixes both.
+
+1. Real hardware enqueue-AD (the headline item)
+-----------------------------------------------
+0098's cc_write_leaf_ad() wrote a SOFT encoding (word0 =
+qband<<16|hm<<8|type - "the dpaa flavor layer owns the qband->FQID
+map"), NOT the RM 8.7.4.3 hardware AD, so matched frames completed the
+CC walk and fell through to normal scheme dispatch.  The leaf encoder
+now emits the ask20-HW-PROVEN encoding (PR14z20/PR14z22 silicon
+captures, 24M+ frames CC-matched and silicon-forwarded) whenever a
+target FQID is supplied:
+
+  word0 (0x0) = fqid & 0x00ffffff      (target frame queue)
+  word1 (0x4) = 0                      (no policer pass)
+  word2 (0x8) = RESULT_CF [| NADEN]    (enqueue; walk HMTD first when
+                                        an HM node is chained)
+  word3 (0xc) = hm_handle              (HMTD MURAM offset; 0 = none)
+
+A silicon HIT on such a row enqueues the frame directly to the target
+FQ, bypassing the KeyGen hash dispatch.  fqid == 0 keeps the
+DUT-validated soft fall-through encoding byte-identical (and remains
+the default), so existing behaviour is unchanged unless a caller
+explicitly opts in.  The miss slot uses the same selector via the new
+miss_fqid (0 = miss traffic stays on the port's RSS path).
+
+New plumbing: u32 target_fqid in struct fman_pcd_cc_hw_key and struct
+fman_cc_key, u32 miss_fqid in struct fman_pcd_cc_hw_spec and struct
+fman_cc_static_tree, passthrough in dpaa_cc_key_to_hw() /
+fman_cc_tree_install().  Resolving target_qband -> FQID stays the dpaa
+flavor layer's job (per the 0098 design note); an explicit FQID is
+authoritative.
+
+2. Silicon-truth match-key layout (required for a HIT to ever occur)
+--------------------------------------------------------------------
+Under the 0106 KGSE_CCBS graft model the CC walker compares the
+KeyGen-EXTRACTED composite - the bytes the port's existing RSS scheme
+emits per its KGSE_EKFC (0x00180206 = IPSRC1|IPDST1|IPSEC_SPI|L4PSRC|
+L4PDST), i.e. [SIP(4)|DIP(4)|SPI(4)=0|SPORT(2)|DPORT(2)] = 16 bytes.
+This was DUT-proven on ask20 (PR14z14 silicon truth; PR14z22 DROP-miss
+diagnostic: 24M frames matched with this layout).  0098's composite
+(ethertype/proto/flags/IP/ports) could NEVER match because the walker
+does not re-extract.  cc_pack_key() now emits the silicon-truth layout.
+Documented limitations (loud, not silent): ETHERTYPE/PROTO cannot
+participate (not in the KG composite); IPv6 keys are rejected with
+-ENOTSUPP at install; SPI is exact-matched as zero (plain-IP shape).
+
+3. Harness extension
+--------------------
+The 0107 cc_test debugfs node gains an optional trailing argument:
+
+  install <hwport> <qband> <proto> <src_ip> <dst_ip> <dport> [fqid-hex]
+
+A non-zero fqid (e.g. 0x6e = eth3's RX-default FQ from the silicon
+captures) arms the real per-key enqueue-AD for DUT validation: send a
+matching flow, confirm delivery via the target FQ's counters, then
+clear and confirm fall-through is restored.
+
+Native arm64 compile of drivers/net/ethernet/freescale/{fman,dpaa}/
+with LOCALVERSION=-vyos: 0 warnings / 0 errors.
+
+Spec sec 5.4; AD encoding per LS1046A RM 8.7.4.3 Table 8-119, cross-ref
+SDK fm_cc.c GetAdOfTypeResult()/NextStepAd().
+
+Signed-off-by: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+index e867fa5..8fcc571 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -244,6 +244,7 @@ hw->present |= FMAN_PCD_CC_HW_F_DST_PORT;
+ }
+ 
+ hw->target_qband = k->target_qband;
++hw->target_fqid = k->target_fqid;
+ hw->hm_handle = k->hm_handle;
+ }
+ 
+@@ -287,6 +288,7 @@ return -ENOMEM;
+ 
+ hw->num_keys = spec->num_keys;
+ hw->miss_qband = spec->miss_qband;
++hw->miss_fqid = spec->miss_fqid;
+ for (i = 0; i < spec->num_keys; i++)
+ dpaa_cc_key_to_hw(&spec->keys[i], &hw->keys[i]);
+ 
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+index eb2aa1a..4fcc610 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+@@ -141,8 +141,17 @@ void fman_cc_tree_destroy(struct fman *fm, u8 port_id);
+  * @src_ip_mask:  prefix-style mask for src_ip (host-endian); 0 = any
+  * @dst_ip_mask:  prefix-style mask for dst_ip (host-endian); 0 = any
+  * @target_qband: qband [0 .. xsk_max_qbands-1] to steer matching frames
++ * @target_fqid:  explicit target frame-queue id for matching frames.
++ *                Non-zero = the leaf AD is the REAL RM 8.7.4.3 hardware
++ *                enqueue-AD: a silicon HIT enqueues directly to this FQ
++ *                (per-key FQ steering).  0 = soft fall-through (the frame
++ *                proceeds to the normal RSS scheme dispatch).  When 0 and
++ *                a consumer wants qband steering it must resolve
++ *                target_qband -> FQID itself (the dpaa flavor layer owns
++ *                that map) and set this field.
+  * @hm_handle:    HM node handle to chain after match (0 = no HM); the
+- *                value returned by fman_hm_node_install() per spec sec 5.5
++ *                value returned by fman_hm_node_install() per spec sec 5.5.
++ *                Honoured only with a non-zero @target_fqid.
+  * @is_ipv6:      when true, match src_ip6/dst_ip6 instead of src_ip/dst_ip
+  *
+  * A field is matched iff it (or its mask) is non-zero. The productive
+@@ -163,6 +172,7 @@ struct fman_cc_key {
+ 	u16 src_port;
+ 	u16 dst_port;
+ 	u16 target_qband;
++	u32 target_fqid;
+ 	u32 hm_handle;
+ };
+ 
+@@ -171,6 +181,10 @@ struct fman_cc_key {
+  * @num_keys: number of valid entries in @keys
+  * @miss_qband: qband for frames matching no key (the tree's miss action);
+  *              default 0 maps to the existing RSS-hash default path
++ * @miss_fqid: explicit FQID for frames matching no key; non-zero = the
++ *             miss slot carries a hardware enqueue-AD (steers ALL
++ *             non-matching traffic - use deliberately), 0 = miss traffic
++ *             stays on the existing RSS-hash path (the default)
+  * @keys: the key array, evaluated in order; first match wins
+  *
+  * Passed to fman_cc_tree_install() for the static (default/vpp) lifecycle.
+@@ -183,6 +197,7 @@ struct fman_cc_key {
+ struct fman_cc_static_tree {
+ 	u16 num_keys;
+ 	u16 miss_qband;
++	u32 miss_fqid;
+ 	struct fman_cc_key keys[FMAN_CC_MAX_STATIC_KEYS];
+ };
+ 
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index 9ac649c..fb8dd6f 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -71,9 +71,11 @@
+  *                     entries are zero = no-match.  gen_pool min_alloc_order
+  *                     = 8 satisfies the 256-byte alignment naturally.
+  * CC_AD_ENTRY_SIZE  : bytes per action descriptor.
+- * CC_KEY_SIZE       : our fixed extracted-key width.  We extract a canonical
+- *                     16-byte composite (ethertype/proto/IP/ports) packed
+- *                     big-endian; the per-key match record is key+mask =
++ * CC_KEY_SIZE       : the fixed compared-key width.  Under the KGSE_CCBS
++ *                     graft model the silicon compares the KeyGen-EXTRACTED
++ *                     composite (the port scheme's EKFC bytes:
++ *                     [SIP|DIP|SPI|SPORT|DPORT] = 16 bytes, see
++ *                     cc_pack_key()); the per-key match record is key+mask =
+  *                     2 * CC_KEY_SIZE bytes.  RM 8.7.4.2 caps extract.size at
+  *                     1..56; 16 is comfortably within range.
+  */
+@@ -84,6 +86,39 @@
+ /* CONT_LOOKUP action-descriptor words (RM 8.7.4.1). */
+ #define CC_AD_W2_CONT_LOOKUP	0x40000000u
+ 
++/*
++ * Leaf (result) action-descriptor field layout — RM 8.7.4.3 Table 8-119.
++ *
++ * The 16-byte MURAM-resident AD record is four big-endian 32-bit words:
++ *
++ *   0x0  u32 fqid          - egress FQID for RESULT_* actions (24-bit)
++ *   0x4  u32 plcr_profile  - policer profile id + enable bits
++ *   0x8  u32 nia           - type[31:30] | flags[29:4] | opcode[3:0]
++ *   0xc  u32 res           - reserved / HMTD pointer when NADEN is set
++ *
++ * type bits nia[31:30]: 00 = RESULT_CONTRL_FLOW (enqueue to fqid),
++ * 01 = CONT_LOOKUP (next CC node), 10 = RESULT_DATA_FLOW, 11 = BYPASS
++ * (drop / discard).  NADEN in nia[29] redirects the silicon walker
++ * through the 16-byte HMTD at @res before enqueueing to @fqid (the
++ * CC->HM chain, spec sec 5.4 order Parser->CC->HM->QMan).
++ *
++ * HW-PROVEN (ask20 silicon captures PR14z20/PR14z22, 2026-05-23): 24M+
++ * frames were CC-matched and silicon-forwarded through exactly this
++ * encoding (RESULT_CF + fqid for plain forward; RESULT_CF | NADEN +
++ * fqid + res=HMTD for the manip-chained forward) under the KGSE_CCBS
++ * graft model that board patch 0106 wires.  Cross-ref SDK fm_cc.c
++ * GetAdOfTypeResult() / NextStepAd().
++ */
++#define CC_AD_OFF_FQID		0x0
++#define CC_AD_OFF_PLCR		0x4
++#define CC_AD_OFF_NIA		0x8
++#define CC_AD_OFF_RES		0xc
++
++#define CC_AD_NIA_TYPE_RESULT_CF	0x00000000u	/* enqueue to fqid */
++#define CC_AD_NIA_TYPE_BYPASS		0xc0000000u	/* drop / discard  */
++#define CC_AD_NIA_NADEN			0x20000000u	/* walk HMTD @res  */
++#define CC_AD_FQID_MASK			0x00ffffffu	/* FQIDs are 24-bit */
++
+ /**
+  * struct fman_pcd_cc_tree - one port's static CC tree handle (private).
+  * @node:          anchor on pcd->cc_trees (protected by pcd->lock)
+@@ -132,23 +167,40 @@ static struct fman_pcd_cc_tree *cc_find_locked(struct fman_pcd *pcd, u8 port_id)
+ }
+ 
+ /*
+- * Pack one normalised key into a CC_KEY_SIZE-byte big-endian composite +
+- * its mask, written into the match record at row @idx.  The composite layout
+- * is fixed (it mirrors the parser extract the install programs):
++ * Pack one normalised key into the CC_KEY_SIZE-byte composite the silicon
++ * compares, plus its mask, written into the match record at row @idx.
++ *
++ * SILICON-TRUTH LAYOUT (ask20 PR14z14/PR14z22, DUT-proven 2026-05-23):
++ * under the KGSE_CCBS graft model (board patch 0106) the CC walker
++ * compares the KeyGen-EXTRACTED composite, i.e. the bytes the port's
++ * existing RSS scheme emits per its KGSE_EKFC.  The mainline default
++ * scheme's EKFC is 0x00180206 = IPSRC1 | IPDST1 | IPSEC_SPI | L4PSRC |
++ * L4PDST, which extracts exactly 16 bytes:
++ *
++ *   bytes 0..3   IPv4 src (network order)
++ *   bytes 4..7   IPv4 dst (network order)
++ *   bytes 8..11  IPsec SPI (0x00000000 for plain IP/TCP/UDP frames)
++ *   bytes 12..13 L4 src port (network order)
++ *   bytes 14..15 L4 dst port (network order)
++ *
++ * The DROP-miss diagnostic (ask20 patch 0053) proved silicon HITs with
++ * this exact layout: 24M frames matched and forwarded with miss=DROP and
++ * throughput unchanged.  The previous 0098 composite
++ * (ethertype/proto/flags/IP/ports) could NEVER match because the walker
++ * does not re-extract — it compares the KG-emitted bytes.
+  *
+- *   bytes 0..1   ethertype (BE)
+- *   byte  2      proto
+- *   byte  3      flags (bit0 = is_ipv6)
+- *   bytes 4..7   IPv4 src (BE)   [or first 4 of IPv6 src for v6]
+- *   bytes 8..11  IPv4 dst (BE)   [or first 4 of IPv6 dst for v6]
+- *   bytes 12..13 L4 src port (BE)
+- *   bytes 14..15 L4 dst port (BE)
++ * Consequences (documented limitations, not silent):
++ *  - ETHERTYPE / PROTO cannot participate: the KG composite carries
++ *    neither.  A TCP and a UDP flow with identical addresses+ports are
++ *    indistinguishable to this tree.  The presence flags are accepted
++ *    (the dpaa-side translator sets them) but do not contribute bytes.
++ *  - IPv6 keys cannot match a v4-shaped 16-byte composite;
++ *    fman_pcd_cc_static_install() rejects them with -ENOTSUPP.
++ *  - The SPI field is exact-matched as zero (the HW-proven shape for
++ *    plain IP traffic); ESP flows are out of scope for this tree.
+  *
+- * The mask row mirrors the same layout: 0xff for participating bytes, 0x00
+- * for wildcard.  This is sufficient for the IPv4 5-tuple shape the dpaa1
+- * default/vpp consumers use; IPv6 full-address matching is a follow-up that
+- * widens CC_KEY_SIZE (handled loudly: an IPv6 key still matches its first 4
+- * address bytes here, which the dpaa-side translator flags).
++ * The mask row mirrors the layout: 0xff for participating bytes, 0x00
++ * for wildcard.
+  */
+ static void cc_pack_key(void __iomem *match, u16 idx,
+ 			const struct fman_pcd_cc_hw_key *k)
+@@ -160,34 +212,16 @@ static void cc_pack_key(void __iomem *match, u16 idx,
+ 	memset(key, 0, sizeof(key));
+ 	memset(msk, 0, sizeof(msk));
+ 
+-	if (k->present & FMAN_PCD_CC_HW_F_ETHERTYPE) {
+-		key[0] = (u8)(k->ethertype_be & 0xff);
+-		key[1] = (u8)(k->ethertype_be >> 8);
+-		msk[0] = msk[1] = 0xff;
+-	}
+-	if (k->present & FMAN_PCD_CC_HW_F_PROTO) {
+-		key[2] = k->proto;
+-		msk[2] = 0xff;
+-	}
+-	if (k->present & FMAN_PCD_CC_HW_F_IPV6)
+-		key[3] |= 0x01;
+-	/* flags byte is structural, always exact-matched */
+-	msk[3] = 0xff;
+-
+ 	if (k->present & FMAN_PCD_CC_HW_F_SRC_IP) {
+-		if (k->present & FMAN_PCD_CC_HW_F_IPV6)
+-			memcpy(&key[4], &k->src_ip6[0], 4);
+-		else
+-			memcpy(&key[4], &k->src_ip_be, 4);
+-		msk[4] = msk[5] = msk[6] = msk[7] = 0xff;
++		memcpy(&key[0], &k->src_ip_be, 4);
++		msk[0] = msk[1] = msk[2] = msk[3] = 0xff;
+ 	}
+ 	if (k->present & FMAN_PCD_CC_HW_F_DST_IP) {
+-		if (k->present & FMAN_PCD_CC_HW_F_IPV6)
+-			memcpy(&key[8], &k->dst_ip6[0], 4);
+-		else
+-			memcpy(&key[8], &k->dst_ip_be, 4);
+-		msk[8] = msk[9] = msk[10] = msk[11] = 0xff;
++		memcpy(&key[4], &k->dst_ip_be, 4);
++		msk[4] = msk[5] = msk[6] = msk[7] = 0xff;
+ 	}
++	/* bytes 8..11: IPsec SPI — exact-match zero (HW-proven shape). */
++	msk[8] = msk[9] = msk[10] = msk[11] = 0xff;
+ 	if (k->present & FMAN_PCD_CC_HW_F_SRC_PORT) {
+ 		key[12] = (u8)(k->src_port_be & 0xff);
+ 		key[13] = (u8)(k->src_port_be >> 8);
+@@ -206,33 +240,56 @@ static void cc_pack_key(void __iomem *match, u16 idx,
+ }
+ 
+ /*
+- * Encode one CONT_LOOKUP action descriptor (RM 8.7.4.3) at AD row @idx.
+- * For a matching key we steer to the target RX FQ derived from the qband;
+- * the dpaa flavor layer owns the qband->FQID map, so here we encode the
+- * qband directly into the AD's result field and let the walker's FQID base
+- * register resolve it.  hm_handle, when non-zero, is encoded into the NIA
+- * (next-invoked-action) HMTD offset so the CC->HM chain (spec sec 5.4 order
+- * Parser->CC->HM->QMan) is honoured.
++ * Encode one leaf (result) action descriptor (RM 8.7.4.3) at AD row @idx.
+  *
+- * AD word layout we emit for a leaf result entry:
+- *   word0 = (qband << 16) | (hm_present << 8) | type
+- *   word1 = hm_handle (HMTD MURAM offset; 0 when no HM)
+- *   word2 = 0
+- *   word3 = 0
+- * where type 0x1 = "result / enqueue".  This is the leaf form; the
+- * group-table[0] entry below is the CONT_LOOKUP that points the walker at
+- * this AD table.
++ * Two regimes, selected by @fqid:
++ *
++ * @fqid != 0 — the REAL hardware enqueue-AD (per-key FQ steering):
++ *   word0 (0x0) = fqid & CC_AD_FQID_MASK   (target frame queue)
++ *   word1 (0x4) = 0                        (no policer pass)
++ *   word2 (0x8) = RESULT_CF [| NADEN]      (enqueue; walk HMTD first
++ *                                           when @hm chains an HM node)
++ *   word3 (0xc) = hm                       (HMTD MURAM offset; 0 = none)
++ *   A silicon CC HIT on this row enqueues the frame directly to @fqid,
++ *   bypassing the KeyGen scheme's hash dispatch entirely.  This is the
++ *   ask20-HW-proven encoding (24M+ frames silicon-forwarded, PR14z22).
++ *
++ * @fqid == 0 — graceful fall-through (DUT-validated 2026-06-10): the
++ *   legacy soft encoding whose word0 is a reserved-shape token, NOT a
++ *   live FQID; the walk completes and the frame proceeds to the normal
++ *   scheme dispatch (hashed RX FQs).  Kept byte-identical to the 0098
++ *   encoding the 0107 lifecycle validation ran against:
++ *   word0 = (qband << 16) | (hm_present << 8) | 0x1, word1 = hm,
++ *   word2 = word3 = 0.  An HM chain cannot be honoured in this regime
++ *   (NADEN needs a target FQID for the post-manip enqueue).
++ *
++ * The miss slot (last AD row) uses the same encoder: a non-zero
++ * @fqid there steers every non-matching frame, fqid 0 leaves miss
++ * traffic on the port's existing RSS path.
+  */
+-static void cc_write_leaf_ad(void __iomem *ad, u16 idx, u16 qband, u32 hm)
++static void cc_write_leaf_ad(void __iomem *ad, u16 idx, u32 fqid,
++			     u16 qband, u32 hm)
+ {
+ 	u32 __iomem *w = (u32 __iomem *)((u8 __force *)ad +
+ 					 (size_t)idx * CC_AD_ENTRY_SIZE);
+-	u32 w0 = ((u32)qband << 16) | ((hm ? 1u : 0u) << 8) | 0x1u;
+ 
+-	iowrite32be(w0, &w[0]);
+-	iowrite32be(hm, &w[1]);
+-	iowrite32be(0, &w[2]);
+-	iowrite32be(0, &w[3]);
++	if (fqid) {
++		u32 nia = CC_AD_NIA_TYPE_RESULT_CF;
++
++		if (hm)
++			nia |= CC_AD_NIA_NADEN;
++		iowrite32be(fqid & CC_AD_FQID_MASK, &w[0]);
++		iowrite32be(0, &w[1]);
++		iowrite32be(nia, &w[2]);
++		iowrite32be(hm, &w[3]);
++	} else {
++		u32 w0 = ((u32)qband << 16) | ((hm ? 1u : 0u) << 8) | 0x1u;
++
++		iowrite32be(w0, &w[0]);
++		iowrite32be(hm, &w[1]);
++		iowrite32be(0, &w[2]);
++		iowrite32be(0, &w[3]);
++	}
+ }
+ 
+ /*
+@@ -283,6 +340,14 @@ int fman_pcd_cc_static_install(struct fman_pcd *pcd, u8 port_id,
+ 		return -EINVAL;
+ 	if (hw->num_keys > FMAN_PCD_CC_HW_MAX_KEYS)
+ 		return -EINVAL;
++	/*
++	 * IPv6 keys cannot match the v4-shaped 16-byte KG-emitted composite
++	 * this tree compares (see cc_pack_key()); reject loudly rather than
++	 * install a key that can never hit.
++	 */
++	for (i = 0; i < hw->num_keys; i++)
++		if (hw->keys[i].present & FMAN_PCD_CC_HW_F_IPV6)
++			return -ENOTSUPP;
+ 
+ 	muram = fman_get_muram(fman_pcd_get_fman(pcd));
+ 	if (!muram)
+@@ -336,11 +401,15 @@ int fman_pcd_cc_static_install(struct fman_pcd *pcd, u8 port_id,
+ 	/* Encode each key's match record + leaf result AD. */
+ 	for (i = 0; i < hw->num_keys; i++) {
+ 		cc_pack_key(t->match, i, &hw->keys[i]);
+-		cc_write_leaf_ad(t->ad, i, hw->keys[i].target_qband,
++		cc_write_leaf_ad(t->ad, i, hw->keys[i].target_fqid,
++				 hw->keys[i].target_qband,
+ 				 hw->keys[i].hm_handle);
+ 	}
+-	/* Miss slot (last row): steer to miss_qband, no HM. */
+-	cc_write_leaf_ad(t->ad, hw->num_keys, hw->miss_qband, 0);
++	/*
++	 * Miss slot (last row): a non-zero miss_fqid steers all non-matching
++	 * frames to that FQ; 0 leaves miss traffic on the existing RSS path.
++	 */
++	cc_write_leaf_ad(t->ad, hw->num_keys, hw->miss_fqid, hw->miss_qband, 0);
+ 
+ 	/* Point the walker at the tables via the group-table[0] CONT_LOOKUP. */
+ 	cc_write_group0(t);
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+index d9f4134..c9240cf 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+@@ -11,10 +11,14 @@
+  *   /sys/kernel/debug/fman_pcd/<N>/cc_test
+  *
+  * Write commands (drives the EXACT 0106 productive sequence):
+- *   install <hwport> <qband> <proto> <src_ip> <dst_ip> <dport>
++ *   install <hwport> <qband> <proto> <src_ip> <dst_ip> <dport> [fqid-hex]
+  *       -> fman_pcd_cc_static_install() (one IPv4 exact-match key)
+  *       -> fman_pcd_cc_static_get_base()
+  *       -> fman_pcd_kg_port_attach_cc()   (the KGSE_CCBS graft)
++ *       The optional trailing fqid (hex, e.g. 0x6e) arms the REAL
++ *       per-key hardware enqueue-AD: a silicon HIT enqueues matching
++ *       frames directly to that FQ.  Omitted or 0 = the soft
++ *       fall-through leaf (lifecycle validation only).
+  *   clear <hwport>
+  *       -> fman_pcd_kg_port_detach_cc()
+  *       -> fman_pcd_cc_static_destroy()
+@@ -63,13 +67,14 @@ static int cc_test_install(struct fman_pcd *pcd, const char *args)
+ 	struct fman_pcd_cc_hw_spec *spec;
+ 	char src_str[40], dst_str[40];
+ 	u32 src_ip, dst_ip, cc_base;
++	u32 fqid = 0;
+ 	u8 port_id, proto;
+ 	u16 qband, dport;
+ 	int n, err;
+ 
+-	n = sscanf(args, "install %hhi %hu %hhu %39s %39s %hu",
+-		   &port_id, &qband, &proto, src_str, dst_str, &dport);
+-	if (n != 6)
++	n = sscanf(args, "install %hhi %hu %hhu %39s %39s %hu %x",
++		   &port_id, &qband, &proto, src_str, dst_str, &dport, &fqid);
++	if (n != 6 && n != 7)
+ 		return -EINVAL;
+ 
+ 	if (qband > 3 || !(proto == 6 || proto == 17))
+@@ -97,6 +102,8 @@ static int cc_test_install(struct fman_pcd *pcd, const char *args)
+ 	spec->keys[0].dst_ip_be = dst_ip;
+ 	spec->keys[0].dst_port_be = cpu_to_be16(dport);
+ 	spec->keys[0].target_qband = qband;
++	/* Non-zero = REAL per-key enqueue-AD (HIT steers to this FQ). */
++	spec->keys[0].target_fqid = fqid;
+ 
+ 	/* The exact 0106 productive sequence (fman_cc_tree_install()). */
+ 	err = fman_pcd_cc_static_install(pcd, port_id, spec);
+@@ -112,8 +119,9 @@ static int cc_test_install(struct fman_pcd *pcd, const char *args)
+ 		return err;
+ 	}
+ 
+-	pr_info("fman_pcd cc_test: port 0x%02x tree installed, KGSE_CCBS grafted to 0x%x\n",
+-		port_id, cc_base);
++	pr_info("fman_pcd cc_test: port 0x%02x tree installed, KGSE_CCBS grafted to 0x%x, key fqid 0x%x%s\n",
++		port_id, cc_base, fqid,
++		fqid ? " (hardware enqueue-AD)" : " (soft fall-through)");
+ 	return 0;
+ }
+ 
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 41f4b3b..7072557 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -330,8 +330,18 @@ void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme);
+  * @dst_ip6:      IPv6 dest   (16 bytes, network order)
+  * @src_port_be:  L4 source port (BE)
+  * @dst_port_be:  L4 dest   port (BE)
+- * @target_qband: qband to steer matching frames to (validated by caller)
+- * @hm_handle:    HM node MURAM handle to chain after match (0 = none)
++ * @target_qband: qband to steer matching frames to (validated by caller);
++ *                informational when @target_fqid is 0 (fall-through)
++ * @target_fqid:  target frame-queue id for matching frames.  Non-zero =
++ *                the leaf AD encodes the REAL RM 8.7.4.3 hardware
++ *                enqueue-AD and a silicon HIT enqueues directly to this
++ *                FQ (per-key FQ steering).  0 = the DUT-validated soft
++ *                fall-through encoding: the frame proceeds to the normal
++ *                scheme dispatch (hashed RX FQs).  The dpaa flavor layer
++ *                owns the qband->FQID resolution.
++ * @hm_handle:    HM node MURAM handle (HMTD offset) to chain after match
++ *                (0 = none).  Honoured only with a non-zero @target_fqid
++ *                (the NADEN walk needs a post-manip enqueue target).
+  */
+ struct fman_pcd_cc_hw_key {
+ 	u32 present;
+@@ -344,6 +354,7 @@ struct fman_pcd_cc_hw_key {
+ 	u16 src_port_be;
+ 	u16 dst_port_be;
+ 	u16 target_qband;
++	u32 target_fqid;
+ 	u32 hm_handle;
+ };
+ 
+@@ -351,11 +362,16 @@ struct fman_pcd_cc_hw_key {
+  * struct fman_pcd_cc_hw_spec - a port's complete normalised static CC tree.
+  * @num_keys:    number of valid entries in @keys (0..FMAN_PCD_CC_HW_MAX_KEYS)
+  * @miss_qband:  qband for frames matching no key
++ * @miss_fqid:   FQID for frames matching no key; non-zero = hardware
++ *               enqueue-AD in the miss slot (steers ALL non-matching
++ *               traffic - use deliberately), 0 = miss traffic stays on
++ *               the port's existing RSS path (the default)
+  * @keys:        evaluated in order; first match wins
+  */
+ struct fman_pcd_cc_hw_spec {
+ 	u16 num_keys;
+ 	u16 miss_qband;
++	u32 miss_fqid;
+ 	struct fman_pcd_cc_hw_key keys[FMAN_PCD_CC_HW_MAX_KEYS];
+ };
+ 
