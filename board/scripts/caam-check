@@ -117,13 +117,19 @@ hdr "2) CAAM kernel drivers"
 # as if they were separate modules — they never load on mainline 6.x.
 CAAM_DRVS=(caam caam_jr caamalg_desc caamhash_desc error)
 for drv in "${CAAM_DRVS[@]}"; do
+    # drivers/crypto/caam/error.c builds as a module literally named
+    # "error.ko" (caam_strstatus() status-decode helpers shared by the
+    # other caam modules). Annotate it so the report doesn't read like
+    # a failure line.
+    label="$drv"
+    [ "$drv" = "error" ] && label="error (caam status-decode helper)"
     if [ -d "/sys/module/${drv}" ]; then
         # Built-in drivers have no refcnt file; modules do.
         if [ -f "/sys/module/${drv}/refcnt" ]; then
             refcnt=$(cat "/sys/module/${drv}/refcnt" 2>/dev/null || echo "?")
-            ok "${drv} loaded (refcnt=${refcnt}, module)"
+            ok "${label} loaded (refcnt=${refcnt}, module)"
         else
-            ok "${drv} present (built-in)"
+            ok "${label} present (built-in)"
         fi
     else
         # caam + caam_jr are mandatory; the *_desc helpers are pulled in
@@ -133,7 +139,7 @@ for drv in "${CAAM_DRVS[@]}"; do
             caam|caam_jr|caamalg_desc|caamhash_desc)
                 fail "${drv} NOT loaded — CAAM crypto API unavailable"; mark_fail ;;
             *)
-                skip "${drv} not loaded (optional)" ;;
+                skip "${label} not loaded (optional)" ;;
         esac
     fi
 done

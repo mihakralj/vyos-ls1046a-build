@@ -62,25 +62,32 @@
 # bash_completion sourcing block commented out), and after every other
 # profile drop-in that might affect PATH/HOME. zz- guarantees last.
 #
-# BOOT-READINESS GATE (login race fix, 2026-06-10)
+# BOOT-READINESS GATE (login race fix, 2026-06-10; getty gate restored 2026-06-11)
 # -------------------------------------------------
 # Sourcing vyatta-cfg with _OFR_CONFIGURE=ok runs `cli-shell-api
 # setupSession` IMMEDIATELY, at login time. setupSession can only succeed
 # once vyos-router has mounted the /opt/vyatta/config tmpfs and the boot
-# commit is done. On this board the login prompt appears EARLY (T+~28s)
-# because zz-ls1046a-nodevbind.conf deliberately clears the upstream
+# commit is done. Historically (ASK 1.x era) the login prompt appeared
+# EARLY (T+~28s) because zz-ls1046a-nodevbind.conf cleared the upstream
 # `ExecStartPre=vyos-config SERIAL` getty gate (which waits for
-# /tmp/vyos-config-status) — without that clear the prompt never appears
-# at all (see 96-enable-services.chroot). The config tmpfs mounts at
-# ~T+45s and the boot commit finishes at ~T+74s, so a login within ~15s
-# of the prompt sources vyatta-cfg before the config backend exists:
-# setupSession fails and vyatta-cfg line ~1158 runs `builtin exit 1` —
-# and because the file is being SOURCED from a login profile, that exits
-# the LOGIN SHELL itself ("Failed to set up config session", straight
-# back to login:). `|| true` on the source line cannot catch a builtin
-# exit. Worse, the stray early session run concurrently with the boot
-# commit can wedge the config system until reboot (observed: hostname
-# stuck at localhost, every subsequent login failing the same way).
+# /tmp/vyos-config-status), so a login within ~15s of the prompt sourced
+# vyatta-cfg before the config backend existed: setupSession failed and
+# vyatta-cfg line ~1158 ran `builtin exit 1` — and because the file is
+# being SOURCED from a login profile, that exits the LOGIN SHELL itself
+# ("Failed to set up config session", straight back to login:). `|| true`
+# on the source line cannot catch a builtin exit. Worse, the stray early
+# session run concurrently with the boot commit could wedge the config
+# system until reboot (observed: hostname stuck at localhost, every
+# subsequent login failing the same way).
+#
+# As of 2026-06-11 the getty-side gate is RESTORED in bounded form
+# (zz-ls1046a-nodevbind.conf waits up to 180s for the marker before
+# starting agetty), so under normal boots the prompt only appears after
+# the boot commit and this profile-side wait never triggers. It is KEPT
+# as a safety net for the cases the getty gate can't cover: a hard
+# vyos-router crash (getty gate times out at 180s and shows the prompt
+# anyway so the operator can get in), SSH logins that beat the marker,
+# and ls1046a-console.service emergency fallback sessions.
 #
 # Fix: re-create upstream's readiness gate INSIDE the login shell, with a
 # visible message — wait (bounded) for /tmp/vyos-config-status, the same
