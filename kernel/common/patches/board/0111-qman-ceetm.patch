@@ -1,4 +1,4 @@
-From 1829510e70c1b750a64d86e35296533b5fe394c6 Mon Sep 17 00:00:00 2001
+From d79543687c120230584eb5a03d30565e2e6ebd0d Mon Sep 17 00:00:00 2001
 From: ci <ci@local>
 Date: Thu, 11 Jun 2026 05:57:12 +0000
 Subject: [PATCH] soc: fsl: qbman: add CEETM hierarchical egress shaper support
@@ -288,7 +288,7 @@ index aa5348f..13c2868 100644
  		.name = KBUILD_MODNAME,
 diff --git a/drivers/soc/fsl/qbman/qman_ceetm.c b/drivers/soc/fsl/qbman/qman_ceetm.c
 new file mode 100644
-index 0000000..fac5557
+index 0000000..e7729b6
 --- /dev/null
 +++ b/drivers/soc/fsl/qbman/qman_ceetm.c
 @@ -0,0 +1,1233 @@
@@ -1460,18 +1460,18 @@ index 0000000..fac5557
 +	int ret;
 +
 +	qman_ceetm_get_prescaler(&pres);
-+	pr_info("ceetm-dump[%s]: qman_clk %u pres 0x%04x\n", tag, qman_clk, pres);
++	pr_debug("ceetm-dump[%s]: qman_clk %u pres 0x%04x\n", tag, qman_clk, pres);
 +
 +	if (sp) {
 +		ret = ceetm_query_mst(CEETM_COMMAND_SP_MAPPING | sp->idx,
 +				      sp->dcp_idx, &mst);
-+		pr_info("ceetm-dump[%s]: sp %u map_ctl 0x%02x (ret %d)\n", tag,
++		pr_debug("ceetm-dump[%s]: sp %u map_ctl 0x%02x (ret %d)\n", tag,
 +			sp->idx, mst.sp_mapping_query.map_ctl, ret);
 +	}
 +	if (lni) {
 +		ret = ceetm_query_mst(CEETM_COMMAND_LNI_SHAPER | lni->idx,
 +				      lni->dcp_idx, &mst);
-+		pr_info("ceetm-dump[%s]: lni %u shaper ctl 0x%02x mps %u crtcr 0x%06x crtbl %u ertcr 0x%06x ertbl %u (ret %d)\n",
++		pr_debug("ceetm-dump[%s]: lni %u shaper ctl 0x%02x mps %u crtcr 0x%06x crtbl %u ertcr 0x%06x ertbl %u (ret %d)\n",
 +			tag, lni->idx, mst.shaper_query.ctl, mst.shaper_query.mps,
 +			be24_get(mst.shaper_query.crtcr),
 +			be16_to_cpu(mst.shaper_query.crtbl),
@@ -1481,18 +1481,18 @@ index 0000000..fac5557
 +	if (channel) {
 +		ret = ceetm_query_mst(CEETM_COMMAND_CHANNEL_MAPPING |
 +				      channel->idx, channel->dcp_idx, &mst);
-+		pr_info("ceetm-dump[%s]: ch %u map_ctl 0x%02x (ret %d)\n", tag,
++		pr_debug("ceetm-dump[%s]: ch %u map_ctl 0x%02x (ret %d)\n", tag,
 +			channel->idx, mst.channel_mapping_query.map_ctl, ret);
 +		ret = ceetm_query_mst(CEETM_COMMAND_CHANNEL_SHAPER |
 +				      channel->idx, channel->dcp_idx, &mst);
-+		pr_info("ceetm-dump[%s]: ch %u shaper ctl 0x%02x crtcr 0x%06x crtbl %u ertcr 0x%06x ertbl %u (ret %d)\n",
++		pr_debug("ceetm-dump[%s]: ch %u shaper ctl 0x%02x crtcr 0x%06x crtbl %u ertcr 0x%06x ertbl %u (ret %d)\n",
 +			tag, channel->idx, mst.shaper_query.ctl,
 +			be24_get(mst.shaper_query.crtcr),
 +			be16_to_cpu(mst.shaper_query.crtbl),
 +			be24_get(mst.shaper_query.ertcr),
 +			be16_to_cpu(mst.shaper_query.ertbl), ret);
 +		ret = ceetm_query_csch(channel, &csch);
-+		pr_info("ceetm-dump[%s]: ch %u csch gpc 0x%02x crem 0x%04x erem 0x%04x w %u %u %u %u %u %u %u %u (ret %d)\n",
++		pr_debug("ceetm-dump[%s]: ch %u csch gpc 0x%02x crem 0x%04x erem 0x%04x w %u %u %u %u %u %u %u %u (ret %d)\n",
 +			tag, channel->idx, csch.gpc, be16_to_cpu(csch.crem),
 +			be16_to_cpu(csch.erem), csch.w[0], csch.w[1], csch.w[2],
 +			csch.w[3], csch.w[4], csch.w[5], csch.w[6], csch.w[7],
@@ -1502,13 +1502,13 @@ index 0000000..fac5557
 +		u16 cqid = (cq->parent->idx << 4) | cq->idx;
 +
 +		ret = ceetm_query_cq(cq, &cqq);
-+		pr_info("ceetm-dump[%s]: cq 0x%03x state 0x%04x ccgid %u frm_cnt %u (ret %d)\n",
++		pr_debug("ceetm-dump[%s]: cq 0x%03x state 0x%04x ccgid %u frm_cnt %u (ret %d)\n",
 +			tag, cqid, be16_to_cpu(cqq.state), be16_to_cpu(cqq.ccgid),
 +			be24_get(cqq.frm_cnt), ret);
 +		ret = ceetm_query_statistics(cqid, cq->parent->dcp_idx,
 +					     CEETM_QUERY_DEQUEUE_STATISTICS,
 +					     &stats);
-+		pr_info("ceetm-dump[%s]: cq 0x%03x dequeued %llu frames %llu bytes (ret %d)\n",
++		pr_debug("ceetm-dump[%s]: cq 0x%03x dequeued %llu frames %llu bytes (ret %d)\n",
 +			tag, cqid, be40_get(stats.frm_cnt), be48_get(stats.byte_cnt),
 +			ret);
 +	}
@@ -1516,7 +1516,7 @@ index 0000000..fac5557
 +		ret = ceetm_query_statistics((ccg->parent->idx << 4) | ccg->idx,
 +					     ccg->parent->dcp_idx,
 +					     CEETM_QUERY_REJECT_STATISTICS, &stats);
-+		pr_info("ceetm-dump[%s]: ccg %u rejected %llu frames %llu bytes (ret %d)\n",
++		pr_debug("ceetm-dump[%s]: ccg %u rejected %llu frames %llu bytes (ret %d)\n",
 +			tag, ccg->idx, be40_get(stats.frm_cnt),
 +			be48_get(stats.byte_cnt), ret);
 +	}

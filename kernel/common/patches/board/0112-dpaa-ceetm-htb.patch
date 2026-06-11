@@ -1,4 +1,4 @@
-From e159fd22e510ef4b4c6e61167abf85e8d0b29625 Mon Sep 17 00:00:00 2001
+From f7791aafbf6aded9b2cc9c81eacb6cce796a58d8 Mon Sep 17 00:00:00 2001
 From: ci <ci@local>
 Date: Thu, 11 Jun 2026 06:27:35 +0000
 Subject: [PATCH] dpaa: add CEETM HTB-offload egress shaper consumer
