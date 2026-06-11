@@ -1,7 +1,7 @@
-From 78639b4696e139c6b3cba1a374e2b09a5f6bec20 Mon Sep 17 00:00:00 2001
+From e159fd22e510ef4b4c6e61167abf85e8d0b29625 Mon Sep 17 00:00:00 2001
 From: ci <ci@local>
 Date: Thu, 11 Jun 2026 06:27:35 +0000
-Subject: [PATCH 2/2] dpaa: add CEETM HTB-offload egress shaper consumer
+Subject: [PATCH] dpaa: add CEETM HTB-offload egress shaper consumer
 
 Add a TC_SETUP_QDISC_HTB offload consumer that bridges the stock iproute2
 HTB-offload contract ("tc qdisc add dev ethX root handle 1: htb offload")
@@ -41,13 +41,13 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ---
  drivers/net/ethernet/freescale/dpaa/Kconfig   |  41 +-
  drivers/net/ethernet/freescale/dpaa/Makefile  |   1 +
- .../net/ethernet/freescale/dpaa/dpaa_ceetm.c  | 665 ++++++++++++++++++
- .../net/ethernet/freescale/dpaa/dpaa_ceetm.h  |  79 +++
+ .../net/ethernet/freescale/dpaa/dpaa_ceetm.c  | 710 ++++++++++++++++++
+ .../net/ethernet/freescale/dpaa/dpaa_ceetm.h  |  79 ++
  .../net/ethernet/freescale/dpaa/dpaa_eth.c    |  46 +-
  .../net/ethernet/freescale/dpaa/dpaa_eth.h    |  18 +
  .../ethernet/freescale/dpaa/dpaa_fman_caps.c  |  34 -
  .../ethernet/freescale/dpaa/dpaa_fman_caps.h  |  71 --
- 8 files changed, 821 insertions(+), 134 deletions(-)
+ 8 files changed, 866 insertions(+), 134 deletions(-)
  create mode 100644 drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.c
  create mode 100644 drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.h
 
@@ -120,10 +120,10 @@ index 51f194a..a9db711 100644
  obj-$(CONFIG_DPAA_AF_XDP_POOL) += af_xdp_pool/
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.c b/drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.c
 new file mode 100644
-index 0000000..81587dc
+index 0000000..668b891
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.c
-@@ -0,0 +1,665 @@
+@@ -0,0 +1,710 @@
 +// SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
 +/*
 + * DPAA1 Ethernet -- QMan CEETM HTB-offload egress shaper consumer.
@@ -208,6 +208,11 @@ index 0000000..81587dc
 +#define DPAA_CEETM_TD_THRESHOLD		(1U << 20)
 +/* Single strict-priority class-queue level used per channel. */
 +#define DPAA_CEETM_CQ_PRIO		0
++
++/* LNI shaper overhead accounting length (Mono CDX CEETM_DEFA_OAL) */
++#define DPAA_CEETM_LNI_OAL		24
++/* Token bucket limit in bytes (Mono CDX CEETM_DEFA_BSIZE) */
++#define DPAA_CEETM_BSIZE		0x2000
 +
 +/**
 + * struct dpaa_ceetm_class - one CEETM channel and its single class queue
@@ -317,10 +322,9 @@ index 0000000..81587dc
 +		qman_ceetm_ccg_release(cls->ccg);
 +		cls->ccg = NULL;
 +	}
-+	if (cls->shaped) {
-+		qman_ceetm_channel_disable_shaper(cls->channel);
-+		cls->shaped = false;
-+	}
++	/* The channel shaper is enabled on every built channel. */
++	qman_ceetm_channel_disable_shaper(cls->channel);
++	cls->shaped = false;
 +	qman_ceetm_channel_release(cls->channel);
 +	cls->channel = NULL;
 +	cls->used = false;
@@ -364,14 +368,27 @@ index 0000000..81587dc
 +			goto err_disable_shaper;
 +	} else {
 +		/*
-+		 * Unshaped channels are scheduled by the LNI's uFQ algorithm
-+		 * with the CR token bucket limit as their weight. Leaving it
-+		 * zero starves the channel: frames enqueue but are never
-+		 * dequeued (hard egress blackhole).
++		 * "Unshaped" on CEETM silicon means shaped at the infinite
++		 * rate: the channel is mapped CS=1 at claim time and a CS=1
++		 * channel with a zero-rate shaper is never scheduled (frames
++		 * enqueue but starve in the CQ - hard egress blackhole,
++		 * hardware-proven). Mono's production CDX app never uses the
++		 * SDK uFQ path; it enables the shaper uncoupled with
++		 * CR = ER = infinite.
 +		 */
-+		err = qman_ceetm_channel_set_weight(cls->channel, burst);
++		struct qm_ceetm_rate inf = QM_CEETM_RATE_INFINITE;
++
++		err = qman_ceetm_channel_enable_shaper(cls->channel, 0);
 +		if (err)
 +			goto err_release_channel;
++		err = qman_ceetm_channel_set_commit_rate(cls->channel, &inf,
++							 DPAA_CEETM_BSIZE);
++		if (!err)
++			err = qman_ceetm_channel_set_excess_rate(cls->channel,
++								 &inf,
++								 DPAA_CEETM_BSIZE);
++		if (err)
++			goto err_disable_shaper;
 +	}
 +
 +	err = qman_ceetm_ccg_claim(&cls->ccg, cls->channel,
@@ -398,21 +415,22 @@ index 0000000..81587dc
 +		goto err_release_ccg;
 +
 +	/*
-+	 * CR/ER eligibility ties a CQ's scheduling to the channel shaper's
-+	 * token buckets; it only makes sense on shaped channels. On an
-+	 * unshaped channel it would gate the CQ on tokens that never
-+	 * replenish (SDK sets eligibility only for shaped classes).
++	 * A CQ on neither eligibility list is never scheduled on a CS=1
++	 * channel. Shaped classes ride the CR list (guaranteed rate) plus
++	 * the ER list (up to ceil); "unshaped" classes ride the ER list
++	 * only, against the infinite ER bucket (Mono CDX: "Set ER
++	 * eligibility, disabling shaping").
 +	 */
 +	if (shaped) {
 +		err = qman_ceetm_channel_set_cq_cr_eligibility(cls->channel,
 +							       DPAA_CEETM_CQ_PRIO, 1);
 +		if (err)
 +			goto err_release_cq;
-+		err = qman_ceetm_channel_set_cq_er_eligibility(cls->channel,
-+							       DPAA_CEETM_CQ_PRIO, 1);
-+		if (err)
-+			goto err_release_cq;
 +	}
++	err = qman_ceetm_channel_set_cq_er_eligibility(cls->channel,
++						       DPAA_CEETM_CQ_PRIO, 1);
++	if (err)
++		goto err_release_cq;
 +
 +	err = qman_ceetm_lfq_claim(&cls->lfq, cls->cq);
 +	if (err)
@@ -441,10 +459,8 @@ index 0000000..81587dc
 +	qman_ceetm_ccg_release(cls->ccg);
 +	cls->ccg = NULL;
 +err_disable_shaper:
-+	if (cls->shaped) {
-+		qman_ceetm_channel_disable_shaper(cls->channel);
-+		cls->shaped = false;
-+	}
++	qman_ceetm_channel_disable_shaper(cls->channel);
++	cls->shaped = false;
 +err_release_channel:
 +	qman_ceetm_channel_release(cls->channel);
 +	cls->channel = NULL;
@@ -549,6 +565,35 @@ index 0000000..81587dc
 +	if (err) {
 +		NL_SET_ERR_MSG_MOD(opt->extack, "CEETM sub-portal->LNI map failed");
 +		goto err_release_lni;
++	}
++
++	/*
++	 * The LNI shaper must always be enabled: a never-enabled LNI shaper
++	 * register is all-zeros, which paces the aggregate at zero rate and
++	 * starves every channel beneath it. CR is set to the infinite rate
++	 * (HTB offload carries no root rate; classes shape per-channel) and
++	 * ER stays zero, mirroring the silicon-proven Mono CDX bring-up
++	 * (coupled shaper, OAL 24).
++	 */
++	err = qman_ceetm_lni_enable_shaper(ceetm->lni, 1, DPAA_CEETM_LNI_OAL);
++	if (err) {
++		NL_SET_ERR_MSG_MOD(opt->extack, "CEETM LNI shaper enable failed");
++		goto err_release_lni;
++	}
++	{
++		struct qm_ceetm_rate inf = QM_CEETM_RATE_INFINITE;
++		struct qm_ceetm_rate zero = { 0, 0 };
++
++		err = qman_ceetm_lni_set_commit_rate(ceetm->lni, &inf,
++						     DPAA_CEETM_BSIZE);
++		if (!err)
++			err = qman_ceetm_lni_set_excess_rate(ceetm->lni, &zero,
++							     DPAA_CEETM_BSIZE);
++		if (err) {
++			NL_SET_ERR_MSG_MOD(opt->extack,
++					   "CEETM LNI shaper rate config failed");
++			goto err_release_lni;
++		}
 +	}
 +
 +	/* Default unshaped channel: catches unclassified and WQ-queue frames. */
@@ -1157,3 +1202,6 @@ index 4fcc610..1c67228 100644
 -
  #endif /* __DPAA_FMAN_CAPS_H */
 \ No newline at end of file
+-- 
+2.39.5
+
