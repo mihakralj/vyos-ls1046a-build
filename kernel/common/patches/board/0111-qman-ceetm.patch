@@ -1,0 +1,2444 @@
+From d79543687c120230584eb5a03d30565e2e6ebd0d Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Thu, 11 Jun 2026 05:57:12 +0000
+Subject: [PATCH] soc: fsl: qbman: add CEETM hierarchical egress shaper support
+
+Port the QorIQ QMan CEETM (Customer Edge Egress Traffic Management) API
+from the legacy NXP SDK, modernised to mainline style. Provides
+hierarchical dual-rate shaping (LNI + channel), strict-priority class
+scheduling and byte/frame tail-drop congestion groups on the FMan egress
+path of DPAA1 SoCs, hard-coded for the LS1046A CEETM0 instance (DCP0).
+
+New optional symbol FSL_QMAN_CEETM (default n) builds qman_ceetm.c. CEETM
+management commands (verbs 0x70-0x7D) ride the existing affine-portal MC
+ring through one generic helper, qman_ceetm_mc_exec(), added to qman.c.
+The SDK bitfield wire structs are reimplemented with explicit __beN
+fields and big-endian byte arrays. CCSR additions (prescaler, sub-portal
+CEETM-mode enable/disable, qman_clk from DT clock-frequency) live in
+qman_ccsr.c.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ drivers/soc/fsl/qbman/Kconfig      |   10 +
+ drivers/soc/fsl/qbman/Makefile     |    1 +
+ drivers/soc/fsl/qbman/qman.c       |  100 +++
+ drivers/soc/fsl/qbman/qman_ccsr.c  |   76 +-
+ drivers/soc/fsl/qbman/qman_ceetm.c | 1233 ++++++++++++++++++++++++++++
+ drivers/soc/fsl/qbman/qman_priv.h  |  319 +++++++
+ include/soc/fsl/qman.h             |  571 +++++++++++++
+ 7 files changed, 2305 insertions(+), 5 deletions(-)
+ create mode 100644 drivers/soc/fsl/qbman/qman_ceetm.c
+
+diff --git a/drivers/soc/fsl/qbman/Kconfig b/drivers/soc/fsl/qbman/Kconfig
+index 27774ec..8a5b1ac 100644
+--- a/drivers/soc/fsl/qbman/Kconfig
++++ b/drivers/soc/fsl/qbman/Kconfig
+@@ -65,4 +65,14 @@ config FSL_QMAN_TEST_STASH
+ 	  across a series of FQs scheduled to different portals (and cpus), with
+ 	  DQRR, data and context stashing always on.
+ 
++config FSL_QMAN_CEETM
++	bool "QMan CEETM hierarchical egress shaper support"
++	depends on FSL_DPAA
++	default n
++	help
++	  Enable support for the QMan Customer Edge Egress Traffic Management
++	  (CEETM) block: hierarchical dual-rate shaping, strict-priority class
++	  scheduling and congestion-group tail-drop on the FMan egress path of
++	  QorIQ DPAA1 SoCs (e.g. LS1046A).
++
+ endif # FSL_DPAA
+diff --git a/drivers/soc/fsl/qbman/Makefile b/drivers/soc/fsl/qbman/Makefile
+index 811312a..dcfaffc 100644
+--- a/drivers/soc/fsl/qbman/Makefile
++++ b/drivers/soc/fsl/qbman/Makefile
+@@ -2,6 +2,7 @@
+ obj-$(CONFIG_FSL_DPAA)                          += bman_ccsr.o qman_ccsr.o \
+ 						   bman_portal.o qman_portal.o \
+ 						   bman.o qman.o dpaa_sys.o
++obj-$(CONFIG_FSL_QMAN_CEETM)			+= qman_ceetm.o
+ 
+ obj-$(CONFIG_FSL_BMAN_TEST)                     += bman-test.o
+ bman-test-y                                      = bman_test.o
+diff --git a/drivers/soc/fsl/qbman/qman.c b/drivers/soc/fsl/qbman/qman.c
+index 43a4e8d..82aa9fb 100644
+--- a/drivers/soc/fsl/qbman/qman.c
++++ b/drivers/soc/fsl/qbman/qman.c
+@@ -2200,6 +2200,106 @@ out:
+ }
+ EXPORT_SYMBOL(qman_query_fq_np);
+ 
++/*
++ * CEETM management-command transport. CEETM management commands (verbs
++ * 0x70-0x7D) ride the existing affine-portal MC ring. This is the single
++ * entry point used by all CEETM object code in qman_ceetm.c; that file never
++ * touches portal internals directly.
++ */
++int qman_ceetm_mc_exec(u8 verb, const void *cmd, size_t cmd_len,
++		       void *rsp, size_t rsp_len)
++{
++	struct qman_portal *p;
++	union qm_mc_command *mcc;
++	union qm_mc_result *mcr;
++	unsigned long irqflags;
++	int ret = 0;
++
++	if (cmd_len > sizeof(*mcc) - 1 || rsp_len > sizeof(*mcr))
++		return -EINVAL;
++
++	p = get_affine_portal();
++	local_irq_save(irqflags);
++	mcc = qm_mc_start(&p->p);
++	/* The command body follows the verb byte (byte 0) of the MC entry */
++	if (cmd && cmd_len)
++		memcpy((u8 *)mcc + 1, cmd, cmd_len);
++	qm_mc_commit(&p->p, verb);
++	if (!qm_mc_result_timeout(&p->p, &mcr)) {
++		ret = -ETIMEDOUT;
++		goto out;
++	}
++	if ((mcr->verb & QM_MCR_VERB_MASK) != verb ||
++	    mcr->result != QM_MCR_RESULT_OK) {
++		ret = -EIO;
++		goto out;
++	}
++	if (rsp && rsp_len)
++		memcpy(rsp, mcr, rsp_len);
++out:
++	local_irq_restore(irqflags);
++	put_affine_portal();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_mc_exec);
++
++/*
++ * qman_ceetm_create_fq - bind a qman_fq to a CEETM logical frame queue.
++ *
++ * ERN delivery for CEETM:
++ *   CEETM FQs have no FQD; their dequeue context lives in the DCT (set via
++ *   qman_ceetm_lfq_set_context()). The DCT context_b is the *FMan* dequeue
++ *   context, NOT the ERN routing tag. ERN routing on the software portal works
++ *   exactly like for ordinary FQs: qman_enqueue() stamps the EQCR entry tag
++ *   with fq_to_tag(fq) (== fq->idx), and a tail-drop rejection comes back as a
++ *   software ERN whose ern.tag carries that same value, which the MR handler
++ *   resolves with tag_to_fq() -> fq_table[tag]. So all that is required for
++ *   correct ERN delivery is to register @fq in fq_table at a valid fq->idx.
++ *
++ *   fq_table is indexed by fqid*2 and sized for the regular FQID range. CEETM
++ *   LFQIDs (0xF00000+) would index far past the table, so we reserve a dynamic
++ *   FQID purely to obtain an in-range, collision-free lookup slot
++ *   (fq->idx = fqid*2 + 1, the NO_MODIFY/odd slot). fq->fqid keeps the real
++ *   LFQID, which is what qm_fqid_set() programs into the enqueue ring entry.
++ */
++int qman_ceetm_create_fq(struct qm_ceetm_lfq *lfq, struct qman_fq *fq)
++{
++	u32 fqid;
++	int ret;
++
++	fq->fqid = lfq->idx;
++	fq->flags = QMAN_FQ_FLAG_NO_MODIFY;
++	fq->state = qman_fq_state_oos;
++	fq->cgr_groupid = 0;
++	if (lfq->ern)
++		fq->cb.ern = lfq->ern;
++
++	ret = qman_alloc_fqid(&fqid);
++	if (ret)
++		return ret;
++	fq->idx = fqid * 2 + 1;
++	if (WARN_ON(fq_table[fq->idx])) {
++		qman_release_fqid(fqid);
++		return -EBUSY;
++	}
++	fq_table[fq->idx] = fq;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_create_fq);
++
++void qman_ceetm_destroy_fq(struct qman_fq *fq)
++{
++	u32 fqid = fq->idx >> 1;
++
++	fq_table[fq->idx] = NULL;
++	/* clear the table slot before releasing the fqid (see qman_destroy_fq) */
++	smp_wmb();
++	qman_release_fqid(fqid);
++	fq->idx = 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_destroy_fq);
++
++
+ static int qman_query_cgr(struct qman_cgr *cgr,
+ 			  struct qm_mcr_querycgr *cgrd)
+ {
+diff --git a/drivers/soc/fsl/qbman/qman_ccsr.c b/drivers/soc/fsl/qbman/qman_ccsr.c
+index aa5348f..13c2868 100644
+--- a/drivers/soc/fsl/qbman/qman_ccsr.c
++++ b/drivers/soc/fsl/qbman/qman_ccsr.c
+@@ -45,6 +45,9 @@ EXPORT_SYMBOL(qm_channel_caam);
+ #define REG_DCP_CFG(n)		(0x0300 + ((n) * 0x10))
+ #define REG_DCP_DD_CFG(n)	(0x0304 + ((n) * 0x10))
+ #define REG_DCP_DLM_AVG(n)	(0x030c + ((n) * 0x10))
++#define REG_CEETM_CFG_IDX	0x900
++#define REG_CEETM_CFG_PRES	0x904
++#define REG_CEETM_XSFDR_IN_USE	0x908
+ #define REG_PFDR_FPC		0x0400
+ #define REG_PFDR_FP_HEAD	0x0404
+ #define REG_PFDR_FP_TAIL	0x0408
+@@ -271,6 +274,8 @@ static const struct qman_error_info_mdata error_mdata[] = {
+ 
+ /* Pointer to the start of the QMan's CCSR space */
+ static u32 __iomem *qm_ccsr_start;
++/* QMan clock frequency (Hz), from the DT 'clock-frequency' property */
++u32 qman_clk;
+ /* A SDQCR mask comprising all the available/visible pool channels */
+ static u32 qm_pools_sdqcr;
+ static int __qman_probed;
+@@ -291,11 +296,6 @@ u32 qm_get_pools_sdqcr(void)
+ 	return qm_pools_sdqcr;
+ }
+ 
+-enum qm_dc_portal {
+-	qm_dc_portal_fman0 = 0,
+-	qm_dc_portal_fman1 = 1
+-};
+-
+ static void qm_set_dc(enum qm_dc_portal portal, int ed, u8 sernd)
+ {
+ 	DPAA_ASSERT(!ed || portal == qm_dc_portal_fman0 ||
+@@ -738,6 +738,11 @@ static int fsl_qman_probe(struct platform_device *pdev)
+ 
+ 	__qman_probed = -1;
+ 
++	if (of_property_read_u32(node, "clock-frequency", &qman_clk)) {
++		dev_warn(dev, "Can't read clock-frequency, defaulting to 300MHz\n");
++		qman_clk = 300000000;
++	}
++
+ 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+ 	if (!res) {
+ 		dev_err(dev, "Can't get %pOF property 'IORESOURCE_MEM'\n",
+@@ -876,6 +881,67 @@ static const struct of_device_id fsl_qman_ids[] = {
+ 	{}
+ };
+ 
++
++#define REG_CEETM_UPDATE_PERIOD	1000 /* credit-update reference period (ns) */
++#define QM_SP_ENABLE_CEETM(n)	(0x80000000 >> (n))
++
++/*
++ * CEETM_CFG_PRES PRES field:
++ *   PRES = (2^22 / credit-update-reference-period) * QMan-clock-period
++ *        = ((2^22 * 10^9) / REG_CEETM_UPDATE_PERIOD) / qman_clk
++ */
++int qman_ceetm_set_prescaler(enum qm_dc_portal portal)
++{
++	u64 temp;
++	u16 pres;
++
++	if (!qm_ccsr_start)
++		return -ENODEV;
++	temp = 0x400000ULL * 100;
++	do_div(temp, REG_CEETM_UPDATE_PERIOD);
++	temp *= 10000000;
++	do_div(temp, qman_clk);
++	pres = (u16)temp;
++	qm_ccsr_out(REG_CEETM_CFG_IDX, portal);
++	qm_ccsr_out(REG_CEETM_CFG_PRES, pres);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_set_prescaler);
++
++int qman_ceetm_get_prescaler(u16 *pres)
++{
++	if (!qm_ccsr_start)
++		return -ENODEV;
++	*pres = (u16)qm_ccsr_in(REG_CEETM_CFG_PRES);
++	return 0;
++}
++
++int qman_sp_enable_ceetm_mode(enum qm_dc_portal portal, u16 sub_portal)
++{
++	u32 dcp_cfg;
++
++	if (!qm_ccsr_start)
++		return -ENODEV;
++	dcp_cfg = qm_ccsr_in(REG_DCP_CFG(portal));
++	dcp_cfg |= QM_SP_ENABLE_CEETM(sub_portal);
++	qm_ccsr_out(REG_DCP_CFG(portal), dcp_cfg);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_sp_enable_ceetm_mode);
++
++int qman_sp_disable_ceetm_mode(enum qm_dc_portal portal, u16 sub_portal)
++{
++	u32 dcp_cfg;
++
++	if (!qm_ccsr_start)
++		return -ENODEV;
++	dcp_cfg = qm_ccsr_in(REG_DCP_CFG(portal));
++	dcp_cfg &= ~QM_SP_ENABLE_CEETM(sub_portal);
++	qm_ccsr_out(REG_DCP_CFG(portal), dcp_cfg);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_sp_disable_ceetm_mode);
++
+ static struct platform_driver fsl_qman_driver = {
+ 	.driver = {
+ 		.name = KBUILD_MODNAME,
+diff --git a/drivers/soc/fsl/qbman/qman_ceetm.c b/drivers/soc/fsl/qbman/qman_ceetm.c
+new file mode 100644
+index 0000000..e7729b6
+--- /dev/null
++++ b/drivers/soc/fsl/qbman/qman_ceetm.c
+@@ -0,0 +1,1233 @@
++// SPDX-License-Identifier: (GPL-2.0 OR BSD-3-Clause)
++/*
++ * Copyright 2008 - 2016 Freescale Semiconductor, Inc.
++ * Copyright 2026 NXP
++ *
++ * QMan CEETM (Customer Edge Egress Traffic Management) hierarchical egress
++ * shaper support.
++ *
++ * Ported from the legacy NXP SDK (qman_high.c CEETM section) and modernised to
++ * mainline kernel style: the SDK big/little-endian bitfield wire structures
++ * have been replaced with explicit __beN fields and byte arrays (see
++ * qman_priv.h), and all management commands are issued through the single
++ * generic transport helper qman_ceetm_mc_exec() in qman.c rather than touching
++ * software-portal internals directly.
++ *
++ * This v1 implements strict-priority class scheduling, LNI/channel dual-rate
++ * shapers and byte/frame tail-drop congestion groups. WBFS weighted groups,
++ * CSCN congestion-state-change notifications and traffic-class flow-control
++ * (tcfc) from the SDK are intentionally not ported (see 0111-NOTES.md).
++ *
++ * Hardware resources are hard-coded for the LS1046A CEETM0 instance (single
++ * FMan -> DCP0): LFQID base 0xF00000 count 0x1000, 32 channels, 8 LNIs and 16
++ * sub-portals, all on qm_dc_portal_fman0.
++ */
++
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
++#include <linux/bitmap.h>
++#include <linux/math64.h>
++#include <linux/string.h>
++
++#include "qman_priv.h"
++
++/* LS1046A CEETM0 hard-coded resource ranges (single FMan -> DCP0) */
++#define CEETM_LFQID_BASE	0xF00000
++#define CEETM_LFQID_COUNT	0x1000
++#define CEETM_LFQID_LSB_MASK	0x000FFF
++#define CEETM_NR_CHANNELS	32
++#define CEETM_NR_LNIS		8
++#define CEETM_NR_SPS		16
++
++/*
++ * ROUNDING(n, d, r): divide n by d with rounding direction r (negative: down,
++ * positive: up, zero: nearest). Ported verbatim from the SDK.
++ */
++#define ROUNDING(n, d, r) \
++	(((r) < 0) ? div64_u64((n), (d)) : \
++	(((r) > 0) ? div64_u64(((n) + (d) - 1), (d)) : \
++	div64_u64(((n) + ((d) / 2)), (d))))
++
++/* Helpers for the explicit big-endian byte-array wire fields */
++static inline void be24_set(u8 *p, u32 v)
++{
++	p[0] = (v >> 16) & 0xff;
++	p[1] = (v >> 8) & 0xff;
++	p[2] = v & 0xff;
++}
++
++static inline u32 be24_get(const u8 *p)
++{
++	return ((u32)p[0] << 16) | ((u32)p[1] << 8) | p[2];
++}
++
++static inline u64 be40_get(const u8 *p)
++{
++	return ((u64)p[0] << 32) | ((u64)p[1] << 24) | ((u64)p[2] << 16) |
++	       ((u64)p[3] << 8) | p[4];
++}
++
++static inline u64 be48_get(const u8 *p)
++{
++	return ((u64)p[0] << 40) | ((u64)p[1] << 32) | ((u64)p[2] << 24) |
++	       ((u64)p[3] << 16) | ((u64)p[4] << 8) | p[5];
++}
++
++/* Simple bitmap allocators (DCP0 only) */
++static DEFINE_SPINLOCK(ceetm_lock);
++static DECLARE_BITMAP(ceetm_lfqid_map, CEETM_LFQID_COUNT);
++static DECLARE_BITMAP(ceetm_channel_map, CEETM_NR_CHANNELS);
++static DECLARE_BITMAP(ceetm_lni_map, CEETM_NR_LNIS);
++static DECLARE_BITMAP(ceetm_sp_map, CEETM_NR_SPS);
++
++static int ceetm_bitmap_claim(unsigned long *map, unsigned int nr,
++			      unsigned int idx)
++{
++	int ret = -EBUSY;
++
++	if (idx >= nr)
++		return -EINVAL;
++	spin_lock(&ceetm_lock);
++	if (!test_bit(idx, map)) {
++		set_bit(idx, map);
++		ret = 0;
++	}
++	spin_unlock(&ceetm_lock);
++	return ret;
++}
++
++static int ceetm_bitmap_alloc(unsigned long *map, unsigned int nr)
++{
++	unsigned int idx;
++
++	spin_lock(&ceetm_lock);
++	idx = find_first_zero_bit(map, nr);
++	if (idx < nr)
++		set_bit(idx, map);
++	spin_unlock(&ceetm_lock);
++	return (idx < nr) ? (int)idx : -ENOSPC;
++}
++
++static void ceetm_bitmap_free(unsigned long *map, unsigned int idx)
++{
++	spin_lock(&ceetm_lock);
++	clear_bit(idx, map);
++	spin_unlock(&ceetm_lock);
++}
++
++/* ----------------------------------------------------------------------
++ * Management-command wrappers (all go through qman_ceetm_mc_exec())
++ * ---------------------------------------------------------------------- */
++
++static int ceetm_configure_lfqmt(struct qm_mcc_ceetm_lfqmt_config *opts)
++{
++	return qman_ceetm_mc_exec(QM_CEETM_VERB_LFQMT_CONFIG, opts,
++				  sizeof(*opts), NULL, 0);
++}
++
++static int ceetm_configure_cq(struct qm_mcc_ceetm_cq_config *opts)
++{
++	return qman_ceetm_mc_exec(QM_CEETM_VERB_CQ_CONFIG, opts,
++				  sizeof(*opts), NULL, 0);
++}
++
++static int ceetm_configure_dct(struct qm_mcc_ceetm_dct_config *opts)
++{
++	return qman_ceetm_mc_exec(QM_CEETM_VERB_DCT_CONFIG, opts,
++				  sizeof(*opts), NULL, 0);
++}
++
++static int ceetm_configure_csch(struct qm_mcc_ceetm_class_scheduler_config *o)
++{
++	return qman_ceetm_mc_exec(QM_CEETM_VERB_CLASS_SCHEDULER_CONFIG, o,
++				  sizeof(*o), NULL, 0);
++}
++
++static int ceetm_query_csch(struct qm_ceetm_channel *channel,
++			    struct qm_mcr_ceetm_class_scheduler_query *res)
++{
++	struct qm_mcc_ceetm_class_scheduler_query q = {0};
++
++	q.cqcid = cpu_to_be16(channel->idx);
++	q.dcpid = channel->dcp_idx;
++	return qman_ceetm_mc_exec(QM_CEETM_VERB_CLASS_SCHEDULER_QUERY, &q,
++				  sizeof(q), res, sizeof(*res));
++}
++
++static int ceetm_configure_mst(struct qm_mcc_ceetm_mapping_shaper_tcfc_config *o)
++{
++	return qman_ceetm_mc_exec(QM_CEETM_VERB_MAPPING_SHAPER_TCFC_CONFIG, o,
++				  sizeof(*o), NULL, 0);
++}
++
++static int ceetm_query_mst(u16 cid, u8 dcpid,
++			   struct qm_mcr_ceetm_mapping_shaper_tcfc_query *res)
++{
++	struct qm_mcc_ceetm_mapping_shaper_tcfc_query q = {0};
++
++	q.cid = cpu_to_be16(cid);
++	q.dcpid = dcpid;
++	return qman_ceetm_mc_exec(QM_CEETM_VERB_MAPPING_SHAPER_TCFC_QUERY, &q,
++				  sizeof(q), res, sizeof(*res));
++}
++
++static int ceetm_configure_ccgr(struct qm_mcc_ceetm_ccgr_config *opts)
++{
++	return qman_ceetm_mc_exec(QM_CEETM_VERB_CCGR_CONFIG, opts,
++				  sizeof(*opts), NULL, 0);
++}
++
++static int ceetm_cq_peek_pop_xsfdrread(struct qm_ceetm_cq *cq, u8 ct,
++			struct qm_mcr_ceetm_cq_peek_pop_xsfdrread *res)
++{
++	struct qm_mcc_ceetm_cq_peek_pop_xsfdrread q = {0};
++
++	/*
++	 * NOTE: matching the silicon-proven SDK exactly, the cqid field of this
++	 * command is written in native (little-endian on LS1046A) order, not
++	 * byte-swapped like the other CEETM commands.
++	 */
++	q.cqid = cpu_to_le16((cq->parent->idx << 4) | cq->idx);
++	q.ct = ct;
++	q.dcpid = cq->parent->dcp_idx;
++	return qman_ceetm_mc_exec(QM_CEETM_VERB_CQ_PEEK_POP_XFDRREAD, &q,
++				  sizeof(q), res, sizeof(*res));
++}
++
++static int ceetm_query_statistics(u16 cid, u8 dcpid, u8 ct,
++				  struct qm_mcr_ceetm_statistics_query *res)
++{
++	struct qm_mcc_ceetm_statistics_query_write q = {0};
++
++	q.cid = cpu_to_be16(cid);
++	q.dcpid = dcpid;
++	q.ct = ct;
++	return qman_ceetm_mc_exec(QM_CEETM_VERB_STATISTICS_QUERY_WRITE, &q,
++				  sizeof(q), res, sizeof(*res));
++}
++
++static int ceetm_query_cq(struct qm_ceetm_cq *cq,
++			  struct qm_mcr_ceetm_cq_query *res)
++{
++	struct qm_mcc_ceetm_cq_query q = {0};
++
++	q.cqid = cpu_to_be16((cq->parent->idx << 4) | cq->idx);
++	q.dcpid = cq->parent->dcp_idx;
++	return qman_ceetm_mc_exec(QM_CEETM_VERB_CQ_QUERY, &q, sizeof(q),
++				  res, sizeof(*res));
++}
++
++/* ----------------------------------------------------------------------
++ * bps <-> token-rate conversion
++ * ---------------------------------------------------------------------- */
++
++int qman_ceetm_bps2tokenrate(u64 bps, struct qm_ceetm_rate *token_rate,
++			     u16 rounding)
++{
++	u16 pres;
++	u64 temp;
++	int ret;
++
++	/* Compile-time check that the wire command/result layouts are exact */
++	BUILD_BUG_ON(sizeof(struct qm_mcc_ceetm_lfqmt_config) != 63);
++	BUILD_BUG_ON(sizeof(struct qm_mcc_ceetm_cq_config) != 63);
++	BUILD_BUG_ON(sizeof(struct qm_mcc_ceetm_dct_config) != 63);
++	BUILD_BUG_ON(sizeof(struct qm_mcc_ceetm_class_scheduler_config) != 63);
++	BUILD_BUG_ON(sizeof(struct qm_mcr_ceetm_class_scheduler_query) != 64);
++	BUILD_BUG_ON(sizeof(struct qm_mcc_ceetm_mapping_shaper_tcfc_config) != 63);
++	BUILD_BUG_ON(sizeof(struct qm_mcr_ceetm_mapping_shaper_tcfc_query) != 64);
++	BUILD_BUG_ON(sizeof(struct qm_mcc_ceetm_ccgr_config) != 63);
++	BUILD_BUG_ON(sizeof(struct qm_mcc_ceetm_cq_peek_pop_xsfdrread) != 63);
++	BUILD_BUG_ON(sizeof(struct qm_mcr_ceetm_cq_peek_pop_xsfdrread) != 64);
++	BUILD_BUG_ON(sizeof(struct qm_mcc_ceetm_statistics_query_write) != 63);
++	BUILD_BUG_ON(sizeof(struct qm_mcr_ceetm_statistics_query) != 64);
++	BUILD_BUG_ON(sizeof(struct qm_mcc_ceetm_cq_query) != 63);
++	BUILD_BUG_ON(sizeof(struct qm_mcr_ceetm_cq_query) != 64);
++
++	ret = qman_ceetm_get_prescaler(&pres);
++	if (ret)
++		return ret;
++	if (!qman_clk)
++		return -EINVAL;
++
++	/*
++	 *	N = (((bps*2^16)/PRES)*2^16)/QHz
++	 * Two 16-bit shifts (instead of one 32-bit) keep the math overflow-safe
++	 * for rates up to and beyond 10Gbps.
++	 */
++	temp = ROUNDING((bps << 16), pres, rounding);
++	temp = ROUNDING((temp << 16), qman_clk, rounding);
++	token_rate->whole = temp >> 13;
++	token_rate->fraction = temp & (((u64)1 << 13) - 1);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_bps2tokenrate);
++
++int qman_ceetm_tokenrate2bps(const struct qm_ceetm_rate *token_rate, u64 *bps,
++			     u16 rounding)
++{
++	u16 pres;
++	u64 temp;
++	int ret;
++
++	ret = qman_ceetm_get_prescaler(&pres);
++	if (ret)
++		return ret;
++	if (!qman_clk)
++		return -EINVAL;
++
++	/*
++	 *	bps = N*PRES*QHZ / (2^32)
++	 * Split into two /2^16 steps to avoid 64-bit overflow.
++	 */
++	temp = ROUNDING((u64)qman_clk * pres, (u64)1 << 16, rounding);
++	temp *= (((u64)token_rate->whole << 13) + token_rate->fraction);
++	*bps = ROUNDING(temp, (u64)1 << 16, rounding);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_tokenrate2bps);
++
++/* ----------------------------------------------------------------------
++ * Sub-portals
++ * ---------------------------------------------------------------------- */
++
++int qman_ceetm_sp_claim(struct qm_ceetm_sp **sp, enum qm_dc_portal dcp_idx,
++			unsigned int sp_idx)
++{
++	struct qm_ceetm_sp *p;
++	int ret;
++
++	if (dcp_idx != qm_dc_portal_fman0)
++		return -EINVAL;
++
++	ret = ceetm_bitmap_claim(ceetm_sp_map, CEETM_NR_SPS, sp_idx);
++	if (ret) {
++		pr_err("CEETM: sub-portal %u not available\n", sp_idx);
++		return ret;
++	}
++
++	p = kzalloc(sizeof(*p), GFP_KERNEL);
++	if (!p) {
++		ceetm_bitmap_free(ceetm_sp_map, sp_idx);
++		return -ENOMEM;
++	}
++	p->idx = sp_idx;
++	p->dcp_idx = dcp_idx;
++	p->is_claimed = 1;
++	*sp = p;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_sp_claim);
++
++int qman_ceetm_sp_release(struct qm_ceetm_sp *sp)
++{
++	if (sp->lni && sp->lni->is_claimed) {
++		pr_err("CEETM: sub-portal %u dependency not released\n",
++		       sp->idx);
++		return -EBUSY;
++	}
++	/* Disable CEETM mode of this sub-portal */
++	qman_sp_disable_ceetm_mode(sp->dcp_idx, sp->idx);
++	ceetm_bitmap_free(ceetm_sp_map, sp->idx);
++	kfree(sp);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_sp_release);
++
++/* ----------------------------------------------------------------------
++ * Logical Network Interfaces
++ * ---------------------------------------------------------------------- */
++
++int qman_ceetm_lni_claim(struct qm_ceetm_lni **lni, enum qm_dc_portal dcp_idx,
++			 unsigned int lni_idx)
++{
++	struct qm_ceetm_lni *p;
++	int ret;
++
++	if (dcp_idx != qm_dc_portal_fman0)
++		return -EINVAL;
++
++	ret = ceetm_bitmap_claim(ceetm_lni_map, CEETM_NR_LNIS, lni_idx);
++	if (ret) {
++		pr_err("CEETM: LNI %u not available\n", lni_idx);
++		return ret;
++	}
++
++	p = kzalloc(sizeof(*p), GFP_KERNEL);
++	if (!p) {
++		ceetm_bitmap_free(ceetm_lni_map, lni_idx);
++		return -ENOMEM;
++	}
++	p->idx = lni_idx;
++	p->dcp_idx = dcp_idx;
++	p->is_claimed = 1;
++	INIT_LIST_HEAD(&p->channels);
++	*lni = p;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_lni_claim);
++
++int qman_ceetm_lni_release(struct qm_ceetm_lni *lni)
++{
++	struct qm_mcc_ceetm_mapping_shaper_tcfc_config opts = {0};
++
++	if (!list_empty(&lni->channels)) {
++		pr_err("CEETM: LNI %u dependencies not released\n", lni->idx);
++		return -EBUSY;
++	}
++
++	/* Reset the LNI shaper record */
++	opts.cid = cpu_to_be16(CEETM_COMMAND_LNI_SHAPER | lni->idx);
++	opts.dcpid = lni->dcp_idx;
++	ceetm_configure_mst(&opts);
++
++	ceetm_bitmap_free(ceetm_lni_map, lni->idx);
++	kfree(lni);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_lni_release);
++
++int qman_ceetm_sp_set_lni(struct qm_ceetm_sp *sp, struct qm_ceetm_lni *lni)
++{
++	struct qm_mcc_ceetm_mapping_shaper_tcfc_config opts = {0};
++
++	opts.cid = cpu_to_be16(CEETM_COMMAND_SP_MAPPING | sp->idx);
++	opts.dcpid = sp->dcp_idx;
++	opts.sp_mapping.map_ctl = lni->idx & CEETM_MAP_LNI_ID_MASK;
++	sp->lni = lni;
++
++	if (ceetm_configure_mst(&opts))
++		return -EINVAL;
++
++	/* Enable CEETM mode for this sub-portal */
++	return qman_sp_enable_ceetm_mode(sp->dcp_idx, sp->idx);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_sp_set_lni);
++
++int qman_ceetm_lni_enable_shaper(struct qm_ceetm_lni *lni, int coupled, int oal)
++{
++	struct qm_mcc_ceetm_mapping_shaper_tcfc_config opts = {0};
++
++	if (lni->shaper_enable) {
++		pr_err("CEETM: LNI %u shaper already enabled\n", lni->idx);
++		return -EINVAL;
++	}
++	lni->shaper_enable = 1;
++	lni->shaper_couple = coupled;
++	lni->oal = oal;
++
++	opts.cid = cpu_to_be16(CEETM_COMMAND_LNI_SHAPER | lni->idx);
++	opts.dcpid = lni->dcp_idx;
++	opts.shaper_config.ctl = (coupled ? CEETM_SHAPER_CPL : 0) |
++				 (oal & CEETM_SHAPER_OAL_MASK);
++	be24_set(opts.shaper_config.crtcr,
++		 ((u32)lni->cr_token_rate.whole << 13) |
++		 lni->cr_token_rate.fraction);
++	be24_set(opts.shaper_config.ertcr,
++		 ((u32)lni->er_token_rate.whole << 13) |
++		 lni->er_token_rate.fraction);
++	opts.shaper_config.crtbl = cpu_to_be16(lni->cr_token_bucket_limit);
++	opts.shaper_config.ertbl = cpu_to_be16(lni->er_token_bucket_limit);
++	/* Erratum A-010383: do not use both OAL and MPS on an LNI shaper */
++	opts.shaper_config.mps = oal ? 0 : 60;
++
++	return ceetm_configure_mst(&opts);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_lni_enable_shaper);
++
++int qman_ceetm_lni_disable_shaper(struct qm_ceetm_lni *lni)
++{
++	struct qm_mcc_ceetm_mapping_shaper_tcfc_config opts = {0};
++
++	if (!lni->shaper_enable) {
++		pr_err("CEETM: LNI %u shaper already disabled\n", lni->idx);
++		return -EINVAL;
++	}
++
++	opts.cid = cpu_to_be16(CEETM_COMMAND_LNI_SHAPER | lni->idx);
++	opts.dcpid = lni->dcp_idx;
++	opts.shaper_config.ctl = (lni->shaper_couple ? CEETM_SHAPER_CPL : 0) |
++				 (lni->oal & CEETM_SHAPER_OAL_MASK);
++	opts.shaper_config.crtbl = cpu_to_be16(lni->cr_token_bucket_limit);
++	opts.shaper_config.ertbl = cpu_to_be16(lni->er_token_bucket_limit);
++	/* All-ones token rate configures an infinite rate (shaping disabled) */
++	be24_set(opts.shaper_config.crtcr, 0xFFFFFF);
++	be24_set(opts.shaper_config.ertcr, 0xFFFFFF);
++	opts.shaper_config.mps = lni->oal ? 0 : 60;
++
++	lni->shaper_enable = 0;
++	return ceetm_configure_mst(&opts);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_lni_disable_shaper);
++
++static int lni_set_rate(struct qm_ceetm_lni *lni, bool commit,
++			const struct qm_ceetm_rate *token_rate, u16 token_limit)
++{
++	struct qm_mcc_ceetm_mapping_shaper_tcfc_config opts = {0};
++	struct qm_mcr_ceetm_mapping_shaper_tcfc_query res = {0};
++	int ret;
++
++	if (commit) {
++		lni->cr_token_rate = *token_rate;
++		lni->cr_token_bucket_limit = token_limit;
++	} else {
++		lni->er_token_rate = *token_rate;
++		lni->er_token_bucket_limit = token_limit;
++	}
++	if (!lni->shaper_enable)
++		return 0;
++
++	ret = ceetm_query_mst(CEETM_COMMAND_LNI_SHAPER | lni->idx,
++			      lni->dcp_idx, &res);
++	if (ret) {
++		pr_err("CEETM: failed to query LNI %u shaper\n", lni->idx);
++		return ret;
++	}
++
++	opts.cid = cpu_to_be16(CEETM_COMMAND_LNI_SHAPER | lni->idx);
++	opts.dcpid = lni->dcp_idx;
++	opts.shaper_config.ctl = res.shaper_query.ctl;
++	opts.shaper_config.mps = res.shaper_query.mps;
++	if (commit) {
++		be24_set(opts.shaper_config.crtcr,
++			 ((u32)token_rate->whole << 13) | token_rate->fraction);
++		opts.shaper_config.crtbl = cpu_to_be16(token_limit);
++		memcpy(opts.shaper_config.ertcr, res.shaper_query.ertcr, 3);
++		opts.shaper_config.ertbl = res.shaper_query.ertbl;
++	} else {
++		be24_set(opts.shaper_config.ertcr,
++			 ((u32)token_rate->whole << 13) | token_rate->fraction);
++		opts.shaper_config.ertbl = cpu_to_be16(token_limit);
++		memcpy(opts.shaper_config.crtcr, res.shaper_query.crtcr, 3);
++		opts.shaper_config.crtbl = res.shaper_query.crtbl;
++	}
++	return ceetm_configure_mst(&opts);
++}
++
++int qman_ceetm_lni_set_commit_rate(struct qm_ceetm_lni *lni,
++				   const struct qm_ceetm_rate *token_rate,
++				   u16 max_burst_size)
++{
++	return lni_set_rate(lni, true, token_rate, max_burst_size);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_lni_set_commit_rate);
++
++int qman_ceetm_lni_set_excess_rate(struct qm_ceetm_lni *lni,
++				   const struct qm_ceetm_rate *token_rate,
++				   u16 max_burst_size)
++{
++	return lni_set_rate(lni, false, token_rate, max_burst_size);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_lni_set_excess_rate);
++
++int qman_ceetm_lni_set_commit_rate_bps(struct qm_ceetm_lni *lni, u64 bps,
++				       u16 max_burst_size)
++{
++	struct qm_ceetm_rate token_rate;
++	int ret;
++
++	ret = qman_ceetm_bps2tokenrate(bps, &token_rate, 0);
++	if (ret)
++		return ret;
++	return lni_set_rate(lni, true, &token_rate, max_burst_size);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_lni_set_commit_rate_bps);
++
++int qman_ceetm_lni_set_excess_rate_bps(struct qm_ceetm_lni *lni, u64 bps,
++				       u16 max_burst_size)
++{
++	struct qm_ceetm_rate token_rate;
++	int ret;
++
++	ret = qman_ceetm_bps2tokenrate(bps, &token_rate, 0);
++	if (ret)
++		return ret;
++	return lni_set_rate(lni, false, &token_rate, max_burst_size);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_lni_set_excess_rate_bps);
++
++/* ----------------------------------------------------------------------
++ * Class Queue Channels
++ * ---------------------------------------------------------------------- */
++
++int qman_ceetm_channel_claim(struct qm_ceetm_channel **channel,
++			     struct qm_ceetm_lni *lni)
++{
++	struct qm_ceetm_channel *p;
++	struct qm_mcc_ceetm_mapping_shaper_tcfc_config opts = {0};
++	int idx;
++
++	if (lni->dcp_idx != qm_dc_portal_fman0)
++		return -EINVAL;
++
++	idx = ceetm_bitmap_alloc(ceetm_channel_map, CEETM_NR_CHANNELS);
++	if (idx < 0) {
++		pr_err("CEETM: no channel available for LNI %u\n", lni->idx);
++		return -ENODEV;
++	}
++
++	p = kzalloc(sizeof(*p), GFP_KERNEL);
++	if (!p) {
++		ceetm_bitmap_free(ceetm_channel_map, idx);
++		return -ENOMEM;
++	}
++	p->idx = idx;
++	p->dcp_idx = lni->dcp_idx;
++	p->lni_idx = lni->idx;
++	INIT_LIST_HEAD(&p->class_queues);
++	INIT_LIST_HEAD(&p->ccgs);
++	list_add_tail(&p->node, &lni->channels);
++
++	opts.cid = cpu_to_be16(CEETM_COMMAND_CHANNEL_MAPPING | idx);
++	opts.dcpid = lni->dcp_idx;
++	opts.channel_mapping.map_ctl = CEETM_MAP_SHAPED |
++				       (lni->idx & CEETM_MAP_LNI_ID_MASK);
++	if (ceetm_configure_mst(&opts)) {
++		pr_err("CEETM: can't map channel %d to LNI %u\n", idx,
++		       lni->idx);
++		list_del(&p->node);
++		ceetm_bitmap_free(ceetm_channel_map, idx);
++		kfree(p);
++		return -EINVAL;
++	}
++	*channel = p;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_channel_claim);
++
++int qman_ceetm_channel_release(struct qm_ceetm_channel *channel)
++{
++	struct qm_mcc_ceetm_mapping_shaper_tcfc_config opts = {0};
++
++	if (!list_empty(&channel->class_queues)) {
++		pr_err("CEETM: channel %u has unreleased class queues\n",
++		       channel->idx);
++		return -EBUSY;
++	}
++	if (!list_empty(&channel->ccgs)) {
++		pr_err("CEETM: channel %u has unreleased CCGs\n", channel->idx);
++		return -EBUSY;
++	}
++
++	/* Reset the channel shaper record */
++	opts.cid = cpu_to_be16(CEETM_COMMAND_CHANNEL_SHAPER | channel->idx);
++	opts.dcpid = channel->dcp_idx;
++	if (ceetm_configure_mst(&opts)) {
++		pr_err("CEETM: can't reset channel %u shaper\n", channel->idx);
++		return -EINVAL;
++	}
++
++	ceetm_bitmap_free(ceetm_channel_map, channel->idx);
++	list_del(&channel->node);
++	kfree(channel);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_channel_release);
++
++int qman_ceetm_channel_enable_shaper(struct qm_ceetm_channel *channel,
++				     int coupled)
++{
++	struct qm_mcr_ceetm_mapping_shaper_tcfc_query res = {0};
++	struct qm_mcc_ceetm_mapping_shaper_tcfc_config opts = {0};
++
++	if (channel->shaper_enable) {
++		pr_err("CEETM: channel %u shaper already enabled\n",
++		       channel->idx);
++		return -EINVAL;
++	}
++	channel->shaper_enable = 1;
++	channel->shaper_couple = coupled;
++
++	if (ceetm_query_mst(CEETM_COMMAND_CHANNEL_MAPPING | channel->idx,
++			    channel->dcp_idx, &res)) {
++		pr_err("CEETM: can't query channel %u mapping\n", channel->idx);
++		return -EINVAL;
++	}
++
++	opts.cid = cpu_to_be16(CEETM_COMMAND_CHANNEL_MAPPING | channel->idx);
++	opts.dcpid = channel->dcp_idx;
++	opts.channel_mapping.map_ctl = CEETM_MAP_SHAPED |
++		(res.channel_mapping_query.map_ctl & CEETM_MAP_LNI_ID_MASK);
++	if (ceetm_configure_mst(&opts)) {
++		pr_err("CEETM: can't enable shaper for channel %u\n",
++		       channel->idx);
++		return -EINVAL;
++	}
++
++	memset(&opts, 0, sizeof(opts));
++	opts.cid = cpu_to_be16(CEETM_COMMAND_CHANNEL_SHAPER | channel->idx);
++	opts.dcpid = channel->dcp_idx;
++	opts.shaper_config.ctl = coupled ? CEETM_SHAPER_CPL : 0;
++	be24_set(opts.shaper_config.crtcr,
++		 ((u32)channel->cr_token_rate.whole << 13) |
++		 channel->cr_token_rate.fraction);
++	be24_set(opts.shaper_config.ertcr,
++		 ((u32)channel->er_token_rate.whole << 13) |
++		 channel->er_token_rate.fraction);
++	opts.shaper_config.crtbl = cpu_to_be16(channel->cr_token_bucket_limit);
++	opts.shaper_config.ertbl = cpu_to_be16(channel->er_token_bucket_limit);
++	return ceetm_configure_mst(&opts);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_channel_enable_shaper);
++
++int qman_ceetm_channel_disable_shaper(struct qm_ceetm_channel *channel)
++{
++	struct qm_mcr_ceetm_mapping_shaper_tcfc_query res = {0};
++	struct qm_mcc_ceetm_mapping_shaper_tcfc_config opts = {0};
++
++	if (ceetm_query_mst(CEETM_COMMAND_CHANNEL_MAPPING | channel->idx,
++			    channel->dcp_idx, &res)) {
++		pr_err("CEETM: can't query channel %u mapping\n", channel->idx);
++		return -EINVAL;
++	}
++
++	opts.cid = cpu_to_be16(CEETM_COMMAND_CHANNEL_MAPPING | channel->idx);
++	opts.dcpid = channel->dcp_idx;
++	opts.channel_mapping.map_ctl =
++		res.channel_mapping_query.map_ctl & CEETM_MAP_LNI_ID_MASK;
++	channel->shaper_enable = 0;
++	return ceetm_configure_mst(&opts);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_channel_disable_shaper);
++
++static int channel_set_rate(struct qm_ceetm_channel *channel, bool commit,
++			    const struct qm_ceetm_rate *token_rate,
++			    u16 token_limit)
++{
++	struct qm_mcc_ceetm_mapping_shaper_tcfc_config opts = {0};
++	struct qm_mcr_ceetm_mapping_shaper_tcfc_query res = {0};
++	int ret;
++
++	ret = ceetm_query_mst(CEETM_COMMAND_CHANNEL_SHAPER | channel->idx,
++			      channel->dcp_idx, &res);
++	if (ret) {
++		pr_err("CEETM: can't query channel %u shaper\n", channel->idx);
++		return ret;
++	}
++
++	if (commit) {
++		channel->cr_token_rate = *token_rate;
++		channel->cr_token_bucket_limit = token_limit;
++	} else {
++		channel->er_token_rate = *token_rate;
++		channel->er_token_bucket_limit = token_limit;
++	}
++
++	opts.cid = cpu_to_be16(CEETM_COMMAND_CHANNEL_SHAPER | channel->idx);
++	opts.dcpid = channel->dcp_idx;
++	opts.shaper_config.ctl = res.shaper_query.ctl;
++	if (commit) {
++		be24_set(opts.shaper_config.crtcr,
++			 ((u32)token_rate->whole << 13) | token_rate->fraction);
++		opts.shaper_config.crtbl = cpu_to_be16(token_limit);
++		memcpy(opts.shaper_config.ertcr, res.shaper_query.ertcr, 3);
++		opts.shaper_config.ertbl = res.shaper_query.ertbl;
++	} else {
++		be24_set(opts.shaper_config.ertcr,
++			 ((u32)token_rate->whole << 13) | token_rate->fraction);
++		opts.shaper_config.ertbl = cpu_to_be16(token_limit);
++		memcpy(opts.shaper_config.crtcr, res.shaper_query.crtcr, 3);
++		opts.shaper_config.crtbl = res.shaper_query.crtbl;
++	}
++	return ceetm_configure_mst(&opts);
++}
++
++int qman_ceetm_channel_set_commit_rate(struct qm_ceetm_channel *channel,
++				       const struct qm_ceetm_rate *token_rate,
++				       u16 max_burst_size)
++{
++	return channel_set_rate(channel, true, token_rate, max_burst_size);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_channel_set_commit_rate);
++
++int qman_ceetm_channel_set_excess_rate(struct qm_ceetm_channel *channel,
++				       const struct qm_ceetm_rate *token_rate,
++				       u16 max_burst_size)
++{
++	return channel_set_rate(channel, false, token_rate, max_burst_size);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_channel_set_excess_rate);
++
++int qman_ceetm_channel_set_commit_rate_bps(struct qm_ceetm_channel *channel,
++					   u64 bps, u16 max_burst_size)
++{
++	struct qm_ceetm_rate token_rate;
++	int ret;
++
++	ret = qman_ceetm_bps2tokenrate(bps, &token_rate, 0);
++	if (ret)
++		return ret;
++	return channel_set_rate(channel, true, &token_rate, max_burst_size);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_channel_set_commit_rate_bps);
++
++int qman_ceetm_channel_set_excess_rate_bps(struct qm_ceetm_channel *channel,
++					   u64 bps, u16 max_burst_size)
++{
++	struct qm_ceetm_rate token_rate;
++	int ret;
++
++	ret = qman_ceetm_bps2tokenrate(bps, &token_rate, 0);
++	if (ret)
++		return ret;
++	return channel_set_rate(channel, false, &token_rate, max_burst_size);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_channel_set_excess_rate_bps);
++
++static int channel_set_cq_eligibility(struct qm_ceetm_channel *channel,
++				      unsigned int cq_level, int set, bool commit)
++{
++	struct qm_mcc_ceetm_class_scheduler_config cfg = {0};
++	struct qm_mcr_ceetm_class_scheduler_query res = {0};
++	u16 mask;
++	int i;
++
++	if (cq_level > 7)
++		return -EINVAL;
++	if (ceetm_query_csch(channel, &res)) {
++		pr_err("CEETM: can't query channel %u scheduler\n",
++		       channel->idx);
++		return -EINVAL;
++	}
++
++	cfg.cqcid = cpu_to_be16(channel->idx);
++	cfg.dcpid = channel->dcp_idx;
++	cfg.gpc = res.gpc;
++	for (i = 0; i < 8; i++)
++		cfg.w[i] = res.w[i];
++
++	if (commit) {
++		mask = be16_to_cpu(res.crem);
++		mask = (mask & ~CQ_ELIGIBILITY_SET(cq_level)) |
++		       (set ? CQ_ELIGIBILITY_SET(cq_level) : 0);
++		cfg.crem = cpu_to_be16(mask);
++		cfg.erem = res.erem;
++	} else {
++		mask = be16_to_cpu(res.erem);
++		mask = (mask & ~CQ_ELIGIBILITY_SET(cq_level)) |
++		       (set ? CQ_ELIGIBILITY_SET(cq_level) : 0);
++		cfg.erem = cpu_to_be16(mask);
++		cfg.crem = res.crem;
++	}
++
++	if (ceetm_configure_csch(&cfg)) {
++		pr_err("CEETM: can't set CQ %u eligibility on channel %u\n",
++		       cq_level, channel->idx);
++		return -EINVAL;
++	}
++	return 0;
++}
++
++int qman_ceetm_channel_set_cq_cr_eligibility(struct qm_ceetm_channel *channel,
++					     unsigned int cq_level, int set)
++{
++	return channel_set_cq_eligibility(channel, cq_level, set, true);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_channel_set_cq_cr_eligibility);
++
++int qman_ceetm_channel_set_cq_er_eligibility(struct qm_ceetm_channel *channel,
++					     unsigned int cq_level, int set)
++{
++	return channel_set_cq_eligibility(channel, cq_level, set, false);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_channel_set_cq_er_eligibility);
++
++/* ----------------------------------------------------------------------
++ * Class Queues
++ * ---------------------------------------------------------------------- */
++
++int qman_ceetm_cq_claim(struct qm_ceetm_cq **cq,
++			struct qm_ceetm_channel *channel, unsigned int idx,
++			struct qm_ceetm_ccg *ccg)
++{
++	struct qm_ceetm_cq *p;
++	struct qm_mcc_ceetm_cq_config cfg = {0};
++
++	if (idx > 7) {
++		pr_err("CEETM: CQ index %u out of range (strict-prio 0-7)\n",
++		       idx);
++		return -EINVAL;
++	}
++
++	list_for_each_entry(p, &channel->class_queues, node) {
++		if (p->idx == idx) {
++			pr_err("CEETM: CQ %u already claimed\n", idx);
++			return -EINVAL;
++		}
++	}
++
++	p = kzalloc(sizeof(*p), GFP_KERNEL);
++	if (!p)
++		return -ENOMEM;
++	p->idx = idx;
++	p->is_claimed = 1;
++	p->parent = channel;
++	p->ccg = ccg;
++	INIT_LIST_HEAD(&p->bound_lfqids);
++	list_add_tail(&p->node, &channel->class_queues);
++
++	if (ccg) {
++		cfg.cqid = cpu_to_be16((channel->idx << 4) | idx);
++		cfg.dcpid = channel->dcp_idx;
++		cfg.ccgid = cpu_to_be16(ccg->idx);
++		if (ceetm_configure_cq(&cfg)) {
++			pr_err("CEETM: can't configure CQ %u with CCG %u\n",
++			       idx, ccg->idx);
++			list_del(&p->node);
++			kfree(p);
++			return -EINVAL;
++		}
++	}
++
++	*cq = p;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_cq_claim);
++
++int qman_ceetm_cq_release(struct qm_ceetm_cq *cq)
++{
++	if (!list_empty(&cq->bound_lfqids)) {
++		pr_err("CEETM: CQ %u has unreleased LFQIDs\n", cq->idx);
++		return -EBUSY;
++	}
++	list_del(&cq->node);
++	qman_ceetm_drain_cq(cq);
++	kfree(cq);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_cq_release);
++
++int qman_ceetm_drain_cq(struct qm_ceetm_cq *cq)
++{
++	struct qm_mcr_ceetm_cq_peek_pop_xsfdrread ppxr;
++	int ret;
++
++	do {
++		ret = ceetm_cq_peek_pop_xsfdrread(cq, 1, &ppxr);
++		if (ret) {
++			pr_err("CEETM: failed to pop frame from CQ %u\n",
++			       cq->idx);
++			return -EINVAL;
++		}
++	} while (!(ppxr.stat & 0x2));
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_drain_cq);
++
++int qman_ceetm_cq_get_dequeue_statistics(struct qm_ceetm_cq *cq, u32 flags,
++					 u64 *frame_count, u64 *byte_count)
++{
++	struct qm_mcr_ceetm_statistics_query res;
++	u8 ct;
++	int ret;
++
++	if (flags == QMAN_CEETM_FLAG_CLEAR_STATISTICS_COUNTER)
++		ct = CEETM_QUERY_DEQUEUE_CLEAR_STATISTICS;
++	else
++		ct = CEETM_QUERY_DEQUEUE_STATISTICS;
++
++	ret = ceetm_query_statistics((cq->parent->idx << 4) | cq->idx,
++				     cq->parent->dcp_idx, ct, &res);
++	if (ret)
++		return ret;
++
++	*frame_count = be40_get(res.frm_cnt);
++	*byte_count = be48_get(res.byte_cnt);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_cq_get_dequeue_statistics);
++
++/* ----------------------------------------------------------------------
++ * Class Congestion Groups (tail-drop only in v1)
++ * ---------------------------------------------------------------------- */
++
++#define CEETM_MAX_CCG_IDX 0x0F
++
++int qman_ceetm_ccg_claim(struct qm_ceetm_ccg **ccg,
++			 struct qm_ceetm_channel *channel, unsigned int idx)
++{
++	struct qm_ceetm_ccg *p;
++
++	if (idx > CEETM_MAX_CCG_IDX) {
++		pr_err("CEETM: CCG index %u out of range\n", idx);
++		return -EINVAL;
++	}
++
++	list_for_each_entry(p, &channel->ccgs, node) {
++		if (p->idx == idx) {
++			pr_err("CEETM: CCG %u already claimed\n", idx);
++			return -EINVAL;
++		}
++	}
++
++	p = kzalloc(sizeof(*p), GFP_KERNEL);
++	if (!p)
++		return -ENOMEM;
++	p->idx = idx;
++	p->parent = channel;
++	list_add_tail(&p->node, &channel->ccgs);
++
++	*ccg = p;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_ccg_claim);
++
++int qman_ceetm_ccg_release(struct qm_ceetm_ccg *ccg)
++{
++	struct qm_mcc_ceetm_ccgr_config opts = {0};
++
++	/* Disable tail-drop so a re-claimed CCG starts clean */
++	opts.ccgrid = cpu_to_be16(CEETM_CCGR_CM_CONFIGURE |
++				  (ccg->parent->idx << 4) | ccg->idx);
++	opts.dcpid = ccg->parent->dcp_idx;
++	opts.we_mask = cpu_to_be16(QM_CCGR_WE_TD_EN | QM_CCGR_WE_MODE);
++	ceetm_configure_ccgr(&opts);
++
++	list_del(&ccg->node);
++	kfree(ccg);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_ccg_release);
++
++int qman_ceetm_ccg_set(struct qm_ceetm_ccg *ccg, u16 we_mask,
++		       const struct qm_ceetm_ccg_params *params)
++{
++	struct qm_mcc_ceetm_ccgr_config opts = {0};
++	u8 ctl = 0;
++
++	/*
++	 * v1 supports tail-drop only: the CSCN congestion-state-change
++	 * notification path of the SDK is not ported, so although the
++	 * QM_CCGR_WE_CSCN_* write-enable bits and the ctl_cscn_en field are
++	 * still honoured for the raw register write, no software-portal CSCN
++	 * callback is registered.
++	 */
++	opts.ccgrid = cpu_to_be16(CEETM_CCGR_CM_CONFIGURE |
++				  (ccg->parent->idx << 4) | ccg->idx);
++	opts.dcpid = ccg->parent->dcp_idx;
++	opts.we_mask = cpu_to_be16(we_mask);
++
++	if (params->mode)
++		ctl |= CEETM_CCGR_CTL_MODE;
++	if (params->cscn_en)
++		ctl |= CEETM_CCGR_CTL_CSCN_EN;
++	if (params->td_mode)
++		ctl |= CEETM_CCGR_CTL_TD_MODE;
++	if (params->td_en)
++		ctl |= CEETM_CCGR_CTL_TD_EN;
++	if (params->wr_en_r)
++		ctl |= CEETM_CCGR_CTL_WR_EN_R;
++	if (params->wr_en_y)
++		ctl |= CEETM_CCGR_CTL_WR_EN_Y;
++	if (params->wr_en_g)
++		ctl |= CEETM_CCGR_CTL_WR_EN_G;
++	opts.cm_config.ctl = ctl;
++	opts.cm_config.oal = params->oal;
++	opts.cm_config.cs_thres = params->cs_thres_in;
++	opts.cm_config.cs_thres_x = params->cs_thres_out;
++	opts.cm_config.td_thres = params->td_thres;
++	opts.cm_config.wr_parm_g = params->wr_parm_g;
++	opts.cm_config.wr_parm_y = params->wr_parm_y;
++	opts.cm_config.wr_parm_r = params->wr_parm_r;
++
++	if (ceetm_configure_ccgr(&opts)) {
++		pr_err("CEETM: configure CCG %u failed\n", ccg->idx);
++		return -EIO;
++	}
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_ccg_set);
++
++int qman_ceetm_ccg_get_reject_statistics(struct qm_ceetm_ccg *ccg, u32 flags,
++					 u64 *frame_count, u64 *byte_count)
++{
++	struct qm_mcr_ceetm_statistics_query res;
++	u8 ct;
++	int ret;
++
++	if (flags == QMAN_CEETM_FLAG_CLEAR_STATISTICS_COUNTER)
++		ct = CEETM_QUERY_REJECT_CLEAR_STATISTICS;
++	else
++		ct = CEETM_QUERY_REJECT_STATISTICS;
++
++	ret = ceetm_query_statistics((ccg->parent->idx << 4) | ccg->idx,
++				     ccg->parent->dcp_idx, ct, &res);
++	if (ret)
++		return ret;
++
++	*frame_count = be40_get(res.frm_cnt);
++	*byte_count = be48_get(res.byte_cnt);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_ccg_get_reject_statistics);
++
++/* ----------------------------------------------------------------------
++ * Logical Frame Queues
++ * ---------------------------------------------------------------------- */
++
++int qman_ceetm_lfq_claim(struct qm_ceetm_lfq **lfq, struct qm_ceetm_cq *cq)
++{
++	struct qm_ceetm_lfq *p;
++	struct qm_mcc_ceetm_lfqmt_config cfg = {0};
++	u32 lfqid, lsb;
++	int idx;
++
++	if (cq->parent->dcp_idx != qm_dc_portal_fman0)
++		return -EINVAL;
++
++	idx = ceetm_bitmap_alloc(ceetm_lfqid_map, CEETM_LFQID_COUNT);
++	if (idx < 0) {
++		pr_err("CEETM: no LFQID available for CQ %u\n", cq->idx);
++		return -ENODEV;
++	}
++	lsb = (u32)idx & CEETM_LFQID_LSB_MASK;
++	lfqid = CEETM_LFQID_BASE | (cq->parent->dcp_idx << 16) | lsb;
++
++	p = kzalloc(sizeof(*p), GFP_KERNEL);
++	if (!p) {
++		ceetm_bitmap_free(ceetm_lfqid_map, idx);
++		return -ENOMEM;
++	}
++	p->idx = lfqid;
++	p->dctidx = (u16)lsb;
++	p->parent = cq->parent;
++	list_add_tail(&p->node, &cq->bound_lfqids);
++
++	be24_set(cfg.lfqid, lfqid);
++	cfg.cqid = cpu_to_be16((cq->parent->idx << 4) | cq->idx);
++	cfg.dctidx = cpu_to_be16(p->dctidx);
++	if (ceetm_configure_lfqmt(&cfg)) {
++		pr_err("CEETM: can't configure LFQMT for LFQID 0x%x\n", lfqid);
++		list_del(&p->node);
++		ceetm_bitmap_free(ceetm_lfqid_map, idx);
++		kfree(p);
++		return -EINVAL;
++	}
++	*lfq = p;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_lfq_claim);
++
++int qman_ceetm_lfq_release(struct qm_ceetm_lfq *lfq)
++{
++	if (lfq->parent->dcp_idx != qm_dc_portal_fman0)
++		return -EINVAL;
++	ceetm_bitmap_free(ceetm_lfqid_map, lfq->idx & CEETM_LFQID_LSB_MASK);
++	list_del(&lfq->node);
++	kfree(lfq);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_lfq_release);
++
++int qman_ceetm_lfq_set_context(struct qm_ceetm_lfq *lfq, u64 context_a,
++			       u32 context_b)
++{
++	struct qm_mcc_ceetm_dct_config cfg = {0};
++
++	lfq->context_a = context_a;
++	lfq->context_b = context_b;
++	cfg.dctidx = cpu_to_be16(lfq->dctidx);
++	cfg.dcpid = lfq->parent->dcp_idx;
++	cfg.context_b = cpu_to_be32(context_b);
++	cfg.context_a = cpu_to_be64(context_a);
++	return ceetm_configure_dct(&cfg);
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_lfq_set_context);
++
++
++/**
++ * qman_ceetm_dump_state - log a forensic snapshot of a CEETM sub-hierarchy
++ * @tag: label prefixed to every log line
++ * @sp: sub-portal to query, or NULL
++ * @lni: LNI to query, or NULL
++ * @channel: class-queue channel to query, or NULL
++ * @cq: class queue to query, or NULL
++ * @ccg: class congestion group to query, or NULL
++ *
++ * Pure-query diagnostic used to bisect egress blackholes: a CQ frame count
++ * stuck above zero means frames sit in QMan scheduling (mapping/prescaler);
++ * growing dequeue statistics without wire traffic implicate the FMan TX
++ * side (DCT context / port); growing CCG reject statistics mean congestion
++ * tail-drops. All commands are non-destructive queries.
++ */
++void qman_ceetm_dump_state(const char *tag, struct qm_ceetm_sp *sp,
++			   struct qm_ceetm_lni *lni,
++			   struct qm_ceetm_channel *channel,
++			   struct qm_ceetm_cq *cq, struct qm_ceetm_ccg *ccg)
++{
++	struct qm_mcr_ceetm_mapping_shaper_tcfc_query mst = {0};
++	struct qm_mcr_ceetm_class_scheduler_query csch = {0};
++	struct qm_mcr_ceetm_statistics_query stats = {0};
++	struct qm_mcr_ceetm_cq_query cqq = {0};
++	u16 pres = 0;
++	int ret;
++
++	qman_ceetm_get_prescaler(&pres);
++	pr_debug("ceetm-dump[%s]: qman_clk %u pres 0x%04x\n", tag, qman_clk, pres);
++
++	if (sp) {
++		ret = ceetm_query_mst(CEETM_COMMAND_SP_MAPPING | sp->idx,
++				      sp->dcp_idx, &mst);
++		pr_debug("ceetm-dump[%s]: sp %u map_ctl 0x%02x (ret %d)\n", tag,
++			sp->idx, mst.sp_mapping_query.map_ctl, ret);
++	}
++	if (lni) {
++		ret = ceetm_query_mst(CEETM_COMMAND_LNI_SHAPER | lni->idx,
++				      lni->dcp_idx, &mst);
++		pr_debug("ceetm-dump[%s]: lni %u shaper ctl 0x%02x mps %u crtcr 0x%06x crtbl %u ertcr 0x%06x ertbl %u (ret %d)\n",
++			tag, lni->idx, mst.shaper_query.ctl, mst.shaper_query.mps,
++			be24_get(mst.shaper_query.crtcr),
++			be16_to_cpu(mst.shaper_query.crtbl),
++			be24_get(mst.shaper_query.ertcr),
++			be16_to_cpu(mst.shaper_query.ertbl), ret);
++	}
++	if (channel) {
++		ret = ceetm_query_mst(CEETM_COMMAND_CHANNEL_MAPPING |
++				      channel->idx, channel->dcp_idx, &mst);
++		pr_debug("ceetm-dump[%s]: ch %u map_ctl 0x%02x (ret %d)\n", tag,
++			channel->idx, mst.channel_mapping_query.map_ctl, ret);
++		ret = ceetm_query_mst(CEETM_COMMAND_CHANNEL_SHAPER |
++				      channel->idx, channel->dcp_idx, &mst);
++		pr_debug("ceetm-dump[%s]: ch %u shaper ctl 0x%02x crtcr 0x%06x crtbl %u ertcr 0x%06x ertbl %u (ret %d)\n",
++			tag, channel->idx, mst.shaper_query.ctl,
++			be24_get(mst.shaper_query.crtcr),
++			be16_to_cpu(mst.shaper_query.crtbl),
++			be24_get(mst.shaper_query.ertcr),
++			be16_to_cpu(mst.shaper_query.ertbl), ret);
++		ret = ceetm_query_csch(channel, &csch);
++		pr_debug("ceetm-dump[%s]: ch %u csch gpc 0x%02x crem 0x%04x erem 0x%04x w %u %u %u %u %u %u %u %u (ret %d)\n",
++			tag, channel->idx, csch.gpc, be16_to_cpu(csch.crem),
++			be16_to_cpu(csch.erem), csch.w[0], csch.w[1], csch.w[2],
++			csch.w[3], csch.w[4], csch.w[5], csch.w[6], csch.w[7],
++			ret);
++	}
++	if (cq) {
++		u16 cqid = (cq->parent->idx << 4) | cq->idx;
++
++		ret = ceetm_query_cq(cq, &cqq);
++		pr_debug("ceetm-dump[%s]: cq 0x%03x state 0x%04x ccgid %u frm_cnt %u (ret %d)\n",
++			tag, cqid, be16_to_cpu(cqq.state), be16_to_cpu(cqq.ccgid),
++			be24_get(cqq.frm_cnt), ret);
++		ret = ceetm_query_statistics(cqid, cq->parent->dcp_idx,
++					     CEETM_QUERY_DEQUEUE_STATISTICS,
++					     &stats);
++		pr_debug("ceetm-dump[%s]: cq 0x%03x dequeued %llu frames %llu bytes (ret %d)\n",
++			tag, cqid, be40_get(stats.frm_cnt), be48_get(stats.byte_cnt),
++			ret);
++	}
++	if (ccg) {
++		ret = ceetm_query_statistics((ccg->parent->idx << 4) | ccg->idx,
++					     ccg->parent->dcp_idx,
++					     CEETM_QUERY_REJECT_STATISTICS, &stats);
++		pr_debug("ceetm-dump[%s]: ccg %u rejected %llu frames %llu bytes (ret %d)\n",
++			tag, ccg->idx, be40_get(stats.frm_cnt),
++			be48_get(stats.byte_cnt), ret);
++	}
++}
++EXPORT_SYMBOL_GPL(qman_ceetm_dump_state);
++
++MODULE_LICENSE("Dual BSD/GPL");
++MODULE_DESCRIPTION("QMan CEETM hierarchical egress shaper support");
+diff --git a/drivers/soc/fsl/qbman/qman_priv.h b/drivers/soc/fsl/qbman/qman_priv.h
+index fd1cf54..9b7f889 100644
+--- a/drivers/soc/fsl/qbman/qman_priv.h
++++ b/drivers/soc/fsl/qbman/qman_priv.h
+@@ -280,3 +280,322 @@ int qman_shutdown_fq(u32 fqid);
+ int qman_requires_cleanup(void);
+ void qman_done_cleanup(void);
+ void qman_enable_irqs(void);
++
++/* ----------------------------------------------------------------------
++ * CEETM (Customer Edge Egress Traffic Management) - internal definitions
++ *
++ * Management-command verbs, wire-format command/response structures and the
++ * generic transport helper used by qman_ceetm.c. These are private to the
++ * driver; the public CEETM object API lives in <soc/fsl/qman.h>.
++ *
++ * The SDK originals (NXP fsl_qman.h) used big/little-endian #ifdef bitfield
++ * pairs; here every multi-byte field is an explicit __beN value and every
++ * sub-32-bit packed field (lfqid:24, crtcr:24, frm_cnt:40, byte_cnt:48, ...)
++ * is a raw big-endian byte array, so the wire layout is byte-exact and
++ * endian-portable without compiler bitfield-ordering assumptions.
++ * ---------------------------------------------------------------------- */
++
++/* See "1.5.9.7 CEETM Management Commands" */
++#define QM_CEETM_VERB_LFQMT_CONFIG			0x70
++#define QM_CEETM_VERB_LFQMT_QUERY			0x71
++#define QM_CEETM_VERB_CQ_CONFIG				0x72
++#define QM_CEETM_VERB_CQ_QUERY				0x73
++#define QM_CEETM_VERB_DCT_CONFIG			0x74
++#define QM_CEETM_VERB_DCT_QUERY				0x75
++#define QM_CEETM_VERB_CLASS_SCHEDULER_CONFIG		0x76
++#define QM_CEETM_VERB_CLASS_SCHEDULER_QUERY		0x77
++#define QM_CEETM_VERB_MAPPING_SHAPER_TCFC_CONFIG	0x78
++#define QM_CEETM_VERB_MAPPING_SHAPER_TCFC_QUERY		0x79
++#define QM_CEETM_VERB_CCGR_CONFIG			0x7A
++#define QM_CEETM_VERB_CCGR_QUERY			0x7B
++#define QM_CEETM_VERB_CQ_PEEK_POP_XFDRREAD		0x7C
++#define QM_CEETM_VERB_STATISTICS_QUERY_WRITE		0x7D
++
++/* mapping/shaper/tcfc command-id selectors (top bits of 'cid') */
++#define CEETM_COMMAND_CHANNEL_MAPPING	(0 << 12)
++#define CEETM_COMMAND_SP_MAPPING	(1 << 12)
++#define CEETM_COMMAND_CHANNEL_SHAPER	(2 << 12)
++#define CEETM_COMMAND_LNI_SHAPER	(3 << 12)
++#define CEETM_COMMAND_TCFC		(4 << 12)
++
++/* ccgr command-id selector (top bits of 'ccgrid') */
++#define CEETM_CCGR_CM_CONFIGURE		(0 << 14)
++
++/* channel/sp mapping control byte */
++#define CEETM_MAP_SHAPED	0x80
++#define CEETM_MAP_LNI_ID_MASK	0x07
++
++/* shaper control byte: cpl(bit7), oal(bits4-0) */
++#define CEETM_SHAPER_CPL	0x80
++#define CEETM_SHAPER_OAL_MASK	0x1f
++
++/* ccgr cm_config control byte */
++#define CEETM_CCGR_CTL_MODE	0x01
++#define CEETM_CCGR_CTL_CSCN_EN	0x02
++#define CEETM_CCGR_CTL_TD_MODE	0x04
++#define CEETM_CCGR_CTL_TD_EN	0x08
++#define CEETM_CCGR_CTL_WR_EN_R	0x10
++#define CEETM_CCGR_CTL_WR_EN_Y	0x20
++#define CEETM_CCGR_CTL_WR_EN_G	0x40
++
++/* class-scheduler eligibility-mask bit for CQ 'n' */
++#define CQ_ELIGIBILITY_SET(n)	(1 << (7 - (n)))
++
++/* statistics_query_write command types */
++#define CEETM_QUERY_DEQUEUE_STATISTICS		0x00
++#define CEETM_QUERY_DEQUEUE_CLEAR_STATISTICS	0x01
++#define CEETM_QUERY_REJECT_STATISTICS		0x03
++#define CEETM_QUERY_REJECT_CLEAR_STATISTICS	0x04
++
++/*
++ * CEETM management-command bodies. These describe bytes 1..63 of the 64-byte
++ * MC command entry (byte 0 is the verb, written by the transport helper), so
++ * each is exactly 63 bytes.
++ */
++struct qm_mcc_ceetm_lfqmt_config {
++	u8 __reserved1[4];
++	u8 lfqid[3];		/* 24-bit big-endian */
++	u8 __reserved2[2];
++	__be16 cqid;
++	u8 __reserved3[2];
++	__be16 dctidx;
++	u8 __reserved4[48];
++} __packed;
++
++struct qm_mcc_ceetm_lfqmt_query {
++	u8 __reserved1[4];
++	u8 lfqid[3];
++	u8 __reserved2[56];
++} __packed;
++
++struct qm_mcc_ceetm_cq_config {
++	u8 __reserved1;
++	__be16 cqid;
++	u8 dcpid;
++	u8 __reserved2;
++	__be16 ccgid;
++	u8 __reserved3[56];
++} __packed;
++
++struct qm_mcc_ceetm_dct_config {
++	u8 __reserved1;
++	__be16 dctidx;
++	u8 dcpid;
++	u8 __reserved2[15];
++	__be32 context_b;
++	__be64 context_a;
++	u8 __reserved3[32];
++} __packed;
++
++struct qm_mcc_ceetm_class_scheduler_config {
++	u8 __reserved1;
++	__be16 cqcid;
++	u8 dcpid;
++	u8 __reserved2[6];
++	u8 gpc;			/* gpc_combine_flag(0x40)|prio_b(0x38)|prio_a(0x07) */
++	__be16 crem;
++	__be16 erem;
++	u8 w[8];
++	u8 __reserved3[40];
++} __packed;
++
++struct qm_mcc_ceetm_class_scheduler_query {
++	u8 __reserved1;
++	__be16 cqcid;
++	u8 dcpid;
++	u8 __reserved2[59];
++} __packed;
++
++struct qm_mcc_ceetm_mapping_shaper_tcfc_config {
++	u8 __reserved1;
++	__be16 cid;
++	u8 dcpid;
++	union {
++		struct {
++			u8 map_ctl;	/* shaped(0x80)|lni_id(0x07) */
++			u8 __reserved2[58];
++		} __packed channel_mapping;
++		struct {
++			u8 map_ctl;	/* lni_id(0x07) */
++			u8 __reserved2[58];
++		} __packed sp_mapping;
++		struct {
++			u8 ctl;		/* cpl(0x80)|oal(0x1f) */
++			u8 crtcr[3];	/* 24-bit big-endian */
++			u8 ertcr[3];	/* 24-bit big-endian */
++			__be16 crtbl;
++			__be16 ertbl;
++			u8 mps;
++			u8 __reserved2[47];
++		} __packed shaper_config;
++		struct {
++			u8 __reserved2[11];
++			__be64 lnitcfcc;
++			u8 __reserved3[40];
++		} __packed tcfc_config;
++	};
++} __packed;
++
++struct qm_mcc_ceetm_mapping_shaper_tcfc_query {
++	u8 __reserved1;
++	__be16 cid;
++	u8 dcpid;
++	u8 __reserved2[59];
++} __packed;
++
++struct qm_mcc_ceetm_ccgr_config {
++	u8 __reserved1;
++	__be16 ccgrid;
++	u8 dcpid;
++	u8 __reserved2;
++	__be16 we_mask;
++	union {
++		struct {
++			u8 ctl;
++			u8 cdv;
++			__be16 cscn_tupd;
++			u8 oal;
++			u8 __reserved3;
++			struct qm_cgr_cs_thres cs_thres;
++			struct qm_cgr_cs_thres cs_thres_x;
++			struct qm_cgr_cs_thres td_thres;
++			struct qm_cgr_wr_parm wr_parm_g;
++			struct qm_cgr_wr_parm wr_parm_y;
++			struct qm_cgr_wr_parm wr_parm_r;
++		} __packed cm_config;
++	};
++	u8 __reserved5[32];
++} __packed;
++
++struct qm_mcc_ceetm_cq_peek_pop_xsfdrread {
++	u8 __reserved1;
++	__le16 cqid;		/* native order, see qman_ceetm.c */
++	u8 dcpid;
++	u8 ct;
++	__le16 xsfdr;
++	u8 __reserved2[56];
++} __packed;
++
++struct qm_mcc_ceetm_statistics_query_write {
++	u8 __reserved1;
++	__be16 cid;
++	u8 dcpid;
++	u8 ct;
++	u8 __reserved2[13];
++	u8 frm_cnt[5];		/* 40-bit big-endian */
++	u8 __reserved3[2];
++	u8 byte_cnt[6];		/* 48-bit big-endian */
++	u8 __reserved4[32];
++} __packed;
++
++/* CEETM management-command results (full 64-byte entry, incl. verb/result) */
++struct qm_mcr_ceetm_class_scheduler_query {
++	u8 verb;
++	u8 result;
++	u8 __reserved1[9];
++	u8 gpc;
++	__be16 crem;
++	__be16 erem;
++	u8 w[8];
++	u8 __reserved2[5];
++	u8 wbfslist[3];		/* 24-bit big-endian */
++	__be32 d[8];
++} __packed;
++
++struct qm_mcr_ceetm_mapping_shaper_tcfc_query {
++	u8 verb;
++	u8 result;
++	__be16 cid;
++	u8 __reserved1;
++	union {
++		struct {
++			u8 map_ctl;
++			u8 __reserved2[58];
++		} __packed channel_mapping_query;
++		struct {
++			u8 map_ctl;
++			u8 __reserved2[58];
++		} __packed sp_mapping_query;
++		struct {
++			u8 ctl;
++			u8 crtcr[3];
++			u8 ertcr[3];
++			__be16 crtbl;
++			__be16 ertbl;
++			u8 mps;
++			u8 __reserved2[15];
++			__be32 crat;
++			__be32 erat;
++			u8 __reserved3[24];
++		} __packed shaper_query;
++		struct {
++			u8 __reserved1[11];
++			__be64 lnitcfcc;
++			u8 __reserved3[40];
++		} __packed tcfc_query;
++	};
++} __packed;
++
++struct qm_mcr_ceetm_cq_peek_pop_xsfdrread {
++	u8 verb;
++	u8 result;
++	u8 stat;
++	u8 __reserved1[11];
++	__be16 dctidx;
++	struct qm_fd fd;
++	u8 __reserved2[32];
++} __packed;
++
++struct qm_mcr_ceetm_statistics_query {
++	u8 verb;
++	u8 result;
++	u8 __reserved1[17];
++	u8 frm_cnt[5];		/* 40-bit big-endian */
++	u8 __reserved2[2];
++	u8 byte_cnt[6];		/* 48-bit big-endian */
++	u8 __reserved3[32];
++} __packed;
++
++struct qm_mcc_ceetm_cq_query {
++	u8 __reserved1;
++	__be16 cqid;
++	u8 dcpid;
++	u8 __reserved2[59];
++} __packed;
++
++struct qm_mcr_ceetm_cq_query {
++	u8 verb;
++	u8 result;
++	u8 __reserved1[4];
++	__be16 ccgid;
++	__be16 state;
++	u8 pfdr_hptr[3];		/* 24-bit big-endian */
++	u8 pfdr_tptr[3];		/* 24-bit big-endian */
++	__be16 od1_xsfdr;
++	__be16 od2_xsfdr;
++	__be16 od3_xsfdr;
++	__be16 od4_xsfdr;
++	__be16 od5_xsfdr;
++	__be16 od6_xsfdr;
++	__be16 ra1_xsfdr;
++	__be16 ra2_xsfdr;
++	u8 __reserved2;
++	u8 frm_cnt[3];		/* 24-bit big-endian */
++	u8 __reserved3[28];
++} __packed;
++
++/* QMan clock frequency (Hz), read from the DT 'clock-frequency' property */
++extern u32 qman_clk;
++
++/* CCSR helpers implemented in qman_ccsr.c */
++int qman_ceetm_get_prescaler(u16 *pres);
++
++/*
++ * Generic CEETM management-command transport (implemented in qman.c). Issues
++ * the command body @cmd (@cmd_len bytes, written after the verb byte) on the
++ * affine software portal with verb @verb, waits for completion, validates the
++ * response verb and result code, and copies @rsp_len bytes of the response
++ * out to @rsp. Returns 0, -ETIMEDOUT or -EIO.
++ */
++int qman_ceetm_mc_exec(u8 verb, const void *cmd, size_t cmd_len,
++		       void *rsp, size_t rsp_len);
+diff --git a/include/soc/fsl/qman.h b/include/soc/fsl/qman.h
+index 7f7a493..83436bb 100644
+--- a/include/soc/fsl/qman.h
++++ b/include/soc/fsl/qman.h
+@@ -33,6 +33,7 @@
+ 
+ #include <linux/bitops.h>
+ #include <linux/device.h>
++#include <linux/list.h>
+ 
+ /* Hardware constants */
+ #define QM_CHANNEL_SWPORTAL0 0
+@@ -1256,4 +1257,574 @@ void qman_portal_get_iperiod(struct qman_portal *portal, u32 *iperiod);
+  */
+ int qman_portal_set_iperiod(struct qman_portal *portal, u32 iperiod);
+ 
++
++/* ----------------------------------------------------------------------
++ * CEETM (Customer Edge Egress Traffic Management) public API
++ *
++ * Hierarchical egress traffic management for the QorIQ DPAA1 FMan datapath:
++ * sub-portals (SP) feed logical network interfaces (LNI) feed class-queue
++ * channels; each channel hosts up to 8 strict-priority class queues (CQ), and
++ * frames are enqueued via logical frame queues (LFQ). LNIs and channels carry
++ * dual-rate (commit/excess) shapers; class congestion groups (CCG) provide
++ * tail-drop. Available only when CONFIG_FSL_QMAN_CEETM is enabled.
++ * ---------------------------------------------------------------------- */
++
++/* Direct-connect (FMan) portal index */
++enum qm_dc_portal {
++	qm_dc_portal_fman0 = 0,
++	qm_dc_portal_fman1 = 1,
++};
++
++/* Flag for the statistics accessors: also reset the counter after reading */
++#define QMAN_CEETM_FLAG_CLEAR_STATISTICS_COUNTER	0x1
++
++/* 'we_mask' bits for qman_ceetm_ccg_set(): select which CCG attrs to write */
++#define QM_CCGR_WE_MODE		0x0001	/* mode (bytes/frames) */
++#define QM_CCGR_WE_CS_THRES_IN	0x0002	/* congestion-state entry threshold */
++#define QM_CCGR_WE_TD_EN	0x0004	/* tail-drop enable */
++#define QM_CCGR_WE_CSCN_TUPD	0x0008	/* CSCN target update */
++#define QM_CCGR_WE_CSCN_EN	0x0010	/* congestion notification enable */
++#define QM_CCGR_WE_WR_EN_R	0x0020	/* WRED enable - red */
++#define QM_CCGR_WE_WR_EN_Y	0x0040	/* WRED enable - yellow */
++#define QM_CCGR_WE_WR_EN_G	0x0080	/* WRED enable - green */
++#define QM_CCGR_WE_WR_PARM_R	0x0100	/* WRED parameters - red */
++#define QM_CCGR_WE_WR_PARM_Y	0x0200	/* WRED parameters - yellow */
++#define QM_CCGR_WE_WR_PARM_G	0x0400	/* WRED parameters - green */
++#define QM_CCGR_WE_OAL		0x0800	/* overhead accounting length */
++#define QM_CCGR_WE_CS_THRES_OUT	0x1000	/* congestion-state exit threshold */
++#define QM_CCGR_WE_TD_THRES	0x2000	/* tail-drop threshold */
++#define QM_CCGR_WE_TD_MODE	0x4000	/* tail-drop mode (state/threshold) */
++#define QM_CCGR_WE_CDV		0x8000	/* cdv */
++
++/**
++ * struct qm_ceetm_rate - CEETM shaper token rate
++ * @whole: integer part of the token rate (0..2047)
++ * @fraction: fractional part in units of 1/8192 (0..8191)
++ *
++ * Represents a rate as the 11.13 fixed-point value whole + fraction/8192.
++ */
++struct qm_ceetm_rate {
++	u16 whole;
++	u16 fraction;
++};
++
++/*
++ * All-ones token rate (whole 11 bits, fraction 13 bits) programs an
++ * infinite rate: the token bucket never limits, i.e. shaping disabled
++ * while the channel/LNI stays in shaped (CS=1) scheduling mode.
++ */
++#define QM_CEETM_RATE_INFINITE	((struct qm_ceetm_rate){ 0x7ff, 0x1fff })
++
++/* CEETM sub-portal */
++struct qm_ceetm_sp {
++	unsigned int idx;
++	unsigned int dcp_idx;
++	int is_claimed;
++	struct qm_ceetm_lni *lni;
++};
++
++/* CEETM logical network interface */
++struct qm_ceetm_lni {
++	unsigned int idx;
++	unsigned int dcp_idx;
++	int is_claimed;
++	struct qm_ceetm_sp *sp;
++	struct list_head channels;
++	int shaper_enable;
++	int shaper_couple;
++	int oal;
++	struct qm_ceetm_rate cr_token_rate;
++	struct qm_ceetm_rate er_token_rate;
++	u16 cr_token_bucket_limit;
++	u16 er_token_bucket_limit;
++};
++
++/* CEETM class-queue channel */
++struct qm_ceetm_channel {
++	struct list_head node;
++	unsigned int idx;
++	unsigned int lni_idx;
++	unsigned int dcp_idx;
++	struct list_head class_queues;
++	struct list_head ccgs;
++	u8 shaper_enable;
++	u8 shaper_couple;
++	struct qm_ceetm_rate cr_token_rate;
++	struct qm_ceetm_rate er_token_rate;
++	u16 cr_token_bucket_limit;
++	u16 er_token_bucket_limit;
++};
++
++/* CEETM class congestion group */
++struct qm_ceetm_ccg {
++	struct qm_ceetm_channel *parent;
++	struct list_head node;
++	unsigned int idx;
++};
++
++/* CEETM class queue */
++struct qm_ceetm_cq {
++	struct qm_ceetm_channel *parent;
++	struct qm_ceetm_ccg *ccg;
++	struct list_head node;
++	unsigned int idx;
++	int is_claimed;
++	struct list_head bound_lfqids;
++};
++
++/* CEETM logical frame queue */
++struct qm_ceetm_lfq {
++	struct qm_ceetm_channel *parent;
++	struct list_head node;
++	unsigned int idx;
++	unsigned int dctidx;
++	u64 context_a;
++	u32 context_b;
++	qman_cb_mr ern;
++};
++
++/**
++ * struct qm_ceetm_ccg_params - CEETM class congestion group parameters
++ * @mode: 0 = count bytes, 1 = count frames
++ * @td_en: enable tail-drop
++ * @td_mode: 0 = tail-drop on congestion-state, 1 = on threshold
++ * @cscn_en: enable congestion-state-change notifications (not wired in v1)
++ * @wr_en_g: enable WRED rejections, green
++ * @wr_en_y: enable WRED rejections, yellow
++ * @wr_en_r: enable WRED rejections, red
++ * @td_thres: tail-drop threshold (see qm_cgr_cs_thres_set64())
++ * @cs_thres_in: congestion-state entry threshold
++ * @cs_thres_out: congestion-state exit threshold
++ * @oal: overhead accounting length, signed per-packet "tax"
++ * @wr_parm_g: WRED parameters, green
++ * @wr_parm_y: WRED parameters, yellow
++ * @wr_parm_r: WRED parameters, red
++ */
++struct qm_ceetm_ccg_params {
++	u8 mode:1;
++	u8 td_en:1;
++	u8 td_mode:1;
++	u8 cscn_en:1;
++	u8 wr_en_g:1;
++	u8 wr_en_y:1;
++	u8 wr_en_r:1;
++	struct qm_cgr_cs_thres td_thres;
++	struct qm_cgr_cs_thres cs_thres_in;
++	struct qm_cgr_cs_thres cs_thres_out;
++	signed char oal;
++	struct qm_cgr_wr_parm wr_parm_g;
++	struct qm_cgr_wr_parm wr_parm_y;
++	struct qm_cgr_wr_parm wr_parm_r;
++};
++
++/**
++ * qman_ceetm_bps2tokenrate - convert a bit-rate to a CEETM token rate
++ * @bps: desired shaper rate in bits-per-second
++ * @token_rate: output token rate
++ * @rounding: <0 round down, >0 round up, 0 round to nearest
++ *
++ * Return: 0 on success, -EINVAL if the prescaler/QMan clock is unavailable.
++ */
++int qman_ceetm_bps2tokenrate(u64 bps, struct qm_ceetm_rate *token_rate,
++			     u16 rounding);
++
++/**
++ * qman_ceetm_tokenrate2bps - convert a CEETM token rate to a bit-rate
++ * @token_rate: input token rate
++ * @bps: output rate in bits-per-second
++ * @rounding: <0 round down, >0 round up, 0 round to nearest
++ *
++ * Return: 0 on success, -EINVAL if the prescaler/QMan clock is unavailable.
++ */
++int qman_ceetm_tokenrate2bps(const struct qm_ceetm_rate *token_rate, u64 *bps,
++			     u16 rounding);
++
++/**
++ * qman_ceetm_sp_claim - claim a CEETM sub-portal by index
++ * @sp: output sub-portal object
++ * @dcp_idx: direct-connect portal (qm_dc_portal_fman0 on LS1046A)
++ * @sp_idx: sub-portal index (0..15)
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_sp_claim(struct qm_ceetm_sp **sp, enum qm_dc_portal dcp_idx,
++			unsigned int sp_idx);
++
++/**
++ * qman_ceetm_sp_release - release a CEETM sub-portal
++ * @sp: the sub-portal to release
++ *
++ * Return: 0 on success, -EBUSY if a mapped LNI is still claimed.
++ */
++int qman_ceetm_sp_release(struct qm_ceetm_sp *sp);
++
++/**
++ * qman_ceetm_lni_claim - claim a CEETM logical network interface by index
++ * @lni: output LNI object
++ * @dcp_idx: direct-connect portal
++ * @lni_idx: LNI index (0..7)
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_lni_claim(struct qm_ceetm_lni **lni, enum qm_dc_portal dcp_idx,
++			 unsigned int lni_idx);
++
++/**
++ * qman_ceetm_lni_release - release a CEETM LNI
++ * @lni: the LNI to release
++ *
++ * Return: 0 on success, -EBUSY if channels are still attached.
++ */
++int qman_ceetm_lni_release(struct qm_ceetm_lni *lni);
++
++/**
++ * qman_ceetm_sp_set_lni - map a sub-portal to an LNI and enable CEETM mode
++ * @sp: the sub-portal
++ * @lni: the LNI to map it to
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_sp_set_lni(struct qm_ceetm_sp *sp, struct qm_ceetm_lni *lni);
++
++/**
++ * qman_ceetm_lni_enable_shaper - enable the LNI dual-rate shaper
++ * @lni: the LNI
++ * @coupled: non-zero to couple excess-rate credit to the commit bucket
++ * @oal: overhead accounting length
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_lni_enable_shaper(struct qm_ceetm_lni *lni, int coupled,
++				 int oal);
++
++/**
++ * qman_ceetm_lni_disable_shaper - disable the LNI shaper
++ * @lni: the LNI
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_lni_disable_shaper(struct qm_ceetm_lni *lni);
++
++/**
++ * qman_ceetm_lni_set_commit_rate_bps - set the LNI commit (CR) rate
++ * @lni: the LNI
++ * @bps: commit rate in bits-per-second
++ * @max_burst_size: commit token-bucket limit
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_lni_set_commit_rate_bps(struct qm_ceetm_lni *lni, u64 bps,
++				       u16 max_burst_size);
++
++/**
++ * qman_ceetm_lni_set_commit_rate - set the LNI commit (CR) token rate
++ * @lni: the LNI
++ * @token_rate: CR token rate (use QM_CEETM_RATE_INFINITE to disable pacing)
++ * @max_burst_size: CR token bucket limit in bytes
++ */
++int qman_ceetm_lni_set_commit_rate(struct qm_ceetm_lni *lni,
++				   const struct qm_ceetm_rate *token_rate,
++				   u16 max_burst_size);
++
++/**
++ * qman_ceetm_lni_set_excess_rate - set the LNI excess (ER) token rate
++ * @lni: the LNI
++ * @token_rate: ER token rate
++ * @max_burst_size: ER token bucket limit in bytes
++ */
++int qman_ceetm_lni_set_excess_rate(struct qm_ceetm_lni *lni,
++				   const struct qm_ceetm_rate *token_rate,
++				   u16 max_burst_size);
++
++/**
++ * qman_ceetm_lni_set_excess_rate_bps - set the LNI excess (ER) rate
++ * @lni: the LNI
++ * @bps: excess rate in bits-per-second
++ * @max_burst_size: excess token-bucket limit
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_lni_set_excess_rate_bps(struct qm_ceetm_lni *lni, u64 bps,
++				       u16 max_burst_size);
++
++/**
++ * qman_ceetm_channel_claim - claim a class-queue channel under an LNI
++ * @channel: output channel object
++ * @lni: the parent LNI
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_channel_claim(struct qm_ceetm_channel **channel,
++			     struct qm_ceetm_lni *lni);
++
++/**
++ * qman_ceetm_channel_release - release a class-queue channel
++ * @channel: the channel to release
++ *
++ * Return: 0 on success, -EBUSY if CQs or CCGs are still attached.
++ */
++int qman_ceetm_channel_release(struct qm_ceetm_channel *channel);
++
++/**
++ * qman_ceetm_channel_enable_shaper - enable the channel dual-rate shaper
++ * @channel: the channel
++ * @coupled: non-zero to couple excess-rate credit to the commit bucket
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_channel_enable_shaper(struct qm_ceetm_channel *channel,
++				     int coupled);
++
++/**
++ * qman_ceetm_channel_disable_shaper - disable the channel shaper
++ * @channel: the channel
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_channel_disable_shaper(struct qm_ceetm_channel *channel);
++
++/**
++ * qman_ceetm_channel_set_commit_rate_bps - set the channel commit (CR) rate
++ * @channel: the channel
++ * @bps: commit rate in bits-per-second
++ * @max_burst_size: commit token-bucket limit
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_channel_set_commit_rate_bps(struct qm_ceetm_channel *channel,
++					   u64 bps, u16 max_burst_size);
++
++/**
++ * qman_ceetm_channel_set_commit_rate - set the channel CR token rate
++ * @channel: the channel
++ * @token_rate: CR token rate (use QM_CEETM_RATE_INFINITE to disable pacing)
++ * @max_burst_size: CR token bucket limit in bytes
++ */
++int qman_ceetm_channel_set_commit_rate(struct qm_ceetm_channel *channel,
++				       const struct qm_ceetm_rate *token_rate,
++				       u16 max_burst_size);
++
++/**
++ * qman_ceetm_channel_set_excess_rate - set the channel ER token rate
++ * @channel: the channel
++ * @token_rate: ER token rate (use QM_CEETM_RATE_INFINITE to disable pacing)
++ * @max_burst_size: ER token bucket limit in bytes
++ */
++int qman_ceetm_channel_set_excess_rate(struct qm_ceetm_channel *channel,
++				       const struct qm_ceetm_rate *token_rate,
++				       u16 max_burst_size);
++
++/**
++ * qman_ceetm_channel_set_excess_rate_bps - set the channel excess (ER) rate
++ * @channel: the channel
++ * @bps: excess rate in bits-per-second
++ * @max_burst_size: excess token-bucket limit
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_channel_set_excess_rate_bps(struct qm_ceetm_channel *channel,
++					   u64 bps, u16 max_burst_size);
++
++
++/**
++ * qman_ceetm_channel_set_cq_cr_eligibility - set CQ commit-rate eligibility
++ * @channel: the channel
++ * @cq_level: class-queue level (0..7)
++ * @set: non-zero to make the CQ eligible for commit-rate scheduling
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_channel_set_cq_cr_eligibility(struct qm_ceetm_channel *channel,
++					     unsigned int cq_level, int set);
++
++/**
++ * qman_ceetm_channel_set_cq_er_eligibility - set CQ excess-rate eligibility
++ * @channel: the channel
++ * @cq_level: class-queue level (0..7)
++ * @set: non-zero to make the CQ eligible for excess-rate scheduling
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_channel_set_cq_er_eligibility(struct qm_ceetm_channel *channel,
++					     unsigned int cq_level, int set);
++
++/**
++ * qman_ceetm_cq_claim - claim a strict-priority class queue
++ * @cq: output class-queue object
++ * @channel: the parent channel
++ * @idx: class-queue index (0..7, strict priority)
++ * @ccg: optional class congestion group to bind, or NULL
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_cq_claim(struct qm_ceetm_cq **cq,
++			struct qm_ceetm_channel *channel, unsigned int idx,
++			struct qm_ceetm_ccg *ccg);
++
++/**
++ * qman_ceetm_cq_release - release a class queue (drains it first)
++ * @cq: the class queue to release
++ *
++ * Return: 0 on success, -EBUSY if LFQIDs are still bound.
++ */
++int qman_ceetm_cq_release(struct qm_ceetm_cq *cq);
++
++/**
++ * qman_ceetm_drain_cq - drain all frames from a class queue
++ * @cq: the class queue
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_drain_cq(struct qm_ceetm_cq *cq);
++
++/**
++ * qman_ceetm_cq_get_dequeue_statistics - read CQ dequeue counters
++ * @cq: the class queue
++ * @flags: QMAN_CEETM_FLAG_CLEAR_STATISTICS_COUNTER to clear after read
++ * @frame_count: output dequeued frame count
++ * @byte_count: output dequeued byte count
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_cq_get_dequeue_statistics(struct qm_ceetm_cq *cq, u32 flags,
++					 u64 *frame_count, u64 *byte_count);
++
++/**
++ * qman_ceetm_ccg_claim - claim a class congestion group
++ * @ccg: output CCG object
++ * @channel: the parent channel
++ * @idx: CCG index (0..15)
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_ccg_claim(struct qm_ceetm_ccg **ccg,
++			 struct qm_ceetm_channel *channel, unsigned int idx);
++
++/**
++ * qman_ceetm_ccg_release - release a class congestion group
++ * @ccg: the CCG to release
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_ccg_release(struct qm_ceetm_ccg *ccg);
++
++/**
++ * qman_ceetm_ccg_set - configure a subset of CCG attributes
++ * @ccg: the CCG
++ * @we_mask: write-enable mask of QM_CCGR_WE_* bits
++ * @params: the attribute values
++ *
++ * Return: 0 on success, -EIO on command failure.
++ */
++int qman_ceetm_ccg_set(struct qm_ceetm_ccg *ccg, u16 we_mask,
++		       const struct qm_ceetm_ccg_params *params);
++
++/**
++ * qman_ceetm_ccg_get_reject_statistics - read CCG reject counters
++ * @ccg: the CCG
++ * @flags: QMAN_CEETM_FLAG_CLEAR_STATISTICS_COUNTER to clear after read
++ * @frame_count: output rejected frame count
++ * @byte_count: output rejected byte count
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_ccg_get_reject_statistics(struct qm_ceetm_ccg *ccg, u32 flags,
++					 u64 *frame_count, u64 *byte_count);
++
++/**
++ * qman_ceetm_lfq_claim - claim a logical frame queue on a class queue
++ * @lfq: output LFQ object
++ * @cq: the class queue to attach to
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_lfq_claim(struct qm_ceetm_lfq **lfq, struct qm_ceetm_cq *cq);
++
++/**
++ * qman_ceetm_lfq_release - release a logical frame queue
++ * @lfq: the LFQ to release
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_lfq_release(struct qm_ceetm_lfq *lfq);
++
++/**
++ * qman_ceetm_lfq_set_context - program the LFQ dequeue context (DCT)
++ * @lfq: the LFQ
++ * @context_a: 64-bit dequeue context A presented to the FMan
++ * @context_b: 32-bit dequeue context B
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_lfq_set_context(struct qm_ceetm_lfq *lfq, u64 context_a,
++			       u32 context_b);
++
++/**
++ * qman_ceetm_create_fq - bind a qman_fq to an LFQ for enqueue + ERN delivery
++ * @lfq: the logical frame queue
++ * @fq: the caller-provided frame-queue object to initialise
++ *
++ * Sets @fq up as an enqueue-only handle on the LFQ and registers it in the
++ * QMan ERN lookup table so that tail-drop rejections are delivered to
++ * @lfq->ern. Must be paired with qman_ceetm_destroy_fq() on teardown.
++ *
++ * Return: 0 on success or a negative errno.
++ */
++int qman_ceetm_create_fq(struct qm_ceetm_lfq *lfq, struct qman_fq *fq);
++
++/**
++ * qman_ceetm_destroy_fq - tear down a qman_fq created by qman_ceetm_create_fq
++ * @fq: the frame-queue object
++ *
++ * Removes @fq from the ERN lookup table and frees its lookup slot. Call after
++ * qman_ceetm_lfq_release() and before freeing @fq's storage.
++ */
++void qman_ceetm_destroy_fq(struct qman_fq *fq);
++
++/* CCSR-level CEETM helpers (implemented in qman_ccsr.c) */
++
++/**
++ * qman_ceetm_set_prescaler - program the CEETM credit-update prescaler
++ * @portal: direct-connect portal
++ *
++ * Return: 0 on success, -ENODEV if the CCSR map is unavailable.
++ */
++int qman_ceetm_set_prescaler(enum qm_dc_portal portal);
++
++/**
++ * qman_sp_enable_ceetm_mode - enable CEETM mode for a sub-portal
++ * @portal: direct-connect portal
++ * @sub_portal: sub-portal index
++ *
++ * Return: 0 on success, -ENODEV if the CCSR map is unavailable.
++ */
++int qman_sp_enable_ceetm_mode(enum qm_dc_portal portal, u16 sub_portal);
++
++/**
++ * qman_sp_disable_ceetm_mode - disable CEETM mode for a sub-portal
++ * @portal: direct-connect portal
++ * @sub_portal: sub-portal index
++ *
++ * Return: 0 on success, -ENODEV if the CCSR map is unavailable.
++ */
++int qman_sp_disable_ceetm_mode(enum qm_dc_portal portal, u16 sub_portal);
++
++
++/**
++ * qman_ceetm_dump_state - log a forensic snapshot of a CEETM sub-hierarchy
++ * @tag: label prefixed to every log line
++ * @sp: sub-portal to query, or NULL
++ * @lni: LNI to query, or NULL
++ * @channel: class-queue channel to query, or NULL
++ * @cq: class queue to query, or NULL
++ * @ccg: class congestion group to query, or NULL
++ *
++ * Logs mapping/shaper/scheduler state plus live CQ occupancy and
++ * dequeue/reject statistics at pr_info level. Diagnostics only.
++ */
++void qman_ceetm_dump_state(const char *tag, struct qm_ceetm_sp *sp,
++			   struct qm_ceetm_lni *lni,
++			   struct qm_ceetm_channel *channel,
++			   struct qm_ceetm_cq *cq, struct qm_ceetm_ccg *ccg);
++
+ #endif	/* __FSL_QMAN_H */
+-- 
+2.39.5
+

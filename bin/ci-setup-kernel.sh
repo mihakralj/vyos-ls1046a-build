@@ -457,6 +457,36 @@ cp "$BOARD_PATCH_DIR/0109-dpaa-ethtool-ntuple-cc-steering-bridge.patch" "$KERNEL
 # survival PASS. Diff base is post-0109 (dpaa_eth.c overlaps 0104/0109),
 # hence the 0110 number. Sorts after 0109, before 101-sfp. Spec sec 6.1.18.
 cp "$BOARD_PATCH_DIR/0110-dpaa1-true-zc-rx-napi-only-flush.patch" "$KERNEL_PATCHES/"
+# 0111: QMan CEETM hierarchical egress shaper core (M3-3e). Ports the NXP
+# SDK CEETM API (qman_high.c 3283-5772 + qman_config.c CCSR) to mainline
+# style: new drivers/soc/fsl/qbman/qman_ceetm.c (~1100 LOC, Kconfig
+# FSL_QMAN_CEETM) with SP/LNI/channel/CQ/CCG/LFQ claim-release, CR/ER
+# token-bucket shaper config (erratum A-010383 mps=60 honoured), CCG
+# tail-drop, and qman_ceetm_create/destroy_fq in qman.c (ERN delivery via
+# a reserved in-range dynamic FQID slot in fq_table -- CEETM LFQIDs
+# 0xF00000+ would overflow it). CCSR side reads qman_clk from the DT
+# clock-frequency property (U-Boot fixup provides 300 MHz on LS1046A) for
+# prescaler math. v1 scope: strict-prio CQ0-7 only (no WBFS), no CSCN,
+# DCP0/rev-3.2 only. Wire structs are explicit __beN -- BUILD_BUG_ON
+# layout-asserted (cmd 63B / rsp 64B). Consumer lands in 0112. Sorts
+# after 0110, before 101-sfp. Spec sec 5.7 (M3-3e).
+cp "$BOARD_PATCH_DIR/0111-qman-ceetm.patch" "$KERNEL_PATCHES/"
+# 0112: dpaa HTB-offload consumer of the 0111 CEETM core (M3-3e). New
+# dpaa_ceetm.{c,h} (Kconfig DPAA_HW_CEETM, rewritten from the 0104b
+# scaffold entry; stubs removed from dpaa_fman_caps.{c,h}). Modern
+# TC_SETUP_QDISC_HTB offload (stock iproute2 `tc qdisc add ... htb
+# offload`), NOT the legacy SDK ceetm qdisc: each HTB leaf class maps to
+# its own CEETM channel (CR=rate, ER=ceil -- the 0111 rate API is
+# channel-level) with one prio-0 CQ + 1MiB byte-mode CCG tail-drop +
+# LFQ/FQ; one extra unshaped default channel carries ALL non-leaf
+# traffic because sp_set_lni() stops conventional WQ dequeue on the
+# port (skb + XDP TX both divert via dpaa_ceetm_egress_fq() inside
+# dpaa_xmit; inactive cost = one predicted-not-taken load). Flat
+# root->leaf only; LEAF_TO_INNER -> -EOPNOTSUPP. txqs: alloc grows to
+# dpaa_max_num_txqs()+32, real_num grown per LEAF_ALLOC_QUEUE, restored
+# on DESTROY. NB tc_htb_qopt_offload rate/ceil are BYTES/s (x8 applied).
+# Sorts after 0111, before 101-sfp. Spec sec 5.7 (M3-3e consumer).
+cp "$BOARD_PATCH_DIR/0112-dpaa-ceetm-htb.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
