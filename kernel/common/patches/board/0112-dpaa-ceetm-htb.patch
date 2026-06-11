@@ -67,10 +67,10 @@ index 51f194a..a9db711 100644
  obj-$(CONFIG_DPAA_AF_XDP_POOL) += af_xdp_pool/
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.c b/drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.c
 new file mode 100644
-index 0000000..c828d3f
+index 0000000..ea78bc4
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.c
-@@ -0,0 +1,627 @@
+@@ -0,0 +1,645 @@
 +// SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
 +/*
 + * DPAA1 Ethernet -- QMan CEETM HTB-offload egress shaper consumer.
@@ -309,6 +309,16 @@ index 0000000..c828d3f
 +					max(ceil_bps, rate_bps), burst);
 +		if (err)
 +			goto err_disable_shaper;
++	} else {
++		/*
++		 * Unshaped channels are scheduled by the LNI's uFQ algorithm
++		 * with the CR token bucket limit as their weight. Leaving it
++		 * zero starves the channel: frames enqueue but are never
++		 * dequeued (hard egress blackhole).
++		 */
++		err = qman_ceetm_channel_set_weight(cls->channel, burst);
++		if (err)
++			goto err_release_channel;
 +	}
 +
 +	err = qman_ceetm_ccg_claim(&cls->ccg, cls->channel,
@@ -334,14 +344,22 @@ index 0000000..c828d3f
 +	if (err)
 +		goto err_release_ccg;
 +
-+	err = qman_ceetm_channel_set_cq_cr_eligibility(cls->channel,
-+						       DPAA_CEETM_CQ_PRIO, 1);
-+	if (err)
-+		goto err_release_cq;
-+	err = qman_ceetm_channel_set_cq_er_eligibility(cls->channel,
-+						       DPAA_CEETM_CQ_PRIO, 1);
-+	if (err)
-+		goto err_release_cq;
++	/*
++	 * CR/ER eligibility ties a CQ's scheduling to the channel shaper's
++	 * token buckets; it only makes sense on shaped channels. On an
++	 * unshaped channel it would gate the CQ on tokens that never
++	 * replenish (SDK sets eligibility only for shaped classes).
++	 */
++	if (shaped) {
++		err = qman_ceetm_channel_set_cq_cr_eligibility(cls->channel,
++							       DPAA_CEETM_CQ_PRIO, 1);
++		if (err)
++			goto err_release_cq;
++		err = qman_ceetm_channel_set_cq_er_eligibility(cls->channel,
++							       DPAA_CEETM_CQ_PRIO, 1);
++		if (err)
++			goto err_release_cq;
++	}
 +
 +	err = qman_ceetm_lfq_claim(&cls->lfq, cls->cq);
 +	if (err)
