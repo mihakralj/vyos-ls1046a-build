@@ -283,74 +283,54 @@ u32  ask_priv_pack_hw_flow_id(u16 node_token, u16 key_idx);
 void ask_priv_unpack_hw_flow_id(u32 hw_flow_id,
         u16 *node_token, u16 *key_idx);
 
-/*
- * PR14j (M2.5j) - two-stage OH-port chain bookkeeping.
- *
- * The widened hw_flow_id is an opaque u32 cookie that indexes into a
- * per-ask_hw_pcd xarray of struct ask_hw_flow_cookie.  Each entry
- * tracks the four silicon objects PR14j allocates per v4-TCP flow:
- *
- *   1. ingress CC slot (cc_node + key_idx) - same as PR14g body-1
- *   2. shared MANIP_RMV_ETHERNET handle (pcd-wide, owned by ask_hw_pcd)
- *   3. per-flow MANIP_INSRT_GENERIC handle (new L2 header bytes)
- *   4. shared MANIP_FIELD_UPDATE_IPV4_FORWARD handle (pcd-wide)
- *
- * The shared (rmv, ipv4_forward) handles are NOT freed per-flow; only
- * the per-flow m_insrt is destroyed in ask_hw_flow_remove().  This
- * cuts MURAM HMTD allocations from 3*N_flows to 2 + N_flows.
- *
- * sink_ifindex / sink_fqid are snapshotted for stats and debugability;
- * they are not dereferenced during teardown.
- *
- * Cookie 0 is reserved as the "no HW backing" sentinel so ask_flow.c
- * can call ask_hw_flow_remove() unconditionally on every tear-down.
- * The xarray is initialised with XA_FLAGS_ALLOC1 so the allocator
- * skips 0.
- */
+/* Still referenced by the bring-up accessor prototypes below (reworked
+ * onto the board substrate in a later stage). */
 struct fman_pcd_cc_node;
 struct fman_pcd_manip;
 
 /*
- * PR14x (2026-05-18) — single-stage MANIP-chain ownership.
+ * ASK2 board-substrate per-flow cookie (2026-06-15).
  *
- * Supersedes the PR14s per-flow OH-port model.  The PR14x kernel
- * primitive fman_pcd_manip_chain_create() (kernel patch 0036) returns
- * a single struct fman_pcd_manip * whose HMCT contains the
- * concatenated command bytes of N source manips (RMV_ETHERNET +
- * INSRT_GENERIC + FIELD_UPDATE_IPV4_FORWARD for v4-TCP), with
- * HMCD_LAST cleared on all but the trailing manip.  The chain handle
- * is consumed directly by the ingress CC key's
- * FMAN_PCD_ACTION_MANIPULATE arm — no Offline Host port hop, no
- * per-OH AD-chain MURAM allocation, no two-stage routing through
- * input/output FQs.
+ * Supersedes the PR14j/PR14x ASK-flavor MANIP-chain bookkeeping.  The
+ * old model owned per-flow fman_pcd_manip handles (RMV_ETHERNET +
+ * INSRT_GENERIC + FIELD_UPDATE_IPV4_FORWARD) via the deprecated
+ * <linux/fsl/fman_pcd.h> API and cost ~3 HMTD allocations PER FLOW —
+ * the source of the 327x `fman_pcd_manip_chain_create(...) failed -12`
+ * MURAM-exhaustion blocker.
  *
- * Silicon-resource accounting after PR14x:
- *   - per-flow: one MANIP_INSRT_GENERIC (m_insrt, ~32 B MURAM) +
- *               one chain handle (manip_chain, ~64 B MURAM for the
- *               fused HMCT) + one CC key slot.
- *   - pcd-wide: m_v4_rmv + m_v4_ipv4 (shared, freed at teardown).
+ * The widened hw_flow_id is still an opaque u32 cookie indexing a
+ * per-ask_hw_pcd xarray of struct ask_hw_flow_cookie, but each entry
+ * now tracks only the two COMMON-board substrate handles a flow owns:
  *
- * Flow ceiling: 255 concurrent v4-TCP cookies (CC node cap from
- * PR14r; chain handles cost ~64 B MURAM each so 255 × 64 = 16 KiB
- * of MURAM for the chain pool — well within the 384 KiB budget).
+ *   1. cc_handle  — the CC key slot returned by fman_cc_tree_add_key()
+ *                   (board patch 0086/0098/0106/0108/0115).  Carries
+ *                   the 5-tuple match + target_fqid + hm_handle and is
+ *                   released with fman_cc_tree_remove_key().
+ *   2. hm_handle  — the SHARED, refcounted next-hop header-manip node
+ *                   returned by fman_hm_nexthop_get() (board patch
+ *                   0120).  Many flows toward the same L3 adjacency
+ *                   share one node, so MURAM use scales O(next-hops)
+ *                   not O(flows).  Released with fman_hm_nexthop_put().
  *
- * `manip_chain` is the per-flow handle returned by
- * fman_pcd_manip_chain_create().  ask_hw_flow_remove() calls
- * fman_pcd_manip_chain_destroy(manip_chain) to release the fused
- * HMCT before destroying the per-flow m_insrt.  NULL means HW
- * insert never armed silicon for this cookie (e.g. -ENOSPC from
- * chain_create) — teardown is a no-op for the chain.
+ * fm / port_id are the ingress port's FMan handle and BMI hwport id,
+ * snapshotted so ask_hw_flow_remove() can call remove_key()/put()
+ * without re-resolving the port.  sink_ifindex / sink_fqid remain
+ * informational snapshots for stats and debugability; they are not
+ * dereferenced during teardown.
  *
- * m_rmv / m_ipv4 are kept as informational snapshots (matching the
- * pcd-wide shared handles); they are NOT destroyed per-flow.
+ * Cookie 0 is reserved as the "no HW backing" sentinel so ask_flow.c
+ * can call ask_hw_flow_remove() unconditionally on every tear-down.
+ * The xarray is initialised with XA_FLAGS_ALLOC1 so the allocator
+ * skips 0.  A zero cc_handle / hm_handle means HW never armed silicon
+ * for that object on this cookie — teardown is a no-op for it.
  */
+struct fman;
+
 struct ask_hw_flow_cookie {
-        struct fman_pcd_cc_node  *cc_node;
-        u16                       key_idx;
-        struct fman_pcd_manip    *m_rmv;        /* shared — do NOT destroy */
-        struct fman_pcd_manip    *m_insrt;      /* per-flow */
-        struct fman_pcd_manip    *m_ipv4;       /* shared — do NOT destroy */
-        struct fman_pcd_manip    *manip_chain;  /* PR14x: per-flow chain */
+        struct fman              *fm;           /* ingress port's FMan */
+        u8                        port_id;      /* ingress BMI hwport id */
+        u32                       cc_handle;    /* fman_cc_tree_add_key() */
+        u32                       hm_handle;    /* fman_hm_nexthop_get()  */
         int                       sink_ifindex;
         u32                       sink_fqid;
 };
