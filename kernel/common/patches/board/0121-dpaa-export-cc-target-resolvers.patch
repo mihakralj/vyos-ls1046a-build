@@ -1,0 +1,134 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Mon, 16 Jun 2026 00:00:00 +0000
+Subject: [PATCH] dpaa: export OOT CC-target resolvers
+ (dpaa_get_rx_fman_port/dpaa_get_tx_fqid)
+
+Single-image Gap-A prerequisite for repointing the out-of-tree ASK2 PCD
+consumer (ask.ko) onto the common board fman_cc_*/fman_hm_* substrate.
+The rebuild-via-install per-flow model (mirroring the productive 0109
+ethtool-ntuple CC bridge) needs two net_device -> hardware-id resolvers
+that exist today only in the dead ask-flavor patches 0031/0039 (which
+patch the nonexistent-in-common <linux/fsl/dpaa_flow_offload.h>).  Provide
+them on the common substrate instead:
+
+  * dpaa_get_rx_fman_port(dev) -> the ingress RX struct fman_port, fed to
+    fman_port_get_id() to derive the BMI hard port id used as the
+    fman_cc_tree_install/destroy port key (the same key 0104/0109 use).
+  * dpaa_get_tx_fqid(dev, queue, *fqid) -> the egress TX QMan FQID used as
+    a CC key target_fqid for FORWARD_FQ[_WITH_MANIP].
+
+Both are EXPORT_SYMBOL_GPL, NULL/non-dpaa-safe, and dormant in-tree (no
+caller yet; ask.ko consumes them once the oot-ungate lands).  Bodies are
+the proven 0031/0039 definitions reparented from dpaa_flow_offload.h onto
+the dpaa_fman_caps.h substrate already #included by dpaa_eth.c (0086), so
+the prototypes satisfy -Wmissing-prototypes at the definition site.
+fman_port_use_kg_hash() is NOT re-exported here -- it is already exported
+in the common series by board patch 0105.
+
+Spec: specs/ask2-rewrite-spec.md sec 13.4/13.5.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -4350,6 +4350,56 @@
+ 	.remove = dpaa_remove
+ };
+ 
++/*
++ * dpaa_get_rx_fman_port() / dpaa_get_tx_fqid() (board patch 0121)
++ *
++ * OOT CC-target resolvers for the single-image ASK2 PCD consumer (ask.ko).
++ * They turn a kernel net_device into the DPAA1 hardware identifiers a
++ * static CC tree needs: the ingress RX struct fman_port (feed to
++ * fman_port_get_id() for the fman_cc_tree_* port key) and an egress TX
++ * frame-queue id (the target_fqid a CC FORWARD_FQ[_WITH_MANIP] action
++ * enqueues to).  Both validate the device is dpaa-owned before touching
++ * private state.  Bodies mirror the dead ask-flavor exports 0039/0031 but
++ * are reparented onto the common dpaa_fman_caps.h substrate.  Callers hold
++ * RTNL (or equivalent) so the dpaa_priv cannot be freed underneath them.
++ */
++struct fman_port *dpaa_get_rx_fman_port(struct net_device *dev)
++{
++	struct dpaa_priv *priv;
++
++	if (!dev)
++		return NULL;
++	if (dev->netdev_ops != &dpaa_ops)
++		return NULL;
++	priv = netdev_priv(dev);
++	if (!priv->mac_dev)
++		return NULL;
++	return priv->mac_dev->port[RX];
++}
++EXPORT_SYMBOL_GPL(dpaa_get_rx_fman_port);
++
++int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid)
++{
++	struct dpaa_priv *priv;
++
++	if (!dev || !fqid)
++		return -EINVAL;
++
++	if (dev->netdev_ops != &dpaa_ops)
++		return -ENODEV;
++
++	if (queue >= dpaa_max_num_txqs())
++		return -ERANGE;
++
++	priv = netdev_priv(dev);
++	if (!priv->egress_fqs || !priv->egress_fqs[queue])
++		return -ENOENT;
++
++	*fqid = qman_fq_fqid(priv->egress_fqs[queue]);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(dpaa_get_tx_fqid);
++
+ static int __init dpaa_load(void)
+ {
+ 	int err;
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+@@ -381,6 +381,39 @@
+  */
+ int  fman_hm_nexthop_put(struct fman *fm, u8 port_id, u32 handle);
+ 
++/* ------------------------------------------------------------------ *
++ * OOT CC-target resolvers (board patch 0121)
++ *
++ * Helpers an out-of-tree PCD consumer (ask.ko) uses to turn a kernel
++ * net_device into the DPAA1 hardware identifiers a static CC tree needs:
++ * the ingress RX fman_port (-> fman_port_get_id() -> port_id key) and an
++ * egress TX frame-queue id (-> fman_cc_key.target_fqid).  Both validate
++ * that the device is DPAA-owned before dereferencing private state.
++ * ------------------------------------------------------------------ */
++struct net_device;
++struct fman_port;
++
++/**
++ * dpaa_get_rx_fman_port - ingress RX fman_port backing a DPAA netdev
++ * @dev: a DPAA-owned net_device
++ *
++ * Returns the RX-side struct fman_port, or NULL when @dev is not a DPAA
++ * interface or has no bound MAC.  Feed the result to fman_port_get_id()
++ * to obtain the BMI hard port id used as the fman_cc_tree_* port key.
++ */
++struct fman_port *dpaa_get_rx_fman_port(struct net_device *dev);
++
++/**
++ * dpaa_get_tx_fqid - egress TX frame-queue id for a DPAA netdev
++ * @dev:   a DPAA-owned net_device (the flow's sink/egress interface)
++ * @queue: egress queue index (< dpaa_max_num_txqs())
++ * @fqid:  out; receives the QMan FQID on success
++ *
++ * Returns 0 and writes @fqid, or -EINVAL/-ENODEV/-ERANGE/-ENOENT.  The
++ * FQID is the target_fqid a CC FORWARD_FQ[_WITH_MANIP] action enqueues to.
++ */
++int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
++
+ /* ------------------------------------------------------------------ *
+  * M3-3d STUB API  (spec sec 5.6 Policer)
+  *
