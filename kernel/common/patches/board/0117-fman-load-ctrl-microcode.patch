@@ -1,0 +1,166 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman.c b/drivers/net/ethernet/freescale/fman/fman.c
+index f763664..e350a19 100644
+--- a/drivers/net/ethernet/freescale/fman/fman.c
++++ b/drivers/net/ethernet/freescale/fman/fman.c
+@@ -1433,6 +1433,150 @@ static int clear_iram(struct fman *fman)
+ 	return 0;
+ }
+ 
++/* Offsets into the U-Boot-injected QEF firmware blob (property
++ * "fsl,firmware" of the "fman-firmware" child node of the fman DT node).
++ * Layout matches struct qe_firmware (Documentation/powerpc/qe_firmware.rst);
++ * only the fields needed for the FM_CTL controller-code upload are parsed.
++ */
++#define QE_FW_MAGIC_OFF		4	/* "QEF" */
++#define QE_FW_ID_OFF		8	/* char id[62], NUL-padded */
++#define QE_FW_UCODE_OFF		124	/* first struct qe_microcode entry */
++#define QE_FW_UC_IRAM_OFF	100	/* __be32 IRAM load offset */
++#define QE_FW_UC_COUNT_OFF	104	/* __be32 instruction word count */
++#define QE_FW_UC_CODE_OFF	108	/* __be32 code byte offset in blob */
++#define QE_FW_UC_MAJOR_OFF	112	/* u8 major, minor, revision */
++
++/* Upload the FMan controller (FM_CTL) microcode from the DTB into IRAM.
++ *
++ * clear_iram() wipes the image U-Boot pre-loads into IRAM, and mainline
++ * never reloads one, so the FM_CTL controllers run with empty IRAM
++ * (IREADY=0).  KeyGen hash distribution, the policer and CEETM still work
++ * (they never enter controller code), but any PCD path dispatching to
++ * FM_CTL — notably custom classification (AC_CC) — parks its FMan task
++ * and leaks the BMI FIFO allocation, freezing the RX port after ~46
++ * frames.
++ *
++ * The sequence replicates the NXP SDK LoadFmanCtrlCode()
++ * (sdk_fman/Peripherals/FM/fm.c:426-480): auto-increment stream into
++ * idata, pad to the 16-byte burst boundary, write-complete handshake on
++ * the last code word, full verify pass, then IRAM_READY.
++ *
++ * Must only run inside fman_init()'s pre-enable window (after
++ * clear_iram(), before FPM/BMI/QMI init): setting IRAM_READY on a live
++ * FMan crashes the datapath.
++ */
++static int load_fman_ctrl_code(struct fman *fman)
++{
++	struct fman_iram_regs __iomem *iram;
++	struct device_node *fw_node;
++	const u8 *blob, *ucode;
++	const __be32 *code;
++	u32 wcount, code_off, iram_off, size;
++	int blob_len, i, count, pad_words;
++
++	fw_node = of_get_child_by_name(fman->dev->of_node, "fman-firmware");
++	if (!fw_node) {
++		dev_warn(fman->dev,
++			 "%s: no fman-firmware node in DT; FM_CTL microcode not loaded (PCD custom classification unavailable)\n",
++			 __func__);
++		return 0;
++	}
++
++	blob = of_get_property(fw_node, "fsl,firmware", &blob_len);
++	of_node_put(fw_node);
++	if (!blob || blob_len < QE_FW_UCODE_OFF + QE_FW_UC_MAJOR_OFF + 4) {
++		dev_warn(fman->dev,
++			 "%s: unusable fsl,firmware property (len %d); FM_CTL microcode not loaded\n",
++			 __func__, blob ? blob_len : -1);
++		return 0;
++	}
++
++	if (blob[QE_FW_MAGIC_OFF] != 'Q' || blob[QE_FW_MAGIC_OFF + 1] != 'E' ||
++	    blob[QE_FW_MAGIC_OFF + 2] != 'F') {
++		dev_warn(fman->dev,
++			 "%s: fsl,firmware blob has bad magic; FM_CTL microcode not loaded\n",
++			 __func__);
++		return 0;
++	}
++
++	ucode = blob + QE_FW_UCODE_OFF;
++	iram_off = be32_to_cpup((const __be32 *)(ucode + QE_FW_UC_IRAM_OFF));
++	wcount = be32_to_cpup((const __be32 *)(ucode + QE_FW_UC_COUNT_OFF));
++	code_off = be32_to_cpup((const __be32 *)(ucode + QE_FW_UC_CODE_OFF));
++	size = wcount * 4;
++
++	if (!wcount || size / 4 != wcount ||
++	    code_off > (u32)blob_len || size > (u32)blob_len - code_off ||
++	    iram_off > fman->state->fm_iram_size ||
++	    size > fman->state->fm_iram_size - iram_off) {
++		dev_warn(fman->dev,
++			 "%s: implausible microcode geometry (iram_off %u count %u code_off %u blob %d); FM_CTL microcode not loaded\n",
++			 __func__, iram_off, wcount, code_off, blob_len);
++		return 0;
++	}
++
++	code = (const __be32 *)(blob + code_off);
++	iram = fman->base_addr + IMEM_OFFSET;
++
++	/* Enable auto-increment and stream the image */
++	iowrite32be(IRAM_IADD_AIE | iram_off, &iram->iadd);
++	count = 100;
++	do {
++		udelay(1);
++	} while ((ioread32be(&iram->iadd) != (IRAM_IADD_AIE | iram_off)) &&
++		 --count);
++	if (count == 0)
++		return -EBUSY;
++
++	for (i = 0; i < wcount; i++)
++		iowrite32be(be32_to_cpup(&code[i]), &iram->idata);
++
++	/* Pad to the 16-byte IRAM burst boundary (SDK fm.c:445-448) */
++	pad_words = ((16 - (size % 16)) / 4) % 4;
++	for (i = 0; i < pad_words; i++)
++		iowrite32be(0xffffffff, &iram->idata);
++
++	/* Write-complete handshake on the last code word */
++	iowrite32be(iram_off + size - 4, &iram->iadd);
++	count = 100;
++	do {
++		udelay(1);
++	} while ((ioread32be(&iram->idata) != be32_to_cpup(&code[wcount - 1])) &&
++		 --count);
++	if (count == 0)
++		return -EBUSY;
++
++	/* Full verify pass before declaring the controllers ready */
++	iowrite32be(IRAM_IADD_AIE | iram_off, &iram->iadd);
++	count = 100;
++	do {
++		udelay(1);
++	} while ((ioread32be(&iram->iadd) != (IRAM_IADD_AIE | iram_off)) &&
++		 --count);
++	if (count == 0)
++		return -EBUSY;
++	for (i = 0; i < wcount; i++) {
++		u32 word = ioread32be(&iram->idata);
++
++		if (word != be32_to_cpup(&code[i])) {
++			dev_err(fman->dev,
++				"%s: IRAM verify mismatch at word %d (read 0x%08x expect 0x%08x)\n",
++				__func__, i, word, be32_to_cpup(&code[i]));
++			return -EIO;
++		}
++	}
++
++	iowrite32be(IRAM_READY, &iram->iready);
++	udelay(1000);
++
++	dev_info(fman->dev,
++		 "FM_CTL microcode %u.%u.%u loaded (%u words): %.62s\n",
++		 ucode[QE_FW_UC_MAJOR_OFF], ucode[QE_FW_UC_MAJOR_OFF + 1],
++		 ucode[QE_FW_UC_MAJOR_OFF + 2], wcount, blob + QE_FW_ID_OFF);
++
++	return 0;
++}
++
+ static u32 get_exception_flag(enum fman_exceptions exception)
+ {
+ 	u32 bit_mask;
+@@ -1957,6 +2101,10 @@ static int fman_init(struct fman *fman)
+ 	if (clear_iram(fman) != 0)
+ 		return -EINVAL;
+ 
++	err = load_fman_ctrl_code(fman);
++	if (err != 0)
++		return err;
++
+ 	cfg->exceptions = fman->state->exceptions;
+ 
+ 	/* Init DMA Registers */

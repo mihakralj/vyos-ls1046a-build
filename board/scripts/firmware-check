@@ -1,0 +1,436 @@
+#!/usr/bin/env bash
+# firmware-check — print the full boot-firmware / microcode inventory of the
+# LS1046A Mono Gateway DK.
+#
+# Usage:   sudo firmware-check        (unprivileged run skips flash reads)
+#
+# Everything below the OS on this board lives in the 64 MB QSPI NOR flash
+# (mt25qu512abb) and is reported here:
+#   - Board & SoC identity: DT model/compatible, fsl-guts soc0 family,
+#     silicon revision, SVR
+#   - Running U-Boot: version injected into /chosen by U-Boot itself,
+#     plus the live kernel cmdline it composed
+#   - QSPI NOR partition map (/proc/mtd) with a content fingerprint per
+#     partition: RCW/PBL preamble (mtd0), embedded U-Boot version string
+#     (mtd1, cross-checked against the running U-Boot), environment CRC
+#     (mtd2), FMan microcode QEF header (mtd3), recovery DTB FDT magic +
+#     compatible (mtd4), content sniff for backup / kernel-initramfs
+#   - FMan microcode deep-decode: the QEF header of the DT-injected
+#     running copy (id string, length, layout version, split I-RAM flag,
+#     microcode count, SoC model/revision code), classification
+#     (proprietary 210.x PCD-capable build vs open-source 106.x), blob
+#     md5 fingerprint, byte-compare vs the on-flash mtd3 copy, and the
+#     kernel's resulting "FMan PCD caps" probe line
+#   - U-Boot environment: boot-critical variables (bootcmd, bootdelay,
+#     board id, base MAC, TFTP addressing) and presence of every boot
+#     target (vyos / usb_vyos / recovery / dev_boot / dev_boot_live)
+#   - Boot image selector: /boot/vyos.env on the eMMC persistence
+#     partition vs the actually-running image from the kernel cmdline
+#   - Running VyOS image version (context)
+#
+# NOTE: the proprietary FMan microcode identifies itself as
+# "Microcode version 210.10.1 for LS1043 r1.0" — the LS1043 label is
+# cosmetic build lineage, NOT a mis-provisioning. It is byte-identical to
+# the fman-ucode partition of Mono's published firmware image and is the
+# correct production microcode for this LS1046A board. The open-source
+# NXP qoriq-fm-ucode 106.x builds boot fine but advertise no PCD
+# extensions (caps probe -> 0x00), which disables the hardware
+# ingress-policer and CC steering.
+#
+# Designed to mirror the style of `sfp-check`, `fan-check`, `caam-check`,
+# `dpaa1-check`: human-readable sectioned report with
+# [OK]/[WARN]/[FAIL]/[SKIP] tags, colour where the tty supports it.
+#
+# Exit codes:
+#   0 — firmware inventory healthy (running ucode present + QEF valid,
+#       flash copies consistent where readable)
+#   1 — a firmware component is missing/corrupt (no DT ucode, bad QEF
+#       magic, invalid env CRC, running-vs-flash mismatch left un-acked)
+#   2 — board is not LS1046A
+
+set -u
+
+# ---------------------------------------------------------------------------
+# Colour escapes (TTY only). Same convention as fan-check / caam-check.
+# ---------------------------------------------------------------------------
+if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]; then
+    C_RST=$'\033[0m'
+    C_BOLD=$'\033[1m'
+    C_DIM=$'\033[2m'
+    C_GREEN=$'\033[1;32m'
+    C_YELLOW=$'\033[1;33m'
+    C_RED=$'\033[1;31m'
+    C_BLUE=$'\033[1;34m'
+else
+    C_RST='' C_BOLD='' C_DIM='' C_GREEN='' C_YELLOW='' C_RED='' C_BLUE=''
+fi
+
+ok()    { printf "  [%sOK%s]   %s\n"   "$C_GREEN"  "$C_RST" "$*"; }
+warn()  { printf "  [%sWARN%s] %s\n"   "$C_YELLOW" "$C_RST" "$*"; }
+fail()  { printf "  [%sFAIL%s] %s\n"   "$C_RED"    "$C_RST" "$*"; }
+skip()  { printf "  [%sSKIP%s] %s\n"   "$C_BLUE"   "$C_RST" "$*"; }
+note()  { printf "         %s%s%s\n"   "$C_DIM"    "$*"     "$C_RST"; }
+hdr()   { printf "\n%s%s%s\n"          "$C_BOLD"   "$*"     "$C_RST"; }
+
+EXIT=0
+mark_fail() { EXIT=1; }
+
+IS_ROOT=0
+[ "$(id -u)" = "0" ] && IS_ROOT=1
+
+# ---------------------------------------------------------------------------
+# Board gate. Same idiom as fan-check / caam-check / vyos-postinstall.
+# ---------------------------------------------------------------------------
+if [ ! -f /proc/device-tree/compatible ] \
+   || ! tr '\0' '\n' < /proc/device-tree/compatible | grep -q 'fsl,ls1046a'; then
+    echo "firmware-check: not LS1046A — nothing to report" >&2
+    exit 2
+fi
+
+printf "%sfirmware-check%s — LS1046A boot firmware & microcode inventory\n" "$C_BOLD" "$C_RST"
+[ "$IS_ROOT" = "1" ] || note "(not root — flash partition reads and fw_printenv will be skipped; run with sudo for the full report)"
+
+# ---------------------------------------------------------------------------
+# QEF (Quicc Engine Firmware) header decoder — the container format of FMan
+# microcode (struct qe_firmware, include/soc/fsl/qe/qe.h):
+#   byte  0-3   be32  length of entire blob
+#   byte  4-6         magic "QEF"
+#   byte  7     u8    header layout version
+#   byte  8-69  char  id[62]  null-terminated identifier string
+#   byte 70     u8    split   (0 = shared I-RAM, 1 = split I-RAM)
+#   byte 71     u8    count   number of microcode[] structures
+#   byte 72-73  be16  soc.model  (BCD-ish chip code, e.g. 0x0413 / 0x0416)
+#   byte 74     u8    soc.major  revision
+#   byte 75     u8    soc.minor  revision
+# Populates QEF_* globals; returns 1 if the source is unreadable/too short,
+# 2 if the magic is wrong.
+# ---------------------------------------------------------------------------
+qef_decode() {
+    local src=$1 hex i b
+    QEF_LEN='' QEF_MAGIC='' QEF_VER='' QEF_ID='' QEF_SPLIT='' QEF_COUNT=''
+    QEF_SOC='' QEF_SOCMAJ='' QEF_SOCMIN=''
+    hex=$(od -An -tx1 -N76 "$src" 2>/dev/null | tr -d ' \n')
+    [ "${#hex}" -ge 152 ] || return 1
+    QEF_MAGIC=$(printf '%b' "\\x${hex:8:2}\\x${hex:10:2}\\x${hex:12:2}")
+    [ "$QEF_MAGIC" = "QEF" ] || return 2
+    QEF_LEN=$(( 0x${hex:0:8} ))
+    QEF_VER=$(( 0x${hex:14:2} ))
+    for (( i=16; i<140; i+=2 )); do
+        b=${hex:$i:2}
+        [ "$b" = "00" ] && break
+        QEF_ID+=$(printf '%b' "\\x$b")
+    done
+    QEF_SPLIT=$(( 0x${hex:140:2} ))
+    QEF_COUNT=$(( 0x${hex:142:2} ))
+    QEF_SOC=$(printf '0x%s' "${hex:144:4}")
+    QEF_SOCMAJ=$(( 0x${hex:148:2} ))
+    QEF_SOCMIN=$(( 0x${hex:150:2} ))
+    return 0
+}
+
+# Classify a decoded ucode id string ("Microcode version 210.10.1 for ...").
+ucode_classify() {
+    local id=$1 maj
+    maj=$(printf '%s' "$id" | sed -n 's/^Microcode version \([0-9]\{1,\}\)\..*/\1/p')
+    if [ -z "$maj" ]; then
+        echo "unrecognized id format"
+    elif [ "$maj" -ge 210 ]; then
+        echo "proprietary NXP/Mono PCD-capable build (CC/HM/POL/PARSER; 'for LS1043' label is cosmetic)"
+    else
+        echo "open-source qoriq-fm-ucode build (NO PCD extensions — policer/CC unavailable)"
+    fi
+}
+
+# Sniff the content type of the first bytes of a flash partition.
+content_sniff() {
+    local hex=$1
+    case "$hex" in
+        d00dfeed*)  echo "FDT (flattened device tree)" ;;
+        1f8b*)      echo "gzip compressed data" ;;
+        ffffffff*)  echo "erased flash (0xFF)" ;;
+        00000000*)  echo "zeroed" ;;
+        27051956*)  echo "U-Boot legacy uImage" ;;
+        *)          echo "unrecognized (first bytes: ${hex:0:16})" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# 1. Board & SoC identity
+# ---------------------------------------------------------------------------
+hdr "1) Board & SoC identity"
+
+if [ -f /proc/device-tree/model ]; then
+    model=$(tr -d '\0' < /proc/device-tree/model)
+    ok "model: $model"
+else
+    warn "no /proc/device-tree/model"
+fi
+compat=$(tr '\0' ' ' < /proc/device-tree/compatible | sed 's/ *$//')
+note "compatible = \"$compat\""
+
+if [ -d /sys/devices/soc0 ]; then
+    fam=$(cat /sys/devices/soc0/family 2>/dev/null || echo "?")
+    rev=$(cat /sys/devices/soc0/revision 2>/dev/null || echo "?")
+    svr=$(cat /sys/devices/soc0/soc_id 2>/dev/null || echo "?")
+    ok "SoC: $fam rev $rev ($svr)"
+else
+    warn "fsl-guts soc0 sysfs absent (CONFIG_FSL_GUTS missing?)"
+fi
+
+# ---------------------------------------------------------------------------
+# 2. Running boot firmware (U-Boot)
+# ---------------------------------------------------------------------------
+hdr "2) Running U-Boot"
+
+UBOOT_RUN=""
+if [ -f "/proc/device-tree/chosen/u-boot,version" ]; then
+    UBOOT_RUN=$(tr -d '\0' < "/proc/device-tree/chosen/u-boot,version")
+    ok "U-Boot version (DT /chosen): $UBOOT_RUN"
+else
+    warn "no /chosen/u-boot,version in DT — old U-Boot or non-U-Boot boot path"
+fi
+
+if [ -r /proc/cmdline ]; then
+    note "kernel cmdline: $(cat /proc/cmdline)"
+fi
+
+# ---------------------------------------------------------------------------
+# 3. QSPI NOR flash map & partition fingerprints
+# ---------------------------------------------------------------------------
+hdr "3) QSPI NOR flash partitions (/proc/mtd)"
+
+UBOOT_FLASH=""
+declare -A MTD_NAME MTD_SIZE
+if [ -r /proc/mtd ] && grep -q '^mtd' /proc/mtd; then
+    while IFS= read -r line; do
+        case "$line" in mtd*) ;; *) continue ;; esac
+        dev=${line%%:*}
+        size=$(echo "$line" | awk '{print $2}')
+        name=$(echo "$line" | sed 's/.*"\(.*\)".*/\1/')
+        MTD_NAME[$dev]=$name
+        MTD_SIZE[$dev]=$size
+        printf "         %s%-6s %8d KiB  %s%s\n" "$C_DIM" "$dev" $(( 0x$size / 1024 )) "$name" "$C_RST"
+    done < /proc/mtd
+    ok "${#MTD_NAME[@]} MTD partition(s) present"
+else
+    fail "/proc/mtd empty — QSPI flash driver (CONFIG_SPI_FSL_QUADSPI) missing"
+    mark_fail
+fi
+
+if [ "$IS_ROOT" = "1" ] && [ -e /dev/mtd0 ]; then
+    # assoc arrays are unordered — iterate numerically
+    for idx in 0 1 2 3 4 5 6 7 8 9; do
+        dev="mtd$idx"
+        [ -n "${MTD_NAME[$dev]:-}" ] || continue
+        name=${MTD_NAME[$dev]}
+        hex=$(dd if="/dev/$dev" bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
+        case "$name" in
+            rcw-bl2)
+                if printf '%s' "$hex" | grep -q '55aa55aa'; then
+                    ok "$dev ($name): RCW/PBL preamble present"
+                else
+                    warn "$dev ($name): no 55aa55aa preamble in first 16 bytes"
+                fi
+                ;;
+            uboot)
+                UBOOT_FLASH=$(dd if="/dev/$dev" bs=64k count=32 2>/dev/null \
+                              | tr -c '[:print:]' '\n' | grep -m1 -E '^U-Boot [0-9]{4}\.' || true)
+                if [ -n "$UBOOT_FLASH" ]; then
+                    ok "$dev ($name): $UBOOT_FLASH"
+                    if [ -n "$UBOOT_RUN" ]; then
+                        case "$UBOOT_FLASH" in
+                            *"$UBOOT_RUN"*) ok "on-flash U-Boot matches the running U-Boot" ;;
+                            *) warn "on-flash U-Boot differs from running ($UBOOT_RUN) — reboot pending after a flash update?" ;;
+                        esac
+                    fi
+                else
+                    warn "$dev ($name): no embedded 'U-Boot 20xx.yy' version string found"
+                fi
+                ;;
+            uboot-env)
+                if command -v fw_printenv >/dev/null 2>&1; then
+                    if fw_printenv >/dev/null 2>&1; then
+                        ok "$dev ($name): environment CRC valid (fw_printenv)"
+                    else
+                        fail "$dev ($name): fw_printenv failed — bad CRC or wrong /etc/fw_env.config"
+                        mark_fail
+                    fi
+                else
+                    skip "$dev ($name): fw_printenv not installed"
+                fi
+                ;;
+            fman-ucode)
+                if qef_decode "/dev/$dev"; then
+                    ok "$dev ($name): QEF ok — \"$QEF_ID\" ($QEF_LEN bytes)"
+                    FLASH_UCODE_ID=$QEF_ID
+                    FLASH_UCODE_LEN=$QEF_LEN
+                else
+                    fail "$dev ($name): no valid QEF microcode header"
+                    mark_fail
+                fi
+                ;;
+            recovery-dtb)
+                case "$hex" in
+                    d00dfeed*)
+                        rc_compat=$(dd if="/dev/$dev" bs=64k count=2 2>/dev/null \
+                                    | tr -c '[:print:]' '\n' | grep -m1 -E '^(mono|fsl),' || true)
+                        ok "$dev ($name): valid FDT${rc_compat:+ (compatible: $rc_compat)}"
+                        ;;
+                    *)
+                        warn "$dev ($name): FDT magic d00dfeed absent — recovery DTB missing/corrupt"
+                        ;;
+                esac
+                ;;
+            kernel-initramfs)
+                ok "$dev ($name): $(content_sniff "$hex") — recovery kernel (\`run recovery\` in U-Boot)"
+                ;;
+            *)
+                note "$dev ($name): $(content_sniff "$hex")"
+                ;;
+        esac
+    done
+elif [ "$IS_ROOT" != "1" ]; then
+    skip "per-partition fingerprints skipped (not root)"
+else
+    warn "/dev/mtd* device nodes absent"
+fi
+
+# ---------------------------------------------------------------------------
+# 4. FMan microcode (the running, U-Boot-injected copy)
+# ---------------------------------------------------------------------------
+hdr "4) FMan microcode"
+
+DT_FW="/proc/device-tree/soc/fman@1a00000/fman-firmware/fsl,firmware"
+RUN_UCODE_ID=""
+if [ -f "$DT_FW" ]; then
+    if qef_decode "$DT_FW"; then
+        RUN_UCODE_ID=$QEF_ID
+        ok "running microcode: \"$QEF_ID\""
+        note "QEF header: length=$QEF_LEN bytes, layout v$QEF_VER, split-IRAM=$QEF_SPLIT, microcode count=$QEF_COUNT"
+        note "SoC code: model=$QEF_SOC rev $QEF_SOCMAJ.$QEF_SOCMIN"
+        note "class: $(ucode_classify "$QEF_ID")"
+        if command -v md5sum >/dev/null 2>&1; then
+            blobmd5=$(dd if="$DT_FW" bs="$QEF_LEN" count=1 2>/dev/null | md5sum | awk '{print $1}')
+            note "blob md5 (first $QEF_LEN bytes): $blobmd5"
+        fi
+    else
+        fail "DT fman-firmware node present but QEF header invalid"
+        mark_fail
+    fi
+else
+    fail "no $DT_FW — U-Boot did not inject FMan microcode (FMan ports will not work)"
+    mark_fail
+fi
+
+# Cross-check running (DT-injected) copy vs the on-flash mtd3 copy.
+if [ -n "$RUN_UCODE_ID" ] && [ -n "${FLASH_UCODE_ID:-}" ]; then
+    if [ "$RUN_UCODE_ID" = "$FLASH_UCODE_ID" ]; then
+        ok "running microcode matches the on-flash fman-ucode partition"
+    else
+        warn "running \"$RUN_UCODE_ID\" != on-flash \"$FLASH_UCODE_ID\" — flash was updated since boot; reboot to load it"
+    fi
+fi
+
+# The kernel's PCD capability probe (board patch 0086/0086a) maps ucode
+# major >= 210 -> caps 0x17. This is the definitive "what did the kernel
+# decide" line.
+KLOG=$(journalctl -k -b -o cat 2>/dev/null || dmesg 2>/dev/null || true)
+if [ -n "$KLOG" ]; then
+    caps=$(printf '%s\n' "$KLOG" | grep -m1 'FMan PCD caps' || true)
+    pcd=$(printf '%s\n' "$KLOG" | grep -m1 'fman_pcd: ready' || true)
+    if [ -n "$caps" ]; then
+        case "$caps" in
+            *"= 0x00"*) warn "$caps" ;;
+            *)          ok "$caps" ;;
+        esac
+    else
+        note "no 'FMan PCD caps' line in this boot's kernel log (pre-0086 kernel?)"
+    fi
+    [ -n "$pcd" ] && note "$pcd"
+else
+    skip "kernel log not readable (journalctl/dmesg need root or adm group)"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. U-Boot environment (boot-critical variables)
+# ---------------------------------------------------------------------------
+hdr "5) U-Boot environment"
+
+if [ "$IS_ROOT" = "1" ] && command -v fw_printenv >/dev/null 2>&1 && fw_printenv >/dev/null 2>&1; then
+    for var in board board_name bootdelay bootcmd ethaddr ipaddr serverip; do
+        val=$(fw_printenv -n "$var" 2>/dev/null || true)
+        [ -n "$val" ] && note "$var = $val"
+    done
+    missing=""
+    for tgt in vyos usb_vyos recovery dev_boot dev_boot_live; do
+        if fw_printenv -n "$tgt" >/dev/null 2>&1; then
+            ok "boot target '$tgt' defined"
+        else
+            case "$tgt" in
+                vyos|usb_vyos|recovery) fail "boot target '$tgt' MISSING — run vyos-postinstall"; mark_fail ;;
+                *) skip "optional boot target '$tgt' not defined (dev-loop only)" ;;
+            esac
+            missing="$missing $tgt"
+        fi
+    done
+else
+    skip "fw_printenv unavailable or not root — environment not dumped"
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Boot image selector (/boot/vyos.env on eMMC)
+# ---------------------------------------------------------------------------
+hdr "6) Boot image selector"
+
+RUNNING_IMG=$(sed -n 's/.*vyos-union=\/boot\/\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null)
+[ -n "$RUNNING_IMG" ] && note "running image (cmdline vyos-union): $RUNNING_IMG"
+
+VYOS_ENV=""
+for cand in /usr/lib/live/mount/persistence/boot/vyos.env /boot/vyos.env; do
+    [ -f "$cand" ] && VYOS_ENV=$cand && break
+done
+if [ -n "$VYOS_ENV" ]; then
+    sel=$(sed -n 's/^vyos_image=//p' "$VYOS_ENV" 2>/dev/null | head -1)
+    if [ -n "$sel" ]; then
+        ok "$VYOS_ENV: vyos_image=$sel"
+        if [ -n "$RUNNING_IMG" ]; then
+            if [ "$sel" = "$RUNNING_IMG" ]; then
+                ok "selector matches the running image"
+            else
+                warn "selector ($sel) != running image ($RUNNING_IMG) — next boot loads a different image (pending upgrade?)"
+            fi
+        fi
+    else
+        fail "$VYOS_ENV exists but has no vyos_image= line — U-Boot will fall through to SPI recovery"
+        mark_fail
+    fi
+else
+    if [ -n "$RUNNING_IMG" ]; then
+        fail "no vyos.env found on the persistence partition — eMMC boot will fail next reboot"
+        mark_fail
+    else
+        skip "no vyos.env (live/TFTP boot — selector only exists on installed systems)"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Running VyOS image (context)
+# ---------------------------------------------------------------------------
+hdr "7) Running VyOS image"
+
+if [ -r /usr/share/vyos/version.json ]; then
+    ver=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p'   /usr/share/vyos/version.json)
+    blt=$(sed -n 's/.*"built_on": *"\([^"]*\)".*/\1/p'  /usr/share/vyos/version.json)
+    git=$(sed -n 's/.*"build_git": *"\([^"]*\)".*/\1/p' /usr/share/vyos/version.json)
+    ok "VyOS $ver"
+    note "built: $blt   git: $git"
+    note "kernel: $(uname -r)"
+else
+    note "kernel: $(uname -r)"
+    skip "/usr/share/vyos/version.json not readable"
+fi
+
+# ---------------------------------------------------------------------------
+# Exit code: 0 healthy / 1 fault (see [FAIL] lines above) / 2 wrong board
+# ---------------------------------------------------------------------------
+exit "$EXIT"

@@ -1,0 +1,28 @@
+diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
+--- a/src/op_mode/image_installer.py
++++ b/src/op_mode/image_installer.py
+@@ -11,5 +11,24 @@
+             if file.is_file() and file.suffix == '.dtb':
+                 copy(file, f'{root_dir}/boot/{image_name}/')
+ 
++        # U-Boot boards (e.g. LS1046A): re-assert the QSPI U-Boot environment so
++        # the freshly added image becomes the autoboot target. grub.set_default()
++        # above only writes /boot/vyos.env; it never rewrites the QSPI `bootcmd`,
++        # so a stale dev-loop / hand-edited bootcmd (e.g. `run ask_boot || ...`)
++        # would otherwise survive the upgrade and keep booting the wrong (or
++        # TFTP) kernel. vyos-postinstall is board-gated (no-op off LS1046A), so
++        # calling it here is always safe.
++        postinstall = Path('/usr/local/bin/vyos-postinstall')
++        if postinstall.exists() and Path('/dev/mtd2').exists():
++            print('Configuring U-Boot environment for automatic eMMC boot...')
++            try:
++                rc = run(f'{postinstall} --root {root_dir} {image_name}')
++                if rc == 0:
++                    print('  [OK]   QSPI : U-Boot env re-asserted (bootcmd, vyos_image)')
++                else:
++                    print(f'  [SKIP] QSPI : vyos-postinstall exited with code {rc}')
++            except Exception as e:
++                print(f'  [SKIP] QSPI : {type(e).__name__}: {e}')
++
+         # unmount an ISO and cleanup
+         cleanup([str(iso_path)])

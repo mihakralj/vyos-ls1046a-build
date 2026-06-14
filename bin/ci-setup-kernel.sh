@@ -487,12 +487,68 @@ cp "$BOARD_PATCH_DIR/0111-qman-ceetm.patch" "$KERNEL_PATCHES/"
 # on DESTROY. NB tc_htb_qopt_offload rate/ceil are BYTES/s (x8 applied).
 # Sorts after 0111, before 101-sfp. Spec sec 5.7 (M3-3e consumer).
 cp "$BOARD_PATCH_DIR/0112-dpaa-ceetm-htb.patch" "$KERNEL_PATCHES/"
+# DCSR error observability: read-only debugfs taps for the FMan common-block
+# error/status registers (fpm/bmi/qmi/parser/kg/pol). fpm_err decodes the 50
+# per-hwport status words incl. STALL — the M3-3b forensic view. Spec §5.8.
+cp "$BOARD_PATCH_DIR/0113-fman-pcd-dcsr-error-taps.patch" "$KERNEL_PATCHES/"
+# True-ZC RX gate-counter realign: moves xsk_zc_eligible/xsk_zc_rx_recovered
+# into af_xdp_pool_rx_hook() (the 0110 NAPI-only flush rework left the old
+# probe site unreachable). Makes xsk-zc-check's verdict meaningful again.
+cp "$BOARD_PATCH_DIR/0114-dpaa1-xsk-zc-eligible-realign.patch" "$KERNEL_PATCHES/"
+# M3-3b wedge fix: SDK-convergent CC bring-up (root CONT_LOOKUP AD, RESULT
+# leaf ADs, productive FMBM_RCCB bind + NIA_KG_CC_EN via fman_port_lookup_rx
+# registry, KG NIA=FM_CTL|AC_CC with CCBS=grpBits). Spec §5.4, v5.19.
+cp "$BOARD_PATCH_DIR/0115-fman-pcd-cc-sdk-convergent-bringup.patch" "$KERNEL_PATCHES/"
+# M3-3b wedge fix iteration 3: CC result-AD NIA must exit via FM_CTL
+# AC_NO_IPACC_PRE_BMI_ENQ_FRAME (0x28) on A006675/SW006 silicon — the 0115
+# direct NIA_ENG_BMI|ENQ exit leaked one FMan task per CC-dispatched frame
+# (MAC RDRP ate everything, no FPM stall, reboot-only). Also brings up the
+# per-port FM_CTL ctrl-params page (FMBM_RGPR) the 0x28 ucode consumes.
+cp "$BOARD_PATCH_DIR/0116-fman-pcd-cc-fmctl-enq-params-page.patch" "$KERNEL_PATCHES/"
+# M3-3b ROOT-CAUSE fix (iter-25): mainline fman_init() clear_iram()s the
+# U-Boot-uploaded FM_CTL microcode and never reloads it — IRAM all-0xFF,
+# IREADY=0, so every CC dispatch (KG→FM_CTL|AC_CC) parks its FMan task and
+# leaks BMI FIFO units (freeze @~46 frames). 0117 re-uploads the DTB QEF
+# blob (proprietary 210.10.1, fman-firmware/fsl,firmware) into IRAM right
+# after clear_iram, per SDK LoadFmanCtrlCode (fm.c:426-480). Spec §5.4.
+cp "$BOARD_PATCH_DIR/0117-fman-load-ctrl-microcode.patch" "$KERNEL_PATCHES/"
+# M3-3b iter-48 fix: revert 0115's KeyGen→CC dispatch encoding back to the
+# HW-proven CCBS model (KGSE_MODE NIA = BMI direct-enqueue 0x80500002 +
+# KGSE_CCBS = CC root group-table MURAM offset). 0115's AC_CC NIA-flip
+# (0x80000006, ccbs=0) was DISPROVEN on hardware: with 0115's RCCB bind +
+# 0116's SDK result-AD + 0117's 210.10.1 ucode all present it still stalls
+# the FMan port on the first CC frame, whereas live-rewriting the scheme to
+# CCBS cured the stall (no STL/60s, ping 5/5). Keeps the rest of 0115/0116/
+# 0117 — only the 3 KeyGen/CC-scheme files revert. Spec §5.4.
+cp "$BOARD_PATCH_DIR/0118-fman-pcd-cc-revert-ccbs-dispatch.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4007-xhci-ls1046a-dwc3-quirks.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4009-sfp-oem-rollball-quirk.patch"       "$KERNEL_PATCHES/"
+
+# ── Staging-completeness guard ────────────────────────────────────────
+# Every kernel/common/patches/board/*.patch must either be cp'd above or
+# listed here as an intentional skip. Failure mode (observed 2026-06-11,
+# run 27362572444): 0113/0114/0115 were committed to board/ but their cp
+# lines were forgotten, so CI silently shipped a kernel without them —
+# the image looked healthy (same KVER) but lacked the new code entirely.
+# Space-separated basenames of board patches deliberately not staged
+# (currently none — 0078 was never committed as a file; see its comment above).
+BOARD_STAGE_SKIP=""
+_missing=""
+for _p in "$BOARD_PATCH_DIR"/*.patch; do
+  _b=$(basename "$_p")
+  case " $BOARD_STAGE_SKIP " in *" $_b "*) continue ;; esac
+  [ -f "$KERNEL_PATCHES/$_b" ] || _missing="$_missing $_b"
+done
+if [ -n "$_missing" ]; then
+  echo "::error::board patches present in $BOARD_PATCH_DIR but NOT staged:$_missing"
+  echo "::error::add a cp line in bin/ci-setup-kernel.sh (or list in BOARD_STAGE_SKIP)"
+  exit 1
+fi
+echo "### Board patch staging-completeness guard: OK"
 
 # Stage critical flavor-agnostic kernel fix:
 #   120-perf-libperf-asm-headers-srctree.patch — fixes arm64 perf build

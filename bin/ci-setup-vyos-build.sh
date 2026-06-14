@@ -552,6 +552,24 @@ chmod +x "$CHROOT/usr/local/bin/xsk-zc-check"
 cp board/scripts/ask-check "$CHROOT/usr/local/bin/ask-check"
 chmod +x "$CHROOT/usr/local/bin/ask-check"
 
+### Boot-firmware / microcode inventory: `firmware-check` reports board &
+### SoC identity (DT model, fsl-guts SVR/revision), the running U-Boot
+### version (DT /chosen/u-boot,version) vs the version string embedded in
+### the QSPI uboot partition, the full /proc/mtd map with per-partition
+### content fingerprints (RCW/PBL preamble, env CRC via fw_printenv, FMan
+### ucode QEF header, recovery-DTB FDT magic, gzip recovery kernel), a
+### deep QEF decode of the running DT-injected FMan microcode (id string,
+### length, SoC code, proprietary-210.x vs open-source-106.x class, md5)
+### cross-checked against the on-flash mtd3 copy and the kernel's
+### "FMan PCD caps" probe line, the boot-critical U-Boot env variables +
+### boot targets (vyos/usb_vyos/recovery/dev_boot*), and the
+### /boot/vyos.env image selector vs the running image. Exit 0 healthy /
+### 1 fault / 2 not-LS1046A — usable as a Nagios/monit probe. Mirrors
+### sfp-check / fan-check / caam-check style. Flavor-agnostic (the boot
+### firmware chain is identical on every flavor).
+cp board/scripts/firmware-check "$CHROOT/usr/local/bin/firmware-check"
+chmod +x "$CHROOT/usr/local/bin/firmware-check"
+
 ### Mono Gateway DK LP5812 status LED control: `led` (Python 3) supports
 ### three input forms — palette index, four decimals R G B W, and 8-digit
 ### hex RRGGBBWW. Auto-creates /config/led.json with a 32-entry default

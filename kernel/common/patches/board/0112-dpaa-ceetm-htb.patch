@@ -15,7 +15,7 @@ New files dpaa_ceetm.{c,h} implement a flat root->leaf mapping:
     CEETM mode on the FMan Tx port) and builds an unshaped default channel.
   - each HTB leaf class -> its own CEETM channel on the shared LNI, with
     the channel dual-rate shaper set to commit-rate = class rate and
-    excess-rate = class ceil, plus a single strict-priority class queue
+    excess-rate = ceil - rate, plus a single strict-priority class queue
     and a byte-mode tail-drop CCG. The leaf is exposed as Tx queue
     base + slot (base = dpaa_max_num_txqs()).
   - TC_HTB_NODE_MODIFY reprograms the channel rates; TC_HTB_LEAF_DEL tears
@@ -88,9 +88,9 @@ index 3b935ec..a66740a 100644
 -	  stable contract. Safe to leave on: zero runtime cost.
 +	  Each HTB leaf class is mapped to its own CEETM class-queue channel on
 +	  a shared logical network interface (LNI): the channel dual-rate shaper
-+	  is programmed with commit-rate = class rate and excess-rate = class
-+	  ceil, and a single strict-priority class queue with a byte-mode CCG
-+	  tail-drop hangs off it. An extra unshaped default channel carries
++	  is programmed with commit-rate = class rate and excess-rate =
++	  ceil - rate, plus a single strict-priority class queue with a
++	  byte-mode CCG tail-drop. An extra unshaped default channel carries
 +	  unclassified traffic.
  
 -	  Depends on DPAA_HW_CC_STEERING because the scaffold object
@@ -120,10 +120,10 @@ index 51f194a..a9db711 100644
  obj-$(CONFIG_DPAA_AF_XDP_POOL) += af_xdp_pool/
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.c b/drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.c
 new file mode 100644
-index 0000000..668b891
+index 0000000..29f05e9
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.c
-@@ -0,0 +1,710 @@
+@@ -0,0 +1,790 @@
 +// SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
 +/*
 + * DPAA1 Ethernet -- QMan CEETM HTB-offload egress shaper consumer.
@@ -144,7 +144,7 @@ index 0000000..668b891
 + *                             channel for unclassified traffic.
 + *   TC_HTB_LEAF_ALLOC_QUEUE-> one CEETM channel per HTB leaf class. The channel
 + *                             dual-rate shaper is programmed with commit-rate =
-+ *                             class rate and excess-rate = class ceil. A single
++ *                             class rate and excess-rate = ceil - rate. A single
 + *                             strict-priority class queue (CQ index 0) with a
 + *                             byte-mode tail-drop congestion group (CCG) sits on
 + *                             the channel; an LFQ + qman_fq is bound for enqueue.
@@ -176,7 +176,7 @@ index 0000000..668b891
 + * Locking: all TC_SETUP_QDISC_HTB callbacks arrive under rtnl, so the install/
 + * destroy/modify paths are mutually serialised. The xmit fast path reads
 + * priv->ceetm with smp_load_acquire(); install publishes it with
-+ * smp_store_release() only after the default channel is fully built, and
++ * smp_store_release(), then builds the default channel post-publish, and
 + * teardown clears it then synchronize_net()s before releasing hardware.
 + */
 +
@@ -213,6 +213,13 @@ index 0000000..668b891
 +#define DPAA_CEETM_LNI_OAL		24
 +/* Token bucket limit in bytes (Mono CDX CEETM_DEFA_BSIZE) */
 +#define DPAA_CEETM_BSIZE		0x2000
++/*
++ * Shaper rate for the default channel: 10 Gbps, >= every LS1046A port's
++ * line rate so it imposes no real limit. A true CEETM "unshaped" channel
++ * (CS=1, infinite CR/ER) never dequeues on this silicon, so the default
++ * channel is built as a shaped channel at this rate (the proven leaf path).
++ */
++#define DPAA_CEETM_DEFAULT_RATE_BPS	10000000000ULL
 +
 +/**
 + * struct dpaa_ceetm_class - one CEETM channel and its single class queue
@@ -244,7 +251,9 @@ index 0000000..668b891
 + * @lni: the claimed CEETM logical network interface
 + * @base_txq: dpaa_max_num_txqs() snapshot; leaf Tx queues start here
 + * @prev_real_txqs: real_num_tx_queues before HTB create, restored on destroy
-+ * @def: the default (unshaped) channel for unclassified / WQ-queue traffic
++ * @htb_maj: major of the installed HTB qdisc handle (TC_H_MAJ(handle) >> 16)
++ * @defcls: TC_H_MIN of the HTB default class; 0 when no default is configured
++ * @def: the default channel for unclassified / WQ-queue traffic
 + * @leaf: per-leaf-class channels, indexed by (Tx queue - base_txq)
 + */
 +struct dpaa_ceetm {
@@ -252,6 +261,8 @@ index 0000000..668b891
 +	struct qm_ceetm_lni *lni;
 +	unsigned int base_txq;
 +	unsigned int prev_real_txqs;
++	u32 htb_maj;
++	u32 defcls;
 +	struct dpaa_ceetm_class def;
 +	struct dpaa_ceetm_class leaf[DPAA_CEETM_MAX_TXQS];
 +};
@@ -301,6 +312,48 @@ index 0000000..668b891
 +		if (ceetm->leaf[i].channel && ceetm->leaf[i].classid == classid)
 +			return i;
 +	return -1;
++}
++
++/*
++ * ndo_select_queue: steer an HTB-offloaded class to its leaf Tx queue.
++ *
++ * The tc HTB-offload core does not remap skbs onto leaf Tx queues itself, so
++ * the driver derives the class from skb->priority here, mirroring
++ * mlx5e_select_queue()/mlx5e_select_htb_queue(). A frame whose major matches
++ * the installed HTB handle steers to TC_H_MIN(priority); otherwise the qdisc
++ * default class applies. A frame resolving to a live leaf returns that leaf's
++ * Tx queue (base_txq + slot); anything else falls back to a conventional Tx
++ * queue (< base_txq), which dpaa_ceetm_egress_fq() routes to the default
++ * channel. skb->priority is set by "action skbedit priority M:N" or
++ * SO_PRIORITY; a bare flower "classid" does NOT set it and will not steer.
++ */
++u16 dpaa_ceetm_select_queue(struct net_device *net_dev, struct sk_buff *skb,
++			    struct net_device *sb_dev)
++{
++	struct dpaa_priv *priv = netdev_priv(net_dev);
++	struct dpaa_ceetm *ceetm = smp_load_acquire(&priv->ceetm);
++	u32 classid;
++	u16 txq;
++	int slot;
++
++	if (likely(!ceetm))
++		return netdev_pick_tx(net_dev, skb, NULL);
++
++	if ((TC_H_MAJ(skb->priority) >> 16) == ceetm->htb_maj)
++		classid = TC_H_MIN(skb->priority);
++	else
++		classid = ceetm->defcls;
++
++	if (classid) {
++		slot = dpaa_ceetm_find_slot(ceetm, classid);
++		if (slot >= 0 && smp_load_acquire(&ceetm->leaf[slot].used))
++			return ceetm->base_txq + slot;
++	}
++
++	txq = netdev_pick_tx(net_dev, skb, NULL);
++	if (txq >= ceetm->base_txq)
++		txq %= ceetm->base_txq;
++	return txq;
 +}
 +
 +/* Release a fully or partially built channel; safe to call on a zeroed class. */
@@ -363,32 +416,24 @@ index 0000000..668b891
 +		if (err)
 +			goto err_disable_shaper;
 +		err = qman_ceetm_channel_set_excess_rate_bps(cls->channel,
-+					max(ceil_bps, rate_bps), burst);
++					ceil_bps > rate_bps ? ceil_bps - rate_bps : 0, burst);
 +		if (err)
 +			goto err_disable_shaper;
 +	} else {
 +		/*
-+		 * "Unshaped" on CEETM silicon means shaped at the infinite
-+		 * rate: the channel is mapped CS=1 at claim time and a CS=1
-+		 * channel with a zero-rate shaper is never scheduled (frames
-+		 * enqueue but starve in the CQ - hard egress blackhole,
-+		 * hardware-proven). Mono's production CDX app never uses the
-+		 * SDK uFQ path; it enables the shaper uncoupled with
-+		 * CR = ER = infinite.
++		 * A true CEETM "unshaped" channel (CS=1 at claim, shaper left
++		 * at the infinite rate) never dequeues on this silicon: frames
++		 * enqueue but starve in the CQ - a hard egress blackhole,
++		 * hardware-proven 2026-06-13 (both the uncoupled CR=ER=infinite
++		 * and the SDK uFQ recipes were tried and blackhole). The default
++		 * channel is built as a shaped channel at line rate instead (see
++		 * dpaa_ceetm_init), so shaped is always true here; reject an
++		 * unshaped request rather than build a silent blackhole.
 +		 */
-+		struct qm_ceetm_rate inf = QM_CEETM_RATE_INFINITE;
-+
-+		err = qman_ceetm_channel_enable_shaper(cls->channel, 0);
-+		if (err)
-+			goto err_release_channel;
-+		err = qman_ceetm_channel_set_commit_rate(cls->channel, &inf,
-+							 DPAA_CEETM_BSIZE);
-+		if (!err)
-+			err = qman_ceetm_channel_set_excess_rate(cls->channel,
-+								 &inf,
-+								 DPAA_CEETM_BSIZE);
-+		if (err)
-+			goto err_disable_shaper;
++		netdev_err(net_dev,
++			   "CEETM: unshaped channels unsupported on this silicon\n");
++		err = -EINVAL;
++		goto err_release_channel;
 +	}
 +
 +	err = qman_ceetm_ccg_claim(&cls->ccg, cls->channel,
@@ -415,18 +460,17 @@ index 0000000..668b891
 +		goto err_release_ccg;
 +
 +	/*
-+	 * A CQ on neither eligibility list is never scheduled on a CS=1
-+	 * channel. Shaped classes ride the CR list (guaranteed rate) plus
-+	 * the ER list (up to ceil); "unshaped" classes ride the ER list
-+	 * only, against the infinite ER bucket (Mono CDX: "Set ER
-+	 * eligibility, disabling shaping").
++	 * Every channel here is shaped: leaves at their rate/ceil, the default
++	 * channel at line rate. Each CQ rides both the CR list (guaranteed
++	 * rate, scheduled against the channel CR token bucket and the LNI CR
++	 * pass) and the ER list (excess up to ceil - rate). The coupled shaper
++	 * spills unused CR credit into ER, so a CR+ER eligible CQ on a shaped
++	 * channel always dequeues - the hardware-proven path.
 +	 */
-+	if (shaped) {
-+		err = qman_ceetm_channel_set_cq_cr_eligibility(cls->channel,
-+							       DPAA_CEETM_CQ_PRIO, 1);
-+		if (err)
-+			goto err_release_cq;
-+	}
++	err = qman_ceetm_channel_set_cq_cr_eligibility(cls->channel,
++						       DPAA_CEETM_CQ_PRIO, 1);
++	if (err)
++		goto err_release_cq;
 +	err = qman_ceetm_channel_set_cq_er_eligibility(cls->channel,
 +						       DPAA_CEETM_CQ_PRIO, 1);
 +	if (err)
@@ -513,7 +557,7 @@ index 0000000..668b891
 +	enum qm_dc_portal dcp;
 +	unsigned int sp_id;
 +	u32 channel;
-+	int err, i;
++	int err;
 +
 +	if (priv->ceetm) {
 +		NL_SET_ERR_MSG_MOD(opt->extack,
@@ -541,6 +585,8 @@ index 0000000..668b891
 +		return -ENOMEM;
 +	ceetm->base_txq = dpaa_max_num_txqs();
 +	ceetm->prev_real_txqs = net_dev->real_num_tx_queues;
++	ceetm->htb_maj = opt->parent_classid;
++	ceetm->defcls = opt->classid;
 +
 +	dpaa_ceetm_prescaler_once(dcp);
 +
@@ -550,14 +596,23 @@ index 0000000..668b891
 +		goto err_free;
 +	}
 +
-+	/* LNIs are claimed by explicit index; find the first free one. */
-+	for (i = 0; i < DPAA_CEETM_NR_LNIS; i++) {
-+		err = qman_ceetm_lni_claim(&ceetm->lni, dcp, i);
-+		if (!err)
-+			break;
-+	}
++	/*
++	 * Give each Tx sub-portal its OWN dedicated LNI (lni_idx == sp_id)
++	 * instead of sharing the first-free LNI. On LS1046A every FMan Tx
++	 * port's QMan channel low-5-bits (sp_id) is unique and < 8
++	 * (10GEC1/2 -> sp 0/1, MAC1..6 -> sp 2..7), so the index is always
++	 * in range and never collides. Two distinct sub-portals sharing one
++	 * LNI corrupted the second port's default channel: sp_release()
++	 * disables CEETM mode but the shared LNI keeps the first port's stale
++	 * binding, so the second port (different sub-portal, same LNI)
++	 * blackholed all unclassified traffic. A per-port LNI removes the
++	 * collision and matches the NXP SDK 1:1 sub-portal<->LNI model; a
++	 * same-port rebuild already worked because it re-asserts the identical
++	 * sp<->lni pair every time.
++	 */
++	err = qman_ceetm_lni_claim(&ceetm->lni, dcp, sp_id);
 +	if (err) {
-+		NL_SET_ERR_MSG_MOD(opt->extack, "no free CEETM LNI");
++		NL_SET_ERR_MSG_MOD(opt->extack, "CEETM LNI claim failed");
 +		goto err_release_sp;
 +	}
 +
@@ -596,27 +651,46 @@ index 0000000..668b891
 +		}
 +	}
 +
-+	/* Default unshaped channel: catches unclassified and WQ-queue frames. */
-+	err = dpaa_ceetm_build_channel(net_dev, ceetm, &ceetm->def, false, 0, 0);
++	/*
++	 * Publish BEFORE building the default channel. The default channel is
++	 * built post-publish - the same way every leaf class is built - so it
++	 * is created while the port is already live in CEETM mode. The special
++	 * pre-publish default channel black-holed unclassified traffic on this
++	 * silicon at every channel index and LNI ordinal (hardware-proven
++	 * 2026-06-13/14: skip-index-0/1 and a sacrificial warm-up channel all
++	 * left the pre-publish default at frm_cnt 0), while every post-publish
++	 * leaf forwarded at 0% loss. Until def.used is set, dpaa_ceetm_egress_fq()
++	 * returns NULL for unclassified traffic and dpaa_xmit() falls back to the
++	 * (now-undequeued) conventional FQ - a sub-millisecond install window.
++	 */
++	smp_store_release(&priv->ceetm, ceetm);
++
++	/*
++	 * Default channel: catches unclassified and WQ-queue frames. Built as
++	 * a shaped channel at line rate (DPAA_CEETM_DEFAULT_RATE_BPS), not a
++	 * CEETM "unshaped" channel - the latter never dequeues on this silicon
++	 * (egress blackhole, hardware-proven 2026-06-13). 10 Gbps is >= every
++	 * port's line rate, so it imposes no real limit.
++	 */
++	err = dpaa_ceetm_build_channel(net_dev, ceetm, &ceetm->def, true,
++				       DPAA_CEETM_DEFAULT_RATE_BPS,
++				       DPAA_CEETM_DEFAULT_RATE_BPS);
 +	if (err) {
 +		NL_SET_ERR_MSG_MOD(opt->extack,
 +				   "CEETM default channel build failed");
-+		goto err_release_lni;
++		goto err_unpublish;
 +	}
-+	ceetm->def.used = true;
++	smp_store_release(&ceetm->def.used, true);
 +
-+	/*
-+	 * Publish. From here dpaa_xmit() diverts every enqueue through CEETM.
-+	 * This MUST follow the default channel build because sp_set_lni() has
-+	 * already stopped the conventional WQ egress FQs.
-+	 */
-+	smp_store_release(&priv->ceetm, ceetm);
 +	netdev_info(net_dev, "CEETM HTB offload installed (sp %u, lni %u)\n",
 +		    ceetm->sp->idx, ceetm->lni->idx);
 +	qman_ceetm_dump_state("install", ceetm->sp, ceetm->lni,
 +			      ceetm->def.channel, ceetm->def.cq, ceetm->def.ccg);
 +	return 0;
 +
++err_unpublish:
++	smp_store_release(&priv->ceetm, NULL);
++	synchronize_net();
 +err_release_lni:
 +	qman_ceetm_lni_release(ceetm->lni);
 +	ceetm->sp->lni = NULL;
@@ -762,7 +836,7 @@ index 0000000..668b891
 +	if (err)
 +		goto err;
 +	err = qman_ceetm_channel_set_excess_rate_bps(cls->channel,
-+						     max(ceil_bps, rate_bps),
++						     ceil_bps > rate_bps ? ceil_bps - rate_bps : 0,
 +						     burst);
 +	if (err)
 +		goto err;
@@ -831,15 +905,21 @@ index 0000000..668b891
 +		    smp_load_acquire(&ceetm->leaf[idx].used))
 +			return &ceetm->leaf[idx].fq;
 +	}
-+	/* WQ queues and unclassified traffic egress via the default channel. */
-+	return &ceetm->def.fq;
++	/*
++	 * WQ queues and unclassified traffic egress via the default channel.
++	 * NULL until the default channel is built post-publish; the caller then
++	 * falls back to the conventional FQ for that sub-millisecond window.
++	 */
++	if (smp_load_acquire(&ceetm->def.used))
++		return &ceetm->def.fq;
++	return NULL;
 +}
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.h b/drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.h
 new file mode 100644
 index 0000000..230bd82
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_ceetm.h
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,91 @@
 +/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause) */
 +/*
 + * DPAA1 Ethernet -- QMan CEETM HTB-offload egress shaper consumer.
@@ -886,7 +966,7 @@ index 0000000..230bd82
 + * Leaf Tx queues (>= base) map to their per-class LFQ; every other Tx
 + * queue (conventional WQ queues, which the hardware no longer dequeues
 + * once CEETM mode is enabled) maps to the default channel's LFQ so that
-+ * unclassified traffic still egresses. Never returns NULL.
++ * unclassified traffic still egresses. Returns NULL until def is built.
 + */
 +struct qman_fq *dpaa_ceetm_egress_fq(struct dpaa_ceetm *ceetm,
 +				     int queue_mapping);
@@ -899,6 +979,18 @@ index 0000000..230bd82
 + * hierarchy is released even if the HTB qdisc was not torn down cleanly.
 + */
 +void dpaa_ceetm_teardown(struct dpaa_priv *priv);
++
++/**
++ * dpaa_ceetm_select_queue - ndo_select_queue: steer to an HTB leaf Tx queue
++ * @net_dev: the DPAA Ethernet netdev
++ * @skb: the frame being transmitted; skb->priority selects the HTB class
++ * @sb_dev: subordinate device (unused)
++ *
++ * Return: the netdev Tx queue index backing the resolved HTB class, or a
++ * conventional Tx queue for unclassified traffic.
++ */
++u16 dpaa_ceetm_select_queue(struct net_device *net_dev, struct sk_buff *skb,
++			    struct net_device *sb_dev);
 +
 +#else /* !CONFIG_DPAA_HW_CEETM */
 +
@@ -981,7 +1073,7 @@ index d4eedfc..ff99b7d 100644
  					  const struct qm_fd *fd, bool ts)
  {
  	const enum dma_data_direction dma_dir = DMA_TO_DEVICE;
-@@ -2482,9 +2492,32 @@ static inline int dpaa_xmit(struct dpaa_priv *priv,
+@@ -2482,9 +2492,35 @@ static inline int dpaa_xmit(struct dpaa_priv *priv,
  	struct qman_fq *egress_fq;
  	int err, i;
  
@@ -993,10 +1085,13 @@ index d4eedfc..ff99b7d 100644
 +		 */
 +		struct dpaa_ceetm *ceetm = smp_load_acquire(&priv->ceetm);
 +
-+		if (unlikely(ceetm))
++		if (unlikely(ceetm)) {
 +			egress_fq = dpaa_ceetm_egress_fq(ceetm, queue);
-+		else
++			if (unlikely(!egress_fq))
++				egress_fq = priv->egress_fqs[queue];
++		} else {
 +			egress_fq = priv->egress_fqs[queue];
++		}
 +	}
 +#else
  	egress_fq = priv->egress_fqs[queue];
@@ -1016,6 +1111,13 @@ index d4eedfc..ff99b7d 100644
  
  	/* Trace this Tx fd */
  	trace_dpaa_tx_fd(priv->net_dev, egress_fq, fd);
+@@ -3590,3 +3623,6 @@ static const struct net_device_ops dpaa_ops = {
+ 	.ndo_hwtstamp_get = dpaa_hwtstamp_get,
+ 	.ndo_hwtstamp_set = dpaa_hwtstamp_set,
++#if IS_ENABLED(CONFIG_DPAA_HW_CEETM)
++	.ndo_select_queue = dpaa_ceetm_select_queue,
++#endif
+ };
 @@ -4072,7 +4105,8 @@ static int dpaa_eth_probe(struct platform_device *pdev)
  	/* Allocate this early, so we can store relevant information in
  	 * the private area
@@ -1055,7 +1157,7 @@ index bd3aa7e..501f947 100644
 +#if IS_ENABLED(CONFIG_DPAA_HW_CEETM)
 +	/* QMan CEETM HTB-offload state (patch 0112). NULL when no HTB
 +	 * offload qdisc is installed; published with smp_store_release()
-+	 * once the default channel is built, read with smp_load_acquire()
++	 * before the default channel is built, read with smp_load_acquire()
 +	 * on the dpaa_xmit() steering fast path.
 +	 */
 +	struct dpaa_ceetm *ceetm;

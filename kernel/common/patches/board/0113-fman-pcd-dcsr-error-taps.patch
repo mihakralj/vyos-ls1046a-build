@@ -1,0 +1,349 @@
+diff --git a/drivers/net/ethernet/freescale/fman/Makefile b/drivers/net/ethernet/freescale/fman/Makefile
+index 1a3a3d4..d448d16 100644
+--- a/drivers/net/ethernet/freescale/fman/Makefile
++++ b/drivers/net/ethernet/freescale/fman/Makefile
+@@ -6,6 +6,6 @@ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_fman_port.o
+ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_mac.o
+ 
+ fsl_dpaa_fman-objs	:= fman_muram.o fman.o fman_sp.o fman_keygen.o
+-fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o fman_pcd_kg.o fman_pcd_cc.o fman_pcd_manip.o fman_pcd_plcr.o fman_pcd_cc_test.o
++fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o fman_pcd_kg.o fman_pcd_cc.o fman_pcd_manip.o fman_pcd_plcr.o fman_pcd_cc_test.o fman_pcd_dcsr.o
+ fsl_dpaa_fman_port-objs := fman_port.o
+ fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 73becad..1fe3753 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -280,6 +280,7 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 					    pcd->debugfs_dir, pcd,
+ 					    &fman_pcd_muram_budget_fops);
+ 			fman_pcd_cc_test_debugfs_init(pcd->debugfs_dir, pcd);
++			fman_pcd_dcsr_debugfs_init(pcd->debugfs_dir, pcd);
+ 		}
+ 	}
+ 
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_dcsr.c b/drivers/net/ethernet/freescale/fman/fman_pcd_dcsr.c
+new file mode 100644
+index 0000000..5ad3854
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_dcsr.c
+@@ -0,0 +1,306 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * fman_pcd_dcsr.c - FMan error/exception observability taps (board 0113)
++ *
++ * Read-only debugfs views of the FMan common-block error/event registers
++ * under /sys/kernel/debug/fman_pcd/<N>/dcsr/ :
++ *
++ *   fpm_err    - FPM pending/error interrupts, controller events, RAMs
++ *                ECC capture and the 50 per-hwport status words (incl.
++ *                the port-STALL bit that fires on a wedged CC dispatch)
++ *   bmi_err    - BMI common interrupt event/enable/force
++ *   qmi_err    - QMI error+normal event/enable and total frame counters
++ *   parser_err - HW parser (HWP) event/error capture registers
++ *   kg_err     - KeyGen error/event, scheme-error and total-packet regs
++ *   pol_err    - Policer error/event capture + global colour counters
++ *
++ * Every file is a pure ioread32be() sweep of status/capture registers:
++ * nothing is written back and no W1C register is acknowledged, so the
++ * taps can never race or disturb the mainline ISR paths.  A module-wide
++ * throttle enforces >= 1 ms between hardware sweeps so userspace cannot
++ * hammer the CCSR bus through debugfs.
++ *
++ * All blocks are reached via fixed CCSR block offsets from
++ * fman::base_addr, exactly like fman_pcd_plcr.c does: the mainline
++ * register structs (fman_fpm_regs, fman_bmi_regs, fman_qmi_regs,
++ * fman_kg_regs, hwp_regs) are file-private to fman.c/fman_keygen.c so
++ * raw offsets are the established intra-series idiom.  Offsets verified
++ * against mainline fman.c/fman_keygen.c struct layouts, the NXP NCSW
++ * SDK t_FmPcdPlcrRegs, and the freebsd-src fsl_fman_prs.h flib.
++ */
++
++#include <linux/debugfs.h>
++#include <linux/delay.h>
++#include <linux/err.h>
++#include <linux/io.h>
++#include <linux/kernel.h>
++#include <linux/ktime.h>
++#include <linux/mutex.h>
++#include <linux/seq_file.h>
++#include <linux/types.h>
++
++#include "fman.h"
++#include "fman_pcd_internal.h"
++
++/* CCSR block offsets from fman::base_addr (mainline fman.c values) */
++#define DCSR_BMI_OFFSET		0x00080000u
++#define DCSR_QMI_OFFSET		0x00080400u
++#define DCSR_PLCR_OFFSET	0x000c0000u
++#define DCSR_KG_OFFSET		0x000c1000u
++#define DCSR_FPM_OFFSET		0x000c3000u
++#define DCSR_HWP_OFFSET		0x000c7000u
++
++/* FPM registers (struct fman_fpm_regs layout, fman.c) */
++#define FPM_EPI			0x018	/* error pending interrupts */
++#define FPM_RIE			0x01c	/* error interrupt enable */
++#define FPM_FCEV(n)		(0x020 + 4 * (n))	/* fman-ctl event */
++#define FPM_CEE(n)		(0x040 + 4 * (n))	/* fman-ctl enable */
++#define FPM_RCR			0x070	/* rams control / ECC capture */
++#define FPM_NPI			0x0d4	/* normal pending interrupts */
++#define FPM_EE			0x0dc	/* event & enable */
++#define FPM_CEV(n)		(0x0e0 + 4 * (n))	/* CPU event */
++#define FPM_PS(n)		(0x100 + 4 * (n))	/* port status */
++#define FPM_NUM_PS		50
++#define FPM_PS_STALLED		0x00800000	/* port is stalled */
++
++/* BMI common registers (struct fman_bmi_regs layout, fman.c) */
++#define BMI_IEVR		0x020	/* interrupt event vector */
++#define BMI_IER			0x024	/* interrupt enable */
++#define BMI_IFR			0x028	/* interrupt force */
++
++/* QMI common registers (struct fman_qmi_regs layout, fman.c) */
++#define QMI_EIE			0x008	/* error interrupt event */
++#define QMI_EIEN		0x00c	/* error interrupt enable */
++#define QMI_EIF			0x010	/* error interrupt force */
++#define QMI_IE			0x014	/* interrupt event */
++#define QMI_IEN			0x018	/* interrupt enable */
++#define QMI_IF			0x01c	/* interrupt force */
++#define QMI_GS			0x020	/* global status */
++#define QMI_ETFC		0x028	/* enqueue total frame counter */
++#define QMI_DTFC		0x02c	/* dequeue total frame counter */
++
++/* HW parser: registers sit at +0x840 inside the HWP block */
++#define HWP_PEVR		0x860	/* parser event */
++#define HWP_PEVER		0x864	/* parser event enable */
++#define HWP_PERR		0x86c	/* parser error */
++#define HWP_PERER		0x870	/* parser error enable */
++
++/* KeyGen registers (struct fman_kg_regs layout, fman_keygen.c) */
++#define KG_GCR			0x000	/* general configuration */
++#define KG_EER			0x00c	/* error event */
++#define KG_EEER			0x010	/* error event enable */
++#define KG_SEER			0x01c	/* scheme error event */
++#define KG_SEEER		0x020	/* scheme error event enable */
++#define KG_GSR			0x024	/* global status */
++#define KG_TPC			0x028	/* total packet counter */
++#define KG_SERC			0x02c	/* soft error capture */
++
++/* Policer registers (SDK t_FmPcdPlcrRegs layout) */
++#define PLCR_GCR		0x000	/* general configuration */
++#define PLCR_GSR		0x004	/* global status */
++#define PLCR_EVR		0x008	/* event */
++#define PLCR_IER		0x00c	/* interrupt enable */
++#define PLCR_EEVR		0x014	/* error event */
++#define PLCR_EIER		0x018	/* error interrupt enable */
++#define PLCR_RPCNT		0x020	/* red packets */
++#define PLCR_YPCNT		0x024	/* yellow packets */
++#define PLCR_RRPCNT		0x028	/* recoloured-to-red packets */
++#define PLCR_RYPCNT		0x02c	/* recoloured-to-yellow packets */
++#define PLCR_TPCNT		0x030	/* total packets */
++#define PLCR_FLMCNT		0x034	/* frame length mismatches */
++#define PLCR_SERC		0x100	/* soft error capture */
++#define PLCR_UPCR		0x104	/* uninitialised profile capture */
++
++static DEFINE_MUTEX(dcsr_sweep_lock);
++static ktime_t dcsr_last_sweep;
++
++/* Enforce >= 1 ms between hardware register sweeps (spec section 4.9) */
++static void dcsr_throttle(void)
++{
++	s64 since_us;
++
++	mutex_lock(&dcsr_sweep_lock);
++	since_us = ktime_us_delta(ktime_get(), dcsr_last_sweep);
++	if (since_us >= 0 && since_us < 1000)
++		usleep_range(1000 - since_us, 1500 - since_us);
++	dcsr_last_sweep = ktime_get();
++	mutex_unlock(&dcsr_sweep_lock);
++}
++
++static u32 dcsr_rd(struct fman_pcd *pcd, u32 block, u32 off)
++{
++	struct fman *fman = fman_pcd_get_fman(pcd);
++
++	return ioread32be(fman->base_addr + block + off);
++}
++
++static int dcsr_fpm_err_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++	int i;
++
++	dcsr_throttle();
++	seq_printf(s, "fm_epi     0x%08x\n",
++		   dcsr_rd(pcd, DCSR_FPM_OFFSET, FPM_EPI));
++	seq_printf(s, "fm_rie     0x%08x\n",
++		   dcsr_rd(pcd, DCSR_FPM_OFFSET, FPM_RIE));
++	seq_printf(s, "fm_npi     0x%08x\n",
++		   dcsr_rd(pcd, DCSR_FPM_OFFSET, FPM_NPI));
++	seq_printf(s, "fmfp_ee    0x%08x\n",
++		   dcsr_rd(pcd, DCSR_FPM_OFFSET, FPM_EE));
++	seq_printf(s, "fm_rcr     0x%08x\n",
++		   dcsr_rd(pcd, DCSR_FPM_OFFSET, FPM_RCR));
++	for (i = 0; i < 4; i++)
++		seq_printf(s, "fmfp_fcev%d 0x%08x (cee 0x%08x)\n", i,
++			   dcsr_rd(pcd, DCSR_FPM_OFFSET, FPM_FCEV(i)),
++			   dcsr_rd(pcd, DCSR_FPM_OFFSET, FPM_CEE(i)));
++	for (i = 0; i < 4; i++)
++		seq_printf(s, "fmfp_cev%d  0x%08x\n", i,
++			   dcsr_rd(pcd, DCSR_FPM_OFFSET, FPM_CEV(i)));
++	for (i = 0; i < FPM_NUM_PS; i++) {
++		u32 ps = dcsr_rd(pcd, DCSR_FPM_OFFSET, FPM_PS(i));
++
++		if (ps)
++			seq_printf(s, "port %02d    fmfp_ps 0x%08x%s\n", i, ps,
++				   (ps & FPM_PS_STALLED) ? "  [STALLED]" : "");
++	}
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(dcsr_fpm_err);
++
++static int dcsr_bmi_err_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++
++	dcsr_throttle();
++	seq_printf(s, "fmbm_ievr  0x%08x\n",
++		   dcsr_rd(pcd, DCSR_BMI_OFFSET, BMI_IEVR));
++	seq_printf(s, "fmbm_ier   0x%08x\n",
++		   dcsr_rd(pcd, DCSR_BMI_OFFSET, BMI_IER));
++	seq_printf(s, "fmbm_ifr   0x%08x\n",
++		   dcsr_rd(pcd, DCSR_BMI_OFFSET, BMI_IFR));
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(dcsr_bmi_err);
++
++static int dcsr_qmi_err_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++
++	dcsr_throttle();
++	seq_printf(s, "fmqm_eie   0x%08x\n",
++		   dcsr_rd(pcd, DCSR_QMI_OFFSET, QMI_EIE));
++	seq_printf(s, "fmqm_eien  0x%08x\n",
++		   dcsr_rd(pcd, DCSR_QMI_OFFSET, QMI_EIEN));
++	seq_printf(s, "fmqm_ie    0x%08x\n",
++		   dcsr_rd(pcd, DCSR_QMI_OFFSET, QMI_IE));
++	seq_printf(s, "fmqm_ien   0x%08x\n",
++		   dcsr_rd(pcd, DCSR_QMI_OFFSET, QMI_IEN));
++	seq_printf(s, "fmqm_gs    0x%08x\n",
++		   dcsr_rd(pcd, DCSR_QMI_OFFSET, QMI_GS));
++	seq_printf(s, "fmqm_etfc  %u\n",
++		   dcsr_rd(pcd, DCSR_QMI_OFFSET, QMI_ETFC));
++	seq_printf(s, "fmqm_dtfc  %u\n",
++		   dcsr_rd(pcd, DCSR_QMI_OFFSET, QMI_DTFC));
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(dcsr_qmi_err);
++
++static int dcsr_parser_err_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++
++	dcsr_throttle();
++	seq_printf(s, "fmpr_pevr  0x%08x\n",
++		   dcsr_rd(pcd, DCSR_HWP_OFFSET, HWP_PEVR));
++	seq_printf(s, "fmpr_pever 0x%08x\n",
++		   dcsr_rd(pcd, DCSR_HWP_OFFSET, HWP_PEVER));
++	seq_printf(s, "fmpr_perr  0x%08x\n",
++		   dcsr_rd(pcd, DCSR_HWP_OFFSET, HWP_PERR));
++	seq_printf(s, "fmpr_perer 0x%08x\n",
++		   dcsr_rd(pcd, DCSR_HWP_OFFSET, HWP_PERER));
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(dcsr_parser_err);
++
++static int dcsr_kg_err_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++
++	dcsr_throttle();
++	seq_printf(s, "fmkg_gcr   0x%08x\n",
++		   dcsr_rd(pcd, DCSR_KG_OFFSET, KG_GCR));
++	seq_printf(s, "fmkg_eer   0x%08x\n",
++		   dcsr_rd(pcd, DCSR_KG_OFFSET, KG_EER));
++	seq_printf(s, "fmkg_eeer  0x%08x\n",
++		   dcsr_rd(pcd, DCSR_KG_OFFSET, KG_EEER));
++	seq_printf(s, "fmkg_seer  0x%08x\n",
++		   dcsr_rd(pcd, DCSR_KG_OFFSET, KG_SEER));
++	seq_printf(s, "fmkg_seeer 0x%08x\n",
++		   dcsr_rd(pcd, DCSR_KG_OFFSET, KG_SEEER));
++	seq_printf(s, "fmkg_gsr   0x%08x\n",
++		   dcsr_rd(pcd, DCSR_KG_OFFSET, KG_GSR));
++	seq_printf(s, "fmkg_tpc   %u\n",
++		   dcsr_rd(pcd, DCSR_KG_OFFSET, KG_TPC));
++	seq_printf(s, "fmkg_serc  0x%08x\n",
++		   dcsr_rd(pcd, DCSR_KG_OFFSET, KG_SERC));
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(dcsr_kg_err);
++
++static int dcsr_pol_err_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++
++	dcsr_throttle();
++	seq_printf(s, "fmpl_gcr    0x%08x\n",
++		   dcsr_rd(pcd, DCSR_PLCR_OFFSET, PLCR_GCR));
++	seq_printf(s, "fmpl_gsr    0x%08x\n",
++		   dcsr_rd(pcd, DCSR_PLCR_OFFSET, PLCR_GSR));
++	seq_printf(s, "fmpl_evr    0x%08x\n",
++		   dcsr_rd(pcd, DCSR_PLCR_OFFSET, PLCR_EVR));
++	seq_printf(s, "fmpl_ier    0x%08x\n",
++		   dcsr_rd(pcd, DCSR_PLCR_OFFSET, PLCR_IER));
++	seq_printf(s, "fmpl_eevr   0x%08x\n",
++		   dcsr_rd(pcd, DCSR_PLCR_OFFSET, PLCR_EEVR));
++	seq_printf(s, "fmpl_eier   0x%08x\n",
++		   dcsr_rd(pcd, DCSR_PLCR_OFFSET, PLCR_EIER));
++	seq_printf(s, "fmpl_serc   0x%08x\n",
++		   dcsr_rd(pcd, DCSR_PLCR_OFFSET, PLCR_SERC));
++	seq_printf(s, "fmpl_upcr   0x%08x\n",
++		   dcsr_rd(pcd, DCSR_PLCR_OFFSET, PLCR_UPCR));
++	seq_printf(s, "fmpl_tpcnt  %u\n",
++		   dcsr_rd(pcd, DCSR_PLCR_OFFSET, PLCR_TPCNT));
++	seq_printf(s, "fmpl_rpcnt  %u\n",
++		   dcsr_rd(pcd, DCSR_PLCR_OFFSET, PLCR_RPCNT));
++	seq_printf(s, "fmpl_ypcnt  %u\n",
++		   dcsr_rd(pcd, DCSR_PLCR_OFFSET, PLCR_YPCNT));
++	seq_printf(s, "fmpl_rrpcnt %u\n",
++		   dcsr_rd(pcd, DCSR_PLCR_OFFSET, PLCR_RRPCNT));
++	seq_printf(s, "fmpl_rypcnt %u\n",
++		   dcsr_rd(pcd, DCSR_PLCR_OFFSET, PLCR_RYPCNT));
++	seq_printf(s, "fmpl_flmcnt %u\n",
++		   dcsr_rd(pcd, DCSR_PLCR_OFFSET, PLCR_FLMCNT));
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(dcsr_pol_err);
++
++void fman_pcd_dcsr_debugfs_init(struct dentry *parent, struct fman_pcd *pcd)
++{
++	struct dentry *dir;
++
++	if (IS_ERR_OR_NULL(parent))
++		return;
++
++	dir = debugfs_create_dir("dcsr", parent);
++	if (IS_ERR_OR_NULL(dir))
++		return;
++
++	debugfs_create_file("fpm_err", 0444, dir, pcd, &dcsr_fpm_err_fops);
++	debugfs_create_file("bmi_err", 0444, dir, pcd, &dcsr_bmi_err_fops);
++	debugfs_create_file("qmi_err", 0444, dir, pcd, &dcsr_qmi_err_fops);
++	debugfs_create_file("parser_err", 0444, dir, pcd,
++			    &dcsr_parser_err_fops);
++	debugfs_create_file("kg_err", 0444, dir, pcd, &dcsr_kg_err_fops);
++	debugfs_create_file("pol_err", 0444, dir, pcd, &dcsr_pol_err_fops);
++}
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+index a65d887..16dfc27 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+@@ -55,4 +55,8 @@ void fman_pcd_cc_seq_dump(struct fman_pcd *pcd, struct seq_file *m);
+ void fman_pcd_cc_test_debugfs_init(struct dentry *parent,
+ 				   struct fman_pcd *pcd);
+ 
++/* Error-observability taps (fman_pcd_dcsr.c).  Intra-module. */
++void fman_pcd_dcsr_debugfs_init(struct dentry *parent,
++				struct fman_pcd *pcd);
++
+ #endif /* __FMAN_PCD_INTERNAL_H */

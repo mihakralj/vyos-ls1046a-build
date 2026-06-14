@@ -3,6 +3,13 @@
 
 ---
 
+## ⚠️ TRANSITION NOTICE (2026-06-12)
+
+**[SPEC]**
+`plans/DUAL-DATAPLANE.md` decided a **single dual-dataplane image**: one ISO ships both VPP and `ask.ko`, both dormant until configured. Once DUAL-DATAPLANE M7 lands, the three-flavor split this plan coordinates **retires** — `version-ask.json`/`version-vpp.json` become aliases of the single image's feed (kept so fielded installs keep receiving updates), and the multi-flavor release machinery below becomes historical. Until M7, the current single-flavor-per-dispatch CI behaviour continues unchanged; do **not** invest further in implementing this plan.
+
+---
+
 ## AI READING INSTRUCTION
 
 Read `[SPEC]` and `[BUG]` blocks for authoritative facts.
