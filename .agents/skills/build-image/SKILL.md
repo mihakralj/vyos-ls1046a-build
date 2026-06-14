@@ -11,8 +11,9 @@ publishing it on the lxc200 HTTP relay so an operator can install it on the
 LS1046A Mono Gateway DK with a single `add system image <url>` command.
 
 This skill encodes the **"ISO deployment invariant"** from `AGENTS.md`. Read
-that rule before deviating — the rsync flags, the `latest-<flavor>.iso`
-symlink, and the canonical install URL are load-bearing.
+that rule before deviating — the rsync flags, the `latest.iso` symlink (plus the
+back-compat `latest-{default,vpp,ask}.iso` aliases), and the canonical install
+URL are load-bearing.
 
 ## Usage
 
@@ -43,14 +44,16 @@ pushes `vmlinuz`/`initrd.img`/`mono-gw.dtb`/`*.squashfs` to `/srv/tftp/`, NOT
 - **GitHub Release assets only exist on `main`.** The `publish` job is gated
   `if: github.ref_name == 'main'`. On `dpaa1`/feature branches there is NO
   release — you MUST pull the Actions artifact, not a release asset.
-- **ISO filename encodes the flavor:**
-  `vyos-<version>-LS1046A-<flavor>-arm64.iso` (flavor ∈ default | ask | vpp).
+- **ISO filename is flavor-neutral:** `vyos-<version>-LS1046A-arm64.iso`. The
+  single image ships every dataplane (mainline DPAA + VPP AF_XDP + dormant
+  `ask.ko`), selected at runtime — there is no per-flavor ISO.
 - **lxc200 relay:** `admin@192.168.1.137` over Tailscale, SSH key
   `~/.ssh/admin_key`. ISOs live at `/srv/tftp/iso/`. A persistent HTTP server
   (`python3 -m http.server 8080 --directory /srv/tftp`) exposes them.
 - **Canonical DUT install URL (what the operator pastes):**
-  `http://192.168.1.137:8080/iso/latest-<flavor>.iso`
-  (e.g. `latest-vpp.iso`, `latest-default.iso`). The versioned URL
+  `http://192.168.1.137:8080/iso/latest.iso`. The back-compat aliases
+  `latest-{default,vpp,ask}.iso` resolve to the same image for installs that
+  pinned an old per-flavor URL. The versioned URL
   `http://192.168.1.137:8080/iso/<versioned-filename>.iso` is also retained for
   pinning/reproducibility.
 - **SSH MCP `ssh_upload_file` TIMES OUT** on the 575+ MB ISO. Use `rsync` over
@@ -67,9 +70,9 @@ If the user gave a run ID, skip to step 2 with that ID. Otherwise:
   gh run list --workflow "VyOS LS1046A build (self-hosted)" --branch "$(git rev-parse --abbrev-ref HEAD)" --limit 5
   ```
 - **To dispatch a new build** (only if the user asked to build, or no usable
-  recent run exists). Pass the flavor explicitly if the user named one:
+  recent run exists):
   ```bash
-  gh workflow run "VyOS LS1046A build (self-hosted)" --ref "$(git rev-parse --abbrev-ref HEAD)" -f flavor=vpp
+  gh workflow run "VyOS LS1046A build (self-hosted)" --ref "$(git rev-parse --abbrev-ref HEAD)"
   ```
   Then poll until complete:
   ```bash
@@ -101,10 +104,9 @@ gh run download <run-id> --dir "$WORK"
 # The artifact unpacks to: $WORK/<image_name>/{manifest.json,<image>.iso,<image>.iso.minisig}
 ISO=$(find "$WORK" -name '*.iso' | head -n1)
 SIG="${ISO}.minisig"
-BASENAME=$(basename "$ISO")                 # vyos-<ver>-LS1046A-<flavor>-arm64.iso
-FLAVOR=$(echo "$BASENAME" | sed -E 's/.*-LS1046A-([a-z]+)-arm64\.iso/\1/')
+BASENAME=$(basename "$ISO")                 # vyos-<ver>-LS1046A-arm64.iso
 test -f "$ISO" && test -f "$SIG" || { echo "FATAL: ISO or .minisig missing"; exit 1; }
-echo "ISO=$ISO  FLAVOR=$FLAVOR"
+echo "ISO=$ISO"
 ```
 
 If `gh run download` reports the artifact expired (>15 days), the build must be
@@ -121,20 +123,22 @@ rsync -av --rsync-path='sudo rsync' -e "ssh -i ~/.ssh/admin_key" \
   "$ISO" "$SIG" admin@192.168.1.137:/srv/tftp/iso/
 ```
 
-Then refresh the per-flavor `latest-<flavor>.iso` symlink atomically:
+Then refresh the canonical `latest.iso` symlink (plus the back-compat per-flavor
+aliases, for installs that pinned an old URL) atomically:
 
 ```bash
 ssh -i ~/.ssh/admin_key admin@192.168.1.137 \
-  "sudo ln -sfn '$BASENAME' /srv/tftp/iso/latest-${FLAVOR}.iso"
+  "sudo ln -sfn '$BASENAME' /srv/tftp/iso/latest.iso && \
+   for a in default vpp ask; do sudo ln -sfn '$BASENAME' /srv/tftp/iso/latest-\$a.iso; done"
 ```
 
 ### 5. Verify the HTTP relay serves it
 
-Confirm both the versioned and `latest-` URLs return 200 and the right size:
+Confirm both the versioned and `latest.iso` URLs return 200 and the right size:
 
 ```bash
-curl -sI "http://192.168.1.137:8080/iso/${BASENAME}"                | head -n1
-curl -sI "http://192.168.1.137:8080/iso/latest-${FLAVOR}.iso"       | head -n1
+curl -sI "http://192.168.1.137:8080/iso/${BASENAME}"   | head -n1
+curl -sI "http://192.168.1.137:8080/iso/latest.iso"    | head -n1
 ```
 Both must be `HTTP/1.0 200 OK`. If the HTTP server is down, (re)start it on
 lxc200: `python3 -m http.server 8080 --directory /srv/tftp` (persistent).
@@ -142,13 +146,13 @@ lxc200: `python3 -m http.server 8080 --directory /srv/tftp` (persistent).
 ### 6. Emit the operator install instructions
 
 Print the exact command the operator runs **on the DUT** (VyOS op-mode). Lead
-with the stable `latest-` URL; include the pinned versioned URL as the
+with the stable `latest.iso` URL; include the pinned versioned URL as the
 reproducible alternative:
 
 ```
 On the DUT (192.168.1.190), from VyOS op-mode:
 
-    add system image http://192.168.1.137:8080/iso/latest-<flavor>.iso
+    add system image http://192.168.1.137:8080/iso/latest.iso
 
   (pinned / reproducible alternative:)
     add system image http://192.168.1.137:8080/iso/<versioned-filename>.iso
@@ -172,6 +176,6 @@ live boot ONLY. Installed systems use `add system image <url>`.
   `/srv/tftp/` (the `bin/dev-build.sh iso-live` TFTP live-boot artefacts).
 - On feature branches, the source of truth is the **Actions artifact**, not a
   GitHub Release (releases are `main`-only).
-- After deploying, store a concise note in Qdrant (run ID, ISO filename, flavor,
-  date, kernel version) per `.clinerules/70-qdrant-memory.md` if this was a
+- After deploying, store a concise note in Qdrant (run ID, ISO filename, date,
+  kernel version) per `.clinerules/70-qdrant-memory.md` if this was a
   validation-relevant deploy.

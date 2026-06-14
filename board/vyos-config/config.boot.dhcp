@@ -50,7 +50,7 @@ system {
     }
     update-check {
         auto-check
-        url https://raw.githubusercontent.com/mihakralj/vyos-ls1046a-build/refs/heads/main/version-default.json
+        url https://raw.githubusercontent.com/mihakralj/vyos-ls1046a-build/refs/heads/main/version.json
     }
     watchdog {
         reboot-timeout 60

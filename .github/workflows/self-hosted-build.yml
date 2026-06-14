@@ -17,14 +17,6 @@ on:
       build_version:
         description: 'Version number (auto: YYYY.MM.DD-HHMM-rolling)'
         default: ''
-      flavor:
-        description: 'Build flavor: default (mainline DPAA), ask (ASK2 rewrite), or vpp (AF_XDP/VPP).'
-        type: choice
-        default: 'default'
-        options:
-          - default
-          - ask
-          - vpp
 
 jobs:
   # ── Step 1: Power on the Azure ARM64 VM ──────────────────────────
@@ -112,7 +104,6 @@ jobs:
       runs_on: ARM64
       BUILD_BY: ${{ github.event.inputs.BUILD_BY }}
       build_version: ${{ github.event.inputs.build_version }}
-      flavor: ${{ github.event.inputs.flavor }}
     secrets:
       MOK_KEY: ${{ secrets.MOK_KEY }}
       MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}

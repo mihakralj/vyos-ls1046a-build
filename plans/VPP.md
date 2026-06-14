@@ -1,4 +1,4 @@
-# VyOS + VPP on the LS1046A Mono Gateway (`FLAVOR=vpp`)
+# VyOS + VPP on the LS1046A Mono Gateway (single-image AF_XDP dataplane)
 **Version 1.0.0** · 2026-06-09 · HADS 1.0.0
 
 ---
@@ -103,7 +103,7 @@ vpp {
 }
 ```
 
-- Hugepages are pre-allocated in U-Boot bootargs (no `set vpp` first-commit kexec dance). Update-check feed is rewritten by `bin/ci-setup-vyos-build.sh` to `version-vpp.json`.
+- Hugepages are pre-allocated in U-Boot bootargs (no `set vpp` first-commit kexec dance).
 
 ---
 
@@ -118,7 +118,7 @@ vpp {
 | `board/scripts/vpp-post-start.sh` + drop-in | After LCP rename: raise `defunct_*` hw MTU to 3290 (DPAA XDP ceiling, max headroom) and set VPP internal MTU on each `af_xdp-*` to 1500 (TCP MSS sanity). |
 
 **[NOTE]**
-Patch 010 still ships some DPDK template branches in `startup.conf.j2`; on the vpp flavor those branches are now dead code because every `fsl_dpa` interface routes to AF_XDP. Cleaning that up is a follow-up — it doesn't affect behaviour.
+Patch 010 still ships some DPDK template branches in `startup.conf.j2`; in the single image those branches are dead code because every `fsl_dpa` interface routes to AF_XDP. Cleaning that up is a follow-up — it doesn't affect behaviour.
 
 ---
 
@@ -126,8 +126,8 @@ Patch 010 still ships some DPDK template branches in `startup.conf.j2`; on the v
 
 **[SPEC]**
 - VPP needs `BPF_SYSCALL`, `BPF_JIT`, `XDP_SOCKETS`, `XDP_SOCKETS_DIAG`, `HUGETLBFS`, `FSL_FMAN`, `FSL_DPAA_ETH` — all already on in the default arm64 kernel config.
-- The per-flavor file `kernel/flavors/vpp/kernel-config/00-vpp-af-xdp.config` is effectively a documentation stub today, not a fragment that flips any new symbols.
-- Two kernel-side fixes also land on the vpp flavor (in `kernel/common/`, applied for every flavor): the DPAA1 XDP `queue_index` patch and the MTU ≤ 3290 invariant.
+- The legacy `kernel/flavors/vpp/kernel-config/00-vpp-af-xdp.config` was only ever a documentation stub (it flipped no new symbols); under the single-image model there is no vpp flavor tree.
+- Two kernel-side fixes land in `kernel/common/` (applied unconditionally to the single image): the DPAA1 XDP `queue_index` patch and the MTU ≤ 3290 invariant.
 
 **[BUG] AF_XDP RX gets zero packets without the queue_index=0 patch**
 - Symptom: AF_XDP RX receives zero packets on DPAA1 interfaces.
@@ -164,18 +164,18 @@ Patch 010 still ships some DPDK template branches in `startup.conf.j2`; on the v
 ## 8. HOW IT'S BUILT
 
 **[SPEC]**
-`FLAVOR=vpp` flows through the standard CI pipeline:
-1. `bin/ci-setup-kernel.sh` — same kernel as `default` (mainline 6.18.x), no flavor-specific patches.
+VPP ships in the single image; its bits flow through the standard CI pipeline:
+1. `bin/ci-setup-kernel.sh` — mainline 6.18.x kernel, no VPP-specific patches.
 2. `bin/ci-setup-vyos1x.sh` — applies every `data/vyos-1x-*.patch` (010 + 022 + the rest).
-3. `bin/ci-setup-vyos-build.sh` — selects `config.boot.vpp` as the active default; rewrites the update-check URL to `version-vpp.json`; stages `vpp-post-start.sh` + its systemd drop-in into the chroot.
+3. `bin/ci-setup-vyos-build.sh` — stages `vpp-post-start.sh` + its systemd drop-in into the chroot (VPP is present but dormant until `set vpp settings`).
 4. `bin/ci-build-packages.sh` — builds vyos-1x .deb, kernel .deb, accel-ppp-ng .deb.
-5. `bin/ci-build-iso.sh` — produces `vyos-<v>-LS1046A-vpp-arm64.iso`.
-6. `bin/ci-verify-vpp-iso.sh` — fails the build if the staged config or chroot is missing required VPP bits.
+5. `bin/ci-build-iso.sh` — produces the single `vyos-<v>-LS1046A-arm64.iso`.
+6. `bin/ci-verify-vpp-iso.sh` — fails the build if the staged chroot is missing required VPP bits.
 
 **[SPEC]**
 Dispatch a release build with:
 ```bash
-gh workflow run "VyOS LS1046A build (self-hosted)" --ref main -f flavor=vpp
+gh workflow run "VyOS LS1046A build (self-hosted)" --ref main
 ```
 
 ---
@@ -183,7 +183,7 @@ gh workflow run "VyOS LS1046A build (self-hosted)" --ref main -f flavor=vpp
 ## 9. KNOWN ISSUES (TODAY)
 
 **[SPEC]**
-- No hardware throughput numbers for the post-022 AF_XDP path. Last published figure under the patch-010-only build was ~3.5 Gbps on a single 10G SFP+ link (kernel-bound). Re-benchmark on a real `FLAVOR=vpp` ISO.
+- No hardware throughput numbers for the post-022 AF_XDP path. Last published figure under the patch-010-only build was ~3.5 Gbps on a single 10G SFP+ link (kernel-bound). Re-benchmark on a current single-image ISO.
 - DPAA1 jumbo frames + VPP are incompatible: AF_XDP MTU ceiling is 3290; kernel-only ports (`e3`) retain full 9578 jumbo.
 
 **[SPEC]**
@@ -199,7 +199,7 @@ AF_XDP zero-copy is unavailable: `fsl_dpaa_mac` lacks `ndo_xsk_wakeup`, so VPP r
 ## 10. DAY-1 VERIFICATION ON THE BOARD
 
 **[SPEC]**
-After installing a `LS1046A-vpp` ISO and rebooting:
+After installing the single-image ISO, configuring VPP (`set vpp settings …`), and rebooting:
 ```bash
 # VPP service up
 systemctl is-active vpp

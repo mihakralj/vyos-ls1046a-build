@@ -623,7 +623,7 @@ The shared conventions guarantee that switching between them is safe:
 - LP5812 driver source in this tree: `kernel/common/files/lp5812/`
 - Manual tool source: `board/scripts/led.py`
 - Manual tool staging block: `bin/ci-setup-vyos-build.sh` (just
-  after the `caam-check` block, before the FLAVOR=ask gate)
+  after the `caam-check` block)
 - Palette: baked into `board/scripts/led.py` as the `PALETTE`
   constant (32 entries). No on-disk state.
 - Future daemon source location: `board/scripts/monoledd` (to be

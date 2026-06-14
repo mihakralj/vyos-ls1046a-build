@@ -5,10 +5,6 @@
 # Outputs: writes to $GITHUB_ENV and $GITHUB_OUTPUT
 set -ex -o pipefail
 
-# Resolve FLAVOR (default | ask | vpp) so we read the right per-flavor feed
-# below. bin/common.sh handles env-var → data/flavor.pin → "default" fallback.
-BC_QUIET=1 source "$(dirname "$0")/common.sh"
-
 if [ -n "$INPUT_BUILD_BY" ]; then
   echo "BUILD_BY=$INPUT_BUILD_BY" >> "$GITHUB_ENV"
   echo "BUILD_BY=$INPUT_BUILD_BY" >> "$GITHUB_OUTPUT"
@@ -26,17 +22,10 @@ fi
 echo "TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
 # PREVIOUS_SUCCESS_BUILD_TIMESTAMP feeds the publish job's `git log --since`
-# call to compose the release notes. Read it from the per-flavor feed so
-# each flavor's release notes only cover commits since *that* flavor's
-# last successful build. Fall back to the legacy version.json (which is
-# the default-flavor alias) and finally the epoch if neither file exists
-# (e.g. the very first build of a new flavor).
-FEED="version-${FLAVOR}.json"
-if [ -s "$FEED" ]; then
-    PREV_TS=$(jq -r '.[0].timestamp // empty' "$FEED")
-elif [ -s version.json ]; then
-    # First-ever build of a new flavor: use the default stream's timestamp
-    # so the changelog window is at least bounded.
+# call to compose the release notes. Single-image build: read the canonical
+# version.json (the version-{default,ask,vpp}.json aliases mirror it). Fall
+# back to the epoch on the very first build when no feed exists yet.
+if [ -s version.json ]; then
     PREV_TS=$(jq -r '.[0].timestamp // empty' version.json)
 else
     PREV_TS=""

@@ -24,51 +24,31 @@ HOOKS=vyos-build/data/live-build-config/hooks/live
 #   on the target disk after install, so the same content is the default
 #   for live/USB/TFTP boot AND for the installed system on first boot.
 #
-#   For FLAVOR=default|ask we ship `config.boot.dhcp` (DHCP on all 5
-#   LS1046A ports, SSH, NTP, syslog, watchdog, update-check) as that active
-#   default. For FLAVOR=vpp we ship `config.boot.vpp` instead: eth0 stays as
-#   the kernel-owned management port, while eth1-eth4 are assigned to VPP.
+#   Single-image build: we ship `config.boot.dhcp` (DHCP on all 5 LS1046A
+#   ports, SSH, NTP, syslog, watchdog, update-check) as the active default.
 #   The other variants are kept alongside under their original names for
-#   reference / `load` after login.
+#   reference / `load` after login. VPP is engaged at runtime via
+#   `set vpp settings` (config.boot.vpp staged below as a `load`-able example).
 #     config.boot.default = lean reference (eth0 DHCP + SSH + console)
 #     config.boot.full    = rich reference (routing/firewall/NAT/DNS/API)
-case "$FLAVOR" in
-  vpp) ACTIVE_DEFAULT=board/vyos-config/config.boot.vpp ;;
-  *)   ACTIVE_DEFAULT=board/vyos-config/config.boot.dhcp ;;
-esac
-cp "$ACTIVE_DEFAULT"       "$CHROOT/opt/vyatta/etc/config.boot.default"
+#     config.boot.vpp     = example AF_XDP/VPP port assignment (load after login)
+cp board/vyos-config/config.boot.dhcp "$CHROOT/opt/vyatta/etc/config.boot.default"
 cp board/vyos-config/config.boot.default "$CHROOT/opt/vyatta/etc/config.boot.minimal"
 cp board/vyos-config/config.boot.dhcp    "$CHROOT/opt/vyatta/etc/config.boot.dhcp"
 cp board/vyos-config/config.boot.full    "$CHROOT/opt/vyatta/etc/config.boot.full"
 cp board/vyos-config/config.boot.vpp     "$CHROOT/opt/vyatta/etc/config.boot.vpp"
 
-# Per-flavor update-check feed: rewrite the hard-coded `version-default.json`
-# URL in every staged config.boot.* to `version-${FLAVOR}.json`. Without this
-# rewrite an ASK or VPP install would point at the default-flavor JSON feed
-# and silently cross-upgrade to a default-flavor ISO on the next update check.
-# The repo source files keep `version-default.json` as the literal so a `grep`
-# of the working tree shows a sensible default; the substitution happens only
-# at CI time and only on the staged copies inside the chroot.
-FEED_URL="https://raw.githubusercontent.com/mihakralj/vyos-ls1046a-build/refs/heads/main/version-${FLAVOR}.json"
-for f in \
-    "$CHROOT/opt/vyatta/etc/config.boot.default" \
-    "$CHROOT/opt/vyatta/etc/config.boot.minimal" \
-    "$CHROOT/opt/vyatta/etc/config.boot.dhcp" \
-    "$CHROOT/opt/vyatta/etc/config.boot.full" \
-    "$CHROOT/opt/vyatta/etc/config.boot.vpp"; do
-    if [ -f "$f" ] && grep -q 'version-default\.json' "$f"; then
-        sed -i \
-            -e "s#https://raw\.githubusercontent\.com/mihakralj/vyos-ls1046a-build/refs/heads/main/version-default\.json#${FEED_URL}#g" \
-            "$f"
-    fi
-done
-echo "### Update-check feed URLs after FLAVOR=${FLAVOR} rewrite:"
-grep -H 'update-check\|version-' \
+# Single-image build: every staged config.boot.* already references the
+# canonical `…/main/version.json` feed — no per-flavor URL rewrite. The
+# version-{default,ask,vpp}.json aliases are kept byte-identical by CI so any
+# fielded install with a persisted per-flavor URL keeps updating.
+echo "### Update-check feed URLs (single-image, no rewrite):"
+grep -H 'update-check\|version' \
     "$CHROOT/opt/vyatta/etc/config.boot.default" \
     "$CHROOT/opt/vyatta/etc/config.boot.dhcp" \
     "$CHROOT/opt/vyatta/etc/config.boot.full" \
     "$CHROOT/opt/vyatta/etc/config.boot.vpp" 2>/dev/null \
-    | grep -E 'version-[a-z]+\.json' || true
+    | grep -E 'version\.json' || true
 # Drop .gitattributes inside the upstream clone so Mergiraf is wired as the
 # merge driver for source-language files when --3way needs to fall back to a
 # real 3-way merge. git apply --3way only consults attributes in the target
