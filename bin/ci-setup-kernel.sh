@@ -532,6 +532,12 @@ cp "$BOARD_PATCH_DIR/0119-fman-pcd-hm-l3-forward-ops.patch" "$KERNEL_PATCHES/"
 # adjacency (egress_tx_fqid, src_mac, dst_mac) so MURAM scales
 # O(next-hops) not O(flows). EXPORT_SYMBOL_GPL, dormant (ask.ko consumes).
 cp "$BOARD_PATCH_DIR/0120-fman-pcd-hm-nexthop-dedup.patch" "$KERNEL_PATCHES/"
+# ASK2 Gap-A: export two net_device -> hardware-id resolvers
+# (dpaa_get_rx_fman_port / dpaa_get_tx_fqid) on the common dpaa_fman_caps.h
+# substrate so the OOT ask.ko PCD consumer can derive the fman_cc_tree_*
+# port key and a CC target_fqid. EXPORT_SYMBOL_GPL, dormant (no in-tree
+# caller). Bodies are the proven dead-ask-flavor 0031/0039 reparented.
+cp "$BOARD_PATCH_DIR/0121-dpaa-export-cc-target-resolvers.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
