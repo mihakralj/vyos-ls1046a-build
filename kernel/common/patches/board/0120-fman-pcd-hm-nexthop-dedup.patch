@@ -1,0 +1,238 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Sat, 14 Jun 2026 00:00:00 +0000
+Subject: [PATCH] dpaa: FMan PCD next-hop HM dedup refcount API
+ (fman_hm_nexthop_get/put)
+
+Adds a small refcounted next-hop cache on top of the productive HM op-set
+(board patches 0090a/0099/0119) so an L3 router can share ONE header-manip
+node per (egress_tx_fqid, src_mac, dst_mac) adjacency instead of one HMTD
+per flow.  Per-flow MANIP exhausts MURAM (the M2 CPU gate observed 327x
+chain_create -ENOMEM at ~21% load); de-duplicating by adjacency drops MURAM
+use from O(flows) to O(next-hops).  Microcode-neutral; mirrors the CDX
+route/conntrack split.
+
+fman_hm_nexthop_get() builds, on first use, the 3-op spec {RMV_ETHERNET,
+INSRT_GENERIC(14-byte dst+src+0x0800 L2), IPV4_FORWARD(dec_ttl, l4_csum)}
+and installs it via fman_hm_node_install(); subsequent calls for the same
+adjacency bump a refcount and return the cached HMTD MURAM handle.
+fman_hm_nexthop_put() drops a reference and destroys the node (reclaiming
+MURAM) when the last flow goes away.  A plain mutex guards the table -- the
+install path sleeps (GFP_KERNEL) and callers hold no spinlock.
+
+Both symbols are EXPORT_SYMBOL_GPL and dormant in-tree (no caller yet); the
+ask.ko CC consumer that re-points its FORWARD_FQ_WITH_MANIP action at the
+shared handle lands separately per spec sec 13.4/13.5.
+
+Spec: specs/ask2-rewrite-spec.md sec 13.4.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -21,6 +21,10 @@
+ #include <linux/printk.h>
+ #include <linux/slab.h>
+ #include <linux/types.h>
++#include <linux/etherdevice.h>
++#include <linux/list.h>
++#include <linux/mutex.h>
++#include <linux/refcount.h>
+ 
+ #include <linux/of.h>
+ #include <linux/string.h>
+@@ -611,5 +615,159 @@
+ }
+ EXPORT_SYMBOL_GPL(fman_policer_caps_supported);
+ 
++/* ------------------------------------------------------------------ *
++ * Next-hop HM dedup (spec sec 13.4): one shared HMTD per L3 adjacency.
++ *
++ * A routed flow's per-key CC action references a header-manip handle that
++ * pops the inbound Ethernet header, pushes the egress {dst, src, IPv4}
++ * L2 header and decrements the IPv4 TTL.  Installing one HMTD per *flow*
++ * exhausts MURAM (the M2 CPU gate observed 327x chain_create -ENOMEM at
++ * ~21% load).  Every flow toward the same next hop shares one adjacency
++ * (egress_tx_fqid, src_mac, dst_mac), so we cache a single fman_hm_node
++ * per adjacency and refcount it: MURAM then scales O(next-hops) instead
++ * of O(flows).  Microcode-neutral; mirrors the CDX route/conntrack split.
++ *
++ * The install path sleeps (fman_hm_node_install does GFP_KERNEL) and
++ * callers hold no spinlock, so a plain mutex guards the table.
++ * ------------------------------------------------------------------ */
++struct fman_hm_nexthop {
++	struct list_head	node;
++	struct fman		*fm;
++	u32			egress_tx_fqid;
++	u8			src_mac[ETH_ALEN];
++	u8			dst_mac[ETH_ALEN];
++	u8			port_id;
++	u32			handle;
++	refcount_t		refcount;
++};
++
++static LIST_HEAD(fman_hm_nexthop_cache);
++static DEFINE_MUTEX(fman_hm_nexthop_lock);
++
++static struct fman_hm_nexthop *
++fman_hm_nexthop_lookup(struct fman *fm, u32 egress_tx_fqid,
++		       const u8 *src_mac, const u8 *dst_mac)
++{
++	struct fman_hm_nexthop *nh;
++
++	list_for_each_entry(nh, &fman_hm_nexthop_cache, node) {
++		if (nh->fm == fm &&
++		    nh->egress_tx_fqid == egress_tx_fqid &&
++		    ether_addr_equal(nh->src_mac, src_mac) &&
++		    ether_addr_equal(nh->dst_mac, dst_mac))
++			return nh;
++	}
++	return NULL;
++}
++
++/*
++ * fman_hm_nexthop_get - resolve (and refcount) the shared HM node for an
++ * L3 next-hop adjacency, installing it on first use.  On success *handle
++ * receives the HMTD MURAM offset to embed in a CC FORWARD_FQ_WITH_MANIP
++ * action.  Builds a 3-op spec {RMV_ETHERNET, INSRT_GENERIC(14-byte L2),
++ * IPV4_FORWARD} the first time an adjacency is seen; later flows to the
++ * same next hop share the cached node.  Sleepable; process context only.
++ */
++int fman_hm_nexthop_get(struct fman *fm, u8 port_id, u32 egress_tx_fqid,
++			const u8 *src_mac, const u8 *dst_mac, u32 *handle)
++{
++	struct fman_hm_nexthop *nh;
++	struct fman_hm_spec spec;
++	struct fman_hm_op *op;
++	int err;
++
++	if (!fm || !src_mac || !dst_mac || !handle)
++		return -EINVAL;
++	*handle = 0;
++	if (!fman_hm_caps_supported())
++		return -ENOTSUPP;
++
++	mutex_lock(&fman_hm_nexthop_lock);
++
++	nh = fman_hm_nexthop_lookup(fm, egress_tx_fqid, src_mac, dst_mac);
++	if (nh) {
++		refcount_inc(&nh->refcount);
++		*handle = nh->handle;
++		mutex_unlock(&fman_hm_nexthop_lock);
++		return 0;
++	}
++
++	nh = kzalloc(sizeof(*nh), GFP_KERNEL);
++	if (!nh) {
++		mutex_unlock(&fman_hm_nexthop_lock);
++		return -ENOMEM;
++	}
++
++	memset(&spec, 0, sizeof(spec));
++	spec.num_ops = 3;
++	/* op 0: strip the inbound Ethernet header */
++	spec.ops[0].type = FMAN_HM_OP_RMV_ETHERNET;
++	/* op 1: push the egress {dst, src, ethertype=IPv4} L2 header */
++	op = &spec.ops[1];
++	op->type = FMAN_HM_OP_INSRT_GENERIC;
++	op->insrt_generic.size = 2 * ETH_ALEN + 2;
++	memcpy(&op->insrt_generic.hdr[0], dst_mac, ETH_ALEN);
++	memcpy(&op->insrt_generic.hdr[ETH_ALEN], src_mac, ETH_ALEN);
++	op->insrt_generic.hdr[2 * ETH_ALEN]     = 0x08; /* ETH_P_IP >> 8 */
++	op->insrt_generic.hdr[2 * ETH_ALEN + 1] = 0x00; /* ETH_P_IP & 0xff */
++	/* op 2: routed-frame IPv4 edits (decrement TTL, recompute cksums) */
++	op = &spec.ops[2];
++	op->type = FMAN_HM_OP_IPV4_FORWARD;
++	op->ipv4_forward.dec_ttl = 1;
++	op->ipv4_forward.l4_csum = 1;
++
++	err = fman_hm_node_install(fm, port_id, &spec, &nh->handle);
++	if (err) {
++		kfree(nh);
++		mutex_unlock(&fman_hm_nexthop_lock);
++		return err;
++	}
++
++	nh->fm = fm;
++	nh->egress_tx_fqid = egress_tx_fqid;
++	nh->port_id = port_id;
++	ether_addr_copy(nh->src_mac, src_mac);
++	ether_addr_copy(nh->dst_mac, dst_mac);
++	refcount_set(&nh->refcount, 1);
++	list_add(&nh->node, &fman_hm_nexthop_cache);
++
++	*handle = nh->handle;
++	mutex_unlock(&fman_hm_nexthop_lock);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_hm_nexthop_get);
++
++/*
++ * fman_hm_nexthop_put - drop a reference taken by fman_hm_nexthop_get().
++ * When the last flow using an adjacency goes away the shared HM node is
++ * destroyed and its MURAM reclaimed.  @handle is the value returned by the
++ * matching _get().  Idempotent for an unknown handle (returns 0).
++ */
++int fman_hm_nexthop_put(struct fman *fm, u8 port_id, u32 handle)
++{
++	struct fman_hm_nexthop *nh, *found = NULL;
++	int err = 0;
++
++	if (!fm)
++		return 0;
++
++	mutex_lock(&fman_hm_nexthop_lock);
++	list_for_each_entry(nh, &fman_hm_nexthop_cache, node) {
++		if (nh->fm == fm && nh->handle == handle) {
++			found = nh;
++			break;
++		}
++	}
++	if (found && refcount_dec_and_test(&found->refcount)) {
++		list_del(&found->node);
++		err = fman_hm_node_destroy(found->fm, found->port_id,
++					   found->handle);
++		kfree(found);
++	}
++	mutex_unlock(&fman_hm_nexthop_lock);
++	return err;
++}
++EXPORT_SYMBOL_GPL(fman_hm_nexthop_put);
++
+ MODULE_LICENSE("Dual BSD/GPL");
+ MODULE_DESCRIPTION("DPAA1 FMan PCD capability detection + HW-offload stubs");
+\ No newline at end of file
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+@@ -361,6 +361,30 @@
+  */
+ bool fman_hm_caps_supported(void);
+ 
++/**
++ * fman_hm_nexthop_get - shared HM node for an L3 next-hop adjacency
++ *
++ * Resolves (installing on first use) the dedup'd header-manip node that
++ * rewrites L2 for the (egress_tx_fqid, src_mac, dst_mac) adjacency and
++ * decrements the IPv4 TTL, then bumps its refcount.  On success @handle
++ * receives the HMTD MURAM offset for a CC FORWARD_FQ_WITH_MANIP action.
++ * Many flows toward one next hop share a single node, so MURAM use scales
++ * O(next-hops) not O(flows) (spec sec 13.4).  Sleepable; process context.
++ *
++ * Returns 0 and writes @handle; -ENOTSUPP when ucode lacks HM caps.
++ */
++int  fman_hm_nexthop_get(struct fman *fm, u8 port_id, u32 egress_tx_fqid,
++			 const u8 *src_mac, const u8 *dst_mac, u32 *handle);
++
++/**
++ * fman_hm_nexthop_put - release a next-hop reference from fman_hm_nexthop_get()
++ *
++ * Drops one reference; when the last user of the adjacency goes away the
++ * shared HM node is destroyed and its MURAM reclaimed.  @handle is the
++ * value a prior _get() returned.  Idempotent for an unknown handle.
++ */
++int  fman_hm_nexthop_put(struct fman *fm, u8 port_id, u32 handle);
++
+ /* ------------------------------------------------------------------ *
+  * M3-3d STUB API  (spec sec 5.6 Policer)
+  *
