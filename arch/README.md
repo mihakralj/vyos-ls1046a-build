@@ -12,12 +12,10 @@ register-level, resource-count, and dataflow facts an agent needs to implement *
 the `fman_pcd` subsystem) without holding the NDA manuals open.
 
 > **Provenance.** Every fact here is distilled from the NXP reference manuals (cited inline by
-> chapter/section/page) and cross-checked against the project's qdrant `agent_memory` corpus
-> (collection index entry *"NXP DPAA1 / LS1046A REFERENCE-CORPUS INDEX v2"*). These docs are the
-> **hardware layer**; they do not restate driver/API behaviour — for that see the LSDK 21.08 /
-> LLDPUG L6.1.1 entries in qdrant and the implementation specs under [`../specs`](../specs).
-> When a project-verified finding (qdrant or AGENTS.md) and a manual disagree for *our* board, the
-> project finding wins; the manual wins for canonical silicon behaviour.
+> chapter/section/page). These docs are the **hardware layer**; they do not restate driver/API
+> behaviour — for that see the LSDK 21.08 / LLDPUG L6.1.1 release notes and the implementation specs
+> under [`../specs`](../specs). When a project-verified finding and a manual disagree for *our*
+> board, the project finding wins; the manual wins for canonical silicon behaviour.
 
 ---
 
@@ -192,6 +190,5 @@ flowchart TD
 
 ---
 
-*Maintainers: keep these docs in sync with the qdrant corpus. When you add a silicon fact, cite the
-RM section and (if it changes an implementation constraint) note the affected `fman_pcd`/`ask.ko`
-artifact.*
+*Maintainers: when you add a silicon fact, cite the RM section and (if it changes an implementation
+constraint) note the affected `fman_pcd`/`ask.ko` artifact.*
