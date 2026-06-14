@@ -99,6 +99,15 @@ for package in $packages; do
       cat "$GITHUB_WORKSPACE/bin/ci-build-accel-ppp.sh" 2>/dev/null
       cat "$GITHUB_WORKSPACE/bin/ci-compile-mono-dtb.sh" 2>/dev/null
       find "$GITHUB_WORKSPACE/board/dtb" -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
+      # ASK2 OOT module sources (ask.ko) are built unconditionally in every
+      # single-image build (see the OOT block below) and the resulting
+      # ask-modules-*.deb is cached/replayed alongside the kernel .debs. Any
+      # change to the OOT sources or to this script's OOT build invocation
+      # MUST bust the kernel cache, otherwise a stale ask-modules-*.deb would
+      # be replayed on a hit (cf. the kernel/common staleness trap, run
+      # 26488626587). Hashing this script itself also covers the OOT build env.
+      find "$GITHUB_WORKSPACE/kernel/flavors/ask/oot-modules" -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
+      cat "$GITHUB_WORKSPACE/bin/ci-build-packages.sh" 2>/dev/null
     } | sha256sum | cut -c1-16)
     KERNEL_CACHE_ROOT="${RUNNER_TOOL_CACHE:-/tmp}/linux-kernel-cache"
     mkdir -p "$KERNEL_CACHE_ROOT"
@@ -321,6 +330,8 @@ for package in $packages; do
     fi
     echo "### accel-ppp-ng .debs (replayed from cache, if any):"
     ls -lh accel-ppp*.deb 2>/dev/null || echo "  (none in cache)"
+    echo "### ASK2 ask-modules .deb (replayed from cache):"
+    ls -lh ask-modules-*.deb 2>/dev/null || { echo "FATAL: cache HIT but no ask-modules-*.deb in cached bundle"; echo "FATAL: rm -rf '$KERNEL_CACHE_HIT_DIR' and rebuild to repopulate"; exit 1; }
   elif [ "$package" == "linux-kernel" ]; then
     # Find the actual kernel source tree (has Makefile + arch/arm64).
     # `find -name 'linux-*'` matches both linux-6.6.x/ (the kernel) AND
@@ -502,26 +513,30 @@ for package in $packages; do
     # `linux-kernel/` package-build dir), where bin/ci-pick-packages.sh's
     # `find scripts/package-build -name '*.deb'` sweep will pick it up.
     #
+    # Single-image: ask.ko is built UNCONDITIONALLY and ships dormant in
+    # every ISO (the FLAVOR=ask gate was retired with the 2026-06-14 flavor
+    # collapse). ask.ko links only against the common board fman_cc_*/fman_hm_*
+    # substrate — the dead ask-flavor in-tree patches stay unapplied — so it
+    # compiles in the default build. The operator engages the datapath at
+    # runtime per plans/DUAL-DATAPLANE.md.
+    #
     # Userspace components (askd, ask-load, libask_fci) are not yet
     # implemented — see specs/ask2-rewrite-spec.md §§4–9.
-    if [ "${FLAVOR:-default}" = "ask" ]; then
-      ASK_OOT_BUILDER="$GITHUB_WORKSPACE/kernel/flavors/ask/oot-modules/ask/ci-build.sh"
-      if [ -n "$KSRC" ] && [ -x "$ASK_OOT_BUILDER" ]; then
-        KSRC_ABS_ASK="$(cd "$KSRC" && pwd)"
-        echo "### FLAVOR=ask: building ASK2 OOT kernel modules"
-        # Cross-build env is already exported by the kernel build above
-        # (ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-). Pass through.
-        ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}" \
-          "$ASK_OOT_BUILDER" "$KSRC_ABS_ASK" "$(pwd)"
-        echo "### ASK OOT module .deb(s) in package dir:"
-        ls -lh ask-modules-*.deb 2>/dev/null || { echo "FATAL: no ask-modules-*.deb produced"; exit 1; }
-      else
-        echo "FATAL: FLAVOR=ask but cannot build OOT modules:"
-        echo "FATAL:   KSRC='$KSRC'"
-        echo "FATAL:   ASK_OOT_BUILDER='$ASK_OOT_BUILDER' (must be executable)"
-        exit 1
-      fi
-      echo "### FLAVOR=ask: userspace stack (askd, ask-load, libask_fci) not yet implemented (see specs/ask2-rewrite-spec.md)"
+    ASK_OOT_BUILDER="$GITHUB_WORKSPACE/kernel/flavors/ask/oot-modules/ask/ci-build.sh"
+    if [ -n "$KSRC" ] && [ -x "$ASK_OOT_BUILDER" ]; then
+      KSRC_ABS_ASK="$(cd "$KSRC" && pwd)"
+      echo "### single-image: building ASK2 OOT kernel modules (ask.ko, dormant)"
+      # Cross-build env is already exported by the kernel build above
+      # (ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-). Pass through.
+      ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}" \
+        "$ASK_OOT_BUILDER" "$KSRC_ABS_ASK" "$(pwd)"
+      echo "### ASK OOT module .deb(s) in package dir:"
+      ls -lh ask-modules-*.deb 2>/dev/null || { echo "FATAL: no ask-modules-*.deb produced"; exit 1; }
+    else
+      echo "FATAL: cannot build ASK2 OOT modules:"
+      echo "FATAL:   KSRC='$KSRC'"
+      echo "FATAL:   ASK_OOT_BUILDER='$ASK_OOT_BUILDER' (must be executable)"
+      exit 1
     fi
 
     ### Build accel-ppp-ng ARM64 packages (daemon + kernel modules)
@@ -539,11 +554,14 @@ for package in $packages; do
     #
     # Captures the linux-image/linux-headers/linux-libc-dev .debs that
     # build.py just produced, the mainline DTB that the `make
-    # freescale/mono-gateway-dk.dtb` step just compiled, and the
-    # accel-ppp-ng .deb that bin/ci-build-accel-ppp.sh just emitted, all
+    # freescale/mono-gateway-dk.dtb` step just compiled, the accel-ppp-ng
+    # .deb that bin/ci-build-accel-ppp.sh just emitted, and the ASK2
+    # ask-modules-*.deb that the OOT build above just signed+packaged, all
     # under one key. Next run with identical inputs (same kernel_version,
-    # config fragments, patches, DTS, setup scripts) will replay the entire
-    # bundle and skip the ~25-minute combined build.
+    # config fragments, patches, DTS, OOT sources, setup scripts) will replay
+    # the entire bundle and skip the ~25-minute combined build. The ASK2 OOT
+    # sources are folded into KERNEL_HASH above so an ask.ko source edit busts
+    # the cache and never replays a stale module.
     #
     # Excludes the -dbg variant (hundreds of MB) — VyOS doesn't ship it
     # and ci-pick-packages.sh ignores it anyway.
@@ -555,7 +573,7 @@ for package in $packages; do
       rm -rf "$KERNEL_CACHE_STAGE" "$KERNEL_CACHE_NEW_DIR"
       mkdir -p "$KERNEL_CACHE_STAGE"
       cached_count=0
-      for built in linux-image-*_arm64.deb linux-headers-*_arm64.deb linux-libc-dev_*_arm64.deb accel-ppp-ng_*_arm64.deb; do
+      for built in linux-image-*_arm64.deb linux-headers-*_arm64.deb linux-libc-dev_*_arm64.deb accel-ppp-ng_*_arm64.deb ask-modules-*_arm64.deb; do
         [ -f "$built" ] || continue
         case "$built" in *-dbg*) continue ;; esac
         cp "$built" "$KERNEL_CACHE_STAGE/$(basename "$built")"
