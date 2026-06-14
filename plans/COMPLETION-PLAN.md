@@ -32,7 +32,7 @@ This plan is a router, not a second source-of-truth. Where it disagrees with a s
 ## 2. ONE-PARAGRAPH SUMMARY
 
 **[NOTE]**
-The DPAA1 driver core is DUT-validated and shipping in the `default`/`vpp` ISOs. The two big kernel forward-ports are **DONE**: the FMan PCD subsystem (common board stack, `0092`/`0097`–`0101`) and the QMan-CEETM driver (`0111`/`0112`, shipped + closed). M3-3b CC steering, M3-3c HM, M3-3d policer BUG 3a + 3b-non-revert, true-ZC RX, and M3-3e CEETM are all closed / HW-validated. What remains is (1) lab/harness quantitative gates — the literal ≥7 Gbps figure, the policer 2.5 Gbps cap number, the M3-3c 802.1Q wire gate; (2) the BUG 3b flood-crash characterization (serial + cold power-cycle); and (3) the ASK2 `ask20` work-stream (M2 `-ENOMEM` MURAM gate, then `ask.ko`), deferred until DPAA1 is fully closed.
+The DPAA1 driver core is board-validated and shipping in the `default`/`vpp` ISOs. The two big kernel forward-ports are **DONE**: the FMan PCD subsystem (common board stack, `0092`/`0097`–`0101`) and the QMan-CEETM driver (`0111`/`0112`, shipped + closed). M3-3b CC steering, M3-3c HM, M3-3d policer BUG 3a + 3b-non-revert, true-ZC RX, and M3-3e CEETM are all closed / HW-validated. What remains is (1) lab/harness quantitative gates — the literal ≥7 Gbps figure, the policer 2.5 Gbps cap number, the M3-3c 802.1Q wire gate; (2) the BUG 3b flood-crash characterization (serial + cold power-cycle); and (3) the ASK2 `ask20` work-stream (M2 `-ENOMEM` MURAM gate, then `ask.ko`), deferred until DPAA1 is fully closed.
 
 ---
 
@@ -95,7 +95,7 @@ Steering + BUG 3a (FMPL block master-enable `GCR.EN|STEN` clear at boot) + the B
 ### 4.5 HM functional datapath gate (M3-3c) — lab-blocked
 
 **[SPEC]**
-- State: feature live on hardware (cap `0x17`, `rx-vlan-offload: on`, MURAM 0→144→0 proven 2026-06-07); `vyos-1x-024` CLI shipped + live on the DUT. No kernel work, no CLI work.
+- State: feature live on hardware (cap `0x17`, `rx-vlan-offload: on`, MURAM 0→144→0 proven 2026-06-07); `vyos-1x-024` CLI shipped + live on the board. No kernel work, no CLI work.
 - Remaining: a controllable 802.1Q tagged source to prove the §5.5 strip/insert gate. Lower silent-fail risk than the policer (VLAN-strip has a normal kernel SW fallback).
 
 ### 4.6 Literal ≥7 Gbps gate-3 figure — ≥7G PROVEN; single-stream line-rate deferred
@@ -169,18 +169,18 @@ The forward-ports and datapath debug are DONE (PCD, CEETM, true-ZC, CC steering,
 ## 8. THE TRAFFIC HARNESS — PROVISIONED 2026-06-08
 
 **[SPEC]**
-- Five separate acceptance gates were lab-blocked on the same missing piece — a controllable traffic generator on the DUT SFP+ peers. Now resolved.
-- The harness is two purpose-built Proxmox LXCs on heidi (`192.168.1.15`, root via `ssh heidi`), one per DUT SFP+ subnet, with the DUT as their L3 gateway so all CT201↔CT202 traffic is forced through the DUT router (eth3 → ip_forward → eth4).
+- Five separate acceptance gates were lab-blocked on the same missing piece — a controllable traffic generator on the board SFP+ peers. Now resolved.
+- The harness is two purpose-built Proxmox LXCs on heidi (`192.168.1.15`, root via `ssh heidi`), one per board SFP+ subnet, with the board as their L3 gateway so all CT201↔CT202 traffic is forced through the board router (eth3 → ip_forward → eth4).
 - Full reference: `plans/TRAFFIC-HARNESS.md`.
 
-| Peer | LXC | IP / gw | DUT port |
+| Peer | LXC | IP / gw | Board port |
 |---|---|---|---|
-| eth3 peer | CT201 `lxc201` | `10.99.1.2/30` → `10.99.1.1` | DUT eth3 |
-| eth4 peer | CT202 `lxc202` | `10.11.1.2/29` → `10.11.1.1` | DUT eth4 |
+| eth3 peer | CT201 `lxc201` | `10.99.1.2/30` → `10.99.1.1` | Board eth3 |
+| eth4 peer | CT202 `lxc202` | `10.11.1.2/29` → `10.11.1.1` | Board eth4 |
 
 **[SPEC]**
 - Both Debian 12 with iperf3 preinstalled, on the 10G `vmbr0`→`enp35s0f1` (ixgbe) bridge.
-- Validated end-to-end 2026-06-08: `TTL=63` one-hop, 0% loss, 4.14 Gbit/s @ 8 TCP streams routed through the DUT (default-flavor software-forwarding floor).
+- Validated end-to-end 2026-06-08: `TTL=63` one-hop, 0% loss, 4.14 Gbit/s @ 8 TCP streams routed through the board (default-flavor software-forwarding floor).
 
 | Gate | Needs | Harness coverage |
 |---|---|---|
@@ -188,7 +188,7 @@ The forward-ports and datapath debug are DONE (PCD, CEETM, true-ZC, CC steering,
 | M3-3d policer throughput cap | >2.5 Gbps offered source, red-drop visibility | `iperf3 -u -b 9G` ✅ |
 | Gate-3 ≥7 Gbps literal | multi-core iperf3 / wire-rate generator | `iperf3 -P`; TRex via SR-IOV VF for true line-rate |
 | VPP flavor benchmark | sustained >3.5 Gbps SFP+ source | ✅ (MTU ≤3290 on AF_XDP) |
-| ASK2 M2 (≥7 Gbps @ ≤5% CPU) | eth3↔eth4 forwarding load at line rate | CT201→DUT→CT202 ✅ |
+| ASK2 M2 (≥7 Gbps @ ≤5% CPU) | eth3↔eth4 forwarding load at line rate | CT201→board→CT202 ✅ |
 
 **[SPEC]**
 - Wire-rate / 802.1Q upgrade (deferred): `enp35s0f1` exposes 63 SR-IOV VFs; pass a VF into a dedicated LXC for TRex/DPDK-pktgen when iperf3 cannot hit the literal ≥7 Gbps figure or when precise 802.1Q stateless generation is required.
@@ -199,6 +199,6 @@ The forward-ports and datapath debug are DONE (PCD, CEETM, true-ZC, CC steering,
 ## 9. DEFINITION OF DONE (PER CONSUMER MODE)
 
 **[SPEC]**
-- default: M3-3b CC steering productive tree installs + steers on DUT; M3-3c/3d/3e wire gates pass on the generator; gate-3 literal ≥7 Gbps measured; DCSR error taps complete. (Core already done.)
+- default: M3-3b CC steering productive tree installs + steers on board; M3-3c/3d/3e wire gates pass on the generator; gate-3 literal ≥7 Gbps measured; DCSR error taps complete. (Core already done.)
 - vpp: HW benchmark recorded (throughput + thermal + MTU constraint verified) on 6.18.x; hugepage-kexec one-shot confirmed.
 - ask: ASK2 components landed (`ask.ko`/`ask_bridge.ko` + PCD patch `0004` + YNL `ask` family); M2 gate PASSES (≥7 Gbps at ≤5% kernel-net CPU) after the MURAM-budget fix; `set system offload ask` engages a real offload (no longer a no-op).

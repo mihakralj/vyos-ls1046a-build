@@ -173,7 +173,7 @@ This block **is** ASK2's inline NAT: 0x0C rewrites IP addr + decrements TTL + fi
 automatically; 0x0E rewrites L4 ports + fixes the L4 checksum incrementally.
 
 > ⚠ **Risk #13 (ASK2 spec §16 / §13.3 — `muram.md`):** each manip chain must total **≤ 1 KiB MURAM**.
-> On the DUT after PR14z21, `fman_pcd_manip_chain_create(3 manips)` failed `-ENOMEM` (errno 12) **327×**
+> On the board after PR14z21, `fman_pcd_manip_chain_create(3 manips)` failed `-ENOMEM` (errno 12) **327×**
 > while `gen_pool` still had ~320 KiB free → needs instrumentation. `fman_pcd_manip.c` must budget AD
 > entries (≤4/chain) and MURAM carefully. See [`muram.md`](muram.md).
 
