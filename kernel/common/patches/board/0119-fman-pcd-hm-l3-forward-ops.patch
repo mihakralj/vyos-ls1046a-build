@@ -1,0 +1,275 @@
+From: vyos-ls1046a-build CI <ci@local>
+Date: Sun, 14 Jun 2026 00:00:00 +0000
+Subject: [PATCH] dpaa: FMan PCD HM L3-forward op-set (RMV_ETHERNET +
+ INSRT_GENERIC + IPV4_FORWARD)
+
+Extends the dpaa1 Header-Manipulation op-set (board patches 0090a/0099)
+with the three primitives an L3 router next-hop rewrite needs, re-grounded
+on the authoritative NXP SDK fm_manip.{c,h} BuildHmct() encodings:
+
+  - FMAN_HM_OP_RMV_ETHERNET   strip the 14-byte inbound L2 header
+  - FMAN_HM_OP_INSRT_GENERIC  insert a new egress L2 header (<=32 bytes)
+  - FMAN_HM_OP_IPV4_FORWARD   decrement IPv4 TTL + recompute L3/L4 cksum
+
+All three emit command words into the SAME generic HMCT, so a combined
+remove+insert+IPv4-update node keeps the generic HMAN_OC=0x35 HMTD opcode
+(SDK single-HMTD multi-op model); the IPv4 edit is a HMCT command WORD
+(0x0c<<24 | L4_CS_CALC | TTL -> 0x0c040001), NOT a separate IP-manip HMTD
+opcode.  The install-loop bounds check is widened from a fixed 8 bytes/op
+to the true per-op footprint (a generic insert is one command word plus
+its 4-byte-aligned inline payload, up to FMAN_PCD_HM_INSRT_GENERIC_MAX).
+
+Additive across all four HM layers (host op set, host->neutral translator,
+neutral op set, silicon encoders/dispatch); no existing VLAN/MPLS encoder,
+constant, or opcode is touched.  Next-hop dedup and the ask.ko CC consumer
+re-point are deferred to a follow-on patch.
+
+Spec: specs/ask2-rewrite-spec.md sec 13.4/13.5.
+
+Signed-off-by: vyos-ls1046a-build CI <ci@local>
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.h
+@@ -237,4 +237,8 @@
+ 	FMAN_HM_OP_VLAN_INSERT	= 1,
+ 	FMAN_HM_OP_MPLS_PUSH	= 2,
+ 	FMAN_HM_OP_MPLS_POP	= 3,
++	/* L3-forward op-set extension (board patch 0119). */
++	FMAN_HM_OP_RMV_ETHERNET	= 4,
++	FMAN_HM_OP_INSRT_GENERIC = 5,
++	FMAN_HM_OP_IPV4_FORWARD	= 6,
+ };
+@@ -253,6 +257,21 @@
+ 	u8  s;/* bottom-of-stack bit */
+ 	u8  ttl;/* MPLS TTL */
+ };
+ 
++/* Parameters for FMAN_HM_OP_INSRT_GENERIC: @size header bytes inserted at
++ * frame offset 0 (a new outer L2 header).  @size in 1..32.
++ */
++#define FMAN_HM_INSRT_GENERIC_MAX	32
++struct fman_hm_insrt_generic {
++	u8 size;/* header bytes to insert (1..32) */
++	u8 hdr[FMAN_HM_INSRT_GENERIC_MAX];/* the header image */
++};
++
++/* Parameters for FMAN_HM_OP_IPV4_FORWARD: routed-frame IPv4 edits. */
++struct fman_hm_ipv4_forward {
++	u8 dec_ttl;/* nonzero: decrement the IPv4 TTL */
++	u8 l4_csum;/* nonzero: recompute L3+L4 checksums in silicon */
++};
++
+ /**
+  * struct fman_hm_op - one entry in an HM node's op list
+@@ -268,5 +287,7 @@
+ 	union {
+ 		struct fman_hm_vlan_insert vlan_insert;
+ 		struct fman_hm_mpls_push   mpls_push;
++		struct fman_hm_insrt_generic insrt_generic;
++		struct fman_hm_ipv4_forward  ipv4_forward;
+ 	};
+ };
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -373,4 +373,18 @@
+ 		case FMAN_HM_OP_MPLS_POP:
+ 			dst->type = FMAN_PCD_HM_HW_OP_MPLS_POP;
+ 			break;
++		case FMAN_HM_OP_RMV_ETHERNET:
++			dst->type = FMAN_PCD_HM_HW_OP_RMV_ETHERNET;
++			break;
++		case FMAN_HM_OP_INSRT_GENERIC:
++			dst->type = FMAN_PCD_HM_HW_OP_INSRT_GENERIC;
++			dst->insrt_generic.size = src->insrt_generic.size;
++			memcpy(dst->insrt_generic.hdr, src->insrt_generic.hdr,
++			       sizeof(dst->insrt_generic.hdr));
++			break;
++		case FMAN_HM_OP_IPV4_FORWARD:
++			dst->type = FMAN_PCD_HM_HW_OP_IPV4_FORWARD;
++			dst->ipv4_forward.dec_ttl = src->ipv4_forward.dec_ttl;
++			dst->ipv4_forward.l4_csum = src->ipv4_forward.l4_csum;
++			break;
+ 		}
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -354,2 +354,3 @@
+ #define FMAN_PCD_HM_HW_MAX_OPS	8
++#define FMAN_PCD_HM_INSRT_GENERIC_MAX	32
+ 
+@@ -368,4 +369,7 @@
+ 	FMAN_PCD_HM_HW_OP_VLAN_INSERT	= 1,
+ 	FMAN_PCD_HM_HW_OP_MPLS_PUSH	= 2,
+ 	FMAN_PCD_HM_HW_OP_MPLS_POP	= 3,
++	FMAN_PCD_HM_HW_OP_RMV_ETHERNET	= 4,
++	FMAN_PCD_HM_HW_OP_INSRT_GENERIC	= 5,
++	FMAN_PCD_HM_HW_OP_IPV4_FORWARD	= 6,
+ };
+@@ -391,7 +395,15 @@
+ 		struct {
+ 			u32 label;	/* 20-bit MPLS label */
+ 			u8  tc;	/* 3-bit traffic class */
+ 			u8  s;	/* bottom-of-stack bit */
+ 			u8  ttl;	/* time-to-live */
+ 		} mpls_push;
++		struct {
++			u8 size;	/* new-header bytes (1..32) */
++			u8 hdr[FMAN_PCD_HM_INSRT_GENERIC_MAX];
++		} insrt_generic;
++		struct {
++			u8 dec_ttl;	/* nonzero: decrement IPv4 TTL */
++			u8 l4_csum;	/* nonzero: recompute L3+L4 checksums */
++		} ipv4_forward;
+ 	};
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+@@ -161,5 +161,21 @@
+ #define FMAN_PCD_MPLS_S_SHIFT	8
+ #define FMAN_PCD_MPLS_LABEL_MASK	0x000fffffu
++
++/* L3-forward op encodings.  Cross-ref NXP SDK fm_manip.h:
++ * HMCD_OPCODE_IPV4_UPDATE = 0x0c, HMCD_IP_L4_CS_CALC = 0x00040000,
++ * HMCD_IPV4_UPDATE_TTL = 0x01.  The IPv4 field-update is one more command
++ * word in the generic HMAN_OC (0x35) chain (SDK BuildHmct IPv4
++ * field-update), NOT a separate IP-manip HMTD opcode.
++ */
++#define FMAN_PCD_HMCD_OP_IPV4_UPDATE	0x0cu
++#define FMAN_PCD_HMCD_IP_L4_CS_CALC	0x00040000u
++#define FMAN_PCD_HMCD_IPV4_UPDATE_TTL	0x00000001u
++
++/* A whole-frame egress L2 (Ethernet) header is inserted at / removed from
++ * frame offset 0; ETH_HLEN (14) bytes for the remove.
++ */
++#define FMAN_PCD_L2_HDR_OFFSET	0u
++#define FMAN_PCD_ETH_HDR_SIZE	14u
+ 
+ /**
+  * struct fman_pcd_hm_node - one MURAM-resident header-manip template.
+@@ -306,5 +322,88 @@
+ 	return cur;
+ }
+ 
++static void __iomem *
++hm_encode_rmv_ethernet(void __iomem *cur, void __iomem **last_cmd)
++{
++	u32 cmd;
++
++	/* Generic remove at frame offset 0, ETH_HLEN (14) bytes: strip the
++	 * inbound L2 header before the egress L2 is inserted.  SDK fm_manip.c
++	 * BuildHmct e_FM_PCD_MANIP_RMV_GENERIC.
++	 */
++	cmd  = (u32)FMAN_PCD_HMCD_OP_GENERIC_RMV << FMAN_PCD_HMCD_OC_SHIFT;
++	cmd |= (u32)FMAN_PCD_L2_HDR_OFFSET << FMAN_PCD_HMCD_RMV_OFFSET_SHIFT;
++	cmd |= (u32)FMAN_PCD_ETH_HDR_SIZE << FMAN_PCD_HMCD_RMV_SIZE_SHIFT;
++
++	iowrite32be(cmd, cur);
++	*last_cmd = cur;
++	cur += 4;
++
++	return cur;
++}
++
++static void __iomem *
++hm_encode_insrt_generic(const struct fman_pcd_hm_hw_op *op,
++			void __iomem *cur, void __iomem **last_cmd)
++{
++	u32 cmd;
++	u32 word;
++	u8  size = op->insrt_generic.size;
++	u8  i;
++
++	/* Generic insert at frame offset 0 of @size bytes (the new egress L2
++	 * header) carried as inline payload.  SDK fm_manip.c BuildHmct
++	 * e_FM_PCD_MANIP_INSRT_GENERIC + inline-payload copy.
++	 */
++	cmd  = (u32)FMAN_PCD_HMCD_OP_GENERIC_INSRT << FMAN_PCD_HMCD_OC_SHIFT;
++	cmd |= (u32)FMAN_PCD_L2_HDR_OFFSET << FMAN_PCD_HMCD_INSRT_OFFSET_SHIFT;
++	cmd |= (u32)size << FMAN_PCD_HMCD_INSRT_SIZE_SHIFT;
++
++	iowrite32be(cmd, cur);
++	*last_cmd = cur;
++	cur += 4;
++
++	/* Inline payload: @size header bytes rounded up to a 4-byte boundary,
++	 * assembled big-endian (byte 0 in bits[31:24]).
++	 */
++	for (i = 0; i < size; i += 4) {
++		word = (u32)op->insrt_generic.hdr[i] << 24;
++		if (i + 1 < size)
++			word |= (u32)op->insrt_generic.hdr[i + 1] << 16;
++		if (i + 2 < size)
++			word |= (u32)op->insrt_generic.hdr[i + 2] << 8;
++		if (i + 3 < size)
++			word |= (u32)op->insrt_generic.hdr[i + 3];
++		iowrite32be(word, cur);
++		cur += 4;
++	}
++
++	return cur;
++}
++
++static void __iomem *
++hm_encode_ipv4_forward(const struct fman_pcd_hm_hw_op *op,
++			void __iomem *cur, void __iomem **last_cmd)
++{
++	u32 cmd;
++
++	/* IPv4 field-update command word inside the generic HMAN_OC chain (NOT
++	 * a separate IP-manip HMTD opcode): optional TTL-decrement + optional
++	 * L3/L4 checksum recompute.  SDK fm_manip.c BuildHmct IPv4
++	 * field-update; 0x0c040001 when both TTL and checksum are requested.
++	 */
++	cmd = (u32)FMAN_PCD_HMCD_OP_IPV4_UPDATE << FMAN_PCD_HMCD_OC_SHIFT;
++	if (op->ipv4_forward.l4_csum)
++		cmd |= FMAN_PCD_HMCD_IP_L4_CS_CALC;
++	if (op->ipv4_forward.dec_ttl)
++		cmd |= FMAN_PCD_HMCD_IPV4_UPDATE_TTL;
++
++	iowrite32be(cmd, cur);
++	*last_cmd = cur;
++	cur += 4;
++
++	return cur;
++}
++
+ /**
+  * fman_pcd_hm_install() - program one ordered-op-list HM node.
+@@ -407,10 +506,17 @@
+ 	for (i = 0; i < spec->num_ops; i++) {
+ 		const struct fman_pcd_hm_hw_op *op = &spec->ops[i];
++		size_t need;
+ 
+-		/* Worst-case op is INSRT command word + 4-byte payload = 8
+-		 * bytes; bounds-check before dispatch.
+-		 */
+-		if (cur + 8 > end) {
++		/* Worst-case bytes this op writes: one 4-byte command word plus,
++		 * for a generic insert, its 4-byte-aligned inline payload (up to
++		 * FMAN_PCD_HM_INSRT_GENERIC_MAX bytes).
++		 */
++		if (op->type == FMAN_PCD_HM_HW_OP_INSRT_GENERIC)
++			need = 4 + ALIGN(op->insrt_generic.size, 4);
++		else
++			need = 8;
++
++		if (cur + need > end) {
+ 			spin_unlock_irqrestore(&hm->lock, flags);
+ 			goto err_free_hmct;
+ 		}
+@@ -428,4 +534,13 @@
+ 		case FMAN_PCD_HM_HW_OP_MPLS_POP:
+ 			cur = hm_encode_mpls_pop(cur, &last_cmd);
+ 			break;
++		case FMAN_PCD_HM_HW_OP_RMV_ETHERNET:
++			cur = hm_encode_rmv_ethernet(cur, &last_cmd);
++			break;
++		case FMAN_PCD_HM_HW_OP_INSRT_GENERIC:
++			cur = hm_encode_insrt_generic(op, cur, &last_cmd);
++			break;
++		case FMAN_PCD_HM_HW_OP_IPV4_FORWARD:
++			cur = hm_encode_ipv4_forward(op, cur, &last_cmd);
++			break;
+ 		default:
