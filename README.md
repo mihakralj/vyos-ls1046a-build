@@ -13,7 +13,7 @@ Behind the decision: I want to use NXP LS1046A, four Cortex-A72 cores at 1.8 GHz
 | I want to... | Go to |
 |---|---|
 | **Install VyOS** on the Mono Gateway | **[INSTALL.md](INSTALL.md)**: write USB image, `install image`, eMMC boot |
-| **Control hardware & diagnose problems** on a running system | [HWCTL.md](HWCTL.md): the `led` RGBW status-LED command (palette, fades, demo modes), LED/fan shell recipes, + the six built-in `*-check` diagnostic scripts (`dpaa1-check`, `sfp-check`, `fan-check`, `caam-check`, `xsk-zc-check`, `ask-check`) — health probes for networking, SFP modules, thermals, crypto, and AF_XDP |
+| **Control hardware & diagnose problems** on a running system | [HWCTL.md](HWCTL.md): the `led` RGBW status-LED command (palette, fades, demo modes), LED/fan shell recipes, + the seven built-in `*-check` diagnostic scripts (`dpaa1-check`, `sfp-check`, `fan-check`, `caam-check`, `xsk-zc-check`, `ask-check`, `firmware-check`) — health probes for networking, SFP modules, thermals, crypto, AF_XDP, and the boot firmware / FMan microcode chain |
 | **Update board firmware** (bricked or fresh board) | [plans/FIRMWARE.md](plans/FIRMWARE.md): NOR + eMMC flash procedure, partition offset details |
 | **Understand the boot process** | [plans/BOOT-PROCESS.md](plans/BOOT-PROCESS.md): USB and eMMC paths, U-Boot env, `booti` sequence, failure modes |
 | **Understand what broke and how it got fixed** | [plans/PORTING.md](plans/PORTING.md): driver archaeology, DPAA1 architecture, boot flow |
@@ -25,11 +25,7 @@ Behind the decision: I want to use NXP LS1046A, four Cortex-A72 cores at 1.8 GHz
 
 ## Build and Release Assets
 
-Automated weekly (Friday 01:00 UTC) via GitHub Actions. Trigger manually:
-
-```bash
-gh workflow run "VyOS LS1046A build" --ref main
-```
+Automated weekly (Friday 01:00 UTC) via GitHub Actions.
 
 | File | Description |
 |------|-------------|

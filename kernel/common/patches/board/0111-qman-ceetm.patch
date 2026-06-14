@@ -329,9 +329,9 @@ index 0000000..e7729b6
 +
 +/* LS1046A CEETM0 hard-coded resource ranges (single FMan -> DCP0) */
 +#define CEETM_LFQID_BASE	0xF00000
-+#define CEETM_LFQID_COUNT	0x1000
-+#define CEETM_LFQID_LSB_MASK	0x000FFF
-+#define CEETM_NR_CHANNELS	32
++#define CEETM_LFQID_COUNT	0x400
++#define CEETM_LFQID_LSB_MASK	0x0003FF
++#define CEETM_NR_CHANNELS	8
 +#define CEETM_NR_LNIS		8
 +#define CEETM_NR_SPS		16
 +
@@ -397,7 +397,7 @@ index 0000000..e7729b6
 +	unsigned int idx;
 +
 +	spin_lock(&ceetm_lock);
-+	idx = find_first_zero_bit(map, nr);
++	idx = find_next_zero_bit(map, nr, 2); /* skip idx 0 (cqid 0x000/lfqid-base/dctidx 0 = HW null set) and idx 1 (channel idx>=2 is the HW-validated allocation floor for leaves and the Option-B default; DEFECT B itself is closed as an LS1046A 8-channel CEETM silicon limitation, see 0112) */
 +	if (idx < nr)
 +		set_bit(idx, map);
 +	spin_unlock(&ceetm_lock);

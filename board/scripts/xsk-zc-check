@@ -5,15 +5,19 @@
 # Usage:   xsk-zc-check [if0 if1 ...]      (default: eth3 eth4 — the SFP+ ports)
 #
 # Background (spec specs/dpaa1-afxdp-modernization-spec.md §6.1.7 / §6.1.10
-# .. §6.1.13). True-zero-copy RX on DPAA1 has a three-mechanism plan:
-#   1. Recognise — match fd->bpid against priv->xsk_bpid[band]   (counter
-#                  xsk_zc_eligible, patch 0093)
-#   2. Recover   — pull the xdp_buff from the XSK chunk + redirect (read-side
-#                  observability counter xsk_zc_rx_recovered, patch 0096;
-#                  productive body is the deferred sub-increment 4)
+# .. §6.1.19). True-zero-copy RX on DPAA1 has three mechanisms, all live
+# since the 0103b reprogram+redirect landed (DUT-validated 2026-06-10):
+#   1. Recognise — match fd->bpid against priv->xsk_bpid[band] at the
+#                  af_xdp_pool_rx_hook() dispatch point (counter
+#                  xsk_zc_eligible — relocated there by 0114; the original
+#                  0093 probe site went dead under 0103f/0110 ordering)
+#   2. Recover   — pull the xdp_buff back from the XSK chunk via the 0103a
+#                  reverse map (counter xsk_zc_rx_recovered, relocated by
+#                  0114 to the successful chunk-lookup point; the redirect
+#                  itself is counted by xsk_zc_rx_redirect, 0103b)
 #   3. reProgram — point the FMan RX port's primary BPID at the XSK pool
-#                  (read-side observability counter xsk_zc_rx_armed, patch
-#                  0094; the hardware-risky MURAM WRITE is sub-increment 4)
+#                  (xsk_zc_rx_armed, patch 0094, set at ZERO_COPY attach;
+#                  the MURAM WRITE runs at attach since 0103b)
 # Plus a crash-defence gate:
 #   - xsk_fill_guard_block (patch 0095) — an in-driver FILL-ring single-
 #     producer assertion. MUST stay 0 under load; a non-zero value is the
@@ -25,7 +29,9 @@
 # verdict the spec gates on (§6.1.12 "Sub-increment 3 entry conditions"):
 #   (1) xsk_zc_rx_armed   > 0   after a ZERO_COPY bind  (reprogram has a target)
 #   (2) xsk_fill_guard_block == 0 under load            (FILL producer sane)
-#   (3) xsk_zc_eligible    growing after the reprogram lands (per-FD oracle)
+#   (3) xsk_zc_eligible    growing under ZC traffic — the per-FD recognition
+#       oracle at the rx_hook dispatch point (0114), climbing in lock-step
+#       with xsk_zc_rx_recovered and xsk_zc_rx_redirect
 # On the shipping default/vpp image NO XSK pool is bound, so every xsk_zc_*
 # counter is 0 and the verdict is "dormant (no ZC bind)" — that is the
 # expected, correct state until an AF_XDP ZERO_COPY producer is attached.
@@ -107,8 +113,8 @@ ERR_COUNTERS=(xsk_pool_attach_fail xsk_pool_detach_timeout xsk_dma_map_fail \
               xsk_pamu_window_fail xsk_align_reject xsk_headroom_reject \
               xsk_mtu_reject xsk_bman_seed_short xsk_bman_starve)
 CTX_COUNTERS=(xsk_pool_attach_ok xsk_pool_detach_ok xsk_rx_branch \
-              xsk_bman_refill_batches xsk_tx_zc_submit xsk_tx_conf_zc \
-              xsk_tx_backpressure)
+              xsk_zc_rx_redirect xsk_bman_refill_batches xsk_tx_zc_submit \
+              xsk_tx_conf_zc xsk_tx_backpressure)
 
 ANY_IFACE_HAS_XSK=0
 
@@ -190,12 +196,12 @@ for IF in "${IFACES[@]}"; do
     elif [ "$zc_armed" -gt 0 ] 2>/dev/null; then
         ok "${IF}: ZC-armed — xsk_zc_rx_armed = ${zc_armed} (reprogram has a distinct target, 0094)"
         if [ "$fill_guard" -eq 0 ] 2>/dev/null; then
-            ok "${IF}: sub-increment-4 PRECONDITIONS (1)+(2) MET — armed AND FILL-guard clean"
-            note "remaining gates: xsk_zc_eligible must grow once the FMan-port BPID reprogram lands (sub-inc 4),"
-            note "plus the FMan-port-BPID reprogram accessor forward-port (spec §6.1.13 scope finding)"
+            ok "${IF}: PRECONDITIONS (1)+(2) MET — armed AND FILL-guard clean"
+            note "under ZC traffic expect the ladder xsk_zc_eligible >= xsk_zc_rx_recovered >= xsk_zc_rx_redirect"
+            note "to climb together (0114 oracles + 0103b productive redirect, spec §6.1.19)"
         fi
         if [ "$zc_recovered" -gt 0 ] 2>/dev/null; then
-            note "xsk_zc_rx_recovered = ${zc_recovered} climbing — Recover decision taken (expected only after sub-inc 4)"
+            note "xsk_zc_rx_recovered = ${zc_recovered} — chunk Recover succeeding (0103a reverse map hit)"
         fi
     else
         warn "${IF}: bound (attach_ok=${attach_ok}) but xsk_zc_rx_armed = 0 — dedicated BPID may equal kernel pool BPID"

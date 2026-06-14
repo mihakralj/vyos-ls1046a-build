@@ -1,0 +1,211 @@
+Revert 0115's KeyGen->CC dispatch encoding back to the HW-proven CCBS model
+
+Board patch 0115 ("sdk-convergent-bringup") changed the KeyGen scheme CC
+next-engine dispatch from the HW-proven CCBS model (0106) -
+
+    KGSE_MODE NIA = ENQUEUE_KG_DFLT_NIA (BMI direct-enqueue, 0x80500002)
+    KGSE_CCBS    = MURAM offset of the CC root group table  (non-zero)
+
+- to the AC_CC NIA-flip model -
+
+    KGSE_MODE NIA = NIA_ENG_FM_CTL | NIA_FM_CTL_AC_CC       (0x80000006)
+    KGSE_CCBS    = 0
+
+on the theory that the earlier CCBS "stall" was caused by a missing FMBM_RCCB
+bind + non-SDK root AD rather than the encoding. That theory was DISPROVEN on
+hardware (iter-48, 2026-06-12, DUT 192.168.1.190): with 0115's RCCB bind +
+0116's SDK result-AD + 0117's 210.10.1 ucode all in place, the AC_CC encoding
+still stalls the FMan port (FMFP_PS[STL]) on the first CC-dispatched frame,
+whereas live-rewriting the grafted scheme back to CCBS (mode 0x80000006 ->
+0x80500002, ccbs 0 -> live FMBM_RCCB value 0x0005ac00) cured the stall
+completely (no STL in 60s, frames flowed, ping 5/5 0% loss).
+
+This patch reverts ONLY 0115's three KeyGen/CC-scheme files
+(fman_keygen.c, fman_keygen_internal.h, fman_pcd_kg.c) back to the CCBS
+encoding. It deliberately KEEPS the rest of 0115 - the FMBM_RCCB bind in
+dpaa_fman_caps.c (fman_port_set_cc_base), the SDK-format result AD in
+fman_pcd_cc.c, and the fman_port.c lookup helper - as well as all of 0116
+(FM_CTL pre-BMI enqueue AD + ctrl-params page) and 0117 (FMan controller
+microcode loader). The net effect makes the mainline driver dispatch CC the
+way the NXP SDK does: NIA stays BMI direct-enqueue and the non-zero KGSE_CCBS
+(root group-table MURAM offset, bound per-port via FMBM_RCCB) drives the
+implicit CC walk.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+index 05c97eb..e4c488e 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+@@ -109,32 +109,19 @@
+  */
+ #define KG_SCH_MODE_NIA_PLCR		0x40000000
+ 
++/* Coarse Classification (CC) chaining - HW-PROVEN recipe (LS1046A FMan v3,
++ * silicon captures 2026-05-23/25): the KGSE_MODE NIA must STAY at the BMI
++ * direct-enqueue default (EN | NIA_ENG_BMI | NIA_BMI_AC_ENQ_FRAME =
++ * 0x80500002).  The CC walk is dispatched IMPLICITLY whenever KGSE_CCBS is
++ * non-zero: CCBS carries the MURAM byte offset of the CC root group table,
++ * and the optional CCOBASE field (KGSE_MODE bits 30:24, SDK fm_kg.c)
++ * selects the group index within it (0 for the single-group static tree of
++ * board patch 0098).  The alternative theory - flipping the NIA engine
++ * bits to FM_CTL|AC_CC (mode 0x80000006/0x80000000) - was DISPROVEN on
++ * hardware: it stalled dispatch at a few hundred frames, while the
++ * CCBS-only graft carried 24M+ frames through CC match -> silicon forward.
++ * The USDPAA SDK concurs: it keeps NIA = BMI|ENQ_FRAME when grafting and
++ * only ORs in CCOBASE.
+-/*
+- * Next-engine = Coarse Classification NIA (SDK sdk_fm_common.h): engine
+- * FM_CTL (0x00000000) + action-code CC (0x6).  The FMan controller
+- * microcode walks the CC root named by the port's FMBM_RCCB.
+- */
+-#define NIA_ENG_FM_CTL			0x00000000
+-#define NIA_FM_CTL_AC_CC		0x00000006
+-
+-/* Coarse Classification (CC) chaining - SDK-convergent model (0115).
+- *
+- * sdk_fm_kg.c FmPcdKgBuildScheme() (lines 1097-1113, 1206-1212): when a
+- * scheme's next engine is CC the KGSE_MODE NIA is ENG_FM_CTL | AC_CC (the
+- * FMan controller runs the CC walker), CCOBASE (KGSE_MODE bits 30:24)
+- * carries the root group BASE ENTRY index, and KGSE_CCBS carries the
+- * group-bits select mask (grpBits) - NOT a pointer.  The CC root MURAM
+- * offset is named per-port in FMBM_RCCB (fman_port_set_cc_base()).
+- *
+- * HISTORY: the pre-0115 model ("NIA stays BMI direct-enqueue, KGSE_CCBS
+- * carries the root MURAM offset, CC fires implicitly") was retired by the
+- * 2026-06-11 SDK init-delta analysis: on the mainline driver it produced
+- * the M3-3b FPM port-stall, and the ask20 silicon captures credited to it
+- * ran on the SDK kernel whose own FM_PCD bring-up had already programmed
+- * FMBM_RCCB and SDK-format root ADs.  The lone FM_CTL|AC_CC experiment
+- * that "stalled dispatch" ran without FMBM_RCCB and with a non-SDK root
+- * AD, so the walker chased a garbage root - it disproves nothing about
+- * the SDK encoding when all three pieces change together.
+  */
+ #define KG_SCH_MODE_CCOBASE_SHIFT	24
+ 
+@@ -566,16 +553,17 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+ 			tmp_reg |= KG_SCH_MODE_NIA_PLCR | NIA_ENG_PLCR;
+ 			scheme_regs.kgse_ppc = scheme->policer_profile_id;
+ 		} else if (scheme->next_engine == 2) {
++			/* Next engine = Coarse Classification.  HW-proven
++			 * recipe (see the CC chaining comment above): keep
++			 * the BMI direct-enqueue NIA - the CC walk fires
++			 * implicitly because KGSE_CCBS (set below) is
++			 * non-zero - and OR in the CCOBASE group index
++			 * (0 for the single-group static tree).  Flipping
++			 * the NIA to FM_CTL|AC_CC stalls dispatch.
+-			/* Next engine = Coarse Classification: SDK-convergent
+-			 * encoding (sdk_fm_kg.c:1206-1212): NIA = ENG_FM_CTL |
+-			 * AC_CC so the FMan controller walks the CC root named
+-			 * by the port's FMBM_RCCB; CCOBASE carries the root
+-			 * group BASE ENTRY index (0 for the single-group
+-			 * static tree).  See the CC chaining comment above.
+ 			 */
++			tmp_reg |= ENQUEUE_KG_DFLT_NIA |
++				(scheme->cc_base_offset <<
++				 KG_SCH_MODE_CCOBASE_SHIFT);
+-			tmp_reg |= NIA_ENG_FM_CTL | NIA_FM_CTL_AC_CC |
+-				   (scheme->cc_base_offset <<
+-				    KG_SCH_MODE_CCOBASE_SHIFT);
+ 		} else {
+ 			/* Enqueue frame NIA */
+ 			tmp_reg |= ENQUEUE_KG_DFLT_NIA;
+@@ -594,10 +582,10 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+ 	 * policer-attach (see BUG 3a above). For the non-policer paths PPC stays 0
+ 	 * from the memset above.
+ 	 */
++	/* KGSE_CCBS: MURAM byte offset of the CC root group table.  A
++	 * non-zero CCBS is what dispatches the frame through the CC engine
++	 * on FMan v3 (HW-proven; the NIA stays BMI direct-enqueue).  Zero
++	 * (from the memset above) on every non-CC path.
+-	/* KGSE_CCBS: CC group-bits select mask (SDK kgse_ccbs = grpBits,
+-	 * sdk_fm_kg.c:1206-1212) - NOT a pointer.  0 for the single-group
+-	 * static tree (numOfDistinctionUnits = 0).  The CC root MURAM offset
+-	 * lives in the port's FMBM_RCCB (fman_port_set_cc_base()).
+ 	 */
+ 	if (enable && scheme->next_engine == 2)
+ 		scheme_regs.kgse_ccbs = scheme->cc_bits_sel;
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h b/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
+index 795d15d..a78fedd5 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
+@@ -89,11 +89,10 @@ struct keygen_scheme {
+ 				 * valid when next_engine == 2. 0 for the
+ 				 * static single-group tree.
+ 				 */
++	u32 cc_bits_sel;	/* MURAM byte offset of the CC root group
++				 * table (KGSE_CCBS).  Non-zero dispatches
++				 * the CC walk (next_engine == 2); the NIA
++				 * stays BMI direct-enqueue (HW-proven).
+-	u32 cc_bits_sel;	/* KGSE_CCBS group-bits select mask (SDK
+-				 * grpBits; 0 for the single-group static
+-				 * tree).  NOT a pointer - the CC root
+-				 * MURAM offset is programmed at the port's
+-				 * FMBM_RCCB by fman_port_set_cc_base().
+ 				 */
+ };
+ 
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+index 81863bf..aed5d84 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+@@ -395,13 +395,12 @@ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
+ 
+ 	/*
+ 	 * Graft this KeyGen scheme onto the installed Coarse Classification
++	 * tree using the HW-proven recipe (see fman_keygen.c CC chaining
++	 * comment): KGSE_CCBS <- MURAM offset of the tree's root group
++	 * table; the NIA stays BMI direct-enqueue and the CC walk fires
++	 * implicitly because CCBS is non-zero.  The matched AD result then
++	 * carries the destination RX FQID; a miss falls through to the
++	 * tree's miss action.
+-	 * tree, SDK-convergent (0115): KGSE_MODE NIA flips to FM_CTL|AC_CC
+-	 * with CCOBASE = root group base entry index (0) and KGSE_CCBS =
+-	 * group-bits mask (0 for the single-group static tree).  The root
+-	 * MURAM offset itself is programmed at the RX port's FMBM_RCCB by
+-	 * fman_port_set_cc_base() - callers bind the port BEFORE this attach
+-	 * (SDK FM_PORT_SetPCD order).  The matched AD result carries the
+-	 * destination RX FQID; a miss falls through to the tree's miss action.
+ 	 *
+ 	 * Same pattern as the policer (next_engine == 1) path: mutate the
+ 	 * internal slot then re-run keygen_scheme_setup(enable = true) under
+@@ -415,7 +414,7 @@ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
+ 
+ 	slot->next_engine    = 2;
+ 	slot->cc_base_offset = 0;
++	slot->cc_bits_sel    = fman_pcd_cc_tree_group_table_off(cc);
+-	slot->cc_bits_sel    = 0;	/* grpBits: single-group tree */
+ 
+ 	/*
+ 	 * keygen_scheme_setup() rejects enable on an already-used scheme
+@@ -609,7 +608,7 @@ int fman_pcd_kg_port_attach_cc(struct fman_pcd *pcd, u8 hw_port_id,
+ 	u8 saved_engine, id;
+ 	int err;
+ 
++	if (!pcd || !cc_group_off)
+-	if (!pcd)
+ 		return -EINVAL;
+ 	if (hw_port_id < 0x08 || hw_port_id >= 0x28)
+ 		return -EINVAL;
+@@ -632,17 +631,15 @@ int fman_pcd_kg_port_attach_cc(struct fman_pcd *pcd, u8 hw_port_id,
+ 	saved_ccbs   = slot->cc_bits_sel;
+ 
+ 	/*
++	 * HW-proven CC graft (see fman_keygen.c CC chaining comment):
++	 * KGSE_CCBS <- MURAM offset of the CC root group table; the NIA
++	 * stays BMI direct-enqueue and the CC walk fires implicitly.
+-	 * SDK-convergent CC graft (0115, see fman_keygen.c CC chaining
+-	 * comment): KGSE_MODE NIA = FM_CTL|AC_CC, CCOBASE = 0, KGSE_CCBS = 0
+-	 * (group-bits mask of the single-group tree).  The CC root MURAM
+-	 * offset is NOT programmed here - the caller must have already bound
+-	 * it at the RX port's FMBM_RCCB via fman_port_set_cc_base().
+ 	 * use_hashing / base_fqid / match_vector are untouched, so on a
+ 	 * CC miss the frame still spreads over the same hashed RX FQs.
+ 	 */
+ 	slot->next_engine    = 2;
+ 	slot->cc_base_offset = 0;
++	slot->cc_bits_sel    = cc_group_off;
+-	slot->cc_bits_sel    = 0;	/* grpBits: single-group tree */
+ 
+ 	slot->used = false;
+ 	err = keygen_scheme_setup(keygen, id, true);

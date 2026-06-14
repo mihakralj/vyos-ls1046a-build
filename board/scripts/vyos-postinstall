@@ -66,6 +66,15 @@ FW_ENV_CONFIG="/etc/fw_env.config"
 # xhci_hcd.quirks= cmdline — PCI-only).
 UBOOT_BOOTARGS_TAIL="console=ttyS0,115200 loglevel=4 systemd.show_status=true net.ifnames=0 boot=live rootdelay=5 noautologin fsl_dpaa_fman.fsl_fm_max_frm=9600 panic=60 sysctl.net.core.default_qdisc=fq usbcore.autosuspend=-1"
 
+# Canonical U-Boot bootcmd: USB → eMMC → SPI recovery. This is the single
+# source of truth for BOTH the writer (Phase 1) and the boot-service
+# stale-detection below. `add system image` updates /boot/vyos.env but never
+# rewrites bootcmd, so a stale dev-loop bootcmd left in QSPI (e.g.
+# `run ask_boot ...` / `run dev_boot ...` / a raw `tftp ...`) would otherwise
+# survive every upgrade and keep booting the wrong (or TFTP) kernel. The
+# boot-service path heals it by comparing the live bootcmd against this value.
+UBOOT_BOOTCMD='run usb_vyos || run vyos || run recovery'
+
 # Accumulated exit code — set to 1 on any actual error, but script always runs to completion
 RC=0
 
@@ -165,6 +174,21 @@ setup_uboot_env_once() {
                 echo "  Detected legacy 'quiet' in vyos env — refreshing for serial visibility."
                 stale=1
             fi
+            # Heal a stale/non-standard bootcmd. The most common cause is the
+            # manual dev-loop `run ask_boot ...` (or any `tftp`/`dev_boot`
+            # variant) left in QSPI NOR: because `add system image` only
+            # rewrites /boot/vyos.env and never touches bootcmd, such a board
+            # would keep short-circuiting into the stale (often TFTP) boot path
+            # on every upgrade. Compare the live bootcmd against the canonical
+            # UBOOT_BOOTCMD and force a refresh on any mismatch.
+            local current_bootcmd
+            current_bootcmd=$(fw_printenv -n bootcmd 2>/dev/null || true)
+            if [ "$current_bootcmd" != "$UBOOT_BOOTCMD" ]; then
+                echo "  Detected stale/non-standard bootcmd — refreshing for correct eMMC boot order."
+                echo "    current : ${current_bootcmd:-<empty>}"
+                echo "    expected: ${UBOOT_BOOTCMD}"
+                stale=1
+            fi
             if [ "$stale" -eq 0 ]; then
                 echo "✓ U-Boot SPI flash already configured (vyos references vyos.env)."
                 return 0
@@ -194,8 +218,8 @@ setup_uboot_env_once() {
     local usb_vyos_val
     usb_vyos_val='usb start; if fatload usb 0:2 ${load_addr} boot.scr; then source ${load_addr}; fi'
 
-    # Boot priority: USB → eMMC → SPI recovery
-    local bootcmd_val='run usb_vyos || run vyos || run recovery'
+    # Boot priority: USB → eMMC → SPI recovery (canonical, defined once above)
+    local bootcmd_val="$UBOOT_BOOTCMD"
 
     # --- Write variables to SPI flash ---
     local failed=0

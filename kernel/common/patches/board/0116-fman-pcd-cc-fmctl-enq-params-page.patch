@@ -1,0 +1,266 @@
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+index b5830be..540832f 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -313,6 +313,8 @@ return err;
+ 		if (!rxport)
+ 			err = -ENODEV;
+ 	}
++	if (!err)
++		err = fman_pcd_port_ensure_params_page(pcd, rxport);
+ 	if (!err)
+ 		err = fman_port_set_cc_base(rxport, cc_base);
+ 	if (!err) {
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index 767c402..e6baf0d 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -61,6 +61,7 @@
+ #include <linux/fsl/fman_pcd.h>
+ #include "fman.h"
+ #include "fman_muram.h"
++#include "fman_port.h"
+ #include "fman_pcd_internal.h"
+ 
+ /*
+@@ -116,8 +117,19 @@
+ 
+ /*
+  * RESULT AD constants (SDK FillAdOfTypeResult, sdk_fm_cc.c:2227-2343).
+- * Every terminating AD must carry a real NIA - BMI engine | enqueue-frame
+- * action, plus NO_OM_VSPE on DPAA v1.1+ silicon.  DATA_FLOW in word0 means
++ * Every terminating AD must carry a real NIA.  0116: on LS1046A (FMANV3H,
++ * errata A006675 + SW006 - SDK dpaa_integration_ext.h:264/271) the SDK
++ * NEVER exits CC straight to BMI: GET_NIA_BMI_AC_ENQ_FRAME() resolves to
++ * NIA_ENG_FM_CTL | NIA_FM_CTL_AC_NO_IPACC_PRE_BMI_ENQ_FRAME (0x00000028,
++ * sdk fm_common.h:441/471-474), a controller ucode fixup that releases
++ * per-frame task state before the BMI enqueue.  The pre-0116 direct
++ * NIA_ENG_BMI|AC_ENQ_FRAME (0x00500002) leaked one FMan task per
++ * CC-dispatched frame: task pool exhausted within ~10 frames, MAC RDRP
++ * then ate every arriving frame (no FPM stall flag), port dead until
++ * reboot - the M3-3b second-iteration wedge.  The 0x28 ucode requires
++ * the FM_CTL ctrl-params page (FMBM_RGPR) - see
++ * fman_pcd_port_ensure_params_page().  NO_OM_VSPE stays mandatory on
++ * DPAA v1.1+.  DATA_FLOW in word0 means
+  * "enqueue to the FQID the KeyGen scheme already computed" (the RSS
+  * fall-through); CONTRL_FLOW (0) means "enqueue to the FQID in word0".
+  */
+@@ -126,7 +138,7 @@
+ #define CC_AD_RES_NO_OM_VSPE		0x02000000u	/* nia: DPAA v1.1+ mandatory   */
+ #define CC_AD_RES_NADEN			0x20000000u	/* nia: walk HMTD first        */
+ #define CC_AD_RES_EXTENDED		0x80000000u	/* nia: extended (manip) mode  */
+-#define CC_NIA_BMI_ENQ_FRAME		0x00500002u	/* NIA_ENG_BMI | AC_ENQ_FRAME  */
++#define CC_NIA_FMCTL_PRE_BMI_ENQ 0x00000028u /* FM_CTL | AC 0x28 (see below) */
+ 
+ /**
+  * struct fman_pcd_cc_tree - one port's static CC tree handle (private).
+@@ -256,13 +268,14 @@ static void cc_pack_key(void __iomem *match, u16 idx,
+  * overrideFqid"):
+  *   word0 = CONTRL_FLOW (0) | fqid     (enqueue to this exact FQ)
+  *   word1 = hm ? hm >> 4 : 0           (HMTD MURAM offset, 16-byte units)
+- *   word2 = NIA: BMI|ENQ_FRAME | NO_OM_VSPE [| NADEN|EXTENDED when @hm]
++ *   word2 = NIA: FM_CTL|PRE_BMI_ENQ(0x28) | NO_OM_VSPE [| NADEN|EXTENDED
++ *           when @hm]
+  *   word3 = 0
+  *
+  * @fqid == 0 - RSS fall-through (SDK "DONE/ENQ_FRAME without override"):
+  *   word0 = DATA_FLOW | PLCR_DIS       (use the KG-computed hash FQID)
+  *   word1 = 0
+- *   word2 = NIA: BMI|ENQ_FRAME | NO_OM_VSPE
++ *   word2 = NIA: FM_CTL|PRE_BMI_ENQ(0x28) | NO_OM_VSPE
+  *   word3 = 0
+  * Used for both the miss row and "match but do not steer" keys; the frame
+  * lands on the same hashed RX FQ the scheme would have picked anyway.
+@@ -278,7 +291,7 @@ static void cc_write_leaf_ad(void __iomem *ad, u16 idx, u32 fqid,
+ {
+ 	u32 __iomem *w = (u32 __iomem *)((u8 __force *)ad +
+ 					 (size_t)idx * CC_AD_ENTRY_SIZE);
+-	u32 nia = CC_NIA_BMI_ENQ_FRAME | CC_AD_RES_NO_OM_VSPE;
++	u32 nia = CC_NIA_FMCTL_PRE_BMI_ENQ | CC_AD_RES_NO_OM_VSPE;
+ 
+ 	if (fqid) {
+ 		if (hm)
+@@ -321,6 +334,54 @@ static void cc_write_group0(struct fman_pcd_cc_tree *t)
+ 	iowrite32be(0, &w[3]);
+ }
+ 
++/*
++ * FM_CTL control-parameters page, SDK t_FmPcdCtrlParamsPage
++ * (sdk fm_common.h:182-197; port-open programming fm_port.c:2813-2846).
++ *
++ * 0116: the FM_CTL PRE_BMI_ENQ_FRAME ucode (result-AD NIA AC 0x28, the
++ * mandatory CC exit path on A006675/SW006 silicon) consumes a per-port
++ * 256-byte MURAM page named by FMBM_RGPR: misc (+0x40) must carry
++ * ALWAYS_ON, errorsDiscardMask (+0x44) must mirror FMBM_RFSDM|RFSEM so
++ * the SW006 error-VSP fixup can discard errored frames.  Mainline never
++ * allocates this page (FMBM_RGPR stays 0 = ucode would read MURAM offset
++ * 0 garbage), so every CC attach must ensure it first.  Allocated once
++ * per port and kept for the port's lifetime (SDK never frees it either);
++ * idempotent via the port-side cached offset.
++ */
++#define CC_CTRL_PARAMS_PAGE_SZ	256
++
++int fman_pcd_port_ensure_params_page(struct fman_pcd *pcd,
++				     struct fman_port *port)
++{
++	struct muram_info *muram;
++	void __iomem *page;
++	unsigned long off;
++	int err;
++
++	if (!pcd || !port)
++		return -EINVAL;
++
++	if (fman_port_get_params_page(port))
++		return 0;
++
++	muram = fman_get_muram(fman_pcd_get_fman(pcd));
++	if (!muram)
++		return -ENXIO;
++
++	off = fman_pcd_muram_alloc(pcd, CC_CTRL_PARAMS_PAGE_SZ);
++	if (IS_ERR_VALUE(off))
++		return (int)off;
++
++	page = (void __iomem *)fman_muram_offset_to_vbase(muram, off);
++	memset_io(page, 0, CC_CTRL_PARAMS_PAGE_SZ);
++
++	err = fman_port_set_params_page(port, (u32)off, page);
++	if (err)
++		fman_pcd_muram_free(pcd, off, CC_CTRL_PARAMS_PAGE_SZ);
++	return err;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_port_ensure_params_page);
++
+ static void cc_tree_free(struct fman_pcd_cc_tree *t)
+ {
+ 	struct fman_pcd *pcd = t->pcd;
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+index 24251a4..6d88d1a 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+@@ -119,6 +119,8 @@ static int cc_test_install(struct fman_pcd *pcd, const char *args)
+ 		if (!rxport)
+ 			err = -ENODEV;
+ 	}
++	if (!err)
++		err = fman_pcd_port_ensure_params_page(pcd, rxport);
+ 	if (!err)
+ 		err = fman_port_set_cc_base(rxport, cc_base);
+ 	if (!err) {
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index b8bb2f3..c50c2e7 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -425,6 +425,7 @@ struct fman_port_dts_params {
+ struct fman_port {
+ 	void *fm;
+ 	struct list_head node;		/* fman_port_active_list (0115) */
++	u32 ctrl_params_page;	/* FM_CTL params page MURAM off (0116) */
+ 	struct device *dev;
+ 	struct fman_rev_info rev_info;
+ 	u8 port_id;
+@@ -1634,6 +1635,61 @@ int fman_port_set_cc_base(struct fman_port *port, u32 cc_muram_off)
+ }
+ EXPORT_SYMBOL_GPL(fman_port_set_cc_base);
+ 
++/* FM_CTL ctrl-params page field offsets (SDK t_FmPcdCtrlParamsPage) */
++#define FMAN_PP_MISC_OFF	0x40
++#define FMAN_PP_ERRDISC_OFF	0x44
++#define FMAN_PP_MISC_ALWAYS_ON	0x00000100
++
++/**
++ * fman_port_get_params_page() - cached FM_CTL params-page MURAM offset
++ * @port: the FMan RX port
++ *
++ * Returns the MURAM byte offset programmed by a prior
++ * fman_port_set_params_page(), or 0 if the page was never set up
++ * (0 is never a valid page offset - MURAM base hosts the CC trees).
++ */
++u32 fman_port_get_params_page(struct fman_port *port)
++{
++	return port ? port->ctrl_params_page : 0;
++}
++EXPORT_SYMBOL_GPL(fman_port_get_params_page);
++
++/**
++ * fman_port_set_params_page() - program the FM_CTL ctrl-params page (0116)
++ * @port:      the FMan RX port
++ * @muram_off: MURAM byte offset of the zeroed 256-byte page
++ * @page:      ioremapped virtual address of that page
++ *
++ * SDK port-open equivalent (fm_port.c:2813-2846 on DPAA v1.1):
++ * misc = ALWAYS_ON, errorsDiscardMask = FMBM_RFSDM | FMBM_RFSEM, then
++ * FMBM_RGPR = page offset.  Required by the FM_CTL AC 0x28
++ * PRE_BMI_ENQ_FRAME ucode that every CC result AD exits through on
++ * A006675/SW006 silicon.  Caller zeroes the page.
++ */
++int fman_port_set_params_page(struct fman_port *port, u32 muram_off,
++			      void __iomem *page)
++{
++	u32 sdm, sem;
++
++	if (!port || !page || port->port_type != FMAN_PORT_TYPE_RX)
++		return -EINVAL;
++
++	sdm = ioread32be(&port->bmi_regs->rx.fmbm_rfsdm);
++	sem = ioread32be(&port->bmi_regs->rx.fmbm_rfsem);
++	iowrite32be(FMAN_PP_MISC_ALWAYS_ON,
++		    (u32 __iomem *)((u8 __iomem *)page + FMAN_PP_MISC_OFF));
++	iowrite32be(sdm | sem,
++		    (u32 __iomem *)((u8 __iomem *)page + FMAN_PP_ERRDISC_OFF));
++	iowrite32be(muram_off, &port->bmi_regs->rx.fmbm_rgpr);
++	port->ctrl_params_page = muram_off;
++
++	dev_info(port->dev,
++		 "fman_port: FM_CTL params page at MURAM off 0x%x (errdisc 0x%08x)\n",
++		 muram_off, sdm | sem);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_port_set_params_page);
++
+ /**
+  * fman_port_init
+  * @port:	A pointer to a FM Port module.
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.h b/drivers/net/ethernet/freescale/fman/fman_port.h
+index ceebdec..2cb0342 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.h
++++ b/drivers/net/ethernet/freescale/fman/fman_port.h
+@@ -168,4 +168,9 @@ int fman_port_set_cc_base(struct fman_port *port, u32 cc_muram_off);
+ 
+ struct fman_port *fman_port_lookup_rx(void *fm, u8 port_id);
+ 
++/* 0116: FM_CTL ctrl-params page (required by CC result-AD NIA AC 0x28) */
++u32 fman_port_get_params_page(struct fman_port *port);
++int fman_port_set_params_page(struct fman_port *port, u32 muram_off,
++			      void __iomem *page);
++
+ #endif /* __FMAN_PORT_H */
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 7072557..7a1f8dc 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -391,9 +391,23 @@ struct fman_pcd_cc_hw_spec {
+  * Return: 0 on success; -EINVAL bad args; -ENOSPC MURAM exhausted; -EBUSY
+  * concurrent install race.
+  */
++struct fman_port;
++
+ int fman_pcd_cc_static_install(struct fman_pcd *pcd, u8 port_id,
+ 			       const struct fman_pcd_cc_hw_spec *hw);
+ 
++/**
++ * fman_pcd_port_ensure_params_page() - FM_CTL ctrl-params page bringup (0116)
++ *
++ * Allocate + program the per-port 256-byte FM_CTL control-parameters page
++ * (FMBM_RGPR) that the AC 0x28 PRE_BMI_ENQ_FRAME ucode - the mandatory CC
++ * result-AD exit on A006675/SW006 silicon - consumes.  Must be called
++ * before fman_port_set_cc_base() on every CC install; idempotent (one
++ * page per port, kept for the port lifetime).  Returns 0 on success.
++ */
++int fman_pcd_port_ensure_params_page(struct fman_pcd *pcd,
++				     struct fman_port *port);
++
+ /**
+  * fman_pcd_cc_static_get_base() - fetch a port's installed CC tree MURAM base.
+  * @pcd:          PCD subsystem handle
