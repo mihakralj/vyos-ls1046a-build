@@ -30,11 +30,6 @@ on:
         type: string
         required: false
         default: ''
-      flavor:
-        description: 'Build flavor: default | ask | vpp. Falls back to data/flavor.pin or "default" if unset.'
-        type: string
-        required: false
-        default: ''
     secrets:
       MOK_KEY:
         required: false
@@ -69,13 +64,13 @@ jobs:
     permissions:
       contents: write
     env:
-      # FLAVOR drives FLAVOR-aware bin/ci-*.sh scripts via bin/common.sh.
-      # Empty string lets bin/common.sh fall back to data/flavor.pin or "default".
-      # All flavors (default/ask/vpp) currently route through ci-stage-kernel.sh
-      # → kernel/common/scripts/stage-kernel.sh. ASK2 (per
-      # specs/ask2-rewrite-spec.md) is scaffold-only; FLAVOR=ask builds a
-      # vanilla VyOS image until ASK2 components land.
-      FLAVOR: ${{ inputs.flavor || github.event.inputs.flavor || '' }}
+      # Single-image build: there is one flavor-neutral ISO. FLAVOR is left
+      # empty so bin/common.sh resolves it to "default" (or data/flavor.pin
+      # for a developer locally exercising the dormant ASK landing zone). The
+      # ask.ko / VPP dataplanes ship dormant in the one image and are switched
+      # at runtime (set system offload ask / set vpp settings), not selected at
+      # build time. See AGENTS.md single-image rules + plans/DUAL-DATAPLANE.md.
+      FLAVOR: ''
     # No `container:` — build runs natively on the self-hosted ARM64 runner.
     # The runner host (Debian 12 bookworm aarch64) provides all build deps
     # (installed in the "Install Dependencies" step below). Removing the
@@ -223,8 +218,9 @@ jobs:
       # (Consume prebuilt ASK kernel, Setup ASK fast-path kernel) were
       # removed on the ask20 branch. Until ASK2 components land
       # (ask.ko, ask_bridge.ko, askd, ask-load, libask_fci) per
-      # specs/ask2-rewrite-spec.md, FLAVOR=ask builds produce a
-      # vanilla VyOS image with no ASK userspace and no SDK kernel.
+      # specs/ask2-rewrite-spec.md, the single flavor-neutral image ships
+      # without ASK userspace or an SDK kernel; ASK engages at runtime
+      # (set system offload ask) once those components are built in.
 
       - name: Compile Mono DTB from DTS (always rebuild from source)
         run: bin/ci-compile-mono-dtb.sh
@@ -246,10 +242,6 @@ jobs:
         env:
           BUILD_VERSION: ${{ steps.set_env_variables.outputs.build_version }}
         run: bin/ci-build-iso.sh
-
-      - name: Verify VPP ISO contents
-        if: env.FLAVOR == 'vpp'
-        run: bin/ci-verify-vpp-iso.sh
 
       - uses: actions/upload-artifact@v7
         with:
@@ -363,39 +355,23 @@ jobs:
           EOF
           cat /tmp/release_notes.md
 
-      # ─── Per-flavor update-check feed ─────────────────────────────────
-      # VyOS's `system update-check url ...` config takes one URL per system.
-      # Each flavor (default | ask | vpp) gets its own feed file so that
-      # installs of one flavor don't accidentally upgrade to a different one.
-      #
-      # Filename scheme:
-      #   version-default.json   ← consumed by flavor=default installs
-      #   version-ask.json       ← consumed by flavor=ask installs
-      #   version-vpp.json       ← consumed by flavor=vpp installs
-      #   version.json           ← legacy alias of version-default.json
-      #                            (kept so existing installs that still have
-      #                             the old `…/main/version.json` URL baked
-      #                             in keep working — they will receive the
-      #                             default-flavor stream)
-      #
-      # The autocommit step below picks up whichever files changed; the other
-      # flavors' feeds are left untouched until their own build runs.
-      - name: "Release publishing: write per-flavor version-${FLAVOR}.json"
+      # ─── Single-image update-check feed ───────────────────────────────
+      # One flavor-neutral ISO → one canonical feed. version.json is the source
+      # of truth; version-{default,ask,vpp}.json are written byte-identical as
+      # aliases so any fielded install that baked in a per-flavor URL before the
+      # 2026-06-14 flavor collapse keeps updating (deleting an alias would make a
+      # persisted …/version-ask.json abort `add system image` on an empty feed).
+      # See AGENTS.md update-check feed rule.
+      - name: "Release publishing: write canonical version.json + aliases"
         env:
-          FLAVOR: ${{ needs.build_iso.outputs.flavor }}
           BUILD_VERSION: ${{ needs.build_iso.outputs.build_version }}
           IMAGE_ISO: ${{ needs.build_iso.outputs.image_iso }}
           TIMESTAMP: ${{ needs.build_iso.outputs.TIMESTAMP }}
           REPO: ${{ github.repository }}
         run: |
           set -e
-          if [ -z "$FLAVOR" ]; then
-            echo "FATAL: build_iso did not export 'flavor' output"
-            exit 1
-          fi
           URL="https://github.com/${REPO}/releases/download/${BUILD_VERSION}/${IMAGE_ISO}"
-          # Per-flavor feed — always written.
-          cat > "version-${FLAVOR}.json" <<EOF
+          cat > version.json <<EOF
           [
             {
               "url": "${URL}",
@@ -404,32 +380,30 @@ jobs:
             }
           ]
           EOF
-          echo "### Wrote version-${FLAVOR}.json"
-          cat "version-${FLAVOR}.json"
-          # Legacy alias: version.json mirrors the default-flavor feed so
-          # pre-flavor-split installs (whose config.boot still references
-          # …/main/version.json) keep getting updates of the default stream.
-          if [ "$FLAVOR" = "default" ]; then
-            cp "version-${FLAVOR}.json" version.json
-            echo "### Mirrored to legacy version.json"
-          fi
+          # Byte-identical aliases for fielded per-flavor URLs.
+          cp version.json version-default.json
+          cp version.json version-ask.json
+          cp version.json version-vpp.json
+          echo "### Wrote canonical version.json + 3 aliases"
+          cat version.json
 
       - name: "Release publishing: check if the repository was modified during runtime to prevent autocommit failure"
         id: check_if_the_repository_was_modified_during_runtime
-        env:
-          FLAVOR: ${{ needs.build_iso.outputs.flavor }}
         run: |
           set -e
           sudo chown -R $(whoami):$(whoami) ./*
-          # Stash the freshly-generated feed file(s) before pulling.
-          cp "version-${FLAVOR}.json" "/tmp/version-${FLAVOR}.json.new"
-          [ "$FLAVOR" = "default" ] && cp version.json /tmp/version.json.new
+          # Stash the freshly-generated feed files before pulling.
+          for f in version.json version-default.json version-ask.json version-vpp.json; do
+            cp "$f" "/tmp/${f}.new"
+          done
           # Reset to clean tree, pull, then restore.
-          git checkout -- "version-${FLAVOR}.json" 2>/dev/null || true
-          [ "$FLAVOR" = "default" ] && git checkout -- version.json 2>/dev/null || true
+          for f in version.json version-default.json version-ask.json version-vpp.json; do
+            git checkout -- "$f" 2>/dev/null || true
+          done
           git pull --rebase || true
-          cp "/tmp/version-${FLAVOR}.json.new" "version-${FLAVOR}.json"
-          [ "$FLAVOR" = "default" ] && cp /tmp/version.json.new version.json
+          for f in version.json version-default.json version-ask.json version-vpp.json; do
+            cp "/tmp/${f}.new" "$f"
+          done
 
       - name: "Release publishing: create autocommit and tag"
         uses: stefanzweifel/git-auto-commit-action@v7

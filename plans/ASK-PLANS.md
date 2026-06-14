@@ -66,7 +66,7 @@ standalone operator install guide.
 | [`ASK2-COURSE-CORRECTION.md`](ASK2-COURSE-CORRECTION.md) | 2026-05-24 · branch `ask20` | **Active execution plan** | The 5-phase plan that drove the spec v1.2 → v1.3 reduction (delete graft + OH-port + userspace daemon). Phases 1–3 complete; Phase 4 hardware bring-up carries the live M2 status (see §6). |
 | [`ASK2-MODERN-ARCHITECTURE-REVIEW.md`](ASK2-MODERN-ARCHITECTURE-REVIEW.md) | v1.3-proposal · 2026-06-09 | Driver/review (active) | The architecture review that *justified* the course-correction: collapse ASK2 to one OOT module + one in-tree PCD subsystem + one pre-`register_netdev()` hook, operator UX via `nft`/`ip xfrm`/`ynl`/`node_exporter`. |
 | [`ASK-VS-ASK2-COMPARATIVE-REVIEW.md`](ASK-VS-ASK2-COMPARATIVE-REVIEW.md) | v1.0.0 (authoritative) · 2026-06-09 | Reference (active) | Deep comparison of the original NXP ASK 1.x stack vs ASK2: module-by-module functional mapping, data-flow diagrams, 210-microcode interaction, perf prediction, completeness audit. **Origin of the Path A recommendation.** |
-| [`ASK-ISO-BUILD-AND-INSTALL.md`](ASK-ISO-BUILD-AND-INSTALL.md) | v1.0.0 · 2026-06-09 | Operational (active) | Standalone how-to: dispatch a `FLAVOR=ask` CI build, deploy the ISO to the lxc200 relay, and run `add system image <url>` on the live LS1046A board. Independent of the architecture docs above. |
+| [`ASK-ISO-BUILD-AND-INSTALL.md`](ASK-ISO-BUILD-AND-INSTALL.md) | v1.0.0 · 2026-06-09 | Operational (active) | Standalone how-to: build the single LS1046A image in CI, deploy the ISO to the lxc200 relay, run `add system image <url>` on the live board, and enable the offload with `set system offload ask`. Independent of the architecture docs above. |
 
 ---
 
@@ -107,7 +107,7 @@ per-PR design artifacts, not standalone ASK plans.
 2. `plans/ASK2-COURSE-CORRECTION.md` §2 — find the first unchecked `[ ]`.
 3. Current blocker is the Phase-4 M2 CPU gate (§6 below).
 
-**Operator installing a `FLAVOR=ask` image on the board:**
+**Operator installing the single image and enabling ASK on the board:**
 1. `plans/ASK-ISO-BUILD-AND-INSTALL.md` — start to finish. (No architecture
    reading required.)
 
@@ -118,10 +118,11 @@ per-PR design artifacts, not standalone ASK plans.
 
 ## 6. CURRENT ASK2 STATUS SNAPSHOT
 
-`[SPEC]` As of spec v1.6 (2026-05-31), ASK2 is a **scaffold-only** flavor at the
-release level: `FLAVOR=ask` ships a vanilla VyOS image until the v1.6 components
-land (`ask.ko` ~1500 LOC in-tree at `drivers/net/ethernet/freescale/dpaa/ask/`,
-plus the FMan PCD subsystem now built-in via the common board patches).
+`[SPEC]` As of spec v1.8 (2026-06-14), ASK2 is **scaffold-only** at the source
+level and ships **dormant in the single image**: `set system offload ask` is a
+no-op until the v1.6 components land (`ask.ko` ~1500 LOC in-tree at
+`drivers/net/ethernet/freescale/dpaa/ask/`, plus the FMan PCD subsystem now
+built-in via the common board patches).
 
 `[BUG]` **Live Phase-4 blocker — M2 acceptance gate: throughput PASS / CPU FAIL.**
 On the mono DUT (kernel `6.18.31-vyos`), Path A activation is verified
@@ -168,7 +169,7 @@ graph TD
     CC -.supersedes.-> IMPL
     CC -.supersedes.-> NEXT
     CC -.supersedes.-> TRIAGE
-    ISO -->|builds FLAVOR=ask from| ASK2SPEC
+    ISO -->|installs single image from| ASK2SPEC
 
     classDef spec fill:#1b4965,color:#fff,stroke:#cae9ff;
     classDef act fill:#2a6f4e,color:#fff,stroke:#bfe3d0;

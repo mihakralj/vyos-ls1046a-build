@@ -1,12 +1,12 @@
-# Multi-Flavor Release Plan: One Tag, Three ISOs
-**Version 1.0.0** · Status as of 2026-05-11 · 2026-06-09 · HADS 1.0.0
+# Multi-Flavor Release Plan: One Tag, Three ISOs — ⚠️ RETIRED 2026-06-14
+**Version 1.0.0** · Status as of 2026-05-11 · 2026-06-09 · **RETIRED 2026-06-14** · HADS 1.0.0
 
 ---
 
-## ⚠️ TRANSITION NOTICE (2026-06-12)
+## ⚠️ RETIRED (2026-06-14) — DO NOT IMPLEMENT
 
 **[SPEC]**
-`plans/DUAL-DATAPLANE.md` decided a **single dual-dataplane image**: one ISO ships both VPP and `ask.ko`, both dormant until configured. Once DUAL-DATAPLANE M7 lands, the three-flavor split this plan coordinates **retires** — `version-ask.json`/`version-vpp.json` become aliases of the single image's feed (kept so fielded installs keep receiving updates), and the multi-flavor release machinery below becomes historical. Until M7, the current single-flavor-per-dispatch CI behaviour continues unchanged; do **not** invest further in implementing this plan.
+The three-flavor (`default | ask | vpp`) build split this plan coordinates **was retired on 2026-06-14**. CI now produces a **single flavor-neutral ISO** (`vyos-<version>-LS1046A-arm64.iso`) and a **single `version.json` feed**; `version-{default,ask,vpp}.json` are kept as identical byte-for-byte aliases so fielded installs keep updating. Both dataplanes (VPP AF_XDP and, once it lands, `ask.ko`) ship in that one image, dormant until selected at runtime per `plans/DUAL-DATAPLANE.md`. **The multi-flavor release machinery described below is historical** and is retained only for context — do **not** implement it.
 
 ---
 

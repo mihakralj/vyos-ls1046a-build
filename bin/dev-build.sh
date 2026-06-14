@@ -293,9 +293,9 @@ cmd_iso() {
 
     # The build leaves exactly one ISO at the repo root; pick it up.
     local iso
-    iso=$(ls -1t "$REPO_ROOT"/vyos-*-LS1046A-"$FLAVOR"-arm64.iso 2>/dev/null | head -1)
+    iso=$(ls -1t "$REPO_ROOT"/vyos-*-LS1046A-arm64.iso 2>/dev/null | head -1)
     [ -n "$iso" ] && [ -f "$iso" ] \
-        || die "No ISO matching vyos-*-LS1046A-$FLAVOR-arm64.iso at $REPO_ROOT"
+        || die "No ISO matching vyos-*-LS1046A-arm64.iso at $REPO_ROOT"
     local iso_name; iso_name=$(basename "$iso")
     info "Built: $iso_name ($(du -h "$iso" | cut -f1))"
 

@@ -1,6 +1,6 @@
 # VPP on NXP LS1046A DPAA1 — AF_XDP Integration & HW Offload
 
-**Status:** Draft v0.4. 2026-06-12. Supersedes v0.3. **Dual-dataplane alignment** (`plans/DUAL-DATAPLANE.md`): single dual-dataplane image decided — VPP ships in **every** image (dormant until configured), the per-flavor ISO split retires after DUAL-DATAPLANE M7; §1.3 reworked accordingly. Global ASK↔VPP mutual exclusion added to §4.1. No datapath change.
+**Status:** Draft v0.4. 2026-06-12. Supersedes v0.3. **Dual-dataplane alignment** (`plans/DUAL-DATAPLANE.md`): single dual-dataplane image decided — VPP ships in **every** image (dormant until configured), the per-flavor ISO split is retired (made immediate 2026-06-14, ahead of DUAL-DATAPLANE M7); §1.3 reworked accordingly. Global ASK↔VPP mutual exclusion added to §4.1. No datapath change.
 **Status:** Draft v0.3. 2026-06-01. Supersedes v0.2 (deferred native-VyOS HW-offload CLI to a later phase). Supersedes v0.1 (native plugin proposal — REJECTED, preserved in Appendix A).
 **Target:** VPP 25.10+ with `af_xdp` plugin, Linux 6.18+ (VyOS rolling), ARM64.
 **Pre-requisite spec:** `specs/dpaa1-afxdp-modernization-spec.md` — all datapath and HW offload APIs consumed by this spec are defined there.
@@ -39,7 +39,7 @@ Kernel (single binary, all flavors)
 
 ### 1.3 Dataplane Modes (v0.4 — single dual-dataplane image)
 
-> **DECIDED 2026-06-12 (`plans/DUAL-DATAPLANE.md` §5/§7):** one ISO ships both dataplanes. VPP and `ask.ko` are both present in every image and both dormant by default; the operator's config selects the mode. The historical per-flavor table (v0.3 §1.3) is retired — `version-ask.json`/`version-vpp.json` feeds become aliases of the single image's feed once DUAL-DATAPLANE M7 lands.
+> **DECIDED 2026-06-12 (`plans/DUAL-DATAPLANE.md` §5/§7):** one ISO ships both dataplanes. VPP and `ask.ko` are both present in every image and both dormant by default; the operator's config selects the mode. The historical per-flavor table (v0.3 §1.3) is retired — `version-ask.json`/`version-vpp.json` feeds are now identical aliases of the single image's `version.json` feed (flavor split retired 2026-06-14).
 
 | Mode | Silicon state | Trigger | Datapath | HW Offload (interim) |
 |---|---|---|---|---|
