@@ -521,6 +521,12 @@ cp "$BOARD_PATCH_DIR/0117-fman-load-ctrl-microcode.patch" "$KERNEL_PATCHES/"
 # CCBS cured the stall (no STL/60s, ping 5/5). Keeps the rest of 0115/0116/
 # 0117 — only the 3 KeyGen/CC-scheme files revert. Spec §5.4.
 cp "$BOARD_PATCH_DIR/0118-fman-pcd-cc-revert-ccbs-dispatch.patch" "$KERNEL_PATCHES/"
+# ASK2 M2 step 1: extend the HM op-set (0090a/0099) with 3 additive
+# L3-forward primitives — RMV_ETHERNET, INSRT_GENERIC, IPV4_FORWARD —
+# across all four HM layers. SDK-grounded encodings (NXP fm_manip): single
+# generic HMAN_OC=0x35 HMTD, RMV=0x01000e00 / INSRT=0x02000e00+BE payload /
+# IPV4=0x0c040001 (TTL+L4 checksum). No existing VLAN/MPLS op altered.
+cp "$BOARD_PATCH_DIR/0119-fman-pcd-hm-l3-forward-ops.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
