@@ -241,7 +241,7 @@ All modes run on **Cobalt 100** and rsync the result to LXC 200:/srv/tftp/.
 | `bin/dev-build.sh iso-live [iso]` | Extract kernel+initrd+DTB+squashfs from ISO → push | ~20 s |
 | `bin/dev-build.sh push` | Re-rsync `work/dev-tftp/` to LXC 200 (no rebuild) | ~5 s |
 
-All modes accept `FLAVOR=default|ask|vpp` in the env. Full ISO builds remain on CI (`gh workflow run "VyOS LS1046A build (self-hosted)"`) — they only take ~7 min warm.
+All modes build the single flavor-neutral image. Full ISO builds remain on CI (`gh workflow run "VyOS LS1046A build (self-hosted)"`) — they only take ~7 min warm.
 
 ## Kernel Config: Key Lessons
 
