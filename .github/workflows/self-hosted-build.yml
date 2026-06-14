@@ -7,6 +7,8 @@ name: VyOS LS1046A build (self-hosted)
 # CI must NOT call `az vm deallocate`.
 
 on:
+  schedule:
+    - cron: "0 1 * * 5" 
   workflow_dispatch:
     inputs:
       BUILD_BY:
@@ -16,7 +18,7 @@ on:
         description: 'Version number (auto: YYYY.MM.DD-HHMM-rolling)'
         default: ''
       flavor:
-        description: 'Build flavor: default (mainline DPAA), ask (ASK2 rewrite — scaffold only, builds vanilla VyOS), or vpp (AF_XDP/VPP — placeholder).'
+        description: 'Build flavor: default (mainline DPAA), ask (ASK2 rewrite), or vpp (AF_XDP/VPP).'
         type: choice
         default: 'default'
         options:

@@ -348,7 +348,7 @@ sudo systemctl start fancontrol
 
 ## 3. Built-in diagnostics — the `*-check` scripts
 
-Every ISO ships six self-contained diagnostic reporters in
+Every ISO ships seven self-contained diagnostic reporters in
 `/usr/local/bin/` (sources live in
 [board/scripts/](board/scripts/)). They share one convention:
 human-readable sectioned output with `[OK]`/`[WARN]`/`[FAIL]`/`[SKIP]`
@@ -366,10 +366,11 @@ RNG reads).
 | `caam-check` | CAAM (SEC 5.4) hardware crypto: DT controller node, driver posture (`caam`, `caam_jr` mandatory; `caamalg`/`caamhash`/`caamrng`/`caampkc` optional), active Job Ring count, dmesg banners, CAAM-backed algorithms in `/proc/crypto`, and the hardware RNG (`rng_current` = `caam-rng`, 16-byte sample read). FLAVOR=ask adds a CDX↔SEC FQ wiring section (self-skips elsewhere). | Verifying hardware crypto offload is alive — e.g. before relying on it for IPsec or `/dev/hwrng` entropy. |
 | `xsk-zc-check` | The AF_XDP true-zero-copy RX gate counters (`ethtool -S`, default eth3 eth4): `xsk_zc_eligible` / `xsk_zc_rx_armed` / `xsk_fill_guard_block` / `xsk_zc_rx_recovered` plus the wider `xsk_*` block, rendered as the spec §6.1.12 verdict — **dormant** (no ZC bind; the normal shipping state), **ZC-armed** (preconditions met), or **fault** (`xsk_fill_guard_block > 0` / attach-DMA errors — the ZC reprogram WRITE must stay disabled). | AF_XDP/VPP datapath debugging on the SFP+ ports. Accepts an interface list: `xsk-zc-check eth3`. |
 | `ask-check` | The full ASK2 fast-path chain, layer by layer in boot order: flavor/kernel posture, the four in-tree patches, `ask.ko`, `ask_bridge.ko`, FMan PCD subsystem, CAAM QI sharing, dpaa-eth flow_block, xfrm offload, `askd`, `ask-cli`, an nft `flags offload` round trip, and dmesg integrity. Uses an extra `[TODO]` tag for milestones not yet landed. | FLAVOR=ask images only (self-skips elsewhere). Tracks ASK2 bring-up progress — `[TODO]` failures map to specific PR rows in `plans/ASK2-IMPLEMENTATION.md`. |
+| `firmware-check` | The complete boot-firmware inventory below the OS: board/SoC identity (DT model, SVR, silicon rev), running U-Boot version vs the copy embedded in QSPI flash, the full `/proc/mtd` partition map with per-partition fingerprints (RCW/PBL preamble, env CRC, FMan-ucode QEF header, recovery-DTB FDT magic, recovery kernel), a deep decode of the running FMan microcode (id, length, SoC code, **proprietary 210.x vs open-source 106.x** classification, md5) cross-checked against the on-flash copy and the kernel's `FMan PCD caps` probe, boot-critical U-Boot env variables + boot targets, and the `/boot/vyos.env` image selector vs the running image. | After any firmware/flash operation, before reporting a bug, or when `add system image` boot selection misbehaves. Run with `sudo` for the full report (flash reads + `fw_printenv`); unprivileged runs skip those sections. A `WARN` on running-vs-flash ucode mismatch means a flash update is pending a reboot. |
 
 ```bash
 # Run everything that applies to this board/flavor
-for c in dpaa1-check sfp-check fan-check caam-check xsk-zc-check ask-check; do
+for c in dpaa1-check sfp-check fan-check caam-check xsk-zc-check ask-check firmware-check; do
     echo "== $c =="; "$c"; echo "rc=$?"
 done
 
@@ -379,7 +380,7 @@ fan-check >/dev/null || logger -p user.err "fan-check failed rc=$?"
 
 > When adding a new diagnostic, mirror this style (sectioned report,
 > tag set, 0/1/2 exit convention) and wire the install in
-> `bin/ci-setup-vyos-build.sh` alongside the existing six.
+> `bin/ci-setup-vyos-build.sh` alongside the existing seven.
 
 ---
 

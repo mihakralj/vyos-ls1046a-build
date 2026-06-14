@@ -71,38 +71,38 @@ MIN_FRAME_MS = 5       # hard floor on per-frame sleep (200 Hz cap on writes)
 # idle = faint grey baseline (0), then red→orange→yellow through mid
 # traffic, transitioning to cool/blue-white at peak load.
 PALETTE = (
-    "01010100",   #  0  idle: faint dim gray baseline (min traffic)
-    "08000000",   #  1  very dim red
-    "10000000",   #  2  dim red
-    "18000000",   #  3  soft red
-    "22000000",   #  4  red
-    "33000000",   #  5  bright red
-    "48000000",   #  6  vivid red
-    "66000000",   #  7  intense red (slow traffic phase)
-    "88000000",   #  8  hot red
-    "AA220000",   #  9  red-orange
-    "CC440000",   # 10  deep orange
-    "EE660000",   # 11  orange
-    "FF880000",   # 12  golden orange
-    "FFAA0000",   # 13  amber
-    "FFCC0000",   # 14  yellow-orange
-    "FFEE0000",   # 15  warm yellow (moderate traffic phase)
-    "FFFF0000",   # 16  pure yellow
-    "FFFF0022",   # 17  yellow + faint white heat
-    "FFFF0044",   # 18  bright yellow-white
-    "FFFF0066",   # 19  intense yellow-white
-    "FFFF0088",   # 20  blinding yellow-white
-    "EEEE11AA",   # 21  shifting cooler (heavy traffic phase)
-    "DDDD22BB",   # 22  warm white transitioning
-    "CCCC44CC",   # 23  neutral white
-    "AAAA66DD",   # 24  cool white
-    "888888EE",   # 25  bright cool white
-    "6666AAFF",   # 26  ice blue-white
-    "4444BBFF",   # 27  electric blue-white
-    "2222CCFF",   # 28  neon blue-white (overdrive phase)
-    "1111DDFF",   # 29  plasma blue
-    "0808EEFF",   # 30  supernova blue
-    "0000FFFF",   # 31  screaming bright blue-white hot (max traffic)
+    "00020000",   #  0  idle: v.v.v. dim green (min traffic)
+    "00080000",   #  1  v.v. dim light green
+    "00100000",   #  2  v. dim light green
+    "00200000",   #  3  dim green
+    "08200000",   #  4  dim green/yellow
+    "10200000",   #  5  dim yellow/green
+    "20180000",   #  6  dim yellow
+    "30100000",   #  7  dim yellow/orange (slow traffic phase)
+    "40080000",   #  8  orange
+    "50000000",   #  9  dark orange/red
+    "60080000",   # 10  dark orange/amber
+    "80100000",   # 11  dark amber
+    "a0080000",   # 12  amber
+    "a0100000",   # 13  bright amber
+    "a0100200",   # 14  amber/pink
+    "a0100800",   # 15  pink/amber (moderate traffic phase)
+    "80101000",   # 16  bright pink
+    "60101000",   # 17  pink/purple
+    "60101804",   # 18  purple
+    "40081808",   # 19  purple/white
+    "20081010",   # 20  white/purple
+    "08000820",   # 21  dim white (heavy traffic phase)
+    "00000040",   # 22  off-white
+    "00002040",   # 23  neutral white
+    "00004040",   # 24  cool white
+    "00006020",   # 25  ice white
+    "00007010",   # 26  ice blue
+    "00009008",   # 27  light blue
+    "0000a000",   # 28  dim dark blue
+    "0000c000",   # 29  dark blue
+    "0000e000",   # 30  bright Blue
+    "0000ff00",   # 31  v.bright Blue (max traffic)
 )
 assert all(re.fullmatch(r"[0-9a-fA-F]{8}", c) for c in PALETTE), \
     "palette entries must be 8 hex digits each"

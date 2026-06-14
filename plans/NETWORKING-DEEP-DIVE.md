@@ -81,25 +81,26 @@ graph TB
 
 FMan's Parser runs on a proprietary RISC processor inside FMan with its own instruction
 RAM (IRAM) and multi-user RAM (MURAM). U-Boot loads the microcode binary from SPI flash
-(partition `mtd4`, file `fsl_fman_ucode_ls1046_r1.0_106_4_18.bin`) and injects it into
+(partition `mtd3` "fman-ucode" @ flash offset 0x400000, file `fsl_fman_ucode_ls1046a_r1.0_210.10.1.bin` — the proprietary NXP LSDK blob this board actually ships; `mtd4` is the recovery-DTB, and the open-source `106.4.18` baseline was only flashed transiently during M3-3b wedge debugging) and injects it into
 the DTB `fsl,fman-firmware` node before kernel handoff.
 
-**Standard microcode** (what ships with the board):
+**Open-source baseline microcode** (`106.4.18`, the public `qoriq-fm-ucode` line — NOT what this board ships; classify-only feature set):
 - L2 Ethernet header parsing (VLAN, QinQ, MPLS, PPPoE)
 - L3 IP parsing (IPv4/IPv6 options, fragments, tunnels)
 - L4 protocol identification (TCP, UDP, SCTP, GRE)
 - Produces Parse Result → feeds KeyGen hash → feeds QMan enqueue
 - Does NOT make forwarding decisions — it only **classifies**
 
-**ASK-enabled microcode** (NXP v210.10.1, proprietary):
-- Everything the standard microcode does, PLUS:
+**Proprietary microcode** (NXP v210.10.1 — the blob this board actually ships, loaded from `mtd3` above):
+- Everything the open-source baseline does, PLUS:
 - Extended Coarse Classifier support with larger flow tables
 - Hooks for CDX-programmed "exact match" entries that trigger **direct FMan port-to-port forwarding**
 - When a classified frame matches a CDX-installed flow entry, FMan routes it directly to the destination TX port via BMI — zero CPU involvement
 
-The critical distinction: **standard microcode classifies but always enqueues to QMan
-(which then delivers to a CPU)**. ASK microcode classifies and can optionally **short-circuit
-the frame directly to a TX port**, bypassing QMan and all software entirely.
+The critical distinction: **the open-source baseline classifies but always enqueues to QMan
+(which then delivers to a CPU)**. The proprietary 210.10.1 microcode classifies and can optionally
+**short-circuit the frame directly to a TX port**, bypassing QMan and all software entirely (the
+Advance-PCD / CDX direct-forward path — gated on FE/ehash structures; see the spec §5.4 archaeology).
 
 ---
 

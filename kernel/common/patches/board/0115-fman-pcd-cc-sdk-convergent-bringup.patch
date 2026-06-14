@@ -1,0 +1,676 @@
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+index b628ad2..b5830be 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_fman_caps.c
+@@ -28,6 +28,7 @@
+ 
+ #include "dpaa_fman_caps.h"
+ #include "fman.h"
++#include "fman_port.h"
+ 
+ /* dpaa_fman_caps.force=<u32>
+  *
+@@ -266,6 +267,7 @@ int fman_cc_tree_install(struct fman *fm, u8 port_id,
+  const struct fman_cc_static_tree *spec)
+ {
+ struct fman_pcd_cc_hw_spec *hw;
++struct fman_port *rxport;
+ struct fman_pcd *pcd;
+ u32 cc_base;
+ u16 i;
+@@ -297,21 +299,32 @@ kfree(hw);
+ if (err)
+ return err;
+ 
+-/*
+- * Wire the datapath: graft the port's existing RSS KeyGen scheme
+- * onto the freshly installed tree (KGSE_CCBS <- root group-table
+- * MURAM offset; HW-proven implicit CC dispatch).  Without this
+- * graft the tree is installed but never walked - the exact silent
+- * non-enforcement failure mode the policer had (BUG 3 steering).
+- */
+-err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
+-if (!err)
+-err = fman_pcd_kg_port_attach_cc(pcd, port_id, cc_base);
+-if (err) {
+-fman_pcd_cc_static_destroy(pcd, port_id);
+-return err;
+-}
+-return 0;
++	/*
++	 * Wire the datapath, SDK FM_PORT_SetPCD order (0115): bind the CC
++	 * root at the RX port (FMBM_RCCB + parser CC-enable bit), THEN flip
++	 * the port's RSS KeyGen scheme to CC next-engine (KGSE_MODE NIA =
++	 * FM_CTL|AC_CC, CCOBASE = 0, CCBS = 0).  Without both halves the
++	 * tree is installed but never walked - the exact silent
++	 * non-enforcement failure mode the policer had (BUG 3 steering).
++	 */
++	err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
++	if (!err) {
++		rxport = fman_port_lookup_rx(fm, port_id);
++		if (!rxport)
++			err = -ENODEV;
++	}
++	if (!err)
++		err = fman_port_set_cc_base(rxport, cc_base);
++	if (!err) {
++		err = fman_pcd_kg_port_attach_cc(pcd, port_id, cc_base);
++		if (err)
++			(void)fman_port_set_cc_base(rxport, 0);
++	}
++	if (err) {
++		fman_pcd_cc_static_destroy(pcd, port_id);
++		return err;
++	}
++	return 0;
+ }
+ EXPORT_SYMBOL_GPL(fman_cc_tree_install);
+ 
+@@ -336,14 +349,22 @@ if (!fm)
+ return;
+ if (!(dpaa_fman_get_caps() & FMAN_CAP_CC_EXACT_MATCH))
+ return;
+-pcd = fman_get_pcd(fm);
+-if (pcd)
+-/*
+- * Detach the KeyGen graft FIRST so the silicon never walks a freed
+- * tree, then release the MURAM tables.
+- */
+-(void)fman_pcd_kg_port_detach_cc(pcd, port_id);
+-fman_pcd_cc_static_destroy(pcd, port_id);
++	pcd = fman_get_pcd(fm);
++	if (pcd) {
++		struct fman_port *rxport;
++
++		/*
++		 * Teardown order (0115): detach the KeyGen graft FIRST so no
++		 * new frame dispatches into CC, then clear the port's
++		 * FMBM_RCCB root (and its parser CC-enable bit), then release
++		 * the MURAM tables.
++		 */
++		(void)fman_pcd_kg_port_detach_cc(pcd, port_id);
++		rxport = fman_port_lookup_rx(fm, port_id);
++		if (rxport)
++			(void)fman_port_set_cc_base(rxport, 0);
++	}
++	fman_pcd_cc_static_destroy(pcd, port_id);
+ }
+ EXPORT_SYMBOL_GPL(fman_cc_tree_destroy);
+ 
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+index e4c488e..05c97eb 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+@@ -109,19 +109,32 @@
+  */
+ #define KG_SCH_MODE_NIA_PLCR		0x40000000
+ 
+-/* Coarse Classification (CC) chaining - HW-PROVEN recipe (LS1046A FMan v3,
+- * silicon captures 2026-05-23/25): the KGSE_MODE NIA must STAY at the BMI
+- * direct-enqueue default (EN | NIA_ENG_BMI | NIA_BMI_AC_ENQ_FRAME =
+- * 0x80500002).  The CC walk is dispatched IMPLICITLY whenever KGSE_CCBS is
+- * non-zero: CCBS carries the MURAM byte offset of the CC root group table,
+- * and the optional CCOBASE field (KGSE_MODE bits 30:24, SDK fm_kg.c)
+- * selects the group index within it (0 for the single-group static tree of
+- * board patch 0098).  The alternative theory - flipping the NIA engine
+- * bits to FM_CTL|AC_CC (mode 0x80000006/0x80000000) - was DISPROVEN on
+- * hardware: it stalled dispatch at a few hundred frames, while the
+- * CCBS-only graft carried 24M+ frames through CC match -> silicon forward.
+- * The USDPAA SDK concurs: it keeps NIA = BMI|ENQ_FRAME when grafting and
+- * only ORs in CCOBASE.
++/*
++ * Next-engine = Coarse Classification NIA (SDK sdk_fm_common.h): engine
++ * FM_CTL (0x00000000) + action-code CC (0x6).  The FMan controller
++ * microcode walks the CC root named by the port's FMBM_RCCB.
++ */
++#define NIA_ENG_FM_CTL			0x00000000
++#define NIA_FM_CTL_AC_CC		0x00000006
++
++/* Coarse Classification (CC) chaining - SDK-convergent model (0115).
++ *
++ * sdk_fm_kg.c FmPcdKgBuildScheme() (lines 1097-1113, 1206-1212): when a
++ * scheme's next engine is CC the KGSE_MODE NIA is ENG_FM_CTL | AC_CC (the
++ * FMan controller runs the CC walker), CCOBASE (KGSE_MODE bits 30:24)
++ * carries the root group BASE ENTRY index, and KGSE_CCBS carries the
++ * group-bits select mask (grpBits) - NOT a pointer.  The CC root MURAM
++ * offset is named per-port in FMBM_RCCB (fman_port_set_cc_base()).
++ *
++ * HISTORY: the pre-0115 model ("NIA stays BMI direct-enqueue, KGSE_CCBS
++ * carries the root MURAM offset, CC fires implicitly") was retired by the
++ * 2026-06-11 SDK init-delta analysis: on the mainline driver it produced
++ * the M3-3b FPM port-stall, and the ask20 silicon captures credited to it
++ * ran on the SDK kernel whose own FM_PCD bring-up had already programmed
++ * FMBM_RCCB and SDK-format root ADs.  The lone FM_CTL|AC_CC experiment
++ * that "stalled dispatch" ran without FMBM_RCCB and with a non-SDK root
++ * AD, so the walker chased a garbage root - it disproves nothing about
++ * the SDK encoding when all three pieces change together.
+  */
+ #define KG_SCH_MODE_CCOBASE_SHIFT	24
+ 
+@@ -553,17 +566,16 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+ 			tmp_reg |= KG_SCH_MODE_NIA_PLCR | NIA_ENG_PLCR;
+ 			scheme_regs.kgse_ppc = scheme->policer_profile_id;
+ 		} else if (scheme->next_engine == 2) {
+-			/* Next engine = Coarse Classification.  HW-proven
+-			 * recipe (see the CC chaining comment above): keep
+-			 * the BMI direct-enqueue NIA - the CC walk fires
+-			 * implicitly because KGSE_CCBS (set below) is
+-			 * non-zero - and OR in the CCOBASE group index
+-			 * (0 for the single-group static tree).  Flipping
+-			 * the NIA to FM_CTL|AC_CC stalls dispatch.
++			/* Next engine = Coarse Classification: SDK-convergent
++			 * encoding (sdk_fm_kg.c:1206-1212): NIA = ENG_FM_CTL |
++			 * AC_CC so the FMan controller walks the CC root named
++			 * by the port's FMBM_RCCB; CCOBASE carries the root
++			 * group BASE ENTRY index (0 for the single-group
++			 * static tree).  See the CC chaining comment above.
+ 			 */
+-			tmp_reg |= ENQUEUE_KG_DFLT_NIA |
+-				(scheme->cc_base_offset <<
+-				 KG_SCH_MODE_CCOBASE_SHIFT);
++			tmp_reg |= NIA_ENG_FM_CTL | NIA_FM_CTL_AC_CC |
++				   (scheme->cc_base_offset <<
++				    KG_SCH_MODE_CCOBASE_SHIFT);
+ 		} else {
+ 			/* Enqueue frame NIA */
+ 			tmp_reg |= ENQUEUE_KG_DFLT_NIA;
+@@ -582,10 +594,10 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+ 	 * policer-attach (see BUG 3a above). For the non-policer paths PPC stays 0
+ 	 * from the memset above.
+ 	 */
+-	/* KGSE_CCBS: MURAM byte offset of the CC root group table.  A
+-	 * non-zero CCBS is what dispatches the frame through the CC engine
+-	 * on FMan v3 (HW-proven; the NIA stays BMI direct-enqueue).  Zero
+-	 * (from the memset above) on every non-CC path.
++	/* KGSE_CCBS: CC group-bits select mask (SDK kgse_ccbs = grpBits,
++	 * sdk_fm_kg.c:1206-1212) - NOT a pointer.  0 for the single-group
++	 * static tree (numOfDistinctionUnits = 0).  The CC root MURAM offset
++	 * lives in the port's FMBM_RCCB (fman_port_set_cc_base()).
+ 	 */
+ 	if (enable && scheme->next_engine == 2)
+ 		scheme_regs.kgse_ccbs = scheme->cc_bits_sel;
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h b/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
+index a78fedd5..795d15d 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen_internal.h
+@@ -89,10 +89,11 @@ struct keygen_scheme {
+ 				 * valid when next_engine == 2. 0 for the
+ 				 * static single-group tree.
+ 				 */
+-	u32 cc_bits_sel;	/* MURAM byte offset of the CC root group
+-				 * table (KGSE_CCBS).  Non-zero dispatches
+-				 * the CC walk (next_engine == 2); the NIA
+-				 * stays BMI direct-enqueue (HW-proven).
++	u32 cc_bits_sel;	/* KGSE_CCBS group-bits select mask (SDK
++				 * grpBits; 0 for the single-group static
++				 * tree).  NOT a pointer - the CC root
++				 * MURAM offset is programmed at the port's
++				 * FMBM_RCCB by fman_port_set_cc_base().
+ 				 */
+ };
+ 
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+index fb8dd6f..767c402 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc.c
+@@ -83,42 +83,51 @@
+ #define CC_AD_ENTRY_SIZE	16
+ #define CC_KEY_SIZE		16
+ 
+-/* CONT_LOOKUP action-descriptor words (RM 8.7.4.1). */
+-#define CC_AD_W2_CONT_LOOKUP	0x40000000u
+-
+ /*
+- * Leaf (result) action-descriptor field layout — RM 8.7.4.3 Table 8-119.
+- *
+- * The 16-byte MURAM-resident AD record is four big-endian 32-bit words:
+- *
+- *   0x0  u32 fqid          - egress FQID for RESULT_* actions (24-bit)
+- *   0x4  u32 plcr_profile  - policer profile id + enable bits
+- *   0x8  u32 nia           - type[31:30] | flags[29:4] | opcode[3:0]
+- *   0xc  u32 res           - reserved / HMTD pointer when NADEN is set
++ * CONT_LOOKUP action descriptor (RM 8.7.4.1; SDK FillAdOfTypeContLookup,
++ * sdk_fm_cc.c:348-373).  SDK-convergent layout (0115):
++ *   word0 = CONT_LOOKUP | (sizeOfExtraction - 1) << 24 | AD-table offset
++ *   word1 = numKeys << 24 | LCL_MASK | keys-match-table offset
++ *   word2 = prsArrayOffset << 24 | offset << 16 | parseCode
++ *   word3 = 4-byte global mask (0 = none; per-key local masks apply)
+  *
+- * type bits nia[31:30]: 00 = RESULT_CONTRL_FLOW (enqueue to fqid),
+- * 01 = CONT_LOOKUP (next CC node), 10 = RESULT_DATA_FLOW, 11 = BYPASS
+- * (drop / discard).  NADEN in nia[29] redirects the silicon walker
+- * through the 16-byte HMTD at @res before enqueueing to @fqid (the
+- * CC->HM chain, spec sec 5.4 order Parser->CC->HM->QMan).
+- *
+- * HW-PROVEN (ask20 silicon captures PR14z20/PR14z22, 2026-05-23): 24M+
+- * frames were CC-matched and silicon-forwarded through exactly this
+- * encoding (RESULT_CF + fqid for plain forward; RESULT_CF | NADEN +
+- * fqid + res=HMTD for the manip-chained forward) under the KGSE_CCBS
+- * graft model that board patch 0106 wires.  Cross-ref SDK fm_cc.c
+- * GetAdOfTypeResult() / NextStepAd().
++ * For "compare the KeyGen-extracted composite" the SDK parse code is
++ * CC_PC_GENERIC_IC_GMASK (0x2B) with the extraction offset folded to
++ * Internal-Context byte 0x50 (sdk_fm_cc.c GetGenParseCode(): IC offset
++ * 0x50 for CC_PRIVATE_INFO_IC_KEY_EXACT_MATCH, then "offset +=
++ * prsArrayOffset; prsArrayOffset = 0" for GENERIC_IC codes, :4554-4560).
++ */
++#define CC_AD_CONT_LOOKUP	0x40000000u
++#define CC_AD_W1_LCL_MASK	0x00800000u
++#define CC_PC_GENERIC_IC_GMASK	0x2Bu
++#define CC_IC_KG_KEY_OFFSET	0x50u
++
++/*
++ * Leaf (result) action-descriptor field layout - RM 8.7.4.3 Table 8-119.
++ * Four big-endian 32-bit words; see cc_write_leaf_ad() for the
++ * SDK-convergent encodings (0115).
+  */
+ #define CC_AD_OFF_FQID		0x0
+ #define CC_AD_OFF_PLCR		0x4
+ #define CC_AD_OFF_NIA		0x8
+ #define CC_AD_OFF_RES		0xc
+ 
+-#define CC_AD_NIA_TYPE_RESULT_CF	0x00000000u	/* enqueue to fqid */
+-#define CC_AD_NIA_TYPE_BYPASS		0xc0000000u	/* drop / discard  */
+-#define CC_AD_NIA_NADEN			0x20000000u	/* walk HMTD @res  */
+ #define CC_AD_FQID_MASK			0x00ffffffu	/* FQIDs are 24-bit */
+ 
++/*
++ * RESULT AD constants (SDK FillAdOfTypeResult, sdk_fm_cc.c:2227-2343).
++ * Every terminating AD must carry a real NIA - BMI engine | enqueue-frame
++ * action, plus NO_OM_VSPE on DPAA v1.1+ silicon.  DATA_FLOW in word0 means
++ * "enqueue to the FQID the KeyGen scheme already computed" (the RSS
++ * fall-through); CONTRL_FLOW (0) means "enqueue to the FQID in word0".
++ */
++#define CC_AD_RES_DATA_FLOW		0x80000000u	/* word0: KG-FQID fall-through */
++#define CC_AD_RES_PLCR_DIS		0x20000000u	/* word0: no policer override  */
++#define CC_AD_RES_NO_OM_VSPE		0x02000000u	/* nia: DPAA v1.1+ mandatory   */
++#define CC_AD_RES_NADEN			0x20000000u	/* nia: walk HMTD first        */
++#define CC_AD_RES_EXTENDED		0x80000000u	/* nia: extended (manip) mode  */
++#define CC_NIA_BMI_ENQ_FRAME		0x00500002u	/* NIA_ENG_BMI | AC_ENQ_FRAME  */
++
+ /**
+  * struct fman_pcd_cc_tree - one port's static CC tree handle (private).
+  * @node:          anchor on pcd->cc_trees (protected by pcd->lock)
+@@ -240,75 +249,75 @@ static void cc_pack_key(void __iomem *match, u16 idx,
+ }
+ 
+ /*
+- * Encode one leaf (result) action descriptor (RM 8.7.4.3) at AD row @idx.
++ * Encode one leaf (result) action descriptor at AD row @idx - SDK-convergent
++ * RESULT AD (0115; SDK FillAdOfTypeResult, sdk_fm_cc.c:2227-2343).
+  *
+- * Two regimes, selected by @fqid:
+- *
+- * @fqid != 0 — the REAL hardware enqueue-AD (per-key FQ steering):
+- *   word0 (0x0) = fqid & CC_AD_FQID_MASK   (target frame queue)
+- *   word1 (0x4) = 0                        (no policer pass)
+- *   word2 (0x8) = RESULT_CF [| NADEN]      (enqueue; walk HMTD first
+- *                                           when @hm chains an HM node)
+- *   word3 (0xc) = hm                       (HMTD MURAM offset; 0 = none)
+- *   A silicon CC HIT on this row enqueues the frame directly to @fqid,
+- *   bypassing the KeyGen scheme's hash dispatch entirely.  This is the
+- *   ask20-HW-proven encoding (24M+ frames silicon-forwarded, PR14z22).
++ * @fqid != 0 - hardware per-key FQ steering (SDK "DONE/ENQ_FRAME with
++ * overrideFqid"):
++ *   word0 = CONTRL_FLOW (0) | fqid     (enqueue to this exact FQ)
++ *   word1 = hm ? hm >> 4 : 0           (HMTD MURAM offset, 16-byte units)
++ *   word2 = NIA: BMI|ENQ_FRAME | NO_OM_VSPE [| NADEN|EXTENDED when @hm]
++ *   word3 = 0
+  *
+- * @fqid == 0 — graceful fall-through (DUT-validated 2026-06-10): the
+- *   legacy soft encoding whose word0 is a reserved-shape token, NOT a
+- *   live FQID; the walk completes and the frame proceeds to the normal
+- *   scheme dispatch (hashed RX FQs).  Kept byte-identical to the 0098
+- *   encoding the 0107 lifecycle validation ran against:
+- *   word0 = (qband << 16) | (hm_present << 8) | 0x1, word1 = hm,
+- *   word2 = word3 = 0.  An HM chain cannot be honoured in this regime
+- *   (NADEN needs a target FQID for the post-manip enqueue).
++ * @fqid == 0 - RSS fall-through (SDK "DONE/ENQ_FRAME without override"):
++ *   word0 = DATA_FLOW | PLCR_DIS       (use the KG-computed hash FQID)
++ *   word1 = 0
++ *   word2 = NIA: BMI|ENQ_FRAME | NO_OM_VSPE
++ *   word3 = 0
++ * Used for both the miss row and "match but do not steer" keys; the frame
++ * lands on the same hashed RX FQ the scheme would have picked anyway.
++ * Replaces the pre-0115 soft-token w0 encoding, which silicon never walked
++ * (the pre-0115 dispatch model never actually reached CC).  @qband is
++ * retained for API stability but unused.
+  *
+- * The miss slot (last AD row) uses the same encoder: a non-zero
+- * @fqid there steers every non-matching frame, fqid 0 leaves miss
+- * traffic on the port's existing RSS path.
++ * An HM chain with @fqid == 0 cannot be honoured (the post-manip enqueue
++ * needs an explicit target FQ); callers reject that combination upstream.
+  */
+ static void cc_write_leaf_ad(void __iomem *ad, u16 idx, u32 fqid,
+ 			     u16 qband, u32 hm)
+ {
+ 	u32 __iomem *w = (u32 __iomem *)((u8 __force *)ad +
+ 					 (size_t)idx * CC_AD_ENTRY_SIZE);
++	u32 nia = CC_NIA_BMI_ENQ_FRAME | CC_AD_RES_NO_OM_VSPE;
+ 
+ 	if (fqid) {
+-		u32 nia = CC_AD_NIA_TYPE_RESULT_CF;
+-
+ 		if (hm)
+-			nia |= CC_AD_NIA_NADEN;
++			nia |= CC_AD_RES_NADEN | CC_AD_RES_EXTENDED;
+ 		iowrite32be(fqid & CC_AD_FQID_MASK, &w[0]);
+-		iowrite32be(0, &w[1]);
++		iowrite32be(hm ? (hm >> 4) : 0, &w[1]);
+ 		iowrite32be(nia, &w[2]);
+-		iowrite32be(hm, &w[3]);
++		iowrite32be(0, &w[3]);
+ 	} else {
+-		u32 w0 = ((u32)qband << 16) | ((hm ? 1u : 0u) << 8) | 0x1u;
+-
+-		iowrite32be(w0, &w[0]);
+-		iowrite32be(hm, &w[1]);
+-		iowrite32be(0, &w[2]);
++		iowrite32be(CC_AD_RES_DATA_FLOW | CC_AD_RES_PLCR_DIS, &w[0]);
++		iowrite32be(0, &w[1]);
++		iowrite32be(nia, &w[2]);
+ 		iowrite32be(0, &w[3]);
+ 	}
+ }
+ 
+ /*
+- * Write the tree group-table[0] CONT_LOOKUP entry (RM 8.7.4.1).  This is the
+- * single entry the CC walker reads first; it points at the match-key table
+- * and the AD table and carries the populated key count + key width.
++ * Write the tree group-table[0] entry as a standard SDK CONT_LOOKUP AD
++ * (0115; SDK NextStepAd() -> FillAdOfTypeContLookup(), sdk_fm_cc.c:348-373).
++ * This is the first AD the CC walker fetches after the KeyGen dispatch
++ * (root base = the port's FMBM_RCCB, entry index = KGSE_MODE CCOBASE = 0);
++ * it names the node's AD table and keys-match table and tells the walker
++ * WHAT to compare: the KeyGen-extracted composite deposited in the frame's
++ * Internal Context at byte 0x50 (parse code GENERIC_IC_GMASK), with
++ * per-key local masks (LCL_MASK).
+  *
+- *   word0 = (num_keys << 24) | (match_off & 0xFFFFFF)
+- *   word1 = (ad_off    & 0xFFFFFF)
+- *   word2 = CONT_LOOKUP | ((CC_KEY_SIZE - 1) << 24)
+- *   word3 = 0
++ * The pre-0115 bespoke layout (w0 = num_keys<<24|match_off, w1 = ad_off,
++ * w2 = CONT_LOOKUP|keylen) was a root cause of the M3-3b FPM port-stall:
++ * the walker dereferenced w0's type bits as garbage.
+  */
+ static void cc_write_group0(struct fman_pcd_cc_tree *t)
+ {
+ 	u32 __iomem *w = (u32 __iomem *)t->group;
+ 
+-	iowrite32be(((u32)t->num_keys << 24) | (t->match_off & 0xFFFFFF), &w[0]);
+-	iowrite32be(t->ad_off & 0xFFFFFF, &w[1]);
+-	iowrite32be(CC_AD_W2_CONT_LOOKUP | ((CC_KEY_SIZE - 1) << 24), &w[2]);
++	iowrite32be(CC_AD_CONT_LOOKUP | ((CC_KEY_SIZE - 1) << 24) |
++		    (t->ad_off & 0xFFFFFF), &w[0]);
++	iowrite32be(((u32)t->num_keys << 24) | CC_AD_W1_LCL_MASK |
++		    (t->match_off & 0xFFFFFF), &w[1]);
++	iowrite32be((CC_IC_KG_KEY_OFFSET << 16) | CC_PC_GENERIC_IC_GMASK, &w[2]);
+ 	iowrite32be(0, &w[3]);
+ }
+ 
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+index c9240cf..24251a4 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_cc_test.c
+@@ -46,6 +46,7 @@
+ #include <linux/fsl/fman_pcd.h>
+ #include "fman.h"
+ #include "fman_pcd_internal.h"
++#include "fman_port.h"
+ 
+ static int cc_test_show(struct seq_file *m, void *v)
+ {
+@@ -67,6 +68,7 @@ static int cc_test_install(struct fman_pcd *pcd, const char *args)
+ 	struct fman_pcd_cc_hw_spec *spec;
+ 	char src_str[40], dst_str[40];
+ 	u32 src_ip, dst_ip, cc_base;
++	struct fman_port *rxport;
+ 	u32 fqid = 0;
+ 	u8 port_id, proto;
+ 	u16 qband, dport;
+@@ -105,21 +107,31 @@ static int cc_test_install(struct fman_pcd *pcd, const char *args)
+ 	/* Non-zero = REAL per-key enqueue-AD (HIT steers to this FQ). */
+ 	spec->keys[0].target_fqid = fqid;
+ 
+-	/* The exact 0106 productive sequence (fman_cc_tree_install()). */
++	/* The exact 0115 productive sequence (fman_cc_tree_install()). */
+ 	err = fman_pcd_cc_static_install(pcd, port_id, spec);
+ 	kfree(spec);
+ 	if (err)
+ 		return err;
+ 
+ 	err = fman_pcd_cc_static_get_base(pcd, port_id, &cc_base);
++	if (!err) {
++		rxport = fman_port_lookup_rx(fman_pcd_get_fman(pcd), port_id);
++		if (!rxport)
++			err = -ENODEV;
++	}
+ 	if (!err)
++		err = fman_port_set_cc_base(rxport, cc_base);
++	if (!err) {
+ 		err = fman_pcd_kg_port_attach_cc(pcd, port_id, cc_base);
++		if (err)
++			(void)fman_port_set_cc_base(rxport, 0);
++	}
+ 	if (err) {
+ 		fman_pcd_cc_static_destroy(pcd, port_id);
+ 		return err;
+ 	}
+ 
+-	pr_info("fman_pcd cc_test: port 0x%02x tree installed, KGSE_CCBS grafted to 0x%x, key fqid 0x%x%s\n",
++	pr_info("fman_pcd cc_test: port 0x%02x tree installed, FMBM_RCCB bound to 0x%x, KG CC-dispatched, key fqid 0x%x%s\n",
+ 		port_id, cc_base, fqid,
+ 		fqid ? " (hardware enqueue-AD)" : " (soft fall-through)");
+ 	return 0;
+@@ -144,8 +156,14 @@ static ssize_t cc_test_write(struct file *file, const char __user *buf,
+ 	kbuf[strcspn(kbuf, "\n")] = 0;
+ 
+ 	if (sscanf(kbuf, "clear %hhi", &port_id) == 1) {
+-		/* 0106 teardown order: detach the graft FIRST. */
++		struct fman_port *rxport;
++
++		/* 0115 teardown order: detach the graft FIRST, then unbind
++		 * the port's FMBM_RCCB root, then free the MURAM tables. */
+ 		(void)fman_pcd_kg_port_detach_cc(pcd, port_id);
++		rxport = fman_port_lookup_rx(fman_pcd_get_fman(pcd), port_id);
++		if (rxport)
++			(void)fman_port_set_cc_base(rxport, 0);
+ 		fman_pcd_cc_static_destroy(pcd, port_id);
+ 		pr_info("fman_pcd cc_test: port 0x%02x graft detached, tree destroyed\n",
+ 			port_id);
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+index aed5d84..81863bf 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+@@ -395,12 +395,13 @@ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
+ 
+ 	/*
+ 	 * Graft this KeyGen scheme onto the installed Coarse Classification
+-	 * tree using the HW-proven recipe (see fman_keygen.c CC chaining
+-	 * comment): KGSE_CCBS <- MURAM offset of the tree's root group
+-	 * table; the NIA stays BMI direct-enqueue and the CC walk fires
+-	 * implicitly because CCBS is non-zero.  The matched AD result then
+-	 * carries the destination RX FQID; a miss falls through to the
+-	 * tree's miss action.
++	 * tree, SDK-convergent (0115): KGSE_MODE NIA flips to FM_CTL|AC_CC
++	 * with CCOBASE = root group base entry index (0) and KGSE_CCBS =
++	 * group-bits mask (0 for the single-group static tree).  The root
++	 * MURAM offset itself is programmed at the RX port's FMBM_RCCB by
++	 * fman_port_set_cc_base() - callers bind the port BEFORE this attach
++	 * (SDK FM_PORT_SetPCD order).  The matched AD result carries the
++	 * destination RX FQID; a miss falls through to the tree's miss action.
+ 	 *
+ 	 * Same pattern as the policer (next_engine == 1) path: mutate the
+ 	 * internal slot then re-run keygen_scheme_setup(enable = true) under
+@@ -414,7 +415,7 @@ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
+ 
+ 	slot->next_engine    = 2;
+ 	slot->cc_base_offset = 0;
+-	slot->cc_bits_sel    = fman_pcd_cc_tree_group_table_off(cc);
++	slot->cc_bits_sel    = 0;	/* grpBits: single-group tree */
+ 
+ 	/*
+ 	 * keygen_scheme_setup() rejects enable on an already-used scheme
+@@ -608,7 +609,7 @@ int fman_pcd_kg_port_attach_cc(struct fman_pcd *pcd, u8 hw_port_id,
+ 	u8 saved_engine, id;
+ 	int err;
+ 
+-	if (!pcd || !cc_group_off)
++	if (!pcd)
+ 		return -EINVAL;
+ 	if (hw_port_id < 0x08 || hw_port_id >= 0x28)
+ 		return -EINVAL;
+@@ -631,15 +632,17 @@ int fman_pcd_kg_port_attach_cc(struct fman_pcd *pcd, u8 hw_port_id,
+ 	saved_ccbs   = slot->cc_bits_sel;
+ 
+ 	/*
+-	 * HW-proven CC graft (see fman_keygen.c CC chaining comment):
+-	 * KGSE_CCBS <- MURAM offset of the CC root group table; the NIA
+-	 * stays BMI direct-enqueue and the CC walk fires implicitly.
++	 * SDK-convergent CC graft (0115, see fman_keygen.c CC chaining
++	 * comment): KGSE_MODE NIA = FM_CTL|AC_CC, CCOBASE = 0, KGSE_CCBS = 0
++	 * (group-bits mask of the single-group tree).  The CC root MURAM
++	 * offset is NOT programmed here - the caller must have already bound
++	 * it at the RX port's FMBM_RCCB via fman_port_set_cc_base().
+ 	 * use_hashing / base_fqid / match_vector are untouched, so on a
+ 	 * CC miss the frame still spreads over the same hashed RX FQs.
+ 	 */
+ 	slot->next_engine    = 2;
+ 	slot->cc_base_offset = 0;
+-	slot->cc_bits_sel    = cc_group_off;
++	slot->cc_bits_sel    = 0;	/* grpBits: single-group tree */
+ 
+ 	slot->used = false;
+ 	err = keygen_scheme_setup(keygen, id, true);
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index ab3e2f6..b8bb2f3 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -160,6 +160,7 @@
+ #define NIA_ENG_QMI_DEQ					0x00580000
+ #define NIA_ENG_HWP					0x00440000
+ #define NIA_ENG_HWK					0x00480000
++#define NIA_KG_CC_EN					0x00000200
+ #define NIA_BMI_AC_ENQ_FRAME				0x00000002
+ #define NIA_BMI_AC_TX_RELEASE				0x000002C0
+ #define NIA_BMI_AC_RELEASE				0x000000C0
+@@ -423,6 +424,7 @@ struct fman_port_dts_params {
+ 
+ struct fman_port {
+ 	void *fm;
++	struct list_head node;		/* fman_port_active_list (0115) */
+ 	struct device *dev;
+ 	struct fman_rev_info rev_info;
+ 	u8 port_id;
+@@ -1541,6 +1543,34 @@ void fman_port_use_kg_hash(struct fman_port *port, bool enable)
+ }
+ EXPORT_SYMBOL(fman_port_use_kg_hash);
+ 
++/*
++ * Active-port registry (0115): fman_port_init() registers every initialised
++ * port so the CC bring-up paths (fman_cc_tree_install() on the dpaa side,
++ * the fman_pcd cc_test harness) can resolve a live RX port from
++ * (fman, hw port id) and program FMBM_RCCB via fman_port_set_cc_base().
++ * Ports never unbind on this platform (the driver has no remove path), so
++ * registration is append-only.
++ */
++static LIST_HEAD(fman_port_active_list);
++static DEFINE_MUTEX(fman_port_active_lock);
++
++struct fman_port *fman_port_lookup_rx(void *fm, u8 port_id)
++{
++	struct fman_port *p, *found = NULL;
++
++	mutex_lock(&fman_port_active_lock);
++	list_for_each_entry(p, &fman_port_active_list, node) {
++		if (p->fm == fm && p->port_id == port_id &&
++		    p->port_type == FMAN_PORT_TYPE_RX) {
++			found = p;
++			break;
++		}
++	}
++	mutex_unlock(&fman_port_active_lock);
++	return found;
++}
++EXPORT_SYMBOL_GPL(fman_port_lookup_rx);
++
+ /**
+  * fman_port_set_cc_base() - set a live RX port's Coarse-Classification base
+  * @port: the FMan RX port (mac_dev->port[RX])
+@@ -1560,23 +1590,46 @@ EXPORT_SYMBOL(fman_port_use_kg_hash);
+  * The Parser->KeyGen half is independent and already wired by
+  * fman_port_use_kg_hash() (fmbm_rfpne = NIA_ENG_HWK).
+  *
+- * DORMANT as of 0105 (exported, no caller). The productive call site is
+- * the DUT-gated final sub-increment: it must run FIRST in the SetPCD
+- * sequence (SDK FM_PORT_SetPCD order: bind CC tree -> write fmbm_rccb ->
+- * bind KeyGen schemes) and pass fman_pcd_cc_tree.group_off.
++ * PRODUCTIVE as of 0115: called by fman_cc_tree_install() (dpaa side) and
++ * the cc_test harness between static tree install and the KeyGen CC
++ * attach (SDK FM_PORT_SetPCD order: bind CC tree -> write fmbm_rccb ->
++ * bind KeyGen schemes), passing fman_pcd_cc_tree.group_off; called with
++ * 0 on teardown after the KeyGen detach.  Also maintains the SDK
++ * parser->KG CC-enable bit (NIA_KG_CC_EN) in fmbm_rfpne.
+  *
+  * Returns 0 on success, -EINVAL on a NULL or non-RX port.
+  */
+ int fman_port_set_cc_base(struct fman_port *port, u32 cc_muram_off)
+ {
++	u32 rfpne;
++
+ 	if (!port || port->port_type != FMAN_PORT_TYPE_RX)
+ 		return -EINVAL;
+ 
+ 	iowrite32be(cc_muram_off, &port->bmi_regs->rx.fmbm_rccb);
+ 
++	/*
++	 * SDK FM_PORT_SetPCD concurrence: for the PRS->KG->CC chain the
++	 * parser-to-KeyGen NIA carries NIA_KG_CC_EN so KeyGen hands the
++	 * frame on to the CC walker.  RMW only when the parser NIA actually
++	 * points at the KeyGen engine.
++	 */
++	rfpne = ioread32be(&port->bmi_regs->rx.fmbm_rfpne);
++	if ((rfpne & 0x007C0000) == NIA_ENG_HWK) {
++		if (cc_muram_off)
++			rfpne |= NIA_KG_CC_EN;
++		else
++			rfpne &= ~NIA_KG_CC_EN;
++		iowrite32be(rfpne, &port->bmi_regs->rx.fmbm_rfpne);
++	} else if (cc_muram_off) {
++		dev_warn(port->dev,
++			 "fman_port: CC base set but parser NIA 0x%08x is not KeyGen - CC will not dispatch\n",
++			 rfpne);
++	}
++
+ 	dev_info(port->dev,
+-		 "fman_port: RX coarse-classification base set to MURAM off 0x%x\n",
+-		 cc_muram_off);
++		 "fman_port: RX coarse-classification base set to MURAM off 0x%x (rfpne 0x%08x)\n",
++		 cc_muram_off, rfpne);
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(fman_port_set_cc_base);
+@@ -1672,6 +1725,10 @@ int fman_port_init(struct fman_port *port)
+ 	kfree(port->cfg);
+ 	port->cfg = NULL;
+ 
++	mutex_lock(&fman_port_active_lock);
++	list_add_tail(&port->node, &fman_port_active_list);
++	mutex_unlock(&fman_port_active_lock);
++
+ 	return 0;
+ }
+ EXPORT_SYMBOL(fman_port_init);
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.h b/drivers/net/ethernet/freescale/fman/fman_port.h
+index 89143ba..ceebdec 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.h
++++ b/drivers/net/ethernet/freescale/fman/fman_port.h
+@@ -166,4 +166,6 @@ u32 fman_port_get_liodn(struct fman_port *port);
+  */
+ int fman_port_set_cc_base(struct fman_port *port, u32 cc_muram_off);
+ 
++struct fman_port *fman_port_lookup_rx(void *fm, u8 port_id);
++
+ #endif /* __FMAN_PORT_H */

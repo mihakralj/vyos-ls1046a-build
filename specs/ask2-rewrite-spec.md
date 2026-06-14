@@ -1,5 +1,7 @@
 # ASK2 — Modern Linux Implementation of FMan 210 Hardware Offload for VyOS
 
+**Status:** Draft v1.7 (supersedes v1.6). 2026-06-12. **Dual-dataplane alignment** (see `plans/DUAL-DATAPLANE.md`). Four changes: (1) **Single dual-dataplane image** — the flavor split retires; `ask.ko` ships unconditionally in every image, dormant until configured (§10). (2) **Path A engagement is config-driven, not boot-unconditional** — boot always lands the silicon in S0 (mainline RSS state); `ask.ko` loads and `pcd_ops->install` fires on `set system offload ask` commit, late-binding onto already-registered netdevs under quiesce (§3.5). (3) **Reversibility Contract adopted as a hard gate** — every silicon write ASK2 performs must land with a verified inverse; `dpaa_unregister_flavor_ops()` teardown is verified by register/MURAM snapshot-diff, and the 100×-toggle gate from DUAL-DATAPLANE M1 is added to §11.2. (4) **§9 VPP coexistence rewritten** to the S0/S1/S2 state-machine model with global ASK↔VPP mutual exclusion in v1 (hybrid memif promotion deferred to v3). Also folds vendor-oracle silicon facts (2026-06-13 live-hardware ASK 1.x parity run) into §2.4.
+
 **Status:** Draft v1.6 (supersedes v1.5). 2026-05-31. **Spec Cross-Alignment.** Purged v1.2 OH-port artifacts from §13; reconciled CC API to DPAA1 modernization `fman_cc_tree_*` surface; added explicit API consumption table (§3.5a); fixed STRICT_DEVMEM statement; elevated Risk #13 with DPAA1 MURAM budget context. No architecture change — all changes are spec-text cleanup of already-resolved design decisions.
 
 **Status (prior, v1.4):** Draft v1.4 (supersedes v1.3). 2026-05-25. **PR14z21 result — Path A activation works, residual M2-CPU-gate blocker found.** Patch `0062-fman-pcd-drop-bogus-muram-reservation.patch` (commit 59f7209, pushed origin/ask20) removed the bogus 64 KiB MURAM reservation that was a v1.2-era OH-port leftover. On the mono DUT (CI run 26383417755, kernel `6.18.31-vyos`, image `2026.05.25-0359-rolling`) the boot-time install hook now reports `claimed=5 declined=0 failed=0` — Path A activation is verified. The M2 gate measured **6.955 Gbps (PASS ≥ 2 Gbps) but 21.40 % kernel-net CPU (FAIL ≤ 5 %, baseline 0.08 %)**. dmesg shows **327× `fman_pcd_manip_chain_create(3 manips) failed: -12`** (`-ENOMEM`) — every per-flow chain insert fails, so the per-hop L2 rewrite never enters silicon and the CPU still does the rewrite. Three hypotheses: (a) boot-time CC trees consume the 384 KiB MURAM gen_pool before per-flow chains can be allocated; (b) `chain_create` byte-size math wrong — 3 manips should fit in well under 1 KiB; (c) per-manip pre-allocation leak in the v1.3 manip-chain refactor. Diagnostic prescription: instrument `gen_pool_size()` / `gen_pool_avail()` at four checkpoints (probe end, post-CC-trees, first chain_create fail, after 327 fails) and log to dmesg. v1.4 is **not** an architecture revision — Path A + `FORWARD_FQ_WITH_MANIP` + YNL-only userspace from v1.3 remain authoritative. v1.4 only adds: §11.1 cross-reference to §13.3 manip-byte-budget constraint, §13.3 `fman_pcd_manip.c` annotation that `chain_create` must not exceed 1 KiB MURAM per chain, §15.4 Month-4 bullet updated to "PR14z21 partial pass, chain_create -ENOMEM instrumentation pending", §16 Risk #13 (residual MURAM exhaustion in per-flow chain_create).
@@ -124,6 +126,7 @@ What ASK2 v1.3 uses from this silicon:
 3. **Event IRQ binding**: SPI 44 (Linux IRQ 59) is the FMan event IRQ on LS1046A; SPI 45 is the FMan err IRQ (shared with `bman-err`/`qman-err`). ASK2 v1.3 does not subscribe to the event IRQ — there are no opcode-driven events on QEF 210.10.1.
 4. **MURAM partitioning**: observable via the in-tree `fman_muram` allocator API and via the parser/classifier table layouts programmed through the FMan PCD interface (§13). `fman_pcd_get_muram_budget()` exposes per-FMan free-MURAM telemetry via the YNL `ASK_CMD_GET_MURAM` reply.
 5. **`STRICT_DEVMEM` is disabled on LS1046A production kernels** (per RC#9: DPDK FMan CCSR mmap requires it). Register-level probing from userspace via `/dev/mem` is therefore possible, but the operational kernel uses `CONFIG_STRICT_DEVMEM=n` / `CONFIG_IO_STRICT_DEVMEM=n`.
+6. **Vendor-oracle facts (v1.7, from the 2026-06-13 live-hardware ASK 1.x parity run** — vendor lf-6.12.49 kernel + cdx.ko + fmc + fixed dpa_app TFTP-booted on the DUT, full d14 register dump captured): (a) the working vendor configuration programs **all 12 KeyGen schemes with `kgse_mode = 0x8X000006`** — next-engine **AC_CC** (coarse classification dispatch), not DONE/enqueue; (b) the AC_CC dispatch was never the stall — the 210 ucode parks frames only when the **ehash/FE MURAM structures are missing** (ext-TS timers, AllocFEObjs, 32 KB FE buffer pool + exthash global mem, singleton MUX-FE + TRANSITION-FE, per-port params-page FE words at +0x54/+0x58); with those structures live, AC_CC dispatch flows; (c) **CCBS-as-pointer (board patch 0118 experiment) is a placebo** — it silently bypasses classification rather than enabling it, and must never be used as an "enable CC" mechanism; (d) classification on this ucode is **external-hash (ehash)**: root AD gmask is repurposed as the MURAM offset of an FE struct, `pcAndOffsets=0xF6` (FE_ENTER), buckets live in DDR (`{u64 h; u64 pad}`, power-of-2), and flow entries are 256-byte external records executed by an FE opcode VM (enqueue/NAT/strip/insert/RTP/stats). Any ASK2 classify milestone (DUAL-DATAPLANE M2+) must reproduce this init protocol; the captured vendor dump is the golden reference oracle.
 
 What ASK2 v1.3 does **not** use:
 - The host-command opcode-dispatch protocol described in v1.2 §12.1–§12.6 (`OP_GET_UCODE_VERSION=0x01`, `OP_FLOW_INSERT_V4_TCP=0x10`, …). Those opcodes were implemented by a vendor-proprietary microcode that shipped in the legacy `we-are-mono/ASK` tree but **not** by mainline U-Boot or by our SPI-flash blob. The §12 wire format is dead-code-deleted from `ask_hostcmd.c` in Phase 3.
@@ -248,7 +251,9 @@ config ASK_DEBUG
     default y if DEBUG_KERNEL
 ```
 
-### 3.5 Probe and Registration Sequence (v1.5 Path A)
+### 3.5 Probe and Registration Sequence (v1.7 Path A, config-engaged)
+
+> **v1.7 timing change (dual-dataplane):** the Path A *mechanism* is unchanged — `dpaa_register_flavor_ops()` causes the core driver to invoke `pcd_ops->install()` per netdev — but the *trigger* moves from boot to config commit. Boot always lands the silicon in **S0** (mainline RSS, KG next-engine DONE, kernel netdevs up); `ask.ko` is present in every image but is loaded only when `set system offload ask` is committed. On load, the core driver late-binds: it quiesces each already-registered netdev (EN-preserving port pause), runs `pcd_ops->install()`, and resumes. On a boot with offload pre-configured, the module loads during the vyos-router config commit — the silicon still passes through S0 first. See `plans/DUAL-DATAPLANE.md` §2.
 
 ```
 ask_init():
@@ -264,7 +269,9 @@ ask_init():
        - qmgmt_ops->alloc_rx_fqs = ask_alloc_rx_fqs
        - qmgmt_ops->rx_hook = ask_rx_hook (dynamic flow steering / conntrack hook)
     6. For each dpaa_eth netdev:
-        - core driver executes pcd_ops->install() pre-carrier-up
+        - core driver executes pcd_ops->install() under quiesce
+          (late binding at module load; pre-carrier-up only when the
+           netdev registers after ask.ko is already loaded)
         - register flow_block_cb (Section 4)
         - set NETIF_F_HW_TC, NETIF_F_HW_ESP feature bits
         - assign xfrmdev_ops
@@ -278,7 +285,7 @@ ask_init():
    11. emit ASK_EVENT_READY on multicast group "events"
 ```
 
-Note: Path A is elegantly secured because the core `dpaa_eth` driver automatically invokes `pcd_ops->install()` during netdev registration before bringing the link carrier-up. The netdev is therefore created downstream of the fully-armed PCD classification trees. Unloading the module triggers RCU-safe `dpaa_unregister_flavor_ops()` which gracefully teardowns the structures without carrier flap or kernel oops.
+Note: Path A is elegantly secured because the core `dpaa_eth` driver invokes `pcd_ops->install()` for every bound netdev — at module load for netdevs that already exist (quiesced install), and during netdev registration pre-carrier-up for any netdev that appears later. Unloading the module triggers RCU-safe `dpaa_unregister_flavor_ops()` which tears the structures down without carrier flap or kernel oops. **v1.7 Reversibility Contract:** the teardown is held to the DUAL-DATAPLANE §2.2 checklist — KG scheme-mode restore (AC_CC→RSS), `fmbm_rfpne` restore, FE/ehash MURAM free, params-page FE-word clear, CC tree destroy — and S0 restoration is verified by register/MURAM **snapshot-diff** (`pcd-snapshot` tooling), not by "traffic still flows". Every forward silicon write in any ASK2 patch must land in the same patch as its verified inverse.
 
 No userspace helper. No XML parsing. No UMH. The kernel loads, probes, registers flavor ops, done. Userspace tools attach over YNL when they're ready.
 
@@ -709,27 +716,29 @@ This is the one place where "use the existing GPL code" is unambiguously the rig
 
 ## 9. VPP coexistence
 
-The data-path mechanics here are spec-driven; final tuning of CPU pinning and memif queue depths is a hardware-measurement step.
+> **v1.7:** this section is governed by `plans/DUAL-DATAPLANE.md` — the silicon mode state machine and the global mutual-exclusion rule below are normative; the hybrid memif promotion path (§9.3–9.4) is **deferred to v3** and kept only as design reference.
 
-### 9.1 The model
+### 9.1 The model — silicon mode state machine
 
-VyOS 1.5 LTS ships VPP. Mono Gateway has 4 cores. Reasonable split for the hybrid case:
+The silicon has exactly two PCD states, and VPP is a userspace overlay on the first:
 
-- Cores 0-1: kernel slow path, conntrack, control plane
-- Cores 2-3: VPP workers
-- FMan + CAAM: silicon, no cores
+- **S0 — mainline/RSS (boot state).** KG schemes next-engine DONE (`…0002`), no CC root bound, no FE/ehash MURAM. Kernel netdevs fully functional. **Boot always lands here** — `ask.ko` is dormant until configured.
+- **S1 — ASK engaged.** KG schemes next-engine AC_CC (`…0006`), CC root bound via `fmbm_rfpne` PRE_CC, FE/ehash MURAM structures live. Entered only from S0 on `set system offload ask` commit; exits back to S0 via snapshot-verified teardown (§3.5).
+- **S2 — VPP.** Pure userspace AF_XDP overlay **on S0** — zero silicon delta versus S0. The ASK-off state IS the VPP-ready state. There is no S1↔S2 edge: switching ASK→VPP always transits S0.
 
-ASK fast path runs in silicon regardless of VPP. The interaction surface is: how do flows reach VPP when they need it?
+A wedged S1 is always recoverable by reboot, because boot unconditionally re-lands S0.
 
-### 9.2 Three deployment modes
+### 9.2 Deployment modes (v1: globally mutually exclusive)
 
-| Mode | Trigger | When |
-|---|---|---|
-| **ASK-only** | `set system offload ask enable` | Pure routing, NAT, basic firewall, IPsec |
-| **VPP-only** | `set vpp enable; set vpp interface ethN` | Specialised CGNAT/SR appliance with no kernel features |
-| **Hybrid** | both enabled | Most flows direct via ASK, specific flows via VPP plugins |
+| Mode | Silicon state | Trigger | When |
+|---|---|---|---|
+| **ASK** | S1 | `set system offload ask` | Pure routing, NAT, basic firewall, IPsec — silicon fast path |
+| **VPP** | S0 + AF_XDP overlay | `set vpp settings interface ethN` | Specialised CGNAT/SR appliance workloads |
+| **Neither** | S0 | (default) | Plain mainline kernel networking |
 
-### 9.3 Hybrid mode promotion path
+**Global mutual exclusion (v1):** the VyOS commit validator rejects a config containing both `system offload ask` and `vpp settings interface …`. Per-port coexistence (ASK on RJ45s + VPP on SFP+) is the DUAL-DATAPLANE M8 stretch goal; hybrid flow promotion is v3.
+
+### 9.3 Hybrid mode promotion path (DEFERRED — v3 design reference)
 
 ```
 flow arrives at eth3
@@ -746,7 +755,7 @@ flow arrives at eth3
 
 memif latency on A72 is sub-µs. The promotion cost is constant; high-bandwidth flows pay it once at setup, not per packet.
 
-### 9.4 VyOS CLI for VPP-promote ACL
+### 9.4 VyOS CLI for VPP-promote ACL (DEFERRED — v3)
 
 ```
 set system offload ask promote vpp acl 100
@@ -760,10 +769,13 @@ Flows matching ACL 100 go to VPP instead of direct ASK hardware. Everything else
 
 - No VPP plugin that talks to `ask.ko` directly. VPP runs in its lane, ASK runs in its lane. They communicate through memif (existing VPP infrastructure) and rtnetlink (existing kernel infrastructure). No new coupling.
 - No promotion of hardware-offloaded flows into VPP mid-flow. Once a flow is in 210 silicon, it stays there until eviction. Operators wanting VPP processing classify flows up-front via ACL.
+- (v1.7) No simultaneous ASK+VPP in v1 — global mutex per §9.2. No direct S1→S2 transition — ASK teardown to snapshot-verified S0 always precedes VPP bring-up.
 
 ---
 
 ## 10. Build pipeline and VyOS integration
+
+> **v1.7 single dual-dataplane image (DECIDED 2026-06-12, `plans/DUAL-DATAPLANE.md` §5/§7):** one ISO ships both dataplanes. `ask.ko` is built and included **unconditionally** in every image (dormant until `set system offload ask`), VPP ships as today (dormant until `set vpp settings`). The `FLAVOR=ask` build path and the per-flavor ISO split retire once DUAL-DATAPLANE M7 lands; `version-ask.json` / `version-vpp.json` feeds become aliases of the single image's feed. The `kernel/flavors/ask/` tree below remains the source location for ASK-specific patches/OOT code, but its contents are wired into the common build, not gated behind a flavor switch.
 
 ### 10.1 Repository layout
 
@@ -806,7 +818,7 @@ vyos-ls1046a-build/                     # existing single-repo
 3. Build kernel with `CONFIG_FSL_DPAA=y CONFIG_NF_FLOW_TABLE=y CONFIG_XFRM_OFFLOAD=y CONFIG_CRYPTO_DEV_FSL_CAAM_QI=y`
 4. Build `ask.ko` out-of-tree against the staged kernel
 5. Sign module with in-tree signing key (`MODULE_SIG_FORCE=y`)
-6. Package as `.deb` for VyOS image inclusion
+6. Package as `.deb` for VyOS image inclusion — in **every** image (v1.7 single-image; no FLAVOR gate). The module is NOT listed in `/etc/modules-load.d` — it is loaded by the `system offload ask` conf_mode script on commit (§3.5 config-engaged Path A).
 
 ### 10.3 Userspace build flow
 
@@ -835,9 +847,11 @@ set system offload ask exclude-alg ftp sip pptp
 set interfaces ethernet eth0 offload ask
 set interfaces ethernet eth3 offload ask
 
-# Optional: VPP promotion ACL
+# Optional: VPP promotion ACL (v3 — rejected by validator in v1, see §9.2)
 set system offload ask promote vpp acl 100
 ```
+
+**v1.7 commit validator:** `set system offload ask` and `set vpp settings interface …` are globally mutually exclusive in v1 — commit fails with a clear error if both subtrees are present (DUAL-DATAPLANE §3.2).
 
 ### 10.5 op_mode commands
 
@@ -891,6 +905,7 @@ Measured on Mono Gateway DK with Spirent or Keysight CyPerf, both directions, 4 
 - VyOS CLI: every documented command produces a working config
 - Module reload (`rmmod ask; modprobe ask`) doesn't crash the kernel
 - Reboot persistence: VyOS config restored on boot → flows offload correctly
+- **(v1.7) Reversibility gates (DUAL-DATAPLANE M1):** S1→S0 teardown leaves a byte-identical register/MURAM snapshot versus pre-engage S0 (`pcd-snapshot` diff clean); **100× engage/disengage toggle** completes with clean snapshot-diff on every cycle and no MURAM leak; VPP/AF_XDP comes up and passes traffic immediately after the 100th disengage with no reboot
 
 ### 11.3 Quality gates
 
@@ -1288,6 +1303,7 @@ Combining the spec-implementable work with the hardware-bound and review-bound c
 | 11 | RCU grace period under high flow churn causes memory pressure | Low | Medium | call_rcu rate-limiting if needed; monitor in soak testing |
 | 12 | Maintainability of shared PCD patches across kernel bumps | Medium | Medium | Unified codebase under `CONFIG_FSL_FMAN_PCD=y` leverages modern kernel idioms (typed structs, RCU, devm_*). Since it is built-in and shared, any API updates automatically apply to all flavors, eliminating out-of-sync OOT drift. |
 | 13 | Residual MURAM exhaustion in per-flow CC key insert — observed as 327× `-ENOMEM` on mono DUT, blocks M2 CPU gate (added v1.4 2026-05-25; elevated v1.6 2026-05-31) | High — CONFIRMED on DUT (2026-05-25) | High | See DPAA1 modernization spec §3.5 MURAM budget table: ASK2 dynamic mode needs up to ~44 KiB total across CC trees, HM nodes, and policer profiles. The 327× `-ENOMEM` observations with ~320 KiB nominally free indicate either a byte-size math error (hypothesis b: a single 3-manip chain reserving >>4 KiB) or a per-manip pre-allocation leak (hypothesis c). **v1.5+ CC-action-inline MANIP eliminates per-flow `chain_create` entirely** — the MANIP template is pre-installed at boot, per-flow updates only mutate CC keys. Execute the four-checkpoint `gen_pool_size()`/`gen_pool_avail()` instrumentation defined in §13.3. |
+| 14 | Non-invertible silicon state: an ASK2 engage path lands a register/MURAM write whose inverse is missing or wrong, leaving S1→S0 teardown dirty — VPP then misbehaves on "clean" silicon and the corruption is invisible to traffic tests (added v1.7 2026-06-12) | Medium | High | Reversibility Contract (§3.5, DUAL-DATAPLANE §2.2): every forward write ships in the same patch as its verified inverse; teardown verified by `pcd-snapshot` register/MURAM diff, never by "ping works"; 100×-toggle gate in §11.2 before any milestone ships; wedged S1 always recoverable by reboot (boot lands S0 unconditionally). |
 
 ---
 

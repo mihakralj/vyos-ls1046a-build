@@ -1,0 +1,81 @@
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+index 496e14c..2118b07 100644
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -379,6 +379,16 @@ return false;
+ if (fd->bpid != priv->xsk_bpid[band])
+ return false;
+ 
++/* 0114: recognition oracle.  Counts every FD FMan DMA-d into the
++ * dedicated XSK BMan pool, at the productive dispatch point: this
++ * hook consumes ZC frames before rx_default_dqrr reaches the old
++ * 0093 observational probe, so that increment was dead once 0103f/
++ * 0110 made dispatch-first the order.  Climbs in lock-step with
++ * xsk_zc_rx_recovered / xsk_zc_rx_redirect when the full
++ * Recover+redirect path succeeds.  Spec sec 6.1.10 / 6.1.19.
++ */
++priv->xsk_zc_eligible++;
++
+ rcu_read_lock();
+ pool = rcu_dereference(priv->xsk_pool[band]);
+ if (!pool)
+@@ -392,6 +402,9 @@ xdp = dpaa_xsk_chunk_lookup(priv, band, head_idx);
+ if (!xdp)
+ goto out_unlock;
+ 
++/* 0114: Recover oracle (relocated from 0096-s now-dead site). */
++priv->xsk_zc_rx_recovered++;
++
+ /* Hand the chunk to the XDP/XSK core. */
+ len = qm_fd_get_length(fd);
+ xsk_buff_set_size(xdp, len);
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index 5bae0fe..c5c79ab 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -3256,39 +3256,12 @@ static enum qman_cb_dqrr_result rx_default_dqrr(struct qman_portal *portal,
+ 		_xp = rcu_dereference(priv->xsk_pool[_band]);
+ 		if (_xp) {
+ 			priv->xsk_rx_branch++;
+-			/* M3-3 step 7 sub-increment 1 (patch 0093): the FD
+-			 * reached a qband with a bound XSK pool. If FMan also
+-			 * DMA'd it into an XSK-pool BMan chunk, fd->bpid equals
+-			 * the dedicated BPID recorded by xsk_pool_attach().
+-			 * Until sub-increment 2 reprograms the FMan RX port's
+-			 * primary BPID, fd->bpid stays the kernel page BPID and
+-			 * this stays 0 -- proving the recognition path is sound
+-			 * with zero datapath risk. Spec sec 6.1.7 / 6.1.10.
+-			 */
+-			if (fd->bpid == priv->xsk_bpid[_band]) {
+-				priv->xsk_zc_eligible++;
+-				/* M3-3 step 7 sub-increment 3 (patch 0096): true-ZC RX
+-				 * Recover read-side. The FD was DMA'd by FMan into an
+-				 * XSK-pool BMan chunk (recognised just above) AND the band
+-				 * was armed for true-ZC at attach (xsk_zc_rx_armed, 0094)
+-				 * AND the FILL-ring double-release guard has never fired
+-				 * (xsk_fill_guard_block == 0, 0095). Under those conditions
+-				 * sub-increment 4 will Recover the xdp_buff from the XSK
+-				 * chunk and xdp_do_redirect() it into the XSKMAP instead of
+-				 * the kernel build_skb() path. Here we only OBSERVE that the
+-				 * Recover decision would be taken -- the FD still travels
+-				 * the unchanged mainline skbuf path below, so there is NO
+-				 * datapath change. This counter stays 0 until sub-increment
+-				 * 4 reprograms the FMan RX port BPID (the hardware-risky
+-				 * MURAM write, gated on DUT validation of 0094/0095 per
+-				 * spec sec 6.1.12); once it does, this climbs in lock-step
+-				 * with xsk_zc_eligible, proving Recover fires for exactly
+-				 * the recognised FDs. Spec sec 6.1.7 / 6.1.13.
+-				 */
+-				if (priv->xsk_zc_rx_armed &&
+-				    !priv->xsk_fill_guard_block)
+-					priv->xsk_zc_rx_recovered++;
+-			}
++			/* The 0093/0096 recognition + Recover oracles that lived here
++ * were relocated by 0114 into af_xdp_pool_rx_hook(): the 0103f/0110
++ * dispatch above consumes ZC frames before this probe runs, so the
++ * increments were dead.  xsk_rx_branch (0083) remains as the
++ * band-has-bound-pool diagnostic for frames the hook declined.
++ */
+ 		}
+ 		rcu_read_unlock();
+ 	}

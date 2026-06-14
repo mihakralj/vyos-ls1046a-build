@@ -1,5 +1,6 @@
 # VPP on NXP LS1046A DPAA1 — AF_XDP Integration & HW Offload
 
+**Status:** Draft v0.4. 2026-06-12. Supersedes v0.3. **Dual-dataplane alignment** (`plans/DUAL-DATAPLANE.md`): single dual-dataplane image decided — VPP ships in **every** image (dormant until configured), the per-flavor ISO split retires after DUAL-DATAPLANE M7; §1.3 reworked accordingly. Global ASK↔VPP mutual exclusion added to §4.1. No datapath change.
 **Status:** Draft v0.3. 2026-06-01. Supersedes v0.2 (deferred native-VyOS HW-offload CLI to a later phase). Supersedes v0.1 (native plugin proposal — REJECTED, preserved in Appendix A).
 **Target:** VPP 25.10+ with `af_xdp` plugin, Linux 6.18+ (VyOS rolling), ARM64.
 **Pre-requisite spec:** `specs/dpaa1-afxdp-modernization-spec.md` — all datapath and HW offload APIs consumed by this spec are defined there.
@@ -36,13 +37,17 @@ Kernel (single binary, all flavors)
 └── fman_cc_tree_*, fman_hm_node_*, fman_policer_* APIs
 ```
 
-### 1.3 Per-Flavor Behavior
+### 1.3 Dataplane Modes (v0.4 — single dual-dataplane image)
 
-| Flavor | VPP? | Datapath | HW Offload (interim) | HW Offload (native VyOS CLI — later phase) |
+> **DECIDED 2026-06-12 (`plans/DUAL-DATAPLANE.md` §5/§7):** one ISO ships both dataplanes. VPP and `ask.ko` are both present in every image and both dormant by default; the operator's config selects the mode. The historical per-flavor table (v0.3 §1.3) is retired — `version-ask.json`/`version-vpp.json` feeds become aliases of the single image's feed once DUAL-DATAPLANE M7 lands.
+
+| Mode | Silicon state | Trigger | Datapath | HW Offload (interim) |
 |---|---|---|---|---|
-| default | No (VPP not shipped) | Kernel skbuf (improved by DPAA1 §5.2) | Existing kernel interfaces (RPS, NETIF_F_HW_VLAN via `ethtool -K`, tc/nftables) | `set system offload …`, `set qos policy shaper hardware …` (deferred) |
-| vpp | Yes | AF_XDP ZC on SFP+ (eth3/eth4) | VPP `vppctl`/`startup.conf` + kernel-native (`ethtool -K`, sysfs) | `set vpp settings hw-offload …` (deferred) |
-| ask | No (VPP not shipped) | Kernel skbuf + ASK2 CC fast path | Via ASK2 (nft flow offload, xfrm IPsec) | `set system offload ask …` (per ASK2 spec) |
+| (default) | S0 — mainline RSS | none | Kernel skbuf (improved by DPAA1 §5.2) | Existing kernel interfaces (RPS, NETIF_F_HW_VLAN via `ethtool -K`, tc/nftables) |
+| VPP | S0 + AF_XDP overlay (zero silicon delta) | `set vpp settings interface ethN` | AF_XDP ZC on SFP+ (eth3/eth4) | VPP `vppctl`/`startup.conf` + kernel-native (`ethtool -K`, sysfs) |
+| ASK | S1 — AC_CC + FE (silicon fast path) | `set system offload ask` | Kernel skbuf + ASK2 silicon forwarding | Via ASK2 (nft flow offload, xfrm IPsec) — per `specs/ask2-rewrite-spec.md` v1.7 |
+
+VPP and ASK are **globally mutually exclusive in v1** (commit validator, §4.1). The ASK-off state (S0) is exactly the VPP-ready state — switching ASK→VPP requires snapshot-verified ASK teardown back to S0, never a direct transition.
 
 ---
 
@@ -131,6 +136,8 @@ set vpp settings interface eth4
 ```
 
 Triggers VPP startup via `vyos-1x-010-vpp-platform-bus.patch` (AF_XDP mode). No `fsl,userspace-managed` DT property needed. No kernel netdev unbind. This is the **only** VyOS config surface this spec ships; VPP itself is otherwise configured/operated through its existing `vppctl`/`startup.conf`.
+
+**Mutual exclusion (v0.4):** the commit validator rejects a config containing both `vpp settings interface …` and `system offload ask` — globally mutually exclusive in v1 (`plans/DUAL-DATAPLANE.md` §3.2). VPP requires the silicon in S0; engaging VPP while ASK silicon state (S1) is live is never permitted.
 
 ### 4.2 HW Offload Configuration (DEFERRED to a later native-VyOS-CLI phase — NOT in scope)
 
