@@ -12,7 +12,7 @@ forks the kernel.
 
 - Patches `0068`–`0103b` in-tree, `patch-health.sh --source release` clean.
 - `caps = 0x17` (CC_EXACT_MATCH | HM_NODES | POLICER_TRTCM | PARSER_SOFTSEQ) live
-  on the DUT with FMan ucode 210.10.1; `HC_DISPATCH` off.
+  on the board with FMan ucode 210.10.1; `HC_DISPATCH` off.
 - VPP AF_XDP path ~3.5 Gbps in production, **0% driver-side drop** (the ≥7 Gbps
   gate is currently methodology-bound, not driver-bound).
 - Per-`dpaa_priv` flavor-ops (`struct dpaa_pcd_ops`, `struct dpaa_qmgmt_ops`,
@@ -52,11 +52,11 @@ Validate `xdpsock -t` / VPP `af_xdp` TX + `xsk_tx_inflight` backpressure + TxCon
 
 ### B1 — CC exact-match tree ✅ CLOSED (2026-06-12)
 
-DUT-validated via the `0107` harness on eth3 (hwport `0x10`): install/miss/detach/idempotent all pass under 210.10.1 ucode, no STALL/RDRP. Visible-FQ-steer wire gate deferred to the §8 harness.
+Board-validated via the `0107` harness on eth3 (hwport `0x10`): install/miss/detach/idempotent all pass under 210.10.1 ucode, no STALL/RDRP. Visible-FQ-steer wire gate deferred to the §8 harness.
 
 ### B2 — HM VLAN strip/insert ✅ live (silicon-proven)
 
-`0099`/`0101` + `vyos-1x-024` shipped + live on the DUT (cap `0x17`; +144 MURAM on rxvlan-on, freed off). **Open:** the wire-visible tagged/untagged gate is blocked by the lab access-port switch (drops VID≠PVID) — needs a controllable 802.1Q source.
+`0099`/`0101` + `vyos-1x-024` shipped + live on the board (cap `0x17`; +144 MURAM on rxvlan-on, freed off). **Open:** the wire-visible tagged/untagged gate is blocked by the lab access-port switch (drops VID≠PVID) — needs a controllable 802.1Q source.
 
 ### B3 — Policer srTCM/trTCM ✅ BUG 3a + 3b-non-revert FIXED (silicon-proven)
 

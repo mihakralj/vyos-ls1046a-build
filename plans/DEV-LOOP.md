@@ -328,7 +328,7 @@ The local dev loop is a **parallel fast-iteration path**, not a replacement for 
 
 > **Status:** ✅ INFRA OPERATIONAL (rebuilt 2026-05-19)
 > **Purpose:** Measure end-to-end nft-flowtable HW offload (`ask.ko` PR14g+) throughput
-> and DUT CPU on a topology where the DUT is the ONLY possible forwarding path between
+> and board CPU on a topology where the board is the ONLY possible forwarding path between
 > the two test endpoints — no /16 ECMP ambiguity, no upstream router, no NAT.
 
 ### Topology
@@ -339,7 +339,7 @@ flowchart LR
     lxc201["lxc201 (VMID 201)<br/>10.99.1.2/30<br/>gw 10.99.1.1<br/>iperf3 client"]
     lxc202["lxc202 (VMID 202)<br/>10.11.1.2/30<br/>gw 10.11.1.1<br/>iperf3 server"]
   end
-  subgraph mono["Mono Gateway DK (DUT, 192.168.1.190)"]
+  subgraph mono["Mono Gateway DK (board, 192.168.1.190)"]
     eth3["eth3<br/>10.99.1.1/30"]
     eth4["eth4<br/>10.11.1.1/30"]
     ask[("ask.ko<br/>FMan PCD<br/>flow offload")]
@@ -350,7 +350,7 @@ flowchart LR
 ```
 
 Both endpoints are unprivileged Debian 12.12 LXC containers on the heidi Proxmox host.
-Each /30 is its own connected subnet, so the DUT's kernel route lookup for the sink IP
+Each /30 is its own connected subnet, so the board's kernel route lookup for the sink IP
 unambiguously selects the correct egress port — no ECMP, no `ip route get` surprises.
 
 ### Why this topology
@@ -363,7 +363,7 @@ Three previous iterations of the M2 rig failed in subtle ways that the previous
    picked the 1G port. The flow then capped at ~0.94 Gbps regardless of how well
    the silicon classifier worked.
 2. **Sink not reachable** — earlier 10.99.2.2 sink configs targeted an IP that
-   was never assigned to lxc200, so the SYN traversed lxc201 → DUT eth3 → DUT eth4
+   was never assigned to lxc200, so the SYN traversed lxc201 → board eth3 → board eth4
    → upstream Linksys 192.168.1.1 → silently dropped. M2 measurement was running
    on a connection that never actually established offload-eligible traffic.
 3. **NAT masquerade** — earlier setups added `nat source rule N masquerade`
@@ -371,7 +371,7 @@ Three previous iterations of the M2 rig failed in subtle ways that the previous
    the silicon CC slot keyed on (orig_src_ip, orig_src_port) never matched the
    post-NAT packet. ask.ko's HW path silently fell back to SW.
 
-The /30 + no-NAT rebuild removes all three failure modes simultaneously. The DUT
+The /30 + no-NAT rebuild removes all three failure modes simultaneously. The board
 is now the SOLE forwarding path with a unique unambiguous route, and the 5-tuple
 on the wire matches what nft flowtable offloaded to silicon.
 
@@ -389,9 +389,9 @@ on the wire matches what nft flowtable offloaded to silicon.
    # see bin/lxc202-setup.sh (idempotent) — useradd admin, sudoers NOPASSWD,
    # echo admin pubkey > /home/admin/.ssh/authorized_keys
    ```
-3. **Add eth4 IP on DUT** (one-time, persists in config.boot):
+3. **Add eth4 IP on board** (one-time, persists in config.boot):
    ```bash
-   # via vbash batch on the DUT
+   # via vbash batch on the board
    set interfaces ethernet eth4 address 10.11.1.1/30
    set interfaces ethernet eth4 description 'ASK2 gate egress (M2 to lxc202)'
    commit && save
@@ -408,7 +408,7 @@ on the wire matches what nft flowtable offloaded to silicon.
      ProxyJump vyos
    ```
    The `ProxyJump vyos` lets the build VM reach lxc202 (which has no route off
-   its /30) by tunnelling through the DUT's eth0 management interface.
+   its /30) by tunnelling through the board's eth0 management interface.
 
 ### Running the gate
 

@@ -71,7 +71,7 @@ This is a **known, reproduced** failure mode that `fman_pcd_manip.c` must defend
 
 - Each **header-manip chain** must total **≤ 1 KiB MURAM** (HMCD table itself is ≤256 B, but the chain
   plus its data and ADs add up).
-- **Observed on the DUT** after PR14z21: `fman_pcd_manip_chain_create()` building a 3-manip chain
+- **Observed on the board** after PR14z21: `fman_pcd_manip_chain_create()` building a 3-manip chain
   failed with **`-ENOMEM` (errno 12) 327 times** — *while the MURAM `gen_pool` still reported
   ~320 KiB free*. That contradiction means the failure is **fragmentation / allocator behaviour**, not
   raw exhaustion.

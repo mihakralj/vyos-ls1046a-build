@@ -1,4 +1,4 @@
-# Traffic Harness — DUT SFP+ acceptance-gate generator
+# Traffic Harness — board SFP+ acceptance-gate generator
 **Version 1.0.0** · 2026-06-09 · HADS 1.0.0
 
 ---
@@ -21,7 +21,7 @@ Read `[NOTE]` only if additional context is needed.
 This is the controllable traffic generator that unblocks every remaining functional acceptance gate (DPAA1 M3-3b/3c/3d/3e wire tests, gate-3 ≥7 Gbps, VPP HW benchmark, ASK2 M2 ≥7 Gbps @ ≤5% CPU). It already exists.
 
 **[SPEC]**
-- Two purpose-built Proxmox LXCs on heidi, one per DUT SFP+ subnet, with the DUT as their L3 gateway.
+- Two purpose-built Proxmox LXCs on heidi, one per board SFP+ subnet, with the board as their L3 gateway.
 
 ---
 
@@ -40,16 +40,16 @@ flowchart LR
         VMBR0 --- NIC
     end
     NIC ===|10G| SW["10G switch fabric"]
-    SW ===|SFP+| ETH3["DUT eth3<br/>10.99.1.1/30"]
-    SW ===|SFP+| ETH4["DUT eth4<br/>10.11.1.1/29"]
-    subgraph DUT["DUT mono (LS1046A, ssh mono / 192.168.1.190)"]
+    SW ===|SFP+| ETH3["board eth3<br/>10.99.1.1/30"]
+    SW ===|SFP+| ETH4["board eth4<br/>10.11.1.1/29"]
+    subgraph board["board mono (LS1046A, ssh mono / 192.168.1.190)"]
         ETH3 --> ROUTE["kernel ip_forward=1"] --> ETH4
     end
 ```
 
 **[SPEC]**
 - Both LXCs share one flat untagged bridge (`vmbr0` → `enp35s0f1`, 10G, jumbo to MTU 9000).
-- CT201 and CT202 are in different /30 subnets whose gateway is the DUT, so all CT201↔CT202 traffic is forced through the DUT as a router (eth3 → ip_forward → eth4).
+- CT201 and CT202 are in different /30 subnets whose gateway is the board, so all CT201↔CT202 traffic is forced through the board as a router (eth3 → ip_forward → eth4).
 - Verified: `ping` shows `TTL=63` (one hop) and 0% loss.
 
 ---
@@ -63,18 +63,18 @@ flowchart LR
 | heidi host | `ssh heidi` (admin, `~/.ssh/admin_key`), `sudo` OK | Proxmox VE 8, kernel 6.8 |
 | CT201 (eth3 peer) | `ssh heidi 'sudo pct exec 201 -- <cmd>'` | Debian 12, iperf3 preinstalled |
 | CT202 (eth4 peer) | `ssh heidi 'sudo pct exec 202 -- <cmd>'` | Debian 12, iperf3 preinstalled |
-| DUT | `ssh mono` (vyos, `~/.ssh/vyos_vanity`) | eth3=10.99.1.1, eth4=10.11.1.1 |
+| Board | `ssh mono` (vyos, `~/.ssh/vyos_vanity`) | eth3=10.99.1.1, eth4=10.11.1.1 |
 
 ---
 
-## 4. QUICK START — ROUTED FORWARDING TEST (eth3 → DUT → eth4)
+## 4. QUICK START — ROUTED FORWARDING TEST (eth3 → board → eth4)
 
 **[SPEC]**
 ```bash
 # Start iperf3 server on the eth4 peer
 ssh heidi 'sudo pct exec 202 -- sh -c "pkill iperf3; iperf3 -s -D"'
 
-# Drive load from the eth3 peer (8 TCP streams, through the DUT)
+# Drive load from the eth3 peer (8 TCP streams, through the board)
 ssh heidi 'sudo pct exec 201 -- iperf3 -c 10.11.1.2 -P 8 -t 30'
 
 # UDP at a target rate (for policer-cap / red-drop and clean throughput)
@@ -96,8 +96,8 @@ That 4.14 Gbit/s is the software-routing floor; the offloaded flavors (ASK2 M2, 
 | Gate | Method on this harness |
 |---|---|
 | Gate-3 ≥7 Gbps literal | multi-stream iperf3 (`-P`), or UDP `-b`; for true wire-rate use TRex on an SR-IOV VF (below) |
-| M3-3d policer throughput cap | UDP `iperf3 -u -b 9G` offered into a policed flow; watch DUT red-drop counters |
-| ASK2 M2 (≥7 Gbps @ ≤5% CPU) | CT201→DUT→CT202 forwarding load while sampling DUT kernel-net CPU |
+| M3-3d policer throughput cap | UDP `iperf3 -u -b 9G` offered into a policed flow; watch board red-drop counters |
+| ASK2 M2 (≥7 Gbps @ ≤5% CPU) | CT201→board→CT202 forwarding load while sampling board kernel-net CPU |
 | VPP flavor benchmark | same forwarding path with eth3/eth4 assigned to VPP (MTU ≤3290 on AF_XDP) |
 | M3-3c HM 802.1Q strip/insert | **needs tagged frames** — bridge is untagged; use `scapy`/`trafgen`/TRex to push 802.1Q (iperf3 cannot tag) |
 

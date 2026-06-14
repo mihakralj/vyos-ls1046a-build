@@ -185,7 +185,7 @@ The Frame Manager is the unsung hero. It handles packet parsing, core distributi
 
 An ongoing effort modernizes the mainline DPAA1 driver into a single shared kernel binary (consumed in different runtime modes — kernel `default`, `vpp` AF_XDP, `ask` offload, all shipping in one image) with HW-accelerated AF_XDP and four FMan/QMan hardware offloads. Full design and per-milestone status: [specs/dpaa1-afxdp-modernization-spec.md](specs/dpaa1-afxdp-modernization-spec.md).
 
-**Shipping and DUT-validated today:**
+**Shipping and board-validated today:**
 
 - **Flavor-ops abstraction (M0)** — per-`dpaa_priv` ops tables, RCU-NULL-safe; byte-identical to mainline when no flavor module is loaded.
 - **AF_XDP zero-copy plumbing (M1–M3-3)** — `ndo_xsk_wakeup`, XSK-backed BMan pool, per-CPU NAPI + dedicated QMan channels per qband, cluster-aware pinning. Driver proven to drop **0%** at line rate; ~5.57 Gbit/s aggregate RX measured (bottleneck is the single userspace receiver, not the NIC).
