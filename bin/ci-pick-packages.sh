@@ -71,7 +71,7 @@ if [ "$KERNEL_PKGS" -eq 0 ]; then
 fi
 echo "### Package validation OK: $KERNEL_PKGS kernel image package(s) in packages/"
 
-### FLAVOR=ask: validate the ASK2 OOT module .deb is present
+### Single-image: validate the ASK2 OOT module .deb is present
 #
 # The default `find scripts/package-build -name '*.deb'` glob above
 # already sweeps in our ask-modules-${KVER}_*_arm64.deb (produced by
@@ -79,21 +79,21 @@ echo "### Package validation OK: $KERNEL_PKGS kernel image package(s) in package
 # scripts/package-build/linux-kernel/) — no name-based filtering excludes
 # it. This block is a fail-fast guard: if the OOT module didn't make it
 # in, the ISO would silently boot without ask.ko and the operator would
-# only discover the omission after USB-booting the device.
-if [ "${FLAVOR:-default}" = "ask" ]; then
-    ASK_MOD_PKGS=$(find packages -name 'ask-modules-*.deb' | wc -l)
-    if [ "$ASK_MOD_PKGS" -eq 0 ]; then
-        echo ""
-        echo "###############################################################"
-        echo "### FATAL: FLAVOR=ask but no ask-modules-*.deb in packages/ ###"
-        echo "### ASK2 OOT kernel module would be MISSING from the ISO.###"
-        echo "###############################################################"
-        echo ""
-        exit 1
-    fi
-    echo "### FLAVOR=ask validation OK: $ASK_MOD_PKGS ASK OOT module .deb(s) in packages/"
-    find packages -name 'ask-modules-*.deb' -exec ls -lh {} \;
+# only discover the omission after USB-booting the device. ask.ko is built
+# unconditionally in every single-image build (FLAVOR=ask gate retired
+# 2026-06-14) and ships dormant; see bin/ci-build-packages.sh.
+ASK_MOD_PKGS=$(find packages -name 'ask-modules-*.deb' | wc -l)
+if [ "$ASK_MOD_PKGS" -eq 0 ]; then
+    echo ""
+    echo "###############################################################"
+    echo "### FATAL: no ask-modules-*.deb in packages/                ###"
+    echo "### ASK2 OOT kernel module would be MISSING from the ISO.   ###"
+    echo "###############################################################"
+    echo ""
+    exit 1
 fi
+echo "### ASK OOT validation OK: $ASK_MOD_PKGS ASK OOT module .deb(s) in packages/"
+find packages -name 'ask-modules-*.deb' -exec ls -lh {} \;
 
 ### HOTFIX: Debian bookworm-backports is currently missing libhtp2 arm64 binary
 ### but suricata from bookworm-backports depends on it. We fetch it from snapshot.
