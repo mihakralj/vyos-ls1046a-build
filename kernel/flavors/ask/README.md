@@ -1,27 +1,33 @@
-# Flavor: `ask` — ASK2 (modern rewrite)
+# ASK2 source tree — `kernel/flavors/ask/`
 
 **Status:** scaffold only. Implementation tracked in
 [`specs/ask2-rewrite-spec.md`](../../../specs/ask2-rewrite-spec.md)
-(v0.6, 2026-05-11).
+(v1.8, 2026-06-14).
 
-This flavor is the **modern rewrite** of the NXP ASK fast-path for
+This directory is the **modern rewrite** of the NXP ASK fast-path for
 LS1046A. It supersedes the legacy ASK 1.x stack (proprietary `cdx.ko`,
 `auto_bridge.ko`, `cmm`, `dpa_app`, the 5797-line in-tree-hooks patch,
 and the 266-file vendored NXP SDK FMan/QMan/BMan driver overlay) in
 **entirety**. Everything ASK 1.x was deleted from this branch
 (`ask20`) on 2026-05-12.
 
-The brand "ASK" and the `FLAVOR=ask` build target carry forward
-unchanged. The 210-series FMan microcode (loaded by U-Boot from SPI
-flash on every shipped Mono Gateway) is also unchanged — ASK2 sits
-on top of it without touching the binary.
+The brand "ASK" carries forward unchanged, but ASK2 is **no longer a
+separate build flavor**. Per the single-image decision (2026-06-14,
+`plans/DUAL-DATAPLANE.md`), the contents of this tree are wired into the
+**common** build — `ask.ko` ships in **every** image, dormant until
+`set system offload ask` engages it at runtime. `kernel/flavors/ask/`
+remains only the *source location* for ASK-specific patches and OOT code;
+the directory name is historical and does not imply a `FLAVOR=ask` build
+target. The 210-series FMan microcode (loaded by U-Boot from SPI flash on
+every shipped Mono Gateway) is also unchanged — ASK2 sits on top of it
+without touching the binary.
 
 ## What lives here
 
 ```
 kernel/flavors/ask/
 ├── README.md                  # this file
-├── kernel-config/             # ASK-flavor kernel config fragments (TBD)
+├── kernel-config/             # ASK kernel config fragments (TBD)
 ├── manifest.json              # generated at CI time (TBD)
 ├── kernel.pin                 # 6.18.x LTS pin (TBD)
 ├── oot-modules/               # OOT kernel modules

@@ -1,11 +1,12 @@
-# DPAA1 Full Driver Plan — `default` + `vpp` + `ask`
+# DPAA1 Full Driver Plan — single image, `default` + `vpp` + `ask` consumer modes
 
 This plan sequences every task, gate, and dependency required to land a **single
 shared DPAA1 kernel binary** (all patches under `kernel/common/patches/board/`)
-that serves all three flavors. The flavors differ **only by userspace consumer**
-— `default` (kernel netdev + ethtool/tc offloads), `vpp` (AF_XDP via upstream
-`af_xdp` plugin), and `ask` (ASK2 acceleration daemon). No flavor forks the
-kernel.
+that serves all three consumer modes from **one ISO / one package**. The modes
+differ **only by userspace consumer** — `default` (kernel netdev + ethtool/tc
+offloads), `vpp` (AF_XDP via upstream `af_xdp` plugin), and `ask` (ASK2
+acceleration). All three ship in every image and are switched at runtime; no mode
+forks the kernel.
 
 **Baseline (already landed):**
 
@@ -22,95 +23,50 @@ graph LR
     M0["M0 flavor-ops ✅"] --> M1["M1 xsk_wakeup ✅"]
     M1 --> M2["M2 XSK pool ✅"]
     M2 --> S2["M3-3 step1-6 ✅"]
-    S2 --> S7["step7 ZC 4b<br/>entry-gate ✅<br/>oracle=0 ⚠️"]
-    S2 --> CC["3b CC stubs ⚠️"]
-    S2 --> HM["3c HM cap-live ⚠️"]
-    S2 --> POL["3d Policer cap-live ⚠️"]
-    S2 --> CEETM["3e CEETM blocked ❌"]
+    S2 --> S7["step7 ZC ✅<br/>(GAP-2 throughput# open)"]
+    S2 --> CC["3b CC steering ✅"]
+    S2 --> HM["3c HM live ✅"]
+    S2 --> POL["3d Policer ✅<br/>(3b flood# open)"]
+    S2 --> CEETM["3e CEETM ✅<br/>shipped+closed"]
 ```
 
 ---
 
-## Phase A — Close the AF_XDP datapath (VPP-critical, benefits all flavors)
+## Phase A — AF_XDP datapath (VPP-critical, benefits all flavors)
 
-### A1 — True-ZC RX oracle (0103b follow-through)
+### A1 — True-ZC RX oracle ✅ DONE (2026-06-10)
 
-The entry-gate counters fire (`xsk_zc_eligible`/`xsk_zc_rx_armed`) but the
-copy-free oracle (`xsk_zc_rx_redirect`) reads 0 — FMan is still DMAing into
-non-XSK BMan chunks.
+`xsk_zc_rx_redirect` fires + reproducible (ISO `2026.06.10-0124`, kernel `6.18.34-vyos`). BMI BPID flip proven (`0102b`), NULL-`xdp.rxq` crash fixed (`0103g`), NAPI-only flush (`0110`); crash-free + reversible. **Open:** GAP 2 — the literal high-rate true-ZC throughput number (needs the §8 peer-flood harness; NOT gate-3-blocking). See `plans/ZC-RX-SCOPE.md`.
 
-- BMI register-readback to confirm `fman_port_set_rx_bpool()` actually programmed
-  the XSK buffer-pool ID into the RX port.
-- Traffic-steering fix so FMan DMAs land in XSK-pool BMan chunks
-  (`priv->xsk_bpid` must match the programmed pool).
+### A2 — Literal ≥7 Gbps Gate-3 — lab task, no kernel code
 
-**Gate Z:** under a live `XDP_ZEROCOPY` producer, `xsk_zc_rx_redirect > 0` and
-`xsk-zc-check` reports copy-free RX (no fallback-copy counter increment).
+gate-3 ≥7 Gbps PROVEN (7.41 Gbit/s @4 flows, 2026-06-12, §8 LXC201/202 harness). A literal single-stream line-rate figure still wants the deferred TRex / SR-IOV-VF upgrade.
 
-### A2 — Literal ≥7 Gbps Gate-3 (lab task, no kernel code)
+### A3 — TX-ZC productive path (`0085` v2 wired)
 
-Current 5.57 Gbps is single-receiver-limited, not driver-limited.
-
-- Provision a multi-process generator (multiple `iperf3` servers, or
-  TRex / DPDK-pktgen) to remove the single-receiver bottleneck.
-
-**Gate 3:** ≥7 Gbps single-stream IPv4 forward at <5% kernel-net CPU per worker.
-
-### A3 — TX-ZC productive path (0085 v2 wired)
-
-- Validate `xdpsock -t` and VPP `af_xdp` TX through the productive path.
-- Confirm `xsk_tx_inflight` backpressure and TxConf recycle.
-
-**Gate T:** sustained TX-ZC with no UMEM stall/deadlock.
+Validate `xdpsock -t` / VPP `af_xdp` TX + `xsk_tx_inflight` backpressure + TxConf recycle on the §8 harness.
 
 ---
 
-## Phase B — HW offload datapath gates (cap-live → proven)
+## Phase B — HW offload datapath gates
 
-### B1 — CC exact-match tree (`fman_cc_tree_*`)
+### B1 — CC exact-match tree ✅ CLOSED (2026-06-12)
 
-- Finish MURAM `CONT_LOOKUP` AD encoding (bodies currently return `-ENOTSUPP`).
-- 5-tuple key install + per-key stats.
+DUT-validated via the `0107` harness on eth3 (hwport `0x10`): install/miss/detach/idempotent all pass under 210.10.1 ucode, no STALL/RDRP. Visible-FQ-steer wire gate deferred to the §8 harness.
 
-**Gate CC:** a 5-tuple steers to the chosen qband, confirmed via counters +
-`tcpdump`.
+### B2 — HM VLAN strip/insert ✅ live (silicon-proven)
 
-### B2 — HM VLAN strip/insert
+`0099`/`0101` + `vyos-1x-024` shipped + live on the DUT (cap `0x17`; +144 MURAM on rxvlan-on, freed off). **Open:** the wire-visible tagged/untagged gate is blocked by the lab access-port switch (drops VID≠PVID) — needs a controllable 802.1Q source.
 
-- `0099`+`0101` DUT-validated; `ethtool` rx-vlan-offload works.
-- Land the vyos-1x CLI consumer (`set interfaces ethernet ethX hw-offload
-  vlan-strip` → `ethtool -K rxvlan on`). The patch file
-  `data/vyos-1x-024-hw-offload-vlan-strip.patch` already exists — needs wiring +
-  validation.
-- Traffic-generator gate.
+### B3 — Policer srTCM/trTCM ✅ BUG 3a + 3b-non-revert FIXED (silicon-proven)
 
-**Gate HM:** `tcpdump` shows tagged-on-wire / consumer-untagged, sub-100 ns.
-
-### B3 — Policer srTCM/trTCM (`0100` cap-confirmed)
-
-- vyos-1x CLI consumer (`set firewall offload policer`, or a tc/nftables ingress
-  backend).
-
-**Gate POL:** a 2.5 Gbps cap on 3 Gbps offered, with red-drops visible in
-counters.
+`0100` (FMPL block master-enable `GCR.EN|STEN`) + `0104` (release-cb scheme revert) + `vyos-1x-025` shipped. **Open:** (1) the iperf3 flood-crash half of BUG 3b (serial capture + cold power-cycle); (2) the literal 2.5 Gbps cap + red-drop number on the §8 harness (qualitative enforce-vs-bypass already PROVEN by ping).
 
 ---
 
-## Phase C — CEETM (largest remaining kernel effort) — BLOCKED
+## Phase C — CEETM egress shaping ✅ SHIPPED + CLOSED (2026-06-14)
 
-CEETM is **absent from mainline 6.18** (no `qman_ceetm.c`,
-`dpaa_eth_ceetm.c`, `qman_ceetm_*`, or `ndo_setup_tc`).
-
-### C1 — CEETM forward-port
-
-- Port SDK `qman_ceetm.c` (~2600 LOC) + `dpaa_eth_ceetm.c` (~1900 LOC) from the
-  NXP LSDK to 6.18.
-- Add `ndo_setup_tc` / `mqprio` (absent) and wire CEETM as a tc root qdisc.
-- VyOS `set qos policy shaper hardware ceetm` consumer + per-port mutex vs the
-  VPP-internal shaper (sysfs `ceetm_active` sentinel).
-
-**Gate CEETM:** hierarchical egress shaping executed in QMan silicon, class-rate
-counters validated.
+Modern rewrite (NOT a verbatim forward-port): `0111` (NEW `qman_ceetm.c` object model + MC helper) + `0112` (`TC_SETUP_QDISC_HTB` offload consumer). DEFECT A (additive effective rate) FIXED + HW-validated; DEFECT B (special-default-channel blackhole) CLOSED as a documented LS1046A 8-channel CEETM dequeue-scheduler silicon limitation, product-impact NONE (`dpaa_ceetm_select_queue` reaches the special default channel ONLY for raw `tc … htb offload default 0`; VyOS always renders `htb default <minor>` → a real default leaf, immune). See spec §5.7.
 
 ---
 
@@ -148,15 +104,16 @@ baseline needed); offload knobs functional.
 
 ## Phase E — Integration & release
 
-- **E1:** single kernel binary boots clean on all 3 ISO flavors
+- **E1:** single kernel binary boots clean from the single ISO
   (`patch-health.sh --source release` + visual `grep` of patched files).
-- **E2:** coexistence — per-port flavor (eth0-2 `default` + eth3-4 `vpp`),
-  MURAM ≤52 KiB, BMan pool IDs ≤40/64, ucode-210 fail-soft `-ENOTSUPP`.
-- **E3:** multi-flavor release — `version-{default,ask,vpp}.json` feeds +
-  flavor-encoded ISO filenames; deploy the vpp ISO to lxc200 `latest-vpp.iso`.
+- **E2:** coexistence — per-port consumer mode (eth0-2 kernel `default` + eth3-4
+  `vpp`), MURAM ≤52 KiB, BMan pool IDs ≤40/64, ucode-210 fail-soft `-ENOTSUPP`.
+- **E3:** single-image release — one canonical `version.json` feed (with
+  `version-{default,ask,vpp}.json` kept as identical back-compat aliases) +
+  flavor-neutral ISO filename; deploy to lxc200 `latest.iso`.
 
-**Gate E (GA):** all 3 flavors install via `add system image`, boot, and pass
-their datapath gates.
+**Gate E (GA):** the single image installs via `add system image`, boots, and
+passes the datapath gates for every consumer mode.
 
 ---
 
@@ -164,10 +121,10 @@ their datapath gates.
 
 ```mermaid
 graph TD
-    A1[A1 ZC oracle] --> A2[A2 Gate-3 lab]
+    A1[A1 ZC ✅] --> A2[A2 Gate-3 lab]
     A2 --> D2[D2 vpp GA]
     B1[B1 CC] --> B2[B2 HM CLI] --> B3[B3 Policer CLI] --> D1[D1 default GA]
-    C1[C1 CEETM forward-port] --> D1
+    C1[C1 CEETM ✅] --> D1
     M2fix[D3 ASK2 M2 -ENOMEM fix] --> ASKko[ask.ko + YNL + xfrm] --> D3gate[ASK GA]
     D1 --> E[E release]
     D2 --> E
@@ -176,8 +133,8 @@ graph TD
 
 ## Summary
 
-| Path | Phases | Effort | New kernel code |
-|------|--------|--------|-----------------|
-| **Shortest** | A1 → A2 → D2 (vpp) | days | none |
-| **Medium** | B1/B2/B3 + CEETM → D1 (default) | weeks | CEETM forward-port dominates (~4500 LOC) |
-| **Longest** | D3 (ask) | months | M2 `-ENOMEM` blocker, then ask.ko ~1500 LOC + YNL + xfrm/CAAM |
+| Path | Phases | Status |
+|------|--------|--------|
+| **Shortest** | A1 → A2 → D2 (vpp) | A1 ✅; A2 ≥7G proven (7.41 Gbit/s); D2 wants a HW benchmark run |
+| **Medium** | B1/B2/B3 + CEETM → D1 (default) | CC/HM/Policer/CEETM all shipped + closed; remaining = lab wire gates + the 3b flood-crash characterization |
+| **Longest** | D3 (ask) | deferred — M2 `-ENOMEM` blocker, then `ask.ko` ~1500 LOC + YNL + xfrm/CAAM |

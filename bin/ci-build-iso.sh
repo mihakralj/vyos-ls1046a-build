@@ -19,9 +19,9 @@
 # Expects: GITHUB_WORKSPACE, BUILD_BY, BUILD_VERSION, DEBIAN_MIRROR,
 #          DEBIAN_SECURITY_MIRROR, VYOS_MIRROR in env
 set -ex -o pipefail
-# Source FLAVOR resolution before changing dir.
-# bin/common.sh resolves FLAVOR from $FLAVOR, then data/flavor.pin, then "default".
-# We export it so the rename below produces flavor-tagged ISO filenames.
+# Single-image build: one flavor-neutral ISO named vyos-<version>-LS1046A-arm64.iso.
+# bin/common.sh still resolves FLAVOR (always "default" now) for the few
+# FLAVOR-aware ci-*.sh helpers; the ISO filename no longer encodes it.
 BC_QUIET=1 source "${GITHUB_WORKSPACE:-.}/bin/common.sh"
 
 cd "${GITHUB_WORKSPACE:-.}/vyos-build"
@@ -108,14 +108,10 @@ rm -rf packages/linux-headers-*
   generic
 
 cd build
-# Rename generic -> LS1046A-${FLAVOR} in artifact filenames so multi-flavor
-# releases coexist on the same release/<tag> page without filename collisions.
-# Examples:
-#   vyos-2026.05.09-1830-rolling-LS1046A-default-arm64.iso
-#   vyos-2026.05.09-1830-rolling-LS1046A-ask-arm64.iso
-#   vyos-2026.05.09-1830-rolling-LS1046A-vpp-arm64.iso
+# Rename generic -> LS1046A in artifact filenames. Single flavor-neutral image:
+#   vyos-2026.05.09-1830-rolling-LS1046A-arm64.iso
 ORIG_ISO=$(jq --raw-output .artifacts[0] manifest.json)
-IMAGE_ISO="${ORIG_ISO/generic/LS1046A-${FLAVOR}}"
+IMAGE_ISO="${ORIG_ISO/generic/LS1046A}"
 IMAGE_NAME="${IMAGE_ISO%.iso}"
 mv "$ORIG_ISO" "$IMAGE_ISO"
 echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"

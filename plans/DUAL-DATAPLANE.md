@@ -1,11 +1,11 @@
 # Dual Dataplane — Full ASK Offload, Switchable to VPP
 
-**Status:** Draft v1.0. 2026-06-12.
+**Status:** Adopted v1.1. 2026-06-14 (single-image flavor collapse made **immediate**; supersedes Draft v1.0 2026-06-12). The `default | ask | vpp` build-flavor split is **retired** — CI ships one flavor-neutral ISO + one `version.json` feed (aliases kept for fielded installs). This is the current build/packaging model, no longer gated behind M7.
 **Goal:** One installed VyOS image on the LS1046A Mono Gateway that supports the *full* NXP-ASK-equivalent FMan hardware offload (classification, FE forwarding, NAT, IPsec, frag/reassembly) **and** can disable that offload to run the VPP/AF_XDP dataplane instead — switched by VyOS config commit, no reflash.
 
 **Authority split.** This plan does not re-specify either dataplane:
 
-- ASK-side architecture (ask.ko, YNL family, `dpaa_flavor_ops`/`pcd_ops->install`, `FORWARD_FQ_WITH_MANIP`, nf_flow_table, xfrmdev_ops) → `specs/ask2-rewrite-spec.md` (v1.7) is authoritative.
+- ASK-side architecture (ask.ko, YNL family, `dpaa_flavor_ops`/`pcd_ops->install`, `FORWARD_FQ_WITH_MANIP`, nf_flow_table, xfrmdev_ops) → `specs/ask2-rewrite-spec.md` (v1.8) is authoritative.
 - VPP-side architecture (AF_XDP ZC, XSK pool, per-CPU NAPI/qband, `set vpp settings`) → `specs/vpp-dpaa1-ls1046a-spec.md` + `specs/dpaa1-afxdp-modernization-spec.md` are authoritative.
 
 What this plan adds is the **glue neither spec owns**: the silicon mode state machine, the reversibility contract that makes ASK-disable possible, the mutual-exclusion CLI semantics, and the milestone sequence that delivers full ASK parity while keeping VPP working at every step.
@@ -167,7 +167,7 @@ graph LR
 | ask.ko control plane | `kernel/flavors/ask/oot-modules/ask/` per ASK2 spec §10.1 | signed post-build (`MODULE_SIG_FORCE`), `LOCALVERSION=-vyos`; with the single-image decision the module builds into **every** image (CI wires it unconditionally, not behind `FLAVOR=ask`) — dormant until `set system offload ask` |
 | Snapshot tool | `board/scripts/pcd-snapshot` (+ `ask-check`) | productized d14 dumpers; used by CI gates and field diagnostics |
 | VyOS CLI + validator | `data/vyos-1x-0NN-*.patch` | offload subtree + ASK/VPP mutual exclusion; follows vyos-1x-010 precedent |
-| Image strategy | `auto-build.yml` | **DECIDED 2026-06-12: single dual-dataplane image.** One ISO ships ask.ko *and* VPP; the dataplane choice is config-only. The `FLAVOR=ask\|vpp\|default` axis collapses: build the single image as `default`, keep `version-ask.json`/`version-vpp.json` publishing as aliases of the same artifact so existing field installs on all three update streams converge onto it (the legacy-alias precedent of `version.json`). Flavor-specific build paths retire after M7 |
+| Image strategy | `auto-build.yml` | **ADOPTED (flavor split retired 2026-06-14): single dual-dataplane image.** One ISO ships ask.ko *and* VPP; the dataplane choice is config-only. The `FLAVOR=ask\|vpp\|default` axis is collapsed: CI builds one flavor-neutral artifact (`vyos-<version>-LS1046A-arm64.iso`) and publishes one `version.json`, copied verbatim to `version-{default,ask,vpp}.json` aliases so existing field installs on all three update streams converge onto it (the legacy-alias precedent of `version.json`). |
 | Oracle archives | `files/` session + summarized into `specs/ask2-rewrite-spec.md` §12 | M0 dumps fold protocol facts back into the spec per its §0 rule |
 
 ---
@@ -188,7 +188,7 @@ graph LR
 
 ## 7. Decisions
 
-1. **Image packaging — DECIDED (2026-06-12): single dual-dataplane image.** One ISO carries ask.ko + VPP; flavor split retires per §5. All update feeds converge on the same artifact.
+1. **Image packaging — ADOPTED (flavor split retired 2026-06-14): single dual-dataplane image.** One ISO carries ask.ko + VPP; the flavor split is retired per §5. All update feeds converge on the same artifact.
 
 Open (to confirm before M1 code):
 
