@@ -527,6 +527,11 @@ cp "$BOARD_PATCH_DIR/0118-fman-pcd-cc-revert-ccbs-dispatch.patch" "$KERNEL_PATCH
 # generic HMAN_OC=0x35 HMTD, RMV=0x01000e00 / INSRT=0x02000e00+BE payload /
 # IPV4=0x0c040001 (TTL+L4 checksum). No existing VLAN/MPLS op altered.
 cp "$BOARD_PATCH_DIR/0119-fman-pcd-hm-l3-forward-ops.patch" "$KERNEL_PATCHES/"
+# ASK2 M2 step 2: dormant next-hop HM dedup refcount API
+# (fman_hm_nexthop_get/put) caches+refcounts one shared HMTD per L3
+# adjacency (egress_tx_fqid, src_mac, dst_mac) so MURAM scales
+# O(next-hops) not O(flows). EXPORT_SYMBOL_GPL, dormant (ask.ko consumes).
+cp "$BOARD_PATCH_DIR/0120-fman-pcd-hm-nexthop-dedup.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
