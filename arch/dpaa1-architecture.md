@@ -156,15 +156,15 @@ sequenceDiagram
     F->>F: 3. parse + classify → choose FQID, color
     F->>Q: 4. enqueue FD (chosen FQID)
     Q->>C: 5. push to WQ of CPU's dedicated channel (QoS picks WQ)
-    C->>C: 6. protocol processing; decides "needs IPsec"
+    C->>C: 6. protocol processing, decides it needs IPsec
     C->>Q: 7. enqueue FD to SEC's FQID
     Q->>S: 8. SEC dequeues via DCP2
-    S->>B: 8b. acquire buffers for ESP/tunnel; update FD length
+    S->>B: 8b. acquire buffers for ESP/tunnel, update FD length
     S->>Q: 8c. enqueue result FD (new FQID)
-    Q->>C: 9. push to a CPU; finalise tunnel header
+    Q->>C: 9. push to a CPU, finalise tunnel header
     C->>Q: 9b. enqueue to FMan TX FQID
     Q->>F: 10. FMan dequeues via DCP0
-    F->>W: 10b. transmit from mEMAC; release buffers to BMan
+    F->>W: 10b. transmit from mEMAC, release buffers to BMan
 ```
 
 **The ASK2 fast path collapses steps 4–9:** when the PCD classifies a flow directly to an egress FQ
