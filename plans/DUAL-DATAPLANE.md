@@ -65,7 +65,7 @@ Key properties:
 
 ### 2.2 What teardown must invert (the S1→S0 checklist)
 
-Each item lands with its inverse in the same patch, and the inverse is exercised in CI/DUT soak before the forward path is considered done:
+Each item lands with its inverse in the same patch, and the inverse is exercised in CI/board soak before the forward path is considered done:
 
 | # | Forward (S0→S1) | Inverse (S1→S0) |
 |---|---|---|
@@ -115,7 +115,7 @@ set vpp settings interface eth4
 
 ## 4. Milestones
 
-Each milestone has a hardware gate on the DUT and lands with its teardown inverse (§2.2). VPP regression (`set vpp settings` on eth3/eth4 still binds and passes traffic after an ASK enable/disable cycle) is part of **every** gate from M1 on.
+Each milestone has a hardware gate on the board and lands with its teardown inverse (§2.2). VPP regression (`set vpp settings` on eth3/eth4 still binds and passes traffic after an ASK enable/disable cycle) is part of **every** gate from M1 on.
 
 ```mermaid
 graph LR
@@ -135,7 +135,7 @@ graph LR
 *Gate:* reference dumps archived in-repo; snapshot tool (`pcd-snapshot`) runs on both vendor and mainline kernels.
 
 **M1 — Reversible PCD mode-switch infrastructure.** Implement §2.2 items 1–4 forward+inverse in the board FMan PCD layer (extending 0097-series primitives: scheme-mode rewrite, `fmbm_rfpne` bind/unbind, FE MURAM alloc/free, params-page set/clear), exposed to ask.ko via `<linux/fsl/fman_pcd.h>`. No classification semantics yet — just clean, snapshot-verified S0→S1→S0 cycling.
-*Gate:* 100× enable/disable cycles on the DUT with snapshot-diff clean every cycle; VPP AF_XDP bind + iperf3 pass after the 100th teardown; kernel netdevs and management SSH unaffected throughout. **This milestone is the user's headline requirement and ships first.**
+*Gate:* 100× enable/disable cycles on the board with snapshot-diff clean every cycle; VPP AF_XDP bind + iperf3 pass after the 100th teardown; kernel netdevs and management SSH unaffected throughout. **This milestone is the user's headline requirement and ships first.**
 
 **M2 — HW classification (the parity keystone).** AC_CC dispatch + full FE/ehash init per the M0 oracle, replacing the 0118 CCBS placebo. First packet of a flow → exception to kernel; subsequent packets classified in silicon.
 *Gate:* D14-class evidence — KG scheme hit counters advance, CC lookup resolves, classified flow's frames stop appearing in kernel softirq; teardown still snapshot-clean.
