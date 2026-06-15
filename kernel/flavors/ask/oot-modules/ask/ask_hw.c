@@ -29,8 +29,8 @@
  * the per-flow cookie onto that substrate; the per-flow insert path is
  * a declared stub (-EOPNOTSUPP) until Stage C wires the rebuild-via-
  * install fast path (mirroring board patch 0109 dpaa_cls_reinstall).
- * ask.ko does not compile into the shipping single-image ISO until the
- * oot-ungate step drops the dead FLAVOR=ask CI guards.
+ * Since the 2026-06-14 oot-ungate, ask.ko builds, signs, and packages
+ * (dormant) into every single-image ISO; it engages only at runtime.
  */
 
 #include <linux/kernel.h>
@@ -168,10 +168,7 @@ static int ask_hw_qef_get_description(const u8 *blob, size_t len, char *desc)
                 return -EINVAL;
         }
 
-        magic = ((u32)blob[ASK_QEF_MAGIC_OFFSET]     << 24) |
-                ((u32)blob[ASK_QEF_MAGIC_OFFSET + 1] << 16) |
-                ((u32)blob[ASK_QEF_MAGIC_OFFSET + 2] <<  8) |
-                ((u32)blob[ASK_QEF_MAGIC_OFFSET + 3]);
+        magic = get_unaligned_be32(&blob[ASK_QEF_MAGIC_OFFSET]);
 
         if (magic != ASK_QEF_MAGIC) {
                 ask_pr_warn("hw: firmware magic mismatch (got 0x%08x, want 0x%08x)\n",
@@ -255,7 +252,10 @@ int ask_hw_ucode_get_version(struct ask_hw_ucode_version *out)
         if (!out)
                 return -EINVAL;
 
-        if (READ_ONCE(ask_hw_cached_valid)) {
+        /* Acquire pairs with the smp_store_release() below so a reader that
+         * observes the valid flag is guaranteed to see the fully-published
+         * ask_hw_cached struct (never a torn copy) on weakly-ordered arm64. */
+        if (smp_load_acquire(&ask_hw_cached_valid)) {
                 *out = ask_hw_cached;
                 return 0;
         }
@@ -265,7 +265,8 @@ int ask_hw_ucode_get_version(struct ask_hw_ucode_version *out)
                 return rc;
 
         ask_hw_cached = *out;
-        WRITE_ONCE(ask_hw_cached_valid, true);
+        /* Publish the struct before the valid flag (release barrier). */
+        smp_store_release(&ask_hw_cached_valid, true);
         return 0;
 }
 EXPORT_SYMBOL_GPL(ask_hw_ucode_get_version);
