@@ -6,25 +6,15 @@
  * patch (PR11/M2.2 - `0002-dpaa-eth-flow-block.patch`) plugs into the
  * `dpaa_setup_tc()` path.
  *
- * PR14j architectural change vs. PR14g:
- *
- *   PR14g bound the KG scheme to whichever dpaa netdev received the
- *   FIRST FLOW_BLOCK_BIND.  On the M2 test rig that turned out to be
- *   egress eth4 - so the ingress eth3 bind returned -EBUSY and the
- *   classifier never saw RX traffic.  Result: 6.9 Gbps / 54% CPU, well
- *   below the 18 Gbps M2 gate.
- *
- *   PR14j defers ask_hw_port_bind() from FLOW_BLOCK_BIND to
- *   FLOW_CLS_REPLACE.  At REPLACE time the rule carries a REDIRECT /
- *   MIRRED action with the egress target, so the netdev whose block
- *   received the REPLACE is unambiguously the INGRESS netdev (the
- *   one that matched the 5-tuple).  We bind KG to THAT netdev's FMan
- *   port id.  Egress-only netdevs never receive a REPLACE for which
- *   they are the source, so they never consume the single-port-per-
- *   scheme KGSE_MV slot.
- *
- *   FLOW_BLOCK_BIND still installs the block_cb (so we'll see the
- *   REPLACE events) - it just does not touch silicon.
+ * Ingress-vs-egress binding: the port-bind decision is deferred from
+ * FLOW_BLOCK_BIND to FLOW_CLS_REPLACE.  At REPLACE time the rule carries
+ * a REDIRECT/MIRRED action with the egress target, so the netdev whose
+ * block received the REPLACE is unambiguously the INGRESS netdev (the one
+ * that matched the 5-tuple); egress-only netdevs never receive a REPLACE
+ * for which they are the source, so they never consume the single-port-
+ * per-scheme KGSE_MV slot.  FLOW_BLOCK_BIND only installs the block_cb
+ * (so we see the REPLACE events); it does not touch silicon.
+ * (Previously a FIRST-BIND scheme bound the wrong netdev - see git log.)
  *
  * Translation shape (FLOW_CLS_* -> ask_flow_*):
  *
@@ -38,8 +28,8 @@
  *
  *   FLOW_CLS_STATS: ask_flow_get_stats() into flow_stats_update().
  *
- * Spec ref: §4.3 (flow_block_cb integration), §11.1 (M2 perf gate),
- * plans/PR14j-DESIGN.md (the two-stage OH-port architecture).
+ * Spec ref: ask2-rewrite-spec.md §4.3 (flow_block_cb integration),
+ * §11.1 (M2 perf gate).
  */
 
 #include <linux/kernel.h>
