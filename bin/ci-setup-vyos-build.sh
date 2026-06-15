@@ -550,6 +550,22 @@ chmod +x "$CHROOT/usr/local/bin/ask-check"
 cp board/scripts/firmware-check "$CHROOT/usr/local/bin/firmware-check"
 chmod +x "$CHROOT/usr/local/bin/firmware-check"
 
+### ASK2 reversible-mode-switch gate: `pcd-snapshot` (Python 3) captures and
+### diffs the FMan PCD silicon state that the S0<->S1 dataplane mode-switch
+### (DUAL-DATAPLANE.md M1) mutates — KeyGen schemes (RSS vs AC_CC, read via
+### the KG indirect Action Register), per-port BMI next-engine bind
+### (fmbm_rfpne/rccb/rgpr), the static CC tree / FM_CTL params-page MURAM
+### region, and the gen_pool MURAM budget (/sys/kernel/debug/fman_pcd/0/
+### muram_budget). `capture` snapshots the S0 baseline; `diff` asserts the
+### live state still equals it after a S1->S0 teardown, so the M1 soak can
+### prove every engage/disengage cycle was fully reversible without a reboot.
+### Exit 0 clean / 1 drift|fault / 2 not-LS1046A — usable as a soak gate.
+### Mirrors firmware-check / fan-check / caam-check style; installed without a
+### .py suffix (fan-pid / led / caam-check convention). Flavor-agnostic (the
+### board PCD substrate is in the common patch set on every image).
+cp board/scripts/pcd-snapshot "$CHROOT/usr/local/bin/pcd-snapshot"
+chmod +x "$CHROOT/usr/local/bin/pcd-snapshot"
+
 ### Mono Gateway DK LP5812 status LED control: `led` (Python 3) supports
 ### three input forms — palette index, four decimals R G B W, and 8-digit
 ### hex RRGGBBWW. Auto-creates /config/led.json with a 32-entry default

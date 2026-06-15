@@ -1,0 +1,522 @@
+#!/usr/bin/env python3
+# pcd-snapshot — capture / diff the LS1046A FMan PCD silicon state that the
+# ASK2 reversible dataplane mode-switch (DUAL-DATAPLANE.md M1, the S0<->S1
+# transition) mutates.
+#
+# WHY THIS EXISTS
+# ---------------
+# M1 builds a runtime switch that re-points the FMan classifier from the
+# mainline/RSS dataplane (state S0) to the ASK coarse-classification fast path
+# (state S1), and back.  The headline acceptance gate for M1 is NOT "ping
+# works" — it is REVERSIBILITY: after every S1->S0 teardown the FMan must be
+# returned to its S0 baseline so the kernel/RSS and the VPP AF_XDP overlay keep
+# running.  A wedged S1 only recovers by reboot (FMan re-init), so we must
+# prove byte-for-byte restoration without rebooting.
+#
+# This tool productizes the d14 /dev/mem forensic dumpers (ccdump / cc0116dump
+# / ccexp43_kgscheme / fmregdump) into a single capture+diff gate.  It reads
+# exactly the hardware surfaces the four reversible M1 primitives touch
+# (DUAL-DATAPLANE.md s2.2 items 1, 2, 4) so that:
+#
+#   pcd-snapshot capture            # at S0 baseline (boot, before any engage)
+#   ... engage ASK (S0->S1) ...     # M1 forward path
+#   ... disengage  (S1->S0) ...     # M1 inverse path
+#   pcd-snapshot diff               # MUST be clean (exit 0) or M1 has a leak
+#
+# THE FOUR M1 SURFACES (DUAL-DATAPLANE.md s2.2)
+#   1. KeyGen schemes  — RSS hash (S0) vs AC_CC dispatch (S1).  Read via the
+#      FMan KeyGen indirect Action Register (KG+0x1FC / window KG+0x100); the
+#      same READ op the in-tree fman_keygen driver uses.  32 schemes x 24 words.
+#   2. BMI per-port next-engine bind — fmbm_rfpne (RSS->KeyGen at S0,
+#      PRE_CC at S1), fmbm_rccb (CC-root MURAM base), fmbm_rgpr (FM_CTL
+#      params-page pointer).  Captured as the whole RX-port config window
+#      0x00..0x7c (counters at +0x200 are volatile and excluded).
+#   3. FE/ehash MURAM is gen_pool-allocated at runtime-chosen addresses, so it
+#      cannot be snapshot by a fixed window; instead we read the kernel's
+#      gen_pool instrumentation at /sys/kernel/debug/fman_pcd/0/muram_budget
+#      ("used" MUST return to its S0 value after teardown — the PR14z21
+#      327x-ENOMEM lesson).
+#   4. CC tree / FM_CTL params-page — the static-tree MURAM region
+#      (0x5AC00..0x5AE00); the params page at +0x5AD80 carries the
+#      FmPortSetFESupport words (+0x54/+0x58) that must zero on teardown.
+#
+# SAFETY
+#   - Register reads are non-destructive.  The KeyGen scheme read writes the KG
+#     Action Register (GO|READ) exactly as the kernel driver does; on the S0
+#     baseline the kernel is not reprogramming KeyGen, so the race window is
+#     nil.  Pass --no-kg to skip it if a concurrent kernel PCD op is possible.
+#   - Capture/diff at QUIESCENT points (after a teardown has fully completed),
+#     never mid-transition.
+#   - When driving the M1 soak, mutate on eth3 (SFP+) and NEVER eth0 — eth0 is
+#     the management/SSH lifeline.
+#
+# Style mirrors fan-check / caam-check / firmware-check: LS1046A board gate,
+# sectioned [OK]/[WARN]/[FAIL] report, exit 0 clean / 1 drift|fault / 2 not
+# this board.  Python 3 stdlib only (matches fan-pid / led).
+import argparse
+import datetime
+import glob
+import hashlib
+import json
+import mmap
+import os
+import struct
+import sys
+
+FMAN_BASE = 0x1A00000          # FMan1 CCSR base (1 MB window)
+MURAM_OFF = 0x00000
+MURAM_SIZE = 0x60000           # 384 KB internal memory
+BMI_COMMON = 0x80000
+KG_OFF = 0xC1000               # KeyGen block
+FPM_OFF = 0xC3000              # Frame Processing Manager
+
+KG_GLOBAL_GCR = 0x000
+KG_GLOBAL_SEER = 0x01C         # scheme error event
+KG_GLOBAL_TPC = 0x028          # total-packets counter (VOLATILE)
+KG_GLOBAL_SERC = 0x02C         # scheme error capture
+KG_WINDOW = 0x100              # indirect register window
+KG_AR = 0x1FC                  # Action Register
+KG_GO = 0x80000000
+KG_READ = 0x40000000
+KG_ERR = 0x20000000
+KG_SEL_PORT = 0x02000000
+KG_SCHEME_WORDS = 0x18         # 24 words per scheme (0x100..0x15c)
+NUM_SCHEMES = 32
+
+# RX BMI port config window (per-port page = BMI_COMMON + P*0x1000).
+# We snapshot 0x00..0x7c (config); the +0x200.. counters are read-volatile.
+BMI_CFG_WORDS = 0x20           # 32 words (0x00..0x7c)
+BMI_RFPNE = 0x28               # next-engine (RSS-KeyGen at S0 / PRE_CC at S1)
+BMI_RCCB = 0x34                # CC-root MURAM base
+# RX BMI port ids on the Mono Gateway: 6x1G (0x08..0x0d) + 2x10G (0x10,0x11).
+RX_PORT_IDS = [0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x10, 0x11]
+
+# Static CC tree / FM_CTL params-page MURAM region (0098/0105/0116 substrate).
+CC_REGION_OFF = 0x5AC00
+CC_REGION_WORDS = 0x80         # 0x200 bytes: root-AD, match table, result ADs, params page
+
+MURAM_BUDGET = "/sys/kernel/debug/fman_pcd/0/muram_budget"
+
+NAMES_SCHEME = ["mode", "ekfc", "ekdv", "bmch", "bmcl", "fqb", "hc", "ppc",
+                "gec0", "gec1", "gec2", "gec3", "gec4", "gec5", "gec6", "gec7",
+                "spc", "dv0", "dv1", "ccbs", "mv", "om", "vsp", "r5c"]
+# kgse_spc (index 16) is the per-scheme Scheme Packet Counter — a statistics
+# register that increments with matched traffic, NOT configuration. Like the
+# global tpc it is volatile and must be excluded from the reversibility diff.
+SCHEME_VOLATILE_IDX = {NAMES_SCHEME.index("spc")}
+
+
+# --------------------------------------------------------------------------
+# Colour (TTY only) — same convention as the other board *-check scripts.
+# --------------------------------------------------------------------------
+if sys.stdout.isatty() and os.environ.get("TERM", "dumb") != "dumb":
+    C_RST, C_BOLD, C_DIM = "\033[0m", "\033[1m", "\033[2m"
+    C_GREEN, C_YELLOW, C_RED, C_BLUE = (
+        "\033[1;32m", "\033[1;33m", "\033[1;31m", "\033[1;34m")
+else:
+    C_RST = C_BOLD = C_DIM = C_GREEN = C_YELLOW = C_RED = C_BLUE = ""
+
+
+def ok(msg):
+    print("  [%sOK%s]   %s" % (C_GREEN, C_RST, msg))
+
+
+def warn(msg):
+    print("  [%sWARN%s] %s" % (C_YELLOW, C_RST, msg))
+
+
+def fail(msg):
+    print("  [%sFAIL%s] %s" % (C_RED, C_RST, msg))
+
+
+def note(msg):
+    print("         %s%s%s" % (C_DIM, msg, C_RST))
+
+
+def hdr(msg):
+    print("\n%s%s%s" % (C_BOLD, msg, C_RST))
+
+
+# --------------------------------------------------------------------------
+# /dev/mem access — big-endian u32, page-cached mmap (matches the d14 dumpers).
+# --------------------------------------------------------------------------
+class Mem:
+    def __init__(self):
+        # O_RDWR needed only for the KeyGen Action Register read trigger.
+        self.fd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
+        self._pages = {}
+
+    def _page(self, phys):
+        pg = phys & ~0xFFF
+        m = self._pages.get(pg)
+        if m is None:
+            m = mmap.mmap(self.fd, 0x1000, mmap.MAP_SHARED,
+                          mmap.PROT_READ | mmap.PROT_WRITE, offset=pg)
+            self._pages[pg] = m
+        return m, phys - pg
+
+    def rd(self, phys):
+        m, o = self._page(phys)
+        return struct.unpack(">I", m[o:o + 4])[0]
+
+    def wr(self, phys, val):
+        m, o = self._page(phys)
+        m[o:o + 4] = struct.pack(">I", val)
+
+    def close(self):
+        for m in self._pages.values():
+            m.close()
+        self._pages.clear()
+        os.close(self.fd)
+
+
+def ar_wait(mem, arval):
+    """Drive the KeyGen indirect Action Register and wait for GO to clear."""
+    mem.wr(FMAN_BASE + KG_OFF + KG_AR, arval)
+    a = 0
+    for _ in range(2000):
+        a = mem.rd(FMAN_BASE + KG_OFF + KG_AR)
+        if not (a & KG_GO):
+            break
+    return a
+
+
+def read_scheme(mem, n):
+    ar = ar_wait(mem, KG_GO | KG_READ | (n << 16))
+    words = [mem.rd(FMAN_BASE + KG_OFF + KG_WINDOW + 4 * i)
+             for i in range(KG_SCHEME_WORDS)]
+    return bool(ar & KG_ERR), words
+
+
+def read_port_sp(mem, port_id):
+    ar_wait(mem, KG_GO | KG_READ | KG_SEL_PORT | (port_id << 16) | 0x8000)
+    return mem.rd(FMAN_BASE + KG_OFF + KG_WINDOW)
+
+
+def hx(v):
+    return "0x%08x" % v
+
+
+def read_muram_budget():
+    """Parse /sys/kernel/debug/fman_pcd/0/muram_budget if present.
+    Returns dict or None. Format is free-form 'key value' lines from the
+    board substrate; we pull reserved/used/high-water tokens leniently."""
+    try:
+        with open(MURAM_BUDGET) as f:
+            txt = f.read()
+    except OSError:
+        return None
+    out = {}
+    toks = txt.replace(",", " ").replace("=", " ").split()
+    for i, t in enumerate(toks):
+        key = t.lower().rstrip(":")
+        if key in ("reserved", "used", "high-water", "highwater", "high_water"):
+            if i + 1 < len(toks):
+                try:
+                    out[key.replace("-", "_")] = int(toks[i + 1], 0)
+                except ValueError:
+                    pass
+    return out or {"raw": txt.strip()}
+
+
+def running_image():
+    try:
+        with open("/proc/cmdline") as f:
+            for tok in f.read().split():
+                if tok.startswith("vyos-union="):
+                    return tok.split("=", 1)[1]
+    except OSError:
+        pass
+    return "?"
+
+
+# --------------------------------------------------------------------------
+# Capture
+# --------------------------------------------------------------------------
+def capture(mem, with_kg=True):
+    snap = {
+        "tool": "pcd-snapshot",
+        "fmt": 1,
+        "captured_at": datetime.datetime.now(datetime.timezone.utc)
+        .strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "image": running_image(),
+        "fman_base": hx(FMAN_BASE),
+    }
+
+    if with_kg:
+        kg = {"stable": {}, "volatile": {}, "port_sp": {}, "schemes": {}}
+        kg["stable"]["gcr"] = hx(mem.rd(FMAN_BASE + KG_OFF + KG_GLOBAL_GCR))
+        kg["stable"]["seer"] = hx(mem.rd(FMAN_BASE + KG_OFF + KG_GLOBAL_SEER))
+        kg["stable"]["serc"] = hx(mem.rd(FMAN_BASE + KG_OFF + KG_GLOBAL_SERC))
+        kg["volatile"]["tpc"] = hx(mem.rd(FMAN_BASE + KG_OFF + KG_GLOBAL_TPC))
+        for n in range(NUM_SCHEMES):
+            err, words = read_scheme(mem, n)
+            kg["schemes"]["%d" % n] = {
+                "err": err, "w": [hx(w) for w in words]}
+        for pid in RX_PORT_IDS:
+            kg["port_sp"]["0x%02x" % pid] = hx(read_port_sp(mem, pid))
+        snap["kg"] = kg
+    else:
+        snap["kg"] = None
+
+    bmi = {}
+    for pid in RX_PORT_IDS:
+        base = FMAN_BASE + BMI_COMMON + pid * 0x1000
+        bmi["0x%02x" % pid] = [hx(mem.rd(base + 4 * i))
+                               for i in range(BMI_CFG_WORDS)]
+    snap["bmi"] = bmi
+
+    cc = [mem.rd(FMAN_BASE + CC_REGION_OFF + 4 * i)
+          for i in range(CC_REGION_WORDS)]
+    snap["muram"] = {
+        "cc_region": {"base": hx(CC_REGION_OFF), "w": [hx(w) for w in cc]},
+        "budget": read_muram_budget(),
+    }
+    return snap
+
+
+# --------------------------------------------------------------------------
+# Diff
+# --------------------------------------------------------------------------
+def _scheme_tag(modeword):
+    v = int(modeword, 16)
+    if not (v & 0x80000000):
+        return "DISABLED"
+    nia = v & 0xFF
+    plcr = " PLCR" if (v & 0x40000000) else ""
+    if nia == 0x06:
+        eng = "CC(AC_CC)"
+    elif nia == 0x00:
+        eng = "ENQ/RSS-hash"
+    else:
+        eng = "nia=0x%02x" % nia
+    return "EN %s%s" % (eng, plcr)
+
+
+def diff(old, new):
+    """Compare two snapshots. Returns list of (severity, message). Volatile
+    fields (KG tpc, MURAM high-water) are reported as notes, never failures."""
+    deltas = []
+
+    # --- KeyGen schemes (item 1) ---
+    okg, nkg = old.get("kg"), new.get("kg")
+    if okg and nkg:
+        for k in ("gcr", "seer", "serc"):
+            ov, nv = okg["stable"].get(k), nkg["stable"].get(k)
+            if ov != nv:
+                deltas.append(("fail", "KG global %s: %s -> %s" % (k, ov, nv)))
+        for pid in sorted(set(okg["port_sp"]) | set(nkg["port_sp"])):
+            ov = okg["port_sp"].get(pid)
+            nv = nkg["port_sp"].get(pid)
+            if ov != nv:
+                deltas.append(("fail", "KG port[%s] scheme-bitmap: %s -> %s"
+                               % (pid, ov, nv)))
+        for sn in sorted(set(okg["schemes"]) | set(nkg["schemes"]),
+                         key=lambda x: int(x)):
+            ow = okg["schemes"].get(sn, {}).get("w", [])
+            nw = nkg["schemes"].get(sn, {}).get("w", [])
+            cfg_changed = (len(ow) != len(nw) or any(
+                a != b and i not in SCHEME_VOLATILE_IDX
+                for i, (a, b) in enumerate(zip(ow, nw))))
+            if cfg_changed:
+                otag = _scheme_tag(ow[0]) if ow else "absent"
+                ntag = _scheme_tag(nw[0]) if nw else "absent"
+                deltas.append(("fail", "KG scheme[%s]: %s -> %s" % (sn, otag, ntag)))
+                for i, (a, b) in enumerate(zip(ow, nw)):
+                    if a != b and i not in SCHEME_VOLATILE_IDX:
+                        nm = NAMES_SCHEME[i] if i < len(NAMES_SCHEME) else "w%d" % i
+                        deltas.append(("note", "    kgse_%-5s %s -> %s" % (nm, a, b)))
+    elif (okg is None) != (nkg is None):
+        deltas.append(("note", "KG capture present in only one snapshot (--no-kg)"))
+
+    # --- BMI per-port next-engine bind (item 2) ---
+    ob, nb = old.get("bmi", {}), new.get("bmi", {})
+    for pid in sorted(set(ob) | set(nb)):
+        ow, nw = ob.get(pid, []), nb.get(pid, [])
+        if ow != nw:
+            for i, (a, b) in enumerate(zip(ow, nw)):
+                if a != b:
+                    off = 4 * i
+                    if off == BMI_RFPNE:
+                        lbl = "fmbm_rfpne(next-engine)"
+                    elif off == BMI_RCCB:
+                        lbl = "fmbm_rccb(cc-base)"
+                    else:
+                        lbl = "+0x%02x" % off
+                    deltas.append(("fail", "BMI port[%s] %s: %s -> %s"
+                                   % (pid, lbl, a, b)))
+
+    # --- CC tree / params-page MURAM region (item 4) ---
+    occ = old.get("muram", {}).get("cc_region", {}).get("w", [])
+    ncc = new.get("muram", {}).get("cc_region", {}).get("w", [])
+    if occ != ncc:
+        base = int(old.get("muram", {}).get("cc_region", {}).get("base", "0x0"), 16)
+        for i, (a, b) in enumerate(zip(occ, ncc)):
+            if a != b:
+                deltas.append(("fail", "MURAM cc-region +0x%05x: %s -> %s"
+                               % (base + 4 * i, a, b)))
+
+    # --- gen_pool MURAM budget (item 3) ---
+    obud = (old.get("muram", {}) or {}).get("budget") or {}
+    nbud = (new.get("muram", {}) or {}).get("budget") or {}
+    ou, nu = obud.get("used"), nbud.get("used")
+    if ou is not None and nu is not None and ou != nu:
+        deltas.append(("fail", "MURAM gen_pool used: %d -> %d bytes (LEAK)"
+                       % (ou, nu)))
+    ohw, nhw = obud.get("high_water"), nbud.get("high_water")
+    if ohw is not None and nhw is not None and ohw != nhw:
+        deltas.append(("note", "MURAM high-water: %d -> %d (monotonic, ignored)"
+                       % (ohw, nhw)))
+
+    return deltas
+
+
+# --------------------------------------------------------------------------
+# show — human-readable decode of the live PCD state
+# --------------------------------------------------------------------------
+def show(snap):
+    hdr("KeyGen schemes (active)")
+    kg = snap.get("kg")
+    if not kg:
+        note("(KG capture skipped)")
+    else:
+        any_active = False
+        for sn in sorted(kg["schemes"], key=lambda x: int(x)):
+            w = kg["schemes"][sn]["w"]
+            if int(w[0], 16) == 0 and all(int(x, 16) == 0 for x in w):
+                continue
+            any_active = True
+            err = " <AR-ERR>" if kg["schemes"][sn]["err"] else ""
+            print("  scheme[%2s] %s  fqb=%s ccbs=%s%s"
+                  % (sn, _scheme_tag(w[0]), w[5], w[19], err))
+        if not any_active:
+            note("(no active schemes)")
+        note("KG gcr=%s seer=%s serc=%s tpc=%s"
+             % (kg["stable"]["gcr"], kg["stable"]["seer"],
+                kg["stable"]["serc"], kg["volatile"]["tpc"]))
+
+    hdr("BMI RX port next-engine bind")
+    for pid in sorted(snap.get("bmi", {}), key=lambda x: int(x, 16)):
+        w = snap["bmi"][pid]
+        rfpne = w[BMI_RFPNE // 4]
+        rccb = w[BMI_RCCB // 4]
+        eng = "PRE_CC" if (int(rfpne, 16) & 0x000000ff) == 0x06 else "KeyGen/RSS"
+        print("  port[%s] rfpne=%s (%s) rccb=%s" % (pid, rfpne, eng, rccb))
+
+    hdr("MURAM")
+    bud = (snap.get("muram", {}) or {}).get("budget")
+    if bud:
+        note("gen_pool budget: " + json.dumps(bud))
+    else:
+        note("gen_pool budget: %s absent (board substrate older than M1)" % MURAM_BUDGET)
+    cc = snap.get("muram", {}).get("cc_region", {})
+    if cc:
+        nz = sum(1 for x in cc.get("w", []) if int(x, 16) != 0)
+        note("cc-region @%s: %d/%d non-zero words"
+             % (cc.get("base"), nz, len(cc.get("w", []))))
+
+
+# --------------------------------------------------------------------------
+# main
+# --------------------------------------------------------------------------
+DEFAULT_PATH = "/run/pcd-snapshot.json"
+
+
+def board_gate():
+    try:
+        with open("/proc/device-tree/compatible", "rb") as f:
+            compat = f.read().replace(b"\0", b"\n")
+        if b"fsl,ls1046a" not in compat:
+            raise ValueError
+    except (OSError, ValueError):
+        print("pcd-snapshot: not LS1046A — nothing to do", file=sys.stderr)
+        sys.exit(2)
+
+
+def need_root():
+    if os.geteuid() != 0:
+        print("pcd-snapshot: must run as root (reads /dev/mem)", file=sys.stderr)
+        sys.exit(2)
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        prog="pcd-snapshot",
+        description="Capture/diff LS1046A FMan PCD silicon state for the "
+                    "ASK2 S0<->S1 reversible mode-switch (DUAL-DATAPLANE M1).")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p_cap = sub.add_parser("capture", help="snapshot current PCD state to a file")
+    p_cap.add_argument("-o", "--out", default=DEFAULT_PATH,
+                       help="output path (default %s)" % DEFAULT_PATH)
+    p_cap.add_argument("--no-kg", action="store_true",
+                       help="skip KeyGen Action-Register reads")
+    p_cap.add_argument("--show", action="store_true",
+                       help="also print a human-readable decode")
+
+    p_diff = sub.add_parser("diff", help="diff current state against a snapshot")
+    p_diff.add_argument("ref", nargs="?", default=DEFAULT_PATH,
+                        help="reference snapshot (default %s)" % DEFAULT_PATH)
+    p_diff.add_argument("--no-kg", action="store_true",
+                        help="skip KeyGen Action-Register reads")
+
+    p_show = sub.add_parser("show", help="decode current live PCD state")
+    p_show.add_argument("--no-kg", action="store_true")
+
+    args = ap.parse_args()
+    board_gate()
+    need_root()
+
+    mem = Mem()
+    try:
+        live = capture(mem, with_kg=not args.no_kg)
+    finally:
+        mem.close()
+
+    if args.cmd == "capture":
+        with open(args.out, "w") as f:
+            json.dump(live, f, indent=1)
+        print("%spcd-snapshot%s captured %s%s%s  image=%s  schemes=%s ports=%s"
+              % (C_BOLD, C_RST, C_GREEN, args.out, C_RST, live["image"],
+                 len(live["kg"]["schemes"]) if live.get("kg") else 0,
+                 len(live["bmi"])))
+        if args.show:
+            show(live)
+        return 0
+
+    if args.cmd == "show":
+        print("%spcd-snapshot show%s — image=%s" % (C_BOLD, C_RST, live["image"]))
+        show(live)
+        return 0
+
+    # diff
+    try:
+        with open(args.ref) as f:
+            ref = json.load(f)
+    except OSError as e:
+        print("pcd-snapshot: cannot read reference %s: %s" % (args.ref, e),
+              file=sys.stderr)
+        return 2
+    print("%spcd-snapshot diff%s — ref=%s (%s)  live=%s"
+          % (C_BOLD, C_RST, args.ref, ref.get("captured_at", "?"),
+             live.get("captured_at")))
+    if ref.get("image") != live.get("image"):
+        warn("image changed: %s -> %s (snapshot baseline is for a different "
+             "image)" % (ref.get("image"), live.get("image")))
+    deltas = diff(ref, live)
+    fails = [m for sev, m in deltas if sev == "fail"]
+    for sev, m in deltas:
+        (fail if sev == "fail" else note)(m)
+    if fails:
+        fail("PCD state DRIFTED from baseline — %d field(s) not restored"
+             % len(fails))
+        return 1
+    ok("PCD state matches baseline — S0<->S1 transition was fully reversible")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
