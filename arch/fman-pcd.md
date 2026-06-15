@@ -151,6 +151,14 @@ generic-from-PR/frame/IC (≤56 B).
 > at a header-manip chain is the core fast-path primitive. `0x29`/`0x2A` (TTL/hop-limit == 1) are how
 > the router punts expired packets to the slow path in hardware.
 
+> **Exact-match vs external-hash (the disposition fork — read before M2).** The exact-match
+> `CONT_LOOKUP` AD above is the universal v3 CC primitive, but on the shipping **210.10.1** microcode a
+> classified frame's *terminal disposition* (the BMI-FIFO free) is performed by the **Frame-Engine (FE)
+> opcode VM**, which exists only on the **external-hash** dispatch path (root AD `FE_ENTER`,
+> `pcAndOffsets=0xF6`, DDR buckets). A bare exact-match node that exits via `CONTRL_FLOW` (FQID-override)
+> leaks the FIFO → the open **M3-3b** stall. The complete FE/ehash init contract, the two-path table,
+> and the M2 decision criterion are the M0 oracle: see [`fman-fe-ehash.md`](fman-fe-ehash.md).
+
 ---
 
 ## 4. Header Manipulation (§5.12.10) — `fman_pcd_manip.c`

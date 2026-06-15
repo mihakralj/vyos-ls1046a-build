@@ -62,6 +62,15 @@ flowchart LR
 - **Design consequence for ASK2:** the HW flow table is a **cache, not a database**. `ask.ko` must
   treat HW slots as scarce — install the heaviest-hitting flows, age out idle ones, and fall back to
   the software path when the table is full. It must never assume "unlimited offload."
+- **FE/ehash MURAM overhead (M2+, the offload-init path).** Engaging hardware classification on the
+  210.10.1 ucode adds a small, bounded fixed cost *on top of* the per-flow CC rows above: a one-time
+  **100 × 28 B = 2 800 B** FE-object pool (`AllocFEObjs`), a **256 B** per-port FM_CTL params page
+  (board `0116`, allocate-once/reuse), and — only on the external-hash path — a **`tnums × 256 × 2`**
+  per-port FE buffer (~4–8 KB/port). The external-hash *bucket arrays* live in **DDR, not MURAM**
+  (`XX_MallocSmart`), so they do **not** count against the ~96 KB ceiling — *provided* `fmc` honours
+  `external='yes'`. The vendor's MURAM-exhaustion wall is exactly the case where it doesn't (buckets
+  fall back to MURAM `MatchTableSet` → `AllocStatsObjs` ENOMEM). Full byte-level contract + budget
+  table: [`fman-fe-ehash.md`](fman-fe-ehash.md) §3–§6.
 
 ---
 
