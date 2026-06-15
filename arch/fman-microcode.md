@@ -131,7 +131,14 @@ Two independent dimensions: **which ucode is loaded** and **which driver path pr
 > **Note on the caps gate.** Patch `0086a` `dpaa_fman_caps_from_id()` grants caps `0x17` only for
 > `major >= 210`, returning `0` for `106`. This is **over-conservative** (106 *does* have CC per the
 > NXP readme) but **harmless for us** — our board is `210.10.1`, so the gate correctly returns `0x17`
-> and CC programming proceeds.
+> and CC programming proceeds. *(Fork C — swapping to `106.4.18` — would require lifting this gate;
+> see [`fman-fe-ehash.md`](fman-fe-ehash.md) §8.2.)*
+>
+> **Caveat on the "✅ exact-match" cells.** The ✅ marks mean the **silicon** supports CC, not that
+> *classic* (FE-less) exact-match dispatch flows on the **loaded blob**. Empirically, the executing
+> `210.10.1` AC_CC handler **requires** FE/ehash globals and **parks** on classic exact-match CC
+> (iter-33; [`fman-fe-ehash.md`](fman-fe-ehash.md) §8.1). Whether `106.4.18` flows classic exact-match
+> **without** FE/ehash is the open question gating Fork C (§8.2) — a single board experiment settles it.
 
 ---
 
@@ -206,12 +213,21 @@ If you ever need to restore the factory ucode, the true QEF is the 51652-byte
 ## 9. Current status / known gap
 
 The microcode load path is HW-proven (DTB decode + `0117` GATE-1 pass). The remaining wall is **not**
-the ucode: with `210.10.1` loaded and executing, the `AC_CC` accelerator **is** dispatched on the
-first CC frame (the parked FM_CTL task holds the correctly-extracted L4 key), but the port **stalls
-mid-walk** (`FMFP_PS[STL]`) **before** any result-AD enqueue/discard fires — the **M3-3b structural
-wall**. This is tracked in [`../specs/dpaa1-afxdp-modernization-spec.md`](../specs/dpaa1-afxdp-modernization-spec.md)
-§5.6 and the ASK2 CC-steering work, **not** here. This doc only guarantees: *the right ucode is on the
-board and the kernel sees it.*
+the ucode load: with `210.10.1` loaded and executing, the `AC_CC` accelerator **is** dispatched on the
+first CC frame (the parked FM_CTL task holds the correctly-extracted L4 key), but the port **stalls on
+that first frame** (`FMFP_PS` → `0x80800000`, **STL** bit8; parked task `ts[4]=0x81000000`, **PRK**)
+**before** any result-AD enqueue/discard fires — the **M3-3b structural wall**.
+
+The root cause is now understood (qdrant `iter-33` 2026-06-12 + `ASK2 ehash/FE architecture root cause`
+2026-06-13): the `210.10.1` AC_CC handler **dereferences Forwarding-Engine global structures on dispatch**
+(FE object pool, internal FE buffer pool, MUX/TRANSITION-FE singletons, `FE_ENTER` root AD) that the
+vendor stack pre-builds via `USE_ENHANCED_EHASH=1` but mainline MURAM lacks — so classic exact-match CC
+parks the FM_CTL task waiting on resources that were never allocated. **Classic exact-match CC cannot
+work on this loaded blob without the FE/ehash init protocol.** The byte-level init contract and the
+resulting **Fork B (reproduce FE/ehash on 210.10.1) vs Fork C (swap to `106.4.18` + classic CC)**
+decision live in [`fman-fe-ehash.md`](fman-fe-ehash.md) §8, tracked in
+[`../specs/dpaa1-afxdp-modernization-spec.md`](../specs/dpaa1-afxdp-modernization-spec.md) §5.6 and the
+ASK2 CC-steering work. This doc only guarantees: *the right ucode is on the board and the kernel sees it.*
 
 ---
 
