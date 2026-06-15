@@ -131,14 +131,15 @@ Two independent dimensions: **which ucode is loaded** and **which driver path pr
 > **Note on the caps gate.** Patch `0086a` `dpaa_fman_caps_from_id()` grants caps `0x17` only for
 > `major >= 210`, returning `0` for `106`. This is **over-conservative** (106 *does* have CC per the
 > NXP readme) but **harmless for us** — our board is `210.10.1`, so the gate correctly returns `0x17`
-> and CC programming proceeds. *(Fork C — swapping to `106.4.18` — would require lifting this gate;
-> see [`fman-fe-ehash.md`](fman-fe-ehash.md) §8.2.)*
+> and CC programming proceeds. *(A `106.4.18` swap would require lifting this gate — but that swap is
+> **ruled out as uninformative**; see [`fman-fe-ehash.md`](fman-fe-ehash.md) §8.4.)*
 >
 > **Caveat on the "✅ exact-match" cells.** The ✅ marks mean the **silicon** supports CC, not that
-> *classic* (FE-less) exact-match dispatch flows on the **loaded blob**. Empirically, the executing
-> `210.10.1` AC_CC handler **requires** FE/ehash globals and **parks** on classic exact-match CC
-> (iter-33; [`fman-fe-ehash.md`](fman-fe-ehash.md) §8.1). Whether `106.4.18` flows classic exact-match
-> **without** FE/ehash is the open question gating Fork C (§8.2) — a single board experiment settles it.
+> *classic* (FE-less) exact-match dispatch flows on the **loaded blob** today. Empirically the executing
+> `210.10.1` port **parks** on the first classic exact-match CC frame (`FMFP_PS[STL]`; iter-33). The
+> iter-42 disassembly shows the AC_CC handler reads **only per-frame context** (no missing FE global),
+> so the park is most likely a **missing runtime controller-arming step** (Option B), **not** proof that
+> classic exact-match is impossible — see [`fman-fe-ehash.md`](fman-fe-ehash.md) §8.1–§8.2.
 
 ---
 
@@ -218,14 +219,17 @@ first CC frame (the parked FM_CTL task holds the correctly-extracted L4 key), bu
 that first frame** (`FMFP_PS` → `0x80800000`, **STL** bit8; parked task `ts[4]=0x81000000`, **PRK**)
 **before** any result-AD enqueue/discard fires — the **M3-3b structural wall**.
 
-The root cause is now understood (qdrant `iter-33` 2026-06-12 + `ASK2 ehash/FE architecture root cause`
-2026-06-13): the `210.10.1` AC_CC handler **dereferences Forwarding-Engine global structures on dispatch**
-(FE object pool, internal FE buffer pool, MUX/TRANSITION-FE singletons, `FE_ENTER` root AD) that the
-vendor stack pre-builds via `USE_ENHANCED_EHASH=1` but mainline MURAM lacks — so classic exact-match CC
-parks the FM_CTL task waiting on resources that were never allocated. **Classic exact-match CC cannot
-work on this loaded blob without the FE/ehash init protocol.** The byte-level init contract and the
-resulting **Fork B (reproduce FE/ehash on 210.10.1) vs Fork C (swap to `106.4.18` + classic CC)**
-decision live in [`fman-fe-ehash.md`](fman-fe-ehash.md) §8, tracked in
+The root cause is **not yet resolved**, but the most rigorous analysis (qdrant `iter-42`, 2026-06-12,
+full disassembly) **narrows** it: the `210.10.1` AC_CC handler (entry word `0x630`) reads **only the
+per-task context page** (`0xd0xx`) for every branch and key extraction — there is **no load from a
+driver-set global** it could be missing, and PRE_CC is near-identical between `106` and `210`. So the
+park is most consistent with a **missing runtime FMan/PCD-enable controller-arming step** (the
+`FmEnable`/`FmPcdEnable`/`FmPcdCcEnable` register delta mainline `fman.c` skips — "Option B"), **not** a
+ucode-build defect. The 2026-06-13 finding that the *vendor* uses `USE_ENHANCED_EHASH=1` is about the
+vendor's **`FE_ENTER`** dispatch (a *different* handler than `AC_CC 0x06`, used for scale/NAT/frag/stats
+features) and does **not** establish that classic exact-match is impossible — that earlier verdict is
+**retracted**. The leading-lead (Option B) vs the larger fallback (**Fork B** reproduce FE/ehash), and
+the **ruled-out** `106.4.18` swap, live in [`fman-fe-ehash.md`](fman-fe-ehash.md) §8, tracked in
 [`../specs/dpaa1-afxdp-modernization-spec.md`](../specs/dpaa1-afxdp-modernization-spec.md) §5.6 and the
 ASK2 CC-steering work. This doc only guarantees: *the right ucode is on the board and the kernel sees it.*
 
