@@ -53,20 +53,27 @@
 #include <linux/etherdevice.h>          /* is_zero_ether_addr */
 #include <linux/if_ether.h>             /* ETH_P_IP, ETH_ALEN */
 #include <linux/in.h>                   /* IPPROTO_TCP */
+#include <linux/unaligned.h>            /* get_unaligned_be32 */
 
 #include "include/ask_internal.h"
 #include "include/ask_fman_caps.h"      /* fman_cc_*, fman_hm_*, struct fman */
 
 /*
- * OOT re-declaration of the one mainline FMan EXPORT_SYMBOL the board
- * substrate header does not surface.  fman_bind() resolves the FMan
- * platform device's struct fman *.  (The per-flow CC-target resolvers
- * dpaa_get_rx_fman_port() / dpaa_get_tx_fqid() — board patch 0121 — and
- * fman_port_get_id() are re-declared at their Stage-C call site in
- * ask_hw_flow_insert(), once the rebuild-via-install path lands.)
+ * OOT re-declarations of the mainline / board-substrate EXPORT_SYMBOLs the
+ * vendored caps header does not surface (a bindeb-pkg linux-headers package
+ * carries no driver headers, so re-declaring locally is the only mechanism).
+ * fman_bind() resolves the FMan platform device's struct fman *.  The per-flow
+ * CC-target resolvers dpaa_get_rx_fman_port() + dpaa_get_tx_fqid() (board patch
+ * 0121) and fman_port_get_id() (board patch 0104) map an ASK flow's ingress /
+ * egress netdevs to the (port_id, tx_fqid) the rebuild-via-install fast path
+ * needs.  Mirrors the identical shim already linking in ask_flow_offload.c.
  */
 struct device;
+struct fman_port;
 struct fman *fman_bind(struct device *dev);
+struct fman_port *dpaa_get_rx_fman_port(struct net_device *dev);
+u8 fman_port_get_id(struct fman_port *port);
+int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
 
 /*
  * QEF blob structural constants (PR13). The microcode version
@@ -117,10 +124,19 @@ static bool ask_hw_cached_valid;
  * the software CC-key shadow the rebuild-via-install per-flow model
  * maintains (mirroring board patch 0109 dpaa_cls_reinstall).
  */
+struct ask_hw_cc_slot {
+        bool                    used;
+        u32                     key_id;   /* monotonic; == cookie.cc_handle */
+        struct fman_cc_key      key;      /* 5-tuple + target_fqid + hm_handle */
+};
+
 struct ask_hw_port {
         bool            in_use;
         u8              port_id;        /* BMI hwport id (sparse 0x01..0x31) */
         bool            cc_installed;   /* a static CC tree is live on this port */
+        u16             nkeys;          /* live entries in shadow[] */
+        u32             next_key_id;    /* per-port monotonic id (never 0) */
+        struct ask_hw_cc_slot shadow[FMAN_CC_MAX_STATIC_KEYS];
 };
 
 struct ask_hw_pcd {
@@ -474,36 +490,249 @@ EXPORT_SYMBOL_GPL(ask_priv_unpack_hw_flow_id);
 /* Per-flow fast path                                                         */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * Resolve (or claim) the per-ingress-port shadow record for @port_id.
+ * Returns NULL only when all ASK_HW_MAX_PORTS slots are already owned by
+ * other ports.  Caller holds h->lock.
+ */
+static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h, u8 port_id)
+{
+        unsigned int i, free_idx = ASK_HW_MAX_PORTS;
+
+        for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+                if (h->port[i].in_use) {
+                        if (h->port[i].port_id == port_id)
+                                return &h->port[i];
+                } else if (free_idx == ASK_HW_MAX_PORTS) {
+                        free_idx = i;
+                }
+        }
+        if (free_idx == ASK_HW_MAX_PORTS)
+                return NULL;
+
+        h->port[free_idx].in_use       = true;
+        h->port[free_idx].port_id      = port_id;
+        h->port[free_idx].cc_installed = false;
+        h->port[free_idx].nkeys        = 0;
+        h->port[free_idx].next_key_id  = 1;
+        return &h->port[free_idx];
+}
+
+/*
+ * Rebuild-via-install (mirrors board patch 0109 dpaa_cls_reinstall): raze the
+ * port's live CC static tree, then re-materialise it from the current software
+ * shadow and install it.  Destroying first clears the port's KGSE_CCBS gate
+ * before the MURAM is freed, so no in-flight frame walks a half-torn tree (the
+ * brief gap routes frames to the RSS scheme).  Caller holds h->lock.
+ */
+static int ask_hw_port_reinstall(struct ask_hw_pcd *h, struct ask_hw_port *p)
+{
+        struct fman_cc_static_tree *tree;
+        unsigned int i;
+        int rc;
+
+        if (p->cc_installed) {
+                fman_cc_tree_destroy(h->fman, p->port_id);
+                p->cc_installed = false;
+        }
+        if (p->nkeys == 0)
+                return 0;
+
+        tree = kzalloc(sizeof(*tree), GFP_KERNEL);
+        if (!tree)
+                return -ENOMEM;
+
+        for (i = 0; i < FMAN_CC_MAX_STATIC_KEYS; i++) {
+                if (!p->shadow[i].used)
+                        continue;
+                tree->keys[tree->num_keys++] = p->shadow[i].key;
+        }
+        /* miss_fqid 0 -> non-matching frames stay on the RSS-hash path. */
+        rc = fman_cc_tree_install(h->fman, p->port_id, tree);
+        if (!rc)
+                p->cc_installed = true;
+        kfree(tree);
+        return rc;
+}
+
+/*
+ * Map an ASK flow netdev ifindex to its ingress BMI hwport id via the board
+ * resolver chain.  Returns -ENODEV for a non-DPAA / unknown ifindex (the
+ * graceful SW-fallback signal).  ASK offload flows on this single-image board
+ * live in the init namespace.
+ */
+static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id)
+{
+        struct net_device *dev;
+        struct fman_port *port;
+
+        dev = dev_get_by_index(&init_net, ifindex);
+        if (!dev)
+                return -ENODEV;
+        port = dpaa_get_rx_fman_port(dev);
+        if (!port) {
+                dev_put(dev);
+                return -ENODEV;
+        }
+        *port_id = fman_port_get_id(port);
+        dev_put(dev);
+        return 0;
+}
+
+/*
+ * Map an ASK flow egress netdev ifindex to its TX QMan FQID (queue 0).
+ * Returns -ENODEV for a non-DPAA / unknown ifindex.
+ */
+static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
+{
+        struct net_device *dev;
+        int rc;
+
+        dev = dev_get_by_index(&init_net, ifindex);
+        if (!dev)
+                return -ENODEV;
+        rc = dpaa_get_tx_fqid(dev, 0, fqid);
+        dev_put(dev);
+        return rc ? -ENODEV : 0;
+}
+
 int ask_hw_flow_insert(const struct ask_flow_key *key,
                        u32 oif, u32 action_flags,
                        enum ask_hw_dir dir,
                        u32 *out_hw_id)
 {
         struct ask_hw_pcd *h = ask_hw_pcd_get();
+        struct ask_hw_flow_cookie ck;
+        struct ask_hw_port *p;
+        struct fman_cc_key *k;
+        unsigned int slot;
+        u32 tx_fqid = 0;
+        u32 hm_handle = 0;
+        u32 cookie;
+        u8  port_id = 0;
+        int rc;
 
-        (void)key; (void)oif; (void)action_flags; (void)dir;
+        (void)action_flags; (void)dir;
 
-        if (out_hw_id)
-                *out_hw_id = 0;
+        /* NULL-arg contract: fail without touching *out_hw_id. */
+        if (!key || !out_hw_id)
+                return -EINVAL;
 
-        /* No HW backing — SW-only fallback. */
+        /* No HW backing -> SW-only fallback. */
         if (!h)
                 return -ENODEV;
 
+        /* Body ships v4 TCP/UDP only; everything else falls back to SW. */
+        if (key->l3_proto != ASK_FLOW_L3_IPV4 ||
+            (key->l4_proto != IPPROTO_TCP && key->l4_proto != IPPROTO_UDP))
+                return -EOPNOTSUPP;
+
         /*
-         * Stage C wires the board-substrate per-flow fast path here:
-         *   fman_hm_nexthop_get(fm, port_id, egress_tx_fqid, src_mac,
-         *                       dst_mac, &hm_handle)
-         *   build struct fman_cc_key{5-tuple, target_fqid = egress FQID,
-         *     hm_handle}, rebuild the ingress port's software CC-key shadow
-         *     and fman_cc_tree_destroy()->fman_cc_tree_install() it (the
-         *     rebuild-via-install model from board patch 0109), then
-         *   ask_hw_cookie_alloc() the {fm, port_id, cc_handle, hm_handle}
-         *     snapshot into *out_hw_id.
-         * Until that lands every insert declines so ask_flow.c keeps the
-         * flow on the software fast path (sentinel cookie 0, no HW backing).
+         * Neighbour not yet resolved: keep the flow in SW until the egress L2
+         * header is known, then the upper layer re-inserts.
          */
-        return -EOPNOTSUPP;
+        if (is_zero_ether_addr(key->next_hop_mac) ||
+            is_zero_ether_addr(key->egress_mac))
+                return -EAGAIN;
+
+        /* Ingress hwport owns the CC tree; egress FQID is the forward target. */
+        rc = ask_hw_resolve_iif_port(key->iif, &port_id);
+        if (rc)
+                return rc;
+        rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid);
+        if (rc)
+                return rc;
+
+        mutex_lock(&h->lock);
+
+        p = ask_hw_port_slot_get(h, port_id);
+        if (!p) {
+                rc = -ENOSPC;
+                goto out_unlock;
+        }
+        if (p->nkeys >= FMAN_CC_MAX_STATIC_KEYS) {
+                rc = -ENOSPC;
+                goto out_unlock;
+        }
+        for (slot = 0; slot < FMAN_CC_MAX_STATIC_KEYS; slot++)
+                if (!p->shadow[slot].used)
+                        break;
+        if (slot == FMAN_CC_MAX_STATIC_KEYS) {
+                rc = -ENOSPC;
+                goto out_unlock;
+        }
+
+        /*
+         * Resolve (and refcount) the shared next-hop HM node.  MAC order per
+         * the caps header: src_mac = egress port's own MAC, dst_mac = next-hop
+         * MAC.  -ENOTSUPP (ucode lacks HM caps) maps to -EOPNOTSUPP so the
+         * caller treats it as a clean SW fallback, not a hard error.
+         */
+        rc = fman_hm_nexthop_get(h->fman, port_id, tx_fqid,
+                                 key->egress_mac, key->next_hop_mac,
+                                 &hm_handle);
+        if (rc) {
+                rc = (rc == -ENOTSUPP) ? -EOPNOTSUPP : rc;
+                goto out_unlock;
+        }
+
+        /* Build the masked 5-tuple CC key -> FORWARD_FQ_WITH_MANIP atom. */
+        k = &p->shadow[slot].key;
+        memset(k, 0, sizeof(*k));
+        k->ethertype    = FMAN_CC_ETHERTYPE_IPV4;
+        k->proto        = key->l4_proto;
+        k->is_ipv6      = 0;
+        k->src_ip       = get_unaligned_be32(&key->src_ip[0]);
+        k->dst_ip       = get_unaligned_be32(&key->dst_ip[0]);
+        k->src_ip_mask  = 0xffffffffu;
+        k->dst_ip_mask  = 0xffffffffu;
+        k->src_port     = be16_to_cpu(key->sport);
+        k->dst_port     = be16_to_cpu(key->dport);
+        k->target_qband = 0;
+        k->target_fqid  = tx_fqid;
+        k->hm_handle    = hm_handle;
+
+        p->shadow[slot].used   = true;
+        p->shadow[slot].key_id = p->next_key_id;
+        p->nkeys++;
+
+        rc = ask_hw_port_reinstall(h, p);
+        if (rc)
+                goto out_rollback;
+
+        ck.fm           = h->fman;
+        ck.port_id      = port_id;
+        ck.cc_handle    = p->shadow[slot].key_id;
+        ck.hm_handle    = hm_handle;
+        ck.sink_ifindex = (int)oif;
+        ck.sink_fqid    = tx_fqid;
+
+        cookie = ask_hw_cookie_alloc(h, &ck);
+        if (!cookie) {
+                rc = -ENOMEM;
+                goto out_rollback;
+        }
+
+        /* Commit: consume the per-port id (skip 0) and publish the cookie. */
+        if (++p->next_key_id == 0)
+                p->next_key_id = 1;
+
+        mutex_unlock(&h->lock);
+        *out_hw_id = cookie;
+        ask_pr_dbg("hw: flow_insert: port=0x%02x fqid=%u hm=0x%x key_id=%u cookie=0x%x\n",
+                   port_id, tx_fqid, hm_handle, ck.cc_handle, cookie);
+        return 0;
+
+out_rollback:
+        p->shadow[slot].used = false;
+        p->nkeys--;
+        /* Best-effort: restore the tree to the pre-insert key set. */
+        (void)ask_hw_port_reinstall(h, p);
+        if (hm_handle)
+                fman_hm_nexthop_put(h->fman, port_id, hm_handle);
+out_unlock:
+        mutex_unlock(&h->lock);
+        return rc;
 }
 EXPORT_SYMBOL_GPL(ask_hw_flow_insert);
 
@@ -511,27 +740,52 @@ int ask_hw_flow_remove(u32 hw_flow_id)
 {
         struct ask_hw_pcd *h = ask_hw_pcd_get();
         struct ask_hw_flow_cookie *ck;
+        struct ask_hw_port *p = NULL;
+        unsigned int i;
 
         if (!h || hw_flow_id == 0)
                 return 0;
 
+        mutex_lock(&h->lock);
+
         ck = ask_hw_cookie_lookup(h, hw_flow_id);
         if (!ck) {
                 /* Already torn down; treat as success (idempotent). */
+                mutex_unlock(&h->lock);
                 return 0;
         }
 
         /*
-         * Board-substrate teardown.  Stage C extends this to also drop the
-         * 5-tuple key from the ingress port's software CC-key shadow and
-         * rebuild the static tree.  The shared next-hop header-manip node is
-         * refcounted, so we always release our reference to it here.
+         * Drop this flow's 5-tuple from the ingress port's software CC shadow
+         * (matched by the monotonic key_id snapshotted in cc_handle) and
+         * rebuild the static tree without it.  Then release the shared
+         * next-hop HM reference (refcounted: the node survives until the last
+         * flow toward that adjacency is gone).
          */
+        for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+                if (h->port[i].in_use && h->port[i].port_id == ck->port_id) {
+                        p = &h->port[i];
+                        break;
+                }
+        }
+        if (p && ck->cc_handle) {
+                for (i = 0; i < FMAN_CC_MAX_STATIC_KEYS; i++) {
+                        if (p->shadow[i].used &&
+                            p->shadow[i].key_id == ck->cc_handle) {
+                                p->shadow[i].used = false;
+                                p->nkeys--;
+                                (void)ask_hw_port_reinstall(h, p);
+                                break;
+                        }
+                }
+        }
+
         if (ck->hm_handle)
                 fman_hm_nexthop_put(ck->fm, ck->port_id, ck->hm_handle);
 
         ask_hw_cookie_free(h, hw_flow_id);
 
+        mutex_unlock(&h->lock);
         ask_pr_dbg("hw: flow_remove: cookie=0x%x released\n", hw_flow_id);
         return 0;
 }
