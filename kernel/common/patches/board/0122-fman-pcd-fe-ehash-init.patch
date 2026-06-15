@@ -1,5 +1,5 @@
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index 0ac38e0..d11f4dc 100644
+index 1fe3753..803b45d 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
 @@ -34,6 +34,8 @@
@@ -229,23 +229,17 @@ index 0ac38e0..d11f4dc 100644
  	pcd->muram_offset = fman_muram_alloc(muram,
  					     FMAN_PCD_MURAM_RESERVED_BYTES);
  	if (IS_ERR_VALUE(pcd->muram_offset)) {
-@@ -275,10 +474,14 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
- 		snprintf(name, sizeof(name), "%d", fman_get_id(fman));
- 		pcd->debugfs_dir = debugfs_create_dir(name,
- 						      fman_pcd_debugfs_root);
--		if (!IS_ERR_OR_NULL(pcd->debugfs_dir))
-+		if (!IS_ERR_OR_NULL(pcd->debugfs_dir)) {
- 			debugfs_create_file("muram_budget", 0444,
- 					    pcd->debugfs_dir, pcd,
+@@ -281,6 +480,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
  					    &fman_pcd_muram_budget_fops);
+ 			fman_pcd_cc_test_debugfs_init(pcd->debugfs_dir, pcd);
+ 			fman_pcd_dcsr_debugfs_init(pcd->debugfs_dir, pcd);
 +			debugfs_create_file("fe_pool", 0644,
 +					    pcd->debugfs_dir, pcd,
 +					    &fman_pcd_fe_pool_fops);
-+		}
+ 		}
  	}
  
- 	dev_info(fman_get_dev(fman),
-@@ -319,6 +522,11 @@ void fman_pcd_release(struct fman_pcd *pcd)
+@@ -322,6 +524,11 @@ void fman_pcd_release(struct fman_pcd *pcd)
  	WARN_ON(!list_empty(&pcd->plcr_profiles));
  	WARN_ON(!list_empty(&pcd->replic_groups));
  
