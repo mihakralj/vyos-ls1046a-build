@@ -42,6 +42,7 @@ The arch docs are the **bedrock** the specs stand on. Where a spec says *"per RM
 | [`qman-ceetm.md`](qman-ceetm.md) | Queue Manager — portals, FQ states, scheduling, congestion, ORP, **CEETM** | FQ config, QoS, shaping, congestion |
 | [`bman.md`](bman.md) | Buffer Manager — pools, FBPR, depletion, portals | Buffer pool sizing, depletion handling |
 | [`muram.md`](muram.md) | FMan shared RAM — budget, partitioning, allocator, **the ASK2 flow-table ceiling** | Sizing CC trees / manip chains (Risk #13) |
+| [`fman-fe-ehash.md`](fman-fe-ehash.md) | **Frame-Engine objects & External Hash** — the M0 offload-init oracle: byte-exact `AllocFEObjs`/`FmPortSetFESupport`/`ExternalHashTableSet` contract, params-page +0x54/+0x58, the two CC dispatch paths & the M3-3b disposition fork | **Implementing M2 HW classification / the S0↔S1 PCD mode-switch** |
 | [`sec-caam.md`](sec-caam.md) | SEC/CAAM — Job Rings, QI, DECO, CHA inventory, protocol accel | IPsec offload, `0001-caam-qi-share` |
 | [`serdes-ethernet.md`](serdes-ethernet.md) | SerDes lanes, MAC↔lane map, mEMAC registers, 1588, XFI/KR | PHY/link bring-up, port map, 10G |
 | [`soc-integration.md`](soc-integration.md) | CCSR/memory map, reset/clock/RCW, GIC interrupts, SCFG/DCFG/DEVDISR, SMMU/ICID | Probe order, IRQ wiring, coherency |
