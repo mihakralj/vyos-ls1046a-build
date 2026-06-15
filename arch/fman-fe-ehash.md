@@ -237,6 +237,17 @@ Swapping to the open-source `106.4.18` ucode to "get classic exact-match" is **u
 
 Board patch **`0118` (CCBS-as-pointer) is a placebo and must be deleted** — it silently *bypasses* classification rather than enabling it (spec §2.4(6c)); the vendor's own `#if 0`'d "BMR bypass" experiment in `fm_kg.c` is the same encoding they tried and abandoned (qdrant 2026-06-13 item 10). The forward writes and their inverses must land **in the same patch** (the §3.5 reversibility contract), each verified by `pcd-snapshot` diff against the warm-S0′ baseline.
 
+### 8.6 Defensive-coding contract for Fork B implementation
+
+Every Fork B patch (§3 pool → §4 `FmPortSetFESupport` → §5 `ExternalHashTableSet` → FE-VM core) **MUST** observe these invariants. The decisive reason is iter-50: the M3-3b stall latches **no hardware fault** (`fmdmsr=0`, `fmfp_ee` unchanged, every fault register clean). A mistake in FE programming therefore produces a silent WAIT that is **invisible to traffic tests** — only this discipline catches it.
+
+1. **MURAM is iomem, never RAM.** Access FE objects, AD nodes, ehash global mem, and the params page with `memset_io` / `memcpy_toio` / `writel` / `readl` **only** — never plain `memset` / `memcpy` / `->field =` (faults under KASAN; otherwise silently corrupts the AD). `gen_pool` does **not** zero on alloc, so every `fman_pcd_muram_alloc` is immediately followed by `memset_io(p, 0, size)` (the `0122` scaffold establishes this pattern).
+2. **Bounds-check before every alloc; unwind cleanly on failure.** Call `gen_pool_avail()` before each MURAM reservation; on any failure, free **all** prior allocations of that operation (no partial-alloc leak), return `-ENOMEM`, and fall back to the SW path — **never half-program silicon**. This is the direct guard against the vendor 327×-`ENOMEM` wall.
+3. **ehash buckets in DDR, never MURAM.** Bucket arrays go through `kmalloc` / `dma` (the `XX_MallocSmart` equivalent, §6); only the FE-object pool, the AD node, and the ehash global singleton live in MURAM. This single rule is what keeps the FE path within budget.
+4. **Forward ⇒ inverse in the same patch.** No register or MURAM write lands without its verified undo (§3.5 reversibility contract). Teardown is proven by a `pcd-snapshot` register/MURAM diff against the warm-S0′ baseline — **never** by "ping works".
+5. **Refcount + fixed lock order.** FE-pool get/put is refcounted so a pristine S0 returns gen_pool `used` to its baseline; lock order is `fe_lock → pcd->lock` everywhere; `WARN_ON` a refcount underflow; drive bring-up from a **single-writer** debugfs node so engage/disengage cannot race during development.
+6. **Validate against this oracle before traffic.** After programming an FE struct / bucket, diff the live MURAM image against this document's expected encoding (`FE_ENTER` AD = `pcAndOffsets=0xF6`, `FM_PCD_AD_FE_ENTER_ALLOCATE=0x00800000`; §3–§5 sizes) via `pcd-snapshot` **before** enabling dispatch — catch a wrong image while the port is still quiescent, not under load.
+
 ---
 
 ## 9. Cross-references
