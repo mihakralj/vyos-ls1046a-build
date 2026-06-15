@@ -191,31 +191,38 @@ The live minimal-config capture is reserved as a fallback only if an M2 ambiguit
 
 The dpaa1 board substrate today steers via **Path 2** (exact-match: `0098` static CC install + `0108` per-key FQ enqueue-AD + `0106` KGSE→AC_CC). Its 100× S0↔S1 soak passed **control-plane-only** (no traffic) precisely because traffic triggers the Path-2 stall (M3-3b).
 
-### 8.1 Fork A (fix Path-2 exact-match disposition) is dead under 210.10.1
+### 8.1 What the M3-3b stall is — and is *not*
 
-Three independent qdrant findings now converge to retire Fork A:
+Three findings bound the stall; a fourth (the iter-42 disassembly) corrects an earlier over-reach:
 
 1. **iter-28/30 — defect is *upstream* of the AD action.** Per-port disposition accounting (`FMQM_PnETFC`, `RFDC`) proved that with executing 210.10.1 ucode, **all three** result-AD actions (FM_CTL-enqueue `0x02000028`, BMI-direct `0x00500002`, BMI-discard `0x005000C1`) are abandoned — nothing enqueues *and* nothing discards. No exit-NIA/AD-action tweak can matter because the CC dispatch never reaches AD execution.
 2. **iter-33 (2026-06-12 breakthrough) — it is a first-frame *port stall*, not a per-frame FIFO leak.** Exception capture (`ccexp32.py`, no differential writes) caught `FMFP_PS` for port `0x10` transitioning `0x80000000 → 0x80800000` (**STL** bit8) on the *first* dispatched frame, with the parked FM_CTL task `ts[4]=0x81000000` (**PRK**). All event registers (FPM EPI/FCEV/EE, BMI IEVR, QMI EIE) stayed silent. The ~47-frame "freeze boundary" of iters 5–24 was just passive BMI-FIFO intake on an already-stalled port — the leak model was an artifact, not the cause.
-3. **2026-06-13 architecture discovery — the 210.10.1 AC_CC handler *requires* FE globals.** The vendor's working stack (we-are-mono/ASK, `nxp-qoriq/linux lf-6.12.49-2.2.0`) force-defines `USE_ENHANCED_EHASH=1` and the ucode's AC_CC handler **dereferences FE global structures on dispatch** (FE object pool, 32 KB internal FE buffer pool, MUX-FE/TRANSITION-FE singletons, `FE_ENTER` root AD with `pcAndOffsets=0xF6`). Mainline MURAM lacks all of it → the engage-then-park *is* the ucode waiting on nonexistent FE resources. **Verdict (qdrant, verbatim): "Classic exact-match CC trees can never work on this ucode; all 26 stall iterations were grafting the wrong architecture."**
+3. **iter-42 (2026-06-12, full disassembly) — the AC_CC handler reads NO missing driver global; the stall is a runtime *arming* gap.** Disassembling the proprietary 210.10.1 AC_CC handler (vector-table entry word `0x630`) showed it reads **only the per-task context page** (`0xd0xx`: d018, d00c, d024, d014, d098, d09c, d01c) for **every** branch decision and key extraction — there is **no load from any global/absolute config address** a mainline driver could fail to initialize. PRE_CC (which populates the context page AC_CC reads) is **near-instruction-identical** between the open-source `106` and the proprietary `210` ucodes. So the park is **not** a missing driver-set global and **not** a ucode-build defect — it is a **hardware resource / dispatch wait**: a controller-arming register write the SDK performs at FMan/PCD-enable that mainline `fman.c` + our patches skip ("**Option B**").
+4. **2026-06-13 — the vendor uses FE/ehash, but that does NOT make classic exact-match *impossible*.** The vendor stack (we-are-mono/ASK, `nxp-qoriq/linux lf-6.12.49-2.2.0`) force-defines `USE_ENHANCED_EHASH=1` and routes production traffic through the **`FE_ENTER` external-hash dispatch** (root AD `pcAndOffsets=0xF6`), which *does* dereference FE global structures (FE object pool, 32 KB internal FE buffer pool, MUX/TRANSITION-FE singletons). **But `FE_ENTER` is a *different* handler entry than `AC_CC` (action code `0x06`)** — and iter-42 (#3) proves the `AC_CC` handler we drive reads no FE globals. The vendor chose FE/ehash for **features** (scale, NAT, fragmentation, byte/frame statistics), not because exact-match cannot dispatch. **The earlier verdict *"classic exact-match CC can never work on this ucode"* was an over-reach** — it conflated the `FE_ENTER` path's FE-global dependency with the `AC_CC` path — and is **retracted here.**
 
-So the M3-3b stall is not a disposition bug to be tweaked — it is the 210.10.1 ucode's AC_CC handler faulting on absent FE state. **Fork A is closed.** (This corrects §8's earlier "open fork" framing and the leads listed for it; the FPM-exception/AC-handler-disasm work already *produced* finding (2), which is what closed the fork.)
+**Net:** the M3-3b stall is most consistent with a **missing runtime FMan/PCD-enable controller-arming step (Option B)** — *proposed* at iter-36/42 but **never carried out** before the investigation pivoted to the FE/ehash architecture theory. Classic exact-match is **not** proven impossible; it is blocked on an unfinished arming enumeration.
 
-### 8.2 The real decision: Fork B vs Fork C
+### 8.2 The leading lead — Option B (complete the controller-arming enumeration)
 
-| | **Fork B — reproduce vendor FE/ehash on 210.10.1** | **Fork C — swap to open-source `106.4.18` + classic exact-match CC** |
-|---|---|---|
-| Datapath | external-hash + FE opcode VM (this doc §3–§5) | classic MURAM `MatchTableSet` exact-match (Path 2), the standard SDK NCSW path |
-| Empirical status on this board | **proven to flow** (vendor stack), but only the minimal KG capture seen live; full build hits §6 MURAM wall | classic-CC graft **stalled** under 106.4.18 too (qdrant 2026-06-10) — **but** that was *before* iter-33's `FMFP_PS` instrumentation, so the failure mode was never classified |
-| Code volume | large (~1700 LOC: FE pool + singletons + `FE_ENTER` AD + per-port `FmPortSetFESupport` + DDR buckets + opcode-VM entries + `PORT_ID` in EKFC) | small-to-moderate (classic CC already coded in `0098/0108/0115`; needs the ucode swap + whatever the 106.x stall root cause turns out to be) |
-| MURAM risk | high — must bound flow tables (§6) to avoid the vendor 327×-ENOMEM wall; buckets in DDR mitigate | the ~750-flow MURAM ceiling ([`muram.md`](muram.md)) |
-| Microcode caps gate | `0086a` already grants `0x17` for `major≥210` | **needs gate change** — `0086a` returns `0` for `106` (over-conservative); [`fman-microcode.md`](fman-microcode.md) §5 note |
+`LoadFmanCtrlCode` (microcode load + `IRAM_READY` handshake) is **already replicated** by patch **`0117`** (GATE-1 HW pass: *"FM_CTL microcode 210.10.1 loaded (12851 words)"*, verify clean). The port-side `AttachPCD` NIAs were each replicated **and individually disproven** as the fix: `RCMNE=0x2C` (iter-31), params-page contents (iter-32, page already populated by `0116`), `RFPNE` CC_EN already set (iter-36). **The unexhausted residue is the controller-level *enable* arming** — the `FmEnable` / `FmPcdEnable` / `FmPcdCcEnable` register writes (FMan-controller go/event/poll, PCD master-enable, CC-engine enable) that mainline `fman.c` performs differently or omits. This is the iter-42-endorsed next step and was never executed.
 
-**The open question that gates Fork C** (and must be answered *before* committing to either fork): was the 2026-06-10 classic-CC stall under `106.4.18` the *same* "ucode parks on missing FE globals" fault, or a *different, fixable* init bug? The NXP `106` IPACC readme lists CC as supported ([`fman-microcode.md`](fman-microcode.md) §3), and standard SDK boards drive classic exact-match CC on `106`-class ucode — so a 106.x classic-CC path *should* exist without FE/ehash. If the 106.4.18 stall classifies (via the iter-33 `FMFP_PS[STL]`/parked-task forensic) as a **non-FE** fault, Fork C is dramatically cheaper than Fork B.
+**De-risk (cheap; first half needs no board):** SDK source archaeology of `FmEnable` / `FmPcdEnable` / `FmPcdCcEnable` (`sdk_fman fm.c`, `fm_pcd.c`, `fm_cc.c` in the archived `mihakralj/kernel-ls1046a-build@464df181`) vs mainline `fman.c` + patches `0115`/`0116`/`0117`, enumerating the controller-arming register-write delta. Then `/dev/mem`-replay each candidate **one mutation per boot** on eth3 against the `0107 cc_test` install, watching `FMFP_PS[STL]` (the iter-33 method). If a write clears the first-frame stall → Option B is the fix and the **already-coded** classic exact-match (`0098/0108/0115`) flows. If the delta is empty or no write clears the stall → escalate to Fork B.
 
-**Cheap de-risking experiment (one board boot):** flash/confirm `106.4.18` executing, run the `0107 cc_test` exact-match install on eth3, and capture `FMFP_PS` + the parked-task `ts[]` at first dispatch (the iter-33 method). If `STL` does **not** set and the result-AD fires → Fork C is viable and cheap. If `STL` sets identically → both ucodes need FE/ehash and Fork B is forced. This single experiment converts the fork from a guess into a measurement.
+### 8.3 The larger alternative — Fork B (reproduce vendor FE/ehash)
 
-### 8.3 Common to whichever fork
+If Option B is exhausted without clearing the stall, adopt the vendor's proven production datapath: external-hash + FE opcode VM (this doc §3–§5). It is **proven to flow** on 210.10.1 (vendor stack) but is large (~1700 LOC: FE pool + singletons + `FE_ENTER` AD + per-port `FmPortSetFESupport` + DDR buckets + opcode-VM entries + `PORT_ID` in EKFC) with **high MURAM risk** (§6) — buckets must live in **DDR** to avoid the vendor 327×-ENOMEM wall. Fork B is the eventual M2/M3 substrate for full features (NAT/frag/stats) regardless; Option B only decides whether the *cheaper* exact-match path can ship first.
+
+### 8.4 Ruled out — the `106.4.18` ucode swap
+
+Swapping to the open-source `106.4.18` ucode to "get classic exact-match" is **uninformative** and is **not** an experiment to run:
+
+- **iter-42:** the `106` and `210` AC_CC/PRE_CC handlers are the **same code shape**, so `106` would park identically — swapping the ucode cannot localize an *arming* bug.
+- **ccexp12 (2026-06-11):** empirically confirmed `106` parks **identically** to `210`.
+- It would also require lifting the `0086a` caps gate (which returns `0` for `106`) for **no** diagnostic gain.
+
+*(This retracts the prior §8.2 "Fork C / one-boot 106-swap de-risk" recommendation, which iter-42 rules out.)*
+
+### 8.5 Common to whichever path
 
 Board patch **`0118` (CCBS-as-pointer) is a placebo and must be deleted** — it silently *bypasses* classification rather than enabling it (spec §2.4(6c)); the vendor's own `#if 0`'d "BMR bypass" experiment in `fm_kg.c` is the same encoding they tried and abandoned (qdrant 2026-06-13 item 10). The forward writes and their inverses must land **in the same patch** (the §3.5 reversibility contract), each verified by `pcd-snapshot` diff against the warm-S0′ baseline.
 
@@ -229,7 +236,7 @@ Board patch **`0118` (CCBS-as-pointer) is a placebo and must be deleted** — it
 | MURAM budget, the ~750-flow ceiling, Risk #13 | [`muram.md`](muram.md) |
 | Mode-switch reversibility contract (S0↔S1), `pcd-snapshot` | [`specs/ask2-rewrite-spec.md`](../specs/ask2-rewrite-spec.md) §2.4(6), §3.1, [`plans/DUAL-DATAPLANE.md`](../plans/DUAL-DATAPLANE.md) §2.2 |
 | 210.10.1 microcode (open-source 106.x vs proprietary 210.10.1), FE opcode VM | [`fman-microcode.md`](fman-microcode.md) |
-| M3-3b root cause (first-frame `FMFP_PS[STL]` stall = ucode waits on absent FE globals; *not* a FIFO leak) | qdrant `iter-33` (2026-06-12), `ASK2 ehash/FE architecture root cause` (2026-06-13) |
+| M3-3b root cause (first-frame `FMFP_PS[STL]` stall; iter-42 disassembly = AC_CC handler reads only per-frame context → most likely a missing controller-arming step, *not* a FIFO leak and *not* missing FE globals) | qdrant `iter-33`, `iter-42` (2026-06-12), `ASK2 ehash/FE architecture root cause` (2026-06-13) |
 
 ---
 
