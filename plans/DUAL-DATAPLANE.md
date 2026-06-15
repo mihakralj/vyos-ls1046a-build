@@ -137,6 +137,26 @@ graph LR
 **M1 — Reversible PCD mode-switch infrastructure.** Implement §2.2 items 1–4 forward+inverse in the board FMan PCD layer (extending 0097-series primitives: scheme-mode rewrite, `fmbm_rfpne` bind/unbind, FE MURAM alloc/free, params-page set/clear), exposed to ask.ko via `<linux/fsl/fman_pcd.h>`. No classification semantics yet — just clean, snapshot-verified S0→S1→S0 cycling.
 *Gate:* 100× enable/disable cycles on the board with snapshot-diff clean every cycle; VPP AF_XDP bind + iperf3 pass after the 100th teardown; kernel netdevs and management SSH unaffected throughout. **This milestone is the user's headline requirement and ships first.**
 
+> **M1 progress (2026-06-15, control-plane reversibility HW-PROVEN).** The
+> verification primitive `board/scripts/pcd-snapshot` is built, CI-green, and
+> packaged into the ISO. Items **1** (KG scheme RSS↔AC_CC, board `0106`), **2**
+> (BMI `fmbm_rccb` bind, `0105`), and **4** (params-page, `0116`
+> `fman_pcd_port_ensure_params_page`) are HW-proven reversible: exercised
+> S0→S1→S0 on **eth3 only** via the shipping `0107 cc_test` debugfs node, gated
+> by pcd-snapshot. A **100× soak passed with 0 drifts**, gen_pool `used` flat at
+> 256 B (zero leak), the eth0/SSH lifeline unaffected every cycle. The leak the
+> gate caught is bounded/non-cumulative — a one-time 256 B per-port FM_CTL
+> params page (allocate-once/reuse by design); the M1 baseline is therefore the
+> warm steady-state S0′. **Caveat:** the soak engaged/disengaged *without
+> data-plane traffic*, so it proves control-plane switch reversibility (M1's
+> scope); the data-plane recovery (eth3 usable after a *trafficked* S1) is the
+> VPP-iperf3 sub-gate and depends on item **3**. Item **3** (FE/ehash global
+> init) is the remaining blocker — it does not yet exist (`0118` is a CCBS
+> placebo) and is entangled with the open **M3-3b CC-disposition defect** (the
+> CC walk executes but the frame's terminal enqueue/discard never fires). The
+> ask.ko engage-wiring (§3.1 `set system offload ask`) waits on item 3 because
+> AC_CC stalls the port under load until disposition works.
+
 **M2 — HW classification (the parity keystone).** AC_CC dispatch + full FE/ehash init per the M0 oracle, replacing the 0118 CCBS placebo. First packet of a flow → exception to kernel; subsequent packets classified in silicon.
 *Gate:* D14-class evidence — KG scheme hit counters advance, CC lookup resolves, classified flow's frames stop appearing in kernel softirq; teardown still snapshot-clean.
 
