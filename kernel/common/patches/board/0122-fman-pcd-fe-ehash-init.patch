@@ -1,0 +1,259 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 0ac38e0..d11f4dc 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -34,6 +34,8 @@
+ #include <linux/mutex.h>
+ #include <linux/seq_file.h>
+ #include <linux/slab.h>
++#include <linux/io.h>
++#include <linux/uaccess.h>
+ 
+ #include <linux/fsl/fman_pcd.h>
+ #include "fman_pcd_internal.h"
+@@ -97,6 +99,18 @@ struct fman_pcd {
+ 	struct list_head plcr_profiles;
+ 	struct list_head replic_groups;
+ 
++	/*
++	 * FE-object pool - see arch/fman-fe-ehash.md (section 3, Fork B
++	 * scaffold).  Lazy + refcounted: a pristine S0 keeps the pool empty
++	 * so gen_pool MURAM "used" stays at baseline; first fe_pool_get()
++	 * allocates, last fe_pool_put() frees -> S0<->S1 stays
++	 * pcd-snapshot reversible.
++	 */
++	struct mutex fe_lock;
++	struct list_head fe_available;
++	struct list_head fe_enq;
++	int fe_refcount;
++
+ 	struct dentry *debugfs_dir;
+ };
+ 
+@@ -213,6 +227,187 @@ void fman_pcd_muram_free(struct fman_pcd *pcd, unsigned long offset,
+ 	mutex_unlock(&pcd->lock);
+ }
+ 
++/*
++ * FE-object pool - arch/fman-fe-ehash.md section 3 (AllocFEObjs).
++ *
++ * Fork B scaffold: a fixed pool of FMAN_PCD_FE_POOL_COUNT fixed-element
++ * (FE) records, each FMAN_PCD_FE_MAX_SIZE bytes, carved from FMan MURAM at
++ * the FMAN_PCD_FE_ALIGN boundary the FE virtual machine requires.  This
++ * step ONLY proves the MURAM allocate/zero/free lifecycle reverts cleanly
++ * (the pcd-snapshot gen_pool "used" gate); it does NOT program the FE
++ * records (no FmPcdCcBuildFE) and does NOT flow traffic - that needs the
++ * FE virtual-machine core in a later sub-step.  Lazy plus refcounted so a
++ * pristine S0 keeps the pool empty.
++ */
++#define FMAN_PCD_FE_ALIGN	8
++#define FMAN_PCD_FE_MAX_SIZE	28
++#define FMAN_PCD_FE_POOL_COUNT	100
++
++struct fman_pcd_fe_obj {
++	struct list_head node;
++	unsigned long muram_off;
++};
++
++static void fman_pcd_fe_pool_free(struct fman_pcd *pcd)
++{
++	struct fman_pcd_fe_obj *obj, *tmp;
++
++	list_for_each_entry_safe(obj, tmp, &pcd->fe_enq, node) {
++		list_del(&obj->node);
++		fman_pcd_muram_free(pcd, obj->muram_off, FMAN_PCD_FE_MAX_SIZE);
++		kfree(obj);
++	}
++	list_for_each_entry_safe(obj, tmp, &pcd->fe_available, node) {
++		list_del(&obj->node);
++		fman_pcd_muram_free(pcd, obj->muram_off, FMAN_PCD_FE_MAX_SIZE);
++		kfree(obj);
++	}
++}
++
++static int fman_pcd_fe_pool_alloc(struct fman_pcd *pcd)
++{
++	struct muram_info *muram;
++	int i, err;
++
++	muram = fman_get_muram(pcd->fman);
++	if (!muram)
++		return -ENXIO;
++
++	for (i = 0; i < FMAN_PCD_FE_POOL_COUNT; i++) {
++		struct fman_pcd_fe_obj *obj;
++		unsigned long off;
++
++		obj = kzalloc(sizeof(*obj), GFP_KERNEL);
++		if (!obj) {
++			err = -ENOMEM;
++			goto unwind;
++		}
++
++		off = fman_pcd_muram_alloc(pcd, FMAN_PCD_FE_MAX_SIZE);
++		if (IS_ERR_VALUE(off)) {
++			kfree(obj);
++			err = (int)off;
++			goto unwind;
++		}
++
++		/* MURAM is iomem and gen_pool does not zero - memset_io. */
++		memset_io((void __iomem *)
++			  fman_muram_offset_to_vbase(muram, off),
++			  0, FMAN_PCD_FE_MAX_SIZE);
++
++		obj->muram_off = off;
++		list_add_tail(&obj->node, &pcd->fe_available);
++	}
++
++	return 0;
++
++unwind:
++	fman_pcd_fe_pool_free(pcd);
++	return err;
++}
++
++/*
++ * Reference-counted engage/disengage.  The first get() builds the pool;
++ * the last put() tears it down.  fe_lock serialises the refcount and is
++ * taken OUTSIDE the muram wrappers' pcd->lock (order: fe_lock ->
++ * pcd->lock), so the pool loops never re-enter pcd->lock on themselves.
++ */
++static int fman_pcd_fe_pool_get(struct fman_pcd *pcd)
++{
++	int err = 0;
++
++	mutex_lock(&pcd->fe_lock);
++	if (pcd->fe_refcount == 0) {
++		err = fman_pcd_fe_pool_alloc(pcd);
++		if (err)
++			goto out;
++	}
++	pcd->fe_refcount++;
++out:
++	mutex_unlock(&pcd->fe_lock);
++	return err;
++}
++
++static void fman_pcd_fe_pool_put(struct fman_pcd *pcd)
++{
++	mutex_lock(&pcd->fe_lock);
++	if (WARN_ON(pcd->fe_refcount == 0)) {
++		mutex_unlock(&pcd->fe_lock);
++		return;
++	}
++	if (--pcd->fe_refcount == 0)
++		fman_pcd_fe_pool_free(pcd);
++	mutex_unlock(&pcd->fe_lock);
++}
++
++static int fman_pcd_fe_pool_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++	unsigned int avail = 0, enq = 0;
++	struct list_head *p;
++	int refcount;
++
++	mutex_lock(&pcd->fe_lock);
++	refcount = pcd->fe_refcount;
++	list_for_each(p, &pcd->fe_available)
++		avail++;
++	list_for_each(p, &pcd->fe_enq)
++		enq++;
++	mutex_unlock(&pcd->fe_lock);
++
++	seq_printf(s, "refcount   %10d\n", refcount);
++	seq_printf(s, "available  %10u\n", avail);
++	seq_printf(s, "enqueued   %10u\n", enq);
++	seq_printf(s, "fe_size    %10d bytes\n", FMAN_PCD_FE_MAX_SIZE);
++	seq_printf(s, "pool_bytes %10d bytes\n",
++		   FMAN_PCD_FE_POOL_COUNT * FMAN_PCD_FE_MAX_SIZE);
++	return 0;
++}
++
++static int fman_pcd_fe_pool_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, fman_pcd_fe_pool_show, inode->i_private);
++}
++
++static ssize_t fman_pcd_fe_pool_write(struct file *file,
++				      const char __user *ubuf,
++				      size_t count, loff_t *ppos)
++{
++	struct seq_file *s = file->private_data;
++	struct fman_pcd *pcd = s->private;
++	char buf[16];
++	char *cmd;
++	int err;
++
++	if (count == 0 || count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++	cmd = strim(buf);
++
++	if (!strcmp(cmd, "get")) {
++		err = fman_pcd_fe_pool_get(pcd);
++		if (err)
++			return err;
++	} else if (!strcmp(cmd, "put")) {
++		fman_pcd_fe_pool_put(pcd);
++	} else {
++		return -EINVAL;
++	}
++
++	return count;
++}
++
++static const struct file_operations fman_pcd_fe_pool_fops = {
++	.owner		= THIS_MODULE,
++	.open		= fman_pcd_fe_pool_open,
++	.read		= seq_read,
++	.write		= fman_pcd_fe_pool_write,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
+ /**
+  * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
+  * @fman: parent FMan controller.  Must have a live MURAM pool (mainline
+@@ -253,6 +448,10 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 	INIT_LIST_HEAD(&pcd->plcr_profiles);
+ 	INIT_LIST_HEAD(&pcd->replic_groups);
+ 
++	mutex_init(&pcd->fe_lock);
++	INIT_LIST_HEAD(&pcd->fe_available);
++	INIT_LIST_HEAD(&pcd->fe_enq);
++
+ 	pcd->muram_offset = fman_muram_alloc(muram,
+ 					     FMAN_PCD_MURAM_RESERVED_BYTES);
+ 	if (IS_ERR_VALUE(pcd->muram_offset)) {
+@@ -275,10 +474,14 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 		snprintf(name, sizeof(name), "%d", fman_get_id(fman));
+ 		pcd->debugfs_dir = debugfs_create_dir(name,
+ 						      fman_pcd_debugfs_root);
+-		if (!IS_ERR_OR_NULL(pcd->debugfs_dir))
++		if (!IS_ERR_OR_NULL(pcd->debugfs_dir)) {
+ 			debugfs_create_file("muram_budget", 0444,
+ 					    pcd->debugfs_dir, pcd,
+ 					    &fman_pcd_muram_budget_fops);
++			debugfs_create_file("fe_pool", 0644,
++					    pcd->debugfs_dir, pcd,
++					    &fman_pcd_fe_pool_fops);
++		}
+ 	}
+ 
+ 	dev_info(fman_get_dev(fman),
+@@ -319,6 +522,11 @@ void fman_pcd_release(struct fman_pcd *pcd)
+ 	WARN_ON(!list_empty(&pcd->plcr_profiles));
+ 	WARN_ON(!list_empty(&pcd->replic_groups));
+ 
++	WARN_ON(pcd->fe_refcount != 0);
++	if (pcd->fe_refcount)
++		fman_pcd_fe_pool_free(pcd);
++	mutex_destroy(&pcd->fe_lock);
++
+ 	if (!IS_ERR_VALUE(pcd->muram_offset))
+ 		fman_muram_free_mem(fman_get_muram(pcd->fman),
+ 				    pcd->muram_offset,
