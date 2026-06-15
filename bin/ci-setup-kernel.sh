@@ -538,6 +538,15 @@ cp "$BOARD_PATCH_DIR/0120-fman-pcd-hm-nexthop-dedup.patch" "$KERNEL_PATCHES/"
 # port key and a CC target_fqid. EXPORT_SYMBOL_GPL, dormant (no in-tree
 # caller). Bodies are the proven dead-ask-flavor 0031/0039 reparented.
 cp "$BOARD_PATCH_DIR/0121-dpaa-export-cc-target-resolvers.patch" "$KERNEL_PATCHES/"
+# ASK2 Fork B M1 step 1: FE-object MURAM pool scaffold (arch/fman-fe-ehash.md
+# §3 AllocFEObjs). Lazy + refcounted pool of 100×28 B FE records carved from
+# FMan MURAM, driven by a new debugfs fman_pcd/<id>/fe_pool (0644) get/put
+# node. fe_lock → pcd->lock order; a pristine S0 keeps the pool empty so
+# engage→disengage nets zero gen_pool used (pcd-snapshot reversibility gate).
+# Single-file fman_pcd.c, internal/static, no ABI export. Scaffold only —
+# allocates+zeroes MURAM, does NOT program the FE records and does NOT flow
+# traffic; the FE-VM core (FmPcdCcBuildFE/ContextByFE) lands later from lf-5.4.
+cp "$BOARD_PATCH_DIR/0122-fman-pcd-fe-ehash-init.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
