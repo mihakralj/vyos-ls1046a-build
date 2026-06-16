@@ -633,6 +633,20 @@ cp "$BOARD_PATCH_DIR/0128-fman-pcd-fe-vm-flow-insert.patch" "$KERNEL_PATCHES/"
 # DORMANT (nothing calls them until the debugfs trigger / M7 op-mode); M1
 # carries no classification semantics. Forward + inverse in one patch.
 cp "$BOARD_PATCH_DIR/0129-fman-pcd-offload-engage.patch" "$KERNEL_PATCHES/"
+# 0130: D9.1 (M2 activate) increment 1 — switch the dormant FE/ehash flow store
+# (0125 ehash table + 0128 per-flow records) from kzalloc()+virt_to_phys() to
+# dma_alloc_coherent(). The en_exthash_node table-base words and each bucket head
+# must carry true bus addresses (not raw physical) before the FE VM is armed, since
+# the armed VM DMA-reads the bucket array and walks the record chain through
+# PAMU/SMMU (arch/fman-fe-ehash.md §8.6 item 6; 0125/0128 flagged this as the
+# pre-arming prerequisite). struct fman_pcd_ehash_table gains table_dma + dev
+# (fman_get_dev(pcd->fman), captured so per-flow record alloc/free reaches the same
+# device); struct fman_pcd_ehash_flow gains record_dma. Records+buckets stay in DDR
+# (§6 anti-pattern: never MURAM) so gen_pool "used" is UNCHANGED — reversibility is
+# still all records dma_free'd + every bucket head restored byte-exactly. Ships
+# DORMANT (no new dispatch); the 0128 on-board record layout is byte-identical.
+# Forward (dma_alloc) + inverse (dma_free) in one patch.
+cp "$BOARD_PATCH_DIR/0130-fman-pcd-fe-ehash-dma-coherent.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
