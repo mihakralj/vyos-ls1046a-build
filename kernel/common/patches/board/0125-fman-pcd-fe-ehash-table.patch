@@ -1,0 +1,328 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 9d61c65..b0e7f12 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -115,5 +115,10 @@ struct fman_pcd {
+ 	unsigned long fe_transition_off;
+ 	unsigned long fe_exit_off;
++	struct list_head fe_ehash_tables; /* sec.5 ExternalHashTableSet */
++	unsigned long fe_int_buf_off;	  /* int-buf pool MURAM, 256-aligned */
++	unsigned long fe_int_buf_raw_off; /* unaligned off handed to free() */
++	size_t fe_int_buf_raw_size;
++	int fe_int_buf_refcount;
+ 
+ 	struct dentry *debugfs_dir;
+ };
+@@ -965,11 +970,285 @@ static const struct file_operations fman_pcd_fe_singletons_fops = {
+ 	.owner		= THIS_MODULE,
+ 	.open		= fman_pcd_fe_singletons_open,
+ 	.read		= seq_read,
+ 	.write		= fman_pcd_fe_singletons_write,
+ 	.llseek		= seq_lseek,
+ 	.release	= single_release,
+ };
+ 
++/*
++ * ---------------------------------------------------------------------------
++ * External-hash flow store - arch/fman-fe-ehash.md section 5
++ * (ExternalHashTableSet), the vendor enhanced-ehash path - the only config
++ * proven to FLOW on the 210.10.1 ucode (section 8).  Two resources:
++ *
++ *   (a) a per-PCD internal-buffer-management pool in MURAM (32 KiB pool +
++ *       256 B global-mem singleton, 256-byte aligned), lazily reserved on
++ *       the first table, refcounted, freed with the last.  This is the
++ *       single largest FE/ehash MURAM consumer (section 6 budget) and the
++ *       dominant pcd-snapshot reversibility signal.
++ *
++ *   (b) per-table DDR bucket arrays (kzalloc, 16 B/bucket * (mask + 1)) plus
++ *       an en_exthash_node descriptor template.  Buckets live in DDR by
++ *       design (section 6 anti-pattern: never let them fall to MURAM - that
++ *       is the 327x-ENOMEM wall the vendor hit).
++ *
++ * Transcribed from the lf-5.4 LSDK ExternalHashTableSet() (Pcd/fm_ehash.c).
++ * The standalone function builds the node TEMPLATE in DDR (inside its info
++ * struct); the MURAM AD placement + AC_CC root-AD FE_ENTER wiring is the next
++ * increment (the fm_cc.c FmPcdExternalHashTableSet wrapper).  Ships DORMANT:
++ * it allocates + encodes, nothing dispatches into the hash store until that
++ * wiring and the FE-VM core (FmPcdCcBuildContextByFE) land.  Forward (set)
++ * and inverse (clear/drain) ship together; clear returns gen_pool "used" to
++ * baseline (section 8.6 reversibility contract).
++ *
++ * The en_exthash_node bit layout is the lf-5.4 native little-endian struct
++ * packing for the DDR template.  Before a frame is ever dispatched into the
++ * FE, that packing AND the 16-vs-8 byte bucket size MUST be confirmed against
++ * a 210.10.1 hardware dump (section 8.6 item 6); neither affects this dormant
++ * increment's safety or reversibility.
++ * ---------------------------------------------------------------------------
++ */
++#define FMAN_EHASH_INT_BUF_POOL_SIZE	(256 * 128)	/* EN_INTERNAL_BUFF_POOL_SIZE */
++#define FMAN_EHASH_GLOBAL_MEM_SIZE	256		/* en_exthash_global_mem */
++#define FMAN_EHASH_INT_BUF_TOTAL \
++	(FMAN_EHASH_INT_BUF_POOL_SIZE + FMAN_EHASH_GLOBAL_MEM_SIZE)
++#define FMAN_EHASH_ALIGN		256		/* EN_EXTHASH_TBL_ALIGNMENT */
++#define FMAN_EHASH_BUCKET_SIZE		16		/* lf-5.4 {u64 h; u64 pad} */
++#define FMAN_EHASH_MASK_MAX		0x7fff		/* hash_mask_bits: 4-bit field */
++
++struct fman_pcd_ehash_table {
++	struct list_head node;
++	void *table_base;		/* DDR bucket array (contiguous) */
++	size_t table_size;
++	u32 hash_mask;
++	u8 key_size;
++	u8 hash_shift;
++	u8 hash_mask_bits;		/* ii = log2(mask + 1) */
++	u32 ad[4];			/* en_exthash_node DDR template */
++};
++
++/* Lazily reserve the per-PCD internal-buffer-management MURAM pool. */
++static int fman_pcd_ehash_int_buf_get(struct fman_pcd *pcd)
++{
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	unsigned long raw_off, aligned_off;
++	size_t raw_size, avail;
++	void __iomem *v;
++
++	if (!muram)
++		return -ENXIO;
++	if (pcd->fe_int_buf_refcount > 0) {
++		pcd->fe_int_buf_refcount++;
++		return 0;
++	}
++
++	/* Bounds-check before reserving (section 8.6 item 2). */
++	raw_size = FMAN_EHASH_INT_BUF_TOTAL + FMAN_EHASH_ALIGN;
++	mutex_lock(&pcd->lock);
++	avail = pcd->muram_reserved - pcd->muram_used;
++	mutex_unlock(&pcd->lock);
++	if (avail < raw_size)
++		return -ENOMEM;
++
++	raw_off = fman_pcd_muram_alloc(pcd, raw_size);
++	if (IS_ERR_VALUE(raw_off))
++		return (int)raw_off;
++	aligned_off = (raw_off + (FMAN_EHASH_ALIGN - 1)) &
++		      ~(unsigned long)(FMAN_EHASH_ALIGN - 1);
++	v = (void __iomem *)fman_muram_offset_to_vbase(muram, aligned_off);
++	memset_io(v, 0, FMAN_EHASH_INT_BUF_TOTAL);
++
++	pcd->fe_int_buf_raw_off = raw_off;
++	pcd->fe_int_buf_raw_size = raw_size;
++	pcd->fe_int_buf_off = aligned_off;
++	pcd->fe_int_buf_refcount = 1;
++	return 0;
++}
++
++static void fman_pcd_ehash_int_buf_put(struct fman_pcd *pcd)
++{
++	if (WARN_ON(pcd->fe_int_buf_refcount <= 0))
++		return;
++	if (--pcd->fe_int_buf_refcount > 0)
++		return;
++	fman_pcd_muram_free(pcd, pcd->fe_int_buf_raw_off,
++			    pcd->fe_int_buf_raw_size);
++	pcd->fe_int_buf_raw_off = 0;
++	pcd->fe_int_buf_raw_size = 0;
++	pcd->fe_int_buf_off = 0;
++}
++
++/*
++ * Encode the en_exthash_node DDR template in the lf-5.4 native little-endian
++ * bitfield order (first field in the least-significant bits):
++ *   word0: table_base_hi:16 | hash_bytes_offset:2 | rsv:6 | key_size:6 |
++ *          miss_action_type:2
++ *   word1: table_base_lo (full 32 bits)
++ *   word2: global_mem_offset:12 | hash_mask_bits:4 | int_buf_pool_addr:16
++ *   word3: miss NIA (deferred to the FE_ENTER increment)
++ */
++static void fman_pcd_ehash_encode_node(struct fman_pcd_ehash_table *t,
++				       phys_addr_t tblphys,
++				       unsigned long int_buf_off)
++{
++	u32 base_hi = (u32)(((u64)tblphys >> 32) & 0xffff);
++	u32 ibp = (u32)((int_buf_off >> 8) & 0xffff);
++	u32 gmo = (FMAN_EHASH_INT_BUF_POOL_SIZE >> 8) & 0xfff;
++
++	t->ad[0] = base_hi |
++		   ((u32)(t->hash_shift & 0x3) << 16) |
++		   ((u32)(t->key_size & 0x3f) << 24);
++		   /* miss_action_type (bits 30-31) = 0, deferred */
++	t->ad[1] = (u32)((u64)tblphys & 0xffffffff);
++	t->ad[2] = gmo |
++		   ((u32)(t->hash_mask_bits & 0xf) << 12) |
++		   (ibp << 16);
++	t->ad[3] = 0;
++}
++
++static int fman_pcd_ehash_table_set(struct fman_pcd *pcd, u32 mask,
++				    u8 key_size, u8 hash_shift)
++{
++	struct fman_pcd_ehash_table *t;
++	phys_addr_t tblphys;
++	size_t tablesize;
++	int ii, err;
++
++	if (mask == 0 || mask > FMAN_EHASH_MASK_MAX)
++		return -EINVAL;
++	ii = fls(mask);				/* 1-based MSB position */
++	if ((1u << ii) != mask + 1)		/* (mask + 1) must be 2^ii */
++		return -EINVAL;
++	if (key_size == 0 || key_size > 0x3f || hash_shift > 0x3)
++		return -EINVAL;
++
++	tablesize = (size_t)FMAN_EHASH_BUCKET_SIZE << ii;
++
++	t = kzalloc(sizeof(*t), GFP_KERNEL);
++	if (!t)
++		return -ENOMEM;
++
++	err = fman_pcd_ehash_int_buf_get(pcd);
++	if (err)
++		goto err_free_t;
++
++	t->table_base = kzalloc(tablesize, GFP_KERNEL);
++	if (!t->table_base) {
++		err = -ENOMEM;
++		goto err_put_buf;
++	}
++	t->table_size = tablesize;
++	t->hash_mask = mask;
++	t->key_size = key_size;
++	t->hash_shift = hash_shift;
++	t->hash_mask_bits = (u8)ii;
++
++	tblphys = virt_to_phys(t->table_base);
++	fman_pcd_ehash_encode_node(t, tblphys, pcd->fe_int_buf_off);
++
++	list_add_tail(&t->node, &pcd->fe_ehash_tables);
++	dev_info(fman_get_dev(pcd->fman),
++		 "fman_pcd: ehash table mask 0x%x keysize %u ii %d size %zu DDR %pa\n",
++		 mask, key_size, ii, tablesize, &tblphys);
++	return 0;
++
++err_put_buf:
++	fman_pcd_ehash_int_buf_put(pcd);
++err_free_t:
++	kfree(t);
++	return err;
++}
++
++static void fman_pcd_ehash_table_free(struct fman_pcd *pcd,
++				      struct fman_pcd_ehash_table *t)
++{
++	list_del(&t->node);
++	kfree(t->table_base);
++	kfree(t);
++	fman_pcd_ehash_int_buf_put(pcd);
++}
++
++static void fman_pcd_ehash_drain(struct fman_pcd *pcd)
++{
++	struct fman_pcd_ehash_table *t, *tmp;
++
++	list_for_each_entry_safe(t, tmp, &pcd->fe_ehash_tables, node)
++		fman_pcd_ehash_table_free(pcd, t);
++}
++
++static int fman_pcd_ehash_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++	struct fman_pcd_ehash_table *t;
++
++	mutex_lock(&pcd->fe_lock);
++	seq_printf(s,
++		   "int_buf refcount=%d off=0x%05lx raw_size=%zu pool=%d global=%d\n",
++		   pcd->fe_int_buf_refcount, pcd->fe_int_buf_off,
++		   pcd->fe_int_buf_raw_size, FMAN_EHASH_INT_BUF_POOL_SIZE,
++		   FMAN_EHASH_GLOBAL_MEM_SIZE);
++	if (list_empty(&pcd->fe_ehash_tables)) {
++		seq_puts(s, "no ehash tables\n");
++	} else {
++		list_for_each_entry(t, &pcd->fe_ehash_tables, node) {
++			phys_addr_t p = virt_to_phys(t->table_base);
++
++			seq_printf(s,
++				   "table mask=0x%04x keysize=%u ii=%u size=%zu DDR=%pa\n",
++				   t->hash_mask, t->key_size,
++				   t->hash_mask_bits, t->table_size, &p);
++			seq_printf(s, "  node %08x %08x %08x %08x\n",
++				   t->ad[0], t->ad[1], t->ad[2], t->ad[3]);
++		}
++	}
++	mutex_unlock(&pcd->fe_lock);
++	return 0;
++}
++
++static int fman_pcd_ehash_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, fman_pcd_ehash_show, inode->i_private);
++}
++
++static ssize_t fman_pcd_ehash_write(struct file *file, const char __user *ubuf,
++				    size_t count, loff_t *ppos)
++{
++	struct seq_file *s = file->private_data;
++	struct fman_pcd *pcd = s->private;
++	unsigned int mask, key_size, hash_shift;
++	char buf[48];
++	int err;
++
++	if (count == 0 || count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	mutex_lock(&pcd->fe_lock);
++	if (sscanf(buf, "set %x %u %u", &mask, &key_size, &hash_shift) == 3)
++		err = fman_pcd_ehash_table_set(pcd, mask, (u8)key_size,
++					       (u8)hash_shift);
++	else if (!strncmp(buf, "clear", 5)) {
++		fman_pcd_ehash_drain(pcd);
++		err = 0;
++	} else {
++		err = -EINVAL;
++	}
++	mutex_unlock(&pcd->fe_lock);
++
++	return err ? err : count;
++}
++
++static const struct file_operations fman_pcd_ehash_fops = {
++	.owner		= THIS_MODULE,
++	.open		= fman_pcd_ehash_open,
++	.read		= seq_read,
++	.write		= fman_pcd_ehash_write,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
+ /**
+  * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
+  * @fman: parent FMan controller.  Must have a live MURAM pool (mainline
+@@ -1012,5 +1333,6 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 	INIT_LIST_HEAD(&pcd->fe_ports);
+ 	INIT_LIST_HEAD(&pcd->fe_singletons);
++	INIT_LIST_HEAD(&pcd->fe_ehash_tables);
+ 
+ 	pcd->muram_offset = fman_muram_alloc(muram,
+ 					     FMAN_PCD_MURAM_RESERVED_BYTES);
+@@ -1047,6 +1369,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 			debugfs_create_file("fe_singletons", 0644,
+ 					    pcd->debugfs_dir, pcd,
+ 					    &fman_pcd_fe_singletons_fops);
++			debugfs_create_file("fe_ehash", 0644,
++					    pcd->debugfs_dir, pcd,
++					    &fman_pcd_ehash_fops);
+ 		}
+ 	}
+ 
+@@ -1091,5 +1416,7 @@ void fman_pcd_release(struct fman_pcd *pcd)
+ 	WARN_ON(!list_empty(&pcd->replic_groups));
+ 
++	fman_pcd_ehash_drain(pcd);
++	WARN_ON(!list_empty(&pcd->fe_ehash_tables));
+ 	fman_pcd_fe_port_drain(pcd);
+ 	WARN_ON(!list_empty(&pcd->fe_ports));
+ 	WARN_ON(pcd->fe_refcount != 0);
+-- 
+2.39.5

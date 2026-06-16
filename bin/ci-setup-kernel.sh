@@ -574,6 +574,19 @@ cp "$BOARD_PATCH_DIR/0123-fman-pcd-fe-port-support.patch" "$KERNEL_PATCHES/"
 # pre-build pool state and pool_free drains the singletons, so pcd-snapshot
 # gen_pool "used" returns to baseline (reversibility gate stays clean).
 cp "$BOARD_PATCH_DIR/0124-fman-pcd-fe-vm-singletons.patch" "$KERNEL_PATCHES/"
+# ASK2 Fork B M1 — §5 ExternalHashTableSet (arch/fman-fe-ehash.md §5/§6). The
+# vendor enhanced-ehash flow store — the only config proven to FLOW on 210.10.1
+# (§8). Lazily reserves a per-PCD internal-buffer-management MURAM pool (32 KiB
+# pool + 256 B global, 256-aligned, refcounted — the dominant pcd-snapshot
+# reversibility signal) and per-table DDR bucket arrays (kzalloc, 16 B/bucket;
+# buckets MUST stay in DDR — §6 327×-ENOMEM wall) plus an en_exthash_node DDR
+# template (lf-5.4 native LE packing). New debugfs fman_pcd/<id>/fe_ehash (0644)
+# "set <mask_hex> <keysize> <shift>" / "clear" with node-word readback. Bounds-
+# checks MURAM before reserving (§8.6 item 2). Ships DORMANT: allocates + encodes
+# only; nothing dispatches into the hash store until the fm_cc.c FE_ENTER wrapper
+# + FE-VM core land. Forward (set) + inverse (clear/drain) in one patch; clear
+# returns gen_pool "used" to baseline (reversibility gate stays clean).
+cp "$BOARD_PATCH_DIR/0125-fman-pcd-fe-ehash-table.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
