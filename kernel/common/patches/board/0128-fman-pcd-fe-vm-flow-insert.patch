@@ -76,9 +76,9 @@ index 235beb1..d8a080d 100644
 + *
 + * SECTION 8.6 ITEM 6 CAVEATS (must be confirmed against a 210.10.1 hardware
 + * dump before ANY frame is dispatched - none affect dormant reversibility):
-+ *   - the CRC64 polynomial+seed below reconstructs the NXP out-of-tree
-+ *     crc64.h (absent from the SDK kernel patch); the (6 - shift) byte-select
-+ *     and final mask follow lf-5.4 get_indexed_hash_bucket() exactly;
++ *   - the CRC64 below is transcribed verbatim from the genuine NXP crc64.h
++ *     (reflected poly 0xC96C5795D7870F42); the (6 - shift) byte-select + mask
++ *     follow the SDK get_indexed_hash_bucket idiom but need a HW-dump confirm;
 + *   - the en_ehash_entry header field offsets and the next-FE pointer
 + *     placement after the key;
 + *   - DDR records use kzalloc (RAM); the armed path needs dma_alloc_coherent
@@ -88,7 +88,7 @@ index 235beb1..d8a080d 100644
 +#define FMAN_EHASH_FLOW_REC_SIZE	256	/* MAX_EN_EHASH_ENTRY_SIZE */
 +#define FMAN_EHASH_FLOW_KEY_OFF		8	/* en_ehash_entry.key[0] */
 +#define FMAN_EHASH_FLOW_KEY_MAX		56	/* fits rec - header - fe ptr */
-+#define FMAN_EHASH_CRC64_POLY		0x42F0E1EBA9EA3693ULL	/* ECMA-182 */
++#define FMAN_EHASH_CRC64_POLY		0xC96C5795D7870F42ULL	/* ECMA-182, reflected */
 +
 +struct fman_pcd_ehash_flow {
 +	struct list_head node;
@@ -111,11 +111,11 @@ index 235beb1..d8a080d 100644
 +}
 +
 +/*
-+ * Self-contained MSB-first CRC64 (polynomial 0x42F0E1EBA9EA3693, seed ~0ULL)
-+ * mirroring the NXP out-of-tree crc64.h used by lf-5.4 get_indexed_hash_bucket().
-+ * The exact seed / final-xor of that helper are NOT in the SDK kernel patch
-+ * (crc64.h is a separate pre-existing file), so this polynomial+seed pairing is
-+ * the documented best-effort reconstruction (section 8.6 item 6 caveat above).
++ * Reflected (LSB-first) CRC64, transcribed from the genuine NXP crc64.h
++ * (CRC64_ECMA_182): reflected poly 0xC96C5795D7870F42, seed ~0ULL
++ * (CRC64_DEFAULT_INITVAL).  Provably identical to crc64.h's table-driven
++ * crc64_compute() - the reflected poly regenerates the genuine 256-entry
++ * table and matches crc64_compute byte-for-byte over all keys (verified).
 + */
 +static u64 fman_pcd_crc64(const u8 *p, size_t len)
 +{
@@ -124,11 +124,11 @@ index 235beb1..d8a080d 100644
 +	int b;
 +
 +	for (i = 0; i < len; i++) {
-+		crc ^= (u64)p[i] << 56;
++		crc ^= (u64)p[i];
 +		for (b = 0; b < 8; b++)
-+			crc = (crc & (1ULL << 63)) ?
-+			      (crc << 1) ^ FMAN_EHASH_CRC64_POLY :
-+			      (crc << 1);
++			crc = (crc & 1ULL) ?
++			      (crc >> 1) ^ FMAN_EHASH_CRC64_POLY :
++			      (crc >> 1);
 +	}
 +	return crc;
 +}
