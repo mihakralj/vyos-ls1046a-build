@@ -1,0 +1,374 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Copilot <223556219+Copilot@users.noreply.github.com>
+Date: Mon, 16 Jun 2026 00:00:00 +0000
+Subject: [PATCH] fman_pcd: FE-VM increment 3 - per-flow ehash insertion
+
+ arch/fman-fe-ehash.md section 5: CRC64 bucket indexer + 256-byte DDR
+ flow-record head-insert linking a classified 5-tuple to its ENQ FE.
+ Ships DORMANT; forward (add) + inverse (LIFO drain) in one patch.
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 235beb1..d8a080d 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -1346,8 +1346,12 @@ struct fman_pcd_ehash_table {
+ 	u8 hash_shift;
+ 	u8 hash_mask_bits;		/* ii = log2(mask + 1) */
+ 	u32 ad[4];			/* en_exthash_node DDR template */
++	struct list_head flows;		/* sec.5 inserted flow records (DDR) */
+ };
+ 
++/* Table teardown cascades to its inserted flow records (defined below). */
++static void fman_pcd_ehash_flow_drain(struct fman_pcd_ehash_table *t);
++
+ /* Lazily reserve the per-PCD internal-buffer-management MURAM pool. */
+ static int fman_pcd_ehash_int_buf_get(struct fman_pcd *pcd)
+ {
+@@ -1463,6 +1467,7 @@ static int fman_pcd_ehash_table_set(struct fman_pcd *pcd, u32 mask,
+ 	t->key_size = key_size;
+ 	t->hash_shift = hash_shift;
+ 	t->hash_mask_bits = (u8)ii;
++	INIT_LIST_HEAD(&t->flows);
+ 
+ 	tblphys = virt_to_phys(t->table_base);
+ 	fman_pcd_ehash_encode_node(t, tblphys, pcd->fe_int_buf_off);
+@@ -1484,6 +1489,7 @@ static void fman_pcd_ehash_table_free(struct fman_pcd *pcd,
+ 				      struct fman_pcd_ehash_table *t)
+ {
+ 	list_del(&t->node);
++	fman_pcd_ehash_flow_drain(t);
+ 	kfree(t->table_base);
+ 	kfree(t);
+ 	fman_pcd_ehash_int_buf_put(pcd);
+@@ -1570,6 +1576,319 @@ static const struct file_operations fman_pcd_ehash_fops = {
+ 	.release	= single_release,
+ };
+ 
++/*
++ * ---------------------------------------------------------------------------
++ * FE-VM core, increment 3 - arch/fman-fe-ehash.md section 5: the per-flow
++ * insertion that links a classified 5-tuple to its ENQ Flow-Entry.  This is
++ * the SDK get_indexed_hash_bucket() CRC64 bucket indexer + ExternalHashTableAddKey()
++ * head-insert, transcribed from the lf-5.4 LSDK (Pcd/fm_ehash.c) - the only
++ * source where both functions are real (lf-6.6.y stubs the indexer; lf-6.12
++ * carries the indexer but stubs the FE-context builder).
++ *
++ * For each inserted flow:
++ *   - CRC64 the key, byte-shift + mask to a bucket index (get_indexed_hash_bucket);
++ *   - allocate a 256-byte DDR flow record (en_ehash_entry, EN_EHASH_ENTRY_ALIGN
++ *     256) and write the en_ehash_entry header (flags, next_entry chain pointer
++ *     to the previous bucket head), the key, and the next-FE pointer (the ENQ
++ *     FE MURAM offset built in increment 2);
++ *   - head-insert into the collision chain: bucket->h = swab64(phys(record)).
++ *
++ * Buckets and records live in DDR by design (section 6 anti-pattern: never let
++ * the flow store fall to MURAM - that is the 327x-ENOMEM wall).  gen_pool
++ * "used" is therefore UNCHANGED by this increment; the reversibility signal is
++ * (a) every DDR record freed, (b) every bucket head restored to its exact
++ * pre-insert value.  Forward (add) and inverse (drain) ship together; drain is
++ * LIFO so the collision chain unwinds in reverse insert order, restoring each
++ * bucket head byte-exactly (section 8.6 reversibility contract).
++ *
++ * Ships DORMANT: it writes DDR flow records and links bucket heads, but
++ * nothing dispatches into the store until the AC_CC root-AD FE_ENTER (built in
++ * increment 2) is wired to a live KeyGen->AC_CC scheme on a port AND a real
++ * key/FQID is programmed.  While dormant the records are inert DDR.
++ *
++ * SECTION 8.6 ITEM 6 CAVEATS (must be confirmed against a 210.10.1 hardware
++ * dump before ANY frame is dispatched - none affect dormant reversibility):
++ *   - the CRC64 polynomial+seed below reconstructs the NXP out-of-tree
++ *     crc64.h (absent from the SDK kernel patch); the (6 - shift) byte-select
++ *     and final mask follow lf-5.4 get_indexed_hash_bucket() exactly;
++ *   - the en_ehash_entry header field offsets and the next-FE pointer
++ *     placement after the key;
++ *   - DDR records use kzalloc (RAM); the armed path needs dma_alloc_coherent
++ *     (the XX_MallocSmart equivalent), as section 5/0125 already notes.
++ * ---------------------------------------------------------------------------
++ */
++#define FMAN_EHASH_FLOW_REC_SIZE	256	/* MAX_EN_EHASH_ENTRY_SIZE */
++#define FMAN_EHASH_FLOW_KEY_OFF		8	/* en_ehash_entry.key[0] */
++#define FMAN_EHASH_FLOW_KEY_MAX		56	/* fits rec - header - fe ptr */
++#define FMAN_EHASH_CRC64_POLY		0x42F0E1EBA9EA3693ULL	/* ECMA-182 */
++
++struct fman_pcd_ehash_flow {
++	struct list_head node;
++	void *record;			/* DDR 256-B flow record (kzalloc) */
++	u64 *bucket_h;			/* the bucket head u64 it links into */
++	u64 prev_head;			/* old bucket->h, for byte-exact undo */
++	u16 index;			/* bucket index (for the show node) */
++	u8 key_size;
++};
++
++static inline int fman_pcd_hexval(char c)
++{
++	if (c >= '0' && c <= '9')
++		return c - '0';
++	if (c >= 'a' && c <= 'f')
++		return c - 'a' + 10;
++	if (c >= 'A' && c <= 'F')
++		return c - 'A' + 10;
++	return -1;
++}
++
++/*
++ * Self-contained MSB-first CRC64 (polynomial 0x42F0E1EBA9EA3693, seed ~0ULL)
++ * mirroring the NXP out-of-tree crc64.h used by lf-5.4 get_indexed_hash_bucket().
++ * The exact seed / final-xor of that helper are NOT in the SDK kernel patch
++ * (crc64.h is a separate pre-existing file), so this polynomial+seed pairing is
++ * the documented best-effort reconstruction (section 8.6 item 6 caveat above).
++ */
++static u64 fman_pcd_crc64(const u8 *p, size_t len)
++{
++	u64 crc = ~0ULL;
++	size_t i;
++	int b;
++
++	for (i = 0; i < len; i++) {
++		crc ^= (u64)p[i] << 56;
++		for (b = 0; b < 8; b++)
++			crc = (crc & (1ULL << 63)) ?
++			      (crc << 1) ^ FMAN_EHASH_CRC64_POLY :
++			      (crc << 1);
++	}
++	return crc;
++}
++
++/* lf-5.4 get_indexed_hash_bucket(): byte-granular right shift, then mask. */
++static u16 fman_pcd_ehash_bucket_index(const u8 *key, u8 key_size,
++				       u8 hash_shift, u32 mask)
++{
++	u64 crc = fman_pcd_crc64(key, key_size);
++
++	crc >>= ((6 - (hash_shift & 0x7)) << 3);
++	return (u16)crc & (u16)mask;
++}
++
++static struct fman_pcd_ehash_table *
++fman_pcd_ehash_table_by_index(struct fman_pcd *pcd, unsigned int idx)
++{
++	struct fman_pcd_ehash_table *t;
++	unsigned int i = 0;
++
++	list_for_each_entry(t, &pcd->fe_ehash_tables, node)
++		if (i++ == idx)
++			return t;
++	return NULL;
++}
++
++/*
++ * Insert one flow: CRC64 the key to a bucket, allocate a DDR flow record, link
++ * it into the collision chain head-first.  Mirrors the simple (non-cumulative)
++ * ExternalHashTableAddKey() path.  On any shortfall nothing is committed.
++ * Caller holds pcd->fe_lock.
++ */
++static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
++				  const u8 *key, u8 key_size,
++				  unsigned long enq_fe_off)
++{
++	struct fman_pcd_ehash_flow *flow;
++	u64 prev_head, old_native, rec_phys;
++	u8 *r;
++	u16 index;
++	size_t fe_ptr_off;
++
++	if (key_size == 0 || key_size != t->key_size)
++		return -EINVAL;
++	if (key_size > FMAN_EHASH_FLOW_KEY_MAX)
++		return -EINVAL;
++
++	index = fman_pcd_ehash_bucket_index(key, key_size, t->hash_shift,
++					    t->hash_mask);
++
++	flow = kzalloc(sizeof(*flow), GFP_KERNEL);
++	if (!flow)
++		return -ENOMEM;
++
++	/* A 256-byte kmalloc is 256-aligned (EN_EHASH_ENTRY_ALIGN). */
++	r = kzalloc(FMAN_EHASH_FLOW_REC_SIZE, GFP_KERNEL);
++	if (!r) {
++		kfree(flow);
++		return -ENOMEM;
++	}
++
++	flow->bucket_h = (u64 *)((u8 *)t->table_base +
++				 (size_t)index * FMAN_EHASH_BUCKET_SIZE);
++	prev_head = *flow->bucket_h;		/* swab'd phys of old head */
++	old_native = swab64(prev_head);		/* unswap to native phys */
++
++	/* en_ehash_entry header: chain THIS record to the previous head. */
++	*(__be16 *)(r + 0) = cpu_to_be16(0);				/* flags */
++	*(__be16 *)(r + 2) = cpu_to_be16((u16)((old_native >> 32) & 0xffff));
++	*(__be32 *)(r + 4) = cpu_to_be32((u32)(old_native & 0xffffffff));
++	memcpy(r + FMAN_EHASH_FLOW_KEY_OFF, key, key_size);
++
++	/* next-FE pointer (ENQ FE MURAM offset) after the 8-byte-aligned key. */
++	fe_ptr_off = FMAN_EHASH_FLOW_KEY_OFF + ((key_size + 7U) & ~7U);
++	*(__be32 *)(r + fe_ptr_off) = cpu_to_be32((u32)enq_fe_off);
++
++	/* Head-insert: bucket head = swab64(phys(record)). */
++	rec_phys = (u64)virt_to_phys(r);
++	*flow->bucket_h = swab64(rec_phys);
++
++	flow->record = r;
++	flow->prev_head = prev_head;
++	flow->index = index;
++	flow->key_size = key_size;
++	list_add(&flow->node, &t->flows);	/* head-add => LIFO drain */
++	return 0;
++}
++
++/*
++ * Inverse: LIFO restore.  Flows are head-added, so walking the list head-first
++ * unwinds the collision chain in reverse insert order, restoring each bucket
++ * head to its exact pre-insert value (byte-exact reversibility, section 8.6).
++ */
++static void fman_pcd_ehash_flow_drain(struct fman_pcd_ehash_table *t)
++{
++	struct fman_pcd_ehash_flow *flow, *tmp;
++
++	list_for_each_entry_safe(flow, tmp, &t->flows, node) {
++		*flow->bucket_h = flow->prev_head;
++		list_del(&flow->node);
++		kfree(flow->record);
++		kfree(flow);
++	}
++}
++
++static void fman_pcd_ehash_flow_clear_all(struct fman_pcd *pcd)
++{
++	struct fman_pcd_ehash_table *t;
++
++	list_for_each_entry(t, &pcd->fe_ehash_tables, node)
++		fman_pcd_ehash_flow_drain(t);
++}
++
++static int fman_pcd_fe_flow_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++	struct fman_pcd_ehash_table *t;
++	struct fman_pcd_ehash_flow *flow;
++	unsigned int ti = 0, total = 0;
++
++	mutex_lock(&pcd->fe_lock);
++	if (list_empty(&pcd->fe_ehash_tables)) {
++		seq_puts(s, "no ehash tables (set one via fe_ehash first)\n");
++		mutex_unlock(&pcd->fe_lock);
++		return 0;
++	}
++	list_for_each_entry(t, &pcd->fe_ehash_tables, node) {
++		unsigned int n = 0;
++
++		list_for_each_entry(flow, &t->flows, node) {
++			u64 rec_phys = (u64)virt_to_phys(flow->record);
++			const u8 *r = flow->record;
++			unsigned int i;
++
++			seq_printf(s,
++				   "tbl[%u] flow[%u] bucket=0x%04x rec=0x%llx ",
++				   ti, n++, flow->index,
++				   (unsigned long long)rec_phys);
++			for (i = 0; i < 16; i++)
++				seq_printf(s, "%02x", r[i]);
++			seq_puts(s, "\n");
++			total++;
++		}
++		if (!n)
++			seq_printf(s, "tbl[%u] (no flows)\n", ti);
++		ti++;
++	}
++	seq_printf(s, "total flows: %u\n", total);
++	mutex_unlock(&pcd->fe_lock);
++	return 0;
++}
++
++static int fman_pcd_fe_flow_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, fman_pcd_fe_flow_show, inode->i_private);
++}
++
++static ssize_t fman_pcd_fe_flow_write(struct file *file,
++				      const char __user *ubuf,
++				      size_t count, loff_t *ppos)
++{
++	struct seq_file *s = file->private_data;
++	struct fman_pcd *pcd = s->private;
++	struct fman_pcd_ehash_table *t;
++	unsigned long enq_fe_off = 0;
++	unsigned int tbl_idx;
++	char buf[160], keytok[2 * FMAN_EHASH_FLOW_KEY_MAX + 2];
++	u8 key[FMAN_EHASH_FLOW_KEY_MAX];
++	u8 key_size = 0;
++	int nf, err;
++	const char *k;
++
++	if (count == 0 || count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	mutex_lock(&pcd->fe_lock);
++	if (!strncmp(buf, "clear", 5)) {
++		fman_pcd_ehash_flow_clear_all(pcd);
++		mutex_unlock(&pcd->fe_lock);
++		return count;
++	}
++
++	nf = sscanf(buf, "add %u %113s %lx", &tbl_idx, keytok, &enq_fe_off);
++	if (nf < 2) {
++		mutex_unlock(&pcd->fe_lock);
++		return -EINVAL;
++	}
++
++	/* Parse the hex key string into bytes. */
++	for (k = keytok; k[0] && k[1]; k += 2) {
++		int hi = fman_pcd_hexval(k[0]);
++		int lo = fman_pcd_hexval(k[1]);
++
++		if (hi < 0 || lo < 0 || key_size >= FMAN_EHASH_FLOW_KEY_MAX) {
++			mutex_unlock(&pcd->fe_lock);
++			return -EINVAL;
++		}
++		key[key_size++] = (u8)((hi << 4) | lo);
++	}
++	if (key_size == 0 || keytok[2 * key_size] != '\0') {
++		mutex_unlock(&pcd->fe_lock);
++		return -EINVAL;		/* odd-length or trailing junk */
++	}
++
++	t = fman_pcd_ehash_table_by_index(pcd, tbl_idx);
++	if (!t) {
++		mutex_unlock(&pcd->fe_lock);
++		return -ENODEV;
++	}
++
++	err = fman_pcd_ehash_add_key(t, key, key_size, enq_fe_off);
++	mutex_unlock(&pcd->fe_lock);
++
++	return err ? err : count;
++}
++
++static const struct file_operations fman_pcd_fe_flow_fops = {
++	.owner		= THIS_MODULE,
++	.open		= fman_pcd_fe_flow_open,
++	.read		= seq_read,
++	.write		= fman_pcd_fe_flow_write,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
+ /**
+  * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
+  * @fman: parent FMan controller.  Must have a live MURAM pool (mainline
+@@ -1686,6 +2005,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 			debugfs_create_file("fe_enter", 0644,
+ 					    pcd->debugfs_dir, pcd,
+ 					    &fman_pcd_fe_enter_fops);
++			debugfs_create_file("fe_flow", 0644,
++					    pcd->debugfs_dir, pcd,
++					    &fman_pcd_fe_flow_fops);
+ 		}
+ 	}
+ 
+-- 
+2.39.5
