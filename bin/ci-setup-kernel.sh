@@ -621,6 +621,18 @@ cp "$BOARD_PATCH_DIR/0127-fman-pcd-fe-vm-enq-root.patch" "$KERNEL_PATCHES/"
 # UNCHANGED — reversibility = all records freed + every bucket head restored.
 # Ships DORMANT; forward (add) + inverse (LIFO drain, byte-exact) in one patch.
 cp "$BOARD_PATCH_DIR/0128-fman-pcd-fe-vm-flow-insert.patch" "$KERNEL_PATCHES/"
+# 0129: M1 coarse ask offload engage/disengage mode-switch (fman_pcd.h export).
+# Adds two EXPORT_SYMBOL_GPL entry points to fman_pcd.c + their prototypes to
+# <linux/fsl/fman_pcd.h>: fman_pcd_offload_engage()/_disengage(struct fman *,
+# u8 hw_port_id). They resolve the PCD internally (fman_get_pcd()) and wrap the
+# EXACT HW-proven reversible sequence from the cc_test harness (0107) + 100x
+# soak: install a benign single-key CC tree → get_base → KGSE_CCBS graft of the
+# port's KeyGen scheme, with strict reverse teardown (detach FIRST, then
+# destroy). The out-of-tree ask.ko mirrors only these two prototypes (into
+# ask_fman_caps.h) and drives them via /sys/kernel/debug/ask/offload. Ships
+# DORMANT (nothing calls them until the debugfs trigger / M7 op-mode); M1
+# carries no classification semantics. Forward + inverse in one patch.
+cp "$BOARD_PATCH_DIR/0129-fman-pcd-offload-engage.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"

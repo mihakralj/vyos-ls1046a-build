@@ -134,6 +134,7 @@ struct ask_hw_port {
         bool            in_use;
         u8              port_id;        /* BMI hwport id (sparse 0x01..0x31) */
         bool            cc_installed;   /* a static CC tree is live on this port */
+        bool            offload_engaged;/* M1 coarse S1 mode-switch active (0129) */
         u16             nkeys;          /* live entries in shadow[] */
         u32             next_key_id;    /* per-port monotonic id (never 0) */
         struct ask_hw_cc_slot shadow[FMAN_CC_MAX_STATIC_KEYS];
@@ -407,6 +408,14 @@ void ask_hw_pcd_teardown(void)
                 kfree(ck);
         }
 
+        /* Disengage any port still in the M1 coarse S1 mode-switch (0129). */
+        for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+                if (h->port[i].in_use && h->port[i].offload_engaged) {
+                        fman_pcd_offload_disengage(h->fman, h->port[i].port_id);
+                        h->port[i].offload_engaged = false;
+                }
+        }
+
         /* Raze every per-port CC static tree we installed. */
         for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
                 if (h->port[i].in_use && h->port[i].cc_installed)
@@ -423,6 +432,90 @@ struct ask_hw_pcd *ask_hw_pcd_get(void)
 {
         return ask_hw_pcd_inst;
 }
+
+/* ------------------------------------------------------------------------- */
+/* M1 coarse dataplane mode-switch (control-plane plumbing; ships dormant)    */
+/* ------------------------------------------------------------------------- */
+
+/* Defined further down with the per-flow fast path; forward-declared here. */
+static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h,
+						u8 port_id);
+
+/*
+ * Engage/disengage the coarse S0<->S1 PCD mode-switch on one FMan RX port.
+ * These forward to the board-exported fman_pcd_offload_engage()/_disengage()
+ * (board patch 0129) - the EXACT reversible KGSE_CCBS graft sequence proven by
+ * the cc_test harness + 100x soak.  A per-port "engaged" flag makes both
+ * idempotent so a double-engage / stray-disengage is a safe no-op, and
+ * teardown reverts any port left engaged.  M1 carries no classification
+ * semantics and is NOT wired to a traffic path - this is control-plane
+ * plumbing only (the traffic-carrying engage is blocked on M2 AC_CC
+ * disposition).  Triggered manually via /sys/kernel/debug/ask/offload; M7
+ * routes `set system offload ask` here.
+ */
+int ask_hw_offload_engage(u8 hw_port_id)
+{
+        struct ask_hw_pcd *h = ask_hw_pcd_get();
+        struct ask_hw_port *p;
+        int rc;
+
+        if (!h)
+                return -ENODEV;
+
+        mutex_lock(&h->lock);
+
+        p = ask_hw_port_slot_get(h, hw_port_id);
+        if (!p) {
+                rc = -ENOSPC;
+                goto out_unlock;
+        }
+        if (p->offload_engaged) {
+                rc = 0;                 /* idempotent */
+                goto out_unlock;
+        }
+
+        rc = fman_pcd_offload_engage(h->fman, hw_port_id);
+        if (rc)
+                goto out_unlock;
+
+        p->offload_engaged = true;
+        ask_pr_info("hw: offload ENGAGED on port 0x%02x (S0->S1)\n", hw_port_id);
+
+out_unlock:
+        mutex_unlock(&h->lock);
+        return rc;
+}
+EXPORT_SYMBOL_GPL(ask_hw_offload_engage);
+
+void ask_hw_offload_disengage(u8 hw_port_id)
+{
+        struct ask_hw_pcd *h = ask_hw_pcd_get();
+        struct ask_hw_port *p;
+        unsigned int i;
+
+        if (!h)
+                return;
+
+        mutex_lock(&h->lock);
+
+        p = NULL;
+        for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+                if (h->port[i].in_use && h->port[i].port_id == hw_port_id) {
+                        p = &h->port[i];
+                        break;
+                }
+        }
+        if (!p || !p->offload_engaged) {
+                mutex_unlock(&h->lock);
+                return;                 /* idempotent no-op */
+        }
+
+        fman_pcd_offload_disengage(h->fman, hw_port_id);
+        p->offload_engaged = false;
+        mutex_unlock(&h->lock);
+        ask_pr_info("hw: offload DISENGAGED on port 0x%02x (S1->S0)\n", hw_port_id);
+}
+EXPORT_SYMBOL_GPL(ask_hw_offload_disengage);
 
 /* ------------------------------------------------------------------------- */
 /* Legacy ABI stubs (consumers/tests still name these; Stage C removes them)  */
