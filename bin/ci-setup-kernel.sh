@@ -608,6 +608,19 @@ cp "$BOARD_PATCH_DIR/0126-fman-pcd-muram-genpool.patch" "$KERNEL_PATCHES/"
 # until the ehash bucket indexer lands). Forward+inverse in one patch; each
 # inverse re-zeros + frees its MURAM so pcd-snapshot stays reversible.
 cp "$BOARD_PATCH_DIR/0127-fman-pcd-fe-vm-enq-root.patch" "$KERNEL_PATCHES/"
+# 0128: FE-VM core increment 3 — per-flow ehash insertion (arch/fman-fe-ehash.md
+# §5). The SDK get_indexed_hash_bucket() CRC64 bucket indexer +
+# ExternalHashTableAddKey() head-insert: CRC64 the key → byte-shift+mask to a
+# bucket → allocate a 256-byte DDR flow record (en_ehash_entry) → write the
+# header (flags + next_entry chain to the old bucket head), the key, and the
+# next-FE pointer (the 0127 ENQ FE MURAM offset) → head-insert
+# (bucket->h = swab64(phys(record))). Links a classified 5-tuple to its ENQ FE.
+# New debugfs fman_pcd/<id>/fe_flow ("add <tbl_idx> <key_hex> [enq_fe_off_hex]" /
+# "clear") with byte-level readback. Buckets+records live in DDR by design (§6
+# anti-pattern: never fall the flow store to MURAM) so gen_pool "used" is
+# UNCHANGED — reversibility = all records freed + every bucket head restored.
+# Ships DORMANT; forward (add) + inverse (LIFO drain, byte-exact) in one patch.
+cp "$BOARD_PATCH_DIR/0128-fman-pcd-fe-vm-flow-insert.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
