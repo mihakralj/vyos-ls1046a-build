@@ -1,0 +1,339 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 9a4b709..9d61c65 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -112,6 +112,10 @@ struct fman_pcd {
+ 	struct list_head fe_enq;
+ 	int fe_refcount;
+ 	struct list_head fe_ports;	/* FmPortSetFESupport records (sec.4) */
++	struct list_head fe_singletons;	/* sec.5 MUX/Transition/Exit FEs */
++	unsigned long fe_mux_off;
++	unsigned long fe_transition_off;
++	unsigned long fe_exit_off;
+ 
+ 	struct dentry *debugfs_dir;
+ };
+@@ -254,6 +258,16 @@ static void fman_pcd_fe_pool_free(struct fman_pcd *pcd)
+ {
+ 	struct fman_pcd_fe_obj *obj, *tmp;
+ 
++	/* sec.5 FE singletons share the pool's MURAM - free them too. */
++	list_for_each_entry_safe(obj, tmp, &pcd->fe_singletons, node) {
++		list_del(&obj->node);
++		fman_pcd_muram_free(pcd, obj->muram_off, FMAN_PCD_FE_MAX_SIZE);
++		kfree(obj);
++	}
++	pcd->fe_mux_off = 0;
++	pcd->fe_transition_off = 0;
++	pcd->fe_exit_off = 0;
++
+ 	list_for_each_entry_safe(obj, tmp, &pcd->fe_enq, node) {
+ 		list_del(&obj->node);
+ 		fman_pcd_muram_free(pcd, obj->muram_off, FMAN_PCD_FE_MAX_SIZE);
+@@ -671,6 +685,288 @@ static const struct file_operations fman_pcd_fe_port_fops = {
+ 	.release	= single_release,
+ };
+ 
++/*
++ * ---------------------------------------------------------------------------
++ * Flow-Entry (FE) virtual-machine descriptor builder - arch/fman-fe-ehash.md
++ * section 5 FE-VM core, increment 1: descriptor encoding plus the three core
++ * MUX / Transition / Exit singletons.
++ *
++ * Transcribed from the NXP lf-5.4 SDK FmPcdCcBuildFE() and the FM_PCD_Init()
++ * FE-singleton setup, adapted to mainline gen_pool MURAM.  The SDK next-FE
++ * pointer (XX_VirtToPhys(h_NextFE) - physicalMuramBase) is exactly the
++ * gen_pool MURAM offset that fman_pcd_muram_alloc() already returns, so a
++ * next-FE reference stores that offset directly.  Descriptor words are
++ * big-endian MURAM image words (iowrite32be), matching the CC/AD accessor
++ * convention used elsewhere in this driver.
++ *
++ * Ships DORMANT: it PROGRAMS the three core FE singletons into pool slots and
++ * exposes them for byte-level verification (fe_singletons debugfs), but
++ * nothing dispatches into the FE machine until the external-hash table
++ * (section 5), the per-flow ENQ FE, and the AC_CC root-AD FE_ENTER wiring
++ * land in later increments.  Forward (build) and inverse (clear) ship in this
++ * one patch; the inverse restores the exact pre-build pool state, so
++ * pcd-snapshot stays reversible (section 8.6 defensive-coding contract).
++ * ---------------------------------------------------------------------------
++ */
++
++/* FE descriptor type codes (word0 bits 24-29) - SDK fm_pcd.h. */
++#define FMAN_FE_TYPE_HM			0x01000000
++#define FMAN_FE_TYPE_ENQ		0x02000000
++#define FMAN_FE_TYPE_EXIT		0x03000000
++#define FMAN_FE_TYPE_MUX		0x04000000
++#define FMAN_FE_TYPE_TRANSITION		0x05000000
++#define FMAN_FE_TYPE_EXT_HASH		0x06000000
++
++/* FE word0 flag bits. */
++#define FMAN_FE_HM_PAHM			0x00800000
++#define FMAN_FE_ENQ_MPPN		0x00800000
++#define FMAN_FE_ENQ_FQID		0x00010000
++#define FMAN_FE_ENQ_PP			0x00040000
++#define FMAN_FE_ENQ_SP			0x00020000
++#define FMAN_FE_EXIT_DEALLOCATE		0x00800000
++#define FMAN_FE_TRANSITION_AD_FROM_WS	0x00400000
++
++/* FE descriptor sizes (bytes); written word count = size / 4. */
++#define FMAN_FE_HM_SIZE			16
++#define FMAN_FE_ENQ_SIZE		16
++#define FMAN_FE_MUX_SIZE		4
++#define FMAN_FE_EXIT_SIZE		4
++#define FMAN_FE_TRANSITION_SIZE		8
++#define FMAN_FE_MAX_WORDS		(FMAN_PCD_FE_MAX_SIZE / 4)
++
++/* Singleton context working-store offsets (FM_PCD_Init). */
++#define FMAN_FE_MUX_CTX_OFF		0
++#define FMAN_FE_TRANSITION_CTX_OFF	4
++
++struct fman_pcd_fe_params {
++	u32 type;			/* FMAN_FE_TYPE_* */
++	u32 ws_offset;			/* context working-store offset (word0) */
++	u32 flags;			/* extra word0 flag bits */
++	u32 nia;			/* ENQ next-invoked-action (word1) */
++	unsigned long next_fe_off;	/* next-FE MURAM offset */
++	bool next_from_ws;		/* TRANSITION: next-AD from work store */
++};
++
++/*
++ * Encode one FE descriptor into its MURAM slot.  Mirrors FmPcdCcBuildFE():
++ * word0 = wsOffset | type | flags; ENQ carries the NIA in word1; HM and ENQ
++ * put the next-FE offset in word3, TRANSITION in word2 (and only when the
++ * next-AD is not taken from the working store).  Only the first feSize/4
++ * words are written, so the TRANSITION next-FE word is emitted only for that
++ * 2-word descriptor when !next_from_ws, exactly as the SDK does.
++ */
++static void fman_pcd_fe_build(struct muram_info *muram, unsigned long fe_off,
++			      const struct fman_pcd_fe_params *p)
++{
++	u32 __iomem *fe = (u32 __iomem *)
++		fman_muram_offset_to_vbase(muram, fe_off);
++	u32 w[FMAN_FE_MAX_WORDS] = { 0 };
++	unsigned int size = 0, i;
++
++	w[0] = p->ws_offset | p->type | p->flags;
++	switch (p->type) {
++	case FMAN_FE_TYPE_HM:
++		size = FMAN_FE_HM_SIZE;
++		w[3] = (u32)p->next_fe_off;
++		break;
++	case FMAN_FE_TYPE_ENQ:
++		size = FMAN_FE_ENQ_SIZE;
++		w[1] = p->nia;
++		w[3] = (u32)p->next_fe_off;
++		break;
++	case FMAN_FE_TYPE_MUX:
++		size = FMAN_FE_MUX_SIZE;
++		break;
++	case FMAN_FE_TYPE_EXIT:
++		size = FMAN_FE_EXIT_SIZE;
++		break;
++	case FMAN_FE_TYPE_TRANSITION:
++		size = FMAN_FE_TRANSITION_SIZE;
++		if (!p->next_from_ws)
++			w[2] = (u32)p->next_fe_off;
++		break;
++	default:
++		return;
++	}
++
++	for (i = 0; i < size / 4; i++)
++		iowrite32be(w[i], fe + i);
++}
++
++/* Dequeue one pool slot, program it, and park it on the singleton list. */
++static int fman_pcd_fe_singleton_one(struct fman_pcd *pcd,
++				     struct muram_info *muram,
++				     const struct fman_pcd_fe_params *p,
++				     unsigned long *out_off)
++{
++	struct fman_pcd_fe_obj *obj;
++
++	obj = list_first_entry_or_null(&pcd->fe_available,
++				       struct fman_pcd_fe_obj, node);
++	if (!obj)
++		return -ENOSPC;
++
++	list_del(&obj->node);
++	fman_pcd_fe_build(muram, obj->muram_off, p);
++	*out_off = obj->muram_off;
++	list_add_tail(&obj->node, &pcd->fe_singletons);
++	return 0;
++}
++
++/* Inverse of the singleton build: re-zero MURAM, return slots to the pool. */
++static void fman_pcd_fe_singletons_free(struct fman_pcd *pcd)
++{
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	struct fman_pcd_fe_obj *obj, *tmp;
++
++	list_for_each_entry_safe(obj, tmp, &pcd->fe_singletons, node) {
++		list_del(&obj->node);
++		if (muram)
++			memset_io((void __iomem *)
++				  fman_muram_offset_to_vbase(muram,
++							     obj->muram_off),
++				  0, FMAN_PCD_FE_MAX_SIZE);
++		list_add_tail(&obj->node, &pcd->fe_available);
++	}
++	pcd->fe_mux_off = 0;
++	pcd->fe_transition_off = 0;
++	pcd->fe_exit_off = 0;
++}
++
++/*
++ * Build the three core FE singletons (MUX, Transition, Exit) into pool slots
++ * in FM_PCD_Init() order.  Requires the pool to be engaged.  On any shortfall
++ * every slot already taken is restored, so the silicon is never left
++ * half-programmed (section 8.6 defensive-coding contract).
++ */
++static int fman_pcd_fe_singletons_build(struct fman_pcd *pcd)
++{
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	struct fman_pcd_fe_params p;
++	int err;
++
++	if (!muram)
++		return -ENXIO;
++	if (pcd->fe_refcount == 0)
++		return -ENXIO;		/* engage the pool first */
++	if (!list_empty(&pcd->fe_singletons))
++		return -EEXIST;
++
++	/* MUX: working-store offset 0, no flags, no next-FE. */
++	memset(&p, 0, sizeof(p));
++	p.type = FMAN_FE_TYPE_MUX;
++	p.ws_offset = FMAN_FE_MUX_CTX_OFF;
++	err = fman_pcd_fe_singleton_one(pcd, muram, &p, &pcd->fe_mux_off);
++	if (err)
++		goto fail;
++
++	/* Transition: deallocate buffer, next-AD from working store. */
++	memset(&p, 0, sizeof(p));
++	p.type = FMAN_FE_TYPE_TRANSITION;
++	p.ws_offset = FMAN_FE_TRANSITION_CTX_OFF;
++	p.flags = FMAN_FE_EXIT_DEALLOCATE | FMAN_FE_TRANSITION_AD_FROM_WS;
++	p.next_from_ws = true;
++	err = fman_pcd_fe_singleton_one(pcd, muram, &p, &pcd->fe_transition_off);
++	if (err)
++		goto fail;
++
++	/* Exit: deallocate buffer. */
++	memset(&p, 0, sizeof(p));
++	p.type = FMAN_FE_TYPE_EXIT;
++	p.flags = FMAN_FE_EXIT_DEALLOCATE;
++	err = fman_pcd_fe_singleton_one(pcd, muram, &p, &pcd->fe_exit_off);
++	if (err)
++		goto fail;
++
++	return 0;
++
++fail:
++	fman_pcd_fe_singletons_free(pcd);
++	return err;
++}
++
++static void fman_pcd_fe_dump_one(struct seq_file *s, struct muram_info *muram,
++				 const char *name, unsigned long off,
++				 unsigned int words)
++{
++	u32 __iomem *fe;
++	unsigned int i;
++
++	if (!off) {
++		seq_printf(s, "%-10s (not built)\n", name);
++		return;
++	}
++	fe = (u32 __iomem *)fman_muram_offset_to_vbase(muram, off);
++	seq_printf(s, "%-10s off=0x%05lx ", name, off);
++	for (i = 0; i < words; i++)
++		seq_printf(s, "%08x ", ioread32be(fe + i));
++	seq_puts(s, "\n");
++}
++
++static int fman_pcd_fe_singletons_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++
++	mutex_lock(&pcd->fe_lock);
++	if (!muram || pcd->fe_refcount == 0) {
++		seq_puts(s, "fe pool not engaged\n");
++		mutex_unlock(&pcd->fe_lock);
++		return 0;
++	}
++	fman_pcd_fe_dump_one(s, muram, "mux", pcd->fe_mux_off,
++			     FMAN_FE_MUX_SIZE / 4);
++	fman_pcd_fe_dump_one(s, muram, "transition", pcd->fe_transition_off,
++			     FMAN_FE_TRANSITION_SIZE / 4);
++	fman_pcd_fe_dump_one(s, muram, "exit", pcd->fe_exit_off,
++			     FMAN_FE_EXIT_SIZE / 4);
++	mutex_unlock(&pcd->fe_lock);
++	return 0;
++}
++
++static int fman_pcd_fe_singletons_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, fman_pcd_fe_singletons_show, inode->i_private);
++}
++
++static ssize_t fman_pcd_fe_singletons_write(struct file *file,
++					    const char __user *ubuf,
++					    size_t count, loff_t *ppos)
++{
++	struct seq_file *s = file->private_data;
++	struct fman_pcd *pcd = s->private;
++	char buf[16];
++	char *cmd;
++	int err = 0;
++
++	if (count == 0 || count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++	cmd = strim(buf);
++
++	mutex_lock(&pcd->fe_lock);
++	if (!strcmp(cmd, "build"))
++		err = fman_pcd_fe_singletons_build(pcd);
++	else if (!strcmp(cmd, "clear"))
++		fman_pcd_fe_singletons_free(pcd);
++	else
++		err = -EINVAL;
++	mutex_unlock(&pcd->fe_lock);
++
++	return err ? err : count;
++}
++
++static const struct file_operations fman_pcd_fe_singletons_fops = {
++	.owner		= THIS_MODULE,
++	.open		= fman_pcd_fe_singletons_open,
++	.read		= seq_read,
++	.write		= fman_pcd_fe_singletons_write,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
+ /**
+  * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
+  * @fman: parent FMan controller.  Must have a live MURAM pool (mainline
+@@ -715,6 +1011,7 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 	INIT_LIST_HEAD(&pcd->fe_available);
+ 	INIT_LIST_HEAD(&pcd->fe_enq);
+ 	INIT_LIST_HEAD(&pcd->fe_ports);
++	INIT_LIST_HEAD(&pcd->fe_singletons);
+ 
+ 	pcd->muram_offset = fman_muram_alloc(muram,
+ 					     FMAN_PCD_MURAM_RESERVED_BYTES);
+@@ -750,6 +1047,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 			debugfs_create_file("fe_port", 0644,
+ 					    pcd->debugfs_dir, pcd,
+ 					    &fman_pcd_fe_port_fops);
++			debugfs_create_file("fe_singletons", 0644,
++					    pcd->debugfs_dir, pcd,
++					    &fman_pcd_fe_singletons_fops);
+ 		}
+ 	}
+ 
