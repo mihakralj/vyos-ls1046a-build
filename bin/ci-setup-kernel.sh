@@ -560,6 +560,20 @@ cp "$BOARD_PATCH_DIR/0122-fman-pcd-fe-ehash-init.patch" "$KERNEL_PATCHES/"
 # ships DORMANT, does NOT flow classified traffic (needs §5 + FE-VM core).
 # Sorts after 0122, before 101-sfp. Spec arch/fman-fe-ehash.md §4 (M1 Fork B).
 cp "$BOARD_PATCH_DIR/0123-fman-pcd-fe-port-support.patch" "$KERNEL_PATCHES/"
+# ASK2 Fork B M1 — FE virtual-machine core, increment 1 (arch/fman-fe-ehash.md
+# §5 FE-VM). Transcribes the lf-5.4 SDK FmPcdCcBuildFE() descriptor encoder and
+# the FM_PCD_Init() FE-singleton setup, adapted to mainline gen_pool MURAM (the
+# SDK next-FE phys == the gen_pool offset fman_pcd_muram_alloc returns). Adds
+# fman_pcd_fe_build() (big-endian MURAM image words via iowrite32be) plus the
+# three core MUX/Transition/Exit singletons, programmed into pool slots from a
+# new debugfs fman_pcd/<id>/fe_singletons (0644) "build"/"clear" node with a
+# byte-level readback for oracle verification (§8.6 contract item 6). Ships
+# DORMANT: programs FE descriptors but nothing dispatches into the FE machine
+# until §5 ehash + the per-flow ENQ FE + AC_CC root-AD FE_ENTER wiring land.
+# Forward (build) + inverse (clear) in this one patch; clear restores the exact
+# pre-build pool state and pool_free drains the singletons, so pcd-snapshot
+# gen_pool "used" returns to baseline (reversibility gate stays clean).
+cp "$BOARD_PATCH_DIR/0124-fman-pcd-fe-vm-singletons.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
