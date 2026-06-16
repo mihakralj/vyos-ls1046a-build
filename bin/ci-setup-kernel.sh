@@ -587,6 +587,15 @@ cp "$BOARD_PATCH_DIR/0124-fman-pcd-fe-vm-singletons.patch" "$KERNEL_PATCHES/"
 # + FE-VM core land. Forward (set) + inverse (clear/drain) in one patch; clear
 # returns gen_pool "used" to baseline (reversibility gate stays clean).
 cp "$BOARD_PATCH_DIR/0125-fman-pcd-fe-ehash-table.patch" "$KERNEL_PATCHES/"
+# 0126 — convert fman_pcd_muram_alloc/_free into a gen_pool sub-allocator over
+# the reserved 64 KiB MURAM partition (0092 reserved the arena but the wrappers
+# re-called the GLOBAL fman_muram_alloc, competing for the ~21 KiB post-CAM/FIFO
+# free tail while the reservation sat dead-weight → §5/0125 int-buf 33 KiB hit
+# -ENOMEM on HW 2026-06-16). Seeds a gen_pool (min_alloc_order=8, 256 B granule)
+# with [muram_offset,+64KiB); all PCD MURAM now sub-allocates from it, bounding
+# PCD use to the reservation and unblocking the FE/ehash forward path. Substrate
+# change — full S0↔S1 + fe_pool + fe_ehash forward regression gate required.
+cp "$BOARD_PATCH_DIR/0126-fman-pcd-muram-genpool.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
