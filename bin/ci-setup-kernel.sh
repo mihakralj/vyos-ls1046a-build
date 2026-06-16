@@ -596,6 +596,18 @@ cp "$BOARD_PATCH_DIR/0125-fman-pcd-fe-ehash-table.patch" "$KERNEL_PATCHES/"
 # PCD use to the reservation and unblocking the FE/ehash forward path. Substrate
 # change — full S0↔S1 + fe_pool + fe_ehash forward regression gate required.
 cp "$BOARD_PATCH_DIR/0126-fman-pcd-muram-genpool.patch" "$KERNEL_PATCHES/"
+# 0127 — FE-VM core increment 2 (arch/fman-fe-ehash.md §5): the per-flow ENQ
+# Flow-Entry (FmPcdCcBuildContextByFE — ENQ-type FE carrying the 24-bit target
+# FQID in word1) and the AC_CC root action-descriptor FE_ENTER wiring
+# (FillAdOfTypeContLookup external-hash branch — CONT_LOOKUP AD: ccAdBase
+# 0x40800000, pcAndOffsets 0xf6, gmask = MURAM offset of the FE to enter).
+# Together they give a classified frame a terminal BMI-FIFO disposition. New
+# debugfs fman_pcd/<id>/fe_enq ("build <fqid_hex> [next_fe_off_hex]" / "clear")
+# and fe_enter ("build [fe_off_hex]" / "clear"), each with byte-level readback.
+# Ships DORMANT (programs descriptors only; nothing dispatches into the FE VM
+# until the ehash bucket indexer lands). Forward+inverse in one patch; each
+# inverse re-zeros + frees its MURAM so pcd-snapshot stays reversible.
+cp "$BOARD_PATCH_DIR/0127-fman-pcd-fe-vm-enq-root.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
