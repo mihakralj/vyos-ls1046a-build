@@ -547,6 +547,19 @@ cp "$BOARD_PATCH_DIR/0121-dpaa-export-cc-target-resolvers.patch" "$KERNEL_PATCHE
 # allocates+zeroes MURAM, does NOT program the FE records and does NOT flow
 # traffic; the FE-VM core (FmPcdCcBuildFE/ContextByFE) lands later from lf-5.4.
 cp "$BOARD_PATCH_DIR/0122-fman-pcd-fe-ehash-init.patch" "$KERNEL_PATCHES/"
+# ASK2 Fork B M1 step 2: per-port FE support (arch/fman-fe-ehash.md §4
+# FmPortSetFESupport/FmPortDeleteFESupport). Carves a per-port FE internal-
+# buffer pool (total_tnums × 0x100 × 2, 256 B aligned) + a management free-list
+# (5 + total_tnums bytes) from FMan MURAM, then writes the port's existing
+# FM_CTL ctrl-params page +0x54 (mgmt index) / +0x58 (depletion count) — never
+# allocating that page itself (it must pre-exist from a CC install, 0116) so the
+# gate stays leak-clean. A faithful inverse (page→0, free mgmt, free pool, list
+# del) makes engage→disengage net zero gen_pool used (pcd-snapshot gate). Adds
+# fman_port_get_total_tnums() accessor (fman_port.c/.h). Driven by a new debugfs
+# fman_pcd/<id>/fe_port (0644) "set <id>"/"del <id>" node. Allocate-only —
+# ships DORMANT, does NOT flow classified traffic (needs §5 + FE-VM core).
+# Sorts after 0122, before 101-sfp. Spec arch/fman-fe-ehash.md §4 (M1 Fork B).
+cp "$BOARD_PATCH_DIR/0123-fman-pcd-fe-port-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
