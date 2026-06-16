@@ -92,6 +92,25 @@ int  ask_hw_init(void);
 void ask_hw_exit(void);
 
 /*
+ * M1 coarse dataplane mode-switch (control-plane plumbing).
+ *
+ * ask_hw_offload_engage()/_disengage() are the ask.ko-side wrappers the
+ * debugfs trigger (and, in M7, the `set system offload ask` op-mode) calls
+ * to flip one FMan RX port between the mainline RSS path (S0) and the AC_CC
+ * classifier path (S1).  They forward to the board-exported coarse API
+ * fman_pcd_offload_engage()/_disengage() (board patch 0129), guarded by a
+ * per-port idempotent "engaged" flag and the PCD instance mutex.  NOT called
+ * at module load - ship dormant.  @hw_port_id is the FMan-side hardware RX
+ * port id (eth3 = 0x10).
+ *
+ * Return (engage): 0 on success or if already engaged; -ENODEV if no HW
+ * backing (non-DPAA host / PCD bring-up failed); negative errno from the
+ * board engage on failure.  disengage is void and idempotent.
+ */
+int  ask_hw_offload_engage(u8 hw_port_id);
+void ask_hw_offload_disengage(u8 hw_port_id);
+
+/*
  * PR14g-body-1 (M2.5g) - FMan PCD bring-up cache.
  *
  * struct ask_hw_pcd holds the per-FMan PCD handles that ask.ko owns

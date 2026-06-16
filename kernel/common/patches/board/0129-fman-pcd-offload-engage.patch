@@ -1,0 +1,170 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Tue, 16 Jun 2026 21:00:00 +0000
+Subject: [PATCH] fman_pcd: coarse ask offload engage/disengage mode-switch
+ (M1 fman_pcd.h export)
+
+Expose a two-symbol coarse entry point the out-of-tree ask.ko calls to
+flip ONE FMan RX port between the mainline RSS path (S0) and the AC_CC
+classifier path (S1):
+
+  int  fman_pcd_offload_engage(struct fman *fman, u8 hw_port_id);
+  void fman_pcd_offload_disengage(struct fman *fman, u8 hw_port_id);
+
+Both resolve the PCD handle internally (fman_get_pcd()), so ask.ko - which
+holds only an opaque struct fman * from fman_bind() - mirrors just these
+two prototypes into ask_fman_caps.h, never the CC spec struct.
+
+engage() wraps the EXACT HW-proven reversible sequence already validated by
+the cc_test debugfs harness (board patch 0107) and the 100x S0<->S1 soak:
+install a benign single-key CC tree (fman_pcd_cc_static_install), fetch its
+MURAM root (fman_pcd_cc_static_get_base), graft the port's existing KeyGen
+scheme onto it (fman_pcd_kg_port_attach_cc / KGSE_CCBS), rolling the tree
+back on any graft failure.  disengage() is the strict reverse: detach the
+graft FIRST (restore RSS), then free the CC tree; both steps idempotent.
+
+M1 carries NO classification semantics - the benign key is a graft target
+only and the engaged port is not trafficked by the mode-switch gate (real
+per-flow keys arrive in M2).  Ships dormant: nothing calls these until
+ask.ko's debugfs trigger is wired.  EXPORT_SYMBOL_GPL both; prototypes added
+to the public <linux/fsl/fman_pcd.h>.
+
+Validated: git apply --3way --check clean against the post-0128
+reconstruction; brace-balanced; LF-only.  Compile gate is CI.
+---diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index d8a080d..01b657a 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -2101,6 +2101,95 @@ struct fman_pcd_muram_budget fman_pcd_get_muram_budget(struct fman_pcd *pcd)
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_get_muram_budget);
+ 
++/*
++ * ASK offload dataplane mode-switch (S0 mainline/RSS <-> S1 ASK/AC_CC).
++ *
++ * fman_pcd_offload_engage()/_disengage() are the single coarse entry points
++ * the out-of-tree ask.ko calls (mirrored into ask_fman_caps.h) to flip ONE
++ * RX port between the mainline RSS path and the AC_CC classifier path.  They
++ * wrap the EXACT HW-proven reversible sequence validated by the cc_test
++ * debugfs node (board patch 0107) and the 100x S0<->S1 soak: a benign
++ * single-key CC tree (a graft target only - M1 carries NO classification
++ * semantics, the engaged port is never trafficked in the mode-switch gate)
++ * plus the KeyGen RSS->AC_CC graft (KGSE_CCBS), with strict reverse teardown.
++ *
++ * The pcd handle is resolved internally from struct fman so ask.ko - which
++ * holds only an opaque struct fman * from fman_bind() - needs to mirror just
++ * these two prototypes, never the CC spec struct.  Both take the FMan-side
++ * hardware RX port id (eth3 = 0x10).
++ */
++int fman_pcd_offload_engage(struct fman *fman, u8 hw_port_id)
++{
++	struct fman_pcd_cc_hw_spec *spec;
++	struct fman_pcd *pcd;
++	u32 cc_base;
++	int err;
++
++	pcd = fman_get_pcd(fman);
++	if (!pcd)
++		return -ENODEV;
++
++	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
++	if (!spec)
++		return -ENOMEM;
++
++	/*
++	 * One benign exact-match key (IPv4/TCP): a syntactically valid CC root
++	 * for the KGSE_CCBS graft to point at.  miss_fqid 0 keeps non-matching
++	 * frames on the port's existing RSS path, so even if the engaged port
++	 * saw traffic the silicon would fall through to mainline behaviour.
++	 * M1 proves only that the switch reverts cleanly; M2+ replaces this
++	 * with real per-flow keys.
++	 */
++	spec->num_keys = 1;
++	spec->miss_qband = 0;
++	spec->miss_fqid = 0;
++	spec->keys[0].present = FMAN_PCD_CC_HW_F_ETHERTYPE |
++				FMAN_PCD_CC_HW_F_PROTO;
++	spec->keys[0].ethertype_be = cpu_to_be16(0x0800);	/* ETH_P_IP */
++	spec->keys[0].proto = 6;				/* IPPROTO_TCP */
++
++	err = fman_pcd_cc_static_install(pcd, hw_port_id, spec);
++	kfree(spec);
++	if (err)
++		return err;
++
++	err = fman_pcd_cc_static_get_base(pcd, hw_port_id, &cc_base);
++	if (!err)
++		err = fman_pcd_kg_port_attach_cc(pcd, hw_port_id, cc_base);
++	if (err) {
++		fman_pcd_cc_static_destroy(pcd, hw_port_id);
++		return err;
++	}
++
++	dev_info(fman_get_dev(fman),
++		 "ask offload ENGAGED on port 0x%02x (CC root 0x%x grafted)\n",
++		 hw_port_id, cc_base);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_offload_engage);
++
++void fman_pcd_offload_disengage(struct fman *fman, u8 hw_port_id)
++{
++	struct fman_pcd *pcd = fman_get_pcd(fman);
++
++	if (!pcd)
++		return;
++
++	/*
++	 * Reverse of engage, order-critical: detach the KGSE_CCBS graft FIRST
++	 * (restores the port's RSS scheme), then free the CC tree.  Both steps
++	 * are idempotent, so a disengage with nothing attached is a safe no-op.
++	 */
++	(void)fman_pcd_kg_port_detach_cc(pcd, hw_port_id);
++	fman_pcd_cc_static_destroy(pcd, hw_port_id);
++
++	dev_info(fman_get_dev(fman),
++		 "ask offload DISENGAGED on port 0x%02x (RSS restored)\n",
++		 hw_port_id);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_offload_disengage);
++
+ /*
+  * Internal accessors for per-engine siblings.  Not exported - same module.
+  */
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 498758a..491bd14 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -606,4 +606,32 @@ int fman_pcd_plcr_install(struct fman_pcd *pcd, u8 port_id, u8 profile_id,
+  */
+ void fman_pcd_plcr_destroy(struct fman_pcd *pcd, u8 port_id, u8 profile_id);
+ 
++/**
++ * fman_pcd_offload_engage() - flip one RX port S0 (RSS) -> S1 (AC_CC).
++ * @fman:       owning FMan (ask.ko holds this opaque handle from fman_bind())
++ * @hw_port_id: hardware RX port id (0x08..0x27; eth3 = 0x10)
++ *
++ * The single coarse mode-switch entry the out-of-tree ask.ko calls to engage
++ * hardware offload on a port.  Resolves the PCD internally (fman_get_pcd()),
++ * installs a benign single-key CC tree and grafts the port's KeyGen scheme
++ * onto it (KGSE_CCBS) - the exact reversible sequence proven by the cc_test
++ * harness (0107) and the 100x S0<->S1 soak.  M1 carries no classification
++ * semantics; the engaged port is not trafficked by the mode-switch gate.
++ *
++ * Return: 0 on success; -ENODEV if the FMan has no PCD; negative errno from
++ * the install/graft on failure (no partial state is left installed).
++ */
++int fman_pcd_offload_engage(struct fman *fman, u8 hw_port_id);
++
++/**
++ * fman_pcd_offload_disengage() - flip one RX port S1 (AC_CC) -> S0 (RSS).
++ * @fman:       owning FMan
++ * @hw_port_id: hardware RX port id (eth3 = 0x10)
++ *
++ * Reverse of fman_pcd_offload_engage(): detaches the KGSE_CCBS graft (restores
++ * RSS) then frees the CC tree.  Idempotent - a port with nothing engaged is a
++ * safe no-op.
++ */
++void fman_pcd_offload_disengage(struct fman *fman, u8 hw_port_id);
++
+ #endif /* __LINUX_FSL_FMAN_PCD_H */

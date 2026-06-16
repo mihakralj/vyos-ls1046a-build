@@ -23,6 +23,7 @@
  *   - fman_cc_tree_install/add_key/remove_key/destroy : board patch 0086
  *     (productive 0098/0106/0108/0115)
  *   - fman_hm_nexthop_get / fman_hm_nexthop_put : board patch 0120
+ *   - fman_pcd_offload_engage / fman_pcd_offload_disengage : board patch 0129
  * When those board patches change a struct or prototype, update this file
  * in the SAME commit.
  */
@@ -145,5 +146,33 @@ int  fman_hm_nexthop_get(struct fman *fm, u8 port_id, u32 egress_tx_fqid,
  * a prior _get() returned.  Idempotent for an unknown handle (returns 0).
  */
 int  fman_hm_nexthop_put(struct fman *fm, u8 port_id, u32 handle);
+
+/* ---- coarse offload mode-switch (board patch 0129) ------------------ */
+
+/**
+ * fman_pcd_offload_engage - flip ONE RX port S0 (mainline RSS) -> S1 (AC_CC).
+ *
+ * The single coarse entry ask.ko calls to engage hardware offload on a port.
+ * Resolves the PCD internally from @fm (so ask.ko mirrors only this prototype,
+ * never the in-kernel CC spec struct), installs a benign single-key CC tree
+ * and grafts the port's KeyGen scheme onto it (KGSE_CCBS) - the exact
+ * reversible sequence proven by the cc_test harness (board 0107) and the 100x
+ * S0<->S1 soak.  M1 carries no classification semantics; the engaged port is
+ * not trafficked by the mode-switch gate.  @hw_port_id is the FMan-side
+ * hardware RX port id (eth3 = 0x10).  Process context only.
+ *
+ * Return: 0 on success; -ENODEV if @fm has no PCD; negative errno from the
+ * install/graft on failure (no partial state is left installed).
+ */
+int  fman_pcd_offload_engage(struct fman *fm, u8 hw_port_id);
+
+/**
+ * fman_pcd_offload_disengage - flip ONE RX port S1 (AC_CC) -> S0 (RSS).
+ *
+ * Reverse of fman_pcd_offload_engage(): detaches the KGSE_CCBS graft (restores
+ * RSS) then frees the CC tree.  Idempotent - a port with nothing engaged is a
+ * safe no-op.
+ */
+void fman_pcd_offload_disengage(struct fman *fm, u8 hw_port_id);
 
 #endif /* __ASK_FMAN_CAPS_H */
