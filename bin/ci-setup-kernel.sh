@@ -660,6 +660,19 @@ cp "$BOARD_PATCH_DIR/0130-fman-pcd-fe-ehash-dma-coherent.patch" "$KERNEL_PATCHES
 # warm-S0' baseline on clear (pcd-snapshot reversibility gate stays clean).
 cp "$BOARD_PATCH_DIR/0131-fman-pcd-fe-hash-object.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0132-fman-pcd-fe-arm-debugfs.patch"   "$KERNEL_PATCHES/"
+# 0133: D9-B (M2 activate) — correct the fe_arm encoding from the 0132 KGSE_CCBS
+# placebo (next_engine=2, mode 0x80500002, which NEVER dispatches the CC walk —
+# frames bypass into RSS) to the REAL AC_CC encoding. Adds a next_engine==3 branch
+# in keygen_scheme_setup that emits KGSE_MODE = FM_CTL|AC_CC (0x80000006) with
+# KGSE_CCBS=0, re-adds the NIA_ENG_FM_CTL / NIA_FM_CTL_AC_CC defines 0118 dropped
+# (used ONLY by the new branch; the ==2 CCBS graft, policer, M1-engage and RSS
+# paths are byte-unchanged), and flips fman_pcd_kg_port_arm_fe() to next_engine=3 /
+# cc_bits_sel=0. The FMBM_RCCB write (→ FE_ENTER root AD) is unchanged. disarm is
+# unchanged (forces next_engine=0). Ships DORMANT: the encoding only takes effect
+# on an explicit echo to the fman_pcd/<id>/fe_arm node. This is the make-or-break
+# M2 dispatch experiment — the only encoding that genuinely enters the FE VM
+# terminal disposition a bare exact-match leaf lacks (M3-3b iter-50 park).
+cp "$BOARD_PATCH_DIR/0133-fman-pcd-fe-arm-real-accc.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
