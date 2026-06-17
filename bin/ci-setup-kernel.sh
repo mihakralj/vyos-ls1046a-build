@@ -659,6 +659,7 @@ cp "$BOARD_PATCH_DIR/0130-fman-pcd-fe-ehash-dma-coherent.patch" "$KERNEL_PATCHES
 # Ships DORMANT; forward+inverse in one patch; gen_pool "used" returns to the
 # warm-S0' baseline on clear (pcd-snapshot reversibility gate stays clean).
 cp "$BOARD_PATCH_DIR/0131-fman-pcd-fe-hash-object.patch" "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0132-fman-pcd-fe-arm-debugfs.patch"   "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
