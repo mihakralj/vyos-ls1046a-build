@@ -647,6 +647,18 @@ cp "$BOARD_PATCH_DIR/0129-fman-pcd-offload-engage.patch" "$KERNEL_PATCHES/"
 # DORMANT (no new dispatch); the 0128 on-board record layout is byte-identical.
 # Forward (dma_alloc) + inverse (dma_free) in one patch.
 cp "$BOARD_PATCH_DIR/0130-fman-pcd-fe-ehash-dma-coherent.patch" "$KERNEL_PATCHES/"
+# 0131: D9-A (M2 activate) increment 3 — the genuine 28-byte external-hash
+# Flow-Entry object (SDK t_ExtHashFe) that the 0127 FE_ENTER root AD dispatches
+# into. Binds the §5 DDR bucket array (0125/0130) to the FE VM and links HIT →
+# MUX singleton / MISS → Exit singleton (0124). fman_pcd gains fe_hash_off;
+# fman_pcd_fe_enter_build()'s default gmask now prefers the t_ExtHashFe once
+# built (falls back to the MUX singleton, the 0127 default). New debugfs node
+# fe_hashfe (build/clear) with a 7-word byte-level readback for the M0 oracle
+# byte-diff (arch/fman-fe-ehash.md §8.6 item 6 — validate the dormant FE image
+# while quiescent BEFORE arming, since the M3-3b stall latches ZERO fault).
+# Ships DORMANT; forward+inverse in one patch; gen_pool "used" returns to the
+# warm-S0' baseline on clear (pcd-snapshot reversibility gate stays clean).
+cp "$BOARD_PATCH_DIR/0131-fman-pcd-fe-hash-object.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
