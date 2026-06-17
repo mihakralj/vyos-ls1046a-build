@@ -24,7 +24,7 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/eth
 index e4c488e..9f1b2d3 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
-@@ -657,6 +657,26 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+@@ -657,6 +657,27 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
  }
  EXPORT_SYMBOL_GPL(keygen_scheme_setup);
  
@@ -196,7 +196,7 @@ new file mode 100644
 index 0000000..5e1a9b0
 --- /dev/null
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_fe_arm.c
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,130 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * FMan PCD Frame-Engine arm debugfs node (Fork B Phase 1 D9-B).
@@ -345,7 +345,7 @@ diff --git a/drivers/net/ethernet/freescale/fman/Makefile b/drivers/net/ethernet
 index d448d16..e5a1f2b 100644
 --- a/drivers/net/ethernet/freescale/fman/Makefile
 +++ b/drivers/net/ethernet/freescale/fman/Makefile
-@@ -6,7 +6,7 @@ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_fman_port.o
+@@ -6,6 +6,6 @@ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_fman_port.o
  obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_mac.o
  
  fsl_dpaa_fman-objs			:= fman_muram.o fman.o fman_sp.o fman_keygen.o
