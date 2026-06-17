@@ -1,0 +1,356 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 1aed407..235beb1 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -130,6 +130,7 @@ struct fman_pcd {
+ 	unsigned long fe_int_buf_raw_off; /* unaligned off handed to free() */
+ 	size_t fe_int_buf_raw_size;
+ 	int fe_int_buf_refcount;
++	unsigned long fe_root_ad_off;	/* sec.5 FE_ENTER root AD (16 B) */
+ 
+ 	struct dentry *debugfs_dir;
+ };
+@@ -266,6 +267,7 @@ void fman_pcd_muram_free(struct fman_pcd *pcd, unsigned long offset,
+ #define FMAN_PCD_FE_ALIGN	8
+ #define FMAN_PCD_FE_MAX_SIZE	28
+ #define FMAN_PCD_FE_POOL_COUNT	32	/* per-obj 256B gen_pool chunk: ehash(130)+fe_port(34) cap pool <=90 in 64K arena */
++#define FMAN_FE_ROOT_AD_SIZE	16	/* FE_ENTER root AD: 4 words (sec.5) */
+ 
+ struct fman_pcd_fe_obj {
+ 	struct list_head node;
+@@ -286,6 +288,13 @@ static void fman_pcd_fe_pool_free(struct fman_pcd *pcd)
+ 	pcd->fe_transition_off = 0;
+ 	pcd->fe_exit_off = 0;
+ 
++	/* sec.5 FE_ENTER root AD is a separate MURAM alloc - free it too. */
++	if (pcd->fe_root_ad_off) {
++		fman_pcd_muram_free(pcd, pcd->fe_root_ad_off,
++				    FMAN_FE_ROOT_AD_SIZE);
++		pcd->fe_root_ad_off = 0;
++	}
++
+ 	list_for_each_entry_safe(obj, tmp, &pcd->fe_enq, node) {
+ 		list_del(&obj->node);
+ 		fman_pcd_muram_free(pcd, obj->muram_off, FMAN_PCD_FE_MAX_SIZE);
+@@ -985,6 +994,308 @@ static const struct file_operations fman_pcd_fe_singletons_fops = {
+ 	.release	= single_release,
+ };
+ 
++/*
++ * ---------------------------------------------------------------------------
++ * FE-VM core, increment 2 - arch/fman-fe-ehash.md section 5: the per-flow
++ * ENQ Flow-Entry and the AC_CC root action-descriptor FE_ENTER wiring.
++ *
++ * Together these give a classified frame a terminal BMI-FIFO disposition:
++ *
++ *   - the per-flow ENQ FE (SDK FmPcdCcBuildContextByFE) is an ENQ-type FE
++ *     descriptor carrying the 24-bit target FQID in word1, so the frame is
++ *     enqueued to its RX frame queue;
++ *   - the FE_ENTER root AD (SDK FillAdOfTypeContLookup external-hash branch)
++ *     is a CONT_LOOKUP action descriptor whose ccAdBase carries the
++ *     FE_ENTER_ALLOCATE bit, pcAndOffsets the FE_ENTER opcode (0xf6), and
++ *     gmask the MURAM offset of the FE to enter - this makes the coarse
++ *     classifier dispatch INTO the FE machine instead of walking a match
++ *     table.
++ *
++ * Encodings are authoritative (NXP SDK fm_cc.[ch]):
++ *   FM_PCD_AD_CONT_LOOKUP_TYPE 0x40000000, FM_PCD_AD_FE_ENTER_ALLOCATE
++ *   0x00800000, FM_PCD_AD_FE_ENTER_OPCODE 0x000000f6; the ENQ word1 FQID is
++ *   the low 24 bits (FM_PCD_FE_T_ENQ_NIA_MASK).
++ *
++ * Ships DORMANT: it PROGRAMS the descriptors into pool / MURAM slots and
++ * exposes them for byte-level verification (fe_enq, fe_enter debugfs), but
++ * nothing dispatches into the FE machine until the external-hash bucket
++ * indexer that links a classified flow to its ENQ FE lands in a later
++ * increment.  Forward (build) and inverse (clear) ship in this one patch;
++ * each inverse restores the exact pre-build MURAM state, so pcd-snapshot
++ * stays reversible (section 8.6 defensive-coding contract).
++ * ---------------------------------------------------------------------------
++ */
++
++/* ENQ FE word1 holds the 24-bit target FQID when FMAN_FE_ENQ_FQID is set. */
++#define FMAN_FE_ENQ_NIA_MASK		0x00ffffff
++
++/* FE_ENTER root action-descriptor (SDK t_AdOfTypeContLookup) field bits. */
++#define FMAN_AD_CONT_LOOKUP_TYPE	0x40000000	/* word0 ccAdBase type */
++#define FMAN_AD_FE_ENTER_ALLOCATE	0x00800000	/* word0 alloc buffer  */
++#define FMAN_AD_FE_ENTER_OPCODE		0x000000f6	/* word2 pcAndOffsets  */
++
++/*
++ * Build one per-flow ENQ FE into a pool slot.  Mirrors the ENQ branch of the
++ * SDK FmPcdCcBuildContextByFE(): an ENQ-type descriptor with the FQID flag,
++ * the 24-bit target FQID in word1 and the next-FE offset in word3 (0 = the FE
++ * chain terminates at the enqueue).  Requires the pool engaged.  On any
++ * shortfall nothing is committed, so silicon is never half-programmed.
++ * Caller holds pcd->fe_lock.
++ */
++static int fman_pcd_fe_enq_build(struct fman_pcd *pcd, u32 fqid,
++				 unsigned long next_fe_off)
++{
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	struct fman_pcd_fe_params p;
++	struct fman_pcd_fe_obj *obj;
++
++	if (!muram)
++		return -ENXIO;
++	if (pcd->fe_refcount == 0)
++		return -ENXIO;		/* engage the pool first */
++	if (fqid & ~FMAN_FE_ENQ_NIA_MASK)
++		return -EINVAL;		/* FQIDs are 24-bit */
++
++	obj = list_first_entry_or_null(&pcd->fe_available,
++				       struct fman_pcd_fe_obj, node);
++	if (!obj)
++		return -ENOSPC;
++
++	memset(&p, 0, sizeof(p));
++	p.type = FMAN_FE_TYPE_ENQ;
++	p.flags = FMAN_FE_ENQ_FQID;
++	p.nia = fqid;
++	p.next_fe_off = next_fe_off;
++
++	list_del(&obj->node);
++	fman_pcd_fe_build(muram, obj->muram_off, &p);
++	list_add_tail(&obj->node, &pcd->fe_enq);
++	return 0;
++}
++
++/* Inverse: re-zero each ENQ FE's MURAM and return its slot to the pool. */
++static void fman_pcd_fe_enq_free(struct fman_pcd *pcd)
++{
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	struct fman_pcd_fe_obj *obj, *tmp;
++
++	list_for_each_entry_safe(obj, tmp, &pcd->fe_enq, node) {
++		list_del(&obj->node);
++		if (muram)
++			memset_io((void __iomem *)
++				  fman_muram_offset_to_vbase(muram,
++							     obj->muram_off),
++				  0, FMAN_PCD_FE_MAX_SIZE);
++		list_add_tail(&obj->node, &pcd->fe_available);
++	}
++}
++
++static int fman_pcd_fe_enq_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	struct fman_pcd_fe_obj *obj;
++	unsigned int n = 0, i;
++
++	mutex_lock(&pcd->fe_lock);
++	if (!muram || pcd->fe_refcount == 0) {
++		seq_puts(s, "fe pool not engaged\n");
++		mutex_unlock(&pcd->fe_lock);
++		return 0;
++	}
++	list_for_each_entry(obj, &pcd->fe_enq, node) {
++		u32 __iomem *fe = (u32 __iomem *)
++			fman_muram_offset_to_vbase(muram, obj->muram_off);
++
++		seq_printf(s, "enq[%u]     off=0x%05lx ", n++, obj->muram_off);
++		for (i = 0; i < FMAN_FE_ENQ_SIZE / 4; i++)
++			seq_printf(s, "%08x ", ioread32be(fe + i));
++		seq_puts(s, "\n");
++	}
++	if (!n)
++		seq_puts(s, "(no enq FEs built)\n");
++	mutex_unlock(&pcd->fe_lock);
++	return 0;
++}
++
++static int fman_pcd_fe_enq_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, fman_pcd_fe_enq_show, inode->i_private);
++}
++
++static ssize_t fman_pcd_fe_enq_write(struct file *file,
++				     const char __user *ubuf,
++				     size_t count, loff_t *ppos)
++{
++	struct seq_file *s = file->private_data;
++	struct fman_pcd *pcd = s->private;
++	unsigned long next_fe_off;
++	unsigned int fqid;
++	char buf[48];
++	int err;
++
++	if (count == 0 || count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	mutex_lock(&pcd->fe_lock);
++	if (sscanf(buf, "build %x %lx", &fqid, &next_fe_off) == 2) {
++		err = fman_pcd_fe_enq_build(pcd, fqid, next_fe_off);
++	} else if (sscanf(buf, "build %x", &fqid) == 1) {
++		err = fman_pcd_fe_enq_build(pcd, fqid, 0);
++	} else if (!strncmp(buf, "clear", 5)) {
++		fman_pcd_fe_enq_free(pcd);
++		err = 0;
++	} else {
++		err = -EINVAL;
++	}
++	mutex_unlock(&pcd->fe_lock);
++
++	return err ? err : count;
++}
++
++static const struct file_operations fman_pcd_fe_enq_fops = {
++	.owner		= THIS_MODULE,
++	.open		= fman_pcd_fe_enq_open,
++	.read		= seq_read,
++	.write		= fman_pcd_fe_enq_write,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
++/*
++ * Build the AC_CC root action-descriptor that enters the FE machine.  Mirrors
++ * the external-hash branch of the SDK FillAdOfTypeContLookup(): a CONT_LOOKUP
++ * AD whose ccAdBase carries the FE_ENTER_ALLOCATE bit, matchTblPtr is 0,
++ * pcAndOffsets is the FE_ENTER opcode, and gmask holds the MURAM offset of the
++ * FE to enter.  The default target is the MUX singleton (the FE-VM entry point
++ * built in increment 1).  Allocated from the reserved MURAM partition; the
++ * inverse re-zeros and frees it.  Caller holds pcd->fe_lock.
++ */
++static int fman_pcd_fe_enter_build(struct fman_pcd *pcd, unsigned long fe_off)
++{
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	u32 __iomem *ad;
++	unsigned long off;
++
++	if (!muram)
++		return -ENXIO;
++	if (pcd->fe_refcount == 0)
++		return -ENXIO;		/* engage the pool first */
++	if (pcd->fe_root_ad_off)
++		return -EEXIST;
++	if (!fe_off)
++		fe_off = pcd->fe_mux_off;	/* FE-VM entry = MUX singleton */
++	if (!fe_off)
++		return -EINVAL;			/* no target FE built yet */
++
++	off = fman_pcd_muram_alloc(pcd, FMAN_FE_ROOT_AD_SIZE);
++	if (IS_ERR_VALUE(off))
++		return (int)off;
++
++	ad = (u32 __iomem *)fman_muram_offset_to_vbase(muram, off);
++	iowrite32be(FMAN_AD_CONT_LOOKUP_TYPE | FMAN_AD_FE_ENTER_ALLOCATE,
++		    ad + 0);				/* ccAdBase          */
++	iowrite32be(0, ad + 1);				/* matchTblPtr       */
++	iowrite32be(FMAN_AD_FE_ENTER_OPCODE, ad + 2);	/* pcAndOffsets      */
++	iowrite32be((u32)fe_off, ad + 3);		/* gmask = FE offset */
++
++	pcd->fe_root_ad_off = off;
++	return 0;
++}
++
++/* Inverse: re-zero the root AD's MURAM and return it to the pool. */
++static void fman_pcd_fe_enter_free(struct fman_pcd *pcd)
++{
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++
++	if (!pcd->fe_root_ad_off)
++		return;
++	if (muram)
++		memset_io((void __iomem *)
++			  fman_muram_offset_to_vbase(muram,
++						     pcd->fe_root_ad_off),
++			  0, FMAN_FE_ROOT_AD_SIZE);
++	fman_pcd_muram_free(pcd, pcd->fe_root_ad_off, FMAN_FE_ROOT_AD_SIZE);
++	pcd->fe_root_ad_off = 0;
++}
++
++static int fman_pcd_fe_enter_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	u32 __iomem *ad;
++	unsigned int i;
++
++	mutex_lock(&pcd->fe_lock);
++	if (!muram || pcd->fe_refcount == 0) {
++		seq_puts(s, "fe pool not engaged\n");
++		mutex_unlock(&pcd->fe_lock);
++		return 0;
++	}
++	if (!pcd->fe_root_ad_off) {
++		seq_puts(s, "root_ad    (not built)\n");
++		mutex_unlock(&pcd->fe_lock);
++		return 0;
++	}
++	ad = (u32 __iomem *)fman_muram_offset_to_vbase(muram,
++						       pcd->fe_root_ad_off);
++	seq_printf(s, "root_ad    off=0x%05lx ", pcd->fe_root_ad_off);
++	for (i = 0; i < FMAN_FE_ROOT_AD_SIZE / 4; i++)
++		seq_printf(s, "%08x ", ioread32be(ad + i));
++	seq_puts(s, "\n");
++	mutex_unlock(&pcd->fe_lock);
++	return 0;
++}
++
++static int fman_pcd_fe_enter_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, fman_pcd_fe_enter_show, inode->i_private);
++}
++
++static ssize_t fman_pcd_fe_enter_write(struct file *file,
++				       const char __user *ubuf,
++				       size_t count, loff_t *ppos)
++{
++	struct seq_file *s = file->private_data;
++	struct fman_pcd *pcd = s->private;
++	unsigned long fe_off;
++	char buf[32];
++	int err;
++
++	if (count == 0 || count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	mutex_lock(&pcd->fe_lock);
++	if (sscanf(buf, "build %lx", &fe_off) == 1)
++		err = fman_pcd_fe_enter_build(pcd, fe_off);
++	else if (!strncmp(buf, "build", 5))
++		err = fman_pcd_fe_enter_build(pcd, 0);
++	else if (!strncmp(buf, "clear", 5)) {
++		fman_pcd_fe_enter_free(pcd);
++		err = 0;
++	} else {
++		err = -EINVAL;
++	}
++	mutex_unlock(&pcd->fe_lock);
++
++	return err ? err : count;
++}
++
++static const struct file_operations fman_pcd_fe_enter_fops = {
++	.owner		= THIS_MODULE,
++	.open		= fman_pcd_fe_enter_open,
++	.read		= seq_read,
++	.write		= fman_pcd_fe_enter_write,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
+ /*
+  * ---------------------------------------------------------------------------
+  * External-hash flow store - arch/fman-fe-ehash.md section 5
+@@ -1369,6 +1680,12 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 			debugfs_create_file("fe_ehash", 0644,
+ 					    pcd->debugfs_dir, pcd,
+ 					    &fman_pcd_ehash_fops);
++			debugfs_create_file("fe_enq", 0644,
++					    pcd->debugfs_dir, pcd,
++					    &fman_pcd_fe_enq_fops);
++			debugfs_create_file("fe_enter", 0644,
++					    pcd->debugfs_dir, pcd,
++					    &fman_pcd_fe_enter_fops);
+ 		}
+ 	}
+ 

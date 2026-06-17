@@ -125,7 +125,7 @@ no-op until the v1.6 components land (`ask.ko` ~1500 LOC in-tree at
 built-in via the common board patches).
 
 `[BUG]` **Live Phase-4 blocker — M2 acceptance gate: throughput PASS / CPU FAIL.**
-On the mono DUT (kernel `6.18.31-vyos`), Path A activation is verified
+On the mono board (kernel `6.18.31-vyos`), Path A activation is verified
 (`claimed=5 declined=0 failed=0`), throughput reaches **6.955 Gbps** (PASS, gate
 ≥ 2 Gbps) but kernel-net CPU is **~21–30 %** (FAIL, gate ≤ 5 %). Root cause:
 `327× fman_pcd_manip_chain_create(3 manips) failed: -12` (`-ENOMEM`) — every

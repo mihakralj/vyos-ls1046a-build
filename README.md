@@ -4,9 +4,9 @@
 
 The [Mono Gateway Development Kit](https://github.com/ryneches/mono-gateway-docs) ships with OpenWrt. This build runs VyOS instead. That is the whole pitch.
 
-Behind the decision: I want to use NXP LS1046A, four Cortex-A72 cores at 1.8 GHz, 8 GB ECC DDR4, a hardware Frame Manager that chews packets before the CPU notices them, three RJ45 ports, two SFP+ cages. NXP markets this chip at telecom carriers and switch vendors, not hobbyists that prefer GUI over enterprise features. 
+The hardware earns the effort. The NXP LS1046A brings four Cortex-A72 cores at 1.8 GHz, 8 GB of ECC DDR4, three RJ45 ports, two SFP+ cages, and a hardware Frame Manager that chews through packets before the CPU notices they arrived. NXP sells this chip to telecom carriers and switch vendors, not to people who want a friendly GUI. That gap is the opportunity.
 
-**Thirteen things** were broken on mainline VyOS to make it run on NXP LS1046A. All thirteen are fixed here.
+**Thirteen things** broke on mainline VyOS before it would run on the LS1046A. All thirteen are fixed here, each documented below with its root cause.
 
 ## Get Started
 
@@ -115,7 +115,7 @@ As of firmware 2026-03-29+, the FMan MAC probe order matches physical port posit
 ```mermaid
 flowchart LR
   NOR["SPI NOR\n64 MB"] --> UB["U-Boot\n2025.04"]
-  UB -->|"booti"| K["Linux Kernel\n6.6.x-vyos"]
+  UB -->|"booti"| K["Linux Kernel\n6.18.x-vyos"]
   UB -.->|"❌ OOM"| EFI["GRUB/EFI"]
   K --> LB["live-boot\ninitramfs"]
   LB --> SQ["squashfs\n+ overlay"]
@@ -185,7 +185,7 @@ The Frame Manager is the unsung hero. It handles packet parsing, core distributi
 
 An ongoing effort modernizes the mainline DPAA1 driver into a single shared kernel binary (consumed in different runtime modes — kernel `default`, `vpp` AF_XDP, `ask` offload, all shipping in one image) with HW-accelerated AF_XDP and four FMan/QMan hardware offloads. Full design and per-milestone status: [specs/dpaa1-afxdp-modernization-spec.md](specs/dpaa1-afxdp-modernization-spec.md).
 
-**Shipping and DUT-validated today:**
+**Shipping and board-validated today:**
 
 - **Flavor-ops abstraction (M0)** — per-`dpaa_priv` ops tables, RCU-NULL-safe; byte-identical to mainline when no flavor module is loaded.
 - **AF_XDP zero-copy plumbing (M1–M3-3)** — `ndo_xsk_wakeup`, XSK-backed BMan pool, per-CPU NAPI + dedicated QMan channels per qband, cluster-aware pinning. Driver proven to drop **0%** at line rate; ~5.57 Gbit/s aggregate RX measured (bottleneck is the single userspace receiver, not the NIC).

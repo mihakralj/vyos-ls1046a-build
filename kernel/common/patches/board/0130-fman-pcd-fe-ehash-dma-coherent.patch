@@ -1,0 +1,222 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Wed, 17 Jun 2026 09:00:00 +0000
+Subject: [PATCH] fman_pcd: FE-VM ehash store uses dma_alloc_coherent (M2
+ activate, increment 1)
+
+The dormant FE/ehash flow store (board patches 0125 ehash table + 0128
+per-flow insert) allocated its DDR bucket array and 256-byte flow records
+with kzalloc() and handed virt_to_phys() addresses to the silicon - the
+en_exthash_node table-base words and each bucket head.  That is correct
+only while nothing dispatches into the store (the section 8.6 item-6
+caveat 0125/0128 explicitly flagged): once the FE VM is armed it DMA-reads
+the bucket array and walks the record chain through PAMU/SMMU, so those
+addresses must be true bus addresses, not raw physical addresses.
+
+This is D9.1 increment 1 - the safe, self-contained plumbing prerequisite
+for arming.  It switches both DDR allocations to dma_alloc_coherent() and
+stores the dma_handle alongside each object:
+
+  - struct fman_pcd_ehash_table gains table_dma (bus address of the bucket
+    array) and dev (the FMan DMA device, fman_get_dev(pcd->fman), captured
+    at table_set time so the per-flow record alloc/free - which only has
+    the table handle - can reach the same device).
+  - struct fman_pcd_ehash_flow gains record_dma (bus address of the record;
+    the swab64'd value written into the bucket head).
+  - fman_pcd_ehash_table_set(): kzalloc(tablesize) -> dma_alloc_coherent;
+    the en_exthash_node table-base words and the dev_info print now carry
+    t->table_dma; %pa -> %pad.  encode_node() takes dma_addr_t.
+  - fman_pcd_ehash_table_free(): kfree -> dma_free_coherent.
+  - fman_pcd_ehash_add_key(): kzalloc(256) -> dma_alloc_coherent(t->dev);
+    bucket head = swab64(dma_addr); record_dma stored.
+  - fman_pcd_ehash_flow_drain(): kfree -> dma_free_coherent(t->dev).
+  - the two show nodes print the stored dma handle, not virt_to_phys.
+
+dma_alloc_coherent() returns page-aligned, zeroed coherent DDR, so the
+EN_EHASH_ENTRY_ALIGN(256) requirement and the all-zero header still hold.
+The records and buckets stay in DDR (section 6 / invariant 3 - never the
+327x-ENOMEM MURAM wall), so gen_pool "used" is UNCHANGED: the reversibility
+signal remains (a) every record dma_free'd, (b) every bucket head restored
+byte-exactly.  Forward (alloc) and inverse (free) ship together.
+
+Ships DORMANT: no new dispatch.  The record byte layout the 0128 on-board
+gate verified (header zeros + key at offset 8) is identical; only the bucket
+head and table-base words now hold bus addresses (== physical on a PAMU
+bypass/1:1 mapping, which is why the dormant gate is unchanged).  A dma_pool
+would avoid the per-record page rounding - noted as a future optimization.
+
+Validated: git apply --3way --check clean against the post-0129
+reconstruction (applied file byte-identical to the edited tree);
+brace-balanced; LF-only.  Compile gate is CI.
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 9e73ae3..0df6585 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -26,6 +26,7 @@
+ 
+ #include <linux/debugfs.h>
+ #include <linux/device.h>
++#include <linux/dma-mapping.h>
+ #include <linux/err.h>
+ #include <linux/genalloc.h>
+ #include <linux/init.h>
+@@ -1339,7 +1340,9 @@ static const struct file_operations fman_pcd_fe_enter_fops = {
+ 
+ struct fman_pcd_ehash_table {
+ 	struct list_head node;
+-	void *table_base;		/* DDR bucket array (contiguous) */
++	void *table_base;		/* DDR bucket array (dma_alloc_coherent) */
++	dma_addr_t table_dma;		/* bus address of table_base (FE VM reads) */
++	struct device *dev;		/* DMA device (fman_get_dev), for record alloc */
+ 	size_t table_size;
+ 	u32 hash_mask;
+ 	u8 key_size;
+@@ -1413,7 +1416,7 @@ static void fman_pcd_ehash_int_buf_put(struct fman_pcd *pcd)
+  *   word3: miss NIA (deferred to the FE_ENTER increment)
+  */
+ static void fman_pcd_ehash_encode_node(struct fman_pcd_ehash_table *t,
+-				       phys_addr_t tblphys,
++				       dma_addr_t tblphys,
+ 				       unsigned long int_buf_off)
+ {
+ 	u32 base_hi = (u32)(((u64)tblphys >> 32) & 0xffff);
+@@ -1434,8 +1437,9 @@ static void fman_pcd_ehash_encode_node(struct fman_pcd_ehash_table *t,
+ static int fman_pcd_ehash_table_set(struct fman_pcd *pcd, u32 mask,
+ 				    u8 key_size, u8 hash_shift)
+ {
++	struct device *dev = fman_get_dev(pcd->fman);
+ 	struct fman_pcd_ehash_table *t;
+-	phys_addr_t tblphys;
++	dma_addr_t tblphys;
+ 	size_t tablesize;
+ 	int ii, err;
+ 
+@@ -1457,11 +1461,13 @@ static int fman_pcd_ehash_table_set(struct fman_pcd *pcd, u32 mask,
+ 	if (err)
+ 		goto err_free_t;
+ 
+-	t->table_base = kzalloc(tablesize, GFP_KERNEL);
++	t->table_base = dma_alloc_coherent(dev, tablesize, &t->table_dma,
++					   GFP_KERNEL);
+ 	if (!t->table_base) {
+ 		err = -ENOMEM;
+ 		goto err_put_buf;
+ 	}
++	t->dev = dev;
+ 	t->table_size = tablesize;
+ 	t->hash_mask = mask;
+ 	t->key_size = key_size;
+@@ -1469,12 +1475,12 @@ static int fman_pcd_ehash_table_set(struct fman_pcd *pcd, u32 mask,
+ 	t->hash_mask_bits = (u8)ii;
+ 	INIT_LIST_HEAD(&t->flows);
+ 
+-	tblphys = virt_to_phys(t->table_base);
++	tblphys = t->table_dma;
+ 	fman_pcd_ehash_encode_node(t, tblphys, pcd->fe_int_buf_off);
+ 
+ 	list_add_tail(&t->node, &pcd->fe_ehash_tables);
+ 	dev_info(fman_get_dev(pcd->fman),
+-		 "fman_pcd: ehash table mask 0x%x keysize %u ii %d size %zu DDR %pa\n",
++		 "fman_pcd: ehash table mask 0x%x keysize %u ii %d size %zu DDR %pad\n",
+ 		 mask, key_size, ii, tablesize, &tblphys);
+ 	return 0;
+ 
+@@ -1490,7 +1496,7 @@ static void fman_pcd_ehash_table_free(struct fman_pcd *pcd,
+ {
+ 	list_del(&t->node);
+ 	fman_pcd_ehash_flow_drain(t);
+-	kfree(t->table_base);
++	dma_free_coherent(t->dev, t->table_size, t->table_base, t->table_dma);
+ 	kfree(t);
+ 	fman_pcd_ehash_int_buf_put(pcd);
+ }
+@@ -1518,10 +1524,10 @@ static int fman_pcd_ehash_show(struct seq_file *s, void *unused)
+ 		seq_puts(s, "no ehash tables\n");
+ 	} else {
+ 		list_for_each_entry(t, &pcd->fe_ehash_tables, node) {
+-			phys_addr_t p = virt_to_phys(t->table_base);
++			dma_addr_t p = t->table_dma;
+ 
+ 			seq_printf(s,
+-				   "table mask=0x%04x keysize=%u ii=%u size=%zu DDR=%pa\n",
++				   "table mask=0x%04x keysize=%u ii=%u size=%zu DDR=%pad\n",
+ 				   t->hash_mask, t->key_size,
+ 				   t->hash_mask_bits, t->table_size, &p);
+ 			seq_printf(s, "  node %08x %08x %08x %08x\n",
+@@ -1613,8 +1619,9 @@ static const struct file_operations fman_pcd_ehash_fops = {
+  *     follow the SDK get_indexed_hash_bucket idiom but need a HW-dump confirm;
+  *   - the en_ehash_entry header field offsets and the next-FE pointer
+  *     placement after the key;
+- *   - DDR records use kzalloc (RAM); the armed path needs dma_alloc_coherent
+- *     (the XX_MallocSmart equivalent), as section 5/0125 already notes.
++ *   - DONE (this patch, 0130): DDR records/buckets use dma_alloc_coherent
++ *     (the XX_MallocSmart equivalent) so the FE VM reads true bus addresses;
++ *     a dma_pool would avoid per-record page rounding (future optimization).
+  * ---------------------------------------------------------------------------
+  */
+ #define FMAN_EHASH_FLOW_REC_SIZE	256	/* MAX_EN_EHASH_ENTRY_SIZE */
+@@ -1624,7 +1631,8 @@ static const struct file_operations fman_pcd_ehash_fops = {
+ 
+ struct fman_pcd_ehash_flow {
+ 	struct list_head node;
+-	void *record;			/* DDR 256-B flow record (kzalloc) */
++	void *record;			/* DDR 256-B flow record (dma_alloc_coherent) */
++	dma_addr_t record_dma;		/* bus address of record (bucket head holds it) */
+ 	u64 *bucket_h;			/* the bucket head u64 it links into */
+ 	u64 prev_head;			/* old bucket->h, for byte-exact undo */
+ 	u16 index;			/* bucket index (for the show node) */
+@@ -1699,6 +1707,7 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ {
+ 	struct fman_pcd_ehash_flow *flow;
+ 	u64 prev_head, old_native, rec_phys;
++	dma_addr_t rdma;
+ 	u8 *r;
+ 	u16 index;
+ 	size_t fe_ptr_off;
+@@ -1715,8 +1724,9 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 	if (!flow)
+ 		return -ENOMEM;
+ 
+-	/* A 256-byte kmalloc is 256-aligned (EN_EHASH_ENTRY_ALIGN). */
+-	r = kzalloc(FMAN_EHASH_FLOW_REC_SIZE, GFP_KERNEL);
++	/* dma_alloc_coherent returns page-aligned, zeroed coherent DDR. */
++	r = dma_alloc_coherent(t->dev, FMAN_EHASH_FLOW_REC_SIZE, &rdma,
++			       GFP_KERNEL);
+ 	if (!r) {
+ 		kfree(flow);
+ 		return -ENOMEM;
+@@ -1737,11 +1747,12 @@ static int fman_pcd_ehash_add_key(struct fman_pcd_ehash_table *t,
+ 	fe_ptr_off = FMAN_EHASH_FLOW_KEY_OFF + ((key_size + 7U) & ~7U);
+ 	*(__be32 *)(r + fe_ptr_off) = cpu_to_be32((u32)enq_fe_off);
+ 
+-	/* Head-insert: bucket head = swab64(phys(record)). */
+-	rec_phys = (u64)virt_to_phys(r);
++	/* Head-insert: bucket head = swab64(dma_addr(record)). */
++	rec_phys = (u64)rdma;
+ 	*flow->bucket_h = swab64(rec_phys);
+ 
+ 	flow->record = r;
++	flow->record_dma = rdma;
+ 	flow->prev_head = prev_head;
+ 	flow->index = index;
+ 	flow->key_size = key_size;
+@@ -1761,7 +1772,8 @@ static void fman_pcd_ehash_flow_drain(struct fman_pcd_ehash_table *t)
+ 	list_for_each_entry_safe(flow, tmp, &t->flows, node) {
+ 		*flow->bucket_h = flow->prev_head;
+ 		list_del(&flow->node);
+-		kfree(flow->record);
++		dma_free_coherent(t->dev, FMAN_EHASH_FLOW_REC_SIZE,
++				  flow->record, flow->record_dma);
+ 		kfree(flow);
+ 	}
+ }
+@@ -1791,7 +1803,7 @@ static int fman_pcd_fe_flow_show(struct seq_file *s, void *unused)
+ 		unsigned int n = 0;
+ 
+ 		list_for_each_entry(flow, &t->flows, node) {
+-			u64 rec_phys = (u64)virt_to_phys(flow->record);
++			u64 rec_phys = (u64)flow->record_dma;
+ 			const u8 *r = flow->record;
+ 			unsigned int i;
+ 

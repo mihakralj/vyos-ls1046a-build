@@ -1,6 +1,6 @@
 ---
 name: build-image
-description: Dispatch (or locate) a VyOS LS1046A CI build, retrieve the latest ISO artifact from the GitHub Actions run, deploy it to the lxc200 TFTP/HTTP relay, and emit the exact `add system image <url>` command the operator runs on the DUT.
+description: Dispatch (or locate) a VyOS LS1046A CI build, retrieve the latest ISO artifact from the GitHub Actions run, deploy it to the lxc200 TFTP/HTTP relay, and emit the exact `add system image <url>` command the operator runs on the board.
 ---
 
 # build-image
@@ -19,7 +19,7 @@ URL are load-bearing.
 
 Use this skill when the user asks to:
 
-- "build an ISO" / "kick off a build" / "deploy the latest build to the DUT"
+- "build an ISO" / "kick off a build" / "deploy the latest build to the board"
 - "get the latest ISO onto lxc200"
 - "give me the `add system image` URL for the newest build"
 - "deploy run `<id>` to the device"
@@ -50,7 +50,7 @@ pushes `vmlinuz`/`initrd.img`/`mono-gw.dtb`/`*.squashfs` to `/srv/tftp/`, NOT
 - **lxc200 relay:** `admin@192.168.1.137` over Tailscale, SSH key
   `~/.ssh/admin_key`. ISOs live at `/srv/tftp/iso/`. A persistent HTTP server
   (`python3 -m http.server 8080 --directory /srv/tftp`) exposes them.
-- **Canonical DUT install URL (what the operator pastes):**
+- **Canonical board install URL (what the operator pastes):**
   `http://192.168.1.137:8080/iso/latest.iso`. The back-compat aliases
   `latest-{default,vpp,ask}.iso` resolve to the same image for installs that
   pinned an old per-flavor URL. The versioned URL
@@ -145,12 +145,12 @@ lxc200: `python3 -m http.server 8080 --directory /srv/tftp` (persistent).
 
 ### 6. Emit the operator install instructions
 
-Print the exact command the operator runs **on the DUT** (VyOS op-mode). Lead
+Print the exact command the operator runs **on the board** (VyOS op-mode). Lead
 with the stable `latest.iso` URL; include the pinned versioned URL as the
 reproducible alternative:
 
 ```
-On the DUT (192.168.1.190), from VyOS op-mode:
+On the board (192.168.1.190), from VyOS op-mode:
 
     add system image http://192.168.1.137:8080/iso/latest.iso
 

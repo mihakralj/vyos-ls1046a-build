@@ -550,6 +550,22 @@ chmod +x "$CHROOT/usr/local/bin/ask-check"
 cp board/scripts/firmware-check "$CHROOT/usr/local/bin/firmware-check"
 chmod +x "$CHROOT/usr/local/bin/firmware-check"
 
+### ASK2 reversible-mode-switch gate: `pcd-snapshot` (Python 3) captures and
+### diffs the FMan PCD silicon state that the S0<->S1 dataplane mode-switch
+### (DUAL-DATAPLANE.md M1) mutates — KeyGen schemes (RSS vs AC_CC, read via
+### the KG indirect Action Register), per-port BMI next-engine bind
+### (fmbm_rfpne/rccb/rgpr), the static CC tree / FM_CTL params-page MURAM
+### region, and the gen_pool MURAM budget (/sys/kernel/debug/fman_pcd/0/
+### muram_budget). `capture` snapshots the S0 baseline; `diff` asserts the
+### live state still equals it after a S1->S0 teardown, so the M1 soak can
+### prove every engage/disengage cycle was fully reversible without a reboot.
+### Exit 0 clean / 1 drift|fault / 2 not-LS1046A — usable as a soak gate.
+### Mirrors firmware-check / fan-check / caam-check style; installed without a
+### .py suffix (fan-pid / led / caam-check convention). Flavor-agnostic (the
+### board PCD substrate is in the common patch set on every image).
+cp board/scripts/pcd-snapshot "$CHROOT/usr/local/bin/pcd-snapshot"
+chmod +x "$CHROOT/usr/local/bin/pcd-snapshot"
+
 ### Mono Gateway DK LP5812 status LED control: `led` (Python 3) supports
 ### three input forms — palette index, four decimals R G B W, and 8-digit
 ### hex RRGGBBWW. Auto-creates /config/led.json with a 32-entry default
@@ -612,23 +628,23 @@ chmod +x "$HOOKS/96-enable-services.chroot"
 #   libfci.so.1 SONAME  — symlink to libask_fci.so.1
 #   /etc/config/fastforward — same ALG-exclusion list format
 #
-# Until those components are authored, FLAVOR=ask builds skip userspace
-# staging entirely. The resulting ISO will boot a vanilla VyOS kernel +
-# userspace; nothing ASK-specific will be present in the image.
-if [[ "${FLAVOR:-default}" == "ask" ]]; then
-    echo "### FLAVOR=ask — ASK2 userspace stack not yet implemented"
-    echo "### See specs/ask2-rewrite-spec.md for the rewrite plan"
+# Until those components are authored, ASK2 userspace staging is skipped
+# entirely. The single image boots a vanilla VyOS userspace; the only
+# ASK-specific artifact present is the dormant ask.ko (+ its autoload hook).
 
-    # M0.3: drop the chroot hook that auto-loads ask.ko at boot via
-    # /etc/modules-load.d/ask.conf. The ask-modules-*.deb (built by
-    # kernel/flavors/ask/oot-modules/ask/ci-build.sh and swept into the
-    # chroot by ci-pick-packages.sh) installs ask.ko under
-    # /lib/modules/$KVER/extra/ but does not auto-load it — that's this
-    # hook's job. Hook is FLAVOR-gated (only staged on ask builds) so
-    # default/vpp ISOs never see it.
-    cp data/hooks/97-ask-modules.chroot "$HOOKS/97-ask-modules.chroot"
-    chmod +x "$HOOKS/97-ask-modules.chroot"
-    echo "### FLAVOR=ask: staged 97-ask-modules.chroot for systemd-modules-load auto-load"
-fi
+# M0.3: stage the chroot hook that auto-loads ask.ko at boot via
+# /etc/modules-load.d/ask.conf. The ask-modules-*.deb (built by
+# kernel/flavors/ask/oot-modules/ask/ci-build.sh and swept into the
+# chroot by ci-pick-packages.sh) installs ask.ko under
+# /lib/modules/$KVER/extra/ but does not auto-load it — that's this
+# hook's job. Staged UNCONDITIONALLY: the flavor split was retired
+# 2026-06-14 (single image carries the dormant ask.ko), so this must
+# match the kernel/flavors/ask oot-module build, which is itself wired
+# unconditionally into the common build. A FLAVOR gate here silently
+# ships ask.ko installed-but-never-loaded (no /sys/kernel/debug/ask/
+# offload node) — observed on image 2026.06.16-2015 before this fix.
+cp data/hooks/97-ask-modules.chroot "$HOOKS/97-ask-modules.chroot"
+chmod +x "$HOOKS/97-ask-modules.chroot"
+echo "### staged 97-ask-modules.chroot for systemd-modules-load auto-load"
 
 echo "### vyos-build setup complete (FLAVOR=${FLAVOR:-default})"

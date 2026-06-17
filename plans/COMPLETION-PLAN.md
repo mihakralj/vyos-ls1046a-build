@@ -32,7 +32,7 @@ This plan is a router, not a second source-of-truth. Where it disagrees with a s
 ## 2. ONE-PARAGRAPH SUMMARY
 
 **[NOTE]**
-The DPAA1 driver core is DUT-validated and shipping in the `default`/`vpp` ISOs. The two big kernel forward-ports are **DONE**: the FMan PCD subsystem (common board stack, `0092`/`0097`–`0101`) and the QMan-CEETM driver (`0111`/`0112`, shipped + closed). M3-3b CC steering, M3-3c HM, M3-3d policer BUG 3a + 3b-non-revert, true-ZC RX, and M3-3e CEETM are all closed / HW-validated. What remains is (1) lab/harness quantitative gates — the literal ≥7 Gbps figure, the policer 2.5 Gbps cap number, the M3-3c 802.1Q wire gate; (2) the BUG 3b flood-crash characterization (serial + cold power-cycle); and (3) the ASK2 `ask20` work-stream (M2 `-ENOMEM` MURAM gate, then `ask.ko`), deferred until DPAA1 is fully closed.
+The DPAA1 driver core is board-validated and shipping in the `default`/`vpp` ISOs. The two big kernel forward-ports are **DONE**: the FMan PCD subsystem (common board stack, `0092`/`0097`–`0101`) and the QMan-CEETM driver (`0111`/`0112`, shipped + closed). M3-3b CC steering, M3-3c HM, M3-3d policer BUG 3a + 3b-non-revert, true-ZC RX, and M3-3e CEETM are all closed / HW-validated. What remains is (1) lab/harness quantitative gates — the literal ≥7 Gbps figure, the policer 2.5 Gbps cap number, the M3-3c 802.1Q wire gate; (2) the BUG 3b flood-crash characterization (serial + cold power-cycle); and (3) the ASK2 `ask20` work-stream (M2 `-ENOMEM` MURAM gate, then `ask.ko`), deferred until DPAA1 is fully closed.
 
 ---
 
@@ -95,7 +95,7 @@ Steering + BUG 3a (FMPL block master-enable `GCR.EN|STEN` clear at boot) + the B
 ### 4.5 HM functional datapath gate (M3-3c) — lab-blocked
 
 **[SPEC]**
-- State: feature live on hardware (cap `0x17`, `rx-vlan-offload: on`, MURAM 0→144→0 proven 2026-06-07); `vyos-1x-024` CLI shipped + live on the DUT. No kernel work, no CLI work.
+- State: feature live on hardware (cap `0x17`, `rx-vlan-offload: on`, MURAM 0→144→0 proven 2026-06-07); `vyos-1x-024` CLI shipped + live on the board. No kernel work, no CLI work.
 - Remaining: a controllable 802.1Q tagged source to prove the §5.5 strip/insert gate. Lower silent-fail risk than the policer (VLAN-strip has a normal kernel SW fallback).
 
 ### 4.6 Literal ≥7 Gbps gate-3 figure — ≥7G PROVEN; single-stream line-rate deferred
@@ -132,6 +132,8 @@ Steering + BUG 3a (FMPL block master-enable `GCR.EN|STEN` clear at boot) + the B
 - Root cause (Qdrant `topic=muram-exhaustion / share-manip-per-nexthop`, 2026-06-13, HIGH confidence — supersedes the earlier 3-hypothesis gen_pool theory): we attach **one MANIP chain PER FLOW** (`rmv_eth`+`insrt_l2`+`ipv4_forward`) plus one MURAM AD per CC key. MURAM is tiny and shared (AD + CC tree + KG + parser + BMI); O(flows) MANIP allocation **exhausts and fragments it** → `-ENOMEM` → SW rewrite → CPU gate fails. `gen_pool` fails because MURAM is FULL, not because of a sub-1 KiB-alloc bug.
 - Fix: **dedup the MANIP chain** — cache + refcount ONE manip-chain handle per next-hop adjacency (key `egress_tx_fqid + src_mac + dst_mac`); every per-flow CC-key `FORWARD_FQ_WITH_MANIP` action references the SHARED handle. MURAM manip consumption drops O(flows)→O(next-hops) (thousands→dozens), so the rewrite enters silicon and the CPU gate clears. Mirrors CDX's route/conntrack split + the mlx5/nfp adjacency-table indirection; `nf_flow_table`'s `flow_block_cb` already carries the next-hop at insert time. **Microcode-independent** — do NOT clone CDX's eHash-with-opcodes (≥209 proprietary-ucode-gated). Keep the `gen_pool_size()` / `gen_pool_avail()` taps as a confirm-diagnostic, not the fix.
 
+**[NOTE] Superseded framing — Fork A is dead, Fork B is the M2 path (2026-06-16).** The `[BUG]` above is real and durable (327× `-ENOMEM` was HW-observed), but its framing — that MANIP-dedup *clears the M2 CPU gate* — assumed the classic exact-match (`CONT_LOOKUP` / `FORWARD_FQ_WITH_MANIP`) datapath. iter-49/50 fault-capture proved that path **cannot dispatch on the 210.10.1 microcode**: the stall latches zero hardware fault, so it is a disposition-less WAIT, not an arming/alloc bug ([`arch/fman-fe-ehash.md`](../arch/fman-fe-ehash.md) §8.1–§8.3). **The active M2 path is Fork B** — the external-hash + FE opcode VM, assembled dormant in board patches `0122`→`0131`. The immediate next step is therefore **the D9-B arm** (KeyGen→AC_CC + BMI CC-root → `FE_ENTER`), not MANIP-dedup. The MANIP-dedup remains required, but as the **Phase-2 MURAM guard** for the forwarding header-manip under the FE path (`fman_hm_nexthop_get/put`, `0120`), not as the M2 unblock. The full sequenced plan is [`plans/ASK2-DEVELOPMENT-PLAN.md`](ASK2-DEVELOPMENT-PLAN.md); §6.1 below is updated to match.
+
 **[NOTE]**
 Cross-flavor leverage: the PCD-subsystem forward-port is already shared in common (consumed via `pcd_ops`). The per-next-hop MANIP-dedup cache lives in `ask.ko`'s flow-offload path, but the underlying shared-MANIP refcount API (`fman_pcd_manip_*`) belongs in the common board stack so the default-flavor CC tree can reuse it.
 
@@ -143,15 +145,15 @@ Build order is **bottom-up by dependency layer**, NOT module-by-module. `ask.ko`
 1. **Substrate (mostly DONE, common / `main`)** — the FMan-PCD subsystem (`0092`/`0097`–`0101`) + `dpaa_flavor_ops` RCU hooks; `ask.ko` is a `pcd_ops` consumer. Remaining substrate task = the productive CC-forwarding wiring (group_off getter → `fman_port_set_cc_base` call-site → `attach_cc` on the RSS scheme) + the shared-MANIP refcount API. Gates M2; shared with DPAA1.
 2. **`ask.ko` skeleton** — builds, **signs** (`MODULE_SIG_FORCE`), loads with `LOCALVERSION=-vyos`; in-tree patches applied (0004 stub OK).
 3. **`ask.ko` control plane** — `ask_main.c` + `ask_genl.c` → YNL family `ask` (`ASK_CMD_GET_INFO`); verify `ynl --family ask --do get-info`.
-4. **`ask.ko` flow core** — `ask_flow.c` (rhashtable+RCU) → `ask_flow_offload.c` (`flow_block_cb`; nft `flow add` reaches the callback).
-5. **Wire to silicon → M2 gate (current blocker)** — couple flow-offload to `fman_pcd_cc_node_add_key()` + `FORWARD_FQ_WITH_MANIP` using the **per-next-hop shared-MANIP dedup** (§6 [BUG] fix). End-to-end on HW → **M2: ≥ 2 Gbps + ≤ 5% CPU** (last run 6.955 Gbps / 21.4% CPU FAIL).
+4. **`ask.ko` flow core** — `ask_flow.c` (rhashtable+RCU) → `ask_flow_offload.c` (`flow_block_cb`; nft `flow add` reaches the callback). **Substantially built today.**
+5. **Arm the FE datapath → M2 gate (current blocker)** — Fork B, not Fork A. First byte-validate the dormant `0122`→`0131` FE/ehash chain against the oracle via the `fe_*` debugfs readback (Phase 0), then land the **D9-B arm** (board `0132`: KeyGen→AC_CC + BMI CC-root → `FE_ENTER`, eth3 only, forward+inverse in one patch). Then re-point `ask_hw.c`'s `fman_pcd_offload_engage` at the FE arm and populate flows via the FE store, using the **per-next-hop shared-MANIP dedup** (§6 [BUG]) as the MURAM guard. End-to-end on HW → **M2: ≥ 2 Gbps + ≤ 5% CPU** (last Fork-A run 6.955 Gbps / 21.4% CPU FAIL). See [`plans/ASK2-DEVELOPMENT-PLAN.md`](ASK2-DEVELOPMENT-PLAN.md) Phases 0–2.
 6. **Broaden flow types + `ask_bridge.ko`** — IPv6, mcast, then L2-bridge. `ask_bridge.ko` lands **after** the IPv4 datapath passes M2 — it is NOT a peer of `ask.ko`.
-7. **`ask_xfrm.c`** — `xdo_dev_state_add` + CAAM shared descriptors (CAAM HW already live). **M4: AES-GCM-128 @ 3 Gbps.**
+7. **`ask_xfrm.c`** — `xdo_dev_state_add` + CAAM shared descriptors. Forward-port `0001-caam-qi-share` into the common board tree first (absent from the single image today). **M4: AES-CBC-SHA256 @ 3 Gbps** (GCM is refused per spec §5.3 — the §11.1 AES-GCM-128 gate is a contradiction to reconcile; see ASK2-DEVELOPMENT-PLAN §4.5).
 8. **YNL schema finalize + VyOS CLI** — `set system offload ask`; op_mode calls `ynl` from Python (no daemon).
 9. **VPP coexistence + soak** — global ASK↔VPP mutex; the Reversibility-Contract gate (100× toggle, pcd-snapshot diff clean, VPP works after the 100th teardown) → v1.0 RC.
 
 **[SPEC]**
-Direct answer: **`ask.ko` first** (built in layers 2–5), **`ask_bridge.ko` later** (step 6) — but the true prerequisite to both is the common PCD substrate (step 1, already landed via DPAA1) + the MURAM MANIP-dedup, which is the immediate next step and shared leverage with DPAA1.
+Direct answer: **`ask.ko` first** (built in layers 2–5), **`ask_bridge.ko` later** (step 6) — but the true prerequisite to both is the common PCD substrate (step 1, already landed via DPAA1). The immediate next step is the **Fork-B FE arm (D9-B)**, gated behind a clean `fe_*` byte-validation of the dormant `0122`→`0131` chain; the MURAM MANIP-dedup is a Phase-2 guard under that path, not the M2 unblock.
 
 ---
 
@@ -162,25 +164,25 @@ The forward-ports and datapath debug are DONE (PCD, CEETM, true-ZC, CC steering,
 1. Run the quantitative wire gates on the §8 harness (≥7 Gbps literal, policer 2.5 Gbps cap + red-drops, M3-3c 802.1Q tagged source).
 2. Characterize the BUG 3b flood-crash (serial capture + cold power-cycle) — riskiest, do last.
 3. VPP HW benchmark on 6.18.x.
-4. ASK2 `ask20` (deferred until DPAA1 is fully closed): follow the **§6.1 build order** — the common PCD substrate productive-wiring + the M2 MANIP-dedup `-ENOMEM` fix first, then the `ask.ko` layers, then `ask_bridge.ko`.
+4. ASK2 `ask20` (deferred until DPAA1 is fully closed): follow the **§6.1 build order** and [`plans/ASK2-DEVELOPMENT-PLAN.md`](ASK2-DEVELOPMENT-PLAN.md) — Phase 0 byte-validate the dormant FE chain, Phase 1 the D9-B FE arm, then `ask.ko` FE-wiring + the M2 MANIP-dedup MURAM guard, then `ask_bridge.ko`/IPsec/CLI.
 
 ---
 
 ## 8. THE TRAFFIC HARNESS — PROVISIONED 2026-06-08
 
 **[SPEC]**
-- Five separate acceptance gates were lab-blocked on the same missing piece — a controllable traffic generator on the DUT SFP+ peers. Now resolved.
-- The harness is two purpose-built Proxmox LXCs on heidi (`192.168.1.15`, root via `ssh heidi`), one per DUT SFP+ subnet, with the DUT as their L3 gateway so all CT201↔CT202 traffic is forced through the DUT router (eth3 → ip_forward → eth4).
+- Five separate acceptance gates were lab-blocked on the same missing piece — a controllable traffic generator on the board SFP+ peers. Now resolved.
+- The harness is two purpose-built Proxmox LXCs on heidi (`192.168.1.15`, root via `ssh heidi`), one per board SFP+ subnet, with the board as their L3 gateway so all CT201↔CT202 traffic is forced through the board router (eth3 → ip_forward → eth4).
 - Full reference: `plans/TRAFFIC-HARNESS.md`.
 
-| Peer | LXC | IP / gw | DUT port |
+| Peer | LXC | IP / gw | Board port |
 |---|---|---|---|
-| eth3 peer | CT201 `lxc201` | `10.99.1.2/30` → `10.99.1.1` | DUT eth3 |
-| eth4 peer | CT202 `lxc202` | `10.11.1.2/29` → `10.11.1.1` | DUT eth4 |
+| eth3 peer | CT201 `lxc201` | `10.99.1.2/30` → `10.99.1.1` | Board eth3 |
+| eth4 peer | CT202 `lxc202` | `10.11.1.2/29` → `10.11.1.1` | Board eth4 |
 
 **[SPEC]**
 - Both Debian 12 with iperf3 preinstalled, on the 10G `vmbr0`→`enp35s0f1` (ixgbe) bridge.
-- Validated end-to-end 2026-06-08: `TTL=63` one-hop, 0% loss, 4.14 Gbit/s @ 8 TCP streams routed through the DUT (default-flavor software-forwarding floor).
+- Validated end-to-end 2026-06-08: `TTL=63` one-hop, 0% loss, 4.14 Gbit/s @ 8 TCP streams routed through the board (default-flavor software-forwarding floor).
 
 | Gate | Needs | Harness coverage |
 |---|---|---|
@@ -188,7 +190,7 @@ The forward-ports and datapath debug are DONE (PCD, CEETM, true-ZC, CC steering,
 | M3-3d policer throughput cap | >2.5 Gbps offered source, red-drop visibility | `iperf3 -u -b 9G` ✅ |
 | Gate-3 ≥7 Gbps literal | multi-core iperf3 / wire-rate generator | `iperf3 -P`; TRex via SR-IOV VF for true line-rate |
 | VPP flavor benchmark | sustained >3.5 Gbps SFP+ source | ✅ (MTU ≤3290 on AF_XDP) |
-| ASK2 M2 (≥7 Gbps @ ≤5% CPU) | eth3↔eth4 forwarding load at line rate | CT201→DUT→CT202 ✅ |
+| ASK2 M2 (≥7 Gbps @ ≤5% CPU) | eth3↔eth4 forwarding load at line rate | CT201→board→CT202 ✅ |
 
 **[SPEC]**
 - Wire-rate / 802.1Q upgrade (deferred): `enp35s0f1` exposes 63 SR-IOV VFs; pass a VF into a dedicated LXC for TRex/DPDK-pktgen when iperf3 cannot hit the literal ≥7 Gbps figure or when precise 802.1Q stateless generation is required.
@@ -199,6 +201,6 @@ The forward-ports and datapath debug are DONE (PCD, CEETM, true-ZC, CC steering,
 ## 9. DEFINITION OF DONE (PER CONSUMER MODE)
 
 **[SPEC]**
-- default: M3-3b CC steering productive tree installs + steers on DUT; M3-3c/3d/3e wire gates pass on the generator; gate-3 literal ≥7 Gbps measured; DCSR error taps complete. (Core already done.)
+- default: M3-3b CC steering productive tree installs + steers on board; M3-3c/3d/3e wire gates pass on the generator; gate-3 literal ≥7 Gbps measured; DCSR error taps complete. (Core already done.)
 - vpp: HW benchmark recorded (throughput + thermal + MTU constraint verified) on 6.18.x; hugepage-kexec one-shot confirmed.
 - ask: ASK2 components landed (`ask.ko`/`ask_bridge.ko` + PCD patch `0004` + YNL `ask` family); M2 gate PASSES (≥7 Gbps at ≤5% kernel-net CPU) after the MURAM-budget fix; `set system offload ask` engages a real offload (no longer a no-op).

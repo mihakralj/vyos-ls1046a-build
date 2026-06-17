@@ -527,6 +527,165 @@ cp "$BOARD_PATCH_DIR/0118-fman-pcd-cc-revert-ccbs-dispatch.patch" "$KERNEL_PATCH
 # generic HMAN_OC=0x35 HMTD, RMV=0x01000e00 / INSRT=0x02000e00+BE payload /
 # IPV4=0x0c040001 (TTL+L4 checksum). No existing VLAN/MPLS op altered.
 cp "$BOARD_PATCH_DIR/0119-fman-pcd-hm-l3-forward-ops.patch" "$KERNEL_PATCHES/"
+# ASK2 M2 step 2: dormant next-hop HM dedup refcount API
+# (fman_hm_nexthop_get/put) caches+refcounts one shared HMTD per L3
+# adjacency (egress_tx_fqid, src_mac, dst_mac) so MURAM scales
+# O(next-hops) not O(flows). EXPORT_SYMBOL_GPL, dormant (ask.ko consumes).
+cp "$BOARD_PATCH_DIR/0120-fman-pcd-hm-nexthop-dedup.patch" "$KERNEL_PATCHES/"
+# ASK2 Gap-A: export two net_device -> hardware-id resolvers
+# (dpaa_get_rx_fman_port / dpaa_get_tx_fqid) on the common dpaa_fman_caps.h
+# substrate so the OOT ask.ko PCD consumer can derive the fman_cc_tree_*
+# port key and a CC target_fqid. EXPORT_SYMBOL_GPL, dormant (no in-tree
+# caller). Bodies are the proven dead-ask-flavor 0031/0039 reparented.
+cp "$BOARD_PATCH_DIR/0121-dpaa-export-cc-target-resolvers.patch" "$KERNEL_PATCHES/"
+# ASK2 Fork B M1 step 1: FE-object MURAM pool scaffold (arch/fman-fe-ehash.md
+# §3 AllocFEObjs). Lazy + refcounted pool of 100×28 B FE records carved from
+# FMan MURAM, driven by a new debugfs fman_pcd/<id>/fe_pool (0644) get/put
+# node. fe_lock → pcd->lock order; a pristine S0 keeps the pool empty so
+# engage→disengage nets zero gen_pool used (pcd-snapshot reversibility gate).
+# Single-file fman_pcd.c, internal/static, no ABI export. Scaffold only —
+# allocates+zeroes MURAM, does NOT program the FE records and does NOT flow
+# traffic; the FE-VM core (FmPcdCcBuildFE/ContextByFE) lands later from lf-5.4.
+cp "$BOARD_PATCH_DIR/0122-fman-pcd-fe-ehash-init.patch" "$KERNEL_PATCHES/"
+# ASK2 Fork B M1 step 2: per-port FE support (arch/fman-fe-ehash.md §4
+# FmPortSetFESupport/FmPortDeleteFESupport). Carves a per-port FE internal-
+# buffer pool (total_tnums × 0x100 × 2, 256 B aligned) + a management free-list
+# (5 + total_tnums bytes) from FMan MURAM, then writes the port's existing
+# FM_CTL ctrl-params page +0x54 (mgmt index) / +0x58 (depletion count) — never
+# allocating that page itself (it must pre-exist from a CC install, 0116) so the
+# gate stays leak-clean. A faithful inverse (page→0, free mgmt, free pool, list
+# del) makes engage→disengage net zero gen_pool used (pcd-snapshot gate). Adds
+# fman_port_get_total_tnums() accessor (fman_port.c/.h). Driven by a new debugfs
+# fman_pcd/<id>/fe_port (0644) "set <id>"/"del <id>" node. Allocate-only —
+# ships DORMANT, does NOT flow classified traffic (needs §5 + FE-VM core).
+# Sorts after 0122, before 101-sfp. Spec arch/fman-fe-ehash.md §4 (M1 Fork B).
+cp "$BOARD_PATCH_DIR/0123-fman-pcd-fe-port-support.patch" "$KERNEL_PATCHES/"
+# ASK2 Fork B M1 — FE virtual-machine core, increment 1 (arch/fman-fe-ehash.md
+# §5 FE-VM). Transcribes the lf-5.4 SDK FmPcdCcBuildFE() descriptor encoder and
+# the FM_PCD_Init() FE-singleton setup, adapted to mainline gen_pool MURAM (the
+# SDK next-FE phys == the gen_pool offset fman_pcd_muram_alloc returns). Adds
+# fman_pcd_fe_build() (big-endian MURAM image words via iowrite32be) plus the
+# three core MUX/Transition/Exit singletons, programmed into pool slots from a
+# new debugfs fman_pcd/<id>/fe_singletons (0644) "build"/"clear" node with a
+# byte-level readback for oracle verification (§8.6 contract item 6). Ships
+# DORMANT: programs FE descriptors but nothing dispatches into the FE machine
+# until §5 ehash + the per-flow ENQ FE + AC_CC root-AD FE_ENTER wiring land.
+# Forward (build) + inverse (clear) in this one patch; clear restores the exact
+# pre-build pool state and pool_free drains the singletons, so pcd-snapshot
+# gen_pool "used" returns to baseline (reversibility gate stays clean).
+cp "$BOARD_PATCH_DIR/0124-fman-pcd-fe-vm-singletons.patch" "$KERNEL_PATCHES/"
+# ASK2 Fork B M1 — §5 ExternalHashTableSet (arch/fman-fe-ehash.md §5/§6). The
+# vendor enhanced-ehash flow store — the only config proven to FLOW on 210.10.1
+# (§8). Lazily reserves a per-PCD internal-buffer-management MURAM pool (32 KiB
+# pool + 256 B global, 256-aligned, refcounted — the dominant pcd-snapshot
+# reversibility signal) and per-table DDR bucket arrays (kzalloc, 16 B/bucket;
+# buckets MUST stay in DDR — §6 327×-ENOMEM wall) plus an en_exthash_node DDR
+# template (lf-5.4 native LE packing). New debugfs fman_pcd/<id>/fe_ehash (0644)
+# "set <mask_hex> <keysize> <shift>" / "clear" with node-word readback. Bounds-
+# checks MURAM before reserving (§8.6 item 2). Ships DORMANT: allocates + encodes
+# only; nothing dispatches into the hash store until the fm_cc.c FE_ENTER wrapper
+# + FE-VM core land. Forward (set) + inverse (clear/drain) in one patch; clear
+# returns gen_pool "used" to baseline (reversibility gate stays clean).
+cp "$BOARD_PATCH_DIR/0125-fman-pcd-fe-ehash-table.patch" "$KERNEL_PATCHES/"
+# 0126 — convert fman_pcd_muram_alloc/_free into a gen_pool sub-allocator over
+# the reserved 64 KiB MURAM partition (0092 reserved the arena but the wrappers
+# re-called the GLOBAL fman_muram_alloc, competing for the ~21 KiB post-CAM/FIFO
+# free tail while the reservation sat dead-weight → §5/0125 int-buf 33 KiB hit
+# -ENOMEM on HW 2026-06-16). Seeds a gen_pool (min_alloc_order=8, 256 B granule)
+# with [muram_offset,+64KiB); all PCD MURAM now sub-allocates from it, bounding
+# PCD use to the reservation and unblocking the FE/ehash forward path. Substrate
+# change — full S0↔S1 + fe_pool + fe_ehash forward regression gate required.
+cp "$BOARD_PATCH_DIR/0126-fman-pcd-muram-genpool.patch" "$KERNEL_PATCHES/"
+# 0127 — FE-VM core increment 2 (arch/fman-fe-ehash.md §5): the per-flow ENQ
+# Flow-Entry (FmPcdCcBuildContextByFE — ENQ-type FE carrying the 24-bit target
+# FQID in word1) and the AC_CC root action-descriptor FE_ENTER wiring
+# (FillAdOfTypeContLookup external-hash branch — CONT_LOOKUP AD: ccAdBase
+# 0x40800000, pcAndOffsets 0xf6, gmask = MURAM offset of the FE to enter).
+# Together they give a classified frame a terminal BMI-FIFO disposition. New
+# debugfs fman_pcd/<id>/fe_enq ("build <fqid_hex> [next_fe_off_hex]" / "clear")
+# and fe_enter ("build [fe_off_hex]" / "clear"), each with byte-level readback.
+# Ships DORMANT (programs descriptors only; nothing dispatches into the FE VM
+# until the ehash bucket indexer lands). Forward+inverse in one patch; each
+# inverse re-zeros + frees its MURAM so pcd-snapshot stays reversible.
+cp "$BOARD_PATCH_DIR/0127-fman-pcd-fe-vm-enq-root.patch" "$KERNEL_PATCHES/"
+# 0128: FE-VM core increment 3 — per-flow ehash insertion (arch/fman-fe-ehash.md
+# §5). The SDK get_indexed_hash_bucket() CRC64 bucket indexer +
+# ExternalHashTableAddKey() head-insert: CRC64 the key → byte-shift+mask to a
+# bucket → allocate a 256-byte DDR flow record (en_ehash_entry) → write the
+# header (flags + next_entry chain to the old bucket head), the key, and the
+# next-FE pointer (the 0127 ENQ FE MURAM offset) → head-insert
+# (bucket->h = swab64(phys(record))). Links a classified 5-tuple to its ENQ FE.
+# New debugfs fman_pcd/<id>/fe_flow ("add <tbl_idx> <key_hex> [enq_fe_off_hex]" /
+# "clear") with byte-level readback. Buckets+records live in DDR by design (§6
+# anti-pattern: never fall the flow store to MURAM) so gen_pool "used" is
+# UNCHANGED — reversibility = all records freed + every bucket head restored.
+# Ships DORMANT; forward (add) + inverse (LIFO drain, byte-exact) in one patch.
+cp "$BOARD_PATCH_DIR/0128-fman-pcd-fe-vm-flow-insert.patch" "$KERNEL_PATCHES/"
+# 0129: M1 coarse ask offload engage/disengage mode-switch (fman_pcd.h export).
+# Adds two EXPORT_SYMBOL_GPL entry points to fman_pcd.c + their prototypes to
+# <linux/fsl/fman_pcd.h>: fman_pcd_offload_engage()/_disengage(struct fman *,
+# u8 hw_port_id). They resolve the PCD internally (fman_get_pcd()) and wrap the
+# EXACT HW-proven reversible sequence from the cc_test harness (0107) + 100x
+# soak: install a benign single-key CC tree → get_base → KGSE_CCBS graft of the
+# port's KeyGen scheme, with strict reverse teardown (detach FIRST, then
+# destroy). The out-of-tree ask.ko mirrors only these two prototypes (into
+# ask_fman_caps.h) and drives them via /sys/kernel/debug/ask/offload. Ships
+# DORMANT (nothing calls them until the debugfs trigger / M7 op-mode); M1
+# carries no classification semantics. Forward + inverse in one patch.
+cp "$BOARD_PATCH_DIR/0129-fman-pcd-offload-engage.patch" "$KERNEL_PATCHES/"
+# 0130: D9.1 (M2 activate) increment 1 — switch the dormant FE/ehash flow store
+# (0125 ehash table + 0128 per-flow records) from kzalloc()+virt_to_phys() to
+# dma_alloc_coherent(). The en_exthash_node table-base words and each bucket head
+# must carry true bus addresses (not raw physical) before the FE VM is armed, since
+# the armed VM DMA-reads the bucket array and walks the record chain through
+# PAMU/SMMU (arch/fman-fe-ehash.md §8.6 item 6; 0125/0128 flagged this as the
+# pre-arming prerequisite). struct fman_pcd_ehash_table gains table_dma + dev
+# (fman_get_dev(pcd->fman), captured so per-flow record alloc/free reaches the same
+# device); struct fman_pcd_ehash_flow gains record_dma. Records+buckets stay in DDR
+# (§6 anti-pattern: never MURAM) so gen_pool "used" is UNCHANGED — reversibility is
+# still all records dma_free'd + every bucket head restored byte-exactly. Ships
+# DORMANT (no new dispatch); the 0128 on-board record layout is byte-identical.
+# Forward (dma_alloc) + inverse (dma_free) in one patch.
+cp "$BOARD_PATCH_DIR/0130-fman-pcd-fe-ehash-dma-coherent.patch" "$KERNEL_PATCHES/"
+# 0131: D9-A (M2 activate) increment 3 — the genuine 28-byte external-hash
+# Flow-Entry object (SDK t_ExtHashFe) that the 0127 FE_ENTER root AD dispatches
+# into. Binds the §5 DDR bucket array (0125/0130) to the FE VM and links HIT →
+# MUX singleton / MISS → Exit singleton (0124). fman_pcd gains fe_hash_off;
+# fman_pcd_fe_enter_build()'s default gmask now prefers the t_ExtHashFe once
+# built (falls back to the MUX singleton, the 0127 default). New debugfs node
+# fe_hashfe (build/clear) with a 7-word byte-level readback for the M0 oracle
+# byte-diff (arch/fman-fe-ehash.md §8.6 item 6 — validate the dormant FE image
+# while quiescent BEFORE arming, since the M3-3b stall latches ZERO fault).
+# Ships DORMANT; forward+inverse in one patch; gen_pool "used" returns to the
+# warm-S0' baseline on clear (pcd-snapshot reversibility gate stays clean).
+cp "$BOARD_PATCH_DIR/0131-fman-pcd-fe-hash-object.patch" "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0132-fman-pcd-fe-arm-debugfs.patch"   "$KERNEL_PATCHES/"
+# 0133: D9-B (M2 activate) — correct the fe_arm encoding from the 0132 KGSE_CCBS
+# placebo (next_engine=2, mode 0x80500002, which NEVER dispatches the CC walk —
+# frames bypass into RSS) to the REAL AC_CC encoding. Adds a next_engine==3 branch
+# in keygen_scheme_setup that emits KGSE_MODE = FM_CTL|AC_CC (0x80000006) with
+# KGSE_CCBS=0, re-adds the NIA_ENG_FM_CTL / NIA_FM_CTL_AC_CC defines 0118 dropped
+# (used ONLY by the new branch; the ==2 CCBS graft, policer, M1-engage and RSS
+# paths are byte-unchanged), and flips fman_pcd_kg_port_arm_fe() to next_engine=3 /
+# cc_bits_sel=0. The FMBM_RCCB write (→ FE_ENTER root AD) is unchanged. disarm is
+# unchanged (forces next_engine=0). Ships DORMANT: the encoding only takes effect
+# on an explicit echo to the fman_pcd/<id>/fe_arm node. This is the make-or-break
+# M2 dispatch experiment — the only encoding that genuinely enters the FE VM
+# terminal disposition a bare exact-match leaf lacks (M3-3b iter-50 park).
+cp "$BOARD_PATCH_DIR/0133-fman-pcd-fe-arm-real-accc.patch" "$KERNEL_PATCHES/"
+# 0134: CAAM/QI descriptor sharing for ASK2 IPsec HW offload (spec §8.1, PR10).
+# Adds caam_qi_ext_consumer_register()/_release() to drivers/crypto/caam/qi.c +
+# the ext_lock/ext_active fields in struct caam_drv_ctx (qi.h) + the new header
+# include/linux/crypto/caam_qi_share.h, so a future in-kernel consumer (ask.ko's
+# CAAM/xfrm datapath) can dequeue completed CAAM frames from a chosen sink FQID.
+# Forward-ported VERBATIM from kernel/flavors/ask/patches/0001-caam-qi-share.patch,
+# which was NEVER staged after the 2026-06-14 flavor collapse killed the dead
+# FLAVOR=ask gate. Touches ONLY drivers/crypto/caam/* + a new header — zero
+# overlap with the FMan PCD board patches, so apply order is irrelevant. Exports
+# the symbols EXPORT_SYMBOL_GPL but they stay dormant (no caller until the CAAM
+# datapath lands). This cp line is MANDATORY — the staging-completeness guard
+# below fails the build if any board/*.patch lacks one.
+cp "$BOARD_PATCH_DIR/0134-caam-qi-share.patch"               "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
@@ -895,6 +1054,19 @@ scripts/config --set-val CONFIG_SERIAL_OF_PLATFORM y
 scripts/config --set-val CONFIG_MAXLINEAR_GPHY y
 scripts/config --set-val CONFIG_IMX2_WDT y
 scripts/config --set-val CONFIG_SPI_FSL_QUADSPI y
+# CAAM (NXP SEC 5.4) hardware crypto built-in for ASK2 IPsec offload (spec §8.1).
+# vyos_defconfig ships these tristate symbols as =m; force =y so the CAAM/QI
+# backend is present at FMan bring-up and patch 0134's
+# caam_qi_ext_consumer_register/_release are compiled-in + EXPORT_SYMBOL_GPL'd
+# (a =m caam_jr would force fragile module load-order coupling with ask.ko).
+# CONFIG_CRYPTO_DEV_FSL_CAAM_QI is the symbol that actually compiles qi.c — the
+# patch's edits and exports live there; the original 5-symbol plan omitted it.
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_COMMON y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_JR y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_QI y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API_DESC y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_AHASH_API_DESC y
 scripts/config --disable CONFIG_DEBUG_PREEMPT
 scripts/config --set-val CONFIG_NEW_LEDS y
 scripts/config --set-val CONFIG_LEDS_CLASS y

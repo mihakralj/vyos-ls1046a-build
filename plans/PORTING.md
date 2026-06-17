@@ -1,6 +1,6 @@
 # Porting VyOS ARM64 to NXP LS1046A
 
-Technical analysis of what breaks when you drop a generic VyOS ARM64 ISO onto NXP Layerscape silicon. And the exact fixes that survived.
+What breaks when you drop a generic VyOS ARM64 ISO onto NXP Layerscape silicon, and the exact fixes that survived contact with the hardware. Seven failures, seven fixes, one working router. Most of the failures are silent, which is the part that costs you an afternoon.
 
 > **Boot process specification** (U-Boot env variables, annotated USB and eMMC boot sequences, `vyos.env` mechanism, failure modes): **[BOOT-PROCESS.md](BOOT-PROCESS.md)**
 > **Install guide** (write USB image, run `install image`, eMMC boot): **[INSTALL.md](../INSTALL.md)**

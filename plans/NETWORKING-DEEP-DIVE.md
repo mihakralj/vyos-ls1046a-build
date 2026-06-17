@@ -9,8 +9,8 @@
 
 ## 1. The Hardware: What the Silicon Actually Does
 
-Before comparing software approaches, it's essential to understand what the LS1046A
-puts in silicon versus what runs on the four Cortex-A72 cores.
+Before comparing software approaches, look at the split the silicon already makes:
+what the LS1046A handles in hardware, and what falls to the four Cortex-A72 cores.
 
 ### 1.1 Block Diagram
 

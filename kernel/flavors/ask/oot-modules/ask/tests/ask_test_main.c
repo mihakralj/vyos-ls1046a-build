@@ -12,9 +12,13 @@
  * ask_test_dummy.c). M1 PRs will append further suites here as new
  * subsystems land:
  *   - ask_genl_suite        (PR5)
- *   - ask_hostcmd_suite     (PR6, golden-hex tests for spec sec 12.5)
  *   - ask_flow_suite        (PR7, rhashtable RCU lookup/insert/remove)
  *   - ask_flow_offload_suite (PR8, flow_block_cb dispatch)
+ *
+ * The ask_hostcmd_suite originally planned for PR6 was dropped: the
+ * v1.3 thin-userspace decision deleted the ask_hostcmd.c opcode/encoder
+ * layer it covered (see ask_internal.h), so no ask_hostcmd_suite is
+ * defined and it must NOT be registered below.
  *
  * Keep the suite array in declaration order so a missing/duplicated
  * registration fails to compile rather than silently dropping
@@ -25,7 +29,6 @@
 #include <linux/module.h>
 
 extern struct kunit_suite ask_dummy_suite;
-extern struct kunit_suite ask_hostcmd_suite;
 extern struct kunit_suite ask_flow_suite;
 extern struct kunit_suite ask_flow_offload_suite;
 extern struct kunit_suite ask_genl_suite;
@@ -40,7 +43,7 @@ extern struct kunit_suite ask_hw_pcd_suite;
  * arms, TOKEN_NONE no-op tear-down) that ask_flow.c body-3 depends
  * on.
  */
-kunit_test_suites(&ask_dummy_suite, &ask_hostcmd_suite, &ask_flow_suite,
+kunit_test_suites(&ask_dummy_suite, &ask_flow_suite,
   &ask_flow_offload_suite, &ask_genl_suite,
   &ask_hw_pcd_suite);
 

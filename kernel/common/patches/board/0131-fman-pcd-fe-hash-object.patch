@@ -1,0 +1,305 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Wed, 17 Jun 2026 12:00:00 +0000
+Subject: [PATCH] fman_pcd: FE-VM EXT_HASH flow-entry object (M2 activate,
+ increment 3)
+
+Board patches 0124/0127 built the FE-VM singletons (MUX/Transition/Exit),
+the per-flow ENQ FE, and the FE_ENTER root action-descriptor; 0125/0128/0130
+built the section-5 external-hash table and per-flow DDR records.  The one
+piece still missing between the AC_CC root AD and the per-flow FE chain is the
+genuine external-hash Flow-Entry object the SDK calls t_ExtHashFe - the
+28-byte FE the FE_ENTER AD actually dispatches into, which performs the HW
+hash lookup and links HIT -> MUX singleton / MISS -> Exit singleton.
+
+D9-A re-bases the FE-hash object onto that genuine 28-byte t_ExtHashFe layout
+(resolved from the lf-5.4 USE_ENHANCED_EHASH FmPcdExternalHashTableSet
+builder; the 0125 en_exthash_node is the table/int-buf substrate, NOT the FE
+object).  It is the wiring increment - no new transcription - that makes the
+dormant FE chain internally complete and byte-verifiable against the M0 oracle
+while the port is still quiescent (arch/fman-fe-ehash.md section 8.6 item 6:
+the M3-3b stall latches ZERO hardware fault, so a wrong FE image is invisible
+to traffic tests and MUST be validated dormant before arming).
+
+  - struct fman_pcd gains fe_hash_off (the t_ExtHashFe MURAM offset).
+  - fman_pcd_fe_hash_encode()/_build()/_free(): assemble the 7-word
+    t_ExtHashFe image (word0 misc EXT_HASH | ctxOffWS 0; word1 hashMask:16 |
+    (contextSize-1):8 | hashShift:8; word2/3 DDR bucket-array bus address;
+    word4 missResult 0 dormant; word5 nextFEPtr -> MUX; word6 missNextFE ->
+    Exit) into a FE-pool slot, big-endian via iowrite32be.  Built from the
+    first section-5 ehash table; parked on the singletons list so fe_pool
+    teardown reclaims it; _free re-zeros the slot and returns it to the pool.
+  - fman_pcd_fe_enter_build(): the default FE-VM entry (gmask) now prefers
+    the t_ExtHashFe once built, falling back to the MUX singleton (the 0127
+    default, kept so the bare-chain gate still works).
+  - new debugfs node fe_hashfe (build/clear) with a byte-level 7-word
+    readback for the oracle byte-diff.
+
+Ships DORMANT: the object is assembled and byte-verifiable but nothing
+dispatches a frame into it until the KeyGen scheme is switched to AC_CC and
+the BMI CC root points at the FE_ENTER root AD (the M2 arm, D9-B, a separate
+explicitly-approved experiment).  word4 (miss-result context) and the word2
+LIODN are arming-time fields, left zero here.  Forward + inverse in one patch;
+fe_hashfe clear / fe_pool teardown returns gen_pool "used" to the warm-S0'
+baseline (pcd-snapshot reversibility gate stays clean).  Records and buckets
+stay in DDR (section 6), so no new MURAM pressure.
+
+git apply --3way --check clean vs the post-0130 reconstruction (applied file
+byte-identical to the edited tree); brace-balanced; LF-only.  Compile gate is
+CI.
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 0df6585..0fb8c0a 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -132,6 +132,7 @@ struct fman_pcd {
+ 	size_t fe_int_buf_raw_size;
+ 	int fe_int_buf_refcount;
+ 	unsigned long fe_root_ad_off;	/* sec.5 FE_ENTER root AD (16 B) */
++	unsigned long fe_hash_off;	/* sec.5 t_ExtHashFe FE-hash object */
+ 
+ 	struct dentry *debugfs_dir;
+ };
+@@ -288,6 +289,7 @@ static void fman_pcd_fe_pool_free(struct fman_pcd *pcd)
+ 	pcd->fe_mux_off = 0;
+ 	pcd->fe_transition_off = 0;
+ 	pcd->fe_exit_off = 0;
++	pcd->fe_hash_off = 0;
+ 
+ 	/* sec.5 FE_ENTER root AD is a separate MURAM alloc - free it too. */
+ 	if (pcd->fe_root_ad_off) {
+@@ -859,6 +861,7 @@ static void fman_pcd_fe_singletons_free(struct fman_pcd *pcd)
+ 	pcd->fe_mux_off = 0;
+ 	pcd->fe_transition_off = 0;
+ 	pcd->fe_exit_off = 0;
++	pcd->fe_hash_off = 0;
+ }
+ 
+ /*
+@@ -1187,8 +1190,14 @@ static int fman_pcd_fe_enter_build(struct fman_pcd *pcd, unsigned long fe_off)
+ 		return -ENXIO;		/* engage the pool first */
+ 	if (pcd->fe_root_ad_off)
+ 		return -EEXIST;
+-	if (!fe_off)
+-		fe_off = pcd->fe_mux_off;	/* FE-VM entry = MUX singleton */
++	if (!fe_off) {
++		/*
++		 * Default FE-VM entry: the t_ExtHashFe FE-hash object once it
++		 * has been built (the genuine external-hash path), else the
++		 * MUX singleton (0127 default, kept for the bare-chain gate).
++		 */
++		fe_off = pcd->fe_hash_off ? pcd->fe_hash_off : pcd->fe_mux_off;
++	}
+ 	if (!fe_off)
+ 		return -EINVAL;			/* no target FE built yet */
+ 
+@@ -1901,6 +1910,199 @@ static const struct file_operations fman_pcd_fe_flow_fops = {
+ 	.release	= single_release,
+ };
+ 
++/*
++ * ---------------------------------------------------------------------------
++ * FE-VM core, increment 3 - arch/fman-fe-ehash.md section 5: the EXT_HASH
++ * Flow-Entry object (SDK t_ExtHashFe, FmPcdExternalHashTableSet builder).
++ *
++ * This is the genuine 28-byte external-hash FE that the FE_ENTER root AD
++ * dispatches into.  On a hit it hands control to the MUX singleton (which
++ * reads the per-flow head FE from the matched record's working store); on a
++ * miss it hands control to the Exit singleton (dealloc).  It binds the DDR
++ * bucket array (section 5 ehash table) to the FE VM:
++ *
++ *   word0 misc        = EXT_HASH type | contextOffsetInWS(0) [| aging | stats]
++ *   word1             = hashMask:16 | (contextSize-1):8 | hashShift:8
++ *   word2             = table bus-addr hi 16 [| LIODN, armed only]
++ *   word3             = table bus-addr lo 32
++ *   word4 missResult  = miss-result context MURAM offset (0 while dormant)
++ *   word5 nextFEPtr   = HIT  link -> MUX singleton MURAM offset
++ *   word6 missNextFE  = MISS link -> Exit singleton MURAM offset
++ *
++ * Ships DORMANT: the object is assembled and byte-verifiable against the M0
++ * oracle (arch/fman-fe-ehash.md section 8.6 item 6) while the port is still
++ * quiescent, but nothing dispatches a frame into it until the KeyGen scheme
++ * is switched to AC_CC and the BMI CC root is pointed at the FE_ENTER root AD
++ * (the M2 arm, D9-B, a separate explicitly-approved experiment).  word4
++ * (missResult context) and the word2 LIODN are arming-time fields, zero here.
++ * ---------------------------------------------------------------------------
++ */
++#define FMAN_FE_HASH_SIZE		28	/* t_ExtHashFe: 7 words */
++#define FMAN_FE_HASH_CONTEXT_SIZE	256	/* FE_MAX_CONTEXT_SIZE */
++/* word0 optional flags - 0 while dormant (no aging, no stats). */
++#define FMAN_FE_HASH_UPDATE_TS		0x00020000
++#define FMAN_FE_HASH_UPDATE_STATS	0x00010000
++
++/*
++ * Encode the t_ExtHashFe image into its MURAM slot (big-endian words).  The
++ * table pointer (word2/word3) is the DDR bucket-array bus address - a full
++ * physical address, NOT a MURAM offset - because the FE VM DMA-reads the
++ * bucket array from DDR.  nextFEPtr/missNextFEPtr ARE MURAM offsets (gen_pool
++ * offsets), matching the SDK "phys(FE) - physicalMuramBase" convention.
++ */
++static void fman_pcd_fe_hash_encode(struct muram_info *muram,
++				    unsigned long fe_off,
++				    const struct fman_pcd_ehash_table *t,
++				    unsigned long mux_off,
++				    unsigned long miss_off)
++{
++	u32 __iomem *fe = (u32 __iomem *)
++		fman_muram_offset_to_vbase(muram, fe_off);
++	u64 tblphys = (u64)t->table_dma;
++
++	iowrite32be(FMAN_FE_TYPE_EXT_HASH, fe + 0);		/* misc       */
++	iowrite32be(((u32)(t->hash_mask & 0xffff) << 16) |
++		    ((u32)((FMAN_FE_HASH_CONTEXT_SIZE - 1) & 0xff) << 8) |
++		    (u32)(t->hash_shift & 0xff), fe + 1);
++	iowrite32be((u32)((tblphys >> 32) & 0xffff), fe + 2);	/* tbl hi     */
++	iowrite32be((u32)(tblphys & 0xffffffff), fe + 3);	/* tbl lo     */
++	iowrite32be(0, fe + 4);					/* missResult */
++	iowrite32be((u32)mux_off, fe + 5);			/* HIT  -> MUX  */
++	iowrite32be((u32)miss_off, fe + 6);			/* MISS -> Exit */
++}
++
++/*
++ * Build the EXT_HASH FE object from a FE-pool slot.  Requires the pool to be
++ * engaged, the MUX/Exit singletons built, and at least one section-5 ehash
++ * table set (the table the FE binds to).  Parked on the singletons list so
++ * fe_pool teardown reclaims it; the dedicated _free returns the slot and
++ * re-zeros the MURAM so pcd-snapshot gen_pool "used" returns to baseline.
++ */
++static int fman_pcd_fe_hash_build(struct fman_pcd *pcd)
++{
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	struct fman_pcd_ehash_table *t;
++	struct fman_pcd_fe_obj *obj;
++
++	if (!muram)
++		return -ENXIO;
++	if (pcd->fe_refcount == 0)
++		return -ENXIO;			/* engage the pool first */
++	if (pcd->fe_hash_off)
++		return -EEXIST;
++	if (!pcd->fe_mux_off || !pcd->fe_exit_off)
++		return -ENXIO;			/* build the singletons first */
++	t = list_first_entry_or_null(&pcd->fe_ehash_tables,
++				     struct fman_pcd_ehash_table, node);
++	if (!t)
++		return -ENXIO;			/* set an ehash table first */
++
++	obj = list_first_entry_or_null(&pcd->fe_available,
++				       struct fman_pcd_fe_obj, node);
++	if (!obj)
++		return -ENOSPC;
++
++	list_del(&obj->node);
++	fman_pcd_fe_hash_encode(muram, obj->muram_off, t,
++				pcd->fe_mux_off, pcd->fe_exit_off);
++	pcd->fe_hash_off = obj->muram_off;
++	list_add_tail(&obj->node, &pcd->fe_singletons);
++	return 0;
++}
++
++/* Inverse: re-zero the FE-hash MURAM and return its slot to the pool. */
++static void fman_pcd_fe_hash_free(struct fman_pcd *pcd)
++{
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	struct fman_pcd_fe_obj *obj, *tmp;
++
++	if (!pcd->fe_hash_off)
++		return;
++	list_for_each_entry_safe(obj, tmp, &pcd->fe_singletons, node) {
++		if (obj->muram_off != pcd->fe_hash_off)
++			continue;
++		list_del(&obj->node);
++		if (muram)
++			memset_io((void __iomem *)
++				  fman_muram_offset_to_vbase(muram,
++							     obj->muram_off),
++				  0, FMAN_PCD_FE_MAX_SIZE);
++		list_add_tail(&obj->node, &pcd->fe_available);
++		break;
++	}
++	pcd->fe_hash_off = 0;
++}
++
++static int fman_pcd_fe_hashfe_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	u32 __iomem *fe;
++	unsigned int i;
++
++	mutex_lock(&pcd->fe_lock);
++	if (!muram || pcd->fe_refcount == 0) {
++		seq_puts(s, "fe pool not engaged\n");
++		mutex_unlock(&pcd->fe_lock);
++		return 0;
++	}
++	if (!pcd->fe_hash_off) {
++		seq_puts(s, "hash_fe    (not built)\n");
++		mutex_unlock(&pcd->fe_lock);
++		return 0;
++	}
++	fe = (u32 __iomem *)fman_muram_offset_to_vbase(muram, pcd->fe_hash_off);
++	seq_printf(s, "hash_fe    off=0x%05lx ", pcd->fe_hash_off);
++	for (i = 0; i < FMAN_FE_HASH_SIZE / 4; i++)
++		seq_printf(s, "%08x ", ioread32be(fe + i));
++	seq_puts(s, "\n");
++	mutex_unlock(&pcd->fe_lock);
++	return 0;
++}
++
++static int fman_pcd_fe_hashfe_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, fman_pcd_fe_hashfe_show, inode->i_private);
++}
++
++static ssize_t fman_pcd_fe_hashfe_write(struct file *file,
++					const char __user *ubuf,
++					size_t count, loff_t *ppos)
++{
++	struct seq_file *s = file->private_data;
++	struct fman_pcd *pcd = s->private;
++	char buf[16];
++	char *cmd;
++	int err = 0;
++
++	if (count == 0 || count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++	cmd = strim(buf);
++
++	mutex_lock(&pcd->fe_lock);
++	if (!strcmp(cmd, "build"))
++		err = fman_pcd_fe_hash_build(pcd);
++	else if (!strcmp(cmd, "clear"))
++		fman_pcd_fe_hash_free(pcd);
++	else
++		err = -EINVAL;
++	mutex_unlock(&pcd->fe_lock);
++
++	return err ? err : count;
++}
++
++static const struct file_operations fman_pcd_fe_hashfe_fops = {
++	.owner		= THIS_MODULE,
++	.open		= fman_pcd_fe_hashfe_open,
++	.read		= seq_read,
++	.write		= fman_pcd_fe_hashfe_write,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
+ /**
+  * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
+  * @fman: parent FMan controller.  Must have a live MURAM pool (mainline
+@@ -2020,6 +2222,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 			debugfs_create_file("fe_flow", 0644,
+ 					    pcd->debugfs_dir, pcd,
+ 					    &fman_pcd_fe_flow_fops);
++			debugfs_create_file("fe_hashfe", 0644,
++					    pcd->debugfs_dir, pcd,
++					    &fman_pcd_fe_hashfe_fops);
+ 		}
+ 	}
+ 
