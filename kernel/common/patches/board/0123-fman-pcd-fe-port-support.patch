@@ -119,13 +119,13 @@ index 803b45d..9a4b709 100644
 +		return -ENODEV;
 +
 +	/*
-+	 * The FM_CTL ctrl-params page is created once per port by a prior
-+	 * CC install (fman_pcd_port_ensure_params_page, 0116) and kept for
-+	 * the port lifetime.  FE support REQUIRES it - do NOT allocate it
-+	 * here (that would leak +256 B that del() never returns, breaking
-+	 * the pcd-snapshot reversibility gate).
++	 * FM_CTL ctrl-params page: reuse a prior install's page or self-
++	 * provision it (idempotent, 0116).  Avoids a cc_test dependency
++	 * whose CC tree fragments MURAM and starves the ehash int-buffer.
 +	 */
 +	params_off = fman_port_get_params_page(port);
++	if (!params_off && !fman_pcd_port_ensure_params_page(pcd, port))
++		params_off = fman_port_get_params_page(port);
 +	if (!params_off)
 +		return -ENXIO;
 +
