@@ -320,6 +320,29 @@ Phase 0 verdict: the §8.6-item-6 byte-gate is satisfied — the dormant chain i
 faithful to the lf-5.4 oracle and reversible. This unblocks Phase 1 (the D9-B
 arm). Phase 1 entry conditions are recorded in §10.
 
+**[SPEC] Phase 1 — `0132` authored + compiles clean (2026-06-17, commit
+`770d882`, branch `dpaa1`).** Board patch
+`0132-fman-pcd-fe-arm-debugfs.patch` delivers the classifier→FE arm via a
+`fe_arm` debugfs node. Implemented as **Path 2**: the node lives in
+`fman_pcd.c` (not a separate TU) so it dereferences the private
+`struct fman_pcd` (`fe_refcount` / `fe_root_ad_off`) directly, like every
+sibling `fe_*` node. KeyGen helpers `fman_pcd_kg_port_arm_fe()` /
+`_disarm_fe()` added to `fman_pcd_kg.c` (HW-proven KGSE_CCBS approach per
+`0118`: `kgse_ccbs=fe_enter_off`, BMI `fmbm_rccb=fe_enter_off`, NIA stays
+BMI direct-enqueue); prototypes in `include/linux/fsl/fman_pcd.h`. Verbs:
+`engage <port_hex> <off_hex>` / `disengage <port_hex>`, port range
+0x08..0x28. Validated: applies cleanly in sort order via
+`stage-kernel.sh` `git apply --3way` through `0132`; `fman_pcd.o` and
+`fman_pcd_kg.o` compile with zero errors / zero warnings under
+`LOCALVERSION=-vyos`. Not yet armed on silicon — gated on a CI ISO build.
+
+**[NOTE]**
+The prior pre-Path-2 iteration of `0132` (separate `fman_pcd_fe_arm.c` TU +
+Makefile object + `fman_pcd_internal.h` proto) was abandoned — it tripped
+three compile blockers (opaque-struct deref across TUs, missing arm/disarm
+protos, dead local KGSE register mirror under `CONFIG_WERROR`). Superseded
+in full by the Path 2 rewrite.
+
 ---
 
 ## 10. Phase 1 entry conditions (derived from the Phase 0 silicon capture)
