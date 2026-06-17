@@ -132,6 +132,8 @@ Steering + BUG 3a (FMPL block master-enable `GCR.EN|STEN` clear at boot) + the B
 - Root cause (Qdrant `topic=muram-exhaustion / share-manip-per-nexthop`, 2026-06-13, HIGH confidence — supersedes the earlier 3-hypothesis gen_pool theory): we attach **one MANIP chain PER FLOW** (`rmv_eth`+`insrt_l2`+`ipv4_forward`) plus one MURAM AD per CC key. MURAM is tiny and shared (AD + CC tree + KG + parser + BMI); O(flows) MANIP allocation **exhausts and fragments it** → `-ENOMEM` → SW rewrite → CPU gate fails. `gen_pool` fails because MURAM is FULL, not because of a sub-1 KiB-alloc bug.
 - Fix: **dedup the MANIP chain** — cache + refcount ONE manip-chain handle per next-hop adjacency (key `egress_tx_fqid + src_mac + dst_mac`); every per-flow CC-key `FORWARD_FQ_WITH_MANIP` action references the SHARED handle. MURAM manip consumption drops O(flows)→O(next-hops) (thousands→dozens), so the rewrite enters silicon and the CPU gate clears. Mirrors CDX's route/conntrack split + the mlx5/nfp adjacency-table indirection; `nf_flow_table`'s `flow_block_cb` already carries the next-hop at insert time. **Microcode-independent** — do NOT clone CDX's eHash-with-opcodes (≥209 proprietary-ucode-gated). Keep the `gen_pool_size()` / `gen_pool_avail()` taps as a confirm-diagnostic, not the fix.
 
+**[NOTE] Superseded framing — Fork A is dead, Fork B is the M2 path (2026-06-16).** The `[BUG]` above is real and durable (327× `-ENOMEM` was HW-observed), but its framing — that MANIP-dedup *clears the M2 CPU gate* — assumed the classic exact-match (`CONT_LOOKUP` / `FORWARD_FQ_WITH_MANIP`) datapath. iter-49/50 fault-capture proved that path **cannot dispatch on the 210.10.1 microcode**: the stall latches zero hardware fault, so it is a disposition-less WAIT, not an arming/alloc bug ([`arch/fman-fe-ehash.md`](../arch/fman-fe-ehash.md) §8.1–§8.3). **The active M2 path is Fork B** — the external-hash + FE opcode VM, assembled dormant in board patches `0122`→`0131`. The immediate next step is therefore **the D9-B arm** (KeyGen→AC_CC + BMI CC-root → `FE_ENTER`), not MANIP-dedup. The MANIP-dedup remains required, but as the **Phase-2 MURAM guard** for the forwarding header-manip under the FE path (`fman_hm_nexthop_get/put`, `0120`), not as the M2 unblock. The full sequenced plan is [`plans/ASK2-DEVELOPMENT-PLAN.md`](ASK2-DEVELOPMENT-PLAN.md); §6.1 below is updated to match.
+
 **[NOTE]**
 Cross-flavor leverage: the PCD-subsystem forward-port is already shared in common (consumed via `pcd_ops`). The per-next-hop MANIP-dedup cache lives in `ask.ko`'s flow-offload path, but the underlying shared-MANIP refcount API (`fman_pcd_manip_*`) belongs in the common board stack so the default-flavor CC tree can reuse it.
 
@@ -143,15 +145,15 @@ Build order is **bottom-up by dependency layer**, NOT module-by-module. `ask.ko`
 1. **Substrate (mostly DONE, common / `main`)** — the FMan-PCD subsystem (`0092`/`0097`–`0101`) + `dpaa_flavor_ops` RCU hooks; `ask.ko` is a `pcd_ops` consumer. Remaining substrate task = the productive CC-forwarding wiring (group_off getter → `fman_port_set_cc_base` call-site → `attach_cc` on the RSS scheme) + the shared-MANIP refcount API. Gates M2; shared with DPAA1.
 2. **`ask.ko` skeleton** — builds, **signs** (`MODULE_SIG_FORCE`), loads with `LOCALVERSION=-vyos`; in-tree patches applied (0004 stub OK).
 3. **`ask.ko` control plane** — `ask_main.c` + `ask_genl.c` → YNL family `ask` (`ASK_CMD_GET_INFO`); verify `ynl --family ask --do get-info`.
-4. **`ask.ko` flow core** — `ask_flow.c` (rhashtable+RCU) → `ask_flow_offload.c` (`flow_block_cb`; nft `flow add` reaches the callback).
-5. **Wire to silicon → M2 gate (current blocker)** — couple flow-offload to `fman_pcd_cc_node_add_key()` + `FORWARD_FQ_WITH_MANIP` using the **per-next-hop shared-MANIP dedup** (§6 [BUG] fix). End-to-end on HW → **M2: ≥ 2 Gbps + ≤ 5% CPU** (last run 6.955 Gbps / 21.4% CPU FAIL).
+4. **`ask.ko` flow core** — `ask_flow.c` (rhashtable+RCU) → `ask_flow_offload.c` (`flow_block_cb`; nft `flow add` reaches the callback). **Substantially built today.**
+5. **Arm the FE datapath → M2 gate (current blocker)** — Fork B, not Fork A. First byte-validate the dormant `0122`→`0131` FE/ehash chain against the oracle via the `fe_*` debugfs readback (Phase 0), then land the **D9-B arm** (board `0132`: KeyGen→AC_CC + BMI CC-root → `FE_ENTER`, eth3 only, forward+inverse in one patch). Then re-point `ask_hw.c`'s `fman_pcd_offload_engage` at the FE arm and populate flows via the FE store, using the **per-next-hop shared-MANIP dedup** (§6 [BUG]) as the MURAM guard. End-to-end on HW → **M2: ≥ 2 Gbps + ≤ 5% CPU** (last Fork-A run 6.955 Gbps / 21.4% CPU FAIL). See [`plans/ASK2-DEVELOPMENT-PLAN.md`](ASK2-DEVELOPMENT-PLAN.md) Phases 0–2.
 6. **Broaden flow types + `ask_bridge.ko`** — IPv6, mcast, then L2-bridge. `ask_bridge.ko` lands **after** the IPv4 datapath passes M2 — it is NOT a peer of `ask.ko`.
-7. **`ask_xfrm.c`** — `xdo_dev_state_add` + CAAM shared descriptors (CAAM HW already live). **M4: AES-GCM-128 @ 3 Gbps.**
+7. **`ask_xfrm.c`** — `xdo_dev_state_add` + CAAM shared descriptors. Forward-port `0001-caam-qi-share` into the common board tree first (absent from the single image today). **M4: AES-CBC-SHA256 @ 3 Gbps** (GCM is refused per spec §5.3 — the §11.1 AES-GCM-128 gate is a contradiction to reconcile; see ASK2-DEVELOPMENT-PLAN §4.5).
 8. **YNL schema finalize + VyOS CLI** — `set system offload ask`; op_mode calls `ynl` from Python (no daemon).
 9. **VPP coexistence + soak** — global ASK↔VPP mutex; the Reversibility-Contract gate (100× toggle, pcd-snapshot diff clean, VPP works after the 100th teardown) → v1.0 RC.
 
 **[SPEC]**
-Direct answer: **`ask.ko` first** (built in layers 2–5), **`ask_bridge.ko` later** (step 6) — but the true prerequisite to both is the common PCD substrate (step 1, already landed via DPAA1) + the MURAM MANIP-dedup, which is the immediate next step and shared leverage with DPAA1.
+Direct answer: **`ask.ko` first** (built in layers 2–5), **`ask_bridge.ko` later** (step 6) — but the true prerequisite to both is the common PCD substrate (step 1, already landed via DPAA1). The immediate next step is the **Fork-B FE arm (D9-B)**, gated behind a clean `fe_*` byte-validation of the dormant `0122`→`0131` chain; the MURAM MANIP-dedup is a Phase-2 guard under that path, not the M2 unblock.
 
 ---
 
@@ -162,7 +164,7 @@ The forward-ports and datapath debug are DONE (PCD, CEETM, true-ZC, CC steering,
 1. Run the quantitative wire gates on the §8 harness (≥7 Gbps literal, policer 2.5 Gbps cap + red-drops, M3-3c 802.1Q tagged source).
 2. Characterize the BUG 3b flood-crash (serial capture + cold power-cycle) — riskiest, do last.
 3. VPP HW benchmark on 6.18.x.
-4. ASK2 `ask20` (deferred until DPAA1 is fully closed): follow the **§6.1 build order** — the common PCD substrate productive-wiring + the M2 MANIP-dedup `-ENOMEM` fix first, then the `ask.ko` layers, then `ask_bridge.ko`.
+4. ASK2 `ask20` (deferred until DPAA1 is fully closed): follow the **§6.1 build order** and [`plans/ASK2-DEVELOPMENT-PLAN.md`](ASK2-DEVELOPMENT-PLAN.md) — Phase 0 byte-validate the dormant FE chain, Phase 1 the D9-B FE arm, then `ask.ko` FE-wiring + the M2 MANIP-dedup MURAM guard, then `ask_bridge.ko`/IPsec/CLI.
 
 ---
 
