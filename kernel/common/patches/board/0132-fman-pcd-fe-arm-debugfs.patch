@@ -24,10 +24,11 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/eth
 index e4c488e..9f1b2d3 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
-@@ -657,6 +657,27 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
- }
- EXPORT_SYMBOL_GPL(keygen_scheme_setup);
+@@ -657,6 +657,28 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
  
+ 	return 0;
+ }
++
 +/**
 + * keygen_scheme_set_mode_raw() - write kgse_mode and kgse_ccbs directly.
 + * @keygen:    KeyGen instance
@@ -49,6 +50,8 @@ index e4c488e..9f1b2d3 100644
 +}
 +EXPORT_SYMBOL_GPL(keygen_scheme_set_mode_raw);
 +
+ EXPORT_SYMBOL_GPL(keygen_scheme_setup);
+ 
  /* keygen_init
   *
   * Initializes the FM KEYGEN module.
