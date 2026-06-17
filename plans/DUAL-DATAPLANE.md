@@ -164,6 +164,24 @@ graph LR
 **M2 — HW classification (the parity keystone).** Engage the classifier and make a classified frame reach its egress FQ, deleting the `0118` CCBS placebo (which *bypasses* classification rather than enabling it). **Fork decision RESOLVED (2026-06-16): Fork B.** Option B (the missing-controller-arming theory) is **exhausted & refuted** — iter-49 (`ccexp47_rfne.py`) tested the strongest untested lead, the SDK `rfne`-last detach/re-arm discipline, byte-perfectly and the port **still stalled** (`FMFP_PS[STL]=0x80800000` at rfrc=+2, identical to baseline); with gmask/exit-NIA/leaf-AD/extraction/RCMNE/params-page/ucode all previously exonerated, **classic exact-match (Fork A) cannot flow on 210.10.1** (qdrant `m3-3b-option-b-rfne-last-REFUTED-forkB-decision`). This confirms the M0 oracle ([`arch/fman-fe-ehash.md`](../arch/fman-fe-ehash.md) §1/§8.3): bare AC_CC `CONTRL_FLOW` has no terminal BMI-FIFO disposition without the **FE opcode VM**. **The path is therefore Fork B** — reproduce the vendor external-hash/FE init contract (doc §3–§5: `AllocFEObjs` MURAM pool + per-port `FmPortSetFESupport` + `ExternalHashTableSet` DDR buckets, each with its inverse), the **only** config proven to flow on this silicon and the eventual substrate for NAT/frag/stats. **⚠ Source-of-truth (corrected 2026-06-15):** the doc §3–§5 *allocation* skeleton is genuine lf-6.6.y archive source, but the FE-VM *programming* core (`FmPcdCcBuildFE` / `FmPcdCcBuildContextByFE` / `get_indexed_hash_bucket`) is **stubbed** in that archive **and in the shipping `lf-6.12.49-2.2.0` mono port** (both no-op `UNUSED()`) — Fork B must extract those three from the **lf-5.4 Layerscape SDK** (`we-are-mono/ASK` `999-…patch`: `FmPcdCcBuildFE` L8883, `FmPcdCcBuildContextByFE` L8954, `get_indexed_hash_bucket` L7301), the only tree with working bodies. The `106.4.18` ucode swap is **ruled out** (iter-42: identical handler code; ccexp12: parks identically). Fork B lands its inverse in the same patch (§3.5 reversibility). First packet of a flow → exception to kernel; subsequent packets classified in silicon.
 *Gate:* D14-class evidence — KG scheme hit counters advance, CC lookup resolves, classified flow's frames stop appearing in kernel softirq **and the port stays alive under sustained traffic** (the M3-3b disposition criterion); teardown still snapshot-clean.
 
+> **M2 status — Fork B executed on silicon, parks (VERDICT D); documented clean boundary (2026-06-17).**
+> The full Fork-B FE-VM substrate (board patches `0122`–`0133`) was built, armed, and trafficked on the board
+> (192.168.1.190, image `2026.06.17-1954-rolling`, kernel `6.18.34-vyos`, CI `27715693384`, eth3 port `0x10`).
+> **(1)** The chain now **builds on-board for the first time** — the `FMAN_PCD_FE_POOL_COUNT 100→32` fix
+> (`b83cee7`/`56a3e10`, per-object 256 B gen_pool chunk-waste; arena `32+131+35+1=199<256` chunks) makes
+> `fe_pool`/`fe_ehash`/`fe_port`/`fe_singletons`/`fe_hashfe`/`fe_enq`/`fe_enter` all return `ok`, MURAM pristine.
+> **(2)** The per-port FE buffer (`fe_port`/`FmPortSetFESupport`) is **necessary-not-sufficient**: `fe_arm engage`
+> still **parks the port immediately** (`FMFP_PS=0x80800000` STL, `rfrc=+21`) with **VERDICT D — zero fault
+> latched** (`fmdmsr=0`, `fmfp_ee` unchanged, `decceh=0`), identical to bare iter-26–50 / `0133`. **The precise
+> remaining gap is the FE working-store context population** (`FmPcdCcBuildContextByFE`, lf-5.4-only stub): the FE
+> VM's MUX reads its next-FE pointer from a per-task working-store context (`0xd0xx`) that nothing populates, so the
+> frame WAITs forever and never reaches the `t_ExtHashFe` terminal dealloc. See [`arch/fman-fe-ehash.md`](../arch/fman-fe-ehash.md) §8.7.
+> **Clean boundary:** the FE-VM scaffold is complete, **dormant, byte-verified, and fully reversible** (M1 HW-proven,
+> `pcd-snapshot` clean); M2 functional-close is blocked solely on the inaccessible lf-5.4 working-store body (a
+> **source-availability wall, not an effort gap** — 50+ clean-room iterations). The shipping datapath is **AF_XDP**
+> (~3.5 Gbps, already on `main`); the scaffold ships dormant and re-activates the instant the working-store body
+> becomes available. This is the M2 stopping point at which `dpaa1` merges to `main`.
+
 **M3 — HW forwarding.** CC match → `FORWARD_FQ_WITH_MANIP` (L2 rewrite + TTL/cksum in the CC-action atom, no OH-port detour) → egress FQ. ask.ko populates flows from `nf_flow_table` EST events per the ASK2 spec.
 *Gate:* IPv4 routed flow forwarded entirely in silicon; perf per ASK2 §11.1 (≥ multi-Gbps with kernel-net CPU ≤ 5%, vs 21.4% at PR14z21); MURAM accounting instrumented (the PR14z21 `-ENOMEM` lesson).
 
