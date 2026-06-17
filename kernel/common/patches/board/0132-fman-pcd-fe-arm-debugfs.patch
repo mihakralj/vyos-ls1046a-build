@@ -310,15 +310,4 @@ index d448d16..e5a1f2b 100644
 +fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o fman_pcd_kg.o fman_pcd_cc.o fman_pcd_manip.o fman_pcd_plcr.o fman_pcd_cc_test.o fman_pcd_dcsr.o fman_pcd_fe_arm.o
  fsl_dpaa_fman_port-objs := fman_port.o
  fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
-diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index 01b657a..f8d4e2c 100644
---- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
-+++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -2225,6 +2225,7 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
- 			debugfs_create_file("fe_hashfe", 0644,
- 					    pcd->debugfs_dir, pcd,
- 					    &fman_pcd_fe_hashfe_fops);
-+			fman_pcd_fe_arm_debugfs_init(pcd->debugfs_dir, pcd);
- 		}
- 	}
  
