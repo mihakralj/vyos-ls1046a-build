@@ -115,6 +115,17 @@ hdr "2) CAAM kernel drivers"
 #   error           — error decode helpers
 # A previous version of this script also probed caamalg/caamhash/etc.
 # as if they were separate modules — they never load on mainline 6.x.
+#
+# Built-in (CONFIG_CRYPTO_DEV_FSL_CAAM*=y) posture: when CAAM is linked
+# into vmlinux the kernel creates NO /sys/module/<drv> directory (the
+# drivers expose no module parameters) and lsmod never lists them, even
+# though they are fully active. modules.builtin is then the authoritative
+# "is this driver present" signal — probe it before declaring a failure.
+KREL="$(uname -r)"
+BUILTIN_LIST="/lib/modules/${KREL}/modules.builtin"
+caam_is_builtin() {  # $1 = driver basename (no .ko)
+    [ -f "$BUILTIN_LIST" ] && grep -q "drivers/crypto/caam/$1\.ko\$" "$BUILTIN_LIST"
+}
 CAAM_DRVS=(caam caam_jr caamalg_desc caamhash_desc error)
 for drv in "${CAAM_DRVS[@]}"; do
     # drivers/crypto/caam/error.c builds as a module literally named
@@ -131,6 +142,10 @@ for drv in "${CAAM_DRVS[@]}"; do
         else
             ok "${label} present (built-in)"
         fi
+    elif caam_is_builtin "$drv"; then
+        # =y: linked into vmlinux, no /sys/module/<drv> dir, absent from
+        # lsmod — but present and active (see dmesg banner / Job Rings).
+        ok "${label} present (built-in, =y)"
     else
         # caam + caam_jr are mandatory; the *_desc helpers are pulled in
         # automatically by caam_jr's symbol deps so absence is also a
