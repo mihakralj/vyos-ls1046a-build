@@ -1,0 +1,134 @@
+fman_pcd: FE-VM arm - real AC_CC encoding (Phase 1 D9-B, board 0133)
+
+Board patch 0132 shipped the fe_arm 'engage' verb but armed the KeyGen
+scheme with the KGSE_CCBS placebo (next_engine=2, mode 0x80500002): per
+the CC-dispatch truth table that encoding NEVER invokes the CC walk -
+frames bypass into plain RSS, so an arm through it is a false positive.
+
+This corrects the arm to the REAL AC_CC encoding: a new next_engine==3
+branch in keygen_scheme_setup emits KGSE_MODE = FM_CTL|AC_CC (0x80000006)
+with KGSE_CCBS=0, and fman_pcd_kg_port_arm_fe() sets next_engine=3 /
+cc_bits_sel=0.  The FMBM_RCCB write (-> FE_ENTER root AD) is unchanged and
+already correct.  The two NIA_ENG_FM_CTL / NIA_FM_CTL_AC_CC defines that
+0118 dropped are re-added (used only by the new branch; the CCBS
+implicit-walk graft for next_engine==2 is untouched, as are the policer,
+M1-engage and RSS paths).  disarm is unchanged (forces next_engine=0).
+
+Ships DORMANT: the encoding only takes effect on an explicit echo to the
+fman_pcd/<id>/fe_arm debugfs node.  This is the make-or-break M2 dispatch
+experiment - the only encoding that genuinely enters the FE VM terminal
+disposition that a bare exact-match leaf lacks (M3-3b iter-50 park).
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+@@ -124,5 +124,15 @@
+  * only ORs in CCOBASE.
+  */
+ #define KG_SCH_MODE_CCOBASE_SHIFT	24
++
++/* Next-engine = real Coarse-Classification AC_CC dispatch (board 0133,
++ * Fork-B FE-VM arm).  Re-added after 0118 dropped them: with these the
++ * KGSE_MODE NIA flips to FM_CTL|AC_CC (0x80000006) so the FMan
++ * controller walks the CC root named by the port's FMBM_RCCB.  Used
++ * only by next_engine==3 (the FE_ENTER arm); the CCBS implicit-walk
++ * graft (next_engine==2) is untouched.
++ */
++#define NIA_ENG_FM_CTL			0x00000000
++#define NIA_FM_CTL_AC_CC		0x00000006
+ 
+ /* Hard-coded configuration:
+@@ -564,6 +564,17 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+ 			tmp_reg |= ENQUEUE_KG_DFLT_NIA |
+ 				(scheme->cc_base_offset <<
+ 				 KG_SCH_MODE_CCOBASE_SHIFT);
++		} else if (scheme->next_engine == 3) {
++			/* Next engine = real Coarse Classification AC_CC
++			 * (board 0133, Fork-B FE-VM arm): NIA = FM_CTL |
++			 * AC_CC (mode 0x80000006) so the FMan controller
++			 * walks the CC root named by the port's FMBM_RCCB -
++			 * here the FE_ENTER root AD.  KGSE_CCBS stays 0.
++			 * A bare exact-match leaf parks with no disposition
++			 * (M3-3b iter-50); the FE VM behind FMBM_RCCB
++			 * supplies the terminal BMI-FIFO disposition.
++			 */
++			tmp_reg |= NIA_ENG_FM_CTL | NIA_FM_CTL_AC_CC;
+ 		} else {
+ 			/* Enqueue frame NIA */
+ 			tmp_reg |= ENQUEUE_KG_DFLT_NIA;
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -2105,8 +2105,8 @@ static const struct file_operations fman_pcd_fe_hashfe_fops = {
+ 
+ /*
+  * fe_arm - arm the FE-VM datapath on a single FMan RX port (Phase 1
+- * D9-B, patch 0132).  Reprograms the port's KGSE scheme to next_engine=CC
+- * with KGSE_CCBS = FE_ENTER root-AD offset and sets the BMI fmbm_rccb, via
+- * the KeyGen helpers in fman_pcd_kg.c (HW-proven KGSE_CCBS approach, 0118).
++ * D9-B, patch 0132; arm encoding corrected by board 0133).  Reprograms the
++ * port's KGSE scheme to the REAL AC_CC NIA (next_engine=3, mode 0x80000006)
++ * and points the BMI fmbm_rccb at the FE_ENTER root AD.
+  * eth3 / hw port 0x10 only in practice.  The node lives here (not in a
+  * separate TU) so it can read pcd->fe_refcount / pcd->fe_root_ad_off
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+@@ -729,16 +729,19 @@ int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
+ 	}
+ 	*saved_engine = slot->next_engine;
+ 
+-	/*
+-	 * Arm the FE datapath (Fork B, Phase 1 D9-B).
+-	 * Use the KGSE_CCBS approach (HW-proven per 0118): set kgse_ccbs
+-	 * to the FE_ENTER AD offset; the CC walk fires because ccbs is
+-	 * non-zero; NIA stays BMI direct-enqueue.  The CC engine resolves
+-	 * its root from the BMI port's fmbm_rccb (set in step 2).
+-	 */
+-	slot->next_engine    = 2;
+-	slot->cc_base_offset = 0;
+-	slot->cc_bits_sel    = fe_enter_off;
++	/*
++	 * Arm the FE datapath (Fork B, Phase 1 D9-B; arm encoding
++	 * corrected by board 0133).  Use the REAL AC_CC NIA, the only
++	 * encoding that actually dispatches the CC walk: next_engine=3
++	 * makes keygen_scheme_setup emit KGSE_MODE = FM_CTL|AC_CC
++	 * (0x80000006) with KGSE_CCBS=0.  The CC root is the FE_ENTER
++	 * AD, named at the BMI port's fmbm_rccb (set in step 2); the
++	 * FE VM behind it supplies the terminal BMI-FIFO disposition
++	 * a bare exact-match leaf lacks (M3-3b iter-50 park).
++	 */
++	slot->next_engine    = 3;
++	slot->cc_base_offset = 0;
++	slot->cc_bits_sel    = 0;
+ 	slot->used = false;
+ 	err = keygen_scheme_setup(keygen, id, true);
+ 	if (err) {
+@@ -767,8 +767,8 @@ int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
+ 		return err;
+ 	}
+ 
+-	pr_info("fman_pcd: port 0x%02x FE-ARMED (fmbm_rccb=0x%x, kgse_ccbs=0x%x)\n",
+-		hw_port_id, fe_enter_off, fe_enter_off);
++	pr_info("fman_pcd: port 0x%02x FE-ARMED (kgse_mode=AC_CC fmbm_rccb=0x%x kgse_ccbs=0)\n",
++		hw_port_id, fe_enter_off);
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_kg_port_arm_fe);
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -286,8 +286,8 @@ int fman_pcd_kg_port_attach_cc(struct fman_pcd *pcd, u8 hw_port_id,
+  *                engaged pcd->fe_root_ad_off)
+  * @saved_engine: out - the scheme's prior next_engine, for restore
+  *
+- * Reprograms the port's KGSE scheme to next_engine=CC with
+- * KGSE_CCBS = @fe_enter_off and sets the BMI fmbm_rccb (HW-proven
+- * KGSE_CCBS approach, patch 0118).  NIA stays BMI direct-enqueue.
++ * Reprograms the port's KGSE scheme to the real AC_CC NIA (next_engine=3,
++ * mode 0x80000006, KGSE_CCBS=0) and points the BMI fmbm_rccb at
++ * @fe_enter_off (the FE_ENTER root AD).  Corrected from the 0132 CCBS form.
+  *
+  * Return: 0 on success; negative errno (scheme/port restored on failure).

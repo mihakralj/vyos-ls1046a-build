@@ -335,6 +335,9 @@ BMI direct-enqueue); prototypes in `include/linux/fsl/fman_pcd.h`. Verbs:
 `stage-kernel.sh` `git apply --3way` through `0132`; `fman_pcd.o` and
 `fman_pcd_kg.o` compile with zero errors / zero warnings under
 `LOCALVERSION=-vyos`. Not yet armed on silicon — gated on a CI ISO build.
+**(The `KGSE_CCBS` arm encoding described here is a placebo that never
+dispatches the CC walk; corrected to real AC_CC by board `0133` — see the
+`[BUG]` immediately below.)**
 
 **[NOTE]**
 The prior pre-Path-2 iteration of `0132` (separate `fman_pcd_fe_arm.c` TU +
@@ -342,6 +345,38 @@ Makefile object + `fman_pcd_internal.h` proto) was abandoned — it tripped
 three compile blockers (opaque-struct deref across TUs, missing arm/disarm
 protos, dead local KGSE register mirror under `CONFIG_WERROR`). Superseded
 in full by the Path 2 rewrite.
+
+**[BUG] `0132` armed the KGSE_CCBS placebo, not real AC_CC — corrected by board
+`0133` (2026-06-17)**
+- Symptom: `0132`'s `fman_pcd_kg_port_arm_fe()` set `slot->next_engine=2`,
+  `cc_bits_sel=fe_enter_off` → `keygen_scheme_setup` emits `KGSE_MODE`
+  `0x80500002` (`ENQUEUE_KG_DFLT_NIA | CCOBASE`). Per the authoritative
+  CC-dispatch truth table that encoding NEVER invokes the FMan CC walk — the
+  frame bypasses straight into plain RSS enqueue. Arming eth3 through the
+  `fe_arm` node would therefore *appear* to engage while silently doing
+  nothing, burning the one-shot-per-boot M2 dispatch experiment on a false
+  positive (and contradicting §10, which already specifies `0x8X000006`).
+- Cause: the `0132` SPEC above mislabelled the `KGSE_CCBS` graft as
+  "HW-proven" for *dispatch*; `0118` only proved CCBS as an implicit-walk
+  *next_engine==2* path, which the M0 oracle (§8.3) and iter-50 fault-capture
+  (VERDICT D — zero fault latched at the AC_CC stall) show has no terminal
+  BMI-FIFO disposition. The only encoding that genuinely enters the CC walk
+  (and thus the FE VM behind `FMBM_RCCB`) is the real AC_CC NIA.
+- Fix: board `0133-fman-pcd-fe-arm-real-accc.patch` adds a `next_engine==3`
+  branch to `keygen_scheme_setup` that ORs `NIA_ENG_FM_CTL | NIA_FM_CTL_AC_CC`
+  → `KGSE_MODE` `0x80000006` with `KGSE_CCBS=0` (re-adding the two NIA defines
+  `0118` dropped, used only by this branch — the `==2` CCBS graft, policer,
+  M1-engage and RSS paths are byte-unchanged), and flips the arm helper to
+  `next_engine=3` / `cc_bits_sel=0`. The `FMBM_RCCB` write (→ FE_ENTER root
+  AD) was already correct and is unchanged; `disarm` is unchanged (forces
+  `next_engine=0`). Ships DORMANT (encoding takes effect only on an explicit
+  echo to `fe_arm`). This is exactly the dispatch iter-50 proved parks a bare
+  exact-match leaf — the make-or-break M2 test is whether the FE VM behind
+  `FMBM_RCCB` now supplies the terminal disposition the leaf lacked. Validated
+  off-tree: LF-only, 6/6 hunk headers arithmetically self-consistent, brace-
+  balanced, every context/removed line byte-exact vs the committed
+  `0132`/`0118`/`0106`, staging guard green (85/85). Gated on a CI ISO build +
+  the §8.6-item-6 dormant byte-gate before the explicit one-shot arm.
 
 ---
 
