@@ -302,7 +302,7 @@ diff --git a/drivers/net/ethernet/freescale/fman/Makefile b/drivers/net/ethernet
 index d448d16..e5a1f2b 100644
 --- a/drivers/net/ethernet/freescale/fman/Makefile
 +++ b/drivers/net/ethernet/freescale/fman/Makefile
-@@ -6,6 +6,6 @@ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_fman_port.o
+@@ -6,7 +6,7 @@ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_fman_port.o
  obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_mac.o
  
  fsl_dpaa_fman-objs			:= fman_muram.o fman.o fman_sp.o fman_keygen.o
