@@ -24,7 +24,7 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/eth
 index e4c488e..9f1b2d3 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
-@@ -657,6 +657,28 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+@@ -657,6 +657,26 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
  }
  EXPORT_SYMBOL_GPL(keygen_scheme_setup);
  
@@ -191,18 +191,6 @@ index aed5d84..c9e3f7a 100644
 +	(void)fman_pcd_kg_port_detach_cc(pcd, hw_port_id);
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_kg_port_disarm_fe);
-diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index 01b657a..f8d4e2c 100644
---- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
-+++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -21,6 +21,7 @@
- #include <linux/seq_file.h>
- #include <linux/uaccess.h>
- 
-+#include "fman_port.h"
- #include "fman.h"
- #include "fman_pcd_internal.h"
- 
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_fe_arm.c b/drivers/net/ethernet/freescale/fman/fman_pcd_fe_arm.c
 new file mode 100644
 index 0000000..5e1a9b0
