@@ -1,0 +1,414 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+Date: Tue, 12 May 2026 22:30:00 +0000
+Subject: [PATCH 1/3] crypto: caam/qi: share descriptors with external
+ consumers
+
+For the ASK2 fast-path (NXP LS1046A FMan/210 ucode driving an
+offline port for IPsec hardware offload, see
+specs/ask2-rewrite-spec.md §8.1), an in-kernel consumer needs to
+dequeue completed CAAM frames from a chosen sink FQID rather than the
+standard per-CPU response FQ that caamalg_qi.c sets up.
+
+Introduce two exported entry points:
+
+    int  caam_qi_ext_consumer_register(struct caam_drv_ctx *ctx,
+                                       const char *consumer_name,
+                                       u32 sink_fqid,
+                                       u32 *caam_req_fqid);
+    void caam_qi_ext_consumer_release(struct caam_drv_ctx *ctx);
+
+plus the upstream-ready public header include/linux/crypto/caam_qi_share.h
+and small bookkeeping (mutex + bool) on struct caam_drv_ctx.
+
+Implementation strategy mirrors the existing caam_drv_ctx_update() FQ
+swap dance:
+
+  1. Allocate a fresh request FQ programmed with @sink_fqid as its
+     context_b response target (instead of qman_fq_fqid(rsp_fq)).
+  2. Atomically swap ctx->req_fq to the new FQ.
+  3. Drain the old request FQ via empty_caam_fq().
+  4. Schedule the new FQ; subsequent enqueues land at @sink_fqid.
+  5. Kill the old FQ.
+
+create_caam_req_fq() is refactored to take a u32 rsp_fqid (the value
+stored in opts.fqd.context_b) instead of a struct qman_fq *rsp_fq, so
+the register/release path can pass any FQID, not only the per-CPU
+response FQ that caam_drv_ctx_init() picks. Both existing callers
+(caam_drv_ctx_update() and caam_drv_ctx_init()) are updated to pass
+qman_fq_fqid(drv_ctx->rsp_fq), preserving prior behaviour.
+
+Single-consumer per ctx (returns -EBUSY on second register without an
+intervening release). Reference-counted via the existing
+ctx->refcnt. Idempotent release (no-op when no consumer is
+registered, including NULL/IS_ERR ctx).
+
+No behaviour change for in-tree CAAM users that do not call the new
+entry points: qi.c retains identical fast-path semantics; only the
+struct grows by sizeof(struct mutex) + sizeof(bool).
+
+Caller-side documentation lives in include/linux/crypto/caam_qi_share.h.
+
+---
+diff --git a/drivers/crypto/caam/qi.c b/drivers/crypto/caam/qi.c
+index 1e731ed..da5388c 100644
+--- a/drivers/crypto/caam/qi.c
++++ b/drivers/crypto/caam/qi.c
+@@ -16,6 +16,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/slab.h>
+ #include <linux/string.h>
++#include <linux/crypto/caam_qi_share.h>
+ #include <soc/fsl/qman.h>
+ 
+ #include "debugfs.h"
+@@ -173,7 +174,7 @@ static void caam_fq_ern_cb(struct qman_portal *qm, struct qman_fq *fq,
+ }
+ 
+ static struct qman_fq *create_caam_req_fq(struct device *qidev,
+-					  struct qman_fq *rsp_fq,
++					  u32 rsp_fqid,
+ 					  dma_addr_t hwdesc,
+ 					  int fq_sched_flag)
+ {
+@@ -201,7 +202,7 @@ static struct qman_fq *create_caam_req_fq(struct device *qidev,
+ 				   QM_INITFQ_WE_CONTEXTA | QM_INITFQ_WE_CGID);
+ 	opts.fqd.fq_ctrl = cpu_to_be16(QM_FQCTRL_CPCSTASH | QM_FQCTRL_CGE);
+ 	qm_fqd_set_destwq(&opts.fqd, qm_channel_caam, 2);
+-	opts.fqd.context_b = cpu_to_be32(qman_fq_fqid(rsp_fq));
++	opts.fqd.context_b = cpu_to_be32(rsp_fqid);
+ 	qm_fqd_context_a_set64(&opts.fqd, hwdesc);
+ 	opts.fqd.cgid = qipriv.cgr.cgrid;
+ 
+@@ -340,7 +341,8 @@ int caam_drv_ctx_update(struct caam_drv_ctx *drv_ctx, u32 *sh_desc)
+ 	old_fq = drv_ctx->req_fq;
+ 
+ 	/* Create a new req FQ in parked state */
+-	new_fq = create_caam_req_fq(drv_ctx->qidev, drv_ctx->rsp_fq,
++	new_fq = create_caam_req_fq(drv_ctx->qidev,
++				    qman_fq_fqid(drv_ctx->rsp_fq),
+ 				    drv_ctx->context_a, 0);
+ 	if (IS_ERR(new_fq)) {
+ 		dev_err(qidev, "FQ allocation for shdesc update failed\n");
+@@ -452,7 +454,9 @@ struct caam_drv_ctx *caam_drv_ctx_init(struct device *qidev,
+ 	drv_ctx->rsp_fq = per_cpu(pcpu_qipriv.rsp_fq, drv_ctx->cpu);
+ 
+ 	/* Attach request FQ */
+-	drv_ctx->req_fq = create_caam_req_fq(qidev, drv_ctx->rsp_fq, hwdesc,
++	drv_ctx->req_fq = create_caam_req_fq(qidev,
++					     qman_fq_fqid(drv_ctx->rsp_fq),
++					     hwdesc,
+ 					     QMAN_INITFQ_FLAG_SCHED);
+ 	if (IS_ERR(drv_ctx->req_fq)) {
+ 		dev_err(qidev, "create_caam_req_fq failed\n");
+@@ -464,6 +468,10 @@ struct caam_drv_ctx *caam_drv_ctx_init(struct device *qidev,
+ 	/* init reference counter used to track references to request FQ */
+ 	refcount_set(&drv_ctx->refcnt, 1);
+ 
++	/* External-consumer (caam_qi_ext_consumer_register) bookkeeping. */
++	mutex_init(&drv_ctx->ext_lock);
++	drv_ctx->ext_active = false;
++
+ 	drv_ctx->qidev = qidev;
+ 	return drv_ctx;
+ }
+@@ -811,3 +819,170 @@ free_cpumask:
+ fail_cpumask:
+ 	return err;
+ }
++
++/*
++ * --------------------------------------------------------------------
++ * External-consumer descriptor sharing (CAAM/QI <-> non-crypto-API)
++ * --------------------------------------------------------------------
++ *
++ * See include/linux/crypto/caam_qi_share.h for the public contract.
++ *
++ * Implementation strategy: mirror caam_drv_ctx_update() FQ-swap dance.
++ *
++ * 1. Allocate a new request FQ programmed with @sink_fqid (instead of
++ *    the per-CPU rsp_fq->fqid) as its response target via context_b.
++ * 2. Park-and-empty the old request FQ. In-flight responses already on
++ *    the old per-CPU rsp_fq path drain naturally.
++ * 3. Atomically swap ctx->req_fq to the new FQ.
++ * 4. Schedule the new FQ. Subsequent enqueues land at @sink_fqid.
++ */
++int caam_qi_ext_consumer_register(struct caam_drv_ctx *ctx,
++				  const char *consumer_name,
++				  u32 sink_fqid,
++				  u32 *caam_req_fqid)
++{
++	struct qman_fq *new_fq, *old_fq;
++	struct device *qidev;
++	int ret;
++
++	if (IS_ERR_OR_NULL(ctx) || !consumer_name || !caam_req_fqid ||
++	    sink_fqid == 0)
++		return -EINVAL;
++
++	qidev = ctx->qidev;
++
++	mutex_lock(&ctx->ext_lock);
++
++	if (ctx->ext_active) {
++		dev_dbg(qidev,
++			"caam_qi: ext_consumer already registered on ctx %px\n",
++			ctx);
++		mutex_unlock(&ctx->ext_lock);
++		return -EBUSY;
++	}
++
++	old_fq = ctx->req_fq;
++
++	new_fq = create_caam_req_fq(qidev, sink_fqid, ctx->context_a, 0);
++	if (IS_ERR(new_fq)) {
++		ret = PTR_ERR(new_fq);
++		dev_err(qidev,
++			"caam_qi: ext_consumer FQ alloc failed for %s: %d\n",
++			consumer_name, ret);
++		mutex_unlock(&ctx->ext_lock);
++		return ret;
++	}
++
++	/* Hook up new FQ so subsequent enqueues queue against it. */
++	ctx->req_fq = new_fq;
++
++	/* Drain the old req FQ. Same pattern as caam_drv_ctx_update(). */
++	ret = empty_caam_fq(old_fq, ctx);
++	if (ret) {
++		dev_err(qidev,
++			"caam_qi: failed to drain old req FQ for %s: %d\n",
++			consumer_name, ret);
++		ctx->req_fq = old_fq;
++		if (kill_fq(qidev, new_fq))
++			dev_warn(qidev,
++				 "caam_qi: ext_consumer new FQ kill failed\n");
++		mutex_unlock(&ctx->ext_lock);
++		return ret;
++	}
++
++	ret = qman_schedule_fq(new_fq);
++	if (ret) {
++		dev_err(qidev,
++			"caam_qi: failed to schedule ext_consumer FQ for %s: %d\n",
++			consumer_name, ret);
++		ctx->req_fq = old_fq;
++		if (kill_fq(qidev, new_fq))
++			dev_warn(qidev,
++				 "caam_qi: ext_consumer new FQ kill failed\n");
++		mutex_unlock(&ctx->ext_lock);
++		return ret;
++	}
++
++	if (kill_fq(qidev, old_fq))
++		dev_warn(qidev,
++			 "caam_qi: ext_consumer old FQ kill failed (leaking)\n");
++
++	ctx->ext_active = true;
++	refcount_inc(&ctx->refcnt);
++
++	*caam_req_fqid = qman_fq_fqid(new_fq);
++
++	dev_dbg(qidev,
++		"caam_qi: ext_consumer %s installed: req_fqid=%u sink_fqid=%u\n",
++		consumer_name, *caam_req_fqid, sink_fqid);
++
++	mutex_unlock(&ctx->ext_lock);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(caam_qi_ext_consumer_register);
++
++void caam_qi_ext_consumer_release(struct caam_drv_ctx *ctx)
++{
++	struct qman_fq *new_fq, *old_fq;
++	struct device *qidev;
++	int ret;
++
++	if (IS_ERR_OR_NULL(ctx))
++		return;
++
++	qidev = ctx->qidev;
++
++	mutex_lock(&ctx->ext_lock);
++
++	if (!ctx->ext_active) {
++		mutex_unlock(&ctx->ext_lock);
++		return;
++	}
++
++	old_fq = ctx->req_fq;
++
++	/*
++	 * Restore the default per-CPU response path: re-create the request
++	 * FQ with rsp_fq->fqid as its context_b target. Same swap dance.
++	 */
++	new_fq = create_caam_req_fq(qidev, qman_fq_fqid(ctx->rsp_fq),
++				    ctx->context_a, 0);
++	if (IS_ERR(new_fq)) {
++		dev_err(qidev,
++			"caam_qi: ext_consumer release: req FQ realloc failed: %ld\n",
++			PTR_ERR(new_fq));
++		/*
++		 * Cannot revert cleanly. Leave ext_active=true so a retry is
++		 * possible without double-decrementing the refcount.
++		 */
++		mutex_unlock(&ctx->ext_lock);
++		return;
++	}
++
++	ctx->req_fq = new_fq;
++
++	ret = empty_caam_fq(old_fq, ctx);
++	if (ret)
++		dev_warn(qidev,
++			 "caam_qi: ext_consumer release: drain failed: %d\n",
++			 ret);
++
++	if (qman_schedule_fq(new_fq))
++		dev_warn(qidev,
++			 "caam_qi: ext_consumer release: schedule new FQ failed\n");
++
++	if (kill_fq(qidev, old_fq))
++		dev_warn(qidev,
++			 "caam_qi: ext_consumer release: old FQ kill failed\n");
++
++	ctx->ext_active = false;
++
++	dev_dbg(qidev,
++		"caam_qi: ext_consumer released, req_fqid restored to %u\n",
++		qman_fq_fqid(new_fq));
++
++	mutex_unlock(&ctx->ext_lock);
++
++	refcount_dec(&ctx->refcnt);
++}
++EXPORT_SYMBOL_GPL(caam_qi_ext_consumer_release);
+diff --git a/drivers/crypto/caam/qi.h b/drivers/crypto/caam/qi.h
+index a96e3d2..68b1461 100644
+--- a/drivers/crypto/caam/qi.h
++++ b/drivers/crypto/caam/qi.h
+@@ -11,6 +11,7 @@
+ 
+ #include <crypto/algapi.h>
+ #include <linux/compiler_attributes.h>
++#include <linux/mutex.h>
+ #include <soc/fsl/qman.h>
+ #include "compat.h"
+ #include "desc.h"
+@@ -71,6 +72,13 @@ struct caam_drv_ctx {
+ 	int cpu;
+ 	enum optype op_type;
+ 	struct device *qidev;
++	/* External-consumer support (caam_qi_ext_consumer_register).
++	 * @ext_lock serialises register/release/update against each other.
++	 * @ext_active is true while a non-callback (sink-FQID) consumer
++	 * owns the response path of this ctx.
++	 */
++	struct mutex ext_lock;
++	bool ext_active;
+ };
+ 
+ /**
+diff --git a/include/linux/crypto/caam_qi_share.h b/include/linux/crypto/caam_qi_share.h
+new file mode 100644
+index 0000000..23fac98
+--- /dev/null
++++ b/include/linux/crypto/caam_qi_share.h
+@@ -0,0 +1,94 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * CAAM/QI external descriptor sharing.
++ *
++ * Allows an in-kernel consumer (e.g. NXP LS1046A FMan 210 ucode driving
++ * an offline port for IPsec hardware fast-path) to dequeue completed
++ * frames from a CAAM/QI request context's response side directly,
++ * instead of going through the standard kernel-crypto-API callback.
++ *
++ * The CAAM driver context is created in the normal way (via
++ * caam_drv_ctx_init() out of caamalg_qi.c). After registration the
++ * CAAM hardware is reprogrammed to enqueue completed frames to a
++ * caller-supplied sink FQID instead of the per-CPU response FQ.
++ *
++ * Single-consumer per ctx. Reference-counted. Idempotent release.
++ *
++ * See specs/ask2-rewrite-spec.md §8.1 (vyos-ls1046a-build) for the
++ * design rationale.
++ *
++ * Copyright 2026 Mono Networks / VyOS LS1046A maintainers.
++ */
++
++#ifndef _LINUX_CRYPTO_CAAM_QI_SHARE_H
++#define _LINUX_CRYPTO_CAAM_QI_SHARE_H
++
++#include <linux/types.h>
++
++struct caam_drv_ctx;
++
++/**
++ * caam_qi_ext_consumer_register - share a CAAM/QI descriptor's response path
++ *				   with an external dequeuer.
++ * @ctx:		descriptor context previously created via
++ *			caam_drv_ctx_init() (typically by caamalg_qi.c on
++ *			behalf of an xfrm SA install).
++ * @consumer_name:	diagnostic string for tracepoints / dev_dbg, e.g.
++ *			"ask:fman0:op1:spi-0x12345678". Must be non-NULL.
++ * @sink_fqid:		FQID that CAAM should enqueue completed (response)
++ *			frames to. Caller-owned (typically a 210-managed
++ *			FMan offline-port RX FQ). REPLACES the per-CPU
++ *			response path; while an external consumer is
++ *			registered, in-kernel crypto-API callers of @ctx will
++ *			NOT receive completions via the normal callback.
++ * @caam_req_fqid:	[out] FQID of the CAAM request queue that the
++ *			external producer (e.g. FMan 210 ucode) must enqueue
++ *			encrypted ESP frames to. This is the request FQ's
++ *			current FQID, exposed read-only to the caller. May
++ *			change across register/release cycles (see Notes).
++ *
++ * Single-consumer: returns -EBUSY if @ctx already has an external
++ * consumer registered.
++ *
++ * Refcount: increments @ctx->refcnt on success. The caller must invoke
++ * caam_qi_ext_consumer_release() to balance it.
++ *
++ * Notes:
++ * - Implementation parks the existing request FQ, allocates a fresh one
++ *   programmed with sink_fqid as its response target, and atomically
++ *   swaps it in (mirroring caam_drv_ctx_update()). The new FQ has a
++ *   different (dynamically allocated) FQID; that is the FQID returned
++ *   in *@caam_req_fqid.
++ * - Frames already in flight when this is called complete on the OLD
++ *   response path; only frames enqueued after the swap reach
++ *   @sink_fqid.
++ * - Caller is responsible for any synchronisation needed against the
++ *   external dequeuer when sink_fqid is shared (e.g. parking the FMan
++ *   offline port before release).
++ *
++ * Return: 0 on success, -EINVAL on bad arguments, -EBUSY if an external
++ * consumer is already registered, -ENOMEM on allocation failure, or any
++ * negative errno propagated from the underlying QMan FQ operations.
++ */
++int caam_qi_ext_consumer_register(struct caam_drv_ctx *ctx,
++				  const char *consumer_name,
++				  u32 sink_fqid,
++				  u32 *caam_req_fqid);
++
++/**
++ * caam_qi_ext_consumer_release - undo caam_qi_ext_consumer_register().
++ * @ctx: descriptor context that was previously registered.
++ *
++ * Restores the default per-CPU response path so subsequent
++ * caam_qi_enqueue() calls on @ctx are dispatched to the normal
++ * caam_qi_cbk callback again.
++ *
++ * Idempotent: a no-op if no external consumer is currently registered
++ * on @ctx (or if @ctx is NULL / IS_ERR).
++ *
++ * In-flight frames already queued on the previous sink FQ are NOT
++ * retroactively redirected. Decrements @ctx->refcnt.
++ */
++void caam_qi_ext_consumer_release(struct caam_drv_ctx *ctx);
++
++#endif /* _LINUX_CRYPTO_CAAM_QI_SHARE_H */
+-- 
+2.39.5
+
