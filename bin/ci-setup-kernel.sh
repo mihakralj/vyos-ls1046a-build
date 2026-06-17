@@ -673,6 +673,19 @@ cp "$BOARD_PATCH_DIR/0132-fman-pcd-fe-arm-debugfs.patch"   "$KERNEL_PATCHES/"
 # M2 dispatch experiment — the only encoding that genuinely enters the FE VM
 # terminal disposition a bare exact-match leaf lacks (M3-3b iter-50 park).
 cp "$BOARD_PATCH_DIR/0133-fman-pcd-fe-arm-real-accc.patch" "$KERNEL_PATCHES/"
+# 0134: CAAM/QI descriptor sharing for ASK2 IPsec HW offload (spec §8.1, PR10).
+# Adds caam_qi_ext_consumer_register()/_release() to drivers/crypto/caam/qi.c +
+# the ext_lock/ext_active fields in struct caam_drv_ctx (qi.h) + the new header
+# include/linux/crypto/caam_qi_share.h, so a future in-kernel consumer (ask.ko's
+# CAAM/xfrm datapath) can dequeue completed CAAM frames from a chosen sink FQID.
+# Forward-ported VERBATIM from kernel/flavors/ask/patches/0001-caam-qi-share.patch,
+# which was NEVER staged after the 2026-06-14 flavor collapse killed the dead
+# FLAVOR=ask gate. Touches ONLY drivers/crypto/caam/* + a new header — zero
+# overlap with the FMan PCD board patches, so apply order is irrelevant. Exports
+# the symbols EXPORT_SYMBOL_GPL but they stay dormant (no caller until the CAAM
+# datapath lands). This cp line is MANDATORY — the staging-completeness guard
+# below fails the build if any board/*.patch lacks one.
+cp "$BOARD_PATCH_DIR/0134-caam-qi-share.patch"               "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
@@ -1041,6 +1054,19 @@ scripts/config --set-val CONFIG_SERIAL_OF_PLATFORM y
 scripts/config --set-val CONFIG_MAXLINEAR_GPHY y
 scripts/config --set-val CONFIG_IMX2_WDT y
 scripts/config --set-val CONFIG_SPI_FSL_QUADSPI y
+# CAAM (NXP SEC 5.4) hardware crypto built-in for ASK2 IPsec offload (spec §8.1).
+# vyos_defconfig ships these tristate symbols as =m; force =y so the CAAM/QI
+# backend is present at FMan bring-up and patch 0134's
+# caam_qi_ext_consumer_register/_release are compiled-in + EXPORT_SYMBOL_GPL'd
+# (a =m caam_jr would force fragile module load-order coupling with ask.ko).
+# CONFIG_CRYPTO_DEV_FSL_CAAM_QI is the symbol that actually compiles qi.c — the
+# patch's edits and exports live there; the original 5-symbol plan omitted it.
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_COMMON y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_JR y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_QI y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API_DESC y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_AHASH_API_DESC y
 scripts/config --disable CONFIG_DEBUG_PREEMPT
 scripts/config --set-val CONFIG_NEW_LEDS y
 scripts/config --set-val CONFIG_LEDS_CLASS y
