@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A CI <ci@vyos-ls1046a>
-Date: Tue, 17 Jun 2026 04:30:00 +0000
+Date: Tue, 17 Jun 2026 04:55:00 +0000
 Subject: [PATCH] fman_pcd: FE/AC_CC arm debugfs node (Phase 1 D9-B, 0132)
 
 Add a debugfs node `fe_arm` that arms the FE-VM datapath on a single
@@ -8,45 +8,15 @@ FMan RX port (eth3 / hw port 0x10 only), using the AC_CC dispatch mode
 (kgse_mode = 0x80000006, NIA_ENG_FM_CTL | NIA_FM_CTL_AC_CC) with the
 FE_ENTER root AD as the BMI coarse-classification base (fmbm_rccb).
 
-This is the Fork-B Phase 1 "D9-B arm" experiment: unlike exact-match
-CONT_LOOKUP trees (which park under AC_CC dispatch per M3-3b, 0118),
-the FE-VM substrate provides terminal egress disposition.
-
-The arm is gated: the operator must first build the dormant FE chain
-(fe_pool get → fe_singletons build → fe_ehash set → fe_enq build →
-fe_hashfe build → fe_enter build → fe_flow add) before calling
-engage.  The engage verb checks fe_root_ad_off matches and fe_pool is
-engaged.  Disengage restores the port's KeyGen scheme to RSS and
-clears fmbm_rccb.  FE chain refcounts keep objects alive across
-arm/ping/disarm so pcd-snapshot can verify reversibility.
-
 Write verbs:
   engage <hw_port_id_hex> <fe_enter_off_hex>   arm the FE datapath
   disengage <hw_port_id_hex>                    disarm, restore S0
 
 Changes:
-  fman_keygen.c
-    - New EXPORT_SYMBOL_GPL keygen_scheme_set_mode_raw(): direct
-      iowrite32be to kgse_mode and kgse_ccbs for a scheme.  Caller
-      holds the pcd lock.
-
-  fman_pcd_kg.c
-    - New fman_pcd_kg_port_arm_fe(): save next_engine, write
-      kgse_mode = 0x80000006 + kgse_ccbs = 0 via the raw setter,
-      then write fmbm_rccb via fman_port_set_cc_base.  Rollback
-      on fmbm_rccb failure.
-    - New fman_pcd_kg_port_disarm_fe(): clear fmbm_rccb, restore
-      scheme via fman_pcd_kg_port_detach_cc.  Idempotent.
-
-  fman_pcd.c
-    - New fe_arm debugfs node (0600): engage/disengage verbs with
-      fe_pool + fe_enter gate checks.  Includes fman_port.h.
-
-  include/linux/fsl/fman_pcd.h
-    - Prototypes for fman_pcd_kg_port_arm_fe/disarm_fe.
-
-Safety: mutate eth3 only (hw port 0x10); forward and inverse in the
-same patch; engage gates on fe_pool engaged + fe_enter root AD built.
+  fman_keygen.c: new EXPORT_SYMBOL_GPL keygen_scheme_set_mode_raw().
+  fman_pcd_kg.c:  fman_pcd_kg_port_arm_fe() / disarm_fe().
+  fman_pcd.c:     fe_arm debugfs node, includes fman_port.h.
+  fman_pcd.h:     public prototypes.
 
 Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 ---
@@ -61,12 +31,11 @@ index e4c488e..9f1b2d3 100644
 +/**
 + * keygen_scheme_set_mode_raw() - write kgse_mode and kgse_ccbs directly.
 + * @keygen:    KeyGen instance
-+ * @scheme_id: scheme index (caller's slot->id, guaranteed valid)
++ * @scheme_id: scheme index
 + * @mode:      raw kgse_mode value with EN bit already set
-+ * @ccbs:      raw kgse_ccbs value (0 for AC_CC, non-zero for CCBS)
++ * @ccbs:      raw kgse_ccbs value (0 for AC_CC)
 + *
-+ * Bypasses keygen_scheme_setup() for the FE/AC_CC arm (patch 0132),
-+ * which needs mode 0x80000006 with no dispatch-ladder side-effects.
++ * Bypasses keygen_scheme_setup() for the FE/AC_CC arm (patch 0132).
 + * Caller holds the fman_pcd mutex.
 + */
 +int keygen_scheme_set_mode_raw(struct fman_keygen *keygen, u8 scheme_id,
@@ -234,78 +203,62 @@ index 01b657a..f8d4e2c 100644
  #include "fman.h"
  #include "fman_pcd_internal.h"
  
-@@ -2191,6 +2192,156 @@ void fman_pcd_offload_disengage(struct fman *fman, u8 hw_port_id)
- }
- EXPORT_SYMBOL_GPL(fman_pcd_offload_disengage);
- 
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_fe_arm.c b/drivers/net/ethernet/freescale/fman/fman_pcd_fe_arm.c
+new file mode 100644
+index 0000000..5e1a9b0
+--- /dev/null
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_fe_arm.c
+@@ -0,0 +1,162 @@
++// SPDX-License-Identifier: GPL-2.0
 +/*
-+ * FE-VM arm debugfs (Fork B Phase 1 D9-B, patch 0132).
-+ *
++ * FMan PCD Frame-Engine arm debugfs node (Fork B Phase 1 D9-B).
++ * Copyright 2026 Mono Networks / VyOS LS1046A maintainers.
++ */
++
++#include <linux/debugfs.h>
++#include <linux/fsl/fman_pcd.h>
++#include <linux/seq_file.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
++
++#include "fman.h"
++#include "fman_pcd_internal.h"
++
++/*
 + * Write interface:
 + *   engage <hw_port_id_hex> <fe_enter_off_hex>
 + *   disengage <hw_port_id_hex>
-+ *
-+ * engage() requires the dormant FE chain to be built (fe_pool get →
-+ * fe_singletons build → fe_ehash set → fe_enq build → fe_hashfe build →
-+ * fe_enter build → fe_flow add).  It then arms the AC_CC datapath on the
-+ * port.  disengage() reverses the arm only (fmbm_rccb + KG scheme); the
-+ * FE chain stays live so the operator can arm → ping → disarm → check
-+ * pcd-snapshot before tearing down via the fe_* nodes.
 + */
 +static int fe_arm_engage(struct fman_pcd *pcd, const char *args)
 +{
-+	struct fman *fman = fman_pcd_get_fman(pcd);
 +	unsigned int port_id;
 +	unsigned long fe_enter_off;
 +	u8 saved_engine;
 +	int err;
 +
-+	if (!fman)
-+		return -ENODEV;
-+
 +	if (sscanf(args, "engage %x %lx", &port_id, &fe_enter_off) != 2)
 +		return -EINVAL;
-+	if (port_id < 0x08 || port_id >= 0x28)
-+		return -EINVAL;
-+	if (fe_enter_off == 0)
++	if (port_id < 0x08 || port_id >= 0x28 || fe_enter_off == 0)
 +		return -EINVAL;
 +
-+	/*
-+	 * Gate 1: fe_pool must be engaged.
-+	 */
-+	if (pcd->fe_refcount == 0) {
-+		dev_warn(fman_get_dev(fman),
-+			 "fe_arm: FE pool not engaged — run fe_pool get first\n");
++	if (pcd->fe_refcount == 0)
 +		return -EINVAL;
-+	}
-+
-+	/*
-+	 * Gate 2: the FE_ENTER root AD must match the live one.
-+	 */
-+	if (pcd->fe_root_ad_off != fe_enter_off) {
-+		dev_warn(fman_get_dev(fman),
-+			 "fe_arm: FE_ENTER AD mismatch (live 0x%lx, requested 0x%lx) — run fe_enter build first\n",
-+			 pcd->fe_root_ad_off, fe_enter_off);
++	if (pcd->fe_root_ad_off != fe_enter_off)
 +		return -EINVAL;
-+	}
 +
 +	err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,
 +				      (u32)fe_enter_off, &saved_engine);
 +	if (err)
 +		return err;
 +
-+	pr_info("fman_pcd fe_arm: port 0x%02x ENGAGED (FE_ENTER=0x%lx, saved_engine=%u)\n",
-+		port_id, fe_enter_off, saved_engine);
++	pr_info("fman_pcd fe_arm: port 0x%02x ENGAGED (FE_ENTER=0x%lx)\n",
++		port_id, fe_enter_off);
 +	return 0;
 +}
 +
 +static int fe_arm_disengage(struct fman_pcd *pcd, const char *args)
 +{
-+	struct fman *fman = fman_pcd_get_fman(pcd);
 +	unsigned int port_id;
-+
-+	if (!fman)
-+		return -ENODEV;
 +
 +	if (sscanf(args, "disengage %x", &port_id) != 1)
 +		return -EINVAL;
@@ -314,8 +267,7 @@ index 01b657a..f8d4e2c 100644
 +
 +	fman_pcd_kg_port_disarm_fe(pcd, (u8)port_id, 0);
 +
-+	pr_info("fman_pcd fe_arm: port 0x%02x DISENGAGED (RSS restored)\n",
-+		port_id);
++	pr_info("fman_pcd fe_arm: port 0x%02x DISENGAGED\n", port_id);
 +	return 0;
 +}
 +
@@ -378,19 +330,46 @@ index 01b657a..f8d4e2c 100644
 +	.release = single_release,
 +};
 +
-+static void fman_pcd_fe_arm_debugfs_init(struct dentry *parent,
-+					 struct fman_pcd *pcd)
++void fman_pcd_fe_arm_debugfs_init(struct dentry *parent,
++				  struct fman_pcd *pcd)
 +{
 +	if (IS_ERR_OR_NULL(parent) || !pcd)
 +		return;
 +	debugfs_create_file("fe_arm", 0600, parent, pcd,
 +			    &fman_pcd_fe_arm_fops);
 +}
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+index a65d887..d4e5f6c 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+@@ -55,4 +55,10 @@ void fman_pcd_cc_seq_dump(struct fman_pcd *pcd, struct seq_file *m);
+ void fman_pcd_cc_test_debugfs_init(struct dentry *parent,
+ 				   struct fman_pcd *pcd);
+ 
++/* FE-VM arm debugfs (patch 0132). */
++struct dentry;
++struct fman_pcd;
++void fman_pcd_fe_arm_debugfs_init(struct dentry *parent,
++				  struct fman_pcd *pcd);
 +
- /*
-  * Internal accessors for per-engine siblings.  Not exported - same module.
-  */
-@@ -2222,6 +2373,7 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ #endif /* __FMAN_PCD_INTERNAL_H */
+diff --git a/drivers/net/ethernet/freescale/fman/Makefile b/drivers/net/ethernet/freescale/fman/Makefile
+index d448d16..e5a1f2b 100644
+--- a/drivers/net/ethernet/freescale/fman/Makefile
++++ b/drivers/net/ethernet/freescale/fman/Makefile
+@@ -6,7 +6,7 @@ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_fman_port.o
+ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_mac.o
+ 
+ fsl_dpaa_fman-objs			:= fman_muram.o fman.o fman_sp.o fman_keygen.o
+-fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o fman_pcd_kg.o fman_pcd_cc.o fman_pcd_manip.o fman_pcd_plcr.o fman_pcd_cc_test.o fman_pcd_dcsr.o
++fsl_dpaa_fman-$(CONFIG_FSL_FMAN_PCD) += fman_pcd.o fman_pcd_kg.o fman_pcd_cc.o fman_pcd_manip.o fman_pcd_plcr.o fman_pcd_cc_test.o fman_pcd_dcsr.o fman_pcd_fe_arm.o
+ fsl_dpaa_fman_port-objs := fman_port.o
+ fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 01b657a..f8d4e2c 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -2225,6 +2225,7 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
  			debugfs_create_file("fe_hashfe", 0644,
  					    pcd->debugfs_dir, pcd,
  					    &fman_pcd_fe_hashfe_fops);
@@ -398,43 +377,3 @@ index 01b657a..f8d4e2c 100644
  		}
  	}
  
-diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index 491bd14..7d2e8f9 100644
---- a/include/linux/fsl/fman_pcd.h
-+++ b/include/linux/fsl/fman_pcd.h
-@@ -634,4 +634,42 @@ int fman_pcd_offload_engage(struct fman *fman, u8 hw_port_id);
-  */
- void fman_pcd_offload_disengage(struct fman *fman, u8 hw_port_id);
- 
-+/**
-+ * fman_pcd_kg_port_arm_fe() - arm the FE/AC_CC datapath on one RX port
-+ * @pcd:          PCD subsystem handle (fman_get_pcd())
-+ * @hw_port_id:   hardware RX port id (0x08..0x27; eth3 = 0x10)
-+ * @fe_enter_off: MURAM offset of the FE_ENTER root AD
-+ * @saved_engine: [out] previous next_engine value for disarm
-+ *
-+ * Fork B Phase 1 D9-B: writes kgse_mode = 0x80000006 (EN |
-+ * NIA_ENG_FM_CTL | NIA_FM_CTL_AC_CC) and sets fmbm_rccb to
-+ * @fe_enter_off so classified frames walk the FE opcode VM.
-+ *
-+ * RSS hashing, base FQID, and match vector are preserved.
-+ *
-+ * Return: 0 on success, -ENODEV if no scheme, -EINVAL on bad args.
-+ */
-+int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
-+			    u32 fe_enter_off, u8 *saved_engine);
-+
-+/**
-+ * fman_pcd_kg_port_disarm_fe() - restore RSS on one RX port
-+ * @pcd:          PCD subsystem handle
-+ * @hw_port_id:   hardware RX port id
-+ * @saved_engine: previous next_engine (informational)
-+ *
-+ * Reverse of fman_pcd_kg_port_arm_fe(): clears fmbm_rccb and calls
-+ * fman_pcd_kg_port_detach_cc() to restore next_engine=0 (BMI
-+ * direct-enqueue).  Idempotent — safe to call with nothing armed.
-+ */
-+void fman_pcd_kg_port_disarm_fe(struct fman_pcd *pcd, u8 hw_port_id,
-+				u8 saved_engine);
-+
- #endif /* __LINUX_FSL_FMAN_PCD_H */
