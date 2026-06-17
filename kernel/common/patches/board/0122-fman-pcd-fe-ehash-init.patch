@@ -48,7 +48,7 @@ index 1fe3753..803b45d 100644
 + */
 +#define FMAN_PCD_FE_ALIGN	8
 +#define FMAN_PCD_FE_MAX_SIZE	28
-+#define FMAN_PCD_FE_POOL_COUNT	100
++#define FMAN_PCD_FE_POOL_COUNT	32	/* per-obj 256B gen_pool chunk: ehash(130)+fe_port(34) cap pool <=90 in 64K arena */
 +
 +struct fman_pcd_fe_obj {
 +	struct list_head node;
