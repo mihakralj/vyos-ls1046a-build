@@ -6,8 +6,8 @@
 #
 # CAAM is the NXP SEC 5.4 hardware crypto engine on every Layerscape
 # LS1046A SoC. It accelerates AES/SHA/3DES/HMAC/RSA/RNG via Job Ring (JR)
-# descriptors submitted from the kernel crypto API, and on FLAVOR=ask it
-# additionally services IPsec ESP packets via the SDK fast-path SEC FQ
+# descriptors submitted from the kernel crypto API, and once ASK offload is
+# engaged it additionally services IPsec ESP packets via the SDK fast-path SEC FQ
 # (`dpaa_submit_inb_pkt_to_SEC` in sdk_dpaa).
 #
 # Reports:
@@ -21,7 +21,7 @@
 #     in /proc/crypto driver fields)
 #   - Hardware RNG: presence of /dev/hwrng, current_source (should be
 #     "rng-caam" once caamrng has loaded), and a 16-byte sample read
-#   - FLAVOR=ask only: dpa_ipsec sysfs / dmesg signs of CDX successfully
+#   - ASK offload only: dpa_ipsec sysfs / dmesg signs of CDX successfully
 #     locating the SEC FQ
 #
 # Designed to mirror the style of `sfp-check`, `fan-check`, and
@@ -282,9 +282,9 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. FLAVOR=ask: ASK 2.0 flow offload / fast-path posture
+# 7. ASK offload: ASK 2.0 flow offload / fast-path posture
 # ---------------------------------------------------------------------------
-hdr "7) ASK 2.0 flow offload (FLAVOR=ask only)"
+hdr "7) ASK 2.0 flow offload (ASK offload only)"
 
 # Two generations of the ASK stack may appear:
 #   ASK 2.0  — single ask.ko module (current; specs/ask2-rewrite-spec.md)

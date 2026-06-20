@@ -1,7 +1,14 @@
 # Plan: NXP SDK Lift to 6.18 Mainline Kernel
 
-**Version 1.0.0 · 2026-06-19**
+**Version 1.1.0 · 2026-06-19**
 **Branch: `nxp_ask`**
+
+> **Reconciliation note (v1.1.0):** §5.2 and the Risk Watch are reconciled with
+> qdrant iter-190/192. The FE-VM un-stub (Phase 5B) is **not** the gate0143/gate0144
+> keystone — it is dead code on the enhanced `en_exthash` path and the working mono
+> lf-6.12 ASK ships it stubbed. Path A's surviving rationale is the coherent SDK PCD
+> chain, and the flow test (Phase 6.2 step 5) is gated by the Path-B differential dump,
+> which may show the FE deposit is ucode-internal (unreachable from any driver builder).
 
 ## Objective
 
@@ -172,7 +179,7 @@ Each patch must be rebased from 6.12 to 6.18. The patches touch:
 | 070 | PPP hooks | **Low** — `net/ppp/` |
 | 080-098 | Defensive fixes | **Low** — mostly SDK-local |
 
-### 5.2 Phase 5B: FE-VM builder un-stub (critical for flowing FE path)
+### 5.2 Phase 5B: FE-VM builder un-stub (fidelity — NOT the gate)
 
 Per `analysis/ASK-SDK-LIFT-TO-6.18.md` §2, the lf-6.12 mono patch stubs both
 FE builders. The real bodies exist in `ask-kernel-5.4.patch`:
@@ -180,9 +187,23 @@ FE builders. The real bodies exist in `ask-kernel-5.4.patch`:
 - `FmPcdCcBuildFE` (lf-5.4 def @line 8882) — emits 28-byte FE opcode struct
 - `FmPcdCcBuildContextByFE` (lf-5.4 def @line 8953) — writes per-task FE working store (HM table copy, ENQ fqid/ppid, **MUX next-FE phys offset**, TRANSITION next-AD phys offset)
 
-These ~150 LOC must be back-ported from lf-5.4 into the SDK tree after
-the patch series is applied. The MUX case (`ctx[0] = phys(NextFE) - physicalMuramBase`)
-is the critical deposit that gate0143/gate0144 proved missing.
+> **Correction (qdrant iter-190 2026-06-19, iter-192/gate0144 2026-06-20):** the earlier
+> claim that this un-stub is "the critical deposit that gate0143/gate0144 proved missing"
+> is **wrong**. The genuine *working* mono lf-6.12 ASK ships `FmPcdCcBuildContextByFE`
+> **stubbed** and still forwards on this board family — so the driver-side build is not the
+> gate; the 210.10.1 ucode populates the FE working store itself. On the enhanced
+> `USE_ENHANCED_EHASH` path this builder is **dead code** (it serves the classic
+> `#ifndef USE_ENHANCED_EHASH` path only). gate0144 then airtight-closed the producer-scheme
+> register domain across both dispatch paths (frames route + traverse the node, zero of 256
+> `key[0]` values hit) → the compare-key deposit is **ucode-internal at node-build time**.
+
+These ~150 LOC may still be back-ported from lf-5.4 into the SDK tree for fidelity and the
+classic path, but **do not treat the un-stub as the thing that makes the enhanced FE path
+flow** — it does not. The surviving rationale for Path A is the coherent SDK PCD chain
+(`FM_PORT_SetPCD → BuildSchemeRegs → CcRootBuild → ExternalHashTableSet/AddKey`) running
+end-to-end, which mainline register-pokes provably cannot reproduce. Whether the lifted
+stack flows the *enhanced* node or falls back to classic `MatchTableSet` is the open `[?]`
+that only the Path-B differential dump can settle.
 
 ## Phase 6: Build & Verify
 
@@ -200,7 +221,13 @@ make -C /path/to/6.18-kernel M=$PWD modules LOCALVERSION=-vyos
 2. Deploy via TFTP dev-loop (`bin/dev-build.sh`)
 3. Verify boot: SDK FMan probes, `fsl_dpa` netdevs appear with correct port order
 4. Load ASK patches: verify `cdx.ko` / `fci.ko` load and `/dev/cdx_ctrl` appears
-5. Flow test: program a minimal `en_exthash` table, verify selective HW offload forwards frames
+5. Flow test: program a minimal `en_exthash` table, verify selective HW offload forwards frames.
+   **This is the real verdict (not Phase 5B).** Per R1, the flow test may show frames route +
+   traverse the node yet no compare-key hits — i.e. the FE deposit is ucode-internal and the
+   lifted SDK chain still falls back to classic `MatchTableSet`. Run the Path-B differential
+   `/dev/mem` dump (engaged-port IC + KeyGen scheme + `en_exthash` node + FE working store,
+   diffed vs armed-but-missing eth3) to settle whether the enhanced path flows or is a silicon
+   limit (option D).
 
 ## Phase 7: CI Integration
 
@@ -242,6 +269,7 @@ Phase 6 is the integration gate. Phase 7 is the productionization tail.
 
 | # | Risk | Mitigation |
 |---|------|------------|
+| R1 | FE-VM un-stub is NOT the gate (qdrant iter-190/192) | Re-scoped: do not rely on the un-stub to flow `en_exthash`; it is dead code on the enhanced path. Treat Phase 6.2 step 5 (flow test) as the real verdict, gated by a Path-B differential dump that may prove the FE deposit ucode-internal |
 | R2 | SDK↔mainline DPAA mutual exclusion | Accept — this is a different kernel config, not a runtime mode |
 | R3 | QBMan portal conflict | SDK staging `fsl_qbman` replaces mainline `soc/fsl/qbman` |
 | R4 | Class 3/4 API churn 6.12→6.18 | Gated by Phase 2 compile-verify; if deep breakage found, escalate to full Class 3/4 rewrite |

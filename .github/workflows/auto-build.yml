@@ -63,14 +63,6 @@ jobs:
     runs-on: ${{ inputs.runs_on || 'ARM64' }}
     permissions:
       contents: write
-    env:
-      # Single-image build: there is one flavor-neutral ISO. FLAVOR is left
-      # empty so bin/common.sh resolves it to "default" (or data/flavor.pin
-      # for a developer locally exercising the dormant ASK landing zone). The
-      # ask.ko / VPP dataplanes ship dormant in the one image and are switched
-      # at runtime (set system offload ask / set vpp settings), not selected at
-      # build time. See AGENTS.md single-image rules + plans/DUAL-DATAPLANE.md.
-      FLAVOR: ''
     # No `container:` — build runs natively on the self-hosted ARM64 runner.
     # The runner host (Debian 12 bookworm aarch64) provides all build deps
     # (installed in the "Install Dependencies" step below). Removing the
@@ -95,7 +87,6 @@ jobs:
       PREVIOUS_SUCCESS_BUILD_TIMESTAMP: ${{ steps.set_env_variables.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}
       image_iso: ${{ steps.build_iso.outputs.image_iso }}
       image_name: ${{ steps.build_iso.outputs.image_name }}
-      flavor: ${{ steps.build_iso.outputs.flavor }}
 
     steps:
       - name: Verify Hardware (self-hosted)

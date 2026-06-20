@@ -5,12 +5,6 @@
 set -ex -o pipefail
 cd "${GITHUB_WORKSPACE:-.}"
 
-# Resolve $FLAVOR (default | ask | vpp) so the per-flavor update-check feed
-# URL can be substituted into config.boot.* before they're staged into the
-# chroot. Sourcing common.sh sets FLAVOR via env / data/flavor.pin / "default".
-# shellcheck disable=SC1091
-. "$(dirname "$0")/common.sh"
-
 CHROOT=vyos-build/data/live-build-config/includes.chroot
 HOOKS=vyos-build/data/live-build-config/hooks/live
 
@@ -476,12 +470,12 @@ chmod +x "$CHROOT/usr/local/bin/fan-check"
 ### presence, kernel driver / built-in posture (caam, caam_jr, caamalg,
 ### caamhash, caamrng, …), Job Ring count, dmesg banner, /proc/crypto
 ### registrations sourced from CAAM, /dev/hwrng status with current_source,
-### and (FLAVOR=ask only) CDX <-> SEC FQ wiring health. Exit 0 healthy /
+### and (only once ASK offload is engaged) CDX <-> SEC FQ wiring health. Exit 0 healthy /
 ### non-zero on fault — usable as a Nagios/monit probe. Mirrors
-### sfp-check / fan-check / ask-check style. Flavor-agnostic at install
+### sfp-check / fan-check / ask-check style. Hardware-common at install
 ### time (CAAM is the same SEC 5.4 block on every LS1046A board); the
-### script's section 7 is the only ASK-specific check and self-skips on
-### default/vpp where cdx/dpa_ipsec are absent.
+### script's section 7 is the only ASK-specific check and self-skips when
+### ASK offload is not engaged (cdx/dpa_ipsec absent).
 cp board/scripts/caam-check "$CHROOT/usr/local/bin/caam-check"
 chmod +x "$CHROOT/usr/local/bin/caam-check"
 
@@ -494,7 +488,7 @@ chmod +x "$CHROOT/usr/local/bin/caam-check"
 ### frames, eth0-eth4 (driver/MAC/MTU/AF_XDP cap), QMan/BMan liveness, and
 ### the AF_XDP zero-copy xsk_* counters (chaining to xsk-zc-check). Exit
 ### non-zero if a controller/driver/port is missing — mirrors sfp-check /
-### fan-check / caam-check so monit/Nagios can poll it. Flavor-agnostic
+### fan-check / caam-check so monit/Nagios can poll it. Hardware-common
 ### (DPAA1 is the same block on every LS1046A board).
 cp board/scripts/dpaa1-check "$CHROOT/usr/local/bin/dpaa1-check"
 chmod +x "$CHROOT/usr/local/bin/dpaa1-check"
@@ -510,10 +504,10 @@ chmod +x "$CHROOT/usr/local/bin/dpaa1-check"
 ### xsk_fill_guard_block==0 → preconditions met), or fault (fill_guard>0 /
 ### hard attach-DMA error). Exit 0 healthy / 1 fault / 2 not-LS1046A-or-no-
 ### xsk-counters — usable as a Nagios/monit probe. Mirrors sfp-check /
-### fan-check / caam-check style. Flavor-agnostic: the AF_XDP datapath
+### fan-check / caam-check style. Image-wide: the AF_XDP datapath
 ### patches are in the common board patch set, so the counters exist on
-### every flavor; on a shipping image with no ZC producer bound the verdict
-### is the expected "dormant".
+### the single image; on a shipping image with no ZC producer bound the
+### verdict is the expected "dormant".
 cp board/scripts/xsk-zc-check "$CHROOT/usr/local/bin/xsk-zc-check"
 chmod +x "$CHROOT/usr/local/bin/xsk-zc-check"
 
@@ -525,10 +519,10 @@ chmod +x "$CHROOT/usr/local/bin/xsk-zc-check"
 ### surface, nf_flow_table HW-offload smoke test, and dmesg integrity.
 ### Exit 0 healthy / non-zero on fault — usable as a Nagios/monit probe.
 ### Mirrors sfp-check / fan-check / caam-check style. Installed
-### unconditionally on every flavor: on default/vpp the ASK-specific
+### unconditionally: until ASK offload is engaged the ASK-specific
 ### sections cleanly emit TODO/SKIP (no false FAILs), making it a useful
-### roadmap-status printer. On FLAVOR=ask it is the single command an
-### operator runs to confirm the modern ASK2 stack came up correctly.
+### roadmap-status printer. Once ASK offload is engaged it is the single
+### command an operator runs to confirm the modern ASK2 stack came up correctly.
 cp board/scripts/ask-check "$CHROOT/usr/local/bin/ask-check"
 chmod +x "$CHROOT/usr/local/bin/ask-check"
 
@@ -592,7 +586,7 @@ cp data/hooks/96-enable-services.chroot "$HOOKS/96-enable-services.chroot"
 chmod +x "$HOOKS/96-enable-services.chroot"
 
 ### ====================================================================
-### ASK2 userspace components (modern rewrite — NOT YET IMPLEMENTED)
+### ASK2 modules auto-load hook (single image — self-guarding)
 ### ====================================================================
 # The legacy ASK 1.x userspace stack (dpa_app, cmm, fmc, libcli/libcmm/libfci,
 # libnfnetlink/libnetfilter-conntrack forks, CDX/FMC config XMLs, ASK module
@@ -600,35 +594,17 @@ chmod +x "$HOOKS/96-enable-services.chroot"
 # 2026-05-12 as part of the ASK2 modern rewrite (branch ask20).
 #
 # ASK2 will ship its own userspace components per
-# specs/ask2-rewrite-spec.md §§4–9:
-#   - askd            — connection manager / decision engine (replaces cmm)
-#   - ask-load        — XML→FMC compiler one-shot       (replaces dpa_app)
-#   - libask_fci.so.1 — generic-netlink wrapper library (replaces libfci)
-#   - ask.ko + ask_bridge.ko — OOT kernel modules       (replace cdx.ko + auto_bridge.ko)
+# specs/ask2-rewrite-spec.md §§4–9 (askd, ask-load, libask_fci.so.1,
+# ask.ko + ask_bridge.ko). Until those are authored the single collapsed
+# image ships vanilla VyOS — nothing ASK-specific is present.
 #
-# Operator-visible compatibility surfaces preserved per spec §18:
-#   /etc/cdx_cfg.xml, /etc/cdx_pcd.xml, /etc/cdx_sp.xml — same schemas
-#   /dev/cdx_ctrl       — symlink to /dev/ask_ctrl (legacy ioctl shim)
-#   libfci.so.1 SONAME  — symlink to libask_fci.so.1
-#   /etc/config/fastforward — same ALG-exclusion list format
-#
-# Until those components are authored, FLAVOR=ask builds skip userspace
-# staging entirely. The resulting ISO will boot a vanilla VyOS kernel +
-# userspace; nothing ASK-specific will be present in the image.
-if [[ "${FLAVOR:-default}" == "ask" ]]; then
-    echo "### FLAVOR=ask — ASK2 userspace stack not yet implemented"
-    echo "### See specs/ask2-rewrite-spec.md for the rewrite plan"
+# Stage 97-ask-modules.chroot UNCONDITIONALLY (per AGENTS.md: the hook is
+# "kept wired so ASK2 components drop in cleanly without re-plumbing CI").
+# The hook is SELF-GUARDING — it only writes /etc/modules-load.d/ask.conf
+# when ask.ko is actually present in the chroot, so on the normal single
+# image (no ask.ko) it is a clean no-op with no boot-time module error.
+cp data/hooks/97-ask-modules.chroot "$HOOKS/97-ask-modules.chroot"
+chmod +x "$HOOKS/97-ask-modules.chroot"
+echo "### staged 97-ask-modules.chroot (self-guarding; no-op unless ask.ko present)"
 
-    # M0.3: drop the chroot hook that auto-loads ask.ko at boot via
-    # /etc/modules-load.d/ask.conf. The ask-modules-*.deb (built by
-    # kernel/flavors/ask/oot-modules/ask/ci-build.sh and swept into the
-    # chroot by ci-pick-packages.sh) installs ask.ko under
-    # /lib/modules/$KVER/extra/ but does not auto-load it — that's this
-    # hook's job. Hook is FLAVOR-gated (only staged on ask builds) so
-    # default/vpp ISOs never see it.
-    cp data/hooks/97-ask-modules.chroot "$HOOKS/97-ask-modules.chroot"
-    chmod +x "$HOOKS/97-ask-modules.chroot"
-    echo "### FLAVOR=ask: staged 97-ask-modules.chroot for systemd-modules-load auto-load"
-fi
-
-echo "### vyos-build setup complete (FLAVOR=${FLAVOR:-default})"
+echo "### vyos-build setup complete (single image)"

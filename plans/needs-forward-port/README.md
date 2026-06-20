@@ -16,5 +16,5 @@ green-build PRs).
 ## Re-introducing
 
 Once forward-ported, move back into `kernel/common/patches/board/`. Re-run
-`bash kernel/common/scripts/integration-test.sh` to confirm `Pass:` count goes up
-by exactly 1 and remains green.
+`bash kernel/common/scripts/patch-health.sh` to confirm the patch applies clean
+(`Pass:` count goes up by exactly 1 and stays green).

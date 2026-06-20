@@ -1,6 +1,15 @@
 # ASK2 Vendored-Port File Inventory
 
-**Version 1.0.0 · 2026-06-19 · HADS 1.0.0**
+**Version 1.0.1 · 2026-06-19 · HADS 1.0.0**
+
+> **Reconciliation note (v1.0.1):** this inventory's premise — that lifting the SDK
+> stack flows the selective `en_exthash` FE path — is **contingent**, not proven. Per
+> qdrant iter-190/192 (see `analysis/ASK-SDK-LIFT-TO-6.18.md` §2 `[BUG]` and
+> `plans/ASKS-SDK-LIFT.md` §5.2), the FE-VM builder un-stub is NOT the gate0143/gate0144
+> keystone: the working mono lf-6.12 ASK ships `FmPcdCcBuildContextByFE` stubbed and still
+> forwards, so the compare-key deposit is ucode-internal at node-build time. The file
+> inventory below is still accurate as a *parts list*; whether the assembled stack flows
+> the enhanced node is the open `[?]` settled only by the Path-B differential dump.
 
 ## AI READING INSTRUCTION
 

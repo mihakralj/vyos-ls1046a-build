@@ -20,9 +20,24 @@
 #
 # Idempotent: writing the same file twice is fine. The file is
 # overwritten on every chroot rebuild.
+#
+# SELF-GUARDING: the single collapsed image normally ships WITHOUT ask.ko
+# (the ASK2 OOT module is not production-ready). This hook is staged
+# UNCONDITIONALLY (see bin/ci-setup-vyos-build.sh) so it drops in cleanly
+# the moment an ask-modules-*.deb is installed — but it must NOT write
+# ask.conf when the module is absent, or systemd-modules-load.service logs
+# a boot-time failure ("Failed to find module 'ask'"). So: probe the chroot
+# for ask.ko first and skip (cleanly) when it isn't there.
 set -e
 
 CONF=/etc/modules-load.d/ask.conf
+
+# Only auto-load ask.ko if it was actually installed into the chroot.
+if ! ls /lib/modules/*/extra/ask.ko /usr/lib/modules/*/extra/ask.ko >/dev/null 2>&1; then
+    echo "I: 97-ask-modules.chroot: ask.ko not present in chroot — skipping ${CONF} (single image ships without ASK)"
+    rm -f "$CONF" 2>/dev/null || true
+    exit 0
+fi
 
 mkdir -p "$(dirname "$CONF")"
 cat > "$CONF" <<EOF

@@ -1,6 +1,15 @@
 # ASK HW Offload — Vendored SDK Lift to the 6.18 Kernel
 
-**Version 1.0.0 · 2026-06-19 · HADS 1.0.0**
+**Version 1.1.0 · 2026-06-19 · HADS 1.0.0**
+
+> **Reconciliation note (v1.1.0, 2026-06-19):** §2, §7 (R1), §10 and §12 are
+> reconciled against qdrant iter-190 (2026-06-19) and iter-192/gate0144
+> (2026-06-20). The headline "back-port the lf-5.4 FE-VM bodies to close the
+> gate0143/gate0144 gap" claim is **corrected**: the un-stub is NOT the
+> keystone (it is dead code on the enhanced `en_exthash` path, and the genuine
+> *working* mono lf-6.12 ASK ships `FmPcdCcBuildContextByFE` stubbed). The
+> lift's real value is the coherent SDK PCD chain, not the un-stub. See the
+> §2 `[BUG]` reconciliation block.
 
 ## AI READING INSTRUCTION
 
@@ -120,6 +129,35 @@ the "combine the mono branches with the original 5.4 code" synthesis. Whether th
 mono lf-6.12 product actually flows the *enhanced FE* path, or silently falls back to the
 classic `MatchTableSet` exact-match path with the FE stub as dead code, is an open
 question (§9, `[?]`).
+
+**[BUG] The FE-VM un-stub does NOT close the gate0143/gate0144 gap (qdrant iter-190,
+2026-06-19; iter-192/gate0144, 2026-06-20).**
+*Symptom:* the `[BUG]`/`[NOTE]` blocks above present back-porting the lf-5.4
+`FmPcdCcBuildFE` / `FmPcdCcBuildContextByFE` bodies as *the* fix for the missing FE
+working-store deposit, and frame the lf-6.12 stub as the iter-37 D9-B park's cause.
+*Cause:* on-source archaeology of the genuine **working** mono lf-6.12 ASK
+(`010-ask-fman-dpaa-ehash.patch` ~L4842) shows `FmPcdCcBuildContextByFE` is **STUBBED
+there too** (`UNUSED(...); /* … not implemented */ return E_OK;`) — yet mono ASK
+forwards on this board family with it stubbed. Therefore the driver-side FE-context
+build is **not** the gate: the 210.10.1 ucode populates the per-task FE working store
+itself. On the enhanced `USE_ENHANCED_EHASH` path `FmPcdCcBuildContextByFE` builds the
+per-flow *disposition* context (HM/ENQ/MUX/TRANSITION) for the **classic
+`#ifndef USE_ENHANCED_EHASH` software path only** — on our path it is **dead code**.
+gate0144 (iter-192) then **AIRTIGHT-CLOSED the producer-scheme register domain across
+both dispatch paths** (overwrite-in-use *and* spare-slot SP-bind): routing was proven
+(spare scheme packet-counter +103, RSS flat) and frames traversed the `en_exthash` node
+(`rfrc` +103), yet **zero of 256 single-byte `key[0]` values hit**. The compare-key
+deposit is therefore **ucode-internal at NODE-BUILD time** (genuine enhanced
+`ExternalHashTableSet`/`AddKey`), dispatch-independent.
+*Corrected fix:* the un-stub (R1) is **NOT** the keystone and on its own changes nothing
+on the enhanced FE path — it remains worth carrying for fidelity and the classic path,
+but must not be relied on to make `en_exthash` flow. The lift's genuine, surviving value
+is running the **coherent `FM_PORT_SetPCD → BuildSchemeRegs → CcRootBuild →
+ExternalHashTableSet/AddKey` chain end-to-end** under `CONFIG_FSL_SDK_FMAN=y` — the one
+mechanism mainline register-pokes provably cannot reproduce (gate0143/gate0144) and the
+one the working mono driver actually uses. Whether mono lf-6.12 flows the *enhanced* node
+or falls back to the classic `MatchTableSet` path (where the un-stub *is* live) is exactly
+§9's open `[?]`, which only Path B (the §10 differential dump) can settle.
 
 ---
 
@@ -286,7 +324,7 @@ on top of the base BSP tree):
 
 | # | Risk | Severity | Note |
 |---|---|---|---|
-| R1 | FE-VM stub in lf-6.12 | **Resolved-known** | back-port lf-5.4 `FmPcdCcBuild{FE,ContextByFE}` (§2) — ~150 LOC, fully specified |
+| R1 | FE-VM stub in lf-6.12 | **Re-scoped — NOT the gate** | un-stub is dead code on the enhanced `en_exthash` path; mono lf-6.12 works WITH it stubbed (§2 `[BUG]`, qdrant iter-190). Carry for fidelity/classic path; does NOT close gate0143/gate0144. The FE deposit is ucode-internal at node-build time |
 | R2 | SDK↔mainline DPAA mutual exclusion | **Critical** | abandons S0/RSS + AF_XDP/VPP overlay (§6); a different product |
 | R3 | QBMan staging vs `soc/fsl/qbman` | **Critical** | RC#31-class global state conflict; pick one |
 | R4 | Class 3/4 mainline API churn 6.12→6.18 | High | chardev/sysfs/NAPI/skb signatures; assessable only on a 6.18 build `[?]` |
@@ -298,8 +336,9 @@ on top of the base BSP tree):
 
 **[NOTE]** Rough order of work: Group A lift is mechanical (~60–90 KLOC moved, days);
 Group B port is the real cost (Class 2–5, weeks of 6.18-API reconciliation + on-board
-bring-up); R2/R3/R6 are *decisions*, not just code. The FE un-stub (R1) is small and
-fully specified. The hard part is not the FMan algorithmic core — it is re-grounding the
+bring-up); R2/R3/R6 are *decisions*, not just code. The FE un-stub (R1) is small but, per the §2
+`[BUG]` reconciliation, is **not load-bearing on the enhanced path** — it does not by
+itself make `en_exthash` flow. The hard part is not the FMan algorithmic core — it is re-grounding the
 entire DPAA dataplane (netdev, QBMan, AF_XDP, the 0086–0144 board work) on the SDK stack.
 
 ---
@@ -369,12 +408,17 @@ single-table `cdx_pcd.xml`.*
 
 **[NOTE]** A full Path-A lift (replace the whole dataplane) is disproportionate to the
 gap. The register-domain closure (gate0143/gate0144) proved the *only* missing piece is
-the **ucode-internal FE working-store deposit** built by `FmPcdCcBuildContextByFE` at
-node-build time. Everything else in our mainline-DPAA substrate (KeyGen scheme
-programming, CC/ehash node install, MURAM allocator, per-port FE buffer) we already
-re-implemented in board patches 0097–0144. **The cheapest path to a working FE datapath
-is therefore not "lift 266 files" but "lift the FE-VM builder algorithm" into our existing
-mainline driver.**
+the **ucode-internal FE working-store deposit**. **Correction (qdrant iter-190/192):** that
+deposit is built *inside the 210.10.1 ucode at `en_exthash` node-build time*, **not** by the
+driver's `FmPcdCcBuildContextByFE` — which is **stubbed in the genuine working mono lf-6.12
+ASK** and is dead code on the enhanced path (§2 `[BUG]`). So the earlier framing here ("the
+missing piece is the builder `FmPcdCcBuildContextByFE`, just lift it") is **wrong**: lifting
+that builder does not reach the ucode-internal store. Everything else in our mainline-DPAA
+substrate (KeyGen scheme programming, CC/ehash node install, MURAM allocator, per-port FE
+buffer) we already re-implemented in board patches 0097–0144. **The cheapest path to a
+working FE datapath is therefore neither "lift 266 files" nor "lift the FE-VM builder" — it
+is first to OBSERVE, via the Path-B differential dump, whether the deposit is reachable from
+any driver code at all.**
 
 **[SPEC]** Recommended sequencing (lowest-risk first):
 
@@ -386,18 +430,25 @@ mainline driver.**
 2. **Lift the FE-VM builder only (bounded hybrid):** port the lf-5.4 `FmPcdCcBuildFE` +
    `FmPcdCcBuildContextByFE` semantics (~150 LOC of pure register/MURAM math, `XX_*`-free
    once translated) into a board patch on our mainline driver, populating the working
-   store the dump in step 1 identified. This keeps the entire mainline-DPAA architecture
-   (R2/R3/R6 avoided) and adds only the proven FE-deposit algorithm — the genuine
-   "combine lf-6.12 node + lf-5.4 FE bodies" synthesis, but grafted onto mainline rather
-   than the SDK tree.
+   store the dump in step 1 identified. **Caveat (iter-190/192):** this step is now
+   *contingent on step 1's result* — if the dump confirms the deposit is ucode-internal
+   (built by the `en_exthash` node-build the harness never invokes), then porting the
+   builder cannot reproduce it and this step is **dead**, exactly as the register domain
+   proved. Only pursue step 2 if step 1 shows a driver-writable working-store offset. If
+   viable, it keeps the entire mainline-DPAA architecture (R2/R3/R6 avoided) and stays in
+   the Option-B mission.
 3. **Full SDK lift only if step 2 is infeasible** — i.e. only if the FE deposit turns out
    to be inseparable from SDK-private state the mainline driver cannot reproduce. That is
    the contingency this whole document scopes; sections 3–8 are the map for it.
 
-**[NOTE]** Step 2 is the recommendation: it is the smallest change that could plausibly
-flow the FE path, it stays inside the Option-B mission (mainline DPAA, no vendored
-overlay), and it is gated by a non-destructive observation (step 1) so we never graft a
-guessed offset. A full lift (§3–§6) is the documented fallback, not the default.
+**[NOTE]** Step 1 (the differential dump) is now the load-bearing action: it is the only
+thing that can confirm whether *any* driver code can reach the FE working-store deposit, or
+whether it is ucode-internal and unreachable (in which case selective `en_exthash` HW
+offload is a documented silicon limit — option D). Step 2 is the smallest *contingent*
+follow-on if step 1 finds a writable offset; it stays inside the Option-B mission and is
+gated by step 1 so we never graft a guessed offset. A full lift (§3–§6) remains the
+documented fallback, not the default — and per the §2 `[BUG]` reconciliation its surviving
+rationale is the **coherent SDK PCD chain**, not the FE-VM un-stub.
 
 ---
 
@@ -442,4 +493,9 @@ feasibility gate.
   `mono-ehash/extracted/*`.
 - qdrant anchors: `M0 vendor oracle … arch/fman-fe-ehash.md` (2026-06-16);
   `ASK2-M3-source-path-EXHAUSTED-deposit-is-port-IC-or-ucode-internal` (2026-06-18);
-  `ASK2-M3-gate0144-G1G4-spare-slot-SP-bind-register-domain-AIRTIGHT-CLOSED` (2026-06-19).
+  `ASK2-M3-gate0144-G1G4-spare-slot-SP-bind-register-domain-AIRTIGHT-CLOSED` (iter-192,
+  2026-06-20 — register domain closed across both dispatch paths; deposit is
+  ucode-internal at node-build time);
+  `ASK2-M3-mono-stub-FmPcdCcBuildContextByFE-confirms-ucode-internal-deposit` (iter-190,
+  2026-06-19 — the genuine working mono lf-6.12 ASK ships the builder STUBBED, so the
+  un-stub is not the gate; basis for the §2 `[BUG]` reconciliation).
