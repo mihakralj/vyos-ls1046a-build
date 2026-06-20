@@ -27,12 +27,12 @@ The former `0001-caam-qi-share.patch` was **relocated** to
 hardware-common and orthogonal to the PCD layer, so it now builds
 unconditionally on the single image (see compat plan §4b).
 
-### Sub-directories (both DROP / ignore)
+### Sub-directories
 
 | Path | Disposition |
 |------|-------------|
-| `vendored-ask/` (`010`–`100`) | **DROP** — legacy ASK 1.x in-tree-hooks; targets the deleted `sdk_dpaa`/`sdk_fman` trees + `net/{bridge,xfrm,netfilter}` core (the rejected mainline-replacement approach). Wired into no build. |
-| `archive-grafted-2026-05-24/` | **Ignore** — superseded graft experiments (only `0065` was resurrected, see below). |
+| `vendored-ask/` (`010`–`100`) | **REMOVED 2026-06-19** — was legacy ASK 1.x in-tree-hooks targeting the deleted `sdk_dpaa`/`sdk_fman` trees + `net/{bridge,xfrm,netfilter}` core (the rejected mainline-replacement approach); wired into no build. Recoverable from git history if ever needed. |
+| `archive-grafted-2026-05-24/` | **Ignore** — superseded graft experiments (only `0065` was resurrected, see below). Left in place. |
 
 ## Authoring rules
 

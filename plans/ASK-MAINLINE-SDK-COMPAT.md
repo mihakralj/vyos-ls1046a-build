@@ -310,11 +310,12 @@ ANY further ASK PCD work — there is no "apply both" path.
 
 **[SPEC]** Sub-tree dispositions (final):
 
-- `kernel/flavors/ask/patches/vendored-ask/` (the `010`–`100` series) targets
+- `kernel/flavors/ask/patches/vendored-ask/` (the `010`–`100` series) targeted
   `drivers/net/ethernet/freescale/sdk_dpaa/` and `sdk_fman/` — the SDK source trees dropped in §2.1.
-  **DROP** (dead without the rejected SDK lift; this is the legacy in-tree-hooks approach, not the
-  PCD-on-mainline layer).
-- `kernel/flavors/ask/patches/archive-grafted-2026-05-24/` — superseded graft experiments. **Ignore.**
+  **DROP — executed 2026-06-19** (19 files removed; dead without the rejected SDK lift, this was the
+  legacy in-tree-hooks approach, not the PCD-on-mainline layer; recoverable from git history).
+- `kernel/flavors/ask/patches/archive-grafted-2026-05-24/` — superseded graft experiments. **Ignore**
+  (left in place; only `0065` was resurrected into the main series).
 - ASK `0001-caam-qi-share.patch` touches only `drivers/crypto/caam/qi.c`/`qi.h` + new
   `include/linux/crypto/caam_qi_share.h` (the dormant `caam_qi_ext_consumer_register`/`release`
   `EXPORT_SYMBOL_GPL` API for the M5 HW-IPsec path). It is **hardware-common and orthogonal to the

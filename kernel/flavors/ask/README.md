@@ -17,11 +17,12 @@ This directory is the **modern rewrite** of the NXP ASK fast-path for
 LS1046A. It supersedes the legacy ASK 1.x stack (proprietary `cdx.ko`,
 `auto_bridge.ko`, `cmm`, `dpa_app`, the 5797-line in-tree-hooks patch,
 and the vendored NXP SDK FMan/QMan/BMan driver overlay) in **entirety**.
-The ASK 1.x source was deleted from this branch lineage; the only legacy
-residue here is `patches/vendored-ask/` + `patches/archive-grafted-2026-05-24/`,
-both **DROP-disposition** per the compat plan §4b (they target the deleted
-SDK trees / the rejected mainline-replacement approach and are wired into
-no build).
+The ASK 1.x source was deleted from this branch lineage. The
+`patches/vendored-ask/` subdir (the legacy ASK 1.x in-tree-hooks `010`–`100`
+series, targeting the deleted `sdk_dpaa`/`sdk_fman` trees) was **removed
+2026-06-19** per the compat plan §4b DROP disposition. The only remaining
+legacy residue is `patches/archive-grafted-2026-05-24/` — superseded graft
+experiments, **ignored** (left in place, wired into no build).
 
 The brand "ASK" carries forward unchanged, but ASK2 is **no longer a
 separate build flavor**. Per the single-image decision (2026-06-14,
@@ -31,7 +32,7 @@ dormant until `set system offload ask` engages it at runtime.
 `kernel/flavors/ask/` remains only the *source location*; the directory
 name is historical and does not imply a `FLAVOR=ask` build target.
 
-## What actually lives here (on-disk, 2026-06-18)
+## What actually lives here (on-disk, 2026-06-19)
 
 ```
 kernel/flavors/ask/
@@ -49,7 +50,6 @@ kernel/flavors/ask/
 │   ├── Kbuild Kconfig Makefile ci-build.sh README.md
 ├── patches/                   # in-tree kernel patch series (see patches/README.md)
 │   ├── 0002-…0065-*.patch     # 46 productive PCD patches (NOT placeholders)
-│   ├── vendored-ask/          # DROP — legacy ASK 1.x in-tree-hooks (dead)
 │   └── archive-grafted-2026-05-24/   # superseded graft experiments (ignore)
 ├── uapi/ask.yaml              # genl protocol definition (codegen source)
 └── userspace/askd/            # askd control-plane daemon
