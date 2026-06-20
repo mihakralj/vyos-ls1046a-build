@@ -36,11 +36,29 @@ cd "${GITHUB_WORKSPACE:-.}"
 # overlay is no longer needed.
 DTS_SRC="board/dtb/mono-gateway-dk.dts"
 DTS_BASE="board/dtb/mono-gateway-dk.dts"
+# NXP SDK reference build: when data/dtb/mono-gateway-dk-sdk.dts is present it
+# is compiled as the TOP device tree. It `#include`s the mainline base DTS
+# (board/dtb/mono-gateway-dk.dts) and adds the SDK fsl,dpa-ethernet /
+# fsl,dpa-oh nodes + QBMan portal cell-index/FQID ranges that the sdk_dpaa /
+# sdk_fman driver stack requires. Both DTS files are staged into the kernel
+# DTS dir so the relative #include resolves. On the mainline branch (no SDK
+# DTS) this falls back to compiling the base DTS exactly as before.
+DTS_SDK="data/dtb/mono-gateway-dk-sdk.dts"
 DTB_OUT="board/dtb/mono-gw.dtb"
 WORK="work/dtb-build"
 LINUX_SRC="$WORK/linux-src"
 
-[ -f "$DTS_SRC" ]  || { echo "ERROR: $DTS_SRC not found";  exit 1; }
+if [ -f "$DTS_SDK" ]; then
+    DTS_TOP="$DTS_SDK"
+    DTS_TOP_NAME="mono-gateway-dk-sdk.dts"
+    echo "### NXP SDK reference DTS detected — compiling $DTS_SDK"
+else
+    DTS_TOP="$DTS_BASE"
+    DTS_TOP_NAME="mono-gateway-dk.dts"
+fi
+
+[ -f "$DTS_BASE" ] || { echo "ERROR: $DTS_BASE not found"; exit 1; }
+[ -f "$DTS_TOP" ]  || { echo "ERROR: $DTS_TOP not found";  exit 1; }
 
 ### 1. Determine kernel version tag.
 # Read from vyos-build/data/defaults.toml (kernel_version = "6.18.28") if the
@@ -96,9 +114,12 @@ echo "### Base DTSIs OK"
 
 ### 4. Stage the Mono DTS into the kernel source tree.
 DTS_DIR="$LINUX_SRC/arch/arm64/boot/dts/freescale"
-echo "### Staging $DTS_BASE into $DTS_DIR"
+echo "### Staging $DTS_BASE (+ $DTS_TOP) into $DTS_DIR"
 cp "$DTS_BASE" "$DTS_DIR/mono-gateway-dk.dts"
-ls -l "$DTS_DIR/mono-gateway-dk.dts"
+if [ "$DTS_TOP" != "$DTS_BASE" ]; then
+    cp "$DTS_TOP" "$DTS_DIR/$DTS_TOP_NAME"
+fi
+ls -l "$DTS_DIR/$DTS_TOP_NAME"
 
 ### 5. Preprocess + compile.
 echo "### Preprocessing with aarch64-linux-gnu-cpp"
@@ -109,7 +130,7 @@ aarch64-linux-gnu-cpp \
     -I "$LINUX_SRC/include" \
     -undef -D__DTS__ \
     -x assembler-with-cpp \
-    "$DTS_DIR/mono-gateway-dk.dts" \
+    "$DTS_DIR/$DTS_TOP_NAME" \
     -o "$PP"
 echo "### Preprocessed DTS: $(wc -l < "$PP") lines"
 
