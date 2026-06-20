@@ -794,7 +794,7 @@ static bool a050385_check_skb(struct sk_buff *skb, struct dpa_priv_s *priv)
 			return true;
 
 		/* Check if the fragment is 16 byte aligned */
-		if (skb_frag_off(frag) % 16)
+		if (skb_frag_offset(frag) % 16)
 			return true;
 
 		/* Check if the fragment crosses a 4K address boundary. Since
@@ -802,7 +802,7 @@ static bool a050385_check_skb(struct sk_buff *skb, struct dpa_priv_s *priv)
 		 * current fragment, checking for the 256 byte alignment
 		 * isn't relevant.
 		 */
-		if (CROSS_4K(skb_frag_off(frag), skb_frag_size(frag)))
+		if (CROSS_4K(skb_frag_offset(frag), skb_frag_size(frag)))
 			return true;
 	}
 

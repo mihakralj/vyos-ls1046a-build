@@ -51,7 +51,7 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/ioport.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/errno.h>
 
 #include "part_ext.h"

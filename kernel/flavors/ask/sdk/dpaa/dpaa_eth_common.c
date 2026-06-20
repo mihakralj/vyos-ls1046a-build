@@ -42,7 +42,7 @@
 #include <linux/fsl_qman.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
-#include <linux/if_vlan.h>	/* vlan_eth_hdr */
+#include <linux/if_vlan.h>	/* skb_vlan_eth_hdr */
 #include "dpaa_eth.h"
 #include "dpaa_eth_common.h"
 #ifdef CONFIG_FSL_DPAA_1588
@@ -1670,7 +1670,7 @@ int dpa_enable_tx_csum(struct dpa_priv_s *priv,
 		 * by the stack, so reset to beginning of skb->data
 		 */
 		skb_reset_mac_header(skb);
-		ethertype = ntohs(vlan_eth_hdr(skb)->h_vlan_encapsulated_proto);
+		ethertype = ntohs(skb_vlan_eth_hdr(skb)->h_vlan_encapsulated_proto);
 	}
 
 	/* Fill in the relevant L3 parse result fields

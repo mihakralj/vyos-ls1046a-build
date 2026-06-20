@@ -53,7 +53,7 @@
 #include <linux/of_irq.h>
 #include <linux/platform_device.h>
 #include <linux/clk.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/errno.h>
 #include <linux/stat.h>	   /* For file access mask */
 #include <linux/skbuff.h>

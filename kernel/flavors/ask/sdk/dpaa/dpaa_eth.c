@@ -712,8 +712,8 @@ static int dpa_private_napi_add(struct net_device *net_dev)
 		}
 
 		for (i = 0; i < qman_portal_max; i++)
-			netif_napi_add(net_dev, &percpu_priv->np[i].napi,
-					dpaa_eth_poll);
+			netif_napi_add_weight(net_dev, &percpu_priv->np[i].napi,
+					dpaa_eth_poll, NAPI_POLL_WEIGHT);
 	}
 
 	return 0;

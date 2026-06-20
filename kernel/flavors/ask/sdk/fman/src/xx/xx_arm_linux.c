@@ -66,7 +66,7 @@
 #include <asm/pgtable.h>
 #include <asm/irq.h>
 #include <asm/bitops.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/io.h>
 #include <asm/atomic.h>
 #include <asm/string.h>
