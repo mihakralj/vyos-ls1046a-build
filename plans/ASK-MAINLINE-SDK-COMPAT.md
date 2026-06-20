@@ -197,14 +197,60 @@ flowchart LR
 TX collapses to Kbit/s with `error af_xdp_device_output_tx_db: tx poll() failed: Device or resource
 busy` and `eth3 flags: admin-up syscall-lock`; the kernel DPAA netdev path on the same silicon does
 **7.41 Gbit/s**. *Cause:* boot dmesg `af_xdp_pool: registered (skeleton, all callbacks stubbed
--EOPNOTSUPP)` — the DPAA1 driver's XSK buffer-pool ops vtable (pool setup, `ndo_xsk_wakeup`,
-`xsk_buff` DMA) shipped by board patches `0073`–`0085` returns `-EOPNOTSUPP` for **every** callback,
-so `XDP_ZEROCOPY` bind is rejected and VPP's `af_xdp_plugin` falls back to `XDP_COPY`; copy-mode TX
-requires a `sendto()`/tx-poll() syscall kick per batch which returns `EBUSY` under load. *Fix:* either
-(F1) implement the real DPAA1 `xsk_buff_pool` zero-copy ops in `dpaa_eth.c` (deep driver work), or
-(F2) route the high-throughput dataplane through the ASK FE hardware offload instead of VPP/AF_XDP.
-The ~3.5 Gbps in AGENTS.md was kernel 6.6.x; 6.18.x ZC TX was never implemented. qdrant
-`vpp-afxdp-validation-6.18`, 2026-06-18, board 192.168.1.190, image 2026.06.17-2317-rolling.
+-EOPNOTSUPP)` — at the observed image the XSK buffer-pool ops (pool setup, `ndo_xsk_wakeup`,
+`xsk_buff` DMA) returned `-EOPNOTSUPP`, so `XDP_ZEROCOPY` bind was rejected and VPP's `af_xdp_plugin`
+fell back to `XDP_COPY`; copy-mode TX requires a `sendto()`/tx-poll() syscall kick per batch which
+returns `EBUSY` under load. *Fix:* either (F1) complete the real DPAA1 zero-copy ops (see the
+architecture refinement below), or (F2) route the high-throughput dataplane through the ASK FE
+hardware offload instead of VPP/AF_XDP. The ~3.5 Gbps in AGENTS.md was kernel 6.6.x; 6.18.x ZC TX
+was never delivered. qdrant `vpp-afxdp-validation-6.18`, 2026-06-18, board 192.168.1.190, image
+2026.06.17-2317-rolling.
+
+**[NOTE] F1 architecture refinement (2026-06-19, static patch-archaeology on the Windows host — board-confirm pending).** The §4a "implement the real ops **in `dpaa_eth.c`**" framing is architecturally
+imprecise. The ZC ops do **not** live inline in `dpaa_eth.c`. The DPAA1 AF_XDP ZC datapath is a
+three-layer indirection: (1) `dpaa_eth.c` carries only the netdev XSK callbacks (`ndo_bpf`
+`XDP_SETUP_XSK_POOL`, `ndo_xsk_wakeup`) which `rcu_dereference(priv->qmgmt_ops)` and dispatch through
+that vtable — returning `-EOPNOTSUPP` **only when `qmgmt_ops` is NULL** (board patch `0071`); (2)
+`struct dpaa_qmgmt_ops` is the indirection vtable defined by board patch `0068`; (3) the real ZC ops
+(`xsk_pool_attach`/`detach`, wakeup, TX-ZC, BMAN seed) are implemented in a **separate in-tree module
+`af_xdp_pool.ko`** at `drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c`
+(`CONFIG_DPAA_AF_XDP_POOL`, board patches `0073`–`0085`), which registers `struct dpaa_qmgmt_ops` at
+init. This is already the clean modular design the directive wants — mainline `dpaa_eth.c` stays thin;
+the ZC body lives out-of-line behind a vtable.
+
+**[SPEC]** `CONFIG_DPAA_AF_XDP_POOL` is defined `default m` by board patch `0073` but is forced **`=y`**
+in `kernel/common/kernel-config/08-dpaa1.config` (verified symbol-name match, 2026-06-19). Built-in
+means `af_xdp_pool_init()` runs at `late_initcall` and registers `qmgmt_ops` **before any netdev
+binds**, so in the shipping single image `priv->qmgmt_ops` is **non-NULL at boot** and the base
+`XDP_SETUP_XSK_POOL` dispatch does **not** hit the NULL→`-EOPNOTSUPP` path. The flavor-collapse commit
+`6896b0e` did **not** touch `af_xdp_pool`, the `qmgmt_ops` indirection, or `08-dpaa1.config` — the ZC
+state is orthogonal to the build-FLAVOR removal.
+
+**[SPEC]** The `0073` dmesg "skeleton, all callbacks stubbed -EOPNOTSUPP" string is the **skeleton
+commit's** banner; patches `0075a`–`0085` progressively implement the TX-ZC + attach-validation +
+BMAN-seed path, and the later **true-ZC RX series `0093`–`0114`** (eligibility-probe `0093`,
+reprogram-redirect `0103b`, register-zc-rxq `0103g`, eligible-realign `0114`) adds the RX path. Per
+AGENTS.md's own `xsk-zc-check` contract the **expected shipping state is "dormant — no ZC bind, all
+`xsk_zc_*` counters 0"** and "the reprogram WRITE must stay disabled". So RX zero-copy is **gated
+dormant by design**, not broken by a NULL vtable.
+
+**[SPEC]** Restated F1 scope: F1 is **not** "write `xsk_buff_pool` ops in `dpaa_eth.c`". F1 is
+**(a)** confirm on-board why the 2026-06-18 image rejected the ZC bind despite `af_xdp_pool` being
+`=y` (dormant-gate vs a genuine `xsk_pool_attach` fault — read boot dmesg + `xsk-zc-check` on the
+board), then **(b)** complete and un-gate the `af_xdp_pool` true-ZC RX **CC-redirect reprogram**
+(`0103b`/`0103g`/`0114`), enabling the currently-disabled reprogram WRITE under the sub-increment-4
+entry gate. That reprogram primitive is the **same FMan KeyGen-scheme→CC-redirect steering** the
+canonical PCD layer programs (§4b) — so F1-RX and the ASK FE CC path are the **same silicon write**,
+reinforcing the shared-substrate point below. This work is **builder-gated** (Cobalt 100 + board
+192.168.1.190): it needs a kernel build and live `xsk-zc-check`/`pcd-snapshot` HW reads, and cannot be
+authored blind on Windows.
+
+**[?]** Open board question (the one fact this Windows analysis cannot settle): given `af_xdp_pool` is
+`=y` and registers `qmgmt_ops` at boot, the 2026-06-18 `-EOPNOTSUPP` bind-reject is **either** the
+intended dormant-gate (RX reprogram WRITE disabled → attach refuses ZC) **or** a real fault in the
+`af_xdp_pool` `xsk_pool_attach` callback. Resolve by reading the actual boot dmesg banner (is it still
+`0073`'s skeleton string, or a per-callback reason?) plus `xsk-zc-check` on the board before any F1
+code change.
 
 **[SPEC]** Because the skeleton never delivered, the AF_XDP/true-ZC cluster (`0068`–`0085`, `0088`,
 `0094`–`0096`, `0102`–`0114`) is **open for refactor or retirement** — it is no longer a constraint
@@ -214,11 +260,15 @@ together, not kept apart.
 
 **[SPEC]** **Decision (2026-06-18): retain VPP-overlay; refactor the AF_XDP XSK pool ops to real
 zero-copy (fix F1), in parallel with the ASK PCD layer.** The AF_XDP/true-ZC cluster (`0068`–`0085`,
-`0088`, `0094`–`0096`, `0102`–`0114`) is therefore **reworked-and-kept, not retired**. F1 means
-implementing the real DPAA1 `xsk_buff_pool` zero-copy ops in `dpaa_eth.c` so `XDP_ZEROCOPY` bind
-succeeds (pool setup binding the XSK umem to the FMan BMAN pool, a working `ndo_xsk_wakeup` that
-drains the XSK TX ring into the FMan TX FQ via QMan, and `xsk_buff` DMA mapping using the
-`rx_dma_dev` from board patch `0088`) — replacing the current all-`-EOPNOTSUPP` skeleton.
+`0088`, `0094`–`0096`, `0102`–`0114`) is therefore **reworked-and-kept, not retired**. Per the
+2026-06-19 architecture refinement above, F1 means completing and un-gating the real ZC ops in the
+**`af_xdp_pool` module** (NOT writing them inline in `dpaa_eth.c`): a working TX path (`ndo_xsk_wakeup`
+draining the XSK TX ring into the FMan TX FQ via QMan, `xsk_buff` DMA via the `rx_dma_dev` from board
+patch `0088`) and, for RX, enabling the currently-disabled true-ZC RX **CC-redirect reprogram**
+(`0103b`/`0103g`/`0114`) under the sub-increment-4 entry gate — so `XDP_ZEROCOPY` bind succeeds and the
+shipping "dormant" state advances to "ZC-armed". The base `qmgmt_ops` indirection is already populated
+at boot (`CONFIG_DPAA_AF_XDP_POOL=y`); F1 is finishing the callback bodies + the gate, not bootstrapping
+the vtable.
 
 **[SPEC]** Shared substrate: AF_XDP ZC (F1) and ASK FE (Fork A/B, §5) are **two consumers of one
 FMan RX-steering engine** — the canonical PCD layer's KeyGen-scheme + CC-redirect primitives. F1
