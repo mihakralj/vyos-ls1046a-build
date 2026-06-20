@@ -1,0 +1,150 @@
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_cc.c b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_cc.c
+--- a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_cc.c
++++ b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_cc.c
+@@ ... @@
+  *
+  * FmPcdCcBuildFE - Build/configure a Frame Engine object
+  * @h_FmPcd: Handle to FM PCD
+  * @p_FeParams: FE parameters
+  * @h_FE: Handle to FE object
+- *
+- * Stub implementation - FE configuration for enhanced hash support
+  */
+ void FmPcdCcBuildFE(t_Handle h_FmPcd, t_FmPcdFEParams *p_FeParams, t_Handle h_FE)
+ {
+-    UNUSED(h_FmPcd);
+-    UNUSED(p_FeParams);
+-    UNUSED(h_FE);
+-    /* Stub - FE building for enhanced external hash not implemented */
++    t_FmPcd     *p_FmPcd = (t_FmPcd*)h_FmPcd;
++    uint32_t    feWords[FM_PCD_FE_MAX_SIZE/4];
++    uint8_t     feSize = 0, i;
++
++    ASSERT_COND(p_FmPcd);
++    ASSERT_COND(p_FeParams);
++    ASSERT_COND(p_FeParams->type != e_FM_PCD_FE_T_INVALID);
++    ASSERT_COND(h_FE);
++
++    memset(feWords, 0, FM_PCD_FE_MAX_SIZE);
++    feWords[0] |= p_FeParams->wsOffset;
++
++    switch (p_FeParams->type)
++    {
++        case e_FM_PCD_FE_T_HM:
++            feSize = FM_PCD_FE_T_HM_SIZE;
++            feWords[0] |= FM_PCD_FE_TYPE_HM;
++            if (p_FeParams->u.hm.parseAfterHm)
++                feWords[0] |= FM_PCD_FE_T_HM_PAHM;
++            feWords[3] |=
++                    (uint32_t)(XX_VirtToPhys(p_FeParams->h_NextFE) - p_FmPcd->physicalMuramBase);
++            break;
++        case e_FM_PCD_FE_T_ENQ:
++            feSize = FM_PCD_FE_T_ENQ_SIZE;
++            feWords[0] |= FM_PCD_FE_TYPE_ENQ;
++            if (p_FeParams->u.enq.mergePolicerWithNia)
++                feWords[0] |= FM_PCD_FE_T_ENQ_MPPN;
++            if (p_FeParams->u.enq.fqidEn)
++                feWords[0] |= FM_PCD_FE_T_ENQ_FQID;
++            if (p_FeParams->u.enq.ppEn)
++                feWords[0] |= FM_PCD_FE_T_ENQ_PP;
++            if (p_FeParams->u.enq.spEn)
++                feWords[0] |= FM_PCD_FE_T_ENQ_SP;
++            feWords[1] = p_FeParams->u.enq.nia;
++            feWords[3] |=
++                    (uint32_t)(XX_VirtToPhys(p_FeParams->h_NextFE) - p_FmPcd->physicalMuramBase);
++            break;
++        case e_FM_PCD_FE_T_MUX:
++            feSize = FM_PCD_FE_T_MUX_SIZE;
++            feWords[0] |= FM_PCD_FE_TYPE_MUX;
++            break;
++        case e_FM_PCD_FE_T_EXIT:
++            feSize = FM_PCD_FE_T_EXIT_SIZE;
++            feWords[0] |= FM_PCD_FE_TYPE_EXIT;
++            if (p_FeParams->u.exit.deallocateBuffer)
++                feWords[0] |= FM_PCD_FE_T_EXIT_DEALLOCATE;
++            break;
++        case e_FM_PCD_FE_T_TRANSITION:
++            feSize = FM_PCD_FE_T_TRANSITION_SIZE;
++            feWords[0] |= FM_PCD_FE_TYPE_TRANSITION;
++            if (p_FeParams->u.transition.deallocateBuffer)
++                feWords[0] |= FM_PCD_FE_T_EXIT_DEALLOCATE;
++            if (p_FeParams->u.transition.nextADFromWS)
++                feWords[0] |= FM_PCD_FE_T_TRANSITION_AD_FROM_WS;
++            else
++                feWords[2] |=
++                    (uint32_t)(XX_VirtToPhys(p_FeParams->h_NextFE) - p_FmPcd->physicalMuramBase);
++            break;
++        default :
++            ASSERT_COND(0);
++    }
++
++    ASSERT_COND((feSize % 4) == 0);
++
++    for(i = 0; i < feSize/4; i++) {
++        WRITE_UINT32(*(uint32_t *)PTR_MOVE(h_FE, i*4), feWords[i]);
++    }
+ }
+
+ /**
+  * FmPcdCcBuildContextByFE - Build context using FE parameters
+  * @h_FmPcd: Handle to FM PCD
+  * @p_Context: Context buffer
+  * @offset: Offset in context
+  * @p_FeParams: FE context parameters
+- *
+- * Stub implementation - returns success without action
+  */
+ t_Error FmPcdCcBuildContextByFE(t_Handle h_FmPcd,
+                                 uint8_t *p_Context,
+                                 uint16_t offset,
+                                 t_FmPcdFEContextParams *p_FeParams)
+ {
+-    UNUSED(h_FmPcd);
+-    UNUSED(p_Context);
+-    UNUSED(offset);
+-    UNUSED(p_FeParams);
+-    /* Stub - FE context building for enhanced external hash not implemented */
++    t_FmPcd     *p_FmPcd = (t_FmPcd*)h_FmPcd;
++    uint16_t    contextSize;
++    uint32_t    *tmp;
++
++    switch (p_FeParams->type)
++    {
++        case e_FM_PCD_FE_T_HM:
++            contextSize = p_FeParams->u.hm.tableSize;
++            if ((offset + contextSize) > FE_MAX_CONTEXT_SIZE)
++                RETURN_ERROR(MAJOR, E_FULL, ("exceeded the %dB for context", FE_MAX_CONTEXT_SIZE));
++            tmp = (uint32_t *)PTR_MOVE(p_Context, offset);
++            MemCpy8((uint8_t*)tmp, p_FeParams->u.hm.p_Hmct, contextSize);
++            break;
++        case e_FM_PCD_FE_T_ENQ:
++            contextSize = 8;
++            if ((offset + contextSize) > FE_MAX_CONTEXT_SIZE)
++                RETURN_ERROR(MAJOR, E_FULL, ("exceeded the %dB for context", FE_MAX_CONTEXT_SIZE));
++            tmp = (uint32_t *)PTR_MOVE(p_Context, offset);
++            WRITE_UINT32(*tmp, (uint32_t)((p_FeParams->u.enq.rspid << 24) |
++                    p_FeParams->u.enq.fqid));
++            WRITE_UINT32(*(tmp + 1), (uint32_t)(p_FeParams->u.enq.ppid << 16));
++		break;
++        case e_FM_PCD_FE_T_MUX:
++            contextSize = 4;
++            if ((offset + contextSize) > FE_MAX_CONTEXT_SIZE)
++                RETURN_ERROR(MAJOR, E_FULL, ("exceeded the %dB for context", FE_MAX_CONTEXT_SIZE));
++            tmp = (uint32_t *)PTR_MOVE(p_Context, offset);
++            WRITE_UINT32(*tmp, (uint32_t)(XX_VirtToPhys(p_FeParams->u.mux.h_NextFE)
++                    - p_FmPcd->physicalMuramBase));
++            break;
++        case e_FM_PCD_FE_T_TRANSITION:
++            contextSize = 4;
++            if ((offset + contextSize) > FE_MAX_CONTEXT_SIZE)
++                RETURN_ERROR(MAJOR, E_FULL, ("exceeded the %dB for context", FE_MAX_CONTEXT_SIZE));
++            tmp = (uint32_t *)PTR_MOVE(p_Context, offset);
++            WRITE_UINT32(*tmp, (uint32_t)(XX_VirtToPhys(p_FeParams->u.transition.h_NextAD)
++                    - p_FmPcd->physicalMuramBase));
++            break;
++        default :
++            ASSERT_COND(0);
++    }
++
+     return E_OK;
+ }

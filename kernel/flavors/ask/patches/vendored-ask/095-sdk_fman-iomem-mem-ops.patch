@@ -1,0 +1,54 @@
+From ed82ee8348023d24f545039eb9ff865b350a9caf Mon Sep 17 00:00:00 2001
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Sun, 26 Apr 2026 22:00:00 +0200
+Subject: [PATCH] sdk_fman: convert plain mem-ops on iomem to iomem-safe helpers
+
+Vendored FMAN code uses plain memset()/memcpy() against pointers
+returned by FM_MURAM_AllocMem(), which is backed by devm_ioremap() —
+Device-nGnRE memory on arm64. Whether such a call faults depends
+entirely on whether the compiler inlines it or emits the library
+__memset/__memcpy:
+
+ - Library __memset uses STP (16-byte store-pair); STP on Device
+   memory raises an alignment fault regardless of natural alignment.
+ - Inlined byte/word stores work fine on Device memory.
+
+With CONFIG_KASAN off, GCC's heuristics happened to inline these
+small-constant calls and the latent bug stayed hidden. With KASAN on,
+the heuristics flip and __memset is emitted, surfacing real boot
+panics. The right fix is to use the iomem-safe FMAN helpers
+(IOMemSet32 / IOMemCpy32) regardless of compiler whim.
+
+This patch is the per-concern collector for these conversions; new
+sites land here as a new hunk plus a bullet below.
+
+Sites converted:
+
+ - AllocFEObjs (fm_pcd.c): 28-byte zero on the FE object allocated
+   in MURAM. Panic seen at FM_PCD_Init+0xc68 (AllocFEObjs inlined),
+   FSC=0x21 alignment fault on a Device-nGnRE address. IOMemSet32 is
+   already used a few lines further down for ipv6FrameIdAddr /
+   capwapFrameIdAddr allocated the same way — this brings AllocFEObjs
+   in line.
+
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+ .../net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.c b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.c
+index a20088a0bf77..0802958f7f86 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.c
++++ b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.c
+@@ -449,7 +449,7 @@ static t_Error AllocFEObjs(t_FmPcd *p_FmPcd)
+                                                     FM_PCD_FE_ALIGN);
+         if (!p_FeObj->h_FE)
+             RETURN_ERROR(MAJOR, E_NO_MEMORY, ("MURAM allocation for FE"));
+-        memset((uint8_t *)p_FeObj->h_FE, 0, FM_PCD_FE_MAX_SIZE);
++        IOMemSet32((uint8_t *)p_FeObj->h_FE, 0, FM_PCD_FE_MAX_SIZE);
+  
+         EnqueueFEObj(p_FmPcd, &p_FmPcd->feInfo.availableFeLst, p_FeObj);
+     }
+-- 
+2.47.3
+

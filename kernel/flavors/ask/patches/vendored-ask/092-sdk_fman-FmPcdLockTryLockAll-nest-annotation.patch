@@ -1,0 +1,146 @@
+From ab4ef45511daf90e3adf4314a9166677048946e9 Mon Sep 17 00:00:00 2001
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Sat, 25 Apr 2026 17:55:41 +0200
+Subject: [PATCH] sdk_fman: annotate FmPcdLockTryLockAll inner lock as nested
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Every FMAN spinlock is allocated via XX_InitSpinlock(), which means they
+all share the same lockdep class. FmPcdLockTryLockAll() takes an outer
+lock (h_FmPcd->h_Spinlock via FmPcdLock) and then walks a list taking
+inner per-object locks (p_Lock->h_Spinlock via FmPcdLockTryLock). Lockdep
+sees "p_Spinlock held, p_Spinlock acquired" and fires a recursive-locking
+warning, because the class is the same even though the instances differ:
+
+    WARNING: possible recursive locking detected
+    dpa_app/125 is trying to acquire lock:
+    ffff000801009558 (p_Spinlock){..-.}-{2:2}, XX_LockIntrSpinlock
+    but task is already holding lock:
+    ffff000801f660d8 (p_Spinlock){..-.}-{2:2}, XX_LockIntrSpinlock
+    FmPcdLockTryLockAll → FM_PORT_SetPCD → LnxwrpFmPortIOCTL
+
+This is a false positive — the outer lock always comes first, the inner
+locks are per-object, so there's no true ordering violation. Fix:
+
+ - Add XX_LockIntrSpinlockNested(h_Spinlock, subclass), a thin wrapper
+   over spin_lock_irqsave_nested.
+ - Add FmPcdLockTryLockNested, an inline variant of FmPcdLockTryLock
+   that takes a subclass.
+ - Use SINGLE_DEPTH_NESTING at the inner site in FmPcdLockTryLockAll.
+
+Properly fixing the root cause (all XX spinlocks sharing one lockdep
+class) would require making XX_InitSpinlock() assign per-call-site keys,
+which is a larger refactor. This minimal change eliminates the warning
+at the single site known to nest.
+
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+ .../sdk_fman/Peripherals/FM/Pcd/fm_pcd.c      |  8 ++++++-
+ .../sdk_fman/Peripherals/FM/Pcd/fm_pcd.h      | 22 +++++++++++++++++++
+ .../ethernet/freescale/sdk_fman/inc/xx_ext.h  | 18 +++++++++++++++
+ .../freescale/sdk_fman/src/xx/xx_arm_linux.c  |  7 ++++++
+ 4 files changed, 54 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.c b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.c
+index b86860b387aa..a20088a0bf77 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.c
++++ b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.c
+@@ -807,7 +807,13 @@ bool FmPcdLockTryLockAll(t_Handle h_FmPcd)
+     LIST_FOR_EACH(p_Pos, &((t_FmPcd*)h_FmPcd)->acquiredLocksLst)
+     {
+         t_FmPcdLock *p_Lock = FM_PCD_LOCK_OBJ(p_Pos);
+-        if (!FmPcdLockTryLock(p_Lock))
++        /* Nested subclass: the FmPcd lock is already held (above), and
++         * each inner per-object lock is a distinct instance of the same
++         * XX_InitSpinlock lockdep class. Lockdep needs the nesting hint
++         * to distinguish outer from inner — otherwise it (correctly)
++         * reports the class-level collision as a deadlock.
++         */
++        if (!FmPcdLockTryLockNested(p_Lock, SINGLE_DEPTH_NESTING))
+         {
+             p_SavedPos = p_Pos;
+             break;
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.h b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.h
+index 7888b95f0345..dc334b070440 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.h
++++ b/drivers/net/ethernet/freescale/sdk_fman/Peripherals/FM/Pcd/fm_pcd.h
+@@ -550,6 +550,28 @@ static __inline__ bool FmPcdLockTryLock(t_FmPcdLock *p_Lock)
+     return TRUE;
+ }
+ 
++/* Variant that takes its spinlock with an explicit lockdep subclass.
++ * All XX_InitSpinlock()-created locks share one lockdep class, so any code
++ * path that acquires a second instance while holding the first (see
++ * FmPcdLockTryLockAll) triggers a false-positive recursive-locking warning.
++ * Pass SINGLE_DEPTH_NESTING from the inner site.
++ */
++static __inline__ bool FmPcdLockTryLockNested(t_FmPcdLock *p_Lock, int subclass)
++{
++    uint32_t intFlags;
++
++    ASSERT_COND(p_Lock);
++    intFlags = XX_LockIntrSpinlockNested(p_Lock->h_Spinlock, subclass);
++    if (p_Lock->flag)
++    {
++        XX_UnlockIntrSpinlock(p_Lock->h_Spinlock, intFlags);
++        return FALSE;
++    }
++    p_Lock->flag = TRUE;
++    XX_UnlockIntrSpinlock(p_Lock->h_Spinlock, intFlags);
++    return TRUE;
++}
++
+ static __inline__ void FmPcdLockUnlock(t_FmPcdLock *p_Lock)
+ {
+     ASSERT_COND(p_Lock);
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/inc/xx_ext.h b/drivers/net/ethernet/freescale/sdk_fman/inc/xx_ext.h
+index 21b62d0a2b1b..b7aa3e24b21f 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/inc/xx_ext.h
++++ b/drivers/net/ethernet/freescale/sdk_fman/inc/xx_ext.h
+@@ -368,6 +368,24 @@ void XX_UnlockSpinlock(t_Handle h_Spinlock);
+ *//***************************************************************************/
+ uint32_t XX_LockIntrSpinlock(t_Handle h_Spinlock);
+ 
++/**************************************************************************//**
++ @Function      XX_LockIntrSpinlockNested
++
++ @Description   Locks a spinlock (interrupt safe) with an explicit lockdep
++                subclass. Needed when code acquires two instances of locks
++                that were allocated via XX_InitSpinlock() (which gives every
++                lock the same lockdep class), under a known outer-before-
++                inner ordering — otherwise lockdep reports a false positive
++                recursive-locking deadlock.
++
++ @Param[in]     h_Spinlock - A handle to a spinlock.
++ @Param[in]     subclass   - Lockdep subclass (0..7). Typical use:
++                             SINGLE_DEPTH_NESTING for a nested acquire.
++
++ @Return        As for XX_LockIntrSpinlock.
++*//***************************************************************************/
++uint32_t XX_LockIntrSpinlockNested(t_Handle h_Spinlock, int subclass);
++
+ /**************************************************************************//**
+  @Function      XX_UnlockIntrSpinlock
+ 
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/src/xx/xx_arm_linux.c b/drivers/net/ethernet/freescale/sdk_fman/src/xx/xx_arm_linux.c
+index a5fa28b4c998..3369f857d6f5 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/src/xx/xx_arm_linux.c
++++ b/drivers/net/ethernet/freescale/sdk_fman/src/xx/xx_arm_linux.c
+@@ -513,6 +513,13 @@ uint32_t XX_LockIntrSpinlock(t_Handle h_Spinlock)
+     return intrFlags;
+ }
+ 
++uint32_t XX_LockIntrSpinlockNested(t_Handle h_Spinlock, int subclass)
++{
++    unsigned long intrFlags;
++    spin_lock_irqsave_nested((spinlock_t *)h_Spinlock, intrFlags, subclass);
++    return intrFlags;
++}
++
+ void XX_UnlockIntrSpinlock(t_Handle h_Spinlock, uint32_t intrFlags)
+ {
+      spin_unlock_irqrestore((spinlock_t *)h_Spinlock, (unsigned long)intrFlags);
+-- 
+2.47.3
+
