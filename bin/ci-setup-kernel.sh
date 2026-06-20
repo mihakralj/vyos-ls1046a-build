@@ -810,6 +810,11 @@ scripts/config --set-val CONFIG_QORIQ_CPUFREQ y
 scripts/config --set-val CONFIG_FSL_EDMA y
 scripts/config --set-val CONFIG_SERIAL_OF_PLATFORM y
 scripts/config --set-val CONFIG_MAXLINEAR_GPHY y
+# Mono fix/security-hardening (sha 165f402b) defconfig ships MARVELL_10G_PHY=y
+# (ours defaults to =m). Forced built-in for Mono-reference A/B parity. Our
+# SFP-10G-T copper module uses the RTL8261 rollball PHY (realtek/rollball), not
+# a Marvell 10G PHY, so this is parity-only — harmless, marginal.
+scripts/config --set-val CONFIG_MARVELL_10G_PHY y
 scripts/config --set-val CONFIG_IMX2_WDT y
 scripts/config --set-val CONFIG_SPI_FSL_QUADSPI y
 scripts/config --disable CONFIG_DEBUG_PREEMPT

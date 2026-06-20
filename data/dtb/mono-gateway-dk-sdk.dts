@@ -310,6 +310,15 @@ vsp-window = <2 0>;
 &fm1_mac9 {
 /delete-property/ managed;
 /* sfp = <&sfp_xfi0> inherited from mainline DTS — SFP driver manages cage */
+/*
+ * Mono fix/security-hardening (sha 165f402b) sets pcs-handle-names = "xfi"
+ * on mac9 ("Match enet7 for consistency"). phy-connection-type = "xgmii" is
+ * already inherited from the base mono-gateway-dk.dts 10G MAC node. The SDK
+ * fsl_mac driver maps xfi_pcs internally from the xgmii mode, so this name
+ * hint is cosmetic for the SDK path; added for byte-alignment with Mono's
+ * latest reference DTS. NOTE: Mono does NOT add this on mac10 (the DAC port).
+ */
+pcs-handle-names = "xfi";
 fixed-link {
 speed = <10000>;
 full-duplex;
