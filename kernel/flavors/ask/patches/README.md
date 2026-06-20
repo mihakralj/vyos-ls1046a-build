@@ -1,26 +1,38 @@
 # ASK2 in-tree kernel patches
 
-Per `specs/ask2-rewrite-spec.md` §10.1, ASK2 needs three small
-in-tree kernel patches. They are listed and applied in numeric order:
+The `0002`–`0065` series (46 patches) is the **productive ASK2 FMan PCD
+(Parse/Classify/Distribute) subsystem** on mainline 6.18 — NOT placeholder
+stubs. It creates the net-new `fman_pcd.c` / `fman_pcd_cc.c` / `fman_pcd_kg.c`
+/ `fman_pcd_manip.c` / `fman_pcd_plcr.c` / `fman_pcd_prs.c` /
+`fman_pcd_replic.c` / `fman_host_cmd.c` translation units, the public
+`include/linux/fsl/fman_pcd.h` ABI (gated by `FMAN_PCD_API_VERSION`), and the
+KUnit suites under `fman/tests/`. Authored against `linux-6.18.28`.
 
-| File                                  | Spec ref | Replaced in |
-|---------------------------------------|----------|-------------|
-| `0001-caam-qi-share.patch`            | §8.1     | PR10 (M2.1) |
-| `0002-dpaa-eth-flow-block.patch`      | §10.2    | PR11 (M2.2) |
-| `0003-fman-host-command-api.patch`    | §10.3    | PR12 (M2.3) |
+## Status (2026-06-18): PARKED — blocked on the canonical PCD-layer decision
 
-## Status (PR2 — M0.2)
+**This series is staged by NOTHING.** After the flavor collapse (`6896b0e`)
+the `FLAVOR=ask` patch-staging block was removed from
+`bin/ci-setup-kernel.sh`, so none of these patches reach a build. They cannot
+simply be re-wired on top of the shipping board patches: per
+[`plans/ASK-MAINLINE-SDK-COMPAT.md`](../../../plans/ASK-MAINLINE-SDK-COMPAT.md)
+**§4b**, this series and the board PCD cluster
+(`kernel/common/patches/board/0086`–`0119`) **both create the same net-new
+`fman_pcd*.c` files** — they are **mutually-exclusive alternatives**, and
+`git apply --3way` of this series onto a board-patched tree fails at
+"file already exists". Choosing the canonical layer is a hard, user-gated
+decision (compat plan §4b / §7); until it is made, this series stays parked.
 
-These are **placeholder stubs** authored against `linux-6.18.28`. Each
-adds the symbol the OOT `ask.ko` module needs at link time, but every
-function returns `-EOPNOTSUPP` and carries a `#warning` line so the
-kernel build chatters about the deferred work. The placeholders exist
-so PR3 (M0.3) can wire the build pipeline end-to-end while the real
-implementations land later as part of M2.
+The former `0001-caam-qi-share.patch` was **relocated** to
+`kernel/common/patches/board/0134-caam-qi-share.patch` (2026-06-18): CAAM is
+hardware-common and orthogonal to the PCD layer, so it now builds
+unconditionally on the single image (see compat plan §4b).
 
-The real PR10/11/12 patches will overwrite these files in place; the
-file names and patch numbers stay stable so `bin/ci-setup-kernel.sh`
-does not need to change again.
+### Sub-directories (both DROP / ignore)
+
+| Path | Disposition |
+|------|-------------|
+| `vendored-ask/` (`010`–`100`) | **DROP** — legacy ASK 1.x in-tree-hooks; targets the deleted `sdk_dpaa`/`sdk_fman` trees + `net/{bridge,xfrm,netfilter}` core (the rejected mainline-replacement approach). Wired into no build. |
+| `archive-grafted-2026-05-24/` | **Ignore** — superseded graft experiments (only `0065` was resurrected, see below). |
 
 ## Authoring rules
 
@@ -31,13 +43,13 @@ Per `plans/PATCH-MIGRATION-3WAY.md`:
 - Apply order is `bin/ci-setup-kernel.sh`'s alphabetical sort. To stay
   out of vyos-build's own `0001-*` and `0003-*` reserved range, these
   files get **renamed at staging time** to `1001-`/`1002-`/`1003-` —
-  see PR3 for the staging logic.
+  see the staging logic when the series is re-wired.
 - Verify any future edit applies cleanly to a stock kernel tree:
   ```sh
   cd /tmp && tar xf /path/to/linux-6.18.x.tar.xz
   cd linux-6.18.x
   git init -q && git add -A && git commit -q -m base --no-verify
-  git apply --3way --check /path/to/0001-caam-qi-share.patch
+  git apply --3way --check /path/to/0004-fman-pcd-subsystem.patch
   ```
 - Mergiraf is wired as the merge driver via repo `.gitattributes` for
   `*.c`/`*.h`/`*.py`/`*.json`/`*.yaml`/`*.toml`/`*.xml`, so

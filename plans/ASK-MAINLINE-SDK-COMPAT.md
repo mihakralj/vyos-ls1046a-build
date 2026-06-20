@@ -8,7 +8,9 @@ This document is the governing architecture + reconciliation plan for landing th
 hardware-offload (FE / `en_exthash` external-hash forwarding, ASK2) **without** swapping the
 mainline `fman` / `dpaa` / `soc/fsl/qbman` source trees. Read §1 for the directive and the core
 decision, §2 for the three-bucket file disposition, §3 for the low-risk gate definition, §4 for the
-PCD-layer reconciliation procedure, §5 for the fork/de-risk plan, §6 for board-safety constraints.
+PCD-layer reconciliation procedure, **§4b for the resolved verify-patch-stack result + the canonical-layer
+decision matrix, §4c for the adopted Option-1 cherry-pick scope**, §5 for the fork/de-risk plan, §6 for
+board-safety constraints.
 Tags: `[SPEC]` = binding fact/requirement, `[NOTE]` = rationale/history, `[?]` = unverified/inferred,
 `[BUG] Title` = symptom+cause+fix. This plan **supersedes** the Path-A source-swap plan in
 `plans/ASKS-SDK-LIFT.md` (which is retained as historical reference only).
@@ -34,10 +36,11 @@ added into the mainline `fman` tree, with only small additive hooks/exports into
 that our board stack 0086–0144 contains an **older, partial version of the same PCD-on-mainline
 effort**, so the two in-house layers overlap on the same new-in-tree filenames.
 
-**[SPEC]** Core decision: adopt **one canonical PCD-on-mainline layer**, retire the overlapping board
-patches, and keep all orthogonal board patches. The canonical layer is selected per §4 (recommended:
-the vendored-ask series, as the more complete and more SDK-API-faithful iteration), reconciled onto
-board-patched mainline rather than clean mainline.
+**[SPEC]** Core decision: adopt **one canonical PCD-on-mainline layer**, and keep all orthogonal board
+patches. The canonical layer is selected per §4 / **§4b** — **adopted (2026-06-18): Option 1, the board
+PCD cluster is canonical**; the ASK-only SDK-API surface (§4c) is cherry-picked additively into board
+`0145+`. **No board patch is retired** under the adopted direction; retiring board patches (Option 2)
+is the one path still requiring explicit user sign-off.
 
 **[SPEC]** Rejected: the full SDK source trees (`sdk_fman` / `sdk_dpaa` / `fsl_qbman`), the
 `10-sdk-swap.config` Kconfig replacement, and any vendored-ask patch that rewrites a mainline-native
@@ -229,6 +232,117 @@ redirect mechanism may be directly reusable by the ASK FE CC tree (Fork A). Conf
 
 ---
 
+## 4b. verify-patch-stack Result — the Two PCD Layers Are Mutually Exclusive (2026-06-18)
+
+**[SPEC]** `verify-patch-stack` is **resolved by static patch-header analysis** (no kernel-tree dry-run
+needed). The parked `kernel/flavors/ask/patches/` series does **NOT** additively apply on
+board-patched mainline 6.18 — it is a **parallel re-implementation** of the board PCD cluster, proven
+by file-for-file collision:
+
+- **Board PCD cluster** (`0086`/`0086a`/`0086b`, `0092`, `0097`–`0100`, `0101`, `0104`/`0104a`/`0104b`,
+  `0106`–`0108`, `0113`, `0115`, `0116`, `0118`, `0119`): ~20 patches, **6 471 added lines**. CREATES
+  `fman_pcd.c`, `fman_pcd_cc.c`, `fman_pcd_kg.c`, `fman_pcd_manip.c`, `fman_pcd_plcr.c`,
+  `fman_pcd_internal.h`, `fman_pcd_dcsr.c`, `fman_keygen_internal.h`, `include/linux/fsl/fman_pcd.h`.
+  **Currently the only PCD layer in the common build; HW-validated on board 192.168.1.190** (ingress
+  policer datapath, FMPL_GCR enable, KeyGen→PLCR steering — all proven on hardware 2026-06-09).
+- **ASK main series** (`0001`–`0065`, 47 patches, **10 342 added lines**): CREATES the **same**
+  `fman_pcd*.c` + `fman_pcd.h` + `fman_keygen_internal.h` net-new files, plus `fman_host_cmd.c`,
+  `fman_pcd_prs.c`, `fman_pcd_replic.c`, `dpaa_flow_offload.h`, and kunit suites under `fman/tests/`.
+  More complete (full kg/cc/manip/plcr/replic/prs encoders, host-command API, `FMAN_PCD_API_VERSION`
+  ABI gate, kernel-scheme graft `0065`). Authored against `linux-6.18.28`. **Parked — built by
+  nothing; HW-validation status in THIS repo is unknown** (inherited from the archived kernel-build
+  repo / `nxp_ask`).
+
+**[SPEC]** Because both layers create the identical net-new files, `git apply --3way` of the ASK PCD
+patches onto a board-patched tree fails at "file already exists" for `fman_pcd*.c` / `fman_pcd.h`. They
+are **alternatives**, not a stack. The §4 canonical-layer decision is therefore a hard prerequisite for
+ANY further ASK PCD work — there is no "apply both" path.
+
+**[SPEC]** Sub-tree dispositions (final):
+
+- `kernel/flavors/ask/patches/vendored-ask/` (the `010`–`100` series) targets
+  `drivers/net/ethernet/freescale/sdk_dpaa/` and `sdk_fman/` — the SDK source trees dropped in §2.1.
+  **DROP** (dead without the rejected SDK lift; this is the legacy in-tree-hooks approach, not the
+  PCD-on-mainline layer).
+- `kernel/flavors/ask/patches/archive-grafted-2026-05-24/` — superseded graft experiments. **Ignore.**
+- ASK `0001-caam-qi-share.patch` touches only `drivers/crypto/caam/qi.c`/`qi.h` + new
+  `include/linux/crypto/caam_qi_share.h` (the dormant `caam_qi_ext_consumer_register`/`release`
+  `EXPORT_SYMBOL_GPL` API for the M5 HW-IPsec path). It is **hardware-common and orthogonal to the
+  PCD decision** (CAAM, not FMan). Board `0134-caam-qi-share.patch` (referenced in AGENTS.md as the
+  shipping location) does **NOT exist on `nxp-ask`** — the board stack here tops out at `0119` + the
+  `4xxx` series. ASK `0001` is therefore the **sole** copy. **RELOCATE** it to
+  `kernel/common/patches/board/0134-caam-qi-share.patch` so it builds unconditionally on the single
+  image (matching AGENTS.md), decoupled from the canonical-layer gate. (Earlier "dedupe duplicate"
+  disposition was wrong — there is no duplicate on this branch.)
+- ASK `0028`/`0029`/`0030`/`0031`/`0039` (dpaa exports) + `0041` (widen hwport) are the only
+  potentially-additive patches, but they touch `dpaa_eth.c`/`fman_pcd_kg.c` that the board layer also
+  edits/creates → they ride with whichever PCD layer wins, not independently.
+
+**[NOTE] CANONICAL-LAYER DECISION — RESOLVED 2026-06-18 (Option 1 adopted, non-destructive; Option 2 still user-gated):**
+
+| Option | Keep | Gain | Cost / Risk |
+|---|---|---|---|
+| **(1) Board cluster canonical** *(ADOPTED — cherry-pick the §4c ASK-only delta into board `0145+`)* | the 6 471-line **HW-validated** layer that ships today | add the `dpaa_flow_offload.h` binding header + `prs`/`replic` encoders + kunit incrementally | must rebase the 2 ASK-only encoders onto the board internal API + compile-test on the builder; **non-destructive (retires nothing)** |
+| **(2) ASK series canonical** *(user-gated — retire board `0092`–`0119`, rebase ASK onto orthogonal board patches)* | the 10 342-line **more-complete** layer | complete PCD subsystem + ABI bump + full tests in one swap | **retires ~13 HW-validated board patches**; ASK layer is unvalidated on this board; large, hard-to-reverse |
+
+**[SPEC] ADOPTED WORKING DECISION (2026-06-18): Option 1 — board cluster canonical.** The shipping
+6 471-line board PCD cluster stays the canonical layer; the ASK-only SDK-API surface (per the §4c
+file-delta: the `dpaa_flow_offload.h` binding header, the `fman_pcd_prs.c`/`fman_pcd_replic.c` encoders
+the board layer lacks, the `0065` graft, and the KUnit suites — **the HC transport is EXCLUDED**) is
+cherry-picked **additively** into new board patches `0145+` as each piece is needed. The board cluster
+already carries the `kg`/`cc`/`manip`/`plcr` encoders and the `FMAN_PCD_API_VERSION` gate, so those are
+NOT part of the delta. This is chosen because (a) it honors the governing directive's spirit
+(*stay SDK-API-compatible, keep what works, modify mainline only low-risk*) literally; (b) it retires
+**zero** HW-validated board patches, so it commits to no irreversible action; (c) the board layer is
+the only one HW-proven on this board. **No board patch is retired under Option 1.**
+
+**[?] Option 2 (ASK series canonical, retire board `0092`–`0119`) remains the ONLY path that requires
+explicit user sign-off** — it is destructive and hard-to-reverse (swaps a HW-proven layer for an
+unvalidated-here one). Do NOT pursue Option 2 without the user explicitly choosing it. If the user
+prefers the "complete subsystem in one swap" tradeoff, re-open this decision.
+
+**[NOTE]** The compat plan's §4 step-1 originally leaned Option 2 (ASK-canonical). The
+verify-patch-stack metrics reversed that: Option 2 throws away a HW-proven layer for an unvalidated
+(here) one. Option 1 is now adopted as the working direction; the cherry-pick scope is the concrete
+next-work item.
+
+### 4c. Option-1 Cherry-Pick Scope — the ASK-only delta surface (2026-06-18)
+
+**[SPEC]** Static file-delta of the two layers (`new file mode` targets, board `0086`–`0119` vs ASK
+`0002`–`0065`) yields the exact set of net-new files the ASK series has that the board cluster lacks.
+The Option-1 work is to port these — and ONLY these — onto the board PCD base as additive board
+patches `0145+`:
+
+| ASK-only net-new file | Role | Disposition under Option 1 |
+|---|---|---|
+| `include/linux/fsl/dpaa_flow_offload.h` | Public flow-offload binding header | **REQUIRED** — the OOT `ask.ko` `#include`s it in `ask_flow_offload.c` AND `ask_hw.c`; the board PCD layer ships no such header, so `ask.ko` cannot link against the board layer without it. **But NOT a clean lift** — see the coupling note below. |
+| `drivers/.../fman/fman_pcd_prs.c` | Soft-parser sequence encoder | **PORT** when ask.ko needs custom parse — adapt to the board `fman_pcd_internal.h` API (NOT a file-copy). |
+| `drivers/.../fman/fman_pcd_replic.c` | Frame-replication group encoder | **PORT** when ask.ko needs replication — same adaptation caveat. |
+| `drivers/.../fman/tests/fman_pcd_{cc,manip,plcr,prs,replic}_test.c` | KUnit suites (board has only a flat `fman_pcd_cc_test.c`) | **PORT (low-risk, test-only)** — gated behind `90-kunit.config`, no runtime impact. |
+| `drivers/.../fman/fman_host_cmd.c` + `include/linux/fsl/fman_host_cmd.h` | FMan host-command (HC) microcode-doorbell transport | **EXCLUDE** — board `0092` intentionally omits HC; the shipping 210.10.1 QEF ucode does not implement the HC doorbell (PR13 finding). Cherry-picking it would be dead code at best, harmful at worst. |
+
+**[SPEC]** The `FMAN_PCD_API_VERSION` ABI gate is **NOT** an ASK-only delta — board `0092`'s
+`fman_pcd.h` already defines it at `1`; ASK `0054` bumps it (to track the manip-ipv4-forward encoder).
+Under Option 1 the board gate is bumped in lockstep only when a new encoder actually lands.
+
+**[BUG] The `dpaa_flow_offload.h` cherry-pick is build-gated, not a blind header copy — it collides with the board's own tc-offload design.** ASK `0002-dpaa-eth-flow-block.patch` (234 lines, 157 added) does
+NOT just add the header — it ALSO modifies the mainline-native `dpaa_eth.c` to register an **external
+flow-offload backend** on `ndo_setup_tc`. The shipping board cluster already implements `ndo_setup_tc` /
+`flow_block` on the same `dpaa_eth.c` with a **different design** — an in-driver `tc-matchall → FMan
+ingress-policer` offload in `0104-dpaa-ingress-policer-tc-matchall-bridge.patch` (33 kw hits) +
+`0104a-dpaa-netdev-advertise-hw-tc.patch` (11 hits), and `0109` ethtool-ntuple CC steering. The two
+models contend for the same `ndo_setup_tc` entry point, so the ASK header CANNOT be lifted in isolation:
+its `dpaa_eth.c` companion hunk must be reconciled against the board's existing tc path, then
+**compile-tested + HW-tested on the Cobalt 100 builder + board 192.168.1.190**. Authoring it blind on
+the Windows host risks the documented "applies via --3way but generates wrong content" failure mode
+(`git apply --3way` catches context drift but NOT malformed hunk arithmetic). **Fix/path:** treat the
+first cherry-pick as a builder task — extract the union header state (0002 + the 0028/0030/0031/0039
+export accretions), design how the ASK external-backend model and the board in-driver tc-matchall model
+coexist or merge on `ndo_setup_tc`, author as board `0145+`, and validate on real hardware before any
+commit. This is the natural M-boundary where authoring must move from the Windows host to the builder.
+
+---
+
 ## 5. Offload Mechanism — Fork Decision and De-Risk
 
 **[SPEC]** The `en_exthash` node has NO driver-settable compare-key source: the 210.10.1 FE ucode
@@ -287,11 +401,23 @@ un-stubs the ZC ops, with AF_XDP ZC and ASK FE sharing one FMan RX-steering engi
 **[?]** Confirm Fork A vs Fork B as the primary implementation target before any board patch is
 authored (§5).
 
-**[?]** Confirm the vendored-ask series (not the board PCD cluster) is the canonical PCD layer to keep
-(§4 step 1) — this retires ~13 board patches and is hard to reverse.
+**[SPEC]** Canonical PCD layer — **RESOLVED + ADOPTED (2026-06-18): Option 1, board cluster canonical**
+(see §4b matrix + §4c scope). The verify-patch-stack metrics (board cluster = 6 471 lines, HW-validated,
+shipping; ASK series = 10 342 lines, more complete, unvalidated-here) reversed §4 step 1's original
+ASK-canonical lean. Option 1 retires **no** board patch and is therefore non-destructive — it is adopted
+as the working direction without a user gate. The ASK-only delta (§4c: `dpaa_flow_offload.h` first, then
+the `prs`/`replic` encoders ported onto the board internal API, plus the KUnit suites; HC transport
+EXCLUDED) is cherry-picked additively into board `0145+`, compile-tested on the Cobalt 100 builder.
+
+**[?]** Option 2 (ASK series canonical, retire board `0092`–`0119`) is the ONLY remaining user-gated
+call — destructive, swaps a HW-proven layer for an unvalidated-here one. Do not pursue without explicit
+user sign-off.
 
 **[?]** Whether `ask.ko`/`askd` bind to the kernel `fman_pcd.h` API or the uapi `fmd` ioctl ABI (or
-both) — determines which Bucket-B headers are load-bearing vs informational.
+both) — determines which Bucket-B headers are load-bearing vs informational. `[NOTE]` The OOT module
+(`oot-modules/ask/`) ships its OWN generic-netlink uapi (`include/uapi/linux/ask/ask.h` + `uapi/ask.yaml`,
+both still present) and `ask_genl.c`/`ask_genl_attr.c` — strong evidence the SDK `fmd` ioctl ABI is NOT
+the ASK binding contract and belongs to the rejected Path-A lift (dropped with `sdk/include/uapi/`).
 
 ---
 

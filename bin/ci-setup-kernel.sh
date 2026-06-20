@@ -527,6 +527,17 @@ cp "$BOARD_PATCH_DIR/0118-fman-pcd-cc-revert-ccbs-dispatch.patch" "$KERNEL_PATCH
 # generic HMAN_OC=0x35 HMTD, RMV=0x01000e00 / INSRT=0x02000e00+BE payload /
 # IPV4=0x0c040001 (TTL+L4 checksum). No existing VLAN/MPLS op altered.
 cp "$BOARD_PATCH_DIR/0119-fman-pcd-hm-l3-forward-ops.patch" "$KERNEL_PATCHES/"
+# 0134: CAAM QI external-consumer share API (dormant). Adds
+# caam_qi_ext_consumer_register/release (EXPORT_SYMBOL_GPL) in
+# drivers/crypto/caam/qi.c + qi.h + new include/linux/crypto/caam_qi_share.h —
+# the descriptor-sharing surface the ASK2 M5 HW-IPsec datapath will consume.
+# NO caller yet (dormant); touches only CAAM, fully independent of the FMan/DPAA
+# patches above, so apply order is irrelevant. Relocated here from the parked
+# kernel/flavors/ask/patches/0001-caam-qi-share.patch (2026-06-18): CAAM is
+# hardware-common to the single image, so it belongs in the unconditional board
+# stack, not behind the parked ASK PCD series. Matches AGENTS.md's documented
+# board-0134 location.
+cp "$BOARD_PATCH_DIR/0134-caam-qi-share.patch"                "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
