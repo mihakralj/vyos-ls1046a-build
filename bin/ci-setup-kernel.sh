@@ -750,29 +750,15 @@ if [ -d "${CWD}/sdk-overlay/drivers" ]; then
       || echo "WARNING: patch-dpaa-probe-fix.py did not apply cleanly (continuing)"
   fi
 
-  # --- Config swap: disable mainline DPAA1, enable the SDK stack -------------
-  # SDK Kconfig depends on !FSL_FMAN/!FSL_DPAA/!FSL_DPAA_ETH, so the mainline
-  # symbols MUST be disabled for the SDK symbols to become selectable. Mainline
-  # qbman (drivers/soc/fsl/qbman, CONFIG_FSL_DPAA) and SDK qbman
-  # (drivers/staging/fsl_qbman, CONFIG_FSL_SDK_DPA) are different dirs.
-  scripts/config --set-val CONFIG_NR_CPUS 4
-  scripts/config --disable CONFIG_FSL_FMAN
-  scripts/config --disable CONFIG_FSL_DPAA
-  scripts/config --disable CONFIG_FSL_DPAA_ETH
-  scripts/config --enable  CONFIG_FSL_XGMAC_MDIO
-  scripts/config --enable  CONFIG_STAGING
-  scripts/config --enable  CONFIG_FSL_SDK_DPA
-  scripts/config --enable  CONFIG_FSL_SDK_BMAN
-  scripts/config --enable  CONFIG_FSL_SDK_QMAN
-  scripts/config --enable  CONFIG_FSL_BMAN_CONFIG
-  scripts/config --enable  CONFIG_FSL_QMAN_CONFIG
-  scripts/config --enable  CONFIG_FSL_SDK_FMAN
-  scripts/config --enable  CONFIG_FMAN_ARM
-  scripts/config --enable  CONFIG_FSL_DPAA_HOOKS
-  scripts/config --set-val CONFIG_FSL_SDK_DPAA_ETH y
-  scripts/config --set-val CONFIG_FSL_DPAA_ETH_MAX_BUF_COUNT 640
-  make olddefconfig
-  echo "### NXP SDK: vendor overlay + config swap applied"
+  # NOTE: the actual .config swap (disable mainline FSL_FMAN/FSL_DPAA/
+  # FSL_DPAA_ETH, enable the SDK stack) is DEFERRED to the post-defconfig block
+  # below. build-kernel.sh runs THIS inject block BEFORE VyOS's merge_config.sh,
+  # which regenerates .config from vyos_defconfig + snippets and would silently
+  # wipe any swap done here (root-caused from CI run 27879714016: the swap
+  # markers printed but mainline DPAA1 compiled). The Kconfig/Makefile hooks and
+  # overlay source tree staged above SURVIVE the merge (they are source-tree
+  # changes, not .config changes); only the .config swap must run after the merge.
+  echo "### NXP SDK: vendor tree overlaid (config swap deferred to post-defconfig)"
 fi
 INJECT_EOF
 
@@ -843,9 +829,53 @@ scripts/config --enable CONFIG_THERMAL_GOV_POWER_ALLOCATOR
 scripts/config --disable CONFIG_THERMAL_GOV_FAIR_SHARE
 scripts/config --disable CONFIG_THERMAL_GOV_BANG_BANG
 scripts/config --disable CONFIG_CPU_IDLE_GOV_LADDER
+# --- NXP SDK DPAA1 vendor overlay: config swap (MUST run AFTER merge_config) --
+# The SDK Kconfig/Makefile hooks + overlay tree were staged in the kernel-inject
+# block (which runs BEFORE merge_config.sh). The actual swap MUST run HERE, after
+# merge_config.sh has regenerated .config, or the merge wipes it and mainline
+# DPAA1 compiles instead of the SDK (root cause of CI run 27879714016). Guarded
+# on the overlay Kconfig being present so a non-SDK build is unaffected.
+if grep -q 'sdk_fman/Kconfig' drivers/net/ethernet/freescale/Kconfig 2>/dev/null; then
+  echo "I: LS1046A — NXP SDK config swap (disable mainline DPAA1, enable SDK)"
+  scripts/config --set-val CONFIG_NR_CPUS 4
+  scripts/config --disable CONFIG_FSL_FMAN
+  scripts/config --disable CONFIG_FSL_DPAA
+  scripts/config --disable CONFIG_FSL_DPAA_ETH
+  scripts/config --enable  CONFIG_FSL_XGMAC_MDIO
+  scripts/config --enable  CONFIG_STAGING
+  scripts/config --enable  CONFIG_FSL_SDK_DPA
+  scripts/config --enable  CONFIG_FSL_SDK_BMAN
+  scripts/config --enable  CONFIG_FSL_SDK_QMAN
+  scripts/config --enable  CONFIG_FSL_BMAN_CONFIG
+  scripts/config --enable  CONFIG_FSL_QMAN_CONFIG
+  scripts/config --enable  CONFIG_FSL_SDK_FMAN
+  scripts/config --enable  CONFIG_FMAN_ARM
+  scripts/config --enable  CONFIG_FSL_DPAA_HOOKS
+  scripts/config --set-val CONFIG_FSL_SDK_DPAA_ETH y
+  scripts/config --set-val CONFIG_FSL_DPAA_ETH_MAX_BUF_COUNT 640
+fi
 scripts/config --disable CONFIG_STRICT_DEVMEM
 scripts/config --disable CONFIG_IO_STRICT_DEVMEM
 make olddefconfig
+# --- NXP SDK config-swap verification (fail loudly on silent mainline rebuild) -
+# Guards against the regression that shipped run 27879714016: the swap markers
+# printed but the final .config still had mainline DPAA1 and zero SDK. If the SDK
+# overlay is present but the swap did NOT stick, abort instead of silently
+# building the wrong stack.
+if grep -q 'sdk_fman/Kconfig' drivers/net/ethernet/freescale/Kconfig 2>/dev/null; then
+  echo "I: NXP SDK final .config state:"
+  grep -E '^(CONFIG_FSL_SDK_FMAN|CONFIG_FSL_SDK_DPAA_ETH|CONFIG_FSL_SDK_DPA|CONFIG_FMAN_ARM|CONFIG_FSL_FMAN|CONFIG_FSL_DPAA_ETH)\b' .config || true
+  if ! grep -q '^CONFIG_FSL_SDK_FMAN=y' .config || ! grep -q '^CONFIG_FSL_SDK_DPAA_ETH=y' .config; then
+    echo "ERROR: NXP SDK config swap did not stick — mainline DPAA1 would compile instead of the SDK." >&2
+    echo "       FSL_SDK_FMAN / FSL_SDK_DPAA_ETH are not =y in the final .config. Aborting." >&2
+    exit 1
+  fi
+  if grep -q '^CONFIG_FSL_FMAN=y' .config; then
+    echo "ERROR: mainline CONFIG_FSL_FMAN=y still set after SDK swap — both stacks would build. Aborting." >&2
+    exit 1
+  fi
+  echo "I: NXP SDK config swap verified — SDK enabled, mainline FSL_FMAN disabled."
+fi
 
 LS1046A_POSTDEFCONFIG_EOF
 
