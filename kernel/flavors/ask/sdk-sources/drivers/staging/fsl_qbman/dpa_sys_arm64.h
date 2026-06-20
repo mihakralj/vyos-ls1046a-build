@@ -35,6 +35,20 @@
 #include <asm/cacheflush.h>
 #include <asm/barrier.h>
 
+/* ASK-edit (mainline-6.18-port): the NXP SDK arch tree provided
+ * ioremap_cache_ns() to map the QBMan portal Cache-Enabled (CENA) region as
+ * Normal / WriteBack / Non-Shareable, via an SDK-added MT_NORMAL_NS MAIR entry
+ * in arch/arm64. Mainline 6.18 has no such helper and we deliberately do NOT
+ * patch arch/arm64 (keep mainline files untouched). Mainline's own
+ * drivers/soc/fsl/qbman maps the same CENA region with memremap(MEMREMAP_WB)
+ * (Normal / WriteBack / Shareable) and works on LS1046A, and this driver does
+ * its own explicit cacheline maintenance (dcbf/dcbi) on the portal, which stays
+ * correct under a shareable mapping. Fall back to ioremap_cache() (Normal /
+ * WriteBack); the only attribute difference is shareability, which is safe. */
+#ifndef ioremap_cache_ns
+#define ioremap_cache_ns(addr, size) ioremap_cache((addr), (size))
+#endif
+
 /* Implementation of ARM 64 bit specific routines */
 
 /* TODO: NB, we currently assume that hwsync() and lwsync() imply compiler
