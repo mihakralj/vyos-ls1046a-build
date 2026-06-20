@@ -49,6 +49,24 @@
 #define ioremap_cache_ns(addr, size) ioremap_cache((addr), (size))
 #endif
 
+/* ASK-edit (mainline-6.18-port): companion to ioremap_cache_ns() above for the
+ * userspace mmap() path (fsl_usdpaa.c). The SDK arch tree provided
+ * pgprot_cached_ns() to map the QBMan portal Cache-Enabled (CENA) region into
+ * user space as Normal / WriteBack / Non-Shareable (its MT_NORMAL_NS MAIR
+ * entry). Mainline 6.18 has no such pgprot helper and we do NOT patch
+ * arch/arm64. Build it from the standard cacheable memory type (MT_NORMAL,
+ * Normal / WriteBack) using mainline's own __pgprot_modify() — the same
+ * primitive pgprot_noncached()/pgprot_writecombine() are built from. The only
+ * attribute difference from the SDK original is shareability; the driver does
+ * its own explicit dcbf/dc-ivac maintenance on the portal, which stays correct
+ * under a shareable mapping, so this is safe. PXN|UXN match the device-style
+ * pgprot helpers (portal is data, never executed). */
+#ifndef pgprot_cached_ns
+#define pgprot_cached_ns(prot)						\
+	__pgprot_modify((prot), PTE_ATTRINDX_MASK,			\
+			PTE_ATTRINDX(MT_NORMAL) | PTE_PXN | PTE_UXN)
+#endif
+
 /* Implementation of ARM 64 bit specific routines */
 
 /* TODO: NB, we currently assume that hwsync() and lwsync() imply compiler
