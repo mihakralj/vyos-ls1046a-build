@@ -1,0 +1,55 @@
+From: VyOS LS1046A Build <build@vyos.io>
+Subject: [PATCH] net: phy: swphy: support 10G/5G/2.5G fixed-link speeds
+
+The NXP SDK DPAA fsl_mac driver (drivers/net/ethernet/freescale/sdk_fman)
+does not use the mainline phylink/SFP framework. The LS1046A 10G SFP+
+MACs (MAC9 1af0000.ethernet, MAC10 1af2000.ethernet) declare a fixed-link
+node:
+
+    fixed-link {
+        speed = <10000>;
+        full-duplex;
+    };
+
+of_phy_register_fixed_link() -> swphy_validate_state() ->
+swphy_decode_speed() only handles 10/100/1000 and returns -EINVAL for
+10000, emitting "swphy: unknown speed" so the MAC probe fails:
+
+    swphy: unknown speed
+    fsl_mac 1af0000.ethernet: probe with driver fsl_mac failed with error -22
+    fsl_mac 1af2000.ethernet: probe with driver fsl_mac failed with error -22
+    fsl_dpa soc:fsl,dpaa:ethernet@8: dev_get_drvdata(1af0000.ethernet) failed
+    fsl_dpa soc:fsl,dpaa:ethernet@9: dev_get_drvdata(1af2000.ethernet) failed
+
+MII clause-22 registers cannot represent speeds above 1G; the real link
+speed/duplex/state is carried by struct fixed_phy_status, consulted
+directly by the MAC driver rather than via synthesized MII reads. Map
+10000/5000/2500 onto SWMII_SPEED_1000 so fixed-link registration succeeds.
+
+Signed-off-by: VyOS LS1046A Build <build@vyos.io>
+---
+diff --git a/drivers/net/phy/swphy.c b/drivers/net/phy/swphy.c
+index 59f1ba4..3f5437f 100644
+--- a/drivers/net/phy/swphy.c
++++ b/drivers/net/phy/swphy.c
+@@ -71,6 +71,20 @@ static const struct swmii_regs duplex[] = {
+ static int swphy_decode_speed(int speed)
+ {
+ 	switch (speed) {
++	case 10000:
++	case 5000:
++	case 2500:
++		/*
++		 * MII (clause-22) registers cannot represent speeds above 1G.
++		 * Map 10G/5G/2.5G fixed-link speeds onto the 1000 entry so that
++		 * of_phy_register_fixed_link() / swphy_validate_state() succeed.
++		 * The real link speed/duplex/state is carried by struct
++		 * fixed_phy_status (consulted directly by the MAC driver), not by
++		 * these synthesized MII register reads. Required for the NXP SDK
++		 * fsl_mac driver on LS1046A 10G SFP+ MACs (MAC9/MAC10) which use
++		 * fixed-link instead of phylink.
++		 */
++		return SWMII_SPEED_1000;
+ 	case 1000:
+ 		return SWMII_SPEED_1000;
+ 	case 100:

@@ -540,6 +540,11 @@ cp "$BOARD_PATCH_DIR/0119-fman-pcd-hm-l3-forward-ops.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0134-caam-qi-share.patch"                "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
+# 4004: swphy 10G/5G/2.5G fixed-link speed support — required by the NXP SDK
+# fsl_mac driver for the LS1046A 10G SFP+ MACs (MAC9/MAC10). Their fixed-link
+# speed=<10000> node makes swphy_decode_speed() return -EINVAL on stock 6.18,
+# so fsl_mac probe fails -22 and eth3/eth4 never appear. See qdrant swphy-10g-fix.
+cp "$BOARD_PATCH_DIR/4004-swphy-support-10g-fixed-link-speed.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4007-xhci-ls1046a-dwc3-quirks.patch"     "$KERNEL_PATCHES/"
