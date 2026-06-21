@@ -692,6 +692,11 @@ cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4007-xhci-ls1046a-dwc3-quirks.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4009-sfp-oem-rollball-quirk.patch"       "$KERNEL_PATCHES/"
+# ASK2 M2.2: external flow-offload backend registration slot (single-slot
+# RCU-protected dpaa_register/unregister_flow_offload_handler). 0145 is a
+# board/common patch (not flavor-gated) because the dpaa driver is built-in
+# for all flavors.
+cp "$BOARD_PATCH_DIR/0145-dpaa-flow-offload-backend-slot.patch" "$KERNEL_PATCHES/"
 
 # ── Staging-completeness guard ────────────────────────────────────────
 # Every kernel/common/patches/board/*.patch must either be cp'd above or
@@ -790,149 +795,27 @@ if [ "${FLAVOR:-default}" = "ask" ]; then
         exit 1
     fi
     echo "### FLAVOR=ask — staging ASK2 in-tree kernel patches from $ASK_PATCH_DIR"
-    # NOTE: slots 0032, 0033, 0034, 0036, 0037, 0038, 0042, 0043, 0045,
-    # 0046, 0051 were archived to $ASK_PATCH_DIR/archive-grafted-2026-05-24/
-    # on 2026-05-24 as part of the v1.3 Path A architecture (graft model +
-    # OH-port two-stage chain abandoned, plus the cross-file keygen.c-deps
-    # debugfs regdump 0045 and the now-orphaned 0051 revert of archived
-    # 0043). The KEEP halves of the PARTIAL splits of 0033 + 0037 + 0046
-    # live in the active series as 0054 + 0055 + 0056 respectively.  See
-    # plans/archive/ASK2-PHASE2-PATCH-TRIAGE.md for the full audit (Option C2).
-    # Archived patches are NOT applied at build time — the subdirectory
-    # is not globbed below.
-    ASK_PATCH_COUNT=0
-    for src_patch in "$ASK_PATCH_DIR"/0001-*.patch \
-                     "$ASK_PATCH_DIR"/0002-*.patch \
-                     "$ASK_PATCH_DIR"/0003-*.patch \
-                     "$ASK_PATCH_DIR"/0004-*.patch \
-                     "$ASK_PATCH_DIR"/0005-*.patch \
-                     "$ASK_PATCH_DIR"/0006-*.patch \
-                     "$ASK_PATCH_DIR"/0007-*.patch \
-                     "$ASK_PATCH_DIR"/0008-*.patch \
-                     "$ASK_PATCH_DIR"/0009-*.patch \
-                     "$ASK_PATCH_DIR"/0010-*.patch \
-                     "$ASK_PATCH_DIR"/0011-*.patch \
-                     "$ASK_PATCH_DIR"/0012-*.patch \
-                     "$ASK_PATCH_DIR"/0013-*.patch \
-                     "$ASK_PATCH_DIR"/0014-*.patch \
-                     "$ASK_PATCH_DIR"/0015-*.patch \
-                     "$ASK_PATCH_DIR"/0016-*.patch \
-                     "$ASK_PATCH_DIR"/0017-*.patch \
-                     "$ASK_PATCH_DIR"/0018-*.patch \
-                     "$ASK_PATCH_DIR"/0019-*.patch \
-                     "$ASK_PATCH_DIR"/0020-*.patch \
-                     "$ASK_PATCH_DIR"/0021-*.patch \
-                     "$ASK_PATCH_DIR"/0022-*.patch \
-                     "$ASK_PATCH_DIR"/0023-*.patch \
-                     "$ASK_PATCH_DIR"/0024-*.patch \
-                     "$ASK_PATCH_DIR"/0025-*.patch \
-                     "$ASK_PATCH_DIR"/0026-*.patch \
-                     "$ASK_PATCH_DIR"/0027-*.patch \
-                     "$ASK_PATCH_DIR"/0028-*.patch \
-                     "$ASK_PATCH_DIR"/0029-*.patch \
-                     "$ASK_PATCH_DIR"/0030-*.patch \
-                     "$ASK_PATCH_DIR"/0031-*.patch \
-                     "$ASK_PATCH_DIR"/0035-*.patch \
-                     "$ASK_PATCH_DIR"/0039-*.patch \
-                     "$ASK_PATCH_DIR"/0041-*.patch \
-                     "$ASK_PATCH_DIR"/0044-*.patch \
-                     "$ASK_PATCH_DIR"/0050-*.patch \
-                     "$ASK_PATCH_DIR"/0054-*.patch \
-                     "$ASK_PATCH_DIR"/0055-*.patch \
-                     "$ASK_PATCH_DIR"/0056-*.patch \
-                     "$ASK_PATCH_DIR"/0057-*.patch \
-                     "$ASK_PATCH_DIR"/0058-*.patch \
-                     "$ASK_PATCH_DIR"/0060-*.patch \
-                     "$ASK_PATCH_DIR"/0061-*.patch \
-                     "$ASK_PATCH_DIR"/0062-*.patch \
-                     "$ASK_PATCH_DIR"/0065-*.patch; do
-        [ -f "$src_patch" ] || { echo "ERROR: missing $src_patch"; exit 1; }
-        # Rename 0001-→1001-, 0002-→1002-, 0003-→1003-, 0004-→1004-,
-        # 0005-→1005-, 0006-→1006-, 0007-→1007-, 0008-→1008-,
-        # 0009-→1009- to avoid collision with vyos-build's reserved
-        # upstream 0001-*/0003-* patches.
-        base=$(basename "$src_patch")
-        case "$base" in
-            0001-*) dst="1001-${base#0001-}" ;;
-            0002-*) dst="1002-${base#0002-}" ;;
-            0003-*) dst="1003-${base#0003-}" ;;
-            0004-*) dst="1004-${base#0004-}" ;;
-            0005-*) dst="1005-${base#0005-}" ;;
-            0006-*) dst="1006-${base#0006-}" ;;
-            0007-*) dst="1007-${base#0007-}" ;;
-            0008-*) dst="1008-${base#0008-}" ;;
-            0009-*) dst="1009-${base#0009-}" ;;
-            0010-*) dst="1010-${base#0010-}" ;;
-            0011-*) dst="1011-${base#0011-}" ;;
-            0012-*) dst="1012-${base#0012-}" ;;
-            0013-*) dst="1013-${base#0013-}" ;;
-            0014-*) dst="1014-${base#0014-}" ;;
-            0015-*) dst="1015-${base#0015-}" ;;
-            0016-*) dst="1016-${base#0016-}" ;;
-            0017-*) dst="1017-${base#0017-}" ;;
-            0018-*) dst="1018-${base#0018-}" ;;
-            0019-*) dst="1019-${base#0019-}" ;;
-            0020-*) dst="1020-${base#0020-}" ;;
-            0021-*) dst="1021-${base#0021-}" ;;
-            0022-*) dst="1022-${base#0022-}" ;;
-            0023-*) dst="1023-${base#0023-}" ;;
-            0024-*) dst="1024-${base#0024-}" ;;
-            0025-*) dst="1025-${base#0025-}" ;;
-            0026-*) dst="1026-${base#0026-}" ;;
-            0027-*) dst="1027-${base#0027-}" ;;
-            0028-*) dst="1028-${base#0028-}" ;;
-            0029-*) dst="1029-${base#0029-}" ;;
-            0030-*) dst="1030-${base#0030-}" ;;
-            0031-*) dst="1031-${base#0031-}" ;;
-            0035-*) dst="1035-${base#0035-}" ;;
-            0039-*) dst="1039-${base#0039-}" ;;
-            0041-*) dst="1041-${base#0041-}" ;;
-            0044-*) dst="1044-${base#0044-}" ;;
-            0050-*) dst="1050-${base#0050-}" ;;
-            0054-*) dst="1054-${base#0054-}" ;;
-            0055-*) dst="1055-${base#0055-}" ;;
-            0056-*) dst="1056-${base#0056-}" ;;
-            0057-*) dst="1057-${base#0057-}" ;;
-            0058-*) dst="1058-${base#0058-}" ;;
-            0060-*) dst="1060-${base#0060-}" ;;
-            0061-*) dst="1061-${base#0061-}" ;;
-            0062-*) dst="1062-${base#0062-}" ;;
-            0065-*) dst="1065-${base#0065-}" ;;
-            *)      echo "ERROR: unexpected ASK patch name: $base"; exit 1 ;;
-        esac
-        echo "###   $base → $dst"
-        cp "$src_patch" "$KERNEL_PATCHES/$dst"
-        ASK_PATCH_COUNT=$((ASK_PATCH_COUNT + 1))
-    done
-    # Expected count: 45 (Phase 2 Option C2 + v1.1-A + DPAA1 supersession):
-    #   53 original
-    # -  8 archived 2026-05-24 stage 1 (0032/0033-RMV/0034/0036/0037-RMV/
-    #                                   0038/0042/0043)
-    # -  3 archived 2026-05-24 stage 2 (Option C2: 0045 wholesale; 0046
-    #                                   PARTIAL-split; 0051 orphaned)
-    # +  3 new KEEP-half patches (0054 ex-0033, 0055 ex-0037, 0056 ex-0046)
-    # +  1 v1.1-A late-registration replay (0060)
-    # +  1 v1.1-A bugfix: INIT_LIST_HEAD pending_ports (0061)
-    # +  1 v1.3 Phase 5 PR14z21 muram reservation fix (0062)
-    # +  1 v1.1-B PR14z13 graft-on-kernel-scheme KGSE_CCBS API (0065)
-    # -  6 deleted 2026-05-28 DPAA1 supersession (DPAA1 AF_XDP M3-3 work
-    #                                   under kernel/common/patches/board/
-    #                                   conflicts with — and supersedes —
-    #                                   these legacy ASK PCD patches per
-    #                                   user directive 2026-05-28 and
-    #                                   AGENTS.md "ASK2 (rewrite-in-progress)":
-    #                                   0040 fman-port-id-use-bmi-hwport
-    #                                   0047 ask-in-tree-skeleton
-    #                                   0048 ask-in-tree-source-migration
-    #                                   0049 ask-fs_initcall
-    #                                   0052 uapi-ask-spdx-syscall-note
-    #                                   0053 dpaa-noconfirm-offload-tx-fq)
-    # = 45 active.
-    if [ "$ASK_PATCH_COUNT" -ne 45 ]; then
-        echo "ERROR: expected 45 ASK kernel patches, staged $ASK_PATCH_COUNT"
-        exit 1
+    # All ASK-specific kernel patches were archived to
+    # archive-2026-06-21-pre-6.18.34/ on 2026-06-21 because the board/common
+    # patch series (kernel/common/patches/board/0092–0145) now carries the
+    # ASK2 PCD/HM/CC features directly. The ASK flavor relies solely on the
+    # common board patch stack; no flavor-specific kernel patches are active.
+    if ls "$ASK_PATCH_DIR"/*.patch >/dev/null 2>&1; then
+        ASK_PATCH_COUNT=0
+        for src_patch in "$ASK_PATCH_DIR"/*.patch; do
+            [ -f "$src_patch" ] || continue
+            base=$(basename "$src_patch")
+            # Rename to 1xxx- to avoid collision with vyos-build's reserved
+            # upstream 0001-*/0003-* patches.
+            dst="1${base}"
+            echo "###   $base → $dst"
+            cp "$src_patch" "$KERNEL_PATCHES/$dst"
+            ASK_PATCH_COUNT=$((ASK_PATCH_COUNT + 1))
+        done
+        echo "### ASK2: $ASK_PATCH_COUNT in-tree kernel patches staged"
+    else
+        echo "### ASK2: 0 kernel patches staged (common board stack carries all PCD features)"
     fi
-    echo "### ASK2: $ASK_PATCH_COUNT in-tree kernel patches staged"
 fi
 
 # Stage FMD Shim + LP5812 source from the new common files layout.
