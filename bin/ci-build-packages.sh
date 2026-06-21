@@ -513,17 +513,12 @@ for package in $packages; do
     # `linux-kernel/` package-build dir), where bin/ci-pick-packages.sh's
     # `find scripts/package-build -name '*.deb'` sweep will pick it up.
     #
-    # Single-image: ask.ko is built UNCONDITIONALLY and ships dormant in
-    # every ISO (the FLAVOR=ask gate was retired with the 2026-06-14 flavor
-    # collapse). ask.ko links only against the common board fman_cc_*/fman_hm_*
-    # substrate — the dead ask-flavor in-tree patches stay unapplied — so it
-    # compiles in the default build. The operator engages the datapath at
-    # runtime per plans/DUAL-DATAPLANE.md.
-    #
-    # Userspace components (askd, ask-load, libask_fci) are not yet
-    # implemented — see specs/ask2-rewrite-spec.md §§4–9.
+    # Gated on FMan PCD header presence: ask.ko includes <linux/fsl/fman_pcd.h>
+    # which is only present when the FMan PCD board patches (0092+) are applied.
+    # On the stock branch those patches are absent, so skip gracefully.
     ASK_OOT_BUILDER="$GITHUB_WORKSPACE/kernel/flavors/ask/oot-modules/ask/ci-build.sh"
-    if [ -n "$KSRC" ] && [ -x "$ASK_OOT_BUILDER" ]; then
+    ASK_PCD_HEADER="$KSRC/include/linux/fsl/fman_pcd.h"
+    if [ -n "$KSRC" ] && [ -x "$ASK_OOT_BUILDER" ] && [ -f "$ASK_PCD_HEADER" ]; then
       KSRC_ABS_ASK="$(cd "$KSRC" && pwd)"
       echo "### single-image: building ASK2 OOT kernel modules (ask.ko, dormant)"
       # Cross-build env is already exported by the kernel build above
@@ -532,11 +527,14 @@ for package in $packages; do
         "$ASK_OOT_BUILDER" "$KSRC_ABS_ASK" "$(pwd)"
       echo "### ASK OOT module .deb(s) in package dir:"
       ls -lh ask-modules-*.deb 2>/dev/null || { echo "FATAL: no ask-modules-*.deb produced"; exit 1; }
-    else
+    elif [ -z "$KSRC" ] || [ ! -x "$ASK_OOT_BUILDER" ]; then
       echo "FATAL: cannot build ASK2 OOT modules:"
       echo "FATAL:   KSRC='$KSRC'"
       echo "FATAL:   ASK_OOT_BUILDER='$ASK_OOT_BUILDER' (must be executable)"
       exit 1
+    else
+      echo "### ask.ko build SKIPPED: FMan PCD header absent ($ASK_PCD_HEADER)"
+      echo "### (FMan PCD board patches not applied — stock build without ASK2 substrate)"
     fi
 
     ### Build accel-ppp-ng ARM64 packages (daemon + kernel modules)
