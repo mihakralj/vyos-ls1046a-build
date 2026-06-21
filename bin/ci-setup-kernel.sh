@@ -9,6 +9,15 @@
 # now runs unconditionally for the single collapsed image. The
 # ASK_KERNEL_TAG guard below is dead code kept only as a safety belt in
 # case some external caller still injects the variable.
+
+# OVERRIDE: nxp-ask branch builds against kernel 6.12.x LTS. The genuine
+# NXP SDK vendor overlay (sdk_fman/sdk_dpaa/fsl_qbman) requires 6.6-6.12
+# — Kconfig on 6.18+ silently rejects SDK symbols. Set before any script
+# that sources sync-kernel-version.sh so env-var precedence beats
+# vyos-build/data/defaults.toml.
+export KERNEL_VERSION="${KERNEL_VERSION:-6.12.94}"
+export KERNEL_SERIES="${KERNEL_SERIES:-6.12}"
+
 set -ex -o pipefail
 cd "${GITHUB_WORKSPACE:-.}"
 
