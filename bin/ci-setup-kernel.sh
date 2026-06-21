@@ -870,17 +870,18 @@ if [ -d "${CWD}/sdk-overlay/drivers" ]; then
   cp -r "${CWD}/sdk-overlay/include/." include/
 
   FRESC=drivers/net/ethernet/freescale
-  # Kconfig hooks — strip depends/select, concat into always-reachable
-  # staging/fsl_qbman/Kconfig. Use CWD (kernel source tree) for temps.
-  grep -v 'depends on\|^\t*select ' \
-      drivers/net/ethernet/freescale/sdk_fman/Kconfig \
-      > "${CWD}/.sdk-fman.kcfg"
-  grep -v 'depends on\|^\t*select ' \
-      drivers/net/ethernet/freescale/sdk_dpaa/Kconfig \
-      > "${CWD}/.sdk-dpaa.kcfg"
-  cat "${CWD}/.sdk-fman.kcfg" "${CWD}/.sdk-dpaa.kcfg" \
-      >> drivers/staging/fsl_qbman/Kconfig
-  rm -f "${CWD}/.sdk-fman.kcfg" "${CWD}/.sdk-dpaa.kcfg"
+  # Makefile hooks for SDK drivers.
+  grep -q 'sdk_fman/' "$FRESC/Makefile" 2>/dev/null || \
+    echo 'obj-\$(CONFIG_FSL_SDK_FMAN) += sdk_fman/' >> "$FRESC/Makefile"
+  grep -q 'sdk_dpaa/' "$FRESC/Makefile" 2>/dev/null || \
+    echo 'obj-\$(CONFIG_FSL_SDK_DPAA_ETH) += sdk_dpaa/' >> "$FRESC/Makefile"
+  # Source SDK Kconfigs from staging/Kconfig alongside the working
+  # fsl_qbman Kconfig. Do NOT concatenate — modifying Kconfig files
+  # in-place creates mismatched if/endif blocks.
+  grep -q 'sdk_fman/Kconfig' drivers/staging/Kconfig 2>/dev/null || \
+    echo 'source "drivers/net/ethernet/freescale/sdk_fman/Kconfig"' >> drivers/staging/Kconfig
+  grep -q 'sdk_dpaa/Kconfig' drivers/staging/Kconfig 2>/dev/null || \
+    echo 'source "drivers/net/ethernet/freescale/sdk_dpaa/Kconfig"' >> drivers/staging/Kconfig
   grep -q 'sdk_fman/' "$FRESC/Makefile" 2>/dev/null || \
     echo 'obj-\$(CONFIG_FSL_SDK_FMAN) += sdk_fman/' >> "$FRESC/Makefile"
   grep -q 'sdk_dpaa/' "$FRESC/Makefile" 2>/dev/null || \
