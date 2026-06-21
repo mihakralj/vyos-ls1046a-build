@@ -1,0 +1,186 @@
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index f072b54..f890101 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -33,6 +33,7 @@
+ #include <net/xdp_sock_drv.h>
+ #include <net/pkt_cls.h>
+ #include <net/flow_offload.h>
++#include <linux/fsl/dpaa_flow_offload.h>
+ #include "dpaa_flavor.h"
+ #include "dpaa_fman_caps.h"
+ #include <soc/fsl/bman.h>
+@@ -651,6 +652,80 @@ static int dpaa_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
+
+ static LIST_HEAD(dpaa_block_cb_list);
+
++/* External flow-offload backend registration (ASK2). */
++static const struct dpaa_flow_offload_ops __rcu *dpaa_fo_ops_slot;
++static DEFINE_SPINLOCK(dpaa_fo_ops_lock);
++
++int dpaa_register_flow_offload_handler(const struct dpaa_flow_offload_ops *ops)
++{
++	const struct dpaa_flow_offload_ops *cur;
++
++	if (!ops || !ops->setup_tc_block)
++		return -EINVAL;
++
++	spin_lock(&dpaa_fo_ops_lock);
++	cur = rcu_dereference_protected(dpaa_fo_ops_slot,
++					lockdep_is_held(&dpaa_fo_ops_lock));
++	if (cur) {
++		spin_unlock(&dpaa_fo_ops_lock);
++		return -EBUSY;
++	}
++	if (ops->owner && !try_module_get(ops->owner)) {
++		spin_unlock(&dpaa_fo_ops_lock);
++		return -ENODEV;
++	}
++
++	rcu_assign_pointer(dpaa_fo_ops_slot, ops);
++	spin_unlock(&dpaa_fo_ops_lock);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(dpaa_register_flow_offload_handler);
++
++int dpaa_unregister_flow_offload_handler(const struct dpaa_flow_offload_ops *ops)
++{
++	const struct dpaa_flow_offload_ops *cur;
++
++	if (!ops)
++		return -EINVAL;
++
++	spin_lock(&dpaa_fo_ops_lock);
++	cur = rcu_dereference_protected(dpaa_fo_ops_slot,
++					lockdep_is_held(&dpaa_fo_ops_lock));
++	if (cur != ops) {
++		spin_unlock(&dpaa_fo_ops_lock);
++		return -EINVAL;
++	}
++
++	rcu_assign_pointer(dpaa_fo_ops_slot, NULL);
++	spin_unlock(&dpaa_fo_ops_lock);
++	synchronize_rcu();
++
++	if (ops->owner)
++		module_put(ops->owner);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(dpaa_unregister_flow_offload_handler);
++
++static int dpaa_setup_tc_flow_block(struct net_device *net_dev,
++				struct flow_block_offload *f)
++{
++	const struct dpaa_flow_offload_ops *ops;
++	int err;
++
++	rcu_read_lock();
++	ops = rcu_dereference(dpaa_fo_ops_slot);
++	if (!ops) {
++		rcu_read_unlock();
++		return -EOPNOTSUPP;
++	}
++
++	err = ops->setup_tc_block(net_dev, f);
++	rcu_read_unlock();
++
++	return err;
++}
++
+ /* Block-unbind self-heal (BUG 3b).
+  *
+  * The ingress qdisc/block can be torn down WITHOUT the matchall filter's
+@@ -723,13 +798,18 @@ static int dpaa_setup_tc_block(struct net_device *net_dev,
+ }
+
+ static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
+-			 void *type_data)
++		 void *type_data)
+ {
++	int err;
++
+ 	switch (type) {
+ 	case TC_SETUP_QDISC_MQPRIO:
+ 		return dpaa_setup_tc_mqprio(net_dev, type_data);
+ 	case TC_SETUP_BLOCK:
+-		return dpaa_setup_tc_block(net_dev, type_data);
++		err = dpaa_setup_tc_block(net_dev, type_data);
++		if (err != -EOPNOTSUPP)
++			return err;
++		return dpaa_setup_tc_flow_block(net_dev, type_data);
+ 	case TC_SETUP_QDISC_HTB:
+ 		return dpaa_ceetm_setup_htb(net_dev, type_data);
+ 	default:
+diff --git a/include/linux/fsl/dpaa_flow_offload.h b/include/linux/fsl/dpaa_flow_offload.h
+new file mode 100644
+index 0000000..17951e8
+--- /dev/null
++++ b/include/linux/fsl/dpaa_flow_offload.h
+@@ -0,0 +1,66 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/*
++ * NXP DPAA1 (fsl_dpa) flow-offload registration API.
++ *
++ * The dpaa Ethernet driver does not itself implement tc-flower /
++ * nf_flow_table HW offload. Instead it exposes a single registration
++ * slot that an external offload backend can occupy at runtime.
++ *
++ * On NXP LS1046A, the backend is the ASK2 module (ask.ko) which
++ * drives the FMan 210-series microcode running on an offline parser.
++ * See specs/ask2-rewrite-spec.md for the broader design.
++ *
++ * The split exists so the dpaa driver itself does not depend on
++ * ask.ko (which would create a circular module dependency: ask.ko
++ * already depends on FSL_DPAA via Kconfig).
++ *
++ * Single-slot, single-consumer:
++ *   - dpaa_register_flow_offload_handler() returns -EBUSY if a handler
++ *     is already registered.
++ *   - dpaa_unregister_flow_offload_handler() must pass the same ops
++ *     pointer that was registered, or -EINVAL is returned.
++ *
++ * Copyright 2026 Mono Networks / VyOS LS1046A maintainers.
++ */
++
++#ifndef _LINUX_FSL_DPAA_FLOW_OFFLOAD_H
++#define _LINUX_FSL_DPAA_FLOW_OFFLOAD_H
++
++#include <linux/types.h>
++
++struct module;
++struct net_device;
++struct flow_block_offload;
++
++/**
++ * struct dpaa_flow_offload_ops - external flow-offload backend hooks
++ * @owner:	module owning this ops struct (set with THIS_MODULE).
++ * @setup_tc_block: invoked from dpaa_setup_tc() for TC_SETUP_BLOCK.
++ * 			Must perform the standard FLOW_BLOCK_BIND /
++ * 			FLOW_BLOCK_UNBIND dance against fbo. Returns 0 on
++ * 			success or a negative errno; -EOPNOTSUPP is treated
++ * 			by the upper layer as 'try software fallback'.
++ */
++struct dpaa_flow_offload_ops {
++	struct module *owner;
++	int (*setup_tc_block)(struct net_device *dev,
++			      struct flow_block_offload *fbo);
++};
++
++#if IS_ENABLED(CONFIG_FSL_DPAA)
++int dpaa_register_flow_offload_handler(const struct dpaa_flow_offload_ops *ops);
++int dpaa_unregister_flow_offload_handler(const struct dpaa_flow_offload_ops *ops);
++#else
++static inline int
++dpaa_register_flow_offload_handler(const struct dpaa_flow_offload_ops *ops)
++{
++	return -ENODEV;
++}
++static inline int
++dpaa_unregister_flow_offload_handler(const struct dpaa_flow_offload_ops *ops)
++{
++	return -ENODEV;
++}
++#endif
++
++#endif /* _LINUX_FSL_DPAA_FLOW_OFFLOAD_H */
