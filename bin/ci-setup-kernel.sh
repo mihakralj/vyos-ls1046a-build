@@ -870,18 +870,17 @@ if [ -d "${CWD}/sdk-overlay/drivers" ]; then
   cp -r "${CWD}/sdk-overlay/include/." include/
 
   FRESC=drivers/net/ethernet/freescale
-  # Kconfig / Makefile hooks — concatenate SDK Kconfigs into the
-  # staging/fsl_qbman Kconfig which is always reachable. Strip 'depends on'
-  # lines so olddefconfig doesn't reject the symbols (the dependencies
-  # are satisfied by the config swap above).
-  sed '/^\t*\(depends on\|select\)/d' \
+  # Kconfig hooks — strip depends/select, concat into always-reachable
+  # staging/fsl_qbman/Kconfig. Use CWD (kernel source tree) for temps.
+  grep -v 'depends on\|^\t*select ' \
       drivers/net/ethernet/freescale/sdk_fman/Kconfig \
-      > /tmp/sdk-fman-stripped.kconfig
-  sed '/^\t*\(depends on\|select\)/d' \
+      > "${CWD}/.sdk-fman.kcfg"
+  grep -v 'depends on\|^\t*select ' \
       drivers/net/ethernet/freescale/sdk_dpaa/Kconfig \
-      > /tmp/sdk-dpaa-stripped.kconfig
-  cat /tmp/sdk-fman-stripped.kconfig /tmp/sdk-dpaa-stripped.kconfig \
+      > "${CWD}/.sdk-dpaa.kcfg"
+  cat "${CWD}/.sdk-fman.kcfg" "${CWD}/.sdk-dpaa.kcfg" \
       >> drivers/staging/fsl_qbman/Kconfig
+  rm -f "${CWD}/.sdk-fman.kcfg" "${CWD}/.sdk-dpaa.kcfg"
   grep -q 'sdk_fman/' "$FRESC/Makefile" 2>/dev/null || \
     echo 'obj-\$(CONFIG_FSL_SDK_FMAN) += sdk_fman/' >> "$FRESC/Makefile"
   grep -q 'sdk_dpaa/' "$FRESC/Makefile" 2>/dev/null || \
