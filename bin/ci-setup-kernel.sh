@@ -527,6 +527,12 @@ cp "$BOARD_PATCH_DIR/0118-fman-pcd-cc-revert-ccbs-dispatch.patch" "$KERNEL_PATCH
 # generic HMAN_OC=0x35 HMTD, RMV=0x01000e00 / INSRT=0x02000e00+BE payload /
 # IPV4=0x0c040001 (TTL+L4 checksum). No existing VLAN/MPLS op altered.
 cp "$BOARD_PATCH_DIR/0119-fman-pcd-hm-l3-forward-ops.patch" "$KERNEL_PATCHES/"
+# 0145: dpaa flow-offload backend registration slot for external TC offload
+# backends (ASK2). Adds a single RCU-protected ops slot + register/unregister
+# helpers in dpaa_eth.c and the public header include/linux/fsl/dpaa_flow_offload.h
+# so an out-of-tree backend (ask.ko) can receive TC_SETUP_BLOCK/FT callbacks
+# without circular module deps. Flavor-agnostic, staged unconditionally.
+cp "$BOARD_PATCH_DIR/0145-dpaa-flow-offload-backend-slot.patch" "$KERNEL_PATCHES/"
 # 0134: CAAM QI external-consumer share API (dormant). Adds
 # caam_qi_ext_consumer_register/release (EXPORT_SYMBOL_GPL) in
 # drivers/crypto/caam/qi.c + qi.h + new include/linux/crypto/caam_qi_share.h —
