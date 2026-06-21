@@ -120,6 +120,15 @@ fi
 # (4006), the LS1046A xhci/dwc3 quirks (4007) and the OEM SFP-10G-T quirk
 # (4009). All are byte-identical to the formerly-duplicated copies under
 # data/kernel-patches/ which were removed in the legacy-path tidy.
+# ON NXP-ASK / KERNEL 6.12: The genuine NXP SDK vendor overlay (sdk_fman/
+# sdk_dpaa/fsl_qbman) replaces the mainline DPAA1 stack entirely. The board
+# patches (0068-0145) target mainline dpaa/fman files which are gated off by
+# the SDK config swap. On 6.12 we only need the essential common fixes (SFP,
+# INA234, phylink, xhci). On 6.18+ the board patches are the ASK2 PCD layer.
+SDK_KERNEL=0
+case "${KERNEL_SERIES:-6.18}" in
+  6.12) SDK_KERNEL=1 ;;
+esac
 BOARD_PATCH_DIR=kernel/common/patches/board
 [ -d "$BOARD_PATCH_DIR" ] || { echo "ERROR: $BOARD_PATCH_DIR missing"; exit 1; }
 
@@ -141,7 +150,10 @@ echo "### Cleaning stale patches in $KERNEL_PATCHES (preserving 0001-*, 0003-*)"
 find "$KERNEL_PATCHES" -maxdepth 1 -type f -name '*.patch' \
   ! -name '0001-*' ! -name '0003-*' -print -delete
 
-echo "### Staging LS1046A board patches from $BOARD_PATCH_DIR"
+if [ "$SDK_KERNEL" -eq 1 ]; then
+  echo "### SDK kernel (6.12) — skipping board DPAA patches (SDK overlay replaces mainline)"
+else
+  echo "### Staging LS1046A board patches from $BOARD_PATCH_DIR"
 cp "$BOARD_PATCH_DIR/0068-dpaa-flavor-ops.patch"              "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0069-dpaa-flavor-hooks.patch"            "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0069a-dpaa-flavor-ops-retro-attach.patch" "$KERNEL_PATCHES/"
@@ -695,27 +707,24 @@ cp "$BOARD_PATCH_DIR/0133-fman-pcd-fe-arm-real-accc.patch" "$KERNEL_PATCHES/"
 # datapath lands). This cp line is MANDATORY — the staging-completeness guard
 # below fails the build if any board/*.patch lacks one.
 cp "$BOARD_PATCH_DIR/0134-caam-qi-share.patch"               "$KERNEL_PATCHES/"
+fi  # end of SDK_KERNEL gate (0068-0145 board DPAA patches skipped on 6.12)
+
+# Essential fixes — always staged (kernel-version-agnostic).
+echo "### Staging essential board fixes"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4007-xhci-ls1046a-dwc3-quirks.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4009-sfp-oem-rollball-quirk.patch"       "$KERNEL_PATCHES/"
-# ASK2 M2.2: external flow-offload backend registration slot (single-slot
-# RCU-protected dpaa_register/unregister_flow_offload_handler). 0145 is a
-# board/common patch (not flavor-gated) because the dpaa driver is built-in
-# for all flavors.
 cp "$BOARD_PATCH_DIR/0145-dpaa-flow-offload-backend-slot.patch" "$KERNEL_PATCHES/"
 
 # ── Staging-completeness guard ────────────────────────────────────────
-# Every kernel/common/patches/board/*.patch must either be cp'd above or
-# listed here as an intentional skip. Failure mode (observed 2026-06-11,
-# run 27362572444): 0113/0114/0115 were committed to board/ but their cp
-# lines were forgotten, so CI silently shipped a kernel without them —
-# the image looked healthy (same KVER) but lacked the new code entirely.
-# Space-separated basenames of board patches deliberately not staged
-# (currently none — 0078 was never committed as a file; see its comment above).
+# Only enforced for non-SDK kernels (0068-0145 patches are staged).
 BOARD_STAGE_SKIP="4004-swphy-support-10g-fixed-link-speed.patch 0103d-dpaa1-true-zc-rx-readback-debug.patch"
+if [ "$SDK_KERNEL" -eq 1 ]; then
+  echo "### SDK kernel — skipping board patch completeness guard (only fixes staged)"
+else
 _missing=""
 for _p in "$BOARD_PATCH_DIR"/*.patch; do
   _b=$(basename "$_p")
@@ -728,6 +737,7 @@ if [ -n "$_missing" ]; then
   exit 1
 fi
 echo "### Board patch staging-completeness guard: OK"
+fi
 
 # Stage critical flavor-agnostic kernel fix:
 #   120-perf-libperf-asm-headers-srctree.patch — fixes arm64 perf build
