@@ -492,30 +492,13 @@ chmod +x "$CHROOT/usr/local/bin/caam-check"
 ### MEMAC MACs + MDIO buses, the PCD (KeyGen/CC/HM/Policer) capability
 ### posture incl. the /sys/kernel/debug/fman_pcd classify harness, jumbo
 ### frames, eth0-eth4 (driver/MAC/MTU/AF_XDP cap), QMan/BMan liveness, and
-### the AF_XDP zero-copy xsk_* counters (chaining to xsk-zc-check). Exit
-### non-zero if a controller/driver/port is missing — mirrors sfp-check /
+### eth0-eth4 AF_XDP counters. Exit non-zero if a controller/driver/port is
+### missing — mirrors sfp-check /
 ### fan-check / caam-check so monit/Nagios can poll it. Flavor-agnostic
 ### (DPAA1 is the same block on every LS1046A board).
 cp board/scripts/dpaa1-check "$CHROOT/usr/local/bin/dpaa1-check"
 chmod +x "$CHROOT/usr/local/bin/dpaa1-check"
 
-### DPAA1 AF_XDP true-ZC RX gate-counter reader: `xsk-zc-check` reads the
-### 20-counter xsk_* ethtool suite (in particular the four sub-increment-4
-### entry-gate counters: xsk_zc_eligible / xsk_zc_rx_armed /
-### xsk_zc_rx_recovered / xsk_fill_guard_block — patches 0093/0094/0095/0096
-### under kernel/common/patches/board/) on eth3/eth4 and renders the
-### sub-increment-4 entry verdict the spec gates on (§6.1.12/§6.1.13 of
-### specs/dpaa1-afxdp-modernization-spec.md): dormant (no ZC bind, all
-### xsk_zc_* counters 0 — the expected shipping state), ZC-armed (armed AND
-### xsk_fill_guard_block==0 → preconditions met), or fault (fill_guard>0 /
-### hard attach-DMA error). Exit 0 healthy / 1 fault / 2 not-LS1046A-or-no-
-### xsk-counters — usable as a Nagios/monit probe. Mirrors sfp-check /
-### fan-check / caam-check style. Flavor-agnostic: the AF_XDP datapath
-### patches are in the common board patch set, so the counters exist on
-### every flavor; on a shipping image with no ZC producer bound the verdict
-### is the expected "dormant".
-cp board/scripts/xsk-zc-check "$CHROOT/usr/local/bin/xsk-zc-check"
-chmod +x "$CHROOT/usr/local/bin/xsk-zc-check"
 
 ### ASK2 stack health helper: `ask-check` reports the landed state of the
 ### ASK2 in-tree kernel patches (0001 caam-qi-share, 0002 dpaa-eth-flow-block,
@@ -550,21 +533,6 @@ chmod +x "$CHROOT/usr/local/bin/ask-check"
 cp board/scripts/firmware-check "$CHROOT/usr/local/bin/firmware-check"
 chmod +x "$CHROOT/usr/local/bin/firmware-check"
 
-### ASK2 reversible-mode-switch gate: `pcd-snapshot` (Python 3) captures and
-### diffs the FMan PCD silicon state that the S0<->S1 dataplane mode-switch
-### (DUAL-DATAPLANE.md M1) mutates — KeyGen schemes (RSS vs AC_CC, read via
-### the KG indirect Action Register), per-port BMI next-engine bind
-### (fmbm_rfpne/rccb/rgpr), the static CC tree / FM_CTL params-page MURAM
-### region, and the gen_pool MURAM budget (/sys/kernel/debug/fman_pcd/0/
-### muram_budget). `capture` snapshots the S0 baseline; `diff` asserts the
-### live state still equals it after a S1->S0 teardown, so the M1 soak can
-### prove every engage/disengage cycle was fully reversible without a reboot.
-### Exit 0 clean / 1 drift|fault / 2 not-LS1046A — usable as a soak gate.
-### Mirrors firmware-check / fan-check / caam-check style; installed without a
-### .py suffix (fan-pid / led / caam-check convention). Flavor-agnostic (the
-### board PCD substrate is in the common patch set on every image).
-cp board/scripts/pcd-snapshot "$CHROOT/usr/local/bin/pcd-snapshot"
-chmod +x "$CHROOT/usr/local/bin/pcd-snapshot"
 
 ### Mono Gateway DK LP5812 status LED control: `led` (Python 3) supports
 ### three input forms — palette index, four decimals R G B W, and 8-digit

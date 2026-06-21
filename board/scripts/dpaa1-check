@@ -29,8 +29,7 @@
 #   5) Jumbo frames     — fsl_fm_max_frm bootarg
 #   6) Interfaces       — eth0-eth4 driver/MAC/operstate/MTU + AF_XDP MTU cap
 #   7) QMan / BMan      — portal + pool posture (DT-driven, early-boot)
-#   8) AF_XDP zero-copy — the 22 xsk_* counters + xsk-zc-check verdict
-#   9) dmesg (best-effort) — boot banners if still in the ring buffer
+#   8) dmesg (best-effort) — boot banners if still in the ring buffer
 #
 # Designed to mirror `caam-check`, `sfp-check`, `fan-check`: human-readable
 # [OK]/[WARN]/[FAIL]/[SKIP] table, colour where the tty supports it.
@@ -366,63 +365,13 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 8. AF_XDP zero-copy status
+# 8. dmesg banners (best-effort)
 # ---------------------------------------------------------------------------
-hdr "8) AF_XDP zero-copy (xsk_* counters)"
-
-# The dpaa_eth driver exports a contiguous block of xsk_* ethtool counters
-# (22 on the current true-ZC build, ending in xsk_zc_rx_redirect — the
-# productive zero-copy RX oracle). Probe both 10G ZC ports (eth3/eth4).
-if command -v ethtool >/dev/null 2>&1; then
-    xsk_seen=0
-    for ZC_IF in eth3 eth4; do
-        [ -d "/sys/class/net/$ZC_IF" ] || continue
-        XSK=$(ethtool -S "$ZC_IF" 2>/dev/null | grep -E '^\s*xsk_')
-        [ -n "$XSK" ] || continue
-        xsk_seen=1
-        nxsk=$(printf "%s\n" "$XSK" | wc -l)
-        ok "${nxsk} xsk_* counter(s) exported on ${ZC_IF}"
-        redir=$(printf "%s\n" "$XSK" | awk -F: '/xsk_zc_rx_redirect/{gsub(/ /,"",$2);print $2}')
-        armed=$(printf "%s\n" "$XSK" | awk -F: '/xsk_zc_rx_armed/{gsub(/ /,"",$2);print $2}')
-        guard=$(printf "%s\n" "$XSK" | awk -F: '/xsk_fill_guard_block/{gsub(/ /,"",$2);print $2}')
-        if [ -n "$redir" ]; then
-            if [ "$redir" -gt 0 ]; then
-                ok "${ZC_IF}: true-ZC RX active — xsk_zc_rx_redirect=${redir} (frames redirected into XSKMAP)"
-            else
-                note "${ZC_IF}: xsk_zc_rx_redirect=0 (no AF_XDP ZEROCOPY socket bound — dormant, normal)"
-            fi
-        fi
-        [ -n "$armed" ] && [ "$armed" != "0" ] \
-            && note "${ZC_IF}: xsk_zc_rx_armed=${armed} (bands reprogrammed to an XSK BPID)"
-        if [ -n "$guard" ] && [ "$guard" -gt 0 ]; then
-            warn "${ZC_IF}: xsk_fill_guard_block=${guard} (FILL-ring single-producer guard fired)"
-        fi
-    done
-    [ "$xsk_seen" -eq 0 ] \
-        && note "no xsk_* counters on eth3/eth4 (AF_XDP not compiled into this dpaa_eth?)"
-else
-    skip "ethtool unavailable — AF_XDP counters not probed"
-fi
-
-# Defer to the dedicated zero-copy verdict tool when present.
-if [ -x /usr/local/bin/xsk-zc-check ]; then
-    note "xsk-zc-check verdict:"
-    /usr/local/bin/xsk-zc-check 2>/dev/null | while IFS= read -r line; do
-        note "  $line"
-    done
-else
-    skip "xsk-zc-check helper not installed (detailed ZC verdict unavailable)"
-fi
-
-# ---------------------------------------------------------------------------
-# 9. dmesg banners (best-effort)
-# ---------------------------------------------------------------------------
-hdr "9) dmesg banners (best-effort)"
+hdr "8) dmesg banners (best-effort)"
 
 # Reuses the KLOG captured once in section 4.
 DMESG_OUT=$(printf '%s\n' "$KLOG" \
-            | grep -iE 'fman|qman|bman|fsl_dpaa|dpaa_eth|Freescale FM' \
-            | grep -ivE 'xsk|af_xdp' || true)
+            | grep -iE 'fman|qman|bman|fsl_dpaa|dpaa_eth|Freescale FM' || true)
 if [ -n "$DMESG_OUT" ]; then
     echo "$DMESG_OUT" | head -12 | while IFS= read -r line; do note "$line"; done
 else
