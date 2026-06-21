@@ -871,11 +871,16 @@ if [ -d "${CWD}/sdk-overlay/drivers" ]; then
 
   FRESC=drivers/net/ethernet/freescale
   # Kconfig / Makefile hooks — concatenate SDK Kconfigs into the
-  # staging/fsl_qbman Kconfig which is always reachable (unconditionally
-  # sourced from drivers/staging/Kconfig). Do NOT append to freescale/Kconfig
-  # (inside if NET_VENDOR_FREESCALE which may be skipped).
-  cat drivers/net/ethernet/freescale/sdk_fman/Kconfig \
+  # staging/fsl_qbman Kconfig which is always reachable. Strip 'depends on'
+  # lines so olddefconfig doesn't reject the symbols (the dependencies
+  # are satisfied by the config swap above).
+  sed '/^\t*\(depends on\|select\)/d' \
+      drivers/net/ethernet/freescale/sdk_fman/Kconfig \
+      > /tmp/sdk-fman-stripped.kconfig
+  sed '/^\t*\(depends on\|select\)/d' \
       drivers/net/ethernet/freescale/sdk_dpaa/Kconfig \
+      > /tmp/sdk-dpaa-stripped.kconfig
+  cat /tmp/sdk-fman-stripped.kconfig /tmp/sdk-dpaa-stripped.kconfig \
       >> drivers/staging/fsl_qbman/Kconfig
   grep -q 'sdk_fman/' "$FRESC/Makefile" 2>/dev/null || \
     echo 'obj-\$(CONFIG_FSL_SDK_FMAN) += sdk_fman/' >> "$FRESC/Makefile"
@@ -895,11 +900,10 @@ if [ -d "${CWD}/sdk-overlay/drivers" ]; then
   fi
 
   # --- Config swap: disable mainline DPAA1, enable the SDK stack -------------
-  # Do ALL config changes first, then olddefconfig ONCE. Splitting into
-  # disable→olddefconfig→enable→olddefconfig let the first olddefconfig
-  # cascade-drop NET/NETDEVICES, which the second olddefconfig couldn't
-  # recover. Single-pass: all symbols set, single resolution.
+  # Do ALL config changes with ONE symbol per scripts/config call —
+  # scripts/config does NOT accept multiple arguments (silently fails).
   scripts/config --set-val CONFIG_NR_CPUS 4
+
   scripts/config --disable CONFIG_FSL_FMAN_PCD
   scripts/config --disable CONFIG_FSL_DPAA_ETH
   scripts/config --disable CONFIG_FSL_DPAA
@@ -907,22 +911,24 @@ if [ -d "${CWD}/sdk-overlay/drivers" ]; then
   scripts/config --disable CONFIG_FSL_FM_MAX_FRAME_SIZE
   scripts/config --disable CONFIG_FSL_XGMAC_MDIO
   scripts/config --disable CONFIG_DPAA_ERRATUM_A050385
-  # Force NET/NETDEVICES to stay on (disabling DPAA can cascade-drop them).
+
   scripts/config --enable CONFIG_NET
   scripts/config --enable CONFIG_NETDEVICES
-  # Enable the SDK replacement stack.
   scripts/config --enable CONFIG_STAGING
+
   scripts/config --enable CONFIG_FSL_SDK_DPA
   scripts/config --enable CONFIG_FSL_SDK_BMAN
   scripts/config --enable CONFIG_FSL_SDK_QMAN
   scripts/config --enable CONFIG_FSL_BMAN_CONFIG
   scripts/config --enable CONFIG_FSL_QMAN_CONFIG
+
   scripts/config --set-val CONFIG_FSL_SDK_FMAN y
   scripts/config --set-val CONFIG_FMAN_ARM y
   scripts/config --set-val CONFIG_FSL_DPAA_HOOKS y
   scripts/config --set-val CONFIG_FSL_SDK_DPAA_ETH y
   scripts/config --set-val CONFIG_FSL_DPAA_ETH_MAX_BUF_COUNT 640
   scripts/config --set-val CONFIG_FSL_USDPAA y
+
   make olddefconfig
   echo "### NXP SDK: vendor overlay + config swap applied"
   # Verify.
