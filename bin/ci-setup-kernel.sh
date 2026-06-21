@@ -706,7 +706,7 @@ cp "$BOARD_PATCH_DIR/0145-dpaa-flow-offload-backend-slot.patch" "$KERNEL_PATCHES
 # the image looked healthy (same KVER) but lacked the new code entirely.
 # Space-separated basenames of board patches deliberately not staged
 # (currently none — 0078 was never committed as a file; see its comment above).
-BOARD_STAGE_SKIP=""
+BOARD_STAGE_SKIP="4004-swphy-support-10g-fixed-link-speed.patch 0103d-dpaa1-true-zc-rx-readback-debug.patch"
 _missing=""
 for _p in "$BOARD_PATCH_DIR"/*.patch; do
   _b=$(basename "$_p")
