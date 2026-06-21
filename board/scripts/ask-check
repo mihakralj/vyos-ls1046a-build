@@ -95,16 +95,7 @@ if [ ! -f /proc/device-tree/compatible ] \
 fi
 
 # ---------------------------------------------------------------------------
-# Header
-# ---------------------------------------------------------------------------
-hostname_str=$(hostname 2>/dev/null || echo "?")
-kernel_str=$(uname -r 2>/dev/null || echo "?")
-printf "%sask-check%s  host=%s  kernel=%s  %s\n" \
-    "$C_BOLD" "$C_RST" "$hostname_str" "$kernel_str" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-note "spec: specs/ask2-rewrite-spec.md v1.1  |  plan: plans/ASK2-IMPLEMENTATION.md"
-
-# ---------------------------------------------------------------------------
-# Cached state
+# Cached state (needed by offload-mode detection below)
 # ---------------------------------------------------------------------------
 DMESG=$(dmesg 2>/dev/null || true)
 LSMOD=$(lsmod 2>/dev/null || true)
@@ -119,12 +110,173 @@ has_sym()    { [ -n "$KALLSYMS" ] && echo "$KALLSYMS" | awk '{print $3}' | grep 
 has_mod()    { echo "$LSMOD" | awk '{print $1}' | grep -qx "$1"; }
 dmesg_has()  { echo "$DMESG" | grep -qE "$1"; }
 
-# Reference manual: 4 in-tree patches + 1 OOT module + userspace.
-note "ASK2 stack: 4 in-tree patches + ask.ko/ask_bridge.ko + askd + ask-cli"
+# ---------------------------------------------------------------------------
+# Offload-architecture detection
+# ---------------------------------------------------------------------------
+# This board can run ONE of two mutually-exclusive DPAA1 offload stacks. This
+# script auto-detects whichever one is actually built and validates only that
+# one — the other stack's checks are reported [SKIP] (n/a), never [FAIL]:
+#
+#   sdk   — the genuine NXP ASK SDK datapath (CONFIG_FSL_SDK_FMAN=y):
+#           sdk_dpaa/{fsl_mac,fsl_dpa,fsl_oh} + staging/fsl_qbman, proprietary
+#           QEF microcode (210.10.1). This is the "legacy ASK" / reference NXP
+#           build. The mainline FMan PCD subsystem and ask.ko do NOT exist here.
+#
+#   ask2  — the modern in-tree rewrite on mainline FMan (CONFIG_FSL_FMAN=y):
+#           the 0001-0004 PCD patches + ask.ko/ask_bridge + askd + ask-cli
+#           (specs/ask2-rewrite-spec.md). The SDK tree does NOT exist here.
+#
+# Primary signal is the kernel config (authoritative, mutually-exclusive
+# Kconfig symbols); modules.builtin and dmesg banners are fallbacks for
+# kernels built without CONFIG_IKCONFIG_PROC.
+KCONFIG=$(zcat /proc/config.gz 2>/dev/null || cat "/boot/config-$(uname -r)" 2>/dev/null || true)
+MODBUILTIN=$(cat "/lib/modules/$(uname -r)/modules.builtin" 2>/dev/null || true)
+kconfig_is_y() { echo "$KCONFIG" | grep -qx "$1=y"; }
+
+detect_mode() {
+    # 1) Authoritative: kernel config (mutually-exclusive symbols).
+    if [ -n "$KCONFIG" ]; then
+        kconfig_is_y CONFIG_FSL_SDK_FMAN && { echo sdk;  return; }
+        kconfig_is_y CONFIG_FSL_FMAN     && { echo ask2; return; }
+    fi
+    # 2) Fallback: built-in module paths (sdk_dpaa/ vs mainline freescale/).
+    if echo "$MODBUILTIN" | grep -q 'sdk_dpaa/fsl_dpa';      then echo sdk;  return; fi
+    if echo "$MODBUILTIN" | grep -qE 'freescale/(dpaa|fman)/'; then echo ask2; return; fi
+    # 3) Fallback: runtime surfaces.
+    if echo "$DMESG" | grep -q 'Freescale FM module, FMD API'; then echo sdk;  return; fi
+    if [ -d /sys/kernel/debug/fman_pcd ];                       then echo ask2; return; fi
+    echo unknown
+}
+MODE=$(detect_mode)
+case "$MODE" in
+    sdk)  MODE_LABEL="NXP ASK SDK datapath (legacy ASK / reference build)" ;;
+    ask2) MODE_LABEL="ASK2 in-tree rewrite (mainline FMan + ask.ko)" ;;
+    *)    MODE_LABEL="unknown — neither SDK nor ASK2 FMan detected" ;;
+esac
+mode_is() { [ "$MODE" = "$1" ]; }
+
+# ---------------------------------------------------------------------------
+# Header
+# ---------------------------------------------------------------------------
+hostname_str=$(hostname 2>/dev/null || echo "?")
+kernel_str=$(uname -r 2>/dev/null || echo "?")
+printf "%sask-check%s  host=%s  kernel=%s  %s\n" \
+    "$C_BOLD" "$C_RST" "$hostname_str" "$kernel_str" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+printf "  offload mode: %s%s%s  - %s\n" "$C_BOLD" "$MODE" "$C_RST" "$MODE_LABEL"
+if mode_is ask2; then
+    note "spec: specs/ask2-rewrite-spec.md v1.1  |  plan: plans/ASK2-IMPLEMENTATION.md"
+    note "ASK2 stack: 4 in-tree patches + ask.ko/ask_bridge.ko + askd + ask-cli"
+elif mode_is sdk; then
+    note "validating the genuine NXP SDK datapath; ASK2 in-tree checks are n/a (skipped)"
+else
+    note "could not detect offload stack; running common checks only"
+fi
+
+# ---------------------------------------------------------------------------
+# 0) DPAA/FMan netdevs + links (COMMON — both stacks create eth0..ethN)
+# ---------------------------------------------------------------------------
+hdr "0) DPAA/FMan netdevs (common)"
+
+DPAA_NETDEVS=()
+for dev in /sys/class/net/*/device/of_node; do
+    [ -L "$dev" ] || continue
+    target=$(readlink -f "$dev" 2>/dev/null || true)
+    case "$target" in
+        */fman*|*/ethernet@*) DPAA_NETDEVS+=("$(basename "$(dirname "$(dirname "$dev")")")") ;;
+    esac
+done
+if [ "${#DPAA_NETDEVS[@]}" -gt 0 ]; then
+    record_ok "${#DPAA_NETDEVS[@]} FMan/DPAA netdev(s) present: ${DPAA_NETDEVS[*]}"
+else
+    record_fail "no DPAA/FMan netdevs found — DPAA1 stack did not initialise"
+    note "AGENTS.md: 'fsl_dpa' driver creates eth0..ethN under fsl_dpaa_mac parents"
+fi
+
+# Per-port carrier/link summary (stack-agnostic).
+if [ "${#DPAA_NETDEVS[@]}" -gt 0 ] && command -v ethtool >/dev/null 2>&1; then
+    for iface in "${DPAA_NETDEVS[@]}"; do
+        oper=$(cat "/sys/class/net/$iface/operstate" 2>/dev/null || echo "?")
+        spd=$(ethtool "$iface" 2>/dev/null | awk -F: '/Speed:/ {gsub(/ /,"",$2); print $2}')
+        link=$(ethtool "$iface" 2>/dev/null | awk -F: '/Link detected:/ {gsub(/ /,"",$2); print $2}')
+        note "$iface: operstate=$oper speed=${spd:-?} link=${link:-?}"
+    done
+fi
+
+# ---------------------------------------------------------------------------
+# S) NXP SDK datapath (only in 'sdk' mode)
+# ---------------------------------------------------------------------------
+if mode_is sdk; then
+hdr "S) NXP ASK SDK datapath"
+
+# SDK FMan driver active (proprietary FMD banner).
+if echo "$DMESG" | grep -q 'Freescale FM module, FMD API'; then
+    fmd_ver=$(echo "$DMESG" | grep -oE 'FMD API version [0-9.]+' | head -1)
+    record_ok "SDK FMan active (${fmd_ver:-FMD API})"
+else
+    record_warn "SDK FMan banner ('Freescale FM module, FMD API') absent from dmesg (ring wrapped?)"
+fi
+
+# SDK built-in drivers present in modules.builtin.
+for m in sdk_dpaa/fsl_mac sdk_dpaa/fsl_dpa fsl_qbman/fsl_usdpaa; do
+    if echo "$MODBUILTIN" | grep -q "$m"; then
+        ok "  built-in: $(basename "$m").ko"
+    else
+        warn "  built-in driver $m missing from modules.builtin"
+    fi
+done
+
+# QMan/BMan portals initialised (dmesg allocator banners).
+if echo "$DMESG" | grep -q 'QMan: Allocated lookup table' \
+   && echo "$DMESG" | grep -qi 'Bman: BPID allocator'; then
+    record_ok "QMan/BMan portals initialised"
+else
+    record_warn "QMan/BMan allocator banners not found in dmesg"
+fi
+
+# QBMan debugfs surfaces (root-only).
+if [ "$(id -u)" -eq 0 ]; then
+    qb=""
+    [ -d /sys/kernel/debug/qman ] && qb="$qb qman"
+    [ -d /sys/kernel/debug/bman ] && qb="$qb bman"
+    if [ -n "$qb" ]; then
+        record_ok "QBMan debugfs present:$qb"
+    else
+        record_warn "QBMan debugfs (qman/bman) absent — qman/bman_debugfs_interface not built?"
+    fi
+else
+    record_skip "QBMan debugfs is root-only — re-run with sudo"
+fi
+
+# FMan microcode partition present (full QEF decode via firmware-check).
+if echo "$DMESG" | grep -q '"fman-ucode"' || grep -qi 'fman-ucode' /proc/mtd 2>/dev/null; then
+    record_ok "FMan microcode (fman-ucode MTD partition) present"
+    note "run 'firmware-check' for the full QEF ucode decode (expect 210.10.1)"
+else
+    record_warn "fman-ucode MTD partition not visible — U-Boot may not have injected ucode"
+fi
+
+# Optional legacy CDX/dpa_app/cmm fast-path overlay (NOT part of the SDK
+# datapath-only reference build; check only if an operator installed it).
+if [ -e /dev/cdx_ctrl ] || command -v dpa_app >/dev/null 2>&1; then
+    if [ -e /dev/cdx_ctrl ]; then
+        record_ok "/dev/cdx_ctrl present (legacy CDX fast-path loaded)"
+    else
+        record_warn "dpa_app installed but /dev/cdx_ctrl absent"
+    fi
+    if systemctl --quiet is-active cmm.service 2>/dev/null; then
+        record_ok "cmm.service active"
+    elif command -v cmm >/dev/null 2>&1; then
+        record_warn "cmm installed but cmm.service not active"
+    fi
+else
+    note "legacy CDX/dpa_app/cmm fast-path not installed (SDK datapath-only reference build) - OK"
+fi
+fi  # end sdk-mode section
 
 # ---------------------------------------------------------------------------
 # 1. In-tree patches landed (kernel-side scaffolding from PR10–PR14h)
 # ---------------------------------------------------------------------------
+if mode_is ask2; then
 hdr "1) In-tree kernel patches landed"
 
 # --- Patch 0001 caam-qi-share-descriptors (PR10) ---
@@ -152,22 +304,8 @@ fi
 # backend chose to advertise the feature bit. Probing the feature bit
 # therefore conflates two layers and was producing a FALSE FAIL on healthy
 # kernels — check the exported symbol instead.
-DPAA_NETDEVS=()
-for dev in /sys/class/net/*/device/of_node; do
-    [ -L "$dev" ] || continue
-    target=$(readlink -f "$dev" 2>/dev/null || true)
-    case "$target" in
-        */fman*|*/ethernet@*) DPAA_NETDEVS+=("$(basename "$(dirname "$(dirname "$dev")")")") ;;
-    esac
-done
-if [ "${#DPAA_NETDEVS[@]}" -gt 0 ]; then
-    record_ok "${#DPAA_NETDEVS[@]} FMan/DPAA netdev(s) present: ${DPAA_NETDEVS[*]}"
-else
-    record_fail "no DPAA/FMan netdevs found — DPAA1 stack did not initialise"
-    note "AGENTS.md: 'fsl_dpa' driver creates eth0..ethN under fsl_dpaa_mac parents"
-fi
-
 # Exported-symbol probe: the patch produces these two EXPORT_SYMBOL_GPL.
+# (netdev presence itself is checked in the common section 0 above.)
 if has_sym dpaa_register_flow_offload_handler && has_sym dpaa_unregister_flow_offload_handler; then
     record_ok "0002-dpaa-eth-flow-block.patch (dpaa_register/unregister_flow_offload_handler exported)"
 elif [ -z "$KALLSYMS" ]; then

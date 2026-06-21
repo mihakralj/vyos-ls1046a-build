@@ -1,13 +1,15 @@
 # ASK2 Mainline-Based, SDK-API-Compatible Offload Plan
 
-**Version 1.0.0 · 2026-06-18 · HADS 1.0.0**
+**Version 1.1.0 · 2026-06-21 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
 This document is the governing architecture + reconciliation plan for landing the DPAA1 FMan
 hardware-offload (FE / `en_exthash` external-hash forwarding, ASK2) **without** swapping the
 mainline `fman` / `dpaa` / `soc/fsl/qbman` source trees. Read §1 for the directive and the core
-decision, §2 for the three-bucket file disposition, §3 for the low-risk gate definition, §4 for the
+decision, **§1a for the "one enhanced mainline DPAA1 for BOTH ASK and ASK2" answer + the decisive DAC
+argument for building on mainline (not the SDK)**, §2 for the three-bucket file disposition, §3 for the
+low-risk gate definition, §4 for the
 PCD-layer reconciliation procedure, **§4b for the resolved verify-patch-stack result + the canonical-layer
 decision matrix, §4c for the adopted Option-1 cherry-pick scope**, §5 for the fork/de-risk plan, §6 for
 board-safety constraints.
@@ -56,6 +58,61 @@ flowchart TD
   X["FULL SDK source trees<br/>sdk_fman/sdk_dpaa/fsl_qbman"]:::drop -->|REJECT: replaces mainline| C
   Y["10-sdk-swap.config"]:::drop -->|REJECT: disables FSL_FMAN/DPAA/BMAN/QMAN| C
   classDef drop fill:#511,stroke:#a44,color:#fff;
+```
+
+### 1a. Answer — "one enhanced mainline DPAA1 for BOTH ASK and ASK2" (2026-06-21)
+
+**[SPEC]** User question (2026-06-21): *could we create a better mainline DPAA1 that includes all
+APIs from NXP ASK DPAA and is usable for both ASK and ASK2?* **Answer: yes — and this plan already IS
+that architecture; it is ~80% built and HW-validated.** "All APIs from NXP ASK DPAA" decomposes into
+two tiers:
+
+- **Tier 1 — kernel FMan PCD programming API** (KeyGen / CC / Policer / Header-Manip / Parser /
+  Replicator + the QBMan FQ/buffer-pool ops). The board cluster `0086`–`0119` **already exports the
+  SDK-shaped names on mainline DPAA1** (verified `EXPORT_SYMBOL_GPL`): `fman_pcd_kg_scheme_create`/
+  `_destroy`/`_bind_port`/`_attach_cc`/`_port_attach_cc`/`_port_detach_cc`/`_port_attach_policer`/
+  `_port_detach_policer` (`0097`/`0106`), `fman_cc_tree_install`/`_add_key`/`_remove_key`/`_destroy`
+  (`0086`/`0098`), `fman_pcd_cc_static_install`/`_destroy`/`_get_base` (`0098`),
+  `fman_pcd_hm_install`/`_destroy` (`0099`), `fman_pcd_plcr_install`/`_destroy` (`0100`),
+  `fman_pcd_init`/`_release`/`_get_muram_budget` (`0092`), `fman_pcd_port_ensure_params_page`
+  (`0116`). **ASK2's `ask.ko` binds to exactly these today** (`ask2-cc-repoint` shipped CI-green
+  `c0b2691`), and the ingress-policer HW datapath is HW-validated 0% loss (BUG 3a fix `1a48948`).
+  Tier-1 **gaps** = Parser (`fman_pcd_prs.c`) + Replicator (`fman_pcd_replic.c`) net-new files (§4c
+  cherry-pick). Host-command transport stays **intentionally omitted** (210.10.1 ucode has no HC
+  doorbell, §4c).
+- **Tier 2 — userspace fmlib / USDPAA ioctl ABI** (`/dev/fm*`, FMC, `dpa_ipsec`, `dpa_classifier`)
+  that **only legacy ASK 1.x userspace** consumed. Mainline ships none; the repo already scaffolds
+  `kernel/common/files/fsl_fmd_shim.c` (`/dev/fm0`, `/dev/fm0-pcd`, `/dev/fm0-port-rxN`,
+  `GET_API_VERSION`-only, PCD/PORT ioctls `-ENOSYS`). **ASK2 does NOT need Tier 2** — it is the only
+  large, optional lift, and only if a fmlib-style userspace is ever revived.
+
+**[SPEC]** "Both ASK and ASK2" = **one FMan RX-steering substrate, multiple consumers.** §4a/§5 already
+frame AF_XDP-ZC and ASK-FE as "two consumers of one FMan RX-steering engine"; the dual-ASK ask just
+adds a third optional consumer (legacy fmlib userspace via the FMD-shim) of the **same exported PCD
+API**. The three consumers — (a) ASK2 kernel flow engine (`ask.ko`), (b) AF_XDP/VPP ZC steering
+(§4a F1), (c) optional fmlib userspace (FMD-shim) — all program the same KeyGen-scheme→CC-redirect
+primitives; the API is exposed once and shared, never duplicated.
+
+**[SPEC] DECISIVE: build the unified API on MAINLINE, not the vendored SDK (DAC finding, 2026-06-20).**
+Mainline keeps phylink / lynx-pcs `managed = "in-band-status"` → real 10GBASE-R link establishment →
+a **passive DAC works on `eth4`**. The fully-vendored SDK reference build (branch `nxp-ask`) uses
+`fixed-link` with **no XFI-PCS in-band path** → DAC RX-dead (`rx_packets=0` forever; copper SFP+
+modules work only because they are active retimers). So the enhanced-mainline base is **strictly
+superior to the SDK on 10G link handling — vendoring the SDK *regresses* the DAC.** This **inverts**
+the original "find why the dpaa1 branch doesn't work" framing: for link establishment mainline is the
+winner. The full-SDK `nxp-ask` vendoring is therefore an **A/B reference build only**; enhanced
+mainline DPAA1 (mainline + board PCD cluster + the §4c Parser/Replicator port) is the single
+production base for both ASK2 and any future ASK.
+
+```mermaid
+flowchart TD
+  M["Enhanced mainline DPAA1<br/>= mainline fman/dpaa/qbman<br/>+ board PCD 0086-0119<br/>+ phylink/lynx-pcs (DAC works)"]
+  M -->|exports SDK-shaped PCD API| API["one FMan RX-steering API<br/>KeyGen scheme + CC redirect<br/>+ Policer + HM (+ Parser/Replicator §4c)"]
+  API --> C1["ASK2 kernel flow engine<br/>ask.ko (HW-validated)"]
+  API --> C2["AF_XDP / VPP ZC overlay<br/>(F1 un-gate)"]
+  API --> C3["legacy fmlib userspace<br/>via FMD-shim (optional, Tier 2)"]
+  SDK["full SDK vendoring (nxp-ask)<br/>fixed-link, DAC RX-dead"]:::ref -->|A/B reference only| M
+  classDef ref fill:#225,stroke:#48a,color:#fff;
 ```
 
 ---
