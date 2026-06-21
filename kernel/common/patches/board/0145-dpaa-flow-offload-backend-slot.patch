@@ -1,11 +1,8 @@
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-index 54a7035c3488..65b2c678abcd 100644
+index 54a7035c3488..e1f4d1a5aaaa 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-@@ -7,6 +7,7 @@
- #include <linux/netdevice.h>
- #include <linux/module.h>
- #include <linux/bpf.h>
+@@ -10,6 +10,7 @@
  #include <linux/bpf_trace.h>
  #include <net/xdp_sock_drv.h>
  #include <net/pkt_cls.h>
@@ -14,9 +11,8 @@ index 54a7035c3488..65b2c678abcd 100644
  #include "dpaa_flavor.h"
  #include "dpaa_fman_caps.h"
  #include <soc/fsl/bman.h>
- #include <soc/fsl/qman.h>
-@@ -367,6 +368,75 @@ static void dpaa_get_stats64(struct net_device *net_dev,
- 
+@@ -284,6 +285,53 @@ static int dpaa_poll(struct napi_struct *napi, int budget)
+ 	return total;
  }
  
 +/* External flow-offload backend registration (ASK2). */
@@ -25,7 +21,6 @@ index 54a7035c3488..65b2c678abcd 100644
 +
 +int dpaa_register_flow_offload_handler(const struct dpaa_flow_offload_ops *ops)
 +{
-+
 +	const struct dpaa_flow_offload_ops *cur;
 +
 +	if (!ops || !ops->setup_tc_block)
@@ -51,7 +46,6 @@ index 54a7035c3488..65b2c678abcd 100644
 +
 +int dpaa_unregister_flow_offload_handler(const struct dpaa_flow_offload_ops *ops)
 +{
-+
 +	const struct dpaa_flow_offload_ops *cur;
 +
 +	if (!ops)
@@ -67,13 +61,6 @@ index 54a7035c3488..65b2c678abcd 100644
 +
 +	rcu_assign_pointer(dpaa_fo_ops_slot, NULL);
 +	spin_unlock(&dpaa_fo_ops_lock);
-+
-+	/*
-+	 * Wait for any concurrent dpaa_setup_tc() readers to drop the old
-+	 * pointer before letting the caller free its ops struct or unload
-+	 * its module. The dispatch path runs entirely under rcu_read_lock(),
-+	 * so a single grace period is sufficient.
-+	 */
 +	synchronize_rcu();
 +
 +	if (ops->owner)
@@ -86,7 +73,6 @@ index 54a7035c3488..65b2c678abcd 100644
 +static int dpaa_setup_tc_flow_block(struct net_device *net_dev,
 +				struct flow_block_offload *f)
 +{
-+
 +	const struct dpaa_flow_offload_ops *ops;
 +	int err;
 +
@@ -106,8 +92,7 @@ index 54a7035c3488..65b2c678abcd 100644
  static int dpaa_setup_tc_mqprio(struct net_device *net_dev, void *type_data)
  {
  
- 
-@@ -324,11 +394,17 @@ static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
+@@ -324,11 +372,17 @@ static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
  				 void *type_data)
  {
 +	int err;
@@ -168,7 +153,7 @@ index 000000000000..6c5f25d98a12 100644
 +
 +/**
 + * struct dpaa_flow_offload_ops - external flow-offload backend hooks
-+ * @owner: 	module owning this ops struct (set with THIS_MODULE).
++ * @owner:	module owning this ops struct (set with THIS_MODULE).
 + * @setup_tc_block: invoked from dpaa_setup_tc() for TC_SETUP_BLOCK.
 + * 			Must perform the standard FLOW_BLOCK_BIND /
 + * 			FLOW_BLOCK_UNBIND dance against fbo. Returns 0 on
