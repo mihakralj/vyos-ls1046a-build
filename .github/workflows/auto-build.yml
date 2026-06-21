@@ -35,6 +35,10 @@ on:
         required: false
       MINISIGN_PRIVATE_KEY:
         required: false
+      SSH_SIGNING_KEY:
+        required: false
+      SSH_ALLOWED_SIGNERS:
+        required: false
 
 env:
   DEBIAN_MIRROR: http://deb.debian.org/debian/
@@ -404,6 +408,21 @@ jobs:
           for f in version.json version-default.json version-ask.json version-vpp.json; do
             cp "/tmp/${f}.new" "$f"
           done
+
+      - name: "Release publishing: configure commit signing"
+        if: ${{ secrets.SSH_SIGNING_KEY != '' }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_SIGNING_KEY" > ~/.ssh/signing_key
+          chmod 600 ~/.ssh/signing_key
+          echo "$SSH_ALLOWED_SIGNERS" > ~/.ssh/allowed_signers
+          git config --global user.signingkey ~/.ssh/signing_key
+          git config --global commit.gpgsign true
+          git config --global gpg.format ssh
+          git config --global gpg.ssh.allowedSignersFile ~/.ssh/allowed_signers
+        env:
+          SSH_SIGNING_KEY: ${{ secrets.SSH_SIGNING_KEY }}
+          SSH_ALLOWED_SIGNERS: ${{ secrets.SSH_ALLOWED_SIGNERS }}
 
       - name: "Release publishing: create autocommit and tag"
         uses: stefanzweifel/git-auto-commit-action@v7

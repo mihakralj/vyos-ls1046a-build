@@ -107,6 +107,8 @@ jobs:
     secrets:
       MOK_KEY: ${{ secrets.MOK_KEY }}
       MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
+      SSH_SIGNING_KEY: ${{ secrets.SSH_SIGNING_KEY }}
+      SSH_ALLOWED_SIGNERS: ${{ secrets.SSH_ALLOWED_SIGNERS }}
 
   # NOTE: VM deallocation is intentionally NOT a CI step. The VM runs a
   # systemd timer (idle-deallocate.service) that self-deallocates after 10
