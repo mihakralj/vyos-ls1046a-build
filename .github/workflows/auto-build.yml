@@ -30,6 +30,11 @@ on:
         type: string
         required: false
         default: ''
+      skip_publish:
+        description: 'Skip the publish job — set true when the main orchestrator handles release'
+        type: boolean
+        required: false
+        default: false
     secrets:
       MOK_KEY:
         required: false
@@ -264,7 +269,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-    if: github.ref_name == 'main'
+    if: github.ref_name == 'main' && !inputs.skip_publish
     steps:
       - uses: actions/checkout@v6
       - name: Clone vyos-build repo
