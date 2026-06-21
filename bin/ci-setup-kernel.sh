@@ -150,6 +150,12 @@ echo "### Cleaning stale patches in $KERNEL_PATCHES (preserving 0001-*, 0003-*)"
 find "$KERNEL_PATCHES" -maxdepth 1 -type f -name '*.patch' \
   ! -name '0001-*' ! -name '0003-*' -print -delete
 
+# On 6.12 SDK kernel, also nuke the VyOS upstream 0001/0003 patches —
+# they target 6.18 API and fail to apply on 6.12.
+if [ "$SDK_KERNEL" -eq 1 ]; then
+  find "$KERNEL_PATCHES" -maxdepth 1 -type f \( -name '0001-*' -o -name '0003-*' \) -print -delete
+fi
+
 if [ "$SDK_KERNEL" -eq 1 ]; then
   echo "### SDK kernel (6.12) — skipping board DPAA patches (SDK overlay replaces mainline)"
 else
