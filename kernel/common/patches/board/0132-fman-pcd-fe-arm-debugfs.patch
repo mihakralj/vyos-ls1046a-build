@@ -1,0 +1,304 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Tue, 17 Jun 2026 05:30:00 +0000
+Subject: [PATCH] fman_pcd: FE-VM arm debugfs node (Phase 1 D9-B, 0132)
+
+Add a debugfs node `fe_arm` that arms the FE-VM datapath on a single
+FMan RX port (eth3 / hw port 0x10 in practice), using the HW-proven
+KGSE_CCBS approach (patch 0118): the port's KGSE scheme is reprogrammed
+to next_engine=CC with KGSE_CCBS = the FE_ENTER root-AD MURAM offset and
+the BMI fmbm_rccb is set to the same offset; the scheme NIA stays BMI
+direct-enqueue.
+
+Write verbs:  engage <port_hex> <fe_enter_off_hex>  |  disengage <port_hex>
+
+The debugfs node lives in fman_pcd.c (not a separate translation unit) so
+it can read pcd->fe_refcount / pcd->fe_root_ad_off directly - struct
+fman_pcd is private to that file.  The KeyGen/BMI silicon programming is
+done by fman_pcd_kg_port_arm_fe() / fman_pcd_kg_port_disarm_fe() in
+fman_pcd_kg.c, declared in the public header next to the sibling
+attach_cc / detach_cc helpers.
+
+Changes:
+  fman_pcd.c:        fe_arm debugfs node (show/write/engage/disengage)
+                     + registration in fman_pcd_init().
+  fman_pcd_kg.c:     fman_pcd_kg_port_arm_fe() / _disarm_fe(); include
+                     fman_port.h for fman_port_lookup_rx/set_cc_base.
+  include/linux/fsl/fman_pcd.h: arm_fe / disarm_fe prototypes.
+
+Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 0fb8c0a..d58feb6 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -2103,6 +2103,113 @@ static const struct file_operations fman_pcd_fe_hashfe_fops = {
+ 	.release	= single_release,
+ };
+ 
++/*
++ * fe_arm - arm the FE-VM datapath on a single FMan RX port (Phase 1
++ * D9-B, patch 0132).  Reprograms the port's KGSE scheme to next_engine=CC
++ * with KGSE_CCBS = FE_ENTER root-AD offset and sets the BMI fmbm_rccb, via
++ * the KeyGen helpers in fman_pcd_kg.c (HW-proven KGSE_CCBS approach, 0118).
++ * eth3 / hw port 0x10 only in practice.  The node lives here (not in a
++ * separate TU) so it can read pcd->fe_refcount / pcd->fe_root_ad_off
++ * directly - struct fman_pcd is private to this file.
++ *
++ * Verbs:  engage <port_hex> <fe_enter_off_hex>  |  disengage <port_hex>
++ */
++static int fman_pcd_fe_arm_engage(struct fman_pcd *pcd, const char *args)
++{
++	unsigned int port_id;
++	unsigned long fe_enter_off;
++	u8 saved_engine = 0;
++	int err;
++
++	if (sscanf(args, "engage %x %lx", &port_id, &fe_enter_off) != 2)
++		return -EINVAL;
++	if (port_id < 0x08 || port_id >= 0x28 || fe_enter_off == 0)
++		return -EINVAL;
++
++	mutex_lock(&pcd->fe_lock);
++	if (pcd->fe_refcount == 0 || pcd->fe_root_ad_off != fe_enter_off) {
++		mutex_unlock(&pcd->fe_lock);
++		return -EINVAL;
++	}
++	mutex_unlock(&pcd->fe_lock);
++
++	err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,
++				      (u32)fe_enter_off, &saved_engine);
++	if (err)
++		return err;
++
++	pr_info("fman_pcd fe_arm: port 0x%02x ENGAGED FE_ENTER=0x%lx\n",
++		port_id, fe_enter_off);
++	return 0;
++}
++
++static int fman_pcd_fe_arm_disengage(struct fman_pcd *pcd, const char *args)
++{
++	unsigned int port_id;
++
++	if (sscanf(args, "disengage %x", &port_id) != 1)
++		return -EINVAL;
++	if (port_id < 0x08 || port_id >= 0x28)
++		return -EINVAL;
++
++	fman_pcd_kg_port_disarm_fe(pcd, (u8)port_id, 0);
++	pr_info("fman_pcd fe_arm: port 0x%02x DISENGAGED\n", port_id);
++	return 0;
++}
++
++static int fman_pcd_fe_arm_show(struct seq_file *s, void *unused)
++{
++	struct fman_pcd *pcd = s->private;
++
++	mutex_lock(&pcd->fe_lock);
++	seq_printf(s, "fe_pool engaged:  %s\n",
++		   pcd->fe_refcount ? "YES" : "NO");
++	seq_printf(s, "FE_ENTER root AD: 0x%lx\n", pcd->fe_root_ad_off);
++	mutex_unlock(&pcd->fe_lock);
++	seq_puts(s,
++		 "verbs: engage <port_hex> <off_hex> | disengage <port_hex>\n");
++	return 0;
++}
++
++static int fman_pcd_fe_arm_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, fman_pcd_fe_arm_show, inode->i_private);
++}
++
++static ssize_t fman_pcd_fe_arm_write(struct file *file,
++				     const char __user *ubuf,
++				     size_t count, loff_t *ppos)
++{
++	struct seq_file *s = file->private_data;
++	struct fman_pcd *pcd = s->private;
++	char buf[64];
++	int ret;
++
++	if (!pcd || count == 0 || count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	if (!strncmp(buf, "engage ", 7))
++		ret = fman_pcd_fe_arm_engage(pcd, buf);
++	else if (!strncmp(buf, "disengage ", 10))
++		ret = fman_pcd_fe_arm_disengage(pcd, buf);
++	else
++		ret = -EINVAL;
++
++	return ret ? ret : count;
++}
++
++static const struct file_operations fman_pcd_fe_arm_fops = {
++	.owner		= THIS_MODULE,
++	.open		= fman_pcd_fe_arm_open,
++	.read		= seq_read,
++	.write		= fman_pcd_fe_arm_write,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
+ /**
+  * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
+  * @fman: parent FMan controller.  Must have a live MURAM pool (mainline
+@@ -2225,6 +2332,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 			debugfs_create_file("fe_hashfe", 0644,
+ 					    pcd->debugfs_dir, pcd,
+ 					    &fman_pcd_fe_hashfe_fops);
++			debugfs_create_file("fe_arm", 0600,
++					    pcd->debugfs_dir, pcd,
++					    &fman_pcd_fe_arm_fops);
+ 		}
+ 	}
+ 
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+index aed5d84..c28a045 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+@@ -49,6 +49,7 @@
+ 
+ #include <linux/fsl/fman_pcd.h>
+ #include "fman.h"
++#include "fman_port.h"
+ #include "fman_keygen_internal.h"
+ #include "fman_pcd_internal.h"
+ 
+@@ -697,3 +698,92 @@ int fman_pcd_kg_port_detach_cc(struct fman_pcd *pcd, u8 hw_port_id)
+ 	return err;
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_kg_port_detach_cc);
++
++int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
++			    u32 fe_enter_off, u8 *saved_engine)
++{
++	struct fman_keygen *keygen;
++	struct keygen_scheme *slot;
++	struct fman_port *rxport;
++	struct fman *fman;
++	struct mutex *lock;
++	u8 id;
++	int err;
++
++	if (!pcd || !fe_enter_off || !saved_engine)
++		return -EINVAL;
++	if (hw_port_id < 0x08 || hw_port_id >= 0x28)
++		return -EINVAL;
++
++	fman = fman_pcd_get_fman(pcd);
++	if (!fman || !fman->keygen)
++		return -ENXIO;
++	keygen = fman->keygen;
++	lock = fman_pcd_get_lock(pcd);
++
++	mutex_lock(lock);
++	slot = kg_find_port_scheme(keygen, hw_port_id, &id);
++	if (!slot) {
++		mutex_unlock(lock);
++		return -ENODEV;
++	}
++	*saved_engine = slot->next_engine;
++
++	/*
++	 * Arm the FE datapath (Fork B, Phase 1 D9-B).
++	 * Use the KGSE_CCBS approach (HW-proven per 0118): set kgse_ccbs
++	 * to the FE_ENTER AD offset; the CC walk fires because ccbs is
++	 * non-zero; NIA stays BMI direct-enqueue.  The CC engine resolves
++	 * its root from the BMI port's fmbm_rccb (set in step 2).
++	 */
++	slot->next_engine    = 2;
++	slot->cc_base_offset = 0;
++	slot->cc_bits_sel    = fe_enter_off;
++	slot->used = false;
++	err = keygen_scheme_setup(keygen, id, true);
++	if (err) {
++		slot->next_engine = *saved_engine;
++		slot->cc_bits_sel = 0;
++		slot->used = false;
++		mutex_unlock(lock);
++		return err;
++	}
++	mutex_unlock(lock);
++
++	rxport = fman_port_lookup_rx(fman, hw_port_id);
++	if (!rxport)
++		return -ENODEV;
++	err = fman_port_set_cc_base(rxport, fe_enter_off);
++	if (err) {
++		mutex_lock(lock);
++		slot = kg_find_port_scheme(keygen, hw_port_id, &id);
++		if (slot) {
++			slot->next_engine = *saved_engine;
++			slot->cc_bits_sel = 0;
++			slot->used = false;
++			(void)keygen_scheme_setup(keygen, id, true);
++		}
++		mutex_unlock(lock);
++		return err;
++	}
++
++	pr_info("fman_pcd: port 0x%02x FE-ARMED (fmbm_rccb=0x%x, kgse_ccbs=0x%x)\n",
++		hw_port_id, fe_enter_off, fe_enter_off);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_kg_port_arm_fe);
++void fman_pcd_kg_port_disarm_fe(struct fman_pcd *pcd, u8 hw_port_id,
++				u8 saved_engine)
++{
++	struct fman *fman = fman_pcd_get_fman(pcd);
++	struct fman_port *rxport;
++
++	if (!pcd || !fman)
++		return;
++
++	rxport = fman_port_lookup_rx(fman, hw_port_id);
++	if (rxport)
++		(void)fman_port_set_cc_base(rxport, 0);
++	(void)fman_pcd_kg_port_detach_cc(pcd, hw_port_id);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_kg_port_disarm_fe);
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 491bd14..d743322 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -278,6 +278,36 @@ int fman_pcd_kg_port_attach_cc(struct fman_pcd *pcd, u8 hw_port_id,
+  */
+ int fman_pcd_kg_port_detach_cc(struct fman_pcd *pcd, u8 hw_port_id);
+ 
++/**
++ * fman_pcd_kg_port_arm_fe() - arm the FE-VM datapath on a single RX port.
++ * @pcd:          PCD subsystem handle
++ * @hw_port_id:   hardware RX port id (0x08..0x27)
++ * @fe_enter_off: MURAM offset of the FE_ENTER root AD (must equal the
++ *                engaged pcd->fe_root_ad_off)
++ * @saved_engine: out - the scheme's prior next_engine, for restore
++ *
++ * Reprograms the port's KGSE scheme to next_engine=CC with
++ * KGSE_CCBS = @fe_enter_off and sets the BMI fmbm_rccb (HW-proven
++ * KGSE_CCBS approach, patch 0118).  NIA stays BMI direct-enqueue.
++ *
++ * Return: 0 on success; negative errno (scheme/port restored on failure).
++ */
++int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
++			    u32 fe_enter_off, u8 *saved_engine);
++
++/**
++ * fman_pcd_kg_port_disarm_fe() - reverse of fman_pcd_kg_port_arm_fe().
++ * @pcd:          PCD subsystem handle
++ * @hw_port_id:   hardware RX port id (0x08..0x27)
++ * @saved_engine: prior next_engine (currently unused; detach restores
++ *                the plain BMI-enqueue path unconditionally)
++ *
++ * Clears the BMI fmbm_rccb and restores the RSS scheme via
++ * fman_pcd_kg_port_detach_cc().  Idempotent.
++ */
++void fman_pcd_kg_port_disarm_fe(struct fman_pcd *pcd, u8 hw_port_id,
++				u8 saved_engine);
++
+ /**
+  * fman_pcd_kg_scheme_destroy() - tear down a previously created scheme.
+  * @scheme: handle from fman_pcd_kg_scheme_create().  NULL-safe.

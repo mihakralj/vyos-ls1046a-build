@@ -151,6 +151,14 @@ generic-from-PR/frame/IC (≤56 B).
 > at a header-manip chain is the core fast-path primitive. `0x29`/`0x2A` (TTL/hop-limit == 1) are how
 > the router punts expired packets to the slow path in hardware.
 
+> **Exact-match vs external-hash (the disposition fork — read before M2).** The exact-match
+> `CONT_LOOKUP` AD above is the universal v3 CC primitive, but on the shipping **210.10.1** microcode a
+> classified frame's *terminal disposition* (the BMI-FIFO free) is performed by the **Frame-Engine (FE)
+> opcode VM**, which exists only on the **external-hash** dispatch path (root AD `FE_ENTER`,
+> `pcAndOffsets=0xF6`, DDR buckets). A bare exact-match node that exits via `CONTRL_FLOW` (FQID-override)
+> leaks the FIFO → the open **M3-3b** stall. The complete FE/ehash init contract, the two-path table,
+> and the M2 decision criterion are the M0 oracle: see [`fman-fe-ehash.md`](fman-fe-ehash.md).
+
 ---
 
 ## 4. Header Manipulation (§5.12.10) — `fman_pcd_manip.c`
@@ -173,7 +181,7 @@ This block **is** ASK2's inline NAT: 0x0C rewrites IP addr + decrements TTL + fi
 automatically; 0x0E rewrites L4 ports + fixes the L4 checksum incrementally.
 
 > ⚠ **Risk #13 (ASK2 spec §16 / §13.3 — `muram.md`):** each manip chain must total **≤ 1 KiB MURAM**.
-> On the DUT after PR14z21, `fman_pcd_manip_chain_create(3 manips)` failed `-ENOMEM` (errno 12) **327×**
+> On the board after PR14z21, `fman_pcd_manip_chain_create(3 manips)` failed `-ENOMEM` (errno 12) **327×**
 > while `gen_pool` still had ~320 KiB free → needs instrumentation. `fman_pcd_manip.c` must budget AD
 > entries (≤4/chain) and MURAM carefully. See [`muram.md`](muram.md).
 

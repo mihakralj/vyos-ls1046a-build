@@ -1,9 +1,8 @@
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-index 54a7035c3488..e1f4d1a5aaaa 100644
+index f072b54..f890101 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-@@ -10,6 +10,7 @@
- #include <linux/bpf_trace.h>
+@@ -33,6 +33,7 @@
  #include <net/xdp_sock_drv.h>
  #include <net/pkt_cls.h>
  #include <net/flow_offload.h>
@@ -11,10 +10,10 @@ index 54a7035c3488..e1f4d1a5aaaa 100644
  #include "dpaa_flavor.h"
  #include "dpaa_fman_caps.h"
  #include <soc/fsl/bman.h>
-@@ -284,6 +285,53 @@ static int dpaa_poll(struct napi_struct *napi, int budget)
- 	return total;
- }
- 
+@@ -651,6 +652,80 @@ static int dpaa_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
+
+ static LIST_HEAD(dpaa_block_cb_list);
+
 +/* External flow-offload backend registration (ASK2). */
 +static const struct dpaa_flow_offload_ops __rcu *dpaa_fo_ops_slot;
 +static DEFINE_SPINLOCK(dpaa_fo_ops_lock);
@@ -89,11 +88,15 @@ index 54a7035c3488..e1f4d1a5aaaa 100644
 +	return err;
 +}
 +
- static int dpaa_setup_tc_mqprio(struct net_device *net_dev, void *type_data)
- {
- 
-@@ -324,11 +372,17 @@ static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
- 				 void *type_data)
+ /* Block-unbind self-heal (BUG 3b).
+  *
+  * The ingress qdisc/block can be torn down WITHOUT the matchall filter's
+@@ -723,13 +798,18 @@ static int dpaa_setup_tc_block(struct net_device *net_dev,
+ }
+
+ static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
+-			 void *type_data)
++		 void *type_data)
  {
 +	int err;
 +
@@ -106,18 +109,15 @@ index 54a7035c3488..e1f4d1a5aaaa 100644
 +		if (err != -EOPNOTSUPP)
 +			return err;
 +		return dpaa_setup_tc_flow_block(net_dev, type_data);
-+	case TC_SETUP_FT:
-+		return dpaa_setup_tc_flow_block(net_dev, type_data);
+ 	case TC_SETUP_QDISC_HTB:
+ 		return dpaa_ceetm_setup_htb(net_dev, type_data);
  	default:
- 		return -EOPNOTSUPP;
- 	}
- }
 diff --git a/include/linux/fsl/dpaa_flow_offload.h b/include/linux/fsl/dpaa_flow_offload.h
 new file mode 100644
-index 000000000000..6c5f25d98a12 100644
+index 0000000..17951e8
 --- /dev/null
 +++ b/include/linux/fsl/dpaa_flow_offload.h
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,66 @@
 +/* SPDX-License-Identifier: GPL-2.0-or-later */
 +/*
 + * NXP DPAA1 (fsl_dpa) flow-offload registration API.
@@ -148,6 +148,7 @@ index 000000000000..6c5f25d98a12 100644
 +
 +#include <linux/types.h>
 +
++struct module;
 +struct net_device;
 +struct flow_block_offload;
 +

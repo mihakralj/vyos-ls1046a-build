@@ -209,7 +209,7 @@ But `fman_pcd_cc_node_create()` and the helpers invoked between graft and ungraf
 | Scheme-group / hash-mask registers | `fman_pcd_kg_scheme_create()` (owned by `dpaa_eth`) | ❌ untouched (good — we don't recreate) |
 
 **[BUG] Graft+ungraft wedges eth3/eth4 RX (KGSE_SPC frozen)**
-- Symptom: after a graft+ungraft+iperf3 cycle on the live DUT (regdump recorded in qdrant 2026-05-22), schemes 3/4 `KGSE_SPC` (silicon packet counter) freeze at 14887572 / 2163140; schemes 0/1/2 (mgmt eth0/1/2) keep incrementing; `KGSE_MODE` and `KGSE_CCBS` on 3/4 are clean (restored); packets reaching the chip on eth3/4 stop reaching KG entirely; ARP times out; only a full reboot recovers.
+- Symptom: after a graft+ungraft+iperf3 cycle on the live board (regdump recorded in qdrant 2026-05-22), schemes 3/4 `KGSE_SPC` (silicon packet counter) freeze at 14887572 / 2163140; schemes 0/1/2 (mgmt eth0/1/2) keep incrementing; `KGSE_MODE` and `KGSE_CCBS` on 3/4 are clean (restored); packets reaching the chip on eth3/4 stop reaching KG entirely; ARP times out; only a full reboot recovers.
 - Cause: the BMI port-side path (`FMBM_RFPNE`) and/or `fmkg_pe_sp` port-to-scheme binding were re-routed upstream of KG by CC-tree creation and were NOT restored on ungraft (only `KGSE_CCBS`/`KGSE_MODE.NIA` are saved/restored). Frozen `KGSE_SPC` with clean `KGSE_MODE` means the silicon believes the schemes are valid and idle while routing is mutated upstream.
 - Fix: the only path that restores routing is a full DPAA1 cold-init (reboot). Architecturally, adopt Path A (boot-time PCD installation, no graft) so the netdev never owns schemes 3/4 and nothing needs restoring.
 
@@ -315,7 +315,7 @@ The CC tree being installed at boot means ASK2 is always-on-or-always-off (cf. o
 **[BUG] Empty CC tree may cost idle CPU**
 - Symptom: ASK2 could consume CPU even with zero offloaded flows.
 - Cause: the boot-installed empty CC tree might not be a true silicon no-op when no keys are inserted.
-- Fix: verify with idle PPS measurement on the live DUT before claiming victory.
+- Fix: verify with idle PPS measurement on the live board before claiming victory.
 
 ### 9.2 Path B — Offline-host port indirection (PR14j / PR14u / PR14x path, archived)
 
@@ -350,7 +350,7 @@ The graft model is architecturally unable to satisfy ASK2 spec §3.2 ("must not 
 
 **[?]**
 1. Does mainline `dpaa_eth` 6.18.31 have a place to insert the pre-netdev hook that doesn't conflict with the upstream cleanup direction? (Likely yes — `dpaa_eth_probe()` calls `dpaa_eth_init_one()` per MAC, with a clean spot after `fman_port_bind()` and before `register_netdev()`.)
-2. Does the empty CC tree cost idle CPU when no keys are installed? Needs measurement on the live DUT.
+2. Does the empty CC tree cost idle CPU when no keys are installed? Needs measurement on the live board.
 3. Path A means ASK2 must be loaded before `dpaa_eth` probes (or registered as a hook before probe). For VyOS that means either built-in (`ask.ko` → `ask`-built-in via `select`) or an initramfs early-load. The build system already supports this (CONFIG_FSL_DPAA1=y is mandatory), but loading order needs verification.
 4. ASK2 spec v1.1 §3.2 may need an amendment to permit "pre-netdev CC tree install via published in-tree hook" — a narrow, well-defined exception, not a full SDK fork.
 

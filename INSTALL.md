@@ -2,14 +2,14 @@
 
 ## Overview
 
-A single hybrid ISO serves both purposes:
+Two jobs, one file. The same ISO installs VyOS onto a bare board from a USB stick and upgrades a system that is already running. You do not build, download, or track separate images for each path.
 
 | Use case | How |
 |----------|-----|
 | **Initial install** | `dd` the ISO to USB → boot → `install image` |
 | **Upgrade** | `add system image <url>` from a running VyOS system |
 
-The ISO is a hybrid image: valid ISO9660 (for VyOS image upgrades) with an appended FAT32 boot partition and MBR (for U-Boot USB boot). One file, two boot paths.
+The trick is the hybrid layout: the file is a valid ISO9660 image (which VyOS upgrades read) with an appended FAT32 boot partition and MBR (which U-Boot reads to boot from USB). One file, two boot paths.
 
 ---
 

@@ -16,7 +16,7 @@
 VPP on LS1046A uses the **kernel AF_XDP zero-copy datapath** provided by the DPAA1 modernization driver. The v0.1 proposal (`fsl-dpaa1-um.ko` + userspace QMan/BMan portal ownership + userspace PCD) was **REJECTED** for three reasons:
 
 1. **RC#31 — userspace QBMan ownership kills all kernel interfaces.** QMan/BMan state is SoC-global. A userspace process reprogramming portal mappings and BMan buffer pools corrupts the kernel's DPAA1 stack identically to how DPDK's `dpaa_bus` probe did (confirmed on hardware, 2026-04-03). Mixed kernel+userspace DPAA1 ownership is architecturally impossible without a SoC-level bifurcation that does not exist.
-2. **AF_XDP ZC already delivers the desired architecture.** The DPAA1 modernization spec's M1–M3-3 step 7 provides `ndo_xsk_wakeup`, XSK-backed BMan pool, per-CPU NAPI with qband mapping, and `fman_port_set_rx_bpool()` reprogram-WRITE — all DUT-validated on real LS1046A silicon. Total kernel-side code: ~3 kLOC. The v0.1 proposal would have required ~12 kLOC of new, untested code for the same result.
+2. **AF_XDP ZC already delivers the desired architecture.** The DPAA1 modernization spec's M1–M3-3 step 7 provides `ndo_xsk_wakeup`, XSK-backed BMan pool, per-CPU NAPI with qband mapping, and `fman_port_set_rx_bpool()` reprogram-WRITE — all board-validated on real LS1046A silicon. Total kernel-side code: ~3 kLOC. The v0.1 proposal would have required ~12 kLOC of new, untested code for the same result.
 3. **Port exclusivity is the wrong model.** AF_XDP creates sockets on kernel-owned netdevs — no unbind/rebind, no DT `fsl,userspace-managed` flag. The kernel retains full ownership of all FMan MACs. This is the proven production model (~3.5 Gbps AF_XDP today, targeting ≥7 Gbps with ZC).
 
 ### 1.2 Component Layout
@@ -201,7 +201,7 @@ program FMan PCD via a custom ioctl interface, and manage hugepage-backed buffer
 pools independently from the kernel. Key rejection reasons:
 
 1. RC#31: userspace QBMan reprogramming kills all kernel FMan interfaces globally.
-2. AF_XDP ZC already delivers the architecture with 25% of the code and proven DUT stability.
+2. AF_XDP ZC already delivers the architecture with 25% of the code and proven board stability.
 3. Port exclusivity breaks VyOS's kernel-managed management ports.
 4. PAMU programming is architecturally impossible on arm64 LS1046A (DPAA1 spec §4.6).
 

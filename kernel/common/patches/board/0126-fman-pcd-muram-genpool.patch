@@ -1,0 +1,153 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index bdf2293..1aed407 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -27,6 +27,7 @@
+ #include <linux/debugfs.h>
+ #include <linux/device.h>
+ #include <linux/err.h>
++#include <linux/genalloc.h>
+ #include <linux/init.h>
+ #include <linux/kernel.h>
+ #include <linux/list.h>
+@@ -58,10 +59,17 @@
+  * Total worst-case ~100 KiB. The full 96 KiB partition does not fit the
+  * post-CAM/FIFO free MURAM window on LS1046A (6x1G + 2x10G ports) and is
+  * rejected with -ENOMEM at probe (PR14b regression). We reserve a 64 KiB
+- * partition; fman_muram_alloc rounds up to 256-byte (gen_pool
+- * min_alloc_order=8) so 65536 is an exact multiple.
++ * partition and sub-allocate every PCD MURAM request from it via a
++ * dedicated gen_pool (min_alloc_order=8 -> 256-byte granule, so 65536 is
++ * an exact multiple).  This bounds PCD allocations to the reserved arena
++ * instead of competing with the global MURAM free list: on LS1046A the
++ * post-CAM/FIFO global free tail is only ~21 KiB, far too small for the
++ * FE/ehash internal-buffer pool (~33 KiB) which DOES fit the 64 KiB
++ * reservation.  Without the sub-pool the reservation was dead-weight and
++ * fman_pcd_muram_alloc() silently fell back to the tiny global tail.
+  */
+ #define FMAN_PCD_MURAM_RESERVED_BYTES	(64U * 1024U)
++#define FMAN_PCD_MURAM_ORDER		8	/* 256-byte gen_pool granule */
+ 
+ /*
+  * Per-FMan PCD state. Allocated and freed by fman_pcd_init/release.
+@@ -86,6 +94,7 @@ struct fman_pcd {
+ 	size_t muram_reserved;
+ 	size_t muram_used;
+ 	size_t muram_high_water;
++	struct gen_pool *muram_pool;	/* sub-allocator over the reservation */
+ 
+ 	/*
+ 	 * Per-engine registries.  Each list_head is consumed by the
+@@ -187,25 +196,32 @@ DEFINE_SHOW_ATTRIBUTE(fman_pcd_muram_budget);
+ 
+ /*
+  * Internal MURAM allocator wrappers consumed by per-engine siblings (NOT
+- * EXPORT_SYMBOL - same module, fsl_dpaa_fman.ko).  Budget accounting is
+- * best-effort: the underlying gen_pool keeps the authoritative
+- * accounting; ours is for visibility (debugfs + cli).
++ * EXPORT_SYMBOL - same module, fsl_dpaa_fman.ko).  Requests are served
++ * from pcd->muram_pool, a gen_pool seeded with the reserved 64 KiB
++ * partition, so PCD allocations are bounded to that arena and never
++ * compete with the global MURAM free list.  Budget accounting
++ * (muram_used / muram_high_water) is best-effort visibility on top; the
++ * gen_pool is authoritative.
+  */
+ unsigned long fman_pcd_muram_alloc(struct fman_pcd *pcd, size_t size)
+ {
+-	struct muram_info *muram;
+ 	unsigned long offset;
+ 
+ 	if (WARN_ON(!pcd) || size == 0)
+ 		return (unsigned long)-EINVAL;
+ 
+-	muram = fman_get_muram(pcd->fman);
+-	if (!muram)
++	if (WARN_ON(!pcd->muram_pool))
+ 		return (unsigned long)-ENXIO;
+ 
+-	offset = fman_muram_alloc(muram, size);
+-	if (IS_ERR_VALUE(offset))
+-		return offset;
++	/*
++	 * gen_pool_alloc() returns 0 on failure.  The reserved partition
++	 * never starts at MURAM offset 0 on LS1046A (it lives above the
++	 * CAM/FIFO region, ~0x4ac00), so a successful allocation is always
++	 * non-zero and 0 unambiguously means out-of-arena.
++	 */
++	offset = gen_pool_alloc(pcd->muram_pool, size);
++	if (!offset)
++		return (unsigned long)-ENOMEM;
+ 
+ 	mutex_lock(&pcd->lock);
+ 	pcd->muram_used += size;
+@@ -219,16 +235,13 @@ unsigned long fman_pcd_muram_alloc(struct fman_pcd *pcd, size_t size)
+ void fman_pcd_muram_free(struct fman_pcd *pcd, unsigned long offset,
+ 			 size_t size)
+ {
+-	struct muram_info *muram;
+-
+ 	if (WARN_ON(!pcd) || size == 0)
+ 		return;
+ 
+-	muram = fman_get_muram(pcd->fman);
+-	if (WARN_ON(!muram))
++	if (WARN_ON(!pcd->muram_pool))
+ 		return;
+ 
+-	fman_muram_free_mem(muram, offset, size);
++	gen_pool_free(pcd->muram_pool, offset, size);
+ 
+ 	mutex_lock(&pcd->lock);
+ 	if (WARN_ON(pcd->muram_used < size))
+@@ -1303,6 +1316,29 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 		goto err_free;
+ 	}
+ 
++	/*
++	 * Sub-allocate all PCD MURAM from the reserved partition via a
++	 * gen_pool seeded with [muram_offset, +RESERVED_BYTES).  The
++	 * gen_pool "address" space IS the MURAM byte offset, so
++	 * fman_pcd_muram_alloc() returns offsets directly usable with
++	 * fman_muram_offset_to_vbase().
++	 */
++	pcd->muram_pool = gen_pool_create(FMAN_PCD_MURAM_ORDER, -1);
++	if (!pcd->muram_pool) {
++		dev_err(fman_get_dev(fman),
++			"fman_pcd: cannot create MURAM sub-pool\n");
++		err = -ENOMEM;
++		goto err_unreserve;
++	}
++	err = gen_pool_add(pcd->muram_pool, pcd->muram_offset,
++			   FMAN_PCD_MURAM_RESERVED_BYTES, -1);
++	if (err) {
++		dev_err(fman_get_dev(fman),
++			"fman_pcd: cannot seed MURAM sub-pool (err %d)\n",
++			err);
++		goto err_destroy_pool;
++	}
++
+ 	err = fman_pcd_debugfs_root_get();
+ 	if (err) {
+ 		dev_warn(fman_get_dev(fman),
+@@ -1343,6 +1379,11 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 
+ 	return pcd;
+ 
++err_destroy_pool:
++	gen_pool_destroy(pcd->muram_pool);
++err_unreserve:
++	fman_muram_free_mem(muram, pcd->muram_offset,
++			    FMAN_PCD_MURAM_RESERVED_BYTES);
+ err_free:
+ 	mutex_destroy(&pcd->lock);
+ 	kfree(pcd);
+@@ -1383,6 +1424,9 @@ void fman_pcd_release(struct fman_pcd *pcd)
+ 		fman_pcd_fe_pool_free(pcd);
+ 	mutex_destroy(&pcd->fe_lock);
+ 
++	if (pcd->muram_pool)
++		gen_pool_destroy(pcd->muram_pool);
++
+ 	if (!IS_ERR_VALUE(pcd->muram_offset))
+ 		fman_muram_free_mem(fman_get_muram(pcd->fman),
+ 				    pcd->muram_offset,

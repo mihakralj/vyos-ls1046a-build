@@ -65,7 +65,7 @@ Key properties:
 
 ### 2.2 What teardown must invert (the S1→S0 checklist)
 
-Each item lands with its inverse in the same patch, and the inverse is exercised in CI/DUT soak before the forward path is considered done:
+Each item lands with its inverse in the same patch, and the inverse is exercised in CI/board soak before the forward path is considered done:
 
 | # | Forward (S0→S1) | Inverse (S1→S0) |
 |---|---|---|
@@ -115,7 +115,7 @@ set vpp settings interface eth4
 
 ## 4. Milestones
 
-Each milestone has a hardware gate on the DUT and lands with its teardown inverse (§2.2). VPP regression (`set vpp settings` on eth3/eth4 still binds and passes traffic after an ASK enable/disable cycle) is part of **every** gate from M1 on.
+Each milestone has a hardware gate on the board and lands with its teardown inverse (§2.2). VPP regression (`set vpp settings` on eth3/eth4 still binds and passes traffic after an ASK enable/disable cycle) is part of **every** gate from M1 on.
 
 ```mermaid
 graph LR
@@ -134,11 +134,53 @@ graph LR
 **M0 — Complete the vendor oracle (Track-2 finish).** Boot the real (non-diag) cdx with `START_DPA_APP=1` auto-spawning the fixed dpa_app; dump the *complete* FE/ehash MURAM layout, CC root ADs, per-port BMI state (`fmbm_rfpne`/RCCB), KG schemes, and the params-page FE words. Archive as the byte-level reference for M2/M3. Also capture an S0 snapshot of the mainline image with the same tooling — the two snapshots **are** the state machine's endpoints.
 *Gate:* reference dumps archived in-repo; snapshot tool (`pcd-snapshot`) runs on both vendor and mainline kernels.
 
-**M1 — Reversible PCD mode-switch infrastructure.** Implement §2.2 items 1–4 forward+inverse in the board FMan PCD layer (extending 0097-series primitives: scheme-mode rewrite, `fmbm_rfpne` bind/unbind, FE MURAM alloc/free, params-page set/clear), exposed to ask.ko via `<linux/fsl/fman_pcd.h>`. No classification semantics yet — just clean, snapshot-verified S0→S1→S0 cycling.
-*Gate:* 100× enable/disable cycles on the DUT with snapshot-diff clean every cycle; VPP AF_XDP bind + iperf3 pass after the 100th teardown; kernel netdevs and management SSH unaffected throughout. **This milestone is the user's headline requirement and ships first.**
+> **M0 — SATISFIED (2026-06-16, by static SDK extraction).** The byte-level oracle was produced **statically from the genuine NXP SDK source** the vendor binaries were compiled from (archived `mihakralj/kernel-ls1046a-build@464df181`), cross-checked against on-hardware register/MURAM dumps — **not** by a live vendor-stack FE/ehash capture, which is both *blocked* (the resurrected vendor stack hits the same MURAM-exhaustion wall: lxc200 `ask-activate.sh` Phase 4 is skipped because `FM_PCD_CcRootBuild()` blocks in the kernel ioctl) and *redundant* (the SDK source is authoritative). Deliverable: **[`arch/fman-fe-ehash.md`](../arch/fman-fe-ehash.md)** — the complete `AllocFEObjs` (100×28 B MURAM pool) / `FmPortSetFESupport` (per-port FE buffer + params-page +0x54/+0x58 + inverse) / `ExternalHashTableSet` (DDR buckets + MURAM node) init contract, the 256 B `t_FmPcdCtrlParamsPage` layout, the two CC dispatch paths (exact-match `CONT_LOOKUP` vs external-hash `FE_ENTER`) and the **disposition fork** that ties FE/ehash to the open M3-3b defect, plus the MURAM/DDR budget and the vendor over-provisioning anti-pattern. The `pcd-snapshot` tool runs on the mainline kernel (S0/S1 endpoints captured); the vendor-kernel run is the only un-captured half, and §7 of the doc explains why a live capture is neither available nor needed. **⚠ Provenance caveat (2026-06-16, source-of-truth corrected 2026-06-15):** the archive is the **lf-6.6.y** ASK-port mirror and supplies the *allocation* contract only — the FE-VM *programming* core (`FmPcdCcBuildFE` / `FmPcdCcBuildContextByFE` / `get_indexed_hash_bucket`) is **stubbed** there. The shipping **`lf-6.12.49-2.2.0`** mono port was checked and **also stubs both FE builders** (explicit `UNUSED()` no-ops), so it is **NOT** a usable source. The **only** tree with genuine working bodies is the **lf-5.4 Layerscape SDK** (`we-are-mono/ASK` `patches/kernel/999-layerscape-ask-kernel_linux_5_4_3_00_0.patch`: `FmPcdCcBuildFE` L8883, `FmPcdCcBuildContextByFE` L8954, `get_indexed_hash_bucket` L7301) — Fork B (M2) extracts the datapath core from lf-5.4. See the doc's *Provenance caveat* and qdrant `m0-vendor-oracle-fe-ehash-provenance` / `m1-fork-b-fe-ehash-provenance-lf5.4-source-found`.
 
-**M2 — HW classification (the parity keystone).** AC_CC dispatch + full FE/ehash init per the M0 oracle, replacing the 0118 CCBS placebo. First packet of a flow → exception to kernel; subsequent packets classified in silicon.
-*Gate:* D14-class evidence — KG scheme hit counters advance, CC lookup resolves, classified flow's frames stop appearing in kernel softirq; teardown still snapshot-clean.
+**M1 — Reversible PCD mode-switch infrastructure.** Implement §2.2 items 1–4 forward+inverse in the board FMan PCD layer (extending 0097-series primitives: scheme-mode rewrite, `fmbm_rfpne` bind/unbind, FE MURAM alloc/free, params-page set/clear), exposed to ask.ko via `<linux/fsl/fman_pcd.h>`. No classification semantics yet — just clean, snapshot-verified S0→S1→S0 cycling.
+*Gate:* 100× enable/disable cycles on the board with snapshot-diff clean every cycle; VPP AF_XDP bind + iperf3 pass after the 100th teardown; kernel netdevs and management SSH unaffected throughout. **This milestone is the user's headline requirement and ships first.**
+
+> **M1 progress (2026-06-15, control-plane reversibility HW-PROVEN).** The
+> verification primitive `board/scripts/pcd-snapshot` is built, CI-green, and
+> packaged into the ISO. Items **1** (KG scheme RSS↔AC_CC, board `0106`), **2**
+> (BMI `fmbm_rccb` bind, `0105`), and **4** (params-page, `0116`
+> `fman_pcd_port_ensure_params_page`) are HW-proven reversible: exercised
+> S0→S1→S0 on **eth3 only** via the shipping `0107 cc_test` debugfs node, gated
+> by pcd-snapshot. A **100× soak passed with 0 drifts**, gen_pool `used` flat at
+> 256 B (zero leak), the eth0/SSH lifeline unaffected every cycle. The leak the
+> gate caught is bounded/non-cumulative — a one-time 256 B per-port FM_CTL
+> params page (allocate-once/reuse by design); the M1 baseline is therefore the
+> warm steady-state S0′. **Caveat:** the soak engaged/disengaged *without
+> data-plane traffic*, so it proves control-plane switch reversibility (M1's
+> scope); the data-plane recovery (eth3 usable after a *trafficked* S1) is the
+> VPP-iperf3 sub-gate and depends on item **3**. Item **3** (M2 HW classification —
+> **Fork B** FE/ehash — Option B controller-arming was **refuted** at iter-49) is the
+> remaining blocker — it does not yet exist (`0118` is a CCBS placebo) and is
+> entangled with the open **M3-3b CC-disposition defect** (the CC walk executes
+> but the frame's terminal enqueue/discard never fires; iter-49 refuted the arming
+> theory → the missing **FE opcode VM** is the disposition mechanism, [`arch/fman-fe-ehash.md`](../arch/fman-fe-ehash.md) §1/§8.3). The
+> ask.ko engage-wiring (§3.1 `set system offload ask`) waits on item 3 because
+> AC_CC stalls the port under load until disposition works.
+
+**M2 — HW classification (the parity keystone).** Engage the classifier and make a classified frame reach its egress FQ, deleting the `0118` CCBS placebo (which *bypasses* classification rather than enabling it). **Fork decision RESOLVED (2026-06-16): Fork B.** Option B (the missing-controller-arming theory) is **exhausted & refuted** — iter-49 (`ccexp47_rfne.py`) tested the strongest untested lead, the SDK `rfne`-last detach/re-arm discipline, byte-perfectly and the port **still stalled** (`FMFP_PS[STL]=0x80800000` at rfrc=+2, identical to baseline); with gmask/exit-NIA/leaf-AD/extraction/RCMNE/params-page/ucode all previously exonerated, **classic exact-match (Fork A) cannot flow on 210.10.1** (qdrant `m3-3b-option-b-rfne-last-REFUTED-forkB-decision`). This confirms the M0 oracle ([`arch/fman-fe-ehash.md`](../arch/fman-fe-ehash.md) §1/§8.3): bare AC_CC `CONTRL_FLOW` has no terminal BMI-FIFO disposition without the **FE opcode VM**. **The path is therefore Fork B** — reproduce the vendor external-hash/FE init contract (doc §3–§5: `AllocFEObjs` MURAM pool + per-port `FmPortSetFESupport` + `ExternalHashTableSet` DDR buckets, each with its inverse), the **only** config proven to flow on this silicon and the eventual substrate for NAT/frag/stats. **⚠ Source-of-truth (corrected 2026-06-15):** the doc §3–§5 *allocation* skeleton is genuine lf-6.6.y archive source, but the FE-VM *programming* core (`FmPcdCcBuildFE` / `FmPcdCcBuildContextByFE` / `get_indexed_hash_bucket`) is **stubbed** in that archive **and in the shipping `lf-6.12.49-2.2.0` mono port** (both no-op `UNUSED()`) — Fork B must extract those three from the **lf-5.4 Layerscape SDK** (`we-are-mono/ASK` `999-…patch`: `FmPcdCcBuildFE` L8883, `FmPcdCcBuildContextByFE` L8954, `get_indexed_hash_bucket` L7301), the only tree with working bodies. The `106.4.18` ucode swap is **ruled out** (iter-42: identical handler code; ccexp12: parks identically). Fork B lands its inverse in the same patch (§3.5 reversibility). First packet of a flow → exception to kernel; subsequent packets classified in silicon.
+*Gate:* D14-class evidence — KG scheme hit counters advance, CC lookup resolves, classified flow's frames stop appearing in kernel softirq **and the port stays alive under sustained traffic** (the M3-3b disposition criterion); teardown still snapshot-clean.
+
+> **M2 status — Fork B executed on silicon, parks (VERDICT D); documented clean boundary (2026-06-17).**
+> The full Fork-B FE-VM substrate (board patches `0122`–`0133`) was built, armed, and trafficked on the board
+> (192.168.1.190, image `2026.06.17-1954-rolling`, kernel `6.18.34-vyos`, CI `27715693384`, eth3 port `0x10`).
+> **(1)** The chain now **builds on-board for the first time** — the `FMAN_PCD_FE_POOL_COUNT 100→32` fix
+> (`b83cee7`/`56a3e10`, per-object 256 B gen_pool chunk-waste; arena `32+131+35+1=199<256` chunks) makes
+> `fe_pool`/`fe_ehash`/`fe_port`/`fe_singletons`/`fe_hashfe`/`fe_enq`/`fe_enter` all return `ok`, MURAM pristine.
+> **(2)** The per-port FE buffer (`fe_port`/`FmPortSetFESupport`) is **necessary-not-sufficient**: `fe_arm engage`
+> still **parks the port immediately** (`FMFP_PS=0x80800000` STL, `rfrc=+21`) with **VERDICT D — zero fault
+> latched** (`fmdmsr=0`, `fmfp_ee` unchanged, `decceh=0`), identical to bare iter-26–50 / `0133`. **The precise
+> remaining gap is the FE working-store context population** (`FmPcdCcBuildContextByFE`, lf-5.4-only stub): the FE
+> VM's MUX reads its next-FE pointer from a per-task working-store context (`0xd0xx`) that nothing populates, so the
+> frame WAITs forever and never reaches the `t_ExtHashFe` terminal dealloc. See [`arch/fman-fe-ehash.md`](../arch/fman-fe-ehash.md) §8.7.
+> **Clean boundary:** the FE-VM scaffold is complete, **dormant, byte-verified, and fully reversible** (M1 HW-proven,
+> `pcd-snapshot` clean); M2 functional-close is blocked solely on the inaccessible lf-5.4 working-store body (a
+> **source-availability wall, not an effort gap** — 50+ clean-room iterations). The shipping datapath is **AF_XDP**
+> (~3.5 Gbps, already on `main`); the scaffold ships dormant and re-activates the instant the working-store body
+> becomes available. This is the M2 stopping point at which `dpaa1` merges to `main`.
 
 **M3 — HW forwarding.** CC match → `FORWARD_FQ_WITH_MANIP` (L2 rewrite + TTL/cksum in the CC-action atom, no OH-port detour) → egress FQ. ask.ko populates flows from `nf_flow_table` EST events per the ASK2 spec.
 *Gate:* IPv4 routed flow forwarded entirely in silicon; perf per ASK2 §11.1 (≥ multi-Gbps with kernel-net CPU ≤ 5%, vs 21.4% at PR14z21); MURAM accounting instrumented (the PR14z21 `-ENOMEM` lesson).
@@ -174,15 +216,17 @@ graph LR
 
 ## 6. Risks
 
-| # | Risk | Likelihood | Mitigation |
+| # | Risk | Likelihood | Mitigation (defensive-coding rules in **bold**) |
 |---|---|---|---|
-| 1 | Some silicon state proves non-invertible without FMan reset (parser RAM, ucode-internal state) | Medium | M1 discovers this *first*, before any classification work; fallback = "reboot to leave ASK mode" (still satisfies the requirement, degraded UX), documented honestly |
-| 2 | AC_CC stalls persist even with oracle-faithful FE init | Low (oracle de-risks) | M0 byte-level reference + incremental diff-against-vendor at every M2 step |
-| 3 | MURAM exhaustion (384 KB; ~96 KB usable ≈ 750 flows; PR14z21 327× `-ENOMEM`) | High (already observed) | gen_pool instrumentation lands in M1; flow-count cap + eviction policy in M3 |
-| 4 | Teardown races live traffic (flows in flight during S1→S0) | Medium | ordered drain: stop new-flow inserts → evict rows → quiesce port (EN-preserving) → rewrite dispatch; test with active iperf3 during disable |
+| 1 | Some silicon state proves non-invertible without FMan reset (parser RAM, ucode-internal state) | Medium | M1 discovers this *first*, before any classification work; fallback = "reboot to leave ASK mode" (still satisfies the requirement, degraded UX), documented honestly. **Every forward register/MURAM write ships with its verified inverse in the same patch — no orphan mutations.** |
+| 2 | **FE-VM core re-implementation infidelity** — the opcode-VM glue (`FmPcdCcBuildFE` / `FmPcdCcBuildContextByFE` / `get_indexed_hash_bucket`) must be lifted from the **lf-5.4 LSDK** (the lf-6.6.y archive *and* the shipping lf-6.12.49 mono port both **stub** it); a wrong FE-struct/bucket image stalls the port with **zero fault latched** (the M3-3b signature — undebuggable by traffic alone) | Medium-High (largest unknown) | Port byte-for-byte from `we-are-mono/ASK` 999-patch (L8883 / L8954 / L7301); **validate the programmed MURAM image against the M0 oracle via `pcd-snapshot` diff BEFORE flowing any traffic**; scaffold-first incremental landing (§3 pool `0122` → §4 port → §5 table → FE-VM core), each on-board reversibility-gated |
+| 3 | MURAM exhaustion (384 KB; ~96 KB usable ≈ 750 flows; PR14z21 327× `-ENOMEM`; the vendor `external='yes'` fall-to-MURAM wall, oracle §6) | High (already observed) | **ehash buckets live in DDR (`kmalloc`/`dma`), never MURAM**; gen_pool instrumentation lands in M1; flow-count cap + eviction policy in M3. **Every MURAM alloc checks `gen_pool_avail()` first and unwinds cleanly on any failure — no partial-alloc leak.** |
+| 4 | Teardown races live traffic (flows in flight during S1→S0) | Medium | ordered drain: stop new-flow inserts → evict rows → quiesce port (EN-preserving) → rewrite dispatch; test with active iperf3 during disable. **Refcounted FE-pool get/put so a pristine S0 always returns gen_pool to its baseline (the `0122` pattern).** |
 | 5 | VPP regression sneaks in via shared PCD primitives | Medium | VPP bind+traffic check in every milestone gate from M1 |
 | 6 | Validator gaps let ASK+VPP both claim a port | Low | v1 global mutex is trivially checkable; per-port logic deferred to M8 |
 | 7 | Watchdog reset under flood during policer/FE tests | Known | discipline stands: ping/small-UDP only until the traffic harness exists; never flood-test new silicon paths |
+| 8 | **MURAM is iomem, not cacheable RAM** — a plain `memset`/`memcpy`/struct-field assignment on an FE-object or bucket pointer faults under KASAN or silently corrupts the AD | Known | **MURAM access exclusively via `memset_io`/`memcpy_toio`/`writel`/`readl`; never plain memset/memcpy/`->field =`. gen_pool does not zero on alloc → every alloc is followed by `memset_io(.., 0, size)` (the `0122` scaffold establishes the pattern).** |
+| 9 | FE-pool / ehash **refcount or lock-order bug** under concurrent engage↔disengage leaks MURAM or leaves a stale AD pointer live across S1→S0 | Medium | **Fixed lock order `fe_lock → pcd->lock`; refcount via atomics with `WARN_ON` on underflow; bring-up driven by a single-writer debugfs node only; MURAM-leak check in the `pcd-snapshot` teardown diff.** |
 
 ---
 

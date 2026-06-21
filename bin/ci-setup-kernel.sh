@@ -527,34 +527,176 @@ cp "$BOARD_PATCH_DIR/0118-fman-pcd-cc-revert-ccbs-dispatch.patch" "$KERNEL_PATCH
 # generic HMAN_OC=0x35 HMTD, RMV=0x01000e00 / INSRT=0x02000e00+BE payload /
 # IPV4=0x0c040001 (TTL+L4 checksum). No existing VLAN/MPLS op altered.
 cp "$BOARD_PATCH_DIR/0119-fman-pcd-hm-l3-forward-ops.patch" "$KERNEL_PATCHES/"
-# 0145: dpaa flow-offload backend registration slot for external TC offload
-# backends (ASK2). Adds a single RCU-protected ops slot + register/unregister
-# helpers in dpaa_eth.c and the public header include/linux/fsl/dpaa_flow_offload.h
-# so an out-of-tree backend (ask.ko) can receive TC_SETUP_BLOCK/FT callbacks
-# without circular module deps. Flavor-agnostic, staged unconditionally.
-cp "$BOARD_PATCH_DIR/0145-dpaa-flow-offload-backend-slot.patch" "$KERNEL_PATCHES/"
-# 0134: CAAM QI external-consumer share API (dormant). Adds
-# caam_qi_ext_consumer_register/release (EXPORT_SYMBOL_GPL) in
-# drivers/crypto/caam/qi.c + qi.h + new include/linux/crypto/caam_qi_share.h —
-# the descriptor-sharing surface the ASK2 M5 HW-IPsec datapath will consume.
-# NO caller yet (dormant); touches only CAAM, fully independent of the FMan/DPAA
-# patches above, so apply order is irrelevant. Relocated here from the parked
-# kernel/flavors/ask/patches/0001-caam-qi-share.patch (2026-06-18): CAAM is
-# hardware-common to the single image, so it belongs in the unconditional board
-# stack, not behind the parked ASK PCD series. Matches AGENTS.md's documented
-# board-0134 location.
-cp "$BOARD_PATCH_DIR/0134-caam-qi-share.patch"                "$KERNEL_PATCHES/"
+# ASK2 M2 step 2: dormant next-hop HM dedup refcount API
+# (fman_hm_nexthop_get/put) caches+refcounts one shared HMTD per L3
+# adjacency (egress_tx_fqid, src_mac, dst_mac) so MURAM scales
+# O(next-hops) not O(flows). EXPORT_SYMBOL_GPL, dormant (ask.ko consumes).
+cp "$BOARD_PATCH_DIR/0120-fman-pcd-hm-nexthop-dedup.patch" "$KERNEL_PATCHES/"
+# ASK2 Gap-A: export two net_device -> hardware-id resolvers
+# (dpaa_get_rx_fman_port / dpaa_get_tx_fqid) on the common dpaa_fman_caps.h
+# substrate so the OOT ask.ko PCD consumer can derive the fman_cc_tree_*
+# port key and a CC target_fqid. EXPORT_SYMBOL_GPL, dormant (no in-tree
+# caller). Bodies are the proven dead-ask-flavor 0031/0039 reparented.
+cp "$BOARD_PATCH_DIR/0121-dpaa-export-cc-target-resolvers.patch" "$KERNEL_PATCHES/"
+# ASK2 Fork B M1 step 1: FE-object MURAM pool scaffold (arch/fman-fe-ehash.md
+# §3 AllocFEObjs). Lazy + refcounted pool of 100×28 B FE records carved from
+# FMan MURAM, driven by a new debugfs fman_pcd/<id>/fe_pool (0644) get/put
+# node. fe_lock → pcd->lock order; a pristine S0 keeps the pool empty so
+# engage→disengage nets zero gen_pool used (pcd-snapshot reversibility gate).
+# Single-file fman_pcd.c, internal/static, no ABI export. Scaffold only —
+# allocates+zeroes MURAM, does NOT program the FE records and does NOT flow
+# traffic; the FE-VM core (FmPcdCcBuildFE/ContextByFE) lands later from lf-5.4.
+cp "$BOARD_PATCH_DIR/0122-fman-pcd-fe-ehash-init.patch" "$KERNEL_PATCHES/"
+# ASK2 Fork B M1 step 2: per-port FE support (arch/fman-fe-ehash.md §4
+# FmPortSetFESupport/FmPortDeleteFESupport). Carves a per-port FE internal-
+# buffer pool (total_tnums × 0x100 × 2, 256 B aligned) + a management free-list
+# (5 + total_tnums bytes) from FMan MURAM, then writes the port's existing
+# FM_CTL ctrl-params page +0x54 (mgmt index) / +0x58 (depletion count) — never
+# allocating that page itself (it must pre-exist from a CC install, 0116) so the
+# gate stays leak-clean. A faithful inverse (page→0, free mgmt, free pool, list
+# del) makes engage→disengage net zero gen_pool used (pcd-snapshot gate). Adds
+# fman_port_get_total_tnums() accessor (fman_port.c/.h). Driven by a new debugfs
+# fman_pcd/<id>/fe_port (0644) "set <id>"/"del <id>" node. Allocate-only —
+# ships DORMANT, does NOT flow classified traffic (needs §5 + FE-VM core).
+# Sorts after 0122, before 101-sfp. Spec arch/fman-fe-ehash.md §4 (M1 Fork B).
+cp "$BOARD_PATCH_DIR/0123-fman-pcd-fe-port-support.patch" "$KERNEL_PATCHES/"
+# ASK2 Fork B M1 — FE virtual-machine core, increment 1 (arch/fman-fe-ehash.md
+# §5 FE-VM). Transcribes the lf-5.4 SDK FmPcdCcBuildFE() descriptor encoder and
+# the FM_PCD_Init() FE-singleton setup, adapted to mainline gen_pool MURAM (the
+# SDK next-FE phys == the gen_pool offset fman_pcd_muram_alloc returns). Adds
+# fman_pcd_fe_build() (big-endian MURAM image words via iowrite32be) plus the
+# three core MUX/Transition/Exit singletons, programmed into pool slots from a
+# new debugfs fman_pcd/<id>/fe_singletons (0644) "build"/"clear" node with a
+# byte-level readback for oracle verification (§8.6 contract item 6). Ships
+# DORMANT: programs FE descriptors but nothing dispatches into the FE machine
+# until §5 ehash + the per-flow ENQ FE + AC_CC root-AD FE_ENTER wiring land.
+# Forward (build) + inverse (clear) in this one patch; clear restores the exact
+# pre-build pool state and pool_free drains the singletons, so pcd-snapshot
+# gen_pool "used" returns to baseline (reversibility gate stays clean).
+cp "$BOARD_PATCH_DIR/0124-fman-pcd-fe-vm-singletons.patch" "$KERNEL_PATCHES/"
+# ASK2 Fork B M1 — §5 ExternalHashTableSet (arch/fman-fe-ehash.md §5/§6). The
+# vendor enhanced-ehash flow store — the only config proven to FLOW on 210.10.1
+# (§8). Lazily reserves a per-PCD internal-buffer-management MURAM pool (32 KiB
+# pool + 256 B global, 256-aligned, refcounted — the dominant pcd-snapshot
+# reversibility signal) and per-table DDR bucket arrays (kzalloc, 16 B/bucket;
+# buckets MUST stay in DDR — §6 327×-ENOMEM wall) plus an en_exthash_node DDR
+# template (lf-5.4 native LE packing). New debugfs fman_pcd/<id>/fe_ehash (0644)
+# "set <mask_hex> <keysize> <shift>" / "clear" with node-word readback. Bounds-
+# checks MURAM before reserving (§8.6 item 2). Ships DORMANT: allocates + encodes
+# only; nothing dispatches into the hash store until the fm_cc.c FE_ENTER wrapper
+# + FE-VM core land. Forward (set) + inverse (clear/drain) in one patch; clear
+# returns gen_pool "used" to baseline (reversibility gate stays clean).
+cp "$BOARD_PATCH_DIR/0125-fman-pcd-fe-ehash-table.patch" "$KERNEL_PATCHES/"
+# 0126 — convert fman_pcd_muram_alloc/_free into a gen_pool sub-allocator over
+# the reserved 64 KiB MURAM partition (0092 reserved the arena but the wrappers
+# re-called the GLOBAL fman_muram_alloc, competing for the ~21 KiB post-CAM/FIFO
+# free tail while the reservation sat dead-weight → §5/0125 int-buf 33 KiB hit
+# -ENOMEM on HW 2026-06-16). Seeds a gen_pool (min_alloc_order=8, 256 B granule)
+# with [muram_offset,+64KiB); all PCD MURAM now sub-allocates from it, bounding
+# PCD use to the reservation and unblocking the FE/ehash forward path. Substrate
+# change — full S0↔S1 + fe_pool + fe_ehash forward regression gate required.
+cp "$BOARD_PATCH_DIR/0126-fman-pcd-muram-genpool.patch" "$KERNEL_PATCHES/"
+# 0127 — FE-VM core increment 2 (arch/fman-fe-ehash.md §5): the per-flow ENQ
+# Flow-Entry (FmPcdCcBuildContextByFE — ENQ-type FE carrying the 24-bit target
+# FQID in word1) and the AC_CC root action-descriptor FE_ENTER wiring
+# (FillAdOfTypeContLookup external-hash branch — CONT_LOOKUP AD: ccAdBase
+# 0x40800000, pcAndOffsets 0xf6, gmask = MURAM offset of the FE to enter).
+# Together they give a classified frame a terminal BMI-FIFO disposition. New
+# debugfs fman_pcd/<id>/fe_enq ("build <fqid_hex> [next_fe_off_hex]" / "clear")
+# and fe_enter ("build [fe_off_hex]" / "clear"), each with byte-level readback.
+# Ships DORMANT (programs descriptors only; nothing dispatches into the FE VM
+# until the ehash bucket indexer lands). Forward+inverse in one patch; each
+# inverse re-zeros + frees its MURAM so pcd-snapshot stays reversible.
+cp "$BOARD_PATCH_DIR/0127-fman-pcd-fe-vm-enq-root.patch" "$KERNEL_PATCHES/"
+# 0128: FE-VM core increment 3 — per-flow ehash insertion (arch/fman-fe-ehash.md
+# §5). The SDK get_indexed_hash_bucket() CRC64 bucket indexer +
+# ExternalHashTableAddKey() head-insert: CRC64 the key → byte-shift+mask to a
+# bucket → allocate a 256-byte DDR flow record (en_ehash_entry) → write the
+# header (flags + next_entry chain to the old bucket head), the key, and the
+# next-FE pointer (the 0127 ENQ FE MURAM offset) → head-insert
+# (bucket->h = swab64(phys(record))). Links a classified 5-tuple to its ENQ FE.
+# New debugfs fman_pcd/<id>/fe_flow ("add <tbl_idx> <key_hex> [enq_fe_off_hex]" /
+# "clear") with byte-level readback. Buckets+records live in DDR by design (§6
+# anti-pattern: never fall the flow store to MURAM) so gen_pool "used" is
+# UNCHANGED — reversibility = all records freed + every bucket head restored.
+# Ships DORMANT; forward (add) + inverse (LIFO drain, byte-exact) in one patch.
+cp "$BOARD_PATCH_DIR/0128-fman-pcd-fe-vm-flow-insert.patch" "$KERNEL_PATCHES/"
+# 0129: M1 coarse ask offload engage/disengage mode-switch (fman_pcd.h export).
+# Adds two EXPORT_SYMBOL_GPL entry points to fman_pcd.c + their prototypes to
+# <linux/fsl/fman_pcd.h>: fman_pcd_offload_engage()/_disengage(struct fman *,
+# u8 hw_port_id). They resolve the PCD internally (fman_get_pcd()) and wrap the
+# EXACT HW-proven reversible sequence from the cc_test harness (0107) + 100x
+# soak: install a benign single-key CC tree → get_base → KGSE_CCBS graft of the
+# port's KeyGen scheme, with strict reverse teardown (detach FIRST, then
+# destroy). The out-of-tree ask.ko mirrors only these two prototypes (into
+# ask_fman_caps.h) and drives them via /sys/kernel/debug/ask/offload. Ships
+# DORMANT (nothing calls them until the debugfs trigger / M7 op-mode); M1
+# carries no classification semantics. Forward + inverse in one patch.
+cp "$BOARD_PATCH_DIR/0129-fman-pcd-offload-engage.patch" "$KERNEL_PATCHES/"
+# 0130: D9.1 (M2 activate) increment 1 — switch the dormant FE/ehash flow store
+# (0125 ehash table + 0128 per-flow records) from kzalloc()+virt_to_phys() to
+# dma_alloc_coherent(). The en_exthash_node table-base words and each bucket head
+# must carry true bus addresses (not raw physical) before the FE VM is armed, since
+# the armed VM DMA-reads the bucket array and walks the record chain through
+# PAMU/SMMU (arch/fman-fe-ehash.md §8.6 item 6; 0125/0128 flagged this as the
+# pre-arming prerequisite). struct fman_pcd_ehash_table gains table_dma + dev
+# (fman_get_dev(pcd->fman), captured so per-flow record alloc/free reaches the same
+# device); struct fman_pcd_ehash_flow gains record_dma. Records+buckets stay in DDR
+# (§6 anti-pattern: never MURAM) so gen_pool "used" is UNCHANGED — reversibility is
+# still all records dma_free'd + every bucket head restored byte-exactly. Ships
+# DORMANT (no new dispatch); the 0128 on-board record layout is byte-identical.
+# Forward (dma_alloc) + inverse (dma_free) in one patch.
+cp "$BOARD_PATCH_DIR/0130-fman-pcd-fe-ehash-dma-coherent.patch" "$KERNEL_PATCHES/"
+# 0131: D9-A (M2 activate) increment 3 — the genuine 28-byte external-hash
+# Flow-Entry object (SDK t_ExtHashFe) that the 0127 FE_ENTER root AD dispatches
+# into. Binds the §5 DDR bucket array (0125/0130) to the FE VM and links HIT →
+# MUX singleton / MISS → Exit singleton (0124). fman_pcd gains fe_hash_off;
+# fman_pcd_fe_enter_build()'s default gmask now prefers the t_ExtHashFe once
+# built (falls back to the MUX singleton, the 0127 default). New debugfs node
+# fe_hashfe (build/clear) with a 7-word byte-level readback for the M0 oracle
+# byte-diff (arch/fman-fe-ehash.md §8.6 item 6 — validate the dormant FE image
+# while quiescent BEFORE arming, since the M3-3b stall latches ZERO fault).
+# Ships DORMANT; forward+inverse in one patch; gen_pool "used" returns to the
+# warm-S0' baseline on clear (pcd-snapshot reversibility gate stays clean).
+cp "$BOARD_PATCH_DIR/0131-fman-pcd-fe-hash-object.patch" "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0132-fman-pcd-fe-arm-debugfs.patch"   "$KERNEL_PATCHES/"
+# 0133: D9-B (M2 activate) — correct the fe_arm encoding from the 0132 KGSE_CCBS
+# placebo (next_engine=2, mode 0x80500002, which NEVER dispatches the CC walk —
+# frames bypass into RSS) to the REAL AC_CC encoding. Adds a next_engine==3 branch
+# in keygen_scheme_setup that emits KGSE_MODE = FM_CTL|AC_CC (0x80000006) with
+# KGSE_CCBS=0, re-adds the NIA_ENG_FM_CTL / NIA_FM_CTL_AC_CC defines 0118 dropped
+# (used ONLY by the new branch; the ==2 CCBS graft, policer, M1-engage and RSS
+# paths are byte-unchanged), and flips fman_pcd_kg_port_arm_fe() to next_engine=3 /
+# cc_bits_sel=0. The FMBM_RCCB write (→ FE_ENTER root AD) is unchanged. disarm is
+# unchanged (forces next_engine=0). Ships DORMANT: the encoding only takes effect
+# on an explicit echo to the fman_pcd/<id>/fe_arm node. This is the make-or-break
+# M2 dispatch experiment — the only encoding that genuinely enters the FE VM
+# terminal disposition a bare exact-match leaf lacks (M3-3b iter-50 park).
+cp "$BOARD_PATCH_DIR/0133-fman-pcd-fe-arm-real-accc.patch" "$KERNEL_PATCHES/"
+# 0134: CAAM/QI descriptor sharing for ASK2 IPsec HW offload (spec §8.1, PR10).
+# Adds caam_qi_ext_consumer_register()/_release() to drivers/crypto/caam/qi.c +
+# the ext_lock/ext_active fields in struct caam_drv_ctx (qi.h) + the new header
+# include/linux/crypto/caam_qi_share.h, so a future in-kernel consumer (ask.ko's
+# CAAM/xfrm datapath) can dequeue completed CAAM frames from a chosen sink FQID.
+# Forward-ported VERBATIM from kernel/flavors/ask/patches/0001-caam-qi-share.patch,
+# which was NEVER staged after the 2026-06-14 flavor collapse killed the dead
+# FLAVOR=ask gate. Touches ONLY drivers/crypto/caam/* + a new header — zero
+# overlap with the FMan PCD board patches, so apply order is irrelevant. Exports
+# the symbols EXPORT_SYMBOL_GPL but they stay dormant (no caller until the CAAM
+# datapath lands). This cp line is MANDATORY — the staging-completeness guard
+# below fails the build if any board/*.patch lacks one.
+cp "$BOARD_PATCH_DIR/0134-caam-qi-share.patch"               "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
-# 4004: swphy 10G/5G/2.5G fixed-link speed support — required by the NXP SDK
-# fsl_mac driver for the LS1046A 10G SFP+ MACs (MAC9/MAC10). Their fixed-link
-# speed=<10000> node makes swphy_decode_speed() return -EINVAL on stock 6.18,
-# so fsl_mac probe fails -22 and eth3/eth4 never appear. See qdrant swphy-10g-fix.
-cp "$BOARD_PATCH_DIR/4004-swphy-support-10g-fixed-link-speed.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4007-xhci-ls1046a-dwc3-quirks.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4009-sfp-oem-rollball-quirk.patch"       "$KERNEL_PATCHES/"
+# ASK2 M2.2: external flow-offload backend registration slot (single-slot
+# RCU-protected dpaa_register/unregister_flow_offload_handler). 0145 is a
+# board/common patch (not flavor-gated) because the dpaa driver is built-in
+# for all flavors.
+cp "$BOARD_PATCH_DIR/0145-dpaa-flow-offload-backend-slot.patch" "$KERNEL_PATCHES/"
 
 # ── Staging-completeness guard ────────────────────────────────────────
 # Every kernel/common/patches/board/*.patch must either be cp'd above or
@@ -581,7 +723,8 @@ echo "### Board patch staging-completeness guard: OK"
 # Stage critical flavor-agnostic kernel fix:
 #   120-perf-libperf-asm-headers-srctree.patch — fixes arm64 perf build
 #   failure ("No rule to make target ... tools/perf/libperf/arch/arm64/
-#   include/generated/uapi/asm/unistd_64.h"). Required on kernel 6.18+.
+#   include/generated/uapi/asm/unistd_64.h"). Required for FLAVOR=default
+#   and FLAVOR=vpp on kernel 6.18+.
 #
 # We DO NOT bulk-stage kernel/common/patches/{vyos,fixes}/ because:
 #   - kernel/common/patches/vyos/{001,003}-* are byte-identical duplicates
@@ -616,16 +759,64 @@ else
     echo "WARNING: $NF_FLOW_LOG_PATCH missing — PR14o REPLACE-delivery diagnostic disabled"
 fi
 
-### ASK2 kernel patches: NOT applied in the single collapsed image.
+### FLAVOR=ask: stage the ASK2 in-tree kernel patches
 #
-# The multi-flavor (default | ask | vpp) build split was retired — there is
-# ONE image. The ASK2 in-tree PCD/offload patch series is parked under
-# kernel/flavors/ask/patches/ as the dormant drop-in source (see AGENTS.md
-# "ASK2 (rewrite-in-progress)"). It is intentionally NOT staged here: the
-# series is not production-ready (the M3-3b BMI-stall wedge is still open),
-# so auto-applying it would risk the board network on boot. When ASK2 is
-# ready its patches move into kernel/common/patches/board/ like any other
-# unconditional board patch.
+# Per plans/archive/ASK2-IMPLEMENTATION.md PR2/PR3 and spec §10, the ASK2
+# kernel surface needs three small patches (currently placeholder stubs;
+# real implementations land in M2):
+#   0001-caam-qi-share.patch        — caam_qi_ext_consumer_register/release
+#   0002-dpaa-eth-flow-block.patch  — TC_SETUP_BLOCK in dpaa_setup_tc()
+#   0003-fman-host-command-api.patch — fman_host_cmd_send() + new header
+#   0004-fman-pcd-subsystem.patch   — FMan PCD orchestration scaffold (PR14a)
+#   0005-fman-pcd-kg-prep.patch     — FMan PCD KeyGen public API stub (PR14b-prep)
+#   0006-fman-pcd-kg-body.patch     — FMan PCD KeyGen real KGSE_* programming (PR14b-body)
+#
+# Naming hazard: vyos-build's own upstream patch loop reserves the
+# `0001-*` and `0003-*` filenames in $KERNEL_PATCHES (preserved by the
+# cleanup glob above via `! -name '0001-*' ! -name '0003-*'`). Copying our
+# patches in with their authored 0001/0002/0003 names would collide with
+# vyos-build's reserved upstream patches and either silently overwrite
+# them or fail to apply. Solution: rename to 1001/1002/1003 at staging
+# time. The build-kernel.sh patch loop applies `find … | sort`-ordered,
+# producing the deterministic apply order:
+#     0001 0003 101 1001 1002 1003 1004 1005 1006 1007 4005 4006 4007 4009
+# i.e. vyos-build's reserved patches first, then board patches, then
+# ASK patches, then the rest of the board patches.
+#
+# Source-of-truth filenames in the repo stay 0001/0002/0003 because that
+# matches the spec §10 numbering and the authoring rule (every patch is
+# `git format-patch`-style starting at 0001). The rename happens ONLY in
+# the staged copies. README.md under kernel/flavors/ask/patches/ documents
+# this.
+if [ "${FLAVOR:-default}" = "ask" ]; then
+    ASK_PATCH_DIR=kernel/flavors/ask/patches
+    if [ ! -d "$ASK_PATCH_DIR" ]; then
+        echo "ERROR: FLAVOR=ask but $ASK_PATCH_DIR is missing"
+        exit 1
+    fi
+    echo "### FLAVOR=ask — staging ASK2 in-tree kernel patches from $ASK_PATCH_DIR"
+    # All ASK-specific kernel patches were archived to
+    # archive-2026-06-21-pre-6.18.34/ on 2026-06-21 because the board/common
+    # patch series (kernel/common/patches/board/0092–0145) now carries the
+    # ASK2 PCD/HM/CC features directly. The ASK flavor relies solely on the
+    # common board patch stack; no flavor-specific kernel patches are active.
+    if ls "$ASK_PATCH_DIR"/*.patch >/dev/null 2>&1; then
+        ASK_PATCH_COUNT=0
+        for src_patch in "$ASK_PATCH_DIR"/*.patch; do
+            [ -f "$src_patch" ] || continue
+            base=$(basename "$src_patch")
+            # Rename to 1xxx- to avoid collision with vyos-build's reserved
+            # upstream 0001-*/0003-* patches.
+            dst="1${base}"
+            echo "###   $base → $dst"
+            cp "$src_patch" "$KERNEL_PATCHES/$dst"
+            ASK_PATCH_COUNT=$((ASK_PATCH_COUNT + 1))
+        done
+        echo "### ASK2: $ASK_PATCH_COUNT in-tree kernel patches staged"
+    else
+        echo "### ASK2: 0 kernel patches staged (common board stack carries all PCD features)"
+    fi
+fi
 
 # Stage FMD Shim + LP5812 source from the new common files layout.
 # Source of truth: kernel/common/files/{fsl_fmd_shim.c,lp5812/}.
@@ -634,29 +825,6 @@ FILES_DIR=kernel/common/files
 [ -d "$FILES_DIR/lp5812" ]         || { echo "ERROR: $FILES_DIR/lp5812 missing"; exit 1; }
 cp "$FILES_DIR/fsl_fmd_shim.c" "$KERNEL_BUILD/"
 cp -r "$FILES_DIR/lp5812"      "$KERNEL_BUILD/"
-
-# === Stage the full NXP SDK DPAA1 vendor overlay ===========================
-# sdk_fman / sdk_dpaa / fsl_qbman + net-new include/ headers. This REPLACES
-# the mainline DPAA1 stack at build time: the config swap inside the injection
-# block disables CONFIG_FSL_FMAN/FSL_DPAA/FSL_DPAA_ETH and enables the SDK
-# symbols (FSL_SDK_FMAN/FSL_SDK_DPAA_ETH/FSL_SDK_DPA/...). The overlay ships
-# ONLY net-new directories and headers (drivers/net/ethernet/freescale/{sdk_fman,
-# sdk_dpaa}, drivers/staging/fsl_qbman, include/{linux,uapi/linux/fmd}) — no
-# mainline parent Makefile/Kconfig is clobbered, so the cp -r is non-destructive.
-# This is the "reference NXP build" used to A/B against the mainline DPAA1 branch.
-SDK_SRC=kernel/flavors/ask/sdk-sources
-[ -d "$SDK_SRC/drivers" ] || { echo "ERROR: $SDK_SRC/drivers missing"; exit 1; }
-[ -d "$SDK_SRC/include" ] || { echo "ERROR: $SDK_SRC/include missing"; exit 1; }
-echo "### Staging NXP SDK vendor overlay from $SDK_SRC"
-rm -rf "$KERNEL_BUILD/sdk-overlay"
-mkdir -p "$KERNEL_BUILD/sdk-overlay"
-cp -r "$SDK_SRC/drivers" "$KERNEL_BUILD/sdk-overlay/"
-cp -r "$SDK_SRC/include" "$KERNEL_BUILD/sdk-overlay/"
-# RX-queue / soft-lockup probe fix (RX_QUEUES 128->16 + cond_resched), applied
-# inside the injection block after the overlay lands.
-if [ -f data/kernel-patches/patch-dpaa-probe-fix.py ]; then
-  cp data/kernel-patches/patch-dpaa-probe-fix.py "$KERNEL_BUILD/sdk-overlay/"
-fi
 
 # Write injection block to temp file (heredoc avoids all quoting issues).
 # Note: the former phylink / dpaa-xdp / xhci-ls1046a Python patchers have
@@ -722,55 +890,6 @@ if [ -d "${CWD}/lp5812" ]; then
   make olddefconfig
   echo "LP5812: injected into $LP5812_DIR (config forced)"
 fi
-
-# === NXP SDK DPAA1 vendor overlay (sdk_fman / sdk_dpaa / fsl_qbman) =========
-# Full replacement of the mainline DPAA1 stack. The overlay dirs are net-new;
-# the board DPAA patches applied earlier target the mainline dpaa/fman files
-# which the config swap below gates OFF, so they apply harmlessly and simply
-# never get compiled. This runs LAST in the injection block so its olddefconfig
-# produces the final .config.
-if [ -d "${CWD}/sdk-overlay/drivers" ]; then
-  echo "### NXP SDK: overlaying vendor tree onto kernel source"
-  cp -r "${CWD}/sdk-overlay/drivers/." drivers/
-  cp -r "${CWD}/sdk-overlay/include/." include/
-
-  FRESC=drivers/net/ethernet/freescale
-  # Kconfig / Makefile hooks (idempotent appends to mainline parent files).
-  grep -q 'fsl_qbman/Kconfig' drivers/staging/Kconfig 2>/dev/null || \
-    echo 'source "drivers/staging/fsl_qbman/Kconfig"' >> drivers/staging/Kconfig
-  grep -q 'fsl_qbman/' drivers/staging/Makefile 2>/dev/null || \
-    echo 'obj-y += fsl_qbman/' >> drivers/staging/Makefile
-  grep -q 'sdk_fman/Kconfig' "$FRESC/Kconfig" 2>/dev/null || \
-    echo 'source "drivers/net/ethernet/freescale/sdk_fman/Kconfig"' >> "$FRESC/Kconfig"
-  grep -q 'sdk_dpaa/Kconfig' "$FRESC/Kconfig" 2>/dev/null || \
-    echo 'source "drivers/net/ethernet/freescale/sdk_dpaa/Kconfig"' >> "$FRESC/Kconfig"
-  grep -q 'sdk_fman/' "$FRESC/Makefile" 2>/dev/null || \
-    echo 'obj-$(CONFIG_FSL_SDK_FMAN) += sdk_fman/' >> "$FRESC/Makefile"
-  grep -q 'sdk_dpaa/' "$FRESC/Makefile" 2>/dev/null || \
-    echo 'obj-$(CONFIG_FSL_SDK_DPAA_ETH) += sdk_dpaa/' >> "$FRESC/Makefile"
-
-  # Enable the enhanced-ehash PCD ioctl path (the FE classifier that programs
-  # FMan KeyGen). Without -DUSE_ENHANCED_EHASH the PCD ioctls silently no-op.
-  if [ -f "$FRESC/sdk_fman/Makefile" ] && ! grep -q USE_ENHANCED_EHASH "$FRESC/sdk_fman/Makefile"; then
-    sed -i '1i ccflags-y += -DUSE_ENHANCED_EHASH' "$FRESC/sdk_fman/Makefile"
-  fi
-
-  # RX-queue / soft-lockup probe fix (RX_QUEUES 128->16 + cond_resched).
-  if [ -f "${CWD}/sdk-overlay/patch-dpaa-probe-fix.py" ]; then
-    python3 "${CWD}/sdk-overlay/patch-dpaa-probe-fix.py" . \
-      || echo "WARNING: patch-dpaa-probe-fix.py did not apply cleanly (continuing)"
-  fi
-
-  # NOTE: the actual .config swap (disable mainline FSL_FMAN/FSL_DPAA/
-  # FSL_DPAA_ETH, enable the SDK stack) is DEFERRED to the post-defconfig block
-  # below. build-kernel.sh runs THIS inject block BEFORE VyOS's merge_config.sh,
-  # which regenerates .config from vyos_defconfig + snippets and would silently
-  # wipe any swap done here (root-caused from CI run 27879714016: the swap
-  # markers printed but mainline DPAA1 compiled). The Kconfig/Makefile hooks and
-  # overlay source tree staged above SURVIVE the merge (they are source-tree
-  # changes, not .config changes); only the .config swap must run after the merge.
-  echo "### NXP SDK: vendor tree overlaid (config swap deferred to post-defconfig)"
-fi
 INJECT_EOF
 
 # Insert injection block before "# Change name of Signing Cert" in build-kernel.sh
@@ -816,13 +935,21 @@ scripts/config --set-val CONFIG_QORIQ_CPUFREQ y
 scripts/config --set-val CONFIG_FSL_EDMA y
 scripts/config --set-val CONFIG_SERIAL_OF_PLATFORM y
 scripts/config --set-val CONFIG_MAXLINEAR_GPHY y
-# Mono fix/security-hardening (sha 165f402b) defconfig ships MARVELL_10G_PHY=y
-# (ours defaults to =m). Forced built-in for Mono-reference A/B parity. Our
-# SFP-10G-T copper module uses the RTL8261 rollball PHY (realtek/rollball), not
-# a Marvell 10G PHY, so this is parity-only — harmless, marginal.
-scripts/config --set-val CONFIG_MARVELL_10G_PHY y
 scripts/config --set-val CONFIG_IMX2_WDT y
 scripts/config --set-val CONFIG_SPI_FSL_QUADSPI y
+# CAAM (NXP SEC 5.4) hardware crypto built-in for ASK2 IPsec offload (spec §8.1).
+# vyos_defconfig ships these tristate symbols as =m; force =y so the CAAM/QI
+# backend is present at FMan bring-up and patch 0134's
+# caam_qi_ext_consumer_register/_release are compiled-in + EXPORT_SYMBOL_GPL'd
+# (a =m caam_jr would force fragile module load-order coupling with ask.ko).
+# CONFIG_CRYPTO_DEV_FSL_CAAM_QI is the symbol that actually compiles qi.c — the
+# patch's edits and exports live there; the original 5-symbol plan omitted it.
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_COMMON y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_JR y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_QI y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_CRYPTO_API_DESC y
+scripts/config --set-val CONFIG_CRYPTO_DEV_FSL_CAAM_AHASH_API_DESC y
 scripts/config --disable CONFIG_DEBUG_PREEMPT
 scripts/config --set-val CONFIG_NEW_LEDS y
 scripts/config --set-val CONFIG_LEDS_CLASS y
@@ -845,53 +972,9 @@ scripts/config --enable CONFIG_THERMAL_GOV_POWER_ALLOCATOR
 scripts/config --disable CONFIG_THERMAL_GOV_FAIR_SHARE
 scripts/config --disable CONFIG_THERMAL_GOV_BANG_BANG
 scripts/config --disable CONFIG_CPU_IDLE_GOV_LADDER
-# --- NXP SDK DPAA1 vendor overlay: config swap (MUST run AFTER merge_config) --
-# The SDK Kconfig/Makefile hooks + overlay tree were staged in the kernel-inject
-# block (which runs BEFORE merge_config.sh). The actual swap MUST run HERE, after
-# merge_config.sh has regenerated .config, or the merge wipes it and mainline
-# DPAA1 compiles instead of the SDK (root cause of CI run 27879714016). Guarded
-# on the overlay Kconfig being present so a non-SDK build is unaffected.
-if grep -q 'sdk_fman/Kconfig' drivers/net/ethernet/freescale/Kconfig 2>/dev/null; then
-  echo "I: LS1046A — NXP SDK config swap (disable mainline DPAA1, enable SDK)"
-  scripts/config --set-val CONFIG_NR_CPUS 4
-  scripts/config --disable CONFIG_FSL_FMAN
-  scripts/config --disable CONFIG_FSL_DPAA
-  scripts/config --disable CONFIG_FSL_DPAA_ETH
-  scripts/config --enable  CONFIG_FSL_XGMAC_MDIO
-  scripts/config --enable  CONFIG_STAGING
-  scripts/config --enable  CONFIG_FSL_SDK_DPA
-  scripts/config --enable  CONFIG_FSL_SDK_BMAN
-  scripts/config --enable  CONFIG_FSL_SDK_QMAN
-  scripts/config --enable  CONFIG_FSL_BMAN_CONFIG
-  scripts/config --enable  CONFIG_FSL_QMAN_CONFIG
-  scripts/config --enable  CONFIG_FSL_SDK_FMAN
-  scripts/config --enable  CONFIG_FMAN_ARM
-  scripts/config --enable  CONFIG_FSL_DPAA_HOOKS
-  scripts/config --set-val CONFIG_FSL_SDK_DPAA_ETH y
-  scripts/config --set-val CONFIG_FSL_DPAA_ETH_MAX_BUF_COUNT 640
-fi
 scripts/config --disable CONFIG_STRICT_DEVMEM
 scripts/config --disable CONFIG_IO_STRICT_DEVMEM
 make olddefconfig
-# --- NXP SDK config-swap verification (fail loudly on silent mainline rebuild) -
-# Guards against the regression that shipped run 27879714016: the swap markers
-# printed but the final .config still had mainline DPAA1 and zero SDK. If the SDK
-# overlay is present but the swap did NOT stick, abort instead of silently
-# building the wrong stack.
-if grep -q 'sdk_fman/Kconfig' drivers/net/ethernet/freescale/Kconfig 2>/dev/null; then
-  echo "I: NXP SDK final .config state:"
-  grep -E '^(CONFIG_FSL_SDK_FMAN|CONFIG_FSL_SDK_DPAA_ETH|CONFIG_FSL_SDK_DPA|CONFIG_FMAN_ARM|CONFIG_FSL_FMAN|CONFIG_FSL_DPAA_ETH)\b' .config || true
-  if ! grep -q '^CONFIG_FSL_SDK_FMAN=y' .config || ! grep -q '^CONFIG_FSL_SDK_DPAA_ETH=y' .config; then
-    echo "ERROR: NXP SDK config swap did not stick — mainline DPAA1 would compile instead of the SDK." >&2
-    echo "       FSL_SDK_FMAN / FSL_SDK_DPAA_ETH are not =y in the final .config. Aborting." >&2
-    exit 1
-  fi
-  if grep -q '^CONFIG_FSL_FMAN=y' .config; then
-    echo "ERROR: mainline CONFIG_FSL_FMAN=y still set after SDK swap — both stacks would build. Aborting." >&2
-    exit 1
-  fi
-  echo "I: NXP SDK config swap verified — SDK enabled, mainline FSL_FMAN disabled."
-fi
 
 LS1046A_POSTDEFCONFIG_EOF
 

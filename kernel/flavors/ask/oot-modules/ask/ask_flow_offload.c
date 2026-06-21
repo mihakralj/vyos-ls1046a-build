@@ -6,25 +6,15 @@
  * patch (PR11/M2.2 - `0002-dpaa-eth-flow-block.patch`) plugs into the
  * `dpaa_setup_tc()` path.
  *
- * PR14j architectural change vs. PR14g:
- *
- *   PR14g bound the KG scheme to whichever dpaa netdev received the
- *   FIRST FLOW_BLOCK_BIND.  On the M2 test rig that turned out to be
- *   egress eth4 - so the ingress eth3 bind returned -EBUSY and the
- *   classifier never saw RX traffic.  Result: 6.9 Gbps / 54% CPU, well
- *   below the 18 Gbps M2 gate.
- *
- *   PR14j defers ask_hw_port_bind() from FLOW_BLOCK_BIND to
- *   FLOW_CLS_REPLACE.  At REPLACE time the rule carries a REDIRECT /
- *   MIRRED action with the egress target, so the netdev whose block
- *   received the REPLACE is unambiguously the INGRESS netdev (the
- *   one that matched the 5-tuple).  We bind KG to THAT netdev's FMan
- *   port id.  Egress-only netdevs never receive a REPLACE for which
- *   they are the source, so they never consume the single-port-per-
- *   scheme KGSE_MV slot.
- *
- *   FLOW_BLOCK_BIND still installs the block_cb (so we'll see the
- *   REPLACE events) - it just does not touch silicon.
+ * Ingress-vs-egress binding: the port-bind decision is deferred from
+ * FLOW_BLOCK_BIND to FLOW_CLS_REPLACE.  At REPLACE time the rule carries
+ * a REDIRECT/MIRRED action with the egress target, so the netdev whose
+ * block received the REPLACE is unambiguously the INGRESS netdev (the one
+ * that matched the 5-tuple); egress-only netdevs never receive a REPLACE
+ * for which they are the source, so they never consume the single-port-
+ * per-scheme KGSE_MV slot.  FLOW_BLOCK_BIND only installs the block_cb
+ * (so we see the REPLACE events); it does not touch silicon.
+ * (Previously a FIRST-BIND scheme bound the wrong netdev - see git log.)
  *
  * Translation shape (FLOW_CLS_* -> ask_flow_*):
  *
@@ -38,8 +28,8 @@
  *
  *   FLOW_CLS_STATS: ask_flow_get_stats() into flow_stats_update().
  *
- * Spec ref: §4.3 (flow_block_cb integration), §11.1 (M2 perf gate),
- * plans/PR14j-DESIGN.md (the two-stage OH-port architecture).
+ * Spec ref: ask2-rewrite-spec.md §4.3 (flow_block_cb integration),
+ * §11.1 (M2 perf gate).
  */
 
 #include <linux/kernel.h>
@@ -64,9 +54,36 @@
 #include <net/netevent.h>
 #include <net/net_namespace.h>
 #include <net/netfilter/nf_flow_table.h>
-#include <linux/fsl/dpaa_flow_offload.h>
-
 #include "include/ask_internal.h"
+
+/*
+ * Single-image OOT re-declares (board patches 0121 + 0104).
+ *
+ * The retired ask-flavor entry mechanism (<linux/fsl/dpaa_flow_offload.h> +
+ * struct dpaa_flow_offload_ops + dpaa_register/unregister_flow_offload_handler)
+ * does not exist on the common board substrate.  ask.ko now enters solely via
+ * the mainline flow_indr_dev_register() path and derives a netdev's ingress
+ * BMI port id from the board-exported resolvers instead of the retired
+ * dpaa_get_fman_port_id():
+ *   dpaa_get_rx_fman_port(dev) -> ingress RX struct fman_port   (board 0121)
+ *   fman_port_get_id(port)     -> BMI hard port id              (board 0104)
+ * ask_dpaa_get_fman_port_id() keeps the old (dev, *pid) -> 0/err call shape
+ * the REPLACE/UNBIND handlers below were written against (NULL/non-dpaa dev
+ * -> -ENODEV, which the handlers treat as the graceful SW-only fallback).
+ */
+struct fman_port;
+struct fman_port *dpaa_get_rx_fman_port(struct net_device *dev);
+u8 fman_port_get_id(struct fman_port *port);
+
+static inline int ask_dpaa_get_fman_port_id(struct net_device *dev, u8 *pid)
+{
+        struct fman_port *port = dpaa_get_rx_fman_port(dev);
+
+        if (!port)
+                return -ENODEV;
+        *pid = fman_port_get_id(port);
+        return 0;
+}
 
 /*
  * PR14z17: file-scope first-arrival latch (hoisted from function-scope
@@ -1328,7 +1345,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
 
                 if (ingress_dev) {
                         u8 pid;
-                        int prc = dpaa_get_fman_port_id(ingress_dev, &pid);
+                        int prc = ask_dpaa_get_fman_port_id(ingress_dev, &pid);
 
                         if (prc == 0) {
                                 u8 expected = 0xff;
@@ -1372,7 +1389,7 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                                                     netdev_name(ingress_dev),
                                                     pid, __dir, prc);
                         } else if (prc != -ENODEV && prc != -ERANGE) {
-                                ask_pr_dbg("flow_offload: REPLACE dpaa_get_fman_port_id(%s) failed: %d\n",
+                                ask_pr_dbg("flow_offload: REPLACE port-id resolve(%s) failed: %d\n",
                                            netdev_name(ingress_dev), prc);
                         }
                 }
@@ -1668,7 +1685,7 @@ int ask_flow_offload_setup_tc(struct net_device *dev,
                  */
                 if (dev) {
                         u8 pid;
-                        int prc = dpaa_get_fman_port_id(dev, &pid);
+                        int prc = ask_dpaa_get_fman_port_id(dev, &pid);
 
                         if (prc == 0) {
                                 int urc = ask_hw_port_unbind(pid);
@@ -1677,7 +1694,7 @@ int ask_flow_offload_setup_tc(struct net_device *dev,
                                         ask_pr_warn("flow_offload: UNBIND %s (pid 0x%02x) port-unbind failed: %d\n",
                                                     netdev_name(dev), pid, urc);
                         } else if (prc != -ENODEV && prc != -ERANGE) {
-                                ask_pr_dbg("flow_offload: UNBIND dpaa_get_fman_port_id(%s) failed: %d\n",
+                                ask_pr_dbg("flow_offload: UNBIND port-id resolve(%s) failed: %d\n",
                                            netdev_name(dev), prc);
                         }
                 }
@@ -1694,21 +1711,6 @@ int ask_flow_offload_setup_tc(struct net_device *dev,
 EXPORT_SYMBOL_GPL(ask_flow_offload_setup_tc);
 
 /* ------------------------------------------------------------------------- */
-/* dpaa_flow_offload_ops backend registration                                 */
-/* ------------------------------------------------------------------------- */
-
-static int ask_dpaa_setup_tc_block(struct net_device *dev,
-                                   struct flow_block_offload *fbo)
-{
-        return ask_flow_offload_setup_tc(dev, fbo);
-}
-
-static const struct dpaa_flow_offload_ops ask_dpaa_fo_ops = {
-        .owner          = THIS_MODULE,
-        .setup_tc_block = ask_dpaa_setup_tc_block,
-};
-
-/* ------------------------------------------------------------------------- */
 /* PR14n: flow_indr_dev callback for nft-flowtable bind                       */
 /*                                                                            */
 /* nft flowtables with `flags offload` deliver their FLOW_BLOCK_BIND through  */
@@ -1719,24 +1721,21 @@ static const struct dpaa_flow_offload_ops ask_dpaa_fo_ops = {
 /*                                                                            */
 /* The indr core invokes our callback once per (netdev, flowtable) pair when */
 /* the userspace `nft flow add` -> nf_flow_table_offload_setup() machinery   */
-/* arrives.  We accept any dpaa netdev (i.e. one whose ->dev.parent->driver  */
-/* matches our existing dpaa_flow_offload_ops registration target) and       */
-/* dispatch TC_SETUP_BLOCK + TC_SETUP_FT to the same                          */
-/* ask_flow_offload_setup_tc() helper used by the dpaa_eth ndo path.  The    */
-/* binder-type widening for FT was done above (PR14n change to               */
+/* arrives.  We accept any netdev the indr core hands us and dispatch         */
+/* TC_SETUP_BLOCK + TC_SETUP_FT to the same ask_flow_offload_setup_tc()       */
+/* helper.  The binder-type widening for FT was done above (PR14n change to   */
 /* ask_flow_offload_setup_tc).                                                */
 /*                                                                            */
 /* Filtering by netdev: rather than maintaining a separate "is this our      */
 /* netdev" predicate (the bnxt / mlx5 / nfp drivers each carry a private one */
-/* keyed on their tunnel-device type), we rely on the dpaa backend rejecting */
-/* unknown netdevs via dpaa_register_flow_offload_handler — the same        */
-/* indirection already used by the ndo path.  In practice the indr core      */
-/* only reaches us when nft has matched a device whose flowtable is bound,   */
-/* so the check is rarely exercised; when it is, ask_flow_offload_setup_tc  */
-/* will silently no-op on a non-dpaa netdev because the per-block priv       */
-/* allocation succeeds but the block_cb's REPLACE handler then fails to     */
-/* resolve dpaa_get_fman_port_id() and the flow stays SW-only (same          */
-/* graceful degradation as PR14j ingress-only bind).                          */
+/* keyed on their tunnel-device type), we let the per-flow REPLACE handler   */
+/* self-filter.  In practice the indr core only reaches us when nft has      */
+/* matched a device whose flowtable is bound, so the check is rarely         */
+/* exercised; when it is, ask_flow_offload_setup_tc silently no-ops on a     */
+/* non-dpaa netdev because the per-block priv allocation succeeds but the    */
+/* block_cb's REPLACE handler then fails to resolve the ingress BMI port id  */
+/* (-ENODEV) and the flow stays SW-only (same graceful degradation as PR14j  */
+/* ingress-only bind).                                                        */
 /* ------------------------------------------------------------------------- */
 
 static int ask_flow_indr_setup_block_cb(struct net_device *dev,
@@ -1788,25 +1787,18 @@ int ask_flow_offload_init(void)
 {
         int rc;
 
-        rc = dpaa_register_flow_offload_handler(&ask_dpaa_fo_ops);
-        if (rc == -ENODEV) {
-                ask_pr_info("flow_offload: dpaa backend unavailable (-ENODEV); running standalone\n");
-                /*
-                 * Still register the indr callback so a non-DPAA host with
-                 * a kunit synthetic netdev (or a future DPAA2 host where
-                 * the ndo path lives elsewhere) can still drive
-                 * FLOW_CLS_REPLACE through the indr path.
-                 */
-        } else if (rc) {
-                ask_pr_err("flow_offload: dpaa_register_flow_offload_handler failed: %d\n",
-                           rc);
-                return rc;
-        }
-
+        /*
+         * Single-image entry: ask.ko drives FLOW_CLS_REPLACE solely through
+         * the mainline flow_indr_dev_register() path.  nft flowtables with
+         * `flags offload` deliver FLOW_BLOCK_BIND here via the indr core; a
+         * non-DPAA netdev degrades gracefully to SW-only when the REPLACE
+         * handler cannot resolve an ingress BMI port id.  The retired
+         * dpaa_flow_offload_ops backend registration is gone with the flavor
+         * collapse -- the common board substrate exports no such handler.
+         */
         rc = flow_indr_dev_register(ask_flow_indr_setup_cb, NULL);
         if (rc) {
                 ask_pr_err("flow_offload: flow_indr_dev_register failed: %d\n", rc);
-                dpaa_unregister_flow_offload_handler(&ask_dpaa_fo_ops);
                 return rc;
         }
 
@@ -1822,7 +1814,6 @@ int ask_flow_offload_init(void)
                 ask_pr_err("flow_offload: register_netevent_notifier failed: %d\n", rc);
                 flow_indr_dev_unregister(ask_flow_indr_setup_cb, NULL,
                                          ask_flow_indr_release);
-                dpaa_unregister_flow_offload_handler(&ask_dpaa_fo_ops);
                 return rc;
         }
 
@@ -1851,7 +1842,6 @@ void ask_flow_offload_exit(void)
 {
         struct ask_flow_block_priv_entry *e, *tmp;
         struct ask_flow_pending *p, *ptmp;
-        int rc;
 
         /*
          * PR14z9: stop the active poller before unregistering the
@@ -1885,11 +1875,6 @@ void ask_flow_offload_exit(void)
 
         flow_indr_dev_unregister(ask_flow_indr_setup_cb, NULL,
                                  ask_flow_indr_release);
-
-        rc = dpaa_unregister_flow_offload_handler(&ask_dpaa_fo_ops);
-        if (rc && rc != -ENODEV && rc != -EINVAL)
-                ask_pr_warn("flow_offload: dpaa_unregister_flow_offload_handler failed: %d\n",
-                            rc);
 
         spin_lock(&ask_flow_block_priv_lock);
         list_for_each_entry_safe(e, tmp, &ask_flow_block_priv_list, node) {

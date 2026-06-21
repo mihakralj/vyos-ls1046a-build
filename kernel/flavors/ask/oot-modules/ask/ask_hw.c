@@ -1,73 +1,36 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * ask_hw.c — ASK2 hardware backend, Path A (v1.3 plan §4.9).
+ * ask_hw.c — ASK2 hardware backend (board-substrate consumer).
  *
- * v1.3 Phase 4.9 (2026-05-24) rewrite per plans/ASK2-COURSE-CORRECTION.md.
+ * HISTORY.  Through v1.3 this file drove the FMan PCD directly via the
+ * ASK-flavor <linux/fsl/fman_pcd.h> / <linux/fsl/dpaa_flow_offload.h>
+ * pointer API: a per-port private CC tree + KG scheme grafted onto the
+ * kernel scheme by a pre-netdev hook, plus per-flow MANIP chains
+ * (RMV_ETHERNET + INSRT_GENERIC + IPV4_FORWARD) allocated one-per-flow.
+ * That API died with the single-image collapse, and the per-flow MANIP
+ * model was the source of the `fman_pcd_manip_chain_create() failed -12`
+ * MURAM-exhaustion blocker.
  *
- * Path A architecture
- * -------------------
- * ASK2 owns the FMan PCD chain from boot. It NEVER grafts onto live
- * silicon and NEVER tears the chain down at runtime.
+ * BOARD SUBSTRATE (2026-06-15).  ask.ko now consumes ONLY the exported
+ * COMMON-board FMan capability API (see include/ask_fman_caps.h):
  *
- * On module load (built-in via Kconfig bool → fs_initcall, so we run
- * BEFORE dpaa_eth_probe), ask_hw_pcd_bringup() registers a
- * pre-netdev hook via fman_pcd_register_pre_netdev_hook() (kernel
- * patch 0044). When dpaa_eth_probe later calls fman_port_init() for
- * each FMan ingress port, the hook fires BEFORE register_netdev() and
- * before mainline's keygen_port_hashing_init():
+ *   - CC steering addressed by (struct fman *, u8 port_id):
+ *       fman_cc_tree_install / _add_key / _remove_key / _destroy
+ *     The CC tree object lives inside fsl_dpa.ko; ask.ko never owns
+ *     fman_pcd_cc_node / fman_pcd_cc_tree handles.  The RSS bring-up
+ *     (keygen_port_hashing_init) already armed each port's KG scheme
+ *     with the CC_EN gate at MAC probe, so there is no graft, no
+ *     mode-RMW, no carrier flap and no pre-netdev hook.
+ *   - Shared, refcounted next-hop header manip:
+ *       fman_hm_nexthop_get / fman_hm_nexthop_put (board patch 0120).
+ *     MURAM use scales O(next-hops) not O(flows).
  *
- *   1. Allocate a per-port KG scheme via fman_pcd_kg_scheme_create()
- *      with the silicon-truth 16-byte key layout
- *      [ SIP:4 | DIP:4 | SPI:4=0 | SPORT:2 | DPORT:2 ].
- *   2. Create empty cc_v4_tcp_in + cc_v4_udp_in CC trees whose
- *      miss_action = FORWARD_FQ(default_base_fqid). The base_fqid is
- *      handed to us by the hook — it's the FQID mainline would have
- *      programmed for this port's RX hash distribution. Unmatched
- *      frames therefore fall back into the kernel's per-CPU RX FQ
- *      pool, preserving the ARP / SYN / ICMP / VPP AF_XDP control
- *      plane exactly as if no PCD chain were present.
- *   3. Attach the CC tree to the scheme via fman_pcd_kg_attach_cc().
- *   4. Bind the scheme to this port via fman_pcd_kg_bind_port().
- *   5. Return 0 → fman_port_init() calls fman_port_use_kg_hash(port,
- *      true) → silicon walks our CC tree on every RX frame. dpaa_eth
- *      proceeds to register_netdev() with the PCD chain already live.
- *
- * No graft, no kgse_mode RMW, no late-stage KGSE_CCBS write, no
- * scheme-discovery walk, no race window. The kernel netdev sits
- * downstream of the PCD chain — it sees a frame ONLY when no
- * offloaded CC key matched.
- *
- * Per-flow updates (Phase 4.10, this file provides scaffolding only):
- *   - REPLACE: build per-flow MANIPs [rmv_eth, insrt_generic(new L2),
- *     ipv4_forward] → fuse into one chain handle → install one CC key
- *     with FMAN_PCD_ACTION_MANIPULATE{chain, peer_tx_fqid}. No graft.
- *   - DESTROY: cc_node_remove_key(slot) → chain_destroy →
- *     manip_destroy(per-flow m_insrt). Shared MANIPs untouched.
- *
- * Phase 4.9 boundary
- * ------------------
- * This file lands the boot-time install + per-port CC tree creation
- * + cookie indirection table. It deletes ~700 LOC of v1.2 graft code
- * (ask_hw_port_bind, ask_hw_port_unbind, ask_hw_pcd_build_chain,
- * ask_hw_pcd_bringup_shared_manips, the per-direction pipeline state
- * machine, the cc_v4_tcp lazy-create-on-bind logic).
- *
- * ask_hw_port_bind() and ask_hw_port_unbind() are KEPT as thin
- * pass-through stubs (return 0 / -ENODEV) so ask_flow_offload.c still
- * compiles unchanged. Phase 4.10 will rewrite ask_flow_offload.c to
- * stop calling them, after which the stub declarations are deleted
- * from ask_internal.h and this file.
- *
- * ask_hw_flow_insert() / ask_hw_flow_remove() are KEPT as -EOPNOTSUPP
- * / 0 stubs for the same reason. Phase 4.10 replaces the bodies with
- * the per-flow MANIP-chain + CC-key-add path.
- *
- * Refs:
- *   - plans/ASK2-COURSE-CORRECTION.md §2.4 Phase 4.3-4.5
- *   - kernel/flavors/ask/patches/0044-fman-pcd-pre-netdev-hook.patch
- *   - kernel/flavors/ask/patches/0050-fman-pcd-cc-wire-group-table-and-miss-ad.patch
- *
- * Copyright 2026 Mono Networks / VyOS LS1046A maintainers.
+ * This file (Stage B of ask2-cc-repoint) reshapes bring-up/teardown and
+ * the per-flow cookie onto that substrate; the per-flow insert path is
+ * a declared stub (-EOPNOTSUPP) until Stage C wires the rebuild-via-
+ * install fast path (mirroring board patch 0109 dpaa_cls_reinstall).
+ * Since the 2026-06-14 oot-ungate, ask.ko builds, signs, and packages
+ * (dormant) into every single-image ISO; it engages only at runtime.
  */
 
 #include <linux/kernel.h>
@@ -87,20 +50,29 @@
 #include <linux/rcupdate.h>
 #include <linux/xarray.h>
 #include <net/net_namespace.h>
-#include <linux/fsl/fman_pcd.h>
-#include <linux/fsl/dpaa_flow_offload.h>
 #include <linux/etherdevice.h>          /* is_zero_ether_addr */
 #include <linux/if_ether.h>             /* ETH_P_IP, ETH_ALEN */
 #include <linux/in.h>                   /* IPPROTO_TCP */
+#include <linux/unaligned.h>            /* get_unaligned_be32 */
 
 #include "include/ask_internal.h"
+#include "include/ask_fman_caps.h"      /* fman_cc_*, fman_hm_*, struct fman */
 
 /*
- * Forward declarations of the dpaa-eth helpers exported by patches
- * 0030 (dpaa-export-fman-port-id) and 0031 (dpaa-export-tx-fqid).
- * The dpaa private header is not OOT-friendly so we re-declare here.
+ * OOT re-declarations of the mainline / board-substrate EXPORT_SYMBOLs the
+ * vendored caps header does not surface (a bindeb-pkg linux-headers package
+ * carries no driver headers, so re-declaring locally is the only mechanism).
+ * fman_bind() resolves the FMan platform device's struct fman *.  The per-flow
+ * CC-target resolvers dpaa_get_rx_fman_port() + dpaa_get_tx_fqid() (board patch
+ * 0121) and fman_port_get_id() (board patch 0104) map an ASK flow's ingress /
+ * egress netdevs to the (port_id, tx_fqid) the rebuild-via-install fast path
+ * needs.  Mirrors the identical shim already linking in ask_flow_offload.c.
  */
-int dpaa_get_fman_port_id(struct net_device *dev, u8 *port_id);
+struct device;
+struct fman_port;
+struct fman *fman_bind(struct device *dev);
+struct fman_port *dpaa_get_rx_fman_port(struct net_device *dev);
+u8 fman_port_get_id(struct fman_port *port);
 int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
 
 /*
@@ -140,69 +112,45 @@ static bool ask_hw_cached_valid;
 
 #define ASK_HW_V4_KEY_WIDTH     16
 
-/*
- * Per-port CC pipeline. The pre-netdev hook creates one of these
- * per hwport that fman_port_init() invites us to claim. Each
- * pipeline owns a private CC tree (one-group) carrying two CC
- * nodes (v4-TCP, v4-UDP) and a private KG scheme bound to the port
- * via fman_pcd_kg_bind_port().
- *
- * The CC trees start empty (num_keys=0) with
- * miss_action = FORWARD_FQ(default_base_fqid) so unmatched RX
- * frames flow to the kernel's per-CPU RX FQ pool exactly as if no
- * PCD chain were installed. Per-flow keys are added/removed at
- * runtime by ask_flow_offload.c (Phase 4.10) — no graft, no
- * mode-RMW, no carrier flap.
- */
 #define ASK_HW_MAX_PORTS        8       /* LS1046A has 8 BMI RX ports total */
 
+/*
+ * Per-offloaded-port record.  Under the board substrate ask.ko owns no
+ * private CC tree / KG scheme / pre-netdev hook — the CC tree lives in
+ * fsl_dpa.ko and is addressed by (struct fman *, u8 port_id), and the
+ * port's KG scheme was armed with the CC_EN gate by the COMMON-board
+ * RSS bring-up.  Stage B only needs to remember which BMI ports carry a
+ * live static CC tree so teardown can raze them; Stage C grows this with
+ * the software CC-key shadow the rebuild-via-install per-flow model
+ * maintains (mirroring board patch 0109 dpaa_cls_reinstall).
+ */
+struct ask_hw_cc_slot {
+        bool                    used;
+        u32                     key_id;   /* monotonic; == cookie.cc_handle */
+        struct fman_cc_key      key;      /* 5-tuple + target_fqid + hm_handle */
+};
+
 struct ask_hw_port {
-        bool                       in_use;
-        u8                         hwport_id;
-        u32                        default_base_fqid;
-        struct fman_pcd_cc_tree   *cc_tree;
-        struct fman_pcd_cc_node   *cc_v4_tcp;
-        struct fman_pcd_cc_node   *cc_v4_udp;
-        /*
-         * v1.1-B (patch 0065): ASK no longer allocates its own KG
-         * scheme.  Instead we GRAFT our CC tree onto the kernel-owned
-         * scheme that dpaa_eth's keygen_port_hashing_init() programmed
-         * at MAC probe time.  We record its scheme_id here so module
-         * unload can call fman_pcd_kg_ungraft_cc() to clear KGSE_CCBS
-         * back to 0 and restore the kernel's default RX hash dispatch.
-         *
-         * kernel_scheme_valid distinguishes "graft installed" (true)
-         * from "no graft yet / already ungrafted" (false) so the
-         * teardown path is idempotent.
-         */
-        u8                         kernel_scheme_id;
-        bool                       kernel_scheme_valid;
+        bool            in_use;
+        u8              port_id;        /* BMI hwport id (sparse 0x01..0x31) */
+        bool            cc_installed;   /* a static CC tree is live on this port */
+        bool            offload_engaged;/* M1 coarse S1 mode-switch active (0129) */
+        u16             nkeys;          /* live entries in shadow[] */
+        u32             next_key_id;    /* per-port monotonic id (never 0) */
+        struct ask_hw_cc_slot shadow[FMAN_CC_MAX_STATIC_KEYS];
 };
 
 struct ask_hw_pcd {
-        struct mutex                lock;
-        struct fman                *fman;
-        struct fman_pcd            *pcd;
-        bool                        hook_registered;
+        struct mutex    lock;
+        struct fman     *fman;          /* shared FMan handle (fman_bind) */
+        struct ask_hw_port port[ASK_HW_MAX_PORTS];
 
         /*
-         * Per-port pipeline records. Indexed densely by the order
-         * in which the pre-netdev hook fires (hwport_id is sparse,
-         * 0x01..0x31; using it as a direct array index would waste
-         * 60 slots). next_slot tracks the next free entry; lookups
-         * scan linearly which is fine for ≤ 8 ports.
+         * Per-flow cookie indirection table.  u32 cookie -> struct
+         * ask_hw_flow_cookie{fm, port_id, cc_handle, hm_handle, ...}.
+         * XA_FLAGS_ALLOC1 keeps cookie 0 as the "no HW backing" sentinel.
          */
-        struct ask_hw_port          port[ASK_HW_MAX_PORTS];
-        unsigned int                next_slot;
-
-        /*
-         * Per-flow cookie indirection table. Phase 4.10 will populate
-         * this from ask_flow_offload.c's REPLACE handler with the
-         * (cc_node, key_idx, manip_chain, m_insrt) state needed for
-         * subsequent DESTROY. xarray with XA_FLAGS_ALLOC1 so cookie 0
-         * stays the "no HW backing" sentinel.
-         */
-        struct xarray               flow_cookies;
+        struct xarray   flow_cookies;
 };
 
 static struct ask_hw_pcd *ask_hw_pcd_inst;
@@ -221,10 +169,7 @@ static int ask_hw_qef_get_description(const u8 *blob, size_t len, char *desc)
                 return -EINVAL;
         }
 
-        magic = ((u32)blob[ASK_QEF_MAGIC_OFFSET]     << 24) |
-                ((u32)blob[ASK_QEF_MAGIC_OFFSET + 1] << 16) |
-                ((u32)blob[ASK_QEF_MAGIC_OFFSET + 2] <<  8) |
-                ((u32)blob[ASK_QEF_MAGIC_OFFSET + 3]);
+        magic = get_unaligned_be32(&blob[ASK_QEF_MAGIC_OFFSET]);
 
         if (magic != ASK_QEF_MAGIC) {
                 ask_pr_warn("hw: firmware magic mismatch (got 0x%08x, want 0x%08x)\n",
@@ -308,7 +253,10 @@ int ask_hw_ucode_get_version(struct ask_hw_ucode_version *out)
         if (!out)
                 return -EINVAL;
 
-        if (READ_ONCE(ask_hw_cached_valid)) {
+        /* Acquire pairs with the smp_store_release() below so a reader that
+         * observes the valid flag is guaranteed to see the fully-published
+         * ask_hw_cached struct (never a torn copy) on weakly-ordered arm64. */
+        if (smp_load_acquire(&ask_hw_cached_valid)) {
                 *out = ask_hw_cached;
                 return 0;
         }
@@ -318,7 +266,8 @@ int ask_hw_ucode_get_version(struct ask_hw_ucode_version *out)
                 return rc;
 
         ask_hw_cached = *out;
-        WRITE_ONCE(ask_hw_cached_valid, true);
+        /* Publish the struct before the valid flag (release barrier). */
+        smp_store_release(&ask_hw_cached_valid, true);
         return 0;
 }
 EXPORT_SYMBOL_GPL(ask_hw_ucode_get_version);
@@ -373,282 +322,7 @@ void ask_hw_cookie_free(struct ask_hw_pcd *h, u32 cookie)
 EXPORT_SYMBOL_GPL(ask_hw_cookie_free);
 
 /* ------------------------------------------------------------------------- */
-/* Path A pre-netdev hook — claim port, install empty CC pipeline             */
-/* ------------------------------------------------------------------------- */
-
-/*
- * v1.1-B (patch 0065): ask_hw_kg_params_fill() removed.
- *
- * Under the graft architecture ASK no longer allocates its own KG
- * scheme — it reuses the one dpaa_eth's keygen_port_hashing_init()
- * already programmed for each port and just writes KGSE_CCBS on it
- * to point at our CC tree (see ask_pcd_install_hook() →
- * fman_pcd_kg_lookup_port_scheme + fman_pcd_kg_graft_cc).
- *
- * The kernel scheme's extract recipe is fine for our purposes
- * because keygen_port_hashing_init() programs
- * DEFAULT_HASH_KEY_EXTRACT_FIELDS = IPSRC1 | IPDST1 | IPSEC_SPI |
- * L4PSRC | L4PDST — exactly the 16-byte layout the downstream CC
- * tree expects [SIP:4][DIP:4][SPI:4][SP:2][DP:2].  The CC key built
- * by ask_hw_build_cc_key_v4() leaves the SPI slot zero with mask
- * 0xff so non-IPSec frames match cleanly; the silicon parse-result
- * fills the kernel-scheme key buffer identically to what our
- * deleted custom recipe would have produced.
- *
- * The historical ASK_HW_PR_OFF_* and ASK_HW_V4_KEY_WIDTH macros
- * above are KEPT — ask_hw_build_cc_key_v4() still uses
- * ASK_HW_V4_KEY_WIDTH, and the offset symbols document the
- * silicon-truth layout for future readers.
- */
-
-/*
- * Create one empty CC node attached to @tree. miss_action targets
- * @miss_fqid so unmatched frames go to the kernel's RX FQ pool.
- *
- * v1.1-A.2 (2026-05-25): num_keys reduced 127 → 31 per node.
- *
- * Empirical M2 verification (build #7, kernel 6.18.31-vyos) showed that
- * with num_keys=127 the install hook successfully claims port 0x09 (both
- * cc_v4_tcp + cc_v4_udp + scheme + cc_tree all allocated) but the SECOND
- * port (0x0c) hits -ENOMEM on its cc_v4_udp create even though the PCD
- * debugfs reports free=52,992 B of the 64 KiB reservation. Root cause:
- * fman_pcd_muram_alloc() is a thin wrapper around the global FMan MURAM
- * gen_pool (not a sub-pool of the 64 KiB PCD reservation); after mainline
- * CAM + per-port Rx/Tx FIFO reservations the free chunk distribution in
- * the global pool fragments so that 6 KiB requests (4096 B match-table +
- * 2048 B AD-table per cc_node, alternating) cannot find a contiguous slot
- * after ~2 cc_nodes' worth of fragmentation.
- *
- * num_keys=31 yields per cc_node: (31+1)×(2×16+16) = 32×48 = 1,536 B.
- * Per port: 2 cc_nodes = 3,072 B. 5 ports total = 15,360 B — fits even
- * in heavily fragmented pool conditions. M2 workload is 16 active
- * 5-tuples per port; 31 slots gives nearly 2× headroom.
- *
- * If we later need >31 keys per port we have two options: (a) raise the
- * per-port budget by allocating BIGGER chunks (1024 → 4096 B blocks)
- * via a custom buddy allocator, or (b) consolidate cc_v4_tcp + cc_v4_udp
- * into one CC node using L4-protocol bytes in the key. Both deferred to
- * v1.2+.
- */
-static struct fman_pcd_cc_node *
-ask_hw_create_empty_cc_node(struct fman_pcd_cc_tree *tree, u32 miss_fqid)
-{
-        struct fman_pcd_cc_extract extract;
-        struct fman_pcd_cc_key_table keys;
-
-        memset(&extract, 0, sizeof(extract));
-        extract.type   = FMAN_PCD_CC_EXTRACT_KEY;
-        extract.offset = 0;
-        extract.size   = ASK_HW_V4_KEY_WIDTH;
-
-        memset(&keys, 0, sizeof(keys));
-        keys.num_keys                    = 31;
-        keys.keys                        = NULL;        /* pre-allocate empty */
-        keys.miss_action.type            = FMAN_PCD_ACTION_FORWARD_FQ;
-        keys.miss_action.forward_fq.fqid = miss_fqid;
-
-        return fman_pcd_cc_node_create(tree, &extract, &keys);
-}
-
-/*
- * Tear down a port's pipeline. Called from teardown and from the
- * install-error path. NULL-safe on every field.
- *
- * v1.1-B (patch 0065): order matters.  Ungraft the kernel scheme
- * FIRST (clears KGSE_CCBS back to 0 so the silicon stops walking
- * our CC tree) before destroying the CC tree itself.  Skipping
- * this would leave the kernel scheme briefly pointing at a freed
- * group-table.  Then destroy the CC nodes + tree.  Note we do NOT
- * destroy any KG scheme handle -- the kernel owns it and dpaa_eth
- * will free it on its own teardown path.
- */
-static void ask_hw_port_destroy(struct ask_hw_port *p)
-{
-        struct ask_hw_pcd *h = ask_hw_pcd_inst;
-
-        if (!p)
-                return;
-
-        if (p->kernel_scheme_valid && h && h->pcd) {
-                (void)fman_pcd_kg_ungraft_cc(h->pcd, p->kernel_scheme_id);
-                p->kernel_scheme_valid = false;
-        }
-        if (p->cc_v4_udp) {
-                fman_pcd_cc_node_destroy(p->cc_v4_udp);
-                p->cc_v4_udp = NULL;
-        }
-        if (p->cc_v4_tcp) {
-                fman_pcd_cc_node_destroy(p->cc_v4_tcp);
-                p->cc_v4_tcp = NULL;
-        }
-        if (p->cc_tree) {
-                fman_pcd_cc_tree_destroy(p->cc_tree);
-                p->cc_tree = NULL;
-        }
-        p->in_use = false;
-}
-
-/*
- * The pre-netdev hook itself. Invoked from fman_port_init() (kernel
- * patch 0044) BEFORE register_netdev() runs for the dpaa_eth that
- * sits on top of this port. We have ~free reign over PCD state at
- * this point — no concurrent flow_block_offload callbacks, no NAPI
- * running on this port yet.
- *
- * Returns 0 on success → fman_port_init() will call
- * fman_port_use_kg_hash(port, true) and continue, leaving our PCD
- * chain in place.
- *
- * Returns negative errno on failure → fman_port_init() returns the
- * same error → dpaa_eth_probe fails for THIS port only. Other ports
- * continue probing. The hook is invoked for EVERY port mainline
- * would have RSS-hashed; we currently claim all of them.
- */
-static int ask_pcd_install_hook(struct fman_pcd *pcd, u8 hwport_id,
-                                u32 default_base_fqid,
-                                u32 default_hash_size,
-                                void *priv)
-{
-        struct ask_hw_pcd *h = priv;
-        struct ask_hw_port *p;
-        unsigned int slot;
-        u8 kernel_sid = 0;
-        u32 kernel_fqb = 0;
-        u32 miss_fqid;
-        bool have_kernel_scheme = false;
-        int rc;
-
-        if (!h || h->pcd != pcd) {
-                ask_pr_warn("hw: pcd_install_hook: pcd mismatch (got %p, expected %p)\n",
-                            pcd, h ? h->pcd : NULL);
-                return -EINVAL;
-        }
-
-        mutex_lock(&h->lock);
-        if (h->next_slot >= ASK_HW_MAX_PORTS) {
-                mutex_unlock(&h->lock);
-                ask_pr_warn("hw: pcd_install_hook: port table full at port 0x%02x\n",
-                            hwport_id);
-                return -ENOSPC;
-        }
-        slot = h->next_slot;
-        p = &h->port[slot];
-        p->in_use            = true;
-        p->hwport_id         = hwport_id;
-        p->default_base_fqid = default_base_fqid;
-        p->kernel_scheme_valid = false;
-        h->next_slot++;
-        mutex_unlock(&h->lock);
-
-        ask_pr_info("hw: pcd_install hook: port 0x%02x base_fqid=0x%x hash_size=%u — claiming via graft\n",
-                    hwport_id, default_base_fqid, default_hash_size);
-
-        /*
-         * v1.1-B (patch 0065): discover the kernel-owned KG scheme
-         * that dpaa_eth allocated for this hwport.  We will graft our
-         * CC tree onto that scheme via KGSE_CCBS rather than
-         * allocating a competing scheme that would lose the FMan KG
-         * arbitration (lowest-ID-bound scheme wins per packet).
-         *
-         * If the kernel hasn't bound a scheme yet (-ENOENT), use the
-         * hook-supplied default_base_fqid as the miss FQ.  In practice
-         * this branch should not fire because the in-tree hook
-         * (patch 0044) is invoked from fman_port_init() AFTER
-         * keygen_port_hashing_init() has already programmed schemes
-         * 0..4 -- but be defensive in case the late-replay path
-         * (patch 0060 install_now) hits ports in a different order.
-         */
-        rc = fman_pcd_kg_lookup_port_scheme(pcd, hwport_id,
-                                            &kernel_sid, &kernel_fqb);
-        if (rc == 0) {
-                have_kernel_scheme = true;
-                miss_fqid = kernel_fqb;
-                ask_pr_info("hw: pcd_install hook: port 0x%02x kernel scheme=%u base_fqid=0x%x — will graft\n",
-                            hwport_id, kernel_sid, kernel_fqb);
-        } else if (rc == -ENOENT) {
-                miss_fqid = default_base_fqid;
-                ask_pr_info("hw: pcd_install hook: port 0x%02x no kernel scheme bound yet — using hook-supplied fqid=0x%x as miss target (no graft will be performed)\n",
-                            hwport_id, default_base_fqid);
-        } else {
-                ask_pr_warn("hw: pcd_install hook: port 0x%02x lookup_port_scheme failed: %d\n",
-                            hwport_id, rc);
-                goto err;
-        }
-
-        /* Build per-port CC tree (one group). */
-        p->cc_tree = fman_pcd_cc_tree_create(pcd, 1);
-        if (IS_ERR_OR_NULL(p->cc_tree)) {
-                rc = p->cc_tree ? PTR_ERR(p->cc_tree) : -ENOMEM;
-                p->cc_tree = NULL;
-                ask_pr_warn("hw: pcd_install hook: port 0x%02x cc_tree_create failed: %d\n",
-                            hwport_id, rc);
-                goto err;
-        }
-
-        /*
-         * Empty v4-TCP CC node. miss_action → miss_fqid (the kernel
-         * scheme's base_fqid when grafting, or the hook-supplied
-         * default otherwise) so unmatched frames go to the kernel RX
-         * FQ.
-         */
-        p->cc_v4_tcp = ask_hw_create_empty_cc_node(p->cc_tree, miss_fqid);
-        if (IS_ERR_OR_NULL(p->cc_v4_tcp)) {
-                rc = p->cc_v4_tcp ? PTR_ERR(p->cc_v4_tcp) : -ENOMEM;
-                p->cc_v4_tcp = NULL;
-                ask_pr_warn("hw: pcd_install hook: port 0x%02x cc_v4_tcp create failed: %d\n",
-                            hwport_id, rc);
-                goto err;
-        }
-
-        /* Empty v4-UDP CC node (Phase 4.10 will install per-flow keys). */
-        p->cc_v4_udp = ask_hw_create_empty_cc_node(p->cc_tree, miss_fqid);
-        if (IS_ERR_OR_NULL(p->cc_v4_udp)) {
-                rc = p->cc_v4_udp ? PTR_ERR(p->cc_v4_udp) : -ENOMEM;
-                p->cc_v4_udp = NULL;
-                ask_pr_warn("hw: pcd_install hook: port 0x%02x cc_v4_udp create failed: %d\n",
-                            hwport_id, rc);
-                goto err;
-        }
-
-        /*
-         * v1.1-B (patch 0065): graft the CC tree onto the kernel
-         * scheme by ID, writing KGSE_CCBS on the kernel-owned scheme.
-         * Skip if no kernel scheme was found (-ENOENT above) -- in
-         * that case the CC tree exists but is unreachable from the
-         * silicon dispatch path; the per-flow CC-key inserts that
-         * follow will still succeed (they don't depend on graft
-         * having been performed), and the next replay pass should
-         * pick up the kernel scheme once it lands.
-         */
-        if (have_kernel_scheme) {
-                rc = fman_pcd_kg_graft_cc(pcd, kernel_sid, p->cc_tree);
-                if (rc) {
-                        ask_pr_warn("hw: pcd_install hook: port 0x%02x graft_cc on kernel scheme %u failed: %d\n",
-                                    hwport_id, kernel_sid, rc);
-                        goto err;
-                }
-                p->kernel_scheme_id    = kernel_sid;
-                p->kernel_scheme_valid = true;
-
-                ask_pr_info("hw: pcd_install hook: port 0x%02x GRAFTED onto kernel scheme %u, miss→FQ 0x%x, ready for per-flow CC keys\n",
-                            hwport_id, kernel_sid, miss_fqid);
-        } else {
-                ask_pr_info("hw: pcd_install hook: port 0x%02x no kernel scheme — CC tree installed without graft (per-flow keys still work, silicon dispatch deferred)\n",
-                            hwport_id);
-        }
-
-        return 0;
-
-err:
-        ask_hw_port_destroy(p);
-        mutex_lock(&h->lock);
-        h->next_slot--;
-        mutex_unlock(&h->lock);
-        return rc;
-}
-
-/* ------------------------------------------------------------------------- */
-/* Bring-up / teardown                                                        */
+/* Board-substrate bring-up / teardown                                        */
 /* ------------------------------------------------------------------------- */
 
 int ask_hw_pcd_bringup(void)
@@ -657,8 +331,6 @@ int ask_hw_pcd_bringup(void)
         struct device_node *np;
         struct platform_device *pdev;
         struct fman *fman;
-        struct fman_pcd *pcd;
-        int rc;
 
         if (ask_hw_pcd_inst) {
                 ask_pr_dbg("hw: pcd bringup already done\n");
@@ -685,13 +357,6 @@ int ask_hw_pcd_bringup(void)
                 return 0;
         }
 
-        pcd = fman_get_pcd(fman);
-        if (!pcd) {
-                ask_pr_info("hw: fman_get_pcd() NULL — HW offload not available\n");
-                put_device(&pdev->dev);
-                return 0;
-        }
-
         h = kzalloc(sizeof(*h), GFP_KERNEL);
         if (!h) {
                 put_device(&pdev->dev);
@@ -700,59 +365,19 @@ int ask_hw_pcd_bringup(void)
 
         mutex_init(&h->lock);
         h->fman = fman;
-        h->pcd  = pcd;
         xa_init_flags(&h->flow_cookies, XA_FLAGS_ALLOC1);
-
-        /*
-         * Register the pre-netdev hook. Patch 0044 expects this to
-         * happen BEFORE dpaa_eth_probe runs — which, for a built-in
-         * ask.ko, is guaranteed by initcall ordering: ask.ko is
-         * fs_initcall and dpaa_eth runs much later. For an OOT ask.ko
-         * loaded after dpaa_eth has already probed, the hook will
-         * register but only fire on subsequent FMan port hot-plugs
-         * (which don't happen on LS1046A — the ports are static).
-         * That's the v1.0 limitation; ask.ko built-in is the
-         * supported configuration.
-         */
-        rc = fman_pcd_register_pre_netdev_hook(pcd, ask_pcd_install_hook, h);
-        if (rc) {
-                ask_pr_warn("hw: pre-netdev hook registration failed (%d) — HW offload not available\n",
-                            rc);
-                xa_destroy(&h->flow_cookies);
-                mutex_destroy(&h->lock);
-                kfree(h);
-                put_device(&pdev->dev);
-                return 0;
-        }
-        h->hook_registered = true;
 
         ask_hw_pcd_inst = h;
 
         /*
-         * v1.1-A late-registration replay. Empirical M2 verification
-         * on 2026-05-24 (kernel 6.18.31-vyos) confirmed all five FMan
-         * MAC ports completed fman_port_init() BEFORE this point in
-         * ask_init() ran -- async/parallel platform probing plus the
-         * MODULE_SIG_FORCE startup cost stalled the hook registration
-         * past every fman_port probe. Without replay the hook never
-         * fires, ask_hw_flow_insert_v4_tcp() returns -ENODEV for every
-         * insert, and kernel-net CPU sits at 33.14 % during forwarding.
-         *
-         * Drive a one-shot drain of pcd->pending_ports right now so
-         * any port that captured (port_id, base_fqid, hash_size) on
-         * the -ENOENT fall-through gets its install hook replayed.
-         * Errors are non-fatal: a failure here only means HW offload
-         * is unavailable for some ports; the kernel still forwards
-         * via mainline RSS.
+         * Balance the of_find_device_by_node() reference.  fman_bind()
+         * took its own get_device(), which we deliberately hold for the
+         * module lifetime (the FMan platform device is static on LS1046A)
+         * to keep the cached struct fman * valid.
          */
-        rc = fman_pcd_install_now_for_existing_ports(pcd);
-        if (rc && rc != -ENOENT)
-                ask_pr_warn("hw: install_now replay returned %d (some ports may stay on default RSS)\n",
-                            rc);
-
         put_device(&pdev->dev);
 
-        ask_pr_info("hw: Path A pre-netdev hook armed; CC pipelines install on first fman_port_init\n");
+        ask_pr_info("hw: board-substrate FMan handle bound; per-flow CC/HM offload available\n");
         return 0;
 }
 
@@ -769,30 +394,33 @@ void ask_hw_pcd_teardown(void)
         ask_hw_pcd_inst = NULL;
 
         /*
-         * Unregister the hook FIRST so no concurrent fman_port_init()
-         * can invoke us mid-teardown. On LS1046A this is moot (ports
-         * don't hot-plug) but it keeps the contract clean.
+         * Drain any flow cookies that survived to teardown, releasing each
+         * flow's shared next-hop HM reference.  The per-port static tree is
+         * razed wholesale just below, so the CC keys need no per-flow
+         * remove here — only the HM refcounts must be balanced.
          */
-        if (h->hook_registered) {
-                fman_pcd_unregister_pre_netdev_hook(h->pcd);
-                h->hook_registered = false;
-        }
-
-        /* Drain any flow cookies that survived to teardown. */
         xa_for_each(&h->flow_cookies, idx, ck) {
                 if (!ck)
                         continue;
-                if (ck->manip_chain)
-                        fman_pcd_manip_chain_destroy(ck->manip_chain);
-                if (ck->m_insrt)
-                        fman_pcd_manip_destroy(ck->m_insrt);
+                if (ck->hm_handle)
+                        fman_hm_nexthop_put(ck->fm, ck->port_id, ck->hm_handle);
                 xa_erase(&h->flow_cookies, idx);
                 kfree(ck);
         }
 
-        /* Tear down every per-port pipeline. */
-        for (i = 0; i < ASK_HW_MAX_PORTS; i++)
-                ask_hw_port_destroy(&h->port[i]);
+        /* Disengage any port still in the M1 coarse S1 mode-switch (0129). */
+        for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+                if (h->port[i].in_use && h->port[i].offload_engaged) {
+                        fman_pcd_offload_disengage(h->fman, h->port[i].port_id);
+                        h->port[i].offload_engaged = false;
+                }
+        }
+
+        /* Raze every per-port CC static tree we installed. */
+        for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+                if (h->port[i].in_use && h->port[i].cc_installed)
+                        fman_cc_tree_destroy(h->fman, h->port[i].port_id);
+        }
 
         xa_destroy(&h->flow_cookies);
         mutex_destroy(&h->lock);
@@ -805,29 +433,104 @@ struct ask_hw_pcd *ask_hw_pcd_get(void)
         return ask_hw_pcd_inst;
 }
 
+/* ------------------------------------------------------------------------- */
+/* M1 coarse dataplane mode-switch (control-plane plumbing; ships dormant)    */
+/* ------------------------------------------------------------------------- */
+
+/* Defined further down with the per-flow fast path; forward-declared here. */
+static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h,
+						u8 port_id);
+
 /*
- * Helper for Phase 4.10's flow_offload path: look up the per-port
- * v4-TCP CC node by hwport_id. Returns NULL if no pipeline is
- * installed for that port.
- *
- * Callers must hold an RCU-equivalent guarantee that the pipeline
- * isn't being torn down concurrently — in practice the pipeline
- * lifetime equals ask.ko module lifetime, so any caller running
- * inside an ask_flow_offload.c callback is safe.
+ * Engage/disengage the coarse S0<->S1 PCD mode-switch on one FMan RX port.
+ * These forward to the board-exported fman_pcd_offload_engage()/_disengage()
+ * (board patch 0129) - the EXACT reversible KGSE_CCBS graft sequence proven by
+ * the cc_test harness + 100x soak.  A per-port "engaged" flag makes both
+ * idempotent so a double-engage / stray-disengage is a safe no-op, and
+ * teardown reverts any port left engaged.  M1 carries no classification
+ * semantics and is NOT wired to a traffic path - this is control-plane
+ * plumbing only (the traffic-carrying engage is blocked on M2 AC_CC
+ * disposition).  Triggered manually via /sys/kernel/debug/ask/offload; M7
+ * routes `set system offload ask` here.
+ */
+int ask_hw_offload_engage(u8 hw_port_id)
+{
+        struct ask_hw_pcd *h = ask_hw_pcd_get();
+        struct ask_hw_port *p;
+        int rc;
+
+        if (!h)
+                return -ENODEV;
+
+        mutex_lock(&h->lock);
+
+        p = ask_hw_port_slot_get(h, hw_port_id);
+        if (!p) {
+                rc = -ENOSPC;
+                goto out_unlock;
+        }
+        if (p->offload_engaged) {
+                rc = 0;                 /* idempotent */
+                goto out_unlock;
+        }
+
+        rc = fman_pcd_offload_engage(h->fman, hw_port_id);
+        if (rc)
+                goto out_unlock;
+
+        p->offload_engaged = true;
+        ask_pr_info("hw: offload ENGAGED on port 0x%02x (S0->S1)\n", hw_port_id);
+
+out_unlock:
+        mutex_unlock(&h->lock);
+        return rc;
+}
+EXPORT_SYMBOL_GPL(ask_hw_offload_engage);
+
+void ask_hw_offload_disengage(u8 hw_port_id)
+{
+        struct ask_hw_pcd *h = ask_hw_pcd_get();
+        struct ask_hw_port *p;
+        unsigned int i;
+
+        if (!h)
+                return;
+
+        mutex_lock(&h->lock);
+
+        p = NULL;
+        for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+                if (h->port[i].in_use && h->port[i].port_id == hw_port_id) {
+                        p = &h->port[i];
+                        break;
+                }
+        }
+        if (!p || !p->offload_engaged) {
+                mutex_unlock(&h->lock);
+                return;                 /* idempotent no-op */
+        }
+
+        fman_pcd_offload_disengage(h->fman, hw_port_id);
+        p->offload_engaged = false;
+        mutex_unlock(&h->lock);
+        ask_pr_info("hw: offload DISENGAGED on port 0x%02x (S1->S0)\n", hw_port_id);
+}
+EXPORT_SYMBOL_GPL(ask_hw_offload_disengage);
+
+/* ------------------------------------------------------------------------- */
+/* Legacy ABI stubs (consumers/tests still name these; Stage C removes them)  */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Under the board substrate ask.ko owns no fman_pcd_cc_node objects (the
+ * CC tree lives inside fsl_dpa.ko, addressed by (struct fman *, port_id)),
+ * so these per-port node accessors always return NULL.  Kept as ABI stubs
+ * until the consumers/tests that still name them are cleaned up in Stage C.
  */
 struct fman_pcd_cc_node *
 ask_hw_pcd_cc_v4_tcp_for_port(u8 hwport_id)
 {
-        struct ask_hw_pcd *h = ask_hw_pcd_inst;
-        unsigned int i;
-
-        if (!h)
-                return NULL;
-
-        for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
-                if (h->port[i].in_use && h->port[i].hwport_id == hwport_id)
-                        return h->port[i].cc_v4_tcp;
-        }
+        (void)hwport_id;
         return NULL;
 }
 EXPORT_SYMBOL_GPL(ask_hw_pcd_cc_v4_tcp_for_port);
@@ -835,43 +538,18 @@ EXPORT_SYMBOL_GPL(ask_hw_pcd_cc_v4_tcp_for_port);
 struct fman_pcd_cc_node *
 ask_hw_pcd_cc_v4_udp_for_port(u8 hwport_id)
 {
-        struct ask_hw_pcd *h = ask_hw_pcd_inst;
-        unsigned int i;
-
-        if (!h)
-                return NULL;
-
-        for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
-                if (h->port[i].in_use && h->port[i].hwport_id == hwport_id)
-                        return h->port[i].cc_v4_udp;
-        }
+        (void)hwport_id;
         return NULL;
 }
 EXPORT_SYMBOL_GPL(ask_hw_pcd_cc_v4_udp_for_port);
-
-/* ------------------------------------------------------------------------- */
-/* Phase 4.9 → 4.10 boundary stubs                                            */
-/*                                                                            */
-/* The following five entry points are KEPT as ABI-compatible stubs so       */
-/* ask_flow_offload.c continues to compile across Phase 4.9 / 4.10.          */
-/* Phase 4.10 will:                                                           */
-/*  - rewrite ask_flow_offload.c to stop calling ask_hw_port_bind /          */
-/*    ask_hw_port_unbind (they're meaningless under Path A; the pipelines   */
-/*    are pre-installed at boot, not at FLOW_BLOCK_BIND time)                */
-/*  - rewrite ask_hw_flow_insert / ask_hw_flow_remove to do real per-flow   */
-/*    MANIP-chain construction + cc_node_add_key / _remove_key               */
-/*  - delete ask_priv_pack_hw_flow_id / _unpack_hw_flow_id (debug-only,     */
-/*    superseded by xarray cookie indirection)                               */
-/* ------------------------------------------------------------------------- */
 
 int ask_hw_port_bind(u8 port_id, enum ask_hw_dir dir,
                      struct net_device *ingress_dev)
 {
         /*
-         * Path A: pipelines are installed at boot via the pre-netdev
-         * hook, not at flow_block bind time. This stub returns 0 so
-         * the legacy ask_flow_offload.c BIND path treats every bind
-         * as a successful no-op. Phase 4.10 deletes the caller.
+         * The board substrate arms each port's CC pipeline at MAC probe;
+         * there is nothing to bind at flow_block time.  Returns 0 so the
+         * ask_flow_offload.c BIND path treats every bind as a no-op.
          */
         (void)port_id; (void)dir; (void)ingress_dev;
         return 0;
@@ -880,12 +558,6 @@ EXPORT_SYMBOL_GPL(ask_hw_port_bind);
 
 int ask_hw_port_unbind(u8 port_id)
 {
-        /*
-         * Path A: pipelines persist for the lifetime of ask.ko.
-         * Unbind is a runtime no-op; the CC trees are emptied by
-         * per-flow remove_key calls and torn down only at
-         * ask_hw_exit().
-         */
         (void)port_id;
         return 0;
 }
@@ -908,129 +580,114 @@ void ask_priv_unpack_hw_flow_id(u32 hw_flow_id,
 }
 EXPORT_SYMBOL_GPL(ask_priv_unpack_hw_flow_id);
 
+/* ------------------------------------------------------------------------- */
+/* Per-flow fast path                                                         */
+/* ------------------------------------------------------------------------- */
+
 /*
- * Build per-flow MANIP chain (v1.3 Path A, plan §4.2):
- *
- *   1. m_rmv   = MANIP_RMV_ETHERNET  (strip 14-byte ingress L2)
- *   2. m_insrt = MANIP_INSRT_GENERIC (push 14-byte egress L2:
- *                next_hop_mac + egress_mac + ETH_P_IP)
- *   3. m_ipv4  = MANIP_FIELD_UPDATE_IPV4_FORWARD (TTL-- + cksum
- *                recompute)
- *   4. chain   = fman_pcd_manip_chain_create([m_rmv, m_insrt, m_ipv4])
- *
- * The chain handle is consumed by a CC-key action atom of type
- * FMAN_PCD_ACTION_MANIPULATE { .manip = chain, .next_fqid = tx_fqid }.
- *
- * On any failure all partially-constructed manips are destroyed and
- * an errno is propagated to the caller (ask_flow_offload.c REPLACE
- * handler). The ASK_HW path NEVER leaks MURAM on the error path —
- * caller falls back to SW-only.
+ * Resolve (or claim) the per-ingress-port shadow record for @port_id.
+ * Returns NULL only when all ASK_HW_MAX_PORTS slots are already owned by
+ * other ports.  Caller holds h->lock.
  */
-static int ask_hw_build_manip_chain(struct ask_hw_pcd *h,
-                                    const struct ask_flow_key *key,
-                                    struct fman_pcd_manip **out_rmv,
-                                    struct fman_pcd_manip **out_insrt,
-                                    struct fman_pcd_manip **out_ipv4,
-                                    struct fman_pcd_manip **out_chain)
+static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h, u8 port_id)
 {
-        struct fman_pcd_manip_params p;
-        struct fman_pcd_manip *m_rmv = NULL, *m_insrt = NULL;
-        struct fman_pcd_manip *m_ipv4 = NULL, *chain = NULL;
-        struct fman_pcd_manip *src[3];
-        __be16 etype = htons(ETH_P_IP);
+        unsigned int i, free_idx = ASK_HW_MAX_PORTS;
+
+        for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+                if (h->port[i].in_use) {
+                        if (h->port[i].port_id == port_id)
+                                return &h->port[i];
+                } else if (free_idx == ASK_HW_MAX_PORTS) {
+                        free_idx = i;
+                }
+        }
+        if (free_idx == ASK_HW_MAX_PORTS)
+                return NULL;
+
+        h->port[free_idx].in_use       = true;
+        h->port[free_idx].port_id      = port_id;
+        h->port[free_idx].cc_installed = false;
+        h->port[free_idx].nkeys        = 0;
+        h->port[free_idx].next_key_id  = 1;
+        return &h->port[free_idx];
+}
+
+/*
+ * Rebuild-via-install (mirrors board patch 0109 dpaa_cls_reinstall): raze the
+ * port's live CC static tree, then re-materialise it from the current software
+ * shadow and install it.  Destroying first clears the port's KGSE_CCBS gate
+ * before the MURAM is freed, so no in-flight frame walks a half-torn tree (the
+ * brief gap routes frames to the RSS scheme).  Caller holds h->lock.
+ */
+static int ask_hw_port_reinstall(struct ask_hw_pcd *h, struct ask_hw_port *p)
+{
+        struct fman_cc_static_tree *tree;
+        unsigned int i;
         int rc;
 
-        ask_pr_dbg("hw: build_manip_chain: enter nh=%pM em=%pM\n",
-                   key->next_hop_mac, key->egress_mac);
-
-        /* 1. RMV_ETHERNET — strip 14-byte ingress L2 header. */
-        memset(&p, 0, sizeof(p));
-        p.type = FMAN_PCD_MANIP_RMV_ETHERNET;
-        m_rmv = fman_pcd_manip_create(h->pcd, &p);
-        if (IS_ERR_OR_NULL(m_rmv)) {
-                rc = m_rmv ? PTR_ERR(m_rmv) : -ENOMEM;
-                m_rmv = NULL;
-                ask_pr_warn("hw: build_manip_chain: RMV_ETHERNET create failed: %d\n", rc);
-                goto err;
+        if (p->cc_installed) {
+                fman_cc_tree_destroy(h->fman, p->port_id);
+                p->cc_installed = false;
         }
+        if (p->nkeys == 0)
+                return 0;
 
-        /* 2. INSRT_GENERIC — push new 14-byte L2 header. */
-        memset(&p, 0, sizeof(p));
-        p.type = FMAN_PCD_MANIP_INSRT_GENERIC;
-        p.insrt_generic.size = 14;
-        memcpy(&p.insrt_generic.hdr[0], key->next_hop_mac, ETH_ALEN);
-        memcpy(&p.insrt_generic.hdr[6], key->egress_mac,   ETH_ALEN);
-        memcpy(&p.insrt_generic.hdr[12], &etype, 2);
-        m_insrt = fman_pcd_manip_create(h->pcd, &p);
-        if (IS_ERR_OR_NULL(m_insrt)) {
-                rc = m_insrt ? PTR_ERR(m_insrt) : -ENOMEM;
-                m_insrt = NULL;
-                ask_pr_warn("hw: build_manip_chain: INSRT_GENERIC create failed: %d\n", rc);
-                goto err;
+        tree = kzalloc(sizeof(*tree), GFP_KERNEL);
+        if (!tree)
+                return -ENOMEM;
+
+        for (i = 0; i < FMAN_CC_MAX_STATIC_KEYS; i++) {
+                if (!p->shadow[i].used)
+                        continue;
+                tree->keys[tree->num_keys++] = p->shadow[i].key;
         }
-
-        /* 3. FIELD_UPDATE_IPV4_FORWARD — TTL-- + IPv4 cksum recompute. */
-        memset(&p, 0, sizeof(p));
-        p.type = FMAN_PCD_MANIP_FIELD_UPDATE_IPV4_FORWARD;
-        p.ipv4_forward.recompute_cksum = true;
-        m_ipv4 = fman_pcd_manip_create(h->pcd, &p);
-        if (IS_ERR_OR_NULL(m_ipv4)) {
-                rc = m_ipv4 ? PTR_ERR(m_ipv4) : -ENOMEM;
-                m_ipv4 = NULL;
-                ask_pr_warn("hw: build_manip_chain: FIELD_UPDATE_IPV4_FORWARD create failed: %d\n", rc);
-                goto err;
-        }
-
-        /* 4. Concatenate into one HMCT. */
-        src[0] = m_rmv;
-        src[1] = m_insrt;
-        src[2] = m_ipv4;
-        chain = fman_pcd_manip_chain_create(h->pcd, src, 3);
-        if (IS_ERR_OR_NULL(chain)) {
-                rc = chain ? PTR_ERR(chain) : -ENOMEM;
-                chain = NULL;
-                ask_pr_warn("hw: build_manip_chain: chain_create(3 manips) failed: %d\n", rc);
-                goto err;
-        }
-
-        *out_rmv   = m_rmv;
-        *out_insrt = m_insrt;
-        *out_ipv4  = m_ipv4;
-        *out_chain = chain;
-        return 0;
-
-err:
-        if (m_ipv4)  fman_pcd_manip_destroy(m_ipv4);
-        if (m_insrt) fman_pcd_manip_destroy(m_insrt);
-        if (m_rmv)   fman_pcd_manip_destroy(m_rmv);
+        /* miss_fqid 0 -> non-matching frames stay on the RSS-hash path. */
+        rc = fman_cc_tree_install(h->fman, p->port_id, tree);
+        if (!rc)
+                p->cc_installed = true;
+        kfree(tree);
         return rc;
 }
 
 /*
- * Build the 16-byte exact-match CC key matching the per-port KG
- * scheme's 5-extract recipe [SIP:4][DIP:4][SPI:4=0][SP:2][DP:2].
- *
- * Bytes 8..11 (SPI slot) are silicon-zero for non-IPSec TCP/UDP, so
- * we leave them at 0 with mask 0xff — non-IPSec frames match, IPSec
- * frames implicitly miss (v1.0 scope).
+ * Map an ASK flow netdev ifindex to its ingress BMI hwport id via the board
+ * resolver chain.  Returns -ENODEV for a non-DPAA / unknown ifindex (the
+ * graceful SW-fallback signal).  ASK offload flows on this single-image board
+ * live in the init namespace.
  */
-static void ask_hw_build_cc_key_v4(const struct ask_flow_key *key,
-                                   struct fman_pcd_cc_key_entry *entry)
+static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id)
 {
-        memset(entry, 0, sizeof(*entry));
+        struct net_device *dev;
+        struct fman_port *port;
 
-        /* Bytes 0..3 : src IPv4 */
-        memcpy(&entry->key[0], &key->src_ip[0], 4);
-        /* Bytes 4..7 : dst IPv4 */
-        memcpy(&entry->key[4], &key->dst_ip[0], 4);
-        /* Bytes 8..11: SPI = 0 (non-IPSec); already zeroed. */
-        /* Bytes 12..13: L4 src port */
-        memcpy(&entry->key[12], &key->sport, 2);
-        /* Bytes 14..15: L4 dst port */
-        memcpy(&entry->key[14], &key->dport, 2);
+        dev = dev_get_by_index(&init_net, ifindex);
+        if (!dev)
+                return -ENODEV;
+        port = dpaa_get_rx_fman_port(dev);
+        if (!port) {
+                dev_put(dev);
+                return -ENODEV;
+        }
+        *port_id = fman_port_get_id(port);
+        dev_put(dev);
+        return 0;
+}
 
-        /* Exact-match mask across all 16 emitted key bytes. */
-        memset(&entry->mask[0], 0xff, ASK_HW_V4_KEY_WIDTH);
+/*
+ * Map an ASK flow egress netdev ifindex to its TX QMan FQID (queue 0).
+ * Returns -ENODEV for a non-DPAA / unknown ifindex.
+ */
+static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
+{
+        struct net_device *dev;
+        int rc;
+
+        dev = dev_get_by_index(&init_net, ifindex);
+        if (!dev)
+                return -ENODEV;
+        rc = dpaa_get_tx_fqid(dev, 0, fqid);
+        dev_put(dev);
+        return rc ? -ENODEV : 0;
 }
 
 int ask_hw_flow_insert(const struct ask_flow_key *key,
@@ -1039,117 +696,136 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
                        u32 *out_hw_id)
 {
         struct ask_hw_pcd *h = ask_hw_pcd_get();
-        struct net_device *dev_iif = NULL, *dev_oif = NULL;
-        struct fman_pcd_cc_node *cc_node;
-        struct fman_pcd_manip *m_rmv = NULL, *m_insrt = NULL;
-        struct fman_pcd_manip *m_ipv4 = NULL, *chain = NULL;
-        struct fman_pcd_cc_key_entry entry;
         struct ask_hw_flow_cookie ck;
-        u32 tx_fqid = 0, cookie = 0;
-        u8 hwport_id;
-        int rc, slot;
+        struct ask_hw_port *p;
+        struct fman_cc_key *k;
+        unsigned int slot;
+        u32 tx_fqid = 0;
+        u32 hm_handle = 0;
+        u32 cookie;
+        u8  port_id = 0;
+        int rc;
 
         (void)action_flags; (void)dir;
 
-        if (out_hw_id)
-                *out_hw_id = 0;
+        /* NULL-arg contract: fail without touching *out_hw_id. */
+        if (!key || !out_hw_id)
+                return -EINVAL;
 
-        /* No HW backing → SW-only fallback. */
+        /* No HW backing -> SW-only fallback. */
         if (!h)
                 return -ENODEV;
 
-        /* v1.0 scope: IPv4 TCP only. UDP v6 land in M3. */
+        /* Body ships v4 TCP/UDP only; everything else falls back to SW. */
         if (key->l3_proto != ASK_FLOW_L3_IPV4 ||
-            key->l4_proto != IPPROTO_TCP)
+            (key->l4_proto != IPPROTO_TCP && key->l4_proto != IPPROTO_UDP))
                 return -EOPNOTSUPP;
 
-        /* Neigh not yet resolved → caller retries after netevent. */
+        /*
+         * Neighbour not yet resolved: keep the flow in SW until the egress L2
+         * header is known, then the upper layer re-inserts.
+         */
         if (is_zero_ether_addr(key->next_hop_mac) ||
             is_zero_ether_addr(key->egress_mac))
                 return -EAGAIN;
 
-        /* Resolve ingress kernel ifindex → FMan BMI hwport_id. */
-        dev_iif = dev_get_by_index(&init_net, key->iif);
-        if (!dev_iif) {
-                rc = -ENODEV;
-                goto out;
-        }
-        rc = dpaa_get_fman_port_id(dev_iif, &hwport_id);
+        /* Ingress hwport owns the CC tree; egress FQID is the forward target. */
+        rc = ask_hw_resolve_iif_port(key->iif, &port_id);
         if (rc)
-                goto out;
+                return rc;
+        rc = ask_hw_resolve_oif_fqid(oif, &tx_fqid);
+        if (rc)
+                return rc;
 
-        /* Per-port CC node installed by the pre-netdev hook. */
-        cc_node = ask_hw_pcd_cc_v4_tcp_for_port(hwport_id);
-        if (!cc_node) {
-                rc = -ENODEV;
-                goto out;
+        mutex_lock(&h->lock);
+
+        p = ask_hw_port_slot_get(h, port_id);
+        if (!p) {
+                rc = -ENOSPC;
+                goto out_unlock;
+        }
+        if (p->nkeys >= FMAN_CC_MAX_STATIC_KEYS) {
+                rc = -ENOSPC;
+                goto out_unlock;
+        }
+        for (slot = 0; slot < FMAN_CC_MAX_STATIC_KEYS; slot++)
+                if (!p->shadow[slot].used)
+                        break;
+        if (slot == FMAN_CC_MAX_STATIC_KEYS) {
+                rc = -ENOSPC;
+                goto out_unlock;
         }
 
-        /* Resolve egress ifindex → DPAA TX FQID. Use queue 0
-         * (single TX path; M3 will add per-CPU TX queue selection).
+        /*
+         * Resolve (and refcount) the shared next-hop HM node.  MAC order per
+         * the caps header: src_mac = egress port's own MAC, dst_mac = next-hop
+         * MAC.  -ENOTSUPP (ucode lacks HM caps) maps to -EOPNOTSUPP so the
+         * caller treats it as a clean SW fallback, not a hard error.
          */
-        dev_oif = dev_get_by_index(&init_net, oif);
-        if (!dev_oif) {
-                rc = -ENODEV;
-                goto out;
-        }
-        rc = dpaa_get_tx_fqid(dev_oif, 0, &tx_fqid);
-        if (rc)
-                goto out;
-
-        /* Build the per-flow 3-MANIP chain (rmv + insrt + ipv4). */
-        rc = ask_hw_build_manip_chain(h, key, &m_rmv, &m_insrt,
-                                      &m_ipv4, &chain);
-        if (rc)
-                goto out;
-
-        /* Build the CC key and install it. */
-        ask_hw_build_cc_key_v4(key, &entry);
-        entry.action.type = FMAN_PCD_ACTION_MANIPULATE;
-        entry.action.manipulate.manip     = chain;
-        entry.action.manipulate.next_fqid = tx_fqid;
-
-        slot = fman_pcd_cc_node_add_key(cc_node, &entry);
-        if (slot < 0) {
-                rc = slot;
-                ask_pr_warn("hw: flow_insert: cc_node_add_key failed: %d\n", rc);
-                goto out_chain;
+        rc = fman_hm_nexthop_get(h->fman, port_id, tx_fqid,
+                                 key->egress_mac, key->next_hop_mac,
+                                 &hm_handle);
+        if (rc) {
+                rc = (rc == -ENOTSUPP) ? -EOPNOTSUPP : rc;
+                goto out_unlock;
         }
 
-        /* Stash cookie state for the matching remove. */
-        memset(&ck, 0, sizeof(ck));
-        ck.cc_node      = cc_node;
-        ck.key_idx      = (u16)slot;
-        ck.m_rmv        = m_rmv;
-        ck.m_insrt      = m_insrt;
-        ck.m_ipv4       = m_ipv4;
-        ck.manip_chain  = chain;
-        ck.sink_ifindex = oif;
+        /* Build the masked 5-tuple CC key -> FORWARD_FQ_WITH_MANIP atom. */
+        k = &p->shadow[slot].key;
+        memset(k, 0, sizeof(*k));
+        k->ethertype    = FMAN_CC_ETHERTYPE_IPV4;
+        k->proto        = key->l4_proto;
+        k->is_ipv6      = 0;
+        k->src_ip       = get_unaligned_be32(&key->src_ip[0]);
+        k->dst_ip       = get_unaligned_be32(&key->dst_ip[0]);
+        k->src_ip_mask  = 0xffffffffu;
+        k->dst_ip_mask  = 0xffffffffu;
+        k->src_port     = be16_to_cpu(key->sport);
+        k->dst_port     = be16_to_cpu(key->dport);
+        k->target_qband = 0;
+        k->target_fqid  = tx_fqid;
+        k->hm_handle    = hm_handle;
+
+        p->shadow[slot].used   = true;
+        p->shadow[slot].key_id = p->next_key_id;
+        p->nkeys++;
+
+        rc = ask_hw_port_reinstall(h, p);
+        if (rc)
+                goto out_rollback;
+
+        ck.fm           = h->fman;
+        ck.port_id      = port_id;
+        ck.cc_handle    = p->shadow[slot].key_id;
+        ck.hm_handle    = hm_handle;
+        ck.sink_ifindex = (int)oif;
         ck.sink_fqid    = tx_fqid;
 
         cookie = ask_hw_cookie_alloc(h, &ck);
-        if (cookie == 0) {
+        if (!cookie) {
                 rc = -ENOMEM;
-                ask_pr_warn("hw: flow_insert: cookie_alloc failed\n");
-                fman_pcd_cc_node_remove_key(cc_node, (u16)slot);
-                goto out_chain;
+                goto out_rollback;
         }
 
+        /* Commit: consume the per-port id (skip 0) and publish the cookie. */
+        if (++p->next_key_id == 0)
+                p->next_key_id = 1;
+
+        mutex_unlock(&h->lock);
         *out_hw_id = cookie;
-        rc = 0;
+        ask_pr_dbg("hw: flow_insert: port=0x%02x fqid=%u hm=0x%x key_id=%u cookie=0x%x\n",
+                   port_id, tx_fqid, hm_handle, ck.cc_handle, cookie);
+        return 0;
 
-        ask_pr_dbg("hw: flow_insert: port 0x%02x slot=%d tx_fqid=0x%x cookie=0x%x\n",
-                   hwport_id, slot, tx_fqid, cookie);
-        goto out;
-
-out_chain:
-        if (chain)   fman_pcd_manip_chain_destroy(chain);
-        if (m_ipv4)  fman_pcd_manip_destroy(m_ipv4);
-        if (m_insrt) fman_pcd_manip_destroy(m_insrt);
-        if (m_rmv)   fman_pcd_manip_destroy(m_rmv);
-out:
-        if (dev_oif) dev_put(dev_oif);
-        if (dev_iif) dev_put(dev_iif);
+out_rollback:
+        p->shadow[slot].used = false;
+        p->nkeys--;
+        /* Best-effort: restore the tree to the pre-insert key set. */
+        (void)ask_hw_port_reinstall(h, p);
+        if (hm_handle)
+                fman_hm_nexthop_put(h->fman, port_id, hm_handle);
+out_unlock:
+        mutex_unlock(&h->lock);
         return rc;
 }
 EXPORT_SYMBOL_GPL(ask_hw_flow_insert);
@@ -1158,30 +834,53 @@ int ask_hw_flow_remove(u32 hw_flow_id)
 {
         struct ask_hw_pcd *h = ask_hw_pcd_get();
         struct ask_hw_flow_cookie *ck;
+        struct ask_hw_port *p = NULL;
+        unsigned int i;
 
         if (!h || hw_flow_id == 0)
                 return 0;
 
+        mutex_lock(&h->lock);
+
         ck = ask_hw_cookie_lookup(h, hw_flow_id);
         if (!ck) {
                 /* Already torn down; treat as success (idempotent). */
+                mutex_unlock(&h->lock);
                 return 0;
         }
 
-        if (ck->cc_node)
-                fman_pcd_cc_node_remove_key(ck->cc_node, ck->key_idx);
-        if (ck->manip_chain)
-                fman_pcd_manip_chain_destroy(ck->manip_chain);
-        if (ck->m_ipv4)
-                fman_pcd_manip_destroy(ck->m_ipv4);
-        if (ck->m_insrt)
-                fman_pcd_manip_destroy(ck->m_insrt);
-        if (ck->m_rmv)
-                fman_pcd_manip_destroy(ck->m_rmv);
+        /*
+         * Drop this flow's 5-tuple from the ingress port's software CC shadow
+         * (matched by the monotonic key_id snapshotted in cc_handle) and
+         * rebuild the static tree without it.  Then release the shared
+         * next-hop HM reference (refcounted: the node survives until the last
+         * flow toward that adjacency is gone).
+         */
+        for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+                if (h->port[i].in_use && h->port[i].port_id == ck->port_id) {
+                        p = &h->port[i];
+                        break;
+                }
+        }
+        if (p && ck->cc_handle) {
+                for (i = 0; i < FMAN_CC_MAX_STATIC_KEYS; i++) {
+                        if (p->shadow[i].used &&
+                            p->shadow[i].key_id == ck->cc_handle) {
+                                p->shadow[i].used = false;
+                                p->nkeys--;
+                                (void)ask_hw_port_reinstall(h, p);
+                                break;
+                        }
+                }
+        }
+
+        if (ck->hm_handle)
+                fman_hm_nexthop_put(ck->fm, ck->port_id, ck->hm_handle);
 
         ask_hw_cookie_free(h, hw_flow_id);
 
-        ask_pr_dbg("hw: flow_remove: cookie=0x%x torn down\n", hw_flow_id);
+        mutex_unlock(&h->lock);
+        ask_pr_dbg("hw: flow_remove: cookie=0x%x released\n", hw_flow_id);
         return 0;
 }
 EXPORT_SYMBOL_GPL(ask_hw_flow_remove);

@@ -20,18 +20,18 @@ iterated over every package); since v6.7 the package build is driven
 per-package from debian/rules, so we have to extend that mechanism
 instead.
 ---
- scripts/package/builddeb      | 16 ++++++++++++++++
- scripts/package/debian/rules  |  3 ++-
- scripts/package/mkdebian      | 12 ++++++++++++
+ scripts/package/builddeb     | 16 ++++++++++++++++
+ scripts/package/debian/rules |  3 ++-
+ scripts/package/mkdebian     | 12 ++++++++++++
  3 files changed, 30 insertions(+), 1 deletion(-)
-
 diff --git a/scripts/package/builddeb b/scripts/package/builddeb
+index ba1defc61..61e5d3b84 100755
 --- a/scripts/package/builddeb
 +++ b/scripts/package/builddeb
-@@ -156,6 +156,20 @@ install_libc_headers () {
+@@ -162,6 +162,20 @@ install_libc_headers () {
  	mv "$pdir/usr/include/asm" "$pdir/usr/include/${DEB_HOST_MULTIARCH}"
  }
- 
+
 +install_perf () {
 +	pdir=debian/$1
 +
@@ -47,9 +47,9 @@ diff --git a/scripts/package/builddeb b/scripts/package/builddeb
 +}
 +
  package=$1
- 
+
  case "${package}" in
-@@ -167,4 +181,6 @@ linux-libc-dev)
+@@ -173,4 +187,6 @@ linux-libc-dev)
  	install_libc_headers "${package}";;
  linux-headers-*)
  	install_kernel_headers "${package}";;
@@ -57,32 +57,33 @@ diff --git a/scripts/package/builddeb b/scripts/package/builddeb
 +	install_perf "${package}";;
  esac
 diff --git a/scripts/package/debian/rules b/scripts/package/debian/rules
+index a417a7f8b..3b6905034 100755
 --- a/scripts/package/debian/rules
 +++ b/scripts/package/debian/rules
 @@ -27,13 +27,14 @@ make-opts = ARCH=$(ARCH) KERNELRELEASE=$(KERNELRELEASE) \
      $(addprefix KBUILD_BUILD_VERSION=,$(revision)) \
      $(addprefix CROSS_COMPILE=,$(CROSS_COMPILE))
- 
+
 -binary-targets := $(addprefix binary-, image image-dbg headers libc-dev)
 +binary-targets := $(addprefix binary-, image image-dbg headers libc-dev perf)
- 
+
  all-packages = $(shell dh_listpackages)
  image-package = $(filter linux-image-% user-%, $(filter-out %-dbg, $(all-packages)))
  image-dbg-package = $(filter %-dbg, $(all-packages))
  libc-dev-package = $(filter linux-libc-dev, $(all-packages))
  headers-package = $(filter linux-headers-%, $(all-packages))
 +perf-package = $(filter linux-perf-%, $(all-packages))
- 
+
  mk-files = $(patsubst binary-%,debian/%.files,$1)
  package = $($(@:binary-%=%-package))
 diff --git a/scripts/package/mkdebian b/scripts/package/mkdebian
+index d4b007b38..1459d60ca 100755
 --- a/scripts/package/mkdebian
 +++ b/scripts/package/mkdebian
-@@ -247,6 +247,18 @@ Description: Linux kernel headers for ${KERNELRELEASE} on $debarch
-  This is useful for people who need to build external modules
- EOF
+@@ -249,6 +249,18 @@ EOF
  fi
-+
+ fi
+
 +cat <<EOF >> debian/control
 +
 +Package: linux-perf-${KERNELRELEASE}
@@ -94,9 +95,9 @@ diff --git a/scripts/package/mkdebian b/scripts/package/mkdebian
 + kernel version ${KERNELRELEASE}.
 +Multi-Arch: same
 +EOF
- fi
- 
++
  if is_enabled CONFIG_DEBUG_INFO; then
--- 
-2.39.5
+ cat <<EOF >> debian/control
 
+--
+2.39.5
