@@ -898,18 +898,24 @@ if [ -d "${CWD}/sdk-overlay/drivers" ]; then
 
   # --- Config swap: disable mainline DPAA1, enable the SDK stack -------------
   scripts/config --set-val CONFIG_NR_CPUS 4
-  # Disable all mainline DPAA symbols so SDK can take over.
+  # Disable all mainline DPAA symbols.
   scripts/config --disable CONFIG_FSL_FMAN_PCD
   scripts/config --disable CONFIG_FSL_DPAA_ETH
   scripts/config --disable CONFIG_FSL_DPAA
   scripts/config --disable CONFIG_FSL_FMAN
   scripts/config --disable CONFIG_FSL_FM_MAX_FRAME_SIZE
   scripts/config --disable CONFIG_FSL_XGMAC_MDIO
-  # Run olddefconfig once to clean up dependents of the disabled symbols.
+  scripts/config --disable CONFIG_DPAA_ERRATUM_A050385
   make olddefconfig
-  # Now force-enable the SDK stack via direct .config writes (scripts/config
-  # may not recognise symbols from newly-sourced Kconfig files, but make
-  # olddefconfig will resolve them).
+  # Force-disable FSL_FMAN/FSL_DPAA — olddefconfig sometimes re-enables
+  # them if any enabled symbol (including SDK ones) touches DPAA selects.
+  sed -i '/^CONFIG_FSL_FMAN[= ]/d' .config
+  sed -i '/^CONFIG_FSL_DPAA[= ]/d' .config
+  sed -i '/^CONFIG_FSL_DPAA_ETH[= ]/d' .config
+  echo '# CONFIG_FSL_FMAN is not set' >> .config
+  echo '# CONFIG_FSL_DPAA is not set' >> .config
+  echo '# CONFIG_FSL_DPAA_ETH is not set' >> .config
+  # Now force-enable the SDK stack.
   cat >> .config << 'SDKCFG'
 CONFIG_STAGING=y
 CONFIG_FSL_SDK_DPA=y
@@ -926,7 +932,7 @@ CONFIG_FSL_USDPAA=y
 SDKCFG
   make olddefconfig
   echo "### NXP SDK: vendor overlay + config swap applied"
-  # Verify the swap took effect.
+  # Hard-verify the swap took effect.
   if grep -q '^CONFIG_FSL_FMAN=y' .config; then
     echo "ERROR: CONFIG_FSL_FMAN re-enabled after SDK config swap"
     exit 1
