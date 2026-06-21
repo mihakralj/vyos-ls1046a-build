@@ -875,17 +875,14 @@ if [ -d "${CWD}/sdk-overlay/drivers" ]; then
     echo 'obj-\$(CONFIG_FSL_SDK_FMAN) += sdk_fman/' >> "$FRESC/Makefile"
   grep -q 'sdk_dpaa/' "$FRESC/Makefile" 2>/dev/null || \
     echo 'obj-\$(CONFIG_FSL_SDK_DPAA_ETH) += sdk_dpaa/' >> "$FRESC/Makefile"
-  # Source SDK Kconfigs from staging/Kconfig alongside the working
-  # fsl_qbman Kconfig. Do NOT concatenate — modifying Kconfig files
-  # in-place creates mismatched if/endif blocks.
+  # Source SDK Kconfigs from staging/Kconfig (always processed).
+  # fsl_qbman must be sourced FIRST — SDK fman/dpaa depend on its symbols.
+  grep -q 'fsl_qbman/Kconfig' drivers/staging/Kconfig 2>/dev/null || \
+    echo 'source "drivers/staging/fsl_qbman/Kconfig"' >> drivers/staging/Kconfig
   grep -q 'sdk_fman/Kconfig' drivers/staging/Kconfig 2>/dev/null || \
     echo 'source "drivers/net/ethernet/freescale/sdk_fman/Kconfig"' >> drivers/staging/Kconfig
   grep -q 'sdk_dpaa/Kconfig' drivers/staging/Kconfig 2>/dev/null || \
     echo 'source "drivers/net/ethernet/freescale/sdk_dpaa/Kconfig"' >> drivers/staging/Kconfig
-  grep -q 'sdk_fman/' "$FRESC/Makefile" 2>/dev/null || \
-    echo 'obj-\$(CONFIG_FSL_SDK_FMAN) += sdk_fman/' >> "$FRESC/Makefile"
-  grep -q 'sdk_dpaa/' "$FRESC/Makefile" 2>/dev/null || \
-    echo 'obj-\$(CONFIG_FSL_SDK_DPAA_ETH) += sdk_dpaa/' >> "$FRESC/Makefile"
 
   # Enable the enhanced-ehash PCD ioctl path (the FE classifier that programs
   # FMan KeyGen). Without -DUSE_ENHANCED_EHASH the PCD ioctls silently no-op.
