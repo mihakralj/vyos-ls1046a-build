@@ -154,6 +154,11 @@ jobs:
       TIMESTAMP: ${{ needs.call-auto-build.outputs.TIMESTAMP }}
       PREV_TIMESTAMP: ${{ needs.call-auto-build.outputs.PREVIOUS_SUCCESS_BUILD_TIMESTAMP }}
       REPO: ${{ github.repository }}
+      # Surface secrets into job-level env so they can be tested in step `if:`
+      # conditions.  The `secrets` context is NOT available in `if:` expressions
+      # (GitHub Actions limitation) — `env` is the required bridge.
+      SSH_SIGNING_KEY: ${{ secrets.SSH_SIGNING_KEY }}
+      SSH_ALLOWED_SIGNERS: ${{ secrets.SSH_ALLOWED_SIGNERS }}
     steps:
       - uses: actions/checkout@v6
 
@@ -282,7 +287,7 @@ jobs:
           done
 
       - name: "Release: configure commit signing"
-        if: ${{ secrets.SSH_SIGNING_KEY != '' }}
+        if: ${{ env.SSH_SIGNING_KEY != '' }}
         run: |
           mkdir -p ~/.ssh
           echo "$SSH_SIGNING_KEY" > ~/.ssh/signing_key
@@ -292,9 +297,6 @@ jobs:
           git config --global commit.gpgsign true
           git config --global gpg.format ssh
           git config --global gpg.ssh.allowedSignersFile ~/.ssh/allowed_signers
-        env:
-          SSH_SIGNING_KEY: ${{ secrets.SSH_SIGNING_KEY }}
-          SSH_ALLOWED_SIGNERS: ${{ secrets.SSH_ALLOWED_SIGNERS }}
 
       - name: "Release: autocommit version feeds and tag"
         uses: stefanzweifel/git-auto-commit-action@v7

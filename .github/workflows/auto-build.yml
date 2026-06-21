@@ -78,7 +78,7 @@ jobs:
       # for a developer locally exercising the dormant ASK landing zone). The
       # ask.ko / VPP dataplanes ship dormant in the one image and are switched
       # at runtime (set system offload ask / set vpp settings), not selected at
-      # build time. See AGENTS.md single-image rules + plans/DUAL-DATAPLANE.md.
+      # build time. See AGENTS.md single-image rules + specs/dual-dataplane.md.
       FLAVOR: ''
     # No `container:` — build runs natively on the self-hosted ARM64 runner.
     # The runner host (Debian 12 bookworm aarch64) provides all build deps
@@ -270,6 +270,12 @@ jobs:
     permissions:
       contents: write
     if: github.ref_name == 'main' && !inputs.skip_publish
+    # Surface secrets into job-level env so they can be tested in step `if:`
+    # conditions.  The `secrets` context is NOT available in `if:` expressions
+    # (GitHub Actions limitation) — `env` is the required bridge.
+    env:
+      SSH_SIGNING_KEY: ${{ secrets.SSH_SIGNING_KEY }}
+      SSH_ALLOWED_SIGNERS: ${{ secrets.SSH_ALLOWED_SIGNERS }}
     steps:
       - uses: actions/checkout@v6
       - name: Clone vyos-build repo
@@ -415,7 +421,7 @@ jobs:
           done
 
       - name: "Release publishing: configure commit signing"
-        if: ${{ secrets.SSH_SIGNING_KEY != '' }}
+        if: ${{ env.SSH_SIGNING_KEY != '' }}
         run: |
           mkdir -p ~/.ssh
           echo "$SSH_SIGNING_KEY" > ~/.ssh/signing_key
@@ -425,9 +431,6 @@ jobs:
           git config --global commit.gpgsign true
           git config --global gpg.format ssh
           git config --global gpg.ssh.allowedSignersFile ~/.ssh/allowed_signers
-        env:
-          SSH_SIGNING_KEY: ${{ secrets.SSH_SIGNING_KEY }}
-          SSH_ALLOWED_SIGNERS: ${{ secrets.SSH_ALLOWED_SIGNERS }}
 
       - name: "Release publishing: create autocommit and tag"
         uses: stefanzweifel/git-auto-commit-action@v7
