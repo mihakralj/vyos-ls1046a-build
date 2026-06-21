@@ -773,6 +773,26 @@ FILES_DIR=kernel/common/files
 cp "$FILES_DIR/fsl_fmd_shim.c" "$KERNEL_BUILD/"
 cp -r "$FILES_DIR/lp5812"      "$KERNEL_BUILD/"
 
+# === Stage the full NXP SDK DPAA1 vendor overlay ===========================
+# sdk_fman / sdk_dpaa / fsl_qbman + net-new include/ headers. This REPLACES
+# the mainline DPAA1 stack at build time: the config swap inside the injection
+# block disables CONFIG_FSL_FMAN/FSL_DPAA/FSL_DPAA_ETH and enables the SDK
+# symbols (FSL_SDK_FMAN/FSL_SDK_DPAA_ETH/FSL_SDK_DPA/...). The overlay ships
+# ONLY net-new directories and headers — no mainline parent Makefile/Kconfig
+# is clobbered, so the cp -r is non-destructive.
+SDK_SRC=kernel/flavors/ask/sdk-sources
+[ -d "$SDK_SRC/drivers" ] || { echo "ERROR: $SDK_SRC/drivers missing"; exit 1; }
+[ -d "$SDK_SRC/include" ] || { echo "ERROR: $SDK_SRC/include missing"; exit 1; }
+echo "### Staging NXP SDK vendor overlay from $SDK_SRC"
+rm -rf "$KERNEL_BUILD/sdk-overlay"
+mkdir -p "$KERNEL_BUILD/sdk-overlay"
+cp -r "$SDK_SRC/drivers" "$KERNEL_BUILD/sdk-overlay/"
+cp -r "$SDK_SRC/include" "$KERNEL_BUILD/sdk-overlay/"
+# RX-queue / soft-lockup probe fix
+if [ -f data/kernel-patches/patch-dpaa-probe-fix.py ]; then
+  cp data/kernel-patches/patch-dpaa-probe-fix.py "$KERNEL_BUILD/sdk-overlay/"
+fi
+
 # Write injection block to temp file (heredoc avoids all quoting issues).
 # Note: the former phylink / dpaa-xdp / xhci-ls1046a Python patchers have
 # been retired — their effects are now carried by the 4005/4006/4007 unified
@@ -836,6 +856,65 @@ if [ -d "${CWD}/lp5812" ]; then
   scripts/config --set-val CONFIG_LEDS_LP5812 y
   make olddefconfig
   echo "LP5812: injected into $LP5812_DIR (config forced)"
+fi
+
+# === NXP SDK DPAA1 vendor overlay (sdk_fman / sdk_dpaa / fsl_qbman) =========
+# Full replacement of the mainline DPAA1 stack. The overlay dirs are net-new;
+# the board DPAA patches applied earlier target the mainline dpaa/fman files
+# which the config swap below gates OFF, so they apply harmlessly and simply
+# never get compiled. This runs LAST in the injection block so its olddefconfig
+# produces the final .config.
+if [ -d "${CWD}/sdk-overlay/drivers" ]; then
+  echo "### NXP SDK: overlaying vendor tree onto kernel source"
+  cp -r "${CWD}/sdk-overlay/drivers/." drivers/
+  cp -r "${CWD}/sdk-overlay/include/." include/
+
+  FRESC=drivers/net/ethernet/freescale
+  # Kconfig / Makefile hooks (idempotent appends to mainline parent files).
+  grep -q 'fsl_qbman/Kconfig' drivers/staging/Kconfig 2>/dev/null || \
+    echo 'source "drivers/staging/fsl_qbman/Kconfig"' >> drivers/staging/Kconfig
+  grep -q 'fsl_qbman/' drivers/staging/Makefile 2>/dev/null || \
+    echo 'obj-y += fsl_qbman/' >> drivers/staging/Makefile
+  grep -q 'sdk_fman/Kconfig' "$FRESC/Kconfig" 2>/dev/null || \
+    echo 'source "drivers/net/ethernet/freescale/sdk_fman/Kconfig"' >> "$FRESC/Kconfig"
+  grep -q 'sdk_dpaa/Kconfig' "$FRESC/Kconfig" 2>/dev/null || \
+    echo 'source "drivers/net/ethernet/freescale/sdk_dpaa/Kconfig"' >> "$FRESC/Kconfig"
+  grep -q 'sdk_fman/' "$FRESC/Makefile" 2>/dev/null || \
+    echo 'obj-\$(CONFIG_FSL_SDK_FMAN) += sdk_fman/' >> "$FRESC/Makefile"
+  grep -q 'sdk_dpaa/' "$FRESC/Makefile" 2>/dev/null || \
+    echo 'obj-\$(CONFIG_FSL_SDK_DPAA_ETH) += sdk_dpaa/' >> "$FRESC/Makefile"
+
+  # Enable the enhanced-ehash PCD ioctl path (the FE classifier that programs
+  # FMan KeyGen). Without -DUSE_ENHANCED_EHASH the PCD ioctls silently no-op.
+  if [ -f "$FRESC/sdk_fman/Makefile" ] && ! grep -q USE_ENHANCED_EHASH "$FRESC/sdk_fman/Makefile"; then
+    sed -i '1i ccflags-y += -DUSE_ENHANCED_EHASH' "$FRESC/sdk_fman/Makefile"
+  fi
+
+  # RX-queue / soft-lockup probe fix (RX_QUEUES 128->16 + cond_resched).
+  if [ -f "${CWD}/sdk-overlay/patch-dpaa-probe-fix.py" ]; then
+    python3 "${CWD}/sdk-overlay/patch-dpaa-probe-fix.py" . \
+      || echo "WARNING: patch-dpaa-probe-fix.py did not apply (continuing)"
+  fi
+
+  # --- Config swap: disable mainline DPAA1, enable the SDK stack -------------
+  scripts/config --set-val CONFIG_NR_CPUS 4
+  scripts/config --disable CONFIG_FSL_FMAN
+  scripts/config --disable CONFIG_FSL_DPAA
+  scripts/config --disable CONFIG_FSL_DPAA_ETH
+  scripts/config --enable  CONFIG_FSL_XGMAC_MDIO
+  scripts/config --enable  CONFIG_STAGING
+  scripts/config --enable  CONFIG_FSL_SDK_DPA
+  scripts/config --enable  CONFIG_FSL_SDK_BMAN
+  scripts/config --enable  CONFIG_FSL_SDK_QMAN
+  scripts/config --enable  CONFIG_FSL_BMAN_CONFIG
+  scripts/config --enable  CONFIG_FSL_QMAN_CONFIG
+  scripts/config --enable  CONFIG_FSL_SDK_FMAN
+  scripts/config --enable  CONFIG_FMAN_ARM
+  scripts/config --enable  CONFIG_FSL_DPAA_HOOKS
+  scripts/config --set-val CONFIG_FSL_SDK_DPAA_ETH y
+  scripts/config --set-val CONFIG_FSL_DPAA_ETH_MAX_BUF_COUNT 640
+  make olddefconfig
+  echo "### NXP SDK: vendor overlay + config swap applied"
 fi
 INJECT_EOF
 
