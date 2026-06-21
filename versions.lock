@@ -16,10 +16,11 @@
 # ── Kernel ─────────────────────────────────────────────────────────────
 # Persistent fallback pin. The actual build version is auto-discovered from
 # vyos-build/data/defaults.toml at build start when that checkout is present.
-# As of 2026-06-08 the project's kernel line is 6.18.34 (CI ISOs + installed
-# DUT image both 6.18.34-vyos); was 6.18.28 on 2026-05-09, 6.6.137 LTS pre-mainline.
-: "${KERNEL_VERSION:=6.18.34}"
-: "${KERNEL_SERIES:=6.18}"
+# As of 2026-06-21 the nxp-ask branch tracks 6.12.94 LTS — the genuine NXP SDK
+# vendor overlay (sdk_fman/sdk_dpaa/fsl_qbman) requires 6.6-6.12 era kernel.
+# The Kconfig parser on 6.18 rejects the SDK symbols regardless of approach.
+: "${KERNEL_VERSION:=6.12.94}"
+: "${KERNEL_SERIES:=6.12}"
 export KERNEL_VERSION KERNEL_SERIES
 
 # ── Cross-compile (skipped automatically when uname -m == aarch64) ─────
