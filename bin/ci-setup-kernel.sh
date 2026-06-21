@@ -157,7 +157,11 @@ if [ "$SDK_KERNEL" -eq 1 ]; then
 fi
 
 if [ "$SDK_KERNEL" -eq 1 ]; then
-  echo "### SDK kernel (6.12) — skipping board DPAA patches (SDK overlay replaces mainline)"
+  echo "### SDK kernel (6.12) — skipping ALL patches (SDK vendor overlay provides everything)"
+  # Don't stage any board, vyos, or fixes patches. The SDK overlay
+  # (sdk_fman/sdk_dpaa/fsl_qbman) is the complete vendor driver stack.
+  # Patch application order is: vyos-build 0001/0003 → nothing left →
+  # kernel compiles with SDK drivers only.
 else
   echo "### Staging LS1046A board patches from $BOARD_PATCH_DIR"
 cp "$BOARD_PATCH_DIR/0068-dpaa-flavor-ops.patch"              "$KERNEL_PATCHES/"
@@ -713,9 +717,12 @@ cp "$BOARD_PATCH_DIR/0133-fman-pcd-fe-arm-real-accc.patch" "$KERNEL_PATCHES/"
 # datapath lands). This cp line is MANDATORY — the staging-completeness guard
 # below fails the build if any board/*.patch lacks one.
 cp "$BOARD_PATCH_DIR/0134-caam-qi-share.patch"               "$KERNEL_PATCHES/"
-fi  # end of SDK_KERNEL gate (0068-0145 board DPAA patches skipped on 6.12)
+fi  # end of SDK_KERNEL gate
 
-# Essential fixes — always staged (kernel-version-agnostic).
+if [ "$SDK_KERNEL" -eq 1 ]; then
+  echo "### SDK kernel — skipping essential fixes (SDK overlay provides SFP/phylink/hwmon)"
+else
+# Essential fixes — only staged on non-SDK kernels.
 echo "### Staging essential board fixes"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
@@ -744,7 +751,11 @@ if [ -n "$_missing" ]; then
 fi
 echo "### Board patch staging-completeness guard: OK"
 fi
+fi  # end of SDK_KERNEL essential-fixes gate
 
+if [ "$SDK_KERNEL" -eq 1 ]; then
+  echo "### SDK kernel — skipping common fixes (120, 130 target 6.18+)"
+else
 # Stage critical flavor-agnostic kernel fix:
 #   120-perf-libperf-asm-headers-srctree.patch — fixes arm64 perf build
 #   failure ("No rule to make target ... tools/perf/libperf/arch/arm64/
@@ -783,6 +794,7 @@ if [ -f "$NF_FLOW_LOG_PATCH" ]; then
 else
     echo "WARNING: $NF_FLOW_LOG_PATCH missing — PR14o REPLACE-delivery diagnostic disabled"
 fi
+fi  # end of SDK_KERNEL common-fixes gate
 
 ### ASK2 in-tree kernel patches — RETIRED 2026-06-21
 # The ASK flavor patch stack was archived to
