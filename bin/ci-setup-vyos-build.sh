@@ -159,6 +159,16 @@ if [ -f vyos-build/data/defaults.toml ]; then
   echo "### defaults.toml console_type after sed:"
   grep -E '^\s*console_(type|num|speed)\s*=' vyos-build/data/defaults.toml || true
 
+  # Override kernel_version from $KERNEL_VERSION env var (e.g. nxp-ask
+  # uses 6.12.94 LTS — the genuine NXP SDK requires 6.6-6.12). If the
+  # env var is not set, keep the upstream pin unchanged.
+  if [ -n "${KERNEL_VERSION:-}" ]; then
+    sed -i "s/^\\(\\s*kernel_version\\s*=\\s*\\).*/\\1\"${KERNEL_VERSION}\"/" \
+      vyos-build/data/defaults.toml
+    echo "### defaults.toml kernel_version overridden to: ${KERNEL_VERSION}"
+    grep -E '^\s*kernel_version\s*=' vyos-build/data/defaults.toml || true
+  fi
+
   ### mksquashfs compression: zstd-22 instead of upstream xz/x86-BCJ.
   #
   # Upstream defaults.toml ships:
