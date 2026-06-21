@@ -63,6 +63,9 @@ jobs:
     runs-on: ${{ inputs.runs_on || 'ARM64' }}
     permissions:
       contents: write
+    env:
+      KERNEL_VERSION: "6.12.94"
+      KERNEL_SERIES: "6.12"
     # No `container:` — build runs natively on the self-hosted ARM64 runner.
     # The runner host (Debian 12 bookworm aarch64) provides all build deps
     # (installed in the "Install Dependencies" step below). Removing the
