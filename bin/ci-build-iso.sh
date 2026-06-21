@@ -108,10 +108,10 @@ rm -rf packages/linux-headers-*
   generic
 
 cd build
-# Rename generic -> LS1046A in artifact filenames. Single flavor-neutral image:
-#   vyos-2026.05.09-1830-rolling-LS1046A-arm64.iso
+# Rename generic -> LS1046A-stock in artifact filenames. Stock (mainline DPAA1) image:
+#   vyos-2026.05.09-1830-rolling-LS1046A-stock-arm64.iso
 ORIG_ISO=$(jq --raw-output .artifacts[0] manifest.json)
-IMAGE_ISO="${ORIG_ISO/generic/LS1046A}"
+IMAGE_ISO="${ORIG_ISO/generic/LS1046A-stock}"
 IMAGE_NAME="${IMAGE_ISO%.iso}"
 mv "$ORIG_ISO" "$IMAGE_ISO"
 echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
