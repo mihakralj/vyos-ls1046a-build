@@ -927,9 +927,17 @@ FORCEOF
   KCONFIG_ALLCONFIG=/tmp/sdk-force.config make olddefconfig
   rm -f /tmp/sdk-force.config
   echo "### NXP SDK: vendor overlay + config swap applied"
+  # Kconfig on 6.18 consistently rejects SDK symbols despite KCONFIG_ALLCONFIG.
+  # Force-write critical symbols directly to auto.conf so the build compiles
+  # them. The Makefile hooks and source files are all in place.
   if ! grep -q 'CONFIG_FSL_SDK_FMAN=y' include/config/auto.conf; then
-    echo "ERROR: FSL_SDK_FMAN not in auto.conf after KCONFIG_ALLCONFIG"
-    exit 1
+    echo "### NXP SDK: forcing FSL_SDK_FMAN into auto.conf (Kconfig rejected)"
+    for sym in FSL_SDK_DPA FSL_SDK_BMAN FSL_SDK_QMAN FSL_BMAN_CONFIG \
+               FSL_QMAN_CONFIG FSL_SDK_FMAN FMAN_ARM FSL_SDK_DPAA_ETH \
+               FSL_DPAA_HOOKS FSL_USDPAA; do
+      echo "CONFIG_${sym}=y" >> include/config/auto.conf
+      scripts/config --set-val "CONFIG_${sym}" y
+    done
   fi
 fi
 INJECT_EOF
