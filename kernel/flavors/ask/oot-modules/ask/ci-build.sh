@@ -89,6 +89,47 @@ fi
 [ -f "$KSRC/certs/signing_key.pem" ] || { echo "FATAL: $KSRC/certs/signing_key.pem missing — MODULE_SIG_KEYS broken?"; exit 1; }
 [ -f "$KSRC/certs/signing_key.x509" ] || { echo "FATAL: $KSRC/certs/signing_key.x509 missing"; exit 1; }
 
+# ── Symbol pre-flight: check that the kernel exports the symbols ask.ko needs ─
+#
+# The ASK2 OOT module (ask.ko) calls 9 symbols exported by the mainline
+# board patch series (0086-0129). On the SDK kernel (6.12 with NXP vendor
+# overlay), the entire board patch set is skipped because the SDK replaces
+# the mainline DPAA1 stack, and these symbols do not exist.
+#
+# When symbols are absent, we skip the compilation entirely and produce a
+# stub .deb — the ISO still ships a valid ask-modules package, but without
+# an actual .ko. This is correct: on the SDK kernel the ASK offload is
+# provided by the proprietary SDK driver stack, not by the mainline-based
+# ask.ko.
+REQUIRED_SYMBOLS=(
+    "dpaa_get_rx_fman_port"
+    "fman_hm_nexthop_put"
+    "fman_pcd_offload_engage"
+    "dpaa_get_tx_fqid"
+    "fman_port_get_id"
+    "fman_cc_tree_destroy"
+    "fman_cc_tree_install"
+    "fman_hm_nexthop_get"
+    "fman_pcd_offload_disengage"
+)
+
+SKIP_KO_BUILD=0
+MISSING_SYMBOLS=()
+for sym in "${REQUIRED_SYMBOLS[@]}"; do
+    if ! grep -qE "^0x[0-9a-fA-F]+[[:space:]]+${sym}[[:space:]]" "$KSRC/Module.symvers"; then
+        MISSING_SYMBOLS+=("$sym")
+    fi
+done
+
+if [ ${#MISSING_SYMBOLS[@]} -gt 0 ]; then
+    SKIP_KO_BUILD=1
+    echo "### ASK2: ${#MISSING_SYMBOLS[@]}/${#REQUIRED_SYMBOLS[@]} required symbols missing from kernel"
+    echo "###   This is expected on the SDK kernel (6.12) — producing stub .deb"
+    for sym in "${MISSING_SYMBOLS[@]}"; do
+        echo "###     missing: $sym"
+    done
+fi
+
 OOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$OOT_DIR"
 
@@ -153,6 +194,7 @@ echo "###   ARCH=${ARCH:-} CROSS_COMPILE=${CROSS_COMPILE:-}"
 make -C "$KSRC" M="$OOT_DIR" clean 2>/dev/null || true
 rm -f ./*.ko ./*.o ./*.mod ./*.mod.c ./Module.symvers ./modules.order
 
+if [ $SKIP_KO_BUILD -eq 0 ]; then
 # Build. Force CONFIG_NET_ASK=m on the command line — there is no in-tree
 # Kconfig hook for the OOT module (the in-tree Kconfig only exists inside
 # the OOT tree itself; the kernel's main config does not know about it).
@@ -181,6 +223,10 @@ for ko in "$OOT_DIR"/*.ko; do
     fi
     echo "###   signed: $(basename "$ko") ($(stat -c '%s bytes' "$ko"))"
 done
+else
+    echo "### ASK2 OOT module build SKIPPED (kernel does not export required symbols)"
+    echo "### Producing stub .deb (no .ko — SDK kernel provides its own offload)"
+fi
 
 # ─── Package as a .deb ─────────────────────────────────────────────────
 #
@@ -201,7 +247,11 @@ trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/DEBIAN"
 mkdir -p "$STAGE/lib/modules/${KVER}/extra"
 
-cp "$OOT_DIR"/*.ko "$STAGE/lib/modules/${KVER}/extra/"
+if [ $SKIP_KO_BUILD -eq 0 ]; then
+    cp "$OOT_DIR"/*.ko "$STAGE/lib/modules/${KVER}/extra/"
+else
+    echo "### Stub .deb: no .ko files to install (kernel does not export required symbols)"
+fi
 
 cat > "$STAGE/DEBIAN/control" <<EOF
 Package: ${DEB_NAME}
@@ -211,6 +261,23 @@ Priority: optional
 Architecture: arm64
 Maintainer: VyOS LS1046A maintainers <noreply@invalid>
 Depends: linux-image-${KVER}
+EOF
+if [ $SKIP_KO_BUILD -eq 1 ]; then
+    cat >> "$STAGE/DEBIAN/control" <<EOF
+Description: ASK2 OOT kernel modules (STUB — no actual .ko)
+ This is a stub package produced because the kernel does not export
+ the symbols ask.ko requires (the 9 fman_pcd_* / fman_hm_* / dpaa_*
+ symbols from the mainline board patch series 0086-0129). On the SDK
+ kernel (6.12 with NXP vendor overlay), the ASK offload is provided
+ by the proprietary SDK driver stack — ask.ko is not needed.
+ .
+ This package satisfies the build-time dependency so the ISO assembles
+ cleanly, but no kernel modules are installed.
+ .
+ See specs/ask2-rewrite-spec.md for the architecture.
+EOF
+else
+    cat >> "$STAGE/DEBIAN/control" <<EOF
 Description: ASK2 OOT kernel modules for LS1046A FMan/210 hardware offload
  Out-of-tree kernel modules implementing the ASK2 fast-path offload
  for the NXP LS1046A FMan microcode (210-series). Replaces the legacy
@@ -219,6 +286,7 @@ Description: ASK2 OOT kernel modules for LS1046A FMan/210 hardware offload
  See specs/ask2-rewrite-spec.md for the architecture and
  plans/archive/ASK2-IMPLEMENTATION.md for the implementation status.
 EOF
+fi
 
 # postinst: regenerate the modules.dep so insmod-by-name works on next boot.
 cat > "$STAGE/DEBIAN/postinst" <<EOF
