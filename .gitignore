@@ -34,6 +34,9 @@ libcli/
 __pycache__/
 *.pyc
 
+# Build/tool caches
+.cache/
+
 # Kernel out-of-tree module build artifacts
 *.o
 *.o.d
