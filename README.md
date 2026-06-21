@@ -1,4 +1,4 @@
-[![VyOS LS1046A build](https://github.com/mihakralj/vyos-ls1046a-build/actions/workflows/auto-build.yml/badge.svg)](https://github.com/mihakralj/vyos-ls1046a-build/actions/workflows/auto-build.yml)
+[![VyOS LS1046A build](https://github.com/mihakralj/vyos-ls1046a-build/actions/workflows/self-hosted-build.yml/badge.svg)](https://github.com/mihakralj/vyos-ls1046a-build/actions/workflows/self-hosted-build.yml)
 
 # VyOS for NXP LS1046A (Mono Gateway)
 

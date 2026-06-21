@@ -1,66 +1,64 @@
-# Porting VyOS ARM64 to NXP LS1046A
+**Version 1.0.0 · VyOS LS1046A Build · 2026-06-21 · HADS 1.0.0**
 
-What breaks when you drop a generic VyOS ARM64 ISO onto NXP Layerscape silicon, and the exact fixes that survived contact with the hardware. Seven failures, seven fixes, one working router. Most of the failures are silent, which is the part that costs you an afternoon.
+## AI READING INSTRUCTION
+
+This document is the authoritative porting guide for running VyOS ARM64 on NXP LS1046A (Mono Gateway DK). It enumerates every kernel configuration requirement, DTS binding, boot plumbing detail, and U-Boot integration fix needed to make a generic VyOS ARM64 ISO boot and network on this hardware. Paragraphs tagged `[SPEC]` contain concrete config values, commands, DTS snippets, or structural facts that must be preserved verbatim. Paragraphs tagged `[NOTE]` contain narrative explanation, war stories, and motivation. Code blocks, tables, and Mermaid diagrams are always correctness-critical and must never be condensed.
+
+## 1. Overview — The Seven Silent Failures
+
+**[NOTE]** What breaks when you drop a generic VyOS ARM64 ISO onto NXP Layerscape silicon, and the exact fixes that survived contact with the hardware. Seven failures, seven fixes, one working router. Most of the failures are silent, which is the part that costs you an afternoon.
 
 > **Boot process specification** (U-Boot env variables, annotated USB and eMMC boot sequences, `vyos.env` mechanism, failure modes): **[BOOT-PROCESS.md](BOOT-PROCESS.md)**
 > **Install guide** (write USB image, run `install image`, eMMC boot): **[INSTALL.md](../INSTALL.md)**
 
-## The Problem
+**[NOTE]** "Generic ARM64" is a kernel configuration covering Raspberry Pi, AWS Graviton, Apple M-series guests, and Qualcomm server silicon: `make defconfig` plus whatever the maintainer cared about last Tuesday. It does not cover QorIQ Layerscape. Not because the drivers don't exist (they've been in mainline Linux since 4.14), but because nobody building VyOS for cloud VMs ever needed DPAA1 Ethernet or Freescale eSDHC. The config symbols sit in the kernel source, untouched.
 
-"Generic ARM64" is a kernel configuration covering Raspberry Pi, AWS Graviton, Apple M-series guests, and Qualcomm server silicon: `make defconfig` plus whatever the maintainer cared about last Tuesday. It does not cover QorIQ Layerscape. Not because the drivers don't exist (they've been in mainline Linux since 4.14), but because nobody building VyOS for cloud VMs ever needed DPAA1 Ethernet or Freescale eSDHC. The config symbols sit in the kernel source, untouched.
+**[NOTE]** Seven things kill the generic ARM64 ISO on this board. All seven are kernel configuration plus board-specific plumbing. Most fail silently.
 
-Seven things kill the generic ARM64 ISO on this board. All seven are kernel configuration plus board-specific plumbing. Most fail silently.
+## 2. Problem — No eMMC
 
-### 1. No eMMC
-
-The LS1046A eMMC controller is a Freescale eSDHC (`fsl,esdhc`). The generic ARM64 `vyos_defconfig` ships with:
+**[NOTE]** The LS1046A eMMC controller is a Freescale eSDHC (`fsl,esdhc`). The generic ARM64 `vyos_defconfig` ships with:
 
 ```text
 # CONFIG_MMC_SDHCI_OF_ESDHC is not set
 ```
 
-No driver, no `mmcblk0`. U-Boot loads the kernel and initrd fine (it has its own eSDHC driver). The VyOS kernel boots from RAM, `live-boot` searches every block device for `filesystem.squashfs`, finds nothing, and panics. Quietly.
+**[NOTE]** No driver, no `mmcblk0`. U-Boot loads the kernel and initrd fine (it has its own eSDHC driver). The VyOS kernel boots from RAM, `live-boot` searches every block device for `filesystem.squashfs`, finds nothing, and panics. Quietly.
 
-### 2. No Networking
+## 3. Problem — No Networking
 
-The LS1046A uses NXP DPAA1 (Data Path Acceleration Architecture, first generation). Five physical Ethernet ports managed by the Frame Manager and DPAA Ethernet glue. Generic VyOS ARM64 kernel:
+**[NOTE]** The LS1046A uses NXP DPAA1 (Data Path Acceleration Architecture, first generation). Five physical Ethernet ports managed by the Frame Manager and DPAA Ethernet glue. Generic VyOS ARM64 kernel:
 
 ```text
 # CONFIG_FSL_FMAN is not set
 # CONFIG_FSL_DPAA is not set
 ```
 
-Zero interfaces. A router with no interfaces is an expensive, well-ventilated paperweight.
+**[NOTE]** Zero interfaces. A router with no interfaces is an expensive, well-ventilated paperweight.
 
-### 3. Wrong Serial Console
+## 4. Problem — Wrong Serial Console
 
-The generic ARM64 image hardcodes `console=ttyAMA0,115200` (PL011 UART: Raspberry Pi, QEMU virt, ARM Juno). The LS1046A speaks 8250 on `ttyS0`. You get a kernel that boots in complete silence. No errors, no warnings. Just nothing.
+**[NOTE]** The generic ARM64 image hardcodes `console=ttyAMA0,115200` (PL011 UART: Raspberry Pi, QEMU virt, ARM Juno). The LS1046A speaks 8250 on `ttyS0`. You get a kernel that boots in complete silence. No errors, no warnings. Just nothing.
 
-### 4. CPU Stuck at 700 MHz
+## 5. Problem — CPU Stuck at 700 MHz
 
-The upstream VyOS kernel ships `CONFIG_QORIQ_CPUFREQ=m` (module). Module loads at T+28s. Clock framework runs `clk: Disabling unused clocks` at T+12s. By the time cpufreq initializes, only `cg-pll2-div2` (700 MHz) is available as a CMUX parent. The CPU is locked at **39% of maximum speed** (700 MHz instead of 1800 MHz). The system works. It just crawls.
+**[NOTE]** The upstream VyOS kernel ships `CONFIG_QORIQ_CPUFREQ=m` (module). Module loads at T+28s. Clock framework runs `clk: Disabling unused clocks` at T+12s. By the time cpufreq initializes, only `cg-pll2-div2` (700 MHz) is available as a CMUX parent. The CPU is locked at **39% of maximum speed** (700 MHz instead of 1800 MHz). The system works. It just crawls.
 
-### 5. No SFP+ Support
+## 6. Problem — No SFP+ Support
 
-The SFP+ cages require an I2C controller driver, GPIO controller, I2C mux driver, SFP framework, and Aquantia PHY driver. None enabled in the generic config. Without them, SFP modules are detected as always-up fixed-links that cannot actually carry traffic.
+**[NOTE]** The SFP+ cages require an I2C controller driver, GPIO controller, I2C mux driver, SFP framework, and Aquantia PHY driver. None enabled in the generic config. Without them, SFP modules are detected as always-up fixed-links that cannot actually carry traffic.
 
-### 6. Wrong Port Order
+## 7. Problem — Wrong Port Order
 
-The mainline `fsl_dpaa_eth` driver probes Ethernet MACs in DT address order (`1ae2000`, `1ae8000`, `1aea000`, `1af0000`, `1af2000`), which assigns ethN names in the order addresses appear: rightmost RJ45 becomes eth0. The physical expectation is leftmost = eth0. You spend twenty minutes plugging cables into the wrong port before checking `ip link`.
+**[NOTE]** The mainline `fsl_dpaa_eth` driver probes Ethernet MACs in DT address order (`1ae2000`, `1ae8000`, `1aea000`, `1af0000`, `1af2000`), which assigns ethN names in the order addresses appear: rightmost RJ45 becomes eth0. The physical expectation is leftmost = eth0. You spend twenty minutes plugging cables into the wrong port before checking `ip link`.
 
-### 7. No U-Boot Integration
+## 8. Problem — No U-Boot Integration
 
-VyOS's `install image` and `add system image` only update GRUB configuration. On boards that boot via U-Boot (no EFI/GRUB), the U-Boot environment must be updated with the new image path, and the DTB must be copied to the boot directory.
+**[NOTE]** VyOS's `install image` and `add system image` only update GRUB configuration. On boards that boot via U-Boot (no EFI/GRUB), the U-Boot environment must be updated with the new image path, and the DTB must be copied to the boot directory.
 
----
+## 9. Fix — Enable eSDHC Driver
 
-## The Fixes
-
-Seven targeted modifications to `vyos-build`. No forks. Just configuration and plumbing.
-
-### Fix 1: Enable eSDHC Driver
-
-The eMMC config is added to `vyos_defconfig` before building:
+**[SPEC]** The eMMC config is added to `vyos_defconfig` before building:
 
 ```text
 CONFIG_MMC_SDHCI_OF_ESDHC=y
@@ -68,11 +66,11 @@ CONFIG_FSL_EDMA=y
 CONFIG_DEVTMPFS_MOUNT=y
 ```
 
-`CONFIG_DEVTMPFS_MOUNT=y` ensures `/dev/console` exists before init runs -- without it, the initramfs init script fails with "unable to open an initial console."
+**[SPEC]** `CONFIG_DEVTMPFS_MOUNT=y` ensures `/dev/console` exists before init runs — without it, the initramfs init script fails with "unable to open an initial console."
 
-### Fix 2: Enable DPAA1 Networking Stack
+## 10. Fix — Enable DPAA1 Networking Stack
 
-The full DPAA1 stack, appended to `vyos_defconfig`:
+**[SPEC]** The full DPAA1 stack, appended to `vyos_defconfig`:
 
 ```text
 CONFIG_FSL_FMAN=y
@@ -86,18 +84,20 @@ CONFIG_FSL_QMAN=y
 CONFIG_FSL_PAMU=y
 ```
 
-All `=y` (built-in), never `=m`. Frame Manager initializes during early boot, before rootfs mount and module loading. If built as modules, they load too late and the interfaces never appear. No errors in dmesg. Just zero interfaces. This one cost hours.
+**[NOTE]** All `=y` (built-in), never `=m`. Frame Manager initializes during early boot, before rootfs mount and module loading. If built as modules, they load too late and the interfaces never appear. No errors in dmesg. Just zero interfaces. This one cost hours.
 
-The Maxlinear GPY115C PHY driver is also required for the three RJ45 SGMII ports:
+**[SPEC]** The Maxlinear GPY115C PHY driver is also required for the three RJ45 SGMII ports:
 
 ```text
 CONFIG_HWMON=y
 CONFIG_MAXLINEAR_GPHY=y
 ```
 
-The GPY2xx has a hardware constraint where SGMII AN between PHY and MAC is only triggered on speed *change*. Generic PHY driver cannot handle this re-trigger. `mxl-gpy` can.
+**[NOTE]** The GPY2xx has a hardware constraint where SGMII AN between PHY and MAC is only triggered on speed *change*. Generic PHY driver cannot handle this re-trigger. `mxl-gpy` can.
 
-### Fix 3: Revert Console Device
+## 11. Fix — Revert Console Device
+
+**[SPEC]**
 
 ```bash
 sed -i 's/ttyAMA0/ttyS0/g' \
@@ -105,9 +105,11 @@ sed -i 's/ttyAMA0/ttyS0/g' \
   vyos-build/data/live-build-config/includes.chroot/opt/vyatta/etc/grub/default-union-grub-entry
 ```
 
-U-Boot bootargs also set `console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500`.
+**[SPEC]** U-Boot bootargs also set `console=ttyS0,115200 earlycon=uart8250,mmio,0x21c0500`.
 
-### Fix 4: CPU Frequency Scaling
+## 12. Fix — CPU Frequency Scaling
+
+**[SPEC]**
 
 ```text
 CONFIG_QORIQ_CPUFREQ=y
@@ -115,11 +117,11 @@ CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y
 # CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL is not set
 ```
 
-Building cpufreq as `=y` (built-in) ensures it registers with the clock mux before `late_initcall` disables unused clock parents. Setting the default governor to `performance` is appropriate for a network router that should never throttle. Confirmed: raid6 neonx8 jumped from 2056 to 4816 MB/s (2.3x improvement).
+**[NOTE]** Building cpufreq as `=y` (built-in) ensures it registers with the clock mux before `late_initcall` disables unused clock parents. Setting the default governor to `performance` is appropriate for a network router that should never throttle. Confirmed: raid6 neonx8 jumped from 2056 to 4816 MB/s (2.3x improvement).
 
-### Fix 5: SFP+ Transceiver Support
+## 13. Fix — SFP+ Transceiver Support
 
-Six kernel configs enable the full SFP probe chain:
+**[SPEC]** Six kernel configs enable the full SFP probe chain:
 
 ```text
 CONFIG_SFP=y
@@ -130,7 +132,7 @@ CONFIG_I2C_IMX=y
 CONFIG_GPIO_MPC8XXX=y
 ```
 
-The dependency chain:
+**[SPEC]** The dependency chain:
 
 ```mermaid
 flowchart LR
@@ -148,9 +150,9 @@ flowchart LR
   style SFP1 fill:#4a9,stroke:#333,color:#fff
 ```
 
-Without `CONFIG_I2C_IMX=y`, the I2C controller hardware never probes, the PCA9545 mux cannot bind, and the SFP driver defers forever. Without `CONFIG_GPIO_MPC8XXX=y`, the `fsl,qoriq-gpio` controller needed for SFP GPIO signals (tx-disable, mod-def0, los) is absent. The dependency chain is six symbols deep. Miss any one and the SFP cages are dead.
+**[NOTE]** Without `CONFIG_I2C_IMX=y`, the I2C controller hardware never probes, the PCA9545 mux cannot bind, and the SFP driver defers forever. Without `CONFIG_GPIO_MPC8XXX=y`, the `fsl,qoriq-gpio` controller needed for SFP GPIO signals (tx-disable, mod-def0, los) is absent. The dependency chain is six symbols deep. Miss any one and the SFP cages are dead.
 
-A custom Device Tree Source (`mono-gateway-dk.dts`) defines the SFP nodes, I2C mux topology, GPIO assignments, and MAC-to-SFP bindings:
+**[SPEC]** A custom Device Tree Source (`mono-gateway-dk.dts`) defines the SFP nodes, I2C mux topology, GPIO assignments, and MAC-to-SFP bindings:
 
 ```dts
 sfp_xfi0: sfp-xfi0 {
@@ -167,23 +169,17 @@ ethernet@f0000 {
 };
 ```
 
-**Critical DTS details:**
-- The 10G MAC nodes must use `phy-connection-type = "xgmii"`, not `"10gbase-r"`. In kernel 6.6's `fman_memac.c`, the PCS assignment fallback path checks `phy_if == PHY_INTERFACE_MODE_XGMII` to assign PCS to `xfi_pcs`. Using `"10gbase-r"` directly causes the PCS to be misassigned to `sgmii_pcs`, resulting in a NULL `xfi_pcs` and broken 10GBASE-R link detection. The kernel converts XGMII to 10GBASER after PCS assignment. This is not documented anywhere. Finding it required reading `fman_memac.c` line by line.
-- The `tx-disable-gpios` must use `GPIO_ACTIVE_LOW`. The Mono Gateway board has a hardware inverter between GPIO2 pins and the SFP cage TX_DISABLE lines. With `GPIO_ACTIVE_HIGH`, the kernel's logical "deassert TX_DISABLE" (GPIO LOW) actually asserts the physical TX_DISABLE via the inverter, keeping the laser OFF. Discovered by observing that `los` dropped (signal detected) only when the kernel *asserted* TX_DISABLE. The polarity was backwards. Hardware inverters, they're everywhere.
+**[BUG] xgmii PCS assignment (kernel fman_memac.c):** The 10G MAC nodes must use `phy-connection-type = "xgmii"`, not `"10gbase-r"`. In kernel 6.6's `fman_memac.c`, the PCS assignment fallback path checks `phy_if == PHY_INTERFACE_MODE_XGMII` to assign PCS to `xfi_pcs`. Using `"10gbase-r"` directly causes the PCS to be misassigned to `sgmii_pcs`, resulting in a NULL `xfi_pcs` and broken 10GBASE-R link detection. The kernel converts XGMII to 10GBASER after PCS assignment. This is not documented anywhere. Finding it required reading `fman_memac.c` line by line.
 
-#### SFP+ Module Compatibility
+**[BUG] tx-disable-gpios polarity (hardware inverter):** The `tx-disable-gpios` must use `GPIO_ACTIVE_LOW`. The Mono Gateway board has a hardware inverter between GPIO2 pins and the SFP cage TX_DISABLE lines. With `GPIO_ACTIVE_HIGH`, the kernel's logical "deassert TX_DISABLE" (GPIO LOW) actually asserts the physical TX_DISABLE via the inverter, keeping the laser OFF. Discovered by observing that `los` dropped (signal detected) only when the kernel *asserted* TX_DISABLE. The polarity was backwards.
 
-The two SFP+ cages (eth3, eth4) are wired to XFI SerDes lanes running at 10.3125 Gbaud. The host-side electrical interface is always 10GBASE-R. This has two implications:
+**[SPEC]** The two SFP+ cages (eth3, eth4) are wired to XFI SerDes lanes running at 10.3125 Gbaud. The host-side electrical interface is always 10GBASE-R.
 
-**1G SFP modules (SFP-GE-T, SFP-GE-SX) are rejected by the kernel:**
+**[SPEC] 1G SFP modules (SFP-GE-T, SFP-GE-SX) are rejected by the kernel:** The `fman_memac.c` driver's `memac_supports()` function only accepts `PHY_INTERFACE_MODE_10GBASER` because the LS1046A DTB has no SerDes PHY provider (`fsl,lynx-28g` binding). When a 1G-only SFP is inserted, phylink finds zero intersection between the MAC's supported modes (`{10GBASER}`) and the module's modes (`{SGMII}`), producing `"unsupported SFP module: no common interface modes"`.
 
-The `fman_memac.c` driver's `memac_supports()` function only accepts `PHY_INTERFACE_MODE_10GBASER` because the LS1046A DTB has no SerDes PHY provider (`fsl,lynx-28g` binding). When a 1G-only SFP is inserted, phylink finds zero intersection between the MAC's supported modes (`{10GBASER}`) and the module's modes (`{SGMII}`), producing `"unsupported SFP module: no common interface modes"`.
+**[SPEC] SFP-10G-T copper modules work at any speed (10G/5G/2.5G/1G):** SFP-10G-T modules with rollball PHY (e.g., RTL8261) contain an internal rate-adapting bridge between the 10GBASE-R host interface and the NBASE-T copper interface. The host side always runs at 10G; the copper side negotiates the best available speed with the link partner. This rate adaptation is transparent to the kernel.
 
-**SFP-10G-T copper modules work at any speed (10G/5G/2.5G/1G):**
-
-SFP-10G-T modules with rollball PHY (e.g., RTL8261) contain an internal rate-adapting bridge between the 10GBASE-R host interface and the NBASE-T copper interface. The host side always runs at 10G; the copper side negotiates the best available speed with the link partner. This rate adaptation is transparent to the kernel.
-
-Verified on the Mono Gateway with a generic OEM SFP-10G-T module connected to a 1G switch port:
+**[SPEC]** Verified on the Mono Gateway with a generic OEM SFP-10G-T module connected to a 1G switch port:
 
 ```
 $ ethtool eth3
@@ -198,9 +194,9 @@ $ ethtool eth3
   Link detected: yes       ← working at 1G
 ```
 
-The module's rollball PHY exposes itself as an external MDIO PHY (PHYAD 11) to the kernel. The kernel sees supported speeds from 100M through 10G and negotiates the best common speed with the link partner. Rate adaptation between the 1G copper link and the 10G host-side XFI happens entirely within the SFP module's internal logic.
+**[NOTE]** The module's rollball PHY exposes itself as an external MDIO PHY (PHYAD 11) to the kernel. The kernel sees supported speeds from 100M through 10G and negotiates the best common speed with the link partner. Rate adaptation between the 1G copper link and the 10G host-side XFI happens entirely within the SFP module's internal logic.
 
-**SFP+ module compatibility matrix:**
+**[SPEC]** SFP+ module compatibility matrix:
 
 | Module Type | Example | Works? | Speed | Notes |
 |-------------|---------|--------|-------|-------|
@@ -210,44 +206,42 @@ The module's rollball PHY exposes itself as an external MDIO PHY (PHYAD 11) to t
 | SFP-GE-T | 1G copper SFP | ❌ | — | Kernel rejects: no 10GBASER support |
 | SFP-GE-SX | 1G fiber SFP | ❌ | — | Kernel rejects: no 10GBASER support |
 
-**SFP-10G-T rollball delay:** Copper SFP-10G-T modules using RTL8261 rollball PHY take ~17 minutes after boot to complete PHY negotiation on kernel 6.6. The rollball polling has a 1020-second timeout with 12 retries. The interface shows `u/D` during this period — this is normal, not a failure. After the rollball timeout, the SFP state machine discovers the PHY via MDIO and negotiates with the link partner.
+**[BUG] SFP-10G-T rollball delay:** Copper SFP-10G-T modules using RTL8261 rollball PHY take ~17 minutes after boot to complete PHY negotiation on kernel 6.6. The rollball polling has a 1020-second timeout with 12 retries. The interface shows `u/D` during this period — this is normal, not a failure. After the rollball timeout, the SFP state machine discovers the PHY via MDIO and negotiates with the link partner.
 
-The DTS is compiled from kernel source during build (using `make dtbs` against the kernel's `fsl-ls1046a.dtsi` includes), producing a DTB with correct mainline bindings.
+**[SPEC]** The DTS is compiled from kernel source during build (using `make dtbs` against the kernel's `fsl-ls1046a.dtsi` includes), producing a DTB with correct mainline bindings.
 
-### Fix 6: Port Ordering
+## 14. Fix — Port Ordering
 
-**As of firmware 2026-03-29, port ordering is firmware-native — no udev rule is needed.**
+**[NOTE]** As of firmware 2026-03-29, port ordering is firmware-native — no udev rule is needed.
 
-The updated U-Boot + FMan firmware probes MACs in physical port order, so the kernel assigns `eth0`–`eth4` matching the physical left-to-right layout without any udev intervention. The `64-fman-port-order.rules` rule has been **removed** from the build.
+**[SPEC]** The updated U-Boot + FMan firmware probes MACs in physical port order, so the kernel assigns `eth0`–`eth4` matching the physical left-to-right layout without any udev intervention. The `64-fman-port-order.rules` rule has been **removed** from the build.
 
-Historical note: earlier firmware probed MACs in DT address order (`1ae2000` sorted numerically first → rightmost RJ45 became eth0). The udev rule is preserved in git history if a firmware downgrade is ever needed.
+**[NOTE]** Historical note: earlier firmware probed MACs in DT address order (`1ae2000` sorted numerically first → rightmost RJ45 became eth0). The udev rule is preserved in git history if a firmware downgrade is ever needed.
 
 > **If port order regresses** (firmware downgrade): re-add `64-fman-port-order.rules` from git history. The rule sets `ENV{VYOS_IFNAME}` at priority 64 (before VyOS's `65-vyos-net.rules`), which VyOS honors as a predefined name bypassing `biosdevname`.
 
-### Fix 7: Automated Install/Upgrade Flow
+## 15. Fix — Automated Install/Upgrade Flow
 
-Five components make `install image` → reboot → `add system image` → reboot work without manual U-Boot commands:
+**[SPEC]** Five components make `install image` → reboot → `add system image` → reboot work without manual U-Boot commands:
 
-**1. DTB at ISO root:** The compiled `mono-gw.dtb` is placed at the ISO root (via `includes.binary/`). During `install image`, the DTB is copied from the live media to the boot directory. Patch `vyos-1x-011` also copies `.dtb` files during `add system image` upgrades (from ISO root to `{root_dir}/boot/{image_name}/`).
+**[SPEC] 1. DTB at ISO root:** The compiled `mono-gw.dtb` is placed at the ISO root (via `includes.binary/`). During `install image`, the DTB is copied from the live media to the boot directory. Patch `vyos-1x-011` also copies `.dtb` files during `add system image` upgrades (from ISO root to `{root_dir}/boot/{image_name}/`).
 
-**2. `/boot/vyos.env` file** (`vyos-1x-011`): Patched into `grub.set_default()` — whenever VyOS sets the default boot image (install, upgrade, `set system image default-boot`, rename), it also writes `/boot/vyos.env` containing `vyos_image=<image-name>`. U-Boot reads this file via `ext4load` + `env import -t` to determine which image to boot. The `vyos_direct` U-Boot command is static — it never needs `fw_setenv` updates after initial setup.
+**[SPEC] 2. `/boot/vyos.env` file** (`vyos-1x-011`): Patched into `grub.set_default()` — whenever VyOS sets the default boot image (install, upgrade, `set system image default-boot`, rename), it also writes `/boot/vyos.env` containing `vyos_image=<image-name>`. U-Boot reads this file via `ext4load` + `env import -t` to determine which image to boot. The `vyos_direct` U-Boot command is static — it never needs `fw_setenv` updates after initial setup.
 
-**3. vyos-postinstall script** (`/usr/local/bin/vyos-postinstall`): Called automatically by `install_image()` during first install. Handles:
+**[SPEC] 3. vyos-postinstall script** (`/usr/local/bin/vyos-postinstall`): Called automatically by `install_image()` during first install. Handles:
 - Writing `/boot/vyos.env` (safety net — also done by the grub.py hook)
 - One-time `fw_setenv` to set static `vyos_direct`, `usb_vyos`, and `bootcmd` U-Boot env vars (only runs if U-Boot env doesn't already reference `vyos.env`)
 - No-op on non-LS1046A hardware (checks `/proc/device-tree/compatible`)
 
-**4. Systemd safety net** (`vyos-postinstall.service`): Runs `vyos-postinstall` on every boot (`After=local-fs.target`). Ensures `/boot/vyos.env` matches the running image even if the image_installer.py hook was bypassed. Also retries the one-time U-Boot setup if it failed during install.
+**[SPEC] 4. Systemd safety net** (`vyos-postinstall.service`): Runs `vyos-postinstall` on every boot (`After=local-fs.target`). Ensures `/boot/vyos.env` matches the running image even if the image_installer.py hook was bypassed. Also retries the one-time U-Boot setup if it failed during install.
 
-**5. eMMC default disk patch** (`vyos-1x-007`): VyOS's `ask_single_disk()` now prefers `mmcblk` devices as the default selection, so `install image` prompts with `/dev/mmcblk0` instead of `/dev/sda` (the USB boot media).
+**[SPEC] 5. eMMC default disk patch** (`vyos-1x-007`): VyOS's `ask_single_disk()` now prefers `mmcblk` devices as the default selection, so `install image` prompts with `/dev/mmcblk0` instead of `/dev/sda` (the USB boot media).
 
-**6. 32 MiB firmware boundary patch** (`vyos-1x-006`): Moves all partitions past the 32 MiB NXP firmware boundary. p1 starts at 32 MiB (sector 65536), p2 at 33 MiB. Firmware re-flash no longer destroys the GPT.
+**[SPEC] 6. 32 MiB firmware boundary patch** (`vyos-1x-006`): Moves all partitions past the 32 MiB NXP firmware boundary. p1 starts at 32 MiB (sector 65536), p2 at 33 MiB. Firmware re-flash no longer destroys the GPT.
 
----
+## 16. The Board
 
-## The Board
-
-**NXP QorIQ LS1046A** is a 2016-era network SoC targeting small enterprise routers and industrial gateways. It ships inside boxes that run for seven years in a telco closet without anyone noticing. That is, by all accounts, a compliment.
+**[SPEC]** **NXP QorIQ LS1046A** is a 2016-era network SoC targeting small enterprise routers and industrial gateways.
 
 ```
 CPU:        4x ARM Cortex-A72 (ARMv8-A), 1.8 GHz
@@ -258,15 +252,13 @@ SoC class:  QorIQ Layerscape (fsl,ls1046a)
 DT model:   Mono Gateway Development Kit (mono,gateway-dk)
 ```
 
----
+## 17. Storage — The eSDHC Problem
 
-## Storage: The eSDHC Problem
+**[NOTE]** The LS1046A eMMC interface is a Freescale "enhanced Secure Digital Host Controller" (eSDHC). It is compatible with SDHCI at the register level but requires a specific OF binding driver to initialize.
 
-The LS1046A eMMC interface is a Freescale "enhanced Secure Digital Host Controller" (eSDHC). It is compatible with SDHCI at the register level but requires a specific OF binding driver to initialize.
+**[SPEC]** The driver is `drivers/mmc/host/sdhci-of-esdhc.c`, in mainline Linux since 3.6. It binds to device tree nodes with `compatible = "fsl,ls1046a-esdhc"`.
 
-The driver is `drivers/mmc/host/sdhci-of-esdhc.c`, in mainline Linux since 3.6. It binds to device tree nodes with `compatible = "fsl,ls1046a-esdhc"`.
-
-**DMA dependency chain:**
+**[SPEC]** DMA dependency chain:
 
 ```
 sdhci-of-esdhc.ko
@@ -276,13 +268,11 @@ sdhci-of-esdhc.ko
     optional: fsl-edma.ko     <- required for HS200 DMA
 ```
 
----
+## 18. Networking — The DPAA1 Architecture
 
-## Networking: The DPAA1 Architecture
+**[NOTE]** DPAA1 is not a NIC driver. It is a complete hardware packet processing subsystem with its own memory manager, queue manager, and buffer manager. Ethernet is just an application running on top of that subsystem.
 
-DPAA1 is not a NIC driver. It is a complete hardware packet processing subsystem with its own memory manager, queue manager, and buffer manager. Ethernet is just an application running on top of that subsystem. Think of it as a small, specialized operating system for packets, burned into silicon.
-
-The component stack, bottom to top:
+**[SPEC]** The component stack, bottom to top:
 
 ```mermaid
 flowchart BT
@@ -299,19 +289,13 @@ flowchart BT
   style ETH fill:#4a9,stroke:#333,color:#fff
 ```
 
-You cannot skip any layer. Each depends on the one below it. `DPAA_ETH` without `FMAN` is a null pointer reference. `FMAN` without `BMAN` and `QMAN` never initializes. Miss one symbol and the entire stack collapses. No partial credit.
+**[NOTE]** You cannot skip any layer. Each depends on the one below it. `DPAA_ETH` without `FMAN` is a null pointer reference. `FMAN` without `BMAN` and `QMAN` never initializes. Miss one symbol and the entire stack collapses.
 
-**Why `=y` and not `=m`:**
+**[SPEC] Why `=y` and not `=m`:** The Frame Manager initializes during kernel early boot, before the root filesystem is mounted. If built as a module, it loads too late: the DPAA1 Ethernet devices probe against an uninitialized FMan, and the interfaces never appear.
 
-The Frame Manager initializes during kernel early boot, before the root filesystem is mounted. If built as a module, it loads too late: the DPAA1 Ethernet devices probe against an uninitialized FMan, and the interfaces never appear.
+**[SPEC] FMan microcode:** Frame Manager requires firmware: a microcode blob loaded from `mtd4` (the `fman-ucode` NOR flash partition, 1 MB) at offset `0x400000` in SPI flash. U-Boot injects this into the DTB before kernel handoff. The kernel does NOT load FMan firmware via `request_firmware()`. No `/lib/firmware/` files needed.
 
-**FMan microcode:**
-
-Frame Manager requires firmware: a microcode blob loaded from `mtd4` (the `fman-ucode` NOR flash partition, 1 MB) at offset `0x400000` in SPI flash. U-Boot injects this into the DTB before kernel handoff. The kernel does NOT load FMan firmware via `request_firmware()`. No `/lib/firmware/` files needed. If you're looking for the firmware, stop. U-Boot already handled it.
-
-**MDIO and PCS (the hidden dependency):**
-
-Even with the entire DPAA1 stack enabled, Ethernet MACs will not probe without the MDIO bus driver. The probe chain is:
+**[SPEC] MDIO and PCS (the hidden dependency):** Even with the entire DPAA1 stack enabled, Ethernet MACs will not probe without the MDIO bus driver. The probe chain is:
 
 ```mermaid
 sequenceDiagram
@@ -335,13 +319,11 @@ sequenceDiagram
   end
 ```
 
-Each MAC's DTB node has a `pcsphy-handle` pointing to a PCS device on an MDIO bus. The MDIO buses are driven by `xgmac_mdio.c` (`CONFIG_FSL_XGMAC_MDIO`). Without it, `fwnode_mdio_find_device()` returns NULL, and every MAC defers forever with `"missing pcs"` errors. This is the most non-obvious dependency in the entire stack. The error message gives no hint that a MDIO bus driver is the root cause.
+**[NOTE]** Each MAC's DTB node has a `pcsphy-handle` pointing to a PCS device on an MDIO bus. The MDIO buses are driven by `xgmac_mdio.c` (`CONFIG_FSL_XGMAC_MDIO`). Without it, `fwnode_mdio_find_device()` returns NULL, and every MAC defers forever with `"missing pcs"` errors. This is the most non-obvious dependency in the entire stack. The error message gives no hint that a MDIO bus driver is the root cause.
 
----
+## 19. Ethernet Interface Mapping
 
-## Ethernet Interface Mapping
-
-Verified by cable-plug testing on board #308. Port remapping via udev rule `64-fman-port-order.rules` corrects the DT address order to match physical layout:
+**[SPEC]** Verified by cable-plug testing on board #308:
 
 | Physical Position | Type | VyOS name | MAC Address | DT Node |
 |-------------------|------|-----------|-------------|---------|
@@ -351,23 +333,21 @@ Verified by cable-plug testing on board #308. Port remapping via udev rule `64-f
 | SFP1 (left cage) | 10GBase-R | **eth3** | `E8:F6:D7:00:16:02` | `1af0000` |
 | SFP2 (right cage) | 10GBase-R | **eth4** | `E8:F6:D7:00:16:03` | `1af2000` |
 
-Port order is assigned by the firmware-native FMan MAC probe order and requires no udev rule as of 2026-03-29 firmware. MAC addresses are unique per board; values above are board #308.
+**[NOTE]** Port order is assigned by the firmware-native FMan MAC probe order and requires no udev rule as of 2026-03-29 firmware. MAC addresses are unique per board; values above are board #308.
 
----
+## 20. Serial Console — PL011 vs 8250
 
-## Serial Console: PL011 vs 8250
-
-The LS1046A serial UART is an 8250-compatible device at MMIO address `0x21c0500`, IRQ 57, base baud 18,750,000 Hz. Registers as `ttyS0`. The earlycon probe string:
+**[SPEC]** The LS1046A serial UART is an 8250-compatible device at MMIO address `0x21c0500`, IRQ 57, base baud 18,750,000 Hz. Registers as `ttyS0`. The earlycon probe string:
 
 ```
 earlycon=uart8250,mmio,0x21c0500
 ```
 
-**CONFIG_SERIAL_OF_PLATFORM is critical.** This config enables the DT-based 8250 platform driver needed for the LS1046A's `serial@21c0500` node. Without it, `earlycon` works (direct hardware access) but `/dev/ttyS0` is never created. You get boot messages but no login prompt. A special kind of torture.
+**[SPEC] `CONFIG_SERIAL_OF_PLATFORM` is critical.** This config enables the DT-based 8250 platform driver needed for the LS1046A's `serial@21c0500` node. Without it, `earlycon` works (direct hardware access) but `/dev/ttyS0` is never created. You get boot messages but no login prompt.
 
----
+## 21. Boot Flow
 
-## Boot Flow
+**[SPEC]**
 
 ```mermaid
 flowchart TD
@@ -389,11 +369,11 @@ flowchart TD
 
 > ⚠️ **Initrd must be loaded LAST** so `${filesize}` captures initrd size for `booti`.
 
-**U-Boot `${filesize}` gotcha:** Each `ext4load` overwrites `${filesize}`. The `booti` command uses `${ramdisk_addr_r}:${filesize}` to tell the kernel the initrd size. If DTB is loaded after initrd, `${filesize}` = DTB size (94KB) instead of initrd size (~33MB), causing "ZSTD-compressed data is truncated" kernel panic. The load order looks arbitrary. It is not.
+**[BUG] U-Boot `${filesize}` gotcha:** Each `ext4load` overwrites `${filesize}`. The `booti` command uses `${ramdisk_addr_r}:${filesize}` to tell the kernel the initrd size. If DTB is loaded after initrd, `${filesize}` = DTB size (94KB) instead of initrd size (~33MB), causing "ZSTD-compressed data is truncated" kernel panic. The load order looks arbitrary. It is not.
 
-**vyos-postinstall automation:** `install image` automatically calls `vyos-postinstall`, which writes `/boot/vyos.env` and performs one-time `fw_setenv` to set a static `vyos_direct` command. Future `add system image` upgrades only update `/boot/vyos.env` (via patched `grub.set_default()`). A systemd service runs `vyos-postinstall` on every boot as a safety net. No SPI flash writes after initial setup. The U-Boot environment is touched exactly once, then never again.
+**[SPEC]** `vyos-postinstall` automation: `install image` automatically calls `vyos-postinstall`, which writes `/boot/vyos.env` and performs one-time `fw_setenv` to set a static `vyos_direct` command. Future `add system image` upgrades only update `/boot/vyos.env` (via patched `grub.set_default()`). A systemd service runs `vyos-postinstall` on every boot as a safety net. No SPI flash writes after initial setup.
 
-U-Boot key addresses:
+**[SPEC]** U-Boot key addresses:
 
 ```
 kernel_addr_r   = 0x82000000
@@ -402,9 +382,9 @@ ramdisk_addr_r  = 0x88080000
 kernel_comp_addr_r = 0x90000000
 ```
 
----
+## 22. MTD Flash Layout
 
-## MTD Flash Layout
+**[SPEC]**
 
 ```mermaid
 block-beta
@@ -425,11 +405,11 @@ block-beta
   style mtd7 fill:#a84,stroke:#333,color:#fff
 ```
 
-`fw_printenv` requires `/etc/fw_env.config` pointing at `/dev/mtd3`. Config: `/dev/mtd3 0x0 0x20000 0x20000`.
+**[SPEC]** `fw_printenv` requires `/etc/fw_env.config` pointing at `/dev/mtd3`. Config: `/dev/mtd3 0x0 0x20000 0x20000`.
 
----
+## 23. eMMC Layout (After `install image`)
 
-## eMMC Layout (After `install image`)
+**[SPEC]**
 
 ```mermaid
 block-beta
@@ -447,13 +427,11 @@ block-beta
   style p3 fill:#4a9,stroke:#333,color:#fff
 ```
 
-> **Factory layout (before install):** mmcblk0p1 = 511 MB OpenWrt root (ext4), mmcblk0p2 = rest empty. `install image` destroys this. There is no recovery back to OpenWrt without reflashing eMMC. Say goodbye to the recovery Linux.
+> **Factory layout (before install):** mmcblk0p1 = 511 MB OpenWrt root (ext4), mmcblk0p2 = rest empty. `install image` destroys this. There is no recovery back to OpenWrt without reflashing eMMC.
 
----
+## 24. Device Tree
 
-## Device Tree
-
-The DTB is compiled from a custom Device Tree Source (`data/dtb/mono-gateway-dk.dts`) during the kernel build step. The DTS includes:
+**[SPEC]** The DTB is compiled from a custom Device Tree Source (`data/dtb/mono-gateway-dk.dts`) during the kernel build step. The DTS includes:
 
 - Board model and compatible strings
 - Three SGMII MAC nodes with Maxlinear GPY115C PHY handles
@@ -464,9 +442,9 @@ The DTB is compiled from a custom Device Tree Source (`data/dtb/mono-gateway-dk.
 - Thermal zones with fan cooling maps
 - LED definitions for SFP link/activity indicators
 
-The DTS inherits from mainline `fsl-ls1046a.dtsi` via `#include`, ensuring compatibility with mainline DPAA1 drivers. A pre-compiled fallback DTB (`data/dtb/mono-gw.dtb`, extracted from live OpenWrt) is used if kernel DTS compilation fails. Belt and suspenders.
+**[NOTE]** The DTS inherits from mainline `fsl-ls1046a.dtsi` via `#include`, ensuring compatibility with mainline DPAA1 drivers. A pre-compiled fallback DTB (`data/dtb/mono-gw.dtb`, extracted from live OpenWrt) is used if kernel DTS compilation fails.
 
-Key DT properties:
+**[SPEC]** Key DT properties:
 
 ```
 compatible: "mono,gateway-dk", "fsl,ls1046a"
@@ -474,13 +452,11 @@ model:      "Mono Gateway Development Kit"
 serial:     uart8250, mmio, 0x21c0500, 115200
 ```
 
----
+## 25. CPU Frequency Scaling
 
-## CPU Frequency Scaling
+**[NOTE]** The LS1046A QorIQ clockgen provides multiple PLL sources for CPU frequency scaling. The `qoriq-cpufreq` driver reads available clock parents from `cg-cmux0` and populates the cpufreq frequency table.
 
-The LS1046A QorIQ clockgen provides multiple PLL sources for CPU frequency scaling. The `qoriq-cpufreq` driver reads available clock parents from `cg-cmux0` and populates the cpufreq frequency table.
-
-**Clock tree:**
+**[SPEC]** Clock tree:
 
 ```mermaid
 flowchart TD
@@ -502,15 +478,13 @@ flowchart TD
   style D6 fill:#a44,stroke:#333,color:#fff
 ```
 
-**The bug:** `CONFIG_QORIQ_CPUFREQ=m` (module) loads at T+28s, after `clk: Disabling unused clocks` at T+12s disables the PLL parents. CPU locked at 700 MHz. The system appears to work fine, just 2.3x slower than it should be.
+**[BUG] CPU stuck at 700 MHz:** `CONFIG_QORIQ_CPUFREQ=m` (module) loads at T+28s, after `clk: Disabling unused clocks` at T+12s disables the PLL parents. CPU locked at 700 MHz. The system appears to work fine, just 2.3x slower than it should be.
 
-**The fix:** `CONFIG_QORIQ_CPUFREQ=y` (built-in) claims PLLs before clock cleanup. Confirmed: 2.3x throughput improvement. The difference between "it works" and "it sprints."
+**[SPEC] The fix:** `CONFIG_QORIQ_CPUFREQ=y` (built-in) claims PLLs before clock cleanup. Confirmed: 2.3x throughput improvement.
 
----
+## 26. Boot Optimizations
 
-## Boot Optimizations
-
-### Services Masked or Adjusted in ISO
+**[SPEC]** Services status in ISO:
 
 | Service | Status | Why | Effect |
 |---------|--------|-----|--------|
@@ -519,13 +493,13 @@ flowchart TD
 | `kexec-load.service` | **Active** (NOT masked) | Mainline 6.6 QBMan kexec fix | VyOS managed-params self-healing works |
 | `kexec.service` | **Active** (NOT masked) | Mainline 6.6 QBMan kexec fix | Normal kexec path via `system_option.py` |
 
-**kexec is intentionally active.** The mainline 6.6 kernel includes a QBMan kexec fix (`bman_requires_cleanup()` / `qman_requires_cleanup()` in `drivers/soc/fsl/qbman/`) that detects prior DPAA1 initialization and cleans up BMan/QMan state before kexec. This allows VyOS's `system_option.py` managed-params self-healing (hugepages, panic= bootarg sync) to work via kexec without cold reboot.
+**[NOTE]** `kexec` is intentionally active. The mainline 6.6 kernel includes a QBMan kexec fix (`bman_requires_cleanup()` / `qman_requires_cleanup()` in `drivers/soc/fsl/qbman/`) that detects prior DPAA1 initialization and cleans up BMan/QMan state before kexec. This allows VyOS's `system_option.py` managed-params self-healing (hugepages, panic= bootarg sync) to work via kexec without cold reboot.
 
-The SysV init scripts (`/etc/init.d/kexec-load`, `/etc/init.d/kexec`) are **removed** via `99-mask-services.chroot` to prevent `systemd-sysv-generator` from creating duplicate units that would improperly restart the services. The systemd units themselves remain active.
+**[SPEC]** The SysV init scripts (`/etc/init.d/kexec-load`, `/etc/init.d/kexec`) are **removed** via `99-mask-services.chroot` to prevent `systemd-sysv-generator` from creating duplicate units that would improperly restart the services. The systemd units themselves remain active.
 
-The `99-mask-services.chroot` hook runs inside the build chroot. The old approach of placing `ln -sf /dev/null` symlinks in `includes.chroot` was broken: live-build dereferences absolute symlinks to paths outside the chroot, producing empty files.
+**[NOTE]** The `99-mask-services.chroot` hook runs inside the build chroot. The old approach of placing `ln -sf /dev/null` symlinks in `includes.chroot` was broken: live-build dereferences absolute symlinks to paths outside the chroot, producing empty files.
 
-### Default Config Hardening
+**[SPEC]** Default config hardening:
 
 | Setting | Purpose |
 |---------|---------|
@@ -533,7 +507,7 @@ The `99-mask-services.chroot` hook runs inside the build chroot. The old approac
 | `system option reboot-on-panic` | Auto-recover from kernel panics |
 | `system option performance network-latency` | Gateway-optimized kernel tuning |
 
-### Kernel Config Optimizations
+**[SPEC]** Kernel config optimizations:
 
 | Config | Effect |
 |--------|--------|
@@ -541,9 +515,9 @@ The `99-mask-services.chroot` hook runs inside the build chroot. The old approac
 | `CONFIG_QORIQ_CPUFREQ=y` | CPU runs at 1.8 GHz instead of 700 MHz |
 | `CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y` | Always max frequency (no power-saving) |
 
----
+## 27. vyos-1x Patches
 
-## vyos-1x Patches
+**[SPEC]**
 
 | Patch | File Modified | Purpose |
 |-------|---------------|---------|
@@ -558,28 +532,30 @@ The `99-mask-services.chroot` hook runs inside the build chroot. The old approac
 | `vyos-1x-011` | `system/grub.py`, `image_installer.py` | Write `/boot/vyos.env` on set_default + call vyos-postinstall on install |
 | `vyos-1x-012` | `system/motd.py` | LS1046A-specific MOTD (board name, SFP note, DPAA1 status) |
 
-## vyos-build Patches
+## 28. vyos-build Patches
+
+**[SPEC]**
 
 | Patch | File Modified | Purpose |
 |-------|---------------|---------|
 | `vyos-build-005` | `11-busybox.chroot` | Create `vim` → `vim.tiny` symlink |
 | `vyos-build-007` | `93-sb-sign-kernel.chroot` | Disable sbsign/sbverify (Secure Boot broken on ARM64) |
 
-## Kernel Patches (`data/kernel-patches/`)
+## 29. Kernel Patches
 
-One out-of-tree patch is documented here on top of the current mainline 6.18 kernel tree during build. (The DPAA1 HW-accelerated AF_XDP board-patch series — CC / HM / Policer / CEETM offloads — is tracked separately in [../specs/dpaa1-afxdp-modernization-spec.md](../specs/dpaa1-afxdp-modernization-spec.md). The earlier DPDK USDPAA chardev patch `9001` and `fsl_usdpaa_mainline.c` were removed per RC#31 when the DPDK DPAA PMD path was abandoned in favour of AF_XDP.)
+**[NOTE]** One out-of-tree patch is documented here on top of the current mainline 6.18 kernel tree during build. (The DPAA1 HW-accelerated AF_XDP board-patch series — CC / HM / Policer / CEETM offloads — is tracked separately in [../specs/dpaa1-afxdp-modernization-spec.md](../specs/dpaa1-afxdp-modernization-spec.md). The earlier DPDK USDPAA chardev patch `9001` and `fsl_usdpaa_mainline.c` were removed per RC#31 when the DPDK DPAA PMD path was abandoned in favour of AF_XDP.)
+
+**[SPEC]**
 
 | File | Purpose |
 |------|---------|
 | `4002-hwmon-ina2xx-add-INA234-support.patch` | Adds `ti,ina234` to the kernel `ina2xx` driver: OF match table, i2c_device_id, enum, config table with INA234-specific scaling (bus voltage LSB 1600 µV, power coefficient 32). Without this patch, the 8x INA234 power sensors on the board don't bind at all — no `ti,ina234` entry upstream. Prefix `4002-` avoids collision with the upstream VyOS `0002-inotify` kernel patch. |
 
-The INA234 patch (`4002-`) was previously numbered in `0002-` series but was renumbered to avoid collision with the upstream VyOS inotify patch.
+**[NOTE]** The INA234 patch (`4002-`) was previously numbered in `0002-` series but was renumbered to avoid collision with the upstream VyOS inotify patch.
 
----
+## 30. Kernel Config Additions
 
-## Kernel Config Additions
-
-Complete list of config options appended to `vyos_defconfig` (source of truth: `printf` block in `.github/workflows/auto-build.yml`):
+**[SPEC]** Complete list of config options appended to `vyos_defconfig` (source of truth: `printf` block in `.github/workflows/auto-build.yml`):
 
 ```text
 # === LS1046A / NXP Layerscape DPAA1 (Mono Gateway DK) ===
@@ -643,9 +619,9 @@ CONFIG_NLS_UTF8=y               # FAT UTF-8
 
 > **Why `=y` for USB and filesystem configs:** The TFTP dev-boot initramfs has no module loader. Any driver needed before rootfs mount must be built-in. `CONFIG_USB_STORAGE=m` means TFTP kernels cannot access the eMMC squashfs via live-boot's USB fallback path. All DPAA1 drivers have the same constraint — `=m` causes silent failure with zero interfaces.
 
----
+## 31. Cosmetic Boot Messages (Ignore These)
 
-## Cosmetic Boot Messages (Ignore These)
+**[SPEC]**
 
 | Message | Cause | Impact |
 |---------|-------|--------|
@@ -655,17 +631,16 @@ CONFIG_NLS_UTF8=y               # FAT UTF-8
 | `PCIe: no link` / `disabled` | No PCIe devices on board | Normal |
 | `bridge: filtering via arp/ip/ip6tables is no longer available` | `br_netfilter` not loaded | VyOS loads it when needed |
 
----
+## 32. See Also
 
-## See Also
-
-- [BOOT-PROCESS.md](BOOT-PROCESS.md) -- complete boot path specification: U-Boot env variables, annotated USB and eMMC sequences, `vyos.env` mechanism, SPI NOR layout, failure modes
-- [DEV-LOOP.md](DEV-LOOP.md) -- local dev build: TFTP dev loop, `bin/dev-build.sh` reference, U-Boot `dev_boot` setup
-- [INSTALL.md](../INSTALL.md) -- step-by-step installation guide
-- [UBOOT.md](UBOOT.md) -- U-Boot serial console reference: memory map, boot commands, clock tree, MTD layout
-- [README.md](../README.md) -- project overview
-- [../specs/dpaa1-afxdp-modernization-spec.md](../specs/dpaa1-afxdp-modernization-spec.md) -- DPAA1 HW-accelerated AF_XDP driver modernization: design, milestone tracker, FMan offload (CC/HM/Policer/CEETM) status (supersedes the abandoned DPDK PMD / USDPAA chardev path, removed per RC#31)
-- [Mono Gateway Getting Started](https://github.com/we-are-mono/meta-mono/blob/master/gateway-development-kit/getting-started.md) -- factory setup, serial console, Recovery Linux
-- [Mono Gateway Hardware Description](https://github.com/we-are-mono/meta-mono/blob/master/gateway-development-kit/hardware-description.md) -- port pinouts, GPIO, M.2, fan headers
-- [nix repo (Mono NixOS build)](https://github.com/nicator-company/nix) -- official DTS source, kernel patches (FMan ethernet-alias ordering, INA234 hwmon), defconfig
-- [OpenWRT-ASK (Mono OpenWrt fork)](https://github.com/nicator-company/OpenWRT-ASK) -- NXP SDK DPAA driver, SDK DTS overlays, upgrade scripts
+**[SPEC]**
+- [BOOT-PROCESS.md](BOOT-PROCESS.md) — complete boot path specification: U-Boot env variables, annotated USB and eMMC sequences, `vyos.env` mechanism, SPI NOR layout, failure modes
+- [DEV-LOOP.md](DEV-LOOP.md) — local dev build: TFTP dev loop, `bin/dev-build.sh` reference, U-Boot `dev_boot` setup
+- [INSTALL.md](../INSTALL.md) — step-by-step installation guide
+- [UBOOT.md](UBOOT.md) — U-Boot serial console reference: memory map, boot commands, clock tree, MTD layout
+- [README.md](../README.md) — project overview
+- [../specs/dpaa1-afxdp-modernization-spec.md](../specs/dpaa1-afxdp-modernization-spec.md) — DPAA1 HW-accelerated AF_XDP driver modernization: design, milestone tracker, FMan offload (CC/HM/Policer/CEETM) status (supersedes the abandoned DPDK PMD / USDPAA chardev path, removed per RC#31)
+- [Mono Gateway Getting Started](https://github.com/we-are-mono/meta-mono/blob/master/gateway-development-kit/getting-started.md) — factory setup, serial console, Recovery Linux
+- [Mono Gateway Hardware Description](https://github.com/we-are-mono/meta-mono/blob/master/gateway-development-kit/hardware-description.md) — port pinouts, GPIO, M.2, fan headers
+- [nix repo (Mono NixOS build)](https://github.com/nicator-company/nix) — official DTS source, kernel patches (FMan ethernet-alias ordering, INA234 hwmon), defconfig
+- [OpenWRT-ASK (Mono OpenWrt fork)](https://github.com/nicator-company/OpenWRT-ASK) — NXP SDK DPAA driver, SDK DTS overlays, upgrade scripts

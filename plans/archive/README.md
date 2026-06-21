@@ -28,17 +28,17 @@ For current state, see (in order of authority):
 | `PR14j-DESIGN.md` | Two-stage OH-port MANIP chain wire-up | OH-port subsystem archived in v1.3 (deferred to v1.1 for IPsec re-inject only) |
 | `PR14o-DESIGN.md` | FLOW_CLS_REPLACE delivery diagnostic | REPLACE delivery fixed; current blocker is downstream (chain_create -ENOMEM) |
 | `PR14x-DESIGN.md` | `fman_pcd_manip_chain_create()` primitive design | API landed and is in use; design doc itself is historical |
-| `PR14z5-DESIGN.md` | Dual-pipeline (per-direction CC tree) experiment | Superseded by Path A's single pre-installed CC tree per protocol |
-| `PR14z7-DESIGN.md` | FMBM_RFPNE per-port KG-arming via `fman_port_use_kg_hash()` | Superseded by Path A pre-`register_netdev()` PCD install |
 | `PR14z22-DESIGN.md` | DROP-miss diagnostic that proved silicon HIT path works | Diagnostic complete — silicon HIT proven at 6.945 Gbps / 16.63 % baseline |
-| `PR14z23-DESIGN.md` | TX-confirm NAPI softirq reduction (no-confirm FQ + bpid fast-path) | Approach superseded by Path A inline `FORWARD_FQ_WITH_MANIP` action atom |
 | `ASK2-IMPLEMENTATION.md` | ASK2 per-PR implementation tracker (target spec v1.1) | Superseded by the `specs/dpaa1-afxdp-modernization-spec.md` cross-flavor milestone table; ASK2 spec is now v1.6 |
 | `ASK2-PHASE2-PATCH-TRIAGE.md` | KEEP/ARCHIVE/PARTIAL classification of `kernel/flavors/ask/patches/0001-0053` | The ASK 1.x patch tree it classifies was deleted on `ask20`; FMan PCD now lives in the common board stack |
 | `ASK2-CMM-TEST-PARITY.md` | Parity matrix mapping the 38 legacy `cmm/unit_tests` shell tests to ASK2 | The `cmm`/`we-are-mono/ASK` corpus was deleted; ASK2 offload has no CLI harness |
 | `ASK2-NEXT-STEPS-2026-05-25.md` | Dated forensic roadmap (KG scheme priority-race) toward ASK2 GA | Snapshot only; references spec v1.3 (now v1.6) and the pre-cross-flavor architecture |
 | `PR14z19-PATH-A-DESIGN.md` | Path A boot-time PCD-install design (graft-model replacement) | Design landed; joins its already-archived PR14z* siblings. Current state in the dpaa1 spec |
-| `REPO-LAYOUT-REFACTOR.md` | Plan to consolidate `ASK/`, `ask-userspace/`, `data/ask-userspace/` userspace trees | All three trees were deleted on `ask20`; the refactor target no longer exists |
+| `REPO-LAYOUT-REFACTOR.md` | Plan to consolidate `ASK/`, `ask-userspace/`, `data/ask-userspace/` userspace trees | All three trees were deleted on `ask20`; the refactor target no longer exists — **deleted 2026-06-21** |
 | `PATCH-MIGRATION-3WAY.md` | `git apply --3way` + Mergiraf + rerere migration plan | Companion `INTEGRATION-PLAN.md` already archived; migration complete and the process is now documented in `AGENTS.md` |
+| `MULTI-FLAVOR-RELEASE.md` | Multi-flavor (`default\|ask\|vpp`) build+release architecture | **RETIRED 2026-06-14** — flavor build split collapsed; single-image model now in `DUAL-DATAPLANE.md`. Moved from plans/ 2026-06-21. |
+| `ZC-RX-SCOPE.md` | Zero-Copy RX scope brief for DPAA1 AF_XDP | **Functionally resolved 2026-06-10.** Only GAP 2 (bulk-flow steering optimization) remains. Moved from plans/ 2026-06-21. |
+| `BUG3B-FLOOD-PLAN.md` | Ingress-policer flood-crash characterization test plan | **PROMOTED to plans/ 2026-06-21** — the flood-crash half of BUG 3b remains OPEN per the DPAA1 spec §5.6. This row kept for bisect reference. |
 
 Archived 2026-05-25 as part of the v1.3 doc consolidation following PR14z21 M2 gate run.
 

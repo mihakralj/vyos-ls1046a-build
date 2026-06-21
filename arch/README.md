@@ -1,25 +1,30 @@
+**Version 1.0.0 · vyos-ls1046a-build · 2026-06-21 · HADS 1.0.0**
+
 # DPAA1 / LS1046A Hardware Architecture Reference
 
-**Status:** Reference material (silicon ground truth) · **Board:** NXP LS1046A — Mono Gateway Development Kit · **DPAA version:** DPAA1, FMan v3
+## AI READING INSTRUCTION
 
-This directory is the **in-repo, distilled silicon reference** for the NXP LS1046A Data Path
-Acceleration Architecture (DPAA1). It exists because the authoritative sources — the LS1046A
-Reference Manual (`LS1046ARM`), the DPAA Reference Manual (`LS1046ADPAARM`), and the SEC Reference
-Manual (`LS1046ASECRM`) — are **NDA-gated PDFs that cannot live in the repo**, yet
-[`specs/ask2-rewrite-spec.md`](../specs/ask2-rewrite-spec.md) tells every implementer to *"read RM
-§8.7–8.10 before touching FMan code."* These documents close that gap: they capture the
-register-level, resource-count, and dataflow facts an agent needs to implement **ASK2** (`ask.ko` +
-the `fman_pcd` subsystem) without holding the NDA manuals open.
+This document is the **in-repo, distilled silicon reference** for the NXP LS1046A DPAA1. It is the single source of truth for hardware constants, register addresses, CCSR offsets, and dataflow facts that every ASK2 implementer (`ask.ko`, `fman_pcd_*.c`) needs.
 
-> **Provenance.** Every fact here is distilled from the NXP reference manuals (cited inline by
-> chapter/section/page). These docs are the **hardware layer**; they do not restate driver/API
-> behaviour — for that see the LSDK 21.08 / LLDPUG L6.1.1 release notes and the implementation specs
-> under [`../specs`](../specs). When a project-verified finding and a manual disagree for *our*
-> board, the project finding wins; the manual wins for canonical silicon behaviour.
+**[SPEC]** Tagged paragraphs (`**[SPEC]**`) contain verifiable silicon facts — register addresses, constant values, resource counts, dataflow paths. These are not configurable; they are the hardware contract.
+
+**[NOTE]** Tagged paragraphs (`**[NOTE]**`) contain rationale, provenance, directory relationships, and architectural context.
+
+**[BUG]** Tagged paragraphs (`**[BUG]**`) document known discrepancies between NXP manual editions and project-verified measurements.
+
+**[?]** Tagged paragraphs (`**[?]**`) mark unverified or inferred claims.
+
+**Reading order for a new implementer:** §3 (datapath overview) → §4 (constants — bookmark this) → §5 (CCSR map — bookmark this) → §6 (ASK2 relevance). Then follow the per-module docs in the §2 index.
+
+**[NOTE]** Every fact here is distilled from the NXP reference manuals (LS1046ARM, DPAA RM, SEC RM), cited inline by chapter/section/page. These docs are the **hardware layer** — they do not restate driver/API behaviour. For driver behaviour see LSDK 21.08 / LLDPUG L6.1.1 release notes and the implementation specs under [`../specs`](../specs). When a project-verified finding and a manual disagree for *our* board, the project finding wins; the manual wins for canonical silicon behaviour.
+
+**[NOTE]** This directory exists because the authoritative sources — the LS1046A Reference Manual (`LS1046ARM`), the DPAA Reference Manual (`LS1046ADPAARM`), and the SEC Reference Manual (`LS1046ASECRM`) — are **NDA-gated PDFs** that cannot live in the repo, yet [`specs/ask2-rewrite-spec.md`](../specs/ask2-rewrite-spec.md) tells every implementer to *"read RM §8.7–8.10 before touching FMan code."* These documents close that gap: they capture the register-level, resource-count, and dataflow facts an agent needs without holding the NDA manuals open.
 
 ---
 
 ## 1. How this relates to `specs/` and `plans/`
+
+**[SPEC]** The arch/ directory is the hardware bedrock. The table below defines the three-layer document hierarchy:
 
 | Directory | Answers | Authority |
 |---|---|---|
@@ -27,12 +32,13 @@ the `fman_pcd` subsystem) without holding the NDA manuals open.
 | [`specs/`](../specs) | *"What are we building on top of it?"* (ASK2 `ask.ko`, `fman_pcd` patches, AF_XDP) | Project design intent |
 | [`plans/`](../plans) | *"In what order, and what is done?"* (phases, gates, course corrections) | Project execution |
 
-The arch docs are the **bedrock** the specs stand on. Where a spec says *"per RM §8.7.3.4"* or
-*"FORWARD_FQ_WITH_MANIP"*, the corresponding mechanism is explained here.
+**[NOTE]** The arch docs are the **bedrock** the specs stand on. Where a spec says *"per RM §8.7.3.4"* or *"FORWARD_FQ_WITH_MANIP"*, the corresponding mechanism is explained here. Per-module arch docs are the first place to look when implementing a new hardware interaction.
 
 ---
 
 ## 2. Document index
+
+**[SPEC]** Each per-module arch doc covers a specific DPAA1 hardware subsystem:
 
 | Doc | Module(s) | Read it before… |
 |---|---|---|
@@ -52,9 +58,7 @@ The arch docs are the **bedrock** the specs stand on. Where a spec says *"per RM
 
 ## 3. DPAA1 at a glance — the datapath
 
-DPAA1 turns "network I/O + crypto + queueing" into **enqueue/dequeue operations on a single Queue
-Manager**. Frame *data* lives in DRAM buffers (owned by BMan); everything else passes **Frame
-Descriptors** (128-bit pointers-with-metadata) between blocks over QMan queues.
+**[SPEC]** DPAA1 turns "network I/O + crypto + queueing" into **enqueue/dequeue operations on a single Queue Manager**. Frame *data* lives in DRAM buffers (owned by BMan); everything else passes **Frame Descriptors** (128-bit pointers-with-metadata) between blocks over QMan queues.
 
 ```mermaid
 flowchart LR
@@ -72,18 +76,15 @@ flowchart LR
     BMAN -. release .-> QMI
 ```
 
-Key idea: **every block-to-block handoff is an enqueue/dequeue on QMan.** Priority and CPU affinity
-are chosen per-handoff by selecting the destination Work Queue / Channel. The CPU can be bypassed
-entirely (HW fast path) when the PCD classifies a flow straight to an egress FQ — this is exactly
-what ASK2 programs.
+**[SPEC]** Key idea: **every block-to-block handoff is an enqueue/dequeue on QMan.** Priority and CPU affinity are chosen per-handoff by selecting the destination Work Queue / Channel. The CPU can be bypassed entirely (HW fast path) when the PCD classifies a flow straight to an egress FQ — this is exactly what ASK2 programs.
 
 ---
 
 ## 4. Canonical LS1046A hardware constants
 
-These are **silicon constants** (not configurable). Treat this table as the single source of truth;
-the per-module docs cite the originating RM section. Values reconciled across the DPAA RM, SoC RM,
-and SEC RM (and a known Ch.14-vs-Ch.1 erratum on CGR count).
+**[SPEC]** These are **silicon constants** (not configurable). Treat this table as the single source of truth; the per-module docs cite the originating RM section. Values reconciled across the DPAA RM, SoC RM, and SEC RM.
+
+**[BUG] QMan congestion groups — Ch.14 erratum** The DPAA RM §3 (and §1.9.1) defines the true CGR count as **256**. Chapter 14's statement of "128" is an erratum. This table uses the correct value (256) per §1.9.1.
 
 | Domain | Constant | Value | Source |
 |---|---|---|---|
@@ -118,12 +119,13 @@ and SEC RM (and a known Ch.14-vs-Ch.1 erratum on CGR count).
 | SEC | CHAs | 11 (incl. PKHA ≤4096-bit RSA / ≤1024-bit ECC) | SEC RM |
 | **SoC** | SVR | `0x8707_0010` (SOC_DEV_ID 0x707, rev 1.0) | SoC RM (DCFG_SVR @ 0x01EE_00A4) |
 
+[NOTE] The 128 CGR erratum in Ch.14 is the only known cross-chapter discrepancy in the DPAA RM for this SoC. All other values are consistent across chapters.
+
 ---
 
 ## 5. CCSR memory map (the addresses you will `ioremap`)
 
-CCSR base = **`0x0100_0000`** at reset (16 MB window). Linux relocates the window to **ALTCBAR
-`0x01_0000_0000`** (4 GB). Full register address = `CCSR_base + block_offset + register_offset`.
+**[SPEC]** CCSR base = **`0x0100_0000`** at reset (16 MB window). Linux relocates the window to **ALTCBAR `0x01_0000_0000`** (4 GB). Full register address = `CCSR_base + block_offset + register_offset`.
 
 | Block | CCSR offset | Notes |
 |---|---|---|
@@ -139,16 +141,13 @@ CCSR base = **`0x0100_0000`** at reset (16 MB window). Linux relocates the windo
 | DCFG | `0x1EE_0000` | device config (RCW shadow, SVR, DEVDISR) |
 | RCPM | `0x1EE_2000` | run-control / power |
 
-QMan/BMan **software-portal data windows** are *separate* 36-bit regions at `0x05_0000_0000`
-(QMan) and `0x05_0800_0000` (BMan) — not the config offsets above. See
-[`qman-ceetm.md`](qman-ceetm.md) and [`bman.md`](bman.md).
+**[SPEC]** QMan/BMan **software-portal data windows** are *separate* 36-bit regions at `0x05_0000_0000` (QMan) and `0x05_0800_0000` (BMan) — not the config offsets above. See [`qman-ceetm.md`](qman-ceetm.md) and [`bman.md`](bman.md).
 
 ---
 
 ## 6. ASK2 relevance map
 
-How each hardware block maps onto the ASK2 implementation (per
-[`specs/ask2-rewrite-spec.md`](../specs/ask2-rewrite-spec.md) §13):
+**[SPEC]** How each hardware block maps onto the ASK2 implementation (per [`specs/ask2-rewrite-spec.md`](../specs/ask2-rewrite-spec.md) §13):
 
 ```mermaid
 flowchart TD
@@ -179,6 +178,8 @@ flowchart TD
     CC -.->|see| fmanpcd
 ```
 
+**[SPEC]** ASK2 implementation artifacts and the hardware ceilings that constrain them:
+
 | ASK2 artifact | Grounded by | Hardware ceiling that constrains it |
 |---|---|---|
 | `fman_pcd_kg.c` (exact-match lookup) | [`fman-pcd.md` §KeyGen](fman-pcd.md) | 32 schemes; 56-byte key; CRC-64 hash |
@@ -191,5 +192,4 @@ flowchart TD
 
 ---
 
-*Maintainers: when you add a silicon fact, cite the RM section and (if it changes an implementation
-constraint) note the affected `fman_pcd`/`ask.ko` artifact.*
+**[NOTE]** *Maintainers: when you add a silicon fact, cite the RM section and (if it changes an implementation constraint) note the affected `fman_pcd`/`ask.ko` artifact.*

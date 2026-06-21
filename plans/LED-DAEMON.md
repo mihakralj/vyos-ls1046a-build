@@ -1,8 +1,20 @@
 # Mono Gateway DK — Status LED control
 
-The Mono Gateway DK has one logical RGBW status LED driven by an LP5812
+**Version 1.0.0 · mono · 2026-06-21 · HADS 1.0.0**
+
+## AI READING INSTRUCTION
+
+**[?]** This document is a HADS-converted specification for the Mono Gateway DK status LED system. API contracts and tool behaviours (exit codes, argument dispatch, fade algorithm, config file schema, systemd unit) are tagged **[SPEC]**. Design rationale and narrative are tagged **[NOTE]**. The `led` CLI tool (Part 1) is a shipped product — its behaviour is frozen per the **[SPEC]** tags below. The `monoledd` daemon (Part 2) is a plan — its **[SPEC]** tags are design targets, not yet implemented. The palette baked into `board/scripts/led.py` (lines 176–189) is the single source of truth for colour indices; there is no on-disk state.
+
+---
+
+## 0. Introduction
+
+**[NOTE]** The Mono Gateway DK has one logical RGBW status LED driven by an LP5812
 on `i²c-15` addr `0x6c`, exposed by the kernel `leds` class as four sysfs
 channels:
+
+**[SPEC]**
 
 | sysfs path                                  | channel |
 |---------------------------------------------|---------|
@@ -11,13 +23,13 @@ channels:
 | `/sys/class/leds/status:blue/brightness`    | B, 0–255 |
 | `/sys/class/leds/status:white/brightness`   | W, 0–255 |
 
-The `trigger` attribute on each channel must be `none` for direct
+**[SPEC]** The `trigger` attribute on each channel must be `none` for direct
 brightness writes to stick (the in-kernel `netdev` / `mmc0` / `sfp`
 triggers will otherwise overwrite anything userspace writes within
 milliseconds). Every tool described below sets `trigger=none` before
 writing.
 
-This document specs **two complementary tools** that share the same LED
+**[SPEC]** This document specs **two complementary tools** that share the same LED
 hardware and the same `trigger=none` convention:
 
 1. **`led`** — manual single-shot CLI (ships today, lives in
@@ -30,7 +42,7 @@ hardware and the same `trigger=none` convention:
    yet). 16-step black-body / iron colour ramp tied to NIC throughput.
    Plan-grade spec in [Part 2](#part-2--monoledd--autonomous-daemon).
 
-They share **mutual exclusion semantics**: `monoledd` claims the LED
+**[NOTE]** They share **mutual exclusion semantics**: `monoledd` claims the LED
 for the lifetime of its service; `led` is for one-shot operator use
 when `monoledd.service` is stopped (or for manual override during
 debugging). The two are not meant to run concurrently — they will
@@ -39,23 +51,23 @@ fight each other and the LED will flicker. See
 
 ---
 
-# Part 1 — `led` (manual CLI)
+## 1. `led` (manual CLI)
 
-**Status:** shipping. Source: `board/scripts/led.py`. Installed path
+**[SPEC]** **Status:** shipping. Source: `board/scripts/led.py`. Installed path
 in the ISO: `/usr/local/bin/led` (no `.py` suffix, matching the
 `fan-pid` / `caam-check` / `sfp-check` convention). Staged into the
 chroot by `bin/ci-setup-vyos-build.sh` directly after the `caam-check`
 block.
 
-The CLI is **flag-free by design.** Fade duration and palette are
+**[NOTE]** The CLI is **flag-free by design.** Fade duration and palette are
 **baked in as Python constants** at the top of `led.py` so the script
 behaves identically every invocation, with no per-call tuning surface
 for the operator to get wrong. To re-tune fade speed or palette,
 edit and reinstall the script; there is no runtime knob.
 
-## 1.1 Baked-in constants
+### 1.1 Baked-in constants
 
-Top of `board/scripts/led.py`:
+**[SPEC]** Top of `board/scripts/led.py`:
 
 | Constant | Value | Meaning |
 |---|---|---|
@@ -64,13 +76,13 @@ Top of `board/scripts/led.py`:
 | `MIN_FRAME_MS` | `5` | hard floor on per-frame sleep (200 Hz cap on sysfs writes) |
 | `PALETTE` | 32-entry tuple of `"RRGGBBWW"` strings | indices stable across upgrades |
 
-Setting `FADE_MS = 0` (edit and reinstall) disables the fade engine —
+**[NOTE]** Setting `FADE_MS = 0` (edit and reinstall) disables the fade engine —
 all transitions become a single 4-channel write. There is no CLI flag
 for this.
 
-## 1.2 Input forms
+### 1.2 Input forms
 
-The CLI dispatches purely on **argument count and shape** of `argv`:
+**[SPEC]** The CLI dispatches purely on **argument count and shape** of `argv`:
 
 | `argv` | Example | Meaning |
 |---|---|---|
@@ -83,12 +95,12 @@ The CLI dispatches purely on **argument count and shape** of `argv`:
 | 4 decimals | `led 51 0 51 0` | fade to `R G B W` |
 | `-h` / `--help` / `help` | `led --help` | print usage; exit 0 |
 
-There are **no other input forms** and **no flags**. Anything that
+**[SPEC]** There are **no other input forms** and **no flags**. Anything that
 doesn't match one of the rows above exits with code 2.
 
-### Disambiguation rules
+#### Disambiguation rules
 
-For single-token input the parser tests in this fixed order:
+**[SPEC]** For single-token input the parser tests in this fixed order:
 
 1. literal `off` (case-insensitive) → fade to all zeros.
 2. `^[0-9a-fA-F]{8}$` (after stripping a leading `#`) → 8-hex form.
@@ -102,35 +114,38 @@ For single-token input the parser tests in this fixed order:
 4. `^[0-9]+$` → palette index.
 5. Anything else → exit 2.
 
-This ordering is deliberate: the user cannot accidentally select an
+**[NOTE]** This ordering is deliberate: the user cannot accidentally select an
 out-of-range palette index by typing a long-but-numeric hex string,
 and a bare 6-digit decimal cannot silently become a hex colour.
 
-## 1.3 Read-current (no-args) form
+### 1.3 Read-current (no-args) form
 
+**[SPEC]**
 ```
 $ led
 51 0 51 0  #33003300
 ```
 
-Output is one line, two views of the same state, separated by **two
+**[SPEC]** Output is one line, two views of the same state, separated by **two
 spaces**:
 
 - four space-separated decimal channel values in `R G B W` order
 - the 8-digit uppercase hex form prefixed with `#`
 
-Machine-readable: `read R G B W _ HEX < <(led)` works in bash. No
+**[SPEC]** Machine-readable: `read R G B W _ HEX < <(led)` works in bash. No
 trailing newline beyond the single one from `print()`. No extra
 columns, no header, no commentary.
 
-## 1.4 Fade animation
+### 1.4 Fade animation
 
-**Every transition fades from the current LED state to the target
+**[SPEC]** **Every transition fades from the current LED state to the target
 over `FADE_MS` milliseconds** by linear interpolation in raw 8-bit
 PWM space at `FADE_FPS` Hz. This applies to every form that sets a
 colour: `off`, `<index>`, 3-decimal, 4-decimal, 6-hex, 8-hex.
 
-### Algorithm
+#### Algorithm
+
+**[SPEC]**
 
 ```python
 def fade_to(target):
@@ -149,20 +164,21 @@ def fade_to(target):
             time.sleep(frame_ms / 1000.0)
 ```
 
-Linear interpolation in raw PWM space (no gamma correction). At
+**[NOTE]** Linear interpolation in raw PWM space (no gamma correction). At
 200 ms total duration the perceptual non-linearity of LED brightness
 isn't visible — gamma would help only on multi-second fades. The
 final frame always lands on the exact target so rounding never
 strands the LED one PWM tick off.
 
-### Cost
+#### Cost
 
-A 200 ms / 50 Hz fade is 10 frames × 4 sysfs writes = **40 writes**,
+**[NOTE]** A 200 ms / 50 Hz fade is 10 frames × 4 sysfs writes = **40 writes**,
 total wall-clock 200 ms, total CPU << 1 ms on the LS1046A A72. Well
 under any reasonable cost budget for a one-shot CLI.
 
-### Failure modes during fade
+#### Failure modes during fade
 
+**[SPEC]**
 - Sysfs write fails mid-fade → exit code 3 immediately. No attempt
   to "wind back" the partial fade; the LED state is wherever the
   last successful write left it (most likely cause is missing root,
@@ -171,24 +187,26 @@ under any reasonable cost budget for a one-shot CLI.
   from "off", which is the safest default if state cannot be
   recovered.
 
-## 1.5 Palette: baked into `led.py`
+### 1.5 Palette: baked into `led.py`
 
-The palette is a 32-entry Python tuple at the top of `led.py`.
+**[SPEC]** The palette is a 32-entry Python tuple at the top of `led.py`.
 There is **no `/config/led.json`**, no on-disk state, no auto-create
 logic. Indices are stable across upgrades because they're literally
 in the source — bumping the palette requires editing `led.py` and
 republishing the ISO (or copying the new script into
 `/usr/local/bin/led` on a live system).
 
-Indices 0–28 sit at ~40% peak brightness (the LP5812 driving four
+**[NOTE]** Indices 0–28 sit at ~40% peak brightness (the LP5812 driving four
 white SMDs through the Mono case at 100% is uncomfortably bright in
 an office). Indices 29–31 are reserved `alert-*` entries at full
 brightness for emergency overrides — `monoledd` (Part 2) treats
 these the same way.
 
-A palette index ≥ `len(PALETTE)` (i.e. ≥ 32) exits with code 2.
+**[SPEC]** A palette index ≥ `len(PALETTE)` (i.e. ≥ 32) exits with code 2.
 
-## 1.6 Exit codes
+### 1.6 Exit codes
+
+**[SPEC]**
 
 | Code | Meaning |
 |---|---|
@@ -197,12 +215,12 @@ A palette index ≥ `len(PALETTE)` (i.e. ≥ 32) exits with code 2.
 | 2 | bad argument / parse error / out-of-range index |
 | 3 | sysfs write failed (usually need root) |
 
-These match what other operator tools in this repo (`fan-check`,
+**[NOTE]** These match what other operator tools in this repo (`fan-check`,
 `caam-check`, `sfp-check`) emit so they can all be wired as
 Nagios/monit probes by the same selector. Note: there is no exit
 code 4 (palette is in source, cannot be "corrupt" at runtime).
 
-## 1.7 Examples
+### 1.7 Examples
 
 ```bash
 led                         # print current state, e.g. "51 0 51 0  #33003300"
@@ -218,29 +236,29 @@ led '#ff8800'               # same, with explicit '#'
 
 ---
 
-# Part 2 — `monoledd` (autonomous daemon)
+## 2. `monoledd` (autonomous daemon)
 
-**Status:** spec / plan — not yet implemented.
+**[NOTE]** **Status:** spec / plan — not yet implemented.
 
-A small userspace daemon that drives the front-panel RGBW status LED
+**[NOTE]** A small userspace daemon that drives the front-panel RGBW status LED
 to communicate **router load** at a glance, using a black-body /
 iron-spectrum colour ramp. Brightness and hue both rise with load, so
 a peripheral glance is enough to read "the box is working hard."
 
-`monoledd` shares the LED hardware, the `trigger=none` convention, and
+**[NOTE]** `monoledd` shares the LED hardware, the `trigger=none` convention, and
 the alert-colour conventions (palette indices 29–31) with the manual
 `led` tool. It is a different process — claimed by a systemd unit,
 running as a dedicated `monoled` system user, dropping privileges
 after sysfs node ownership is set by `tmpfiles.d`.
 
-## 2.1 Signal philosophy
+### 2.1 Signal philosophy
 
-For "the box is working hard," black-body / iron wins by a mile:
+**[NOTE]** For "the box is working hard," black-body / iron wins by a mile:
 **brightness and colour both increase with load**, which double-encodes
 the signal. The user reads warmer + brighter as louder without ever
 having to interpret the colour explicitly.
 
-Three separate "resolution" questions hide in one:
+**[NOTE]** Three separate "resolution" questions hide in one:
 
 | Question | Answer |
 |---|---|
@@ -248,18 +266,18 @@ Three separate "resolution" questions hide in one:
 | Smooth gradient steps so transitions don't look chunky | ~32–64 with gamma / log correction. Without correction, even 256 raw PWM steps look chunky in the dim end. |
 | Underlying PWM resolution | 8-bit (256) per channel from the LP5812. |
 
-**Decision: 16 logical states.** Enough granularity to *feel* the load
+**[SPEC]** **Decision: 16 logical states.** Enough granularity to *feel* the load
 climbing, not so much that we tune levels nobody sees. Smoothing
 between states is done by the daemon (see §2.5).
 
-The other thing to log-map is the **input**: network traffic spans
+**[NOTE]** The other thing to log-map is the **input**: network traffic spans
 orders of magnitude (1 Mbps idle to 1 Gbps saturated = 1000×). Linear
 mapping wastes 90% of the scale on the top decade. The daemon uses
 `log10(bps)` clipped to a log curve, normalised against link capacity.
 
-## 2.2 RGBW state table (16 steps, black-body + cool-idle)
+### 2.2 RGBW state table (16 steps, black-body + cool-idle)
 
-Idle is faint cool cyan (LED is always alive and informative);
+**[SPEC]** Idle is faint cool cyan (LED is always alive and informative);
 transitions to black-body as load climbs. White only kicks in at
 step 12+ as a "saturation alarm."
 
@@ -282,7 +300,7 @@ step 12+ as a "saturation alarm."
 |   14 |  93–97 | 255 |  96 |  16 | 128 | hot white                     |
 |   15 | 98–100 | 255 | 200 |  64 | 255 | white-hot, saturated          |
 
-Notes on the design:
+**[NOTE]** Notes on the design:
 
 - **W (white) is reserved as the saturation alarm.** A white tint
   specifically means the router is near link cap, visually distinct
@@ -292,30 +310,30 @@ Notes on the design:
 - B at idle keeps the LED visibly on without claiming the "active"
   green/yellow band.
 
-Alternative: **black-body purist** — drop steps 0–2 to all zeros and
+**[SPEC]** Alternative: **black-body purist** — drop steps 0–2 to all zeros and
 start the red rise at step 3. Cleaner aesthetic, less informative when
 idle. Selected via `--idle off|cyan` (default `cyan`).
 
-The values above assume the LP5812's W channel is the cool-white die;
+**[NOTE]** The values above assume the LP5812's W channel is the cool-white die;
 if it is warm-white (~3000 K), the saturation states will look more
 orange-white than blue-white, which actually works in our favour for
 this scale.
 
-## 2.3 Load metric
+### 2.3 Load metric
 
-The "load" scalar fed into the table is **derived purely from network
+**[SPEC]** The "load" scalar fed into the table is **derived purely from network
 throughput** — no CPU, no conntrack, no other signals. The status LED
 is a packet-flow indicator. CPU-busy / commit-in-progress / table-walk
 states are intentionally invisible to the LED; they belong in
 journald, not in a peripheral-vision channel.
 
-The board has five physical FMan ports — three 1G RJ45 (`eth0`,
+**[NOTE]** The board has five physical FMan ports — three 1G RJ45 (`eth0`,
 `eth1`, `eth2`) and two 10G SFP+ (`eth3`, `eth4`). We treat the LED
 as a **chassis-wide** indicator: the busiest single port wins, not
 the sum. A saturated 10G WAN should glow red even if everything else
 is idle; averaging would smear that signal away.
 
-**Capacity is hard-coded at 10 Gbps**, not derived from
+**[SPEC]** **Capacity is hard-coded at 10 Gbps**, not derived from
 `/sys/class/net/<ifc>/speed`. Reasons:
 
 - The 1G ports have a real capacity of 1 Gbps but they share the
@@ -329,14 +347,14 @@ is idle; averaging would smear that signal away.
   would either crash a divisor or pin the LED at saturation.
 - One fixed denominator keeps the daemon stateless about port type.
 
-**Counter source**: read once per tick from
+**[SPEC]** **Counter source**: read once per tick from
 `/sys/class/net/<ifc>/statistics/rx_bytes` and `tx_bytes` (one
 `open()` + `read()` per file, ~10 syscalls per tick total — cheaper
 and less parsing-fragile than `/proc/net/dev`). The first tick seeds
 the baseline and emits step 0; subsequent ticks compute
 `bps = (Δrx_bytes + Δtx_bytes) * 8 / Δt`.
 
-**Per-port load**:
+**[SPEC]** **Per-port load**:
 
 ```
 PORT_CAP_BPS = 10e9                       # 10 Gbps, fixed
@@ -349,31 +367,31 @@ port_log = (log10(bps) - log10(LOG_FLOOR)) /
 port_log = clamp(port_log, 0.0, 1.0)
 ```
 
-This puts each decade (1 Mbps → 10 Mbps → 100 Mbps → 1 Gbps →
+**[NOTE]** This puts each decade (1 Mbps → 10 Mbps → 100 Mbps → 1 Gbps →
 10 Gbps) on roughly four steps of the 16-step ramp, which matches
 the "orders-of-magnitude" intuition the colour scale is designed for.
 
-**Chassis aggregate**:
+**[SPEC]** **Chassis aggregate**:
 
 ```
 load = max(port_log[i] for i in interfaces)
 ```
 
-`max`, not sum: we want "the busiest pipe," not an average that
+**[SPEC]** `max`, not sum: we want "the busiest pipe," not an average that
 under-reports a single saturated port. If a future use case wants
 total-throughput visualisation, that is a different LED daemon, not
 a config knob here.
 
-Mapping from `load ∈ [0,1]` to step `s ∈ [0,15]`:
+**[SPEC]** Mapping from `load ∈ [0,1]` to step `s ∈ [0,15]`:
 
 ```
 s = round(load * 15)
 ```
 
-Hysteresis: the daemon will only change `s` by ±1 per tick (see
+**[NOTE]** Hysteresis: the daemon will only change `s` by ±1 per tick (see
 §2.5), so no extra hysteresis band is needed.
 
-**Caveats — VPP / AF_XDP ports.** When an interface is handed to VPP
+**[NOTE]** **Caveats — VPP / AF_XDP ports.** When an interface is handed to VPP
 via `set vpp settings interface ethN`, VPP runs AF_XDP on top of the
 kernel netdev. Kernel `rx_bytes`/`tx_bytes` counters **still
 increment** for AF_XDP traffic (XDP redirects copy through the kernel
@@ -384,15 +402,15 @@ silent on those ports and the daemon will need to read the VPP stats
 segment. Out of scope for v1; flagged here so the future-proofing
 isn't a surprise.
 
-**Caveats — ASK fast-path.** Conntrack-offloaded flows that go
+**[NOTE]** **Caveats — ASK fast-path.** Conntrack-offloaded flows that go
 through the SDK DPAA fast-path still pass through the netdev TX/RX
 path on their way in/out of the box, so the byte counters reflect
 them. The fast-path bypasses *protocol stack* CPU work, not the
 netdev counters.
 
-## 2.4 Animation / tick loop
+### 2.4 Animation / tick loop
 
-The daemon ticks at 5 Hz and animates between table entries the same
+**[SPEC]** The daemon ticks at 5 Hz and animates between table entries the same
 way `led` (Part 1) animates between user inputs — but with different
 defaults appropriate for a continuous load indicator:
 
@@ -412,14 +430,14 @@ defaults appropriate for a continuous load indicator:
 - **Saturation alarm** (`s >= 14`): superimpose a 1 Hz 10% brightness
   flicker on W. Reads as urgency without blinking.
 
-If/when the LP5812 driver gains autonomous-engine support, the daemon
+**[NOTE]** If/when the LP5812 driver gains autonomous-engine support, the daemon
 should hand the per-tick interpolation off to hardware (program the
 ramp as start/end + duration, sleep through the transition). v1 stays
 pure userspace.
 
-## 2.5 Shape
+### 2.5 Shape
 
-Single-file Python 3 (consistent with `led`, `fan-pid`, and the
+**[SPEC]** Single-file Python 3 (consistent with `led`, `fan-pid`, and the
 other `board/scripts/*` we ship), 200–300 lines. No external Python
 deps beyond the stdlib.
 
@@ -430,8 +448,9 @@ deps beyond the stdlib.
 /usr/local/share/monoledd/states.json        # 16-step table (ships in repo)
 ```
 
-### CLI
+#### CLI
 
+**[SPEC]**
 ```
 monoledd [--config /etc/monoledd.conf]
          [--once]              # compute + apply one frame, exit (debug)
@@ -441,7 +460,9 @@ monoledd [--config /etc/monoledd.conf]
          [--list-leds]         # print discovered LP5812 channel paths and exit
 ```
 
-### Config (`/etc/monoledd.conf`)
+#### Config (`/etc/monoledd.conf`)
+
+**[SPEC]**
 
 ```ini
 [general]
@@ -467,11 +488,12 @@ led_blue       = /sys/class/leds/status:blue
 led_white      = /sys/class/leds/status:white
 ```
 
-Sysfs paths are config-driven so the same daemon works on a board
+**[NOTE]** Sysfs paths are config-driven so the same daemon works on a board
 where the LP5812 channels are wired differently.
 
-### Startup behaviour
+#### Startup behaviour
 
+**[SPEC]**
 1. Parse config, resolve LED paths, fail loudly if any of the four
    are missing (refuse to half-control the indicator).
 2. For each LED, write `none` to `trigger` (claim it from any active
@@ -486,12 +508,15 @@ where the LP5812 channels are wired differently.
    `open()`/`close()` churn.
 5. Apply step 0 (idle) immediately, then enter the tick loop.
 
-### Shutdown behaviour
+#### Shutdown behaviour
 
+**[SPEC]**
 `systemd ExecStop=` writes 0 to all four channels, then re-points
 each LED's trigger to `none` (no-op). Safe to restart at any time.
 
-### systemd unit
+#### systemd unit
+
+**[SPEC]**
 
 ```ini
 [Unit]
@@ -517,12 +542,13 @@ ReadWritePaths=/sys/class/leds/status:red /sys/class/leds/status:green /sys/clas
 WantedBy=multi-user.target
 ```
 
-`monoled` user is created via the same hook pattern that wires
+**[NOTE]** `monoled` user is created via the same hook pattern that wires
 `fancontrol` (`98-fancontrol.chroot` style — a new `97-monoled.chroot`
 is the cleanest split).
 
-## 2.6 Failure modes & guarantees
+### 2.6 Failure modes & guarantees
 
+**[SPEC]**
 - **LP5812 not bound** → daemon refuses to start (`exit 1`), logs a
   one-line `journalctl` message. Do not silently downgrade to a
   partial indicator; a half-lit RGBW LED is worse than off.
@@ -543,9 +569,9 @@ is the cleanest split).
   `LOG_SCALE_EN` support, switch a config flag (`use_hw_log =
   true`) to skip the userspace gamma step.
 
-## 2.7 Build / packaging integration
+### 2.7 Build / packaging integration
 
-Files land in the repo as:
+**[SPEC]** Files land in the repo as:
 
 | File | Purpose |
 |---|---|
@@ -555,14 +581,15 @@ Files land in the repo as:
 | `board/systemd/monoledd.tmpfiles` | tmpfiles.d entry that chowns the four `brightness` nodes to `monoled:monoled` at boot and creates the `multi-user.target.wants/monoledd.service` symlink. |
 | `data/hooks/97-monoled.chroot` | live-build hook: creates `monoled` system user, installs daemon + unit + tmpfiles. |
 
-Wiring in `bin/ci-setup-vyos-build.sh`: copy `data/hooks/97-monoled.chroot`
+**[SPEC]** Wiring in `bin/ci-setup-vyos-build.sh`: copy `data/hooks/97-monoled.chroot`
 into `vyos-build/data/live-build-config/hooks/live/` exactly the way
 `98-fancontrol.chroot` already is (per the AGENTS.md "chroot hooks do
 NOT auto-apply" rule), and copy `board/scripts/monoledd` into
 `$CHROOT/usr/local/sbin/`, alongside the existing `led` block.
 
-## 2.8 Out of scope for v1
+### 2.8 Out of scope for v1
 
+**[SPEC]**
 - Driver-level changes to `leds-lp5812` (autonomous engine,
   `LOG_SCALE_EN`, per-channel current trim via DT). Tracked
   separately if/when v2 needs them.
@@ -575,9 +602,9 @@ NOT auto-apply" rule), and copy `board/scripts/monoledd` into
   in-tree `netdev` / `mmc0` / `sfp` triggers, and don't need the
   daemon.
 
-## 2.9 Acceptance checklist
+### 2.9 Acceptance checklist
 
-Before declaring v1 done:
+**[?]** Before declaring v1 done:
 
 - [ ] `monoledd --once --dry-run` prints sane RGBW for representative
       load points (idle, 50%, 100%).
@@ -596,10 +623,12 @@ Before declaring v1 done:
 
 ---
 
-# Coexistence — `led` vs `monoledd`
+## 3. Coexistence — `led` vs `monoledd`
 
-Both tools claim the same four LP5812 sysfs channels. They cannot run
+**[NOTE]** Both tools claim the same four LP5812 sysfs channels. They cannot run
 concurrently without fighting each other.
+
+**[SPEC]**
 
 | Scenario | What to do |
 |---|---|
@@ -608,7 +637,7 @@ concurrently without fighting each other.
 | Want manual control permanently (operator preference) | `systemctl disable --now monoledd.service`. `led` then has exclusive ownership; the baked-in `PALETTE` is the only colour source. |
 | Want to script colour changes from a custom daemon | Either disable `monoledd` or fork it. Two userspace processes writing the same sysfs nodes is unsupported. |
 
-The shared conventions guarantee that switching between them is safe:
+**[SPEC]** The shared conventions guarantee that switching between them is safe:
 
 - Both tools write `trigger=none` before any brightness write
 - Both tools use the same RGBW byte order (`status:red`, `:green`,
@@ -617,8 +646,9 @@ The shared conventions guarantee that switching between them is safe:
 
 ---
 
-# References
+## 4. References
 
+**[NOTE]**
 - Hardware spec & driver background: [HWCTL.md](../HWCTL.md) §1
 - LP5812 driver source in this tree: `kernel/common/files/lp5812/`
 - Manual tool source: `board/scripts/led.py`
