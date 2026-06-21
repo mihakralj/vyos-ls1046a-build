@@ -895,6 +895,10 @@ if [ -d "${CWD}/sdk-overlay/drivers" ]; then
   fi
 
   # --- Config swap: disable mainline DPAA1, enable the SDK stack -------------
+  # Do ALL config changes first, then olddefconfig ONCE. Splitting into
+  # disable→olddefconfig→enable→olddefconfig let the first olddefconfig
+  # cascade-drop NET/NETDEVICES, which the second olddefconfig couldn't
+  # recover. Single-pass: all symbols set, single resolution.
   scripts/config --set-val CONFIG_NR_CPUS 4
   scripts/config --disable CONFIG_FSL_FMAN_PCD
   scripts/config --disable CONFIG_FSL_DPAA_ETH
@@ -903,15 +907,10 @@ if [ -d "${CWD}/sdk-overlay/drivers" ]; then
   scripts/config --disable CONFIG_FSL_FM_MAX_FRAME_SIZE
   scripts/config --disable CONFIG_FSL_XGMAC_MDIO
   scripts/config --disable CONFIG_DPAA_ERRATUM_A050385
-  make olddefconfig
-  # CRITICAL: disabling FSL_DPAA can cascade to drop NETDEVICES, which
-  # gates all networking Kconfigs. Force it back on before SDK symbols.
+  # Force NET/NETDEVICES to stay on (disabling DPAA can cascade-drop them).
+  scripts/config --enable CONFIG_NET
   scripts/config --enable CONFIG_NETDEVICES
-  # Force-disable mainline DPAA (olddefconfig may have re-enabled them).
-  scripts/config --disable CONFIG_FSL_FMAN
-  scripts/config --disable CONFIG_FSL_DPAA
-  scripts/config --disable CONFIG_FSL_DPAA_ETH
-  # Force-enable SDK stack.
+  # Enable the SDK replacement stack.
   scripts/config --enable CONFIG_STAGING
   scripts/config --enable CONFIG_FSL_SDK_DPA
   scripts/config --enable CONFIG_FSL_SDK_BMAN
@@ -924,6 +923,7 @@ if [ -d "${CWD}/sdk-overlay/drivers" ]; then
   scripts/config --set-val CONFIG_FSL_SDK_DPAA_ETH y
   scripts/config --set-val CONFIG_FSL_DPAA_ETH_MAX_BUF_COUNT 640
   scripts/config --set-val CONFIG_FSL_USDPAA y
+  make olddefconfig
   echo "### NXP SDK: vendor overlay + config swap applied"
   # Verify.
   if grep -q '^CONFIG_FSL_FMAN=y' .config; then
