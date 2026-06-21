@@ -84,16 +84,22 @@ echo "### Package validation OK: $KERNEL_PKGS kernel image package(s) in package
 # 2026-06-14) and ships dormant; see bin/ci-build-packages.sh.
 ASK_MOD_PKGS=$(find packages -name 'ask-modules-*.deb' | wc -l)
 if [ "$ASK_MOD_PKGS" -eq 0 ]; then
-    echo ""
-    echo "###############################################################"
-    echo "### FATAL: no ask-modules-*.deb in packages/                ###"
-    echo "### ASK2 OOT kernel module would be MISSING from the ISO.   ###"
-    echo "###############################################################"
-    echo ""
-    exit 1
+    if [ "${ASK_OOT_SKIPPED:-0}" = "1" ]; then
+        echo "### ask.ko SKIPPED (FMan PCD board patches absent — stock build)"
+        echo "### ISO will boot without ask.ko; ASK2 datapath not available on this image."
+    else
+        echo ""
+        echo "###############################################################"
+        echo "### FATAL: no ask-modules-*.deb in packages/                ###"
+        echo "### ASK2 OOT kernel module would be MISSING from the ISO.   ###"
+        echo "###############################################################"
+        echo ""
+        exit 1
+    fi
+else
+    echo "### ASK OOT validation OK: $ASK_MOD_PKGS ASK OOT module .deb(s) in packages/"
+    find packages -name 'ask-modules-*.deb' -exec ls -lh {} \;
 fi
-echo "### ASK OOT validation OK: $ASK_MOD_PKGS ASK OOT module .deb(s) in packages/"
-find packages -name 'ask-modules-*.deb' -exec ls -lh {} \;
 
 ### HOTFIX: Debian bookworm-backports is currently missing libhtp2 arm64 binary
 ### but suricata from bookworm-backports depends on it. We fetch it from snapshot.

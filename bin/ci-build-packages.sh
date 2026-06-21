@@ -331,7 +331,13 @@ for package in $packages; do
     echo "### accel-ppp-ng .debs (replayed from cache, if any):"
     ls -lh accel-ppp*.deb 2>/dev/null || echo "  (none in cache)"
     echo "### ASK2 ask-modules .deb (replayed from cache):"
-    ls -lh ask-modules-*.deb 2>/dev/null || { echo "FATAL: cache HIT but no ask-modules-*.deb in cached bundle"; echo "FATAL: rm -rf '$KERNEL_CACHE_HIT_DIR' and rebuild to repopulate"; exit 1; }
+    if [ -f "$KERNEL_CACHE_HIT_DIR/ask-modules-skipped.txt" ]; then
+      echo "### ask.ko SKIPPED marker found in cache — FMan PCD was absent in this build"
+      cp "$KERNEL_CACHE_HIT_DIR/ask-modules-skipped.txt" . 2>/dev/null || true
+      [ -n "${GITHUB_ENV:-}" ] && echo "ASK_OOT_SKIPPED=1" >> "$GITHUB_ENV"
+    else
+      ls -lh ask-modules-*.deb 2>/dev/null || { echo "FATAL: cache HIT but no ask-modules-*.deb in cached bundle"; echo "FATAL: rm -rf '$KERNEL_CACHE_HIT_DIR' and rebuild to repopulate"; exit 1; }
+    fi
   elif [ "$package" == "linux-kernel" ]; then
     # Find the actual kernel source tree (has Makefile + arch/arm64).
     # `find -name 'linux-*'` matches both linux-6.6.x/ (the kernel) AND
@@ -535,6 +541,10 @@ for package in $packages; do
     else
       echo "### ask.ko build SKIPPED: FMan PCD header absent ($ASK_PCD_HEADER)"
       echo "### (FMan PCD board patches not applied — stock build without ASK2 substrate)"
+      # Signal to subsequent CI steps (ci-pick-packages.sh) and cache replay
+      # that ask.ko was intentionally not built on this branch.
+      [ -n "${GITHUB_ENV:-}" ] && echo "ASK_OOT_SKIPPED=1" >> "$GITHUB_ENV"
+      echo "skipped" > ask-modules-skipped.txt
     fi
 
     ### Build accel-ppp-ng ARM64 packages (daemon + kernel modules)
@@ -571,7 +581,7 @@ for package in $packages; do
       rm -rf "$KERNEL_CACHE_STAGE" "$KERNEL_CACHE_NEW_DIR"
       mkdir -p "$KERNEL_CACHE_STAGE"
       cached_count=0
-      for built in linux-image-*_arm64.deb linux-headers-*_arm64.deb linux-libc-dev_*_arm64.deb accel-ppp-ng_*_arm64.deb ask-modules-*_arm64.deb; do
+      for built in linux-image-*_arm64.deb linux-headers-*_arm64.deb linux-libc-dev_*_arm64.deb accel-ppp-ng_*_arm64.deb ask-modules-*_arm64.deb ask-modules-skipped.txt; do
         [ -f "$built" ] || continue
         case "$built" in *-dbg*) continue ;; esac
         cp "$built" "$KERNEL_CACHE_STAGE/$(basename "$built")"
