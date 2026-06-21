@@ -870,15 +870,13 @@ if [ -d "${CWD}/sdk-overlay/drivers" ]; then
   cp -r "${CWD}/sdk-overlay/include/." include/
 
   FRESC=drivers/net/ethernet/freescale
-  # Kconfig / Makefile hooks — source SDK Kconfigs from drivers/Kconfig
-  # directly (NOT freescale/Kconfig which is inside if NETDEVICES and may
-  # not be processed if NETDEVICES dependencies are unmet during olddefconfig).
-  grep -q 'fsl_qbman/Kconfig' drivers/staging/Kconfig 2>/dev/null || \
-    echo 'source "drivers/staging/fsl_qbman/Kconfig"' >> drivers/staging/Kconfig
-  grep -q 'sdk_fman/Kconfig' drivers/Kconfig 2>/dev/null || \
-    echo 'source "drivers/net/ethernet/freescale/sdk_fman/Kconfig"' >> drivers/Kconfig
-  grep -q 'sdk_dpaa/Kconfig' drivers/Kconfig 2>/dev/null || \
-    echo 'source "drivers/net/ethernet/freescale/sdk_dpaa/Kconfig"' >> drivers/Kconfig
+  # Kconfig / Makefile hooks — concatenate SDK Kconfigs into the
+  # staging/fsl_qbman Kconfig which is always reachable (unconditionally
+  # sourced from drivers/staging/Kconfig). Do NOT append to freescale/Kconfig
+  # (inside if NET_VENDOR_FREESCALE which may be skipped).
+  cat drivers/net/ethernet/freescale/sdk_fman/Kconfig \
+      drivers/net/ethernet/freescale/sdk_dpaa/Kconfig \
+      >> drivers/staging/fsl_qbman/Kconfig
   grep -q 'sdk_fman/' "$FRESC/Makefile" 2>/dev/null || \
     echo 'obj-\$(CONFIG_FSL_SDK_FMAN) += sdk_fman/' >> "$FRESC/Makefile"
   grep -q 'sdk_dpaa/' "$FRESC/Makefile" 2>/dev/null || \
@@ -906,18 +904,15 @@ if [ -d "${CWD}/sdk-overlay/drivers" ]; then
   scripts/config --disable CONFIG_FSL_XGMAC_MDIO
   scripts/config --disable CONFIG_DPAA_ERRATUM_A050385
   make olddefconfig
+  # CRITICAL: disabling FSL_DPAA can cascade to drop NETDEVICES, which
+  # gates all networking Kconfigs. Force it back on before SDK symbols.
+  scripts/config --enable CONFIG_NETDEVICES
   # Force-disable mainline DPAA (olddefconfig may have re-enabled them).
   scripts/config --disable CONFIG_FSL_FMAN
   scripts/config --disable CONFIG_FSL_DPAA
   scripts/config --disable CONFIG_FSL_DPAA_ETH
-  # Force-enable SDK stack.  Write AFTER olddefconfig so symbols are not
-  # stripped by Kconfig dependency resolution.  make syncconfig (called
-  # implicitly by the build) only strips symbols whose Kconfig source
-  # file is not reachable; we wire the sources into ethernet/Kconfig
-  # and staging/Kconfig above.
+  # Force-enable SDK stack.
   scripts/config --enable CONFIG_STAGING
-  scripts/config --enable CONFIG_ARCH_LAYERSCAPE
-  scripts/config --enable CONFIG_NET_VENDOR_FREESCALE
   scripts/config --enable CONFIG_FSL_SDK_DPA
   scripts/config --enable CONFIG_FSL_SDK_BMAN
   scripts/config --enable CONFIG_FSL_SDK_QMAN
