@@ -40,9 +40,7 @@ for package in $packages; do
   # Cache key derivation:
   #   * KVER         — kernel_version from vyos-build/data/defaults.toml
   #                    (pins which upstream tarball gets downloaded)
-  #   * FLAVOR       — default | vpp | ask. Encoded in the key so cross-flavor
-  #                    cache contamination is impossible. (ask is currently
-  #                    excluded from caching anyway — see scope gate below.)
+  #   * No FLAVOR variable — single collapsed image.
   #   * KERNEL_HASH  — sha256(first 16 chars) of every input that mutates the
   #                    kernel source tree or .config:
   #                      - data/kernel-config/*.config  (defconfig fragments)
@@ -58,13 +56,7 @@ for package in $packages; do
   #                      - bin/ci-build-accel-ppp.sh    (its .deb rides in
   #                        the same cache entry)
   #
-  # Cache scope: enabled only for FLAVOR in {default,vpp}. The ask flavor
-  # builds OOT ASK userspace binaries against $KSRC (cmm, dpa_app, fci, cdx,
-  # auto_bridge) — caching the kernel without also caching the ASK userspace
-  # tree would leave us with a hit on the .debs but no $KSRC for the
-  # userspace step. Out of scope for this iteration. ASK_KERNEL_TAG mode
-  # (which already consumes a prebuilt kernel from a frozen release) is
-  # likewise excluded — there is no kernel build to cache.
+  # Cache scope: enabled for all builds (single collapsed image).
   #
   # Cache layout: one directory per key under $CACHE_DIR/<key>/ containing:
   #   linux-image-<kver>_arm64.deb
@@ -79,7 +71,7 @@ for package in $packages; do
   SKIP_KERNEL_BUILD=0
   KERNEL_CACHE_KEY=""
   KERNEL_CACHE_HIT_DIR=""
-  if [ "$package" == "linux-kernel" ] && [ "${FLAVOR:-default}" != "ask" ] && [ -z "${ASK_KERNEL_TAG:-}" ]; then
+  if [ "$package" == "linux-kernel" ] && [ -z "${ASK_KERNEL_TAG:-}" ]; then
     KVER=$(awk -F'"' '/^kernel_version/ {print $2}' "$GITHUB_WORKSPACE/vyos-build/data/defaults.toml" 2>/dev/null | head -1)
     KERNEL_HASH=$( {
       find "$GITHUB_WORKSPACE/data/kernel-config" -maxdepth 1 -name '*.config' -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
@@ -114,7 +106,7 @@ for package in $packages; do
     # GC stale entries (14 days)
     find "$KERNEL_CACHE_ROOT" -maxdepth 1 -mindepth 1 -type d -mtime +14 -exec rm -rf {} + 2>/dev/null || true
     if [ -n "$KVER" ] && [ -n "$KERNEL_HASH" ]; then
-      KERNEL_CACHE_KEY="linux-kernel_${KVER}_${FLAVOR:-default}_${KERNEL_HASH}"
+      KERNEL_CACHE_KEY="linux-kernel_${KVER}_${KERNEL_HASH}"
       KERNEL_CACHE_HIT_DIR="$KERNEL_CACHE_ROOT/$KERNEL_CACHE_KEY"
       if [ -d "$KERNEL_CACHE_HIT_DIR" ] && \
          ls "$KERNEL_CACHE_HIT_DIR"/linux-image-*_arm64.deb >/dev/null 2>&1; then
@@ -383,18 +375,9 @@ for package in $packages; do
         cp -v "$SDK_DTSI_DIR"/*.dtsi "$DTS_DIR/" 2>/dev/null || true
       fi
 
-      # FLAVOR-aware DTB selection:
-      #   FLAVOR=ask           → SDK DTB is PRIMARY (SDK fsl_mac needs fixed-link
-      #                          on 10G MACs; mainline phylink path is bypassed)
-      #   FLAVOR=default|vpp   → MAINLINE DTB is PRIMARY (kernel uses mainline
-      #                          DPAA1 + phylink/SFP state machine; shipping the
-      #                          SDK DTB here forces phylink into fixed/10gbase-r
-      #                          fallback and rejects all SFP+ modules with
-      #                          "unsupported SFP module: no common interface modes")
-      #
-      # Both DTBs are still BUILT (when sources are present) and SHIPPED so
-      # diagnostics can compare. Only the `mono-gw.dtb` filename — what U-Boot
-      # actually loads — switches based on FLAVOR.
+      # DTB selection — single collapsed image always uses mainline DTB.
+      # SDK DTB is still shipped as mono-gw-sdk.dtb for diagnostics.
+
       SDK_DTS="$DTS_DIR/mono-gateway-dk-sdk.dts"
       SDK_DTB_OK=false
       if [ -f "$SDK_DTS" ]; then
@@ -430,75 +413,24 @@ for package in $packages; do
         echo "WARNING: mainline DTB build failed (rc=$MAKE_RC)"
       fi
 
-      # Select PRIMARY mono-gw.dtb based on FLAVOR.
-      case "$FLAVOR" in
-        ask)
-          if [ "$SDK_DTB_OK" = true ]; then
-            cp "$SDK_DTB" "$INCLUDES_BIN/mono-gw.dtb"
-            cp "$SDK_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
-            echo "### FLAVOR=ask → SDK DTB selected as PRIMARY mono-gw.dtb"
-          elif [ "$MAINLINE_DTB_OK" = true ]; then
-            cp "$MONO_DTB" "$INCLUDES_BIN/mono-gw.dtb"
-            cp "$MONO_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
-            echo "WARNING: FLAVOR=ask but SDK DTB unavailable — falling back to mainline DTB as PRIMARY"
-          elif [ -f "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" ] \
-               && [ "$(stat -c %Y "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb")" -gt "$(stat -c %Y "$GITHUB_WORKSPACE/board/dtb/mono-gateway-dk.dts")" ]; then
-            # ci-compile-mono-dtb.sh ran earlier in local-build.sh and
-            # produced board/dtb/mono-gw.dtb FROM the current DTS in this
-            # workspace (we verify by mtime ordering, so a stale committed
-            # DTB cannot sneak past). The in-kernel-tree DTB build in this
-            # script attempted to redo the same compile but blew up because
-            # vyos-build's build-kernel.sh wipes the kernel .config after
-            # packaging. Re-using the pre-compiled DTB is safe in this case
-            # — it came from the same DTS we would have compiled here.
-            cp "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" "$INCLUDES_BIN/mono-gw.dtb"
-            cp "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" "$INCLUDES_CHR/boot/mono-gw.dtb"
-            echo "### FLAVOR=ask → falling back to pre-compiled board/dtb/mono-gw.dtb (mtime > DTS mtime, ci-compile-mono-dtb.sh output)"
-          else
-            echo "FATAL: FLAVOR=ask and neither SDK nor mainline DTB built; refusing to ship stale board/dtb/mono-gw.dtb."
-            exit 1
-          fi
-          ;;
-        default|vpp)
-          if [ "$MAINLINE_DTB_OK" = true ]; then
-            cp "$MONO_DTB" "$INCLUDES_BIN/mono-gw.dtb"
-            cp "$MONO_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
-            echo "### FLAVOR=$FLAVOR → mainline DTB selected as PRIMARY mono-gw.dtb"
-          elif [ -f "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" ] \
-               && [ "$(stat -c %Y "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb")" -gt "$(stat -c %Y "$GITHUB_WORKSPACE/board/dtb/mono-gateway-dk.dts")" ]; then
-            # ci-compile-mono-dtb.sh ran earlier in this CI run (workflow step
-            # "Compile Mono DTB from DTS" at .github/workflows/auto-build.yml
-            # line 223; bin/local-build.sh:166 for local builds) and produced
-            # board/dtb/mono-gw.dtb FROM the current DTS in this workspace by
-            # sparse-cloning linux-stable at the matching kernel tag. We verify
-            # by mtime ordering, so a stale committed DTB cannot sneak past.
-            # The in-kernel-tree DTB build attempt above blew up because
-            # vyos-build's bindeb-pkg wipes .config (and friends) after
-            # packaging, leaving the kernel tree unconfigured for the dtbs
-            # target. Re-using the pre-compiled DTB is safe — it came from
-            # the same DTS we would have compiled here, against the same
-            # kernel tag.
-            cp "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" "$INCLUDES_BIN/mono-gw.dtb"
-            cp "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" "$INCLUDES_CHR/boot/mono-gw.dtb"
-            # Also publish under the named alias for diagnostic parity with
-            # the in-tree build path.
-            cp "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" "$INCLUDES_BIN/mono-gw-mainline.dtb"
-            echo "### FLAVOR=$FLAVOR → falling back to pre-compiled board/dtb/mono-gw.dtb (mtime > DTS mtime, ci-compile-mono-dtb.sh output; in-tree make failed rc=$MAKE_RC because bindeb-pkg cleaned .config)"
-          elif [ "$SDK_DTB_OK" = true ]; then
-            echo "FATAL: FLAVOR=$FLAVOR and mainline DTB build failed (rc=$MAKE_RC)."
-            echo "FATAL: refusing to ship SDK DTB as primary on a non-ASK flavor — that"
-            echo "FATAL: forces mainline phylink into fixed-link fallback and rejects all SFP+ modules."
-            exit 1
-          else
-            echo "FATAL: FLAVOR=$FLAVOR and no DTB built; refusing to ship stale board/dtb/mono-gw.dtb."
-            exit 1
-          fi
-          ;;
-        *)
-          echo "FATAL: unknown FLAVOR='$FLAVOR' in DTB selection"
-          exit 1
-          ;;
-      esac
+      # Select PRIMARY mono-gw.dtb — single image uses mainline DTB.
+      if [ "$MAINLINE_DTB_OK" = true ]; then
+        cp "$MONO_DTB" "$INCLUDES_BIN/mono-gw.dtb"
+        cp "$MONO_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
+        echo "### Mainline DTB selected as PRIMARY mono-gw.dtb"
+      elif [ -f "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" ] \
+           && [ "$(stat -c %Y "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb")" -gt "$(stat -c %Y "$GITHUB_WORKSPACE/board/dtb/mono-gateway-dk.dts")" ]; then
+        # ci-compile-mono-dtb.sh ran earlier and produced board/dtb/mono-gw.dtb
+        # from the current DTS. bindeb-pkg wiped .config so in-tree dtbs target
+        # failed; fall back to the pre-compiled DTB.
+        cp "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" "$INCLUDES_BIN/mono-gw.dtb"
+        cp "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" "$INCLUDES_CHR/boot/mono-gw.dtb"
+        cp "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" "$INCLUDES_BIN/mono-gw-mainline.dtb"
+        echo "### Falling back to pre-compiled board/dtb/mono-gw.dtb (mtime > DTS mtime)"
+      else
+        echo "FATAL: no DTB built; refusing to ship stale board/dtb/mono-gw.dtb."
+        exit 1
+      fi
     fi
 
     ### ASK2 OOT kernel modules (ask.ko, future ask_bridge.ko)
@@ -514,7 +446,7 @@ for package in $packages; do
     # `find scripts/package-build -name '*.deb'` sweep will pick it up.
     #
     # Single-image: ask.ko is built UNCONDITIONALLY and ships dormant in
-    # every ISO (the FLAVOR=ask gate was retired with the 2026-06-14 flavor
+    # every ISO (single collapsed image; ASK OOT module built unconditionally).
     # collapse). ask.ko links only against the common board fman_cc_*/fman_hm_*
     # substrate — the dead ask-flavor in-tree patches stay unapplied — so it
     # compiles in the default build. The operator engages the datapath at

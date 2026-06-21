@@ -6,7 +6,7 @@
 # ASK2 (rewrite-in-progress): the legacy ASK_KERNEL_TAG env var and the
 # ci-consume-ask-kernel.sh / ci-setup-kernel-ask.sh helpers were deleted on
 # the ask20 branch along with the ASK 1.x SDK kernel stack. This script
-# now runs unconditionally for all flavors (default | ask | vpp). The
+# now runs unconditionally for the single collapsed image. The
 # ASK_KERNEL_TAG guard below is dead code kept only as a safety belt in
 # case some external caller still injects the variable.
 set -ex -o pipefail
@@ -115,11 +115,11 @@ BOARD_PATCH_DIR=kernel/common/patches/board
 [ -d "$BOARD_PATCH_DIR" ] || { echo "ERROR: $BOARD_PATCH_DIR missing"; exit 1; }
 
 # Clean stale patches left by prior CI runs on the same self-hosted runner.
-# Failure mode (observed 2026-05-11): a prior FLAVOR=ask build on the same
+# Failure mode (observed 2026-05-11): a prior build on the same
 # runner workspace left 003-ask-kernel-hooks, 4002-hwmon-ina2xx,
 # 4003-sfp-rollball-phylink-einval-fallback (legacy name of current 101) and
 # 4004-swphy-support-10g-fixed-link-speed in $KERNEL_PATCHES. They were then
-# applied alphabetically alongside the current default-flavor patches by
+# applied alphabetically alongside the current patches by
 # build-kernel.sh's `for patch in ...; patch -p1` loop, which does NOT check
 # exit codes. Legacy 4003 and current 101 both touch sfp.c near line 2667;
 # the second-applied silently fails, corrupts subsequent line anchors, and
@@ -759,64 +759,11 @@ else
     echo "WARNING: $NF_FLOW_LOG_PATCH missing — PR14o REPLACE-delivery diagnostic disabled"
 fi
 
-### FLAVOR=ask: stage the ASK2 in-tree kernel patches
-#
-# Per plans/archive/ASK2-IMPLEMENTATION.md PR2/PR3 and spec §10, the ASK2
-# kernel surface needs three small patches (currently placeholder stubs;
-# real implementations land in M2):
-#   0001-caam-qi-share.patch        — caam_qi_ext_consumer_register/release
-#   0002-dpaa-eth-flow-block.patch  — TC_SETUP_BLOCK in dpaa_setup_tc()
-#   0003-fman-host-command-api.patch — fman_host_cmd_send() + new header
-#   0004-fman-pcd-subsystem.patch   — FMan PCD orchestration scaffold (PR14a)
-#   0005-fman-pcd-kg-prep.patch     — FMan PCD KeyGen public API stub (PR14b-prep)
-#   0006-fman-pcd-kg-body.patch     — FMan PCD KeyGen real KGSE_* programming (PR14b-body)
-#
-# Naming hazard: vyos-build's own upstream patch loop reserves the
-# `0001-*` and `0003-*` filenames in $KERNEL_PATCHES (preserved by the
-# cleanup glob above via `! -name '0001-*' ! -name '0003-*'`). Copying our
-# patches in with their authored 0001/0002/0003 names would collide with
-# vyos-build's reserved upstream patches and either silently overwrite
-# them or fail to apply. Solution: rename to 1001/1002/1003 at staging
-# time. The build-kernel.sh patch loop applies `find … | sort`-ordered,
-# producing the deterministic apply order:
-#     0001 0003 101 1001 1002 1003 1004 1005 1006 1007 4005 4006 4007 4009
-# i.e. vyos-build's reserved patches first, then board patches, then
-# ASK patches, then the rest of the board patches.
-#
-# Source-of-truth filenames in the repo stay 0001/0002/0003 because that
-# matches the spec §10 numbering and the authoring rule (every patch is
-# `git format-patch`-style starting at 0001). The rename happens ONLY in
-# the staged copies. README.md under kernel/flavors/ask/patches/ documents
-# this.
-if [ "${FLAVOR:-default}" = "ask" ]; then
-    ASK_PATCH_DIR=kernel/flavors/ask/patches
-    if [ ! -d "$ASK_PATCH_DIR" ]; then
-        echo "ERROR: FLAVOR=ask but $ASK_PATCH_DIR is missing"
-        exit 1
-    fi
-    echo "### FLAVOR=ask — staging ASK2 in-tree kernel patches from $ASK_PATCH_DIR"
-    # All ASK-specific kernel patches were archived to
-    # archive-2026-06-21-pre-6.18.34/ on 2026-06-21 because the board/common
-    # patch series (kernel/common/patches/board/0092–0145) now carries the
-    # ASK2 PCD/HM/CC features directly. The ASK flavor relies solely on the
-    # common board patch stack; no flavor-specific kernel patches are active.
-    if ls "$ASK_PATCH_DIR"/*.patch >/dev/null 2>&1; then
-        ASK_PATCH_COUNT=0
-        for src_patch in "$ASK_PATCH_DIR"/*.patch; do
-            [ -f "$src_patch" ] || continue
-            base=$(basename "$src_patch")
-            # Rename to 1xxx- to avoid collision with vyos-build's reserved
-            # upstream 0001-*/0003-* patches.
-            dst="1${base}"
-            echo "###   $base → $dst"
-            cp "$src_patch" "$KERNEL_PATCHES/$dst"
-            ASK_PATCH_COUNT=$((ASK_PATCH_COUNT + 1))
-        done
-        echo "### ASK2: $ASK_PATCH_COUNT in-tree kernel patches staged"
-    else
-        echo "### ASK2: 0 kernel patches staged (common board stack carries all PCD features)"
-    fi
-fi
+### ASK2 in-tree kernel patches — RETIRED 2026-06-21
+# The ASK flavor patch stack was archived to
+# kernel/flavors/ask/patches/archive-2026-06-21-pre-6.18.34/ because the
+# common board patch series (kernel/common/patches/board/0092-0145) now
+# carries all PCD features. No flavor-specific kernel patches are staged.
 
 # Stage FMD Shim + LP5812 source from the new common files layout.
 # Source of truth: kernel/common/files/{fsl_fmd_shim.c,lp5812/}.

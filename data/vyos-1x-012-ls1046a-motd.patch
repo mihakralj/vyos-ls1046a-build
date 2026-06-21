@@ -12,7 +12,7 @@ index 0d52092..f9e3bd2 100644
  {% if version_data.lts_build %}
   * Support portal: {{ version_data.support_url }}
  {% endif %}
-+   Flavor:        @@FLAVOR@@
++   Image:         LS1046A (single collapsed image)
 +   Patches:       eMMC boot, Fan control, LED control, CAAM, SFP+, Watchdog, U-Boot env
 +
   * Documentation:  {{ version_data.documentation_url }}

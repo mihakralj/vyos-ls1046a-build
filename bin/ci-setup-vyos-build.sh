@@ -647,4 +647,4 @@ cp data/hooks/97-ask-modules.chroot "$HOOKS/97-ask-modules.chroot"
 chmod +x "$HOOKS/97-ask-modules.chroot"
 echo "### staged 97-ask-modules.chroot for systemd-modules-load auto-load"
 
-echo "### vyos-build setup complete (FLAVOR=${FLAVOR:-default})"
+echo "### vyos-build setup complete"
