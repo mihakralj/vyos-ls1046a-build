@@ -870,15 +870,15 @@ if [ -d "${CWD}/sdk-overlay/drivers" ]; then
   cp -r "${CWD}/sdk-overlay/include/." include/
 
   FRESC=drivers/net/ethernet/freescale
-  # Kconfig / Makefile hooks (idempotent appends to mainline parent files).
+  # Kconfig / Makefile hooks — source SDK Kconfigs from drivers/Kconfig
+  # directly (NOT freescale/Kconfig which is inside if NETDEVICES and may
+  # not be processed if NETDEVICES dependencies are unmet during olddefconfig).
   grep -q 'fsl_qbman/Kconfig' drivers/staging/Kconfig 2>/dev/null || \
     echo 'source "drivers/staging/fsl_qbman/Kconfig"' >> drivers/staging/Kconfig
-  grep -q 'fsl_qbman/' drivers/staging/Makefile 2>/dev/null || \
-    echo 'obj-y += fsl_qbman/' >> drivers/staging/Makefile
-  grep -q 'sdk_fman/Kconfig' "$FRESC/Kconfig" 2>/dev/null || \
-    echo 'source "drivers/net/ethernet/freescale/sdk_fman/Kconfig"' >> "$FRESC/Kconfig"
-  grep -q 'sdk_dpaa/Kconfig' "$FRESC/Kconfig" 2>/dev/null || \
-    echo 'source "drivers/net/ethernet/freescale/sdk_dpaa/Kconfig"' >> "$FRESC/Kconfig"
+  grep -q 'sdk_fman/Kconfig' drivers/Kconfig 2>/dev/null || \
+    echo 'source "drivers/net/ethernet/freescale/sdk_fman/Kconfig"' >> drivers/Kconfig
+  grep -q 'sdk_dpaa/Kconfig' drivers/Kconfig 2>/dev/null || \
+    echo 'source "drivers/net/ethernet/freescale/sdk_dpaa/Kconfig"' >> drivers/Kconfig
   grep -q 'sdk_fman/' "$FRESC/Makefile" 2>/dev/null || \
     echo 'obj-\$(CONFIG_FSL_SDK_FMAN) += sdk_fman/' >> "$FRESC/Makefile"
   grep -q 'sdk_dpaa/' "$FRESC/Makefile" 2>/dev/null || \
@@ -898,7 +898,6 @@ if [ -d "${CWD}/sdk-overlay/drivers" ]; then
 
   # --- Config swap: disable mainline DPAA1, enable the SDK stack -------------
   scripts/config --set-val CONFIG_NR_CPUS 4
-  # Disable all mainline DPAA symbols.
   scripts/config --disable CONFIG_FSL_FMAN_PCD
   scripts/config --disable CONFIG_FSL_DPAA_ETH
   scripts/config --disable CONFIG_FSL_DPAA
@@ -907,38 +906,37 @@ if [ -d "${CWD}/sdk-overlay/drivers" ]; then
   scripts/config --disable CONFIG_FSL_XGMAC_MDIO
   scripts/config --disable CONFIG_DPAA_ERRATUM_A050385
   make olddefconfig
-  # Force-disable FSL_FMAN/FSL_DPAA — olddefconfig sometimes re-enables
-  # them if any enabled symbol (including SDK ones) touches DPAA selects.
-  sed -i '/^CONFIG_FSL_FMAN[= ]/d' .config
-  sed -i '/^CONFIG_FSL_DPAA[= ]/d' .config
-  sed -i '/^CONFIG_FSL_DPAA_ETH[= ]/d' .config
-  echo '# CONFIG_FSL_FMAN is not set' >> .config
-  echo '# CONFIG_FSL_DPAA is not set' >> .config
-  echo '# CONFIG_FSL_DPAA_ETH is not set' >> .config
-  # Now force-enable the SDK stack.
-  cat >> .config << 'SDKCFG'
-CONFIG_STAGING=y
-CONFIG_FSL_SDK_DPA=y
-CONFIG_FSL_SDK_BMAN=y
-CONFIG_FSL_SDK_QMAN=y
-CONFIG_FSL_BMAN_CONFIG=y
-CONFIG_FSL_QMAN_CONFIG=y
-CONFIG_FSL_SDK_FMAN=y
-CONFIG_FMAN_ARM=y
-CONFIG_FSL_DPAA_HOOKS=y
-CONFIG_FSL_SDK_DPAA_ETH=y
-CONFIG_FSL_DPAA_ETH_MAX_BUF_COUNT=640
-CONFIG_FSL_USDPAA=y
-SDKCFG
-  make olddefconfig
+  # Force-disable mainline DPAA (olddefconfig may have re-enabled them).
+  scripts/config --disable CONFIG_FSL_FMAN
+  scripts/config --disable CONFIG_FSL_DPAA
+  scripts/config --disable CONFIG_FSL_DPAA_ETH
+  # Force-enable SDK stack.  Write AFTER olddefconfig so symbols are not
+  # stripped by Kconfig dependency resolution.  make syncconfig (called
+  # implicitly by the build) only strips symbols whose Kconfig source
+  # file is not reachable; we wire the sources into ethernet/Kconfig
+  # and staging/Kconfig above.
+  scripts/config --enable CONFIG_STAGING
+  scripts/config --enable CONFIG_ARCH_LAYERSCAPE
+  scripts/config --enable CONFIG_NET_VENDOR_FREESCALE
+  scripts/config --enable CONFIG_FSL_SDK_DPA
+  scripts/config --enable CONFIG_FSL_SDK_BMAN
+  scripts/config --enable CONFIG_FSL_SDK_QMAN
+  scripts/config --enable CONFIG_FSL_BMAN_CONFIG
+  scripts/config --enable CONFIG_FSL_QMAN_CONFIG
+  scripts/config --set-val CONFIG_FSL_SDK_FMAN y
+  scripts/config --set-val CONFIG_FMAN_ARM y
+  scripts/config --set-val CONFIG_FSL_DPAA_HOOKS y
+  scripts/config --set-val CONFIG_FSL_SDK_DPAA_ETH y
+  scripts/config --set-val CONFIG_FSL_DPAA_ETH_MAX_BUF_COUNT 640
+  scripts/config --set-val CONFIG_FSL_USDPAA y
   echo "### NXP SDK: vendor overlay + config swap applied"
-  # Hard-verify the swap took effect.
+  # Verify.
   if grep -q '^CONFIG_FSL_FMAN=y' .config; then
-    echo "ERROR: CONFIG_FSL_FMAN re-enabled after SDK config swap"
+    echo "ERROR: CONFIG_FSL_FMAN still enabled"
     exit 1
   fi
   if ! grep -q '^CONFIG_FSL_SDK_FMAN=y' .config; then
-    echo "ERROR: CONFIG_FSL_SDK_FMAN not set after SDK config swap"
+    echo "ERROR: CONFIG_FSL_SDK_FMAN not set"
     exit 1
   fi
 fi
