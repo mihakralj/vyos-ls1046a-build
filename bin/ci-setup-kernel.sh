@@ -897,48 +897,40 @@ if [ -d "${CWD}/sdk-overlay/drivers" ]; then
   fi
 
   # --- Config swap: disable mainline DPAA1, enable the SDK stack -------------
-  # Write all config changes, then olddefconfig ONCE.
-  scripts/config --set-val CONFIG_NR_CPUS 4
-  scripts/config --disable CONFIG_FSL_FMAN_PCD
-  scripts/config --disable CONFIG_FSL_DPAA_ETH
-  scripts/config --disable CONFIG_FSL_DPAA
-  scripts/config --disable CONFIG_FSL_FMAN
-  scripts/config --disable CONFIG_FSL_FM_MAX_FRAME_SIZE
-  scripts/config --disable CONFIG_FSL_XGMAC_MDIO
-  scripts/config --disable CONFIG_DPAA_ERRATUM_A050385
-  scripts/config --enable CONFIG_NET
-  scripts/config --enable CONFIG_NETDEVICES
-  scripts/config --enable CONFIG_STAGING
-  scripts/config --enable CONFIG_FSL_SDK_DPA
-  scripts/config --enable CONFIG_FSL_SDK_BMAN
-  scripts/config --enable CONFIG_FSL_SDK_QMAN
-  scripts/config --enable CONFIG_FSL_BMAN_CONFIG
-  scripts/config --enable CONFIG_FSL_QMAN_CONFIG
-  scripts/config --set-val CONFIG_FSL_SDK_FMAN y
-  scripts/config --set-val CONFIG_FMAN_ARM y
-  scripts/config --set-val CONFIG_FSL_DPAA_HOOKS y
-  scripts/config --set-val CONFIG_FSL_SDK_DPAA_ETH y
-  scripts/config --set-val CONFIG_FSL_DPAA_ETH_MAX_BUF_COUNT 640
-  scripts/config --set-val CONFIG_FSL_USDPAA y
-  make olddefconfig
-  # Force SDK symbols into auto.conf/.config. If olddefconfig accepted
-  # FSL_SDK_DPA (from staging/fsl_qbman) but not FSL_SDK_FMAN (concatenated
-  # into same file), the concatenation broke something. Log diagnostics and
-  # continue — the Makefile hooks and source files are all in place.
-  if ! grep -q 'CONFIG_FSL_SDK_DPA=y' include/config/auto.conf; then
-    echo "ERROR: FSL_SDK_DPA not in auto.conf — staging Kconfig broken"
+  # Build a KCONFIG_ALLCONFIG fragment that force-sets ALL needed symbols.
+  # This is stronger than scripts/config+olddefconfig — allconfig bypasses
+  # dependency checks and forces the specified values.
+  cat > /tmp/sdk-force.config << 'FORCEOF'
+CONFIG_NR_CPUS=4
+CONFIG_NET=y
+CONFIG_NETDEVICES=y
+# CONFIG_FSL_FMAN_PCD is not set
+# CONFIG_FSL_DPAA_ETH is not set
+# CONFIG_FSL_DPAA is not set
+# CONFIG_FSL_FMAN is not set
+# CONFIG_FSL_FM_MAX_FRAME_SIZE is not set
+# CONFIG_FSL_XGMAC_MDIO is not set
+# CONFIG_DPAA_ERRATUM_A050385 is not set
+CONFIG_STAGING=y
+CONFIG_FSL_SDK_DPA=y
+CONFIG_FSL_SDK_BMAN=y
+CONFIG_FSL_SDK_QMAN=y
+CONFIG_FSL_BMAN_CONFIG=y
+CONFIG_FSL_QMAN_CONFIG=y
+CONFIG_FSL_SDK_FMAN=y
+CONFIG_FMAN_ARM=y
+CONFIG_FSL_DPAA_HOOKS=y
+CONFIG_FSL_SDK_DPAA_ETH=y
+CONFIG_FSL_DPAA_ETH_MAX_BUF_COUNT=640
+CONFIG_FSL_USDPAA=y
+FORCEOF
+  KCONFIG_ALLCONFIG=/tmp/sdk-force.config make olddefconfig
+  rm -f /tmp/sdk-force.config
+  echo "### NXP SDK: vendor overlay + config swap applied"
+  if ! grep -q 'CONFIG_FSL_SDK_FMAN=y' include/config/auto.conf; then
+    echo "ERROR: FSL_SDK_FMAN not in auto.conf after KCONFIG_ALLCONFIG"
     exit 1
   fi
-  if grep -q 'CONFIG_FSL_SDK_FMAN=y' include/config/auto.conf; then
-    echo "### NXP SDK: FSL_SDK_FMAN accepted by Kconfig"
-  else
-    echo "### NXP SDK: FSL_SDK_FMAN REJECTED by olddefconfig — forcing into auto.conf"
-    for sym in FSL_SDK_FMAN FMAN_ARM FSL_SDK_DPAA_ETH FSL_DPAA_HOOKS; do
-      echo "CONFIG_${sym}=y" >> include/config/auto.conf
-      scripts/config --set-val "CONFIG_${sym}" y
-    done
-  fi
-  echo "### NXP SDK: vendor overlay + config swap applied"
 fi
 INJECT_EOF
 
