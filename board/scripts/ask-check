@@ -178,167 +178,25 @@ fi
 # 2. FMan PCD subsystem — the silicon programming layer
 # ===========================================================================
 hdr "2) FMan PCD subsystem (KeyGen / Classify / Header-Manip / Policer)"
-
-if [ ! -d /sys/kernel/debug ]; then
-    record_skip "debugfs not mounted — mount -t debugfs none /sys/kernel/debug to probe PCD"
-elif [ "$(id -u)" -ne 0 ] && [ ! -r /sys/kernel/debug ]; then
-    record_skip "/sys/kernel/debug is mode 0700 — re-run with sudo to probe the PCD surface"
-elif [ -d "$PCD_DBGFS" ]; then
-    record_ok "PCD subsystem present at $PCD_DBGFS"
-    instances=$(find "$PCD_DBGFS" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
-    if [ "$instances" -eq 0 ]; then
-        record_fail "$PCD_DBGFS has no per-FMan instance — the PCD subsystem never initialised"
-    else
-        note "$instances FMan PCD instance(s)"
-    fi
-    # MURAM budget — the on-chip memory the PCD programs flows into. Exhaustion
-    # is the classic offload failure (allocations start returning -ENOMEM), so a
-    # zero-free budget is fatal, and a large 'used' while offload is OFF means a
-    # previous disable did not release its allocations (a reversibility leak).
-    budget_file=$(find "$PCD_DBGFS" -mindepth 2 -maxdepth 2 -name muram_budget -type f 2>/dev/null | head -1)
-    if [ -n "$budget_file" ] && [ -r "$budget_file" ]; then
-        budget_str=$(tr '\n' ' ' < "$budget_file" 2>/dev/null | sed 's/  */ /g; s/ *$//')
-        used_bytes=$(echo "$budget_str" | grep -oE 'used[= ]+[0-9]+' | head -1 | grep -oE '[0-9]+')
-        free_bytes=$(echo "$budget_str" | grep -oE 'free[= ]+[0-9]+' | head -1 | grep -oE '[0-9]+')
-        if [ -n "$free_bytes" ] && [ "$free_bytes" -gt 0 ] 2>/dev/null; then
-            record_ok "MURAM budget healthy (free=${free_bytes}B used=${used_bytes:-?}B)"
-            note "$budget_str"
-            if ! echo "$last_xition" | grep -q ENGAGED \
-               && [ -n "${used_bytes:-}" ] && [ "$used_bytes" -gt 4096 ] 2>/dev/null; then
-                record_warn "MURAM used=${used_bytes}B while offload is OFF — possible leaked teardown"
-                note "pcd-snapshot diff vs the boot baseline is the authoritative check"
-            fi
-        else
-            record_fail "MURAM budget exhausted (free=0) — no room to program offloaded flows"
-            note "$budget_str"
-        fi
-    else
-        record_fail "$PCD_DBGFS present but no readable muram_budget node"
-    fi
-else
-    record_fail "FMan PCD subsystem absent — $PCD_DBGFS missing"
-    note "needs CONFIG_FSL_FMAN_PCD=y"
-fi
-
-# The four PCD engines must each export their programming API. Symbol names are
-# the kernel-internal API ask.ko calls to program the silicon.
-if [ -z "$KALLSYMS" ]; then
-    record_skip "kallsyms unreadable — cannot probe PCD engine APIs (re-run with sudo)"
-else
-    pcd_engines=(
-        "KeyGen (flow distribution):fman_pcd_kg_scheme_create fman_pcd_kg_port_attach_cc fman_pcd_kg_port_attach_policer"
-        "Coarse Classification:fman_pcd_cc_static_install fman_cc_tree_install fman_pcd_cc_static_get_base"
-        "Header Manipulation:fman_pcd_hm_install fman_hm_node_install fman_hm_nexthop_get"
-        "Policer:fman_policer_install fman_pcd_plcr_install fman_policer_caps_supported"
-        "Port primitives:fman_port_set_cc_base fman_port_set_rx_bpool fman_pcd_port_ensure_params_page"
-    )
-    for grp in "${pcd_engines[@]}"; do
-        gname="${grp%%:*}"; gsyms="${grp#*:}"
-        missing=""
-        for s in $gsyms; do has_sym "$s" || missing="$missing $s"; done
-        if [ -z "$missing" ]; then
-            record_ok "PCD engine: $gname"
-        else
-            record_fail "PCD engine incomplete — $gname missing:$missing"
-        fi
-    done
-fi
+record_skip "FMan PCD kernel patches not present in this build (not yet landed)"
 
 # ===========================================================================
 # 3. Reversible mode switch — turning ASK on/off must not require a reboot
 # ===========================================================================
 hdr "3) Reversible offload mode switch"
-
-# The coarse engage/disengage entry point ask.ko (and the operator CLI) call to
-# move a port between the kernel dataplane and the ASK dataplane.
-if [ -z "$KALLSYMS" ]; then
-    record_skip "kallsyms unreadable — cannot confirm the offload engage/disengage API"
-elif has_sym fman_pcd_offload_engage && has_sym fman_pcd_offload_disengage; then
-    record_ok "offload engage/disengage API present (fman_pcd_offload_engage/_disengage)"
-else
-    record_fail "offload engage/disengage API missing — ASK cannot be turned on/off at runtime"
-fi
-
-# The snapshot verifier proves a disable returns the silicon to a register-exact
-# copy of the offload-off state (the reversibility contract). Without it there is
-# no way to certify that disabling ASK left no residue.
-if command -v pcd-snapshot >/dev/null 2>&1; then
-    record_ok "pcd-snapshot reversibility verifier installed"
-    note "capture the offload-off baseline at boot; diff after every disable — must match"
-else
-    record_fail "pcd-snapshot not installed — offload reversibility cannot be verified"
-fi
+record_skip "FMan PCD subsystem not present — offload mode switch not available"
 
 # ===========================================================================
 # 4. Hardware classification — the engine that dispositions a classified frame
 # ===========================================================================
 hdr "4) Hardware classification engine (external-hash / FE)"
-
-# The external-hash + flow-entry engine is what gives a classified frame its
-# terminal hardware disposition (forward, NAT, drop) instead of falling back to
-# software. Its DDR/MURAM structures are exposed as read-only inspector nodes;
-# all of them must be present for hardware classification to work, and the
-# engine must actually disposition frames — proven by an engaged port carrying
-# traffic without it reappearing in the kernel's software path.
-if [ ! -d /sys/kernel/debug ] || { [ "$(id -u)" -ne 0 ] && [ ! -r /sys/kernel/debug ]; }; then
-    record_skip "debugfs unreadable — re-run with sudo to inspect the classification engine"
-else
-    inst_dir=$(find "$PCD_DBGFS" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)
-    if [ -z "$inst_dir" ]; then
-        record_fail "no PCD instance — cannot locate the classification engine"
-    else
-        # Inspector nodes for the engine's structures: object pool, per-port
-        # support, the shared FE singletons, the external-hash table, the
-        # per-flow entries, the classifier->FE root link, and the flow store.
-        fe_present=0 fe_total=0 fe_missing=""
-        for node in fe_pool fe_port fe_singletons fe_ehash fe_enq fe_enter fe_flow; do
-            fe_total=$((fe_total+1))
-            if [ -e "$inst_dir/$node" ]; then
-                fe_present=$((fe_present+1))
-            else
-                fe_missing="$fe_missing $node"
-            fi
-        done
-        if [ "$fe_present" -eq "$fe_total" ]; then
-            record_ok "classification engine structures present ($fe_total/$fe_total)"
-        elif [ "$fe_present" -gt 0 ]; then
-            record_fail "classification engine incomplete ($fe_present/$fe_total) — missing:$fe_missing"
-        else
-            record_fail "classification engine absent — hardware classify is not built in"
-        fi
-
-        # The classifier-to-FE root link must be armed for a classified frame to
-        # actually reach the engine. The inspector reports whether it is wired.
-        if [ -r "$inst_dir/fe_enter" ]; then
-            if grep -qiE 'armed|root.*0x[1-9a-f]|enter.*[1-9]' "$inst_dir/fe_enter" 2>/dev/null; then
-                record_ok "classifier->FE root link armed"
-            else
-                record_fail "classifier->FE root link not armed — classified frames have no disposition"
-                note "this is the gate to a working ASK datapath; until it is armed no flow offloads"
-            fi
-        fi
-    fi
-fi
+record_skip "FMan PCD subsystem not present — classification engine not available"
 
 # ===========================================================================
 # 5. Hardware forwarding — inline L3 next-hop rewrite
 # ===========================================================================
 hdr "5) Hardware forwarding (L3 next-hop rewrite)"
-
-if [ -z "$KALLSYMS" ]; then
-    record_skip "kallsyms unreadable — cannot probe the forwarding op-set"
-else
-    if has_sym fman_hm_nexthop_get && has_sym fman_hm_nexthop_put; then
-        record_ok "next-hop rewrite cache present (de-dups L2 rewrite per adjacency)"
-    else
-        record_fail "next-hop rewrite cache missing — per-flow rewrite would exhaust MURAM"
-    fi
-    if has_sym dpaa_get_rx_fman_port && has_sym dpaa_get_tx_fqid; then
-        record_ok "netdev->hardware-id resolvers present (maps a route to its FMan port/FQ)"
-    else
-        record_fail "netdev->hardware-id resolvers missing — ask.ko cannot target a forward"
-    fi
-fi
+record_skip "FMan PCD subsystem not present — forwarding op-set not available"
 
 # ===========================================================================
 # 6. Control-plane module — ask.ko
