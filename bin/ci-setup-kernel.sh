@@ -897,38 +897,38 @@ if [ -d "${CWD}/sdk-overlay/drivers" ]; then
   fi
 
   # --- Config swap: disable mainline DPAA1, enable the SDK stack -------------
-  # CRITICAL: disable dependents FIRST, then the root symbols. If any
-  # remaining =y symbol depends on FSL_FMAN or FSL_DPAA, olddefconfig will
-  # silently re-enable them. Observed 2026-06-21: FSL_XGMAC_MDIO depends on
-  # FSL_FMAN, so enabling it BEFORE disabling FSL_FMAN caused olddefconfig to
-  # turn FSL_FMAN back on.
   scripts/config --set-val CONFIG_NR_CPUS 4
-  # Disable all symbols that depend on or select mainline DPAA components.
+  # Disable all mainline DPAA symbols so SDK can take over.
   scripts/config --disable CONFIG_FSL_FMAN_PCD
-  scripts/config --disable CONFIG_FSL_XGMAC_MDIO
   scripts/config --disable CONFIG_FSL_DPAA_ETH
   scripts/config --disable CONFIG_FSL_DPAA
   scripts/config --disable CONFIG_FSL_FMAN
   scripts/config --disable CONFIG_FSL_FM_MAX_FRAME_SIZE
-  # Enable the SDK replacement stack.
-  scripts/config --enable  CONFIG_STAGING
-  scripts/config --enable  CONFIG_FSL_SDK_DPA
-  scripts/config --enable  CONFIG_FSL_SDK_BMAN
-  scripts/config --enable  CONFIG_FSL_SDK_QMAN
-  scripts/config --enable  CONFIG_FSL_BMAN_CONFIG
-  scripts/config --enable  CONFIG_FSL_QMAN_CONFIG
-  scripts/config --enable  CONFIG_FSL_SDK_FMAN
-  scripts/config --enable  CONFIG_FMAN_ARM
-  scripts/config --enable  CONFIG_FSL_DPAA_HOOKS
-  scripts/config --set-val CONFIG_FSL_SDK_DPAA_ETH y
-  scripts/config --set-val CONFIG_FSL_DPAA_ETH_MAX_BUF_COUNT 640
-  # Re-enable XGMAC_MDIO under the SDK stack (SDK FMAN exports its own mdio).
-  scripts/config --enable  CONFIG_FSL_XGMAC_MDIO
+  scripts/config --disable CONFIG_FSL_XGMAC_MDIO
+  # Run olddefconfig once to clean up dependents of the disabled symbols.
+  make olddefconfig
+  # Now force-enable the SDK stack via direct .config writes (scripts/config
+  # may not recognise symbols from newly-sourced Kconfig files, but make
+  # olddefconfig will resolve them).
+  cat >> .config << 'SDKCFG'
+CONFIG_STAGING=y
+CONFIG_FSL_SDK_DPA=y
+CONFIG_FSL_SDK_BMAN=y
+CONFIG_FSL_SDK_QMAN=y
+CONFIG_FSL_BMAN_CONFIG=y
+CONFIG_FSL_QMAN_CONFIG=y
+CONFIG_FSL_SDK_FMAN=y
+CONFIG_FMAN_ARM=y
+CONFIG_FSL_DPAA_HOOKS=y
+CONFIG_FSL_SDK_DPAA_ETH=y
+CONFIG_FSL_DPAA_ETH_MAX_BUF_COUNT=640
+CONFIG_FSL_USDPAA=y
+SDKCFG
   make olddefconfig
   echo "### NXP SDK: vendor overlay + config swap applied"
-  # Verify the swap took effect — FSL_FMAN must be absent, FSL_SDK_FMAN present.
+  # Verify the swap took effect.
   if grep -q '^CONFIG_FSL_FMAN=y' .config; then
-    echo "ERROR: CONFIG_FSL_FMAN re-enabled after SDK config swap — olddefconfig reverted"
+    echo "ERROR: CONFIG_FSL_FMAN re-enabled after SDK config swap"
     exit 1
   fi
   if ! grep -q '^CONFIG_FSL_SDK_FMAN=y' .config; then
