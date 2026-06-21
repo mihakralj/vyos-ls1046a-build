@@ -343,9 +343,64 @@ three compile blockers (opaque-struct deref across TUs, missing arm/disarm
 protos, dead local KGSE register mirror under `CONFIG_WERROR`). Superseded
 in full by the Path 2 rewrite.
 
+**[SPEC] Phase 1 — D9-B arm ARMED + REVERSIBLE ON SILICON (2026-06-17, board
+192.168.1.190, ISO `2026.06.17-1547-rolling`, CI run `27701485878`, kernel
+6.18.34-vyos).** `0132` shipped in a CI ISO, installed, and the
+`engage`/`disengage` cycle was executed against live eth3 (hw port `0x10`) with
+the dormant chain built to the §9 byte-validated state. All nine `fe_*` nodes
+present at `/sys/kernel/debug/fman_pcd/0/`. Sequence and results:
+
+- **Baselines.** S0 boot baseline `/tmp/s0-baseline.json` (port[0x10]
+  `rfpne=0x00480000 rccb=0x00000000`, MURAM used 0); chain-built pre-arm snapshot
+  `/tmp/pre-arm.json` (schemes 0–4 EN nia=0x02, 5–31 DISABLED; ports RSS).
+- **Arm (`engage 10 59200`).** Silicon binding changed live: port[0x10]
+  `rfpne 0x00480000→0x00480200`, `rccb 0x00000000→0x00059200`; `scheme[3]`
+  ccbs `0→0x00059200` — proving engage reprogrammed the BMI CC-base to the
+  `fe_enter` root AD `@0x59200`.
+- **eth3 survived the armed window with 0 flows.** RX kept counting
+  (1594→1637), carrier=1, **ping `10.99.1.2` 0% loss during arm**. With no
+  `fe_flow` rows every classified frame went MISS → EXIT → DEALLOCATE and the
+  port did **not** park. This is a key silicon finding: **EXIT-DEALLOCATE is a
+  real terminal MISS disposition** — it refutes the bare-AC_CC park concern for
+  the MISS path (the ~47-frame FMan-v3 park seen in iter-28/34/49 was the
+  *no-terminal-disposition* case, not this one).
+- **Disengage (`disengage 10`) restored binding byte-exact.** port[0x10] back
+  to `rfpne=0x00480000 rccb=0x00000000`; `fe_port`="no FE-support ports"
+  before/during/after. Post-disengage ping 0% loss, RX still advancing.
+- **Arm/disarm reversibility: byte-clean.** `pcd-snapshot diff
+  /tmp/pre-arm.json` → `[OK] PCD state matches baseline` (exit 0).
+- **Stage E teardown (reverse build order: fe_flow→fe_enter→fe_hashfe→fe_enq→
+  fe_ehash→fe_singletons clear, then fe_pool put).** Pool drained cleanly
+  (available 95→100 as singletons/enq/hashfe returned, then →0 on put;
+  refcount 1→0); `fe_arm` engaged=NO, root AD `0x0`. MURAM used **36096→0**.
+- **Full reversibility: byte-clean.** `pcd-snapshot diff /tmp/s0-baseline.json`
+  → `[OK] PCD state matches baseline — S0<->S1 transition was fully reversible`
+  (exit 0; only MURAM high-water 36096 monotonic/ignored).
+- **eth0/SSH untouched** across the entire arm→disarm→teardown cycle; no port
+  diversion ever reached the management port.
+
+**[NOTE]**
+Phase 1 §10 gate condition (1) — **control-plane arm/disarm with byte-clean
+reversibility — is SATISFIED on silicon.** Gate condition (2) — a programmed
+`fe_flow` key HITs → egress FQ with that flow's kernel softirq → ~0 — remains
+**deferred**: it needs a matching 8-byte ehash key, and the CRC64
+`get_indexed_hash_bucket` bucket-select form is still unconfirmed in the
+accessible SDKs (FE-VM opcode execution is stubbed). The arm mechanism and the
+MISS disposition are now both proven; only the HIT-path datapath measurement is
+outstanding, and it is decoupled from the (now-complete) reversibility gate.
+
 ---
 
 ## 10. Phase 1 entry conditions (derived from the Phase 0 silicon capture)
+
+**[NOTE] Status (2026-06-17):** condition-set below is **partially demonstrated
+on silicon** — see §9. The control-plane writes + their byte-exact inverses + the
+FE-chain teardown (the reversibility half of the gate) are **PROVEN** (arm
+reprogrammed BMI `rccb→0x00059200`, disarm restored `→0`, two `pcd-snapshot`
+diffs `[OK]`). The remaining half — a programmed `fe_flow` key HITs → egress FQ
+with softirq→~0 — is **deferred** (HIT-path 8-byte key / CRC64 bucket-select
+unconfirmed). The empty-store MISS path was exercised and does **not** park
+(EXIT-DEALLOCATE terminal disposition confirmed).
 
 **[SPEC]**
 The arm (`0132`) must, on eth3 (hw port `0x10`) only, perform two writes and
