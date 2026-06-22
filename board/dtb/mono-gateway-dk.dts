@@ -184,6 +184,7 @@ maximum-power-milliwatt = <3000>;
 	dpaa_pool: dpaa-bpool {
 		compatible = "fsl,bpool";
 		fsl,bpid = <16>;
+		fsl,bpool-ethernet-cfg = <0 16 0 1728 0 0xdeadbeef>;
 	};
 };
 
