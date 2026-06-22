@@ -250,9 +250,9 @@ mkdir -p "$STAGE/etc"
 # Binaries — cmm goes to /usr/bin per cmm.service ExecStart
 mkdir -p "$STAGE/usr/bin"
 cp "$CMM_BUILT"       "$STAGE/usr/bin/cmm"
-cp "$DPA_BUILT"       "$STAGE/usr/sbin/dpa_app"
+cp "$DPA_BUILT"       "$STAGE/usr/bin/dpa_app"
 cp "$FMC_DIR/source/fmc" "$STAGE/usr/sbin/fmc"
-"${STRIP:-strip}" "$STAGE/usr/bin/cmm" "$STAGE/usr/sbin/dpa_app" "$STAGE/usr/sbin/fmc" 2>/dev/null || true
+"${STRIP:-strip}" "$STAGE/usr/bin/cmm" "$STAGE/usr/bin/dpa_app" "$STAGE/usr/sbin/fmc" 2>/dev/null || true
 
 # Runtime config files from ASK repo
 cp "$ASK_DIR/config/ask-modules.conf" "$STAGE/etc/modules-load.d/ask-modules.conf"
