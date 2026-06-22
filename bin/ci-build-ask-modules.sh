@@ -111,9 +111,13 @@ echo "### Patched cdx_main.c: START_DPA_APP disabled"
 # cdx/system.h and cdx/dpa_wifi.h define CFG_WIFI_OFFLOAD which causes
 # dpaa_vwd_init() to run during cdx_module_init(). On LS1046A without WiFi,
 # vwd_init_ohport() fails because no OH port is configured for WiFi offload.
-# Disable the feature — Mono Gateway DK has no WiFi hardware.
+# The Kbuild also passes -DWIFI_ENABLE via ccflags-y, which compiles WiFi
+# source files (dpa_wifi.c) that reference PFE structs not available on LS1046A.
+# Disable both the CPP define and the compiler flag.
 sed -i 's/^#define CFG_WIFI_OFFLOAD$/\/\/ #define CFG_WIFI_OFFLOAD/' "$ASK_DIR/cdx/system.h" "$ASK_DIR/cdx/dpa_wifi.h"
 echo "### Patched system.h + dpa_wifi.h: CFG_WIFI_OFFLOAD disabled"
+sed -i 's/-DWIFI_ENABLE//g' "$ASK_DIR/cdx/Kbuild"
+echo "### Patched cdx/Kbuild: -DWIFI_ENABLE removed from ccflags"
 
 # ── Build cdx.ko ───────────────────────────────────────────────────────────
 echo "### ======== Building cdx.ko ========"
