@@ -1,0 +1,219 @@
+#!/bin/bash
+# ci-build-ask-modules.sh — Build NXP ASK 1.x OOT kernel modules (cdx, fci, auto_bridge)
+#
+# Clones the we-are-mono/ASK repo at mt-6.12.y, builds cdx.ko, fci.ko, and
+# auto_bridge.ko against a pre-built NXP lf-6.12.49-2.2.0 kernel tree, signs
+# them with the kernel's auto-generated module signing key, and packages them
+# as Debian .deb files.
+#
+# Invariants:
+#   - $KSRC must be a fully built NXP kernel tree (Module.symvers, scripts/sign-file,
+#     certs/signing_key.{pem,x509}), with CONFIG_MODULE_SIG_FORCE=y.
+#   - The NXP kernel tree must have the SDK DPAA drivers (sdk_fman, sdk_dpaa,
+#     fsl_qbman) in-tree — the cdx Kbuild includes sdk_fman/ncsw_config.mk.
+#   - Cross-build env (ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-) is inherited.
+#
+# Module dependency order:
+#   cdx.ko  →  fci.ko (depends on cdx/Module.symvers)
+#   cdx.ko  →  auto_bridge.ko (independent of fci, depends on cdx symbols)
+#
+# Inputs:
+#   $1  KSRC       — absolute path to the built kernel source tree (required)
+#   $2  PKG_DIR    — absolute path to where .debs should land (required)
+#
+# Outputs:
+#   cdx-modules-${KVER}_${PKG_VER}_arm64.deb
+#   fci-modules-${KVER}_${PKG_VER}_arm64.deb
+#   auto-bridge-modules-${KVER}_${PKG_VER}_arm64.deb
+#
+# Plan: plans/NXP-SDK-ASK-INTEGRATION.md §3.2, M2
+set -ex -o pipefail
+
+KSRC="${1:?KSRC required as \$1}"
+PKG_DIR="${2:?PKG_DIR required as \$2}"
+
+[ -d "$KSRC" ] || { echo "FATAL: KSRC=$KSRC does not exist"; exit 1; }
+[ -d "$PKG_DIR" ] || { echo "FATAL: PKG_DIR=$PKG_DIR does not exist"; exit 1; }
+
+# ── Resolve KSRC — handle post-bindeb-pkg cleanup (snapshot fallback) ─────
+# When the kernel was built via bindeb-pkg, the original source tree may have
+# had Module.symvers cleaned. The ask-kernel-snapshot mechanism (injected by
+# build-kernel.sh) preserves a headers snapshot. Try that first.
+SNAP_DIR="$(dirname "$KSRC")/ask-kernel-snapshot"
+if [ ! -f "$KSRC/Module.symvers" ] && [ -d "$SNAP_DIR" ] && [ -e "$SNAP_DIR/.done" ]; then
+    if [ -L "$SNAP_DIR/ksrc" ] || [ -d "$SNAP_DIR/ksrc" ]; then
+        SNAP_KSRC="$(readlink -f "$SNAP_DIR/ksrc")"
+    else
+        SNAP_KSRC="$(find "$SNAP_DIR/extracted/usr/src" -maxdepth 1 -type d -name 'linux-headers-*' 2>/dev/null | head -1)"
+    fi
+    if [ -n "$SNAP_KSRC" ] && [ -f "$SNAP_KSRC/Module.symvers" ]; then
+        echo "### Switching to snapshot KSRC: $SNAP_KSRC"
+        KSRC="$SNAP_KSRC"
+    fi
+fi
+
+# ── Validate kernel tree readiness ─────────────────────────────────────────
+[ -f "$KSRC/Module.symvers" ] || { echo "FATAL: $KSRC/Module.symvers missing — kernel must be built first"; exit 1; }
+[ -x "$KSRC/scripts/sign-file" ] || { echo "FATAL: $KSRC/scripts/sign-file missing"; exit 1; }
+[ -f "$KSRC/certs/signing_key.pem" ] || { echo "FATAL: $KSRC/certs/signing_key.pem missing"; exit 1; }
+[ -f "$KSRC/certs/signing_key.x509" ] || { echo "FATAL: $KSRC/certs/signing_key.x509 missing"; exit 1; }
+
+# SDK FMan must be present in the kernel tree for cdx Kbuild's ncsw_config.mk include
+NCSW_MK="$KSRC/drivers/net/ethernet/freescale/sdk_fman/ncsw_config.mk"
+[ -f "$NCSW_MK" ] || { echo "FATAL: SDK FMan ncsw_config.mk not found at $NCSW_MK — NXP kernel tree required"; exit 1; }
+
+# ── Resolve KVER ───────────────────────────────────────────────────────────
+# Prefer reading from the produced kernel .deb in PKG_DIR (matches what apt sees);
+# then from include/config/kernel.release (authoritative post-build); fall back
+# to make kernelrelease, stripping any "+" dirty marker.
+KERNEL_DEB="$(find "$PKG_DIR" -maxdepth 1 -name 'linux-image-*-vyos_*_arm64.deb' \
+    ! -name '*-dbg_*' ! -name '*-headers_*' ! -name '*-dbgsym_*' 2>/dev/null | head -1)"
+if [ -n "$KERNEL_DEB" ]; then
+    KVER="$(basename "$KERNEL_DEB" | sed -E 's/^linux-image-(.+)_[^_]+_arm64\.deb$/\1/')"
+    echo "### KVER from $(basename "$KERNEL_DEB"): $KVER"
+elif [ -f "$KSRC/include/config/kernel.release" ]; then
+    KVER="$(cat "$KSRC/include/config/kernel.release")"
+    echo "### KVER from kernel.release: $KVER"
+else
+    KVER="$(make -C "$KSRC" -s kernelrelease 2>/dev/null | sed 's/+$//' || true)"
+    if [ -z "$KVER" ]; then
+        KVER="$(make -C "$KSRC" -s kernelversion 2>/dev/null || true)"
+    fi
+    echo "### KVER from kernel tree: $KVER"
+fi
+[ -n "$KVER" ] || { echo "FATAL: could not resolve KVER"; exit 1; }
+
+# ── Clone we-are-mono/ASK ─────────────────────────────────────────────────
+ASK_REPO="https://github.com/we-are-mono/ASK.git"
+ASK_BRANCH="mt-6.12.y"
+ASK_CACHE_DIR="${RUNNER_TOOL_CACHE:-/tmp}/ask-clone-cache"
+ASK_DIR="$ASK_CACHE_DIR/ask-mt-6.12.y"
+
+if [ -d "$ASK_DIR/.git" ]; then
+    echo "### Updating ASK repo cache at $ASK_DIR"
+    git -C "$ASK_DIR" fetch --depth 1 origin "$ASK_BRANCH" 2>&1 | tail -3 || true
+    git -C "$ASK_DIR" checkout -f "$ASK_BRANCH" 2>&1 || true
+else
+    echo "### Cloning we-are-mono/ASK ($ASK_BRANCH)…"
+    rm -rf "$ASK_DIR"
+    git clone --depth 1 --branch "$ASK_BRANCH" "$ASK_REPO" "$ASK_DIR" 2>&1 | tail -3
+fi
+
+# ── Build cdx.ko ───────────────────────────────────────────────────────────
+echo "### ======== Building cdx.ko ========"
+make -C "$KSRC" \
+    ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-}" \
+    PLATFORM="LS1043A" \
+    CONFIG_ASK_CDX=m \
+    M="$ASK_DIR/cdx" \
+    modules
+
+CDX_KO="$ASK_DIR/cdx/cdx.ko"
+[ -f "$CDX_KO" ] || { echo "FATAL: cdx.ko was not produced"; exit 1; }
+echo "### cdx.ko built: $(stat -c '%s bytes' "$CDX_KO")"
+
+# ── Build fci.ko (depends on cdx/Module.symvers) ──────────────────────────
+echo "### ======== Building fci.ko ========"
+make -C "$KSRC" \
+    ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-}" \
+    BOARD_ARCH=arm64 \
+    CONFIG_ASK_FCI=m \
+    KBUILD_EXTRA_SYMBOLS="$ASK_DIR/cdx/Module.symvers" \
+    M="$ASK_DIR/fci" \
+    modules
+
+FCI_KO="$ASK_DIR/fci/fci.ko"
+[ -f "$FCI_KO" ] || { echo "FATAL: fci.ko was not produced"; exit 1; }
+echo "### fci.ko built: $(stat -c '%s bytes' "$FCI_KO")"
+
+# ── Build auto_bridge.ko ───────────────────────────────────────────────────
+echo "### ======== Building auto_bridge.ko ========"
+make -C "$KSRC" \
+    ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-}" \
+    PLATFORM="LS1043A" \
+    CONFIG_ASK_AUTO_BRIDGE=m \
+    M="$ASK_DIR/auto_bridge" \
+    modules
+
+ABM_KO="$ASK_DIR/auto_bridge/auto_bridge.ko"
+[ -f "$ABM_KO" ] || { echo "FATAL: auto_bridge.ko was not produced"; exit 1; }
+echo "### auto_bridge.ko built: $(stat -c '%s bytes' "$ABM_KO")"
+
+# ── Sign all modules ───────────────────────────────────────────────────────
+echo "### Signing OOT modules with kernel auto-generated signing key"
+for ko in "$CDX_KO" "$FCI_KO" "$ABM_KO"; do
+    "$KSRC/scripts/sign-file" sha512 \
+        "$KSRC/certs/signing_key.pem" \
+        "$KSRC/certs/signing_key.x509" \
+        "$ko"
+    if ! tail -c 28 "$ko" | grep -q "Module signature appended"; then
+        echo "FATAL: $(basename "$ko") was not signed"
+        exit 1
+    fi
+    echo "###   signed: $(basename "$ko") ($(stat -c '%s bytes' "$ko"))"
+done
+
+# ── Package as .debs ──────────────────────────────────────────────────────
+PKG_VER="1.0.0-${KVER}"
+
+package_module() {
+    local mod_name="$1" mod_ko="$2" pkg_name="$3" pkg_desc="$4"
+    local STAGE DEB_NAME DEB_FILE
+
+    STAGE="$(mktemp -d -t ask-deb-stage.XXXXXXXX)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$STAGE'" RETURN
+
+    mkdir -p "$STAGE/DEBIAN" "$STAGE/lib/modules/${KVER}/extra"
+
+    cp "$mod_ko" "$STAGE/lib/modules/${KVER}/extra/"
+
+    DEB_NAME="${pkg_name}-modules-${KVER}"
+    DEB_FILE="${DEB_NAME}_${PKG_VER}_arm64.deb"
+
+    cat > "$STAGE/DEBIAN/control" <<EOF
+Package: ${DEB_NAME}
+Version: ${PKG_VER}
+Section: kernel
+Priority: optional
+Architecture: arm64
+Maintainer: VyOS LS1046A maintainers <noreply@invalid>
+Depends: linux-image-${KVER}
+Description: ${pkg_desc}
+ NXP ASK 1.x out-of-tree kernel module for LS1046A FMan offload.
+ Part of the NXP SDK ASK fast-path stack (cdx → fci → auto_bridge).
+EOF
+
+    cat > "$STAGE/DEBIAN/postinst" <<EOF
+#!/bin/sh
+set -e
+if [ -d /lib/modules/${KVER} ]; then
+    depmod -a ${KVER} || true
+fi
+exit 0
+EOF
+    chmod 0755 "$STAGE/DEBIAN/postinst"
+
+    cat > "$STAGE/DEBIAN/postrm" <<EOF
+#!/bin/sh
+set -e
+if [ -d /lib/modules/${KVER} ]; then
+    depmod -a ${KVER} || true
+fi
+exit 0
+EOF
+    chmod 0755 "$STAGE/DEBIAN/postrm"
+
+    echo "### Building $DEB_FILE"
+    dpkg-deb --build --root-owner-group "$STAGE" "$PKG_DIR/$DEB_FILE"
+    echo "###   $(ls -lh "$PKG_DIR/$DEB_FILE" | awk '{print $5, $NF}')"
+}
+
+package_module "cdx"          "$CDX_KO" "cdx"          "CDX — NXP ASK data-plane acceleration module"
+package_module "fci"          "$FCI_KO" "fci"          "FCI — NXP ASK flow control interface module"
+package_module "auto_bridge"  "$ABM_KO" "auto-bridge"  "Auto Bridge — NXP ASK L2 bridge flow detection module"
+
+echo "### ASK OOT modules built and packaged successfully"
+echo "###   KVER:     $KVER"
+echo "###   PKG_DIR:  $PKG_DIR"
+ls -lh "$PKG_DIR"/{cdx,fci,auto-bridge}-modules-*.deb

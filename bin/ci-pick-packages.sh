@@ -82,24 +82,36 @@ echo "### Package validation OK: $KERNEL_PKGS kernel image package(s) in package
 # only discover the omission after USB-booting the device. ask.ko is built
 # unconditionally in every single-image build (FLAVOR=ask gate retired
 # 2026-06-14) and ships dormant; see bin/ci-build-packages.sh.
-ASK_MOD_PKGS=$(find packages -name 'ask-modules-*.deb' | wc -l)
-if [ "$ASK_MOD_PKGS" -eq 0 ]; then
-    if [ "${ASK_OOT_SKIPPED:-0}" = "1" ]; then
+  if [ "${FLAVOR:-default}" == "ask" ]; then
+    ASK_MOD_PKGS=$(find packages -name 'cdx-modules-*.deb' | wc -l)
+    if [ "$ASK_MOD_PKGS" -eq 0 ]; then
+      echo "### FATAL: no cdx-modules-*.deb in packages/ — NXP ASK OOT kernel modules MISSING"
+      exit 1
+    fi
+    echo "### ASK OOT validation OK: cdx/fci/auto-bridge module .debs in packages/"
+    find packages -name 'cdx-modules-*.deb' -exec ls -lh {} \;
+    find packages -name 'fci-modules-*.deb' -exec ls -lh {} \;
+    find packages -name 'auto-bridge-modules-*.deb' -exec ls -lh {} \;
+    ASK_USP_PKGS=$(find packages -name 'ask-userspace-*.deb' | wc -l)
+    [ "$ASK_USP_PKGS" -gt 0 ] || { echo "### FATAL: ask-userspace .deb missing"; exit 1; }
+    echo "### ASK userspace OK"
+    find packages -name 'ask-userspace-*.deb' -exec ls -lh {} \;
+  else
+    ASK_MOD_PKGS=$(find packages -name 'ask-modules-*.deb' | wc -l)
+    if [ "$ASK_MOD_PKGS" -eq 0 ]; then
+      if [ "${ASK_OOT_SKIPPED:-0}" = "1" ]; then
         echo "### ask.ko SKIPPED (FMan PCD board patches absent — stock build)"
         echo "### ISO will boot without ask.ko; ASK2 datapath not available on this image."
-    else
-        echo ""
-        echo "###############################################################"
-        echo "### FATAL: no ask-modules-*.deb in packages/                ###"
-        echo "### ASK2 OOT kernel module would be MISSING from the ISO.   ###"
-        echo "###############################################################"
-        echo ""
+      else
+        echo "### FATAL: no ask-modules-*.deb in packages/"
+        echo "### ASK2 OOT kernel module would be MISSING from the ISO."
         exit 1
+      fi
+    else
+      echo "### ASK OOT validation OK: $ASK_MOD_PKGS ASK OOT module .deb(s) in packages/"
+      find packages -name 'ask-modules-*.deb' -exec ls -lh {} \;
     fi
-else
-    echo "### ASK OOT validation OK: $ASK_MOD_PKGS ASK OOT module .deb(s) in packages/"
-    find packages -name 'ask-modules-*.deb' -exec ls -lh {} \;
-fi
+  fi
 
 ### HOTFIX: Debian bookworm-backports is currently missing libhtp2 arm64 binary
 ### but suricata from bookworm-backports depends on it. We fetch it from snapshot.

@@ -1,0 +1,26 @@
+diff --git a/drivers/staging/fsl_qbman/bman_config.c b/drivers/staging/fsl_qbman/bman_config.c
+index a249d2c..acb4a48 100644
+--- a/drivers/staging/fsl_qbman/bman_config.c
++++ b/drivers/staging/fsl_qbman/bman_config.c
+@@ -379,7 +379,7 @@ __init int bman_init_early(void)
+ 	}
+ 	return 0;
+ }
+-postcore_initcall_sync(bman_init_early);
++device_initcall(bman_init_early);
+ 
+ 
+ static void log_edata_bits(u32 bit_count)
+diff --git a/drivers/staging/fsl_qbman/qman_config.c b/drivers/staging/fsl_qbman/qman_config.c
+index a44e26a..bd7b07b 100644
+--- a/drivers/staging/fsl_qbman/qman_config.c
++++ b/drivers/staging/fsl_qbman/qman_config.c
+@@ -661,7 +661,7 @@ __init int qman_init_early(void)
+ 	}
+ 	return 0;
+ }
+-postcore_initcall_sync(qman_init_early);
++device_initcall(qman_init_early);
+ 
+ static void log_edata_bits(u32 bit_count)
+ {
