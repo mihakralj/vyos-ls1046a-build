@@ -132,6 +132,23 @@ else
 fi
 
 # ── Patch application (plan §3.4) ─────────────────────────────────────
+# ASK flavor on the NXP kernel tree (6.12): skip common board/vendor
+# patches that require 6.18+ kernel context. The NXP tree has SDK
+# drivers already; these patches target mainline code paths.
+if [[ "$FLAVOR" == "ask" ]]; then
+    ASK_PATCH_SKIP_LIST=(
+        "001-vyos-linkstate-ip-device-attribute.patch"
+        "095-leds-lp5812-register.patch"
+        "101-sfp-rollball-phylink-fallback.patch"
+        "120-perf-libperf-asm-headers-srctree.patch"
+        "130-nf-flow-offload-log-alloc-failure.patch"
+        "4002-hwmon-ina2xx-add-ina234-support.patch"
+        "4005-phylink-inband-sfp-fallback.patch"
+        "4007-xhci-ls1046a-dwc3-quirks.patch"
+        "4009-sfp-oem-rollball-quirk.patch"
+    )
+fi
+
 PATCHES=()
 for sub in vyos board fixes; do
     d="$COMMON_DIR/patches/$sub"
@@ -176,6 +193,11 @@ GITATTR
 info "applying ${#PATCHES[@]} patches to linux-$KVER…"
 for p in "${PATCHES[@]}"; do
     name="$(basename "$(dirname "$p")")/$(basename "$p")"
+    # Check skip list for ASK flavor
+    if [[ "$FLAVOR" == "ask" ]] && printf '%s\n' "${ASK_PATCH_SKIP_LIST[@]}" | grep -qFx "$(basename "$p")"; then
+        echo "   ⊘ $name (skipped — 6.18-only, not needed on NXP 6.12 tree)"
+        continue
+    fi
     if git -C "$KSRC" apply --3way --whitespace=nowarn "$p" 2>&1; then
         printf '   ✓ %s\n' "$name"
         ( cd "$KSRC" && git add -A && git commit -qm "$name" --allow-empty )
