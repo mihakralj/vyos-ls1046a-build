@@ -107,6 +107,14 @@ fi
 sed -i 's/^#define START_DPA_APP 1$/\/\/ #define START_DPA_APP 1/' "$ASK_DIR/cdx/cdx_main.c"
 echo "### Patched cdx_main.c: START_DPA_APP disabled"
 
+# ── Patch: disable WiFi offload (CFG_WIFI_OFFLOAD) ────────────────────────
+# cdx/system.h and cdx/dpa_wifi.h define CFG_WIFI_OFFLOAD which causes
+# dpaa_vwd_init() to run during cdx_module_init(). On LS1046A without WiFi,
+# vwd_init_ohport() fails because no OH port is configured for WiFi offload.
+# Disable the feature — Mono Gateway DK has no WiFi hardware.
+sed -i 's/^#define CFG_WIFI_OFFLOAD$/\/\/ #define CFG_WIFI_OFFLOAD/' "$ASK_DIR/cdx/system.h" "$ASK_DIR/cdx/dpa_wifi.h"
+echo "### Patched system.h + dpa_wifi.h: CFG_WIFI_OFFLOAD disabled"
+
 # ── Build cdx.ko ───────────────────────────────────────────────────────────
 echo "### ======== Building cdx.ko ========"
 make -C "$KSRC" \
