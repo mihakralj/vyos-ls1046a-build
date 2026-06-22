@@ -255,11 +255,13 @@ cp "$FMC_DIR/source/fmc" "$STAGE/usr/sbin/fmc"
 "${STRIP:-strip}" "$STAGE/usr/bin/cmm" "$STAGE/usr/bin/dpa_app" "$STAGE/usr/sbin/fmc" 2>/dev/null || true
 
 # Runtime config files from ASK repo
-cp "$ASK_DIR/config/ask-modules.conf" "$STAGE/etc/modules-load.d/ask-modules.conf"
+# NOTE: modules-load.d is handled by 97-ask-modules.chroot hook, not here.
 cp "$ASK_DIR/config/cmm.service"      "$STAGE/etc/systemd/system/cmm.service"
-[ -f "$ASK_DIR/config/fastforward" ] && cp "$ASK_DIR/config/fastforward" "$STAGE/etc/fastforward"
+mkdir -p "$STAGE/etc/config"
+[ -f "$ASK_DIR/config/fastforward" ] && cp "$ASK_DIR/config/fastforward" "$STAGE/etc/config/fastforward"
 [ -f "$ASK_DIR/config/gateway-dk/cdx_cfg.xml" ] && cp "$ASK_DIR/config/gateway-dk/cdx_cfg.xml" "$STAGE/etc/cdx_cfg.xml"
 [ -f "$ASK_DIR/dpa_app/files/etc/cdx_pcd.xml" ] && cp "$ASK_DIR/dpa_app/files/etc/cdx_pcd.xml" "$STAGE/etc/cdx_pcd.xml"
+[ -f "$ASK_DIR/dpa_app/files/etc/cdx_cfg_dgw.xml" ] && cp "$ASK_DIR/dpa_app/files/etc/cdx_cfg_dgw.xml" "$STAGE/etc/cdx_cfg_dgw.xml"
 
 cat > "$STAGE/DEBIAN/control" <<EOF
 Package: ${DEB_NAME}
@@ -283,6 +285,7 @@ cat > "$STAGE/DEBIAN/postinst" <<'PEOF'
 set -e
 if [ -x /usr/bin/cmm ] && [ -f /etc/systemd/system/cmm.service ]; then
     systemctl daemon-reload || true
+    systemctl enable cmm.service || true
 fi
 exit 0
 PEOF
