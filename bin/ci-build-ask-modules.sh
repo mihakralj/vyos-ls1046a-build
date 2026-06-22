@@ -99,6 +99,14 @@ else
     git clone --depth 1 --branch "$ASK_BRANCH" "$ASK_REPO" "$ASK_DIR" 2>&1 | tail -3
 fi
 
+# ── Patch: disable auto-start of dpa_app by cdx.ko ─────────────────────────
+# cdx_main.c defines START_DPA_APP which causes cdx_module_init() to call
+# dpa_app via call_usermodehelper() BEFORE /dev/cdx_ctrl is created. dpa_app
+# then fails with -EAGAIN because the device doesn't exist yet. Disable
+# auto-start so dpa_app can be started separately after cdx.ko loads.
+sed -i 's/^#define START_DPA_APP 1$/\/\/ #define START_DPA_APP 1/' "$ASK_DIR/cdx/cdx_main.c"
+echo "### Patched cdx_main.c: START_DPA_APP disabled"
+
 # ── Build cdx.ko ───────────────────────────────────────────────────────────
 echo "### ======== Building cdx.ko ========"
 make -C "$KSRC" \

@@ -26,9 +26,13 @@ CONF=/etc/modules-load.d/ask.conf
 
 mkdir -p "$(dirname "$CONF")"
 cat > "$CONF" <<EOF
-# ASK 2.0 OOT kernel modules — managed by 97-ask-modules.chroot
+# ASK OOT kernel modules — managed by 97-ask-modules.chroot
 # See plans/ASK-2.0-IMPLEMENTATION.md and specs/ask-2.0-rewrite-spec.md.
+# ASK 2.0 module (when available)
 ask
+# ASK 1.x modules (cdx must load first, then fci)
+cdx
+fci
 EOF
 
 echo "I: 97-ask-modules.chroot: wrote $CONF"
