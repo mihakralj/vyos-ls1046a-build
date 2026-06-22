@@ -556,6 +556,35 @@ XEOF
       esac
     fi
 
+    ### DTB sanity check — validate critical SDK properties before ISO build
+    if [ "${FLAVOR:-default}" = "ask" ] && [ -f "$INCLUDES_BIN/mono-gw.dtb" ]; then
+      echo "### DTB sanity check: verifying SDK-critical properties in mono-gw.dtb"
+      FAIL=0
+      # fsl,bpool-ethernet-cfg must exist on dpaa-bpool node
+      if ! dtc -I dtb -O dts "$INCLUDES_BIN/mono-gw.dtb" 2>/dev/null | grep -q 'fsl,bpool-ethernet-cfg'; then
+        echo "FATAL: fsl,bpool-ethernet-cfg MISSING from mono-gw.dtb"
+        FAIL=1
+      fi
+      # OH port cell-index must be < 6 (FM_MAX_NUM_OF_OH_PORTS)
+      for port in 82000 83000 84000 85000 86000 87000; do
+        CI=$(dtc -I dtb -O dts "$INCLUDES_BIN/mono-gw.dtb" 2>/dev/null | grep -A3 "port@${port}" | grep -o 'cell-index = <0x0[0-5]>' || true)
+        if [ -z "$CI" ]; then
+          echo "FATAL: port@${port} cell-index >= 6 or missing in mono-gw.dtb"
+          FAIL=1
+        fi
+      done
+      # QMan CEETM node must have fsl,ceetm-channel-range
+      if ! dtc -I dtb -O dts "$INCLUDES_BIN/mono-gw.dtb" 2>/dev/null | grep -q 'fsl,ceetm-channel-range'; then
+        echo "FATAL: fsl,ceetm-channel-range MISSING from QMan CEETM node"
+        FAIL=1
+      fi
+      if [ "$FAIL" -eq 1 ]; then
+        echo "FATAL: DTB sanity check FAILED — refusing to ship broken ISO"
+        exit 1
+      fi
+      echo "### DTB sanity check PASSED"
+    fi
+
     ### ASK2 OOT kernel modules (ask.ko, future ask_bridge.ko)
     #
     # Build and sign the ASK2 OOT module .ko against the kernel source
