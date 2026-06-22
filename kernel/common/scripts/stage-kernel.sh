@@ -108,20 +108,28 @@ if [[ ! -d "$FLAVOR_DIR" && "$FLAVOR" == "ask" ]]; then
 fi
 
 # ── Kernel source ──────────────────────────────────────────────────────
-if [[ -n "$VERSION_ARG" || ! -f "$WORK_DIR/.kernel-version" ]]; then
-    "$SCRIPTS_DIR/fetch-kernel.sh" $VERSION_ARG
+# FLAVOR=ask: use NXP lf-6.12.49-2.2.0 tree (fetch-kernel-nxp.sh, git archive).
+# FLAVOR=default|vpp: use kernel.org tarball (fetch-kernel.sh, tar -xf).
+if [[ "$FLAVOR" == "ask" ]]; then
+    "$SCRIPTS_DIR/fetch-kernel-nxp.sh" $VERSION_ARG
+    KVER=$(cat "$WORK_DIR/.kernel-version")
+    KSRC="$WORK_DIR/linux-$KVER"
+    [[ -d "$KSRC" ]] || err "NXP kernel source missing: $KSRC"
+else
+    if [[ -n "$VERSION_ARG" || ! -f "$WORK_DIR/.kernel-version" ]]; then
+        "$SCRIPTS_DIR/fetch-kernel.sh" $VERSION_ARG
+    fi
+    KVER=$(cat "$WORK_DIR/.kernel-version")
+    KSRC="$WORK_DIR/linux-$KVER"
+    TARBALL="$WORK_DIR/linux-$KVER.tar.xz"
+    # Always start from a fresh extraction so re-runs are deterministic.
+    if [[ -f "$TARBALL" ]]; then
+        info "extracting fresh kernel tree (linux-$KVER)…"
+        rm -rf "$KSRC"
+        tar -xf "$TARBALL" -C "$WORK_DIR/"
+    fi
+    [[ -d "$KSRC" ]] || err "kernel source missing: $KSRC"
 fi
-KVER=$(cat "$WORK_DIR/.kernel-version")
-KSRC="$WORK_DIR/linux-$KVER"
-TARBALL="$WORK_DIR/linux-$KVER.tar.xz"
-
-# Always start from a fresh extraction so re-runs are deterministic.
-if [[ -f "$TARBALL" ]]; then
-    info "extracting fresh kernel tree (linux-$KVER)…"
-    rm -rf "$KSRC"
-    tar -xf "$TARBALL" -C "$WORK_DIR/"
-fi
-[[ -d "$KSRC" ]] || err "kernel source missing: $KSRC"
 
 # ── Patch application (plan §3.4) ─────────────────────────────────────
 PATCHES=()

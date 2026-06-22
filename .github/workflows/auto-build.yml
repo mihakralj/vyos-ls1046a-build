@@ -216,18 +216,15 @@ jobs:
           MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
         run: bin/ci-setup-vyos1x.sh
 
-      - name: Setup kernel config and patches
+      - name: Stage kernel tree (FLAVOR-aware)
+        run: bin/ci-stage-kernel.sh
+
+      - name: Setup kernel config and patches (mainline only — skip on nxp-sdk)
+        if: ${{ !startsWith(github.ref_name, 'nxp-sdk') }}
         run: bin/ci-setup-kernel.sh
 
-      # ASK2 (rewrite-in-progress): the legacy ASK 1.x build steps
-      # (Consume prebuilt ASK kernel, Setup ASK fast-path kernel) were
-      # removed on the ask20 branch. Until ASK2 components land
-      # (ask.ko, ask_bridge.ko, askd, ask-load, libask_fci) per
-      # specs/ask2-rewrite-spec.md, the single flavor-neutral image ships
-      # without ASK userspace or an SDK kernel; ASK engages at runtime
-      # (set system offload ask) once those components are built in.
-
-      - name: Compile Mono DTB from DTS (always rebuild from source)
+      - name: Compile Mono DTB from DTS (mainline only — skip on nxp-sdk)
+        if: ${{ !startsWith(github.ref_name, 'nxp-sdk') }}
         run: bin/ci-compile-mono-dtb.sh
 
       - name: Setup vyos-build (config, chroot files, hooks)
