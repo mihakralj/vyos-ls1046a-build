@@ -108,10 +108,12 @@ rm -rf packages/linux-headers-*
   generic
 
 cd build
-# Rename generic -> LS1046A-stock in artifact filenames. Stock (mainline DPAA1) image:
-#   vyos-2026.05.09-1830-rolling-LS1046A-stock-arm64.iso
+# Rename generic -> LS1046A-${ISO_FLAVOR} in artifact filenames.
+# ISO_FLAVOR = "nxpask" for the nxp-sdk branch, "stock" otherwise.
+ISO_FLAVOR="${FLAVOR:-default}"
+[ "$ISO_FLAVOR" = "ask" ] && ISO_FLAVOR="nxpask" || ISO_FLAVOR="stock"
 ORIG_ISO=$(jq --raw-output .artifacts[0] manifest.json)
-IMAGE_ISO="${ORIG_ISO/generic/LS1046A-stock}"
+IMAGE_ISO="${ORIG_ISO/generic/LS1046A-${ISO_FLAVOR}}"
 IMAGE_NAME="${IMAGE_ISO%.iso}"
 mv "$ORIG_ISO" "$IMAGE_ISO"
 echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
