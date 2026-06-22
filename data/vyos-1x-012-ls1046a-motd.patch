@@ -8,12 +8,13 @@ index 0d52092..f9e3bd2 100644
  
     ┌── ┐
     . VyOS {{ version_data.version }}
-@@ -7,6 +7,9 @@ Welcome to VyOS!
+@@ -7,6 +7,10 @@ Welcome to VyOS!
  {% if version_data.lts_build %}
   * Support portal: {{ version_data.support_url }}
  {% endif %}
-+   Flavor:        @@FLAVOR@@
-+   Patches:       eMMC boot, Fan control, LED control, CAAM, SFP+, Watchdog, U-Boot env
++   Flavor:        Reference graft of NXP LS1046A SDK 6.12
++   Grafts:        FMan (sdk_fman), DPAA (sdk_dpaa), BMan/QMan (fsl_qbman), CAAM
++   Patches:       eMMC boot, Fan control, LED control, SFP+, Watchdog, U-Boot env
 +
   * Documentation:  {{ version_data.documentation_url }}
   * Project news:   {{ version_data.project_news_url }}
