@@ -14,4 +14,17 @@
 #include "mono-gateway-dk.dts"
 #include "qoriq-qman-portals-sdk.dtsi"
 #include "qoriq-bman-portals-sdk.dtsi"
-#include "qoriq-fman3-0-6oh.dtsi"
+
+/*
+ * Fix OH port cell-index values.
+ *
+ * qoriq-fman3-0.dtsi sets cell-index 2-7 on ports 82000-87000, but the
+ * SDK FMan port driver requires cell-index < FM_MAX_NUM_OF_OH_PORTS (6).
+ * Override to match qoriq-fman3-0-6oh.dtsi: 0-5.
+ */
+&fman0_oh_0x2 { /delete-property/ cell-index; cell-index = <0>; };
+&fman0_oh_0x3 { /delete-property/ cell-index; cell-index = <1>; };
+&fman0_oh_0x4 { /delete-property/ cell-index; cell-index = <2>; };
+&fman0_oh_0x5 { /delete-property/ cell-index; cell-index = <3>; };
+&fman0_oh_0x6 { /delete-property/ cell-index; cell-index = <4>; };
+&fman0_oh_0x7 { /delete-property/ cell-index; cell-index = <5>; };
