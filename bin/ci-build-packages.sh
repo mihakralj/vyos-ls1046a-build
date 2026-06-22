@@ -607,6 +607,30 @@ XEOF
       ls -lh accel-ppp*.deb 2>/dev/null || echo "  (none produced)"
     fi
 
+    ### Build ASK 1.x OOT kernel modules (cdx, fci, auto_bridge)
+    # Requires a fully-built NXP kernel tree with Module.symvers (signing keys).
+    ASK_MOD_BUILDER="$GITHUB_WORKSPACE/bin/ci-build-ask-modules.sh"
+    if [ -n "$KSRC" ] && [ -x "$ASK_MOD_BUILDER" ]; then
+      KSRC_ABS_ASK="$(cd "$KSRC" && pwd)"
+      echo "### Building ASK 1.x OOT kernel modules (cdx, fci, auto_bridge)"
+      ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}" \
+        "$ASK_MOD_BUILDER" "$KSRC_ABS_ASK" "$(pwd)" || \
+        { echo "FATAL: ASK 1.x OOT module build failed"; exit 1; }
+      echo "### ASK 1.x OOT module .debs in package dir:"
+      ls -lh cdx-modules-*.deb fci-modules-*.deb auto-bridge-modules-*.deb 2>/dev/null || echo "  (none produced)"
+    fi
+
+    ### Build ASK 1.x userspace (cmm, dpa_app, fmc)
+    # Requires the kernel source tree for fmlib headers.
+    ASK_USR_BUILDER="$GITHUB_WORKSPACE/bin/ci-build-ask-userspace.sh"
+    if [ -n "$KSRC" ] && [ -x "$ASK_USR_BUILDER" ]; then
+      echo "### Building ASK 1.x userspace (cmm, dpa_app, fmc)"
+      "$ASK_USR_BUILDER" "$KSRC" "$(pwd)" || \
+        { echo "FATAL: ASK 1.x userspace build failed"; exit 1; }
+      echo "### ASK 1.x userspace .debs in package dir:"
+      ls -lh cmm-*.deb dpa-app-*.deb fmc-*.deb 2>/dev/null || echo "  (none produced)"
+    fi
+
     ### Populate linux-kernel cache after a successful build (cache miss path)
     #
     # Captures the linux-image/linux-headers/linux-libc-dev .debs that
