@@ -14,3 +14,4 @@
 #include "mono-gateway-dk.dts"
 #include "qoriq-qman-portals-sdk.dtsi"
 #include "qoriq-bman-portals-sdk.dtsi"
+#include "qoriq-fman3-0-6oh.dtsi"
