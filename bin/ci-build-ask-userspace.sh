@@ -77,9 +77,20 @@ LIBFCI_DIR="$ASK_DIR/fci/lib"
 ABM_DIR="$ASK_DIR/auto_bridge"
 
 # ── Resolve KVER ───────────────────────────────────────────────────────────
+# Prefer $KSRC/include/config/kernel.release (set by LOCALVERSION during build).
+# Fall back to extracting KVER from the kernel image .deb in PKG_DIR (the most
+# reliable source after bindeb-pkg may have cleaned the tree).
+KVER=""
 if [ -f "$KSRC/include/config/kernel.release" ]; then
     KVER="$(cat "$KSRC/include/config/kernel.release")"
-else
+    # Strip trailing '+' which indicates a dirty tree without LOCALVERSION
+    KVER="${KVER%+}"
+fi
+if [ -z "$KVER" ] || [ "$KVER" = "6.12.49" ]; then
+    # bindeb-pkg may have cleaned kernel.release; extract from .deb filename
+    KVER="$(ls "$PKG_DIR"/linux-image-*_arm64.deb 2>/dev/null | head -1 | sed 's/.*linux-image-\(.*\)_arm64.deb/\1/; s/_.*//' || true)"
+fi
+if [ -z "$KVER" ]; then
     KVER="$(make -C "$KSRC" -s kernelrelease 2>/dev/null | sed 's/+$//' || true)"
     [ -z "$KVER" ] && KVER="$(make -C "$KSRC" -s kernelversion 2>/dev/null || true)"
 fi
