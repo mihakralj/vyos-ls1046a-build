@@ -296,7 +296,7 @@ Phase-2 commit that fully realises the v1.3 patch stack.
 ## 9. References
 
 - `plans/ASK2-COURSE-CORRECTION.md` §2 Phase 2 (driver)
-- `plans/ASK2-MODERN-ARCHITECTURE-REVIEW.md` (2026-05-24, root cause)
+- `specs/ask2-modern-architecture-review.md` (2026-05-24, root cause)
 - `specs/ask2-rewrite-spec.md` v1.3 §13.2 (module LOC budget),
   §15.1 (line-count table)
 - `bin/ci-setup-kernel.sh` lines 218–340 (the patch-enumeration block

@@ -6,7 +6,7 @@
 ## ⚠️ RETIRED (2026-06-14) — DO NOT IMPLEMENT
 
 **[SPEC]**
-The three-flavor (`default | ask | vpp`) build split this plan coordinates **was retired on 2026-06-14**. CI now produces a **single flavor-neutral ISO** (`vyos-<version>-LS1046A-arm64.iso`) and a **single `version.json` feed**; `version-{default,ask,vpp}.json` are kept as identical byte-for-byte aliases so fielded installs keep updating. Both dataplanes (VPP AF_XDP and, once it lands, `ask.ko`) ship in that one image, dormant until selected at runtime per `plans/DUAL-DATAPLANE.md`. **The multi-flavor release machinery described below is historical** and is retained only for context — do **not** implement it.
+The three-flavor (`default | ask | vpp`) build split this plan coordinates **was retired on 2026-06-14**. CI now produces a **single flavor-neutral ISO** (`vyos-<version>-LS1046A-arm64.iso`) and a **single `version.json` feed**; `version-{default,ask,vpp}.json` are kept as identical byte-for-byte aliases so fielded installs keep updating. Both dataplanes (VPP AF_XDP and, once it lands, `ask.ko`) ship in that one image, dormant until selected at runtime per `specs/dual-dataplane.md`. **The multi-flavor release machinery described below is historical** and is retained only for context — do **not** implement it.
 
 ---
 

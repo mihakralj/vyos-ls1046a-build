@@ -64,8 +64,8 @@ standalone operator install guide.
 | File | Version / Date | Status | Purpose |
 |---|---|---|---|
 | [`ASK2-COURSE-CORRECTION.md`](ASK2-COURSE-CORRECTION.md) | 2026-05-24 · branch `ask20` | **Active execution plan** | The 5-phase plan that drove the spec v1.2 → v1.3 reduction (delete graft + OH-port + userspace daemon). Phases 1–3 complete; Phase 4 hardware bring-up carries the live M2 status (see §6). |
-| [`ASK2-MODERN-ARCHITECTURE-REVIEW.md`](ASK2-MODERN-ARCHITECTURE-REVIEW.md) | v1.3-proposal · 2026-06-09 | Driver/review (active) | The architecture review that *justified* the course-correction: collapse ASK2 to one OOT module + one in-tree PCD subsystem + one pre-`register_netdev()` hook, operator UX via `nft`/`ip xfrm`/`ynl`/`node_exporter`. |
-| [`ASK-VS-ASK2-COMPARATIVE-REVIEW.md`](ASK-VS-ASK2-COMPARATIVE-REVIEW.md) | v1.0.0 (authoritative) · 2026-06-09 | Reference (active) | Deep comparison of the original NXP ASK 1.x stack vs ASK2: module-by-module functional mapping, data-flow diagrams, 210-microcode interaction, perf prediction, completeness audit. **Origin of the Path A recommendation.** |
+| [`ASK2-MODERN-ARCHITECTURE-REVIEW.md`](../specs/ask2-modern-architecture-review.md) | v1.3-proposal · 2026-06-09 | Driver/review (active) | The architecture review that *justified* the course-correction: collapse ASK2 to one OOT module + one in-tree PCD subsystem + one pre-`register_netdev()` hook, operator UX via `nft`/`ip xfrm`/`ynl`/`node_exporter`. |
+| [`ASK-VS-ASK2-COMPARATIVE-REVIEW.md`](../specs/ask-vs-ask2-comparative-review.md) | v1.0.0 (authoritative) · 2026-06-09 | Reference (active) | Deep comparison of the original NXP ASK 1.x stack vs ASK2: module-by-module functional mapping, data-flow diagrams, 210-microcode interaction, perf prediction, completeness audit. **Origin of the Path A recommendation.** |
 | [`ASK-ISO-BUILD-AND-INSTALL.md`](ASK-ISO-BUILD-AND-INSTALL.md) | v1.0.0 · 2026-06-09 | Operational (active) | Standalone how-to: build the single LS1046A image in CI, deploy the ISO to the lxc200 relay, run `add system image <url>` on the live board, and enable the offload with `set system offload ask`. Independent of the architecture docs above. |
 
 ---
@@ -98,8 +98,8 @@ per-PR design artifacts, not standalone ASK plans.
 **New contributor (understand ASK2 from scratch):**
 1. `specs/dpaa1-afxdp-modernization-spec.md` — the shared DPAA1 backplane.
 2. `specs/ask2-rewrite-spec.md` — ASK2 architecture (v1.6).
-3. `plans/ASK-VS-ASK2-COMPARATIVE-REVIEW.md` — why ASK2 looks the way it does.
-4. `plans/ASK2-MODERN-ARCHITECTURE-REVIEW.md` — the Path A rationale.
+3. `specs/ask-vs-ask2-comparative-review.md` — why ASK2 looks the way it does.
+4. `specs/ask2-modern-architecture-review.md` — the Path A rationale.
 5. `plans/ASK2-COURSE-CORRECTION.md` — what was cut and why.
 
 **Resuming ASK2 implementation work (next-session entry point):**

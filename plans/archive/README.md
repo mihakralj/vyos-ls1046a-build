@@ -15,7 +15,7 @@ For current state, see (in order of authority):
 - `specs/ask2-rewrite-spec.md` — ASK2 architectural source-of-truth (v1.6).
 - `specs/vpp-dpaa1-ls1046a-spec.md` — VPP-flavor (AF_XDP) design spec.
 - `plans/ASK2-COURSE-CORRECTION.md` — ASK2 5-phase execution plan (kept as reference).
-- `plans/ASK2-MODERN-ARCHITECTURE-REVIEW.md` / `plans/ASK-VS-ASK2-COMPARATIVE-REVIEW.md` — the reviews that drove Path A.
+- `specs/ask2-modern-architecture-review.md` / `specs/ask-vs-ask2-comparative-review.md` — the reviews that drove Path A.
 
 ## File index
 

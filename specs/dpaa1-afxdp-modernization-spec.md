@@ -103,7 +103,7 @@ Kernel-side changes to `drivers/net/ethernet/freescale/dpaa/` + FMan/QMan/BMan s
 ### 3.3 Cross-flavor reach
 
 **[NOTE]**
-**Single-image update (retired 2026-06-14, `plans/DUAL-DATAPLANE.md`):** the per-flavor ISO split is gone — one dual-dataplane image ships all consumers (VPP and `ask.ko` both present, both dormant until configured, globally mutually exclusive in v1). The "flavor" terms below remain valid as **consumer roles** of this kernel's APIs; they no longer imply separate ISO builds.
+**Single-image update (retired 2026-06-14, `specs/dual-dataplane.md`):** the per-flavor ISO split is gone — one dual-dataplane image ships all consumers (VPP and `ask.ko` both present, both dormant until configured, globally mutually exclusive in v1). The "flavor" terms below remain valid as **consumer roles** of this kernel's APIs; they no longer imply separate ISO builds.
 
 **[SPEC]**
 The single kernel binary ships in all three ISO flavors. The M0 abstraction makes the hot path RCU-NULL-safe — when no flavor module registers ops, behaviour is byte-identical to mainline DPAA1. §5 capabilities are kernel APIs consumable by:
@@ -796,7 +796,7 @@ If running ucode < 210, §3.5 cap bits zero → every §5.4–§5.6 install retu
 
 ### 9.5 Silicon mode state machine — mode-switch primitives
 
-`plans/DUAL-DATAPLANE.md` defines the system-level state machine. This spec owns every register/MURAM-touching **mode-switch primitive** (DUAL-DATAPLANE M1):
+`specs/dual-dataplane.md` defines the system-level state machine. This spec owns every register/MURAM-touching **mode-switch primitive** (DUAL-DATAPLANE M1):
 
 1. **KG scheme-mode rewrite** — flip `kgse_mode` next-engine between DONE/RSS (`…0002`) and AC_CC (`…0006`).
 2. **`fmbm_rfpne` CC-root bind/unbind** — attach/detach the PRE_CC dispatch.

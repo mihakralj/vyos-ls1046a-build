@@ -240,7 +240,7 @@ config ASK_DEBUG
 
 ### 3.5 Probe and Registration Sequence (v1.7 Path A, config-engaged)
 
-**[NOTE]** v1.7 timing change (dual-dataplane): the Path A *mechanism* is unchanged — `dpaa_register_flavor_ops()` causes the core driver to invoke `pcd_ops->install()` per netdev — but the *trigger* moves from boot to config commit. Boot always lands the silicon in **S0** (mainline RSS, KG next-engine DONE, kernel netdevs up); `ask.ko` is present in every image but is loaded only when `set system offload ask` is committed. On load, the core driver late-binds: it quiesces each already-registered netdev (EN-preserving port pause), runs `pcd_ops->install()`, and resumes. On a boot with offload pre-configured, the module loads during the vyos-router config commit — the silicon still passes through S0 first. See `plans/DUAL-DATAPLANE.md` §2.
+**[NOTE]** v1.7 timing change (dual-dataplane): the Path A *mechanism* is unchanged — `dpaa_register_flavor_ops()` causes the core driver to invoke `pcd_ops->install()` per netdev — but the *trigger* moves from boot to config commit. Boot always lands the silicon in **S0** (mainline RSS, KG next-engine DONE, kernel netdevs up); `ask.ko` is present in every image but is loaded only when `set system offload ask` is committed. On load, the core driver late-binds: it quiesces each already-registered netdev (EN-preserving port pause), runs `pcd_ops->install()`, and resumes. On a boot with offload pre-configured, the module loads during the vyos-router config commit — the silicon still passes through S0 first. See `specs/dual-dataplane.md` §2.
 
 ```
 ask_init():
@@ -504,7 +504,7 @@ netdev->hw_enc_features |= NETIF_F_HW_ESP | NETIF_F_HW_ESP_TX_CSUM;
 
 **[SPEC]** Concretely, `ask.ko` is the entire offload control surface; the genl family `ask` is its only ABI; mainline Linux tools (`nft`, `ip xfrm`, `ynl`, `node_exporter`) are the entire operator UX. The v1.0/v1.1/v1.2 §6 chapter is preserved in git history if needed for archaeological reference; new development must not re-introduce a daemon.
 
-**[NOTE]** See also: `plans/ASK2-COURSE-CORRECTION.md` Phase 5 (the doc-lock commit that landed this deletion) and `plans/ASK2-MODERN-ARCHITECTURE-REVIEW.md` §6 (the architecture review that justified it).
+**[NOTE]** See also: `plans/ASK2-COURSE-CORRECTION.md` Phase 5 (the doc-lock commit that landed this deletion) and `specs/ask2-modern-architecture-review.md` §6 (the architecture review that justified it).
 
 ---
 
@@ -692,7 +692,7 @@ void caam_qi_ext_consumer_release(struct caam_drv_ctx *ctx);
 
 ## 9. VPP coexistence
 
-**[NOTE]** v1.7: this section is governed by `plans/DUAL-DATAPLANE.md` — the silicon mode state machine and the global mutual-exclusion rule below are normative; the hybrid memif promotion path is **deferred to v3** and kept only as design reference.
+**[NOTE]** v1.7: this section is governed by `specs/dual-dataplane.md` — the silicon mode state machine and the global mutual-exclusion rule below are normative; the hybrid memif promotion path is **deferred to v3** and kept only as design reference.
 
 ### 9.1 The model — silicon mode state machine
 
@@ -751,7 +751,7 @@ set policy access-list 100 rule 10 destination address 10.0.0.0/8
 
 ## 10. Build pipeline and VyOS integration
 
-**[NOTE]** v1.7 single dual-dataplane image (DECIDED 2026-06-12, `plans/DUAL-DATAPLANE.md` §5/§7): one ISO ships both dataplanes. `ask.ko` is built and included **unconditionally** in every image (dormant until `set system offload ask`), VPP ships as today (dormant until `set vpp settings`). The `FLAVOR=ask` build path and the per-flavor ISO split were retired 2026-06-14 (made immediate, ahead of DUAL-DATAPLANE M7); `version-ask.json` / `version-vpp.json` feeds are now identical aliases of the single image's `version.json` feed. The `kernel/flavors/ask/` tree below remains the source location for ASK-specific patches/OOT code, but its contents are wired into the common build, not gated behind a flavor switch.
+**[NOTE]** v1.7 single dual-dataplane image (DECIDED 2026-06-12, `specs/dual-dataplane.md` §5/§7): one ISO ships both dataplanes. `ask.ko` is built and included **unconditionally** in every image (dormant until `set system offload ask`), VPP ships as today (dormant until `set vpp settings`). The `FLAVOR=ask` build path and the per-flavor ISO split were retired 2026-06-14 (made immediate, ahead of DUAL-DATAPLANE M7); `version-ask.json` / `version-vpp.json` feeds are now identical aliases of the single image's `version.json` feed. The `kernel/flavors/ask/` tree below remains the source location for ASK-specific patches/OOT code, but its contents are wired into the common build, not gated behind a flavor switch.
 
 ### 10.1 Repository layout
 

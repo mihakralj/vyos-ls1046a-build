@@ -518,7 +518,7 @@ for package in $packages; do
     # collapse). ask.ko links only against the common board fman_cc_*/fman_hm_*
     # substrate — the dead ask-flavor in-tree patches stay unapplied — so it
     # compiles in the default build. The operator engages the datapath at
-    # runtime per plans/DUAL-DATAPLANE.md.
+    # runtime per specs/dual-dataplane.md.
     #
     # Userspace components (askd, ask-load, libask_fci) are not yet
     # implemented — see specs/ask2-rewrite-spec.md §§4–9.

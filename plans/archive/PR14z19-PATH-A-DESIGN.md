@@ -4,7 +4,7 @@
 **Branch:** `ask20`
 **Status:** Design draft — implementation begins after operator review
 **Supersedes:** PR14z13/z15/z18 graft model (to be dropped)
-**Authoritative reasoning:** `plans/ASK-VS-ASK2-COMPARATIVE-REVIEW.md`
+**Authoritative reasoning:** `specs/ask-vs-ask2-comparative-review.md`
 
 ---
 

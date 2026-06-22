@@ -13,7 +13,7 @@ and the 266-file vendored NXP SDK FMan/QMan/BMan driver overlay) in
 
 The brand "ASK" carries forward unchanged, but ASK2 is **no longer a
 separate build flavor**. Per the single-image decision (2026-06-14,
-`plans/DUAL-DATAPLANE.md`), the contents of this tree are wired into the
+`specs/dual-dataplane.md`), the contents of this tree are wired into the
 **common** build — `ask.ko` ships in **every** image, dormant until
 `set system offload ask` engages it at runtime. `kernel/flavors/ask/`
 remains only the *source location* for ASK-specific patches and OOT code;

@@ -6,7 +6,7 @@ This document is the VPP-on-DPAA1 integration spec for the LS1046A Mono Gateway.
 
 **[SPEC]** Target: VPP 25.10+ with `af_xdp` plugin, Linux 6.18+ (VyOS rolling), ARM64.
 **[SPEC]** Pre-requisite spec: `specs/dpaa1-afxdp-modernization-spec.md` — all datapath and HW offload APIs consumed by this spec are defined there.
-**[NOTE]** Supersedes v0.3 (2026-06-01), which superseded v0.2 (deferred native-VyOS HW-offload CLI) and v0.1 (native plugin proposal — REJECTED, preserved in Appendix A). The per-flavor ISO split was retired 2026-06-14 ahead of `plans/DUAL-DATAPLANE.md` M7; `version-ask.json`/`version-vpp.json` feeds are now identical aliases of `version.json`.
+**[NOTE]** Supersedes v0.3 (2026-06-01), which superseded v0.2 (deferred native-VyOS HW-offload CLI) and v0.1 (native plugin proposal — REJECTED, preserved in Appendix A). The per-flavor ISO split was retired 2026-06-14 ahead of `specs/dual-dataplane.md` M7; `version-ask.json`/`version-vpp.json` feeds are now identical aliases of `version.json`.
 
 **[NOTE]** CLI policy (v0.3): VPP configuration and operation continue to use the **existing** surface — VPP's own `vppctl`/`startup.conf` plus the already-shipped `set vpp settings interface ethX` (patch `vyos-1x-010-vpp-platform-bus.patch`). This spec does **not** introduce any new native VyOS `set vpp settings hw-offload …` verbs. Native VyOS CLI for the §3 HW-offload primitives is **deferred to a separate, later phase** (tracked as a follow-on, out of scope for the AF_XDP datapath milestones). In the interim, the DPAA1 §5 HW-offload kernel APIs are reachable only through their native kernel interfaces (`ethtool -K`, sysfs, kernel module params / VPP startup config), not through new VyOS config nodes.
 
@@ -42,7 +42,7 @@ Kernel (single binary, all flavors)
 
 ### 1.3 Dataplane Modes (v0.4 — single dual-dataplane image)
 
-**[NOTE]** **DECIDED 2026-06-12** (`plans/DUAL-DATAPLANE.md` §5/§7): one ISO ships both dataplanes. VPP and `ask.ko` are both present in every image and both dormant by default; the operator's config selects the mode. The historical per-flavor table (v0.3 §1.3) is retired — `version-ask.json`/`version-vpp.json` feeds are now identical aliases of the single image's `version.json` feed (flavor split retired 2026-06-14).
+**[NOTE]** **DECIDED 2026-06-12** (`specs/dual-dataplane.md` §5/§7): one ISO ships both dataplanes. VPP and `ask.ko` are both present in every image and both dormant by default; the operator's config selects the mode. The historical per-flavor table (v0.3 §1.3) is retired — `version-ask.json`/`version-vpp.json` feeds are now identical aliases of the single image's `version.json` feed (flavor split retired 2026-06-14).
 
 **[SPEC]**
 
@@ -144,7 +144,7 @@ set vpp settings interface eth4
 
 **[SPEC]** Triggers VPP startup via `vyos-1x-010-vpp-platform-bus.patch` (AF_XDP mode). No `fsl,userspace-managed` DT property needed. No kernel netdev unbind. This is the **only** VyOS config surface this spec ships; VPP itself is otherwise configured/operated through its existing `vppctl`/`startup.conf`.
 
-**[SPEC]** **Mutual exclusion (v0.4):** the commit validator rejects a config containing both `vpp settings interface …` and `system offload ask` — globally mutually exclusive in v1 (`plans/DUAL-DATAPLANE.md` §3.2). VPP requires the silicon in S0; engaging VPP while ASK silicon state (S1) is live is never permitted.
+**[SPEC]** **Mutual exclusion (v0.4):** the commit validator rejects a config containing both `vpp settings interface …` and `system offload ask` — globally mutually exclusive in v1 (`specs/dual-dataplane.md` §3.2). VPP requires the silicon in S0; engaging VPP while ASK silicon state (S1) is live is never permitted.
 
 ### 4.2 HW Offload Configuration (DEFERRED to a later native-VyOS-CLI phase — NOT in scope)
 

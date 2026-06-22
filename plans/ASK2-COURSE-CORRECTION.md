@@ -449,8 +449,8 @@ exhaustion bug.
 ## 8. References
 
 **[NOTE]**
-- `plans/ASK2-MODERN-ARCHITECTURE-REVIEW.md` (2026-05-24) — the driver document this plan executes.
-- `plans/ASK-VS-ASK2-COMPARATIVE-REVIEW.md` (2026-05-23) — Path A justification.
+- `specs/ask2-modern-architecture-review.md` (2026-05-24) — the driver document this plan executes.
+- `specs/ask-vs-ask2-comparative-review.md` (2026-05-23) — Path A justification.
 - `plans/PR14z19-PATH-A-DESIGN.md` (2026-05-23) — concrete hook design that Phase 4 builds on.
 - `specs/ask2-rewrite-spec.md` v1.2 — the document Phase 1 revises to v1.3.
 - `kernel/flavors/ask/patches/` — the patch stack Phase 2 audits and archives.

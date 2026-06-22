@@ -552,7 +552,7 @@ chmod +x "$CHROOT/usr/local/bin/firmware-check"
 
 ### ASK2 reversible-mode-switch gate: `pcd-snapshot` (Python 3) captures and
 ### diffs the FMan PCD silicon state that the S0<->S1 dataplane mode-switch
-### (DUAL-DATAPLANE.md M1) mutates — KeyGen schemes (RSS vs AC_CC, read via
+### (specs/dual-dataplane.md M1) mutates — KeyGen schemes (RSS vs AC_CC, read via
 ### the KG indirect Action Register), per-port BMI next-engine bind
 ### (fmbm_rfpne/rccb/rgpr), the static CC tree / FM_CTL params-page MURAM
 ### region, and the gen_pool MURAM budget (/sys/kernel/debug/fman_pcd/0/

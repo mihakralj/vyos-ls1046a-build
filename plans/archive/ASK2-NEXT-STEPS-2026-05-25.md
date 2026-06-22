@@ -475,7 +475,7 @@ is the GA condition.
 
 - `plans/ASK2-COURSE-CORRECTION.md` — Phases 1–5 driver doc; §5.3 has the
   current MURAM-blocker disposition.
-- `plans/ASK2-MODERN-ARCHITECTURE-REVIEW.md` — Path A architectural rationale.
+- `specs/ask2-modern-architecture-review.md` — Path A architectural rationale.
 - `specs/ask2-rewrite-spec.md` v1.3 — current authoritative spec.
 - `kernel/flavors/ask/patches/0060-0064` — landed remediation stack.
 - `bin/verify-ask-flow-offload.sh`, `bin/m2-dut-prep.sh`, `bin/ask-pcd-regdump.py` —

@@ -11,7 +11,7 @@ Read `[NOTE]` only if additional context is needed.
 
 This plan is execution-oriented and subordinate to two sources of truth: the
 silicon contract in [`arch/fman-fe-ehash.md`](../arch/fman-fe-ehash.md) and the
-state machine in [`plans/DUAL-DATAPLANE.md`](DUAL-DATAPLANE.md). Where this plan
+state machine in [`specs/dual-dataplane.md`](DUAL-DATAPLANE.md). Where this plan
 and those documents disagree, they win. Section 9 is the live execution log.
 
 ---

@@ -391,7 +391,7 @@ Clean M2 boundary (2026-06-17). The FE-VM scaffold (`0122`–`0133`) is complete
 |---|---|
 | CC root/AD/match-table byte formats, KeyGen scheme bits | `fman-pcd.md` §3–§4 |
 | MURAM budget, the ~750-flow ceiling, Risk #13 | `muram.md` |
-| Mode-switch reversibility contract (S0↔S1), `pcd-snapshot` | `specs/ask2-rewrite-spec.md` §2.4(6), §3.1, `plans/DUAL-DATAPLANE.md` §2.2 |
+| Mode-switch reversibility contract (S0↔S1), `pcd-snapshot` | `specs/ask2-rewrite-spec.md` §2.4(6), §3.1, `specs/dual-dataplane.md` §2.2 |
 | 210.10.1 microcode (open-source 106.x vs proprietary 210.10.1), FE opcode VM | `fman-microcode.md` |
 | Mainline FE-VM build increments (byte-assembled dormant chain) | `0124` singletons → `0125`/`0130` ehash table (DDR/DMA) → `0127` per-flow ENQ FE + `FE_ENTER` root AD → `0128` CRC64 flow insert → **`0131` `t_ExtHashFe` FE-hash object** |
 | M3-3b root cause | qdrant `iter-33`, `iter-42` (2026-06-12), `ASK2 ehash/FE architecture root cause` (2026-06-13) |

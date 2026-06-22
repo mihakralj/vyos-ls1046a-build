@@ -30,6 +30,9 @@ nxp-fmc/
 libcli/
 !patches/libcli/
 
+# Cache directories (anywhere)
+**/.cache/
+
 # Python bytecode caches
 __pycache__/
 *.pyc

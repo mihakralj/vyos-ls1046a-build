@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # pcd-snapshot — capture / diff the LS1046A FMan PCD silicon state that the
-# ASK2 reversible dataplane mode-switch (DUAL-DATAPLANE.md M1, the S0<->S1
+# ASK2 reversible dataplane mode-switch (specs/dual-dataplane.md M1, the S0<->S1
 # transition) mutates.
 #
 # WHY THIS EXISTS
@@ -16,14 +16,14 @@
 # This tool productizes the d14 /dev/mem forensic dumpers (ccdump / cc0116dump
 # / ccexp43_kgscheme / fmregdump) into a single capture+diff gate.  It reads
 # exactly the hardware surfaces the four reversible M1 primitives touch
-# (DUAL-DATAPLANE.md s2.2 items 1, 2, 4) so that:
+# (specs/dual-dataplane.md s2.2 items 1, 2, 4) so that:
 #
 #   pcd-snapshot capture            # at S0 baseline (boot, before any engage)
 #   ... engage ASK (S0->S1) ...     # M1 forward path
 #   ... disengage  (S1->S0) ...     # M1 inverse path
 #   pcd-snapshot diff               # MUST be clean (exit 0) or M1 has a leak
 #
-# THE FOUR M1 SURFACES (DUAL-DATAPLANE.md s2.2)
+# THE FOUR M1 SURFACES (specs/dual-dataplane.md s2.2)
 #   1. KeyGen schemes  — RSS hash (S0) vs AC_CC dispatch (S1).  Read via the
 #      FMan KeyGen indirect Action Register (KG+0x1FC / window KG+0x100); the
 #      same READ op the in-tree fman_keygen driver uses.  32 schemes x 24 words.
@@ -443,7 +443,7 @@ def main():
     ap = argparse.ArgumentParser(
         prog="pcd-snapshot",
         description="Capture/diff LS1046A FMan PCD silicon state for the "
-                    "ASK2 S0<->S1 reversible mode-switch (DUAL-DATAPLANE M1).")
+                    "ASK2 S0<->S1 reversible mode-switch (specs/dual-dataplane.md M1).")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p_cap = sub.add_parser("capture", help="snapshot current PCD state to a file")

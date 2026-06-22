@@ -19,7 +19,7 @@ Read `[NOTE]` only if additional context is needed.
 - Date: 2026-05-24
 - Branch: `ask20`
 - Status: Review / proposal — feeds into ASK2 spec v1.3
-- Inputs: `plans/ASK-VS-ASK2-COMPARATIVE-REVIEW.md` (2026-05-23), `specs/ask2-rewrite-spec.md` v1.2, `tmp-mono-ask/` corpus, PR14g/z13/z15/z18 outcomes, qdrant memories tagged `fman-pcd`, `m2-gate`, `ASK2-spec-v1.1`.
+- Inputs: `specs/ask-vs-ask2-comparative-review.md` (2026-05-23), `specs/ask2-rewrite-spec.md` v1.2, `tmp-mono-ask/` corpus, PR14g/z13/z15/z18 outcomes, qdrant memories tagged `fman-pcd`, `m2-gate`, `ASK2-spec-v1.1`.
 
 ---
 
@@ -270,7 +270,7 @@ Steps 1–2 cost <1 day. Steps 3–6 are PR14m (boot-time PCD install) — "1 PR
 ## 10. RECOMMENDATION
 
 **[SPEC]**
-- Adopt this review in conjunction with Path A from `plans/ASK-VS-ASK2-COMPARATIVE-REVIEW.md`. Net effect: ASK2 becomes a single kernel module + one in-tree PCD subsystem + one tiny pre-register hook, with operator UX delivered through existing mainline Linux tools (`nft`, `ip xfrm`, `ynl`, `node_exporter`).
+- Adopt this review in conjunction with Path A from `specs/ask-vs-ask2-comparative-review.md`. Net effect: ASK2 becomes a single kernel module + one in-tree PCD subsystem + one tiny pre-register hook, with operator UX delivered through existing mainline Linux tools (`nft`, `ip xfrm`, `ynl`, `node_exporter`).
 - Outcome: 2.7× less code, zero graft surface, same performance gates, drop-in mainline UX. Adopt.
 
 **[NOTE]**
@@ -281,7 +281,7 @@ The two documents are complementary: the comparative review establishes why the 
 ## 11. REFERENCES
 
 **[SPEC]**
-- `plans/ASK-VS-ASK2-COMPARATIVE-REVIEW.md` (2026-05-23) — Path A recommendation, residual-state model, graft-model failure analysis.
+- `specs/ask-vs-ask2-comparative-review.md` (2026-05-23) — Path A recommendation, residual-state model, graft-model failure analysis.
 - `specs/ask2-rewrite-spec.md` v1.2 (2026-05-16) — current authoritative architecture (the document this review proposes to revise to v1.3).
 - `tmp-mono-ask/cdx/cdx_main.c` — original ASK module-init sequence, `start_dpa_app` user-helper, `CDX_MIN_FW_PACKAGE 209` ucode gate.
 - `tmp-mono-ask/dpa_app/files/etc/cdx_pcd.xml` — declarative PCD chain (16 distributions, per-port policies) — evidence the SDK programmed CC trees at boot from a declarative spec, not at runtime via graft.
