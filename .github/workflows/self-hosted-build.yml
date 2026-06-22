@@ -120,7 +120,7 @@ jobs:
   # artifact is uploaded; this job handles the combined release.
   call-stock-build:
     needs: call-auto-build
-    uses: mihakralj/vyos-ls1046a-build/.github/workflows/auto-build.yml@refs/heads/stock
+    uses: mihakralj/vyos-ls1046a-build/.github/workflows/auto-build.yml@stock
     permissions:
       contents: write
     with:
