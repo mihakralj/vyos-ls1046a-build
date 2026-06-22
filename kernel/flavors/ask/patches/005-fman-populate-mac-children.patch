@@ -1,0 +1,25 @@
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_fm.c b/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_fm.c
+index a7a1036..e7f37f5 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_fm.c
++++ b/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_fm.c
+@@ -1189,6 +1189,20 @@ static int /*__devinit*/ fm_probe(struct platform_device *of_dev)
+ 
+     DBG(TRACE, ("FM%d probed", p_LnxWrpFmDev->id));
+ 
++    /* Populate MAC child devices so fsl_mac driver can probe them */
++    if (devm_of_platform_populate(&of_dev->dev)) {
++        dev_err(&of_dev->dev, "failed to populate FM child devices\n");
++        fm_sysfs_destroy(&of_dev->dev);
++        device_destroy(p_LnxWrpFmDev->fm_class,
++                   MKDEV(p_LnxWrpFmDev->major, DEV_FM_MINOR_BASE));
++        device_destroy(p_LnxWrpFmDev->fm_class,
++                   MKDEV(p_LnxWrpFmDev->major, DEV_FM_PCD_MINOR_BASE));
++        class_destroy(p_LnxWrpFmDev->fm_class);
++        unregister_chrdev(p_LnxWrpFmDev->major, p_LnxWrpFmDev->name);
++        FreeFmDev(p_LnxWrpFmDev);
++        return -EIO;
++    }
++
+     return 0;
+ }
+ 
