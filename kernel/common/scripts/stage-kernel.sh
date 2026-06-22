@@ -131,13 +131,27 @@ else
     [[ -d "$KSRC" ]] || err "kernel source missing: $KSRC"
 fi
 
+# ── SDK source overlay (ASK only) ─────────────────────────────────────
+# MUST run BEFORE patches because ASK kernel patches modify the
+# overlaid SDK driver files (dpaa_eth_sg.c includes the ASK hooks).
+if [[ "$FLAVOR" == "ask" && -d "$SDK_DIR" ]]; then
+    info "overlaying SDK sources (266 files) onto kernel tree…"
+    (cd "$SDK_DIR" && find . -type f -print0) | \
+        while IFS= read -r -d '' f; do
+            f="${f#./}"
+            mkdir -p "$KSRC/$(dirname "$f")"
+            cp -f "$SDK_DIR/$f" "$KSRC/$f"
+        done
+    ok "SDK overlay complete"
+fi
+
 # ── Patch application (plan §3.4) ─────────────────────────────────────
-# ASK flavor on the NXP kernel tree (6.12): skip common board/vendor
 # patches that require 6.18+ kernel context. The NXP tree has SDK
 # drivers already; these patches target mainline code paths.
 if [[ "$FLAVOR" == "ask" ]]; then
     ASK_PATCH_SKIP_LIST=(
         "001-vyos-linkstate-ip-device-attribute.patch"
+        "0134-caam-qi-share.patch"
         "095-leds-lp5812-register.patch"
         "101-sfp-rollball-phylink-fallback.patch"
         "120-perf-libperf-asm-headers-srctree.patch"
@@ -207,18 +221,6 @@ for p in "${PATCHES[@]}"; do
         err "patch failed: $name (see *.rej under $KSRC)"
     fi
 done
-
-# ── SDK source overlay (ASK only) ─────────────────────────────────────
-if [[ "$FLAVOR" == "ask" && -d "$SDK_DIR" ]]; then
-    info "overlaying SDK sources (266 files) onto kernel tree…"
-    (cd "$SDK_DIR" && find . -type f -print0) | \
-        while IFS= read -r -d '' f; do
-            f="${f#./}"
-            mkdir -p "$KSRC/$(dirname "$f")"
-            cp -f "$SDK_DIR/$f" "$KSRC/$f"
-        done
-    ok "SDK overlay complete"
-fi
 
 # ── Inject driver source files (LP5812, FMD shim) ─────────────────────
 if [[ -d "$FILES_DIR/lp5812" ]]; then
