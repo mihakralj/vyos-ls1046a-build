@@ -64,45 +64,53 @@ jobs:
           # Truncate the full git commit SHA to the first 7 characters for a cleaner footer
           SHORT_SHA="${SHA:0:7}"
 
+          # Generate an ISO8601 timestamp for the Discord embed footer
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
           # Display version strips the release-channel suffix (-rolling / -stream
-          # / -lts) for a cleaner header. The full BUILD_VERSION is still used for
-          # the release tag + download URLs, which must match the published asset.
+          # / -lts) for a cleaner header.
           DISPLAY_VERSION=$(printf '%s' "${BUILD_VERSION}" | sed -E 's/-(rolling|stream|lts)$//')
 
-          # Build the description with real newlines via printf — jq's --arg
-          # treats its value literally, so a bash string containing "\n" would be
-          # JSON-encoded as the two characters backslash-n and Discord would
-          # render them verbatim. printf converts \n into actual newline bytes,
-          # which jq then encodes correctly as JSON "\n".
           if [ "${STATUS}" = "success" ]; then
             TITLE="📦 New VyOS LS1046A Build"
             COLOR=5763719 # Discord Green
-            DESC=$(printf '**Version:** `%s`\n**Flavor:** `%s`\n**Edition:** `%s`\n\n[🛠️ Install Guide](https://github.com/%s/blob/main/INSTALL.md)\n[📝 Release Notes](https://github.com/%s/releases/tag/%s)\n[🐙 Repository](https://github.com/%s)\n\n**Direct upgrade command:**\n```bash\nadd system image https://github.com/%s/releases/download/%s/%s\n```' \
-              "${DISPLAY_VERSION}" "${BUILD_BRANCH}" "${RELEASE_TYPE}" \
+            
+            # Formats links horizontally like a navbar to save vertical space.
+            # Using printf to properly handle the newlines (\n) for the JSON payload.
+            DESC=$(printf '[🛠️ Install Guide](https://github.com/%s/blob/main/INSTALL.md) • [📝 Release Notes](https://github.com/%s/releases/tag/%s) • [🐙 Repository](https://github.com/%s)\n\n**Direct upgrade command:**\n\`\`\`bash\nadd system image https://github.com/%s/releases/download/%s/%s\n\`\`\`' \
               "${REPO}" "${REPO}" "${BUILD_VERSION}" "${REPO}" \
               "${REPO}" "${BUILD_VERSION}" "${IMAGE_NAME}")
           else
             TITLE="❌ VyOS LS1046A Build Failed"
             COLOR=15548997 # Discord Red
-            DESC=$(printf '**Version:** `%s`\n**Flavor:** `%s` • **Edition:** `%s`\n\nThe automated pipeline encountered an error during compilation.\n\n[🔍 Inspect Action Logs](https://github.com/%s/actions/runs/%s)' \
-              "${DISPLAY_VERSION}" "${BUILD_BRANCH}" "${RELEASE_TYPE}" \
+            DESC=$(printf 'The CI pipeline encountered an error during compilation.\n\n[🔍 Inspect Action Logs](https://github.com/%s/actions/runs/%s)' \
               "${REPO}" "${RUN_ID}")
           fi
 
           # Build the embed payload using jq. 
-          # By using a single 'description' block instead of multiple 'fields', 
-          # the output scales beautifully on both mobile and desktop Discord clients.
+          # Moving Version/Flavor/Edition into 'fields' with 'inline: true' 
+          # aligns them perfectly horizontally on desktop screens.
           PAYLOAD=$(jq -n \
             --arg title  "${TITLE}" \
             --argjson color "${COLOR}" \
             --arg desc "${DESC}" \
+            --arg ver "\`${DISPLAY_VERSION}\`" \
+            --arg fla "\`${BUILD_BRANCH}\`" \
+            --arg edt "\`${RELEASE_TYPE}\`" \
             --arg footer "Commit: ${SHORT_SHA} • Run: #${RUN_NUMBER}" \
+            --arg timestamp "${TIMESTAMP}" \
             '{
               embeds: [{
                 title: $title,
                 color: $color,
                 description: $desc,
-                footer: { text: $footer }
+                fields: [
+                  { name: "Version", value: $ver, inline: true },
+                  { name: "Flavor", value: $fla, inline: true },
+                  { name: "Edition", value: $edt, inline: true }
+                ],
+                footer: { text: $footer },
+                timestamp: $timestamp
               }]
             }')
 
