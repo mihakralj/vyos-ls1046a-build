@@ -193,11 +193,12 @@ echo "### Patched dpa_cfg.c: num_fmans no longer static"
 sed -i 's/^static struct oh_port_info offline_port_info/struct oh_port_info offline_port_info/' "$ASK_DIR/cdx/devoh.c"
 echo "### Patched devoh.c: offline_port_info no longer static"
 
-# Add headers for kernel OH port API
+# Add headers for kernel OH port API + extern for cdx's offline_port_info
 sed -i '/^#include "lnxwrp_fm.h"/a\
 #include <linux/fsl_oh_port.h>\n\
-extern int oh_port_driver_get_port_info(struct fman_offline_port_info *info);' "$ASK_DIR/cdx/cdx_main.c"
-echo "### Patched cdx_main.c: added fsl_oh_port.h include"
+extern int oh_port_driver_get_port_info(struct fman_offline_port_info *info);\n\
+extern struct oh_port_info offline_port_info[1][MAX_OF_PORTS];' "$ASK_DIR/cdx/cdx_main.c"
+echo "### Patched cdx_main.c: added fsl_oh_port.h + externs"
 
 # ── Patch: populate cdx OH ports from kernel fsl_oh driver ─────────────────
 # oh_port_driver_get_port_info() requires caller to pre-fill port_name.
@@ -205,6 +206,7 @@ echo "### Patched cdx_main.c: added fsl_oh_port.h include"
 sed -i '/cdx: pre-populated MURAM handle/i\
 \t/* Mirror kernel OH port info into cdx array for alloc_offline_port() */\
 \t{\
+\t\tprintk("cdx: scanning kernel OH ports...\\n");\
 \t\tstatic const char *oh_names[] = {"dpa-fman0-oh@2", "dpa-fman0-oh@3"};\
 \t\tint oi;\
 \t\tfor (oi = 0; oi < 2; oi++) {\
