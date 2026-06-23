@@ -107,24 +107,20 @@ fi
 sed -i 's/^#define START_DPA_APP 1$/\/\/ #define START_DPA_APP 1/' "$ASK_DIR/cdx/cdx_main.c"
 echo "### Patched cdx_main.c: START_DPA_APP disabled"
 
-# ── Patch: disable WiFi offload (CFG_WIFI_OFFLOAD) ────────────────────────
-# cdx/system.h and cdx/dpa_wifi.h define CFG_WIFI_OFFLOAD which causes
-# dpaa_vwd_init() to run during cdx_module_init(). On LS1046A without WiFi,
-# vwd_init_ohport() fails because no OH port is configured for WiFi offload.
+# ── Patch: stub out WiFi offload init ─────────────────────────────────────
+# cdx_module_init() calls dpaa_vwd_init() under CFG_WIFI_OFFLOAD, which
+# tries to allocate an OH port (vwd_init_ohport). On LS1046A without WiFi,
+# alloc_offline_port() finds no free OH ports and returns failure, causing
+# the entire cdx init to abort. Solutions tried and failed:
+#   - Disabling CFG_WIFI_OFFLOAD → #else stubs have struct pfe issues + control_wifi symbols lost
+#   - Removing .o files → linker undefined symbols
+#   - -Wno-error alone → dpa_wifi.c still fails at modpost
 #
-# Disabling CFG_WIFI_OFFLOAD skips the WiFi init call in cdx_main.c, but
-# dpa_wifi.c has an #else block with PFE stub functions (pfe_vwd_init,
-# pfe_vwd_exit) that reference struct pfe — undeclared on LS1046A. Fix the
-# stubs to use void* instead of struct pfe*, so they compile cleanly. Other
-# WiFi functions (drain_tx_bp_pool, dpaa_get_wifi_dev, etc.) are called
-# unconditionally from cdx_ehash.c/devman.c and must remain available.
-# The cflags -DWIFI_ENABLE and -Werror stay as-is.
-sed -i 's/^#define CFG_WIFI_OFFLOAD$/\/\/ #define CFG_WIFI_OFFLOAD/' "$ASK_DIR/cdx/system.h" "$ASK_DIR/cdx/dpa_wifi.h"
-echo "### Patched system.h + dpa_wifi.h: CFG_WIFI_OFFLOAD disabled"
-sed -i 's/struct pfe \*pfe/void *pfe/g' "$ASK_DIR/cdx/dpa_wifi.c"
-echo "### Patched dpa_wifi.c: struct pfe → void in PFE stubs"
-sed -i 's/-Werror/-Wno-error/g' "$ASK_DIR/cdx/Kbuild"
-echo "### Patched cdx/Kbuild: -Werror → -Wno-error (tolerate unused WiFi vars)"
+# Fix: keep WiFi enabled at compile time, but stub dpaa_vwd_init() to
+# return 0 immediately. The WiFi offload won't be active but all symbols
+# remain available for linking and cdx_module_init() succeeds.
+sed -i '/^int dpaa_vwd_init/a\    return 0;' "$ASK_DIR/cdx/dpa_wifi.c"
+echo "### Patched dpa_wifi.c: dpaa_vwd_init() returns 0 immediately"
 
 # ── Build cdx.ko ───────────────────────────────────────────────────────────
 echo "### ======== Building cdx.ko ========"
