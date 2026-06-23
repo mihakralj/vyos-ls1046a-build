@@ -144,6 +144,7 @@ make -C "$KSRC" \
     ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-}" \
     PLATFORM="LS1043A" \
     CONFIG_ASK_CDX=m \
+    EXTRA_CFLAGS="-Wno-unused-variable -Wno-unused-function" \
     M="$ASK_DIR/cdx" \
     modules
 
