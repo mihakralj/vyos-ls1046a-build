@@ -288,8 +288,10 @@ UNIT
 echo "### Created dpa_app.service"
 
 # Enable dpa_app so it runs before cmm on every boot
-mkdir -p "$STAGE/etc/systemd/system/multi-user.target.wants"
-ln -sf /etc/systemd/system/dpa_app.service "$STAGE/etc/systemd/system/multi-user.target.wants/dpa_app.service"
+# NOTE: cdx.ko spawns dpa_app via call_usermodehelper (START_DPA_APP=1)
+# at module load time. The systemd unit is a fallback for manual runs.
+# We DON'T auto-enable — cdx handles the first run.
+echo "### dpa_app.service created (cdx auto-spawn, systemd as fallback)"
 mkdir -p "$STAGE/etc/config"
 [ -f "$ASK_DIR/config/fastforward" ] && cp "$ASK_DIR/config/fastforward" "$STAGE/etc/config/fastforward"
 [ -f "$ASK_DIR/config/gateway-dk/cdx_cfg.xml" ] && cp "$ASK_DIR/config/gateway-dk/cdx_cfg.xml" "$STAGE/etc/cdx_cfg.xml"

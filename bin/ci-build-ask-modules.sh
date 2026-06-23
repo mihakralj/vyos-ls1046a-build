@@ -99,13 +99,18 @@ else
     git clone --depth 1 --branch "$ASK_BRANCH" "$ASK_REPO" "$ASK_DIR" 2>&1 | tail -3
 fi
 
-# ── Patch: disable auto-start of dpa_app by cdx.ko ─────────────────────────
-# cdx_main.c defines START_DPA_APP which causes cdx_module_init() to call
-# dpa_app via call_usermodehelper() BEFORE /dev/cdx_ctrl is created. dpa_app
-# then fails with -EAGAIN because the device doesn't exist yet. Disable
-# auto-start so dpa_app can be started separately after cdx.ko loads.
-sed -i 's/^#define START_DPA_APP 1$/\/\/ #define START_DPA_APP 1/' "$ASK_DIR/cdx/cdx_main.c"
-echo "### Patched cdx_main.c: START_DPA_APP disabled"
+# ── Patch: re-enable START_DPA_APP (was disabled pre-MURAM fix) ───────────
+# dpa_app must run to program the FMan PCD (KeyGen/CC/hashtables) before
+# CMM can push conntrack flows. MURAM is now pre-populated so
+# cdx_init_frag_module succeeds. dpa_app may crash in FM_Open/fmc_compile
+# but that's a separate debug — cdx init should still succeed.
+# Remove the comment-out sed.
+# ── Patch: make start_dpa_app failure non-fatal ───────────────────────────
+# If dpa_app crashes (SEGV in FM_Open/fmc_compile), the original code
+# does rc=-EIO; goto exit which kills cdx module load. Make it non-fatal:
+# print a warning but let cdx continue in degraded mode.
+sed -i '/start_dpa_app failed rc/{ n; /rc = -EIO/d; /goto exit/d; }' "$ASK_DIR/cdx/cdx_main.c"
+echo "### Patched cdx_main.c: start_dpa_app failure non-fatal"
 
 # ── Patch: stub out WiFi offload init ─────────────────────────────────────
 # cdx_module_init() calls dpaa_vwd_init() under CFG_WIFI_OFFLOAD, which
