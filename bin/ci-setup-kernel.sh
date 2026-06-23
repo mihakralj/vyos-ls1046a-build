@@ -686,6 +686,13 @@ cp "$BOARD_PATCH_DIR/0133-fman-pcd-fe-arm-real-accc.patch" "$KERNEL_PATCHES/"
 # datapath lands). This cp line is MANDATORY — the staging-completeness guard
 # below fails the build if any board/*.patch lacks one.
 cp "$BOARD_PATCH_DIR/0134-caam-qi-share.patch"               "$KERNEL_PATCHES/"
+# 0135: FE-VM context builder — port of lf-5.4 LSDK FmPcdCcBuildContextByFE().
+# Adds fman_pcd_fe_context_build() + struct fman_pcd_fe_context_params (the
+# centralized per-FE context writer the SDK calls at 999-patch line 8954).
+# Ships dormant (no callers yet — callers wire in a later patch to populate
+# MUX/TRANSITION/ENQ/HM per-instance context after the FE descriptor build,
+# matching the SDK two-step FmPcdCcBuildFE→FmPcdCcBuildContextByFE sequence).
+cp "$BOARD_PATCH_DIR/0135-fman-pcd-fe-context-build.patch"   "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"

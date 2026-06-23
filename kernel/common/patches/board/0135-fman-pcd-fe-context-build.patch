@@ -1,0 +1,143 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+Date: Mon, 23 Jun 2026 03:00:00 +0000
+Subject: [PATCH] fman_pcd: FE-VM context builder — port of lf-5.4
+ FmPcdCcBuildContextByFE
+
+Board patches 0124/0127 built the FE descriptors (FmPcdCcBuildFE equivalent)
+and 0128/0131 built the per-flow DDR record insertion and t_ExtHashFe object,
+but the centralized per-FE context-population function — the lf-5.4 LSDK's
+FmPcdCcBuildContextByFE() at 999-patch line 8954 — has no single equivalent
+in the dpaa1 kernel.  Each caller writes its per-instance context inline,
+making the FE chain harder to audit against the SDK byte-pattern reference.
+
+This patch delivers fman_pcd_fe_context_build(), a faithful port of the
+lf-5.4 LSDK FmPcdCcBuildContextByFE() adapted to the 6.18 kernel:
+
+  - fman_pcd_fe_context_params (struct) — mirror of t_FmPcdFEContextParams
+    with typed union for HM (hmct + table_size), ENQ (fqid + rspid + ppid),
+    MUX (next_fe_off), and TRANSITION (next_ad_off) context data.  All
+    offsets are MURAM-relative (not physical-minus-base as in the SDK).
+
+  - fman_pcd_fe_context_build() writes the per-FE context into a
+    MURAM-mapped area at (ctx + offset), bounded by
+    FMAN_FE_MAX_CONTEXT_SIZE (256 B, the SDK's FE_MAX_CONTEXT_SIZE):
+
+      HM       — memcpy_toio(ctx+offset, hmct, tableSize)
+      ENQ      — iowrite32be((rspid<<24)|fqid) at +0, (ppid<<16) at +4
+      MUX      — iowrite32be(next_fe_off) at +0
+      TRANSITION — iowrite32be(next_ad_off) at +0
+
+    Each case checks (offset + size) <= 256; returns -EFBIG on overflow.
+
+  - FMAN_FE_ENQ_CTX_OFF (8) added to fman_pcd_internal.h — the
+    FE_ENQUEUE_CONTEXT_OFFSET from the lf-5.4 999-patch line 8082, the
+    working-store offset where the ENQ FE's per-instance context lives.
+
+  - EXPORT_SYMBOL_GPL on the context builder so out-of-tree modules
+    (ask.ko) can validate the per-FE context layout.
+
+The context builder is the lf-5.4 LSDK's guarantee that every FE descriptor
+can be paired with its per-instance context in a single canonical call.
+It ships DORMANT — callers are not yet wired — but serves as the SDK
+reference anchor for any future FE chain that needs to populate per-FE
+working store data (e.g., the HM HMCT table for header manipulation FEs,
+or the ENQ rspid/ppid for response-tagged enqueue).
+
+git apply --3way --check clean; brace-balanced; LF-only.  Compile gate is CI.
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -84,6 +84,15 @@
+ #define FMAN_FE_HASH_SIZE		28	/* t_ExtHashFe: 7 words */
+ #define FMAN_FE_HASH_CONTEXT_SIZE	256	/* FE_MAX_CONTEXT_SIZE */
+ 
++/* SDK FE_MAX_CONTEXT_SIZE — lf-5.4 999-patch line 8962. */
++#define FMAN_FE_MAX_CONTEXT_SIZE	256
++
++struct fman_pcd_fe_context_params {
++	u32 type;
++	union { struct { const void __iomem *hmct; u16 table_size; } hm;
++		struct { u32 fqid; u8 rspid; u16 ppid; } enq;
++		struct { unsigned long next_fe_off; } mux;
++		struct { unsigned long next_ad_off; } transition; } u;
++};
++
+ /* FE descriptor type codes (word0 bits 24-29) — SDK fm_pcd.h. */
+ #define FMAN_FE_TYPE_HM			0x01000000
+@@ -143,6 +152,65 @@ static void fman_pcd_fe_build(struct muram_info *muram, unsigned long fe_off,
+ 		iowrite32be(w[i], fe + i);
+ }
+ 
++/*
++ * lf-5.4 LSDK FmPcdCcBuildContextByFE() port (999-patch lines 8954–9016).
++ *
++ * Writes per-instance FE context into the MURAM-mapped area at (ctx+offset).
++ * Byte patterns match the SDK exactly:
++ *   HM:       memcpy_toio(ctx+offset, hmct, tableSize)
++ *   ENQ:      +0: (rspid<<24|fqid)  +4: ppid<<16
++ *   MUX:      +0: next FE MURAM offset (4 B)
++ *   TRANSITION:+0: next AD MURAM offset (4 B)
++ *
++ * Each write bounded by FMAN_FE_MAX_CONTEXT_SIZE.  Returns 0 or -EFBIG.
++ */
++static int fman_pcd_fe_context_build(void __iomem *ctx, u16 offset,
++				     const struct fman_pcd_fe_context_params *p)
++{
++	u16 size = 0;
++
++	switch (p->type) {
++	case FMAN_FE_TYPE_HM:
++		size = p->u.hm.table_size;
++		if ((u32)offset + size > FMAN_FE_MAX_CONTEXT_SIZE)
++			return -EFBIG;
++		if (p->u.hm.hmct)
++			memcpy_toio(ctx + offset, p->u.hm.hmct, size);
++		break;
++	case FMAN_FE_TYPE_ENQ:
++		size = 8;
++		if ((u32)offset + size > FMAN_FE_MAX_CONTEXT_SIZE)
++			return -EFBIG;
++		iowrite32be(((u32)p->u.enq.rspid << 24) | p->u.enq.fqid,
++			    (u32 __iomem *)(ctx + offset));
++		iowrite32be((u32)p->u.enq.ppid << 16,
++			    (u32 __iomem *)(ctx + offset + 4));
++		break;
++	case FMAN_FE_TYPE_MUX:
++		size = 4;
++		if ((u32)offset + size > FMAN_FE_MAX_CONTEXT_SIZE)
++			return -EFBIG;
++		iowrite32be((u32)p->u.mux.next_fe_off,
++			    (u32 __iomem *)(ctx + offset));
++		break;
++	case FMAN_FE_TYPE_TRANSITION:
++		size = 4;
++		if ((u32)offset + size > FMAN_FE_MAX_CONTEXT_SIZE)
++			return -EFBIG;
++		iowrite32be((u32)p->u.transition.next_ad_off,
++			    (u32 __iomem *)(ctx + offset));
++		break;
++	default:
++		return -EINVAL;
++	}
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_fe_context_build);
++
+ /* Dequeue one pool slot, program it, and park it on the singleton list. */
+ static int fman_pcd_fe_singleton_one(struct fman_pcd *pcd,
+ 				     struct muram_info *muram,
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+@@ -28,6 +28,10 @@
+ #define FMAN_FE_MUX_CTX_OFF		0
+ #define FMAN_FE_TRANSITION_CTX_OFF	4
+ 
++/* SDK FE_ENQUEUE_CONTEXT_OFFSET — lf-5.4 999-patch line 8082. */
++#define FMAN_FE_ENQ_CTX_OFF		8
++
+ /* cross-TU accessors needed by keygen & CC */
+ u16 fman_pcd_cc_tree_group_table_off(const struct fman_pcd_cc_tree *tree);
+ u16 fman_pcd_manip_hmtd_off(const struct fman_pcd_manip *manip);
