@@ -1,0 +1,125 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+Date: Mon, 23 Jun 2026 03:15:00 +0000
+Subject: [PATCH] fman_port: TX confirm bypass for silicon-HIT frames
+
+The FMan TX port BMI block can release silicon-HIT frames (FCO=0 in the
+FD command word) directly to BMan, bypassing QMan TX-confirm enqueue and
+eliminating the ~20% CPU softirq cost of draining 2.24 Mpps of TX-confirm
+FDs through the per-CPU QMan DQRR poll loop.
+
+The mechanism is silicon-supported and zero-overhead:
+
+  - Kernel TX FDs set FM_FD_CMD_FCO=1 (dpaa_eth.c:1980, 2087) — FMan
+    uses the FD's confq_fqid field for TX-confirm, overriding fmbm_tcfqid.
+  - Silicon-HIT FDs (CC tree egress) have FCO=0 — FMan uses fmbm_tcfqid /
+    fmbm_tfene programming.
+
+fman_port_set_silicon_hit_release_mode(port, true/false) programs:
+
+  Enable:  fmbm_tcfqid <- 0xFFFFFF  (DFLT_FQ_ID sentinel)
+           fmbm_tfene  <- NIA_ENG_BMI | NIA_BMI_AC_TX_RELEASE
+  Disable: restore saved fmbm_tcfqid / fmbm_tfene
+
+The enable path stores the pre-enable register values in two new fields
+on struct fman_port (saved_tcfqid, saved_tfene) so the disable path can
+restore byte-exactly.  This is the final form of the ASK2-NEXT-STEPS
+§0.0.1 recommendation (the "Option A" fix re-validated on 2026-05-25
+hardware) — superseding patch 0053's bpid fast-path (proven inert).
+
+Ships DORMANT: no caller in this patch; productive caller lands in a
+follow-up patch that wires fman_port_set_silicon_hit_release_mode(true)
+into ask_hw_offload_engage() and false into ask_hw_offload_disengage().
+Until then, dpaa_eth TX-confirm NAPI poll is unchanged.
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -375,6 +375,8 @@ struct fman_port {
+ 	struct muram_info *muram;
+ 	u32 dflt_fqid;
+ 	bool dont_release_buf;
++	u32 saved_tcfqid;	/* fmbm_tcfqid before hit-release mode */
++	u32 saved_tfene;	/* fmbm_tfene  before hit-release mode */
+ 	bool fmbm_tfne_has_features;
+ 	bool reversed_bmi_pool;
+ 	u32 buffer_prefix_content;
+@@ -990,6 +992,65 @@ int fman_port_set_cc_base(struct fman_port *rxport, u32 cc_base_off)
+ }
+ EXPORT_SYMBOL_GPL(fman_port_set_cc_base);
+ 
++/*
++ * fman_port_set_silicon_hit_release_mode — toggle TX confirm bypass
++ *
++ * When enabled, the TX port's BMI block releases silicon-HIT frames
++ * (FCO=0) directly to BMan without QMan TX-confirm enqueue, eliminating
++ * the per-frame DQRR poll-loop CPU cost (~20% softirq at 2.24 Mpps).
++ * Kernel-originated TX frames (FCO=1) are unaffected — they continue to
++ * use the FD's confq_fqid for skb cleanup.
++ *
++ * Encode:  fmbm_tcfqid <- 0xFFFFFF   (DFLT_FQ_ID sentinel)
++ *          fmbm_tfene  <- NIA_ENG_BMI | NIA_BMI_AC_TX_RELEASE
++ *
++ * Disable: restore the saved pre-enable register values.
++ *
++ * Idempotent: repeated enable/disable calls are safe.
++ *
++ * @port:    a bound TX-side BMI port (RX ports return -EINVAL)
++ * @enable:  true = engage hit-release mode, false = disengage
++ *
++ * Return:   0 on success, -EINVAL if port is NULL or RX-only,
++ *           -ENODEV if the port has no TX BMI register block.
++ */
++int fman_port_set_silicon_hit_release_mode(struct fman_port *port, bool enable)
++{
++	union fman_port_bmi_regs __iomem *regs;
++	u32 tcfqid, tfene;
++
++	if (!port)
++		return -EINVAL;
++	if (port->port_type != FMAN_PORT_TYPE_TX)
++		return -EINVAL;
++
++	regs = port->bmi_regs;
++	if (!regs)
++		return -ENODEV;
++
++	if (enable) {
++		/* Save current TX confirm programming for the inverse. */
++		port->saved_tcfqid = ioread32be(&regs->tx.fmbm_tcfqid);
++		port->saved_tfene  = ioread32be(&regs->tx.fmbm_tfene);
++
++		/* Program BMI to release-to-BMan for FCO=0 frames. */
++		iowrite32be(0xFFFFFF, &regs->tx.fmbm_tcfqid);
++		iowrite32be(NIA_ENG_BMI | NIA_BMI_AC_TX_RELEASE,
++			    &regs->tx.fmbm_tfene);
++	} else {
++		/*
++		 * Idempotent: if never enabled, the saved fields are zero
++		 * (kernel init) — restoring zero would break the port, so
++		 * only restore when a real saved pair exists.
++		 */
++		if (port->saved_tcfqid || port->saved_tfene) {
++			iowrite32be(port->saved_tcfqid, &regs->tx.fmbm_tcfqid);
++			iowrite32be(port->saved_tfene,  &regs->tx.fmbm_tfene);
++		}
++	}
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_port_set_silicon_hit_release_mode);
++
+ static void init_bmi_tx(struct fman_port *port)
+ {
+ 	union fman_port_bmi_regs __iomem *regs = port->bmi_regs;
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.h b/drivers/net/ethernet/freescale/fman/fman_port.h
+--- a/drivers/net/ethernet/freescale/fman/fman_port.h
++++ b/drivers/net/ethernet/freescale/fman/fman_port.h
+@@ -124,6 +124,8 @@ int fman_port_enable(struct fman_port *port);
+ u32 fman_port_get_qman_channel_id(struct fman_port *port);
+ int fman_port_get_hash_result_offset(struct fman_port *port, u32 *offset);
+ int fman_port_get_tstamp(struct fman_port *port, const void *data, u64 *tstamp);
++int fman_port_set_silicon_hit_release_mode(struct fman_port *port,
++					   bool enable);
+ int fman_port_set_cc_base(struct fman_port *rxport, u32 cc_base_off);
+ int fman_port_set_rx_bpool(struct fman_port *port, u8 old_bpid, u8 new_bpid);
+ 

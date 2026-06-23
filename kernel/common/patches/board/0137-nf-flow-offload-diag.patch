@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+Date: Mon, 23 Jun 2026 03:30:00 +0000
+Subject: [PATCH] nf_flow_table_offload: add rate-limited diagnostics for
+ silent offload failures
+
+The flow_offload_work_add() path can silently fail in two places:
+
+  1. nf_flow_offload_alloc() returns -ENOMEM when the flow-rule allocation
+     fails — no log emitted, the flow stays SW-only silently.
+  2. flow_offload_rule_add() returns -ENOENT when zero block_cb drivers
+     accepted the flow (the block_cb list is empty, or every driver's
+     REPLACE handler returned an error) — no log emitted.
+
+This was diagnosed as the root cause of ASK2 C6 (issue #C6 in the RC
+analysis of 2026-06-23): nf_flow_table never delivers FLOW_CLS_REPLACE to
+ask.ko during iperf3 because the offload promotion silently fails before
+reaching the block_cb callback.  Without diagnostics, the operator has
+zero visibility into whether conntrack is even attempting offload.
+
+This patch adds pr_warn_ratelimited() calls at both failure points so the
+kernel log records the failure reason.  The rate-limiting gate is 1
+message per second (the system-wide ratelimit default), so a flood of
+offload failures (e.g., every SYN packet from conntrack promote) does not
+spam the log.
+
+No functional change — the non-offloaded fast-path is unchanged.
+---
+diff --git a/net/netfilter/nf_flow_table_offload.c b/net/netfilter/nf_flow_table_offload.c
+--- a/net/netfilter/nf_flow_table_offload.c
++++ b/net/netfilter/nf_flow_table_offload.c
+@@ -974,8 +974,11 @@ static void flow_offload_work_add(struct flow_offload_work *offload)
+ 	int err;
+ 
+ 	err = nf_flow_offload_alloc(offload, flow_rule);
+-	if (err < 0)
++	if (err < 0) {
++		pr_warn_ratelimited("nf_flow_table: offload alloc failed: %d "
++				    "(flow may stay SW-only)\n", err);
+ 		return;
++	}
+ 
+ 	err = flow_offload_rule_add(offload, flow_rule);
+ 	if (err < 0)
+@@ -985,6 +988,18 @@ static void flow_offload_work_add(struct flow_offload_work *offload)
+ 
+ out:
+ 	nf_flow_offload_destroy(flow_rule);
++
++	/*
++	 * flow_offload_rule_add() returns -ENOENT when zero block_cb
++	 * drivers accepted the flow (no block_cb registered, or every
++	 * driver's REPLACE handler returned an error).  Log this so the
++	 * operator can distinguish "no offload backend loaded" from
++	 * "backend loaded but rejecting flows."
++	 */
++	if (err < 0)
++		pr_warn_ratelimited("nf_flow_table: offload rule-add failed: %d "
++				    "(no driver accepted the flow; check that "
++				    "an offload backend is loaded)\n", err);
+ }
+ 
+ static void flow_offload_work_del(struct flow_offload_work *offload)
