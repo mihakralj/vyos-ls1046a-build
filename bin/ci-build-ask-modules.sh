@@ -238,12 +238,17 @@ sed -i '/^#include "portdefs.h"/a\
 extern int oh_port_driver_get_port_info(struct fman_offline_port_info *info);' "$ASK_DIR/cdx/devoh.c"
 echo "### Patched devoh.c: added fsl_oh_port.h include"
 
-# In cdx_main.c, call the import BEFORE MURAM pre-population
-sed -i '/cdx: pre-populated MURAM handle/i\
-\tcdxdrv_import_oh_ports();' "$ASK_DIR/cdx/cdx_main.c"
-sed -i '/^#include "dpa_ipsec.h"/a\
+# In cdx_main.c, call right before the MURAM pre-populate block.
+# Use the MURAM filp_open block's opening brace as anchor — it's unique.
+sed -i '/Pre-populate FMan info via \/dev\/fm0-pcd/i\
+\tcdxdrv_import_oh_ports();\
+' "$ASK_DIR/cdx/cdx_main.c"
+echo "### Patched cdx_main.c: call cdxdrv_import_oh_ports() before MURAM block"
+
+# Forward declaration needed since function is in devoh.c
+sed -i '/^#include "dpa_ipsec.h"/i\
 void cdxdrv_import_oh_ports(void);' "$ASK_DIR/cdx/cdx_main.c"
-echo "### Patched cdx_main.c: call cdxdrv_import_oh_ports() + extern decl"
+echo "### Patched cdx_main.c: forward-declare cdxdrv_import_oh_ports"
 
 # Then insert FMan MURAM init right before cdx_init_fqid_procfs()
 sed -i '/\/\* creating a \/proc\/fqid_stats dir/i\
