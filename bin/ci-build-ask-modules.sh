@@ -267,6 +267,26 @@ sed -i '/\/\* creating a \/proc\/fqid_stats dir/i\
 ' "$ASK_DIR/cdx/cdx_main.c"
 echo "### Patched cdx_main.c: pre-populate fman_info MURAM handle before frag init"
 
+# ── Patch: insert cdxdrv_import_oh_ports() call BEFORE the MURAM printk ──────
+# The MURAM block (above) creates the printk line; this python replaces it
+# with a version that calls the OH import function first. Must run AFTER the
+# MURAM sed so the target string exists.
+python3 -c "
+import re
+with open('$ASK_DIR/cdx/cdx_main.c', 'r') as f:
+    src = f.read()
+# Insert call right before the MURAM pre-populate printk
+src = src.replace(
+    '\t\t\t\tprintk(\"cdx: pre-populated MURAM handle',
+    '\t\t\t\tcdxdrv_import_oh_ports();\n\t\t\t\tprintk(\"cdx: pre-populated MURAM handle'
+)
+with open('$ASK_DIR/cdx/cdx_main.c', 'w') as f:
+    f.write(src)
+print('### Patched cdx_main.c: call cdxdrv_import_oh_ports() before MURAM printk')
+"
+
+echo "### Patched cdx_main.c: added procfs cleanup in cdx_module_deinit"
+
 sed -i '/^static void cdx_module_deinit/,/^}$/ {
     /kfree(cdx_info);/i\
 \tremove_proc_subtree("fqid_stats", NULL);\
