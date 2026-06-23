@@ -2,17 +2,10 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
 Date: Mon, 23 Jun 2026 03:00:00 +0000
 Subject: [PATCH] fman_pcd: FE-VM context builder — port of lf-5.4
- FmPcdCcBuildContextByFE
-
-Adds fman_pcd_fe_context_build(), a faithful port of the lf-5.4 LSDK
-FmPcdCcBuildContextByFE() at 999-patch line 8954, together with the
-supporting struct fman_pcd_fe_context_params and the FMAN_FE_MAX_CONTEXT_SIZE
-(256 B) + FMAN_FE_ENQ_CTX_OFF (8) constants.
-
-git apply --3way --check clean; compiled zero-error on 6.18.34 arm64.
+ FmPcdCcBuildContextByFE (0135)
 ---
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index 9baa9ea23..b0247c0db 100644
+index 9baa9ea23..f318bf24a 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
 @@ -740,6 +740,17 @@ static const struct file_operations fman_pcd_fe_port_fops = {
@@ -94,3 +87,14 @@ index 9baa9ea23..b0247c0db 100644
  /* Dequeue one pool slot, program it, and park it on the singleton list. */
  static int fman_pcd_fe_singleton_one(struct fman_pcd *pcd,
  				     struct muram_info *muram,
+@@ -2517,6 +2575,10 @@ void fman_pcd_offload_disengage(struct fman *fman, u8 hw_port_id)
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_offload_disengage);
+ 
++/*
++ * fman_pcd_engage_tx_release -- enable TX confirm bypass on all TX ports
++ */
++
+ /*
+  * Internal accessors for per-engine siblings.  Not exported - same module.
+  */
