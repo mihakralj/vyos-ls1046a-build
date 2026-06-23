@@ -28,3 +28,29 @@
 &fman0_oh_0x5 { /delete-property/ cell-index; cell-index = <3>; };
 &fman0_oh_0x6 { /delete-property/ cell-index; cell-index = <4>; };
 &fman0_oh_0x7 { /delete-property/ cell-index; cell-index = <5>; };
+
+/*
+ * 10G MAC fixed-link overrides (matching OpenWRT SDK DTS).
+ *
+ * The SDK fsl_mac driver does NOT support managed="in-band-status" or
+ * sfp=<...> — those are mainline DPAA bindings. Without explicit fixed-link
+ * the SDK driver falls through to a broken swphy emulation (10G isn't
+ * representable in Clause 22 MII registers). Set fixed-link=10000/Full
+ * so the SDK driver skips the swphy path and initializes the serdes
+ * directly for 10GBASE-R/XGMII.
+ */
+&fman0 {
+	ethernet@f0000 {
+		/delete-property/ managed;
+		/delete-property/ sfp;
+		fixed-link = <0 1 10000 0 0>;
+		phy-connection-type = "xgmii";
+	};
+
+	ethernet@f2000 {
+		/delete-property/ managed;
+		/delete-property/ sfp;
+		fixed-link = <0 1 10000 0 0>;
+		phy-connection-type = "xgmii";
+	};
+};
