@@ -267,30 +267,37 @@ sed -i '/\/\* creating a \/proc\/fqid_stats dir/i\
 ' "$ASK_DIR/cdx/cdx_main.c"
 echo "### Patched cdx_main.c: pre-populate fman_info MURAM handle before frag init"
 
-# ── Patch: insert cdxdrv_import_oh_ports() call BEFORE the MURAM printk ──────
-# The MURAM block (above) creates the printk line; this python replaces it
-# with a version that calls the OH import function first. Must run AFTER the
-# MURAM sed so the target string exists.
-python3 -c "
-import re
-with open('$ASK_DIR/cdx/cdx_main.c', 'r') as f:
-    src = f.read()
-# Insert call right before the MURAM pre-populate printk
-src = src.replace(
-    '\t\t\t\tprintk(\"cdx: pre-populated MURAM handle',
-    '\t\t\t\tcdxdrv_import_oh_ports();\n\t\t\t\tprintk(\"cdx: pre-populated MURAM handle'
-)
-with open('$ASK_DIR/cdx/cdx_main.c', 'w') as f:
-    f.write(src)
-print('### Patched cdx_main.c: call cdxdrv_import_oh_ports() before MURAM printk')
-"
-
 sed -i '/^static void cdx_module_deinit/,/^}$/ {
     /kfree(cdx_info);/i\
 \tremove_proc_subtree("fqid_stats", NULL);\
 \tremove_proc_subtree("ucode_frag", NULL);
 }' "$ASK_DIR/cdx/cdx_main.c"
 echo "### Patched cdx_main.c: added procfs cleanup in cdx_module_deinit"
+
+# ── Guard NULL ohinfo in get_ofport_portid ──────────────────────────────────
+# After alloc_offline_port finds a slot (which now works since we set the type),
+# get_ofport_portid() and get_ofport_info() dereference info->ohinfo->portid.
+# ohinfo is only populated by dpa_app ioctl (not yet running), so we guard it.
+sed -i '/^\t\*portid = info->ohinfo->portid;$/ {
+    i\
+\tif (!info->ohinfo) return -1;
+}' "$ASK_DIR/cdx/devoh.c"
+echo "### Patched devoh.c: guarded NULL ohinfo in get_ofport_portid"
+
+# ── Guard NULL ohinfo in get_ofport_info ────────────────────────────────────
+# get_ofport_info calls get_tableInfo_by_portid(..., info->ohinfo->portid, ...)
+# which crashes when ohinfo is NULL. Guard after the IN_USE check.
+sed -i '/^\t\tget_tableInfo_by_portid(fm_idx, info->ohinfo->portid,/ {
+    i\
+\t\tif (!info->ohinfo) return -1;
+}' "$ASK_DIR/cdx/devoh.c"
+echo "### Patched devoh.c: guarded NULL ohinfo in get_ofport_info"
+
+# ── Make dpa_ipsec_init failure non-fatal (like start_dpa_app) ──────────────
+sed -i '/dpa_ipsec start failed/,/goto exit;/{
+    s/goto exit;/\/\* goto exit; (suppressed -- non-fatal) \*\//
+}' "$ASK_DIR/cdx/cdx_main.c"
+echo "### Patched cdx_main.c: dpa_ipsec_init failure non-fatal"
 
 # ── Patch: disable CDX_FRAG_USE_BUFF_POOL ───────────────────────────────────
 # The frag pool init calls get_phys_port_poolinfo_bysize() which walks
