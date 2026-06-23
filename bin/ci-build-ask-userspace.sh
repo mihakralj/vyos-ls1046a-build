@@ -261,6 +261,35 @@ cp "$ASK_DIR/config/cmm.service"      "$STAGE/etc/systemd/system/cmm.service"
 # and set Restart=no to prevent infinite cycling when cdx is in degraded mode.
 sed -i '/ExecStartPre=/d; /ExecStopPost=/d; s/Restart=on-failure/Restart=no/' "$STAGE/etc/systemd/system/cmm.service"
 echo "### Patched cmm.service: removed WiFi hooks, set Restart=no"
+
+# dpa_app systemd unit (programs FMan PCD via /dev/cdx_ctrl before CMM starts)
+cat > "$STAGE/etc/systemd/system/dpa_app.service" <<'UNIT'
+[Unit]
+Description=DPA APP — FMan PCD configuration for ASK Fast Path
+After=systemd-modules-load.service network-pre.target
+Before=cmm.service
+Wants=systemd-modules-load.service
+ConditionPathExists=/dev/cdx_ctrl
+ConditionPathExists=/etc/cdx_cfg.xml
+ConditionPathExists=/etc/cdx_pcd.xml
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/dpa_app -f /etc/cdx_cfg.xml --pcd /etc/cdx_pcd.xml --fmc /usr/sbin/fmc
+ExecStartPost=/bin/sleep 1
+RemainAfterExit=yes
+Restart=no
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+echo "### Created dpa_app.service"
+
+# Enable dpa_app so it runs before cmm on every boot
+mkdir -p "$STAGE/etc/systemd/system/multi-user.target.wants"
+ln -sf /etc/systemd/system/dpa_app.service "$STAGE/etc/systemd/system/multi-user.target.wants/dpa_app.service"
 mkdir -p "$STAGE/etc/config"
 [ -f "$ASK_DIR/config/fastforward" ] && cp "$ASK_DIR/config/fastforward" "$STAGE/etc/config/fastforward"
 [ -f "$ASK_DIR/config/gateway-dk/cdx_cfg.xml" ] && cp "$ASK_DIR/config/gateway-dk/cdx_cfg.xml" "$STAGE/etc/cdx_cfg.xml"
