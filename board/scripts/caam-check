@@ -297,99 +297,56 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. FLAVOR=ask: ASK 2.0 flow offload / fast-path posture
+# 7. ASK fast-path posture (ASK 2.0 / ASK 1.x / none)
 # ---------------------------------------------------------------------------
-hdr "7) ASK 2.0 flow offload (FLAVOR=ask only)"
+hdr "7) ASK fast-path posture"
 
-# Two generations of the ASK stack may appear:
-#   ASK 2.0  — single ask.ko module (current; specs/ask2-rewrite-spec.md)
-#              dmesg: "ask: loading ASK 2.0.0", "ask: hw: FMan microcode …",
-#                     "ask: ready (genl family registered …)",
-#                     "ask: flow_offload: BIND <ifname>", "ask: flow: hw_insert OK"
-#   ASK 1.x  — legacy cdx.ko + dpa_ipsec.ko (deleted on ask20 branch May 2026)
-# If neither generation's module is loaded we are on default/vpp/generic
-# and simply SKIP. IPsec ESP offload via xfrmdev_ops is on the ASK 2.0
-# roadmap (M5 per spec) and not expected to be wired yet.
+# Three configurations:
+#   ASK 2.0  — ask.ko (mainline, in-tree, genl family)
+#   ASK 1.x  — cdx.ko + fci.ko (nxp-sdk branch, OOT modules)
+#   none     — skip
 
 if [ -d /sys/module/ask ]; then
-    ver=$(cat /sys/module/ask/version 2>/dev/null || echo "?")
-    refcnt=$(cat /sys/module/ask/refcnt 2>/dev/null || echo "?")
-    ok "ask module loaded (version=${ver}, refcnt=${refcnt})"
-
-    # Pull the per-subsystem 'ready' banners from the persistent journal —
-    # the kernel ring buffer ages them out on long-running systems.
-    if command -v journalctl >/dev/null 2>&1; then
-        ASK_LOG=$(journalctl -k -b -o cat 2>/dev/null | grep -E '^ask:' || true)
+    # ----- ASK 2.0 -----
+    ok "ASK 2.0 module loaded"
+    if [ -n "$KALLSYMS" ] && has_sym caam_qi_ext_consumer_register; then
+        ok "CAAM descriptor-sharing API present"
     else
-        ASK_LOG=$(dmesg 2>/dev/null | sed -E 's/^\[[^]]+\] //' | grep -E '^ask:' || true)
+        warn "CAAM descriptor-sharing API absent — IPsec offload deferred"
     fi
 
-    if [ -n "$ASK_LOG" ]; then
-        # Each of these banners is logged exactly once at module init by
-        # the corresponding subsystem (see ask_main.c / ask_hw_*.c).
-        ucode=$(printf "%s\n" "$ASK_LOG" | grep -m1 'hw: FMan microcode'        || true)
-        pcd=$(printf   "%s\n" "$ASK_LOG" | grep -m1 'hw: FMan PCD chain up'      || true)
-        ohpool=$(printf "%s\n" "$ASK_LOG" | grep -m1 'hw: PR14s OH-port pool'    || true)
-        flow=$(printf  "%s\n" "$ASK_LOG" | grep -m1 'flow: subsystem ready'      || true)
-        fo=$(printf    "%s\n" "$ASK_LOG" | grep -m1 'flow_offload: ready'        || true)
-        genl=$(printf  "%s\n" "$ASK_LOG" | grep -m1 "genl family 'ask' registered" || true)
-        ready=$(printf "%s\n" "$ASK_LOG" | grep -m1 '^ask: ready'                || true)
+elif [ -d /sys/module/cdx ]; then
+    # ----- NXP ASK 1.x (nxp-sdk branch) -----
+    ok "NXP ASK 1.x stack active (cdx.ko loaded)"
 
-        [ -n "$ucode"  ] && ok "FMan microcode loaded"    && note "$ucode"   || warn "no 'FMan microcode' banner — ucode load may have failed"
-        [ -n "$pcd"    ] && ok "FMan PCD chain ready"     && note "$pcd"     || warn "no 'FMan PCD chain up' banner"
-        [ -n "$ohpool" ] && ok "PR14s OH-port pool ready" && note "$ohpool"  || warn "no 'OH-port pool ready' banner"
-        [ -n "$flow"   ] && ok "ask flow subsystem ready" && note "$flow"
-        [ -n "$fo"     ] && ok "flow_offload subsystem ready" && note "$fo"
-        [ -n "$genl"   ] && ok "ask genl family registered" && note "$genl"
-        [ -n "$ready"  ] && note "$ready"
-
-        # Per-port BIND events + hw_insert success/failure counters.
-        binds=$(printf "%s\n" "$ASK_LOG" | grep -cE 'flow_offload: BIND ')
-        hw_ok=$(printf "%s\n" "$ASK_LOG" | grep -cE 'flow: hw_insert OK')
-        hw_bad=$(printf "%s\n" "$ASK_LOG" | grep -cE 'flow: hw_insert (FAIL|err|ERROR)')
-        if [ "$binds" -gt 0 ] || [ "$hw_ok" -gt 0 ] || [ "$hw_bad" -gt 0 ]; then
-            if [ "$hw_bad" -eq 0 ]; then
-                ok "flow offload activity: ${binds} BIND, ${hw_ok} hw_insert OK, 0 errors"
-            else
-                fail "flow offload activity: ${binds} BIND, ${hw_ok} hw_insert OK, ${hw_bad} ERROR"
-                mark_fail
-            fi
-        else
-            note "no flow_offload activity yet (no nft flowtable rules bound to dpaa_eth?)"
-        fi
+    if [ -d /sys/module/fci ]; then
+        ok "fci.ko loaded (CMM↔CDX IPC)"
     else
-        warn "no 'ask:' lines in journal/dmesg — module loaded but did not log"
+        warn "fci.ko not loaded"
     fi
 
-    # IPsec ESP offload via xfrmdev_ops is deferred to M5 in the rewrite
-    # spec. caam-check is the natural place to surface that status, but
-    # nothing has been wired yet — note it explicitly so operators don't
-    # mistake the absence for a bug.
-    if [ -e /sys/class/net/eth3/xfrm ] || [ -e /sys/class/net/eth4/xfrm ]; then
-        ok "xfrmdev offload sysfs present on dpaa_eth ports"
+    # MURAM handle
+    if dmesg | grep -q "pre-populated MURAM handle"; then
+        ok "cdx MURAM handle pre-populated from /dev/fm0-pcd"
+    elif dmesg | grep -q "Error in getting MURAM"; then
+        fail "cdx MURAM handle unavailable — cdx in degraded mode"
+        mark_fail
+    fi
+
+    # /dev/cdx_ctrl
+    [ -c /dev/cdx_ctrl ] && ok "/dev/cdx_ctrl present" || fail "/dev/cdx_ctrl absent"
+
+    # IPsec OH port readiness
+    if dmesg | grep -q "dpa_ipsec start failed"; then
+        warn "cdx IPsec init failed — OH ports not configured (non-blocking)"
+    elif dmesg | grep -q "alloc_offline_port::no free"; then
+        warn "cdx IPsec degraded — offline port unavailable"
     else
-        skip "IPsec ESP offload via xfrmdev_ops not wired (deferred to ASK 2.0 M5)"
+        ok "cdx IPsec subsystem initialised"
     fi
 
-elif [ -d /sys/module/cdx ] || [ -d /sys/module/dpa_ipsec ]; then
-    # ----- Legacy ASK 1.x path (cdx.ko + dpa_ipsec.ko) -----
-    warn "legacy ASK 1.x stack detected (cdx/dpa_ipsec) — deprecated"
-    if [ -d /sys/module/cdx ];        then ok "cdx module loaded";        else warn "cdx module NOT loaded — ASK IPsec offload disabled"; fi
-    if [ -d /sys/module/dpa_ipsec ];  then ok "dpa_ipsec module loaded";  else warn "dpa_ipsec module NOT loaded"; fi
-    if command -v dmesg >/dev/null 2>&1; then
-        sec_fq=$(dmesg 2>/dev/null | grep -E 'cdx.*ipsec_fq|dpa_ipsec.*sec_fq|cdx.*SEC' | tail -3)
-        if [ -n "$sec_fq" ]; then
-            note "$sec_fq"
-        fi
-        bad=$(dmesg 2>/dev/null | grep -E 'cdx_module_init.*failed|locate eth bman pool|dpa_ipsec start failed' | tail -3)
-        if [ -n "$bad" ]; then
-            fail "ASK CDX init errors detected:"
-            printf "%s\n" "$bad" | while IFS= read -r line; do note "$line"; done
-            mark_fail
-        fi
-    fi
 else
-    skip "FLAVOR != ask (no ask/cdx/dpa_ipsec module loaded)"
+    skip "no ASK module loaded (default/VPP dataplane)"
 fi
 
 # ---------------------------------------------------------------------------

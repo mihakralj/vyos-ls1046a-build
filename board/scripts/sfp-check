@@ -69,7 +69,16 @@ for sysnet in /sys/class/net/*; do
         lo|tun*|tap*|veth*|br*|docker*|virbr*|vyos*) continue ;;
     esac
 
-    out=$(ethtool -m "$iface" 2>/dev/null) || continue
+    out=$(ethtool -m "$iface" 2>/dev/null)
+    if [ -z "$out" ]; then
+        # ethtool -m not supported (e.g. SDK fsl_dpa driver).
+        # Fallback: SFP+ cage can be detected via 10000Mb/s link speed.
+        if ethtool "$iface" 2>/dev/null | grep -q '10000Mb/s'; then
+            printf "%6s  SFP+ module (10G link, ethtool -m unsupported by driver)\n" "$iface"
+            found=$((found+1))
+        fi
+        continue
+    fi
     [ -z "$out" ] && continue
 
     vendor=$(echo "$out" | awk -F: '/Vendor name /{sub(/^ +/,"",$2); sub(/ +$/,"",$2); print $2; exit}')
