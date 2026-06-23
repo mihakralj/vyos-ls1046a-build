@@ -111,20 +111,20 @@ echo "### Patched cdx_main.c: START_DPA_APP disabled"
 # cdx/system.h and cdx/dpa_wifi.h define CFG_WIFI_OFFLOAD which causes
 # dpaa_vwd_init() to run during cdx_module_init(). On LS1046A without WiFi,
 # vwd_init_ohport() fails because no OH port is configured for WiFi offload.
-# The Kbuild passes -DWIFI_ENABLE via ccflags-y, and dpa_wifi.c has PFE stub
-# functions that reference undeclared struct pfe — these are warnings but
-# -Werror makes them fatal. dpa_wifi.o CANNOT be simply removed because other
-# cdx object files reference symbols defined in it (qm_init, policer functions).
 #
-# Solution: disable the CPP define, remove -DWIFI_ENABLE, and make -Werror
-# non-fatal (replace with -Wno-error). The WiFi code compiles with warnings
-# but the #ifdef guards prevent it from being called at runtime.
+# Disabling CFG_WIFI_OFFLOAD skips the WiFi init call in cdx_main.c, but
+# dpa_wifi.c has an #else block with PFE stub functions (pfe_vwd_init,
+# pfe_vwd_exit) that reference struct pfe — undeclared on LS1046A. Fix the
+# stubs to use void* instead of struct pfe*, so they compile cleanly. Other
+# WiFi functions (drain_tx_bp_pool, dpaa_get_wifi_dev, etc.) are called
+# unconditionally from cdx_ehash.c/devman.c and must remain available.
+# The cflags -DWIFI_ENABLE and -Werror stay as-is.
 sed -i 's/^#define CFG_WIFI_OFFLOAD$/\/\/ #define CFG_WIFI_OFFLOAD/' "$ASK_DIR/cdx/system.h" "$ASK_DIR/cdx/dpa_wifi.h"
 echo "### Patched system.h + dpa_wifi.h: CFG_WIFI_OFFLOAD disabled"
-sed -i 's/-DWIFI_ENABLE//g' "$ASK_DIR/cdx/Kbuild"
-echo "### Patched cdx/Kbuild: -DWIFI_ENABLE removed from ccflags"
+sed -i 's/struct pfe \*pfe/void *pfe/g' "$ASK_DIR/cdx/dpa_wifi.c"
+echo "### Patched dpa_wifi.c: struct pfe → void in PFE stubs"
 sed -i 's/-Werror/-Wno-error/g' "$ASK_DIR/cdx/Kbuild"
-echo "### Patched cdx/Kbuild: -Werror → -Wno-error (WiFi stubs tolerate warnings)"
+echo "### Patched cdx/Kbuild: -Werror → -Wno-error (tolerate unused WiFi vars)"
 
 # ── Build cdx.ko ───────────────────────────────────────────────────────────
 echo "### ======== Building cdx.ko ========"
