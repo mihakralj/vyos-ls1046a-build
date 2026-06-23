@@ -64,6 +64,11 @@ jobs:
           # Truncate the full git commit SHA to the first 7 characters for a cleaner footer
           SHORT_SHA="${SHA:0:7}"
 
+          # Display version strips the release-channel suffix (-rolling / -stream
+          # / -lts) for a cleaner header. The full BUILD_VERSION is still used for
+          # the release tag + download URLs, which must match the published asset.
+          DISPLAY_VERSION=$(printf '%s' "${BUILD_VERSION}" | sed -E 's/-(rolling|stream|lts)$//')
+
           # Build the description with real newlines via printf — jq's --arg
           # treats its value literally, so a bash string containing "\n" would be
           # JSON-encoded as the two characters backslash-n and Discord would
@@ -72,15 +77,15 @@ jobs:
           if [ "${STATUS}" = "success" ]; then
             TITLE="✅ VyOS LS1046A Build Published"
             COLOR=5763719 # Discord Green
-            DESC=$(printf '**Version:** `%s`\n**Edition:** `%s` • `%s`\n\n[📖 Install Guide](https://github.com/%s/blob/main/INSTALL.md) | [📦 Release Notes](https://github.com/%s/releases/tag/%s) | [📁 Repository](https://github.com/%s)\n\n**To upgrade directly from the CLI, run:**\n```bash\nadd system image https://github.com/%s/releases/download/%s/%s\n```' \
-              "${BUILD_VERSION}" "${BUILD_BRANCH}" "${RELEASE_TYPE}" \
+            DESC=$(printf '**Version:** `%s`\n**Flavor:** `%s` • **Edition:** `%s`\n\n[📖 Install Guide](https://github.com/%s/blob/main/INSTALL.md) | [📦 Release Notes](https://github.com/%s/releases/tag/%s) | [📁 Repository](https://github.com/%s)\n\n**To upgrade directly from the CLI, run:**\n```bash\nadd system image https://github.com/%s/releases/download/%s/%s\n```' \
+              "${DISPLAY_VERSION}" "${BUILD_BRANCH}" "${RELEASE_TYPE}" \
               "${REPO}" "${REPO}" "${BUILD_VERSION}" "${REPO}" \
               "${REPO}" "${BUILD_VERSION}" "${IMAGE_NAME}")
           else
             TITLE="❌ VyOS LS1046A Build Failed"
             COLOR=15548997 # Discord Red
-            DESC=$(printf '**Version:** `%s`\n**Edition:** `%s` • `%s`\n\nThe automated pipeline encountered an error during compilation.\n\n[🔍 Inspect Action Logs](https://github.com/%s/actions/runs/%s)' \
-              "${BUILD_VERSION}" "${BUILD_BRANCH}" "${RELEASE_TYPE}" \
+            DESC=$(printf '**Version:** `%s`\n**Flavor:** `%s` • **Edition:** `%s`\n\nThe automated pipeline encountered an error during compilation.\n\n[🔍 Inspect Action Logs](https://github.com/%s/actions/runs/%s)' \
+              "${DISPLAY_VERSION}" "${BUILD_BRANCH}" "${RELEASE_TYPE}" \
               "${REPO}" "${RUN_ID}")
           fi
 
