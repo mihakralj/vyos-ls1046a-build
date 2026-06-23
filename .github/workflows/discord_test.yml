@@ -1,0 +1,16 @@
+name: "Discord notification test"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  hello:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: "Send hello to Discord"
+        run: |
+          curl -X POST \
+            -H "Authorization: Bot ${{ secrets.DISCORD_BOT_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"content": "hello"}' \
+            https://discord.com/api/v10/channels/1519025519327318239/messages
