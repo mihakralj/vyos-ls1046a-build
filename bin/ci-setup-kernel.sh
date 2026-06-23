@@ -698,6 +698,8 @@ cp "$BOARD_PATCH_DIR/0135-fman-pcd-fe-context-build.patch"   "$KERNEL_PATCHES/"
 # without QMan TX-confirm enqueue.  Kernel TX (FCO=1) is unaffected.
 # This eliminates the ~20% CPU softirq floor proved on hardware 2026-05-25.
 cp "$BOARD_PATCH_DIR/0136-fman-port-tx-confirm-bypass.patch" "$KERNEL_PATCHES/"
+# 0137: MANIP creation + chain API for L3 forwarding (fman_pcd_manip_create/_destroy/_chain_create/_chain_destroy/_hmtd_off).
+cp "$BOARD_PATCH_DIR/0137-fman-pcd-manip-create-chain.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
@@ -1310,3 +1312,4 @@ print(f"### {bk}: ASK2 v2 persistent-key + headers-snapshot blocks injected")
 PYEOF
 
 echo "### Kernel setup complete"
+
