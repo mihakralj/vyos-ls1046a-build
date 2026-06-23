@@ -64,14 +64,24 @@ jobs:
           # Truncate the full git commit SHA to the first 7 characters for a cleaner footer
           SHORT_SHA="${SHA:0:7}"
 
+          # Build the description with real newlines via printf — jq's --arg
+          # treats its value literally, so a bash string containing "\n" would be
+          # JSON-encoded as the two characters backslash-n and Discord would
+          # render them verbatim. printf converts \n into actual newline bytes,
+          # which jq then encodes correctly as JSON "\n".
           if [ "${STATUS}" = "success" ]; then
             TITLE="✅ VyOS LS1046A Build Published"
             COLOR=5763719 # Discord Green
-            DESC="**Version:** \`${BUILD_VERSION}\`\n**Edition:** \`${BUILD_BRANCH}\` • \`${RELEASE_TYPE}\`\n\n[📖 Install Guide](https://github.com/${REPO}/blob/main/INSTALL.md) | [📦 Release Notes](https://github.com/${REPO}/releases/tag/${BUILD_VERSION}) | [📁 Repository](https://github.com/${REPO})\n\n**To upgrade directly from the CLI, run:**\n\`\`\`bash\nadd system image https://github.com/${REPO}/releases/download/${BUILD_VERSION}/${IMAGE_NAME}\n\`\`\`"
+            DESC=$(printf '**Version:** `%s`\n**Edition:** `%s` • `%s`\n\n[📖 Install Guide](https://github.com/%s/blob/main/INSTALL.md) | [📦 Release Notes](https://github.com/%s/releases/tag/%s) | [📁 Repository](https://github.com/%s)\n\n**To upgrade directly from the CLI, run:**\n```bash\nadd system image https://github.com/%s/releases/download/%s/%s\n```' \
+              "${BUILD_VERSION}" "${BUILD_BRANCH}" "${RELEASE_TYPE}" \
+              "${REPO}" "${REPO}" "${BUILD_VERSION}" "${REPO}" \
+              "${REPO}" "${BUILD_VERSION}" "${IMAGE_NAME}")
           else
             TITLE="❌ VyOS LS1046A Build Failed"
             COLOR=15548997 # Discord Red
-            DESC="**Version:** \`${BUILD_VERSION}\`\n**Edition:** \`${BUILD_BRANCH}\` • \`${RELEASE_TYPE}\`\n\nThe automated pipeline encountered an error during compilation.\n\n[🔍 Inspect Action Logs](https://github.com/${REPO}/actions/runs/${RUN_ID})"
+            DESC=$(printf '**Version:** `%s`\n**Edition:** `%s` • `%s`\n\nThe automated pipeline encountered an error during compilation.\n\n[🔍 Inspect Action Logs](https://github.com/%s/actions/runs/%s)' \
+              "${BUILD_VERSION}" "${BUILD_BRANCH}" "${RELEASE_TYPE}" \
+              "${REPO}" "${RUN_ID}")
           fi
 
           # Build the embed payload using jq. 
