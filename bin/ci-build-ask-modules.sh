@@ -213,11 +213,18 @@ void cdxdrv_import_oh_ports(void)\
 \t\t\tfor (slot = 0; slot < MAX_OF_PORTS; slot++)\
 \t\t\t\tif (!(offline_port_info[0][slot].flags \& PORT_VALID)) break;\
 \t\t\tif (slot < MAX_OF_PORTS) {\
+\t\t\t\tint ai;\
 \t\t\t\toffline_port_info[0][slot].flags = PORT_VALID;\
+\t\t\t\tfor (ai = 0; ai < MAX_OH_PORT_ASSIGN; ai++) {\
+\t\t\t\t\tif (strcmp(ohport_assign[ai].name, name) == 0) {\
+\t\t\t\t\t\toffline_port_info[0][slot].flags |= ohport_assign[ai].type;\
+\t\t\t\t\t\tbreak;\
+\t\t\t\t\t}\
+\t\t\t\t}\
 \t\t\t\toffline_port_info[0][slot].channel = kinfo.channel_id;\
 \t\t\t\toffline_port_info[0][slot].fm_idx = 0;\
-	\t\t\t\tprintk("cdx: OH port %s imported (ch %d egr_fq %d err_fq %d)\\n",\
-\t\t\t\t\tname, kinfo.channel_id, kinfo.default_fqid, kinfo.err_fqid);\
+	\t\t\t\tprintk("cdx: OH port %s imported type=0x%x (ch %d egr_fq %d err_fq %d)\\n",\
+\t\t\t\t\tname, ohport_assign[ai].type, kinfo.channel_id, kinfo.default_fqid, kinfo.err_fqid);\
 \t\t\t}\
 \t\t} else {\
 	\t\t\tprintk("cdx: OH port %s NOT found in kernel\\n", name);\
