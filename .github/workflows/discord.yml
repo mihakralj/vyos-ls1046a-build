@@ -75,8 +75,15 @@ jobs:
             TITLE="📦 New VyOS LS1046A Build"
             COLOR=5763719 # Discord Green
             
-            # Using printf to properly handle the newlines (\n) for the JSON payload.
-            DESC=$(printf '[🛠️ Install Guide](https://github.com/%s/blob/main/INSTALL.md) [📝 Release Notes](https://github.com/%s/releases/tag/%s) [🐙 Repository](https://github.com/%s)\n\n**Direct upgrade command:**\n\`\`\`bash\nadd system image https://github.com/%s/releases/download/%s/%s\n\`\`\`' \
+            # printf handles the literal newlines for the JSON payload. The code
+            # fence uses bare backticks (single quotes disable substitution); do
+            # NOT backslash-escape them — Discord renders \` as a literal backtick
+            # and the ```bash block would never form.
+            # Version/Flavor/Edition live at the TOP of the description because
+            # Discord always renders embed `fields` BELOW the description, so they
+            # cannot be hoisted under the title via the fields array.
+            DESC=$(printf '**Version** `%s`   **Flavor** `%s`   **Edition** `%s`\n\n[🛠️ Install Guide](https://github.com/%s/blob/main/INSTALL.md) [📝 Release Notes](https://github.com/%s/releases/tag/%s) [🐙 Repository](https://github.com/%s)\n\n**Direct upgrade command:**\n```bash\nadd system image https://github.com/%s/releases/download/%s/%s\n```' \
+              "${DISPLAY_VERSION}" "${BUILD_BRANCH}" "${RELEASE_TYPE}" \
               "${REPO}" "${REPO}" "${BUILD_VERSION}" "${REPO}" \
               "${REPO}" "${BUILD_VERSION}" "${IMAGE_NAME}")
           else
@@ -86,27 +93,18 @@ jobs:
               "${REPO}" "${RUN_ID}")
           fi
 
-          # Build the embed payload using jq. 
-          # Moving Version/Flavor/Edition into 'fields' with 'inline: true' 
-          # aligns them perfectly horizontally on desktop screens.
+          # Build the embed payload using jq. A single 'description' block (no
+          # 'fields') keeps Version/Flavor/Edition directly under the title.
           PAYLOAD=$(jq -n \
             --arg title  "${TITLE}" \
             --argjson color "${COLOR}" \
             --arg desc "${DESC}" \
-            --arg ver "\`${DISPLAY_VERSION}\`" \
-            --arg fla "\`${BUILD_BRANCH}\`" \
-            --arg edt "\`${RELEASE_TYPE}\`" \
             --arg footer "Commit: ${SHORT_SHA} • Run: #${RUN_NUMBER}" \
             --arg timestamp "${TIMESTAMP}" \
             '{
               embeds: [{
                 title: $title,
                 color: $color,
-                fields: [
-                  { name: "Version", value: $ver, inline: true },
-                  { name: "Flavor", value: $fla, inline: true },
-                  { name: "Edition", value: $edt, inline: true }
-                ],
                 description: $desc,
                 footer: { text: $footer },
                 timestamp: $timestamp
