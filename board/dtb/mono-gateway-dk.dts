@@ -792,6 +792,7 @@ managed = "in-band-status";
 		ethernet@0 {
 			compatible = "fsl,dpa-ethernet";
 			fsl,fman-mac = <&enet0>;
+			fsl,bman-buffer-pools = <&dpaa_pool>;
 			dma-coherent;
 		};
 
@@ -799,6 +800,7 @@ managed = "in-band-status";
 		ethernet@1 {
 			compatible = "fsl,dpa-ethernet";
 			fsl,fman-mac = <&enet1>;
+			fsl,bman-buffer-pools = <&dpaa_pool>;
 			dma-coherent;
 		};
 
@@ -806,6 +808,7 @@ managed = "in-band-status";
 		ethernet@2 {
 			compatible = "fsl,dpa-ethernet";
 			fsl,fman-mac = <&enet2>;
+			fsl,bman-buffer-pools = <&dpaa_pool>;
 			dma-coherent;
 		};
 
@@ -813,6 +816,7 @@ managed = "in-band-status";
 		ethernet@3 {
 			compatible = "fsl,dpa-ethernet";
 			fsl,fman-mac = <&enet3>;
+			fsl,bman-buffer-pools = <&dpaa_pool>;
 			dma-coherent;
 		};
 
@@ -820,6 +824,7 @@ managed = "in-band-status";
 		ethernet@4 {
 			compatible = "fsl,dpa-ethernet";
 			fsl,fman-mac = <&enet4>;
+			fsl,bman-buffer-pools = <&dpaa_pool>;
 			dma-coherent;
 		};
 
@@ -827,6 +832,7 @@ managed = "in-band-status";
 		ethernet@5 {
 			compatible = "fsl,dpa-ethernet";
 			fsl,fman-mac = <&enet5>;
+			fsl,bman-buffer-pools = <&dpaa_pool>;
 			dma-coherent;
 		};
 
