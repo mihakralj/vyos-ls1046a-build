@@ -201,6 +201,7 @@ echo "### Patched devoh.c: offline_port_info no longer static"
 # Add an import function to devoh.c (where struct oh_port_info is visible),
 # and call it from cdx_main.c during module init before IPsec init.
 sed -i '/^int alloc_offline_port/i\
+void cdxdrv_import_oh_ports(void);\
 \
 /* Import OH port info from kernel fsl_oh driver into cdx array. */\
 void cdxdrv_import_oh_ports(void)\
