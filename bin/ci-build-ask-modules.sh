@@ -214,6 +214,7 @@ echo "### Patched cdx_ehash.c: CDX_FRAG_USE_BUFF_POOL disabled"
 echo "### ======== Building cdx.ko ========"
 make -C "$KSRC" \
     ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-}" \
+    LOCALVERSION=-vyos \
     PLATFORM="LS1043A" \
     CONFIG_ASK_CDX=m \
     EXTRA_CFLAGS="-Wno-unused-variable -Wno-unused-function" \
@@ -228,6 +229,7 @@ echo "### cdx.ko built: $(stat -c '%s bytes' "$CDX_KO")"
 echo "### ======== Building fci.ko ========"
 make -C "$KSRC" \
     ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-}" \
+    LOCALVERSION=-vyos \
     BOARD_ARCH=arm64 \
     CONFIG_ASK_FCI=m \
     KBUILD_EXTRA_SYMBOLS="$ASK_DIR/cdx/Module.symvers" \
@@ -242,6 +244,7 @@ echo "### fci.ko built: $(stat -c '%s bytes' "$FCI_KO")"
 echo "### ======== Building auto_bridge.ko ========"
 make -C "$KSRC" \
     ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-}" \
+    LOCALVERSION=-vyos \
     PLATFORM="LS1043A" \
     CONFIG_ASK_AUTO_BRIDGE=m \
     M="$ASK_DIR/auto_bridge" \
