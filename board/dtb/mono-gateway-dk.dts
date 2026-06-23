@@ -843,6 +843,13 @@ managed = "in-band-status";
 			fsl,qman-frame-queues-rx = <0x40c 1 0x40d 1>;
 			fsl,qman-frame-queues-tx = <0x40e 1 0x40f 1>;
 			fsl,bman-buffer-pools = <&dpaa_pool>;
+
+			dpaa-ethernet@0 {
+				compatible = "fsl,dpa-ethernet";
+				fsl,fman-mac = <&enet6>;
+				fsl,bman-buffer-pools = <&dpaa_pool>;
+				dma-coherent;
+			};
 		};
 
 		/* MAC10 — 10G right SFP+ (eth4) */
@@ -852,6 +859,13 @@ managed = "in-band-status";
 			fsl,qman-frame-queues-rx = <0x410 1 0x411 1>;
 			fsl,qman-frame-queues-tx = <0x412 1 0x413 1>;
 			fsl,bman-buffer-pools = <&dpaa_pool>;
+
+			dpaa-ethernet@0 {
+				compatible = "fsl,dpa-ethernet";
+				fsl,fman-mac = <&enet7>;
+				fsl,bman-buffer-pools = <&dpaa_pool>;
+				dma-coherent;
+			};
 		};
 	};
 };
