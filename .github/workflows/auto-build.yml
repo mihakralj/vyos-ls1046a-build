@@ -230,6 +230,11 @@ jobs:
             work/linux-6.12.49/drivers/net/phy/swphy.c
           echo "### Patched swphy.c: WARN_ON -> WARN_ON_ONCE"
 
+          # Silence phy-device-not-initialized spam (25 lines/5 ports per boot)
+          sed -i 's/netdev_err(net_dev, "phy device not initialized")/netdev_dbg(net_dev, "phy device not initialized")/' \
+            work/linux-6.12.49/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_ethtool.c
+          echo "### Patched dpaa_ethtool.c: netdev_err -> netdev_dbg for phy-not-init"
+
       - name: Compile Mono DTB from DTS (mainline only — skip on nxp-sdk)
         if: ${{ !startsWith(github.ref_name, 'nxp-sdk') }}
         run: bin/ci-compile-mono-dtb.sh
