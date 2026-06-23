@@ -73,6 +73,7 @@ struct fman_port;
 struct fman *fman_bind(struct device *dev);
 struct fman_port *dpaa_get_rx_fman_port(struct net_device *dev);
 u8 fman_port_get_id(struct fman_port *port);
+int fman_port_set_silicon_hit_release_all(struct fman *fm, bool enable);
 int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
 
 /*
@@ -408,6 +409,9 @@ void ask_hw_pcd_teardown(void)
                 kfree(ck);
         }
 
+        /* Restore TX confirm on all ports before tearing down CC trees. */
+        fman_port_set_silicon_hit_release_all(h->fman, false);
+
         /* Disengage any port still in the M1 coarse S1 mode-switch (0129). */
         for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
                 if (h->port[i].in_use && h->port[i].offload_engaged) {
@@ -478,6 +482,13 @@ int ask_hw_offload_engage(u8 hw_port_id)
         if (rc)
                 goto out_unlock;
 
+        /*
+         * M1 TX bypass: flip all TX ports to BMan-direct release
+         * (patch 0136).  Kernel TX (FCO=1) is unaffected.  Errors
+         * here are non-fatal — the RX CC tree is already grafted.
+         */
+        fman_port_set_silicon_hit_release_all(h->fman, true);
+
         p->offload_engaged = true;
         ask_pr_info("hw: offload ENGAGED on port 0x%02x (S0->S1)\n", hw_port_id);
 
@@ -509,6 +520,9 @@ void ask_hw_offload_disengage(u8 hw_port_id)
                 mutex_unlock(&h->lock);
                 return;                 /* idempotent no-op */
         }
+
+        /* Restore TX confirm before tearing down the CC tree. */
+        fman_port_set_silicon_hit_release_all(h->fman, false);
 
         fman_pcd_offload_disengage(h->fman, hw_port_id);
         p->offload_engaged = false;

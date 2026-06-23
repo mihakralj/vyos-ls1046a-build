@@ -1,20 +1,10 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
-Date: Mon, 23 Jun 2026 03:15:00 +0000
-Subject: [PATCH] fman_port: TX confirm bypass for silicon-HIT frames
-
-Adds fman_port_set_silicon_hit_release_mode() which flips the TX port
-BMI fmbm_tcfqid/fmbm_tfene to release silicon-HIT (FCO=0) frames
-directly to BMan, eliminating the ~20% CPU QMan DQRR softirq.
-
-Kernel TX (FCO=1) is unaffected via per-FD override.  Two new saved_*
-fields in struct fman_port store the pre-engage register values for
-the inverse (disengage) path.
-
-git apply --3way --check clean; compiled zero-error on 6.18.34 arm64.
+Date: Mon, 23 Jun 2026 04:00:00 +0000
+Subject: [PATCH] fman_port: TX confirm bypass for silicon-HIT frames (0136)
 ---
 diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
-index 8b8e2c366..65c435f4c 100644
+index 8b8e2c366..077ced237 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_port.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_port.c
 @@ -455,6 +455,8 @@ struct fman_port {
@@ -26,7 +16,49 @@ index 8b8e2c366..65c435f4c 100644
  };
  
  static int init_bmi_rx(struct fman_port *port)
-@@ -1624,6 +1626,36 @@ int fman_port_set_cc_base(struct fman_port *port, u32 cc_muram_off)
+@@ -1561,6 +1563,41 @@ struct fman_port *fman_port_lookup_rx(void *fm, u8 port_id)
+ }
+ EXPORT_SYMBOL_GPL(fman_port_lookup_rx);
+ 
++/*
++ * fman_port_set_silicon_hit_release_all -- TX bypass on all TX ports
++ *
++ * Iterates fman_port_active_list, finds TX ports for this fman,
++ * and calls fman_port_set_silicon_hit_release_mode().
++ */
++int fman_port_set_silicon_hit_release_all(struct fman *fm, bool enable)
++{
++	struct fman_port *port;
++	int count = 0, errors = 0;
++
++	if (!fm)
++		return -ENODEV;
++
++	mutex_lock(&fman_port_active_lock);
++	list_for_each_entry(port, &fman_port_active_list, node) {
++		if (port->fm != fm)
++			continue;
++		if (port->port_type != FMAN_PORT_TYPE_TX)
++			continue;
++		if (fman_port_set_silicon_hit_release_mode(port, enable) == 0)
++			count++;
++		else
++			errors++;
++	}
++	mutex_unlock(&fman_port_active_lock);
++
++	if (count == 0 && errors == 0 && enable)
++		return -ENODEV;
++	if (errors && enable)
++		return -EIO;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_port_set_silicon_hit_release_all);
++
+ /**
+  * fman_port_set_cc_base() - set a live RX port's Coarse-Classification base
+  * @port: the FMan RX port (mac_dev->port[RX])
+@@ -1624,6 +1661,36 @@ int fman_port_set_cc_base(struct fman_port *port, u32 cc_muram_off)
  }
  EXPORT_SYMBOL_GPL(fman_port_set_cc_base);
  
@@ -64,15 +96,16 @@ index 8b8e2c366..65c435f4c 100644
  #define FMAN_PP_MISC_OFF	0x40
  #define FMAN_PP_ERRDISC_OFF	0x44
 diff --git a/drivers/net/ethernet/freescale/fman/fman_port.h b/drivers/net/ethernet/freescale/fman/fman_port.h
-index bb8ec87db..3046512b6 100644
+index bb8ec87db..f32d5af39 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_port.h
 +++ b/drivers/net/ethernet/freescale/fman/fman_port.h
-@@ -165,6 +165,8 @@ u32 fman_port_get_liodn(struct fman_port *port);
+@@ -165,6 +165,9 @@ u32 fman_port_get_liodn(struct fman_port *port);
   * scheme bind) is the DUT-gated final sub-increment.
   */
  int fman_port_set_cc_base(struct fman_port *port, u32 cc_muram_off);
 +int fman_port_set_silicon_hit_release_mode(struct fman_port *port,
 +					   bool enable);
++int fman_port_set_silicon_hit_release_all(struct fman *fm, bool enable);
  
  struct fman_port *fman_port_lookup_rx(void *fm, u8 port_id);
  
