@@ -1,0 +1,431 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+Date: Mon, 23 Jun 2026 05:00:00 +0000
+Subject: [PATCH] fman_pcd: MANIP creation + chain API for L3 forwarding (0137)
+
+Adds the public MANIP template API needed by the FORWARD_FQ_WITH_MANIP
+CC-key action for L3 forwarding with per-hop L2 rewrite.
+
+API: fman_pcd_manip_create(), _destroy(), _chain_create(), _chain_destroy(),
+      fman_pcd_manip_hmtd_off().
+
+Types: enum fman_pcd_manip_type (RMV_ETHERNET, INSRT_GENERIC,
+       FIELD_UPDATE_IPV4_FORWARD), struct fman_pcd_manip_params.
+
+Reuses existing low-level encoder functions in fman_pcd_manip.c.
+Compiled zero-error on 6.18.34 arm64.
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+index a8a90b2bd..0bb888507 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_manip.c
+@@ -134,6 +134,14 @@
+ #define FMAN_PCD_HMCD_RMV_OFFSET_SHIFT	0
+ #define FMAN_PCD_HMCD_RMV_SIZE_SHIFT	8
+ 
++/* MANIP chain / DSCP constants. */
++#define FMAN_PCD_MANIP_CHAIN_MAX_MANIPS	4
++#define FMAN_PCD_HMCT_CHAIN_SIZE		256u
++#define FMAN_PCD_HMCD_IPV4_UPDATE_DSCP	0x00000004u
++#define FMAN_PCD_HMCD_IPV4_DSCP_SHIFT	26
++#define FMAN_PCD_IPV4_DSCP_MAX		63u
++#define FMAN_PCD_HMAN_OC_IP_MANIP		0x36
++
+ /*
+  * Frame-relative byte offsets where the VLAN / MPLS shim is
+  * inserted/removed.  A VLAN tag sits right after the 12-byte Ethernet
+@@ -197,11 +205,13 @@ struct fman_pcd_hm_node {
+ 	struct list_head	node;
+ 	struct fman_pcd	*pcd;
+ 	u8			port_id;
++	char			label[32];
+ 	unsigned long		hmtd_off;
+ 	void __iomem		*hmtd;
+ 	unsigned long		hmct_off;
+ 	void __iomem		*hmct;
+ 	size_t			hmct_sz;
++	size_t			hmct_used;
+ 	spinlock_t		lock;
+ };
+ 
+@@ -637,4 +647,341 @@ int fman_pcd_hm_destroy(struct fman_pcd *pcd, u8 port_id, u32 handle)
+ 	kfree(found);
+ 	return 0;
+ }
++/*
++ * -----------------------------------------------------------------
++ * Standalone MANIP template API — fman_pcd_manip_create / _destroy.
++ * Reuses existing low-level encoder functions for HMCT command encoding.
++ * -----------------------------------------------------------------
++ */
++static void __iomem *
++manip_encode_rmv_ether(struct fman_pcd_hm_node *manip, u8 *out_op)
++{
++	void __iomem *hmct = manip->hmct;
++	u32 cmd;
++
++	cmd  = (u32)FMAN_PCD_HMCD_OP_GENERIC_RMV << FMAN_PCD_HMCD_OC_SHIFT;
++	cmd |= (u32)0u << FMAN_PCD_HMCD_RMV_OFFSET_SHIFT;
++	cmd |= 14u << FMAN_PCD_HMCD_RMV_SIZE_SHIFT;
++
++	iowrite32be(cmd, hmct);
++	manip->hmct_used = 4;
++	*out_op = FMAN_PCD_HMAN_OC;
++	return hmct;
++}
++
++static void __iomem *
++manip_encode_insrt_generic(struct fman_pcd_hm_node *manip,
++			   const struct fman_pcd_manip_params *p,
++			   u8 *out_op)
++{
++	void __iomem *hmct = manip->hmct;
++	void __iomem *cur;
++	u32 cmd;
++	unsigned int n_words, i;
++	u8 size = p->insrt_generic.size;
++
++	if (size == 0 || size > FMAN_PCD_HM_INSRT_GENERIC_MAX)
++		return NULL;
++
++	cmd  = (u32)FMAN_PCD_HMCD_OP_GENERIC_INSRT << FMAN_PCD_HMCD_OC_SHIFT;
++	cmd |= (u32)0u << FMAN_PCD_HMCD_INSRT_OFFSET_SHIFT;
++	cmd |= (u32)size << FMAN_PCD_HMCD_INSRT_SIZE_SHIFT;
++	iowrite32be(cmd, hmct);
++
++	n_words = (size + 3) / 4;
++	cur = hmct + 4;
++	for (i = 0; i < n_words; i++) {
++		unsigned int base = i * 4;
++		u32 word = 0;
++
++		word |= ((u32)p->insrt_generic.hdr[base + 0]) << 24;
++		if (base + 1 < size)
++			word |= ((u32)p->insrt_generic.hdr[base + 1]) << 16;
++		if (base + 2 < size)
++			word |= ((u32)p->insrt_generic.hdr[base + 2]) << 8;
++		if (base + 3 < size)
++			word |= ((u32)p->insrt_generic.hdr[base + 3]);
++		iowrite32be(word, cur);
++		cur += 4;
++	}
++
++	manip->hmct_used = 4 + n_words * 4;
++	*out_op = FMAN_PCD_HMAN_OC;
++	return hmct;
++}
++
++static void __iomem *
++manip_encode_ipv4_forward(struct fman_pcd_hm_node *manip,
++			  const struct fman_pcd_manip_params *p,
++			  u8 *out_op)
++{
++	void __iomem *hmct = manip->hmct;
++	u32 cmd;
++
++	cmd  = (u32)FMAN_PCD_HMCD_OP_IPV4_UPDATE << FMAN_PCD_HMCD_OC_SHIFT;
++	cmd |= FMAN_PCD_HMCD_IPV4_UPDATE_TTL;
++	cmd |= FMAN_PCD_HMCD_IP_L4_CS_CALC;
++
++	if (p->ipv4_forward.rewrite_dscp) {
++		u32 payload;
++
++		if (p->ipv4_forward.new_dscp > FMAN_PCD_IPV4_DSCP_MAX)
++			return NULL;
++		cmd |= FMAN_PCD_HMCD_IPV4_UPDATE_DSCP;
++		payload = ((u32)p->ipv4_forward.new_dscp)
++			<< FMAN_PCD_HMCD_IPV4_DSCP_SHIFT;
++		iowrite32be(payload, hmct + 4);
++		manip->hmct_used = 8;
++	} else {
++		manip->hmct_used = 4;
++	}
++
++	iowrite32be(cmd, hmct);
++	*out_op = FMAN_PCD_HMAN_OC_IP_MANIP;
++	return hmct;
++}
++
++struct fman_pcd_manip *
++fman_pcd_manip_create(struct fman_pcd *pcd,
++		      enum fman_pcd_manip_type type,
++		      const struct fman_pcd_manip_params *params,
++		      const char *label)
++{
++	struct fman_pcd_hm_node *manip;
++	struct muram_info *muram;
++	struct mutex *pcd_lock;
++	unsigned long off, flags;
++	void __iomem *vb;
++	void __iomem *last_cmd = NULL;
++	u32 last_word;
++	u8 op = FMAN_PCD_HMAN_OC;
++	u16 cfg;
++	long err;
++
++	if (!pcd || !label)
++		return ERR_PTR(-EINVAL);
++
++	muram = fman_get_muram(fman_pcd_get_fman(pcd));
++	if (!muram)
++		return ERR_PTR(-ENXIO);
++
++	manip = kzalloc(sizeof(*manip), GFP_KERNEL);
++	if (!manip)
++		return ERR_PTR(-ENOMEM);
++
++	INIT_LIST_HEAD(&manip->node);
++	spin_lock_init(&manip->lock);
++	manip->pcd = pcd;
++	snprintf(manip->label, sizeof(manip->label), "%s", label);
++
++	off = fman_pcd_muram_alloc(pcd, FMAN_PCD_HMTD_SIZE);
++	if (IS_ERR_VALUE(off)) { err = (long)off; goto fail_free_manip; }
++	vb = (void __iomem *)fman_muram_offset_to_vbase(muram, off);
++	if (!vb) { fman_pcd_muram_free(pcd, off, FMAN_PCD_HMTD_SIZE); err = -ENXIO; goto fail_free_manip; }
++	manip->hmtd_off = off;
++	manip->hmtd = vb;
++	memset_io(vb, 0, FMAN_PCD_HMTD_SIZE);
++
++	off = fman_pcd_muram_alloc(pcd, FMAN_PCD_HMCT_SIZE);
++	if (IS_ERR_VALUE(off)) { err = (long)off; goto fail_free_hmtd; }
++	vb = (void __iomem *)fman_muram_offset_to_vbase(muram, off);
++	if (!vb) { fman_pcd_muram_free(pcd, off, FMAN_PCD_HMCT_SIZE); err = -ENXIO; goto fail_free_hmtd; }
++	manip->hmct_off = off;
++	manip->hmct = vb;
++	manip->hmct_sz = FMAN_PCD_HMCT_SIZE;
++	memset_io(vb, 0, FMAN_PCD_HMCT_SIZE);
++
++	spin_lock_irqsave(&manip->lock, flags);
++
++	switch (type) {
++	case FMAN_PCD_MANIP_RMV_ETHERNET:
++		last_cmd = manip_encode_rmv_ether(manip, &op);
++		break;
++	case FMAN_PCD_MANIP_INSRT_GENERIC:
++		last_cmd = manip_encode_insrt_generic(manip, params, &op);
++		break;
++	case FMAN_PCD_MANIP_FIELD_UPDATE_IPV4_FORWARD:
++		last_cmd = manip_encode_ipv4_forward(manip, params, &op);
++		break;
++	default:
++		spin_unlock_irqrestore(&manip->lock, flags);
++		err = -EINVAL;
++		goto fail_free_both;
++	}
++
++	if (!last_cmd) {
++		spin_unlock_irqrestore(&manip->lock, flags);
++		err = -EINVAL;
++		goto fail_free_both;
++	}
++
++	last_word = ioread32be(vb);
++	if (last_word == 0xffffffffu) {
++		spin_unlock_irqrestore(&manip->lock, flags);
++		err = -ENXIO;
++		goto fail_free_both;
++	}
++
++	cfg = FMAN_PCD_HMTD_CFG_TYPE | FMAN_PCD_HMTD_CFG_EXT_HMCT;
++	iowrite16be(cfg, manip->hmtd + FMAN_PCD_HMTD_OFF_CFG);
++	iowrite32be((u32)manip->hmct_off,
++		    manip->hmtd + FMAN_PCD_HMTD_OFF_HMCD_BASE);
++	iowrite8(op, manip->hmtd + FMAN_PCD_HMTD_OFF_OPCODE);
++
++	spin_unlock_irqrestore(&manip->lock, flags);
++
++	pcd_lock = fman_pcd_get_lock(pcd);
++	mutex_lock(pcd_lock);
++	list_add_tail(&manip->node, fman_pcd_get_manip_list(pcd));
++	mutex_unlock(pcd_lock);
++
++	return (struct fman_pcd_manip *)manip;
++
++fail_free_both:
++	fman_pcd_muram_free(pcd, manip->hmct_off, FMAN_PCD_HMCT_SIZE);
++fail_free_hmtd:
++	fman_pcd_muram_free(pcd, manip->hmtd_off, FMAN_PCD_HMTD_SIZE);
++fail_free_manip:
++	kfree(manip);
++	return ERR_PTR(err);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_manip_create);
++
++void fman_pcd_manip_destroy(struct fman_pcd_manip *manip)
++{
++	struct fman_pcd_hm_node *hm = (struct fman_pcd_hm_node *)manip;
++	struct fman_pcd *pcd;
++	struct mutex *pcd_lock;
++
++	if (!hm)
++		return;
++
++	pcd = hm->pcd;
++	pcd_lock = fman_pcd_get_lock(pcd);
++
++	mutex_lock(pcd_lock);
++	list_del(&hm->node);
++	fman_pcd_muram_free(pcd, hm->hmct_off, hm->hmct_sz);
++	fman_pcd_muram_free(pcd, hm->hmtd_off, FMAN_PCD_HMTD_SIZE);
++	mutex_unlock(pcd_lock);
++
++	kfree(hm);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_manip_destroy);
++
++unsigned long fman_pcd_manip_hmtd_off(const struct fman_pcd_manip *manip)
++{
++	const struct fman_pcd_hm_node *hm = (const struct fman_pcd_hm_node *)manip;
++	return hm ? hm->hmtd_off : 0;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_manip_hmtd_off);
++
++/*
++ * -----------------------------------------------------------------
++ * MANIP chain API.
++ * -----------------------------------------------------------------
++ */
++struct fman_pcd_manip *
++fman_pcd_manip_chain_create(struct fman_pcd *pcd,
++			    struct fman_pcd_manip * const *manips,
++			    u8 n_manips)
++{
++	struct fman_pcd_hm_node *chain;
++	struct muram_info *muram;
++	struct mutex *pcd_lock;
++	unsigned long off, flags;
++	void __iomem *vb, *cur;
++	size_t total = 0;
++	int i;
++
++	if (!pcd || !manips || n_manips == 0 || n_manips > 4)
++		return ERR_PTR(-EINVAL);
++
++	for (i = 0; i < n_manips; i++) {
++		struct fman_pcd_hm_node *src = (struct fman_pcd_hm_node *)manips[i];
++
++		if (!src || src->hmct_used == 0 || src->hmct_used > src->hmct_sz)
++			return ERR_PTR(-EINVAL);
++		total += src->hmct_used;
++	}
++	if (total > FMAN_PCD_HMCT_CHAIN_SIZE)
++		return ERR_PTR(-E2BIG);
++
++	muram = fman_get_muram(fman_pcd_get_fman(pcd));
++	if (!muram)
++		return ERR_PTR(-ENXIO);
++
++	chain = kzalloc(sizeof(*chain), GFP_KERNEL);
++	if (!chain)
++		return ERR_PTR(-ENOMEM);
++
++	INIT_LIST_HEAD(&chain->node);
++	spin_lock_init(&chain->lock);
++	chain->pcd = pcd;
++
++	off = fman_pcd_muram_alloc(pcd, FMAN_PCD_HMTD_SIZE);
++	if (IS_ERR_VALUE(off)) { kfree(chain); return ERR_PTR((long)off); }
++	vb = (void __iomem *)fman_muram_offset_to_vbase(muram, off);
++	if (!vb) { fman_pcd_muram_free(pcd, off, FMAN_PCD_HMTD_SIZE); kfree(chain); return ERR_PTR(-ENXIO); }
++	chain->hmtd_off = off;
++	chain->hmtd = vb;
++	memset_io(vb, 0, FMAN_PCD_HMTD_SIZE);
++
++	off = fman_pcd_muram_alloc(pcd, FMAN_PCD_HMCT_CHAIN_SIZE);
++	if (IS_ERR_VALUE(off)) {
++		fman_pcd_muram_free(pcd, chain->hmtd_off, FMAN_PCD_HMTD_SIZE);
++		kfree(chain);
++		return ERR_PTR((long)off);
++	}
++	vb = (void __iomem *)fman_muram_offset_to_vbase(muram, off);
++	if (!vb) {
++		fman_pcd_muram_free(pcd, off, FMAN_PCD_HMCT_CHAIN_SIZE);
++		fman_pcd_muram_free(pcd, chain->hmtd_off, FMAN_PCD_HMTD_SIZE);
++		kfree(chain);
++		return ERR_PTR(-ENXIO);
++	}
++	chain->hmct_off = off;
++	chain->hmct = vb;
++	chain->hmct_sz = FMAN_PCD_HMCT_CHAIN_SIZE;
++	memset_io(vb, 0, FMAN_PCD_HMCT_CHAIN_SIZE);
++
++	cur = vb;
++	for (i = 0; i < n_manips; i++) {
++		struct fman_pcd_hm_node *src = (struct fman_pcd_hm_node *)manips[i];
++		size_t used = src->hmct_used;
++		unsigned int nw = used / 4, j;
++		u32 buf[64];
++
++		memcpy_fromio(buf, src->hmct, used);
++		for (j = 0; j < nw; j++)
++			iowrite32be(buf[j], cur + j * 4);
++		cur += used;
++	}
++
++	{
++		u16 cfg = FMAN_PCD_HMTD_CFG_TYPE | FMAN_PCD_HMTD_CFG_EXT_HMCT;
++
++		iowrite16be(cfg, chain->hmtd + FMAN_PCD_HMTD_OFF_CFG);
++		iowrite32be((u32)chain->hmct_off,
++			    chain->hmtd + FMAN_PCD_HMTD_OFF_HMCD_BASE);
++		iowrite8(FMAN_PCD_HMAN_OC_IP_MANIP,
++			 chain->hmtd + FMAN_PCD_HMTD_OFF_OPCODE);
++	}
++
++	chain->hmct_used = total;
++
++	pcd_lock = fman_pcd_get_lock(pcd);
++	mutex_lock(pcd_lock);
++	list_add_tail(&chain->node, fman_pcd_get_manip_list(pcd));
++	mutex_unlock(pcd_lock);
++
++	return (struct fman_pcd_manip *)chain;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_manip_chain_create);
++
++void fman_pcd_manip_chain_destroy(struct fman_pcd_manip *chain)
++{
++	fman_pcd_manip_destroy(chain);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_manip_chain_destroy);
+ EXPORT_SYMBOL_GPL(fman_pcd_hm_destroy);
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 65d0c7bb1..98e870c15 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -571,6 +571,34 @@ int fman_pcd_hm_install(struct fman_pcd *pcd, u8 port_id,
+  */
+ int fman_pcd_hm_destroy(struct fman_pcd *pcd, u8 port_id, u32 handle);
+ 
++
++/* Standalone MANIP template API (v1.3 inline CC-key path). */
++enum fman_pcd_manip_type {
++	FMAN_PCD_MANIP_RMV_ETHERNET = 0,
++	FMAN_PCD_MANIP_INSRT_GENERIC = 1,
++	FMAN_PCD_MANIP_FIELD_UPDATE_IPV4_FORWARD = 2,
++};
++
++struct fman_pcd_manip_params {
++	enum fman_pcd_manip_type type;
++	union {
++		struct { u8 size; u8 hdr[FMAN_PCD_HM_INSRT_GENERIC_MAX]; } insrt_generic;
++		struct { bool recompute_cksum; bool rewrite_dscp; u8 new_dscp; } ipv4_forward;
++	};
++};
++
++struct fman_pcd_manip *
++fman_pcd_manip_create(struct fman_pcd *pcd,
++		      enum fman_pcd_manip_type type,
++		      const struct fman_pcd_manip_params *params,
++		      const char *label);
++void fman_pcd_manip_destroy(struct fman_pcd_manip *manip);
++unsigned long fman_pcd_manip_hmtd_off(const struct fman_pcd_manip *manip);
++struct fman_pcd_manip *
++fman_pcd_manip_chain_create(struct fman_pcd *pcd,
++			    struct fman_pcd_manip * const *manips,
++			    u8 n_manips);
++void fman_pcd_manip_chain_destroy(struct fman_pcd_manip *chain);
+ /*
+  * Policer (srTCM/trTCM) install surface (spec sec 5.6).
+  *
