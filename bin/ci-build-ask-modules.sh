@@ -123,6 +123,21 @@ sed -i '/^int dpaa_vwd_init(void)/,/^{/ { /^{/a\    return 0;
 }' "$ASK_DIR/cdx/dpa_wifi.c"
 echo "### Patched dpa_wifi.c: dpaa_vwd_init() returns 0 immediately"
 
+# ── Patch: fix cdx_create_fragment_bufpool NULL deref ──────────────────────
+# If get_phys_port_poolinfo_bysize() fails (dpa_interface_info empty because
+# dpa_app never ran), the error path tries bman_free_pool(bp->pool) but
+# bp->pool was never allocated (still NULL from kzalloc). Remove the bogus
+# free and just kfree the struct.
+sed -i '/bman_free_pool(bp->pool);/d' "$ASK_DIR/cdx/cdx_ehash.c"
+echo "### Patched cdx_ehash.c: removed bogus bman_free_pool(NULL) on error path"
+
+# ── Patch: disable CDX_FRAG_USE_BUFF_POOL ───────────────────────────────────
+# The frag pool init calls get_phys_port_poolinfo_bysize() which walks
+# dpa_interface_info. That list is populated by dpa_app (START_DPA_APP)
+# which we've disabled. Skip the frag pool allocation entirely.
+sed -i 's/^#define CDX_FRAG_USE_BUFF_POOL$/\/\/ #define CDX_FRAG_USE_BUFF_POOL/' "$ASK_DIR/cdx/cdx_ehash.c"
+echo "### Patched cdx_ehash.c: CDX_FRAG_USE_BUFF_POOL disabled"
+
 # ── Build cdx.ko ───────────────────────────────────────────────────────────
 echo "### ======== Building cdx.ko ========"
 make -C "$KSRC" \
