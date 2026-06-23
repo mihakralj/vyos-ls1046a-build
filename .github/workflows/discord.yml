@@ -75,7 +75,7 @@ jobs:
           # render them verbatim. printf converts \n into actual newline bytes,
           # which jq then encodes correctly as JSON "\n".
           if [ "${STATUS}" = "success" ]; then
-            TITLE="✅ VyOS LS1046A Build Published"
+            TITLE="✅ New VyOS LS1046A Build"
             COLOR=5763719 # Discord Green
             DESC=$(printf '**Version:** `%s`\n**Flavor:** `%s` • **Edition:** `%s`\n\n[📖 Install Guide](https://github.com/%s/blob/main/INSTALL.md) | [📦 Release Notes](https://github.com/%s/releases/tag/%s) | [📁 Repository](https://github.com/%s)\n\n**To upgrade directly from the CLI, run:**\n```bash\nadd system image https://github.com/%s/releases/download/%s/%s\n```' \
               "${DISPLAY_VERSION}" "${BUILD_BRANCH}" "${RELEASE_TYPE}" \
