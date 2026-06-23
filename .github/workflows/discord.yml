@@ -1,11 +1,7 @@
 name: Discord notification (reusable)
 
-# Reusable-only workflow — no `workflow_dispatch:` trigger, so it never appears
-# in the Actions "Run workflow" dropdown and never burns hosted-runner minutes
-# on its own. It is invoked from another workflow (e.g. self-hosted-build.yml)
-# via `uses: ./.github/workflows/discord.yml` to post a build-result embed to a
-# Discord channel. All build-specific values are passed in as inputs because the
-# `steps.*` contexts of the build job are not visible across workflows.
+# Reusable-only workflow — no `workflow_dispatch:` trigger.
+# Invoked from another workflow via `uses: ./.github/workflows/discord.yml`
 
 on:
   workflow_call:
@@ -15,10 +11,20 @@ on:
         type: string
         required: true
       build_version:
-        description: 'Release/build version string'
+        description: 'Release/build version string (e.g., 2026.06.19-0202-rolling)'
         type: string
         required: false
         default: 'unknown'
+      build_branch:
+        description: 'Branch or board target (e.g., Stock, NXP, ASK2)'
+        type: string
+        required: false
+        default: 'Stock'
+      release_type:
+        description: 'Release type (e.g., LTS, Stream, Rolling)'
+        type: string
+        required: false
+        default: 'Rolling'
       image_name:
         description: 'ISO image name produced by the build'
         type: string
@@ -44,58 +50,43 @@ jobs:
           DISCORD_BOT_KEY: ${{ secrets.DISCORD_BOT_KEY }}
           STATUS: ${{ inputs.status }}
           BUILD_VERSION: ${{ inputs.build_version }}
+          BUILD_BRANCH: ${{ inputs.build_branch }}
+          RELEASE_TYPE: ${{ inputs.release_type }}
           IMAGE_NAME: ${{ inputs.image_name }}
           CHANNEL_ID: ${{ inputs.channel_id }}
-          WORKFLOW: ${{ github.workflow }}
           RUN_NUMBER: ${{ github.run_number }}
           RUN_ID: ${{ github.run_id }}
           REPO: ${{ github.repository }}
-          EVENT_NAME: ${{ github.event_name }}
-          ACTOR: ${{ github.actor }}
-          REF_NAME: ${{ github.ref_name }}
           SHA: ${{ github.sha }}
-          RUNNER_NAME: ${{ runner.name }}
-          RUNNER_OS: ${{ runner.os }}
-          RUNNER_ARCH: ${{ runner.arch }}
         run: |
           set -euo pipefail
 
+          # Truncate the full git commit SHA to the first 7 characters for a cleaner footer
+          SHORT_SHA="${SHA:0:7}"
+
           if [ "${STATUS}" = "success" ]; then
-            EMOJI="✅"
-            COLOR=5763719
+            TITLE="✅ VyOS LS1046A Build Published"
+            COLOR=5763719 # Discord Green
+            DESC="**Version:** \`${BUILD_VERSION}\`\n**Edition:** \`${BUILD_BRANCH}\` • \`${RELEASE_TYPE}\`\n\n[📖 Install Guide](https://github.com/${REPO}/blob/main/INSTALL.md) | [📦 Release Notes](https://github.com/${REPO}/releases/tag/${BUILD_VERSION}) | [📁 Repository](https://github.com/${REPO})\n\n**To upgrade directly from the CLI, run:**\n\`\`\`bash\nadd system image https://github.com/${REPO}/releases/download/${BUILD_VERSION}/${IMAGE_NAME}\n\`\`\`"
           else
-            EMOJI="❌"
-            COLOR=15548997
+            TITLE="❌ VyOS LS1046A Build Failed"
+            COLOR=15548997 # Discord Red
+            DESC="**Version:** \`${BUILD_VERSION}\`\n**Edition:** \`${BUILD_BRANCH}\` • \`${RELEASE_TYPE}\`\n\nThe automated pipeline encountered an error during compilation.\n\n[🔍 Inspect Action Logs](https://github.com/${REPO}/actions/runs/${RUN_ID})"
           fi
 
-          # Build the embed payload with jq so all interpolated values are
-          # safely JSON-escaped (titles, names, branch refs, etc.).
+          # Build the embed payload using jq. 
+          # By using a single 'description' block instead of multiple 'fields', 
+          # the output scales beautifully on both mobile and desktop Discord clients.
           PAYLOAD=$(jq -n \
-            --arg title  "${EMOJI} LS1046A Build — ${BUILD_VERSION}" \
+            --arg title  "${TITLE}" \
             --argjson color "${COLOR}" \
-            --arg workflow "${WORKFLOW}" \
-            --arg run    "[#${RUN_NUMBER}](https://github.com/${REPO}/actions/runs/${RUN_ID})" \
-            --arg trigger "${EVENT_NAME} by @${ACTOR}" \
-            --arg branch "${REF_NAME}" \
-            --arg commit "[${SHA}](https://github.com/${REPO}/commit/${SHA})" \
-            --arg image  "${IMAGE_NAME}" \
-            --arg release "${BUILD_VERSION}" \
-            --arg runner "${RUNNER_NAME} (${RUNNER_OS} ${RUNNER_ARCH})" \
-            --arg footer "${REPO} • ${REF_NAME}" \
+            --arg desc "${DESC}" \
+            --arg footer "Commit: ${SHORT_SHA} • Run: #${RUN_NUMBER}" \
             '{
               embeds: [{
                 title: $title,
                 color: $color,
-                fields: [
-                  { name: "Workflow", value: $workflow, inline: true },
-                  { name: "Run",      value: $run,      inline: true },
-                  { name: "Trigger",  value: $trigger,  inline: true },
-                  { name: "Branch",   value: $branch,   inline: true },
-                  { name: "Commit",   value: $commit,   inline: true },
-                  { name: "Image",    value: $image,    inline: true },
-                  { name: "Release",  value: $release,  inline: true },
-                  { name: "Runner",   value: $runner,   inline: true }
-                ],
+                description: $desc,
                 footer: { text: $footer }
               }]
             }')

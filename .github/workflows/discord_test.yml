@@ -21,12 +21,22 @@ on:
         description: 'Release/build version string'
         type: string
         required: false
-        default: 'test-build'
+        default: '2026.06.19-0202-rolling'
+      build_branch:
+        description: 'Branch or board target'
+        type: string
+        required: false
+        default: 'NXP'
+      release_type:
+        description: 'Release type'
+        type: string
+        required: false
+        default: 'Rolling'
       image_name:
         description: 'ISO image name to show'
         type: string
         required: false
-        default: 'vyos-test-LS1046A-arm64.iso'
+        default: 'vyos-2026.06.19-0202-rolling-LS1046A-arm64.iso'
 
 jobs:
   notify:
@@ -34,6 +44,8 @@ jobs:
     with:
       status: ${{ inputs.status }}
       build_version: ${{ inputs.build_version }}
+      build_branch: ${{ inputs.build_branch }}
+      release_type: ${{ inputs.release_type }}
       image_name: ${{ inputs.image_name }}
     secrets:
       DISCORD_BOT_KEY: ${{ secrets.DISCORD_BOT_KEY }}
