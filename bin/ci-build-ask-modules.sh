@@ -131,6 +131,40 @@ echo "### Patched dpa_wifi.c: dpaa_vwd_init() returns 0 immediately"
 sed -i '/bman_free_pool(bp->pool);/d' "$ASK_DIR/cdx/cdx_ehash.c"
 echo "### Patched cdx_ehash.c: removed bogus bman_free_pool(NULL) on error path"
 
+# ── Patch: make cdx_init_frag_module non-fatal on MURAM error ────────────────
+# dpa_get_fm_MURAM_handle() returns NULL because it's an OOT module
+# that can't access the SDK FMan's MURAM handle. Instead of killing
+# the entire cdx init, skip MURAM-dependent allocations (dscp_fq_map,
+# ucode frag params) and return success. The frag subsystem won't
+# work but cdx will load and the flow offload + IPsec subsystems
+# initialize correctly.
+sed -i '/^#ifdef CDX_FRAG_USE_BUFF_POOL$/,/^#endif \/\/CDX_FRAG_USE_BUFF_POOL$/{ /DPA_ERROR.*Error in getting MURAM handle/{ n; /cdx_deinit_fragment_bufpool/d; /return -1/s/-1/0/; }; }' "$ASK_DIR/cdx/cdx_ehash.c"
+echo "### Patched cdx_ehash.c: MURAM handle failure no longer kills cdx init"
+
+# ── Patch: guard unguarded NULL MURAM derefs in flow-creation functions ──────
+# create_enque_hm() line ~2556 and cdx_create_rtp_qos_slowpath_flow() line ~3718
+# dereference dscp_fq_map_ff_g.muram_addr which can be NULL if MURAM init
+# failed. Guard them with NULL checks.
+sed -i '/^.*MURAM_VIRT_TO_PHYS_ADDR(dscp_fq_map_ff_g.muram_addr)/{ s/^/if (dscp_fq_map_ff_g.muram_addr) /; }' "$ASK_DIR/cdx/cdx_ehash.c"
+echo "### Patched cdx_ehash.c: guarded MURAM_VIRT_TO_PHYS_ADDR against NULL"
+
+# ── Patch: add procfs cleanup on cdx module deinit ───────────────────────────
+# cdx_init_fqid_procfs() creates /proc/fqid_stats/{tx,rx,pcd,sa} but
+# cdx_module_deinit() never removes them. On failed init + retry, this
+# causes 'proc_dir_entry already registered' WARNINGs. Add cleanup.
+sed -i '/^static void cdx_module_deinit/,/^}$/ {
+    /kfree(cdx_info);/i\
+\tremove_proc_subtree("fqid_stats", NULL);\
+\tif (frag_info_g.frag_proc_dir) remove_proc_subtree(frag_info_g.frag_proc_dir->name, NULL);
+}' "$ASK_DIR/cdx/cdx_main.c"
+echo "### Patched cdx_main.c: added procfs cleanup in cdx_module_deinit"
+
+# Note: frag_info_g is defined in cdx_ehash.c, but we also need to make
+# frag_info_g.frag_proc_dir externally visible. Add extern declaration.
+sed -i '/^#include/!b; :a; n; /^#include/b a; i\
+extern cdx_frag_info_t frag_info_g;' "$ASK_DIR/cdx/cdx_main.c"
+echo "### Patched cdx_main.c: added extern frag_info_g declaration"
+
 # ── Patch: disable CDX_FRAG_USE_BUFF_POOL ───────────────────────────────────
 # The frag pool init calls get_phys_port_poolinfo_bysize() which walks
 # dpa_interface_info. That list is populated by dpa_app (START_DPA_APP)
