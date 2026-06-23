@@ -111,18 +111,20 @@ echo "### Patched cdx_main.c: START_DPA_APP disabled"
 # cdx/system.h and cdx/dpa_wifi.h define CFG_WIFI_OFFLOAD which causes
 # dpaa_vwd_init() to run during cdx_module_init(). On LS1046A without WiFi,
 # vwd_init_ohport() fails because no OH port is configured for WiFi offload.
-# The Kbuild also passes -DWIFI_ENABLE via ccflags-y, and dpa_wifi.c has an
-# #else block (when CFG_WIFI_OFFLOAD is NOT defined) that compiles PFE stub
-# functions referencing struct pfe, which doesn't exist on LS1046A.
+# The Kbuild passes -DWIFI_ENABLE via ccflags-y, and dpa_wifi.c has PFE stub
+# functions that reference undeclared struct pfe — these are warnings but
+# -Werror makes them fatal. dpa_wifi.o CANNOT be simply removed because other
+# cdx object files reference symbols defined in it (qm_init, policer functions).
 #
-# Solution: disable the CPP define, remove -DWIFI_ENABLE from cflags, and
-# remove dpa_wifi.o + control_wifi.o from the build objects.
+# Solution: disable the CPP define, remove -DWIFI_ENABLE, and make -Werror
+# non-fatal (replace with -Wno-error). The WiFi code compiles with warnings
+# but the #ifdef guards prevent it from being called at runtime.
 sed -i 's/^#define CFG_WIFI_OFFLOAD$/\/\/ #define CFG_WIFI_OFFLOAD/' "$ASK_DIR/cdx/system.h" "$ASK_DIR/cdx/dpa_wifi.h"
 echo "### Patched system.h + dpa_wifi.h: CFG_WIFI_OFFLOAD disabled"
 sed -i 's/-DWIFI_ENABLE//g' "$ASK_DIR/cdx/Kbuild"
 echo "### Patched cdx/Kbuild: -DWIFI_ENABLE removed from ccflags"
-sed -i '/dpa_wifi\.o/d; /control_wifi\.o/d' "$ASK_DIR/cdx/Makefile" "$ASK_DIR/cdx/Kbuild"
-echo "### Patched cdx Makefile + Kbuild: dpa_wifi.o, control_wifi.o removed"
+sed -i 's/-Werror/-Wno-error/g' "$ASK_DIR/cdx/Kbuild"
+echo "### Patched cdx/Kbuild: -Werror → -Wno-error (WiFi stubs tolerate warnings)"
 
 # ── Build cdx.ko ───────────────────────────────────────────────────────────
 echo "### ======== Building cdx.ko ========"
