@@ -119,7 +119,8 @@ echo "### Patched cdx_main.c: START_DPA_APP disabled"
 # Fix: keep WiFi enabled at compile time, but stub dpaa_vwd_init() to
 # return 0 immediately. The WiFi offload won't be active but all symbols
 # remain available for linking and cdx_module_init() succeeds.
-sed -i '/^int dpaa_vwd_init/a\    return 0;' "$ASK_DIR/cdx/dpa_wifi.c"
+sed -i '/^int dpaa_vwd_init(void)/,/^{/ { /^{/a\    return 0;
+}' "$ASK_DIR/cdx/dpa_wifi.c"
 echo "### Patched dpa_wifi.c: dpaa_vwd_init() returns 0 immediately"
 
 # ── Build cdx.ko ───────────────────────────────────────────────────────────
