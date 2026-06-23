@@ -30,9 +30,10 @@ cat > "$CONF" <<EOF
 # See plans/ASK-2.0-IMPLEMENTATION.md and specs/ask-2.0-rewrite-spec.md.
 # ASK 2.0 module (when available)
 ask
-# ASK 1.x modules (cdx must load first, then fci)
+# ASK 1.x modules (cdx must load first, then fci, then auto_bridge)
 cdx
 fci
+auto_bridge
 EOF
 
 echo "I: 97-ask-modules.chroot: wrote $CONF"

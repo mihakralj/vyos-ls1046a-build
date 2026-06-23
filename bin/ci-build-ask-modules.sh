@@ -175,6 +175,44 @@ echo "### Patched cdx_main.c: added extern uint32_t num_fmans"
 sed -i 's/^static uint32_t num_fmans;/uint32_t num_fmans;/' "$ASK_DIR/cdx/dpa_cfg.c"
 echo "### Patched dpa_cfg.c: num_fmans no longer static"
 
+# Un-static cdx's offline_port_info array so cdx_main.c can populate it
+sed -i 's/^static struct oh_port_info offline_port_info/struct oh_port_info offline_port_info/' "$ASK_DIR/cdx/devoh.c"
+echo "### Patched devoh.c: offline_port_info no longer static"
+
+# Add headers for kernel OH port API
+sed -i '/^#include "lnxwrp_fm.h"/a\
+#include <linux/fsl_oh_port.h>\n\
+extern int oh_port_driver_get_port_info(struct fman_offline_port_info *info);' "$ASK_DIR/cdx/cdx_main.c"
+echo "### Patched cdx_main.c: added fsl_oh_port.h include"
+
+# ── Patch: populate cdx OH ports from kernel fsl_oh driver ─────────────────
+# oh_port_driver_get_port_info() requires caller to pre-fill port_name.
+# Call it once per known OH port and mirror into cdx's offline_port_info[].
+sed -i '/cdx: pre-populated MURAM handle/i\
+\t/* Mirror kernel OH port info into cdx array for alloc_offline_port() */\
+\t{\
+\t\tstatic const char *oh_names[] = {"dpa-fman0-oh@2", "dpa-fman0-oh@3"};\
+\t\tint oi;\
+\t\tfor (oi = 0; oi < 2; oi++) {\
+\t\t\tstruct fman_offline_port_info kinfo;\
+\t\t\tstrncpy(kinfo.port_name, oh_names[oi], sizeof(kinfo.port_name)-1);\
+\t\t\tif (oh_port_driver_get_port_info(\&kinfo) == 0 \&\& kinfo.channel_id) {\
+\t\t\t\tint slot;\
+\t\t\t\tfor (slot = 0; slot < MAX_OF_PORTS; slot++)\
+\t\t\t\t\tif (!(offline_port_info[0][slot].flags \& PORT_VALID)) break;\
+\t\t\t\tif (slot < MAX_OF_PORTS) {\
+\t\t\t\t\toffline_port_info[0][slot].flags = PORT_VALID;\
+\t\t\t\t\toffline_port_info[0][slot].channel = kinfo.channel_id;\
+\t\t\t\t\toffline_port_info[0][slot].fm_idx = 0;\
+\t\t\t\t\tprintk("cdx: OH port %s imported (ch %d fq %d)\\n",\
+\t\t\t\t\t\toh_names[oi], kinfo.channel_id, kinfo.default_fqid);\
+\t\t\t\t}\
+\t\t\t}\
+\t\t}\
+\t}\
+' "$ASK_DIR/cdx/cdx_main.c"
+echo "### Patched cdx_main.c: import OH port info from kernel fsl_oh driver"
+
 # Then insert FMan MURAM init right before cdx_init_fqid_procfs()
 sed -i '/\/\* creating a \/proc\/fqid_stats dir/i\
 \t/* Pre-populate FMan info via /dev/fm0pcd so MURAM handle is available */\
