@@ -1,0 +1,16 @@
+diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_proxy.c b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_proxy.c
+index aa08ff8..76b5252 100644
+--- a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_proxy.c
++++ b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_proxy.c
+@@ -197,6 +197,11 @@ static int dpaa_eth_proxy_probe(struct platform_device *_of_dev)
+ 		     mac_dev->addr[0], mac_dev->addr[1], mac_dev->addr[2],
+ 		     mac_dev->addr[3], mac_dev->addr[4], mac_dev->addr[5]);
+ 
++	/* Populate dpaa-ethernet child devices so fsl_dpa can probe them */
++	err = devm_of_platform_populate(dev);
++	if (err)
++		goto port_enable_fail;
++
+ 	return 0; /* Proxy interface initialization ended */
+ 
+ port_enable_fail:
