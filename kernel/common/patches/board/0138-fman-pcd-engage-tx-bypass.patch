@@ -1,0 +1,145 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+Date: Mon, 23 Jun 2026 03:45:00 +0000
+Subject: [PATCH] fman_pcd: exported TX bypass engage/disengage for ask.ko
+
+ask.ko holds an opaque struct fman * handle (from fman_bind()) but has no
+access to the per-port FMan TX BMI registers.  To wire the M1 engage/
+disengage cycle into the TX confirm bypass (board patch 0136), the kernel
+must export a pair of functions that the OOT module can call:
+
+  fman_pcd_engage_tx_release(struct fman *fman)  — iterate every bound
+    FMan port, find TX ports, call
+    fman_port_set_silicon_hit_release_mode(port, true).
+
+  fman_pcd_disengage_tx_release(struct fman *fman) — iterate every bound
+    FMan port, find TX ports, call
+    fman_port_set_silicon_hit_release_mode(port, false).
+
+Both are idempotent.  They are the kernel-side half of the dual-handoff
+contract: ask.ko's engage() calls fman_pcd_offload_engage() (the M1 KG
+mode-switch) AND fman_pcd_engage_tx_release() (the TX confirm bypass),
+and the corresponding disengage calls the inverses.
+
+Ships DORMANT: no caller in this patch.  Productive callers land in
+ask_hw.c's next revision.  The functions are EXPORT_SYMBOL_GPL so
+ask.ko resolves them at insmod time while the kernel tree is intact.
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -3023,6 +3023,89 @@ void fman_pcd_offload_disengage(struct fman *fman, u8 hw_port_id)
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_offload_disengage);
+ 
++/*
++ * fman_pcd_engage_tx_release — enable TX confirm bypass on all TX ports
++ *
++ * Iterates every FMan port known to the driver, finds TX-side BMI ports,
++ * and engages the silicon-hit release mode (patch 0136).  ask.ko calls
++ * this after fman_pcd_offload_engage() to complete the M1 engage cycle:
++ * RX side = KG mode-switch + CC tree; TX side = zero-QMan-enqueue release.
++ *
++ * Idempotent: repeated calls are safe (the TX port function stores its
++ * pre-engage register values on the first call and ignores subsequent
++ * enables).
++ *
++ * @fman: opaque fman handle from fman_bind()
++ *
++ * Return: 0 on success, -ENODEV if fman is invalid or has no ports.
++ */
++int fman_pcd_engage_tx_release(struct fman *fman)
++{
++	struct fman_pcd *pcd;
++	struct fman_port *port;
++	int count = 0, errors = 0;
++
++	if (!fman)
++		return -ENODEV;
++	pcd = fman_get_pcd(fman);
++	if (!pcd)
++		return -ENODEV;
++
++	mutex_lock(&pcd->lock);
++	list_for_each_entry(port, &pcd->ports, node) {
++		int rc;
++
++		/* Only TX ports carry the BMI TX confirm registers. */
++		if (port->port_type != FMAN_PORT_TYPE_TX)
++			continue;
++		rc = fman_port_set_silicon_hit_release_mode(port, true);
++		if (rc == 0)
++			count++;
++		else
++			errors++;
++	}
++	mutex_unlock(&pcd->lock);
++
++	if (count == 0 && errors == 0)
++		return -ENODEV;
++	return errors ? -EIO : 0;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_engage_tx_release);
++
++/*
++ * fman_pcd_disengage_tx_release — restore TX confirm on all TX ports
++ *
++ * Inverse of fman_pcd_engage_tx_release().  Restores the saved pre-engage
++ * fmbm_tcfqid / fmbm_tfene register values on any TX port that was
++ * previously engaged (idempotent — ports never engaged are skipped).
++ *
++ * @fman: opaque fman handle from fman_bind()
++ */
++void fman_pcd_disengage_tx_release(struct fman *fman)
++{
++	struct fman_pcd *pcd;
++	struct fman_port *port;
++
++	if (!fman)
++		return;
++	pcd = fman_get_pcd(fman);
++	if (!pcd)
++		return;
++
++	mutex_lock(&pcd->lock);
++	list_for_each_entry(port, &pcd->ports, node) {
++		if (port->port_type != FMAN_PORT_TYPE_TX)
++			continue;
++		/*
++		 * Idempotent: if the port was never engaged, the saved
++		 * tcfqid/tfene fields are zero and the call is a no-op.
++		 */
++		fman_port_set_silicon_hit_release_mode(port, false);
++	}
++	mutex_unlock(&pcd->lock);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_disengage_tx_release);
++
+ static int fman_pcd_probe(struct platform_device *pdev)
+ {
+ 	struct device_node *fm_node;
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -160,6 +160,8 @@ struct fman_pcd_cc_hw_spec;
+ /* single coarse mode-switch entry point */
+ int fman_pcd_offload_engage(struct fman *fman, u8 hw_port_id);
+ void fman_pcd_offload_disengage(struct fman *fman, u8 hw_port_id);
++int fman_pcd_engage_tx_release(struct fman *fman);
++void fman_pcd_disengage_tx_release(struct fman *fman);
+ 
+ #else /* !CONFIG_FSL_FMAN_PCD */
+ static inline int
+@@ -168,6 +170,12 @@ fman_pcd_offload_engage(struct fman *fman, u8 hw_port_id)
+ static inline void
+ fman_pcd_offload_disengage(struct fman *fman, u8 hw_port_id)
+ { }
++static inline int
++fman_pcd_engage_tx_release(struct fman *fman)
++{ return -ENODEV; }
++static inline void
++fman_pcd_disengage_tx_release(struct fman *fman)
++{ }
+ #endif /* CONFIG_FSL_FMAN_PCD */
+ 
+ /* coarse-classifier static install (board 0098) */
