@@ -189,47 +189,60 @@ echo "### Patched cdx_main.c: added extern uint32_t num_fmans"
 sed -i 's/^static uint32_t num_fmans;/uint32_t num_fmans;/' "$ASK_DIR/cdx/dpa_cfg.c"
 echo "### Patched dpa_cfg.c: num_fmans no longer static"
 
-# Un-static cdx's offline_port_info array so cdx_main.c can populate it
+# Un-static cdx's offline_port_info array in devoh.c
 sed -i 's/^static struct oh_port_info offline_port_info/struct oh_port_info offline_port_info/' "$ASK_DIR/cdx/devoh.c"
 echo "### Patched devoh.c: offline_port_info no longer static"
 
-# Add headers for kernel OH port API + extern for cdx's offline_port_info
-sed -i '/^#include "lnxwrp_fm.h"/a\
-#include <linux/fsl_oh_port.h>\n\
-extern int oh_port_driver_get_port_info(struct fman_offline_port_info *info);\n\
-extern struct oh_port_info offline_port_info[1][MAX_OF_PORTS];' "$ASK_DIR/cdx/cdx_main.c"
-echo "### Patched cdx_main.c: added fsl_oh_port.h + externs"
-
 # ── Patch: populate cdx OH ports from kernel fsl_oh driver ─────────────────
-# oh_port_driver_get_port_info() requires caller to pre-fill port_name.
-# Call it once per known OH port and mirror into cdx's offline_port_info[].
-sed -i '/cdx: pre-populated MURAM handle/i\
-\t/* Mirror kernel OH port info into cdx array for alloc_offline_port() */\
-\t{\
-\t\tprintk("cdx: scanning kernel OH ports...\\n");\
-\t\tstatic const char *oh_names[] = {"dpa-fman0-oh@2", "dpa-fman0-oh@3"};\
-\t\tint oi;\
-\t\tfor (oi = 0; oi < 2; oi++) {\
-\t\t\tstruct fman_offline_port_info kinfo;\
-\t\t\tstrncpy(kinfo.port_name, oh_names[oi], sizeof(kinfo.port_name)-1);\
-\t\t\tif (oh_port_driver_get_port_info(\&kinfo) == 0) {\
-\t\t\t\tint slot;\
-\t\t\t\tfor (slot = 0; slot < MAX_OF_PORTS; slot++)\
-\t\t\t\t\tif (!(offline_port_info[0][slot].flags \& PORT_VALID)) break;\
-\t\t\t\tif (slot < MAX_OF_PORTS) {\
-\t\t\t\t\toffline_port_info[0][slot].flags = PORT_VALID;\
-\t\t\t\t\toffline_port_info[0][slot].channel = kinfo.channel_id;\
-\t\t\t\t\toffline_port_info[0][slot].fm_idx = 0;\
-\t\t\t\t\tprintk("cdx: OH port %s imported (ch %d fq_egr %d fq_err %d)\\n",\
-\t\t\t\t\t\toh_names[oi], kinfo.channel_id, kinfo.default_fqid, kinfo.err_fqid);\
-\t\t\t\t}\
-\t\t\t} else {\
-\t\t\t\tprintk("cdx: OH port %s NOT found in kernel\\n", oh_names[oi]);\
+# The kernel's fsl_oh driver (offline_port.c) populates offline_port_info[]
+# during probe. cdx needs to mirror this into its own array so
+# alloc_offline_port() can find IPsec/WiFi OH ports.
+#
+# Add an import function to devoh.c (where struct oh_port_info is visible),
+# and call it from cdx_main.c during module init before IPsec init.
+sed -i '/^int alloc_offline_port/i\
+\
+/* Import OH port info from kernel fsl_oh driver into cdx array. */\
+void cdxdrv_import_oh_ports(void)\
+{\
+\tstatic const char *oh_names[] = {"dpa-fman0-oh@2", "dpa-fman0-oh@3"};\
+\tint oi;\
+\tprintk("cdx: scanning kernel OH ports...\\n");\
+\tfor (oi = 0; oi < 2; oi++) {\
+\t\tstruct fman_offline_port_info kinfo;\
+\t\tmemset(\&kinfo, 0, sizeof(kinfo));\
+\t\tstrncpy(kinfo.port_name, oh_names[oi], sizeof(kinfo.port_name)-1);\
+\t\tif (oh_port_driver_get_port_info(\&kinfo) == 0) {\
+\t\t\tint slot;\
+\t\t\tfor (slot = 0; slot < MAX_OF_PORTS; slot++)\
+\t\t\t\tif (!(offline_port_info[0][slot].flags \& PORT_VALID)) break;\
+\t\t\tif (slot < MAX_OF_PORTS) {\
+\t\t\t\toffline_port_info[0][slot].flags = PORT_VALID;\
+\t\t\t\toffline_port_info[0][slot].channel = kinfo.channel_id;\
+\t\t\t\toffline_port_info[0][slot].fm_idx = 0;\
+\t\t\t\tprintk("cdx: OH port %s imported (ch %d egr_fq %d err_fq %d)\\n",\
+\t\t\t\t\toh_names[oi], kinfo.channel_id, kinfo.default_fqid, kinfo.err_fqid);\
 \t\t\t}\
+\t\t} else {\
+\t\t\tprintk("cdx: OH port %s NOT found in kernel\\n", oh_names[oi]);\
 \t\t}\
 \t}\
-' "$ASK_DIR/cdx/cdx_main.c"
-echo "### Patched cdx_main.c: import OH port info from kernel fsl_oh driver"
+}\
+' "$ASK_DIR/cdx/devoh.c"
+echo "### Patched devoh.c: added cdxdrv_import_oh_ports()"
+
+# Also need linux/fsl_oh_port.h in devoh.c for fman_offline_port_info + oh_port_driver_get_port_info
+sed -i '/^#include "portdefs.h"/a\
+#include <linux/fsl_oh_port.h>\n\
+extern int oh_port_driver_get_port_info(struct fman_offline_port_info *info);' "$ASK_DIR/cdx/devoh.c"
+echo "### Patched devoh.c: added fsl_oh_port.h include"
+
+# In cdx_main.c, call the import BEFORE MURAM pre-population
+sed -i '/cdx: pre-populated MURAM handle/i\
+\tcdxdrv_import_oh_ports();' "$ASK_DIR/cdx/cdx_main.c"
+sed -i '/^#include "dpa_ipsec.h"/a\
+void cdxdrv_import_oh_ports(void);' "$ASK_DIR/cdx/cdx_main.c"
+echo "### Patched cdx_main.c: call cdxdrv_import_oh_ports() + extern decl"
 
 # Then insert FMan MURAM init right before cdx_init_fqid_procfs()
 sed -i '/\/\* creating a \/proc\/fqid_stats dir/i\
