@@ -201,7 +201,7 @@ sed -i '/cdx: pre-populated MURAM handle/i\
 \t\tfor (oi = 0; oi < 2; oi++) {\
 \t\t\tstruct fman_offline_port_info kinfo;\
 \t\t\tstrncpy(kinfo.port_name, oh_names[oi], sizeof(kinfo.port_name)-1);\
-\t\t\tif (oh_port_driver_get_port_info(\&kinfo) == 0 \&\& kinfo.channel_id) {\
+\t\t\tif (oh_port_driver_get_port_info(\&kinfo) == 0) {\
 \t\t\t\tint slot;\
 \t\t\t\tfor (slot = 0; slot < MAX_OF_PORTS; slot++)\
 \t\t\t\t\tif (!(offline_port_info[0][slot].flags \& PORT_VALID)) break;\
@@ -209,9 +209,11 @@ sed -i '/cdx: pre-populated MURAM handle/i\
 \t\t\t\t\toffline_port_info[0][slot].flags = PORT_VALID;\
 \t\t\t\t\toffline_port_info[0][slot].channel = kinfo.channel_id;\
 \t\t\t\t\toffline_port_info[0][slot].fm_idx = 0;\
-\t\t\t\t\tprintk("cdx: OH port %s imported (ch %d fq %d)\\n",\
-\t\t\t\t\t\toh_names[oi], kinfo.channel_id, kinfo.default_fqid);\
+\t\t\t\t\tprintk("cdx: OH port %s imported (ch %d fq_egr %d fq_err %d)\\n",\
+\t\t\t\t\t\toh_names[oi], kinfo.channel_id, kinfo.default_fqid, kinfo.err_fqid);\
 \t\t\t\t}\
+\t\t\t} else {\
+\t\t\t\tprintk("cdx: OH port %s NOT found in kernel\\n", oh_names[oi]);\
 \t\t\t}\
 \t\t}\
 \t}\
