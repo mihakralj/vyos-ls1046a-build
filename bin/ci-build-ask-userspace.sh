@@ -275,7 +275,7 @@ ConditionPathExists=/etc/cdx_pcd.xml
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/dpa_app -f /etc/cdx_cfg.xml --pcd /etc/cdx_pcd.xml --fmc /usr/sbin/fmc
+ExecStart=/usr/bin/dpa_app
 ExecStartPost=/bin/sleep 1
 RemainAfterExit=yes
 Restart=no
