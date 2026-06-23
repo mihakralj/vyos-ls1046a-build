@@ -195,6 +195,7 @@ echo "### Patched devoh.c: offline_port_info no longer static"
 
 # Add OH port import function to devoh.c (struct oh_port_info visible here)
 sed -i '/^int alloc_offline_port/i\
+void cdxdrv_import_oh_ports(void);\
 \
 /* Import OH ports from kernel fsl_oh driver into cdx array */\
 void cdxdrv_import_oh_ports(void)\
