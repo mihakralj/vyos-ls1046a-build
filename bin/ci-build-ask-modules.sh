@@ -179,7 +179,7 @@ echo "### Patched dpa_cfg.c: num_fmans no longer static"
 sed -i '/\/\* creating a \/proc\/fqid_stats dir/i\
 \t/* Pre-populate FMan info via /dev/fm0pcd so MURAM handle is available */\
 \t{\
-\t\tstruct file *fm_file = filp_open("/dev/fm0pcd", O_RDWR, 0);\
+\t\tstruct file *fm_file = filp_open("/dev/fm0-pcd", O_RDWR, 0);\
 \t\tif (!IS_ERR(fm_file)) {\
 \t\t\tt_LnxWrpFmDev *wrapper = (t_LnxWrpFmDev *)fm_file->private_data;\
 \t\t\tif (wrapper \&\& wrapper->h_MuramDev) {\
@@ -188,7 +188,7 @@ sed -i '/\/\* creating a \/proc\/fqid_stats dir/i\
 \t\t\t\tfman_info->physicalMuramBase = wrapper->fmMuramPhysBaseAddr;\
 \t\t\t\tfman_info->fmMuramMemSize = wrapper->fmMuramMemSize;\
 \t\t\t\tnum_fmans = 1;\
-\t\t\t\tprintk("cdx: pre-populated MURAM handle from /dev/fm0pcd\\n");\
+\t\t\t\tprintk("cdx: pre-populated MURAM handle from /dev/fm0-pcd\\n");\
 \t\t\t}\
 \t\t\tfilp_close(fm_file, NULL);\
 \t\t}\
