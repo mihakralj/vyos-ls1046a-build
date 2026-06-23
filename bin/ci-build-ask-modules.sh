@@ -201,7 +201,7 @@ void cdxdrv_import_oh_ports(void);\
 void cdxdrv_import_oh_ports(void)\
 {\
 \tint oi;\
-\tprintk("cdx: scanning kernel OH ports...\\\\n");\
+	\tprintk("cdx: scanning kernel OH ports...\\n");\
 \tfor (oi = 0; oi < 2; oi++) {\
 \t\tstruct fman_offline_port_info kinfo;\
 \t\tchar name[32];\
@@ -216,11 +216,11 @@ void cdxdrv_import_oh_ports(void)\
 \t\t\t\toffline_port_info[0][slot].flags = PORT_VALID;\
 \t\t\t\toffline_port_info[0][slot].channel = kinfo.channel_id;\
 \t\t\t\toffline_port_info[0][slot].fm_idx = 0;\
-\t\t\t\tprintk("cdx: OH port %s imported (ch %d egr_fq %d err_fq %d)\\\\n",\
+	\t\t\t\tprintk("cdx: OH port %s imported (ch %d egr_fq %d err_fq %d)\\n",\
 \t\t\t\t\tname, kinfo.channel_id, kinfo.default_fqid, kinfo.err_fqid);\
 \t\t\t}\
 \t\t} else {\
-\t\t\tprintk("cdx: OH port %s NOT found in kernel\\\\n", name);\
+	\t\t\tprintk("cdx: OH port %s NOT found in kernel\\n", name);\
 \t\t}\
 \t}\
 }\
