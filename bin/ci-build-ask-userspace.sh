@@ -257,6 +257,10 @@ cp "$FMC_DIR/source/fmc" "$STAGE/usr/sbin/fmc"
 # Runtime config files from ASK repo
 # NOTE: modules-load.d is handled by 97-ask-modules.chroot hook, not here.
 cp "$ASK_DIR/config/cmm.service"      "$STAGE/etc/systemd/system/cmm.service"
+# Fix cmm.service: remove WiFi/vwd pre/post hooks (we don't have WiFi offload),
+# and set Restart=no to prevent infinite cycling when cdx is in degraded mode.
+sed -i '/ExecStartPre=/d; /ExecStopPost=/d; s/Restart=on-failure/Restart=no/' "$STAGE/etc/systemd/system/cmm.service"
+echo "### Patched cmm.service: removed WiFi hooks, set Restart=no"
 mkdir -p "$STAGE/etc/config"
 [ -f "$ASK_DIR/config/fastforward" ] && cp "$ASK_DIR/config/fastforward" "$STAGE/etc/config/fastforward"
 [ -f "$ASK_DIR/config/gateway-dk/cdx_cfg.xml" ] && cp "$ASK_DIR/config/gateway-dk/cdx_cfg.xml" "$STAGE/etc/cdx_cfg.xml"
