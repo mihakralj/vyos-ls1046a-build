@@ -223,6 +223,13 @@ jobs:
         if: ${{ !startsWith(github.ref_name, 'nxp-sdk') }}
         run: bin/ci-setup-kernel.sh
 
+      - name: Fix swphy WARN_ON spam (nxp-sdk only — SDK 10G fixed-link polling)
+        if: ${{ startsWith(github.ref_name, 'nxp-sdk') }}
+        run: |
+          sed -i 's/WARN_ON(speed_index < 0)/WARN_ON_ONCE(speed_index < 0)/' \
+            work/linux-6.12.49/drivers/net/phy/swphy.c
+          echo "### Patched swphy.c: WARN_ON -> WARN_ON_ONCE"
+
       - name: Compile Mono DTB from DTS (mainline only — skip on nxp-sdk)
         if: ${{ !startsWith(github.ref_name, 'nxp-sdk') }}
         run: bin/ci-compile-mono-dtb.sh
