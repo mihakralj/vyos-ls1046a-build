@@ -26,11 +26,11 @@ for p in data/vyos-1x-*.patch; do
 done
 cp data/reftree.cache "$PATCH_STAGING/"
 
-# Substitute @@FLAVOR@@ placeholder in the MOTD patch so the post-login banner
+# Substitute @@FLAVOR@@ placeholder in the MOTD patch so the post-login banner identifies this as the ASK2 build.
 # correctly identifies which build flavor is installed (default | ask | vpp).
-# The MOTD patch (vyos-1x-012-ls1046a-motd.patch) ships with literal
+# The MOTD patch (vyos-1x-012) now hardcodes 'ASK2 — rewrite of NXP ASK'.
 # `@@FLAVOR@@` in the new-file content; sed-replace it on the STAGED copy
-# only, so the in-repo patch stays flavor-agnostic.
+# only.
 #
 # Why sed the staged copy (not the source patch): keeps `git status` clean
 # across CI runs and lets a single patch file serve all three flavors.
@@ -42,7 +42,7 @@ cp data/reftree.cache "$PATCH_STAGING/"
 MOTD_PATCH="$PATCH_STAGING/vyos-1x-012-ls1046a-motd.patch"
 if [ -f "$MOTD_PATCH" ]; then
   sed -i "s/@@FLAVOR@@/${FLAVOR:-default}/g" "$MOTD_PATCH"
-  echo "### MOTD patch flavor substituted: @@FLAVOR@@ → ${FLAVOR:-default}"
+  echo "### MOTD patch already carries ASK2 branding (no substitution needed)"
 fi
 
 # NOTE: pre_build_hook MUST be a TOML *literal* multi-line string ('''...''')

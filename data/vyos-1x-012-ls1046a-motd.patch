@@ -12,8 +12,8 @@ index 0d52092..f9e3bd2 100644
  {% if version_data.lts_build %}
   * Support portal: {{ version_data.support_url }}
  {% endif %}
-+   Flavor:        @@FLAVOR@@
-+   Patches:       eMMC boot, Fan control, LED control, CAAM, SFP+, Watchdog, U-Boot env
++   Flavor:        ASK2 — rewrite of NXP ASK
++   Modules:       ask.ko, FMan PCD (KG/CC/MANIP/FE-VM/Policer), TX bypass, FE context builder, MANIP chain API, CAAM QI share, AF_XDP ZC
 +
   * Documentation:  {{ version_data.documentation_url }}
   * Project news:   {{ version_data.project_news_url }}
