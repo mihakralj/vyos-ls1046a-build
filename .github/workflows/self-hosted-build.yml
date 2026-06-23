@@ -95,8 +95,6 @@ jobs:
           exit 1
 
   # ── Step 2: Build VyOS on the self-hosted ARM64 runner ───────────
-  # Single-image build — one flavor-neutral ISO.  Publishing is handled
-  # internally by auto-build.yml's publish job.
   call-auto-build:
     needs: start-vm
     uses: ./.github/workflows/auto-build.yml
@@ -109,8 +107,7 @@ jobs:
     secrets:
       MOK_KEY: ${{ secrets.MOK_KEY }}
       MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
-      SSH_SIGNING_KEY: ${{ secrets.SSH_SIGNING_KEY }}
-      SSH_ALLOWED_SIGNERS: ${{ secrets.SSH_ALLOWED_SIGNERS }}
+      DISCORD_BOT_KEY: ${{ secrets.DISCORD_BOT_KEY }}
 
   # NOTE: VM deallocation is intentionally NOT a CI step. The VM runs a
   # systemd timer (idle-deallocate.service) that self-deallocates after 10
