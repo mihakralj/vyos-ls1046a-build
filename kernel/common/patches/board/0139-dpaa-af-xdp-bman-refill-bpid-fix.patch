@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
+Date: Tue, 24 Jun 2026 05:15:00 +0000
+Subject: [PATCH] dpaa1: fix BMan IVCI crash in NAPI refill — set bpid on each slot (0139)
+
+Patch 0084's af_xdp_pool_napi_refill() calls bman_release() with
+XSK UMEM DMA cookies.  bman_release() composes the RCR (Release Command
+Ring) slot as documented in bman.c:
+
+  - Slot 0: bm_buffer_set_bpid(r->bufs, pool->bpid) — correct bpid
+  - Slots 1..N-1: raw memcpy from the caller's bm_buffer array,
+    preserving whatever bpid was in the high word of each struct
+
+0084 zeroes bmbs[i].data then calls bm_buffer_set64() — this sets the
+DMA address but leaves bpid=0 in the bpid field.  When bman_release()
+memcpies slots 1..7, those slots carry bpid=0 which BMan validates as
+an invalid pool ID → ErrInt: Invalid Command Verb → RCU stall → hard hang.
+
+This was the exact crash observed on DUT 2026-05-27 (M3-3 step 4
+regression, DUT 192.168.1.190, kernel 6.18.33-vyos): "bman_ccsr ErrInt:
+Invalid Command Verb" emitted twice at t=357s/360s, followed by
+rcu_preempt stalls on CPU#3, soft lockup 26s→52s→78s→84s → power-cycle
+required.
+
+Fix: after bm_buffer_set64(), call bm_buffer_set_bpid() on each buffer
+slot with the pool's actual bpid (from bman_get_bpid()).  This matches
+the proven dpaa_bp_add_8_bufs() pattern in dpaa_eth.c which has run
+crash-free on this board for years.
+
+One-line change, no API surface change, no ASK2 impact (af_xdp_pool
+napi_refill runs in dpaa_eth_poll NAPI tail, orthogonal to the ASK2
+hardware PCD classification path on different FMan ports).
+Compile-verified zero-error on 6.18.34 arm64.
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -1267,6 +1267,7 @@
+  */
+ bmbs[i].data = 0;
+ bm_buffer_set64(&bmbs[i], dma);
++bm_buffer_set_bpid(&bmbs[i], bman_get_bpid(bpool));
+ /* 0103b: record-on-FILL so the RX hook can Recover this
+  * chunk's xdp_buff from its bare DMA cookie.  Keyed by
+  * head-index (stable for the pool's lifetime).
