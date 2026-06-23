@@ -700,6 +700,7 @@ cp "$BOARD_PATCH_DIR/0135-fman-pcd-fe-context-build.patch"   "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0136-fman-port-tx-confirm-bypass.patch" "$KERNEL_PATCHES/"
 # 0137: MANIP creation + chain API for L3 forwarding (fman_pcd_manip_create/_destroy/_chain_create/_chain_destroy/_hmtd_off).
 cp "$BOARD_PATCH_DIR/0137-fman-pcd-manip-create-chain.patch" "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/0139-dpaa-af-xdp-bman-refill-bpid-fix.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
