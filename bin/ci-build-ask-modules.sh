@@ -109,8 +109,17 @@ fi
 # If dpa_app crashes (SEGV in FM_Open/fmc_compile), the original code
 # does rc=-EIO; goto exit which kills cdx module load. Make it non-fatal:
 # print a warning but let cdx continue in degraded mode.
-sed -i '/start_dpa_app failed rc/{ n; /rc = -EIO/d; /goto exit/d; }' "$ASK_DIR/cdx/cdx_main.c"
-echo "### Patched cdx_main.c: start_dpa_app failure non-fatal"
+# Don't kill cdx init if dpa_app crashes. The original code does:
+#   printk("...start_dpa_app failed rc...");
+#   /* cant pass error code from start_dpa_app */
+#   rc = -EIO;
+#   goto exit;
+# We keep the printk (it's useful), remove rc=-EIO and goto exit.
+sed -i '/start_dpa_app failed rc/,/goto exit;/{
+  /rc = -EIO/s/.*/    \/* rc = -EIO; (suppressed -- non-fatal) *\//
+  /goto exit/s/.*/    \/* goto exit; (suppressed -- non-fatal) *\//
+}' "$ASK_DIR/cdx/cdx_main.c"
+echo "### Patched cdx_main.c: start_dpa_app failure non-fatal (all paths)"
 
 # ── Patch: stub out WiFi offload init ─────────────────────────────────────
 # cdx_module_init() calls dpaa_vwd_init() under CFG_WIFI_OFFLOAD, which
