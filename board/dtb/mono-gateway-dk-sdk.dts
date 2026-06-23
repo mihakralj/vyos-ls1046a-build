@@ -3,12 +3,13 @@
  * Mono Gateway DK — SDK device tree (VyOS variant)
  *
  * Includes the mainline board DTS plus SDK portal overlays (cell-index
- * on BMan/QMan portals, FQID/CGR/CEETM ranges). Does NOT include
- * bootmem or fman0-extended-args — those conflict with VyOS's initramfs
- * boot path (U-Boot loads initrd to the same region bootmem would reserve).
+ * on BMan/QMan portals), OH port bindings for CDX IPsec, FMan extended-args
+ * for per-port FIFO sizing, and 10G fixed-link overrides for SFP+ cages.
  *
  * Source: we-are-mono/OpenWRT-ASK (target/linux/layerscape/files/)
- * Adapted for VyOS: bootmem + extended-args removed, portal overlays retained.
+ * Adapted for VyOS: bootmem nodes removed (conflict with initramfs),
+ * fman0-extended-args retained (config only, no memory reservation),
+ * OH port bindings + 10G fixed-link overrides added.
  */
 
 #include "mono-gateway-dk.dts"
@@ -30,13 +31,78 @@
 &fman0_oh_0x7 { /delete-property/ cell-index; cell-index = <5>; };
 
 /*
+ * FMan offline-parsing (OH) port bindings — required for cdx IPsec offload.
+ *
+ * Two OH ports (port@83000/IPsec and port@84000/WiFi) are bound to specific
+ * QMan frame queues for CDX/IPsec packet re-injection. The cdx module's
+ * devoh.c queries these via oh_port_driver_get_port_info().
+ *
+ * Matching OpenWRT mono-gateway-dk-sdk.dts lines 314-325.
+ */
+&fman0 {
+	dpa-fman0-oh@2 {
+		compatible = "fsl,dpa-oh";
+		fsl,qman-frame-queues-oh = <0x60 0x01 0x61 0x01>;
+		fsl,fman-oh-port = <&fman0_oh_0x3>;
+	};
+
+	dpa-fman0-oh@3 {
+		compatible = "fsl,dpa-oh";
+		fsl,qman-frame-queues-oh = <0x62 0x01 0x63 0x01>;
+		fsl,fman-oh-port = <&fman0_oh_0x4>;
+	};
+};
+
+/*
+ * FMan extended-args — per-port FIFO sizing for the SDK FMan driver.
+ *
+ * This is a config descriptor under /cpus/ (NOT a memory reservation).
+ * It tells the SDK FMan driver the FIFO sizes for OH ports used by CDX.
+ * total-fifo-size = 0x3e500 (254,272 bytes).
+ *
+ * Without this, alloc_offline_port() fails with "no free of ports"
+ * because the FMan driver doesn't know how to size the OH port FIFOs.
+ *
+ * Matching OpenWRT mono-gateway-dk-sdk.dts lines 24-48 (safe subset).
+ * bootmem0/bootmem1 nodes are NOT included — they conflict with VyOS
+ * initramfs boot (U-Boot loads initrd to the same region).
+ */
+/ {
+	cpus {
+		fman0-extended-args {
+		cell-index = <0x00>;
+		compatible = "fsl,fman-extended-args";
+		total-fifo-size = <0x3e500>;
+
+		/*
+		 * OH port extended-args — cell-index matches the SDK
+		 * override values (port@83000=1, port@84000=2)
+		 */
+		fman0_oh_0x3-extended-args {
+			cell-index = <0x01>;
+			compatible = "fsl,fman-port-op-extended-args";
+			fifo-size = <0x3200 0x00>;   /* 12,800 bytes for IPsec */
+			buffer-layout = <0x60 0x40>;
+		};
+
+		fman0_oh_0x4-extended-args {
+			cell-index = <0x02>;
+			compatible = "fsl,fman-port-op-extended-args";
+			fifo-size = <0x900 0x00>;    /* 2,304 bytes for WiFi */
+			buffer-layout = <0x60 0x40>;
+		};
+	};
+};
+}; /* / (root node re-entry close) */
+
+/*
  * 10G MAC fixed-link overrides (matching OpenWRT SDK DTS).
  *
  * The SDK fsl_mac driver does NOT support managed="in-band-status" or
  * sfp=<...> — those are mainline DPAA bindings. Without explicit fixed-link
  * the SDK driver falls through to a broken swphy emulation (10G isn't
  * representable in Clause 22 MII registers). Set fixed-link=10000/Full
- * so the SDK driver skips the swphy path and initializes the serdes
+ * so the SDK driver skips the swphy path and initialises the serdes
  * directly for 10GBASE-R/XGMII.
  */
 &fman0 {
