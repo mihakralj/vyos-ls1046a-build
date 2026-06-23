@@ -698,15 +698,6 @@ cp "$BOARD_PATCH_DIR/0135-fman-pcd-fe-context-build.patch"   "$KERNEL_PATCHES/"
 # without QMan TX-confirm enqueue.  Kernel TX (FCO=1) is unaffected.
 # This eliminates the ~20% CPU softirq floor proved on hardware 2026-05-25.
 cp "$BOARD_PATCH_DIR/0136-fman-port-tx-confirm-bypass.patch" "$KERNEL_PATCHES/"
-# 0137: nf_flow_table_offload diagnostics — rate-limited logging at the two
-# silent failure points in flow_offload_work_add() (alloc failure and zero
-# block_cb drivers accepted the flow).  Root cause of ASK2 C6 — without
-# these diagnostics the operator has zero visibility into offload promotion.
-cp "$BOARD_PATCH_DIR/0137-nf-flow-offload-diag.patch"       "$KERNEL_PATCHES/"
-# 0138: TX bypass engage/disengage for ask.ko — fman_pcd_engage_tx_release()
-# and fman_pcd_disengage_tx_release().  Exported GPL so ask.ko can call them
-# alongside fman_pcd_offload_engage/disengage() in the M1 engage cycle.
-cp "$BOARD_PATCH_DIR/0138-fman-pcd-engage-tx-bypass.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
