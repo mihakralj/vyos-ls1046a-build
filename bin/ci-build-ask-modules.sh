@@ -238,26 +238,8 @@ sed -i '/^#include "dpa_ipsec.h"/i\
 void cdxdrv_import_oh_ports(void);' "$ASK_DIR/cdx/cdx_main.c"
 echo "### Patched cdx_main.c: forward-declare cdxdrv_import_oh_ports"
 
-# ── Patch: call OH port import from devoh.c function ────────────────────────
-# The cdxdrv_import_oh_ports() function already exists in devoh.c (inserted
-# by a previous sed). We just need to call it from cdx_module_init(). Previous
-# sed approaches failed because cdx_main.c can't see struct oh_port_info.
-# Instead, use python to reliably insert the call at a known-unique line.
-python3 -c "
-import re
-with open('$ASK_DIR/cdx/cdx_main.c', 'r') as f:
-    src = f.read()
-# Insert call right before the MURAM pre-populate printk
-src = src.replace(
-    'printk(\"cdx: pre-populated MURAM handle',
-    'cdxdrv_import_oh_ports();\n\tprintk(\"cdx: pre-populated MURAM handle'
-)
-with open('$ASK_DIR/cdx/cdx_main.c', 'w') as f:
-    f.write(src)
-print('### Patched cdx_main.c: call cdxdrv_import_oh_ports() before MURAM printk')
-"
-
-# Then insert FMan MURAM init right before cdx_init_fqid_procfs()
+# ── Insert FMan MURAM init block BEFORE cdx_init_fqid_procfs() ──────────────
+# This MUST run first so the printk target exists for the python call insertion.
 sed -i '/\/\* creating a \/proc\/fqid_stats dir/i\
 \t/* Pre-populate FMan info via /dev/fm0pcd so MURAM handle is available */\
 \t{\
@@ -277,6 +259,24 @@ sed -i '/\/\* creating a \/proc\/fqid_stats dir/i\
 \t}\
 ' "$ASK_DIR/cdx/cdx_main.c"
 echo "### Patched cdx_main.c: pre-populate fman_info MURAM handle before frag init"
+
+# ── Patch: insert cdxdrv_import_oh_ports() call BEFORE the MURAM printk ──────
+# The MURAM block (above) creates the printk line; this python replaces it
+# with a version that calls the OH import function first. Must run AFTER the
+# MURAM sed so the target string exists.
+python3 -c "
+import re
+with open('$ASK_DIR/cdx/cdx_main.c', 'r') as f:
+    src = f.read()
+# Insert call right before the MURAM pre-populate printk
+src = src.replace(
+    '\t\t\t\tprintk(\"cdx: pre-populated MURAM handle',
+    '\t\t\t\tcdxdrv_import_oh_ports();\n\t\t\t\tprintk(\"cdx: pre-populated MURAM handle'
+)
+with open('$ASK_DIR/cdx/cdx_main.c', 'w') as f:
+    f.write(src)
+print('### Patched cdx_main.c: call cdxdrv_import_oh_ports() before MURAM printk')
+"
 
 sed -i '/^static void cdx_module_deinit/,/^}$/ {
     /kfree(cdx_info);/i\
