@@ -156,6 +156,45 @@ sed -i '/^#include "cdx.h"/a\
 #include <linux/proc_fs.h>' "$ASK_DIR/cdx/cdx_main.c"
 echo "### Patched cdx_main.c: added linux/proc_fs.h include"
 
+# ── Patch: pre-populate fman_info MURAM handle via /dev/fm0pcd ──────────────
+# Normally dpa_app opens /dev/fm0pcd and passes the fd number via
+# CDX_CTRL_DPA_SET_PARAMS ioctl, which then calls cdxdrv_get_fman_handles()
+# to populate fman_info[0].muram_handle. Since START_DPA_APP is disabled,
+# this never happens. Open /dev/fm0pcd directly from cdx_module_init()
+# BEFORE cdx_init_frag_module() so the MURAM handle is available.
+sed -i '/^#include "lnxwrp_fsl_fman.h"/a\
+#include <linux/file.h>\
+\
+extern struct cdx_fman_info *fman_info;\
+extern uint32_t num_fmans;' "$ASK_DIR/cdx/cdx_main.c"
+echo "### Patched cdx_main.c: added linux/file.h + externs for fman_info/num_fmans"
+
+# Pre-populate FMan MURAM handle before cdx_init_frag_module.
+# First: make num_fmans non-static (dpa_cfg.c:33) so cdx_main.c can set it.
+sed -i 's/^static uint32_t num_fmans;/uint32_t num_fmans;/' "$ASK_DIR/cdx/dpa_cfg.c"
+echo "### Patched dpa_cfg.c: num_fmans no longer static"
+
+# Then insert FMan MURAM init right before cdx_init_fqid_procfs()
+sed -i '/\/\* creating a \/proc\/fqid_stats dir/i\
+\t/* Pre-populate FMan info via /dev/fm0pcd so MURAM handle is available */\
+\t{\
+\t\tstruct file *fm_file = filp_open("/dev/fm0pcd", O_RDWR, 0);\
+\t\tif (!IS_ERR(fm_file)) {\
+\t\t\tt_LnxWrpFmDev *wrapper = (t_LnxWrpFmDev *)fm_file->private_data;\
+\t\t\tif (wrapper \&\& wrapper->h_MuramDev) {\
+\t\t\t\tfman_info = kzalloc(sizeof(*fman_info), GFP_KERNEL);\
+\t\t\t\tfman_info->muram_handle = wrapper->h_MuramDev;\
+\t\t\t\tfman_info->physicalMuramBase = wrapper->fmMuramPhysBaseAddr;\
+\t\t\t\tfman_info->fmMuramMemSize = wrapper->fmMuramMemSize;\
+\t\t\t\tnum_fmans = 1;\
+\t\t\t\tprintk("cdx: pre-populated MURAM handle from /dev/fm0pcd\\n");\
+\t\t\t}\
+\t\t\tfilp_close(fm_file, NULL);\
+\t\t}\
+\t}\
+' "$ASK_DIR/cdx/cdx_main.c"
+echo "### Patched cdx_main.c: pre-populate fman_info MURAM handle before frag init"
+
 sed -i '/^static void cdx_module_deinit/,/^}$/ {
     /kfree(cdx_info);/i\
 \tremove_proc_subtree("fqid_stats", NULL);\
