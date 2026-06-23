@@ -75,9 +75,8 @@ jobs:
             TITLE="📦 New VyOS LS1046A Build"
             COLOR=5763719 # Discord Green
             
-            # Formats links horizontally like a navbar to save vertical space.
             # Using printf to properly handle the newlines (\n) for the JSON payload.
-            DESC=$(printf '[🛠️ Install Guide](https://github.com/%s/blob/main/INSTALL.md) • [📝 Release Notes](https://github.com/%s/releases/tag/%s) • [🐙 Repository](https://github.com/%s)\n\n**Direct upgrade command:**\n\`\`\`bash\nadd system image https://github.com/%s/releases/download/%s/%s\n\`\`\`' \
+            DESC=$(printf '[🛠️ Install Guide](https://github.com/%s/blob/main/INSTALL.md) [📝 Release Notes](https://github.com/%s/releases/tag/%s) [🐙 Repository](https://github.com/%s)\n\n**Direct upgrade command:**\n\`\`\`bash\nadd system image https://github.com/%s/releases/download/%s/%s\n\`\`\`' \
               "${REPO}" "${REPO}" "${BUILD_VERSION}" "${REPO}" \
               "${REPO}" "${BUILD_VERSION}" "${IMAGE_NAME}")
           else
@@ -103,12 +102,12 @@ jobs:
               embeds: [{
                 title: $title,
                 color: $color,
-                description: $desc,
                 fields: [
                   { name: "Version", value: $ver, inline: true },
                   { name: "Flavor", value: $fla, inline: true },
                   { name: "Edition", value: $edt, inline: true }
                 ],
+                description: $desc,
                 footer: { text: $footer },
                 timestamp: $timestamp
               }]
