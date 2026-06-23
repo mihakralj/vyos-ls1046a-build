@@ -164,10 +164,11 @@ echo "### Patched cdx_main.c: added linux/proc_fs.h include"
 # BEFORE cdx_init_frag_module() so the MURAM handle is available.
 sed -i '/^#include "lnxwrp_fsl_fman.h"/a\
 #include <linux/file.h>\
+#include "lnxwrp_fm.h"' "$ASK_DIR/cdx/cdx_main.c"
+sed -i '/^#include "lnxwrp_fm.h"/a\
 \
-extern struct cdx_fman_info *fman_info;\
 extern uint32_t num_fmans;' "$ASK_DIR/cdx/cdx_main.c"
-echo "### Patched cdx_main.c: added linux/file.h + externs for fman_info/num_fmans"
+echo "### Patched cdx_main.c: added extern uint32_t num_fmans"
 
 # Pre-populate FMan MURAM handle before cdx_init_frag_module.
 # First: make num_fmans non-static (dpa_cfg.c:33) so cdx_main.c can set it.
