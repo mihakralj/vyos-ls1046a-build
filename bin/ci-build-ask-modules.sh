@@ -193,62 +193,68 @@ echo "### Patched dpa_cfg.c: num_fmans no longer static"
 sed -i 's/^static struct oh_port_info offline_port_info/struct oh_port_info offline_port_info/' "$ASK_DIR/cdx/devoh.c"
 echo "### Patched devoh.c: offline_port_info no longer static"
 
-# ── Patch: populate cdx OH ports from kernel fsl_oh driver ─────────────────
-# The kernel's fsl_oh driver (offline_port.c) populates offline_port_info[]
-# during probe. cdx needs to mirror this into its own array so
-# alloc_offline_port() can find IPsec/WiFi OH ports.
-#
-# Add an import function to devoh.c (where struct oh_port_info is visible),
-# and call it from cdx_main.c during module init before IPsec init.
+# Add OH port import function to devoh.c (struct oh_port_info visible here)
 sed -i '/^int alloc_offline_port/i\
-void cdxdrv_import_oh_ports(void);\
 \
-/* Import OH port info from kernel fsl_oh driver into cdx array. */\
+/* Import OH ports from kernel fsl_oh driver into cdx array */\
 void cdxdrv_import_oh_ports(void)\
 {\
-\tstatic const char *oh_names[] = {"dpa-fman0-oh@2", "dpa-fman0-oh@3"};\
 \tint oi;\
-\tprintk("cdx: scanning kernel OH ports...\\n");\
+\tprintk("cdx: scanning kernel OH ports...\\\\n");\
 \tfor (oi = 0; oi < 2; oi++) {\
 \t\tstruct fman_offline_port_info kinfo;\
+\t\tchar name[32];\
+\t\tint slot;\
 \t\tmemset(\&kinfo, 0, sizeof(kinfo));\
-\t\tstrncpy(kinfo.port_name, oh_names[oi], sizeof(kinfo.port_name)-1);\
+\t\tsnprintf(name, sizeof(name), "dpa-fman0-oh@%d", oi+2);\
+\t\tstrncpy(kinfo.port_name, name, sizeof(kinfo.port_name)-1);\
 \t\tif (oh_port_driver_get_port_info(\&kinfo) == 0) {\
-\t\t\tint slot;\
 \t\t\tfor (slot = 0; slot < MAX_OF_PORTS; slot++)\
 \t\t\t\tif (!(offline_port_info[0][slot].flags \& PORT_VALID)) break;\
 \t\t\tif (slot < MAX_OF_PORTS) {\
 \t\t\t\toffline_port_info[0][slot].flags = PORT_VALID;\
 \t\t\t\toffline_port_info[0][slot].channel = kinfo.channel_id;\
 \t\t\t\toffline_port_info[0][slot].fm_idx = 0;\
-\t\t\t\tprintk("cdx: OH port %s imported (ch %d egr_fq %d err_fq %d)\\n",\
-\t\t\t\t\toh_names[oi], kinfo.channel_id, kinfo.default_fqid, kinfo.err_fqid);\
+\t\t\t\tprintk("cdx: OH port %s imported (ch %d egr_fq %d err_fq %d)\\\\n",\
+\t\t\t\t\tname, kinfo.channel_id, kinfo.default_fqid, kinfo.err_fqid);\
 \t\t\t}\
 \t\t} else {\
-\t\t\tprintk("cdx: OH port %s NOT found in kernel\\n", oh_names[oi]);\
+\t\t\tprintk("cdx: OH port %s NOT found in kernel\\\\n", name);\
 \t\t}\
 \t}\
 }\
 ' "$ASK_DIR/cdx/devoh.c"
 echo "### Patched devoh.c: added cdxdrv_import_oh_ports()"
 
-# Also need linux/fsl_oh_port.h in devoh.c for fman_offline_port_info + oh_port_driver_get_port_info
+# Add headers needed by the import function
 sed -i '/^#include "portdefs.h"/a\
 #include <linux/fsl_oh_port.h>\n\
 extern int oh_port_driver_get_port_info(struct fman_offline_port_info *info);' "$ASK_DIR/cdx/devoh.c"
 echo "### Patched devoh.c: added fsl_oh_port.h include"
 
-# In cdx_main.c, call right before the MURAM pre-populate block.
-# Use the MURAM filp_open block's opening brace as anchor — it's unique.
-sed -i '/Pre-populate FMan info via \/dev\/fm0-pcd/i\
-\tcdxdrv_import_oh_ports();\
-' "$ASK_DIR/cdx/cdx_main.c"
-echo "### Patched cdx_main.c: call cdxdrv_import_oh_ports() before MURAM block"
-
-# Forward declaration needed since function is in devoh.c
+# Also forward-declare in cdx_main.c for the call
 sed -i '/^#include "dpa_ipsec.h"/i\
 void cdxdrv_import_oh_ports(void);' "$ASK_DIR/cdx/cdx_main.c"
 echo "### Patched cdx_main.c: forward-declare cdxdrv_import_oh_ports"
+
+# ── Patch: call OH port import from devoh.c function ────────────────────────
+# The cdxdrv_import_oh_ports() function already exists in devoh.c (inserted
+# by a previous sed). We just need to call it from cdx_module_init(). Previous
+# sed approaches failed because cdx_main.c can't see struct oh_port_info.
+# Instead, use python to reliably insert the call at a known-unique line.
+python3 -c "
+import re
+with open('$ASK_DIR/cdx/cdx_main.c', 'r') as f:
+    src = f.read()
+# Insert call right before the MURAM pre-populate printk
+src = src.replace(
+    'printk(\"cdx: pre-populated MURAM handle',
+    'cdxdrv_import_oh_ports();\n\tprintk(\"cdx: pre-populated MURAM handle'
+)
+with open('$ASK_DIR/cdx/cdx_main.c', 'w') as f:
+    f.write(src)
+print('### Patched cdx_main.c: call cdxdrv_import_oh_ports() before MURAM printk')
+"
 
 # Then insert FMan MURAM init right before cdx_init_fqid_procfs()
 sed -i '/\/\* creating a \/proc\/fqid_stats dir/i\
