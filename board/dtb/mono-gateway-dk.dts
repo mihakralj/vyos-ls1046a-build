@@ -788,6 +788,48 @@ managed = "in-band-status";
 	fsl,dpaa {
 		compatible = "fsl,ls1046a-dpaa", "simple-bus", "fsl,dpaa";
 
+		/* MAC1 (1G, eth0-disabled) */
+		ethernet@0 {
+			compatible = "fsl,dpa-ethernet";
+			fsl,fman-mac = <&enet0>;
+			dma-coherent;
+		};
+
+		/* MAC2 (1G, left RJ45 — eth0) */
+		ethernet@1 {
+			compatible = "fsl,dpa-ethernet";
+			fsl,fman-mac = <&enet1>;
+			dma-coherent;
+		};
+
+		/* MAC3 (1G, disabled) */
+		ethernet@2 {
+			compatible = "fsl,dpa-ethernet";
+			fsl,fman-mac = <&enet2>;
+			dma-coherent;
+		};
+
+		/* MAC4 (1G, disabled) */
+		ethernet@3 {
+			compatible = "fsl,dpa-ethernet";
+			fsl,fman-mac = <&enet3>;
+			dma-coherent;
+		};
+
+		/* MAC5 (1G, center RJ45 — eth1) */
+		ethernet@4 {
+			compatible = "fsl,dpa-ethernet";
+			fsl,fman-mac = <&enet4>;
+			dma-coherent;
+		};
+
+		/* MAC6 (1G, right RJ45 — eth2) */
+		ethernet@5 {
+			compatible = "fsl,dpa-ethernet";
+			fsl,fman-mac = <&enet5>;
+			dma-coherent;
+		};
+
 		/* MAC9 — 10G left SFP+ (eth3) */
 		ethernet@8 {
 			compatible = "fsl,dpa-ethernet-init";
