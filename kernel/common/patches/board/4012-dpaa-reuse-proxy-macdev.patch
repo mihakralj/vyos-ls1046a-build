@@ -1,0 +1,50 @@
+diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c
+index b00c8e2..a3236c5 100644
+--- a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c
+@@ -975,10 +975,41 @@ dpaa_eth_priv_probe(struct platform_device *_of_dev)
+ 	dpa_loop_netdevs[priv->loop_id] = net_dev;
+ #endif
+ 
+-	mac_dev = dpa_mac_probe(_of_dev);
+-	if (IS_ERR(mac_dev) || !mac_dev) {
+-		err = PTR_ERR(mac_dev);
+-		goto mac_probe_failed;
++	/* If this is a proxy child, reuse the parent proxy driver's mac_dev
++	 * instead of probing a new one. The proxy already initialized the
++	 * FMan port, and creating a separate mac_dev produces a duplicate set
++	 * of FMan port handles whose fm_port_disable()/fm_port_enable() calls
++	 * do not affect the hardware port configured by the proxy. By reusing
++	 * the proxy's mac_dev, dpaa_eth_init_ports() below configures the
++	 * actual FMan hardware port with this netdev's FQ IDs.
++	 */
++	if (of_device_is_compatible(dpa_node->parent, "fsl,dpa-ethernet-init")) {
++		struct platform_device *parent_pdev;
++		struct proxy_device *proxy_dev;
++
++		parent_pdev = of_find_device_by_node(dpa_node->parent);
++		if (!parent_pdev) {
++			dev_err(dev, "parent proxy not probed yet\n");
++			err = -EPROBE_DEFER;
++			goto mac_probe_failed;
++		}
++		proxy_dev = dev_get_drvdata(&parent_pdev->dev);
++		if (!proxy_dev || !proxy_dev->mac_dev) {
++			dev_err(dev, "parent proxy has no mac_dev\n");
++			platform_device_put(parent_pdev);
++			err = -ENODEV;
++			goto mac_probe_failed;
++		}
++		mac_dev = proxy_dev->mac_dev;
++		/* proxy_dev->mac_dev is owned by the proxy driver — do NOT
++		 * call dpa_mac_probe(), do NOT free it on error paths.
++		 */
++	} else {
++		mac_dev = dpa_mac_probe(_of_dev);
++		if (IS_ERR(mac_dev) || !mac_dev) {
++			err = PTR_ERR(mac_dev);
++			goto mac_probe_failed;
++		}
+ 	}
+ 
+ 	/* We have physical ports, so we need to establish
