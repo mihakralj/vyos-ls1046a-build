@@ -109,25 +109,38 @@
  */
 / {
     reserved-memory {
-        fman0_dma: fman-dma@a0000000 {
-            reg = <0x0 0xa0000000 0x0 0xa000000>;   /* 160 MB */
+        /* FMan DMA regions — carved out before initramfs loads.
+         * The SDK fsl_mac driver parses bootmem nodes for 10G port
+         * DMA descriptors. 256 MB at 0xa0000000–0xafffffff,
+         * stopping before ramoops at 0xb0000000. */
+        fman_dma: fman-dma@a0000000 {
+            reg = <0x0 0xa0000000 0x0 0x8000000>;   /* 128 MB */
             no-map;
         };
-        fman1_dma: fman-dma@aa000000 {
-            reg = <0x0 0xaa000000 0x0 0xa000000>;   /* 160 MB */
+        fman_dma2: fman-dma@a8000000 {
+            reg = <0x0 0xa8000000 0x0 0x8000000>;   /* 128 MB */
             no-map;
         };
-        /* bootmem nodes — SDK fsl_fman parses these inside reserved-memory */
-        bootmem0: bootmem@a0000000 {
-            compatible = "fsl,fman-dma-pool";
-            reg = <0x00 0xa0000000 0x00 0x4000000>,
-                  <0x00 0xa4000000 0x00 0x6000000>;
-        };
-        bootmem1: bootmem@aa000000 {
-            compatible = "fsl,fman-dma-pool";
-            reg = <0x00 0xaa000000 0x00 0x4000000>,
-                  <0x00 0xae000000 0x00 0x6000000>;
-        };
+    };
+
+    /* SDK driver-compatible bootmem nodes inside reserved-memory.
+     * reg format matches OpenWRT's two-tuple, split to avoid the
+     * kernel ignoring a second region. */
+    bootmem0: bootmem@a0000000 {
+        compatible = "fsl,fman-dma-pool";
+        reg = <0x00 0xa0000000 0x00 0x4000000>;
+    };
+    bootmem1: bootmem@a4000000 {
+        compatible = "fsl,fman-dma-pool";
+        reg = <0x00 0xa4000000 0x00 0x4000000>;
+    };
+    bootmem2: bootmem@a8000000 {
+        compatible = "fsl,fman-dma-pool";
+        reg = <0x00 0xa8000000 0x00 0x4000000>;
+    };
+    bootmem3: bootmem@ac000000 {
+        compatible = "fsl,fman-dma-pool";
+        reg = <0x00 0xac000000 0x00 0x4000000>;
     };
 };
 
