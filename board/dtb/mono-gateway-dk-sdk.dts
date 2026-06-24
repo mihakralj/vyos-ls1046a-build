@@ -136,3 +136,26 @@
 &sfp_xfi1 {
     status = "disabled";
 };
+
+/*
+ * Force TX_DISABLE GPIOs HIGH at boot (TX enabled).
+ * The GPIOs have GPIO_ACTIVE_LOW polarity and a hardware inverter
+ * between the GPIO pin and the SFP cage TX_DISABLE pin.
+ * By default the pins float LOW (internal pull-down) → TX stays off.
+ * The SFP driver normally manages these, but since we disabled it,
+ * we use GPIO hogs to force TX on.
+ */
+&gpio2 {
+    sfp0_tx_enable {
+        gpio-hog;
+        gpios = <14 0>;  /* pin 14 = sfp-xfi0 (eth3), output HIGH */
+        output-high;
+        line-name = "sfp0-tx-enable";
+    };
+    sfp1_tx_enable {
+        gpio-hog;
+        gpios = <13 0>;  /* pin 13 = sfp-xfi1 (eth4), output HIGH */
+        output-high;
+        line-name = "sfp1-tx-enable";
+    };
+};
