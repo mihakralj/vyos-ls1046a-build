@@ -130,10 +130,6 @@ if [ ! -f "$FMC_DIR/.built" ]; then
         (cd "$FMC_DIR" && git apply "$FMC_PATCH")
     fi
     # Build
-    # Debian 12 libxml2 v2.9.14+ changed xmlStructuredErrorFunc signature
-    # from void(*)(void*, const xmlError*) to void(*)(void*, xmlError*).
-    # Fix the mismatch before compiling.
-    sed -i 's/const xmlError \*/xmlError */g' "$FMC_DIR/source/FMCGenericError.cpp" "$FMC_DIR/source/FMCGenericError.h"
     make -C "$FMC_DIR/source" \
         CC="$CC" CXX="$CXX" AR="$AR" \
         MACHINE=ls1046 \
@@ -143,6 +139,10 @@ if [ ! -f "$FMC_DIR/.built" ]; then
         TCLAP_HEADER_PATH=/usr/include
     touch "$FMC_DIR/.built"
 fi
+# Debian 12 libxml2 v2.9.14+ changed xmlStructuredErrorFunc signature
+# from void(*)(void*, const xmlError*) to void(*)(void*, xmlError*).
+# Fix the mismatch (idempotent — safe to run on cached clones too).
+sed -i 's/const xmlError \*/xmlError */g' "$FMC_DIR/source/FMCGenericError.cpp" "$FMC_DIR/source/FMCGenericError.h"
 echo "### fmc ready: $(ls -lh "$FMC_DIR/source/fmc" | awk '{print $5}')"
 
 # ===========================================================================
@@ -233,18 +233,16 @@ DPA_SRC="$ASK_DIR/dpa_app"
 FMC_SRC="$FMC_DIR/source"
 FMLIB_INC="$FMLIB_DIR/include/fmd"
 
+# fmlib has nested includes that reference subdirectories relatively
+DPA_CFLAGS="-DNCSW_LINUX -DLS1043 -D__STDC_LIMIT_MACROS -O2"
+DPA_INCLUDES="-I$FMC_SRC -I$FMLIB_INC -I$FMLIB_INC/integrations -I$FMLIB_INC/Peripherals -I/usr/include/libxml2 -I$ASK_DIR/cdx"
+
 # Compile objects
-$CXX -c -DNCSW_LINUX -DLS1043 -D__STDC_LIMIT_MACROS -O2 \
-    -I"$FMC_SRC" -I"$FMLIB_INC" -I/usr/include/libxml2 \
-    -I"$ASK_DIR/cdx" \
+$CXX -c $DPA_CFLAGS $DPA_INCLUDES \
     "$DPA_SRC/main.c" -o "$DPA_SRC/main.o" 2>&1
-$CXX -c -DNCSW_LINUX -DLS1043 -D__STDC_LIMIT_MACROS -O2 \
-    -I"$FMC_SRC" -I"$FMLIB_INC" -I/usr/include/libxml2 \
-    -I"$ASK_DIR/cdx" \
+$CXX -c $DPA_CFLAGS $DPA_INCLUDES \
     "$DPA_SRC/dpa.c" -o "$DPA_SRC/dpa.o" 2>&1
-$CXX -c -DNCSW_LINUX -DLS1043 -D__STDC_LIMIT_MACROS -O2 \
-    -I"$FMC_SRC" -I"$FMLIB_INC" -I/usr/include/libxml2 \
-    -I"$ASK_DIR/cdx" \
+$CXX -c $DPA_CFLAGS $DPA_INCLUDES \
     "$DPA_SRC/testapp.c" -o "$DPA_SRC/testapp.o" 2>&1
 
 # Link against freshly-compiled libfmc.a + fmlib
