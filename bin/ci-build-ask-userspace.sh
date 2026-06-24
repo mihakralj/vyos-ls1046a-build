@@ -130,6 +130,10 @@ if [ ! -f "$FMC_DIR/.built" ]; then
         (cd "$FMC_DIR" && git apply "$FMC_PATCH")
     fi
     # Build
+    # Debian 12 libxml2 v2.9.14+ changed xmlStructuredErrorFunc signature
+    # from void(*)(void*, const xmlError*) to void(*)(void*, xmlError*).
+    # Fix the mismatch before compiling.
+    sed -i 's/const xmlError \*/xmlError */g' "$FMC_DIR/source/FMCGenericError.cpp" "$FMC_DIR/source/FMCGenericError.h"
     make -C "$FMC_DIR/source" \
         CC="$CC" CXX="$CXX" AR="$AR" \
         MACHINE=ls1046 \
@@ -216,21 +220,42 @@ echo "### cmm ready: $(ls -lh "$CMM_BUILT" | awk '{print $5}')"
 file "$CMM_BUILT"
 
 # ===========================================================================
-#  dpa_app — DPAA application (userspace binary)
+#  dpa_app — DPAA application (userspace binary, with fmc PCD compiler)
 # ===========================================================================
-# NOTE: The original dpa_app (dpa.c + fmc_compile from libfmc.a) crashes
-# with SIGSEGV on Debian 12 due to C++ static initializer issues in the
-# pre-compiled fmc library. Replaced with C-only version (dpa_nofmc.c)
-# that uses the FMan C library directly — no C++ dependency.
-echo "### ======== dpa_app (C-only, no fmc) ========"
+# The original dpa_app crashed with SIGSEGV in CGenericError static init due
+# to C++ ABI mismatch when linking against a pre-compiled libfmc.a. Now that
+# libfmc.a is compiled from source with the same GCC 12, there is no ABI
+# mismatch. The libxml2 const issue (xmlStructuredErrorFunc signature change
+# in Debian 12) is patched above during fmc build.
+echo "### ======== dpa_app (real, with fmc) ========"
 DPA_BUILT="$ASK_DIR/dpa_app/dpa_app"
-cp "$ASK_DIR/dpa_app/dpa_nofmc.c" "$ASK_DIR/dpa_app/dpa.c.bak" 2>/dev/null || true
-$CC \
-    -I$ASK_DIR/cdx \
-    -o "$DPA_BUILT" \
-    "$ASK_DIR/dpa_app/dpa_nofmc.c" \
-    -L$FMLIB_DIR -lfm \
+DPA_SRC="$ASK_DIR/dpa_app"
+FMC_SRC="$FMC_DIR/source"
+FMLIB_INC="$FMLIB_DIR/include/fmd"
+
+# Compile objects
+$CXX -c -DNCSW_LINUX -DLS1043 -D__STDC_LIMIT_MACROS -O2 \
+    -I"$FMC_SRC" -I"$FMLIB_INC" -I/usr/include/libxml2 \
+    -I"$ASK_DIR/cdx" \
+    "$DPA_SRC/main.c" -o "$DPA_SRC/main.o" 2>&1
+$CXX -c -DNCSW_LINUX -DLS1043 -D__STDC_LIMIT_MACROS -O2 \
+    -I"$FMC_SRC" -I"$FMLIB_INC" -I/usr/include/libxml2 \
+    -I"$ASK_DIR/cdx" \
+    "$DPA_SRC/dpa.c" -o "$DPA_SRC/dpa.o" 2>&1
+$CXX -c -DNCSW_LINUX -DLS1043 -D__STDC_LIMIT_MACROS -O2 \
+    -I"$FMC_SRC" -I"$FMLIB_INC" -I/usr/include/libxml2 \
+    -I"$ASK_DIR/cdx" \
+    "$DPA_SRC/testapp.c" -o "$DPA_SRC/testapp.o" 2>&1
+
+# Link against freshly-compiled libfmc.a + fmlib
+$CXX -o "$DPA_BUILT" \
+    "$DPA_SRC/main.o" "$DPA_SRC/dpa.o" "$DPA_SRC/testapp.o" \
+    "$FMC_SRC/libfmc.a" \
+    -L"$FMLIB_DIR" -lfm \
+    -lxml2 -lpthread -lcli \
+    -static-libstdc++ -static-libgcc \
     2>&1
+
 [ -f "$DPA_BUILT" ] || { echo "FATAL: dpa_app was not produced"; exit 1; }
 echo "### dpa_app ready: $(ls -lh "$DPA_BUILT" | awk '{print $5}')"
 file "$DPA_BUILT"
