@@ -120,3 +120,19 @@
 		phy-connection-type = "xgmii";
 	};
 };
+
+/*
+ * Disable SFP platform devices when using the SDK driver.
+ * The SDK fsl_mac driver uses fixed-link (no phylink/SFP support),
+ * so the SFP nodes must not bind — otherwise the SFP driver asserts
+ * TX_DISABLE and waits forever for a phylink connection that never
+ * comes (the SFP remains in "waitdev" state, TX stays off, and the
+ * switch sees no signal despite the MAC reporting carrier=1).
+ */
+&sfp_xfi0 {
+    status = "disabled";
+};
+
+&sfp_xfi1 {
+    status = "disabled";
+};
