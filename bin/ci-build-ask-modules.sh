@@ -319,6 +319,23 @@ sed -i '/dpa_ipsec start failed/,/goto exit;/{
 }' "$ASK_DIR/cdx/cdx_main.c"
 echo "### Patched cdx_main.c: dpa_ipsec_init failure non-fatal"
 
+# ── Make scatter_gather_bpool failure non-fatal ─────────────────────────────
+# Depends on dpa_interface_info (populated by dpa_app, not yet running).
+# Suppress both rc = -ENOMEM and goto exit.
+sed -i '/cdx_init_scatter_gather_bpool failed/,/goto exit;/{
+    /rc = -ENOMEM/s/.*/    \/\* rc = -ENOMEM; (suppressed -- non-fatal) \*\//
+    s/goto exit;/\/\* goto exit; (suppressed -- non-fatal) \*\//
+}' "$ASK_DIR/cdx/cdx_main.c"
+echo "### Patched cdx_main.c: scatter_gather_bpool failure non-fatal"
+
+# ── Make skb_2bfreed_bpool failure non-fatal ────────────────────────────────
+# Same dependency on dpa_app. Suppress both rc and goto exit.
+sed -i '/cdx_init_skb_2bfreed_bpool failed/,/goto exit;/{
+    /rc = -ENOMEM/s/.*/    \/\* rc = -ENOMEM; (suppressed -- non-fatal) \*\//
+    s/goto exit;/\/\* goto exit; (suppressed -- non-fatal) \*\//
+}' "$ASK_DIR/cdx/cdx_main.c"
+echo "### Patched cdx_main.c: skb_2bfreed_bpool failure non-fatal"
+
 # ── Patch: disable CDX_FRAG_USE_BUFF_POOL ───────────────────────────────────
 # The frag pool init calls get_phys_port_poolinfo_bysize() which walks
 # dpa_interface_info. That list is populated by dpa_app (START_DPA_APP)
