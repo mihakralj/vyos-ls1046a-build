@@ -120,7 +120,7 @@ jobs:
                     { name: "Version", value: $version, inline: true },
                     { name: "Flavor",  value: $flavor,  inline: true },
                     { name: "Release",     value: $release, inline: true },
-                    { name: "Notes",   value: $notes,   inline: true },
+                    { name: $notes,   value: " ",   inline: true },
                     { name: "Install", value: $install, inline: true },
                     { name: "Repo",    value: $repo,    inline: true },
                     { name: "Direct upgrade command:", value: $upgrade, inline: false }
