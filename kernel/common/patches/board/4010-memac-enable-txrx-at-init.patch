@@ -1,0 +1,29 @@
+From: VyOS LS1046A <build@vyos.io>
+Subject: [PATCH] sdk_dpaa: enable MAC TX/RX at memac_init for fixed-link 10G
+
+The SDK fsl_mac driver's start() function calls fm_mac_enable() to set
+CMD_CFG_TX_EN and CMD_CFG_RX_EN in the MEMAC command_config register.
+However, for 10G fixed-link ports the start() path is either not called
+or fails silently, leaving TX/RX disabled (register reads 0x43080200).
+This results in 10G SFP+ ports showing carrier=1 and accepting TX frames
+at the FMan level, but the serdes PCS never transmits — switch FDB has
+no DUT MAC entries and the switch LEDs stay off.
+
+Fix: call fm_mac_enable() at the end of memac_init() for all port types,
+after fm_mac_init(). This mirrors what the mainline fman_memac.c does:
+CMD_CFG_TX_EN/RX_EN are set unconditionally during memac init, not
+deferred to a separate start() callback.
+
+--- a/drivers/net/ethernet/freescale/sdk_dpaa/mac-api.c
++++ b/drivers/net/ethernet/freescale/sdk_dpaa/mac-api.c
+@@ -162,6 +162,10 @@ static int __cold memac_init(struct mac_device *mac_dev)
+ 	if (unlikely(_errno < 0))
+ 		goto _return_fm_mac_free;
+ 
++	/* Enable TX and RX unconditionally — needed for 10G fixed-link
++	 * ports where the start() path may not run before traffic starts.
++	 */
++	fm_mac_enable(priv->fm_mac);
+ 	dev_info(mac_dev->dev, "FMan MEMAC\n");
+ 
+ 	goto _return;
