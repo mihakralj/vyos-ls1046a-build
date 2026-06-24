@@ -1,0 +1,69 @@
+diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_proxy.c b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_proxy.c
+index aa08ff8..5ccd645 100644
+--- a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_proxy.c
++++ b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth_proxy.c
+@@ -145,57 +145,15 @@ static int dpaa_eth_proxy_probe(struct platform_device *_of_dev)
+ 	proxy_dev->mac_dev = mac_dev;
+ 	dev_set_drvdata(dev, proxy_dev);
+ 
+-	/* We have physical ports, so we need to establish
+-	 * the buffer layout.
++	/* fsl_dpa handles FQ allocation, buffer pools, port init, and
++	 * fm_port_enable. The proxy only initializes the MAC hardware
++	 * and creates dpaa-ethernet child devices.
+ 	 */
+-	buf_layout = devm_kzalloc(dev, 2 * sizeof(*buf_layout),
+-				  GFP_KERNEL);
+-	if (!buf_layout) {
+-		dev_err(dev, "devm_kzalloc() failed\n");
+-		return -ENOMEM;
+-	}
+-	dpa_set_buffers_layout(mac_dev, buf_layout);
+-
+-	INIT_LIST_HEAD(&proxy_fq_list);
+-
+-	memset(&port_fqs, 0, sizeof(port_fqs));
+-
+-	err = dpa_fq_probe_mac(dev, &proxy_fq_list, &port_fqs, true, RX);
+-	if (!err)
+-		err = dpa_fq_probe_mac(dev, &proxy_fq_list, &port_fqs, true,
+-				       TX);
+-	if (err < 0) {
+-		devm_kfree(dev, buf_layout);
+-		return err;
+-	}
+-
+-	/* Proxy initializer - Just configures the MAC on behalf of
+-	 * another partition.
+-	 */
+-	dpaa_eth_init_ports(mac_dev, dpa_bp, count, &port_fqs,
+-			buf_layout, dev);
+ 
+-	/* Proxy interfaces need to be started, and the allocated
+-	 * memory freed
+-	 */
+-	devm_kfree(dev, buf_layout);
+-	devm_kfree(dev, dpa_bp);
+-
+-	/* Free FQ structures */
+-	devm_kfree(dev, port_fqs.rx_defq);
+-	devm_kfree(dev, port_fqs.rx_errq);
+-	devm_kfree(dev, port_fqs.tx_defq);
+-	devm_kfree(dev, port_fqs.tx_errq);
+-
+-	for_each_port_device(i, mac_dev->port_dev) {
+-		err = fm_port_enable(mac_dev->port_dev[i]);
+-		if (err)
+-			goto port_enable_fail;
+-	}
+-
+-	dev_info(dev, "probed MAC device with MAC address: %02hx:%02hx:%02hx:%02hx:%02hx:%02hx\n",
+-		     mac_dev->addr[0], mac_dev->addr[1], mac_dev->addr[2],
+-		     mac_dev->addr[3], mac_dev->addr[4], mac_dev->addr[5]);
++	/* Populate dpaa-ethernet child devices so fsl_dpa can probe them */
++	err = devm_of_platform_populate(dev);
++	if (err)
++		goto port_enable_fail;
+ 
+ 	return 0; /* Proxy interface initialization ended */
+ 
