@@ -124,7 +124,7 @@ jobs:
                     { name: "Release notes:",   value: $notes,   inline: true },
                     { name: "Install guide:", value: $install, inline: true },
                     { name: "Repository:",    value: $repo,    inline: true },
-                    { name: "Built:",   value: "<t:\($ts_epoch):f>", inline: true }
+                    { name: "Built:",    value: "<t:\($ts_epoch):f>", inline: true }
                   ],
                   footer: { text: $footer }
                 }]
