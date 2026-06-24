@@ -86,7 +86,9 @@ jobs:
           REPO_URL="https://github.com/${REPO}"
           ISO_URL="https://github.com/${REPO}/releases/download/${BUILD_VERSION}/${IMAGE_NAME}"
 
-          LINKS="[🛠️ Install Guide](${INSTALL_URL})   [📝 Release Notes](${NOTES_URL})   [🐙 Repository](${REPO_URL})"
+          NOTES_LINK="[📝 Release Notes](${NOTES_URL})"
+          INSTALL_LINK="[🛠️ Install Guide](${INSTALL_URL})"
+          REPO_LINK="[🐙 Repository](${REPO_URL})"
           UPGRADE_CMD="\`\`\`"$'\n'"add system image ${ISO_URL}"$'\n'"\`\`\`"
 
           if [ "${JOB_STATUS}" = "success" ]; then
@@ -104,9 +106,10 @@ jobs:
               --arg version    "${DISPLAY_VERSION}" \
               --arg flavor     "${BUILD_BRANCH}" \
               --arg release    "${RELEASE_TYPE}" \
-              --arg links      "${LINKS}" \
+              --arg notes      "${NOTES_LINK}" \
+              --arg install    "${INSTALL_LINK}" \
+              --arg repo       "${REPO_LINK}" \
               --arg upgrade    "${UPGRADE_CMD}" \
-              --arg zwsp       "${ZWSP}" \
               --arg footer     "Commit: ${SHORT_SHA} • Run: #${RUN_NUMBER}" \
               --arg timestamp  "${TIMESTAMP}" \
               '{
@@ -117,9 +120,9 @@ jobs:
                     { name: "Version", value: $version, inline: true },
                     { name: "Flavor",  value: $flavor,  inline: true },
                     { name: "Release",     value: $release, inline: true },
-                    { name: "🛠️ Install Guide](${INSTALL_URL})",     value: $zwsp, inline: true },
-                    { name: "📝 Release Notes](${NOTES_URL})",     value: $zwsp, inline: true },
-                    { name: "🐙 Repository](${REPO_URL})",     value: $zwsp, inline: true },
+                    { name: "Notes",   value: $notes,   inline: true },
+                    { name: "Install", value: $install, inline: true },
+                    { name: "Repo",    value: $repo,    inline: true },
                     { name: "Direct upgrade command:", value: $upgrade, inline: false }
                   ],
                   footer: { text: $footer },
