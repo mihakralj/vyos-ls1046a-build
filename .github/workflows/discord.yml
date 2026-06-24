@@ -69,7 +69,7 @@ jobs:
           set -euo pipefail
 
           SHORT_SHA="${SHA:0:7}"
-          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          BUILD_EPOCH=$(date -u +%s)
 
           # Zero-width space — lets a field render with no visible label.
           ZWSP=$'\u200b'
@@ -111,7 +111,7 @@ jobs:
               --arg repo       "${REPO_LINK}" \
               --arg upgrade    "${UPGRADE_CMD}" \
               --arg footer     "Commit: ${SHORT_SHA} • Run: #${RUN_NUMBER}" \
-              --arg timestamp  "${TIMESTAMP}" \
+              --arg ts_epoch   "${BUILD_EPOCH}" \
               '{
                 embeds: [{
                   title: $title,
@@ -123,11 +123,10 @@ jobs:
                     { name: "Direct upgrade command:", value: $upgrade, inline: false },
                     { name: "Release notes:",   value: $notes,   inline: true },
                     { name: "Install guide:", value: $install, inline: true },
-                    { name: "Repository:",    value: $repo,    inline: true }
-                    
+                    { name: "Repository:",    value: $repo,    inline: true },
+                    { name: "Built:",   value: "<t:\($ts_epoch):f>", inline: true }
                   ],
-                  footer: { text: $footer },
-                  timestamp: $timestamp
+                  footer: { text: $footer }
                 }]
               }')
           else
@@ -140,8 +139,8 @@ jobs:
               --arg run_url    "https://github.com/${REPO}/actions/runs/${RUN_ID}" \
               --arg run_number "${RUN_NUMBER}" \
               --arg zwsp       "${ZWSP}" \
-              --arg footer     "Commit: ${SHORT_SHA} • Run: #${RUN_NUMBER}" \
-              --arg timestamp  "${TIMESTAMP}" \
+              --arg footer     "Commit: ${SHORT_SHA}" \
+              --arg ts_epoch   "${BUILD_EPOCH}" \
               '{
                 embeds: [{
                   title: $title,
@@ -150,10 +149,10 @@ jobs:
                     { name: "Version", value: $version, inline: true },
                     { name: "Flavor",  value: $flavor,  inline: true },
                     { name: $zwsp,     value: $release, inline: true },
-                    { name: "Run",     value: "[#\($run_number)](\($run_url))", inline: false }
+                    { name: "Run",     value: "[#\($run_number)](\($run_url))", inline: false },
+                    { name: "Built",   value: "<t:\($ts_epoch):f>", inline: true }
                   ],
-                  footer: { text: $footer },
-                  timestamp: $timestamp
+                  footer: { text: $footer }
                 }]
               }')
           fi
