@@ -218,16 +218,19 @@ file "$CMM_BUILT"
 # ===========================================================================
 #  dpa_app — DPAA application (userspace binary)
 # ===========================================================================
-echo "### ======== dpa_app ========"
+# NOTE: The original dpa_app (dpa.c + fmc_compile from libfmc.a) crashes
+# with SIGSEGV on Debian 12 due to C++ static initializer issues in the
+# pre-compiled fmc library. Replaced with C-only version (dpa_nofmc.c)
+# that uses the FMan C library directly — no C++ dependency.
+echo "### ======== dpa_app (C-only, no fmc) ========"
 DPA_BUILT="$ASK_DIR/dpa_app/dpa_app"
-make -C "$ASK_DIR/dpa_app" CC="$CC" \
-    CFLAGS="-DDPAA_DEBUG_ENABLE -DNCSW_LINUX \
-        -I$FMC_DIR/source \
-        -I$ASK_DIR/cdx \
-        -I$FMLIB_DIR/include/fmd \
-        -I$FMLIB_DIR/include/fmd/Peripherals \
-        -I$FMLIB_DIR/include/fmd/integrations" \
-    LDFLAGS="-lpthread -lcli -L$FMC_DIR/source -lfmc -L$FMLIB_DIR -lfm -lstdc++ -lxml2 -lm"
+cp "$ASK_DIR/dpa_app/dpa_nofmc.c" "$ASK_DIR/dpa_app/dpa.c.bak" 2>/dev/null || true
+$CC \
+    -I$ASK_DIR/cdx \
+    -o "$DPA_BUILT" \
+    "$ASK_DIR/dpa_app/dpa_nofmc.c" \
+    -L$FMLIB_DIR -lfm \
+    2>&1
 [ -f "$DPA_BUILT" ] || { echo "FATAL: dpa_app was not produced"; exit 1; }
 echo "### dpa_app ready: $(ls -lh "$DPA_BUILT" | awk '{print $5}')"
 file "$DPA_BUILT"
