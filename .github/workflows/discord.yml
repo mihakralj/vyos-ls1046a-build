@@ -86,9 +86,9 @@ jobs:
           REPO_URL="https://github.com/${REPO}"
           ISO_URL="https://github.com/${REPO}/releases/download/${BUILD_VERSION}/${IMAGE_NAME}"
 
-          NOTES_LINK="[📝 Release Notes](${NOTES_URL})"
-          INSTALL_LINK="[🛠️ Install Guide](${INSTALL_URL})"
-          REPO_LINK="[🐙 Repository](${REPO_URL})"
+          NOTES_LINK="[📝 Read changelog](${NOTES_URL})"
+          INSTALL_LINK="[🛠️ View instructions](${INSTALL_URL})"
+          REPO_LINK="[🐙 Browse code](${REPO_URL})"
           UPGRADE_CMD="\`\`\`"$'\n'"add system image ${ISO_URL}"$'\n'"\`\`\`"
 
           if [ "${JOB_STATUS}" = "success" ]; then
