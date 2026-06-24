@@ -118,8 +118,8 @@ jobs:
                     { name: "Flavor",  value: $flavor,  inline: true },
                     { name: "Release",     value: $release, inline: true },
                     { name: "🛠️ Install Guide](${INSTALL_URL})",     value: $zwsp, inline: true },
-                    { name: $zwsp,     value: $links,   inline: true },
-                    { name: $links,     value: $zwsp,   inline: true },
+                    { name: "📝 Release Notes](${NOTES_URL})",     value: $zwsp, inline: true },
+                    { name: "🐙 Repository](${REPO_URL})",     value: $zwsp, inline: true },
                     { name: "Direct upgrade command:", value: $upgrade, inline: false }
                   ],
                   footer: { text: $footer },
