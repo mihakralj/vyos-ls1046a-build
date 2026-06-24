@@ -1,40 +1,48 @@
 #!/bin/sh
-# 97-ask-modules.chroot — auto-load ASK 2.0 OOT modules at boot
+# 97-ask-modules.chroot — auto-load ASK OOT modules at boot
 #
-# Per plans/ASK-2.0-IMPLEMENTATION.md PR3 (M0.3 — wire build pipeline):
-# the ask-modules-*.deb that bin/ci-pick-packages.sh stages into the
-# chroot installs ask.ko (and future ask_bridge.ko) under
-# /lib/modules/${KVER}/extra/. Without this hook, the modules would be
-# installed-but-never-loaded — `lsmod | grep ask` would return empty on
-# the live system because nothing tells systemd-modules-load to auto-load
-# them.
+# cdx.ko and fci.ko need /dev/fm0-pcd (FMan PCD chardev) which is
+# created by the sdk_fman driver during late init. They must NOT load
+# via systemd-modules-load (too early — ENOMEM). Instead they are
+# loaded by ask-cdx.service (enabled below) which waits for the FMan
+# device to appear.
 #
-# Drop a /etc/modules-load.d/ask.conf so systemd-modules-load.service
-# loads ask.ko at every boot (matches how mainline kernel modules are
-# wired up via /etc/modules-load.d/*.conf).
+# auto_bridge.ko has no FMan dependency and loads fine early.
+# ask (ASK 2.0) is dormant — loaded when the module lands.
 #
-# Hook ordering: 97 runs after 96-enable-services.chroot (which enables
-# our custom services) and before 98-fancontrol.chroot / 99-mask-services.
-# No ordering dependency on the others — ask.ko is purely a kernel-side
-# resource; userspace integration (askd) lands in M5.
-#
-# Idempotent: writing the same file twice is fine. The file is
-# overwritten on every chroot rebuild.
+# Hook ordering: 97 runs after 96-enable-services.chroot and before
+# 98-fancontrol.chroot / 99-mask-services.
 set -e
 
+# ── modules-load.d: only modules safe to load early ─────────────────────
 CONF=/etc/modules-load.d/ask.conf
-
 mkdir -p "$(dirname "$CONF")"
-cat > "$CONF" <<EOF
+cat > "$CONF" <<'MODEOF'
 # ASK OOT kernel modules — managed by 97-ask-modules.chroot
-# See plans/ASK-2.0-IMPLEMENTATION.md and specs/ask-2.0-rewrite-spec.md.
-# ASK 2.0 module (when available)
-ask
-# ASK 1.x modules (cdx must load first, then fci, then auto_bridge)
-cdx
-fci
+# cdx and fci are loaded by ask-cdx.service (need /dev/fm0-pcd)
 auto_bridge
-EOF
-
+MODEOF
 echo "I: 97-ask-modules.chroot: wrote $CONF"
-cat "$CONF"
+
+# ── systemd service: load cdx + fci after FMan is ready ─────────────────
+UNIT=/etc/systemd/system/ask-cdx.service
+cat > "$UNIT" <<'UNITEOF'
+[Unit]
+Description=Load ASK CDX/FCI Kernel Modules
+After=multi-user.target
+Wants=multi-user.target
+ConditionPathExists=/dev/fm0-pcd
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/modprobe cdx
+ExecStart=/sbin/modprobe fci
+
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+
+# Enable so it runs on every boot
+ln -sf "$UNIT" /etc/systemd/system/multi-user.target.wants/ask-cdx.service
+echo "I: 97-ask-modules.chroot: installed ask-cdx.service"
