@@ -344,52 +344,51 @@ sed -i 's/^#define CDX_FRAG_USE_BUFF_POOL$/\/\/ #define CDX_FRAG_USE_BUFF_POOL/'
 echo "### Patched cdx_ehash.c: CDX_FRAG_USE_BUFF_POOL disabled"
 
 # ── Patch: NULL-guard dpa_update_timestamp (kernel panic on partial init) ────
-# cdx_ctrl_timer → dpa_update_timestamp → cdx_ehash_update_timestamp derefs
-# a global that is NULL when CDX init partially failed. Add a static ready
-# flag so the timer is a no-op until full init completes.
-python3 - "$ASK_DIR/cdx/cdx_dpa_stub.c" << 'PYEOF'
+# cdx_ctrl_timer → dpa_update_timestamp → FM_PCD_UpdateExtTimeStamp derefs
+# an FMan PCD handle that is NULL when CDX init partially failed (non-fatal).
+# Guard with a static ready flag so the timer is a no-op until full init.
+python3 - "$ASK_DIR/cdx/devman.c" << 'PYEOF'
 import sys, re
 path = sys.argv[1]
 with open(path) as f:
     src = f.read()
 
-# 1. Declare static ready flag
-src = src.replace(
-    'void\ndpa_update_timestamp',
-    'static int cdx_timer_ready;\n\nvoid\ndpa_update_timestamp'
-)
-# 2. Replace the function body
-old = 'cdx_ehash_update_timestamp(EXTERNAL_TIMESTAMP_TIMERID, ts);'
-new = '\tif (cdx_timer_ready)\n\t\tcdx_ehash_update_timestamp(EXTERNAL_TIMESTAMP_TIMERID, ts);'
+# Add static flag and guard the function body
+old = 'void dpa_update_timestamp(uint32_t ts)\n{\n\tFM_PCD_UpdateExtTimeStamp(EXTERNAL_TIMESTAMP_TIMERID, cpu_to_be32(ts));\n}'
+new = '''static int cdx_timer_ready;
+
+void dpa_update_timestamp(uint32_t ts)
+{
+\tif (cdx_timer_ready)
+\t\tFM_PCD_UpdateExtTimeStamp(EXTERNAL_TIMESTAMP_TIMERID, cpu_to_be32(ts));
+}'''
 src = src.replace(old, new)
 
 with open(path, 'w') as f:
     f.write(src)
-print('Patched cdx_dpa_stub.c: NULL guard on dpa_update_timestamp')
+print('Patched devman.c: NULL guard on dpa_update_timestamp')
 PYEOF
 
-# 3. Set cdx_timer_ready=1 at the end of cdx_module_init in cdx_main.c
-#    (right before the final return 0 that indicates success)
+# Set cdx_timer_ready=1 at the end of cdx_module_init in cdx_main.c
 python3 - "$ASK_DIR/cdx/cdx_main.c" << 'PYEOF'
 import sys, re
 path = sys.argv[1]
 with open(path) as f:
     src = f.read()
-# Insert 'extern int cdx_timer_ready;' declaration
+# Declare extern
 src = src.replace(
     '#ifdef CDX_TIMER_INTERVAL',
     'extern int cdx_timer_ready;\n#ifdef CDX_TIMER_INTERVAL'
 )
-# Set cdx_timer_ready=1 before the success return in cdx_module_init
-# Look for 'printk("CDX module initialized' and add assignment before it
+# Set before success return — find the last return 0 in cdx_module_init
 src = re.sub(
-    r'(printk\("CDX module initialized.*\n)',
-    r'\tcdx_timer_ready = 1;\n\1',
+    r'(pr_info\("CDX module initialized[^"]*"\);)\n',
+    r'\1\n\tcdx_timer_ready = 1;\n',
     src
 )
 with open(path, 'w') as f:
     f.write(src)
-print('Patched cdx_main.c: cdx_timer_ready=1 on success')
+print('Patched cdx_main.c: cdx_timer_ready=1 on init success')
 PYEOF
 
 # ── Build cdx.ko ───────────────────────────────────────────────────────────
