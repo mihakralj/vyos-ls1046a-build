@@ -145,6 +145,31 @@ if [[ "$FLAVOR" == "ask" && -d "$SDK_DIR" ]]; then
     ok "SDK overlay complete"
 fi
 
+# ── Board DTS injection (ASK only) ──────────────────────────────────────────
+# The NXP kernel tree doesn't include our custom mono-gateway-dk.dts or
+# mono-gateway-dk-sdk.dts. Inject them from board/dtb/ so kernel patches
+# targeting these DTS files can apply.
+if [[ "$FLAVOR" == "ask" ]]; then
+    BOARD_DTB_DIR="$REPO_ROOT/board/dtb"
+    DTS_DST="$KSRC/arch/arm64/boot/dts/freescale"
+    mkdir -p "$DTS_DST"
+    for _dts in mono-gateway-dk.dts mono-gateway-dk-sdk.dts; do
+        if [[ -f "$BOARD_DTB_DIR/$_dts" ]]; then
+            cp -f "$BOARD_DTB_DIR/$_dts" "$DTS_DST/$_dts"
+        fi
+    done
+    # Also inject SDK DTSI overlays
+    if [[ -d "$BOARD_DTB_DIR/sdk-dtsi" ]]; then
+        (cd "$BOARD_DTB_DIR/sdk-dtsi" && find . -type f -print0) | \
+            while IFS= read -r -d '' f; do
+                f="${f#./}"
+                mkdir -p "$DTS_DST/$(dirname "$f")"
+                cp -f "$BOARD_DTB_DIR/sdk-dtsi/$f" "$DTS_DST/$f"
+            done
+    fi
+    ok "board DTS injected into kernel tree"
+fi
+
 # ── Patch application (plan §3.4) ─────────────────────────────────────
 # patches that require 6.18+ kernel context. The NXP tree has SDK
 # drivers already; these patches target mainline code paths.
