@@ -117,12 +117,12 @@ jobs:
                   title: $title,
                   color: $color,
                   fields: [
-                    { name: "Version", value: $version, inline: true },
-                    { name: "Flavor",  value: $flavor,  inline: true },
-                    { name: $release,     value: " ", inline: true },
-                    { name: $notes,   value: " ",   inline: true },
-                    { name: $install, value: " ", inline: true },
-                    { name: "Repo",    value: $repo,    inline: true },
+                    { name: "Version:", value: $version, inline: true },
+                    { name: "Flavor:",  value: $flavor,  inline: true },
+                    { name: "Release:",     value: $release, inline: true },
+                    { name: "Release notes:",   value: $notes,   inline: true },
+                    { name: "Install guide:", value: $install, inline: true },
+                    { name: "Repository:",    value: $repo,    inline: true },
                     { name: "Direct upgrade command:", value: $upgrade, inline: false }
                   ],
                   footer: { text: $footer },
