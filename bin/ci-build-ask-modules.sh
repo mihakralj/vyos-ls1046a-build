@@ -343,6 +343,55 @@ echo "### Patched cdx_main.c: skb_2bfreed_bpool failure non-fatal"
 sed -i 's/^#define CDX_FRAG_USE_BUFF_POOL$/\/\/ #define CDX_FRAG_USE_BUFF_POOL/' "$ASK_DIR/cdx/cdx_ehash.c"
 echo "### Patched cdx_ehash.c: CDX_FRAG_USE_BUFF_POOL disabled"
 
+# ── Patch: NULL-guard dpa_update_timestamp (kernel panic on partial init) ────
+# cdx_ctrl_timer → dpa_update_timestamp → cdx_ehash_update_timestamp derefs
+# a global that is NULL when CDX init partially failed. Add a static ready
+# flag so the timer is a no-op until full init completes.
+python3 - "$ASK_DIR/cdx/cdx_dpa_stub.c" << 'PYEOF'
+import sys, re
+path = sys.argv[1]
+with open(path) as f:
+    src = f.read()
+
+# 1. Declare static ready flag
+src = src.replace(
+    'void\ndpa_update_timestamp',
+    'static int cdx_timer_ready;\n\nvoid\ndpa_update_timestamp'
+)
+# 2. Replace the function body
+old = 'cdx_ehash_update_timestamp(EXTERNAL_TIMESTAMP_TIMERID, ts);'
+new = '\tif (cdx_timer_ready)\n\t\tcdx_ehash_update_timestamp(EXTERNAL_TIMESTAMP_TIMERID, ts);'
+src = src.replace(old, new)
+
+with open(path, 'w') as f:
+    f.write(src)
+print('Patched cdx_dpa_stub.c: NULL guard on dpa_update_timestamp')
+PYEOF
+
+# 3. Set cdx_timer_ready=1 at the end of cdx_module_init in cdx_main.c
+#    (right before the final return 0 that indicates success)
+python3 - "$ASK_DIR/cdx/cdx_main.c" << 'PYEOF'
+import sys, re
+path = sys.argv[1]
+with open(path) as f:
+    src = f.read()
+# Insert 'extern int cdx_timer_ready;' declaration
+src = src.replace(
+    '#ifdef CDX_TIMER_INTERVAL',
+    'extern int cdx_timer_ready;\n#ifdef CDX_TIMER_INTERVAL'
+)
+# Set cdx_timer_ready=1 before the success return in cdx_module_init
+# Look for 'printk("CDX module initialized' and add assignment before it
+src = re.sub(
+    r'(printk\("CDX module initialized.*\n)',
+    r'\tcdx_timer_ready = 1;\n\1',
+    src
+)
+with open(path, 'w') as f:
+    f.write(src)
+print('Patched cdx_main.c: cdx_timer_ready=1 on success')
+PYEOF
+
 # ── Build cdx.ko ───────────────────────────────────────────────────────────
 echo "### ======== Building cdx.ko ========"
 make -C "$KSRC" \
