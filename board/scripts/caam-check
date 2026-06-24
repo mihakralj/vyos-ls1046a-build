@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Auto-elevate: re-exec with sudo if not root, preserving all arguments.
+if [ "$(id -u)" -ne 0 ]; then
+    exec sudo "$0" "$@"
+fi
 # caam-check — print full CAAM (Cryptographic Acceleration and Assurance
 # Module) status for the LS1046A Mono Gateway DK.
 #
