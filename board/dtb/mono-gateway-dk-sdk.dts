@@ -122,40 +122,32 @@
 };
 
 /*
- * Disable SFP platform devices when using the SDK driver.
- * The SDK fsl_mac driver uses fixed-link (no phylink/SFP support),
- * so the SFP nodes must not bind — otherwise the SFP driver asserts
- * TX_DISABLE and waits forever for a phylink connection that never
- * comes (the SFP remains in "waitdev" state, TX stays off, and the
- * switch sees no signal despite the MAC reporting carrier=1).
- */
-&sfp_xfi0 {
-    status = "disabled";
-};
-
-&sfp_xfi1 {
-    status = "disabled";
-};
-
-/*
- * Force TX_DISABLE GPIOs HIGH at boot (TX enabled).
- * The GPIOs have GPIO_ACTIVE_LOW polarity and a hardware inverter
- * between the GPIO pin and the SFP cage TX_DISABLE pin.
- * By default the pins float LOW (internal pull-down) → TX stays off.
- * The SFP driver normally manages these, but since we disabled it,
- * we use GPIO hogs to force TX on.
+ * GPIO hogs: force TX_DISABLE HIGH (TX enabled) at boot.
+ * We remove tx-disable-gpios from the SFP nodes below so the SFP driver
+ * doesn't request these GPIOs (no conflict). The SFP driver still binds,
+ * reads the SFP EEPROM, and configures the serdes rate via the MAC.
+ * TX is always enabled because the GPIO hogs hold pins 13+14 HIGH.
  */
 &gpio2 {
     sfp0_tx_enable {
         gpio-hog;
-        gpios = <14 0>;  /* pin 14 = sfp-xfi0 (eth3), output HIGH */
+        gpios = <14 0>;  /* pin 14 = sfp-xfi0 (eth3), output HIGH → TX on */
         output-high;
         line-name = "sfp0-tx-enable";
     };
     sfp1_tx_enable {
         gpio-hog;
-        gpios = <13 0>;  /* pin 13 = sfp-xfi1 (eth4), output HIGH */
+        gpios = <13 0>;  /* pin 13 = sfp-xfi1 (eth4), output HIGH → TX on */
         output-high;
         line-name = "sfp1-tx-enable";
     };
+};
+
+/* SFP nodes: keep enabled (EEPROM/serdes config) but remove tx-disable-gpios */
+&sfp_xfi0 {
+    /delete-property/ tx-disable-gpios;
+};
+
+&sfp_xfi1 {
+    /delete-property/ tx-disable-gpios;
 };
