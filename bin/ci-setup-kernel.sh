@@ -151,7 +151,7 @@ cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4007-xhci-ls1046a-dwc3-quirks.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4009-sfp-oem-rollball-quirk.patch"       "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4010-memac-enable-txrx-at-init.patch"     "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/4012-dpaa-reuse-proxy-macdev.patch"       "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/4013-dts-proxy-child-fq-ids.patch"       "$KERNEL_PATCHES/"
 
 # ── Staging-completeness guard ────────────────────────────────────────
 # Every kernel/common/patches/board/*.patch must either be cp'd above or
