@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Auto-elevate: re-exec with sudo if not root, preserving all arguments.
+if [ "$(id -u)" -ne 0 ]; then
+    exec sudo "$0" "$@"
+fi
 # firmware-check — print the full boot-firmware / microcode inventory of the
 # LS1046A Mono Gateway DK.
 #
