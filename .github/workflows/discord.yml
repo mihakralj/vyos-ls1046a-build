@@ -116,8 +116,10 @@ jobs:
                   fields: [
                     { name: "Version", value: $version, inline: true },
                     { name: "Flavor",  value: $flavor,  inline: true },
-                    { name: $zwsp,     value: $release, inline: true },
-                    { name: $zwsp,     value: $links,   inline: false },
+                    { name: "Release",     value: $release, inline: true },
+                    { name: "🛠️ Install Guide](${INSTALL_URL})",     value: $zwsp, inline: true },
+                    { name: $zwsp,     value: $links,   inline: true },
+                    { name: $links,     value: $zwsp,   inline: true },
                     { name: "Direct upgrade command:", value: $upgrade, inline: false }
                   ],
                   footer: { text: $footer },
