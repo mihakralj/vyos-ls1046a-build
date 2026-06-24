@@ -44,68 +44,66 @@ jobs:
   notify:
     runs-on: ubuntu-24.04
     steps:
-      - name: "Discord notification"
+      - name: Notify Discord
         if: always()
         env:
           DISCORD_BOT_KEY: ${{ secrets.DISCORD_BOT_KEY }}
-          STATUS: ${{ inputs.status }}
-          BUILD_VERSION: ${{ inputs.build_version }}
-          BUILD_BRANCH: ${{ inputs.build_branch }}
-          RELEASE_TYPE: ${{ inputs.release_type }}
-          IMAGE_NAME: ${{ inputs.image_name }}
           CHANNEL_ID: ${{ inputs.channel_id }}
+          JOB_STATUS: ${{ job.status }}
+          WORKFLOW: ${{ github.workflow }}
           RUN_NUMBER: ${{ github.run_number }}
           RUN_ID: ${{ github.run_id }}
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          REF_NAME: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          BUILD_VERSION: ${{ inputs.build_version }}
+          RUNNER_NAME: ${{ runner.name }}
+          RUNNER_OS: ${{ runner.os }}
+          RUNNER_ARCH: ${{ runner.arch }}
         run: |
           set -euo pipefail
 
-          # Truncate the full git commit SHA to the first 7 characters for a cleaner footer
           SHORT_SHA="${SHA:0:7}"
-
-          # Generate an ISO8601 timestamp for the Discord embed footer
           TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-          # Display version strips the release-channel suffix (-rolling / -stream
-          # / -lts) for a cleaner header.
-          DISPLAY_VERSION=$(printf '%s' "${BUILD_VERSION}" | sed -E 's/-(rolling|stream|lts)$//')
-
-          if [ "${STATUS}" = "success" ]; then
-            TITLE="📦 New VyOS LS1046A Build"
-            COLOR=5763719 # Discord Green
-            
-            # printf handles the literal newlines for the JSON payload. The code
-            # fence uses bare backticks (single quotes disable substitution); do
-            # NOT backslash-escape them — Discord renders \` as a literal backtick
-            # and the ```bash block would never form.
-            # Version/Flavor/Edition live at the TOP of the description because
-            # Discord always renders embed `fields` BELOW the description, so they
-            # cannot be hoisted under the title via the fields array.
-            DESC=$(printf '**Version** `%s`   **Flavor** `%s`   **Edition** `%s`\n\n[🛠️ Install Guide](https://github.com/%s/blob/main/INSTALL.md) [📝 Release Notes](https://github.com/%s/releases/tag/%s) [🐙 Repository](https://github.com/%s)\n\n**Direct upgrade command:**\n```bash\nadd system image https://github.com/%s/releases/download/%s/%s\n```' \
-              "${DISPLAY_VERSION}" "${BUILD_BRANCH}" "${RELEASE_TYPE}" \
-              "${REPO}" "${REPO}" "${BUILD_VERSION}" "${REPO}" \
-              "${REPO}" "${BUILD_VERSION}" "${IMAGE_NAME}")
+          if [ "${JOB_STATUS}" = "success" ]; then
+            EMOJI="✅"; COLOR=5763719
           else
-            TITLE="❌ VyOS LS1046A Build Failed"
-            COLOR=15548997 # Discord Red
-            DESC=$(printf 'The CI pipeline encountered an error during compilation.\n\n[🔍 Inspect Action Logs](https://github.com/%s/actions/runs/%s)' \
-              "${REPO}" "${RUN_ID}")
+            EMOJI="❌"; COLOR=15548997
           fi
 
-          # Build the embed payload using jq. A single 'description' block (no
-          # 'fields') keeps Version/Flavor/Edition directly under the title.
           PAYLOAD=$(jq -n \
-            --arg title  "${TITLE}" \
-            --argjson color "${COLOR}" \
-            --arg desc "${DESC}" \
-            --arg footer "Commit: ${SHORT_SHA} • Run: #${RUN_NUMBER}" \
-            --arg timestamp "${TIMESTAMP}" \
+            --arg emoji      "${EMOJI}" \
+            --argjson color  "${COLOR}" \
+            --arg version    "${BUILD_VERSION}" \
+            --arg workflow   "${WORKFLOW}" \
+            --arg run_number "${RUN_NUMBER}" \
+            --arg run_url    "https://github.com/${REPO}/actions/runs/${RUN_ID}" \
+            --arg event      "${EVENT_NAME}" \
+            --arg actor      "${ACTOR}" \
+            --arg branch     "${REF_NAME}" \
+            --arg sha        "${SHORT_SHA}" \
+            --arg commit_url "https://github.com/${REPO}/commit/${SHA}" \
+            --arg image      "${IMAGE_NAME}" \
+            --arg runner     "${RUNNER_NAME} (${RUNNER_OS} ${RUNNER_ARCH})" \
+            --arg footer     "${REPO} • ${REF_NAME}" \
+            --arg timestamp  "${TIMESTAMP}" \
             '{
               embeds: [{
-                title: $title,
+                title: "\($emoji) LS1046A Build — \($version)",
                 color: $color,
-                description: $desc,
+                fields: [
+                  { name: "Workflow", value: $workflow,                          inline: true },
+                  { name: "Run",      value: "[#\($run_number)](\($run_url))",    inline: true },
+                  { name: "Trigger",  value: "\($event) by @\($actor)",           inline: true },
+                  { name: "Branch",   value: $branch,                             inline: true },
+                  { name: "Commit",   value: "[\($sha)](\($commit_url))",         inline: true },
+                  { name: "Image",    value: $image,                             inline: true },
+                  { name: "Runner",   value: $runner,                             inline: true }
+                ],
                 footer: { text: $footer },
                 timestamp: $timestamp
               }]
