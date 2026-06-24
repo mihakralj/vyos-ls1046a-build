@@ -1,8 +1,8 @@
 diff --git a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c
-index b00c8e2..a3236c5 100644
+index b00c8e2..4870b2f 100644
 --- a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c
-@@ -975,10 +975,41 @@ dpaa_eth_priv_probe(struct platform_device *_of_dev)
+@@ -975,10 +975,39 @@ dpaa_eth_priv_probe(struct platform_device *_of_dev)
  	dpa_loop_netdevs[priv->loop_id] = net_dev;
  #endif
  
@@ -36,9 +36,7 @@ index b00c8e2..a3236c5 100644
 +			goto mac_probe_failed;
 +		}
 +		mac_dev = proxy_dev->mac_dev;
-+		/* proxy_dev->mac_dev is owned by the proxy driver — do NOT
-+		 * call dpa_mac_probe(), do NOT free it on error paths.
-+		 */
++		/* Owned by proxy — do NOT free on error paths */
 +	} else {
 +		mac_dev = dpa_mac_probe(_of_dev);
 +		if (IS_ERR(mac_dev) || !mac_dev) {
@@ -48,3 +46,23 @@ index b00c8e2..a3236c5 100644
  	}
  
  	/* We have physical ports, so we need to establish
+@@ -1068,7 +1097,18 @@ dpaa_eth_priv_probe(struct platform_device *_of_dev)
+ 	priv->tx_headroom = dpa_get_headroom(&priv->buf_layout[TX]);
+ 	priv->rx_headroom = dpa_get_headroom(&priv->buf_layout[RX]);
+ 
+-	/* All real interfaces need their ports initialized */
++	/* All real interfaces need their ports initialized.
++	 *
++	 * For proxy children, the proxy already enabled the FMan port
++	 * during its probe. Disable it first so our PCD callbacks (set
++	 * via fm_port_pcd_bind() inside dpaa_eth_init_ports()) take
++	 * effect when the port is re-enabled by dpa_start().
++	 */
++	if (of_device_is_compatible(dpa_node->parent, "fsl,dpa-ethernet-init")) {
++		for (i = 0; i < ARRAY_SIZE(mac_dev->port_dev); i++)
++			if (mac_dev->port_dev[i])
++				fm_port_disable(mac_dev->port_dev[i]);
++	}
+ 	dpaa_eth_init_ports(mac_dev, dpa_bp, count, &port_fqs,
+ 			buf_layout, dev);
+ 
