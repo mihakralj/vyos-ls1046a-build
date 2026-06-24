@@ -265,6 +265,11 @@ cp "$ASK_DIR/config/cmm.service"      "$STAGE/etc/systemd/system/cmm.service"
 sed -i '/ExecStartPre=/d; /ExecStopPost=/d; s/Restart=on-failure/Restart=no/' "$STAGE/etc/systemd/system/cmm.service"
 echo "### Patched cmm.service: removed WiFi hooks, set Restart=no"
 
+# Add dependency on ask-cdx.service so /dev/cdx_ctrl exists before CMM starts
+sed -i '/^After=network.target/ s/$/ ask-cdx.service/' "$STAGE/etc/systemd/system/cmm.service"
+sed -i '/^Wants=systemd-modules-load/ a\Wants=ask-cdx.service' "$STAGE/etc/systemd/system/cmm.service"
+echo "### Patched cmm.service: added After/Wants ask-cdx.service"
+
 # dpa_app systemd unit (programs FMan PCD via /dev/cdx_ctrl before CMM starts)
 cat > "$STAGE/etc/systemd/system/dpa_app.service" <<'UNIT'
 [Unit]
