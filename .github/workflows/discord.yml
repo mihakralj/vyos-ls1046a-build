@@ -70,6 +70,7 @@ jobs:
 
           SHORT_SHA="${SHA:0:7}"
           BUILD_EPOCH=$(date -u +%s)
+          BUILD_HUMAN=$(date -u -d "@${BUILD_EPOCH}" +"%B %-d, %Y %-I:%M %p UTC")
 
           # Zero-width space — lets a field render with no visible label.
           ZWSP=$'\u200b'
@@ -110,7 +111,7 @@ jobs:
               --arg install    "${INSTALL_LINK}" \
               --arg repo       "${REPO_LINK}" \
               --arg upgrade    "${UPGRADE_CMD}" \
-              --arg footer     "Commit: ${SHORT_SHA} • Run: #${RUN_NUMBER}" \
+              --arg footer     "${BUILD_HUMAN}" \
               --arg ts_epoch   "${BUILD_EPOCH}" \
               '{
                 embeds: [{
@@ -123,8 +124,7 @@ jobs:
                     { name: "Direct upgrade command:", value: $upgrade, inline: false },
                     { name: "Release notes:",   value: $notes,   inline: true },
                     { name: "Install guide:", value: $install, inline: true },
-                    { name: "Repository:",    value: $repo,    inline: true },
-                    { name: "Built:",    value: "<t:\($ts_epoch):f>", inline: true }
+                    { name: "Repository:",    value: $repo,    inline: true }
                   ],
                   footer: { text: $footer }
                 }]
@@ -139,7 +139,7 @@ jobs:
               --arg run_url    "https://github.com/${REPO}/actions/runs/${RUN_ID}" \
               --arg run_number "${RUN_NUMBER}" \
               --arg zwsp       "${ZWSP}" \
-              --arg footer     "Commit: ${SHORT_SHA}" \
+              --arg footer     "${BUILD_HUMAN}" \
               --arg ts_epoch   "${BUILD_EPOCH}" \
               '{
                 embeds: [{
@@ -149,8 +149,7 @@ jobs:
                     { name: "Version", value: $version, inline: true },
                     { name: "Flavor",  value: $flavor,  inline: true },
                     { name: $zwsp,     value: $release, inline: true },
-                    { name: "Run",     value: "[#\($run_number)](\($run_url))", inline: false },
-                    { name: "Built",   value: "<t:\($ts_epoch):f>", inline: true }
+                    { name: "Run",     value: "[#\($run_number)](\($run_url))", inline: false }
                   ],
                   footer: { text: $footer }
                 }]
