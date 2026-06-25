@@ -122,13 +122,31 @@ echo "### fmlib ready"
 #  fmc — NXP FMan Configuration tool
 # ===========================================================================
 echo "### ======== fmc ========"
-if [ ! -f "$FMC_DIR/.built" ]; then
+if [ ! -f "$FMC_DIR/.built" ] || ! grep -q 'ret == EEXIST' "$FMC_DIR/source/fmc_exec.c" 2>/dev/null; then
     rm -rf "$FMC_DIR"
     git clone -q --depth 1 --branch "$NXP_TAG" "$NXP_FMC_REPO" "$FMC_DIR" 2>&1 | tail -3
     FMC_PATCH="$ASK_DIR/patches/fmc/01-mono-ask-extensions.patch"
     if [ -f "$FMC_PATCH" ]; then
         (cd "$FMC_DIR" && git apply "$FMC_PATCH")
     fi
+    # Patch: skip E_ALREADY_EXISTS (EEXIST) in fmc_execute loop
+    # Kernel RSS creates PCD schemes at IDs 0-N during fsl_dpa probe.
+    # When dpa_app's fmc_execute tries to create CDX schemes at the same
+    # IDs, FM_PCD_KgSchemeSet returns EEXIST. Instead of aborting the
+    # entire fmc_execute, skip the conflicting scheme and continue.
+    python3 -c "
+import sys
+p = '$FMC_DIR/source/fmc_exec.c'
+with open(p) as f: s = f.read()
+old = '        /* Exit the loop in case of failure */\n        if ( ret != 0 ) {\n            break;\n        }'
+new = '        /* Exit the loop in case of failure (skip kernel RSS collision) */\n        if ( ret != 0 ) {\n            if (ret == EEXIST) {\n                fmc_log_write(LOG_WARN, \"scheme exists (kernel RSS) -- skipping\");\n                ret = 0;\n                continue;\n            }\n            break;\n        }'
+if old in s:
+    s = s.replace(old, new)
+    print('Patched fmc_exec.c: skip EEXIST in fmc_execute')
+else:
+    print('WARNING: EEXIST-skip pattern not found in fmc_exec.c')
+with open(p,'w') as f: f.write(s)
+"
     # Build
     make -C "$FMC_DIR/source" \
         CC="$CC" CXX="$CXX" AR="$AR" \
