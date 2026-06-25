@@ -122,7 +122,7 @@ echo "### fmlib ready"
 #  fmc — NXP FMan Configuration tool
 # ===========================================================================
 echo "### ======== fmc ========"
-if [ ! -f "$FMC_DIR/.built" ] || ! grep -q 'return err.*CHECK_ERR\|GET_ERROR_TYPE(ret) == EEXIST' "$FMC_DIR/source/fmc_exec.c" 2>/dev/null; then
+if [ ! -f "$FMC_DIR/.built" ] || ! grep -q 'return err.*name, err' "$FMC_DIR/source/fmc_exec.c" 2>/dev/null; then
     rm -rf "$FMC_DIR"
     git clone -q --depth 1 --branch "$NXP_TAG" "$NXP_FMC_REPO" "$FMC_DIR" 2>&1 | tail -3
     FMC_PATCH="$ASK_DIR/patches/fmc/01-mono-ask-extensions.patch"
