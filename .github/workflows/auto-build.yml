@@ -237,14 +237,12 @@ jobs:
             work/linux-6.12.49/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_ethtool.c
           echo "### Patched dpaa_ethtool.c: netdev_err -> netdev_dbg for phy-not-init"
 
-          # Skip kernel RX PCD scheme creation — CDX dataplane programs all
-          # FMan PCD from scratch. Comment out fm_port_pcd_bind() which is
-          # the only PCD scheme creator. Keep everything else (TX/RX port
-          # init, FQs, NAPI) so the kernel netdevices work normally.
-          sed -i '/^dpaa_eth_init_ports/,/^}$/{
-            /fm_port_pcd_bind(/c\    \/\* fm_port_pcd_bind skipped -- CDX owns PCD \*\/
+          # Skip RX PCD scheme creation — CDX dataplane programs all FMan PCD
+          # from scratch. Keep TX init (kernel needs TX FQs for SSH management).
+          sed -i '/^dpaa_eth_init_rx_port/,/struct fm_port_params rx_port_param/{
+            s/struct fm_port_params rx_port_param/return;  \/* skip RX PCD -- CDX programs all PCD *\/\n\tstruct fm_port_params rx_port_param/
           }' work/linux-6.12.49/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c
-          echo "### Patched dpaa_eth.c: skip fm_port_pcd_bind (CDX owns PCD)"
+          echo "### Patched dpaa_eth.c: skip RX PCD for all ports (CDX-owned)"
 
       - name: Compile Mono DTB from DTS
         run: bin/ci-compile-mono-dtb.sh
