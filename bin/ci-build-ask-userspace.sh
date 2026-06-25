@@ -122,7 +122,7 @@ echo "### fmlib ready"
 #  fmc — NXP FMan Configuration tool
 # ===========================================================================
 echo "### ======== fmc ========"
-if [ ! -f "$FMC_DIR/.built" ] || ! grep -q 'GET_ERROR_TYPE(ret) == EEXIST' "$FMC_DIR/source/fmc_exec.c" 2>/dev/null; then
+if [ ! -f "$FMC_DIR/.built" ] || ! grep -q 'return err.*CHECK_ERR\|GET_ERROR_TYPE(ret) == EEXIST' "$FMC_DIR/source/fmc_exec.c" 2>/dev/null; then
     rm -rf "$FMC_DIR"
     git clone -q --depth 1 --branch "$NXP_TAG" "$NXP_FMC_REPO" "$FMC_DIR" 2>&1 | tail -3
     FMC_PATCH="$ASK_DIR/patches/fmc/01-mono-ask-extensions.patch"
@@ -138,6 +138,20 @@ if [ ! -f "$FMC_DIR/.built" ] || ! grep -q 'GET_ERROR_TYPE(ret) == EEXIST' "$FMC
 import sys
 p = '$FMC_DIR/source/fmc_exec.c'
 with open(p) as f: s = f.read()
+
+# Fix 1: CHECK_ERR macro returns hardcoded 1 — change to return err
+# so that callers can inspect the actual NXP error code.
+# Match pattern: line with 'return 1;' immediately preceded by
+# 'name, err );' (unique to CHECK_ERR, not CHECK_HANDLE).
+old_checkerr = 'name, err );                                          \\\n        return 1;'
+new_checkerr = 'name, err );                                          \\\n        return err;'
+if old_checkerr in s:
+    s = s.replace(old_checkerr, new_checkerr)
+    print('Patched fmc_exec.c: CHECK_ERR returns err instead of 1')
+else:
+    print('WARNING: CHECK_ERR pattern not found')
+
+# Fix 2: skip EEXIST in fmc_execute loop
 old = '        /* Exit the loop in case of failure */\n        if ( ret != 0 ) {\n            break;\n        }'
 new = "        /* Exit the loop in case of failure (skip kernel RSS collision) */\n        if ( ret != 0 ) {\n            if (GET_ERROR_TYPE(ret) == EEXIST) {\n                fmc_log_write(LOG_WARN, \"scheme exists (kernel RSS) - skipping\");\n                ret = 0;\n                continue;\n            }\n            break;\n        }"
 if old in s:
