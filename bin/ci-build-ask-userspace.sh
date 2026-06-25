@@ -234,15 +234,15 @@ FMC_SRC="$FMC_DIR/source"
 FMLIB_INC="$FMLIB_DIR/include/fmd"
 
 # fmlib has nested includes that reference subdirectories relatively
-DPA_CFLAGS="-DNCSW_LINUX -DLS1043 -D__STDC_LIMIT_MACROS -DDPAA_DEBUG_ENABLE -O2 -fpermissive"
+DPA_CFLAGS="-DNCSW_LINUX -DLS1043 -D__STDC_LIMIT_MACROS -DDPAA_DEBUG_ENABLE -O2"
 DPA_INCLUDES="-I$FMC_SRC -I$FMLIB_INC -I$FMLIB_INC/integrations -I$FMLIB_INC/Peripherals -I/usr/include/libxml2 -I$ASK_DIR/cdx"
 
-# Compile objects
-$CXX -c $DPA_CFLAGS $DPA_INCLUDES \
+# Compile objects — use CC for .c files (C linkage for FMan symbols)
+$CC -c $DPA_CFLAGS $DPA_INCLUDES \
     "$DPA_SRC/main.c" -o "$DPA_SRC/main.o" 2>&1
-$CXX -c $DPA_CFLAGS $DPA_INCLUDES \
+$CC -c $DPA_CFLAGS $DPA_INCLUDES \
     "$DPA_SRC/dpa.c" -o "$DPA_SRC/dpa.o" 2>&1
-$CXX -c $DPA_CFLAGS $DPA_INCLUDES \
+$CC -c $DPA_CFLAGS $DPA_INCLUDES \
     "$DPA_SRC/testapp.c" -o "$DPA_SRC/testapp.o" 2>&1
 
 # Link against freshly-compiled libfmc.a + fmlib
