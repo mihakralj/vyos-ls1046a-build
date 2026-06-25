@@ -121,6 +121,12 @@ sed -i '/start_dpa_app failed rc/,/goto exit;/{
 }' "$ASK_DIR/cdx/cdx_main.c"
 echo "### Patched cdx_main.c: start_dpa_app failure non-fatal (all paths)"
 
+# ── Patch: add NXP SDK PCD header for FM_PCD_Free/Config/Init ────────────
+# Needed by the PCD reset block inserted during MURAM init.
+sed -i '/^#include "lnxwrp_fm.h"/a\
+#include "fm_pcd_ext.h"' "$ASK_DIR/cdx/cdx_main.c"
+echo "### Patched cdx_main.c: added fm_pcd_ext.h for PCD reset"
+
 # ── Patch: stub out WiFi offload init ─────────────────────────────────────
 # cdx_module_init() calls dpaa_vwd_init() under CFG_WIFI_OFFLOAD, which
 # tries to allocate an OH port (vwd_init_ohport). On LS1046A without WiFi,
@@ -245,27 +251,54 @@ sed -i '/^#include "dpa_ipsec.h"/i\
 void cdxdrv_import_oh_ports(void);' "$ASK_DIR/cdx/cdx_main.c"
 echo "### Patched cdx_main.c: forward-declare cdxdrv_import_oh_ports"
 
-# ── Insert FMan MURAM init block BEFORE cdx_init_fqid_procfs() ──────────────
-# This MUST run first so the printk target exists for the python call insertion.
+# ── Insert FMan MURAM + PCD reset block BEFORE cdx_init_fqid_procfs() ──────
+# Opens /dev/fm0-pcd to extract MURAM info AND reset PCD (clearing fsl_dpa's
+# kernel RSS schemes so dpa_app's fmc_execute() doesn't fail with
+# "Resource Already Exists").
+# The file is NOT closed — keeping it open prevents the kernel driver's release
+# function from freeing the re-created PCD handle.
 sed -i '/\/\* creating a \/proc\/fqid_stats dir/i\
-\t/* Pre-populate FMan info via /dev/fm0pcd so MURAM handle is available */\
+\t/* Pre-populate FMan info via /dev/fm0-pcd so MURAM handle is available.\
+\t * Also reset PCD to clear kernel RSS schemes (created by fsl_dpa during\
+\t * probe) so dpa_app can program fresh CDX schemes without collision.\
+\t * The file is kept open so the PCD handle survives. */\
 \t{\
 \t\tstruct file *fm_file = filp_open("/dev/fm0-pcd", O_RDWR, 0);\
 \t\tif (!IS_ERR(fm_file)) {\
 \t\t\tt_LnxWrpFmDev *wrapper = (t_LnxWrpFmDev *)fm_file->private_data;\
-\t\t\tif (wrapper \&\& wrapper->h_MuramDev) {\
-\t\t\t\tfman_info = kzalloc(sizeof(*fman_info), GFP_KERNEL);\
-\t\t\t\tfman_info->muram_handle = wrapper->h_MuramDev;\
-\t\t\t\tfman_info->physicalMuramBase = wrapper->fmMuramPhysBaseAddr;\
-\t\t\t\tfman_info->fmMuramMemSize = wrapper->fmMuramMemSize;\
-\t\t\t\tnum_fmans = 1;\
-\t\t\t\tprintk("cdx: pre-populated MURAM handle from /dev/fm0-pcd\\n");\
+\t\t\tif (wrapper) {\
+\t\t\t\tif (wrapper->h_MuramDev) {\
+\t\t\t\t\tfman_info = kzalloc(sizeof(*fman_info), GFP_KERNEL);\
+\t\t\t\t\tfman_info->muram_handle = wrapper->h_MuramDev;\
+\t\t\t\t\tfman_info->physicalMuramBase = wrapper->fmMuramPhysBaseAddr;\
+\t\t\t\t\tfman_info->fmMuramMemSize = wrapper->fmMuramMemSize;\
+\t\t\t\t\tnum_fmans = 1;\
+\t\t\t\t\tprintk("cdx: pre-populated MURAM handle from /dev/fm0-pcd\\n");\
+\t\t\t\t}\
+\t\t\t\t/* Reset FMan PCD to clear kernel RSS schemes.\
+\t\t\t\t * FM_PCD_Free destroys all schemes/trees/profiles;\
+\t\t\t\t * FM_PCD_Config + FM_PCD_Init recreate a fresh PCD. */\
+\t\t\t\tif (wrapper->h_PcdDev) {\
+\t\t\t\t\tt_FmPcdParams pcd_params;\
+\t\t\t\t\tprintk("cdx: resetting FMan PCD to clear kernel RSS schemes\\n");\
+\t\t\t\t\tFM_PCD_Free(wrapper->h_PcdDev);\
+\t\t\t\t\tmemset(\&pcd_params, 0, sizeof(pcd_params));\
+\t\t\t\t\tpcd_params.h_Fm = wrapper->h_Dev;\
+\t\t\t\t\twrapper->h_PcdDev = FM_PCD_Config(\&pcd_params);\
+\t\t\t\t\tif (!wrapper->h_PcdDev) {\
+\t\t\t\t\t\tprintk("cdx: WARNING: FM_PCD_Config failed after reset\\n");\
+\t\t\t\t\t} else {\
+\t\t\t\t\t\tFM_PCD_Init(wrapper->h_PcdDev);\
+\t\t\t\t\t\tprintk("cdx: PCD reset complete, fresh handle ready\\n");\
+\t\t\t\t\t}\
+\t\t\t\t}\
 \t\t\t}\
-\t\t\tfilp_close(fm_file, NULL);\
+\t\t\t/* keep file open — closing it would trigger FM_PCD_Free in\
+\t\t\t * the kernel driver release, destroying our fresh PCD */\
 \t\t}\
 \t}\
 ' "$ASK_DIR/cdx/cdx_main.c"
-echo "### Patched cdx_main.c: pre-populate fman_info MURAM handle before frag init"
+echo "### Patched cdx_main.c: MURAM + PCD reset block inserted"
 
 # ── Patch: insert cdxdrv_import_oh_ports() call BEFORE the MURAM printk ──────
 # The MURAM block (above) creates the printk line; this python replaces it
