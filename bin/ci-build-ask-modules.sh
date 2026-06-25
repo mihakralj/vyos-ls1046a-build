@@ -429,6 +429,50 @@ with open(p,'w') as f: f.write(s)
 PYEOF
 echo "### Patched dpa_cfg.c: NULL after kfree in release_cfg_info()"
 
+# ── Patch: NULL userspace pointers after copy_from_user in cdx_ioc_set_dpa_params ──
+# When dpa_app pushes PCD config via CDX_CTRL_DPA_SET_PARAMS, copy_from_user()
+# copies the entire fman_info struct including POINTER FIELDS (portinfo, tbl_info)
+# that contain dpa_app's userspace virtual addresses. On error paths,
+# release_cfg_info() tries to kfree() these userspace addresses → kernel panic.
+# Fix: NULL them out right after copy_from_user — they get re-populated by
+# get_port_info()/get_cctbl_info() which allocate proper kernel memory.
+python3 - "$ASK_DIR/cdx/dpa_cfg.c" << 'PYEOF'
+import sys
+p = sys.argv[1]
+with open(p) as f: s = f.read()
+
+old = '''	if (copy_from_user(fman_info, (void *)params.fman_info, 
+				(sizeof(struct cdx_fman_info) * num_fmans))) {
+		DPA_ERROR("%s::Read fman_info failed\\n", 
+				__func__);
+		retval = -EIO;
+		goto err_ret;
+	}'''
+
+new = '''	if (copy_from_user(fman_info, (void *)params.fman_info, 
+				(sizeof(struct cdx_fman_info) * num_fmans))) {
+		DPA_ERROR("%s::Read fman_info failed\\n", 
+				__func__);
+		retval = -EIO;
+		goto err_ret;
+	}
+	/* NULL out userspace pointers — they will be re-populated
+	 * by get_port_info()/get_cctbl_info(), and release_cfg_info()
+	 * on error paths must not kfree() userspace addresses.
+	 */
+	for (ii = 0; ii < num_fmans; ii++) {
+		fman_info[ii].portinfo = NULL;
+		fman_info[ii].tbl_info = NULL;
+	}'''
+
+if old in s:
+    s = s.replace(old, new)
+    print('Patched dpa_cfg.c: NULL userspace pointers after copy_from_user')
+else:
+    print('WARNING: copy_from_user pattern not found')
+with open(p,'w') as f: f.write(s)
+PYEOF
+
 # ── Patch: NULL-guard dpa_update_timestamp (kernel panic on partial init) ────
 # cdx_ctrl_timer → dpa_update_timestamp → FM_PCD_UpdateExtTimeStamp derefs
 # an FMan PCD handle that is NULL when CDX init partially failed (non-fatal).
