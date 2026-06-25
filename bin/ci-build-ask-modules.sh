@@ -348,9 +348,19 @@ echo "### Patched cdx_ehash.c: CDX_FRAG_USE_BUFF_POOL disabled"
 # sub-structures. When dpa_app re-pushes PCD config, the old pointers that
 # were already freed get kfree()d again → kernel panic in kfree().
 # Fix: NULL the pointers after each kfree().
-sed -i '/kfree(port_info->dist_info);/a\\t\t\t\t\tport_info->dist_info = NULL;' "$ASK_DIR/cdx/dpa_cfg.c"
-sed -i '/kfree(finfo->portinfo);/a\\t\t\tfinfo->portinfo = NULL;' "$ASK_DIR/cdx/dpa_cfg.c"
-sed -i '/kfree(finfo->tbl_info);/a\\t\t\tfinfo->tbl_info = NULL;' "$ASK_DIR/cdx/dpa_cfg.c"
+python3 - "$ASK_DIR/cdx/dpa_cfg.c" << 'PYEOF'
+import sys
+p = sys.argv[1]
+with open(p) as f: s = f.read()
+s = s.replace('kfree(port_info->dist_info);',
+              'kfree(port_info->dist_info);\n\t\t\t\t\tport_info->dist_info = NULL;')
+s = s.replace('kfree(finfo->portinfo);',
+              'kfree(finfo->portinfo);\n\t\t\tfinfo->portinfo = NULL;')
+s = s.replace('kfree(finfo->tbl_info);',
+              'kfree(finfo->tbl_info);\n\t\t\tfinfo->tbl_info = NULL;')
+with open(p,'w') as f: f.write(s)
+print('Patched dpa_cfg.c: NULL after kfree')
+PYEOF
 echo "### Patched dpa_cfg.c: NULL after kfree in release_cfg_info()"
 
 # ── Patch: NULL-guard dpa_update_timestamp (kernel panic on partial init) ────
