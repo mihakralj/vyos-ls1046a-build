@@ -234,7 +234,7 @@ FMC_SRC="$FMC_DIR/source"
 FMLIB_INC="$FMLIB_DIR/include/fmd"
 
 # fmlib has nested includes that reference subdirectories relatively
-DPA_CFLAGS="-DNCSW_LINUX -DLS1043 -D__STDC_LIMIT_MACROS -O2"
+DPA_CFLAGS="-DNCSW_LINUX -DLS1043 -D__STDC_LIMIT_MACROS -DDPAA_DEBUG_ENABLE -O2"
 DPA_INCLUDES="-I$FMC_SRC -I$FMLIB_INC -I$FMLIB_INC/integrations -I$FMLIB_INC/Peripherals -I/usr/include/libxml2 -I$ASK_DIR/cdx"
 
 # Compile objects
