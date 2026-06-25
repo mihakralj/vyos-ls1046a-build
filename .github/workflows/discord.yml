@@ -87,9 +87,9 @@ jobs:
           REPO_URL="https://github.com/${REPO}"
           ISO_URL="https://github.com/${REPO}/releases/download/${BUILD_VERSION}/${IMAGE_NAME}"
 
-          NOTES_LINK="[📝 Read changelog](${NOTES_URL})"
-          INSTALL_LINK="[🛠️ View instructions](${INSTALL_URL})"
-          REPO_LINK="[🐙 Browse code](${REPO_URL})"
+          NOTES_LINK="[Read changelog](${NOTES_URL})"
+          INSTALL_LINK="[View instructions](${INSTALL_URL})"
+          REPO_LINK="[Open repository](${REPO_URL})"
           UPGRADE_CMD="\`\`\`"$'\n'"add system image ${ISO_URL}"$'\n'"\`\`\`"
 
           if [ "${JOB_STATUS}" = "success" ]; then
@@ -122,9 +122,9 @@ jobs:
                     { name: "Flavor:",  value: $flavor,  inline: true },
                     { name: "Release:",     value: $release, inline: true },
                     { name: "Direct upgrade command:", value: $upgrade, inline: false },
-                    { name: "Release notes:",   value: $notes,   inline: true },
-                    { name: "Install guide:", value: $install, inline: true },
-                    { name: "Repository:",    value: $repo,    inline: true }
+                    { name: "📝 Release notes:",   value: $notes,   inline: true },
+                    { name: "🛠️ Install guide:", value: $install, inline: true },
+                    { name: "🐙 Code review:",    value: $repo,    inline: true }
                   ],
                   footer: { text: $footer }
                 }]
