@@ -343,6 +343,16 @@ echo "### Patched cdx_main.c: skb_2bfreed_bpool failure non-fatal"
 sed -i 's/^#define CDX_FRAG_USE_BUFF_POOL$/\/\/ #define CDX_FRAG_USE_BUFF_POOL/' "$ASK_DIR/cdx/cdx_ehash.c"
 echo "### Patched cdx_ehash.c: CDX_FRAG_USE_BUFF_POOL disabled"
 
+# ── Patch: prevent double-free in release_cfg_info() ──────────────────────
+# cdx_ioc_set_dpa_params() calls release_cfg_info() which kfree()s
+# sub-structures. When dpa_app re-pushes PCD config, the old pointers that
+# were already freed get kfree()d again → kernel panic in kfree().
+# Fix: NULL the pointers after each kfree().
+sed -i '/kfree(port_info->dist_info);/a\\t\t\t\t\tport_info->dist_info = NULL;' "$ASK_DIR/cdx/dpa_cfg.c"
+sed -i '/kfree(finfo->portinfo);/a\\t\t\tfinfo->portinfo = NULL;' "$ASK_DIR/cdx/dpa_cfg.c"
+sed -i '/kfree(finfo->tbl_info);/a\\t\t\tfinfo->tbl_info = NULL;' "$ASK_DIR/cdx/dpa_cfg.c"
+echo "### Patched dpa_cfg.c: NULL after kfree in release_cfg_info()"
+
 # ── Patch: NULL-guard dpa_update_timestamp (kernel panic on partial init) ────
 # cdx_ctrl_timer → dpa_update_timestamp → FM_PCD_UpdateExtTimeStamp derefs
 # an FMan PCD handle that is NULL when CDX init partially failed (non-fatal).
