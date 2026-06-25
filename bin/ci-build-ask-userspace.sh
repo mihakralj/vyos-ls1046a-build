@@ -134,19 +134,19 @@ if [ ! -f "$FMC_DIR/.built" ] || ! grep -q 'GET_ERROR_TYPE(ret) == EEXIST' "$FMC
     # When dpa_app's fmc_execute tries to create CDX schemes at the same
     # IDs, FM_PCD_KgSchemeSet returns EEXIST. Instead of aborting the
     # entire fmc_execute, skip the conflicting scheme and continue.
-    python3 -c "
+    python3 << PYEOF
 import sys
 p = '$FMC_DIR/source/fmc_exec.c'
 with open(p) as f: s = f.read()
 old = '        /* Exit the loop in case of failure */\n        if ( ret != 0 ) {\n            break;\n        }'
-new = '        /* Exit the loop in case of failure (skip kernel RSS collision) */\n        if ( ret != 0 ) {\n            if (GET_ERROR_TYPE(ret) == EEXIST) {\n                fmc_log_write(LOG_WARN, "scheme exists (kernel RSS) — skipping");\n                ret = 0;\n                continue;\n            }\n            break;\n        }'
+new = "        /* Exit the loop in case of failure (skip kernel RSS collision) */\n        if ( ret != 0 ) {\n            if (GET_ERROR_TYPE(ret) == EEXIST) {\n                fmc_log_write(LOG_WARN, \"scheme exists (kernel RSS) - skipping\");\n                ret = 0;\n                continue;\n            }\n            break;\n        }"
 if old in s:
     s = s.replace(old, new)
     print('Patched fmc_exec.c: skip EEXIST in fmc_execute')
 else:
     print('WARNING: EEXIST-skip pattern not found in fmc_exec.c')
 with open(p,'w') as f: f.write(s)
-"
+PYEOF
     # Build
     make -C "$FMC_DIR/source" \
         CC="$CC" CXX="$CXX" AR="$AR" \
