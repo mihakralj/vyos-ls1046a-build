@@ -347,19 +347,85 @@ echo "### Patched cdx_ehash.c: CDX_FRAG_USE_BUFF_POOL disabled"
 # cdx_ioc_set_dpa_params() calls release_cfg_info() which kfree()s
 # sub-structures. When dpa_app re-pushes PCD config, the old pointers that
 # were already freed get kfree()d again → kernel panic in kfree().
-# Fix: NULL the pointers after each kfree().
+# Fix: NULL pointers after kfree() in release_cfg_info() to prevent double-free.
+# Also add braces to single-statement ifs to avoid -Wmisleading-indentation.
 python3 - "$ASK_DIR/cdx/dpa_cfg.c" << 'PYEOF'
 import sys
 p = sys.argv[1]
 with open(p) as f: s = f.read()
-s = s.replace('kfree(port_info->dist_info);',
-              'kfree(port_info->dist_info);\n\t\t\t\t\tport_info->dist_info = NULL;')
-s = s.replace('kfree(finfo->portinfo);',
-              'kfree(finfo->portinfo);\n\t\t\tfinfo->portinfo = NULL;')
-s = s.replace('kfree(finfo->tbl_info);',
-              'kfree(finfo->tbl_info);\n\t\t\tfinfo->tbl_info = NULL;')
+
+old = '''static void release_cfg_info(void)
+{
+\tstruct cdx_fman_info *finfo;
+\tuint32_t ii;
+\tuint32_t jj;
+
+\tif (!fman_info)
+\t\treturn;
+\tfinfo = fman_info;
+\tfor (ii = 0; ii < num_fmans; ii++) {
+\t\t//free port information for this fman
+\t\tif (finfo->portinfo) {
+\t\t\tstruct cdx_port_info *port_info;
+\t\t\tport_info = finfo->portinfo;
+\t\t\tfor (jj = 0; jj < finfo->max_ports; jj++) {
+\t\t\t\tif (port_info->dist_info)
+\t\t\t\t\tkfree(port_info->dist_info);
+\t\t\t\tport_info++;
+\t\t\t}
+\t\t\tkfree(finfo->portinfo);
+\t\t}
+\t\t//free cc table information for this fman
+\t\tif (finfo->tbl_info) {
+\t\t\tkfree(finfo->tbl_info);
+\t\t}
+\t\tfinfo++;
+\t}
+\tkfree(fman_info);
+\tfman_info = NULL;
+\tnum_fmans = 0;
+}'''
+
+new = '''static void release_cfg_info(void)
+{
+\tstruct cdx_fman_info *finfo;
+\tuint32_t ii;
+\tuint32_t jj;
+
+\tif (!fman_info)
+\t\treturn;
+\tfinfo = fman_info;
+\tfor (ii = 0; ii < num_fmans; ii++) {
+\t\tif (finfo->portinfo) {
+\t\t\tstruct cdx_port_info *port_info;
+\t\t\tport_info = finfo->portinfo;
+\t\t\tfor (jj = 0; jj < finfo->max_ports; jj++) {
+\t\t\t\tif (port_info->dist_info) {
+\t\t\t\t\tkfree(port_info->dist_info);
+\t\t\t\t\tport_info->dist_info = NULL;
+\t\t\t\t}
+\t\t\t\tport_info++;
+\t\t\t}
+\t\t\tkfree(finfo->portinfo);
+\t\t\tfinfo->portinfo = NULL;
+\t\t}
+\t\tif (finfo->tbl_info) {
+\t\t\tkfree(finfo->tbl_info);
+\t\t\tfinfo->tbl_info = NULL;
+\t\t}
+\t\tfinfo++;
+\t}
+\tkfree(fman_info);
+\tfman_info = NULL;
+\tnum_fmans = 0;
+}'''
+
+if old in s:
+    s = s.replace(old, new)
+    print('Patched dpa_cfg.c: NULL after kfree + braces')
+else:
+    print('WARNING: release_cfg_info pattern not found — may already be patched?')
 with open(p,'w') as f: f.write(s)
-print('Patched dpa_cfg.c: NULL after kfree')
 PYEOF
 echo "### Patched dpa_cfg.c: NULL after kfree in release_cfg_info()"
 
