@@ -238,34 +238,6 @@ DPA_CFLAGS="-DNCSW_LINUX -DLS1043 -D__STDC_LIMIT_MACROS -DDPAA_DEBUG_ENABLE -O2"
 DPA_INCLUDES="-I$FMC_SRC -I$FMLIB_INC -I$FMLIB_INC/integrations -I$FMLIB_INC/Peripherals -I/usr/include/libxml2 -I$ASK_DIR/cdx"
 
 # Compile objects — use CC for .c files (C linkage for FMan symbols)
-
-# Patch: reset FMan PCD before fmc_execute to clear kernel RSS schemes
-python3 - "$DPA_SRC/dpa.c" << 'PYEOF'
-import sys
-with open(sys.argv[1]) as f: src = f.read()
-old = '\t//load compiled cfg it into the FMAN\t\n\tif (fmc_execute(&cmodel)) {'
-new = '''\t/* Reset FMan PCD to clear schemes created by fsl_dpa
-\t * during probe. Without this, fmc_execute() fails with
-\t * "Resource Already Exists" because kernel RSS schemes
-\t * occupy the same scheme IDs that CDX needs.
-\t */
-\tif (cmodel.fman[0].pcd_handle && cmodel.fman[0].handle) {
-\t\tt_FmPcdParams pcd_params;
-\t\tFM_PCD_Free(cmodel.fman[0].pcd_handle);
-\t\tmemset(&pcd_params, 0, sizeof(pcd_params));
-\t\tpcd_params.h_Fm = cmodel.fman[0].handle;
-\t\tcmodel.fman[0].pcd_handle = FM_PCD_Open(&pcd_params);
-\t}
-\t//load compiled cfg it into the FMAN\t
-\tif (fmc_execute(&cmodel)) {'''
-if old in src:
-    src = src.replace(old, new)
-    print('Patched dpa.c: PCD reset before fmc_execute')
-else:
-    print('WARNING: fmc_execute pattern not found')
-with open(sys.argv[1],'w') as f: f.write(src)
-PYEOF
-
 $CC -c $DPA_CFLAGS $DPA_INCLUDES \
     "$DPA_SRC/main.c" -o "$DPA_SRC/main.o" 2>&1
 $CC -c $DPA_CFLAGS $DPA_INCLUDES \
