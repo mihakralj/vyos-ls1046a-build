@@ -1,40 +1,34 @@
 From: VyOS LS1046A <build@vyos.io>
-Subject: [PATCH] sdk_dpaa: skip dpaa_eth_init_ports for proxy children
+Subject: [PATCH] sdk_dpaa: skip RX PCD scheme creation for all ports
 
-fsl_dpa calls dpaa_eth_init_ports() which creates FMan PCD schemes
-(RSS) for all ports. When dpa_app later calls fmc_execute() to push
-CDX offload schemes, FM_PCD_KgSchemeSet() fails with "Resource
-Already Exists — Scheme id (0)" because the kernel already created
-schemes at those IDs.
+fsl_dpa's dpaa_eth_init_ports() calls dpaa_eth_init_rx_port() which
+creates FMan PCD schemes (RSS). When dpa_app later invokes fmc_execute()
+to push CDX offload schemes, FM_PCD_KgSchemeSet() fails with "Resource
+Already Exists — Scheme id (0)" because the kernel already owns those
+scheme IDs.
 
-Fix: skip dpaa_eth_init_ports() for proxy children (parent compatible
-"fsl,dpa-ethernet-init"). dpa_app configures FMan PCD for these ports
-via CDX at runtime. For direct children (eth0-2 RJ45), keep existing
-behavior (kernel RSS).
+Fix: make dpaa_eth_init_rx_port() a no-op — return immediately without
+creating RX default FQs or PCD schemes. The TX path (dpaa_eth_init_tx_port)
+continues to work normally, so the kernel can still transmit frames
+(e.g., SSH responses on the management interface).
 
-A follow-up sed patch in auto-build.yml also skips RX PCD scheme
-creation for ALL ports by inserting a return in dpaa_eth_init_rx_port().
-
-Side effect: proxy-child ports (eth3/eth4) won't pass RX traffic
-until dpa_app successfully programs the FMan PCD (~T+64s at boot).
+Tradeoff: kernel cannot receive frames until dpa_app successfully programs
+the CDX PCD (~T+64s). Serial console remains available for emergency access.
+After dpa_app starts, all RX is handled by CDX FQs.
 
 --- a/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c
 +++ b/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_eth.c
-@@ -1068,9 +1068,14 @@ dpaa_eth_priv_probe(struct platform_device *_of_dev)
- 	priv->tx_headroom = dpa_get_headroom(&priv->buf_layout[TX]);
- 	priv->rx_headroom = dpa_get_headroom(&priv->buf_layout[RX]);
- 
--	/* All real interfaces need their ports initialized */
--	dpaa_eth_init_ports(mac_dev, dpa_bp, count, &port_fqs,
--			buf_layout, dev);
-+	/* All real interfaces need their ports initialized.
-+	 * Proxy children skip port init — dpa_app configures
-+	 * FMan PCD for these ports via CDX at runtime.
-+	 */
-+	if (!of_device_is_compatible(dpa_node->parent,
-+				"fsl,dpa-ethernet-init"))
-+		dpaa_eth_init_ports(mac_dev, dpa_bp, count,
-+				&port_fqs, buf_layout, dev);
- 
- #ifdef CONFIG_FMAN_PFC
- 	for (i = 0; i < CONFIG_FMAN_PFC_COS_COUNT; i++) {
+@@ -10630,0 +10631,7 @@
+ static void
+ dpaa_eth_init_rx_port(struct fm_port *port, struct dpa_bp *bp, size_t count,
+ 		struct dpa_fq *errq, struct dpa_fq *defq,
+ 		struct dpa_buffer_layout_s *buf_layout)
+ {
++	/* Skip RX PCD scheme creation — CDX dataplane (dpa_app → CDX
++	 * kernel module) programs all FMan PCD from scratch. No kernel RSS.
++	 * TX path (dpaa_eth_init_tx_port) is kept for kernel TX (SSH). */
++	return;
++
+ 	struct fm_port_params rx_port_param;
+ 	int i;
+ 	bool frag_enabled = false;
