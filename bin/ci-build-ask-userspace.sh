@@ -328,6 +328,11 @@ mkdir -p "$STAGE/etc/config"
 [ -f "$ASK_DIR/config/gateway-dk/cdx_cfg.xml" ] && cp "$ASK_DIR/config/gateway-dk/cdx_cfg.xml" "$STAGE/etc/cdx_cfg.xml"
 [ -f "$ASK_DIR/dpa_app/files/etc/cdx_pcd.xml" ] && cp "$ASK_DIR/dpa_app/files/etc/cdx_pcd.xml" "$STAGE/etc/cdx_pcd.xml"
 [ -f "$ASK_DIR/dpa_app/files/etc/cdx_cfg_dgw.xml" ] && cp "$ASK_DIR/dpa_app/files/etc/cdx_cfg_dgw.xml" "$STAGE/etc/cdx_cfg_dgw.xml"
+[ -f "$ASK_DIR/dpa_app/files/etc/cdx_sp.xml" ] && cp "$ASK_DIR/dpa_app/files/etc/cdx_sp.xml" "$STAGE/etc/cdx_sp.xml"
+
+# fmc PDL (Protocol Definition Language) — needed by dpa_app for fmc_compile()
+mkdir -p "$STAGE/etc/fmc/config"
+[ -f "$FMC_DIR/etc/fmc/config/hxs_pdl_v3.xml" ] && cp "$FMC_DIR/etc/fmc/config/hxs_pdl_v3.xml" "$STAGE/etc/fmc/config/hxs_pdl_v3.xml"
 
 cat > "$STAGE/DEBIAN/control" <<EOF
 Package: ${DEB_NAME}
