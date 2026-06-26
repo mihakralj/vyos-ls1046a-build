@@ -424,41 +424,18 @@ with open(p,'w') as f: f.write(s)
 PYEOF
 echo "### Patched dpa_cfg.c: NULL after kfree in release_cfg_info()"
 
-# ── Patch: NULL userspace pointers after copy_from_user ──────────────────
-python3 - "$ASK_DIR/cdx/dpa_cfg.c" << 'PYEOF'
-import sys
-p = sys.argv[1]
-with open(p) as f: s = f.read()
-
-old = '''	if (copy_from_user(fman_info, (void *)params.fman_info, 
-				(sizeof(struct cdx_fman_info) * num_fmans))) {
-		DPA_ERROR("%s::Read fman_info failed\\n", 
-				__func__);
-		retval = -EIO;
-		goto err_ret;
-	}'''
-
-new = '''	if (copy_from_user(fman_info, (void *)params.fman_info, 
-				(sizeof(struct cdx_fman_info) * num_fmans))) {
-		DPA_ERROR("%s::Read fman_info failed\\n", 
-				__func__);
-		retval = -EIO;
-		goto err_ret;
-	}
-	/* NULL out userspace pointers */
-	for (ii = 0; ii < num_fmans; ii++) {
-		fman_info[ii].portinfo = NULL;
-		fman_info[ii].tbl_info = NULL;
-	}'''
-
-if old in s:
-    s = s.replace(old, new)
-    print('Patched dpa_cfg.c: NULL userspace pointers after copy_from_user')
-else:
-    print('WARNING: copy_from_user pattern not found')
-with open(p,'w') as f: f.write(s)
-PYEOF
-echo "### Patched dpa_cfg.c: NULL userspace pointers after copy_from_user"
+# NOTE: The "NULL userspace pointers after copy_from_user" fix is
+# DELIBERATELY OMITTED. It set fman_info[ii].portinfo = NULL which
+# broke get_port_info() — that function saves the userspace pointer
+# before allocating a kernel buffer, then copy_from_user() from the
+# saved pointer. NULLing it causes copy_from_user(port_info, NULL)
+# → -EIO → "Read port_info failed".
+#
+# The release_cfg_info() NULL-after-kfree fix (above) already handles
+# double-free protection. The userspace pointer in fman_info is never
+# kfree'd by release_cfg_info — it only kfrees the dist_info and
+# port_info arrays that get_port_info allocates with kzalloc (kernel
+# pointers, not userspace ones).
 
 # ── Build cdx.ko ───────────────────────────────────────────────────────────
 echo "### ======== Building cdx.ko ========"
