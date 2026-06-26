@@ -343,6 +343,123 @@ echo "### Patched cdx_main.c: skb_2bfreed_bpool failure non-fatal"
 sed -i 's/^#define CDX_FRAG_USE_BUFF_POOL$/\/\/ #define CDX_FRAG_USE_BUFF_POOL/' "$ASK_DIR/cdx/cdx_ehash.c"
 echo "### Patched cdx_ehash.c: CDX_FRAG_USE_BUFF_POOL disabled"
 
+# ── Patch: prevent double-free in release_cfg_info() ──────────────────────
+python3 - "$ASK_DIR/cdx/dpa_cfg.c" << 'PYEOF'
+import sys
+p = sys.argv[1]
+with open(p) as f: s = f.read()
+
+old = '''static void release_cfg_info(void)
+{
+\tstruct cdx_fman_info *finfo;
+\tuint32_t ii;
+\tuint32_t jj;
+
+\tif (!fman_info)
+\t\treturn;
+\tfinfo = fman_info;
+\tfor (ii = 0; ii < num_fmans; ii++) {
+\t\t//free port information for this fman
+\t\tif (finfo->portinfo) {
+\t\t\tstruct cdx_port_info *port_info;
+\t\t\tport_info = finfo->portinfo;
+\t\t\tfor (jj = 0; jj < finfo->max_ports; jj++) {
+\t\t\t\tif (port_info->dist_info)
+\t\t\t\t\tkfree(port_info->dist_info);
+\t\t\t\tport_info++;
+\t\t\t}
+\t\t\tkfree(finfo->portinfo);
+\t\t}
+\t\t//free cc table information for this fman
+\t\tif (finfo->tbl_info) {
+\t\t\tkfree(finfo->tbl_info);
+\t\t}
+\t\tfinfo++;
+\t}
+\tkfree(fman_info);
+\tfman_info = NULL;
+\tnum_fmans = 0;
+}'''
+
+new = '''static void release_cfg_info(void)
+{
+\tstruct cdx_fman_info *finfo;
+\tuint32_t ii;
+\tuint32_t jj;
+
+\tif (!fman_info)
+\t\treturn;
+\tfinfo = fman_info;
+\tfor (ii = 0; ii < num_fmans; ii++) {
+\t\tif (finfo->portinfo) {
+\t\t\tstruct cdx_port_info *port_info;
+\t\t\tport_info = finfo->portinfo;
+\t\t\tfor (jj = 0; jj < finfo->max_ports; jj++) {
+\t\t\t\tif (port_info->dist_info) {
+\t\t\t\t\tkfree(port_info->dist_info);
+\t\t\t\t\tport_info->dist_info = NULL;
+\t\t\t\t}
+\t\t\t\tport_info++;
+\t\t\t}
+\t\t\tkfree(finfo->portinfo);
+\t\t\tfinfo->portinfo = NULL;
+\t\t}
+\t\tif (finfo->tbl_info) {
+\t\t\tkfree(finfo->tbl_info);
+\t\t\tfinfo->tbl_info = NULL;
+\t\t}
+\t\tfinfo++;
+\t}
+\tkfree(fman_info);
+\tfman_info = NULL;
+\tnum_fmans = 0;
+}'''
+
+if old in s:
+    s = s.replace(old, new)
+    print('Patched dpa_cfg.c: NULL after kfree + braces')
+else:
+    print('WARNING: release_cfg_info pattern not found')
+with open(p,'w') as f: f.write(s)
+PYEOF
+echo "### Patched dpa_cfg.c: NULL after kfree in release_cfg_info()"
+
+# ── Patch: NULL userspace pointers after copy_from_user ──────────────────
+python3 - "$ASK_DIR/cdx/dpa_cfg.c" << 'PYEOF'
+import sys
+p = sys.argv[1]
+with open(p) as f: s = f.read()
+
+old = '''	if (copy_from_user(fman_info, (void *)params.fman_info, 
+				(sizeof(struct cdx_fman_info) * num_fmans))) {
+		DPA_ERROR("%s::Read fman_info failed\\n", 
+				__func__);
+		retval = -EIO;
+		goto err_ret;
+	}'''
+
+new = '''	if (copy_from_user(fman_info, (void *)params.fman_info, 
+				(sizeof(struct cdx_fman_info) * num_fmans))) {
+		DPA_ERROR("%s::Read fman_info failed\\n", 
+				__func__);
+		retval = -EIO;
+		goto err_ret;
+	}
+	/* NULL out userspace pointers */
+	for (ii = 0; ii < num_fmans; ii++) {
+		fman_info[ii].portinfo = NULL;
+		fman_info[ii].tbl_info = NULL;
+	}'''
+
+if old in s:
+    s = s.replace(old, new)
+    print('Patched dpa_cfg.c: NULL userspace pointers after copy_from_user')
+else:
+    print('WARNING: copy_from_user pattern not found')
+with open(p,'w') as f: f.write(s)
+PYEOF
+echo "### Patched dpa_cfg.c: NULL userspace pointers after copy_from_user"
+
 # ── Build cdx.ko ───────────────────────────────────────────────────────────
 echo "### ======== Building cdx.ko ========"
 make -C "$KSRC" \
