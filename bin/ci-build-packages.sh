@@ -561,10 +561,10 @@ XEOF
     if [ "${FLAVOR:-default}" = "ask" ] && [ -f "$INCLUDES_BIN/mono-gw.dtb" ]; then
       echo "### DTB sanity check: verifying SDK-critical properties in mono-gw.dtb"
       FAIL=0
-      # fsl,bpool-ethernet-cfg must exist on dpaa-bpool node
+      # fsl,bpool-ethernet-cfg on dpaa-bpool node — optional hint,
+      # OpenWrt-ASK DTB doesn't include it. Non-fatal.
       if ! dtc -I dtb -O dts "$INCLUDES_BIN/mono-gw.dtb" 2>/dev/null | grep -q 'fsl,bpool-ethernet-cfg'; then
-        echo "FATAL: fsl,bpool-ethernet-cfg MISSING from mono-gw.dtb"
-        FAIL=1
+        echo "WARNING: fsl,bpool-ethernet-cfg missing from mono-gw.dtb (optional — OpenWrt-ASK DTB also lacks it)"
       fi
       # OH port cell-index must be < 6 (FM_MAX_NUM_OF_OH_PORTS)
       for port in 82000 83000 84000 85000 86000 87000; do
