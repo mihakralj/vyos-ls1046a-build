@@ -1,0 +1,163 @@
+name: Discord notification (reusable)
+
+# Reusable-only workflow — no `workflow_dispatch:` trigger.
+# Invoked from another workflow via `uses: ./.github/workflows/discord.yml`
+
+on:
+  workflow_call:
+    inputs:
+      status:
+        description: 'Build result — "success" or anything else (treated as failure)'
+        type: string
+        required: true
+      build_version:
+        description: 'Release/build version string (e.g., 2026.06.19-0202-rolling)'
+        type: string
+        required: false
+        default: 'unknown'
+      build_branch:
+        description: 'Branch or board target (e.g., Stock, NXP, ASK2)'
+        type: string
+        required: false
+        default: 'Stock'
+      release_type:
+        description: 'Release type (e.g., LTS, Stream, Rolling)'
+        type: string
+        required: false
+        default: 'Rolling'
+      image_name:
+        description: 'ISO image name produced by the build'
+        type: string
+        required: false
+        default: 'n/a'
+      channel_id:
+        description: 'Discord channel ID to post to'
+        type: string
+        required: false
+        default: '1519025519327318239'
+    secrets:
+      DISCORD_BOT_KEY:
+        description: 'Discord bot token (Authorization: Bot <token>)'
+        required: true
+
+jobs:
+  notify:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Notify Discord
+        if: always()
+        env:
+          DISCORD_BOT_KEY: ${{ secrets.DISCORD_BOT_KEY }}
+          CHANNEL_ID: ${{ inputs.channel_id }}
+          JOB_STATUS: ${{ inputs.status }}
+          WORKFLOW: ${{ github.workflow }}
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ID: ${{ github.run_id }}
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          BUILD_VERSION: ${{ inputs.build_version }}
+          RUNNER_NAME: ${{ runner.name }}
+          RUNNER_OS: ${{ runner.os }}
+          RUNNER_ARCH: ${{ runner.arch }}
+          RELEASE_TYPE: ${{ inputs.release_type }}
+          BUILD_BRANCH: ${{ inputs.build_branch }}
+        run: |
+          set -euo pipefail
+
+          SHORT_SHA="${SHA:0:7}"
+          BUILD_EPOCH=$(date -u +%s)
+          BUILD_HUMAN=$(date -u -d "@${BUILD_EPOCH}" +"%B %-d, %Y %-I:%M %p UTC")
+
+          # Zero-width space — lets a field render with no visible label.
+          ZWSP=$'\u200b'
+
+          # Display version drops the trailing channel suffix (e.g. "-rolling"),
+          # which is surfaced separately as the release type.
+          DISPLAY_VERSION="${BUILD_VERSION}"
+          DISPLAY_VERSION="${DISPLAY_VERSION%-rolling}"
+          DISPLAY_VERSION="${DISPLAY_VERSION%-lts}"
+          DISPLAY_VERSION="${DISPLAY_VERSION%-stream}"
+
+          INSTALL_URL="https://github.com/${REPO}/blob/main/INSTALL.md"
+          NOTES_URL="https://github.com/${REPO}/releases/tag/${BUILD_VERSION}"
+          REPO_URL="https://github.com/${REPO}"
+          ISO_URL="https://github.com/${REPO}/releases/download/${BUILD_VERSION}/${IMAGE_NAME}"
+
+          NOTES_LINK="[Read changelog](${NOTES_URL})"
+          INSTALL_LINK="[View instructions](${INSTALL_URL})"
+          REPO_LINK="[Open repository](${REPO_URL})"
+          UPGRADE_CMD="\`\`\`"$'\n'"add system image ${ISO_URL}"$'\n'"\`\`\`"
+
+          if [ "${JOB_STATUS}" = "success" ]; then
+            TITLE="📦 New VyOS LS1046A Build"
+            COLOR=5763719
+          else
+            TITLE="❌ VyOS LS1046A Build Failed"
+            COLOR=15548997
+          fi
+
+          if [ "${JOB_STATUS}" = "success" ]; then
+            PAYLOAD=$(jq -n \
+              --arg title      "${TITLE}" \
+              --argjson color  "${COLOR}" \
+              --arg version    "${DISPLAY_VERSION}" \
+              --arg flavor     "${BUILD_BRANCH}" \
+              --arg release    "${RELEASE_TYPE}" \
+              --arg notes      "${NOTES_LINK}" \
+              --arg install    "${INSTALL_LINK}" \
+              --arg repo       "${REPO_LINK}" \
+              --arg upgrade    "${UPGRADE_CMD}" \
+              --arg footer     "${BUILD_HUMAN}" \
+              --arg ts_epoch   "${BUILD_EPOCH}" \
+              '{
+                embeds: [{
+                  title: $title,
+                  color: $color,
+                  fields: [
+                    { name: "Version:", value: $version, inline: true },
+                    { name: "Flavor:",  value: $flavor,  inline: true },
+                    { name: "Release:",     value: $release, inline: true },
+                    { name: "Direct upgrade command:", value: $upgrade, inline: false },
+                    { name: "📝 Release notes:",   value: $notes,   inline: true },
+                    { name: "🛠️ Install guide:", value: $install, inline: true },
+                    { name: "🐙 Code review:",    value: $repo,    inline: true }
+                  ],
+                  footer: { text: $footer }
+                }]
+              }')
+          else
+            PAYLOAD=$(jq -n \
+              --arg title      "${TITLE}" \
+              --argjson color  "${COLOR}" \
+              --arg version    "${DISPLAY_VERSION}" \
+              --arg flavor     "${BUILD_BRANCH}" \
+              --arg release    "${RELEASE_TYPE}" \
+              --arg run_url    "https://github.com/${REPO}/actions/runs/${RUN_ID}" \
+              --arg run_number "${RUN_NUMBER}" \
+              --arg zwsp       "${ZWSP}" \
+              --arg footer     "${BUILD_HUMAN}" \
+              --arg ts_epoch   "${BUILD_EPOCH}" \
+              '{
+                embeds: [{
+                  title: $title,
+                  color: $color,
+                  fields: [
+                    { name: "Version", value: $version, inline: true },
+                    { name: "Flavor",  value: $flavor,  inline: true },
+                    { name: $zwsp,     value: $release, inline: true },
+                    { name: "Run",     value: "[#\($run_number)](\($run_url))", inline: false }
+                  ],
+                  footer: { text: $footer }
+                }]
+              }')
+          fi
+
+          curl -fsS -X POST \
+            -H "Authorization: Bot ${DISCORD_BOT_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "${PAYLOAD}" \
+            "https://discord.com/api/v10/channels/${CHANNEL_ID}/messages"

@@ -1,16 +1,51 @@
 name: "Discord notification test"
 
+# Dispatchable harness that exercises the reusable `discord.yml` embed workflow
+# from the CLI / Actions UI. `discord.yml` is `workflow_call`-only and cannot be
+# dispatched directly, so this thin caller passes test inputs and the bot token
+# through to it. Use it to verify the real build-result embed without running a
+# full self-hosted build.
+
 on:
   workflow_dispatch:
+    inputs:
+      status:
+        description: 'Build result to simulate'
+        type: choice
+        required: true
+        default: success
+        options:
+          - success
+          - failure
+      build_version:
+        description: 'Release/build version string'
+        type: string
+        required: false
+        default: '2026.06.19-0202-rolling'
+      build_branch:
+        description: 'Branch or board target'
+        type: string
+        required: false
+        default: 'default'
+      release_type:
+        description: 'Release type'
+        type: string
+        required: false
+        default: 'Rolling'
+      image_name:
+        description: 'ISO image name to show'
+        type: string
+        required: false
+        default: 'vyos-2026.06.19-0202-rolling-LS1046A-arm64.iso'
 
 jobs:
-  hello:
-    runs-on: ubuntu-24.04
-    steps:
-      - name: "Send hello to Discord"
-        run: |
-          curl -X POST \
-            -H "Authorization: Bot ${{ secrets.DISCORD_BOT_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d '{"content": "hello"}' \
-            https://discord.com/api/v10/channels/1519025519327318239/messages
+  notify:
+    uses: ./.github/workflows/discord.yml
+    with:
+      status: ${{ inputs.status }}
+      build_version: ${{ inputs.build_version }}
+      build_branch: ${{ inputs.build_branch }}
+      release_type: ${{ inputs.release_type }}
+      image_name: ${{ inputs.image_name }}
+    secrets:
+      DISCORD_BOT_KEY: ${{ secrets.DISCORD_BOT_KEY }}
