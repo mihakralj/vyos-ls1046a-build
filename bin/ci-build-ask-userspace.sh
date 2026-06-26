@@ -252,42 +252,18 @@ echo "### cmm ready: $(ls -lh "$CMM_BUILT" | awk '{print $5}')"
 file "$CMM_BUILT"
 
 # ===========================================================================
-#  dpa_app — DPAA application (userspace binary, with fmc PCD compiler)
+#  dpa_app — nofmc stub (C-only, no CDX PCD push)
 # ===========================================================================
-# The original dpa_app crashed with SIGSEGV in CGenericError static init due
-# to C++ ABI mismatch when linking against a pre-compiled libfmc.a. Now that
-# libfmc.a is compiled from source with the same GCC 12, there is no ABI
-# mismatch. The libxml2 const issue (xmlStructuredErrorFunc signature change
-# in Debian 12) is patched above during fmc build.
-echo "### ======== dpa_app (real, with fmc) ========"
-DPA_BUILT="$ASK_DIR/dpa_app/dpa_app"
-DPA_SRC="$ASK_DIR/dpa_app"
-FMC_SRC="$FMC_DIR/source"
-FMLIB_INC="$FMLIB_DIR/include/fmd"
+# The real dpa_app pushes PCD config via CDX_CTRL_DPA_SET_PARAMS ioctl
+# which calls cdx_ioc_set_dpa_params() → partially initializes CDX but
+# corrupts QMan FQ state → "Invalid Enqueue State" flood on all ports.
+# Use the nofmc stub which returns 0 without touching CDX at all.
+echo "### ======== dpa_app (nofmc stub — no CDX PCD push) ========"
+DPA_BUILT="$ASK_DIR/dpa_app/dpa_nofmc"
+$CC -Wall -O2 "$REPO_ROOT/kernel/flavors/ask/dpa_nofmc.c" -o "$DPA_BUILT" 2>&1
 
-# fmlib has nested includes that reference subdirectories relatively
-DPA_CFLAGS="-DNCSW_LINUX -DLS1043 -D__STDC_LIMIT_MACROS -DDPAA_DEBUG_ENABLE -O2"
-DPA_INCLUDES="-I$FMC_SRC -I$FMLIB_INC -I$FMLIB_INC/integrations -I$FMLIB_INC/Peripherals -I/usr/include/libxml2 -I$ASK_DIR/cdx"
-
-# Compile objects — use CC for .c files (C linkage for FMan symbols)
-$CC -c $DPA_CFLAGS $DPA_INCLUDES \
-    "$DPA_SRC/main.c" -o "$DPA_SRC/main.o" 2>&1
-$CC -c $DPA_CFLAGS $DPA_INCLUDES \
-    "$DPA_SRC/dpa.c" -o "$DPA_SRC/dpa.o" 2>&1
-$CC -c $DPA_CFLAGS $DPA_INCLUDES \
-    "$DPA_SRC/testapp.c" -o "$DPA_SRC/testapp.o" 2>&1
-
-# Link against freshly-compiled libfmc.a + fmlib
-$CXX -o "$DPA_BUILT" \
-    "$DPA_SRC/main.o" "$DPA_SRC/dpa.o" "$DPA_SRC/testapp.o" \
-    "$FMC_SRC/libfmc.a" \
-    -L"$FMLIB_DIR" -lfm \
-    -lxml2 -lpthread -lcli \
-    -static-libstdc++ -static-libgcc \
-    2>&1
-
-[ -f "$DPA_BUILT" ] || { echo "FATAL: dpa_app was not produced"; exit 1; }
-echo "### dpa_app ready: $(ls -lh "$DPA_BUILT" | awk '{print $5}')"
+[ -f "$DPA_BUILT" ] || { echo "FATAL: dpa_nofmc was not produced"; exit 1; }
+echo "### dpa_app (nofmc stub) ready: $(ls -lh "$DPA_BUILT" | awk '{print $5}')"
 file "$DPA_BUILT"
 
 # ===========================================================================
