@@ -430,6 +430,12 @@ echo "### Patched dpa_cfg.c: NULL after kfree in release_cfg_info()"
 sed -i '/if (copy_from_user(port_info, uspace_info, mem_size))/i\
 \tprintk("cdx: get_port_info fm=%d max_ports=%u uspace_info=%px mem_size=%u\\n", \
 \t\tfinfo->index, finfo->max_ports, uspace_info, mem_size);' "$ASK_DIR/cdx/dpa_cfg.c"
+# Also add sizeof diagnostic in the ioctl handler entry
+sed -i '/memset(fman_info, 0, mem_size);/a\
+\tprintk("cdx: cdx_ioc_set_dpa_params num_fmans=%u sizeof_fman_info=%zu offset_index=%zu offset_max_ports=%zu\\n", \
+\t\tnum_fmans, sizeof(struct cdx_fman_info), \
+\t\toffsetof(struct cdx_fman_info, index), \
+\t\toffsetof(struct cdx_fman_info, max_ports));' "$ASK_DIR/cdx/dpa_cfg.c"
 echo "### Patched dpa_cfg.c: diagnostic printk before copy_from_user in get_port_info"
 
 # ── Patch: NULL userspace pointers at err_ret BEFORE release_cfg_info ───────
