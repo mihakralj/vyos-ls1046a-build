@@ -113,7 +113,19 @@ Authoritative reference for the idle-deallocate script, systemd unit files, Mana
 - **FMan firmware:** U-Boot injects from SPI flash `mtd4` into DTB before kernel boot. Not loaded via `request_firmware()`, no `/lib/firmware/` files needed
 - **Builder image:** Use `ghcr.io/huihuimoe/vyos-arm64-build/vyos-builder:current-arm64` — do NOT fork or rebuild
 - **Live device SSH:** OpenWrt is at `root@192.168.1.234` (not the default 192.168.1.1)
-- **The board (installed VyOS LS1046A) access — two channels:** The board is reachable BOTH via **serial console** (`plink -serial COM11 -sercfg 115200,8,n,1,N` from the Windows agent workstation — the serial line is a local COM port, COM11; drive it interactively in an async shell) AND via **SSH** (`ssh -i ~/.ssh/vyos_key vyos@192.168.1.190` — lands on **eth0**, the management RJ45). Use SSH for normal verification (key-based, no password) and the serial console for U-Boot/recovery, watching a full boot, or driving the interactive `add system image` installer (the serial console is a live logged-in `vyos@vyos:~$` shell when VyOS is up). Console echoes CR as `^M` and `$`/`?` in sent commands can mangle — keep serial-driven commands simple. (Historical: the serial line was previously exposed as a TCP-to-serial relay at `192.168.1.16:5555`; that endpoint is retired — use plink/COM11.) For non-interactive config sets over either channel use a `#!/bin/vbash` script that `source`s `/opt/vyatta/etc/functions/script-template` (NOT `vbash -c`, NOT the bare `vyatta-cfg-cmd-wrapper` — see validator-env gotcha).
+- **The board (installed VyOS LS1046A) access — three channels:**
+  1. **SSH** (primary): `ssh -i ~/.ssh/vyos_key vyos@192.168.1.190` — lands on **eth0**, the management RJ45. Key-based, no password. Use for normal verification.
+  2. **Serial via TCP relay** (active — reachable from Cobalt 100 and any host on 192.168.1.0/24): raw TCP to `192.168.1.16:5555`. From the Cobalt 100 build VM (Linux), connect with:
+     ```bash
+     bash -c "stty raw -echo; exec 3<>/dev/tcp/192.168.1.16/5555; cat <&3 & cat >&3"
+     ```
+     Or from any host: `nc 192.168.1.16 5555` (but `stty raw -echo` first for proper terminal behavior). The relay is a TCP-to-serial bridge on the Windows agent workstation (COM11, 115200 8N1). With the `pty-mcp` tool, spawn with:
+     ```
+     pty-spawn -- bash -c "stty raw -echo; exec 3<>/dev/tcp/192.168.1.16/5555; cat <&3 & cat >&3"
+     ```
+  3. **Windows workstation serial** (`plink -serial COM11 -sercfg 115200,8,n,1,N`) — COM11 is the local serial port on the Windows agent PC.
+
+  **Serial console gotchas:** Keep commands simple — `$` and `?` characters in the command stream mangle with the raw terminal. Avoid `$?` (shell exit code) — use explicit return code capture instead. CR is echoed as `^M`. For non-interactive config sets use a `#!/bin/vbash` script that `source`s `/opt/vyatta/etc/functions/script-template` — never use `vbash -c` or bare `vyatta-cfg-cmd-wrapper` (see validator-env gotcha).
 - **Git on Windows:** `core.filemode=false` required — NTFS can't represent Unix permissions
 - **Don't push during builds:** The workflow updates `version.json` — pushing while a build is running causes merge conflicts. Use `git pull --rebase` if this happens.
 - **NEVER `install image` from an installed system:** Use `add system image <url>` instead. `install image` is for USB live boot ONLY — it repartitions the eMMC and looks for `/usr/lib/live/mount/medium/live/filesystem.squashfs` which doesn't exist on installed systems. Running it from eMMC DESTROYS the existing installation.
