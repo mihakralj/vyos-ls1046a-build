@@ -424,12 +424,9 @@ with open(p,'w') as f: f.write(s)
 PYEOF
 echo "### Patched dpa_cfg.c: NULL after kfree in release_cfg_info()"
 
-# NOTE: get_port_info/fman_info struct diagnostic printks REMOVED.
-# Kern-vs-userspace struct mismatch confirmed:
-#   kernel sizeof=424, index@400, max_ports@404
-#   userspace sizeof=360, index@336, max_ports@340
-# Root cause: INGRESS_ALL_POLICER_QUEUES or struct alignment differs.
-# Fix required in upstream ASK repo — dpa_app sets wrong fields.
+# FIXED 2026-06-26: Struct mismatch resolved by adding -DSEC_PROFILE_SUPPORT
+# to dpa_app compilation (ci-build-ask-userspace.sh). Kernel Kbuild already
+# has SEC_PROFILE_SUPPORT in ccflags-y. Both sides now use sizeof=424 index@400.
 
 # ── Patch: NULL userspace pointers at err_ret BEFORE release_cfg_info ───────
 # The ioctl copies fman_info from userspace. The struct has POINTER fields
