@@ -158,16 +158,13 @@ if [[ "$FLAVOR" == "ask" ]]; then
             cp -f "$BOARD_DTB_DIR/$_dts" "$DTS_DST/$_dts"
         fi
     done
-    # Also inject SDK DTSI overlays
-    if [[ -d "$BOARD_DTB_DIR/sdk-dtsi" ]]; then
-        (cd "$BOARD_DTB_DIR/sdk-dtsi" && find . -type f -print0) | \
-            while IFS= read -r -d '' f; do
-                f="${f#./}"
-                mkdir -p "$DTS_DST/$(dirname "$f")"
-                cp -f "$BOARD_DTB_DIR/sdk-dtsi/$f" "$DTS_DST/$f"
-            done
-    fi
-    ok "board DTS injected into kernel tree"
+    # NXP kernel tree already ships correct SDK dtsi files with cell-index
+    # on QMan/BMan portal nodes. Our board/dtb/sdk-dtsi/ copies (pulled from
+    # OpenWrt-ASK) lack QMan portal cell-index. Injecting them overwrites the
+    # NXP kernel's correct dtsi files → compiled DTB has no portal cell-index
+    # → SDK fsl_qbman allocates FQs in wrong range → Qman ErrInt flood.
+    # Only our custom DTS files are injected; dtsi files stay NXP-kernel-native.
+    ok "board DTS injected into kernel tree (dtsi skipped — NXP kernel native)"
 fi
 
 # ── Patch application (plan §3.4) ─────────────────────────────────────
