@@ -1,316 +1,45 @@
 // SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 /*
- * Device Tree file for Freescale Layerscape-1046A family SoC.
+ * Mono Gateway DK — SDK device tree (VyOS variant)
  *
- * Copyright 2025 Mono Technologies Inc.
+ * Includes the mainline board DTS plus SDK portal overlays (cell-index
+ * on BMan/QMan portals), OH port bindings for CDX IPsec, FMan extended-args
+ * for per-port FIFO sizing, and 10G fixed-link overrides for SFP+ cages.
  *
- * Author: Tomaz Zaman <tomaz@mono.si>
+ * Source: we-are-mono/OpenWRT-ASK (target/linux/layerscape/files/)
+ * Adapted for VyOS: bootmem nodes removed (conflict with initramfs),
+ * fman0-extended-args retained (config only, no memory reservation),
+ * OH port bindings + 10G fixed-link overrides added.
  */
 
 #include "mono-gateway-dk.dts"
 #include "qoriq-qman-portals-sdk.dtsi"
 #include "qoriq-bman-portals-sdk.dtsi"
 
-/ {
-	/* Boot memory regions for SDK DPAA driver */
-	bootmem0@a0000000 {
-		reg = <0x00 0xa0000000 0x00 0x4000000 0x00 0xa4000000 0x00 0x6000000>;
-	};
+/*
+ * Fix OH port cell-index values.
+ *
+ * qoriq-fman3-0.dtsi sets cell-index 2-7 on ports 82000-87000, but the
+ * SDK FMan port driver requires cell-index < FM_MAX_NUM_OF_OH_PORTS (6).
+ * Override to match qoriq-fman3-0-6oh.dtsi: 0-5.
+ */
+&fman0_oh_0x2 { /delete-property/ cell-index; cell-index = <0>; };
+&fman0_oh_0x3 { /delete-property/ cell-index; cell-index = <1>; };
+&fman0_oh_0x4 { /delete-property/ cell-index; cell-index = <2>; };
+&fman0_oh_0x5 { /delete-property/ cell-index; cell-index = <3>; };
+&fman0_oh_0x6 { /delete-property/ cell-index; cell-index = <4>; };
+&fman0_oh_0x7 { /delete-property/ cell-index; cell-index = <5>; };
 
-	bootmem1@aa000000 {
-		reg = <0x00 0xaa000000 0x00 0x4000000 0x00 0xae000000 0x00 0x6000000>;
-	};
-
-	cpus {
-		fman0-extended-args {
-			cell-index = <0x00>;
-			compatible = "fsl,fman-extended-args";
-			total-fifo-size = <0x3e500>;
-
-			/* Offline ports for CDX - cell-index overridden for SDK compatibility:
-			 * fman0_oh_0x3 (port@83000) = cell-index 1 (SDK style)
-			 * fman0_oh_0x4 (port@84000) = cell-index 2 (SDK style)
-			 */
-			fman0_oh_0x3-extended-args {
-				cell-index = <0x01>;  /* matches port@83000 SDK cell-index */
-				compatible = "fsl,fman-port-op-extended-args";
-				fifo-size = <0x3200 0x00>;
-				buffer-layout = <0x60 0x40>;
-			};
-
-			fman0_oh_0x4-extended-args {
-				cell-index = <0x02>;  /* matches port@84000 SDK cell-index */
-				compatible = "fsl,fman-port-op-extended-args";
-				fifo-size = <0x900 0x00>;
-				buffer-layout = <0x60 0x40>;
-			};
-
-			/* All 1G ports need extended-args (SDK driver requirement) */
-
-			/* MAC1 (ethernet@e0000) - cell-index 0 - disabled but needed */
-			fman0_rx0-extended-args {
-				cell-index = <0x00>;
-				compatible = "fsl,fman-port-1g-rx-extended-args";
-				fifo-size = <0x3200 0x00>;
-				buffer-layout = <0x60 0x40>;
-				vsp-window = <0x02 0x00>;
-			};
-
-			fman0_tx0-extended-args {
-				cell-index = <0x00>;
-				compatible = "fsl,fman-port-1g-tx-extended-args";
-				fifo-size = <0x3200 0x00>;
-				buffer-layout = <0x60 0x40>;
-			};
-
-			/* MAC2 (ethernet@e2000) - cell-index 1 */
-			fman0_rx1-extended-args {
-				cell-index = <0x01>;
-				compatible = "fsl,fman-port-1g-rx-extended-args";
-				fifo-size = <0x3200 0x00>;
-				buffer-layout = <0x60 0x40>;
-				vsp-window = <0x02 0x00>;
-			};
-
-			fman0_tx1-extended-args {
-				cell-index = <0x01>;
-				compatible = "fsl,fman-port-1g-tx-extended-args";
-				fifo-size = <0x3200 0x00>;
-				buffer-layout = <0x60 0x40>;
-			};
-
-			/* MAC3 (ethernet@e4000) - cell-index 2 - disabled but needed */
-			fman0_rx2-extended-args {
-				cell-index = <0x02>;
-				compatible = "fsl,fman-port-1g-rx-extended-args";
-				fifo-size = <0x3200 0x00>;
-				buffer-layout = <0x60 0x40>;
-				vsp-window = <0x02 0x00>;
-			};
-
-			fman0_tx2-extended-args {
-				cell-index = <0x02>;
-				compatible = "fsl,fman-port-1g-tx-extended-args";
-				fifo-size = <0x3200 0x00>;
-				buffer-layout = <0x60 0x40>;
-			};
-
-			/* MAC4 (ethernet@e6000) - cell-index 3 - disabled but needed */
-			fman0_rx3-extended-args {
-				cell-index = <0x03>;
-				compatible = "fsl,fman-port-1g-rx-extended-args";
-				fifo-size = <0x3200 0x00>;
-				buffer-layout = <0x60 0x40>;
-				vsp-window = <0x02 0x00>;
-			};
-
-			fman0_tx3-extended-args {
-				cell-index = <0x03>;
-				compatible = "fsl,fman-port-1g-tx-extended-args";
-				fifo-size = <0x3200 0x00>;
-				buffer-layout = <0x60 0x40>;
-			};
-
-			/* MAC5 (ethernet@e8000) - cell-index 4 */
-			fman0_rx4-extended-args {
-				cell-index = <0x04>;
-				compatible = "fsl,fman-port-1g-rx-extended-args";
-				fifo-size = <0x3200 0x00>;
-				buffer-layout = <0x60 0x40>;
-				vsp-window = <0x02 0x00>;
-			};
-
-			fman0_tx4-extended-args {
-				cell-index = <0x04>;
-				compatible = "fsl,fman-port-1g-tx-extended-args";
-				fifo-size = <0x3200 0x00>;
-				buffer-layout = <0x60 0x40>;
-			};
-
-			/* MAC6 (ethernet@ea000) - cell-index 5 */
-			fman0_rx5-extended-args {
-				cell-index = <0x05>;
-				compatible = "fsl,fman-port-1g-rx-extended-args";
-				fifo-size = <0x3200 0x00>;
-				buffer-layout = <0x60 0x40>;
-				vsp-window = <0x02 0x00>;
-			};
-
-			fman0_tx5-extended-args {
-				cell-index = <0x05>;
-				compatible = "fsl,fman-port-1g-tx-extended-args";
-				fifo-size = <0x3200 0x00>;
-				buffer-layout = <0x60 0x40>;
-			};
-
-			/* MAC9 (ethernet@f0000) - 10G cell-index 0 */
-			fman0_rx6-extended-args {
-				cell-index = <0x00>;
-				compatible = "fsl,fman-port-10g-rx-extended-args";
-				fifo-size = <0x6000 0x00>;
-				buffer-layout = <0x60 0x40>;
-				vsp-window = <0x02 0x00>;
-			};
-
-			fman0_tx6-extended-args {
-				cell-index = <0x00>;
-				compatible = "fsl,fman-port-10g-tx-extended-args";
-				fifo-size = <0x4000 0x00>;
-				buffer-layout = <0x60 0x40>;
-			};
-
-			/* MAC10 (ethernet@f2000) - 10G cell-index 1 */
-			fman0_rx7-extended-args {
-				cell-index = <0x01>;
-				compatible = "fsl,fman-port-10g-rx-extended-args";
-				fifo-size = <0x6000 0x00>;
-				buffer-layout = <0x60 0x40>;
-				vsp-window = <0x02 0x00>;
-			};
-
-			fman0_tx7-extended-args {
-				cell-index = <0x01>;
-				compatible = "fsl,fman-port-10g-tx-extended-args";
-				fifo-size = <0x4000 0x00>;
-				buffer-layout = <0x60 0x40>;
-			};
-		};
-	};
-};
-
-&bman_fbpr {
-	compatible = "fsl,bman-fbpr";
-	alloc-ranges = <0 0 0x10000 0>;
-};
-&qman_fqd {
-	compatible = "fsl,qman-fqd";
-	alloc-ranges = <0 0 0x10000 0>;
-};
-&qman_pfdr {
-	compatible = "fsl,qman-pfdr";
-	alloc-ranges = <0 0 0x10000 0>;
-};
-
-&soc {
-	/delete-property/ dma-coherent;
-
-	#include "qoriq-dpaa-eth.dtsi"
-	/* Note: We override cell-index values in &fman0 section to match
-	 * SDK driver expectations (0-5 instead of mainline 2-7).
-	 * Port@82000 with cell-index=0 becomes the HC port for PCD.
-	 */
-
-	pcie@3400000 {
-		/delete-property/ iommu-map;
-	};
-
-	pcie@3500000 {
-		/delete-property/ iommu-map;
-	};
-
-	pcie@3600000 {
-		/delete-property/ iommu-map;
-	};
-
-	/delete-node/ iommu@9000000;
-};
-
-&fsldpaa {
-	ethernet@0 {
-		status = "disabled";  /* MAC1 - not on Mono Gateway DK */
-	};
-	ethernet@2 {
-		status = "disabled";  /* MAC3 - not on Mono Gateway DK */
-	};
-	ethernet@3 {
-		status = "disabled";  /* MAC4 - not on Mono Gateway DK */
-	};
-
-	/* Enabled from qoriq-dpaa-eth.dtsi:
-	 * ethernet@1 = enet1 = MAC2
-	 * ethernet@4 = enet4 = MAC5
-	 * ethernet@5 = enet5 = MAC6
-	 * ethernet@8 = enet6 = MAC9 (10G)
-	 */
-
-	/* Add MAC10 - not in qoriq-dpaa-eth.dtsi */
-	ethernet@9 {
-		compatible = "fsl,dpa-ethernet";
-		fsl,fman-mac = <&enet7>;
-		dma-coherent;
-	};
-};
-
+/*
+ * FMan offline-parsing (OH) port bindings — required for cdx IPsec offload.
+ *
+ * Two OH ports (port@83000/IPsec and port@84000/WiFi) are bound to specific
+ * QMan frame queues for CDX/IPsec packet re-injection. The cdx module's
+ * devoh.c queries these via oh_port_driver_get_port_info().
+ *
+ * Matching OpenWRT mono-gateway-dk-sdk.dts lines 314-325.
+ */
 &fman0 {
-	compatible = "fsl,fman", "simple-bus";
-
-	/* Core FMan sub-modules */
-	muram@0 {
-		compatible = "fsl,fman-muram";
-		reg = <0x0 0x60000>;
-	};
-
-	bmi@80000 {
-		compatible = "fsl,fman-bmi";
-		reg = <0x80000 0x400>;
-	};
-
-	qmi@80400 {
-		compatible = "fsl,fman-qmi";
-		reg = <0x80400 0x400>;
-	};
-
-	/* PCD sub-modules required for FMC/CDX */
-	cc {
-		compatible = "fsl,fman-cc";
-	};
-
-	policer@c0000 {
-		compatible = "fsl,fman-policer";
-		reg = <0xc0000 0x1000>;
-	};
-
-	keygen@c1000 {
-		compatible = "fsl,fman-keygen";
-		reg = <0xc1000 0x1000>;
-	};
-
-	dma@c2000 {
-		compatible = "fsl,fman-dma";
-		reg = <0xc2000 0x1000>;
-	};
-
-	fpm@c3000 {
-		compatible = "fsl,fman-fpm";
-		reg = <0xc3000 0x1000>;
-	};
-
-	parser@c7000 {
-		compatible = "fsl,fman-parser";
-		reg = <0xc7000 0x1000>;
-	};
-
-	vsps@dc000 {
-		compatible = "fsl,fman-vsps";
-		reg = <0xdc000 0x1000>;
-	};
-
-	ethernet@f0000 {
-		/delete-property/ managed;
-		fixed-link = <0 1 10000 0 0>;
-		phy-connection-type = "xgmii";
-	};
-
-	ethernet@f2000 {
-		/delete-property/ managed;
-		fixed-link = <0 1 10000 0 0>;
-		phy-connection-type = "xgmii";
-	};
-
-	/* DPA Offline port bindings - required for CDX.
-	 * Use phandles fman0_oh_0x3 (port@83000) and fman0_oh_0x4 (port@84000).
-	 * Cell-index overridden to SDK-style (1 and 2) in port nodes above.
-	 */
 	dpa-fman0-oh@2 {
 		compatible = "fsl,dpa-oh";
 		fsl,qman-frame-queues-oh = <0x60 0x01 0x61 0x01>;
@@ -322,210 +51,152 @@
 		fsl,qman-frame-queues-oh = <0x62 0x01 0x63 0x01>;
 		fsl,fman-oh-port = <&fman0_oh_0x4>;
 	};
+};
 
-	/* Override OH port cell-index values for SDK driver compatibility.
-	 * SDK driver expects cell-index 0 for HC (Host Command/PCD) port.
-	 * Mainline qoriq-fman3-0.dtsi uses cell-index 2-7, but SDK needs 0-5.
-	 */
-	port@82000 {
-		cell-index = <0>;  /* HC port - required for PCD initialization */
-		compatible = "fsl,fman-port-oh";
+/*
+ * FMan extended-args — per-port FIFO sizing for the SDK FMan driver.
+ *
+ * This is a config descriptor under /cpus/ (NOT a memory reservation).
+ * It tells the SDK FMan driver the FIFO sizes for OH ports used by CDX.
+ * total-fifo-size = 0x3e500 (254,272 bytes).
+ *
+ * Without this, alloc_offline_port() fails with "no free of ports"
+ * because the FMan driver doesn't know how to size the OH port FIFOs.
+ *
+ * Matching OpenWRT mono-gateway-dk-sdk.dts lines 24-48 (safe subset).
+ * bootmem0/bootmem1 nodes are NOT included — they conflict with VyOS
+ * initramfs boot (U-Boot loads initrd to the same region).
+ */
+/ {
+	cpus {
+		fman0-extended-args {
+		cell-index = <0x00>;
+		compatible = "fsl,fman-extended-args";
+		total-fifo-size = <0x3e500>;
+
+		/*
+		 * OH port extended-args — cell-index matches the SDK
+		 * override values (port@83000=1, port@84000=2)
+		 */
+		fman0_oh_0x3-extended-args {
+			cell-index = <0x01>;
+			compatible = "fsl,fman-port-op-extended-args";
+			fifo-size = <0x3200 0x00>;   /* 12,800 bytes for IPsec */
+			buffer-layout = <0x60 0x40>;
+		};
+
+		fman0_oh_0x4-extended-args {
+			cell-index = <0x02>;
+			compatible = "fsl,fman-port-op-extended-args";
+			fifo-size = <0x900 0x00>;    /* 2,304 bytes for WiFi */
+			buffer-layout = <0x60 0x40>;
+		};
 	};
+};
+}; /* / (root node re-entry close) */
 
-	port@83000 {
-		cell-index = <1>;
-		compatible = "fsl,fman-port-oh";
-	};
+/* ── FMan DMA memory reservations ────────────────────────────────────────
+ * The SDK fsl_fman/fsl_mac driver needs contiguous DMA regions for 10G
+ * port buffer descriptors. OpenWRT achieves this via custom bootmem{} DTS
+ * nodes, but those conflict with the VyOS initramfs load address.
+ *
+ * Using the standard /reserved-memory binding avoids that: the kernel
+ * carves these regions out during early init, before initramfs is
+ * unpacked. The SDK driver still uses its own bootmem parser, but these
+ * no-map nodes ensure the regions are never handed out to other users.
+ *
+ * 320 MB total: 0xa0000000–0xb3ffffff (same range as OpenWRT bootmem).
+ */
+/ {
+    reserved-memory {
+        /* FMan DMA regions — carved out before initramfs loads.
+         * The SDK fsl_mac driver parses bootmem nodes for 10G port
+         * DMA descriptors. 256 MB at 0xa0000000–0xafffffff,
+         * stopping before ramoops at 0xb0000000. */
+        fman_dma: fman-dma@a0000000 {
+            reg = <0x0 0xa0000000 0x0 0x8000000>;   /* 128 MB */
+            no-map;
+        };
+        fman_dma2: fman-dma@a8000000 {
+            reg = <0x0 0xa8000000 0x0 0x8000000>;   /* 128 MB */
+            no-map;
+        };
+    };
 
-	port@84000 {
-		cell-index = <2>;
-		compatible = "fsl,fman-port-oh";
-	};
-
-	port@85000 {
-		cell-index = <3>;
-		compatible = "fsl,fman-port-oh";
-	};
-
-	port@86000 {
-		cell-index = <4>;
-		compatible = "fsl,fman-port-oh";
-	};
-
-	port@87000 {
-		cell-index = <5>;
-		compatible = "fsl,fman-port-oh";
-	};
+    /* SDK driver-compatible bootmem nodes inside reserved-memory.
+     * reg format matches OpenWRT's two-tuple, split to avoid the
+     * kernel ignoring a second region. */
+    bootmem0: bootmem@a0000000 {
+        compatible = "fsl,fman-dma-pool";
+        reg = <0x00 0xa0000000 0x00 0x4000000>;
+    };
+    bootmem1: bootmem@a4000000 {
+        compatible = "fsl,fman-dma-pool";
+        reg = <0x00 0xa4000000 0x00 0x4000000>;
+    };
+    bootmem2: bootmem@a8000000 {
+        compatible = "fsl,fman-dma-pool";
+        reg = <0x00 0xa8000000 0x00 0x4000000>;
+    };
+    bootmem3: bootmem@ac000000 {
+        compatible = "fsl,fman-dma-pool";
+        reg = <0x00 0xac000000 0x00 0x4000000>;
+    };
 };
 
-&clockgen {
-	dma-coherent;
-};
-
-&scfg {
-	dma-coherent;
-};
-
-&crypto {
-	dma-coherent;
-};
-
-&dcfg {
-	dma-coherent;
-};
-
-&ifc {
-	dma-coherent;
-};
-
-&qspi {
-	dma-coherent;
-};
-
-&esdhc {
-	dma-coherent;
-};
-
-&ddr {
-	dma-coherent;
-};
-
-&tmu {
-	dma-coherent;
-};
-
-&qman {
-	dma-coherent;
-};
-
-&bman {
-	dma-coherent;
-};
-
-&bportals {
-	dma-coherent;
-};
-
-&qportals {
-	dma-coherent;
-};
-
-&dspi {
-	dma-coherent;
-};
-
-&i2c0 {
-	dma-coherent;
-};
-
-&i2c1 {
-	dma-coherent;
-};
-
-&i2c2 {
-	dma-coherent;
-};
-
-&i2c3 {
-	dma-coherent;
-};
-
-&duart0 {
-	dma-coherent;
-};
-
-&duart1 {
-	dma-coherent;
-};
-
-&duart2 {
-	dma-coherent;
-};
-
-&duart3 {
-	dma-coherent;
-};
-
-&gpio0 {
-	dma-coherent;
-};
-
-&gpio1 {
-	dma-coherent;
-};
-
-&gpio2 {
-	dma-coherent;
-};
-
-&gpio3 {
-	dma-coherent;
-};
-
-&lpuart0 {
-	dma-coherent;
-};
-
-&lpuart1 {
-	dma-coherent;
-};
-
-&lpuart2 {
-	dma-coherent;
-};
-
-&lpuart3 {
-	dma-coherent;
-};
-
-&lpuart4 {
-	dma-coherent;
-};
-
-&lpuart5 {
-	dma-coherent;
-};
-
-&ftm_alarm0 {
-	dma-coherent;
-};
-
-&wdog0 {
-	dma-coherent;
-};
-
-&edma0 {
-	dma-coherent;
-};
-
-&sata {
-	dma-coherent;
-};
-
-&qdma {
-	dma-coherent;
-};
-
-&msi1 {
-	dma-coherent;
-};
-
-&msi2 {
-	dma-coherent;
-};
-
-&msi3 {
-	dma-coherent;
-};
-
+/*
+ * 10G MAC fixed-link overrides (matching OpenWRT SDK DTS).
+ *
+ * The SDK fsl_mac driver does NOT support managed="in-band-status" or
+ * sfp=<...> — those are mainline DPAA bindings. Without explicit fixed-link
+ * the SDK driver falls through to a broken swphy emulation (10G isn't
+ * representable in Clause 22 MII registers). Set fixed-link=10000/Full
+ * so the SDK driver skips the swphy path and initialises the serdes
+ * directly for 10GBASE-R/XGMII.
+ */
 &fman0 {
-	dma-coherent;
+	ethernet@f0000 {
+		/delete-property/ managed;
+		/delete-property/ sfp;
+		fixed-link = <0 1 10000 0 0>;
+		phy-connection-type = "xgmii";
+	};
+
+	ethernet@f2000 {
+		/delete-property/ managed;
+		/delete-property/ sfp;
+		fixed-link = <0 1 10000 0 0>;
+		phy-connection-type = "xgmii";
+	};
 };
 
-&ptp_timer0 {
-	dma-coherent;
+/*
+ * GPIO hogs: force TX_DISABLE HIGH (TX enabled) at boot.
+ * We remove tx-disable-gpios from the SFP nodes below so the SFP driver
+ * doesn't request these GPIOs (no conflict). The SFP driver still binds,
+ * reads the SFP EEPROM, and configures the serdes rate via the MAC.
+ * TX is always enabled because the GPIO hogs hold pins 13+14 HIGH.
+ */
+&gpio2 {
+    sfp0_tx_enable {
+        gpio-hog;
+        gpios = <14 0>;  /* pin 14 = sfp-xfi0 (eth3), output HIGH → TX on */
+        output-high;
+        line-name = "sfp0-tx-enable";
+    };
+    sfp1_tx_enable {
+        gpio-hog;
+        gpios = <13 0>;  /* pin 13 = sfp-xfi1 (eth4), output HIGH → TX on */
+        output-high;
+        line-name = "sfp1-tx-enable";
+    };
 };
 
-&fsldpaa {
-	dma-coherent;
+/* SFP nodes: keep enabled (EEPROM/serdes config) but remove tx-disable-gpios */
+&sfp_xfi0 {
+    /delete-property/ tx-disable-gpios;
+};
+
+&sfp_xfi1 {
+    /delete-property/ tx-disable-gpios;
 };
