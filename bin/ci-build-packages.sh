@@ -430,12 +430,16 @@ XEOF
         fi
       fi
 
-      # Copy SDK dtsi files required by mono-gateway-dk-sdk.dts
-      # These are NXP SDK-specific includes not present in the mainline kernel tree
+      # NXP kernel tree already ships the SDK dtsi files with correct
+      # cell-index on QMan/BMan portal nodes. Our copies in board/dtb/sdk-dtsi/
+      # are pulled from OpenWrt-ASK but LACK cell-index (0 vs 10 BMan, 0 QMan).
+      # Overwriting the NXP tree's dtsi files produces a DTB with no portal
+      # cell-index → SDK fsl_qbman allocates FQs in wrong range → Qman ErrInt.
+      # Only the custom DTS files (mono-gateway-dk*.dts) are injected — dtsi
+      # files stay as-shipped by the NXP kernel tree.
       SDK_DTSI_DIR="$GITHUB_WORKSPACE/board/dtb/sdk-dtsi"
       if [ -d "$SDK_DTSI_DIR" ]; then
-        echo "### Installing SDK dtsi files into kernel DTS directory"
-        cp -v "$SDK_DTSI_DIR"/*.dtsi "$DTS_DIR/" 2>/dev/null || true
+        echo "### SKIPPING SDK dtsi injection — NXP kernel tree ships correct dtsis"
       fi
 
       # FLAVOR-aware DTB selection:
