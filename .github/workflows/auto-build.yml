@@ -237,7 +237,8 @@ jobs:
             work/linux-6.12.49/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_ethtool.c
           echo "### Patched dpaa_ethtool.c: netdev_err -> netdev_dbg for phy-not-init"
 
-      - name: Compile Mono DTB from DTS
+      - name: Compile Mono DTB from DTS (mainline only — skip on nxp-sdk)
+        if: ${{ !startsWith(github.ref_name, 'nxp-sdk') }}
         run: bin/ci-compile-mono-dtb.sh
 
       - name: Setup vyos-build (config, chroot files, hooks)
