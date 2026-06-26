@@ -252,31 +252,25 @@ echo "### cmm ready: $(ls -lh "$CMM_BUILT" | awk '{print $5}')"
 file "$CMM_BUILT"
 
 # ===========================================================================
-#  dpa_app — with diagnostic (real fmc, temporarily restored for debug)
+#  dpa_app — nofmc stub (C-only, no CDX PCD push)
 # ===========================================================================
-echo "### ======== dpa_app (real, with fmc — DIAGNOSTIC BUILD) ========"
-DPA_BUILT="$ASK_DIR/dpa_app/dpa_app"
-DPA_SRC="$ASK_DIR/dpa_app"
-FMC_SRC="$FMC_DIR/source"
-FMLIB_INC="$FMLIB_DIR/include/fmd"
+# KNOWN ISSUE: The real dpa_app cannot push PCD config via CDX ioctl because
+# the struct cdx_fman_info has different sizes between userspace (360 bytes,
+# index@336) and kernel (424 bytes, index@400). The 64-byte difference means
+# dpa_app writes max_ports at offset 340 but kernel reads it from offset 404
+# → garbage values → get_port_info fails → QMan corruption.
+#
+# Root cause: INGRESS_ALL_POLICER_QUEUES differs between builds (likely 8 vs 10
+# or struct alignment divergence). This needs fixing in upstream ASK repo.
+# For now, the nofmc stub returns 0 without any CDX ioctl, leaving CDX in
+# its pre-populated state with clean kernel QMan.
+echo "### ======== dpa_app (nofmc stub — no CDX PCD push) ========"
+DPA_BUILT="$ASK_DIR/dpa_app/dpa_nofmc"
+$CC -Wall -O2 "$REPO_ROOT/kernel/flavors/ask/dpa_nofmc.c" -o "$DPA_BUILT" 2>&1
 
-DPA_CFLAGS="-DNCSW_LINUX -DLS1043 -D__STDC_LIMIT_MACROS -DDPAA_DEBUG_ENABLE -O2"
-DPA_INCLUDES="-I$FMC_SRC -I$FMLIB_INC -I$FMLIB_INC/integrations -I$FMLIB_INC/Peripherals -I/usr/include/libxml2 -I$ASK_DIR/cdx"
-
-$CC -c $DPA_CFLAGS $DPA_INCLUDES "$DPA_SRC/main.c" -o "$DPA_SRC/main.o" 2>&1
-$CC -c $DPA_CFLAGS $DPA_INCLUDES "$DPA_SRC/dpa.c" -o "$DPA_SRC/dpa.o" 2>&1
-$CC -c $DPA_CFLAGS $DPA_INCLUDES "$DPA_SRC/testapp.c" -o "$DPA_SRC/testapp.o" 2>&1
-
-$CXX -o "$DPA_BUILT" \
-    "$DPA_SRC/main.o" "$DPA_SRC/dpa.o" "$DPA_SRC/testapp.o" \
-    "$FMC_SRC/libfmc.a" \
-    -L"$FMLIB_DIR" -lfm \
-    -lxml2 -lpthread -lcli \
-    -static-libstdc++ -static-libgcc \
-    2>&1
-
-[ -f "$DPA_BUILT" ] || { echo "FATAL: dpa_app was not produced"; exit 1; }
-echo "### dpa_app ready: $(ls -lh "$DPA_BUILT" | awk '{print $5}')"
+[ -f "$DPA_BUILT" ] || { echo "FATAL: dpa_nofmc was not produced"; exit 1; }
+echo "### dpa_app (nofmc stub) ready: $(ls -lh "$DPA_BUILT" | awk '{print $5}')"
+file "$DPA_BUILT"
 
 # ===========================================================================
 #  Package as .deb
