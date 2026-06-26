@@ -424,18 +424,36 @@ with open(p,'w') as f: f.write(s)
 PYEOF
 echo "### Patched dpa_cfg.c: NULL after kfree in release_cfg_info()"
 
-# NOTE: The "NULL userspace pointers after copy_from_user" fix is
-# DELIBERATELY OMITTED. It set fman_info[ii].portinfo = NULL which
-# broke get_port_info() — that function saves the userspace pointer
-# before allocating a kernel buffer, then copy_from_user() from the
-# saved pointer. NULLing it causes copy_from_user(port_info, NULL)
-# → -EIO → "Read port_info failed".
-#
-# The release_cfg_info() NULL-after-kfree fix (above) already handles
-# double-free protection. The userspace pointer in fman_info is never
-# kfree'd by release_cfg_info — it only kfrees the dist_info and
-# port_info arrays that get_port_info allocates with kzalloc (kernel
-# pointers, not userspace ones).
+# ── Patch: NULL userspace pointers at err_ret BEFORE release_cfg_info ───────
+# The ioctl copies fman_info from userspace. The struct has POINTER fields
+# (portinfo, tbl_info) holding dpa_app's userspace addresses. On error path,
+# release_cfg_info() tries to kfree() these → kernel panic.
+# Fix: NULL them at err_ret BEFORE calling release_cfg_info, but AFTER the
+# get_port_info() loop (which NEEDS the userspace pointers to copy data).
+python3 - "$ASK_DIR/cdx/dpa_cfg.c" << 'PYEOF'
+import sys
+p = sys.argv[1]
+with open(p) as f: s = f.read()
+
+old_label = 'err_ret:\n\trelease_cfg_info();'
+new_label = '''err_ret:
+\t{
+\t\tint _ii;
+\t\tfor (_ii = 0; _ii < num_fmans; _ii++) {
+\t\t\tfman_info[_ii].portinfo = NULL;
+\t\t\tfman_info[_ii].tbl_info = NULL;
+\t\t}
+\t}
+\trelease_cfg_info();'''
+
+if old_label in s:
+    s = s.replace(old_label, new_label)
+    print('Patched dpa_cfg.c: NULL userspace pointers at err_ret before release_cfg_info')
+else:
+    print('WARNING: err_ret pattern not found in dpa_cfg.c')
+with open(p,'w') as f: f.write(s)
+PYEOF
+echo "### Patched dpa_cfg.c: NULL userspace pointers at err_ret"
 
 # ── Build cdx.ko ───────────────────────────────────────────────────────────
 echo "### ======== Building cdx.ko ========"
