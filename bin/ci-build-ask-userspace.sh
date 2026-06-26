@@ -252,24 +252,31 @@ echo "### cmm ready: $(ls -lh "$CMM_BUILT" | awk '{print $5}')"
 file "$CMM_BUILT"
 
 # ===========================================================================
-#  dpa_app — nofmc stub (C-only, no CDX PCD push)
+#  dpa_app — with diagnostic (real fmc, temporarily restored for debug)
 # ===========================================================================
-# The real dpa_app pushes PCD config via CDX_CTRL_DPA_SET_PARAMS ioctl.
-# This corrupts QMan FQ state → "Invalid Enqueue State" flood → zero
-# networking. The root cause is get_port_info() failing in the kernel
-# CDX ioctl handler (dpa_cfg.c:294) because dpa_app's userspace pointers
-# don't survive the copy_from_user chain correctly.
-#
-# The nofmc stub returns 0 without touching CDX — CDX loads with its
-# pre-populated MURAM handle and the kernel keeps clean QMan state.
-# TODO: fix dpa_app's userspace→kernel data transfer for get_port_info.
-echo "### ======== dpa_app (nofmc stub — no CDX PCD push) ========"
-DPA_BUILT="$ASK_DIR/dpa_app/dpa_nofmc"
-$CC -Wall -O2 "$REPO_ROOT/kernel/flavors/ask/dpa_nofmc.c" -o "$DPA_BUILT" 2>&1
+echo "### ======== dpa_app (real, with fmc — DIAGNOSTIC BUILD) ========"
+DPA_BUILT="$ASK_DIR/dpa_app/dpa_app"
+DPA_SRC="$ASK_DIR/dpa_app"
+FMC_SRC="$FMC_DIR/source"
+FMLIB_INC="$FMLIB_DIR/include/fmd"
 
-[ -f "$DPA_BUILT" ] || { echo "FATAL: dpa_nofmc was not produced"; exit 1; }
-echo "### dpa_app (nofmc stub) ready: $(ls -lh "$DPA_BUILT" | awk '{print $5}')"
-file "$DPA_BUILT"
+DPA_CFLAGS="-DNCSW_LINUX -DLS1043 -D__STDC_LIMIT_MACROS -DDPAA_DEBUG_ENABLE -O2"
+DPA_INCLUDES="-I$FMC_SRC -I$FMLIB_INC -I$FMLIB_INC/integrations -I$FMLIB_INC/Peripherals -I/usr/include/libxml2 -I$ASK_DIR/cdx"
+
+$CC -c $DPA_CFLAGS $DPA_INCLUDES "$DPA_SRC/main.c" -o "$DPA_SRC/main.o" 2>&1
+$CC -c $DPA_CFLAGS $DPA_INCLUDES "$DPA_SRC/dpa.c" -o "$DPA_SRC/dpa.o" 2>&1
+$CC -c $DPA_CFLAGS $DPA_INCLUDES "$DPA_SRC/testapp.c" -o "$DPA_SRC/testapp.o" 2>&1
+
+$CXX -o "$DPA_BUILT" \
+    "$DPA_SRC/main.o" "$DPA_SRC/dpa.o" "$DPA_SRC/testapp.o" \
+    "$FMC_SRC/libfmc.a" \
+    -L"$FMLIB_DIR" -lfm \
+    -lxml2 -lpthread -lcli \
+    -static-libstdc++ -static-libgcc \
+    2>&1
+
+[ -f "$DPA_BUILT" ] || { echo "FATAL: dpa_app was not produced"; exit 1; }
+echo "### dpa_app ready: $(ls -lh "$DPA_BUILT" | awk '{print $5}')"
 
 # ===========================================================================
 #  Package as .deb
