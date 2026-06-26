@@ -44,6 +44,8 @@ on:
         required: false
       SSH_ALLOWED_SIGNERS:
         required: false
+      DISCORD_BOT_KEY:
+        required: false
 
 env:
   DEBIAN_MIRROR: http://deb.debian.org/debian/
