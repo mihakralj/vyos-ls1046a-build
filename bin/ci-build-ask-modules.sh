@@ -424,6 +424,14 @@ with open(p,'w') as f: f.write(s)
 PYEOF
 echo "### Patched dpa_cfg.c: NULL after kfree in release_cfg_info()"
 
+# ── Diagnostic: log get_port_info parameters before copy_from_user ───────────
+# We need to see what values are causing "Read port_info failed" in the kernel
+# when the real dpa_app sends the CDX ioctl.
+sed -i '/if (copy_from_user(port_info, uspace_info, mem_size))/i\
+\tprintk("cdx: get_port_info fm=%d max_ports=%u uspace_info=%px mem_size=%u\\n", \
+\t\tfinfo->index, finfo->max_ports, uspace_info, mem_size);' "$ASK_DIR/cdx/dpa_cfg.c"
+echo "### Patched dpa_cfg.c: diagnostic printk before copy_from_user in get_port_info"
+
 # ── Patch: NULL userspace pointers at err_ret BEFORE release_cfg_info ───────
 # The ioctl copies fman_info from userspace. The struct has POINTER fields
 # (portinfo, tbl_info) holding dpa_app's userspace addresses. On error path,
