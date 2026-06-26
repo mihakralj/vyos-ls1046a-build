@@ -492,29 +492,26 @@ XEOF
       # Select PRIMARY mono-gw.dtb based on FLAVOR.
       case "$FLAVOR" in
         ask)
-          if [ "$SDK_DTB_OK" = true ]; then
+          # For ASK, prefer the git-tracked pre-compiled DTB which is known-good
+          # (verified 54 cell-index entries, fsl,bpool-ethernet-cfg, FQ properties).
+          # The SDK DTB recompilation inside the NXP kernel tree can produce DTBs
+          # with subtle differences in QMan/BMan portal configuration that cause
+          # "Invalid Enqueue State" errors. The pre-compiled DTB was the one used
+          # on the working build (Jun 24, 941 Mbps iperf3).
+          if [ -f "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" ]; then
+            cp "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" "$INCLUDES_BIN/mono-gw.dtb"
+            cp "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" "$INCLUDES_CHR/boot/mono-gw.dtb"
+            echo "### FLAVOR=ask → pre-compiled board/dtb/mono-gw.dtb selected as PRIMARY mono-gw.dtb"
+          elif [ "$SDK_DTB_OK" = true ]; then
             cp "$SDK_DTB" "$INCLUDES_BIN/mono-gw.dtb"
             cp "$SDK_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
-            echo "### FLAVOR=ask → SDK DTB selected as PRIMARY mono-gw.dtb"
+            echo "### FLAVOR=ask → SDK DTB selected as PRIMARY mono-gw.dtb (fallback: pre-compiled missing)"
           elif [ "$MAINLINE_DTB_OK" = true ]; then
             cp "$MONO_DTB" "$INCLUDES_BIN/mono-gw.dtb"
             cp "$MONO_DTB" "$INCLUDES_CHR/boot/mono-gw.dtb"
-            echo "WARNING: FLAVOR=ask but SDK DTB unavailable — falling back to mainline DTB as PRIMARY"
-          elif [ -f "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" ] \
-               && [ "$(stat -c %Y "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb")" -gt "$(stat -c %Y "$GITHUB_WORKSPACE/board/dtb/mono-gateway-dk.dts")" ]; then
-            # ci-compile-mono-dtb.sh ran earlier in local-build.sh and
-            # produced board/dtb/mono-gw.dtb FROM the current DTS in this
-            # workspace (we verify by mtime ordering, so a stale committed
-            # DTB cannot sneak past). The in-kernel-tree DTB build in this
-            # script attempted to redo the same compile but blew up because
-            # vyos-build's build-kernel.sh wipes the kernel .config after
-            # packaging. Re-using the pre-compiled DTB is safe in this case
-            # — it came from the same DTS we would have compiled here.
-            cp "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" "$INCLUDES_BIN/mono-gw.dtb"
-            cp "$GITHUB_WORKSPACE/board/dtb/mono-gw.dtb" "$INCLUDES_CHR/boot/mono-gw.dtb"
-            echo "### FLAVOR=ask → falling back to pre-compiled board/dtb/mono-gw.dtb (mtime > DTS mtime, ci-compile-mono-dtb.sh output)"
+            echo "WARNING: FLAVOR=ask but no DTB available — falling back to mainline DTB as PRIMARY"
           else
-            echo "FATAL: FLAVOR=ask and neither SDK nor mainline DTB built; refusing to ship stale board/dtb/mono-gw.dtb."
+            echo "FATAL: FLAVOR=ask and no DTB available."
             exit 1
           fi
           ;;
