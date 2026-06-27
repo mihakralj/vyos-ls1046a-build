@@ -20,7 +20,9 @@ mkdir -p "$(dirname "$CONF")"
 cat > "$CONF" <<'MODEOF'
 # ASK OOT kernel modules — managed by 97-ask-modules.chroot
 # cdx and fci are loaded by ask-cdx.service (need /dev/fm0-pcd)
+# nf_conntrack core is needed for CMM conntrack-based flow offload
 auto_bridge
+nf_conntrack
 MODEOF
 echo "I: 97-ask-modules.chroot: wrote $CONF"
 
@@ -47,3 +49,66 @@ UNITEOF
 # Enable so it runs on every boot
 ln -sf "$UNIT" /etc/systemd/system/multi-user.target.wants/ask-cdx.service
 echo "I: 97-ask-modules.chroot: installed ask-cdx.service"
+
+# ── Conntrack fix for ASK hw offload ───────────────────────────────────
+# VyOS firewall adds "notrack" that disables kernel conntrack.
+# CMM needs conntrack events (via libnetfilter_conntrack) to push flows
+# to CDX/FMan. This service removes notrack after VyOS firewall is applied.
+CTFIX_SCRIPT=/usr/local/sbin/vyos-ask-ct-fix
+CTFIX_UNIT=/etc/systemd/system/ask-ct-setup.service
+
+cat > "$CTFIX_SCRIPT" <<'CTSCRIPTEOF'
+#!/bin/bash
+# vyos-ask-ct-fix — enable kernel conntrack for ASK hardware offload
+set -e
+MAX_WAIT=120
+while ! nft list tables 2>/dev/null | grep -q vyos_conntrack; do
+    [ "$MAX_WAIT" -le 0 ] && exit 1
+    sleep 1; MAX_WAIT=$((MAX_WAIT - 1))
+done
+# Remove VyOS "notrack" from conntrack chains (blocks CMM offload)
+for chain in PREROUTING OUTPUT; do
+    if nft list chain ip vyos_conntrack "$chain" 2>/dev/null | grep -q "notrack$"; then
+        nft flush chain ip vyos_conntrack "$chain" 2>/dev/null || true
+        for jump in VYOS_CT_IGNORE FW_CONNTRACK NAT_CONNTRACK WLB_CONNTRACK; do
+            nft add rule ip vyos_conntrack "$chain" jump "$jump" 2>/dev/null || true
+        done
+        echo "vyos-ask-ct-fix: removed notrack from ip $chain"
+    fi
+done
+for chain in PREROUTING OUTPUT; do
+    if nft list chain ip6 vyos_conntrack "$chain" 2>/dev/null | grep -q "notrack$"; then
+        nft flush chain ip6 vyos_conntrack "$chain" 2>/dev/null || true
+        for jump in VYOS_CT_IGNORE FW_CONNTRACK NAT_CONNTRACK; do
+            nft add rule ip6 vyos_conntrack "$chain" jump "$jump" 2>/dev/null || true
+        done
+    fi
+done
+# Add ct state tracking to FORWARD chain for routed offload
+if ! nft list chain inet mangle FORWARD 2>/dev/null | grep -q "ct state new counter"; then
+    nft add rule inet mangle FORWARD ct state new counter 2>/dev/null || true
+fi
+sysctl -w net.netfilter.nf_conntrack_acct=1 2>/dev/null || true
+CTSCRIPTEOF
+
+chmod 755 "$CTFIX_SCRIPT"
+echo "I: 97-ask-modules.chroot: installed $CTFIX_SCRIPT"
+
+cat > "$CTFIX_UNIT" <<'CTFIXEOF'
+[Unit]
+Description=Enable conntrack tracking for ASK hardware offload
+After=vyos-router.service
+Requires=vyos-router.service
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/vyos-ask-ct-fix
+
+[Install]
+WantedBy=multi-user.target
+CTFIXEOF
+
+ln -sf "$CTFIX_UNIT" /etc/systemd/system/multi-user.target.wants/ask-ct-setup.service
+echo "I: 97-ask-modules.chroot: installed ask-ct-setup.service"
