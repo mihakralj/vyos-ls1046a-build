@@ -96,7 +96,13 @@ fi
 # ---------------------------------------------------------------------------
 # Cached state
 # ---------------------------------------------------------------------------
-DMESG=$(dmesg 2>/dev/null || true)
+# dmesg_restrict=1 blocks dmesg even for root on SDK kernels.
+# The dmesg ring buffer also wraps on long boots, losing early init lines.
+# Prefer journalctl -k (complete boot log, honours CAP_SYS_ADMIN).
+DMESG=$(journalctl -k --no-pager -o cat 2>/dev/null || true)
+if [ -z "$DMESG" ]; then
+    DMESG=$(dmesg 2>/dev/null || true)
+fi
 LSMOD=$(lsmod 2>/dev/null || true)
 
 has_mod()   { echo "$LSMOD" | awk '{print $1}' | grep -qx "$1"; }
@@ -122,6 +128,9 @@ record_ok "board: $board"
 note "kernel: $kernel_str"
 if dmesg_has "Freescale USDPAA process driver"; then
     record_ok "USDPAA process driver loaded"
+elif grep -q fsl_usdpaa /lib/modules/$(uname -r)/modules.builtin 2>/dev/null \
+     || [ -d /sys/bus/platform/drivers/fsl-usdpaa ]; then
+    record_ok "USDPAA process driver loaded (built-in / sysfs)"
 else
     record_fail "USDPAA driver not found in dmesg"
 fi
@@ -230,13 +239,22 @@ fi
 # 5. FMan microcode
 # ===========================================================================
 hdr "5) FMan microcode + PCD"
-if dmesg_has "FMan.*210\.10\.1"; then
+if dmesg_has "FMan.*210\.10\.1" || dmesg_has "FMAN firmware 210\.10\.1"; then
     record_ok "FMan microcode v210.10.1 loaded"
 else
-    record_fail "FMan microcode v210.10.1 NOT detected — proprietary QEF required"
+    # Fallback: check DT-injected firmware blob for ASCII version string
+    fw_str=$(od -An -tc -N76 /proc/device-tree/soc/fman@1a00000/fman-firmware/fsl,firmware 2>/dev/null \
+        | tr -d ' ' | tr -s '\n' ' ' || true)
+    if echo "$fw_str" | grep -q '210.10.1'; then
+        record_ok "FMan microcode v210.10.1 loaded (DT blob decode)"
+    else
+        record_fail "FMan microcode v210.10.1 NOT detected — proprietary QEF required"
+    fi
 fi
 if dmesg_has "FM_PCD_Init"; then
     record_ok "FMan PCD initialised"
+elif [ -d /proc/fqid_stats/pcd ]; then
+    record_ok "FMan PCD initialised (CDX /proc/fqid_stats/pcd present)"
 else
     record_fail "FMan PCD not initialised"
 fi
@@ -253,6 +271,10 @@ if dmesg_has "caam.*device ID"; then
     jrs=$(echo "$DMESG" | grep -oP 'job rings = \d+' | grep -oP '\d+')
     qi=$(echo "$DMESG" | grep -oP 'qi = \d+' | grep -oP '\d+')
     record_ok "CAAM present: $era, $jrs Job Ring(s), QI=$qi"
+elif grep -q caam /proc/crypto 2>/dev/null; then
+    # dmesg may be restricted; fall back to /proc/crypto evidence
+    caam_drv=$(grep -m1 'driver.*caam' /proc/crypto 2>/dev/null | awk '{print $NF}')
+    record_ok "CAAM present (via /proc/crypto, driver: ${caam_drv:-unknown})"
 else
     record_fail "CAAM driver not found in dmesg"
 fi
@@ -416,6 +438,26 @@ if [ -x "$DPA_APP" ]; then
     fi
 else
     record_fail "dpa_app binary not found at $DPA_APP"
+fi
+
+# fmc — FMan Configuration tool (pushes PCD tables to hardware)
+# Installed at /usr/sbin/fmc by ask-userspace .deb; invoked by dpa_app
+# internally (linked with libfmc.a) or standalone for diagnostics.
+FMC_BIN="/usr/sbin/fmc"
+if [ -x "$FMC_BIN" ]; then
+    fmc_ver=$("$FMC_BIN" --version 2>&1 | head -1 || echo "?")
+    record_ok "fmc binary present ($FMC_BIN, $fmc_ver)"
+else
+    if [ -x /usr/bin/fmc ]; then
+        record_ok "fmc binary present (/usr/bin/fmc)"
+    else
+        record_fail "fmc binary not found at $FMC_BIN or /usr/bin/fmc"
+    fi
+fi
+if [ -f /etc/fmc/config/hxs_pdl_v3.xml ]; then
+    record_ok "/etc/fmc/config/hxs_pdl_v3.xml present (PDL for FMC parser)"
+else
+    record_warn "/etc/fmc/config/hxs_pdl_v3.xml missing — FMC cannot parse protocols"
 fi
 
 # Config files

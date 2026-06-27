@@ -1,0 +1,25 @@
+From 85950bc5a482da3b92bac1092624da811c39e684 Mon Sep 17 00:00:00 2001
+From: ci <ci@local>
+Date: Sat, 27 Jun 2026 04:29:06 +0000
+Subject: [PATCH] fix: enable_hooks=true by default for conntrack
+
+---
+ net/netfilter/nf_conntrack_standalone.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/net/netfilter/nf_conntrack_standalone.c b/net/netfilter/nf_conntrack_standalone.c
+index f1aab3a..8e4ffb3 100644
+--- a/net/netfilter/nf_conntrack_standalone.c
++++ b/net/netfilter/nf_conntrack_standalone.c
+@@ -24,7 +24,7 @@
+ #include <net/netfilter/nf_conntrack_timestamp.h>
+ #include <linux/rculist_nulls.h>
+ 
+-static bool enable_hooks __read_mostly;
++static bool enable_hooks __read_mostly = true;
+ MODULE_PARM_DESC(enable_hooks, "Always enable conntrack hooks");
+ module_param(enable_hooks, bool, 0000);
+ 
+-- 
+2.39.5
+
