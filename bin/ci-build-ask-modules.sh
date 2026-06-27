@@ -491,6 +491,15 @@ echo "### fci.ko built: $(stat -c '%s bytes' "$FCI_KO")"
 
 # ── Build auto_bridge.ko ───────────────────────────────────────────────────
 echo "### ======== Building auto_bridge.ko ========"
+
+# Fix: remove abm_ff guard. auto_bridge checks skb->abm_ff before processing
+# any packet, but CONFIG_CPE_FAST_PATH bridge code doesn't reliably set it.
+# Without removing this guard, auto_bridge is a no-op on all bridge traffic.
+echo "### Patching auto_bridge: remove abm_ff guard"
+ABM_SRC="$ASK_DIR/auto_bridge/auto_bridge.c"
+sed -i 's/^\tif(!skb->abm_ff)$/\t\/\* if(!skb->abm_ff) \*\/ \/\* nxpsdk: removed \*\//' "$ABM_SRC"
+sed -i 's/^\t\tgoto exit0;$/\t\t\/\* goto exit0; \*\/ \/\* nxpsdk: removed \*\//' "$ABM_SRC"
+
 make -C "$KSRC" \
     ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-}" \
     LOCALVERSION=-vyos \
