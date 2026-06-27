@@ -595,13 +595,19 @@ status = "disabled";
  * qoriq-bman-portals-sdk.dtsi / qoriq-qman-portals-sdk.dtsi to supply those;
  * mainline (gregkh/linux) does not.
  *
- * ASK 1.x is gone. The mainline DPAA1 QBMan driver
- * (drivers/soc/fsl/qbman/{bman,qman}_portal.c) enumerates portals positionally
- * from the standard qoriq-{bman,qman}-portals.dtsi already pulled in by
- * fsl-ls1046a.dtsi, and seeds the pool/FQID ranges from the bman/qman CCSR
- * blocks at probe time. The SDK DTSI files (and the data/dtb/sdk-dtsi/ tree)
- * were deleted on ask20; including them here was a residual reference that
- * broke `bin/ci-compile-mono-dtb.sh`.
+ * ASK 1.x (nxp-sdk branch) uses the NXP SDK staging QBMan drivers
+ * (drivers/staging/fsl_qbman/{bman,qman}_driver.c) which require
+ * `cell-index` on every portal node AND `fsl,bpid-range` /
+ * `fsl,fqid-range` / `fsl,pool-channel-range` / `fsl,cgrid-range`
+ * resource-pool seeds. These are supplied by the SDK portal DTSIs
+ * (`qoriq-bman-portals-sdk.dtsi`, `qoriq-qman-portals-sdk.dtsi`)
+ * included by the SDK overlay `mono-gateway-dk-sdk.dts`.
+ *
+ * The pre-compiled DTB (`board/dtb/mono-gw.dtb`) is the authoritative
+ * binary — it was compiled by the OpenWrt-ASK build system which uses
+ * the OpenWrt kernel tree (NXP lf-6.x + Mono patches) with all the
+ * correct portal cell-index values. Our CI skips DTS compilation for
+ * nxp-sdk and ships this binary directly.
  */
 
 &fman0 {
