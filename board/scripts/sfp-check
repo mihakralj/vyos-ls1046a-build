@@ -76,10 +76,66 @@ for sysnet in /sys/class/net/*; do
     out=$(ethtool -m "$iface" 2>/dev/null)
     if [ -z "$out" ]; then
         # ethtool -m not supported (e.g. SDK fsl_dpa driver).
-        # Fallback: SFP+ cage can be detected via 10000Mb/s link speed.
-        if ethtool "$iface" 2>/dev/null | grep -q '10000Mb/s'; then
-            printf "%6s  SFP+ module (10G link, ethtool -m unsupported by driver)\n" "$iface"
-            found=$((found+1))
+        # Fallback: detect SFP+ via link speed, then extract module
+        # identity from dmesg and live diagnostics from hwmon.
+        if ! ethtool "$iface" 2>/dev/null | grep -q '10000Mb/s'; then
+            continue
+        fi
+
+        found=$((found + 1))
+
+        # ── SFP identity from dmesg ──────────────────────────────
+        # The kernel SFP subsystem logs one line per module:
+        #   sfp sfp-xfi0: module OEM SFP-10G-T rev 02 sn CSY101OB0963 dc 241012
+        # Map ethN → sfp-xfiX: the DTS binds sfp-xfi0→eth3, sfp-xfi1→eth4.
+        # Try to read the of_node symlink; fall back to the known mapping.
+        sfp_name=""
+        if [ "$iface" = "eth3" ]; then sfp_name="sfp-xfi0"; fi
+        if [ "$iface" = "eth4" ]; then sfp_name="sfp-xfi1"; fi
+
+        vendor=""; pn=""; rev=""; sn=""
+        if [ -n "$sfp_name" ]; then
+            dmesg_line=$(dmesg 2>/dev/null | grep -F "$sfp_name: module" | tail -n1)
+            if [ -n "$dmesg_line" ]; then
+                # Example: sfp sfp-xfi0: module OEM              SFP-10G-T        rev 02   sn CSY101OB0963     dc 241012
+                vendor=$(echo "$dmesg_line" | sed -n 's/.*module \([A-Za-z0-9_-]\+\)\s\s\+.*/\1/p')
+                pn=$(echo "$dmesg_line"     | sed -n 's/.*module [A-Za-z0-9_-]\+\s\s\+\([A-Za-z0-9_-]\+\)\s\s\+.*/\1/p')
+                rev=$(echo "$dmesg_line"    | sed -n 's/.*rev \([0-9A-Za-z]\+\)\s\s\+.*/\1/p')
+                sn=$(echo "$dmesg_line"     | sed -n 's/.*sn \([A-Za-z0-9]\+\)\s\s\+.*/\1/p')
+            fi
+        fi
+
+        printf '\n%s   %s "%s"   rev "%s"   sn "%s"\n' \
+            "$iface" "${vendor:-(unknown)}" "${pn:-(unknown)}" "${rev:-N/A}" "${sn:-N/A}"
+
+        # ── Live diagnostics from SFP hwmon ─────────────────────
+        # On the SDK kernel ethtool -m is unavailable, but the
+        # kernel SFP subsystem still exposes voltage / temp /
+        # bias current / RX power via hwmon.
+        [ -z "$sfp_name" ] && sfp_name="sfp-xfi0"  # best-effort for eth3
+        hwmon_dir="/sys/devices/platform/${sfp_name}/hwmon"
+        if [ -d "$hwmon_dir" ]; then
+            hwmon=$(ls "$hwmon_dir" 2>/dev/null | head -n1)
+            [ -n "$hwmon" ] && hwmon_dir="$hwmon_dir/$hwmon"
+            _v=$(cat "$hwmon_dir/in0_input"   2>/dev/null) && printf '    Supply voltage   : %s mV\n' "$_v"
+            _t=$(cat "$hwmon_dir/temp1_input" 2>/dev/null) && printf '    Temperature      : %s.%s °C\n' "$(( _t / 1000 ))" "$(( (_t % 1000) / 100 ))"
+            _c=$(cat "$hwmon_dir/curr1_input" 2>/dev/null) && printf '    Tx bias current  : %s mA\n' "$_c"
+            _p=$(cat "$hwmon_dir/power2_input" 2>/dev/null) && printf '    Rx power         : %s µW\n' "$_p"
+        fi
+
+        printf '    EEPROM           : (ethtool -m not supported by driver; identity from dmesg above)\n'
+
+        # ── Quirk classification (from dmesg PN fallback) ───────
+        if echo "${pn:-}" | grep -qi 'SFP-10G-T'; then
+            printf '    Verdict          : 10GBASE-T copper rollball (RTL8261) — needs sfp_fixup_fs_10gt quirk\n'
+            printf '    --- patch line ---\n'
+            printf '    SFP_QUIRK_F("%s", "%s", sfp_fixup_fs_10gt),\n' "${vendor:-OEM}" "${pn:-SFP-10G-T}"
+        elif echo "${pn:-}" | grep -qi 'SFP-10G-SR'; then
+            printf '    Verdict          : 10GBASE-SR fiber — kernel handles natively, no quirk needed\n'
+        elif echo "${pn:-}" | grep -qi 'H10GB-CU'; then
+            printf '    Verdict          : passive DAC — kernel handles natively, no quirk needed\n'
+        else
+            printf '    Verdict          : unknown — cannot classify without EEPROM read\n'
         fi
         continue
     fi
