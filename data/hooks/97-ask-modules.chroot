@@ -29,8 +29,9 @@ UNIT=/etc/systemd/system/ask-cdx.service
 cat > "$UNIT" <<'UNITEOF'
 [Unit]
 Description=Load ASK CDX/FCI Kernel Modules
-After=multi-user.target
-Wants=multi-user.target
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=cmm.service
 ConditionPathExists=/dev/fm0-pcd
 
 [Service]
