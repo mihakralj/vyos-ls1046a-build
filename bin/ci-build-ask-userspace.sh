@@ -243,13 +243,26 @@ echo "### libfci ready"
 echo "### ======== cmm ========"
 CMM_BUILT="$ASK_DIR/cmm/src/cmm"
 # libfci .a is in LIBFCI_DIR; patched libs .a in SYSROOT/lib
+# PKG_CONFIG_PATH must be explicit — Makefile ?= default may not resolve SYSROOT
 make -C "$ASK_DIR/cmm" CC="$CC" \
     LIBFCI_DIR="$LIBFCI_DIR" \
     ABM_DIR="$ABM_DIR" \
-    SYSROOT="$SYSROOT"
+    SYSROOT="$SYSROOT" \
+    PKG_CONFIG_PATH="$SYSROOT/lib/pkgconfig"
 [ -f "$CMM_BUILT" ] || { echo "FATAL: cmm was not produced"; exit 1; }
 echo "### cmm ready: $(ls -lh "$CMM_BUILT" | awk '{print $5}')"
 file "$CMM_BUILT"
+
+# Verify libnetfilter_conntrack is compiled in — required for conntrack-based
+# hardware offload. Without it, CMM opens Eth 12 (NETLINK_NETFILTER) but
+# never receives conntrack events → never pushes flows to CDX/FMan.
+if ! strings "$CMM_BUILT" 2>/dev/null | grep -q "nfct_open\|nfct_callback_register"; then
+    echo "FATAL: cmm built without libnetfilter_conntrack — PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
+    echo "  Check that libnetfilter_conntrack.pc exists in SYSROOT/lib/pkgconfig/"
+    echo "  and that pkg-config can resolve libnfnetlink dependency."
+    exit 1
+fi
+echo "### cmm: libnetfilter_conntrack symbols verified"
 
 # ===========================================================================
 #  dpa_app — real (with fmc, CDX PCD push)
