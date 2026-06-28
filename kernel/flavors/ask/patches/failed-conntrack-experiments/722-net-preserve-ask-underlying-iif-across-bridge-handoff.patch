@@ -1,0 +1,127 @@
+From: Mono OpenWrt Integration <integration@mono.local>
+Date: Thu, 30 Apr 2026 12:00:00 +0100
+Subject: [PATCH] net: preserve ASK underlying ingress ifindex across bridge handoff
+
+ASK control-plane and DPAA datapath decisions sometimes need the physical
+ingress interface even after Linux has moved a packet through bridge or PPPoE
+handoff paths. Preserve that original ifindex on the skb so later fast-path
+metadata and flow programming can distinguish the hardware-facing port from
+the logical bridge or PPP device.
+
+This is intentionally limited to carrying ingress identity. It does not
+program flows, change policy, or make any offload decision by itself.
+
+---
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -1027,6 +1027,10 @@ struct sk_buff {
+ 	};
+ 	__u32			priority;
+ 	int			skb_iif;
++#if IS_ENABLED(CONFIG_NF_CONNTRACK)
++	/* Preserve the physical ingress ifindex after bridge handoff. */
++	int			layerscape_underlying_iif;
++#endif
+ 	__u32			hash;
+ 	union {
+ 		u32		vlan_all;
+--- a/net/bridge/br_input.c
++++ b/net/bridge/br_input.c
+@@ -66,6 +66,9 @@ static int br_pass_frame_up(struct sk_buff *skb, bool promisc)
+ 	br_multicast_count(br, NULL, skb, br_multicast_igmp_type(skb),
+ 			   BR_MCAST_DIR_TX);
+ 
++#if IS_ENABLED(CONFIG_NF_CONNTRACK)
++	skb->layerscape_underlying_iif = indev->ifindex;
++#endif
+ 	BR_INPUT_SKB_CB(skb)->promisc = promisc;
+ 
+ 	return NF_HOOK(NFPROTO_BRIDGE, NF_BR_LOCAL_IN,
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -5582,8 +5582,13 @@ static int __netif_receive_skb_core(struct sk_buff **pskb, bool pfmemalloc,
+ 
+ 	trace_netif_receive_skb(skb);
+ 
++#if IS_ENABLED(CONFIG_NF_CONNTRACK)
++	if (!skb->layerscape_underlying_iif)
++		skb->layerscape_underlying_iif = skb->dev->ifindex;
++#endif
++
+ 	orig_dev = skb->dev;
+ 
+ 	skb_reset_network_header(skb);
+ 	if (!skb_transport_header_was_set(skb))
+ 		skb_reset_transport_header(skb);
+--- a/net/core/gro.c
++++ b/net/core/gro.c
+@@ -649,6 +649,9 @@ static void napi_reuse_skb(struct napi_struct *napi, struct sk_buff *skb)
+ 	__vlan_hwaccel_clear_tag(skb);
+ 	skb->dev = napi->dev;
+ 	skb->skb_iif = 0;
++#if IS_ENABLED(CONFIG_NF_CONNTRACK)
++	skb->layerscape_underlying_iif = 0;
++#endif
+ 
+ 	/* eth_type_trans() assumes pkt_type is PACKET_HOST */
+ 	skb->pkt_type = PACKET_HOST;
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -1557,6 +1557,9 @@ static void __copy_skb_header(struct sk_buff *new, const struct sk_buff *old)
+ 	CHECK_SKB_FIELD(hash);
+ 	CHECK_SKB_FIELD(priority);
+ 	CHECK_SKB_FIELD(skb_iif);
++#if IS_ENABLED(CONFIG_NF_CONNTRACK)
++	CHECK_SKB_FIELD(layerscape_underlying_iif);
++#endif
+ 	CHECK_SKB_FIELD(vlan_proto);
+ 	CHECK_SKB_FIELD(vlan_tci);
+ 	CHECK_SKB_FIELD(transport_header);
+@@ -6124,6 +6127,9 @@ void skb_scrub_packet(struct sk_buff *skb, bool xnet)
+ {
+ 	skb->pkt_type = PACKET_HOST;
+ 	skb->skb_iif = 0;
++#if IS_ENABLED(CONFIG_NF_CONNTRACK)
++	skb->layerscape_underlying_iif = 0;
++#endif
+ 	skb->ignore_df = 0;
+ 	skb_dst_drop(skb);
+ 	skb_ext_reset(skb);
+--- a/drivers/net/ppp/pppoe.c
++++ b/drivers/net/ppp/pppoe.c
+@@ -443,6 +443,9 @@ static int pppoe_rcv(struct sk_buff *skb
+ 	po = __get_item(pn, ph->sid, eth_hdr(skb)->h_source, dev->ifindex);
+ 	if (!po)
+ 		goto drop;
++#if IS_ENABLED(CONFIG_NF_CONNTRACK)
++	skb->layerscape_underlying_iif = dev->ifindex;
++#endif
+ 
+ 	return __sk_receive_skb(sk_pppox(po), skb, 0, 1, false);
+ 
+--- a/drivers/net/ppp/ppp_generic.c
++++ b/drivers/net/ppp/ppp_generic.c
+@@ -2406,6 +2406,9 @@ static void
+ ppp_receive_nonmp_frame(struct ppp *ppp, struct sk_buff *skb)
+ {
+ 	struct sk_buff *ns;
++#if IS_ENABLED(CONFIG_NF_CONNTRACK)
++	int layerscape_underlying_iif = skb->layerscape_underlying_iif;
++#endif
+ 	int proto, len, npi;
+ 
+ 	/*
+@@ -2530,8 +2533,13 @@ ppp_receive_nonmp_frame(struct ppp *ppp,
+ 			skb->dev = ppp->dev;
+ 			skb->protocol = htons(npindex_to_ethertype[npi]);
+ 			skb_reset_mac_header(skb);
+ 			skb_scrub_packet(skb, !net_eq(ppp->ppp_net,
+ 						      dev_net(ppp->dev)));
++#if IS_ENABLED(CONFIG_NF_CONNTRACK)
++			if (layerscape_underlying_iif &&
++			    net_eq(ppp->ppp_net, dev_net(ppp->dev)))
++				skb->layerscape_underlying_iif = layerscape_underlying_iif;
++#endif
+ 			netif_rx(skb);
+ 		}
+ 	}

@@ -1,0 +1,146 @@
+From: Mono OpenWrt Integration <integration@mono.local>
+Date: Thu, 30 Apr 2026 12:15:00 +0100
+Subject: [PATCH] netfilter: honor ASK permanent conntrack pinning
+
+CMM needs a narrow way to pin an already-installed conntrack while hardware
+state depends on it, then unpin that conntrack when the control plane tears
+the hardware state down. Reuse the existing conntrack status bit and handle
+only the by-id pin/unpin update path instead of importing broader vendor
+conntrack behavior.
+
+Permanent entries retain a bounded visible timeout for userspace display and
+remain non-expired while established. The procfs dump also prints
+[PERMANENT] so pinned state is auditable during runtime validation.
+
+---
+--- a/include/net/netfilter/nf_conntrack.h
++++ b/include/net/netfilter/nf_conntrack.h
+@@ -24,6 +24,8 @@
+ 
+ #include <net/netfilter/nf_conntrack_tuple.h>
+ 
++#define LAYERSCAPE_PERMANENT_TIMEOUT	1000
++
+ struct nf_ct_udp {
+ 	unsigned long	stream_ts;
+ };
+@@ -284,6 +286,11 @@
+ 	return test_bit(IPS_DYING_BIT, &ct->status);
+ }
+ 
++static inline int nf_ct_is_permanent(const struct nf_conn *ct)
++{
++	return test_bit(IPS_PERMANENT_BIT, &ct->status);
++}
++
+ /* Packet is received from loopback */
+ static inline bool nf_is_loopback_packet(const struct sk_buff *skb)
+ {
+@@ -307,10 +314,15 @@
+ {
+ 	s32 timeout = READ_ONCE(ct->timeout) - nfct_time_stamp;
+ 
++	if (nf_ct_is_permanent(ct))
++		return LAYERSCAPE_PERMANENT_TIMEOUT;
++
+ 	return max(timeout, 0);
+ }
+ 
+-static inline bool nf_ct_is_expired(const struct nf_conn *ct)
++bool nf_ct_is_expired(const struct nf_conn *ct);
++
++static inline bool __nf_ct_is_expired(const struct nf_conn *ct)
+ {
+ 	return (__s32)(READ_ONCE(ct->timeout) - nfct_time_stamp) <= 0;
+ }
+--- a/net/netfilter/nf_conntrack_core.c
++++ b/net/netfilter/nf_conntrack_core.c
+@@ -2866,3 +2866,17 @@
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(nf_ct_change_status_common);
++
++bool nf_ct_is_expired(const struct nf_conn *ct)
++{
++	const struct nf_conntrack_l4proto *l4proto;
++
++	l4proto = nf_ct_l4proto_find(nf_ct_protonum(ct));
++	if (!nf_ct_is_permanent(ct) ||
++	    ((l4proto->l4proto == IPPROTO_TCP) &&
++	     (ct->proto.tcp.state != TCP_CONNTRACK_ESTABLISHED)))
++		return __nf_ct_is_expired(ct);
++
++	return false;
++}
++EXPORT_SYMBOL_GPL(nf_ct_is_expired);
+--- a/net/netfilter/nf_conntrack_netlink.c
++++ b/net/netfilter/nf_conntrack_netlink.c
+@@ -2431,6 +2431,40 @@
+ 	return ERR_PTR(err);
+ }
+ 
++/*
++ * ASK only needs to pin or unpin an already-existing installed conntrack.
++ * Handle that as a dedicated status-bit update instead of a broader state
++ * change so the control plane can make the entry permanent by id.
++ */
++static int ctnetlink_change_permanent(struct nf_conn *ct,
++				      const struct nlattr * const cda[])
++{
++	unsigned int status;
++	u32 id;
++	__be32 conntrack_id = ntohl((__force __be32)nf_ct_get_id(ct));
++
++	if (!cda[CTA_STATUS] || !cda[CTA_ID])
++		return -1;
++
++	status = ntohl(nla_get_be32(cda[CTA_STATUS]));
++	id = ntohl(nla_get_be32(cda[CTA_ID]));
++
++	if (conntrack_id != id)
++		return -ENOENT;
++
++	if (status & IPS_PERMANENT) {
++		set_bit(IPS_PERMANENT_BIT, &ct->status);
++		return 0;
++	}
++
++	if (nf_ct_is_permanent(ct)) {
++		clear_bit(IPS_PERMANENT_BIT, &ct->status);
++		return 0;
++	}
++
++	return -1;
++}
++
+ static int ctnetlink_new_conntrack(struct sk_buff *skb,
+ 				   const struct nfnl_info *info,
+ 				   const struct nlattr * const cda[])
+@@ -2510,6 +2544,12 @@
+ 	err = -EEXIST;
+ 	ct = nf_ct_tuplehash_to_ctrack(h);
+ 	if (!(info->nlh->nlmsg_flags & NLM_F_EXCL)) {
++		err = ctnetlink_change_permanent(ct, cda);
++		if (err == 0 || err == -ENOENT) {
++			nf_ct_put(ct);
++			return err;
++		}
++
+ 		err = ctnetlink_change_conntrack(ct, cda);
+ 		if (err == 0) {
+ 			nf_conntrack_eventmask_report((1 << IPCT_REPLY) |
+--- a/net/netfilter/nf_conntrack_standalone.c
++++ b/net/netfilter/nf_conntrack_standalone.c
+@@ -338,6 +338,12 @@
+ 	if (seq_has_overflowed(s))
+ 		goto release;
+ 
++	if (test_bit(IPS_PERMANENT_BIT, &ct->status))
++		seq_puts(s, "[PERMANENT] ");
++
++	if (seq_has_overflowed(s))
++		goto release;
++
+ 	seq_print_acct(s, ct, IP_CT_DIR_ORIGINAL);
+ 
+ 	if (!(test_bit(IPS_SEEN_REPLY_BIT, &ct->status)))
