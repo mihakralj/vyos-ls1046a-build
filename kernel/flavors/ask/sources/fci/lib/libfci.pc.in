@@ -1,0 +1,15 @@
+# libfci pkg-config file
+
+prefix=@prefix@
+exec_prefix=@exec_prefix@
+libdir=@libdir@
+includedir=@includedir@
+
+Name: libfci
+Description: Fast Control Interface communication library
+URL: http://www.mindspeed.com
+Version: @VERSION@
+Requires:
+Conflicts:
+Libs: -L${libdir} -lfci
+Cflags: -I${includedir}

@@ -1,0 +1,25 @@
+# CMM Fast Forward configuration
+# This file specifies traffic that should NOT be offloaded to the fast path
+
+# Don't Fast Forward FTP traffic (needs ALG)
+config fastforward ftp
+	option proto		tcp
+	option port		21
+
+# Don't Fast Forward SIP (needs ALG)
+config fastforward sip
+	option proto		udp
+	option port		5060
+
+# Don't Fast Forward PPTP control
+config fastforward pptp
+	option proto		tcp
+	option port		1723
+
+# Optional logging
+#config logging
+#	option file	/var/log/cmm.log
+#	option command	0
+#	option error	1
+#	option warning	1
+#	option info	1

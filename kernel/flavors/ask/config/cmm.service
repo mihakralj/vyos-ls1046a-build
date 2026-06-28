@@ -1,0 +1,17 @@
+[Unit]
+Description=CMM Connection Management Module for ASK Fast Path
+After=network.target systemd-modules-load.service systemd-sysctl.service
+Wants=systemd-modules-load.service
+ConditionPathExists=/dev/cdx_ctrl
+
+[Service]
+Type=forking
+ExecStartPre=-/bin/sh -c 'test -e /sys/class/vwd/vwd0/vwd_fast_path_enable && echo 1 > /sys/class/vwd/vwd0/vwd_fast_path_enable'
+# -n 131072 sets conntrack table size (per OpenWrt/NXP defaults)
+ExecStart=/usr/bin/cmm -f /etc/config/fastforward -n 131072
+ExecStopPost=-/bin/sh -c 'test -e /sys/class/vwd/vwd0/vwd_fast_path_enable && echo 0 > /sys/class/vwd/vwd0/vwd_fast_path_enable'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
