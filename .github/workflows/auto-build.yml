@@ -246,7 +246,13 @@ jobs:
             work/linux-6.12.49/net/netfilter/nf_conntrack_standalone.c
           echo "### Patched nf_conntrack_standalone.c: enable_hooks := true"
 
-          # Inject sk_buff fields referenced by SDK-patched consumers
+          # Inject sk_buff fields referenced by SDK-patched consumers.
+          # Fields go after _nfct (~line 926) to avoid breaking the
+          # BUILD_BUG_ON assertion that requires next/prev at offset 0.
+          # Remove any stale injection first (from previous CI runs).
+          sed -i '/^\tint\t\tlayerscape_underlying_iif;$/d' work/linux-6.12.49/include/linux/skbuff.h
+          sed -i '/^\t__u16\t\tunderlying_vlan_tci;$/d' work/linux-6.12.49/include/linux/skbuff.h
+          sed -i '/^\tunsigned long\tipsec_offload;$/d' work/linux-6.12.49/include/linux/skbuff.h
           bin/fix-skbuff-fields.sh work/linux-6.12.49/include/linux/skbuff.h
 
       - name: Compile Mono DTB from DTS (mainline only — skip on nxp-sdk)
