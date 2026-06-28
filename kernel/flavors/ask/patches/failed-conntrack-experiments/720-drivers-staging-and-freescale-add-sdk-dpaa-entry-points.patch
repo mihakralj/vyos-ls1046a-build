@@ -1,0 +1,44 @@
+--- a/drivers/net/ethernet/freescale/Kconfig
++++ b/drivers/net/ethernet/freescale/Kconfig
+@@ -103,6 +103,8 @@ config GIANFAR
+ 	  This driver supports the Gigabit TSEC on the MPC83xx, MPC85xx,
+ 	  and MPC86xx family of chips, the eTSEC on LS1021A and the FEC
+ 	  on the 8540.
++source "drivers/net/ethernet/freescale/sdk_fman/Kconfig"
++source "drivers/net/ethernet/freescale/sdk_dpaa/Kconfig"
+ 
+ source "drivers/net/ethernet/freescale/dpaa/Kconfig"
+ source "drivers/net/ethernet/freescale/dpaa2/Kconfig"
+--- a/drivers/net/ethernet/freescale/Makefile
++++ b/drivers/net/ethernet/freescale/Makefile
+@@ -20,6 +20,9 @@ obj-$(CONFIG_GIANFAR) += gianfar_driver.o
+ obj-$(CONFIG_UCC_GETH) += ucc_geth_driver.o
+ ucc_geth_driver-objs := ucc_geth.o ucc_geth_ethtool.o
+ 
++obj-$(if $(CONFIG_FSL_SDK_FMAN),y) += sdk_fman/
++obj-$(if $(CONFIG_FSL_SDK_DPAA_ETH),y) += sdk_dpaa/
++
+ obj-$(CONFIG_FSL_FMAN) += fman/
+ obj-$(CONFIG_FSL_DPAA_ETH) += dpaa/
+ 
+--- a/drivers/staging/Kconfig
++++ b/drivers/staging/Kconfig
+@@ -56,6 +56,8 @@ source "drivers/staging/greybus/Kconfig"
+ 
+ source "drivers/staging/vc04_services/Kconfig"
+ 
++source "drivers/staging/fsl_qbman/Kconfig"
++
+ source "drivers/staging/axis-fifo/Kconfig"
+ 
+ source "drivers/staging/fieldbus/Kconfig"
+--- a/drivers/staging/Makefile
++++ b/drivers/staging/Makefile
+@@ -18,6 +18,7 @@ obj-$(CONFIG_MFD_NVEC)		+= nvec/
+ obj-$(CONFIG_MOST)		+= most/
+ obj-$(CONFIG_GREYBUS)		+= greybus/
+ obj-$(CONFIG_BCM2835_VCHIQ)	+= vc04_services/
++obj-$(CONFIG_FSL_SDK_DPA)	+= fsl_qbman/
+ obj-$(CONFIG_XIL_AXIS_FIFO)	+= axis-fifo/
+ obj-$(CONFIG_FIELDBUS_DEV)     += fieldbus/
+ obj-$(CONFIG_FSL_PPFE)		+= fsl_ppfe/
