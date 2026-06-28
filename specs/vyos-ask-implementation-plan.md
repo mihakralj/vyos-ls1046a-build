@@ -1,6 +1,7 @@
-**Version 1.0 · HADS 1.0.0**  
+**Version 1.1 · HADS 1.0.0**  
 **Date:** 2026-06-28  
 **Branch:** `nxp-sdk`  
+**Scope:** High-fidelity NXP ASK 1.x native SDK port to VyOS (NOT ASK2 rewrite)  
 **Based on:** Hardware-verified findings from sergioaguayo 25.12.2 + cvandesande 25.12.4 OpenWrt-ASK builds
 
 ## AI READING INSTRUCTION
@@ -75,47 +76,38 @@ This document is the **revised VyOS-ASK hardware offload development plan**, inc
 
 **[NOTE]** These patches were archived on 2026-06-21 because they target the NXP SDK kernel (6.12.49), not mainline 6.18. The current VyOS kernel is 6.18.36 — these patches need forward-porting.
 
-## 3. Architecture Decision: cdx.ko vs ask.ko
+## 3. Architecture: Original NXP ASK 1.x SDK
 
-**[DECISION]** We have two mutually exclusive architectures on the table:
+**[DECISION]** `nxp-sdk` is a **high-fidelity port** of the original NXP ASK 1.x SDK. The components are:
 
-### Option A: Port CVAN's cdx.ko (NXP ASK 1.x)
+| Component | Source | Role |
+|-----------|--------|------|
+| **cdx.ko** | CVAN cvandesande/openwrt | FMan PCD flow table manager (embedded fp_netfilter) |
+| **fci.ko** | CVAN cvandesande/openwrt | CMM↔CDX IPC (Fastpath Control Interface) |
+| **cmm** | CVAN cvandesande/openwrt | Connection Manager userspace daemon |
+| **dpa_app** | CVAN cvandesande/openwrt | FMan PCD boot-time programmer (call_usermodehelper) |
+| **fmc** | CVAN cvandesande/openwrt | FMan Configuration library (linked by dpa_app) |
 
-| Pro | Con |
-|-----|-----|
-| Proven working (bridge offload functional) | NXP proprietary codebase |
-| Complete FCI→CMM→CDX→FMan pipeline | Uses NXP's FMD Shim API (not mainline) |
-| 500KB, well-tested, CI-validated | Requires userspace CMM + dpa_app |
-| Bridge path works out of box | Conntrack path still blocked |
-| CDX XML configs are available | Conntrack fix involves CMM source debugging |
+These are the **exact same components** that run on CVAN 25.12.4 where bridge offload is proven working. No rewrite — direct port with VyOS packaging and init integration.
 
-### Option B: Complete our ask.ko (ASK2 rewrite)
-
-| Pro | Con |
-|-----|-----|
-| Clean-sheet design, modern kernel APIs | **NOT PROVEN** — no hardware testing |
-| Leverages our PCD API patches | Need to implement cdX XML config parsing |
-| Single kernel module, no userspace daemon | Need to reimplement bridge + conntrack paths |
-| Better VyOS integration (netlink, genl) | Unknown performance characteristics |
-| No CMM dependency | ~2800 LOC target (currently scaffold) |
-
-**[DECISION]** The **pragmatic path** is:
-1. **Immediately**: Port CVAN's cdx.ko + fci.ko + cmm + dpa_app to get bridge offload working as a baseline
-2. **In parallel**: Continue developing ask.ko to eventually replace cdx.ko
-3. **Bridge first, conntrack later**: Use bridge offload for M1, fix conntrack for M3
+**[NOTE]** The ASK2 rewrite (`ask.ko` — single in-tree module replacing the entire cdx/fci/cmm ecosystem) is a **separate effort** on the `ask20` branch. This branch (`nxp-sdk`) stays faithful to the original NXP ASK 1.x architecture.
 
 ## 4. Revised Implementation Plan
 
-### Phase 0: Prerequisites (this week)
+### Phase 0: Source Extraction (1-2 days)
 
 | Step | Action |
 |------|--------|
-| P0.1 | **[ACTION]** Extract cdx.ko + fci.ko + cmm + dpa_app source from CVAN OpenWrt build tree (`cvandesande/openwrt`, branch `mono-ask-v25.12.4`) |
-| P0.2 | **[ACTION]** Extract cdx_pcd.xml + cdx_cfg.xml + cdx_sp.xml from CVAN rootfs |
-| P0.3 | **[ACTION]** Copy CVAN's cdx + fci kernel module source to `kernel/flavors/ask/sdk-modules/cdx/` and `.../fci/` |
-| P0.4 | **[ACTION]** Build CI pipeline for cross-compiling cdx.ko + fci.ko against VyOS kernel |
+| P0.1 | **[ACTION]** Clone cvandesande/openwrt at tag `mono-ask-v25.12.4-r1` |
+| P0.2 | **[ACTION]** Extract cdx.ko source to `kernel/flavors/ask/sources/cdx/` |
+| P0.3 | **[ACTION]** Extract fci.ko source to `kernel/flavors/ask/sources/fci/` |
+| P0.4 | **[ACTION]** Extract cmm source to `kernel/flavors/ask/userspace/cmm/` |
+| P0.5 | **[ACTION]** Extract dpa_app source to `kernel/flavors/ask/userspace/dpa_app/` |
+| P0.6 | **[ACTION]** Extract fmc source to `kernel/flavors/ask/userspace/fmc/` |
+| P0.7 | **[ACTION]** Extract cdx_pcd.xml + cdx_cfg.xml + cdx_sp.xml to `kernel/flavors/ask/config/` |
+| P0.8 | **[ACTION]** Update `KERNEL_ID` to track CVAN kernel commit for patch alignment |
 
-### Phase 1: Bridge Offload Baseline (next 2 weeks)
+### Phase 1: Bridge Offload Baseline (~2 weeks)
 
 | Step | Action |
 |------|--------|
@@ -131,7 +123,7 @@ This document is the **revised VyOS-ASK hardware offload development plan**, inc
 | P1.10 | **[ACTION]** Configure br-lan bridge (eth0+eth1+eth2) via VyOS CLI |
 | P1.11 | **[ACTION]** Verify: PCD counters non-zero → bridge offload confirmed |
 
-### Phase 2: Conntrack Offload Fix (after Phase 1)
+### Phase 2: Conntrack Offload (after Phase 1)
 
 | Step | Action |
 |------|--------|
@@ -140,36 +132,24 @@ This document is the **revised VyOS-ASK hardware offload development plan**, inc
 | P2.3 | **[ACTION]** Test conntrack-based flow offload with iperf3 between bridge ports |
 | P2.4 | **[ACTION]** Verify: PCD counters increase with TCP flows → conntrack offload confirmed |
 
-### Phase 3: ask.ko Integration (after Phase 2)
-
-| Step | Action |
-|------|--------|
-| P3.1 | **[ACTION]** Implement ask_flow.c — conntrack event listener (replace CMM) |
-| P3.2 | **[ACTION]** Implement ask_hw.c — PCD CC programming (replace CDX) |
-| P3.3 | **[ACTION]** Implement ask_bridge.c — bridge port tracking (replace CMM bridge mode) |
-| P3.4 | **[ACTION]** Implement ask_flow_offload.c — tc flower offload (replace FCI) |
-| P3.5 | **[ACTION]** Implement ask_genl.c — VyOS CLI generic netlink interface |
-| P3.6 | **[ACTION]** Implement ask_xfrm.c — IPsec offload via CAAM QI |
-| P3.7 | **[ACTION]** Deprecate cdx.ko + fci.ko + cmm — switch fully to ask.ko |
-
 ## 5. Files to Create/Modify
 
 ### 5.1 New Files
 
 ```
-kernel/flavors/ask/sdk-modules/cdx/cdx*.c           # CVAN cdx.ko source
-kernel/flavors/ask/sdk-modules/cdx/fp_netfilter*.c   # Embedded fp_netfilter
-kernel/flavors/ask/sdk-modules/fci/fci*.c            # CVAN fci.ko source
-kernel/flavors/ask/userspace/cmm/                    # CVAN cmm source
-kernel/flavors/ask/userspace/dpa_app/                # CVAN dpa_app source
-kernel/flavors/ask/config/cdx_pcd.xml                 # 18,172 bytes (from CVAN)
-kernel/flavors/ask/config/cdx_cfg.xml                 # 962 bytes (from CVAN)
-kernel/flavors/ask/config/cdx_sp.xml                  # 7,252 bytes (from CVAN)
-kernel/flavors/ask/patches/active/0100-dpaa-*        # Forward-ported PCD patches
-board/systemd/ask-cdx.service                         # CDX module loader
-board/systemd/ask-fci.service                         # FCI module loader
-board/systemd/ask-cmm.service                         # CMM daemon loader
-board/vyos-config/ask-fastforward.conf                # CMM offload exclusion config
+kernel/flavors/ask/sources/cdx/          # CVAN cdx.ko source (with fp_netfilter)
+kernel/flavors/ask/sources/fci/          # CVAN fci.ko source
+kernel/flavors/ask/userspace/cmm/        # CVAN cmm source
+kernel/flavors/ask/userspace/dpa_app/    # CVAN dpa_app source
+kernel/flavors/ask/userspace/fmc/        # CVAN fmc source
+kernel/flavors/ask/config/cdx_pcd.xml    # 18,172 bytes (from CVAN)
+kernel/flavors/ask/config/cdx_cfg.xml    # 962 bytes (from CVAN)
+kernel/flavors/ask/config/cdx_sp.xml     # 7,252 bytes (from CVAN)
+board/systemd/ask-cdx.service            # CDX module loader (START=18)
+board/systemd/ask-fci.service            # FCI module loader (START=53)
+board/systemd/ask-cmm.service            # CMM daemon loader (START=54)
+board/systemd/ask-dpa-app.service        # dpa_app boot-time programmer
+board/vyos-config/ask-fastforward.conf   # CMM offload exclusion
 ```
 
 ### 5.2 Modified Files
@@ -183,13 +163,16 @@ kernel/flavors/ask/patches/README.md                 # Document active patch set
 specs/vyos-ask-development-reference.md              # Update with this plan
 ```
 
-### 5.3 Files to DELETE
+### 5.3 Files Already Removed (2026-06-28)
 
 ```
-kernel/flavors/ask/patches/0401-0404-*.patch         # Failed conntrack experiments
-kernel/flavors/ask/patches/archive-2026-06-21/       # Archive PCD patches (conditionally)
-board/systemd/ask-ct-setup.service                   # Old conntrack fix service
-board/scripts/vyos-ask-ct-fix                        # Old conntrack fix script
+kernel/flavors/ask/oot-modules/       # ask.ko scaffold (moved to ask20 branch)
+kernel/flavors/ask/userspace/askd/    # askd scaffold (moved to ask20 branch)
+kernel/flavors/ask/patches/0401-0404-*.patch  # Failed conntrack experiments
+board/systemd/ask-ct-setup.service    # Old conntrack fix service
+board/scripts/vyos-ask-ct-fix         # Old conntrack fix script
+specs/ask2-rewrite-spec.md           # ASK2 spec (moved to ask20 branch)
+
 ```
 
 ## 6. Kernel Configuration Requirements
@@ -229,6 +212,5 @@ CONFIG_BRIDGE_NETFILTER=m           # Bridge netfilter (needed for bridge offloa
 |-------|-----------|---------------|
 | P1 | Bridge offload working | `sh ask-inventory.sh` shows PCD counters > 0 on bridge ports |
 | P2 | Conntrack offload working | `new > 0` in /proc/net/stat/nf_conntrack, PCD counters increase per-flow |
-| P3 | ask.ko replaces cdx.ko | Same PCD counters, no cmm/fci/cdx modules, VyOS CLI integration |
 
-**[FACT]** The bridge offload path is proven on real hardware. The conntrack path requires fixing ctnetlink event generation — a single-stage fix. All supporting infrastructure (FMan PCD API patches, build scripts, diagnostic tools) is already in the nxp-sdk branch.
+**[FACT]** The bridge offload path is proven on real hardware (CVAN 25.12.4). The conntrack path requires fixing ctnetlink event generation — a single-stage fix. All supporting infrastructure (FMan PCD API patches, build scripts, diagnostic tools) is already in the nxp-sdk branch. The ASK2 rewrite (`ask.ko` single in-tree module) is a separate effort on the `ask20` branch.
