@@ -188,7 +188,46 @@ Fix: Install dpa_app to /usr/bin in ci-build-ask-userspace.sh. (Already fixed.)
 
 **[NOTE]** The CI pipeline itself has been broken by the reset—force-push cycle. The `certs/x509.genkey` fix needs to be in the branch for the build to succeed past the stage-kernel step. The last successful CI build that produced a bootable ISO was run 27923606673 (commit 5868a69).
 
-## 9. Recommended Next Actions
+## 9. OPNsense/FreeBSD Reference Implementation (2026-06-28)
+
+**[SPEC]** The `mono-gateway-26.1.6.pkg` from https://opnsense.mono.si/ provides a
+complete, working ASK 1.x stack for FreeBSD. Full analysis in:
+- `arch/opnsense-ask-architecture.md` — component inventory, pf_notify architecture
+- `specs/opnsense-ask-analysis.md` — comparative analysis vs. VyOS Linux port
+
+**[SPEC]** Key OPNsense→VyOS findings:
+
+| Finding | OPNsense | VyOS Linux |
+|---|---|---|
+| Conntrack equivalent | `/dev/pfnotify` (PF state events) | `nf_conntrack_netlink` (DEAF: new=0) |
+| L2 detection | auto_bridge.ko (20 KB, stable) | REMOVED (UAF crash) |
+| CMM binary size | 114 KB (FreeBSD ELF) | 1.87 MB (glibc Linux) |
+| PCD configs | Identical to our TFTP stash | ✅ Matching |
+| Module order | cdx→auto_bridge→pf_notify→fci | cdx→fci (reduced) |
+
+**[NOTE]** The OPNsense working state proves the CMM→FCI→CDX→FMan pipeline is
+architecturally sound. The VyOS Linux gaps are all in the event-source layer
+(conntrack + L2FLOW), not in the CDX/PCD programming layer.
+
+## 10. Bridge Offload Breakthrough (2026-06-28)
+
+**[SPEC]** On 2026-06-28, the CMM bridge-manual-mode pipeline was proven operational
+on VyOS Linux (commit `d77dbe1`):
+
+- ✅ Kernel rebuilt with CONFIG_BRIDGE=y, CONFIG_CPE_FAST_PATH=y
+- ✅ cdx.ko (309 KB) + fci.ko (16 KB) rebuilt against ask-ref kernel
+- ✅ CMM starts without "Error while trying to set bridge mode"
+- ✅ CMM detects bridges: `__cmmGetBridges::77: br0 is a bridge`
+- ✅ CDX bridge add: `fcode=0x0011 rc=0` on port join
+- ✅ FCI heartbeat: `fcode=0x0e09 rc=0` every 30s
+- ⚠️ Board crash: bridge loop on same L2 switch segment (all 5 ports on 192.168.1.0/24)
+
+**[BUG] Network loop on bridge port addition**
+Symptom: Adding eth0+eth1 to br0 flooded the home LAN (all ports on same switch).
+Cause: No STP enabled; bridge forwarded all BUM traffic in a loop.
+Fix: Use `ip link add br0 type bridge stp_state 1` and isolate test ports.
+
+## 11. Recommended Next Actions
 
 **[SPEC]**
 1. Fix CI pipeline: ensure certs/x509.genkey + fetch_state_write fixes are on branch
@@ -196,3 +235,9 @@ Fix: Install dpa_app to /usr/bin in ci-build-ask-userspace.sh. (Already fixed.)
 3. Deploy ISO to board, boot, verify QBMan portals initialize
 4. If QBMan works → proceed to M7 board validation
 5. If QBMan fails → move to Option B (full SDK DTB + initcall deferral + EXPORT_SYMBOL fix)
+6. **Bridge offload testing**: after board recovery, test with STP-enabled bridge on
+   physically isolated ports, monitor PCD counters
+7. **Conntrack fix**: investigate nf_conntrack_netlink groups subscription to unblock
+   the primary flow offload path
+8. **nf_notify.ko**: consider creating a Linux equivalent of pf_notify.ko as a
+   single-module replacement for both auto_bridge.ko and nf_conntrack_netlink
