@@ -8,6 +8,84 @@
 
 This document is the authoritative reference dump of the NXP ASK 1.x SDK stack running on the Mono Gateway DK. Every fact tagged `[SPEC]` was observed on the live board on 2026-06-28. `[NOTE]` entries provide context and analysis. `[BUG]` entries describe known issues.
 
+## Quick Inventory Script
+
+Run on any OpenWrt-ASK board to reproduce this document's data:
+
+```bash
+#!/bin/sh
+# NXP ASK SDK inventory — run as root on any OpenWrt-ASK or NXP SDK board
+# Fetch and run: wget -qO- URL | sh
+echo "=== SYSTEM ==="
+echo "kernel  : $(uname -r)"
+head -1 /proc/version 2>/dev/null
+echo "dtmodel : $(cat /proc/device-tree/model 2>/dev/null | tr '\0' ' ')"
+echo "cmdline : $(cat /proc/cmdline)"
+echo
+echo "=== FMAN UCODE ==="
+dmesg 2>/dev/null|grep 'FMan-Controller code'|head -1|sed 's/.*(ver \([^)]*\)).*/ver \1/'
+f=$(find /proc/device-tree -name 'fman-ucode*' 2>/dev/null|head -1)
+[ -n "$f" ] && { ucode=$(cat "$f" 2>/dev/null|tr -d '\0'); echo "fman-ucode partition: present (${#ucode} bytes)"; } || echo "fman-ucode: in DT only"
+echo
+echo "=== ASK KERNEL MODULES ==="
+grep -E '^(cdx|fci|auto_bridge|sdk_dpaa|fp_netfilter) ' /proc/modules 2>/dev/null|awk '{printf "%-16s %7s  %s\n",$1,$2,$4}'
+echo
+echo "=== USERSPACE BINARIES ==="
+for b in /usr/sbin/cmm /usr/bin/dpa_app /usr/bin/fmc;do
+  [ -f "$b" ] && printf "%-20s %8d\n" "$(basename $b)" $(wc -c <"$b") || echo "$b: MISSING"
+done
+echo "cmm_nfct: $(readelf -s /usr/sbin/cmm 2>/dev/null | grep -c nfct)"
+echo "cmm_pid : $(pidof cmm 2>/dev/null||echo NOT_RUNNING)"
+echo
+echo "=== LIBRARIES ==="
+for l in libfci.so libcmm.so libnetfilter_conntrack.so libnfnetlink.so;do
+  f=$(find /usr/lib -name "${l}*" -not -type l 2>/dev/null|head -1)
+  [ -n "$f" ] && printf "%-35s %8d\n" "$(basename $f)" $(wc -c <"$f") || echo "$l: MISSING"
+done
+echo
+echo "=== DEVICE NODES ==="
+ls -1 /dev/cdx_ctrl /dev/fm0 /dev/fm0-pcd 2>/dev/null|wc -l|awk '{print "fm/cdx nodes: "$1}'
+echo
+echo "=== CONFIG FILES ==="
+printf "%-30s %6d\n" cdx_pcd.xml $(wc -c </etc/cdx_pcd.xml 2>/dev/null||echo 0)
+printf "%-30s %6d\n" cdx_cfg.xml $(wc -c </etc/cdx_cfg.xml 2>/dev/null||echo 0)
+echo
+echo "=== FQID STATS ==="
+for d in pcd rx tx sa;do
+  echo -n "$d: "
+  ls /proc/fqid_stats/$d/ 2>/dev/null|tr '\n' ' '; echo
+done
+echo
+echo "=== CONNTRACK ==="
+echo "count=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null)  events=$(cat /proc/sys/net/netfilter/nf_conntrack_events 2>/dev/null)  max=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)"
+awk 'NR>1{printf "CPU%d: entries=%d new=%d insert=%d found=%d\n",NR-2,$1,$4,$11,$3}' /proc/net/stat/nf_conntrack 2>/dev/null
+echo
+echo "=== CMM FDs ==="
+p=$(pidof cmm 2>/dev/null)
+[ -n "$p" ] && { echo "PID=$p FDs=$(ls /proc/$p/fd/ 2>/dev/null|wc -l)"; cat /proc/$p/cmdline 2>/dev/null|tr '\0' ' '; echo; } || echo "cmm NOT_RUNNING"
+echo
+echo "=== INTERFACES ==="
+ip -br link 2>/dev/null|grep eth
+echo
+echo "=== PACKAGES (APK) ==="
+for p in kmod-ask-cdx kmod-ask-fci kmod-ask-auto-bridge ask-cmm ask-dpa-app fmc fmlib libfci kmod-nft-offload;do
+  f="/lib/apk/packages/${p}.list"
+  [ -f "$f" ] && echo "$p" || true
+done
+echo
+echo "=== ASK DMESG ==="
+dmesg 2>/dev/null|grep -iE 'FMan-Controller code|FM_PCD_Init.*ext timers|fp_netfilter.*hook|cdx.*dpa_app|FM_PORT_PcdOpen|cc-root'|head -8
+echo
+echo "=== DONE ==="
+```
+
+Run via wget:
+```
+wget -qO- https://raw.githubusercontent.com/mihakralj/vyos-ls1046a-build/nxp-sdk/board/scripts/ask-inventory.sh | sh
+```
+
+**[SPEC]** The output of this script from the reference DUT on 2026-06-28 is the source of all facts in this document.
+
 ## 1. System Identity
 
 **[SPEC]** Board: Mono Gateway Development Kit (NXP LS1046A, 4× Cortex-A72, 8 GB RAM)  
@@ -228,16 +306,6 @@ T+10.88  cdx_module_init::start_dpa_app successful
 | Firewall | iptables | nftables fw4 |
 
 **[NOTE]** The key difference is fp_netfilter activity. On OpenWrt-ASK, continuous broadcast traffic on the /16 subnet triggers constant `ct: ifindex changed` / `ct: iif changed` messages from the 10 stale conntrack entries. On VyOS with 0 entries, hooks have nothing to read. The underlying conntrack deafness is identical on both.
-
-## 16. Operational Workarounds
-
-**[NOTE]** The board is unstable with Ethernet connected due to `auto_bridge.ko` UAF bug. Workaround:
-1. Boot without Ethernet cables
-2. Via serial: `ip link set eth1 down; ip link set eth2 down; ip link set eth3 down; ip link set eth4 down`
-3. Assign IP directly: `ip addr add 192.168.1.190/16 dev eth0`
-4. Connect Ethernet — board can now be reached via SSH
-
-**[NOTE]** nftables fw4 INPUT chain has `policy drop` with `jump handle_reject` before catch-all rules. Any new accept rules must be inserted BEFORE the handle_reject jump to take effect.
 
 ## 17. All ASK-Related Files (complete find)
 
