@@ -246,6 +246,18 @@ jobs:
             work/linux-6.12.49/net/netfilter/nf_conntrack_standalone.c
           echo "### Patched nf_conntrack_standalone.c: enable_hooks := true"
 
+          # NXP SDK overlay patches add references to sk_buff fields
+          # (layerscape_underlying_iif, underlying_vlan_tci, ipsec_offload)
+          # that only exist when CONFIG_CPE_FAST_PATH is enabled. The CI
+          # kernel tree includes the consumer patches (nf_conntrack,
+          # bridge) but NOT the sk_buff field definitions (which live in
+          # failed-conntrack-experiments/724-*). Inject the fields
+          # unconditionally so the kernel compiles.
+          sed -i '/^struct sk_buff {/a\
+\tint\t\t\tlayerscape_underlying_iif;\n\t__u16\t\tunderlying_vlan_tci;\n\tunsigned long\t\tipsec_offload;' \
+            work/linux-6.12.49/include/linux/skbuff.h
+          echo "### Patched skbuff.h: injected layerscape_underlying_iif, underlying_vlan_tci, ipsec_offload"
+
       - name: Compile Mono DTB from DTS (mainline only — skip on nxp-sdk)
         if: ${{ !startsWith(github.ref_name, 'nxp-sdk') }}
         run: bin/ci-compile-mono-dtb.sh
