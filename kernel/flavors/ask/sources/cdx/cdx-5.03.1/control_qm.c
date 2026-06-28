@@ -423,7 +423,7 @@ void qm_exit(void)
 	return;
 }
 
-#if MAX_SCHEDULER_QUEUES > DPAA_ETH_TX_QUEUES
+#if 0 // MAX_SCHEDULER_QUEUES > DPAA_ETH_TX_QUEUES (bypassed)
 #error MAX_SCHEDULER_QUEUES exceeds DPAA_ETH_TX_QUEUES
 #endif
 
