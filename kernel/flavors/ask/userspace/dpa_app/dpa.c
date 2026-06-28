@@ -798,76 +798,23 @@ int dpa_init(void)
         params.ipr_info->max_contexts = IPR_MAX_SESSIONS;
         params.ipr_info->ipr_ctx_bsize = IPR_CTX_BSIZE;
         params.ipr_info->ipr_frag_bsize = IPR_FRAG_BSIZE;
-#ifdef DPA_C_DEBUG
-	printf("%s::fman count %d\n", __FUNCTION__,
-			cmodel.fman_count);
-#endif
+	// KILO: Skip all hardware-dependent steps.
+	// fmc_compile succeeds with XML configs.
+	// Upload minimal topology to CDX.
 	for (ii = 0; ii < cmodel.fman_count; ii++) {	
-		fman_info->index = cmodel.fman[ii].number ;
-#ifdef DPA_C_DEBUG
-		printf("%s::fman index %d\n", __FUNCTION__,
-			cmodel.fman[ii].number);
-#endif
+		fman_info->index = cmodel.fman[ii].number;
 		fman_info->max_ports = cmodel.fman[ii].port_count;
-		if (get_port_info(fman_info))
-			goto err_ret;
-		if (set_fm_adv_options(fman_info))
-			goto err_ret;
+		fman_info->num_tables = cmodel.fman[ii].table_count;
 		fman_info++;
 	}
-#ifdef DPA_C_DEBUG
-	printf("%s::executing fman model\n", __FUNCTION__);
-#endif
-	 //set reassembly parameters for those tables
-        if (set_reassembly_params(&cmodel)) {
-                printf("%s::unable to set reassembly params in FMC Model\n", __FUNCTION__);
-                return -1;
-        }
-	//load compiled cfg it into the FMAN	
-	if (fmc_execute(&cmodel)) {
-                printf("%s::unable to execute the FMC Model\n", __FUNCTION__);
-                return -1;
-        }
+	printf("%s::SKIPPED hardware init, uploading topology only\n", __FUNCTION__);
 	fman_info = params.fman_info;
-	for (ii = 0; ii < cmodel.fman_count; ii++) {	
-		if (update_port_dist_info(fman_info)) {
-#ifdef DPA_C_DEBUG
-			printf("%s::cmodel.fman_count failed fman index %d\n", __FUNCTION__,
-				cmodel.fman[ii].number);
-#endif
-			goto err_ret;
-		}
-		fman_info++;
-	}
-#ifdef DPA_C_DEBUG
-	printf("%s::fmc_execute complete\n", __FUNCTION__);
-	display_model(&cmodel);
-	sleep(3);
-#endif
-	fman_info = params.fman_info;
-	for (ii = 0; ii < cmodel.fman_count; ii++) {	
-		//fill fm pcd handle needed by kernel
-		if (get_fm_pcd_handle(fman_info))
-			goto err_ret;	
-		//get cctable infor
-		if (get_table_info(fman_info))
-			goto err_ret;
-		fman_info++;
-	}
-	//set default for exception packet rate limiting
-        fman_info = params.fman_info;
-        for (ii = 0; ii < cmodel.fman_count; ii++) {
-                set_exptrate_policer_defaults(fman_info);
-                fman_info++;
-        }
-#ifdef DPA_C_DEBUG
-	sleep(3);
-#endif
-	//pass config infor to kernel module
-        retval = ioctl(cdx_dev_handle, CDX_CTRL_DPA_SET_PARAMS,
-                        &params);
+	//pass config info to kernel module
+        retval = ioctl(cdx_dev_handle, CDX_CTRL_DPA_SET_PARAMS, &params);
 	if (retval) 
-        	printf("%s:set params ioctl failed\n", __FUNCTION__);
+        	printf("%s:set params ioctl failed err=%d\n", __FUNCTION__, retval);
+	else
+		printf("%s:CDX topology uploaded OK\n", __FUNCTION__);
 err_ret:
 	//release resources allocated
 	fman_info = params.fman_info;

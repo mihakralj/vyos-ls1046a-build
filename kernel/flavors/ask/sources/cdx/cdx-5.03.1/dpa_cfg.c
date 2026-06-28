@@ -797,20 +797,29 @@ int cdx_ioc_set_dpa_params(unsigned long args)
 	//init the fman handles 
 	finfo = fman_info;
 	for (ii = 0; ii < num_fmans; ii++) {
-		if (cdxdrv_get_fman_handles(finfo)) {
-			retval = -EIO;
-			goto err_ret;
+		if (finfo->pcd_handle) {
+			if (cdxdrv_get_fman_handles(finfo)) {
+				retval = -EIO;
+				goto err_ret;
+			}
 		}
 		finfo++;
 	}
 	finfo = fman_info;
+	bool hw_skip = !finfo->pcd_handle;
 	//init interface stats module
-	if (cdxdrv_init_stats(finfo->muram_handle)) {
+	if (!hw_skip && cdxdrv_init_stats(finfo->muram_handle)) {
 		retval = -EIO;
 		goto err_ret;
 	}
 
 	for (ii = 0; ii < num_fmans; ii++) {
+		if (hw_skip) {
+			finfo->portinfo = (struct cdx_port_info __force *)uspace_portinfo[ii];
+			finfo->tbl_info = (struct table_info __force *)uspace_tbl_info[ii];
+			finfo++;
+			continue;
+		}
 		//get port info
 		retval = get_port_info(finfo, uspace_portinfo[ii]);
 		if (retval)
@@ -822,6 +831,7 @@ int cdx_ioc_set_dpa_params(unsigned long args)
 		finfo++;
 	}
 	finfo = fman_info;
+	if (!hw_skip) {
 	//loop thru all fmans
 	for (ii = 0; ii < num_fmans; ii++) {
 		struct cdx_port_info *port_info;
@@ -891,6 +901,7 @@ int cdx_ioc_set_dpa_params(unsigned long args)
 			goto err_ret;
 		}
 	}
+	} /* !hw_skip */
 	display_dpa_cfg();
 	kfree(uspace_tbl_info);
 	kfree(uspace_portinfo);
