@@ -30,6 +30,13 @@
 	 ******************************/
 	#define MAX_CT_ID 8
 
+	enum cmm_ct_runtime_state {
+		CMM_CT_RUNTIME_FALLBACK = 0,
+		CMM_CT_RUNTIME_INSTALLED,
+		CMM_CT_RUNTIME_REJECTED,
+		CMM_CT_RUNTIME_DELETE_PENDING,
+	};
+
 	struct ctTable
 	{
 		struct list_head list;
@@ -81,6 +88,15 @@
 
 		int dir_filter;
 
+		/*
+		 * Stage 2 runtime-state stays narrowly aligned with the ASK control
+		 * path: installed means the FE accepted the conntrack, rejected means
+		 * FE programming failed, and fallback means the flow stays software
+		 * handled for the current attempt.
+		 */
+		int runtime_state;
+		int last_program_rc;
+
 		u_int32_t ids[MAX_CT_ID];
 
 		int n_id;
@@ -118,6 +134,7 @@
 	#define FLOWFLAG_SOCKET_ROUTE		(1 << 2)
 	#define FLOWFLAG_LOCAL			(1 << 3)
 	#define FLOWFLAG_SA_ROUTE		(1 << 4)
+	#define FLOWFLAG_IPSEC_CT		(1 << 5)
 
 #ifdef VLAN_FILTER
 	/* vlan filtering flags on a route*/
@@ -141,23 +158,30 @@
 
 	int cmmCtInit(struct cmm_ct *ctx);
 	void cmmCtExit(struct cmm_ct *ctx);
-	int __cmmRouteRegister(struct ct_route *rt, struct flow *flow, const char *dir);
+	int __cmmRouteRegister(FCI_CLIENT *fci_handle, struct ct_route *rt, struct flow *flow, const char *dir);
 	int ____cmmCtRegister(FCI_CLIENT *fci_handle, struct ctTable *ctEntry);
 	void __cmmCtUpdateWithRoute(FCI_CLIENT *fci_handle, struct RtEntry *route);
 	int cmmCtNetlinkRemove(struct nfct_handle * handler, struct nf_conntrack *ct);
 	int cmmCtHandle(FCI_CLIENT *fci_handle, int function_code, u_int8_t *cmd_buf, u_int16_t cmd_len, u_int16_t *res_buf, u_int16_t *res_len);
 
 	int cmmCtShow(struct cli_def * cli, const char *command, char *argv[], int argc);
+	int cmmCtShowProcess(char ** keywords, int tabStart, daemon_handle_t daemon_handle);
+	int cmmCtShowClientCmd(FCI_CLIENT *fci_handle, u_int8_t *cmd_buf, u_int16_t cmd_len, u_int16_t *res_buf, u_int16_t *res_len);
 	int cmmFlowLocalShow(struct cli_def * cli, const char *command, char *argv[], int argc);
+	const char *cmmCtRuntimeStateName(const struct ctTable *ctEntry);
+	void cmmCtRuntimeStateSetFallback(struct ctTable *ctEntry);
+	void cmmCtRuntimeStateSetInstalled(struct ctTable *ctEntry);
+	void cmmCtRuntimeStateSetRejected(struct ctTable *ctEntry, int program_rc);
+	void cmmCtRuntimeStateSetDeletePending(struct ctTable *ctEntry);
 
 	u_int64_t cmmQosmarkGet(struct nf_conntrack *ct);
 	void cmmQosmarkSet(struct nf_conntrack *ct, u_int64_t qosmark);
 
 	struct ctTable *__cmmCtFind(struct nf_conntrack *ctTemp);
 	void __cmmNeighDeregister(FCI_CLIENT *fci_handle, struct NeighborEntry *neigh, const char *dir);
-	void __cmmRouteDeregister(FCI_CLIENT *fci_handle, struct ct_route *rt, const char *dir);
+	int __cmmRouteDeregister(FCI_CLIENT *fci_handle, struct ct_route *rt, const char *dir);
 	void ____cmmRouteDeregister(struct RtEntry *route, const char *dir);
-	void __cmmFPPRouteDeregister(FCI_CLIENT *fci_handle, struct fpp_rt *fpp_route, const char *dir);
+	int __cmmFPPRouteDeregister(FCI_CLIENT *fci_handle, struct fpp_rt *fpp_route, const char *dir);
 	void __cmmCheckFPPRouteIdUpdate(struct ct_route *rt, int *flags);
 	void __cmmCtRemove(struct ctTable *ctEntry);
 	int ____cmmCtDeregister(FCI_CLIENT *fci_handle, FCI_CLIENT *fci_key_handle, struct ctTable *ctEntry);
@@ -211,15 +235,15 @@ int cmmDPIFlagProcessClientCmd(u_int8_t *cmd_buf, u_int16_t *res_buf, u_int16_t 
  */
 
 #define SUPPORTED_LOCAL_PROTO(l4proto)  ((l4proto == IPPROTO_IPIP) ||\
-					   (l4proto == IPPROTO_IPV6) ||\
+					   (l4proto == IPPROTO_IPV6) || (l4proto == IPPROTO_ETHERIP) ||\
 					    (l4proto == IPPROTO_GRE) || (l4proto == IPPROTO_ESP) || (l4proto == IPPROTO_AH))
 #elif CONFIG_IPSEC_ESP_PASSTHRU
 #define SUPPORTED_LOCAL_PROTO(l4proto)  ((l4proto == IPPROTO_IPIP) ||\
-											  (l4proto == IPPROTO_IPV6) ||\
+											  (l4proto == IPPROTO_IPV6) || (l4proto == IPPROTO_ETHERIP) ||\
 											   (l4proto == IPPROTO_GRE) || (l4proto == IPPROTO_ESP))
 #else
 #define SUPPORTED_LOCAL_PROTO(l4proto)  ((l4proto == IPPROTO_IPIP) ||\
-					   (l4proto == IPPROTO_IPV6) ||\
+					   (l4proto == IPPROTO_IPV6) || (l4proto == IPPROTO_ETHERIP) ||\
 					    (l4proto == IPPROTO_GRE))
 #endif
 

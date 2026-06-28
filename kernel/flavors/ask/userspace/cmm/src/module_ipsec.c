@@ -144,7 +144,7 @@ int __cmmSATunnelRegister(FCI_CLIENT *fci_handle, struct SATable* SAEntry)
 	/* Eventhough SA is local connection, as the connection will not exist in kernel this is disabled */
 	SAEntry->Sa_flow.flow_flags = FLOWFLAG_SA_ROUTE;
 
-	rc = __cmmRouteRegister(&SAEntry->tnl_rt, &SAEntry->Sa_flow, "sa");
+	rc = __cmmRouteRegister(fci_handle, &SAEntry->tnl_rt, &SAEntry->Sa_flow, "sa");
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
 /* 
    In 3.19 kernel, neighbor entry in linux neighbor cache is not created during the creation of route entry

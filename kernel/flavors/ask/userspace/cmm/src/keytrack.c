@@ -416,6 +416,7 @@ int __cmmFetchFlowParams(int family, struct flowi *fl, unsigned int **flsaddr, u
 	char sbuf[INET6_ADDRSTRLEN], dbuf[INET6_ADDRSTRLEN];
 	switch (fl->flowi_proto)
 	{
+		case IPPROTO_ETHERIP:
 		case IPPROTO_IPIP:
 		case IPPROTO_GRE:
 			/* Make sure to reset port information */
@@ -859,6 +860,7 @@ int cmmKeyEngineFlowRemove(FCI_CLIENT *fci_handle, unsigned short fcode, unsigne
 
 	switch (fl->flowi_proto)
 	{
+	case IPPROTO_ETHERIP:
 	case IPPROTO_IPIP:
 	case IPPROTO_GRE:
 		/* Make sure to reset port information */
@@ -1071,6 +1073,12 @@ static void cmmReplaceXfrmHandle(unsigned short  *xfrm_handle, unsigned short ol
 
 int cmmUpdateFlowsWithNewSAInfo(struct SATable *pNewSAEntry,unsigned short old_xfrm_handle)
 {
+#if defined(ASK_STAGE2_SKIP_XFRM_CONNTRACK_ABI)
+	(void)pNewSAEntry;
+	(void)old_xfrm_handle;
+
+	return 0;
+#else
 	struct ctTable *ctEntry;
 	struct list_head *entry;
 	int list_sa_index, dir =0;
@@ -1110,6 +1118,7 @@ int cmmUpdateFlowsWithNewSAInfo(struct SATable *pNewSAEntry,unsigned short old_x
 	/* update old_xfrm_value with new SA xfrm handle value in netlink messages of CtEntry */
 	cmmUpdateFlows(pSAEntry);
 	return 0;
+#endif
 
 }
 
@@ -1660,6 +1669,12 @@ clean:
 }
 #endif
 
+#if defined(IPSEC_SUPPORT_DISABLED)
+void cmmDPDIPsecSAUpdate(struct cmm_ct *ctx)
+{
+	(void)ctx;
+}
+#else
 void cmmDPDIPsecSAUpdate(struct cmm_ct *ctx)
 {
 	static unsigned int gDPDCurrAutoTimeout = 0;
@@ -1763,6 +1778,7 @@ void cmmDPDIPsecSAUpdate(struct cmm_ct *ctx)
 	}
 	last_dpd = now;
 }
+#endif
 
 void cmmDPDSaQueryPrintHelp(int cmd_type)
 {
