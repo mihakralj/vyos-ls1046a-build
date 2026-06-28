@@ -181,7 +181,7 @@ flowchart LR
     end
 ```
 
-### 7.1 Bridge Path — Proven Working
+### 7.1 Bridge Path — Proven Working on CVAN
 
 **[SPEC]** On CVAN 25.12.4, bridge offload is **FUNCTIONAL**:
 - PCD counters: `eth0(22,496 B) eth1(22,496 B) eth2(22,496 B)` — bridge traffic through FMan
@@ -189,7 +189,13 @@ flowchart LR
 - OH1 (IPsec): 22,812 B — specialized offload active
 - OH2 (WiFi): 316 B — minimal traffic
 
-**[SPEC]** On sergio 25.12.2, bridge offload was **NOT TESTABLE** because `auto_bridge.ko` causes kernel panic when interfaces are bridged.
+**[NOTE]** On sergio 25.12.2, bridge mode was **NOT TESTED**. We never configured a bridge (`br-lan`) or measured PCD counters during bridge traffic. Our testing focused on:
+- Basic networking (eth0-only)
+- ASK module loading and state
+- Conntrack behavior
+- Auto_bridge crash when bringing up SFP+ ports with cable traffic
+
+The auto_bridge UAF crash occurred during routed-mode testing (eth3↔eth4 with IPs and cables), not bridge-mode testing. It remains unknown whether bridge offload would work on sergio if a proper bridge were configured and auto_bridge were tamed. **[GUIDANCE]** Testing bridge offload on sergio would require: (1) unloading or disabling `auto_bridge.ko` ebtables hooks, (2) creating `br-lan` with eth0+eth1+eth2, (3) generating cross-port traffic, (4) checking PCD counters.
 
 **[GUIDANCE]** The bridge path proves CDX→FCI→CMM→FMan PCD pipeline works end-to-end. VyOS-ASK M1 should use this as the baseline. Bridge offload requires:
 1. No `auto_bridge.ko`
@@ -208,6 +214,7 @@ flowchart LR
 | CMM subscribed to events? | ✗ (groups=0x0) | ✗ (groups=0x0) |
 | nf_conntrack_netlink used? | ✗ (refcnt=0) | ✗ (refcnt=0) |
 | PCD conntrack flows? | ✗ (zero counters) | ✗ (only bridge flows) |
+| **Bridge mode tested?** | **NOT TESTED** (auto_bridge crash during routed-mode testing, not bridge-mode) | ✓ proven working |
 
 **[GUIDANCE]** For VyOS-ASK to enable conntrack offload:
 1. Fix ctnetlink event generation (`new=0` → `new>0`)
