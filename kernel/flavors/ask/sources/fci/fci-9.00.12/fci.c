@@ -500,24 +500,24 @@ static void __fci_fe_inbound_data(struct sk_buff *skb)
 	}
 
 	payload_len = skb->len; /* KILO: use actual data length, not header field */
-	printk(KERN_EMERG "KILO-FCI: recv payload_len=%d FCI_HDR=%d FCI_SIZE=%d\n",
+	pr_debug("KILO-FCI: recv payload_len=%d FCI_HDR=%d FCI_SIZE=%d\n",
 	       payload_len, FCI_MSG_HDR_SIZE, FCI_MSG_SIZE);
 	rc = 0;
 	if (payload_len < FCI_MSG_HDR_SIZE)
-	{	rc = -EINVAL; printk(KERN_EMERG "KILO-FCI: FAIL len<HDR\n"); }
+	{	rc = -EINVAL; pr_debug("KILO-FCI: FAIL len<HDR\n"); }
 	else if (payload_len > FCI_MSG_SIZE)
-	{	rc = -EMSGSIZE; printk(KERN_EMERG "KILO-FCI: FAIL len>SIZE\n"); }
+	{	rc = -EMSGSIZE; pr_debug("KILO-FCI: FAIL len>SIZE\n"); }
 	else
 	{
 		/* extract fci message from skb */
 		fci_msg = nlmsg_data(nlh);
 		actual_payload_len = payload_len - FCI_MSG_HDR_SIZE;
-		printk(KERN_EMERG "KILO-FCI: fcode=0x%04x msglen=%d actual_pay=%d\n",
+		pr_debug("KILO-FCI: fcode=0x%04x msglen=%d actual_pay=%d\n",
 		       fci_msg->fcode, fci_msg->length, actual_payload_len);
 		if (fci_msg->length > FCI_MSG_MAX_PAYLOAD)
-		{	rc = -EMSGSIZE; printk(KERN_EMERG "KILO-FCI: FAIL len>MAX\n"); }
+		{	rc = -EMSGSIZE; pr_debug("KILO-FCI: FAIL len>MAX\n"); }
 		else if (fci_msg->length > actual_payload_len)
-		{	rc = -EINVAL; printk(KERN_EMERG "KILO-FCI: FAIL len>actual\n"); }
+		{	rc = -EINVAL; pr_debug("KILO-FCI: FAIL len>actual\n"); }
 	}
 
 	memset(&fci_rep_local, 0, sizeof(fci_rep_local));
@@ -583,11 +583,11 @@ static int fci_fe_inbound_parser(FCI_MSG *fci_msg, FCI_MSG *fci_rep)
 {
 	int rc = 0;
 
-	printk(KERN_EMERG "KILO-FCI: parser called fcode=0x%04x len=%d\n", fci_msg->fcode, fci_msg->length);
+	pr_debug("KILO-FCI: parser called fcode=0x%04x len=%d\n", fci_msg->fcode, fci_msg->length);
 
 	fci_rep->length = 0;
 	rc = comcerto_fpp_send_command(fci_msg->fcode, fci_msg->length, fci_msg->payload, &fci_rep->length, fci_rep->payload, FCI_MSG_MAX_PAYLOAD);
-	printk(KERN_EMERG "KILO-FCI: send_command rc=%d replen=%d\n", rc, fci_rep->length);
+	pr_debug("KILO-FCI: send_command rc=%d replen=%d\n", rc, fci_rep->length);
 
 	if (fci_rep->length > FCI_MSG_MAX_PAYLOAD)
 		fci_rep->length = FCI_MSG_MAX_PAYLOAD;

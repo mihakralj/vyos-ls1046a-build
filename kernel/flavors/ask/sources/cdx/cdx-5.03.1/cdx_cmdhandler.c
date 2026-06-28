@@ -619,11 +619,11 @@ int comcerto_fpp_send_command(u16 fcode, u16 length, u16 *payload, u16 *rlen, u1
 
 	mutex_lock(&ctrl->mutex);
 
-	printk(KERN_EMERG "KILO-FPP: comcerto_fpp_send_command fcode=0x%04x len=%d\n", fcode, length);
+	pr_debug("KILO-FPP: comcerto_fpp_send_command fcode=0x%04x len=%d\n", fcode, length);
 
 	rc = cdx_cmd_handler(fcode, length, payload, &tmp_rlen, tmp_rbuf, sizeof(tmp_rbuf));
 
-	printk(KERN_EMERG "KILO-FPP: cdx_cmd_handler rc=%d rlen=%d rbuf[0]=0x%04x\n", rc, tmp_rlen, tmp_rbuf[0]);
+	pr_debug("KILO-FPP: cdx_cmd_handler rc=%d rlen=%d rbuf[0]=0x%04x\n", rc, tmp_rlen, tmp_rbuf[0]);
 
 	if (!rc) {
 		if (tmp_rlen > rbuf_len) {
