@@ -19,6 +19,7 @@
 #include "portdefs.h"
 #include "cdx.h"
 #include "cdx_cmdhandler.h"
+#include "control_bridge.h"
 #include "dpa_ipsec.h"
 
 static uint32_t init_level;
@@ -191,14 +192,18 @@ static int __init cdx_module_init(void)
 	/* creating a /proc/fqid_stats dir for listing fqids created by cdx module */
 	cdx_init_fqid_procfs();
 #ifdef START_DPA_APP
+	// KILO: run dpa_app but don't fail if it errors — we'll run it manually after load
 	rc = start_dpa_app();
-	if (rc != 0)  {
-		printk("%s::start_dpa_app failed rc %d\n", __FUNCTION__, rc);
-		/* cant pass error code from start_dpa_app */
-		rc = -EIO;
-		goto exit;
-	}
+	if (rc != 0)
+		printk("%s::start_dpa_app failed rc %d (non-fatal, will run manually)\n", __FUNCTION__, rc);
+	else
 	printk("%s::start_dpa_app successful\n", __FUNCTION__);
+#endif
+#if 1
+	/* KILO: Initialize bridge command handler so cmm can set bridge mode.
+	 * control_bridge_init() is NOT called by default in CDX init. */
+	bridge_init();
+	printk("%s::bridge_init done\n", __FUNCTION__);
 #endif
 #ifdef CFG_WIFI_OFFLOAD
 	rc = dpaa_vwd_init();
@@ -208,11 +213,16 @@ static int __init cdx_module_init(void)
 	}
 #endif
 	// initialize global fragmentation params
+	// KILO-HACK: skip frag module init — BMan pools not available under mainline DPAA
+	// cdx_init_frag_module() needs SDK DPAA BMan pools from sdk_dpaa
+	printk("%s::SKIPPING cdx_init_frag_module (BMan pools unavailable)\n", __FUNCTION__);
+#if 0
 	if (cdx_init_frag_module()) { 
 		printk("%s::cdx_init_frag_module failed\n", __FUNCTION__);
 		rc = -EIO;
 		goto exit;
 	}
+#endif
 
 #ifdef DPA_IPSEC_OFFLOAD
 	if (cdx_dpa_ipsec_init()) {

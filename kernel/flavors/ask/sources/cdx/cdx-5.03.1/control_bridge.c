@@ -450,8 +450,12 @@ static int M_bridge_handle_control(U16 code, U16 *p, U16 Length)
 			}
 
 		case CMD_RX_L2BRIDGE_MODE:
-			if (prsp->mode_timeout != L2_BRIDGE_MODE_AUTO) {
-				printk("%s::manual mode not supported\n", __FUNCTION__);
+			printk(KERN_EMERG "KILO-BRIDGE: CMD_RX_L2BRIDGE_MODE mode_timeout=%d\n", prsp->mode_timeout);
+			/* KILO: Accept both MANUAL and AUTO.
+			 * cmm falls back to MANUAL when NETLINK_L2FLOW is unavailable. */
+			if (prsp->mode_timeout != L2_BRIDGE_MODE_AUTO &&
+			    prsp->mode_timeout != L2_BRIDGE_MODE_MANUAL) {
+				printk("%s::invalid mode %d\n", __FUNCTION__, prsp->mode_timeout);
 				ackstatus = ERR_WRONG_COMMAND_PARAM;
 			}
 			break;
@@ -483,6 +487,8 @@ static U16 M_bridge_cmdproc(U16 cmd_code, U16 cmd_len, U16 *p)
 	U16 acklen;
 	U16 ackstatus;
 	U32 action;
+
+	printk(KERN_EMERG "KILO-BRIDGE: cmdproc called cmd=0x%04x len=%d\n", cmd_code, cmd_len);
 
 	acklen = 2;
 	ackstatus = CMD_OK;

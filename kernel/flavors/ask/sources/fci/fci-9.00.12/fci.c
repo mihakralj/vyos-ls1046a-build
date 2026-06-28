@@ -488,8 +488,9 @@ static void __fci_fe_inbound_data(struct sk_buff *skb)
 	}
 
 	nlh = nlmsg_hdr(skb);
-	if (!nlmsg_ok(nlh, skb->len))
-	{
+	/* KILO: cmm binary sends nlmsg_len=24 but only 22 bytes of data.
+	 * Use skb->len for validation and length calculations. */
+	if (skb->len < NLMSG_HDRLEN) {
 		nskb = fci_alloc_msg();
 		if (nskb)
 			fci_outbound_err(FCI_NL_FF, nskb, NETLINK_CB(skb).portid,
@@ -498,21 +499,25 @@ static void __fci_fe_inbound_data(struct sk_buff *skb)
 		return;
 	}
 
-	payload_len = nlmsg_len(nlh);
+	payload_len = skb->len; /* KILO: use actual data length, not header field */
+	printk(KERN_EMERG "KILO-FCI: recv payload_len=%d FCI_HDR=%d FCI_SIZE=%d\n",
+	       payload_len, FCI_MSG_HDR_SIZE, FCI_MSG_SIZE);
 	rc = 0;
 	if (payload_len < FCI_MSG_HDR_SIZE)
-		rc = -EINVAL;
+	{	rc = -EINVAL; printk(KERN_EMERG "KILO-FCI: FAIL len<HDR\n"); }
 	else if (payload_len > FCI_MSG_SIZE)
-		rc = -EMSGSIZE;
+	{	rc = -EMSGSIZE; printk(KERN_EMERG "KILO-FCI: FAIL len>SIZE\n"); }
 	else
 	{
 		/* extract fci message from skb */
 		fci_msg = nlmsg_data(nlh);
 		actual_payload_len = payload_len - FCI_MSG_HDR_SIZE;
+		printk(KERN_EMERG "KILO-FCI: fcode=0x%04x msglen=%d actual_pay=%d\n",
+		       fci_msg->fcode, fci_msg->length, actual_payload_len);
 		if (fci_msg->length > FCI_MSG_MAX_PAYLOAD)
-			rc = -EMSGSIZE;
+		{	rc = -EMSGSIZE; printk(KERN_EMERG "KILO-FCI: FAIL len>MAX\n"); }
 		else if (fci_msg->length > actual_payload_len)
-			rc = -EINVAL;
+		{	rc = -EINVAL; printk(KERN_EMERG "KILO-FCI: FAIL len>actual\n"); }
 	}
 
 	memset(&fci_rep_local, 0, sizeof(fci_rep_local));
@@ -578,10 +583,11 @@ static int fci_fe_inbound_parser(FCI_MSG *fci_msg, FCI_MSG *fci_rep)
 {
 	int rc = 0;
 
-	FCI_PRINTK(FCI_INBOUND, "FCI: fci_fe_inbound_parser()\n");
+	printk(KERN_EMERG "KILO-FCI: parser called fcode=0x%04x len=%d\n", fci_msg->fcode, fci_msg->length);
 
 	fci_rep->length = 0;
 	rc = comcerto_fpp_send_command(fci_msg->fcode, fci_msg->length, fci_msg->payload, &fci_rep->length, fci_rep->payload, FCI_MSG_MAX_PAYLOAD);
+	printk(KERN_EMERG "KILO-FCI: send_command rc=%d replen=%d\n", rc, fci_rep->length);
 
 	if (fci_rep->length > FCI_MSG_MAX_PAYLOAD)
 		fci_rep->length = FCI_MSG_MAX_PAYLOAD;
