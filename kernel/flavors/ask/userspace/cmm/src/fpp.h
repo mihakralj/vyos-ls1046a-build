@@ -140,6 +140,9 @@
 #define FPP_ERR_SOCK_UPDATE_ERR							1218
 #endif //LS1043
 
+/* ------------------------------- NATPT -------------------------------------*/
+#define FPP_ERR_NATPT_UNKNOWN_CONNECTION                1220
+
 /* ------------------------------- RTP ---------------------------------------*/
 #define FPP_ERR_RTP_STATS_MAX_ENTRIES                   1230
 #define FPP_ERR_RTP_STATS_STREAMID_ALREADY_USED         1231 
@@ -1624,6 +1627,49 @@ typedef struct fpp_alt_set_cmd {
     u_int32_t   params[FPP_ALTCONF_OPTION_MAX_PARAMS];
 } __attribute__((__packed__)) fpp_alt_set_cmd_t;
 
+/*-------------------------------- NATPT -------------------------------------*/
+#define FPP_CMD_NATPT_OPEN                              0x1101
+#define FPP_CMD_NATPT_CLOSE                             0x1102
+#define FPP_CMD_NATPT_QUERY                             0x1103
+
+#define FPP_NATPT_CONTROL_6to4                          0x01
+#define FPP_NATPT_CONTROL_4to6                          0x02
+#define FPP_NATPT_CONTROL_TCPFIN                        0x0100  
+
+typedef struct fpp_natpt_open_cmd {
+    u_int16_t   socket_a;
+    u_int16_t   socket_b;
+    u_int16_t   control;
+    u_int16_t   rsvd1;
+} __attribute__((__packed__)) fpp_natpt_open_cmd_t;
+
+typedef struct fpp_natpt_close_cmd {
+    u_int16_t   socket_a;
+    u_int16_t   socket_b;
+} __attribute__((__packed__)) fpp_natpt_close_cmd;
+
+typedef struct fpp_natpt_query_cmd {
+    u_int16_t   reserved1;
+    u_int16_t   socket_a;
+    u_int16_t   socket_b;
+    u_int16_t   reserved2;
+} __attribute__((__packed__)) fpp_natpt_query_cmd_t;
+
+typedef struct fpp_natpt_query_response {
+    u_int16_t   retcode;
+    u_int16_t   socket_a;
+    u_int16_t   socket_b;
+    u_int16_t   control;
+    u_int64_t   stat_v6_received;
+    u_int64_t   stat_v6_transmitted;
+    u_int64_t   stat_v6_dropped;
+    u_int64_t   stat_v6_sent_to_ACP;
+    u_int64_t   stat_v4_received;
+    u_int64_t   stat_v4_transmitted;
+    u_int64_t   stat_v4_dropped;
+    u_int64_t   stat_v4_sent_to_ACP;
+} __attribute__((__packed__)) fpp_natpt_query_response_t;
+
 /*-------------------------------- Fast Forwarding ---------------------------*/
 #define FPP_CMD_IPV4_FF_CONTROL                         0x0321
 
@@ -1879,6 +1925,9 @@ typedef struct fpp_wifi_cmd
 #define FPP_CMD_TUNNEL_SEC                              0x0B04
 #define FPP_CMD_TUNNEL_QUERY                            0x0B05
 #define FPP_CMD_TUNNEL_QUERY_CONT                       0x0B06
+#define FPP_CMD_TUNNEL_4rd_ID_CONV_dport                0x0B07
+#define FPP_CMD_TUNNEL_4rd_ID_CONV_psid                 0x0B08
+
 /* CMM / FPP API Command */
 typedef struct fpp_tunnel_create_cmd {
     char        name[IFNAMSIZ];
@@ -1929,10 +1978,28 @@ typedef struct fpp_tunnel_query_cmd {
     u_int16_t       pad;
 } __attribute__((__packed__)) fpp_tunnel_query_cmd_t;
 
+#ifdef SAM_LEGACY
+
+typedef struct {
+    int         port_set_id;        /**< Port Set ID        */
+    int         port_set_id_length; /**< Port Set ID length */
+    int         psid_offset;        /**< PSID offset        */
+}sam_port_info_t;
+typedef sam_port_info_t rt_mw_ipstack_sam_port_t;
+
+typedef struct fpp_tunnel_id_conv_cmd {
+    u_int8_t        name[IFNAMSIZ];
+    sam_port_info_t sam_port_info;
+    u_int32_t       IdConvStatus:1,
+                    unused:31;
+} __attribute__((__packed__)) fpp_tunnel_id_conv_cmd_t;
+
+#else /* SAM_LEGACY */
 typedef struct fpp_tunnel_id_conv_cmd {
     u_int16_t   IdConvStatus;
     u_int16_t   Pad;
 } __attribute__((__packed__)) fpp_tunnel_id_conv_cmd_t;
+#endif /* SAM_LEGACY */
 
 /*-------------------------------- Timeout -----------------------------------*/
 #define FPP_CMD_IPV4_SET_TIMEOUT                        0x0319

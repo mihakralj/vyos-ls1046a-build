@@ -22,7 +22,8 @@
 
 	int cmmFePPPoEUpdate(FCI_CLIENT *fci_handler, int action, struct interface *itf);
 	int cmmPPPoELocalShow(struct cli_def * cli, const char *command, char *argv[], int argc);
+	int cmmPPPoEShowProcess(char ** keywords, int tabStart, daemon_handle_t daemon_handle);
+	int cmmPPPoEShowClientCmd(u_int8_t *cmd_buf, u_int16_t cmd_len, u_int16_t *res_buf, u_int16_t *res_len);
 	int cmmPPPoEQueryProcess(char ** keywords, int tabStart, daemon_handle_t daemon_handle);
 
 #endif
-

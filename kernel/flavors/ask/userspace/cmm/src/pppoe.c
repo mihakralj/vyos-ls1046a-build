@@ -30,6 +30,117 @@
 	#define PPPIOCSFPPIDLE  _IOW('t', 53, struct ppp_idle)      /* Set the FPP stats */
 #endif
 
+static int cmmPPPoEFillCmdFromState(struct interface *itf, fpp_pppoe_cmd_t *cmd,
+				    int action, int use_programmed_state)
+{
+	cmd->action = action;
+	cmd->mode = 0;
+
+#if PPPOE_AUTO_ENABLE
+	if (itf->itf_flags & ITF_PPPOE_AUTO_MODE)
+		cmd->mode |= PPPOE_AUTO_MODE;
+#endif
+
+	if (____itf_get_name(itf, cmd->log_intf, sizeof(cmd->log_intf)) < 0)
+	{
+		cmm_print(DEBUG_ERROR, "%s: ____itf_get_name(%d) failed\n", __func__, itf->ifindex);
+		return -1;
+	}
+
+	if (use_programmed_state)
+	{
+		memcpy(cmd->macaddr, itf->fpp_prog_dst_macaddr, ETH_ALEN);
+		cmd->sessionid = itf->fpp_prog_session_id;
+
+		if (__itf_get_name(itf->fpp_prog_phys_ifindex, cmd->phy_intf,
+				   sizeof(cmd->phy_intf)) < 0)
+		{
+			cmm_print(DEBUG_ERROR, "%s: __itf_get_name(%d) failed\n",
+				  __func__, itf->fpp_prog_phys_ifindex);
+			return -1;
+		}
+	}
+	else
+	{
+		memcpy(cmd->macaddr, itf->dst_macaddr, ETH_ALEN);
+		cmd->sessionid = itf->session_id;
+
+		if (__itf_get_name(itf->phys_ifindex, cmd->phy_intf,
+				   sizeof(cmd->phy_intf)) < 0)
+		{
+			cmm_print(DEBUG_ERROR, "%s: __itf_get_name(%d) failed\n",
+				  __func__, itf->phys_ifindex);
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+static void cmmPPPoEStoreProgrammedState(struct interface *itf)
+{
+	itf->fpp_prog_phys_ifindex = itf->phys_ifindex;
+	itf->fpp_prog_session_id = itf->session_id;
+	memcpy(itf->fpp_prog_dst_macaddr, itf->dst_macaddr, ETH_ALEN);
+}
+
+static int cmmPPPoEUpdateSession(struct interface *itf, unsigned int session_id,
+				 const unsigned char *macaddr,
+				 const char *phys_ifname, int unit)
+{
+	char ifname[IFNAMSIZ];
+	int phys_ifindex;
+
+	if (!itf)
+		return -1;
+
+	if (!__itf_is_pppoe(itf))
+	{
+		cmm_print(DEBUG_ERROR, "%s::%d: not point to point interface %s\n",
+			  __func__, __LINE__,
+			  if_indextoname(itf->ifindex, ifname) ? ifname : "unknown");
+		return -1;
+	}
+
+	phys_ifindex = if_nametoindex(phys_ifname);
+	if (!phys_ifindex)
+	{
+		cmm_print(DEBUG_ERROR, "%s::%d: could not resolve physical device %s\n",
+			  __func__, __LINE__, phys_ifname);
+		return -1;
+	}
+
+	itf->itf_flags |= ITF_PPPOE_SESSION_UP;
+
+	if (unit >= 0)
+		itf->unit = unit;
+
+	session_id &= 0xFFFF;
+
+	if (itf->session_id != session_id)
+	{
+		itf->flags |= FPP_NEEDS_UPDATE;
+		itf->session_id = session_id;
+	}
+
+	if (memcmp(itf->dst_macaddr, macaddr, ETH_ALEN))
+	{
+		itf->flags |= FPP_NEEDS_UPDATE;
+		memcpy(itf->dst_macaddr, macaddr, ETH_ALEN);
+	}
+
+	if (itf->phys_ifindex != phys_ifindex)
+	{
+		itf->flags |= FPP_NEEDS_UPDATE;
+		itf->phys_ifindex = phys_ifindex;
+	}
+
+	cmm_print(DEBUG_INFO, "%s::%d: %s is pppoe via %s\n", __func__, __LINE__,
+		  if_indextoname(itf->ifindex, ifname) ? ifname : "unknown",
+		  phys_ifname);
+	return 0;
+}
+
 
 /*****************************************************************
 * __cmmGetPPPoE
@@ -41,11 +152,15 @@ int __cmmGetPPPoESession(FILE *fp, struct interface* ppp_itf)
 	char buf[256];
 	char phys_ifname[IFNAMSIZ];
 	char ifname[IFNAMSIZ];
+	char compat_phys_ifname[IFNAMSIZ];
 	unsigned char macaddr[ETH_ALEN];
+	unsigned char compat_macaddr[ETH_ALEN];
 	unsigned int session_id;
 	struct interface *itf;
+	unsigned int compat_session_id = 0;
+	int compat_entries = 0;
 	int ifindex;
-	int unit;
+	int unit = -1;
 
 	if (fseek(fp, 0, SEEK_SET))
 	{
@@ -56,7 +171,7 @@ int __cmmGetPPPoESession(FILE *fp, struct interface* ppp_itf)
 	while (fgets(buf, sizeof(buf), fp))
 	{
 		// Id   Address           Device     PPPDevice  Unit
-		if (sscanf(buf, "%04X%hhx:%hhx:%hhx:%hhx:%hhx:%hhx%16s%16s%d", &session_id, &macaddr[0], &macaddr[1], &macaddr[2], &macaddr[3], &macaddr[4], &macaddr[5], phys_ifname, ifname, &unit) == 10)
+		if (sscanf(buf, "%X%hhx:%hhx:%hhx:%hhx:%hhx:%hhx%16s%16s%d", &session_id, &macaddr[0], &macaddr[1], &macaddr[2], &macaddr[3], &macaddr[4], &macaddr[5], phys_ifname, ifname, &unit) == 10)
 		{
 			ifindex = if_nametoindex(ifname);
 
@@ -64,38 +179,40 @@ int __cmmGetPPPoESession(FILE *fp, struct interface* ppp_itf)
 			if (!itf)
 				continue;
 
-			if (!__itf_is_pppoe(itf))
+			cmmPPPoEUpdateSession(itf, session_id, macaddr, phys_ifname, unit);
+			continue;
+		}
+
+		/*
+		 * Newer kernels only export the lower device in /proc/net/pppoe:
+		 * "Id Address Device". Use that path only when the runtime state
+		 * contains a single PPPoE session, which matches the accepted
+		 * first-class scope.
+		 */
+		if (sscanf(buf, "%X%hhx:%hhx:%hhx:%hhx:%hhx:%hhx%16s",
+			   &session_id, &macaddr[0], &macaddr[1], &macaddr[2],
+			   &macaddr[3], &macaddr[4], &macaddr[5], phys_ifname) == 8)
+		{
+			if (compat_entries == 0)
 			{
-				cmm_print(DEBUG_ERROR, "%s::%d: not point to point interface %s\n", __func__, __LINE__, ifname);
-				continue;
+				compat_session_id = session_id;
+				memcpy(compat_macaddr, macaddr, ETH_ALEN);
+				strncpy(compat_phys_ifname, phys_ifname,
+					sizeof(compat_phys_ifname) - 1);
+				compat_phys_ifname[sizeof(compat_phys_ifname) - 1] = '\0';
 			}
 
-			if (!(itf->itf_flags & ITF_PPPOE_SESSION_UP))
-                        {
-                               itf->itf_flags  |= ITF_PPPOE_SESSION_UP;
-                        }
-
-
-			itf->unit = unit;
-			session_id &= 0xFFFF;
-
-			if (itf->session_id != session_id)
-			{
-				itf->flags |= FPP_NEEDS_UPDATE;
-				itf->session_id = session_id;
-			}
-
-			if (memcmp(itf->dst_macaddr, macaddr, 6))
-			{
-				itf->flags |= FPP_NEEDS_UPDATE;
-				memcpy(itf->dst_macaddr, macaddr, 6);
-			}
-
-			itf->phys_ifindex = if_nametoindex(phys_ifname);
-
-			cmm_print(DEBUG_INFO, "%s::%d: %s is pppoe\n", __func__, __LINE__, if_indextoname(itf->ifindex, ifname));
+			compat_entries++;
 		}
 	}
+
+	if (compat_entries == 1 && ppp_itf)
+		cmmPPPoEUpdateSession(ppp_itf, compat_session_id, compat_macaddr,
+				      compat_phys_ifname, -1);
+	else if (compat_entries > 1)
+		cmm_print(DEBUG_INFO,
+			  "%s::%d: multiple PPPoE sessions exported without logical interface names, leaving mapping unchanged\n",
+			  __func__, __LINE__);
 
 #if PPPOE_AUTO_ENABLE
         if ( !(ppp_itf->itf_flags & ITF_PPPOE_AUTO_MODE))
@@ -125,7 +242,6 @@ int cmmFePPPoEUpdate(FCI_CLIENT *fci_handle, int request, struct interface *itf)
 {
 	fpp_pppoe_cmd_t cmd;
 	short ret;
-	int action;
 
 	switch (request)
 	{
@@ -136,11 +252,25 @@ int cmmFePPPoEUpdate(FCI_CLIENT *fci_handle, int request, struct interface *itf)
 
 		if ((itf->flags & (FPP_PROGRAMMED | FPP_NEEDS_UPDATE)) == (FPP_PROGRAMMED | FPP_NEEDS_UPDATE))
 		{
-			cmm_print(DEBUG_ERROR, "%s: trying to update PPPoE interface(%d)\n", __func__, itf->ifindex);
-			goto err;
-		}
+			cmm_print(DEBUG_INFO, "%s: refreshing programmed PPPoE interface(%d)\n",
+				  __func__, itf->ifindex);
 
-		action = FPP_ACTION_REGISTER;
+			memset(&cmd, 0, sizeof(cmd));
+			if (cmmPPPoEFillCmdFromState(itf, &cmd, FPP_ACTION_DEREGISTER, 1) < 0)
+				goto err;
+
+			ret = fci_write(fci_handle, FPP_CMD_PPPOE_ENTRY,
+					sizeof(fpp_pppoe_cmd_t), (unsigned short *)&cmd);
+			if ((ret != FPP_ERR_OK) && (ret != FPP_ERR_PPPOE_ENTRY_NOT_FOUND))
+			{
+				cmm_print(DEBUG_ERROR,
+					  "%s: Error %d while refreshing old PPPoE interface(%d)\n",
+					  __func__, ret, itf->ifindex);
+				goto err;
+			}
+
+			itf->flags &= ~FPP_PROGRAMMED;
+		}
 
 		break;
 
@@ -148,46 +278,24 @@ int cmmFePPPoEUpdate(FCI_CLIENT *fci_handle, int request, struct interface *itf)
 		if (!(itf->flags & FPP_PROGRAMMED))
 			goto out;
 
-		action = FPP_ACTION_DEREGISTER;
-
 		break;
 	}
 
 	memset(&cmd, 0, sizeof(cmd));
-
-	cmd.action = action;
-	memcpy(cmd.macaddr, itf->dst_macaddr, 6);
-	cmd.sessionid = itf->session_id;
-
-#if PPPOE_AUTO_ENABLE
-        if( itf->itf_flags & ITF_PPPOE_AUTO_MODE)
-                cmd.mode |= PPPOE_AUTO_MODE;
-#endif
-
-	if (____itf_get_name(itf, cmd.log_intf, sizeof(cmd.log_intf)) < 0)
+	switch (request)
 	{
-		cmm_print(DEBUG_ERROR, "%s: ____itf_get_name(%d) failed\n", __func__, itf->ifindex);
-
-		goto err;
-	}
-
-	switch (action)
-	{
-	case FPP_ACTION_REGISTER:
-		cmm_print(DEBUG_COMMAND, "Send CMD_PPPOE_ENTRY ACTION_REGISTER\n");
-
-		if (__itf_get_name(itf->phys_ifindex, cmd.phy_intf, sizeof(cmd.phy_intf)) < 0)
-		{
-			cmm_print(DEBUG_ERROR, "%s: __itf_get_name(%d) failed\n", __func__, itf->phys_ifindex);
-
+	case ADD:
+		if (cmmPPPoEFillCmdFromState(itf, &cmd, FPP_ACTION_REGISTER, 0) < 0)
 			goto err;
-		}
+
+		cmm_print(DEBUG_COMMAND, "Send CMD_PPPOE_ENTRY ACTION_REGISTER\n");
 
 		ret = fci_write(fci_handle, FPP_CMD_PPPOE_ENTRY, sizeof(fpp_pppoe_cmd_t), (unsigned short *) &cmd);
 		if ((ret == FPP_ERR_OK) || (ret == FPP_ERR_PPPOE_ENTRY_ALREADY_REGISTERED))
 		{
 			itf->flags |= FPP_PROGRAMMED;
 			itf->flags &= ~FPP_NEEDS_UPDATE;
+			cmmPPPoEStoreProgrammedState(itf);
 		}
 		else
 		{
@@ -196,24 +304,10 @@ int cmmFePPPoEUpdate(FCI_CLIENT *fci_handle, int request, struct interface *itf)
 		}
 
 		break;
-#if 0
-	case ACTION_UPDATE:
-		cmm_print(DEBUG_COMMAND, "Send CMD_PPPOE_ENTRY ACTION_UPDATE\n");
 
-		ret = fci_write(fci_handle, CMD_PPPOE_ENTRY, sizeof(struct PPPoECommand), (unsigned short *) &cmd);
-		if (ret == FPP_ERR_OK)
-		{
-			itf->flags &= ~FPP_NEEDS_UPDATE;
-		}
-		else
-		{
-			cmm_print(DEBUG_ERROR, "%s: Error %d while sending CMD_PPPOE_ENTRY, ACTION_UPDATE\n", __func__, ret);
+	case REMOVE:
+		if (cmmPPPoEFillCmdFromState(itf, &cmd, FPP_ACTION_DEREGISTER, 1) < 0)
 			goto err;
-		}
-
-		break;
-#endif
-	case FPP_ACTION_DEREGISTER:
 	
 		cmm_print(DEBUG_COMMAND, "Send CMD_PPPOE_ENTRY ACTION_DEREGISTER\n");
 
@@ -221,6 +315,7 @@ int cmmFePPPoEUpdate(FCI_CLIENT *fci_handle, int request, struct interface *itf)
 		if ((ret == FPP_ERR_OK) || (ret == FPP_ERR_PPPOE_ENTRY_NOT_FOUND))
 		{
 			itf->flags &= ~FPP_PROGRAMMED;
+			itf->flags &= ~FPP_NEEDS_UPDATE;
 		}
 		else
 		{
@@ -231,7 +326,7 @@ int cmmFePPPoEUpdate(FCI_CLIENT *fci_handle, int request, struct interface *itf)
 		break;
 
 	default:
-		cmm_print(DEBUG_ERROR, "%s: unknown CMD_PPPOE_ENTRY action %x\n", __func__, action);
+		cmm_print(DEBUG_ERROR, "%s: unknown CMD_PPPOE_ENTRY request %x\n", __func__, request);
 		break;
 	}
 
@@ -280,6 +375,125 @@ int cmmPPPoELocalShow(struct cli_def * cli, const char *command, char *argv[], i
 	}
 
 	return CLI_OK;
+}
+
+int cmmPPPoEShowClientCmd(u_int8_t *cmd_buf, u_int16_t cmd_len, u_int16_t *res_buf, u_int16_t *res_len)
+{
+	cmmd_local_show_cmd_t *cmd = (cmmd_local_show_cmd_t *)cmd_buf;
+	cmmd_pppoe_local_show_res_t *res = (cmmd_pppoe_local_show_res_t *)res_buf;
+	struct list_head *entry;
+	struct interface *itf;
+	int i;
+	int skipcount;
+
+	memset(res, 0, sizeof(*res));
+	*res_len = sizeof(*res);
+
+	if (cmd_len < sizeof(*cmd))
+	{
+		res->rc = CMMD_ERR_WRONG_COMMAND_SIZE;
+		res->eof = 1;
+		return 0;
+	}
+
+	res->rc = CMMD_ERR_NOT_FOUND;
+	res->eof = 1;
+	skipcount = cmd->skip;
+
+	for (i = 0; i < ITF_HASH_TABLE_SIZE; i++)
+	{
+		__pthread_mutex_lock(&itf_table.lock);
+
+		for (entry = list_first(&itf_table.hash[i]); entry != &itf_table.hash[i]; entry = list_next(entry))
+		{
+			itf = container_of(entry, struct interface, list);
+
+			if (!__itf_is_pppoe(itf))
+				continue;
+
+			if (skipcount)
+			{
+				skipcount--;
+				continue;
+			}
+
+			res->rc = CMMD_ERR_OK;
+			res->eof = 0;
+			res->session_id = itf->session_id;
+			res->ifindex = itf->ifindex;
+			res->phys_ifindex = itf->phys_ifindex;
+			res->flags = itf->flags;
+			res->itf_flags = itf->itf_flags;
+			memcpy(res->dst_macaddr, itf->dst_macaddr, sizeof(res->dst_macaddr));
+			__pthread_mutex_unlock(&itf_table.lock);
+			return 0;
+		}
+
+		__pthread_mutex_unlock(&itf_table.lock);
+	}
+
+	return 0;
+}
+
+int cmmPPPoEShowProcess(char ** keywords, int tabStart, daemon_handle_t daemon_handle)
+{
+	union u_rxbuf rxbuf;
+	cmmd_local_show_cmd_t cmd = { 0 };
+	cmmd_pppoe_local_show_res_t *res = (cmmd_pppoe_local_show_res_t *)rxbuf.rcvBuffer;
+	char ifname[IFNAMSIZ];
+	char phys_ifname[IFNAMSIZ];
+	int rc;
+	int count = 0;
+
+	if (keywords[tabStart])
+	{
+		cmm_print(DEBUG_STDERR, "ERROR: show pppoe does not take extra arguments\n");
+		return -1;
+	}
+
+	while (1)
+	{
+		rc = cmmSendToDaemon(daemon_handle, CMMD_CMD_PPPOE_LOCAL_SHOW, &cmd, sizeof(cmd), rxbuf.rcvBuffer);
+		if (rc < (int)sizeof(*res))
+		{
+			cmm_print(DEBUG_STDERR, "ERROR: wrong response size %d for local PPPoE show\n", rc);
+			return -1;
+		}
+
+		if (res->rc == CMMD_ERR_NOT_FOUND)
+			break;
+
+		if (res->rc != CMMD_ERR_OK)
+		{
+			cmm_print(DEBUG_STDERR, "ERROR: local PPPoE show failed rc %u\n", res->rc);
+			return -1;
+		}
+
+		cmm_print(DEBUG_STDOUT,
+			"PPP Device: %s, Session ID: %u, MAC addr: %02X:%02X:%02X:%02X:%02X:%02X, Physical Device: %s, Flags: %x, itf_flags: %x\n",
+			if_indextoname(res->ifindex, ifname) ? ifname : "unknown",
+			res->session_id,
+			res->dst_macaddr[0],
+			res->dst_macaddr[1],
+			res->dst_macaddr[2],
+			res->dst_macaddr[3],
+			res->dst_macaddr[4],
+			res->dst_macaddr[5],
+			if_indextoname(res->phys_ifindex, phys_ifname) ? phys_ifname : "unknown",
+			res->flags,
+			res->itf_flags);
+		count++;
+		cmd.skip++;
+	}
+
+	if (!count)
+	{
+		cmm_print(DEBUG_STDERR, "ERROR: CMM local PPPoE table empty\n");
+		return 0;
+	}
+
+	cmm_print(DEBUG_STDOUT, "Total PPPoE Entries:%d\n", count);
+	return 0;
 }
 
 /*****************************************************************
@@ -476,4 +690,3 @@ void cmmPPPoEAutoKeepAlive(void)
         last_pppoe = now;
 }
 #endif
-

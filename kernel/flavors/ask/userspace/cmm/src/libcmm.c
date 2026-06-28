@@ -23,6 +23,10 @@
 #include "cmm.h"
 
 #define MAX_PATH 32
+#define CMM_COMMAND_TEXT_HDR_SIZE \
+	(sizeof(cmm_command_t) - sizeof(((cmm_command_t *)0)->msg_type) - sizeof(((cmm_command_t *)0)->buf))
+#define CMM_RESPONSE_TEXT_HDR_SIZE \
+	(sizeof(cmm_response_t) - sizeof(((cmm_response_t *)0)->msg_type) - sizeof(((cmm_response_t *)0)->buf))
 
 struct cmm_handle
 {
@@ -150,21 +154,33 @@ int cmm_send(cmm_handle_t *handle, cmm_command_t* cmd, int nonblocking)
 {
 	cmd->msg_type = handle->uniqueid;
 
-        return msgsnd(handle->queue_id_tx, 
-		      cmd, 
-		      sizeof(cmm_command_t) - sizeof(cmd->buf) + cmd->length, 
-		      nonblocking ? IPC_NOWAIT : 0);
+	if (cmd->length > CMM_BUF_SIZE) {
+		errno = EMSGSIZE;
+		return -1;
+	}
+
+	return msgsnd(handle->queue_id_tx,
+			cmd,
+			CMM_COMMAND_TEXT_HDR_SIZE + cmd->length,
+			nonblocking ? IPC_NOWAIT : 0);
 }
 
 int cmm_recv(cmm_handle_t *handle, cmm_response_t* res, int nonblocking)
 {
-        int len = msgrcv(handle->queue_id_rx, 
-			 res, 
-			 sizeof(cmm_response_t), 
-			 handle->uniqueid, 
-			 nonblocking ? IPC_NOWAIT : 0);
+	int len = msgrcv(handle->queue_id_rx,
+			res,
+			sizeof(*res) - sizeof(res->msg_type),
+			handle->uniqueid,
+			nonblocking ? IPC_NOWAIT : 0);
 	if (len < 0)
-                return len;
+		return len;
+
+	if (len < CMM_RESPONSE_TEXT_HDR_SIZE ||
+	    res->length > CMM_BUF_SIZE ||
+	    res->length > len - CMM_RESPONSE_TEXT_HDR_SIZE) {
+		errno = EMSGSIZE;
+		return -1;
+	}
 
 	if (res->daemon_errno) {
 		errno = res->daemon_errno;
@@ -173,4 +189,3 @@ int cmm_recv(cmm_handle_t *handle, cmm_response_t* res, int nonblocking)
 
 	return len;
 }
-

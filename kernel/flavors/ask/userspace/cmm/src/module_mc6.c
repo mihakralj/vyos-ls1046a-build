@@ -518,7 +518,7 @@ int cmmMc6SetProcess(char ** keywords, int tabStart, daemon_handle_t daemon_hand
 		}
 
 	}
-	if(!listenerCnt & !entryCmd->num_output)
+	if(!listenerCnt && !entryCmd->num_output)
 		listenerCnt = 1; //fall back to legacy design, single listener is configured.
 
 	entryCmd->num_output = listenerCnt;

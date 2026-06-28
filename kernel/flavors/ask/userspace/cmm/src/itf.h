@@ -178,8 +178,40 @@ static inline char *get_port_name(int port_id, char *buf, int buf_size)
 #define ITF_L2TP	(1 << 8)
 #define ITF_LRO		(1 << 9)
 
+#if defined(CMM_4RD_SUPPORT) && !defined(SAM_LEGACY)
+
+struct ip6_4rd_map_msg {
+	__u32 reset;
+	__u32 ifindex;
+	__be32 prefix;
+	__u16 prefixlen;
+	struct in6_addr relay_prefix;
+	struct in6_addr relay_suffix;
+	__u16 relay_prefixlen;
+	__u16 relay_suffixlen;
+	__u16 psid_offsetlen;
+	__u16 eabit_len;
+	__u16 entry_num;
+};
+#endif
+
 #define LINK_KIND_MACVLAN	"macvlan"
 #define LINK_KIND_GRE6		"ip6gretap"
+
+#ifndef SIOCGET6RD
+#define SIOCGET6RD	(SIOCDEVPRIVATE + 8)
+
+struct ip_tunnel_6rd {
+	struct in6_addr		prefix;
+	u_int32_t		relay_prefix;
+	u_int16_t		prefixlen;
+	u_int16_t		relay_prefixlen;
+};
+#endif
+
+#ifndef SIOCISETHIPV4TUNNEL
+#define SIOCISETHIPV4TUNNEL  (SIOCDEVPRIVATE + 15)
+#endif
 
 struct l2tp_itf_info {
 	u_int16_t local_tun_id;
@@ -233,12 +265,16 @@ struct interface {
 	unsigned int itf_flags; /* bit field with ITF_xxx flags */
 
 	int phys_ifindex;	/* physical interface index, if vlan/pppoe */
+	int fpp_prog_phys_ifindex; /* last programmed lower ifindex for vlan/pppoe */
 
 	u_int16_t session_id; /* session id if pppoe interface */
+	u_int16_t fpp_prog_session_id; /* last programmed PPPoE session id */
 	int		unit;				/* PPPoE unit number */
 	unsigned char dst_macaddr[ETH_ALEN]; /* peer mac address if pppoe interface */
+	unsigned char fpp_prog_dst_macaddr[ETH_ALEN]; /* last programmed PPPoE peer MAC */
 
 	u_int16_t vlan_id;	/* vlan id if vlan interface */
+	u_int16_t fpp_prog_vlan_id; /* last programmed VLAN id */
 
 	int ifindices[MAX_PORTS];	/* list of bridge ports if bridge interface */
 
@@ -250,6 +286,8 @@ struct interface {
 		struct ip6_tnl_parm tunnel_parm6;
 		struct ip_tunnel_parm tunnel_parm4;
 	};
+	struct ip_tunnel_6rd tunnel_parm6rd;
+
 	int tunnel_flags;
 	int tunnel_family;
 	int tunnel_enabled;
@@ -259,6 +297,11 @@ struct interface {
 #ifdef WIFI_ENABLE
 	struct wifi_ff_entry *wifi_if;
 #endif
+#ifdef SAM_LEGACY
+	u_int16_t sam_enable;
+#elif defined(CMM_4RD_SUPPORT)
+	struct list_head mr_list; /* netlink mapping rule information */
+#endif /* SAM_LEGACY */
 	/* If L2TP interface */
 	struct l2tp_itf_info l2tp;
 

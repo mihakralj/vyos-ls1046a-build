@@ -26,6 +26,27 @@ static u_int32_t route_id = 0;
 pthread_mutex_t rtMutex = PTHREAD_MUTEX_INITIALIZER;		/*mutex to prevent race condition on the route table*/
 extern unsigned short TunMtu;
 
+static int cmmRouteFlowHasDst(const char *func, struct flow *flow)
+{
+	if (!flow) {
+		cmm_print(DEBUG_ERROR, "%s: null route flow\n", func);
+		return 0;
+	}
+
+	if (flow->family != AF_INET && flow->family != AF_INET6) {
+		cmm_print(DEBUG_ERROR, "%s: invalid route family %d\n",
+				func, flow->family);
+		return 0;
+	}
+
+	if (!flow->dAddr) {
+		cmm_print(DEBUG_ERROR, "%s: route flow missing destination address\n", func);
+		return 0;
+	}
+
+	return 1;
+}
+
 static int cmmRouteNetlinkLookupFilter(const struct sockaddr_nl *nladdr, struct nlmsghdr *nlh, void *arg)
 {
 	struct RtEntry *route = arg;
@@ -82,6 +103,12 @@ static int cmmRouteNetlinkLookupFilter(const struct sockaddr_nl *nladdr, struct 
 
 	route->oifindex = *(int *)RTA_DATA(attr[RTA_OIF]);
 
+	if (!route->mtu) {
+		int if_mtu = __itf_get_mtu(route->oifindex);
+		if (if_mtu > 0)
+			route->mtu = if_mtu;
+	}
+
 	/* Always stop parsing on first match */
 	return RTNL_CB_STOP;
 
@@ -92,7 +119,7 @@ err:
 static int cmmRouteNetlinkLookup(struct flow *flow, struct RtEntry *route)
 {
 	struct rtnl_handle rth;
-	int ipAddrLen = IPADDRLEN(flow->family);
+	int ipAddrLen;
 	char iifname[IFNAMSIZ], oifname[IFNAMSIZ];
 	char buf1[INET6_ADDRSTRLEN], buf2[INET6_ADDRSTRLEN], buf3[INET6_ADDRSTRLEN];
 	char buf[256] __attribute__ ((aligned (4)));
@@ -100,6 +127,11 @@ static int cmmRouteNetlinkLookup(struct flow *flow, struct RtEntry *route)
 	struct rtmsg *rtm;
 
 	cmm_print(DEBUG_INFO, "%s\n", __func__);
+
+	if (!cmmRouteFlowHasDst(__func__, flow))
+		goto err0;
+
+	ipAddrLen = IPADDRLEN(flow->family);
 
 	if (cmm_rtnl_open(&rth, 0) < 0) {
 		cmm_print(DEBUG_ERROR, "%s::%d: cmm_rtnl_open() failed, %s\n", __func__, __LINE__, strerror(errno));
@@ -188,10 +220,15 @@ struct RtEntry *__cmmRouteFind(struct flow *flow)
 	struct list_head *entry;
 	char sbuf[INET6_ADDRSTRLEN], dbuf[INET6_ADDRSTRLEN];
 	int key;
-	int ipAddrLen = IPADDRLEN(flow->family);
+	int ipAddrLen;
 
-	cmm_print(DEBUG_INFO, "%s: Route(%s, %s)\n", __func__, inet_ntop(flow->family, flow->sAddr, sbuf, sizeof(sbuf)),
+	if (!cmmRouteFlowHasDst(__func__, flow))
+		return NULL;
+
+	cmm_print(DEBUG_INFO, "%s: Route(%s, %s)\n", __func__, flow->sAddr ? inet_ntop(flow->family, flow->sAddr, sbuf, sizeof(sbuf)) : "(any)",
 								inet_ntop(flow->family, flow->dAddr, dbuf, sizeof(dbuf)));
+
+	ipAddrLen = IPADDRLEN(flow->family);
 
 	key = HASH_RT(flow->family, flow->sAddr, flow->dAddr);
 
@@ -300,6 +337,12 @@ struct RtEntry *__cmmRouteAdd(struct flow *flow)
 	struct RtEntry *route;
 	char sbuf[INET6_ADDRSTRLEN], dbuf[INET6_ADDRSTRLEN];
 	int key;
+#ifdef SAM_LEGACY
+	struct interface *itf = NULL;
+#endif
+
+	if (!cmmRouteFlowHasDst(__func__, flow))
+		goto err0;
 
 	route = malloc(sizeof(struct RtEntry));
 	if (!route)
@@ -318,6 +361,11 @@ struct RtEntry *__cmmRouteAdd(struct flow *flow)
 		cmm_print(DEBUG_WARNING, "%s::%d: cmmRouteNetlinkLookup() failed\n", __func__, __LINE__);
 		goto err1;
 	}
+
+#ifdef SAM_LEGACY
+	if(((itf = __itf_get(route->oifindex)) != NULL) && (____itf_is_4o6_tunnel(itf)))
+               route->mtu = TunMtu;
+#endif
 
 	key = HASH_RT(route->family, route->sAddr, route->dAddr);
 
@@ -349,6 +397,9 @@ struct RtEntry *__cmmRouteGet(struct flow *flow)
 {
 	struct RtEntry *route;
 
+	if (!cmmRouteFlowHasDst(__func__, flow))
+		goto err;
+
 	route = __cmmRouteFind(flow);
 	if (!route)
 	{
@@ -370,7 +421,8 @@ err:
 *
 *
 ******************************************************************/
-struct fpp_rt *__cmmFPPRouteFind(int oifindex, int iifindex, const unsigned char *dst_mac, int mtu, const unsigned int *dst_addr, int dst_addr_len)
+struct fpp_rt *__cmmFPPRouteFind(int oifindex, int iifindex, int underlying_iifindex,
+	const unsigned char *dst_mac, int mtu, const unsigned int *dst_addr, int dst_addr_len)
 {
 	struct fpp_rt *route;
 	char mac[MAC_ADDRSTRLEN];
@@ -385,7 +437,8 @@ struct fpp_rt *__cmmFPPRouteFind(int oifindex, int iifindex, const unsigned char
 	while (entry != &fpp_rt_table[key])
 	{
 		route = container_of(entry, struct fpp_rt, list);
-		if (!memcmp(route->dst_mac, dst_mac, ETH_ALEN) && (route->oifindex == oifindex) && (route->iifindex == iifindex) &&
+		if (!memcmp(route->dst_mac, dst_mac, ETH_ALEN) && (route->oifindex == oifindex) &&
+		    (route->iifindex == iifindex) && (route->underlying_iifindex == underlying_iifindex) &&
 		    (route->mtu == mtu) && ((dst_addr_len == route->dst_addr_len) && (!dst_addr_len || !memcmp(route->dst_addr, dst_addr, dst_addr_len))))
 		{
 			goto found;
@@ -497,7 +550,7 @@ struct fpp_rt *__cmmFPPRouteGet(int oifindex, int iifindex, int underlying_iifin
 {
 	struct fpp_rt *route;
 
-	route = __cmmFPPRouteFind(oifindex, iifindex, dst_mac, mtu, dst_addr, dst_addr_len);
+	route = __cmmFPPRouteFind(oifindex, iifindex, underlying_iifindex, dst_mac, mtu, dst_addr, dst_addr_len);
 	if (!route)
 	{
 		route = __cmmFPPRouteAdd(oifindex, iifindex, underlying_iifindex, dst_mac, mtu, dst_addr, dst_addr_len);
@@ -644,13 +697,30 @@ int cmmRtShow(struct cli_def * cli, const char *command, char *argv[], int argc)
 static void __cmmCtTunnelRouteUpdate(FCI_CLIENT *fci_handle, struct ctTable *ctEntry, struct RtEntry *route, int dir)
 {
 	struct ct_route rt;
+	struct ct_route *ct_rt;
+	const char *dir_name;
 
 	cmm_print(DEBUG_INFO, "%s\n", __func__);
 
-	if (dir == ORIGINATOR)
+	if (dir == ORIGINATOR) {
 		rt = ctEntry->orig_tunnel;
-	else
+		ct_rt = &ctEntry->orig_tunnel;
+		dir_name = "originator tunnel";
+	} else {
 		rt = ctEntry->rep_tunnel;
+		ct_rt = &ctEntry->rep_tunnel;
+		dir_name = "replier tunnel";
+	}
+
+	if (!(route->flags & INVALID))
+		rt.route = NULL;
+
+	if ((rt.fpp_route || rt.route) &&
+	    __cmmRouteDeregister(fci_handle, &rt, dir_name) < 0) {
+		ct_rt->delete_pending = 1;
+		cmmCtRuntimeStateSetDeletePending(ctEntry);
+		return;
+	}
 
 	if (route->flags & INVALID)
 	{
@@ -658,6 +728,7 @@ static void __cmmCtTunnelRouteUpdate(FCI_CLIENT *fci_handle, struct ctTable *ctE
 		{
 			ctEntry->orig_tunnel.route = NULL;
 			ctEntry->orig_tunnel.fpp_route = NULL;
+			ctEntry->orig_tunnel.delete_pending = 0;
 
 			list_del(&ctEntry->list_by_orig_tunnel_route);
 		}
@@ -665,26 +736,23 @@ static void __cmmCtTunnelRouteUpdate(FCI_CLIENT *fci_handle, struct ctTable *ctE
 		{
 			ctEntry->rep_tunnel.route = NULL;
 			ctEntry->rep_tunnel.fpp_route = NULL;
+			ctEntry->rep_tunnel.delete_pending = 0;
 
 			list_del(&ctEntry->list_by_rep_tunnel_route);
 		}
 	}
 	else
 	{
-		rt.route = NULL;
-
-		if (dir == ORIGINATOR)
+		if (dir == ORIGINATOR) {
 			ctEntry->orig_tunnel.fpp_route = NULL;
-		else
+			ctEntry->orig_tunnel.delete_pending = 0;
+		} else {
 			ctEntry->rep_tunnel.fpp_route = NULL;
+			ctEntry->rep_tunnel.delete_pending = 0;
+		}
 	}
 
 	____cmmCtRegister(fci_handle, ctEntry);
-
-	if (dir == ORIGINATOR)
-	 	__cmmRouteDeregister(fci_handle, &rt, "originator tunnel");
-	else
-		__cmmRouteDeregister(fci_handle, &rt, "replier tunnel");
 }
 
 /*****************************************************************
@@ -696,6 +764,10 @@ static void __cmmCtRouteUpdate(FCI_CLIENT *fci_handle, struct ctTable *ctEntry, 
 {
 	struct ct_route rt;
 	struct ct_route tunnel_rt;
+	struct ct_route *ct_rt;
+	const char *dir_name;
+	const char *tunnel_dir_name;
+	int tunnel_route_linked = 0;
 
 	cmm_print(DEBUG_INFO, "%s\n", __func__);
 
@@ -703,25 +775,59 @@ static void __cmmCtRouteUpdate(FCI_CLIENT *fci_handle, struct ctTable *ctEntry, 
 	{
 		rt = ctEntry->orig;
 		tunnel_rt = ctEntry->orig_tunnel;
+		ct_rt = &ctEntry->orig;
+		dir_name = "originator";
+		tunnel_dir_name = "originator tunnel";
 
-		if (ctEntry->orig_tunnel.route)
+		tunnel_route_linked = ctEntry->orig_tunnel.route != NULL;
+		if (ctEntry->orig_tunnel.route || ctEntry->orig_tunnel.fpp_route)
 		{
+			if (__cmmRouteDeregister(fci_handle, &tunnel_rt, tunnel_dir_name) < 0) {
+				ctEntry->orig_tunnel.delete_pending = 1;
+				cmmCtRuntimeStateSetDeletePending(ctEntry);
+				return;
+			}
+
 			ctEntry->orig_tunnel.route = NULL;
 			ctEntry->orig_tunnel.fpp_route = NULL;
-			list_del(&ctEntry->list_by_orig_tunnel_route);
+			ctEntry->orig_tunnel.delete_pending = 0;
+			if (tunnel_route_linked)
+				list_del(&ctEntry->list_by_orig_tunnel_route);
 		}
 	}
 	else
 	{
 		rt = ctEntry->rep;
 		tunnel_rt = ctEntry->rep_tunnel;
+		ct_rt = &ctEntry->rep;
+		dir_name = "replier";
+		tunnel_dir_name = "replier tunnel";
 
-		if (ctEntry->rep_tunnel.route)
+		tunnel_route_linked = ctEntry->rep_tunnel.route != NULL;
+		if (ctEntry->rep_tunnel.route || ctEntry->rep_tunnel.fpp_route)
 		{			
+			if (__cmmRouteDeregister(fci_handle, &tunnel_rt, tunnel_dir_name) < 0) {
+				ctEntry->rep_tunnel.delete_pending = 1;
+				cmmCtRuntimeStateSetDeletePending(ctEntry);
+				return;
+			}
+
 			ctEntry->rep_tunnel.route = NULL;
 			ctEntry->rep_tunnel.fpp_route = NULL;
-			list_del(&ctEntry->list_by_rep_tunnel_route);
+			ctEntry->rep_tunnel.delete_pending = 0;
+			if (tunnel_route_linked)
+				list_del(&ctEntry->list_by_rep_tunnel_route);
 		}
+	}
+
+	if (!(route->flags & INVALID))
+		rt.route = NULL;
+
+	if ((rt.fpp_route || rt.route) &&
+	    __cmmRouteDeregister(fci_handle, &rt, dir_name) < 0) {
+		ct_rt->delete_pending = 1;
+		cmmCtRuntimeStateSetDeletePending(ctEntry);
+		return;
 	}
 
 	if (route->flags & INVALID)
@@ -730,35 +836,27 @@ static void __cmmCtRouteUpdate(FCI_CLIENT *fci_handle, struct ctTable *ctEntry, 
 		{
 			ctEntry->orig.route = NULL;
 			ctEntry->orig.fpp_route = NULL;
+			ctEntry->orig.delete_pending = 0;
 		}
 		else
 		{
 			ctEntry->rep.route = NULL;
 			ctEntry->rep.fpp_route = NULL;
+			ctEntry->rep.delete_pending = 0;
 		}
 	}
 	else
 	{
-		rt.route = NULL;
-
-		if (dir == ORIGINATOR)
+		if (dir == ORIGINATOR) {
 			ctEntry->orig.fpp_route = NULL;
-		else
+			ctEntry->orig.delete_pending = 0;
+		} else {
 			ctEntry->rep.fpp_route = NULL;
+			ctEntry->rep.delete_pending = 0;
+		}
 	}
 
 	____cmmCtRegister(fci_handle, ctEntry);
-
-	if (dir == ORIGINATOR)
-	{
-		__cmmRouteDeregister(fci_handle, &rt, "originator");
-		__cmmRouteDeregister(fci_handle, &tunnel_rt, "originator tunnel");
-	}
-	else
-	{
-		__cmmRouteDeregister(fci_handle, &rt, "replier");
-		__cmmRouteDeregister(fci_handle, &tunnel_rt, "replier tunnel");
-	}
 }
 
 /*****************************************************************
@@ -1065,6 +1163,7 @@ static int __cmmRouteIsTnlConn (int family, const unsigned int* daddr,
 	int addr_len = IPADDRLEN(family);
 	int rc = 0;
 	struct RtEntry* route;
+	unsigned short dport;
 
 	/* Conntracks pointing to a tunnel interface */
 	if (dir & ORIGINATOR)
@@ -1105,8 +1204,13 @@ static int __cmmRouteIsTnlConn (int family, const unsigned int* daddr,
 		if (!____itf_is_4o6_tunnel(itf))
 			goto free_itf;
 
-		/* Use tunnel remote address directly */
-		memcpy(tunnel_daddr, itf->tunnel_parm6.raddr.s6_addr32, 16);
+		if (dir & ORIGINATOR)
+			dport = nfct_get_attr_u16(ctEntry->ct, ATTR_ORIG_PORT_DST);
+		else
+			dport = nfct_get_attr_u16(ctEntry->ct, ATTR_REPL_PORT_DST);
+
+		if(getTunnel4rdAddress(itf, tunnel_daddr, *daddr , dport) < 0)
+			goto free_itf;
 
 		if (prefix_match)
 		{

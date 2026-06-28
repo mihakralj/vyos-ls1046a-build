@@ -54,6 +54,161 @@ extern unsigned int nf_conntrack_max;
 void * cb_data;
 int cb_status;
 
+static void cmmCtFormatIfindex(int ifindex, char *buf, size_t len)
+{
+	if (!ifindex) {
+		snprintf(buf, len, "-");
+		return;
+	}
+
+		if (!if_indextoname(ifindex, buf))
+			snprintf(buf, len, "if%d", ifindex);
+}
+
+static void cmmCtFormatDirBits(unsigned int dir, char *buf, size_t len)
+{
+	size_t used = 0;
+	unsigned int unknown;
+
+	if (!dir) {
+		snprintf(buf, len, "none");
+		return;
+	}
+
+	if (dir & ORIGINATOR)
+		used += snprintf(buf + used, len - used, "orig");
+
+	if (dir & REPLIER)
+		used += snprintf(buf + used, len - used, "%sreply", used ? "+" : "");
+
+	unknown = dir & ~(ORIGINATOR | REPLIER);
+	if (unknown)
+		snprintf(buf + used, len - used, "%s%#x", used ? "+" : "", unknown);
+}
+
+static const char *cmmCtRuntimeStateNameValue(int runtime_state)
+{
+	switch (runtime_state) {
+	case CMM_CT_RUNTIME_INSTALLED:
+		return "installed";
+	case CMM_CT_RUNTIME_REJECTED:
+		return "rejected";
+	case CMM_CT_RUNTIME_DELETE_PENDING:
+		return "delete-pending";
+	case CMM_CT_RUNTIME_FALLBACK:
+	default:
+			return "fallback";
+	}
+}
+
+const char *cmmCtRuntimeStateName(const struct ctTable *ctEntry)
+{
+	if (!ctEntry)
+		return "unknown";
+
+	return cmmCtRuntimeStateNameValue(ctEntry->runtime_state);
+}
+
+void cmmCtRuntimeStateSetFallback(struct ctTable *ctEntry)
+{
+	if (!ctEntry)
+		return;
+
+	ctEntry->runtime_state = CMM_CT_RUNTIME_FALLBACK;
+}
+
+void cmmCtRuntimeStateSetInstalled(struct ctTable *ctEntry)
+{
+	if (!ctEntry)
+		return;
+
+	ctEntry->runtime_state = CMM_CT_RUNTIME_INSTALLED;
+	ctEntry->last_program_rc = 0;
+}
+
+void cmmCtRuntimeStateSetRejected(struct ctTable *ctEntry, int program_rc)
+{
+	if (!ctEntry)
+		return;
+
+	ctEntry->runtime_state = CMM_CT_RUNTIME_REJECTED;
+	ctEntry->last_program_rc = program_rc;
+}
+
+void cmmCtRuntimeStateSetDeletePending(struct ctTable *ctEntry)
+{
+	if (!ctEntry)
+		return;
+
+	ctEntry->runtime_state = CMM_CT_RUNTIME_DELETE_PENDING;
+}
+
+static int cmmCtHasDeletePendingRoute(const struct ctTable *ctEntry)
+{
+	if (!ctEntry)
+		return 0;
+
+	return ctEntry->orig.delete_pending ||
+		ctEntry->rep.delete_pending ||
+		ctEntry->orig_tunnel.delete_pending ||
+		ctEntry->rep_tunnel.delete_pending;
+}
+
+static void cmmCtRuntimeStateSync(struct ctTable *ctEntry)
+{
+	int expected_dir;
+
+	if (!ctEntry)
+		return;
+
+	if (cmmCtHasDeletePendingRoute(ctEntry)) {
+		cmmCtRuntimeStateSetDeletePending(ctEntry);
+		return;
+	}
+
+	expected_dir = ctEntry->dir & ~ctEntry->dir_filter;
+
+	/*
+	 * Stage 3 proof must stay direction-honest: a conntrack is only
+	 * "installed" once every requested direction that was not explicitly
+	 * filtered still has hardware state behind it.
+	 */
+	if ((ctEntry->flags & FPP_PROGRAMMED) && expected_dir &&
+	    ((ctEntry->fpp_dir & expected_dir) == expected_dir))
+		cmmCtRuntimeStateSetInstalled(ctEntry);
+	else
+		cmmCtRuntimeStateSetFallback(ctEntry);
+}
+
+static int cmmCtIngressProgramIfindex(struct nf_conntrack *ct, int iif_attr,
+	int underlying_iif_attr)
+{
+	int iifindex;
+#if defined(LS1043)
+	int underlying_iif;
+	int is_bridge;
+#endif
+
+	if (!ct)
+		return 0;
+
+	iifindex = nfct_get_attr_u32(ct, iif_attr);
+
+#if defined(LS1043)
+	if (!iifindex)
+		return 0;
+
+	is_bridge = __itf_is_bridge(iifindex);
+	if (is_bridge > 0) {
+		underlying_iif = nfct_get_attr_u32(ct, underlying_iif_attr);
+		if (underlying_iif)
+			return underlying_iif;
+	}
+#endif
+
+	return iifindex;
+}
+
 
 /*****************************************************************
 * cmmCtSetPermanent
@@ -207,9 +362,25 @@ int cmmCtShow(struct cli_def * cli, const char *command, char *argv[], int argc)
 	struct ctTable * temp;
 	struct list_head *entry;
 	char buf[1024];
+	char orig_iif_name[IF_NAMESIZE];
+	char orig_ifindex_name[IF_NAMESIZE];
+	char orig_underlying_iif_name[IF_NAMESIZE];
+	char orig_oif_name[IF_NAMESIZE];
+	char orig_phys_oif_name[IF_NAMESIZE];
+	char rep_oif_name[IF_NAMESIZE];
+	char rep_phys_oif_name[IF_NAMESIZE];
+	char dir_name[32];
+	char fpp_dir_name[32];
+	char dir_filter_name[32];
+	char expected_dir_name[32];
+	char reject_detail[32];
 	int i, cpt = 0, nb_mult_ids = 0;
 	int len;
 	unsigned int timeout = 0, orig_timeout;
+	unsigned int orig_iif, orig_ifindex, orig_underlying_iif, orig_mark;
+	unsigned int expected_dir;
+	unsigned short orig_underlying_vid;
+	int orig_oif, orig_phys_oif, rep_oif, rep_phys_oif;
 
 	for (i = 0 ; i < CONNTRACK_HASH_TABLE_SIZE; i++)
 	{
@@ -282,7 +453,67 @@ int cmmCtShow(struct cli_def * cli, const char *command, char *argv[], int argc)
 					snprintf(buf + len, 1024 - len, " Reply FWD(sa_nr:1 H0:%04x)", temp->fEntryRepFwdSA->SAInfo.sagd);
 			}
 #endif /* IPSEC_FLOW_CACHE */
-			cli_print(cli, "%s, Flags: %x, n_id: %d, local-conn: %s", buf, temp->flags, temp->n_id, ((temp->flags & LOCAL_CONN) ? "yes" : "no"));
+			orig_iif = nfct_get_attr_u32(temp->ct, ATTR_ORIG_COMCERTO_FP_IIF);
+			orig_ifindex = nfct_get_attr_u32(temp->ct, ATTR_ORIG_COMCERTO_FP_IFINDEX);
+			orig_underlying_iif = nfct_get_attr_u32(temp->ct, ATTR_ORIG_COMCERTO_FP_UNDERLYING_IIF);
+			orig_underlying_vid = nfct_get_attr_u16(temp->ct, ATTR_ORIG_COMCERTO_FP_UNDERLYING_VID);
+			orig_mark = nfct_get_attr_u32(temp->ct, ATTR_ORIG_COMCERTO_FP_MARK);
+			orig_oif = temp->orig.route ? temp->orig.route->oifindex : 0;
+			orig_phys_oif = temp->orig.route ? temp->orig.route->phys_oifindex : 0;
+			rep_oif = temp->rep.route ? temp->rep.route->oifindex : 0;
+			rep_phys_oif = temp->rep.route ? temp->rep.route->phys_oifindex : 0;
+
+			cmmCtFormatIfindex(orig_iif, orig_iif_name, sizeof(orig_iif_name));
+			cmmCtFormatIfindex(orig_ifindex, orig_ifindex_name, sizeof(orig_ifindex_name));
+			cmmCtFormatIfindex(orig_underlying_iif, orig_underlying_iif_name, sizeof(orig_underlying_iif_name));
+			cmmCtFormatIfindex(orig_oif, orig_oif_name, sizeof(orig_oif_name));
+			cmmCtFormatIfindex(orig_phys_oif, orig_phys_oif_name, sizeof(orig_phys_oif_name));
+			cmmCtFormatIfindex(rep_oif, rep_oif_name, sizeof(rep_oif_name));
+			cmmCtFormatIfindex(rep_phys_oif, rep_phys_oif_name, sizeof(rep_phys_oif_name));
+			expected_dir = temp->dir & ~temp->dir_filter;
+			cmmCtFormatDirBits(temp->dir, dir_name, sizeof(dir_name));
+			cmmCtFormatDirBits(temp->fpp_dir, fpp_dir_name, sizeof(fpp_dir_name));
+			cmmCtFormatDirBits(temp->dir_filter, dir_filter_name, sizeof(dir_filter_name));
+			cmmCtFormatDirBits(expected_dir, expected_dir_name, sizeof(expected_dir_name));
+			reject_detail[0] = '\0';
+
+			if (temp->runtime_state == CMM_CT_RUNTIME_REJECTED)
+				snprintf(reject_detail, sizeof(reject_detail), ", last-fci-rc: %d", temp->last_program_rc);
+
+			cli_print(cli,
+				"%s, Flags: %x, n_id: %d, local-conn: %s, fp-state: %s%s, dir: %s(%#x), expected-dir: %s(%#x), fpp-dir: %s(%#x), dir-filter: %s(%#x), orig-route-id: %#x, rep-route-id: %#x, orig-iif: %s(%u), orig-ifindex: %s(%u), orig-underlying-iif: %s(%u), orig-underlying-vid: %u, orig-mark: %#x, orig-oif: %s(%d), orig-phys-oif: %s(%d), rep-oif: %s(%d), rep-phys-oif: %s(%d)",
+				buf,
+				temp->flags,
+				temp->n_id,
+				((temp->flags & LOCAL_CONN) ? "yes" : "no"),
+				cmmCtRuntimeStateName(temp),
+				reject_detail,
+				dir_name,
+				temp->dir,
+				expected_dir_name,
+				expected_dir,
+				fpp_dir_name,
+				temp->fpp_dir,
+				dir_filter_name,
+				temp->dir_filter,
+				temp->orig.fpp_route_id,
+				temp->rep.fpp_route_id,
+				orig_iif_name,
+				orig_iif,
+				orig_ifindex_name,
+				orig_ifindex,
+				orig_underlying_iif_name,
+				orig_underlying_iif,
+				orig_underlying_vid,
+				orig_mark,
+				orig_oif_name,
+				orig_oif,
+				orig_phys_oif_name,
+				orig_phys_oif,
+				rep_oif_name,
+				rep_oif,
+				rep_phys_oif_name,
+				rep_phys_oif);
 
 			if (temp->n_id > 1)
 				nb_mult_ids++;
@@ -304,6 +535,297 @@ int cmmCtShow(struct cli_def * cli, const char *command, char *argv[], int argc)
 	cli_print(cli, "%d connections with > 1 ids", nb_mult_ids);
 
 	return CLI_OK;
+}
+
+static void cmmCtShowResPopulate(FCI_CLIENT *fci_handle, const struct ctTable *ctEntry,
+	cmmd_ct_local_show_res_t *res)
+{
+	unsigned int timeout = 0;
+	unsigned int orig_timeout;
+	int family;
+
+	memset(res, 0, sizeof(*res));
+	res->rc = CMMD_ERR_OK;
+	res->eof = 0;
+
+	orig_timeout = nfct_get_attr_u32(ctEntry->ct, ATTR_TIMEOUT);
+	if (ctEntry->flags & FPP_PROGRAMMED)
+		cmmFeGetTimeout(fci_handle, (struct ctTable *)ctEntry, &timeout);
+
+	family = nfct_get_attr_u8(ctEntry->ct, ATTR_ORIG_L3PROTO);
+	res->family = family;
+	res->l4proto = nfct_get_attr_u8(ctEntry->ct, ATTR_ORIG_L4PROTO);
+
+	if (family == AF_INET)
+	{
+		memcpy(res->orig_src, nfct_get_attr(ctEntry->ct, ATTR_ORIG_IPV4_SRC), sizeof(u_int32_t));
+		memcpy(res->orig_dst, nfct_get_attr(ctEntry->ct, ATTR_ORIG_IPV4_DST), sizeof(u_int32_t));
+		memcpy(res->repl_src, nfct_get_attr(ctEntry->ct, ATTR_REPL_IPV4_SRC), sizeof(u_int32_t));
+		memcpy(res->repl_dst, nfct_get_attr(ctEntry->ct, ATTR_REPL_IPV4_DST), sizeof(u_int32_t));
+	}
+	else
+	{
+		memcpy(res->orig_src, nfct_get_attr(ctEntry->ct, ATTR_ORIG_IPV6_SRC), 16);
+		memcpy(res->orig_dst, nfct_get_attr(ctEntry->ct, ATTR_ORIG_IPV6_DST), 16);
+		memcpy(res->repl_src, nfct_get_attr(ctEntry->ct, ATTR_REPL_IPV6_SRC), 16);
+		memcpy(res->repl_dst, nfct_get_attr(ctEntry->ct, ATTR_REPL_IPV6_DST), 16);
+	}
+
+	res->orig_sport = nfct_get_attr_u16(ctEntry->ct, ATTR_ORIG_PORT_SRC);
+	res->orig_dport = nfct_get_attr_u16(ctEntry->ct, ATTR_ORIG_PORT_DST);
+	res->repl_sport = nfct_get_attr_u16(ctEntry->ct, ATTR_REPL_PORT_SRC);
+	res->repl_dport = nfct_get_attr_u16(ctEntry->ct, ATTR_REPL_PORT_DST);
+	res->timeout = timeout ? timeout : orig_timeout;
+	res->flags = ctEntry->flags;
+	res->n_id = ctEntry->n_id;
+	res->runtime_state = ctEntry->runtime_state;
+	res->last_program_rc = ctEntry->last_program_rc;
+	res->orig_iif = nfct_get_attr_u32(ctEntry->ct, ATTR_ORIG_COMCERTO_FP_IIF);
+	res->orig_ifindex = nfct_get_attr_u32(ctEntry->ct, ATTR_ORIG_COMCERTO_FP_IFINDEX);
+	res->orig_underlying_iif = nfct_get_attr_u32(ctEntry->ct, ATTR_ORIG_COMCERTO_FP_UNDERLYING_IIF);
+	res->orig_underlying_vid = nfct_get_attr_u16(ctEntry->ct, ATTR_ORIG_COMCERTO_FP_UNDERLYING_VID);
+	res->orig_mark = nfct_get_attr_u32(ctEntry->ct, ATTR_ORIG_COMCERTO_FP_MARK);
+	res->orig_oif = ctEntry->orig.route ? ctEntry->orig.route->oifindex : 0;
+	res->orig_phys_oif = ctEntry->orig.route ? ctEntry->orig.route->phys_oifindex : 0;
+	res->rep_oif = ctEntry->rep.route ? ctEntry->rep.route->oifindex : 0;
+	res->rep_phys_oif = ctEntry->rep.route ? ctEntry->rep.route->phys_oifindex : 0;
+	res->orig_route_id = ctEntry->orig.fpp_route_id;
+	res->rep_route_id = ctEntry->rep.fpp_route_id;
+	res->local_conn = !!(ctEntry->flags & LOCAL_CONN);
+	res->dir = ctEntry->dir;
+	res->fpp_dir = ctEntry->fpp_dir;
+	res->dir_filter = ctEntry->dir_filter;
+}
+
+int cmmCtShowClientCmd(FCI_CLIENT *fci_handle, u_int8_t *cmd_buf, u_int16_t cmd_len,
+	u_int16_t *res_buf, u_int16_t *res_len)
+{
+	cmmd_local_show_cmd_t *cmd = (cmmd_local_show_cmd_t *)cmd_buf;
+	cmmd_ct_local_show_res_t *res = (cmmd_ct_local_show_res_t *)res_buf;
+	struct list_head *entry;
+	struct ctTable *ctEntry;
+	int i;
+	int skipcount;
+
+	memset(res, 0, sizeof(*res));
+	*res_len = sizeof(*res);
+
+	if (cmd_len < sizeof(*cmd))
+	{
+		res->rc = CMMD_ERR_WRONG_COMMAND_SIZE;
+		res->eof = 1;
+		return 0;
+	}
+
+	res->rc = CMMD_ERR_NOT_FOUND;
+	res->eof = 1;
+	skipcount = cmd->skip;
+
+	for (i = 0; i < CONNTRACK_HASH_TABLE_SIZE; i++)
+	{
+#ifndef IPSEC_FLOW_CACHE
+		__pthread_mutex_lock(&sa_lock);
+#endif /* IPSEC_FLOW_CACHE */
+		__pthread_mutex_lock(&ctMutex);
+#ifdef IPSEC_FLOW_CACHE
+		__pthread_mutex_lock(&flowMutex);
+#endif /* IPSEC_FLOW_CACHE */
+
+		for (entry = list_first(&ct_table[i]); entry != &ct_table[i]; entry = list_next(entry))
+		{
+			ctEntry = container_of(entry, struct ctTable, list);
+
+			if (skipcount)
+			{
+				skipcount--;
+				continue;
+			}
+
+			cmmCtShowResPopulate(fci_handle, ctEntry, res);
+			goto out;
+		}
+
+#ifdef IPSEC_FLOW_CACHE
+		__pthread_mutex_unlock(&flowMutex);
+#endif /* IPSEC_FLOW_CACHE */
+		__pthread_mutex_unlock(&ctMutex);
+#ifndef IPSEC_FLOW_CACHE
+		__pthread_mutex_unlock(&sa_lock);
+#endif /* IPSEC_FLOW_CACHE */
+	}
+
+	return 0;
+
+out:
+#ifdef IPSEC_FLOW_CACHE
+	__pthread_mutex_unlock(&flowMutex);
+#endif /* IPSEC_FLOW_CACHE */
+	__pthread_mutex_unlock(&ctMutex);
+#ifndef IPSEC_FLOW_CACHE
+	__pthread_mutex_unlock(&sa_lock);
+#endif /* IPSEC_FLOW_CACHE */
+	return 0;
+}
+
+static void cmmCtShowResToConntrack(struct nf_conntrack *ctTemp,
+	const cmmd_ct_local_show_res_t *res)
+{
+	nfct_clear(ctTemp);
+	nfct_set_attr_u8(ctTemp, ATTR_ORIG_L3PROTO, res->family);
+	nfct_set_attr_u8(ctTemp, ATTR_REPL_L3PROTO, res->family);
+	nfct_set_attr_u8(ctTemp, ATTR_ORIG_L4PROTO, res->l4proto);
+	nfct_set_attr_u8(ctTemp, ATTR_REPL_L4PROTO, res->l4proto);
+
+	if (res->family == AF_INET)
+	{
+		nfct_set_attr(ctTemp, ATTR_ORIG_IPV4_SRC, res->orig_src);
+		nfct_set_attr(ctTemp, ATTR_ORIG_IPV4_DST, res->orig_dst);
+		nfct_set_attr(ctTemp, ATTR_REPL_IPV4_SRC, res->repl_src);
+		nfct_set_attr(ctTemp, ATTR_REPL_IPV4_DST, res->repl_dst);
+	}
+	else
+	{
+		nfct_set_attr(ctTemp, ATTR_ORIG_IPV6_SRC, res->orig_src);
+		nfct_set_attr(ctTemp, ATTR_ORIG_IPV6_DST, res->orig_dst);
+		nfct_set_attr(ctTemp, ATTR_REPL_IPV6_SRC, res->repl_src);
+		nfct_set_attr(ctTemp, ATTR_REPL_IPV6_DST, res->repl_dst);
+	}
+
+	nfct_set_attr_u16(ctTemp, ATTR_ORIG_PORT_SRC, res->orig_sport);
+	nfct_set_attr_u16(ctTemp, ATTR_ORIG_PORT_DST, res->orig_dport);
+	nfct_set_attr_u16(ctTemp, ATTR_REPL_PORT_SRC, res->repl_sport);
+	nfct_set_attr_u16(ctTemp, ATTR_REPL_PORT_DST, res->repl_dport);
+	nfct_set_attr_u32(ctTemp, ATTR_TIMEOUT, res->timeout);
+}
+
+int cmmCtShowProcess(char ** keywords, int tabStart, daemon_handle_t daemon_handle)
+{
+	union u_rxbuf rxbuf;
+	cmmd_local_show_cmd_t cmd = { 0 };
+	cmmd_ct_local_show_res_t *res = (cmmd_ct_local_show_res_t *)rxbuf.rcvBuffer;
+	struct nf_conntrack *ctTemp;
+	char buf[1024];
+	char orig_iif_name[IF_NAMESIZE];
+	char orig_ifindex_name[IF_NAMESIZE];
+	char orig_underlying_iif_name[IF_NAMESIZE];
+	char orig_oif_name[IF_NAMESIZE];
+	char orig_phys_oif_name[IF_NAMESIZE];
+	char rep_oif_name[IF_NAMESIZE];
+	char rep_phys_oif_name[IF_NAMESIZE];
+	char dir_name[32];
+	char fpp_dir_name[32];
+	char dir_filter_name[32];
+	char expected_dir_name[32];
+	char reject_detail[32];
+	unsigned int expected_dir;
+	int rc;
+	int count = 0;
+	int nb_mult_ids = 0;
+
+	if (keywords[tabStart])
+	{
+		cmm_print(DEBUG_STDERR, "ERROR: show connections does not take extra arguments\n");
+		return -1;
+	}
+
+	ctTemp = nfct_new();
+	if (!ctTemp)
+	{
+		cmm_print(DEBUG_STDERR, "ERROR: nfct_new() failed\n");
+		return -1;
+	}
+
+	while (1)
+	{
+		rc = cmmSendToDaemon(daemon_handle, CMMD_CMD_CT_LOCAL_SHOW, &cmd, sizeof(cmd), rxbuf.rcvBuffer);
+		if (rc < (int)sizeof(*res))
+		{
+			cmm_print(DEBUG_STDERR, "ERROR: wrong response size %d for local conntrack show\n", rc);
+			nfct_destroy(ctTemp);
+			return -1;
+		}
+
+		if (res->rc == CMMD_ERR_NOT_FOUND)
+			break;
+
+		if (res->rc != CMMD_ERR_OK)
+		{
+			cmm_print(DEBUG_STDERR, "ERROR: local conntrack show failed rc %u\n", res->rc);
+			nfct_destroy(ctTemp);
+			return -1;
+		}
+
+		cmmCtShowResToConntrack(ctTemp, res);
+		cmmCtFormatIfindex(res->orig_iif, orig_iif_name, sizeof(orig_iif_name));
+		cmmCtFormatIfindex(res->orig_ifindex, orig_ifindex_name, sizeof(orig_ifindex_name));
+		cmmCtFormatIfindex(res->orig_underlying_iif, orig_underlying_iif_name, sizeof(orig_underlying_iif_name));
+		cmmCtFormatIfindex(res->orig_oif, orig_oif_name, sizeof(orig_oif_name));
+		cmmCtFormatIfindex(res->orig_phys_oif, orig_phys_oif_name, sizeof(orig_phys_oif_name));
+		cmmCtFormatIfindex(res->rep_oif, rep_oif_name, sizeof(rep_oif_name));
+		cmmCtFormatIfindex(res->rep_phys_oif, rep_phys_oif_name, sizeof(rep_phys_oif_name));
+		expected_dir = res->dir & ~res->dir_filter;
+		cmmCtFormatDirBits(res->dir, dir_name, sizeof(dir_name));
+		cmmCtFormatDirBits(res->fpp_dir, fpp_dir_name, sizeof(fpp_dir_name));
+		cmmCtFormatDirBits(res->dir_filter, dir_filter_name, sizeof(dir_filter_name));
+		cmmCtFormatDirBits(expected_dir, expected_dir_name, sizeof(expected_dir_name));
+		reject_detail[0] = '\0';
+
+		if (res->runtime_state == CMM_CT_RUNTIME_REJECTED)
+			snprintf(reject_detail, sizeof(reject_detail), ", last-fci-rc: %d", res->last_program_rc);
+
+		nfct_snprintf(buf, sizeof(buf), ctTemp, NFCT_T_UNKNOWN, NFCT_O_PLAIN, NFCT_OF_SHOW_LAYER3);
+		cmm_print(DEBUG_STDOUT,
+			"%s, Flags: %x, n_id: %u, local-conn: %s, fp-state: %s%s, dir: %s(%#x), expected-dir: %s(%#x), fpp-dir: %s(%#x), dir-filter: %s(%#x), orig-route-id: %#x, rep-route-id: %#x, orig-iif: %s(%u), orig-ifindex: %s(%u), orig-underlying-iif: %s(%u), orig-underlying-vid: %u, orig-mark: %#x, orig-oif: %s(%d), orig-phys-oif: %s(%d), rep-oif: %s(%d), rep-phys-oif: %s(%d)\n",
+			buf,
+			res->flags,
+			res->n_id,
+			res->local_conn ? "yes" : "no",
+			cmmCtRuntimeStateNameValue(res->runtime_state),
+			reject_detail,
+			dir_name,
+			res->dir,
+			expected_dir_name,
+			expected_dir,
+			fpp_dir_name,
+			res->fpp_dir,
+			dir_filter_name,
+			res->dir_filter,
+			res->orig_route_id,
+			res->rep_route_id,
+			orig_iif_name,
+			res->orig_iif,
+			orig_ifindex_name,
+			res->orig_ifindex,
+			orig_underlying_iif_name,
+			res->orig_underlying_iif,
+			res->orig_underlying_vid,
+			res->orig_mark,
+			orig_oif_name,
+			res->orig_oif,
+			orig_phys_oif_name,
+			res->orig_phys_oif,
+			rep_oif_name,
+			res->rep_oif,
+			rep_phys_oif_name,
+			res->rep_phys_oif);
+
+		count++;
+		if (res->n_id > 1)
+			nb_mult_ids++;
+		cmd.skip++;
+	}
+
+	nfct_destroy(ctTemp);
+
+	if (!count)
+	{
+		cmm_print(DEBUG_STDERR, "ERROR: CMM runtime conntrack table empty\n");
+		return 0;
+	}
+
+	cmm_print(DEBUG_STDOUT, "%d connections printed\n", count);
+	cmm_print(DEBUG_STDOUT, "%d connections with > 1 ids\n", nb_mult_ids);
+	return 0;
 }
 
 /*****************************************************************
@@ -408,6 +930,7 @@ static struct ctTable *__cmmCtAdd(struct nf_conntrack *ct)
 	memset(newEntry, 0, sizeof(struct ctTable));
 
 	newEntry->ct = ct;
+	cmmCtRuntimeStateSetFallback(newEntry);
 
 	newEntry->family = nfct_get_attr_u8(ct, ATTR_ORIG_L3PROTO);
 
@@ -995,13 +1518,12 @@ err:
 *
 *
 ******************************************************************/
-static int __cmmFPPRouteRegister(struct ct_route *rt, const char *dir)
+static int __cmmFPPRouteRegister(FCI_CLIENT *fci_handle, struct ct_route *rt, const char *dir)
 {
 	const unsigned char *dst_mac;
 	int iifindex;
-
-	if (rt->fpp_route)
-		goto out;
+	int dst_addr_len;
+	const unsigned int *dst_addr;
 
 	if (rt->route->neighEntry)
 		dst_mac = rt->route->neighEntry->macAddr;
@@ -1014,12 +1536,48 @@ static int __cmmFPPRouteRegister(struct ct_route *rt, const char *dir)
 	else
 #endif
 		iifindex = rt->route->iifindex;
-		
+
+#if defined(LS1043)
+	/* Native IPsec CT entries are classified after SEC on a hardware path;
+	 * avoid programming CDX with transient logical ingress ifindices. */
+	if ((rt->route->flow_flags & FLOWFLAG_IPSEC_CT) &&
+	    rt->route->underlying_iifindex)
+		iifindex = rt->route->underlying_iifindex;
+#endif
+
+	if (rt->route->flow_flags & FLOWFLAG_FLOATING_TUNNEL) {
+		dst_addr = rt->route->dAddr;
+		dst_addr_len = IPADDRLEN(rt->route->family);
+	} else {
+		dst_addr = NULL;
+		dst_addr_len = 0;
+	}
+
+	/*
+	 * Bridge-backed routes can move between physical ports after neighbor/FDB
+	 * refresh. If that happens, drop the stale FE route object before
+	 * reacquiring a matching one so the conntrack cannot keep an old route id.
+	 */
+	if (rt->fpp_route &&
+	    ((rt->fpp_route->oifindex != rt->route->phys_oifindex) ||
+	     (rt->fpp_route->iifindex != iifindex) ||
+	     (rt->fpp_route->underlying_iifindex != rt->route->underlying_iifindex) ||
+	     memcmp(rt->fpp_route->dst_mac, dst_mac, ETH_ALEN) ||
+	     (rt->fpp_route->mtu != rt->route->mtu) ||
+	     (rt->fpp_route->dst_addr_len != dst_addr_len) ||
+	     (dst_addr_len && memcmp(rt->fpp_route->dst_addr, dst_addr, dst_addr_len)))) {
+		if (__cmmFPPRouteDeregister(fci_handle, rt->fpp_route, dir) < 0) {
+			rt->delete_pending = 1;
+			return -1;
+		}
+		rt->fpp_route = NULL;
+		rt->delete_pending = 0;
+	}
 
 	if (rt->route->flow_flags & FLOWFLAG_FLOATING_TUNNEL)
  		rt->fpp_route = __cmmFPPRouteGet(rt->route->phys_oifindex, iifindex, 
 						rt->route->underlying_iifindex, 
-						dst_mac, rt->route->mtu, rt->route->dAddr, IPADDRLEN(rt->route->family));
+						dst_mac, rt->route->mtu, dst_addr, dst_addr_len);
 	else
  		rt->fpp_route = __cmmFPPRouteGet(rt->route->phys_oifindex, iifindex, 
 						rt->route->underlying_iifindex, 
@@ -1041,7 +1599,6 @@ static int __cmmFPPRouteRegister(struct ct_route *rt, const char *dir)
 	rt->fpp_route->underlying_vlan_id = rt->route->underlying_vlan_id;
 #endif
 
-out:
 	return 0;
 
 err:
@@ -1054,7 +1611,7 @@ err:
 *
 *
 ******************************************************************/
-int __cmmRouteRegister(struct ct_route *rt, struct flow *flow, const char *dir)
+int __cmmRouteRegister(FCI_CLIENT *fci_handle, struct ct_route *rt, struct flow *flow, const char *dir)
 {
 	struct ctTable* ctEntry = NULL;
 
@@ -1106,7 +1663,7 @@ getRoute:
 		goto err;
 	}
 
-	if (__cmmFPPRouteRegister(rt, dir) < 0)
+	if (__cmmFPPRouteRegister(fci_handle, rt, dir) < 0)
 	{
 		goto err;
 	}
@@ -1122,8 +1679,9 @@ err:
 *
 *
 ******************************************************************/
-static int __cmmCtTunnelRouteRegister(struct ct_route *rt, struct ct_route *tunnel_rt,
-								struct flow *Saflow, const char *dir)
+static int __cmmCtTunnelRouteRegister(FCI_CLIENT *fci_handle, struct ct_route *rt, struct ct_route *tunnel_rt, unsigned int Daddr4o6,
+								unsigned int Dport4o6, struct flow *Saflow,
+								const char *dir)
 {
 	struct interface *itf = NULL;
 	unsigned int dAddrV4, dAddrV6[4];
@@ -1169,8 +1727,9 @@ static int __cmmCtTunnelRouteRegister(struct ct_route *rt, struct ct_route *tunn
 				if (!____itf_is_4o6_tunnel(itf))
 					goto out;
 
-				/* Use tunnel remote address directly */
-				memcpy(dAddrV6, itf->tunnel_parm6.raddr.s6_addr32, 16);
+
+				if(getTunnel4rdAddress(itf, dAddrV6, Daddr4o6,Dport4o6) < 0)
+					goto err0;
 
 				SET_FLOW_PARAMS(flow, (unsigned int *)itf->tunnel_parm6.laddr.s6_addr,
 						dAddrV6,itf->tunnel_parm6.proto, itf->tunnel_family,
@@ -1192,7 +1751,7 @@ static int __cmmCtTunnelRouteRegister(struct ct_route *rt, struct ct_route *tunn
 	flow.fwmark = 0;
 	flow.underlying_iif = 0;
 
-	if (__cmmRouteRegister(tunnel_rt, &flow, dir) < 0)
+	if (__cmmRouteRegister(fci_handle, tunnel_rt, &flow, dir) < 0)
 		goto err0;
 
 out:
@@ -1228,6 +1787,33 @@ void __cmmCheckFPPRouteIdUpdate(struct ct_route *rt, int *flags)
 	}
 }
 
+static int __cmmCtHasIPsecSA(const struct ctTable *ctEntry)
+{
+#ifndef IPSEC_FLOW_CACHE
+	return ctEntry->fEntryOrigFwdSA || ctEntry->fEntryOrigOutSA ||
+	       ctEntry->fEntryRepFwdSA || ctEntry->fEntryRepOutSA;
+#else
+	return 0;
+#endif
+}
+
+static int __cmmCtRouteUpdate(FCI_CLIENT *fci_handle,
+			      const struct ctTable *ctEntry,
+			      struct fpp_rt *fpp_route)
+{
+	if (!fpp_route)
+		return -1;
+
+	if (!__cmmCtHasIPsecSA(ctEntry))
+		return cmmFeRouteUpdate(fci_handle, ADD | UPDATE, fpp_route);
+
+	if (!(fpp_route->flags & FPP_PROGRAMMED) ||
+	    (fpp_route->flags & FPP_NEEDS_UPDATE))
+		return cmmFeRouteUpdate(fci_handle, ADD | UPDATE, fpp_route);
+
+	return __cmmFeRouteUpdate(fci_handle, FPP_ACTION_REGISTER, fpp_route);
+}
+
 /*****************************************************************
 * ____cmmCtLocalRegister
 *
@@ -1249,6 +1835,27 @@ int ____cmmCtLocalRegister(FCI_CLIENT *fci_handle, struct ctTable* ctEntry)
    if there is a matching SA for given SA_INFO, that SA pointer gets
    filled in fEntrySA
 */
+static void __cmm_ct_detach_SA(struct ctTable *ctEntry,
+						struct SATable **fEntrySA,
+						int replier_f)
+{
+	struct SATable *sa_entry = *fEntrySA;
+	struct list_head *list_node;
+	int list_index;
+
+	if (!sa_entry)
+		return;
+
+	list_index = replier_f * 2;
+	if (!(sa_entry->SAInfo.id.flags & NLKEY_SAFLAGS_INBOUND))
+		list_index ++;
+
+	list_node = &ctEntry->list_by_sa[list_index];
+	list_del(list_node);
+	*fEntrySA = NULL;
+	ctEntry->flags |= FPP_NEEDS_UPDATE;
+}
+
 static void __cmm_ct_get_SA(struct ctTable *ctEntry,
 						unsigned short *xfrm_handle,
 						struct SATable **fEntrySA,
@@ -1273,6 +1880,7 @@ static void __cmm_ct_get_SA(struct ctTable *ctEntry,
 			list_index ++;
 		list_node = &ctEntry->list_by_sa[list_index];
 		list_del(list_node);
+		ctEntry->flags |= FPP_NEEDS_UPDATE;
 		cmm_print(DEBUG_INFO,"%s(%d) XFRM SPI of existing sagd %x, sagd %x, list_node %p , index %d\n",
 			__FUNCTION__,__LINE__,sa_entry->SAInfo.sagd, *xfrm_handle, list_node, list_index);
 	}
@@ -1305,6 +1913,7 @@ static void __cmm_ct_get_SA(struct ctTable *ctEntry,
 		(sa_entry->SAInfo.id.flags & NLKEY_SAFLAGS_INBOUND) ? "Inbound" : "Outbound",
 		 list_node, list_index);
 	list_add(&sa_entry->ctentry_list[replier_f], list_node);
+	ctEntry->flags |= FPP_NEEDS_UPDATE;
 	*fEntrySA = sa_entry;
 	return;
 }
@@ -1329,6 +1938,10 @@ static void __cmm_ct_fill_orig_repl_SAs(struct ctTable *ctEntry,
 			(*fEntryFwdSA) ? (*fEntryFwdSA)->SAInfo.sagd : 0,
 			(*fEntryFwdSA) ? (*fEntryFwdSA)->SAInfo.id.spi : 0);
 	}	
+	else
+	{
+		__cmm_ct_detach_SA(ctEntry, fEntryFwdSA, replier_f);
+	}
 
 	/* filling OUT SA info */
 	if (xfrm_handle[MAX_SAs_INFO_PER_DIR_IN_NL_MSG])
@@ -1341,6 +1954,10 @@ static void __cmm_ct_fill_orig_repl_SAs(struct ctTable *ctEntry,
 			(*fEntryOutSA)? (*fEntryOutSA)->SAInfo.sagd : 0,
 			(*fEntryOutSA)? (*fEntryOutSA)->SAInfo.id.spi : 0);
 	}	
+	else
+	{
+		__cmm_ct_detach_SA(ctEntry, fEntryOutSA, replier_f);
+	}
 
 	return;
 }
@@ -1396,6 +2013,12 @@ static void cmm_ct_fill_ipsec_info(struct ctTable *ctEntry, uint16_t *orig_xfrm_
  */
 uint8_t cmmCheckIfCtEntryWithSGID(struct ctTable *ctEntry, unsigned short sgid)
 {
+#if defined(ASK_STAGE2_SKIP_XFRM_CONNTRACK_ABI)
+	(void)ctEntry;
+	(void)sgid;
+
+	return 0;
+#else
 	unsigned short	*orig_xfrm_handle, *rep_xfrm_handle;
 	struct nf_conntrack *ct = ctEntry->ct;
 	int ii;
@@ -1413,6 +2036,7 @@ uint8_t cmmCheckIfCtEntryWithSGID(struct ctTable *ctEntry, unsigned short sgid)
 		}
 	}
 	return 0;
+#endif
 }
 
 #endif /* IPSEC_FLOW_CACHE */
@@ -1439,6 +2063,7 @@ int ____cmmCtRegister(FCI_CLIENT *fci_handle, struct ctTable *ctEntry)
 	int key;
 	int rc;
  	int iif, rep_iif, iif_programmed;
+	int raw_iif, raw_rep_iif;
 	struct interface *itf,*out_itf;
 	struct RtEntry *route;
 	struct SATable *SAEntry = NULL;
@@ -1472,16 +2097,20 @@ int ____cmmCtRegister(FCI_CLIENT *fci_handle, struct ctTable *ctEntry)
 	if (dir & ORIGINATOR)
 	{
 		/* Check if originator packet passed through PRE_ROUTING hook */
-		iif = nfct_get_attr_u32(ct, ATTR_ORIG_COMCERTO_FP_IIF);
-		if (!iif)
+		raw_iif = nfct_get_attr_u32(ct, ATTR_ORIG_COMCERTO_FP_IIF);
+		if (!raw_iif)
 		{
 			ctEntry->flags |= LOCAL_CONN_ORIG;
 			rc = ____cmmCtLocalRegister(fci_handle,ctEntry);
 			goto end;
 		}
 
+		iif = cmmCtIngressProgramIfindex(ct,
+			ATTR_ORIG_COMCERTO_FP_IIF,
+			ATTR_ORIG_COMCERTO_FP_UNDERLYING_IIF);
 
- 		cmm_print(DEBUG_INFO,"orig iif is %x\n", iif);
+		cmm_print(DEBUG_INFO, "orig iif is %x, programmed ingress %x\n",
+			raw_iif, iif);
 
 		/* Check if conntrack is between two fpp interfaces */
 		iif_programmed = __itf_is_programmed(iif);
@@ -1493,8 +2122,17 @@ int ____cmmCtRegister(FCI_CLIENT *fci_handle, struct ctTable *ctEntry)
 		
 		// Is this CT secure ?
 #ifndef IPSEC_FLOW_CACHE
+#if defined(ASK_STAGE2_SKIP_XFRM_CONNTRACK_ABI)
+		/*
+		 * Stage 2 only needs wired runtime-state visibility. The vendor
+		 * conntrack XFRM-handle ABI is deferred to the later IPsec milestone.
+		 */
+		orig_xfrm_handle = NULL;
+		rep_xfrm_handle = NULL;
+#else
 		orig_xfrm_handle = (unsigned short *)nfct_get_attr(ct,ATTR_ORIG_COMCERTO_FP_XFRM_HANDLE);
 		rep_xfrm_handle = (unsigned short *)nfct_get_attr(ct,ATTR_REPL_COMCERTO_FP_XFRM_HANDLE);
+#endif
 		
 		if ((orig_xfrm_handle || rep_xfrm_handle))
 		{
@@ -1580,6 +2218,8 @@ int ____cmmCtRegister(FCI_CLIENT *fci_handle, struct ctTable *ctEntry)
 #endif
 		flow.fwmark = nfct_get_attr_u32(ct, ATTR_ORIG_COMCERTO_FP_MARK);
 		flow.flow_flags = 0;
+		if (ctEntry->fEntryOrigFwdSA || ctEntry->fEntryOrigOutSA)
+			flow.flow_flags |= FLOWFLAG_IPSEC_CT;
 
 #ifdef IPSEC_FLOW_CACHE
 		if (ctEntry->fEntryOrigOut && ctEntry->fEntryOrigOut->ignore_neigh)
@@ -1600,7 +2240,7 @@ int ____cmmCtRegister(FCI_CLIENT *fci_handle, struct ctTable *ctEntry)
 		}
 #endif /* IPSEC_FLOW_CACHE */
 
-		if (__cmmRouteRegister(&ctEntry->orig, &flow, "originator") < 0)
+		if (__cmmRouteRegister(fci_handle, &ctEntry->orig, &flow, "originator") < 0)
 		{
 			dir &= ~ORIGINATOR;
 			goto replier;
@@ -1619,8 +2259,8 @@ int ____cmmCtRegister(FCI_CLIENT *fci_handle, struct ctTable *ctEntry)
 		}
 		tmp = ctEntry->orig_tunnel.route;
 
-		rc = __cmmCtTunnelRouteRegister(&ctEntry->orig, &ctEntry->orig_tunnel,
-								(SAEntry)? &SAEntry->Sa_flow : NULL, "originator tunnel");
+		rc = __cmmCtTunnelRouteRegister(fci_handle, &ctEntry->orig, &ctEntry->orig_tunnel,dAddrOrig[0], dPortOrig,
+							(SAEntry)? &SAEntry->Sa_flow : NULL, "originator tunnel");
 
 		if (ctEntry->orig_tunnel.route && !tmp)
 		{
@@ -1641,16 +2281,20 @@ replier:
 	{
 		SAEntry = NULL;
 		/* Check if replier packet passed through PRE_ROUTING hook */
-		rep_iif = nfct_get_attr_u32(ct, ATTR_REPL_COMCERTO_FP_IIF);
-		if (!rep_iif)
+		raw_rep_iif = nfct_get_attr_u32(ct, ATTR_REPL_COMCERTO_FP_IIF);
+		if (!raw_rep_iif)
 		{
 			ctEntry->flags |= LOCAL_CONN_REPL;
 			rc = ____cmmCtLocalRegister(fci_handle,ctEntry);
 			goto end;
 		}
 
+		rep_iif = cmmCtIngressProgramIfindex(ct,
+			ATTR_REPL_COMCERTO_FP_IIF,
+			ATTR_REPL_COMCERTO_FP_UNDERLYING_IIF);
 
- 		cmm_print(DEBUG_INFO,"repl iif is %x\n", rep_iif);
+		cmm_print(DEBUG_INFO, "repl iif is %x, programmed ingress %x\n",
+			raw_rep_iif, rep_iif);
 		/* Check if conntrack is between two fpp interfaces */
 		if (!__itf_is_programmed(rep_iif))
 		{
@@ -1706,6 +2350,8 @@ replier:
 #endif
 		flow.fwmark = nfct_get_attr_u32(ct, ATTR_REPL_COMCERTO_FP_MARK);
 		flow.flow_flags = 0;
+		if (ctEntry->fEntryRepFwdSA || ctEntry->fEntryRepOutSA)
+			flow.flow_flags |= FLOWFLAG_IPSEC_CT;
 
 #ifdef IPSEC_FLOW_CACHE
 		if (ctEntry->fEntryRepOut && ctEntry->fEntryRepOut->ignore_neigh)
@@ -1726,7 +2372,7 @@ replier:
 		}
 #endif /* IPSEC_FLOW_CACHE */
 
-		if (__cmmRouteRegister(&ctEntry->rep, &flow, "replier") < 0)
+		if (__cmmRouteRegister(fci_handle, &ctEntry->rep, &flow, "replier") < 0)
 		{
 			dir &= ~REPLIER;
 			goto program;
@@ -1734,7 +2380,7 @@ replier:
 
 		tmp = ctEntry->rep_tunnel.route;
 
-		rc = __cmmCtTunnelRouteRegister(&ctEntry->rep, &ctEntry->rep_tunnel,
+		rc = __cmmCtTunnelRouteRegister(fci_handle, &ctEntry->rep, &ctEntry->rep_tunnel, dAddrRepl[0], dPortRepl,
 							(SAEntry)? &SAEntry->Sa_flow : NULL, "replier tunnel");
 
 		if (ctEntry->rep_tunnel.route && !tmp)
@@ -1754,7 +2400,7 @@ replier:
 program:
 	if (dir & ORIGINATOR)
 	{
-		rc = cmmFeRouteUpdate(fci_handle, ADD | UPDATE, ctEntry->orig.fpp_route);
+		rc = __cmmCtRouteUpdate(fci_handle, ctEntry, ctEntry->orig.fpp_route);
 		if (rc < 0)
 		{
 			dir &= ~ORIGINATOR;
@@ -1763,7 +2409,7 @@ program:
 
 		if (ctEntry->orig_tunnel.fpp_route)
 		{
-			rc = cmmFeRouteUpdate(fci_handle, ADD | UPDATE, ctEntry->orig_tunnel.fpp_route);
+			rc = __cmmCtRouteUpdate(fci_handle, ctEntry, ctEntry->orig_tunnel.fpp_route);
 			if (rc < 0)
 			{
 				dir &= ~ORIGINATOR;
@@ -1776,7 +2422,7 @@ program_replier:
 
 	if (dir & REPLIER)
 	{
-		rc = cmmFeRouteUpdate(fci_handle, ADD | UPDATE, ctEntry->rep.fpp_route);
+		rc = __cmmCtRouteUpdate(fci_handle, ctEntry, ctEntry->rep.fpp_route);
 		if (rc < 0)
 		{
 			dir &= ~REPLIER;
@@ -1785,7 +2431,7 @@ program_replier:
 
 		if (ctEntry->rep_tunnel.fpp_route)
 		{
-			rc = cmmFeRouteUpdate(fci_handle, ADD | UPDATE, ctEntry->rep_tunnel.fpp_route);
+			rc = __cmmCtRouteUpdate(fci_handle, ctEntry, ctEntry->rep_tunnel.fpp_route);
 			if (rc < 0)
 			{
 				dir &= ~REPLIER;
@@ -1816,6 +2462,8 @@ program_ct:
 end:
 	if (rc == 0)
 	{
+		cmmCtRuntimeStateSync(ctEntry);
+
 		/* check if permananet is not already set */
 		if (!(ctEntry->flags & SENT_PERMANENT_INFO))
 		{
@@ -1830,6 +2478,13 @@ end:
 	}
 
 	cmm_print(DEBUG_ERROR, "%s: CtAdd failed\n", __func__);
+	if (ctEntry->runtime_state != CMM_CT_RUNTIME_REJECTED)
+	{
+		if (cmmCtHasDeletePendingRoute(ctEntry))
+			cmmCtRuntimeStateSetDeletePending(ctEntry);
+		else
+			cmmCtRuntimeStateSetFallback(ctEntry);
+	}
 
 	return -1;
 
@@ -1861,11 +2516,15 @@ void __cmmCtUpdateWithRoute(FCI_CLIENT *fci_handle, struct RtEntry *route)
 		if (ctEntry->orig.route == route)
 		{
 			fpp_route = ctEntry->orig.fpp_route;
+			if (__cmmFPPRouteDeregister(fci_handle, fpp_route, "originator") < 0) {
+				ctEntry->orig.delete_pending = 1;
+				cmmCtRuntimeStateSetDeletePending(ctEntry);
+				continue;
+			}
 			ctEntry->orig.fpp_route = NULL;
+			ctEntry->orig.delete_pending = 0;
 
 			____cmmCtRegister(fci_handle, ctEntry);
-
-			__cmmFPPRouteDeregister(fci_handle, fpp_route, "originator");
 		}
 	}
 
@@ -1877,11 +2536,15 @@ void __cmmCtUpdateWithRoute(FCI_CLIENT *fci_handle, struct RtEntry *route)
 		if (ctEntry->rep.route == route)
 		{
 			fpp_route = ctEntry->rep.fpp_route;
+			if (__cmmFPPRouteDeregister(fci_handle, fpp_route, "replier") < 0) {
+				ctEntry->rep.delete_pending = 1;
+				cmmCtRuntimeStateSetDeletePending(ctEntry);
+				continue;
+			}
 			ctEntry->rep.fpp_route = NULL;
+			ctEntry->rep.delete_pending = 0;
 
 			____cmmCtRegister(fci_handle, ctEntry);
-
-			__cmmFPPRouteDeregister(fci_handle, fpp_route, "replier");
 		}
 	}
 
@@ -1893,11 +2556,15 @@ void __cmmCtUpdateWithRoute(FCI_CLIENT *fci_handle, struct RtEntry *route)
 		if (ctEntry->orig_tunnel.route == route)
 		{
 			fpp_route = ctEntry->orig_tunnel.fpp_route;
+			if (__cmmFPPRouteDeregister(fci_handle, fpp_route, "originator tunnel") < 0) {
+				ctEntry->orig_tunnel.delete_pending = 1;
+				cmmCtRuntimeStateSetDeletePending(ctEntry);
+				continue;
+			}
 			ctEntry->orig_tunnel.fpp_route = NULL;
+			ctEntry->orig_tunnel.delete_pending = 0;
 
 			____cmmCtRegister(fci_handle, ctEntry);
-
-			__cmmFPPRouteDeregister(fci_handle, fpp_route, "originator tunnel");
 		}
         }
 
@@ -1910,11 +2577,15 @@ void __cmmCtUpdateWithRoute(FCI_CLIENT *fci_handle, struct RtEntry *route)
 		if (ctEntry->rep_tunnel.route == route)
 		{
 			fpp_route = ctEntry->rep_tunnel.fpp_route;
+			if (__cmmFPPRouteDeregister(fci_handle, fpp_route, "replier tunnel") < 0) {
+				ctEntry->rep_tunnel.delete_pending = 1;
+				cmmCtRuntimeStateSetDeletePending(ctEntry);
+				continue;
+			}
 			ctEntry->rep_tunnel.fpp_route = NULL;
+			ctEntry->rep_tunnel.delete_pending = 0;
 
 			____cmmCtRegister(fci_handle, ctEntry);
-
-			__cmmFPPRouteDeregister(fci_handle, fpp_route, "replier tunnel");
 		}
 	}
 }
@@ -2056,12 +2727,12 @@ static void __cmmCtUpdate(struct nf_conntrack *ct, struct nfct_handle *handle, s
 *
 *
 ******************************************************************/
-void __cmmFPPRouteDeregister(FCI_CLIENT *fci_handle, struct fpp_rt *fpp_route, const char *dir)
+int __cmmFPPRouteDeregister(FCI_CLIENT *fci_handle, struct fpp_rt *fpp_route, const char *dir)
 {
 	int rc = 0;
 
 	if (!fpp_route)
-		return;
+		return 0;
 
 	cmm_print(DEBUG_INFO, "%s: removing %s route entry\n", __func__, dir);
 
@@ -2072,9 +2743,11 @@ void __cmmFPPRouteDeregister(FCI_CLIENT *fci_handle, struct fpp_rt *fpp_route, c
 
 	/* In case of a deregister error don't free the route entry, we still need to track the fpp state */
 	if (rc < 0)
-		fpp_route->count--;
+		return rc;
 	else
 		__cmmFPPRoutePut(fpp_route);
+
+	return 0;
 }
 
 /*****************************************************************
@@ -2109,12 +2782,16 @@ void ____cmmRouteDeregister(struct RtEntry *route, const char *dir)
 *
 *
 ******************************************************************/
-void __cmmRouteDeregister(FCI_CLIENT *fci_handle, struct ct_route *rt, const char *dir)
+int __cmmRouteDeregister(FCI_CLIENT *fci_handle, struct ct_route *rt, const char *dir)
 {
 	if (rt->fpp_route)
 	{
-		__cmmFPPRouteDeregister(fci_handle, rt->fpp_route, dir);
+		if (__cmmFPPRouteDeregister(fci_handle, rt->fpp_route, dir) < 0) {
+			rt->delete_pending = 1;
+			return -1;
+		}
 		rt->fpp_route = NULL;
+		rt->delete_pending = 0;
 	}
 
 	if (rt->route)
@@ -2126,6 +2803,8 @@ void __cmmRouteDeregister(FCI_CLIENT *fci_handle, struct ct_route *rt, const cha
 	{
 		cmm_print(DEBUG_WARNING, "%s: %s route entry not found\n", __func__, dir);
 	}
+
+	return 0;
 }
 
 /*****************************************************************
@@ -2135,20 +2814,27 @@ void __cmmRouteDeregister(FCI_CLIENT *fci_handle, struct ct_route *rt, const cha
 ******************************************************************/
 int  ____cmmCtLocalDeregister(FCI_CLIENT *fci_handle, FCI_CLIENT *fci_key_handle, struct ctTable *ctEntry)
 {
+	int rc = 0;
+
 	/* As the local route is attached to ctEntry for local connections */
 	__pthread_mutex_lock(&rtMutex);
 	__pthread_mutex_lock(&neighMutex);
 
-	__cmmRouteDeregister(fci_handle, &ctEntry->orig, "originator");
-	__cmmRouteDeregister(fci_handle, &ctEntry->rep, "replier");
+	if (__cmmRouteDeregister(fci_handle, &ctEntry->orig, "originator") < 0)
+		rc = -1;
+	if (__cmmRouteDeregister(fci_handle, &ctEntry->rep, "replier") < 0)
+		rc = -1;
 
-	lro_socket_close(fci_handle, fci_key_handle, ctEntry);
+	if (!rc)
+		lro_socket_close(fci_handle, fci_key_handle, ctEntry);
 
 	__pthread_mutex_unlock(&neighMutex);
 	__pthread_mutex_unlock(&rtMutex);
 
+	if (rc)
+		cmmCtRuntimeStateSetDeletePending(ctEntry);
 
-	return 0;
+	return rc;
 }
 
 /*****************************************************************
@@ -2172,19 +2858,25 @@ int ____cmmCtDeregister(FCI_CLIENT *fci_handle, FCI_CLIENT *fci_key_handle, stru
 	__pthread_mutex_lock(&neighMutex);
 
 	//Try to remove route entries
-	__cmmRouteDeregister(fci_handle, &ctEntry->rep, "replier");
-	__cmmRouteDeregister(fci_handle, &ctEntry->orig, "originator");
+	if (__cmmRouteDeregister(fci_handle, &ctEntry->rep, "replier") < 0)
+		rc = -1;
+	if (__cmmRouteDeregister(fci_handle, &ctEntry->orig, "originator") < 0)
+		rc = -1;
 
 	if (ctEntry->rep_tunnel.route)
 	{
-		__cmmRouteDeregister(fci_handle, &ctEntry->rep_tunnel, "replier tunnel");
-		list_del(&ctEntry->list_by_rep_tunnel_route);
+		if (__cmmRouteDeregister(fci_handle, &ctEntry->rep_tunnel, "replier tunnel") < 0)
+			rc = -1;
+		else
+			list_del(&ctEntry->list_by_rep_tunnel_route);
 	}
 
 	if (ctEntry->orig_tunnel.route)
 	{
-		__cmmRouteDeregister(fci_handle, &ctEntry->orig_tunnel, "originator tunnel");
-		list_del(&ctEntry->list_by_orig_tunnel_route);
+		if (__cmmRouteDeregister(fci_handle, &ctEntry->orig_tunnel, "originator tunnel") < 0)
+			rc = -1;
+		else
+			list_del(&ctEntry->list_by_orig_tunnel_route);
 	}
 
 	__pthread_mutex_unlock(&neighMutex);
@@ -2231,8 +2923,10 @@ int ____cmmCtDeregister(FCI_CLIENT *fci_handle, FCI_CLIENT *fci_key_handle, stru
 ct_remove:
 	if (!rc)
 		__cmmCtRemove(ctEntry);
-	else
+	else {
+		cmmCtRuntimeStateSetDeletePending(ctEntry);
 		cmm_print(DEBUG_ERROR, "%s: DeRegister failed\n", __func__);
+	}
 
 	return rc;
 }
@@ -2333,6 +3027,10 @@ static int cmmCtCheckCtCb(enum nf_conntrack_msg_type type,
 	if((nfct_get_attr_u32(ct, ATTR_ID) != nfct_get_attr_u32(ct_local, ATTR_ID))
 	|| __cmmCtIsInv(ct, ct_local))
 		cb_status = -1;
+	else
+		/* Keep CMM's event object aligned with the kernel object,
+		 * including ASK/XFRM metadata filled after the original event. */
+		nfct_copy(ct_local, ct, NFCT_CP_OVERRIDE);
 
 	return NFCT_CB_CONTINUE;
 }
@@ -2343,6 +3041,7 @@ static int cmmCheckUpdateEvent(struct nfct_handle *handle, struct nf_conntrack *
 
 	cb_data = ct;
 
+	cb_status = -1;
 	if (nfct_query(handle, NFCT_Q_GET, (void*)ct) < 0) {
 		if (errno == ENOENT) {
 			rc = -1;
@@ -2569,6 +3268,16 @@ static int __cmmCtCatch(struct cmm_ct *ctx, enum nf_conntrack_msg_type type, str
 		case NFCT_T_NEW:
 		case NFCT_T_UPDATE:
 			status = nfct_get_attr_u32(ct, ATTR_STATUS);
+
+			if (nfct_attr_is_set(ct, ATTR_TCP_STATE)) {
+				state = nfct_get_attr_u8(ct, ATTR_TCP_STATE);
+				if ((state == TCP_CONNTRACK_ESTABLISHED) &&
+				    (status & IPS_ASSURED)) {
+					if (cmmCheckUpdateEvent(ctx->get_handle, ct) < 0)
+						goto exit;
+					status = nfct_get_attr_u32(ct, ATTR_STATUS);
+				}
+			}
 
 			ctEntry = __cmmCtFind(ct);
 
@@ -2910,6 +3619,7 @@ static void *cmmCtThread(void *data)
 {
 	struct cmm_ct *ctx = data;
 	fd_set set;
+	sigset_t timer_mask;
 	int fd_ct, fd_fci;
 #if !defined(IPSEC_SUPPORT_DISABLED)
 	int fd_key;
@@ -2922,6 +3632,15 @@ static void *cmmCtThread(void *data)
 	int rc;
 
 	cmm_print(DEBUG_INFO, "%s: pid %d\n", __func__, getpid());
+
+	sigemptyset(&timer_mask);
+	sigaddset(&timer_mask, SIGALRM);
+	rc = pthread_sigmask(SIG_UNBLOCK, &timer_mask, NULL);
+	if (rc != 0)
+	{
+		cmm_print(DEBUG_ERROR, "%s: pthread_sigmask(SIG_UNBLOCK) failed %s\n", __func__, strerror(rc));
+		goto out;
+	}
 
 #if !defined(IPSEC_SUPPORT_DISABLED)
 	fd_key = fci_fd(ctx->fci_key_catch_handle);
@@ -3343,7 +4062,8 @@ int cmmCtInit(struct cmm_ct *ctx)
 
 	if (nfnl_set_nonblocking_mode((struct nfnl_handle *)nfct_nfnlh(ctx->catch_handle)) < 0)
 	{
-		cmm_print(DEBUG_ERROR, "%s:%d nfnl_set_nonblocking_mode() failed %s\n", __func__, __LINE__, strerror(errno));
+		cmm_print(DEBUG_ERROR, "%s:%d nfnl_set_nonblocking_mode() failed %s\n",
+			  __func__, __LINE__, strerror(errno));
 		goto err14;
 	}
 
@@ -4014,4 +4734,3 @@ help:
 	return -1;
 }
 #endif /*C2000_DPI*/
-

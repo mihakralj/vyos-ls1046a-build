@@ -33,6 +33,13 @@ int dumpmem(int argc, char *argv[]);
 #define ERR_CODE_PREFIX_LENGTH (8) /* FPP_ERR_ */
 #endif
 
+#ifdef NEW_IPC
+#define CMM_COMMAND_TEXT_HDR_SIZE \
+	(sizeof(cmm_command_t) - sizeof(((cmm_command_t *)0)->msg_type) - sizeof(((cmm_command_t *)0)->buf))
+#define CMM_RESPONSE_TEXT_HDR_SIZE \
+	(sizeof(cmm_response_t) - sizeof(((cmm_response_t *)0)->msg_type) - sizeof(((cmm_response_t *)0)->buf))
+#endif
+
 char * getErrorString(unsigned short error)
 {
 	switch (error)
@@ -146,6 +153,9 @@ char * getErrorString(unsigned short error)
 	caseretstr(FPP_ERR_SOCK_UPDATE_ERR);
 #endif //LS1043
 
+	/* ------------------------------- NATPT ---------------------------------*/
+	caseretstr(FPP_ERR_NATPT_UNKNOWN_CONNECTION);
+
 	/* ------------------------------- RTP -----------------------------------*/
 	caseretstr(FPP_ERR_RTP_STATS_MAX_ENTRIES);
 	caseretstr(FPP_ERR_RTP_STATS_STREAMID_ALREADY_USED);
@@ -240,6 +250,7 @@ void cmmClientPrintHelp()
 									"\tsocket: Manage Socket module\n"
 									"\tsocket6: Manage V6 socket module\n"
 									"\trtp: Manage RTP Relay module\n"
+									"\tnatpt: Manage NAT-PT module\n"
 									"\tsa_query_timer: Manage IPsec SA query timer module\n"
 #ifdef C2000_DPI
 									"\tdpi: Manage DPI Enable/disable\n"
@@ -252,13 +263,18 @@ void cmmClientPrintHelp()
 									"\tff: manage fast forwarding control\n"
 									"\tipsec: manage ipsec configurations\n"
 									"\tvoicebuf: manage voicebuf control \n"
-									"\tfrag: manage ipv4/ipv6 fragmentation configurations\n");
+									"\tfrag: manage ipv4/ipv6 fragmentation configurations\n"		
+									"\t4rd-id-conversion: Enable/ Disable IPv4 header Identification conversion,\n"
+									"\t\tfor 4rd interfaces\n");
 	cmm_print(DEBUG_STDOUT, "\nCommand usage: show <module_name> [option ...]\n"
 									"\trx: show RX module (ICC, Bridging  ...)\n"
 									"\tqm: show QM module (QOS, Rate Limiting....)\n"
 									"\tmc6:	show IPv6 Multicast module\n"
 									"\tmc4:	show  IPv4 Multicast module\n"
-                                    					"\tstat: show Statistics module\n"
+	                                    					"\tstat: show Statistics module\n"
+									"\tconnections: show local conntrack runtime-state\n"
+									"\tpppoe: show local PPPoE session state\n"
+									"\tvlan: show local VLAN state\n"
 									"\troute: show Extended Route module\n"
 									"\tsocket: show Socket module\n"
 									"\tsocket6: show V6 socket module\n");
@@ -288,6 +304,7 @@ void cmmClientPrintHelp()
 									"\tsocket: IPV4 sockets\n"
 									"\trtcp: RTP relay statistics\n"
 									"\trtpstats: RTP statistics for Fast Forwarded connections\n"
+				  					"\tnatpt: NAT-PT Entries\n"
 				  					"\tl2flows: L2 and L3-4 flows Entries\n"
 									"\tmacvlan: Mac-vlan interfaces\n"
 									"\ttunnels: tunnel interfaces\n");
@@ -310,9 +327,14 @@ int cmmSendToDaemon(daemon_handle_t handle, unsigned short commandCode, void * d
 	cmm_command_t cmd;
 	cmm_response_t res;
 
+	if (dataSize < 0 || dataSize > CMM_BUF_SIZE || (dataSize && !dataToSend)) {
+		errno = EMSGSIZE;
+		return -1;
+	}
 	cmd.func = commandCode;
 	cmd.length = dataSize;
-	memcpy(cmd.buf, dataToSend, dataSize);
+	if (dataSize)
+		memcpy(cmd.buf, dataToSend, dataSize);
 
 	if(cmm_send(handle, &cmd, 0) < 0)
 	{
@@ -574,6 +596,11 @@ int cmmClientProcessCmd(char * command, int argc, char ** argv, daemon_handle_t 
 			if (cmmRTPStatsSetProcess(keywords, 2, daemon_handle))
 				return -1;
 		}
+		else if (strcasecmp(keywords[1], "natpt") == 0)
+		{
+			if (cmmNATPTSetProcess(keywords, 2, daemon_handle))
+				return -1;
+		}
 		else if (strcasecmp(keywords[1], "voicebuf") == 0)
 		{
 			if (cmmVoiceBufSetProcess(cpt - 2, &keywords[2], daemon_handle))
@@ -587,6 +614,11 @@ int cmmClientProcessCmd(char * command, int argc, char ** argv, daemon_handle_t 
 		else if (strcasecmp(keywords[1], "bridge") == 0)
 		{
 			if (cmmBridgeControlProcess(keywords, 2, daemon_handle))
+				return -1;
+		}		
+		else if (strcasecmp(keywords[1], "4rd-id-conversion") == 0)
+		{
+			if (cmm4rdIdConvSetProcess(keywords, 2, (cpt - 2), daemon_handle))
 				return -1;
 		}
 		else
@@ -621,17 +653,32 @@ int cmmClientProcessCmd(char * command, int argc, char ** argv, daemon_handle_t 
 			if(cmmMc4ShowProcess(keywords, 2, daemon_handle))
 				return -1;
 		}
-		else if (strcasecmp(keywords[1], "stat") == 0)
-		{
-			/*Call Stat process function*/
-			if(cmmStatShowProcess(keywords, 2, daemon_handle))
-				return -1;
-		}
-		else if (strcasecmp(keywords[1], "expt") == 0)
-		{
-			/*Call QM process function*/
-			if(cmmExptShowProcess(keywords, 2, daemon_handle))
-				return -1;
+			else if (strcasecmp(keywords[1], "stat") == 0)
+			{
+				/*Call Stat process function*/
+				if(cmmStatShowProcess(keywords, 2, daemon_handle))
+					return -1;
+			}
+			else if (strcasecmp(keywords[1], "connections") == 0)
+			{
+				if (cmmCtShowProcess(keywords, 2, daemon_handle))
+					return -1;
+			}
+			else if (strcasecmp(keywords[1], "pppoe") == 0)
+			{
+				if (cmmPPPoEShowProcess(keywords, 2, daemon_handle))
+					return -1;
+			}
+			else if (strcasecmp(keywords[1], "vlan") == 0)
+			{
+				if (cmmVlanShowProcess(keywords, 2, daemon_handle))
+					return -1;
+			}
+			else if (strcasecmp(keywords[1], "expt") == 0)
+			{
+				/*Call QM process function*/
+				if(cmmExptShowProcess(keywords, 2, daemon_handle))
+					return -1;
 		}
 		else if (strcasecmp(keywords[1], "route") == 0)
 		{
@@ -784,6 +831,11 @@ int cmmClientProcessCmd(char * command, int argc, char ** argv, daemon_handle_t 
                         if(cmmTnlQueryProcess(keywords, 2, daemon_handle))
                         		return -1;
                 }
+		else if (strcasecmp(keywords[1], "natpt") == 0)
+		{
+		  		if(cmmNATPTQueryProcess(keywords, 2, daemon_handle))
+		  				return -1;
+  		}
 #ifdef AUTO_BRIDGE
 		else if (strcasecmp(keywords[1], "l2flows") == 0)
 		{
@@ -1008,14 +1060,38 @@ static void *cmmDaemonThread(void *data)
 		memset(&cmd, 0, sizeof(cmd));
 		memset(&res, 0, sizeof(res));
 
-		// msgrcv expects size msgsz as length after msgtype.
-		msgrcv(ctx->queueIdRx, &cmd, (sizeof(cmd) - sizeof(cmd.msg_type)), 0, 0);
-		res.msg_type = cmd.msg_type;
-		dataSize = cmd.length;
-		dataRcvSize = sizeof(res.buf);
-		func = cmd.func;
-		rx_buf = cmd.buf;
-		tx_buf = res.buf;
+		/* msgrcv expects msgsz as the length after msg_type. Keep the
+		 * receive return code so EINTR can be retried cleanly.
+		 */
+		dataSize = msgrcv(ctx->queueIdRx, &cmd,
+				(sizeof(cmd) - sizeof(cmd.msg_type)),
+				0, MSG_NOERROR);
+		if (dataSize >= 0) {
+			res.msg_type = cmd.msg_type;
+			func = cmd.func;
+
+			if (dataSize < CMM_COMMAND_TEXT_HDR_SIZE) {
+				cmm_print(DEBUG_ERROR, "%s: command message too short(%d)\n",
+					__func__, dataSize);
+				rc = -1;
+				dataRcvSize = 0;
+				goto answer;
+			}
+
+			if (cmd.length > CMM_BUF_SIZE ||
+			    cmd.length > dataSize - CMM_COMMAND_TEXT_HDR_SIZE) {
+				cmm_print(DEBUG_ERROR, "%s: invalid command payload length(%u/%d)\n",
+					__func__, cmd.length, dataSize);
+				rc = -1;
+				dataRcvSize = 0;
+				goto answer;
+			}
+
+			dataSize = cmd.length;
+			dataRcvSize = sizeof(res.buf);
+			rx_buf = cmd.buf;
+			tx_buf = res.buf;
+		}
 #else
 		dataSize = msgrcv(ctx->queueIdRx, &msg, sizeof(msg.buffer), 0, 0);
 		dataRcvSize = sizeof(msg.buffer);
@@ -1029,11 +1105,12 @@ static void *cmmDaemonThread(void *data)
 			if ((errno == EIDRM) || (errno == ENOENT))
 				break;
 
+			if (errno == EINTR)
+				continue;
+
 			// If we have an error receiving a msg, do nothing and continue waiting for a new one
 			cmm_print(DEBUG_WARNING, "%s: msgrcv() failed, %s\n", __func__, strerror(errno));
-			rc = -1;
-			dataRcvSize = 0;
-			goto answer;
+			continue;
 		}
 
 		if (dataSize > CMM_BUF_SIZE) { 
@@ -1100,11 +1177,14 @@ answer:
 		}
 
 		res.length = dataRcvSize;
-		if (msgsnd(ctx->queueIdTx, &res, sizeof(res) - sizeof(res.buf) + res.length, 0) < 0)
+		if (msgsnd(ctx->queueIdTx, &res,
+				CMM_RESPONSE_TEXT_HDR_SIZE + res.length, 0) < 0)
 #else
 		if (msgsnd(ctx->queueIdTx, &msg, dataRcvSize, 0) < 0)
 #endif
 		{
+			if (errno == EINTR)
+				goto answer;
 			cmm_print(DEBUG_WARNING, "%s: msgsnd() failed, %s\n", __func__, strerror(errno));
 			break;
 		}
@@ -1256,12 +1336,15 @@ static int cmmCommandParse(struct cmm_daemon *ctx, int function_code, u_int8_t *
 
 	switch (function_code)
 	{
-        case CMMD_CMD_IPV4_CONNTRACK:
-        case CMMD_CMD_IPV6_CONNTRACK:
-		return cmmCtHandle(ctx->fci_handle, function_code, cmd_buf, cmd_len, res_buf, res_len);
+	        case CMMD_CMD_IPV4_CONNTRACK:
+	        case CMMD_CMD_IPV6_CONNTRACK:
+			return cmmCtHandle(ctx->fci_handle, function_code, cmd_buf, cmd_len, res_buf, res_len);
 
-	case CMMD_CMD_IPV4_FF_CONTROL:
-		return cmmFeFFControl(ctx->fci_handle, cmd_buf, cmd_len, res_buf, res_len);
+		case CMMD_CMD_CT_LOCAL_SHOW:
+			return cmmCtShowClientCmd(ctx->fci_handle, cmd_buf, cmd_len, res_buf, res_len);
+
+		case CMMD_CMD_IPV4_FF_CONTROL:
+			return cmmFeFFControl(ctx->fci_handle, cmd_buf, cmd_len, res_buf, res_len);
 
 	// Multicast commands, we accept but we need to do a local process
 	case CMMD_CMD_MC6_MULTICAST:
@@ -1275,17 +1358,27 @@ static int cmmCommandParse(struct cmm_daemon *ctx, int function_code, u_int8_t *
 
 	/* Tunnel commands */
 	case CMMD_CMD_TUNNEL_ADD:
-	case CMMD_CMD_TUNNEL_DEL:
+	case CMMD_CMD_TUNNEL_DEL: 
  	case CMMD_CMD_TUNNEL_SHOW:
+	case CMMD_CMD_TUNNEL_IDCONV_psid:
+#ifdef SAM_LEGACY	
+ 	case CMMD_CMD_TUNNEL_SAMREADY:
+#endif
 		return tunnel_daemon_msg_recv(ctx->fci_handle, ctx->fci_key_handle, function_code, cmd_buf, cmd_len, res_buf, res_len);
 
-        case CMMD_CMD_PPPOE_RELAY_ADD:
-        case CMMD_CMD_PPPOE_RELAY_REMOVE:
-		return cmmRelayProcessClientCmd(ctx->fci_handle, function_code, cmd_buf, cmd_len, res_buf, res_len);
+	        case CMMD_CMD_PPPOE_RELAY_ADD:
+	        case CMMD_CMD_PPPOE_RELAY_REMOVE:
+			return cmmRelayProcessClientCmd(ctx->fci_handle, function_code, cmd_buf, cmd_len, res_buf, res_len);
 
-	case CMMD_CMD_VLAN_ENTRY:
-		return cmmVlanProcessClientCmd(ctx->fci_handle, function_code, cmd_buf, cmd_len, res_buf, res_len);
-#if defined (LS1043)
+		case CMMD_CMD_PPPOE_LOCAL_SHOW:
+			return cmmPPPoEShowClientCmd(cmd_buf, cmd_len, res_buf, res_len);
+
+		case CMMD_CMD_VLAN_ENTRY:
+			return cmmVlanProcessClientCmd(ctx->fci_handle, function_code, cmd_buf, cmd_len, res_buf, res_len);
+
+		case CMMD_CMD_VLAN_LOCAL_SHOW:
+			return cmmVlanShowClientCmd(cmd_buf, cmd_len, res_buf, res_len);
+	#if defined (LS1043)
 	case CMMD_CMD_IPR_V4_STATS:
 	case CMMD_CMD_IPR_V6_STATS:
 		return cmmIprStatsProcessClientCmd(ctx->fci_handle, function_code, cmd_buf, cmd_len, res_buf, res_len);
@@ -1324,6 +1417,9 @@ static int cmmCommandParse(struct cmm_daemon *ctx, int function_code, u_int8_t *
 	case FPP_CMD_RX_L2BRIDGE_QUERY_STATUS:
 	case FPP_CMD_RX_L2BRIDGE_QUERY_ENTRY:
 		return cmmL2BridgeProcessClientCmd(ctx->fci_handle, function_code, cmd_buf, cmd_len, res_buf, res_len); 
+
+	case FPP_CMD_NATPT_OPEN:
+		return cmmNATPTOpenProcessClientCmd(ctx->fci_handle, cmd_buf, cmd_len, res_buf, res_len);
 
 	// Special processing for QM Reset and Scheduler config (need to notify eth driver)
 	
@@ -1452,6 +1548,8 @@ static int cmmCommandParse(struct cmm_daemon *ctx, int function_code, u_int8_t *
 	case FPP_CMD_RTP_STATS_DISABLE:
 	case FPP_CMD_RTP_STATS_QUERY:
 	case FPP_CMD_RTP_STATS_DTMF_PT:
+	case FPP_CMD_NATPT_CLOSE:
+	case FPP_CMD_NATPT_QUERY:
 	case FPP_CMD_PKTCAP_IFSTATUS:
 	case FPP_CMD_PKTCAP_SLICE:
 	case FPP_CMD_PKTCAP_FLF:
@@ -1459,6 +1557,7 @@ static int cmmCommandParse(struct cmm_daemon *ctx, int function_code, u_int8_t *
 	case FPP_CMD_MACVLAN_ENTRY:
 	case FPP_CMD_TUNNEL_QUERY:
 	case FPP_CMD_TUNNEL_QUERY_CONT:
+	case FPP_CMD_TUNNEL_4rd_ID_CONV_dport:
 		goto FCI_CMD;
 
 	// Other commands, we refuse

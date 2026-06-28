@@ -660,7 +660,7 @@ int __socket_open(FCI_CLIENT *fci_handle, struct socket *s)
 					.flow_flags = FLOWFLAG_SOCKET_ROUTE,
 				};
 
-		if (__cmmRouteRegister(&s->rt, &flow, "socket") < 0)
+		if (__cmmRouteRegister(fci_handle, &s->rt, &flow, "socket") < 0)
 		{
 			goto program;
 		}

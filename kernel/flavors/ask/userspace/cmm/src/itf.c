@@ -26,6 +26,15 @@
 #include <linux/if_vlan.h>
 #include <net/if_arp.h>
 
+/* 4RD (IPv4 Residual Deployment) netlink constants - NXP ASK extension.
+ * These are defined in the ASK-patched kernel but not in glibc headers. */
+#ifdef CMM_4RD_SUPPORT
+#ifndef RTM_NEW4RD
+#define RTM_NEW4RD	97
+#define RTM_DEL4RD	98
+#define RTM_GET4RD	99
+#endif
+#endif
 #include "itf.h"
 #include "pppoe.h"
 #include "ffbridge.h"
@@ -210,6 +219,213 @@ found:
 	return addr;
 }
 
+#if defined(CMM_4RD_SUPPORT) && !defined(SAM_LEGACY)
+static struct map_rule * mr_add(struct interface *itf)
+{
+       struct map_rule *mr;
+
+       mr = malloc(sizeof(struct map_rule));
+       if (!mr)
+       {
+               cmm_print(DEBUG_ERROR, "%s::%d: malloc() failed\n", __func__, __LINE__);
+               goto err;
+       }
+       memset(mr, 0, sizeof(struct map_rule));
+
+       list_add(&itf->mr_list, &mr->list);
+
+       cmm_print(DEBUG_INFO, "%s: map rule added\n", __func__);
+
+       return mr;
+
+err:
+       return NULL;
+}
+
+
+static void  mr_debug( struct interface * itf)
+{
+       struct list_head *entry, *next_entry;
+       struct map_rule *mr;
+
+
+       for (entry = list_first(&itf->mr_list); next_entry = list_next(entry), entry != &itf->mr_list; entry = next_entry)
+       {
+               mr = container_of(entry, struct map_rule, list);
+       cmm_print(DEBUG_ERROR, "%03d : %03d.%03d.%03d.%03d/%02d %02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x/%03d %02x%02x     :%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x/%03d eabit:%03d offset:%03d \n",
+                                       mr->rule.entry_num,
+                                       (ntohl(mr->rule.prefix) >> 24) & 0xff,
+                                       (ntohl(mr->rule.prefix) >> 16) & 0xff,
+                                       (ntohl(mr->rule.prefix) >>  8) & 0xff,
+                                       ntohl(mr->rule.prefix) & 0xff,
+                                       mr->rule.prefixlen,
+                                       mr->rule.relay_prefix.s6_addr[0],
+                                       mr->rule.relay_prefix.s6_addr[1],
+                                       mr->rule.relay_prefix.s6_addr[2],
+                                       mr->rule.relay_prefix.s6_addr[3],
+                                       mr->rule.relay_prefix.s6_addr[4],
+                                       mr->rule.relay_prefix.s6_addr[5],
+                                       mr->rule.relay_prefix.s6_addr[6],
+                                       mr->rule.relay_prefix.s6_addr[7],
+                                       mr->rule.relay_prefix.s6_addr[8],
+                                       mr->rule.relay_prefix.s6_addr[9],
+                                       mr->rule.relay_prefix.s6_addr[10],
+                                       mr->rule.relay_prefix.s6_addr[11],
+                                       mr->rule.relay_prefix.s6_addr[12],
+                                       mr->rule.relay_prefix.s6_addr[13],
+                                       mr->rule.relay_prefix.s6_addr[14],
+                                       mr->rule.relay_prefix.s6_addr[15],
+                                       mr->rule.relay_prefixlen,
+                                       mr->rule.relay_suffix.s6_addr[0],
+                                       mr->rule.relay_suffix.s6_addr[1],
+                                       mr->rule.relay_suffix.s6_addr[2],
+                                       mr->rule.relay_suffix.s6_addr[3],
+                                       mr->rule.relay_suffix.s6_addr[4],
+                                       mr->rule.relay_suffix.s6_addr[5],
+                                       mr->rule.relay_suffix.s6_addr[6],
+                                       mr->rule.relay_suffix.s6_addr[7],
+                                       mr->rule.relay_suffix.s6_addr[8],
+                                       mr->rule.relay_suffix.s6_addr[9],
+                                       mr->rule.relay_suffix.s6_addr[10],
+                                       mr->rule.relay_suffix.s6_addr[11],
+                                       mr->rule.relay_suffix.s6_addr[12],
+                                       mr->rule.relay_suffix.s6_addr[13],
+                                       mr->rule.relay_suffix.s6_addr[14],
+                                       mr->rule.relay_suffix.s6_addr[15],
+                                       mr->rule.relay_suffixlen,
+                                       mr->rule.eabit_len,
+                                       mr->rule.psid_offsetlen );
+
+
+       }
+       return ;
+}
+
+
+static struct map_rule * mr_find( int entry_num,struct interface * itf)
+{
+       struct list_head *entry, *next_entry;
+       struct map_rule *mr;
+
+       cmm_print(DEBUG_INFO, "%s: mapping rule entry find %d \n", __func__, entry_num);
+
+       for (entry = list_first(&itf->mr_list); next_entry = list_next(entry), entry != &itf->mr_list; entry = next_entry)
+       {
+               mr = container_of(entry, struct map_rule, list);
+               if(mr->rule.entry_num == entry_num)
+                       return mr;
+
+       }
+       return NULL;
+}
+
+static void __mr_delete(struct map_rule *mr)
+{
+       cmm_print(DEBUG_INFO, "%s: mapping rule removed\n", __func__);
+
+       list_del(&mr->list);
+       free(mr);
+}
+
+static void mr_delete(int entry_num, int reset, struct interface* itf)
+{
+       struct list_head *entry, *next_entry;
+       struct map_rule *mr;
+
+       cmm_print(DEBUG_INFO, "%s: mapping rule entry delete  %d reset is %d \n", __func__, entry_num,reset);
+       for (entry = list_first(&itf->mr_list); next_entry = list_next(entry), entry != &itf->mr_list; entry = next_entry)
+       {
+               mr = container_of(entry, struct map_rule, list);
+               if(reset)
+                       __mr_delete(mr);
+               else if(mr->rule.entry_num == entry_num)
+               {
+                       __mr_delete(mr);
+                       return;
+               }
+
+       }
+       return ;
+}
+
+static void __mr_update(struct map_rule * mr, struct ip6_4rd_map_msg *mr_msg)
+{
+       mr->rule.prefix = mr_msg->prefix ;
+       memcpy(&mr->rule.relay_prefix,&mr_msg->relay_prefix, sizeof(mr_msg->relay_prefix));
+       memcpy(&mr->rule.relay_suffix,&mr_msg->relay_suffix, sizeof(mr_msg->relay_suffix));
+       mr->rule.prefixlen = mr_msg->prefixlen ;
+       mr->rule.relay_prefixlen = mr_msg->relay_prefixlen ;
+       mr->rule.relay_suffixlen = mr_msg->relay_suffixlen ;
+       mr->rule.psid_offsetlen = mr_msg->psid_offsetlen ;
+       mr->rule.eabit_len = mr_msg->eabit_len ;
+       mr->rule.entry_num = mr_msg->entry_num ;
+       return;
+}
+
+static void mr_update(FCI_CLIENT *fci_handle,struct ip6_4rd_map_msg *mr_msg)
+{
+       struct interface *itf;
+       struct map_rule *mr;
+
+       itf = __itf_find(mr_msg->ifindex);
+       if (!itf)
+       {
+               cmm_print(DEBUG_ERROR, "%s::%d: __itf_find(%d) failed\n", __func__, __LINE__, mr_msg->ifindex);
+               goto out;
+       }
+
+       mr = mr_find(mr_msg->entry_num, itf);
+       if (!mr)
+       {
+               // Add new mapping rule
+               mr = mr_add(itf);
+               if(!mr)
+               {
+                       cmm_print(DEBUG_ERROR, "%s::%d: __mr_add(%d) failed\n", __func__, __LINE__, mr_msg->entry_num);
+                       goto out;
+               }
+	       if(!(itf->tunnel_flags & TNL_4RD))
+	       {
+			/* Set tunnel mode to 4RD and update tunnel in FPP */
+			itf->tunnel_flags |= TNL_4RD;
+			itf->flags |= FPP_NEEDS_UPDATE;
+			tunnel_send_cmd(fci_handle, UPDATE,itf);	
+	       }
+			
+       }
+       __mr_update(mr, mr_msg);
+out:
+       return;
+}
+
+static void mr_remove(FCI_CLIENT *fci_handle,struct ip6_4rd_map_msg *mr_msg)
+{
+       struct interface *itf;
+       struct list_head *entry;
+
+       itf = __itf_find(mr_msg->ifindex);
+       if (!itf)
+       {
+               cmm_print(DEBUG_ERROR, "%s::%d: __itf_find(%d) failed\n", __func__, __LINE__, mr_msg->ifindex);
+               goto out;
+       }
+
+       mr_delete(mr_msg->entry_num, mr_msg->reset, itf);
+       entry = &itf->mr_list;
+       if(list_empty(entry))
+       {
+	       if(itf->tunnel_flags & TNL_4RD)	
+	       {
+		       itf->tunnel_flags &= ~TNL_4RD;
+		       /* The tunnel needs  to be updated as type 4o6 */
+			itf->flags |= FPP_NEEDS_UPDATE;
+			tunnel_send_cmd(fci_handle, UPDATE,itf);	
+	       }	
+       }
+out:
+       return;
+}
+#endif
 
 #ifdef VLAN_FILTER
 struct interface_bridge_vlan_info *vinfo_find_by_vid(int ifindex, u_int16_t vid)
@@ -342,6 +558,9 @@ static void __itf_remove(struct interface *itf)
 {
 	struct interface_addr *addr;
 	struct list_head *entry, *next_entry;
+#if defined(CMM_4RD_SUPPORT) && !defined(SAM_LEGACY)
+	struct map_rule *mr;
+#endif
 
 	cmm_print(DEBUG_INFO, "%s: interface(%d) removed\n", __func__, itf->ifindex);
 
@@ -350,6 +569,14 @@ static void __itf_remove(struct interface *itf)
 		addr = container_of(entry, struct interface_addr, list);
 		__addr_remove(addr);
 	}
+#if defined(CMM_4RD_SUPPORT) && !defined(SAM_LEGACY)
+       for (entry = list_first(&itf->mr_list); next_entry = list_next(entry), entry != &itf->mr_list; entry = next_entry)
+       {
+	       mr = container_of(entry, struct map_rule, list);
+	       __mr_delete(mr);
+
+       }
+#endif
 
 #ifdef VLAN_FILTER
        del_itf_bridge_vlan_info(itf);
@@ -413,6 +640,7 @@ static void __itf_update(struct interface_table *ctx, struct interface *itf, str
 		/* mark mac address valid */
 		itf->macaddr_len = RTA_PAYLOAD(attr);
 
+		/* Ethip kernel mod WA compatibility */
 		if(itf->macaddr_len > 6)
 			itf->macaddr_len = 6;
 		
@@ -505,9 +733,7 @@ static void __itf_update(struct interface_table *ctx, struct interface *itf, str
 #endif
 	}
 
-#ifdef WIFI_ENABLE
 proceed_to_lro:
-#endif
 	lro_interface_update(itf);
 
 out:
@@ -535,6 +761,9 @@ static struct interface *__itf_add(struct interface_table *ctx, int ifindex)
 	itf->count = 0;
 
 	list_head_init(&itf->addr_list);
+#if defined(CMM_4RD_SUPPORT) && !defined(SAM_LEGACY)
+	list_head_init(&itf->mr_list);
+#endif
 #ifdef VLAN_FILTER
 	/* Default vlan filtering configuration */
 	list_head_init(&itf->bridge_vlan_info_list);
@@ -554,6 +783,51 @@ static struct interface *__itf_add(struct interface_table *ctx, int ifindex)
 err:
 	return NULL;
 }
+
+#if defined(CMM_4RD_SUPPORT) && !defined(SAM_LEGACY)
+static int __cmmGetMappingRuleFilter(const struct sockaddr_nl *nladdr, struct nlmsghdr *nlh, void *arg)
+{
+	struct interface_table *ctx = arg;
+	struct ip6_4rd_map_msg *mr;
+//	struct rtattr *tb[IF_MR_MAX + 1];
+
+	if (nlh->nlmsg_type != RTM_NEW4RD)
+	{
+		cmm_print(DEBUG_ERROR, "%s::%d: unexpected netlink message(%d)\n",
+						 __func__, __LINE__, nlh->nlmsg_type);
+		goto out;
+	}
+
+	mr = NLMSG_DATA(nlh);
+
+	mr_update(ctx->fci_handle,mr);	
+	struct interface * itf = __itf_find(mr->ifindex);
+	if (itf)
+	{
+		mr_debug(itf);
+	}
+
+
+out:
+	return RTNL_CB_CONTINUE;
+}
+
+static int __cmmGetMappingRule(struct interface_table *ctx)
+{
+	struct ip6_4rd_map_msg mr;
+
+	int rc;
+	memset(&mr,0,sizeof(mr));
+
+	if ((rc = cmm_rtnl_dump_request(&ctx->rth, RTM_GET4RD, &mr, sizeof(struct ip6_4rd_map_msg))) < 0)
+		goto out;
+
+	rc = cmm_rtnl_listen(&ctx->rth, __cmmGetMappingRuleFilter, ctx);
+
+out:
+	return rc;
+}
+#endif
 
 void __itf_update_connection(FCI_CLIENT *fci_handle, int ifindex)
 {
@@ -858,6 +1132,12 @@ static int __itf_table_update(struct interface_table *ctx)
 	rc = __cmmGetAddr(&ctx->rth, AF_INET6);
 	if (rc < 0)
 		goto out;
+
+#if defined(CMM_4RD_SUPPORT) && !defined(SAM_LEGACY)
+	rc = __cmmGetMappingRule(ctx);
+	if (rc < 0)
+		cmm_print(DEBUG_ERROR, "%s::%d: __cmmGetMappingRule failed\n", __func__, __LINE__);
+#endif
 
 	return 0;
 out:
@@ -1435,16 +1715,21 @@ int itf_table_init(struct interface_table *ctx)
 	cmmVlanReset(ctx->fci_handle);
 
 	if (itf_table_update(ctx) < 0)
+#if !defined(IPSEC_SUPPORT_DISABLED)
 		goto err4;
+#else
+		goto err3;
+#endif
 
 	return 0;
 
 #if !defined(IPSEC_SUPPORT_DISABLED)
 err4:
-	fci_close(ctx->fci_handle);
+	fci_close(ctx->fci_key_handle);
 #endif
 
 err3:
+	fci_close(ctx->fci_handle);
 	cmm_rtnl_close(&ctx->rth);
 
 err2:
@@ -1517,9 +1802,32 @@ int cmmRtnlIfAddr(const struct sockaddr_nl *who, struct nlmsghdr *nlh, void *arg
 	struct rtattr *tb[IFA_MAX + 1];
 	char address[INET6_ADDRSTRLEN];
 	unsigned int *ipaddr;
+#if defined(CMM_4RD_SUPPORT) && !defined(SAM_LEGACY)
+	struct ip6_4rd_map_msg *mr;
+#endif
 
 	switch (nlh->nlmsg_type)
 	{
+#if defined(CMM_4RD_SUPPORT) && !defined(SAM_LEGACY)
+	case RTM_NEW4RD:
+        case RTM_DEL4RD:
+		{
+			mr = NLMSG_DATA(nlh);
+
+
+			if(nlh->nlmsg_type == RTM_NEW4RD)
+				mr_update(ctx->fci_handle,mr);
+			else if(nlh->nlmsg_type == RTM_DEL4RD)
+				mr_remove(ctx->fci_handle,mr);
+			struct interface * itf = __itf_find(mr->ifindex);
+			if (itf)
+			{
+				mr_debug(itf);
+			}
+
+			return 0;
+		}
+#endif
 	case RTM_NEWADDR:
 	case RTM_DELADDR:
 		break;

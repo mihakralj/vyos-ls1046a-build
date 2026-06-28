@@ -27,6 +27,7 @@
 	int vlanDeleteProcess(daemon_handle_t daemon_handle, int argc, char *argv[]);
 	int cmmVlanClient(int argc, char **argv, int firstarg, daemon_handle_t daemon_handle);
 	int cmmVlanProcessClientCmd(FCI_CLIENT *fci_handle, int function_code, u_int8_t *cmd_buf, u_int16_t cmd_len, u_int16_t *res_buf, u_int16_t *res_len);
+	int cmmVlanShowProcess(char ** keywords, int tabStart, daemon_handle_t daemon_handle);
+	int cmmVlanShowClientCmd(u_int8_t *cmd_buf, u_int16_t cmd_len, u_int16_t *res_buf, u_int16_t *res_len);
 	int cmmVlanQuery(char ** keywords, int tabStart, daemon_handle_t daemon_handle);
 #endif
-
