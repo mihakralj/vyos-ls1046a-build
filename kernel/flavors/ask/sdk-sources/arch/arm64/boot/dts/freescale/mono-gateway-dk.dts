@@ -1,0 +1,519 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Device Tree file for Mono Gateway Development Kit (LS1046A)
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/leds/common.h>
+#include <dt-bindings/pwm/pwm.h>
+#include "fsl-ls1046a.dtsi"
+
+/ {
+	model = "Mono Gateway Development Kit";
+	compatible = "mono,gateway-dk", "fsl,ls1046a";
+
+	aliases {
+		serial0 = &duart0;
+		serial1 = &duart1;
+
+		/* Physical port order: left to right */
+		ethernet0 = &enet4;  /* MAC5 - 1G leftmost - LAN */
+		ethernet1 = &enet5;  /* MAC6 - 1G middle - LAN */
+		ethernet2 = &enet1;  /* MAC2 - 1G rightmost - LAN */
+		ethernet3 = &enet6;  /* MAC9 - 10G left - WAN */
+		ethernet4 = &enet7;  /* MAC10 - 10G right - extra */
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		/* SFP+ Port 0 LEDs - Activity/Link */
+		led_sfp0_link: sfp0_link {
+			label = "sfp0:link";
+			gpios = <&gpio2 17 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+
+		led_sfp0_activity: sfp0_activity {
+			label = "sfp0:activity";
+			gpios = <&gpio2 18 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+
+		/* SFP+ Port 1 LEDs - Activity/Link */
+		led_sfp1_link: sfp1_link {
+			label = "sfp1:link";
+			gpios = <&gpio2 15 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+
+		led_sfp1_activity: sfp1_activity {
+			label = "sfp1:activity";
+			gpios = <&gpio2 16 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+	};
+
+	/* SFP 1 */
+	sfp_xfi0: sfp-xfi0 {
+		compatible = "sff,sfp";
+		i2c-bus = <&sfp0_i2c>;
+		tx-disable-gpios = <&gpio2 14 GPIO_ACTIVE_HIGH>;
+		mod-def0-gpios = <&gpio2 12 GPIO_ACTIVE_LOW>;
+		los-gpios = <&gpio2 11 GPIO_ACTIVE_HIGH>;
+		maximum-power-milliwatt = <3000>;
+		leds = <&led_sfp0_link>, <&led_sfp0_activity>;
+	};
+
+	/* SFP 2 */
+	sfp_xfi1: sfp-xfi1 {
+		compatible = "sff,sfp";
+		i2c-bus = <&sfp1_i2c>;
+		tx-disable-gpios = <&gpio2 13 GPIO_ACTIVE_HIGH>;
+		mod-def0-gpios = <&gpio2 10 GPIO_ACTIVE_LOW>;
+		los-gpios = <&gpio2 9 GPIO_ACTIVE_HIGH>;
+		maximum-power-milliwatt = <3000>;
+		leds = <&led_sfp1_link>, <&led_sfp1_activity>;
+	};
+
+	/* SFP LED Controller */
+	sfp_led_controller: sfp-led-controller {
+		compatible = "mono,sfp-led";
+		sfp-ports = <&sfp_xfi0>, <&sfp_xfi1>;
+	};
+};
+
+&pcie3 {
+	status = "okay";
+};
+
+&gpio2 {
+	2R-enable {
+		gpio-hog;
+		gpios = <6 GPIO_ACTIVE_LOW>;
+		output-high;
+		line-name = "2r-enable";
+	};
+
+	3R-enable {
+		gpio-hog;
+		gpios = <2 GPIO_ACTIVE_LOW>;
+		output-low;
+		line-name = "3r-enable";
+	};
+
+	uart-mux {
+		gpio-hog;
+		gpios = <26 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "uart-mux";
+	};
+};
+
+&duart0 {
+	status = "okay";
+};
+
+&duart1 {
+	status = "okay";
+	uart-has-rtscts;
+};
+
+&usb0 {
+	status = "okay";
+	dr_mode = "host";
+};
+
+&usb1 {
+	status = "disabled";
+	disable-over-current;
+};
+
+&usb2 {
+	status = "disabled";
+	disable-over-current;
+};
+
+&dspi {
+	status = "okay";
+};
+
+&esdhc {
+	status = "okay";
+	mmc-hs200-1_8v;
+	bus-width = <4>;
+};
+
+&i2c0 {
+	status = "okay";
+
+	/* Thermal sensors, retimer, clock generator, PWM fan */
+	i2c-mux@70 {
+		compatible = "nxp,pca9545";
+		reg = <0x70>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		i2c@0 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <0>;
+
+			retimer: retimer@18 {
+				compatible = "ti,ds100df410";
+				reg = <0x18>;
+				status = "okay";
+			};
+		};
+
+		i2c@1 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <1>;
+
+			temp-sensor@4c {
+				compatible = "ti,tmp431";
+				reg = <0x4c>;
+			};
+		};
+
+		i2c@2 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <2>;
+
+			temp-sensor@4c {
+				compatible = "ti,tmp431";
+				reg = <0x4c>;
+			};
+		};
+
+		i2c@3 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <3>;
+
+			fan_controller: fan-controller@2e {
+				compatible = "microchip,emc2305";
+				reg = <0x2e>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				#pwm-cells = <3>;
+
+				fan: fan@0 {
+					reg = <0>;
+					pwms = <&fan_controller 26000 1 1>;
+					#cooling-cells = <2>;
+				};
+			};
+		};
+	};
+};
+
+&i2c1 {
+	status = "okay";
+
+	/* SFP+ modules */
+	sfpmux: i2c-mux@70 {
+		compatible = "nxp,pca9545";
+		reg = <0x70>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		
+		sfp0_i2c: i2c@0 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <0>;
+		};
+
+		sfp1_i2c: i2c@1 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <1>;
+		};
+	};
+};
+
+&i2c2 {
+	status = "okay";
+
+	i2c-mux@70 {
+		compatible = "nxp,pca9545";
+		reg = <0x70>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		
+		i2c@0 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <0>;
+
+			power_sensor@40 {
+				compatible = "ti,ina234";
+				reg = <0x40>;
+				label = "USB Power Delivery";
+				#io-channel-cells = <1>;
+				shunt-resistor = <1000>;
+			};	
+			power_sensor@41 {
+				compatible = "ti,ina234";
+				reg = <0x41>;
+				label = "5V PSU";
+				#io-channel-cells = <1>;
+				shunt-resistor = <1000>;
+			};
+			power_sensor@42 {
+				compatible = "ti,ina234";
+				reg = <0x42>;
+				label = "1V Core PSU";
+				#io-channel-cells = <1>;
+				shunt-resistor = <1000>;
+			};						
+			power_sensor@43 {
+				compatible = "ti,ina234";
+				reg = <0x43>;
+				label = "1.2V DDR PSU";
+				#io-channel-cells = <1>;
+				shunt-resistor = <5000>;
+			};
+		};
+
+		i2c@1 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <1>;
+
+			power_sensor@40 {
+				compatible = "ti,ina234";
+				reg = <0x40>;
+				label = "1.35V SerDes PSU";
+				#io-channel-cells = <1>;
+				shunt-resistor = <5000>;
+			};	
+			power_sensor@41 {
+				compatible = "ti,ina234";
+				reg = <0x41>;
+				label = "1.8V PSU";
+				#io-channel-cells = <1>;
+				shunt-resistor = <5000>;
+			};
+			power_sensor@42 {
+				compatible = "ti,ina234";
+				reg = <0x42>;
+				label = "2.5V DDR PSU";
+				#io-channel-cells = <1>;
+				shunt-resistor = <5000>;
+			};						
+			power_sensor@43 {
+				compatible = "ti,ina234";
+				reg = <0x43>;
+				label = "3.3V PSU";
+				#io-channel-cells = <1>;
+				shunt-resistor = <1000>;
+			};
+		};	
+
+		i2c@2 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <2>;
+
+			rtc@53 {
+				compatible = "nxp,pcf2131";
+				reg = <0x53>;
+				status = "okay";
+			};
+
+			typec: hd3ss3220@47 {
+				compatible = "ti,hd3ss3220";
+				reg = <0x47>;
+			};
+		};
+
+		i2c@3 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <3>;
+
+			lp5810@6c {
+				compatible = "ti,lp5812";
+				reg = <0x6c>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+					
+				led@0 {
+					reg = <0>;
+					color = <LED_COLOR_ID_WHITE>;
+					label = "status:white";
+					led-max-microamp = <25500>;
+				};
+				
+				led@1 {
+					reg = <1>;
+					color = <LED_COLOR_ID_BLUE>;
+					label = "status:blue";
+					led-max-microamp = <25500>;
+				};
+				
+				led@2 {
+					reg = <2>;
+					color = <LED_COLOR_ID_GREEN>;
+					label = "status:green";
+					led-max-microamp = <25500>;
+				};
+				
+				led@3 {
+					reg = <3>;
+					color = <LED_COLOR_ID_RED>;
+					label = "status:red";
+					led-max-microamp = <25500>;
+				};		
+			};
+		};
+	};
+};
+
+&i2c3 {
+	status = "okay";
+};
+
+&qspi {
+	status = "okay";
+
+	mt25qu512a0: flash@0 {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		compatible = "jedec,spi-nor";
+		spi-max-frequency = <50000000>;
+		reg = <0>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@flash {
+				label = "flash";
+				reg = <0x0 0x4000000>;
+				read-only;
+			};
+
+			partition@0 {
+				label = "rcw-bl2";
+				reg = <0x0 0x100000>;
+				read-only;
+			};
+
+			partition@100000 {
+				label = "uboot";
+				reg = <0x100000 0x200000>;
+				read-only;
+			};
+
+			partition@300000 {
+				label = "uboot-env";
+				reg = <0x300000 0x100000>;
+			};
+
+			partition@400000 {
+				label = "fman-ucode";
+				reg = <0x400000 0x100000>;
+				read-only;
+			};
+
+			partition@500000 {
+				label = "recovery-dtb";
+				reg = <0x500000 0x100000>;
+				read-only;
+			};
+
+			partition@600000 {
+				label = "backup";
+				reg = <0x600000 0x400000>;
+			};
+
+			partition@a00000 {
+				label = "kernel-initramfs";
+				reg = <0xa00000 0x1600000>;
+				read-only;
+			};
+
+			partition@2000000 {
+				label = "unallocated";
+				reg = <0x2000000 0x2000000>;
+			};
+		};
+	};
+};
+
+#include "fsl-ls1046-post.dtsi"
+
+&fman0 {
+	ethernet@e0000 {
+		status = "disabled";
+	};
+
+	ethernet@e4000 {
+		status = "disabled";
+	};
+
+	ethernet@e6000 {
+		status = "disabled";
+	};
+
+	ethernet@e8000 {
+		phy-handle = <&sgmii_phy0>;
+		phy-connection-type = "sgmii";
+		status = "okay";
+	};
+
+	ethernet@ea000 {
+		phy-handle = <&sgmii_phy1>;
+		phy-connection-type = "sgmii";
+		status = "okay";
+	};
+
+	ethernet@e2000 {
+		phy-handle = <&sgmii_phy2>;
+		phy-connection-type = "sgmii";
+		status = "okay";
+	};
+
+	fm1_mac9: ethernet@f0000 { /* 10GEC1 */
+		sfp = <&sfp_xfi0>;
+		phy-connection-type = "10gbase-r";
+		managed = "in-band-status";
+		pcs-handle-names = "xfi";
+	};
+
+ fm1_mac10: ethernet@f2000 { /* 10GEC2 */
+		sfp = <&sfp_xfi1>;
+		phy-connection-type = "10gbase-r";
+		managed = "in-band-status";
+		pcs-handle-names = "xfi";
+	};
+	
+	mdio@fc000 {
+		status = "disabled";
+	};
+
+	mdio@fd000 {
+		sgmii_phy0: ethernet-phy@0 {
+			reg = <0x0>;
+		};
+
+		sgmii_phy1: ethernet-phy@1 {
+			reg = <0x1>;
+		};
+
+		sgmii_phy2: ethernet-phy@2 {
+			reg = <0x2>;
+		};
+	};
+};

@@ -25,6 +25,18 @@ config FSL_SDK_FMAN_RTC_API
 		it is selected for RTC (1588 timer). Neither of them
 		were not able to be used together.
 
+config DBG_UCODE_INFRA
+	bool "debug infra support for microcode"
+	default n
+	help
+		enable/disable debug infra support for microcode
+
+config DMAR_TEST
+	bool "DMA read test in microcode"
+	default n
+	help
+		enable DMA read test in microcode
+
 config FSL_FM_MAX_FRAME_SIZE
 	int "Maximum L2 frame size"
 	range 64 9600

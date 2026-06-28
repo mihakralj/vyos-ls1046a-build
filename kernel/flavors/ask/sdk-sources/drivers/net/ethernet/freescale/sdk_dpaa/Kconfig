@@ -2,7 +2,6 @@ menuconfig FSL_SDK_DPAA_ETH
 	tristate "DPAA Ethernet"
 	depends on (FSL_SOC || ARM64 || ARM) && FSL_SDK_BMAN && FSL_SDK_QMAN && FSL_SDK_FMAN && !FSL_DPAA_ETH
 	select PHYLIB
-	select PHYLINK
 	help
 	  Data Path Acceleration Architecture Ethernet driver,
 	  supporting the Freescale QorIQ chips.
@@ -20,6 +19,13 @@ config FSL_DPAA_CEETM
 	default n
 	help
 	Enable QoS offloading support through the CEETM hardware block.
+
+config FSL_DPAA_ASK_CEETM_TX_OWNER
+	bool "ASK CEETM TX owner hooks"
+	default n
+	help
+	  Enable the narrow ASK/CDX-owned CEETM TX path used by the Mono
+	  dataplane. This does not enable the Linux CEETM qdisc control plane.
 
 config FSL_DPAA_CEETM_CCS_THRESHOLD_1G
 	hex "CEETM egress congestion threshold on 1G ports"
@@ -115,8 +121,10 @@ config FSL_DPAA_ETH_REFILL_THRESHOLD
 	default "80"
 	help
 	  The DPAA-Ethernet driver will start replenishing buffer pools whose count
-	  falls below this threshold per CPU. This must be related to DPAA_ETH_MAX_BUF_COUNT.
-	  One needn't normally modify this value unless one has very specific performance reasons.
+	  falls below (buffer pool config count - this threshold)(for ethernet buffer case
+	  config count is DPAA_ETH_MAX_BUF_COUNT). This parameter can also useful for other
+	  buffer pools(vsp is using it). One needn't normally modify this value unless one
+	  has very specific performance reasons.
 
 config FSL_DPAA_CS_THRESHOLD_1G
 	hex "Egress congestion threshold on 1G ports"
