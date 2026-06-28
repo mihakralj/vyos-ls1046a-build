@@ -1,0 +1,6 @@
+#!/bin/sh
+
+cmm -c relay add 00:00:00:00:01:00 00:00:00:00:00:02 eth2 eth1 1 1
+cmm -c relay del 00:00:00:00:01:00 00:00:00:00:00:02 eth2 eth1 1 1
+
+#Error 32002 r
