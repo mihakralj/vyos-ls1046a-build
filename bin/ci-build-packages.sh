@@ -258,8 +258,17 @@ XEOF
       # Build kernel + modules (bindeb-pkg)
       ( cd "$NXP_KSRC" && make ARCH=arm64 olddefconfig ) 2>&1 | tail -1
       echo "### Building kernel (make -j$(nproc) bindeb-pkg LOCALVERSION=-vyos)…"
+      KBUILD_LOG="$GITHUB_WORKSPACE/work/kbuild.log"
       ( cd "$NXP_KSRC" && make ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}" \
-          LOCALVERSION=-vyos -j"$(nproc)" bindeb-pkg ) 2>&1 | tail -15
+          LOCALVERSION=-vyos -j"$(nproc)" bindeb-pkg ) > "$KBUILD_LOG" 2>&1
+      BUILD_RC=$?
+      tail -15 "$KBUILD_LOG"
+      if [ "$BUILD_RC" -ne 0 ]; then
+        echo "### Kernel build FAILED (rc=$BUILD_RC) — dumping last 80 lines:"
+        tail -80 "$KBUILD_LOG"
+        echo "### Full build log saved to $KBUILD_LOG"
+        exit 1
+      fi
 
       NXP_PARENT="$(dirname "$NXP_KSRC")"
       echo "### Collecting kernel .debs from $NXP_PARENT"
