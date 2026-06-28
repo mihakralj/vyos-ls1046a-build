@@ -616,6 +616,7 @@ XEOF
     if [ -n "${NXP_KSRC:-}" ]; then
       echo "### nxp-sdk: skipping ASK2 OOT module build (uses pre-built kernel)"
       echo "skipped" > ask-modules-skipped.txt
+      [ -n "${GITHUB_ENV:-}" ] && echo "ASK_OOT_SKIPPED=1" >> "$GITHUB_ENV"
     elif [ -n "$KSRC" ] && [ -x "$ASK_OOT_BUILDER" ] && [ -f "$ASK_PCD_HEADER" ]; then
       KSRC_ABS_ASK="$(cd "$KSRC" && pwd)"
       echo "### single-image: building ASK2 OOT kernel modules (ask.ko, dormant)"
