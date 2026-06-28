@@ -608,9 +608,15 @@ XEOF
     # Gated on FMan PCD header presence: ask.ko includes <linux/fsl/fman_pcd.h>
     # which is only present when the FMan PCD board patches (0092+) are applied.
     # On the stock branch those patches are absent, so skip gracefully.
+    #
+    # nxp-sdk branch ships pre-built kernel .debs — OOT module build is skipped
+    # because the CI kernel tree lacks the full SDK overlay needed by cdx.ko/fci.ko.
     ASK_OOT_BUILDER="$GITHUB_WORKSPACE/kernel/flavors/ask/oot-modules/ask/ci-build.sh"
     ASK_PCD_HEADER="$KSRC/include/linux/fsl/fman_pcd.h"
-    if [ -n "$KSRC" ] && [ -x "$ASK_OOT_BUILDER" ] && [ -f "$ASK_PCD_HEADER" ]; then
+    if [ -n "${NXP_KSRC:-}" ]; then
+      echo "### nxp-sdk: skipping ASK2 OOT module build (uses pre-built kernel)"
+      echo "skipped" > ask-modules-skipped.txt
+    elif [ -n "$KSRC" ] && [ -x "$ASK_OOT_BUILDER" ] && [ -f "$ASK_PCD_HEADER" ]; then
       KSRC_ABS_ASK="$(cd "$KSRC" && pwd)"
       echo "### single-image: building ASK2 OOT kernel modules (ask.ko, dormant)"
       # Cross-build env is already exported by the kernel build above
