@@ -1,0 +1,14 @@
+[Unit]
+Description=Enable conntrack tracking for ASK hardware offload
+Documentation=https://github.com/mihakralj/vyos-ls1046a-build
+After=vyos-router.service
+Requires=vyos-router.service
+Before=ls1046a-ask.service multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/vyos-ask-ct-fix
+
+[Install]
+WantedBy=multi-user.target
