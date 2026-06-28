@@ -1882,6 +1882,20 @@ static int cmmStatCmd(struct cli_def * cli, const char *command, char *argv[], i
 }
 
 /*****************************************************************
+* cmm4rdIdConvCmd
+*
+*
+******************************************************************/
+static int cmm4rdIdConvCmd(struct cli_def * cli, const char *command, char *argv[], int argc)
+{
+  /*Call tunnel 4rd id conversion set process function*/
+  cmm4rdIdConvSetProcess(argv, 0, argc, globalConf.cli.daemon_handle);
+
+       return CLI_OK;
+}
+
+
+/*****************************************************************
 * cmmDPDSaQueryCmd
 *
 *
@@ -2180,6 +2194,18 @@ static int cmmSECfailStatsQueryCmd(struct cli_def * cli, const char *command, ch
 }
 #endif /* LS1043 */
 
+/*****************************************************************
+* cmmQueryNatptCmd
+*
+*
+******************************************************************/
+static int cmmQueryNatptCmd(struct cli_def * cli, const char *command, char *argv[], int argc)
+{
+	/*Call NATPT process function*/
+	cmmNATPTQueryProcess(argv, 0, globalConf.cli.daemon_handle);
+
+	return CLI_OK;
+}
 #ifdef AUTO_BRIDGE
 /*****************************************************************
 * cmmQueryL2FlowCmd
@@ -2542,6 +2568,13 @@ int cmmSocket6Cmd(struct cli_def * cli, const char *command, char *argv[], int a
 	return CLI_OK;
 }
 
+int cmmNatptCmd(struct cli_def * cli, const char *command, char *argv[], int argc) 
+{
+  	/*Call NAT-PT process function*/
+ 	cmmNATPTSetProcess(argv, 0, globalConf.cli.daemon_handle);
+	return CLI_OK;
+}
+
 int cmmAltConfCmd(struct cli_def * cli, const char *command, char *argv[], int argc) 
 {
   	/*Call AltConf process function*/
@@ -2585,6 +2618,11 @@ static void *cmmCliThread(void *data)
 		ctx->sock2 = accept(ctx->sock, NULL, 0);
 		if (ctx->sock2 < 0)
 		{
+			/* SIGALRM from the conntrack timer is process-wide. Do not tear
+			 * down the daemon when it interrupts the CLI accept loop.
+			 */
+			if (errno == EINTR)
+				continue;
 			cmm_print(DEBUG_ERROR, "%s: accept() %s\n", __func__, strerror(errno));
 			break;
 		}
@@ -2703,6 +2741,7 @@ int cmmCliInit(struct cmm_cli *ctx)
 	        cli_register_command(ctx->handle, c, "tx-dscp-to-vlanpcp", cmmDSCPVlanPcpMapQueryCmd, PRIVILEGE_UNPRIVILEGED, MODE_EXEC, "Query DSCP VLAN PCP map configuration");
         	cli_register_command(ctx->handle, c, "secfailstats", cmmSECfailStatsQueryCmd, PRIVILEGE_UNPRIVILEGED, MODE_EXEC, "Query SEC engine failure statistics");
 #endif
+        	cli_register_command(ctx->handle, c, "natpt", cmmQueryNatptCmd, PRIVILEGE_UNPRIVILEGED, MODE_EXEC, "Query NAT-PT connections");
 		cli_register_command(ctx->handle, c, "pktcapture", cmmPktCapQuery, PRIVILEGE_UNPRIVILEGED, MODE_EXEC, "Query packet capture config parameters");
 		cli_register_command(ctx->handle, c, "tunnels",cmmQueryTnlCmd , PRIVILEGE_UNPRIVILEGED, MODE_EXEC, "Query tunnel parameters");
 #ifdef AUTO_BRIDGE
@@ -2734,6 +2773,7 @@ int cmmCliInit(struct cmm_cli *ctx)
 		cli_register_command(ctx->handle, c, "socket", cmmSocketCmd, PRIVILEGE_UNPRIVILEGED, MODE_EXEC, "Manage Socket module");
 		cli_register_command(ctx->handle, c, "socket6", cmmSocket6Cmd, PRIVILEGE_UNPRIVILEGED, MODE_EXEC, "Manage Socket module");
 		cli_register_command(ctx->handle, c, "rtp", cmmRtpCmd, PRIVILEGE_UNPRIVILEGED, MODE_EXEC, "Manage RTP-relay module");
+		cli_register_command(ctx->handle, c, "natpt", cmmNatptCmd, PRIVILEGE_UNPRIVILEGED, MODE_EXEC, "Manage NAT-PT module");
 		cli_register_command(ctx->handle, c, "sa_query_timer", cmmDPDSaQueryCmd, PRIVILEGE_UNPRIVILEGED, MODE_EXEC, "Enable or disable SA query timer");
 		cli_register_command(ctx->handle, c, "config", cmmAltConfCmd, PRIVILEGE_UNPRIVILEGED, MODE_EXEC, "Manage Alternate Configuration module");
 		cli_register_command(ctx->handle, c, "bridge", cmmBridgeControlCmd, PRIVILEGE_UNPRIVILEGED, MODE_EXEC, "Manage automatic bridging");
@@ -2741,6 +2781,7 @@ int cmmCliInit(struct cmm_cli *ctx)
 		cli_register_command(ctx->handle, c, "dpi", cmmDPIEnableCmd, PRIVILEGE_UNPRIVILEGED, MODE_EXEC, "Enable or disable Global DPI flag");
 #endif
 		cli_register_command(ctx->handle, c, "asym_fastforward", cmmAsymFFEnableCmd, PRIVILEGE_UNPRIVILEGED, MODE_EXEC, "Enable or disable Asymmetric Fast forward");
+		cli_register_command(ctx->handle, c, "4rd-id-conversion", cmm4rdIdConvCmd, PRIVILEGE_UNPRIVILEGED, MODE_EXEC, "Enable or disable 4rd Ipv4  header ID conversion");
 	}
 
 	c = cli_register_command(ctx->handle, NULL, "ipv4", cmmIpv4Cmd, PRIVILEGE_UNPRIVILEGED, MODE_EXEC, "");

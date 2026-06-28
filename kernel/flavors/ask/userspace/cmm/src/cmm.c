@@ -332,6 +332,7 @@ static void sig_term_hdlr(int signum)
 int main (int argc, char ** argv)
 {
 	sigset_t block_mask;
+	sigset_t timer_mask;
   	extern char *optarg;
 	extern int optind;
 	char confFilePath[512+1] = "";
@@ -341,6 +342,7 @@ int main (int argc, char ** argv)
 	char *buf;
 	int ret = 0;
 	int ch;
+	int rc;
 
 	// Forward engine programmation is enabled by default
 	globalConf.enable = 1;
@@ -499,6 +501,19 @@ int main (int argc, char ** argv)
 		buf = (char *)(((unsigned long)buf + CMM_16B_ALIGN -1) & ~(CMM_16B_ALIGN - 1));
 		globalConf.rtnl_buf_pools_align[ii] = (uint64_t )buf;
 		globalConf.cur_rtnl_bufs++;
+	}
+
+	/* Keep SIGALRM confined to the conntrack thread. Other threads use
+	 * blocking syscalls that should not be interrupted by the periodic
+	 * conntrack maintenance timer.
+	 */
+	sigemptyset(&timer_mask);
+	sigaddset(&timer_mask, SIGALRM);
+	rc = pthread_sigmask(SIG_BLOCK, &timer_mask, NULL);
+	if (rc != 0)
+	{
+		cmm_print(DEBUG_ERROR, "%s: pthread_sigmask(SIG_BLOCK) failed %s\n", __func__, strerror(rc));
+		goto err1;
 	}
 
 	if (cmmCtInit(&globalConf.ct) < 0)

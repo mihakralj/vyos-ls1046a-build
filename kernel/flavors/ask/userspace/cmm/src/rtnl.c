@@ -11,6 +11,7 @@
  *
  */
 #include "cmm.h"
+#include "rtnl_parse.h"
 
 /*********************************************************************************************/
 
@@ -30,6 +31,12 @@ Copyright notice from that file follows...
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
  *
  */
+
+void cmm_parse_rtattr_overflow(const char *func, int line, int len_remaining)
+{
+	cmm_print(DEBUG_ERROR, "%s::%d: payload too long, %d byte(s) trailing\n",
+		  func, line, len_remaining);
+}
 
 void cmm_rtnl_close(struct rtnl_handle *rth)
 {
@@ -265,23 +272,6 @@ err:
 	return -1;
 }
 
-int cmm_parse_rtattr(struct rtattr *tb[], int max, struct rtattr *rta, int len)
-{
-	memset(tb, 0, sizeof(struct rtattr *) * (max + 1));
-
-	while (RTA_OK(rta, len)) {
-		if (rta->rta_type <= max)
-			tb[rta->rta_type] = rta;
-
-		rta = RTA_NEXT(rta,len);
-	}
-
-	if (len)
-		cmm_print(DEBUG_ERROR, "%s::%d: payload too long %d %d\n", __func__, __LINE__, len, rta->rta_len);
-
-	return 0;
-}
-
 struct rtattr *cmm_get_rtattr(struct rtattr *rta, int len, int type)
 {
 	while (RTA_OK(rta, len)) {
@@ -349,4 +339,3 @@ int cmm_addattr32(struct nlmsghdr *n, int maxlen, int type, __u32 data)
 	n->nlmsg_len = NLMSG_ALIGN(n->nlmsg_len) + len;
 	return 0;
 }
-

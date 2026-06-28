@@ -1,0 +1,38 @@
+# Autotools generated files
+autom4te.cache/
+Makefile.in
+aclocal.m4
+config.guess
+config.sub
+configure
+depcomp
+install-sh
+ltmain.sh
+missing
+compile
+INSTALL
+COPYING
+
+# Configure output
+config.log
+config.status
+config.h
+stamp-h1
+libtool
+
+# Backup files
+*~
+
+# Build artifacts
+*.o
+*.lo
+*.la
+*.a
+*.so
+*.so.*
+.libs/
+.deps/
+
+# Editor files
+*.swp
+*.swo

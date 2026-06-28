@@ -588,9 +588,11 @@ proceedv4_if_flow_no_repl_sa:
 #endif /* IPSEC_FLOW_CACHE */
 			ctEntry->flags |= FPP_PROGRAMMED;
 			ctEntry->flags &= ~FPP_NEEDS_UPDATE;
+			cmmCtRuntimeStateSetInstalled(ctEntry);
 		}
 		else
 		{
+			cmmCtRuntimeStateSetRejected(ctEntry, ret);
 			cmm_print(DEBUG_ERROR, "Error %d while sending CMD_IPV4_CONNTRACK, ACTION_REGISTER\n", ret);
 			goto err;
 		}
@@ -615,9 +617,11 @@ proceedv4_if_flow_no_repl_sa:
 				ctEntry->fEntryRepOut->flags &= ~FPP_NEEDS_UPDATE;
 #endif /* IPSEC_FLOW_CACHE */
 			ctEntry->flags &= ~FPP_NEEDS_UPDATE;
+			cmmCtRuntimeStateSetInstalled(ctEntry);
 		}
 		else
 		{
+			cmmCtRuntimeStateSetRejected(ctEntry, ret);
 			cmm_print(DEBUG_ERROR, "Error %d while sending CMD_IPV4_CONNTRACK, ACTION_UPDATE\n", ret);
 			goto err;
 		}
@@ -645,6 +649,7 @@ proceedv4_if_flow_no_repl_sa:
 #endif /* IPSEC_FLOW_CACHE */
 
 			ctEntry->flags &= ~FPP_PROGRAMMED;
+			cmmCtRuntimeStateSetFallback(ctEntry);
 		}
 		else
 		{
@@ -942,9 +947,11 @@ proceedv6_if_flow_no_repl_sa:
 
 			ctEntry->flags |= FPP_PROGRAMMED;
 			ctEntry->flags &= ~FPP_NEEDS_UPDATE;
+			cmmCtRuntimeStateSetInstalled(ctEntry);
 		}
 		else
 		{
+			cmmCtRuntimeStateSetRejected(ctEntry, ret);
 			cmm_print(DEBUG_ERROR, "Error %d while sending CMD_IPV6_CONNTRACK, ACTION_REGISTER\n", ret);
 			goto err;
 		}
@@ -970,9 +977,11 @@ proceedv6_if_flow_no_repl_sa:
 #endif /* IPSEC_FLOW_CACHE */
 
 			ctEntry->flags &= ~FPP_NEEDS_UPDATE;
+			cmmCtRuntimeStateSetInstalled(ctEntry);
 		}
 		else
 		{
+			cmmCtRuntimeStateSetRejected(ctEntry, ret);
 			cmm_print(DEBUG_ERROR, "Error %d while sending CMD_IPV6_CONNTRACK, ACTION_UPDATE\n", ret);
 			goto err;
 		}
@@ -999,6 +1008,7 @@ proceedv6_if_flow_no_repl_sa:
 #endif /* IPSEC_FLOW_CACHE */
 
 			ctEntry->flags &= ~FPP_PROGRAMMED;
+			cmmCtRuntimeStateSetFallback(ctEntry);
 		}
 		else
 		{
@@ -1062,6 +1072,7 @@ static void cmmFeCtChange4(struct cmm_ct *ctx, fpp_ct_cmd_t* cmd, int len)
 		cmm_print(DEBUG_COMMAND, "%s: CMD_IPV4_CONNTRACK_CHANGE, ACTION_REMOVED\n", __func__);
 
 		ctEntry->flags &= ~FPP_PROGRAMMED;
+		cmmCtRuntimeStateSetFallback(ctEntry);
 
 		cmmCtNetlinkRemove(ctx->handle, ctEntry->ct);
 		ct_stats.removed++;
@@ -1081,6 +1092,7 @@ static void cmmFeCtChange4(struct cmm_ct *ctx, fpp_ct_cmd_t* cmd, int len)
 		cmm_print(DEBUG_COMMAND, "%s: CMD_IPV4_CONNTRACK_CHANGE, ACTION_TCP_FIN\n", __func__);
 
 		ctEntry->flags &= ~FPP_PROGRAMMED;
+		cmmCtRuntimeStateSetFallback(ctEntry);
 
 		break;
 
@@ -1143,6 +1155,7 @@ static void cmmFeCtChange6(struct cmm_ct *ctx, fpp_ct6_cmd_t* cmd, int len)
 		cmm_print(DEBUG_COMMAND, "%s: CMD_IPV6_CONNTRACK_CHANGE, ACTION_REMOVED\n", __func__);
 
 		ctEntry->flags &= ~FPP_PROGRAMMED;
+		cmmCtRuntimeStateSetFallback(ctEntry);
 
 		cmmCtNetlinkRemove(ctx->handle, ctEntry->ct);
 		ct_stats.removed++;
@@ -1162,6 +1175,7 @@ static void cmmFeCtChange6(struct cmm_ct *ctx, fpp_ct6_cmd_t* cmd, int len)
 		cmm_print(DEBUG_COMMAND, "%s: CMD_IPV6_CONNTRACK_CHANGE, ACTION_TCP_FIN\n", __func__);
 
 		ctEntry->flags &= ~FPP_PROGRAMMED;
+		cmmCtRuntimeStateSetFallback(ctEntry);
 
 		break;
 
@@ -1774,4 +1788,3 @@ int cmmFeCatch(unsigned short fcode, unsigned short len, unsigned short *payload
 
 	return FCI_CB_CONTINUE;
 }
-

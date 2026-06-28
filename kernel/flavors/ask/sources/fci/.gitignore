@@ -1,0 +1,15 @@
+fci-9.00.12/*.o
+fci-9.00.12/*.ko
+fci-9.00.12/*.mod
+fci-9.00.12/*.mod.c
+fci-9.00.12/*.mod.o
+fci-9.00.12/*.mod.cmd
+fci-9.00.12/*.cmd
+fci-9.00.12/Module.symvers
+fci-9.00.12/modules.order
+fci-9.00.12/.tmp_versions/
+fci-9.00.12/lib/src/.deps/
+fci-9.00.12/lib/src/.libs/
+fci-9.00.12/lib/include/.deps/
+fci-9.00.12/lib/autom4te.cache/
+fci-9.00.12/lib/stamp-h1

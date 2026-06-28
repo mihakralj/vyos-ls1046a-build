@@ -43,6 +43,9 @@
 #define CMMD_CMD_SOCKET_CLOSE				0x1302
 #define CMMD_CMD_SOCKET_SHOW				0x1303
 #define CMMD_CMD_SOCKET_UPDATE				0x1305
+#define CMMD_CMD_CT_LOCAL_SHOW				0x1306
+#define CMMD_CMD_PPPOE_LOCAL_SHOW			0x1307
+#define CMMD_CMD_VLAN_LOCAL_SHOW			0x1308
 
 #define CMMD_SOCKET_TYPE_LANWAN				0
 #define CMMD_SOCKET_TYPE_ACP				1
@@ -117,6 +120,71 @@ typedef struct cmmd_socket_show_res {
 		u_int32_t	flags;
 	} sockets[0];
 } __attribute__((__packed__)) cmmd_socket_show_res_t;
+
+typedef struct cmmd_local_show_cmd {
+	u_int16_t	skip;
+	u_int16_t	pad1;
+} __attribute__((__packed__)) cmmd_local_show_cmd_t;
+
+typedef struct cmmd_ct_local_show_res {
+	u_int16_t	rc;
+	u_int16_t	eof;
+	u_int8_t	family;
+	u_int8_t	l4proto;
+	u_int16_t	pad1;
+	u_int32_t	orig_src[4];
+	u_int32_t	orig_dst[4];
+	u_int32_t	repl_src[4];
+	u_int32_t	repl_dst[4];
+	u_int16_t	orig_sport;
+	u_int16_t	orig_dport;
+	u_int16_t	repl_sport;
+	u_int16_t	repl_dport;
+	u_int32_t	timeout;
+	u_int32_t	flags;
+	u_int32_t	n_id;
+	u_int32_t	runtime_state;
+	int32_t		last_program_rc;
+	u_int32_t	orig_iif;
+	u_int32_t	orig_ifindex;
+	u_int32_t	orig_underlying_iif;
+	u_int16_t	orig_underlying_vid;
+	u_int16_t	pad2;
+	u_int32_t	orig_mark;
+	int32_t		orig_oif;
+	int32_t		orig_phys_oif;
+	int32_t		rep_oif;
+	int32_t		rep_phys_oif;
+	u_int16_t	orig_route_id;
+	u_int16_t	rep_route_id;
+	u_int8_t	local_conn;
+	u_int8_t	dir;
+	u_int8_t	fpp_dir;
+	u_int8_t	dir_filter;
+} __attribute__((__packed__)) cmmd_ct_local_show_res_t;
+
+typedef struct cmmd_pppoe_local_show_res {
+	u_int16_t	rc;
+	u_int16_t	eof;
+	u_int16_t	session_id;
+	u_int16_t	pad1;
+	int32_t		ifindex;
+	int32_t		phys_ifindex;
+	u_int32_t	flags;
+	u_int32_t	itf_flags;
+	u_int8_t	dst_macaddr[6];
+	u_int8_t	pad2[2];
+} __attribute__((__packed__)) cmmd_pppoe_local_show_res_t;
+
+typedef struct cmmd_vlan_local_show_res {
+	u_int16_t	rc;
+	u_int16_t	eof;
+	u_int16_t	vlan_id;
+	u_int16_t	pad1;
+	int32_t		ifindex;
+	int32_t		phys_ifindex;
+	u_int32_t	flags;
+} __attribute__((__packed__)) cmmd_vlan_local_show_res_t;
 
 /*---------------------------------- Routing ---------------------------------*/
 #define CMMD_CMD_EXTROUTE		0x0D01
@@ -255,12 +323,17 @@ typedef struct cmmd_voice_file_unload_cmd {
 #define CMMD_CMD_TUNNEL_QUERY_CONT	FPP_CMD_TUNNEL_QUERY_CONT	
 #define CMMD_CMD_TUNNEL_SHOW		0x0B09
 #define CMMD_CMD_TUNNEL_SAMREADY	0x0B0a
+#define CMMD_CMD_TUNNEL_IDCONV_psid	FPP_CMD_TUNNEL_4rd_ID_CONV_psid
 
 /* CMM to Deamon message structure */
 typedef struct cmmd_tunnel {
 	char		name[IFNAMSIZ];    /* Tunnel name */
         int8_t		ipsec;             /* IPSec ? */
         int8_t		tunnel_type;       /* Type */
+#ifdef SAM_LEGACY
+	int16_t          sam_enable:1,
+			 tun_mtu:15;
+#endif
 } __attribute__((__packed__)) cmmd_tunnel_t;
 
 /* CMM / FPP API Command */
@@ -416,4 +489,3 @@ typedef struct cmmd_l2tp_session {
 } __attribute__((__packed__)) cmmd_l2tp_session_t;
 
 #endif
-
