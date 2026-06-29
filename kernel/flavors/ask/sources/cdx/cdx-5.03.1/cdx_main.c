@@ -194,10 +194,12 @@ static int __init cdx_module_init(void)
 #ifdef START_DPA_APP
 	// KILO: run dpa_app but don't fail if it errors — we'll run it manually after load
 	rc = start_dpa_app();
-	if (rc != 0)
+	if (rc != 0) {
 		printk("%s::start_dpa_app failed rc %d (non-fatal, will run manually)\n", __FUNCTION__, rc);
-	else
-	printk("%s::start_dpa_app successful\n", __FUNCTION__);
+		rc = 0;  // KILO: reset rc so module init succeeds — dpa_app is optional
+	} else {
+		printk("%s::start_dpa_app successful\n", __FUNCTION__);
+	}
 #endif
 #if 1
 	/* KILO: Initialize bridge command handler so cmm can set bridge mode.
