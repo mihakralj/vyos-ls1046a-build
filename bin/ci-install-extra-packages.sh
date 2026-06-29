@@ -111,7 +111,9 @@ install_doggo() {
   [ -n "$v" ] || { echo "WARNING: Could not determine doggo version" >&2; return 0; }
   local url="https://github.com/mr-karan/doggo/releases/download/v${v}/doggo_${v}_Linux_arm64.tar.gz"
   echo "Downloading doggo ${v} from ${url}"
-  curl -fSL --max-time 120 -o "${TMP_DIR}/doggo.tar.gz" "$url"
+  curl -fSL --max-time 120 -o "${TMP_DIR}/doggo.tar.gz" "$url" || {
+    echo "WARNING: doggo download failed (404 or network) — skipping" >&2; return 0
+  }
   tar xzf "${TMP_DIR}/doggo.tar.gz" -C "$TMP_DIR"
   local bin
   bin=$(find "$TMP_DIR" -name 'doggo' -type f -executable | head -1)
