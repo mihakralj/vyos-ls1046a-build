@@ -623,14 +623,12 @@ chmod +x "$HOOKS/96-enable-services.chroot"
 # hook's job. Staged UNCONDITIONALLY: the flavor split was retired
 # 2026-06-14 (single image carries the dormant ask.ko), so this must
 # Copy ASK offload .deb into packages.chroot so it's installed at chroot time.
-# The .deb installs all ASK modules, userspace, configs, and services.
-# Must be built BEFORE this script runs (ci-build-packages.sh produces it).
-if [ -f ask-offload_1.0.0_arm64.deb ]; then
+if [ -f release/ask-offload_1.0.0_arm64.deb ]; then
   mkdir -p vyos-build/data/live-build-config/packages.chroot
-  cp -v ask-offload_1.0.0_arm64.deb vyos-build/data/live-build-config/packages.chroot/
+  cp -v release/ask-offload_1.0.0_arm64.deb vyos-build/data/live-build-config/packages.chroot/
   echo "### staged ask-offload.deb into packages.chroot/"
 else
-  echo "### WARNING: ask-offload_1.0.0_arm64.deb not found — ASK artifacts MISSING from ISO"
+  echo "### WARNING: release/ask-offload_1.0.0_arm64.deb not found — ASK artifacts MISSING from ISO"
 fi
 
 # match the kernel/flavors/ask oot-module build, which is itself wired
