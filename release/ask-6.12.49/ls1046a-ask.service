@@ -1,0 +1,18 @@
+[Unit]
+Description=LS1046A ASK hardware offload daemon (CMM)
+Documentation=https://mono.si
+After=ask-ct-setup.service
+Requires=ask-ct-setup.service
+Before=getty.target
+
+[Service]
+Type=forking
+ExecStart=/usr/local/bin/cmm -f /etc/config/fastforward
+ExecStop=/usr/bin/pkill cmm
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
