@@ -1,114 +1,104 @@
 #!/bin/sh
-# 97-ask-modules.chroot — auto-load ASK OOT modules at boot
+# 97-ask-modules.chroot — deploy NXP ASK 1.x hardware offload stack into ISO
 #
-# cdx.ko and fci.ko need /dev/fm0-pcd (FMan PCD chardev) which is
-# created by the sdk_fman driver during late init. They must NOT load
-# via systemd-modules-load (too early — ENOMEM). Instead they are
-# loaded by ask-cdx.service (enabled below) which waits for the FMan
-# device to appear.
+# Installs pre-built kernel modules (cdx, fci, nf_conntrack_netlink),
+# userspace binaries (cmm, dpa_app), XML configs, conntrack fix script,
+# and systemd services. All artifacts live in the squashfs at ISO build
+# time so they are available immediately on first boot.
 #
-# auto_bridge.ko has no FMan dependency and loads fine early.
-# ask (ASK 2.0) is dormant — loaded when the module lands.
-#
+# Artifacts sourced from: release/ask-6.12.49/ in the git worktree.
 # Hook ordering: 97 runs after 96-enable-services.chroot and before
 # 98-fancontrol.chroot / 99-mask-services.
 set -e
 
-# ── modules-load.d: only modules safe to load early ─────────────────────
-CONF=/etc/modules-load.d/ask.conf
-mkdir -p "$(dirname "$CONF")"
-cat > "$CONF" <<'MODEOF'
-# ASK OOT kernel modules — managed by 97-ask-modules.chroot
-# cdx and fci are loaded by ask-cdx.service (need /dev/fm0-pcd)
-# nf_conntrack core is needed for CMM conntrack-based flow offload
-auto_bridge
-nf_conntrack
-MODEOF
-echo "I: 97-ask-modules.chroot: wrote $CONF"
-
-# ── systemd service: load cdx + fci after FMan is ready ─────────────────
-UNIT=/etc/systemd/system/ask-cdx.service
-cat > "$UNIT" <<'UNITEOF'
-[Unit]
-Description=Load ASK CDX/FCI Kernel Modules
-DefaultDependencies=no
-After=systemd-modules-load.service
-Before=cmm.service
-ConditionPathExists=/dev/fm0-pcd
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/sbin/modprobe cdx
-ExecStart=/sbin/modprobe fci
-
-[Install]
-WantedBy=multi-user.target
-UNITEOF
-
-# Enable so it runs on every boot
-ln -sf "$UNIT" /etc/systemd/system/multi-user.target.wants/ask-cdx.service
-echo "I: 97-ask-modules.chroot: installed ask-cdx.service"
-
-# ── Conntrack fix for ASK hw offload ───────────────────────────────────
-# VyOS firewall adds "notrack" that disables kernel conntrack.
-# CMM needs conntrack events (via libnetfilter_conntrack) to push flows
-# to CDX/FMan. This service removes notrack after VyOS firewall is applied.
-CTFIX_SCRIPT=/usr/local/sbin/vyos-ask-ct-fix
-CTFIX_UNIT=/etc/systemd/system/ask-ct-setup.service
-
-cat > "$CTFIX_SCRIPT" <<'CTSCRIPTEOF'
-#!/bin/bash
-# vyos-ask-ct-fix — enable kernel conntrack for ASK hardware offload
-set -e
-MAX_WAIT=120
-while ! nft list tables 2>/dev/null | grep -q vyos_conntrack; do
-    [ "$MAX_WAIT" -le 0 ] && exit 1
-    sleep 1; MAX_WAIT=$((MAX_WAIT - 1))
-done
-# Remove VyOS "notrack" from conntrack chains (blocks CMM offload)
-for chain in PREROUTING OUTPUT; do
-    if nft list chain ip vyos_conntrack "$chain" 2>/dev/null | grep -q "notrack$"; then
-        nft flush chain ip vyos_conntrack "$chain" 2>/dev/null || true
-        for jump in VYOS_CT_IGNORE FW_CONNTRACK NAT_CONNTRACK WLB_CONNTRACK; do
-            nft add rule ip vyos_conntrack "$chain" jump "$jump" 2>/dev/null || true
-        done
-        echo "vyos-ask-ct-fix: removed notrack from ip $chain"
-    fi
-done
-for chain in PREROUTING OUTPUT; do
-    if nft list chain ip6 vyos_conntrack "$chain" 2>/dev/null | grep -q "notrack$"; then
-        nft flush chain ip6 vyos_conntrack "$chain" 2>/dev/null || true
-        for jump in VYOS_CT_IGNORE FW_CONNTRACK NAT_CONNTRACK; do
-            nft add rule ip6 vyos_conntrack "$chain" jump "$jump" 2>/dev/null || true
-        done
-    fi
-done
-# Add ct state tracking to FORWARD chain for routed offload
-if ! nft list chain inet mangle FORWARD 2>/dev/null | grep -q "ct state new counter"; then
-    nft add rule inet mangle FORWARD ct state new counter 2>/dev/null || true
+# Resolve the CHROOT/worktree boundary. live-build exports LB_* vars;
+# the worktree is at ${LB_BASE:-.}/release/ask-6.12.49/.
+# In CI the worktree is $GITHUB_WORKSPACE; in local builds we fall back
+# to scanning upward from the hook's own path.
+ARTIFACT_DIR=""
+if [ -d "${GITHUB_WORKSPACE:-/nonexistent}/release/ask-6.12.49" ]; then
+    ARTIFACT_DIR="${GITHUB_WORKSPACE}/release/ask-6.12.49"
+elif [ -d "${LB_BASE:-/nonexistent}/release/ask-6.12.49" ]; then
+    ARTIFACT_DIR="${LB_BASE}/release/ask-6.12.49"
+else
+    echo "WARNING: 97-ask-modules.chroot: cannot find release/ask-6.12.49/ — ASK artifacts will be MISSING from ISO"
+    exit 0
 fi
-sysctl -w net.netfilter.nf_conntrack_acct=1 2>/dev/null || true
-CTSCRIPTEOF
 
-chmod 755 "$CTFIX_SCRIPT"
-echo "I: 97-ask-modules.chroot: installed $CTFIX_SCRIPT"
+echo "I: 97-ask-modules.chroot: deploying ASK artifacts from $ARTIFACT_DIR"
 
-cat > "$CTFIX_UNIT" <<'CTFIXEOF'
-[Unit]
-Description=Enable conntrack tracking for ASK hardware offload
-After=vyos-router.service
-Requires=vyos-router.service
-Before=multi-user.target
+# ── Kernel modules ─────────────────────────────────────────────────────
+MODDIR=/lib/modules/6.12.49-vyos/extra
+mkdir -p "$MODDIR"
+for ko in cdx.ko fci.ko nf_conntrack_netlink.ko; do
+    if [ -f "$ARTIFACT_DIR/$ko" ]; then
+        cp "$ARTIFACT_DIR/$ko" "$MODDIR/$ko"
+        echo "  $MODDIR/$ko"
+    else
+        echo "  WARNING: $ko not found in $ARTIFACT_DIR"
+    fi
+done
+depmod -a 6.12.49-vyos 2>/dev/null || true
+echo "I: 97-ask-modules.chroot: modules installed"
 
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/sbin/vyos-ask-ct-fix
+# ── Userspace binaries ─────────────────────────────────────────────────
+mkdir -p /usr/local/bin /usr/local/sbin /usr/local/lib /usr/bin
+if [ -f "$ARTIFACT_DIR/cmm" ]; then
+    cp "$ARTIFACT_DIR/cmm" /usr/local/bin/cmm
+    chmod 755 /usr/local/bin/cmm
+    echo "  /usr/local/bin/cmm"
+fi
+if [ -f "$ARTIFACT_DIR/dpa_app" ]; then
+    cp "$ARTIFACT_DIR/dpa_app" /usr/bin/dpa_app
+    chmod 755 /usr/bin/dpa_app
+    echo "  /usr/bin/dpa_app"
+fi
+if [ -f "$ARTIFACT_DIR/libcli.so.1.10.8" ]; then
+    cp "$ARTIFACT_DIR/libcli.so.1.10.8" /usr/local/lib/libcli.so.1.10.8
+    ln -sf libcli.so.1.10.8 /usr/local/lib/libcli.so.1.10
+    ln -sf libcli.so.1.10.8 /usr/local/lib/libcli.so.1
+    echo "  /usr/local/lib/libcli.so.1.10.8"
+fi
+echo "I: 97-ask-modules.chroot: userspace installed"
 
-[Install]
-WantedBy=multi-user.target
-CTFIXEOF
+# ── XML configs ────────────────────────────────────────────────────────
+for xml in cdx_cfg.xml cdx_pcd.xml cdx_sp.xml cdx_cfg_dgw.xml; do
+    if [ -f "$ARTIFACT_DIR/$xml" ]; then
+        cp "$ARTIFACT_DIR/$xml" /etc/$xml
+        echo "  /etc/$xml"
+    fi
+done
+echo "I: 97-ask-modules.chroot: XML configs installed"
 
-ln -sf "$CTFIX_UNIT" /etc/systemd/system/multi-user.target.wants/ask-ct-setup.service
-echo "I: 97-ask-modules.chroot: installed ask-ct-setup.service"
+# ── Conntrack fix script ───────────────────────────────────────────────
+if [ -f "$ARTIFACT_DIR/vyos-ask-ct-fix" ]; then
+    cp "$ARTIFACT_DIR/vyos-ask-ct-fix" /usr/local/sbin/vyos-ask-ct-fix
+    chmod 755 /usr/local/sbin/vyos-ask-ct-fix
+    echo "  /usr/local/sbin/vyos-ask-ct-fix"
+fi
+
+# ── Systemd services ───────────────────────────────────────────────────
+mkdir -p /etc/systemd/system /etc/systemd/system/multi-user.target.wants
+
+# Conntrack fix service (oneshot, after vyos-router)
+if [ -f "$ARTIFACT_DIR/ask-ct-setup.service" ]; then
+    cp "$ARTIFACT_DIR/ask-ct-setup.service" /etc/systemd/system/ask-ct-setup.service
+    ln -sf /etc/systemd/system/ask-ct-setup.service /etc/systemd/system/multi-user.target.wants/ask-ct-setup.service
+    echo "  ask-ct-setup.service (enabled)"
+fi
+
+# CMM daemon service (forking, after ask-ct-setup)
+if [ -f "$ARTIFACT_DIR/ls1046a-ask.service" ]; then
+    cp "$ARTIFACT_DIR/ls1046a-ask.service" /etc/systemd/system/ls1046a-ask.service
+    ln -sf /etc/systemd/system/ls1046a-ask.service /etc/systemd/system/multi-user.target.wants/ls1046a-ask.service
+    echo "  ls1046a-ask.service (enabled)"
+fi
+
+# ── Module auto-load (cdx/fci are loaded by ask-ct-setup,
+#     nf_conntrack_netlink by the fix script, but drop a conf for safety) ─
+cat > /etc/modules-load.d/ask.conf <<'EOF'
+# ASK conntrack netlink — loaded early so ctnetlink socket exists
+nf_conntrack_netlink
+EOF
+
+echo "I: 97-ask-modules.chroot: ASK deployment complete"

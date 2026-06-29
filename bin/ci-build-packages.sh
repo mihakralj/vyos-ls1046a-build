@@ -257,6 +257,14 @@ XEOF
 
       # Build kernel + modules (bindeb-pkg)
       ( cd "$NXP_KSRC" && make ARCH=arm64 olddefconfig ) 2>&1 | tail -1
+
+      # Force ASK-critical configs after olddefconfig may have reverted them
+      ( cd "$NXP_KSRC" && scripts/config --set-val BRIDGE y )
+      ( cd "$NXP_KSRC" && scripts/config --enable CPE_FAST_PATH 2>/dev/null || true )
+      ( cd "$NXP_KSRC" && scripts/config --set-val NR_CPUS 4 )
+      ( cd "$NXP_KSRC" && make ARCH=arm64 olddefconfig ) 2>&1 | tail -1
+      echo "### ASK config override: BRIDGE=$(grep CONFIG_BRIDGE= $NXP_KSRC/.config) CPE_FAST=$(grep CPE_FAST_PATH $NXP_KSRC/.config || echo not-set)"
+
       echo "### Building kernel (make -j$(nproc) bindeb-pkg LOCALVERSION=-vyos)…"
       KBUILD_LOG="$GITHUB_WORKSPACE/work/kbuild.log"
       ( cd "$NXP_KSRC" && make ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}" \
