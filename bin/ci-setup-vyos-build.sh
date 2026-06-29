@@ -184,6 +184,21 @@ if [ -f vyos-build/data/defaults.toml ]; then
     echo "### defaults.toml squashfs_compression_type after sed:"
     grep -E '^\s*squashfs_compression_type\s*=' vyos-build/data/defaults.toml || true
   fi
+
+  ### arm64.toml ALSO carries a squashfs_compression_type override that
+  ### build-vyos-image reads AFTER defaults.toml — so the architecture-
+  ### specific value wins. Without patching this file, the squashfs ends
+  ### up xz-compressed despite the defaults.toml override above. The xz
+  ### path also produces corrupt blocks on large ARM64 squashfs images
+  ### (observed 2026-06-26: block 0xbe207ec decompression failure on
+  ### both USB and eMMC boot from the same ISO).
+  ARM64_TOML="vyos-build/data/architectures/arm64.toml"
+  if [ -f "$ARM64_TOML" ] && grep -q 'squashfs_compression_type' "$ARM64_TOML"; then
+    sed -i -E 's|^(\s*squashfs_compression_type\s*=\s*).*$|\1"zstd -b 1M -Xcompression-level 22"|' \
+      "$ARM64_TOML"
+    echo "### arm64.toml squashfs_compression_type after sed:"
+    grep -E 'squashfs_compression_type' "$ARM64_TOML" || true
+  fi
 fi
 
 ### Pin kernel_version to the ASK kernel.
