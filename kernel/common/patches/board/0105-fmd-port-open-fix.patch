@@ -1,0 +1,49 @@
+From: NXP SDK Build <vyos@mono.si>
+Date: Mon, 29 Jun 2026 22:34:00 +0000
+Subject: [PATCH] fmd: allow /dev/fm0-port-rx* opens without SDK port init
+
+The SDK FM port driver's fm_port_probe creates sysfs devices and sets
+dev_set_drvdata(), but InitFmPortDev() (which calls FM_PORT_Config +
+FM_PORT_Init to populate h_Dev) is never invoked because the mainline
+DPAA driver claims FMan port platform devices first. The h_Dev NULL
+check in fm_open() therefore rejects all port device opens with ENODEV.
+
+Fix: replace the h_Dev NULL check with a dev NULL check. Since
+ReadFmPortDevTreeNode sets ->dev from the platform device during probe,
+and dev_set_drvdata() was called, fm_port_bind(->dev) works correctly
+and returns the port structure via dev_get_drvdata().
+
+This allows dpa_app to open /dev/fm0-port-rx0 (and other port minors)
+for PCD programming ioctls.
+
+Board-verified: dpa_app v2 (3.2 MB, fmc-linked) exits 0 after
+successful FMC model compilation and execution. All PCD ioctls on
+/dev/fm0-pcd (0x17 load, 0x15 execute, 0x28/0x39/0x2c/0x2e) return 0.
+
+Signed-off-by: NXP SDK Build <vyos@mono.si>
+---
+ drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_ioctls_fm.c | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_ioctls_fm.c b/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_ioctls_fm.c
+index f97c37f06..a8b5a78ec 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_ioctls_fm.c
++++ b/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_ioctls_fm.c
+@@ -4727,9 +4727,15 @@ static int fm_open(struct inode *inode, struct file *file)
+         else
+             return -EINVAL;
+ 
+-        /* if trying to open port, check if it initialized */
+-        if (!p_LnxWrpFmPortDev->h_Dev)
++        /* KILO-FIX: Mainline DPAA driver owns FMan port platform devices,
++         * so the SDK port driver's InitFmPortDev() is never called and
++         * h_Dev stays NULL. However, dev_set_drvdata() was called by
++         * fm_port_probe, so fm_port_bind() below works correctly.
++         * Skip the h_Dev check — the port is initialized enough for PCD ops. */
++        if (!p_LnxWrpFmPortDev->dev) {
++            pr_err("fm_open: port minor %d has no platform device\n", minor);
+             return -ENODEV;
++        }
+ 
+         p_LnxWrpFmPortDev = (t_LnxWrpFmPortDev *)fm_port_bind(p_LnxWrpFmPortDev->dev);
+         file->private_data = p_LnxWrpFmPortDev;
