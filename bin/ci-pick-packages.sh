@@ -116,7 +116,8 @@ echo "### Package validation OK: $KERNEL_PKGS kernel image package(s) in package
 ### HOTFIX: Debian bookworm-backports is currently missing libhtp2 arm64 binary
 ### but suricata from bookworm-backports depends on it. We fetch it from snapshot.
 echo "### Fetching missing libhtp2 from snapshot.debian.org..."
-curl -sSfL "https://snapshot.debian.org/archive/debian/20260529T053103Z/pool/main/libh/libhtp/libhtp2_0.5.53-1~bpo12%2B1_arm64.deb" -o packages/libhtp2_0.5.53-1~bpo12+1_arm64.deb
+curl -sSfL "https://snapshot.debian.org/archive/debian/20260529T053103Z/pool/main/libh/libhtp/libhtp2_0.5.53-1~bpo12%2B1_arm64.deb" -o packages/libhtp2_0.5.53-1~bpo12+1_arm64.deb 2>/dev/null || \
+  { echo "### WARNING: libhtp2 snapshot download failed (network/snapshot down) — skipping"; }
 echo "### Downloaded libhtp2:"
 ls -l packages/libhtp2_0.5.53-1~bpo12+1_arm64.deb
 
