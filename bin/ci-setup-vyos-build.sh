@@ -624,12 +624,11 @@ chmod +x "$HOOKS/96-enable-services.chroot"
 # 2026-06-14 (single image carries the dormant ask.ko), so this must
 # Copy ASK artifacts into the chroot BEFORE the hook runs.
 # The hook runs inside the chroot and can't see the host worktree.
-# includes.chroot is merged into the chroot by live-build.
-INCLUDES_CHROOT="$BUILD_DIR/data/live-build-config/includes.chroot"
-mkdir -p "$INCLUDES_CHROOT/tmp/ask-artifacts"
+# includes.chroot (variable $CHROOT) is merged into the chroot by live-build.
+mkdir -p "$CHROOT/tmp/ask-artifacts"
 if [ -d release/ask-6.12.49 ]; then
-  cp -v release/ask-6.12.49/* "$INCLUDES_CHROOT/tmp/ask-artifacts/" 2>&1 | tail -5
-  echo "### staged ask artifacts into includes.chroot/tmp/ask-artifacts/"
+  cp -v release/ask-6.12.49/* "$CHROOT/tmp/ask-artifacts/" 2>&1 | tail -5
+  echo "### staged ask artifacts into \$CHROOT/tmp/ask-artifacts/"
 else
   echo "### WARNING: release/ask-6.12.49/ not found — ASK artifacts MISSING from ISO"
 fi
