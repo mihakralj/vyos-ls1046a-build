@@ -11,31 +11,14 @@
 # 98-fancontrol.chroot / 99-mask-services.
 set -e
 
-# Resolve the artifact directory. live-build `.chroot` hooks run on the
-# host system but GITHUB_WORKSPACE / LB_BASE may not be in the environment.
-# Instead walk up from the hook's own location: the hook is copied to
-# vyos-build/data/live-build-config/hooks/live/ by ci-setup-vyos-build.sh.
-# The worktree root is 4 levels up from hooks/live/.
-#
-# In CI the hook lives at:
-#   $GITHUB_WORKSPACE/vyos-build/data/live-build-config/hooks/live/97-ask-modules.chroot
-# and the release dir is at:
-#   $GITHUB_WORKSPACE/release/ask-6.12.49/
-#
-# Try multiple paths in order.
-ARTIFACT_DIR=""
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-for candidate in \
-    "${SCRIPT_DIR}/../../../../../release/ask-6.12.49" \
-    "${GITHUB_WORKSPACE:-/nonexistent}/release/ask-6.12.49" \
-    "${LB_BASE:-/nonexistent}/release/ask-6.12.49" \
-    /mnt/nvme/_work/vyos-ls1046a-build/vyos-ls1046a-build/release/ask-6.12.49 \
-; do
-    if [ -d "$candidate" ]; then
-        ARTIFACT_DIR="$candidate"
-        break
-    fi
-done
+# Artifacts are staged into /tmp/ask-artifacts/ by ci-setup-vyos-build.sh
+# via includes.chroot BEFORE the ISO build. The files are already inside
+# the chroot at build time.
+ARTIFACT_DIR="/tmp/ask-artifacts"
+if [ ! -d "$ARTIFACT_DIR" ]; then
+    echo "WARNING: 97-ask-modules.chroot: $ARTIFACT_DIR not found — ASK artifacts will be MISSING from ISO"
+    exit 0
+fi
 
 echo "I: 97-ask-modules.chroot: deploying ASK artifacts from $ARTIFACT_DIR"
 
