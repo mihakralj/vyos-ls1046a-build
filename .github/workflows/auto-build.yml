@@ -228,11 +228,11 @@ jobs:
           echo "### Downloading pre-built kernel from GitHub Release ask-kernel-6.12.49"
           gh release download ask-kernel-6.12.49 \
             --repo mihakralj/vyos-ls1046a-build \
-            --dir packages/ \
+            --dir vyos-build/scripts/package-build/ \
             --pattern 'linux-image-*' --pattern 'linux-headers-*' \
             --clobber 2>&1
           echo "### Downloaded kernel .debs:"
-          ls -lh packages/linux-*.deb
+          ls -lh vyos-build/scripts/package-build/linux-*.deb
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
