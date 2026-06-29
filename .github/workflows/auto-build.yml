@@ -233,7 +233,7 @@ jobs:
             --repo mihakralj/vyos-ls1046a-build \
             --dir vyos-build/scripts/package-build/ \
             --pattern 'linux-image-*' --pattern 'linux-headers-*' \
-            --clobber 2>&1
+            --prerelease --clobber 2>&1
           echo "### Downloaded kernel .debs:"
           ls -lh vyos-build/scripts/package-build/linux-*.deb
         env:
