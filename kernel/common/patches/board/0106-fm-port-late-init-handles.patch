@@ -1,0 +1,109 @@
+diff --git a/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_fm_port.c b/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_fm_port.c
+index ea4235847..52fb78cce 100644
+--- a/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_fm_port.c
++++ b/drivers/net/ethernet/freescale/sdk_fman/src/wrapper/lnxwrp_fm_port.c
+@@ -792,11 +792,10 @@ static t_Error InitFmPortDev(t_LnxWrpFmPortDev *p_LnxWrpFmPortDev)
+ 
+ 
+     if ((p_LnxWrpFmPortDev->settings.param.portType != e_FM_PORT_TYPE_TX) &&
+-        (p_LnxWrpFmPortDev->settings.param.portType != e_FM_PORT_TYPE_TX_10G)) {
+-            if (FM_PORT_ConfigErrorsToDiscard(p_LnxWrpFmPortDev->h_Dev, (FM_PORT_FRM_ERR_IPRE |
+-                                                                         FM_PORT_FRM_ERR_IPR_NCSP |
+-                                                                         FM_PORT_FRM_ERR_CLS_DISCARD)) !=E_OK)
+-            RETURN_ERROR(MAJOR, E_INVALID_STATE, NO_MSG);
++        (p_LnxWrpFmPortDev->settings.param.portType != e_FM_PORT_TYPE_TX_10G)) { 
++            /*(FM_PORT_FRM_ERR_IPRE | FM_PORT_FRM_ERR_IPR_NCSP | FM_PORT_FRM_ERR_CLS_DISCARD*/
++            if (FM_PORT_ConfigErrorsToDiscard(p_LnxWrpFmPortDev->h_Dev, FM_RFSDM_DEFAULT) != E_OK)
++            	RETURN_ERROR(MAJOR, E_INVALID_STATE, NO_MSG);
+     }
+ 
+     if (CheckNConfigFmPortAdvArgs(p_LnxWrpFmPortDev) != E_OK)
+@@ -1281,6 +1280,9 @@ static struct platform_driver fm_port_driver = {
+ 	.remove = fm_port_remove
+ };
+ 
++static struct delayed_work fm_port_late_work;
++static void fm_port_init_handles_workfn(struct work_struct *work);
++
+ static int __init __cold fm_port_load(void)
+ {
+ 	if (platform_driver_register(&fm_port_driver)) {
+@@ -1290,9 +1292,78 @@ static int __init __cold fm_port_load(void)
+ 
+ 	printk(KERN_INFO "Freescale FM Ports module\n");
+ 
++	/* Schedule delayed port handle init — must run after mainline DPAA
++	 * port probe (~T+55s). 90s delay gives margin for board boot timing. */
++	INIT_DELAYED_WORK(&fm_port_late_work, fm_port_init_handles_workfn);
++	schedule_delayed_work(&fm_port_late_work, 90 * HZ);
++
+ 	return 0;
+ }
+ 
++/*
++ * KILO-FIX: delayed work to initialize SDK port handles for ports that
++ * were probed by the mainline DPAA driver instead of the SDK fm_port_driver.
++ *
++ * Must run AFTER the mainline DPAA port probe completes (~T+55s).
++ * late_initcall would fire too early (T+1s) when the hardware isn't
++ * fully set up by the mainline driver.
++ */
++static struct delayed_work fm_port_late_work;
++static void fm_port_init_handles_workfn(struct work_struct *work)
++{
++	struct device_node *fman_np;
++	int i;
++
++	fman_np = of_find_compatible_node(NULL, NULL, "fsl,fman");
++	if (!fman_np)
++		return;
++
++	for_each_compatible_node(fman_np, NULL, "fsl,fman") {
++		t_LnxWrpFmDev *p_LnxWrpFmDev;
++		struct platform_device *pdev;
++
++		pdev = of_find_device_by_node(fman_np);
++		if (!pdev)
++			continue;
++
++		p_LnxWrpFmDev = (t_LnxWrpFmDev *)fm_bind(&pdev->dev);
++		if (!p_LnxWrpFmDev) {
++			put_device(&pdev->dev);
++			continue;
++		}
++
++		/* Initialize RX ports that have a device but no handle */
++		for (i = 0; i < FM_MAX_NUM_OF_RX_PORTS; i++) {
++			if (p_LnxWrpFmDev->rxPorts[i].dev &&
++			    !p_LnxWrpFmDev->rxPorts[i].h_Dev) {
++				pr_info("fm_port: delayed-init rx port %d\n", i);
++				InitFmPortDev(&p_LnxWrpFmDev->rxPorts[i]);
++			}
++		}
++
++		/* Initialize TX ports that have a device but no handle */
++		for (i = 0; i < FM_MAX_NUM_OF_TX_PORTS; i++) {
++			if (p_LnxWrpFmDev->txPorts[i].dev &&
++			    !p_LnxWrpFmDev->txPorts[i].h_Dev) {
++				pr_info("fm_port: delayed-init tx port %d\n", i);
++				InitFmPortDev(&p_LnxWrpFmDev->txPorts[i]);
++			}
++		}
++
++		/* OP ports */
++		for (i = 0; i < FM_MAX_NUM_OF_OH_PORTS - 1; i++) {
++			if (p_LnxWrpFmDev->opPorts[i].dev &&
++			    !p_LnxWrpFmDev->opPorts[i].h_Dev) {
++				pr_info("fm_port: delayed-init op port %d\n", i);
++				InitFmPortDev(&p_LnxWrpFmDev->opPorts[i]);
++			}
++		}
++
++		fm_unbind((struct fm *)p_LnxWrpFmDev);
++		put_device(&pdev->dev);
++	}
++}
++
+ static void __exit __cold fm_port_unload(void)
+ {
+ 	platform_driver_unregister(&fm_port_driver);
