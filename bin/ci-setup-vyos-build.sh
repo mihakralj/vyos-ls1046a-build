@@ -622,17 +622,15 @@ chmod +x "$HOOKS/96-enable-services.chroot"
 # /lib/modules/$KVER/extra/ but does not auto-load it — that's this
 # hook's job. Staged UNCONDITIONALLY: the flavor split was retired
 # 2026-06-14 (single image carries the dormant ask.ko), so this must
-# Copy ASK artifacts into includes.chroot BEFORE the chroot is built.
-# The hook runs inside the chroot and can't see the host worktree,
-# but includes.chroot files are merged at bootstrap time so they're
-# available at /tmp/ask-artifacts/ when the hook runs.
-INCLUDES_CHROOT="${GITHUB_WORKSPACE:-.}/vyos-build/data/live-build-config/includes.chroot"
-mkdir -p "$INCLUDES_CHROOT/tmp/ask-artifacts"
-if [ -d "${GITHUB_WORKSPACE:-.}/release/ask-6.12.49" ]; then
-  cp -v "${GITHUB_WORKSPACE:-.}/release/ask-6.12.49/"* "$INCLUDES_CHROOT/tmp/ask-artifacts/" 2>&1 | tail -5
-  echo "### staged ask artifacts into $INCLUDES_CHROOT/tmp/ask-artifacts/"
+# Copy ASK offload .deb into packages.chroot so it's installed at chroot time.
+# The .deb installs all ASK modules, userspace, configs, and services.
+# Must be built BEFORE this script runs (ci-build-packages.sh produces it).
+if [ -f ask-offload_1.0.0_arm64.deb ]; then
+  mkdir -p vyos-build/data/live-build-config/packages.chroot
+  cp -v ask-offload_1.0.0_arm64.deb vyos-build/data/live-build-config/packages.chroot/
+  echo "### staged ask-offload.deb into packages.chroot/"
 else
-  echo "### WARNING: release/ask-6.12.49/ not found — ASK artifacts MISSING from ISO"
+  echo "### WARNING: ask-offload_1.0.0_arm64.deb not found — ASK artifacts MISSING from ISO"
 fi
 
 # match the kernel/flavors/ask oot-module build, which is itself wired
