@@ -236,6 +236,11 @@ jobs:
             "$BASE/linux-headers-6.12.49-vyos_6.12.49-1_arm64.deb"
           echo "### Downloaded kernel .debs:"
           ls -lh vyos-build/scripts/package-build/linux-*.deb
+          # Also copy to packages.chroot so kernel_version pinning in
+          # ci-setup-vyos-build.sh finds them (it scans PKG_CHROOT).
+          mkdir -p vyos-build/data/live-build-config/packages.chroot
+          cp -v vyos-build/scripts/package-build/linux-*.deb \
+            vyos-build/data/live-build-config/packages.chroot/
 
       - name: Stage kernel tree (FLAVOR-aware)
         run: bin/ci-stage-kernel.sh
