@@ -1,0 +1,7 @@
+# vyos-user-utils_1.4.0+vyos1+current — VyOS Circinus 2026.03 vendor tarball
+name = "vyos-user-utils_1.4.0+vyos1+current"
+bundle_path = "/tmp/vyos-stream-tarballs/vyos-user-utils_1.4.0+vyos1+current"
+size_bytes = 27920
+file_count = 11
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

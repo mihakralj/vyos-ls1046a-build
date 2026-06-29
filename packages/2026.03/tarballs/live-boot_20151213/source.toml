@@ -1,0 +1,7 @@
+# live-boot_20151213 — VyOS Circinus 2026.03 vendor tarball
+name = "live-boot_20151213"
+bundle_path = "/tmp/vyos-stream-tarballs/live-boot_20151213"
+size_bytes = 576974
+file_count = 67
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

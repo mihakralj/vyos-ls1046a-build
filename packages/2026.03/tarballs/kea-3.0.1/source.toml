@@ -1,0 +1,7 @@
+# kea-3.0.1 — VyOS Circinus 2026.03 vendor tarball
+name = "kea-3.0.1"
+bundle_path = "/tmp/vyos-stream-tarballs/kea-3.0.1"
+size_bytes = 53671464
+file_count = 3577
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

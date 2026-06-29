@@ -1,0 +1,7 @@
+# wide-dhcpv6_debian_20080615-23 — VyOS Circinus 2026.03 vendor tarball
+name = "wide-dhcpv6_debian_20080615-23"
+bundle_path = "/tmp/vyos-stream-tarballs/wide-dhcpv6_debian_20080615-23"
+size_bytes = 1417874
+file_count = 145
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

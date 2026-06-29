@@ -1,0 +1,7 @@
+# openvpn-otp_9781ff1 — VyOS Circinus 2026.03 vendor tarball
+name = "openvpn-otp_9781ff1"
+bundle_path = "/tmp/vyos-stream-tarballs/openvpn-otp_9781ff1"
+size_bytes = 92311
+file_count = 16
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

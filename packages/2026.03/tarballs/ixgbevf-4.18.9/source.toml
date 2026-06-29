@@ -1,0 +1,7 @@
+# ixgbevf-4.18.9 — VyOS Circinus 2026.03 vendor tarball
+name = "ixgbevf-4.18.9"
+bundle_path = "/tmp/vyos-stream-tarballs/ixgbevf-4.18.9"
+size_bytes = 992684
+file_count = 37
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

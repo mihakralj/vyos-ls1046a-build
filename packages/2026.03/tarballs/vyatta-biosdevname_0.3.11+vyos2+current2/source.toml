@@ -1,0 +1,7 @@
+# vyatta-biosdevname_0.3.11+vyos2+current2 — VyOS Circinus 2026.03 vendor tarball
+name = "vyatta-biosdevname_0.3.11+vyos2+current2"
+bundle_path = "/tmp/vyos-stream-tarballs/vyatta-biosdevname_0.3.11+vyos2+current2"
+size_bytes = 358554
+file_count = 56
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

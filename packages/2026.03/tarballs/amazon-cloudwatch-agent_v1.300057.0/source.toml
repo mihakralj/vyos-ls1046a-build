@@ -1,0 +1,7 @@
+# amazon-cloudwatch-agent_v1.300057.0 — VyOS Circinus 2026.03 vendor tarball
+name = "amazon-cloudwatch-agent_v1.300057.0"
+bundle_path = "/tmp/vyos-stream-tarballs/amazon-cloudwatch-agent_v1.300057.0"
+size_bytes = 37362233
+file_count = 1566
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

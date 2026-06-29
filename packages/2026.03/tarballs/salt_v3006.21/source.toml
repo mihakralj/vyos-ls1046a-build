@@ -1,0 +1,7 @@
+# salt_v3006.21 — VyOS Circinus 2026.03 vendor tarball
+name = "salt_v3006.21"
+bundle_path = "/tmp/vyos-stream-tarballs/salt_v3006.21"
+size_bytes = 65759949
+file_count = 6671
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

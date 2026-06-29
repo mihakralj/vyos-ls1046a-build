@@ -1,0 +1,7 @@
+# blackbox_exporter_v0.26.0 — VyOS Circinus 2026.03 vendor tarball
+name = "blackbox_exporter_v0.26.0"
+bundle_path = "/tmp/vyos-stream-tarballs/blackbox_exporter_v0.26.0"
+size_bytes = 306914
+file_count = 60
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

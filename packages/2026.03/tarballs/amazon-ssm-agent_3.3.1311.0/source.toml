@@ -1,0 +1,7 @@
+# amazon-ssm-agent_3.3.1311.0 — VyOS Circinus 2026.03 vendor tarball
+name = "amazon-ssm-agent_3.3.1311.0"
+bundle_path = "/tmp/vyos-stream-tarballs/amazon-ssm-agent_3.3.1311.0"
+size_bytes = 265323249
+file_count = 6613
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

@@ -1,0 +1,7 @@
+# linux-firmware-20260110 — VyOS Circinus 2026.03 vendor tarball
+name = "linux-firmware-20260110"
+bundle_path = "/tmp/vyos-stream-tarballs/linux-firmware-20260110"
+size_bytes = 1810329472
+file_count = 4396
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

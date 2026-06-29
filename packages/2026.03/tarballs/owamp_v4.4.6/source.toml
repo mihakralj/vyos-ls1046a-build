@@ -1,0 +1,7 @@
+# owamp_v4.4.6 — VyOS Circinus 2026.03 vendor tarball
+name = "owamp_v4.4.6"
+bundle_path = "/tmp/vyos-stream-tarballs/owamp_v4.4.6"
+size_bytes = 2945739
+file_count = 182
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

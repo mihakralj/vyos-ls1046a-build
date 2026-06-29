@@ -1,0 +1,7 @@
+# hostap_525bbfca3 — VyOS Circinus 2026.03 vendor tarball
+name = "hostap_525bbfca3"
+bundle_path = "/tmp/vyos-stream-tarballs/hostap_525bbfca3"
+size_bytes = 26365809
+file_count = 1490
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

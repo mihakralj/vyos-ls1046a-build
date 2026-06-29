@@ -1,0 +1,7 @@
+# ndppd_debian_0.2.5-6 — VyOS Circinus 2026.03 vendor tarball
+name = "ndppd_debian_0.2.5-6"
+bundle_path = "/tmp/vyos-stream-tarballs/ndppd_debian_0.2.5-6"
+size_bytes = 137696
+file_count = 40
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

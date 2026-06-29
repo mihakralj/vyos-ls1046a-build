@@ -1,0 +1,7 @@
+# xen-guest-agent_0.4.0 — VyOS Circinus 2026.03 vendor tarball
+name = "xen-guest-agent_0.4.0"
+bundle_path = "/tmp/vyos-stream-tarballs/xen-guest-agent_0.4.0"
+size_bytes = 159567
+file_count = 41
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

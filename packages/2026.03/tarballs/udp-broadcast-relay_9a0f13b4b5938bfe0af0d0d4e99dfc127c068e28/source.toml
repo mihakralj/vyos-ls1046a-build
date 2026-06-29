@@ -1,0 +1,7 @@
+# udp-broadcast-relay_9a0f13b4b5938bfe0af0d0d4e99dfc127c068e28 — VyOS Circinus 2026.03 vendor tarball
+name = "udp-broadcast-relay_9a0f13b4b5938bfe0af0d0d4e99dfc127c068e28"
+bundle_path = "/tmp/vyos-stream-tarballs/udp-broadcast-relay_9a0f13b4b5938bfe0af0d0d4e99dfc127c068e28"
+size_bytes = 35356
+file_count = 7
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

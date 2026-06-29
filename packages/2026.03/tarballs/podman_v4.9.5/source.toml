@@ -1,0 +1,7 @@
+# podman_v4.9.5 — VyOS Circinus 2026.03 vendor tarball
+name = "podman_v4.9.5"
+bundle_path = "/tmp/vyos-stream-tarballs/podman_v4.9.5"
+size_bytes = 97961812
+file_count = 9574
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

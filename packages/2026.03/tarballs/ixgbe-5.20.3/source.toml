@@ -1,0 +1,7 @@
+# ixgbe-5.20.3 — VyOS Circinus 2026.03 vendor tarball
+name = "ixgbe-5.20.3"
+bundle_path = "/tmp/vyos-stream-tarballs/ixgbe-5.20.3"
+size_bytes = 2375034
+file_count = 69
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

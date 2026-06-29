@@ -1,0 +1,7 @@
+# pkg-libnftnl_debian_1.2.6-2 — VyOS Circinus 2026.03 vendor tarball
+name = "pkg-libnftnl_debian_1.2.6-2"
+bundle_path = "/tmp/vyos-stream-tarballs/pkg-libnftnl_debian_1.2.6-2"
+size_bytes = 2510016
+file_count = 223
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

@@ -1,0 +1,7 @@
+# strongswan_debian_5.9.11-2 — VyOS Circinus 2026.03 vendor tarball
+name = "strongswan_debian_5.9.11-2"
+bundle_path = "/tmp/vyos-stream-tarballs/strongswan_debian_5.9.11-2"
+size_bytes = 34129731
+file_count = 8642
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

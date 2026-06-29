@@ -1,0 +1,7 @@
+# libyang_v3.13.6 — VyOS Circinus 2026.03 vendor tarball
+name = "libyang_v3.13.6"
+bundle_path = "/tmp/vyos-stream-tarballs/libyang_v3.13.6"
+size_bytes = 8587383
+file_count = 578
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

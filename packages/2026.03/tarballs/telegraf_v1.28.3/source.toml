@@ -1,0 +1,7 @@
+# telegraf_v1.28.3 — VyOS Circinus 2026.03 vendor tarball
+name = "telegraf_v1.28.3"
+bundle_path = "/tmp/vyos-stream-tarballs/telegraf_v1.28.3"
+size_bytes = 18971137
+file_count = 3797
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

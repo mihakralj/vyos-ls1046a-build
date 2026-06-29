@@ -1,0 +1,7 @@
+# libnss-mapuser_circinus — VyOS Circinus 2026.03 vendor tarball
+name = "libnss-mapuser_circinus"
+bundle_path = "/tmp/vyos-stream-tarballs/libnss-mapuser_circinus"
+size_bytes = 71664
+file_count = 25
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

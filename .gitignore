@@ -92,7 +92,8 @@ ASK/fci/lib/src/*.la
 # Local-build artefacts (created by bin/local-build.sh)
 *.log
 /manifest.json
-/packages/
+/packages/*
+!/packages/2026.03/
 .clinerules/
 .clinehooks/
 .clineskills/

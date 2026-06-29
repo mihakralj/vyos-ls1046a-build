@@ -1,0 +1,7 @@
+# ovpn-dco-v0.2.20231117 — VyOS Circinus 2026.03 vendor tarball
+name = "ovpn-dco-v0.2.20231117"
+bundle_path = "/tmp/vyos-stream-tarballs/ovpn-dco-v0.2.20231117"
+size_bytes = 1877858
+file_count = 90
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

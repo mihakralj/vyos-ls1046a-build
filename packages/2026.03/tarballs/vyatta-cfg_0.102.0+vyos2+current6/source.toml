@@ -1,0 +1,7 @@
+# vyatta-cfg_0.102.0+vyos2+current6 — VyOS Circinus 2026.03 vendor tarball
+name = "vyatta-cfg_0.102.0+vyos2+current6"
+bundle_path = "/tmp/vyos-stream-tarballs/vyatta-cfg_0.102.0+vyos2+current6"
+size_bytes = 981394
+file_count = 96
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

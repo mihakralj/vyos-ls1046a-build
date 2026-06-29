@@ -1,0 +1,7 @@
+# jool-4.1.9+bf4c7e3669 — VyOS Circinus 2026.03 vendor tarball
+name = "jool-4.1.9+bf4c7e3669"
+bundle_path = "/tmp/vyos-stream-tarballs/jool-4.1.9+bf4c7e3669"
+size_bytes = 5554686
+file_count = 1016
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

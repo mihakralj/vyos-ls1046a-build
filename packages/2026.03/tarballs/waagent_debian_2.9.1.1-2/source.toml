@@ -1,0 +1,7 @@
+# waagent_debian_2.9.1.1-2 — VyOS Circinus 2026.03 vendor tarball
+name = "waagent_debian_2.9.1.1-2"
+bundle_path = "/tmp/vyos-stream-tarballs/waagent_debian_2.9.1.1-2"
+size_bytes = 6138040
+file_count = 516
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

@@ -1,0 +1,18 @@
+# Large files stay in /tmp — referenced by packages.toml manifest
+# The manifest and source.toml reference files are tracked in git.
+
+# Don't commit actual source tarballs
+*.orig.tar.*
+*.tar.gz
+*.tar.xz
+*.tar.bz2
+*.orig/
+*.diff.gz
+
+# Don't commit vendored tarball contents
+tarballs/*/.gitkeep-out
+
+# But DO track the manifest and reference files
+!packages.toml
+!SUMMARY.md
+!*.toml

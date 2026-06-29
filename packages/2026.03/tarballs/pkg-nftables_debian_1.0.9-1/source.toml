@@ -1,0 +1,7 @@
+# pkg-nftables_debian_1.0.9-1 — VyOS Circinus 2026.03 vendor tarball
+name = "pkg-nftables_debian_1.0.9-1"
+bundle_path = "/tmp/vyos-stream-tarballs/pkg-nftables_debian_1.0.9-1"
+size_bytes = 8236060
+file_count = 1511
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

@@ -1,0 +1,7 @@
+# aws-gwlbtun_c1fd48b — VyOS Circinus 2026.03 vendor tarball
+name = "aws-gwlbtun_c1fd48b"
+bundle_path = "/tmp/vyos-stream-tarballs/aws-gwlbtun_c1fd48b"
+size_bytes = 1094671
+file_count = 35
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

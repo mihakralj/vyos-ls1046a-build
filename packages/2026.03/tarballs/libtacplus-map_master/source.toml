@@ -1,0 +1,7 @@
+# libtacplus-map_master — VyOS Circinus 2026.03 vendor tarball
+name = "libtacplus-map_master"
+bundle_path = "/tmp/vyos-stream-tarballs/libtacplus-map_master"
+size_bytes = 60337
+file_count = 24
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

@@ -1,0 +1,7 @@
+# vyos-http-api-tools_2.3 — VyOS Circinus 2026.03 vendor tarball
+name = "vyos-http-api-tools_2.3"
+bundle_path = "/tmp/vyos-stream-tarballs/vyos-http-api-tools_2.3"
+size_bytes = 12175
+file_count = 13
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

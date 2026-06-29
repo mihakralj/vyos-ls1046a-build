@@ -1,0 +1,7 @@
+# bash-completion_debian_2.8-6 — VyOS Circinus 2026.03 vendor tarball
+name = "bash-completion_debian_2.8-6"
+bundle_path = "/tmp/vyos-stream-tarballs/bash-completion_debian_2.8-6"
+size_bytes = 1401664
+file_count = 2058
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

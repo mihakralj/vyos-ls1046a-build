@@ -1,0 +1,7 @@
+# wpa_debian_2%2.10-12 — VyOS Circinus 2026.03 vendor tarball
+name = "wpa_debian_2%2.10-12"
+bundle_path = "/tmp/vyos-stream-tarballs/wpa_debian_2%2.10-12"
+size_bytes = 16947708
+file_count = 1012
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

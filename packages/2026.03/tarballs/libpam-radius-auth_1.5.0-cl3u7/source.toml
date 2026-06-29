@@ -1,0 +1,7 @@
+# libpam-radius-auth_1.5.0-cl3u7 — VyOS Circinus 2026.03 vendor tarball
+name = "libpam-radius-auth_1.5.0-cl3u7"
+bundle_path = "/tmp/vyos-stream-tarballs/libpam-radius-auth_1.5.0-cl3u7"
+size_bytes = 245360
+file_count = 55
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

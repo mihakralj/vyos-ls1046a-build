@@ -1,0 +1,7 @@
+# node_exporter_v1.9.1 — VyOS Circinus 2026.03 vendor tarball
+name = "node_exporter_v1.9.1"
+bundle_path = "/tmp/vyos-stream-tarballs/node_exporter_v1.9.1"
+size_bytes = 2151039
+file_count = 374
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

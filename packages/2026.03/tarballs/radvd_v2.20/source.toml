@@ -1,0 +1,7 @@
+# radvd_v2.20 — VyOS Circinus 2026.03 vendor tarball
+name = "radvd_v2.20"
+bundle_path = "/tmp/vyos-stream-tarballs/radvd_v2.20"
+size_bytes = 411974
+file_count = 68
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

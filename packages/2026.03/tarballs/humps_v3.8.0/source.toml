@@ -1,0 +1,7 @@
+# humps_v3.8.0 — VyOS Circinus 2026.03 vendor tarball
+name = "humps_v3.8.0"
+bundle_path = "/tmp/vyos-stream-tarballs/humps_v3.8.0"
+size_bytes = 2590616
+file_count = 35
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

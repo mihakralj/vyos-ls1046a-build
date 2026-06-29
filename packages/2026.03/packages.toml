@@ -1,0 +1,2992 @@
+# packages/2026.03/packages.toml — VyOS Circinus 2026.03 GPL source manifest
+# Auto-generated from /tmp/vyos-stream-src + /tmp/vyos-stream-tarballs
+# Date: 2026-06-29
+# Source packages: 541
+# Vendored tarballs: 60
+# Total size: 12.4 GB
+#
+# Usage:
+#   - VyOS tarballs (60): built from source into a local apt repo
+#   - Debian src packages (~500): reference only; arm64 binaries from deb.debian.org
+#
+
+## VyOS vendored tarballs
+
+[tarball.linux-kernel-6.6.128]
+path = "/tmp/vyos-stream-tarballs/linux-kernel-6.6.128"
+size = "2.7 GB"
+file_count = 129775
+
+[tarball.linux-firmware-20260110]
+path = "/tmp/vyos-stream-tarballs/linux-firmware-20260110"
+size = "1.7 GB"
+file_count = 4396
+
+[tarball.amazon-ssm-agent_3.3.1311.0]
+path = "/tmp/vyos-stream-tarballs/amazon-ssm-agent_3.3.1311.0"
+size = "253.0 MB"
+file_count = 6613
+
+[tarball.podman_v4.9.5]
+path = "/tmp/vyos-stream-tarballs/podman_v4.9.5"
+size = "93.4 MB"
+file_count = 9574
+
+[tarball.salt_v3006.21]
+path = "/tmp/vyos-stream-tarballs/salt_v3006.21"
+size = "62.7 MB"
+file_count = 6671
+
+[tarball.frr_168ade7da9]
+path = "/tmp/vyos-stream-tarballs/frr_168ade7da9"
+size = "52.1 MB"
+file_count = 8269
+
+[tarball.isc-kea_Kea-3.0.2]
+path = "/tmp/vyos-stream-tarballs/isc-kea_Kea-3.0.2"
+size = "51.5 MB"
+file_count = 3667
+
+[tarball.kea-3.0.1]
+path = "/tmp/vyos-stream-tarballs/kea-3.0.1"
+size = "51.2 MB"
+file_count = 3577
+
+[tarball.amazon-cloudwatch-agent_v1.300057.0]
+path = "/tmp/vyos-stream-tarballs/amazon-cloudwatch-agent_v1.300057.0"
+size = "35.6 MB"
+file_count = 1566
+
+[tarball.strongswan_debian_5.9.11-2]
+path = "/tmp/vyos-stream-tarballs/strongswan_debian_5.9.11-2"
+size = "32.5 MB"
+file_count = 8642
+
+[tarball.QAT.L.4.24.0-00005]
+path = "/tmp/vyos-stream-tarballs/QAT.L.4.24.0-00005"
+size = "31.1 MB"
+file_count = 928
+
+[tarball.net-snmp_debian_5.9.5.2+dfsg-1]
+path = "/tmp/vyos-stream-tarballs/net-snmp_debian_5.9.5.2+dfsg-1"
+size = "28.6 MB"
+file_count = 2295
+
+[tarball.hostap_525bbfca3]
+path = "/tmp/vyos-stream-tarballs/hostap_525bbfca3"
+size = "25.1 MB"
+file_count = 1490
+
+[tarball.accel-ppp-ng-3e30d9b]
+path = "/tmp/vyos-stream-tarballs/accel-ppp-ng-3e30d9b"
+size = "18.3 MB"
+file_count = 1159
+
+[tarball.telegraf_v1.28.3]
+path = "/tmp/vyos-stream-tarballs/telegraf_v1.28.3"
+size = "18.1 MB"
+file_count = 3797
+
+[tarball.vyatta-bash_4.1-3+vyos2+current2]
+path = "/tmp/vyos-stream-tarballs/vyatta-bash_4.1-3+vyos2+current2"
+size = "17.8 MB"
+file_count = 1317
+
+[tarball.wpa_debian_2%2.10-12]
+path = "/tmp/vyos-stream-tarballs/wpa_debian_2%2.10-12"
+size = "16.2 MB"
+file_count = 1012
+
+[tarball.isc-dhcp_debian_4.4.3-P1-4]
+path = "/tmp/vyos-stream-tarballs/isc-dhcp_debian_4.4.3-P1-4"
+size = "15.3 MB"
+file_count = 849
+
+[tarball.vyos-1x]
+path = "/tmp/vyos-stream-tarballs/vyos-1x"
+size = "12.7 MB"
+file_count = 2535
+
+[tarball.host-sflow_v2.1.21-1]
+path = "/tmp/vyos-stream-tarballs/host-sflow_v2.1.21-1"
+size = "11.5 MB"
+file_count = 586
+
+[tarball.dropbear_debian_2022.83-1+deb12u1]
+path = "/tmp/vyos-stream-tarballs/dropbear_debian_2022.83-1+deb12u1"
+size = "9.2 MB"
+file_count = 978
+
+[tarball.libyang_v3.13.6]
+path = "/tmp/vyos-stream-tarballs/libyang_v3.13.6"
+size = "8.2 MB"
+file_count = 578
+
+[tarball.pkg-nftables_debian_1.0.9-1]
+path = "/tmp/vyos-stream-tarballs/pkg-nftables_debian_1.0.9-1"
+size = "7.9 MB"
+file_count = 1511
+
+[tarball.waagent_debian_2.9.1.1-2]
+path = "/tmp/vyos-stream-tarballs/waagent_debian_2.9.1.1-2"
+size = "5.9 MB"
+file_count = 516
+
+[tarball.cloud-init_22.1-447-g1eccc418.orig]
+path = "/tmp/vyos-stream-tarballs/cloud-init_22.1-447-g1eccc418.orig"
+size = "5.5 MB"
+file_count = 823
+
+[tarball.jool-4.1.9+bf4c7e3669]
+path = "/tmp/vyos-stream-tarballs/jool-4.1.9+bf4c7e3669"
+size = "5.3 MB"
+file_count = 1016
+
+[tarball.keepalived_debian_1%2.3.3-1]
+path = "/tmp/vyos-stream-tarballs/keepalived_debian_1%2.3.3-1"
+size = "5.0 MB"
+file_count = 350
+
+[tarball.owamp_v4.4.6]
+path = "/tmp/vyos-stream-tarballs/owamp_v4.4.6"
+size = "2.8 MB"
+file_count = 182
+
+[tarball.humps_v3.8.0]
+path = "/tmp/vyos-stream-tarballs/humps_v3.8.0"
+size = "2.5 MB"
+file_count = 35
+
+[tarball.pkg-libnftnl_debian_1.2.6-2]
+path = "/tmp/vyos-stream-tarballs/pkg-libnftnl_debian_1.2.6-2"
+size = "2.4 MB"
+file_count = 223
+
+[tarball.ixgbe-5.20.3]
+path = "/tmp/vyos-stream-tarballs/ixgbe-5.20.3"
+size = "2.3 MB"
+file_count = 69
+
+[tarball.node_exporter_v1.9.1]
+path = "/tmp/vyos-stream-tarballs/node_exporter_v1.9.1"
+size = "2.1 MB"
+file_count = 374
+
+[tarball.vyos-build]
+path = "/tmp/vyos-stream-tarballs/vyos-build"
+size = "2.0 MB"
+file_count = 297
+
+[tarball.ovpn-dco-v0.2.20231117]
+path = "/tmp/vyos-stream-tarballs/ovpn-dco-v0.2.20231117"
+size = "1.8 MB"
+file_count = 90
+
+[tarball.ethtool_debian_1%6.10-1]
+path = "/tmp/vyos-stream-tarballs/ethtool_debian_1%6.10-1"
+size = "1.6 MB"
+file_count = 145
+
+[tarball.ddclient_debian_3.11.2-1]
+path = "/tmp/vyos-stream-tarballs/ddclient_debian_3.11.2-1"
+size = "1.5 MB"
+file_count = 161
+
+[tarball.wide-dhcpv6_debian_20080615-23]
+path = "/tmp/vyos-stream-tarballs/wide-dhcpv6_debian_20080615-23"
+size = "1.4 MB"
+file_count = 145
+
+[tarball.bash-completion_debian_2.8-6]
+path = "/tmp/vyos-stream-tarballs/bash-completion_debian_2.8-6"
+size = "1.3 MB"
+file_count = 2058
+
+[tarball.libnss-tacplus_master]
+path = "/tmp/vyos-stream-tarballs/libnss-tacplus_master"
+size = "1.3 MB"
+file_count = 42
+
+[tarball.aws-gwlbtun_c1fd48b]
+path = "/tmp/vyos-stream-tarballs/aws-gwlbtun_c1fd48b"
+size = "1.0 MB"
+file_count = 35
+
+[tarball.ixgbevf-4.18.9]
+path = "/tmp/vyos-stream-tarballs/ixgbevf-4.18.9"
+size = "969.4 KB"
+file_count = 37
+
+[tarball.vyatta-cfg_0.102.0+vyos2+current6]
+path = "/tmp/vyos-stream-tarballs/vyatta-cfg_0.102.0+vyos2+current6"
+size = "958.4 KB"
+file_count = 96
+
+[tarball.live-boot_20151213]
+path = "/tmp/vyos-stream-tarballs/live-boot_20151213"
+size = "563.5 KB"
+file_count = 67
+
+[tarball.ipaddrcheck_1.4]
+path = "/tmp/vyos-stream-tarballs/ipaddrcheck_1.4"
+size = "529.8 KB"
+file_count = 42
+
+[tarball.radvd_v2.20]
+path = "/tmp/vyos-stream-tarballs/radvd_v2.20"
+size = "402.3 KB"
+file_count = 68
+
+[tarball.vyatta-biosdevname_0.3.11+vyos2+current2]
+path = "/tmp/vyos-stream-tarballs/vyatta-biosdevname_0.3.11+vyos2+current2"
+size = "350.2 KB"
+file_count = 56
+
+[tarball.blackbox_exporter_v0.26.0]
+path = "/tmp/vyos-stream-tarballs/blackbox_exporter_v0.26.0"
+size = "299.7 KB"
+file_count = 60
+
+[tarball.libpam-tacplus_master]
+path = "/tmp/vyos-stream-tarballs/libpam-tacplus_master"
+size = "259.4 KB"
+file_count = 67
+
+[tarball.libpam-radius-auth_1.5.0-cl3u7]
+path = "/tmp/vyos-stream-tarballs/libpam-radius-auth_1.5.0-cl3u7"
+size = "239.6 KB"
+file_count = 55
+
+[tarball.frr_exporter_v1.5.0]
+path = "/tmp/vyos-stream-tarballs/frr_exporter_v1.5.0"
+size = "158.4 KB"
+file_count = 39
+
+[tarball.xen-guest-agent_0.4.0]
+path = "/tmp/vyos-stream-tarballs/xen-guest-agent_0.4.0"
+size = "155.8 KB"
+file_count = 41
+
+[tarball.ndppd_debian_0.2.5-6]
+path = "/tmp/vyos-stream-tarballs/ndppd_debian_0.2.5-6"
+size = "134.5 KB"
+file_count = 40
+
+[tarball.openvpn-otp_9781ff1]
+path = "/tmp/vyos-stream-tarballs/openvpn-otp_9781ff1"
+size = "90.1 KB"
+file_count = 16
+
+[tarball.vyos-libnss-mapuser_1.1.0-cl3u3.1]
+path = "/tmp/vyos-stream-tarballs/vyos-libnss-mapuser_1.1.0-cl3u3.1"
+size = "78.4 KB"
+file_count = 28
+
+[tarball.libnss-mapuser_circinus]
+path = "/tmp/vyos-stream-tarballs/libnss-mapuser_circinus"
+size = "70.0 KB"
+file_count = 25
+
+[tarball.libtacplus-map_master]
+path = "/tmp/vyos-stream-tarballs/libtacplus-map_master"
+size = "58.9 KB"
+file_count = 24
+
+[tarball.hvinfo_1.2.0]
+path = "/tmp/vyos-stream-tarballs/hvinfo_1.2.0"
+size = "54.0 KB"
+file_count = 26
+
+[tarball.udp-broadcast-relay_9a0f13b4b5938bfe0af0d0d4e99dfc127c068e28]
+path = "/tmp/vyos-stream-tarballs/udp-broadcast-relay_9a0f13b4b5938bfe0af0d0d4e99dfc127c068e28"
+size = "34.5 KB"
+file_count = 7
+
+[tarball.vyos-user-utils_1.4.0+vyos1+current]
+path = "/tmp/vyos-stream-tarballs/vyos-user-utils_1.4.0+vyos1+current"
+size = "27.3 KB"
+file_count = 11
+
+[tarball.vyos-http-api-tools_2.3]
+path = "/tmp/vyos-stream-tarballs/vyos-http-api-tools_2.3"
+size = "11.9 KB"
+file_count = 13
+
+## Debian source packages (reference)
+# arm64 binaries from deb.debian.org bookworm at build time
+
+[src.aardvark-dns]
+versions = ['1.4.0', '1.4.0-3']
+  debian = "aardvark-dns_1.4.0-3.debian"  # 9.8 KB
+  orig = "aardvark-dns_1.4.0.orig"  # 201.0 KB
+
+[src.acl]
+versions = ['2.3.1', '2.3.1-3']
+  debian = "acl_2.3.1-3.debian"  # 81.1 KB
+  orig = "acl_2.3.1.orig"  # 2.3 MB
+
+[src.acpid]
+versions = ['2.0.33', '2.0.33-2']
+  debian = "acpid_2.0.33-2.debian"  # 63.5 KB
+  orig = "acpid_2.0.33.orig"  # 710.5 KB
+
+[src.adduser]
+versions = ['3.134']
+  unknown = "adduser_3.134"  # 2.5 MB
+
+[src.amd64-microcode]
+versions = ['3.20250311.1~deb12u1']
+  unknown = "amd64-microcode_3.20250311.1~deb12u1"  # 732.2 KB
+
+[src.apparmor]
+versions = ['3.0.8', '3.0.8-3']
+  debian = "apparmor_3.0.8-3.debian"  # 385.0 KB
+  orig = "apparmor_3.0.8.orig"  # 17.3 MB
+
+[src.apt]
+versions = ['2.6.1']
+  unknown = "apt_2.6.1"  # 18.9 MB
+
+[src.apt-rdepends]
+versions = ['1.3.0', '1.3.0-10']
+  debian = "apt-rdepends_1.3.0-10.debian"  # 15.1 KB
+  orig = "apt-rdepends_1.3.0.orig"  # 40.7 KB
+
+[src.aptitude]
+versions = ['0.8.13', '0.8.13-5']
+  debian = "aptitude_0.8.13-5.debian"  # 216.9 KB
+  orig = "aptitude_0.8.13.orig"  # 36.7 MB
+
+[src.argon2]
+versions = ['0~20171227', '0~20171227-0.3+deb12u1']
+  debian = "argon2_0~20171227-0.3+deb12u1.debian"  # 21.2 KB
+  orig = "argon2_0~20171227.orig"  # 3.3 MB
+
+[src.arpwatch]
+versions = ['2.1a15', '2.1a15-8']
+  debian = "arpwatch_2.1a15-8.debian"  # 111.0 KB
+  orig = "arpwatch_2.1a15.orig"  # 675.1 KB
+
+[src.at]
+versions = ['3.2.5', '3.2.5-1']
+  debian = "at_3.2.5-1.debian"  # 48.3 KB
+  orig = "at_3.2.5.orig"  # 466.6 KB
+
+[src.atop]
+versions = ['2.8.1', '2.8.1-1+deb12u1']
+  debian = "atop_2.8.1-1+deb12u1.debian"  # 65.2 KB
+  orig = "atop_2.8.1.orig"  # 1.2 MB
+
+[src.attr]
+versions = ['2.5.1', '2.5.1-4']
+  debian = "attr_2.5.1-4.debian"  # 89.2 KB
+  orig = "attr_2.5.1.orig"  # 1.9 MB
+
+[src.audit]
+versions = ['3.0.9', '3.0.9-1']
+  debian = "audit_3.0.9-1.debian"  # 67.3 KB
+  orig = "audit_3.0.9.orig"  # 5.1 MB
+
+[src.avahi]
+versions = ['0.8', '0.8-10+deb12u1']
+  debian = "avahi_0.8-10+deb12u1.debian"  # 179.3 KB
+  orig = "avahi_0.8.orig"  # 7.6 MB
+
+[src.aws-crt-python]
+versions = ['0.16.8+dfsg', '0.16.8+dfsg-1']
+  debian = "aws-crt-python_0.16.8+dfsg-1.debian"  # 16.4 KB
+  orig = "aws-crt-python_0.16.8+dfsg.orig"  # 43.7 MB
+
+[src.awscli]
+versions = ['2.9.19', '2.9.19-1']
+  debian = "awscli_2.9.19-1.debian"  # 17.6 KB
+  orig = "awscli_2.9.19.orig"  # 94.8 MB
+
+[src.babeltrace]
+versions = ['1.5.11', '1.5.11-1']
+  debian = "babeltrace_1.5.11-1.debian"  # 40.1 KB
+  orig = "babeltrace_1.5.11.orig"  # 6.1 MB
+
+[src.base-files]
+versions = ['12.4+deb12u13']
+  unknown = "base-files_12.4+deb12u13"  # 315.4 KB
+
+[src.base-passwd]
+versions = ['3.6.1']
+  unknown = "base-passwd_3.6.1"  # 303.5 KB
+
+[src.bash]
+versions = ['5.2.15', '5.2.15-2']
+  debian = "bash_5.2.15-2.debian"  # 375.9 KB
+  orig = "bash_5.2.15.orig"  # 31.3 MB
+
+[src.bcg729]
+versions = ['1.1.1', '1.1.1-2']
+  debian = "bcg729_1.1.1-2.debian"  # 7.1 KB
+  orig = "bcg729_1.1.1.orig"  # 644.9 KB
+
+[src.beep]
+versions = ['1.4.9', '1.4.9-1']
+  debian = "beep_1.4.9-1.debian"  # 20.6 KB
+  orig = "beep_1.4.9.orig"  # 289.8 KB
+
+[src.bgpq3]
+versions = ['0.1.36.1', '0.1.36.1-1']
+  debian = "bgpq3_0.1.36.1-1.debian"  # 12.8 KB
+  orig = "bgpq3_0.1.36.1.orig"  # 373.1 KB
+
+[src.bind9]
+versions = ['9.18.44', '9.18.44-1~deb12u1']
+  debian = "bind9_9.18.44-1~deb12u1.debian"  # 234.2 KB
+  orig = "bind9_9.18.44.orig"  # 25.9 MB
+
+[src.binutils]
+versions = ['2.40', '2.40-2']
+  debian = "binutils_2.40-2.debian"  # 572.5 KB
+  orig = "binutils_2.40.orig"  # 264.1 MB
+
+[src.blinker]
+versions = ['1.5', '1.5-1']
+  debian = "blinker_1.5-1.debian"  # 13.4 KB
+  orig = "blinker_1.5.orig"  # 67.7 KB
+
+[src.bmon]
+versions = ['4.0', '4.0-10']
+  debian = "bmon_4.0-10.debian"  # 11.0 KB
+  orig = "bmon_4.0.orig"  # 279.0 KB
+
+[src.boost1.74]
+versions = ['1.74.0+ds1', '1.74.0+ds1-21']
+  debian = "boost1.74_1.74.0+ds1-21.debian"  # 3.1 MB
+  orig = "boost1.74_1.74.0+ds1.orig"  # 333.2 MB
+
+[src.brotli]
+versions = ['1.0.9', '1.0.9-2']
+  debian = "brotli_1.0.9-2.debian"  # 16.3 KB
+  orig = "brotli_1.0.9.orig"  # 2.0 MB
+
+[src.bsdmainutils]
+versions = ['12.1.8']
+  unknown = "bsdmainutils_12.1.8"  # 694.8 KB
+
+[src.busybox]
+versions = ['1.35.0', '1.35.0-4']
+  debian = "busybox_1.35.0-4.debian"  # 296.6 KB
+  orig = "busybox_1.35.0.orig"  # 9.6 MB
+
+[src.bzip2]
+versions = ['1.0.8', '1.0.8-5']
+  debian = "bzip2_1.0.8-5.debian"  # 82.8 KB
+  orig = "bzip2_1.0.8.orig"  # 3.0 MB
+
+[src.c-ares]
+versions = ['1.18.1', '1.18.1-3']
+  debian = "c-ares_1.18.1-3.debian"  # 37.3 KB
+  orig = "c-ares_1.18.1.orig"  # 7.1 MB
+
+[src.ca-certificates]
+versions = ['20230311+deb12u1']
+  unknown = "ca-certificates_20230311+deb12u1"  # 1.4 MB
+
+[src.cairo]
+versions = ['1.16.0', '1.16.0-7']
+  debian = "cairo_1.16.0-7.debian"  # 133.1 KB
+  orig = "cairo_1.16.0.orig"  # 71.6 MB
+
+[src.cdebconf]
+versions = ['0.270']
+  unknown = "cdebconf_0.270"  # 1.9 MB
+
+[src.cdrkit]
+versions = ['1.1.11', '1.1.11-3.4']
+  debian = "cdrkit_1.1.11-3.4.debian"  # 85.7 KB
+  orig = "cdrkit_1.1.11.orig"  # 5.8 MB
+
+[src.chardet]
+versions = ['5.1.0+dfsg', '5.1.0+dfsg-2']
+  debian = "chardet_5.1.0+dfsg-2.debian"  # 20.0 KB
+  orig = "chardet_5.1.0+dfsg.orig"  # 7.7 MB
+
+[src.chrony]
+versions = ['4.3', '4.3-2+deb12u1']
+  debian = "chrony_4.3-2+deb12u1.debian"  # 139.3 KB
+  orig = "chrony_4.3.orig"  # 2.4 MB
+
+[src.cloud-utils]
+versions = ['0.33', '0.33-1']
+  debian = "cloud-utils_0.33-1.debian"  # 27.1 KB
+  orig = "cloud-utils_0.33.orig"  # 167.4 KB
+
+[src.cme]
+versions = ['1.038', '1.038-1']
+  debian = "cme_1.038-1.debian"  # 35.0 KB
+  orig = "cme_1.038.orig"  # 154.2 KB
+
+[src.configobj]
+versions = ['5.0.8', '5.0.8-1']
+  debian = "configobj_5.0.8-1.debian"  # 18.8 KB
+  orig = "configobj_5.0.8.orig"  # 371.8 KB
+
+[src.conmon]
+versions = ['2.1.6+ds1', '2.1.6+ds1-1']
+  debian = "conmon_2.1.6+ds1-1.debian"  # 8.3 KB
+  orig = "conmon_2.1.6+ds1.orig"  # 341.9 KB
+
+[src.conntrack-tools]
+versions = ['1.4.7', '1.4.7-1']
+  debian = "conntrack-tools_1.4.7-1.debian"  # 30.5 KB
+  orig = "conntrack-tools_1.4.7.orig"  # 2.7 MB
+
+[src.conserver]
+versions = ['8.2.7', '8.2.7-2']
+  debian = "conserver_8.2.7-2.debian"  # 138.1 KB
+  orig = "conserver_8.2.7.orig"  # 1.0 MB
+
+[src.console-data]
+versions = ['1.12', '1.12-9']
+  debian = "console-data_1.12-9.debian"  # 946.6 KB
+  orig = "console-data_1.12.orig"  # 3.6 MB
+
+[src.coreutils]
+versions = ['9.1', '9.1-1']
+  debian = "coreutils_9.1-1.debian"  # 74.4 KB
+  orig = "coreutils_9.1.orig"  # 51.3 MB
+
+[src.cpio]
+versions = ['2.13+dfsg', '2.13+dfsg-7.1']
+  debian = "cpio_2.13+dfsg-7.1.debian"  # 189.2 KB
+  orig = "cpio_2.13+dfsg.orig"  # 7.3 MB
+
+[src.cracklib2]
+versions = ['2.9.6', '2.9.6-5']
+  debian = "cracklib2_2.9.6-5.debian"  # 103.1 KB
+  orig = "cracklib2_2.9.6.orig"  # 2.4 MB
+
+[src.cron]
+versions = ['3.0pl1', '3.0pl1-162']
+  debian = "cron_3.0pl1-162.debian"  # 468.3 KB
+  orig = "cron_3.0pl1.orig"  # 170.1 KB
+
+[src.crun]
+versions = ['1.8.1', '1.8.1-1+deb12u1']
+  debian = "crun_1.8.1-1+deb12u1.debian"  # 39.6 KB
+  orig = "crun_1.8.1.orig"  # 7.1 MB
+
+[src.cryptsetup]
+versions = ['2.6.1', '2.6.1-4~deb12u2']
+  debian = "cryptsetup_2.6.1-4~deb12u2.debian"  # 738.7 KB
+  orig = "cryptsetup_2.6.1.orig"  # 16.0 MB
+
+[src.curl]
+versions = ['7.88.1', '7.88.1-10+deb12u14']
+  debian = "curl_7.88.1-10+deb12u14.debian"  # 356.1 KB
+  orig = "curl_7.88.1.orig"  # 23.0 MB
+
+[src.cwidget]
+versions = ['0.5.18', '0.5.18-6']
+  debian = "cwidget_0.5.18-6.debian"  # 27.5 KB
+  orig = "cwidget_0.5.18.orig"  # 2.8 MB
+
+[src.cyrus-sasl2]
+versions = ['2.1.28+dfsg', '2.1.28+dfsg-10']
+  debian = "cyrus-sasl2_2.1.28+dfsg-10.debian"  # 470.7 KB
+  orig = "cyrus-sasl2_2.1.28+dfsg.orig"  # 4.7 MB
+
+[src.dash]
+versions = ['0.5.12', '0.5.12-2']
+  debian = "dash_0.5.12-2.debian"  # 130.0 KB
+  orig = "dash_0.5.12.orig"  # 886.4 KB
+
+[src.db5.3]
+versions = ['5.3.28+dfsg2', '5.3.28+dfsg2-1']
+  debian = "db5.3_5.3.28+dfsg2-1.debian"  # 134.1 KB
+  orig = "db5.3_5.3.28+dfsg2.orig"  # 133.7 MB
+
+[src.dbus]
+versions = ['1.14.10', '1.14.10-1~deb12u1']
+  debian = "dbus_1.14.10-1~deb12u1.debian"  # 249.2 KB
+  orig = "dbus_1.14.10.orig"  # 8.8 MB
+
+[src.dbus-python]
+versions = ['1.3.2', '1.3.2-4']
+  debian = "dbus-python_1.3.2-4.debian"  # 91.9 KB
+  orig = "dbus-python_1.3.2.orig"  # 2.5 MB
+
+[src.dctrl-tools]
+versions = ['2.24', '2.24-3']
+  debian = "dctrl-tools_2.24-3.debian"  # 66.4 KB
+  orig = "dctrl-tools_2.24.orig"  # 9.8 MB
+
+[src.debconf]
+versions = ['1.5.82']
+  unknown = "debconf_1.5.82"  # 3.9 MB
+
+[src.debian-archive-keyring]
+versions = ['2023.3+deb12u2']
+  unknown = "debian-archive-keyring_2023.3+deb12u2"  # 281.1 KB
+
+[src.debianutils]
+versions = ['5.7', '5.7-0.5~deb12u1']
+  debian = "debianutils_5.7-0.5~deb12u1.debian"  # 85.2 KB
+  orig = "debianutils_5.7.orig"  # 898.8 KB
+
+[src.dh-runit]
+versions = ['2.15.2']
+  unknown = "dh-runit_2.15.2"  # 53.6 KB
+
+[src.dialog]
+versions = ['1.3-20230209', '1.3-20230209-1']
+  debian = "dialog_1.3-20230209-1.debian"  # 40.9 KB
+  orig = "dialog_1.3-20230209.orig"  # 2.4 MB
+
+[src.diffutils]
+versions = ['3.8', '3.8-4']
+  debian = "diffutils_3.8-4.debian"  # 44.0 KB
+  orig = "diffutils_3.8.orig"  # 11.8 MB
+
+[src.dmidecode]
+versions = ['3.4', '3.4-1']
+  debian = "dmidecode_3.4-1.debian"  # 45.9 KB
+  orig = "dmidecode_3.4.orig"  # 281.0 KB
+
+[src.dns-root-data]
+versions = ['2024071801~deb12u1']
+  unknown = "dns-root-data_2024071801~deb12u1"  # 38.6 KB
+
+[src.dnsdist]
+versions = ['1.7.3', '1.7.3-2']
+  debian = "dnsdist_1.7.3-2.debian"  # 37.9 KB
+  orig = "dnsdist_1.7.3.orig"  # 8.4 MB
+
+[src.dosfstools]
+versions = ['4.2', '4.2-1']
+  debian = "dosfstools_4.2-1.debian"  # 41.7 KB
+  orig = "dosfstools_4.2.orig"  # 1.3 MB
+
+[src.dpkg]
+versions = ['1.21.22']
+  unknown = "dpkg_1.21.22"  # 48.8 MB
+
+[src.duktape]
+versions = ['2.7.0', '2.7.0-2']
+  debian = "duktape_2.7.0-2.debian"  # 26.6 KB
+  orig = "duktape_2.7.0.orig"  # 17.4 MB
+
+[src.e2fsprogs]
+versions = ['1.47.0', '1.47.0-2']
+  debian = "e2fsprogs_1.47.0-2.debian"  # 318.3 KB
+  orig = "e2fsprogs_1.47.0.orig"  # 32.3 MB
+
+[src.easy-rsa]
+versions = ['3.1.0', '3.1.0-1']
+  debian = "easy-rsa_3.1.0-1.debian"  # 135.4 KB
+  orig = "easy-rsa_3.1.0.orig"  # 192.3 KB
+
+[src.efibootmgr]
+versions = ['17', '17-2']
+  debian = "efibootmgr_17-2.debian"  # 21.3 KB
+  orig = "efibootmgr_17.orig"  # 137.4 KB
+
+[src.efivar]
+versions = ['37', '37-6']
+  debian = "efivar_37-6.debian"  # 74.6 KB
+  orig = "efivar_37.orig"  # 786.3 KB
+
+[src.elfutils]
+versions = ['0.188', '0.188-2.1']
+  debian = "elfutils_0.188-2.1.debian"  # 176.1 KB
+  orig = "elfutils_0.188.orig"  # 18.4 MB
+
+[src.etherwake]
+versions = ['1.09', '1.09-4']
+  debian = "etherwake_1.09-4.debian"  # 8.6 KB
+  orig = "etherwake_1.09.orig"  # 13.6 KB
+
+[src.exfatprogs]
+versions = ['1.2.0', '1.2.0-1+deb12u1']
+  debian = "exfatprogs_1.2.0-1+deb12u1.debian"  # 11.0 KB
+  orig = "exfatprogs_1.2.0.orig"  # 1.6 MB
+
+[src.expat]
+versions = ['2.5.0', '2.5.0-1+deb12u2']
+  debian = "expat_2.5.0-1+deb12u2.debian"  # 169.1 KB
+  orig = "expat_2.5.0.orig"  # 81.7 MB
+
+[src.file]
+versions = ['5.44', '5.44-3']
+  debian = "file_5.44-3.debian"  # 137.3 KB
+  orig = "file_5.44.orig"  # 3.8 MB
+
+[src.findutils]
+versions = ['4.9.0', '4.9.0-4']
+  debian = "findutils_4.9.0-4.debian"  # 110.3 KB
+  orig = "findutils_4.9.0.orig"  # 16.6 MB
+
+[src.flex]
+versions = ['2.6.4', '2.6.4-8.2']
+  diff = "flex_2.6.4-8.2.diff"  # 233.4 KB
+  orig = "flex_2.6.4.orig"  # 5.9 MB
+
+[src.fontconfig]
+versions = ['2.14.1', '2.14.1-4']
+  debian = "fontconfig_2.14.1-4.debian"  # 297.6 KB
+  orig = "fontconfig_2.14.1.orig"  # 7.5 MB
+
+[src.fonts-dejavu]
+versions = ['2.37', '2.37-6']
+  debian = "fonts-dejavu_2.37-6.debian"  # 48.7 KB
+  orig = "fonts-dejavu_2.37.orig"  # 61.0 MB
+
+[src.freeipmi]
+versions = ['1.6.10', '1.6.10-1']
+  debian = "freeipmi_1.6.10-1.debian"  # 171.2 KB
+  orig = "freeipmi_1.6.10.orig"  # 20.5 MB
+
+[src.freetype]
+versions = ['2.12.1+dfsg', '2.12.1+dfsg-5+deb12u4', '2.12.1+dfsg.orig-ft2demos', '2.12.1+dfsg.orig-ft2docs']
+  debian = "freetype_2.12.1+dfsg-5+deb12u4.debian"  # 160.6 KB
+  orig = "freetype_2.12.1+dfsg.orig"  # 15.8 MB
+  unknown = "freetype_2.12.1+dfsg.orig-ft2demos"  # 1.6 MB
+  unknown = "freetype_2.12.1+dfsg.orig-ft2docs"  # 2.3 MB
+
+[src.fribidi]
+versions = ['1.0.8', '1.0.8-2.1']
+  debian = "fribidi_1.0.8-2.1.debian"  # 30.9 KB
+  orig = "fribidi_1.0.8.orig"  # 18.7 MB
+
+[src.fstrm]
+versions = ['0.6.1', '0.6.1-1']
+  debian = "fstrm_0.6.1-1.debian"  # 11.9 KB
+  orig = "fstrm_0.6.1.orig"  # 625.1 KB
+
+[src.fuse]
+versions = ['2.9.9', '2.9.9-6']
+  debian = "fuse_2.9.9-6.debian"  # 75.1 KB
+  orig = "fuse_2.9.9.orig"  # 8.1 MB
+
+[src.fuse-exfat]
+versions = ['1.3.0+git20220115', '1.3.0+git20220115-2']
+  debian = "fuse-exfat_1.3.0+git20220115-2.debian"  # 11.7 KB
+  orig = "fuse-exfat_1.3.0+git20220115.orig"  # 247.6 KB
+
+[src.fuse-overlayfs]
+versions = ['1.10', '1.10-1']
+  debian = "fuse-overlayfs_1.10-1.debian"  # 6.8 KB
+  orig = "fuse-overlayfs_1.10.orig"  # 403.7 KB
+
+[src.fuse3]
+versions = ['3.14.0', '3.14.0-4']
+  debian = "fuse3_3.14.0-4.debian"  # 114.9 KB
+  orig = "fuse3_3.14.0.orig"  # 99.8 MB
+
+[src.gawk]
+versions = ['5.2.1', '5.2.1-2']
+  debian = "gawk_5.2.1-2.debian"  # 43.9 KB
+  orig = "gawk_5.2.1.orig"  # 17.4 MB
+
+[src.gcc-12]
+versions = ['12.2.0', '12.2.0-14+deb12u1']
+  debian = "gcc-12_12.2.0-14+deb12u1.debian"  # 20.4 MB
+  orig = "gcc-12_12.2.0.orig"  # 83.0 MB
+
+[src.gdb]
+versions = ['13.1', '13.1-3']
+  debian = "gdb_13.1-3.debian"  # 185.1 KB
+  orig = "gdb_13.1.orig"  # 188.3 MB
+
+[src.gdbm]
+versions = ['1.23', '1.23-3']
+  debian = "gdbm_1.23-3.debian"  # 56.1 KB
+  orig = "gdbm_1.23.orig"  # 4.2 MB
+
+[src.gdisk]
+versions = ['1.0.9', '1.0.9-2.1']
+  debian = "gdisk_1.0.9-2.1.debian"  # 18.7 KB
+  orig = "gdisk_1.0.9.orig"  # 730.5 KB
+
+[src.gdk-pixbuf]
+versions = ['2.42.10+dfsg', '2.42.10+dfsg-1+deb12u3']
+  debian = "gdk-pixbuf_2.42.10+dfsg-1+deb12u3.debian"  # 90.9 KB
+  orig = "gdk-pixbuf_2.42.10+dfsg.orig"  # 23.7 MB
+
+[src.gettext]
+versions = ['0.21', '0.21-12']
+  debian = "gettext_0.21-12.debian"  # 161.9 KB
+  orig = "gettext_0.21.orig"  # 114.3 MB
+
+[src.git]
+versions = ['2.39.5', '2.39.5-0+deb12u3']
+  debian = "git_2.39.5-0+deb12u3.debian"  # 3.4 MB
+  orig = "git_2.39.5.orig"  # 39.3 MB
+
+[src.glib2.0]
+versions = ['2.74.6', '2.74.6-2+deb12u8', '2.74.6.orig-unicode-data']
+  debian = "glib2.0_2.74.6-2+deb12u8.debian"  # 748.7 KB
+  orig = "glib2.0_2.74.6.orig"  # 46.3 MB
+  unknown = "glib2.0_2.74.6.orig-unicode-data"  # 2.7 MB
+
+[src.glibc]
+versions = ['2.36', '2.36-9+deb12u13']
+  debian = "glibc_2.36-9+deb12u13.debian"  # 6.1 MB
+  orig = "glibc_2.36.orig"  # 221.6 MB
+
+[src.gmp]
+versions = ['6.2.1+dfsg1', '6.2.1+dfsg1-1.1']
+  debian = "gmp_6.2.1+dfsg1-1.1.debian"  # 62.8 KB
+  orig = "gmp_6.2.1+dfsg1.orig"  # 13.5 MB
+
+[src.gnupg2]
+versions = ['2.2.40', '2.2.40-1.1+deb12u2']
+  debian = "gnupg2_2.2.40-1.1+deb12u2.debian"  # 245.8 KB
+  orig = "gnupg2_2.2.40.orig"  # 34.1 MB
+
+[src.gnutls28]
+versions = ['3.7.9', '3.7.9-2+deb12u6']
+  debian = "gnutls28_3.7.9-2+deb12u6.debian"  # 705.6 KB
+  orig = "gnutls28_3.7.9.orig"  # 53.8 MB
+
+[src.gobject-introspection]
+versions = ['1.74.0', '1.74.0-3', '1.74.0.orig-glib']
+  debian = "gobject-introspection_1.74.0-3.debian"  # 158.4 KB
+  orig = "gobject-introspection_1.74.0.orig"  # 8.1 MB
+  unknown = "gobject-introspection_1.74.0.orig-glib"  # 45.9 MB
+
+[src.golang-github-containernetworking-plugins]
+versions = ['1.1.1+ds1', '1.1.1+ds1-3']
+  debian = "golang-github-containernetworking-plugins_1.1.1+ds1-3.debian"  # 20.2 KB
+  orig = "golang-github-containernetworking-plugins_1.1.1+ds1.orig"  # 1021.2 KB
+
+[src.golang-github-containers-common]
+versions = ['0.50.1+ds1', '0.50.1+ds1-4']
+  debian = "golang-github-containers-common_0.50.1+ds1-4.debian"  # 23.7 KB
+  orig = "golang-github-containers-common_0.50.1+ds1.orig"  # 3.2 MB
+
+[src.golang-github-containers-image]
+versions = ['5.23.1', '5.23.1-4']
+  debian = "golang-github-containers-image_5.23.1-4.debian"  # 36.5 KB
+  orig = "golang-github-containers-image_5.23.1.orig"  # 2.5 MB
+
+[src.google-authenticator]
+versions = ['20191231', '20191231-2']
+  debian = "google-authenticator_20191231-2.debian"  # 6.7 KB
+  orig = "google-authenticator_20191231.orig"  # 219.6 KB
+
+[src.gpgme1.0]
+versions = ['1.18.0', '1.18.0-3']
+  debian = "gpgme1.0_1.18.0-3.debian"  # 96.4 KB
+  orig = "gpgme1.0_1.18.0.orig"  # 9.3 MB
+
+[src.gpm]
+versions = ['1.20.7', '1.20.7-10']
+  debian = "gpm_1.20.7-10.debian"  # 418.7 KB
+  orig = "gpm_1.20.7.orig"  # 1.6 MB
+
+[src.graphite2]
+versions = ['1.3.14', '1.3.14-1']
+  debian = "graphite2_1.3.14-1.debian"  # 42.8 KB
+  orig = "graphite2_1.3.14.orig"  # 21.4 MB
+
+[src.grc]
+versions = ['1.13.1', '1.13.1-1']
+  debian = "grc_1.13.1-1.debian"  # 13.3 KB
+  orig = "grc_1.13.1.orig"  # 155.4 KB
+
+[src.grep]
+versions = ['3.8', '3.8-5']
+  debian = "grep_3.8-5.debian"  # 60.3 KB
+  orig = "grep_3.8.orig"  # 12.3 MB
+
+[src.grepcidr]
+versions = ['2.0', '2.0-2']
+  debian = "grepcidr_2.0-2.debian"  # 5.4 KB
+  orig = "grepcidr_2.0.orig"  # 52.6 KB
+
+[src.groff]
+versions = ['1.22.4', '1.22.4-10']
+  debian = "groff_1.22.4-10.debian"  # 171.8 KB
+  orig = "groff_1.22.4.orig"  # 16.0 MB
+
+[src.grub-efi-amd64-signed]
+versions = ['1+2.06+13+deb12u1']
+  unknown = "grub-efi-amd64-signed_1+2.06+13+deb12u1"  # 10.2 KB
+
+[src.grub2]
+versions = ['2.06', '2.06-13+deb12u1']
+  debian = "grub2_2.06-13+deb12u1.debian"  # 6.1 MB
+  orig = "grub2_2.06.orig"  # 44.6 MB
+
+[src.gzip]
+versions = ['1.12', '1.12-1']
+  debian = "gzip_1.12-1.debian"  # 44.0 KB
+  orig = "gzip_1.12.orig"  # 5.4 MB
+
+[src.h2o]
+versions = ['2.2.5+dfsg2', '2.2.5+dfsg2-7']
+  debian = "h2o_2.2.5+dfsg2-7.debian"  # 47.6 KB
+  orig = "h2o_2.2.5+dfsg2.orig"  # 41.4 MB
+
+[src.haproxy]
+versions = ['2.6.12', '2.6.12-1+deb12u3']
+  debian = "haproxy_2.6.12-1+deb12u3.debian"  # 386.3 KB
+  orig = "haproxy_2.6.12.orig"  # 15.3 MB
+
+[src.harfbuzz]
+versions = ['6.0.0+dfsg', '6.0.0+dfsg-3']
+  debian = "harfbuzz_6.0.0+dfsg-3.debian"  # 84.5 KB
+  orig = "harfbuzz_6.0.0+dfsg.orig"  # 98.1 MB
+
+[src.haveged]
+versions = ['1.9.14', '1.9.14-1']
+  debian = "haveged_1.9.14-1.debian"  # 30.6 KB
+  orig = "haveged_1.9.14.orig"  # 1.8 MB
+
+[src.hostname]
+versions = ['3.23+nmu1']
+  unknown = "hostname_3.23+nmu1"  # 40.2 KB
+
+[src.htop]
+versions = ['3.2.2', '3.2.2-2']
+  debian = "htop_3.2.2-2.debian"  # 35.0 KB
+  orig = "htop_3.2.2.orig"  # 1.3 MB
+
+[src.http-parser]
+versions = ['2.9.4', '2.9.4-5']
+  debian = "http-parser_2.9.4-5.debian"  # 42.4 KB
+  orig = "http-parser_2.9.4.orig"  # 243.2 KB
+
+[src.hwloc]
+versions = ['2.9.0', '2.9.0-1']
+  debian = "hwloc_2.9.0-1.debian"  # 59.0 KB
+  orig = "hwloc_2.9.0.orig"  # 12.3 MB
+
+[src.icu]
+versions = ['72.1', '72.1-3+deb12u1']
+  debian = "icu_72.1-3+deb12u1.debian"  # 144.4 KB
+  orig = "icu_72.1.orig"  # 103.9 MB
+
+[src.ieee-data]
+versions = ['20220827.1']
+  unknown = "ieee-data_20220827.1"  # 13.0 MB
+
+[src.iftop]
+versions = ['1.0~pre4', '1.0~pre4-9']
+  debian = "iftop_1.0~pre4-9.debian"  # 25.7 KB
+  orig = "iftop_1.0~pre4.orig"  # 720.4 KB
+
+[src.ifupdown]
+versions = ['0.8.41']
+  unknown = "ifupdown_0.8.41"  # 372.6 KB
+
+[src.igmpproxy]
+versions = ['0.3', '0.3-1']
+  debian = "igmpproxy_0.3-1.debian"  # 12.1 KB
+  orig = "igmpproxy_0.3.orig"  # 600.5 KB
+
+[src.inetutils]
+versions = ['2.4', '2.4-2+deb12u2']
+  debian = "inetutils_2.4-2+deb12u2.debian"  # 312.9 KB
+  orig = "inetutils_2.4.orig"  # 11.2 MB
+
+[src.init-system-helpers]
+versions = ['1.65.2+deb12u1']
+  unknown = "init-system-helpers_1.65.2+deb12u1"  # 205.7 KB
+
+[src.initramfs-tools]
+versions = ['0.142+deb12u3']
+  unknown = "initramfs-tools_0.142+deb12u3"  # 348.1 KB
+
+[src.intel-microcode]
+versions = ['3.20251111.1~deb12u1']
+  unknown = "intel-microcode_3.20251111.1~deb12u1"  # 22.9 MB
+
+[src.intel-processor-trace]
+versions = ['2.0.5', '2.0.5-1']
+  debian = "intel-processor-trace_2.0.5-1.debian"  # 9.8 KB
+  orig = "intel-processor-trace_2.0.5.orig"  # 2.2 MB
+
+[src.io-stringy]
+versions = ['2.111', '2.111-3']
+  debian = "io-stringy_2.111-3.debian"  # 11.5 KB
+  orig = "io-stringy_2.111.orig"  # 127.1 KB
+
+[src.iotop]
+versions = ['0.6-42-ga14256a', '0.6-42-ga14256a-0.1']
+  debian = "iotop_0.6-42-ga14256a-0.1.debian"  # 22.7 KB
+  orig = "iotop_0.6-42-ga14256a.orig"  # 91.6 KB
+
+[src.ipcalc]
+versions = ['0.42', '0.42-2']
+  debian = "ipcalc_0.42-2.debian"  # 15.7 KB
+  orig = "ipcalc_0.42.orig"  # 57.0 KB
+
+[src.iperf]
+versions = ['2.1.8+dfsg', '2.1.8+dfsg-1']
+  debian = "iperf_2.1.8+dfsg-1.debian"  # 95.0 KB
+  orig = "iperf_2.1.8+dfsg.orig"  # 1.7 MB
+
+[src.iperf3]
+versions = ['3.12', '3.12-1+deb12u2']
+  debian = "iperf3_3.12-1+deb12u2.debian"  # 53.1 KB
+  orig = "iperf3_3.12.orig"  # 2.3 MB
+
+[src.ipmitool]
+versions = ['1.8.19', '1.8.19-4+deb12u2']
+  debian = "ipmitool_1.8.19-4+deb12u2.debian"  # 4.6 MB
+  orig = "ipmitool_1.8.19.orig"  # 2.9 MB
+
+[src.iproute2]
+versions = ['6.15.0', '6.15.0-1~bpo12+1']
+  debian = "iproute2_6.15.0-1~bpo12+1.debian"  # 130.6 KB
+  orig = "iproute2_6.15.0.orig"  # 5.0 MB
+
+[src.iptables]
+versions = ['1.8.9', '1.8.9-2']
+  debian = "iptables_1.8.9-2.debian"  # 103.4 KB
+  orig = "iptables_1.8.9.orig"  # 3.8 MB
+
+[src.iputils]
+versions = ['20221126', '20221126-1+deb12u1']
+  debian = "iputils_20221126-1+deb12u1.debian"  # 33.9 KB
+  orig = "iputils_20221126.orig"  # 1.2 MB
+
+[src.ipvsadm]
+versions = ['1.31', '1.31-1']
+  debian = "ipvsadm_1.31-1.debian"  # 37.8 KB
+  orig = "ipvsadm_1.31.orig"  # 198.6 KB
+
+[src.iucode-tool]
+versions = ['2.3.1', '2.3.1-3']
+  debian = "iucode-tool_2.3.1-3.debian"  # 42.0 KB
+  orig = "iucode-tool_2.3.1.orig"  # 699.8 KB
+
+[src.iw]
+versions = ['5.19', '5.19-1']
+  debian = "iw_5.19-1.debian"  # 53.0 KB
+  orig = "iw_5.19.orig"  # 754.7 KB
+
+[src.jansson]
+versions = ['2.14', '2.14-2']
+  debian = "jansson_2.14-2.debian"  # 16.6 KB
+  orig = "jansson_2.14.orig"  # 646.7 KB
+
+[src.jbigkit]
+versions = ['2.1', '2.1-6.1']
+  debian = "jbigkit_2.1-6.1.debian"  # 33.8 KB
+  orig = "jbigkit_2.1.orig"  # 740.9 KB
+
+[src.jemalloc]
+versions = ['5.3.0', '5.3.0-1']
+  debian = "jemalloc_5.3.0-1.debian"  # 50.5 KB
+  orig = "jemalloc_5.3.0.orig"  # 4.0 MB
+
+[src.jigit]
+versions = ['1.22', '1.22-3']
+  debian = "jigit_1.22-3.debian"  # 12.7 KB
+  orig = "jigit_1.22.orig"  # 2.0 MB
+
+[src.jimtcl]
+versions = ['0.81+dfsg0', '0.81+dfsg0-2']
+  debian = "jimtcl_0.81+dfsg0-2.debian"  # 25.2 KB
+  orig = "jimtcl_0.81+dfsg0.orig"  # 14.2 MB
+
+[src.jinja2]
+versions = ['3.1.2', '3.1.2-1+deb12u3']
+  debian = "jinja2_3.1.2-1+deb12u3.debian"  # 50.5 KB
+  orig = "jinja2_3.1.2.orig"  # 962.9 KB
+
+[src.jq]
+versions = ['1.6', '1.6-2.1+deb12u1']
+  debian = "jq_1.6-2.1+deb12u1.debian"  # 42.2 KB
+  orig = "jq_1.6.orig"  # 1.4 MB
+
+[src.json-c]
+versions = ['0.16', '0.16-2']
+  debian = "json-c_0.16-2.debian"  # 25.8 KB
+  orig = "json-c_0.16.orig"  # 1.5 MB
+
+[src.kbd]
+versions = ['2.5.1', '2.5.1-1']
+  debian = "kbd_2.5.1-1.debian"  # 223.1 KB
+  orig = "kbd_2.5.1.orig"  # 12.4 MB
+
+[src.kexec-tools]
+versions = ['2.0.25', '2.0.25-3+deb12u3']
+  debian = "kexec-tools_2.0.25-3+deb12u3.debian"  # 82.1 KB
+  orig = "kexec-tools_2.0.25.orig"  # 1.6 MB
+
+[src.keyutils]
+versions = ['1.6.3', '1.6.3-2']
+  debian = "keyutils_1.6.3-2.debian"  # 45.5 KB
+  orig = "keyutils_1.6.3.orig"  # 588.9 KB
+
+[src.kitty]
+versions = ['0.26.5', '0.26.5-5']
+  debian = "kitty_0.26.5-5.debian"  # 58.4 KB
+  orig = "kitty_0.26.5.orig"  # 18.2 MB
+
+[src.klibc]
+versions = ['2.0.12', '2.0.12-1']
+  debian = "klibc_2.0.12-1.debian"  # 67.8 KB
+  orig = "klibc_2.0.12.orig"  # 2.1 MB
+
+[src.kmod]
+versions = ['30+20221128', '30+20221128-1']
+  debian = "kmod_30+20221128-1.debian"  # 27.8 KB
+  orig = "kmod_30+20221128.orig"  # 2.2 MB
+
+[src.krb5]
+versions = ['1.20.1', '1.20.1-2+deb12u4']
+  debian = "krb5_1.20.1-2+deb12u4.debian"  # 533.6 KB
+  orig = "krb5_1.20.1.orig"  # 38.2 MB
+
+[src.lapack]
+versions = ['3.11.0', '3.11.0-2']
+  debian = "lapack_3.11.0-2.debian"  # 214.4 KB
+  orig = "lapack_3.11.0.orig"  # 60.7 MB
+
+[src.lcdproc]
+versions = ['0.5.9', '0.5.9-6']
+  debian = "lcdproc_0.5.9-6.debian"  # 62.3 KB
+  orig = "lcdproc_0.5.9.orig"  # 3.4 MB
+
+[src.lerc]
+versions = ['4.0.0+ds', '4.0.0+ds-2']
+  debian = "lerc_4.0.0+ds-2.debian"  # 57.3 KB
+  orig = "lerc_4.0.0+ds.orig"  # 757.0 KB
+
+[src.less]
+versions = ['590', '590-2.1~deb12u2']
+  debian = "less_590-2.1~deb12u2.debian"  # 73.8 KB
+  orig = "less_590.orig"  # 1.3 MB
+
+[src.libaio]
+versions = ['0.3.113', '0.3.113-4']
+  debian = "libaio_0.3.113-4.debian"  # 62.5 KB
+  orig = "libaio_0.3.113.orig"  # 558.9 KB
+
+[src.libapp-cmd-perl]
+versions = ['0.335', '0.335-1']
+  debian = "libapp-cmd-perl_0.335-1.debian"  # 16.7 KB
+  orig = "libapp-cmd-perl_0.335.orig"  # 200.1 KB
+
+[src.libapt-pkg-perl]
+versions = ['0.1.40']
+  unknown = "libapt-pkg-perl_0.1.40"  # 162.4 KB
+
+[src.libassuan]
+versions = ['2.5.5', '2.5.5-5']
+  debian = "libassuan_2.5.5-5.debian"  # 42.9 KB
+  orig = "libassuan_2.5.5.orig"  # 2.8 MB
+
+[src.libb-hooks-op-check-perl]
+versions = ['0.22', '0.22-2']
+  debian = "libb-hooks-op-check-perl_0.22-2.debian"  # 7.3 KB
+  orig = "libb-hooks-op-check-perl_0.22.orig"  # 314.6 KB
+
+[src.libboolean-perl]
+versions = ['0.46', '0.46-3']
+  debian = "libboolean-perl_0.46-3.debian"  # 9.5 KB
+  orig = "libboolean-perl_0.46.orig"  # 41.6 KB
+
+[src.libbpf]
+versions = ['1.1.2', '1.1.2-0+deb12u1']
+  debian = "libbpf_1.1.2-0+deb12u1.debian"  # 32.5 KB
+  orig = "libbpf_1.1.2.orig"  # 3.5 MB
+
+[src.libbsd]
+versions = ['0.11.7', '0.11.7-2']
+  debian = "libbsd_0.11.7-2.debian"  # 61.3 KB
+  orig = "libbsd_0.11.7.orig"  # 2.5 MB
+
+[src.libburn]
+versions = ['1.5.4', '1.5.4-1']
+  debian = "libburn_1.5.4-1.debian"  # 27.2 KB
+  orig = "libburn_1.5.4.orig"  # 3.7 MB
+
+[src.libcap-ng]
+versions = ['0.8.3', '0.8.3-1']
+  debian = "libcap-ng_0.8.3-1.debian"  # 37.5 KB
+  orig = "libcap-ng_0.8.3.orig"  # 1.7 MB
+
+[src.libcap2]
+versions = ['2.66', '2.66-4+deb12u2']
+  debian = "libcap2_2.66-4+deb12u2.debian"  # 65.2 KB
+  orig = "libcap2_2.66.orig"  # 733.9 KB
+
+[src.libcapture-tiny-perl]
+versions = ['0.48', '0.48-2']
+  debian = "libcapture-tiny-perl_0.48-2.debian"  # 12.6 KB
+  orig = "libcapture-tiny-perl_0.48.orig"  # 133.4 KB
+
+[src.libcarp-assert-more-perl]
+versions = ['2.2.0', '2.2.0-1']
+  debian = "libcarp-assert-more-perl_2.2.0-1.debian"  # 17.8 KB
+  orig = "libcarp-assert-more-perl_2.2.0.orig"  # 94.3 KB
+
+[src.libcbor]
+versions = ['0.8.0', '0.8.0-2']
+  debian = "libcbor_0.8.0-2.debian"  # 13.7 KB
+  orig = "libcbor_0.8.0.orig"  # 703.2 KB
+
+[src.libcidr]
+versions = ['1.2.3', '1.2.3-3']
+  debian = "libcidr_1.2.3-3.debian"  # 8.5 KB
+  orig = "libcidr_1.2.3.orig"  # 605.5 KB
+
+[src.libclass-data-inheritable-perl]
+versions = ['0.08', '0.08-3']
+  debian = "libclass-data-inheritable-perl_0.08-3.debian"  # 7.9 KB
+  orig = "libclass-data-inheritable-perl_0.08.orig"  # 14.7 KB
+
+[src.libclass-load-perl]
+versions = ['0.25', '0.25-2']
+  debian = "libclass-load-perl_0.25-2.debian"  # 10.1 KB
+  orig = "libclass-load-perl_0.25.orig"  # 160.0 KB
+
+[src.libclone-choose-perl]
+versions = ['0.010', '0.010-2']
+  debian = "libclone-choose-perl_0.010-2.debian"  # 3.9 KB
+  orig = "libclone-choose-perl_0.010.orig"  # 79.6 KB
+
+[src.libconfig-model-lcdproc-perl]
+versions = ['2.053', '2.053-2']
+  debian = "libconfig-model-lcdproc-perl_2.053-2.debian"  # 21.5 KB
+  orig = "libconfig-model-lcdproc-perl_2.053.orig"  # 374.5 KB
+
+[src.libconfig-model-perl]
+versions = ['2.152', '2.152-1']
+  debian = "libconfig-model-perl_2.152-1.debian"  # 97.5 KB
+  orig = "libconfig-model-perl_2.152.orig"  # 1.5 MB
+
+[src.libconfuse]
+versions = ['3.3', '3.3-3']
+  debian = "libconfuse_3.3-3.debian"  # 33.7 KB
+  orig = "libconfuse_3.3.orig"  # 482.3 KB
+
+[src.libdaemon]
+versions = ['0.14', '0.14-7.1']
+  debian = "libdaemon_0.14-7.1.debian"  # 17.0 KB
+  orig = "libdaemon_0.14.orig"  # 1.4 MB
+
+[src.libdata-optlist-perl]
+versions = ['0.113', '0.113-1']
+  debian = "libdata-optlist-perl_0.113-1.debian"  # 9.3 KB
+  orig = "libdata-optlist-perl_0.113.orig"  # 79.9 KB
+
+[src.libdatrie]
+versions = ['0.2.13', '0.2.13-2']
+  debian = "libdatrie_0.2.13-2.debian"  # 31.6 KB
+  orig = "libdatrie_0.2.13.orig"  # 1.8 MB
+
+[src.libdbi-perl]
+versions = ['1.643', '1.643-4']
+  debian = "libdbi-perl_1.643-4.debian"  # 48.0 KB
+  orig = "libdbi-perl_1.643.orig"  # 2.0 MB
+
+[src.libdeflate]
+versions = ['1.14', '1.14-1']
+  debian = "libdeflate_1.14-1.debian"  # 13.6 KB
+  orig = "libdeflate_1.14.orig"  # 664.2 KB
+
+[src.libdevel-callchecker-perl]
+versions = ['0.008', '0.008-2']
+  debian = "libdevel-callchecker-perl_0.008-2.debian"  # 8.7 KB
+  orig = "libdevel-callchecker-perl_0.008.orig"  # 55.9 KB
+
+[src.libdevel-stacktrace-perl]
+versions = ['2.0400', '2.0400-2']
+  debian = "libdevel-stacktrace-perl_2.0400-2.debian"  # 22.4 KB
+  orig = "libdevel-stacktrace-perl_2.0400.orig"  # 156.3 KB
+
+[src.libdrm]
+versions = ['2.4.114', '2.4.114-1']
+  debian = "libdrm_2.4.114-1.debian"  # 147.9 KB
+  orig = "libdrm_2.4.114.orig"  # 3.4 MB
+
+[src.libdynaloader-functions-perl]
+versions = ['0.003', '0.003-3']
+  debian = "libdynaloader-functions-perl_0.003-3.debian"  # 7.1 KB
+  orig = "libdynaloader-functions-perl_0.003.orig"  # 23.3 KB
+
+[src.libecap]
+versions = ['1.0.1', '1.0.1-3.4']
+  debian = "libecap_1.0.1-3.4.debian"  # 20.4 KB
+  orig = "libecap_1.0.1.orig"  # 1.4 MB
+
+[src.libedit]
+versions = ['3.1-20221030', '3.1-20221030-2']
+  debian = "libedit_3.1-20221030-2.debian"  # 66.8 KB
+  orig = "libedit_3.1-20221030.orig"  # 2.1 MB
+
+[src.liberror-perl]
+versions = ['0.17029', '0.17029-2']
+  debian = "liberror-perl_0.17029-2.debian"  # 12.1 KB
+  orig = "liberror-perl_0.17029.orig"  # 121.2 KB
+
+[src.libestr]
+versions = ['0.1.11', '0.1.11-1']
+  debian = "libestr_0.1.11-1.debian"  # 8.3 KB
+  orig = "libestr_0.1.11.orig"  # 1.3 MB
+
+[src.libev]
+versions = ['4.33', '4.33-1']
+  debian = "libev_4.33-1.debian"  # 15.3 KB
+  orig = "libev_4.33.orig"  # 2.1 MB
+
+[src.libevent]
+versions = ['2.1.12-stable', '2.1.12-stable-8']
+  debian = "libevent_2.1.12-stable-8.debian"  # 96.8 KB
+  orig = "libevent_2.1.12-stable.orig"  # 4.4 MB
+
+[src.libexception-class-perl]
+versions = ['1.45', '1.45-1']
+  debian = "libexception-class-perl_1.45-1.debian"  # 13.4 KB
+  orig = "libexception-class-perl_1.45.orig"  # 183.8 KB
+
+[src.libexporter-tiny-perl]
+versions = ['1.006000', '1.006000-1']
+  debian = "libexporter-tiny-perl_1.006000-1.debian"  # 14.9 KB
+  orig = "libexporter-tiny-perl_1.006000.orig"  # 305.0 KB
+
+[src.libfastjson]
+versions = ['1.2304.0', '1.2304.0-1']
+  debian = "libfastjson_1.2304.0-1.debian"  # 9.3 KB
+  orig = "libfastjson_1.2304.0.orig"  # 1.7 MB
+
+[src.libffi]
+versions = ['3.4.4', '3.4.4-1']
+  debian = "libffi_3.4.4-1.debian"  # 35.9 KB
+  orig = "libffi_3.4.4.orig"  # 5.1 MB
+
+[src.libfido2]
+versions = ['1.12.0', '1.12.0-2']
+  debian = "libfido2_1.12.0-2.debian"  # 82.9 KB
+  orig = "libfido2_1.12.0.orig"  # 1.8 MB
+
+[src.libfile-find-rule-perl]
+versions = ['0.34', '0.34-4~deb12u1']
+  debian = "libfile-find-rule-perl_0.34-4~deb12u1.debian"  # 11.2 KB
+  orig = "libfile-find-rule-perl_0.34.orig"  # 54.6 KB
+
+[src.libfile-homedir-perl]
+versions = ['1.006', '1.006-2']
+  debian = "libfile-homedir-perl_1.006-2.debian"  # 11.0 KB
+  orig = "libfile-homedir-perl_1.006.orig"  # 125.6 KB
+
+[src.libfile-which-perl]
+versions = ['1.27', '1.27-2']
+  debian = "libfile-which-perl_1.27-2.debian"  # 10.9 KB
+  orig = "libfile-which-perl_1.27.orig"  # 67.9 KB
+
+[src.libgc]
+versions = ['8.2.2', '8.2.2-3']
+  debian = "libgc_8.2.2-3.debian"  # 42.0 KB
+  orig = "libgc_8.2.2.orig"  # 4.4 MB
+
+[src.libgcrypt20]
+versions = ['1.10.1', '1.10.1-3']
+  debian = "libgcrypt20_1.10.1-3.debian"  # 133.4 KB
+  orig = "libgcrypt20_1.10.1.orig"  # 14.4 MB
+
+[src.libgetopt-long-descriptive-perl]
+versions = ['0.111', '0.111-1']
+  debian = "libgetopt-long-descriptive-perl_0.111-1.debian"  # 13.4 KB
+  orig = "libgetopt-long-descriptive-perl_0.111.orig"  # 130.4 KB
+
+[src.libgpg-error]
+versions = ['1.46', '1.46-1']
+  debian = "libgpg-error_1.46-1.debian"  # 60.7 KB
+  orig = "libgpg-error_1.46.orig"  # 5.3 MB
+
+[src.libgudev]
+versions = ['237', '237-2']
+  debian = "libgudev_237-2.debian"  # 13.3 KB
+  orig = "libgudev_237.orig"  # 145.9 KB
+
+[src.libhash-merge-perl]
+versions = ['0.302', '0.302-1']
+  debian = "libhash-merge-perl_0.302-1.debian"  # 7.9 KB
+  orig = "libhash-merge-perl_0.302.orig"  # 145.8 KB
+
+[src.libidn2]
+versions = ['2.3.3', '2.3.3-1']
+  debian = "libidn2_2.3.3-1.debian"  # 35.5 KB
+  orig = "libidn2_2.3.3.orig"  # 10.4 MB
+
+[src.libio-tiecombine-perl]
+versions = ['1.005', '1.005-3']
+  debian = "libio-tiecombine-perl_1.005-3.debian"  # 6.8 KB
+  orig = "libio-tiecombine-perl_1.005.orig"  # 67.4 KB
+
+[src.libisoburn]
+versions = ['1.5.4', '1.5.4-4']
+  debian = "libisoburn_1.5.4-4.debian"  # 70.3 KB
+  orig = "libisoburn_1.5.4.orig"  # 6.2 MB
+
+[src.libisofs]
+versions = ['1.5.4', '1.5.4-1']
+  debian = "libisofs_1.5.4-1.debian"  # 30.3 KB
+  orig = "libisofs_1.5.4.orig"  # 3.5 MB
+
+[src.libjpeg-turbo]
+versions = ['2.1.5', '2.1.5-2']
+  debian = "libjpeg-turbo_2.1.5-2.debian"  # 722.7 KB
+  orig = "libjpeg-turbo_2.1.5.orig"  # 8.0 MB
+
+[src.libjson-perl]
+versions = ['4.10000', '4.10000-1']
+  debian = "libjson-perl_4.10000-1.debian"  # 17.8 KB
+  orig = "libjson-perl_4.10000.orig"  # 321.0 KB
+
+[src.libksba]
+versions = ['1.6.3', '1.6.3-2']
+  debian = "libksba_1.6.3-2.debian"  # 39.5 KB
+  orig = "libksba_1.6.3.orig"  # 3.3 MB
+
+[src.liblinear]
+versions = ['2.3.0+dfsg', '2.3.0+dfsg-5']
+  debian = "liblinear_2.3.0+dfsg-5.debian"  # 59.8 KB
+  orig = "liblinear_2.3.0+dfsg.orig"  # 237.0 KB
+
+[src.liblist-moreutils-perl]
+versions = ['0.430', '0.430-2']
+  debian = "liblist-moreutils-perl_0.430-2.debian"  # 16.0 KB
+  orig = "liblist-moreutils-perl_0.430.orig"  # 630.7 KB
+
+[src.liblist-moreutils-xs-perl]
+versions = ['0.430', '0.430-3']
+  debian = "liblist-moreutils-xs-perl_0.430-3.debian"  # 7.7 KB
+  orig = "liblist-moreutils-xs-perl_0.430.orig"  # 685.1 KB
+
+[src.liblog-log4perl-perl]
+versions = ['1.57', '1.57-1']
+  debian = "liblog-log4perl-perl_1.57-1.debian"  # 52.8 KB
+  orig = "liblog-log4perl-perl_1.57.orig"  # 1.1 MB
+
+[src.liblognorm]
+versions = ['2.0.6', '2.0.6-4']
+  debian = "liblognorm_2.0.6-4.debian"  # 69.3 KB
+  orig = "liblognorm_2.0.6.orig"  # 2.4 MB
+
+[src.libmaxminddb]
+versions = ['1.7.1', '1.7.1-1']
+  debian = "libmaxminddb_1.7.1-1.debian"  # 40.5 KB
+  orig = "libmaxminddb_1.7.1.orig"  # 1.7 MB
+
+[src.libmbim]
+versions = ['1.28.2', '1.28.2-1']
+  debian = "libmbim_1.28.2-1.debian"  # 60.4 KB
+  orig = "libmbim_1.28.2.orig"  # 1.8 MB
+
+[src.libmd]
+versions = ['1.0.4', '1.0.4-2']
+  debian = "libmd_1.0.4-2.debian"  # 23.7 KB
+  orig = "libmd_1.0.4.orig"  # 1.6 MB
+
+[src.libmnl]
+versions = ['1.0.4', '1.0.4-3']
+  debian = "libmnl_1.0.4-3.debian"  # 18.6 KB
+  orig = "libmnl_1.0.4.orig"  # 1.5 MB
+
+[src.libmodule-implementation-perl]
+versions = ['0.09', '0.09-2']
+  debian = "libmodule-implementation-perl_0.09-2.debian"  # 14.9 KB
+  orig = "libmodule-implementation-perl_0.09.orig"  # 78.1 KB
+
+[src.libmodule-pluggable-perl]
+versions = ['5.2', '5.2-4']
+  debian = "libmodule-pluggable-perl_5.2-4.debian"  # 5.3 KB
+  orig = "libmodule-pluggable-perl_5.2.orig"  # 87.6 KB
+
+[src.libmodule-runtime-perl]
+versions = ['0.016', '0.016-2']
+  debian = "libmodule-runtime-perl_0.016-2.debian"  # 8.9 KB
+  orig = "libmodule-runtime-perl_0.016.orig"  # 49.0 KB
+
+[src.libmouse-perl]
+versions = ['2.5.10', '2.5.10-1']
+  debian = "libmouse-perl_2.5.10-1.debian"  # 24.7 KB
+  orig = "libmouse-perl_2.5.10.orig"  # 924.9 KB
+
+[src.libmousex-nativetraits-perl]
+versions = ['1.09', '1.09-3']
+  debian = "libmousex-nativetraits-perl_1.09-3.debian"  # 6.8 KB
+  orig = "libmousex-nativetraits-perl_1.09.orig"  # 225.4 KB
+
+[src.libmousex-strictconstructor-perl]
+versions = ['0.02', '0.02-3']
+  debian = "libmousex-strictconstructor-perl_0.02-3.debian"  # 4.9 KB
+  orig = "libmousex-strictconstructor-perl_0.02.orig"  # 59.3 KB
+
+[src.libmspack]
+versions = ['0.11', '0.11-1']
+  debian = "libmspack_0.11-1.debian"  # 10.5 KB
+  orig = "libmspack_0.11.orig"  # 2.0 MB
+
+[src.libndp]
+versions = ['1.8', '1.8-1+deb12u1']
+  debian = "libndp_1.8-1+deb12u1.debian"  # 12.8 KB
+  orig = "libndp_1.8.orig"  # 1.4 MB
+
+[src.libnet]
+versions = ['1.1.6+dfsg', '1.1.6+dfsg-3.2']
+  debian = "libnet_1.1.6+dfsg-3.2.debian"  # 73.1 KB
+  orig = "libnet_1.1.6+dfsg.orig"  # 3.2 MB
+
+[src.libnetfilter-conntrack]
+versions = ['1.0.9', '1.0.9-3']
+  debian = "libnetfilter-conntrack_1.0.9-3.debian"  # 26.9 KB
+  orig = "libnetfilter-conntrack_1.0.9.orig"  # 2.0 MB
+
+[src.libnetfilter-cthelper]
+versions = ['1.0.1', '1.0.1-1']
+  debian = "libnetfilter-cthelper_1.0.1-1.debian"  # 12.9 KB
+  orig = "libnetfilter-cthelper_1.0.1.orig"  # 1.5 MB
+
+[src.libnetfilter-cttimeout]
+versions = ['1.0.1', '1.0.1-1']
+  debian = "libnetfilter-cttimeout_1.0.1-1.debian"  # 13.3 KB
+  orig = "libnetfilter-cttimeout_1.0.1.orig"  # 1.5 MB
+
+[src.libnetfilter-queue]
+versions = ['1.0.5', '1.0.5-3']
+  debian = "libnetfilter-queue_1.0.5-3.debian"  # 17.0 KB
+  orig = "libnetfilter-queue_1.0.5.orig"  # 1.6 MB
+
+[src.libnfnetlink]
+versions = ['1.0.2', '1.0.2-2']
+  debian = "libnfnetlink_1.0.2-2.debian"  # 14.7 KB
+  orig = "libnfnetlink_1.0.2.orig"  # 1.4 MB
+
+[src.libnginx-mod-http-echo]
+versions = ['0.63', '0.63-4']
+  debian = "libnginx-mod-http-echo_0.63-4.debian"  # 8.3 KB
+  orig = "libnginx-mod-http-echo_0.63.orig"  # 281.4 KB
+
+[src.libnl3]
+versions = ['3.7.0', '3.7.0-0.2']
+  debian = "libnl3_3.7.0-0.2.debian"  # 129.8 KB
+  orig = "libnl3_3.7.0.orig"  # 4.8 MB
+
+[src.libnsl]
+versions = ['1.3.0', '1.3.0-2']
+  debian = "libnsl_1.3.0-2.debian"  # 15.9 KB
+  orig = "libnsl_1.3.0.orig"  # 1.9 MB
+
+[src.libnumber-compare-perl]
+versions = ['0.03', '0.03-3']
+  debian = "libnumber-compare-perl_0.03-3.debian"  # 8.2 KB
+  orig = "libnumber-compare-perl_0.03.orig"  # 5.0 KB
+
+[src.libnvme]
+versions = ['1.3', '1.3-1+deb12u1']
+  debian = "libnvme_1.3-1+deb12u1.debian"  # 20.4 KB
+  orig = "libnvme_1.3.orig"  # 2.3 MB
+
+[src.libonig]
+versions = ['6.9.8', '6.9.8-1']
+  debian = "libonig_6.9.8-1.debian"  # 32.8 KB
+  orig = "libonig_6.9.8.orig"  # 3.1 MB
+
+[src.libpackage-stash-perl]
+versions = ['0.40', '0.40-1']
+  debian = "libpackage-stash-perl_0.40-1.debian"  # 12.5 KB
+  orig = "libpackage-stash-perl_0.40.orig"  # 271.4 KB
+
+[src.libparams-classify-perl]
+versions = ['0.015', '0.015-2']
+  debian = "libparams-classify-perl_0.015-2.debian"  # 13.0 KB
+  orig = "libparams-classify-perl_0.015.orig"  # 65.4 KB
+
+[src.libparams-util-perl]
+versions = ['1.102', '1.102-2']
+  debian = "libparams-util-perl_1.102-2.debian"  # 9.3 KB
+  orig = "libparams-util-perl_1.102.orig"  # 863.9 KB
+
+[src.libparams-validate-perl]
+versions = ['1.31', '1.31-1']
+  debian = "libparams-validate-perl_1.31-1.debian"  # 30.1 KB
+  orig = "libparams-validate-perl_1.31.orig"  # 912.7 KB
+
+[src.libparse-recdescent-perl]
+versions = ['1.967015+dfsg', '1.967015+dfsg-4']
+  debian = "libparse-recdescent-perl_1.967015+dfsg-4.debian"  # 27.4 KB
+  orig = "libparse-recdescent-perl_1.967015+dfsg.orig"  # 433.4 KB
+
+[src.libpath-tiny-perl]
+versions = ['0.144', '0.144-1']
+  debian = "libpath-tiny-perl_0.144-1.debian"  # 18.9 KB
+  orig = "libpath-tiny-perl_0.144.orig"  # 391.4 KB
+
+[src.libpcap]
+versions = ['1.10.3', '1.10.3-1']
+  debian = "libpcap_1.10.3-1.debian"  # 62.0 KB
+  orig = "libpcap_1.10.3.orig"  # 3.6 MB
+
+[src.libpgm]
+versions = ['5.3.128~dfsg', '5.3.128~dfsg-2']
+  debian = "libpgm_5.3.128~dfsg-2.debian"  # 17.5 KB
+  orig = "libpgm_5.3.128~dfsg.orig"  # 3.0 MB
+
+[src.libpng1.6]
+versions = ['1.6.39', '1.6.39-2+deb12u3']
+  debian = "libpng1.6_1.6.39-2+deb12u3.debian"  # 171.0 KB
+  orig = "libpng1.6_1.6.39.orig"  # 5.7 MB
+
+[src.libpod-pom-perl]
+versions = ['2.01', '2.01-4']
+  debian = "libpod-pom-perl_2.01-4.debian"  # 12.6 KB
+  orig = "libpod-pom-perl_2.01.orig"  # 239.5 KB
+
+[src.libpsl]
+versions = ['0.21.2', '0.21.2-1']
+  debian = "libpsl_0.21.2-1.debian"  # 28.6 KB
+  orig = "libpsl_0.21.2.orig"  # 36.9 MB
+
+[src.libqmi]
+versions = ['1.32.2', '1.32.2-1']
+  debian = "libqmi_1.32.2-1.debian"  # 352.8 KB
+  orig = "libqmi_1.32.2.orig"  # 24.4 MB
+
+[src.libqrtr-glib]
+versions = ['1.2.2', '1.2.2-1']
+  debian = "libqrtr-glib_1.2.2-1.debian"  # 11.0 KB
+  orig = "libqrtr-glib_1.2.2.orig"  # 118.1 KB
+
+[src.libregexp-common-perl]
+versions = ['2017060201', '2017060201-3']
+  debian = "libregexp-common-perl_2017060201-3.debian"  # 25.5 KB
+  orig = "libregexp-common-perl_2017060201.orig"  # 972.6 KB
+
+[src.librsvg]
+versions = ['2.54.7+dfsg', '2.54.7+dfsg-1~deb12u1']
+  debian = "librsvg_2.54.7+dfsg-1~deb12u1.debian"  # 127.9 KB
+  orig = "librsvg_2.54.7+dfsg.orig"  # 80.2 MB
+
+[src.librtr]
+versions = ['0.8.0', '0.8.0-1']
+  debian = "librtr_0.8.0-1.debian"  # 16.2 KB
+  orig = "librtr_0.8.0.orig"  # 1004.4 KB
+
+[src.libseccomp]
+versions = ['2.5.4', '2.5.4-1+deb12u1']
+  debian = "libseccomp_2.5.4-1+deb12u1.debian"  # 37.2 KB
+  orig = "libseccomp_2.5.4.orig"  # 2.7 MB
+
+[src.libselinux]
+versions = ['3.4', '3.4-1']
+  debian = "libselinux_3.4-1.debian"  # 102.4 KB
+  orig = "libselinux_3.4.orig"  # 833.2 KB
+
+[src.libsemanage]
+versions = ['3.4', '3.4-1']
+  debian = "libsemanage_3.4-1.debian"  # 84.5 KB
+  orig = "libsemanage_3.4.orig"  # 1016.0 KB
+
+[src.libsepol]
+versions = ['3.4', '3.4-2.1']
+  debian = "libsepol_3.4-2.1.debian"  # 69.3 KB
+  orig = "libsepol_3.4.orig"  # 3.5 MB
+
+[src.libsigc++-2.0]
+versions = ['2.12.0', '2.12.0-1']
+  debian = "libsigc++-2.0_2.12.0-1.debian"  # 40.7 KB
+  orig = "libsigc++-2.0_2.12.0.orig"  # 842.8 KB
+
+[src.libsigsegv]
+versions = ['2.14', '2.14-1']
+  debian = "libsigsegv_2.14-1.debian"  # 23.1 KB
+  orig = "libsigsegv_2.14.orig"  # 1.9 MB
+
+[src.libsmi]
+versions = ['0.4.8+dfsg2', '0.4.8+dfsg2-16']
+  debian = "libsmi_0.4.8+dfsg2-16.debian"  # 46.6 KB
+  orig = "libsmi_0.4.8+dfsg2.orig"  # 11.4 MB
+
+[src.libsodium]
+versions = ['1.0.18', '1.0.18-1+deb12u1']
+  debian = "libsodium_1.0.18-1+deb12u1.debian"  # 43.3 KB
+  orig = "libsodium_1.0.18.orig"  # 5.6 MB
+
+[src.libssh]
+versions = ['0.10.6', '0.10.6-0+deb12u2']
+  debian = "libssh_0.10.6-0+deb12u2.debian"  # 145.6 KB
+  orig = "libssh_0.10.6.orig"  # 4.2 MB
+
+[src.libssh2]
+versions = ['1.10.0', '1.10.0-3']
+  debian = "libssh2_1.10.0-3.debian"  # 26.2 KB
+  orig = "libssh2_1.10.0.orig"  # 4.3 MB
+
+[src.libstring-rewriteprefix-perl]
+versions = ['0.009', '0.009-1']
+  debian = "libstring-rewriteprefix-perl_0.009-1.debian"  # 6.5 KB
+  orig = "libstring-rewriteprefix-perl_0.009.orig"  # 67.0 KB
+
+[src.libsub-exporter-perl]
+versions = ['0.989', '0.989-1']
+  debian = "libsub-exporter-perl_0.989-1.debian"  # 10.8 KB
+  orig = "libsub-exporter-perl_0.989.orig"  # 225.6 KB
+
+[src.libsub-install-perl]
+versions = ['0.929', '0.929-1']
+  debian = "libsub-install-perl_0.929-1.debian"  # 8.4 KB
+  orig = "libsub-install-perl_0.929.orig"  # 83.0 KB
+
+[src.libsub-uplevel-perl]
+versions = ['0.2800', '0.2800-3']
+  debian = "libsub-uplevel-perl_0.2800-3.debian"  # 12.0 KB
+  orig = "libsub-uplevel-perl_0.2800.orig"  # 84.3 KB
+
+[src.libtasn1-6]
+versions = ['4.19.0', '4.19.0-2+deb12u1']
+  debian = "libtasn1-6_4.19.0-2+deb12u1.debian"  # 67.2 KB
+  orig = "libtasn1-6_4.19.0.orig"  # 7.3 MB
+
+[src.libtest-exception-perl]
+versions = ['0.43', '0.43-3']
+  debian = "libtest-exception-perl_0.43-3.debian"  # 11.1 KB
+  orig = "libtest-exception-perl_0.43.orig"  # 44.5 KB
+
+[src.libtext-glob-perl]
+versions = ['0.11', '0.11-3']
+  debian = "libtext-glob-perl_0.11-3.debian"  # 12.1 KB
+  orig = "libtext-glob-perl_0.11.orig"  # 15.0 KB
+
+[src.libthai]
+versions = ['0.1.29', '0.1.29-1']
+  debian = "libthai_0.1.29-1.debian"  # 43.7 KB
+  orig = "libthai_0.1.29.orig"  # 2.6 MB
+
+[src.libtirpc]
+versions = ['1.3.3+ds', '1.3.3+ds-1']
+  debian = "libtirpc_1.3.3+ds-1.debian"  # 37.4 KB
+  orig = "libtirpc_1.3.3+ds.orig"  # 2.8 MB
+
+[src.libtomcrypt]
+versions = ['1.18.2', '1.18.2-6']
+  debian = "libtomcrypt_1.18.2-6.debian"  # 50.0 KB
+  orig = "libtomcrypt_1.18.2.orig"  # 7.9 MB
+
+[src.libtommath]
+versions = ['1.2.0', '1.2.0-6+deb12u1']
+  debian = "libtommath_1.2.0-6+deb12u1.debian"  # 46.8 KB
+  orig = "libtommath_1.2.0.orig"  # 1.5 MB
+
+[src.libtool]
+versions = ['2.4.7', '2.4.7-7~deb12u1']
+  debian = "libtool_2.4.7-7~deb12u1.debian"  # 100.9 KB
+  orig = "libtool_2.4.7.orig"  # 8.0 MB
+
+[src.libtry-tiny-perl]
+versions = ['0.31', '0.31-2']
+  debian = "libtry-tiny-perl_0.31-2.debian"  # 11.0 KB
+  orig = "libtry-tiny-perl_0.31.orig"  # 146.8 KB
+
+[src.libunistring]
+versions = ['1.0', '1.0-2']
+  debian = "libunistring_1.0-2.debian"  # 74.6 KB
+  orig = "libunistring_1.0.orig"  # 26.6 MB
+
+[src.libunwind]
+versions = ['1.6.2', '1.6.2-3']
+  debian = "libunwind_1.6.2-3.debian"  # 46.1 KB
+  orig = "libunwind_1.6.2.orig"  # 4.2 MB
+
+[src.liburing]
+versions = ['2.3', '2.3-3']
+  debian = "liburing_2.3-3.debian"  # 28.0 KB
+  orig = "liburing_2.3.orig"  # 1.3 MB
+
+[src.libusb-1.0]
+versions = ['1.0.26', '1.0.26-1']
+  debian = "libusb-1.0_1.0.26-1.debian"  # 44.6 KB
+  orig = "libusb-1.0_1.0.26.orig"  # 3.3 MB
+
+[src.libutempter]
+versions = ['1.2.1', '1.2.1-3']
+  debian = "libutempter_1.2.1-3.debian"  # 26.5 KB
+  orig = "libutempter_1.2.1.orig"  # 51.7 KB
+
+[src.libuv1]
+versions = ['1.44.2', '1.44.2-1+deb12u1']
+  debian = "libuv1_1.44.2-1+deb12u1.debian"  # 83.4 KB
+  orig = "libuv1_1.44.2.orig"  # 4.1 MB
+
+[src.libwebp]
+versions = ['1.2.4', '1.2.4-0.2+deb12u1']
+  debian = "libwebp_1.2.4-0.2+deb12u1.debian"  # 34.7 KB
+  orig = "libwebp_1.2.4.orig"  # 8.8 MB
+
+[src.libx11]
+versions = ['1.8.4', '1.8.4-2+deb12u2']
+  diff = "libx11_1.8.4-2+deb12u2.diff"  # 348.3 KB
+  orig = "libx11_1.8.4.orig"  # 15.4 MB
+
+[src.libxau]
+versions = ['1.0.9', '1.0.9-1']
+  diff = "libxau_1.0.9-1.diff"  # 23.8 KB
+  orig = "libxau_1.0.9.orig"  # 1.6 MB
+
+[src.libxcb]
+versions = ['1.15', '1.15-1']
+  diff = "libxcb_1.15-1.diff"  # 210.0 KB
+  orig = "libxcb_1.15.orig"  # 2.6 MB
+
+[src.libxcrypt]
+versions = ['4.4.33', '4.4.33-2']
+  debian = "libxcrypt_4.4.33-2.debian"  # 28.7 KB
+  orig = "libxcrypt_4.4.33.orig"  # 2.0 MB
+
+[src.libxdmcp]
+versions = ['1.1.2', '1.1.2-3']
+  diff = "libxdmcp_1.1.2-3.diff"  # 52.5 KB
+  orig = "libxdmcp_1.1.2.orig"  # 1.7 MB
+
+[src.libxext]
+versions = ['1.3.4', '1.3.4-1']
+  diff = "libxext_1.3.4-1.diff"  # 42.1 KB
+  orig = "libxext_1.3.4.orig"  # 2.1 MB
+
+[src.libxinerama]
+versions = ['1.1.4', '1.1.4-3']
+  diff = "libxinerama_1.1.4-3.diff"  # 21.1 KB
+  orig = "libxinerama_1.1.4.orig"  # 1.6 MB
+
+[src.libxml2]
+versions = ['2.9.14+dfsg', '2.9.14+dfsg-1.3~deb12u5']
+  debian = "libxml2_2.9.14+dfsg-1.3~deb12u5.debian"  # 201.4 KB
+  orig = "libxml2_2.9.14+dfsg.orig"  # 23.9 MB
+
+[src.libxrender]
+versions = ['0.9.10', '0.9.10-1.1']
+  diff = "libxrender_0.9.10-1.1.diff"  # 35.3 KB
+  orig = "libxrender_0.9.10.orig"  # 1.6 MB
+
+[src.libxslt]
+versions = ['1.1.35', '1.1.35-1+deb12u3']
+  debian = "libxslt_1.1.35-1+deb12u3.debian"  # 106.0 KB
+  orig = "libxslt_1.1.35.orig"  # 19.8 MB
+
+[src.libyaml]
+versions = ['0.2.5', '0.2.5-1']
+  debian = "libyaml_0.2.5-1.debian"  # 13.4 KB
+  orig = "libyaml_0.2.5.orig"  # 553.9 KB
+
+[src.libyaml-pp-perl]
+versions = ['0.035', '0.035-1']
+  debian = "libyaml-pp-perl_0.035-1.debian"  # 8.3 KB
+  orig = "libyaml-pp-perl_0.035.orig"  # 784.8 KB
+
+[src.libyaml-tiny-perl]
+versions = ['1.73', '1.73-1']
+  debian = "libyaml-tiny-perl_1.73-1.debian"  # 13.4 KB
+  orig = "libyaml-tiny-perl_1.73.orig"  # 271.3 KB
+
+[src.libzstd]
+versions = ['1.5.4+dfsg2', '1.5.4+dfsg2-5']
+  debian = "libzstd_1.5.4+dfsg2-5.debian"  # 337.9 KB
+  orig = "libzstd_1.5.4+dfsg2.orig"  # 7.1 MB
+
+[src.linux]
+versions = ['6.1.164', '6.1.164-1']
+  debian = "linux_6.1.164-1.debian"  # 9.3 MB
+  orig = "linux_6.1.164.orig"  # 1.2 GB
+
+[src.linux-base]
+versions = ['4.9']
+  unknown = "linux-base_4.9"  # 186.6 KB
+
+[src.lirc]
+versions = ['0.10.1', '0.10.1-7.2']
+  debian = "lirc_0.10.1-7.2.debian"  # 136.0 KB
+  orig = "lirc_0.10.1.orig"  # 6.2 MB
+
+[src.live-config]
+versions = ['11.0.3+nmu1']
+  unknown = "live-config_11.0.3+nmu1"  # 583.4 KB
+
+[src.lksctp-tools]
+versions = ['1.0.19+dfsg', '1.0.19+dfsg-2']
+  debian = "lksctp-tools_1.0.19+dfsg-2.debian"  # 29.0 KB
+  orig = "lksctp-tools_1.0.19+dfsg.orig"  # 873.9 KB
+
+[src.lldpd]
+versions = ['1.0.16', '1.0.16-1+deb12u1']
+  debian = "lldpd_1.0.16-1+deb12u1.debian"  # 40.5 KB
+  orig = "lldpd_1.0.16.orig"  # 8.1 MB
+
+[src.lm-sensors]
+versions = ['3.6.0', '3.6.0-7.1']
+  debian = "lm-sensors_3.6.0-7.1.debian"  # 95.4 KB
+  orig = "lm-sensors_3.6.0.orig"  # 1.0 MB
+
+[src.lmdb]
+versions = ['0.9.24', '0.9.24-1']
+  debian = "lmdb_0.9.24-1.debian"  # 17.6 KB
+  orig = "lmdb_0.9.24.orig"  # 519.1 KB
+
+[src.localepurge]
+versions = ['0.7.3.10']
+  unknown = "localepurge_0.7.3.10"  # 282.1 KB
+
+[src.log4cplus]
+versions = ['2.0.8', '2.0.8-1']
+  debian = "log4cplus_2.0.8-1.debian"  # 41.4 KB
+  orig = "log4cplus_2.0.8.orig"  # 8.8 MB
+
+[src.logrotate]
+versions = ['3.21.0', '3.21.0-1']
+  debian = "logrotate_3.21.0-1.debian"  # 55.8 KB
+  orig = "logrotate_3.21.0.orig"  # 909.1 KB
+
+[src.lsb]
+versions = ['11.6']
+  unknown = "lsb_11.6"  # 146.2 KB
+
+[src.lsb-release-minimal]
+versions = ['12.0', '12.0-1']
+  debian = "lsb-release-minimal_12.0-1.debian"  # 6.4 KB
+  orig = "lsb-release-minimal_12.0.orig"  # 12.0 KB
+
+[src.lsof]
+versions = ['4.95.0', '4.95.0-1']
+  debian = "lsof_4.95.0-1.debian"  # 36.8 KB
+  orig = "lsof_4.95.0.orig"  # 2.3 MB
+
+[src.lsscsi]
+versions = ['0.31', '0.31-1']
+  debian = "lsscsi_0.31-1.debian"  # 8.7 KB
+  orig = "lsscsi_0.31.orig"  # 720.3 KB
+
+[src.lua-lpeg]
+versions = ['1.0.2', '1.0.2-2']
+  debian = "lua-lpeg_1.0.2-2.debian"  # 8.7 KB
+  orig = "lua-lpeg_1.0.2.orig"  # 226.0 KB
+
+[src.lua5.2]
+versions = ['5.2.4', '5.2.4-3']
+  debian = "lua5.2_5.2.4-3.debian"  # 29.7 KB
+  orig = "lua5.2_5.2.4.orig"  # 909.7 KB
+
+[src.lua5.3]
+versions = ['5.3.6', '5.3.6-2']
+  debian = "lua5.3_5.3.6-2.debian"  # 21.5 KB
+  orig = "lua5.3_5.3.6.orig"  # 1.0 MB
+
+[src.luajit]
+versions = ['2.1.0~beta3+git20220320+dfsg', '2.1.0~beta3+git20220320+dfsg-4.1+deb12u1']
+  debian = "luajit_2.1.0~beta3+git20220320+dfsg-4.1+deb12u1.debian"  # 44.3 KB
+  orig = "luajit_2.1.0~beta3+git20220320+dfsg.orig"  # 3.9 MB
+
+[src.lvm2]
+versions = ['2.03.16', '2.03.16-2']
+  debian = "lvm2_2.03.16-2.debian"  # 125.2 KB
+  orig = "lvm2_2.03.16.orig"  # 11.1 MB
+
+[src.lz4]
+versions = ['1.9.4', '1.9.4-1']
+  debian = "lz4_1.9.4-1.debian"  # 29.1 KB
+  orig = "lz4_1.9.4.orig"  # 1.6 MB
+
+[src.lzo2]
+versions = ['2.10', '2.10-2']
+  debian = "lzo2_2.10-2.debian"  # 28.0 KB
+  orig = "lzo2_2.10.orig"  # 2.9 MB
+
+[src.markupsafe]
+versions = ['2.1.2', '2.1.2-1']
+  debian = "markupsafe_2.1.2-1.debian"  # 8.9 KB
+  orig = "markupsafe_2.1.2.orig"  # 55.6 KB
+
+[src.mawk]
+versions = ['1.3.4.20200120', '1.3.4.20200120-3.1']
+  debian = "mawk_1.3.4.20200120-3.1.debian"  # 40.0 KB
+  orig = "mawk_1.3.4.20200120.orig"  # 1.4 MB
+
+[src.mdadm]
+versions = ['4.2', '4.2-5']
+  debian = "mdadm_4.2-5.debian"  # 366.5 KB
+  orig = "mdadm_4.2.orig"  # 2.1 MB
+
+[src.media-types]
+versions = ['10.0.0']
+  unknown = "media-types_10.0.0"  # 261.2 KB
+
+[src.minicom]
+versions = ['2.8', '2.8-2']
+  debian = "minicom_2.8-2.debian"  # 41.6 KB
+  orig = "minicom_2.8.orig"  # 3.3 MB
+
+[src.minisign]
+versions = ['0.11', '0.11-1']
+  debian = "minisign_0.11-1.debian"  # 6.1 KB
+  orig = "minisign_0.11.orig"  # 72.1 KB
+
+[src.modemmanager]
+versions = ['1.20.4', '1.20.4-1']
+  debian = "modemmanager_1.20.4-1.debian"  # 180.5 KB
+  orig = "modemmanager_1.20.4.orig"  # 12.3 MB
+
+[src.mpfr4]
+versions = ['4.2.0', '4.2.0-1']
+  debian = "mpfr4_4.2.0-1.debian"  # 62.5 KB
+  orig = "mpfr4_4.2.0.orig"  # 9.0 MB
+
+[src.mtools]
+versions = ['4.0.33-1+really4.0.32', '4.0.33-1+really4.0.32-1']
+  debian = "mtools_4.0.33-1+really4.0.32-1.debian"  # 33.6 KB
+  orig = "mtools_4.0.33-1+really4.0.32.orig"  # 1.8 MB
+
+[src.mtr]
+versions = ['0.95', '0.95-1']
+  debian = "mtr_0.95-1.debian"  # 24.5 KB
+  orig = "mtr_0.95.orig"  # 571.3 KB
+
+[src.nano]
+versions = ['7.2', '7.2-1+deb12u1']
+  debian = "nano_7.2-1+deb12u1.debian"  # 120.2 KB
+  orig = "nano_7.2.orig"  # 12.5 MB
+
+[src.ncurses]
+versions = ['6.4', '6.4-4']
+  debian = "ncurses_6.4-4.debian"  # 441.2 KB
+  orig = "ncurses_6.4.orig"  # 17.2 MB
+
+[src.ndisc6]
+versions = ['1.0.5', '1.0.5-1']
+  debian = "ndisc6_1.0.5-1.debian"  # 19.1 KB
+  orig = "ndisc6_1.0.5.orig"  # 1.3 MB
+
+[src.net-tools]
+versions = ['2.10', '2.10-0.1+deb12u2']
+  debian = "net-tools_2.10-0.1+deb12u2.debian"  # 423.7 KB
+  orig = "net-tools_2.10.orig"  # 1.3 MB
+
+[src.netavark]
+versions = ['1.4.0', '1.4.0-3']
+  debian = "netavark_1.4.0-3.debian"  # 10.4 KB
+  orig = "netavark_1.4.0.orig"  # 362.0 KB
+
+[src.netbase]
+versions = ['6.4']
+  unknown = "netbase_6.4"  # 102.6 KB
+
+[src.netcat-openbsd]
+versions = ['1.219', '1.219-1']
+  debian = "netcat-openbsd_1.219-1.debian"  # 236.0 KB
+  orig = "netcat-openbsd_1.219.orig"  # 76.1 KB
+
+[src.netifaces]
+versions = ['0.11.0', '0.11.0-2']
+  debian = "netifaces_0.11.0-2.debian"  # 8.7 KB
+  orig = "netifaces_0.11.0.orig"  # 128.5 KB
+
+[src.netplug]
+versions = ['1.2.9.2', '1.2.9.2-3.1']
+  debian = "netplug_1.2.9.2-3.1.debian"  # 15.1 KB
+  orig = "netplug_1.2.9.2.orig"  # 75.5 KB
+
+[src.nettle]
+versions = ['3.8.1', '3.8.1-2']
+  debian = "nettle_3.8.1-2.debian"  # 106.7 KB
+  orig = "nettle_3.8.1.orig"  # 7.1 MB
+
+[src.nghttp2]
+versions = ['1.52.0', '1.52.0-1+deb12u2']
+  debian = "nghttp2_1.52.0-1+deb12u2.debian"  # 81.9 KB
+  orig = "nghttp2_1.52.0.orig"  # 5.6 MB
+
+[src.nginx]
+versions = ['1.22.1', '1.22.1-9+deb12u4']
+  debian = "nginx_1.22.1-9+deb12u4.debian"  # 307.7 KB
+  orig = "nginx_1.22.1.orig"  # 6.2 MB
+
+[src.nmap]
+versions = ['7.93+dfsg1', '7.93+dfsg1-1']
+  debian = "nmap_7.93+dfsg1-1.debian"  # 140.3 KB
+  orig = "nmap_7.93+dfsg1.orig"  # 39.4 MB
+
+[src.norm]
+versions = ['1.5.9+dfsg', '1.5.9+dfsg-2']
+  debian = "norm_1.5.9+dfsg-2.debian"  # 30.6 KB
+  orig = "norm_1.5.9+dfsg.orig"  # 8.0 MB
+
+[src.npth]
+versions = ['1.6', '1.6-3']
+  debian = "npth_1.6-3.debian"  # 20.5 KB
+  orig = "npth_1.6.orig"  # 1.5 MB
+
+[src.numactl]
+versions = ['2.0.16', '2.0.16-1']
+  debian = "numactl_2.0.16-1.debian"  # 25.3 KB
+  orig = "numactl_2.0.16.orig"  # 390.1 KB
+
+[src.nvme-cli]
+versions = ['2.4+really2.3', '2.4+really2.3-3']
+  debian = "nvme-cli_2.4+really2.3-3.debian"  # 19.9 KB
+  orig = "nvme-cli_2.4+really2.3.orig"  # 6.5 MB
+
+[src.oath-toolkit]
+versions = ['2.6.7', '2.6.7-3.1+deb12u1']
+  debian = "oath-toolkit_2.6.7-3.1+deb12u1.debian"  # 46.1 KB
+  orig = "oath-toolkit_2.6.7.orig"  # 23.3 MB
+
+[src.ocserv]
+versions = ['1.1.6', '1.1.6-3']
+  debian = "ocserv_1.1.6-3.debian"  # 76.8 KB
+  orig = "ocserv_1.1.6.orig"  # 5.6 MB
+
+[src.open-vm-tools]
+versions = ['12.2.0', '12.2.0-1+deb12u4']
+  debian = "open-vm-tools_12.2.0-1+deb12u4.debian"  # 168.6 KB
+  orig = "open-vm-tools_12.2.0.orig"  # 13.2 MB
+
+[src.openldap]
+versions = ['2.5.13+dfsg', '2.5.13+dfsg-5']
+  debian = "openldap_2.5.13+dfsg-5.debian"  # 829.5 KB
+  orig = "openldap_2.5.13+dfsg.orig"  # 23.8 MB
+
+[src.openssh]
+versions = ['9.2p1', '9.2p1-2+deb12u7']
+  debian = "openssh_9.2p1-2+deb12u7.debian"  # 757.6 KB
+  orig = "openssh_9.2p1.orig"  # 7.6 MB
+
+[src.openssl]
+versions = ['3.0.18', '3.0.18-1~deb12u2']
+  debian = "openssl_3.0.18-1~deb12u2.debian"  # 255.4 KB
+  orig = "openssl_3.0.18.orig"  # 52.2 MB
+
+[src.opentracing-c-wrapper]
+versions = ['1.1.3', '1.1.3-3']
+  debian = "opentracing-c-wrapper_1.1.3-3.debian"  # 6.4 KB
+  orig = "opentracing-c-wrapper_1.1.3.orig"  # 202.3 KB
+
+[src.opentracing-cpp]
+versions = ['1.6.0', '1.6.0-4']
+  debian = "opentracing-cpp_1.6.0-4.debian"  # 10.6 KB
+  orig = "opentracing-cpp_1.6.0.orig"  # 766.2 KB
+
+[src.openvpn]
+versions = ['2.6.3', '2.6.3-1+deb12u4']
+  debian = "openvpn_2.6.3-1+deb12u4.debian"  # 420.4 KB
+  orig = "openvpn_2.6.3.orig"  # 7.9 MB
+
+[src.openvpn-auth-ldap]
+versions = ['2.0.4', '2.0.4-3']
+  debian = "openvpn-auth-ldap_2.0.4-3.debian"  # 22.8 KB
+  orig = "openvpn-auth-ldap_2.0.4.orig"  # 960.8 KB
+
+[src.openvpn-auth-radius]
+versions = ['2.1', '2.1-8']
+  debian = "openvpn-auth-radius_2.1-8.debian"  # 13.6 KB
+  orig = "openvpn-auth-radius_2.1.orig"  # 1.1 MB
+
+[src.p11-kit]
+versions = ['0.24.1', '0.24.1-2']
+  debian = "p11-kit_0.24.1-2.debian"  # 65.3 KB
+  orig = "p11-kit_0.24.1.orig"  # 6.7 MB
+
+[src.pam]
+versions = ['1.5.2', '1.5.2-6+deb12u2']
+  debian = "pam_1.5.2-6+deb12u2.debian"  # 681.7 KB
+  orig = "pam_1.5.2.orig"  # 9.3 MB
+
+[src.pango1.0]
+versions = ['1.50.12+ds', '1.50.12+ds-1']
+  debian = "pango1.0_1.50.12+ds-1.debian"  # 184.8 KB
+  orig = "pango1.0_1.50.12+ds.orig"  # 6.5 MB
+
+[src.paramiko]
+versions = ['2.12.0', '2.12.0-2']
+  debian = "paramiko_2.12.0-2.debian"  # 23.5 KB
+  orig = "paramiko_2.12.0.orig"  # 1.3 MB
+
+[src.parsedatetime]
+versions = ['2.6', '2.6-3']
+  debian = "parsedatetime_2.6-3.debian"  # 11.7 KB
+  orig = "parsedatetime_2.6.orig"  # 323.0 KB
+
+[src.parted]
+versions = ['3.5', '3.5-3']
+  debian = "parted_3.5-3.debian"  # 211.3 KB
+  orig = "parted_3.5.orig"  # 14.7 MB
+
+[src.pci.ids]
+versions = ['0.0~2023.04.11', '0.0~2023.04.11-1']
+  debian = "pci.ids_0.0~2023.04.11-1.debian"  # 15.1 KB
+  orig = "pci.ids_0.0~2023.04.11.orig"  # 1.3 MB
+
+[src.pciutils]
+versions = ['3.9.0', '3.9.0-4']
+  debian = "pciutils_3.9.0-4.debian"  # 64.1 KB
+  orig = "pciutils_3.9.0.orig"  # 4.3 MB
+
+[src.pcre2]
+versions = ['10.42', '10.42-1']
+  diff = "pcre2_10.42-1.diff"  # 33.2 KB
+  orig = "pcre2_10.42.orig"  # 10.5 MB
+
+[src.pcre3]
+versions = ['8.39', '8.39-15']
+  debian = "pcre3_8.39-15.debian"  # 90.6 KB
+  orig = "pcre3_8.39.orig"  # 9.1 MB
+
+[src.pcsc-lite]
+versions = ['1.9.9', '1.9.9-2']
+  debian = "pcsc-lite_1.9.9-2.debian"  # 65.4 KB
+  orig = "pcsc-lite_1.9.9.orig"  # 4.3 MB
+
+[src.pdns-recursor]
+versions = ['4.8.8', '4.8.8-1+deb12u1']
+  debian = "pdns-recursor_4.8.8-1+deb12u1.debian"  # 78.0 KB
+  orig = "pdns-recursor_4.8.8.orig"  # 7.9 MB
+
+[src.perl]
+versions = ['5.36.0', '5.36.0-7+deb12u3', '5.36.0.orig-regen-configure']
+  debian = "perl_5.36.0-7+deb12u3.debian"  # 2.2 MB
+  orig = "perl_5.36.0.orig"  # 82.7 MB
+  unknown = "perl_5.36.0.orig-regen-configure"  # 2.8 MB
+
+[src.pinentry]
+versions = ['1.2.1', '1.2.1-1']
+  debian = "pinentry_1.2.1-1.debian"  # 66.1 KB
+  orig = "pinentry_1.2.1.orig"  # 2.6 MB
+
+[src.pixman]
+versions = ['0.42.2', '0.42.2-1']
+  diff = "pixman_0.42.2-1.diff"  # 1014.1 KB
+  orig = "pixman_0.42.2.orig"  # 4.2 MB
+
+[src.pkcs11-helper]
+versions = ['1.29.0', '1.29.0-1']
+  debian = "pkcs11-helper_1.29.0-1.debian"  # 18.1 KB
+  orig = "pkcs11-helper_1.29.0.orig"  # 2.5 MB
+
+[src.policykit-1]
+versions = ['122', '122-3', '122.orig-polkit-pkla-compat']
+  debian = "policykit-1_122-3.debian"  # 142.6 KB
+  orig = "policykit-1_122.orig"  # 1.9 MB
+  unknown = "policykit-1_122.orig-polkit-pkla-compat"  # 2.0 MB
+
+[src.popt]
+versions = ['1.19+dfsg', '1.19+dfsg-1']
+  debian = "popt_1.19+dfsg-1.debian"  # 30.8 KB
+  orig = "popt_1.19+dfsg.orig"  # 2.1 MB
+
+[src.ppp]
+versions = ['2.4.9', '2.4.9-1+1.1']
+  debian = "ppp_2.4.9-1+1.1.debian"  # 386.9 KB
+  orig = "ppp_2.4.9.orig"  # 2.6 MB
+
+[src.procps]
+versions = ['4.0.2', '4.0.2-3']
+  debian = "procps_4.0.2-3.debian"  # 93.4 KB
+  orig = "procps_4.0.2.orig"  # 11.0 MB
+
+[src.prompt-toolkit]
+versions = ['3.0.36', '3.0.36-2']
+  debian = "prompt-toolkit_3.0.36-2.debian"  # 13.5 KB
+  orig = "prompt-toolkit_3.0.36.orig"  # 5.1 MB
+
+[src.protobuf-c]
+versions = ['1.4.1', '1.4.1-1']
+  debian = "protobuf-c_1.4.1-1.debian"  # 15.0 KB
+  orig = "protobuf-c_1.4.1.orig"  # 2.3 MB
+
+[src.publicsuffix]
+versions = ['20230209.2326', '20230209.2326-1']
+  debian = "publicsuffix_20230209.2326-1.debian"  # 53.9 KB
+  orig = "publicsuffix_20230209.2326.orig"  # 327.0 KB
+
+[src.pyasn1]
+versions = ['0.4.8', '0.4.8-3+deb12u1']
+  debian = "pyasn1_0.4.8-3+deb12u1.debian"  # 19.6 KB
+  orig = "pyasn1_0.4.8.orig"  # 843.9 KB
+
+[src.pygobject]
+versions = ['3.42.2', '3.42.2-3']
+  debian = "pygobject_3.42.2-3.debian"  # 85.9 KB
+  orig = "pygobject_3.42.2.orig"  # 2.8 MB
+
+[src.pyjwt]
+versions = ['2.6.0', '2.6.0-1']
+  debian = "pyjwt_2.6.0-1.debian"  # 11.8 KB
+  orig = "pyjwt_2.6.0.orig"  # 280.8 KB
+
+[src.pyopenssl]
+versions = ['23.0.0', '23.0.0-1']
+  debian = "pyopenssl_23.0.0-1.debian"  # 31.8 KB
+  orig = "pyopenssl_23.0.0.orig"  # 663.8 KB
+
+[src.pyrfc3339]
+versions = ['1.1', '1.1-4']
+  debian = "pyrfc3339_1.1-4.debian"  # 6.8 KB
+  orig = "pyrfc3339_1.1.orig"  # 17.8 KB
+
+[src.pyroute2]
+versions = ['0.7.2', '0.7.2-2']
+  debian = "pyroute2_0.7.2-2.debian"  # 17.0 KB
+  orig = "pyroute2_0.7.2.orig"  # 1.9 MB
+
+[src.pyrsistent]
+versions = ['0.18.1', '0.18.1-1']
+  debian = "pyrsistent_0.18.1-1.debian"  # 7.3 KB
+  orig = "pyrsistent_0.18.1.orig"  # 439.6 KB
+
+[src.pystache]
+versions = ['0.6.0', '0.6.0-1']
+  debian = "pystache_0.6.0-1.debian"  # 13.4 KB
+  orig = "pystache_0.6.0.orig"  # 481.8 KB
+
+[src.python-acme]
+versions = ['2.1.0', '2.1.0-1']
+  debian = "python-acme_2.1.0-1.debian"  # 32.6 KB
+  orig = "python-acme_2.1.0.orig"  # 301.6 KB
+
+[src.python-attrs]
+versions = ['22.2.0', '22.2.0-1']
+  debian = "python-attrs_22.2.0-1.debian"  # 15.0 KB
+  orig = "python-attrs_22.2.0.orig"  # 732.0 KB
+
+[src.python-bcrypt]
+versions = ['3.2.2', '3.2.2-1']
+  debian = "python-bcrypt_3.2.2-1.debian"  # 24.2 KB
+  orig = "python-bcrypt_3.2.2.orig"  # 135.2 KB
+
+[src.python-certbot]
+versions = ['2.1.0', '2.1.0-4']
+  debian = "python-certbot_2.1.0-4.debian"  # 101.7 KB
+  orig = "python-certbot_2.1.0.orig"  # 1.7 MB
+
+[src.python-certifi]
+versions = ['2022.9.24', '2022.9.24-1']
+  debian = "python-certifi_2022.9.24-1.debian"  # 29.0 KB
+  orig = "python-certifi_2022.9.24.orig"  # 295.3 KB
+
+[src.python-cffi]
+versions = ['1.15.1', '1.15.1-5']
+  debian = "python-cffi_1.15.1-5.debian"  # 31.8 KB
+  orig = "python-cffi_1.15.1.orig"  # 2.0 MB
+
+[src.python-charset-normalizer]
+versions = ['3.0.1', '3.0.1-2']
+  debian = "python-charset-normalizer_3.0.1-2.debian"  # 30.6 KB
+  orig = "python-charset-normalizer_3.0.1.orig"  # 265.1 KB
+
+[src.python-colorama]
+versions = ['0.4.6', '0.4.6-2']
+  debian = "python-colorama_0.4.6-2.debian"  # 13.7 KB
+  orig = "python-colorama_0.4.6.orig"  # 191.8 KB
+
+[src.python-configargparse]
+versions = ['1.5.3', '1.5.3-1']
+  debian = "python-configargparse_1.5.3-1.debian"  # 5.3 KB
+  orig = "python-configargparse_1.5.3.orig"  # 182.9 KB
+
+[src.python-cryptography]
+versions = ['38.0.4', '38.0.4-3+deb12u1']
+  debian = "python-cryptography_38.0.4-3+deb12u1.debian"  # 86.3 KB
+  orig = "python-cryptography_38.0.4.orig"  # 3.2 MB
+
+[src.python-dateutil]
+versions = ['2.8.2', '2.8.2-2']
+  debian = "python-dateutil_2.8.2-2.debian"  # 24.2 KB
+  orig = "python-dateutil_2.8.2.orig"  # 1.0 MB
+
+[src.python-distro]
+versions = ['1.8.0', '1.8.0-1']
+  debian = "python-distro_1.8.0-1.debian"  # 7.3 KB
+  orig = "python-distro_1.8.0.orig"  # 212.7 KB
+
+[src.python-docutils]
+versions = ['0.19+dfsg', '0.19+dfsg-6']
+  debian = "python-docutils_0.19+dfsg-6.debian"  # 116.7 KB
+  orig = "python-docutils_0.19+dfsg.orig"  # 6.6 MB
+
+[src.python-hurry.filesize]
+versions = ['0.9', '0.9-3']
+  debian = "python-hurry.filesize_0.9-3.debian"  # 4.9 KB
+  orig = "python-hurry.filesize_0.9.orig"  # 9.5 KB
+
+[src.python-idna]
+versions = ['3.3', '3.3-1+deb12u1']
+  debian = "python-idna_3.3-1+deb12u1.debian"  # 57.4 KB
+  orig = "python-idna_3.3.orig"  # 1.6 MB
+
+[src.python-inotify]
+versions = ['0.2.10', '0.2.10-4']
+  debian = "python-inotify_0.2.10-4.debian"  # 7.1 KB
+  orig = "python-inotify_0.2.10.orig"  # 69.5 KB
+
+[src.python-jmespath]
+versions = ['1.0.1', '1.0.1-1']
+  debian = "python-jmespath_1.0.1-1.debian"  # 6.2 KB
+  orig = "python-jmespath_1.0.1.orig"  # 105.4 KB
+
+[src.python-josepy]
+versions = ['1.13.0', '1.13.0-1']
+  debian = "python-josepy_1.13.0-1.debian"  # 18.4 KB
+  orig = "python-josepy_1.13.0.orig"  # 189.6 KB
+
+[src.python-json-patch]
+versions = ['1.32', '1.32-2']
+  debian = "python-json-patch_1.32-2.debian"  # 10.0 KB
+  orig = "python-json-patch_1.32.orig"  # 119.6 KB
+
+[src.python-json-pointer]
+versions = ['2.3', '2.3-2']
+  debian = "python-json-pointer_2.3-2.debian"  # 27.8 KB
+  orig = "python-json-pointer_2.3.orig"  # 49.0 KB
+
+[src.python-jsonschema]
+versions = ['4.10.3', '4.10.3-1']
+  debian = "python-jsonschema_4.10.3-1.debian"  # 22.0 KB
+  orig = "python-jsonschema_4.10.3.orig"  # 2.5 MB
+
+[src.python-linux-procfs]
+versions = ['0.6.3', '0.6.3-1.1']
+  debian = "python-linux-procfs_0.6.3-1.1.debian"  # 6.4 KB
+  orig = "python-linux-procfs_0.6.3.orig"  # 68.2 KB
+
+[src.python-nacl]
+versions = ['1.5.0', '1.5.0-2']
+  debian = "python-nacl_1.5.0-2.debian"  # 15.1 KB
+  orig = "python-nacl_1.5.0.orig"  # 12.5 MB
+
+[src.python-netaddr]
+versions = ['0.8.0', '0.8.0-2']
+  debian = "python-netaddr_0.8.0-2.debian"  # 14.4 KB
+  orig = "python-netaddr_0.8.0.orig"  # 7.8 MB
+
+[src.python-oauthlib]
+versions = ['3.2.2', '3.2.2-1']
+  debian = "python-oauthlib_3.2.2-1.debian"  # 13.5 KB
+  orig = "python-oauthlib_3.2.2.orig"  # 890.1 KB
+
+[src.python-passlib]
+versions = ['1.7.4', '1.7.4-3']
+  debian = "python-passlib_1.7.4-3.debian"  # 14.3 KB
+  orig = "python-passlib_1.7.4.orig"  # 2.5 MB
+
+[src.python-psutil]
+versions = ['5.9.4', '5.9.4-1']
+  debian = "python-psutil_5.9.4-1.debian"  # 23.1 KB
+  orig = "python-psutil_5.9.4.orig"  # 3.5 MB
+
+[src.python-py]
+versions = ['1.11.0', '1.11.0-1']
+  debian = "python-py_1.11.0-1.debian"  # 46.3 KB
+  orig = "python-py_1.11.0.orig"  # 735.2 KB
+
+[src.python-roman]
+versions = ['3.3', '3.3-3']
+  debian = "python-roman_3.3-3.debian"  # 20.4 KB
+  orig = "python-roman_3.3.orig"  # 18.8 KB
+
+[src.python-systemd]
+versions = ['235', '235-1']
+  debian = "python-systemd_235-1.debian"  # 7.2 KB
+  orig = "python-systemd_235.orig"  # 232.6 KB
+
+[src.python-tabulate]
+versions = ['0.8.9', '0.8.9-1']
+  debian = "python-tabulate_0.8.9-1.debian"  # 9.2 KB
+  orig = "python-tabulate_0.8.9.orig"  # 249.5 KB
+
+[src.python-tz]
+versions = ['2022.7.1', '2022.7.1-4']
+  debian = "python-tz_2022.7.1-4.debian"  # 51.4 KB
+  orig = "python-tz_2022.7.1.orig"  # 1019.8 KB
+
+[src.python-urllib3]
+versions = ['1.26.12', '1.26.12-1+deb12u3']
+  debian = "python-urllib3_1.26.12-1+deb12u3.debian"  # 91.0 KB
+  orig = "python-urllib3_1.26.12.orig"  # 1.1 MB
+
+[src.python-xmltodict]
+versions = ['0.13.0', '0.13.0-1']
+  debian = "python-xmltodict_0.13.0-1.debian"  # 6.1 KB
+  orig = "python-xmltodict_0.13.0.orig"  # 68.2 KB
+
+[src.python3-defaults]
+versions = ['3.11.2-1']
+  unknown = "python3-defaults_3.11.2-1"  # 462.7 KB
+
+[src.python3.11]
+versions = ['3.11.2', '3.11.2-6+deb12u6']
+  debian = "python3.11_3.11.2-6+deb12u6.debian"  # 1.1 MB
+  orig = "python3.11_3.11.2.orig"  # 91.3 MB
+
+[src.pyudev]
+versions = ['0.24.0', '0.24.0-1']
+  debian = "pyudev_0.24.0-1.debian"  # 10.5 KB
+  orig = "pyudev_0.24.0.orig"  # 369.0 KB
+
+[src.pyyaml]
+versions = ['6.0', '6.0-3']
+  debian = "pyyaml_6.0-3.debian"  # 21.4 KB
+  orig = "pyyaml_6.0.orig"  # 582.1 KB
+
+[src.pyzmq]
+versions = ['24.0.1', '24.0.1-4']
+  debian = "pyzmq_24.0.1-4.debian"  # 31.3 KB
+  orig = "pyzmq_24.0.1.orig"  # 1.2 MB
+
+[src.qemu]
+versions = ['7.2+dfsg', '7.2+dfsg-7+deb12u18']
+  debian = "qemu_7.2+dfsg-7+deb12u18.debian"  # 1.9 MB
+  orig = "qemu_7.2+dfsg.orig"  # 185.5 MB
+
+[src.qrencode]
+versions = ['4.1.1', '4.1.1-1']
+  debian = "qrencode_4.1.1-1.debian"  # 16.2 KB
+  orig = "qrencode_4.1.1.orig"  # 2.6 MB
+
+[src.radcli]
+versions = ['1.2.11', '1.2.11-1']
+  debian = "radcli_1.2.11-1.debian"  # 14.4 KB
+  orig = "radcli_1.2.11.orig"  # 1.2 MB
+
+[src.re2]
+versions = ['20220601+dfsg', '20220601+dfsg-1']
+  debian = "re2_20220601+dfsg-1.debian"  # 35.6 KB
+  orig = "re2_20220601+dfsg.orig"  # 1.4 MB
+
+[src.readline]
+versions = ['8.2', '8.2-1.3']
+  debian = "readline_8.2-1.3.debian"  # 126.2 KB
+  orig = "readline_8.2.orig"  # 7.1 MB
+
+[src.requests]
+versions = ['2.28.1+dfsg', '2.28.1+dfsg-1']
+  debian = "requests_2.28.1+dfsg-1.debian"  # 46.0 KB
+  orig = "requests_2.28.1+dfsg.orig"  # 546.2 KB
+
+[src.rp-pppoe]
+versions = ['3.15', '3.15-2']
+  debian = "rp-pppoe_3.15-2.debian"  # 35.2 KB
+  orig = "rp-pppoe_3.15.orig"  # 807.1 KB
+
+[src.rsync]
+versions = ['3.2.7', '3.2.7-1+deb12u4']
+  debian = "rsync_3.2.7-1+deb12u4.debian"  # 131.7 KB
+  orig = "rsync_3.2.7.orig"  # 3.9 MB
+
+[src.rsyslog]
+versions = ['8.2302.0', '8.2302.0-1+deb12u1']
+  debian = "rsyslog_8.2302.0-1+deb12u1.debian"  # 119.3 KB
+  orig = "rsyslog_8.2302.0.orig"  # 12.2 MB
+
+[src.rtmpdump]
+versions = ['2.4+20151223.gitfa8646d.1', '2.4+20151223.gitfa8646d.1-2']
+  debian = "rtmpdump_2.4+20151223.gitfa8646d.1-2.debian"  # 22.1 KB
+  orig = "rtmpdump_2.4+20151223.gitfa8646d.1.orig"  # 534.5 KB
+
+[src.ruamel.yaml]
+versions = ['0.17.21', '0.17.21-1']
+  debian = "ruamel.yaml_0.17.21-1.debian"  # 9.3 KB
+  orig = "ruamel.yaml_0.17.21.orig"  # 639.7 KB
+
+[src.ruamel.yaml.clib]
+versions = ['0.2.7', '0.2.7-1']
+  debian = "ruamel.yaml.clib_0.2.7-1.debian"  # 6.0 KB
+  orig = "ruamel.yaml.clib_0.2.7.orig"  # 1.6 MB
+
+[src.sbc]
+versions = ['2.0', '2.0-1']
+  debian = "sbc_2.0-1.debian"  # 12.5 KB
+  orig = "sbc_2.0.orig"  # 1.6 MB
+
+[src.screen]
+versions = ['4.9.0', '4.9.0-4']
+  debian = "screen_4.9.0-4.debian"  # 160.8 KB
+  orig = "screen_4.9.0.orig"  # 2.2 MB
+
+[src.sed]
+versions = ['4.9', '4.9-1']
+  debian = "sed_4.9-1.debian"  # 196.6 KB
+  orig = "sed_4.9.orig"  # 10.1 MB
+
+[src.sensible-utils]
+versions = ['0.0.17+nmu1']
+  unknown = "sensible-utils_0.0.17+nmu1"  # 335.1 KB
+
+[src.setuptools]
+versions = ['66.1.1', '66.1.1-1+deb12u2']
+  debian = "setuptools_66.1.1-1+deb12u2.debian"  # 67.7 KB
+  orig = "setuptools_66.1.1.orig"  # 7.4 MB
+
+[src.sgml-base]
+versions = ['1.31']
+  unknown = "sgml-base_1.31"  # 53.6 KB
+
+[src.shadow]
+versions = ['4.13+dfsg1', '4.13+dfsg1-1+deb12u2']
+  debian = "shadow_4.13+dfsg1-1+deb12u2.debian"  # 278.0 KB
+  orig = "shadow_4.13+dfsg1.orig"  # 18.9 MB
+
+[src.shared-mime-info]
+versions = ['2.2', '2.2-1']
+  debian = "shared-mime-info_2.2-1.debian"  # 34.0 KB
+  orig = "shared-mime-info_2.2.orig"  # 15.3 MB
+
+[src.sharutils]
+versions = ['4.15.2', '4.15.2-9']
+  debian = "sharutils_4.15.2-9.debian"  # 27.5 KB
+  orig = "sharutils_4.15.2.orig"  # 8.9 MB
+
+[src.shim-signed]
+versions = ['1.44~1+deb12u1']
+  unknown = "shim-signed_1.44~1+deb12u1"  # 2.7 MB
+
+[src.sipcalc]
+versions = ['1.1.6', '1.1.6-3']
+  debian = "sipcalc_1.1.6-3.debian"  # 8.4 KB
+  orig = "sipcalc_1.1.6.orig"  # 436.4 KB
+
+[src.six]
+versions = ['1.16.0', '1.16.0-4']
+  debian = "six_1.16.0-4.debian"  # 13.7 KB
+  orig = "six_1.16.0.orig"  # 131.2 KB
+
+[src.skopeo]
+versions = ['1.9.3+ds1', '1.9.3+ds1-1']
+  debian = "skopeo_1.9.3+ds1-1.debian"  # 9.9 KB
+  orig = "skopeo_1.9.3+ds1.orig"  # 1.5 MB
+
+[src.smartmontools]
+versions = ['7.3', '7.3-1']
+  debian = "smartmontools_7.3-1.debian"  # 121.3 KB
+  orig = "smartmontools_7.3.orig"  # 3.8 MB
+
+[src.snappy]
+versions = ['1.1.9', '1.1.9-3']
+  debian = "snappy_1.1.9-3.debian"  # 54.4 KB
+  orig = "snappy_1.1.9.orig"  # 3.2 MB
+
+[src.socat]
+versions = ['1.7.4.4', '1.7.4.4-2']
+  debian = "socat_1.7.4.4-2.debian"  # 30.6 KB
+  orig = "socat_1.7.4.4.orig"  # 3.3 MB
+
+[src.source-highlight]
+versions = ['3.1.9', '3.1.9-4.2']
+  debian = "source-highlight_3.1.9-4.2.debian"  # 21.8 KB
+  orig = "source-highlight_3.1.9.orig"  # 7.4 MB
+
+[src.spandsp]
+versions = ['0.0.6+dfsg', '0.0.6+dfsg-2']
+  debian = "spandsp_0.0.6+dfsg-2.debian"  # 71.3 KB
+  orig = "spandsp_0.0.6+dfsg.orig"  # 14.0 MB
+
+[src.speexdsp]
+versions = ['1.2.1', '1.2.1-1']
+  debian = "speexdsp_1.2.1-1.debian"  # 6.8 KB
+  orig = "speexdsp_1.2.1.orig"  # 2.7 MB
+
+[src.sqlite3]
+versions = ['3.40.1', '3.40.1-2+deb12u2', '3.40.1.orig-www']
+  debian = "sqlite3_3.40.1-2+deb12u2.debian"  # 147.8 KB
+  orig = "sqlite3_3.40.1.orig"  # 103.6 MB
+  unknown = "sqlite3_3.40.1.orig-www"  # 32.8 MB
+
+[src.squashfs-tools]
+versions = ['4.5.1', '4.5.1-1']
+  debian = "squashfs-tools_4.5.1-1.debian"  # 34.4 KB
+  orig = "squashfs-tools_4.5.1.orig"  # 1.2 MB
+
+[src.squid]
+versions = ['5.7', '5.7-2+deb12u5']
+  debian = "squid_5.7-2+deb12u5.debian"  # 404.4 KB
+  orig = "squid_5.7.orig"  # 22.1 MB
+
+[src.squid-langpack]
+versions = ['20220130', '20220130-1']
+  debian = "squid-langpack_20220130-1.debian"  # 24.0 KB
+  orig = "squid-langpack_20220130.orig"  # 2.7 MB
+
+[src.squidguard]
+versions = ['1.6.0', '1.6.0-4']
+  debian = "squidguard_1.6.0-4.debian"  # 111.3 KB
+  orig = "squidguard_1.6.0.orig"  # 2.8 MB
+
+[src.sshguard]
+versions = ['2.4.2', '2.4.2-1']
+  debian = "sshguard_2.4.2-1.debian"  # 21.0 KB
+  orig = "sshguard_2.4.2.orig"  # 5.7 MB
+
+[src.ssl-cert]
+versions = ['1.1.2']
+  unknown = "ssl-cert_1.1.2"  # 154.0 KB
+
+[src.sstp-client]
+versions = ['1.0.18', '1.0.18-1']
+  debian = "sstp-client_1.0.18-1.debian"  # 5.8 KB
+  orig = "sstp-client_1.0.18.orig"  # 432.8 KB
+
+[src.strace]
+versions = ['6.1', '6.1-0.1']
+  debian = "strace_6.1-0.1.debian"  # 85.5 KB
+  orig = "strace_6.1.orig"  # 28.5 MB
+
+[src.stunnel4]
+versions = ['5.68', '5.68-2+deb12u1']
+  debian = "stunnel4_5.68-2+deb12u1.debian"  # 200.4 KB
+  orig = "stunnel4_5.68.orig"  # 3.3 MB
+
+[src.sudo]
+versions = ['1.9.13p3', '1.9.13p3-1+deb12u3']
+  debian = "sudo_1.9.13p3-1+deb12u3.debian"  # 139.0 KB
+  orig = "sudo_1.9.13p3.orig"  # 20.4 MB
+
+[src.syslinux]
+versions = ['6.04~git20190206.bf6db5b4+dfsg1', '6.04~git20190206.bf6db5b4+dfsg1-3']
+  debian = "syslinux_6.04~git20190206.bf6db5b4+dfsg1-3.debian"  # 178.1 KB
+  orig = "syslinux_6.04~git20190206.bf6db5b4+dfsg1.orig"  # 12.2 MB
+
+[src.systemd]
+versions = ['252.39', '252.39-1~deb12u1']
+  debian = "systemd_252.39-1~deb12u1.debian"  # 700.3 KB
+  orig = "systemd_252.39.orig"  # 64.7 MB
+
+[src.systemd-bootchart]
+versions = ['234', '234-2']
+  debian = "systemd-bootchart_234-2.debian"  # 11.0 KB
+  orig = "systemd-bootchart_234.orig"  # 535.8 KB
+
+[src.sysvinit]
+versions = ['3.06', '3.06-4']
+  debian = "sysvinit_3.06-4.debian"  # 548.1 KB
+  orig = "sysvinit_3.06.orig"  # 1.5 MB
+
+[src.talloc]
+versions = ['2.4.0', '2.4.0-f2']
+  debian = "talloc_2.4.0-f2.debian"  # 54.0 KB
+  orig = "talloc_2.4.0.orig"  # 2.4 MB
+
+[src.tar]
+versions = ['1.34+dfsg', '1.34+dfsg-1.2+deb12u1']
+  debian = "tar_1.34+dfsg-1.2+deb12u1.debian"  # 67.4 KB
+  orig = "tar_1.34+dfsg.orig"  # 15.5 MB
+
+[src.tcp-wrappers]
+versions = ['7.6.q', '7.6.q-32']
+  debian = "tcp-wrappers_7.6.q-32.debian"  # 142.2 KB
+  orig = "tcp-wrappers_7.6.q.orig"  # 303.5 KB
+
+[src.tcpdump]
+versions = ['4.99.3', '4.99.3-1']
+  debian = "tcpdump_4.99.3-1.debian"  # 55.7 KB
+  orig = "tcpdump_4.99.3.orig"  # 13.2 MB
+
+[src.tcptraceroute]
+versions = ['1.5beta7+debian', '1.5beta7+debian-4.1']
+  debian = "tcptraceroute_1.5beta7+debian-4.1.debian"  # 20.2 KB
+  orig = "tcptraceroute_1.5beta7+debian.orig"  # 469.5 KB
+
+[src.tdb]
+versions = ['1.4.8', '1.4.8-2']
+  debian = "tdb_1.4.8-2.debian"  # 70.9 KB
+  orig = "tdb_1.4.8.orig"  # 2.8 MB
+
+[src.tftp-hpa]
+versions = ['5.2+20150808', '5.2+20150808-1.4']
+  debian = "tftp-hpa_5.2+20150808-1.4.debian"  # 104.4 KB
+  orig = "tftp-hpa_5.2+20150808.orig"  # 216.9 KB
+
+[src.tiff]
+versions = ['4.5.0', '4.5.0-6+deb12u3']
+  debian = "tiff_4.5.0-6+deb12u3.debian"  # 125.2 KB
+  orig = "tiff_4.5.0.orig"  # 6.5 MB
+
+[src.tinycdb]
+versions = ['0.78']
+  unknown = "tinycdb_0.78"  # 115.2 KB
+
+[src.tpm-udev]
+versions = ['0.6']
+  unknown = "tpm-udev_0.6"  # 5.5 KB
+
+[src.tpm2-tools]
+versions = ['5.4', '5.4-1']
+  debian = "tpm2-tools_5.4-1.debian"  # 408.6 KB
+  orig = "tpm2-tools_5.4.orig"  # 3.4 MB
+
+[src.tpm2-tss]
+versions = ['3.2.1', '3.2.1-3']
+  debian = "tpm2-tss_3.2.1-3.debian"  # 103.5 KB
+  orig = "tpm2-tss_3.2.1.orig"  # 7.9 MB
+
+[src.traceroute]
+versions = ['2.1.2', '2.1.2-1']
+  debian = "traceroute_2.1.2-1.debian"  # 35.3 KB
+  orig = "traceroute_2.1.2.orig"  # 223.8 KB
+
+[src.tuned]
+versions = ['2.20.0', '2.20.0-1']
+  debian = "tuned_2.20.0-1.debian"  # 20.1 KB
+  orig = "tuned_2.20.0.orig"  # 949.8 KB
+
+[src.tzdata]
+versions = ['2025b', '2025b-0+deb12u2']
+  debian = "tzdata_2025b-0+deb12u2.debian"  # 3.1 MB
+  orig = "tzdata_2025b.orig"  # 1.3 MB
+
+[src.ucf]
+versions = ['3.0043+nmu1+deb12u1']
+  unknown = "ucf_3.0043+nmu1+deb12u1"  # 367.4 KB
+
+[src.uchardet]
+versions = ['0.0.7', '0.0.7-1']
+  debian = "uchardet_0.0.7-1.debian"  # 10.6 KB
+  orig = "uchardet_0.0.7.orig"  # 1.3 MB
+
+[src.unionfs-fuse]
+versions = ['1.0', '1.0-1']
+  debian = "unionfs-fuse_1.0-1.debian"  # 15.3 KB
+  orig = "unionfs-fuse_1.0.orig"  # 161.5 KB
+
+[src.usb-modeswitch]
+versions = ['2.6.1', '2.6.1-3']
+  debian = "usb-modeswitch_2.6.1-3.debian"  # 38.5 KB
+  orig = "usb-modeswitch_2.6.1.orig"  # 163.3 KB
+
+[src.usb-modeswitch-data]
+versions = ['20191128', '20191128-5']
+  debian = "usb-modeswitch-data_20191128-5.debian"  # 45.7 KB
+  orig = "usb-modeswitch-data_20191128.orig"  # 138.2 KB
+
+[src.usbutils]
+versions = ['014', '014-1+deb12u1']
+  debian = "usbutils_014-1+deb12u1.debian"  # 30.7 KB
+  orig = "usbutils_014.orig"  # 1.1 MB
+
+[src.usrmerge]
+versions = ['37~deb12u1']
+  unknown = "usrmerge_37~deb12u1"  # 48.0 KB
+
+[src.util-linux]
+versions = ['2.38.1', '2.38.1-5+deb12u3']
+  debian = "util-linux_2.38.1-5+deb12u3.debian"  # 516.0 KB
+  orig = "util-linux_2.38.1.orig"  # 59.1 MB
+
+[src.vim]
+versions = ['9.0.1378', '9.0.1378-2+deb12u2']
+  debian = "vim_9.0.1378-2+deb12u2.debian"  # 767.8 KB
+  orig = "vim_9.0.1378.orig"  # 58.4 MB
+
+[src.virt-what]
+versions = ['1.25', '1.25-1']
+  debian = "virt-what_1.25-1.debian"  # 14.8 KB
+  orig = "virt-what_1.25.orig"  # 1.8 MB
+
+[src.vmtouch]
+versions = ['1.3.1', '1.3.1-2']
+  debian = "vmtouch_1.3.1-2.debian"  # 7.1 KB
+  orig = "vmtouch_1.3.1.orig"  # 56.4 KB
+
+[src.voluptuous]
+versions = ['0.12.2', '0.12.2-1']
+  debian = "voluptuous_0.12.2-1.debian"  # 8.6 KB
+  orig = "voluptuous_0.12.2.orig"  # 218.6 KB
+
+[src.vyos-1x]
+versions = ['1.5dev0']
+  unknown = "vyos-1x_1.5dev0"  # 12.8 MB
+
+[src.wcwidth]
+versions = ['0.2.5+dfsg1', '0.2.5+dfsg1-1.1']
+  debian = "wcwidth_0.2.5+dfsg1-1.1.debian"  # 12.4 KB
+  orig = "wcwidth_0.2.5+dfsg1.orig"  # 105.6 KB
+
+[src.wget]
+versions = ['1.21.3', '1.21.3-1+deb12u1']
+  debian = "wget_1.21.3-1+deb12u1.debian"  # 116.8 KB
+  orig = "wget_1.21.3.orig"  # 19.9 MB
+
+[src.whois]
+versions = ['5.5.17']
+  unknown = "whois_5.5.17"  # 424.0 KB
+
+[src.wireguard]
+versions = ['1.0.20210914', '1.0.20210914-1']
+  debian = "wireguard_1.0.20210914-1.debian"  # 37.1 KB
+  orig = "wireguard_1.0.20210914.orig"  # 503.2 KB
+
+[src.wireless-regdb]
+versions = ['2025.07.10', '2025.07.10-1~deb12u1']
+  debian = "wireless-regdb_2025.07.10-1~deb12u1.debian"  # 48.8 KB
+  orig = "wireless-regdb_2025.07.10.orig"  # 152.1 KB
+
+[src.wireshark]
+versions = ['4.0.17', '4.0.17-0+deb12u1']
+  debian = "wireshark_4.0.17-0+deb12u1.debian"  # 415.7 KB
+  orig = "wireshark_4.0.17.orig"  # 280.3 MB
+
+[src.wslay]
+versions = ['1.1.1', '1.1.1-3']
+  debian = "wslay_1.1.1-3.debian"  # 21.5 KB
+  orig = "wslay_1.1.1.orig"  # 274.8 KB
+
+[src.xapian-core]
+versions = ['1.4.22', '1.4.22-1']
+  debian = "xapian-core_1.4.22-1.debian"  # 74.1 KB
+  orig = "xapian-core_1.4.22.orig"  # 19.1 MB
+
+[src.xen]
+versions = ['4.17.5+72-g01140da4e8', '4.17.5+72-g01140da4e8-1']
+  debian = "xen_4.17.5+72-g01140da4e8-1.debian"  # 858.9 KB
+  orig = "xen_4.17.5+72-g01140da4e8.orig"  # 27.3 MB
+
+[src.xml-core]
+versions = ['0.18+nmu1']
+  unknown = "xml-core_0.18+nmu1"  # 86.8 KB
+
+[src.xmlsec1]
+versions = ['1.2.37', '1.2.37-2']
+  debian = "xmlsec1_1.2.37-2.debian"  # 84.8 KB
+  orig = "xmlsec1_1.2.37.orig"  # 11.2 MB
+
+[src.xosd]
+versions = ['2.2.14', '2.2.14-2.1']
+  debian = "xosd_2.2.14-2.1.debian"  # 66.4 KB
+  orig = "xosd_2.2.14.orig"  # 1.8 MB
+
+[src.xxhash]
+versions = ['0.8.1', '0.8.1-1']
+  debian = "xxhash_0.8.1-1.debian"  # 12.1 KB
+  orig = "xxhash_0.8.1.orig"  # 638.8 KB
+
+[src.xz-utils]
+versions = ['5.4.1', '5.4.1-1']
+  debian = "xz-utils_5.4.1-1.debian"  # 506.2 KB
+  orig = "xz-utils_5.4.1.orig"  # 8.5 MB
+
+[src.yajl]
+versions = ['2.1.0', '2.1.0-3+deb12u2']
+  debian = "yajl_2.1.0-3+deb12u2.debian"  # 17.9 KB
+  orig = "yajl_2.1.0.orig"  # 382.4 KB
+
+[src.zabbix]
+versions = ['7.0.9+dfsg', '7.0.9+dfsg-1~bpo12+1', '7.0.9+dfsg.orig-templates', '7.0.9+dfsg.orig-vendor']
+  debian = "zabbix_7.0.9+dfsg-1~bpo12+1.debian"  # 657.2 KB
+  orig = "zabbix_7.0.9+dfsg.orig"  # 190.7 MB
+  unknown = "zabbix_7.0.9+dfsg.orig-templates"  # 48.4 MB
+  unknown = "zabbix_7.0.9+dfsg.orig-vendor"  # 7.0 MB
+
+[src.zeromq3]
+versions = ['4.3.4', '4.3.4-6']
+  debian = "zeromq3_4.3.4-6.debian"  # 40.9 KB
+  orig = "zeromq3_4.3.4.orig"  # 5.0 MB
+
+[src.zlib]
+versions = ['1.2.13.dfsg', '1.2.13.dfsg-1']
+  debian = "zlib_1.2.13.dfsg-1.debian"  # 55.8 KB
+  orig = "zlib_1.2.13.dfsg.orig"  # 2.6 MB
+
+[src.zsync]
+versions = ['0.6.2', '0.6.2-5']
+  debian = "zsync_0.6.2-5.debian"  # 24.3 KB
+  orig = "zsync_0.6.2.orig"  # 1.0 MB
+

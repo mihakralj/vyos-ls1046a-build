@@ -1,0 +1,7 @@
+# accel-ppp-ng-3e30d9b — VyOS Circinus 2026.03 vendor tarball
+name = "accel-ppp-ng-3e30d9b"
+bundle_path = "/tmp/vyos-stream-tarballs/accel-ppp-ng-3e30d9b"
+size_bytes = 19136917
+file_count = 1159
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

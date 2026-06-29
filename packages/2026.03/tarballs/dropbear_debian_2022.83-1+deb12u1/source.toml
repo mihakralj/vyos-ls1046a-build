@@ -1,0 +1,7 @@
+# dropbear_debian_2022.83-1+deb12u1 — VyOS Circinus 2026.03 vendor tarball
+name = "dropbear_debian_2022.83-1+deb12u1"
+bundle_path = "/tmp/vyos-stream-tarballs/dropbear_debian_2022.83-1+deb12u1"
+size_bytes = 9622818
+file_count = 978
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

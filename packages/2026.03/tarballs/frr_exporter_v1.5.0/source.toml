@@ -1,0 +1,7 @@
+# frr_exporter_v1.5.0 — VyOS Circinus 2026.03 vendor tarball
+name = "frr_exporter_v1.5.0"
+bundle_path = "/tmp/vyos-stream-tarballs/frr_exporter_v1.5.0"
+size_bytes = 162249
+file_count = 39
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

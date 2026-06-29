@@ -1,0 +1,7 @@
+# QAT.L.4.24.0-00005 — VyOS Circinus 2026.03 vendor tarball
+name = "QAT.L.4.24.0-00005"
+bundle_path = "/tmp/vyos-stream-tarballs/QAT.L.4.24.0-00005"
+size_bytes = 32574751
+file_count = 928
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

@@ -1,0 +1,7 @@
+# isc-dhcp_debian_4.4.3-P1-4 — VyOS Circinus 2026.03 vendor tarball
+name = "isc-dhcp_debian_4.4.3-P1-4"
+bundle_path = "/tmp/vyos-stream-tarballs/isc-dhcp_debian_4.4.3-P1-4"
+size_bytes = 16027511
+file_count = 849
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

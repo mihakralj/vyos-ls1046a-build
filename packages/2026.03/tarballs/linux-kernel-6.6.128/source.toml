@@ -1,0 +1,7 @@
+# linux-kernel-6.6.128 — VyOS Circinus 2026.03 vendor tarball
+name = "linux-kernel-6.6.128"
+bundle_path = "/tmp/vyos-stream-tarballs/linux-kernel-6.6.128"
+size_bytes = 2947303272
+file_count = 129775
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

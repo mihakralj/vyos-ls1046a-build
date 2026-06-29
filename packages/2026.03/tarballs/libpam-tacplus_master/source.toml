@@ -1,0 +1,7 @@
+# libpam-tacplus_master — VyOS Circinus 2026.03 vendor tarball
+name = "libpam-tacplus_master"
+bundle_path = "/tmp/vyos-stream-tarballs/libpam-tacplus_master"
+size_bytes = 265667
+file_count = 67
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

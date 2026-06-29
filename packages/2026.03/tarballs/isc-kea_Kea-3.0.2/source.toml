@@ -1,0 +1,7 @@
+# isc-kea_Kea-3.0.2 — VyOS Circinus 2026.03 vendor tarball
+name = "isc-kea_Kea-3.0.2"
+bundle_path = "/tmp/vyos-stream-tarballs/isc-kea_Kea-3.0.2"
+size_bytes = 54033547
+file_count = 3667
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

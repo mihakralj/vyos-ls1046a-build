@@ -1,0 +1,7 @@
+# frr_168ade7da9 — VyOS Circinus 2026.03 vendor tarball
+name = "frr_168ade7da9"
+bundle_path = "/tmp/vyos-stream-tarballs/frr_168ade7da9"
+size_bytes = 54658282
+file_count = 8269
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

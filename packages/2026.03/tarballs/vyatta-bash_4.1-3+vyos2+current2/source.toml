@@ -1,0 +1,7 @@
+# vyatta-bash_4.1-3+vyos2+current2 — VyOS Circinus 2026.03 vendor tarball
+name = "vyatta-bash_4.1-3+vyos2+current2"
+bundle_path = "/tmp/vyos-stream-tarballs/vyatta-bash_4.1-3+vyos2+current2"
+size_bytes = 18632938
+file_count = 1317
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh

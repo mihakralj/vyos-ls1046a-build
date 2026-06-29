@@ -1,0 +1,7 @@
+# libnss-tacplus_master — VyOS Circinus 2026.03 vendor tarball
+name = "libnss-tacplus_master"
+bundle_path = "/tmp/vyos-stream-tarballs/libnss-tacplus_master"
+size_bytes = 1344725
+file_count = 42
+buildable = true
+# Build recipe: see bin/ci-build-tarballs.sh
