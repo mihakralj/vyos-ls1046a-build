@@ -224,6 +224,7 @@ static int __init cdx_module_init(void)
 	}
 #endif
 
+#if 0  /* KILO: DPA_IPSEC_OFFLOAD disabled — IPsec pools fail without full SDK BMan */
 #ifdef DPA_IPSEC_OFFLOAD
 	if (cdx_dpa_ipsec_init()) {
 		printk("%s::dpa_ipsec start failed\n", __FUNCTION__);
@@ -240,6 +241,7 @@ static int __init cdx_module_init(void)
 		rc = -ENOMEM;
 		goto exit;
 	}
+#endif
 #endif
 
 #ifdef CDX_IP_REASSEMBLY
