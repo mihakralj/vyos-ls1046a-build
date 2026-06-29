@@ -222,6 +222,20 @@ jobs:
           MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
         run: bin/ci-setup-vyos1x.sh
 
+      - name: Download pre-built NXP kernel .debs (nxp-sdk only — use ask-kernel-6.12.49 release)
+        if: ${{ startsWith(github.ref_name, 'nxp-sdk') }}
+        run: |
+          echo "### Downloading pre-built kernel from GitHub Release ask-kernel-6.12.49"
+          gh release download ask-kernel-6.12.49 \
+            --repo mihakralj/vyos-ls1046a-build \
+            --dir packages/ \
+            --pattern 'linux-image-*' --pattern 'linux-headers-*' \
+            --clobber 2>&1
+          echo "### Downloaded kernel .debs:"
+          ls -lh packages/linux-*.deb
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Stage kernel tree (FLAVOR-aware)
         run: bin/ci-stage-kernel.sh
 
