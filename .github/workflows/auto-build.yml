@@ -82,6 +82,9 @@ jobs:
       # from scratch. The CI kernel tree lacks CONFIG_CPE_FAST_PATH which
       # causes cdx.ko struct module layout mismatch.
       ASK_KERNEL_TAG: 'ask-kernel-6.12.49'
+      # nxp-sdk branch skips OOT module builds — prevent ci-pick-packages.sh
+      # from FATALing on missing ask-modules-*.deb / cdx-modules-*.deb.
+      ASK_OOT_SKIPPED: '1'
     # No `container:` — build runs natively on the self-hosted ARM64 runner.
     # The runner host (Debian 12 bookworm aarch64) provides all build deps
     # (installed in the "Install Dependencies" step below). Removing the
