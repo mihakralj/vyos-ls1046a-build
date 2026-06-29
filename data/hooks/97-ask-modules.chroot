@@ -105,3 +105,7 @@ nf_conntrack_netlink
 EOF
 
 echo "I: 97-ask-modules.chroot: ASK deployment complete"
+echo "=== VERIFY ==="
+find /lib/modules/6.12.49-vyos/extra -type f 2>/dev/null | sort
+find /usr/local/bin /usr/local/sbin /usr/bin -name "cmm" -o -name "dpa_app" -o -name "vyos-ask*" 2>/dev/null | sort
+find /etc -name "cdx_*" -o -name "ask-ct*" -o -name "ls1046a*" 2>/dev/null | sort
