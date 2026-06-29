@@ -229,15 +229,13 @@ jobs:
         if: ${{ startsWith(github.ref_name, 'nxp-sdk') }}
         run: |
           echo "### Downloading pre-built kernel from GitHub Release ask-kernel-6.12.49"
-          gh release download ask-kernel-6.12.49 \
-            --repo mihakralj/vyos-ls1046a-build \
-            --dir vyos-build/scripts/package-build/ \
-            --pattern 'linux-image-*' --pattern 'linux-headers-*' \
-            --prerelease --clobber 2>&1
+          BASE="https://github.com/mihakralj/vyos-ls1046a-build/releases/download/ask-kernel-6.12.49"
+          curl -fsSL -o vyos-build/scripts/package-build/linux-image-6.12.49-vyos_6.12.49-1_arm64.deb \
+            "$BASE/linux-image-6.12.49-vyos_6.12.49-1_arm64.deb"
+          curl -fsSL -o vyos-build/scripts/package-build/linux-headers-6.12.49-vyos_6.12.49-1_arm64.deb \
+            "$BASE/linux-headers-6.12.49-vyos_6.12.49-1_arm64.deb"
           echo "### Downloaded kernel .debs:"
           ls -lh vyos-build/scripts/package-build/linux-*.deb
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Stage kernel tree (FLAVOR-aware)
         run: bin/ci-stage-kernel.sh
