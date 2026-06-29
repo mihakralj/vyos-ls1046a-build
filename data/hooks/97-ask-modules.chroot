@@ -11,14 +11,22 @@
 # 98-fancontrol.chroot / 99-mask-services.
 set -e
 
-# Artifacts are staged into /tmp/ask-artifacts/ by ci-setup-vyos-build.sh
-# via includes.chroot BEFORE the ISO build. The files are already inside
-# the chroot at build time.
-ARTIFACT_DIR="/tmp/ask-artifacts"
-if [ ! -d "$ARTIFACT_DIR" ]; then
-    echo "WARNING: 97-ask-modules.chroot: $ARTIFACT_DIR not found — ASK artifacts will be MISSING from ISO"
-    exit 0
-fi
+# Find artifacts on the HOST filesystem. live-build chroot hooks run
+# inside the chroot, so host paths are at their normal location (the
+# chroot does not pivot_root). The CI workspace is at a known path.
+# Also try the chroot include path as fallback.
+ARTIFACT_DIR=""
+for candidate in \
+    /mnt/nvme/_work/vyos-ls1046a-build/vyos-ls1046a-build/release/ask-6.12.49 \
+    "$(cat /proc/1/root 2>/dev/null)/mnt/nvme/_work/vyos-ls1046a-build/vyos-ls1046a-build/release/ask-6.12.49" \
+    /tmp/ask-artifacts \
+; do
+    if [ -d "$candidate" ] && [ -f "$candidate/cdx.ko" ]; then
+        ARTIFACT_DIR="$candidate"
+        echo "  found artifacts at $ARTIFACT_DIR"
+        break
+    fi
+done
 
 echo "I: 97-ask-modules.chroot: deploying ASK artifacts from $ARTIFACT_DIR"
 
