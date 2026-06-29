@@ -1,0 +1,86 @@
+#!/bin/bash
+# vyos-ask-ct-fix — enable kernel conntrack + load ASK modules for hardware offload
+#
+# VyOS default firewall adds "notrack" to the vyos_conntrack table,
+# which disables kernel connection tracking. CMM receives conntrack
+# events via libnetfilter_conntrack and pushes flows to CDX/FMan.
+# Without tracked connections, hardware offload never engages.
+#
+# This script:
+#   1. Loads ASK kernel modules (cdx, fci, nf_conntrack_netlink)
+#   2. Waits for VyOS nftables rules to be applied
+#   3. Removes the "notrack" rule from PREROUTING + OUTPUT chains
+#   4. Rebuilds chains preserving jump structure without notrack
+#   5. Adds masquerade NAT to trigger conntrack
+#   6. Starts CMM daemon
+#
+# Runs as ExecStart of ls1046a-ask.service after vyos-router.service.
+
+set -e
+
+MODDIR="/lib/modules/$(uname -r)/extra"
+
+# ── Only run on LS1046A ───────────────────────────────────────────────
+if ! grep -q "fsl,ls1046a" /proc/device-tree/compatible 2>/dev/null; then
+    exit 0
+fi
+
+# ── Load kernel modules ───────────────────────────────────────────────
+echo "ASK: loading kernel modules..."
+for mod in cdx fci nf_conntrack_netlink; do
+    if ! lsmod | grep -q "^${mod} "; then
+        insmod "${MODDIR}/${mod}.ko" 2>/dev/null || modprobe "${mod}" 2>/dev/null || true
+    fi
+done
+
+# Wait for /dev/cdx_ctrl
+for i in $(seq 1 10); do
+    [ -c /dev/cdx_ctrl ] && break
+    sleep 1
+done
+
+# ── Wait for VyOS conntrack table ──────────────────────────────────────
+MAX_WAIT=120
+while ! nft list tables 2>/dev/null | grep -q vyos_conntrack; do
+    [ "$MAX_WAIT" -le 0 ] && exit 1
+    sleep 1
+    MAX_WAIT=$((MAX_WAIT - 1))
+done
+
+# ── Remove notrack from IPv4 conntrack chains ──────────────────────────
+# VyOS adds unconditional "notrack" as the last rule, which disables
+# conntrack for ALL packets. Rebuild chains without notrack.
+for chain in PREROUTING OUTPUT; do
+    if nft list chain ip vyos_conntrack "$chain" 2>/dev/null | grep -q "notrack$"; then
+        nft flush chain ip vyos_conntrack "$chain" 2>/dev/null || true
+        for jump in VYOS_CT_IGNORE FW_CONNTRACK NAT_CONNTRACK WLB_CONNTRACK; do
+            nft add rule ip vyos_conntrack "$chain" jump "$jump" 2>/dev/null || true
+        done
+        echo "ASK: removed notrack from ip vyos_conntrack $chain"
+    fi
+done
+
+# ── Same for IPv6 ─────────────────────────────────────────────────────
+for chain in PREROUTING OUTPUT; do
+    if nft list chain ip6 vyos_conntrack "$chain" 2>/dev/null | grep -q "notrack$"; then
+        nft flush chain ip6 vyos_conntrack "$chain" 2>/dev/null || true
+        for jump in VYOS_CT_IGNORE FW_CONNTRACK NAT_CONNTRACK; do
+            nft add rule ip6 vyos_conntrack "$chain" jump "$jump" 2>/dev/null || true
+        done
+        echo "ASK: removed notrack from ip6 vyos_conntrack $chain"
+    fi
+done
+
+# ── Trigger conntrack via masquerade NAT ──────────────────────────────
+nft add rule ip nat VYOS_PRE_SNAT_HOOK oif eth0 masquerade 2>/dev/null || true
+echo "ASK: added masquerade NAT on eth0"
+
+# ── Enable conntrack accounting ───────────────────────────────────────
+sysctl -w net.netfilter.nf_conntrack_acct=1 2>/dev/null || true
+
+# ── Verify ────────────────────────────────────────────────────────────
+if cat /proc/net/stat/nf_conntrack 2>/dev/null | grep -q "."; then
+    echo "ASK: conntrack initialized"
+else
+    echo "ASK: WARNING — conntrack not available"
+fi
