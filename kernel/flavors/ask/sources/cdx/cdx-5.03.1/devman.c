@@ -2708,6 +2708,13 @@ err_ret:
 
 void dpa_update_timestamp(uint32_t ts)
 {
+	/* KILO-FIX: guard against uninitialized PCD external timestamp table.
+	 * Under SDK DTB + mainline DPAA driver, FM_PCD_Init may leave
+	 * extHashTsInfo.ptr NULL because the FMan initialization path
+	 * differs. Dereferencing NULL here kills the cdx_ctrl_timer thread
+	 * with a kernel panic. */
+	if (!extHashTsInfo.ptr)
+		return;
 	FM_PCD_UpdateExtTimeStamp(EXTERNAL_TIMESTAMP_TIMERID, cpu_to_be32(ts));
 }
 
