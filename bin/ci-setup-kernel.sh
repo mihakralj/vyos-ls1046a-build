@@ -152,12 +152,13 @@ cp "$BOARD_PATCH_DIR/4007-xhci-ls1046a-dwc3-quirks.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4009-sfp-oem-rollball-quirk.patch"       "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4010-memac-enable-txrx-at-init.patch"     "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/4011-dpaa-proxy-child-port-disable.patch" "$KERNEL_PATCHES/"
+cp "$BOARD_PATCH_DIR/4011-dpaa-proxy-child-port-disable.patch" "$KERNEL_PATCHES/"
 
 # ── Staging-completeness guard ────────────────────────────────────────
 # Every kernel/common/patches/board/*.patch must either be cp'd above or
 # listed here as an intentional skip.
 # Space-separated basenames of board patches deliberately not staged.
-BOARD_STAGE_SKIP=""
+BOARD_STAGE_SKIP="0105-fmd-port-open-fix.patch"
 _missing=""
 for _p in "$BOARD_PATCH_DIR"/*.patch; do
   _b=$(basename "$_p")
