@@ -78,10 +78,10 @@ jobs:
       # at runtime (set system offload ask / set vpp settings), not selected at
       # build time. See AGENTS.md single-image rules + plans/DUAL-DATAPLANE.md.
       FLAVOR: ''
-      # Use pre-built NXP kernel from GitHub Release instead of building
-      # from scratch. The CI kernel tree lacks CONFIG_CPE_FAST_PATH which
-      # causes cdx.ko struct module layout mismatch.
-      ASK_KERNEL_TAG: 'ask-kernel-6.12.49'
+      # Build kernel from source with all ASK patches (FMD port open,
+      # CPE_FAST_PATH, etc.). Set ASK_KERNEL_TAG to a release tag to
+      # use pre-built kernel .debs instead (skips ~15 min kernel build).
+      # ASK_KERNEL_TAG: 'ask-kernel-6.12.49'
       # nxp-sdk branch skips OOT module builds — prevent ci-pick-packages.sh
       # from FATALing on missing ask-modules-*.deb / cdx-modules-*.deb.
       ASK_OOT_SKIPPED: '1'
