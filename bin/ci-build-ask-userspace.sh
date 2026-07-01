@@ -248,12 +248,7 @@ echo "### ======== cmm ========"
 CMM_BUILT="$ASK_DIR/cmm/src/cmm"
 # libfci .a is in LIBFCI_DIR; patched libs .a in SYSROOT/lib
 # PKG_CONFIG_PATH must be explicit — Makefile ?= default may not resolve SYSROOT
-# AUTO_BRIDGE enables the bridge-mode FCI path in cmmBridgeInit() —
-# sends FPP_CMD_RX_L2BRIDGE_MODE to CDX, without which CMM cannot
-# communicate bridge state to the hardware offload engine.
-# Drop -Werror (ASK code has benign warnings).
 make -C "$ASK_DIR/cmm" CC="$CC" \
-    AM_CFLAGS="-O2 -g -Wall -DAUTO_BRIDGE" \
     LIBFCI_DIR="$LIBFCI_DIR" \
     ABM_DIR="$ABM_DIR" \
     SYSROOT="$SYSROOT" \
@@ -363,6 +358,15 @@ echo "### Patched cmm.service: added After/Wants ask-cdx.service"
 cp "$REPO_ROOT/board/systemd/ask-ct-setup.service" "$STAGE/etc/systemd/system/ask-ct-setup.service"
 echo "### Deployed ask-ct-setup.service"
 
+# Conntrack fix persistence (specs/conntrack-root-cause-analysis.md §3/§6):
+# ask-ct-setup.service only runs once at boot, but a later commit touching
+# firewall/nat/system-conntrack config makes VyOS regenerate vyos_conntrack
+# with notrack restored. This timer re-applies the same idempotent fix every
+# 30s so a regression self-heals instead of persisting until reboot.
+cp "$REPO_ROOT/board/systemd/ask-ct-resync.timer"   "$STAGE/etc/systemd/system/ask-ct-resync.timer"
+cp "$REPO_ROOT/board/systemd/ask-ct-resync.service" "$STAGE/etc/systemd/system/ask-ct-resync.service"
+echo "### Deployed ask-ct-resync.timer/.service"
+
 mkdir -p "$STAGE/usr/local/sbin"
 cp "$REPO_ROOT/board/scripts/vyos-ask-ct-fix" "$STAGE/usr/local/sbin/vyos-ask-ct-fix"
 chmod +x "$STAGE/usr/local/sbin/vyos-ask-ct-fix"
@@ -441,6 +445,7 @@ fi
 if [ -f /etc/systemd/system/ls1046a-ask.service ]; then
     systemctl daemon-reload || true
     systemctl enable ask-ct-setup.service || true
+    systemctl enable ask-ct-resync.timer || true
     systemctl enable ls1046a-ask.service || true
     # Mask upstream cmm.service — ls1046a-ask wraps it with conntrack setup
     systemctl mask cmm.service 2>/dev/null || true

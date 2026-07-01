@@ -7,6 +7,15 @@ Before=getty.target
 
 [Service]
 Type=forking
+# Boot-race guard (2026-07-01, specs/conntrack-root-cause-analysis.md §6):
+# /usr/local/lib/libcli.so.1.10.8 is part of the base squashfs but has been
+# observed to become visible on the live filesystem several minutes after
+# vyos-router.service (and therefore ask-ct-setup.service) reports active,
+# the same class of early-boot race documented elsewhere in this repo for
+# /opt/vyatta/config. Without this guard `cmm` crash-loops on "cannot open
+# shared object file" every RestartSec until the race resolves on its own.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 180); do [ -f /usr/local/lib/libcli.so.1.10.8 ] && exit 0; sleep 1; done; echo "libcli.so.1.10.8 not present after 180s" >&2; exit 1'
+TimeoutStartSec=200
 ExecStart=/usr/local/bin/cmm -f /etc/config/fastforward
 ExecStop=/usr/bin/pkill cmm
 Restart=on-failure

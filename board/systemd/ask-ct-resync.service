@@ -1,0 +1,13 @@
+[Unit]
+Description=Re-apply conntrack notrack fix (triggered periodically by ask-ct-resync.timer)
+Documentation=https://github.com/mihakralj/vyos-ls1046a-build
+After=ask-ct-setup.service
+Wants=ask-ct-setup.service
+
+[Service]
+Type=oneshot
+# Reuses the existing, idempotent vyos-ask-ct-fix script — it only touches
+# nftables when a bare "notrack" rule is actually present (grep -q "notrack$"
+# guard), so re-running it every 30s is cheap and safe. See
+# specs/conntrack-root-cause-analysis.md §3/§6.
+ExecStart=/usr/local/sbin/vyos-ask-ct-fix
