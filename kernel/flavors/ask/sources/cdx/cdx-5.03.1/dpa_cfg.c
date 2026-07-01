@@ -18,13 +18,8 @@
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 #include <linux/fdtable.h>
-#include <linux/fs.h>
-#include <linux/cdev.h>
-#include <linux/of.h>
-#include <linux/of_platform.h>
 //#include <linux/fsl_dpa_classifier.h>
 #include "dpaa_eth.h"
-#include "fm_ioctls.h"
 
 #include "cdx.h"
 #include "portdefs.h"
@@ -42,12 +37,16 @@ struct cdx_fman_info *fman_info;
 static struct dpa_fq *dpa_pcd_fq;
 //ipr info received via ioctl
 struct cdx_ipr_info ipr_info;
+#include <linux/fs.h>
+#include <linux/cdev.h>
+#include <linux/of.h>
+#include <linux/of_platform.h>
 
 struct fm;
 extern struct fm *fm_bind(struct device *fm_dev);
 extern void fm_unbind(struct fm *fm);
 
-static int cdxdrv_bind_fman_by_index(uint32_t index,
+static int __maybe_unused cdxdrv_bind_fman_by_index(uint32_t index,
 				     t_LnxWrpFmDev **fm_wrapper_dev)
 {
 	struct device_node *fm_node;
@@ -88,6 +87,7 @@ static int cdxdrv_bind_fman_by_index(uint32_t index,
 
 	return -ENODEV;
 }
+
 
 #ifdef DPA_CFG_DEBUG
 //show port related info
@@ -232,34 +232,28 @@ static void release_cfg_info(void)
 }
 
 //allocate and copy distribution info from uspace 
-static int get_dist_info(struct cdx_port_info *port_info, void __user *uspace_info)
+static int get_dist_info(struct cdx_port_info *port_info)
 {
+	uint32_t mem_size;
 	struct cdx_dist_info *dist_info;
+	void *uspace_info;
 
 #ifdef DPA_CFG_DEBUG
 	DPA_INFO("%s::port %s dist %d\n", __FUNCTION__, 
 			port_info->name, port_info->max_dist);
 #endif
-	if (!port_info->max_dist) {
-		port_info->dist_info = NULL;
-		return 0;
-	}
-
-	if (port_info->max_dist > CDX_CTRL_MAX_DIST_PER_PORT)
-		return -EINVAL;
-
-	if (!uspace_info)
-		return -EINVAL;
-
-	dist_info = kcalloc(port_info->max_dist, sizeof(*dist_info), GFP_KERNEL);
+	mem_size = (sizeof(struct cdx_dist_info) * port_info->max_dist);
+	dist_info = kzalloc(mem_size, 0);
 	if (!dist_info) {
 		DPA_ERROR("%s::memalloc for dist_info failed\n",
 				__FUNCTION__);
 		return -ENOMEM;
 	}
+	memset(dist_info, 0, mem_size);
+	uspace_info = port_info->dist_info;
 	port_info->dist_info = dist_info;
 	if (copy_from_user(dist_info, uspace_info, 
-				sizeof(*dist_info) * port_info->max_dist)) {
+				mem_size)) {
 		DPA_ERROR("%s::Read dist_info failed port %s\n",
 				__FUNCTION__, port_info->name);
 		return -EIO;
@@ -338,52 +332,32 @@ static void *get_dist_info_by_fman_params(struct cdx_fman_info *finfo, uint32_t 
 #endif //CDX_RTP_RELAY
 
 //allocate and copy port releated info from uspace 
-static int get_port_info(struct cdx_fman_info *finfo, void __user *uspace_info)
+static int get_port_info(struct cdx_fman_info *finfo) 
 {	
 	struct cdx_port_info *port_info;
-	void __user **uspace_dist_info;
+	void *uspace_info;
+	uint32_t mem_size;
 	uint32_t ii;
 
 	//allocate port information area
-	if (!finfo->max_ports || finfo->max_ports > CDX_CTRL_MAX_PORTS_PER_FMAN)
-		return -EINVAL;
-
-	if (!uspace_info)
-		return -EINVAL;
-
+	mem_size = (sizeof(struct cdx_port_info) * finfo->max_ports);
 #ifdef DPA_CFG_DEBUG
 	DPA_INFO("%s::fm %d num ports %d\n", __FUNCTION__, 
 			finfo->index, finfo->max_ports);
 #endif
-	port_info = kcalloc(finfo->max_ports, sizeof(*port_info), GFP_KERNEL);
+	port_info = kzalloc(mem_size, 0); 
 	if (!port_info) {
 		DPA_ERROR("%s::memalloc for port_info failed\n",
 				__FUNCTION__);
 		return -ENOMEM;
 	}
+	memset(port_info, 0, mem_size);
+	uspace_info = finfo->portinfo;
 	finfo->portinfo = port_info;
-	if (copy_from_user(port_info, uspace_info,
-				sizeof(*port_info) * finfo->max_ports)) {
+	if (copy_from_user(port_info, uspace_info, mem_size)) {
 		DPA_ERROR("%s::Read port_info failed\n",
 				__FUNCTION__);
 		return -EIO;
-	}
-	uspace_dist_info = kcalloc(finfo->max_ports, sizeof(*uspace_dist_info),
-			GFP_KERNEL);
-	if (!uspace_dist_info) {
-		DPA_ERROR("%s::memalloc for dist info references failed\n",
-				__FUNCTION__);
-		return -ENOMEM;
-	}
-	for (ii = 0; ii < finfo->max_ports; ii++) {
-		uspace_dist_info[ii] = (void __user *)port_info[ii].dist_info;
-		port_info[ii].dist_info = NULL;
-		if (port_info[ii].fm_index >= CDX_CTRL_MAX_FMANS ||
-		    port_info[ii].max_dist > CDX_CTRL_MAX_DIST_PER_PORT ||
-		    (port_info[ii].max_dist && !uspace_dist_info[ii])) {
-			kfree(uspace_dist_info);
-			return -EINVAL;
-		}
 	}
 	//put the linux name for the port
 	for (ii = 0; ii < finfo->max_ports; ii++) {
@@ -395,7 +369,6 @@ static int get_port_info(struct cdx_fman_info *finfo, void __user *uspace_info)
 			if (!dev) {
 				DPA_ERROR("%s::could not map port %s\n",
 						__FUNCTION__, port_info->name);
-				kfree(uspace_dist_info);
 				return -EIO;
 			} else {
 				strcpy(port_info->name, dev->name);
@@ -414,39 +387,34 @@ static int get_port_info(struct cdx_fman_info *finfo, void __user *uspace_info)
 	for (ii = 0; ii < finfo->max_ports; ii++) {
 		int retval;
 		//get dist info for this port
-		retval = get_dist_info(port_info, uspace_dist_info[ii]);
-		if (retval) {
-			kfree(uspace_dist_info);
+		retval = get_dist_info(port_info);
+		if (retval)
 			return retval;
-		}
 		port_info++;
 	}
-	kfree(uspace_dist_info);
 	return 0;
 }	
 
 //allocate and copy cc table infor from uspace
-static int get_cctbl_info(struct cdx_fman_info *finfo, void __user *uspace_info)
+static int get_cctbl_info(struct cdx_fman_info *finfo) 
 {	
 	struct table_info *tbl_info;
+	uint32_t mem_size;
+	void *uspace_info;
 
 	//allocate table information area
-	if (!finfo->num_tables || finfo->num_tables > CDX_CTRL_MAX_TABLES_PER_FMAN)
-		return -EINVAL;
-
-	if (!uspace_info)
-		return -EINVAL;
-
-	tbl_info = kcalloc(finfo->num_tables, sizeof(*tbl_info), GFP_KERNEL);
+	mem_size = (sizeof(struct table_info) * finfo->num_tables);
+	tbl_info = kzalloc(mem_size, 0); 
 	if (!tbl_info) {
 		DPA_ERROR("%s::memalloc for table_info failed\n",
 				__FUNCTION__);
 		return -ENOMEM;
 	}
+	memset(tbl_info, 0, mem_size);
+	uspace_info = finfo->tbl_info;
 	finfo->tbl_info = tbl_info;
 	//copy table related info from user space	
-	if (copy_from_user(tbl_info, (void *)uspace_info,
-				sizeof(*tbl_info) * finfo->num_tables)) {
+	if (copy_from_user(tbl_info, (void *)uspace_info, mem_size)) {
 		DPA_ERROR("%s::Read tbl_info failed\n",
 				__FUNCTION__);
 		return -EIO;
@@ -645,9 +613,7 @@ static int cdxdrv_get_fman_handles(struct cdx_fman_info *finfo)
 {
 	//translate pcd handle from uspace
 	struct file *fm_pcd_file;
-	struct inode *inode;
 	t_LnxWrpFmDev *fm_wrapper_dev;
-	int rc;
 
 	//get handle - use fget() instead of fcheck() for kernel 5.7+
 	fm_pcd_file = fget((unsigned long)finfo->pcd_handle);
@@ -656,44 +622,17 @@ static int cdxdrv_get_fman_handles(struct cdx_fman_info *finfo)
 				__FUNCTION__, finfo->pcd_handle);
 		return -1;
 	}
-	inode = file_inode(fm_pcd_file);
-	if (!inode || !S_ISCHR(inode->i_mode) ||
-	    iminor(inode) != DEV_FM_PCD_MINOR_BASE) {
-		DPA_ERROR("%s::invalid PCD fd for handle 0x%p\n",
+	//map it to wrapper dev
+	fm_wrapper_dev = (t_LnxWrpFmDev *)fm_pcd_file->private_data;
+	if (!fm_wrapper_dev) {
+		DPA_ERROR("%s::null wrap dev for pcd 0x%p\n",
 				__FUNCTION__, finfo->pcd_handle);
 		fput(fm_pcd_file);
 		return -1;
 	}
-
-	rc = cdxdrv_bind_fman_by_index(finfo->index, &fm_wrapper_dev);
-	if (rc < 0) {
-		DPA_ERROR("%s::failed to bind fman index %u for pcd 0x%p\n",
-				__FUNCTION__, finfo->index, finfo->pcd_handle);
-		fput(fm_pcd_file);
-		return -1;
-	}
-	if (imajor(inode) != fm_wrapper_dev->major ||
-	    fm_pcd_file->private_data != fm_wrapper_dev) {
-		DPA_ERROR("%s::PCD fd does not belong to fman index %u\n",
-				__FUNCTION__, finfo->index);
-		fm_unbind((struct fm *)fm_wrapper_dev);
-		fput(fm_pcd_file);
-		return -1;
-	}
-	if (!fm_pcd_file->f_op || !inode->i_cdev ||
-	    fm_pcd_file->f_op != inode->i_cdev->ops) {
-		DPA_ERROR("%s::invalid PCD fd operations for pcd 0x%p\n",
-				__FUNCTION__, finfo->pcd_handle);
-		fm_unbind((struct fm *)fm_wrapper_dev);
-		fput(fm_pcd_file);
-		return -1;
-	}
-	if (!fm_wrapper_dev->active || !fm_wrapper_dev->pcdActive ||
-	    !fm_wrapper_dev->h_PcdDev || !fm_wrapper_dev->h_Dev ||
-	    !fm_wrapper_dev->h_MuramDev || fm_wrapper_dev->id != finfo->index) {
+	if (!fm_wrapper_dev->h_PcdDev) {
 		DPA_ERROR("%s::null pcd dev for pcd 0x%p\n",
 				__FUNCTION__, finfo->pcd_handle);
-		fm_unbind((struct fm *)fm_wrapper_dev);
 		fput(fm_pcd_file);
 		return -1;
 	}
@@ -703,7 +642,6 @@ static int cdxdrv_get_fman_handles(struct cdx_fman_info *finfo)
 	finfo->muram_handle = fm_wrapper_dev->h_MuramDev;
 	finfo->physicalMuramBase = fm_wrapper_dev->fmMuramPhysBaseAddr;
 	finfo->fmMuramMemSize = fm_wrapper_dev->fmMuramMemSize;
-	fm_unbind((struct fm *)fm_wrapper_dev);
 	fput(fm_pcd_file);
 	return 0;
 }
@@ -713,14 +651,10 @@ static int cdxdrv_get_fman_handles(struct cdx_fman_info *finfo)
 int cdx_ioc_set_dpa_params(unsigned long args)
 {
 	struct cdx_ctrl_set_dpa_params params;
-	struct cdx_port_info __user **uspace_portinfo = NULL;
-	struct table_info __user **uspace_tbl_info = NULL;
 	struct cdx_fman_info *finfo;
 	uint32_t ii;	
+	uint32_t mem_size;
 	int retval;
-
-	if (!args)
-		return -EINVAL;
 
 	if (copy_from_user(&params, (void *)args, 
 				sizeof(struct cdx_ctrl_set_dpa_params))) {
@@ -728,14 +662,8 @@ int cdx_ioc_set_dpa_params(unsigned long args)
 				__FUNCTION__);
 		return -EBUSY;
 	}
-	if (fman_info || num_fmans)
-		return -EBUSY;
-
-	if (!params.num_fmans || params.num_fmans > CDX_CTRL_MAX_FMANS ||
-	    !params.fman_info || !params.ipr_info)
-		return -EINVAL;
-
-	fman_info = kcalloc(params.num_fmans, sizeof(*fman_info), GFP_KERNEL);
+	mem_size = (sizeof(struct cdx_fman_info) * params.num_fmans);
+	fman_info = kzalloc(mem_size, 0);
 	if (!fman_info) {
 		DPA_ERROR("%s::unable to allocate mem for fman_info\n",
 				__FUNCTION__);
@@ -745,9 +673,10 @@ int cdx_ioc_set_dpa_params(unsigned long args)
 #ifdef DPA_CFG_DEBUG
 	DPA_INFO("%s::num fmans %d\n", __FUNCTION__, num_fmans);
 #endif
+	memset(fman_info, 0, mem_size);
 	//get fman info
 	if (copy_from_user(fman_info, (void *)params.fman_info, 
-				sizeof(*fman_info) * num_fmans)) {
+				(sizeof(struct cdx_fman_info) * num_fmans))) {
 		DPA_ERROR("%s::Read fman_info failed\n", 
 				__FUNCTION__);
 		retval = -EIO;
@@ -760,78 +689,30 @@ int cdx_ioc_set_dpa_params(unsigned long args)
 		retval = -EIO;
 		goto err_ret;
 	}
-	uspace_portinfo = kcalloc(num_fmans, sizeof(*uspace_portinfo),
-			GFP_KERNEL);
-	if (!uspace_portinfo) {
-		retval = -ENOMEM;
-		goto err_ret;
-	}
-	uspace_tbl_info = kcalloc(num_fmans, sizeof(*uspace_tbl_info),
-			GFP_KERNEL);
-	if (!uspace_tbl_info) {
-		retval = -ENOMEM;
-		goto err_ret;
-	}
-	finfo = fman_info;
-	for (ii = 0; ii < num_fmans; ii++) {
-		uspace_portinfo[ii] = (struct cdx_port_info __user *)finfo->portinfo;
-		uspace_tbl_info[ii] = (struct table_info __user *)finfo->tbl_info;
-		if (finfo->index >= CDX_CTRL_MAX_FMANS ||
-		    !finfo->max_ports ||
-		    finfo->max_ports > CDX_CTRL_MAX_PORTS_PER_FMAN ||
-		    !finfo->num_tables ||
-		    finfo->num_tables > CDX_CTRL_MAX_TABLES_PER_FMAN ||
-		    !uspace_portinfo[ii] || !uspace_tbl_info[ii]) {
-			retval = -EINVAL;
-			goto err_ret;
-		}
-		/*
-		 * release_cfg_info() only owns kernel allocations. Clear the
-		 * copied userspace pointers here so early unwind paths never
-		 * hand them to kfree().
-		 */
-		finfo->portinfo = NULL;
-		finfo->tbl_info = NULL;
-		finfo++;
-	}
 	//init the fman handles 
 	finfo = fman_info;
 	for (ii = 0; ii < num_fmans; ii++) {
-		if (finfo->pcd_handle) {
-			if (cdxdrv_get_fman_handles(finfo)) {
-				retval = -EIO;
-				goto err_ret;
-			}
-		}
+		if (cdxdrv_get_fman_handles(finfo))
+			return -1;
 		finfo++;
 	}
 	finfo = fman_info;
-	bool hw_skip = !finfo->pcd_handle;
 	//init interface stats module
-	if (!hw_skip && cdxdrv_init_stats(finfo->muram_handle)) {
-		retval = -EIO;
-		goto err_ret;
-	}
+	if (cdxdrv_init_stats(finfo->muram_handle))
+		return -1;
 
 	for (ii = 0; ii < num_fmans; ii++) {
-		if (hw_skip) {
-			finfo->portinfo = (struct cdx_port_info __force *)uspace_portinfo[ii];
-			finfo->tbl_info = (struct table_info __force *)uspace_tbl_info[ii];
-			finfo++;
-			continue;
-		}
 		//get port info
-		retval = get_port_info(finfo, uspace_portinfo[ii]);
+		retval = get_port_info(finfo);
 		if (retval)
 			goto err_ret;
 		//get cc table info
-		retval = get_cctbl_info(finfo, uspace_tbl_info[ii]);
+		retval = get_cctbl_info(finfo);
 		if (retval)
 			goto err_ret;
 		finfo++;
 	}
 	finfo = fman_info;
-	if (!hw_skip) {
 	//loop thru all fmans
 	for (ii = 0; ii < num_fmans; ii++) {
 		struct cdx_port_info *port_info;
@@ -873,42 +754,29 @@ int cdx_ioc_set_dpa_params(unsigned long args)
 		finfo++;
 	}
 
-	if (cdx_create_port_fqs()) {
-		retval = -EIO;
-		goto err_ret;
-	}
+	if (cdx_create_port_fqs())
+		return -1;
 	//create cp rate limit policier profiles
 	if (cdxdrv_create_missaction_policer_profiles(fman_info)) {
-		retval = -EIO;
 		goto err_ret;
 	}
 #ifdef ENABLE_INGRESS_QOS
 	if (cdxdrv_create_ingress_qos_policer_profiles(fman_info)) {
-		retval = -EIO;
 		goto err_ret;
 	}
 #endif
 #ifdef ENABLE_EGRESS_QOS
-	if(ceetm_init_cq_plcr()) {
-		retval = -EIO;
+	if(ceetm_init_cq_plcr())
 		goto err_ret;
-	}
 #endif
 	//init the fman and its ports
 	for (ii = 0; ii < num_fmans; ii++) {
-		if (cdxdrv_set_miss_action(ii)) {
-			retval = -EIO;
+		if (cdxdrv_set_miss_action(ii))
 			goto err_ret;
-		}
 	}
-	} /* !hw_skip */
 	display_dpa_cfg();
-	kfree(uspace_tbl_info);
-	kfree(uspace_portinfo);
 	return 0;
 err_ret:
-	kfree(uspace_tbl_info);
-	kfree(uspace_portinfo);
 	release_cfg_info();
 	return retval;
 }
