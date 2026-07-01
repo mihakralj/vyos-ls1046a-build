@@ -1,0 +1,105 @@
+# ARM64 boards (LS1046A Mono Gateway DK) have no DMI/SMBIOS tables, so
+# `show version`'s Hardware vendor/model/S/N/UUID always print "Unknown".
+# Falls back to devicetree model, the board-ID EEPROM (i2c-3 @0x50, offset
+# 0x0028, read via I2C_SLAVE_FORCE same as board/scripts/fan-pid), and the
+# lowest MAC address (colons stripped) as a stable pseudo-UUID.
+# See specs/conntrack-root-cause-analysis.md-adjacent chat thread 2026-07-01.
+diff --git a/python/vyos/version.py b/python/vyos/version.py
+index d62778c..c229d16 100644
+--- a/python/vyos/version.py
++++ b/python/vyos/version.py
+@@ -94,16 +94,87 @@ def get_full_version_data(fname=version_file):
+ 
+     # Get hardware details from DMI
+     dmi = '/sys/class/dmi/id'
+-    version_data['hardware_vendor'] = read_file(dmi + '/sys_vendor', 'Unknown')
+-    version_data['hardware_model'] = read_file(dmi +'/product_name','Unknown')
+-
+-    # These two assume script is run as root, normal users can't access those files
+-    subsystem = '/sys/class/dmi/id/subsystem/id'
+-    version_data['hardware_serial'] = read_file(subsystem + '/product_serial','Unknown')
+-    version_data['hardware_uuid'] = read_file(subsystem + '/product_uuid', 'Unknown')
++    if os.path.exists(dmi):
++        version_data['hardware_vendor'] = read_file(dmi + '/sys_vendor', 'Unknown')
++        version_data['hardware_model'] = read_file(dmi +'/product_name','Unknown')
++
++        # These two assume script is run as root, normal users can't access those files
++        subsystem = '/sys/class/dmi/id/subsystem/id'
++        version_data['hardware_serial'] = read_file(subsystem + '/product_serial','Unknown')
++        version_data['hardware_uuid'] = read_file(subsystem + '/product_uuid', 'Unknown')
++    else:
++        # ARM64 boards (e.g. LS1046A Mono Gateway DK) have no DMI/SMBIOS
++        # tables. Fall back to devicetree + board-ID EEPROM + lowest MAC.
++        version_data['hardware_vendor'] = 'Mono'
++        version_data['hardware_model'] = _arm64_dt_model()
++        version_data['hardware_serial'] = _arm64_board_serial()
++        version_data['hardware_uuid'] = _arm64_lowest_mac_uuid()
+ 
+     return version_data
+ 
++def _arm64_dt_model():
++    """Board model string from the devicetree (no DMI on ARM64)."""
++    return read_file('/proc/device-tree/model', 'Unknown').rstrip('\x00')
++
++def _arm64_board_serial():
++    """
++    Read the board serial number from the Mono Gateway DK board-ID EEPROM.
++
++    The serial is stored as a NUL-terminated ASCII string at offset 0x0028
++    of the EEPROM at I2C address 0x50 on /dev/i2c-3. I2C_SLAVE_FORCE (not
++    plain I2C_SLAVE) is used so this works even if a kernel driver already
++    holds the address, matching the technique used by board/scripts/fan-pid
++    for the EMC2305 fan controller.
++    """
++    import fcntl
++    I2C_SLAVE_FORCE = 0x0706
++    try:
++        fd = os.open('/dev/i2c-3', os.O_RDWR)
++    except OSError:
++        return 'Unknown'
++    try:
++        fcntl.ioctl(fd, I2C_SLAVE_FORCE, 0x50)
++        os.write(fd, bytes([0x00, 0x28]))
++        data = os.read(fd, 64)
++    except OSError:
++        return 'Unknown'
++    finally:
++        os.close(fd)
++    try:
++        return data.split(b'\x00')[0].decode() or 'Unknown'
++    except UnicodeDecodeError:
++        return 'Unknown'
++
++def _arm64_lowest_mac_uuid():
++    """Stable pseudo-UUID: the lowest real Ethernet MAC address on the
++    board, no colons. Virtual/tunnel interfaces (sit0, ip6tnl0, ...) report
++    non-standard pseudo-addresses (e.g. "00:00:00:00", a 4-byte all-zero
++    value that is NOT the literal 6-byte "00:00:00:00:00:00" string) that
++    would otherwise be mistaken for the numerically-lowest "MAC" — filter
++    to the standard 17-character xx:xx:xx:xx:xx:xx form first.
++    """
++    net_dir = '/sys/class/net'
++    lowest_int = None
++    lowest_str = None
++    try:
++        interfaces = os.listdir(net_dir)
++    except OSError:
++        return 'Unknown'
++    for iface in interfaces:
++        if iface == 'lo':
++            continue
++        mac = read_file(f'{net_dir}/{iface}/address', '')
++        if len(mac) != 17 or mac == '00:00:00:00:00:00':
++            continue
++        try:
++            mac_int = int(mac.replace(':', ''), 16)
++        except ValueError:
++            continue
++        if lowest_int is None or mac_int < lowest_int:
++            lowest_int = mac_int
++            lowest_str = mac.replace(':', '')
++    return lowest_str or 'Unknown'
++
+ def get_remote_version(url):
+     """
+     Get remote available JSON file from remote URL
