@@ -677,16 +677,16 @@ XEOF
 
     ### Build ASK 1.x userspace (cmm, dpa_app, fmc)
     # Requires the kernel source tree for fmlib headers.
-    # Skipped on nxp-sdk: uses pre-built binaries.
+    # Always built for nxp-sdk — the cached pre-built binary from the ASK
+    # clone is stale and doesn't include CT-TRACE diagnostics or other fixes.
     ASK_USR_BUILDER="$GITHUB_WORKSPACE/bin/ci-build-ask-userspace.sh"
-    if [ -z "${NXP_KSRC:-}" ] && [ -n "$KSRC" ] && [ -x "$ASK_USR_BUILDER" ]; then
+    if [ -x "$ASK_USR_BUILDER" ] && [ -n "${KSRC:-}" ]; then
+      KSRC_USR="${NXP_KSRC:-$KSRC}"
       echo "### Building ASK 1.x userspace (cmm, dpa_app, fmc)"
-      "$ASK_USR_BUILDER" "$KSRC" "$(pwd)" || \
+      "$ASK_USR_BUILDER" "$KSRC_USR" "$(pwd)" || \
         { echo "FATAL: ASK 1.x userspace build failed"; exit 1; }
       echo "### ASK 1.x userspace .debs in package dir:"
       ls -lh cmm-*.deb dpa-app-*.deb fmc-*.deb 2>/dev/null || echo "  (none produced)"
-    elif [ -n "${NXP_KSRC:-}" ]; then
-      echo "### nxp-sdk: skipping ASK 1.x userspace build"
     fi
 
     ### Populate linux-kernel cache after a successful build (cache miss path)
