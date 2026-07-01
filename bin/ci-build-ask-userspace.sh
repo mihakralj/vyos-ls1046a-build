@@ -248,7 +248,12 @@ echo "### ======== cmm ========"
 CMM_BUILT="$ASK_DIR/cmm/src/cmm"
 # libfci .a is in LIBFCI_DIR; patched libs .a in SYSROOT/lib
 # PKG_CONFIG_PATH must be explicit — Makefile ?= default may not resolve SYSROOT
+# AUTO_BRIDGE enables the bridge-mode FCI path in cmmBridgeInit() —
+# sends FPP_CMD_RX_L2BRIDGE_MODE to CDX, without which CMM cannot
+# communicate bridge state to the hardware offload engine.
+# Drop -Werror (ASK code has benign warnings).
 make -C "$ASK_DIR/cmm" CC="$CC" \
+    AM_CFLAGS="-O2 -g -Wall -DAUTO_BRIDGE" \
     LIBFCI_DIR="$LIBFCI_DIR" \
     ABM_DIR="$ABM_DIR" \
     SYSROOT="$SYSROOT" \
@@ -326,6 +331,18 @@ mkdir -p "$STAGE/usr/bin"
 cp "$CMM_BUILT"       "$STAGE/usr/bin/cmm"
 cp "$DPA_BUILT"       "$STAGE/usr/bin/dpa_app"
 cp "$FMC_DIR/source/fmc" "$STAGE/usr/sbin/fmc"
+
+# libcli.so — shipped from our release snapshot (libcli1.10 1.10.8 is not
+# in VyOS arm64 apt repos; we cross-compile and ship our own).
+mkdir -p "$STAGE/usr/local/lib"
+if [ -f "$REPO_ROOT/release/ask-6.12.49/libcli.so.1.10.8" ]; then
+    cp "$REPO_ROOT/release/ask-6.12.49/libcli.so.1.10.8" "$STAGE/usr/local/lib/"
+    ln -sf libcli.so.1.10.8 "$STAGE/usr/local/lib/libcli.so.1.10"
+    ln -sf libcli.so.1.10.8 "$STAGE/usr/local/lib/libcli.so"
+    echo "### Shipped libcli.so.1.10.8"
+else
+    echo "WARNING: libcli.so.1.10.8 not found — CMM will fail at runtime"
+fi
 "${STRIP:-strip}" "$STAGE/usr/bin/cmm" "$STAGE/usr/bin/dpa_app" "$STAGE/usr/sbin/fmc" 2>/dev/null || true
 
 # Runtime config files from ASK repo
@@ -403,7 +420,7 @@ Section: net
 Priority: optional
 Architecture: arm64
 Maintainer: VyOS LS1046A maintainers <noreply@invalid>
-Depends: linux-image-${KVER}, cdx-modules-${KVER}, fci-modules-${KVER}, libcli1.10, libpcap0.8, libmnl0, libxml2, libstdc++6
+Depends: linux-image-${KVER}, cdx-modules-${KVER}, fci-modules-${KVER}, libpcap0.8, libmnl0, libxml2, libstdc++6
 Description: NXP ASK 1.x userspace — cmm, dpa_app, fmc for LS1046A FMan offload
  Connection Manager (cmm), DPAA application (dpa_app), and FMan Configuration
  tool (fmc) — the userspace components of the NXP ASK 1.x fast-path offload
@@ -416,6 +433,11 @@ EOF
 cat > "$STAGE/DEBIAN/postinst" <<'PEOF'
 #!/bin/sh
 set -e
+# Register libcli.so in ldconfig
+if [ -d /usr/local/lib ] && [ -f /usr/local/lib/libcli.so.1.10.8 ]; then
+    echo "/usr/local/lib" > /etc/ld.so.conf.d/zz-ask-libcli.conf
+    ldconfig
+fi
 if [ -f /etc/systemd/system/ls1046a-ask.service ]; then
     systemctl daemon-reload || true
     systemctl enable ask-ct-setup.service || true
