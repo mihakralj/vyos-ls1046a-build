@@ -3146,6 +3146,19 @@ static int __cmmCtCatch(struct cmm_ct *ctx, enum nf_conntrack_msg_type type, str
 	u_int32_t id, ctFlags = 0;
 	struct nf_conntrack *ctTemp = NULL;
 
+	/*
+	 * Diagnostic instrumentation (2026-07-01, specs/conntrack-root-cause-analysis.md §6/§8).
+	 * Printed unconditionally at DEBUG_CRIT (always visible regardless of
+	 * globalConf.debug_level/log_level) so a bare `journalctl -u ls1046a-ask.service |
+	 * grep CT-TRACE` conclusively answers whether nfct_catch()/libnetfilter_conntrack
+	 * is actually dispatching kernel ctnetlink events into this callback at all,
+	 * independent of whatever __cmmCtRegister()/ct_table[] does afterward. Remove
+	 * once the §5 open item (vendored libnetfilter_conntrack 1.1.0 comcerto-fp
+	 * extension) is confirmed/refuted.
+	 */
+	cmm_print(DEBUG_CRIT, "CT-TRACE: __cmmCtCatch type=%d(%s) enable=%d\n",
+		  type, conntrack_event_type(type), globalConf.enable);
+
 	// If Forward Engine programmation is forbidden, don't do anything
 	if (globalConf.enable == 0)
 		goto exit;
