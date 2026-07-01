@@ -3761,6 +3761,15 @@ static void *cmmCtThread(void *data)
 		if (FD_ISSET(fd_ct, &set))
 		{
 			rc = nfct_catch(ctx->catch_handle);
+			/*
+			 * Diagnostic (2026-07-01, specs/conntrack-root-cause-analysis.md §8):
+			 * If nfct_catch() returns > 0 but __cmmCtCatch() CT-TRACE never
+			 * fires, the vendored libnetfilter_conntrack parser is silently
+			 * rejecting kernel-6.12 ctnetlink messages. Remove once the
+			 * library upgrade to 1.0.9 confirms dispatch working.
+			 */
+			if (rc > 0)
+				cmm_print(DEBUG_CRIT, "CT-TRACE: nfct_catch processed %d events\n", rc);
 			if (rc < 0)
 			{
 				if (errno != EAGAIN)
