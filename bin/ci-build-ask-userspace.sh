@@ -259,19 +259,21 @@ with open(p) as f:
     s = f.read()
 
 # Diagnostic 1: CT-TRACE at top of __cmmCtCatch() — proves callback fires
-old1 = '''{
+# Match the actual ASK clone source (different from our local reference copy)
+old1 = '''	struct ctTable *ctEntry = NULL;
 	u_int32_t id, ctFlags = 0;
 	struct nf_conntrack *ctTemp = NULL;'''
-new1 = '''{
-	u_int32_t id, ctFlags = 0;
-	struct nf_conntrack *ctTemp = NULL;
+new1 = '''	struct ctTable *ctEntry = NULL;
 
 	/* Diagnostic (2026-07-01): unconditional DEBUG_CRIT to prove
 	 * nfct_catch()/libnetfilter_conntrack dispatches kernel ctnetlink
 	 * events into this callback. grep CT-TRACE in journal. Remove once
 	 * vendored-libnfct dispatch is confirmed/refuted. */
 	cmm_print(DEBUG_CRIT, "CT-TRACE: __cmmCtCatch type=%d(%s) enable=%d\\n",
-		  type, conntrack_event_type(type), globalConf.enable);'''
+		  type, conntrack_event_type(type), globalConf.enable);
+
+	u_int32_t id, ctFlags = 0;
+	struct nf_conntrack *ctTemp = NULL;'''
 if old1 in s:
     s = s.replace(old1, new1)
     print('Injected CT-TRACE __cmmCtCatch')
