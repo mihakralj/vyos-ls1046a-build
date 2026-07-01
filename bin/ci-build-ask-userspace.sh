@@ -27,6 +27,10 @@
 # Plan: plans/NXP-SDK-ASK-INTEGRATION.md §3.3, M3
 set -ex -o pipefail
 
+# REPO_ROOT is exported by common.sh when called from ci-build-packages.sh.
+# Fallback for standalone execution.
+export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+
 KSRC="${1:?KSRC required as \$1}"
 PKG_DIR="${2:?PKG_DIR required as \$2}"
 
@@ -283,7 +287,7 @@ FMLIB_INC="$FMLIB_DIR/include/fmd"
 
 # SEC_PROFILE_SUPPORT is MANDATORY — matches kernel Kbuild: cdx/ccflags-y
 # (without it, cdx_fman_info layout mismatches → get_port_info ioctl fails)
-DPA_CFLAGS="-DNCSW_LINUX -DLS1043 -D__STDC_LIMIT_MACROS -DDPAA_DEBUG_ENABLE -DSEC_PROFILE_SUPPORT -O2"
+DPA_CFLAGS="-DNCSW_LINUX -DLS1043 -D__STDC_LIMIT_MACROS -DDPAA_DEBUG_ENABLE -DSEC_PROFILE_SUPPORT -DENDIAN_LITTLE -DVLAN_FILTER -O2"
 DPA_INCLUDES="-I$FMC_SRC -I$FMLIB_INC -I$FMLIB_INC/integrations -I$FMLIB_INC/Peripherals -I/usr/include/libxml2 -I$ASK_DIR/cdx"
 
 $CC -c $DPA_CFLAGS $DPA_INCLUDES "$DPA_SRC/main.c" -o "$DPA_SRC/main.o" 2>&1
@@ -337,6 +341,20 @@ sed -i '/^After=network.target/ s/$/ ask-cdx.service/' "$STAGE/etc/systemd/syste
 sed -i '/^Wants=systemd-modules-load/ a\Wants=ask-cdx.service' "$STAGE/etc/systemd/system/cmm.service"
 echo "### Patched cmm.service: added After/Wants ask-cdx.service"
 
+# Conntrack fix: deploy ask-ct-setup.service (runs vyos-ask-ct-fix to remove
+# VyOS notrack rule and ensure nf_conntrack_netlink is loaded before CMM)
+cp "$REPO_ROOT/board/systemd/ask-ct-setup.service" "$STAGE/etc/systemd/system/ask-ct-setup.service"
+echo "### Deployed ask-ct-setup.service"
+
+mkdir -p "$STAGE/usr/local/sbin"
+cp "$REPO_ROOT/board/scripts/vyos-ask-ct-fix" "$STAGE/usr/local/sbin/vyos-ask-ct-fix"
+chmod +x "$STAGE/usr/local/sbin/vyos-ask-ct-fix"
+echo "### Deployed vyos-ask-ct-fix"
+
+# Replace upstream cmm.service with our ls1046a-ask.service wrapper
+cp "$REPO_ROOT/board/systemd/ls1046a-ask.service" "$STAGE/etc/systemd/system/ls1046a-ask.service"
+echo "### Deployed ls1046a-ask.service (After/Requires ask-ct-setup)"
+
 # dpa_app systemd unit (programs FMan PCD via /dev/cdx_ctrl before CMM starts)
 cat > "$STAGE/etc/systemd/system/dpa_app.service" <<'UNIT'
 [Unit]
@@ -385,7 +403,7 @@ Section: net
 Priority: optional
 Architecture: arm64
 Maintainer: VyOS LS1046A maintainers <noreply@invalid>
-Depends: linux-image-${KVER}, cdx-modules-${KVER}, fci-modules-${KVER}, auto-bridge-modules-${KVER}, libcli1.10, libpcap0.8, libmnl0, libxml2, libstdc++6
+Depends: linux-image-${KVER}, cdx-modules-${KVER}, fci-modules-${KVER}, libcli1.10, libpcap0.8, libmnl0, libxml2, libstdc++6
 Description: NXP ASK 1.x userspace — cmm, dpa_app, fmc for LS1046A FMan offload
  Connection Manager (cmm), DPAA application (dpa_app), and FMan Configuration
  tool (fmc) — the userspace components of the NXP ASK 1.x fast-path offload
@@ -398,9 +416,12 @@ EOF
 cat > "$STAGE/DEBIAN/postinst" <<'PEOF'
 #!/bin/sh
 set -e
-if [ -x /usr/bin/cmm ] && [ -f /etc/systemd/system/cmm.service ]; then
+if [ -f /etc/systemd/system/ls1046a-ask.service ]; then
     systemctl daemon-reload || true
-    systemctl enable cmm.service || true
+    systemctl enable ask-ct-setup.service || true
+    systemctl enable ls1046a-ask.service || true
+    # Mask upstream cmm.service — ls1046a-ask wraps it with conntrack setup
+    systemctl mask cmm.service 2>/dev/null || true
 fi
 exit 0
 PEOF
