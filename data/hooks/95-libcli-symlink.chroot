@@ -1,0 +1,13 @@
+#!/bin/bash
+# libcli.so.1.10.8 ships in /usr/local/bin/ (from ask-userspace .deb packaging)
+# but the ls1046a-ask.service poll guard and ldconfig expect /usr/local/lib/.
+# Create a symlink so CMM starts without the libcli crash-loop race.
+if [ -f /usr/local/bin/libcli.so.1.10.8 ] && [ ! -f /usr/local/lib/libcli.so.1.10.8 ]; then
+    mkdir -p /usr/local/lib
+    ln -sf /usr/local/bin/libcli.so.1.10.8 /usr/local/lib/libcli.so.1.10.8
+    ln -sf libcli.so.1.10.8 /usr/local/lib/libcli.so.1.10
+    ln -sf libcli.so.1.10.8 /usr/local/lib/libcli.so
+    echo "/usr/local/lib" > /etc/ld.so.conf.d/zz-ask-libcli.conf
+    ldconfig
+    echo "### libcli symlink created in /usr/local/lib/"
+fi
