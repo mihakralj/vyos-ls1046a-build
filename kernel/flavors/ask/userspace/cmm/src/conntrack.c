@@ -3661,6 +3661,23 @@ static void *cmmCtThread(void *data)
 	fd_fci = fci_fd(ctx->fci_catch_handle);
 	fd_ct = nfct_fd(ctx->catch_handle);
 
+	/*
+	 * Diagnostic (2026-07-01): the vendored libnfct 1.1.0 opens multiple
+	 * NETLINK_NETFILTER sockets. Log which fd ctx->catch_handle wraps so
+	 * we can cross-check against /proc/net/netlink. If fd_ct != the
+	 * Groups=0x000007 socket, nfct_fd() is returning the wrong descriptor.
+	 */
+	cmm_print(DEBUG_CRIT, "CT-TRACE: fd_fci=%d fd_ct=%d"
+#if !defined(IPSEC_SUPPORT_DISABLED)
+		  " fd_key=%d"
+#endif
+		  "\n",
+		  fd_fci, fd_ct
+#if !defined(IPSEC_SUPPORT_DISABLED)
+		  , fd_key
+#endif
+		  );
+
 	/* Dump all conntracks */
 	cmmCtResync(ctx);
 
