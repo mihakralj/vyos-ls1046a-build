@@ -29,6 +29,18 @@ for package in $packages; do
   [[ " ${ignore_packages[@]} " =~ " ${package} " ]] && continue
   cd "$package"
 
+  # nxp-sdk: the NXP tree is staged by ci-stage-kernel.sh at
+  # work/linux-6.12.49/ but linux-kernel build is skipped when
+  # ASK_KERNEL_TAG is set. Set KSRC unconditionally so the
+  # ASK userspace builder (cmm, dpa_app, fmc) can find the tree.
+  if [ "${FLAVOR:-default}" == "ask" ] && [ -z "${KSRC:-}" ]; then
+    NXP_TREE="$GITHUB_WORKSPACE/work/linux-6.12.49"
+    if [ -d "$NXP_TREE" ] && [ -f "$NXP_TREE/include/config/kernel.release" ]; then
+      KSRC="$NXP_TREE"
+      echo "### nxp-sdk: KSRC=$KSRC (ASK_KERNEL_TAG mode, NXP tree)"
+    fi
+  fi
+
   [ "$package" == "keepalived" ] && apt-get install -y libsnmp-dev
 
   ### linux-kernel .deb + DTB + accel-ppp-ng cache
