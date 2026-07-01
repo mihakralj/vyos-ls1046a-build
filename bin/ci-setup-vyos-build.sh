@@ -460,6 +460,12 @@ chmod +x "$HOOKS/98-fancontrol.chroot"
 cp data/hooks/99-mask-services.chroot "$HOOKS/99-mask-services.chroot"
 chmod +x "$HOOKS/99-mask-services.chroot"
 
+# nxp-sdk: libcli.so.1.10.8 ships in /usr/local/bin/ (from the ask-userspace
+# .deb), but the ls1046a-ask.service ExecStartPre poll guard and ldconfig both
+# expect /usr/local/lib/. Symlink so CMM starts without the boot crash-loop.
+cp data/hooks/95-libcli-symlink.chroot "$HOOKS/95-libcli-symlink.chroot"
+chmod +x "$HOOKS/95-libcli-symlink.chroot"
+
 ### NOTE: ethernet port remapping was deleted on 2026-05-15. The previous
 ### eth0..eth4 rename layer (fman-port-name + 10-fman-port-order.rules +
 ### 00-fman.link) lived in the squashfs, but the predictable-naming race

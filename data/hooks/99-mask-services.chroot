@@ -25,3 +25,9 @@ ln -sf /dev/null /etc/systemd/system/vyos-grub-update.service
 # removal makes the boot dependency graph cleaner and avoids the noisy
 # [FAILED] line).
 rm -f /etc/systemd/system/vyos-router.service.wants/vyos-grub-update.service
+
+# auditd: kernel CONFIG_AUDIT is not set on nxp-sdk (pre-built ask-kernel).
+# auditd parses its config fine, then exits with "Cannot open netlink audit
+# socket". Mask it to eliminate the noisy boot failure.
+ln -sf /dev/null /etc/systemd/system/auditd.service
+rm -f /etc/systemd/system/multi-user.target.wants/auditd.service
