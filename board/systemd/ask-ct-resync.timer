@@ -1,0 +1,19 @@
+[Unit]
+Description=Periodic re-sync of conntrack notrack fix for ASK hardware offload
+Documentation=https://github.com/mihakralj/vyos-ls1046a-build
+# See specs/conntrack-root-cause-analysis.md §3/§6: ask-ct-setup.service only
+# runs once at boot, but a later `commit` touching firewall/nat/system
+# conntrack config makes VyOS regenerate the ip/ip6 vyos_conntrack table with
+# its default notrack fallthrough, silently undoing the boot-time fix with no
+# automatic re-trigger. This timer re-applies the same idempotent fix on a
+# short interval so any regression self-heals instead of persisting until the
+# next reboot or manual intervention.
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=ask-ct-resync.service
+
+[Install]
+WantedBy=timers.target

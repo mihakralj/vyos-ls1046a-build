@@ -10,7 +10,8 @@
 This spec analyzes the FreeBSD/OPNsense ASK 1.x offload stack (mono-gateway-26.1.6.pkg)
 and identifies every structural difference from the VyOS Linux port. Each `[DIFF]`
 documents a gap that must be bridged. `[VERIFIED]` marks aspects we have confirmed
-working on our Linux build.
+working on our Linux build. **See `specs/conntrack-root-cause-analysis.md` for the
+2026-07-01 board-verified re-audit of §2 — it corrects a misdiagnosis below.**
 
 ## 1. Component Equivalence Matrix
 
@@ -31,11 +32,18 @@ working on our Linux build.
 
 ## 2. The Conntrack Deadlock — Root Cause Analysis
 
+**[NOTE] 2026-07-01 correction:** the "groups=0x0" row below was a misdiagnosis —
+see `specs/conntrack-root-cause-analysis.md` §4. CMM opens four distinct
+NETLINK_NETFILTER sockets; only the event-catching one needs a nonzero group,
+and on live-hardware re-verification it correctly shows `Groups=00000007`. The
+real remaining bug is that CMM's own shadow conntrack table never gains an
+entry even once a qualifying event arrives — see that document §5.
+
 **[SPEC]** The Linux CMM binary expects flow events from THREE sources:
 
 | Source | Netlink protocol | Linux CMM socket | Status on DUT |
 |---|---|---|---|
-| Conntrack events | NETLINK_NETFILTER (12) | groups=0x0 | **DEAF** — nfct_open with zero subscriptions |
+| Conntrack events | NETLINK_NETFILTER (12) | groups=0x7 (one of 4 sockets) | Socket subscription OK — see `conntrack-root-cause-analysis.md` §5 for the actual remaining break |
 | Bridge port events | NETLINK_ROUTE (0) | groups=0x4 | Working — tracks neighbor ARP |
 | L2 flow events | NETLINK_L2FLOW (33) | socket() fails | "Protocol not supported" — triggers MANUAL fallback |
 | FCI commands | NETLINK_FF (30) | groups=0x1 | **WORKING** — heartbeat rc=0 every 30s |
