@@ -246,6 +246,66 @@ echo "### libfci ready"
 # ===========================================================================
 echo "### ======== cmm ========"
 CMM_BUILT="$ASK_DIR/cmm/src/cmm"
+CMM_SRC="$ASK_DIR/cmm/src/conntrack.c"
+
+# Apply CT-TRACE diagnostics to the ASK clone's conntrack.c. The CI builds
+# CMM from the cloned ASK repo, NOT from our local reference copy, so we
+# inject these before compilation. Remove once conntrack dispatch is verified.
+echo "### Injecting CT-TRACE diagnostics into conntrack.c"
+python3 << PYPATCH
+import re
+p = '${CMM_SRC}'
+with open(p) as f:
+    s = f.read()
+
+# Diagnostic 1: CT-TRACE at top of __cmmCtCatch() — proves callback fires
+old1 = '''{
+	u_int32_t id, ctFlags = 0;
+	struct nf_conntrack *ctTemp = NULL;'''
+new1 = '''{
+	u_int32_t id, ctFlags = 0;
+	struct nf_conntrack *ctTemp = NULL;
+
+	/* Diagnostic (2026-07-01): unconditional DEBUG_CRIT to prove
+	 * nfct_catch()/libnetfilter_conntrack dispatches kernel ctnetlink
+	 * events into this callback. grep CT-TRACE in journal. Remove once
+	 * vendored-libnfct dispatch is confirmed/refuted. */
+	cmm_print(DEBUG_CRIT, "CT-TRACE: __cmmCtCatch type=%d(%s) enable=%d\\n",
+		  type, conntrack_event_type(type), globalConf.enable);'''
+if old1 in s:
+    s = s.replace(old1, new1)
+    print('Injected CT-TRACE __cmmCtCatch')
+else:
+    print('WARNING: __cmmCtCatch pattern not found')
+
+# Diagnostic 2: CT-TRACE after nfct_catch() — proves event loop polls
+old2 = '''			rc = nfct_catch(ctx->catch_handle);
+			if (rc < 0)'''
+new2 = '''			rc = nfct_catch(ctx->catch_handle);
+			if (rc > 0)
+				cmm_print(DEBUG_CRIT, "CT-TRACE: nfct_catch processed %d events\\n", rc);
+			if (rc < 0)'''
+if old2 in s:
+    s = s.replace(old2, new2)
+    print('Injected CT-TRACE nfct_catch')
+else:
+    print('WARNING: nfct_catch pattern not found')
+
+# Diagnostic 3: CT-TRACE at fd_ct init — proves which fd the handle wraps
+old3 = '	fd_ct = nfct_fd(ctx->catch_handle);'
+new3 = '''	fd_ct = nfct_fd(ctx->catch_handle);
+	cmm_print(DEBUG_CRIT, "CT-TRACE: fd_fci=%d fd_ct=%d\\n", fd_fci, fd_ct);'''
+if old3 in s:
+    s = s.replace(old3, new3)
+    print('Injected CT-TRACE fd_ct')
+else:
+    print('WARNING: fd_ct pattern not found')
+
+with open(p, 'w') as f:
+    f.write(s)
+PYPATCH
+echo "### CT-TRACE diagnostics injected"
+
 # libfci .a is in LIBFCI_DIR; patched libs .a in SYSROOT/lib
 # PKG_CONFIG_PATH must be explicit — Makefile ?= default may not resolve SYSROOT
 make -C "$ASK_DIR/cmm" CC="$CC" \
