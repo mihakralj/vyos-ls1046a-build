@@ -645,14 +645,34 @@ chmod +x "$HOOKS/96-enable-services.chroot"
 # 2026-06-14 (single image carries the dormant ask.ko), so this must
 # Copy ASK offload .deb into packages.chroot so it's installed at chroot time.
 # Use glob to find the latest version (1.0.1, 1.0.2, etc.)
-ASKOFFLOAD_DEB=$(ls -t release/ask-offload_*_arm64.deb 2>/dev/null | head -1)
-if [ -n "$ASKOFFLOAD_DEB" ] && [ -f "$ASKOFFLOAD_DEB" ]; then
-  mkdir -p vyos-build/data/live-build-config/packages.chroot
-  cp -v "$ASKOFFLOAD_DEB" vyos-build/data/live-build-config/packages.chroot/
-  echo "### staged ask-offload.deb ($ASKOFFLOAD_DEB) into packages.chroot/"
-else
-  echo "### WARNING: no release/ask-offload_*_arm64.deb found — ASK artifacts MISSING from ISO"
-fi
+#
+# DISABLED 2026-07-02: release/ask-offload_*.deb is a stale, pre-built
+# snapshot (dated 2026-06-29, committed to git from an earlier manual
+# build/deploy cycle before the from-source pipeline below was working
+# end-to-end). Its ENTIRE content is now built fresh every CI run by
+# bin/ci-build-ask-modules.sh (cdx.ko/fci.ko/auto_bridge.ko) and
+# bin/ci-build-ask-userspace.sh (cmm/dpa_app/libcli.so, cdx_cfg.xml/
+# cdx_pcd.xml/cdx_sp.xml/hxs_pdl_v3.xml, ask-ct-setup.service/
+# ls1046a-ask.service, vyos-ask-ct-fix — confirmed via `dpkg-deb
+# --contents release/ask-offload_1.0.4_arm64.deb` vs. grepping both
+# builder scripts for the same paths). Staging BOTH into the same
+# packages.chroot/ causes a hard dpkg conflict: "trying to overwrite
+# '/etc/cdx_cfg.xml', which is also in package ask-userspace-6.12.49-
+# vyos" (CI run 28567653514) — ask-offload.deb is also strictly staler
+# than the from-source build (predates dozens of this-session kernel/
+# userspace fixes). If the from-source ASK userspace build is ever
+# intentionally skipped again (e.g. ASK_KERNEL_TAG fallback mode), this
+# will need a real conditional re-enable, not just an unconditional
+# stage — don't blindly uncomment.
+# ASKOFFLOAD_DEB=$(ls -t release/ask-offload_*_arm64.deb 2>/dev/null | head -1)
+# if [ -n "$ASKOFFLOAD_DEB" ] && [ -f "$ASKOFFLOAD_DEB" ]; then
+#   mkdir -p vyos-build/data/live-build-config/packages.chroot
+#   cp -v "$ASKOFFLOAD_DEB" vyos-build/data/live-build-config/packages.chroot/
+#   echo "### staged ask-offload.deb ($ASKOFFLOAD_DEB) into packages.chroot/"
+# else
+#   echo "### WARNING: no release/ask-offload_*_arm64.deb found — ASK artifacts MISSING from ISO"
+# fi
+echo "### ask-offload.deb staging SKIPPED (superseded by from-source ask-userspace/ask-modules build)"
 
 # match the kernel/flavors/ask oot-module build, which is itself wired
 # unconditionally into the common build. A FLAVOR gate here silently
