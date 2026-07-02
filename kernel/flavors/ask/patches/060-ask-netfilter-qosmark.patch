@@ -1,0 +1,845 @@
+From 2ad28cd7b121e327e8f86444090e5a7afd357d44 Mon Sep 17 00:00:00 2001
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Thu, 23 Apr 2026 17:55:41 +0200
+Subject: [PATCH] ask: netfilter qosmark/qosconnmark + comcerto_fp module
+
+New netfilter matches + targets: xt_qosmark, xt_qosconnmark, and the
+comcerto_fp_netfilter module that glues the fast path to netfilter's
+packet-pipeline hooks. Declares CONFIG_NETFILTER_XT_QOSMARK and
+CONFIG_NETFILTER_XT_QOSCONNMARK (both depend on CPE_FAST_PATH from 010).
+
+Also the matching UAPI headers (xt_qosmark.h, xt_QOSMARK.h,
+xt_qosconnmark.h, xt_QOSCONNMARK.h).
+
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+ include/uapi/linux/netfilter/xt_QOSCONNMARK.h |  10 +
+ include/uapi/linux/netfilter/xt_QOSMARK.h     |   6 +
+ include/uapi/linux/netfilter/xt_qosconnmark.h |  35 +++
+ include/uapi/linux/netfilter/xt_qosmark.h     |  19 ++
+ net/netfilter/Kconfig                         |  26 ++
+ net/netfilter/Makefile                        |   3 +
+ net/netfilter/comcerto_fp_netfilter.c         | 392 ++++++++++++++++++++++++++
+ net/netfilter/xt_qosconnmark.c                | 171 +++++++++++
+ net/netfilter/xt_qosmark.c                    |  85 ++++++
+ 9 files changed, 747 insertions(+)
+
+
+diff --git a/include/uapi/linux/netfilter/xt_QOSCONNMARK.h b/include/uapi/linux/netfilter/xt_QOSCONNMARK.h
+new file mode 100644
+index 000000000000..8a0821856c32
+--- /dev/null
++++ b/include/uapi/linux/netfilter/xt_QOSCONNMARK.h
+@@ -0,0 +1,10 @@
++#ifndef _XT_QOSCONNMARK_H_target
++#define _XT_QOSCONNMARK_H_target
++
++#include <linux/netfilter/xt_qosconnmark.h>
++
++#endif /*_XT_QOSCONNMARK_H_target*/
++
++
++
++
+diff --git a/include/uapi/linux/netfilter/xt_QOSMARK.h b/include/uapi/linux/netfilter/xt_QOSMARK.h
+new file mode 100644
+index 000000000000..45c4795aac12
+--- /dev/null
++++ b/include/uapi/linux/netfilter/xt_QOSMARK.h
+@@ -0,0 +1,6 @@
++#ifndef _XT_QOSMARK_H_target
++#define _XT_QOSMARK_H_target
++
++#include <linux/netfilter/xt_qosmark.h>
++
++#endif /*_XT_QOSMARK_H_target */
+diff --git a/include/uapi/linux/netfilter/xt_qosconnmark.h b/include/uapi/linux/netfilter/xt_qosconnmark.h
+new file mode 100644
+index 000000000000..d9901a9bd4fd
+--- /dev/null
++++ b/include/uapi/linux/netfilter/xt_qosconnmark.h
+@@ -0,0 +1,35 @@
++#ifndef _XT_QOSCONNMARK_H
++#define _XT_QOSCONNMARK_H
++
++#include <linux/types.h>
++
++/* Copyright (C) 2002,2004 MARA Systems AB <http://www.marasystems.com>
++    + * by Henrik Nordstrom <hno@marasystems.com>
++    + *
++    + * This program is free software; you can redistribute it and/or modify
++    + * it under the terms of the GNU General Public License as published by
++    + * the Free Software Foundation; either version 2 of the License, or
++    + * (at your option) any later version.
++    + */
++
++enum {
++    XT_QOSCONNMARK_SET = 0,
++    XT_QOSCONNMARK_SAVE_QOSMARK,
++    XT_QOSCONNMARK_RESTORE_QOSMARK
++};
++
++struct xt_qosconnmark_tginfo1 {
++    __u64 mark, ctmask, nfmask;
++    __u8 mode;
++};
++
++struct xt_qosconnmark_mtinfo1 {
++    __u64 mark, mask;
++     __u8 invert;
++};
++
++#endif /*_XT_QOSCONNMARK_H*/
++
++
++
++
+diff --git a/include/uapi/linux/netfilter/xt_qosmark.h b/include/uapi/linux/netfilter/xt_qosmark.h
+new file mode 100644
+index 000000000000..6f80bd016c40
+--- /dev/null
++++ b/include/uapi/linux/netfilter/xt_qosmark.h
+@@ -0,0 +1,19 @@
++#ifndef _XT_QOSMARK_H
++#define _XT_QOSMARK_H
++
++#include <linux/types.h>
++
++struct xt_qosmark_tginfo2 {
++    __u64 mark, mask;
++};
++
++struct xt_qosmark_mtinfo1 {
++    __u64 mark, mask;
++    __u8 invert;
++};
++
++#endif /*_XT_QOSMARK_H*/
++
++
++
++
+diff --git a/net/netfilter/Kconfig b/net/netfilter/Kconfig
+index df2dc21304ef..af3beb6931ed 100644
+--- a/net/netfilter/Kconfig
++++ b/net/netfilter/Kconfig
+@@ -790,6 +790,32 @@ config NETFILTER_XT_CONNMARK
+ 	ctmark), similarly to the packet mark (nfmark). Using this
+ 	target and match, you can set and match on this mark.
+ 
++config NETFILTER_XT_QOSMARK
++	tristate 'qosmark target and match support'
++	depends on CPE_FAST_PATH
++	default m if NETFILTER_ADVANCED=n
++	help
++	  This option adds the "QOSMARK" target and "qosmark" match.
++
++	  Netfilter qosmark matching allows you to match packets based on the
++	  "qosmark" value in the packet.
++	  The target allows you to create rules in the "mangle" table which alter
++	  the netfilter qosmark field associated with the packet.
++
++config NETFILTER_XT_QOSCONNMARK
++	tristate 'qosconnmark target and match support'
++	depends on CPE_FAST_PATH
++	depends on NF_CONNTRACK
++	depends on NETFILTER_ADVANCED
++	select NF_CONNTRACK_MARK
++	help
++	  This option adds the "QOSCONNMARK" target and "qosconnmark" match.
++
++	  Netfilter allows you to store a qosmark value per connection (a.k.a.
++	  qosconnmark), similarly to the qos mark (qosmark). Using this
++	  target and match, you can set and match on this mark.
++
++
+ config NETFILTER_XT_SET
+ 	tristate 'set target and match support'
+ 	depends on IP_SET
+diff --git a/net/netfilter/Makefile b/net/netfilter/Makefile
+index f0aa4d7ef499..6af83a10050b 100644
+--- a/net/netfilter/Makefile
++++ b/net/netfilter/Makefile
+@@ -22,6 +22,7 @@ nf_conntrack-$(CONFIG_DEBUG_INFO_BTF) += nf_conntrack_bpf.o
+ endif
+ 
+ obj-$(CONFIG_NETFILTER) = netfilter.o
++obj-$(CONFIG_CPE_FAST_PATH) += comcerto_fp_netfilter.o
+ obj-$(CONFIG_NETFILTER_BPF_LINK) += nf_bpf_link.o
+ 
+ obj-$(CONFIG_NETFILTER_NETLINK) += nfnetlink.o
+@@ -158,6 +159,8 @@ obj-$(CONFIG_NETFILTER_XTABLES) += x_tables.o xt_tcpudp.o
+ # combos
+ obj-$(CONFIG_NETFILTER_XT_MARK) += xt_mark.o
+ obj-$(CONFIG_NETFILTER_XT_CONNMARK) += xt_connmark.o
++obj-$(CONFIG_NETFILTER_XT_QOSMARK) += xt_qosmark.o
++obj-$(CONFIG_NETFILTER_XT_QOSCONNMARK) += xt_qosconnmark.o
+ obj-$(CONFIG_NETFILTER_XT_SET) += xt_set.o
+ obj-$(CONFIG_NETFILTER_XT_NAT) += xt_nat.o
+ 
+diff --git a/net/netfilter/comcerto_fp_netfilter.c b/net/netfilter/comcerto_fp_netfilter.c
+new file mode 100644
+index 000000000000..236fdf135b28
+--- /dev/null
++++ b/net/netfilter/comcerto_fp_netfilter.c
+@@ -0,0 +1,392 @@
++/* Copyright (C) 2015 Freescale Semiconductor, Inc.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *     * Redistributions of source code must retain the above copyright
++ *       notice, this list of conditions and the following disclaimer.
++ *     * Redistributions in binary form must reproduce the above copyright
++ *       notice, this list of conditions and the following disclaimer in the
++ *       documentation and/or other materials provided with the distribution.
++ *     * Neither the name of Freescale Semiconductor nor the
++ *       names of its contributors may be used to endorse or promote products
++ *       derived from this software without specific prior written permission.
++ *
++ *
++ * ALTERNATIVELY, this software may be distributed under the terms of the
++ * GNU General Public License ("GPL") as published by the Free Software
++ * Foundation, either version 2 of that License or (at your option) any
++ * later version.
++ *
++ * THIS SOFTWARE IS PROVIDED BY Freescale Semiconductor ``AS IS'' AND ANY
++ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++ * DISCLAIMED. IN NO EVENT SHALL Freescale Semiconductor BE LIABLE FOR ANY
++ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
++ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
++ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
++ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/skbuff.h>
++#include <linux/netfilter.h>
++#include <net/netfilter/nf_conntrack.h>
++#include <net/netfilter/nf_conntrack_ecache.h>
++
++
++#ifndef IPSEC_FLOW_CACHE
++/* this function is used to fill the xfrm info in conntrack structure */
++static void nf_ct_set_xfrm_in_fp(struct sk_buff *skb, struct xfrm_state *xfrm[MAX_SUPPORTED_XFRMS_PER_DIR],
++						  int num_xfrm, int xfrm_dir, int *rekey)
++{
++	struct nf_conn *ct;
++	enum ip_conntrack_info ctinfo;
++	struct comcerto_fp_info *fp_info;
++	int dir, xfrm_ind, ii;
++
++	if (num_xfrm > MAX_SUPPORTED_XFRMS_PER_DIR)
++	{
++		printk(KERN_ERR "%s(%d) num_xfrm %d > %d(MAX supported)\n",
++			__func__,__LINE__,num_xfrm,MAX_SUPPORTED_XFRMS_PER_DIR);
++		return;
++	}	
++	/* get ct info */
++	ct = nf_ct_get(skb, &ctinfo);
++	if (!ct)
++	{
++		return;
++	}
++	
++	dir = CTINFO2DIR(ctinfo);
++	if (dir == IP_CT_DIR_ORIGINAL) {
++		fp_info = &ct->fp_info[IP_CT_DIR_ORIGINAL];
++	} else {
++		fp_info = &ct->fp_info[IP_CT_DIR_REPLY];
++	}
++
++	if (xfrm_dir == XFRM_POLICY_FWD)
++		xfrm_dir = 0;
++	/* xfrm_dir can be XFRM_POLICY_IN, XFRM_POLICY_OUT, XFRM_POLICY_FWD */
++	/* fp_info->xfrm_id[4] has 4 instances , first 2 instances reserved for direction IN/FWD
++	   next 2 instances for OUT direction */
++	xfrm_ind =  xfrm_dir << 1;
++	
++	for (ii=0; ii<num_xfrm; ii++)
++	{
++		if (fp_info->xfrm_handle[xfrm_ind+ii]  && 
++			fp_info->xfrm_handle[xfrm_ind+ii] != xfrm[ii]->handle)
++		{
++			*rekey = 1;
++		}
++		/* filling SA info and xfrm handle */
++		fp_info->xfrm_handle[xfrm_ind+ii] = xfrm[ii]->handle;
++		/*printk("%s(%d)ii %d, index %d ct %p,  dir %d, SPI %x, proto %d xfrmdir %d, sgid %x\n",
++		__func__,__LINE__,ii, xfrm_ind+ii, ct,  dir, xfrm[ii]->id.spi, xfrm[ii]->id.proto,
++		xfrm_dir, fp_info->xfrm_handle[xfrm_ind+ii]); */
++	}
++	return;
++}
++
++/* this function is used to get the inbound and outbound xfrm info corresponding to
++ * skb , if exist fill in conntrack structure */
++static unsigned int fp_netfilter_get_xfrm_info(struct sk_buff *skb)
++{
++	struct nf_conn *ct;
++	enum ip_conntrack_info ctinfo;
++	struct sec_path *sp ;
++	struct xfrm_state *x[2]={}, *tmp;
++	int num_xfrms = 0, i, dir, rekey = 0;
++	struct dst_entry *dst1 = skb_dst(skb);
++
++	/* get ct info */
++	ct = nf_ct_get(skb, &ctinfo);
++	if (!ct)
++	{
++		return NF_ACCEPT;
++	}
++	/* ctinfo direction [originator/replier] */
++	dir = CTINFO2DIR(ctinfo);
++
++	/* extract the inbound IPSec information if exist */
++	if ((sp = skb_sec_path(skb)))
++	{
++		for (i=sp->len-1; (i>=0) && (num_xfrms < MAX_SUPPORTED_XFRMS_PER_DIR); i--)
++		{
++			x[num_xfrms] = sp->xvec[i];
++	
++			/* printk("%s(%d) num_xfrm %d , xfrm %p , SPI %x dir XFRM_POLICY_FWD, handle %x\n",
++				__func__,__LINE__,num_xfrms, x[num_xfrms], 
++				x[num_xfrms]->id.spi, x[num_xfrms]->handle);*/
++			num_xfrms++;
++		}
++		if (num_xfrms)
++			nf_ct_set_xfrm_in_fp(skb, x, num_xfrms, XFRM_POLICY_FWD, &rekey);
++	}
++
++	/* extract the outbound IPSec information if exist */
++	if (dst1 && dst1->xfrm)
++	{
++		for (i=0; i<MAX_SUPPORTED_XFRMS_PER_DIR; i++)
++			x[i]  = 0;
++		num_xfrms = 0;
++	
++		while(((tmp = dst1->xfrm) != NULL) && (num_xfrms<MAX_SUPPORTED_XFRMS_PER_DIR))  {
++			/*printk("%s(%d) num_xfrm %d , xfrm %p , SPI %x, handle %x XFRM_POLICY_OUT\n",
++				__func__,__LINE__, num_xfrms, tmp, tmp->id.spi, tmp->handle);*/
++			x[num_xfrms] = tmp;			
++			dst1 = xfrm_dst_child(dst1);
++			num_xfrms++;
++			if (dst1 == NULL) {
++				printk("%s(%d) DST is null \n",__func__,__LINE__);
++				break;
++			}
++		}
++		if (num_xfrms)
++			nf_ct_set_xfrm_in_fp(skb, x, num_xfrms, XFRM_POLICY_OUT, &rekey);
++	}
++
++	/* if there is a change in ipsec info, send rekey conntrack event */
++	if (rekey)
++	{
++		/*printk("%s(%d) sending rekey event\n",__func__,__LINE__); */
++		nf_conntrack_event_cache(IPCT_PROTOINFO, ct);
++	}
++	return NF_ACCEPT;
++}
++#endif /* IPSEC_FLOW_CACHE */
++
++static unsigned int fp_netfilter_pre_routing(int family, const struct nf_hook_state *state, struct sk_buff *skb)
++{
++	struct nf_conn *ct;
++	u_int8_t protonum;
++	enum ip_conntrack_info ctinfo;
++	struct comcerto_fp_info *fp_info;
++	int dir;
++
++	ct = nf_ct_get(skb, &ctinfo);
++	if (!ct)
++		goto done;
++
++	protonum = nf_ct_protonum(ct);
++	if ((protonum != IPPROTO_TCP) && (protonum != IPPROTO_UDP) && (protonum != IPPROTO_IPIP) && (protonum != IPPROTO_IPV6) &&
++	(protonum != IPPROTO_GRE) && (protonum != IPPROTO_ESP) && (protonum != IPPROTO_AH))
++		goto done;
++
++	dir = CTINFO2DIR(ctinfo);
++
++	//  if (printk_ratelimit())
++	//      printk(KERN_INFO "ct: %lx, dir: %x, mark: %x, ifindex: %d iif: %d iif_index:%d\n", (unsigned long)ct, dir, skb->mark, skb->dev->ifindex, skb->skb_iif,skb->iif_index);
++
++	/* We could also check for changes and notify userspace (or print message) */
++	if (dir == IP_CT_DIR_ORIGINAL) {
++		fp_info = &ct->fp_info[IP_CT_DIR_ORIGINAL];
++	} else {
++		fp_info = &ct->fp_info[IP_CT_DIR_REPLY];
++	}
++
++	if (fp_info->mark && (fp_info->mark != skb->mark))
++		if (printk_ratelimit())
++			printk(KERN_INFO "ct: mark changed %x, %x\n", fp_info->mark, skb->mark);
++
++
++	if (fp_info->ifindex && (fp_info->ifindex != skb->dev->ifindex))
++		if (printk_ratelimit())
++			printk(KERN_DEBUG "ct: ifindex changed %d, %d\n", fp_info->ifindex, skb->dev->ifindex);
++
++	if (fp_info->iif && (fp_info->iif != skb->iif_index))
++		if (printk_ratelimit())
++			printk(KERN_DEBUG "ct: iif changed %d, %d\n", fp_info->iif, skb->iif_index);
++	/*      // commenting it out as a duplicate print. In most cases iif and underlying iif are the same.
++			if (fp_info->underlying_iif && (fp_info->underlying_iif != skb->underlying_iif))
++			if (printk_ratelimit())
++			printk(KERN_DEBUG "ct: underlying_iif changed %d, %d\n", fp_info->underlying_iif, skb->underlying_iif);
++	 */
++
++	fp_info->mark = skb->mark;
++	fp_info->ifindex = skb->dev->ifindex;
++	/* now skb_iif always tracks dev,so iif_index stores incoming interface */
++	fp_info->iif = skb->iif_index;
++	fp_info->underlying_iif = skb->underlying_iif;
++	/*omit priority bits in vlan tag*/
++	fp_info->underlying_vlan_id = skb->underlying_vlan_tci & VLAN_VID_MASK;
++
++done:
++	return NF_ACCEPT;
++}
++
++static unsigned int fp_netfilter_local_out(int family, const struct nf_hook_state *state, struct sk_buff *skb)
++{
++	struct nf_conn *ct;
++	u_int8_t protonum;
++	enum ip_conntrack_info ctinfo;
++	struct comcerto_fp_info *fp_info;
++	int dir,update_event=0;
++
++	ct = nf_ct_get(skb, &ctinfo);
++	if (!ct)
++		goto done;
++
++
++	protonum = nf_ct_protonum(ct);
++	if ((protonum != IPPROTO_IPIP) && (protonum != IPPROTO_IPV6) && (protonum != IPPROTO_GRE))
++			goto done;
++
++	dir = CTINFO2DIR(ctinfo);
++
++	/* We could also check for changes and notify userspace (or print message) */
++	if (dir == IP_CT_DIR_ORIGINAL) {
++		fp_info = &ct->fp_info[IP_CT_DIR_ORIGINAL];
++	} else {
++		fp_info = &ct->fp_info[IP_CT_DIR_REPLY];
++	}
++
++	if (fp_info->mark && (fp_info->mark != skb->mark))
++		if (printk_ratelimit())
++			printk(KERN_INFO "ct: mark changed %x, %x\n", fp_info->mark, skb->mark);
++
++	if ((fp_info->ifindex) && (skb->dev) &&(fp_info->ifindex != skb->dev->ifindex))
++		if (printk_ratelimit()) {
++			printk(KERN_DEBUG "ct: ifindex changed %d, %d\n", fp_info->ifindex, skb->dev->ifindex);
++			update_event=1;
++		}
++
++	fp_info->mark = skb->mark;
++	if (skb->dev)
++		fp_info->ifindex = skb->dev->ifindex;
++
++	if (update_event == 1) {
++		nf_conntrack_event_cache(IPCT_PROTOINFO, ct);
++	}
++
++	//printk(KERN_INFO "%s:(DIR-%d, CT-%x):%x:%s:%x\n",__func__,dir, (unsigned int)ct, fp_info->mark,  skb->dev->name, skb->skb_iif);
++	fp_info->iif = 0; /* To identify the connection as local connection */
++
++#ifndef IPSEC_FLOW_CACHE
++	/* fill xfrm info in conntrack structure */
++	return (fp_netfilter_get_xfrm_info(skb));
++#endif /* IPSEC_FLOW_CACHE */
++done:
++	return NF_ACCEPT;
++}
++
++
++#ifndef IPSEC_FLOW_CACHE
++/* this post routing hook is introduced to gather the xfrm information
++ * corresponding to ctinfo of skb and fill it in conntrack structure.
++ * This is required to take the xfrm info of ctinfo part of conntrack message
++ * to user space
++ */
++static unsigned int fp_ip_netfilter_post_routing(void *priv,
++						struct sk_buff *skb,
++						const struct nf_hook_state *state)
++{
++	return (fp_netfilter_get_xfrm_info(skb));
++}
++#endif /* IPSEC_FLOW_CACHE */
++
++static unsigned int fp_ipv4_netfilter_pre_routing(void *priv,
++		struct sk_buff *skb,
++		const struct nf_hook_state *state)
++{
++	return fp_netfilter_pre_routing(PF_INET, state, skb);
++}
++
++static unsigned int fp_ipv6_netfilter_pre_routing(void *priv,
++		struct sk_buff *skb,
++		const struct nf_hook_state *state)
++{
++	return fp_netfilter_pre_routing(PF_INET6, state, skb);
++}
++
++static unsigned int fp_ipv4_netfilter_local_out(void *priv,
++		struct sk_buff *skb,
++		const struct nf_hook_state *state)
++{
++	return fp_netfilter_local_out(PF_INET, state, skb);
++}
++
++static unsigned int fp_ipv6_netfilter_local_out(void *priv,
++		struct sk_buff *skb,
++		const struct nf_hook_state *state)
++{
++	return fp_netfilter_local_out(PF_INET6, state, skb);
++}
++
++
++static struct nf_hook_ops fp_netfilter_ops[] __read_mostly = {
++	{
++		.hook       = fp_ipv4_netfilter_pre_routing,
++		.pf     = NFPROTO_IPV4,
++		.hooknum    = NF_INET_PRE_ROUTING,
++		.priority   = NF_IP_PRI_LAST,
++	},
++	{
++		.hook       = fp_ipv6_netfilter_pre_routing,
++		.pf     = NFPROTO_IPV6,
++		.hooknum    = NF_INET_PRE_ROUTING,
++		.priority   = NF_IP_PRI_LAST,
++	},
++	/* For local_out packets, routing will be done
++	   1. before entering the LOCAL_OUT hook
++	   2. and at the completion of all mangle rules,
++	   if there are changes to the packet like mark etc
++
++	   So NF_IP_PRI_LAST priority is used here to receive
++	   the mark value of the packet, at the end of all changes.
++	 */
++	{
++		.hook           = fp_ipv4_netfilter_local_out,
++		.pf             = NFPROTO_IPV4,
++		.hooknum        = NF_INET_LOCAL_OUT,
++		.priority       = NF_IP_PRI_LAST - 1,
++	},
++	{
++		.hook           = fp_ipv6_netfilter_local_out,
++		.pf             = NFPROTO_IPV6,
++		.hooknum        = NF_INET_LOCAL_OUT,
++		.priority       = NF_IP_PRI_LAST - 1,
++	},
++
++#ifndef IPSEC_FLOW_CACHE
++	{
++		.hook			= fp_ip_netfilter_post_routing,
++		.pf 			= NFPROTO_IPV4,
++		.hooknum		= NF_INET_POST_ROUTING,
++		.priority		= NF_IP_PRI_LAST - 1, /* this priority should be less than INT_MAX */
++	},
++	{
++		.hook			= fp_ip_netfilter_post_routing,
++		.pf 			= NFPROTO_IPV6,
++		.hooknum		= NF_INET_POST_ROUTING,
++		.priority		= NF_IP_PRI_LAST - 1, /* this priority should be less than INT_MAX, */
++	},
++#endif
++};
++
++static int __init fp_netfilter_init(void)
++{
++	int rc;
++
++	rc = nf_register_net_hooks(&init_net, fp_netfilter_ops, ARRAY_SIZE(fp_netfilter_ops));
++	if (rc < 0) {
++		printk(KERN_ERR "fp_netfilter_ops: can't register hooks.\n");
++		goto err0;
++	}
++
++	return 0;
++
++err0:
++	return rc;
++}
++
++
++static void __exit fp_netfilter_exit(void)
++{
++	nf_unregister_net_hooks(&init_net, fp_netfilter_ops, ARRAY_SIZE(fp_netfilter_ops));
++}
++
++module_init(fp_netfilter_init);
++module_exit(fp_netfilter_exit);
+diff --git a/net/netfilter/xt_qosconnmark.c b/net/netfilter/xt_qosconnmark.c
+new file mode 100644
+index 000000000000..a47f1ad05168
+--- /dev/null
++++ b/net/netfilter/xt_qosconnmark.c
+@@ -0,0 +1,171 @@
++/* xt_connmark - Netfilter module to operate on connection marks
++ *
++ * Copyright (C) 2002,2004 MARA Systems AB <http://www.marasystems.com>
++ * by Henrik Nordstrom <hno@marasystems.com>
++ * Copyright © CC Computer Consultants GmbH, 2007 - 2008
++ * Jan Engelhardt <jengelh@medozas.de>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ */
++
++#include <linux/module.h>
++#include <linux/skbuff.h>
++#include <net/netfilter/nf_conntrack.h>
++#include <net/netfilter/nf_conntrack_ecache.h>
++#include <linux/netfilter/x_tables.h>
++#include <linux/netfilter/xt_qosconnmark.h>
++
++MODULE_AUTHOR("Henrik Nordstrom <hno@marasystems.com>");
++MODULE_DESCRIPTION("Xtables: QOS connection mark operations");
++MODULE_LICENSE("GPL");
++MODULE_ALIAS("ipt_QOSCONNMARK");
++MODULE_ALIAS("ip6t_QOSCONNMARK");
++MODULE_ALIAS("ipt_qosconnmark");
++MODULE_ALIAS("ip6t_qosconnmark");
++
++static unsigned int
++qosconnmark_tg(struct sk_buff *skb, const struct xt_action_param *par)
++{
++	const struct xt_qosconnmark_tginfo1 *info = par->targinfo;
++	enum ip_conntrack_info ctinfo;
++	struct nf_conn *ct;
++	u_int64_t newmark;
++
++	ct = nf_ct_get(skb, &ctinfo);
++	if (ct == NULL)
++		return XT_CONTINUE;
++
++	switch (info->mode) {
++		case XT_QOSCONNMARK_SET:
++			newmark = (ct->qosconnmark & ~info->ctmask) ^ info->mark;
++			if (ct->qosconnmark != newmark) {
++				ct->qosconnmark = newmark;
++				nf_conntrack_event_cache(IPCT_QOSCONNMARK, ct);
++			}
++			break;
++		case XT_QOSCONNMARK_SAVE_QOSMARK:
++			newmark = (ct->qosconnmark & ~info->ctmask) ^
++				(skb->qosmark & info->nfmask);
++			if (ct->qosconnmark != newmark) {
++				ct->qosconnmark = newmark;
++				nf_conntrack_event_cache(IPCT_QOSCONNMARK, ct);
++			}
++			break;
++		case XT_QOSCONNMARK_RESTORE_QOSMARK:
++			newmark = (skb->qosmark & ~info->nfmask) ^
++				(ct->qosconnmark & info->ctmask);
++			skb->qosmark = newmark;
++			break;
++	}
++
++	return XT_CONTINUE;
++}
++
++static int qosconnmark_tg_check(const struct xt_tgchk_param *par)
++{
++	int ret;
++
++	ret = nf_ct_netns_get(par->net, par->family);
++	if (ret < 0)
++		pr_info("cannot load conntrack support for proto=%u\n",
++			par->family);
++	return ret;
++}
++
++ 
++static void qosconnmark_tg_destroy(const struct xt_tgdtor_param *par)
++{
++	nf_ct_netns_put(par->net, par->family);
++}
++
++static bool
++qosconnmark_mt(const struct sk_buff *skb, struct xt_action_param *par)
++{
++	const struct xt_qosconnmark_mtinfo1 *info = par->matchinfo;
++	enum ip_conntrack_info ctinfo;
++	const struct nf_conn *ct;
++
++	ct = nf_ct_get(skb, &ctinfo);
++	if (ct == NULL)
++		return false;
++
++	return ((ct->qosconnmark & info->mask) == info->mark) ^ info->invert;
++}
++
++static int qosconnmark_mt_check(const struct xt_mtchk_param *par)
++{
++	int ret;
++
++	ret = nf_ct_netns_get(par->net, par->family);
++	if (ret < 0)
++		pr_info("cannot load conntrack support for proto=%u\n",
++			par->family);
++	return ret;
++}
++
++static void qosconnmark_mt_destroy(const struct xt_mtdtor_param *par)
++{
++	nf_ct_netns_put(par->net, par->family);
++}
++
++static struct xt_target qosconnmark_tg_reg __read_mostly = {
++	.name           = "QOSCONNMARK",
++	.revision       = 1,
++	.family         = NFPROTO_UNSPEC,
++	.checkentry     = qosconnmark_tg_check,
++	.target         = qosconnmark_tg,
++	.targetsize     = sizeof(struct xt_qosconnmark_tginfo1),
++	.destroy        = qosconnmark_tg_destroy,
++	.me             = THIS_MODULE,
++};
++
++static struct xt_match qosconnmark_mt_reg __read_mostly = {
++	.name           = "qosconnmark",
++	.revision       = 1,
++	.family         = NFPROTO_UNSPEC,
++	.checkentry     = qosconnmark_mt_check,
++	.match          = qosconnmark_mt,
++	.matchsize      = sizeof(struct xt_qosconnmark_mtinfo1),
++	.destroy        = qosconnmark_mt_destroy,
++	.me             = THIS_MODULE,
++};
++
++static int __init qosconnmark_mt_init(void)
++{
++	int ret;
++
++	ret = xt_register_target(&qosconnmark_tg_reg);
++	if (ret < 0)
++		return ret;
++	ret = xt_register_match(&qosconnmark_mt_reg);
++	if (ret < 0) {
++		xt_unregister_target(&qosconnmark_tg_reg);
++		return ret;
++	}
++	return 0;
++}
++
++static void __exit qosconnmark_mt_exit(void)
++{
++	xt_unregister_match(&qosconnmark_mt_reg);
++	xt_unregister_target(&qosconnmark_tg_reg);
++}
++
++module_init(qosconnmark_mt_init);
++module_exit(qosconnmark_mt_exit);
++
++             
++
++
+diff --git a/net/netfilter/xt_qosmark.c b/net/netfilter/xt_qosmark.c
+new file mode 100644
+index 000000000000..771edb1f812f
+--- /dev/null
++++ b/net/netfilter/xt_qosmark.c
+@@ -0,0 +1,85 @@
++/*
++ * xt_mark - Netfilter module to match NFMARK value
++ *
++ * (C) 1999-2001 Marc Boucher <marc@mbsi.ca>
++ * Copyright © CC Computer Consultants GmbH, 2007 - 2008
++ * Jan Engelhardt <jengelh@medozas.de>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ */
++
++#include <linux/module.h>
++#include <linux/skbuff.h>
++
++#include <linux/netfilter/xt_qosmark.h>
++#include <linux/netfilter/x_tables.h>
++
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("Marc Boucher <marc@mbsi.ca>");
++MODULE_DESCRIPTION("Xtables: packet qosmark operations");
++MODULE_ALIAS("ipt_qosmark");
++MODULE_ALIAS("ip6t_qosmark");
++MODULE_ALIAS("ipt_QOSMARK");
++MODULE_ALIAS("ip6t_QOSMARK");
++
++static unsigned int
++qosmark_tg(struct sk_buff *skb, const struct xt_action_param *par)
++{
++	const struct xt_qosmark_tginfo2 *info = par->targinfo;
++
++	skb->qosmark = (skb->qosmark & ~info->mask) ^ info->mark;
++	return XT_CONTINUE;
++}
++
++static bool
++qosmark_mt(const struct sk_buff *skb, struct xt_action_param *par)
++{
++	const struct xt_qosmark_mtinfo1 *info = par->matchinfo;
++
++	return ((skb->qosmark & info->mask) == info->mark) ^ info->invert;
++}
++static struct xt_target qosmark_tg_reg __read_mostly = {
++	.name           = "QOSMARK",
++	.revision       = 2,
++	.family         = NFPROTO_UNSPEC,
++	.target         = qosmark_tg,
++	.targetsize     = sizeof(struct xt_qosmark_tginfo2),
++	.me             = THIS_MODULE,
++};
++
++static struct xt_match qosmark_mt_reg __read_mostly = {
++	.name           = "qosmark",
++	.revision       = 1,
++	.family         = NFPROTO_UNSPEC,
++	.match          = qosmark_mt,
++	.matchsize      = sizeof(struct xt_qosmark_mtinfo1),
++	.me             = THIS_MODULE,
++};
++
++static int __init qosmark_mt_init(void)
++{
++	int ret;
++
++	ret = xt_register_target(&qosmark_tg_reg);
++	if (ret < 0)
++		return ret;
++	ret = xt_register_match(&qosmark_mt_reg);
++	if (ret < 0) {
++		xt_unregister_target(&qosmark_tg_reg);
++		return ret;
++	}
++	return 0;
++}
++
++static void __exit qosmark_mt_exit(void)
++{
++	xt_unregister_match(&qosmark_mt_reg);
++	xt_unregister_target(&qosmark_tg_reg);
++}
++
++module_init(qosmark_mt_init);
++module_exit(qosmark_mt_exit);
++
++

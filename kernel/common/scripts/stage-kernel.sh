@@ -187,60 +187,74 @@ fi
 
 # ── ASK per-patch path excludes ────────────────────────────────────────
 # General mechanism: some ASK patches are only PARTIALLY redundant — a
-# subset of their hunks duplicate content another patch (or the sdk-sources
-# overlay) already provides, while the rest of their hunks are still
-# genuinely needed. ASK_PATCH_PATH_EXCLUDES maps a patch basename to a
-# space-separated list of git-apply --exclude=<pattern> globs to drop from
-# JUST that patch, so it applies for everything else.
+# subset of their hunks duplicate content the sdk-sources overlay already
+# provides, while the rest of their hunks are still genuinely needed.
+# ASK_PATCH_PATH_EXCLUDES maps a patch basename to a space-separated list
+# of git-apply --exclude=<pattern> globs to drop from JUST that patch, so
+# it applies for everything else.
 #
-# 002-ask-kernel-hooks.patch / 004-export-dpaa-submit-symbol.patch predate
-# the current kernel/flavors/ask/sdk-sources/ overlay (both were curated
-# together in commit 6aa2efd, "populate sdk-sources from cvandesande, curate
-# patches, kernel builds", but from different upstream snapshots). The
-# sdk-sources overlay ALREADY carries these hooks baked directly into the
-# vendored source for the sdk_fman/sdk_dpaa/fsl_qbman/fmd-uapi tree (verified
-# 2026-07-02: e.g. fm_pcd.c already defines ReleaseFEsList/AllocFEObjs under
-# #if (DPAA_VERSION >= 11), dpaa_eth_sg.c already defines+exports
-# dpaa_submit_outb_pkt_to_SEC/dpaa_submit_inb_pkt_to_SEC). Applying these
-# hunks against the overlay fails outright (stale context) or would create
-# duplicate EXPORT_SYMBOL/definitions if forced. The hunks these two patches
-# carry OUTSIDE the overlay (net/ipv6, net/netfilter, net/xfrm, net/wireless,
-# net/key, include/linux/netdevice.h, include/linux/skbuff.h) are NOT part of
-# the overlay and are still needed — only overlay-owned paths are excluded.
-# The one confirmed genuine gap (fm_get_fw_rev(), missing overlay-wide) is
-# added directly to kernel/flavors/ask/sdk-sources/.../lnxwrp_fm.c +
-# lnxwrp_fsl_fman.h instead of relying on the patch.
+# 2026-07-02: replaced the old hand-rolled/reverse-engineered patch set
+# (002-ask-kernel-hooks.patch + 004/720-725) with a direct import of the
+# upstream we-are-mono/ASK "fix/security-hardening" branch's own properly
+# split kernel patch series (010-098) — the same branch/commit lineage the
+# cdx.ko/fci.ko/auto_bridge.ko/cmm/dpa_app sources are pulled from, so it's
+# guaranteed mutually consistent with them. This is the "minimal changes to
+# NXP reference implementation" path: use the reference project's own
+# patches verbatim instead of a locally-diverged approximation. Our old
+# 002 was itself originally a copy of upstream's OWN prior monolithic
+# 002-mono-gateway-ask-kernel_linux_6_12.patch (mt-6.12.y branch) — upstream
+# has since split it into 010 (fman/dpaa/qbman driver hooks), 020 (bridge),
+# 030 (ipv4/ipv6 forwarding), 040 (xfrm/ipsec offload), 050 (conntrack
+# offload), 060 (netfilter qosmark), 070 (ppp), 080 (wext-core), and
+# 090-098 (KASAN/locking/stability fixes discovered after our sdk-sources
+# overlay snapshot was taken — genuinely new content, not redundant).
+# 020/030/040/050/060/070/080/090/093/096/097 apply CLEANLY as-is (verified
+# against a from-scratch scratch-repo rebuild of our exact tree before
+# deploying — see repo memory for the full validation log). Only 010 and
+# 094 need excludes; 098 is fully redundant (see ASK_PATCH_SKIP_LIST_NATIVE
+# below) and 091/092/095 are genuinely new fixes that apply cleanly whole.
 #
-# 721-netfilter-add-ask-conntrack-metadata-abi.patch overlaps with
-# 002-ask-kernel-hooks.patch itself (both add the SAME "comcerto fast-path
-# conntrack metadata" ABI — struct comcerto_fp_info in nf_conntrack.h,
-# IPS_PERMANENT_BIT in nf_conntrack_common.h, CTA_LAYERSCAPE_FP_*/
-# ctattr_comcerto_fp in nfnetlink_conntrack.h, ctnetlink_dump_comcerto_fp in
-# nf_conntrack_netlink.c — 002's version is a superset, e.g. it also adds
-# IPS_DPI_ALLOWED_BIT and qosconnmark). Confirmed 2026-07-02 by reading
-# both patches' hunks side by side. 721's OTHER files (nf_conntrack_core.h
-# declarations, nf_conntrack_core.c xfrm-tracking functions,
-# nf_conntrack_proto.c postrouting hook) are NOT touched by 002 at all and
-# are still needed — only the 4 ABI-duplicate files are excluded.
+# 010-ask-fman-dpaa-ehash.patch is upstream's current version of the same
+# sdk_fman/sdk_dpaa/fsl_qbman driver-hook content our old 002 carried. The
+# sdk-sources overlay ALREADY carries the vast majority of these hooks
+# baked directly into the vendored source (verified: fm_pcd.c already
+# defines ReleaseFEsList/AllocFEObjs under #if (DPAA_VERSION >= 11),
+# dpaa_eth_sg.c already defines+exports dpaa_submit_outb_pkt_to_SEC/
+# dpaa_submit_inb_pkt_to_SEC, etc). Applying these hunks against the
+# overlay fails outright (stale context) or would create duplicate
+# EXPORT_SYMBOL/definitions if forced. 5 files have genuine unresolved
+# hunks even after excluding (dpaa_eth_common.h, dpaa_eth_sg.c, fm_cc.c,
+# fm_muram.c, stdlib_ext.h) involving deep structural reorganization —
+# deliberately left unpatched (same call made for the old 002; this
+# overlay state is the one already proven to boot + pass ask-check 41/41
+# on 2026-06-27, so it is trusted over blind hunk surgery). The one
+# confirmed genuine gap in the overlay, fm_get_fw_rev(), is added directly
+# to kernel/flavors/ask/sdk-sources/.../lnxwrp_fm.c + lnxwrp_fsl_fman.h
+# instead of relying on the patch (010 also declares it, redundantly, but
+# that hunk is under the excluded overlay scope so never attempted).
+#
+# 094-sdk-fman-dpaa-qbman-kasan-sanitize-off.patch: 12 of 14 Makefile hunks
+# apply cleanly (KASAN_SANITIZE := n for sdk_fman subdirs). Two excluded:
+# drivers/soc/fsl/qbman/Makefile doesn't exist in our tree at all (that
+# path is a newer/parallel QBMan driver location upstream's base kernel
+# has that ours doesn't — not applicable here); drivers/staging/fsl_qbman/
+# Makefile has a trivial context mismatch (our overlay's first line already
+# has extra -Wno-missing-prototypes -Wno-missing-declarations flags
+# appended) — the same one-line KASAN_SANITIZE := n addition is applied
+# directly to that Makefile instead.
 declare -A ASK_PATCH_PATH_EXCLUDES=(
-    ["002-ask-kernel-hooks.patch"]="drivers/net/ethernet/freescale/sdk_fman/* drivers/net/ethernet/freescale/sdk_dpaa/* drivers/staging/fsl_qbman/* include/uapi/linux/fmd/* include/linux/fsl_qman.h include/linux/fsl_bman.h include/linux/fsl_usdpaa.h include/linux/fsl_oh_port.h"
-    ["004-export-dpaa-submit-symbol.patch"]="drivers/net/ethernet/freescale/sdk_fman/* drivers/net/ethernet/freescale/sdk_dpaa/* drivers/staging/fsl_qbman/* include/uapi/linux/fmd/* include/linux/fsl_qman.h include/linux/fsl_bman.h include/linux/fsl_usdpaa.h include/linux/fsl_oh_port.h"
-    ["721-netfilter-add-ask-conntrack-metadata-abi.patch"]="include/net/netfilter/nf_conntrack.h include/uapi/linux/netfilter/nf_conntrack_common.h include/uapi/linux/netfilter/nfnetlink_conntrack.h net/netfilter/nf_conntrack_netlink.c"
+    ["010-ask-fman-dpaa-ehash.patch"]="drivers/net/ethernet/freescale/sdk_fman/* drivers/net/ethernet/freescale/sdk_dpaa/* drivers/staging/fsl_qbman/* include/uapi/linux/fmd/* include/linux/fsl_qman.h include/linux/fsl_bman.h include/linux/fsl_usdpaa.h include/linux/fsl_oh_port.h"
+    ["094-sdk-fman-dpaa-qbman-kasan-sanitize-off.patch"]="drivers/soc/fsl/qbman/Makefile drivers/staging/fsl_qbman/Makefile"
 )
 
-# ── ASK patches fully redundant against the native NXP vendor tree ────
-# Unlike 002/004 above (partially redundant — some hunks still needed),
-# these patches are ENTIRELY redundant: every file/hunk they touch is
-# already present natively in the nxp-qoriq/linux vendor tree fetched by
-# fetch-kernel-nxp.sh (verified 2026-07-02 directly against
-# raw.githubusercontent.com/nxp-qoriq/linux/lf-6.12.49-2.2.0/): the vendor
-# Kconfig/Makefiles already `source`/`obj-y` the sdk_fman/sdk_dpaa/
-# fsl_qbman directories that 720 tries to wire in, using the exact same
-# CONFIG_FSL_SDK_FMAN/CONFIG_FSL_SDK_DPAA_ETH/CONFIG_FSL_SDK_DPA symbols.
-# Skip outright rather than exclude-and-apply-partial, since these patches
-# have no non-overlay content left once the redundant part is removed.
+# ── ASK patches fully redundant against the sdk-sources overlay ───────
+# 098-sdk_dpaa-bp-alloc-slab-build-skb.patch: the overlay's dpaa_eth_sg.c
+# already calls slab_build_skb(ptr_buf) at the exact call site this patch
+# targets (verified 2026-07-02 by grep) — the fix it carries is already
+# present. Skip outright rather than exclude-and-apply-partial since this
+# patch touches only that one already-fixed line.
 ASK_PATCH_SKIP_LIST_NATIVE=(
-    "720-drivers-staging-and-freescale-add-sdk-dpaa-entry-points.patch"
+    "098-sdk_dpaa-bp-alloc-slab-build-skb.patch"
 )
 
 PATCHES=()
@@ -298,10 +312,20 @@ for p in "${PATCHES[@]}"; do
         continue
     fi
     # Exclude paths that duplicate another already-applied patch/overlay
-    # (see ASK_PATCH_PATH_EXCLUDES comment above).
+    # (see ASK_PATCH_PATH_EXCLUDES comment above). Uses `read -ra` (not an
+    # unquoted `for pat in $string` loop) because these patterns contain
+    # glob wildcards (e.g. sdk_fman/*) — an unquoted expansion triggers
+    # bash pathname expansion against the CURRENT shell cwd in addition to
+    # word-splitting, silently replacing the literal glob with whatever
+    # real files happen to match it there (harmless here since the repo
+    # root has no drivers/ tree to match, but a latent footgun — verified
+    # 2026-07-02 while validating the 010-098 patch import, where a
+    # cwd-inside-$KSRC test script DID trigger it and produced 71 bogus
+    # top-level-only excludes instead of 8 recursive ones).
     EXCLUDE_ARGS=()
     if [[ "$FLAVOR" == "ask" && -n "${ASK_PATCH_PATH_EXCLUDES[$base]+set}" ]]; then
-        for pat in ${ASK_PATCH_PATH_EXCLUDES[$base]}; do
+        IFS=' ' read -ra _excl_patterns <<< "${ASK_PATCH_PATH_EXCLUDES[$base]}"
+        for pat in "${_excl_patterns[@]}"; do
             EXCLUDE_ARGS+=("--exclude=$pat")
         done
     fi
