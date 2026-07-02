@@ -240,6 +240,21 @@ if [ -n "$ASK_KERNEL_DEB" ]; then
   else
     echo "WARN: Could not parse kernel version from $(basename "$ASK_KERNEL_DEB"); leaving defaults.toml alone"
   fi
+elif [ "${FLAVOR:-default}" == "ask" ]; then
+  # No ASK_KERNEL_TAG pre-built .deb staged (the normal case now — the
+  # kernel is built from source in bin/ci-build-packages.sh's FLAVOR=ask
+  # branch, and its .deb won't exist until AFTER this script runs). We
+  # still know the target version from common.sh's KERNEL_VERSION
+  # (versions.lock / sync-kernel-version.sh), so pin directly instead of
+  # leaving defaults.toml at the upstream mainline default.
+  if [ -n "${KERNEL_VERSION:-}" ]; then
+    echo "### Pinning defaults.toml kernel_version -> $KERNEL_VERSION (from-source build, KERNEL_VERSION)"
+    sed -i -E "s/^(\\s*kernel_version\\s*=\\s*)\"[^\"]+\"/\\1\"$KERNEL_VERSION\"/" \
+      vyos-build/data/defaults.toml
+    grep -E '^\s*kernel_version\s*=' vyos-build/data/defaults.toml || true
+  else
+    echo "WARN: FLAVOR=ask but KERNEL_VERSION is unset; leaving defaults.toml alone"
+  fi
 else
   echo "### No ASK kernel .deb staged in $PKG_CHROOT — leaving defaults.toml kernel_version untouched"
 fi

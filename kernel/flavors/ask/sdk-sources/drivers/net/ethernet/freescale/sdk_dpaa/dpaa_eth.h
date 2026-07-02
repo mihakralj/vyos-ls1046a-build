@@ -197,6 +197,14 @@ increased buffer size from 2048 to 2176, to accomodate them in contiguous fd */
 /* number of Tx queues to FMan */
 #ifdef CONFIG_FMAN_PFC
 #define DPAA_ETH_TX_QUEUES	(NR_CPUS * CONFIG_FMAN_PFC_COS_COUNT)
+#elif defined(CONFIG_CPE_FAST_PATH)
+/* ASK CDX module's MAX_SCHEDULER_QUEUES=16 (8 PQs + 8 WBFQs) requires
+ * DPAA_ETH_TX_QUEUES=16 to match the cdx struct layout it builds against.
+ * FMAN_PFC is intentionally NOT enabled (it changes dpa_select_queue's
+ * signature to 4 params, which the mainline net_device_ops.ndo_select_queue
+ * typedef the 002-ask-kernel-hooks patch adds doesn't support), so this
+ * branch is the only path that reaches 16 with NR_CPUS=4. */
+#define DPAA_ETH_TX_QUEUES	(NR_CPUS * 4)
 #else
 #define DPAA_ETH_TX_QUEUES	NR_CPUS
 #endif

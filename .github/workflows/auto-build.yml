@@ -78,12 +78,27 @@ jobs:
       # at runtime (set system offload ask / set vpp settings), not selected at
       # build time. See AGENTS.md single-image rules + plans/DUAL-DATAPLANE.md.
       FLAVOR: ''
-      # Use pre-built NXP SDK kernel from GitHub Release. The CI kernel tree
-      # lacks the full SDK FMan source overlay (ask-ref tree only), so
-      # CONFIG_FSL_SDK_FMAN=y cannot be built from mainline kernel source.
-      ASK_KERNEL_TAG: 'ask-kernel-6.12.49'
-      # nxp-sdk branch skips OOT module builds — prevent ci-pick-packages.sh
-      # from FATALing on missing ask-modules-*.deb / cdx-modules-*.deb.
+      # Build kernel from source (fetch-kernel-nxp.sh + stage-kernel.sh
+      # --flavor ask, which unconditionally overlays the 266-file SDK
+      # source drop from kernel/flavors/ask/sdk-sources/ before compiling —
+      # this DOES include drivers/net/ethernet/freescale/sdk_fman/, verified
+      # 2026-07-02 both on GitHub (nxp-qoriq/linux @ lf-6.12.49-2.2.0) and by
+      # tracing kernel/common/scripts/stage-kernel.sh directly). This is the
+      # same from-source pipeline that produced a working cdx.ko/fci.ko M2
+      # build in the 2026-06-21..06-28 session history (qdrant: "M2
+      # complete", "bridge offload breakthrough") — restoring it here so
+      # ci-build-ask-modules.sh gets a real Module.symvers that matches the
+      # actual compiled driver tree, instead of the frozen ask-kernel-6.12.49
+      # release's linux-headers-*.deb (which has Module.symvers but no
+      # drivers/ source at all, so cdx.ko/fci.ko/auto_bridge.ko could never
+      # be built against it). Costs ~15-20 min of kernel compile per run.
+      # Set ASK_KERNEL_TAG to a release tag to fall back to the pre-built
+      # kernel .deb shortcut instead (skips the compile, but M2 stays broken).
+      # ASK_KERNEL_TAG: 'ask-kernel-6.12.49'
+      # nxp-sdk branch skips the ASK2 (mainline ask.ko) OOT module build —
+      # prevent ci-pick-packages.sh from FATALing on missing ask-modules-*.deb.
+      # Does NOT affect ci-build-ask-modules.sh (cdx/fci/auto_bridge), which
+      # is the ASK 1.x native module builder and has its own gate.
       ASK_OOT_SKIPPED: '1'
     # No `container:` — build runs natively on the self-hosted ARM64 runner.
     # The runner host (Debian 12 bookworm aarch64) provides all build deps
@@ -225,8 +240,8 @@ jobs:
           MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
         run: bin/ci-setup-vyos1x.sh
 
-      - name: Download pre-built NXP kernel .debs (nxp-sdk only — use ask-kernel-6.12.49 release)
-        if: ${{ startsWith(github.ref_name, 'nxp-sdk') }}
+      - name: Download pre-built NXP kernel .debs (nxp-sdk only — ASK_KERNEL_TAG fallback mode)
+        if: ${{ startsWith(github.ref_name, 'nxp-sdk') && env.ASK_KERNEL_TAG != '' }}
         run: |
           echo "### Downloading pre-built kernel from GitHub Release ask-kernel-6.12.49"
           BASE="https://github.com/mihakralj/vyos-ls1046a-build/releases/download/ask-kernel-6.12.49"
