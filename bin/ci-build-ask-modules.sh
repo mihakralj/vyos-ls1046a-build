@@ -83,21 +83,28 @@ else
 fi
 [ -n "$KVER" ] || { echo "FATAL: could not resolve KVER"; exit 1; }
 
-# ── Clone we-are-mono/ASK ─────────────────────────────────────────────────
+# ── Clone we-are-mono/ASK, pinned to a fixed commit ───────────────────────
+# Pinned (not a floating branch) so upstream drift on mt-6.12.y can never
+# silently break the sed/python source patches below without a deliberate
+# bump here. Update ASK_COMMIT + kernel/flavors/ask/{sources,userspace}
+# READMEs together when intentionally moving to a newer upstream commit.
 ASK_REPO="https://github.com/we-are-mono/ASK.git"
 ASK_BRANCH="mt-6.12.y"
+ASK_COMMIT="a211ea865379362058c6656b9c448e4a7050e93c"
 ASK_CACHE_DIR="${RUNNER_TOOL_CACHE:-/tmp}/ask-clone-cache"
 ASK_DIR="$ASK_CACHE_DIR/ask-mt-6.12.y"
 
-if [ -d "$ASK_DIR/.git" ]; then
-    echo "### Updating ASK repo cache at $ASK_DIR"
-    git -C "$ASK_DIR" fetch --depth 1 origin "$ASK_BRANCH" 2>&1 | tail -3 || true
-    git -C "$ASK_DIR" checkout -f "$ASK_BRANCH" 2>&1 || true
-else
-    echo "### Cloning we-are-mono/ASK ($ASK_BRANCH)…"
+if [ ! -d "$ASK_DIR/.git" ]; then
+    echo "### Initializing ASK repo cache at $ASK_DIR"
     rm -rf "$ASK_DIR"
-    git clone --depth 1 --branch "$ASK_BRANCH" "$ASK_REPO" "$ASK_DIR" 2>&1 | tail -3
+    mkdir -p "$ASK_DIR"
+    git -C "$ASK_DIR" init -q
+    git -C "$ASK_DIR" remote add origin "$ASK_REPO"
 fi
+echo "### Resetting ASK repo cache at $ASK_DIR to pinned commit $ASK_COMMIT"
+git -C "$ASK_DIR" fetch --depth 1 origin "$ASK_COMMIT" 2>&1 | tail -3
+git -C "$ASK_DIR" checkout -f FETCH_HEAD 2>&1
+git -C "$ASK_DIR" clean -fdx 2>&1 | tail -3 || true
 
 # ── Patch: re-enable START_DPA_APP (was disabled pre-MURAM fix) ───────────
 # dpa_app must run to program the FMan PCD (KeyGen/CC/hashtables) before
