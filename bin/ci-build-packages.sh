@@ -231,13 +231,14 @@ for package in $packages; do
       echo "### Skipping ./build.py for linux-kernel (cache hit)"
     else
       echo "### Removing any stale linux source tree before kernel build (force re-download)"
-      rm -rf linux linux-[0-9]* linux-*.tar.xz linux-*.tar.sign linux-*.tar.gz linux-*.tar.asc 2>/dev/null || true
+      rm -rf linux-[0-9]* linux-*.tar.xz linux-*.tar.sign 2>/dev/null || true
       # VyOS kernel versions >= 6.18 are published as git tags on git.kernel.org,
       # NOT as tarballs on www.kernel.org/pub/linux/kernel/v6.x/. The build.py
       # download URL is hardcoded to the latter which returns 404. Pre-fetch
       # the correct tarball from git.kernel.org so build_kernel() skips the
       # download (it guards on os.path.exists('linux')).
-      KVER="$(grep -E '^\s*kernel_version\s*=' ../../data/defaults.toml | awk -F'"' '{print $2}')"
+      KVER="${KERNEL_VERSION:-}"
+      [ -z "$KVER" ] && KVER="$(grep -E '^\s*kernel_version\s*=' ../../data/defaults.toml | awk -F'"' '{print $2}' | head -1)"
       if [ -n "$KVER" ] && [ ! -f "linux-${KVER}.tar.gz" ]; then
         echo "### Pre-fetching kernel ${KVER} from git.kernel.org..."
         GIT_URL="https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/snapshot/linux-${KVER}.tar.gz"
