@@ -157,6 +157,7 @@ void fm_unbind(struct fm *fm);
 void *fm_get_handle(struct fm *fm);
 void *fm_get_rtc_handle(struct fm *fm);
 struct resource *fm_get_mem_region(struct fm *fm);
+int fm_get_fw_rev(struct fm *fm, u16 *package, u8 *major, u8 *minor);
 
 /**************************************************************************//**
  @Function	fm_port_bind
