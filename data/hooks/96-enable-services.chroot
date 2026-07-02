@@ -15,8 +15,16 @@ set -e
 echo "I: Enabling custom LS1046A services..."
 
 # multi-user.target services
-for svc in vyos-postinstall fman-fq-qdisc sfp-tx-enable-sdk \
-           ask-conntrack-fix cmm; do
+# NOTE (2026-07-02): dropped stale "ask-conntrack-fix" and "cmm" entries —
+# neither .service file has ever been deployed by any active build script
+# (ask-conntrack-fix.service only ever existed in plans/archive/*.md; the
+# real name is ask-ct-setup.service. cmm.service was deployed+patched here
+# until this date, but is now intentionally not shipped at all — see
+# ci-build-ask-userspace.sh's comments — superseded by ls1046a-ask.service,
+# which the ask-userspace .deb's own postinst already `systemctl enable`s).
+# Both entries were harmless no-ops (guarded by the -f check below) but
+# stale enough to be worth removing rather than leaving as dead weight.
+for svc in vyos-postinstall fman-fq-qdisc sfp-tx-enable-sdk; do
   if [ -f "/etc/systemd/system/${svc}.service" ]; then
     mkdir -p /etc/systemd/system/multi-user.target.wants
     ln -sf "../${svc}.service" "/etc/systemd/system/multi-user.target.wants/${svc}.service"
