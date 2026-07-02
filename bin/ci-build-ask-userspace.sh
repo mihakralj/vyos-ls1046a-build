@@ -547,14 +547,23 @@ Section: net
 Priority: optional
 Architecture: arm64
 Maintainer: VyOS LS1046A maintainers <noreply@invalid>
-Depends: linux-image-${KVER}, cdx-modules-${KVER}, fci-modules-${KVER}, libpcap0.8, libmnl0, libxml2, libstdc++6
+Depends: linux-image-${KVER}, libpcap0.8, libmnl0, libxml2, libstdc++6
+Recommends: cdx-modules-${KVER}, fci-modules-${KVER}
 Description: NXP ASK 1.x userspace — cmm, dpa_app, fmc for LS1046A FMan offload
  Connection Manager (cmm), DPAA application (dpa_app), and FMan Configuration
  tool (fmc) — the userspace components of the NXP ASK 1.x fast-path offload
  stack for the LS1046A FMan microcode.
  .
  Requires the CDX/FCI/Auto-Bridge kernel modules and the 210-series FMan
- microcode in SPI flash (mtd3).
+ microcode in SPI flash (mtd3) for actual hardware offload. cdx-modules/
+ fci-modules are a soft Recommends, not a hard Depends: the OOT module
+ builder (bin/ci-build-ask-modules.sh, M2) currently never runs in
+ ASK_KERNEL_TAG CI mode (see kernel/flavors/ask/sources/cdx/README.md),
+ so those .debs don't exist in this pipeline yet. A hard Depends here
+ makes this package — and therefore the whole ISO — uninstallable
+ whenever M2 hasn't produced them (observed CI run 28560100473). cmm/
+ dpa_app can still run in a degraded, hardware-offload-less mode without
+ cdx.ko/fci.ko loaded.
 EOF
 
 cat > "$STAGE/DEBIAN/postinst" <<'PEOF'
