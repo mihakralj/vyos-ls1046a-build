@@ -395,30 +395,31 @@ fi
 # ===========================================================================
 hdr "10) CMM / dpa_app userspace"
 
-# CMM daemon
+# CMM daemon — runs via ls1046a-ask.service (board/systemd/ls1046a-ask.service),
+# NOT via upstream's cmm.service, which ci-build-ask-userspace.sh intentionally
+# does not deploy (see that script's comments, 2026-07-02): ls1046a-ask.service
+# fully replaces it (correct After/Requires=ask-ct-setup.service instead of a
+# nonexistent ask-cdx.service, plus a libcli.so.1.10.8 boot-race guard).
 CMM_BIN="/usr/bin/cmm"
 if [ -x "$CMM_BIN" ]; then
     record_ok "CMM binary present ($CMM_BIN)"
-    if systemctl is-active cmm >/dev/null 2>&1; then
-        record_ok "CMM service running"
+    if systemctl is-active ls1046a-ask >/dev/null 2>&1; then
+        record_ok "CMM service running (ls1046a-ask.service)"
     else
-        cmm_status=$(systemctl show cmm -p ExecMainStatus 2>/dev/null | cut -d= -f2)
+        cmm_status=$(systemctl show ls1046a-ask -p ExecMainStatus 2>/dev/null | cut -d= -f2)
         if [ "$cmm_status" = "1" ]; then
             record_warn "CMM service exited status=1 (needs dpa_app + PCD configuration)"
         else
-            # CMM may not auto-start due to systemd ordering cycle
-            # (cmm.service After=ask-cdx.service doesn't exist on nxp-sdk).
-            # The binary is present and startable manually — this is a
-            # boot-time ordering bug, not a capability failure.
-            record_warn "CMM service not running — startable with: sudo systemctl start cmm"
-            note "  (boot ordering cycle — cmm.service After=ask-cdx.service unresolved)"
+            record_warn "CMM service not running — startable with: sudo systemctl start ls1046a-ask"
         fi
     fi
-    # Check Restart setting
-    if systemctl show cmm -p Restart 2>/dev/null | grep -q '=no$'; then
-        note "CMM Restart=no (no cycling)"
+    # Check Restart setting (ls1046a-ask.service uses Restart=on-failure,
+    # RestartSec=10 — auto-restart is expected/desired here, unlike
+    # upstream cmm.service's Restart=no)
+    if systemctl show ls1046a-ask -p Restart 2>/dev/null | grep -q '=on-failure$'; then
+        note "CMM Restart=on-failure (auto-recovers from transient failures)"
     else
-        note "CMM Restart enabled — may cycle on failure"
+        note "CMM Restart setting: $(systemctl show ls1046a-ask -p Restart 2>/dev/null | cut -d= -f2)"
     fi
 else
     record_fail "CMM binary not found at $CMM_BIN"
