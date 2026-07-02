@@ -459,7 +459,7 @@ mkdir -p "$STAGE/etc/systemd/system"
 mkdir -p "$STAGE/etc/modules-load.d"
 mkdir -p "$STAGE/etc"
 
-# Binaries — cmm goes to /usr/bin per cmm.service ExecStart
+# Binaries — cmm goes to /usr/bin per ls1046a-ask.service ExecStart
 mkdir -p "$STAGE/usr/bin"
 cp "$CMM_BUILT"       "$STAGE/usr/bin/cmm"
 cp "$DPA_BUILT"       "$STAGE/usr/bin/dpa_app"
@@ -480,16 +480,20 @@ fi
 
 # Runtime config files from ASK repo
 # NOTE: modules-load.d is handled by 97-ask-modules.chroot hook, not here.
-cp "$ASK_DIR/config/cmm.service"      "$STAGE/etc/systemd/system/cmm.service"
-# Fix cmm.service: remove WiFi/vwd pre/post hooks (we don't have WiFi offload),
-# and set Restart=no to prevent infinite cycling when cdx is in degraded mode.
-sed -i '/ExecStartPre=/d; /ExecStopPost=/d; s/Restart=on-failure/Restart=no/' "$STAGE/etc/systemd/system/cmm.service"
-echo "### Patched cmm.service: removed WiFi hooks, set Restart=no"
-
-# Add dependency on ask-cdx.service so /dev/cdx_ctrl exists before CMM starts
-sed -i '/^After=network.target/ s/$/ ask-cdx.service/' "$STAGE/etc/systemd/system/cmm.service"
-sed -i '/^Wants=systemd-modules-load/ a\Wants=ask-cdx.service' "$STAGE/etc/systemd/system/cmm.service"
-echo "### Patched cmm.service: added After/Wants ask-cdx.service"
+#
+# NOTE (2026-07-02): upstream's cmm.service is intentionally NOT deployed
+# here. board/systemd/ls1046a-ask.service (deployed below) fully replaces
+# it (After/Requires ask-ct-setup.service instead of the nonexistent
+# ask-cdx.service upstream's cmm.service was patched to reference, plus
+# the libcli.so.1.10.8 boot-race guard). Deploying BOTH left two systemd
+# units racing to run the same cmm binary — cmm.service always lost
+# (ConditionPathExists=/dev/cdx_ctrl evaluated before cdx.ko created the
+# device node, so it silently skipped every boot) but still showed up as
+# a permanent "CMM service not running" WARN in ask-check, which checked
+# the wrong (dead) unit name. postinst already carries a defensive
+# `systemctl mask cmm.service` for any stale copy left by an older build
+# on a persistent runner cache — kept as a belt-and-suspenders measure
+# even though this script no longer creates the file itself.
 
 # Conntrack fix: deploy ask-ct-setup.service (runs vyos-ask-ct-fix to remove
 # VyOS notrack rule and ensure nf_conntrack_netlink is loaded before CMM)
@@ -519,7 +523,7 @@ cat > "$STAGE/etc/systemd/system/dpa_app.service" <<'UNIT'
 [Unit]
 Description=DPA APP — FMan PCD configuration for ASK Fast Path
 After=systemd-modules-load.service network-pre.target
-Before=cmm.service
+Before=ls1046a-ask.service
 Wants=systemd-modules-load.service
 ConditionPathExists=/dev/cdx_ctrl
 ConditionPathExists=/etc/cdx_cfg.xml
