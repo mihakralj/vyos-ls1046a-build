@@ -185,8 +185,15 @@ if [[ "$FLAVOR" == "ask" ]]; then
     )
 fi
 
-# ── ASK overlay-owned path excludes (per-patch) ───────────────────────
-# 002-ask-kernel-hooks.patch and 004-export-dpaa-submit-symbol.patch predate
+# ── ASK per-patch path excludes ────────────────────────────────────────
+# General mechanism: some ASK patches are only PARTIALLY redundant — a
+# subset of their hunks duplicate content another patch (or the sdk-sources
+# overlay) already provides, while the rest of their hunks are still
+# genuinely needed. ASK_PATCH_PATH_EXCLUDES maps a patch basename to a
+# space-separated list of git-apply --exclude=<pattern> globs to drop from
+# JUST that patch, so it applies for everything else.
+#
+# 002-ask-kernel-hooks.patch / 004-export-dpaa-submit-symbol.patch predate
 # the current kernel/flavors/ask/sdk-sources/ overlay (both were curated
 # together in commit 6aa2efd, "populate sdk-sources from cvandesande, curate
 # patches, kernel builds", but from different upstream snapshots). The
@@ -203,19 +210,22 @@ fi
 # The one confirmed genuine gap (fm_get_fw_rev(), missing overlay-wide) is
 # added directly to kernel/flavors/ask/sdk-sources/.../lnxwrp_fm.c +
 # lnxwrp_fsl_fman.h instead of relying on the patch.
-ASK_OVERLAY_EXCLUDE_PATTERNS=(
-    "drivers/net/ethernet/freescale/sdk_fman/*"
-    "drivers/net/ethernet/freescale/sdk_dpaa/*"
-    "drivers/staging/fsl_qbman/*"
-    "include/uapi/linux/fmd/*"
-    "include/linux/fsl_qman.h"
-    "include/linux/fsl_bman.h"
-    "include/linux/fsl_usdpaa.h"
-    "include/linux/fsl_oh_port.h"
-)
-ASK_PATCHES_NEEDING_OVERLAY_EXCLUDE=(
-    "002-ask-kernel-hooks.patch"
-    "004-export-dpaa-submit-symbol.patch"
+#
+# 721-netfilter-add-ask-conntrack-metadata-abi.patch overlaps with
+# 002-ask-kernel-hooks.patch itself (both add the SAME "comcerto fast-path
+# conntrack metadata" ABI — struct comcerto_fp_info in nf_conntrack.h,
+# IPS_PERMANENT_BIT in nf_conntrack_common.h, CTA_LAYERSCAPE_FP_*/
+# ctattr_comcerto_fp in nfnetlink_conntrack.h, ctnetlink_dump_comcerto_fp in
+# nf_conntrack_netlink.c — 002's version is a superset, e.g. it also adds
+# IPS_DPI_ALLOWED_BIT and qosconnmark). Confirmed 2026-07-02 by reading
+# both patches' hunks side by side. 721's OTHER files (nf_conntrack_core.h
+# declarations, nf_conntrack_core.c xfrm-tracking functions,
+# nf_conntrack_proto.c postrouting hook) are NOT touched by 002 at all and
+# are still needed — only the 4 ABI-duplicate files are excluded.
+declare -A ASK_PATCH_PATH_EXCLUDES=(
+    ["002-ask-kernel-hooks.patch"]="drivers/net/ethernet/freescale/sdk_fman/* drivers/net/ethernet/freescale/sdk_dpaa/* drivers/staging/fsl_qbman/* include/uapi/linux/fmd/* include/linux/fsl_qman.h include/linux/fsl_bman.h include/linux/fsl_usdpaa.h include/linux/fsl_oh_port.h"
+    ["004-export-dpaa-submit-symbol.patch"]="drivers/net/ethernet/freescale/sdk_fman/* drivers/net/ethernet/freescale/sdk_dpaa/* drivers/staging/fsl_qbman/* include/uapi/linux/fmd/* include/linux/fsl_qman.h include/linux/fsl_bman.h include/linux/fsl_usdpaa.h include/linux/fsl_oh_port.h"
+    ["721-netfilter-add-ask-conntrack-metadata-abi.patch"]="include/net/netfilter/nf_conntrack.h include/uapi/linux/netfilter/nf_conntrack_common.h include/uapi/linux/netfilter/nfnetlink_conntrack.h net/netfilter/nf_conntrack_netlink.c"
 )
 
 # ── ASK patches fully redundant against the native NXP vendor tree ────
@@ -287,17 +297,17 @@ for p in "${PATCHES[@]}"; do
         echo "   ⊘ $name (skipped — already wired natively in the NXP vendor kernel tree)"
         continue
     fi
-    # Exclude overlay-owned paths for patches that predate the sdk-sources
-    # overlay refresh (see ASK_PATCHES_NEEDING_OVERLAY_EXCLUDE comment above).
+    # Exclude paths that duplicate another already-applied patch/overlay
+    # (see ASK_PATCH_PATH_EXCLUDES comment above).
     EXCLUDE_ARGS=()
-    if [[ "$FLAVOR" == "ask" ]] && printf '%s\n' "${ASK_PATCHES_NEEDING_OVERLAY_EXCLUDE[@]}" | grep -qFx "$base"; then
-        for pat in "${ASK_OVERLAY_EXCLUDE_PATTERNS[@]}"; do
+    if [[ "$FLAVOR" == "ask" && -n "${ASK_PATCH_PATH_EXCLUDES[$base]+set}" ]]; then
+        for pat in ${ASK_PATCH_PATH_EXCLUDES[$base]}; do
             EXCLUDE_ARGS+=("--exclude=$pat")
         done
     fi
     if git -C "$KSRC" apply --3way --whitespace=nowarn "${EXCLUDE_ARGS[@]}" "$p" 2>&1; then
         if (( ${#EXCLUDE_ARGS[@]} )); then
-            printf '   ✓ %s (overlay-owned hunks excluded — already in sdk-sources)\n' "$name"
+            printf '   ✓ %s (duplicate-content hunks excluded — already applied elsewhere)\n' "$name"
         else
             printf '   ✓ %s\n' "$name"
         fi
