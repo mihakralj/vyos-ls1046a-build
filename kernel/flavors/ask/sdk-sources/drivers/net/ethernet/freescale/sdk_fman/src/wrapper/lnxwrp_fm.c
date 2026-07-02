@@ -1319,6 +1319,26 @@ void *fm_port_get_handle(const struct fm_port *port)
 }
 EXPORT_SYMBOL(fm_port_get_handle);
 
+int fm_get_fw_rev(struct fm *fm, u16 *package, u8 *major, u8 *minor)
+{
+    t_LnxWrpFmDev               *p_LnxWrpFmDev = (t_LnxWrpFmDev*)fm;
+    t_FmCtrlCodeRevisionInfo    rv;
+    t_Error                     err;
+
+    if (!p_LnxWrpFmDev || !p_LnxWrpFmDev->active || !p_LnxWrpFmDev->h_Dev)
+        return -ENODEV;
+
+    err = FM_GetFmanCtrlCodeRevision((t_Handle)p_LnxWrpFmDev->h_Dev, &rv);
+    if (err != E_OK)
+        return -EIO;
+
+    if (package) *package = rv.packageRev;
+    if (major)   *major   = rv.majorRev;
+    if (minor)   *minor   = rv.minorRev;
+    return 0;
+}
+EXPORT_SYMBOL(fm_get_fw_rev);
+
 int fm_port_get_hwid(const struct fm_port *port)
 {
 	t_LnxWrpFmPortDev *p_LnxWrpFmPortDev = (t_LnxWrpFmPortDev*)port;

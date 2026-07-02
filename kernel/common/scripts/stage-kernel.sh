@@ -185,6 +185,39 @@ if [[ "$FLAVOR" == "ask" ]]; then
     )
 fi
 
+# ── ASK overlay-owned path excludes (per-patch) ───────────────────────
+# 002-ask-kernel-hooks.patch and 004-export-dpaa-submit-symbol.patch predate
+# the current kernel/flavors/ask/sdk-sources/ overlay (both were curated
+# together in commit 6aa2efd, "populate sdk-sources from cvandesande, curate
+# patches, kernel builds", but from different upstream snapshots). The
+# sdk-sources overlay ALREADY carries these hooks baked directly into the
+# vendored source for the sdk_fman/sdk_dpaa/fsl_qbman/fmd-uapi tree (verified
+# 2026-07-02: e.g. fm_pcd.c already defines ReleaseFEsList/AllocFEObjs under
+# #if (DPAA_VERSION >= 11), dpaa_eth_sg.c already defines+exports
+# dpaa_submit_outb_pkt_to_SEC/dpaa_submit_inb_pkt_to_SEC). Applying these
+# hunks against the overlay fails outright (stale context) or would create
+# duplicate EXPORT_SYMBOL/definitions if forced. The hunks these two patches
+# carry OUTSIDE the overlay (net/ipv6, net/netfilter, net/xfrm, net/wireless,
+# net/key, include/linux/netdevice.h, include/linux/skbuff.h) are NOT part of
+# the overlay and are still needed — only overlay-owned paths are excluded.
+# The one confirmed genuine gap (fm_get_fw_rev(), missing overlay-wide) is
+# added directly to kernel/flavors/ask/sdk-sources/.../lnxwrp_fm.c +
+# lnxwrp_fsl_fman.h instead of relying on the patch.
+ASK_OVERLAY_EXCLUDE_PATTERNS=(
+    "drivers/net/ethernet/freescale/sdk_fman/*"
+    "drivers/net/ethernet/freescale/sdk_dpaa/*"
+    "drivers/staging/fsl_qbman/*"
+    "include/uapi/linux/fmd/*"
+    "include/linux/fsl_qman.h"
+    "include/linux/fsl_bman.h"
+    "include/linux/fsl_usdpaa.h"
+    "include/linux/fsl_oh_port.h"
+)
+ASK_PATCHES_NEEDING_OVERLAY_EXCLUDE=(
+    "002-ask-kernel-hooks.patch"
+    "004-export-dpaa-submit-symbol.patch"
+)
+
 PATCHES=()
 for sub in vyos board fixes; do
     d="$COMMON_DIR/patches/$sub"
@@ -229,17 +262,30 @@ GITATTR
 info "applying ${#PATCHES[@]} patches to linux-$KVER…"
 for p in "${PATCHES[@]}"; do
     name="$(basename "$(dirname "$p")")/$(basename "$p")"
+    base="$(basename "$p")"
     # Check skip list for ASK flavor
-    if [[ "$FLAVOR" == "ask" ]] && printf '%s\n' "${ASK_PATCH_SKIP_LIST[@]}" | grep -qFx "$(basename "$p")"; then
+    if [[ "$FLAVOR" == "ask" ]] && printf '%s\n' "${ASK_PATCH_SKIP_LIST[@]}" | grep -qFx "$base"; then
         echo "   ⊘ $name (skipped — 6.18-only, not needed on NXP 6.12 tree)"
         continue
     fi
-    if git -C "$KSRC" apply --3way --whitespace=nowarn "$p" 2>&1; then
-        printf '   ✓ %s\n' "$name"
+    # Exclude overlay-owned paths for patches that predate the sdk-sources
+    # overlay refresh (see ASK_PATCHES_NEEDING_OVERLAY_EXCLUDE comment above).
+    EXCLUDE_ARGS=()
+    if [[ "$FLAVOR" == "ask" ]] && printf '%s\n' "${ASK_PATCHES_NEEDING_OVERLAY_EXCLUDE[@]}" | grep -qFx "$base"; then
+        for pat in "${ASK_OVERLAY_EXCLUDE_PATTERNS[@]}"; do
+            EXCLUDE_ARGS+=("--exclude=$pat")
+        done
+    fi
+    if git -C "$KSRC" apply --3way --whitespace=nowarn "${EXCLUDE_ARGS[@]}" "$p" 2>&1; then
+        if (( ${#EXCLUDE_ARGS[@]} )); then
+            printf '   ✓ %s (overlay-owned hunks excluded — already in sdk-sources)\n' "$name"
+        else
+            printf '   ✓ %s\n' "$name"
+        fi
         ( cd "$KSRC" && git add -A && git commit -qm "$name" --allow-empty )
     else
         # Fall back to --reject to surface failing hunks for the maintainer.
-        git -C "$KSRC" apply --reject --whitespace=nowarn "$p" 2>&1 || true
+        git -C "$KSRC" apply --reject --whitespace=nowarn "${EXCLUDE_ARGS[@]}" "$p" 2>&1 || true
         err "patch failed: $name (see *.rej under $KSRC)"
     fi
 done
