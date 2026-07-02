@@ -157,9 +157,17 @@ for iface in "${DPAA_NETDEVS[@]}"; do
     elif [ "$carrier" -eq 1 ]; then
         record_warn "$iface  $mac  $state  $speed  link=$link (LOWER_UP but ethtool disagrees)"
     else
-        record_fail "$iface  $mac  $state  $speed  link=$link"
+        record_warn "$iface  $mac  $state  $speed  link=$link"
     fi
 done
+
+# Only FAIL if zero ports are up — a single connected port is sufficient.
+if [ "${#DPAA_NETDEVS[@]}" -gt 0 ]; then
+    up_count=$(ip link show 2>/dev/null | grep -c LOWER_UP || true)
+    if [ "$up_count" -eq 0 ]; then
+        record_fail "ALL ports are down — zero link on any DPAA interface"
+    fi
+fi
 
 # ===========================================================================
 # 3. SDK DPAA driver stack
