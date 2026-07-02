@@ -264,7 +264,7 @@ old1 = '''	struct ctTable *ctEntry = NULL;
 	u_int32_t id, ctFlags = 0;
 	struct nf_conntrack *ctTemp = NULL;'''
 new1 = ('	struct ctTable *ctEntry = NULL;\n'
-	'	cmm_print(DEBUG_CRIT, "CT-TRACE: __cmmCtCatch type=%d(%s) enable=%d\\n",\n'
+	'	cmm_print(DEBUG_CRIT, "CT-TRACE: __cmmCtCatch type=%d(%s) enable=%d\\\\n",\n'
 	'		  type, conntrack_event_type(type), globalConf.enable);\n'
 	'	u_int32_t id, ctFlags = 0;\n'
 	'	struct nf_conntrack *ctTemp = NULL;')
@@ -279,7 +279,7 @@ old2 = '''			rc = nfct_catch(ctx->catch_handle);
 			if (rc < 0)'''
 new2 = '''			rc = nfct_catch(ctx->catch_handle);
 			if (rc > 0)
-				cmm_print(DEBUG_CRIT, "CT-TRACE: nfct_catch processed %d events\\n", rc);
+				cmm_print(DEBUG_CRIT, "CT-TRACE: nfct_catch processed %d events\\\\n", rc);
 			if (rc < 0)'''
 if old2 in s:
     s = s.replace(old2, new2)
@@ -290,7 +290,7 @@ else:
 # Diagnostic 3: CT-TRACE at fd_ct init — proves which fd the handle wraps
 old3 = '	fd_ct = nfct_fd(ctx->catch_handle);'
 new3 = '''	fd_ct = nfct_fd(ctx->catch_handle);
-	cmm_print(DEBUG_CRIT, "CT-TRACE: fd_fci=%d fd_ct=%d\\n", fd_fci, fd_ct);'''
+	cmm_print(DEBUG_CRIT, "CT-TRACE: fd_fci=%d fd_ct=%d\\\\n", fd_fci, fd_ct);'''
 if old3 in s:
     s = s.replace(old3, new3)
     print('Injected CT-TRACE fd_ct')
@@ -299,7 +299,7 @@ else:
 
 # Diagnostic 4: CT-TRACE in main thread after CMM init — proves output works
 old4 = '	if(cmmBridgeInit(ctx))'
-new4 = '''	cmm_print(DEBUG_CRIT, "CT-TRACE: cmmCtInit: about to call cmmBridgeInit\\n");
+new4 = '''	cmm_print(DEBUG_CRIT, "CT-TRACE: cmmCtInit: about to call cmmBridgeInit\\\\n");
 	if(cmmBridgeInit(ctx))'''
 if old4 in s:
     s = s.replace(old4, new4)
@@ -309,7 +309,7 @@ else:
 
 # Diagnostic 5: CT-TRACE at pthread_create — proves thread spawns
 old5 = '	if (pthread_create(&ctx->pthread, NULL, cmmCtThread, ctx) < 0)'
-new5 = '''	cmm_print(DEBUG_CRIT, "CT-TRACE: cmmCtInit: spawning cmmCtThread\\n");
+new5 = '''	cmm_print(DEBUG_CRIT, "CT-TRACE: cmmCtInit: spawning cmmCtThread\\\\n");
 	if (pthread_create(&ctx->pthread, NULL, cmmCtThread, ctx) < 0)'''
 if old5 in s:
     s = s.replace(old5, new5)
@@ -325,7 +325,7 @@ new6 = '''static void *cmmCtThread(void *data)
 {
 	struct cmm_ct *ctx = data;
 
-	cmm_print(DEBUG_CRIT, "CT-TRACE: cmmCtThread thread started, pid=%d\\n", getpid());'''
+	cmm_print(DEBUG_CRIT, "CT-TRACE: cmmCtThread thread started, pid=%d\\\\n", getpid());'''
 if old6 in s:
     s = s.replace(old6, new6)
     print('Injected CT-TRACE cmmCtThread started')
