@@ -1,0 +1,51 @@
+From bfba753e663ad8d15f1289d9fcea1b5d91f93f08 Mon Sep 17 00:00:00 2001
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Sat, 25 Apr 2026 17:55:41 +0200
+Subject: [PATCH] netlink: name NETLINK_KEY and NETLINK_L2FLOW in cb_mutex
+ string table
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The nlk_cb_mutex_key_strings[] array is declared sized [MAX_LINKS + 1]
+(65 entries with MAX_LINKS=64) but only initialized for indices 0..32,
+with a "nlk_cb_mutex-MAX_LINKS" sentinel placed at index 32 — left over
+from when MAX_LINKS actually was 32. Indices 33..64 are implicitly NULL.
+
+Since NETLINK_L2FLOW = 33 (added by the ASK patch bundle), creating a
+kernel netlink socket on that protocol hands lockdep a NULL name:
+
+    WARNING at lockdep.c:4925 DEBUG_LOCKS_WARN_ON(!name)
+    lockdep_init_map_type
+    __netlink_create
+    __netlink_kernel_create
+    abm_init [auto_bridge]
+
+Also, the sentinel at index 32 misnames NETLINK_KEY = 32 as "MAX_LINKS"
+on every boot. Swap that entry to the real name and add an L2FLOW entry
+at index 33.
+
+This only affects lockdep trace readability and the DEBUG_LOCKS_WARN_ON
+above — no functional change.
+
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+ net/netlink/af_netlink.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/net/netlink/af_netlink.c b/net/netlink/af_netlink.c
+index 8b060465a2be..5fa41e9e22da 100644
+--- a/net/netlink/af_netlink.c
++++ b/net/netlink/af_netlink.c
+@@ -127,6 +127,8 @@ static const char *const nlk_cb_mutex_key_strings[MAX_LINKS + 1] = {
+ 	"nlk_cb_mutex-29",
+ 	"nlk_cb_mutex-30",
+ 	"nlk_cb_mutex-31",
++	"nlk_cb_mutex-KEY",        /* NETLINK_KEY = 32 */
++	"nlk_cb_mutex-L2FLOW",     /* NETLINK_L2FLOW = 33 (ASK) */
+ 	"nlk_cb_mutex-MAX_LINKS"
+ };
+ 
+-- 
+2.47.3
+

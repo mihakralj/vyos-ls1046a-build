@@ -1,0 +1,111 @@
+From 1011c50340247b3752427cf870d68be0ac79bd74 Mon Sep 17 00:00:00 2001
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Thu, 23 Apr 2026 17:55:41 +0200
+Subject: [PATCH] ask: PPP/PPPoE fast-path hooks
+
+Extends drivers/net/ppp/ppp_generic.c and pppoe.c with hook points for
+PPPoE session offload (session create/destroy notifications, per-session
+data carrying offload state). UAPI surface via ppp-ioctl.h.
+
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+ drivers/net/ppp/ppp_generic.c  | 12 ++++++++++++
+ drivers/net/ppp/pppoe.c        | 23 +++++++++++++++++++++++
+ include/uapi/linux/ppp-ioctl.h |  1 +
+ 3 files changed, 36 insertions(+)
+
+
+diff --git a/drivers/net/ppp/ppp_generic.c b/drivers/net/ppp/ppp_generic.c
+index afc1566488b3..52ffb64c16de 100644
+--- a/drivers/net/ppp/ppp_generic.c
++++ b/drivers/net/ppp/ppp_generic.c
+@@ -54,6 +54,10 @@
+ #include <net/net_namespace.h>
+ #include <net/netns/generic.h>
+ 
++#if defined(CONFIG_CPE_FAST_PATH)
++#include <linux/jiffies.h>
++#endif
++
+ #define PPP_VERSION	"2.4.2"
+ 
+ /*
+@@ -3519,6 +3523,14 @@ ppp_connect_channel(struct channel *pch, int unit)
+ 
+  outl:
+ 	write_unlock_bh(&pch->upl);
++#if defined(CONFIG_CPE_FAST_PATH)
++	if ((ppp->dev) && (!ppp->closing)) {
++		rtnl_lock();
++		rtmsg_ifinfo(RTM_NEWLINK, ppp->dev, 0, GFP_KERNEL, 0, NULL);
++		rtnl_unlock();
++	}
++#endif
++
+  out:
+ 	mutex_unlock(&pn->all_ppp_mutex);
+ 	return ret;
+diff --git a/drivers/net/ppp/pppoe.c b/drivers/net/ppp/pppoe.c
+index 2ea4f4890d23..454468f3a8d6 100644
+--- a/drivers/net/ppp/pppoe.c
++++ b/drivers/net/ppp/pppoe.c
+@@ -948,6 +948,14 @@ static int __pppoe_xmit(struct sock *sk, struct sk_buff *skb)
+ 
+ 	skb->protocol = cpu_to_be16(ETH_P_PPP_SES);
+ 	skb->dev = dev;
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)  
++	if((skb->ipsec_offload == 1) && (!secpath_exists(skb)))
++	{
++		dev_hard_header(skb, dev, ETH_P_PPP_SES,
++				dev->dev_addr, po->pppoe_pa.remote, data_len);
++	}
++	else
++#endif
+ 
+ 	dev_hard_header(skb, dev, ETH_P_PPP_SES,
+ 			po->pppoe_pa.remote, NULL, data_len);
+@@ -1030,17 +1038,32 @@ static int pppoe_seq_show(struct seq_file *seq, void *v)
+ {
+ 	struct pppox_sock *po;
+ 	char *dev_name;
++#if defined(CONFIG_CPE_FAST_PATH)
++	char *ppp_name;
++#endif
+ 
+ 	if (v == SEQ_START_TOKEN) {
++#if defined(CONFIG_CPE_FAST_PATH)
++		seq_puts(seq, "Id   Address           Device     PPPDevice  Unit\n");
++#else
+ 		seq_puts(seq, "Id       Address              Device\n");
++#endif
+ 		goto out;
+ 	}
+ 
+ 	po = v;
+ 	dev_name = po->pppoe_pa.dev;
++#if defined(CONFIG_CPE_FAST_PATH)
++	ppp_name = ppp_dev_name(&po->chan);
++	if (!ppp_name)
++		goto out;
+ 
++	seq_printf(seq, "%04X %pM %-10s %-10s %d\n",
++	ntohs(po->pppoe_pa.sid), po->pppoe_pa.remote, dev_name, ppp_name, ppp_unit_number(&po->chan));
++#else
+ 	seq_printf(seq, "%08X %pM %8s\n",
+ 		po->pppoe_pa.sid, po->pppoe_pa.remote, dev_name);
++#endif
+ out:
+ 	return 0;
+ }
+diff --git a/include/uapi/linux/ppp-ioctl.h b/include/uapi/linux/ppp-ioctl.h
+index 1cc5ce0ae062..d1869d3f1bd4 100644
+--- a/include/uapi/linux/ppp-ioctl.h
++++ b/include/uapi/linux/ppp-ioctl.h
+@@ -117,6 +117,7 @@ struct pppol2tp_ioc_stats {
+ #define PPPIOCGL2TPSTATS _IOR('t', 54, struct pppol2tp_ioc_stats)
+ #define PPPIOCBRIDGECHAN _IOW('t', 53, int)	/* bridge one channel to another */
+ #define PPPIOCUNBRIDGECHAN _IO('t', 52)	/* unbridge channel */
++#define PPPIOCSFPPIDLE	_IOW('t', 51, struct ppp_idle)	/* Set the FPP stats */
+ 
+ #define SIOCGPPPSTATS   (SIOCDEVPRIVATE + 0)
+ #define SIOCGPPPVER     (SIOCDEVPRIVATE + 1)	/* NEVER change this!! */

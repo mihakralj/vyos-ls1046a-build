@@ -1,0 +1,337 @@
+From 8958217de0bd9d8706e4bdf87a93e009f7e9100f Mon Sep 17 00:00:00 2001
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Thu, 23 Apr 2026 17:55:40 +0200
+Subject: [PATCH] ask: IPv4/IPv6 forwarding-path hook points
+
+Wires Comcerto fast-path hooks into the kernel's IP forwarding code path:
+net/ipv4/{ip_output,ip_tunnel}.c, net/ipv6/{ip6_output,ip6_tunnel,sit,udp,
+output_core}.c and net/ipv6/netfilter/ip6t_NPT.c. Also the tunnel-related
+UAPI (if_arp.h ARPHRD_IPV6_IPV6_TUNNEL, if_tunnel.h, ip6_tunnel.h).
+
+Depends on the dpa_add_dummy_eth_hdr export and skb fields from 010.
+
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+ include/uapi/linux/if_arp.h   |  1 +
+ net/ipv4/ip_output.c          | 38 +++++++++++++++++++++++++++++++++++++-
+ net/ipv4/ip_tunnel.c          |  3 +++
+ net/ipv6/ip6_output.c         | 31 +++++++++++++++++++++++++++++--
+ net/ipv6/ip6_tunnel.c         | 12 ++++++++----
+ net/ipv6/netfilter/ip6t_NPT.c | 29 +++++++++++++++++++++++++++++
+ net/ipv6/output_core.c        | 19 +++++++++++++++++++
+ net/ipv6/sit.c                |  3 +++
+ 8 files changed, 129 insertions(+), 7 deletions(-)
+
+
+diff --git a/include/uapi/linux/if_arp.h b/include/uapi/linux/if_arp.h
+index 4783af9fe520..822e21ba5ebb 100644
+--- a/include/uapi/linux/if_arp.h
++++ b/include/uapi/linux/if_arp.h
+@@ -29,6 +29,7 @@
+ /* ARP protocol HARDWARE identifiers. */
+ #define ARPHRD_NETROM	0		/* from KA9Q: NET/ROM pseudo	*/
+ #define ARPHRD_ETHER 	1		/* Ethernet 10Mbps		*/
++#define ARPHRD_IPV6_IPV6_TUNNEL		ARPHRD_ETHER
+ #define	ARPHRD_EETHER	2		/* Experimental Ethernet	*/
+ #define	ARPHRD_AX25	3		/* AX.25 Level 2		*/
+ #define	ARPHRD_PRONET	4		/* PROnet token ring		*/
+diff --git a/net/ipv4/ip_output.c b/net/ipv4/ip_output.c
+index 49811c9281d4..87b2653bb951 100644
+--- a/net/ipv4/ip_output.c
++++ b/net/ipv4/ip_output.c
+@@ -102,6 +102,17 @@ int __ip_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
+ {
+ 	struct iphdr *iph = ip_hdr(skb);
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD)
++	/*
++	 * The tunnel header is not added in slow path and packet may be ipv6
++	 * (IPv6 traffic and IPv4 IPSec tunnel) in case IPv6 over IPv4 IPsec
++	 * tunnel. When it assumes as IPv4 and accessing IP header from SKB
++	 * causing invalid accesses it leading to kernel panic.
++	 * Avoiding ip header checks.
++	 */
++	if((skb->ipsec_offload) && (iph->version == 6))
++		goto sendout;
++#endif /* endif for CONFIG_INET_IPSEC_OFFLOAD */
+ 	IP_INC_STATS(net, IPSTATS_MIB_OUTREQUESTS);
+ 
+ 	iph_set_totlen(iph, skb->len);
+@@ -114,8 +125,19 @@ int __ip_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
+ 	if (unlikely(!skb))
+ 		return 0;
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD)
++sendout:
++#endif
+ 	skb->protocol = htons(ETH_P_IP);
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD)
++	if(skb->ipsec_offload)
++	{
++		dst_output(net, sk, skb);
++		return 0;
++	}
++	else
++#endif /* endif for CONFIG_INET_IPSEC_OFFLOAD */
+ 	return nf_hook(NFPROTO_IPV4, NF_INET_LOCAL_OUT,
+ 		       net, sk, skb, NULL, skb_dst(skb)->dev,
+ 		       dst_output);
+@@ -308,7 +330,11 @@ static int __ip_finish_output(struct net *net, struct sock *sk, struct sk_buff *
+ 	if (skb_is_gso(skb))
+ 		return ip_finish_output_gso(net, sk, skb, mtu);
+ 
+-	if (skb->len > mtu || IPCB(skb)->frag_max_size)
++	if (
++#if defined(CONFIG_INET_IPSEC_OFFLOAD)
++		(skb->ipsec_offload == 0) &&
++#endif
++		(skb->len > mtu || IPCB(skb)->frag_max_size))
+ 		return ip_fragment(net, sk, skb, mtu, ip_finish_output2);
+ 
+ 	return ip_finish_output2(net, sk, skb);
+@@ -431,6 +457,13 @@ int ip_output(struct net *net, struct sock *sk, struct sk_buff *skb)
+ 	skb->dev = dev;
+ 	skb->protocol = htons(ETH_P_IP);
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD)
++	/* Bypass invoking post routing hooks since the tunnel header and ESP
++	 * processing is not done in slow path for IPSec offloaded cases
++	 */
++	if (skb->ipsec_offload)
++		return ip_finish_output(net, sk, skb);
++#endif
+ 	return NF_HOOK_COND(NFPROTO_IPV4, NF_INET_POST_ROUTING,
+ 			    net, sk, skb, indev, dev,
+ 			    ip_finish_output,
+@@ -561,6 +594,9 @@ static void ip_copy_metadata(struct sk_buff *to, struct sk_buff *from)
+ 	skb_dst_copy(to, from);
+ 	to->dev = from->dev;
+ 	to->mark = from->mark;
++#if defined(CONFIG_CPE_FAST_PATH)
++	to->qosmark = from->qosmark;
++#endif
+ 
+ 	skb_copy_hash(to, from);
+ 
+diff --git a/net/ipv4/ip_tunnel.c b/net/ipv4/ip_tunnel.c
+index 09b73acf037a..1083fe44416d 100644
+--- a/net/ipv4/ip_tunnel.c
++++ b/net/ipv4/ip_tunnel.c
+@@ -438,6 +438,9 @@ int ip_tunnel_rcv(struct ip_tunnel *tunnel, struct sk_buff *skb,
+ 		skb->protocol = eth_type_trans(skb, tunnel->dev);
+ 		skb_postpull_rcsum(skb, eth_hdr(skb), ETH_HLEN);
+ 	} else {
++#ifdef CONFIG_CPE_FAST_PATH
++		skb->underlying_iif = skb->dev->ifindex;
++#endif
+ 		skb->dev = tunnel->dev;
+ 	}
+ 
+diff --git a/net/ipv6/ip6_output.c b/net/ipv6/ip6_output.c
+index f0e5431c2d46..87fe154cd7ea 100644
+--- a/net/ipv6/ip6_output.c
++++ b/net/ipv6/ip6_output.c
+@@ -83,6 +83,13 @@ static int ip6_finish_output2(struct net *net, struct sock *sk, struct sk_buff *
+ 
+ 	hdr = ipv6_hdr(skb);
+ 	daddr = &hdr->daddr;
++#if defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	/* For IPv4 over IPv6 IPsec tunnel cases, just send the packet out
++	 * since the packet is IPv4
++	 */
++	if((skb->ipsec_offload) && (hdr->version == 4))
++		goto sendout;
++#endif /* endif for CONFIG_INET6_IPSEC_OFFLOAD */
+ 	if (ipv6_addr_is_multicast(daddr)) {
+ 		if (!(dev->flags & IFF_LOOPBACK) && sk_mc_loop(sk) &&
+ 		    ((mroute6_is_socket(net, skb) &&
+@@ -114,6 +121,9 @@ static int ip6_finish_output2(struct net *net, struct sock *sk, struct sk_buff *
+ 		}
+ 	}
+ 
++#if defined(CONFIG_INET6_IPSEC_OFFLOAD)
++sendout:
++#endif /* endif for CONFIG_INET6_IPSEC_OFFLOAD */
+ 	if (lwtunnel_xmit_redirect(dst->lwtstate)) {
+ 		int res = lwtunnel_xmit(skb);
+ 
+@@ -208,8 +218,15 @@ static int __ip6_finish_output(struct net *net, struct sock *sk, struct sk_buff
+ 	if (skb_is_gso(skb))
+ 		return ip6_finish_output_gso(net, sk, skb, mtu);
+ 
+-	if (skb->len > mtu ||
+-	    (IP6CB(skb)->frag_max_size && skb->len > IP6CB(skb)->frag_max_size))
++	if (
++#if defined(CONFIG_INET6_IPSEC_OFFLOAD)
++		/* If ipsec offload is there, do not do fragment. So, when IPSec
++		 * offload is enabled it directly calls ip6_finish_output2
++		 */
++		(skb->ipsec_offload == 0) &&
++#endif
++		((skb->len > mtu) ||
++		(IP6CB(skb)->frag_max_size && skb->len > IP6CB(skb)->frag_max_size)))
+ 		return ip6_fragment(net, sk, skb, ip6_finish_output2);
+ 
+ 	return ip6_finish_output2(net, sk, skb);
+@@ -244,6 +261,13 @@ int ip6_output(struct net *net, struct sock *sk, struct sk_buff *skb)
+ 		return 0;
+ 	}
+ 
++#if defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	/* Bypass invoking post routing hooks since the tunnel header and ESP
++	 * processing is not done in slow path for IPSec offloaded cases
++	 */
++	if (skb->ipsec_offload)
++		return ip6_finish_output(net, sk, skb);
++#endif
+ 	return NF_HOOK_COND(NFPROTO_IPV6, NF_INET_POST_ROUTING,
+ 			    net, sk, skb, indev, dev,
+ 			    ip6_finish_output,
+@@ -686,6 +710,9 @@ static void ip6_copy_metadata(struct sk_buff *to, struct sk_buff *from)
+ 	skb_dst_set(to, dst_clone(skb_dst(from)));
+ 	to->dev = from->dev;
+ 	to->mark = from->mark;
++#if defined(CONFIG_CPE_FAST_PATH)
++	to->qosmark = from->qosmark;
++#endif
+ 
+ 	skb_copy_hash(to, from);
+ 
+diff --git a/net/ipv6/ip6_tunnel.c b/net/ipv6/ip6_tunnel.c
+index 5350c9bb2319..8273f86c6372 100644
+--- a/net/ipv6/ip6_tunnel.c
++++ b/net/ipv6/ip6_tunnel.c
+@@ -19,6 +19,7 @@
+ #include <linux/capability.h>
+ #include <linux/errno.h>
+ #include <linux/types.h>
++#include <linux/version.h>
+ #include <linux/sockios.h>
+ #include <linux/icmp.h>
+ #include <linux/if.h>
+@@ -1196,11 +1197,14 @@ int ip6_tnl_xmit(struct sk_buff *skb, struct net_device *dev, __u8 dsfield,
+ 		       IPV6_MIN_MTU : IPV4_MIN_MTU);
+ 
+ 	skb_dst_update_pmtu_no_confirm(skb, mtu);
++
+ 	if (skb->len - t->tun_hlen - eth_hlen > mtu && !skb_is_gso(skb)) {
+-		*pmtu = mtu;
+-		err = -EMSGSIZE;
+-		goto tx_err_dst_release;
+-	}
++			*pmtu = mtu;
++			err = -EMSGSIZE;
++			goto tx_err_dst_release;
++		}
++
++	hop_limit = t->parms.hop_limit;
+ 
+ 	if (t->err_count > 0) {
+ 		if (time_before(jiffies,
+diff --git a/net/ipv6/netfilter/ip6t_NPT.c b/net/ipv6/netfilter/ip6t_NPT.c
+index 787c74aa85e3..f523f471722a 100644
+--- a/net/ipv6/netfilter/ip6t_NPT.c
++++ b/net/ipv6/netfilter/ip6t_NPT.c
+@@ -11,6 +11,9 @@
+ #include <linux/netfilter_ipv6.h>
+ #include <linux/netfilter_ipv6/ip6t_NPT.h>
+ #include <linux/netfilter/x_tables.h>
++#ifdef CONFIG_CPE_FAST_PATH
++#include <net/netfilter/nf_conntrack.h>
++#endif
+ 
+ static int ip6t_npt_checkentry(const struct xt_tgchk_param *par)
+ {
+@@ -114,6 +117,19 @@ ip6t_snpt_tg(struct sk_buff *skb, const struct xt_action_param *par)
+ 			ip6t_npt_map_pfx(npt, &bounced_hdr->daddr);
+ 	}
+ 
++#ifdef CONFIG_CPE_FAST_PATH
++	{
++		struct nf_conn *ct;
++		enum ip_conntrack_info ctinfo;
++		rcu_read_lock();
++		ct = nf_ct_get(skb, &ctinfo);
++		if (ct && ((ctinfo == IP_CT_NEW) || (ctinfo == IP_CT_RELATED))) {
++			memcpy(&ct->tuplehash[IP_CT_DIR_REPLY].tuple.dst.u3.in6,
++			       &ipv6_hdr(skb)->saddr, sizeof(struct in6_addr));
++		}
++		rcu_read_unlock();
++	}
++#endif
+ 	return XT_CONTINUE;
+ }
+ 
+@@ -139,6 +155,19 @@ ip6t_dnpt_tg(struct sk_buff *skb, const struct xt_action_param *par)
+ 			ip6t_npt_map_pfx(npt, &bounced_hdr->saddr);
+ 	}
+ 
++#ifdef CONFIG_CPE_FAST_PATH
++	{
++		struct nf_conn *ct;
++		enum ip_conntrack_info ctinfo;
++		rcu_read_lock();
++		ct = nf_ct_get(skb, &ctinfo);
++		if (ct && ((ctinfo == IP_CT_NEW) || (ctinfo == IP_CT_RELATED))) {
++			memcpy(&ct->tuplehash[IP_CT_DIR_REPLY].tuple.src.u3.in6,
++			       &ipv6_hdr(skb)->daddr, sizeof(struct in6_addr));
++		}
++		rcu_read_unlock();
++	}
++#endif
+ 	return XT_CONTINUE;
+ }
+ 
+diff --git a/net/ipv6/output_core.c b/net/ipv6/output_core.c
+index 806d4b5dd1e6..f27467e8e51d 100644
+--- a/net/ipv6/output_core.c
++++ b/net/ipv6/output_core.c
+@@ -128,7 +128,18 @@ int __ip6_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
+ 	len = skb->len - sizeof(struct ipv6hdr);
+ 	if (len > IPV6_MAXPLEN)
+ 		len = 0;
++
++#if defined(CONFIG_INET6_IPSEC_OFFLOAD)
++/* Since tunnel header is not added in slow path and route cache entry lookup is changed to perform
++   lookup on tunnel header, for Ipv4 over Ipv6 IPsec tunnel cases,dst_output will be ip6 output 
++   but packet will be IPv4 type. So,this check is introduced to update ipv6 pay_load for the following cases
++   1.IPv6 over Ipv6 IPsec tunnel.
++   2.IPv4 over Ipv6 Ipsec tunnel when software encryption come into play(i.e for packets > 1782 bytes) */
++        if((ipv6_hdr(skb)->version) == 6)
++                ipv6_hdr(skb)->payload_len = htons(len);
++#else
+ 	ipv6_hdr(skb)->payload_len = htons(len);
++#endif
+ 	IP6CB(skb)->nhoff = offsetof(struct ipv6hdr, nexthdr);
+ 
+ 	/* if egress device is enslaved to an L3 master device pass the
+@@ -140,6 +151,14 @@ int __ip6_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
+ 
+ 	skb->protocol = htons(ETH_P_IPV6);
+ 
++#if defined(CONFIG_INET6_IPSEC_OFFLOAD)
++	if(skb->ipsec_offload)
++	{
++		dst_output(net, sk, skb);
++		return 0;
++	}
++	else
++#endif
+ 	return nf_hook(NFPROTO_IPV6, NF_INET_LOCAL_OUT,
+ 		       net, sk, skb, NULL, skb_dst(skb)->dev,
+ 		       dst_output);
+diff --git a/net/ipv6/sit.c b/net/ipv6/sit.c
+index 3c15a0ae228e..338f3d6674c3 100644
+--- a/net/ipv6/sit.c
++++ b/net/ipv6/sit.c
+@@ -694,6 +694,9 @@ static int ipip6_rcv(struct sk_buff *skb)
+ 		skb->mac_header = skb->network_header;
+ 		skb_reset_network_header(skb);
+ 		IPCB(skb)->flags = 0;
++#ifdef CONFIG_CPE_FAST_PATH
++		skb->underlying_iif = skb->dev->ifindex;
++#endif
+ 		skb->dev = tunnel->dev;
+ 
+ 		if (packet_is_spoofed(skb, iph, tunnel)) {
