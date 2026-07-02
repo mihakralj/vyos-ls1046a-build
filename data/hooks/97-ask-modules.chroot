@@ -1,5 +1,9 @@
 #!/bin/sh
-# 97-ask-modules.chroot — ASK offload: all artifacts installed via
-# ask-offload.deb in packages.chroot.  This hook is a no-op kept for
+# 97-ask-modules.chroot — ASK offload: all artifacts installed via the
+# from-source ask-userspace/cdx-modules/fci-modules/auto-bridge-modules
+# .debs (bin/ci-build-ask-userspace.sh + bin/ci-build-ask-modules.sh),
+# staged into packages.chroot by ci-pick-packages.sh. (Previously named
+# after release/ask-offload.deb, a pre-built snapshot retired 2026-07-02
+# — see bin/ci-setup-vyos-build.sh.) This hook is a no-op kept for
 # procedural compatibility.
-echo "I: 97-ask-modules.chroot: all ASK artifacts installed by ask-offload.deb"
+echo "I: 97-ask-modules.chroot: all ASK artifacts installed via from-source ask-userspace/ask-modules .debs"
