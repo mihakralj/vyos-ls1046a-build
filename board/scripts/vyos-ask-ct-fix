@@ -71,9 +71,12 @@ for chain in PREROUTING OUTPUT; do
     fi
 done
 
-# ── Trigger conntrack via masquerade NAT ──────────────────────────────
-nft add rule ip nat VYOS_PRE_SNAT_HOOK oif eth0 masquerade 2>/dev/null || true
-echo "ASK: added masquerade NAT on eth0"
+# ── Conntrack event pipeline: note ─────────────────────────────────────
+# No NAT/masquerade is required for conntrack events. The pipeline works
+# when (a) nf_conntrack_netlink is loaded, (b) VyOS notrack is removed,
+# (c) CMM subscribes to ctnetlink groups, and (d) globalConf.enable=1.
+# Adding masquerade on eth0 as a "conntrack trigger" is a side-effect
+# with security implications — remove it and document why it was wrong.
 
 # ── Enable conntrack accounting ───────────────────────────────────────
 sysctl -w net.netfilter.nf_conntrack_acct=1 2>/dev/null || true
