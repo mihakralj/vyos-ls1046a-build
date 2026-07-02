@@ -132,7 +132,7 @@ setup_uboot_env_once() {
 
     # Verify the MTD device exists (requires CONFIG_SPI_FSL_QSPI=y in kernel)
     local mtd_dev
-    mtd_dev=$(awk '/^[^#]/ {print $1; exit}' "$FW_ENV_CONFIG")
+    mtd_dev=$(awk 'NF && !/^[[:space:]]*#/ {print $1; exit}' "$FW_ENV_CONFIG")
     if [ -n "$mtd_dev" ] && [ ! -e "$mtd_dev" ]; then
         echo "WARNING: ${mtd_dev} does not exist — QSPI flash not accessible."
         echo "  Verify CONFIG_SPI_FSL_QSPI=y in kernel config."
