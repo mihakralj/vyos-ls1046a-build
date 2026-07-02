@@ -1,0 +1,61 @@
+From 0561f485d1b8069e974ed937954941f19357eb93 Mon Sep 17 00:00:00 2001
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Thu, 23 Apr 2026 17:55:41 +0200
+Subject: [PATCH] wireless: restore ndo_do_ioctl dispatch in wext-core
+
+Restores the wext_handle_ioctl path's call to ndo_do_ioctl on drivers
+that haven't migrated to the newer cfg80211 path. Unrelated to the ASK
+offload stack; carried here because the ASK tree's out-of-tree wifi
+driver (ath10k vendor fork) still uses the old hook. Downstream
+integrators using a different wifi stack can drop this patch.
+
+Also enables WEXT_SPY / WEXT_PRIV by default in net/wireless/Kconfig so
+the out-of-tree driver's iwstats interface works without manual Kconfig
+surgery.
+
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+ net/wireless/Kconfig     | 6 +++---
+ net/wireless/wext-core.c | 3 +++
+ 2 files changed, 6 insertions(+), 3 deletions(-)
+
+
+diff --git a/net/wireless/Kconfig b/net/wireless/Kconfig
+index 10345388ad13..722332d6dcc9 100644
+--- a/net/wireless/Kconfig
++++ b/net/wireless/Kconfig
+@@ -1,6 +1,6 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ config WIRELESS_EXT
+-	bool
++	def_bool y
+ 
+ config WEXT_CORE
+ 	def_bool y
+@@ -12,10 +12,10 @@ config WEXT_PROC
+ 	depends on WEXT_CORE
+ 
+ config WEXT_SPY
+-	bool
++	def_bool y
+ 
+ config WEXT_PRIV
+-	bool
++	def_bool y
+ 
+ config CFG80211
+ 	tristate "cfg80211 - wireless configuration API"
+diff --git a/net/wireless/wext-core.c b/net/wireless/wext-core.c
+index 838ad6541a17..862c47191b46 100644
+--- a/net/wireless/wext-core.c
++++ b/net/wireless/wext-core.c
+@@ -984,6 +984,9 @@ static int wireless_process_ioctl(struct net *net, struct iwreq *iwr,
+ 		else if (private)
+ 			return private(dev, iwr, cmd, info, handler);
+ 	}
++	/* Old driver API : call driver ioctl handler */
++	if (dev->netdev_ops->ndo_do_ioctl)
++		return dev->netdev_ops->ndo_do_ioctl(dev, (struct ifreq *)iwr, cmd);
+ 	return -EOPNOTSUPP;
+ }
+ 

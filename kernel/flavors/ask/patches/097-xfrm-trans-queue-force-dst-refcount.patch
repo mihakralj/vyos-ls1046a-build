@@ -1,0 +1,80 @@
+From 0202d2f4f5cdee271dde67e4be46901f2eb5dc56 Mon Sep 17 00:00:00 2001
+From: Tomaz Zaman <tomaz@mono.si>
+Date: Wed, 29 Apr 2026 19:19:06 +0200
+Subject: [PATCH] xfrm: force dst refcount before transport-mode async reinject
+
+The inbound transport-mode async-decap path defers post-decryption
+processing to a workqueue via xfrm_trans_queue. The work item runs
+under local_bh_disable() but without an explicit rcu_read_lock, so
+under CONFIG_PROVE_LOCKING the downstream skb_dst_force() called from
+__xfrm_route_forward trips:
+
+  WARNING: include/net/dst.h:317 skb_dst_force.isra.0
+  Workqueue: events xfrm_trans_reinject
+   skb_dst_force.isra.0+0x38/0x84
+   __xfrm_route_forward+0x9c/0x144
+   ip_forward+0x410/0x7c0
+   xfrm4_rcv_encap_finish2+0x30/0x40
+   xfrm_trans_reinject+0xec/0x134
+
+The skb arrives with a noref dst when nf_nat_ipv4_pre_routing
+(net/netfilter/nf_nat_proto.c:656) drops the original refcounted dst
+on daddr rewrite, and xfrm4_rcv_encap_finish then calls
+ip_route_input_noref to re-resolve. The noref dst then crosses the
+workqueue boundary.
+
+Convert the dst to refcounted at xfrm_trans_queue_net, the choke
+point for both IPv4 and IPv6 transport-mode reinject. All current
+callers are inside xfrm_input's outer rcu_read_lock so this is safe.
+Per-packet WARN cost is multi-millisecond from dump_stack to the UART
+console; under TCP load the retransmit cascade collapses throughput
+to zero. Same shape as 3bc07321ccc2 for the analogous crypto-async
+boundary one layer up.
+
+Reproducer: LAN host pings via DUT through a transport-mode IPsec
+tunnel with MASQUERADE/conntrack on the WAN side; reply path triggers
+NAT daddr rewrite + decrypt-then-forward.
+
+Signed-off-by: Tomaz Zaman <tomaz@mono.si>
+---
+ net/xfrm/xfrm_input.c | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/net/xfrm/xfrm_input.c b/net/xfrm/xfrm_input.c
+index b91fd2911cf3..f6f1c4ef2584 100644
+--- a/net/xfrm/xfrm_input.c
++++ b/net/xfrm/xfrm_input.c
+@@ -800,6 +800,30 @@ int xfrm_trans_queue_net(struct net *net, struct sk_buff *skb,
+ 	if (skb_queue_len(&trans->queue) >= READ_ONCE(net_hotdata.max_backlog))
+ 		return -ENOBUFS;
+ 
++	/* On the inbound transport-mode async-decap path, the skb may
++	 * arrive here with a noref dst (e.g. when nf_nat_ipv4_pre_routing
++	 * dropped the original after a daddr rewrite and a subsequent
++	 * ip_route_input_noref re-resolved it). The work item later runs
++	 * in workqueue context with only local_bh_disable(), where the
++	 * rcu_read_lock_held() check inside skb_dst_force() returns false
++	 * under PROVE_LOCKING; downstream skb_dst_force in
++	 * __xfrm_route_forward then trips its WARN.
++	 *
++	 * Convert any noref dst to refcounted now. Inbound callers
++	 * (xfrm4_rcv_encap_finish, xfrm6_transport_finish2) are inside
++	 * xfrm_input's outer rcu_read_lock so this is safe even when the
++	 * dst is noref. Outbound callers (esp_output_tail_tcp v4/v6) reach
++	 * here with a dst already refcounted by xfrm_output_one, so the
++	 * skb_dst_is_noref(skb) branch inside skb_dst_force() short-circuits
++	 * without invoking dst_hold_safe and the rcu requirement does not
++	 * apply. Same shape as commit 3bc07321ccc2 ("xfrm: Force a dst
++	 * refcount before entering the xfrm type handlers") for the
++	 * analogous crypto-async boundary one layer up.
++	 */
++	skb_dst_force(skb);
++	if (unlikely(!skb_dst(skb)))
++		return -EHOSTUNREACH;
++
+ 	BUILD_BUG_ON(sizeof(struct xfrm_trans_cb) > sizeof(skb->cb));
+ 
+ 	XFRM_TRANS_SKB_CB(skb)->finish = finish;
+-- 
+2.47.3
+
