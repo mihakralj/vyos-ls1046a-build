@@ -63,6 +63,11 @@ commit_id = "rolling"
 scm_url = "https://github.com/vyos/vyos-1x.git"
 pre_build_hook = '''
   set -ex
+  # The self-hosted Cobalt 100 runner can accumulate a stale /tmp/xml_cache.json
+  # directory from a prior VyOS build.  The vyos-1x interface_definitions target
+  # (Makefile:32) writes to that path as a FILE; if a directory already exists
+  # there the write fails with "Is a directory" (CI run 28556552309, 2026-07-02).
+  rm -rf /tmp/xml_cache.json
   cp ../ls1046a-patches/reftree.cache data/reftree.cache
   sed -i 's/all: clean copyright/all: clean/' Makefile
   # Remove packages not available for ARM64 from dependencies, plus sub-packages
