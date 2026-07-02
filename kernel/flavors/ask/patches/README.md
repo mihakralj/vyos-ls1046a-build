@@ -62,6 +62,27 @@ in `stage-kernel.sh` (see the comments there for the full rationale):
   hunks (mainline `net/Kconfig`, `net/core/*`, `include/linux/
   netdevice.h`/`skbuff.h`, `drivers/net/usb/usbnet.c`, uapi headers) are
   NOT excluded and apply cleanly.
+  - **Known gap (found 2026-07-02 via `cdx.ko` modpost failure,
+    `ERROR: modpost: "dpa_add_dummy_eth_hdr" ... undefined!`)**: patch
+    010 adds a genuinely NEW function, `dpa_add_dummy_eth_hdr()`
+    (`EXPORT_SYMBOL`'d), to `drivers/net/ethernet/freescale/sdk_dpaa/
+    dpaa_eth_sg.c` — not present anywhere in the pre-010 overlay (unlike
+    most of what's excluded there, which duplicates existing content).
+    Its declaration lives in `include/linux/netdevice.h` (NOT excluded,
+    applies cleanly), so the external `cdx.ko` OOT module (built by
+    `bin/ci-build-ask-modules.sh` from a separate `we-are-mono/ASK`
+    clone, branch `mt-6.12.y`) expects it to be exported from vmlinux,
+    but the DEFINITION was silently dropped by this file-level exclude.
+    Fixed by manually adding just this one function (verbatim from the
+    patch) directly to the overlay's `dpaa_eth_sg.c`, right after
+    `EXPORT_SYMBOL(dpaa_submit_outb_pkt_to_SEC)` — same placement as in
+    the patch — rather than un-excluding the whole file (which has other
+    unresolved structural conflicts, see above). If a FUTURE CI run hits
+    another `modpost: "..." undefined!` error for a different symbol
+    from the list of ~70 `EXPORT_SYMBOL`s this patch adds (see `grep
+    -oE '^\+EXPORT_SYMBOL\(...\)' 010-*.patch`), the same treatment
+    applies: add just that one function/export to the overlay directly,
+    don't un-exclude the whole file.
 - **`094-sdk-fman-dpaa-qbman-kasan-sanitize-off.patch`**: 12 of 14
   Makefile hunks apply cleanly; 2 are excluded (one path doesn't exist
   in our tree at all, one has a trivial context mismatch against our

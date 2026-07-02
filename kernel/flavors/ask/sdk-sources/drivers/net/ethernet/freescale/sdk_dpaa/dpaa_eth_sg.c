@@ -1988,6 +1988,63 @@ sec_submit_failed:
 
 EXPORT_SYMBOL(dpaa_submit_outb_pkt_to_SEC);
 
+/**
+ * dpa_add_dummy_eth_hdr - Add dummy Ethernet header space to SKB
+ * @skb_in: Pointer to SKB pointer (may be reallocated)
+ * @priv_headroom: Private headroom to reserve (not used, for API compatibility)
+ * @hdroom_realloc: Set to 1 if headroom was reallocated
+ *
+ * This function ensures there is space for an Ethernet header in the SKB
+ * headroom for cellular interfaces that don't have a MAC header.
+ * Returns 0 on success, negative on failure.
+ */
+int dpa_add_dummy_eth_hdr(struct sk_buff **skb_in, int priv_headroom,
+			  unsigned char *hdroom_realloc)
+{
+	struct sk_buff *skb = *skb_in;
+	struct ethhdr *eth;
+	__be16 proto;
+	int headroom_needed = ETH_HLEN + priv_headroom;
+	int ipv;
+
+	/* Check if we have enough headroom */
+	if (skb_headroom(skb) < headroom_needed) {
+		struct sk_buff *new_skb;
+
+		new_skb = skb_realloc_headroom(skb, headroom_needed);
+		if (!new_skb)
+			return -ENOMEM;
+
+		dev_kfree_skb(skb);
+		*skb_in = new_skb;
+		skb = new_skb;
+		*hdroom_realloc = 1;
+	}
+
+	/* Determine IP version from first byte of packet */
+	ipv = (skb->data[0] >> 4) & 0xf;
+
+	/* Set protocol based on IP version */
+	if (ipv == 6)
+		proto = htons(ETH_P_IPV6);
+	else
+		proto = htons(ETH_P_IP);
+
+	/* Push ethernet header space */
+	eth = (struct ethhdr *)skb_push(skb, ETH_HLEN);
+
+	/* Initialize with dummy MAC addresses (will be overwritten later) */
+	memset(eth->h_dest, 0, ETH_ALEN);
+	memset(eth->h_source, 0, ETH_ALEN);
+	eth->h_proto = proto;
+
+	/* Reset SKB pointers - caller will adjust data/len */
+	skb_pull(skb, ETH_HLEN);
+
+	return 0;
+}
+EXPORT_SYMBOL(dpa_add_dummy_eth_hdr);
+
 int __hot dpaa_ipsec_xmit_compat_fd(struct net_device *net_dev,
 				    struct qm_fd *fd)
 {
