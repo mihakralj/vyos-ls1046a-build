@@ -288,10 +288,15 @@ jobs:
           # Inject sk_buff fields referenced by SDK-patched consumers.
           # Fields go after _nfct (~line 926) to avoid breaking the
           # BUILD_BUG_ON assertion that requires next/prev at offset 0.
-          # Remove any stale injection first (from previous CI runs).
+          # Remove any stale injection first (from previous CI runs — the
+          # underlying_vlan_tci/ipsec_offload lines are stale as of
+          # 2026-07-02 since patch 010 now declares both natively, but the
+          # cleanup stays here in case a cached runner work/ dir still has
+          # them from a build predating that fix).
           sed -i '/^\tint\t\tlayerscape_underlying_iif;$/d' work/linux-6.12.49/include/linux/skbuff.h
           sed -i '/^\t__u16\t\tunderlying_vlan_tci;$/d' work/linux-6.12.49/include/linux/skbuff.h
           sed -i '/^\tunsigned long\tipsec_offload;$/d' work/linux-6.12.49/include/linux/skbuff.h
+          sed -i '/^\t__u16\t\tipsec_sa_handle;$/d' work/linux-6.12.49/include/linux/skbuff.h
           bin/fix-skbuff-fields.sh work/linux-6.12.49/include/linux/skbuff.h
 
       - name: Compile Mono DTB from DTS (mainline only — skip on nxp-sdk)
