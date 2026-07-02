@@ -7,7 +7,7 @@
 # Without tracked connections, hardware offload never engages.
 #
 # This script:
-#   1. Loads ASK kernel modules (cdx, fci, nf_conntrack_netlink)
+#   1. Loads ASK kernel modules (cdx, fci, auto_bridge, nf_conntrack_netlink)
 #   2. Waits for VyOS nftables rules to be applied
 #   3. Removes the "notrack" rule from PREROUTING + OUTPUT chains
 #   4. Rebuilds chains preserving jump structure without notrack
@@ -26,8 +26,20 @@ if ! grep -q "fsl,ls1046a" /proc/device-tree/compatible 2>/dev/null; then
 fi
 
 # ── Load kernel modules ───────────────────────────────────────────────
+# auto_bridge.ko is required for CMM's bridge init to succeed in "auto
+# mode" — without it, cmmBridgeInit() falls back to "manual mode", which
+# the kernel's M_bridge_handle_control rejects ("manual mode not
+# supported"), and CMM exits(1) immediately. Confirmed via hardware
+# validation 2026-07-02 (192.168.1.185, build vyos-2026.07.02-0543-
+# rolling): loading auto_bridge.ko flipped ask-check from FAIL to
+# OPERATIONAL and stopped the ls1046a-ask.service crash-loop. Safe to
+# load unconditionally — auto_bridge's packet-processing netfilter hook
+# (abm_ebt_hook) is a guarded no-op (`if (!skb->abm_ff) goto exit0;`)
+# unless a bridge device is actually configured and fast-forwarding
+# unicast traffic through it; loading the module alone only registers
+# its (inert without a bridge) netlink/proc/sysctl/notifier plumbing.
 echo "ASK: loading kernel modules..."
-for mod in cdx fci nf_conntrack_netlink; do
+for mod in cdx fci auto_bridge nf_conntrack_netlink; do
     if ! lsmod | grep -q "^${mod} "; then
         insmod "${MODDIR}/${mod}.ko" 2>/dev/null || modprobe "${mod}" 2>/dev/null || true
     fi
