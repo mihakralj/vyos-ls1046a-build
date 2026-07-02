@@ -71,9 +71,41 @@ mkdir -p "$SRC_CACHE"
 SYSROOT="$SRC_CACHE/sysroot"
 mkdir -p "$SYSROOT" "$SYSROOT/lib" "$SYSROOT/include" "$SYSROOT/lib/pkgconfig"
 
+# Pinned (not a floating branch) — matches bin/ci-build-ask-modules.sh.
+# Update ASK_COMMIT in both scripts + the kernel/flavors/ask/{sources,
+# userspace} READMEs together when intentionally bumping upstream.
+ASK_REPO="https://github.com/we-are-mono/ASK.git"
+ASK_BRANCH="mt-6.12.y"
+ASK_COMMIT="a211ea865379362058c6656b9c448e4a7050e93c"
 ASK_CACHE="${RUNNER_TOOL_CACHE:-/tmp}/ask-clone-cache"
 ASK_DIR="$ASK_CACHE/ask-mt-6.12.y"
-[ -d "$ASK_DIR" ] || { echo "FATAL: ASK repo not found at $ASK_DIR — M2 must run first"; exit 1; }
+
+# ── Ensure a clean, pinned ASK clone — do NOT assume M2
+# (ci-build-ask-modules.sh) already ran and reset it. In ASK_KERNEL_TAG
+# mode M2 doesn't run (see kernel/flavors/ask/sources/cdx/README.md), so
+# this builder must be self-sufficient. Without this reset, the
+# self-hosted runner's persistent cache directory keeps whatever
+# CT-TRACE sed/python mutations a PREVIOUS run left behind (in tracked
+# files like cmm/src/conntrack.c), and this run's `if old in s` pattern
+# matches silently fail against that already-mutated text — leaving
+# stale, potentially broken content in place that then fails to compile
+# with errors that don't reflect the current injection logic at all
+# (observed 2026-07-02, CI run 28557820493: two of six CT-TRACE patterns
+# reported "pattern not found" because the cached conntrack.c was
+# already mutated by an earlier pre-fix run). Pinning to a fixed commit
+# additionally makes the patches immune to upstream drift on mt-6.12.y.
+if [ ! -d "$ASK_DIR/.git" ]; then
+    echo "### Initializing ASK repo cache at $ASK_DIR"
+    rm -rf "$ASK_DIR"
+    mkdir -p "$ASK_DIR"
+    git -C "$ASK_DIR" init -q
+    git -C "$ASK_DIR" remote add origin "$ASK_REPO"
+fi
+echo "### Resetting ASK repo cache at $ASK_DIR to pinned commit $ASK_COMMIT"
+git -C "$ASK_DIR" fetch --depth 1 origin "$ASK_COMMIT" 2>&1 | tail -3
+git -C "$ASK_DIR" checkout -f FETCH_HEAD 2>&1
+git -C "$ASK_DIR" clean -fdx 2>&1 | tail -3 || true
+[ -d "$ASK_DIR" ] || { echo "FATAL: ASK repo not found at $ASK_DIR after clone/reset"; exit 1; }
 
 FMLIB_DIR="$SRC_CACHE/fmlib"
 FMC_DIR="$SRC_CACHE/fmc"
