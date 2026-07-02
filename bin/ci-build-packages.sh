@@ -35,7 +35,7 @@ for package in $packages; do
   # ASK userspace builder (cmm, dpa_app, fmc) can find the tree.
   if [ -n "${ASK_KERNEL_TAG:-}" ] && [ -z "${KSRC:-}" ]; then
     NXP_TREE="$GITHUB_WORKSPACE/work/linux-6.12.49"
-    if [ -d "$NXP_TREE" ] && [ -f "$NXP_TREE/include/config/kernel.release" ]; then
+    if [ -d "$NXP_TREE" ] && [ -f "$NXP_TREE/.config" ]; then
       KSRC="$NXP_TREE"
       echo "### nxp-sdk: KSRC=$KSRC (ASK_KERNEL_TAG mode, NXP tree)"
     fi
@@ -673,9 +673,9 @@ XEOF
 
     ### Build ASK 1.x OOT kernel modules (cdx, fci, auto_bridge)
     # Requires a fully-built NXP kernel tree with Module.symvers (signing keys).
-    # Skipped on nxp-sdk: uses pre-built kernel .debs + pre-built modules.
+    # Gated: only when building linux-kernel from source (NXP_KSRC set).
     ASK_MOD_BUILDER="$GITHUB_WORKSPACE/bin/ci-build-ask-modules.sh"
-    if [ -z "${NXP_KSRC:-}" ] && [ -n "$KSRC" ] && [ -x "$ASK_MOD_BUILDER" ]; then
+    if [ -n "${NXP_KSRC:-}" ] && [ -n "$KSRC" ] && [ -x "$ASK_MOD_BUILDER" ]; then
       KSRC_ABS_ASK="$(cd "$KSRC" && pwd)"
       echo "### Building ASK 1.x OOT kernel modules (cdx, fci, auto_bridge)"
       ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}" \
@@ -685,20 +685,6 @@ XEOF
       ls -lh cdx-modules-*.deb fci-modules-*.deb auto-bridge-modules-*.deb 2>/dev/null || echo "  (none produced)"
     elif [ -n "${NXP_KSRC:-}" ]; then
       echo "### nxp-sdk: skipping ASK 1.x OOT module build"
-    fi
-
-    ### Build ASK 1.x userspace (cmm, dpa_app, fmc)
-    # Requires the kernel source tree for fmlib headers.
-    # Always built for nxp-sdk — the cached pre-built binary from the ASK
-    # clone is stale and doesn't include CT-TRACE diagnostics or other fixes.
-    ASK_USR_BUILDER="$GITHUB_WORKSPACE/bin/ci-build-ask-userspace.sh"
-    if [ -x "$ASK_USR_BUILDER" ] && [ -n "${KSRC:-}" ]; then
-      KSRC_USR="${NXP_KSRC:-$KSRC}"
-      echo "### Building ASK 1.x userspace (cmm, dpa_app, fmc)"
-      "$ASK_USR_BUILDER" "$KSRC_USR" "$(pwd)" || \
-        { echo "FATAL: ASK 1.x userspace build failed"; exit 1; }
-      echo "### ASK 1.x userspace .debs in package dir:"
-      ls -lh cmm-*.deb dpa-app-*.deb fmc-*.deb 2>/dev/null || echo "  (none produced)"
     fi
 
     ### Populate linux-kernel cache after a successful build (cache miss path)
@@ -778,6 +764,24 @@ XEOF
   df -Th
   cd ..
 done
+
+### Build ASK 1.x userspace (cmm, dpa_app, fmc)
+# Runs unconditionally after the package loop — KSRC is set from the
+# NXP kernel tree at work/linux-6.12.49/ (staged by ci-stage-kernel.sh
+# even when ASK_KERNEL_TAG skips the linux-kernel package build).
+# The cached pre-built binary from the ASK clone is stale and lacks
+# CT-TRACE diagnostics, libcli path fixes, and the cmmCtResync flush fix.
+ASK_USR_BUILDER="$GITHUB_WORKSPACE/bin/ci-build-ask-userspace.sh"
+if [ -x "$ASK_USR_BUILDER" ] && [ -n "${KSRC:-}" ]; then
+  echo "### Building ASK 1.x userspace (cmm, dpa_app, fmc)"
+  "$ASK_USR_BUILDER" "$KSRC" "$(pwd)" || \
+    { echo "FATAL: ASK 1.x userspace build failed"; exit 1; }
+  echo "### ASK 1.x userspace .debs in package dir:"
+  ls -lh ask-userspace-*.deb cmm-*.deb dpa-app-*.deb fmc-*.deb 2>/dev/null || echo "  (none produced)"
+else
+  echo "FATAL: ASK 1.x userspace builder not found or KSRC not set"
+  exit 1
+fi
 
 ### ASK2 (rewrite-in-progress): the legacy ASK-consume mode userspace
 ### rebuild block was removed on the ask20 branch along with
