@@ -279,9 +279,17 @@ XEOF
 
       echo "### Building kernel (make -j$(nproc) bindeb-pkg LOCALVERSION=-vyos)…"
       KBUILD_LOG="$GITHUB_WORKSPACE/work/kbuild.log"
+      # NOTE: `set -e` is active in this script (see top). Without the
+      # `|| BUILD_RC=$?` guard below, a non-zero exit from this subshell
+      # would kill the whole script IMMEDIATELY at this line — before
+      # BUILD_RC=$?, the tail -15/-80 diagnostic dump, or the "Kernel
+      # build FAILED" message ever run, silently hiding the real compiler
+      # error from CI logs (verified 2026-07-02: run 28565682543 showed
+      # zero output between "Building kernel…" and "Process completed
+      # with exit code 2" — this dead-code bug was the reason why).
+      BUILD_RC=0
       ( cd "$NXP_KSRC" && make ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}" \
-          LOCALVERSION=-vyos -j"$(nproc)" bindeb-pkg ) > "$KBUILD_LOG" 2>&1
-      BUILD_RC=$?
+          LOCALVERSION=-vyos -j"$(nproc)" bindeb-pkg ) > "$KBUILD_LOG" 2>&1 || BUILD_RC=$?
       tail -15 "$KBUILD_LOG"
       if [ "$BUILD_RC" -ne 0 ]; then
         echo "### Kernel build FAILED (rc=$BUILD_RC) — dumping last 80 lines:"
