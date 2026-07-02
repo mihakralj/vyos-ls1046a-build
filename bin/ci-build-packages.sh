@@ -765,6 +765,40 @@ XEOF
   cd ..
 done
 
+### Build ASK 1.x OOT kernel modules (cdx, fci, auto_bridge) — currently
+# NOT POSSIBLE in ASK_KERNEL_TAG mode, and deliberately not attempted.
+#
+# bin/ci-build-ask-modules.sh (M2) requires a kernel tree containing both
+# drivers/net/ethernet/freescale/sdk_fman/ncsw_config.mk (cdx's Kbuild
+# `include`s it directly) AND a matching Module.symvers. Neither single
+# tree currently available to CI has both:
+#   - work/linux-6.12.49 (staged UNCONDITIONALLY by bin/ci-stage-kernel.sh
+#     on every run, incl. this mode — fetch-kernel-nxp.sh clones the
+#     public https://github.com/nxp-qoriq/linux.git at lf-6.12.49-2.2.0,
+#     which HAS sdk_fman/ natively, then the 266-file SDK overlay from
+#     kernel/flavors/ask/sdk-sources/ layers on top) has the full driver
+#     source, but is never compiled in this mode, so it has no
+#     Module.symvers of its own.
+#   - The downloaded linux-headers-*.deb (ask-kernel-6.12.49 release) DOES
+#     have a Module.symvers that matches the actually-shipped/booted
+#     kernel, but is a normal Debian headers package with no drivers/ tree
+#     at all — verified 2026-07-02 by extracting it directly.
+# This is a build-orchestration gap, not a missing-source gap — do not
+# repeat/re-derive the (incorrect, briefly held during this same
+# investigation) claim that the SDK source isn't available anywhere. See
+# kernel/flavors/ask/sources/cdx/README.md for the full writeup and the
+# untested candidate fix (copying the headers-.deb's Module.symvers/certs/
+# compiled scripts/sign-file into work/linux-6.12.49) — NOT attempted here
+# because an unverified combination risks producing modules that silently
+# fail to load or load with mismatched symbol versions on real hardware.
+echo "### nxp-sdk: ASK 1.x OOT modules (cdx.ko/fci.ko/auto_bridge.ko) SKIPPED"
+echo "###   reason: no single kernel tree has both sdk_fman/ source AND a"
+echo "###   Module.symvers matching the shipped kernel (see"
+echo "###   kernel/flavors/ask/sources/cdx/README.md — this is a build-"
+echo "###   orchestration gap, the SDK source itself is not missing)"
+echo "###   effect: the ISO ships without cdx.ko/fci.ko/auto_bridge.ko — the ASK"
+echo "###   1.x fast-path kernel modules are entirely absent from this build"
+
 ### Build ASK 1.x userspace (cmm, dpa_app, fmc)
 # Runs unconditionally after the package loop — KSRC is set from the
 # NXP kernel tree at work/linux-6.12.49/ (staged by ci-stage-kernel.sh

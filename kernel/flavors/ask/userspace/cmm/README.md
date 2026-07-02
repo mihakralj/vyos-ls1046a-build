@@ -1,28 +1,31 @@
-# ask-cmm
+# cmm — Reference copy (NOT the build source)
 
-This repository owns the standalone source tree for the NXP ASK Connection
-Manager daemon (`ask-cmm`).
+This directory is a **reference copy** for code review and documentation.
+It is **not** compiled by CI or any build script.
 
-The OpenWrt integration repository consumes this source through the normal
-package fetch path in `openwrt/package/network/ask-cmm/Makefile` using a pinned
-`PKG_SOURCE_VERSION` commit and matching `PKG_MIRROR_HASH`. OpenWrt downloads
-the pinned source, unpacks it into `build_dir`, and builds the package through
-the standard package workflow.
+**The actual cmm binary shipped in the ISO is built from the
+`we-are-mono/ASK` Git repository** (branch `mt-6.12.y`, pinned to commit
+`a211ea865379362058c6656b9c448e4a7050e93c` as of 2026-07-02). The CI build
+script `bin/ci-build-ask-userspace.sh` clones that repo to
+`$RUNNER_TOOL_CACHE/ask-clone-cache/ask-mt-6.12.y/` (resetting it to the
+pinned commit on every run — a persistent self-hosted runner cache
+directory was previously left un-reset between runs, causing prior
+CT-TRACE mutations to accumulate and break the build, see CI run
+28557820493) and builds `cmm/src/*.c` from there. CT-TRACE diagnostics
+and bug fixes are applied via Python injection into the clone's
+`conntrack.c` and `callback.c` before `make`.
 
-The following remain owned by the OpenWrt integration package directory rather
-than this repository:
+**Editing files here has zero effect on the shipped binary.** To change
+the CMM binary, either:
 
-- package metadata and dependency declarations
-- OpenWrt init and config files under `files/`
-- exceptional OpenWrt-local integration patches only when a change truly cannot
-  live in this source repo
-- OpenWrt package release bumps and integration-only build flags
+1. Modify the Python injection in `bin/ci-build-ask-userspace.sh`
+   (the `#### PYPATCH` block), or
+2. Create a patch file and add a `patch -p1` step before `make`, or
+3. Contribute the fix upstream to `we-are-mono/ASK` and update
+   `ASK_COMMIT` in both `bin/ci-build-ask-userspace.sh` and
+   `bin/ci-build-ask-modules.sh`.
 
-For reproducible packaging, update the OpenWrt package to a specific commit from
-this repository and refresh `PKG_MIRROR_HASH` for that exact source archive.
-Tags may be added for release landmarks, but packaging must stay pinned to an
-exact commit or exact immutable tag target.
-
-Durable CMM behavior changes should be made directly in this source tree, then
-packaged by updating the OpenWrt pin and mirror hash. Avoid carrying normal CMM
-source fixes as OpenWrt package patches.
+**Last maintained:** 2026-07-02 (added after code-review finding that 
+eight commits of CT-TRACE injections targeted this inert copy before 
+the CI-side Python injection was adopted in `b3c6579`; updated same day
+after fixing the unreset-clone-cache bug and pinning to a fixed commit).
