@@ -522,5 +522,12 @@ jobs:
         with:
           keep_latest: 10
           delete_tags: true
+          # Only auto-delete releases whose tags contain "-rolling" (the
+          # standard CI build format: YYYY.MM.DD-HHMM-rolling).  Releases
+          # tagged differently (e.g. manual custom releases, nxp-sdk
+          # checkpoint builds, or any future non-rolling tag) are left
+          # untouched — this step will never touch them regardless of age
+          # or count.
+          delete_tag_pattern: "-rolling"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
