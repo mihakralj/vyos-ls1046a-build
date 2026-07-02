@@ -430,5 +430,6 @@ jobs:
         with:
           keep_latest: 10
           delete_tags: true
+          delete_tag_pattern: "-rolling"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
