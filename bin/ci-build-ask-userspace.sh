@@ -123,8 +123,23 @@ if [ -f "$KSRC/include/config/kernel.release" ]; then
     KVER="${KVER%+}"
 fi
 if [ -z "$KVER" ] || [ "$KVER" = "6.12.49" ]; then
-    # bindeb-pkg may have cleaned kernel.release; extract from .deb filename
-    KVER="$(ls "$PKG_DIR"/linux-image-*_arm64.deb 2>/dev/null | head -1 | sed 's/.*linux-image-\(.*\)_arm64.deb/\1/; s/_.*//' || true)"
+    # bindeb-pkg may have cleaned kernel.release (it also doesn't reflect
+    # a command-line `make LOCALVERSION=-vyos bindeb-pkg` override — that
+    # file is only ever regenerated from CONFIG_LOCALVERSION + git-derived
+    # setlocalversion, never from the make-invocation LOCALVERSION= var,
+    # so it reads "6.12.49+" here regardless of the real -vyos suffix).
+    # Extract from the .deb filename instead. ci-build-packages.sh calls
+    # this script with PKG_DIR = the vyos-build package-build ROOT (this
+    # call happens AFTER the per-package build loop's `cd ..`, unlike
+    # ci-build-ask-modules.sh which is called from inside the loop while
+    # still cd'd into PKG_DIR/linux-kernel) — so the kernel .deb is one
+    # level down, at PKG_DIR/linux-kernel/linux-image-*.deb, not directly
+    # in PKG_DIR. Search both locations (confirmed via CI run 28567049653:
+    # searching PKG_DIR alone silently found nothing, KVER fell through to
+    # `make kernelversion`'s bare "6.12.49", producing an ask-userspace
+    # .deb with `Depends: linux-image-6.12.49` — a package name that never
+    # exists, since the real kernel .deb is linux-image-6.12.49-vyos).
+    KVER="$(ls "$PKG_DIR"/linux-image-*_arm64.deb "$PKG_DIR"/linux-kernel/linux-image-*_arm64.deb 2>/dev/null | head -1 | sed 's/.*linux-image-\(.*\)_arm64.deb/\1/; s/_.*//' || true)"
 fi
 if [ -z "$KVER" ]; then
     KVER="$(make -C "$KSRC" -s kernelrelease 2>/dev/null | sed 's/+$//' || true)"
