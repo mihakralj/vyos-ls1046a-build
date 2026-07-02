@@ -2,6 +2,7 @@ menuconfig FSL_SDK_DPAA_ETH
 	tristate "DPAA Ethernet"
 	depends on (FSL_SOC || ARM64 || ARM) && FSL_SDK_BMAN && FSL_SDK_QMAN && FSL_SDK_FMAN && !FSL_DPAA_ETH
 	select PHYLIB
+	select PHYLINK
 	help
 	  Data Path Acceleration Architecture Ethernet driver,
 	  supporting the Freescale QorIQ chips.
