@@ -218,6 +218,21 @@ ASK_PATCHES_NEEDING_OVERLAY_EXCLUDE=(
     "004-export-dpaa-submit-symbol.patch"
 )
 
+# ── ASK patches fully redundant against the native NXP vendor tree ────
+# Unlike 002/004 above (partially redundant — some hunks still needed),
+# these patches are ENTIRELY redundant: every file/hunk they touch is
+# already present natively in the nxp-qoriq/linux vendor tree fetched by
+# fetch-kernel-nxp.sh (verified 2026-07-02 directly against
+# raw.githubusercontent.com/nxp-qoriq/linux/lf-6.12.49-2.2.0/): the vendor
+# Kconfig/Makefiles already `source`/`obj-y` the sdk_fman/sdk_dpaa/
+# fsl_qbman directories that 720 tries to wire in, using the exact same
+# CONFIG_FSL_SDK_FMAN/CONFIG_FSL_SDK_DPAA_ETH/CONFIG_FSL_SDK_DPA symbols.
+# Skip outright rather than exclude-and-apply-partial, since these patches
+# have no non-overlay content left once the redundant part is removed.
+ASK_PATCH_SKIP_LIST_NATIVE=(
+    "720-drivers-staging-and-freescale-add-sdk-dpaa-entry-points.patch"
+)
+
 PATCHES=()
 for sub in vyos board fixes; do
     d="$COMMON_DIR/patches/$sub"
@@ -263,9 +278,13 @@ info "applying ${#PATCHES[@]} patches to linux-$KVER…"
 for p in "${PATCHES[@]}"; do
     name="$(basename "$(dirname "$p")")/$(basename "$p")"
     base="$(basename "$p")"
-    # Check skip list for ASK flavor
+    # Check skip lists for ASK flavor
     if [[ "$FLAVOR" == "ask" ]] && printf '%s\n' "${ASK_PATCH_SKIP_LIST[@]}" | grep -qFx "$base"; then
         echo "   ⊘ $name (skipped — 6.18-only, not needed on NXP 6.12 tree)"
+        continue
+    fi
+    if [[ "$FLAVOR" == "ask" ]] && printf '%s\n' "${ASK_PATCH_SKIP_LIST_NATIVE[@]}" | grep -qFx "$base"; then
+        echo "   ⊘ $name (skipped — already wired natively in the NXP vendor kernel tree)"
         continue
     fi
     # Exclude overlay-owned paths for patches that predate the sdk-sources
