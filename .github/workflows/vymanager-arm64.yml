@@ -8,8 +8,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_BACKEND: ${{ github.repository_owner }}/vymanager-backend
-  IMAGE_FRONTEND: ${{ github.repository_owner }}/vymanager-frontend
+  IMAGE_API: ${{ github.repository_owner }}/vymanager-api
+  IMAGE_UI: ${{ github.repository_owner }}/vymanager-ui
   UPSTREAM_REPO: Community-VyProjects/VyManager
   UPSTREAM_REF: beta
 
@@ -40,7 +40,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push backend
+      - name: Build and push API (backend)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -48,12 +48,12 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}:beta-arm64
-            ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}:latest-arm64
-          cache-from: type=gha,scope=backend-arm64
-          cache-to: type=gha,mode=max,scope=backend-arm64
+            ${{ env.REGISTRY }}/${{ env.IMAGE_API }}:beta-arm64
+            ${{ env.REGISTRY }}/${{ env.IMAGE_API }}:latest-arm64
+          cache-from: type=gha,scope=api-arm64
+          cache-to: type=gha,mode=max,scope=api-arm64
 
-      - name: Build and push frontend
+      - name: Build and push UI (frontend)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -61,7 +61,7 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_FRONTEND }}:beta-arm64
-            ${{ env.REGISTRY }}/${{ env.IMAGE_FRONTEND }}:latest-arm64
-          cache-from: type=gha,scope=frontend-arm64
-          cache-to: type=gha,mode=max,scope=frontend-arm64
+            ${{ env.REGISTRY }}/${{ env.IMAGE_UI }}:beta-arm64
+            ${{ env.REGISTRY }}/${{ env.IMAGE_UI }}:latest-arm64
+          cache-from: type=gha,scope=ui-arm64
+          cache-to: type=gha,mode=max,scope=ui-arm64
