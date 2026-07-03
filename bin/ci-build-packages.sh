@@ -245,8 +245,9 @@ for package in $packages; do
         curl -fsSL -o "linux-${KVER}.tar.gz" "$GIT_URL" || echo "WARN: pre-fetch failed, falling back to build.py download"
       fi
       if [ -f "linux-${KVER}.tar.gz" ] && [ ! -d linux ]; then
-        echo "### Extracting linux-${KVER}.tar.gz -> linux/"
-        tar xzf "linux-${KVER}.tar.gz" && mv "linux-${KVER}" linux && echo "### Kernel source extracted to linux/"
+        echo "### Extracting linux-${KVER}.tar.gz ..."
+        tar xzf "linux-${KVER}.tar.gz" && echo "### Kernel source extracted to linux-${KVER}/"
+        ln -sf "linux-${KVER}" linux
       fi
       ./build.py --packages linux-kernel
     fi
