@@ -48,9 +48,11 @@ jobs:
           chmod +x backend/docker-entrypoint-wrap.sh
 
           # Rename original entrypoint copy destination + add wrapper COPY
+          # Also extend the chmod to cover the renamed original
           sed -i \
             -e 's|COPY backend/docker-entrypoint.sh /usr/local/bin/|COPY backend/docker-entrypoint.sh /usr/local/bin/docker-entrypoint-orig.sh|' \
             -e '/COPY backend\/docker-entrypoint\.sh \/usr\/local\/bin\/docker-entrypoint-orig\.sh/a COPY backend/docker-entrypoint-wrap.sh /usr/local/bin/docker-entrypoint.sh' \
+            -e 's|chmod +x /usr/local/bin/docker-entrypoint\.sh|chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/docker-entrypoint-orig.sh|' \
             Dockerfile.backend
 
           # --- UI wrapper (frontend) ---
@@ -70,6 +72,7 @@ jobs:
           sed -i \
             -e 's|COPY frontend/docker-entrypoint.sh /usr/local/bin/|COPY frontend/docker-entrypoint.sh /usr/local/bin/docker-entrypoint-orig.sh|' \
             -e '/COPY frontend\/docker-entrypoint\.sh \/usr\/local\/bin\/docker-entrypoint-orig\.sh/a COPY frontend/docker-entrypoint-wrap.sh /usr/local/bin/docker-entrypoint.sh' \
+            -e 's|chmod +x /usr/local/bin/docker-entrypoint\.sh|chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/docker-entrypoint-orig.sh|' \
             Dockerfile.frontend
 
       - name: Set up Docker Buildx
