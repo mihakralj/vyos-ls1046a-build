@@ -8,8 +8,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_BACKEND: ${{ github.repository_owner }}/vymanager-backend
-  IMAGE_FRONTEND: ${{ github.repository_owner }}/vymanager-frontend
+  IMAGE_API: ${{ github.repository_owner }}/vymanager-api
+  IMAGE_UI: ${{ github.repository_owner }}/vymanager-ui
   UPSTREAM_REPO: Community-VyProjects/VyManager
   UPSTREAM_REF: beta
 
@@ -27,6 +27,56 @@ jobs:
           repository: ${{ env.UPSTREAM_REPO }}
           ref: ${{ env.UPSTREAM_REF }}
 
+      # -----------------------------------------------------------------------
+      # Inject auto-detect entrypoint wrappers so containers discover the
+      # DUT's IP at startup.  Uses ${VAR:-default} fallback so explicit env
+      # vars set in VyOS config always win over auto-detection.
+      # -----------------------------------------------------------------------
+      - name: Inject IP-auto-detect entrypoint wrappers
+        run: |
+          # --- API wrapper (backend) ---
+          cat > backend/docker-entrypoint-wrap.sh << 'WRAP'
+          #!/bin/sh
+          # Auto-detect host IP for VyManager API
+          HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+          [ -z "$HOST_IP" ] && HOST_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
+          [ -z "$HOST_IP" ] && HOST_IP="127.0.0.1"
+          export BETTER_AUTH_URL="${BETTER_AUTH_URL:-http://${HOST_IP}:8000}"
+          export FRONTEND_URL="${FRONTEND_URL:-http://${HOST_IP}:3000}"
+          exec /usr/local/bin/docker-entrypoint-orig.sh "$@"
+          WRAP
+          chmod +x backend/docker-entrypoint-wrap.sh
+
+          # Rename original entrypoint copy destination + add wrapper COPY
+          sed -i \
+            -e 's|COPY backend/docker-entrypoint.sh /usr/local/bin/|COPY backend/docker-entrypoint.sh /usr/local/bin/docker-entrypoint-orig.sh|' \
+            -e '/COPY backend\/docker-entrypoint\.sh \/usr\/local\/bin\/docker-entrypoint-orig\.sh/a COPY backend/docker-entrypoint-wrap.sh /usr/local/bin/docker-entrypoint.sh' \
+            Dockerfile.backend
+
+          # --- UI wrapper (frontend) ---
+          cat > frontend/docker-entrypoint-wrap.sh << 'WRAP'
+          #!/bin/sh
+          # Auto-detect host IP for VyManager UI
+          HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+          [ -z "$HOST_IP" ] && HOST_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
+          [ -z "$HOST_IP" ] && HOST_IP="127.0.0.1"
+          export BETTER_AUTH_URL="${BETTER_AUTH_URL:-http://${HOST_IP}:3000}"
+          export FRONTEND_URL="${FRONTEND_URL:-http://${HOST_IP}:3000}"
+          export TRUSTED_ORIGINS="${TRUSTED_ORIGINS:-http://${HOST_IP}:3000,http://localhost:3000}"
+          exec /usr/local/bin/docker-entrypoint-orig.sh "$@"
+          WRAP
+          chmod +x frontend/docker-entrypoint-wrap.sh
+
+          sed -i \
+            -e 's|COPY frontend/docker-entrypoint.sh /usr/local/bin/|COPY frontend/docker-entrypoint.sh /usr/local/bin/docker-entrypoint-orig.sh|' \
+            -e '/COPY frontend\/docker-entrypoint\.sh \/usr\/local\/bin\/docker-entrypoint-orig\.sh/a COPY frontend/docker-entrypoint-wrap.sh /usr/local/bin/docker-entrypoint.sh' \
+            Dockerfile.frontend
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+
       - name: Log into registry ${{ env.REGISTRY }}
         uses: docker/login-action@v3
         with:
@@ -34,7 +84,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push backend
+      - name: Build and push API (backend)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -42,12 +92,12 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}:beta-arm64
-            ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}:latest-arm64
-          cache-from: type=gha,scope=backend-arm64
-          cache-to: type=gha,mode=max,scope=backend-arm64
+            ${{ env.REGISTRY }}/${{ env.IMAGE_API }}:beta-arm64
+            ${{ env.REGISTRY }}/${{ env.IMAGE_API }}:latest-arm64
+          cache-from: type=gha,scope=api-arm64
+          cache-to: type=gha,mode=max,scope=api-arm64
 
-      - name: Build and push frontend
+      - name: Build and push UI (frontend)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -55,7 +105,7 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_FRONTEND }}:beta-arm64
-            ${{ env.REGISTRY }}/${{ env.IMAGE_FRONTEND }}:latest-arm64
-          cache-from: type=gha,scope=frontend-arm64
-          cache-to: type=gha,mode=max,scope=frontend-arm64
+            ${{ env.REGISTRY }}/${{ env.IMAGE_UI }}:beta-arm64
+            ${{ env.REGISTRY }}/${{ env.IMAGE_UI }}:latest-arm64
+          cache-from: type=gha,scope=ui-arm64
+          cache-to: type=gha,mode=max,scope=ui-arm64
