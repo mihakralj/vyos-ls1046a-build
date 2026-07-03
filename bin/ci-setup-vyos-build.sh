@@ -240,7 +240,18 @@ if [ -n "$ASK_KERNEL_DEB" ]; then
     echo "WARN: Could not parse kernel version from $(basename "$ASK_KERNEL_DEB"); leaving defaults.toml alone"
   fi
 else
-  echo "### No ASK kernel .deb staged in $PKG_CHROOT — leaving defaults.toml kernel_version untouched"
+  echo "### No ASK kernel .deb staged in $PKG_CHROOT — pinning kernel_version from env instead"
+  # Stock flavor: pin defaults.toml kernel_version directly from KERNEL_VERSION
+  # (sync-kernel-version.sh reads this from vyos-build/data/defaults.toml →
+  #  but the cloned upstream repo may lag behind our versions.lock pin).
+  if [ -n "${KERNEL_VERSION:-}" ]; then
+    echo "### Pinning defaults.toml kernel_version -> $KERNEL_VERSION (from env)"
+    sed -i -E "s/^(\\s*kernel_version\\s*=\\s*)\"[^\"]+\"/\\1\"$KERNEL_VERSION\"/" \
+      vyos-build/data/defaults.toml
+    grep -E '^\s*kernel_version\s*=' vyos-build/data/defaults.toml || true
+  else
+    echo "WARN: KERNEL_VERSION unset — leaving defaults.toml alone"
+  fi
 fi
 sed -i 's/ttyAMA0/ttyS0/g' \
   vyos-build/data/live-build-config/hooks/live/01-live-serial.binary \
