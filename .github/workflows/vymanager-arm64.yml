@@ -27,9 +27,53 @@ jobs:
           repository: ${{ env.UPSTREAM_REPO }}
           ref: ${{ env.UPSTREAM_REF }}
 
+      # -----------------------------------------------------------------------
+      # Inject auto-detect entrypoint wrappers so containers discover the
+      # DUT's IP at startup.  Uses ${VAR:-default} fallback so explicit env
+      # vars set in VyOS config always win over auto-detection.
+      # -----------------------------------------------------------------------
+      - name: Inject IP-auto-detect entrypoint wrappers
+        run: |
+          # --- API wrapper (backend) ---
+          cat > backend/docker-entrypoint-wrap.sh << 'WRAP'
+          #!/bin/sh
+          # Auto-detect host IP for VyManager API
+          HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+          [ -z "$HOST_IP" ] && HOST_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
+          [ -z "$HOST_IP" ] && HOST_IP="127.0.0.1"
+          export BETTER_AUTH_URL="${BETTER_AUTH_URL:-http://${HOST_IP}:8000}"
+          export FRONTEND_URL="${FRONTEND_URL:-http://${HOST_IP}:3000}"
+          exec /usr/local/bin/docker-entrypoint-orig.sh "$@"
+          WRAP
+          chmod +x backend/docker-entrypoint-wrap.sh
+
+          # Rename original entrypoint copy destination + add wrapper COPY
+          sed -i \
+            -e 's|COPY backend/docker-entrypoint.sh /usr/local/bin/|COPY backend/docker-entrypoint.sh /usr/local/bin/docker-entrypoint-orig.sh|' \
+            -e '/COPY backend\/docker-entrypoint\.sh \/usr\/local\/bin\/docker-entrypoint-orig\.sh/a COPY backend/docker-entrypoint-wrap.sh /usr/local/bin/docker-entrypoint.sh' \
+            Dockerfile.backend
+
+          # --- UI wrapper (frontend) ---
+          cat > frontend/docker-entrypoint-wrap.sh << 'WRAP'
+          #!/bin/sh
+          # Auto-detect host IP for VyManager UI
+          HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+          [ -z "$HOST_IP" ] && HOST_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
+          [ -z "$HOST_IP" ] && HOST_IP="127.0.0.1"
+          export BETTER_AUTH_URL="${BETTER_AUTH_URL:-http://${HOST_IP}:3000}"
+          export FRONTEND_URL="${FRONTEND_URL:-http://${HOST_IP}:3000}"
+          export TRUSTED_ORIGINS="${TRUSTED_ORIGINS:-http://${HOST_IP}:3000,http://localhost:3000}"
+          exec /usr/local/bin/docker-entrypoint-orig.sh "$@"
+          WRAP
+          chmod +x frontend/docker-entrypoint-wrap.sh
+
+          sed -i \
+            -e 's|COPY frontend/docker-entrypoint.sh /usr/local/bin/|COPY frontend/docker-entrypoint.sh /usr/local/bin/docker-entrypoint-orig.sh|' \
+            -e '/COPY frontend\/docker-entrypoint\.sh \/usr\/local\/bin\/docker-entrypoint-orig\.sh/a COPY frontend/docker-entrypoint-wrap.sh /usr/local/bin/docker-entrypoint.sh' \
+            Dockerfile.frontend
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        # docker-container driver required for GHA cache export
         with:
           driver: docker-container
 
