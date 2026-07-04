@@ -42,6 +42,8 @@ on:
         required: false
       DISCORD_BOT_KEY:
         required: false
+      VYOS_VANITY_KEY:
+        required: false
 
 env:
   DEBIAN_MIRROR: http://deb.debian.org/debian/
@@ -304,6 +306,8 @@ jobs:
         run: bin/ci-compile-mono-dtb.sh
 
       - name: Setup vyos-build (config, chroot files, hooks)
+        env:
+          VYOS_VANITY_KEY: ${{ secrets.VYOS_VANITY_KEY }}
         run: bin/ci-setup-vyos-build.sh
 
       - name: Build Image Packages
