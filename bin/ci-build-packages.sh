@@ -80,7 +80,7 @@ for package in $packages; do
   KERNEL_CACHE_KEY=""
   KERNEL_CACHE_HIT_DIR=""
   if [ "$package" == "linux-kernel" ] && [ "${FLAVOR:-default}" != "ask" ] && [ -z "${ASK_KERNEL_TAG:-}" ]; then
-    KVER=$(awk -F'"' '/^kernel_version/ {print $2}' "$GITHUB_WORKSPACE/vyos-build/data/defaults.toml" 2>/dev/null | head -1)
+    KVER="${KERNEL_VERSION:-$(awk -F'"' '/^kernel_version/ {print $2}' "$GITHUB_WORKSPACE/vyos-build/data/defaults.toml" 2>/dev/null | head -1)}"
     KERNEL_HASH=$( {
       find "$GITHUB_WORKSPACE/data/kernel-config" -maxdepth 1 -name '*.config' -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
       find "$GITHUB_WORKSPACE/data/kernel-patches" -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null

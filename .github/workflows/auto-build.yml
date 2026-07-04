@@ -71,6 +71,10 @@ jobs:
       # at runtime (set system offload ask / set vpp settings), not selected at
       # build time. See AGENTS.md single-image rules + plans/DUAL-DATAPLANE.md.
       FLAVOR: ''
+      # Kernel version override (takes precedence over vyos-build/data/defaults.toml
+      # per sync-kernel-version.sh priority #1). Set when the upstream korg CDN
+      # hasn't cached the latest tarball yet but git.kernel.org snapshots exist.
+      KERNEL_VERSION: '6.18.37'
     # No `container:` — build runs natively on the self-hosted ARM64 runner.
     # The runner host (Debian 12 bookworm aarch64) provides all build deps
     # (installed in the "Install Dependencies" step below). Removing the
