@@ -47,7 +47,8 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethern
 +					       struct fman_pcd_fe_obj, node);
 +		if (enq && muram) {
 +			fe = fman_muram_offset_to_vbase(muram, enq->muram_off);
-+			fqid = ioread32be(fe + 1) & 0x00FFFFFFu;
++			fqid = ioread32be((u32 __iomem *)fe + 1)
++				& 0x00FFFFFFu;
 +			if (fqid) {
 +				struct fman_pcd_fe_context_params p = {
 +					.type = FMAN_FE_TYPE_ENQ,
