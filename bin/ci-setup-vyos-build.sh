@@ -227,6 +227,18 @@ if [ -n "$ASK_KERNEL_DEB" ]; then
   fi
 else
   echo "### No ASK kernel .deb staged in $PKG_CHROOT — leaving defaults.toml kernel_version untouched"
+  # For the non-ASK (single-image default) build, sync defaults.toml's
+  # kernel_version to the running KERNEL_VERSION env var (set by prior
+  # sync-kernel-version.sh steps and consumed by ci-build-packages.sh's
+  # pre-fetch). Without this, lb config renders --linux-packages against
+  # the upstream kernel version in defaults.toml, which may differ from
+  # the pre-fetched kernel we actually compiled.
+  if [ -n "${KERNEL_VERSION:-}" ]; then
+    echo "### Pinning defaults.toml kernel_version -> ${KERNEL_VERSION} (from env)"
+    sed -i -E "s/^(\\s*kernel_version\\s*=\\s*)\"[^\"]+\"/\\1\"${KERNEL_VERSION}\"/" \
+      vyos-build/data/defaults.toml
+    grep -E '^\s*kernel_version\s*=' vyos-build/data/defaults.toml || true
+  fi
 fi
 sed -i 's/ttyAMA0/ttyS0/g' \
   vyos-build/data/live-build-config/hooks/live/01-live-serial.binary \
