@@ -40,11 +40,9 @@ on:
         required: false
       MINISIGN_PRIVATE_KEY:
         required: false
-      SSH_SIGNING_KEY:
-        required: false
-      SSH_ALLOWED_SIGNERS:
-        required: false
       DISCORD_BOT_KEY:
+        required: false
+      VYOS_VANITY_KEY:
         required: false
 
 env:
@@ -80,8 +78,30 @@ jobs:
       # for a developer locally exercising the dormant ASK landing zone). The
       # ask.ko / VPP dataplanes ship dormant in the one image and are switched
       # at runtime (set system offload ask / set vpp settings), not selected at
-      # build time. See AGENTS.md single-image rules + specs/dual-dataplane.md.
+      # build time. See AGENTS.md single-image rules + plans/DUAL-DATAPLANE.md.
       FLAVOR: ''
+      # Build kernel from source (fetch-kernel-nxp.sh + stage-kernel.sh
+      # --flavor ask, which unconditionally overlays the 266-file SDK
+      # source drop from kernel/flavors/ask/sdk-sources/ before compiling —
+      # this DOES include drivers/net/ethernet/freescale/sdk_fman/, verified
+      # 2026-07-02 both on GitHub (nxp-qoriq/linux @ lf-6.12.49-2.2.0) and by
+      # tracing kernel/common/scripts/stage-kernel.sh directly). This is the
+      # same from-source pipeline that produced a working cdx.ko/fci.ko M2
+      # build in the 2026-06-21..06-28 session history (qdrant: "M2
+      # complete", "bridge offload breakthrough") — restoring it here so
+      # ci-build-ask-modules.sh gets a real Module.symvers that matches the
+      # actual compiled driver tree, instead of the frozen ask-kernel-6.12.49
+      # release's linux-headers-*.deb (which has Module.symvers but no
+      # drivers/ source at all, so cdx.ko/fci.ko/auto_bridge.ko could never
+      # be built against it). Costs ~15-20 min of kernel compile per run.
+      # Set ASK_KERNEL_TAG to a release tag to fall back to the pre-built
+      # kernel .deb shortcut instead (skips the compile, but M2 stays broken).
+      # ASK_KERNEL_TAG: 'ask-kernel-6.12.49'
+      # nxp-sdk branch skips the ASK2 (mainline ask.ko) OOT module build —
+      # prevent ci-pick-packages.sh from FATALing on missing ask-modules-*.deb.
+      # Does NOT affect ci-build-ask-modules.sh (cdx/fci/auto_bridge), which
+      # is the ASK 1.x native module builder and has its own gate.
+      ASK_OOT_SKIPPED: '1'
     # No `container:` — build runs natively on the self-hosted ARM64 runner.
     # The runner host (Debian 12 bookworm aarch64) provides all build deps
     # (installed in the "Install Dependencies" step below). Removing the
@@ -222,21 +242,72 @@ jobs:
           MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
         run: bin/ci-setup-vyos1x.sh
 
-      - name: Setup kernel config and patches
+      - name: Download pre-built NXP kernel .debs (nxp-sdk only — ASK_KERNEL_TAG fallback mode)
+        if: ${{ startsWith(github.ref_name, 'nxp-sdk') && env.ASK_KERNEL_TAG != '' }}
+        run: |
+          echo "### Downloading pre-built kernel from GitHub Release ask-kernel-6.12.49"
+          BASE="https://github.com/mihakralj/vyos-ls1046a-build/releases/download/ask-kernel-6.12.49"
+          curl -fsSL -o vyos-build/scripts/package-build/linux-image-6.12.49-vyos_6.12.49-1_arm64.deb \
+            "$BASE/linux-image-6.12.49-vyos_6.12.49-1_arm64.deb"
+          curl -fsSL -o vyos-build/scripts/package-build/linux-headers-6.12.49-vyos_6.12.49-1_arm64.deb \
+            "$BASE/linux-headers-6.12.49-vyos_6.12.49-1_arm64.deb"
+          echo "### Downloaded kernel .debs:"
+          ls -lh vyos-build/scripts/package-build/linux-*.deb
+          # Also copy to packages.chroot so kernel_version pinning in
+          # ci-setup-vyos-build.sh finds them (it scans PKG_CHROOT).
+          mkdir -p vyos-build/data/live-build-config/packages.chroot
+          cp -v vyos-build/scripts/package-build/linux-*.deb \
+            vyos-build/data/live-build-config/packages.chroot/
+
+      - name: Stage kernel tree (FLAVOR-aware)
+        run: bin/ci-stage-kernel.sh
+
+      - name: Setup kernel config and patches (mainline only — skip on nxp-sdk)
+        if: ${{ !startsWith(github.ref_name, 'nxp-sdk') }}
         run: bin/ci-setup-kernel.sh
 
-      # ASK2 (rewrite-in-progress): the legacy ASK 1.x build steps
-      # (Consume prebuilt ASK kernel, Setup ASK fast-path kernel) were
-      # removed on the ask20 branch. Until ASK2 components land
-      # (ask.ko, ask_bridge.ko, askd, ask-load, libask_fci) per
-      # specs/ask2-rewrite-spec.md, the single flavor-neutral image ships
-      # without ASK userspace or an SDK kernel; ASK engages at runtime
-      # (set system offload ask) once those components are built in.
+      - name: Fix swphy WARN_ON spam (nxp-sdk only — SDK 10G fixed-link polling)
+        if: ${{ startsWith(github.ref_name, 'nxp-sdk') }}
+        run: |
+          sed -i 's/WARN_ON(speed_index < 0)/WARN_ON_ONCE(speed_index < 0)/' \
+            work/linux-6.12.49/drivers/net/phy/swphy.c
+          echo "### Patched swphy.c: WARN_ON -> WARN_ON_ONCE"
 
-      - name: Compile Mono DTB from DTS (always rebuild from source)
+          # Silence phy-device-not-initialized spam (25 lines/5 ports per boot)
+          sed -i '/phy device not initialized/s/netdev_err/netdev_dbg/' \
+            work/linux-6.12.49/drivers/net/ethernet/freescale/sdk_dpaa/dpaa_ethtool.c
+          echo "### Patched dpaa_ethtool.c: netdev_err -> netdev_dbg for phy-not-init"
+
+          # NXP SDK kernel defaults enable_hooks=false — conntrack netfilter hooks
+          # (PREROUTING/OUTPUT) are never registered → nf_conntrack_in() never fires
+          # → conntrack stays deaf (zero entries) → CMM never receives nfct events
+          # → ASK hardware offload never engages.
+          # Force enable_hooks=true so standard Linux conntrack works.
+          sed -i 's/static bool enable_hooks __read_mostly;/static bool enable_hooks __read_mostly = true;/' \
+            work/linux-6.12.49/net/netfilter/nf_conntrack_standalone.c
+          echo "### Patched nf_conntrack_standalone.c: enable_hooks := true"
+
+          # Inject sk_buff fields referenced by SDK-patched consumers.
+          # Fields go after _nfct (~line 926) to avoid breaking the
+          # BUILD_BUG_ON assertion that requires next/prev at offset 0.
+          # Remove any stale injection first (from previous CI runs — the
+          # underlying_vlan_tci/ipsec_offload lines are stale as of
+          # 2026-07-02 since patch 010 now declares both natively, but the
+          # cleanup stays here in case a cached runner work/ dir still has
+          # them from a build predating that fix).
+          sed -i '/^\tint\t\tlayerscape_underlying_iif;$/d' work/linux-6.12.49/include/linux/skbuff.h
+          sed -i '/^\t__u16\t\tunderlying_vlan_tci;$/d' work/linux-6.12.49/include/linux/skbuff.h
+          sed -i '/^\tunsigned long\tipsec_offload;$/d' work/linux-6.12.49/include/linux/skbuff.h
+          sed -i '/^\t__u16\t\tipsec_sa_handle;$/d' work/linux-6.12.49/include/linux/skbuff.h
+          bin/fix-skbuff-fields.sh work/linux-6.12.49/include/linux/skbuff.h
+
+      - name: Compile Mono DTB from DTS (mainline only — skip on nxp-sdk)
+        if: ${{ !startsWith(github.ref_name, 'nxp-sdk') }}
         run: bin/ci-compile-mono-dtb.sh
 
       - name: Setup vyos-build (config, chroot files, hooks)
+        env:
+          VYOS_VANITY_KEY: ${{ secrets.VYOS_VANITY_KEY }}
         run: bin/ci-setup-vyos-build.sh
 
       - name: Build Image Packages
@@ -274,7 +345,7 @@ jobs:
       status: ${{ needs.build_iso.result }}
       build_version: ${{ needs.build_iso.outputs.build_version }}
       image_name: ${{ needs.build_iso.outputs.image_name }}
-      build_branch: 'default'
+      build_branch: ${{ startsWith(github.ref_name, 'nxp-sdk') && 'nxp-sdk' || 'Stock' }}
       release_type: Rolling
     secrets:
       DISCORD_BOT_KEY: ${{ secrets.DISCORD_BOT_KEY }}
@@ -286,12 +357,6 @@ jobs:
     permissions:
       contents: write
     if: github.ref_name == 'main' && !inputs.skip_publish
-    # Surface secrets into job-level env so they can be tested in step `if:`
-    # conditions.  The `secrets` context is NOT available in `if:` expressions
-    # (GitHub Actions limitation) — `env` is the required bridge.
-    env:
-      SSH_SIGNING_KEY: ${{ secrets.SSH_SIGNING_KEY }}
-      SSH_ALLOWED_SIGNERS: ${{ secrets.SSH_ALLOWED_SIGNERS }}
     steps:
       - uses: actions/checkout@v6
       - name: Clone vyos-build repo
@@ -436,18 +501,6 @@ jobs:
             cp "/tmp/${f}.new" "$f"
           done
 
-      - name: "Release publishing: configure commit signing"
-        if: ${{ env.SSH_SIGNING_KEY != '' }}
-        run: |
-          mkdir -p ~/.ssh
-          echo "$SSH_SIGNING_KEY" > ~/.ssh/signing_key
-          chmod 600 ~/.ssh/signing_key
-          echo "$SSH_ALLOWED_SIGNERS" > ~/.ssh/allowed_signers
-          git config --global user.signingkey ~/.ssh/signing_key
-          git config --global commit.gpgsign true
-          git config --global gpg.format ssh
-          git config --global gpg.ssh.allowedSignersFile ~/.ssh/allowed_signers
-
       - name: "Release publishing: create autocommit and tag"
         uses: stefanzweifel/git-auto-commit-action@v7
         with:
@@ -464,7 +517,6 @@ jobs:
         with:
           body_path: /tmp/release_notes.md
           tag_name: ${{ needs.build_iso.outputs.build_version }}
-          draft: false
           fail_on_unmatched_files: true
           files: |
             ${{ needs.build_iso.outputs.image_iso }}
@@ -474,6 +526,12 @@ jobs:
         with:
           keep_latest: 10
           delete_tags: true
+          # Only auto-delete releases whose tags contain "-rolling" (the
+          # standard CI build format: YYYY.MM.DD-HHMM-rolling).  Releases
+          # tagged differently (e.g. manual custom releases, nxp-sdk
+          # checkpoint builds, or any future non-rolling tag) are left
+          # untouched — this step will never touch them regardless of age
+          # or count.
           delete_tag_pattern: "-rolling"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
