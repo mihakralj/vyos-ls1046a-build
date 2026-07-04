@@ -52,6 +52,8 @@ jobs:
           #!/bin/sh
           FIRST_MAC=$(cat /sys/class/net/eth0/address 2>/dev/null || for f in /sys/class/net/*/address; do a=$(cat "$f" 2>/dev/null); [ "$a" != "00:00:00:00:00:00" ] && { echo "$a"; break; }; done)
           SECRET_DB=$(echo -n "vymanager-db:${FIRST_MAC}" | sha256sum | awk '{print $1}')
+          export POSTGRES_USER="${POSTGRES_USER:-vymanager}"
+          export POSTGRES_DB="${POSTGRES_DB:-vymanager}"
           export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$SECRET_DB}"
           exec /usr/local/bin/docker-entrypoint-orig.sh "$@"
           WRAP
