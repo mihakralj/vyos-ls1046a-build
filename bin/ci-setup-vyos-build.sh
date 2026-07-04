@@ -327,6 +327,39 @@ if [ -f board/mok/MOK.key ]; then
   cp board/mok/MOK.pem vyos-build/data/certificates/vyos-dev-2025-linux.pem
 fi
 
+### VyOS vanity SSH key — bake into ISO for VyManager self-management.
+# On fresh install, VyManager needs the vyos user's private key to SSH
+# into localhost.  The key is deployed via $VYOS_VANITY_KEY env (CI secret)
+# or read from ~/.ssh/vyos_key (local builds on Cobalt 100).
+VANITY_KEY_SRC="${VYOS_VANITY_KEY:-}"
+if [ -z "$VANITY_KEY_SRC" ] && [ -f "$HOME/.ssh/vyos_key" ]; then
+  VANITY_KEY_SRC="$HOME/.ssh/vyos_key"
+fi
+
+if [ -n "$VANITY_KEY_SRC" ]; then
+  echo "### Baking VyOS vanity SSH key into ISO..."
+  mkdir -p "$CHROOT/home/vyos/.ssh"
+
+  if [ -f "$VANITY_KEY_SRC" ]; then
+    # File path: copy the key directly
+    cp "$VANITY_KEY_SRC" "$CHROOT/home/vyos/.ssh/id_ed25519"
+  else
+    # Raw key content (from CI secret env var)
+    echo "$VANITY_KEY_SRC" > "$CHROOT/home/vyos/.ssh/id_ed25519"
+  fi
+
+  chmod 600 "$CHROOT/home/vyos/.ssh/id_ed25519"
+
+  # Derive public key from private and add to authorized_keys
+  ssh-keygen -y -f "$CHROOT/home/vyos/.ssh/id_ed25519" \
+    > "$CHROOT/home/vyos/.ssh/authorized_keys" 2>/dev/null || true
+  chmod 644 "$CHROOT/home/vyos/.ssh/authorized_keys"
+  echo "###   Vanity key installed ($(ssh-keygen -l -f "$CHROOT/home/vyos/.ssh/id_ed25519" 2>&1 | awk '{print $2}'))"
+else
+  echo "### No VyOS vanity key found — ISO will ship without it."
+  echo "###   Set VYOS_VANITY_KEY env or place key at ~/.ssh/vyos_key."
+fi
+
 ### Apt preferences pin: block upstream linux-image-*-vyos.
 #
 # When VyOS upstream rebuilds vyos-1x against a newer kernel ABI than
