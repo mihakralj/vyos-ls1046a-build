@@ -712,6 +712,10 @@ cp "$BOARD_PATCH_DIR/4009-sfp-oem-rollball-quirk.patch"       "$KERNEL_PATCHES/"
 # board/common patch (not flavor-gated) because the dpaa driver is built-in
 # for all flavors.
 cp "$BOARD_PATCH_DIR/0145-dpaa-flow-offload-backend-slot.patch" "$KERNEL_PATCHES/"
+# 0146: Phase 2 integration — wire 0135 FE-VM context builder into fe_arm engage.
+# Contexts (ENQ/MUX/Transition) are built immediately before the AC_CC arm
+# reprograms KeyGen/BMI, so the FE-VM can resolve HIT→ENQ and MISS→Exit.
+cp "$BOARD_PATCH_DIR/0146-fman-pcd-fe-context-build-integration.patch" "$KERNEL_PATCHES/"
 
 # ── Staging-completeness guard ────────────────────────────────────────
 # Every kernel/common/patches/board/*.patch must either be cp'd above or
