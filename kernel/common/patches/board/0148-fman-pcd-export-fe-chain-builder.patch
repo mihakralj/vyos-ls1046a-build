@@ -1,124 +1,60 @@
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index 90c9c2151..c2ec6362b 100644
+index 90c9c2151..ef34b9100 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -880,6 +880,70 @@ int fman_pcd_fe_context_build(void __iomem *ctx, u16 offset,
+@@ -880,6 +880,52 @@ int fman_pcd_fe_context_build(void __iomem *ctx, u16 offset,
  }
  EXPORT_SYMBOL_GPL(fman_pcd_fe_context_build);
  
 +int fman_pcd_fe_build_chain(struct fman_pcd *pcd, u32 fqid, u32 *enter_off)
-+
 +{
-+
 +	int ret;
 +
 +	ret = fman_pcd_fe_pool_engage(pcd); if (ret) return ret;
-+
 +	ret = fman_pcd_fe_singletons_build(pcd); if (ret) goto err_pool;
-+
 +	ret = fman_pcd_fe_ehash_create(pcd, 0xFF, 8, 0); if (ret) goto err_sg;
-+
 +	ret = fman_pcd_fe_enq_build(pcd, fqid, 0); if (ret) goto err_ehash;
-+
 +	ret = fman_pcd_fe_hash_build(pcd); if (ret) goto err_enq;
-+
 +	ret = fman_pcd_fe_enter_build(pcd, 0); if (ret) goto err_hash;
 +
 +	if (enter_off) *enter_off = (u32)pcd->fe_root_ad_off;
-+
 +	pr_info("fman_pcd: FE chain built (enter=0x%lx)\n", pcd->fe_root_ad_off);
-+
 +	return 0;
 +
-+err_hash: fman_pcd_fe_hash_free(pcd);
-+
-+err_enq:  fman_pcd_fe_enq_free(pcd);
-+
-+err_ehash: fman_pcd_fe_ehash_free(pcd);
-+
-+err_sg:   fman_pcd_fe_singletons_free(pcd);
-+
-+err_pool: fman_pcd_fe_pool_disengage(pcd);
-+
++err_hash:
++	fman_pcd_fe_hash_free(pcd);
++err_enq:
++	fman_pcd_fe_enq_free(pcd);
++err_ehash:
++	fman_pcd_fe_ehash_free(pcd);
++err_sg:
++	fman_pcd_fe_singletons_free(pcd);
++err_pool:
++	fman_pcd_fe_pool_disengage(pcd);
 +	return ret;
-+
 +}
-+
 +EXPORT_SYMBOL_GPL(fman_pcd_fe_build_chain);
 +
 +void fman_pcd_fe_teardown_chain(struct fman_pcd *pcd)
-+
 +{
-+
-+	fman_pcd_fe_enter_free(pcd); fman_pcd_fe_hash_free(pcd);
-+
-+	fman_pcd_fe_enq_free(pcd); fman_pcd_fe_ehash_free(pcd);
-+
-+	fman_pcd_fe_singletons_free(pcd); fman_pcd_fe_pool_disengage(pcd);
-+
++	fman_pcd_fe_enter_free(pcd);
++	fman_pcd_fe_hash_free(pcd);
++	fman_pcd_fe_enq_free(pcd);
++	fman_pcd_fe_ehash_free(pcd);
++	fman_pcd_fe_singletons_free(pcd);
++	fman_pcd_fe_pool_disengage(pcd);
 +}
-+
 +EXPORT_SYMBOL_GPL(fman_pcd_fe_teardown_chain);
 +
 +bool fman_pcd_fe_chain_is_built(struct fman_pcd *pcd)
-+
 +{
-+
 +	return pcd->fe_refcount > 0 && pcd->fe_root_ad_off != 0;
-+
 +}
-+
 +EXPORT_SYMBOL_GPL(fman_pcd_fe_chain_is_built);
 +
- 
  /* Dequeue one pool slot, program it, and park it on the singleton list. */
  static int fman_pcd_fe_singleton_one(struct fman_pcd *pcd,
-@@ -2361,7 +2425,45 @@ static void fman_pcd_fe_build_contexts(struct fman_pcd *pcd)
- 		p.u.transition.next_ad_off = pcd->fe_exit_off;
- 		fman_pcd_fe_context_build(fe, FMAN_FE_TRANSITION_CTX_OFF, &p);
- 	}
-+}}
-+
-+int fman_pcd_fe_build_chain(struct fman_pcd *pcd, u32 fqid, u32 *enter_off)
-+{
-+	int ret;
-+	ret = fman_pcd_fe_pool_engage(pcd); if (ret) return ret;
-+	ret = fman_pcd_fe_singletons_build(pcd); if (ret) goto err_pool;
-+	ret = fman_pcd_fe_ehash_create(pcd, 0xFF, 8, 0); if (ret) goto err_sg;
-+	ret = fman_pcd_fe_enq_build(pcd, fqid, 0); if (ret) goto err_ehash;
-+	ret = fman_pcd_fe_hash_build(pcd); if (ret) goto err_enq;
-+	ret = fman_pcd_fe_enter_build(pcd, 0); if (ret) goto err_hash;
-+	if (enter_off) *enter_off = (u32)pcd->fe_root_ad_off;
-+	pr_info("fman_pcd: FE chain built (enter=0x%lx)\n", pcd->fe_root_ad_off);
-+	return 0;
-+err_hash: fman_pcd_fe_hash_free(pcd);
-+err_enq:  fman_pcd_fe_enq_free(pcd);
-+err_ehash: fman_pcd_fe_ehash_free(pcd);
-+err_sg:   fman_pcd_fe_singletons_free(pcd);
-+err_pool: fman_pcd_fe_pool_disengage(pcd);
-+	return ret;
-+}
-+EXPORT_SYMBOL_GPL(fman_pcd_fe_build_chain);
-+
-+void fman_pcd_fe_teardown_chain(struct fman_pcd *pcd)
-+{
-+	fman_pcd_fe_enter_free(pcd); fman_pcd_fe_hash_free(pcd);
-+	fman_pcd_fe_enq_free(pcd); fman_pcd_fe_ehash_free(pcd);
-+	fman_pcd_fe_singletons_free(pcd); fman_pcd_fe_pool_disengage(pcd);
- }
-+EXPORT_SYMBOL_GPL(fman_pcd_fe_teardown_chain);
-+
-+bool fman_pcd_fe_chain_is_built(struct fman_pcd *pcd)
-+{
-+	return pcd->fe_refcount > 0 && pcd->fe_root_ad_off != 0;
-+}
-+EXPORT_SYMBOL_GPL(fman_pcd_fe_chain_is_built);
-+
-+/*
-+
- 
- /*
-  * fe_arm - arm the FE-VM datapath on a single FMan RX port (Phase 1
+
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
 index 98e870c15..799843fb3 100644
 --- a/include/linux/fsl/fman_pcd.h

@@ -6,7 +6,7 @@ index dd7a52cef..90c9c2151 100644
  	.write		= fman_pcd_fe_flow_write,
  	.llseek		= seq_lseek,
  	.release	= single_release,
-+};};
++};
 +
 +
 +
