@@ -1,0 +1,141 @@
+From: ASK2 MISS-path + FQ ownership fix
+Subject: [PATCH] fman_pcd: fe_arm kernq + miss verbs for MISS→kernel (0147)
+
+Currently the FE-VM t_ExtHashFe MISS link (w6) points to the Exit singleton
+which deallocates unmatched frames.  Every packet that doesn't HIT a flow is
+silently dropped when ASK is engaged — the same miss-blackhole ASK 1.x had.
+
+Fix: two new verbs on the existing fe_arm debugfs node:
+
+  echo "kernq <fqid>" > fe_arm   — build kernel-return ENQ (MISS target)
+  echo "miss <off>"   > fe_arm   — rewrite t_ExtHashFe w6 to kernq
+
+Build order for MISS-safe arm: pool→singletons→ehash→enq→kernq→hashfe
+(autodetects kernq for MISS)→enter→arm engage.
+
+The hashfe builder now auto-wires MISS to fe_kernq_off when set.
+
+Signed-off-by: ASK2 Phase 2
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -158,6 +158,7 @@ struct fman_pcd {
+ 	u32 fe_mux_off;
+ 	u32 fe_transition_off;
+ 	u32 fe_exit_off;
++	u32 fe_kernq_off;
+ 	u32 fe_enq_pool;
+ 	u32 fe_enq_fqid;
+ 	struct list_head fe_enq;
+@@ -1930,6 +1931,13 @@ static int fman_pcd_fe_hashfe_build(struct fman_pcd *pcd)
+ 	p.nia		= 0;
+ 	p.ni		= 0;
+ 
++	/* Prefer kernel-return ENQ for MISS when available. */
++	if (pcd->fe_kernq_off) {
++		p.ad[6] = pcd->fe_kernq_off;
++		pr_info("fman_pcd: t_ExtHashFe MISS -> fe_kernq 0x%x\n",
++			pcd->fe_kernq_off);
++	}
++
+ 	/* MISS link: Exit singleton deallocates the frame. */
+ 	ret = fman_pcd_fe_build_obj(muram, &p, pcd->fe_hashfe_off,
+ 				    sizeof(p));
+@@ -2128,6 +2136,83 @@ static void fman_pcd_fe_build_contexts(struct fman_pcd *pcd)
+ 	}
+ }
+ 
++/* Build a kernel-return ENQ for the MISS path.  Uses the same enq_build
++ * as fe_enq; the new ENQ goes into pcd->fe_enq list alongside the HIT ENQ.
++ * The offset is stored in pcd->fe_kernq_off so hashfe_build can wire it
++ * into t_ExtHashFe w6 (MISS link).
++ */
++static int fman_pcd_fe_kernq_build(struct fman_pcd *pcd, u32 fqid)
++{
++	struct fman_pcd_fe_obj *obj;
++	int ret;
++
++	/* Reuse the existing enq builder — fman_pcd_fe_enq_build() is
++	 * static in this file.  next_fe_off=0: terminal ENQ (no chained FE).
++	 */
++	ret = fman_pcd_fe_enq_build(pcd, fqid, 0);
++	if (ret)
++		return ret;
++
++	/* The new ENQ is at the tail of fe_enq list. */
++	obj = list_last_entry(&pcd->fe_enq, struct fman_pcd_fe_obj, node);
++	pcd->fe_kernq_off = obj->muram_off;
++
++	pr_info("fman_pcd: fe_kernq built at MURAM off 0x%x FQID 0x%x\n",
++		obj->muram_off, fqid);
++	return 0;
++}
++
++/* Rewrite t_ExtHashFe word 6 (MISS link) to a new target offset. */
++static int fman_pcd_fe_miss_set(struct fman_pcd *pcd, u32 miss_off)
++{
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	void __iomem *fe;
++
++	if (!pcd->fe_hashfe_off) {
++		pr_err("fman_pcd: fe_miss: t_ExtHashFe not built\n");
++		return -EINVAL;
++	}
++	if (!muram)
++		return -ENODEV;
++
++	fe = fman_muram_offset_to_vbase(muram, pcd->fe_hashfe_off);
++	/* w6 is at byte offset 24 (6 words × 4 bytes) */
++	iowrite32be(miss_off, (u32 __iomem *)fe + 6);
++	pr_info("fman_pcd: t_ExtHashFe w6 (MISS) rewritten to 0x%08x\n",
++		miss_off);
++	return 0;
++}
++
++/* Parse an unsigned integer from the verb argument. */
++static int fe_arm_parse_u32(const char *s, u32 *val)
++{
++	unsigned long v;
++	char *end;
++
++	while (*s == ' ' || *s == '\t')
++		s++;
++	if (*s == '\0')
++		return -EINVAL;
++	v = simple_strtoul(s, &end, 0);
++	if (end == s || v > 0xFFFFFFFFu)
++		return -EINVAL;
++	*val = (u32)v;
++	return 0;
++}
++
++/* Dispatch extra fe_arm verbs. */
++static int fe_arm_extra_verbs(struct fman_pcd *pcd, const char *cmd)
++{
++	u32 val;
++
++	if (strncmp(cmd, "kernq", 5) == 0)
++		return fe_arm_parse_u32(cmd + 5, &val)
++			? -EINVAL : fman_pcd_fe_kernq_build(pcd, val);
++	if (strncmp(cmd, "miss", 4) == 0)
++		return fe_arm_parse_u32(cmd + 4, &val)
++			? -EINVAL : fman_pcd_fe_miss_set(pcd, val);
++	return -EOPNOTSUPP;
++}
++
+ /*
+  * fe_arm - arm the FE-VM datapath on a single FMan RX port (Phase 1
+  * one-shot experiment port, board patch 0132).
+@@ -2166,6 +2251,10 @@ fman_pcd_fe_arm_write(struct file *filp, const char __user *buf,
+ 		ret = fman_pcd_fe_arm_engage(pcd, args);
+ 	else if (strncmp(cmd, "disengage", 9) == 0)
+ 		ret = fman_pcd_fe_arm_disengage(pcd, args);
++	else {
++		ret = fe_arm_extra_verbs(pcd, cmd);
++		if (ret == -EOPNOTSUPP)
++			ret = -EINVAL;
++	}
+ 
+ 	return ret ? ret : count;
+ }

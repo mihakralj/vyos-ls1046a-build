@@ -716,6 +716,10 @@ cp "$BOARD_PATCH_DIR/0145-dpaa-flow-offload-backend-slot.patch" "$KERNEL_PATCHES
 # Contexts (ENQ/MUX/Transition) are built immediately before the AC_CC arm
 # reprograms KeyGen/BMI, so the FE-VM can resolve HIT→ENQ and MISS→Exit.
 cp "$BOARD_PATCH_DIR/0146-fman-pcd-fe-context-build-integration.patch" "$KERNEL_PATCHES/"
+# 0147: fe_arm kernq + miss verbs — kernel-return ENQ for MISS path.
+# Prevents the miss-blackhole (all unmatched frames silently dropped when
+# ASK is engaged).  See ASK2-DEVELOPMENT-PLAN.md §4.2.
+cp "$BOARD_PATCH_DIR/0147-fman-pcd-fe-kernq-miss-fix.patch" "$KERNEL_PATCHES/"
 
 # ── Staging-completeness guard ────────────────────────────────────────
 # Every kernel/common/patches/board/*.patch must either be cp'd above or
