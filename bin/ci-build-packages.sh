@@ -232,6 +232,17 @@ for package in $packages; do
     else
       echo "### Removing any stale linux source tree before kernel build (force re-download)"
       rm -rf linux linux-[0-9]* linux-*.tar.xz linux-*.tar.sign 2>/dev/null || true
+      echo "### Pre-fetching kernel ${KVER} from git.kernel.org..."
+      GIT_URL="https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/snapshot/linux-${KVER}.tar.gz"
+      curl -fsSL -o "linux-${KVER}.tar.gz" "$GIT_URL"
+      if [ -f "linux-${KVER}.tar.gz" ]; then
+        echo "### Extracting linux-${KVER}.tar.gz ..."
+        tar xzf "linux-${KVER}.tar.gz"
+        echo "### Kernel source extracted to linux-${KVER}/"
+        ln -sf "linux-${KVER}" linux
+      else
+        echo "### WARNING: kernel download failed, falling back to build.py native fetch"
+      fi
       ./build.py --packages linux-kernel
     fi
   elif [ "$SKIP_VYOS1X_BUILD" -eq 1 ]; then
