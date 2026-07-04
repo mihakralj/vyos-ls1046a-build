@@ -716,10 +716,11 @@ cp "$BOARD_PATCH_DIR/0145-dpaa-flow-offload-backend-slot.patch" "$KERNEL_PATCHES
 # Contexts (ENQ/MUX/Transition) are built immediately before the AC_CC arm
 # reprograms KeyGen/BMI, so the FE-VM can resolve HIT→ENQ and MISS→Exit.
 cp "$BOARD_PATCH_DIR/0146-fman-pcd-fe-context-build-integration.patch" "$KERNEL_PATCHES/"
-# 0147: fe_arm kernq + miss verbs — kernel-return ENQ for MISS path.
-# Prevents the miss-blackhole (all unmatched frames silently dropped when
-# ASK is engaged).  See ASK2-DEVELOPMENT-PLAN.md §4.2.
-cp "$BOARD_PATCH_DIR/0147-fman-pcd-fe-kernq-miss-fix.patch" "$KERNEL_PATCHES/"
+# 0147: fe_arm kernq + miss verbs — temporarily removed (parked as .hold).
+# Multiple hand-written bugs: non-existent struct fields, undefined functions.
+# Not needed for M2 gate (MISS path only affects unmatched packets).
+# Will be re-introduced after 0148 ships and the code is properly generated.
+#cp "$BOARD_PATCH_DIR/0147-fman-pcd-fe-kernq-miss-fix.patch" "$KERNEL_PATCHES/"
 # 0148: Export FE chain builder wrapper (fman_pcd_fe_build_chain / _teardown_chain)
 # for OOT modules (ask.ko).  Builds the full dormant chain in one call.
 cp "$BOARD_PATCH_DIR/0148-fman-pcd-export-fe-chain-builder.patch" "$KERNEL_PATCHES/"
