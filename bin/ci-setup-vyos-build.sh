@@ -240,6 +240,21 @@ if [ -n "$ASK_KERNEL_DEB" ]; then
   else
     echo "WARN: Could not parse kernel version from $(basename "$ASK_KERNEL_DEB"); leaving defaults.toml alone"
   fi
+elif [ "${FLAVOR:-default}" == "ask" ]; then
+  # No ASK_KERNEL_TAG pre-built .deb staged (the normal case now — the
+  # kernel is built from source in bin/ci-build-packages.sh's FLAVOR=ask
+  # branch, and its .deb won't exist until AFTER this script runs). We
+  # still know the target version from common.sh's KERNEL_VERSION
+  # (versions.lock / sync-kernel-version.sh), so pin directly instead of
+  # leaving defaults.toml at the upstream mainline default.
+  if [ -n "${KERNEL_VERSION:-}" ]; then
+    echo "### Pinning defaults.toml kernel_version -> $KERNEL_VERSION (from-source build, KERNEL_VERSION)"
+    sed -i -E "s/^(\\s*kernel_version\\s*=\\s*)\"[^\"]+\"/\\1\"$KERNEL_VERSION\"/" \
+      vyos-build/data/defaults.toml
+    grep -E '^\s*kernel_version\s*=' vyos-build/data/defaults.toml || true
+  else
+    echo "WARN: FLAVOR=ask but KERNEL_VERSION is unset; leaving defaults.toml alone"
+  fi
 else
   echo "### No ASK kernel .deb staged in $PKG_CHROOT — leaving defaults.toml kernel_version untouched"
 fi
@@ -310,6 +325,39 @@ fi
 if [ -f board/mok/MOK.key ]; then
   cp board/mok/MOK.key vyos-build/data/certificates/vyos-dev-2025-linux.key
   cp board/mok/MOK.pem vyos-build/data/certificates/vyos-dev-2025-linux.pem
+fi
+
+### VyOS vanity SSH key — bake into ISO for VyManager self-management.
+# On fresh install, VyManager needs the vyos user's private key to SSH
+# into localhost.  The key is deployed via $VYOS_VANITY_KEY env (CI secret)
+# or read from ~/.ssh/vyos_key (local builds on Cobalt 100).
+VANITY_KEY_SRC="${VYOS_VANITY_KEY:-}"
+if [ -z "$VANITY_KEY_SRC" ] && [ -f "$HOME/.ssh/vyos_key" ]; then
+  VANITY_KEY_SRC="$HOME/.ssh/vyos_key"
+fi
+
+if [ -n "$VANITY_KEY_SRC" ]; then
+  echo "### Baking VyOS vanity SSH key into ISO..."
+  mkdir -p "$CHROOT/home/vyos/.ssh"
+
+  if [ -f "$VANITY_KEY_SRC" ]; then
+    # File path: copy the key directly
+    cp "$VANITY_KEY_SRC" "$CHROOT/home/vyos/.ssh/id_ed25519"
+  else
+    # Raw key content (from CI secret env var)
+    echo "$VANITY_KEY_SRC" > "$CHROOT/home/vyos/.ssh/id_ed25519"
+  fi
+
+  chmod 600 "$CHROOT/home/vyos/.ssh/id_ed25519"
+
+  # Derive public key from private and add to authorized_keys
+  ssh-keygen -y -f "$CHROOT/home/vyos/.ssh/id_ed25519" \
+    > "$CHROOT/home/vyos/.ssh/authorized_keys" 2>/dev/null || true
+  chmod 644 "$CHROOT/home/vyos/.ssh/authorized_keys"
+  echo "###   Vanity key installed ($(ssh-keygen -l -f "$CHROOT/home/vyos/.ssh/id_ed25519" 2>&1 | awk '{print $2}'))"
+else
+  echo "### No VyOS vanity key found — ISO will ship without it."
+  echo "###   Set VYOS_VANITY_KEY env or place key at ~/.ssh/vyos_key."
 fi
 
 ### Apt preferences pin: block upstream linux-image-*-vyos.
@@ -460,6 +508,12 @@ chmod +x "$HOOKS/98-fancontrol.chroot"
 cp data/hooks/99-mask-services.chroot "$HOOKS/99-mask-services.chroot"
 chmod +x "$HOOKS/99-mask-services.chroot"
 
+# nxp-sdk: libcli.so.1.10.8 ships in /usr/local/bin/ (from the ask-userspace
+# .deb), but the ls1046a-ask.service ExecStartPre poll guard and ldconfig both
+# expect /usr/local/lib/. Symlink so CMM starts without the boot crash-loop.
+cp data/hooks/95-libcli-symlink.chroot "$HOOKS/95-libcli-symlink.chroot"
+chmod +x "$HOOKS/95-libcli-symlink.chroot"
+
 ### NOTE: ethernet port remapping was deleted on 2026-05-15. The previous
 ### eth0..eth4 rename layer (fman-port-name + 10-fman-port-order.rules +
 ### 00-fman.link) lived in the squashfs, but the predictable-naming race
@@ -507,30 +561,13 @@ chmod +x "$CHROOT/usr/local/bin/caam-check"
 ### MEMAC MACs + MDIO buses, the PCD (KeyGen/CC/HM/Policer) capability
 ### posture incl. the /sys/kernel/debug/fman_pcd classify harness, jumbo
 ### frames, eth0-eth4 (driver/MAC/MTU/AF_XDP cap), QMan/BMan liveness, and
-### the AF_XDP zero-copy xsk_* counters (chaining to xsk-zc-check). Exit
-### non-zero if a controller/driver/port is missing — mirrors sfp-check /
+### eth0-eth4 AF_XDP counters. Exit non-zero if a controller/driver/port is
+### missing — mirrors sfp-check /
 ### fan-check / caam-check so monit/Nagios can poll it. Flavor-agnostic
 ### (DPAA1 is the same block on every LS1046A board).
 cp board/scripts/dpaa1-check "$CHROOT/usr/local/bin/dpaa1-check"
 chmod +x "$CHROOT/usr/local/bin/dpaa1-check"
 
-### DPAA1 AF_XDP true-ZC RX gate-counter reader: `xsk-zc-check` reads the
-### 20-counter xsk_* ethtool suite (in particular the four sub-increment-4
-### entry-gate counters: xsk_zc_eligible / xsk_zc_rx_armed /
-### xsk_zc_rx_recovered / xsk_fill_guard_block — patches 0093/0094/0095/0096
-### under kernel/common/patches/board/) on eth3/eth4 and renders the
-### sub-increment-4 entry verdict the spec gates on (§6.1.12/§6.1.13 of
-### specs/dpaa1-afxdp-modernization-spec.md): dormant (no ZC bind, all
-### xsk_zc_* counters 0 — the expected shipping state), ZC-armed (armed AND
-### xsk_fill_guard_block==0 → preconditions met), or fault (fill_guard>0 /
-### hard attach-DMA error). Exit 0 healthy / 1 fault / 2 not-LS1046A-or-no-
-### xsk-counters — usable as a Nagios/monit probe. Mirrors sfp-check /
-### fan-check / caam-check style. Flavor-agnostic: the AF_XDP datapath
-### patches are in the common board patch set, so the counters exist on
-### every flavor; on a shipping image with no ZC producer bound the verdict
-### is the expected "dormant".
-cp board/scripts/xsk-zc-check "$CHROOT/usr/local/bin/xsk-zc-check"
-chmod +x "$CHROOT/usr/local/bin/xsk-zc-check"
 
 ### ASK2 stack health helper: `ask-check` reports the landed state of the
 ### ASK2 in-tree kernel patches (0001 caam-qi-share, 0002 dpaa-eth-flow-block,
@@ -565,21 +602,6 @@ chmod +x "$CHROOT/usr/local/bin/ask-check"
 cp board/scripts/firmware-check "$CHROOT/usr/local/bin/firmware-check"
 chmod +x "$CHROOT/usr/local/bin/firmware-check"
 
-### ASK2 reversible-mode-switch gate: `pcd-snapshot` (Python 3) captures and
-### diffs the FMan PCD silicon state that the S0<->S1 dataplane mode-switch
-### (specs/dual-dataplane.md M1) mutates — KeyGen schemes (RSS vs AC_CC, read via
-### the KG indirect Action Register), per-port BMI next-engine bind
-### (fmbm_rfpne/rccb/rgpr), the static CC tree / FM_CTL params-page MURAM
-### region, and the gen_pool MURAM budget (/sys/kernel/debug/fman_pcd/0/
-### muram_budget). `capture` snapshots the S0 baseline; `diff` asserts the
-### live state still equals it after a S1->S0 teardown, so the M1 soak can
-### prove every engage/disengage cycle was fully reversible without a reboot.
-### Exit 0 clean / 1 drift|fault / 2 not-LS1046A — usable as a soak gate.
-### Mirrors firmware-check / fan-check / caam-check style; installed without a
-### .py suffix (fan-pid / led / caam-check convention). Flavor-agnostic (the
-### board PCD substrate is in the common patch set on every image).
-cp board/scripts/pcd-snapshot "$CHROOT/usr/local/bin/pcd-snapshot"
-chmod +x "$CHROOT/usr/local/bin/pcd-snapshot"
 
 ### Mono Gateway DK LP5812 status LED control: `led` (Python 3) supports
 ### three input forms — palette index, four decimals R G B W, and 8-digit
@@ -654,6 +676,37 @@ chmod +x "$HOOKS/96-enable-services.chroot"
 # /lib/modules/$KVER/extra/ but does not auto-load it — that's this
 # hook's job. Staged UNCONDITIONALLY: the flavor split was retired
 # 2026-06-14 (single image carries the dormant ask.ko), so this must
+# Copy ASK offload .deb into packages.chroot so it's installed at chroot time.
+# Use glob to find the latest version (1.0.1, 1.0.2, etc.)
+#
+# DISABLED 2026-07-02: release/ask-offload_*.deb is a stale, pre-built
+# snapshot (dated 2026-06-29, committed to git from an earlier manual
+# build/deploy cycle before the from-source pipeline below was working
+# end-to-end). Its ENTIRE content is now built fresh every CI run by
+# bin/ci-build-ask-modules.sh (cdx.ko/fci.ko/auto_bridge.ko) and
+# bin/ci-build-ask-userspace.sh (cmm/dpa_app/libcli.so, cdx_cfg.xml/
+# cdx_pcd.xml/cdx_sp.xml/hxs_pdl_v3.xml, ask-ct-setup.service/
+# ls1046a-ask.service, vyos-ask-ct-fix — confirmed via `dpkg-deb
+# --contents release/ask-offload_1.0.4_arm64.deb` vs. grepping both
+# builder scripts for the same paths). Staging BOTH into the same
+# packages.chroot/ causes a hard dpkg conflict: "trying to overwrite
+# '/etc/cdx_cfg.xml', which is also in package ask-userspace-6.12.49-
+# vyos" (CI run 28567653514) — ask-offload.deb is also strictly staler
+# than the from-source build (predates dozens of this-session kernel/
+# userspace fixes). If the from-source ASK userspace build is ever
+# intentionally skipped again (e.g. ASK_KERNEL_TAG fallback mode), this
+# will need a real conditional re-enable, not just an unconditional
+# stage — don't blindly uncomment.
+# ASKOFFLOAD_DEB=$(ls -t release/ask-offload_*_arm64.deb 2>/dev/null | head -1)
+# if [ -n "$ASKOFFLOAD_DEB" ] && [ -f "$ASKOFFLOAD_DEB" ]; then
+#   mkdir -p vyos-build/data/live-build-config/packages.chroot
+#   cp -v "$ASKOFFLOAD_DEB" vyos-build/data/live-build-config/packages.chroot/
+#   echo "### staged ask-offload.deb ($ASKOFFLOAD_DEB) into packages.chroot/"
+# else
+#   echo "### WARNING: no release/ask-offload_*_arm64.deb found — ASK artifacts MISSING from ISO"
+# fi
+echo "### ask-offload.deb staging SKIPPED (superseded by from-source ask-userspace/ask-modules build)"
+
 # match the kernel/flavors/ask oot-module build, which is itself wired
 # unconditionally into the common build. A FLAVOR gate here silently
 # ships ask.ko installed-but-never-loaded (no /sys/kernel/debug/ask/
