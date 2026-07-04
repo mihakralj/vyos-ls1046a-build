@@ -1,5 +1,5 @@
 # ASK2 Development Plan — from dormant substrate to operational offload
-**Version 1.0.0 · 2026-06-16 · HADS 1.0.0**
+**Version 1.1.0 · 2026-07-04 · HADS 1.0.0**
 
 ---
 
@@ -16,12 +16,28 @@ and those documents disagree, they win. Section 9 is the live execution log.
 
 ---
 
-## 1. Current state (ground truth, 2026-06-16)
+## 1. Current state (ground truth, refreshed 2026-07-04)
 
 **[SPEC]**
 The silicon-programming substrate is complete, reversible, and HW-proven
-dormant. The remaining work is five capabilities, surfaced as the five `[FAIL]`
-lines of `board/scripts/ask-check` run on the lab board (192.168.1.190, image
+dormant. Since v1.0.0 the following additionally landed on this branch
+(compile-verified on 6.18.34 arm64, shipping dormant):
+
+| Increment | State | Anchor |
+|---|---|---|
+| Real AC_CC arm encoding (`KGSE_MODE 0x80000006`, replaces the `0132` CCBS placebo) | AUTHORED + compiled, **awaiting the one-shot board arm** | board `0133` (commit `fe73b01`→`c4d3bfd` series) |
+| CAAM QI descriptor-sharing API in the **common** tree, CAAM stack forced `=y` | **LANDED** — clears the Phase 4(a) forward-port task | board `0134` (commit `bfbfbe7`) |
+| FE context builder (`FmPcdCcBuildContextByFE` port from lf-5.4 L8954) | LANDED, dormant | board `0135` (commit `d73dace`) |
+| TX confirm bypass (`fman_port_set_silicon_hit_release_mode/_all`) — kills the ~20% QMan DQRR softirq floor | LANDED, dormant, wired into `ask_hw.c` engage/disengage/teardown | board `0136` (commits `d73dace`/`31b7f6c`) |
+| MANIP create + chain API (`fman_pcd_manip_create/chain_create/hmtd_off`) | LANDED, dormant; **v2 fixed `HMAN_OC_IP_MANIP` 0x36→0x34 + HMCD_LAST intermediate clearing** | board `0137` (commits `7fa8679`/`1e28dc0`) |
+| BMan IVCI crash fix in AF_XDP NAPI refill (`bm_buffer_set_bpid` on all 8 slots) | LANDED | board `0139` (commit `1a93531`) |
+| Flow-offload backend slot (external registration API for `dpaa_setup_tc`) | LANDED, wired into CI staging | board `0145` (commit `c4d3bfd`) |
+| Legacy ASK flavor patch stack (0001–0065) | ARCHIVED to `archive-2026-06-21-pre-6.18.34/` — common board series 0092–0145 carries everything | commit `c4d3bfd` |
+| NXP-RM/SDK byte-level compliance review of the whole datapath (KG/CC/FE-VM/HMCT/TX-bypass) | PASS — every constant verified vs RM + SDK; one critical bug found+fixed (0137 v2) | qdrant `sdk-deep-review-findings` 2026-06-23 |
+| Authoritative DTS/DTB sync from `we-are-mono/OpenWRT-ASK` `mono-25.12.0-rc2` | DONE 2026-06-26 (base DTS + SDK overlay + 13 DTSI; `ci-compile-mono-dtb.sh` SDK gate) | `board/dtb/`, qdrant 2026-06-26 |
+
+The remaining work is the five capabilities, surfaced as the `[FAIL]`
+lines of `board/scripts/ask-check` (baseline run: board 192.168.1.190, image
 `2026.06.17-0315-rolling`, kernel `6.18.34-vyos`):
 
 | Layer | State | Anchor |
@@ -29,10 +45,10 @@ lines of `board/scripts/ask-check` run on the lab board (192.168.1.190, image
 | FMan PCD subsystem (KeyGen / CC / HM / Policer) | DONE, shipping | board patches `0092`/`0097`–`0100` (commit `f307193`) |
 | Reversible mode-switch API + `pcd-snapshot` | DONE, HW-proven (100× control-plane soak, 0 drift) | `0105`/`0106`/`0116`/`0129` |
 | FE/ehash VM substrate (dormant chain) | BUILT, DORMANT | `0122`→`0131`, byte-verifiable via `fe_*` debugfs |
-| ask.ko control plane (genl, flow table, debugfs, engage entry) | BUILT | `ask_flow_offload.c` 92 KB, `ask_hw.c` 32 KB, genl id 0x1e |
-| Classifier→FE root link armed | **FAIL** | the single datapath gate |
+| ask.ko control plane (genl, flow table, debugfs, engage entry, TX-bypass wiring) | BUILT | `ask_flow_offload.c` 92 KB, `ask_hw.c` 32 KB, genl id 0x1e |
+| Classifier→FE root link armed with **real AC_CC** | **FAIL** — `0133` authored, one-shot board experiment pending | the single datapath gate |
 | `ask_bridge.ko` (L2 switchdev) | **FAIL** (stub 417 B) | `kernel/flavors/ask/oot-modules/ask/ask_bridge.c` |
-| CAAM descriptor-sharing API | **FAIL** (`0001` not in common tree) | symbol `caam_qi_ext_consumer_register` absent on board |
+| CAAM descriptor-sharing API | ~~FAIL~~ **LANDED in tree** (board `0134`) — board re-verify pending | `caam_qi_ext_consumer_register` |
 | ESP hardware-offload advertise | **FAIL** (stub 1 KB) | `ask_xfrm.c` |
 | `set system offload ask` CLI | **FAIL** (not started) | — |
 
@@ -52,6 +68,50 @@ as "NOT STARTED", but on disk its control plane is substantially built (the
 is real). `plans/COMPLETION-PLAN.md` §6 still names the now-dead Fork-A
 "MANIP-dedup / `FORWARD_FQ_WITH_MANIP`" as the M2 next step. Section 8 of this
 plan enumerates the doc corrections.
+
+### 1.1 ASK 1.x vendor-stack oracle findings (nxp-sdk lineage, 2026-06-23 → 07-02)
+
+**[NOTE]**
+In parallel with this branch, the `nxp-sdk` lineage ran the ORIGINAL NXP ASK 1.x
+stack (lf-6.12.49 SDK kernel + `cdx.ko`/`fci.ko`/`dpa_app`/`cmm`) on the same
+board as a live oracle. That effort is a *reference*, not the implementation
+path (91 kLOC legacy vs ~12 kLOC ASK2), but it produced silicon facts ASK2 must
+absorb:
+
+**[SPEC]** Findings that de-risk or redirect ASK2 work:
+
+1. **The 210.10.1 ucode accepts full PCD programming** — `dpa_app` v4.03.0
+   (we-are-mono/ASK `beefead3`) programmed the complete KG + CC + ehash + policer
+   baseline with `rc=0`, all PCD ioctls passing. The silicon side of Fork B is
+   proven programmable end-to-end by the vendor tool; residual ASK2 risk is
+   confined to our re-implementation fidelity, not silicon capability.
+2. **Bridge/L2 offload proven end-to-end** (2026-06-28, commit `d77dbe1` on
+   nxp-sdk): CMM→FCI→CDX→FMan pipeline live, PCD counters incrementing on
+   bridge ports, and — notably — **without `auto_bridge.ko`** (the CVAN 25.12.4
+   reference also omits it). Confirms ASK2's Phase-3 plan of a small switchdev
+   notifier in `ask_bridge.c` is the right scale; no auto_bridge-style
+   netfilter-hook machinery is needed.
+3. **PCD miss-action blackhole lesson**: `dpa_app`'s empty-CC-tree baseline
+   with catch-all miss rules routed unmatched traffic to disconnected FQs →
+   total traffic blackhole + QMan ErrInt flood. ASK2's already-proven
+   **EXIT-DEALLOCATE MISS disposition** (§9 arm result: empty store, 0% ping
+   loss under arm) is architecturally superior — keep the miss path terminating
+   in EXIT, never in an unconnected FQ.
+4. **PCD state persists across module reloads** — only a reboot/hardware reset
+   clears FMan PCD registers on the vendor stack. Reinforces the §3
+   forward+inverse-in-the-same-patch discipline: ASK2 must never rely on
+   `rmmod` as a cleanup path; every write needs its byte-exact inverse.
+5. **VyOS notrack is a recurring cross-effort blocker**: VyOS's default
+   `vyos_conntrack` raw-chain notrack fallthrough disables tracking for
+   untranslated traffic, starving `nf_flow_table` (blocked ASK2 M2 measurement
+   2026-05-20 AND the ASK1 conntrack path 2026-06-28). Phase 2's DUT prep must
+   install a ct-touching rule (or the Phase 5 CLI must own this centrally)
+   before any offload-promotion measurement is trusted.
+6. **N/A to ASK2 (SDK-kernel-only problems)**: the vendor `enable_hooks`
+   conntrack gate, the mixed mainline/SDK driver-ownership hazard, the
+   `CDX_CTRL_DPA_SET_PARAMS` ioctl flakiness, and the SDK DTB requirements
+   (bman-portal `cell-index`, dual port compatibles) do not exist on the
+   mainline 6.18 stack this branch ships.
 
 ---
 
@@ -184,13 +244,16 @@ MURAM is full; `rmmod`/`modprobe` clean.
 ### 4.5 Phase 4 — HW IPsec  ▶ clears board §7  *(parallel with Phase 3)*
 
 **[SPEC]**
-Three tasks: (a) forward-port `0001-caam-qi-share` from
-`kernel/flavors/ask/patches/` into `kernel/common/patches/board/` and wire it
-into `bin/ci-setup-kernel.sh`'s common (not `FLAVOR=ask`) path — this restores
-`caam_qi_ext_consumer_register` in the single image; (b) implement `ask_xfrm.c`
+Three tasks: (a) ~~forward-port `0001-caam-qi-share`~~ **DONE 2026-06-17** —
+landed as common board patch `0134` (byte-identical copy of the flavor-tree
+`0001`, CAAM stack forced `=y` incl. `CONFIG_CRYPTO_DEV_FSL_CAAM_QI`); board
+re-verify of the exported `caam_qi_ext_consumer_register` symbol pending;
+(b) implement `ask_xfrm.c`
 (`xfrmdev_ops` packet-mode): set `netdev->xfrmdev_ops`, advertise
 `NETIF_F_HW_ESP`; `xdo_dev_state_add` → `caam_qi_ext_consumer_register` + ehash
 SPI flow → CAAM RX FQ; (c) fill the `ask_caam.c` descriptor-lifecycle stub.
+Do **not** advertise `NETIF_F_HW_ESP` before (b)+(c) are real — flipping the
+capability bit against a no-op `xdo_dev_state_add` silently drops all ESP.
 **Gate:** `ip xfrm state … offload packet` → SA visible, `esp-hw-offload=on`;
 ESP tunnel throughput at the M4 target; SA delete tears down the ehash row.
 
@@ -234,9 +297,9 @@ ASK completes — its exit code flips 1→0 at Phase 6.
 
 | board section [FAIL] | cleared by |
 |---|---|
-| §4 classifier→FE root link not armed | Phase 1 |
+| §4 classifier→FE root link not armed | Phase 1 (`0133` one-shot arm) |
 | §6 ask_bridge.ko not loaded | Phase 3 |
-| §7 CAAM descriptor-sharing API missing | Phase 4(a) |
+| §7 CAAM descriptor-sharing API missing | ~~Phase 4(a)~~ landed (`0134`) — flips on next board install |
 | §7 eth0 does not advertise ESP offload | Phase 4(b) |
 | §8 `set system offload ask` CLI absent | Phase 5 |
 
@@ -423,6 +486,65 @@ outstanding, and it is decoupled from the (now-complete) reversibility gate.
   balanced, every context/removed line byte-exact vs the committed
   `0132`/`0118`/`0106`, staging guard green (85/85). Gated on a CI ISO build +
   the §8.6-item-6 dormant byte-gate before the explicit one-shot arm.
+
+**[SPEC] Datapath-integration increments landed (2026-06-17 → 06-23, plan v1.1).**
+Board `0133` (real AC_CC arm — corrects the `0132` CCBS placebo, see the `[BUG]`
+above); `0134` (CAAM QI share in common tree — Phase 4(a) done); `0135` (FE
+context builder, lf-5.4 `FmPcdCcBuildContextByFE` L8954 port); `0136` (TX
+confirm bypass `fman_port_set_silicon_hit_release_mode/_all` — targets the
+~20% QMan DQRR softirq floor measured 2026-05-25, wired into `ask_hw.c`
+engage/disengage/teardown, non-fatal on error); `0137` v2 (MANIP create +
+chain API; **critical fix** `HMAN_OC_IP_MANIP` 0x36→0x34 per SDK `fm_manip.h`
+L59 + HMCD_LAST intermediate-segment clearing per `FmPcdManipChain`); `0139`
+(BMan IVCI NAPI-refill fix); `0145` (flow-offload backend slot, wired into CI).
+Legacy flavor patches 0001–0065 archived; patch-health Pass 93 / Fail 0 all
+flavors. Full-datapath byte review vs NXP RM + SDK: PASS (qdrant
+`sdk-deep-review-findings`). All increments ship dormant; none board-validated
+under traffic yet.
+
+**[NOTE] Immediate next actions (v1.1, priority order):**
+
+See `plans/NEXT-ACTIONS-ASK2.md` for the compact HADS execution checklist.
+
+1. **CI ISO build + install on the board** — everything after image
+   `2026.06.17-0315-rolling` (0133–0139, 0145, ask.ko wiring, authoritative
+   DTB) has never booted. Re-run `ask-check`; expect the CAAM §7 symbol FAIL to
+   flip.
+2. **Phase 1 one-shot arm experiment** — the §10 sequence with the `0133` real
+   AC_CC encoding: build chain → `fe_flow add` a real 8-byte test key + live
+   `fe_enq` FQID → `fe_arm engage 10 <fe_enter_off>` → ping (never flood) →
+   HIT-path verdict. This is the make-or-break M2 dispatch test; prepare the
+   `pcd-snapshot` baselines and the serial console before arming.
+3. **If HIT flows**: Phase 2 — re-point `ask_hw_offload_engage` at the FE arm,
+   wire `flow_block_cb` → ehash add/remove, engage `0136` TX bypass, install
+   the VyOS ct-touching rule (§1.1 finding 5) before measuring the M2 gate.
+4. **If HIT parks**: re-derive `get_indexed_hash_bucket` bucket-select from
+   lf-5.4 (the one residual unconfirmed byte, §9 CRC64 note) and re-gate via
+   Phase 0 byte-diff before any re-arm.
+
+**[NOTE]**
+2026-07-04 — Session wrap: qdrant analysis, nxp-sdk ASK 1.x oracle review,
+current state assessment. Deliverables:
+1. `plans/NEXT-ACTIONS-ASK2.md` created — immediate priorities checklist.
+2. This plan v1.1.0 refreshed — §1.1 oracle findings, §9 execution log update.
+3. DTB fixes applied (10G MACs status=okay, phy-connection-type=xgmii,
+   ci-compile-mono-dtb.sh skip guard, AGENTS.md reconciled, ramoops node re-added).
+4. Qdrant entry `ASK2 implementation plan refresh — 2026-07-04 session wrap`
+   stored with session findings.
+
+**Key findings this session:**
+- Phase 0 PASS confirmed on silicon (2026-06-16) — dormant FE/eHash chain byte-validated.
+- Phase 1 gated on `0133` real AC_CC arm (authored + compiled, **awaiting one-shot board experiment**).
+- ASK 1.x oracle findings (§1.1) de-risk remaining work — 6 silicon facts from nxp-sdk lineage.
+- All datapath increments (0133–0139, 0145, DTB sync) landed but **never booted on hardware**.
+- M2 acceptance gate is critical path — must pass ≥2 Gbps + ≤5% CPU.
+- The `0132` CCBS placebo bug is corrected by `0133` (real AC_CC encoding KGSE_MODE 0x80000006).
+
+**Next actions (from NEXT-ACTIONS-ASK2.md):**
+1. CI ISO build + board install (unblock Phase 1 experiment)
+2. Phase 1 one-shot AC_CC arm experiment (make-or-break M2 gate)
+3. If HIT: Phase 2 (ask.ko drives FE path + flow population)
+4. If MISS: debug FE-VM core fidelity (re-derive `get_indexed_hash_bucket`)
 
 ---
 

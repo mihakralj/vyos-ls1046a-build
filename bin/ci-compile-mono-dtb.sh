@@ -34,6 +34,34 @@ cd "${GITHUB_WORKSPACE:-.}"
 # mono-gateway-dk.dts directly. The ASK2 spec keeps the mainline FMan
 # driver and re-implements the fast-path in ask.ko / askd, so an SDK DTS
 # overlay is no longer needed.
+#
+# nxp-sdk (2026-06-26): The nxp-sdk branch runs the NXP lf-6.12.49 SDK kernel
+# with its own QBMan/FMan/DPAA driver tree. That kernel requires SDK-compatible
+# DTB properties (cell-index on bman-portal nodes, dual FMan port compatible
+# strings, fsl,bpool-ethernet-cfg, fman0-extended-args, etc.) which this script
+# does NOT produce (it compiles against mainline linux-stable includes). When
+# the SDK overlay DTS exists (board/dtb/mono-gateway-dk-sdk.dts), this script
+# SKIPS — the SDK DTB is compiled later by ci-build-packages.sh INSIDE the NXP
+# kernel tree, which has the correct SDK DTSI includes.
+
+# -- SDK-flavor gate: skip ONLY when this build actually targets the SDK
+# kernel (FLAVOR=ask). The SDK overlay DTS existing on disk is NOT enough:
+# it is present on every checkout, and mainline (default/vpp) builds still
+# need this script to refresh board/dtb/mono-gw.dtb from the base DTS
+# (ci-build-packages.sh's fallback path depends on that fresh mtime when
+# bindeb-pkg wipes the kernel .config).
+if [ -f "bin/common.sh" ]; then
+    # shellcheck disable=SC1091
+    . bin/common.sh
+fi
+if [ "${FLAVOR:-default}" = "ask" ] && [ -f "board/dtb/mono-gateway-dk-sdk.dts" ]; then
+    echo "### SKIP: FLAVOR=ask with mono-gateway-dk-sdk.dts present — SDK DTB"
+    echo "###       will be compiled by ci-build-packages.sh inside the NXP kernel"
+    echo "###       tree (which has the correct SDK DTSI includes). This mainline"
+    echo "###       compile would produce an SDK-incompatible DTB; skipping"
+    echo "###       prevents a wrong-DTB overwrite."
+    exit 0
+fi
 DTS_SRC="board/dtb/mono-gateway-dk.dts"
 DTS_BASE="board/dtb/mono-gateway-dk.dts"
 DTB_OUT="board/dtb/mono-gw.dtb"

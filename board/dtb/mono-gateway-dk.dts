@@ -21,170 +21,100 @@
 	aliases {
 		serial0 = &duart0;
 		serial1 = &duart1;
-		ethernet0 = &enet1;  /* MAC2 - left RJ45 */
-ethernet1 = &enet4;  /* MAC5 - center RJ45 */
-ethernet2 = &enet5;  /* MAC6 - right RJ45 */
-		ethernet3 = &enet6;  /* MAC9 - 10G left SFP */
-		ethernet4 = &enet7;  /* MAC10 - 10G right SFP */
+
+		/* Physical port order: left to right */
+		ethernet0 = &enet4;  /* MAC5 - 1G leftmost */
+		ethernet1 = &enet5;  /* MAC6 - 1G middle */
+		ethernet2 = &enet1;  /* MAC2 - 1G rightmost */
+		ethernet3 = &enet6;  /* MAC9 - 10G left */
+		ethernet4 = &enet7;  /* MAC10 - 10G right */
 	};
 
 	chosen {
 		stdout-path = "serial0:115200n8";
 	};
 
-reserved-memory {
-#address-cells = <2>;
-#size-cells = <2>;
-ranges;
+	/* Deliberate local addition vs the canonical we-are-mono/OpenWRT-ASK DTS:
+	 * ramoops persistent crash store — 1 MB at 0xb0000000, inside the first
+	 * System RAM bank, clear of the dynamic DPAA reserved chunks. Captures
+	 * panic backtrace + console across the panic=60 reboot into /sys/fs/pstore
+	 * (this U-Boot board has no other persistent crash path). Requires
+	 * CONFIG_PSTORE_RAM=y.
+	 */
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
 
-/* DPDK DMA buffer pool — 256MB contiguous
- * Used by fsl_usdpaa_mainline driver for DMA_MAP ioctl.
- * Address 0xc000_0000 is below 4GB DMA boundary.
- */
-usdpaa_mem: usdpaa-mem@c0000000 {
-compatible = "fsl,usdpaa-mem";
-reg = <0x0 0xc0000000 0x0 0x10000000>;
-no-map;
-};
-
-/* Ramoops persistent crash store (diagnostic) — 1 MB at 0xb0000000.
- * Inside the first System RAM bank (0x80000000-0xbfffffff), clear of the
- * usdpaa pool (0xc0000000) and the dynamic DPAA reserved chunks. Captures
- * panic backtrace + console across the panic=60 reboot so dumps land in
- * /sys/fs/pstore on the next boot (this U-Boot board has no other
- * persistent crash path). Not no-map: memblock_reserve keeps it mapped
- * cached for best cross-reboot retention. Requires CONFIG_PSTORE_RAM=y.
- */
-ramoops@b0000000 {
-compatible = "ramoops";
-reg = <0x0 0xb0000000 0x0 0x100000>;
-record-size = <0x20000>;
-console-size = <0x40000>;
-pmsg-size = <0x20000>;
-max-reason = <5>;
-ecc-size = <16>;
-};
-};
-};
-
-/*
- * Override reserved-memory compatibles for ASK/SDK staging drivers.
- *
- * Mainline fsl-ls1046a.dtsi declares bman_fbpr / qman_fqd / qman_pfdr with
- * compatible = "shared-dma-pool". The SDK staging QBMan drivers install
- * their reservation handlers via RESERVEDMEM_OF_DECLARE() matching on:
- *   - "fsl,bman-fbpr"
- *   - "fsl,qman-fqd"
- *   - "fsl,qman-pfdr"
- * With only "shared-dma-pool", the SDK handlers never run, bman_fbpr_phys /
- * qman_fqd_phys / qman_pfdr_phys remain 0 — at init time the driver prints
- * "bman-fbpr addr 0x0000000000000000" and then qm_init_pfdr() spins forever
- * on an MCR poll, hanging subsys_initcall qbman_init right after the 4
- * "Bman portal initialised" lines and before any "Qman portal initialised".
- *
- * Reference: ASK-BOOTSTRAP.md Boot #1 root cause (2026-04-05 18:04 UTC).
- */
-/*
- * IMPORTANT: compatible list must be fsl,* ONLY — not a two-element list
- * with "shared-dma-pool" as fallback.
- *
- * First attempt used
- *   compatible = "fsl,bman-fbpr", "shared-dma-pool";
- * expecting the SDK RESERVEDMEM_OF_DECLARE("fsl,bman-fbpr", ...) to win.
- * It did not. The of/reserved_mem core walks __reservedmem_of_table and
- * dispatches to the FIRST registered handler whose of_device_id matches
- * any compatible string. Link order places the generic "shared-dma-pool"
- * handler (drivers/of/of_reserved_mem.c:rmem_dma_setup) before the SDK
- * fsl,* handlers, so the node gets consumed by the generic path, the
- * SDK's dma_declare_coherent_memory() setup never runs, and the global
- * bman_fbpr_phys / qman_fqd_phys / qman_pfdr_phys variables stay 0.
- *
- * Boot log proof (shared-dma-pool fallback present):
- *   OF: reserved mem: initialized node bman-fbpr, compatible id shared-dma-pool
- *   bman-fbpr addr 0x0000000000000000 size 0x1000000
- *   qman-fqd  addr 0x0000000000000000 size 0x400000
- *   qman-pfdr addr 0x0000000000000000 size 0x2000000   ← still zero!
- *
- * Fix: strip "shared-dma-pool" entirely so only the SDK handlers can match.
- */
-&bman_fbpr {
-compatible = "fsl,bman-fbpr";
-};
-
-&qman_fqd {
-compatible = "fsl,qman-fqd";
-};
-
-&qman_pfdr {
-compatible = "fsl,qman-pfdr";
-};
-
-/ {
+		ramoops@b0000000 {
+			compatible = "ramoops";
+			reg = <0x0 0xb0000000 0x0 0x100000>;
+			record-size = <0x20000>;
+			console-size = <0x40000>;
+			pmsg-size = <0x20000>;
+			max-reason = <5>;
+			ecc-size = <16>;
+		};
+	};
 
 	leds {
 		compatible = "gpio-leds";
 
 		/* SFP+ Port 0 LEDs - Activity/Link */
-		sfp0_link {
+		led_sfp0_link: sfp0_link {
 			label = "sfp0:link";
 			gpios = <&gpio2 17 GPIO_ACTIVE_HIGH>;
 			default-state = "off";
 		};
 
-		sfp0_activity {
+		led_sfp0_activity: sfp0_activity {
 			label = "sfp0:activity";
 			gpios = <&gpio2 18 GPIO_ACTIVE_HIGH>;
 			default-state = "off";
-			linux,default-trigger = "netdev";
 		};
 
 		/* SFP+ Port 1 LEDs - Activity/Link */
-		sfp1_link {
+		led_sfp1_link: sfp1_link {
 			label = "sfp1:link";
 			gpios = <&gpio2 15 GPIO_ACTIVE_HIGH>;
 			default-state = "off";
 		};
 
-		sfp1_activity {
+		led_sfp1_activity: sfp1_activity {
 			label = "sfp1:activity";
 			gpios = <&gpio2 16 GPIO_ACTIVE_HIGH>;
 			default-state = "off";
-			linux,default-trigger = "netdev";
 		};
 	};
 
 	/* SFP 1 */
-sfp_xfi0: sfp-xfi0 {
-compatible = "sff,sfp";
-i2c-bus = <&sfp0_i2c>;
-tx-disable-gpios = <&gpio2 14 GPIO_ACTIVE_LOW>;
-mod-def0-gpios = <&gpio2 12 GPIO_ACTIVE_LOW>;
-los-gpios = <&gpio2 11 GPIO_ACTIVE_HIGH>;
-maximum-power-milliwatt = <3000>;
+	sfp_xfi0: sfp-xfi0 {
+		compatible = "sff,sfp";
+		i2c-bus = <&sfp0_i2c>;
+		tx-disable-gpios = <&gpio2 14 GPIO_ACTIVE_LOW>; /* board has hardware inverter */
+		mod-def0-gpios = <&gpio2 12 GPIO_ACTIVE_LOW>;
+		los-gpios = <&gpio2 11 GPIO_ACTIVE_HIGH>;
+		maximum-power-milliwatt = <3000>;
+		leds = <&led_sfp0_link>, <&led_sfp0_activity>;
 	};
 
 	/* SFP 2 */
-sfp_xfi1: sfp-xfi1 {
-compatible = "sff,sfp";
-i2c-bus = <&sfp1_i2c>;
-tx-disable-gpios = <&gpio2 13 GPIO_ACTIVE_LOW>;
-mod-def0-gpios = <&gpio2 10 GPIO_ACTIVE_LOW>;
-los-gpios = <&gpio2 9 GPIO_ACTIVE_HIGH>;
-maximum-power-milliwatt = <3000>;
+	sfp_xfi1: sfp-xfi1 {
+		compatible = "sff,sfp";
+		i2c-bus = <&sfp1_i2c>;
+		tx-disable-gpios = <&gpio2 13 GPIO_ACTIVE_LOW>; /* board has hardware inverter */
+		mod-def0-gpios = <&gpio2 10 GPIO_ACTIVE_LOW>;
+		los-gpios = <&gpio2 9 GPIO_ACTIVE_HIGH>;
+		maximum-power-milliwatt = <3000>;
+		leds = <&led_sfp1_link>, <&led_sfp1_activity>;
 	};
-};
 
-/*
- * BMan buffer pool for DPDK.
- * DPDK's fman.c requires at least one bpool with fsl,bpid.
- * The bpool-ethernet-cfg values (count/size/addr) are optional hints;
- * DPDK overrides them with its own mbuf pool allocation.
- */
-/ {
-	dpaa_pool: dpaa-bpool {
-		compatible = "fsl,bpool";
-		fsl,bpid = <16>;
+	/* SFP LED Controller */
+	sfp_led_controller: sfp-led-controller {
+		compatible = "mono,sfp-led";
+		sfp-ports = <&sfp_xfi0>, <&sfp_xfi1>;
 	};
+
 };
 
 &pcie3 {
@@ -224,42 +154,23 @@ maximum-power-milliwatt = <3000>;
 
 	bluetooth {
 		compatible = "nxp,88w8987-bt";
-		fw-init-baudrate = <3000000>;
+		fw-init-baudrate = <3000000>; 
 	};
 };
 
 &usb0 {
-status = "okay";
-dr_mode = "host";
-/*
- * LS1046A DWC3 USB stability quirks.
- *
- * Without these, high-speed USB-2 mass storage (live-boot USB stick)
- * enumerates but cannot sustain bulk transfers during initramfs
- * filesystem scan — the port resets every ~30s with
- *   "xhci-hcd: Setup ERROR: setup context command for slot N"
- *   "usb 1-1: hub failed to enable device, error -22"
- * and live-boot never finds filesystem.squashfs.
- *
- * - dis_u2_susphy_quirk / dis_u3_susphy_quirk: disable suspend PHY.
- *   LS1046A erratum: PHY exit from suspend corrupts link training.
- * - dis-u1-entry-quirk / dis-u2-entry-quirk: block LPM U1/U2 transitions.
- *   LS1046A erratum A-005697: controller mis-handles U1/U2 exit.
- * - usb3-lpm-capable removed for the same LPM erratum.
- */
-snps,dis_u2_susphy_quirk;
-snps,dis_u3_susphy_quirk;
-snps,dis-u1-entry-quirk;
-snps,dis-u2-entry-quirk;
-/delete-property/ usb3-lpm-capable;
+	status = "okay";
+	dr_mode = "host";
 };
 
 &usb1 {
-status = "disabled";
+	status = "disabled";
+	disable-over-current;
 };
 
 &usb2 {
-status = "disabled";
+	status = "disabled";
+	disable-over-current;
 };
 
 &dspi {
@@ -287,7 +198,7 @@ status = "disabled";
 			#size-cells = <0>;
 			reg = <0>;
 
-			retimer@18 {
+			retimer: retimer@18 {
 				compatible = "ti,ds100df410";
 				reg = <0x18>;
 				status = "okay";
@@ -355,7 +266,7 @@ status = "disabled";
 		reg = <0x70>;
 		#address-cells = <1>;
 		#size-cells = <0>;
-
+		
 		sfp0_i2c: i2c@0 {
 			#address-cells = <1>;
 			#size-cells = <0>;
@@ -378,7 +289,7 @@ status = "disabled";
 		reg = <0x70>;
 		#address-cells = <1>;
 		#size-cells = <0>;
-
+		
 		i2c@0 {
 			#address-cells = <1>;
 			#size-cells = <0>;
@@ -390,7 +301,7 @@ status = "disabled";
 				label = "USB Power Delivery";
 				#io-channel-cells = <1>;
 				shunt-resistor = <1000>;
-			};
+			};	
 			power_sensor@41 {
 				compatible = "ti,ina234";
 				reg = <0x41>;
@@ -404,7 +315,7 @@ status = "disabled";
 				label = "1V Core PSU";
 				#io-channel-cells = <1>;
 				shunt-resistor = <1000>;
-			};
+			};						
 			power_sensor@43 {
 				compatible = "ti,ina234";
 				reg = <0x43>;
@@ -425,7 +336,7 @@ status = "disabled";
 				label = "1.35V SerDes PSU";
 				#io-channel-cells = <1>;
 				shunt-resistor = <5000>;
-			};
+			};	
 			power_sensor@41 {
 				compatible = "ti,ina234";
 				reg = <0x41>;
@@ -439,7 +350,7 @@ status = "disabled";
 				label = "2.5V DDR PSU";
 				#io-channel-cells = <1>;
 				shunt-resistor = <5000>;
-			};
+			};						
 			power_sensor@43 {
 				compatible = "ti,ina234";
 				reg = <0x43>;
@@ -447,18 +358,22 @@ status = "disabled";
 				#io-channel-cells = <1>;
 				shunt-resistor = <1000>;
 			};
-		};
+		};	
 
 		i2c@2 {
 			#address-cells = <1>;
 			#size-cells = <0>;
 			reg = <2>;
 
-
 			rtc@53 {
 				compatible = "nxp,pcf2131";
 				reg = <0x53>;
 				status = "okay";
+			};
+
+			typec: hd3ss3220@47 {
+				compatible = "ti,hd3ss3220";
+				reg = <0x47>;
 			};
 		};
 
@@ -472,34 +387,34 @@ status = "disabled";
 				reg = <0x6c>;
 				#address-cells = <1>;
 				#size-cells = <0>;
-
+					
 				led@0 {
 					reg = <0>;
 					color = <LED_COLOR_ID_WHITE>;
 					label = "status:white";
 					led-max-microamp = <25500>;
 				};
-
+				
 				led@1 {
 					reg = <1>;
 					color = <LED_COLOR_ID_BLUE>;
 					label = "status:blue";
 					led-max-microamp = <25500>;
 				};
-
+				
 				led@2 {
 					reg = <2>;
 					color = <LED_COLOR_ID_GREEN>;
 					label = "status:green";
 					led-max-microamp = <25500>;
 				};
-
+				
 				led@3 {
 					reg = <3>;
 					color = <LED_COLOR_ID_RED>;
 					label = "status:red";
 					led-max-microamp = <25500>;
-				};
+				};		
 			};
 		};
 	};
@@ -524,84 +439,55 @@ status = "disabled";
 			#address-cells = <1>;
 			#size-cells = <1>;
 
-			/*
-			 * Partition table verified against live /proc/mtd
-			 * (2026-03-29, U-Boot 2025.04, Micron mt25qu512a 64MB QSPI).
-			 * Erase sector = 4KB (0x1000). Must match actual firmware layout
-			 * so mtd3 = uboot-env and fw_setenv works.
-			 */
+			partition@flash {
+				label = "flash";
+				reg = <0x0 0x4000000>;
+			};
 
-			/* RCW + BL2 (1 MB) — mtd1 */
 			partition@0 {
 				label = "rcw-bl2";
-				reg = <0x00000000 0x00100000>;
-				read-only;
+				reg = <0x0 0x100000>;
 			};
-			/* U-Boot (2 MB) — mtd2 */
+
 			partition@100000 {
 				label = "uboot";
-				reg = <0x00100000 0x00200000>;
-				read-only;
+				reg = <0x100000 0x200000>;
 			};
-			/* U-Boot environment (1 MB, env=8KB) — mtd3, fw_setenv target */
+
 			partition@300000 {
 				label = "uboot-env";
-				reg = <0x00300000 0x00100000>;
+				reg = <0x300000 0x100000>;
 			};
-			/* FMan microcode (1 MB) — mtd4 */
+
 			partition@400000 {
 				label = "fman-ucode";
-				reg = <0x00400000 0x00100000>;
-				read-only;
+				reg = <0x400000 0x100000>;
 			};
-			/* Recovery DTB (1 MB) — mtd5 */
+
 			partition@500000 {
 				label = "recovery-dtb";
-				reg = <0x00500000 0x00100000>;
-				read-only;
+				reg = <0x500000 0x100000>;
 			};
-			/* Backup (4 MB) — mtd6 */
+
 			partition@600000 {
 				label = "backup";
-				reg = <0x00600000 0x00400000>;
-				read-only;
+				reg = <0x600000 0x400000>;
 			};
-			/* Recovery kernel + initramfs (22 MB) — mtd7 */
+
 			partition@a00000 {
 				label = "kernel-initramfs";
-				reg = <0x00a00000 0x01600000>;
-				read-only;
+				reg = <0xa00000 0x1600000>;
 			};
-			/* Remaining space (32 MB) — mtd8 */
+
 			partition@2000000 {
 				label = "unallocated";
-				reg = <0x02000000 0x02000000>;
+				reg = <0x2000000 0x2000000>;
 			};
 		};
 	};
 };
 
 #include "fsl-ls1046-post.dtsi"
-
-/*
- * ASK2 (2026-05-15): the NXP SDK portal DTSIs were dropped here.
- *
- * Background: the legacy ASK 1.x staging driver
- * (drivers/staging/fsl_qbman/{bman,qman}_driver.c) refused to enumerate any
- * portal node that lacked `cell-index = <N>;` and also required
- * `fsl,bpid-range` / `fsl,fqid-range` / `fsl,pool-channel-range` /
- * `fsl,cgrid-range` resource-pool seeds. NXP's lf-6.x kernel trees ship
- * qoriq-bman-portals-sdk.dtsi / qoriq-qman-portals-sdk.dtsi to supply those;
- * mainline (gregkh/linux) does not.
- *
- * ASK 1.x is gone. The mainline DPAA1 QBMan driver
- * (drivers/soc/fsl/qbman/{bman,qman}_portal.c) enumerates portals positionally
- * from the standard qoriq-{bman,qman}-portals.dtsi already pulled in by
- * fsl-ls1046a.dtsi, and seeds the pool/FQID ranges from the bman/qman CCSR
- * blocks at probe time. The SDK DTSI files (and the data/dtb/sdk-dtsi/ tree)
- * were deleted on ask20; including them here was a residual reference that
- * broke `bin/ci-compile-mono-dtb.sh`.
- */
 
 &fman0 {
 	ethernet@e0000 {
@@ -634,20 +520,30 @@ status = "disabled";
 		status = "okay";
 	};
 
-fm1_mac9: ethernet@f0000 { /* 10GEC1 */
-status = "okay"; /* kernel fsl_dpaa_mac + fsl_dpa own this MAC at boot */
-sfp = <&sfp_xfi0>;
-phy-connection-type = "xgmii"; /* kernel converts to 10gbase-r; must use xgmii so fman_memac assigns PCS to xfi_pcs */
-managed = "in-band-status";
-};
+	/* Deliberate local deviations from the canonical we-are-mono/OpenWRT-ASK
+	 * DTS (HW-validated on mainline 6.18, see AGENTS.md):
+	 *  - status = "okay": mainline fsl-ls1046a.dtsi defaults these MACs to
+	 *    "disabled"; without the override eth3/eth4 netdevs never appear.
+	 *  - phy-connection-type = "xgmii" (canonical uses "10gbase-r"): the
+	 *    mainline fman_memac.c PCS-assignment fallback needs XGMII to select
+	 *    xfi_pcs; "10gbase-r" misassigns to sgmii_pcs -> permanent no-link.
+	 * The SDK kernel path is unaffected: mono-gateway-dk-sdk.dts overrides
+	 * both nodes (fixed-link + /delete-property/ managed).
+	 */
+	fm1_mac9: ethernet@f0000 { /* 10GEC1 */
+		sfp = <&sfp_xfi0>;
+		phy-connection-type = "xgmii"; /* kernel converts to 10gbase-r */
+		managed = "in-band-status";
+		status = "okay";
+	};
 
-fm1_mac10: ethernet@f2000 { /* 10GEC2 */
-status = "okay"; /* kernel fsl_dpaa_mac + fsl_dpa own this MAC at boot */
-sfp = <&sfp_xfi1>;
-phy-connection-type = "xgmii"; /* kernel converts to 10gbase-r; must use xgmii so fman_memac assigns PCS to xfi_pcs */
-managed = "in-band-status";
-};
-
+	fm1_mac10: ethernet@f2000 { /* 10GEC2 */
+		sfp = <&sfp_xfi1>;
+		phy-connection-type = "xgmii"; /* kernel converts to 10gbase-r */
+		managed = "in-band-status";
+		status = "okay";
+	};
+	
 	mdio@fc000 {
 		status = "disabled";
 	};
@@ -667,142 +563,3 @@ managed = "in-band-status";
 	};
 };
 
-/* mainline 6.18 fsl-ls1046a.dtsi names the CPU thermal zone
- * `cluster-thermal`, not `core-cluster` (the latter was the SDK / NXP
- * lf-6.6 / 6.12 name).  Reference both /thermal-zones/cluster-thermal
- * paths via the new label so the overlay applies cleanly on mainline.
- */
-&{/thermal-zones/cluster-thermal/trips} {
-	fan_level1: fan-level1 {
-		temperature = <40000>;
-		hysteresis = <1000>;
-		type = "active";
-	};
-
-	fan_level2: fan-level2 {
-		temperature = <45000>;
-		hysteresis = <1000>;
-		type = "active";
-	};
-
-	fan_level3: fan-level3 {
-		temperature = <50000>;
-		hysteresis = <1000>;
-		type = "active";
-	};
-
-	fan_level4: fan-level4 {
-		temperature = <55000>;
-		hysteresis = <1000>;
-		type = "active";
-	};
-
-	fan_level5: fan-level5 {
-		temperature = <60000>;
-		hysteresis = <1000>;
-		type = "active";
-	};
-};
-
-&{/thermal-zones/cluster-thermal/cooling-maps} {
-	fan-map1 {
-		trip = <&fan_level1>;
-		cooling-device = <&fan0 1 1>;
-	};
-
-	fan-map2 {
-		trip = <&fan_level2>;
-		cooling-device = <&fan0 2 2>;
-	};
-
-	fan-map3 {
-		trip = <&fan_level3>;
-		cooling-device = <&fan0 3 3>;
-	};
-
-	fan-map4 {
-		trip = <&fan_level4>;
-		cooling-device = <&fan0 4 4>;
-	};
-
-	fan-map5 {
-		trip = <&fan_level5>;
-		cooling-device = <&fan0 6 6>;
-	};
-};
-
-/*
-	* DPDK DPAA1 PMD support.
-	*
-	* Mainline kernel DTSIs lack fsl,qman-channel-id on TX port nodes
-	* (only SDK DTSIs have it). DPDK's fman.c requires this property to
-	* determine the QMan enqueue channel for each MAC's TX path.
-	*
-	* LS1046A FMan0 QMan channel assignment (from LS1046A Reference Manual):
-	*   0x800 = 10GEC1 (MAC9,  ethernet@f0000)
-	*   0x801 = 10GEC2 (MAC10, ethernet@f2000)
-	*   0x802 = 1G MAC1 (ethernet@e0000) — disabled
-	*   0x803 = 1G MAC2 (ethernet@e2000)
-	*   0x804 = 1G MAC3 (ethernet@e4000) — disabled
-	*   0x805 = 1G MAC4 (ethernet@e6000) — disabled
-	*   0x806 = 1G MAC5 (ethernet@e8000)
-	*   0x807 = 1G MAC6 (ethernet@ea000)
-	*/
-&fman0_tx_0x28 { fsl,qman-channel-id = <0x802>; }; /* MAC1 */
-&fman0_tx_0x29 { fsl,qman-channel-id = <0x803>; }; /* MAC2 */
-&fman0_tx_0x2a { fsl,qman-channel-id = <0x804>; }; /* MAC3 */
-&fman0_tx_0x2b { fsl,qman-channel-id = <0x805>; }; /* MAC4 */
-&fman0_tx_0x2c { fsl,qman-channel-id = <0x806>; }; /* MAC5 */
-&fman0_tx_0x2d { fsl,qman-channel-id = <0x807>; }; /* MAC6 */
-&fman0_tx_0x30 { fsl,qman-channel-id = <0x800>; }; /* MAC9  10GEC1 */
-&fman0_tx_0x31 { fsl,qman-channel-id = <0x801>; }; /* MAC10 10GEC2 */
-
-/*
- * BMan/QMan portal cell-index + allocator-range nodes are supplied by the
- * NXP SDK DTSIs (#include'd near the top of this file, right after
- * fsl-ls1046-post.dtsi). No additional board-level overlays needed.
- */
-
-/*
-* DPDK DPAA bus container — SFP+ ports ONLY.
-*
-* DPDK's fman_init() looks for a node with compatible = "fsl,dpaa",
-* then iterates its children calling fman_if_init() for each.
-* The kernel ignores this node — no mainline driver matches "fsl,dpaa".
-*
-* CRITICAL: Only SFP+ ports (10G) are listed here. RJ45 ports (1G)
-* are managed exclusively by kernel fsl_dpa and must NOT appear in
-* this container. Including them causes DPDK to grab their QMan portals
-* via /dev/mem, conflicting with kernel fsl_dpa → kernel panic.
-*
-* At boot, the SFP+ MAC nodes (status = "okay") are owned by the kernel
-* via fsl_dpaa_mac + fsl_dpa drivers. When VyOS configures a port for
-* VPP, vyos-1x vpp.py unbinds that port's dpaa-ethernet.N device from
-* fsl_dpa before starting VPP with DPDK DPAA PMD. On VPP stop, the
-* device is rebound to fsl_dpa, restoring kernel control.
-*
-* FQIDs start at 0x40c to avoid conflict with kernel dynamic allocation.
-*/
-&soc {
-	fsl,dpaa {
-		compatible = "fsl,ls1046a-dpaa", "simple-bus", "fsl,dpaa";
-
-		/* MAC9 — 10G left SFP+ (eth3) */
-		ethernet@8 {
-			compatible = "fsl,dpa-ethernet-init";
-			fsl,fman-mac = <&enet6>;
-			fsl,qman-frame-queues-rx = <0x40c 1 0x40d 1>;
-			fsl,qman-frame-queues-tx = <0x40e 1 0x40f 1>;
-			fsl,bman-buffer-pools = <&dpaa_pool>;
-		};
-
-		/* MAC10 — 10G right SFP+ (eth4) */
-		ethernet@9 {
-			compatible = "fsl,dpa-ethernet-init";
-			fsl,fman-mac = <&enet7>;
-			fsl,qman-frame-queues-rx = <0x410 1 0x411 1>;
-			fsl,qman-frame-queues-tx = <0x412 1 0x413 1>;
-			fsl,bman-buffer-pools = <&dpaa_pool>;
-		};
-	};
-};

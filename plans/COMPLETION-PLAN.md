@@ -1,5 +1,5 @@
 # DPAA1 + VPP + ASK2 — Consolidated Completion Plan
-**Version 1.2.0** · 2026-06-14 · HADS 1.0.0
+**Version 1.3.0** · 2026-07-04 · HADS 1.0.0
 
 ---
 
@@ -14,9 +14,10 @@ Read `[NOTE]` only if additional context is needed.
 ## 1. METADATA & SOURCE-OF-TRUTH
 
 **[SPEC]**
-- Date: 2026-06-08.
-- Branch: `dpaa1` (default/vpp work) · `ask20` (ASK2 work).
+- Date: 2026-07-04.
+- Branch: `puddle-cornet` (ASK2 work, mainline 6.18.34) · `nxp-sdk` (ASK 1.x vendor oracle, lf-6.12.49, frozen reference).
 - Status: Active roadmap — single cross-flavor view of all remaining work.
+- **For ASK2 detailed plan see [`plans/ASK2-DEVELOPMENT-PLAN.md`](ASK2-DEVELOPMENT-PLAN.md) (v1.1.0) — this document only provides the high-level status summary and context.**
 
 **[SPEC]**
 Authoritative specs (source-of-truth; this doc only sequences them):
@@ -32,7 +33,7 @@ This plan is a router, not a second source-of-truth. Where it disagrees with a s
 ## 2. ONE-PARAGRAPH SUMMARY
 
 **[NOTE]**
-The DPAA1 driver core is board-validated and shipping in the `default`/`vpp` ISOs. The two big kernel forward-ports are **DONE**: the FMan PCD subsystem (common board stack, `0092`/`0097`–`0101`) and the QMan-CEETM driver (`0111`/`0112`, shipped + closed). M3-3b CC steering, M3-3c HM, M3-3d policer BUG 3a + 3b-non-revert, true-ZC RX, and M3-3e CEETM are all closed / HW-validated. What remains is (1) lab/harness quantitative gates — the literal ≥7 Gbps figure, the policer 2.5 Gbps cap number, the M3-3c 802.1Q wire gate; (2) the BUG 3b flood-crash characterization (serial + cold power-cycle); and (3) the ASK2 `ask20` work-stream (M2 `-ENOMEM` MURAM gate, then `ask.ko`), deferred until DPAA1 is fully closed.
+The DPAA1 driver core is board-validated and shipping in the `default`/`vpp` ISOs. The two big kernel forward-ports are **DONE**: the FMan PCD subsystem (common board stack, `0092`/`0097`–`0101`) and the QMan-CEETM driver (`0111`/`0112`, shipped + closed). M3-3b CC steering, M3-3c HM, M3-3d policer BUG 3a + 3b-non-revert, true-ZC RX, and M3-3e CEETM are all closed / HW-validated. What remains is (1) lab/harness quantitative gates — the literal ≥7 Gbps figure, the policer 2.5 Gbps cap number, the M3-3c 802.1Q wire gate; (2) the BUG 3b flood-crash characterization (serial + cold power-cycle); and (3) the ASK2 `puddle-cornet` work-stream, now active on the Fork-B FE/eHash path with Phase 1 `0133` as the immediate dispatch gate.
 
 ---
 
@@ -51,7 +52,7 @@ graph TD
     subgraph OPEN["Remaining — lab + deferred"]
         GEN["Quantitative wire gates<br/>(≥7G literal · policer cap · 802.1Q HM)"]
         FLOOD["BUG 3b flood-crash characterization"]
-        ASK2["ASK2 M2 -ENOMEM gate (ask20, deferred)"]
+        ASK2["ASK2 Phase 1 AC_CC arm gate\n(puddle-cornet)"]
     end
     CORE --> OPEN
     GEN -->|same MURAM gen_pool| ASK2
@@ -63,7 +64,7 @@ graph TD
 |---|---|---|---|
 | **default** | common DPAA1 core ✅ | M3-3b/3c/3d/3e all closed / HW-validated; true-ZC RX closed | quantitative wire gates + the BUG 3b flood-crash characterization (lab) |
 | **vpp** | common DPAA1 core ✅ (AF_XDP) | plumbed + shipping in CI; **not benchmarked on HW after the patch-022 AF_XDP cutover** | a HW benchmark run |
-| **ask** | scaffold-only (builds vanilla VyOS today) | Path A activation verified on a prior ask20 build; **M2 CPU gate FAILED** (327× `chain_create -ENOMEM`) | PCD MURAM-budget fix (deferred work-stream) |
+| **ask** | common DPAA1 core ✅ (FE/ehash chain dormant in every ISO since 2026-06-14) | AC_CC arm (0133) authored + compiled, awaiting one-shot board experiment; FE context (0135), TX bypass (0136), MANIP chain (0137 v2), CAAM QI share (0134) all LANDED dormant; ASK1 bridge-offload oracle (nxp-sdk) confirms L2 path + validates switchdev ask_bridge plan | the one-shot Phase 1 AC_CC arm experiment (D9-B) — make-or-break M2 dispatch test |
 
 ---
 
@@ -121,23 +122,21 @@ Steering + BUG 3a (FMPL block master-enable `GCR.EN|STEN` clear at boot) + the B
 
 ---
 
-## 6. ASK2 COMPLETION (`ask20` BRANCH)
+## 6. ASK2 COMPLETION (`puddle-cornet` BRANCH)
 
 **[SPEC]**
-- State: `kernel/flavors/ask/` is scaffold-only; the single image ships `ask.ko` **dormant in every ISO** — until the ASK2 components land, the offload is a no-op and the image is functionally vanilla VyOS for ASK. Spec is **v1.8** (single-image flavor collapse adopted; architecture frozen; dual-dataplane state machine S0/S1/S2). Path A is **config-driven late-bind**: `ask.ko` loads on a `set system offload ask` commit and `pcd_ops->install` late-binds under quiesce on already-registered netdevs (NOT boot-unconditional).
-- Components to land: the ~10k-LOC FMan-PCD substrate is **already largely landed in the common board stack** (`0092`/`0097`–`0101`, consumed via `pcd_ops`) — not a fresh build. ASK2-specific NEW code (per spec §15.1): `ask.ko` ~1500 + `ask_bridge.ko` ~400 + `dpaa_flavor_ops` ~100 + YNL `ask` family ~300 (≈ 2.3k LOC kernel/OOT) **+** VyOS CLI ~1200 LOC (Python, `set system offload ask`). Userspace daemon = 0 (single YNL family; no `askd`, no `libfci` ABI — opnsense-deps keeps the legacy daemon, we delete it).
+- State: `kernel/flavors/ask/` is no longer scaffold-only. The common FMan-PCD substrate, FE/eHash dormant chain, `ask.ko` control plane, CAAM QI share, TX-confirm bypass, MANIP chain API, and flow-offload backend slot are all present and shipping dormant. The offload still remains functionally inactive until Phase 1 proves the real AC_CC classifier→FE arm on hardware and Phase 2 wires real flow population into `ask.ko`.
+- Runtime model: single image, config-driven late-bind. Boot lands S0 mainline/RSS; ASK enters S1 only after `set system offload ask` exists and its future commit path loads/engages ASK. Any ASK teardown must return byte-exactly to S0 before VPP can run.
+- Components still to land: productive FE/eHash flow population in `ask.ko`, `ask_bridge.ko` switchdev implementation, `ask_xfrm.c` + `ask_caam.c` packet-mode IPsec, YNL/op-mode polish, and VyOS CLI/validator (`set system offload ask`, ASK↔VPP mutex). Userspace daemon = 0 (single YNL family; no `askd`, no `libfci` ABI).
 
-**[BUG] ASK2 M2 CPU gate FAILED — 327× manip_chain_create -ENOMEM**
-- Symptom (v1.4 status): Path A activation is verified (`claimed=5 declined=0 failed=0`), but the M2 CPU gate FAILED — 6.955 Gbps at 21.40% kernel-net CPU (need ≤5%; baseline 0.08%). 327× `fman_pcd_manip_chain_create(3 manips) failed: -12` (`-ENOMEM`) — every per-flow L2-rewrite chain fails to allocate, so the rewrite stays on the CPU.
-- Root cause (Qdrant `topic=muram-exhaustion / share-manip-per-nexthop`, 2026-06-13, HIGH confidence — supersedes the earlier 3-hypothesis gen_pool theory): we attach **one MANIP chain PER FLOW** (`rmv_eth`+`insrt_l2`+`ipv4_forward`) plus one MURAM AD per CC key. MURAM is tiny and shared (AD + CC tree + KG + parser + BMI); O(flows) MANIP allocation **exhausts and fragments it** → `-ENOMEM` → SW rewrite → CPU gate fails. `gen_pool` fails because MURAM is FULL, not because of a sub-1 KiB-alloc bug.
-- Fix: **dedup the MANIP chain** — cache + refcount ONE manip-chain handle per next-hop adjacency (key `egress_tx_fqid + src_mac + dst_mac`); every per-flow CC-key `FORWARD_FQ_WITH_MANIP` action references the SHARED handle. MURAM manip consumption drops O(flows)→O(next-hops) (thousands→dozens), so the rewrite enters silicon and the CPU gate clears. Mirrors CDX's route/conntrack split + the mlx5/nfp adjacency-table indirection; `nf_flow_table`'s `flow_block_cb` already carries the next-hop at insert time. **Microcode-independent** — do NOT clone CDX's eHash-with-opcodes (≥209 proprietary-ucode-gated). Keep the `gen_pool_size()` / `gen_pool_avail()` taps as a confirm-diagnostic, not the fix.
-
-**[NOTE] Superseded framing — Fork A is dead, Fork B is the M2 path (2026-06-16).** The `[BUG]` above is real and durable (327× `-ENOMEM` was HW-observed), but its framing — that MANIP-dedup *clears the M2 CPU gate* — assumed the classic exact-match (`CONT_LOOKUP` / `FORWARD_FQ_WITH_MANIP`) datapath. iter-49/50 fault-capture proved that path **cannot dispatch on the 210.10.1 microcode**: the stall latches zero hardware fault, so it is a disposition-less WAIT, not an arming/alloc bug ([`arch/fman-fe-ehash.md`](../arch/fman-fe-ehash.md) §8.1–§8.3). **The active M2 path is Fork B** — the external-hash + FE opcode VM, assembled dormant in board patches `0122`→`0131`. The immediate next step is therefore **the D9-B arm** (KeyGen→AC_CC + BMI CC-root → `FE_ENTER`), not MANIP-dedup. The MANIP-dedup remains required, but as the **Phase-2 MURAM guard** for the forwarding header-manip under the FE path (`fman_hm_nexthop_get/put`, `0120`), not as the M2 unblock. The full sequenced plan is [`plans/ASK2-DEVELOPMENT-PLAN.md`](ASK2-DEVELOPMENT-PLAN.md); §6.1 below is updated to match.
+**[BUG] ASK2 M2 CPU gate FAILED (Fork A, 2026-05-25) — superseded by Fork B FE/ehash path**
+- The `[BUG]` block below is historical: Fork A (exact-match `CONT_LOOKUP` / `FORWARD_FQ_WITH_MANIP`) was proven DEAD on 210.10.1 microcode — iter-49/50 fault-capture showed it stalls with no latched fault. Fork A is NOT the M2 path. **Fork B** (external-hash + FE opcode VM, assembled dormant in board patches `0122`→`0131`) is the active M2 dispatch test; its full sequenced plan lives in [`plans/ASK2-DEVELOPMENT-PLAN.md`](ASK2-DEVELOPMENT-PLAN.md). The MANIP-dedup MURAM guard remains required for Fork B Phase 2, but as a per-next-hop dedup via `fman_hm_nexthop_get/put` (`0120`), not as the M2 unblock.
+- Symptom preserved for historical reference: 327× `fman_pcd_manip_chain_create(3 manips) failed: -12` (`-ENOMEM`) — every per-flow L2-rewrite chain fails, rewrite stays on CPU. Root cause: O(flows) MANIP allocation exhausts tiny MURAM. Fix: dedup by adjacency (shared MANIP per next-hop).
 
 **[NOTE]**
 Cross-flavor leverage: the PCD-subsystem forward-port is already shared in common (consumed via `pcd_ops`). The per-next-hop MANIP-dedup cache lives in `ask.ko`'s flow-offload path, but the underlying shared-MANIP refcount API (`fman_pcd_manip_*`) belongs in the common board stack so the default-flavor CC tree can reuse it.
 
-### 6.1 ASK2 build order (verified 2026-06-14 vs Qdrant + spec §14)
+### 6.1 ASK2 build order (refreshed 2026-07-04, aligned with ASK2-DEVELOPMENT-PLAN v1.1.0)
 
 **[SPEC]**
 Build order is **bottom-up by dependency layer**, NOT module-by-module. `ask.ko` is built incrementally in layers and `ask_bridge.ko` lands late. The spec §14 numbered list still names the deleted `ask_hostcmd.c` (step 4) and `askd` (step 12) — both removed in v1.3 (YNL-only); ignore them.
@@ -146,9 +145,9 @@ Build order is **bottom-up by dependency layer**, NOT module-by-module. `ask.ko`
 2. **`ask.ko` skeleton** — builds, **signs** (`MODULE_SIG_FORCE`), loads with `LOCALVERSION=-vyos`; in-tree patches applied (0004 stub OK).
 3. **`ask.ko` control plane** — `ask_main.c` + `ask_genl.c` → YNL family `ask` (`ASK_CMD_GET_INFO`); verify `ynl --family ask --do get-info`.
 4. **`ask.ko` flow core** — `ask_flow.c` (rhashtable+RCU) → `ask_flow_offload.c` (`flow_block_cb`; nft `flow add` reaches the callback). **Substantially built today.**
-5. **Arm the FE datapath → M2 gate (current blocker)** — Fork B, not Fork A. First byte-validate the dormant `0122`→`0131` FE/ehash chain against the oracle via the `fe_*` debugfs readback (Phase 0), then land the **D9-B arm** (board `0132`: KeyGen→AC_CC + BMI CC-root → `FE_ENTER`, eth3 only, forward+inverse in one patch). Then re-point `ask_hw.c`'s `fman_pcd_offload_engage` at the FE arm and populate flows via the FE store, using the **per-next-hop shared-MANIP dedup** (§6 [BUG]) as the MURAM guard. End-to-end on HW → **M2: ≥ 2 Gbps + ≤ 5% CPU** (last Fork-A run 6.955 Gbps / 21.4% CPU FAIL). See [`plans/ASK2-DEVELOPMENT-PLAN.md`](ASK2-DEVELOPMENT-PLAN.md) Phases 0–2.
+5. **Arm the FE datapath → M2 gate (current blocker)** — Fork B, not Fork A. The dormant `0122`→`0131` FE/ehash chain was byte-validated against the oracle and torn down clean on HW (Phase 0 PASS, 2026-06-16). The **real AC_CC arm** (`0133`, board `fman-pcd-fe-arm-real-accc`, `KGSE_MODE 0x80000006`) is authored + compiled, correcting the `0132` CCBS placebo. One-shot board experiment pending: build the FE chain → `fe_flow add` a real test key + live `fe_enq` FQID → `fe_arm engage` → ping → HIT-path verdict. Also landed dormant under Phase 2: `0135` (FE context builder), `0136` (TX confirm bypass, wired into `ask_hw.c`), `0137` v2 (MANIP chain API with HMAN_OC 0x34 fix), `0145` (flow-offload backend slot). Full detail: [`plans/ASK2-DEVELOPMENT-PLAN.md`](ASK2-DEVELOPMENT-PLAN.md) Phases 0–2.
 6. **Broaden flow types + `ask_bridge.ko`** — IPv6, mcast, then L2-bridge. `ask_bridge.ko` lands **after** the IPv4 datapath passes M2 — it is NOT a peer of `ask.ko`.
-7. **`ask_xfrm.c`** — `xdo_dev_state_add` + CAAM shared descriptors. Forward-port `0001-caam-qi-share` into the common board tree first (absent from the single image today). **M4: AES-CBC-SHA256 @ 3 Gbps** (GCM is refused per spec §5.3 — the §11.1 AES-GCM-128 gate is a contradiction to reconcile; see ASK2-DEVELOPMENT-PLAN §4.5).
+7. **`ask_xfrm.c`** — `xdo_dev_state_add` + CAAM shared descriptors. The CAAM QI descriptor-sharing API (`0134`, `caam_qi_ext_consumer_register`) is **already landed** in the common board tree (2026-06-17, CAAM stack forced `=y` incl. `CONFIG_CRYPTO_DEV_FSL_CAAM_QI`). The remaining work is the `xfrmdev_ops` packet-mode consumer in `ask_xfrm.c`. **M4: AES-CBC-SHA256 @ 3 Gbps** (GCM is refused per spec §5.3 — the §11.1 AES-GCM-128 gate is a contradiction to reconcile; see ASK2-DEVELOPMENT-PLAN §4.5).
 8. **YNL schema finalize + VyOS CLI** — `set system offload ask`; op_mode calls `ynl` from Python (no daemon).
 9. **VPP coexistence + soak** — global ASK↔VPP mutex; the Reversibility-Contract gate (100× toggle, pcd-snapshot diff clean, VPP works after the 100th teardown) → v1.0 RC.
 
@@ -164,7 +163,7 @@ The forward-ports and datapath debug are DONE (PCD, CEETM, true-ZC, CC steering,
 1. Run the quantitative wire gates on the §8 harness (≥7 Gbps literal, policer 2.5 Gbps cap + red-drops, M3-3c 802.1Q tagged source).
 2. Characterize the BUG 3b flood-crash (serial capture + cold power-cycle) — riskiest, do last.
 3. VPP HW benchmark on 6.18.x.
-4. ASK2 `ask20` (deferred until DPAA1 is fully closed): follow the **§6.1 build order** and [`plans/ASK2-DEVELOPMENT-PLAN.md`](ASK2-DEVELOPMENT-PLAN.md) — Phase 0 byte-validate the dormant FE chain, Phase 1 the D9-B FE arm, then `ask.ko` FE-wiring + the M2 MANIP-dedup MURAM guard, then `ask_bridge.ko`/IPsec/CLI.
+4. ASK2 (active on `puddle-cornet`, mainline 6.18.34): follow the **§6.1 build order** and [`plans/ASK2-DEVELOPMENT-PLAN.md`](ASK2-DEVELOPMENT-PLAN.md) — Phase 1 one-shot AC_CC arm experiment (the make-or-break M2 dispatch test) is the immediate next step. Then Phase 2 ask.ko FE-wiring + 0136 TX bypass + MANIP-dedup MURAM guard, then `ask_bridge.ko`/IPsec/CLI. The ASK 1.x nxp-sdk vendor-stack lineage (lf-6.12.49) is a **frozen reference oracle** — it proved bridge offload works end-to-end without `auto_bridge.ko` (validates the small switchdev `ask_bridge.c` plan), the 210 ucode accepts full PCD programming, and PCD miss-blackhole + VyOS notrack are cross-effort traps to avoid.
 
 ---
 
@@ -203,4 +202,4 @@ The forward-ports and datapath debug are DONE (PCD, CEETM, true-ZC, CC steering,
 **[SPEC]**
 - default: M3-3b CC steering productive tree installs + steers on board; M3-3c/3d/3e wire gates pass on the generator; gate-3 literal ≥7 Gbps measured; DCSR error taps complete. (Core already done.)
 - vpp: HW benchmark recorded (throughput + thermal + MTU constraint verified) on 6.18.x; hugepage-kexec one-shot confirmed.
-- ask: ASK2 components landed (`ask.ko`/`ask_bridge.ko` + PCD patch `0004` + YNL `ask` family); M2 gate PASSES (≥7 Gbps at ≤5% kernel-net CPU) after the MURAM-budget fix; `set system offload ask` engages a real offload (no longer a no-op).
+- ask: ASK2 components landed (`ask.ko`/`ask_bridge.ko` + PCD `0092`–`0145` + YNL `ask` family); M2 hard gate PASSES (≥2 Gbps at ≤5% kernel-net CPU, stretch ≥7 Gbps) after the FE-arm + MANIP-dedup + TX-bypass integration; `set system offload ask` engages a real offload (no longer a no-op). Phase 0 FE-chain byte-validation already PASSED; Phase 1 AC_CC arm (`0133`) awaits the one-shot board experiment.

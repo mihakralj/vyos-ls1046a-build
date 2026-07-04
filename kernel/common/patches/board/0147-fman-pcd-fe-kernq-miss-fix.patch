@@ -1,149 +1,192 @@
-From: ASK2 MISS-path + FQ ownership fix v4
-Subject: [PATCH] fman_pcd: add fe_miss debugfs node for MISS→kernel path (0147)
-
-Currently the FE-VM t_ExtHashFe MISS link (w6) points to the Exit singleton
-which deallocates unmatched frames.  Every packet that doesn't HIT a flow is
-silently dropped when ASK is engaged.
-
-This patch adds a NEW debugfs node 'fe_miss' (alongside fe_arm/fe_pool/etc)
-with two verbs:
-
-  echo "kernq <fqid>" > fe_miss  — build kernel-return ENQ (MISS target)
-  echo "set <off>"   > fe_miss  — rewrite t_ExtHashFe w6 to new target
-
-Build order: pool→singletons→ehash→enq(HIT)→fe_miss kernq→hashfe→enter→
-fe_miss set <kernq_off>→arm engage
-
-The hashfe builder auto-wires MISS to fe_kernq_off when set (preferred over
-Exit deallocator).
-
-Purely additive: new node + new static functions, no modification of existing
-code, no context dependency on fe_arm_write.  Ships dormant.
-
-Signed-off-by: ASK2 Phase 2
----
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index dd7a52cef..90c9c2151 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -1962,6 +1962,138 @@ static int fman_pcd_fe_hashfe_show(struct seq_file *s, void *v)
- };
- DEFINE_SHOW_ATTRIBUTE(fman_pcd_fe_hashfe);
- 
-+/* --- fe_miss: MISS-path control (kernel-return + MISS link rewrite) --- */
+@@ -1966,9 +1966,161 @@ static const struct file_operations fman_pcd_fe_flow_fops = {
+ 	.write		= fman_pcd_fe_flow_write,
+ 	.llseek		= seq_lseek,
+ 	.release	= single_release,
++};};
++
++
++
++/* --- fe_miss: MISS-path kernel-return + link rewriter --- */
++
++
 +
 +static int fman_pcd_fe_kernq_build(struct fman_pcd *pcd, u32 fqid)
++
 +{
++
 +	struct fman_pcd_fe_obj *obj;
++
 +	int ret;
 +
-+	/* Reuse the existing ENQ builder — it allocates a pool slot,
-+	 * builds the descriptor, and links the FE object into pcd->fe_enq.
-+	 */
++
++
 +	ret = fman_pcd_fe_enq_build(pcd, fqid, 0);
++
 +	if (ret)
++
 +		return ret;
 +
-+	/* The new ENQ is at the tail of fe_enq list; steal its offset. */
 +	obj = list_last_entry(&pcd->fe_enq, struct fman_pcd_fe_obj, node);
++
 +	pcd->fe_kernq_off = obj->muram_off;
-+	pr_info("fman_pcd: fe_kernq built at MURAM off 0x%x FQID 0x%x\n",
-+		obj->muram_off, fqid);
++
++	pr_info("fman_pcd: fe_kernq at 0x%lx FQID 0x%x\n", obj->muram_off, fqid);
++
 +	return 0;
++
 +}
++
++
 +
 +static int fman_pcd_fe_miss_set(struct fman_pcd *pcd, u32 miss_off)
++
 +{
++
 +	struct muram_info *muram = fman_get_muram(pcd->fman);
++
 +	void __iomem *fe;
 +
-+	if (!pcd->fe_hashfe_off) {
-+		pr_err("fman_pcd: fe_miss: t_ExtHashFe not built\n");
++
++
++	if (!pcd->fe_hashfe_off || !muram)
++
 +		return -EINVAL;
-+	}
-+	if (!muram)
-+		return -ENODEV;
 +
 +	fe = fman_muram_offset_to_vbase(muram, pcd->fe_hashfe_off);
++
 +	iowrite32be(miss_off, (u32 __iomem *)fe + 6);
-+	pr_info("fman_pcd: t_ExtHashFe w6 (MISS) rewritten to 0x%08x\n", miss_off);
++
++	pr_info("fman_pcd: t_ExtHashFe w6 (MISS) -> 0x%x\n", miss_off);
++
 +	return 0;
++
 +}
++
++
 +
 +static ssize_t fman_pcd_fe_miss_write(struct file *filp,
++
 +	const char __user *buf, size_t count, loff_t *pos)
++
 +{
++
 +	struct fman_pcd *pcd = filp->private_data;
++
 +	char cmd[64];
-+	int ret;
++
++	u32 val;
++
++
 +
 +	if (count >= sizeof(cmd))
++
 +		return -EINVAL;
++
 +	if (copy_from_user(cmd, buf, count))
++
 +		return -EFAULT;
++
 +	cmd[count] = '\0';
 +
-+	if (strncmp(cmd, "kernq", 5) == 0) {
-+		u32 fqid;
 +
-+		if (sscanf(cmd + 5, "%x", &fqid) != 1)
-+			return -EINVAL;
-+		ret = fman_pcd_fe_kernq_build(pcd, fqid);
-+	} else if (strncmp(cmd, "set", 3) == 0) {
-+		u32 off;
 +
-+		if (sscanf(cmd + 3, "%x", &off) != 1)
-+			return -EINVAL;
-+		ret = fman_pcd_fe_miss_set(pcd, off);
-+	} else {
-+		ret = -EINVAL;
-+	}
++	if (sscanf(cmd, "kernq %x", &val) == 1)
 +
-+	return ret ? ret : count;
++		return fman_pcd_fe_kernq_build(pcd, val) ?: (ssize_t)count;
++
++	if (sscanf(cmd, "set %x", &val) == 1)
++
++		return fman_pcd_fe_miss_set(pcd, val) ?: (ssize_t)count;
++
++	return -EINVAL;
++
 +}
++
++
 +
 +static int fman_pcd_fe_miss_show(struct seq_file *s, void *v)
++
 +{
++
 +	struct fman_pcd *pcd = s->private;
 +
-+	seq_printf(s, "kernq_off=%08x hashfe_off=%08x\n",
++	seq_printf(s, "kernq_off=0x%lx hashfe_off=0x%lx\n",
++
 +		   pcd->fe_kernq_off, pcd->fe_hashfe_off);
++
 +	if (pcd->fe_kernq_off)
-+		seq_printf(s, "  MISS target: fe_kernq @0x%x (kernel return)\n",
-+			   pcd->fe_kernq_off);
++
++		seq_printf(s, "  MISS -> fe_kernq @0x%lx\n", pcd->fe_kernq_off);
++
 +	else
-+		seq_puts(s, "  MISS path: Exit (dealloc) — use kernq verb for kernel return\n");
++
++		seq_puts(s, "  MISS -> Exit (dealloc)\n");
++
 +	return 0;
++
 +}
++
++
 +
 +static int fman_pcd_fe_miss_open(struct inode *inode, struct file *file)
++
 +{
++
 +	return single_open(file, fman_pcd_fe_miss_show, inode->i_private);
++
 +}
++
++
 +
 +static const struct file_operations fman_pcd_fe_miss_fops = {
++
 +	.open		= fman_pcd_fe_miss_open,
++
 +	.read		= seq_read,
++
 +	.write		= fman_pcd_fe_miss_write,
++
 +	.llseek		= seq_lseek,
++
 +	.release	= single_release,
-+};
 +
-+static int fman_pcd_fe_miss_init(struct fman_pcd *pcd, struct dentry *dir)
-+{
-+	if (!debugfs_create_file("fe_miss", 0600, dir, pcd,
-+				 &fman_pcd_fe_miss_fops))
-+		return -ENOMEM;
-+	return 0;
-+}
-+
- /* --- fe_enter --- */
+ };
  
- static int fman_pcd_fe_enter_build(struct fman_pcd *pcd, u32 root_ad_off)
-@@ -2559,6 +2691,7 @@ static int fman_pcd_debugfs_init(struct fman_pcd *pcd, struct dentry *dir)
- 	fman_pcd_fe_port_init(pcd, dir);
- 	fman_pcd_fe_singletons_init(pcd, dir);
- 	fman_pcd_fe_ehash_init(pcd, dir);
-+	fman_pcd_fe_miss_init(pcd, dir);
- 	fman_pcd_fe_enq_init(pcd, dir);
- 	fman_pcd_fe_hashfe_init(pcd, dir);
- 	fman_pcd_fe_enter_init(pcd, dir);
++
++
+ /*
++
++ * Build FE-VM runtime contexts*
+  * ---------------------------------------------------------------------------
+  * FE-VM core, increment 3 - arch/fman-fe-ehash.md section 5: the EXT_HASH
+  * Flow-Entry object (SDK t_ExtHashFe, FmPcdExternalHashTableSet builder).
+@@ -2299,6 +2451,15 @@ static ssize_t fman_pcd_fe_arm_write(struct file *file,
+ 		return -EFAULT;
+ 	buf[count] = '\0';
+ 
++	if (!strncmp(buf, "kernq ", 6)) {
++		unsigned long fqid = 0;
++		if (kstrtoul(buf + 6, 0, &fqid) == 0 && fqid <= 0xFFFFFF)
++			ret = fman_pcd_fe_kernq_build(pcd, (u32)fqid);
++	} else if (!strncmp(buf, "miss ", 5)) {
++		unsigned long off = 0;
++		if (kstrtoul(buf + 5, 0, &off) == 0 && off <= 0xFFFFF)
++			ret = fman_pcd_fe_miss_set(pcd, (u32)off);
++	} else
+ 	if (!strncmp(buf, "engage ", 7))
+ 		ret = fman_pcd_fe_arm_engage(pcd, buf);
+ 	else if (!strncmp(buf, "disengage ", 10))
+@@ -2428,6 +2589,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+ 			debugfs_create_file("fe_ehash", 0644,
+ 					    pcd->debugfs_dir, pcd,
+ 					    &fman_pcd_ehash_fops);
++			debugfs_create_file("fe_miss", 0600,
++					    pcd->debugfs_dir, pcd,
++					    &fman_pcd_fe_miss_fops);
+ 			debugfs_create_file("fe_enq", 0644,
+ 					    pcd->debugfs_dir, pcd,
+ 					    &fman_pcd_fe_enq_fops);
