@@ -720,6 +720,9 @@ cp "$BOARD_PATCH_DIR/0146-fman-pcd-fe-context-build-integration.patch" "$KERNEL_
 # Prevents the miss-blackhole (all unmatched frames silently dropped when
 # ASK is engaged).  See ASK2-DEVELOPMENT-PLAN.md §4.2.
 cp "$BOARD_PATCH_DIR/0147-fman-pcd-fe-kernq-miss-fix.patch" "$KERNEL_PATCHES/"
+# 0148: Export FE chain builder wrapper (fman_pcd_fe_build_chain / _teardown_chain)
+# for OOT modules (ask.ko).  Builds the full dormant chain in one call.
+cp "$BOARD_PATCH_DIR/0148-fman-pcd-export-fe-chain-builder.patch" "$KERNEL_PATCHES/"
 
 # ── Staging-completeness guard ────────────────────────────────────────
 # Every kernel/common/patches/board/*.patch must either be cp'd above or
