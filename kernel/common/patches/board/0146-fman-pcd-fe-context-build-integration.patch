@@ -1,94 +1,92 @@
-From: ASK2 Phase 2 integration
-Subject: [PATCH] fman_pcd: FE-VM context builder integration (0146)
+From: ASK2 Phase 2 integration v2
+Subject: [PATCH] fman_pcd: FE-VM context builder call during fe_arm engage (0146)
 
-Patch 0135 defines fman_pcd_fe_context_build() but never calls it.  The
-FE-VM cannot dispatch flow lookups without runtime context programmed
-into the VM's working store.  This patch integrates the context builder
-into fman_pcd_fe_arm_engage(), called after the dormant chain is fully
-assembled and immediately before the AC_CC arm reprograms the KeyGen.
+Patch 0135 defines fman_pcd_fe_context_build() but never calls it.
+The FE-VM cannot dispatch flow lookups without runtime context
+programmed into the VM's working store.  This patch:
 
-Contexts built (in the FE object's own MURAM allocation at working-store
-offsets reserved by 0124/0135):
-- ENQ (offset 8):  FQID read back from the ENQ FE descriptor
-- MUX (offset 0):  next_fe_off = ENQ FE MURAM offset
-- Transition (offset 4):  next_ad_off = Exit singleton offset (MISS → dealloc)
+1. Adds fman_pcd_fe_build_contexts() — builds ENQ/MUX/Transition
+   contexts in one pass over the dormant chain's FE objects.
+2. Calls it from fman_pcd_fe_arm_engage() immediately before the
+   pr_info() that logs "ENGAGED", so context build + arm are a
+   single atomic operation.
 
-The HMCT context for t_ExtHashFe is embedded within the 256-byte DDR
-record area (contextSize=256 in word1 of the descriptor).
+The additive function sits right after fman_pcd_fe_hashfe_fops (the
+stable anchor point 0132 uses), so git apply --3way lands it cleanly
+regardless of later patch context drift.
 
-Without these contexts, flows hit the ENQ FE but the FE-VM does not know
-the target FQID, so frames silently park or return to kernel.
-
-Ships DORMANT: context build only takes effect when called via fe_arm
-engage.
+v2: void* pointer arithmetic fix: ioread32be((u32 __iomem *)fe + 1)
+    not ioread32be(fe + 1).
 
 Signed-off-by: ASK2 Phase 2
 ---
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -2095,6 +2095,55 @@ static int fman_pcd_fe_arm_engage(struct fman_pcd *pcd, const char *args)
- 	}
- 	mutex_unlock(&pcd->fe_lock);
- 
-+	/*
-+	 * Build FE-VM runtime contexts after the full dormant chain is
-+	 * assembled, before the AC_CC arm reprograms KeyGen/BMI.
-+	 * Contexts live in each FE object's MURAM working-store area.
-+	 */
-+	{
-+		struct muram_info *muram = fman_get_muram(pcd->fman);
-+		struct fman_pcd_fe_obj *enq;
-+		void __iomem *fe;
-+		u32 fqid;
+@@ -2106,6 +2106,56 @@ static const struct file_operations fman_pcd_fe_hashfe_fops = {
+ 	.llseek		= seq_lseek,
+ 	.release	= single_release,
+ };
 +
-+		/* ENQ context: read FQID from the built ENQ FE descriptor. */
-+		enq = list_first_entry_or_null(&pcd->fe_enq,
-+					       struct fman_pcd_fe_obj, node);
-+		if (enq && muram) {
-+			fe = fman_muram_offset_to_vbase(muram, enq->muram_off);
-+			fqid = ioread32be((u32 __iomem *)fe + 1)
-+				& 0x00FFFFFFu;
-+			if (fqid) {
-+				struct fman_pcd_fe_context_params p = {
-+					.type = FMAN_FE_TYPE_ENQ,
-+					.u.enq.fqid = fqid,
-+				};
-+				fman_pcd_fe_context_build(fe,
-+					FMAN_FE_ENQ_CTX_OFF, &p);
-+			}
-+		}
++/*
++ * Build FE-VM runtime contexts after the full dormant chain is assembled.
++ * Called by fe_arm engage before reprogramming KeyGen/BMI.
++ * Contexts live in each FE object's MURAM working-store area.
++ */
++static void fman_pcd_fe_build_contexts(struct fman_pcd *pcd)
++{
++	struct muram_info *muram = fman_get_muram(pcd->fman);
++	struct fman_pcd_fe_obj *enq;
++	struct fman_pcd_fe_context_params p = {};
++	void __iomem *fe;
++	u32 fqid;
 +
-+		/* MUX context: HIT → ENQ */
-+		if (pcd->fe_mux_off && enq && muram) {
-+			fe = fman_muram_offset_to_vbase(muram, pcd->fe_mux_off);
-+			{
-+				struct fman_pcd_fe_context_params p = {
-+					.type = FMAN_FE_TYPE_MUX,
-+					.u.mux.next_fe_off = enq->muram_off,
-+				};
-+				fman_pcd_fe_context_build(fe,
-+					FMAN_FE_MUX_CTX_OFF, &p);
-+			}
-+		}
++	if (!muram)
++		return;
 +
-+		/* Transition: MISS → Exit (deallocate) */
-+		if (pcd->fe_transition_off && pcd->fe_exit_off && muram) {
-+			fe = fman_muram_offset_to_vbase(muram,
-+						pcd->fe_transition_off);
-+			/* Transition context built in singletons - read AD */
++	/* ENQ context: read FQID from the built ENQ FE descriptor. */
++	enq = list_first_entry_or_null(&pcd->fe_enq,
++				       struct fman_pcd_fe_obj, node);
++	if (enq) {
++		fe = fman_muram_offset_to_vbase(muram, enq->muram_off);
++		fqid = ioread32be((u32 __iomem *)fe + 1) & 0x00FFFFFFu;
++		if (fqid) {
++			p.type = FMAN_FE_TYPE_ENQ;
++			p.u.enq.fqid = fqid;
++			fman_pcd_fe_context_build(fe,
++				FMAN_FE_ENQ_CTX_OFF, &p);
 +		}
 +	}
-+	pr_info("fman_pcd fe_arm: contexts built (ENQ/MUX)\n");
 +
- 	err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,
- 				      (u32)fe_enter_off, &saved_engine);
- 	if (err)
-@@ -2536,6 +2585,7 @@ static int fman_pcd_fe_enq_build(struct fman_pcd *pcd, u32 fqid,
- {
- 	struct muram_info *muram = fman_get_muram(pcd->fman);
- 	struct fman_pcd_fe_params p;
-+	u32 off;
- 	struct fman_pcd_fe_obj *obj;
++	/* MUX context: HIT -> ENQ */
++	if (pcd->fe_mux_off && enq) {
++		fe = fman_muram_offset_to_vbase(muram, pcd->fe_mux_off);
++		memset(&p, 0, sizeof(p));
++		p.type = FMAN_FE_TYPE_MUX;
++		p.u.mux.next_fe_off = enq->muram_off;
++		fman_pcd_fe_context_build(fe, FMAN_FE_MUX_CTX_OFF, &p);
++	}
++
++	/* Transition: MISS -> Exit (deallocate) */
++	if (pcd->fe_transition_off && pcd->fe_exit_off) {
++		fe = fman_muram_offset_to_vbase(muram,
++					pcd->fe_transition_off);
++		memset(&p, 0, sizeof(p));
++		p.type = FMAN_FE_TYPE_TRANSITION;
++		p.u.transition.next_ad_off = pcd->fe_exit_off;
++		fman_pcd_fe_context_build(fe, FMAN_FE_TRANSITION_CTX_OFF, &p);
++	}
++}
  
- 	if (!muram)
+ /*
+  * fe_arm - arm the FE-VM datapath on a single FMan RX port (Phase 1
++@@ -2132,6 +2132,9 @@
++ 	if (err)
++ 		return err;
++ 
+++	/* Build FE-VM runtime contexts before logging ENGAGED (0146). */
+++	fman_pcd_fe_build_contexts(pcd);
+++
++ 	pr_info("fman_pcd fe_arm: port 0x%02x ENGAGED FE_ENTER=0x%lx\n",
++ 		port_id, fe_enter_off);
++ 	return 0;
