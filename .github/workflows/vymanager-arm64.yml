@@ -8,6 +8,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
+  IMAGE_DB: ${{ github.repository_owner }}/vymanager-db
   IMAGE_API: ${{ github.repository_owner }}/vymanager-api
   IMAGE_UI: ${{ github.repository_owner }}/vymanager-ui
   UPSTREAM_REPO: Community-VyProjects/VyManager
@@ -28,29 +29,64 @@ jobs:
           ref: ${{ env.UPSTREAM_REF }}
 
       # -----------------------------------------------------------------------
-      # Inject auto-detect entrypoint wrappers so containers discover the
-      # DUT's IP at startup.  Uses ${VAR:-default} fallback so explicit env
-      # vars set in VyOS config always win over auto-detection.
+      # Shared secret derivation — deterministic per device from eth0 MAC.
+      #
+      #   FIRST_MAC           = eth0's MAC address (e.g. e8:f6:d7:00:16:00)
+      #   POSTGRES_PASSWORD   = sha256("vymanager-db:"   + FIRST_MAC) → 64 hex
+      #   BETTER_AUTH_SECRET  = sha256("vymanager-auth:" + FIRST_MAC) → 64 hex
+      #   DATABASE_URL        = derived from POSTGRES_PASSWORD
+      #
+      # All three containers use the same formula — no env vars in VyOS config.
+      # Uses ${VAR:-default} so explicit config values always win.
       # -----------------------------------------------------------------------
-      - name: Inject IP-auto-detect entrypoint wrappers
+      - name: Inject auto-config entrypoint wrappers
         run: |
+          # === SHARED SECRET DERIVATION FUNCTIONS (inlined in each wrapper) ===
+          # FIRST_MAC=$(cat /sys/class/net/eth0/address 2>/dev/null || \
+          #            grep -lv 00:00:00:00:00:00 /sys/class/net/*/address 2>/dev/null | \
+          #            head -1 | xargs cat)
+
+          # --- DB wrapper (postgres:15-alpine) ---
+          mkdir -p db-build
+          cat > db-build/docker-entrypoint-wrap.sh << 'WRAP'
+          #!/bin/sh
+          FIRST_MAC=$(cat /sys/class/net/eth0/address 2>/dev/null || for f in /sys/class/net/*/address; do a=$(cat "$f" 2>/dev/null); [ "$a" != "00:00:00:00:00:00" ] && { echo "$a"; break; }; done)
+          SECRET_DB=$(echo -n "vymanager-db:${FIRST_MAC}" | sha256sum | awk '{print $1}')
+          export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$SECRET_DB}"
+          exec /usr/local/bin/docker-entrypoint-orig.sh "$@"
+          WRAP
+          chmod +x db-build/docker-entrypoint-wrap.sh
+
+          cat > db-build/Dockerfile << 'DOCKERFILE'
+          FROM postgres:15-alpine
+          RUN mv /usr/local/bin/docker-entrypoint.sh /usr/local/bin/docker-entrypoint-orig.sh
+          COPY docker-entrypoint-wrap.sh /usr/local/bin/docker-entrypoint.sh
+          RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/docker-entrypoint-orig.sh
+          DOCKERFILE
+
           # --- API wrapper (backend) ---
           cat > backend/docker-entrypoint-wrap.sh << 'WRAP'
           #!/bin/sh
-          # Auto-detect host IP for VyManager API
-          # Prefer ip addr (first global IPv4 = eth0, deterministic) over route lookup
+          # Auto-detect host IP (prefer eth0, deterministic interface order)
           HOST_IP=$(ip -4 addr show scope global 2>/dev/null | awk '/inet /{print $2; exit}' | cut -d/ -f1)
           [ -z "$HOST_IP" ] && HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
           [ -z "$HOST_IP" ] && HOST_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src /{print $NF; exit}')
           [ -z "$HOST_IP" ] && HOST_IP="127.0.0.1"
+
+          # Derive secrets from eth0 MAC (deterministic per device)
+          FIRST_MAC=$(cat /sys/class/net/eth0/address 2>/dev/null || for f in /sys/class/net/*/address; do a=$(cat "$f" 2>/dev/null); [ "$a" != "00:00:00:00:00:00" ] && { echo "$a"; break; }; done)
+          SECRET_DB=$(echo -n "vymanager-db:${FIRST_MAC}" | sha256sum | awk '{print $1}')
+          SECRET_AUTH=$(echo -n "vymanager-auth:${FIRST_MAC}" | sha256sum | awk '{print $1}')
+
+          export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$SECRET_DB}"
+          export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-$SECRET_AUTH}"
+          export DATABASE_URL="${DATABASE_URL:-postgresql://vymanager:${POSTGRES_PASSWORD}@127.0.0.1:5432/vymanager}"
           export BETTER_AUTH_URL="${BETTER_AUTH_URL:-http://${HOST_IP}:8000}"
           export FRONTEND_URL="${FRONTEND_URL:-http://${HOST_IP}:3000}"
           exec /usr/local/bin/docker-entrypoint-orig.sh "$@"
           WRAP
           chmod +x backend/docker-entrypoint-wrap.sh
 
-          # Rename original entrypoint copy destination + add wrapper COPY
-          # Also extend the chmod to cover the renamed original
           sed -i \
             -e 's|COPY backend/docker-entrypoint.sh /usr/local/bin/|COPY backend/docker-entrypoint.sh /usr/local/bin/docker-entrypoint-orig.sh|' \
             -e '/COPY backend\/docker-entrypoint\.sh \/usr\/local\/bin\/docker-entrypoint-orig\.sh/a COPY backend/docker-entrypoint-wrap.sh /usr/local/bin/docker-entrypoint.sh' \
@@ -60,11 +96,21 @@ jobs:
           # --- UI wrapper (frontend) ---
           cat > frontend/docker-entrypoint-wrap.sh << 'WRAP'
           #!/bin/sh
-          # Auto-detect host IP for VyManager UI
           HOST_IP=$(ip -4 addr show scope global 2>/dev/null | awk '/inet /{print $2; exit}' | cut -d/ -f1)
           [ -z "$HOST_IP" ] && HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
           [ -z "$HOST_IP" ] && HOST_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src /{print $NF; exit}')
           [ -z "$HOST_IP" ] && HOST_IP="127.0.0.1"
+
+          FIRST_MAC=$(cat /sys/class/net/eth0/address 2>/dev/null || for f in /sys/class/net/*/address; do a=$(cat "$f" 2>/dev/null); [ "$a" != "00:00:00:00:00:00" ] && { echo "$a"; break; }; done)
+          SECRET_DB=$(echo -n "vymanager-db:${FIRST_MAC}" | sha256sum | awk '{print $1}')
+          SECRET_AUTH=$(echo -n "vymanager-auth:${FIRST_MAC}" | sha256sum | awk '{print $1}')
+
+          export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$SECRET_DB}"
+          export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-$SECRET_AUTH}"
+          export DATABASE_URL="${DATABASE_URL:-postgresql://vymanager:${POSTGRES_PASSWORD}@127.0.0.1:5432/vymanager}"
+          export BACKEND_URL="${BACKEND_URL:-http://127.0.0.1:8000}"
+          export NODE_ENV="${NODE_ENV:-production}"
+          export VYMANAGER_ENV="${VYMANAGER_ENV:-production}"
           export BETTER_AUTH_URL="${BETTER_AUTH_URL:-http://${HOST_IP}:3000}"
           export FRONTEND_URL="${FRONTEND_URL:-http://${HOST_IP}:3000}"
           export TRUSTED_ORIGINS="${TRUSTED_ORIGINS:-http://${HOST_IP}:3000,http://localhost:3000}"
@@ -89,6 +135,18 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push DB (postgres + MAC-derived password)
+        uses: docker/build-push-action@v6
+        with:
+          context: db-build
+          file: db-build/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_DB }}:arm64
+          cache-from: type=gha,scope=db-arm64
+          cache-to: type=gha,mode=max,scope=db-arm64
 
       - name: Build and push API (backend)
         uses: docker/build-push-action@v6
