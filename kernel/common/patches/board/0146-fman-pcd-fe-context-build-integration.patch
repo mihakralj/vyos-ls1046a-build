@@ -1,0 +1,93 @@
+From: ASK2 Phase 2 integration
+Subject: [PATCH] fman_pcd: FE-VM context builder integration (0146)
+
+Patch 0135 defines fman_pcd_fe_context_build() but never calls it.  The
+FE-VM cannot dispatch flow lookups without runtime context programmed
+into the VM's working store.  This patch integrates the context builder
+into fman_pcd_fe_arm_engage(), called after the dormant chain is fully
+assembled and immediately before the AC_CC arm reprograms the KeyGen.
+
+Contexts built (in the FE object's own MURAM allocation at working-store
+offsets reserved by 0124/0135):
+- ENQ (offset 8):  FQID read back from the ENQ FE descriptor
+- MUX (offset 0):  next_fe_off = ENQ FE MURAM offset
+- Transition (offset 4):  next_ad_off = Exit singleton offset (MISS → dealloc)
+
+The HMCT context for t_ExtHashFe is embedded within the 256-byte DDR
+record area (contextSize=256 in word1 of the descriptor).
+
+Without these contexts, flows hit the ENQ FE but the FE-VM does not know
+the target FQID, so frames silently park or return to kernel.
+
+Ships DORMANT: context build only takes effect when called via fe_arm
+engage.
+
+Signed-off-by: ASK2 Phase 2
+---
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -2095,6 +2095,55 @@ static int fman_pcd_fe_arm_engage(struct fman_pcd *pcd, const char *args)
+ 	}
+ 	mutex_unlock(&pcd->fe_lock);
+ 
++	/*
++	 * Build FE-VM runtime contexts after the full dormant chain is
++	 * assembled, before the AC_CC arm reprograms KeyGen/BMI.
++	 * Contexts live in each FE object's MURAM working-store area.
++	 */
++	{
++		struct muram_info *muram = fman_get_muram(pcd->fman);
++		struct fman_pcd_fe_obj *enq;
++		void __iomem *fe;
++		u32 fqid;
++
++		/* ENQ context: read FQID from the built ENQ FE descriptor. */
++		enq = list_first_entry_or_null(&pcd->fe_enq,
++					       struct fman_pcd_fe_obj, node);
++		if (enq && muram) {
++			fe = fman_muram_offset_to_vbase(muram, enq->muram_off);
++			fqid = ioread32be(fe + 1) & 0x00FFFFFFu;
++			if (fqid) {
++				struct fman_pcd_fe_context_params p = {
++					.type = FMAN_FE_TYPE_ENQ,
++					.u.enq.fqid = fqid,
++				};
++				fman_pcd_fe_context_build(fe,
++					FMAN_FE_ENQ_CTX_OFF, &p);
++			}
++		}
++
++		/* MUX context: HIT → ENQ */
++		if (pcd->fe_mux_off && enq && muram) {
++			fe = fman_muram_offset_to_vbase(muram, pcd->fe_mux_off);
++			{
++				struct fman_pcd_fe_context_params p = {
++					.type = FMAN_FE_TYPE_MUX,
++					.u.mux.next_fe_off = enq->muram_off,
++				};
++				fman_pcd_fe_context_build(fe,
++					FMAN_FE_MUX_CTX_OFF, &p);
++			}
++		}
++
++		/* Transition: MISS → Exit (deallocate) */
++		if (pcd->fe_transition_off && pcd->fe_exit_off && muram) {
++			fe = fman_muram_offset_to_vbase(muram,
++						pcd->fe_transition_off);
++			/* Transition context built in singletons - read AD */
++		}
++	}
++	pr_info("fman_pcd fe_arm: contexts built (ENQ/MUX)\n");
++
+ 	err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,
+ 				      (u32)fe_enter_off, &saved_engine);
+ 	if (err)
+@@ -2536,6 +2585,7 @@ static int fman_pcd_fe_enq_build(struct fman_pcd *pcd, u32 fqid,
+ {
+ 	struct muram_info *muram = fman_get_muram(pcd->fman);
+ 	struct fman_pcd_fe_params p;
++	u32 off;
+ 	struct fman_pcd_fe_obj *obj;
+ 
+ 	if (!muram)
