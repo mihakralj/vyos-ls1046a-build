@@ -1,0 +1,27 @@
+From: VyOS LS1046A Build <build@vyos.io>
+Date: Sun, 6 Jul 2026 00:00:00 +0000
+Subject: [PATCH] debug(ask2): 0148 — log KG scheme EKFC/MV during setup
+
+Add pr_info in keygen_scheme_setup to log the exact EKFC, match vector,
+hash control, and FQ base values written to hardware for each scheme.
+This definitively answers whether the default RSS schemes get
+DEFAULT_HASH_KEY_EXTRACT_FIELDS (0x00180206) or 0x00000000 for EKFC.
+
+Temporary debug patch — remove after KG extraction verified.
+---
+ drivers/net/ethernet/freescale/fman/fman_keygen.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+@@ -552,6 +552,9 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+ 	if (scheme->use_hashing) {
+ 		/* configure kgse_ekfc */
+ 		scheme_regs.kgse_ekfc = DEFAULT_HASH_KEY_EXTRACT_FIELDS;
++		pr_info("ASK2-DBG scheme%u hashing: ekfc=0x%08x mv=0x%08x hc=0x%08x fqb=0x%08x\n",
++			scheme_id, scheme_regs.kgse_ekfc,
++			scheme_regs.kgse_mv, scheme_regs.kgse_hc, scheme_regs.kgse_fqb);
+ 
+ 		/* configure kgse_ekdv */
+ 		tmp_reg = 0;
