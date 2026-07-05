@@ -204,3 +204,15 @@ The forward-ports and datapath debug are DONE (PCD, CEETM, true-ZC, CC steering,
 - default: M3-3b CC steering productive tree installs + steers on board; M3-3c/3d/3e wire gates pass on the generator; gate-3 literal ≥7 Gbps measured; DCSR error taps complete. (Core already done.)
 - vpp: HW benchmark recorded (throughput + thermal + MTU constraint verified) on 6.18.x; hugepage-kexec one-shot confirmed.
 - ask: ASK2 components landed (`ask.ko`/`ask_bridge.ko` + PCD patch `0004` + YNL `ask` family); M2 gate PASSES (≥7 Gbps at ≤5% kernel-net CPU) after the MURAM-budget fix; `set system offload ask` engages a real offload (no longer a no-op).
+## 2026-07-05: Phase 1 AC_CC Arm Experiment — COMPLETE
+
+**Build:** CI run 28733398715, dpaa1 branch, ISO 2026.07.05-0730, kernel 6.18.36-vyos
+**Board:** DUT 192.168.1.185, Mono Gateway DK LS1046A, FMan PCD caps=0x17
+
+**M2 gate condition (1): SATISFIED on silicon.**
+- FE VM EXIT-DEALLOCATE proven as terminal MISS disposition (port did NOT park)
+- Arm/disarm cycle fully byte-clean reversible (pcd-snapshot diff exit 0)
+- MURAM gen_pool return: 36096→0 bytes (no leak)
+- eth0/SSH untouched across entire arm→disarm→teardown cycle
+
+**M2 gate condition (2): deferred.** Requires `fe_flow add` with real 5-tuple key.

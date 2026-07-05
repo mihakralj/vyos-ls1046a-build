@@ -481,3 +481,90 @@ teardown (Phase 0 reverse). This is a small, well-bounded delta over `0129`; the
 FE-VM core it dispatches into (`0124`/`0127`/`0131`) is already byte-validated
 (§9), so the residual risk is confined to the port-attach target and the live
 `fe_flow`/`fe_enq` HIT→ENQ resolution.
+
+## §9 2026-07-05: Phase 1 AC_CC Arm Experiment — SATISFIED
+
+**Board:** DUT 192.168.1.185, kernel 6.18.36-vyos, ISO 2026.07.05-0730 (CI run 28733398715, dpaa1 branch).
+
+**Sequence:**
+```
+echo get > fe_pool                                    # allocates 100×28B pool
+echo build > fe_singletons                           # MUX/Transition/Exit
+echo 'set 0x7FFF 16 0' > fe_ehash                    # ehash table
+echo build > fe_hashfe                               # EXT_HASH FE object
+echo build > fe_enter                                # FE_ENTER root AD @ 0x59200
+echo 'build 0x8000' > fe_enq                         # ENQ FE target FQID=0x8000
+echo 'engage 10 59200' > fe_arm                      # ARM AC_CC
+# PING: 4 sent, 0 received, 100% loss — MISS→EXIT→DEALLOCATE
+echo 'disengage 10' > fe_arm                         # DISARM
+echo clear > fe_enter; ... ; echo put > fe_pool      # TEARDOWN
+pcd-snapshot diff /tmp/s0-baseline.json -> [OK]      # BYTE-CLEAN
+```
+
+**Hardware-validated:**
+- FE VM EXIT-DEALLOCATE is a real terminal disposition (port did NOT park)
+- Arm/disarm cycle is fully byte-clean reversible (pcd-snapshot exit 0)
+- MURAM gen_pool return: 36096→0 bytes
+- eth0/SSH untouched across the entire cycle
+
+**M2 gate condition (1) SATISFIED.** Gate condition (2) — `fe_flow add` HIT→egress — deferred.
+
+## §10 Module Inventory (2026-07-05)
+
+### Delivered — In-Tree Kernel (91 board patches)
+| Component | Files | Status |
+|-----------|-------|--------|
+| FMan PCD core | `fman_pcd.c` | ENGAGED on silicon |
+| PCD KeyGen | `fman_pcd_kg.c`, `fman_keygen.c` | ON SILICON |
+| PCD CC tree | `fman_pcd_cc.c`, `fman_pcd_cc_test.c` | ON SILICON |
+| PCD HM/Manip | `fman_pcd_manip.c` | COMPILED (MANIP create/chain API) |
+| PCD Policer | `fman_pcd_plcr.c` | ON SILICON (FMPL GCR) |
+| PCD DCSR error taps | `fman_pcd_dcsr.c` | COMPILED |
+| FE-VM pool+singletons | (in fman_pcd.c) | ON SILICON (Phase 1) |
+| FE-VM ehash+flow insert | (in fman_pcd.c) | ON SILICON (Phase 1) |
+| FE-VM hash object | (in fman_pcd.c) | ON SILICON (Phase 1) |
+| FE-VM arm debugfs | (in fman_pcd.c) | ON SILICON (Phase 1) |
+| FE context builder | (in fman_pcd.c) | COMPILED (0135) |
+| TX confirm bypass | `fman_port.c` (+saved_* fields) | COMPILED (0136) |
+| CAAM QI share | `drivers/crypto/caam/qi.c` | COMPILED (0134) |
+| AF_XDP pool framework | `af_xdp_pool/af_xdp_pool_main.c` | PARTIAL (ZC gated) |
+| BMan refill crash fix | `af_xdp_pool/af_xdp_pool_main.c` | COMPILED (0139) |
+| RX bpool reprogram | `fman_port.c` (0102 v2) | COMPILED, DUT PENDING |
+| Flow-offload backend slot | `dpaa_eth.c` | COMPILED (0145) |
+| Flavor ops | `dpaa_flavor.c/h` | COMPILED |
+| Ethernet ntuple | `dpaa_eth.c` | ON SILICON (HW steering) |
+| VLAN strip | `dpaa_eth.c` | ON SILICON (HMCT) |
+| Policer tc matchall | `dpaa_eth.c` | ON SILICON (FMPL) |
+| CEETM stub | `dpaa_fman_caps.c/h` | COMPILED |
+| DTB sync | `mono-gateway-dk.dts` | DEPLOYED (2026-07-04) |
+
+### Delivered — OOT ask.ko (14 source files)
+| File | Purpose | Status |
+|------|---------|--------|
+| `ask_main.c` | Module init, flavor ops registration | COMPILED |
+| `ask_hw.c` | Engage/disengage + TX bypass | COMPILED, ask.ko wired |
+| `ask_flow.c` | Flow table management | COMPILED |
+| `ask_flow_offload.c` | nf_flow_table handler (BIND/REPLACE/DESTROY) | COMPILED, REPLACE untested |
+| `ask_genl.c` / `ask_genl_attr.c` | Generic netlink control plane | COMPILED |
+| `ask_debugfs.c` | DebugFS diagnostics | COMPILED |
+| `ask_neigh.c` | Neighbor resolution | COMPILED |
+| `ask_op.c` | Per-flow operation encoder | COMPILED |
+| `ask_stats.c` | Statistics | COMPILED |
+| `ask_bridge.c` | L2 switchdev | STUB (417 B) |
+| `ask_caam.c` | CAAM integration | STUB |
+| `ask_xfrm.c` | ESP xfrmdev_ops | STUB (1 KB) |
+| Tests (5 files) | KUnit test suite | COMPILED |
+
+### Planned — Not Yet Implemented
+| Component | Phase | Dependency |
+|-----------|-------|------------|
+| ask.ko full FE datapath (fe_flow add + TX bypass + ct rule) | 2 | M2 gate condition (2) |
+| MANIP chain → CC AD word3 wiring (NADEN=0x20000000) | 2 | 0137 MANIP API |
+| Flow-offload REPLACE delivery audit | 2 | nf_flow_table diag |
+| `ask_bridge.ko` L2 switchdev (full body) | 3 | Phase 2 |
+| HW IPsec `xfrmdev_ops` (ESP, GCM/CBC+CTR) | 4 | CAAM QI share (0134) |
+| Operator CLI `set system offload ask` | 5 | Phase 3-4 |
+| VPP + ASK mutual exclusion (runtime) | 5 | Phase 5 |
+| Soak testing (reversibility 100-cycle, policer throughput) | 6 | Phase 2-5 |
+| AF_XDP ZC BPID reprogram DUT verification | deferred | Option A (0102 v2) |
+| CEETM full body (QMan qdisc) | deferred | CEETM stub |
