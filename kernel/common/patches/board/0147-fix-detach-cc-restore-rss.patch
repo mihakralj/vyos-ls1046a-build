@@ -1,0 +1,36 @@
+From: VyOS LS1046A Build <build@vyos.io>
+Date: Sat, 5 Jul 2026 21:50:00 +0000
+Subject: [PATCH] fix(ask2): 0147 — detach_cc restores RSS next_engine=2
+
+fman_pcd_kg_port_detach_cc() (patch 0106) sets next_engine=0, which
+disables the KG scheme entirely. After detach, the port is dead: no
+RSS hashing, hc=0, fqb=0 — requires cold reboot to recover. This
+breaks fe_arm disengage (0132), policer detach (0097), and any
+CC→RSS transition.
+
+Fix: set next_engine=2 (bmi-enqueue / RSS). The scheme's extraction
+context (EKFC/mv/hc/fqb) is preserved — only next_engine transitions
+CC→RSS. pcd-snapshot byte-clean after disengage on hardware.
+
+Verified fix: 2026-07-05 hardware session, scheme[3] corrupted to
+next_engine=0 after disengage; with next_engine=2 the original RSS
+scheme is restored and port traffic resumes normally.
+
+Signed-off-by: VyOS LS1046A Build <build@vyos.io>
+---
+ drivers/net/ethernet/freescale/fman/fman_keygen.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+index a1b2c3d..d4e5f6a 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+@@ -598,7 +598,7 @@ int fman_pcd_kg_port_detach_cc(struct fman_pcd *pcd, u8 hw_port_id)
+ 		return 0;
+ 	}
+ 
+-	slot->next_engine    = 0;
++	slot->next_engine    = 2;  /* restore RSS direct-enqueue (was 0=dead) */
+ 	slot->cc_base_offset = 0;
+ 	slot->cc_bits_sel    = 0;
+ 
