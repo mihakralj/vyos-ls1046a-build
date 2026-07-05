@@ -1,19 +1,16 @@
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index dd7a52cef..f602c65d0 100644
+index dd7a52cef..35f9b81ef 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -2318,6 +2318,97 @@ static const struct file_operations fman_pcd_fe_arm_fops = {
+@@ -2318,6 +2318,90 @@ static const struct file_operations fman_pcd_fe_arm_fops = {
  	.release	= single_release,
  };
  
 +/*
 + * fman_pcd_fe_build_chain — build the complete FE-VM dormant chain.
-+ *
-+ * Pool is acquired with the self-locking fman_pcd_fe_pool_get(), then
-+ * fe_lock is held for the remaining build operations (which all require
-+ * the lock to be held).  On error, cleanup functions are also called
-+ * with the lock held; only fman_pcd_fe_pool_put() (self-locking) must
-+ * be called OUTSIDE the lock.
++ * Pool acquisition via self-locking fman_pcd_fe_pool_get(), then fe_lock
++ * held for remaining build ops.  After enter_build(), context records are
++ * programmed into the MUX/Transition/Exit singletons via build_contexts.
 + */
 +int fman_pcd_fe_build_chain(struct fman_pcd *pcd, u32 fqid, u32 *enter_off)
 +{
@@ -42,7 +39,6 @@ index dd7a52cef..f602c65d0 100644
 +	if (ret)
 +		goto err_enter;
 +
-+	/* Program MUX/Transition/Exit context records (0146) */
 +	fman_pcd_fe_build_contexts(pcd);
 +
 +	if (enter_off)
@@ -69,10 +65,6 @@ index dd7a52cef..f602c65d0 100644
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_fe_build_chain);
 +
-+/*
-+ * fman_pcd_fe_teardown_chain — tear down the FE-VM dormant chain.
-+ * All _free/_drain calls require fe_lock; pool_put is self-locking.
-+ */
 +void fman_pcd_fe_teardown_chain(struct fman_pcd *pcd)
 +{
 +	mutex_lock(&pcd->fe_lock);
