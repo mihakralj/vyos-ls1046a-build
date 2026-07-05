@@ -1,7 +1,7 @@
 # Dual Dataplane — Full ASK Offload, Switchable to VPP
 
-**Status:** Adopted v1.1. 2026-06-14 (single-image flavor collapse made **immediate**; supersedes Draft v1.0 2026-06-12). The `default | ask | vpp` build-flavor split is **retired** — CI ships one flavor-neutral ISO + one `version.json` feed (aliases kept for fielded installs). This is the current build/packaging model, no longer gated behind M7.
-**Goal:** One installed VyOS image on the LS1046A Mono Gateway that supports the *full* NXP-ASK-equivalent FMan hardware offload (classification, FE forwarding, NAT, IPsec, frag/reassembly) **and** can disable that offload to run the VPP/AF_XDP dataplane instead — switched by VyOS config commit, no reflash.
+**Status:** Adopted v1.2. 2026-07-05 (added M1.5 AF_XDP MISS-path integration milestone). The `default | ask | vpp` build-flavor split is **retired** — CI ships one flavor-neutral ISO + one `version.json` feed (aliases kept for fielded installs). This is the current build/packaging model, no longer gated behind M7.
+**Goal:** One installed VyOS image on the LS1046A Mono Gateway that supports the *full* NXP-ASK-equivalent FMan hardware offload (classification, FE forwarding, NAT, IPsec, frag/reassembly), **and** can disable that offload to run the VPP/AF_XDP dataplane instead, **and** can route unmatched ASK flows to AF_XDP for custom userspace processing — switched by VyOS config commit, no reflash.
 
 **Authority split.** This plan does not re-specify either dataplane:
 
@@ -120,7 +120,9 @@ Each milestone has a hardware gate on the board and lands with its teardown inve
 ```mermaid
 graph LR
     M0[M0 oracle:\nfull vendor FE/ehash dump] --> M1[M1 reversible\nmode switch infra]
+    M1 --> M15[M1.5 AF_XDP\nMISS-path integration]
     M1 --> M2[M2 HW classification\nAC_CC + FE init]
+    M15 --> M2
     M2 --> M3[M3 HW forwarding\nFORWARD_FQ_WITH_MANIP]
     M3 --> M4[M4 HW NAT]
     M3 --> M5[M5 HW IPsec\nCAAM QI + xfrmdev_ops]
@@ -160,6 +162,18 @@ graph LR
 > theory → the missing **FE opcode VM** is the disposition mechanism, [`arch/fman-fe-ehash.md`](../arch/fman-fe-ehash.md) §1/§8.3). The
 > ask.ko engage-wiring (§3.1 `set system offload ask`) waits on item 3 because
 > AC_CC stalls the port under load until disposition works.
+
+**M1.5 — AF_XDP MISS-path integration with ASK2 (added 2026-07-05).**
+Wire the FE-VM's MISS→Exit singleton to an XDP-capable FQ, so unmatched
+frames land in an AF_XDP socket instead of the kernel RX FQ. Three concurrent
+dispatch paths: HIT→silicon TX, MISS→AF_XDP userspace, MISS→kernel stack (0147).
+*Gate:* MISS→AF_XDP frames delivered to XSK RX ring; throughput ≥3.5 Gbps
+(existing DPAA1 AF_XDP ceiling); 100× engage/disengage soak still clean with
+AF_XDP active; VPP bind works after ASK teardown (M1 regression gate unchanged).
+*Architecture:* One FQID swap — change the FE-VM ENQ object from kernel-FQ to
+XDP-FQ. No new kernel patches (AF_XDP ships in board 0085–0096). ASK2 signals
+the XSK socket manager of the MISS FQID at engage time via a new `ask_af_xdp`
+notification. This is a post-M2 polish in ASK2-DEVELOPMENT-PLAN.md Phase 2.5.
 
 **M2 — HW classification (the parity keystone).** Engage the classifier and make a classified frame reach its egress FQ, deleting the `0118` CCBS placebo (which *bypasses* classification rather than enabling it). **Fork decision RESOLVED (2026-06-16): Fork B.** Option B (the missing-controller-arming theory) is **exhausted & refuted** — iter-49 (`ccexp47_rfne.py`) tested the strongest untested lead, the SDK `rfne`-last detach/re-arm discipline, byte-perfectly and the port **still stalled** (`FMFP_PS[STL]=0x80800000` at rfrc=+2, identical to baseline); with gmask/exit-NIA/leaf-AD/extraction/RCMNE/params-page/ucode all previously exonerated, **classic exact-match (Fork A) cannot flow on 210.10.1** (qdrant `m3-3b-option-b-rfne-last-REFUTED-forkB-decision`). This confirms the M0 oracle ([`arch/fman-fe-ehash.md`](../arch/fman-fe-ehash.md) §1/§8.3): bare AC_CC `CONTRL_FLOW` has no terminal BMI-FIFO disposition without the **FE opcode VM**. **The path is therefore Fork B** — reproduce the vendor external-hash/FE init contract (doc §3–§5: `AllocFEObjs` MURAM pool + per-port `FmPortSetFESupport` + `ExternalHashTableSet` DDR buckets, each with its inverse), the **only** config proven to flow on this silicon and the eventual substrate for NAT/frag/stats. **⚠ Source-of-truth (corrected 2026-06-15):** the doc §3–§5 *allocation* skeleton is genuine lf-6.6.y archive source, but the FE-VM *programming* core (`FmPcdCcBuildFE` / `FmPcdCcBuildContextByFE` / `get_indexed_hash_bucket`) is **stubbed** in that archive **and in the shipping `lf-6.12.49-2.2.0` mono port** (both no-op `UNUSED()`) — Fork B must extract those three from the **lf-5.4 Layerscape SDK** (`we-are-mono/ASK` `999-…patch`: `FmPcdCcBuildFE` L8883, `FmPcdCcBuildContextByFE` L8954, `get_indexed_hash_bucket` L7301), the only tree with working bodies. The `106.4.18` ucode swap is **ruled out** (iter-42: identical handler code; ccexp12: parks identically). Fork B lands its inverse in the same patch (§3.5 reversibility). First packet of a flow → exception to kernel; subsequent packets classified in silicon.
 *Gate:* D14-class evidence — KG scheme hit counters advance, CC lookup resolves, classified flow's frames stop appearing in kernel softirq **and the port stays alive under sustained traffic** (the M3-3b disposition criterion); teardown still snapshot-clean.

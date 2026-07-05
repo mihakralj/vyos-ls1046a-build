@@ -1,5 +1,5 @@
 # ASK2 Next Actions — Immediate Implementation Priorities
-**Version 1.0.0 · 2026-07-04 · HADS 1.0.0**
+**Version 1.1.0 · 2026-07-05 · HADS 1.0.0**
 
 ---
 
@@ -178,7 +178,29 @@ M2 gate: throughput must be at least 2 Gbps and kernel-net CPU must be at most 5
 
 ---
 
-## 8. Priorities 4–6 After M2
+## 8. Priority 3.5 — AF_XDP MISS-Path Integration (post-M2 polish)
+
+**[SPEC]**
+Wire the FE-VM's MISS→Exit singleton to an XDP-capable FQ so unmatched
+frames land in an AF_XDP socket for custom userspace processing (NAT, DPI,
+tunneling). This adds a third dispatch path alongside HIT→silicon TX and
+MISS→kernel RX (0147).
+
+**[SPEC]**
+- No new kernel patches needed — the AF_XDP substrate (pool management,
+  BPF program, XSK socket lifecycle) already ships in board patches
+  0085–0096 from the VPP overlay work.
+- Architecture: one FQID swap — change the MISS ENQ from kernel-FQ to
+  XDP-FQ. ASK2 notifies the XSK socket manager of the FQID at engage
+  time via a new `ask_af_xdp` notification.
+- Scope: post-M2 gate, runs in parallel with Priorities 4–6.
+- Gate: MISS→AF_XDP frames delivered to XSK RX ring; throughput ≥3.5
+  Gbps (DPAA1 AF_XDP ceiling); 100× engage/disengage soak still clean;
+  VPP AF_XDP bind works after ASK teardown.
+
+---
+
+## 9. Priorities 4–6 After M2
 
 **[SPEC]**
 Phase 3 replaces the `ask_bridge.c` stub with a switchdev-based L2 bridge offload. The nxp-sdk ASK1 oracle proves this is the right scale: bridge offload works without an `auto_bridge.ko`-style netfilter-hook stack.
@@ -199,7 +221,7 @@ Phase 6 is productization: trafficked engage/disengage soak, `pcd-snapshot` clea
 
 ---
 
-## 9. Risk Register for the Next Session
+## 10. Risk Register for the Next Session
 
 **[BUG] Phase 1 arm parks with no fault
 Symptom: Port stalls or packets disappear while FMan fault registers stay clean.
@@ -223,7 +245,7 @@ Fix: Use shared next-hop MANIP handles with reference counts; per-flow rows refe
 
 ---
 
-## 10. Session Artifacts
+## 11. Session Artifacts
 
 **[SPEC]**
 This refresh created or updated these plan artifacts:

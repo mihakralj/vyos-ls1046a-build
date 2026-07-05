@@ -1,5 +1,5 @@
 # ASK2 Development Plan — from dormant substrate to operational offload
-**Version 1.1.0 · 2026-07-04 · HADS 1.0.0**
+**Version 1.2.0 · 2026-07-05 · HADS 1.0.0**
 
 ---
 
@@ -126,10 +126,11 @@ Phase 2 passes the throughput gate.
 graph LR
     P0["Phase 0\nbyte-gate dormant\nFE chain on silicon"] --> P1["Phase 1\nARM classifier->FE\n(board sec.4)"]
     P1 --> P2["Phase 2\nask.ko drives FE +\nflow population -> M2 gate"]
+    P2 --> P25["Phase 2.5\nAF_XDP MISS-path\nintegration"]
     P2 --> P3["Phase 3\nflow types + ask_bridge\n(board sec.6)"]
     P2 --> P4["Phase 4\nCAAM 0001 fwd-port +\nask_xfrm (board sec.7)"]
-    P3 --> P5["Phase 5\nVyOS CLI + ASK/VPP mutex\n(board sec.8)"]
-    P4 --> P5
+    P25 --> P5["Phase 5\nVyOS CLI + ASK/VPP mutex\n(board sec.8)"]
+    P3 --> P5
     P3 --> P6["Phase 6\ntrafficked 100x soak\n+ dual-dataplane RC"]
     P4 --> P6
     P5 --> P6
@@ -233,7 +234,48 @@ offloads; throughput ≥2 Gbps at ≤5% kernel-net CPU (stretch ≥7 Gbps), with
   `(egress_tx_fqid, src_mac, dst_mac)` via `fman_hm_nexthop_get/put` (`0120`);
   per-flow CC keys reference the shared handle.
 
-### 4.4 Phase 3 — broaden flow types + ask_bridge.ko  ▶ clears board §6
+### 4.4 Phase 2.5 — AF_XDP MISS-path integration with ASK2
+
+**[SPEC]**
+Add an AF_XDP socket dispatch target to the FE-VM MISS path,
+complementing the 0147 kernel-return fix. When ASK2 engages on
+a port, the FE-VM's MISS→Exit singleton is redirected to an
+XDP-attached FQ instead of the kernel's default RX FQ. This
+enables three concurrent dispatch paths on the same port:
+
+```
+FMan → KG → FE-VM → HIT(ENQ→TX)              → silicon forwarding
+                  → MISS(ENQ→XDP-FQ→BPF)     → AF_XDP userspace
+                  → MISS(ENQ→kernel-FQ)       → kernel stack (0147)
+```
+
+**[SPEC]**
+- The AF_XDP infrastructure (pool manage, BPF program, XSK socket
+  lifecycle, per-CPU NAPI/qband) **already ships** in the kernel
+  (board patches 0085–0096) as part of the VPP AF_XDP overlay.
+- ASK2 only needs to wire the MISS ENQ to an XDP-capable FQ —
+  a one-FQID swap in the 0147 `fe_kernq` ENQ object.
+- The XSK socket is managed by VPP or a standalone AF_XDP daemon;
+  ASK2 does not own it.
+
+**[SPEC] Gate:**
+MISS→AF_XDP frames delivered to the XSK RX ring; the kernel
+netdev and management SSH unaffected with ASK engaged;
+throughput ≥3.5 Gbps for AF_XDP-destined flows (the existing
+DPAA1 AF_XDP ceiling per `specs/dpaa1-afxdp-modernization-spec.md`).
+
+**[NOTE]**
+AF_XDP does not benefit the HIT path (already silicon-to-silicon at
+line rate). It only helps the MISS path: unmatched flows land in an
+XSK socket for custom processing (NAT, DPI, tunneling) instead of
+dropping or punting to kernel. This is a single FQID swap
+architecturally — the FE-VM already speaks ENQ natively.
+
+**[NOTE]**
+This Phase runs in parallel with Phases 3 (broaden flow types) and
+4 (HW IPsec). It is a post-M2 polish item, not a gate blocker.
+
+### 4.5 Phase 3 — broaden flow types + ask_bridge.ko  ▶ clears board §6
 
 **[SPEC]**
 IPv4 → IPv6 → multicast (`fman_pcd_replic`) → L2 bridge. Replace the 417-byte
