@@ -717,6 +717,11 @@ cp "$BOARD_PATCH_DIR/0145-dpaa-flow-offload-backend-slot.patch" "$KERNEL_PATCHES
 # reprograms KeyGen/BMI, so the FE-VM can resolve HIT→ENQ and MISS→Exit.
 cp "$BOARD_PATCH_DIR/0146-fman-pcd-fe-context-build-integration.patch" "$KERNEL_PATCHES/"
 
+# 0147: fix disengage — detach_cc restores RSS next_engine=2 instead of 0.
+# Without this, disengage kills the KG scheme (hc=0, fqb=0), requiring
+# cold reboot to recover port traffic.
+cp "$BOARD_PATCH_DIR/0147-fix-detach-cc-restore-rss.patch" "$KERNEL_PATCHES/"
+
 # ── Staging-completeness guard ────────────────────────────────────────
 # Every kernel/common/patches/board/*.patch must either be cp'd above or
 # listed here as an intentional skip. Failure mode (observed 2026-06-11,
