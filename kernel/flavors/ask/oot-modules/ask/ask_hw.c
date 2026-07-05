@@ -489,11 +489,34 @@ int ask_hw_offload_engage(u8 hw_port_id)
         }
 
         /*
-         * Build the FE-VM dormant chain (0148):
-         *   pool -> singletons -> ehash -> enq -> hash -> enter
-         * fqid=0: no flows inserted yet, ENQ not reached (MISS -> Exit).
+         * Resolve egress TX FQID for the chain ENQ.  For now, use
+         * eth4 as the canonical egress port (matched to eth3=0x10
+         * ingress).  The full flow_offload path provides per-flow
+         * FQIDs from the nf_flow_table cookie data.
          */
-        rc = fman_pcd_fe_build_chain(pcd, 0, &fe_enter_off);
+        {
+                struct net_device *egress_dev = NULL;
+                unsigned int egress_id = (hw_port_id == 0x10) ? 0x11 : 0x10;
+                u32 tx_fqid = 0;
+
+                rcu_read_lock();
+                for_each_netdev_rcu(&init_net, egress_dev) {
+                        struct fman_port *fp;
+                        fp = dpaa_get_rx_fman_port(egress_dev);
+                        if (fp && fman_port_get_id(fp) == egress_id) {
+                                dev_hold(egress_dev);
+                                break;
+                        }
+                }
+                rcu_read_unlock();
+
+                if (egress_dev) {
+                        dpaa_get_tx_fqid(egress_dev, 0, &tx_fqid);
+                        dev_put(egress_dev);
+                }
+
+                rc = fman_pcd_fe_build_chain(pcd, tx_fqid, &fe_enter_off);
+        }
         if (rc) {
                 ask_pr_warn("hw: FE chain build failed (rc=%d) on port 0x%02x\n",
                             rc, hw_port_id);
