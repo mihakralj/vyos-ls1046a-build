@@ -1408,3 +1408,21 @@ These are non-goals. Don't slip them in.
 **End of v1.4 (historical).** Superseded by v1.6. v1.4 added PR14z21 M2-result logging and `-ENOMEM` instrumentation prescription.
 
 **End of v1.3 (historical).** Superseded by v1.4 (now v1.6). Three concurrent reductions (Path A, FORWARD_FQ_WITH_MANIP, no-userspace).
+
+## §2026-07-05 Phase 1 AC_CC Arm — Silicon Verified
+
+The Phase 1 AC_CC arm experiment was executed on DUT (Mono Gateway DK LS1046A,
+kernel 6.18.36-vyos, ISO 2026.07.05-0730, CI run 28733398715, dpaa1 branch).
+Full FE chain was built from debugfs and armed on eth3 (hw port 0x10) via the
+0133 real AC_CC encoding (KGSE_MODE 0x80000006, FMBM_RCCB→fe_enter MURAM
+0x59200). Results:
+
+- FE VM EXIT-DEALLOCATE is a real terminal MISS disposition on 210.10.1 ucode
+  (port did NOT park — the ~47-frame park seen in iter-28/34/49 was the
+  no-terminal-disposition case, not the MISS→EXIT→DEALLOCATE path)
+- Full arm→disarm→teardown cycle is byte-clean reversible (pcd-snapshot diff
+  exit 0, MURAM gen_pool 36096→0, scheme[3] reverted to RSS nia=0x02)
+- Management port (eth0/SSH) untouched across the entire cycle
+
+This validates the Fork B FE/eHash architecture and unblocks the M2 HIT-path
+datapath gate (condition 2: fe_flow add with real 5-tuple key → egress FQ).
