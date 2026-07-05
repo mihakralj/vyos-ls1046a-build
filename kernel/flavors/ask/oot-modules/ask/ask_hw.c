@@ -135,8 +135,9 @@ struct ask_hw_port {
         bool            in_use;
         u8              port_id;        /* BMI hwport id (sparse 0x01..0x31) */
         bool            cc_installed;   /* a static CC tree is live on this port */
-        bool            offload_engaged;/* M1 coarse S1 mode-switch active (0129) */
-        u16             nkeys;          /* live entries in shadow[] */
+	bool            offload_engaged;/* M1 coarse S1 mode-switch active (0129) */
+	u8              saved_engine;   /* pre-arm KG next_engine for disengage */
+	u16             nkeys;          /* live entries in shadow[] */
         u32             next_key_id;    /* per-port monotonic id (never 0) */
         struct ask_hw_cc_slot shadow[FMAN_CC_MAX_STATIC_KEYS];
 };
@@ -461,6 +462,9 @@ int ask_hw_offload_engage(u8 hw_port_id)
 {
         struct ask_hw_pcd *h = ask_hw_pcd_get();
         struct ask_hw_port *p;
+        struct fman_pcd *pcd;
+        u32 fe_enter_off = 0;
+        u8 saved_engine;
         int rc;
 
         if (!h)
@@ -478,19 +482,48 @@ int ask_hw_offload_engage(u8 hw_port_id)
                 goto out_unlock;
         }
 
-        rc = fman_pcd_offload_engage(h->fman, hw_port_id);
-        if (rc)
+        pcd = fman_get_pcd(h->fman);
+        if (!pcd) {
+                rc = -ENODEV;
                 goto out_unlock;
+        }
 
         /*
-         * M1 TX bypass: flip all TX ports to BMan-direct release
-         * (patch 0136).  Kernel TX (FCO=1) is unaffected.  Errors
-         * here are non-fatal — the RX CC tree is already grafted.
+         * Build the FE-VM dormant chain (0148):
+         *   pool -> singletons -> ehash -> enq -> hash -> enter
+         * fqid=0: no flows inserted yet, ENQ not reached (MISS -> Exit).
+         */
+        rc = fman_pcd_fe_build_chain(pcd, 0, &fe_enter_off);
+        if (rc) {
+                ask_pr_warn("hw: FE chain build failed (rc=%d) on port 0x%02x\n",
+                            rc, hw_port_id);
+                goto out_unlock;
+        }
+
+        /*
+         * Arm the port: flip KG scheme RSS -> AC_CC, set CC base to
+         * the FE_ENTER root AD (0133 real AC_CC encoding).
+         */
+        rc = fman_pcd_kg_port_arm_fe(pcd, hw_port_id, fe_enter_off,
+                                     &saved_engine);
+        if (rc) {
+                ask_pr_warn("hw: FE arm failed (rc=%d) on port 0x%02x\n",
+                            rc, hw_port_id);
+                fman_pcd_fe_teardown_chain(pcd);
+                goto out_unlock;
+        }
+        p->saved_engine = saved_engine;
+
+        /*
+         * TX bypass: flip all TX ports to BMan-direct release (0136).
+         * Kernel TX (FCO=1) is unaffected.
          */
         fman_port_set_silicon_hit_release_all(h->fman, true);
 
         p->offload_engaged = true;
-        ask_pr_info("hw: offload ENGAGED on port 0x%02x (S0->S1)\n", hw_port_id);
+        ask_pr_info("hw: FE-ARMED port 0x%02x (enter=0x%x engine %u->3)\n",
+                    hw_port_id, fe_enter_off, saved_engine);
+        rc = 0;
 
 out_unlock:
         mutex_unlock(&h->lock);
@@ -502,6 +535,7 @@ void ask_hw_offload_disengage(u8 hw_port_id)
 {
         struct ask_hw_pcd *h = ask_hw_pcd_get();
         struct ask_hw_port *p;
+        struct fman_pcd *pcd;
         unsigned int i;
 
         if (!h)
@@ -521,13 +555,19 @@ void ask_hw_offload_disengage(u8 hw_port_id)
                 return;                 /* idempotent no-op */
         }
 
-        /* Restore TX confirm before tearing down the CC tree. */
+        /* Restore TX confirm before tearing down. */
         fman_port_set_silicon_hit_release_all(h->fman, false);
 
-        fman_pcd_offload_disengage(h->fman, hw_port_id);
+        pcd = fman_get_pcd(h->fman);
+        if (pcd) {
+                fman_pcd_kg_port_disarm_fe(pcd, hw_port_id,
+                                           p->saved_engine);
+                fman_pcd_fe_teardown_chain(pcd);
+        }
+
         p->offload_engaged = false;
         mutex_unlock(&h->lock);
-        ask_pr_info("hw: offload DISENGAGED on port 0x%02x (S1->S0)\n", hw_port_id);
+        ask_pr_info("hw: FE-DISARMED port 0x%02x (S1->S0)\n", hw_port_id);
 }
 EXPORT_SYMBOL_GPL(ask_hw_offload_disengage);
 

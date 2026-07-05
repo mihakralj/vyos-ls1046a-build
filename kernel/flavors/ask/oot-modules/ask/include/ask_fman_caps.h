@@ -175,4 +175,31 @@ int  fman_pcd_offload_engage(struct fman *fm, u8 hw_port_id);
  */
 void fman_pcd_offload_disengage(struct fman *fm, u8 hw_port_id);
 
+/* ---- FE-VM Fork-B path (board patches 0133 + 0148) -------------------- */
+
+/* Opaque PCD subsystem handle (resolved via fman_get_pcd below). */
+struct fman_pcd;
+
+struct fman_pcd *fman_get_pcd(struct fman *fman);
+
+/*
+ * fman_pcd_fe_build_chain — build the complete FE-VM dormant chain
+ * (pool→singletons→ehash→enq→hash→enter).  Returns the FE_ENTER root-AD
+ * MURAM offset in *enter_off.  Call once before arming a port.
+ */
+int  fman_pcd_fe_build_chain(struct fman_pcd *pcd, u32 fqid, u32 *enter_off);
+void fman_pcd_fe_teardown_chain(struct fman_pcd *pcd);
+bool fman_pcd_fe_chain_is_built(struct fman_pcd *pcd);
+
+/*
+ * fman_pcd_kg_port_arm_fe — arm a port's KG scheme for FE-VM dispatch.
+ * Flips the scheme's next_engine AC_CC (0133 real encoding), sets the
+ * port's CC base to @fe_enter_off, and saves the pre-arm engine in
+ * *saved_engine for later disengage.
+ */
+int  fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
+			     u32 fe_enter_off, u8 *saved_engine);
+void fman_pcd_kg_port_disarm_fe(struct fman_pcd *pcd, u8 hw_port_id,
+				u8 saved_engine);
+
 #endif /* __ASK_FMAN_CAPS_H */
