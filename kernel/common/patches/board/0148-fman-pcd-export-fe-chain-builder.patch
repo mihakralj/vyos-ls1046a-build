@@ -1,70 +1,74 @@
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index ba6343dc2..1fa0a237c 100644
+index dd7a52cef..f602c65d0 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -2479,6 +2479,88 @@ static const struct file_operations fman_pcd_fe_arm_fops = {
+@@ -2318,6 +2318,95 @@ static const struct file_operations fman_pcd_fe_arm_fops = {
  	.release	= single_release,
  };
  
 +/*
 + * fman_pcd_fe_build_chain — build the complete FE-VM dormant chain.
-+ * Called by ask.ko to construct the FE classification pipeline
-+ * (pool → singletons → ehash → enq → hash → enter) before
-+ * arming a port.  All internal workers must already be defined
-+ * (this function lives near the end of the file for that reason).
++ *
++ * Pool is acquired with the self-locking fman_pcd_fe_pool_get(), then
++ * fe_lock is held for the remaining build operations (which all require
++ * the lock to be held).  On error, cleanup functions are also called
++ * with the lock held; only fman_pcd_fe_pool_put() (self-locking) must
++ * be called OUTSIDE the lock.
 + */
 +int fman_pcd_fe_build_chain(struct fman_pcd *pcd, u32 fqid, u32 *enter_off)
 +{
 +	int ret;
 +
-+	mutex_lock(&pcd->fe_lock);
-+
++	/* self-locking — no fe_lock held */
 +	ret = fman_pcd_fe_pool_get(pcd);
 +	if (ret)
-+		goto out_unlock;
++		return ret;
++
++	mutex_lock(&pcd->fe_lock);
++
 +	ret = fman_pcd_fe_singletons_build(pcd);
 +	if (ret)
-+		goto err_pool;
++		goto err_sg;
 +	ret = fman_pcd_ehash_table_set(pcd, 0xFF, 8, 0);
 +	if (ret)
-+		goto err_sg;
++		goto err_ehash;
 +	ret = fman_pcd_fe_enq_build(pcd, fqid, 0);
 +	if (ret)
-+		goto err_ehash;
++		goto err_enq;
 +	ret = fman_pcd_fe_hash_build(pcd);
 +	if (ret)
-+		goto err_enq;
++		goto err_hash;
 +	ret = fman_pcd_fe_enter_build(pcd, 0);
 +	if (ret)
-+		goto err_hash;
++		goto err_enter;
 +
 +	if (enter_off)
 +		*enter_off = (u32)pcd->fe_root_ad_off;
++
++	mutex_unlock(&pcd->fe_lock);
 +	pr_info("fman_pcd: FE chain built (enter=0x%lx fqid=0x%x)\n",
 +		pcd->fe_root_ad_off, fqid);
-+
-+	mutex_unlock(&pcd->fe_lock);
 +	return 0;
 +
-+err_hash:
++err_enter:
 +	fman_pcd_fe_hash_free(pcd);
-+err_enq:
 +	fman_pcd_fe_enq_free(pcd);
-+err_ehash:
++err_hash:
++	fman_pcd_fe_enq_free(pcd);
++err_enq:
 +	fman_pcd_ehash_drain(pcd);
-+err_sg:
++err_ehash:
 +	fman_pcd_fe_singletons_free(pcd);
-+err_pool:
-+	fman_pcd_fe_pool_put(pcd);
-+out_unlock:
++err_sg:
 +	mutex_unlock(&pcd->fe_lock);
++	fman_pcd_fe_pool_put(pcd);
 +	return ret;
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_fe_build_chain);
 +
 +/*
 + * fman_pcd_fe_teardown_chain — tear down the FE-VM dormant chain.
-+ * Reverse order of build: enter → hash → enq → ehash → singletons → pool.
++ * All _free/_drain calls require fe_lock; pool_put is self-locking.
 + */
 +void fman_pcd_fe_teardown_chain(struct fman_pcd *pcd)
 +{
@@ -74,17 +78,20 @@ index ba6343dc2..1fa0a237c 100644
 +	fman_pcd_fe_enq_free(pcd);
 +	fman_pcd_ehash_drain(pcd);
 +	fman_pcd_fe_singletons_free(pcd);
-+	fman_pcd_fe_pool_put(pcd);
 +	mutex_unlock(&pcd->fe_lock);
++
++	fman_pcd_fe_pool_put(pcd);
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_fe_teardown_chain);
 +
-+/*
-+ * fman_pcd_fe_chain_is_built — predicate.
-+ */
 +bool fman_pcd_fe_chain_is_built(struct fman_pcd *pcd)
 +{
-+	return pcd->fe_refcount > 0 && pcd->fe_root_ad_off != 0;
++	bool built;
++
++	mutex_lock(&pcd->fe_lock);
++	built = pcd->fe_refcount > 0 && pcd->fe_root_ad_off != 0;
++	mutex_unlock(&pcd->fe_lock);
++	return built;
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_fe_chain_is_built);
 +
@@ -92,17 +99,14 @@ index ba6343dc2..1fa0a237c 100644
   * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
   * @fman: parent FMan controller.  Must have a live MURAM pool (mainline
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
-index 98e870c15..533d479c3 100644
+index 98e870c15..0208220e5 100644
 --- a/include/linux/fsl/fman_pcd.h
 +++ b/include/linux/fsl/fman_pcd.h
-@@ -692,4 +692,12 @@ int fman_pcd_offload_engage(struct fman *fman, u8 hw_port_id);
+@@ -692,4 +692,9 @@ int fman_pcd_offload_engage(struct fman *fman, u8 hw_port_id);
   */
  void fman_pcd_offload_disengage(struct fman *fman, u8 hw_port_id);
  
-+/* FE chain builder wrapper (0148) — build/teardown the FE-VM dormant chain.
-+ * These are callable from OOT modules (ask.ko) after the PCD subsystem
-+ * initialises.  Mutex-protected internally.
-+ */
++/* FE chain builder (0148) — one-call build/teardown for ask.ko */
 +int  fman_pcd_fe_build_chain(struct fman_pcd *pcd, u32 fqid, u32 *enter_off);
 +void fman_pcd_fe_teardown_chain(struct fman_pcd *pcd);
 +bool fman_pcd_fe_chain_is_built(struct fman_pcd *pcd);
