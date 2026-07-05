@@ -2,7 +2,7 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethern
 index dd7a52cef..f602c65d0 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -2318,6 +2318,95 @@ static const struct file_operations fman_pcd_fe_arm_fops = {
+@@ -2318,6 +2318,97 @@ static const struct file_operations fman_pcd_fe_arm_fops = {
  	.release	= single_release,
  };
  
@@ -41,6 +41,9 @@ index dd7a52cef..f602c65d0 100644
 +	ret = fman_pcd_fe_enter_build(pcd, 0);
 +	if (ret)
 +		goto err_enter;
++
++	/* Program MUX/Transition/Exit context records (0146) */
++	fman_pcd_fe_build_contexts(pcd);
 +
 +	if (enter_off)
 +		*enter_off = (u32)pcd->fe_root_ad_off;
