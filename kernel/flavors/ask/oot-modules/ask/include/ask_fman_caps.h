@@ -175,4 +175,11 @@ int  fman_pcd_offload_engage(struct fman *fm, u8 hw_port_id);
  */
 void fman_pcd_offload_disengage(struct fman *fm, u8 hw_port_id);
 
+int  fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id);
+void fman_pcd_fe_disengage(struct fman *fm, u8 hw_port_id);
+int  fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
+                          const u8 *key, u8 key_size, unsigned long enq_off);
+int  fman_pcd_fe_flow_del(struct fman *fm, u8 hw_port_id,
+                          const u8 *key, u8 key_size);
+
 #endif /* __ASK_FMAN_CAPS_H */
