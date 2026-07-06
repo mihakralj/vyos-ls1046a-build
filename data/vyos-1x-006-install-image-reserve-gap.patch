@@ -1,5 +1,5 @@
 diff --git a/python/vyos/system/disk.py b/python/vyos/system/disk.py
-index 7ae9a15..d27d15f 100644
+index 7ae9a15bb..017f582dd 100644
 --- a/python/vyos/system/disk.py
 +++ b/python/vyos/system/disk.py
 @@ -15,6 +15,7 @@
@@ -30,7 +30,7 @@ index 7ae9a15..d27d15f 100644
  def disk_cleanup(drive_path: str) -> None:
      """Clean up disk partition table (MBR and GPT)
      Remove partition and device signatures.
-@@ -42,8 +56,12 @@ def disk_cleanup(drive_path: str) -> None:
+@@ -42,8 +56,21 @@ def disk_cleanup(drive_path: str) -> None:
      partitions: list[str] = partition_list(drive_path)
      for partition in partitions:
          run(f'wipefs -af {partition}')
@@ -38,6 +38,15 @@ index 7ae9a15..d27d15f 100644
 -    run(f'sgdisk -Z {drive_path}')
 +    if _is_emmc(drive_path):
 +        # eMMC: first 32 MiB is NXP firmware - DO NOT zero LBA 0.
++        # Force the kernel to forget stale partition mappings first.
++        # Without this, a pre-existing MBR (e.g., OpenWrt single-partition)
++        # stays mapped in the kernel's view after the MBR->GPT conversion,
++        # partx -u can't create new nodes while the old ones exist, and
++        # partition_list() returns the old layout -> StopIteration downstream.
++        try:
++            run(f'partx -d {drive_path}')
++        except Exception:
++            pass  # no partitions to delete - harmless
 +        run(f'sgdisk -o {drive_path}')
 +    else:
 +        run(f'wipefs -af {drive_path}')
@@ -45,7 +54,7 @@ index 7ae9a15..d27d15f 100644
  
  
  def find_persistence() -> str:
-@@ -69,12 +87,21 @@ def parttable_create(drive_path: str, root_size: int) -> None:
+@@ -69,25 +96,46 @@ def parttable_create(drive_path: str, root_size: int) -> None:
      Args:
          drive_path (str): path to a drive
      """
@@ -62,7 +71,7 @@ index 7ae9a15..d27d15f 100644
 +        # LS1046A eMMC: partitions start after 32 MiB firmware zone.
 +        command = f'sgdisk -a1 -n1:{_BIOS_BOOT_START}:{_BIOS_BOOT_END} -t1:EF02 \
 +            -n2:{_EFI_START}:+256M -t2:EF00 \
-+            -n3:0:0 -t3:8300 {drive_path}'
++            -n3:0:0 -t3:8300 {drive_path}''
      else:
 -        root_size_text: str = str(root_size)
 -    command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:4096:+256M -t2:EF00 \
@@ -72,7 +81,56 @@ index 7ae9a15..d27d15f 100644
  
      run(command)
      # update partitions in kernel
-@@ -171,7 +198,7 @@ def partition_mount(partition: str,
+     sync()
+     run(f'partx -u {drive_path}')
++    # Retry -- kernel may need a moment to create device nodes for the
++    # fresh partition table (especially after an MBR->GPT conversion).
++    for _ in range(5):
++        sleep(1)
++        partitions: list[str] = partition_list(drive_path)
++        if len(partitions) >= 3:
++            break
+ 
+-    partitions: list[str] = partition_list(drive_path)
++    efi_part = next((x for x in partitions if x.endswith('2')), None)
++    root_part = next((x for x in partitions if x.endswith('3')), None)
++    if efi_part is None or root_part is None:
++        raise OSError(
++            f'Cannot detect partitions on {drive_path}: '
++            f'found {partitions} (expected EFI=*2, root=*3)')
+ 
+     disk: DiskDetails = DiskDetails(
+         name = drive_path,
+         partition = {
+-            'efi': next(x for x in partitions if x.endswith('2')),
+-            'root': next(x for x in partitions if x.endswith('3'))
++            'efi': efi_part,
++            'root': root_part,
+         }
+     )
+ 
+@@ -128,11 +176,18 @@ def from_partition(partition_path: str) -> DiskDetails:
+     drive_path: str = partition_parent(partition_path)
+     partitions: list[str] = partition_list(drive_path)
+ 
++    efi_part = next((x for x in partitions if x.endswith('2')), None)
++    root_part = next((x for x in partitions if x.endswith('3')), None)
++    if efi_part is None or root_part is None:
++        raise OSError(
++            f'Cannot detect partitions for {partition_path}: '
++            f'found {partitions} (expected EFI=*2, root=*3)')
++
+     disk: DiskDetails = DiskDetails(
+         name = drive_path,
+         partition = {
+-            'efi': next(x for x in partitions if x.endswith('2')),
+-            'root': next(x for x in partitions if x.endswith('3'))
++            'efi': efi_part,
++            'root': root_part,
+         }
+     )
+ 
+@@ -171,7 +226,7 @@ def partition_mount(partition: str,
      """
      if fsype in ['squashfs', 'iso9660']:
          command: str = f'mount -o loop,ro -t {fsype} {partition} {path}'
@@ -81,8 +139,256 @@ index 7ae9a15..d27d15f 100644
          command: str = f'mount -t overlay -o noatime,\
              upperdir={overlay_params["upperdir"]},\
              lowerdir={overlay_params["lowerdir"]},\
+diff --git a/python/vyos/system/disk.py.orig b/python/vyos/system/disk.py.orig
+new file mode 100644
+index 000000000..7ae9a15bb
+--- /dev/null
++++ b/python/vyos/system/disk.py.orig
+@@ -0,0 +1,242 @@
++# Copyright VyOS maintainers and contributors <maintainers@vyos.io>
++#
++# This library is free software; you can redistribute it and/or
++# modify it under the terms of the GNU Lesser General Public
++# License as published by the Free Software Foundation; either
++# version 2.1 of the License, or (at your option) any later version.
++#
++# This library is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++# Lesser General Public License for more details.
++#
++# You should have received a copy of the GNU Lesser General Public
++# License along with this library.  If not, see <http://www.gnu.org/licenses/>.
++
++from json import loads as json_loads
++from os import sync
++from dataclasses import dataclass
++from time import sleep
++
++from psutil import disk_partitions
++
++from vyos.utils.process import run, cmd
++
++
++@dataclass
++class DiskDetails:
++    """Disk details"""
++    name: str
++    partition: dict[str, str]
++
++
++def disk_cleanup(drive_path: str) -> None:
++    """Clean up disk partition table (MBR and GPT)
++    Remove partition and device signatures.
++    Zeroize primary and secondary headers - first and last 17408 bytes
++    (512 bytes * 34 LBA) on a drive
++
++    Args:
++        drive_path (str): path to a drive that needs to be cleaned
++    """
++    partitions: list[str] = partition_list(drive_path)
++    for partition in partitions:
++        run(f'wipefs -af {partition}')
++    run(f'wipefs -af {drive_path}')
++    run(f'sgdisk -Z {drive_path}')
++
++
++def find_persistence() -> str:
++    """Find a mountpoint for persistence storage
++
++    Returns:
++        str: Path where 'persistence' pertition is mounted, Empty if not found
++    """
++    mounted_partitions = disk_partitions()
++    for partition in mounted_partitions:
++        if partition.mountpoint.endswith('/persistence'):
++            return partition.mountpoint
++    return ''
++
++
++def parttable_create(drive_path: str, root_size: int) -> None:
++    """Create a hybrid MBR/GPT partition table
++    0-2047 first sectors are free
++    2048-4095 sectors - BIOS Boot Partition
++    4096 + 256 MB - EFI system partition
++    Everything else till the end of a drive - Linux partition
++
++    Args:
++        drive_path (str): path to a drive
++    """
++    if not root_size:
++        root_size_text: str = '+100%'
++    else:
++        root_size_text: str = str(root_size)
++    command = f'sgdisk -a1 -n1:2048:4095 -t1:EF02 -n2:4096:+256M -t2:EF00 \
++        -n3:0:+{root_size_text}K -t3:8300 {drive_path}'
++
++    run(command)
++    # update partitions in kernel
++    sync()
++    run(f'partx -u {drive_path}')
++
++    partitions: list[str] = partition_list(drive_path)
++
++    disk: DiskDetails = DiskDetails(
++        name = drive_path,
++        partition = {
++            'efi': next(x for x in partitions if x.endswith('2')),
++            'root': next(x for x in partitions if x.endswith('3'))
++        }
++    )
++
++    return disk
++
++
++def partition_list(drive_path: str) -> list[str]:
++    """Get a list of partitions on a drive
++
++    Args:
++        drive_path (str): path to a drive
++
++    Returns:
++        list[str]: a list of partition paths
++    """
++    lsblk: str = cmd(f'lsblk -Jp {drive_path}')
++    drive_info: dict = json_loads(lsblk)
++    device: list = drive_info.get('blockdevices')
++    children: list[str] = device[0].get('children', []) if device else []
++    partitions: list[str] = [child.get('name') for child in children]
++    return partitions
++
++
++def partition_parent(partition_path: str) -> str:
++    """Get a parent device for a partition
++
++    Args:
++        partition (str): path to a partition
++
++    Returns:
++        str: path to a parent device
++    """
++    parent: str = cmd(f'lsblk -ndpo pkname {partition_path}')
++    return parent
++
++
++def from_partition(partition_path: str) -> DiskDetails:
++    drive_path: str = partition_parent(partition_path)
++    partitions: list[str] = partition_list(drive_path)
++
++    disk: DiskDetails = DiskDetails(
++        name = drive_path,
++        partition = {
++            'efi': next(x for x in partitions if x.endswith('2')),
++            'root': next(x for x in partitions if x.endswith('3'))
++        }
++    )
++
++    return disk
++
++def filesystem_create(partition: str, fstype: str) -> None:
++    """Create a filesystem on a partition
++
++    Args:
++        partition (str): path to a partition (for example: '/dev/sda1')
++        fstype (str): filesystem type ('efi' or 'ext4')
++    """
++    if fstype == 'efi':
++        command = 'mkfs -t fat -n EFI'
++        run(f'{command} {partition}')
++    if fstype == 'ext4':
++        command = 'mkfs -t ext4 -L persistence'
++        run(f'{command} {partition}')
++
++
++def partition_mount(partition: str,
++                    path: str,
++                    fsype: str = '',
++                    overlay_params: dict[str, str] = {}) -> bool:
++    """Mount a partition into a path
++
++    Args:
++        partition (str): path to a partition (for example: '/dev/sda1')
++        path (str): a path where to mount
++        fsype (str): optionally, set fstype ('squashfs', 'overlay', 'iso9660')
++        overlay_params (dict): optionally, set overlay parameters.
++        Defaults to None.
++
++    Returns:
++        bool: True on success
++    """
++    if fsype in ['squashfs', 'iso9660']:
++        command: str = f'mount -o loop,ro -t {fsype} {partition} {path}'
++    if fsype == 'overlay' and overlay_params:
++        command: str = f'mount -t overlay -o noatime,\
++            upperdir={overlay_params["upperdir"]},\
++            lowerdir={overlay_params["lowerdir"]},\
++            workdir={overlay_params["workdir"]} overlay {path}'
++
++    else:
++        command = f'mount {partition} {path}'
++
++    rc = run(command)
++    if rc == 0:
++        return True
++
++    return False
++
++
++def partition_umount(partition: str = '', path: str = '') -> None:
++    """Umount a partition by a partition name or a path
++
++    Args:
++        partition (str): path to a partition (for example: '/dev/sda1')
++        path (str): a path where a partition is mounted
++    """
++    if partition:
++        command = f'umount {partition}'
++        run(command)
++    if path:
++        command = f'umount {path}'
++        run(command)
++
++
++def find_device(mountpoint: str) -> str:
++    """Find a device by mountpoint
++
++    Returns:
++        str: Path to device, Empty if not found
++    """
++    mounted_partitions = disk_partitions(all=True)
++    for partition in mounted_partitions:
++        if partition.mountpoint == mountpoint:
++            return partition.mountpoint
++    return ''
++
++
++def wait_for_umount(mountpoint: str = '') -> None:
++    """Wait (within reason) for umount to complete
++    """
++    i = 0
++    while find_device(mountpoint):
++        i += 1
++        if i == 5:
++            print(f'Warning: {mountpoint} still mounted')
++            break
++        sleep(1)
++
++
++def disks_size() -> dict[str, int]:
++    """Get a dictionary with physical disks and their sizes
++
++    Returns:
++        dict[str, int]: a dictionary with name: size mapping
++    """
++    disks_size: dict[str, int] = {}
++    lsblk: str = cmd('lsblk -Jbp')
++    blk_list = json_loads(lsblk)
++    for device in blk_list.get('blockdevices'):
++        if device['type'] == 'disk':
++            disks_size.update({device['name']: device['size']})
++    return disks_size
 diff --git a/src/op_mode/image_installer.py b/src/op_mode/image_installer.py
-index 07f69cc..68db05f 100755
+index 07f69ccd5..4a4a16dce 100755
 --- a/src/op_mode/image_installer.py
 +++ b/src/op_mode/image_installer.py
 @@ -130,7 +130,7 @@
@@ -94,12 +400,12 @@ index 07f69cc..68db05f 100755
  
  # define directories and paths
  DIR_CONFIG: str = directories['config']
-@@ -194,6 +194,41 @@ def find_disks() -> dict[str, int]:
+@@ -194,6 +194,40 @@ def find_disks() -> dict[str, int]:
      for disk_name, disk_size in disks_available.copy().items():
          if disk_size < CONST_MIN_DISK_SIZE:
              del disks_available[disk_name]
 +
-+    # Hide USB-attached drives — they are typically install media or
++    # Hide USB-attached drives -- they are typically install media or
 +    # removable storage, not legitimate install targets on this platform.
 +    for disk_name in list(disks_available):
 +        try:
@@ -131,22 +437,11 @@ index 07f69cc..68db05f 100755
 +            if live_disk in disks_available:
 +                del disks_available[live_disk]
 +        except Exception:
-+            pass  # lsblk failed — keep all disks (safe fallback)
-+
++            pass  # lsblk failed -- keep all disks (safe fallback)
      if not disks_available:
          print(MSG_ERR_NO_DISK)
          exit(MSG_INFO_INSTALL_EXIT)
-@@ -208,17 +243,30 @@ def ask_root_size(available_space: int) -> int:
-     """Define a size of root partition
- 
-     Args:
--        available_space (int): available space in bytes for a root partition
-+        available_space (int): available space in KB for a root partition
- 
-     Returns:
--        int: defined size
-+        int: defined size in KB
-     """
+@@ -216,9 +250,22 @@ def ask_root_size(available_space: int) -> int:
      if ask_yes_no(MSG_INPUT_ROOT_SIZE_ALL, default=True):
          return available_space
  
@@ -171,7 +466,7 @@ index 07f69cc..68db05f 100755
  
          if root_size_kbytes > available_space:
              print(MSG_WARN_ROOT_SIZE_TOOBIG)
-@@ -396,6 +444,11 @@ def ask_single_disk(disks_available: dict[str, int]) -> str:
+@@ -396,6 +443,11 @@ def ask_single_disk(disks_available: dict[str, int]) -> str:
      """
      print(MSG_INFO_INSTALL_DISKS_LIST)
      default_disk: str = list(disks_available)[0]
@@ -183,31 +478,12 @@ index 07f69cc..68db05f 100755
      for disk_name, disk_size in disks_available.items():
          disk_size_human: str = bytes_to_gb(disk_size)
          print(f'Drive: {disk_name} ({disk_size_human} GB)')
-@@ -1058,6 +1111,94 @@ def install_image() -> None:
+@@ -1058,6 +1110,75 @@ def install_image() -> None:
          grub.set_default(image_name, DIR_DST_ROOT)
          grub.set_console_type(console_dict[console_type], DIR_DST_ROOT)
  
 +        # ------------------------------------------------------------
 +        # U-Boot / eMMC boot configuration (LS1046A Mono Gateway)
-+        # ------------------------------------------------------------
-+        # Boot chain on this board:
-+        #   1. SoC ROM loads U-Boot from QSPI NOR flash
-+        #   2. U-Boot reads its environment from QSPI NOR ("uboot-env"
-+        #      MTD partition).  The env var `bootcmd` selects what to
-+        #      load; `vyos_image` selects which installed image dir.
-+        #   3. U-Boot reads /boot/vyos.env from eMMC partition 3 to learn
-+        #      the active image name (written here, below).
-+        #   4. U-Boot loads vmlinuz/initrd/dtb from
-+        #      /boot/<image>/  on eMMC and jumps to the kernel.
-+        #
-+        # Two things therefore have to be configured at install time:
-+        #   (a) /boot/vyos.env  on the eMMC root partition  -- always
-+        #       writable, this script writes it directly.
-+        #   (b) U-Boot env vars in QSPI NOR (`bootcmd`, `vyos_image`,
-+        #       `usb_vyos`) -- requires CONFIG_MTD + CONFIG_SPI in the
-+        #       running kernel so /dev/mtd2 exists for fw_setenv.
-+        #       If absent, the user must set them once from the U-Boot
-+        #       prompt; see vyos-ls1046a-build/INSTALL.md.
 +        # ------------------------------------------------------------
 +        print()
 +        print('=' * 60)
@@ -278,7 +554,7 @@ index 07f69cc..68db05f 100755
          if is_raid_install(install_target):
              # add RAID specific modules
              grub.modules_write(f'{DIR_DST_ROOT}/{grub.CFG_VYOS_MODULES}',
-@@ -1095,7 +1236,7 @@ def install_image() -> None:
+@@ -1095,7 +1216,7 @@ def install_image() -> None:
          exit()
  
      except Exception as err:
@@ -287,7 +563,7 @@ index 07f69cc..68db05f 100755
          # unmount filesystems and cleanup
          try:
              if install_target is not None:
-@@ -1307,6 +1448,11 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
+@@ -1307,6 +1428,11 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
          copy(f'{DIR_ISO_MOUNT}/live/filesystem.squashfs',
               f'{root_dir}/boot/{image_name}/{image_name}.squashfs')
  
