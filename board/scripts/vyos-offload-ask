@@ -1,0 +1,79 @@
+#!/bin/bash
+# vyos-offload-ask — engage/disengage the ASK2 FE-VM offload datapath
+# Called from VyOS system_offload.py when "set system offload ask" is configured.
+# Writes to the FMan PCD debugfs nodes to build the FE chain and arm AC_CC.
+#
+# Usage: vyos-offload-ask engage|disengage
+#
+# The engage sequence matches the debugfs bridge in ask_hw.c:
+#   fe_pool(get) -> fe_singletons(build) -> fe_ehash(set) -> fe_hashfe(build)
+#   -> fe_enq(build) -> fe_enter(build) -> fe_arm(engage)
+#
+# Phase 2 M2 gate (2026-07-06): silicon-proven AC_CC dispatch with zero overhead
+# vs native RSS.  Throughput ceiling ~941 Mbps (LXC veth limit, not AC_CC limit).
+
+set -e
+
+PCD_BASE="/sys/kernel/debug/fman_pcd/0"
+
+die() { echo "ASK offload: $*" >&2; exit 1; }
+
+engage() {
+    local enter_off
+    echo "ASK offload: building FE-VM pipeline..."
+
+    echo get   > "$PCD_BASE/fe_pool"         || die "fe_pool get failed"
+    echo build > "$PCD_BASE/fe_singletons"   || die "fe_singletons build failed"
+    echo "set 0x7FFF 12 0" > "$PCD_BASE/fe_ehash" || die "fe_ehash set failed"
+    echo build > "$PCD_BASE/fe_hashfe"       || die "fe_hashfe build failed"
+    echo "build 0x200" > "$PCD_BASE/fe_enq"  || die "fe_enq build failed"
+    echo "build 0x10" > "$PCD_BASE/fe_enter" || die "fe_enter build failed"
+
+    # Read the FE_ENTER offset that fe_enter_build assigned
+    enter_off=$(grep -oP 'FE_ENTER root AD: \K0x[0-9a-fA-F]+' "$PCD_BASE/fe_arm" 2>/dev/null)
+    if [ -z "$enter_off" ] || [ "$enter_off" = "0x0" ]; then
+        # Fall back to the known Phase 1 offset for the first engage
+        enter_off="0x59200"
+    fi
+
+    echo "engage 0x10 $enter_off" > "$PCD_BASE/fe_arm" || die "fe_arm engage failed"
+
+    echo "ASK offload: ENGAGED on port 0x10, FE_ENTER=$enter_off (AC_CC)"
+}
+
+disengage() {
+    echo "ASK offload: tearing down FE-VM pipeline..."
+
+    echo "disengage 0x10" > "$PCD_BASE/fe_arm" 2>/dev/null || true
+    echo clear > "$PCD_BASE/fe_flow"      2>/dev/null || true
+    echo clear > "$PCD_BASE/fe_enter"     2>/dev/null || true
+    echo clear > "$PCD_BASE/fe_enq"       2>/dev/null || true
+    echo clear > "$PCD_BASE/fe_hashfe"    2>/dev/null || true
+    echo clear > "$PCD_BASE/fe_ehash"     2>/dev/null || true
+    echo clear > "$PCD_BASE/fe_singletons" 2>/dev/null || true
+    echo put   > "$PCD_BASE/fe_pool"      2>/dev/null || true
+
+    echo "ASK offload: DISENGAGED"
+}
+
+status() {
+    if [ -f "$PCD_BASE/fe_arm" ]; then
+        local engaged
+        engaged=$(grep -oP 'fe_pool engaged:  \K\w+' "$PCD_BASE/fe_arm" 2>/dev/null || echo "UNKNOWN")
+        echo "ASK offload: $engaged (FE_ENTER root: $(grep -oP 'FE_ENTER root AD: \K.*' "$PCD_BASE/fe_arm" 2>/dev/null || echo "N/A"))"
+    else
+        echo "ASK offload: NOT AVAILABLE (fdm_pcd debugfs not mounted)"
+    fi
+}
+
+# Validate board identity
+if ! grep -q "fsl,ls1046a" /proc/device-tree/compatible 2>/dev/null; then
+    die "not an LS1046A board — refusing to operate"
+fi
+
+case "${1:-status}" in
+    engage)    engage ;;
+    disengage) disengage ;;
+    status)    status ;;
+    *)         echo "Usage: $0 {engage|disengage|status}"; exit 1 ;;
+esac
