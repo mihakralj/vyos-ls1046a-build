@@ -199,6 +199,16 @@ index 0fb8c0a..d58feb6 100644
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+
+@@ -49,6 +49,7 @@
+ 
+ #include <linux/fsl/fman_pcd.h>
+ #include "fman.h"
++#include "fman_port.h"
+ #include "fman_keygen_internal.h"
+ #include "fman_pcd_internal.h"
+ 
+
 @@ -697,3 +698,90 @@ int fman_pcd_kg_port_detach_cc(struct fman_pcd *pcd, u8 hw_port_id)
  	return err;
  }
