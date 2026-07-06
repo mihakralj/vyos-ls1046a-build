@@ -78,7 +78,7 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/eth
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
-@@ -239,8 +239,11 @@ int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
+@@ -239,11 +239,13 @@ int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
 
  	/*
 -	 * Arm the FE datapath (Fork B, Phase 1 D9-B).
