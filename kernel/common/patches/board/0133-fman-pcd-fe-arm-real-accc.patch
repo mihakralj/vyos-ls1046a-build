@@ -1,26 +1,30 @@
-fman_pcd: FE-VM arm — real AC_CC keygen encoding (Phase 1 D9-B, board 0133)
+fman_pcd: FE-VM arm - real AC_CC encoding (Phase 1 D9-B, board 0133)
 
-Board patch 0132 v3 arms the FE-VM datapath with AC_CC dispatch
-(next_engine=3, cc_bits_sel=0, mode 0x80000006).  This patch adds the
-required keygen_scheme_setup branch for next_engine==3: the NIA flips
-to FM_CTL|AC_CC (0x80000006) with KGSE_CCBS=0, so the FMan controller
-walks the CC root named by the port's FMBM_RCCB (the FE_ENTER root AD
-programmed by 0132's arm_fe).
+Board patch 0132 shipped the fe_arm 'engage' verb but armed the KeyGen
+scheme with the KGSE_CCBS placebo (next_engine=2, mode 0x80500002): per
+the CC-dispatch truth table that encoding NEVER invokes the CC walk -
+frames bypass into plain RSS, so an arm through it is a false positive.
 
-The NIA_ENG_FM_CTL / NIA_FM_CTL_AC_CC defines (dropped by 0118) are
-re-added.  The CCBS implicit-walk graft (next_engine==2), policer,
-M1-engage, and RSS paths are byte-unchanged.  disarm is unchanged
-(forces next_engine=0 via detach_cc).
+This corrects the arm to the REAL AC_CC encoding: a new next_engine==3
+branch in keygen_scheme_setup emits KGSE_MODE = FM_CTL|AC_CC (0x80000006)
+with KGSE_CCBS=0, and fman_pcd_kg_port_arm_fe() sets next_engine=3 /
+cc_bits_sel=0.  The FMBM_RCCB write (-> FE_ENTER root AD) is unchanged and
+already correct.  The two NIA_ENG_FM_CTL / NIA_FM_CTL_AC_CC defines that
+0118 dropped are re-added (used only by the new branch; the CCBS
+implicit-walk graft for next_engine==2 is untouched, as are the policer,
+M1-engage and RSS paths).  disarm is unchanged (forces next_engine=0).
 
-Only touches fman_keygen.c — no comment or header conflicts with 0132 v3.
+Ships DORMANT: the encoding only takes effect on an explicit echo to the
+fman_pcd/<id>/fe_arm debugfs node.  This is the make-or-break M2 dispatch
+experiment - the only encoding that genuinely enters the FE VM terminal
+disposition that a bare exact-match leaf lacks (M3-3b iter-50 park).
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ---
-
 diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
 --- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
-@@ -124,5 +124,22 @@
+@@ -124,5 +124,15 @@
   * only ORs in CCOBASE.
   */
  #define KG_SCH_MODE_CCOBASE_SHIFT	24
@@ -29,15 +33,14 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/eth
 + * Fork-B FE-VM arm).  Re-added after 0118 dropped them: with these the
 + * KGSE_MODE NIA flips to FM_CTL|AC_CC (0x80000006) so the FMan
 + * controller walks the CC root named by the port's FMBM_RCCB.  Used
-+ * only by next_engine==3 (the FE_ENTER arm, now driven by 0132 v3);
-+ * the CCBS implicit-walk graft (next_engine==2) is untouched.
++ * only by next_engine==3 (the FE_ENTER arm); the CCBS implicit-walk
++ * graft (next_engine==2) is untouched.
 + */
 +#define NIA_ENG_FM_CTL			0x00000000
 +#define NIA_FM_CTL_AC_CC		0x00000006
-
+ 
  /* Hard-coded configuration:
-  */
-@@ -564,6 +581,17 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+@@ -564,6 +564,17 @@ int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
  			tmp_reg |= ENQUEUE_KG_DFLT_NIA |
  				(scheme->cc_base_offset <<
  				 KG_SCH_MODE_CCOBASE_SHIFT);
