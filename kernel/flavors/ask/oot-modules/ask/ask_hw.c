@@ -384,7 +384,6 @@ int ask_hw_pcd_bringup(void)
         return 0;
 }
 
-
 static int debugfs_fe_write(const char *name, const char *buf, size_t len);
 void ask_hw_pcd_teardown(void)
 {
@@ -457,14 +456,12 @@ static int debugfs_fe_write(const char *name, const char *buf, size_t len)
                 return -ENAMETOOLONG;
         f = filp_open(path, O_WRONLY, 0);
         if (IS_ERR(f)) {
-                ask_pr_err("hw: open %s: %ld
-", path, PTR_ERR(f));
+                ask_pr_err("hw: open %s: %ld\n", path, PTR_ERR(f));
                 return PTR_ERR(f);
         }
         w = kernel_write(f, buf, len, &pos);
         if (w < 0 || (size_t)w != len)
-                ask_pr_err("hw: write %s: %zd/%zu
-", path, w, len);
+                ask_pr_err("hw: write %s: %zd/%zu\n", path, w, len);
         filp_close(f, NULL);
         return (w >= 0 && (size_t)w == len) ? 0 : -EIO;
 }
