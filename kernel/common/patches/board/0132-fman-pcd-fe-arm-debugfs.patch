@@ -168,7 +168,7 @@ index aed5d84..c28a045 100644
  #include "fman_keygen_internal.h"
  #include "fman_pcd_internal.h"
  
-@@ -697,3 +698,92 @@ int fman_pcd_kg_port_detach_cc(struct fman_pcd *pcd, u8 hw_port_id)
+@@ -697,3 +698,90 @@ int fman_pcd_kg_port_detach_cc(struct fman_pcd *pcd, u8 hw_port_id)
  	return err;
  }
  EXPORT_SYMBOL_GPL(fman_pcd_kg_port_detach_cc);
