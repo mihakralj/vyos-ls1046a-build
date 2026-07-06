@@ -33,6 +33,8 @@
  * (dormant) into every single-image ISO; it engages only at runtime.
  */
 
+#include <linux/fs.h>
+#include <linux/file.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -409,13 +411,14 @@ void ask_hw_pcd_teardown(void)
                 kfree(ck);
         }
 
-        /* Restore TX confirm on all ports before tearing down CC trees. */
-        fman_port_set_silicon_hit_release_all(h->fman, false);
-
-        /* Disengage any port still in the M1 coarse S1 mode-switch (0129). */
-        for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
-                if (h->port[i].in_use && h->port[i].offload_engaged) {
-                        fman_pcd_fe_disengage(h->fman, h->port[i].port_id);
+        /* Tear down FE-VM pipeline via debugfs bridge (Phase 2). */
+        debugfs_fe_write("fe_arm", "disengage 0x10", 14);
+        debugfs_fe_write("fe_enter", "clear", 5);
+        debugfs_fe_write("fe_enq", "clear", 5);
+        debugfs_fe_write("fe_hashfe", "clear", 5);
+        debugfs_fe_write("fe_ehash", "clear", 5);
+        debugfs_fe_write("fe_singletons", "clear", 5);
+        debugfs_fe_write("fe_pool", "put", 3);
                         h->port[i].offload_engaged = false;
                 }
         }
@@ -441,13 +444,37 @@ struct ask_hw_pcd *ask_hw_pcd_get(void)
 /* M1 coarse dataplane mode-switch (control-plane plumbing; ships dormant)    */
 /* ------------------------------------------------------------------------- */
 
+/* Debugfs bridge: write buf to /sys/kernel/debug/fman_pcd/0/<name> (Phase 2). */
+static int debugfs_fe_write(const char *name, const char *buf, size_t len)
+{
+        static const char pf[] = "/sys/kernel/debug/fman_pcd/0/";
+        struct file *f;
+        loff_t pos = 0;
+        ssize_t w;
+        char path[128];
+
+        if (snprintf(path, sizeof(path), "%s%s", pf, name) >= sizeof(path))
+                return -ENAMETOOLONG;
+        f = filp_open(path, O_WRONLY, 0);
+        if (IS_ERR(f)) {
+                ask_pr_err("hw: open %s: %ld\n", path, PTR_ERR(f));
+                return PTR_ERR(f);
+        }
+        w = kernel_write(f, buf, len, &pos);
+        if (w < 0 || (size_t)w != len)
+                ask_pr_err("hw: write %s: %zd/%zu\n", path, w, len);
+        filp_close(f, NULL);
+        return (w >= 0 && (size_t)w == len) ? 0 : -EIO;
+}
+
+
 /* Defined further down with the per-flow fast path; forward-declared here. */
 static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h,
 						u8 port_id);
 
 /*
  * Engage/disengage the coarse S0<->S1 PCD mode-switch on one FMan RX port.
- * These forward to the board-exported fman_pcd_fe_engage()/_disengage()
+ * These forward to the board-exported fman_pcd_offload_engage()/_disengage()
  * (board patch 0129) - the EXACT reversible KGSE_CCBS graft sequence proven by
  * the cc_test harness + 100x soak.  A per-port "engaged" flag makes both
  * idempotent so a double-engage / stray-disengage is a safe no-op, and
@@ -478,16 +505,16 @@ int ask_hw_offload_engage(u8 hw_port_id)
                 goto out_unlock;
         }
 
-        rc = fman_pcd_fe_engage(h->fman, hw_port_id);
+        /* Build FE-VM pipeline via debugfs bridge (Phase 2, 2026-07-06). */
+        debugfs_fe_write("fe_pool", "get", 3);
+        debugfs_fe_write("fe_singletons", "build", 5);
+        debugfs_fe_write("fe_ehash", "set 0x7FFF 12 0", 16);
+        debugfs_fe_write("fe_hashfe", "build", 5);
+        debugfs_fe_write("fe_enq", "build 0x200", 11);
+        debugfs_fe_write("fe_enter", "build 0x10", 10);
+        rc = debugfs_fe_write("fe_arm", "engage 0x10 0x59200", 19);
         if (rc)
                 goto out_unlock;
-
-        /*
-         * M1 TX bypass: flip all TX ports to BMan-direct release
-         * (patch 0136).  Kernel TX (FCO=1) is unaffected.  Errors
-         * here are non-fatal — the RX CC tree is already grafted.
-         */
-        fman_port_set_silicon_hit_release_all(h->fman, true);
 
         p->offload_engaged = true;
         ask_pr_info("hw: offload ENGAGED on port 0x%02x (S0->S1)\n", hw_port_id);
@@ -524,7 +551,7 @@ void ask_hw_offload_disengage(u8 hw_port_id)
         /* Restore TX confirm before tearing down the CC tree. */
         fman_port_set_silicon_hit_release_all(h->fman, false);
 
-        fman_pcd_fe_disengage(h->fman, hw_port_id);
+        fman_pcd_offload_disengage(h->fman, hw_port_id);
         p->offload_engaged = false;
         mutex_unlock(&h->lock);
         ask_pr_info("hw: offload DISENGAGED on port 0x%02x (S1->S0)\n", hw_port_id);
