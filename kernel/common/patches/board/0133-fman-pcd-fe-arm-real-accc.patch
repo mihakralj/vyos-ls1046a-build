@@ -126,19 +126,18 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/eth
 +	 * Without this, all frames silently dropped (hw-proven 2026-07-06).
 +	 */
 +	{
-+		void __iomem *cc;
-+		u32 grp_off, node_off;
-+		grp_off  = fman_pcd_muram_alloc(pcd, 16);
-+		node_off = fman_pcd_muram_alloc(pcd, 20);
-+		if (grp_off && node_off) {
-+			cc = fman_muram_offset_to_vbase(fman_get_muram(fman), grp_off);
-+			iowrite32be(0x80000000, cc + 0x00);
-+			iowrite32be(node_off,    cc + 0x04);
-+			iowrite32be(0,           cc + 0x08);
-+			iowrite32be(0,           cc + 0x0C);
-+			cc = fman_muram_offset_to_vbase(fman_get_muram(fman), node_off);
-+			iowrite32be(0x80000000, cc + 0x00);
-+			iowrite32be(fe_enter_off,cc + 0x04);
++		void __iomem *c;
++		u32 gro, ndo;
++		gro = fman_pcd_muram_alloc(pcd, 16);
++		ndo = fman_pcd_muram_alloc(pcd, 20);
++		if (gro && ndo) {
++			c = fman_muram_offset_to_vbase(fman_get_muram(fman), gro);
++			iowrite32be(0x80000000, c + 0x00);
++			iowrite32be(ndo, c + 0x04);
++			c = fman_muram_offset_to_vbase(fman_get_muram(fman), ndo);
++			iowrite32be(0x80000000, c + 0x00);
++			iowrite32be(fe_enter_off, c + 0x04);
++			fe_enter_off = gro;
 +		}
 +	}
  	rxport = fman_port_lookup_rx(fman, hw_port_id);
