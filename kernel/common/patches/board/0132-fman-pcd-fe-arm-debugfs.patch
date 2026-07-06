@@ -99,7 +99,7 @@ index 0fb8c0a..d58feb6 100644
 +		}
 +	}
 +
-++	err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,
++	err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,
 +				      (u32)fe_enter_off, &saved_engine);
 +	if (err)
 +		return err;
