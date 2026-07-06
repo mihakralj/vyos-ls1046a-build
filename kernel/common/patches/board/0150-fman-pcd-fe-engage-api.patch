@@ -29,7 +29,7 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -2405,3 +2405,124 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+@@ -0,0 +0,0 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
  
  	return pcd;
  }
