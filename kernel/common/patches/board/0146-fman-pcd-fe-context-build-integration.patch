@@ -77,6 +77,58 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethern
 +		fman_pcd_fe_context_build(fe, FMAN_FE_TRANSITION_CTX_OFF, &p);
 +	}
 +}
++
++/* ---- FE-VM engage/flow API for ask.ko (board 0150, Phase 2) ---- */
++int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id)
++{
++	struct fman_pcd *pcd; unsigned long enter_off; u8 saved_engine; int err;
++	if (!fm || hw_port_id < 0x08 || hw_port_id >= 0x28) return -EINVAL;
++	pcd = fman_get_pcd(fm); if (!pcd) return -ENXIO;
++	mutex_lock(&pcd->fe_lock);
++	if (pcd->fe_refcount > 0) { mutex_unlock(&pcd->fe_lock); return -EBUSY; }
++	err = fman_pcd_fe_pool_alloc(pcd); if (err) goto out_unlock;
++	err = fman_pcd_fe_singletons_build(pcd); if (err) goto rollback_pool;
++	err = fman_pcd_ehash_table_set(pcd, 0x7FFF, 12, 0); if (err) goto rollback_singletons;
++	err = fman_pcd_fe_hash_build(pcd); if (err) goto rollback_ehash;
++	err = fman_pcd_fe_enq_build(pcd, 0x200, 0); if (err) goto rollback_hashfe;
++	err = fman_pcd_fe_enter_build(pcd, 0); if (err) goto rollback_enq;
++	pcd->fe_refcount = 1; enter_off = pcd->fe_root_ad_off; mutex_unlock(&pcd->fe_lock);
++	fman_pcd_fe_build_contexts(pcd);
++	err = fman_pcd_kg_port_arm_fe(pcd, hw_port_id, (u32)enter_off, &saved_engine);
++	if (err) { pr_err("fman_pcd: AC_CC arm failed port 0x%02x: %d\n", hw_port_id, err); mutex_lock(&pcd->fe_lock); goto rollback_enter; }
++	pr_info("fman_pcd: FE engage port 0x%02x ENTER=0x%lx (AC_CC)\n", hw_port_id, enter_off);
++	return 0;
++rollback_enter: fman_pcd_fe_enter_free(pcd);
++rollback_enq: fman_pcd_fe_enq_free(pcd);
++rollback_hashfe: fman_pcd_fe_hash_free(pcd);
++rollback_ehash: fman_pcd_ehash_drain(pcd);
++rollback_singletons: fman_pcd_fe_singletons_free(pcd);
++rollback_pool: fman_pcd_fe_pool_free(pcd); pcd->fe_refcount = 0;
++out_unlock: mutex_unlock(&pcd->fe_lock); return err;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_fe_engage);
++
++void fman_pcd_fe_disengage(struct fman *fm, u8 hw_port_id)
++{
++	struct fman_pcd *pcd = fman_get_pcd(fm);
++	if (!pcd) return;
++	mutex_lock(&pcd->fe_lock); if (pcd->fe_refcount == 0) { mutex_unlock(&pcd->fe_lock); return; }
++	fman_pcd_kg_port_disarm_fe(pcd, hw_port_id, 0);
++	fman_pcd_fe_enter_free(pcd); fman_pcd_fe_enq_free(pcd); fman_pcd_fe_hash_free(pcd);
++	fman_pcd_ehash_drain(pcd); fman_pcd_fe_singletons_free(pcd); fman_pcd_fe_pool_free(pcd);
++	pcd->fe_refcount = 0; mutex_unlock(&pcd->fe_lock);
++	pr_info("fman_pcd: FE disengage port 0x%02x\n", hw_port_id);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_fe_disengage);
++
++int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id, const u8 *key, u8 key_size, unsigned long enq_off)
++{ return -EOPNOTSUPP; }
++EXPORT_SYMBOL_GPL(fman_pcd_fe_flow_add);
++
++int fman_pcd_fe_flow_del(struct fman *fm, u8 hw_port_id, const u8 *key, u8 key_size)
++{ return -EOPNOTSUPP; }
++EXPORT_SYMBOL_GPL(fman_pcd_fe_flow_del);
++
  
  /*
   * fe_arm - arm the FE-VM datapath on a single FMan RX port (Phase 1
