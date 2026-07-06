@@ -415,7 +415,7 @@ void ask_hw_pcd_teardown(void)
         /* Disengage any port still in the M1 coarse S1 mode-switch (0129). */
         for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
                 if (h->port[i].in_use && h->port[i].offload_engaged) {
-                        fman_pcd_offload_disengage(h->fman, h->port[i].port_id);
+                        fman_pcd_fe_disengage(h->fman, h->port[i].port_id);
                         h->port[i].offload_engaged = false;
                 }
         }
@@ -447,7 +447,7 @@ static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h,
 
 /*
  * Engage/disengage the coarse S0<->S1 PCD mode-switch on one FMan RX port.
- * These forward to the board-exported fman_pcd_offload_engage()/_disengage()
+ * These forward to the board-exported fman_pcd_fe_engage()/_disengage()
  * (board patch 0129) - the EXACT reversible KGSE_CCBS graft sequence proven by
  * the cc_test harness + 100x soak.  A per-port "engaged" flag makes both
  * idempotent so a double-engage / stray-disengage is a safe no-op, and
@@ -478,7 +478,7 @@ int ask_hw_offload_engage(u8 hw_port_id)
                 goto out_unlock;
         }
 
-        rc = fman_pcd_offload_engage(h->fman, hw_port_id);
+        rc = fman_pcd_fe_engage(h->fman, hw_port_id);
         if (rc)
                 goto out_unlock;
 
@@ -524,7 +524,7 @@ void ask_hw_offload_disengage(u8 hw_port_id)
         /* Restore TX confirm before tearing down the CC tree. */
         fman_port_set_silicon_hit_release_all(h->fman, false);
 
-        fman_pcd_offload_disengage(h->fman, hw_port_id);
+        fman_pcd_fe_disengage(h->fman, hw_port_id);
         p->offload_engaged = false;
         mutex_unlock(&h->lock);
         ask_pr_info("hw: offload DISENGAGED on port 0x%02x (S1->S0)\n", hw_port_id);
