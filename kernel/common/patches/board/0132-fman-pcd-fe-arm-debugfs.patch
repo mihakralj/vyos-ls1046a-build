@@ -45,9 +45,9 @@ index 0fb8c0a..d58feb6 100644
  
 +/*
 + * fe_arm - arm the FE-VM datapath on a single FMan RX port (Phase 1
-+ * D9-B, patch 0132).  Reprograms the port's KGSE scheme to next_engine=CC
-+ * with KGSE_CCBS = FE_ENTER root-AD offset and sets the BMI fmbm_rccb, via
-+ * the KeyGen helpers in fman_pcd_kg.c (HW-proven KGSE_CCBS approach, 0118).
++ * D9-B, patch 0132 v3).  Reprograms the port's KGSE scheme to the REAL
++ * AC_CC NIA (next_engine=3, mode 0x80000006, KGSE_CCBS=0) and points
++ * the BMI fmbm_rccb at the FE_ENTER CONT_LOOKUP root AD.
 + * eth3 / hw port 0x10 only in practice.  The node lives here (not in a
 + * separate TU) so it can read pcd->fe_refcount / pcd->fe_root_ad_off
 + * directly - struct fman_pcd is private to this file.
@@ -73,8 +73,8 @@ index 0fb8c0a..d58feb6 100644
 +	}
 +	mutex_unlock(&pcd->fe_lock);
 +
-+	/* 0150: CCBS scaffold — CONT_LOOKUP AD + match table + AD table (MURAM).
-+	 * Implements ask20-HW-PROVEN KGSE_CCBS implicit CC walk (RM 8.7.4.1).
++	/* 0132 v3: AC_CC dispatch — CONT_LOOKUP AD + match table + AD table (MURAM).
++	 * Implements ask20-HW-PROVEN next_engine=3, KGSE_CCBS=0, mode 0x80000006.
 +	 * With numKeys=0, all frames miss→ENQ to default FQ 0x200.
 +	 * MURAM: 256+16+32 = 304B. Disengage does NOT free.
 +	 */
@@ -197,17 +197,8 @@ index 0fb8c0a..d58feb6 100644
  	}
  
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
-index aed5d84..c28a045 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
-@@ -49,6 +49,7 @@
- 
- #include <linux/fsl/fman_pcd.h>
- #include "fman.h"
-+#include "fman_port.h"
- #include "fman_keygen_internal.h"
- #include "fman_pcd_internal.h"
- 
 @@ -697,3 +698,90 @@ int fman_pcd_kg_port_detach_cc(struct fman_pcd *pcd, u8 hw_port_id)
  	return err;
  }
@@ -244,15 +235,17 @@ index aed5d84..c28a045 100644
 +	*saved_engine = slot->next_engine;
 +
 +	/*
-+	 * Arm the FE datapath (Fork B, Phase 1 D9-B).
-+	 * Use the KGSE_CCBS approach (HW-proven per 0118): set kgse_ccbs
-+	 * to the FE_ENTER AD offset; the CC walk fires because ccbs is
-+	 * non-zero; NIA stays BMI direct-enqueue.  The CC engine resolves
-+	 * its root from the BMI port's fmbm_rccb (set in step 2).
++	 * Arm the FE datapath (Fork B, Phase 1 D9-B, 0132 v3).
++	 * Use AC_CC dispatch (next_engine=3, mode 0x80000006, KGSE_CCBS=0):
++	 * the FMan controller walks the CC root named by the BMI port's
++	 * fmbm_rccb (set in step 2 below), which points at the FE_ENTER
++	 * CONT_LOOKUP root AD (group table).  The CCBS graft (next_engine=2,
++	 * KGSE_CCBS!=0) was proven for Fork A (match-node trees) which
++	 * is DEAD on 210.10.1 ucode.  Fork B FE/ehash requires AC_CC.
 +	 */
-+	slot->next_engine    = 2;
++	slot->next_engine    = 3;
 +	slot->cc_base_offset = 0;
-+	slot->cc_bits_sel    = fe_enter_off;
++	slot->cc_bits_sel    = 0;
 +	slot->used = false;
 +	err = keygen_scheme_setup(keygen, id, true);
 +	if (err) {
