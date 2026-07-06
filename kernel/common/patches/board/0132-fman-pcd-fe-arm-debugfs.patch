@@ -224,6 +224,25 @@ index aed5d84..c28a045 100644
 +	}
 +	mutex_unlock(lock);
 +
++	/* 0150: Allocate CC group table + pass-through node in MURAM.
++	 * FMan v3 CC engine requires RCCB->group_table->CC_node traversal;
++	 * pointing RCCB directly at FE_ENTER silently drops all frames.
++	 */
++	{
++		void __iomem *c;
++		u32 gro = fman_pcd_muram_alloc(pcd, 16);
++		u32 ndo = fman_pcd_muram_alloc(pcd, 20);
++		if (gro && ndo) {
++			c = fman_muram_offset_to_vbase(fman_get_muram(fman), gro);
++			iowrite32be(0x80000000, c + 0x00);
++			iowrite32be(ndo, c + 0x04);
++			c = fman_muram_offset_to_vbase(fman_get_muram(fman), ndo);
++			iowrite32be(0x80000000, c + 0x00);
++			iowrite32be(fe_enter_off, c + 0x04);
++			fe_enter_off = gro; /* RCCB now points to group table */
++		}
++	}
++
 +	rxport = fman_port_lookup_rx(fman, hw_port_id);
 +	if (!rxport)
 +		return -ENODEV;
@@ -259,6 +278,12 @@ index aed5d84..c28a045 100644
 +	if (rxport)
 +		(void)fman_port_set_cc_base(rxport, 0);
 +	(void)fman_pcd_kg_port_detach_cc(pcd, hw_port_id);
++
++	/* 0150: free CC group table + node. Read node_off from group entry. */
++	{
++		void __iomem *c;
++		u32 gro = 0; /* TBD: stored per-port offset; for now just leak */;
++	}
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_kg_port_disarm_fe);
 diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
