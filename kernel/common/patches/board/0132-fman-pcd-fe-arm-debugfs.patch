@@ -90,11 +90,11 @@ index 0fb8c0a..d58feb6 100644
 +				iowrite32be(0, c + 8);
 +				iowrite32be(0, c + 12);
 +				u32 fe_root = (u32)fe_enter_off;
-+				/* CC node: valid pass-through → FE_ENTER */
++				/* CC node: pass-through, both paths → FE_ENTER */
 +				c = (void __iomem *)fman_muram_offset_to_vbase(muram, ndo);
 +				iowrite32be(0x80000000, c + 0);
-+				iowrite32be((u32)fe_enter_off, c + 4);
-+				iowrite32be(0, c + 8);
++				iowrite32be(fe_root, c + 4);
++				iowrite32be(fe_root, c + 8);
 +				iowrite32be(0, c + 12);
 +				iowrite32be(0, c + 16);
 +				fe_enter_off = gro;
