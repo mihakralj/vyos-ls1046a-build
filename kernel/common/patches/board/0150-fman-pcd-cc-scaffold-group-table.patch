@@ -1,0 +1,115 @@
+From: VyOS LS1046A Build <build@vyos.io>
+Date: Sun, 6 Jul 2026 02:15:00 +0000
+Subject: [PATCH] fix(ask2): 0150 — CC group-table scaffold for FE-VM dispatch
+
+On FMan v3 the CC engine requires a CC GROUP TABLE at RCCB, not a
+bare FE descriptor. Without it, the CC engine mis-parses FE_ENTER
+as a group entry and drops every frame — the FE-VM never receives
+a packet. This was definitively proven on 2026-07-06: 256 flows
+covering all 1-byte keys matched zero packets.
+
+Fix: during fman_pcd_kg_port_arm_fe(), allocate and program a
+minimal 1-entry group table + pass-through CC node in MURAM. The
+node dispatches ALL traffic to FE_ENTER, where the existing
+hashfe→ehash→flow-table chain performs actual key matching.
+RCCB now points to the group table, not FE_ENTER directly.
+
+MURAM budget: +36 bytes (16 group table + 20 CC node).
+Group table and node are freed during kg_port_disarm_fe().
+
+Signed-off-by: VyOS LS1046A Build <build@vyos.io>
+---
+ drivers/net/ethernet/freescale/fman/fman_keygen.c | 37 +++++++++++++++
+ drivers/net/ethernet/freescale/fman/fman_pcd.c    |  1 +
+ .../net/ethernet/freescale/fman/fman_pcd_internal.h |  1 +
+ 3 files changed, 39 insertions(+)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+@@ -730,6 +730,8 @@ int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
+ 	struct fman_keygen *keygen = fman->keygen;
+ 	struct keygen_scheme *slot;
+ 	struct mutex *lock;
++	void __iomem *cc;
++	u32 grp_off, node_off;
+ 	u8 id;
+ 	int err;
+ 
+@@ -762,6 +764,26 @@ int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
+ 
+ 	*saved_engine = slot->next_engine;
+ 
++	/* 0150: CC group table + pass-through node. FMan v3 requires a
++	 * group table behind RCCB; pointing RCCB directly at FE_ENTER
++	 * silently drops all frames (hw-proven 2026-07-06).
++	 */
++	grp_off  = fman_pcd_muram_alloc(pcd, 16);
++	node_off = fman_pcd_muram_alloc(pcd, 20);
++	if (!grp_off || !node_off) {
++		err = -ENOMEM;
++		goto err_restore;
++	}
++	cc = fman_muram_offset_to_vbase(fman_get_muram(fman), grp_off);
++	iowrite32be(0x80000000, cc + 0x00);
++	iowrite32be(node_off,    cc + 0x04);
++	iowrite32be(0,           cc + 0x08);
++	iowrite32be(0,           cc + 0x0C);
++	cc = fman_muram_offset_to_vbase(fman_get_muram(fman), node_off);
++	iowrite32be(0x80000000, cc + 0x00);
++	iowrite32be(fe_enter_off,cc + 0x04);
++
++	pcd->fe_cc_grp_off = grp_off;
+ 	/* -- 0133/0106: real AC_CC NIA (next_engine=3, 0x80000006). */
+ 	slot->next_engine    = 3;
+ 	slot->cc_base_offset = 0;
+@@ -782,7 +804,7 @@ int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
+ 	rxport = fman_port_lookup_rx(fman, hw_port_id);
+ 	if (rxport) {
+ 		(void)fman_port_set_next_engine(rxport, FM_PORT_CC);
+-		(void)fman_port_set_cc_base(rxport, fe_enter_off);
++		(void)fman_port_set_cc_base(rxport, grp_off);
+ 	}
+ 
+ 	pr_info("fman_pcd fe_arm: port 0x%02x ENGAGED FE_ENTER=0x%lx\n",
+@@ -810,6 +832,21 @@ EXPORT_SYMBOL_GPL(fman_pcd_kg_port_arm_fe);
+ void fman_pcd_kg_port_disarm_fe(struct fman_pcd *pcd, u8 hw_port_id,
+ 				u8 saved_engine)
+ {
++	/* 0150: free CC group table + node allocated by arm_fe */
++	if (pcd->fe_cc_grp_off) {
++		void __iomem *cc = fman_muram_offset_to_vbase(
++			fman_get_muram(fman_pcd_get_fman(pcd)),
++			pcd->fe_cc_grp_off);
++		u32 node_off = ioread32be(cc + 0x04);
++		if (node_off)
++			fman_pcd_muram_free(pcd, node_off, 20);
++		fman_pcd_muram_free(pcd, pcd->fe_cc_grp_off, 16);
++		pcd->fe_cc_grp_off = 0;
++	}
++
+ 	struct fman *fman = fman_pcd_get_fman(pcd);
+ 	struct fman_port *rxport;
+ 
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -121,6 +121,7 @@ struct fman_pcd {
+ 	struct list_head fe_available;
+ 	struct list_head fe_enq;
+ 	int fe_refcount;
++	u32 fe_cc_grp_off;
+ 
+ 	struct dentry *debugfs_dir;
+ };
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_internal.h
+@@ -14,6 +14,7 @@ struct fman_pcd {
+ 	struct list_head fe_available;
+ 	struct list_head fe_enq;
+ 	int fe_refcount;
++	u32 fe_cc_grp_off;
+ 
+ 	struct dentry *debugfs_dir;
+ };
