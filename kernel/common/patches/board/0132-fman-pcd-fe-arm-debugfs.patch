@@ -208,11 +208,11 @@ index aed5d84..c28a045 100644
 +	 * Use the KGSE_CCBS approach (HW-proven per 0118): set kgse_ccbs
 +	 * to the FE_ENTER AD offset; the CC walk fires because ccbs is
 +	 * non-zero; NIA stays BMI direct-enqueue.  The CC engine resolves
-+	 * its root from the BMI port's fmbm_rccb (set in step 2).
++	 * a bare exact-match leaf lacks (M3-3b iter-50 park).
 +	 */
-+	slot->next_engine    = 2;
++	slot->next_engine    = 3;
 +	slot->cc_base_offset = 0;
-+	slot->cc_bits_sel    = fe_enter_off;
++	slot->cc_bits_sel    = 0;
 +	slot->used = false;
 +	err = keygen_scheme_setup(keygen, id, true);
 +	if (err) {
@@ -260,8 +260,8 @@ index aed5d84..c28a045 100644
 +		return err;
 +	}
 +
-+	pr_info("fman_pcd: port 0x%02x FE-ARMED (fmbm_rccb=0x%x, kgse_ccbs=0x%x)\n",
-+		hw_port_id, fe_enter_off, fe_enter_off);
++	pr_info("fman_pcd fe_arm: port 0x%02x ENGAGED FE_ENTER=0x%lx\n",
++		hw_port_id, fe_enter_off);
 +	return 0;
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_kg_port_arm_fe);
