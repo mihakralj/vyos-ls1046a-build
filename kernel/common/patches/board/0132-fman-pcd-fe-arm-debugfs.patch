@@ -5,7 +5,7 @@ Subject: [PATCH] fman_pcd: FE-VM arm debugfs node (Phase 1 D9-B, 0132)
 
 Add a debugfs node `fe_arm` that arms the FE-VM datapath on a single
 FMan RX port (eth3 / hw port 0x10 in practice), using the HW-proven
-KGSE_CCBS implicit-walk (patch 0118): the port's KGSE scheme is reprogrammed
+KGSE_CCBS approach (patch 0118): the port's KGSE scheme is reprogrammed
 to next_engine=CC with KGSE_CCBS = the FE_ENTER root-AD MURAM offset and
 the BMI fmbm_rccb is set to the same offset; the scheme NIA stays BMI
 direct-enqueue.
@@ -32,8 +32,7 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethern
 index 0fb8c0a..d58feb6 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -2103,6 +2103,160 @@ static const struct file_operations fman_pcd_fe_hashfe_fops = {
-
+@@ -2103,6 +2103,146 @@ static const struct file_operations fman_pcd_fe_hashfe_fops = {
  	.release	= single_release,
  };
  
@@ -68,53 +67,39 @@ index 0fb8c0a..d58feb6 100644
 +	mutex_unlock(&pcd->fe_lock);
 +
 +	/* 0150: CCBS scaffold — CONT_LOOKUP AD + match table + AD table (MURAM).
-+	 * Implements the ask20-HW-PROVEN KGSE_CCBS implicit CC walk on FMan v3:
-+	 * KeyGen→hashing→scheme→KGSE_CCBS≠0 triggers CC walk→group_table[0].
-+	 * Group table[0] = CONT_LOOKUP AD (RM 8.7.4.1) pointing to match+AD tables.
-+	 * With numKeys=0, all frames miss→miss AD→ENQ to scheme default FQ 0x200.
-+	 * Match AD (unused) = same ENQ.  MURAM: 256+16+32 = 304B per engage.
-+	 * No RCCB write needed — KGSE_CCBS alone triggers the implicit walk on v3.
-+	 * Disengage does NOT free (pool yields ~195 cycles before exhaustion).
++	 * Implements ask20-HW-PROVEN KGSE_CCBS implicit CC walk (RM 8.7.4.1).
++	 * With numKeys=0, all frames miss→ENQ to default FQ 0x200.
++	 * MURAM: 256+16+32 = 304B. Disengage does NOT free.
 +	 */
 +	{
 +		struct muram_info *muram = fman_get_muram(pcd->fman);
 +		u32 gro, mto, ato;
-+
 +		if (muram) {
 +			gro = fman_pcd_muram_alloc(pcd, 256);
 +			mto = fman_pcd_muram_alloc(pcd, 16);
 +			ato = fman_pcd_muram_alloc(pcd, 32);
 +			if (gro && mto && ato) {
 +				void __iomem *c;
-+
-+				/* CONT_LOOKUP AD (group_table[0], RM 8.7.4.1):
-+				 * numKeys=0, matchTable=mto, adTable=ato, keySize=16 */
 +				c = (void __iomem *)fman_muram_offset_to_vbase(muram, gro);
 +				iowrite32be((mto & 0xFFFFFF), c + 0);
 +				iowrite32be((ato & 0xFFFFFF), c + 4);
 +				iowrite32be(0x4F000000, c + 8);
 +				iowrite32be(0, c + 12);
-+
-+				/* Miss AD (entry 0): ENQ to default FQ 0x200 (RM 8.7.4.3) */
 +				c = (void __iomem *)fman_muram_offset_to_vbase(muram, ato);
 +				iowrite32be(0x00000200, c + 0);
 +				iowrite32be(0, c + 4);
 +				iowrite32be(0, c + 8);
 +				iowrite32be(0, c + 12);
-+
-+				/* Match AD (entry 1): same ENQ to default FQ 0x200 */
 +				iowrite32be(0x00000200, c + 16);
 +				iowrite32be(0, c + 20);
 +				iowrite32be(0, c + 24);
 +				iowrite32be(0, c + 28);
-+
 +				fe_enter_off = gro;
 +			}
 +		}
 +	}
 +
-+
-+	err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,
+++	err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,
 +				      (u32)fe_enter_off, &saved_engine);
 +	if (err)
 +		return err;
@@ -194,7 +179,7 @@ index 0fb8c0a..d58feb6 100644
  /**
   * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
   * @fman: parent FMan controller.  Must have a live MURAM pool (mainline
-@@ -2225,6 +2344,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+@@ -2225,6 +2365,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
  			debugfs_create_file("fe_hashfe", 0644,
  					    pcd->debugfs_dir, pcd,
  					    &fman_pcd_fe_hashfe_fops);
@@ -253,7 +238,7 @@ index aed5d84..c28a045 100644
 +
 +	/*
 +	 * Arm the FE datapath (Fork B, Phase 1 D9-B).
-+	 * Use the KGSE_CCBS implicit-walk approach (HW-proven per ask20/0106): set KGSE_CCBS
++	 * Use the KGSE_CCBS approach (HW-proven per 0118): set kgse_ccbs
 +	 * to the FE_ENTER AD offset; the CC walk fires because ccbs is
 +	 * non-zero; NIA stays BMI direct-enqueue.  The CC engine resolves
 +	 * its root from the BMI port's fmbm_rccb (set in step 2).
