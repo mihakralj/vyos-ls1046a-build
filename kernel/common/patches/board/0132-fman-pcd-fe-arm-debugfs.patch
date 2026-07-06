@@ -32,7 +32,7 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethern
 index 0fb8c0a..d58feb6 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -2103,6 +2103,113 @@ static const struct file_operations fman_pcd_fe_hashfe_fops = {
+@@ -2103,6 +2103,148 @@ static const struct file_operations fman_pcd_fe_hashfe_fops = {
  	.release	= single_release,
  };
  
@@ -65,6 +65,41 @@ index 0fb8c0a..d58feb6 100644
 +		return -EINVAL;
 +	}
 +	mutex_unlock(&pcd->fe_lock);
++
++	/* 0150: CC scaffold — allocate group table + CC node (MURAM).
++	 * FMan v3 CC engine requires RCCB->group_table->CC_node traversal;
++	 * pointing RCCB directly at FE_ENTER silently drops all frames
++	 * (hardware-proven on LS1046A 2026-07-06).  Group table: single-entry
++	 * array, first entry → CC node.  CC node: pass-through → FE_ENTER.
++	 * MURAM overhead: 16B + 20B = 36B per engage.
++	 * Disengage does NOT free (pool yields ~1820 cycles).
++	 */
++	{
++		struct muram_info *muram = fman_get_muram(pcd->fman);
++		u32 gro, ndo;
++
++		if (muram) {
++			gro = fman_pcd_muram_alloc(pcd, 16);
++			ndo = fman_pcd_muram_alloc(pcd, 20);
++			if (gro && ndo) {
++				void __iomem *c;
++				/* group table: valid, next→CC node, no key gen */
++				c = (void __iomem *)fman_muram_offset_to_vbase(muram, gro);
++				iowrite32be(0x80000000, c + 0);
++				iowrite32be(ndo, c + 4);
++				iowrite32be(0, c + 8);
++				iowrite32be(0, c + 12);
++				/* CC node: valid pass-through → FE_ENTER */
++				c = (void __iomem *)fman_muram_offset_to_vbase(muram, ndo);
++				iowrite32be(0x80000000, c + 0);
++				iowrite32be((u32)fe_enter_off, c + 4);
++				iowrite32be(0, c + 8);
++				iowrite32be(0, c + 12);
++				iowrite32be(0, c + 16);
++				fe_enter_off = gro;
++			}
++		}
++	}
 +
 +	err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,
 +				      (u32)fe_enter_off, &saved_engine);
