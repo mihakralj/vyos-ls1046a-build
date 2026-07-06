@@ -234,10 +234,10 @@ index aed5d84..c28a045 100644
 +		u32 gro = fman_pcd_muram_alloc(pcd, 16);
 +		u32 ndo = fman_pcd_muram_alloc(pcd, 20);
 +		if (gro && ndo) {
-+			c = fman_muram_offset_to_vbase(fman_get_muram(fman), gro);
++			c = (void __iomem *)fman_muram_offset_to_vbase(fman_get_muram(fman), gro);
 +			iowrite32be(0x80000000, c + 0x00);
 +			iowrite32be(ndo, c + 0x04);
-+			c = fman_muram_offset_to_vbase(fman_get_muram(fman), ndo);
++			c = (void __iomem *)fman_muram_offset_to_vbase(fman_get_muram(fman), ndo);
 +			iowrite32be(0x80000000, c + 0x00);
 +			iowrite32be(fe_enter_off, c + 0x04);
 +			fe_enter_off = gro; /* RCCB now points to group table */
@@ -280,8 +280,7 @@ index aed5d84..c28a045 100644
 +
 +	/* 0150: free CC group table + node. Read node_off from group entry. */
 +	{
-+		void __iomem *c;
-+		u32 gro = 0; /* TBD: stored per-port offset; for now just leak */;
++		(void)0; /* 0150 TBD: free CC group table + node */
 +	}
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_kg_port_disarm_fe);
