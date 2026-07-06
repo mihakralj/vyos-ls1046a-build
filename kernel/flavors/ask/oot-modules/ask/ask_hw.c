@@ -32,9 +32,9 @@
  * Since the 2026-06-14 oot-ungate, ask.ko builds, signs, and packages
  * (dormant) into every single-image ISO; it engages only at runtime.
  */
-
 #include <linux/fs.h>
 #include <linux/file.h>
+
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -384,6 +384,8 @@ int ask_hw_pcd_bringup(void)
         return 0;
 }
 
+
+static int debugfs_fe_write(const char *name, const char *buf, size_t len);
 void ask_hw_pcd_teardown(void)
 {
         struct ask_hw_pcd *h = ask_hw_pcd_inst;
@@ -411,14 +413,13 @@ void ask_hw_pcd_teardown(void)
                 kfree(ck);
         }
 
-        /* Tear down FE-VM pipeline via debugfs bridge (Phase 2). */
-        debugfs_fe_write("fe_arm", "disengage 0x10", 14);
-        debugfs_fe_write("fe_enter", "clear", 5);
-        debugfs_fe_write("fe_enq", "clear", 5);
-        debugfs_fe_write("fe_hashfe", "clear", 5);
-        debugfs_fe_write("fe_ehash", "clear", 5);
-        debugfs_fe_write("fe_singletons", "clear", 5);
-        debugfs_fe_write("fe_pool", "put", 3);
+        /* Restore TX confirm on all ports before tearing down CC trees. */
+        fman_port_set_silicon_hit_release_all(h->fman, false);
+
+        /* Disengage any port still in the M1 coarse S1 mode-switch (0129). */
+        for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
+                if (h->port[i].in_use && h->port[i].offload_engaged) {
+                        debugfs_fe_write("fe_arm", "disengage 0x10", 14);
                         h->port[i].offload_engaged = false;
                 }
         }
@@ -444,7 +445,6 @@ struct ask_hw_pcd *ask_hw_pcd_get(void)
 /* M1 coarse dataplane mode-switch (control-plane plumbing; ships dormant)    */
 /* ------------------------------------------------------------------------- */
 
-/* Debugfs bridge: write buf to /sys/kernel/debug/fman_pcd/0/<name> (Phase 2). */
 static int debugfs_fe_write(const char *name, const char *buf, size_t len)
 {
         static const char pf[] = "/sys/kernel/debug/fman_pcd/0/";
@@ -457,16 +457,17 @@ static int debugfs_fe_write(const char *name, const char *buf, size_t len)
                 return -ENAMETOOLONG;
         f = filp_open(path, O_WRONLY, 0);
         if (IS_ERR(f)) {
-                ask_pr_err("hw: open %s: %ld\n", path, PTR_ERR(f));
+                ask_pr_err("hw: open %s: %ld
+", path, PTR_ERR(f));
                 return PTR_ERR(f);
         }
         w = kernel_write(f, buf, len, &pos);
         if (w < 0 || (size_t)w != len)
-                ask_pr_err("hw: write %s: %zd/%zu\n", path, w, len);
+                ask_pr_err("hw: write %s: %zd/%zu
+", path, w, len);
         filp_close(f, NULL);
         return (w >= 0 && (size_t)w == len) ? 0 : -EIO;
 }
-
 
 /* Defined further down with the per-flow fast path; forward-declared here. */
 static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h,
@@ -548,10 +549,14 @@ void ask_hw_offload_disengage(u8 hw_port_id)
                 return;                 /* idempotent no-op */
         }
 
-        /* Restore TX confirm before tearing down the CC tree. */
-        fman_port_set_silicon_hit_release_all(h->fman, false);
-
-        fman_pcd_offload_disengage(h->fman, hw_port_id);
+        /* Tear down FE-VM pipeline via debugfs bridge (Phase 2). */
+        debugfs_fe_write("fe_arm", "disengage 0x10", 14);
+        debugfs_fe_write("fe_enter", "clear", 5);
+        debugfs_fe_write("fe_enq", "clear", 5);
+        debugfs_fe_write("fe_hashfe", "clear", 5);
+        debugfs_fe_write("fe_ehash", "clear", 5);
+        debugfs_fe_write("fe_singletons", "clear", 5);
+        debugfs_fe_write("fe_pool", "put", 3);
         p->offload_engaged = false;
         mutex_unlock(&h->lock);
         ask_pr_info("hw: offload DISENGAGED on port 0x%02x (S1->S0)\n", hw_port_id);
