@@ -715,7 +715,7 @@ cp "$BOARD_PATCH_DIR/0145-dpaa-flow-offload-backend-slot.patch" "$KERNEL_PATCHES
 # 0146: Phase 2 integration — wire 0135 FE-VM context builder into fe_arm engage.
 # Contexts (ENQ/MUX/Transition) are built immediately before the AC_CC arm
 # reprograms KeyGen/BMI, so the FE-VM can resolve HIT→ENQ and MISS→Exit.
-cp "$BOARD_PATCH_DIR/0146-fman-pcd-fe-context-build-integration.patch" "$KERNEL_PATCHES/"
+#cp "$BOARD_PATCH_DIR/0146-fman-pcd-fe-context-build-integration.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0148-keygen-debug-ekfc-log.patch" "$KERNEL_PATCHES/"
 
 
