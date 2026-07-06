@@ -672,8 +672,8 @@ cp "$BOARD_PATCH_DIR/0132-fman-pcd-fe-arm-debugfs.patch"   "$KERNEL_PATCHES/"
 # on an explicit echo to the fman_pcd/<id>/fe_arm node. This is the make-or-break
 # M2 dispatch experiment — the only encoding that genuinely enters the FE VM
 # terminal disposition a bare exact-match leaf lacks (M3-3b iter-50 park).
-# 0133 merged into 0132 v3 (AC_CC dispatch + keygen branch now in 0132)
-#cp "$BOARD_PATCH_DIR/0133-fman-pcd-fe-arm-real-accc.patch" "$KERNEL_PATCHES/"
+# 0133: D9-B (M2 activate) — adds AC_CC keygen_scheme_setup branch (board 0133 v1); arm function now in 0132 v3
+cp "$BOARD_PATCH_DIR/0133-fman-pcd-fe-arm-real-accc.patch" "$KERNEL_PATCHES/"
 # 0134: CAAM/QI descriptor sharing for ASK2 IPsec HW offload (spec §8.1, PR10).
 # Adds caam_qi_ext_consumer_register()/_release() to drivers/crypto/caam/qi.c +
 # the ext_lock/ext_active fields in struct caam_drv_ctx (qi.h) + the new header
@@ -728,7 +728,7 @@ cp "$BOARD_PATCH_DIR/0148-keygen-debug-ekfc-log.patch" "$KERNEL_PATCHES/"
 # the image looked healthy (same KVER) but lacked the new code entirely.
 # Space-separated basenames of board patches deliberately not staged
 # (currently none — 0078 was never committed as a file; see its comment above).
-BOARD_STAGE_SKIP="0146-fman-pcd-fe-context-build-integration.patch 0133-fman-pcd-fe-arm-real-accc.patch"
+BOARD_STAGE_SKIP="0146-fman-pcd-fe-context-build-integration.patch"
 _missing=""
 for _p in "$BOARD_PATCH_DIR"/*.patch; do
   _b=$(basename "$_p")
