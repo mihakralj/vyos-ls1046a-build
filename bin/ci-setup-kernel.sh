@@ -727,7 +727,7 @@ cp "$BOARD_PATCH_DIR/0148-keygen-debug-ekfc-log.patch" "$KERNEL_PATCHES/"
 # the image looked healthy (same KVER) but lacked the new code entirely.
 # Space-separated basenames of board patches deliberately not staged
 # (currently none — 0078 was never committed as a file; see its comment above).
-BOARD_STAGE_SKIP=""
+BOARD_STAGE_SKIP="0146-fman-pcd-fe-context-build-integration.patch"
 _missing=""
 for _p in "$BOARD_PATCH_DIR"/*.patch; do
   _b=$(basename "$_p")
