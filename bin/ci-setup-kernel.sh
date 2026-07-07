@@ -913,27 +913,7 @@ if [ -d "${CWD}/lp5812" ]; then
   # so CONFIG_LEDS_LP5812=y was silently dropped. Re-apply and resolve.
   scripts/config --set-val CONFIG_LEDS_LP5812 y
   make olddefconfig
-  
-# LS1046A phylink in-band SFP fallback (4005 equivalent)
-if [ -f drivers/net/phy/phylink.c ]; then
-    python3 -c '
-import sys
-src = open("drivers/net/phy/phylink.c").read()
-if "trust SFP link" not in src:
-    marker = chr(9)*3 + chr(47) + "* If we have a phy, the " + chr(34) + "up" + chr(34) + " state"
-    block = (
-        chr(9)*3 + chr(47) + "* VyOS: trust SFP link over PCS in INBAND mode (LS1046A XFI fix) */" + chr(10) +
-        chr(9)*3 + "if (!link_state.link && pl->sfp_bus)" + chr(10) +
-        chr(9)*4 + "link_state.link = true;" + chr(10)*2
-    )
-    new = src.replace(marker, block + marker)
-    open("drivers/net/phy/phylink.c", "w").write(new)
-    print("phylink.c: SFP in-band fallback injected (via kernel-inject/python3)")
-else:
-    print("phylink.c: SFP fallback already present")
-'
-fi
-echo "LP5812: injected into $LP5812_DIR (config forced)"
+  echo "LP5812: injected into $LP5812_DIR (config forced)"
 fi
 INJECT_EOF
 
@@ -1216,20 +1196,6 @@ if [ -f drivers/net/phy/sfp.c ]; then
     echo "### sfp.c: OEM SFP-10G-T/SR rollball quirk injected (sed)"
 fi
 
-# Patch 4005 equivalent: phylink in-band SFP fallback (LS1046A XFI fix)
-if [ -f drivers/net/phy/phylink.c ]; then
-    echo "CgkJCS8qIFZ5T1M6IHRydXN0IFNGUCBsaW5rIG92ZXIgUENTIGluIElOQkFORCBtb2RlIChMUzEwNDZBIFhGSSBmaXgpICovCgkJCWlmICghbGlua19zdGF0ZS5saW5rICYmIHBsLT5zZnBfYnVzKQoJCQkJbGlua19zdGF0ZS5saW5rID0gdHJ1ZTsKCg==" | base64 -d > /tmp/phylink_block.txt
-        sed -i "/\\/\\* If we have a phy, the \"up\" state/{
-r /tmp/phylink_block.txt
-}" drivers/net/phy/phylink.c
-        rm -f /tmp/phylink_block.txt
-        touch drivers/net/phy/phylink.c
-        if grep -qF "trust SFP link" drivers/net/phy/phylink.c; then
-            echo "### phylink.c: SFP in-band fallback injected"
-        else
-            echo "ERROR: phylink sed injection failed" >&2
-        fi
-fi
 # === end ls1046a-build patch-loop replacement ===
 """
 
