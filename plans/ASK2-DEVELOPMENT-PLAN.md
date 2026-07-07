@@ -55,6 +55,13 @@ plan enumerates the doc corrections.
 
 ---
 
+
+**[NOTE]** The NXP ASK performance parity analysis and cdx.ko-class
+direct-QMan TX fastpath modernization plan are in
+`[plans/ASK2-PERFORMANCE-MODERNIZATION.md](plans/ASK2-PERFORMANCE-MODERNIZATION.md)`.
+That plan supersedes the acceptance gate targets in §6 for NXP ASK parity
+(≥8 Gbps TX through hardware MANIP opcode chains).
+
 ## 2. Critical path
 
 **[SPEC]**
