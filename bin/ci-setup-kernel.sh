@@ -932,7 +932,7 @@ if "trust SFP link" not in src:
 else:
     print("phylink.c: SFP fallback already present")
 '
-fifi
+fi
 echo "LP5812: injected into $LP5812_DIR (config forced)"
 fi
 INJECT_EOF
