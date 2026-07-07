@@ -1197,45 +1197,12 @@ if [ -f drivers/net/phy/sfp.c ]; then
 fi
 
 # Patch 4005 equivalent: phylink in-band SFP fallback (LS1046A XFI fix)
-# Inserts a brand-agnostic override in phylink_resolve(): when an SFP bus is
-# present but PCS reports no link, force link_state.link=true.
-# Fixes kernel 6.18 NO-CARRIER for rollball-copper SFPs.
-# Uses inline Python (same heredoc pattern as other sed injections in this file)
-# so there is no temp-file quoting passthrough.
-if [ -f drivers/net/phy/phylink.c ]; then
-    python3 << "PHYLINK_EOF"
-import sys
-src = open("drivers/net/phy/phylink.c").read()
-
-# Idempotency: skip if the VyOS override is already present.
-if "trust SFP link" in src:
-    print("### phylink.c: SFP fallback already present")
-    sys.exit(0)
-
-# Unique anchor: the comment that follows phylink_mac_pcs_get_state()
-# in the MLO_AN_INBAND polling path of phylink_resolve().
-marker = '\t\t\t/* If we have a phy, the "up" state'
-if marker not in src:
-    print("ERROR: phylink anchor not found - upstream phylink_resolve changed", file=sys.stderr)
-    sys.exit(1)
-
-override = (
-    "\t\t\t/* VyOS: trust SFP link over PCS in INBAND mode (LS1046A XFI fix) */\n"
-    "\t\t\tif (!link_state.link && pl->sfp_bus)\n"
-    "\t\t\t\tlink_state.link = true;\n\n"
-)
-
-new = src.replace(marker, override + marker, 1)
-open("drivers/net/phy/phylink.c", "w").write(new)
-
-# Verify
-check = open("drivers/net/phy/phylink.c").read()
-if "trust SFP link" in check:
-    print("### phylink.c: SFP in-band fallback injected")
-else:
-    print("FATAL: phylink injection verification failed", file=sys.stderr)
-    sys.exit(1)
-PHYLINK_EOF
+# Runs a standalone Python script (kernel/common/scripts/fix-phylink.py)
+# that inserts the brand-agnostic SFP fallback before the "If we have a phy"
+# comment in phylink_resolve().  Standalone script avoids shell/Python
+# heredoc quoting hell that keeps breaking inline injections.
+if [ -f "${GITHUB_WORKSPACE}/kernel/common/scripts/fix-phylink.py" ]; then
+    python3 "${GITHUB_WORKSPACE}/kernel/common/scripts/fix-phylink.py"
     echo "### phylink.c: SFP in-band fallback injected"
 fi
 
