@@ -3,7 +3,7 @@
 # Called from VyOS system_offload.py when "set system offload ask" is configured.
 # Writes to the FMan PCD debugfs nodes to build the FE chain and arm AC_CC.
 #
-# Usage: vyos-offload-ask engage|disengage
+# Usage: vyos-offload-ask [--port 0x10|0x11] engage|disengage
 #
 # The engage sequence matches the debugfs bridge in ask_hw.c:
 #   fe_pool(get) -> fe_singletons(build) -> fe_ehash(set) -> fe_hashfe(build)
@@ -15,6 +15,17 @@
 set -e
 
 PCD_BASE="/sys/kernel/debug/fman_pcd/0"
+PORT="0x10"  # default: eth3 (FMan MAC9, ethernet@f0000)
+             # eth4 = 0x11 (FMan MAC10, ethernet@f2000)
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --port) PORT="$2"; shift 2 ;;
+        *) break ;;
+    esac
+done
+VERB="$1"
+shift || true
 
 die() { echo "ASK offload: $*" >&2; exit 1; }
 
@@ -27,7 +38,7 @@ engage() {
     echo "set 0x7FFF 12 0" > "$PCD_BASE/fe_ehash" || die "fe_ehash set failed"
     echo build > "$PCD_BASE/fe_hashfe"       || die "fe_hashfe build failed"
     echo "build 0x200" > "$PCD_BASE/fe_enq"  || die "fe_enq build failed"
-    echo "build 0x10" > "$PCD_BASE/fe_enter" || die "fe_enter build failed"
+    echo "build $PORT" > "$PCD_BASE/fe_enter" || die "fe_enter build failed"
 
     # Read the FE_ENTER offset that fe_enter_build assigned
     enter_off=$(grep -oP 'FE_ENTER root AD: \K0x[0-9a-fA-F]+' "$PCD_BASE/fe_arm" 2>/dev/null)
@@ -36,15 +47,15 @@ engage() {
         enter_off="0x59200"
     fi
 
-    echo "engage 0x10 $enter_off" > "$PCD_BASE/fe_arm" || die "fe_arm engage failed"
+    echo "engage $PORT $enter_off" > "$PCD_BASE/fe_arm" || die "fe_arm engage failed"
 
-    echo "ASK offload: ENGAGED on port 0x10, FE_ENTER=$enter_off (AC_CC)"
+    echo "ASK offload: ENGAGED on port $PORT, FE_ENTER=$enter_off (AC_CC)"
 }
 
 disengage() {
     echo "ASK offload: tearing down FE-VM pipeline..."
 
-    echo "disengage 0x10" > "$PCD_BASE/fe_arm" 2>/dev/null || true
+    echo "disengage $PORT" > "$PCD_BASE/fe_arm" 2>/dev/null || true
     echo clear > "$PCD_BASE/fe_flow"      2>/dev/null || true
     echo clear > "$PCD_BASE/fe_enter"     2>/dev/null || true
     echo clear > "$PCD_BASE/fe_enq"       2>/dev/null || true

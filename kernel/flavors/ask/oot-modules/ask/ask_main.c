@@ -21,7 +21,7 @@ static int __init ask_init(void)
 {
 	int rc;
 
-	ask_pr_info("loading ASK %s (skeleton — no offload functionality yet)\n",
+	ask_pr_info("loading ASK %s (flow offload + FMan PCD AC_CC FE/ehash)\n",
 		    ASK_DRV_VERSION_STR);
 
 	rc = ask_hw_init();
@@ -68,7 +68,7 @@ goto err_flow;
 	if (rc)
 		goto err_genl;
 
-	ask_pr_info("ready (genl family registered, all subsystems are stubs)\n");
+	ask_pr_info("ready (genl family registered, flow_offload + hw + genl active)\n");
 	return 0;
 
 err_genl:
@@ -116,7 +116,7 @@ module_init(ask_init);
 module_exit(ask_exit);
 
 MODULE_AUTHOR("VyOS LS1046A maintainers");
-MODULE_DESCRIPTION("ASK2 — NXP LS1046A FMan/210 hardware offload (skeleton)");
+MODULE_DESCRIPTION("ASK2 — NXP LS1046A FMan/210 hardware offload");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(ASK_DRV_VERSION_STR);
 MODULE_ALIAS_GENL_FAMILY("ask");
