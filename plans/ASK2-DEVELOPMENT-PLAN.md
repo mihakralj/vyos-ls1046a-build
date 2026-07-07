@@ -245,7 +245,7 @@ ASK completes — its exit code flips 1→0 at Phase 6.
 ## 6. Acceptance gates (from the spec, corrected here)
 
 **[SPEC]**
-- M2 hard gate: ≥2 Gbps + ≤5% kernel-net CPU (stretch ≥7 Gbps). Last Fork-A run
+- M2 hard gate: ≥2 Gbps + ≤5% kernel-net CPU (stretch ≥7 Gbps, **NXP-ASK-parity stretch ≥8 Gbps**). ✅ PASSED 2026-07-07 at 7.37 Gbps / 0.16% CPU — hard + stretch exceeded; parity stretch gated on nft flowtable offload automation (commits 8d37d54 + 0b196d1, build #28840239878).
   (PR14z21): 6.955 Gbps PASS / 21.40% CPU FAIL — the MURAM-dedup fix targets this.
 - IPsec (M4): ≥3 Gbps, cipher per the §4.5 `[BUG]` resolution (not GCM).
 - Reversibility: byte-identical `pcd-snapshot` after each S1→S0; 100× toggle
@@ -254,6 +254,75 @@ ASK completes — its exit code flips 1→0 at Phase 6.
   sparse clean; `MODULE_SIG_FORCE=y` signed with `LOCALVERSION=-vyos`.
 
 ---
+
+
+---
+
+## 6a. NXP ASK Performance Parity Targets (2026-07-07)
+
+**[SPEC]** Dual-board 10G SFP+ cross-connect test (2026-07-07) established
+definitive head-to-head throughput between NXP ASK (.112, kernel 6.12.49
+with cdx.ko advanced drivers) and ASK2 (.185, kernel 6.18.36 with mainline
+fsl_dpa). The root cause of performance asymmetry is not kernel config tuning
+but a fundamental difference in the DPAA Ethernet driver stack:
+
+| Board | Kernel | Driver | TX (single) | RX (single) |
+|---|---|---|---|---|
+| .112 (NXP ASK) | 6.12.49 | CONFIG_FSL_DPAA_ADVANCED_DRIVERS + cdx.ko | **8.58 Gbps** | 3.20 Gbps |
+| .185 (ASK2) | 6.18.36 | mainline fsl_dpa + board patches | 3.20 Gbps | **8.19 Gbps** |
+
+**[SPEC]** Two drivers, two fast paths:
+
+- **NXP ASK TX:** cdx.ko (659 KB, loaded with fci.ko) provides a direct-QMan
+  TX fastpath that bypasses kernel fsl_dpa entirely. cdx_module_init calls
+  start_dpa_app at boot; frames are enqueued directly to QMan TX FQs. Peak
+  single-stream: 9.58 Gbps (96% line rate).
+- **NXP ASK RX:** The NXP Advanced driver (CONFIG_FSL_DPAA_ADVANCED_DRIVERS)
+  handles RX. This is a different codebase from mainline fsl_dpa with different
+  NAPI/buffer characteristics. Capped at ~3.2 Gbps. cdx.ko does NOT interfere
+  with RX — it imports OH ports 2/3 (IPsec) only, leaves data-path ports to
+  the advanced driver.
+- **ASK2 RX:** Mainline fsl_dpa benefited from years of upstream NAPI/buffer-
+  recycling optimizations. Achieves 8.19 Gbps single-stream RX.
+- **ASK2 TX:** Mainline fsl_dpa TX is bottlenecked by per-flow QMan FQ depth
+  (~1.35-2.06 Gbps/flow). This is the same bottleneck identified in the PR14g
+  era, unresolved in mainline. The AC_CC FE/ehash flow offload pipeline is the
+  path to closing this gap.
+
+**[SPEC] ASK2 TX parity target:** match or exceed NXP ASK's 8.58 Gbps TX
+single-stream by completing the AC_CC flow offload automation loop:
+
+```
+nft flowtable flags offload
+        │
+        ▼ FLOW_CLS_REPLACE
+ask.ko REPLACE handler
+        │
+        ▼ fman_pcd_flow_insert
+FMan PCD FE/ehash
+        │
+        ▼ HIT → ENQ to TX FQ
+QMan direct TX enqueue (bypasses fsl_dpa TX)
+        │
+        ▼
+10G MAC → wire
+```
+
+The HIT path (manual debugfs flow insertion) already achieves 6.65 Gbps
+single-stream (peak 8.67 Gbps), within 8% of cdx.ko's peak. The remaining
+gap is the nft flowtable → ask.ko REPLACE handler automation (staged in
+kernel config commit 8d37d54 + TC_SETUP_FT handler commit 0b196d1, build
+#28840239878).
+
+**[SPEC] Revised M2 stretch target:** ≥8 Gbps TX single-stream (matching NXP
+ASK cdx.ko). The existing ≥7 Gbps stretch target is retained as the floor;
+the new stretch target represents full NXP ASK TX parity.
+
+**[NOTE]** FMan microcode is identical between both boards (210.10.1); CPU
+frequency is identical (1.60 GHz qoriq_cpufreq); QMan portal allocation is
+identical (4 portals, 1 per CPU). The entire performance delta is explained
+by (a) which DPAA driver handles TX and (b) whether it uses direct QMan
+enqueue or the kernel fsl_dpa TX path.
 
 ## 7. Effort & risk
 
@@ -481,6 +550,52 @@ teardown (Phase 0 reverse). This is a small, well-bounded delta over `0129`; the
 FE-VM core it dispatches into (`0124`/`0127`/`0131`) is already byte-validated
 (§9), so the residual risk is confined to the port-attach target and the live
 `fe_flow`/`fe_enq` HIT→ENQ resolution.
+
+
+**[SPEC] Phase 2 — M2 Gate PASSED (2026-07-07, commit ec8299a, build #28835707141,
+kernel 6.18.36-vyos, board .185).** Dual-board 10G SFP+ cross-connect test:
+.185 (ASK2, AC_CC FE/ehash) ↔ .106 (vanilla fsl_dpa, sender). AC_CC dispatch
+achieved 7.37 Gbps single-stream at 0.16% CPU — 3.7× above the 2 Gbps hard
+gate and 31× below the 5% CPU ceiling. Zero retransmits, zero QMan errors.
+MTU 9000 is mandatory (MTU 1500 caps at ~1.5 Gbps with catastrophic retransmits).
+
+**[SPEC] Phase 2 — HIT Path Verified (2026-07-07, commit ec8299a).** With a
+matching flow key programmed via `vyos-offload-ask flow-add`, the HIT path
+achieved 6.65 Gbps single-stream (peak 8.67 Gbps, P4 aggregate 7.14 Gbps).
+MISS path (P4 traffic through the matching flow): 7.14 Gbps aggregate. Flow
+key format confirmed: L4PDST(2B)+L4PSRC(2B)+IPDST(4B)+IPSRC(4B), EKFC=
+0x00180206.
+
+**[SPEC] Phase 2 — AC_CC Overhead (2026-07-07).** AC_CC dispatch vs RSS
+baseline: 7.00 vs 7.26 Gbps → 3.6% overhead, well within acceptable range.
+
+**[SPEC] Phase 2 — NXP ASK Performance Baseline (2026-07-07).** Third board
+(.112, kernel 6.12.49 + cdx.ko, NXP SDK advanced drivers) added to the test
+matrix. Head-to-head comparison established:
+- NXP ASK TX: 8.58 Gbps (cdx.ko direct-QMan fastpath)
+- ASK2 TX: 3.20 Gbps (mainline fsl_dpa, QMan FQ-depth bottleneck)
+- ASK2 RX: 8.19 Gbps (mainline fsl_dpa, well-optimized)
+- NXP ASK RX: 3.20 Gbps (NXP Advanced driver, different codebase)
+Root cause confirmed: different DPAA driver stacks (CONFIG_FSL_DPAA_ADVANCED
+vs mainline fsl_dpa), not config tuning. ASK2 TX parity target set at ≥8 Gbps
+single-stream through AC_CC flow offload pipeline.
+
+**[SPEC] Phase 2 — Flow Offload Automation (2026-07-07).** Two blockers
+identified and fixed to enable nft flowtable 'flags offload' → ask.ko
+REPLACE handler automation:
+1. CONFIG_NF_FLOW_TABLE_OFFLOAD=m added (commit 8d37d54) — nf_flow_table.ko
+   now includes offload infrastructure (flow_indr_dev_setup_offload).
+2. TC_SETUP_FT handler in dpaa_setup_tc() (commit 0b196d1) — sed injection
+   adds case TC_SETUP_FT: → dpaa_setup_tc_block() to unblock the
+   nf_flow_table_offload_setup() → ndo_setup_tc(dev, TC_SETUP_FT) call chain.
+   Previously dpaa_setup_tc() returned -EOPNOTSUPP for TC_SETUP_FT, blocking
+   the entire offload path before flow_indr_dev_setup_offload() could fire.
+
+**[NOTE]**
+16 builds attempted 2026-07-07, 6 succeeded. Dominant failure mode: git apply
+--3way context matching in fman_pcd.c patches (9 of 10 failures). Mitigated by
+using sed injection instead of .patch files for small, well-bounded source
+modifications.
 
 ## §9 2026-07-05: Phase 1 AC_CC Arm Experiment — SATISFIED
 
