@@ -1,11 +1,11 @@
 From: VyOS LS1046A Build <build@vyos.io>
 Date: Sun, 10 May 2026 00:00:00 +0000
-Subject: [PATCH] net: sfp: upgrade OEM SFP-10G-T quirk to rewrite SR codes
+Subject: [PATCH] net: sfp: upgrade OEM SFP-10G-T/SR quirk to rewrite SR codes
 
-The unbranded "OEM SFP-10G-T" 10GBASE-T copper SFP+ module advertises
-SFP-MSA transceiver code 0x10 (10GBASE-SR fiber) in its EEPROM byte 3
-even though it is a copper module with an RTL8261 PHY behind a Rollball
-MDIO bridge. The existing kernel quirk
+The unbranded "OEM SFP-10G-T" and "OEM SFP-10G-SR" 10GBASE-T copper SFP+
+modules advertise SFP-MSA transceiver code 0x10 (10GBASE-SR fiber) in their
+EEPROM byte 3 even though they are copper modules with an RTL8261 PHY behind
+a Rollball MDIO bridge. The existing kernel quirk
 
   SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_rollball_cc)
 
@@ -36,19 +36,28 @@ Replace the existing quirk's fixup function rather than adding a new
 SFP_QUIRK_F entry, because SFP_QUIRK matching is first-hit and the
 existing entry would shadow ours.
 
+Also add an entry for "OEM SFP-10G-SR" — OEM ships some of these modules
+with the product name "SFP-10G-SR" rather than "SFP-10G-T" in their
+EEPROM, but they are the same RTL8261 rollball hardware. Without this
+entry, the quirk table produces zero matches ("SFP-10G-SR" ≠ "SFP-10G-T"),
+the connector stays LC (fiber), and phylink falls back to FIXED mode
+ignoring the SFP entirely — the rollball PHY completes copper negotiation
+(LOS deasserts) but the MAC never transitions to link-up.
+
 Verified on hardware 2026-05-10 (LS1046A Mono Gateway, kernel 6.18.28,
 default flavor, FMan memac 1af0000 / eth3) with patch 4003 already
-applied.
+applied. SFP-10G-SR entry verified 2026-07-07 on kernel 6.18.36-vyos
+(board .185, module sn CSY101NC2727, LOS=LOW but NO-CARRIER before fix).
 
 Signed-off-by: VyOS LS1046A Build <build@vyos.io>
 ---
- drivers/net/phy/sfp.c | 6 +++++-
- 1 file changed, 5 insertions(+), 1 deletion(-)
+ drivers/net/phy/sfp.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
 
 diff --git a/drivers/net/phy/sfp.c b/drivers/net/phy/sfp.c
 --- a/drivers/net/phy/sfp.c
 +++ b/drivers/net/phy/sfp.c
-@@ -579,7 +579,11 @@ static const struct sfp_quirk sfp_quirks[] = {
+@@ -579,7 +579,12 @@ static const struct sfp_quirk sfp_quirks[] = {
  	// OEM SFP-GE-T is a 1000Base-T module with broken TX_FAULT indicator
  	SFP_QUIRK_F("OEM", "SFP-GE-T", sfp_fixup_ignore_tx_fault),
  
@@ -58,6 +67,7 @@ diff --git a/drivers/net/phy/sfp.c b/drivers/net/phy/sfp.c
 +	// the FS-10G-T fixup chain so the connector/extended_cc are rewritten
 +	// to 10GBASE-T short-reach BEFORE phylink parses the supported modes.
 +	SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_fs_10gt),
++	SFP_QUIRK_F("OEM", "SFP-10G-SR", sfp_fixup_fs_10gt),
  	SFP_QUIRK_S("OEM", "SFP-2.5G-T", sfp_quirk_oem_2_5g),
  	SFP_QUIRK_S("OEM", "SFP-2.5G-BX10-D", sfp_quirk_2500basex),
  	SFP_QUIRK_S("OEM", "SFP-2.5G-BX10-U", sfp_quirk_2500basex),
