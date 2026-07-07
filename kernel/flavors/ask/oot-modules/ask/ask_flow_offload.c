@@ -1032,6 +1032,11 @@ static void ask_debugfs_fe_flow_write(const struct ask_flow_key *key,
         struct file *filp;
         loff_t pos = 0;
 
+        if (!key) {
+                ask_pr_dbg("debugfs_fe_flow_write: NULL key (flow destroyed) -- skipping\n");
+                return;
+        }
+
         raw[0] = (key->dport >> 8) & 0xff;   raw[1] = key->dport & 0xff;
         raw[2] = (key->sport >> 8) & 0xff;   raw[3] = key->sport & 0xff;
         memcpy(&raw[4], key->dst_ip, 4);     memcpy(&raw[8], key->src_ip, 4);
