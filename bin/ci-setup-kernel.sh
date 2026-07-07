@@ -717,6 +717,10 @@ cp "$BOARD_PATCH_DIR/0145-dpaa-flow-offload-backend-slot.patch" "$KERNEL_PATCHES
 # Contexts (ENQ/MUX/Transition) are built immediately before the AC_CC arm
 # reprograms KeyGen/BMI, so the FE-VM can resolve HIT→ENQ and MISS→Exit.
 cp "$BOARD_PATCH_DIR/0146-fman-pcd-fe-context-build-integration.patch" "$KERNEL_PATCHES/"
+# 0147: handle TC_SETUP_FT in DPAA ndo_setup_tc for nft flowtable offload.
+# Without this, nf_flow_table_offload_setup() calls ndo_setup_tc(TC_SETUP_FT)
+# which dpaa_setup_tc() rejects with -EOPNOTSUPP (no FT case in switch).
+cp "$BOARD_PATCH_DIR/0147-dpaa-ft-nft-flowtable-offload.patch" "$KERNEL_PATCHES/"
 # 0150: Phase 2 — FE-VM engage/flow API for ask.ko
 #0150 (PLACEHOLDER — functions embedded into 0146)
 #cp "$BOARD_PATCH_DIR/0150-fman-pcd-fe-engage-api.patch"          "$KERNEL_PATCHES/"
