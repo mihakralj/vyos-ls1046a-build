@@ -74,6 +74,35 @@ fi
 case "${1:-status}" in
     engage)    engage ;;
     disengage) disengage ;;
+    flow-add)
+        key="${2}"
+        enq="${3:-0}"
+        if [ -z "$key" ] || [ "${#key}" -ne 24 ] || ! echo "$key" | grep -qE '^[0-9a-fA-F]{24}$'; then
+            echo "ERROR: key must be 24 hex chars (12 bytes)" >&2
+            echo "Usage: $0 flow-add <key_hex_24chars> [enq_off]" >&2
+            exit 1
+        fi
+        echo "add 0 ${key} ${enq}" > "$PCD_BASE/fe_flow" || die "fe_flow add failed"
+        echo "ASK flow: ADDED key=$key enq=$enq"
+        ;;
+    flow-del)
+        echo clear > "$PCD_BASE/fe_flow" 2>/dev/null || true
+        echo "ASK flow: CLEARED"
+        ;;
+    flow-list)
+        if [ -f "$PCD_BASE/fe_flow" ]; then
+            grep -oP 'flow\[\d+\] bucket=\S+ rec=\S+ .*' "$PCD_BASE/fe_flow" 2>/dev/null || echo "  (no flows)"
+        else
+            echo "ASK flow: NOT AVAILABLE"
+        fi
+        ;;
+    flow-stats)
+        if [ -f "$PCD_BASE/fe_flow" ]; then
+            grep -c "flow\[" "$PCD_BASE/fe_flow" 2>/dev/null || echo "0"
+        else
+            echo "0"
+        fi
+        ;;
     status)    status ;;
-    *)         echo "Usage: $0 {engage|disengage|status}"; exit 1 ;;
+    *)         echo "Usage: $0 {engage|disengage|status|flow-add|flow-del|flow-list|flow-stats}"; exit 1 ;;
 esac
