@@ -717,10 +717,6 @@ cp "$BOARD_PATCH_DIR/0145-dpaa-flow-offload-backend-slot.patch" "$KERNEL_PATCHES
 # Contexts (ENQ/MUX/Transition) are built immediately before the AC_CC arm
 # reprograms KeyGen/BMI, so the FE-VM can resolve HIT→ENQ and MISS→Exit.
 cp "$BOARD_PATCH_DIR/0146-fman-pcd-fe-context-build-integration.patch" "$KERNEL_PATCHES/"
-# 0147: handle TC_SETUP_FT in DPAA ndo_setup_tc for nft flowtable offload.
-# Without this, nf_flow_table_offload_setup() calls ndo_setup_tc(TC_SETUP_FT)
-# which dpaa_setup_tc() rejects with -EOPNOTSUPP (no FT case in switch).
-cp "$BOARD_PATCH_DIR/0147-dpaa-ft-nft-flowtable-offload.patch" "$KERNEL_PATCHES/"
 # 0150: Phase 2 — FE-VM engage/flow API for ask.ko
 #0150 (PLACEHOLDER — functions embedded into 0146)
 #cp "$BOARD_PATCH_DIR/0150-fman-pcd-fe-engage-api.patch"          "$KERNEL_PATCHES/"
@@ -1141,6 +1137,18 @@ fi
 # FMD shim, etc.) see the patched state as their merge base.
 git -c user.email=ci@local -c user.name=ci add -A
 git -c user.email=ci@local -c user.name=ci commit -q -m "kernel post-patches" --allow-empty || true
+# Patch-less source modification: add TC_SETUP_FT case to dpaa_setup_tc()
+# TC_SETUP_FT is required by nf_flow_table_offload_setup() when the
+# netdev has ndo_setup_tc.  Without it, nft 'flags offload' never
+# reaches flow_indr_dev_setup_offload() — dpaa_setup_tc() returns
+# -EOPNOTSUPP from its default: case.  Injected via sed (not a
+# .patch file) to avoid the git apply --3way context-matching wall.
+if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    sed -i "/case TC_SETUP_BLOCK:/a\        case TC_SETUP_FT:\n                return dpaa_setup_tc_block(net_dev, type_data);" \
+        drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+    echo "### dpaa_eth.c: TC_SETUP_FT case injected (sed)"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
