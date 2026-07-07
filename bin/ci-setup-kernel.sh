@@ -1144,7 +1144,7 @@ git -c user.email=ci@local -c user.name=ci commit -q -m "kernel post-patches" --
 # -EOPNOTSUPP from its default: case.  Injected via sed (not a
 # .patch file) to avoid the git apply --3way context-matching wall.
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
-    sed -i "/case TC_SETUP_BLOCK:/a\        case TC_SETUP_FT:\n                return dpaa_setup_tc_block(net_dev, type_data);" \
+    sed -i "/case TC_SETUP_BLOCK:/a\        case TC_SETUP_FT:\n                return dpaa_setup_tc_flow_block(net_dev, type_data);" \
         drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
     echo "### dpaa_eth.c: TC_SETUP_FT case injected (sed)"
 fi
