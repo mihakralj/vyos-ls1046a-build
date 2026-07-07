@@ -57,6 +57,7 @@
 #include "include/ask_internal.h"
 #include <linux/fs.h>
 #include <linux/file.h>
+#include <linux/fsl/dpaa_flow_offload.h>
 
 /*
  * Single-image OOT re-declares (board patches 0121 + 0104).
@@ -1812,22 +1813,56 @@ static int ask_flow_indr_setup_cb(struct net_device *dev, struct Qdisc *sch,
  * indr unregister, which takes the release helper that is defined below. */
 static void ask_flow_indr_release(void *cb_priv);
 
+/*
+ * Backend slot wrapper for dpaa_setup_tc_flow_block().  When
+ * nf_flow_table_offload_setup() calls ndo_setup_tc(dev, TC_SETUP_FT),
+ * the in-tree dpaa driver routes to dpaa_setup_tc_flow_block() (patch
+ * 0145), which looks up the registered ops and calls setup_tc_block().
+ * This wrapper delegates to ask_flow_indr_setup_cb().
+ */
+static int ask_flow_offload_setup_tc_block(struct net_device *dev,
+                                           struct flow_block_offload *fbo)
+{
+        return ask_flow_indr_setup_cb(dev, NULL, NULL, TC_SETUP_FT,
+                                      fbo, NULL, NULL);
+}
+
+static const struct dpaa_flow_offload_ops ask_flow_offload_ops = {
+        .owner          = THIS_MODULE,
+        .setup_tc_block = ask_flow_offload_setup_tc_block,
+};
+
 int ask_flow_offload_init(void)
 {
         int rc;
 
         /*
-         * Single-image entry: ask.ko drives FLOW_CLS_REPLACE solely through
-         * the mainline flow_indr_dev_register() path.  nft flowtables with
-         * `flags offload` deliver FLOW_BLOCK_BIND here via the indr core; a
-         * non-DPAA netdev degrades gracefully to SW-only when the REPLACE
-         * handler cannot resolve an ingress BMI port id.  The retired
-         * dpaa_flow_offload_ops backend registration is gone with the flavor
-         * collapse -- the common board substrate exports no such handler.
+         * Single-image entry: ask.ko registers TWO paths for flow offload:
+         *
+         * 1. flow_indr_dev_register() — the generic kernel indr path (used
+         *    when ndo_setup_tc is NULL on the netdev).
+         * 2. dpaa_register_flow_offload_handler() — the DPAA1 backend slot
+         *    (patch 0145), used when ndo_setup_tc IS present (which DPAA1
+         *    has via board patch 0104).  The slot bridges the gap between
+         *    nf_flow_table_offload_setup()'s ndo_setup_tc(TC_SETUP_FT) and
+         *    our flow_block_cb chain.
+         *
+         * Path 1 handles non-DPAA netdevs; path 2 handles DPAA1 eth ports.
+         * A non-DPAA netdev degrades gracefully to SW-only when the REPLACE
+         * handler cannot resolve an ingress BMI port id.
          */
         rc = flow_indr_dev_register(ask_flow_indr_setup_cb, NULL);
         if (rc) {
                 ask_pr_err("flow_offload: flow_indr_dev_register failed: %d\n", rc);
+                return rc;
+        }
+
+        rc = dpaa_register_flow_offload_handler(&ask_flow_offload_ops);
+        if (rc) {
+                ask_pr_err("flow_offload: dpaa_register_flow_offload_handler failed: %d\n",
+                           rc);
+                flow_indr_dev_unregister(ask_flow_indr_setup_cb, NULL,
+                                         ask_flow_indr_release);
                 return rc;
         }
 
@@ -1841,6 +1876,7 @@ int ask_flow_offload_init(void)
         rc = register_netevent_notifier(&ask_flow_offload_netevent_nb);
         if (rc) {
                 ask_pr_err("flow_offload: register_netevent_notifier failed: %d\n", rc);
+                dpaa_unregister_flow_offload_handler(&ask_flow_offload_ops);
                 flow_indr_dev_unregister(ask_flow_indr_setup_cb, NULL,
                                          ask_flow_indr_release);
                 return rc;
@@ -1879,6 +1915,7 @@ void ask_flow_offload_exit(void)
          */
         cancel_delayed_work_sync(&ask_flow_pending_poll_work);
 
+        dpaa_unregister_flow_offload_handler(&ask_flow_offload_ops);
         unregister_netevent_notifier(&ask_flow_offload_netevent_nb);
 
         /*
