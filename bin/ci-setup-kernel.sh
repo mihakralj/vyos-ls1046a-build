@@ -913,7 +913,22 @@ if [ -d "${CWD}/lp5812" ]; then
   # so CONFIG_LEDS_LP5812=y was silently dropped. Re-apply and resolve.
   scripts/config --set-val CONFIG_LEDS_LP5812 y
   make olddefconfig
-  echo "LP5812: injected into $LP5812_DIR (config forced)"
+  
+# LS1046A phylink in-band SFP fallback (4005 equivalent)
+if [ -f drivers/net/phy/phylink.c ]; then
+    echo "CgkJCS8qIFZ5T1M6IHRydXN0IFNGUCBsaW5rIG92ZXIgUENTIGluIElOQkFORCBtb2RlIChMUzEwNDZBIFhGSSBmaXgpICovCgkJCWlmICghbGlua19zdGF0ZS5saW5rICYmIHBsLT5zZnBfYnVzKQoJCQkJbGlua19zdGF0ZS5saW5rID0gdHJ1ZTsKCg==" | base64 -d > /tmp/phylink_block.txt
+    sed -i "/\\\\/\\\\* If we have a phy, the \\\"up\\\" state/{
+r /tmp/phylink_block.txt
+}" drivers/net/phy/phylink.c
+    rm -f /tmp/phylink_block.txt
+    touch drivers/net/phy/phylink.c
+    if grep -qF "trust SFP link" drivers/net/phy/phylink.c; then
+        echo "phylink.c: SFP in-band fallback injected (via kernel-inject)"
+    else
+        echo "WARNING: phylink injection verification failed" >&2
+    fi
+fi
+echo "LP5812: injected into $LP5812_DIR (config forced)"
 fi
 INJECT_EOF
 
