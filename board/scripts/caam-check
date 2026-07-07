@@ -129,12 +129,18 @@ for drv in "${CAAM_DRVS[@]}"; do
             refcnt=$(cat "/sys/module/${drv}/refcnt" 2>/dev/null || echo "?")
             ok "${label} loaded (refcnt=${refcnt}, module)"
         else
-            ok "${label} present (built-in)"
+            ok "${label} present (built-in, sysfs)"
         fi
+    elif [ "$drv" = "caam" ] && [ -d "/sys/bus/platform/devices/1700000.crypto" ]; then
+        ok "${label} present (built-in, platform device probed — /sys/module N/A for initcall-order drivers)"
+    elif [ "$drv" = "caam_jr" ] && [ -d "/sys/bus/platform/drivers/caam_jr" ] && \
+         [ "$(ls /sys/bus/platform/drivers/caam_jr/ 2>/dev/null | grep -c '\.jr$')" -gt 0 ]; then
+        ok "${label} present (built-in, $(ls /sys/bus/platform/drivers/caam_jr/ | grep '\.jr$' | wc -l) JR bound)"
+    elif [ "$drv" = "caamalg_desc" ] && grep -q "caam" /proc/crypto 2>/dev/null; then
+        ok "${label} present (built-in, CAAM algorithms in /proc/crypto)"
+    elif [ "$drv" = "caamhash_desc" ] && grep -q "caam" /proc/crypto 2>/dev/null; then
+        ok "${label} present (built-in, CAAM algorithms in /proc/crypto)"
     else
-        # caam + caam_jr are mandatory; the *_desc helpers are pulled in
-        # automatically by caam_jr's symbol deps so absence is also a
-        # hard fail. error is technically optional but always present.
         case "$drv" in
             caam|caam_jr|caamalg_desc|caamhash_desc)
                 fail "${drv} NOT loaded — CAAM crypto API unavailable"; mark_fail ;;
