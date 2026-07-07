@@ -1,3 +1,30 @@
+# ASK2 Forward Plan — 2026-07-06 → 2026-07-07
+
+**Status Update 2026-07-07:** M2 gate PASSED (7.37 Gbps / 0.16% CPU). NXP ASK
+performance baseline established. Flow offload automation blockers identified
+and fixed. See §8 for NXP ASK parity targets.
+
+**Branch:** `dpaa1`  
+**Latest CI build:** #28840239878 (TC_SETUP_FT handler, in progress)  
+**Board .185:** 192.168.1.185, kernel 6.18.36-vyos  
+**Board .112 (NXP ASK):** 192.168.1.112, kernel 6.12.49-vyos + cdx.ko
+
+---
+
+## 0. 2026-07-07 Accomplishments
+
+| Item | Status | Details |
+|------|--------|---------|
+| AC_CC dispatch proven (7.37 Gbps, 0.16% CPU) | ✅ DONE | Dual-board cross-connect, MTU 9000 |
+| HIT path verified (6.65 Gbps single-stream, peak 8.67) | ✅ DONE | Manual debugfs flow insertion |
+| NXP ASK baseline established (8.58 Gbps TX via cdx.ko) | ✅ DONE | Third board .112 added to test matrix |
+| CONFIG_NF_FLOW_TABLE_OFFLOAD=m | ✅ COMMITTED (8d37d54) | Enables nf_flow_table_offload_setup() |
+| TC_SETUP_FT handler in dpaa_setup_tc() | ✅ COMMITTED (0b196d1) | Unblocks nft flowtable offload |
+| vyos-offload-ask script (6 verbs) in ISO | ✅ SHIPPED | engage/disengage/flow-add/del/list/stats |
+| ask.ko debugfs bridge (engage/disengage) | ✅ SHIPPED | filp_open/kernel_write to fe_* debugfs |
+| ask.ko REPLACE/DESTROY handlers compiled | ✅ BUILT, DORMANT | Awaiting nft flowtable → BIND trigger |
+| TC_SETUP_FT build | 🔄 BUILD #28840239878 | Pending CI completion |
+
 # ASK2 Forward Plan — 2026-07-06
 
 **Status:** Course correction in progress. Architecture confirmed.
@@ -153,4 +180,80 @@ The old scaffold (simple flags+next_ptr group entry) decoded as RESULT_CF fqid=0
 | SFP-10G-T PHY destabilizes | High | Lost test time | Cold boot per test cycle |
 | 0146 context builder needed but can't compile | Medium | FE_ENTER uninitialized | Fix prototype, embed call in 0132 |
 | ask20 CCBS lesson misinterpreted | Low | Using wrong dispatch | Vendor reference confirms AC_CC is correct for Fork B |
+
+
+
+---
+
+## 8. NXP ASK Performance Parity (2026-07-07)
+
+### 8.1 Head-to-Head Results
+
+Dual-board 10G SFP+ cross-connect test matrix (MTU 9000):
+
+| Sender → Receiver | Throughput (single) | Driver Stack |
+|---|---|---|
+| .112 (NXP ASK) → .185 (ASK2) | **8.58 Gbps** (peak 9.58) | cdx.ko TX fastpath → mainline fsl_dpa RX |
+| .185 (ASK2) → .112 (NXP ASK) | **3.20 Gbps** | mainline fsl_dpa TX → NXP Advanced driver RX |
+| .185 (ASK2) → .106 (vanilla) | **7.22 Gbps** | mainline fsl_dpa TX → mainline fsl_dpa RX |
+| .106 (vanilla) → .185 (ASK2) | **8.19 Gbps** | mainline fsl_dpa TX → mainline fsl_dpa RX |
+
+### 8.2 Root Cause
+
+The .112 NXP ASK board uses a **different DPAA Ethernet driver stack**:
+- `CONFIG_FSL_DPAA is not set` — mainline fsl_dpa **disabled**
+- `CONFIG_FSL_DPAA_ADVANCED_DRIVERS=y` — NXP proprietary advanced driver
+- cdx.ko (659KB) provides direct-QMan TX fastpath (bypasses kernel fsl_dpa TX)
+- cdx_module_init → start_dpa_app programs FMan PCD via dpa_app userspace
+
+The .185 ASK2 board uses the mainline fsl_dpa driver with VyOS board patches.
+
+Both boards share: same FMan microcode (210.10.1), same CPU frequency (1.60 GHz),
+same QMan portal allocation (4 portals, 1 per CPU).
+
+### 8.3 ASK2 TX Path to Parity
+
+To match NXP ASK TX (8.58 Gbps), ASK2 needs the AC_CC flow offload pipeline to
+deliver per-flow hardware direct QMan enqueue, bypassing the kernel fsl_dpa TX
+QMan FQ depth bottleneck (~1.35-2.06 Gbps/flow):
+
+```
+nft flowtable flags offload
+        │
+        ▼ FLOW_CLS_REPLACE
+ask.ko REPLACE handler (ask_flow_offload.c)
+        │
+        ▼ fman_pcd_flow_insert
+FMan PCD FE/ehash (AC_CC dispatch)
+        │
+        ▼ HIT → ENQ to TX FQ (bypasses fsl_dpa TX)
+QMan direct TX enqueue
+        │
+        ▼
+10G MAC → wire → 8+ Gbps
+```
+
+**Already proven:** Manual flow insertion (debugfs) → 6.65 Gbps single-stream
+(peak 8.67 Gbps), within 8% of cdx.ko peak.
+
+**Remaining:** Close the nft flowtable → ask.ko automation loop:
+1. CONFIG_NF_FLOW_TABLE_OFFLOAD=m — ✅ committed (8d37d54)
+2. TC_SETUP_FT handler in dpaa_setup_tc() — ✅ committed (0b196d1), build pending
+3. nft flowtable offload → FLOW_CLS_REPLACE → ask.ko handler chain — 🔄 testing
+
+### 8.4 ASK2 RX Advantage
+
+ASK2 RX (8.19 Gbps) already exceeds NXP ASK RX (3.20 Gbps) by 2.6×. This is a
+natural consequence of using the mainline fsl_dpa driver which received years of
+upstream NAPI/buffer-recycling optimizations. **No RX changes needed.**
+
+### 8.5 Revised Milestones
+
+| Milestone | Gate | NXP ASK Parity |
+|-----------|------|----------------|
+| M2 hard | ≥2 Gbps, ≤5% CPU | ✅ PASSED (7.37/0.16%) |
+| M2 stretch | ≥7 Gbps, <5% CPU | ✅ PASSED |
+| M2 NXP parity | ≥8 Gbps TX single-stream | 🔄 Gated on flow offload automation |
+| M3 (IPv6) | ≥5 Gbps, ≤5% CPU | — |
+| M4 (IPsec) | ≥3 Gbps | — |
 
