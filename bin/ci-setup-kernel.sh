@@ -1198,20 +1198,17 @@ fi
 
 # Patch 4005 equivalent: phylink in-band SFP fallback (LS1046A XFI fix)
 if [ -f drivers/net/phy/phylink.c ]; then
-    if ! grep -qF "trust SFP link" drivers/net/phy/phylink.c; then
-        echo "CgkJCS8qIFZ5T1M6IHRydXN0IFNGUCBsaW5rIG92ZXIgUENTIGluIElOQkFORCBtb2RlIChMUzEwNDZBIFhGSSBmaXgpICovCgkJCWlmICghbGlua19zdGF0ZS5saW5rICYmIHBsLT5zZnBfYnVzKQoJCQkJbGlua19zdGF0ZS5saW5rID0gdHJ1ZTsKCg==" | base64 -d > /tmp/phylink_block.txt
+    echo "CgkJCS8qIFZ5T1M6IHRydXN0IFNGUCBsaW5rIG92ZXIgUENTIGluIElOQkFORCBtb2RlIChMUzEwNDZBIFhGSSBmaXgpICovCgkJCWlmICghbGlua19zdGF0ZS5saW5rICYmIHBsLT5zZnBfYnVzKQoJCQkJbGlua19zdGF0ZS5saW5rID0gdHJ1ZTsKCg==" | base64 -d > /tmp/phylink_block.txt
         sed -i "/\\/\\* If we have a phy, the \"up\" state/{
 r /tmp/phylink_block.txt
 }" drivers/net/phy/phylink.c
         rm -f /tmp/phylink_block.txt
+        touch drivers/net/phy/phylink.c
         if grep -qF "trust SFP link" drivers/net/phy/phylink.c; then
             echo "### phylink.c: SFP in-band fallback injected"
         else
             echo "ERROR: phylink sed injection failed" >&2
         fi
-    else
-        echo "### phylink.c: SFP fallback already present"
-    fi
 fi
 # === end ls1046a-build patch-loop replacement ===
 """
