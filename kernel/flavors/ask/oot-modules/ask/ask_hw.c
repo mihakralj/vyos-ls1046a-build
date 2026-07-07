@@ -504,15 +504,29 @@ int ask_hw_offload_engage(u8 hw_port_id)
                 goto out_unlock;
         }
 
-        /* Build + arm FE-VM pipeline via exported PCD API (Phase 2a, 2026-07-07).
-         * Replaces the debugfs bridge with direct fman_pcd_offload_engage()
-         * call — no filp_open/kernel_write, port-aware via hw_port_id. */
-        rc = fman_pcd_offload_engage(h->fman, hw_port_id);
-        if (rc) {
-                ask_pr_err("hw: offload engage failed on port 0x%02x: %d\n",
-                           hw_port_id, rc);
-                goto out_unlock;
+        /* Build FE-VM pipeline via debugfs bridge + CC graft via API.
+         * The FE-VM chain (pool/singletons/ehash/hashfe/enq/enter/arm)
+         * does not yet have exported API equivalents; keep the debugfs
+         * bridge for now.  The fman_pcd_offload_engage() API only handles
+         * the CC static-tree graft (Phase 1), not the FE-VM (Phase 2).
+         * Once FE-VM builders are exported (P3.3), this becomes a single
+         * fman_pcd_fe_vm_arm() call. */
+        {
+                char buf[64];
+                int n;
+
+                debugfs_fe_write("fe_pool", "get", 3);
+                debugfs_fe_write("fe_singletons", "build", 5);
+                debugfs_fe_write("fe_ehash", "set 0x7FFF 12 0", 16);
+                debugfs_fe_write("fe_hashfe", "build", 5);
+                debugfs_fe_write("fe_enq", "build 0x200", 11);
+                n = snprintf(buf, sizeof(buf), "build 0x%02x", hw_port_id);
+                debugfs_fe_write("fe_enter", buf, n);
+                n = snprintf(buf, sizeof(buf), "engage 0x%02x 0x59200", hw_port_id);
+                rc = debugfs_fe_write("fe_arm", buf, n);
         }
+        if (rc)
+                goto out_unlock;
 
         p->offload_engaged = true;
         ask_pr_info("hw: offload ENGAGED on port 0x%02x (S0->S1)\n", hw_port_id);
