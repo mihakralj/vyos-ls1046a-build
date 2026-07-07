@@ -509,8 +509,7 @@ int ask_hw_offload_engage(u8 hw_port_id)
          * call — no filp_open/kernel_write, port-aware via hw_port_id. */
         rc = fman_pcd_offload_engage(h->fman, hw_port_id);
         if (rc) {
-                ask_pr_err("hw: offload engage failed on port 0x%02x: %d
-",
+                ask_pr_err("hw: offload engage failed on port 0x%02x: %d\n",
                            hw_port_id, rc);
                 goto out_unlock;
         }
