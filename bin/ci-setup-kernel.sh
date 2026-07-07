@@ -1158,6 +1158,16 @@ if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     sed -i "s/0x1e00000080000000ULL/0x9e00000080000000ULL/" \
         drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
     echo "### dpaa_eth.c: OVFQ=1 injected (sed)"
+
+    # B0V=0: disable context_b writebacks for hardware-offloaded frames.
+    # With EBD=1 (FMan deallocates buffers in hardware), the QMan portal
+    # does not need to write buffer-release confirmations to context_b.
+    # cdx.ko uses hi=0x9a000000 (B0V=0); we follow suit.  Safe for
+    # non-offloaded TX because buffer-release confirmation goes through
+    # a separate TX_CONFIRM FQ, not context_b of the TX FQ.
+    sed -i "s/0x9e00000080000000ULL/0x9a00000080000000ULL/" \
+        drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+    echo "### dpaa_eth.c: B0V=0 injected (sed)"
 fi
 
 # Performance: deeper TX FQ taildrop (2MB -> 4MB) for 10G throughput.
