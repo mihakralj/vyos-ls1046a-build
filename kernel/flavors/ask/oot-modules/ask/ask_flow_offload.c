@@ -55,6 +55,8 @@
 #include <net/net_namespace.h>
 #include <net/netfilter/nf_flow_table.h>
 #include "include/ask_internal.h"
+#include <linux/fs.h>
+#include <linux/file.h>
 
 /*
  * Single-image OOT re-declares (board patches 0121 + 0104).
@@ -1019,6 +1021,29 @@ static __be32 ask_z11_other_src_v4(unsigned long cookie, int *out_dir,
 }
 
 /* ------------------------------------------------------------------------- */
+/* FE-VM debugfs flow insert helper (Phase 3, 2026-07-07) — converts ask_flow_key
+ * to FMan hash key (L4PDST+L4PSRC+IPDST+IPSRC) and writes fe_flow debugfs. */
+static void ask_debugfs_fe_flow_write(const struct ask_flow_key *key,
+                                       unsigned long enq_off)
+{
+        char buf[128];
+        u8 raw[12];
+        struct file *filp;
+        loff_t pos = 0;
+
+        raw[0] = (key->dport >> 8) & 0xff;   raw[1] = key->dport & 0xff;
+        raw[2] = (key->sport >> 8) & 0xff;   raw[3] = key->sport & 0xff;
+        memcpy(&raw[4], key->dst_ip, 4);     memcpy(&raw[8], key->src_ip, 4);
+
+        snprintf(buf, sizeof(buf), "add 0 %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X %lx",
+                 raw[0], raw[1], raw[2], raw[3], raw[4], raw[5],
+                 raw[6], raw[7], raw[8], raw[9], raw[10], raw[11], enq_off);
+
+        filp = filp_open("/sys/kernel/debug/fman_pcd/0/fe_flow", O_WRONLY, 0);
+        if (!IS_ERR(filp)) { kernel_write(filp, buf, strlen(buf), &pos); filp_close(filp, NULL); }
+}
+
+
 /* FLOW_CLS_* dispatch                                                        */
 /* ------------------------------------------------------------------------- */
 
@@ -1423,6 +1448,9 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                             f->cookie, hw_id,
                             ingress_dev ? netdev_name(ingress_dev) : "?", oif,
                             key.next_hop_mac, key.egress_mac);
+        /* Insert flow into FMan FE-VM ehash table (debugfs bridge, Phase 3). */
+        ask_debugfs_fe_flow_write(&key, 0);
+
         return 0;
 }
 
@@ -1455,6 +1483,7 @@ static int ask_flow_offload_destroy(struct flow_cls_offload *f)
                 return rc;
 
         ask_pr_dbg("flow_offload: DESTROY cookie=0x%lx\n", f->cookie);
+        ask_debugfs_fe_flow_write(NULL, 0); /* clear all */
         return 0;
 }
 
