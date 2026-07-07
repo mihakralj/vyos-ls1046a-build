@@ -58,6 +58,8 @@
 #include <linux/in.h>                   /* IPPROTO_TCP */
 #include <linux/unaligned.h>            /* get_unaligned_be32 */
 
+#include <linux/fsl/qman.h>          /* qman_alloc_fqid */
+#include <soc/fsl/qman.h>            /* QMAN_FQ_FLAG_NO_ENQUEUE */
 #include "include/ask_internal.h"
 #include "include/ask_fman_caps.h"      /* fman_cc_*, fman_hm_*, struct fman */
 
@@ -373,6 +375,26 @@ int ask_hw_pcd_bringup(void)
 
         ask_hw_pcd_inst = h;
 
+	/* P4.1: allocate dedicated QMan TX FQ for hardware direct-enqueue */
+	{
+		u32 fqid;
+		int rc = qman_alloc_fqid(&fqid);
+		if (rc == 0) {
+			struct qman_fq fq = { .fqid = fqid };
+			rc = qman_create_fq(fqid, QMAN_FQ_FLAG_NO_ENQUEUE, &fq);
+			if (rc == 0) {
+				h->dedicated_tx_fqid = fqid;
+				h->dedicated_fq_ready = true;
+				ask_pr_info("hw: dedicated TX FQ (fqid=0x%x)\n", fqid);
+			} else {
+				qman_release_fqid(fqid);
+				ask_pr_warn("hw: qman_create_fq(0x%x) failed rc=%d\n", fqid, rc);
+			}
+		} else {
+			ask_pr_warn("hw: qman_alloc_fqid failed rc=%d\n", rc);
+		}
+	}
+
         /*
          * Balance the of_find_device_by_node() reference.  fman_bind()
          * took its own get_device(), which we deliberately hold for the
@@ -397,6 +419,13 @@ void ask_hw_pcd_teardown(void)
                 return;
 
         ask_hw_pcd_inst = NULL;
+
+	/* P4.1: release dedicated TX FQ */
+	if (h->dedicated_fq_ready) {
+		qman_destroy_fq(h->dedicated_tx_fqid);
+		qman_release_fqid(h->dedicated_tx_fqid);
+		ask_pr_info("hw: dedicated TX FQ 0x%x released\n", h->dedicated_tx_fqid);
+	}
 
         /*
          * Drain any flow cookies that survived to teardown, releasing each
@@ -732,15 +761,25 @@ static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id)
  */
 static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
 {
-        struct net_device *dev;
-        int rc;
+	struct ask_hw_pcd *h = ask_hw_pcd_get();
 
-        dev = dev_get_by_index(&init_net, ifindex);
-        if (!dev)
-                return -ENODEV;
-        rc = dpaa_get_tx_fqid(dev, 0, fqid);
-        dev_put(dev);
-        return rc ? -ENODEV : 0;
+	/* P4.1: prefer dedicated TX FQ for hardware enqueue */
+	if (h && h->dedicated_fq_ready) {
+		*fqid = h->dedicated_tx_fqid;
+		return 0;
+	}
+
+	/* Fallback: mainline DPAA port TX FQID */
+	{
+		struct net_device *dev;
+		int rc;
+		dev = dev_get_by_index(&init_net, ifindex);
+		if (!dev)
+			return -ENODEV;
+		rc = dpaa_get_tx_fqid(dev, 0, fqid);
+		dev_put(dev);
+		return rc ? -ENODEV : 0;
+	}
 }
 
 int ask_hw_flow_insert(const struct ask_flow_key *key,
