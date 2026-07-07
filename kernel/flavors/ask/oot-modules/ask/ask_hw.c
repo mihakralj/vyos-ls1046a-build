@@ -48,6 +48,7 @@
 #include <linux/types.h>
 #include <linux/in.h>
 #include <linux/if_ether.h>
+#include <linux/kallsyms.h>
 #include <linux/kallsyms.h>             /* kallsyms_lookup_name for P4.1 */
 #include <linux/fsl/fman_pcd.h>
 #include <linux/netdevice.h>
