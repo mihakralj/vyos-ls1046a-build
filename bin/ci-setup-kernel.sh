@@ -1149,6 +1149,29 @@ if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     echo "### dpaa_eth.c: TC_SETUP_FT case injected (sed)"
 fi
 
+# Performance: OVFQ=1 on TX FQ context_a for FMan hardware direct enqueue.
+# OVFQ=1 means FMan uses the FQID from the ENQUEUE_PKT opcode operand
+# instead of the ICAD — required for the AC_CC FE/ehash HIT path.
+# B0V is kept at 1 (kernel TX confirmation safety — see plans/ASK2-
+# PERFORMANCE-MODERNIZATION.md §7 for the dedicated-FQ plan with B0V=0).
+if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    sed -i "s/0x1e00000080000000ULL/0x9e00000080000000ULL/" \
+        drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+    echo "### dpaa_eth.c: OVFQ=1 injected (sed)"
+fi
+
+# Performance: deeper TX FQ taildrop (2MB -> 4MB) for 10G throughput.
+# The 2MB default fills quickly at 10G line rate; 4MB gives more headroom
+# before QMan taildrop kicks in, reducing per-flow backpressure.
+if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
+    sed -i "s/#define DPAA_FQ_TD 0x200000/#define DPAA_FQ_TD 0x400000/" \
+        drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+    echo "### dpaa_eth.c: DPAA_FQ_TD=4MB injected (sed)"
+fi
+
+# Performance: deeper TX FQ taildrop (2MB -> 4MB) for 10G throughput.
+# The 2MB default fills quickly at 10G line rate; 4MB gives more headroom
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
