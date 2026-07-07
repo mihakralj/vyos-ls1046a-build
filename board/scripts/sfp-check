@@ -128,6 +128,81 @@ for sysnet in /sys/class/net/*; do
     fi
 done
 
+# ---------------------------------------------------------------------------
+# Phase 2: link health diagnostic for rollball/module ports
+# ---------------------------------------------------------------------------
+if [ "$found" -gt 0 ]; then
+    echo ""
+    echo "--- link health diagnostic ---"
+
+    kver=$(uname -r 2>/dev/null)
+    kver_major=$(echo "$kver" | cut -d. -f1)
+    kver_minor=$(echo "$kver" | cut -d. -f2)
+
+    has_phylink_issue=0
+
+    for sysnet in /sys/class/net/*; do
+        iface=$(basename "$sysnet")
+        case "$iface" in lo|tun*|tap*|veth*|br*|docker*|virbr*|vyos*) continue ;; esac
+
+        # Skip if not an SFP-capable interface (no EEPROM)
+        ethtool -m "$iface" >/dev/null 2>&1 || continue
+
+        link=$(ethtool "$iface" 2>/dev/null | grep "Link detected" | grep -o "yes\|no")
+        port_type=$(ethtool "$iface" 2>/dev/null | grep "Port:" | awk '{print $2}')
+        speed=$(ethtool "$iface" 2>/dev/null | grep "Speed:" | awk '{print $2}')
+
+        # LOS GPIO: gpio-N for this interface.  The LOS pin name in the
+        # gpio debugfs dump is 'los' for xfi0 (eth3) and xfi1 (eth4).
+        los_state="?"
+        if [ -f /sys/kernel/debug/gpio ]; then
+            los_state=$(grep "los" /sys/kernel/debug/gpio 2>/dev/null | head -1 | grep -o "lo\|hi" | head -1)
+        fi
+
+        printf '\n    %-5s  link=%-3s  port=%-10s  speed=%-6s  los=%s\n' \
+            "$iface" "$link" "$port_type" "$speed" "$los_state"
+
+        # Detect the specific kernel-6.18 FMan in-band PCS sync issue:
+        #   - Link is DOWN
+        #   - Module is detected (ethtool -m succeeded)
+        #   - LOS is LOW (rollball PHY completed copper negotiation)
+        #   - Port type is TP or MII (quirk rewrote connector from SR fiber)
+        #   - Kernel >= 6.18 where FMan 10G MAC in-band PCS is known broken
+        #   - Phylink shows "inband/10gbase-r" in dmesg
+        if [ "$link" = "no" ] && [ "$los_state" = "lo" ]; then
+            # Check phylink mode
+            inband=$(dmesg 2>/dev/null | grep "$iface.*configuring for" | grep "inband" | tail -1)
+            if [ -n "$inband" ]; then
+                printf '    \033[33m[DIAG]\033[m  LOS deasserted (signal present) but link DOWN.\n'
+                printf '           Phylink mode: inband/10gbase-r — FMan 10G MAC in-band\n'
+                printf '           PCS sync is broken on kernel %s.\n' "$kver"
+                # Check DTS for managed property
+                of_node=$(readlink "/sys/class/net/$iface/device/of_node" 2>/dev/null | xargs basename)
+                if [ -f "/proc/device-tree/soc/fman@1a00000/$of_node/managed" ]; then
+                    managed=$(tr -d '\0' < "/proc/device-tree/soc/fman@1a00000/$of_node/managed" 2>/dev/null)
+                    printf '           DTS: managed="%s" on %s.\n' "$managed" "$of_node"
+                fi
+                printf '           Fix: change DTS to fixed-link { speed = <10000>; full-duplex; };\n'
+                printf '           (bypasses broken in-band PCS sync, SFP LOS still monitored)\n'
+                has_phylink_issue=1
+            else
+                # LOS LOW, link down, but NOT inband — some other issue
+                printf '    [DIAG]  LOS deasserted but link DOWN (non-inband phylink mode — investigate)\n'
+            fi
+        fi
+    done
+
+    if [ "$has_phylink_issue" -eq 1 ]; then
+        echo ""
+        echo "  --- action required ---"
+        echo "  The DTS currently uses managed=\"in-band-status\" on one or more"
+        echo "  10G SFP+ ports.  Kernel $kver FMan 10G MAC in-band PCS sync is"
+        echo "  broken for rollball-copper modules.  Switch to fixed-link in the"
+        echo "  DTS (board/dtb/mono-gateway-dk.dts) to force link up regardless"
+        echo "  of PCS state.  The SFP cage (LOS, TX_DISABLE) is still monitored."
+    fi
+fi
+
 if [ "$found" = 0 ]; then
     echo "No SFP/SFP+ modules detected (all cages empty, or interfaces lack ethtool -m support)." >&2
     exit 1
