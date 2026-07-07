@@ -99,7 +99,7 @@ pre_build_hook = '''
 [MAIN]
 ignore-patterns=.*\\.graphql$,.*\\.tmpl$
 [MESSAGES CONTROL]
-disable=E0606,E1111
+disable=E0606,E0611,E1111
 PYLINTRC
   patch_fail=0
   # Drop a .gitattributes that wires Mergiraf as the merge driver for
