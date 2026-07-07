@@ -1,0 +1,38 @@
+From: VyOS LS1046A maintainers
+Subject: [PATCH 0147] dpaa: handle TC_SETUP_FT in ndo_setup_tc for nft flowtable offload
+
+Root cause: nft 'flags offload' -> nf_flow_table_offload_setup() sees that
+the DPAA1 netdev has ndo_setup_tc (from board patch 0104) and takes the
+nf_flow_table_offload_cmd() path, which calls ndo_setup_tc(dev, TC_SETUP_FT).
+But dpaa_setup_tc() only handles TC_SETUP_QDISC_MQPRIO and TC_SETUP_BLOCK;
+TC_SETUP_FT falls through to default -> -EOPNOTSUPP.
+
+Fix: route TC_SETUP_FT to the existing dpaa_setup_tc_block() handler, which
+already understands flow_block_cb_alloc/add/remove via the upstream flow_block
+infrastructure. The two tc_setup_type enums are semantically identical for
+flowtable block binds (nft flowtables use CLSACT_INGRESS binder on kernel 6.18,
+which dpaa_setup_tc_block() already accepts).
+
+Required for: CONFIG_NF_FLOW_TABLE_OFFLOAD=m (board commit 8d37d54) to
+unblock the kernel->ask.ko REPLACE handler trigger chain.
+
+Signed-off-by: VyOS LS1046A maintainers
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ dpaa_setup_tc: add TC_SETUP_FT case @@
+ static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
+ 			 void *type_data)
+ {
+ 	switch (type) {
+ 	case TC_SETUP_QDISC_MQPRIO:
+ 		return dpaa_setup_tc_mqprio(net_dev, type_data);
+ 	case TC_SETUP_BLOCK:
+ 		return dpaa_setup_tc_block(net_dev, type_data);
++	case TC_SETUP_FT:
++		return dpaa_setup_tc_block(net_dev, type_data);
+ 	default:
+ 		return -EOPNOTSUPP;
+ 	}
+ }
