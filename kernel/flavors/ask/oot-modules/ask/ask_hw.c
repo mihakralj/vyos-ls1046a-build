@@ -48,6 +48,7 @@
 #include <linux/types.h>
 #include <linux/in.h>
 #include <linux/if_ether.h>
+#include <linux/fsl/fman_pcd.h>
 #include <linux/netdevice.h>
 #include <linux/rcupdate.h>
 #include <linux/xarray.h>
@@ -503,16 +504,16 @@ int ask_hw_offload_engage(u8 hw_port_id)
                 goto out_unlock;
         }
 
-        /* Build FE-VM pipeline via debugfs bridge (Phase 2, 2026-07-06). */
-        debugfs_fe_write("fe_pool", "get", 3);
-        debugfs_fe_write("fe_singletons", "build", 5);
-        debugfs_fe_write("fe_ehash", "set 0x7FFF 12 0", 16);
-        debugfs_fe_write("fe_hashfe", "build", 5);
-        debugfs_fe_write("fe_enq", "build 0x200", 11);
-        debugfs_fe_write("fe_enter", "build 0x10", 10);
-        rc = debugfs_fe_write("fe_arm", "engage 0x10 0x59200", 19);
-        if (rc)
+        /* Build + arm FE-VM pipeline via exported PCD API (Phase 2a, 2026-07-07).
+         * Replaces the debugfs bridge with direct fman_pcd_offload_engage()
+         * call — no filp_open/kernel_write, port-aware via hw_port_id. */
+        rc = fman_pcd_offload_engage(h->fman, hw_port_id);
+        if (rc) {
+                ask_pr_err("hw: offload engage failed on port 0x%02x: %d
+",
+                           hw_port_id, rc);
                 goto out_unlock;
+        }
 
         p->offload_engaged = true;
         ask_pr_info("hw: offload ENGAGED on port 0x%02x (S0->S1)\n", hw_port_id);
@@ -546,14 +547,10 @@ void ask_hw_offload_disengage(u8 hw_port_id)
                 return;                 /* idempotent no-op */
         }
 
-        /* Tear down FE-VM pipeline via debugfs bridge (Phase 2). */
-        debugfs_fe_write("fe_arm", "disengage 0x10", 14);
-        debugfs_fe_write("fe_enter", "clear", 5);
-        debugfs_fe_write("fe_enq", "clear", 5);
-        debugfs_fe_write("fe_hashfe", "clear", 5);
-        debugfs_fe_write("fe_ehash", "clear", 5);
-        debugfs_fe_write("fe_singletons", "clear", 5);
-        debugfs_fe_write("fe_pool", "put", 3);
+        /* Tear down FE-VM pipeline via exported PCD API (Phase 2a, 2026-07-07).
+         * Replaces the debugfs bridge with direct fman_pcd_offload_disengage()
+         * call — port-aware via hw_port_id. */
+        fman_pcd_offload_disengage(h->fman, hw_port_id);
         p->offload_engaged = false;
         mutex_unlock(&h->lock);
         ask_pr_info("hw: offload DISENGAGED on port 0x%02x (S1->S0)\n", hw_port_id);
