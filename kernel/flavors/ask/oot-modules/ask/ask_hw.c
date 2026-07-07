@@ -58,8 +58,6 @@
 #include <linux/in.h>                   /* IPPROTO_TCP */
 #include <linux/unaligned.h>            /* get_unaligned_be32 */
 
-#include <linux/fsl/qman.h>          /* qman_alloc_fqid */
-#include <soc/fsl/qman.h>            /* QMAN_FQ_FLAG_NO_ENQUEUE */
 #include "include/ask_internal.h"
 #include "include/ask_fman_caps.h"      /* fman_cc_*, fman_hm_*, struct fman */
 
@@ -80,6 +78,17 @@ struct fman_port *dpaa_get_rx_fman_port(struct net_device *dev);
 u8 fman_port_get_id(struct fman_port *port);
 int fman_port_set_silicon_hit_release_all(struct fman *fm, bool enable);
 int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
+
+/* P4.1: QMan FQID alloc/release — locally redeclared because
+ * linux/fsl/qman.h is not in the Debian headers package.
+ * qman_alloc_fqid() returns an unused FQID from QMan's pool;
+ * qman_release_fqid() returns it.  No FQ creation is needed —
+ * the global OVFQ=1/B0V=0 sed injection already sets context_a
+ * on all FQIDs, and the FMan CC tree's ACTION_DESCRIPTOR
+ * writes directly to the QMan FQ in hardware (no CPU dequeue).
+ */
+int qman_alloc_fqid(u32 *fqid);
+void qman_release_fqid(u32 fqid);
 
 /*
  * QEF blob structural constants (PR13). The microcode version
@@ -375,21 +384,18 @@ int ask_hw_pcd_bringup(void)
 
         ask_hw_pcd_inst = h;
 
-	/* P4.1: allocate dedicated QMan TX FQ for hardware direct-enqueue */
+	/* P4.1: allocate dedicated QMan TX FQID for hardware direct-enqueue.
+	 * The global OVFQ=1/B0V=0 sed injection already sets context_a on all
+	 * FQIDs; no qman_create_fq is needed — the FMan CC tree writes directly
+	 * to this FQID via the ACTION_DESCRIPTOR in hardware.
+	 */
 	{
 		u32 fqid;
 		int rc = qman_alloc_fqid(&fqid);
 		if (rc == 0) {
-			struct qman_fq fq = { .fqid = fqid };
-			rc = qman_create_fq(fqid, QMAN_FQ_FLAG_NO_ENQUEUE, &fq);
-			if (rc == 0) {
-				h->dedicated_tx_fqid = fqid;
-				h->dedicated_fq_ready = true;
-				ask_pr_info("hw: dedicated TX FQ (fqid=0x%x)\n", fqid);
-			} else {
-				qman_release_fqid(fqid);
-				ask_pr_warn("hw: qman_create_fq(0x%x) failed rc=%d\n", fqid, rc);
-			}
+			h->dedicated_tx_fqid = fqid;
+			h->dedicated_fq_ready = true;
+			ask_pr_info("hw: dedicated TX FQID 0x%x\n", fqid);
 		} else {
 			ask_pr_warn("hw: qman_alloc_fqid failed rc=%d\n", rc);
 		}
@@ -420,11 +426,10 @@ void ask_hw_pcd_teardown(void)
 
         ask_hw_pcd_inst = NULL;
 
-	/* P4.1: release dedicated TX FQ */
+	/* P4.1: release dedicated TX FQID */
 	if (h->dedicated_fq_ready) {
-		qman_destroy_fq(h->dedicated_tx_fqid);
 		qman_release_fqid(h->dedicated_tx_fqid);
-		ask_pr_info("hw: dedicated TX FQ 0x%x released\n", h->dedicated_tx_fqid);
+		ask_pr_info("hw: dedicated TX FQID 0x%x released\n", h->dedicated_tx_fqid);
 	}
 
         /*
