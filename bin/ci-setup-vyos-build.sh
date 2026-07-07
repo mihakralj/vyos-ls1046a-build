@@ -364,10 +364,6 @@ cp board/scripts/99-ls1046a-quiet-console.conf "$CHROOT/etc/sysctl.d/99-ls1046a-
 ### Post-install helper: writes /boot/vyos.env + one-time U-Boot env setup
 mkdir -p "$CHROOT/usr/local/bin"
 cp board/scripts/vyos-postinstall "$CHROOT/usr/local/bin/vyos-postinstall"
-
-# ASK2 FE-VM offload engage/disengage script (board/scripts/vyos-offload-ask)
-cp board/scripts/vyos-offload-ask "$CHROOT/usr/local/bin/vyos-offload-ask"
-chmod 755 "$CHROOT/usr/local/bin/vyos-offload-ask"
 chmod +x "$CHROOT/usr/local/bin/vyos-postinstall"
 
 ### Systemd service for vyos-postinstall (from extracted data file)
@@ -649,7 +645,6 @@ chmod +x "$HOOKS/96-enable-services.chroot"
 # offload node) — observed on image 2026.06.16-2015 before this fix.
 cp data/hooks/97-ask-modules.chroot "$HOOKS/97-ask-modules.chroot"
 chmod +x "$HOOKS/97-ask-modules.chroot"
-
 echo "### staged 97-ask-modules.chroot for systemd-modules-load auto-load"
 
 echo "### vyos-build setup complete (FLAVOR=${FLAVOR:-default})"
