@@ -1097,8 +1097,11 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          * propagates into the replay path automatically — no separate
          * fix needed in ask_flow_pending_poll_fn().
          */
-        if (ingress_dev)
+        if (ingress_dev) {
+                pr_info_ratelimited("ask: flow_offload: PR14z19 IIF override key.iif=%d (from ingress_dev=%s) cookie=0x%lx\n",
+                                    ingress_dev->ifindex, netdev_name(ingress_dev), f->cookie);
                 key.iif = ingress_dev->ifindex;
+        }
 
         rc = ask_parse_action(f, &action_flags, &oif, &egress_dev);
         if (rc) {
@@ -1282,7 +1285,15 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
          * drops the pending entry instead of trying ask_flow_remove() on a
          * cookie that was never installed.
          */
+		/* PR14y BUG #2: ARP TOCTOU — neighbour resolved but evicted
+		 * before insert.  Deferred to pending queue; residual risk
+		 * of indefinite pinning if ARP churns.  M3 eviction policy
+		 * will age out entries stuck > 30 s and force SW path.
+		 */
         if (egress_dev && is_zero_ether_addr(key.next_hop_mac)) {
+                /* PR14y BUG #2: ARP TOCTOU — neighbour resolved but evicted
+                 * before insert.  Deferred pending; M3 eviction TBD.
+                 */
                 int qrc;
                 struct neighbour *n;
                 u32 dst_key = (__force u32)dst_ip;
