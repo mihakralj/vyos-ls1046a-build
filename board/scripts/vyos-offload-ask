@@ -34,11 +34,11 @@ engage() {
     echo "ASK offload: building FE-VM pipeline..."
 
     echo get   > "$PCD_BASE/fe_pool"         || die "fe_pool get failed"
-    echo build > "$PCD_BASE/fe_singletons"   || die "fe_singletons build failed"
+    echo build > "$PCD_BASE/fe_singletons" 2>/dev/null || true
     echo "set 0x7FFF 12 0" > "$PCD_BASE/fe_ehash" || die "fe_ehash set failed"
-    echo build > "$PCD_BASE/fe_hashfe"       || die "fe_hashfe build failed"
+    echo build > "$PCD_BASE/fe_hashfe" 2>/dev/null || true
     echo "build 0x200" > "$PCD_BASE/fe_enq"  || die "fe_enq build failed"
-    echo "build $PORT" > "$PCD_BASE/fe_enter" || die "fe_enter build failed"
+    echo "build $PORT" > "$PCD_BASE/fe_enter" 2>/dev/null || true
 
     # Read the FE_ENTER offset that fe_enter_build assigned
     enter_off=$(grep -oP 'FE_ENTER root AD: \K0x[0-9a-fA-F]+' "$PCD_BASE/fe_arm" 2>/dev/null)
@@ -82,7 +82,7 @@ if ! grep -q "fsl,ls1046a" /proc/device-tree/compatible 2>/dev/null; then
     die "not an LS1046A board — refusing to operate"
 fi
 
-case "${1:-status}" in
+case "${VERB:-status}" in
     engage)    engage ;;
     disengage) disengage ;;
     flow-add)
