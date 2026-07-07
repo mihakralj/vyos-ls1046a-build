@@ -1182,6 +1182,47 @@ fi
 # Performance: deeper TX FQ taildrop (2MB -> 4MB) for 10G throughput.
 # The 2MB default fills quickly at 10G line rate; 4MB gives more headroom
 
+# Fix dropped board patches: use sed injection instead of raw patch
+# (raw patch -p1 silently drops hunks when line numbers drift in kernel 6.18)
+
+# Patch 4009 equivalent: fix OEM SFP-10G-T quirk + add OEM SFP-10G-SR quirk
+if [ -f drivers/net/phy/sfp.c ]; then
+    # Change sfp_fixup_rollball_cc to sfp_fixup_fs_10gt for OEM SFP-10G-T
+    sed -i 's/SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_rollball_cc)/SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_fs_10gt)/' \
+        drivers/net/phy/sfp.c
+    # Add OEM SFP-10G-SR quirk entry (our modules report "SR" but are copper rollball)
+    sed -i '/SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_fs_10gt)/a\	SFP_QUIRK_F("OEM", "SFP-10G-SR", sfp_fixup_fs_10gt),' \
+        drivers/net/phy/sfp.c
+    echo "### sfp.c: OEM SFP-10G-T/SR rollball quirk injected (sed)"
+fi
+
+# Patch 4005 equivalent: phylink in-band SFP fallback (LS1046A XFI fix)
+if [ -f drivers/net/phy/phylink.c ]; then
+    # Writes a small Python script to /tmp and executes it. The script inserts
+    # an SFP-aware link fallback before the "If we have a phy, the \"up\" state"
+    # comment in phylink_resolve(). Uses a tempfile so we can use a clean heredoc
+    # without fighting shell-single-quote-vs-Python-triple-quote escaping.
+    cat > /tmp/phylink_fix.py << "PPEOF"
+import sys
+src = open("drivers/net/phy/phylink.c").read()
+# Unique anchor in phylink_resolve's MLO_AN_INBAND path
+marker = '/* If we have a phy, the "up" state'
+override = (
+    "\t\t\t/* VyOS: trust SFP link over PCS in INBAND mode (LS1046A XFI fix) */\n"
+    "\t\t\tif (!link_state.link && pl->sfp_bus)\n"
+    "\t\t\t\tlink_state.link = true;\n\n"
+    "\t\t\t"
+)
+new = src.replace(marker, override + marker, 1)
+if new == src:
+    print("ERROR: phylink anchor not found - upstream phylink_resolve changed", file=sys.stderr)
+    sys.exit(1)
+open("drivers/net/phy/phylink.c", "w").write(new)
+PPEOF
+    python3 /tmp/phylink_fix.py && rm -f /tmp/phylink_fix.py
+    echo "### phylink.c: SFP in-band fallback injected"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
