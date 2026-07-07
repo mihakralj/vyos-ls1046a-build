@@ -48,6 +48,7 @@
 #include <linux/types.h>
 #include <linux/in.h>
 #include <linux/if_ether.h>
+#include <linux/kallsyms.h>             /* kallsyms_lookup_name for P4.1 */
 #include <linux/fsl/fman_pcd.h>
 #include <linux/netdevice.h>
 #include <linux/rcupdate.h>
@@ -55,6 +56,7 @@
 #include <net/net_namespace.h>
 #include <linux/etherdevice.h>          /* is_zero_ether_addr */
 #include <linux/if_ether.h>             /* ETH_P_IP, ETH_ALEN */
+#include <linux/kallsyms.h>             /* kallsyms_lookup_name for P4.1 */
 #include <linux/in.h>                   /* IPPROTO_TCP */
 #include <linux/unaligned.h>            /* get_unaligned_be32 */
 
@@ -81,14 +83,17 @@ int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
 
 /* P4.1: QMan FQID alloc/release — locally redeclared because
  * linux/fsl/qman.h is not in the Debian headers package.
+/* P4.1: QMan symbols resolved dynamically via kallsyms_lookup_name()
+ * because Module.symvers in the headers package does not export them.
+ */
+static int (*ask_qman_alloc_fqid)(u32 *fqid);
+static void (*ask_qman_release_fqid)(u32 fqid);
  * qman_alloc_fqid() returns an unused FQID from QMan's pool;
  * qman_release_fqid() returns it.  No FQ creation is needed —
  * the global OVFQ=1/B0V=0 sed injection already sets context_a
  * on all FQIDs, and the FMan CC tree's ACTION_DESCRIPTOR
  * writes directly to the QMan FQ in hardware (no CPU dequeue).
  */
-int qman_alloc_fqid(u32 *fqid);
-void qman_release_fqid(u32 fqid);
 
 /*
  * QEF blob structural constants (PR13). The microcode version
@@ -351,6 +356,12 @@ int ask_hw_pcd_bringup(void)
 
         if (ask_hw_pcd_inst) {
                 ask_pr_dbg("hw: pcd bringup already done\n");
+
+	/* P4.1: resolve QMan symbols dynamically */
+	if (!ask_qman_alloc_fqid) {
+		ask_qman_alloc_fqid = (void *)kallsyms_lookup_name("qman_alloc_fqid");
+		ask_qman_release_fqid = (void *)kallsyms_lookup_name("qman_release_fqid");
+	}
                 return 0;
         }
 
@@ -393,7 +404,7 @@ int ask_hw_pcd_bringup(void)
 	 */
 	{
 		u32 fqid;
-		int rc = qman_alloc_fqid(&fqid);
+		int rc = -ENOSYS; if (ask_qman_alloc_fqid) rc = ask_qman_alloc_fqid(&fqid);
 		if (rc == 0) {
 			h->dedicated_tx_fqid = fqid;
 			h->dedicated_fq_ready = true;
@@ -430,7 +441,7 @@ void ask_hw_pcd_teardown(void)
 
 	/* P4.1: release dedicated TX FQID */
 	if (h->dedicated_fq_ready) {
-		qman_release_fqid(h->dedicated_tx_fqid);
+		if (ask_qman_release_fqid) ask_qman_release_fqid(h->dedicated_tx_fqid);
 		ask_pr_info("hw: dedicated TX FQID 0x%x released\n", h->dedicated_tx_fqid);
 	}
 
