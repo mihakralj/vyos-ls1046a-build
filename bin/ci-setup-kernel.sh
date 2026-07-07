@@ -890,6 +890,27 @@ if [ -d "${CWD}/lp5812" ]; then
   make olddefconfig
   echo "LP5812: injected into $LP5812_DIR (config forced)"
 fi
+
+# Fix silently-dropped board patches: use sed injection as a belt-and-
+# suspenders fallback for kernel 6.18+ where upstream line-number drift
+# can cause `git apply --3way` to resolve hunks differently than expected.
+#
+# 4009 (sfp.c): ensure OEM SFP-10G-T uses sfp_fixup_fs_10gt (not rollball_cc)
+# and add the OEM SFP-10G-SR entry (our modules report "SR" in EEPROM but are
+# copper rollball hardware — without this entry the kernel sees fiber SR,
+# phylink falls to FIXED mode, and the LOS-deasserted module never gets link).
+# Guard: only runs if 4009 patch didn't already add the SR entry (idempotent).
+if [ -f drivers/net/phy/sfp.c ]; then
+    # Change sfp_fixup_rollball_cc to sfp_fixup_fs_10gt for OEM SFP-10G-T
+    sed -i 's/SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_rollball_cc)/SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_fs_10gt)/' \
+        drivers/net/phy/sfp.c
+    # Add OEM SFP-10G-SR quirk entry if not already present
+    if ! grep -q 'SFP_QUIRK_F("OEM", "SFP-10G-SR", sfp_fixup_fs_10gt)' drivers/net/phy/sfp.c; then
+        sed -i '/SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_fs_10gt)/a\	SFP_QUIRK_F("OEM", "SFP-10G-SR", sfp_fixup_fs_10gt),' \
+            drivers/net/phy/sfp.c
+    fi
+    echo "### sfp.c: OEM SFP-10G-T/SR rollball quirk injected (sed)"
+fi
 INJECT_EOF
 
 # Insert injection block before "# Change name of Signing Cert" in build-kernel.sh
