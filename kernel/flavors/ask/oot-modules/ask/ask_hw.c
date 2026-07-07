@@ -166,6 +166,8 @@ struct ask_hw_pcd {
          * XA_FLAGS_ALLOC1 keeps cookie 0 as the "no HW backing" sentinel.
          */
         struct xarray   flow_cookies;
+	u32		dedicated_tx_fqid;	/* P4.1: dedicated TX FQID for HW enqueue */
+	bool		dedicated_fq_ready;	/* P4.1: FQ allocated */
 };
 
 static struct ask_hw_pcd *ask_hw_pcd_inst;
