@@ -831,6 +831,15 @@ index 0000000..d260f66
 +	for (i = 0; i < FM_KG_MAX_NUM_OF_SCHEMES; i++) {
 +		if (keygen->schemes[i].used &&
 +		    keygen->schemes[i].hw_port_id == hw_port_id) {
++			/*
++			 * Skip explicit-match schemes (match_vector != 0).
++			 * Policer and CC attach must target the RSS-hashing
++			 * scheme (match_vector==0) which is the only scheme
++			 * guaranteed to receive ALL port traffic.  Mutating
++			 * an explicit-match scheme would break its filter-rules.
++			 */
++			if (keygen->schemes[i].match_vector != 0)
++				continue;
 +			*id_out = (u8)i;
 +			return &keygen->schemes[i];
 +		}
