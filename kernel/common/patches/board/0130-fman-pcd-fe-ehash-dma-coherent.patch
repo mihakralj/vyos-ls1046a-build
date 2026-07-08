@@ -69,6 +69,7 @@ index 9e73ae3..0df6585 100644
 +	void *table_base;		/* DDR bucket array (dma_alloc_coherent) */
 +	dma_addr_t table_dma;		/* bus address of table_base (FE VM reads) */
 +	struct device *dev;		/* DMA device (fman_get_dev), for record alloc */
++	struct dma_pool *record_pool;	/* 256-B per-flow record pool (F-008) */
  	size_t table_size;
  	u32 hash_mask;
  	u8 key_size;
@@ -104,6 +105,13 @@ index 9e73ae3..0df6585 100644
  		goto err_put_buf;
  	}
 +	t->dev = dev;
++	t->record_pool = dma_pool_create("fe_flow_rec", dev,
++					 FMAN_EHASH_FLOW_REC_SIZE,
++					 FMAN_EHASH_FLOW_REC_SIZE, 0);
++	if (!t->record_pool) {
++		err = -ENOMEM;
++		goto err_free_table;
++	}
  	t->table_size = tablesize;
  	t->hash_mask = mask;
  	t->key_size = key_size;
@@ -126,6 +134,7 @@ index 9e73ae3..0df6585 100644
  {
  	list_del(&t->node);
  	fman_pcd_ehash_flow_drain(t);
++	dma_pool_destroy(t->record_pool);
 -	kfree(t->table_base);
 +	dma_free_coherent(t->dev, t->table_size, t->table_base, t->table_dma);
  	kfree(t);
@@ -180,9 +189,8 @@ index 9e73ae3..0df6585 100644
  
 -	/* A 256-byte kmalloc is 256-aligned (EN_EHASH_ENTRY_ALIGN). */
 -	r = kzalloc(FMAN_EHASH_FLOW_REC_SIZE, GFP_KERNEL);
-+	/* dma_alloc_coherent returns page-aligned, zeroed coherent DDR. */
-+	r = dma_alloc_coherent(t->dev, FMAN_EHASH_FLOW_REC_SIZE, &rdma,
-+			       GFP_KERNEL);
++	/* dma_pool: 256-B aligned, zeroed, without per-record page overhead. */
++	r = dma_pool_alloc(t->record_pool, GFP_KERNEL, &rdma);
  	if (!r) {
  		kfree(flow);
  		return -ENOMEM;
@@ -206,8 +214,7 @@ index 9e73ae3..0df6585 100644
  		*flow->bucket_h = flow->prev_head;
  		list_del(&flow->node);
 -		kfree(flow->record);
-+		dma_free_coherent(t->dev, FMAN_EHASH_FLOW_REC_SIZE,
-+				  flow->record, flow->record_dma);
++		dma_pool_free(t->record_pool, flow->record, flow->record_dma);
  		kfree(flow);
  	}
  }
