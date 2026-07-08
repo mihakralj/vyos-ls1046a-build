@@ -50,6 +50,11 @@ index 803b45d..9a4b709 100644
  	struct list_head fe_available;
  	struct list_head fe_enq;
  	int fe_refcount;
++	/* CCBS scaffold MURAM offsets — allocated on engage, freed on disengage. */
++	u32 fe_arm_off;
++	u32 fe_arm_match_off;
++	u32 fe_arm_ad_off;
+ 
 +	struct list_head fe_ports;	/* FmPortSetFESupport records (sec.4) */
  
  	struct dentry *debugfs_dir;

@@ -27,6 +27,11 @@ index 1fe3753..803b45d 100644
 +	struct list_head fe_enq;
 +	int fe_refcount;
 +
++	/* CCBS scaffold MURAM offsets — allocated on engage, freed on disengage. */
++	u32 fe_arm_off;
++	u32 fe_arm_match_off;
++	u32 fe_arm_ad_off;
+
  	struct dentry *debugfs_dir;
  };
  
