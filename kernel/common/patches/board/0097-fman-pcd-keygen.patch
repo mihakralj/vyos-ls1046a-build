@@ -762,11 +762,14 @@ index 0000000..d260f66
 +
 +	err = keygen_scheme_setup(keygen, (u8)scheme->id, true);
 +	if (err) {
-+		/* Roll back to the BMI-enqueue default on failure. */
++		/* Roll back to the BMI-enqueue default on failure.
++		 * Force used=true after rollback so the slot cannot be
++		 * re-allocated while still bound to hardware (F-003). */
 +		slot->next_engine    = 0;
 +		slot->cc_base_offset = 0;
 +		slot->cc_bits_sel    = 0;
 +		(void)keygen_scheme_setup(keygen, (u8)scheme->id, true);
++		slot->used = true;
 +		mutex_unlock(lock);
 +		return err;
 +	}
@@ -877,6 +880,10 @@ index 0000000..d260f66
 +	 * are untouched, so the scheme keeps spreading conforming frames over
 +	 * the same hashed RX FQs while the next-engine now points at the
 +	 * policer profile.
++	 *
++	 * Save was_used so a double-failure on rollback can restore the
++	 * original used state — otherwise kg_alloc_scheme_id() may
++	 * re-allocate a slot still bound to hardware (F-003).
 +	 */
 +	slot->used = false;
 +	err = keygen_scheme_setup(keygen, id, true);
@@ -886,6 +893,14 @@ index 0000000..d260f66
 +		slot->policer_profile_id = saved_profile;
 +		slot->used = false;
 +		(void)keygen_scheme_setup(keygen, id, true);
++		/*
++		 * If the rollback also failed the scheme is in an indeterminate
++		 * hardware state but still bound to the slot.  Force used=true
++		 * so kg_alloc_scheme_id() cannot re-allocate this scheme to a
++		 * different consumer until the hardware is recovered (port
++		 * detach + scheme destroy).
++		 */
++		slot->used = true;
 +		mutex_unlock(lock);
 +		return err;
 +	}
