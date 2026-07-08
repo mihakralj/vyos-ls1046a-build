@@ -1,3 +1,27 @@
+
+## 2026-07-08 Status Update (Full Audit)
+
+### Audit summary (ask-check: 19/24 OK, 4 FAIL, 1 WARN)
+
+| Gate | Status | Notes |
+|------|--------|-------|
+| **M1 Reversibility** | ✅ **PASSED** (2026-07-08 04:23) | pcd-snapshot S0→S1→S0 cycle, 0 drift, MURAM used=0 after teardown |
+| **P4.1 Dedicated FQ** | ✅ **COMPILED+ALLOCATED** | FQID 0x2b9, qman_create_fq at bringup, resolve_oif_fqid connected |
+| **FE-VM engage** | ✅ **ENGAGED** | AC_CC FE_ENTER=0x54e00 on eth4 port 0x11 |
+| **M2 perf gate (automated)** | ❌ **BLOCKED** | nftables flowtable integration broke forwarding (permanent hook); 0 flows in fe_flow; throughput 1.4 Gbps shared-FQ ceiling |
+| **Flow offload automation** | ❌ **NOT INTEGRATED** | DebugFS fe_flow write requires 12-byte ehash key format; nftables path broken |
+| **ask_bridge.ko** | ❌ Stub (396B) | Not loaded |
+| **ESP/IPsec offload** | ❌ Stub (992B) | esp-hw-offload=off[fixed] |
+| **CLI** | ❌ Not started | vyos-offload-ask now in ISO (bf1ebe5) but set-system-offload-ask CLI absent |
+
+### Immediate next actions
+1. Debug SFP+ eth4 networking (intermittent failure post-engage/disengage cycle)
+2. Implement automated flow insertion via debugfs fe_flow (bypass nftables hook issue)
+3. Test M2 throughput with offloaded flows using dedicated TX FQ
+4. Rebuild ISO with all fixes (bf1ebe5 + f5bced7)
+
+---
+
 # ASK2 Forward Plan — 2026-07-06 → 2026-07-07
 
 **Status Update 2026-07-07:** M2 gate PASSED (7.37 Gbps / 0.16% CPU). NXP ASK
