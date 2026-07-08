@@ -1196,6 +1196,48 @@ if [ -f drivers/net/phy/sfp.c ]; then
     echo "### sfp.c: OEM SFP-10G-T/SR rollball quirk injected (sed)"
 fi
 
+# F-040/F-002: fman_pcd.c post-patch MURAM zeroing + leak fix.
+# These run after the "kernel post-patches" commit, before kernel compilation.
+# Uses sed with $'\t' for tabs (Python converts \t to a tab in build-kernel.sh).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    TAB=$'\t'
+
+    # F-002: Add file-scope statics before fe_arm_engage
+    sed -i "/^static int fman_pcd_fe_arm_engage(/i\\
+/* F-002: CCBS scaffold MURAM offsets — saved by engage, freed by disengage */\\
+static unsigned long fe_arm_muram_gro, fe_arm_muram_mto, fe_arm_muram_ato;\\
+static bool fe_arm_muram_valid;" \\
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+
+    # F-040: memset_io after MURAM vbase calls (gen_pool is never zeroed)
+    sed -i "/muram, gro);/a\\
+${TAB}${TAB}${TAB}${TAB}memset_io(c, 0, 256);" \\
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    sed -i "/muram, ato);/a\\
+${TAB}${TAB}${TAB}${TAB}memset_io(c, 0, 32);" \\
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+
+    # F-002: Save MURAM offsets after fe_enter_off = gro
+    sed -i "/fe_enter_off = gro;/a\\
+${TAB}${TAB}${TAB}${TAB}fe_arm_muram_gro = gro;\\
+${TAB}${TAB}${TAB}${TAB}fe_arm_muram_mto = mto;\\
+${TAB}${TAB}${TAB}${TAB}fe_arm_muram_ato = ato;\\
+${TAB}${TAB}${TAB}${TAB}fe_arm_muram_valid = true;" \\
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+
+    # F-002: Free MURAM in disengage before port_disarm_fe
+    sed -i "/fman_pcd_kg_port_disarm_fe(pcd, (u8)port_id, 0);/i\\
+${TAB}if (fe_arm_muram_valid) {\\
+${TAB}${TAB}fman_pcd_muram_free(pcd, fe_arm_muram_gro, 256);\\
+${TAB}${TAB}fman_pcd_muram_free(pcd, fe_arm_muram_mto, 16);\\
+${TAB}${TAB}fman_pcd_muram_free(pcd, fe_arm_muram_ato, 32);\\
+${TAB}${TAB}fe_arm_muram_valid = false;\\
+${TAB}}" \\
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+
+    echo "### fman_pcd.c: F-040 memset_io + F-002 MURAM-leak fixups applied (sed)"
+fi
+
 # === end ls1046a-build patch-loop replacement ===
 """
 
@@ -1212,78 +1254,6 @@ if n == 0:
 bk.write_text(new)
 print(f"### {bk}: patch loop replaced with git apply --3way (1 substitution)")
 PYEOF
-
-### F-040/F-002: Append MURAM zeroing + leak fix sed commands to build-kernel.sh
-# These run after all patches are applied, before kernel compilation.
-# Uses a guard marker so re-running ci-setup-kernel.sh is idempotent.
-if ! grep -q "# === F-040 MURAM zero-before-use fixup ===" \
-    "$KERNEL_BUILD/build-kernel.sh" 2>/dev/null; then
-    cat >> "$KERNEL_BUILD/build-kernel.sh" << 'MURAM_FIXUP_EOF'
-
-# === F-040 MURAM zero-before-use fixup + F-002 leak fix ===
-# F-040: gen_pool MURAM is NOT zeroed — hardware walker reads all bytes.
-#   Zero both group table (256B) and AD table (32B) blocks.
-# F-002: Disengage never freed the 304B (256+16+32) MURAM allocations.
-#   Store offsets in file-scope statics; free in reverse order on disengage.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 << 'MURAM_PYEOF'
-import sys
-path = "drivers/net/ethernet/freescale/fman/fman_pcd.c"
-with open(path) as f:
-    src = f.read()
-
-# F-002: Add file-scope statics before fe_arm_engage (match fn signature start)
-src = src.replace(
-    "static int fman_pcd_fe_arm_engage(",
-    "/* F-002: CCBS scaffold MURAM offsets — saved by engage, freed by disengage */\n"
-    "static unsigned long fe_arm_muram_gro, fe_arm_muram_mto, fe_arm_muram_ato;\n"
-    "static bool fe_arm_muram_valid;\n\n"
-    "static int fman_pcd_fe_arm_engage("
-)
-
-# F-040: Zero MURAM blocks after each muram_offset_to_vbase call
-src = src.replace(
-    "fman_muram_offset_to_vbase(muram, gro);\n\t\t\t\tiowrite32be(0x40000000",
-    "fman_muram_offset_to_vbase(muram, gro);\n\t\t\t\tmemset_io(c, 0, 256);\n\t\t\t\tiowrite32be(0x40000000"
-)
-src = src.replace(
-    "fman_muram_offset_to_vbase(muram, ato);\n\t\t\t\tiowrite32be(0x00000200",
-    "fman_muram_offset_to_vbase(muram, ato);\n\t\t\t\tmemset_io(c, 0, 32);\n\t\t\t\tiowrite32be(0x00000200"
-)
-
-# F-002: Save offsets after fe_enter_off = gro (inside the if-block)
-src = src.replace(
-    "\t\t\t\tfe_enter_off = gro;\n",
-    "\t\t\t\tfe_enter_off = gro;\n"
-    "\t\t\t\tfe_arm_muram_gro = gro;\n"
-    "\t\t\t\tfe_arm_muram_mto = mto;\n"
-    "\t\t\t\tfe_arm_muram_ato = ato;\n"
-    "\t\t\t\tfe_arm_muram_valid = true;\n"
-)
-
-# F-002: Free MURAM in disengage before port_disarm_fe
-src = src.replace(
-    "\tfman_pcd_kg_port_disarm_fe(pcd, (u8)port_id, 0);\n",
-    "\tif (fe_arm_muram_valid) {\n"
-    "\t\tfman_pcd_muram_free(pcd, fe_arm_muram_gro, 256);\n"
-    "\t\tfman_pcd_muram_free(pcd, fe_arm_muram_mto, 16);\n"
-    "\t\tfman_pcd_muram_free(pcd, fe_arm_muram_ato, 32);\n"
-    "\t\tfe_arm_muram_valid = false;\n"
-    "\t}\n"
-    "\tfman_pcd_kg_port_disarm_fe(pcd, (u8)port_id, 0);\n"
-)
-
-with open(path, "w") as f:
-    f.write(src)
-print("### fman_pcd.c: F-040 memset_io + F-002 MURAM-leak fixups applied (Python)")
-MURAM_PYEOF
-    echo "### fman_pcd.c: patches complete"
-fi
-MURAM_FIXUP_EOF
-    echo "### build-kernel.sh: F-040/F-002 MURAM fixup block appended"
-else
-    echo "### build-kernel.sh: F-040/F-002 MURAM fixup already present — skipping"
-fi
 
 ### PR14z2 fix #4 (v2): persistent signing key + post-build snapshot from headers .deb
 #
