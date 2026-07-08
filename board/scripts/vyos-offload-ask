@@ -37,7 +37,16 @@ engage() {
     echo build > "$PCD_BASE/fe_singletons" 2>/dev/null || true
     echo "set 0x7FFF 12 0" > "$PCD_BASE/fe_ehash" || die "fe_ehash set failed"
     echo build > "$PCD_BASE/fe_hashfe" 2>/dev/null || true
-    echo "build 0x200" > "$PCD_BASE/fe_enq"  || die "fe_enq build failed"
+    # P4.1: use the dedicated TX FQ when available (requires BMan pool
+    # setup in ask.ko P4.1 bringup).  Falls back to default per-port FQ 0x200.
+    # TODO: uncomment the DEDICATED_FQ block once BMan pool is wired.
+    ENQ_FQID="0x200"
+    # DEDICATED_FQ=$(dmesg 2>/dev/null | grep -oP "dedicated TX FQ 0x[0-9a-fA-F]+" | tail -1 | grep -oP "0x[0-9a-fA-F]+" || echo "")
+    # if [ -n "$DEDICATED_FQ" ]; then
+    #     ENQ_FQID=$(echo "$DEDICATED_FQ" | sed "s/0x//")
+    #     echo "ASK offload: using dedicated TX FQ $DEDICATED_FQ"
+    # fi
+    echo "build $ENQ_FQID" > "$PCD_BASE/fe_enq"  || die "fe_enq build failed" 
     echo "build $PORT" > "$PCD_BASE/fe_enter" 2>/dev/null || true
 
     # Read the FE_ENTER offset that fe_enter_build assigned
