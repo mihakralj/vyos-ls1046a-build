@@ -83,4 +83,6 @@ KVER=$(awk '/^VERSION/{v=$3} /^PATCHLEVEL/{p=$3} /^SUBLEVEL/{s=$3} END{print v".
 [[ "$KVER" == "$VERSION" ]] || warn "Makefile reports $KVER, expected $VERSION"
 
 ok "kernel ready: ${SRCDIR} (${KVER})"
-exit "$STATE_RC"
+# fetch_state_write returns 10 on "new" (successful download, not an error)
+# Always exit 0 since download+extraction succeeded
+exit 0
