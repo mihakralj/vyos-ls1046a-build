@@ -1197,42 +1197,26 @@ if [ -f drivers/net/phy/sfp.c ]; then
 fi
 
 # F-040/F-002: fman_pcd.c post-patch MURAM zeroing + leak fix.
-# These run after the "kernel post-patches" commit, before kernel compilation.
-# Uses sed with $'\t' for tabs (Python converts \t to a tab in build-kernel.sh).
+# Pattern: uses \t/\n in sed a\/i\ text (Python converts to real tab/newline,
+# same pattern as the TC_SETUP_FT sed at line 1147).  No bash line-continuation.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    TAB=$'\t'
-
-    # F-002: Add file-scope statics before fe_arm_engage
-    sed -i "/^static int fman_pcd_fe_arm_engage(/i\\
-/* F-002: CCBS scaffold MURAM offsets — saved by engage, freed by disengage */\\
-static unsigned long fe_arm_muram_gro, fe_arm_muram_mto, fe_arm_muram_ato;\\
-static bool fe_arm_muram_valid;" \\
+    # F-002: Add file-scope statics before fe_arm_engage (insert-before)
+    sed -i "/^static int fman_pcd_fe_arm_engage(/i\/* F-002: CCBS scaffold MURAM offsets — saved by engage, freed by disengage */\nstatic unsigned long fe_arm_muram_gro, fe_arm_muram_mto, fe_arm_muram_ato;\nstatic bool fe_arm_muram_valid;\n" \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
 
-    # F-040: memset_io after MURAM vbase calls (gen_pool is never zeroed)
-    sed -i "/muram, gro);/a\\
-${TAB}${TAB}${TAB}${TAB}memset_io(c, 0, 256);" \\
+    # F-040: Zero MURAM before HW walker reads it.  s/ matches the first
+    # iowrite32be after each vbase call; & re-inserts it after memset_io.
+    sed -i "s/\t\t\t\tiowrite32be(0x40000000/\t\t\t\tmemset_io(c, 0, 256);\n&/" \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
-    sed -i "/muram, ato);/a\\
-${TAB}${TAB}${TAB}${TAB}memset_io(c, 0, 32);" \\
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-
-    # F-002: Save MURAM offsets after fe_enter_off = gro
-    sed -i "/fe_enter_off = gro;/a\\
-${TAB}${TAB}${TAB}${TAB}fe_arm_muram_gro = gro;\\
-${TAB}${TAB}${TAB}${TAB}fe_arm_muram_mto = mto;\\
-${TAB}${TAB}${TAB}${TAB}fe_arm_muram_ato = ato;\\
-${TAB}${TAB}${TAB}${TAB}fe_arm_muram_valid = true;" \\
+    sed -i "s/\t\t\t\tiowrite32be(0x00000200/\t\t\t\tmemset_io(c, 0, 32);\n&/" \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
 
-    # F-002: Free MURAM in disengage before port_disarm_fe
-    sed -i "/fman_pcd_kg_port_disarm_fe(pcd, (u8)port_id, 0);/i\\
-${TAB}if (fe_arm_muram_valid) {\\
-${TAB}${TAB}fman_pcd_muram_free(pcd, fe_arm_muram_gro, 256);\\
-${TAB}${TAB}fman_pcd_muram_free(pcd, fe_arm_muram_mto, 16);\\
-${TAB}${TAB}fman_pcd_muram_free(pcd, fe_arm_muram_ato, 32);\\
-${TAB}${TAB}fe_arm_muram_valid = false;\\
-${TAB}}" \\
+    # F-002: Save MURAM offsets after fe_enter_off = gro (append-after)
+    sed -i "/fe_enter_off = gro;/a\t\t\t\tfe_arm_muram_gro = gro;\n\t\t\t\tfe_arm_muram_mto = mto;\n\t\t\t\tfe_arm_muram_ato = ato;\n\t\t\t\tfe_arm_muram_valid = true;" \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+
+    # F-002: Free MURAM in disengage (insert-before, multi-line)
+    sed -i "/fman_pcd_kg_port_disarm_fe(pcd, (u8)port_id, 0);/i\tif (fe_arm_muram_valid) {\n\t\tfman_pcd_muram_free(pcd, fe_arm_muram_gro, 256);\n\t\tfman_pcd_muram_free(pcd, fe_arm_muram_mto, 16);\n\t\tfman_pcd_muram_free(pcd, fe_arm_muram_ato, 32);\n\t\tfe_arm_muram_valid = false;\n\t}\n" \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
 
     echo "### fman_pcd.c: F-040 memset_io + F-002 MURAM-leak fixups applied (sed)"
