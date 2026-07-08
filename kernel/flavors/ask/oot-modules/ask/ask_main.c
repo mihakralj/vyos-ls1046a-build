@@ -13,6 +13,7 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/kallsyms.h>
 #include <net/genetlink.h>
 
 #include "include/ask_internal.h"
@@ -108,7 +109,12 @@ static void __exit ask_exit(void)
 	ask_neigh_exit();
 ask_flow_exit();
 ask_stats_exit();
-ask_hw_exit();
+/* P4.1: release dedicated TX FQID */
+	if (ask_dedicated_fqid) {
+		void (*fn)(u32) = (void *)kallsyms_lookup_name("qman_release_fqid");
+		if (fn) fn(ask_dedicated_fqid);
+	}
+	ask_hw_exit();
 ask_pr_info("unloaded\n");
 }
 
@@ -120,3 +126,6 @@ MODULE_DESCRIPTION("ASK2 — NXP LS1046A FMan/210 hardware offload");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(ASK_DRV_VERSION_STR);
 MODULE_ALIAS_GENL_FAMILY("ask");
+/* P4.1: dedicated TX FQID — allocated at init via kallsyms. */
+u32 ask_dedicated_fqid;
+EXPORT_SYMBOL_GPL(ask_dedicated_fqid);
