@@ -148,4 +148,19 @@ EOF
 
 chmod 0644 /etc/profile.d/zz-vyatta-cfg-env.sh
 
+
+# Also ensure VyOS CLI paths are in the login shell PATH.
+# On standard VyOS, /opt/vyatta/bin and /opt/vyatta/sbin are
+# added via /etc/profile (which includes them in the default
+# PATH for interactive shells). Our build's Debian base profile
+# does not include them, so add a dedicated profile.d drop-in.
+cat > /etc/profile.d/zz-vyos-path.sh <<'EOF'
+# Add VyOS CLI paths for interactive shells
+if ! echo "$PATH" | grep -q /opt/vyatta/bin; then
+    PATH="/opt/vyatta/bin:/opt/vyatta/sbin:$PATH"
+    export PATH
+fi
+EOF
+chmod 0644 /etc/profile.d/zz-vyos-path.sh
+
 exit 0
