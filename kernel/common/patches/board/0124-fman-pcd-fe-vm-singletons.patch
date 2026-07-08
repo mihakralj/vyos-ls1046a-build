@@ -127,6 +127,16 @@ index 9a4b709..9d61c65 100644
 +		size = FMAN_FE_ENQ_SIZE;
 +		w[1] = p->nia;
 +		w[3] = (u32)p->next_fe_off;
++		/*
++		 * w[2] stays 0 (from the {} initialiser): on FMan v3 this
++		 * means "no per-FE context, BPID 0".  The ENQUEUE_PKT
++		 * opcode uses the port's pre-allocated RX buffer pool for the
++		 * enqueue destination and returns the buffer to BMan pool 0
++		 * (discard after TX).  This is correct for the TX-bypass
++		 * pathway where the FMan does not allocate a new buffer.
++		 * For a per‑flow statistics context set w[2] = ctx_off; for
++		 * a dedicated buffer-recycling pool set w[2] to its BPID.
++		 */
 +		break;
 +	case FMAN_FE_TYPE_MUX:
 +		size = FMAN_FE_MUX_SIZE;
