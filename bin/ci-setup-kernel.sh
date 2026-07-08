@@ -1197,29 +1197,10 @@ if [ -f drivers/net/phy/sfp.c ]; then
 fi
 
 # F-040/F-002: fman_pcd.c post-patch MURAM zeroing + leak fix.
-# Pattern: uses \t/\n in sed a\/i\ text (Python converts to real tab/newline,
-# same pattern as the TC_SETUP_FT sed at line 1147).  No bash line-continuation.
+# Base64-encoded Python fixer — no \t/\n escaping issues.
+# Decoded and executed inline during kernel build (after post-patches commit).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    # F-002: Add file-scope statics before fe_arm_engage (insert-before)
-    sed -i "/^static int fman_pcd_fe_arm_engage(/i\/* F-002: CCBS scaffold MURAM offsets — saved by engage, freed by disengage */\nstatic unsigned long fe_arm_muram_gro, fe_arm_muram_mto, fe_arm_muram_ato;\nstatic bool fe_arm_muram_valid;\n" \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-
-    # F-040: Zero MURAM before HW walker reads it.  s/ matches the first
-    # iowrite32be after each vbase call; & re-inserts it after memset_io.
-    sed -i "s/\t\t\t\tiowrite32be(0x40000000/\t\t\t\tmemset_io(c, 0, 256);\n&/" \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    sed -i "s/\t\t\t\tiowrite32be(0x00000200/\t\t\t\tmemset_io(c, 0, 32);\n&/" \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-
-    # F-002: Save MURAM offsets after fe_enter_off = gro (append-after)
-    sed -i "/fe_enter_off = gro;/a\t\t\t\tfe_arm_muram_gro = gro;\n\t\t\t\tfe_arm_muram_mto = mto;\n\t\t\t\tfe_arm_muram_ato = ato;\n\t\t\t\tfe_arm_muram_valid = true;" \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-
-    # F-002: Free MURAM in disengage (insert-before, multi-line)
-    sed -i "/fman_pcd_kg_port_disarm_fe(pcd, (u8)port_id, 0);/i\tif (fe_arm_muram_valid) {\n\t\tfman_pcd_muram_free(pcd, fe_arm_muram_gro, 256);\n\t\tfman_pcd_muram_free(pcd, fe_arm_muram_mto, 16);\n\t\tfman_pcd_muram_free(pcd, fe_arm_muram_ato, 32);\n\t\tfe_arm_muram_valid = false;\n\t}\n" \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-
-    echo "### fman_pcd.c: F-040 memset_io + F-002 MURAM-leak fixups applied (sed)"
+    echo 'aW1wb3J0IHN5cwpwYXRoID0gImRyaXZlcnMvbmV0L2V0aGVybmV0L2ZyZWVzY2FsZS9mbWFuL2ZtYW5fcGNkLmMiCndpdGggb3BlbihwYXRoKSBhcyBmOgogICAgc3JjID0gZi5yZWFkKCkKCiMgRi0wMDI6IEFkZCBmaWxlLXNjb3BlIHN0YXRpY3MgYmVmb3JlIGZlX2FybV9lbmdhZ2UKc3JjID0gc3JjLnJlcGxhY2UoCiAgICAic3RhdGljIGludCBmbWFuX3BjZF9mZV9hcm1fZW5nYWdlKCIsCiAgICAiLyogRi0wMDI6IENDQlMgc2NhZmZvbGQgTVVSQU0gb2Zmc2V0cyDigJQgc2F2ZWQgYnkgZW5nYWdlLCBmcmVlZCBieSBkaXNlbmdhZ2UgKi9cbiIKICAgICJzdGF0aWMgdW5zaWduZWQgbG9uZyBmZV9hcm1fbXVyYW1fZ3JvLCBmZV9hcm1fbXVyYW1fbXRvLCBmZV9hcm1fbXVyYW1fYXRvO1xuIgogICAgInN0YXRpYyBib29sIGZlX2FybV9tdXJhbV92YWxpZDtcblxuIgogICAgInN0YXRpYyBpbnQgZm1hbl9wY2RfZmVfYXJtX2VuZ2FnZSgiCikKCiMgRi0wNDA6IFplcm8gTVVSQU0gYmxvY2tzIOKAlCBwcmVwZW5kIG1lbXNldF9pbyBiZWZvcmUgZmlyc3QgaW93cml0ZTMyYmUKc3JjID0gc3JjLnJlcGxhY2UoCiAgICAiXHRcdFx0XHRpb3dyaXRlMzJiZSgweDQwMDAwMDAwIiwKICAgICJcdFx0XHRcdG1lbXNldF9pbyhjLCAwLCAyNTYpO1xuXHRcdFx0XHRpb3dyaXRlMzJiZSgweDQwMDAwMDAwIgopCnNyYyA9IHNyYy5yZXBsYWNlKAogICAgIlx0XHRcdFx0aW93cml0ZTMyYmUoMHgwMDAwMDIwMCIsCiAgICAiXHRcdFx0XHRtZW1zZXRfaW8oYywgMCwgMzIpO1xuXHRcdFx0XHRpb3dyaXRlMzJiZSgweDAwMDAwMjAwIgopCgojIEYtMDAyOiBTYXZlIG9mZnNldHMgYWZ0ZXIgZmVfZW50ZXJfb2ZmID0gZ3JvCnNyYyA9IHNyYy5yZXBsYWNlKAogICAgIlx0XHRcdFx0ZmVfZW50ZXJfb2ZmID0gZ3JvO1xuIiwKICAgICJcdFx0XHRcdGZlX2VudGVyX29mZiA9IGdybztcbiIKICAgICJcdFx0XHRcdGZlX2FybV9tdXJhbV9ncm8gPSBncm87XG4iCiAgICAiXHRcdFx0XHRmZV9hcm1fbXVyYW1fbXRvID0gbXRvO1xuIgogICAgIlx0XHRcdFx0ZmVfYXJtX211cmFtX2F0byA9IGF0bztcbiIKICAgICJcdFx0XHRcdGZlX2FybV9tdXJhbV92YWxpZCA9IHRydWU7XG4iCikKCiMgRi0wMDI6IEZyZWUgTVVSQU0gaW4gZGlzZW5nYWdlIGJlZm9yZSBwb3J0X2Rpc2FybV9mZQpzcmMgPSBzcmMucmVwbGFjZSgKICAgICJcdGZtYW5fcGNkX2tnX3BvcnRfZGlzYXJtX2ZlKHBjZCwgKHU4KXBvcnRfaWQsIDApO1xuIiwKICAgICJcdGlmIChmZV9hcm1fbXVyYW1fdmFsaWQpIHtcbiIKICAgICJcdFx0Zm1hbl9wY2RfbXVyYW1fZnJlZShwY2QsIGZlX2FybV9tdXJhbV9ncm8sIDI1Nik7XG4iCiAgICAiXHRcdGZtYW5fcGNkX211cmFtX2ZyZWUocGNkLCBmZV9hcm1fbXVyYW1fbXRvLCAxNik7XG4iCiAgICAiXHRcdGZtYW5fcGNkX211cmFtX2ZyZWUocGNkLCBmZV9hcm1fbXVyYW1fYXRvLCAzMik7XG4iCiAgICAiXHRcdGZlX2FybV9tdXJhbV92YWxpZCA9IGZhbHNlO1xuIgogICAgIlx0fVxuIgogICAgIlx0Zm1hbl9wY2Rfa2dfcG9ydF9kaXNhcm1fZmUocGNkLCAodTgpcG9ydF9pZCwgMCk7XG4iCikKCndpdGggb3BlbihwYXRoLCAidyIpIGFzIGY6CiAgICBmLndyaXRlKHNyYykKcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBGLTA0MCBtZW1zZXRfaW8gKyBGLTAwMiBNVVJBTS1sZWFrIGZpeHVwcyBhcHBsaWVkIChQeXRob24pIikK' | base64 -d | python3
 fi
 
 # === end ls1046a-build patch-loop replacement ===
