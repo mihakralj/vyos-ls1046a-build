@@ -1371,6 +1371,15 @@ if [ -n "$ASK_HEADERS_DEB" ] && [ -f "$ASK_KEY_PEM" ]; then
                "$ASK_KSRC/include/soc/fsl/qman.h"
             echo "I: ASK2 v2 — copied include/soc/fsl/qman.h into snapshot"
         fi
+        # P4.1a: copy include/soc/fsl/bman.h (BMan buffer-pool API) into the
+        # snapshot so OOT ask.ko can allocate a dedicated BMan pool for the
+        # hardware-enqueued TX FQ (future — BPID currently defaults to 0).
+        if [ -f "${CWD}/${KERNEL_DIR}/include/soc/fsl/bman.h" ]; then
+            mkdir -p "$ASK_KSRC/include/soc/fsl"
+            cp "${CWD}/${KERNEL_DIR}/include/soc/fsl/bman.h" \
+               "$ASK_KSRC/include/soc/fsl/bman.h"
+            echo "I: ASK2 v2 — copied include/soc/fsl/bman.h into snapshot"
+        fi
         touch "$ASK_SNAP_DIR/.done"
         echo "I: ASK2 v2 — snapshot ready: $ASK_SNAP_DIR/ksrc -> $ASK_KSRC"
         ls -la "$ASK_KSRC/Module.symvers" "$ASK_KSRC/scripts/sign-file" "$ASK_KSRC/certs/signing_key.pem" 2>&1 || true
