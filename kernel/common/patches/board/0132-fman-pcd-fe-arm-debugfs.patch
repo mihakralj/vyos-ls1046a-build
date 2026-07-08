@@ -80,6 +80,22 @@ index 0fb8c0a..d58feb6 100644
 +			ato = fman_pcd_muram_alloc(pcd, 32);
 +			if (!IS_ERR_VALUE(gro) && !IS_ERR_VALUE(mto) && !IS_ERR_VALUE(ato)) {
 +				void __iomem *c;
++				/*
++				 * MURAM is iomem and gen_pool does NOT zero on
++				 * alloc (invariant per 0126).  memset_io the full
++				 * regions first so the silicon never reads stale
++				 * MURAM content from unwritten words.  Under
++				 * CONFIG_KASAN_GENERIC=y plain memset() on iomem
++				 * triggers a shadow-page fault — always use the
++				 * _io variant for MURAM pointers.
++				 */
++				c = (void __iomem *)fman_muram_offset_to_vbase(muram, gro);
++				memset_io(c, 0, 256);
++				c = (void __iomem *)fman_muram_offset_to_vbase(muram, mto);
++				memset_io(c, 0, 16);
++				c = (void __iomem *)fman_muram_offset_to_vbase(muram, ato);
++				memset_io(c, 0, 32);
++
 +				c = (void __iomem *)fman_muram_offset_to_vbase(muram, gro);
 +				iowrite32be((mto & 0xFFFFFF), c + 0);
 +				iowrite32be((ato & 0xFFFFFF), c + 4);

@@ -175,6 +175,7 @@ index 803b45d..9a4b709 100644
 +		goto err_pool;
 +	}
 +	mgmt_v = (void __iomem *)fman_muram_offset_to_vbase(muram, mgmt_off);
++	memset_io(mgmt_v, 0, mgmt_size);
 +	iowrite32be((u32)aligned_off, mgmt_v);		/* [0..3] pool off (BE) */
 +	iowrite8(4, mgmt_v);				/* [0] read index = 4 */
 +	for (i = 0; i < total_tnums; i++)
