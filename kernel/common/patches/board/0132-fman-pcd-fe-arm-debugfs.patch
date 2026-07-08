@@ -289,14 +289,6 @@ index aed5d84..c28a045 100644
 +	rxport = fman_port_lookup_rx(fman, hw_port_id);
 +	if (rxport)
 +		(void)fman_port_set_cc_base(rxport, 0);
-+	/*
-+	 * Restore the original RSS scheme. detach_cc sets next_engine=0
-+	 * (KG_DFLT_NIA path), which is correct for ports that were RSS
-+	 * before arm_fe. saved_engine is preserved for audit but not
-+	 * directly programmed here because detach_cc handles the full
-+	 * scheme reset (next_engine, cc_base_offset, cc_bits_sel, used)
-+	 * via keygen_scheme_setup.
-+	 */
 +	(void)fman_pcd_kg_port_detach_cc(pcd, hw_port_id);
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_kg_port_disarm_fe);
