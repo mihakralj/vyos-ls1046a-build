@@ -1363,6 +1363,14 @@ if [ -n "$ASK_HEADERS_DEB" ] && [ -f "$ASK_KEY_PEM" ]; then
                    "$ASK_KSRC/include/linux/fsl/" 2>&1 | tail -5 || true
             echo "I: ASK2 v2 — copied include/linux/fsl/ headers into snapshot"
         fi
+        # P4.1: copy include/soc/fsl/qman.h (QMan FQ allocation API) into the
+        # snapshot so the OOT ask.ko can allocate its dedicated TX FQ.
+        if [ -f "${CWD}/${KERNEL_DIR}/include/soc/fsl/qman.h" ]; then
+            mkdir -p "$ASK_KSRC/include/soc/fsl"
+            cp "${CWD}/${KERNEL_DIR}/include/soc/fsl/qman.h" \
+               "$ASK_KSRC/include/soc/fsl/qman.h"
+            echo "I: ASK2 v2 — copied include/soc/fsl/qman.h into snapshot"
+        fi
         touch "$ASK_SNAP_DIR/.done"
         echo "I: ASK2 v2 — snapshot ready: $ASK_SNAP_DIR/ksrc -> $ASK_KSRC"
         ls -la "$ASK_KSRC/Module.symvers" "$ASK_KSRC/scripts/sign-file" "$ASK_KSRC/certs/signing_key.pem" 2>&1 || true
