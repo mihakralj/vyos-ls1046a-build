@@ -300,6 +300,7 @@ index d260f66..aed5d84 100644
 +		slot->cc_bits_sel    = saved_ccbs;
 +		slot->used = false;
  		(void)keygen_scheme_setup(keygen, (u8)scheme->id, true);
+ 		slot->used = true;
  		mutex_unlock(lock);
  		return err;
 @@ -586,3 +596,104 @@ int fman_pcd_kg_port_detach_policer(struct fman_pcd *pcd, u8 hw_port_id)
