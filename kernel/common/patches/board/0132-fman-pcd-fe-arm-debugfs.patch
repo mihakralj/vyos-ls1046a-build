@@ -69,16 +69,16 @@ index 0fb8c0a..d58feb6 100644
 +	/* 0150: CCBS scaffold — CONT_LOOKUP AD + match table + AD table (MURAM).
 +	 * Implements ask20-HW-PROVEN KGSE_CCBS implicit CC walk (RM 8.7.4.1).
 +	 * With numKeys=0, all frames miss→ENQ to default FQ 0x200.
-+	 * MURAM: 256+16+32 = 304B. Disengage does NOT free.
++	 * MURAM: 256+16+32 = 304B. Saved to pcd, freed on disengage.
 +	 */
 +	{
 +		struct muram_info *muram = fman_get_muram(pcd->fman);
-+		u32 gro, mto, ato;
++		unsigned long gro, mto, ato;
 +		if (muram) {
 +			gro = fman_pcd_muram_alloc(pcd, 256);
 +			mto = fman_pcd_muram_alloc(pcd, 16);
 +			ato = fman_pcd_muram_alloc(pcd, 32);
-+			if (gro && mto && ato) {
++			if (!IS_ERR_VALUE(gro) && !IS_ERR_VALUE(mto) && !IS_ERR_VALUE(ato)) {
 +				void __iomem *c;
 +				c = (void __iomem *)fman_muram_offset_to_vbase(muram, gro);
 +				iowrite32be((mto & 0xFFFFFF), c + 0);
@@ -95,6 +95,9 @@ index 0fb8c0a..d58feb6 100644
 +				iowrite32be(0, c + 24);
 +				iowrite32be(0, c + 28);
 +				fe_enter_off = gro;
++				pcd->fe_arm_off = (u32)gro;
++				pcd->fe_arm_match_off = (u32)mto;
++				pcd->fe_arm_ad_off = (u32)ato;
 +			}
 +		}
 +	}
@@ -119,6 +122,15 @@ index 0fb8c0a..d58feb6 100644
 +		return -EINVAL;
 +
 +	fman_pcd_kg_port_disarm_fe(pcd, (u8)port_id, 0);
+
++	/* Free CCBS scaffold MURAM allocated in engage. */
++	if (pcd->fe_arm_ad_off)
++		fman_pcd_muram_free(pcd, pcd->fe_arm_ad_off, 32);
++	if (pcd->fe_arm_match_off)
++		fman_pcd_muram_free(pcd, pcd->fe_arm_match_off, 16);
++	if (pcd->fe_arm_off)
++		fman_pcd_muram_free(pcd, pcd->fe_arm_off, 256);
++	pcd->fe_arm_off = pcd->fe_arm_match_off = pcd->fe_arm_ad_off = 0;
 +	pr_info("fman_pcd fe_arm: port 0x%02x DISENGAGED\n", port_id);
 +	return 0;
 +}

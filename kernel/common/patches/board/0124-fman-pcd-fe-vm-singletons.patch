@@ -5,6 +5,11 @@ index 9a4b709..9d61c65 100644
 @@ -112,6 +112,10 @@ struct fman_pcd {
  	struct list_head fe_enq;
  	int fe_refcount;
++	/* CCBS scaffold MURAM offsets — allocated on engage, freed on disengage. */
++	u32 fe_arm_off;
++	u32 fe_arm_match_off;
++	u32 fe_arm_ad_off;
+ 
  	struct list_head fe_ports;	/* FmPortSetFESupport records (sec.4) */
 +	struct list_head fe_singletons;	/* sec.5 MUX/Transition/Exit FEs */
 +	unsigned long fe_mux_off;
