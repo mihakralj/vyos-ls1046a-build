@@ -8,11 +8,6 @@ index 1aed407..235beb1 100644
  	int fe_int_buf_refcount;
 +	unsigned long fe_root_ad_off;	/* sec.5 FE_ENTER root AD (16 B) */
  
-+	/* CCBS scaffold MURAM offsets — allocated on engage, freed on disengage. */
-+	u32 fe_arm_off;
-+	u32 fe_arm_match_off;
-+	u32 fe_arm_ad_off;
- 
  	struct dentry *debugfs_dir;
  };
 @@ -266,6 +267,7 @@ void fman_pcd_muram_free(struct fman_pcd *pcd, unsigned long offset,
@@ -150,7 +145,6 @@ index 1aed407..235beb1 100644
 +		mutex_unlock(&pcd->fe_lock);
 +		return 0;
 +	}
-+	seq_puts(s, "# w0=opcode|flags w1=FQID[23:0] w2=BPID[15:8]|MTU[31:16] w3=next\n");
 +	list_for_each_entry(obj, &pcd->fe_enq, node) {
 +		u32 __iomem *fe = (u32 __iomem *)
 +			fman_muram_offset_to_vbase(muram, obj->muram_off);
