@@ -49,7 +49,6 @@
 #include <linux/in.h>
 #include <linux/if_ether.h>
 #include <linux/kallsyms.h>
-#include <linux/kallsyms.h>             /* kallsyms_lookup_name for P4.1 */
 #include <linux/fsl/fman_pcd.h>
 #include <linux/netdevice.h>
 #include <linux/rcupdate.h>
@@ -57,7 +56,6 @@
 #include <net/net_namespace.h>
 #include <linux/etherdevice.h>          /* is_zero_ether_addr */
 #include <linux/if_ether.h>             /* ETH_P_IP, ETH_ALEN */
-#include <linux/kallsyms.h>             /* kallsyms_lookup_name for P4.1 */
 #include <linux/in.h>                   /* IPPROTO_TCP */
 #include <linux/unaligned.h>            /* get_unaligned_be32 */
 
