@@ -24,7 +24,6 @@ static int __init ask_init(void)
 	ask_pr_info("loading ASK %s (flow offload + FMan PCD AC_CC FE/ehash)\n",
 		    ASK_DRV_VERSION_STR);
 
-	ask_dedicated_fqid = dedicated_fqid;
 	rc = ask_hw_init();
 	if (rc)
 		goto err_hw;
@@ -121,9 +120,3 @@ MODULE_DESCRIPTION("ASK2 — NXP LS1046A FMan/210 hardware offload");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(ASK_DRV_VERSION_STR);
 MODULE_ALIAS_GENL_FAMILY("ask");
-
-/* P4.1: dedicated TX FQID (set via /sys/module/ask/parameters/dedicated_fqid) */
-static u32 dedicated_fqid;
-module_param_named(dedicated_fqid, dedicated_fqid, uint, 0644);
-u32 ask_dedicated_fqid;
-EXPORT_SYMBOL_GPL(ask_dedicated_fqid);

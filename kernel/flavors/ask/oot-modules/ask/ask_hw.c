@@ -37,7 +37,6 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/kallsyms.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
@@ -733,31 +732,15 @@ static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id)
  */
 static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
 {
-        extern u32 ask_dedicated_fqid;
-        if (ask_dedicated_fqid) {
-                *fqid = ask_dedicated_fqid;
-                return 0;
-        }
-        {
-                struct net_device *dev;
-                int rc;
-                dev = dev_get_by_index(&init_net, ifindex);
-                if (!dev) return -ENODEV;
-                rc = dpaa_get_tx_fqid(dev, 0, fqid);
-                dev_put(dev);
-                return rc ? -ENODEV : 0;
-        }
-}
+        struct net_device *dev;
+        int rc;
 
-        {
-                struct net_device *dev;
-                int rc;
-                dev = dev_get_by_index(&init_net, ifindex);
-                if (!dev) return -ENODEV;
-                rc = dpaa_get_tx_fqid(dev, 0, fqid);
-                dev_put(dev);
-                return rc ? -ENODEV : 0;
-        }
+        dev = dev_get_by_index(&init_net, ifindex);
+        if (!dev)
+                return -ENODEV;
+        rc = dpaa_get_tx_fqid(dev, 0, fqid);
+        dev_put(dev);
+        return rc ? -ENODEV : 0;
 }
 
 int ask_hw_flow_insert(const struct ask_flow_key *key,
