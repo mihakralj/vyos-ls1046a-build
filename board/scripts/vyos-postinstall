@@ -189,6 +189,15 @@ setup_uboot_env_once() {
                 echo "    expected: ${UBOOT_BOOTCMD}"
                 stale=1
             fi
+            # Self-heal: ensure address variables exist (they may be absent on
+            # factory U-Boot or after a corrupted env reflash).
+            for _av in load_addr kernel_addr_r fdt_addr_r ramdisk_addr_r; do
+                if [ -z "$(fw_printenv -n $_av 2>/dev/null || true)" ]; then
+                    echo "  Address var $_av missing — refreshing."
+                    stale=1
+                    break
+                fi
+            done
             if [ "$stale" -eq 0 ]; then
                 echo "✓ U-Boot SPI flash already configured (vyos references vyos.env)."
                 return 0
@@ -223,6 +232,30 @@ setup_uboot_env_once() {
 
     # --- Write variables to SPI flash ---
     local failed=0
+
+    # Address variables referenced by the vyos/vyos_boot/vyos_load scripts.
+    # These are not part of the board's factory U-Boot env and must be
+    # written here so ext4load / booti have valid destination addresses.
+    echo "  Writing load_addr..."
+    if ! fw_setenv load_addr "0xa0000000"; then
+        echo "  ERROR: fw_setenv load_addr failed"
+        failed=1
+    fi
+    echo "  Writing kernel_addr_r..."
+    if ! fw_setenv kernel_addr_r "0xa0000000"; then
+        echo "  ERROR: fw_setenv kernel_addr_r failed"
+        failed=1
+    fi
+    echo "  Writing fdt_addr_r..."
+    if ! fw_setenv fdt_addr_r "0x88000000"; then
+        echo "  ERROR: fw_setenv fdt_addr_r failed"
+        failed=1
+    fi
+    echo "  Writing ramdisk_addr_r..."
+    if ! fw_setenv ramdisk_addr_r "0x80000000"; then
+        echo "  ERROR: fw_setenv ramdisk_addr_r failed"
+        failed=1
+    fi
 
     echo "  Writing vyos..."
     if ! fw_setenv vyos "$vyos_val"; then
