@@ -397,7 +397,7 @@ index d260f66..aed5d84 100644
 +		return 0;
 +	}
 +
-+	slot->next_engine    = 2;  /* restore RSS (was 0=dead) */
++	slot->next_engine    = 0;  /* restore RSS: 0 triggers KG_DFLT_NIA in keygen_scheme_setup */
 +	slot->cc_base_offset = 0;
 +	slot->cc_bits_sel    = 0;
 +
