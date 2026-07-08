@@ -393,21 +393,43 @@ int ask_hw_pcd_bringup(void)
         /* P4.1: allocate a dedicated QMan TX FQ for hardware direct-enqueue.
          * All CC-tree flows use this FQ as their egress target, bypassing the
          * mainline dpaa_eth per-port TX FQ (whose taildrop limits sustained
-         * throughput to ~1.5 Gbps). Falls back to dpaa_get_tx_fqid() on failure. */
+         * throughput to ~1.5 Gbps). Falls back to dpaa_get_tx_fqid() on failure.
+         *
+         * The FQ is scheduled onto the FMan DC-portal channel 0x801 (MAC10/eth4
+         * TX side) so QMan delivers hardware-enqueued frames direct-to-wire
+         * without software portal involvement. Prior to 2026-07-08 the flag was
+         * NO_ENQUEUE which silently dropped all frames (107K retransmits). */
         {
                 u32 fqid;
                 int rc = qman_alloc_fqid(&fqid);
                 if (rc == 0) {
                         struct qman_fq *fq = &h->dedicated_fq;
+                        struct qm_mcc_initfq initfq;
                         memset(fq, 0, sizeof(*fq));
                         fq->fqid = fqid;
-                        rc = qman_create_fq(fqid, QMAN_FQ_FLAG_NO_ENQUEUE, fq);
+                        rc = qman_create_fq(fqid, QMAN_FQ_FLAG_TO_DCPORTAL, fq);
                         if (rc == 0) {
-                                h->dedicated_fq_ready = true;
-                                ask_pr_info("hw: dedicated TX FQ 0x%x allocated\n", fqid);
+                                memset(&initfq, 0, sizeof(initfq));
+                                initfq.we_mask = cpu_to_be16(QM_INITFQ_WE_FQCTRL |
+                                                             QM_INITFQ_WE_DESTWQ);
+                                initfq.fqd.fq_ctrl = cpu_to_be16(QM_FQCTRL_PREFERINCACHE);
+                                /* Channel 0x801 = FMan MAC10 (eth4) TX DC portal. */
+                                qm_fqd_set_destwq(&initfq.fqd, 0x801, 0);
+                                rc = qman_init_fq(fq, QMAN_INITFQ_FLAG_SCHED, &initfq);
+                                if (rc == 0) {
+                                        h->dedicated_fq_ready = true;
+                                        ask_pr_info("hw: dedicated TX FQ 0x%x allocated ch=0x801\n",
+                                                    fqid);
+                                } else {
+                                        qman_destroy_fq(fq);
+                                        qman_release_fqid(fqid);
+                                        ask_pr_warn("hw: qman_init_fq(0x%x) failed rc=%d\n",
+                                                    fqid, rc);
+                                }
                         } else {
                                 qman_release_fqid(fqid);
-                                ask_pr_warn("hw: qman_create_fq(0x%x) failed rc=%d\n", fqid, rc);
+                                ask_pr_warn("hw: qman_create_fq(0x%x) failed rc=%d\n",
+                                            fqid, rc);
                         }
                 } else {
                         ask_pr_warn("hw: qman_alloc_fqid failed rc=%d\n", rc);
