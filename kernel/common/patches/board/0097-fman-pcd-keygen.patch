@@ -804,6 +804,16 @@ index 0000000..d260f66
 +	lock = fman_pcd_get_lock(scheme->pcd);
 +
 +	mutex_lock(lock);
++	if (WARN_ON(!keygen->schemes[scheme->id].used)) {
++		/*
++		 * Double-free or use-after-free: another caller already
++		 * destroyed this scheme's slot.  The KV pair is orphaned;
++		 * skip teardown to avoid corrupting a re-allocated slot.
++		 */
++		mutex_unlock(lock);
++		kfree(scheme);
++		return;
++	}
 +	if (scheme->bound)
 +		(void)keygen_bind_port_to_schemes(keygen, scheme->id, false);
 +	(void)keygen_scheme_setup(keygen, scheme->id, false);
