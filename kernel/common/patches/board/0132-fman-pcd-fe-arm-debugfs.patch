@@ -73,12 +73,12 @@ index 0fb8c0a..d58feb6 100644
 +	 */
 +	{
 +		struct muram_info *muram = fman_get_muram(pcd->fman);
-+		u32 gro, mto, ato;
++		unsigned long gro, mto, ato;
 +		if (muram) {
 +			gro = fman_pcd_muram_alloc(pcd, 256);
 +			mto = fman_pcd_muram_alloc(pcd, 16);
 +			ato = fman_pcd_muram_alloc(pcd, 32);
-+			if (gro && mto && ato) {
++			if (!IS_ERR_VALUE(gro) && !IS_ERR_VALUE(mto) && !IS_ERR_VALUE(ato)) {
 +				void __iomem *c;
 +				c = (void __iomem *)fman_muram_offset_to_vbase(muram, gro);
 +				iowrite32be((mto & 0xFFFFFF), c + 0);

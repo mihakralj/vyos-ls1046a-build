@@ -721,7 +721,6 @@ cp "$BOARD_PATCH_DIR/0146-fman-pcd-fe-context-build-integration.patch" "$KERNEL_
 #0150 (PLACEHOLDER — functions embedded into 0146)
 #cp "$BOARD_PATCH_DIR/0150-fman-pcd-fe-engage-api.patch"          "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0148-keygen-debug-ekfc-log.patch" "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0151-code-review-fixes.patch" "$KERNEL_PATCHES/"
 
 
 # ── Staging-completeness guard ────────────────────────────────────────
