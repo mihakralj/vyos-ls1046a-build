@@ -81,18 +81,18 @@ index 0fb8c0a..d58feb6 100644
 +			if (!IS_ERR_VALUE(gro) && !IS_ERR_VALUE(mto) && !IS_ERR_VALUE(ato)) {
 +				void __iomem *c;
 +				c = (void __iomem *)fman_muram_offset_to_vbase(muram, gro);
-+				iowrite32be((mto & 0xFFFFFF), c + 0);
-+				iowrite32be((ato & 0xFFFFFF), c + 4);
-+				iowrite32be(0x4F000000, c + 8);
++				iowrite32be(0x40000000 | (0xFu << 24) | (ato & 0xFFFFFF), c + 0);
++				iowrite32be(0, c + 4);
++				iowrite32be((0u << 24) | (0x50u << 16) | 0x2Bu, c + 8);
 +				iowrite32be(0, c + 12);
 +				c = (void __iomem *)fman_muram_offset_to_vbase(muram, ato);
 +				iowrite32be(0x00000200, c + 0);
 +				iowrite32be(0, c + 4);
-+				iowrite32be(0, c + 8);
++				iowrite32be(0x02500002, c + 8);
 +				iowrite32be(0, c + 12);
 +				iowrite32be(0x00000200, c + 16);
 +				iowrite32be(0, c + 20);
-+				iowrite32be(0, c + 24);
++				iowrite32be(0x02500002, c + 24);
 +				iowrite32be(0, c + 28);
 +				fe_enter_off = gro;
 +			}
