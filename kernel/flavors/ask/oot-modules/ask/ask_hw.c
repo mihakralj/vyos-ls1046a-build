@@ -37,6 +37,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/kallsyms.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
@@ -48,7 +49,6 @@
 #include <linux/types.h>
 #include <linux/in.h>
 #include <linux/if_ether.h>
-#include <linux/kallsyms.h>
 #include <linux/fsl/fman_pcd.h>
 #include <linux/netdevice.h>
 #include <linux/rcupdate.h>
@@ -79,20 +79,6 @@ struct fman_port *dpaa_get_rx_fman_port(struct net_device *dev);
 u8 fman_port_get_id(struct fman_port *port);
 int fman_port_set_silicon_hit_release_all(struct fman *fm, bool enable);
 int dpaa_get_tx_fqid(struct net_device *dev, u32 queue, u32 *fqid);
-
-/* P4.1: QMan FQID alloc/release — locally redeclared because
- * linux/fsl/qman.h is not in the Debian headers package.
-/* P4.1: QMan symbols resolved dynamically via kallsyms_lookup_name()
- * because Module.symvers in the headers package does not export them.
- */
-static int (*ask_qman_alloc_fqid)(u32 *fqid);
-static void (*ask_qman_release_fqid)(u32 fqid);
- * qman_alloc_fqid() returns an unused FQID from QMan's pool;
- * qman_release_fqid() returns it.  No FQ creation is needed —
- * the global OVFQ=1/B0V=0 sed injection already sets context_a
- * on all FQIDs, and the FMan CC tree's ACTION_DESCRIPTOR
- * writes directly to the QMan FQ in hardware (no CPU dequeue).
- */
 
 /*
  * QEF blob structural constants (PR13). The microcode version
@@ -170,8 +156,6 @@ struct ask_hw_pcd {
          * XA_FLAGS_ALLOC1 keeps cookie 0 as the "no HW backing" sentinel.
          */
         struct xarray   flow_cookies;
-	u32		dedicated_tx_fqid;	/* P4.1: dedicated TX FQID for HW enqueue */
-	bool		dedicated_fq_ready;	/* P4.1: FQ allocated */
 };
 
 static struct ask_hw_pcd *ask_hw_pcd_inst;
@@ -355,12 +339,6 @@ int ask_hw_pcd_bringup(void)
 
         if (ask_hw_pcd_inst) {
                 ask_pr_dbg("hw: pcd bringup already done\n");
-
-	/* P4.1: resolve QMan symbols dynamically */
-	if (!ask_qman_alloc_fqid) {
-		ask_qman_alloc_fqid = (void *)kallsyms_lookup_name("qman_alloc_fqid");
-		ask_qman_release_fqid = (void *)kallsyms_lookup_name("qman_release_fqid");
-	}
                 return 0;
         }
 
@@ -396,23 +374,6 @@ int ask_hw_pcd_bringup(void)
 
         ask_hw_pcd_inst = h;
 
-	/* P4.1: allocate dedicated QMan TX FQID for hardware direct-enqueue.
-	 * The global OVFQ=1/B0V=0 sed injection already sets context_a on all
-	 * FQIDs; no qman_create_fq is needed — the FMan CC tree writes directly
-	 * to this FQID via the ACTION_DESCRIPTOR in hardware.
-	 */
-	{
-		u32 fqid;
-		int rc = -ENOSYS; if (ask_qman_alloc_fqid) rc = ask_qman_alloc_fqid(&fqid);
-		if (rc == 0) {
-			h->dedicated_tx_fqid = fqid;
-			h->dedicated_fq_ready = true;
-			ask_pr_info("hw: dedicated TX FQID 0x%x\n", fqid);
-		} else {
-			ask_pr_warn("hw: qman_alloc_fqid failed rc=%d\n", rc);
-		}
-	}
-
         /*
          * Balance the of_find_device_by_node() reference.  fman_bind()
          * took its own get_device(), which we deliberately hold for the
@@ -437,12 +398,6 @@ void ask_hw_pcd_teardown(void)
                 return;
 
         ask_hw_pcd_inst = NULL;
-
-	/* P4.1: release dedicated TX FQID */
-	if (h->dedicated_fq_ready) {
-		if (ask_qman_release_fqid) ask_qman_release_fqid(h->dedicated_tx_fqid);
-		ask_pr_info("hw: dedicated TX FQID 0x%x released\n", h->dedicated_tx_fqid);
-	}
 
         /*
          * Drain any flow cookies that survived to teardown, releasing each
@@ -778,25 +733,25 @@ static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id)
  */
 static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
 {
-	struct ask_hw_pcd *h = ask_hw_pcd_get();
+        /* P4.1: use dedicated TX FQID if set (debugfs knob:
+         * /sys/kernel/debug/ask/dedicated_tx_fqid).
+         * Falls back to mainline DPAA port FQID when 0.
+         */
+        extern u32 ask_dedicated_fqid;
+        if (ask_dedicated_fqid) {
+                *fqid = ask_dedicated_fqid;
+                return 0;
+        }
 
-	/* P4.1: prefer dedicated TX FQ for hardware enqueue */
-	if (h && h->dedicated_fq_ready) {
-		*fqid = h->dedicated_tx_fqid;
-		return 0;
-	}
-
-	/* Fallback: mainline DPAA port TX FQID */
-	{
-		struct net_device *dev;
-		int rc;
-		dev = dev_get_by_index(&init_net, ifindex);
-		if (!dev)
-			return -ENODEV;
-		rc = dpaa_get_tx_fqid(dev, 0, fqid);
-		dev_put(dev);
-		return rc ? -ENODEV : 0;
-	}
+        {
+                struct net_device *dev;
+                int rc;
+                dev = dev_get_by_index(&init_net, ifindex);
+                if (!dev) return -ENODEV;
+                rc = dpaa_get_tx_fqid(dev, 0, fqid);
+                dev_put(dev);
+                return rc ? -ENODEV : 0;
+        }
 }
 
 int ask_hw_flow_insert(const struct ask_flow_key *key,
