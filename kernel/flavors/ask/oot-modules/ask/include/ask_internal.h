@@ -22,9 +22,9 @@
 #include <net/netlink.h>
 
 #define ASK_DRV_NAME            "ask"
-#define ASK_DRV_VERSION_STR     "2.0.0"
+#define ASK_DRV_VERSION_STR     "2.1.0"
 #define ASK_DRV_VERSION_MAJOR   2
-#define ASK_DRV_VERSION_MINOR   0
+#define ASK_DRV_VERSION_MINOR   1
 #define ASK_DRV_VERSION_PATCH   0
 
 #define ask_pr_info(fmt, ...)   pr_info(ASK_DRV_NAME ": " fmt, ##__VA_ARGS__)

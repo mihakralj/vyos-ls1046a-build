@@ -21,7 +21,7 @@ static int __init ask_init(void)
 {
 	int rc;
 
-	ask_pr_info("loading ASK %s (flow offload + FMan PCD AC_CC FE/ehash)\n",
+	ask_pr_info("loading ASK %s — FMan PCD AC_CC + FE/eHash + dedicated-TX-FQ\n",
 		    ASK_DRV_VERSION_STR);
 
 	rc = ask_hw_init();
@@ -116,7 +116,7 @@ module_init(ask_init);
 module_exit(ask_exit);
 
 MODULE_AUTHOR("VyOS LS1046A maintainers");
-MODULE_DESCRIPTION("ASK2 — NXP LS1046A FMan/210 hardware offload");
+MODULE_DESCRIPTION("ASK2 — NXP LS1046A FMan/210 hardware offload engine");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(ASK_DRV_VERSION_STR);
 MODULE_ALIAS_GENL_FAMILY("ask");

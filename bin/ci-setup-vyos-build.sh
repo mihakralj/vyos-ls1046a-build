@@ -564,6 +564,8 @@ chmod +x "$CHROOT/usr/local/bin/firmware-check"
 ### .py suffix (fan-pid / led / caam-check convention). Flavor-agnostic (the
 ### board PCD substrate is in the common patch set on every image).
 cp board/scripts/pcd-snapshot "$CHROOT/usr/local/bin/pcd-snapshot"
+cp board/scripts/vyos-offload-ask "$CHROOT/usr/local/bin/vyos-offload-ask"
+chmod +x "$CHROOT/usr/local/bin/vyos-offload-ask"
 chmod +x "$CHROOT/usr/local/bin/pcd-snapshot"
 
 ### Mono Gateway DK LP5812 status LED control: `led` (Python 3) supports
