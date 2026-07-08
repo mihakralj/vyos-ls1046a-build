@@ -57,6 +57,7 @@
 #include <linux/if_ether.h>             /* ETH_P_IP, ETH_ALEN */
 #include <linux/in.h>                   /* IPPROTO_TCP */
 #include <linux/unaligned.h>            /* get_unaligned_be32 */
+#include <soc/fsl/qman.h>          /* qman_alloc_fqid, qman_create_fq, QMAN_FQ_FLAG_NO_ENQUEUE */
 
 #include "include/ask_internal.h"
 #include "include/ask_fman_caps.h"      /* fman_cc_*, fman_hm_*, struct fman */
@@ -155,6 +156,13 @@ struct ask_hw_pcd {
          * XA_FLAGS_ALLOC1 keeps cookie 0 as the "no HW backing" sentinel.
          */
         struct xarray   flow_cookies;
+        /* P4.1: dedicated QMan TX FQ for hardware direct-enqueue.
+         * Allocated at bringup, released at teardown, used by
+         * ask_hw_resolve_oif_fqid() as the preferred egress FQ
+         * for all CC-tree flows (avoids mainline dpaa_eth FQ
+         * taildrop bottleneck). */
+        struct qman_fq  dedicated_fq;
+        bool            dedicated_fq_ready;
 };
 
 static struct ask_hw_pcd *ask_hw_pcd_inst;
@@ -382,6 +390,29 @@ int ask_hw_pcd_bringup(void)
         put_device(&pdev->dev);
 
         ask_pr_info("hw: board-substrate FMan handle bound; per-flow CC/HM offload available\n");
+        /* P4.1: allocate a dedicated QMan TX FQ for hardware direct-enqueue.
+         * All CC-tree flows use this FQ as their egress target, bypassing the
+         * mainline dpaa_eth per-port TX FQ (whose taildrop limits sustained
+         * throughput to ~1.5 Gbps). Falls back to dpaa_get_tx_fqid() on failure. */
+        {
+                u32 fqid;
+                int rc = qman_alloc_fqid(&fqid);
+                if (rc == 0) {
+                        struct qman_fq *fq = &h->dedicated_fq;
+                        memset(fq, 0, sizeof(*fq));
+                        fq->fqid = fqid;
+                        rc = qman_create_fq(fqid, QMAN_FQ_FLAG_NO_ENQUEUE, fq);
+                        if (rc == 0) {
+                                h->dedicated_fq_ready = true;
+                                ask_pr_info("hw: dedicated TX FQ 0x%x allocated\n", fqid);
+                        } else {
+                                qman_release_fqid(fqid);
+                                ask_pr_warn("hw: qman_create_fq(0x%x) failed rc=%d\n", fqid, rc);
+                        }
+                } else {
+                        ask_pr_warn("hw: qman_alloc_fqid failed rc=%d\n", rc);
+                }
+        }
         return 0;
 }
 
@@ -397,6 +428,14 @@ void ask_hw_pcd_teardown(void)
                 return;
 
         ask_hw_pcd_inst = NULL;
+        /* P4.1: release dedicated TX FQ before draining flow cookies. */
+        if (h->dedicated_fq_ready) {
+                u32 fqid = h->dedicated_fq.fqid;
+                qman_destroy_fq(&h->dedicated_fq);
+                qman_release_fqid(fqid);
+                h->dedicated_fq_ready = false;
+                ask_pr_info("hw: dedicated TX FQ 0x%x released\n", fqid);
+        }
 
         /*
          * Drain any flow cookies that survived to teardown, releasing each
@@ -732,8 +771,18 @@ static int ask_hw_resolve_iif_port(u32 ifindex, u8 *port_id)
  */
 static int ask_hw_resolve_oif_fqid(u32 ifindex, u32 *fqid)
 {
+        struct ask_hw_pcd *h;
         struct net_device *dev;
         int rc;
+
+        /* P4.1: prefer the dedicated TX FQ for hardware direct-enqueue.
+         * Falls back to the mainline dpaa_eth per-port TX FQID if the
+         * dedicated FQ is not ready (e.g. allocation failed at bringup). */
+        h = ask_hw_pcd_inst;
+        if (h && h->dedicated_fq_ready) {
+                *fqid = h->dedicated_fq.fqid;
+                return 0;
+        }
 
         dev = dev_get_by_index(&init_net, ifindex);
         if (!dev)
