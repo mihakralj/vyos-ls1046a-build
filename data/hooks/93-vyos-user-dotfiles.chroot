@@ -1,0 +1,40 @@
+#!/bin/sh -e
+# 93-vyos-user-dotfiles.chroot — Ensure vyos user has standard dotfiles
+#
+# VyOS' vyos user is created during the ISO build but the skel files
+# (/etc/skel/.profile, .bashrc, .bash_logout) are not always copied,
+# depending on whether useradd -m or adduser was called and the timing
+# relative to /etc/skel/ population.
+#
+# On LS1046A serial console the 94-vbash-vyatta-env.chroot hook sources
+# vyatta-cfg at login (for CLI command dispatch), which creates a
+# configure-mode session and changes the prompt to vyos@vyos#. Without
+# ~/.bashrc (which resets PS1 to a standard bash prompt), operators
+# see the raw vbash configure-mode prompt on login. exit from configure
+# mode logs out (the session IS the login shell).
+#
+# Fix: copy /etc/skel/ dotfiles to /home/vyos/ if they don't exist yet.
+# The .bashrc sets a standard bash PS1 that makes the prompt appear as
+# op-mode (vyos@vyos:~$) even though the CLI session is in configure
+# mode — matching the behaviour on the nxp-sdk branch and on standard
+# VyOS amd64 serial consoles.
+
+set -e
+
+VYOS_HOME="/home/vyos"
+
+if [ ! -d "$VYOS_HOME" ]; then
+    echo "I: vyos home dir missing, skipping dotfiles hook"
+    exit 0
+fi
+
+for f in .profile .bashrc .bash_logout; do
+    if [ ! -f "$VYOS_HOME/$f" ] && [ -f "/etc/skel/$f" ]; then
+        cp "/etc/skel/$f" "$VYOS_HOME/$f"
+        chown vyos:vyos "$VYOS_HOME/$f"
+        chmod 0644 "$VYOS_HOME/$f"
+        echo "I: copied /etc/skel/$f to $VYOS_HOME/$f"
+    fi
+done
+
+exit 0

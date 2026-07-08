@@ -495,6 +495,11 @@ chmod +x "$HOOKS/95-vyos-hostname.chroot"
 #     (TFTP boot, nopersistence boot, fresh device pre-partition).
 cp data/hooks/92-livescripts-defensive-mount-list.chroot "$HOOKS/92-livescripts-defensive-mount-list.chroot"
 chmod +x "$HOOKS/92-livescripts-defensive-mount-list.chroot"
+# 93-vyos-user-dotfiles.chroot — ensure vyos user has .profile/.bashrc
+if [ -f data/hooks/93-vyos-user-dotfiles.chroot ]; then
+    cp data/hooks/93-vyos-user-dotfiles.chroot "$HOOKS/93-vyos-user-dotfiles.chroot"
+    chmod +x "$HOOKS/93-vyos-user-dotfiles.chroot"
+fi
 
 # 94: prime VYATTA_* env on interactive vbash login so `configure` op-mode
 #     does not SIGABRT with std::out_of_range in libvyatta-cfg setupSession.
