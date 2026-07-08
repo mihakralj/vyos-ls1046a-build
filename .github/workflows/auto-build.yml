@@ -101,7 +101,7 @@ jobs:
       # prevent ci-pick-packages.sh from FATALing on missing ask-modules-*.deb.
       # Does NOT affect ci-build-ask-modules.sh (cdx/fci/auto_bridge), which
       # is the ASK 1.x native module builder and has its own gate.
-      ASK_OOT_SKIPPED: '1'
+      ASK_OOT_SKIPPED: ${{ startsWith(github.ref_name, 'nxp-sdk') && '1' || '' }}
     # No `container:` — build runs natively on the self-hosted ARM64 runner.
     # The runner host (Debian 12 bookworm aarch64) provides all build deps
     # (installed in the "Install Dependencies" step below). Removing the
