@@ -12,6 +12,11 @@
 # CI build without dispatching CI.
 set -ex -o pipefail
 
+# Prevent debconf from blocking on interactive prompts in CI.
+# The pbuilder package in particular has an interactive mirror-selection
+# prompt in pbuilder.config that spins forever without this.
+export DEBIAN_FRONTEND=noninteractive
+
 echo "HOME: $HOME"
 echo "PATH: $PATH"
 command -v go || true
