@@ -34,7 +34,8 @@ engage() {
     echo "ASK offload: building FE-VM pipeline..."
 
     echo "set $PORT"   > "$PCD_BASE/fe_port"  || die "fe_port set $PORT failed"
-    echo "set 0x7FFF 12 0" > "$PCD_BASE/fe_ehash" || die "fe_ehash set failed"
+    # 16-byte key: SIP(4)+DIP(4)+SPI(4)+SPORT(2)+DPORT(2) — matches KG EKFC=0x00180206
+echo "set 0x7FFF 16 0" > "$PCD_BASE/fe_ehash" || die "fe_ehash set failed"
     echo get   > "$PCD_BASE/fe_pool"         || die "fe_pool get failed"
     echo build > "$PCD_BASE/fe_singletons" 2>/dev/null || true
     echo build > "$PCD_BASE/fe_hashfe" 2>/dev/null || true
@@ -49,7 +50,6 @@ engage() {
         ENQ_FQID="200"
     fi
     echo "build $ENQ_FQID" > "$PCD_BASE/fe_enq"  || die "fe_enq build failed"
-    echo "set $PORT"   > "$PCD_BASE/fe_port"  || die "fe_port set $PORT failed"
     echo "build $PORT" > "$PCD_BASE/fe_enter" 2>/dev/null || true
 
     # Read the FE_ENTER offset that fe_enter_build assigned
