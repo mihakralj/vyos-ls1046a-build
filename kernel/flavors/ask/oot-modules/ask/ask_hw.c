@@ -589,6 +589,23 @@ int ask_hw_offload_engage(u8 hw_port_id)
         if (rc)
                 goto out_unlock;
 
+        /*
+         * Enable silicon HIT-release on all FMan TX ports so that
+         * HIT frames bypass QMan and go directly to the wire.
+         * Idempotent — repeated calls with 'true' are harmless.
+         * Reversed symmetrically in ask_hw_offload_disengage() so the
+         * S1→S0 cycle restores the TX-confirm bit to its S0 default and
+         * `pcd-snapshot diff` stays byte-clean (DUAL-DATAPLANE.md M1
+         * reversibility contract).  Also reversed in ask_hw_pcd_teardown()
+         * for module-unload cleanup as a belt-and-suspenders.
+         *
+         * NOTE: this call is FMan-global (touches every TX port).  v1
+         * enforces global mutual exclusion (one port engaged at a time),
+         * so a symmetric enable/disable at engage/disengage is safe.
+         * A future multi-port engage will need a per-fman refcount.
+         */
+        fman_port_set_silicon_hit_release_all(h->fman, true);
+
         p->offload_engaged = true;
         ask_pr_info("hw: offload ENGAGED on port 0x%02x (S0->S1)\n", hw_port_id);
 
@@ -625,6 +642,18 @@ void ask_hw_offload_disengage(u8 hw_port_id)
          * Replaces the debugfs bridge with direct fman_pcd_offload_disengage()
          * call — port-aware via hw_port_id. */
         fman_pcd_offload_disengage(h->fman, hw_port_id);
+
+        /*
+         * Reverse the FMan-global TX-confirm bypass set at engage so the
+         * S1→S0 cycle restores the silicon HIT-release bit to its S0
+         * default.  Mirrors the engage-side call at line ~598; keeps
+         * `pcd-snapshot diff` byte-clean per the DUAL-DATAPLANE.md M1
+         * reversibility contract.  Safe under v1 mutual exclusion (one
+         * port engaged at a time); a future multi-port engage will need
+         * a per-fman refcount so this only fires on the last disengage.
+         */
+        fman_port_set_silicon_hit_release_all(h->fman, false);
+
         p->offload_engaged = false;
         mutex_unlock(&h->lock);
         ask_pr_info("hw: offload DISENGAGED on port 0x%02x (S1->S0)\n", hw_port_id);
