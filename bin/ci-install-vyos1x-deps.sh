@@ -18,6 +18,9 @@
 # the freshly-checked-out vyos-build/docker/ tree.
 set -ex -o pipefail
 
+# Prevent debconf interactive prompts in CI.
+export DEBIAN_FRONTEND=noninteractive
+
 # The shipped vyos-dev.key is signed with a SHA1 self-signature which
 # newer apt/sqv policies reject. The key is fine, the *signature* on it
 # is just old. We trust it (the upstream vyos-builder Docker container
