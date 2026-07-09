@@ -30,14 +30,14 @@ jobs:
       # default GITHUB_TOKEN (which lacks admin:actions and returns 403).
       GH_TOKEN: ${{ secrets.RUNNER_PAT || secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
-      RUNNER_LABEL: ARM64-runner2
+      RUNNER_LABEL: ARM64-runner2  # label for job routing; probe uses runner name
     steps:
       - name: Check runner status (fast path)
         id: probe
         run: |
           set -u
           status=$(gh api "repos/${GH_REPO}/actions/runners" \
-            --jq ".runners[]? | select(.labels[].name==\"${RUNNER_LABEL}\") | .status" \
+            --jq ".runners[]? | select(.name==\"ARM64-runner2\") | .status" \
             2>/dev/null | head -1 || true)
           echo "Runner '${RUNNER_LABEL}' status: '${status:-<unknown>}'"
           if [ "$status" = "online" ]; then
@@ -82,7 +82,7 @@ jobs:
           deadline=$(( $(date +%s) + 300 ))
           while [ "$(date +%s)" -lt "$deadline" ]; do
             status=$(gh api "repos/${GH_REPO}/actions/runners" \
-              --jq ".runners[]? | select(.labels[].name==\"${RUNNER_LABEL}\") | .status" \
+              --jq ".runners[]? | select(.name==\"ARM64-runner2\") | .status" \
               | head -1 || true)
             echo "runner '${RUNNER_LABEL}' status: ${status:-<not-registered>}"
             if [ "$status" = "online" ]; then
