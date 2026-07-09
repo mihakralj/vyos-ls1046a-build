@@ -46,6 +46,8 @@ static const struct genl_multicast_group ask_mcgrps[] = {
 
 /* Forward */
 static int ask_genl_get_info_doit(struct sk_buff *skb, struct genl_info *info);
+static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info);
+static int ask_genl_disengage_doit(struct sk_buff *skb, struct genl_info *info);
 /*
  * The eopnotsupp stubs and the per-flow fill / dump-walker helpers below
  * are non-static so the kunit suite (PR9 / M1.5) can call them directly
@@ -144,6 +146,18 @@ static const struct genl_small_ops ask_genl_small_ops[] = {
 .flags    = GENL_UNS_ADMIN_PERM,
 .doit     = ask_genl_eopnotsupp_doit,
 },
+{
+.cmd      = ASK_CMD_ENGAGE,
+.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
+.flags    = GENL_UNS_ADMIN_PERM,
+.doit     = ask_genl_engage_doit,
+},
+{
+.cmd      = ASK_CMD_DISENGAGE,
+.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
+.flags    = GENL_UNS_ADMIN_PERM,
+.doit     = ask_genl_disengage_doit,
+},
 };
 
 /* ------------------------------------------------------------------------- */
@@ -160,7 +174,7 @@ static struct genl_family ask_genl_family __ro_after_init = {
 .module        = THIS_MODULE,
 .small_ops     = ask_genl_small_ops,
 .n_small_ops   = ARRAY_SIZE(ask_genl_small_ops),
-.resv_start_op = ASK_CMD_SET_POLICER + 1,
+.resv_start_op = ASK_CMD_DISENGAGE + 1,
 .mcgrps        = ask_mcgrps,
 .n_mcgrps      = ARRAY_SIZE(ask_mcgrps),
 };
@@ -529,6 +543,56 @@ if (!t)
 return -ENOENT;
 
 ask_flow_flush(t);
+return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* ASK_CMD_ENGAGE / ASK_CMD_DISENGAGE handlers                                */
+/*                                                                            */
+/* These commands engage/disengage the ASK2 hardware offload on a specific    */
+/* FMan port. The port_id parameter is the hardware port ID (e.g., 0x10 for   */
+/* eth3, 0x11 for eth4 on LS1046A).                                           */
+/*                                                                            */
+/* Unlike the debugfs bridge (vyos-offload-ask), these handlers use the       */
+/* proper fman_pcd_offload_engage()/disengage() API which correctly manages   */
+/* BMI port state and doesn't corrupt the RX path.                            */
+/* ------------------------------------------------------------------------- */
+static int ask_genl_engage_doit(struct sk_buff *skb, struct genl_info *info)
+{
+struct nlattr *port_attr;
+u8 port_id;
+int rc;
+
+port_attr = info->attrs[ASK_ATTR_PORT_ID];
+if (!port_attr)
+return -EINVAL;
+
+port_id = nla_get_u8(port_attr);
+
+rc = ask_hw_offload_engage(port_id);
+if (rc) {
+ask_pr_err("genl: engage port 0x%02x failed: %d\n", port_id, rc);
+return rc;
+}
+
+ask_pr_info("genl: engaged port 0x%02x\n", port_id);
+return 0;
+}
+
+static int ask_genl_disengage_doit(struct sk_buff *skb, struct genl_info *info)
+{
+struct nlattr *port_attr;
+u8 port_id;
+
+port_attr = info->attrs[ASK_ATTR_PORT_ID];
+if (!port_attr)
+return -EINVAL;
+
+port_id = nla_get_u8(port_attr);
+
+ask_hw_offload_disengage(port_id);
+
+ask_pr_info("genl: disengaged port 0x%02x\n", port_id);
 return 0;
 }
 

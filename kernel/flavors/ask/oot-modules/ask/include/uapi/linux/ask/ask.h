@@ -51,6 +51,8 @@ enum ask_genl_cmd {
     ASK_CMD_FLUSH_FLOWS,    /* admin: remove all flows */
     ASK_CMD_FLUSH_SAS,      /* admin: remove all SAs */
     ASK_CMD_SET_POLICER,    /* exception-rate-limit configuration */
+    ASK_CMD_ENGAGE,         /* engage offload on a port */
+    ASK_CMD_DISENGAGE,      /* disengage offload on a port */
 
     __ASK_CMD_MAX,
 };
@@ -66,6 +68,7 @@ enum ask_genl_attr {
     ASK_ATTR_SA,            /* nested ask_sa_attr */
     ASK_ATTR_EVENT,         /* nested ask_event_attr */
     ASK_ATTR_POLICER,       /* nested ask_policer_attr */
+    ASK_ATTR_PORT_ID,       /* u8, hardware port ID for engage/disengage */
 
     __ASK_ATTR_MAX,
 };
