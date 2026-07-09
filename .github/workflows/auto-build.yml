@@ -3,7 +3,7 @@ name: VyOS LS1046A build (reusable)
 # This workflow is INTENTIONALLY reusable-only — it has no `workflow_dispatch:`
 # trigger and therefore does NOT appear in the Actions "Run workflow" dropdown.
 #
-# It always runs on the self-hosted Azure ARM64 VM (label `ARM64`), which
+# It always runs on the self-hosted Azure ARM64 VM (label `ARM64-runner2`), which
 # is Debian 12 bookworm aarch64 — the same distribution the build expects
 # (matches the OCaml/opam pins, libc 2.36, and Python 3.11 of the
 # upstream vyos-builder Docker image). The build runs natively on the host;
@@ -21,7 +21,7 @@ on:
         description: 'Runner label to execute the build on'
         type: string
         required: false
-        default: 'ARM64'
+        default: 'ARM64-runner2'
       BUILD_BY:
         type: string
         required: false
@@ -60,7 +60,7 @@ env:
 
 jobs:
   build_iso:
-    runs-on: ${{ inputs.runs_on || 'ARM64' }}
+    runs-on: ${{ inputs.runs_on || 'ARM64-runner2' }}
     permissions:
       contents: write
     env:

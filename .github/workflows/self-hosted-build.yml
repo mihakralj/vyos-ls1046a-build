@@ -30,7 +30,7 @@ jobs:
       # default GITHUB_TOKEN (which lacks admin:actions and returns 403).
       GH_TOKEN: ${{ secrets.RUNNER_PAT || secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
-      RUNNER_LABEL: ARM64
+      RUNNER_LABEL: ARM64-runner2
     steps:
       - name: Check runner status (fast path)
         id: probe
@@ -60,7 +60,7 @@ jobs:
         run: |
           az vm start \
             --resource-group arm64-runner-group \
-            --name arm64-runner \
+            --name ARM64-runner2 \
             --no-wait
 
       - name: Wait for self-hosted runner to come online
@@ -101,7 +101,7 @@ jobs:
     permissions:
       contents: write
     with:
-      runs_on: ARM64
+      runs_on: ARM64-runner2
       BUILD_BY: ${{ github.event.inputs.BUILD_BY }}
       build_version: ${{ github.event.inputs.build_version }}
     secrets:
