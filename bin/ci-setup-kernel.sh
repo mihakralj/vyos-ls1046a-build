@@ -1196,6 +1196,17 @@ if [ -f drivers/net/phy/sfp.c ]; then
     echo "### sfp.c: OEM SFP-10G-T/SR rollball quirk injected (sed)"
 fi
 
+# F-043: Drop IPSEC_SPI from KG EKFC extraction (0x00180206→0x00180006).
+# The IPSEC_SPI bit (bit 9) causes the KG to extract 4 bytes from the
+# nonexistent IPsec header for non-IPsec TCP flows, producing unpredictable
+# garbage that breaks FE-VM ehash flow matching.  Removing bit 9 gives a
+# 12-byte key (DPORT+SPORT+DIP+SIP) that matches what Phase-1 verified.
+if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
+    sed -i 's/scheme_regs\.kgse_ekfc = DEFAULT_HASH_KEY_EXTRACT_FIELDS;/scheme_regs.kgse_ekfc = 0x00180006; \/* no IPSEC_SPI for non-IPsec flows *\//' \
+        drivers/net/ethernet/freescale/fman/fman_keygen.c
+    echo "### fman_keygen.c: EKFC 0x00180206→0x00180006 (no IPSEC_SPI)"
+fi
+
 # F-040/F-002: fman_pcd.c post-patch MURAM zeroing + leak fix.
 # Base64-encoded Python fixer (no escape issues).
 # Runs after kernel post-patches commit, before compilation.
