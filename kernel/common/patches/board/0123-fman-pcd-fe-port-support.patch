@@ -299,9 +299,9 @@ index 803b45d..9a4b709 100644
 +	buf[count] = '\0';
 +
 +	mutex_lock(&pcd->fe_lock);
-+	if (sscanf(buf, "set %hhi", &port_id) == 1)
++	if (sscanf(buf, "set %hhx", &port_id) == 1)
 +		err = fman_pcd_fe_port_set(pcd, port_id);
-+	else if (sscanf(buf, "del %hhi", &port_id) == 1)
++	else if (sscanf(buf, "del %hhx", &port_id) == 1)
 +		err = fman_pcd_fe_port_del(pcd, port_id);
 +	else
 +		err = -EINVAL;
