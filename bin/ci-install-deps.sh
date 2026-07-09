@@ -111,6 +111,39 @@ fi
 "$MERGIRAF_BIN" --version || echo "WARN: mergiraf install failed — patches with context drift may produce conflict markers"
 
 # ---------------------------------------------------------------------------
+# syft — Anchore SBOM generator. NEW hard dependency: upstream vyos-build's
+# build-vyos-image now shells out to `syft chroot ...` after the live-build
+# binary stage to emit CycloneDX + SPDX SBOMs alongside the ISO (see
+# build-vyos-image build() → "Now create SBOM"). It is NOT packaged in
+# Debian and is absent from the bare self-hosted runner, so without it the
+# ISO build fails with `FileNotFoundError: 'syft'` AFTER the ISO has already
+# been assembled (build #28996067767, 2026-07-09). Install the pinned
+# prebuilt release tarball, same idempotent pattern as Mergiraf above.
+# ---------------------------------------------------------------------------
+SYFT_VERSION="v1.46.0"
+SYFT_BIN=/usr/local/bin/syft
+if "$SYFT_BIN" version 2>/dev/null | grep -q "${SYFT_VERSION#v}"; then
+  echo "syft ${SYFT_VERSION} already installed"
+else
+  arch=$(uname -m)
+  case "$arch" in
+    aarch64) syft_arch="arm64" ;;
+    x86_64)  syft_arch="amd64" ;;
+    *) echo "WARN: no syft prebuilt for $arch — ISO SBOM generation will fail"; syft_arch="" ;;
+  esac
+  if [ -n "$syft_arch" ]; then
+    tarball="syft_${SYFT_VERSION#v}_linux_${syft_arch}.tar.gz"
+    url="https://github.com/anchore/syft/releases/download/${SYFT_VERSION}/${tarball}"
+    tmp=$(mktemp -d)
+    curl -fsSL "$url" -o "$tmp/syft.tar.gz"
+    tar -xzf "$tmp/syft.tar.gz" -C "$tmp"
+    install -m 0755 "$tmp/syft" "$SYFT_BIN"
+    rm -rf "$tmp"
+  fi
+fi
+"$SYFT_BIN" version || echo "WARN: syft install failed — ISO SBOM generation will fail"
+
+# ---------------------------------------------------------------------------
 # j2lint — Jinja2 linter, NOT packaged in Debian.
 # vyos-1x's debian/rules invokes `make j2lint` which runs the `j2lint`
 # binary on data/templates/. The Makefile errors out
