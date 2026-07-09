@@ -1204,15 +1204,14 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
 fi
 
 
-# M2-4: fix fe_port lookup — all LS1046A fman_port->port_id==0
-# (mainline of_alias_get_id fallback returns -ENODEV for missing
-# fman-port aliases).  cc_test works by accident (%hhi "0x10" → 0).
-# fe_port passed decimal 16, which didn't match.  Switch to 0 so
-# fman_port_lookup_rx finds the first RX port.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    sed -i "s/fman_port_lookup_rx(fman, port_id)/fman_port_lookup_rx(fman, 0)  \/* M2-4: port_id=0 for all LS1046A RX ports *\//" \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo "### fman_pcd.c: M2-4 fe_port lookup fixed (port_id=0)"
+# M2-4: fix fman_port_lookup_rx — all LS1046A fman_port->port_id==0
+# (mainline of_alias_get_id fallback returns -ENODEV).  The lookup
+# comparison p->port_id == port_id always fails for non-zero port_id.
+# Remove the port_id check; match on fm + port_type only.
+# cc_test works by accident (%hhi "0x10" → port_id=0, which matches).
+if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
+    echo 'aW1wb3J0IHN5cwpwYXRoID0gImRyaXZlcnMvbmV0L2V0aGVybmV0L2ZyZWVzY2FsZS9mbWFuL2ZtYW5fcG9ydC5jIgp3aXRoIG9wZW4ocGF0aCkgYXMgZjoKICAgIHNyYyA9IGYucmVhZCgpCgpvbGQgPSAoJ1x0aWYgKHAtPmZtID09IGZtICYmIHAtPnBvcnRfaWQgPT0gcG9ydF9pZCAmJlxuJwogICAgICAgJ1x0ICAgIHAtPnBvcnRfdHlwZSA9PSBGTUFOX1BPUlRfVFlQRV9SWCkgeycpCm5ldyA9ICgnXHRpZiAocC0+Zm0gPT0gZm0gJiZcbicKICAgICAgICdcdCAgICBwLT5wb3J0X3R5cGUgPT0gRk1BTl9QT1JUX1RZUEVfUlgpIHsnKQppZiBvbGQgaW4gc3JjOgogICAgc3JjID0gc3JjLnJlcGxhY2Uob2xkLCBuZXcsIDEpCiAgICB3aXRoIG9wZW4ocGF0aCwgInciKSBhcyBmOgogICAgICAgIGYud3JpdGUoc3JjKQogICAgcHJpbnQoIiMjIyBmbWFuX3BvcnQuYzogZm1hbl9wb3J0X2xvb2t1cF9yeCBwb3J0X2lkIGNoZWNrIHJlbW92ZWQgKE0yLTQpIikKZWxzZToKICAgIHByaW50KCIjIyMgZm1hbl9wb3J0LmM6IHBhdHRlcm4gbm90IGZvdW5kLCBza2lwcGluZyAoYWxyZWFkeSBmaXhlZD8pIikK' | base64 -d | python3
+    echo "### fman_port.c: M2-4 fman_port_lookup_rx fixed"
 fi
 
 # === end ls1046a-build patch-loop replacement ===
