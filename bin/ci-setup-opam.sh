@@ -59,7 +59,14 @@ opam pin add -y -n vyos1x-config \
   'https://github.com/vyos/vyos1x-config.git#52132ad2c0992bf6f17a06173384030d93a29053'
 opam pin add -y -n vyconf \
   'https://github.com/vyos/vyconf.git#e25b13ae3040d02326f01bf9bedd097795fb3a62'
-opam install -y vyos1x-config vyconf
+
+# Install sequentially, NOT as a single `opam install -y vyos1x-config vyconf`.
+# A combined install causes opam to build vyconf before vyos1x-config's
+# dune-package is fully registered in findlib → "Library vyos1x-config not
+# found" → exit 31. Separating them ensures the dependency is fully resolved
+# before the dependent package builds.
+opam install -y vyos1x-config
+opam install -y vyconf
 
 # vyos-1x's top-level Makefile gates the libvyosconfig build behind
 #   @if [ ! -f /usr/lib/libvyosconfig.so.0 ]; then make -C libvyosconfig all; ... fi
