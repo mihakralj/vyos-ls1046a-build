@@ -47,7 +47,8 @@ engage() {
     else
         ENQ_FQID="200"
     fi
-    echo "build $ENQ_FQID" > "$PCD_BASE/fe_enq"  || die "fe_enq build failed" 
+    echo "build $ENQ_FQID" > "$PCD_BASE/fe_enq"  || die "fe_enq build failed"
+    echo "set $PORT"   > "$PCD_BASE/fe_port"  || die "fe_port set $PORT failed"
     echo "build $PORT" > "$PCD_BASE/fe_enter" 2>/dev/null || true
 
     # Read the FE_ENTER offset that fe_enter_build assigned
@@ -68,6 +69,7 @@ disengage() {
     echo "disengage $PORT" > "$PCD_BASE/fe_arm" 2>/dev/null || true
     echo clear > "$PCD_BASE/fe_flow"      2>/dev/null || true
     echo clear > "$PCD_BASE/fe_enter"     2>/dev/null || true
+    echo "del $PORT"   > "$PCD_BASE/fe_port"  2>/dev/null || true
     echo clear > "$PCD_BASE/fe_enq"       2>/dev/null || true
     echo clear > "$PCD_BASE/fe_hashfe"    2>/dev/null || true
     echo clear > "$PCD_BASE/fe_ehash"     2>/dev/null || true
