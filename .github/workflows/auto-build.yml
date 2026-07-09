@@ -146,8 +146,8 @@ jobs:
           # checkout can repopulate the workspace cleanly.
           set -e
           if [ -d "$GITHUB_WORKSPACE" ]; then
-            chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" 2>/dev/null || \
-              chown -R vyos:vyos "$GITHUB_WORKSPACE" 2>/dev/null || true
+            sudo chown -R vyos:vyos "$GITHUB_WORKSPACE" 2>/dev/null || true
+            sudo rm -rf "$GITHUB_WORKSPACE/.git" 2>/dev/null || true
           fi
           # Also drop any prior root-owned content under the runner work root
           # in case the workspace dir itself has the wrong owner.
