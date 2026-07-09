@@ -578,7 +578,7 @@ int ask_hw_offload_engage(u8 hw_port_id)
 
                 debugfs_fe_write("fe_pool", "get", 3);
                 debugfs_fe_write("fe_singletons", "build", 5);
-                debugfs_fe_write("fe_ehash", "set 0x7FFF 16 0", 16);
+                debugfs_fe_write("fe_ehash", "set 0x7FFF 12 0", 16);
                 debugfs_fe_write("fe_hashfe", "build", 5);
                 debugfs_fe_write("fe_enq", "build 0x200", 11);
                 n = snprintf(buf, sizeof(buf), "build 0x%02x", hw_port_id);
