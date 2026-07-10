@@ -1196,15 +1196,16 @@ if [ -f drivers/net/phy/sfp.c ]; then
     echo "### sfp.c: OEM SFP-10G-T/SR rollball quirk injected (sed)"
 fi
 
-# F-043: Drop IPSEC_SPI from KG EKFC extraction (0x00180206→0x00180006).
-# The IPSEC_SPI bit (bit 9) causes the KG to extract 4 bytes from the
-# nonexistent IPsec header for non-IPsec TCP flows, producing unpredictable
-# garbage that breaks FE-VM ehash flow matching.  Removing bit 9 gives a
-# 12-byte key (DPORT+SPORT+DIP+SIP) that matches what Phase-1 verified.
+# F-048: Set EKFC to 0x001C0006 — IPSRC1|IPDST1|PTYPE1|L4PSRC|L4PDST.
+# EKFC descending-bit-order extraction (Qdrant FMAN_KEYGEN_EKFC_LAYOUT,
+# 2026-07-10): highest bit first → SIP(4)+DIP(4)+PROTO(1)+SPORT(2)+DPORT(2)
+# = 13 bytes, matching the NXP ASK 1.x SDK fill_ehash_key_info() format.
+# PTYPE1 (bit 18, 1 byte) extracts the IPv4 next-header/protocol number
+# needed to disambiguate TCP(6) vs UDP(17) flows with identical 4-tuples.
 if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
-    sed -i 's/scheme_regs\.kgse_ekfc = DEFAULT_HASH_KEY_EXTRACT_FIELDS;/scheme_regs.kgse_ekfc = 0x00180006; \/* no IPSEC_SPI for non-IPsec flows *\//' \
+    sed -i 's/scheme_regs\.kgse_ekfc = DEFAULT_HASH_KEY_EXTRACT_FIELDS;/scheme_regs.kgse_ekfc = 0x001C0006; \/\* F-048: 13B key = SIP+DIP+PROTO+SPORT+DPORT \*\//' \
         drivers/net/ethernet/freescale/fman/fman_keygen.c
-    echo "### fman_keygen.c: EKFC 0x00180206→0x00180006 (no IPSEC_SPI)"
+    echo "### fman_keygen.c: EKFC 0x00180206→0x001C0006 (incl PROTO)"
 fi
 
 # F-040/F-002: fman_pcd.c post-patch MURAM zeroing + leak fix.

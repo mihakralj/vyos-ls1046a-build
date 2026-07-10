@@ -1028,7 +1028,7 @@ static void ask_debugfs_fe_flow_write(const struct ask_flow_key *key,
                                        unsigned long enq_off)
 {
         char buf[128];
-        u8 raw[12];
+        u8 raw[13];
         struct file *filp;
         loff_t pos = 0;
 
@@ -1037,13 +1037,16 @@ static void ask_debugfs_fe_flow_write(const struct ask_flow_key *key,
                 return;
         }
 
-        raw[0] = (key->dport >> 8) & 0xff;   raw[1] = key->dport & 0xff;
-        raw[2] = (key->sport >> 8) & 0xff;   raw[3] = key->sport & 0xff;
-        memcpy(&raw[4], key->dst_ip, 4);     memcpy(&raw[8], key->src_ip, 4);
+        /* F-049: descending EKFC bit order — SIP(4)+DIP(4)+PROTO(1)+SPORT(2)+DPORT(2) */
+        memcpy(&raw[0], key->src_ip, 4);
+        memcpy(&raw[4], key->dst_ip, 4);
+        raw[8]  = key->proto;
+        raw[9]  = (key->sport >> 8) & 0xff;   raw[10] = key->sport & 0xff;
+        raw[11] = (key->dport >> 8) & 0xff;   raw[12] = key->dport & 0xff;
 
-        snprintf(buf, sizeof(buf), "add 0 %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X %lx",
+        snprintf(buf, sizeof(buf), "add 0 %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X %lx",
                  raw[0], raw[1], raw[2], raw[3], raw[4], raw[5],
-                 raw[6], raw[7], raw[8], raw[9], raw[10], raw[11], enq_off);
+                 raw[6], raw[7], raw[8], raw[9], raw[10], raw[11], raw[12], enq_off);
 
         filp = filp_open("/sys/kernel/debug/fman_pcd/0/fe_flow", O_WRONLY, 0);
         if (!IS_ERR(filp)) { kernel_write(filp, buf, strlen(buf), &pos); filp_close(filp, NULL); }
