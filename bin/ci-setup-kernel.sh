@@ -1279,11 +1279,11 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-050 mask=0 allowed (E-EKFC-1 single-bucket isolation)"
 fi
 
-# F-051: Force-clear kgse_bmch, kgse_bmcl, and kgse_hc to zero inside
-# keygen_scheme_setup() AFTER the scheme_regs struct is populated but BEFORE
-# it's written to hardware.  The DPAA1 RSS driver may leave byte masks or hash
-# config that interfere with exact-match ehash.  Anchored on the '/* Write
-# scheme registers */' comment that precedes the write call.
+# F-051: Force-clear kgse_bmch, kgse_bmcl, kgse_hc, and kgse_ekdv to zero
+# inside keygen_scheme_setup() AFTER the scheme_regs struct is populated but
+# BEFORE it's written to hardware.  The DPAA1 RSS driver may leave byte masks
+# or hash config that interfere with exact-match ehash.  Anchored on the
+# '/* Write scheme registers */' comment that precedes the write call.
 if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     sed -i '/\/\* Write scheme registers \*\//i\
 	/* F-051: force-clear RSS mask/hash config for exact-match ehash */\
@@ -1293,6 +1293,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
 	scheme_regs.kgse_ekdv = 0;' \
         drivers/net/ethernet/freescale/fman/fman_keygen.c
     echo "### fman_keygen.c: F-051 BM/HC/EKDV zeroed (RSS isolation)"
+fi
+
+# F-052: Suppress -Werror=unused-function for fman_pcd_debugfs_root_get.
+# This static helper is defined in patch 0092/0126 but not called from any
+# currently-enabled code path.  -Werror promotes the warning to error.
+# Mark it with __attribute__((unused)) to silence the build.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    sed -i 's/static int fman_pcd_debugfs_root_get(void)/static __attribute__((unused)) int fman_pcd_debugfs_root_get(void)/' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    echo "### fman_pcd.c: F-052 debugfs_root_get marked __unused"
 fi
 
 # M2-4: free params page on disengage (was leaking 256 B per cycle)
