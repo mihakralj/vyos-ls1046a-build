@@ -129,6 +129,61 @@ Authoritative reference for the idle-deallocate script, systemd unit files, Mana
 - **Transient U-Boot ext4 failure on first boot after fresh eMMC format:** After `install image` on a freshly wiped eMMC, the first boot may print `Failed to load '/boot/vyos.env'` and fall through to SPI recovery. This is a known U-Boot ext4 driver quirk: the driver cannot reliably read a freshly-formatted ext4 partition on first access. `/boot/vyos.env` was written correctly by the installer (via grub.py hook). Just reboot from the recovery shell (`reboot`) and the second boot will load eMMC correctly. This is not a bug in postinstall or the installer.
 - **VyOS migration scripts assume GRUB:** VyOS migration scripts (e.g., `system/31-to-32` from T8375) call `disk.find_persistence()` and read `CFG_VYOS_VARS` (GRUB vars file) with dict key access (`vars_current['console_type']`). On U-Boot systems, this file may not exist or lack expected keys → `KeyError` → "Configuration error" → hostname stays `localhost.localdomain`. Fix: patch `vyos-1x-017` wraps persistence lookup in try/except, checks file existence with `os.path.exists()`, and uses `.get()` for safe key access. **Watch for new migration scripts that assume GRUB** — any new `vars_read()` + `['key']` pattern in `src/migration-scripts/` will need the same treatment.
 
+## FMan KeyGen / ASK2 Silicon Rules
+
+Authoritative reference: `specs/fman-keygen-flow-key-spec.md` v2.0 (2026-07-10).
+
+### Architecture (settled)
+
+- **EKFC extraction only, no GEC:** ASK2 uses EKFC (Extract Known Fields Command) exclusively. `kgse_gec[]` stays zero. The NXP SDK uses FMC/GEC declared-order extraction (`SIP, DIP, PROTO, SPORT, DPORT`); ASK2 gets the silicon's fixed EKFC order instead. Same five fields, same 13 bytes, different byte order. **Do not "fix" the ASK2 layout to match the SDK.** See §1.3, §1.4 of the spec.
+- **RCCB → FE_ENTER direct is the correct dispatch topology.** There is no CC group table, no CC node, no match table. F-044 and F-047 already removed these. OQ4 (CC-hop clobbers KG hash) is closed as moot — there is no hop. See §5 of the spec.
+- **kgse_hc is NOT a hash-algorithm selector.** The KeyGen hash algorithm is fixed silicon CRC-64 (ECMA-182, reflected poly `0xC96C5795D7870F42`). `kgse_hc` only configures FQID distribution (hash shift, symmetric flag, mask). There is no Toeplitz hash anywhere in the DPAA1 drivers. Nothing to align. **Do not read back `kgse_hc`.** §4.3.
+- **ASK2 correct CRC64 settings (all in place):** `hashShift = 0`, `symmetric = false` (direction-distinct flows, what conntrack wants), `mask = 0x7fff`. Our `fman_pcd_crc64()` and `fman_pcd_ehash_bucket_index()` are verbatim-identical to ASK1's production `get_indexed_hash_bucket()`. §4.3.
+
+### Target EKFC value
+
+- **Target EKFC = 0x001C0006** (adds PTYPE1 / bit 18 for 5-tuple): `IPSRC1 | IPDST1 | PTYPE1 | L4PSRC | L4PDST`. 13 bytes total. The 4-tuple `0x00180006` aliases TCP and UDP flows sharing the same IP:port pair — a silent misforwarding, not a drop. §2, §3.
+- **IPsec SPI bit 9 MUST NOT be set on non-IPsec schemes.** On non-IPsec frames the parser has no SPI offset → reads random bytes → unpredictable key. F-043 existed because of this. §4.1.
+- **PTYPE1 has no EKDV default-value slot** (§4.2). Guard: reject `proto == 0` at flow insert (§10.6). Non-IP frames never reach the FE path (gated on parser's IPv4 indication). On a frame that somehow gets through, `proto=0` produces a deterministic 0x00 byte that matches no inserted flow (none carries `proto==0`).
+
+### Extraction order: UNVERIFIED (critical)
+
+- **The EKFC extraction order is NOT confirmed.** Three competing models exist: ascending bit position (`DPORT, SPORT, PROTO, DIP, SIP`), descending (`SIP, DIP, PROTO, SPORT, DPORT`), and size-grouped (`SIP, DIP, SPORT, DPORT, PROTO`). **None has direct empirical support from silicon.** §3.1.
+- **Patch 0148's logging is NOT proof.** It added `pr_info()` to `keygen_scheme_setup()`, which writes `kgse_ekfc` — logging the value being written, not what the silicon does with it. The extraction-order table in the Qdrant entry is an annotation, not dmesg output.
+- **The 2026-07-04 HIT does NOT settle the order.** Four candidate keys were inserted simultaneously; the match was attributed by elimination, not isolation. The observed key is consistent with NO model — strong signal the attribution was wrong or the pipeline was already corrupted by the scaffold (§5.5).
+- **Engineering response:** encode the order as a data table (`static const struct fman_kg_field fman_kg_order_v4[]`). Derive key_len by walking it. Cross-check the covered bitmask against EKFC at probe. Add `fman_pcd_key_selftest()` that reads the silicon's actual extracted key from a live frame and compares against prediction. Gate `fe_arm_engage()` on `key_verified=1`. Then resolving the order is a one-line table edit. §7.
+- **Working assumption for implementation:** ascending bit position. It is a placeholder until the §11 E2 workspace dump confirms it.
+- **IPv6 requires a separate KG scheme + separate ehash table** (IPSRC1/IPDST1 become 16 bytes each → 37-byte key). The design must not preclude it. §12.
+
+### Immediate required actions (no gate, order-independent)
+
+- **Revert F-046.** Restore `word0 = 0x40800000` (ALLOCATE bit) on FE_ENTER AD. F-046 stripped it speculatively, against the only configuration that ever produced a HIT. ALLOCATE allocates the FE workspace that holds the extracted key and KG hash result. §5.4.
+- **Delete the scaffold block** (not `if (0)` — physically remove it). It allocated 304 bytes per engage cycle from `gen_pool`, never freed them, and wrote at offsets overlapping active FMan data structures → MURAM corruption, `ecir.fqid=0x0` storms, SFP+ link lock. Every MISS in the record predates F-047. §5.5, §10.7.
+- **Delete dead code; do not disable it.** `if (0) { ... }` blocks survive rebases and get re-enabled by accident. Git history holds the code. §10.7.
+
+### Defensive coding requirements (traceable to specific defects)
+
+- **Never write MURAM at an offset you do not own** (origin: F-047 MURAM corruption). Every MURAM write goes to an address returned by `fman_muram_alloc()` for this object, offset by less than the allocated size. §10.1.
+- **Readback every silicon write that has no error report** (origin: pipeline-verification burden where debugfs readback was bolted on after the fact). After programming an FE descriptor or KGSE entry, read it back and compare. Fail the engage on mismatch. §10.2.
+- **Derive key length from one constant, in one place** (origin: `${#key} -ne 24` gate survived a sed-based change to 13-byte keys, silently blocking all inserts). The kernel exports key_len via debugfs; the shell reads it. No literal byte counts anywhere. §10.3.
+- **A build that cannot verify its own key layout must refuse to engage** (origin: three sessions of MISS testing against an unverified order). `fe_arm_engage()` returns `-EPROTO` unless `fman_pcd_key_selftest()` has passed since boot. Force-override with `fman_pcd.force_unverified=1` for experiments only. §10.4.
+- **keysize MUST equal the full extracted key length** (origin: ascending order puts IP addresses last, so truncating keysize drops the addresses — not coarser flow, wrong flow). `ehash->keysize != pcd->key_len_v4` is a checked error. To make coarser flows, change EKFC, not keysize. §10.5.
+- **Never change a known-good configuration on a hypothesis** (origin: F-046 stripped ALLOCATE on a theory). Changes to a proven-good state require either an observation that contradicts it, or an A/B measurement. A hypothesis is neither. §10.8.
+- **Always cold-boot before any silicon experiment** (origin: "port goes deaf after disengage" was accumulated BMI corruption from pre-fix builds, not a commit). Warm reboot does not clear BMI or MURAM state. Record the boot type in every result. §10.9.
+- **One variable per experiment** (origin: 2026-07-04 HIT inserted four candidate keys simultaneously). One key, one flow, one packet class per run. §10.10.
+
+### Candidate root causes for flow-HIT failure (ranked)
+
+From the spec §13. Only the E2 workspace dump (§11 Step 3) can discriminate:
+1. **Scaffold MURAM corruption** — UNTESTED. Every MISS predates F-047.
+2. **keysize < extracted length truncating IP addresses** — NEVER CONSIDERED before v2.0.
+3. **F-046 stripping ALLOCATE** — UNTESTED. Removed a bit set in the only HIT.
+4. Wrong extraction order — possible but permutation-exhaustion argues against it.
+5. CC-hop clobbers KG hash — CLOSED (no hop exists post-F-044).
+6. CRC64 / kgse_hc mismatch — CLOSED (§4.3, verbatim-identical).
+7. Bucket or entry struct layout — CLOSED (verbatim match to SDK oracle).
+8. contextOffsetInWS — CLOSED (both pass 0).
+
 ## Local Dev Loop Rules
 
 - **Single CI workflow:** all CI builds run through `self-hosted-build.yml`, which delegates the heavy lifting to `auto-build.yml` via `workflow_call` (reusable workflow). All build-logic edits (kernel config, patches, ISO recipe) live in **`auto-build.yml`** — the self-hosted wrapper only handles VM lifecycle (start/stop Azure ARM64 VM) and dispatch. Do **not** re-add `workflow_dispatch:` to `auto-build.yml` to "test on hosted runners"; that re-introduces hosted-runner builds and burns Actions minutes.
