@@ -1309,6 +1309,21 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-052 debugfs_root_get marked __unused"
 fi
 
+# F-053: Fix hash_bytes_offset in en_exthash_node descriptor ad[0] encoding.
+# The DDR flow record (en_ehash_entry) has an 8-byte link-chain header (flags +
+# next_entry pointer) before the key data at FMAN_EHASH_FLOW_KEY_OFF=8.  The
+# hardware descriptor field hash_bytes_offset (bits 17:16 of ad[0]) was being
+# written with t->hash_shift (0), telling the hardware to start key comparison
+# at byte 0 of the DDR record — comparing against the link header (all zeros
+# for the first flow) + partial key, which NEVER matches the KG-extracted bytes.
+# The correct value for an 8-byte header is 1 (the field encodes 0→0B, 1→8B).
+# The CRC64 bucket-indexer's hash_shift is a separate parameter and is unchanged.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    sed -i 's/((u32)(t->hash_shift \& 0x3) << 16)/((u32)(1) << 16)  \/\* F-053: hash_bytes_offset=1 (8B header before key) \*\//' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    echo "### fman_pcd.c: F-053 hash_bytes_offset=1 (key at offset 8 in DDR record)"
+fi
+
 # M2-4: free params page on disengage (was leaking 256 B per cycle)
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
     echo 'aW1wb3J0IHN5cwpwYXRoID0gImRyaXZlcnMvbmV0L2V0aGVybmV0L2ZyZWVzY2FsZS9mbWFuL2ZtYW5fcGNkX2tnLmMiCndpdGggb3BlbihwYXRoKSBhcyBmOgogICAgc3JjID0gZi5yZWFkKCkKCm9sZCA9ICgnXHRpZiAocnhwb3J0KVxuJwogICAgICAgJ1x0XHQodm9pZClmbWFuX3BvcnRfc2V0X2NjX2Jhc2Uocnhwb3J0LCAwKTtcbicKICAgICAgICdcdCh2b2lkKWZtYW5fcGNkX2tnX3BvcnRfZGV0YWNoX2NjKHBjZCwgaHdfcG9ydF9pZCk7JykKbmV3ID0gKCdcdGlmIChyeHBvcnQpIHtcbicKICAgICAgICdcdFx0dTMyIHBwX29mZjtcbicKICAgICAgICdcdFx0KHZvaWQpZm1hbl9wb3J0X3NldF9jY19iYXNlKHJ4cG9ydCwgMCk7XG4nCiAgICAgICAnXHRcdHBwX29mZiA9IGZtYW5fcG9ydF9nZXRfcGFyYW1zX3BhZ2Uocnhwb3J0KTtcbicKICAgICAgICdcdFx0aWYgKHBwX29mZikge1xuJwogICAgICAgJ1x0XHRcdGZtYW5fcGNkX211cmFtX2ZyZWUocGNkLCBwcF9vZmYsIDI1Nik7XG4nCiAgICAgICAnXHRcdFx0KHZvaWQpZm1hbl9wb3J0X3NldF9wYXJhbXNfcGFnZShyeHBvcnQsIDAsIE5VTEwpO1xuJwogICAgICAgJ1x0XHR9XG4nCiAgICAgICAnXHR9XG4nCiAgICAgICAnXHQodm9pZClmbWFuX3BjZF9rZ19wb3J0X2RldGFjaF9jYyhwY2QsIGh3X3BvcnRfaWQpOycpCmlmIG9sZCBpbiBzcmM6CiAgICBzcmMgPSBzcmMucmVwbGFjZShvbGQsIG5ldywgMSkKICAgIHdpdGggb3BlbihwYXRoLCAidyIpIGFzIGY6CiAgICAgICAgZi53cml0ZShzcmMpCiAgICBwcmludCgiIyMjIGZtYW5fcGNkX2tnLmM6IHBhcmFtcyBwYWdlIGZyZWVkIG9uIGRpc2FybSAoTTItNCkiKQplbHNlOgogICAgcHJpbnQoIiMjIyBmbWFuX3BjZF9rZy5jOiBwYXR0ZXJuIG5vdCBmb3VuZCAoYWxyZWFkeSBmaXhlZD8pIikK' | base64 -d | python3
