@@ -39,16 +39,10 @@ engage() {
     echo get   > "$PCD_BASE/fe_pool"         || die "fe_pool get failed"
     echo build > "$PCD_BASE/fe_singletons" 2>/dev/null || true
     echo build > "$PCD_BASE/fe_hashfe" 2>/dev/null || true
-    # P4.1: use the dedicated TX FQ when available.
-    # Falls back to default per-port FQ 0x200 on ask.ko that predates P4.1.
-    DEDICATED_FQ=$(dmesg 2>/dev/null | grep -oP "dedicated TX FQ 0x[0-9a-fA-F]+" | tail -1 | grep -oP "0x[0-9a-fA-F]+" || echo "")
-    if [ -n "$DEDICATED_FQ" ]; then
-        # Strip 0x prefix: fe_enq build takes bare hex (e.g. "build 2b9")
-        ENQ_FQID=$(echo "$DEDICATED_FQ" | sed "s/^0x//")
-        echo "ASK offload: using dedicated TX FQ $DEDICATED_FQ"
-    else
-        ENQ_FQID="200"
-    fi
+    # F-054: always use PCD-range FQ 0x200 (512) which is in eth3's polled
+    # FQ range (512-639).  The dedicated TX FQ 0x2b9 (697) is outside the
+    # kernel's per-port FQ range so HIT frames are silently lost.
+    ENQ_FQID="200"
     echo "build $ENQ_FQID" > "$PCD_BASE/fe_enq"  || die "fe_enq build failed"
     # F-045: fe_enter build with no argument defaults to hash frontend
     # (fe_hash_off) or MUX, not an invalid port-offset.
@@ -103,7 +97,7 @@ case "${VERB:-status}" in
     disengage) disengage ;;
     flow-add)
         key="${1}"
-        enq="${2:-0}"
+        enq="${2:-0x55100}"  # F-054: default to MUX FE offset
         if [ -z "$key" ] || [ "${#key}" -ne 26 ] || ! echo "$key" | grep -qE '^[0-9a-fA-F]{26}$'; then
             echo "ERROR: key must be 26 hex chars (13 bytes) — SIP(8)+DIP(8)+PROTO(2)+SPORT(4)+DPORT(4)" >&2
             echo "Usage: $0 flow-add <key_hex_26chars> [enq_off]" >&2
