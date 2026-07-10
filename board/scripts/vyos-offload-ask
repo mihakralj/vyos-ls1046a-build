@@ -34,8 +34,8 @@ engage() {
     echo "ASK offload: building FE-VM pipeline..."
 
     echo "set $PORT"   > "$PCD_BASE/fe_port"  || die "fe_port set $PORT failed"
-    # 12-byte key: DPORT(2)+SPORT(2)+DIP(4)+SIP(4) — matches EKFC=0x00180006
-    echo "set 0x7FFF 12 0" > "$PCD_BASE/fe_ehash" || die "fe_ehash set failed"
+    # 13-byte key: SIP(4)+DIP(4)+PROTO(1)+SPORT(2)+DPORT(2) — descending EKFC bit order
+    echo "set 0x7FFF 13 0" > "$PCD_BASE/fe_ehash" || die "fe_ehash set failed"
     echo get   > "$PCD_BASE/fe_pool"         || die "fe_pool get failed"
     echo build > "$PCD_BASE/fe_singletons" 2>/dev/null || true
     echo build > "$PCD_BASE/fe_hashfe" 2>/dev/null || true
@@ -104,9 +104,9 @@ case "${VERB:-status}" in
     flow-add)
         key="${1}"
         enq="${2:-0}"
-        if [ -z "$key" ] || [ "${#key}" -ne 24 ] || ! echo "$key" | grep -qE '^[0-9a-fA-F]{24}$'; then
-            echo "ERROR: key must be 24 hex chars (12 bytes)" >&2
-            echo "Usage: $0 flow-add <key_hex_24chars> [enq_off]" >&2
+        if [ -z "$key" ] || [ "${#key}" -ne 26 ] || ! echo "$key" | grep -qE '^[0-9a-fA-F]{26}$'; then
+            echo "ERROR: key must be 26 hex chars (13 bytes) — SIP(8)+DIP(8)+PROTO(2)+SPORT(4)+DPORT(4)" >&2
+            echo "Usage: $0 flow-add <key_hex_26chars> [enq_off]" >&2
             exit 1
         fi
         echo "add 0 ${key} ${enq}" > "$PCD_BASE/fe_flow" || die "fe_flow add failed"
