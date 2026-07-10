@@ -1256,15 +1256,19 @@ fi
 # HIT in program history (2026-07-04).  No sed needed: the original patch
 # code already has the correct value.  word0 = 0x40800000.
 
-# F-047: Disable dead CCBS scaffold (if(0) sentinel).
-# Per spec §5.6: proper deletion deferred to §7 table-driven restructure.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 -c "
-import sys, base64
-b64='aW1wb3J0IHN5cwoKcGF0aCA9ICdkcml2ZXJzL25ldC9ldGhlcm5ldC9mcmVlc2NhbGUvZm1hbi9mbWFuX3BjZC5jJwp3aXRoIG9wZW4ocGF0aCkgYXMgZjoKICAgIHNyYyA9IGYucmVhZCgpCgppZHggPSBzcmMuZmluZCgnLyogMDE1MDogQ0NCUyBzY2FmZm9sZCcpCmlmIGlkeCA8IDA6CiAgICBwcmludCgnIyMjIGZtYW5fcGNkLmM6IEYtMDQ3IHNjYWZmb2xkIGNvbW1lbnQgbm90IGZvdW5kJykKICAgIHN5cy5leGl0KDApCgp0YWlsID0gc3JjW2lkeDppZHgrMjAwMF0KbXVyYW1faWR4ID0gdGFpbC5maW5kKCdpZiAobXVyYW0pIHsnKQppZiBtdXJhbV9pZHggPCAwOgogICAgcHJpbnQoJyMjIyBmbWFuX3BjZC5jOiBpZiAobXVyYW0pIG5vdCBmb3VuZCBuZWFyIHNjYWZmb2xkJykKICAgIHN5cy5leGl0KDApCgpiZWZvcmUgPSBzcmNbOmlkeCttdXJhbV9pZHhdCmFmdGVyID0gc3JjW2lkeCttdXJhbV9pZHhdCmFmdGVyID0gYWZ0ZXIucmVwbGFjZSgnaWYgKG11cmFtKSB7JywgJ2lmICgwKSB7IC8qIEYtMDQ3OiBDQ0JTIHNjYWZmb2xkIGRpc2FibGVkICovJywgMSkKc3JjID0gYmVmb3JlICsgYWZ0ZXIKCndpdGggb3BlbihwYXRoLCAndycpIGFzIGY6CiAgICBmLndyaXRlKHNyYykKcHJpbnQoJyMjIyBmbWFuX3BjZC5jOiBGLTA0NyBDQ0JTIHNjYWZmb2xkIGRpc2FibGVkJykK'
-exec(base64.b64decode(b64).decode())
-" 2>&1
-    echo "### fman_pcd.c: F-047 CCBS scaffold disabled"
+# F-047: Strip the dead CCBS scaffold from 0132 patch BEFORE application.
+# Patch 0132 adds a scaffold block that DOES NOT APPLY on kernel 6.18.38
+# due to context drift — the scaffold hunk gets truncated at 'i' and the
+# subsequent function body (err=..., return 0, etc.) is never appended.
+# Result: fman_pcd.c ends with a stray 'i' and the compiler fails at EOF.
+# Solution: strip lines 69-100 of the patch (the scaffold comment + block)
+# before the patch is applied, so the rest of the 0132 delta (err=..., 
+# disengage function, show handler) applies cleanly.
+# F-044 RCCB bypass is already in place (does not reference the scaffold).
+PATCH_0132="vyos-build/scripts/package-build/linux-kernel/patches/kernel/0132-fman-pcd-fe-arm-debugfs.patch"
+if [ -f "$PATCH_0132" ]; then
+    sed -i '/+[[:space:]]*\/\* 0150: CCBS scaffold/,/+[[:space:]]*\}[[:space:]]*$/{/^+/d}' "$PATCH_0132"
+    echo "### 0132.patch: F-047 CCBS scaffold hunk stripped before application"
 fi
 
 # F-050: Allow mask=0 in fe_ehash set for single-bucket E-EKFC-1 experiment.
