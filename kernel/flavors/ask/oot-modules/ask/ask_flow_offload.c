@@ -1040,7 +1040,7 @@ static void ask_debugfs_fe_flow_write(const struct ask_flow_key *key,
         /* F-049: descending EKFC bit order — SIP(4)+DIP(4)+PROTO(1)+SPORT(2)+DPORT(2) */
         memcpy(&raw[0], key->src_ip, 4);
         memcpy(&raw[4], key->dst_ip, 4);
-        raw[8]  = key->proto;
+        raw[8]  = key->l4_proto;
         raw[9]  = (key->sport >> 8) & 0xff;   raw[10] = key->sport & 0xff;
         raw[11] = (key->dport >> 8) & 0xff;   raw[12] = key->dport & 0xff;
 
