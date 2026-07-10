@@ -1251,32 +1251,20 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-044 CCBS scaffold bypass removed (keep ehash root)"
 fi
 
-# F-046: Remove FE_ENTER_ALLOCATE bit from CONT_LOOKUP root AD word0.
-# The FE_ENTER root AD (built by fman_pcd_fe_enter_build()) has word0 =
-# FMAN_AD_CONT_LOOKUP_TYPE | FMAN_AD_FE_ENTER_ALLOCATE (0x40800000).
-# The ALLOCATE bit (0x00800000) tells the CC engine to allocate a new
-# workspace buffer for the FE-VM entry.  Hypothesis: this fresh buffer
-# lacks the KG 64-bit hash result, so the ehash indexes a wrong bucket
-# and flow keys never HIT.  Removing the ALLOCATE bit preserves the
-# original frame context (including KG hash) when entering the FE-VM.
-# If this fix makes flow HITs work, the ALLOCATE path needs a hash-copy
-# rather than outright removal.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    sed -i 's/FMAN_AD_CONT_LOOKUP_TYPE | FMAN_AD_FE_ENTER_ALLOCATE,/FMAN_AD_CONT_LOOKUP_TYPE,  \/\* F-046: no ALLOCATE — preserve KG hash \*\//' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo "### fman_pcd.c: F-046 FE_ENTER_ALLOCATE removed (preserve KG hash)"
-fi
+# F-046 REVERTED per fman-keygen-flow-key-spec.md v2.0 §5.4:
+# FMAN_AD_FE_ENTER_ALLOCATE (0x00800000) was set during the only confirmed
+# HIT in program history (2026-07-04).  No sed needed: the original patch
+# code already has the correct value.  word0 = 0x40800000.
 
-# F-047: Disable the dead CCBS scaffold in fman_pcd_fe_arm_engage().
-# The scaffold (patch 0132) allocates 304B MURAM per engage and writes
-# CONT_LOOKUP AD entries to random MURAM offsets.  F-044 already bypasses
-# the scaffold (RCCB -> FE_ENTER directly), so these MURAM writes are dead
-# code that only risk corrupting active FMan data structures and leak 304B
-# per engage/disengage cycle.  Disable the entire block by making the
-# 'if (muram)' guard always-false.
+# F-047: Disable dead CCBS scaffold (if(0) sentinel).
+# Per spec §5.6: proper deletion deferred to §7 table-driven restructure.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    echo 'aW1wb3J0IHN5cwpwYXRoID0gJ2RyaXZlcnMvbmV0L2V0aGVybmV0L2ZyZWVzY2FsZS9mbWFuL2ZtYW5fcGNkLmMnCndpdGggb3BlbihwYXRoKSBhcyBmOgogICAgc3JjID0gZi5yZWFkKCkKCiMgVGhlIHNjYWZmb2xkIGlzIHRoZSBPTkxZIHBsYWNlIHRoYXQgaGFzICdDQ0JTIHNjYWZmb2xkJyBpbiBmbWFuX3BjZC5jLgojIEZpbmQgdGhlIGxpbmUgY29udGFpbmluZyAnaWYgKG11cmFtKScgQUZURVIgdGhlIHNjYWZmb2xkIGNvbW1lbnQgbWFya2VyLgppZHggPSBzcmMuZmluZCgnLyogMDE1MDogQ0NCUyBzY2FmZm9sZCcpCmlmIGlkeCA8IDA6CiAgICBwcmludCgnIyMjIGZtYW5fcGNkLmM6IEYtMDQ3IHNjYWZmb2xkIGNvbW1lbnQgbm90IGZvdW5kIChhbHJlYWR5IHJlbW92ZWQ/KScpCiAgICBzeXMuZXhpdCgwKQoKIyBGaW5kICdpZiAobXVyYW0pIHsnIHdpdGhpbiA0MCBsaW5lcyBhZnRlciB0aGUgc2NhZmZvbGQgY29tbWVudAp0YWlsID0gc3JjW2lkeDppZHgrMjAwMF0KbXVyYW1faWR4ID0gdGFpbC5maW5kKCdpZiAobXVyYW0pIHsnKQppZiBtdXJhbV9pZHggPCAwOgogICAgcHJpbnQoJyMjIyBmbWFuX3BjZC5jOiBGLTA0NyBpZiAobXVyYW0pIG5vdCBmb3VuZCBuZWFyIHNjYWZmb2xkJykKICAgIHN5cy5leGl0KDApCgojIFJlcGxhY2UganVzdCB0aGF0IG9jY3VycmVuY2UKYmVmb3JlID0gc3JjWzppZHgrbXVyYW1faWR4XQphZnRlciA9IHNyY1tpZHgrbXVyYW1faWR4Ol0KYWZ0ZXIgPSBhZnRlci5yZXBsYWNlKCdpZiAobXVyYW0pIHsnLCAnaWYgKDApIHsgLyogRi0wNDc6IENDQlMgc2NhZmZvbGQgZGlzYWJsZWQgKi8nLCAxKQpzcmMgPSBiZWZvcmUgKyBhZnRlcgoKd2l0aCBvcGVuKHBhdGgsICd3JykgYXMgZjoKICAgIGYud3JpdGUoc3JjKQpwcmludCgnIyMjIGZtYW5fcGNkLmM6IEYtMDQ3IENDQlMgc2NhZmZvbGQgZGlzYWJsZWQgKE1VUkFNIGxlYWsgKyBjb3JydXB0aW9uIGZpeGVkKScpCg==' | base64 -d | python3
-    echo "### fman_pcd.c: F-047 CCBS scaffold disabled (MURAM leak + corruption fixed)"
+    python3 -c "
+import sys, base64
+b64='aW1wb3J0IHN5cwoKcGF0aCA9ICdkcml2ZXJzL25ldC9ldGhlcm5ldC9mcmVlc2NhbGUvZm1hbi9mbWFuX3BjZC5jJwp3aXRoIG9wZW4ocGF0aCkgYXMgZjoKICAgIHNyYyA9IGYucmVhZCgpCgppZHggPSBzcmMuZmluZCgnLyogMDE1MDogQ0NCUyBzY2FmZm9sZCcpCmlmIGlkeCA8IDA6CiAgICBwcmludCgnIyMjIGZtYW5fcGNkLmM6IEYtMDQ3IHNjYWZmb2xkIGNvbW1lbnQgbm90IGZvdW5kJykKICAgIHN5cy5leGl0KDApCgp0YWlsID0gc3JjW2lkeDppZHgrMjAwMF0KbXVyYW1faWR4ID0gdGFpbC5maW5kKCdpZiAobXVyYW0pIHsnKQppZiBtdXJhbV9pZHggPCAwOgogICAgcHJpbnQoJyMjIyBmbWFuX3BjZC5jOiBpZiAobXVyYW0pIG5vdCBmb3VuZCBuZWFyIHNjYWZmb2xkJykKICAgIHN5cy5leGl0KDApCgpiZWZvcmUgPSBzcmNbOmlkeCttdXJhbV9pZHhdCmFmdGVyID0gc3JjW2lkeCttdXJhbV9pZHhdCmFmdGVyID0gYWZ0ZXIucmVwbGFjZSgnaWYgKG11cmFtKSB7JywgJ2lmICgwKSB7IC8qIEYtMDQ3OiBDQ0JTIHNjYWZmb2xkIGRpc2FibGVkICovJywgMSkKc3JjID0gYmVmb3JlICsgYWZ0ZXIKCndpdGggb3BlbihwYXRoLCAndycpIGFzIGY6CiAgICBmLndyaXRlKHNyYykKcHJpbnQoJyMjIyBmbWFuX3BjZC5jOiBGLTA0NyBDQ0JTIHNjYWZmb2xkIGRpc2FibGVkJykK'
+exec(base64.b64decode(b64).decode())
+" 2>&1
+    echo "### fman_pcd.c: F-047 CCBS scaffold disabled"
 fi
 
 # F-050: Allow mask=0 in fe_ehash set for single-bucket E-EKFC-1 experiment.
