@@ -62,16 +62,13 @@ rm -rf packages/linux-headers-*
 ### specs/ask2-rewrite-spec.md.
 
 # Allow apt downgrades: VyOS rolling repo has older libssl3/openssl than
-# Debian bookworm.  live-build runs apt inside the chroot.  A chroot hook
-# (runs before package installation) writes the config; includes.chroot/
-# files are also copied but hooks are more reliable for this.
-sudo install -D -m 755 /dev/stdin \
-  vyos-build/data/live-build-config/hooks/live/00ci-allow-downgrades.chroot <<'HOOK'
-#!/bin/sh
-cat > /etc/apt/apt.conf.d/99ci-allow-downgrades <<'EOF'
-APT::Get::Allow-Downgrades "true";
-EOF
-HOOK
+# Debian bookworm.  live-build chroot apt-get -y full-upgrade calculates
+# 2 downgrades and refuses without --allow-downgrades.
+# Chroot hooks run AFTER package install in live-build (too late).
+# Instead, patch build-vyos-image to add --allow-downgrades to lb config.
+sed -i 's/--apt-options --yes/--apt-options "--yes --allow-downgrades"/' \
+  scripts/image-build/build-vyos-image
+grep 'apt.options.*yes' scripts/image-build/build-vyos-image || echo "WARNING: apt-options sed pattern not found in build-vyos-image"
 
 ./build-vyos-image \
   --architecture arm64 \
