@@ -61,6 +61,15 @@ rm -rf packages/linux-headers-*
 ### will ship ask.ko + ask_bridge.ko via a new packaging path per
 ### specs/ask2-rewrite-spec.md.
 
+# Allow apt downgrades: the VyOS upstream repos occasionally have version
+# mismatches that cause `apt-get -y` to refuse downgrades during the live-build
+# chroot phase (e.g. 2 packages downgraded, -y used without --allow-downgrades).
+# Tell apt to accept downgrades globally.
+export APT_GET_OPTIONS="--allow-downgrades"
+sudo tee /etc/apt/apt.conf.d/99ci-allow-downgrades <<'EOF' >/dev/null
+APT::Get::Allow-Downgrades "true";
+EOF
+
 ./build-vyos-image \
   --architecture arm64 \
   --build-by "$BUILD_BY" \
