@@ -61,6 +61,15 @@ rm -rf packages/linux-headers-*
 ### will ship ask.ko + ask_bridge.ko via a new packaging path per
 ### specs/ask2-rewrite-spec.md.
 
+# libssl3/openssl downgrade fix: VyOS rolling repo has older versions than
+# Debian bookworm.  Modify live-build's Apt() function to always pass
+# -o APT::Get::Allow-Downgrades=true.  This is the single funnel through
+# which ALL apt-get calls pass (bootstrap_archives, chroot_archives,
+# chroot_install-packages), so fixing it once covers everything.
+sudo sed -i 's/Chroot ${CHROOT} apt-get ${APT_OPTIONS} "${@}"/Chroot ${CHROOT} apt-get ${APT_OPTIONS} -o APT::Get::Allow-Downgrades=true "${@}"/' \
+  /usr/share/live/build/functions/wrapper.sh
+grep 'Allow-Downgrades' /usr/share/live/build/functions/wrapper.sh && echo "Apt() patched" || echo "ERROR: Apt() patch failed"
+
 ./build-vyos-image \
   --architecture arm64 \
   --build-by "$BUILD_BY" \
