@@ -61,25 +61,14 @@ rm -rf packages/linux-headers-*
 ### will ship ask.ko + ask_bridge.ko via a new packaging path per
 ### specs/ask2-rewrite-spec.md.
 
-# libssl3/openssl downgrade fix — see comments above.
-# Previous CI runs corrupted live-build scripts with broken sed patterns.
-# Reinstall to restore originals, then apply clean patches.
-sudo apt-get install --reinstall -qq -y live-build 2>/dev/null || true
-
-# Two mechanisms: (1) apt config in includes.chroot/ (copied into chroot
-# before pkg install), (2) -o APT::Get::Allow-Downgrades=true in both
-# dist-upgrade calls (bootstrap_archives + chroot_archives).
-sudo install -D -m 644 /dev/stdin \
-  vyos-build/data/live-build-config/includes.chroot/etc/apt/apt.conf.d/99ci-allow-downgrades <<'EOF'
-APT::Get::Allow-Downgrades "true";
-EOF
-
-sudo sed -i 's/Apt chroot "dist-upgrade"/Apt chroot dist-upgrade -o APT::Get::Allow-Downgrades=true/' \
-  /usr/lib/live/build/chroot_archives
-sudo sed -i 's/Apt chroot "dist-upgrade"/Apt chroot dist-upgrade -o APT::Get::Allow-Downgrades=true/' \
-  /usr/lib/live/build/bootstrap_archives
-
-echo "apt downgrade fix: config + bootstrap_archives + chroot_archives"
+# libssl3/openssl downgrade fix: VyOS rolling repo has older versions than
+# Debian bookworm.  Modify live-build's Apt() function to always pass
+# -o APT::Get::Allow-Downgrades=true.  This is the single funnel through
+# which ALL apt-get calls pass (bootstrap_archives, chroot_archives,
+# chroot_install-packages), so fixing it once covers everything.
+sudo sed -i 's/Chroot ${CHROOT} apt-get ${APT_OPTIONS} "${@}"/Chroot ${CHROOT} apt-get ${APT_OPTIONS} -o APT::Get::Allow-Downgrades=true "${@}"/' \
+  /usr/share/live/build/functions/wrapper.sh
+grep 'Allow-Downgrades' /usr/share/live/build/functions/wrapper.sh && echo "Apt() patched" || echo "ERROR: Apt() patch failed"
 
 ./build-vyos-image \
   --architecture arm64 \
