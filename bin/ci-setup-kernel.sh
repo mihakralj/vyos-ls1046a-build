@@ -1444,6 +1444,22 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     echo "### fman_keygen.c: F-062b scheme default FQ set to 0x200 (fixes MISS/EXIT stall)"
 fi
 
+# F-062c: Set ENQUEUE_KG_DFLT_NIA in the AC_CC branch of keygen_scheme_setup().
+# The AC_CC (next_engine==2) case sets NIA_ENG_FM_CTL|NIA_FM_CTL_AC_CC but
+# does NOT set ENQUEUE_KG_DFLT_NIA.  Without it, the scheme has no default
+# action after the CC engine returns (EXIT → scheme → ??? → STALL).
+# F-062b sets kgse_fqb=0x200 as the default FQID, but the hardware ignores
+# it unless ENQUEUE_KG_DFLT_NIA is also set.  Add it right after the
+# NIA_FM_CTL_AC_CC line.
+if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
+    sed -i '/tmp_reg |= NIA_ENG_FM_CTL | NIA_FM_CTL_AC_CC |$/{n;s/^/\t\t\ttmp_reg |= ENQUEUE_KG_DFLT_NIA;\t\/\* F-062c: default FQ after AC_CC *\/\n/;}' \
+        drivers/net/ethernet/freescale/fman/fman_keygen.c 2>/dev/null || \
+    sed -i '/NIA_FM_CTL_AC_CC |/a\
+		tmp_reg |= ENQUEUE_KG_DFLT_NIA;	/* F-062c: default FQ after AC_CC EXIT */' \
+        drivers/net/ethernet/freescale/fman/fman_keygen.c
+    echo "### fman_keygen.c: F-062c ENQUEUE_KG_DFLT_NIA added to AC_CC branch"
+fi
+
 # M2-4: free params page on disengage (was leaking 256 B per cycle)
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
     echo 'aW1wb3J0IHN5cwpwYXRoID0gImRyaXZlcnMvbmV0L2V0aGVybmV0L2ZyZWVzY2FsZS9mbWFuL2ZtYW5fcGNkX2tnLmMiCndpdGggb3BlbihwYXRoKSBhcyBmOgogICAgc3JjID0gZi5yZWFkKCkKCm9sZCA9ICgnXHRpZiAocnhwb3J0KVxuJwogICAgICAgJ1x0XHQodm9pZClmbWFuX3BvcnRfc2V0X2NjX2Jhc2Uocnhwb3J0LCAwKTtcbicKICAgICAgICdcdCh2b2lkKWZtYW5fcGNkX2tnX3BvcnRfZGV0YWNoX2NjKHBjZCwgaHdfcG9ydF9pZCk7JykKbmV3ID0gKCdcdGlmIChyeHBvcnQpIHtcbicKICAgICAgICdcdFx0dTMyIHBwX29mZjtcbicKICAgICAgICdcdFx0KHZvaWQpZm1hbl9wb3J0X3NldF9jY19iYXNlKHJ4cG9ydCwgMCk7XG4nCiAgICAgICAnXHRcdHBwX29mZiA9IGZtYW5fcG9ydF9nZXRfcGFyYW1zX3BhZ2Uocnhwb3J0KTtcbicKICAgICAgICdcdFx0aWYgKHBwX29mZikge1xuJwogICAgICAgJ1x0XHRcdGZtYW5fcGNkX211cmFtX2ZyZWUocGNkLCBwcF9vZmYsIDI1Nik7XG4nCiAgICAgICAnXHRcdFx0KHZvaWQpZm1hbl9wb3J0X3NldF9wYXJhbXNfcGFnZShyeHBvcnQsIDAsIE5VTEwpO1xuJwogICAgICAgJ1x0XHR9XG4nCiAgICAgICAnXHR9XG4nCiAgICAgICAnXHQodm9pZClmbWFuX3BjZF9rZ19wb3J0X2RldGFjaF9jYyhwY2QsIGh3X3BvcnRfaWQpOycpCmlmIG9sZCBpbiBzcmM6CiAgICBzcmMgPSBzcmMucmVwbGFjZShvbGQsIG5ldywgMSkKICAgIHdpdGggb3BlbihwYXRoLCAidyIpIGFzIGY6CiAgICAgICAgZi53cml0ZShzcmMpCiAgICBwcmludCgiIyMjIGZtYW5fcGNkX2tnLmM6IHBhcmFtcyBwYWdlIGZyZWVkIG9uIGRpc2FybSAoTTItNCkiKQplbHNlOgogICAgcHJpbnQoIiMjIyBmbWFuX3BjZF9rZy5jOiBwYXR0ZXJuIG5vdCBmb3VuZCAoYWxyZWFkeSBmaXhlZD8pIikK' | base64 -d | python3
