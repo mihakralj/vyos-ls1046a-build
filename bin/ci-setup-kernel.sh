@@ -1419,6 +1419,35 @@ fi
 
 fi
 
+# F-062a: Reverse F-059 — route HIT to MUX→ENQ→FQ 0x200, not EXIT.
+# EXIT returns to the scheme which has fqb=0 → BMI stall.  HIT through
+# MUX→ENQ bypasses the scheme entirely: the ENQ AD word 2 has FQID 0x200
+# (F-058) and QMan handles buffer release properly.  MISS still goes to
+# EXIT (hash FE word 6 unchanged); we fix that via F-062b below.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    sed -i 's/\(F-059.*route HIT to EXIT.*\)\n.*exit_off/route HIT to MUX (reversed by F-062a)/' drivers/net/ethernet/freescale/fman/fman_pcd.c 2>/dev/null || \
+    sed -i 's/pcd->fe_exit_off,/pcd->fe_mux_off,  \/\* F-062a: HIT->MUX->ENQ, not EXIT \*\//' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    echo "### fman_pcd.c: F-062a HIT route changed from EXIT to MUX→ENQ"
+fi
+
+# F-062b: Set scheme default FQ to 0x200 so post-EXIT MISS dispatch doesn't stall.
+# The scheme's kgse_fqb register is the base Frame Queue ID used for default
+# dispatch after the CC engine (and thus after EXIT).  Currently fqb=0 which
+# maps to invalid FQ 0 → BM pool drains → port stalls.  FQ 0x200 is the
+# kernel's PCD-range polled FQ, consistently used by ENQ (F-058) and accepted
+# by QMan.  Insert BEFORE the F-051 zeros (which run later via sed) so fqb
+# survives the F-051 pass (F-051 only zeros bmch/bmcl/hc/ekdv).
+if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
+    sed -i '/\/\* F-051: force-clear RSS mask\/hash config for exact-match ehash \*\//i\
+	/* F-062b: set default Frame Queue Base so post-EXIT dispatch works.\n\
+	 * Without this, the scheme fqb stays 0 and MISS/EXIT frames target\n\
+	 * invalid FQ 0 -> BM pool drain -> port stall (BMI IER=0xf0000000). */\n\
+	scheme_regs.kgse_fqb = 0x200;' \
+        drivers/net/ethernet/freescale/fman/fman_keygen.c
+    echo "### fman_keygen.c: F-062b scheme default FQ set to 0x200 (fixes MISS/EXIT stall)"
+fi
+
 # M2-4: free params page on disengage (was leaking 256 B per cycle)
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
     echo 'aW1wb3J0IHN5cwpwYXRoID0gImRyaXZlcnMvbmV0L2V0aGVybmV0L2ZyZWVzY2FsZS9mbWFuL2ZtYW5fcGNkX2tnLmMiCndpdGggb3BlbihwYXRoKSBhcyBmOgogICAgc3JjID0gZi5yZWFkKCkKCm9sZCA9ICgnXHRpZiAocnhwb3J0KVxuJwogICAgICAgJ1x0XHQodm9pZClmbWFuX3BvcnRfc2V0X2NjX2Jhc2Uocnhwb3J0LCAwKTtcbicKICAgICAgICdcdCh2b2lkKWZtYW5fcGNkX2tnX3BvcnRfZGV0YWNoX2NjKHBjZCwgaHdfcG9ydF9pZCk7JykKbmV3ID0gKCdcdGlmIChyeHBvcnQpIHtcbicKICAgICAgICdcdFx0dTMyIHBwX29mZjtcbicKICAgICAgICdcdFx0KHZvaWQpZm1hbl9wb3J0X3NldF9jY19iYXNlKHJ4cG9ydCwgMCk7XG4nCiAgICAgICAnXHRcdHBwX29mZiA9IGZtYW5fcG9ydF9nZXRfcGFyYW1zX3BhZ2Uocnhwb3J0KTtcbicKICAgICAgICdcdFx0aWYgKHBwX29mZikge1xuJwogICAgICAgJ1x0XHRcdGZtYW5fcGNkX211cmFtX2ZyZWUocGNkLCBwcF9vZmYsIDI1Nik7XG4nCiAgICAgICAnXHRcdFx0KHZvaWQpZm1hbl9wb3J0X3NldF9wYXJhbXNfcGFnZShyeHBvcnQsIDAsIE5VTEwpO1xuJwogICAgICAgJ1x0XHR9XG4nCiAgICAgICAnXHR9XG4nCiAgICAgICAnXHQodm9pZClmbWFuX3BjZF9rZ19wb3J0X2RldGFjaF9jYyhwY2QsIGh3X3BvcnRfaWQpOycpCmlmIG9sZCBpbiBzcmM6CiAgICBzcmMgPSBzcmMucmVwbGFjZShvbGQsIG5ldywgMSkKICAgIHdpdGggb3BlbihwYXRoLCAidyIpIGFzIGY6CiAgICAgICAgZi53cml0ZShzcmMpCiAgICBwcmludCgiIyMjIGZtYW5fcGNkX2tnLmM6IHBhcmFtcyBwYWdlIGZyZWVkIG9uIGRpc2FybSAoTTItNCkiKQplbHNlOgogICAgcHJpbnQoIiMjIyBmbWFuX3BjZF9rZy5jOiBwYXR0ZXJuIG5vdCBmb3VuZCAoYWxyZWFkeSBmaXhlZD8pIikK' | base64 -d | python3
