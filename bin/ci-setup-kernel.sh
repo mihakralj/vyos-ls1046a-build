@@ -1425,8 +1425,7 @@ fi
 # (F-058) and QMan handles buffer release properly.  MISS still goes to
 # EXIT (hash FE word 6 unchanged); we fix that via F-062b below.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    sed -i 's/\(F-059.*route HIT to EXIT.*\)\n.*exit_off/route HIT to MUX (reversed by F-062a)/' drivers/net/ethernet/freescale/fman/fman_pcd.c 2>/dev/null || \
-    sed -i 's/pcd->fe_exit_off,/pcd->fe_mux_off,  \/\* F-062a: HIT->MUX->ENQ, not EXIT \*\//' \
+    sed -i 's/pcd->fe_exit_off,/pcd->fe_mux_off,/' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
     echo "### fman_pcd.c: F-062a HIT route changed from EXIT to MUX→ENQ"
 fi
@@ -1436,14 +1435,11 @@ fi
 # dispatch after the CC engine (and thus after EXIT).  Currently fqb=0 which
 # maps to invalid FQ 0 → BM pool drains → port stalls.  FQ 0x200 is the
 # kernel's PCD-range polled FQ, consistently used by ENQ (F-058) and accepted
-# by QMan.  Insert BEFORE the F-051 zeros (which run later via sed) so fqb
-# survives the F-051 pass (F-051 only zeros bmch/bmcl/hc/ekdv).
+# by QMan.  Insert AFTER scheme_regs.kgse_mv assignment (before F-051 block)
+# so fqb survives the F-051 pass (F-051 only zeros bmch/bmcl/hc/ekdv).
 if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
-    sed -i '/\/\* F-051: force-clear RSS mask\/hash config for exact-match ehash \*\//i\
-	/* F-062b: set default Frame Queue Base so post-EXIT dispatch works.\n\
-	 * Without this, the scheme fqb stays 0 and MISS/EXIT frames target\n\
-	 * invalid FQ 0 -> BM pool drain -> port stall (BMI IER=0xf0000000). */\n\
-	scheme_regs.kgse_fqb = 0x200;' \
+    sed -i '/scheme_regs\.kgse_mv = scheme->match_vector;/a\
+	scheme_regs.kgse_fqb = 0x200;	/* F-062b: default FQ for post-EXIT dispatch */' \
         drivers/net/ethernet/freescale/fman/fman_keygen.c
     echo "### fman_keygen.c: F-062b scheme default FQ set to 0x200 (fixes MISS/EXIT stall)"
 fi
