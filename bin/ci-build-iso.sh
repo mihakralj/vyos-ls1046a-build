@@ -61,18 +61,21 @@ rm -rf packages/linux-headers-*
 ### will ship ask.ko + ask_bridge.ko via a new packaging path per
 ### specs/ask2-rewrite-spec.md.
 
-# libssl3/openssl downgrade fix: VyOS rolling repo has older versions than
-# Debian bookworm-{backports,security,updates}.  live-build's chroot_archives
-# line 302 runs `Apt chroot "dist-upgrade"` without --allow-downgrades.
-# APT_OPTIONS env var gets lost between subshell/chroot layers.
-# Fix: patch chroot_archives directly on the runner to add the flag.
-# Also patch chroot_install-packages line 82 for completeness.
-sudo sed -i 's/Apt chroot "upgrade"/Apt chroot "upgrade --allow-downgrades"/' \
+# libssl3/openssl downgrade fix — see comments above.
+# Two mechanisms: (1) apt config in includes.chroot/ (copied into chroot
+# before pkg install), (2) -o APT::Get::Allow-Downgrades=true in both
+# dist-upgrade calls (bootstrap_archives + chroot_archives).
+sudo install -D -m 644 /dev/stdin \
+  vyos-build/data/live-build-config/includes.chroot/etc/apt/apt.conf.d/99ci-allow-downgrades <<'EOF'
+APT::Get::Allow-Downgrades "true";
+EOF
+
+sudo sed -i 's/Apt chroot "dist-upgrade"/Apt chroot dist-upgrade -o APT::Get::Allow-Downgrades=true/' \
   /usr/lib/live/build/chroot_archives
-sudo sed -i 's/Apt chroot "dist-upgrade"/Apt chroot "dist-upgrade --allow-downgrades"/' \
-  /usr/lib/live/build/chroot_archives
-sudo sed -i 's/apt-get ${APT_OPTIONS} install/apt-get ${APT_OPTIONS} --allow-downgrades install/' \
-  /usr/lib/live/build/chroot_install-packages
+sudo sed -i 's/Apt chroot "dist-upgrade"/Apt chroot dist-upgrade -o APT::Get::Allow-Downgrades=true/' \
+  /usr/lib/live/build/bootstrap_archives
+
+echo "apt downgrade fix: config + bootstrap_archives + chroot_archives"
 
 ./build-vyos-image \
   --architecture arm64 \
