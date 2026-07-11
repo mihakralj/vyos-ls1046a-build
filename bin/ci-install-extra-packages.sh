@@ -105,10 +105,13 @@ try_install "gping" install_gping
 # doggo — DNS client (dig alternative)
 ###############################################################################
 install_doggo() {
-  local v
-  v=$(curl -fsSI --max-time 30 https://github.com/mr-karan/doggo/releases/latest \
-    | grep -i '^location:' | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+' || true)
-  [ -n "$v" ] || { echo "WARNING: Could not determine doggo version" >&2; return 0; }
+  # Pinned to v1.1.0: v1.2.0 changed asset naming convention from
+  # doggo_1.1.0_Linux_arm64.tar.gz to doggo-linux-aarch64.tar.gz
+  # (GoReleaser).  The version-detect logic would get v1.2.0 from the
+  # latest-release redirect, but the URL constructor below uses the
+  # old underscore convention.  Pin explicitly until upstream adopts
+  # GoReleaser-style naming or we add convention detection.
+  local v="1.1.0"
   local url="https://github.com/mr-karan/doggo/releases/download/v${v}/doggo_${v}_Linux_arm64.tar.gz"
   echo "Downloading doggo ${v} from ${url}"
   curl -fSL --max-time 120 -o "${TMP_DIR}/doggo.tar.gz" "$url"
