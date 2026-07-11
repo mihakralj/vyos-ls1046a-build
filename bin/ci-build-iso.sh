@@ -61,13 +61,17 @@ rm -rf packages/linux-headers-*
 ### will ship ask.ko + ask_bridge.ko via a new packaging path per
 ### specs/ask2-rewrite-spec.md.
 
-# Allow apt downgrades: the VyOS rolling repo has older libssl3/openssl than
-# Debian bookworm.  live-build runs apt INSIDE the chroot, so the apt config
-# must be placed in includes.chroot/ (not on the host system).
-sudo install -D -m 644 /dev/stdin \
-  vyos-build/data/live-build-config/includes.chroot/etc/apt/apt.conf.d/99ci-allow-downgrades <<'EOF'
+# Allow apt downgrades: VyOS rolling repo has older libssl3/openssl than
+# Debian bookworm.  live-build runs apt inside the chroot.  A chroot hook
+# (runs before package installation) writes the config; includes.chroot/
+# files are also copied but hooks are more reliable for this.
+sudo install -D -m 755 /dev/stdin \
+  vyos-build/data/live-build-config/hooks/live/00ci-allow-downgrades.chroot <<'HOOK'
+#!/bin/sh
+cat > /etc/apt/apt.conf.d/99ci-allow-downgrades <<'EOF'
 APT::Get::Allow-Downgrades "true";
 EOF
+HOOK
 
 ./build-vyos-image \
   --architecture arm64 \
