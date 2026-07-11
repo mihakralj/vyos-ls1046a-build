@@ -62,20 +62,11 @@ rm -rf packages/linux-headers-*
 ### specs/ask2-rewrite-spec.md.
 
 # libssl3/openssl downgrade fix: VyOS rolling repo has older versions than
-# Debian bookworm-{backports,security,updates}.  Two-pronged:
-# 1. Disable those repos in lb config so apt never sees newer ssl versions
-# 2. Chroot apt config as defense-in-depth (includes.chroot/ copied before
-#    apt runs inside chroot)
-sudo install -D -m 644 /dev/stdin \
-  vyos-build/data/live-build-config/includes.chroot/etc/apt/apt.conf.d/99ci-allow-downgrades <<'EOF'
-APT::Get::Allow-Downgrades "true";
-APT::Get::Assume-Yes "true";
-EOF
-sed -i -e 's/--backports true/--backports false/' \
-       -e 's/--security true/--security false/' \
-       -e 's/--updates true/--updates false/' \
-  scripts/image-build/build-vyos-image
-echo "backports/security/updates: disabled"
+# Debian bookworm-{backports,security,updates}.  live-build's chroot_archives
+# (line 302) runs `Apt chroot "dist-upgrade"` which uses ${APT_OPTIONS}.
+# configuration.sh line 120: APT_OPTIONS="${APT_OPTIONS:---yes}".
+# Setting APT_OPTIONS in the environment overrides lb config entirely.
+export APT_OPTIONS="--yes --allow-downgrades"
 
 ./build-vyos-image \
   --architecture arm64 \
