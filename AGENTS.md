@@ -11,6 +11,7 @@ The **qdrant** MCP server is the authoritative persistent memory for this projec
 3. **Prefer `qdrant-store` over expanding this file** for session-specific or dated findings. Reserve `AGENTS.md` for stable, structural rules that apply to *every* future edit.
 4. **Conflict resolution:** if qdrant and AGENTS.md disagree, trust the more recent source (check `metadata.date` in qdrant entries).
 5. **Always run `qdrant-find` first** when continuing a topic across sessions — prior insights may already solve the problem you are investigating.
+6. **Validate before committing.** Before committing any change that touches the kernel, FMan PCD, FE-VM, ehash, KeyGen, or AC_CC dispatch path, run `qdrant-find` with the affected component names and your proposed approach to validate architectural correctness against NXP silicon documentation, prior session findings, and settled topology decisions. If Qdrant and your change disagree, trust Qdrant unless you have new hardware evidence that contradicts it.
 
 ## Documentation Style
 
