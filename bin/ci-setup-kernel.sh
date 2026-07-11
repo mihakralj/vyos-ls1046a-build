@@ -1452,7 +1452,7 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # ENQ ALLOCATE — add to p.flags (fman_pcd_fe_build encodes w[0] = type|flags)
     # EXIT has ALLOCATE and works; ENQ needs it to free FE workspace
-    sed -i 's/p.flags = FMAN_FE_ENQ_FQID;/p.flags = FMAN_FE_ENQ_FQID | FMAN_AD_FE_ALLOCATE; \/\* F-062d: free FE workspace \*\//' \
+    sed -i 's/p.flags = FMAN_FE_ENQ_FQID;/p.flags = FMAN_FE_ENQ_FQID | FMAN_AD_FE_ENTER_ALLOCATE; \/\* F-062d: free FE workspace \*\//' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c 2>/dev/null || true
     echo "### fman_pcd.c: F-062d ENQ ALLOCATE for workspace cleanup"
 fi
