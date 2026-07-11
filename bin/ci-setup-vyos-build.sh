@@ -184,6 +184,16 @@ if [ -f vyos-build/data/defaults.toml ]; then
     echo "### defaults.toml squashfs_compression_type after sed:"
     grep -E '^\s*squashfs_compression_type\s*=' vyos-build/data/defaults.toml || true
   fi
+
+  # Pin doggo to v1.1.0: upstream bumped to v1.2.0 but the v1.2.0 release
+  # uses GoReleaser naming (doggo-linux-aarch64.tar.gz) while the VyOS
+  # build scripts construct URLs with the old naming convention
+  # (doggo_1.2.0_Linux_arm64.tar.gz) → 404.  v1.1.0 still has the old convention.
+  if grep -q doggo_version vyos-build/data/defaults.toml; then
+    sed -i 's/doggo_version = "1\.2\.0"/doggo_version = "1.1.0"/' \
+      vyos-build/data/defaults.toml
+    echo "### defaults.toml doggo_version pinned to 1.1.0 (v1.2.0 asset naming changed)"
+  fi
 fi
 
 ### Pin kernel_version to the ASK kernel.
