@@ -62,6 +62,10 @@ rm -rf packages/linux-headers-*
 ### specs/ask2-rewrite-spec.md.
 
 # libssl3/openssl downgrade fix — see comments above.
+# Previous CI runs corrupted live-build scripts with broken sed patterns.
+# Reinstall to restore originals, then apply clean patches.
+sudo apt-get install --reinstall -qq -y live-build 2>/dev/null || true
+
 # Two mechanisms: (1) apt config in includes.chroot/ (copied into chroot
 # before pkg install), (2) -o APT::Get::Allow-Downgrades=true in both
 # dist-upgrade calls (bootstrap_archives + chroot_archives).
