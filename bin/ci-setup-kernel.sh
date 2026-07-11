@@ -1444,20 +1444,20 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     echo "### fman_keygen.c: F-062b scheme default FQ set to 0x200 (fixes MISS/EXIT stall)"
 fi
 
-# F-062c: Set ENQUEUE_KG_DFLT_NIA in the AC_CC branch of keygen_scheme_setup().
-# The AC_CC (next_engine==2) case sets NIA_ENG_FM_CTL|NIA_FM_CTL_AC_CC but
-# does NOT set ENQUEUE_KG_DFLT_NIA.  Without it, the scheme has no default
-# action after the CC engine returns (EXIT → scheme → ??? → STALL).
-# F-062b sets kgse_fqb=0x200 as the default FQID, but the hardware ignores
-# it unless ENQUEUE_KG_DFLT_NIA is also set.  Add it right after the
-# NIA_FM_CTL_AC_CC line.
-if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
-    sed -i '/tmp_reg |= NIA_ENG_FM_CTL | NIA_FM_CTL_AC_CC |$/{n;s/^/\t\t\ttmp_reg |= ENQUEUE_KG_DFLT_NIA;\t\/\* F-062c: default FQ after AC_CC *\/\n/;}' \
-        drivers/net/ethernet/freescale/fman/fman_keygen.c 2>/dev/null || \
-    sed -i '/NIA_FM_CTL_AC_CC |/a\
-		tmp_reg |= ENQUEUE_KG_DFLT_NIA;	/* F-062c: default FQ after AC_CC EXIT */' \
-        drivers/net/ethernet/freescale/fman/fman_keygen.c
-    echo "### fman_keygen.c: F-062c ENQUEUE_KG_DFLT_NIA added to AC_CC branch"
+# F-062d: Route MISS through MUX→ENQ (same as HIT).  The scheme's default
+# FQ (kgse_spc.DEFQID) is 6-bit only (FQIDs 0-63) — cannot address FQ 0x200.
+# Fix: change hash encode call last arg from fe_exit_off to fe_mux_off so
+# word 6 (MISS nextFEPtr) points to MUX, not EXIT.  Both HIT and MISS flow
+# MUX→ENQ→FQ 0x200.
+# Also: add ALLOCATE to MUX so it deallocates the FE workspace.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    sed -i '/fman_pcd_fe_hash_encode(/,/);/{
+            s/pcd->fe_exit_off/pcd->fe_mux_off/
+        }' drivers/net/ethernet/freescale/fman/fman_pcd.c 2>/dev/null || true
+    # MUX ALLOCATE
+    sed -i 's/FMAN_FE_TYPE_MUX,/FMAN_FE_TYPE_MUX | FMAN_AD_FE_ALLOCATE,/' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c 2>/dev/null || true
+    echo "### fman_pcd.c: F-062d MISS→MUX→ENQ + MUX ALLOCATE"
 fi
 
 # M2-4: free params page on disengage (was leaking 256 B per cycle)
