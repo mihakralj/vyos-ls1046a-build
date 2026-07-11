@@ -1444,20 +1444,17 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     echo "### fman_keygen.c: F-062b scheme default FQ set to 0x200 (fixes MISS/EXIT stall)"
 fi
 
-# F-062d: Route MISS through MUX→ENQ (same as HIT).  The scheme's default
-# FQ (kgse_spc.DEFQID) is 6-bit only (FQIDs 0-63) — cannot address FQ 0x200.
-# Fix: change hash encode call last arg from fe_exit_off to fe_mux_off so
-# word 6 (MISS nextFEPtr) points to MUX, not EXIT.  Both HIT and MISS flow
-# MUX→ENQ→FQ 0x200.
-# Also: add ALLOCATE to MUX so it deallocates the FE workspace.
+# F-062d: MISS stays at EXIT (proven safe, no BMI stall per 2026-07-10 A/B test).
+# Routing MISS through MUX→ENQ caused BMI stall because ENQ→QMan path has
+# never been silicon-proven in FE-VM architecture (M2 gate used CONT_LOOKUP AD).
+# Keep only the MUX ALLOCATE fix — MUX needs ALLOCATE for HIT frames that
+# chain through MUX→ENQ.  MISS stays at EXIT→safe-drop.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    sed -i '/fman_pcd_fe_hash_encode(/,/);/{
-            s/pcd->fe_exit_off/pcd->fe_mux_off/
-        }' drivers/net/ethernet/freescale/fman/fman_pcd.c 2>/dev/null || true
-    # MUX ALLOCATE
-    sed -i 's/FMAN_FE_TYPE_MUX,/FMAN_FE_TYPE_MUX | FMAN_AD_FE_ALLOCATE,/' \
+    # ENQ ALLOCATE — add to p.flags (fman_pcd_fe_build encodes w[0] = type|flags)
+    # EXIT has ALLOCATE and works; ENQ needs it to free FE workspace
+    sed -i 's/p.flags = FMAN_FE_ENQ_FQID;/p.flags = FMAN_FE_ENQ_FQID | FMAN_AD_FE_ALLOCATE; \/\* F-062d: free FE workspace \*\//' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c 2>/dev/null || true
-    echo "### fman_pcd.c: F-062d MISS→MUX→ENQ + MUX ALLOCATE"
+    echo "### fman_pcd.c: F-062d ENQ ALLOCATE for workspace cleanup"
 fi
 
 # M2-4: free params page on disengage (was leaking 256 B per cycle)
