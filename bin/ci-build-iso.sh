@@ -63,10 +63,16 @@ rm -rf packages/linux-headers-*
 
 # libssl3/openssl downgrade fix: VyOS rolling repo has older versions than
 # Debian bookworm-{backports,security,updates}.  live-build's chroot_archives
-# (line 302) runs `Apt chroot "dist-upgrade"` which uses ${APT_OPTIONS}.
-# configuration.sh line 120: APT_OPTIONS="${APT_OPTIONS:---yes}".
-# Setting APT_OPTIONS in the environment overrides lb config entirely.
-export APT_OPTIONS="--yes --allow-downgrades"
+# line 302 runs `Apt chroot "dist-upgrade"` without --allow-downgrades.
+# APT_OPTIONS env var gets lost between subshell/chroot layers.
+# Fix: patch chroot_archives directly on the runner to add the flag.
+# Also patch chroot_install-packages line 82 for completeness.
+sudo sed -i 's/Apt chroot "upgrade"/Apt chroot "upgrade --allow-downgrades"/' \
+  /usr/lib/live/build/chroot_archives
+sudo sed -i 's/Apt chroot "dist-upgrade"/Apt chroot "dist-upgrade --allow-downgrades"/' \
+  /usr/lib/live/build/chroot_archives
+sudo sed -i 's/apt-get ${APT_OPTIONS} install/apt-get ${APT_OPTIONS} --allow-downgrades install/' \
+  /usr/lib/live/build/chroot_install-packages
 
 ./build-vyos-image \
   --architecture arm64 \
