@@ -61,21 +61,21 @@ rm -rf packages/linux-headers-*
 ### will ship ask.ko + ask_bridge.ko via a new packaging path per
 ### specs/ask2-rewrite-spec.md.
 
-# libssl3/openssl downgrade fix: VyOS rolling repo has older versions
-# than Debian bookworm-security/updates.  Write apt config to both
-# includes.chroot/ (copied into chroot before pkg install) and also
-# pass --allow-downgrades via lb config apt-options (two-pronged).
+# libssl3/openssl downgrade fix: VyOS rolling repo has older versions than
+# Debian bookworm-{backports,security,updates}.  Two-pronged:
+# 1. Disable those repos in lb config so apt never sees newer ssl versions
+# 2. Chroot apt config as defense-in-depth (includes.chroot/ copied before
+#    apt runs inside chroot)
 sudo install -D -m 644 /dev/stdin \
   vyos-build/data/live-build-config/includes.chroot/etc/apt/apt.conf.d/99ci-allow-downgrades <<'EOF'
 APT::Get::Allow-Downgrades "true";
+APT::Get::Assume-Yes "true";
 EOF
-# Also patch build-vyos-image: disable backports (source of newer ssl)
-# and add --allow-downgrades as a separate --apt-options flag
-sed -i 's/--backports true/--backports false/' \
+sed -i -e 's/--backports true/--backports false/' \
+       -e 's/--security true/--security false/' \
+       -e 's/--updates true/--updates false/' \
   scripts/image-build/build-vyos-image
-sed -i 's/"--yes"/"--yes" --apt-options "--allow-downgrades"/' \
-  scripts/image-build/build-vyos-image
-grep -c 'Allow-Downgrades' vyos-build/data/live-build-config/includes.chroot/etc/apt/apt.conf.d/99ci-allow-downgrades && echo "apt config: installed"
+echo "backports/security/updates: disabled"
 
 ./build-vyos-image \
   --architecture arm64 \
