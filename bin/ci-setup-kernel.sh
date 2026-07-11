@@ -1391,17 +1391,14 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-059 hash FE word 5 (HIT) routed to EXIT for isolation test"
 fi
 
-# F-060: Fix MUX context write target — write to AD+4 (word 1), not AD+0.
-# NXP SDK's FmPcdCcBuildContextByFE writes MUX context to h_FE + feSize + 0
-# = AD + 4 (the word after the MUX type header).  F-056 wrote to AD + 0,
-# overwriting the type header (0x04000000) with enq_off → hardware sees
-# type=0x00 (invalid FE type) → crash.
-#
-# The MUX hardware reads the working store from AD + 4 regardless of
-# ws_offset.  The type header at AD + 0 must stay intact.
+# F-060 v3: Fix MUX context write target — write to AD+4 (word 1), not AD+0.
+# F-056 wrote the MUX to word 0, overwriting the type header (0x04000000).
+# F-060 v2 searched for a single-line pattern "enq->muram_off, mux);" but
+# F-055/F-056 writes across TWO lines (line break after comma).  v3 uses
+# \s*\n\s* in the regex to match the multi-line pattern robustly.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    echo 'aW1wb3J0IHJlCgpwYXRoID0gImRyaXZlcnMvbmV0L2V0aGVybmV0L2ZyZWVzY2FsZS9mbWFuL2ZtYW5fcGNkLmMiCndpdGggb3BlbihwYXRoKSBhcyBmOgogICAgc3JjID0gZi5yZWFkKCkKCiMgVHJ5IHYyIHBhdHRlcm4gZmlyc3QgKHdpdGggRk1BTl9GRV9UWVBFX01VWCBwcmVmaXgsIHRoZSBhY3R1YWwgRi0wNTUgb3V0cHV0KQpvbGRfdjIgPSAiaW93cml0ZTMyYmUoRk1BTl9GRV9UWVBFX01VWCB8ICh1MzIpZW5xLT5tdXJhbV9vZmYsIG11eCk7IgpuZXdfbGluZSA9ICJpb3dyaXRlMzJiZSgodTMyKWVucS0+bXVyYW1fb2ZmLCAodTMyIF9faW9tZW0gKiltdXggKyAxKTsgLyogRi0wNjA6IFNESy1jb21wbGlhbnQ6IHJhdyBlbnFfb2ZmIGF0IEFEKzQgKi8iCgppZiBvbGRfdjIgaW4gc3JjOgogICAgc3JjID0gc3JjLnJlcGxhY2Uob2xkX3YyLCBuZXdfbGluZSkKICAgIHByaW50KCIjIyMgZm1hbl9wY2QuYzogRi0wNjAgdjI6IE1VWCB3cml0ZSBmaXhlZCAodHlwZSByZW1vdmVkICsgQUQrNCB0YXJnZXQpIikKZWxpZiAiaW93cml0ZTMyYmUoKHUzMillbnEtPm11cmFtX29mZiwgbXV4KTsiIGluIHNyYzoKICAgICMgQWxyZWFkeSBoYWQgdHlwZSBieXRlIHJlbW92ZWQsIGZpeCB0aGUgdGFyZ2V0CiAgICBvbGRfdjEgPSAiaW93cml0ZTMyYmUoKHUzMillbnEtPm11cmFtX29mZiwgbXV4KTsiCiAgICBzcmMgPSBzcmMucmVwbGFjZShvbGRfdjEsIG5ld19saW5lKQogICAgcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBGLTA2MCB2MTogTVVYIHRhcmdldCBmaXhlZCB0byBBRCs0IikKZWxzZToKICAgIHByaW50KCIjIyMgZm1hbl9wY2QuYzogRi0wNjAgbmVpdGhlciBwYXR0ZXJuIGZvdW5kIChGLTA1NS9GLTA1NiBtYXkgbm90IGhhdmUgYXBwbGllZCkiKQoKd2l0aCBvcGVuKHBhdGgsICJ3IikgYXMgZjoKICAgIGYud3JpdGUoc3JjKQo=' | base64 -d | python3
-    echo "### fman_pcd.c: F-060 MUX context write fixed to AD+4 (word 1, preserves type)"
+    echo 'aW1wb3J0IHJlCgpwYXRoID0gImRyaXZlcnMvbmV0L2V0aGVybmV0L2ZyZWVzY2FsZS9mbWFuL2ZtYW5fcGNkLmMiCndpdGggb3BlbihwYXRoKSBhcyBmOgogICAgc3JjID0gZi5yZWFkKCkKCiMgRi0wNjAgdjM6IEZpeCBNVVggY29udGV4dCB3cml0ZSB0YXJnZXQgZnJvbSBBRCswIHRvIEFEKzQgKHdvcmQgMSkKIyBUaGUgRi0wNTUvRi0wNTYgZml4dXAgd3JvdGU6CiMgICAgIGlvd3JpdGUzMmJlKCh1MzIpZW5xLT5tdXJhbV9vZmYsCiMgICAgICAgICAgICAgICAgIG11eCk7CiMgYWNyb3NzIFRXTyBsaW5lcy4gIEYtMDYwIHYyIHNlYXJjaGVkIG9uIGEgc2luZ2xlIGxpbmUgYW5kIG5ldmVyIG1hdGNoZWQuCiMgdjMgc2VhcmNoZXMgZm9yIHRoZSBwYXJ0aWFsIHVuaXF1ZSBtYXJrZXIgIih1MzIpZW5xLT5tdXJhbV9vZmYsIgojIHRoZW4gdXNlcyByZWdleCB0byByZXBsYWNlIHRoZSBlbnRpcmUgMi1saW5lIHdyaXRlIGJsb2NrLgoKb2xkX2Jsb2NrID0gcidcdFx0XHRcdGlvd3JpdGUzMmJlXChcKHUzMlwpZW5xLT5tdXJhbV9vZmYsXHMqXG5ccyptdXhcKTtccypcbicKbmV3X2Jsb2NrID0gJ1x0XHRcdFx0aW93cml0ZTMyYmUoKHUzMillbnEtPm11cmFtX29mZiwgKHUzMiBfX2lvbWVtICopbXV4ICsgMSk7IC8qIEYtMDYwOiBTREstY29tcGxpYW50IE1VWCBjb250ZXh0IGF0IEFEKzQgKi9cbicKCm4gPSAwCmlmICdlbnEtPm11cmFtX29mZiwnIGluIHNyYzoKICAgIHNyYywgbiA9IHJlLnN1Ym4ob2xkX2Jsb2NrLCBuZXdfYmxvY2ssIHNyYywgY291bnQ9MSkKaWYgbiA+IDA6CiAgICBwcmludChmIiMjIyBmbWFuX3BjZC5jOiBGLTA2MCB2MzogTVVYIHdyaXRlIGZpeGVkIHRvIEFEKzQgKHtufSByZXBsYWNlbWVudCkiKQplbHNlOgogICAgIyBGYWxsYmFjazogdHJ5IHNpbmdsZS1saW5lIHBhdHRlcm4gKEYtMDU1IG1heSBhbHJlYWR5IGhhdmUgbWVyZ2VkIGxpbmVzKQogICAgb2xkX3NpbmdsZSA9IHInaW93cml0ZTMyYmVcKFwodTMyXCllbnEtPm11cmFtX29mZixccyptdXhcKTsnCiAgICBzcmMsIG4gPSByZS5zdWJuKG9sZF9zaW5nbGUsICdpb3dyaXRlMzJiZSgodTMyKWVucS0+bXVyYW1fb2ZmLCAodTMyIF9faW9tZW0gKiltdXggKyAxKTsgLyogRi0wNjAgdjMgKi8nLCBzcmMsIGNvdW50PTEpCiAgICBpZiBuID4gMDoKICAgICAgICBwcmludChmIiMjIyBmbWFuX3BjZC5jOiBGLTA2MCB2Mzogc2luZ2xlLWxpbmUgZmFsbGJhY2sgbWF0Y2hlZCAoe259KSIpCiAgICBlbHNlOgogICAgICAgIHByaW50KCIjIyMgZm1hbl9wY2QuYzogRi0wNjAgdjM6IHBhdHRlcm4gTk9UIGZvdW5kIChhbHJlYWR5IGFwcGxpZWQgb3IgRi0wNTUgbm90IGFwcGxpZWQpIikKCndpdGggb3BlbihwYXRoLCAidyIpIGFzIGY6CiAgICBmLndyaXRlKHNyYykK' | base64 -d | python3
+    echo "### fman_pcd.c: F-060 v3: MUX context write fixed to AD+4 (multi-line match)"
 
 # F-061-struct: Add fe_pool_off field to struct fman_pcd and populate it.
 # F-061's fe_probe debugfs references pcd->fe_pool_off which was never defined.
