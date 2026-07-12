@@ -1441,6 +1441,15 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-069b ic_probe debugfs node"
 fi
 
+# Suppress -Wunused-function for fman_pcd_fe_build_contexts (leftover
+# from CCBS scaffold removal). The function was called from 0150 which
+# F-047 removed.  Avoids -Werror build failure.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    sed -i 's/static void fman_pcd_fe_build_contexts/static __maybe_unused void fman_pcd_fe_build_contexts/' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    echo "### fman_pcd.c: fe_build_contexts marked __maybe_unused (suppress -Werror)"
+fi
+
 
 
 fi
