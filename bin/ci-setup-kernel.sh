@@ -1447,7 +1447,9 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     sed -i 's/static void fman_pcd_fe_build_contexts/static __maybe_unused void fman_pcd_fe_build_contexts/' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo "### fman_pcd.c: fe_build_contexts marked __maybe_unused (suppress -Werror)"
+    sed -i 's/fman_muram_offset_to_vbase(muram,/(void *)fman_muram_offset_to_vbase(muram,/' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    echo "### fman_pcd.c: fe_build_contexts fixed (__maybe_unused + cast)"
 fi
 
 
