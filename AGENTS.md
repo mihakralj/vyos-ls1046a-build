@@ -12,6 +12,7 @@ The **qdrant** MCP server is the authoritative persistent memory for this projec
 4. **Conflict resolution:** if qdrant and AGENTS.md disagree, trust the more recent source (check `metadata.date` in qdrant entries).
 5. **Always run `qdrant-find` first** when continuing a topic across sessions — prior insights may already solve the problem you are investigating.
 6. **Validate before committing.** Before committing any change that touches the kernel, FMan PCD, FE-VM, ehash, KeyGen, or AC_CC dispatch path, run `qdrant-find` with the affected component names and your proposed approach to validate architectural correctness against NXP silicon documentation, prior session findings, and settled topology decisions. If Qdrant and your change disagree, trust Qdrant unless you have new hardware evidence that contradicts it.
+7. **Validate findings at every step.** After each diagnostic read, hardware probe, or experimental result, run `qdrant-find` to cross-check your interpretation against prior sessions. Do NOT proceed to a fix without confirming that Qdrant's accumulated knowledge agrees with your diagnosis. This rule exists because assumptions about buffer layouts, register offsets, field names, and silicon behavior have been wrong multiple times — Qdrant holds the corrected versions.
 
 ## Documentation Style
 
