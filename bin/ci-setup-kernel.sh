@@ -1441,6 +1441,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-069b ic_probe debugfs node"
 fi
 
+# Strip EXPORT_SYMBOL_GPL placed before #include by F-069b v3.
+# EXPORT_SYMBOL_GPL needs <linux/export.h> which isn't included yet.
+# Both fsl_dpaa_fman and dpaa_eth are built-in, so the symbol resolves 
+# without exporting.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    sed -i '/^EXPORT_SYMBOL_GPL(fman_pcd_ic_vaddr);$/d' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    echo "### fman_pcd.c: stripped EXPORT_SYMBOL_GPL (before includes)"
+fi
+
 # Suppress -Wunused-function for fman_pcd_fe_build_contexts (leftover
 # from CCBS scaffold removal). The function was called from 0150 which
 # F-047 removed.  Avoids -Werror build failure.
