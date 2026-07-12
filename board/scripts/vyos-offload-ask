@@ -34,8 +34,8 @@ engage() {
     echo "ASK offload: building FE-VM pipeline..."
 
     echo "set $PORT"   > "$PCD_BASE/fe_port"  || die "fe_port set $PORT failed"
-    # 13-byte key: SIP(4)+DIP(4)+PROTO(1)+SPORT(2)+DPORT(2) — descending EKFC bit order
-    echo "set 0x7FFF 13 0" > "$PCD_BASE/fe_ehash" || die "fe_ehash set failed"
+    # 8-byte key (F-063 keysize regression test): SIP(4)+DIP(4) only — match 2026-07-10 proven config
+    echo "set 0x7FFF 8 0" > "$PCD_BASE/fe_ehash" || die "fe_ehash set failed"
     echo get   > "$PCD_BASE/fe_pool"         || die "fe_pool get failed"
     echo build > "$PCD_BASE/fe_singletons" 2>/dev/null || true
     echo build > "$PCD_BASE/fe_hashfe" 2>/dev/null || true
