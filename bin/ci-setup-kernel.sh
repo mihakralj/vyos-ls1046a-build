@@ -1228,7 +1228,7 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
 # M2-4: reduce FE pool 100->16 to fit 64KB MURAM
 # 100x28B rounded 256B = 25600B + pool 8192B + ehash 33280B > 65536B
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    sed -i 's/FMAN_PCD_FE_POOL_COUNT 100/FMAN_PCD_FE_POOL_COUNT 16/' drivers/net/ethernet/freescale/fman/fman_pcd.c
+    sed -i 's/FMAN_PCD_FE_POOL_COUNT[[:space:]]*100/FMAN_PCD_FE_POOL_COUNT 16/' drivers/net/ethernet/freescale/fman/fman_pcd.c
     echo '### fman_pcd.c: M2-4 FE pool reduced 100->16'
 fi
 
