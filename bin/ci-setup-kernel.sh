@@ -1310,6 +1310,13 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-052 debugfs_root_get marked __unused"
 fi
 
+# F-052b: Suppress -Werror for fman_pcd_debugfs_root_put (same root cause).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    sed -i 's/static void fman_pcd_debugfs_root_put(void)/static __attribute__((unused)) void fman_pcd_debugfs_root_put(void)/' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    echo "### fman_pcd.c: F-052b debugfs_root_put marked __unused"
+fi
+
 # F-053: Fix hash_bytes_offset in en_exthash_node descriptor ad[0] encoding.
 # The DDR flow record (en_ehash_entry) has an 8-byte link-chain header (flags +
 # next_entry pointer) before the key data at FMAN_EHASH_FLOW_KEY_OFF=8.  The
