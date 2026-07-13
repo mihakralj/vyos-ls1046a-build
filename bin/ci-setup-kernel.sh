@@ -1212,7 +1212,7 @@ fi
 # Base64-encoded Python fixer (no escape issues).
 # Runs after kernel post-patches commit, before compilation.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    
+    echo 'aW1wb3J0IHN5cwoKcGF0aCA9ICJkcml2ZXJzL25ldC9ldGhlcm5ldC9mcmVlc2NhbGUvZm1hbi9mbWFuX3BjZC5jIgp3aXRoIG9wZW4ocGF0aCkgYXMgZjogc3JjID0gZi5yZWFkKCkKY2hhbmdlcyA9IDAKCiMgMC4gRGVmaW5lIGJvdGggZ2xvYmFscwpmb3IgZyBpbiBbInVuc2lnbmVkIGludCBmbWFuX3BjZF9oYXNoX29mZnNldCIsICJ2b2lkICpmbWFuX3BjZF9pY192YWRkciJdOgogICAgaWYgZyBub3QgaW4gc3JjOgogICAgICAgIGZpcnN0X2luYyA9IHNyYy5maW5kKCIjaW5jbHVkZSIpCiAgICAgICAgaWYgZmlyc3RfaW5jID4gMDoKICAgICAgICAgICAgc3JjID0gc3JjWzpmaXJzdF9pbmNdICsgZyArICI7XG4iICsgc3JjW2ZpcnN0X2luYzpdCiAgICAgICAgICAgIGNoYW5nZXMgKz0gMQogICAgICAgICAgICBwcmludChmIiMjIyBmbWFuX3BjZC5jOiBGLTA2OWIgdjYge2d9IGRlZmluZWQiKQoKIyAxLiBJbnNlcnQgaWNfcHJvYmVfc2hvdyBpZiBub3QgcHJlc2VudCAoaGFuZGxlIGZyZXNoIEFORCB1cGdyYWRlIGZyb20gb2xkIHY0KQppZiAiZm1hbl9wY2RfaWNfcHJvYmVfc2hvdyIgbm90IGluIHNyYzoKICAgIGFuY2hvciA9ICJzdGF0aWMgaW50IGZtYW5fcGNkX2ZlX3Byb2JlX3Nob3ciCiAgICBpZiBhbmNob3IgaW4gc3JjOgogICAgICAgIGNvZGUgPSAoCiAgICAgICAgICAgICIvKiBGLTA2OWIgdjY6IGljX3Byb2JlIGRlYnVnZnMgLSBkdW1wIEZNYW4gSUMgYXQgY29ycmVjdCBvZmZzZXRzICovXG4iCiAgICAgICAgICAgICJzdGF0aWMgaW50IGZtYW5fcGNkX2ljX3Byb2JlX3Nob3coc3RydWN0IHNlcV9maWxlICpzLCB2b2lkICp1bnVzZWQpXG4iCiAgICAgICAgICAgICJ7XG4iCiAgICAgICAgICAgICJcdHZvaWQgKnZhZGRyO1xuIgogICAgICAgICAgICAiXHR1bnNpZ25lZCBpbnQgaGFzaF9vZmYsIHByc19vZmYsIGk7XG4iCiAgICAgICAgICAgICJcbiIKICAgICAgICAgICAgIlx0c21wX3JtYigpO1xuIgogICAgICAgICAgICAiXHR2YWRkciA9IGZtYW5fcGNkX2ljX3ZhZGRyO1xuIgogICAgICAgICAgICAiXHRpZiAoIXZhZGRyKSB7XG4iCiAgICAgICAgICAgICJcdFx0c2VxX3B1dHMocywgXCJubyBmcmFtZSBjYXB0dXJlZFxcblwiKTtcbiIKICAgICAgICAgICAgIlx0XHRyZXR1cm4gMDtcbiIKICAgICAgICAgICAgIlx0fVxuIgogICAgICAgICAgICAiXHRoYXNoX29mZiA9IGZtYW5fcGNkX2hhc2hfb2Zmc2V0O1xuIgogICAgICAgICAgICAiXHRwcnNfb2ZmID0gaGFzaF9vZmYgLSAweDI4O1xuIgogICAgICAgICAgICAiXHRzZXFfcHJpbnRmKHMsIFwidmFkZHI9JXB4IGhhc2hfb2ZmPSV1IHByc19vZmY9JXVcXG5cIiwgdmFkZHIsIGhhc2hfb2ZmLCBwcnNfb2ZmKTtcbiIKICAgICAgICAgICAgIlx0c2VxX3ByaW50ZihzLCBcInBhcnNlX3Jlc3VsdDogXCIpO1xuIgogICAgICAgICAgICAiXHRmb3IgKGkgPSAwOyBpIDwgODsgaSsrKSB7XG4iCiAgICAgICAgICAgICJcdFx0dTMyIHYgPSBiZTMyX3RvX2NwdSgoKHUzMiAqKXZhZGRyKVtwcnNfb2ZmLzQgKyBpXSk7XG4iCiAgICAgICAgICAgICJcdFx0c2VxX3ByaW50ZihzLCBcIiBbJTAyZF09JTA4eFwiLCBwcnNfb2ZmLzQgKyBpLCB2KTtcbiIKICAgICAgICAgICAgIlx0fVxuIgogICAgICAgICAgICAiXHRzZXFfcHJpbnRmKHMsIFwiXFxuaGFzaDogICAgICAgXCIpO1xuIgogICAgICAgICAgICAiXHRmb3IgKGkgPSAwOyBpIDwgMjsgaSsrKSB7XG4iCiAgICAgICAgICAgICJcdFx0dTMyIHYgPSBiZTMyX3RvX2NwdSgoKHUzMiAqKXZhZGRyKVtoYXNoX29mZi80ICsgaV0pO1xuIgogICAgICAgICAgICAiXHRcdHNlcV9wcmludGYocywgXCIgWyUwMmRdPSUwOHhcIiwgaGFzaF9vZmYvNCArIGksIHYpO1xuIgogICAgICAgICAgICAiXHR9XG4iCiAgICAgICAgICAgICJcdHNlcV9wdXRzKHMsIFwiXFxuXCIpO1xuIgogICAgICAgICAgICAiXHRyZXR1cm4gMDtcbiIKICAgICAgICAgICAgIn1cbiIKICAgICAgICAgICAgIlxuIgogICAgICAgICAgICAic3RhdGljIGludCBmbWFuX3BjZF9pY19wcm9iZV9vcGVuKHN0cnVjdCBpbm9kZSAqaW5vZGUsIHN0cnVjdCBmaWxlICpmaWxlKVxuIgogICAgICAgICAgICAie1xuIgogICAgICAgICAgICAiXHRyZXR1cm4gc2luZ2xlX29wZW4oZmlsZSwgZm1hbl9wY2RfaWNfcHJvYmVfc2hvdywgaW5vZGUtPmlfcHJpdmF0ZSk7XG4iCiAgICAgICAgICAgICJ9XG4iCiAgICAgICAgICAgICJcbiIKICAgICAgICAgICAgInN0YXRpYyBjb25zdCBzdHJ1Y3QgZmlsZV9vcGVyYXRpb25zIGZtYW5fcGNkX2ljX3Byb2JlX2ZvcHMgPSB7XG4iCiAgICAgICAgICAgICJcdC5vd25lclx0XHQ9IFRISVNfTU9EVUxFLFxuIgogICAgICAgICAgICAiXHQub3Blblx0XHQ9IGZtYW5fcGNkX2ljX3Byb2JlX29wZW4sXG4iCiAgICAgICAgICAgICJcdC5yZWFkXHRcdD0gc2VxX3JlYWQsXG4iCiAgICAgICAgICAgICJcdC5sbHNlZWtcdFx0PSBzZXFfbHNlZWssXG4iCiAgICAgICAgICAgICJcdC5yZWxlYXNlXHQ9IHNpbmdsZV9yZWxlYXNlLFxuIgogICAgICAgICAgICAifTtcblxuIgogICAgICAgICkKICAgICAgICBzcmMgPSBzcmMucmVwbGFjZShhbmNob3IsIGNvZGUgKyBhbmNob3IpCiAgICAgICAgY2hhbmdlcyArPSAxCiAgICAgICAgcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBGLTA2OWIgdjYgaWNfcHJvYmVfc2hvdyBpbnNlcnRlZCIpCiAgICBlbHNlOgogICAgICAgIHByaW50KCIjIyMgZm1hbl9wY2QuYzogRi0wNjliIHY2IGFuY2hvciBub3QgZm91bmQiKQplbHNlOgogICAgcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBGLTA2OWIgdjYgaWNfcHJvYmVfc2hvdyBhbHJlYWR5IHByZXNlbnQiKQoKIyAyLiBSZWdpc3RlciBkZWJ1Z2ZzCmlmICdkZWJ1Z2ZzX2NyZWF0ZV9maWxlKCJpY19wcm9iZSInIG5vdCBpbiBzcmM6CiAgICBkYmdfYW5jaG9yID0gJ2RlYnVnZnNfY3JlYXRlX2ZpbGUoImZlX3Byb2JlIicKICAgIGlmIGRiZ19hbmNob3IgaW4gc3JjOgogICAgICAgIHByb2JlX2RiZyA9ICgKICAgICAgICAgICAgJ1x0XHRcdGRlYnVnZnNfY3JlYXRlX2ZpbGUoImljX3Byb2JlIiwgMDQ0NCxcbicKICAgICAgICAgICAgJ1x0XHRcdFx0XHQgICAgcGNkLT5kZWJ1Z2ZzX2RpciwgcGNkLFxuJwogICAgICAgICAgICAnXHRcdFx0XHRcdCAgICAmZm1hbl9wY2RfaWNfcHJvYmVfZm9wcyk7XG4nCiAgICAgICAgICAgICdcdFx0XHQnICsgZGJnX2FuY2hvcgogICAgICAgICkKICAgICAgICBzcmMgPSBzcmMucmVwbGFjZShkYmdfYW5jaG9yLCBwcm9iZV9kYmcpCiAgICAgICAgY2hhbmdlcyArPSAxCiAgICAgICAgcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBGLTA2OWIgdjYgaWNfcHJvYmUgcmVnaXN0ZXJlZCIpCgppZiBjaGFuZ2VzID4gMDoKICAgIHdpdGggb3BlbihwYXRoLCAidyIpIGFzIGY6IGYud3JpdGUoc3JjKQogICAgcHJpbnQoZiIjIyMgZm1hbl9wY2QuYzogRi0wNjliIHY2IHtjaGFuZ2VzfSBjaGFuZ2UocykgYXBwbGllZCIpCmVsc2U6CiAgICBwcmludCgiIyMjIGZtYW5fcGNkLmM6IEYtMDY5YiB2NiBubyBjaGFuZ2VzIikK' | base64 -d | python3
 fi
 
 
@@ -1436,64 +1436,8 @@ fi
 # Stores the DMA buffer virtual address in shared global fman_pcd_ic_vaddr
 # at the top of rx_default_dqrr() so fman_pcd can dump the IC.
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
-    echo 'import sys
-
-path = "drivers/net/ethernet/freescale/dpaa/dpaa_eth.c"
-try:
-    with open(path) as f:
-        src = f.read()
-except FileNotFoundError:
-    print("### dpaa_eth.c: F-069a v7 file not found")
-    sys.exit(0)
-
-changes = 0
-
-# 1. Add extern declarations for shared globals
-if "extern void *fman_pcd_ic_vaddr" not in src:
-    first_static = src.find("
-static ")
-    if first_static > 0:
-        src = (src[:first_static+1] +
-               "extern void *fman_pcd_ic_vaddr;	/* F-069a v7: DMA buffer vaddr for ic_probe */
-" +
-               src[first_static+1:])
-        changes += 1
-        print("### dpaa_eth.c: F-069a v7 extern added")
-
-# 2. Insert vaddr capture in rx_default_dqrr
-if "fman_pcd_ic_vaddr = vaddr" not in src:
-    # Find rx_default_dqrr function and insert vaddr capture
-    func_anchor = "rx_default_dqrr"
-    func_pos = src.find(func_anchor)
-    if func_pos > 0:
-        brace = src.find('{', func_pos)
-        # Find "vaddr = " after the brace (first assignment to vaddr)
-        vaddr_assign = src.find("vaddr = ", brace)
-        if vaddr_assign > 0:
-            eol = src.find('
-', vaddr_assign)
-            # End of this statement - insert capture after it
-            capture = ('
-
-	/* F-069a v7: capture buffer vaddr for ic_probe debugfs. */
-'
-                       '	fman_pcd_ic_vaddr = vaddr;')
-            src = src[:eol+1] + capture + src[eol+1:]
-            changes += 1
-            assign_text = src[vaddr_assign:eol].strip()[:60]
-            print(f"### dpaa_eth.c: F-069a v7 vaddr capture inserted after '{assign_text}'")
-        else:
-            print("### dpaa_eth.c: F-069a v7 vaddr assignment not found in rx_default_dqrr")
-    else:
-        print("### dpaa_eth.c: F-069a v7 rx_default_dqrr not found")
-
-if changes > 0:
-    with open(path, "w") as f:
-        f.write(src)
-    print(f"### dpaa_eth.c: F-069a v7 {changes} change(s) applied")
-else:
-    print("### dpaa_eth.c: F-069a v7 no changes")' | base64 -d | python3
-    echo "### dpaa_eth.c: F-069a v7 vaddr capture (page-boundary safe scan)\n"
+    echo 'aW1wb3J0IHN5cwoKcGF0aCA9ICJkcml2ZXJzL25ldC9ldGhlcm5ldC9mcmVlc2NhbGUvZHBhYS9kcGFhX2V0aC5jIgp0cnk6CiAgICB3aXRoIG9wZW4ocGF0aCkgYXMgZjogc3JjID0gZi5yZWFkKCkKZXhjZXB0IEZpbGVOb3RGb3VuZEVycm9yOgogICAgcHJpbnQoIiMjIyBkcGFhX2V0aC5jOiBGLTA2OWEgdjkgZmlsZSBub3QgZm91bmQiKQogICAgc3lzLmV4aXQoMCkKCmNoYW5nZXMgPSAwCgojIDEuIGV4dGVybiBkZWNsYXJhdGlvbnMKaWYgImV4dGVybiB2b2lkICpmbWFuX3BjZF9pY19idWZfYmFzZSIgbm90IGluIHNyYzoKICAgIGZpcnN0X3N0ID0gc3JjLmZpbmQoIlxuc3RhdGljICIpCiAgICBpZiBmaXJzdF9zdCA+IDA6CiAgICAgICAgc3JjID0gKHNyY1s6Zmlyc3Rfc3QrMV0gKwogICAgICAgICAgICAgICAiZXh0ZXJuIHZvaWQgKmZtYW5fcGNkX2ljX3ZhZGRyO1xuIiArCiAgICAgICAgICAgICAgICJleHRlcm4gdm9pZCAqZm1hbl9wY2RfaWNfYnVmX2Jhc2U7XG4iICsKICAgICAgICAgICAgICAgc3JjW2ZpcnN0X3N0KzE6XSkKICAgICAgICBjaGFuZ2VzICs9IDEKICAgICAgICBwcmludCgiIyMjIGRwYWFfZXRoLmM6IEYtMDY5YSB2OSBleHRlcm5zIGFkZGVkIikKCiMgMi4gQ2FwdHVyZSBidWZfYmFzZSBmcm9tIGRwYWFfYnAtPnZhZGRyICh0cnkgbXVsdGlwbGUgdmFyaWFibGUgbmFtZXMpCmNhcHR1cmVkID0gImZtYW5fcGNkX2ljX2J1Zl9iYXNlID0gIgppZiBjYXB0dXJlZCBub3QgaW4gc3JjOgogICAgYW5jaG9yID0gInBoeXNfdG9fdmlydChhZGRyKSIKICAgIHBvcyA9IHNyYy5maW5kKGFuY2hvcikKICAgIGlmIHBvcyA+IDA6CiAgICAgICAgZW9sID0gc3JjLmZpbmQoJ1xuJywgcG9zKQogICAgICAgICMgU2VhcmNoIGZvciBidWZmZXItcG9vbCB2YXJpYWJsZSBuZWFyIHRoZSB2YWRkciBhc3NpZ25tZW50CiAgICAgICAgIyBUcnk6IGRwYWFfYnAsIGJwLCBkcGFhX2JwX3B0ciwgcHJpdi0+YnAKICAgICAgICBzZWN0aW9uID0gc3JjW3Bvcy0zMDA6cG9zKzgwMF0KICAgICAgICBicF92YXIgPSBOb25lCiAgICAgICAgZm9yIHZhciBpbiBbJ2RwYWFfYnAtPnZhZGRyJywgJ2JwLT52YWRkcicsICdkYnAtPnZhZGRyJ106CiAgICAgICAgICAgIGlmIHZhciBpbiBzZWN0aW9uOgogICAgICAgICAgICAgICAgYnBfdmFyID0gdmFyCiAgICAgICAgICAgICAgICBicmVhawogICAgICAgIGlmIGJwX3ZhcjoKICAgICAgICAgICAgY2FwdHVyZSA9ICgnXG5cblx0LyogRi0wNjlhIHY5OiBjYXB0dXJlIGJ1ZmZlciBiYXNlICsgZnJhbWUtZGF0YSB2YWRkciAqL1xuJwogICAgICAgICAgICAgICAgICAgICAgIGYnXHRmbWFuX3BjZF9pY192YWRkciA9IHZhZGRyO1xuJwogICAgICAgICAgICAgICAgICAgICAgIGYnXHRmbWFuX3BjZF9pY19idWZfYmFzZSA9IHticF92YXJ9OycpCiAgICAgICAgICAgIHNyYyA9IHNyY1s6ZW9sKzFdICsgY2FwdHVyZSArIHNyY1tlb2wrMTpdCiAgICAgICAgICAgIGNoYW5nZXMgKz0gMQogICAgICAgICAgICBwcmludChmIiMjIyBkcGFhX2V0aC5jOiBGLTA2OWEgdjkgYnVmX2Jhc2UgY2FwdHVyZSB1c2luZyB7YnBfdmFyfSIpCiAgICAgICAgZWxzZToKICAgICAgICAgICAgY2FwdHVyZSA9ICgnXG5cblx0LyogRi0wNjlhIHY5OiBjYXB0dXJlIGZyYW1lLWRhdGEgdmFkZHIgKG5vIGJwIHZhciBmb3VuZCkgKi9cbicKICAgICAgICAgICAgICAgICAgICAgICAnXHRmbWFuX3BjZF9pY192YWRkciA9IHZhZGRyOycpCiAgICAgICAgICAgIHNyYyA9IHNyY1s6ZW9sKzFdICsgY2FwdHVyZSArIHNyY1tlb2wrMTpdCiAgICAgICAgICAgIGNoYW5nZXMgKz0gMQogICAgICAgICAgICBwcmludCgiIyMjIGRwYWFfZXRoLmM6IEYtMDY5YSB2OSB2YWRkciBjYXB0dXJlIG9ubHkgKG5vIGJwIHZhcikiKQogICAgZWxzZToKICAgICAgICBwcmludCgiIyMjIGRwYWFfZXRoLmM6IEYtMDY5YSB2OSBwaHlzX3RvX3ZpcnQgYW5jaG9yIG5vdCBmb3VuZCIpCgppZiBjaGFuZ2VzOgogICAgd2l0aCBvcGVuKHBhdGgsICJ3IikgYXMgZjogZi53cml0ZShzcmMpCiAgICBwcmludChmIiMjIyBkcGFhX2V0aC5jOiBGLTA2OWEgdjkge2NoYW5nZXN9IGNoYW5nZShzKSBhcHBsaWVkIikKZWxzZToKICAgIHByaW50KCIjIyMgZHBhYV9ldGguYzogRi0wNjlhIHY5IG5vIGNoYW5nZXMiKQo=' | base64 -d | python3
+    echo "### dpaa_eth.c: F-069a v9 buf_base + vaddr captures\n"
 fi
 
 # F-069b: IC probe debugfs node — reads buffer captured by F-069a.
