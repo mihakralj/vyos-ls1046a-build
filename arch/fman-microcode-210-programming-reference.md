@@ -43,7 +43,7 @@ DDR is used for the ehash bucket array and per-flow records (to avoid MURAM exha
 
 Two dispatch paths exist on 210.10.1:
 
-- **Path 1, FE-VM external-hash** (the only path that flows): RCCB → `FE_ENTER` AD → EXT_HASH FE → DDR bucket lookup → MUX → ENQ (HIT) or EXIT (MISS). The FE-VM opcode interpreter provides terminal BMI-FIFO disposition.
+- **Path 1, FE-VM external-hash** (**210-only**; the only path that flows): RCCB → `FE_ENTER` AD → EXT_HASH FE → DDR bucket lookup → MUX → ENQ (HIT) or EXIT (MISS). The FE-VM opcode interpreter provides terminal BMI-FIFO disposition.
 - **Path 2, bare exact-match CC** (`CONT_LOOKUP` → `CONTRL_FLOW` exit): parks on 210.10.1. No terminal FIFO disposition, BMI stall at approximately 45 frames. Do not use.
 
 
@@ -117,10 +117,10 @@ Key mode encodings:
 
 | Purpose | `kgse_mode` | Decode |
 |---|---|---|
-| **AC_CC dispatch** (FE-VM path) | `0x80000006` | EN, CC/DONE action code |
-| **RSS hash** (mainline default) | `0x80500002` | EN, `NIA_ENG_BMI \| AC_ENQ_FRAME` |
-| **Policer steering** | `0xC04C0000` | EN, `NIA_ENG_PLCR` with policer profile in low bits |
-| **Scheme disabled** | `0x00000000` | EN clear; scheme skipped during selection |
+| **AC_CC dispatch** (FE-VM path) | `0x80000006` | EN, CC/DONE action code | **210-only**: dispatches frames to the FE-VM classifier for ehash lookup |
+| **RSS hash** (mainline default) | `0x80500002` | EN, `NIA_ENG_BMI \| AC_ENQ_FRAME` | |
+| **Policer steering** | `0xC04C0000` | EN, `NIA_ENG_PLCR` with policer profile in low bits | |
+| **Scheme disabled** | `0x00000000` | EN clear; scheme skipped during selection | |
 
 For AC_CC dispatch, `kgse_ccbs` MUST be `0x00000000`. A non-zero CCBS triggers an implicit CC group-table walk, which is a different dispatch mechanism and does not work for FE-VM on 210.10.1.
 
@@ -200,7 +200,7 @@ FQID computation: `KDFV = (hash >> HSHIFT) & HMASK`; `FQID = KDFV | FQBASE`.
 
 Symmetric hash (`SYM=1`): XORs src+dst pairs (MAC, IP, L4 port) before hashing. Both directions of a flow produce the same FQID.
 
-FE-VM ehash bucket index (from lf-5.4 LSDK `get_indexed_hash_bucket`, L7301):
+FE-VM ehash bucket index (**210-only**, from lf-5.4 LSDK `get_indexed_hash_bucket`, L7301):
 
 ```
 bucket_index = (crc64_raw >> ((6 - hashShift) * 8)) & hashMask
@@ -238,7 +238,7 @@ Parser-Next-Engine (`FMBM_RFPNE`) and Frame-Enqueue-Next-Engine (`FMBM_RFENE`) s
 | `NIA_ENG_HWK` | `0x00480000` | KeyGen (RSS / classification hash) |
 | `NIA_ENG_BMI` | `0x00500000` | BMI direct |
 | `NIA_BMI_AC_ENQ_FRAME` | `0x00000002` | BMI: enqueue frame to destination FQ |
-| `NIA_BMI_AC_CC` | `0x00000200` | BMI: dispatch to coarse-classifier (CC / FE-VM entry) |
+| `NIA_BMI_AC_CC` | `0x00000200` | BMI: dispatch to coarse-classifier (CC / FE-VM entry) | **210-only**: AC_CC dispatch path |
 | `NIA_ORDER_RESTOR` | `0x00800000` | QMan order-restoration flag (order-preserving enqueue) |
 
 Observed pipeline configurations on LS1046A:
@@ -247,7 +247,7 @@ Observed pipeline configurations on LS1046A:
 |---|---|---|---|---|
 | `0x00500002` | `NIA_ENG_BMI \| AC_ENQ_FRAME` | Parser → BMI → direct enqueue | no | no (stale/garbage) |
 | `0x00480000` | `NIA_ENG_HWK` | Parser → KG → RSS-hash → BMI enqueue | yes | yes (KG raw CRC-64) |
-| `0x00480200` | `NIA_ENG_HWK \| AC_CC` | Parser → KG → AC_CC dispatch → FE-VM | yes | yes (KG raw CRC-64) |
+| `0x00480200` | `NIA_ENG_HWK \| AC_CC` | Parser → KG → AC_CC dispatch → FE-VM | yes | yes (KG raw CRC-64) | **210-only**: AC_CC dispatch path |
 | `0x00440200` | `NIA_ENG_HWP \| AC_CC` | Parser → CC (KG skipped) | no | no |
 
 The mainline `dpaa_eth` default for kernel RSS delivery is `0x00500002`: no KeyGen. To engage the KG for either RSS or AC_CC, RFPNE must be rewritten to `0x00480000` or `0x00480200` on the target port. Before trusting any read at `hash_result_offset`, dump RFPNE and confirm bits [22:16] = `0x48`. If bits [22:16] = `0x50`, the KG did not run and the annotation hash slot is not populated by the KG.
@@ -265,29 +265,31 @@ Allocated once per port. The FMan Controller reads this page during frame proces
 | `0x18` | `reserved1[24]` | | |
 | `0x30` | `ipfOptionsCounter` | `[31:0]` | IP Fragmentation options counter (unconsumed) |
 | `0x34` | `reserved2[12]` | | |
-| **`0x40`** | **`misc`** | `[31:0]` | `FM_CTL_PARAMS_PAGE_ALWAYS_ON = 0x100`; `OFFLOAD_SUPPORT_EN = 0x40000000` |
+| **`0x40`** | **`misc`** | `[31:0]` | `FM_CTL_PARAMS_PAGE_ALWAYS_ON = 0x100`; **`OFFLOAD_SUPPORT_EN = 0x40000000`** (**210-only**: enables FE-VM offload on this port) |
 | `0x44` | `errorsDiscardMask` | `[31:0]` | Frame error discard mask (`0x012ee0e8`) |
 | `0x48` | `discardMask` | `[31:0]` | |
 | `0x4C` | `reserved3[4]` | | |
 | `0x50` | `postBmiFetchNia` | `[31:0]` | NIA after BMI buffer fetch |
-| **`0x54`** | **`internalFEBufferManagementIndexAddr`** | `[31:0]` | MURAM offset of per-port FE buffer free-list |
-| **`0x58`** | **`internalFEBufferDepletionCounter`** | `[31:0]` | Reset to 0 on enable |
+| **`0x54`** | **`internalFEBufferManagementIndexAddr`** | `[31:0]` | **210-only**: MURAM offset of per-port FE buffer free-list |
+| **`0x58`** | **`internalFEBufferDepletionCounter`** | `[31:0]` | **210-only**: Reset to 0 on enable |
 | `0x5C` | `reserved4[164]` | | Pad to 256 B |
 
-Init values (from lf-5.4 LSDK `FmPortSetFESupport`):
+Init values (from lf-5.4 LSDK `FmPortSetFESupport`, **210-only** for FE-VM path):
 - `+0x40` = `0x00000100`
 - `+0x44` = `0x012ee0e8`
 - `+0x54` = MURAM offset of the per-port FE buffer management free-list (written at arm time)
 - `+0x58` = `0x00000000` (reset depletion counter at arm time; zeroed at disengage)
 
-The `internalFEBufferManagementIndexAddr` and `internalFEBufferDepletionCounter` are only written when `FmPortSetFESupport` is called (the FE-VM path). They are left zero for bare exact-match CC.
+The `internalFEBufferManagementIndexAddr` and `internalFEBufferDepletionCounter` are only written when `FmPortSetFESupport` is called (the FE-VM path, **210-only**). They are left zero for bare exact-match CC.
 
 
-## 7. FE Types: The Complete Command Set
+## 7. FE Types: The Complete Command Set (210-only)
 
-The FE-VM opcode interpreter dispatches on the type field in bits `[31:26]` of the first MURAM word of each FE object. These are the ONLY commands the 210.10.1 FE-VM implements. Each FE object lives in the MURAM pool (100 slots × 28 B = 2800 B total, allocated by `AllocFEObjs`).
+The FE-VM opcode interpreter (**210-only**) dispatches on the type field in bits `[31:26]` of the first MURAM word of each FE object. These are the ONLY commands the 210.10.1 FE-VM implements. Each FE object lives in the MURAM pool (100 slots × 28 B = 2800 B total, allocated by `AllocFEObjs`, **210-only**).
 
-### 7.1 FE Type Table
+### 7.1 FE Type Table (210-only)
+
+All six FE types are **210-only** — they do not exist in public 106.x/108.x microcode.
 
 | Type Constant | Word0 | Name | MURAM Size | Purpose |
 |---|---|---|---|---|
@@ -298,7 +300,7 @@ The FE-VM opcode interpreter dispatches on the type field in bits `[31:26]` of t
 | `0x05000000` | - | **TRANSITION** | 8 B | State transition relay for HIT forwarding. Singleton |
 | `0x06000000` | `0x06000000` | **EXT_HASH** | 28 B | External hash table lookup in DDR: core FE-VM fastpath |
 
-### 7.2 EXT_HASH FE: Byte-Level Layout
+### 7.2 EXT_HASH FE: Byte-Level Layout (210-only)
 
 The central FE object. It performs: raw CRC-64(hardware key) → bucket index → DDR bucket walk → key comparison → HIT/MISS dispatch.
 
@@ -320,7 +322,7 @@ The central FE object. It performs: raw CRC-64(hardware key) → bucket index �
 
 **contextOffsetInWS** (in `w0`): tells the EXT_HASH comparator where within the FE workspace the extracted key starts. The SDK passes `0`. The raw extracted key is not preserved at any addressable IC offset (the Field Extraction Unit produces the key transiently and feeds it to the CRC64 engine; only the hash is retained at IC `0x48`). The FE-VM comparator reads from the microcode's implicit staging area; `contextOffsetInWS = 0` selects this default and works in ASK1 production with GEC extraction.
 
-### 7.3 ENQ FE: Byte Layout
+### 7.3 ENQ FE: Byte Layout (210-only)
 
 | Word | Offset | Contents |
 |---|---|---|
@@ -329,7 +331,7 @@ The central FE object. It performs: raw CRC-64(hardware key) → bucket index �
 | `w2` | `0x08` | reserved/context |
 | `w3` | `0x0C` | reserved/context |
 
-### 7.4 EXIT FE: Byte Layout
+### 7.4 EXIT FE: Byte Layout (210-only)
 
 | Word | Offset | Contents |
 |---|---|---|
@@ -337,21 +339,21 @@ The central FE object. It performs: raw CRC-64(hardware key) → bucket index �
 
 EXIT-DEALLOCATE is a real terminal MISS disposition on 210.10.1: AC_CC arm → MISS → EXIT → port does NOT park.
 
-### 7.5 MUX FE: Byte Layout
+### 7.5 MUX FE: Byte Layout (210-only)
 
 | Word | Offset | Contents |
 |---|---|---|
 | `w0` | `0x00` | `FMAN_FE_TYPE_MUX (0x04000000)` |
 | `w1` | `0x04` | next-FE MURAM offset (TRANSITION singleton) |
 
-### 7.6 TRANSITION FE: Byte Layout
+### 7.6 TRANSITION FE: Byte Layout (210-only)
 
 | Word | Offset | Contents |
 |---|---|---|
 | `w0` | `0x00` | `FMAN_FE_TYPE_TRANSITION (0x05000000)` |
 | `w1` | `0x04` | next-FE MURAM offset (ENQ FE) |
 
-### 7.7 FE_ENTER Root AD: Byte Layout
+### 7.7 FE_ENTER Root AD: Byte Layout (210-only)
 
 The AD at `FMBM_RCCB` that enters the FE-VM. NOT a pooled FE object; a standalone 16-byte MURAM AD.
 
@@ -364,7 +366,7 @@ The AD at `FMBM_RCCB` that enters the FE-VM. NOT a pooled FE object; a standalon
 
 `w0` encodes two independent bits: `CONT_LOOKUP` (byte `[31:24] = 0x40`, expanding to `0x40000000` in the word) enters the FE-VM lookup path, and `NIA_ORDER_RESTOR` (`0x00800000`) is the QMan order-restoration flag for order-preserving enqueue. OR'ing the two produces `0x40800000`. `NIA_ORDER_RESTOR` does not allocate a workspace; workspace behavior is governed by microcode-internal state and controlled through `contextOffsetInWS` in the EXT_HASH FE (see §7.2).
 
-### 7.8 FE Object Pool
+### 7.8 FE Object Pool (210-only)
 
 Pool init (`AllocFEObjs`, lf-5.4 LSDK):
 - 100 FE objects × `FM_PCD_FE_MAX_SIZE` (28 B) = 2800 B MURAM, 8-byte aligned
@@ -385,7 +387,7 @@ MURAM is iomem; use `memset_io` / `__iowrite32_copy` for all accesses.
 | `FM_PCD_FE_T_EXIT_SIZE` | 4 (4×1) | EXIT (singleton) |
 | `FM_PCD_FE_MAX_SIZE` | 28 | Max of all types (= EXT_HASH) |
 
-### 7.10 FE-VM Programming Core
+### 7.10 FE-VM Programming Core (210-only)
 
 The FE-VM programming core comprises `fman_pcd_fe_*_build()` functions plus `fman_pcd_fe_build_contexts()`. The `fman_pcd_ehash_bucket_index()` CRC-64 bucket indexer is verbatim-identical to the lf-5.4 LSDK `get_indexed_hash_bucket()` implementation.
 
@@ -488,9 +490,9 @@ Each profile carries three NIAs: **GNIA** (Green, enqueue within CIR/CBS), **YNI
 `FMPL_PMR1–63` maps a logical port number to a policer profile ID, enabling per-port profiles without consuming scheme slots.
 
 
-## 10. DDR ehash Flow Store
+## 10. DDR ehash Flow Store (210-only)
 
-The ehash bucket array lives in DDR (NOT MURAM), allocated via `dma_alloc_coherent`. The FE-VM DMA-reads it directly.
+The ehash bucket array and per-flow records are **210-only** — they do not exist in public 106.x/108.x microcode. The FE-VM DMA-reads the bucket array directly from DDR (NOT MURAM), allocated via `dma_alloc_coherent`.
 
 ### 10.1 Bucket Array
 
@@ -572,11 +574,11 @@ All bucket and record memory is DDR. gen_pool `used` is unchanged.
 | CC AD size | 16 bytes | RM §5.12 |
 | HMCD table | ≤256 bytes | RM §5.12.10 |
 | Manip MURAM per chain | ≤1 KiB | |
-| FE object pool | 100 × 28 B = 2800 B MURAM | `AllocFEObjs` |
-| Per-port FE buffers | `tnums × 256 × 2` B MURAM (~4–8 KB/port) | `FmPortSetFESupport` |
-| ehash buckets | `(mask+1)`, power-of-2, mask ≤ `0x7FFF` (32768) | DDR (not MURAM) |
-| ehash bucket size | 16 bytes | `en_exthash_bucket { u64 hash; u64 pad; }` |
-| ehash flow record | 256 bytes | SDK `en_ehash_entry` |
+| FE object pool | 100 × 28 B = 2800 B MURAM (**210-only**) | `AllocFEObjs` |
+| Per-port FE buffers | `tnums × 256 × 2` B MURAM (~4–8 KB/port) (**210-only**) | `FmPortSetFESupport` |
+| ehash buckets | `(mask+1)`, power-of-2, mask ≤ `0x7FFF` (32768) (**210-only**) | DDR (not MURAM) |
+| ehash bucket size | 16 bytes (**210-only**) | `en_exthash_bucket { u64 hash; u64 pad; }` |
+| ehash flow record | 256 bytes (**210-only**) | SDK `en_ehash_entry` |
 | Total MURAM | 64 KiB reserved, ~38 KiB usable after overhead | gen_pool debugfs |
 | Parser hard protocols | 16 | RM §5.9 |
 | Parser Rx/OH ports | 16 (IDs 1–16) | RM §5.9 |
@@ -590,17 +592,17 @@ All bucket and record memory is DDR. gen_pool `used` is unchanged.
 | # | Function | Status | Cap Bit | Driver Consumer |
 |---|---|---|---|---|
 | 1 | **Hard Parser** (L2–L4 header recognition, 16 protocols) | Consumed | - | Mainline `fman_prs.c` |
-| 2 | **Soft Parser** (custom protocol extensions, 1984-byte instruction space) | Consumed | BIT 4 | `fman_pcd_prs.c`. The NXP-official RSR 10.3.0.B1 stack uses this to program a 194-line NetPDL protocol (`/etc/cdx_sp.xml`) handling PPPoE ccbase-slide, TTL/hop-limit kernel-punt, 6-in-4 dispatch, and OH-port Ethernet re-parse |
+| 2 | **Soft Parser** (custom protocol extensions, 1984-byte instruction space) | **210-only** (consumed) | BIT 4 | `fman_pcd_prs.c`. The NXP-official RSR 10.3.0.B1 stack uses this to program a 194-line NetPDL protocol (`/etc/cdx_sp.xml`) handling PPPoE ccbase-slide, TTL/hop-limit kernel-punt, 6-in-4 dispatch, and OH-port Ethernet re-parse |
 | 3 | **KeyGen** (32 schemes, raw CRC-64 hash, EKFC/GEC extraction, FQID distribution) | Consumed | - | `fman_pcd_kg.c` |
 | 4 | **KeyGen post-hash index + explicit PP-select** | Present (unconsumed) | - | None |
 | 5 | **CC Match-Table** (exact-match, ≤255 entries, ≤3 nested hops, per-key stats) | Consumed | BIT 0 | `fman_pcd_cc.c` |
-| 6 | **CC Hash-Table** (hashed CC lookup, DDR-based, large flow tables) | Present (unconsumed) | BIT 5 placeholder | None |
+| 6 | **CC Hash-Table** (hashed CC lookup, DDR-based, large flow tables) | **210-only** (unconsumed) | BIT 5 placeholder | None |
 | 7 | **Header Manipulation** (VLAN/Q-in-Q/MPLS push-pop, arbitrary byte insert/remove/replace) | Consumed | BIT 1 | `fman_pcd_manip.c` |
 | 8 | **Policer** (256 profiles, RFC 2698 srTCM / RFC 4115 trTCM, color-marking) | Consumed | BIT 2 | `fman_pcd_plcr.c` |
-| 9 | **FE-VM ehash** (EXT_HASH → MUX → ENQ → EXIT dispatch, DDR flow store) | Consumed | - | `fman_pcd_fe.c` |
-| 10 | **Frame Replicator** (source-TD + member-AD chain → multiple egress FQs) | Present (unconsumed) | BIT 8 placeholder | KUnit tests exist |
-| 11 | **IP Reassembly** (timeout-driven flush) | Present (unconsumed) | BIT 6 placeholder | None |
-| 12 | **IP Fragmentation** | Present (unconsumed) | BIT 7 placeholder | None |
+| 9 | **FE-VM ehash** (EXT_HASH → MUX → ENQ → EXIT dispatch, DDR flow store) | **210-only** (consumed) | - | `fman_pcd_fe.c` |
+| 10 | **Frame Replicator** (source-TD + member-AD chain → multiple egress FQs) | **210-only** (unconsumed) | BIT 8 placeholder | KUnit tests exist |
+| 11 | **IP Reassembly** (timeout-driven flush) | **210-only** (unconsumed) | BIT 6 placeholder | None |
+| 12 | **IP Fragmentation** | **210-only** (unconsumed) | BIT 7 placeholder | None |
 
 Capability bitmask: `0x17 = CC_EXACT_MATCH | HM_NODES | POLICER_TRTCM | PARSER_SOFTSEQ`. Bit 3 (`HC_DISPATCH`) is deliberately clear; the Host Command doorbell is absent from this blob.
 
