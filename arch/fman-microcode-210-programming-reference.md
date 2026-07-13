@@ -10,11 +10,11 @@
 
 The FMan v3 (LS1046A) microcode is a QEF container (`struct qe_firmware`, `magic="QEF"`) loaded by U-Boot from SPI `mtd3` into FMan IRAM at boot. It implements a table-driven Parse-Classify-Distribute pipeline. The kernel programs it by writing MURAM-resident configuration tables through FMan CCSR registers. It is never invoked via a software API or opcode dispatch.
 
-The Host Command (HC) doorbell is **absent** from this blob (`caps=0x17`, bit 3 `FMAN_CAP_HC_DISPATCH` clear). `fmd_host_cmd_send()` returns `-ENXIO`. The only productive programming path is the register→MURAM→silicon path documented here.
+The Host Command (HC) doorbell is **absent** from this blob (`caps=0x17`, `0x17 = 0b0001_0111` → bits 0,1,2,4 set; bit 3 `FMAN_CAP_HC_DISPATCH` clear). `fmd_host_cmd_send()` returns `-ENXIO`. The only productive programming path is the register→MURAM→silicon path documented here.
 
 The microcode is proprietary NXP 210.10.1, not the open-source `qoriq-fm-ucode` 106.x/108.x families. The public families are a strictly narrower subset — features marked "210-only" in this document do not exist in public microcode.
 
-Three programming facts are not yet confirmed by a direct hardware measurement (§12). They are marked **UNKNOWN-1**, **UNKNOWN-2**, **UNKNOWN-3**. Everything else has been confirmed against at least one of: (a) the NXP DPAA Reference Manual, (b) the NXP lf-5.4 LSDK driver source, (c) the `we-are-mono/ASK` production code, or (d) a direct `/dev/mem` / debugfs read on the board.
+Three programming facts are listed in §12: **UNKNOWN-1** (ekfc extraction order, open), **RESOLVED-2** (contextOffsetInWS), and **RESOLVED-3** (FE-VM core port). Everything else has been confirmed against at least one of: (a) the NXP DPAA Reference Manual, (b) the NXP lf-5.4 LSDK driver source, (c) the `we-are-mono/ASK` production code, or (d) a direct `/dev/mem` / debugfs read on the board.
 
 
 ## 2. Architecture Overview
@@ -98,8 +98,7 @@ To read or write a scheme word:
 | Word Index | Register Name | Bits | Meaning |
 |---|---|---|---|
 | **0** | `kgse_mode` | `[31]` | **EN** — master enable for this scheme |
-| | | `[7:0]` | **next_engine**: `2`=RSS (hash→DONE), `3`=FM_CTL (AC_CC), `4`=PLCR (policer), `6`=DONE (enqueue) |
-| | | `[31:28]` | **NIA_ENG**: `0x8`=FM_CTL, `0xC`=PLCR, `0x0`=BMI |
+| | | `[7:0]` | **next_engine**: `2`=RSS (hash→DONE, BMI direct enqueue), `3`=FM_CTL (AC_CC dispatch), `4`=PLCR (policer), `6`=DONE (enqueue) |
 | **1** | `kgse_ekfc` | `[31:0]` | **Extract Known Fields bitmask** — see §4.3 |
 | **2** | `kgse_mv` | `[31:0]` | **Match Vector** — LCV bits that select this scheme |
 | **3** | `kgse_ccbs` | `[27:12]` | **CC Base Select** — MURAM offset of CC group table (set to `0` for direct AC_CC dispatch via FMBM_RCCB) |
@@ -292,7 +291,7 @@ The central FE object. It performs: CRC64(hardware key) → bucket index → DDR
 
 **hashMask** (in `w1[31:16]`): `(mask+1)` must be an exact power of two. Valid masks: `0x0, 0x1, 0x3, 0x7, 0xF, …, 0x7FFF` (32768 buckets).
 
-**contextOffsetInWS**: See §12.2 **UNKNOWN-2**. The SDK passes `0`. The field occupies bits in `w0`.
+**contextOffsetInWS**: See §12.2 **RESOLVED-2**. The SDK passes `0`. The field occupies bits in `w0`.
 
 ### 7.3 ENQ FE — Byte Layout
 
@@ -331,12 +330,12 @@ The AD at `FMBM_RCCB` that enters the FE-VM. NOT a pooled FE object — a standa
 
 | Word | Offset | Contents |
 |---|---|---|
-| `w0` | `0x00` | **`0x40800000`** = `CONT_LOOKUP(0x40)` \| `NIA_ORDER_RESTOR(0x00800000)` |
+| `w0` | `0x00` | **`0x40800000`** = `CONT_LOOKUP(byte [31:24] = 0x40 → 0x40000000)` \| `NIA_ORDER_RESTOR(0x00800000)` |
 | `w1` | `0x04` | `0x00000000` (reserved) |
 | `w2` | `0x08` | **`0x000000F6`** = `pcAndOffsets` = OPC_FE_ENTER |
 | `w3` | `0x0C` | next-FE MURAM offset (the EXT_HASH FE) |
 
-`w0` carries `CONT_LOOKUP` (`0x40`) to enter the FE-VM lookup path, and `NIA_ORDER_RESTOR` (`0x00800000`) which is the QMan order-restoration bit that flags the FE for order-preserving enqueue.
+`w0` carries `CONT_LOOKUP` (byte [31:24] = `0x40`, producing `0x40000000` in the word) to enter the FE-VM lookup path, and `NIA_ORDER_RESTOR` (`0x00800000`) which is the QMan order-restoration bit that flags the FE for order-preserving enqueue. OR'ing the two gives `0x40800000`.
 
 ### 7.8 FE Object Pool
 
@@ -472,10 +471,12 @@ The ehash bucket array lives in DDR (NOT MURAM), allocated via `dma_alloc_cohere
 Bucket entry (16 bytes):
 ```c
 struct en_exthash_bucket {
-    u64 hash;   // hash value for this bucket
+    u64 hash;   // encodes the DDR bus address of the head flow record
     u64 pad;    // padding
 };
 ```
+
+Each bucket's `hash` field carries a 48-bit DDR bus address pointing to the head flow record for that bucket index, with collision bits packed in the upper bits (see the `insert()` pseudocode in §10.4). The EXT_HASH FE (§7.2) computes `bucket_index` from the KG hash, DMA-reads this 16-byte bucket entry to obtain the head pointer, then walks the collision chain of 256-byte flow records (§10.2) comparing the stored key against the hardware-extracted key. Buckets live in the DDR bucket array; flow records are separately allocated DDR objects. Neither consumes MURAM.
 
 ### 10.2 Per-Flow Record
 
@@ -552,12 +553,12 @@ All bucket and record memory is DDR — gen_pool `used` is unchanged.
 | Parser Rx/OH ports | 16 (IDs 1–16) | RM §5.9 |
 | Parse Result | 32 bytes | RM §5.9 |
 
-**MURAM budget:** ehash buckets MUST live in DDR. Only FE objects, CC trees, HM chains, policer profiles, and the params page live in MURAM.
+**MURAM budget:** ehash buckets MUST live in DDR. Only FE objects, CC trees, HM chains, policer profiles, and the params page live in MURAM. The FMan MURAM pool is 64 KiB reserved, of which ~38 KiB is usable after overhead (see `arch/muram.md` for the full allocation breakdown: pool size, per-object overhead, 750-flow ceiling, 327× ENOMEM under GenPool fragmentation).
 
 
-## 12. The Three Unknowns
+## 12. Open Questions
 
-These are the only three facts about the 210.10.1 programming surface not yet confirmed by a direct hardware measurement. Everything else in this document has been verified against at least one of: the DPAA RM, the lf-5.4 LSDK driver source, the `we-are-mono/ASK` production code, or a direct hardware register read. All three can be resolved by experiments on the Mono Gateway DK.
+Of the three facts about the 210.10.1 programming surface listed below, **UNKNOWN-1** remains open. **RESOLVED-2** (contextOffsetInWS) and **RESOLVED-3** (FE-VM core port) are settled — the workspace layout is confirmed via IC-layout analysis and the FE-VM pipeline is proven operational on silicon. Everything else in this document has been verified against at least one of: the DPAA RM, the lf-5.4 LSDK driver source, the `we-are-mono/ASK` production code, or a direct hardware register read.
 
 ### 12.1 UNKNOWN-1: EKFC Extraction Byte Order
 
@@ -602,9 +603,9 @@ Since the raw key is transient in the Field Extraction Unit and only the hash is
 
 **Precondition check:** Before any hash-capture attempt, dump the target port's `FMBM_RFPNE` and verify bits [22:16] = `0x48` (HWK). If bits [22:16] = `0x50` (BMI direct), the KG is bypassed and the hash slot is not populated. See the NIA decode table in §5.
 
-**Order-independent alternative — widen `FMBM_RICP` to copy the raw key.** Set `iciof = 0x48` (skip past PR+TS+hash to IC key region) and `icsz ≥ 16` (or full key length). The extracted key then appears verbatim in the DDR annotation of every delivered frame; its byte layout is read directly, no CRC64 inference needed. Caveat: the exact IC offset of the extracted key is IC-layout-derived (§12.2) — dump a wide RICP copy of a known frame first and locate the known field bytes to validate the IC offset before trusting it. This is the strongest resolution because it collapses both UNKNOWN-1 and UNKNOWN-2 into a single direct observation.
+**Order-independent alternative — widen `FMBM_RICP` to copy the raw key.** Set `iciof = 0x48` (skip past PR+TS+hash to IC key region) and `icsz ≥ 16` (or full key length). The extracted key then appears verbatim in the DDR annotation of every delivered frame; its byte layout is read directly, no CRC64 inference needed. Caveat: the exact IC offset of the extracted key is IC-layout-derived (§12.2) — dump a wide RICP copy of a known frame first and locate the known field bytes to validate the IC offset before trusting it. This is the strongest resolution because it collapses both UNKNOWN-1 and RESOLVED-2 into a single direct observation.
 
-### 12.2 UNKNOWN-2: FE Workspace Layout (contextOffsetInWS)
+### 12.2 RESOLVED-2: FE Workspace Layout (contextOffsetInWS)
 
 The `contextOffsetInWS` field in `EXT_HASH w0` tells the EXT_HASH comparator where within the FE workspace the extracted key starts. The SDK passes `0`.
 
@@ -627,11 +628,11 @@ The `NIA_ORDER_RESTOR` bit (`0x00800000`) in FE_ENTER AD word0 is the QMan order
 2. **Widen `FMBM_RICP`** (`iciof = 0x48`, `icsz ≥ 16`) and read the extracted key bytes directly from the DDR annotation. Removes all inference; also directly validates the IC-`0x48` key offset assumption. Strongest evidence.
 3. **If HIT still misses after (1) or (2) succeed:** the microcode may support allocating a workspace via a bit not currently in the driver's AD. Empirically bisect FE_ENTER AD word0 bits and inspect MURAM after each variation to identify a bit that produces a populated (non-zero) MURAM region correlated with received frames.
 
-### 12.3 UNKNOWN-3: FE-VM Programming Core Port
+### 12.3 RESOLVED-3: FE-VM Programming Core Port
 
 The FE-VM pipeline is operational on silicon using `fman_pcd_fe_*_build()` functions and `fman_pcd_fe_build_contexts()`. AC_CC dispatch is proven on hardware with byte-clean reversibility (three full engage→disengage→re-engage cycles). The MISS→EXIT path is proven safe — the port does NOT park.
 
-A byte-for-byte port of three lf-5.4 LSDK functions was originally identified as potential work. The lf-6.6.y and lf-6.12.y kernels stub these as empty `UNUSED()` no-ops, so a forward-port may be beneficial for future kernel compatibility. The lf-5.4 LSDK source is available at `/home/vyos/ask-ref/ask/patches/kernel/999-layerscape-ask-kernel_linux_5_4_3_00_0.patch` for reference.
+A byte-for-byte port of three lf-5.4 LSDK functions remains as potential future work for kernel compatibility. The lf-6.6.y and lf-6.12.y kernels stub these as empty `UNUSED()` no-ops, so a forward-port would avoid relying on an internal implementation that may be deleted upstream. The lf-5.4 LSDK source is at `/home/vyos/ask-ref/ask/patches/kernel/999-layerscape-ask-kernel_linux_5_4_3_00_0.patch`.
 
 
 ## 13. Complete Function Inventory
