@@ -300,6 +300,7 @@ The DPDK DPAA1 PMD path was abandoned on 2026-04-03 (RC#31: `dpaa_bus` probe kil
 | `specs/ask2-rewrite-spec.md` | ASK2 modern rewrite spec (v1.7) — authoritative reference for all ASK2 work |
 | `plans/DUAL-DATAPLANE.md` | Dual-dataplane plan — silicon mode state machine (S0 mainline/RSS ↔ S1 ASK, S2 VPP overlay on S0), reversibility contract, single-image decision, milestones M0–M8 |
 | `kernel/flavors/ask/README.md` | Scaffold-only pointer to the ASK2 spec; all ASK 1.x source/kernel/userspace artifacts under this tree were deleted on `ask20` |
+| `arch/fman-microcode-210-programming-reference.md` | **Complete 210.10.1 programming reference** — every register, FE type, opcode, resource ceiling, and invariant in one flat document. Supersedes the scattered register facts in `fman-pcd.md`, `fman-fe-ehash.md`, `fman-keygen-flow-key-spec.md`, and `dpaa1-afxdp-modernization-spec.md` for raw programming-surface facts. §12 documents the three unknowns (EKFC order, workspace layout, FE-VM core port) with experimental methodology |
 | `plans/NETWORKING-DEEP-DIVE.md` | DPAA1 networking deep-dive: FMan architecture, QBMan, portal allocation, driver split |
 | `board/scripts/fman-port-name` | Script called by udev: reads `/sys/class/net/<iface>/device/of_node` to map FMan MAC DT address → physical port name (eth0-eth4) |
 | `board/scripts/10-fman-port-order.rules` | Udev rule: calls `fman-port-name` on net device add, sets `NAME=` to correct ethN (installed to `/etc/udev/rules.d/`) |
