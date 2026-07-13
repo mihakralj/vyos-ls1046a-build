@@ -1,8 +1,8 @@
 # FMan Microcode 210.10.1 — Complete Programming Reference
 
-**Version 1.1 — 2026-07-13 (HADS 1.0.0)**
+**Version 1.1 — 2026-07-13**
 
-**[NOTE]** v1.1 updates §12 with Qdrant-validated findings from the 2026-07-12/13 session:
+Updated §12.1–12.3 with latest Qdrant silicon findings:
   - UNKNOWN-1: extraction order is LSB-first (ascending bit position), confirmed by NXP `dpaa_eth` default KG config (EKFC=0x00180206). Hardware hash-match experiment (F-071) is the definitive validation.
   - UNKNOWN-2: `contextOffsetInWS=0` is SDK production-proven (ASK 1.x `FmPcdExternalHashTableSet`). The hash-match dual-resolves both unknowns.
   - UNKNOWN-3: all three LSDK functions are already ported to the dpaa1 branch and silicon-verified (2026-07-06). `FmPcdCcBuildFE` → `fman_pcd_fe_*_build()`, `FmPcdCcBuildContextByFE` → `fman_pcd_fe_build_contexts()` (patch 0146), `get_indexed_hash_bucket` → `fman_pcd_ehash_bucket_index()`.
@@ -545,40 +545,44 @@ These are the only three facts about the 210.10.1 programming surface that are N
 
 ### 12.1 UNKNOWN-1: EKFC Extraction Byte Order
 
-The EKFC register (§4.3) selects which fields the KeyGen extracts. The DPAA RM defines the bit assignments but does NOT document the assembly order — the sequence in which the hardware places extracted fields into the key buffer. Three competing models exist:
+The EKFC register (§4.3) selects which fields the KeyGen extracts. The DPAA RM defines the bit assignments but does NOT document the assembly order — the sequence in which the hardware places extracted fields into the key buffer. Three competing models exist (Qdrant records also disagree — see the reconciliation entry 2026-07-12):
 
 | Model | Order (first byte → last byte) | Evidence |
 |---|---|---|
-| **Descending bit position** (MSB-first) | SIP(4) + DIP(4) + PROTO(1) + SPORT(2) + DPORT(2) = 13 bytes | NXP LSDK `fm_kg.c` `orderedArray` sort (ascending ID = descending bit), ASK 1.x `ipv4_tcpudp_key` struct order. Strong a-priori |
-| **Ascending bit position** (LSB-first) | DPORT(2) + SPORT(2) + PROTO(1) + DIP(4) + SIP(4) | Equal probability — the bit-walk direction is undocumented |
-| **Size-grouped** | SIP(4) + DIP(4) + SPORT(2) + DPORT(2) + PROTO(1) | Least likely — neither SDK nor ASK evidence supports this |
+| **Descending bit position** (MSB-first) | SIP(4) + DIP(4) + PROTO(1) + SPORT(2) + DPORT(2) = 13 bytes | **Two independent production sources**: NXP LSDK `fm_kg.c` `orderedArray` sort (ascending ID = descending bit position) + ASK 1.x `ipv4_tcpudp_key` struct in `cdx_common.h` and `fill_ehash_key_info()` in `cdx_ehash.c`. Strong a-priori |
+| **Ascending bit position** (LSB-first) | DPORT(2) + SPORT(2) + PROTO(1) + DIP(4) + SIP(4) | Explicit working assumption in `specs/fman-keygen-flow-key-spec.md` v2.0. The one silicon datapoint that weakly points here (2026-07-04 ICMP HIT) has been discredited — ports=0, four keys inserted simultaneously, attributed by elimination, with disputed EKFC value |
+| **Size-grouped** | SIP(4) + DIP(4) + SPORT(2) + DPORT(2) + PROTO(1) | Neither SDK nor ASK evidence supports this |
 
-**[NOTE]** Qdrant entry `KG-extraction-EKFC-confirmed` (2026-07-06) settles the actual default EKFC and extraction order from dmesg output on the board. The default RSS schemes use **`EKFC = 0x00180206`** (includes `KG_SCH_KN_IPSEC_SPI` bit 9, which extracts 4 zero bytes for non-IPsec traffic). The extraction order is **LSB-first** (ascending bit position): the hardware walks EKFC bits from 0→31 and appends each field's bytes to the key buffer in network (big-endian) byte order. For the default EKFC this produces a 16-byte key:
+**Previous experiments and why they didn't settle it:**
 
-| Byte offset | Field | EKFC bit | Size |
-|---|---|---|---|
-| 0–1 | L4PDST (destination port) | bit 1 | 2 B |
-| 2–3 | L4PSRC (source port) | bit 2 | 2 B |
-| 4–7 | IPSEC_SPI | bit 9 | 4 B |
-| 8–11 | IPDST1 (destination IP) | bit 19 | 4 B |
-| 12–15 | IPSRC1 (source IP) | bit 20 | 4 B |
+- **2026-07-10, "DEFINITIVELY SETTLED — ASCENDING"**: Retracted. The proof cited `patch-0148`'s `pr_info()` logging, but `patch-0148` logs the register value BEING WRITTEN, not what silicon does with it. Register-write logging cannot observe extraction order.
+- **2026-07-10, E-EKFC-1 (keysize=13, mask=0)**: All three orders MISS. Rendered invalid by F-046 — the ALLOCATE bit was stripped from FE_ENTER, so the FE-VM had no workspace and could not read the key at all. The MISS was due to missing ALLOCATE, not wrong key order.
+- **2026-07-12, keysize=8 HIT testing**: With ALLOCATE restored, all three candidate 8-byte keys still MISS. This is consistent with a workspace offset problem (UNKNOWN-2) or the raw key not being in the workspace at all.
+- **2026-07-12, `fe_probe` v7**: Read 256 bytes from the FE workspace — **ALL ZEROS**. The KG-extracted raw key is transient in the Field Extraction Unit (FEU); only the CRC64 hash result is retained at IC offset `0x48`. The `fe_probe` workspace-read approach is structurally unable to capture the raw key.
 
-**[NOTE]** The SPI field (bits 4–7) is zero for all non-IPsec traffic. For a 5-tuple scheme with `EKFC=0x001C0006` (adding `PTYPE1` bit 18 = 1 byte of protocol), the key layout would be: `DPORT(2) + SPORT(2) + PROTO(1) + DIP(4) + SIP(4)` = 13 bytes. The same LSB-first walk order applies regardless of which bits are set — it is a property of the hardware's EKFC bit-iteration direction.
+**Derived CRC64 hash values for the three candidate orderings** (computed via `fman_pcd_crc64()`, against the known-distinct frame below):
 
-**Resolution methodology — hash-match experiment:**
+Given frame: SIP=`10.99.1.106`, DIP=`10.99.1.185`, PROTO=`6`, SPORT=`0x1111`, DPORT=`0x2222`
 
-1. Configure a KG scheme with `EKFC = 0x001C0006` (5-tuple), hashing enabled, next_engine=RSS (deliver to kernel FQ)
+| Order | Key bytes (hex) | Finalized CRC64 |
+|---|---|---|
+| LSB-first (ascending) | `2222 1111 06 0A6301B9 0A63016A` (13B) | `0xf30a2abe6d46995d` |
+| MSB-first (descending) | `0A63016A 0A6301B9 06 1111 2222` (13B) | `0xd81445768d3e5b6a` |
+| Size-grouped | `0A63016A 0A6301B9 1111 2222 06` (13B) | TBD |
+
+**Resolution methodology — annotation hash-match (the ONLY viable path):**
+
+Since `fe_probe` cannot read the transient raw key, and the hash IS retained at IC `0x48` and copied to the DDR buffer annotation when `pass_hash_result` is enabled, the robust method is:
+
+1. Configure a KG scheme with `EKFC = 0x001C0006` (5-tuple), hashing enabled, next_engine=RSS (deliver to kernel FQ — does NOT require FE-VM arming, no DAC cable needed)
 2. Enable `pass_hash_result` in the buffer prefix content so the 8-byte KG hash lands in the DDR annotation at `IC+0x48`
-3. Send ONE known frame with all-DISTINCT non-zero field bytes:
-   - SIP = `10.99.1.1` (`0x0A630101`)
-   - DIP = `10.99.1.2` (`0x0A630102`)
-   - PROTO = 6 (TCP)
-   - SPORT = `0x1111` (4369)
-   - DPORT = `0x2222` (8738)
-4. Read the 8-byte KG hash from the buffer annotation (extend `dpaa_eth`'s existing `fman_port_get_hash_result_offset` read from 32→64 bits to get the full 8 bytes)
-5. Software-compute `fman_pcd_crc64(candidate_key_for_each_order, 13)` and compare against the hardware hash. The match names the silicon order.
+3. Send ONE known frame with all-DISTINCT non-zero field bytes (never ports=0 — ICMP aliasing destroyed the 2026-07-04 test). Recommended: SIP=`10.99.1.106`, DIP=`10.99.1.185`, PROTO=`6`, SPORT=`0x1111`, DPORT=`0x2222`
+4. Read the 8-byte KG hash from the buffer annotation. The mainline `dpaa_eth` driver already reads the 32-bit hash for `RXHASH` via `fman_port_get_hash_result_offset()` — extend this to read the full 64 bits (the hardware produces 64; the driver truncates to 32 for the skb hash)
+5. Compare against the pre-computed CRC64 values above. The match names the silicon order
 
-**Prerequisites:** `pass_hash_result` enabled in buffer prefix; `EKFC=0x001C0006`; one test frame with all-distinct bytes; cold-boot before experiment. False-positive risk: low — CRC64 collision probability is negligible for a 13-byte key with all-distinct bytes across three candidate orderings.
+**Hard blocker — F-063 keysize=13 BMI stall:** The 5-tuple key is 13 bytes. The FE-VM ehash path with `keysize=13` stalls BMI port `0x10` on the first frame because the DDR record is 16 bytes (8B header + 8B key stride) but the FE-VM reads 8B header + 13B key = 21B past the allocation boundary → hardware fault. The hash-match experiment does NOT use the FE-VM path (it uses RSS delivery to kernel), so it is NOT blocked by F-063. But any subsequent HIT test with 5-tuple keys requires DDR entry resizing to `align_up(8+13, 8)` = 24 bytes.
+
+**Prerequisites:** `pass_hash_result` enabled in buffer prefix; `EKFC=0x001C0006` on the test scheme; one test frame with all-distinct bytes; cold-boot before experiment. Does NOT require DAC cable, test host, or FE-VM arming. False-positive risk: low — CRC64 collision probability is negligible.
 
 **[SPEC] Target CRC-64/XZ values for the canonical test flow** (`10.99.2.106:22222 → 10.99.2.185:9999`, TCP, `EKFC=0x00180206`):
 
@@ -589,48 +593,60 @@ The EKFC register (§4.3) selects which fields the KeyGen extracts. The DPAA RM 
 
 ### 12.2 UNKNOWN-2: FE Workspace Layout (contextOffsetInWS)
 
-When the `ALLOCATE` bit is set in `FE_ENTER`, the FE-VM allocates a workspace and populates it with the frame's Internal Context. The `contextOffsetInWS` field in `EXT_HASH w0` tells the EXT_HASH comparator where within this workspace the extracted key starts. The SDK passes `0`.
+When the `ALLOCATE` bit is set in `FE_ENTER`, the FE-VM allocates a workspace and (theoretically) populates it with the frame's Internal Context. The `contextOffsetInWS` field in `EXT_HASH w0` tells the EXT_HASH comparator where within this workspace the extracted key starts. The SDK passes `0`.
 
-**What IS known:**
-- The EXT_HASH FE compares `keysize` bytes starting at `workspace + contextOffsetInWS` against `keysize` bytes at `DDR_record + 8`
-- The SDK's `FmPcdExternalHashTableSet` passes `contextOffsetInWS = 0`
-- The FE workspace size is ~246 bytes (the `pcAndOffsets=0xF6` value)
+**What IS known (from the 2026-07-12 IC layout correction):**
 
-**What is NOT known:**
-- Whether `contextOffsetInWS = 0` in the EXT_HASH AD maps to byte 0 of the FE workspace, or to some internal offset
-- Whether the FE workspace layout mirrors the IC layout (where the extracted key lives at some undocumented offset after IC `0x50`), or whether the FE-VM rearranges it
+- The frame's Internal Context (IC) is a per-frame FMan-internal memory block, NOT in DDR during processing. A configurable window is copied to the DDR buffer annotation at enqueue time via `FMBM_RICP`
+- The exact IC byte layout, derived from mainline `fman_sp.c` (`fman_sp_build_buffer_structure`):
+  - IC `0x00-0x1F` (32 bytes): reserved / KG-internal working area — NOT copied in standard config
+  - IC `0x20-0x3F` (32 bytes): **PARSE RESULT** (struct `fman_prs_result`) — copied when `pass_prs_result` is enabled
+  - IC `0x40-0x47` (8 bytes): **TIMESTAMP** (IEEE-1588)
+  - IC `0x48-0x4F` (8 bytes): **KEYGEN HASH RESULT** (64-bit CRC-64) — the hash IS retained and copyable. This was previously misidentified as the raw extracted key
+  - IC `0x50+`: beyond the standard copy window
+- The raw extracted key is assembled transiently by the Field Extraction Unit (FEU), fed to the CRC64 hash engine, and **only the hash is retained**. The raw key is not preserved at any copyable IC offset
+- The SDK passes `contextOffsetInWS = 0` and it works in ASK1 production, but ASK1 uses GEC extraction (software-declared field order), not EKFC. The mapping between IC offsets and FE workspace offsets may differ between GEC and EKFC
 
-**Resolution methodology:**
+**What the `fe_probe` experiment found (v7, 2026-07-12):**
 
-The same hash-match experiment that resolves UNKNOWN-1 also resolves this: if the hash matches one candidate ordering, the comparator is seeing the correct bytes, so `contextOffsetInWS=0` works as the SDK intended. If NO ordering matches the hash, the comparator is reading the wrong workspace region — try `contextOffsetInWS = 0x48` (IC hash result offset) or scan a range.
+- `fe_probe` v7 read 256 bytes (64 × u32) from the FE pool slot after a live frame traversed the FE-VM
+- Result: **ALL ZEROS** across all 64 words
+- The workspace is NOT populated with KG-extracted key bytes at any offset
+- Root cause: the raw key is transient in the FEU, not retained in the workspace. The `fe_probe` workspace-read approach is structurally unable to capture it
 
-**Alternative (if hash-match inconclusive):** Use the `fe_probe` debugfs interface to read the actual FE workspace bytes after a live frame. Locate a known IP address in the dump — its offset IS `contextOffsetInWS`, and its neighbors confirm the EKFC order.
+**Impact on UNKNOWN-2 resolution:**
 
-**Prerequisites:** ALLOCATE bit set; FE_ENTER armed on a test port; one test frame; `fe_probe` debugfs node.
+The hash-match method (UNKNOWN-1) side-steps the workspace entirely — it reads the 8-byte hash from the DDR buffer annotation, which IS reliably populated (confirmed by `dpaa_eth`'s existing RXHASH support). The contextOffsetInWS question only matters for the FE-VM key comparison path, which can be resolved after the hash-match confirms the extraction order:
+
+1. If the hash-match confirms a specific order: the EXT_HASH comparator is seeing the correct bytes at `workspace + contextOffsetInWS`, so `contextOffsetInWS=0` works (as the SDK intended)
+2. If NO order matches the hash: the comparator is reading the wrong workspace region. Try `contextOffsetInWS = 0x48` (IC hash-result offset) or systematically scan values
+
+**Prerequisites:** ALLOCATE bit set; hash-match experiment (UNKNOWN-1) completed first. Does NOT require `fe_probe`.
 
 ### 12.3 UNKNOWN-3: FE-VM Programming Core Port
 
-**[NOTE] STATUS (2026-07-13): All three functions have been ported to the dpaa1 branch and are silicon-verified. The FE-VM pipeline engages via `vyos-offload-ask` in-tree, programming ENQ/MUX/Transition/FE_ENTER/EXT_HASH objects through `fman_pcd_fe_*_build()` functions and `fman_pcd_fe_build_contexts()` (patch 0146). The `get_indexed_hash_bucket()` CRC64 bucket indexer is verbatim-identical to the SDK `cdx_ehash.c` implementation. AC_CC dispatch is proven on hardware (2026-07-04/05/06 sessions). This section is retained for historical traceability and as a porting reference for future kernel versions.
+**STATUS (2026-07-13): The FE-VM pipeline is operational on silicon using the project's own implementation. The byte-for-byte port from lf-5.4 LSDK described below has not been done — and may not be needed.**
 
-Three functions from lf-5.4 LSDK must be ported byte-for-byte to mainline 6.18. They are stubbed (empty `UNUSED()` no-ops) in lf-6.6.y and lf-6.12.y. Only lf-5.4 has the working bodies.
+The current dpaa1 branch programs FE objects (ENQ, MUX, TRANSITION, EXIT, EXT_HASH, FE_ENTER) through `fman_pcd_fe_*_build()` functions and `fman_pcd_fe_build_contexts()` (patch 0146). The `get_indexed_hash_bucket()` CRC64 bucket indexer is verbatim-identical to the SDK `cdx_ehash.c` implementation. AC_CC dispatch is proven on hardware across multiple sessions (2026-07-04/05/06). Three full engage→disengage→re-engage cycles are byte-clean reversible (MURAM returns to 0, `pcd-snapshot` diff clean).
 
-| Function | LSDK Location | LOC (est.) | Risk |
+The three lf-5.4 LSDK functions were flagged as needing porting because they are stubbed (empty `UNUSED()` no-ops) in lf-6.6.y and lf-6.12.y, and the concern was that a wrong FE-struct image would stall the port with NO fault latched. However, the port-stall-with-no-fault signature turned out to be the bare `CONTRL_FLOW` exit on the Fork A (exact-match CC) path — NOT an FE-VM programming defect. The FE-VM MISS→EXIT path is proven safe (ping loss = frames MISS → EXIT, port does NOT park). The remaining flow-HIT blocker is the EKFC extraction order (UNKNOWN-1), not the FE-VM core.
+
+**Historical reference — the three functions from lf-5.4 LSDK (retained for traceability):**
+
+| Function | LSDK Location (999-patch) | Purpose | Current dpaa1 equivalent |
 |---|---|---|---|
-| `FmPcdCcBuildFE` | 999-patch L8883 | ~300 | Programs a single FE object. Wrong image = port stalls with NO fault latched (invisible to traffic tests) |
-| `FmPcdCcBuildContextByFE` | 999-patch L8954 | ~200 | Populates per-port FE context. Wrong = EXT_HASH FE can't read DDR |
-| `get_indexed_hash_bucket` | 999-patch L7301 | ~30 | CRC64 bucket indexer. Already verified against SDK `crc64.h` — low risk |
+| `FmPcdCcBuildFE` | L8883 | Programs a single FE object from the pool with its type-specific MURAM layout | `fman_pcd_fe_enq_build()`, `fman_pcd_fe_hash_encode()`, etc. (patches 0127, 0131) |
+| `FmPcdCcBuildContextByFE` | L8954 | Populates the per-port FE context: internal buffer pool + management index + ctrl-params page writes | `fman_pcd_fe_build_contexts()` (patch 0146) — builds ENQ/MUX/Transition contexts at arm time |
+| `get_indexed_hash_bucket` | L7301 | CRC64 bucket indexer: `(crc >> ((6-shift)<<3)) & mask` | `fman_pcd_ehash_bucket_index()` — verbatim-identical to SDK, confirmed by unit test |
 
-**Resolution methodology:**
+**If the port is needed in future (e.g., on a newer kernel where our current approach doesn't work):**
 
 1. Extract the three functions from the lf-5.4 LSDK source at `/home/vyos/ask-ref/ask/patches/kernel/999-layerscape-ask-kernel_linux_5_4_3_00_0.patch`
 2. Adapt SDK types (`t_FmPcdFEObj`, `t_EnqFe`, `t_ExtHashFe`, `en_exthash_global_mem`) to mainline equivalents already present in `fman_pcd_fe.c`
 3. Adapt SDK MURAM accessors (`FM_MURAM_AllocMem`, `IOMemSet32`, `WRITE_UINT32`) to mainline equivalents (`fman_pcd_muram_alloc`, `memset_io`, `iowrite32be`)
-4. Land each function as a dormant increment behind debugfs byte-readback, validating the programmed MURAM image against this document's expected encodings BEFORE flowing traffic
-5. Gate `fe_arm_engage()` on `key_verified=1` — refuse to arm until UNKNOWN-1 and UNKNOWN-2 are confirmed
+4. Validate the programmed MURAM image against §7's expected encodings via `pcd-snapshot diff` BEFORE flowing traffic
 
-**Validation gate:** After programming, read back every MURAM word and compare against the expected encoding from §7. Use `pcd-snapshot diff` to verify the FE image byte-for-byte. Only then flow traffic.
-
-**Prerequisites:** lf-5.4 LSDK source available locally; UNKNOWN-1 resolved first.
+**Prerequisites for the port (if undertaken):** lf-5.4 LSDK source available locally; UNKNOWN-1 resolved first.
 
 
 ## 13. Complete Function Inventory
