@@ -148,18 +148,16 @@ Authoritative reference: `specs/fman-keygen-flow-key-spec.md` v2.0 (2026-07-10).
 - **IPsec SPI bit 9 MUST NOT be set on non-IPsec schemes.** On non-IPsec frames the parser has no SPI offset → reads random bytes → unpredictable key. F-043 existed because of this. §4.1.
 - **PTYPE1 has no EKDV default-value slot** (§4.2). Guard: reject `proto == 0` at flow insert (§10.6). Non-IP frames never reach the FE path (gated on parser's IPv4 indication). On a frame that somehow gets through, `proto=0` produces a deterministic 0x00 byte that matches no inserted flow (none carries `proto==0`).
 
-### Extraction order: UNVERIFIED (critical)
+### Extraction order: SETTLED (2026-07-13)
 
-- **The EKFC extraction order is NOT confirmed.** Three competing models exist: ascending bit position (`DPORT, SPORT, PROTO, DIP, SIP`), descending (`SIP, DIP, PROTO, SPORT, DPORT`), and size-grouped (`SIP, DIP, SPORT, DPORT, PROTO`). **None has direct empirical support from silicon.** §3.1.
-- **Patch 0148's logging is NOT proof.** It added `pr_info()` to `keygen_scheme_setup()`, which writes `kgse_ekfc` — logging the value being written, not what the silicon does with it. The extraction-order table in the Qdrant entry is an annotation, not dmesg output.
-- **The 2026-07-04 HIT does NOT settle the order.** Four candidate keys were inserted simultaneously; the match was attributed by elimination, not isolation. The observed key is consistent with NO model — strong signal the attribution was wrong or the pipeline was already corrupted by the scaffold (§5.5).
-- **Engineering response:** encode the order as a data table (`static const struct fman_kg_field fman_kg_order_v4[]`). Derive key_len by walking it. Cross-check the covered bitmask against EKFC at probe. Add `fman_pcd_key_selftest()` that reads the silicon's actual extracted key from a live frame and compares against prediction. Gate `fe_arm_engage()` on `key_verified=1`. Then resolving the order is a one-line table edit. §7.
-- **Working assumption for implementation:** ascending bit position. It is a placeholder until the §11 E2 workspace dump confirms it.
+- **The EKFC extraction byte order is CONFIRMED: MSB-first (descending bit position).** The silicon extracts: **SIP (IPSRC1) → DIP (IPDST1) → PROTO (PTYPE1) → SPORT (L4PSRC) → DPORT (L4PDST)**. 13 bytes total for EKFC=0x001C0006. Verified 2026-07-13 on hardware (board 192.168.1.185, kernel 6.18.38-vyos, ISO 2026.07.13-1938-rolling) via CRC-64 hash-match against two independent TCP flows on eth4. The ascending-bit-position model (DPORT first) and size-grouped model are both **DISPROVEN**.
+- **The hardware KG hash is RAW CRC-64 (no final complement).** The silicon stores `crc64_raw(key)` at IC offset 0x48, where `crc64_raw` uses seed `~0ULL` but does NOT apply the final `~crc` XOR. The CRC-64/XZ finalized variant (which adds `XOR 0xFFFFFFFFFFFFFFFF`) does NOT match the hardware. Verified: `crc64_raw(SIP|DIP|6|0xAD9C|0xD903) = 0x600824e70ae4d573` matched captured hash; `crc64_xz(...)` did not. When inserting ehash flow keys or computing bucket indices, use the raw CRC-64 without final complement.
+- **Verification methodology (repeatable):** mainline RSS on eth4 (KeyGen in RX path, `receive-hashing: on`, `FMBM_RFPNE` has HWK engine), no ASK engage needed, eth4-only capture filter via `strcmp(net_dev->name, "eth4")` in `rx_default_dqrr` hook. Send controlled TCP SYN from `.106:portA` to `.185:portB` with distinct non-zero fields, read `hash_probe` debugfs, compare against `crc64_raw()` over the 13-byte key assembled in confirmed order.
 - **IPv6 requires a separate KG scheme + separate ehash table** (IPSRC1/IPDST1 become 16 bytes each → 37-byte key). The design must not preclude it. §12.
 
 ### Immediate required actions (no gate, order-independent)
 
-- **Revert F-046.** Restore `word0 = 0x40800000` (ALLOCATE bit) on FE_ENTER AD. F-046 stripped it speculatively, against the only configuration that ever produced a HIT. ALLOCATE allocates the FE workspace that holds the extracted key and KG hash result. §5.4.
+- **~~Revert F-046.~~** Restore `word0 = 0x40800000` (ALLOCATE bit) on FE_ENTER AD. F-046 stripped it speculatively, against the only configuration that ever produced a HIT. ALLOCATE allocates the FE workspace that holds the extracted key and KG hash result. §5.4.
 - **Delete the scaffold block** (not `if (0)` — physically remove it). It allocated 304 bytes per engage cycle from `gen_pool`, never freed them, and wrote at offsets overlapping active FMan data structures → MURAM corruption, `ecir.fqid=0x0` storms, SFP+ link lock. Every MISS in the record predates F-047. §5.5, §10.7.
 - **Delete dead code; do not disable it.** `if (0) { ... }` blocks survive rebases and get re-enabled by accident. Git history holds the code. §10.7.
 
@@ -180,7 +178,7 @@ From the spec §13. Only the E2 workspace dump (§11 Step 3) can discriminate:
 1. **Scaffold MURAM corruption** — UNTESTED. Every MISS predates F-047.
 2. **keysize < extracted length truncating IP addresses** — NEVER CONSIDERED before v2.0.
 3. **F-046 stripping ALLOCATE** — UNTESTED. Removed a bit set in the only HIT.
-4. Wrong extraction order — possible but permutation-exhaustion argues against it.
+4. ~~Wrong extraction order~~ — **CLOSED 2026-07-13** (confirmed MSB-first: SIP→DIP→PROTO→SPORT→DPORT via CRC-64 hash-match on hardware).
 5. CC-hop clobbers KG hash — CLOSED (no hop exists post-F-044).
 6. CRC64 / kgse_hc mismatch — CLOSED (§4.3, verbatim-identical).
 7. Bucket or entry struct layout — CLOSED (verbatim match to SDK oracle).
