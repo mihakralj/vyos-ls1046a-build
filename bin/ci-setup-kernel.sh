@@ -1436,8 +1436,64 @@ fi
 # Stores the DMA buffer virtual address in shared global fman_pcd_ic_vaddr
 # at the top of rx_default_dqrr() so fman_pcd can dump the IC.
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
-    echo 'aW1wb3J0IHN5cwoKcGF0aCA9ICJkcml2ZXJzL25ldC9ldGhlcm5ldC9mcmVlc2NhbGUvZHBhYS9kcGFhX2V0aC5jIgp0cnk6CiAgICB3aXRoIG9wZW4ocGF0aCkgYXMgZjogc3JjID0gZi5yZWFkKCkKZXhjZXB0IEZpbGVOb3RGb3VuZEVycm9yOgogICAgcHJpbnQoIiMjIyBkcGFhX2V0aC5jOiBGLTA2OWEgdjExIGZpbGUgbm90IGZvdW5kIikKICAgIHN5cy5leGl0KDApCgpjaGFuZ2VzID0gMAoKIyAxLiBleHRlcm4gZGVjbGFyYXRpb25zCmlmICJleHRlcm4gdm9pZCAqZm1hbl9wY2RfaWNfYnVmX2Jhc2UiIG5vdCBpbiBzcmM6CiAgICBmaXJzdF9zdCA9IHNyYy5maW5kKCJcbnN0YXRpYyAiKQogICAgaWYgZmlyc3Rfc3QgPiAwOgogICAgICAgIHNyYyA9IChzcmNbOmZpcnN0X3N0KzFdICsKICAgICAgICAgICAgICAgImV4dGVybiB2b2lkICpmbWFuX3BjZF9pY192YWRkcjtcbiIgKwogICAgICAgICAgICAgICAiZXh0ZXJuIHZvaWQgKmZtYW5fcGNkX2ljX2J1Zl9iYXNlO1xuIiArCiAgICAgICAgICAgICAgIHNyY1tmaXJzdF9zdCsxOl0pCiAgICAgICAgY2hhbmdlcyArPSAxCiAgICAgICAgcHJpbnQoIiMjIyBkcGFhX2V0aC5jOiBGLTA2OWEgdjExIGV4dGVybnMgYWRkZWQiKQoKIyAyLiBDYXB0dXJlIGJ1Zl9iYXNlIGFmdGVyIGRwYWFfYnBpZDJwb29sIGluIHJ4X2RlZmF1bHRfZHFycgojIFVzZSBmdWxsIGxpbmUgY29udGV4dCB0byBhdm9pZCBtYXRjaGluZyBjb21tZW50cyBvciBvdGhlciBmdW5jdGlvbnMKaWYgImZtYW5fcGNkX2ljX2J1Zl9iYXNlID0gIiBub3QgaW4gc3JjOgogICAgIyBUaGUgZXhhY3QgbGluZSBpbiByeF9kZWZhdWx0X2RxcnI6CiAgICAjIFx0ZHBhYV9icCA9IGRwYWFfYnBpZDJwb29sKGRxLT5mZC5icGlkKTsKICAgIGFuY2hvciA9ICJcdGRwYWFfYnAgPSBkcGFhX2JwaWQycG9vbChkcS0+ZmQuYnBpZCk7IgogICAgcG9zID0gc3JjLmZpbmQoYW5jaG9yKQogICAgaWYgcG9zIDwgMDoKICAgICAgICAjIFRyeSB3aXRob3V0IGxlYWRpbmcgdGFiCiAgICAgICAgYW5jaG9yID0gImRwYWFfYnAgPSBkcGFhX2JwaWQycG9vbChkcS0+ZmQuYnBpZCk7IgogICAgICAgIHBvcyA9IHNyYy5maW5kKGFuY2hvcikKICAgIGlmIHBvcyA+IDA6CiAgICAgICAgZW9sID0gc3JjLmZpbmQoJ1xuJywgcG9zKQogICAgICAgIHNyYyA9IChzcmNbOmVvbCsxXSArCiAgICAgICAgICAgICAgICdcdC8qIEYtMDY5YSB2MTE6IGNhcHR1cmUgYnVmZmVyIGJhc2UgZnJvbSBkcGFhX2JwLT52YWRkciAqL1xuJwogICAgICAgICAgICAgICAnXHRmbWFuX3BjZF9pY19idWZfYmFzZSA9IGRwYWFfYnAtPnZhZGRyO1xuJyArCiAgICAgICAgICAgICAgIHNyY1tlb2wrMTpdKQogICAgICAgIGNoYW5nZXMgKz0gMQogICAgICAgIHByaW50KCIjIyMgZHBhYV9ldGguYzogRi0wNjlhIHYxMSBidWZfYmFzZSBjYXB0dXJlZCIpCiAgICBlbHNlOgogICAgICAgIHByaW50KCIjIyMgZHBhYV9ldGguYzogRi0wNjlhIHYxMSBkcGFhX2JwaWQycG9vbCBsaW5lIG5vdCBmb3VuZCIpCgojIDMuIENhcHR1cmUgdmFkZHIgYWZ0ZXIgcGh5c190b192aXJ0KGFkZHIpCmlmICJmbWFuX3BjZF9pY192YWRkciA9IHZhZGRyIiBub3QgaW4gc3JjOgogICAgIyBTZWFyY2ggd2l0aGluIHJ4X2RlZmF1bHRfZHFyciBjb250ZXh0CiAgICAjIExvb2sgZm9yOiBcdHZhZGRyID0gcGh5c190b192aXJ0KGFkZHIpOwogICAgYW5jaG9yMiA9ICJwaHlzX3RvX3ZpcnQoYWRkcikiCiAgICBwb3MyID0gc3JjLmZpbmQoYW5jaG9yMikKICAgIGlmIHBvczIgPiAwOgogICAgICAgIGVvbDIgPSBzcmMuZmluZCgnXG4nLCBwb3MyKQogICAgICAgIHNyYyA9IChzcmNbOmVvbDIrMV0gKwogICAgICAgICAgICAgICAnXHQvKiBGLTA2OWEgdjExOiBjYXB0dXJlIGZyYW1lLWRhdGEgdmFkZHIgKi9cbicKICAgICAgICAgICAgICAgJ1x0Zm1hbl9wY2RfaWNfdmFkZHIgPSB2YWRkcjtcbicgKwogICAgICAgICAgICAgICBzcmNbZW9sMisxOl0pCiAgICAgICAgY2hhbmdlcyArPSAxCiAgICAgICAgcHJpbnQoIiMjIyBkcGFhX2V0aC5jOiBGLTA2OWEgdjExIHZhZGRyIGNhcHR1cmVkIikKICAgIGVsc2U6CiAgICAgICAgcHJpbnQoIiMjIyBkcGFhX2V0aC5jOiBGLTA2OWEgdjExIHBoeXNfdG9fdmlydCBub3QgZm91bmQiKQoKaWYgY2hhbmdlczoKICAgIHdpdGggb3BlbihwYXRoLCAidyIpIGFzIGY6IGYud3JpdGUoc3JjKQogICAgcHJpbnQoZiIjIyMgZHBhYV9ldGguYzogRi0wNjlhIHYxMSB7Y2hhbmdlc30gY2hhbmdlKHMpIGFwcGxpZWQiKQplbHNlOgogICAgcHJpbnQoIiMjIyBkcGFhX2V0aC5jOiBGLTA2OWEgdjExIG5vIGNoYW5nZXMiKQo=' | base64 -d | python3
-    echo "### dpaa_eth.c: F-069a v11 buf_base (full-line anchor)\n"
+    echo 'import sys
+
+path = "drivers/net/ethernet/freescale/dpaa/dpaa_eth.c"
+try:
+    with open(path) as f:
+        src = f.read()
+except FileNotFoundError:
+    print("### dpaa_eth.c: F-069a v7 file not found")
+    sys.exit(0)
+
+changes = 0
+
+# 1. Add extern declarations for shared globals
+if "extern void *fman_pcd_ic_vaddr" not in src:
+    first_static = src.find("
+static ")
+    if first_static > 0:
+        src = (src[:first_static+1] +
+               "extern void *fman_pcd_ic_vaddr;	/* F-069a v7: DMA buffer vaddr for ic_probe */
+" +
+               src[first_static+1:])
+        changes += 1
+        print("### dpaa_eth.c: F-069a v7 extern added")
+
+# 2. Insert vaddr capture in rx_default_dqrr
+if "fman_pcd_ic_vaddr = vaddr" not in src:
+    # Find rx_default_dqrr function and insert vaddr capture
+    func_anchor = "rx_default_dqrr"
+    func_pos = src.find(func_anchor)
+    if func_pos > 0:
+        brace = src.find('{', func_pos)
+        # Find "vaddr = " after the brace (first assignment to vaddr)
+        vaddr_assign = src.find("vaddr = ", brace)
+        if vaddr_assign > 0:
+            eol = src.find('
+', vaddr_assign)
+            # End of this statement - insert capture after it
+            capture = ('
+
+	/* F-069a v7: capture buffer vaddr for ic_probe debugfs. */
+'
+                       '	fman_pcd_ic_vaddr = vaddr;')
+            src = src[:eol+1] + capture + src[eol+1:]
+            changes += 1
+            assign_text = src[vaddr_assign:eol].strip()[:60]
+            print(f"### dpaa_eth.c: F-069a v7 vaddr capture inserted after '{assign_text}'")
+        else:
+            print("### dpaa_eth.c: F-069a v7 vaddr assignment not found in rx_default_dqrr")
+    else:
+        print("### dpaa_eth.c: F-069a v7 rx_default_dqrr not found")
+
+if changes > 0:
+    with open(path, "w") as f:
+        f.write(src)
+    print(f"### dpaa_eth.c: F-069a v7 {changes} change(s) applied")
+else:
+    print("### dpaa_eth.c: F-069a v7 no changes")' | base64 -d | python3
+    echo "### dpaa_eth.c: F-069a v7 vaddr capture (page-boundary safe scan)\n"
 fi
 
 # F-069b: IC probe debugfs node — reads buffer captured by F-069a.
