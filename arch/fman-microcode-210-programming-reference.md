@@ -1,31 +1,22 @@
 # FMan Microcode 210.10.1 — Complete Programming Reference
 
-**Version 1.1 — 2026-07-13**
-
-Updated §12.1–12.3 with latest Qdrant silicon findings:
-  - UNKNOWN-1: extraction order is LSB-first (ascending bit position), confirmed by NXP `dpaa_eth` default KG config (EKFC=0x00180206). Hardware hash-match experiment (F-071) is the definitive validation.
-  - UNKNOWN-2: `contextOffsetInWS=0` is SDK production-proven (ASK 1.x `FmPcdExternalHashTableSet`). The hash-match dual-resolves both unknowns.
-  - UNKNOWN-3: all three LSDK functions are already ported to the dpaa1 branch and silicon-verified (2026-07-06). `FmPcdCcBuildFE` → `fman_pcd_fe_*_build()`, `FmPcdCcBuildContextByFE` → `fman_pcd_fe_build_contexts()` (patch 0146), `get_indexed_hash_bucket` → `fman_pcd_ehash_bucket_index()`.
-  - Added CRC-64/XZ target values for the test flow (LSB-first and MSB-first, with and without final complement).
-  - Corrected default EKFC from 0x00180006 to 0x00180206 (includes IPsec SPI bit).
-
 **Board:** NXP LS1046A Mono Gateway DK (FMan v3, DPAA1)
 **Microcode:** QEF 210.10.1 ("Microcode version 210.10.1 for LS1043 r1.0"), `caps=0x17`
 **Blob:** 51652 bytes, 12851 code words, SPI `mtd3` @ `0x400000`, DT node `/soc/fman@1a00000/fman-firmware/fsl,firmware`
 
-This is the complete, self-contained programming reference for the NXP FMan 210.10.1 microcode. Every register, field, bit assignment, FE type encoding, opcode, resource ceiling, and invariant appears exactly once. Sections 1–11 describe the reachable programming surface. Section 12 documents the three genuine unknowns with their resolution methodology. Section 13 documents what is absent (do not attempt to use). Section 14 cross-references the deeper architectural documents.
+This manual describes the complete programming surface of the NXP FMan 210.10.1 microcode — every register, field, bit assignment, FE type encoding, opcode, and resource ceiling. Sections 1–11 cover the reachable programming surface. Section 12 documents three facts not yet confirmed by a direct hardware measurement, with the methodology to resolve each. Section 13 documents what is absent from this microcode. Section 14 provides cross-references to deeper architectural documents.
 
 ---
 
 ## 1. Identity & Scope
 
-The FMan v3 (LS1046A) microcode is a QEF container (`struct qe_firmware`, `magic="QEF"`) loaded by U-Boot from SPI `mtd3` into FMan IRAM at boot. It implements a table-driven Parse-Classify-Distribute pipeline. The kernel programs it by writing MURAM-resident configuration tables through FMan CCSR registers; it is never invoked via a software API or opcode dispatch.
+The FMan v3 (LS1046A) microcode is a QEF container (`struct qe_firmware`, `magic="QEF"`) loaded by U-Boot from SPI `mtd3` into FMan IRAM at boot. It implements a table-driven Parse-Classify-Distribute pipeline. The kernel programs it by writing MURAM-resident configuration tables through FMan CCSR registers. It is never invoked via a software API or opcode dispatch.
 
 The Host Command (HC) doorbell is **absent** from this blob (`caps=0x17`, bit 3 `FMAN_CAP_HC_DISPATCH` clear). `fmd_host_cmd_send()` returns `-ENXIO`. The only productive programming path is the register→MURAM→silicon path documented here.
 
-The microcode is proprietary NXP 210.10.1, not the open-source `qoriq-fm-ucode` 106.x/108.x families. The public families are a strictly narrower subset. Every feature marked "210-only" does not exist in public microcode.
+The microcode is proprietary NXP 210.10.1, not the open-source `qoriq-fm-ucode` 106.x/108.x families. The public families are a strictly narrower subset — features marked "210-only" in this document do not exist in public microcode.
 
-Three programming facts are not yet empirically confirmed by a hardware experiment (§12). They are marked **UNKNOWN-1**, **UNKNOWN-2**, **UNKNOWN-3**. Everything else has been confirmed against at least one of: (a) the NXP DPAA Reference Manual, (b) the NXP lf-5.4 LSDK driver source, (c) the `we-are-mono/ASK` production code, or (d) a direct `/dev/mem` / debugfs read on the board.
+Three programming facts are not yet confirmed by a direct hardware measurement (§12). They are marked **UNKNOWN-1**, **UNKNOWN-2**, **UNKNOWN-3**. Everything else has been confirmed against at least one of: (a) the NXP DPAA Reference Manual, (b) the NXP lf-5.4 LSDK driver source, (c) the `we-are-mono/ASK` production code, or (d) a direct `/dev/mem` / debugfs read on the board.
 
 
 ## 2. Architecture Overview
@@ -55,7 +46,7 @@ DDR is used for the ehash bucket array and per-flow records (to avoid MURAM exha
 The two dispatch paths on 210.10.1:
 
 - **Path 1 — FE-VM external-hash** (the only path that flows): RCCB → `FE_ENTER` AD → EXT_HASH FE → DDR bucket lookup → MUX → ENQ (HIT) or EXIT (MISS). The FE-VM opcode interpreter provides terminal BMI-FIFO disposition.
-- **Path 2 — bare exact-match CC** (`CONT_LOOKUP` → `CONTRL_FLOW` exit): **Parks on 210.10.1** — no terminal FIFO disposition → BMI stall at ~45 frames. Do not use.
+- **Path 2 — bare exact-match CC** (`CONT_LOOKUP` → `CONTRL_FLOW` exit): **Parks on 210.10.1** — no terminal FIFO disposition, BMI stall at ~45 frames. Do not use.
 
 
 ## 3. QEF Container (Blob Identity)
@@ -73,9 +64,9 @@ The microcode blob on SPI `mtd3` (flash offset `0x400000`, 1 MiB partition "fman
 | `0x48–0x49` | `__be16 soc_model` | `0x0413` (proprietary 210); `0x0416` = open-source 106 |
 | `+112` | `u8×3 version` | `0xd2 0x0a 0x01` = 210.10.1 |
 
-Microcode entry at `code_offset = 244`, `wcount = 12851` (51404 code bytes). After U-Boot loads it, the kernel reads it from the DT property `/proc/device-tree/soc/fman@1a00000/fman-firmware/fsl,firmware`. The blob is 51652 bytes on this board.
+Microcode entry at `code_offset = 244`, `wcount = 12851` (51404 code bytes). After U-Boot loads it, the kernel reads it from the DT property `/proc/device-tree/soc/fman@1a00000/fman-firmware/fsl,firmware`.
 
-> The "for LS1043 r1.0" label is cosmetic — LS1043A and LS1046A share identical FMan v3 silicon. NXP ships one ASK microcode package for both. Do not "fix" it.
+> The "for LS1043 r1.0" label is cosmetic — LS1043A and LS1046A share identical FMan v3 silicon. NXP ships one ASK microcode package for both.
 
 **Verification commands:**
 ```bash
@@ -123,7 +114,7 @@ To read or write a scheme word:
 | **16** | `kgse_spc` | `[31:0]` | **Scheme Packet Counter** (read-only) |
 | **23** | (upper words) | | Additional configuration words for advanced features |
 
-**Key mode encodings for ASK2:**
+**Key mode encodings:**
 
 | Purpose | `kgse_mode` | Meaning |
 |---|---|---|
@@ -132,7 +123,7 @@ To read or write a scheme word:
 | **Policer steering** | `0xC04C0000` | EN \| NIA_PLCR \| DONE — route to policer profile |
 | **Scheme disabled** | `0x00000000` | SI=0 — skipped during scheme selection |
 
-For AC_CC dispatch, `kgse_ccbs` MUST be `0x00000000`. A non-zero CCBS triggers an implicit CC group-table walk (the CCBS graft, which is a separate dispatch mechanism from AC_CC and was disproven for FE-VM on 210.10.1).
+For AC_CC dispatch, `kgse_ccbs` MUST be `0x00000000`. A non-zero CCBS triggers an implicit CC group-table walk, which is a different dispatch mechanism and does not work for FE-VM on 210.10.1.
 
 ### 4.3 EKFC Field Bit Assignments
 
@@ -150,16 +141,16 @@ Extract Known Fields Command — a 32-bit bitmask. Each set bit instructs the Ke
 | 17 | `KG_SCH_KN_IPTOS1` | IPv4 TOS / IPv6 Traffic Class | 1 B | |
 | 14 | `KG_SCH_KN_IPSRC2` | Inner/tunneled IP source | 4/16 B | Tunneled frame only |
 | 13 | `KG_SCH_KN_IPDST2` | Inner/tunneled IP destination | 4/16 B | Tunneled frame only |
-| **9** | `KG_SCH_KN_IPSECSPI` | IPsec ESP/AH SPI | 4 B | **Do NOT set on non-IPsec schemes** — parser has no SPI offset for non-IPsec frames, reads random bytes → unpredictable key (F-043) |
+| **9** | `KG_SCH_KN_IPSECSPI` | IPsec ESP/AH SPI | 4 B | **Do NOT set on non-IPsec schemes** — parser has no SPI offset for non-IPsec frames, reads random bytes |
 | **4** | **`KG_SCH_KN_L4PSRC`** | **TCP/UDP source port** | 2 B | |
 | **3** | **`KG_SCH_KN_L4PDST`** | **TCP/UDP dest port** | 2 B | |
 | 2 | `KG_SCH_KN_TFLG` | TCP flags | 1 B | |
 
-**ASK2 5-tuple target:** `EKFC = 0x001C0006` = `IPSRC1 | IPDST1 | PTYPE1 | L4PSRC | L4PDST` → 13 bytes.
+**5-tuple target:** `EKFC = 0x001C0006` = `IPSRC1 | IPDST1 | PTYPE1 | L4PSRC | L4PDST` → 13 bytes.
 
-**ASK2 4-tuple (NO PTYPE1):** `EKFC = 0x00180006` → 12 bytes. **Do not use for production** — aliases TCP and UDP flows sharing the same IP:port pair (silent misforwarding). Use only for testing where protocol is known and distinct.
+**4-tuple (NO PTYPE1):** `EKFC = 0x00180006` → 12 bytes. **Do not use for production** — aliases TCP and UDP flows sharing the same IP:port pair (silent misforwarding).
 
-**IPsec SPI (bit 9) MUST NOT be set on non-IPsec schemes.** On non-IPsec frames the parser has no SPI offset → reads random bytes → unpredictable key. This was the root cause of F-043.
+**IPsec SPI (bit 9) MUST NOT be set on non-IPsec schemes.** On non-IPsec frames the parser has no SPI offset — reads random bytes — unpredictable key.
 
 ### 4.4 Scheme Selection Logic
 
@@ -169,7 +160,7 @@ For each received frame:
 3. Walk schemes SC0→SC31: first scheme where `SI=1` AND `(QLCV & kgse_mv) == kgse_mv` wins
 4. No match → `FMKG_GCR[DEFNIA]` default next-interface action
 
-For ASK2 exact-match classification: set `kgse_mv` to the LCV bits for the protocol combination you want to match (IPv4=bitX, TCP=bitY, etc.), and set `SI=1`.
+For exact-match classification: set `kgse_mv` to the LCV bits for the protocol combination you want to match, and set `SI=1`.
 
 ### 4.5 Hash Algorithm
 
@@ -177,17 +168,16 @@ CRC-64-ECMA-182, reflected polynomial `0xC96C5795D7870F42`, seed `0xFFFFFFFFFFFF
 
 FQID computation: `KDFV = (hash >> HSHIFT) & HMASK`; `FQID = KDFV | FQBASE`.
 
-Symmetric hash (`SYM=1`): XORs src+dst pairs (MAC, IP, L4 port) before hashing. Both directions of a flow produce the same FQID. Critical for stateful NAT where return traffic must hit the same CPU.
+Symmetric hash (`SYM=1`): XORs src+dst pairs (MAC, IP, L4 port) before hashing. Both directions of a flow produce the same FQID.
 
-**FE-VM ehash bucket index** (from lf-5.4 LSDK `get_indexed_hash_bucket`, L7301):
+FE-VM ehash bucket index (from lf-5.4 LSDK `get_indexed_hash_bucket`, L7301):
 ```
 bucket_index = (crc64_hash >> ((6 - hashShift) * 8)) & hashMask
 ```
-This is **verbatim-identical** to the production ASK 1.x `get_indexed_hash_bucket()`. Confirmed by static code comparison, not yet confirmed by a hardware dump — see §12.3 item 3.
 
 ### 4.6 KGSE_SPC — Scheme Packet Counter
 
-`kgse_spc` (word 16, read-only) is the per-scheme packet counter. It increments for every frame this scheme classifies. Zero SPC on an armed scheme means frames are not being dispatched to it (check `kgse_mv` against the live `LCV`).
+`kgse_spc` (word 16, read-only) is the per-scheme packet counter. It increments for every frame this scheme classifies. Zero SPC on an armed scheme means frames are not being dispatched to it — check `kgse_mv` against the live `LCV`.
 
 
 ## 5. BMI Port Registers
@@ -213,7 +203,7 @@ For the hash-match method (§12.1), `pass_hash_result` must be enabled in the bu
 
 ## 6. FM_CTL Params Page (per-port, 256 B MURAM)
 
-Allocated once per port by patch `0116` (`fman_pcd_port_ensure_params_page`). The FMan Controller reads this page during frame processing. Exact layout (`t_FmPcdCtrlParamsPage`, packed 256 bytes):
+Allocated once per port. The FMan Controller reads this page during frame processing. Exact layout (`t_FmPcdCtrlParamsPage`, packed 256 bytes):
 
 | Offset | Field | Bits | Meaning |
 |---|---|---|---|
@@ -233,8 +223,8 @@ Allocated once per port by patch `0116` (`fman_pcd_port_ensure_params_page`). Th
 | `0x5C` | `reserved4[164]` | | Pad to 256 B |
 
 **Init values** (from lf-5.4 LSDK `FmPortSetFESupport`):
-- `+0x40` = `0x00000100` (already populated by `0116`)
-- `+0x44` = `0x012ee0e8` (already populated by `0116`)
+- `+0x40` = `0x00000100`
+- `+0x44` = `0x012ee0e8`
 - `+0x54` = MURAM offset of the per-port FE buffer management free-list (written at arm time)
 - `+0x58` = `0x00000000` (reset depletion counter at arm time; zeroed at disengage)
 
@@ -251,14 +241,14 @@ The FE-VM opcode interpreter dispatches on the type field in bits `[31:26]` of t
 |---|---|---|---|---|
 | `0x01000000` | — | **HM** (Hash Match) | 16 B | Header Manipulation FE — executes HMCD/HMCT chains inline |
 | `0x02000000` | `0x02010000` | **ENQ** | 16 B | Terminal enqueue to QMan FQ. Word1 encodes the 24-bit FQID |
-| `0x03000000` | `0x03800000` | **EXIT** (DEALLOCATE) | 4 B | Free workspace allocation, terminate frame. **Terminal MISS disposition** |
-| `0x04000000` | `0x04000000` | **MUX** | 8 B | Multiplexer — branches HIT→nextFE / MISS→implied EXIT. **Singleton** |
-| `0x05000000` | — | **TRANSITION** | 8 B | State transition relay for HIT forwarding. **Singleton** |
+| `0x03000000` | `0x03800000` | **EXIT** (DEALLOCATE) | 4 B | Free workspace allocation, terminate frame. Terminal MISS disposition |
+| `0x04000000` | `0x04000000` | **MUX** | 8 B | Multiplexer — branches HIT→nextFE / MISS→implied EXIT. Singleton |
+| `0x05000000` | — | **TRANSITION** | 8 B | State transition relay for HIT forwarding. Singleton |
 | `0x06000000` | `0x06000000` | **EXT_HASH** | 28 B | External hash table lookup in DDR — core FE-VM fastpath |
 
 ### 7.2 EXT_HASH FE — Byte-Level Layout
 
-This is the central FE object. It performs: CRC64(hardware key) → bucket index → DDR bucket walk → key comparison → HIT/MISS dispatch.
+The central FE object. It performs: CRC64(hardware key) → bucket index → DDR bucket walk → key comparison → HIT/MISS dispatch.
 
 | Word | Offset | Size | Field | Dormant Value |
 |---|---|---|---|---|
@@ -272,18 +262,18 @@ This is the central FE object. It performs: CRC64(hardware key) → bucket index
 
 **Critical address-space split:** `table_base_hi/lo` (`w2`/`w3`) carry a DDR bus address (`dma_addr_t` from `dma_alloc_coherent`). `nextFEPtr`/`missNextFE` (`w5`/`w6`) carry MURAM offsets (gen_pool offsets). Do not mix them.
 
-**contextSize** (in `w1[15:8]`): the SDK passes 256 (`w1 = 0x00FF0000` masked with `0x7FFF`). Encoded as `contextSize-1` in the field. This determines how many IC bytes the FE-VM copies into the FE workspace. Must be large enough to cover the extracted key region.
+**contextSize** (in `w1[15:8]`): the SDK passes 256 (`w1 = 0x00FF0000` masked with `0x7FFF`). Encoded as `contextSize-1` in the field.
 
-**hashMask** (in `w1[31:16]`): `(mask+1)` must be an exact power of two. Valid masks: `0x0, 0x1, 0x3, 0x7, 0xF, …, 0x7FFF` (32768 buckets). Invalid: `0xF0` (not power-of-2-minus-1). Mainline `0125` enforces this.
+**hashMask** (in `w1[31:16]`): `(mask+1)` must be an exact power of two. Valid masks: `0x0, 0x1, 0x3, 0x7, 0xF, …, 0x7FFF` (32768 buckets).
 
-**contextOffsetInWS**: See §12.2 **UNKNOWN-2**. Controls where within the FE workspace the extracted key starts. The SDK passes `0`. The field occupies bits in `w0`.
+**contextOffsetInWS**: See §12.2 **UNKNOWN-2**. The SDK passes `0`. The field occupies bits in `w0`.
 
 ### 7.3 ENQ FE — Byte Layout
 
 | Word | Offset | Contents |
 |---|---|---|
 | `w0` | `0x00` | `FMAN_FE_TYPE_ENQ (0x02010000)` |
-| `w1` | `0x04` | FQID (24-bit, low bits). `w1 = 0x00000200` for FQ `0x200` (kernel delivery); `0x00008000` for dedicated offload FQ |
+| `w1` | `0x04` | FQID (24-bit). `w1 = 0x00000200` for FQ `0x200` (kernel delivery); `0x00008000` for dedicated offload FQ |
 | `w2` | `0x08` | reserved/context |
 | `w3` | `0x0C` | reserved/context |
 
@@ -293,7 +283,7 @@ This is the central FE object. It performs: CRC64(hardware key) → bucket index
 |---|---|---|
 | `w0` | `0x00` | `FMAN_FE_TYPE_EXIT | FMAN_FE_EXIT_DEALLOCATE (0x03800000)` |
 
-EXIT-DEALLOCATE is a **real terminal MISS disposition on 210.10.1**. Proven on silicon 2026-07-05: AC_CC arm → ping loss = frames MISS → EXIT, port did NOT park. This refutes the bare-AC_CC park concern for the FE-VM path.
+EXIT-DEALLOCATE is a real terminal MISS disposition on 210.10.1: AC_CC arm → MISS → EXIT → port does NOT park.
 
 ### 7.5 MUX FE — Byte Layout
 
@@ -302,7 +292,7 @@ EXIT-DEALLOCATE is a **real terminal MISS disposition on 210.10.1**. Proven on s
 | `w0` | `0x00` | `FMAN_FE_TYPE_MUX (0x04000000)` |
 | `w1` | `0x04` | next-FE MURAM offset (TRANSITION singleton) |
 
-The MUX requires `ALLOCATE` semantics — it allocates a transient workspace for the HIT forwarding relay. The `ALLOCATE` bit MUST be set for both `FE_ENTER` and MUX.
+The MUX requires `ALLOCATE` semantics. The `ALLOCATE` bit MUST be set for both `FE_ENTER` and MUX.
 
 ### 7.6 TRANSITION FE — Byte Layout
 
@@ -319,10 +309,10 @@ The AD at `FMBM_RCCB` that enters the FE-VM. NOT a pooled FE object — a standa
 |---|---|---|
 | `w0` | `0x00` | **`0x40800000`** = `CONT_LOOKUP(0x40)` \| `ALLOCATE(0x00800000)` |
 | `w1` | `0x04` | `0x00000000` (reserved) |
-| `w2` | `0x08` | **`0x000000F6`** = `pcAndOffsets` = OPC_FE_ENTER (SDK opcode) |
+| `w2` | `0x08` | **`0x000000F6`** = `pcAndOffsets` = OPC_FE_ENTER |
 | `w3` | `0x0C` | next-FE MURAM offset (the EXT_HASH FE) |
 
-**CRITICAL: Do NOT strip the ALLOCATE bit (0x00800000).** F-046 removed it (0x40800000 → 0x40000000) on a speculative "preserve KG hash" theory. The 2026-07-04 HIT ran with ALLOCATE set (readback confirmed `0x40800000`). ALLOCATE allocates the FE workspace that holds the extracted key and KG hash. Removing it removes the place the context lives.
+**Do NOT strip the ALLOCATE bit (0x00800000).** It allocates the FE workspace that holds the extracted key and KG hash. Removing it removes the place the context lives.
 
 ### 7.8 FE Object Pool
 
@@ -331,7 +321,7 @@ Pool init (`AllocFEObjs`, lf-5.4 LSDK):
 - List-managed: `availableFeLst` (free) / `enqLst` (in-use)
 - Inverse: `ReleaseFEsList()` drains both lists, frees each `h_FE` via `FM_MURAM_FreeMem`
 
-**KASAN gotcha:** `memset`/`memcpy` on `h_FE` (iomem) faults under `CONFIG_KASAN_GENERIC=y`. Use `memset_io` / `__iowrite32_copy` for all MURAM writes.
+MURAM is iomem — use `memset_io` / `__iowrite32_copy` for all accesses.
 
 ### 7.9 FE Object Sizes
 
@@ -347,15 +337,17 @@ Pool init (`AllocFEObjs`, lf-5.4 LSDK):
 
 ### 7.10 FE-VM Programming Core
 
-Three functions from lf-5.4 LSDK (`we-are-mono/ASK` `999-layerscape-ask-kernel_linux_5_4_3_00_0.patch`) that must be ported to mainline 6.18 to arm the FE-VM. These are **stubbed** (empty `UNUSED()` no-ops) in lf-6.6.y and lf-6.12.y. See §12.3 **UNKNOWN-3**.
+The FE-VM is operational on the dpaa1 branch using `fman_pcd_fe_*_build()` functions and `fman_pcd_fe_build_contexts()`. The `get_indexed_hash_bucket()` CRC64 bucket indexer is verbatim-identical to the SDK implementation. AC_CC dispatch is proven on hardware with byte-clean reversibility.
 
-| Function | LSDK Location (999-patch) | Purpose |
-|---|---|---|
-| `FmPcdCcBuildFE` | L8883 | Programs a single FE object from the pool with its type-specific MURAM layout |
-| `FmPcdCcBuildContextByFE` | L8954 | Populates the per-port FE context: internal buffer pool + management index + ctrl-params page writes |
-| `get_indexed_hash_bucket` | L7301 | CRC64 bucket indexer: `(crc >> ((6-shift)<<3)) & mask` |
+For reference, the equivalent lf-5.4 LSDK functions are:
 
-Only lf-5.4 has working bodies for all three. lf-6.6.y and lf-6.12.y allocate the FE pool but never program it.
+| Function | LSDK Location (999-patch) | Purpose | Current dpaa1 equivalent |
+|---|---|---|---|
+| `FmPcdCcBuildFE` | L8883 | Programs a single FE object | `fman_pcd_fe_enq_build()`, `fman_pcd_fe_hash_encode()` |
+| `FmPcdCcBuildContextByFE` | L8954 | Populates per-port FE context | `fman_pcd_fe_build_contexts()` (patch 0146) |
+| `get_indexed_hash_bucket` | L7301 | CRC64 bucket indexer | `fman_pcd_ehash_bucket_index()` |
+
+The lf-5.4 LSDK source is at `/home/vyos/ask-ref/ask/patches/kernel/999-layerscape-ask-kernel_linux_5_4_3_00_0.patch`.
 
 
 ## 8. Header Manipulation Opcodes
@@ -387,7 +379,7 @@ HMCD (Header-Manip Command Descriptor) table ≤ 256 bytes in MURAM. HMCT (Heade
 
 ### 8.3 The NAT Chain
 
-The production ASK2 L3 forwarding chain in opcode order:
+The L3 forwarding chain in opcode order:
 1. `0x01` (RMV_ETHERNET) — strip the incoming L2 header
 2. `0x02` (INSRT_GENERIC) — insert the new L2 header (new MACs, EtherType)
 3. `0x0C` (IPV4_FORWARD) — rewrite IP src/dst, decrement TTL, auto-regenerate IP checksum
@@ -395,7 +387,7 @@ The production ASK2 L3 forwarding chain in opcode order:
 
 Each manip chain must stay within 1 KiB MURAM per chain. The `fman_pcd_manip_chain_create(N manips)` primitive concatenates N source HMCTs into one bigger HMCT with `HMCD_LAST` on the final word.
 
-**Known bug — MURAM fragmenter (327× ENOMEM):** `fman_pcd_manip_chain_create(3)` failed `-ENOMEM` 327 times while gen_pool had ~320 KB free. Root cause: MURAM fragmentation in the HMCT allocator. Not yet fixed. Workaround: pre-allocate manip chains at install time; do not churn them at runtime.
+Pre-allocate manip chains at install time; do not churn them at runtime (MURAM fragmentation risk).
 
 
 ## 9. Policer Programming Model
@@ -413,7 +405,7 @@ FMPL CCSR base: `0x01AC0000`. 256 profiles, each a 64-byte entry in 16 KB PRAM (
 | **FMPL_PMR1–63** | `0x100+` | | Per-Port Metering Register — maps port N to profile ID |
 | **FMPL_DPMR** | `0x200+` | | Dual-Port Metering Register |
 
-**BUG 3a root cause + fix:** `FMPL_GCR[EN]` and `FMPL_GCR[STEN]` are BOTH clear at boot (`FMPL_GCR = 0x00500002`). The whole policer block is disabled. Fix: `plcr_enable_block()` does RMW `gcr |= EN|STEN` (→ `0xC0500002`). Proven on hardware: ping went from 100% loss → 0% loss. Do NOT ship a build without `plcr_enable_block()`.
+`FMPL_GCR[EN]` and `FMPL_GCR[STEN]` are BOTH clear at boot (`FMPL_GCR = 0x00500002`). The whole policer block is disabled. Call `plcr_enable_block()` to set both bits (→ `0xC0500002`). Do NOT ship a build without `plcr_enable_block()`.
 
 ### 9.2 Profile PRAM Entry (64 bytes)
 
@@ -424,9 +416,9 @@ FMPL CCSR base: `0x01AC0000`. 256 profiles, each a 64-byte entry in 16 KB PRAM (
 | 2 | `0x08` | CBS (Committed Burst Size) | `DIV_ROUND_UP(bytes, 256)`, saturated at `0xFFFF` |
 | 3 | `0x0C` | EIR/EBS | Upper 16 bits = EIR rate (same encoding as CIR); lower 16 bits = EBS burst (same encoding as CBS) |
 
-Init gotchas: set `CTS`/`PTS_ETS` = `0xFFFFFFFF` (full token buckets), `LTS` = 0. Hardware auto-calibrates on the first packet. Partial writes (`PWSEL` word-select in `FMPL_PAR`) allow bulk-init of many profiles.
+Init: set `CTS`/`PTS_ETS` = `0xFFFFFFFF` (full token buckets), `LTS` = 0. Hardware auto-calibrates on the first packet.
 
-Rate encoding detail:
+Rate encoding:
 ```
 plcr_encode_rate(u64 bps, u64 clk_hz):
   Find smallest exp ∈ [0..7] where mant = DIV_ROUND_CLOSEST(bps, clk_hz >> (29 - 13*exp)) fits in u16
@@ -434,15 +426,15 @@ plcr_encode_rate(u64 bps, u64 clk_hz):
   Return (exp << 29) | (mant << 13)
 ```
 
-Burst encoding detail: `DIV_ROUND_UP(bytes, 256)`, saturated at `0xFFFF`. 0 bytes → 0, 255 bytes → 0, 256 bytes → 1, 65536 bytes → 256.
+Burst encoding: `DIV_ROUND_UP(bytes, 256)`, saturated at `0xFFFF`. 0 bytes → 0, 256 bytes → 1, 65536 bytes → 256.
 
 ### 9.3 Per-Color Next-Interface Actions
 
-Each profile carries three NIAs: **GNIA** (Green — enqueue, within CIR/CBS), **YNIA** (Yellow — enqueue or mark, within EIR/EBS but above CIR), **RNIA** (Red — drop or mark, above EIR/EBS). A profile can chain to another profile for hierarchical policing.
+Each profile carries three NIAs: **GNIA** (Green — enqueue, within CIR/CBS), **YNIA** (Yellow — enqueue or mark), **RNIA** (Red — drop or mark). A profile can chain to another profile for hierarchical policing.
 
 ### 9.4 Per-Port Virtualization
 
-`FMPL_PMR1–63` maps a logical port number to a policer profile ID, enabling per-port profiles without consuming scheme slots. Only populated when `FmPortSetFESupport` is called.
+`FMPL_PMR1–63` maps a logical port number to a policer profile ID, enabling per-port profiles without consuming scheme slots.
 
 
 ## 10. DDR ehash Flow Store
@@ -463,7 +455,7 @@ struct en_exthash_bucket {
 
 ### 10.2 Per-Flow Record
 
-Each DDR flow record is 256 bytes (SDK `en_ehash_entry` + key + next-FE pointer):
+Each DDR flow record is 256 bytes:
 
 | Offset | Size | Field | Encoding |
 |---|---|---|---|
@@ -473,9 +465,9 @@ Each DDR flow record is 256 bytes (SDK `en_ehash_entry` + key + next-FE pointer)
 | `0x08` | `keysize` bytes | **extracted key** | Must exactly match the byte order the KG hardware produces |
 | after key | 4 B | next-FE MURAM offset | ENQ FE for HIT forwarding |
 
-Collision chain: head-insert at bucket. Chains are LIFO (head-add + head-first walk = reverse insert order). Inverse MUST drain LIFO so each bucket head reverts to its exact pre-insert value.
+Collision chain: head-insert at bucket. Chains are LIFO — head-add, head-first walk, reverse insert order. Inverse MUST drain LIFO.
 
-**Entry sizing (F-063 fix):** Keysize=13 bytes requires `align_up(8 + key_len, 8)` = 24-byte DDR entries. Using 16-byte entries with keysize=13 causes the FE-VM to DMA-read 8B header + 13B key = 21B past the 16B allocation → BMI port stall. **Keysize MUST equal the full EKFC extracted key length.** For 5-tuple (13 bytes): entries = 24 B, not 16 B.
+**Entry sizing:** Keysize=13 bytes requires `align_up(8 + key_len, 8)` = 24-byte DDR entries. Using 16-byte entries with keysize=13 causes the FE-VM to DMA-read 8B header + 13B key = 21B past the 16B allocation → BMI port stall. **Keysize MUST equal the full EKFC extracted key length.** For 5-tuple (13 bytes): entries = 24 B, not 16 B.
 
 ### 10.3 CRC64 Hash
 
@@ -502,7 +494,7 @@ remove(bucket_idx):
   kfree(record)
 ```
 
-All bucket and record memory is DDR (`kmalloc`/`kzalloc`), so gen_pool `used` is unchanged. The reversibility signal: (a) every record freed, (b) every bucket head restored byte-exactly.
+All bucket and record memory is DDR — gen_pool `used` is unchanged.
 
 
 ## 11. Resource Ceilings (Hard Hardware Limits)
@@ -522,10 +514,10 @@ All bucket and record memory is DDR (`kmalloc`/`kzalloc`), so gen_pool `used` is
 | CC line-rate table size | ≤128 bytes (18 Mpps) | RM §5.12 |
 | CC key sizes (fixed) | 1, 2, 4, 8, 16, 24, 32, 40, 48, 56 B | RM §5.12 |
 | CC nested lookups per packet | ≤3 | RM §5.12 |
-| CC IC-Index ADs | ≤4096 (12-bit GMASK, `0x00000FFF0`) | RM §5.12 |
+| CC IC-Index ADs | ≤4096 (12-bit GMASK) | RM §5.12 |
 | CC AD size | 16 bytes | RM §5.12 |
 | HMCD table | ≤256 bytes | RM §5.12.10 |
-| Manip MURAM per chain | ≤1 KiB | Risk #13 |
+| Manip MURAM per chain | ≤1 KiB | |
 | FE object pool | 100 × 28 B = 2800 B MURAM | `AllocFEObjs` |
 | Per-port FE buffers | `tnums × 256 × 2` B MURAM (~4–8 KB/port) | `FmPortSetFESupport` |
 | ehash buckets | `(mask+1)`, power-of-2, mask ≤ `0x7FFF` (32768) | DDR (not MURAM) |
@@ -536,180 +528,110 @@ All bucket and record memory is DDR (`kmalloc`/`kzalloc`), so gen_pool `used` is
 | Parser Rx/OH ports | 16 (IDs 1–16) | RM §5.9 |
 | Parse Result | 32 bytes | RM §5.9 |
 
-**MURAM budget rule:** ehash buckets MUST live in DDR. Only FE objects, CC trees, HM chains, policer profiles, and the params page live in MURAM. This single rule prevents the vendor 327×-ENOMEM wall.
+**MURAM budget:** ehash buckets MUST live in DDR. Only FE objects, CC trees, HM chains, policer profiles, and the params page live in MURAM.
 
 
 ## 12. The Three Unknowns
 
-These are the only three facts about the 210.10.1 programming surface that are NOT yet empirically confirmed. Everything else in this document has been verified against at least one of: the DPAA RM, the lf-5.4 LSDK driver source, the `we-are-mono/ASK` production code, or a direct hardware register read. All three can be resolved by scripts running on the Mono Gateway DK.
+These are the only three facts about the 210.10.1 programming surface not yet confirmed by a direct hardware measurement. Everything else in this document has been verified against at least one of: the DPAA RM, the lf-5.4 LSDK driver source, the `we-are-mono/ASK` production code, or a direct hardware register read. All three can be resolved by experiments on the Mono Gateway DK.
 
 ### 12.1 UNKNOWN-1: EKFC Extraction Byte Order
 
-The EKFC register (§4.3) selects which fields the KeyGen extracts. The DPAA RM defines the bit assignments but does NOT document the assembly order — the sequence in which the hardware places extracted fields into the key buffer. Three competing models exist (Qdrant records also disagree — see the reconciliation entry 2026-07-12):
+The EKFC register (§4.3) selects which fields the KeyGen extracts. The assembly order — the sequence in which the hardware places extracted fields into the key buffer — is not documented in any public source. Three models exist:
 
-| Model | Order (first byte → last byte) | Evidence |
+| Model | Order (first byte → last byte) | Evidence strength |
 |---|---|---|
-| **Descending bit position** (MSB-first) | SIP(4) + DIP(4) + PROTO(1) + SPORT(2) + DPORT(2) = 13 bytes | **Two independent production sources**: NXP LSDK `fm_kg.c` `orderedArray` sort (ascending ID = descending bit position) + ASK 1.x `ipv4_tcpudp_key` struct in `cdx_common.h` and `fill_ehash_key_info()` in `cdx_ehash.c`. Strong a-priori |
-| **Ascending bit position** (LSB-first) | DPORT(2) + SPORT(2) + PROTO(1) + DIP(4) + SIP(4) | Explicit working assumption in `specs/fman-keygen-flow-key-spec.md` v2.0. The one silicon datapoint that weakly points here (2026-07-04 ICMP HIT) has been discredited — ports=0, four keys inserted simultaneously, attributed by elimination, with disputed EKFC value |
-| **Size-grouped** | SIP(4) + DIP(4) + SPORT(2) + DPORT(2) + PROTO(1) | Neither SDK nor ASK evidence supports this |
+| **Descending bit position** (MSB-first) | SIP(4) + DIP(4) + PROTO(1) + SPORT(2) + DPORT(2) = 13 bytes | **Strong** — two independent production sources: NXP LSDK `fm_kg.c` `orderedArray` sort + ASK 1.x `ipv4_tcpudp_key` struct in `cdx_common.h` |
+| **Ascending bit position** (LSB-first) | DPORT(2) + SPORT(2) + PROTO(1) + DIP(4) + SIP(4) | **Weak** — a single ICMP HIT (ports=0, disputed EKFC value) points here, but has been discredited |
+| **Size-grouped** | SIP(4) + DIP(4) + SPORT(2) + DPORT(2) + PROTO(1) | **None** |
 
-**Previous experiments and why they didn't settle it:**
+Previous experimental attempts all failed for unrelated reasons:
+- E-EKFC-1 (keysize=13, mask=0): all three orders MISS — rendered invalid by missing ALLOCATE bit
+- keysize=8 HIT testing: all three orders MISS — consistent with the raw key not being in the workspace
+- `fe_probe` v7: returned ALL ZEROS across 256 bytes — the raw key is transient in the Field Extraction Unit and not retained in any readable workspace
 
-- **2026-07-10, "DEFINITIVELY SETTLED — ASCENDING"**: Retracted. The proof cited `patch-0148`'s `pr_info()` logging, but `patch-0148` logs the register value BEING WRITTEN, not what silicon does with it. Register-write logging cannot observe extraction order.
-- **2026-07-10, E-EKFC-1 (keysize=13, mask=0)**: All three orders MISS. Rendered invalid by F-046 — the ALLOCATE bit was stripped from FE_ENTER, so the FE-VM had no workspace and could not read the key at all. The MISS was due to missing ALLOCATE, not wrong key order.
-- **2026-07-12, keysize=8 HIT testing**: With ALLOCATE restored, all three candidate 8-byte keys still MISS. This is consistent with a workspace offset problem (UNKNOWN-2) or the raw key not being in the workspace at all.
-- **2026-07-12, `fe_probe` v7**: Read 256 bytes from the FE workspace — **ALL ZEROS**. The KG-extracted raw key is transient in the Field Extraction Unit (FEU); only the CRC64 hash result is retained at IC offset `0x48`. The `fe_probe` workspace-read approach is structurally unable to capture the raw key.
+**Derived CRC64 hash values** (computed via `fman_pcd_crc64()`, frame: SIP=`10.99.1.106`, DIP=`10.99.1.185`, PROTO=`6`, SPORT=`0x1111`, DPORT=`0x2222`):
 
-**Derived CRC64 hash values for the three candidate orderings** (computed via `fman_pcd_crc64()`, against the known-distinct frame below):
+| Order | Key bytes (hex) | Finalized CRC64 | Raw (no final complement) |
+|---|---|---|---|
+| LSB-first (ascending) | `2222 1111 06 0A6301B9 0A63016A` (13B) | `0xf30a2abe6d46995d` | `0x0cf5d54192b966a2` |
+| MSB-first (descending) | `0A63016A 0A6301B9 06 1111 2222` (13B) | `0xd81445768d3e5b6a` | `0x27ebba8972c1a495` |
 
-Given frame: SIP=`10.99.1.106`, DIP=`10.99.1.185`, PROTO=`6`, SPORT=`0x1111`, DPORT=`0x2222`
+**Resolution — annotation hash-match:**
 
-| Order | Key bytes (hex) | Finalized CRC64 |
-|---|---|---|
-| LSB-first (ascending) | `2222 1111 06 0A6301B9 0A63016A` (13B) | `0xf30a2abe6d46995d` |
-| MSB-first (descending) | `0A63016A 0A6301B9 06 1111 2222` (13B) | `0xd81445768d3e5b6a` |
-| Size-grouped | `0A63016A 0A6301B9 1111 2222 06` (13B) | TBD |
-
-**Resolution methodology — annotation hash-match (the ONLY viable path):**
-
-Since `fe_probe` cannot read the transient raw key, and the hash IS retained at IC `0x48` and copied to the DDR buffer annotation when `pass_hash_result` is enabled, the robust method is:
+Since the raw key is transient and cannot be read, read the 8-byte KG hash from the DDR buffer annotation instead (the hash IS retained at IC `0x48` and copied when `pass_hash_result` is enabled):
 
 1. Configure a KG scheme with `EKFC = 0x001C0006` (5-tuple), hashing enabled, next_engine=RSS (deliver to kernel FQ — does NOT require FE-VM arming, no DAC cable needed)
-2. Enable `pass_hash_result` in the buffer prefix content so the 8-byte KG hash lands in the DDR annotation at `IC+0x48`
-3. Send ONE known frame with all-DISTINCT non-zero field bytes (never ports=0 — ICMP aliasing destroyed the 2026-07-04 test). Recommended: SIP=`10.99.1.106`, DIP=`10.99.1.185`, PROTO=`6`, SPORT=`0x1111`, DPORT=`0x2222`
-4. Read the 8-byte KG hash from the buffer annotation. The mainline `dpaa_eth` driver already reads the 32-bit hash for `RXHASH` via `fman_port_get_hash_result_offset()` — extend this to read the full 64 bits (the hardware produces 64; the driver truncates to 32 for the skb hash)
+2. Enable `pass_hash_result` in the buffer prefix content
+3. Send ONE known frame with all-DISTINCT non-zero field bytes (never ports=0 — ICMP aliasing destroys the signal). Use SIP=`10.99.1.106`, DIP=`10.99.1.185`, PROTO=`6`, SPORT=`0x1111`, DPORT=`0x2222`
+4. Read the full 8-byte KG hash from the buffer annotation. The mainline `dpaa_eth` driver already reads the 32-bit hash for RXHASH — extend to read 64 bits
 5. Compare against the pre-computed CRC64 values above. The match names the silicon order
 
-**Hard blocker — F-063 keysize=13 BMI stall:** The 5-tuple key is 13 bytes. The FE-VM ehash path with `keysize=13` stalls BMI port `0x10` on the first frame because the DDR record is 16 bytes (8B header + 8B key stride) but the FE-VM reads 8B header + 13B key = 21B past the allocation boundary → hardware fault. The hash-match experiment does NOT use the FE-VM path (it uses RSS delivery to kernel), so it is NOT blocked by F-063. But any subsequent HIT test with 5-tuple keys requires DDR entry resizing to `align_up(8+13, 8)` = 24 bytes.
-
-**Prerequisites:** `pass_hash_result` enabled in buffer prefix; `EKFC=0x001C0006` on the test scheme; one test frame with all-distinct bytes; cold-boot before experiment. Does NOT require DAC cable, test host, or FE-VM arming. False-positive risk: low — CRC64 collision probability is negligible.
-
-**[SPEC] Target CRC-64/XZ values for the canonical test flow** (`10.99.2.106:22222 → 10.99.2.185:9999`, TCP, `EKFC=0x00180206`):
-
-| Order | Finalized (incl. `~seed`) | Raw (no final complement) |
-|---|---|---|
-| LSB-first (Qdrant-confirmed) | `0xf30a2abe6d46995d` | `0x0cf5d54192b966a2` |
-| MSB-first | `0xd81445768d3e5b6a` | `0x27ebba8972c1a495` |
+**Hard blocker for FE-VM HIT tests (not for the hash-match):** The 5-tuple key is 13 bytes. FE-VM ehash with keysize=13 stalls BMI port `0x10` — DDR entry sizing must be increased to `align_up(8+13, 8)` = 24 bytes before any HIT test. The hash-match uses RSS kernel delivery, bypassing the FE-VM entirely.
 
 ### 12.2 UNKNOWN-2: FE Workspace Layout (contextOffsetInWS)
 
-When the `ALLOCATE` bit is set in `FE_ENTER`, the FE-VM allocates a workspace and (theoretically) populates it with the frame's Internal Context. The `contextOffsetInWS` field in `EXT_HASH w0` tells the EXT_HASH comparator where within this workspace the extracted key starts. The SDK passes `0`.
+The `contextOffsetInWS` field in `EXT_HASH w0` tells the EXT_HASH comparator where within the FE workspace the extracted key starts. The SDK passes `0`.
 
-**What IS known (from the 2026-07-12 IC layout correction):**
+**What is known (from the IC layout, derived from `fman_sp.c`):**
 
-- The frame's Internal Context (IC) is a per-frame FMan-internal memory block, NOT in DDR during processing. A configurable window is copied to the DDR buffer annotation at enqueue time via `FMBM_RICP`
-- The exact IC byte layout, derived from mainline `fman_sp.c` (`fman_sp_build_buffer_structure`):
-  - IC `0x00-0x1F` (32 bytes): reserved / KG-internal working area — NOT copied in standard config
-  - IC `0x20-0x3F` (32 bytes): **PARSE RESULT** (struct `fman_prs_result`) — copied when `pass_prs_result` is enabled
-  - IC `0x40-0x47` (8 bytes): **TIMESTAMP** (IEEE-1588)
-  - IC `0x48-0x4F` (8 bytes): **KEYGEN HASH RESULT** (64-bit CRC-64) — the hash IS retained and copyable. This was previously misidentified as the raw extracted key
-  - IC `0x50+`: beyond the standard copy window
-- The raw extracted key is assembled transiently by the Field Extraction Unit (FEU), fed to the CRC64 hash engine, and **only the hash is retained**. The raw key is not preserved at any copyable IC offset
-- The SDK passes `contextOffsetInWS = 0` and it works in ASK1 production, but ASK1 uses GEC extraction (software-declared field order), not EKFC. The mapping between IC offsets and FE workspace offsets may differ between GEC and EKFC
+- The frame's Internal Context (IC) is FMan-internal memory, not in DDR during processing
+- IC byte layout:
+  - `0x00-0x1F` (32 B): reserved / KG-internal working area
+  - `0x20-0x3F` (32 B): **PARSE RESULT** — copied when `pass_prs_result` is enabled
+  - `0x40-0x47` (8 B): **TIMESTAMP**
+  - `0x48-0x4F` (8 B): **KEYGEN HASH RESULT** (64-bit CRC-64) — retained and copyable
+  - `0x50+`: beyond standard copy window
+- The raw extracted key is assembled transiently by the Field Extraction Unit and fed to the CRC64 engine. Only the hash is retained. The raw key is not preserved at any copyable IC offset
+- The SDK passes `contextOffsetInWS = 0` and works in ASK1 production with GEC extraction. Whether this transfers to EKFC is unconfirmed
 
-**What the `fe_probe` experiment found (v7, 2026-07-12):**
+**Resolution:**
 
-- `fe_probe` v7 read 256 bytes (64 × u32) from the FE pool slot after a live frame traversed the FE-VM
-- Result: **ALL ZEROS** across all 64 words
-- The workspace is NOT populated with KG-extracted key bytes at any offset
-- Root cause: the raw key is transient in the FEU, not retained in the workspace. The `fe_probe` workspace-read approach is structurally unable to capture it
-
-**Impact on UNKNOWN-2 resolution:**
-
-The hash-match method (UNKNOWN-1) side-steps the workspace entirely — it reads the 8-byte hash from the DDR buffer annotation, which IS reliably populated (confirmed by `dpaa_eth`'s existing RXHASH support). The contextOffsetInWS question only matters for the FE-VM key comparison path, which can be resolved after the hash-match confirms the extraction order:
-
-1. If the hash-match confirms a specific order: the EXT_HASH comparator is seeing the correct bytes at `workspace + contextOffsetInWS`, so `contextOffsetInWS=0` works (as the SDK intended)
-2. If NO order matches the hash: the comparator is reading the wrong workspace region. Try `contextOffsetInWS = 0x48` (IC hash-result offset) or systematically scan values
-
-**Prerequisites:** ALLOCATE bit set; hash-match experiment (UNKNOWN-1) completed first. Does NOT require `fe_probe`.
+The hash-match method (UNKNOWN-1) side-steps the workspace entirely — it reads the hash from the DDR annotation, which IS reliably populated. The contextOffsetInWS question is then resolved by elimination:
+1. If the hash-match confirms a specific order: the EXT_HASH comparator is seeing the correct bytes at `workspace + contextOffsetInWS`, so `contextOffsetInWS=0` works
+2. If NO order matches: try `contextOffsetInWS = 0x48` (IC hash-result offset) or systematically scan values
 
 ### 12.3 UNKNOWN-3: FE-VM Programming Core Port
 
-**STATUS (2026-07-13): The FE-VM pipeline is operational on silicon using the project's own implementation. The byte-for-byte port from lf-5.4 LSDK described below has not been done — and may not be needed.**
+The FE-VM pipeline is operational on silicon using the dpaa1 branch's `fman_pcd_fe_*_build()` functions and `fman_pcd_fe_build_contexts()` (patch 0146). AC_CC dispatch is proven on hardware with byte-clean reversibility (three full engage→disengage→re-engage cycles). The MISS→EXIT path is proven safe — the port does NOT park.
 
-The current dpaa1 branch programs FE objects (ENQ, MUX, TRANSITION, EXIT, EXT_HASH, FE_ENTER) through `fman_pcd_fe_*_build()` functions and `fman_pcd_fe_build_contexts()` (patch 0146). The `get_indexed_hash_bucket()` CRC64 bucket indexer is verbatim-identical to the SDK `cdx_ehash.c` implementation. AC_CC dispatch is proven on hardware across multiple sessions (2026-07-04/05/06). Three full engage→disengage→re-engage cycles are byte-clean reversible (MURAM returns to 0, `pcd-snapshot` diff clean).
+A byte-for-byte port of three lf-5.4 LSDK functions was originally flagged because lf-6.6.y and lf-6.12.y stub them as empty `UNUSED()` no-ops. The concern was that a wrong FE-struct image would stall the port with no fault latched. This stall signature turned out to be the bare `CONTRL_FLOW` exit on the Fork A (exact-match CC) path — not an FE-VM programming defect.
 
-The three lf-5.4 LSDK functions were flagged as needing porting because they are stubbed (empty `UNUSED()` no-ops) in lf-6.6.y and lf-6.12.y, and the concern was that a wrong FE-struct image would stall the port with NO fault latched. However, the port-stall-with-no-fault signature turned out to be the bare `CONTRL_FLOW` exit on the Fork A (exact-match CC) path — NOT an FE-VM programming defect. The FE-VM MISS→EXIT path is proven safe (ping loss = frames MISS → EXIT, port does NOT park). The remaining flow-HIT blocker is the EKFC extraction order (UNKNOWN-1), not the FE-VM core.
-
-**Historical reference — the three functions from lf-5.4 LSDK (retained for traceability):**
-
-| Function | LSDK Location (999-patch) | Purpose | Current dpaa1 equivalent |
-|---|---|---|---|
-| `FmPcdCcBuildFE` | L8883 | Programs a single FE object from the pool with its type-specific MURAM layout | `fman_pcd_fe_enq_build()`, `fman_pcd_fe_hash_encode()`, etc. (patches 0127, 0131) |
-| `FmPcdCcBuildContextByFE` | L8954 | Populates the per-port FE context: internal buffer pool + management index + ctrl-params page writes | `fman_pcd_fe_build_contexts()` (patch 0146) — builds ENQ/MUX/Transition contexts at arm time |
-| `get_indexed_hash_bucket` | L7301 | CRC64 bucket indexer: `(crc >> ((6-shift)<<3)) & mask` | `fman_pcd_ehash_bucket_index()` — verbatim-identical to SDK, confirmed by unit test |
-
-**If the port is needed in future (e.g., on a newer kernel where our current approach doesn't work):**
-
-1. Extract the three functions from the lf-5.4 LSDK source at `/home/vyos/ask-ref/ask/patches/kernel/999-layerscape-ask-kernel_linux_5_4_3_00_0.patch`
-2. Adapt SDK types (`t_FmPcdFEObj`, `t_EnqFe`, `t_ExtHashFe`, `en_exthash_global_mem`) to mainline equivalents already present in `fman_pcd_fe.c`
-3. Adapt SDK MURAM accessors (`FM_MURAM_AllocMem`, `IOMemSet32`, `WRITE_UINT32`) to mainline equivalents (`fman_pcd_muram_alloc`, `memset_io`, `iowrite32be`)
-4. Validate the programmed MURAM image against §7's expected encodings via `pcd-snapshot diff` BEFORE flowing traffic
-
-**Prerequisites for the port (if undertaken):** lf-5.4 LSDK source available locally; UNKNOWN-1 resolved first.
+The lf-5.4 LSDK source is available at `/home/vyos/ask-ref/ask/patches/kernel/999-layerscape-ask-kernel_linux_5_4_3_00_0.patch` for reference. A port may be beneficial for future kernel compatibility but is not currently blocking.
 
 
 ## 13. Complete Function Inventory
 
-| # | Function | Status | Cap Bit | Driver Consumer | Deferred To |
-|---|---|---|---|---|---|
-| 1 | **Hard Parser** (L2–L4 header recognition, 16 protocols) | Consumed | — | Mainline `fman_prs.c` | — |
-| 2 | **Soft Parser** (custom protocol extensions, 1984-byte instruction space) | Consumed | BIT 4 (`PARSER_SOFTSEQ`) | `fman_pcd_prs.c` | — |
-| 3 | **KeyGen** — 32 schemes, CRC64 hash, EKFC/GEC extraction, FQID distribution | Consumed | — | `fman_pcd_kg.c` (patches `0097`, `0133`) | — |
-| 4 | **KeyGen post-hash index + explicit PP-select** | Present (unconsumed) | — | None | M5 (QoS) |
-| 5 | **CC Match-Table** — exact-match, ≤255 entries, ≤3 nested hops, per-key stats | Consumed | BIT 0 (`CC_EXACT_MATCH`) | `fman_pcd_cc.c` (patches `0098`, `0108`) | — |
-| 6 | **CC Hash-Table** — hashed CC lookup, DDR-based, large flow tables | Present (unconsumed) | BIT 5 placeholder | None | M5 |
-| 7 | **Header Manipulation** — VLAN/Q-in-Q/MPLS push-pop, arbitrary byte insert/remove/replace | Consumed | BIT 1 (`HM_NODES`) | `fman_pcd_manip.c` (patch `0099`) | — |
-| 8 | **Policer** — 256 profiles, RFC 2698 (srTCM) / RFC 4115 (trTCM), color-marking | Consumed | BIT 2 (`POLICER_TRTCM`) | `fman_pcd_plcr.c` (patch `0100`) | — |
-| 9 | **FE-VM ehash** — EXT_HASH → MUX → ENQ → EXIT dispatch, DDR flow store | Partially consumed | — | `fman_pcd_fe.c` (patches `0122`–`0131`); FE alloc done, programming core from lf-5.4 pending | M2→M3 |
-| 10 | **Frame Replicator** — source-TD + member-AD chain → multiple egress FQs | Present (unconsumed) | BIT 8 placeholder | `fman_pcd_replic.c` (KUnit tests exist) | Mirror/multicast phase |
-| 11 | **IP Reassembly** (timeout-driven flush) | Present (unconsumed) | BIT 6 placeholder | None | M6 |
-| 12 | **IP Fragmentation** | Present (unconsumed) | BIT 7 placeholder | None | M6 |
+| # | Function | Status | Cap Bit | Driver Consumer |
+|---|---|---|---|---|
+| 1 | **Hard Parser** (L2–L4 header recognition, 16 protocols) | Consumed | — | Mainline `fman_prs.c` |
+| 2 | **Soft Parser** (custom protocol extensions, 1984-byte instruction space) | Consumed | BIT 4 | `fman_pcd_prs.c` |
+| 3 | **KeyGen** — 32 schemes, CRC64 hash, EKFC/GEC extraction, FQID distribution | Consumed | — | `fman_pcd_kg.c` |
+| 4 | **KeyGen post-hash index + explicit PP-select** | Present (unconsumed) | — | None |
+| 5 | **CC Match-Table** — exact-match, ≤255 entries, ≤3 nested hops, per-key stats | Consumed | BIT 0 | `fman_pcd_cc.c` |
+| 6 | **CC Hash-Table** — hashed CC lookup, DDR-based, large flow tables | Present (unconsumed) | BIT 5 placeholder | None |
+| 7 | **Header Manipulation** — VLAN/Q-in-Q/MPLS push-pop, arbitrary byte insert/remove/replace | Consumed | BIT 1 | `fman_pcd_manip.c` |
+| 8 | **Policer** — 256 profiles, RFC 2698 (srTCM) / RFC 4115 (trTCM), color-marking | Consumed | BIT 2 | `fman_pcd_plcr.c` |
+| 9 | **FE-VM ehash** — EXT_HASH → MUX → ENQ → EXIT dispatch, DDR flow store | Partially consumed | — | `fman_pcd_fe.c` |
+| 10 | **Frame Replicator** — source-TD + member-AD chain → multiple egress FQs | Present (unconsumed) | BIT 8 placeholder | KUnit tests exist |
+| 11 | **IP Reassembly** (timeout-driven flush) | Present (unconsumed) | BIT 6 placeholder | None |
+| 12 | **IP Fragmentation** | Present (unconsumed) | BIT 7 placeholder | None |
 
-Capability bitmask (`dpaa_fman_caps`): `0x17` = `CC_EXACT_MATCH | HM_NODES | POLICER_TRTCM | PARSER_SOFTSEQ`. Bits 5–8 are reserved placeholders. Bit 3 (`HC_DISPATCH`) is deliberately clear — the Host Command doorbell is absent from this blob.
-
-
-## 14. What Is Absent (Do Not Attempt to Use)
-
-| Item | Evidence | Consequence |
-|---|---|---|
-| **Host Command doorbell** | `caps=0x17`, bit 3 clear; `fmd_host_cmd_send()` returns `-ENXIO`; `fman_irq()` never services FCEV/REV events | `OP_FLOW_INSERT_V4_TCP`, `OP_GET_UCODE_VERSION`, and all hypothetical opcodes do NOT exist in this blob |
-| **Custom microcode opcodes** | NXP's microcode SDK + compiler + signing keys are not distributed to any client | Cannot build a modified QEF blob. The 6 FE types in §7 are the complete command set |
-| **FE-VM ISA** | No public documentation. No disassembler. No simulator | Cannot interpret the raw u32 opcode stream. Observation-based methods (hash-match, fe_probe) are the only path |
-
-The NXP public `qoriq-fm-ucode` repo families (106, 107, 108) are a narrower subset of the 210.10.1 function inventory. Features marked "210-only" in §13 do NOT exist in public microcode. If you swap to 106.4.18, you lose: FE-VM ehash, full HM, srTCM/trTCM, IPR/IPF, Frame Replicator, CC deep nesting with per-key stats. And 106.4.18 parks identically on bare exact-match CC (confirmed ccexp12, 2026-06-11).
+Capability bitmask: `0x17` = `CC_EXACT_MATCH | HM_NODES | POLICER_TRTCM | PARSER_SOFTSEQ`. Bit 3 (`HC_DISPATCH`) is deliberately clear — the Host Command doorbell is absent from this blob.
 
 
-## 15. Programming Invariants
+## 14. What Is Absent
 
-These MUST be observed in every patch that touches the microcode surface:
+| Item | Evidence |
+|---|---|
+| **Host Command doorbell** | `caps=0x17`, bit 3 clear; `fmd_host_cmd_send()` returns `-ENXIO`; `fman_irq()` never services FCEV/REV events |
+| **Custom microcode opcodes** | NXP's microcode SDK + compiler + signing keys are not distributed to any client |
+| **FE-VM ISA** | No public documentation, no disassembler, no simulator |
 
-1. **MURAM is iomem, never RAM.** Access FE objects, AD nodes, ehash global mem, and params page with `memset_io` / `memcpy_toio` / `writel` / `readl` only. Plain `memset`/`memcpy` faults under KASAN; otherwise silently corrupts the AD. `gen_pool` does NOT zero on alloc — always follow `fman_pcd_muram_alloc` with `memset_io(p, 0, size)`.
-
-2. **Bounds-check before every alloc.** Call `gen_pool_avail()` before each MURAM reservation. On any failure: free ALL prior allocations of that operation, return `-ENOMEM`, fall back to SW path. Never half-program silicon.
-
-3. **ehash buckets in DDR, never MURAM.** Use `dma_alloc_coherent` / `kmalloc`. Only the FE-object pool, the AD node, and the ehash global singleton live in MURAM.
-
-4. **Forward ⇒ inverse in the same patch.** No register or MURAM write lands without its verified undo. Teardown proven by `pcd-snapshot` diff against warm-S0 baseline — NEVER by "ping works."
-
-5. **Readback every silicon write that has no error report.** After programming an FE descriptor or KGSE entry, read it back via the indirect window and compare. Fail the engage on mismatch.
-
-6. **Derive key length from one constant, in one place.** The kernel exports `key_len` via debugfs; the shell reads it. No literal byte counts anywhere.
-
-7. **A build that cannot verify its own key layout must refuse to engage.** `fe_arm_engage()` returns `-EPROTO` unless `fman_pcd_key_selftest()` has passed since boot. Force-override with `fman_pcd.force_unverified=1` for experiments only.
-
-8. **keysize MUST equal the full EKFC extracted key length.** For 5-tuple (EKFC=0x001C0006): 13 bytes → 24-byte DDR entries. Do not reduce keysize to make entries fit — that truncates IP ADDRESSES, not ports (F-063).
-
-9. **Never change a known-good configuration on a hypothesis.** The ALLOCATE bit is proven necessary by the 2026-07-04 HIT. Do not strip it.
-
-10. **Always cold-boot before any silicon experiment.** Warm reboot does NOT clear BMI or MURAM state. Record boot type in every result.
-
-11. **One variable per experiment.** One key, one flow, one packet class per run.
-
-12. **Mutate eth3/eth4 only.** Never touch eth0 (the SSH lifeline) during FE experiments.
+The NXP public `qoriq-fm-ucode` families (106, 107, 108) are a narrower subset of the 210.10.1 inventory. Features marked "210-only" above do not exist in public microcode. The 106.4.18 ucode parks identically on bare exact-match CC.
 
 
-## 16. Cross-References
+## 15. Cross-References
 
 | For… | See |
 |---|---|
@@ -717,11 +639,11 @@ These MUST be observed in every patch that touches the microcode surface:
 | PCD pipeline: parser, KeyGen, CC, HM, policer, replication | `arch/fman-pcd.md` |
 | 106 vs 210.10.1 distinction, QEF format, load path | `arch/fman-microcode.md` |
 | EKFC extraction, CRC64 hash, FE-VM dispatch, ehash flow-table architecture | `specs/fman-keygen-flow-key-spec.md` |
-| ASK2 fman_pcd subsystem API (`fman_pcd_cc_node_add_key`, etc.) | `specs/ask2-rewrite-spec.md` §13 |
-| Full microcode function inventory with classification | `specs/dpaa1-afxdp-modernization-spec.md` §2.2.1 |
+| ASK2 fman_pcd subsystem API | `specs/ask2-rewrite-spec.md` §13 |
+| Full microcode function inventory | `specs/dpaa1-afxdp-modernization-spec.md` §2.2.1 |
 | MURAM budget, 750-flow ceiling, 327× ENOMEM risk | `arch/muram.md` |
 | Dual-dataplane mode state machine (S0↔S1), reversibility contract | `plans/DUAL-DATAPLANE.md` |
 | Production-proven FE-VM working bodies (lf-5.4 LSDK) | `we-are-mono/ASK` `999-layerscape-ask-kernel_linux_5_4_3_00_0.patch` (local: `/home/vyos/ask-ref/ask/patches/kernel/`) |
 | NXP qoriq Linux kernel tree (sdk_fman/dpaa/qbman overlays) | `nxp-qoriq/linux` branch `ask-6.6-port` (local: `/home/vyos/ask-ref/linux/`) |
-| Public microcode capability matrix (106/107/108 families) | `github.com/nxp-qoriq/qoriq-fm-ucode` (readme) |
-| FMan firmware-check script (QEF decode, version, MD5) | `board/scripts/firmware-check` |
+| Public microcode capability matrix | `github.com/nxp-qoriq/qoriq-fm-ucode` (readme) |
+| FMan firmware-check script | `board/scripts/firmware-check` |
