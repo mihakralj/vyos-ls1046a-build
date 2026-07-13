@@ -1,6 +1,6 @@
 # FMan Microcode 210.10.1 — Programming Reference
 
-**Version 1.0**
+**Version 1.1 · HADS 1.0.0**
 
 **Board:** NXP LS1046A Mono Gateway DK (FMan v3, DPAA1)
 **Microcode:** QEF 210.10.1 ("Microcode version 210.10.1 for LS1043 r1.0"), `caps=0x17`
@@ -14,7 +14,7 @@ The Host Command (HC) doorbell is **absent** from this blob (`caps=0x17`, `0x17 
 
 The microcode is proprietary NXP 210.10.1, not the open-source `qoriq-fm-ucode` 106.x/108.x families. The public families are a strictly narrower subset — features marked "210-only" in this document do not exist in public microcode.
 
-Three programming facts are listed in §12: **UNKNOWN-1** (ekfc extraction order, open), **RESOLVED-2** (contextOffsetInWS), and **RESOLVED-3** (FE-VM core port). Everything else has been confirmed against at least one of: (a) the NXP DPAA Reference Manual, (b) the NXP lf-5.4 LSDK driver source, (c) the `we-are-mono/ASK` production code, or (d) a direct `/dev/mem` / debugfs read on the board.
+Three programming facts are listed in §12: **CLOSED-1** (ekfc extraction order, resolved 2026-07-13 via hardware CRC-64 hash-match), **RESOLVED-2** (contextOffsetInWS), and **RESOLVED-3** (FE-VM core port). Everything else has been confirmed against at least one of: (a) the NXP DPAA Reference Manual, (b) the NXP lf-5.4 LSDK driver source, (c) the `we-are-mono/ASK` production code, or (d) a direct `/dev/mem` / debugfs read on the board.
 
 
 ## 2. Architecture Overview
@@ -161,9 +161,11 @@ For exact-match classification: set `kgse_mv` to the LCV bits for the protocol c
 
 ### 4.5 Hash Algorithm
 
-CRC-64-ECMA-182, reflected polynomial `0xC96C5795D7870F42`, seed `0xFFFFFFFFFFFFFFFF`, **final complement** (XOR `0xFFFFFFFFFFFFFFFF`) — i.e. **CRC-64/XZ** (a.k.a. CRC-64/GO-ECMA). Applied over the assembled key bytes in network byte order. The result is a 64-bit hash stored at Internal Context offset `0x48` (confirmed by `fman_sp_build_buffer_structure`).
+CRC-64-ECMA-182, reflected polynomial `0xC96C5795D7870F42`, seed `0xFFFFFFFFFFFFFFFF`. Applied over the assembled key bytes in network byte order. The result is a 64-bit hash stored at Internal Context offset `0x48` (confirmed by `fman_sp_build_buffer_structure`).
 
-**Algorithm verification vector:** `CRC-64/XZ("123456789") == 0x995DC9BBDF1939FA`. The kernel-side `fman_pcd_crc64()` returns this exact value — algorithm confirmed identical to the definitional NXP `fsl_fman_crc64.h`. Any hash-match mismatch is therefore NOT an algorithm defect; it is either wrong extraction order, wrong capture site, or wrong key bytes fed in.
+**CRITICAL — RAW hash, no final complement.** The silicon stores `crc64_raw(key)` — the running CRC with seed `~0ULL` but **without** the final `~crc` XOR. The CRC-64/XZ finalized variant (`crc64_raw ^ 0xFFFFFFFFFFFFFFFF`) does **NOT** match the hardware. Verified 2026-07-13 on hardware (board 192.168.1.185, kernel 6.18.38-vyos): `crc64_raw(SIP|DIP|6|0xAD9C|0xD903) = 0x600824e70ae4d573` matched the captured hash from eth4; `crc64_xz(...)` (finalized) did not. The kernel-side `fman_pcd_crc64()` also returns raw (`seed ~0ULL`, no final XOR — confirmed in NXP `fsl_fman_crc64.h`).
+
+**Algorithm self-test:** `crc64_raw("123456789") = 0x66A2364420E6C605`; `crc64_xz("123456789") = 0x995DC9BBDF1939FA` (the finalized variant). Any hash-match comparison **must** use the raw value. When inserting ehash flow keys or computing bucket indices, use `crc64_raw` — the finalized variant will never match the hardware.
 
 FQID computation: `KDFV = (hash >> HSHIFT) & HMASK`; `FQID = KDFV | FQBASE`.
 
@@ -185,7 +187,7 @@ Per-RX-port registers in the FMan BMI block. Port `0x10` = eth3 (left SFP+), por
 
 | Register | Offset | Bits | Meaning |
 |---|---|---|---|
-| **FMBM_RFPNE** | `0x28` | `[23:16]` | NIA engine after parse — see NIA decode table below for bit-field breakdown |
+| **FMBM_RFPNE** | `0x28` | `[23:16]` | NIA engine after parse — see NIA decode table below for bit-field breakdown. **Verified 2026-07-13** via `/dev/mem` mmap at eth4 RX port base `0x1A91000 + 0x28`: reads `0x00480200` (HWK\|AC_CC) when ASK2 is armed. Earlier reads at offset `0x08` returned garbage — `0x28` is the correct offset. |
 | | | `[11:0]` | Per-engine action code within NIA |
 | **FMBM_RFQID** | `0x0C` | `[23:0]` | Default RX Frame Queue ID — where frames go if not reclassified |
 | **FMBM_RCCB** | `0x34` | `[27:12]` | **RX CC Base** — MURAM offset of the first Action Descriptor for CC dispatch |
@@ -278,7 +280,7 @@ The central FE object. It performs: CRC64(hardware key) → bucket index → DDR
 | Word | Offset | Size | Field | Dormant Value |
 |---|---|---|---|---|
 | `w0` | `0x00` | 4 B | **misc**: `FMAN_FE_TYPE_EXT_HASH (0x06000000)` \| `contextOffsetInWS` \| aging \| stats | `0x06000000` |
-| `w1` | `0x04` | 4 B | `(hashMask << 16)` \| `((contextSize-1) << 8)` \| `hashShift` | `0x00FFFF00` (mask=`0xFF`, ctxtSize=256, shift=0) |
+| `w1` | `0x04` | 4 B | `(hashMask << 16)` \| `((contextSize-1) << 8)` \| `hashShift` | mask=`0x7FFF`, ctxtSize=key_size, shift=0 |
 | `w2` | `0x08` | 4 B | `table_base_hi` — DDR bucket array bus address, high 16 bits of 48-bit | `0x00000000` (dormant) |
 | `w3` | `0x0C` | 4 B | `table_base_lo` — DDR bucket array bus address, low 32 bits | table DMA addr lo |
 | `w4` | `0x10` | 4 B | `missResult` — miss-result context MURAM offset | `0x00000000` (dormant) |
@@ -287,7 +289,7 @@ The central FE object. It performs: CRC64(hardware key) → bucket index → DDR
 
 **Critical address-space split:** `table_base_hi/lo` (`w2`/`w3`) carry a DDR bus address (`dma_addr_t` from `dma_alloc_coherent`). `nextFEPtr`/`missNextFE` (`w5`/`w6`) carry MURAM offsets (gen_pool offsets). Do not mix them.
 
-**contextSize** (in `w1[15:8]`): the SDK passes 256 (`w1 = 0x00FF0000` masked with `0x7FFF`). Encoded as `contextSize-1` in the field.
+**contextSize** (in `w1[15:8]`): Encoded as `contextSize-1` in the field. **Must equal the EKFC extracted key length** (13 for 5-tuple, 8 for 4-tuple), NOT the DDR record size (256). Using 256 causes the hardware to compare 256 bytes per DDR entry → BMI port stall with keysize=13. Patch 0131 originally used `FMAN_FE_HASH_CONTEXT_SIZE` (256) — fixed 2026-07-13 by F-063 (`sed 's/(FMAN_FE_HASH_CONTEXT_SIZE - 1)/(t->key_size - 1)/'`).
 
 **hashMask** (in `w1[31:16]`): `(mask+1)` must be an exact power of two. Valid masks: `0x0, 0x1, 0x3, 0x7, 0xF, …, 0x7FFF` (32768 buckets).
 
@@ -492,7 +494,7 @@ Each DDR flow record is 256 bytes:
 
 Collision chain: head-insert at bucket. Chains are LIFO — head-add, head-first walk, reverse insert order. Inverse MUST drain LIFO.
 
-**Entry sizing:** Keysize=13 bytes requires `align_up(8 + key_len, 8)` = 24-byte DDR entries. Using 16-byte entries with keysize=13 causes the FE-VM to DMA-read 8B header + 13B key = 21B past the 16B allocation → BMI port stall. **Keysize MUST equal the full EKFC extracted key length.** For 5-tuple (13 bytes): entries = 24 B, not 16 B.
+**Entry sizing:** DDR flow records are 256 bytes (`FMAN_EHASH_FLOW_REC_SIZE`) — plenty of space for any key size. The actual root cause of the keysize=13 BMI stall (F-063) was **NOT** DDR entry sizing but the EXT_HASH FE descriptor encoding `contextSize=256` instead of `key_size` (see §7.2). With `contextSize=256`, the hardware DMA-reads 256 bytes per comparison, far exceeding the intended key region. **Keysize MUST equal the full EKFC extracted key length.** For 5-tuple (13 bytes): keysize = 13 in the EXT_HASH descriptor and DDR record key field.
 
 ### 10.3 CRC64 Hash
 
@@ -558,52 +560,65 @@ All bucket and record memory is DDR — gen_pool `used` is unchanged.
 
 ## 12. Open Questions
 
-Of the three facts about the 210.10.1 programming surface listed below, **UNKNOWN-1** remains open. **RESOLVED-2** (contextOffsetInWS) and **RESOLVED-3** (FE-VM core port) are settled — the workspace layout is confirmed via IC-layout analysis and the FE-VM pipeline is proven operational on silicon. Everything else in this document has been verified against at least one of: the DPAA RM, the lf-5.4 LSDK driver source, the `we-are-mono/ASK` production code, or a direct hardware register read.
+> **Status update (2026-07-13):** UNKNOWN-1 is **CLOSED** — the EKFC extraction byte order was resolved via hardware CRC-64 hash-match on the dpaa1 branch. The hardware hash is **RAW CRC-64** (no final complement). F-063 (contextSize bug) root cause identified and fixed. See §12.1 for the full resolution proof.
 
-### 12.1 UNKNOWN-1: EKFC Extraction Byte Order
+Of the three facts about the 210.10.1 programming surface listed below, **CLOSED-1** (ekfc extraction order, resolved 2026-07-13), **RESOLVED-2** (contextOffsetInWS), and **RESOLVED-3** (FE-VM core port) are all settled — the workspace layout is confirmed via IC-layout analysis and the FE-VM pipeline is proven operational on silicon. Everything else in this document has been verified against at least one of: the DPAA RM, the lf-5.4 LSDK driver source, the `we-are-mono/ASK` production code, or a direct hardware register read.
 
-The EKFC register (§4.3) selects which fields the KeyGen extracts. The assembly order — the sequence in which the hardware places extracted fields into the key buffer — is not documented in any public source. Three models exist:
+### 12.1 CLOSED-1: EKFC Extraction Byte Order (resolved 2026-07-13)
 
-| Model | Order (first byte → last byte) | Evidence strength |
-|---|---|---|
-| **Descending bit position** (MSB-first) | SIP(4) + DIP(4) + PROTO(1) + SPORT(2) + DPORT(2) = 13 bytes | **Strong** — two independent production sources: NXP LSDK `fm_kg.c` `orderedArray` sort + ASK 1.x `ipv4_tcpudp_key` struct in `cdx_common.h` |
-| **Ascending bit position** (LSB-first) | DPORT(2) + SPORT(2) + PROTO(1) + DIP(4) + SIP(4) | **Weak** — a single ICMP observation with ports=0 and disputed EKFC value |
-| **Size-grouped** | SIP(4) + DIP(4) + SPORT(2) + DPORT(2) + PROTO(1) | **None** |
+**Status: CLOSED.** The EKFC extraction byte order was resolved via hardware CRC-64 hash-match on 2026-07-13 (board 192.168.1.185, kernel 6.18.38-vyos, ISO `2026.07.13-1938-rolling`, branch `dpaa1`).
 
-**Derived CRC64 hash values** (computed via `fman_pcd_crc64()`, frame: SIP=`10.99.1.106`, DIP=`10.99.1.185`, PROTO=`6`, SPORT=`0x1111`, DPORT=`0x2222`):
+**Confirmed extraction order — MSB-first (descending bit position):**
 
-| Order | Key bytes (hex) | Finalized CRC64/XZ | Raw (no final complement) |
-|---|---|---|---|
-| MSB-first (descending) | `0A63016A 0A6301B9 06 1111 2222` (13B) | `0xE6D09D347C8EB255` | `0x192F62CB83714DAA` |
-| LSB-first (ascending) | `2222 1111 06 0A6301B9 0A63016A` (13B) | `0x798580C57B29F962` | `0x867A7F3A84D6069D` |
-| Size-grouped | `0A63016A 0A6301B9 1111 2222 06` (13B) | `0x60FC30C70E2C1703` | `0x9F03CF38F1D3E8FC` |
+The silicon extracts fields in **descending EKFC bit position**: **SIP (IPSRC1, bit 20) → DIP (IPDST1, bit 19) → PROTO (PTYPE1, bit 18) → SPORT (L4PSRC, bit 2) → DPORT (L4PDST, bit 1)**. 13 bytes total for EKFC=`0x001C0006`.
 
-Values recomputable: `CRC-64/XZ("123456789") == 0x995DC9BBDF1939FA` (self-test), then `CRC-64/XZ(key_bytes)` over each 13-byte key above. The kernel-side `fman_pcd_crc64()` returns these exact values. Regenerate with:
+**Confirmed hash algorithm — RAW CRC-64 (no final complement):**
+
+The hardware stores `crc64_raw(key)` at IC offset `0x48` — the running CRC-64/ECMA-182 with seed `~0ULL` but **without** the final `~crc` XOR. The CRC-64/XZ finalized variant (`crc64_raw ^ 0xFFFFFFFFFFFFFFFF`) does **NOT** match the hardware. This is consistent with `fman_pcd_crc64()` in the kernel, which also returns raw.
+
+**Verification (repeatable):**
+
+Method: mainline RSS on eth4 (`receive-hashing: on`, `FMBM_RFPNE` has HWK engine at offset `0x28`), no ASK engage needed, eth4-only capture filter via `strcmp(net_dev->name, "eth4")` in `rx_default_dqrr` hook. Send controlled TCP SYN from `.106:portA` to `.185:portB` with distinct non-zero fields, read `hash_probe` debugfs, compare against `crc64_raw()` over the 13-byte key assembled in confirmed order.
+
+| # | Flow | Captured hash | Key (SIP→DIP→PROTO→SPORT→DPORT) | Match |
+|---|---|---|---|---|
+| 1 | `10.99.2.106:44444 → 10.99.2.185:55555 TCP` | `0x600824e70ae4d573` | `0a63026a0a6302b906ad9cd903` | **crc64_raw = 0x600824e70ae4d573 ✓** |
+| 2 | `10.99.2.106:55001 → 10.99.2.185:5201 TCP` | `0x145a4d6c34d37089` | `0a63026a0a6302b906d6d91451` | **crc64_raw = 0x145a4d6c34d37089 ✓** |
+
+**Disproven models:**
+
+| Model | Order | Key bytes (flow 1) | crc64_raw | Match? |
+|---|---|---|---|---|
+| **Descending (MSB-first)** ✓ | SIP+DIP+PROTO+SPORT+DPORT | `0a63026a0a6302b906ad9cd903` | `0x600824e70ae4d573` | **YES** |
+| Ascending (LSB-first) ✗ | DPORT+SPORT+PROTO+DIP+SIP | `d903ad9c060a6302b90a63026a` | `0x13b73f31e93236d8` | no |
+| Size-grouped ✗ | SIP+DIP+SPORT+DPORT+PROTO | `0a63026a0a6302b9ad9cd90306` | `0x2420596c5979e750` | no |
+
+**Key layout for 5-tuple (EKFC=`0x001C0006`):**
+
+```
+Byte:  0  1  2  3  4  5  6  7  8  9 10 11 12
+Field: ── SIP ── ── DIP ── PROTO ─ SPORT ─ DPORT ─
+       0A 63 02 6A 0A 63 02 B9 06 AD 9C D9 03
+```
+
+**CRC-64 reference implementation (raw, no final complement):**
 
 ```python
-def crc64_xz(data: bytes) -> int:
+def crc64_raw(data: bytes) -> int:
     poly = 0xC96C5795D7870F42
     crc = 0xFFFFFFFFFFFFFFFF
     for byte in data:
         crc ^= byte
         for _ in range(8):
             crc = (crc >> 1) ^ poly if crc & 1 else crc >> 1
-    return crc ^ 0xFFFFFFFFFFFFFFFF
+    return crc  # NO final complement — matches hardware
 ```
 
-**Resolution — annotation hash-match:**
+**F-063 contextSize interaction:** The EXT_HASH FE descriptor (§7.2) encodes `contextSize` in word1 bits [15:8]. For keysize=13, this MUST be 13 (encoded as `12` = `contextSize-1`), NOT 256 (the DDR record size). Using 256 caused the hardware to compare 256 bytes per DDR entry → BMI port stall. Fixed by F-063 (`sed 's/(FMAN_FE_HASH_CONTEXT_SIZE - 1)/(t->key_size - 1)/'`).
 
-Since the raw key is transient in the Field Extraction Unit and only the hash is retained, read the 8-byte KG hash from the DDR buffer annotation instead (the hash IS retained at IC `0x48` and copied when `pass_hash_result` is enabled):
+**IPv6 note:** IPv6 requires a separate KG scheme + separate ehash table (IPSRC1/IPDST1 become 16 bytes each → 37-byte key). The design must not preclude it.
 
-1. On the test port, set `FMBM_RFPNE = 0x00480000` (KG-armed, no CC dispatch — frames pass through KG with hashing enabled but deliver directly to the kernel FQ, so the frame reaches `rx_default_dqrr` where the hash annotation is readable). Leave `FMBM_RCCB = 0`. Configure a KG scheme with `EKFC = 0x001C0006` (5-tuple, NO IPSECSPI bit), `kgse_mode` next_engine=BMI/DONE (enqueue to kernel FQ). Does NOT require FE-VM arming.
-2. Enable `pass_hash_result` in the buffer prefix content
-3. Send ONE known frame with all-DISTINCT non-zero field bytes (never ports=0 — ICMP aliasing destroys the signal). Use SIP=`10.99.1.106`, DIP=`10.99.1.185`, PROTO=`6`, SPORT=`0x1111`, DPORT=`0x2222`
-4. Read the full 8-byte KG hash from the DDR annotation at `vaddr + hash_result_offset` (§5). The mainline `dpaa_eth` driver already reads the 32-bit hash for RXHASH — extend to read 64 bits
-5. Compare against the pre-computed values above. The match names the silicon order
-
-**Precondition check:** Before any hash-capture attempt, dump the target port's `FMBM_RFPNE` and verify bits [22:16] = `0x48` (HWK). If bits [22:16] = `0x50` (BMI direct), the KG is bypassed and the hash slot is not populated. See the NIA decode table in §5.
-
-**Order-independent alternative — widen `FMBM_RICP` to copy the raw key.** Set `iciof = 0x48` (skip past PR+TS+hash to IC key region) and `icsz ≥ 16` (or full key length). The extracted key then appears verbatim in the DDR annotation of every delivered frame; its byte layout is read directly, no CRC64 inference needed. Caveat: the exact IC offset of the extracted key is IC-layout-derived (§12.2) — dump a wide RICP copy of a known frame first and locate the known field bytes to validate the IC offset before trusting it. This is the strongest resolution because it collapses both UNKNOWN-1 and RESOLVED-2 into a single direct observation.
+**Order-independent alternative (still valid):** Widen `FMBM_RICP` (`iciof = 0x48`, `icsz ≥ 16`) to copy the raw key to the DDR annotation. The extracted key then appears verbatim; its byte layout is read directly, no CRC64 inference needed. This collapses both extraction-order and workspace-layout questions into a single direct observation.
 
 ### 12.2 RESOLVED-2: FE Workspace Layout (contextOffsetInWS)
 
