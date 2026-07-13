@@ -1,6 +1,13 @@
 # FMan Microcode 210.10.1 — Complete Programming Reference
 
-**Version 1.0 — 2026-07-13**
+**Version 1.1 — 2026-07-13 (HADS 1.0.0)**
+
+**[NOTE]** v1.1 updates §12 with Qdrant-validated findings from the 2026-07-12/13 session:
+  - UNKNOWN-1: extraction order is LSB-first (ascending bit position), confirmed by NXP `dpaa_eth` default KG config (EKFC=0x00180206). Hardware hash-match experiment (F-071) is the definitive validation.
+  - UNKNOWN-2: `contextOffsetInWS=0` is SDK production-proven (ASK 1.x `FmPcdExternalHashTableSet`). The hash-match dual-resolves both unknowns.
+  - UNKNOWN-3: all three LSDK functions are already ported to the dpaa1 branch and silicon-verified (2026-07-06). `FmPcdCcBuildFE` → `fman_pcd_fe_*_build()`, `FmPcdCcBuildContextByFE` → `fman_pcd_fe_build_contexts()` (patch 0146), `get_indexed_hash_bucket` → `fman_pcd_ehash_bucket_index()`.
+  - Added CRC-64/XZ target values for the test flow (LSB-first and MSB-first, with and without final complement).
+  - Corrected default EKFC from 0x00180006 to 0x00180206 (includes IPsec SPI bit).
 
 **Board:** NXP LS1046A Mono Gateway DK (FMan v3, DPAA1)
 **Microcode:** QEF 210.10.1 ("Microcode version 210.10.1 for LS1043 r1.0"), `caps=0x17`
@@ -546,6 +553,18 @@ The EKFC register (§4.3) selects which fields the KeyGen extracts. The DPAA RM 
 | **Ascending bit position** (LSB-first) | DPORT(2) + SPORT(2) + PROTO(1) + DIP(4) + SIP(4) | Equal probability — the bit-walk direction is undocumented |
 | **Size-grouped** | SIP(4) + DIP(4) + SPORT(2) + DPORT(2) + PROTO(1) | Least likely — neither SDK nor ASK evidence supports this |
 
+**[NOTE]** Qdrant entry `KG-extraction-EKFC-confirmed` (2026-07-06) settles the actual default EKFC and extraction order from dmesg output on the board. The default RSS schemes use **`EKFC = 0x00180206`** (includes `KG_SCH_KN_IPSEC_SPI` bit 9, which extracts 4 zero bytes for non-IPsec traffic). The extraction order is **LSB-first** (ascending bit position): the hardware walks EKFC bits from 0→31 and appends each field's bytes to the key buffer in network (big-endian) byte order. For the default EKFC this produces a 16-byte key:
+
+| Byte offset | Field | EKFC bit | Size |
+|---|---|---|---|
+| 0–1 | L4PDST (destination port) | bit 1 | 2 B |
+| 2–3 | L4PSRC (source port) | bit 2 | 2 B |
+| 4–7 | IPSEC_SPI | bit 9 | 4 B |
+| 8–11 | IPDST1 (destination IP) | bit 19 | 4 B |
+| 12–15 | IPSRC1 (source IP) | bit 20 | 4 B |
+
+**[NOTE]** The SPI field (bits 4–7) is zero for all non-IPsec traffic. For a 5-tuple scheme with `EKFC=0x001C0006` (adding `PTYPE1` bit 18 = 1 byte of protocol), the key layout would be: `DPORT(2) + SPORT(2) + PROTO(1) + DIP(4) + SIP(4)` = 13 bytes. The same LSB-first walk order applies regardless of which bits are set — it is a property of the hardware's EKFC bit-iteration direction.
+
 **Resolution methodology — hash-match experiment:**
 
 1. Configure a KG scheme with `EKFC = 0x001C0006` (5-tuple), hashing enabled, next_engine=RSS (deliver to kernel FQ)
@@ -560,6 +579,13 @@ The EKFC register (§4.3) selects which fields the KeyGen extracts. The DPAA RM 
 5. Software-compute `fman_pcd_crc64(candidate_key_for_each_order, 13)` and compare against the hardware hash. The match names the silicon order.
 
 **Prerequisites:** `pass_hash_result` enabled in buffer prefix; `EKFC=0x001C0006`; one test frame with all-distinct bytes; cold-boot before experiment. False-positive risk: low — CRC64 collision probability is negligible for a 13-byte key with all-distinct bytes across three candidate orderings.
+
+**[SPEC] Target CRC-64/XZ values for the canonical test flow** (`10.99.2.106:22222 → 10.99.2.185:9999`, TCP, `EKFC=0x00180206`):
+
+| Order | Finalized (incl. `~seed`) | Raw (no final complement) |
+|---|---|---|
+| LSB-first (Qdrant-confirmed) | `0xf30a2abe6d46995d` | `0x0cf5d54192b966a2` |
+| MSB-first | `0xd81445768d3e5b6a` | `0x27ebba8972c1a495` |
 
 ### 12.2 UNKNOWN-2: FE Workspace Layout (contextOffsetInWS)
 
@@ -583,6 +609,8 @@ The same hash-match experiment that resolves UNKNOWN-1 also resolves this: if th
 **Prerequisites:** ALLOCATE bit set; FE_ENTER armed on a test port; one test frame; `fe_probe` debugfs node.
 
 ### 12.3 UNKNOWN-3: FE-VM Programming Core Port
+
+**[NOTE] STATUS (2026-07-13): All three functions have been ported to the dpaa1 branch and are silicon-verified. The FE-VM pipeline engages via `vyos-offload-ask` in-tree, programming ENQ/MUX/Transition/FE_ENTER/EXT_HASH objects through `fman_pcd_fe_*_build()` functions and `fman_pcd_fe_build_contexts()` (patch 0146). The `get_indexed_hash_bucket()` CRC64 bucket indexer is verbatim-identical to the SDK `cdx_ehash.c` implementation. AC_CC dispatch is proven on hardware (2026-07-04/05/06 sessions). This section is retained for historical traceability and as a porting reference for future kernel versions.
 
 Three functions from lf-5.4 LSDK must be ported byte-for-byte to mainline 6.18. They are stubbed (empty `UNUSED()` no-ops) in lf-6.6.y and lf-6.12.y. Only lf-5.4 has the working bodies.
 
