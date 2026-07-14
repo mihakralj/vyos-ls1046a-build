@@ -1611,18 +1611,23 @@ else:
 "
 fi
 
-# F-062d: MISS stays at EXIT (proven safe, no BMI stall per 2026-07-10 A/B test).
-# Routing MISS through MUX→ENQ caused BMI stall because ENQ→QMan path has
-# never been silicon-proven in FE-VM architecture (M2 gate used CONT_LOOKUP AD).
-# Keep only the MUX ALLOCATE fix — MUX needs ALLOCATE for HIT frames that
-# chain through MUX→ENQ.  MISS stays at EXIT→safe-drop.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    # ENQ ALLOCATE — add to p.flags (fman_pcd_fe_build encodes w[0] = type|flags)
-    # EXIT has ALLOCATE and works; ENQ needs it to free FE workspace
-    sed -i 's/p.flags = FMAN_FE_ENQ_FQID;/p.flags = FMAN_FE_ENQ_FQID | FMAN_AD_FE_ENTER_ALLOCATE; \/\* F-062d: free FE workspace \*\//' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c 2>/dev/null || true
-    echo "### fman_pcd.c: F-062d ENQ ALLOCATE for workspace cleanup"
-fi
+# F-062d-DISABLED: The ENQ ALLOCATE flag (FMAN_AD_FE_ENTER_ALLOCATE = 0x00800000)
+# on the ENQ FE may deallocate the frame buffer that QMan later tries to free
+# during confirmation FQ processing → dpaa_cleanup_tx_fd crash.
+#
+# F-062f routes MISS→ENQ directly (bypassing EXIT).  With ENQ ALLOCATE
+# active, the test was clean (engage→ping→disengage OK) but board crashed
+# minutes later from background traffic — consistent with accumulated
+# QMan FD corruption from ENQ deallocation.
+#
+# Disabling F-062d tests whether the 0x00800000 flag on ENQ is the corruption
+# source.  Without it, ENQ word0 = 0x02010000 (type only, no ALLOCATE).
+: 'F-062d-DISABLED'
+: 'if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then'
+: '    sed -i ...'
+: 'fi'
+
+echo "### fman_pcd.c: F-062d DISABLED (ENQ ALLOCATE may cause QMan FD corruption)"
 
 # M2-4: free params page on disengage (was leaking 256 B per cycle)
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
