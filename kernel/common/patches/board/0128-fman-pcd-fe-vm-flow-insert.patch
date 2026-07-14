@@ -8,7 +8,6 @@ Subject: [PATCH] fman_pcd: FE-VM increment 3 - per-flow ehash insertion
  Ships DORMANT; forward (add) + inverse (LIFO drain) in one patch.
 
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-index 235beb1..d8a080d 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
 @@ -1346,8 +1346,12 @@ struct fman_pcd_ehash_table {
