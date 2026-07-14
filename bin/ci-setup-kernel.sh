@@ -1551,6 +1551,30 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     echo "### fman_keygen.c: F-062b scheme default FQ set to 0x200 (fixes MISS/EXIT stall)"
 fi
 
+# F-062e: Strip FMAN_FE_EXIT_DEALLOCATE from EXIT and Transition singletons.
+# The DEALLOCATE flag on the EXIT FE deallocates the frame buffer, then the
+# hardware returns to the KeyGen scheme which dispatches the deallocated frame
+# to fqb=0x200 (F-062b) → QMan FD corruption → kernel panic in
+# dpaa_cleanup_tx_fd on NAPI poll of the confirmation FQ.
+#
+# Fix: remove DEALLOCATE from both the Transition (HIT path deallocation) and
+# the EXIT (MISS path deallocation).  After FE-VM processing, the scheme
+# dispatches the intact frame to fqb — the FQ owns the buffer and QMan handles
+# buffer lifecycle.  The frame is silently dropped (no kernel poller on FQ
+# 0x200), which is the correct CONT_LOOKUP pass-through behavior (no crash).
+#
+# For Layer 1 HIT forwarding, ENQ sends to a dedicated TX FQ directly;
+# deallocation is handled by the kernel's TX completion path.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    # Transition: strip FMAN_FE_EXIT_DEALLOCATE |, keep FMAN_FE_TRANSITION_AD_FROM_WS
+    sed -i 's/p.flags = FMAN_FE_EXIT_DEALLOCATE | FMAN_FE_TRANSITION_AD_FROM_WS;/p.flags = FMAN_FE_TRANSITION_AD_FROM_WS;  \/\* F-062e: no DEALLOCATE — scheme fqb owns buffer \*\//' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    # Exit: strip FMAN_FE_EXIT_DEALLOCATE entirely
+    sed -i 's/p.flags = FMAN_FE_EXIT_DEALLOCATE;/p.flags = 0;  \/\* F-062e: no DEALLOCATE — scheme fqb owns buffer \*\//' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    echo "### fman_pcd.c: F-062e DEALLOCATE stripped from EXIT and Transition (prevents QMan FD corruption)"
+fi
+
 # F-062d: MISS stays at EXIT (proven safe, no BMI stall per 2026-07-10 A/B test).
 # Routing MISS through MUX→ENQ caused BMI stall because ENQ→QMan path has
 # never been silicon-proven in FE-VM architecture (M2 gate used CONT_LOOKUP AD).
