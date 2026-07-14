@@ -1468,8 +1468,10 @@ static int ask_flow_offload_replace(struct net_device *ingress_dev,
                             f->cookie, hw_id,
                             ingress_dev ? netdev_name(ingress_dev) : "?", oif,
                             key.next_hop_mac, key.egress_mac);
-        /* Insert flow into FMan FE-VM ehash table (debugfs bridge, Phase 3). */
-        ask_debugfs_fe_flow_write(&key, 0);
+        /* Insert flow into FMan FE-VM ehash table (debugfs bridge, Phase 3).
+         * Fix C3: use captured ENQ FE offset instead of 0 to avoid invalid
+         * DDR flow record dispatch (next-FE pointer must be valid MURAM offset). */
+        ask_debugfs_fe_flow_write(&key, ask_hw_get_enq_fe_off());
 
         return 0;
 }

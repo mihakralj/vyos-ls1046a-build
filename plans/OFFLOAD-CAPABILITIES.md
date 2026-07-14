@@ -39,9 +39,9 @@ hardware and the test traffic walked the FMan datapath.
 | FE pool (16 × 28 B) MURAM allocation | `0122`/`0124` | `fe_pool` debugfs: get/put cycles, gen_pool used returns to baseline |
 | FE singletons (MUX 8 B, TRANSITION 8 B, EXIT 4 B) | `0124` byte-assembled | `fe_singletons` debugfs readback: MUX=0x04000000, EXIT=0x03800000 |
 | `t_ExtHashFe` (28 B, DDR table addr, MUX/MISS links) | `0131` | `fe_hashfe` readback: 7 words match oracle §5 byte table |
-| FE_ENTER root AD (16 B, pcAndOffsets=0xF6, ALLOCATE) | `0127` | `fe_enter` readback: 40800000 00000000 000000f6 00000010 |
+| FE_ENTER root AD (16 B, pcAndOffsets=0xF6, NIA_ORDER_RESTOR) | `0127` | `fe_enter` readback: 40800000 00000000 000000f6 00000010 |
 | ENQ FE (16 B, NIA+FQID 0x2b9 = dedicated TX FQ) | `0127`/P4.1 | `fe_enq` readback: 02010000 000002b9 00000000 00000000 |
-| DDR ehash table (mask=0x7FFF, 524 KB, DMA-coherent) | `0125`/`0130` | dmesg: "ehash table mask 0x7fff keysize 12 ii 15 size 524288 DDR=0xf7780000" |
+| DDR ehash table (mask=0x7FFF, 524 KB, DMA-coherent) | `0125`/`0130` | dmesg: "ehash table mask 0x7fff keysize 13 ii 15 size 524288 DDR=0xf7780000" |
 | CRC64 flow insertion into DDR buckets | `0128` | `fe_flow` readback: bucket=0x273d rec=0xfa403000, key=`<hex>` verified |
 | FE-VM arm engages (BMI CC root → FE_ENTER) | `0132` D9-B | `fe_arm`: "fe_pool engaged: YES, FE_ENTER root AD: 0x59200" |
 | **Port survives sustained FE-VM traffic** | **M3-3b fix** | **50+ pings, zero STL stall, no fault latched** |

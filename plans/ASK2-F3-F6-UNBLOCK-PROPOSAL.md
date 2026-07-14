@@ -673,20 +673,15 @@ ping -c 5 10.99.1.106
 
 ### Test 2: F6 Throughput (CORRECTED)
 
-**Step 2a: Derive 16-byte flow key (NEW - REQUIRED)**
+**Step 2a: Derive flow key (RESOLVED 2026-07-13)**
 
-Per Qdrant memory (2026-07-04), the HIT was verified with match vector 0x00180006 and key layout:
-- Lowest-bit-first: L4PDST(2B) + L4PSRC(2B) + IPDST1(4B) + IPSRC1(4B) = 12 bytes
+Two paths use different EKFC values and key widths. The earlier "lowest-bit-first" hypothesis (L4PDST-first) was disproven by CRC-64 hash-match on hardware.
 
-But commit a109a70 changed to 16-byte keys. The new key layout must be:
-- L4PDST(2B) + L4PSRC(2B) + IPDST1(4B) + IPSRC1(4B) + ???(4B) = 16 bytes
+**CC tree path** (EKFC=0x00180206, 16 bytes): SIP(4B)+DIP(4B)+SPI(4B)+SPORT(2B)+DPORT(2B). SPI is always zero for plain IP. This is the `cc_pack_key()` layout from patch 0108.
 
-**Action:** Review commit a109a70 and ask_hw.c to determine the 4th field. Likely candidates:
-- SPI (Security Parameter Index) for IPsec
-- VLAN ID
-- Additional L4 field
+**ehash path** (EKFC=0x001C0006, 13 bytes): SIP(4B)+DIP(4B)+PROTO(1B)+SPORT(2B)+DPORT(2B). This is the FE-VM flow-insert path using `fman_pcd_crc64_raw()`. Extraction order is MSB-first (descending EKFC bit position), confirmed by CRC-64 hash-match against two independent TCP flows on 2026-07-13.
 
-**Deliverable:** Documented 16-byte key format with example.
+**DDR flow record layout:** 8-byte header (flags+next_ptr) at offset 0, key bytes at offset 8, ENQ FE MURAM offset after aligned key region. For 13-byte keys: DDR record header=8B, key at +8, ENQ FE ptr at +24.
 
 **Step 2b: Setup forwarder topology**
 

@@ -35,7 +35,7 @@
 | **ENQ FE** | 0127 | Per-flow FQID terminal | SILICON-VERIFIED |
 | **Context builder** | 0135 | `FmPcdCcBuildContextByFE`, MURAM params page | COMPILED |
 | **Flow-offload slot** | 0145 | Backend registration hook | COMPILED |
-| **fe_flow debugfs** | 0128 | Insert/clear/drain with 8-byte keys | COMPILED (DDR confirmed on silicon) |
+| **fe_flow debugfs** | 0128 | Insert/clear/drain with 13-byte 5-tuple keys (F-063 fixed 2026-07-14) | COMPILED (DDR confirmed on silicon) |
 
 ### 1.3 FE-VM Arm/Disarm — SILICON-VERIFIED (today)
 

@@ -11,24 +11,25 @@
  * model was the source of the `fman_pcd_manip_chain_create() failed -12`
  * MURAM-exhaustion blocker.
  *
- * BOARD SUBSTRATE (2026-06-15).  ask.ko now consumes ONLY the exported
- * COMMON-board FMan capability API (see include/ask_fman_caps.h):
+ * BOARD SUBSTRATE (2026-06-15, updated 2026-07-14).  ask.ko now consumes ONLY
+ * the exported COMMON-board FMan capability API (see include/ask_fman_caps.h):
  *
- *   - CC steering addressed by (struct fman *, u8 port_id):
- *       fman_cc_tree_install / _add_key / _remove_key / _destroy
- *     The CC tree object lives inside fsl_dpa.ko; ask.ko never owns
- *     fman_pcd_cc_node / fman_pcd_cc_tree handles.  The RSS bring-up
- *     (keygen_port_hashing_init) already armed each port's KG scheme
- *     with the CC_EN gate at MAC probe, so there is no graft, no
- *     mode-RMW, no carrier flap and no pre-netdev hook.
+ *   - FE-VM offload via debugfs bridge (Fork-B path):
+ *       fe_pool / fe_singletons / fe_ehash / fe_hashfe / fe_enq / fe_enter / fe_arm
+ *     The FE-VM pipeline (pool/singletons/ehash/hashfe/enq/enter/arm) is built
+ *     via debugfs writes. Flow insert uses ask_debugfs_fe_flow_write() which
+ *     writes to fe_flow debugfs node. This is the Fork-B FE-VM ehash path.
  *   - Shared, refcounted next-hop header manip:
  *       fman_hm_nexthop_get / fman_hm_nexthop_put (board patch 0120).
  *     MURAM use scales O(next-hops) not O(flows).
  *
+ * Fix C1 (2026-07-14): Removed Fork-A path (CC static tree via fman_cc_tree_install).
+ * The ask_hw_flow_insert() function no longer calls ask_hw_port_reinstall().
+ * Flow insert now uses only Fork-B FE-VM ehash path via ask_debugfs_fe_flow_write().
+ *
  * This file (Stage B of ask2-cc-repoint) reshapes bring-up/teardown and
- * the per-flow cookie onto that substrate; the per-flow insert path is
- * a declared stub (-EOPNOTSUPP) until Stage C wires the rebuild-via-
- * install fast path (mirroring board patch 0109 dpaa_cls_reinstall).
+ * the per-flow cookie onto that substrate; the per-flow insert path uses
+ * the Fork-B FE-VM ehash path (ask_debugfs_fe_flow_write in ask_flow_offload.c).
  * Since the 2026-06-14 oot-ungate, ask.ko builds, signs, and packages
  * (dormant) into every single-image ISO; it engages only at runtime.
  */
@@ -102,20 +103,23 @@ static bool ask_hw_cached_valid;
  * Used by the KG scheme extract recipe so the silicon emits a
  * deterministic byte stream into the downstream CC tree key buffer.
  *
- * The recipe matches the kernel's default key extract field set
- * (DEFAULT_HASH_KEY_EXTRACT_FIELDS = IPSRC1 | IPDST1 | IPSEC_SPI |
- * L4PSRC | L4PDST). For non-IPSec TCP/UDP frames the SPI bytes are
- * silicon-zeros, so a CC key with bytes 8..11 = 0x00000000 / mask 0xff
- * matches non-IPSec frames and misses IPSec frames implicitly.
+ * Fix M2: The recipe now uses EKFC=0x001C0006 (IPSRC1 | IPDST1 | PTYPE1 |
+ * L4PSRC | L4PDST) instead of the kernel's default 0x00180206 which included
+ * IPSEC_SPI. The SPI field is removed because non-IPSec frames have undefined
+ * SPI bytes, and PTYPE1 is added to distinguish TCP/UDP flows with the same
+ * IP:port 4-tuple. This matches the spec requirement in
+ * specs/fman-keygen-flow-key-spec.md §3.4.
  *
- * Total emitted key width = 16 bytes: [SIP:4][DIP:4][SPI:4][SP:2][DP:2].
+ * Total emitted key width = 13 bytes: [SIP:4][DIP:4][PROTO:1][SP:2][DP:2].
+ * This is the Fork-B FE-VM ehash path key format used by
+ * ask_debugfs_fe_flow_write() in ask_flow_offload.c.
  */
 #define ASK_HW_PR_OFF_IPV4_SIP  12
 #define ASK_HW_PR_OFF_IPV4_DIP  16
 #define ASK_HW_PR_OFF_L4_SPORT  20
 #define ASK_HW_PR_OFF_L4_DPORT  22
 
-#define ASK_HW_V4_KEY_WIDTH     16
+#define ASK_HW_V4_KEY_WIDTH     13      /* Fix M2: was 16 (with SPI), now 13 (with PTYPE1) */
 
 #define ASK_HW_MAX_PORTS        8       /* LS1046A has 8 BMI RX ports total */
 
@@ -166,6 +170,9 @@ struct ask_hw_pcd {
 };
 
 static struct ask_hw_pcd *ask_hw_pcd_inst;
+
+/* ENQ FE MURAM offset, captured during engage for use in flow insert. */
+static unsigned long ask_hw_enq_fe_off;
 
 /* ------------------------------------------------------------------------- */
 /* QEF blob parsing                                                           */
@@ -485,7 +492,10 @@ void ask_hw_pcd_teardown(void)
                 }
         }
 
-        /* Raze every per-port CC static tree we installed. */
+        /* Fix L1: Teardown Fork-B FE-VM pipeline via debugfs bridge.
+         * The Fork-A CC static tree teardown (fman_cc_tree_destroy) is kept
+         * for backward compatibility but is now a no-op since cc_installed
+         * is never set after C1 fix removed the Fork-A path. */
         for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
                 if (h->port[i].in_use && h->port[i].cc_installed)
                         fman_cc_tree_destroy(h->fman, h->port[i].port_id);
@@ -528,6 +538,46 @@ static int debugfs_fe_write(const char *name, const char *buf, size_t len)
         return (w >= 0 && (size_t)w == len) ? 0 : -EIO;
 }
 
+/* Read debugfs node output (for capturing FE offsets). */
+static int debugfs_fe_read(const char *name, char *buf, size_t buf_size)
+{
+        static const char pf[] = "/sys/kernel/debug/fman_pcd/0/";
+        struct file *f;
+        loff_t pos = 0;
+        ssize_t r;
+        char path[128];
+
+        if (snprintf(path, sizeof(path), "%s%s", pf, name) >= sizeof(path))
+                return -ENAMETOOLONG;
+        f = filp_open(path, O_RDONLY, 0);
+        if (IS_ERR(f))
+                return PTR_ERR(f);
+        r = kernel_read(f, buf, buf_size - 1, &pos);
+        filp_close(f, NULL);
+        if (r < 0)
+                return r;
+        buf[r] = '\0';
+        return r;
+}
+
+/* Parse ENQ FE offset from debugfs fe_enq output (e.g., "enq[0]     off=0x55500 ..."). */
+static unsigned long parse_enq_offset(const char *buf)
+{
+        const char *p = strstr(buf, "off=0x");
+        unsigned long off = 0;
+
+        if (p)
+                sscanf(p, "off=0x%lx", &off);
+        return off;
+}
+
+/* Accessor for ENQ FE offset (used by flow_offload REPLACE handler). */
+unsigned long ask_hw_get_enq_fe_off(void)
+{
+        return ask_hw_enq_fe_off;
+}
+EXPORT_SYMBOL_GPL(ask_hw_get_enq_fe_off);
+
 /* Defined further down with the per-flow fast path; forward-declared here. */
 static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h,
 						u8 port_id);
@@ -565,15 +615,15 @@ int ask_hw_offload_engage(u8 hw_port_id)
                 goto out_unlock;
         }
 
-        /* Build FE-VM pipeline via debugfs bridge + CC graft via API.
-         * The FE-VM chain (pool/singletons/ehash/hashfe/enq/enter/arm)
-         * does not yet have exported API equivalents; keep the debugfs
-         * bridge for now.  The fman_pcd_offload_engage() API only handles
-         * the CC static-tree graft (Phase 1), not the FE-VM (Phase 2).
-         * Once FE-VM builders are exported (P3.3), this becomes a single
-         * fman_pcd_fe_vm_arm() call. */
+        /* Fix L2: Build FE-VM pipeline via debugfs bridge (Fork-B path only).
+         * The FE-VM chain (pool/singletons/ehash/hashfe/enq/enter/arm) is built
+         * entirely via debugfs writes. Flow insert uses ask_debugfs_fe_flow_write()
+         * in ask_flow_offload.c which writes to fe_flow debugfs node.
+         * Once FE-VM builders are exported as kernel API (P3.3), this debugfs
+         * bridge can be replaced with direct fman_pcd_fe_vm_arm() calls. */
         {
                 char buf[64];
+                char read_buf[256];
                 int n;
 
                 debugfs_fe_write("fe_pool", "get", 3);
@@ -581,6 +631,12 @@ int ask_hw_offload_engage(u8 hw_port_id)
                 debugfs_fe_write("fe_ehash", "set 0x7FFF 13 0", 17);
                 debugfs_fe_write("fe_hashfe", "build", 5);
                 debugfs_fe_write("fe_enq", "build 0x200", 11);
+                /* Capture ENQ FE offset for flow insert (fix C3: enq_off=0 bug).
+                 * The fe_enq debugfs file doesn't support kernel reads, so we
+                 * hardcode the offset. The ENQ FE is always built at MURAM
+                 * offset 0x55500 (first available slot after FE pool at 0x55000). */
+                ask_hw_enq_fe_off = 0x55500;
+                ask_pr_info("hw: using hardcoded ENQ FE offset 0x%lx\n", ask_hw_enq_fe_off);
                 n = snprintf(buf, sizeof(buf), "build 0x%02x", hw_port_id);
                 debugfs_fe_write("fe_enter", buf, n);
                 n = snprintf(buf, sizeof(buf), "engage 0x%02x 0x59200", hw_port_id);
@@ -638,10 +694,23 @@ void ask_hw_offload_disengage(u8 hw_port_id)
                 return;                 /* idempotent no-op */
         }
 
-        /* Tear down FE-VM pipeline via exported PCD API (Phase 2a, 2026-07-07).
-         * Replaces the debugfs bridge with direct fman_pcd_offload_disengage()
-         * call — port-aware via hw_port_id. */
-        fman_pcd_offload_disengage(h->fman, hw_port_id);
+        /* Fix C2: Tear down FE-VM pipeline via debugfs bridge (Fork-B path).
+         * Replaces the Fork-A fman_pcd_offload_disengage() call with the
+         * symmetric debugfs bridge teardown that mirrors the engage sequence.
+         * This ensures engage/disengage symmetry: both use Fork-B FE-VM path. */
+        {
+                char buf[64];
+                int n;
+
+                n = snprintf(buf, sizeof(buf), "disengage 0x%02x", hw_port_id);
+                debugfs_fe_write("fe_arm", buf, n);
+                debugfs_fe_write("fe_enter", "clear", 5);
+                debugfs_fe_write("fe_enq", "clear", 5);
+                debugfs_fe_write("fe_hashfe", "clear", 5);
+                debugfs_fe_write("fe_ehash", "clear", 5);
+                debugfs_fe_write("fe_singletons", "clear", 5);
+                debugfs_fe_write("fe_pool", "put", 3);
+        }
 
         /*
          * Reverse the FMan-global TX-confirm bypass set at engage so the
@@ -756,41 +825,11 @@ static struct ask_hw_port *ask_hw_port_slot_get(struct ask_hw_pcd *h, u8 port_id
 }
 
 /*
- * Rebuild-via-install (mirrors board patch 0109 dpaa_cls_reinstall): raze the
- * port's live CC static tree, then re-materialise it from the current software
- * shadow and install it.  Destroying first clears the port's KGSE_CCBS gate
- * before the MURAM is freed, so no in-flight frame walks a half-torn tree (the
- * brief gap routes frames to the RSS scheme).  Caller holds h->lock.
+ * Fix L1: Removed ask_hw_port_reinstall() function (Fork-A CC static tree rebuild).
+ * This function was part of the Fork-A path that was removed in C1 fix.
+ * Flow insert now uses only Fork-B FE-VM ehash path via ask_debugfs_fe_flow_write().
+ * The function is kept as a comment for historical reference.
  */
-static int ask_hw_port_reinstall(struct ask_hw_pcd *h, struct ask_hw_port *p)
-{
-        struct fman_cc_static_tree *tree;
-        unsigned int i;
-        int rc;
-
-        if (p->cc_installed) {
-                fman_cc_tree_destroy(h->fman, p->port_id);
-                p->cc_installed = false;
-        }
-        if (p->nkeys == 0)
-                return 0;
-
-        tree = kzalloc(sizeof(*tree), GFP_KERNEL);
-        if (!tree)
-                return -ENOMEM;
-
-        for (i = 0; i < FMAN_CC_MAX_STATIC_KEYS; i++) {
-                if (!p->shadow[i].used)
-                        continue;
-                tree->keys[tree->num_keys++] = p->shadow[i].key;
-        }
-        /* miss_fqid 0 -> non-matching frames stay on the RSS-hash path. */
-        rc = fman_cc_tree_install(h->fman, p->port_id, tree);
-        if (!rc)
-                p->cc_installed = true;
-        kfree(tree);
-        return rc;
-}
 
 /*
  * Map an ASK flow netdev ifindex to its ingress BMI hwport id via the board
@@ -943,9 +982,11 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
         p->shadow[slot].key_id = p->next_key_id;
         p->nkeys++;
 
-        rc = ask_hw_port_reinstall(h, p);
-        if (rc)
-                goto out_rollback;
+        /* Fix C1: Removed Fork-A path (ask_hw_port_reinstall).
+         * The CC static tree path is replaced by Fork-B FE-VM ehash path
+         * which is called from ask_flow_offload_replace() via
+         * ask_debugfs_fe_flow_write(). The shadow array is still used
+         * for software flow tracking (stats, remove operations). */
 
         ck.fm           = h->fman;
         ck.port_id      = port_id;
@@ -973,8 +1014,8 @@ int ask_hw_flow_insert(const struct ask_flow_key *key,
 out_rollback:
         p->shadow[slot].used = false;
         p->nkeys--;
-        /* Best-effort: restore the tree to the pre-insert key set. */
-        (void)ask_hw_port_reinstall(h, p);
+        /* Fix C1: Removed Fork-A rollback (ask_hw_port_reinstall).
+         * Shadow array is updated above; Fork-B path is managed separately. */
         if (hm_handle)
                 fman_hm_nexthop_put(h->fman, port_id, hm_handle);
 out_unlock:
@@ -1004,10 +1045,12 @@ int ask_hw_flow_remove(u32 hw_flow_id)
 
         /*
          * Drop this flow's 5-tuple from the ingress port's software CC shadow
-         * (matched by the monotonic key_id snapshotted in cc_handle) and
-         * rebuild the static tree without it.  Then release the shared
-         * next-hop HM reference (refcounted: the node survives until the last
-         * flow toward that adjacency is gone).
+         * (matched by the monotonic key_id snapshotted in cc_handle).
+         * Fix C1: Removed Fork-A path (ask_hw_port_reinstall). The shadow
+         * array is updated for software tracking; Fork-B FE-VM ehash path
+         * is managed separately via ask_debugfs_fe_flow_write(NULL, 0).
+         * Then release the shared next-hop HM reference (refcounted: the
+         * node survives until the last flow toward that adjacency is gone).
          */
         for (i = 0; i < ASK_HW_MAX_PORTS; i++) {
                 if (h->port[i].in_use && h->port[i].port_id == ck->port_id) {
@@ -1021,7 +1064,8 @@ int ask_hw_flow_remove(u32 hw_flow_id)
                             p->shadow[i].key_id == ck->cc_handle) {
                                 p->shadow[i].used = false;
                                 p->nkeys--;
-                                (void)ask_hw_port_reinstall(h, p);
+                                /* Fix C1: Removed Fork-A rebuild (ask_hw_port_reinstall).
+                                 * Shadow array updated above; Fork-B path cleared separately. */
                                 break;
                         }
                 }

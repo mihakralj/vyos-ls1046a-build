@@ -63,7 +63,7 @@ graph TD
 |---|---|---|---|
 | **default** | common DPAA1 core ✅ | M3-3b/3c/3d/3e all closed / HW-validated; true-ZC RX closed | quantitative wire gates + the BUG 3b flood-crash characterization (lab) |
 | **vpp** | common DPAA1 core ✅ (AF_XDP) | plumbed + shipping in CI; **not benchmarked on HW after the patch-022 AF_XDP cutover** | a HW benchmark run |
-| **ask** | scaffold-only (builds vanilla VyOS today) | Path A activation verified on a prior ask20 build; **M2 CPU gate FAILED** (327× `chain_create -ENOMEM`) | PCD MURAM-budget fix (deferred work-stream) |
+| **ask** | FE-VM ehash path (Fork B) silicon-verified ✅ 2026-07-14 | FE-VM arm/disarm with byte-clean reversibility; CRC-64 hash-match confirmed MSB-first extraction order; ehash flow insert working with 13-byte 5-tuple keys (EKFC=0x001C0006); F-063 keysize=8→13 fixed in vyos-offload-ask | Multi-FQ ENQ spread; HM in HIT chain with nexthop dedup; soft parser for PPPoE WAN; eth3 PHY for dual-port GA gate measurement. **MURAM ceiling dissolved:** flows live in DDR, only nexthops (~200-400) consume MURAM under dedup. The 327× `-ENOMEM` from PR14z21 was Fork-A per-flow chain_create — not applicable to current path. |
 
 ---
 

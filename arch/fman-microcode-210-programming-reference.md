@@ -44,7 +44,7 @@ DDR is used for the ehash bucket array and per-flow records (to avoid MURAM exha
 Two dispatch paths exist on 210.10.1:
 
 - **Path 1, FE-VM external-hash** (**210-only**; the only path that flows): RCCB → `FE_ENTER` AD → EXT_HASH FE → DDR bucket lookup → MUX → ENQ (HIT) or EXIT (MISS). The FE-VM opcode interpreter provides terminal BMI-FIFO disposition.
-- **Path 2, bare exact-match CC** (`CONT_LOOKUP` → `CONTRL_FLOW` exit): parks on 210.10.1. No terminal FIFO disposition, BMI stall at approximately 45 frames. Do not use.
+- **Path 2, bare exact-match CC** (`CONT_LOOKUP` → `CONTRL_FLOW` exit): parks on 210.10.1. No terminal FIFO disposition, BMI stall at approximately 45 frames. Do not use. (Empirically observed on LS1046A hardware; confirmed in both 210.10.1 and public 106.4.18 microcode. Not described in NXP documentation — the CC engine expects FE-VM dispatch behind it.)
 
 
 ## 3. QEF Container (Blob Identity)
@@ -316,7 +316,9 @@ The central FE object. It performs: raw CRC-64(hardware key) → bucket index �
 
 **Critical address-space split.** `table_base_hi/lo` (`w2`/`w3`) carry a DDR bus address (`dma_addr_t` from `dma_alloc_coherent`). `nextFEPtr` and `missNextFE` (`w5`/`w6`) carry MURAM offsets (gen_pool offsets). Do not mix them.
 
-**contextSize** (in `w1[15:8]`): encoded as `contextSize - 1`. This value MUST equal the EKFC extracted key length (13 for 5-tuple, 12 for 4-tuple, 8 for a hypothetical 3-tuple), NOT the DDR record size. Setting `contextSize = 256` (the DDR record size) causes the hardware to compare 256 bytes per DDR entry, exceeding the intended key region and stalling the BMI port. For 5-tuple (13 bytes), `w1[15:8]` = `0x0C` (13 - 1).
+**contextSize** (in `w1[15:8]`): encoded as `contextSize - 1`. This value MUST equal the EKFC extracted key length (13 for 5-tuple, 12 for 4-tuple, 8 for a hypothetical 3-tuple), NOT the DDR record size. For 5-tuple (13 bytes), `w1[15:8]` = `0x0C` (13 - 1).
+
+**Known bug in patch 0131:** `fman_pcd_fe_hash_encode()` hardcodes `FMAN_FE_HASH_CONTEXT_SIZE=256` (the DDR record size) in the `contextSize` field rather than deriving it from `t->key_size`. This causes the EXT_HASH FE to compare 256 bytes per DDR entry instead of the actual key length. Fix: replace the constant with `t->key_size`.
 
 **hashMask** (in `w1[31:16]`): `(mask + 1)` must be an exact power of two. Valid masks: `0x0, 0x1, 0x3, 0x7, 0xF, ..., 0x7FFF` (32768 buckets).
 
