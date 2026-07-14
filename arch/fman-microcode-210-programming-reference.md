@@ -14,6 +14,33 @@ The Host Command (HC) doorbell is absent from this blob (`caps=0x17 = 0b0001_011
 
 The microcode is proprietary NXP 210.10.1, not the open-source `qoriq-fm-ucode` 106.x/108.x families. The public families are a strictly narrower subset; features marked "210-only" in this document do not exist in public microcode.
 
+### 1.1 The NXP Microcode Families
+
+| Question | Answer |
+|---|---|
+| What runs on **our board**? | **Proprietary `210.10.1`** QEF blob, U-Boot-injected into the DTB. |
+| What is the open-source alternative? | **`106.4.18`** (`fsl_fman_ucode_ls1046_r1.0_106_4_18.bin`). |
+| Is **"160"** a valid LS1046A ucode? | **No.** `160` is the **P1023** open-source major. "Open-source 160" for LS1046A is a **misnomer for `106`**. |
+| Do both families *support* CC? | Yes — both `106` (IPACC) and `210.x` silicon-support CC/HM/Policer. The gate is **which blob is loaded + executing**, not the family. |
+| Does mainline program CC? | **Never.** Mainline DPAA only does KG-RSS. CC is programmed solely by our `fman_pcd_*.c` patches. |
+| How is it detected? | QEF header decode (`firmware-check` §4) + kernel caps gate (patch `0086a`, `major>=210 → 0x17`). |
+| What is the fallback if it is missing? | Graceful: board boots **mainline KG-RSS only**, no CC caps, `0117` `dev_warn`. There is **no** `request_firmware()` /lib/firmware fallback — by design. |
+
+**NXP open-source ucode versioning** (from the `qoriq-fm-ucode` readme):
+
+- **First number = Primary Major = feature family.** `106` = **IPACC** (includes Custom Classification, Independent-Mode, Host-Commands, IPv4/6 Frag/Reassembly, IPsec, and Header-Manip). `107` = DSAR + partial IPACC. `108` = NG-CAPWAP + FE + IPACC.
+- **Second number = HW rev.** `.1` FMANv2 no-SW-DMA-sem · `.2` FMANv2 w/sem · `.3` FMANv3 Rev1 · `.4` FMANv3 > Rev1. LS1046A r1.0 ⇒ `106.4.18`.
+- **`210.x` is proprietary** — a newer NXP release **not in the public repo** (`210 ≫ 108`). It lacks the HC host-command doorbell, so our approach uses **direct KG→`FM_CTL|AC_CC` dispatch + result-AD enqueue**, never the HC doorbell.
+
+**Coarse vs fine — the terminology trap.** NXP's PCD has two distinct steering mechanisms whose "coarse/fine" naming is inverted relative to the networking meaning:
+
+- **KeyGen (KG)** hashes a key and spreads flows across a *set* of frame queues → **statistical / COARSE**. This is what mainline DPAA programs by default (RSS).
+- **Coarse Classifier (CC)** — despite NXP's name — is the **exact-match lookup tree** = deterministic per-flow steering = the **user's "fine classifier"**. NXP named it "coarse" relative to the *Parser* (which inspects headers byte-by-byte); from a flow-granularity view it is the fine one.
+
+**Mainline DPAA never programs CC.** The practical split is: **mainline / open-source datapath = coarse hash-RSS only**; **fine exact-match CC = our `fman_pcd_*.c` patches + a loaded, executing ucode**.
+
+> **Work with `210`, never request an open-source `106`.** Patch `0117` MUST load the DTB-injected blob (proprietary `210.10.1`) and MUST NOT `request_firmware()` a `106` blob from `/lib/firmware`. Verified: no such code path exists. The load is correct by construction.
+
 Everything in this document has been confirmed against at least one of: the NXP DPAA Reference Manual, the NXP lf-5.4 LSDK driver source, the `we-are-mono/ASK` production code, or a direct `/dev/mem` / debugfs read on the board.
 
 
@@ -65,6 +92,27 @@ The microcode blob on SPI `mtd3` (flash offset `0x400000`, 1 MiB partition "fman
 Microcode entry at `code_offset = 244`, `wcount = 12851` (51404 code bytes). After U-Boot loads it, the kernel reads it from the DT property `/proc/device-tree/soc/fman@1a00000/fman-firmware/fsl,firmware`.
 
 The "for LS1043 r1.0" label is cosmetic. LS1043A and LS1046A share identical FMan v3 silicon; NXP ships one ASK microcode package for both.
+
+### 3.1 Load Path
+
+```mermaid
+flowchart LR
+    F["QSPI mtd3 head<br/>offset 0x400000<br/>QEF blob"] --> UB["U-Boot:<br/>read to RAM, validate QEF header"]
+    UB -->|valid| UP["upload to FMan IRAM<br/>+ fdt_fixup_fman_firmware()"]
+    UP --> DT["kernel DTB node<br/>/soc/fman@1a00000/fman-firmware<br/>property fsl,firmware"]
+    DT --> K["fman driver reads blob<br/>from DT (NOT request_firmware)"]
+    K --> CI["mainline fman_init() clear_iram()<br/>WIPES the FM_CTL ucode"]
+    CI --> P117["patch 0117 load_fman_ctrl_code()<br/>re-streams DT blob into IRAM<br/>+ verify + IRAM_READY"]
+    UB -->|invalid / not a QEF| FB["U-Boot: 'Data at ... is not a firmware'<br/>NO DT injection"]
+    FB --> NOCC["kernel: DT node absent<br/>0117 dev_warn (non-fatal)<br/>caps=0 → mainline KG-RSS only"]
+```
+
+- **U-Boot owns the load.** It reads the QEF from QSPI `0x400000` into a RAM buffer, validates the header, uploads to FMan IRAM, and `fdt_fixup_fman_firmware()` injects the blob into the kernel DTB. The `fman_ucode` env var is a **volatile boot-computed RAM address** — **never `saveenv`** it.
+- **clear_iram bug + patch 0117 (the reload).** Mainline `fman_init()` calls `clear_iram()`, which wipes the U-Boot-uploaded FM_CTL microcode, and mainline **never reloads it** — so the `AC_CC` handler vanishes and CC dispatch silently dies. Patch `0117` `load_fman_ctrl_code()` runs right after `clear_iram`: re-reads the DT QEF, streams the code words via IRAM auto-increment (`IRAM_IADD_AIE`), full verify readback, then `IRAM_READY` — replicating SDK `LoadFmanCtrlCode`. **Non-fatal `dev_warn` if the DT node is absent.**
+- **Graceful degradation fallback.** If `mtd3` holds garbage, U-Boot prints `"Fman1: Data at <addr> is not a firmware"`, skips injection, and the board **still boots** — the DT node is absent, `0086a` returns caps `0`, `0117` `dev_warn`s, and the datapath falls back to **mainline KG-RSS** with **no CC offload**.
+- **The kernel never calls `request_firmware()`** and there are **no `/lib/firmware/fsl*` files**. The load path is correct by construction: we get whatever U-Boot put in the DTB = `210.10.1`.
+
+> **Partition numbering shifts between builds** — `mtd3` on current builds was `mtd4` on older images. Always confirm with `cat /proc/mtd` before reading raw flash. The 1 MiB at `mtd4` "recovery-dtb" is an FDT, **not** the ucode.
 
 Verification commands:
 
@@ -626,7 +674,7 @@ The NXP public `qoriq-fm-ucode` families (106, 107, 108) are a narrower subset o
 |---|---|
 | FE-VM init contract, FE pool, per-port params page, DDR bucket sizes | `arch/fman-fe-ehash.md` |
 | PCD pipeline: parser, KeyGen, CC, HM, policer, replication | `arch/fman-pcd.md` |
-| 106 vs 210.10.1 distinction, QEF format, load path | `arch/fman-microcode.md` |
+| 106 vs 210.10.1 distinction, QEF format, load path | this document (§1.1, §3) |
 | EKFC extraction, CRC64 hash, FE-VM dispatch, ehash flow-table architecture | `specs/fman-keygen-flow-key-spec.md` |
 | ASK2 fman_pcd subsystem API | `specs/ask2-rewrite-spec.md` §13 |
 | Full microcode function inventory | `specs/dpaa1-afxdp-modernization-spec.md` §2.2.1 |

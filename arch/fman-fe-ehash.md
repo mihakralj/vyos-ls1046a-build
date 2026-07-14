@@ -273,7 +273,7 @@ Every Fork B patch (§3 pool → §4 `FmPortSetFESupport` → §5 `ExternalHashT
 | CC root/AD/match-table byte formats, KeyGen scheme bits | [`fman-pcd.md`](fman-pcd.md) §2–§3 |
 | MURAM budget, the ~750-flow ceiling, Risk #13 | [`muram.md`](muram.md) |
 | Mode-switch reversibility contract (S0↔S1), `pcd-snapshot` | [`specs/ask2-rewrite-spec.md`](../specs/ask2-rewrite-spec.md) §2.4(6), §3.1, [`plans/DUAL-DATAPLANE.md`](../plans/DUAL-DATAPLANE.md) §2.2 |
-| 210.10.1 microcode (open-source 106.x vs proprietary 210.10.1), FE opcode VM | [`fman-microcode.md`](fman-microcode.md) |
+| 210.10.1 microcode (open-source 106.x vs proprietary 210.10.1), FE opcode VM | [`fman-microcode-210-programming-reference.md`](fman-microcode-210-programming-reference.md) (§1.1) |
 | Mainline FE-VM build increments (byte-assembled dormant chain) | `0124` singletons → `0125`/`0130` ehash table (DDR/DMA) → `0127` per-flow ENQ FE + `FE_ENTER` root AD → `0128` CRC64 flow insert → **`0131` `t_ExtHashFe` FE-hash object** (§5 byte table). Each ships DORMANT with its inverse + a `fe_*` debugfs byte-readback for the item-6 oracle gate. The **arm** (D9-B: KG→AC_CC + BMI CC root → `FE_ENTER`) is a separate explicitly-approved experiment, authored only after the dormant chain passes the §8.6-item-6 byte-gate on silicon |
 | M3-3b root cause (first-frame `FMFP_PS[STL]` stall; iter-42 disassembly = AC_CC handler reads only per-frame context → most likely a missing controller-arming step, *not* a FIFO leak and *not* missing FE globals) | qdrant `iter-33`, `iter-42` (2026-06-12), `ASK2 ehash/FE architecture root cause` (2026-06-13) |
 
