@@ -63,9 +63,7 @@ standalone operator install guide.
 
 | File | Version / Date | Status | Purpose |
 |---|---|---|---|
-| [`ASK2-COURSE-CORRECTION.md`](ASK2-COURSE-CORRECTION.md) | 2026-05-24 · branch `ask20` | **Active execution plan** | The 5-phase plan that drove the spec v1.2 → v1.3 reduction (delete graft + OH-port + userspace daemon). Phases 1–3 complete; Phase 4 hardware bring-up carries the live M2 status (see §6). |
-| [`ASK2-MODERN-ARCHITECTURE-REVIEW.md`](ASK2-MODERN-ARCHITECTURE-REVIEW.md) | v1.3-proposal · 2026-06-09 | Driver/review (active) | The architecture review that *justified* the course-correction: collapse ASK2 to one OOT module + one in-tree PCD subsystem + one pre-`register_netdev()` hook, operator UX via `nft`/`ip xfrm`/`ynl`/`node_exporter`. |
-| [`ASK-VS-ASK2-COMPARATIVE-REVIEW.md`](ASK-VS-ASK2-COMPARATIVE-REVIEW.md) | v1.0.0 (authoritative) · 2026-06-09 | Reference (active) | Deep comparison of the original NXP ASK 1.x stack vs ASK2: module-by-module functional mapping, data-flow diagrams, 210-microcode interaction, perf prediction, completeness audit. **Origin of the Path A recommendation.** |
+| [`ASK2-PATH-A-ARCHITECTURE-DECISION-RECORD.md`](archive/ASK2-PATH-A-ARCHITECTURE-DECISION-RECORD.md) | 2026-05-23–24 · merged 2026-07-14 | **HISTORICAL — Decision Record** | Combined Path A architecture decision record in three parts: (1) ASK-vs-ASK2 comparative analysis — Path A origin, (2) Architecture review — five simplifications, (3) Course-correction execution plan — five phases with 28-patch audit. All superseded by Fork B — FE-VM ehash (July 2026). |
 | [`ASK-ISO-BUILD-AND-INSTALL.md`](ASK-ISO-BUILD-AND-INSTALL.md) | v1.0.0 · 2026-06-09 | Operational (active) | Standalone how-to: build the single LS1046A image in CI, deploy the ISO to the lxc200 relay, run `add system image <url>` on the live board, and enable the offload with `set system offload ask`. Independent of the architecture docs above. |
 
 ---
@@ -97,15 +95,17 @@ per-PR design artifacts, not standalone ASK plans.
 
 **New contributor (understand ASK2 from scratch):**
 1. `specs/dpaa1-afxdp-modernization-spec.md` — the shared DPAA1 backplane.
-2. `specs/ask2-rewrite-spec.md` — ASK2 architecture (v1.6).
-3. `plans/ASK-VS-ASK2-COMPARATIVE-REVIEW.md` — why ASK2 looks the way it does.
-4. `plans/ASK2-MODERN-ARCHITECTURE-REVIEW.md` — the Path A rationale.
-5. `plans/ASK2-COURSE-CORRECTION.md` — what was cut and why.
+2. `specs/ask2-rewrite-spec.md` — ASK2 architecture index (canonical redirect to current sources).
+3. `arch/fman-microcode-210-programming-reference.md` — authoritative 210.10.1 register/FE reference.
+4. `plans/DUAL-DATAPLANE.md` — S0↔S1 dataplane mode state machine.
+5. `plans/ASK2-DEVELOPMENT-PLAN.md` — current Fork-B execution plan.
+
+**Historical context (Path A era, May 2026):**
+- `plans/archive/ASK2-PATH-A-ARCHITECTURE-DECISION-RECORD.md` — combined decision record in three parts: comparative analysis (Path A origin), architecture review (what changed), course-correction plan (how it was executed). Superseded by Fork B.
 
 **Resuming ASK2 implementation work (next-session entry point):**
-1. `qdrant-find ask2 v1.3 course-correction 5-phase plan` (loads the live plan memo).
-2. `plans/ASK2-COURSE-CORRECTION.md` §2 — find the first unchecked `[ ]`.
-3. Current blocker is the Phase-4 M2 CPU gate (§6 below).
+1. `plans/ASK2-DEVELOPMENT-PLAN.md` — current Fork-B plan.
+2. `plans/ASK2-PHASE2-AUTOMATION-PLAN.md` — flow offload automation (M2 gate passed).
 
 **Operator installing the single image and enabling ASK on the board:**
 1. `plans/ASK-ISO-BUILD-AND-INSTALL.md` — start to finish. (No architecture
