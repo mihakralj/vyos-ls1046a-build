@@ -248,5 +248,5 @@ Order of work, smallest first:
 **[SPEC]**
 - `AGENTS.md` — authoritative day-to-day reference (interface naming, MTU rules, thermal, kexec, patch discipline).
 - `specs/vpp-dpaa1-ls1046a-spec.md` — the hardware-offload native plugin design, not built.
-- `plans/MULTI-FLAVOR-RELEASE.md` — how `default | ask | vpp` ISOs and `version-*.json` feeds coexist.
+- `plans/archive/MULTI-FLAVOR-RELEASE.md` — **RETIRED 2026-06-14** — historical multi-flavor release plan; single-image model supersedes.
 - `plans/NETWORKING-DEEP-DIVE.md` — DPAA1 / FMan / QBMan architecture background.
