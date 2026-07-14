@@ -1581,6 +1581,36 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-062e v2 — Transition no DEALLOCATE, EXIT DEALLOCATE RESTORED (terminal disposition)"
 fi
 
+# F-062f: Route EXT_HASH MISS directly to ENQ (0x55500), bypassing EXIT and
+# scheme dispatch.  This tests whether the BMI stall is in the EXT_HASH FE
+# itself or in the EXIT→scheme post-FE-VM dispatch path.
+#
+# The CONT_LOOKUP pass-through (working July 10 7.37 Gbps baseline) used
+# FE_ENTER→ENQ directly without EXT_HASH or EXIT.  This fixup makes
+# EXT_HASH(MISS)→ENQ the equivalent test for the full FE-VM chain.
+#
+# MISS frames go: KG→FE_ENTER→EXT_HASH(MISS)→ENQ→FQ 0x200 (QMan enqueue).
+# No EXIT, no scheme dispatch, no fqb involvement.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 -c "
+import sys
+path = 'drivers/net/ethernet/freescale/fman/fman_pcd.c'
+with open(path) as f:
+    src = f.read()
+
+old = 'pcd->fe_mux_off, pcd->fe_exit_off);'
+new = 'pcd->fe_mux_off, 0x00055500 /* F-062f: MISS→ENQ, bypass EXIT+scheme */);'
+
+if old in src:
+    src = src.replace(old, new, 1)
+    with open(path, 'w') as f:
+        f.write(src)
+    print('### fman_pcd.c: F-062f hash MISS routed to ENQ 0x55500 (bypass EXIT+scheme)')
+else:
+    print('### fman_pcd.c: F-062f pattern NOT FOUND — already applied or hash encode signature changed', file=sys.stderr)
+"
+fi
+
 # F-062d: MISS stays at EXIT (proven safe, no BMI stall per 2026-07-10 A/B test).
 # Routing MISS through MUX→ENQ caused BMI stall because ENQ→QMan path has
 # never been silicon-proven in FE-VM architecture (M2 gate used CONT_LOOKUP AD).
