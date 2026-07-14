@@ -720,7 +720,6 @@ cp "$BOARD_PATCH_DIR/0146-fman-pcd-fe-context-build-integration.patch" "$KERNEL_
 # 0150: Phase 2 — FE-VM engage/flow API for ask.ko
 #0150 (PLACEHOLDER — functions embedded into 0146)
 #cp "$BOARD_PATCH_DIR/0150-fman-pcd-fe-engage-api.patch"      "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0151-fman-pcd-fe-flow-show-full-key.patch" "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0148-keygen-debug-ekfc-log.patch" "$KERNEL_PATCHES/"
 
 
