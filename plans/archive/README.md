@@ -14,13 +14,14 @@ For current state, see (in order of authority):
 - `specs/dpaa1-afxdp-modernization-spec.md` — **the authoritative cross-flavor source-of-truth** (one DPAA1 driver core + `pcd_ops`/`qmgmt_ops`; the FMan PCD subsystem now lives in the common board stack, built-in for default/vpp/ask).
 - `specs/ask2-rewrite-spec.md` — ASK2 architectural source-of-truth (v1.6).
 - `specs/vpp-dpaa1-ls1046a-spec.md` — VPP-flavor (AF_XDP) design spec.
-- `plans/ASK2-COURSE-CORRECTION.md` — ASK2 5-phase execution plan (kept as reference).
-- `plans/ASK2-MODERN-ARCHITECTURE-REVIEW.md` / `plans/ASK-VS-ASK2-COMPARATIVE-REVIEW.md` — the reviews that drove Path A.
+- `plans/archive/ASK2-PATH-A-ARCHITECTURE-DECISION-RECORD.md` — **combined Path A decision record** (merged 2026-07-14) in three parts: (1) ASK-vs-ASK2 comparative analysis, (2) architecture review, (3) course-correction execution plan.
 
 ## File index
 
 | File | Topic | Why archived |
-|---|---|---|
+|---|---|---|---|
+| `ASK2-PATH-A-ARCHITECTURE-DECISION-RECORD.md` | **Combined Path A decision record** in three parts: (1) ASK-vs-ASK2 comparative analysis — forensic SDK evidence, sequence diagrams, residual-state model, Path A/B/C options; (2) Architecture review — five simplifications, LOC reduction table, component dispositions; (3) Course-correction execution — five phases, 28-patch KEEP/ARCHIVE/PARTIAL audit, M2 gate findings | Superseded by Fork B — FE-VM ehash (July 2026). Three original docs merged 2026-07-14; stubs remain at `plans/ASK-VS-ASK2-COMPARATIVE-REVIEW.md`, `plans/ASK2-MODERN-ARCHITECTURE-REVIEW.md`, `plans/ASK2-COURSE-CORRECTION.md`. |
+| `MULTI-FLAVOR-RELEASE.md` | RETIRED multi-flavor build plan (`default` / `ask` / `vpp`) | Retired 2026-06-14; single-image model supersedes per `plans/DUAL-DATAPLANE.md` |
 | `ASK-UPSTREAM-SYNC.md` | Legacy ASK 1.x SDK upstream sync workflow | ASK 1.x branch deleted; ASK2 is a clean re-architecture |
 | `INTEGRATION-PLAN.md` | Original integration plan before ASK2 spec existed | Superseded by spec + ASK2-IMPLEMENTATION |
 | `MIGRATION-PLAN-6.18.md` | Kernel migration from 6.6 → 6.18 | Migration complete; mainline 6.18 is live |
