@@ -1552,28 +1552,33 @@ fi
 : '    sed ...'
 : 'fi'
 
-# F-062e: Strip FMAN_FE_EXIT_DEALLOCATE from EXIT and Transition singletons.
-# The DEALLOCATE flag on the EXIT FE frees the frame buffer, then the
-# hardware returns to the KeyGen scheme which dispatches the deallocated
-# frame to the scheme's fqb → QMan FD corruption → kernel panic in
-# dpaa_cleanup_tx_fd on NAPI poll of the confirmation FQ.
+# F-062e: Strip FMAN_FE_EXIT_DEALLOCATE from Transition only.
+# Per NXP FMan microcode 210.10.1 programming reference §7.1:
+#   EXIT type 0x03800000 = "Free workspace allocation, terminate frame.
+#   Terminal MISS disposition."
+# And §7.4: "EXIT-DEALLOCATE is a real terminal MISS disposition on
+#   210.10.1: AC_CC arm → MISS → EXIT → port does NOT park."
 #
-# Fix: remove DEALLOCATE from both the Transition (HIT path) and the EXIT
-# (MISS path).  After FE-VM processing, the scheme dispatches the intact
-# frame to fqb (the kernel's original per-port default RX FQ set by
-# keygen_port_hashing_init()).  The kernel polls that FQ, receives the
-# frame, and handles buffer lifecycle.
+# The EXIT FE with DEALLOCATE (0x00800000) provides terminal BMI-FIFO
+# disposition — the FE-VM opcode interpreter handles final dispatch and
+# the scheme does NOT try to enqueue after EXIT returns.  No fqb needed.
 #
-# For Layer 1 HIT forwarding, ENQ sends to a dedicated TX FQ directly;
-# deallocation is handled by the kernel's TX completion path.
+# The Transition FE (§7.6, encoding 0x05000000) does NOT carry DEALLOCATE
+# — deallocation is EXIT's responsibility.  Strip DEALLOCATE from Transition
+# only; RESTORE it on EXIT (undo the over-broad F-062e v1).
+#
+# For Layer 1 HIT forwarding: MUX → Transition(AD_FROM_WS) → workspace points
+# to ENQ → dedicated TX FQ.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    # Transition: strip FMAN_FE_EXIT_DEALLOCATE |, keep FMAN_FE_TRANSITION_AD_FROM_WS
-    sed -i 's/p.flags = FMAN_FE_EXIT_DEALLOCATE | FMAN_FE_TRANSITION_AD_FROM_WS;/p.flags = FMAN_FE_TRANSITION_AD_FROM_WS;  \/\* F-062e: no DEALLOCATE — scheme fqb owns buffer \*\//' \
+    # Transition: strip DEALLOCATE, keep AD_FROM_WS
+    sed -i 's/p.flags = FMAN_FE_EXIT_DEALLOCATE | FMAN_FE_TRANSITION_AD_FROM_WS;/p.flags = FMAN_FE_TRANSITION_AD_FROM_WS;  \/\* F-062e: Transition no DEALLOCATE — EXIT handles terminal disposition \*\//' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
-    # Exit: strip FMAN_FE_EXIT_DEALLOCATE entirely
-    sed -i 's/p.flags = FMAN_FE_EXIT_DEALLOCATE;/p.flags = 0;  \/\* F-062e: no DEALLOCATE — scheme fqb owns buffer \*\//' \
+    # EXIT: RESTORE DEALLOCATE (undo the old strip)
+    # The patch 0124 sets p.flags = FMAN_FE_EXIT_DEALLOCATE; which is CORRECT.
+    # F-062e v1's sed changed it to p.flags = 0; — revert that change.
+    sed -i 's/p.flags = 0;  \/\* F-062e: no DEALLOCATE — scheme fqb owns buffer \*\//p.flags = FMAN_FE_EXIT_DEALLOCATE;  \/\* F-062e v2: DEALLOCATE provides terminal MISS disposition per NXP doc §7.4 \*\//' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo "### fman_pcd.c: F-062e DEALLOCATE stripped from EXIT and Transition (prevents QMan FD corruption)"
+    echo "### fman_pcd.c: F-062e v2 — Transition no DEALLOCATE, EXIT DEALLOCATE RESTORED (terminal disposition)"
 fi
 
 # F-062d: MISS stays at EXIT (proven safe, no BMI stall per 2026-07-10 A/B test).
