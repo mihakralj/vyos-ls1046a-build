@@ -1216,6 +1216,19 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     echo "### fman_keygen.c: EKFC 0x00180206→0x00180006 (remove PTYPE1, no stall)"
 fi
 
+# F-062c-R1: Add ENQUEUE_KG_DFLT_NIA to AC_CC branch (next_engine==3).
+# Without DFLT_NIA, the FE-VM scheme has no recovery path when the CC engine
+# returns → first frame through FE-VM permanently stalls the BMI port.
+# The Qdrant-proven CONT_LOOKUP pass-through (7.37 Gbps on build 28809182051)
+# used next_engine==2 (implicit CCBS) which has DFLT_NIA. The fe_arm function
+# uses next_engine==3 (FE_ENTER arm via FMBM_RCCB) which misses DFLT_NIA.
+# Bit 2 conflict between DFLT_NIA and AC_CC is mitigated by the CC engine
+# taking priority when active; DFLT_NIA provides the fallback recovery path.
+if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
+    echo 'aW1wb3J0IHN5cwoKcGF0aCA9ICJkcml2ZXJzL25ldC9ldGhlcm5ldC9mcmVlc2NhbGUvZm1hbi9mbWFuX2tleWdlbi5jIgp0cnk6CiAgICB3aXRoIG9wZW4ocGF0aCkgYXMgZjoKICAgICAgICBzcmMgPSBmLnJlYWQoKQpleGNlcHQgRmlsZU5vdEZvdW5kRXJyb3I6CiAgICBwcmludCgiIyMjIGZtYW5fa2V5Z2VuLmM6IERGTFRfTklBIGZpeCAtIGZpbGUgbm90IGZvdW5kIikKICAgIHN5cy5leGl0KDApCgpjaGFuZ2VzID0gMAoKIyBGaXg6IEFkZCBFTlFVRVVFX0tHX0RGTFRfTklBIHRvIHRoZSBuZXh0X2VuZ2luZT09MyAoRkUtVk0gQUNfQ0MpIGJyYW5jaAojIFRoZSBidWc6IHRtcF9yZWcgfD0gTklBX0VOR19GTV9DVEwgfCBOSUFfRk1fQ1RMX0FDX0NDIHdpdGhvdXQgREZMVF9OSUEKIyBjYXVzZXMgQk1JIHN0YWxsIGJlY2F1c2UgdGhlIHNjaGVtZSBoYXMgbm8gcmVjb3ZlcnkgcGF0aCB3aGVuIENDIHJldHVybnMuCm9sZF9saW5lID0gIlx0XHRcdHRtcF9yZWcgfD0gTklBX0VOR19GTV9DVEwgfCBOSUFfRk1fQ1RMX0FDX0NDOyIKbmV3X2xpbmUgPSAiXHRcdFx0dG1wX3JlZyB8PSBFTlFVRVVFX0tHX0RGTFRfTklBIHwgTklBX0VOR19GTV9DVEwgfCBOSUFfRk1fQ1RMX0FDX0NDO1x0LyogRi0wNjJjLVIxOiBERkxUX05JQSBmb3IgQ0MgcmV0dXJuIHBhdGggKHByZXZlbnRzIEJNSSBzdGFsbCkgKi8iCgppZiBvbGRfbGluZSBpbiBzcmM6CiAgICBzcmMgPSBzcmMucmVwbGFjZShvbGRfbGluZSwgbmV3X2xpbmUsIDEpCiAgICBjaGFuZ2VzICs9IDEKICAgIHByaW50KCIjIyMgZm1hbl9rZXlnZW4uYzogREZMVF9OSUEgYWRkZWQgdG8gQUNfQ0MgYnJhbmNoIChGLTA2MmMtUjEpIikKZWxzZToKICAgICMgQWxyZWFkeSBmaXhlZD8KICAgIGlmICJcdFx0XHR0bXBfcmVnIHw9IEVOUVVFVUVfS0dfREZMVF9OSUEgfCBOSUFfRU5HX0ZNX0NUTCB8IE5JQV9GTV9DVExfQUNfQ0M7IiBpbiBzcmM6CiAgICAgICAgcHJpbnQoIiMjIyBmbWFuX2tleWdlbi5jOiBERkxUX05JQSBhbHJlYWR5IHByZXNlbnQgaW4gQUNfQ0MgYnJhbmNoIikKICAgIGVsc2U6CiAgICAgICAgcHJpbnQoIiMjIyBmbWFuX2tleWdlbi5jOiBDb3VsZCBub3QgZmluZCBBQ19DQyBicmFuY2ggdG8gZml4IikKCmlmIGNoYW5nZXMgPiAwOgogICAgd2l0aCBvcGVuKHBhdGgsICJ3IikgYXMgZjoKICAgICAgICBmLndyaXRlKHNyYykKICAgIHByaW50KGYiIyMjIGZtYW5fa2V5Z2VuLmM6IERGTFRfTklBIGZpeCBhcHBsaWVkICh7Y2hhbmdlc30gY2hhbmdlcykiKQplbHNlOgogICAgcHJpbnQoIiMjIyBmbWFuX2tleWdlbi5jOiBERkxUX05JQSBmaXggLSBubyBjaGFuZ2VzIG1hZGUiKQo=' | base64 -d | python3
+    echo "### fman_keygen.c: F-062c-R1 DFLT_NIA fixup applied"
+fi
+
 # F-040/F-002: fman_pcd.c post-patch MURAM zeroing + leak fix.
 # Base64-encoded Python fixer (no escape issues).
 # Runs after kernel post-patches commit, before compilation.
