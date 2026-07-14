@@ -1537,31 +1537,32 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-062a HIT route changed from EXIT to MUX→ENQ"
 fi
 
-# F-062b: Set scheme default FQ to 0x200 so post-EXIT MISS dispatch doesn't stall.
-# The scheme's kgse_fqb register is the base Frame Queue ID used for default
-# dispatch after the CC engine (and thus after EXIT).  Currently fqb=0 which
-# maps to invalid FQ 0 → BM pool drains → port stalls.  FQ 0x200 is the
-# kernel's PCD-range polled FQ, consistently used by ENQ (F-058) and accepted
-# by QMan.  Insert AFTER scheme_regs.kgse_mv assignment (before F-051 block)
-# so fqb survives the F-051 pass (F-051 only zeros bmch/bmcl/hc/ekdv).
-if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
-    sed -i '/scheme_regs\.kgse_mv = scheme->match_vector;/a\
-	scheme_regs.kgse_fqb = 0x200;	/* F-062b: default FQ for post-EXIT dispatch */' \
-        drivers/net/ethernet/freescale/fman/fman_keygen.c
-    echo "### fman_keygen.c: F-062b scheme default FQ set to 0x200 (fixes MISS/EXIT stall)"
-fi
+# F-062b DISABLED: The hardcoded fqb=0x200 override is WRONG — FQ 0x200
+# is not allocated by the kernel for every port (only for port 3 / eth3 where
+# it happens to be in the PCD range 512-639).  For other ports, dispatching
+# deallocated frames to FQ 0x200 hits an uninitialized QMan FQ → corruption
+# → kernel panic in dpaa_cleanup_tx_fd.
+#
+# Instead, let the kernel's original keygen_port_hashing_init() set the
+# correct per-port fqb.  After FE-VM processing (with DEALLOCATE stripped by
+# F-062e), the scheme dispatches the intact frame to the kernel's own default
+# RX FQ — the kernel polls it, receives the frame, and handles buffer lifecycle.
+: 'F-062b-DISABLED'
+: 'if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then'
+: '    sed ...'
+: 'fi'
 
 # F-062e: Strip FMAN_FE_EXIT_DEALLOCATE from EXIT and Transition singletons.
-# The DEALLOCATE flag on the EXIT FE deallocates the frame buffer, then the
-# hardware returns to the KeyGen scheme which dispatches the deallocated frame
-# to fqb=0x200 (F-062b) → QMan FD corruption → kernel panic in
+# The DEALLOCATE flag on the EXIT FE frees the frame buffer, then the
+# hardware returns to the KeyGen scheme which dispatches the deallocated
+# frame to the scheme's fqb → QMan FD corruption → kernel panic in
 # dpaa_cleanup_tx_fd on NAPI poll of the confirmation FQ.
 #
-# Fix: remove DEALLOCATE from both the Transition (HIT path deallocation) and
-# the EXIT (MISS path deallocation).  After FE-VM processing, the scheme
-# dispatches the intact frame to fqb — the FQ owns the buffer and QMan handles
-# buffer lifecycle.  The frame is silently dropped (no kernel poller on FQ
-# 0x200), which is the correct CONT_LOOKUP pass-through behavior (no crash).
+# Fix: remove DEALLOCATE from both the Transition (HIT path) and the EXIT
+# (MISS path).  After FE-VM processing, the scheme dispatches the intact
+# frame to fqb (the kernel's original per-port default RX FQ set by
+# keygen_port_hashing_init()).  The kernel polls that FQ, receives the
+# frame, and handles buffer lifecycle.
 #
 # For Layer 1 HIT forwarding, ENQ sends to a dedicated TX FQ directly;
 # deallocation is handled by the kernel's TX completion path.
