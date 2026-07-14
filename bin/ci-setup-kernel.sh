@@ -721,13 +721,6 @@ cp "$BOARD_PATCH_DIR/0146-fman-pcd-fe-context-build-integration.patch" "$KERNEL_
 #0150 (PLACEHOLDER — functions embedded into 0146)
 #cp "$BOARD_PATCH_DIR/0150-fman-pcd-fe-engage-api.patch"      "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0148-keygen-debug-ekfc-log.patch" "$KERNEL_PATCHES/"
-# 0152: Fix fe_flow debugfs 8-byte key truncation
-# The fe_flow debugfs read handler was hardcoded to display the first 16
-# bytes of DDR flow records (8-byte bucket pointer + first 8 key bytes).
-# For 13-byte 5-tuple keys, this truncated PROTO+SPORT+DPORT, making
-# TCP/UDP flow matching unverifiable. Fix: display only flow key at
-# FMAN_EHASH_FLOW_KEY_OFF (offset 8) for flow->key_size bytes.
-cp "$BOARD_PATCH_DIR/0152-fman-pcd-fe-flow-show-full-key.patch" "$KERNEL_PATCHES/"
 
 
 # ── Staging-completeness guard ────────────────────────────────────────
@@ -1155,6 +1148,14 @@ if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
         drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
     echo "### dpaa_eth.c: TC_SETUP_FT case injected (sed)"
 fi
+
+# Fix fe_flow debugfs 8-byte key truncation (post-patch fixup)
+# The fe_flow debugfs read handler was hardcoded to display the first 16
+# bytes of DDR flow records (8-byte bucket pointer + first 8 key bytes).
+# For 13-byte 5-tuple keys, this truncated PROTO+SPORT+DPORT, making
+# TCP/UDP flow matching unverifiable. Fix: display only flow key at
+# FMAN_EHASH_FLOW_KEY_OFF (offset 8) for flow->key_size bytes.
+echo 'aW1wb3J0IHN5cwoKcGF0aCA9ICJkcml2ZXJzL25ldC9ldGhlcm5ldC9mcmVlc2NhbGUvZm1hbi9mbWFuX3BjZC5jIgp0cnk6CiAgICB3aXRoIG9wZW4ocGF0aCkgYXMgZjoKICAgICAgICBzcmMgPSBmLnJlYWQoKQpleGNlcHQgRmlsZU5vdEZvdW5kRXJyb3I6CiAgICBwcmludCgiIyMjIGZtYW5fcGNkLmM6IGZlX2Zsb3cgZml4IC0gZmlsZSBub3QgZm91bmQiKQogICAgc3lzLmV4aXQoMCkKCmNoYW5nZXMgPSAwCgojIEZpbmQgdGhlIGZtYW5fcGNkX2ZlX2Zsb3dfc2hvdyBmdW5jdGlvbgphbmNob3IgPSAic3RhdGljIGludCBmbWFuX3BjZF9mZV9mbG93X3Nob3ciCmlmIGFuY2hvciBub3QgaW4gc3JjOgogICAgcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBmZV9mbG93IGZpeCAtIGZ1bmN0aW9uIG5vdCBmb3VuZCIpCiAgICBzeXMuZXhpdCgwKQoKIyBGaW5kIHRoZSBmdW5jdGlvbiBib2R5CnBvcyA9IHNyYy5maW5kKGFuY2hvcikKZnVuY19zdGFydCA9IHNyYy5maW5kKCJ7IiwgcG9zKQpmdW5jX2VuZCA9IHNyYy5maW5kKCJcbn1cbiIsIGZ1bmNfc3RhcnQpCgppZiBmdW5jX3N0YXJ0IDwgMCBvciBmdW5jX2VuZCA8IDA6CiAgICBwcmludCgiIyMjIGZtYW5fcGNkLmM6IGZlX2Zsb3cgZml4IC0gZnVuY3Rpb24gYm9keSBub3QgZm91bmQiKQogICAgc3lzLmV4aXQoMCkKCmZ1bmNfYm9keSA9IHNyY1tmdW5jX3N0YXJ0OmZ1bmNfZW5kKzJdCgojIDEuIEFkZCBrZXkgcG9pbnRlciBhZnRlciByIGRlY2xhcmF0aW9uCm9sZF9yID0gImNvbnN0IHU4ICpyID0gZmxvdy0+cmVjb3JkOyIKbmV3X3IgPSAiY29uc3QgdTggKnIgPSBmbG93LT5yZWNvcmQ7XG5cdFx0XHRjb25zdCB1OCAqa2V5ID0gciArIEZNQU5fRUhBU0hfRkxPV19LRVlfT0ZGOyIKaWYgb2xkX3IgaW4gZnVuY19ib2R5IGFuZCAiY29uc3QgdTggKmtleSIgbm90IGluIGZ1bmNfYm9keToKICAgIGZ1bmNfYm9keSA9IGZ1bmNfYm9keS5yZXBsYWNlKG9sZF9yLCBuZXdfciwgMSkKICAgIGNoYW5nZXMgKz0gMQogICAgcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBmZV9mbG93IGZpeCAtIGFkZGVkIGtleSBwb2ludGVyIikKCiMgMi4gQ2hhbmdlIGxvb3AgZnJvbSAxNiB0byBmbG93LT5rZXlfc2l6ZQpvbGRfbG9vcCA9ICJmb3IgKGkgPSAwOyBpIDwgMTY7IGkrKykiCm5ld19sb29wID0gImZvciAoaSA9IDA7IGkgPCBmbG93LT5rZXlfc2l6ZTsgaSsrKSIKaWYgb2xkX2xvb3AgaW4gZnVuY19ib2R5OgogICAgZnVuY19ib2R5ID0gZnVuY19ib2R5LnJlcGxhY2Uob2xkX2xvb3AsIG5ld19sb29wLCAxKQogICAgY2hhbmdlcyArPSAxCiAgICBwcmludCgiIyMjIGZtYW5fcGNkLmM6IGZlX2Zsb3cgZml4IC0gY2hhbmdlZCBsb29wIHRvIGZsb3ctPmtleV9zaXplIikKCiMgMy4gQ2hhbmdlIHJbaV0gdG8ga2V5W2ldCm9sZF9wcmludCA9ICdzZXFfcHJpbnRmKHMsICIlMDJ4IiwgcltpXSk7JwpuZXdfcHJpbnQgPSAnc2VxX3ByaW50ZihzLCAiJTAyeCIsIGtleVtpXSk7JwppZiBvbGRfcHJpbnQgaW4gZnVuY19ib2R5OgogICAgZnVuY19ib2R5ID0gZnVuY19ib2R5LnJlcGxhY2Uob2xkX3ByaW50LCBuZXdfcHJpbnQsIDEpCiAgICBjaGFuZ2VzICs9IDEKICAgIHByaW50KCIjIyMgZm1hbl9wY2QuYzogZmVfZmxvdyBmaXggLSBjaGFuZ2VkIHJbaV0gdG8ga2V5W2ldIikKCmlmIGNoYW5nZXMgPiAwOgogICAgc3JjID0gc3JjWzpmdW5jX3N0YXJ0XSArIGZ1bmNfYm9keSArIHNyY1tmdW5jX2VuZCsyOl0KICAgIHdpdGggb3BlbihwYXRoLCAidyIpIGFzIGY6CiAgICAgICAgZi53cml0ZShzcmMpCiAgICBwcmludChmIiMjIyBmbWFuX3BjZC5jOiBmZV9mbG93IGZpeCBhcHBsaWVkICh7Y2hhbmdlc30gY2hhbmdlcykiKQplbHNlOgogICAgcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBmZV9mbG93IGZpeCAtIG5vIGNoYW5nZXMgbmVlZGVkIChhbHJlYWR5IGFwcGxpZWQ/KSIpCg==' | base64 -d | python3
 
 # Performance: OVFQ=1 on TX FQ context_a for FMan hardware direct enqueue.
 # OVFQ=1 means FMan uses the FQID from the ENQUEUE_PKT opcode operand
