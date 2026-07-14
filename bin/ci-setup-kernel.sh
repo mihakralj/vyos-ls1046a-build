@@ -721,6 +721,13 @@ cp "$BOARD_PATCH_DIR/0146-fman-pcd-fe-context-build-integration.patch" "$KERNEL_
 #0150 (PLACEHOLDER — functions embedded into 0146)
 #cp "$BOARD_PATCH_DIR/0150-fman-pcd-fe-engage-api.patch"      "$KERNEL_PATCHES/"
 cp "$BOARD_PATCH_DIR/0148-keygen-debug-ekfc-log.patch" "$KERNEL_PATCHES/"
+# 0152: Fix fe_flow debugfs 8-byte key truncation
+# The fe_flow debugfs read handler was hardcoded to display the first 16
+# bytes of DDR flow records (8-byte bucket pointer + first 8 key bytes).
+# For 13-byte 5-tuple keys, this truncated PROTO+SPORT+DPORT, making
+# TCP/UDP flow matching unverifiable. Fix: display only flow key at
+# FMAN_EHASH_FLOW_KEY_OFF (offset 8) for flow->key_size bytes.
+cp "$BOARD_PATCH_DIR/0152-fman-pcd-fe-flow-show-full-key.patch" "$KERNEL_PATCHES/"
 
 
 # ── Staging-completeness guard ────────────────────────────────────────
