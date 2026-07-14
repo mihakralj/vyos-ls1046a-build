@@ -1579,7 +1579,7 @@ fi  # close M2-4 fman_port.c if (line 1212)
 # === end ls1046a-build patch-loop replacement ===
 """
 
-new, n = PATTERN.subn(REPLACEMENT, src, count=1)
+new, n = PATTERN.subn(lambda m: REPLACEMENT, src, count=1)
 if n == 0:
     print(
         f"ERROR: upstream `for patch in $(ls ${{PATCH_DIR}})` loop not found in {bk}.\n"
