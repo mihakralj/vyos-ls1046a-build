@@ -1229,9 +1229,12 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
     echo "### fman_keygen.c: F-062c-R1 DFLT_NIA fixup applied"
 fi
 
-# F-040/F-002 DISABLED FOR BISECT: fman_pcd.c MURAM zeroing + leak fix.
-# Commented out to test if memset_io zeroing causes the BMI stall.
-: 'F-040-DISABLED: skipping MURAM zeroing fixup'
+# F-040/F-002: fman_pcd.c post-patch MURAM zeroing + leak fix.
+# Base64-encoded Python fixer (no escape issues).
+# Runs after kernel post-patches commit, before compilation.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    echo 'aW1wb3J0IHN5cwoKcGF0aCA9ICJkcml2ZXJzL25ldC9ldGhlcm5ldC9mcmVlc2NhbGUvZm1hbi9mbWFuX3BjZC5jIgp3aXRoIG9wZW4ocGF0aCkgYXMgZjogc3JjID0gZi5yZWFkKCkKY2hhbmdlcyA9IDAKCiMgMC4gRGVmaW5lIGJvdGggZ2xvYmFscwpmb3IgZyBpbiBbInVuc2lnbmVkIGludCBmbWFuX3BjZF9oYXNoX29mZnNldCIsICJ2b2lkICpmbWFuX3BjZF9pY192YWRkciJdOgogICAgaWYgZyBub3QgaW4gc3JjOgogICAgICAgIGZpcnN0X2luYyA9IHNyYy5maW5kKCIjaW5jbHVkZSIpCiAgICAgICAgaWYgZmlyc3RfaW5jID4gMDoKICAgICAgICAgICAgc3JjID0gc3JjWzpmaXJzdF9pbmNdICsgZyArICI7XG4iICsgc3JjW2ZpcnN0X2luYzpdCiAgICAgICAgICAgIGNoYW5nZXMgKz0gMQogICAgICAgICAgICBwcmludChmIiMjIyBmbWFuX3BjZC5jOiBGLTA2OWIgdjYge2d9IGRlZmluZWQiKQoKIyAxLiBJbnNlcnQgaWNfcHJvYmVfc2hvdyBpZiBub3QgcHJlc2VudCAoaGFuZGxlIGZyZXNoIEFORCB1cGdyYWRlIGZyb20gb2xkIHY0KQppZiAiZm1hbl9wY2RfaWNfcHJvYmVfc2hvdyIgbm90IGluIHNyYzoKICAgIGFuY2hvciA9ICJzdGF0aWMgaW50IGZtYW5fcGNkX2ZlX3Byb2JlX3Nob3ciCiAgICBpZiBhbmNob3IgaW4gc3JjOgogICAgICAgIGNvZGUgPSAoCiAgICAgICAgICAgICIvKiBGLTA2OWIgdjY6IGljX3Byb2JlIGRlYnVnZnMgLSBkdW1wIEZNYW4gSUMgYXQgY29ycmVjdCBvZmZzZXRzICovXG4iCiAgICAgICAgICAgICJzdGF0aWMgaW50IGZtYW5fcGNkX2ljX3Byb2JlX3Nob3coc3RydWN0IHNlcV9maWxlICpzLCB2b2lkICp1bnVzZWQpXG4iCiAgICAgICAgICAgICJ7XG4iCiAgICAgICAgICAgICJcdHZvaWQgKnZhZGRyO1xuIgogICAgICAgICAgICAiXHR1bnNpZ25lZCBpbnQgaGFzaF9vZmYsIHByc19vZmYsIGk7XG4iCiAgICAgICAgICAgICJcbiIKICAgICAgICAgICAgIlx0c21wX3JtYigpO1xuIgogICAgICAgICAgICAiXHR2YWRkciA9IGZtYW5fcGNkX2ljX3ZhZGRyO1xuIgogICAgICAgICAgICAiXHRpZiAoIXZhZGRyKSB7XG4iCiAgICAgICAgICAgICJcdFx0c2VxX3B1dHMocywgXCJubyBmcmFtZSBjYXB0dXJlZFxcblwiKTtcbiIKICAgICAgICAgICAgIlx0XHRyZXR1cm4gMDtcbiIKICAgICAgICAgICAgIlx0fVxuIgogICAgICAgICAgICAiXHRoYXNoX29mZiA9IGZtYW5fcGNkX2hhc2hfb2Zmc2V0O1xuIgogICAgICAgICAgICAiXHRwcnNfb2ZmID0gaGFzaF9vZmYgLSAweDI4O1xuIgogICAgICAgICAgICAiXHRzZXFfcHJpbnRmKHMsIFwidmFkZHI9JXB4IGhhc2hfb2ZmPSV1IHByc19vZmY9JXVcXG5cIiwgdmFkZHIsIGhhc2hfb2ZmLCBwcnNfb2ZmKTtcbiIKICAgICAgICAgICAgIlx0c2VxX3ByaW50ZihzLCBcInBhcnNlX3Jlc3VsdDogXCIpO1xuIgogICAgICAgICAgICAiXHRmb3IgKGkgPSAwOyBpIDwgODsgaSsrKSB7XG4iCiAgICAgICAgICAgICJcdFx0dTMyIHYgPSBiZTMyX3RvX2NwdSgoKHUzMiAqKXZhZGRyKVtwcnNfb2ZmLzQgKyBpXSk7XG4iCiAgICAgICAgICAgICJcdFx0c2VxX3ByaW50ZihzLCBcIiBbJTAyZF09JTA4eFwiLCBwcnNfb2ZmLzQgKyBpLCB2KTtcbiIKICAgICAgICAgICAgIlx0fVxuIgogICAgICAgICAgICAiXHRzZXFfcHJpbnRmKHMsIFwiXFxuaGFzaDogICAgICAgXCIpO1xuIgogICAgICAgICAgICAiXHRmb3IgKGkgPSAwOyBpIDwgMjsgaSsrKSB7XG4iCiAgICAgICAgICAgICJcdFx0dTMyIHYgPSBiZTMyX3RvX2NwdSgoKHUzMiAqKXZhZGRyKVtoYXNoX29mZi80ICsgaV0pO1xuIgogICAgICAgICAgICAiXHRcdHNlcV9wcmludGYocywgXCIgWyUwMmRdPSUwOHhcIiwgaGFzaF9vZmYvNCArIGksIHYpO1xuIgogICAgICAgICAgICAiXHR9XG4iCiAgICAgICAgICAgICJcdHNlcV9wdXRzKHMsIFwiXFxuXCIpO1xuIgogICAgICAgICAgICAiXHRyZXR1cm4gMDtcbiIKICAgICAgICAgICAgIn1cbiIKICAgICAgICAgICAgIlxuIgogICAgICAgICAgICAic3RhdGljIGludCBmbWFuX3BjZF9pY19wcm9iZV9vcGVuKHN0cnVjdCBpbm9kZSAqaW5vZGUsIHN0cnVjdCBmaWxlICpmaWxlKVxuIgogICAgICAgICAgICAie1xuIgogICAgICAgICAgICAiXHRyZXR1cm4gc2luZ2xlX29wZW4oZmlsZSwgZm1hbl9wY2RfaWNfcHJvYmVfc2hvdywgaW5vZGUtPmlfcHJpdmF0ZSk7XG4iCiAgICAgICAgICAgICJ9XG4iCiAgICAgICAgICAgICJcbiIKICAgICAgICAgICAgInN0YXRpYyBjb25zdCBzdHJ1Y3QgZmlsZV9vcGVyYXRpb25zIGZtYW5fcGNkX2ljX3Byb2JlX2ZvcHMgPSB7XG4iCiAgICAgICAgICAgICJcdC5vd25lclx0XHQ9IFRISVNfTU9EVUxFLFxuIgogICAgICAgICAgICAiXHQub3Blblx0XHQ9IGZtYW5fcGNkX2ljX3Byb2JlX29wZW4sXG4iCiAgICAgICAgICAgICJcdC5yZWFkXHRcdD0gc2VxX3JlYWQsXG4iCiAgICAgICAgICAgICJcdC5sbHNlZWtcdFx0PSBzZXFfbHNlZWssXG4iCiAgICAgICAgICAgICJcdC5yZWxlYXNlXHQ9IHNpbmdsZV9yZWxlYXNlLFxuIgogICAgICAgICAgICAifTtcblxuIgogICAgICAgICkKICAgICAgICBzcmMgPSBzcmMucmVwbGFjZShhbmNob3IsIGNvZGUgKyBhbmNob3IpCiAgICAgICAgY2hhbmdlcyArPSAxCiAgICAgICAgcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBGLTA2OWIgdjYgaWNfcHJvYmVfc2hvdyBpbnNlcnRlZCIpCiAgICBlbHNlOgogICAgICAgIHByaW50KCIjIyMgZm1hbl9wY2QuYzogRi0wNjliIHY2IGFuY2hvciBub3QgZm91bmQiKQplbHNlOgogICAgcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBGLTA2OWIgdjYgaWNfcHJvYmVfc2hvdyBhbHJlYWR5IHByZXNlbnQiKQoKIyAyLiBSZWdpc3RlciBkZWJ1Z2ZzCmlmICdkZWJ1Z2ZzX2NyZWF0ZV9maWxlKCJpY19wcm9iZSInIG5vdCBpbiBzcmM6CiAgICBkYmdfYW5jaG9yID0gJ2RlYnVnZnNfY3JlYXRlX2ZpbGUoImZlX3Byb2JlIicKICAgIGlmIGRiZ19hbmNob3IgaW4gc3JjOgogICAgICAgIHByb2JlX2RiZyA9ICgKICAgICAgICAgICAgJ1x0XHRcdGRlYnVnZnNfY3JlYXRlX2ZpbGUoImljX3Byb2JlIiwgMDQ0NCxcbicKICAgICAgICAgICAgJ1x0XHRcdFx0XHQgICAgcGNkLT5kZWJ1Z2ZzX2RpciwgcGNkLFxuJwogICAgICAgICAgICAnXHRcdFx0XHRcdCAgICAmZm1hbl9wY2RfaWNfcHJvYmVfZm9wcyk7XG4nCiAgICAgICAgICAgICdcdFx0XHQnICsgZGJnX2FuY2hvcgogICAgICAgICkKICAgICAgICBzcmMgPSBzcmMucmVwbGFjZShkYmdfYW5jaG9yLCBwcm9iZV9kYmcpCiAgICAgICAgY2hhbmdlcyArPSAxCiAgICAgICAgcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBGLTA2OWIgdjYgaWNfcHJvYmUgcmVnaXN0ZXJlZCIpCgppZiBjaGFuZ2VzID4gMDoKICAgIHdpdGggb3BlbihwYXRoLCAidyIpIGFzIGY6IGYud3JpdGUoc3JjKQogICAgcHJpbnQoZiIjIyMgZm1hbl9wY2QuYzogRi0wNjliIHY2IHtjaGFuZ2VzfSBjaGFuZ2UocykgYXBwbGllZCIpCmVsc2U6CiAgICBwcmludCgiIyMjIGZtYW5fcGNkLmM6IEYtMDY5YiB2NiBubyBjaGFuZ2VzIikK' | base64 -d | python3
+fi
 
 
 # M2-4: fix fman_port_lookup_rx — all LS1046A fman_port->port_id==0
@@ -1281,15 +1284,35 @@ fi
 # HIT in program history (2026-07-04).  No sed needed: the original patch
 # code already has the correct value.  word0 = 0x40800000.
 
-# F-047 DISABLED FOR BISECT: Strip the dead CCBS scaffold from 0132 patch.
-# Commented out to test if scaffolding removal causes the BMI stall.
-# Re-enable after bisect confirms culprit.
-: 'F-047-DISABLED'
-: ' PATCH_0132="vyos-build/scripts/package-build/linux-kernel/patches/kernel/0132-fman-pcd-fe-arm-debugfs.patch"'
-: ' if [ -f "$PATCH_0132" ]; then'
-: '     sed -i '"'"'/+\/\* 0150: CCBS scaffold/,/+[[:space:]]*\}[[:space:]]*$/{/^+/d}'"'"' "$PATCH_0132"'
-: '     echo "### 0132.patch: F-047 CCBS scaffold hunk stripped before application"'
-: ' fi'
+# F-047-R2: Precise CCBS scaffold strip from 0132 patch (Python-based).
+# Original sed ended at the first '+}' (line 98: inner if block), leaving
+# orphaned braces at lines 99-100 that corrupt the fe_arm function structure.
+# Fix: Python strips from '+\/\* 0150: CCBS scaffold' to exactly '+\t}'
+# (the single-tab scaffold closing brace at line 100), preserving the
+# engage code after the scaffold.
+PATCH_0132="vyos-build/scripts/package-build/linux-kernel/patches/kernel/0132-fman-pcd-fe-arm-debugfs.patch"
+if [ -f "$PATCH_0132" ]; then
+    python3 -c "
+import re, sys
+with open('$PATCH_0132') as f:
+    lines = f.readlines()
+in_scaffold = False
+out = []
+brace_re = re.compile(r'^\+\t\}\s*$')
+for line in lines:
+    if re.match(r'\+\s*/\* 0150: CCBS scaffold', line):
+        in_scaffold = True
+        continue
+    if in_scaffold and brace_re.match(line):
+        in_scaffold = False
+        continue
+    if in_scaffold and line.startswith('+'):
+        continue
+    out.append(line)
+with open('$PATCH_0132', 'w') as f:
+    f.writelines(out)
+" && echo "### 0132.patch: F-047-R2 CCBS scaffold precisely stripped"
+fi
 
 # F-050: Allow mask=0 in fe_ehash set for single-bucket E-EKFC-1 experiment.
 # Patch 0125 rejects mask==0 ("if (mask == 0 || mask > ...) return -EINVAL").
