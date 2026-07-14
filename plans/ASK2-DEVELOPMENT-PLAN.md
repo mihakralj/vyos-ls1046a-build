@@ -570,8 +570,12 @@ MTU 9000 is mandatory (MTU 1500 caps at ~1.5 Gbps with catastrophic retransmits)
 matching flow key programmed via `vyos-offload-ask flow-add`, the HIT path
 achieved 6.65 Gbps single-stream (peak 8.67 Gbps, P4 aggregate 7.14 Gbps).
 MISS path (P4 traffic through the matching flow): 7.14 Gbps aggregate. Flow
-key format confirmed: L4PDST(2B)+L4PSRC(2B)+IPDST(4B)+IPSRC(4B), EKFC=
-0x00180206.
+key format confirmed 2026-07-13 by CRC-64 hash-match on hardware: MSB-first
+descending EKFC bit order — SIP(4B)+DIP(4B)+PROTO(1B)+SPORT(2B)+DPORT(2B) = 13B,
+EKFC=0x001C0006 (5-tuple with PTYPE1, no IPSECSPI). The earlier ascending
+(L4PDST-first) order from July 7 was derived on the kernel default scheme
+(EKFC=0x00180206 with SPI bit) and is now known wrong for this path.
+CRC-64 is raw (no final complement), confirmed by hash-match.
 
 **[SPEC] Phase 2 — AC_CC Overhead (2026-07-07).** AC_CC dispatch vs RSS
 baseline: 7.00 vs 7.26 Gbps → 3.6% overhead, well within acceptable range.
@@ -690,3 +694,20 @@ pcd-snapshot diff /tmp/s0-baseline.json -> [OK]      # BYTE-CLEAN
 | Soak testing (reversibility 100-cycle, policer throughput) | 6 | Phase 2-5 |
 | AF_XDP ZC BPID reprogram DUT verification | deferred | Option A (0102 v2) |
 | CEETM full body (QMan qdisc) | deferred | CEETM stub |
+
+### Retired Ceilings (2026-07-14)
+
+The following flow-count and MURAM limits from earlier plan phases are no longer binding on the Fork-B FE-VM ehash path:
+
+| Ceiling | Origin | Why retired |
+|---|---|---|
+| 750-flow MURAM cap | Fork-A / OH-port per-flow MANIP chain allocation | Flows live in DDR ehash records; MURAM is only consumed by nexthop-dedup HM FE objects (~200-400 distinct nexthops, ~80-160 B each) |
+| 327× `chain_create -ENOMEM` | PR14z21 per-flow `fman_pcd_manip_chain_create(3)` | Fork-A artifact; FE-VM path uses pre-built HMCT per nexthop (patch 0120 `fman_hm_nexthop_get/put`), not per-flow chain_create |
+| 16-byte CC-tree key from EKFC=0x00180206 | CC match-table path (M2) | FE-VM ehash uses 13-byte 5-tuple (EKFC=0x001C0006, MSB-first extraction, confirmed 2026-07-13) |
+| `FMAN_FE_HASH_CONTEXT_SIZE=256` | Patch 0131 hardcoded DDR record size | Must derive from `t->key_size` (13 for 5-tuple); see `arch/fman-microcode-210-programming-reference.md` §7.2 |
+
+### Pre-GA Hardening (2026-07-14)
+
+- **Policer arm:** `plcr_enable_block()` + default drop-profile per offloaded port (~50 LOC). FMPL_PMR per-port profiles cost zero KG scheme slots. Prevents HIT-path overload from stalling the BMI.
+- **Kernel RSS scheme fix:** Change `DEFAULT_HASH_KEY_EXTRACT_FIELDS` from `0x00180206` to `0x00180006`, set `SYM=1`. Makes `skb->hash` deterministic on the MISS path, improving RPS/RFS locality for flow-establishment under connection churn.
+- **Soft Parser P2 gap:** PPPoE WAN is a mainstream VyOS deployment. Every PPPoE frame is a guaranteed MISS today. RSR 10.3.0.B1's `cdx_sp.xml` provides 194 lines of proven NetPDL for PPPoE ccbase-slide + TTL≤1 kernel-punt on identical FMan v3 silicon. Porting the soft-parser schema + TTL-punt hooks is a `plans/` item; skip ESP/PLCR steer until IPsec offload matters.

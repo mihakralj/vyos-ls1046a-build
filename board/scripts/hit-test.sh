@@ -1,0 +1,122 @@
+#!/bin/bash
+# hit-test.sh — Definitive ASK2 FE-VM flow-HIT test
+# Run on the board (192.168.1.185) after cold-booting with F-063 ISO.
+#
+# Extraction order: MSB-first (CONFIRMED 2026-07-13)
+#   SIP(4) → DIP(4) → PROTO(1) → SPORT(2) → DPORT(2) = 13 bytes
+# Hash algorithm: RAW CRC-64 (no final complement)
+# contextSize: key_size=13 (F-063 fix applied)
+set -euo pipefail
+
+PCD="/sys/kernel/debug/fman_pcd/0"
+PORT="0x11"
+
+# Test flow: 10.99.2.106:44444 → 10.99.2.185:55555 TCP
+# Key (MSB-first): 0A63026A0A6302B906AD9CD903
+# CRC-64 raw: 0x600824e70ae4d573
+# Bucket index: (0x600824e70ae4d573 >> 48) & 0x7FFF = 0x6008
+KEY="0A63026A0A6302B906AD9CD903"
+EXPECTED_BUCKET="6008"
+
+echo "=== ASK2 HIT Test — $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+echo "Key: $KEY (MSB-first: SIP→DIP→PROTO→SPORT→DPORT)"
+echo "Expected bucket: 0x$EXPECTED_BUCKET"
+echo ""
+
+# Step 1: Disengage first (clean state)
+echo "--- Step 1: Disengage ---"
+echo "disengage $PORT" > "$PCD/fe_arm" 2>/dev/null || true
+sleep 1
+
+# Step 2: Engage with keysize=13
+echo "--- Step 2: Engage keysize=13 ---"
+echo "set $PORT" > "$PCD/fe_port"
+echo "set 0x7FFF 13 0" > "$PCD/fe_ehash"
+echo get > "$PCD/fe_pool"
+echo build > "$PCD/fe_singletons"
+echo build > "$PCD/fe_hashfe"
+echo "build 200" > "$PCD/fe_enq"
+echo build > "$PCD/fe_enter"
+
+enter_off=$(grep -oP "FE_ENTER root AD: \K0x[0-9a-fA-F]+" "$PCD/fe_arm" 2>/dev/null)
+[ -z "$enter_off" ] || [ "$enter_off" = "0x0" ] && enter_off="0x56100"
+echo "engage $PORT $enter_off" > "$PCD/fe_arm"
+
+echo "FE pipeline state:"
+cat "$PCD/fe_arm"
+cat "$PCD/fe_enter"
+cat "$PCD/fe_hashfe" | head -2
+echo ""
+
+# Step 3: Verify EXT_HASH contextSize
+echo "--- Step 3: Verify EXT_HASH w1 (contextSize) ---"
+w1_line=$(cat "$PCD/fe_hashfe" | grep "hash_fe")
+w1=$(echo "$w1_line" | awk '{print $3}')
+cs=$(( (0x$w1 >> 8) & 0xFF ))
+cs_actual=$((cs + 1))
+echo "EXT_HASH w1=0x$w1 → contextSize-1=$cs → contextSize=$cs_actual"
+if [ "$cs_actual" -eq 13 ]; then
+    echo "✓ contextSize=13 CORRECT (F-063 fix active)"
+else
+    echo "✗ contextSize=$cs_actual WRONG (expected 13, F-063 fix NOT active)"
+    echo "ABORT: contextSize must be 13 for 5-tuple key"
+    exit 1
+fi
+echo ""
+
+# Step 4: Insert flow
+echo "--- Step 4: Insert flow ---"
+echo "add 0 $KEY 0x55500" > "$PCD/fe_flow"
+echo "Flow table:"
+cat "$PCD/fe_flow" | head -5
+echo ""
+
+# Step 5: Send test frame from .106
+echo "--- Step 5: Sending test TCP SYN ---"
+echo "(send from test host: nc -w 2 -p 44444 10.99.2.185 55555)"
+echo ""
+
+# Step 6: Start listener and wait for HIT
+echo "--- Step 6: Start listener on .185:55555 ---"
+timeout 15 nc -l -p 55555 > /tmp/hit-result.txt 2>&1 &
+NC_PID=$!
+echo "Listener PID=$NC_PID, waiting 3s for connection..."
+sleep 3
+
+# Step 7: Check result
+echo "--- Step 7: Result ---"
+if [ -s /tmp/hit-result.txt ]; then
+    echo "✓ HIT! Received: $(cat /tmp/hit-result.txt)"
+    RESULT="HIT"
+else
+    echo "✗ MISS (listener received nothing after 3s)"
+    RESULT="MISS"
+fi
+echo ""
+
+# Step 8: Check BMI stall
+echo "--- Step 8: BMI stall check ---"
+python3 -c "
+import mmap, struct, os
+fd = os.open('/dev/mem', os.O_RDONLY)
+mm = mmap.mmap(fd, mmap.PAGESIZE, mmap.MAP_SHARED, mmap.PROT_READ, offset=0x1a91000)
+fmfp_ps = struct.unpack('>I', mm[0x28:0x2C])[0]
+mm.close(); os.close(fd)
+stall = '[STALLED]' if fmfp_ps & 0x80000000 else '[OK]'
+print('eth4 FMBM_RFPNE=0x%08X %s' % (fmfp_ps, stall))
+" 2>/dev/null || echo "(register read failed — not critical)"
+echo ""
+
+# Step 9: Verify MISS→EXIT works (send ICMP, should be dropped not stalled)
+echo "--- Step 9: MISS→EXIT verification (ping, expect 0 replies) ---"
+ping -c 2 -W 2 10.99.2.185 2>&1 | tail -2 || true
+echo ""
+
+# Summary
+echo "=== RESULT: $RESULT ==="
+echo "Key: $KEY"
+echo "Bucket: 0x$EXPECTED_BUCKET"
+echo "contextSize: $cs_actual"
+echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+kill $NC_PID 2>/dev/null || true

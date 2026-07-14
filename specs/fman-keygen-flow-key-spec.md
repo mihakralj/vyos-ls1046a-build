@@ -1,7 +1,8 @@
 # FMan KeyGen Flow-Key Architecture for ASK2 (LS1046A / DPAA1)
 
-**Status:** v3.0 — Clean Reference Spec. 2026-07-10.
+**Status:** v3.1 — Clean Reference Spec. 2026-07-14.
 **Branch:** dpaa1
+**Changes since v3.0:** Extraction order confirmed by CRC-64 hash-match on hardware (2026-07-13); self-test gate implementation status noted; F-063 keysize fix recorded.
 **Scope:** FMan KeyGen EKFC extraction, FE-VM dispatch, ehash flow-table architecture, and the software/silicon contract that ASK2 must satisfy.
 **References:**
 - `drivers/net/ethernet/freescale/fman/fman_keygen.c` (mainline, NXP 2017) — EKFC register definitions, KGSE indirect-write protocol
@@ -96,12 +97,12 @@ The order is encoded as a data table, not as control flow. The serialiser, the k
  * derive from this table. No other code hardcodes field positions.
  */
 static const struct fman_kg_field fman_kg_order_v4[] = {
-    /* { EKFC_bit, width_bytes, name } — ordered as silicon iterates */
-    { .bit =  1, .width = 2, .name = "l4pdst"  },  /* L4 dest port   */
-    { .bit =  2, .width = 2, .name = "l4psrc"  },  /* L4 source port */
-    { .bit = 18, .width = 1, .name = "ptype1"  },  /* IP protocol    */
-    { .bit = 19, .width = 4, .name = "ipdst1"  },  /* IP destination */
+    /* { EKFC_bit, width_bytes, name } — MSB-first descending (CONFIRMED 2026-07-13) */
     { .bit = 20, .width = 4, .name = "ipsrc1"  },  /* IP source      */
+    { .bit = 19, .width = 4, .name = "ipdst1"  },  /* IP destination */
+    { .bit = 18, .width = 1, .name = "ptype1"  },  /* IP protocol    */
+    { .bit =  2, .width = 2, .name = "l4psrc"  },  /* L4 source port */
+    { .bit =  1, .width = 2, .name = "l4pdst"  },  /* L4 dest port   */
 };
 ```
 
@@ -168,11 +169,21 @@ int fman_pcd_key_serialize_v4(const struct fman_pcd *pcd,
 }
 ```
 
-`put_unaligned()` is mandatory when IP addresses land at unaligned offsets (e.g. offset 5 or 9 under ascending order). The `default: return -EINVAL` catches the case where a field was added to the table but the switch was not updated.
+`put_unaligned()` is mandatory when L4 ports land at unaligned offsets (offset 9 and 11 under MSB-first order: SIP@0 + DIP@4 + PROTO@8 + SPORT@9 + DPORT@11). The `default: return -EINVAL` catches the case where a field was added to the table but the switch was not updated.
 
-### 3.4 Runtime Self-Check
+### 3.4 Extraction Order — CONFIRMED (2026-07-13)
 
-A debugfs-triggered self-test reads the key the silicon actually extracted for one live frame from the FE workspace, and compares it against what `fman_pcd_key_serialize_v4()` produces for the same 5-tuple. The test tries all candidate orders and names the one that matches.
+The extraction order was resolved by CRC-64 hash-match on hardware: two independent TCP flows on eth4 produced hash values that matched `crc64_raw(SIP|DIP|6|SPORT|DPORT)` under MSB-first order and no other order. The ascending-bit-position model and size-grouped model are both **DISPROVEN**.
+
+**Confirmed byte layout for EKFC=0x001C0006 (13 bytes):**
+```
+Byte:  0  1  2  3  4  5  6  7  8   9 10 11 12
+Field: SIP────────  DIP────────  PROTO  SPORT  DPORT
+```
+
+The software-side serializers in `ask_flow_offload.c` (ehash path) and `fman_pcd_key_serialize_v4()` already use this order.
+
+### 3.5 Runtime Self-Check (NOT YET IMPLEMENTED)
 
 ```
 # echo "10.99.1.106 10.99.2.200 6 55001 5201" > /sys/kernel/debug/fman_pcd/0/key_selftest
@@ -182,9 +193,9 @@ observed:                 1451 D6D9 06 0A6302C8 0A63016A
 verdict: PASS.
 ```
 
-This is the engineering equivalent of an assertion: the code does not assume the order is correct; it verifies it.
+A debugfs-triggered self-test verifies that the run-time key layout matches the build-time expectation by inserting a known 5-tuple key into the ehash table, sending a matching frame, and confirming a HIT. The test validates the end-to-end pipeline: CRC-64, bucket index, key bytes in DDR record, and FE-VM comparison. Implementation status: **specified but not yet committed** — no kernel patch creates `key_selftest`, `key_verified`, or `force_unverified` debugfs nodes.
 
-### 3.5 Engagement Gate
+### 3.6 Engagement Gate (NOT YET IMPLEMENTED)
 
 `fe_arm_engage()` refuses to engage the FE path unless the self-test has passed at least once since boot:
 

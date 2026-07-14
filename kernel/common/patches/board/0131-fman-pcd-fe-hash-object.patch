@@ -149,7 +149,7 @@ index 0df6585..0fb8c0a 100644
 +
 +	iowrite32be(FMAN_FE_TYPE_EXT_HASH, fe + 0);		/* misc       */
 +	iowrite32be(((u32)(t->hash_mask & 0xffff) << 16) |
-+		    ((u32)((FMAN_FE_HASH_CONTEXT_SIZE - 1) & 0xff) << 8) |
++		    ((u32)((t->key_size - 1) & 0xff) << 8) |
 +		    (u32)(t->hash_shift & 0xff), fe + 1);
 +	iowrite32be((u32)((tblphys >> 32) & 0xffff), fe + 2);	/* tbl hi     */
 +	iowrite32be((u32)(tblphys & 0xffffffff), fe + 3);	/* tbl lo     */

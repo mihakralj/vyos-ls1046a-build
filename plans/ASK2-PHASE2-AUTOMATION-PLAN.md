@@ -24,13 +24,16 @@ disagree, they win.
 - Reversibility PASSED: S0↔S1 byte-clean, 100× soak, 0 drift
 - `TC_SETUP_FT` handler committed (0b196d1), `CONFIG_NF_FLOW_TABLE_OFFLOAD=m` committed (8d37d54)
 - `vyos-offload-ask` shipped with 6 verbs, including `flow-add` (via debugfs `fe_flow`)
-- Keysize fixed: 12→16 bytes (da14deb), matches KG `EKFC=0x00180206` composite
-- `ask_hw.c` line 581 still writes `"set 0x7FFF 12 0"` to `fe_ehash` — **BUG**
+- Keysize fixed: 12→16 bytes (da14deb), matches KG `EKFC=0x00180206` composite for CC-tree path
+- **EKFC/key-width clarification (2026-07-14):** Two paths use different EKFC values and key widths:
+  - **CC tree path** (M2, ask.ko FLOW_CLS_REPLACE): 16-byte key, EKFC=0x00180206 — SIP(4)+DIP(4)+SPI(4)+SPORT(2)+DPORT(2). The SPI field is always zero for plain IP.
+  - **ehash path** (FE-VM, vyos-offload-ask flow-add): 13-byte key, EKFC=0x001C0006 — SIP(4)+DIP(4)+PROTO(1)+SPORT(2)+DPORT(2). Uses PTYPE1 instead of IPSECSPI to distinguish TCP/UDP flows.
+- `ask_hw.c` line 581 still writes `"set 0x7FFF 12 0"` to `fe_ehash` — **BUG** (should be 13 for ehash path)
 
 **[BUG] ask_hw.c:581 still uses keysize=12 for fe_ehash**
-- Symptom: `ask.ko`'s debugfs bridge writes `"set 0x7FFF 12 0"` to `fe_ehash`, but the KG composite is 16 bytes. CRC64 bucket index computed over wrong byte range → flow insertion fails to HIT.
-- Cause: `vyos-offload-ask` was fixed to 16 bytes (da14deb) but the parallel debugfs bridge in `ask_hw.c` was not.
-- Fix: change `"set 0x7FFF 12 0"` to `"set 0x7FFF 16 0"` in `ask_hw.c:581`.
+- Symptom: `ask.ko`'s debugfs bridge writes `"set 0x7FFF 12 0"` to `fe_ehash`, but the KG ehash-path composite is 13 bytes (EKFC=0x001C0006). CRC64 bucket index computed over wrong byte range → flow insertion fails to HIT.
+- Cause: `vyos-offload-ask` was F-063 (key_size=8, fixed to 13 on 2026-07-14) but the parallel debugfs bridge in `ask_hw.c` was not.
+- Fix: change `"set 0x7FFF 12 0"` to `"set 0x7FFF 13 0"` in `ask_hw.c:581`.
 
 ---
 
