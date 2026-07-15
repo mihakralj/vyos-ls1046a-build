@@ -1644,6 +1644,124 @@ fi
 
 echo "### fman_pcd.c: F-062d DISABLED (ENQ ALLOCATE may cause QMan FD corruption)"
 
+# F-068: Switch from AC_CC to CCBS dispatch mode per NXP ASK architecture.
+# AC_CC was DISPROVEN on LS1046A (ask20 patch 0043/0051).  CCBS
+# (next_engine=2, kgse_ccbs=group_table) is the working approach that
+# matched 24M+ frames in ask20 PR14z22.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 <<'PYEOF'
+import sys
+path = "drivers/net/ethernet/freescale/fman/fman_pcd.c"
+with open(path) as f:
+    src = f.read()
+
+changed = 0
+
+# 1. next_engine: 3 -> 2 (CCBS mode)
+new = src.replace(
+    "slot->next_engine    = 3;",
+    "slot->next_engine    = 2;  /* F-068: CCBS mode per ask20 silicon proven */",
+    1)
+if new != src:
+    changed += 1
+    print("### fman_pcd.c: F-068 next_engine 3->2")
+src = new
+
+# 2. Add CC group table allocation, replace cc_base_offset=0
+old = "slot->cc_base_offset = 0;"
+new = """\
+	/*
+	 * F-068: Allocate CC group table (16B CONT_LOOKUP AD + 20B CC node)
+	 * in MURAM.  The CONT_LOOKUP AD has numKeys=0 (empty match table),
+	 * AD table at group_off+16 where the CC node lives.
+	 * CC node is a wildcard pass-through dispatching to FE_ENTER.
+	 * kgse_ccbs points here to trigger the CCBS implicit walk.
+	 */
+	{
+		struct muram_info *muram = fman_get_muram(fman);
+		if (muram) {
+			unsigned long gro = fman_pcd_muram_alloc(pcd, 36);
+			if (!IS_ERR_VALUE(gro)) {
+				void __iomem *g = (void __iomem *)fman_muram_offset_to_vbase(muram, gro);
+				/* group table[0] = CONT_LOOKUP AD (16B) */
+				iowrite32be(0, g + 0);        /* numKeys=0, matchTable=0 */
+				iowrite32be(gro + 16, g + 4);  /* adTable at group+16 */
+				iowrite32be(0x40000000, g + 8);/* CC AD type */
+				iowrite32be(0, g + 12);        /* reserved */
+				/* AD table[0] = CC node (20B) — pass-through */
+				iowrite32be(0x80000000, g + 16);/* valid bit */
+				iowrite32be((u32)fe_enter_off, g + 20);/* next0→FE_ENTER */
+				iowrite32be(0, g + 24);       /* next1=0 */
+				iowrite32be(0, g + 28);       /* key_val=0 (wildcard) */
+				iowrite32be(0, g + 32);       /* key_mask=0 (wildcard) */
+				slot->cc_base_offset = gro; /* kgse_ccbs→group table */
+			}
+		}
+	}
+"""
+if old in src:
+    src = src.replace(old, new, 1)
+    changed += 1
+    print("### fman_pcd.c: F-068 CC group table + CC node allocated")
+else:
+    print("### fman_pcd.c: F-068 cc_base_offset pattern NOT FOUND", file=sys.stderr)
+
+# 3. Remove fman_port_set_cc_base call (not needed in CCBS)
+old2 = """\
+	rxport = fman_port_lookup_rx(fman, hw_port_id);
+	if (!rxport)
+		return -ENODEV;
+	err = fman_port_set_cc_base(rxport, fe_enter_off);
+	if (err) {
+		mutex_lock(lock);
+		slot = kg_find_port_scheme(keygen, hw_port_id, &id);
+		if (slot) {
+			slot->next_engine = *saved_engine;
+			slot->cc_bits_sel = 0;
+			slot->used = false;
+			(void)keygen_scheme_setup(keygen, id, true);
+		}
+		mutex_unlock(lock);
+		return err;
+	}"""
+new2 = """\
+	/* F-068: CCBS mode — no RCCB change needed.
+	 * The CCBS engine intercepts via kgse_ccbs, not RCCB.
+	 */"""
+if old2 in src:
+    src = src.replace(old2, new2, 1)
+    changed += 1
+    print("### fman_pcd.c: F-068 removed fman_port_set_cc_base (not needed)")
+else:
+    print("### fman_pcd.c: F-068 set_cc_base pattern NOT FOUND", file=sys.stderr)
+
+# 4. Change disengage to free group table
+old3 = """\
+	rxport = fman_port_lookup_rx(fman, hw_port_id);
+
+	if (rxport)
+		(void)fman_port_set_cc_base(rxport, 0);"""
+new3 = """\
+	/* F-068: CCBS mode — no RCCB to clear.
+	 * TODO: free CC group table MURAM allocation.
+	 */"""
+if old3 in src:
+    src = src.replace(old3, new3, 1)
+    changed += 1
+    print("### fman_pcd.c: F-068 disarm: removed cc_base clear")
+else:
+    print("### fman_pcd.c: F-068 disarm pattern NOT FOUND — may already be fixed", file=sys.stderr)
+
+if changed > 0:
+    with open(path, "w") as f:
+        f.write(src)
+    print("### fman_pcd.c: F-068 CCBS mode applied (%d changes)" % changed)
+else:
+    print("### fman_pcd.c: F-068 NO CHANGES applied", file=sys.stderr)
+PYEOF
+    echo "### fman_pcd.c: F-068 CCBS dispatch mode (next_engine=2, CC group table)"
+fi
+
 # M2-4: free params page on disengage (was leaking 256 B per cycle)
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
     echo 'aW1wb3J0IHN5cwpwYXRoID0gImRyaXZlcnMvbmV0L2V0aGVybmV0L2ZyZWVzY2FsZS9mbWFuL2ZtYW5fcGNkX2tnLmMiCndpdGggb3BlbihwYXRoKSBhcyBmOgogICAgc3JjID0gZi5yZWFkKCkKCm9sZCA9ICgnXHRpZiAocnhwb3J0KVxuJwogICAgICAgJ1x0XHQodm9pZClmbWFuX3BvcnRfc2V0X2NjX2Jhc2Uocnhwb3J0LCAwKTtcbicKICAgICAgICdcdCh2b2lkKWZtYW5fcGNkX2tnX3BvcnRfZGV0YWNoX2NjKHBjZCwgaHdfcG9ydF9pZCk7JykKbmV3ID0gKCdcdGlmIChyeHBvcnQpIHtcbicKICAgICAgICdcdFx0dTMyIHBwX29mZjtcbicKICAgICAgICdcdFx0KHZvaWQpZm1hbl9wb3J0X3NldF9jY19iYXNlKHJ4cG9ydCwgMCk7XG4nCiAgICAgICAnXHRcdHBwX29mZiA9IGZtYW5fcG9ydF9nZXRfcGFyYW1zX3BhZ2Uocnhwb3J0KTtcbicKICAgICAgICdcdFx0aWYgKHBwX29mZikge1xuJwogICAgICAgJ1x0XHRcdGZtYW5fcGNkX211cmFtX2ZyZWUocGNkLCBwcF9vZmYsIDI1Nik7XG4nCiAgICAgICAnXHRcdFx0KHZvaWQpZm1hbl9wb3J0X3NldF9wYXJhbXNfcGFnZShyeHBvcnQsIDAsIE5VTEwpO1xuJwogICAgICAgJ1x0XHR9XG4nCiAgICAgICAnXHR9XG4nCiAgICAgICAnXHQodm9pZClmbWFuX3BjZF9rZ19wb3J0X2RldGFjaF9jYyhwY2QsIGh3X3BvcnRfaWQpOycpCmlmIG9sZCBpbiBzcmM6CiAgICBzcmMgPSBzcmMucmVwbGFjZShvbGQsIG5ldywgMSkKICAgIHdpdGggb3BlbihwYXRoLCAidyIpIGFzIGY6CiAgICAgICAgZi53cml0ZShzcmMpCiAgICBwcmludCgiIyMjIGZtYW5fcGNkX2tnLmM6IHBhcmFtcyBwYWdlIGZyZWVkIG9uIGRpc2FybSAoTTItNCkiKQplbHNlOgogICAgcHJpbnQoIiMjIyBmbWFuX3BjZF9rZy5jOiBwYXR0ZXJuIG5vdCBmb3VuZCAoYWxyZWFkeSBmaXhlZD8pIikK' | base64 -d | python3
