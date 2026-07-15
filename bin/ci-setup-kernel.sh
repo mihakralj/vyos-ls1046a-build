@@ -1620,14 +1620,14 @@ fi
 # F-062g routes to ENQ for HIT path).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # Transition: strip DEALLOCATE, keep AD_FROM_WS
-    sed -i 's/p.flags = FMAN_FE_EXIT_DEALLOCATE | FMAN_FE_TRANSITION_AD_FROM_WS;/p.flags = FMAN_FE_TRANSITION_AD_FROM_WS;  \/\* F-062e: Transition no DEALLOCATE — HIT/MUX path only \*\//' \
+    sed -i 's#p.flags = FMAN_FE_EXIT_DEALLOCATE | FMAN_FE_TRANSITION_AD_FROM_WS;#p.flags = FMAN_FE_TRANSITION_AD_FROM_WS;  /* F-062e: Transition no DEALLOCATE — HIT/MUX path only */#' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
     # EXIT: strip DEALLOCATE — pass-through exit to scheme default NIA
     # The patch 0124 sets p.flags = FMAN_FE_EXIT_DEALLOCATE; which includes DEALLOCATE.
     # The sed below also catches any prior v2 sed residue.
-    sed -i 's/p.flags = FMAN_FE_EXIT_DEALLOCATE;  \/\* F-062e v2: DEALLOCATE provides terminal MISS disposition per NXP doc §7.4 \*\//p.flags = 0;  \/\* F-062e v3: pass-through EXIT — scheme default NIA delivers to kernel RX FQ per NXP arch \*\//' \
+    sed -i 's#p.flags = FMAN_FE_EXIT_DEALLOCATE;  /* F-062e v2: DEALLOCATE provides terminal MISS disposition per NXP doc §7.4 */#p.flags = 0;  /* F-062e v3: pass-through EXIT — scheme default NIA delivers to kernel RX FQ per NXP arch */#' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
-    sed -i 's/p.flags = FMAN_FE_EXIT_DEALLOCATE;/p.flags = 0;  \/\* F-062e v3: pass-through EXIT — scheme NIA→kernel RX FQ per NXP arch \*\//' \
+    sed -i 's#p.flags = FMAN_FE_EXIT_DEALLOCATE;#p.flags = 0;  /* F-062e v3: pass-through EXIT — scheme NIA→kernel RX FQ per NXP arch */#' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
     echo "### fman_pcd.c: F-062e v3 — Transition+EXIT both stripped of DEALLOCATE (NXP pass-through architecture)"
 fi
