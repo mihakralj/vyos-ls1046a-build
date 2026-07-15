@@ -1254,18 +1254,17 @@ else:
     echo "### fman_keygen.c: F-062c-R2 pure AC_CC (0x80000006)"
 fi
 
-# F-069 v2: MISS context (stops wild DMA) + contextSize-1=keysize-1.
+# F-069: MISS context (DDR + MURAM t_ExtHashResult) with exact anchors.
+# Every fixup asserts count()==1 or the build fails loudly — four prior
+# silent no-ops cost four board sessions (F-062a, F-062g, F-069a v1/v2).
 # Per NXP LSDK ExternalHashTableSet (999-layerscape-ask):
-#  F-069a: allocates 256B zeroed DDR miss context + 16B MURAM t_ExtHashResult,
-#   replaces pcd->fe_exit_off with miss_off at the fe_hash_encode call site so
-#   w4 points to valid DDR DMA target (not MURAM EXIT descriptor).
-#   Without this, w4=0 → wild 256B DMA from garbage 40-bit addr → crash.
-#  F-069c-REVERT: contextSize-1 stays at keysize-1 (not 255). Per §7.2,
-#   "MUST equal EKFC extracted key length" — 256B compares past DDR record
-#   → uniform MISS. keysize=12 gives contextSize=12, comparing exactly 12 bytes.
+#  - Adds miss_res_off (6th parameter, distinct from w6 miss_off)
+#  - w4 = miss_res_off MURAM offset of 16B t_ExtHashResult
+#  - DDR miss context (256B, dma_alloc_coherent via t->dev from 0130)
+#  - Persists in struct fman_pcd, freed on hash_free teardown
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    echo 'aW1wb3J0IHN5cywgcmUKCnBhdGggPSAiZHJpdmVycy9uZXQvZXRoZXJuZXQvZnJlZXNjYWxlL2ZtYW4vZm1hbl9wY2QuYyIKd2l0aCBvcGVuKHBhdGgpIGFzIGY6CiAgICBzcmMgPSBmLnJlYWQoKQpjaGFuZ2VkID0gMAoKIyA9PT0gRi0wNjlhIHYyOiBNSVNTIGNvbnRleHQgKEREUiArIE1VUkFNIHRfRXh0SGFzaFJlc3VsdCkgPT09CiMgQWxsb2NhdGUgMjU2QiB6ZXJvZWQgRERSIG1pc3MgY29udGV4dCArIDE2QiBNVVJBTSByZXN1bHQsIHBhc3MgdG8gZmVfaGFzaF9lbmNvZGUKIyBUaGUgZW5jb2RlIGZ1bmN0aW9uIHNpZ25hdHVyZSBpczoKIyAgIGZtYW5fcGNkX2ZlX2hhc2hfZW5jb2RlKG11cmFtLCBmZV9vZmYsIHQsIG11eF9vZmYsIG1pc3Nfb2ZmKQojIFRoZSBjYWxsIHNpdGUgaXM6CiMgICBmbWFuX3BjZF9mZV9oYXNoX2VuY29kZShtdXJhbSwgb2JqLT5tdXJhbV9vZmYsIHQsIG11eF9vZmYsIHBjZC0+ZmVfZXhpdF9vZmYpOwojIFdlIG5lZWQgdG8gYWxsb2NhdGUgbWlzc19vZmYgYW5kIHJlcGxhY2UgcGNkLT5mZV9leGl0X29mZiB3aXRoIGl0LgoKIyBGaW5kIHRoZSBlbmNvZGUgY2FsbCBhbmQgYWRkIGFsbG9jYXRpb24gYmVmb3JlIGl0CmVuY29kZV9jYWxsID0gJ2ZtYW5fcGNkX2ZlX2hhc2hfZW5jb2RlKG11cmFtLCBvYmotPm11cmFtX29mZiwgdCwnCmlmIGVuY29kZV9jYWxsIGluIHNyYyBhbmQgJ0YtMDY5YScgbm90IGluIHNyYzoKICAgICMgSW5zZXJ0IGFsbG9jYXRpb24gY29kZSBiZWZvcmUgdGhlIGVuY29kZSBjYWxsCiAgICBhbGxvY19jb2RlID0gKAogICAgICAgICdcdHZvaWQgKm1pc3NfY3R4O1xuJwogICAgICAgICdcdGRtYV9hZGRyX3QgbWlzc19jdHhfcGh5cztcbicKICAgICAgICAnXHR1bnNpZ25lZCBsb25nIG1pc3Nfb2ZmID0gMDtcdC8qIEYtMDY5YSB2MjogbWlzc1Jlc3VsdCBNVVJBTSBvZmZzZXQgKi9cbicKICAgICAgICAnXG4nCiAgICAgICAgJ1x0LyogRi0wNjlhIHYyOiBhbGxvY2F0ZSAyNTZCIHplcm9lZCBERFIgbWlzcyBjb250ZXh0ICsgMTZCIE1VUkFNIHJlc3VsdCAqL1xuJwogICAgICAgICdcdG1pc3NfY3R4ID0gZG1hX2FsbG9jX2NvaGVyZW50KHBjZC0+Zm1hbi0+ZGV2LCAyNTYsICZtaXNzX2N0eF9waHlzLCBHRlBfS0VSTkVMKTtcbicKICAgICAgICAnXHRpZiAobWlzc19jdHgpIHtcbicKICAgICAgICAnXHRcdG1lbXNldChtaXNzX2N0eCwgMCwgMjU2KTtcbicKICAgICAgICAnXHRcdG1pc3Nfb2ZmID0gZm1hbl9wY2RfbXVyYW1fYWxsb2MocGNkLCAxNik7XG4nCiAgICAgICAgJ1x0XHRpZiAoIUlTX0VSUl9WQUxVRShtaXNzX29mZikpIHtcbicKICAgICAgICAnXHRcdFx0dm9pZCBfX2lvbWVtICptciA9ICh2b2lkIF9faW9tZW0gKilmbWFuX211cmFtX29mZnNldF90b192YmFzZShtdXJhbSwgbWlzc19vZmYpO1xuJwogICAgICAgICdcdFx0XHR1MzIgcGxvID0gKHUzMikobWlzc19jdHhfcGh5cyAmIDB4RkZGRkZGRkYpO1xuJwogICAgICAgICdcdFx0XHR1MzIgcGhpID0gKHUzMikoKG1pc3NfY3R4X3BoeXMgPj4gMzIpICYgMHhGRkZGKTtcbicKICAgICAgICAnXHRcdFx0aW93cml0ZTMyYmUocGhpLCBtciArIDApO1xuJwogICAgICAgICdcdFx0XHRpb3dyaXRlMzJiZShwbG8sIG1yICsgNCk7XG4nCiAgICAgICAgJ1x0XHRcdGlvd3JpdGUzMmJlKHBoaSwgbXIgKyA4KTtcbicKICAgICAgICAnXHRcdFx0aW93cml0ZTMyYmUocGxvLCBtciArIDEyKTtcbicKICAgICAgICAnXHRcdH1cbicKICAgICAgICAnXHR9XG4nCiAgICAgICAgJ1xuJwogICAgKS5yZXBsYWNlKCdcXHQnLCAnXHQnKQogICAgc3JjID0gc3JjLnJlcGxhY2UoZW5jb2RlX2NhbGwsIGFsbG9jX2NvZGUgKyBlbmNvZGVfY2FsbCwgMSkKICAgIGNoYW5nZWQgKz0gMQogICAgcHJpbnQoIiMjIyBGLTA2OWEgdjI6IEREUiBtaXNzIGNvbnRleHQgYWxsb2NhdGlvbiBpbnNlcnRlZCIpCgojIE5vdyByZXBsYWNlIHBjZC0+ZmVfZXhpdF9vZmYgd2l0aCBtaXNzX29mZiBpbiB0aGUgY2FsbApvbGRfY2FsbCA9IGVuY29kZV9jYWxsICsgJyBtdXhfb2ZmLCBwY2QtPmZlX2V4aXRfb2ZmKTsnCm5ld19jYWxsID0gZW5jb2RlX2NhbGwgKyAnIG11eF9vZmYsIG1pc3Nfb2ZmKTsnCmlmIG9sZF9jYWxsIGluIHNyYyBhbmQgbmV3X2NhbGwgbm90IGluIHNyYzoKICAgIHNyYyA9IHNyYy5yZXBsYWNlKG9sZF9jYWxsLCBuZXdfY2FsbCwgMSkKICAgIGNoYW5nZWQgKz0gMQogICAgcHJpbnQoIiMjIyBGLTA2OWEgdjI6IG1pc3Nfb2ZmIHBhc3NlZCBpbnN0ZWFkIG9mIHBjZC0+ZmVfZXhpdF9vZmYiKQplbGlmIG9sZF9jYWxsIG5vdCBpbiBzcmM6CiAgICBwcmludCgiIyMjIEYtMDY5YSB2MjogY2FsbCBwYXR0ZXJuIG5vdCBmb3VuZCAobWF5IGhhdmUgbXVsdGktbGluZSBmb3JtYXR0aW5nKSIpCgojID09PSBGLTA2OWMtUkVWRVJUOiBjb250ZXh0U2l6ZS0xIHN0YXlzIGF0IGtleXNpemUtMSAod2FzIEYtMDY5YyBjaGFuZ2VkIHRvIDI1NSkgPT09CiMgUWRyYW50IFx1MDBhNzcuMjogImNvbnRleHRTaXplIE1VU1QgZXF1YWwgRUtGQyBleHRyYWN0ZWQga2V5IGxlbmd0aCIKIyBjb250ZXh0U2l6ZT0yNTYgY29tcGFyZXMgMjU2QiBwYXN0IEREUiByZWNvcmQgLT4gdW5pZm9ybSBNSVNTCm9sZF9jc18yNTUgPSAnKCh1MzIpKDI1NSAmIDB4ZmYpIDw8IDgpXHRcdFx0XHQvKiBGLTA2OWM6IGNvbnRleHRTaXplPTI1NiAqLycKaWYgb2xkX2NzXzI1NSBpbiBzcmM6CiAgICBuZXdfY3MgPSAnKCh1MzIpKCh0LT5rZXlfc2l6ZSAtIDEpICYgMHhmZikgPDwgOCknCiAgICBzcmMgPSBzcmMucmVwbGFjZShvbGRfY3NfMjU1LCBuZXdfY3MsIDEpCiAgICBjaGFuZ2VkICs9IDEKICAgIHByaW50KCIjIyMgRi0wNjljLVJFVkVSVDogY29udGV4dFNpemUtMSByZXN0b3JlZCB0byBrZXlzaXplLTEgKHBlciBOWFAgXHUwMGE3Ny4yKSIpCgppZiBjaGFuZ2VkID4gMDoKICAgIHdpdGggb3BlbihwYXRoLCAidyIpIGFzIGY6CiAgICAgICAgZi53cml0ZShzcmMpCiAgICBwcmludChmIiMjIyBGLTA2OSB2MjogYXBwbGllZCB7Y2hhbmdlZH0gY2hhbmdlcyAobWlzcyBjb250ZXh0ICsgY29udGV4dFNpemUgcmV2ZXJ0KSIpCmVsc2U6CiAgICBwcmludCgiIyMjIEYtMDY5IHYyOiBubyBjaGFuZ2VzIG5lZWRlZCIpCg==' | base64 -d | python3
-    echo "### F-069 v2: MISS context + contextSize=keysize (no ENQ change)"
+    echo 'aW1wb3J0IHN5cwoKcGF0aCA9ICJkcml2ZXJzL25ldC9ldGhlcm5ldC9mcmVlc2NhbGUvZm1hbi9mbWFuX3BjZC5jIgp3aXRoIG9wZW4ocGF0aCkgYXMgZjoKICAgIHNyYyA9IGYucmVhZCgpCgpkZWYgYXNzZXJ0X29uZShvbGQsIGxhYmVsKToKICAgICIiIkV2ZXJ5IGZpeHVwIG11c3QgbWF0Y2ggZXhhY3RseSBvbmNlIG9yIHRoZSBidWlsZCBmYWlscyBsb3VkbHkuIiIiCiAgICBuID0gc3JjLmNvdW50KG9sZCkKICAgIGlmIG4gIT0gMToKICAgICAgICBwcmludChmIkZBVEFMOiBGLTA2OSB7bGFiZWx9OiBleHBlY3RlZCAxIG1hdGNoLCBnb3Qge259IiwgZmlsZT1zeXMuc3RkZXJyKQogICAgICAgIHN5cy5leGl0KDEpCgpjaGFuZ2VkID0gMAoKIyAxLiBTaWduYXR1cmU6IGFkZCA2dGggcGFyYW1ldGVyIG1pc3NfcmVzX29mZiAoZGlmZmVyZW50IG5hbWUgZnJvbSBtaXNzX29mZi93NikKb2xkID0gJ3Vuc2lnbmVkIGxvbmcgbXV4X29mZixcblx0XHRcdFx0ICAgIHVuc2lnbmVkIGxvbmcgbWlzc19vZmYpJwpuZXcgPSAoJ3Vuc2lnbmVkIGxvbmcgbXV4X29mZixcblx0XHRcdFx0ICAgIHVuc2lnbmVkIGxvbmcgbWlzc19vZmYsXG4nCiAgICAgICAnXHRcdFx0XHQgICAgdW5zaWduZWQgbG9uZyBtaXNzX3Jlc19vZmYpJykKYXNzZXJ0X29uZShvbGQsICJzaWduYXR1cmUiKQpzcmMgPSBzcmMucmVwbGFjZShvbGQsIG5ldywgMSkKY2hhbmdlZCArPSAxCnByaW50KCIjIyMgRi0wNjk6IHNpZ25hdHVyZSArbWlzc19yZXNfb2ZmIikKCiMgMi4gdzQ6IHdyaXRlIG1pc3NfcmVzX29mZiBpbnN0ZWFkIG9mIDAKb2xkID0gJ2lvd3JpdGUzMmJlKDAsIGZlICsgNCk7XHRcdFx0XHRcdC8qIG1pc3NSZXN1bHQgKi8nCm5ldyA9ICdpb3dyaXRlMzJiZSgodTMyKW1pc3NfcmVzX29mZiwgZmUgKyA0KTtcdFx0LyogbWlzc1Jlc3VsdCAtPiB0X0V4dEhhc2hSZXN1bHQgKi8nCmFzc2VydF9vbmUob2xkLCAidzQiKQpzcmMgPSBzcmMucmVwbGFjZShvbGQsIG5ldywgMSkKY2hhbmdlZCArPSAxCnByaW50KCIjIyMgRi0wNjk6IHc0ID0gbWlzc19yZXNfb2ZmIikKCiMgMy4gQWRkIG1pc3NfY3R4L21pc3NfY3R4X3BoeXMgZmllbGRzIHRvIHN0cnVjdCBmbWFuX3BjZAojIEFuY2hvcjogZmVfaGFzaF9vZmYgZGVjbGFyYXRpb24KYW5jaG9yID0gJ3Vuc2lnbmVkIGxvbmcgZmVfaGFzaF9vZmY7XHRcdFx0LyogRVhUX0hBU0ggRkUgTVVSQU0gb2Zmc2V0ICovJwpuZXdfZmllbGRzID0gKCdcdHZvaWQgKm1pc3NfY3R4O1x0XHRcdC8qIEYtMDY5OiAyNTZCIEREUiBtaXNzIGNvbnRleHQgKi9cbicKICAgICAgICAgICAgICAnXHRkbWFfYWRkcl90IG1pc3NfY3R4X3BoeXM7XHRcdC8qIEYtMDY5OiBwaHlzaWNhbCBhZGRyICovXG4nCiAgICAgICAgICAgICAgJ1x0dW5zaWduZWQgbG9uZyBtaXNzX3Jlc19vZmY7XHRcdC8qIEYtMDY5OiBNVVJBTSByZXN1bHQgKi8nKQphc3NlcnRfb25lKGFuY2hvciwgInN0cnVjdCBmaWVsZHMiKQpzcmMgPSBzcmMucmVwbGFjZShhbmNob3IsIGFuY2hvciArICdcbicgKyBuZXdfZmllbGRzLCAxKQpjaGFuZ2VkICs9IDEKcHJpbnQoIiMjIyBGLTA2OTogc3RydWN0IGZpZWxkcyBhZGRlZCIpCgojIDQuIENhbGwgc2l0ZSAodHdvIGxpbmVzLCB0YWIgY29udGludWF0aW9uKQpvbGQgPSAoJ2ZtYW5fcGNkX2ZlX2hhc2hfZW5jb2RlKG11cmFtLCBvYmotPm11cmFtX29mZiwgdCxcbicKICAgICAgICdcdFx0XHRcdHBjZC0+ZmVfbXV4X29mZiwgcGNkLT5mZV9leGl0X29mZik7JykKbmV3ID0gKCdmbWFuX3BjZF9mZV9oYXNoX2VuY29kZShtdXJhbSwgb2JqLT5tdXJhbV9vZmYsIHQsXG4nCiAgICAgICAnXHRcdFx0XHRwY2QtPmZlX211eF9vZmYsIHBjZC0+ZmVfZXhpdF9vZmYsIHBjZC0+bWlzc19yZXNfb2ZmKTsnKQphc3NlcnRfb25lKG9sZCwgImNhbGwgc2l0ZSIpCnNyYyA9IHNyYy5yZXBsYWNlKG9sZCwgbmV3LCAxKQpjaGFuZ2VkICs9IDEKcHJpbnQoIiMjIyBGLTA2OTogY2FsbCBzaXRlIHVwZGF0ZWQiKQoKIyA1LiBBbGxvY2F0aW9uIGluIGZlX2hhc2hfYnVpbGQsIGFmdGVyIGxpc3RfZGVsKCZvYmotPm5vZGUpOwojIHQtPmRldiBleGlzdHMgc2luY2UgcGF0Y2ggMDEzMAphbmNob3IgPSAnbGlzdF9kZWwoJm9iai0+bm9kZSk7JwojIFZlcmlmeSBpdCBleGlzdHMgZXhhY3RseSBvbmNlCmFzc2VydF9vbmUoYW5jaG9yLCAibGlzdF9kZWwgYW5jaG9yIikKYWxsb2MgPSAoCiAgICAnXG4nCiAgICAnXHQvKiBGLTA2OTogYWxsb2NhdGUgMjU2QiBERFIgbWlzcyBjb250ZXh0ICsgMTZCIE1VUkFNIHRfRXh0SGFzaFJlc3VsdCAqL1xuJwogICAgJ1x0cGNkLT5taXNzX2N0eCA9IGRtYV9hbGxvY19jb2hlcmVudCh0LT5kZXYsIDI1NiwgJnBjZC0+bWlzc19jdHhfcGh5cywgR0ZQX0tFUk5FTCk7XG4nCiAgICAnXHRpZiAoIXBjZC0+bWlzc19jdHgpXG4nCiAgICAnXHRcdHJldHVybiAtRU5PTUVNO1xuJwogICAgJ1x0cGNkLT5taXNzX3Jlc19vZmYgPSBmbWFuX3BjZF9tdXJhbV9hbGxvYyhwY2QsIDE2KTtcbicKICAgICdcdGlmIChJU19FUlJfVkFMVUUocGNkLT5taXNzX3Jlc19vZmYpKSB7XG4nCiAgICAnXHRcdGRtYV9mcmVlX2NvaGVyZW50KHQtPmRldiwgMjU2LCBwY2QtPm1pc3NfY3R4LCBwY2QtPm1pc3NfY3R4X3BoeXMpO1xuJwogICAgJ1x0XHRwY2QtPm1pc3NfY3R4ID0gTlVMTDtcbicKICAgICdcdFx0cmV0dXJuIC1FTk9NRU07XG4nCiAgICAnXHR9XG4nCiAgICAnXHQvKiBXcml0ZSB0X0V4dEhhc2hSZXN1bHQ6IHtMSU9ETj0wfHBoeXNfaGksIHBoeXNfbG8sIDAsIDB9ICovXG4nCiAgICAnXHR7XG4nCiAgICAnXHRcdHZvaWQgX19pb21lbSAqbXIgPSAodm9pZCBfX2lvbWVtICopZm1hbl9tdXJhbV9vZmZzZXRfdG9fdmJhc2UobXVyYW0sIHBjZC0+bWlzc19yZXNfb2ZmKTtcbicKICAgICdcdFx0dTMyIHBsbyA9ICh1MzIpKHBjZC0+bWlzc19jdHhfcGh5cyAmIDB4RkZGRkZGRkYpO1xuJwogICAgJ1x0XHR1MzIgcGhpID0gKHUzMikoKHBjZC0+bWlzc19jdHhfcGh5cyA+PiAzMikgJiAweEZGRkYpO1xuJwogICAgJ1x0XHRpb3dyaXRlMzJiZShwaGksIG1yICsgMCk7XG4nCiAgICAnXHRcdGlvd3JpdGUzMmJlKHBsbywgbXIgKyA0KTtcbicKICAgICdcdFx0aW93cml0ZTMyYmUoMCwgbXIgKyA4KTtcbicKICAgICdcdFx0aW93cml0ZTMyYmUoMCwgbXIgKyAxMik7XG4nCiAgICAnXHR9XG4nCikKc3JjID0gc3JjLnJlcGxhY2UoYW5jaG9yLCBhbmNob3IgKyBhbGxvYywgMSkKY2hhbmdlZCArPSAxCnByaW50KCIjIyMgRi0wNjk6IEREUiBtaXNzIGNvbnRleHQgKyBNVVJBTSByZXN1bHQgYWxsb2NhdGVkIikKCiMgNi4gRnJlZSBpbiBmbWFuX3BjZF9mZV9oYXNoX2ZyZWUsIG5leHQgdG8gcGNkLT5mZV9oYXNoX29mZiA9IDAKYW5jaG9yID0gJ3BjZC0+ZmVfaGFzaF9vZmYgPSAwOycKYXNzZXJ0X29uZShhbmNob3IsICJmcmVlIGFuY2hvciIpCmZyZWVfY29kZSA9ICgKICAgICdcbicKICAgICdcdC8qIEYtMDY5OiBmcmVlIG1pc3MgY29udGV4dCAqL1xuJwogICAgJ1x0aWYgKHBjZC0+bWlzc19jdHgpIHtcbicKICAgICdcdFx0ZG1hX2ZyZWVfY29oZXJlbnQodC0+ZGV2LCAyNTYsIHBjZC0+bWlzc19jdHgsIHBjZC0+bWlzc19jdHhfcGh5cyk7XG4nCiAgICAnXHRcdHBjZC0+bWlzc19jdHggPSBOVUxMO1xuJwogICAgJ1x0fVxuJwogICAgJ1x0Zm1hbl9wY2RfbXVyYW1fZnJlZShwY2QsIHBjZC0+bWlzc19yZXNfb2ZmLCAxNik7XG4nCiAgICAnXHRwY2QtPm1pc3NfcmVzX29mZiA9IDA7XG4nCikKc3JjID0gc3JjLnJlcGxhY2UoYW5jaG9yLCBhbmNob3IgKyBmcmVlX2NvZGUsIDEpCmNoYW5nZWQgKz0gMQpwcmludCgiIyMjIEYtMDY5OiBmcmVlIG1pc3MgY29udGV4dCBvbiB0ZWFyZG93biIpCgp3aXRoIG9wZW4ocGF0aCwgInciKSBhcyBmOgogICAgZi53cml0ZShzcmMpCnByaW50KGYiIyMjIEYtMDY5OiBhcHBsaWVkIHtjaGFuZ2VkfSBjaGFuZ2VzIChtaXNzUmVzIHc0ICsgRERSIGNvbnRleHQpIikK' | base64 -d | python3
+    echo "### F-069: MISS context + DDR alloc (count-asserted anchors)"
 fi
 
 # F-040/F-002: fman_pcd.c post-patch MURAM zeroing + leak fix.
@@ -1565,124 +1564,25 @@ fi
 
 fi
 
-# F-062a: Reverse F-059 — route HIT to MUX→ENQ→FQ 0x200, not EXIT.
-# EXIT returns to the scheme which has fqb=0 → BMI stall.  HIT through
-# MUX→ENQ bypasses the scheme entirely: the ENQ AD word 2 has FQID 0x200
-# (F-058) and QMan handles buffer release properly.  MISS still goes to
-# EXIT (hash FE word 6 unchanged); we fix that via F-062b below.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    sed -i 's/pcd->fe_exit_off,/pcd->fe_mux_off,/' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo "### fman_pcd.c: F-062a HIT route changed from EXIT to MUX→ENQ"
-fi
+# F-062a DELETED — was a functional no-op. The sed s/pcd->fe_exit_off,/pcd->fe_mux_off,/
+# never matched because the hash FE encode call uses named parameters split across
+# two lines. w5 was already MUX from patch 0131.
 
-# F-062b DISABLED: The hardcoded fqb=0x200 override is WRONG — FQ 0x200
-# is not allocated by the kernel for every port (only for port 3 / eth3 where
-# it happens to be in the PCD range 512-639).  For other ports, dispatching
-# deallocated frames to FQ 0x200 hits an uninitialized QMan FQ → corruption
-# → kernel panic in dpaa_cleanup_tx_fd.
-#
-# Instead, let the kernel's original keygen_port_hashing_init() set the
-# correct per-port fqb.  After FE-VM processing (with DEALLOCATE stripped by
-# F-062e), the scheme dispatches the intact frame to the kernel's own default
-# RX FQ — the kernel polls it, receives the frame, and handles buffer lifecycle.
-: 'F-062b-DISABLED'
-: 'if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then'
-: '    sed ...'
-: 'fi'
+# F-062b DISABLED — fqb=0x200 is per-port wrong.
 
-# F-062e v3: Strip FMAN_FE_EXIT_DEALLOCATE from both Transition and EXIT.
-# Per NXP FMan 210.10.1 architecture (Qdrant: NXP ASK Offload Pipeline,
-# §7.2 t_ExtHashFe byte layout):
-#
-#   HIT:  EXT_HASH(w5 nextFEPtr) → MUX → Transition(AD_FROM_WS) → ENQ → QMan TX FQ → wire
-#   MISS: EXT_HASH(w6 missNextFE) → EXIT (pass-through) → scheme default NIA → kernel RX FQ
-#
-# The NXP production CDX data flow explicitly states:
-#   "MISS → default RX FQID → Linux kernel stack → netfilter → conntrack"
-#
-# EXIT with DEALLOCATE (0x00800000) frees the BMI frame buffer, but the
-# scheme's default NIA (BMI|ENQ_FRAME) still enqueues the FD to the kernel's
-# RX FQ.  The kernel's rx_default_dqrr then tries to build_skb from a
-# freed/reused buffer → corrupt BMan pointer → OOPS in kmem_cache_alloc_noprof.
-# Hardware-verified on 2026-07-15 (build 2026.07.15-0116, kernel 6.18.38-vyos).
-#
-# The EXIT singleton (§7.5, encoding 0x03000000) without DEALLOCATE is a
-# pass-through return from the FE-VM microcode.  The frame continues through
-# the scheme's default NIA to the kernel's RX FQ — the kernel polls it,
-# receives the frame, and handles the full buffer lifecycle.
-#
-# F-062e v1 (strip DEALLOCATE from both) was correct per NXP architecture.
-# F-062e v2 (restore DEALLOCATE on EXIT) was WRONG — produced the OOPS above.
-# F-062e v3: strip DEALLOCATE from BOTH Transition and EXIT.
-#
-# The Transition FE (§7.6, encoding 0x05400004) does NOT carry DEALLOCATE.
-# Transition reads next_ad_off from workspace[4] (set by MUX context builder,
-# F-062g routes to ENQ for HIT path).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    # Transition: strip DEALLOCATE, keep AD_FROM_WS
-    sed -i 's#p.flags = FMAN_FE_EXIT_DEALLOCATE | FMAN_FE_TRANSITION_AD_FROM_WS;#p.flags = FMAN_FE_TRANSITION_AD_FROM_WS;  /* F-062e: Transition no DEALLOCATE — HIT/MUX path only */#' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    # EXIT: strip DEALLOCATE — pass-through exit to scheme default NIA
-    # The patch 0124 sets p.flags = FMAN_FE_EXIT_DEALLOCATE; which includes DEALLOCATE.
-    # The sed below also catches any prior v2 sed residue.
-    sed -i 's#p.flags = FMAN_FE_EXIT_DEALLOCATE;  /* F-062e v2: DEALLOCATE provides terminal MISS disposition per NXP doc §7.4 */#p.flags = 0;  /* F-062e v3: pass-through EXIT — scheme default NIA delivers to kernel RX FQ per NXP arch */#' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    sed -i 's#p.flags = FMAN_FE_EXIT_DEALLOCATE;#p.flags = 0;  /* F-062e v3: pass-through EXIT — scheme NIA→kernel RX FQ per NXP arch */#' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo "### fman_pcd.c: F-062e v3 — Transition+EXIT both stripped of DEALLOCATE (NXP pass-through architecture)"
-fi
+# F-062e v3 DELETED — stripped DEALLOCATE from EXIT singleton. The NXP oracle
+# (LSDK 999-layerscape-ask ~14253) explicitly sets deallocateBuffer = TRUE on
+# the EXIT FE. Without DEALLOCATE, every frame through FE-VM leaks an FMan-internal
+# frame buffer → BMI depletion → port-wide RX starvation after disengage.
+# The original patch 0124 sets p.flags = FMAN_FE_EXIT_DEALLOCATE; which is correct.
 
-# F-062f REVERTED: The NXP FMan 210.10.1 architecture defines a binary
-# EXT_HASH dispatch: w5(nextFEPtr)=HIT→MUX, w6(missNextFE)=MISS→EXIT.
-# Routing w6→ENQ was a bisect test (non-compliant, reverted).
-#
-# The NXP-aligned setup per Qdrant:
-#   HIT:  EXT_HASH(w5)→MUX→Transition→ENQ→QMan TX FQ→wire
-#   MISS: EXT_HASH(w6)→EXIT(pass-through)→scheme default NIA→kernel RX FQ
-#
-# F-062g (below) handles the HIT path correctly.
-echo "### fman_pcd.c: F-062f REVERTED — w6 missNextFE points to EXIT per NXP §7.2"
+# F-062f REVERTED — w6 missNextFE points to EXIT per NXP §7.2.
 
-# F-062g: Route MUX context workspace[4] to ENQ for HIT path.
-# Per NXP FMan 210.10.1 architecture §7.2:
-#   HIT: EXT_HASH(w5)→MUX→Transition(AD_FROM_WS)→ENQ→QMan TX FQ→wire
-#
-# The MUX context builder writes the next-FE offset to Transition's
-# workspace at offset 4.  The Transition AD_FROM_WS reads workspace[4]
-# to find the next FE descriptor in the chain.
-#
-# Before: workspace[4] = fe_exit_off → HIT frames went to EXIT (now pass-through,
-#         would deliver to kernel RX FQ — same as MISS, wrong).
-# After:  workspace[4] = enq->muram_off → HIT frames go to ENQ→wire (correct).
-#
-# The enq variable is in scope from the ENQ context build block
-# (patch 0146 context builder).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 -c "
-import sys
-path = 'drivers/net/ethernet/freescale/fman/fman_pcd.c'
-with open(path) as f:
-    src = f.read()
+# F-062g DELETED — was a functional no-op. The sed on Transition context builder
+# never matched because the pattern uses different variable naming than the actual
+# patch 0146 code.
 
-old = 'p.u.transition.next_ad_off = pcd->fe_exit_off;'
-new = 'p.u.transition.next_ad_off = enq ? enq->muram_off : pcd->fe_exit_off;  /* F-062g: HIT→ENQ per NXP arch */'
-
-if old in src:
-    src = src.replace(old, new, 1)
-    with open(path, 'w') as f:
-        f.write(src)
-    print('### fman_pcd.c: F-062g Transition→ENQ routing applied')
-elif 'F-062g' in src:
-    print('### fman_pcd.c: F-062g already applied')
-else:
-    print('### fman_pcd.c: F-062g pattern NOT FOUND — Transition context signature changed', file=sys.stderr)
-"
-fi
-
-# F-062d-DISABLED: The ENQ ALLOCATE flag (FMAN_AD_FE_ENTER_ALLOCATE = 0x00800000)
-# on the ENQ FE may deallocate the frame buffer that QMan later tries to free
-# during confirmation FQ processing → dpaa_cleanup_tx_fd crash.
+# F-062d DISABLED — ENQ ALLOCATE deallocates frame buffers QMan later needs.
 #
 # F-062f routes MISS→ENQ directly (bypassing EXIT).  With ENQ ALLOCATE
 # active, the test was clean (engage→ping→disengage OK) but board crashed
