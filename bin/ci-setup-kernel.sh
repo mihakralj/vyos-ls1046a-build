@@ -1194,6 +1194,96 @@ fi
 # Fix dropped board patches: use sed injection instead of raw patch
 # (raw patch -p1 silently drops hunks when line numbers drift in kernel 6.18)
 
+# F-068: Switch from AC_CC to CCBS dispatch mode per NXP ASK architecture.
+# AC_CC was DISPROVEN on LS1046A (ask20 patch 0043/0051). CCBS
+# (next_engine=2, kgse_ccbs=group_table) matched 24M+ frames in PR14z22.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 <<'F068EOF'
+import sys
+path = "drivers/net/ethernet/freescale/fman/fman_pcd.c"
+with open(path) as f:
+    src = f.read()
+changed = 0
+
+# 1. next_engine: 3 -> 2
+new = src.replace(
+    "slot->next_engine    = 3;",
+    "slot->next_engine    = 2;  /* F-068: CCBS per ask20 */",
+    1)
+if new != src:
+    changed += 1
+    print("### F-068: next_engine 3->2")
+src = new
+
+# 2. CC group table + CC node allocation
+old_b = "slot->cc_base_offset = 0;"
+new_b = (
+    "/* F-068: CC group table (36B: 16B CONT_LOOKUP AD + 20B CC node) */\n"
+    "{\n"
+    "\tstruct muram_info *muram = fman_get_muram(fman);\n"
+    "\tif (muram) {\n"
+    "\t\tunsigned long gro = fman_pcd_muram_alloc(pcd, 36);\n"
+    "\t\tif (!IS_ERR_VALUE(gro)) {\n"
+    "\t\t\tvoid __iomem *g = (void __iomem *)fman_muram_offset_to_vbase(muram, gro);\n"
+    "\t\t\tiowrite32be(0, g + 0);\n"
+    "\t\t\tiowrite32be(gro + 16, g + 4);\n"
+    "\t\t\tiowrite32be(0x40000000, g + 8);\n"
+    "\t\t\tiowrite32be(0, g + 12);\n"
+    "\t\t\tiowrite32be(0x80000000, g + 16);\n"
+    "\t\t\tiowrite32be((u32)fe_enter_off, g + 20);\n"
+    "\t\t\tiowrite32be(0, g + 24);\n"
+    "\t\t\tiowrite32be(0, g + 28);\n"
+    "\t\t\tiowrite32be(0, g + 32);\n"
+    "\t\t\tslot->cc_base_offset = gro;\n"
+    "\t\t}\n"
+    "\t}\n"
+    "}\n"
+)
+if old_b in src:
+    src = src.replace(old_b, new_b, 1)
+    changed += 1
+    print("### F-068: CC group table allocated")
+else:
+    print("### F-068: cc_base_offset pattern NOT FOUND", file=sys.stderr)
+
+# 3. Remove set_cc_base (not needed in CCBS)
+old_c = """\
+	rxport = fman_port_lookup_rx(fman, hw_port_id);
+	if (!rxport)
+		return -ENODEV;
+	err = fman_port_set_cc_base(rxport, fe_enter_off);
+	if (err) {
+		mutex_lock(lock);
+		slot = kg_find_port_scheme(keygen, hw_port_id, &id);
+		if (slot) {
+			slot->next_engine = *saved_engine;
+			slot->cc_bits_sel = 0;
+			slot->used = false;
+			(void)keygen_scheme_setup(keygen, id, true);
+		}
+		mutex_unlock(lock);
+		return err;
+	}"""
+new_c = (
+    "/* F-068: CCBS mode — CC engine intercepts via kgse_ccbs, not RCCB */\n"
+)
+if old_c in src:
+    src = src.replace(old_c, new_c, 1)
+    changed += 1
+    print("### F-068: removed fman_port_set_cc_base")
+else:
+    print("### F-068: set_cc_base pattern NOT FOUND", file=sys.stderr)
+
+if changed > 0:
+    with open(path, "w") as f:
+        f.write(src)
+    print("### F-068: CCBS mode applied (%d changes)" % changed)
+else:
+    print("### F-068: NO CHANGES applied", file=sys.stderr)
+F068EOF
+    echo "### fman_pcd.c: F-068 CCBS dispatch mode (next_engine=2, CC group table)"
+fi
+
 # Patch 4009 equivalent: fix OEM SFP-10G-T quirk + add OEM SFP-10G-SR quirk
 if [ -f drivers/net/phy/sfp.c ]; then
     # Change sfp_fixup_rollball_cc to sfp_fixup_fs_10gt for OEM SFP-10G-T
@@ -1643,116 +1733,6 @@ fi
 : 'fi'
 
 echo "### fman_pcd.c: F-062d DISABLED (ENQ ALLOCATE may cause QMan FD corruption)"
-
-# F-068: Switch from AC_CC to CCBS dispatch mode per NXP ASK architecture.
-# AC_CC was DISPROVEN on LS1046A (ask20 patch 0043/0051).  CCBS
-# (next_engine=2, kgse_ccbs=group_table) is the working approach that
-# matched 24M+ frames in ask20 PR14z22.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 <<'PYEOF'
-import sys
-path = "drivers/net/ethernet/freescale/fman/fman_pcd.c"
-with open(path) as f:
-    src = f.read()
-
-changed = 0
-
-# 1. next_engine: 3 -> 2 (CCBS mode)
-new = src.replace(
-    "slot->next_engine    = 3;",
-    "slot->next_engine    = 2;  /* F-068: CCBS mode per ask20 silicon proven */",
-    1)
-if new != src:
-    changed += 1
-    print("### fman_pcd.c: F-068 next_engine 3->2")
-src = new
-
-# 2. Add CC group table allocation, replace cc_base_offset=0
-old = "slot->cc_base_offset = 0;"
-new = (
-    "/* F-068: Allocate CC group table (16B CONT_LOOKUP AD + 20B CC node)\n"
-    " * in MURAM.  CONT_LOOKUP AD has numKeys=0, AD table at group+16.\n"
-    " * CC node: wildcard pass-through -> FE_ENTER.\n"
-    " * kgse_ccbs points here to trigger CCBS implicit walk.\n"
-    " */\n"
-    "{\n"
-    "\tstruct muram_info *muram = fman_get_muram(fman);\n"
-    "\tif (muram) {\n"
-    "\t\tunsigned long gro = fman_pcd_muram_alloc(pcd, 36);\n"
-    "\t\tif (!IS_ERR_VALUE(gro)) {\n"
-    "\t\t\tvoid __iomem *g = (void __iomem *)fman_muram_offset_to_vbase(muram, gro);\n"
-    "\t\t\t/* group table[0] = CONT_LOOKUP AD (16B) */\n"
-    "\t\t\tiowrite32be(0, g + 0);\n"
-    "\t\t\tiowrite32be(gro + 16, g + 4);\n"
-    "\t\t\tiowrite32be(0x40000000, g + 8);\n"
-    "\t\t\tiowrite32be(0, g + 12);\n"
-    "\t\t\t/* AD table[0] = CC node (20B) pass-through */\n"
-    "\t\t\tiowrite32be(0x80000000, g + 16);\n"
-    "\t\t\tiowrite32be((u32)fe_enter_off, g + 20);\n"
-    "\t\t\tiowrite32be(0, g + 24);\n"
-    "\t\t\tiowrite32be(0, g + 28);\n"
-    "\t\t\tiowrite32be(0, g + 32);\n"
-    "\t\t\tslot->cc_base_offset = gro;\n"
-    "\t\t}\n"
-    "\t}\n"
-    "}\n"
-)
-if old in src:
-    src = src.replace(old, new, 1)
-    changed += 1
-    print("### fman_pcd.c: F-068 CC group table + CC node allocated")
-else:
-    print("### fman_pcd.c: F-068 cc_base_offset pattern NOT FOUND", file=sys.stderr)
-
-# 3. Remove fman_port_set_cc_base call (not needed in CCBS)
-old2 = """\
-	rxport = fman_port_lookup_rx(fman, hw_port_id);
-	if (!rxport)
-		return -ENODEV;
-	err = fman_port_set_cc_base(rxport, fe_enter_off);
-	if (err) {
-		mutex_lock(lock);
-		slot = kg_find_port_scheme(keygen, hw_port_id, &id);
-		if (slot) {
-			slot->next_engine = *saved_engine;
-			slot->cc_bits_sel = 0;
-			slot->used = false;
-			(void)keygen_scheme_setup(keygen, id, true);
-		}
-		mutex_unlock(lock);
-		return err;
-	}"""
-new2 = "/* F-068: CCBS mode — no RCCB change needed.\n * The CCBS engine intercepts via kgse_ccbs, not RCCB.\n */"
-if old2 in src:
-    src = src.replace(old2, new2, 1)
-    changed += 1
-    print("### fman_pcd.c: F-068 removed fman_port_set_cc_base (not needed)")
-else:
-    print("### fman_pcd.c: F-068 set_cc_base pattern NOT FOUND", file=sys.stderr)
-
-# 4. Change disengage to free group table
-old3 = """\
-	rxport = fman_port_lookup_rx(fman, hw_port_id);
-
-	if (rxport)
-		(void)fman_port_set_cc_base(rxport, 0);"""
-new3 = "/* F-068: CCBS mode — no RCCB to clear. */"
-if old3 in src:
-    src = src.replace(old3, new3, 1)
-    changed += 1
-    print("### fman_pcd.c: F-068 disarm: removed cc_base clear")
-else:
-    print("### fman_pcd.c: F-068 disarm pattern NOT FOUND — may already be fixed", file=sys.stderr)
-
-if changed > 0:
-    with open(path, "w") as f:
-        f.write(src)
-    print("### fman_pcd.c: F-068 CCBS mode applied (%d changes)" % changed)
-else:
-    print("### fman_pcd.c: F-068 NO CHANGES applied", file=sys.stderr)
-PYEOF
-    echo "### fman_pcd.c: F-068 CCBS dispatch mode (next_engine=2, CC group table)"
-fi
 
 # M2-4: free params page on disengage (was leaking 256 B per cycle)
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
