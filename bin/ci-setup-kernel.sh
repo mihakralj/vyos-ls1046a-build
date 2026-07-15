@@ -1581,16 +1581,29 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-062e v2 — Transition no DEALLOCATE, EXIT DEALLOCATE RESTORED (terminal disposition)"
 fi
 
-# F-062f: Route EXT_HASH MISS directly to ENQ (0x55500), bypassing EXIT and
-# scheme dispatch.  This tests whether the BMI stall is in the EXT_HASH FE
-# itself or in the EXIT→scheme post-FE-VM dispatch path.
+# F-062f REVERTED: The NXP FMan 210.10.1 architecture defines a binary
+# EXT_HASH dispatch (w5=HIT→MUX, w6=MISS→EXIT).  Routing w6→ENQ was a
+# bisect test that proved successful (clean engage/ping/disengage) but
+# non-compliant with the documented architecture.
 #
-# The CONT_LOOKUP pass-through (working July 10 7.37 Gbps baseline) used
-# FE_ENTER→ENQ directly without EXT_HASH or EXIT.  This fixup makes
-# EXT_HASH(MISS)→ENQ the equivalent test for the full FE-VM chain.
+# The correct setup per NXP reference stored in Qdrant:
+#   HIT:  EXT_HASH(w5)→MUX→Transition→ENQ→QMan FQ
+#   MISS: EXT_HASH(w6)→EXIT(DEALLOCATE)→terminal disposition
 #
-# MISS frames go: KG→FE_ENTER→EXT_HASH(MISS)→ENQ→FQ 0x200 (QMan enqueue).
-# No EXIT, no scheme dispatch, no fqb involvement.
+# F-062f is replaced by F-062g below: correct Transition routing → ENQ.
+echo "### fman_pcd.c: F-062f REVERTED — architecture requires word6→EXIT (see F-062g)"
+
+# F-062g: Route Transition workspace next_ad_off from EXIT to ENQ.
+# Per NXP FMan 210.10.1 architecture: HIT frames go EXT_HASH→MUX→ENQ.
+# The MUX chains to Transition(AD_FROM_WS) which reads the next action
+# descriptor from the FE workspace at offset 4.  The workspace must point
+# to the ENQ FE, not the EXIT FE.
+#
+# Before: Transition workspace[4] = pcd->fe_exit_off → chains to EXIT (wrong)
+# After:  Transition workspace[4] = enq->muram_off → chains to ENQ (correct)
+#
+# The enq variable is already in scope from the ENQ context build block
+# immediately above (patch 0146 line 48).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 -c "
 import sys
@@ -1598,16 +1611,18 @@ path = 'drivers/net/ethernet/freescale/fman/fman_pcd.c'
 with open(path) as f:
     src = f.read()
 
-old = 'pcd->fe_mux_off, pcd->fe_exit_off);'
-new = 'pcd->fe_mux_off, 0x00055500 /* F-062f: MISS→ENQ, bypass EXIT+scheme */);'
+old = 'p.u.transition.next_ad_off = pcd->fe_exit_off;'
+new = 'p.u.transition.next_ad_off = enq ? enq->muram_off : pcd->fe_exit_off;  /* F-062g: HIT→ENQ per NXP arch */'
 
 if old in src:
     src = src.replace(old, new, 1)
     with open(path, 'w') as f:
         f.write(src)
-    print('### fman_pcd.c: F-062f hash MISS routed to ENQ 0x55500 (bypass EXIT+scheme)')
+    print('### fman_pcd.c: F-062g Transition→ENQ routing applied')
+elif 'F-062g' in src:
+    print('### fman_pcd.c: F-062g already applied')
 else:
-    print('### fman_pcd.c: F-062f pattern NOT FOUND — already applied or hash encode signature changed', file=sys.stderr)
+    print('### fman_pcd.c: F-062g pattern NOT FOUND — Transition context signature changed', file=sys.stderr)
 "
 fi
 
