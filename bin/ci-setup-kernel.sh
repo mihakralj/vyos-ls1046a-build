@@ -1670,34 +1670,33 @@ src = new
 # 2. Add CC group table allocation, replace cc_base_offset=0
 old = "slot->cc_base_offset = 0;"
 new = """\
-	/*
-	 * F-068: Allocate CC group table (16B CONT_LOOKUP AD + 20B CC node)
-	 * in MURAM.  The CONT_LOOKUP AD has numKeys=0 (empty match table),
-	 * AD table at group_off+16 where the CC node lives.
-	 * CC node is a wildcard pass-through dispatching to FE_ENTER.
-	 * kgse_ccbs points here to trigger the CCBS implicit walk.
-	 */
-	{
-		struct muram_info *muram = fman_get_muram(fman);
-		if (muram) {
-			unsigned long gro = fman_pcd_muram_alloc(pcd, 36);
-			if (!IS_ERR_VALUE(gro)) {
-				void __iomem *g = (void __iomem *)fman_muram_offset_to_vbase(muram, gro);
-				/* group table[0] = CONT_LOOKUP AD (16B) */
-				iowrite32be(0, g + 0);        /* numKeys=0, matchTable=0 */
-				iowrite32be(gro + 16, g + 4);  /* adTable at group+16 */
-				iowrite32be(0x40000000, g + 8);/* CC AD type */
-				iowrite32be(0, g + 12);        /* reserved */
-				/* AD table[0] = CC node (20B) — pass-through */
-				iowrite32be(0x80000000, g + 16);/* valid bit */
-				iowrite32be((u32)fe_enter_off, g + 20);/* next0→FE_ENTER */
-				iowrite32be(0, g + 24);       /* next1=0 */
-				iowrite32be(0, g + 28);       /* key_val=0 (wildcard) */
-				iowrite32be(0, g + 32);       /* key_mask=0 (wildcard) */
-				slot->cc_base_offset = gro; /* kgse_ccbs→group table */
-			}
-		}
-	}
+/* F-068: Allocate CC group table (16B CONT_LOOKUP AD + 20B CC node)
+ * in MURAM.  The CONT_LOOKUP AD has numKeys=0 (empty match table),
+ * AD table at group_off+16 where the CC node lives.
+ * CC node is a wildcard pass-through dispatching to FE_ENTER.
+ * kgse_ccbs points here to trigger the CCBS implicit walk.
+ */
+{
+\tstruct muram_info *muram = fman_get_muram(fman);
+\tif (muram) {
+\t\tunsigned long gro = fman_pcd_muram_alloc(pcd, 36);
+\t\tif (!IS_ERR_VALUE(gro)) {
+\t\t\tvoid __iomem *g = (void __iomem *)fman_muram_offset_to_vbase(muram, gro);
+\t\t\t/* group table[0] = CONT_LOOKUP AD (16B) */
+\t\t\tiowrite32be(0, g + 0);
+\t\t\tiowrite32be(gro + 16, g + 4);
+\t\t\tiowrite32be(0x40000000, g + 8);
+\t\t\tiowrite32be(0, g + 12);
+\t\t\t/* AD table[0] = CC node (20B) pass-through */
+\t\t\tiowrite32be(0x80000000, g + 16);
+\t\t\tiowrite32be((u32)fe_enter_off, g + 20);
+\t\t\tiowrite32be(0, g + 24);
+\t\t\tiowrite32be(0, g + 28);
+\t\t\tiowrite32be(0, g + 32);
+\t\t\tslot->cc_base_offset = gro;
+\t\t}
+\t}
+}
 """
 if old in src:
     src = src.replace(old, new, 1)
