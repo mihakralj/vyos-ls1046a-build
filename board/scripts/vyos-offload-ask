@@ -3,7 +3,7 @@
 # Called from VyOS system_offload.py when "set system offload ask" is configured.
 # Writes to the FMan PCD debugfs nodes to build the FE chain and arm AC_CC.
 #
-# Usage: vyos-offload-ask [--port 0x10|0x11] engage|disengage
+# Usage: vyos-offload-ask [--port 0x10|0x11] [--gate-a] engage|disengage
 #
 # The engage sequence matches the debugfs bridge in ask_hw.c:
 #   fe_pool(get) -> fe_singletons(build) -> fe_ehash(set) -> fe_hashfe(build)
@@ -16,10 +16,12 @@ set -e
 
 PCD_BASE="/sys/kernel/debug/fman_pcd/0"
 PORT="0x11"  # default: eth4 (FMan MAC10, ethernet@f2000, RX BMI port 0x11)
+GATE_A=0     # --gate-a: skip ENQ, hash FE word6→EXIT (workspace pool isolation)
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --port) PORT="$2"; shift 2 ;;
+        --port)  PORT="$2"; shift 2 ;;
+        --gate-a) GATE_A=1; shift ;;
         *) break ;;
     esac
 done
@@ -30,12 +32,6 @@ die() { echo "ASK offload: $*" >&2; exit 1; }
 
 engage() {
     local enter_off
-    # F-072: fe_port set must run AFTER fe_arm engage because the params
-    # page (+0x54) is created during engage (patch 0116). Running it before
-    # silently fails — the handler returns success but doesn't arm the FE pool.
-    # Also runs fe_port del first to clear any stale state from pre-engage.
-    echo "del $PORT"   > "$PCD_BASE/fe_port"  2>/dev/null || true
-    echo "set $PORT"   > "$PCD_BASE/fe_port"  || die "fe_port set $PORT failed (post-engage)"
 
     echo "ASK offload: building FE-VM pipeline..."
     # 12-byte 4-tuple key (SIP+DIP+SPORT+DPORT) — matches EKFC=0x00180006
@@ -44,19 +40,27 @@ engage() {
     echo get   > "$PCD_BASE/fe_pool"         || die "fe_pool get failed"
     echo build > "$PCD_BASE/fe_singletons" 2>/dev/null || true
     echo build > "$PCD_BASE/fe_hashfe" 2>/dev/null || true
-    # F-054/F-070 v2: Use kernel's RX default FQID from /sys for eth4.
-    # The kernel polls this FQ via NAPI — MISS frames enqueued here reach the
-    # Linux network stack.  Fall back to 0x292 (658) if sysfs unavailable.
-    local rx_fqid_path
-    rx_fqid_path="/sys/devices/platform/soc/1a00000.fman/1af2000.ethernet/net/eth4/fqids"
-    local port_fqid_dec fqid_hex
-    if [ -r "$rx_fqid_path" ]; then
-        port_fqid_dec=$(awk '/^Rx default:/ {print $3}' "$rx_fqid_path")
-        fqid_hex=$(printf "%x" "$port_fqid_dec" 2>/dev/null || echo "200")
+
+    if [ "$GATE_A" -eq 1 ]; then
+        # Gate A: MISS→EXIT(DEALLOCATE) with pool armed.
+        # Skip ENQ build — hash FE word6 stays at EXIT.
+        # Frames are deallocated (ping loss expected), but port must
+        # NOT stall, and disengage must be clean.
+        echo "ASK offload: Gate A — MISS→EXIT (no ENQ, pool isolation test)"
+    else
+        # Gate B: MISS→ENQ(NIA)→EXIT (vendor encoding).
+        # F-054/F-070 v2: Use kernel's RX default FQID from /sys.
+        local rx_fqid_path
+        rx_fqid_path="/sys/devices/platform/soc/1a00000.fman/1af2000.ethernet/net/eth4/fqids"
+        local port_fqid_dec fqid_hex
+        if [ -r "$rx_fqid_path" ]; then
+            port_fqid_dec=$(awk '/^Rx default:/ {print $3}' "$rx_fqid_path")
+            fqid_hex=$(printf "%x" "$port_fqid_dec" 2>/dev/null || echo "200")
+        fi
+        ENQ_FQID="${fqid_hex:-200}"
+        echo "ASK offload: using FQID $ENQ_FQID (decimal $port_fqid_dec) for ENQ"
+        echo "build $ENQ_FQID" > "$PCD_BASE/fe_enq"  || die "fe_enq build failed"
     fi
-    ENQ_FQID="${fqid_hex:-200}"
-    echo "ASK offload: using FQID $ENQ_FQID (decimal $port_fqid_dec) for ENQ"
-    echo "build $ENQ_FQID" > "$PCD_BASE/fe_enq"  || die "fe_enq build failed"
     # F-045: fe_enter build with no argument defaults to hash frontend
     # (fe_hash_off) or MUX, not an invalid port-offset.
     echo "build" > "$PCD_BASE/fe_enter" 2>/dev/null || true
@@ -81,11 +85,15 @@ engage() {
 disengage() {
     echo "ASK offload: tearing down FE-VM pipeline..."
 
-    echo "disengage $PORT" > "$PCD_BASE/fe_arm" 2>/dev/null || true
+    # F-074: fe_port del MUST run BEFORE fe_arm disengage.
+    # Per oracle FmPortDeleteFESupport (999-patch ~L14604): clear params
+    # page +0x54 while it still exists, free pool, THEN detach PCD.
+    # The old order (disengage first) freed the params page, so fe_port
+    # del wrote to freed/garbage MURAM → crash.
     echo "del $PORT"   > "$PCD_BASE/fe_port"  2>/dev/null || true
+    echo "disengage $PORT" > "$PCD_BASE/fe_arm" 2>/dev/null || true
     echo clear > "$PCD_BASE/fe_flow"      2>/dev/null || true
     echo clear > "$PCD_BASE/fe_enter"     2>/dev/null || true
-    echo "del $PORT"   > "$PCD_BASE/fe_port"  2>/dev/null || true
     echo clear > "$PCD_BASE/fe_enq"       2>/dev/null || true
     echo clear > "$PCD_BASE/fe_hashfe"    2>/dev/null || true
     echo clear > "$PCD_BASE/fe_ehash"     2>/dev/null || true
@@ -143,5 +151,5 @@ case "${VERB:-status}" in
         fi
         ;;
     status)    status ;;
-    *)         echo "Usage: $0 {engage|disengage|status|flow-add|flow-del|flow-list|flow-stats}"; exit 1 ;;
+    *)         echo "Usage: $0 [--port 0x10|0x11] [--gate-a] {engage|disengage|status|flow-add|flow-del|flow-list|flow-stats}"; exit 1 ;;
 esac
