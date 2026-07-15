@@ -30,9 +30,14 @@ die() { echo "ASK offload: $*" >&2; exit 1; }
 
 engage() {
     local enter_off
-    echo "ASK offload: building FE-VM pipeline..."
+    # F-072: fe_port set must run AFTER fe_arm engage because the params
+    # page (+0x54) is created during engage (patch 0116). Running it before
+    # silently fails — the handler returns success but doesn't arm the FE pool.
+    # Also runs fe_port del first to clear any stale state from pre-engage.
+    echo "del $PORT"   > "$PCD_BASE/fe_port"  2>/dev/null || true
+    echo "set $PORT"   > "$PCD_BASE/fe_port"  || die "fe_port set $PORT failed (post-engage)"
 
-    echo "set $PORT"   > "$PCD_BASE/fe_port"  || die "fe_port set $PORT failed"
+    echo "ASK offload: building FE-VM pipeline..."
     # 12-byte 4-tuple key (SIP+DIP+SPORT+DPORT) — matches EKFC=0x00180006
     # NXP §7.2: contextSize MUST equal EKFC extracted key length
     echo "set 0x7FFF 12 0" > "$PCD_BASE/fe_ehash" || die "fe_ehash set failed"
