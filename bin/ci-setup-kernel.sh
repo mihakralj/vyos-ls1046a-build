@@ -1560,58 +1560,73 @@ fi
 : '    sed ...'
 : 'fi'
 
-# F-062e: Strip FMAN_FE_EXIT_DEALLOCATE from Transition only.
-# Per NXP FMan microcode 210.10.1 programming reference §7.1:
-#   EXIT type 0x03800000 = "Free workspace allocation, terminate frame.
-#   Terminal MISS disposition."
-# And §7.4: "EXIT-DEALLOCATE is a real terminal MISS disposition on
-#   210.10.1: AC_CC arm → MISS → EXIT → port does NOT park."
+# F-062e v3: Strip FMAN_FE_EXIT_DEALLOCATE from both Transition and EXIT.
+# Per NXP FMan 210.10.1 architecture (Qdrant: NXP ASK Offload Pipeline,
+# §7.2 t_ExtHashFe byte layout):
 #
-# The EXIT FE with DEALLOCATE (0x00800000) provides terminal BMI-FIFO
-# disposition — the FE-VM opcode interpreter handles final dispatch and
-# the scheme does NOT try to enqueue after EXIT returns.  No fqb needed.
+#   HIT:  EXT_HASH(w5 nextFEPtr) → MUX → Transition(AD_FROM_WS) → ENQ → QMan TX FQ → wire
+#   MISS: EXT_HASH(w6 missNextFE) → EXIT (pass-through) → scheme default NIA → kernel RX FQ
 #
-# The Transition FE (§7.6, encoding 0x05000000) does NOT carry DEALLOCATE
-# — deallocation is EXIT's responsibility.  Strip DEALLOCATE from Transition
-# only; RESTORE it on EXIT (undo the over-broad F-062e v1).
+# The NXP production CDX data flow explicitly states:
+#   "MISS → default RX FQID → Linux kernel stack → netfilter → conntrack"
 #
-# For Layer 1 HIT forwarding: MUX → Transition(AD_FROM_WS) → workspace points
-# to ENQ → dedicated TX FQ.
+# EXIT with DEALLOCATE (0x00800000) frees the BMI frame buffer, but the
+# scheme's default NIA (BMI|ENQ_FRAME) still enqueues the FD to the kernel's
+# RX FQ.  The kernel's rx_default_dqrr then tries to build_skb from a
+# freed/reused buffer → corrupt BMan pointer → OOPS in kmem_cache_alloc_noprof.
+# Hardware-verified on 2026-07-15 (build 2026.07.15-0116, kernel 6.18.38-vyos).
+#
+# The EXIT singleton (§7.5, encoding 0x03000000) without DEALLOCATE is a
+# pass-through return from the FE-VM microcode.  The frame continues through
+# the scheme's default NIA to the kernel's RX FQ — the kernel polls it,
+# receives the frame, and handles the full buffer lifecycle.
+#
+# F-062e v1 (strip DEALLOCATE from both) was correct per NXP architecture.
+# F-062e v2 (restore DEALLOCATE on EXIT) was WRONG — produced the OOPS above.
+# F-062e v3: strip DEALLOCATE from BOTH Transition and EXIT.
+#
+# The Transition FE (§7.6, encoding 0x05400004) does NOT carry DEALLOCATE.
+# Transition reads next_ad_off from workspace[4] (set by MUX context builder,
+# F-062g routes to ENQ for HIT path).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # Transition: strip DEALLOCATE, keep AD_FROM_WS
-    sed -i 's/p.flags = FMAN_FE_EXIT_DEALLOCATE | FMAN_FE_TRANSITION_AD_FROM_WS;/p.flags = FMAN_FE_TRANSITION_AD_FROM_WS;  \/\* F-062e: Transition no DEALLOCATE — EXIT handles terminal disposition \*\//' \
+    sed -i 's/p.flags = FMAN_FE_EXIT_DEALLOCATE | FMAN_FE_TRANSITION_AD_FROM_WS;/p.flags = FMAN_FE_TRANSITION_AD_FROM_WS;  \/\* F-062e: Transition no DEALLOCATE — HIT/MUX path only \*\//' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
-    # EXIT: RESTORE DEALLOCATE (undo the old strip)
-    # The patch 0124 sets p.flags = FMAN_FE_EXIT_DEALLOCATE; which is CORRECT.
-    # F-062e v1's sed changed it to p.flags = 0; — revert that change.
-    sed -i 's/p.flags = 0;  \/\* F-062e: no DEALLOCATE — scheme fqb owns buffer \*\//p.flags = FMAN_FE_EXIT_DEALLOCATE;  \/\* F-062e v2: DEALLOCATE provides terminal MISS disposition per NXP doc §7.4 \*\//' \
+    # EXIT: strip DEALLOCATE — pass-through exit to scheme default NIA
+    # The patch 0124 sets p.flags = FMAN_FE_EXIT_DEALLOCATE; which includes DEALLOCATE.
+    # The sed below also catches any prior v2 sed residue.
+    sed -i 's/p.flags = FMAN_FE_EXIT_DEALLOCATE;  \/\* F-062e v2: DEALLOCATE provides terminal MISS disposition per NXP doc §7.4 \*\//p.flags = 0;  \/\* F-062e v3: pass-through EXIT — scheme default NIA delivers to kernel RX FQ per NXP arch \*\//' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo "### fman_pcd.c: F-062e v2 — Transition no DEALLOCATE, EXIT DEALLOCATE RESTORED (terminal disposition)"
+    sed -i 's/p.flags = FMAN_FE_EXIT_DEALLOCATE;/p.flags = 0;  \/\* F-062e v3: pass-through EXIT — scheme NIA→kernel RX FQ per NXP arch \*\//' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    echo "### fman_pcd.c: F-062e v3 — Transition+EXIT both stripped of DEALLOCATE (NXP pass-through architecture)"
 fi
 
 # F-062f REVERTED: The NXP FMan 210.10.1 architecture defines a binary
-# EXT_HASH dispatch (w5=HIT→MUX, w6=MISS→EXIT).  Routing w6→ENQ was a
-# bisect test that proved successful (clean engage/ping/disengage) but
-# non-compliant with the documented architecture.
+# EXT_HASH dispatch: w5(nextFEPtr)=HIT→MUX, w6(missNextFE)=MISS→EXIT.
+# Routing w6→ENQ was a bisect test (non-compliant, reverted).
 #
-# The correct setup per NXP reference stored in Qdrant:
-#   HIT:  EXT_HASH(w5)→MUX→Transition→ENQ→QMan FQ
-#   MISS: EXT_HASH(w6)→EXIT(DEALLOCATE)→terminal disposition
+# The NXP-aligned setup per Qdrant:
+#   HIT:  EXT_HASH(w5)→MUX→Transition→ENQ→QMan TX FQ→wire
+#   MISS: EXT_HASH(w6)→EXIT(pass-through)→scheme default NIA→kernel RX FQ
 #
-# F-062f is replaced by F-062g below: correct Transition routing → ENQ.
-echo "### fman_pcd.c: F-062f REVERTED — architecture requires word6→EXIT (see F-062g)"
+# F-062g (below) handles the HIT path correctly.
+echo "### fman_pcd.c: F-062f REVERTED — w6 missNextFE points to EXIT per NXP §7.2"
 
-# F-062g: Route Transition workspace next_ad_off from EXIT to ENQ.
-# Per NXP FMan 210.10.1 architecture: HIT frames go EXT_HASH→MUX→ENQ.
-# The MUX chains to Transition(AD_FROM_WS) which reads the next action
-# descriptor from the FE workspace at offset 4.  The workspace must point
-# to the ENQ FE, not the EXIT FE.
+# F-062g: Route MUX context workspace[4] to ENQ for HIT path.
+# Per NXP FMan 210.10.1 architecture §7.2:
+#   HIT: EXT_HASH(w5)→MUX→Transition(AD_FROM_WS)→ENQ→QMan TX FQ→wire
 #
-# Before: Transition workspace[4] = pcd->fe_exit_off → chains to EXIT (wrong)
-# After:  Transition workspace[4] = enq->muram_off → chains to ENQ (correct)
+# The MUX context builder writes the next-FE offset to Transition's
+# workspace at offset 4.  The Transition AD_FROM_WS reads workspace[4]
+# to find the next FE descriptor in the chain.
 #
-# The enq variable is already in scope from the ENQ context build block
-# immediately above (patch 0146 line 48).
+# Before: workspace[4] = fe_exit_off → HIT frames went to EXIT (now pass-through,
+#         would deliver to kernel RX FQ — same as MISS, wrong).
+# After:  workspace[4] = enq->muram_off → HIT frames go to ENQ→wire (correct).
+#
+# The enq variable is in scope from the ENQ context build block
+# (patch 0146 context builder).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 -c "
 import sys

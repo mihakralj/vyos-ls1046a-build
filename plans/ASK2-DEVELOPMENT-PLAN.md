@@ -608,6 +608,39 @@ REPLACE handler automation:
 using sed injection instead of .patch files for small, well-bounded source
 modifications.
 
+## §9 2026-07-14: Board .185 DAC Confirmed — Dual-Port Topology Unblocked
+
+**[SPEC] 2026-07-14 — Board .185 (kernel 6.18.38-vyos, ISO 2026.07.14-2236-rolling).**
+Both SFP+ ports confirmed DAC (`SFP-H10GB-CU1M`, `ethtool` reports `Port: Direct Attach Copper`),
+10G full-duplex, link up on eth3 and eth4:
+
+```
+eth3: SFP-H10GB-CU1M  sn CSC251022070171  Link is Up - 10Gbps/Full
+eth4: SFP-H10GB-CU1M  sn CSC240509160290  Link is Up - 10Gbps/Full
+```
+
+**[SPEC]**
+Previous analysis flagged an "eth3 copper SFP broken on kernel 6.18" blocker
+(RTL8261 rollball PHY I2C probe failure). That applies only to copper SFP modules,
+not DAC. Board .185 uses DAC on both cages → the blocker does **not** apply.
+The prior P4.1 throughput caveat — AC_CC ENQ sent frames back out the same port
+(eth4↔eth4 on one DAC) — is **resolved**. Proper multi-port topology is now
+available: **ingress on eth3 RX → AC_CC classify → FE-VM ehash HIT → ENQ →
+egress on eth4 TX**, disambiguating HW-forwarding throughput from kernel receive
+throughput.
+
+**[NOTE]**
+This is the same topology the NXP ASK parity test used (Board A → Board B across
+DAC). The entire M2→ASK-parity measurement chain is now unblocked on a single
+board pair.
+
+**[SPEC] ASK2 state after boot:**
+- ask.ko loaded (77824 bytes, refcount 1)
+- vyos-offload-ask: `ASK offload: NO (FE_ENTER root: 0x0)`
+- MURAM `used=0, free=65536, high-water=144`
+- pcd-snapshot: all 5 schemes `nia=0x02` (RSS), schemes 5-31 DISABLED
+- fe_* debugfs nodes present, no FE chain built (S0 pristine)
+
 ## §9 2026-07-05: Phase 1 AC_CC Arm Experiment — SATISFIED
 
 **Board:** DUT 192.168.1.185, kernel 6.18.36-vyos, ISO 2026.07.05-0730 (CI run 28733398715, dpaa1 branch).
