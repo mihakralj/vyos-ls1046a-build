@@ -65,6 +65,11 @@ engage() {
 
     echo "engage $PORT $enter_off" > "$PCD_BASE/fe_arm" || die "fe_arm engage failed"
 
+    # F-072: params page is created during fe_arm engage (patch 0116 ensure).
+    # fe_port set must run AFTER engage so the FE buffer pool is armed with
+    # a valid MURAM workspace pool — without this, every frame corrupts MURAM.
+    echo "set $PORT"   > "$PCD_BASE/fe_port"  || die "fe_port set $PORT failed (post-engage)"
+
     echo "ASK offload: ENGAGED on port $PORT, FE_ENTER=$enter_off (AC_CC)"
 }
 
