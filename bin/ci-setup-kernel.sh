@@ -1722,10 +1722,7 @@ old2 = """\
 		mutex_unlock(lock);
 		return err;
 	}"""
-new2 = """\
-	/* F-068: CCBS mode — no RCCB change needed.
-	 * The CCBS engine intercepts via kgse_ccbs, not RCCB.
-	 */"""
+new2 = "/* F-068: CCBS mode — no RCCB change needed.\n * The CCBS engine intercepts via kgse_ccbs, not RCCB.\n */"
 if old2 in src:
     src = src.replace(old2, new2, 1)
     changed += 1
@@ -1739,10 +1736,7 @@ old3 = """\
 
 	if (rxport)
 		(void)fman_port_set_cc_base(rxport, 0);"""
-new3 = """\
-	/* F-068: CCBS mode — no RCCB to clear.
-	 * TODO: free CC group table MURAM allocation.
-	 */"""
+new3 = "/* F-068: CCBS mode — no RCCB to clear. */"
 if old3 in src:
     src = src.replace(old3, new3, 1)
     changed += 1
