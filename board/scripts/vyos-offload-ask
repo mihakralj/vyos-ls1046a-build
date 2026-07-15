@@ -85,15 +85,13 @@ engage() {
 disengage() {
     echo "ASK offload: tearing down FE-VM pipeline..."
 
-    # F-074: fe_port del MUST run BEFORE fe_arm disengage.
-    # Per oracle FmPortDeleteFESupport (999-patch ~L14604): clear params
-    # page +0x54 while it still exists, free pool, THEN detach PCD.
-    # The old order (disengage first) freed the params page, so fe_port
-    # del wrote to freed/garbage MURAM → crash.
+    # F-075: fe_arm disengage (patch 0106 detach_cc) already frees FE_ENTER
+    # MURAM.  Writing "clear" to fe_enter after disengage double-frees it
+    # → gen_pool_free_owner BUG at lib/genalloc.c:508 (x19=FE_ENTER_off).
     echo "del $PORT"   > "$PCD_BASE/fe_port"  2>/dev/null || true
     echo "disengage $PORT" > "$PCD_BASE/fe_arm" 2>/dev/null || true
     echo clear > "$PCD_BASE/fe_flow"      2>/dev/null || true
-    echo clear > "$PCD_BASE/fe_enter"     2>/dev/null || true
+    # fe_enter clear NOT called — detach_cc already freed it
     echo clear > "$PCD_BASE/fe_enq"       2>/dev/null || true
     echo clear > "$PCD_BASE/fe_hashfe"    2>/dev/null || true
     echo clear > "$PCD_BASE/fe_ehash"     2>/dev/null || true
