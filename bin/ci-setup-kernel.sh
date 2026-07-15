@@ -1095,7 +1095,7 @@ PATTERN = re.compile(
     r"done\n",
 )
 
-REPLACEMENT = SENTINEL + """
+REPLACEMENT = SENTINEL + '''
 # Initialise the kernel source tree as a throwaway git repo so that
 # `git apply --3way` can fall back to a real 3-way merge using the
 # pre-patch blobs in object storage when context drifts.
@@ -1767,7 +1767,7 @@ fi
 fi  # close M2-4 fman_port.c if (line 1212)
 
 # === end ls1046a-build patch-loop replacement ===
-"""
+'''
 
 new, n = PATTERN.subn(lambda m: REPLACEMENT, src, count=1)
 if n == 0:
