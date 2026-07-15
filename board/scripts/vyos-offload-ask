@@ -85,20 +85,27 @@ engage() {
 disengage() {
     echo "ASK offload: tearing down FE-VM pipeline..."
 
-    # F-075: fe_arm disengage (patch 0106 detach_cc) already frees FE_ENTER
-    # MURAM.  Writing "clear" to fe_enter after disengage double-frees it
-    # → gen_pool_free_owner BUG at lib/genalloc.c:508 (x19=FE_ENTER_off).
+    # F-074: fe_port del MUST run BEFORE fe_arm disengage.
+    # Per oracle FmPortDeleteFESupport: clear params +0x54 while it
+    # still exists, free pool, THEN detach PCD.
+    #
+    # F-075: Only these two calls. All explicit debugfs clears
+    # (fe_enter, fe_enq, fe_hashfe, fe_singletons, fe_pool) are
+    # potential double-frees because fe_arm disengage (patch 0106
+    # detach_cc) already frees those MURAM objects — but does not
+    # update fe_arm.engaged software state.  Re-clearing them
+    # hits gen_pool_free_owner BUG at lib/genalloc.c:508.
+    #
+    # KNOWN ISSUE: After disengage, port RX stays broken (port
+    # deafness).  pcd-snapshot confirms hardware state is clean
+    # (schemes=RSS, RCCB=0), but RX remains at zero.  This is a
+    # kernel-side bug in detach_cc — the KG scheme restoration
+    # is incomplete for 10G FMan ports.  Cold boot required to
+    # recover RX after ANY engage→disengage cycle.
     echo "del $PORT"   > "$PCD_BASE/fe_port"  2>/dev/null || true
     echo "disengage $PORT" > "$PCD_BASE/fe_arm" 2>/dev/null || true
-    echo clear > "$PCD_BASE/fe_flow"      2>/dev/null || true
-    # fe_enter clear NOT called — detach_cc already freed it
-    echo clear > "$PCD_BASE/fe_enq"       2>/dev/null || true
-    echo clear > "$PCD_BASE/fe_hashfe"    2>/dev/null || true
-    echo clear > "$PCD_BASE/fe_ehash"     2>/dev/null || true
-    echo clear > "$PCD_BASE/fe_singletons" 2>/dev/null || true
-    echo put   > "$PCD_BASE/fe_pool"      2>/dev/null || true
 
-    echo "ASK offload: DISENGAGED"
+    echo "ASK offload: DISENGAGED (cold boot required to recover port RX)"
 }
 
 status() {
