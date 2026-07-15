@@ -1200,39 +1200,48 @@ fi
 # error per specs/fman-keygen-flow-key-spec.md v2.0 §5. The crash root cause is not the
 # dispatch mode but the missing missResult/w4 causing wild DMA (fix follows separately).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    # 1. Revert next_engine 2 → 3
+    sed -i 's/slot->next_engine    = 2;/slot->next_engine    = 3;/' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    # 2. Revert CC group table → cc_base_offset = 0
+    #    F-068 replaced "slot->cc_base_offset = 0;" with a multi-line block
+    #    starting with "/* F-068: CC group table". Revert by finding the
+    #    start comment and replacing the entire block.
     python3 -c "
 import sys, re
-path = 'drivers/net/ethernet/freescale/fman/fman_pcd.c'
-with open(path) as f: src = f.read()
-changed = 0
-
-# 1. Revert next_engine 2 → 3
-n1 = src.replace('slot->next_engine    = 2;', 'slot->next_engine    = 3;', 1)
-if n1 != src:
-    changed += 1; print('### F-068-REVERT: next_engine 2→3')
-src = n1
-
-# 2. Revert CC group table allocation → simple cc_base_offset = 0
-# Match the F-068-injected block (has 'F-068: CC group table' comment)
-cc_pat = re.compile(r'/\* F-068: CC group table \+ CC node per ask20 CCBS.*?\n\s*\}\n', re.DOTALL)
-m = cc_pat.search(src)
-if m:
-    src = src[:m.start()] + 'slot->cc_base_offset = 0;' + src[m.end():]
-    changed += 1; print('### F-068-REVERT: CC group table → cc_base_offset=0')
-
-# 3. Restore RCCB code (undo stub)
-stub = '/* F-068: CCBS mode — no RCCB */\n\treturn 0; // F-068 stub'
-original_rccb = 'rxport = fman_port_lookup_rx(fman, hw_port_id);\n\tif (!rxport)\n\t\treturn -ENODEV;\n\terr = fman_port_set_cc_base(rxport, fe_enter_off);'
-if stub in src:
-    src = src.replace(stub, original_rccb, 1)
-    changed += 1; print('### F-068-REVERT: RCCB code restored')
-
-if changed > 0:
-    with open(path, 'w') as f: f.write(src)
-    print(f'### F-068-REVERT: AC_CC restored ({changed} changes)')
+p = 'drivers/net/ethernet/freescale/fman/fman_pcd.c'
+with open(p) as f: s = f.read()
+# Find F-068 block start and replace everything through the closing brace+blank line
+pat = re.compile(r'/\* F-068: CC group table .*?\n\s*\}\n', re.DOTALL)
+if pat.search(s):
+    s = pat.sub('slot->cc_base_offset = 0;', s, count=1)
+    with open(p, 'w') as f: f.write(s)
+    print('### F-068-REVERT: CC group table → cc_base_offset=0')
 else:
-    print('### F-068-REVERT: already at AC_CC baseline')
+    print('### F-068-REVERT: CC group table already reverted')
 " 2>&1
+    # 3. Restore RCCB code
+    sed -i 's|/\* F-068: CCBS mode . no RCCB \*/\n\treturn 0; // F-068 stub|rxport = fman_port_lookup_rx(fman, hw_port_id);\n\tif (!rxport)\n\t\treturn -ENODEV;\n\terr = fman_port_set_cc_base(rxport, fe_enter_off);|' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c 2>/dev/null || {
+        # sed multi-line failed, try python
+        python3 -c "
+p = 'drivers/net/ethernet/freescale/fman/fman_pcd.c'
+with open(p) as f: s = f.read()
+stub = '/* F-068: CCBS mode'
+orig = 'rxport = fman_port_lookup_rx(fman, hw_port_id);'
+if stub in s and orig not in s:
+    # Replace the stub line + next line (return 0;) with original RCCB code
+    old = '/* F-068: CCBS mode — no RCCB */\n\treturn 0; // F-068 stub'
+    new2 = 'rxport = fman_port_lookup_rx(fman, hw_port_id);\n\tif (!rxport)\n\t\treturn -ENODEV;\n\terr = fman_port_set_cc_base(rxport, fe_enter_off);'
+    s = s.replace(old, new2, 1)
+    with open(p, 'w') as f: f.write(s)
+    print('### F-068-REVERT: RCCB code restored (python)')
+elif orig in s:
+    print('### F-068-REVERT: RCCB already restored')
+else:
+    print('### F-068-REVERT: RCCB stub not found')
+" 2>&1
+    }
     echo "### F-068-REVERT: AC_CC dispatch (next_engine=3, RCCB→FE_ENTER)"
 fi
 
