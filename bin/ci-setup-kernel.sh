@@ -1095,7 +1095,7 @@ PATTERN = re.compile(
     r"done\n",
 )
 
-REPLACEMENT = SENTINEL + '''
+REPLACEMENT = SENTINEL + """
 # Initialise the kernel source tree as a throwaway git repo so that
 # `git apply --3way` can fall back to a real 3-way merge using the
 # pre-patch blobs in object storage when context drifts.
@@ -1198,90 +1198,8 @@ fi
 # AC_CC was DISPROVEN on LS1046A (ask20 patch 0043/0051). CCBS
 # (next_engine=2, kgse_ccbs=group_table) matched 24M+ frames in PR14z22.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 <<'F068EOF'
-import sys
-path = "drivers/net/ethernet/freescale/fman/fman_pcd.c"
-with open(path) as f:
-    src = f.read()
-changed = 0
-
-# 1. next_engine: 3 -> 2
-new = src.replace(
-    "slot->next_engine    = 3;",
-    "slot->next_engine    = 2;  /* F-068: CCBS per ask20 */",
-    1)
-if new != src:
-    changed += 1
-    print("### F-068: next_engine 3->2")
-src = new
-
-# 2. CC group table + CC node allocation
-old_b = "slot->cc_base_offset = 0;"
-new_b = (
-    "/* F-068: CC group table (36B: 16B CONT_LOOKUP AD + 20B CC node) */\n"
-    "{\n"
-    "\tstruct muram_info *muram = fman_get_muram(fman);\n"
-    "\tif (muram) {\n"
-    "\t\tunsigned long gro = fman_pcd_muram_alloc(pcd, 36);\n"
-    "\t\tif (!IS_ERR_VALUE(gro)) {\n"
-    "\t\t\tvoid __iomem *g = (void __iomem *)fman_muram_offset_to_vbase(muram, gro);\n"
-    "\t\t\tiowrite32be(0, g + 0);\n"
-    "\t\t\tiowrite32be(gro + 16, g + 4);\n"
-    "\t\t\tiowrite32be(0x40000000, g + 8);\n"
-    "\t\t\tiowrite32be(0, g + 12);\n"
-    "\t\t\tiowrite32be(0x80000000, g + 16);\n"
-    "\t\t\tiowrite32be((u32)fe_enter_off, g + 20);\n"
-    "\t\t\tiowrite32be(0, g + 24);\n"
-    "\t\t\tiowrite32be(0, g + 28);\n"
-    "\t\t\tiowrite32be(0, g + 32);\n"
-    "\t\t\tslot->cc_base_offset = gro;\n"
-    "\t\t}\n"
-    "\t}\n"
-    "}\n"
-)
-if old_b in src:
-    src = src.replace(old_b, new_b, 1)
-    changed += 1
-    print("### F-068: CC group table allocated")
-else:
-    print("### F-068: cc_base_offset pattern NOT FOUND", file=sys.stderr)
-
-# 3. Remove set_cc_base (not needed in CCBS)
-old_c = """\
-	rxport = fman_port_lookup_rx(fman, hw_port_id);
-	if (!rxport)
-		return -ENODEV;
-	err = fman_port_set_cc_base(rxport, fe_enter_off);
-	if (err) {
-		mutex_lock(lock);
-		slot = kg_find_port_scheme(keygen, hw_port_id, &id);
-		if (slot) {
-			slot->next_engine = *saved_engine;
-			slot->cc_bits_sel = 0;
-			slot->used = false;
-			(void)keygen_scheme_setup(keygen, id, true);
-		}
-		mutex_unlock(lock);
-		return err;
-	}"""
-new_c = (
-    "/* F-068: CCBS mode — CC engine intercepts via kgse_ccbs, not RCCB */\n"
-)
-if old_c in src:
-    src = src.replace(old_c, new_c, 1)
-    changed += 1
-    print("### F-068: removed fman_port_set_cc_base")
-else:
-    print("### F-068: set_cc_base pattern NOT FOUND", file=sys.stderr)
-
-if changed > 0:
-    with open(path, "w") as f:
-        f.write(src)
-    print("### F-068: CCBS mode applied (%d changes)" % changed)
-else:
-    print("### F-068: NO CHANGES applied", file=sys.stderr)
-F068EOF
-    echo "### fman_pcd.c: F-068 CCBS dispatch mode (next_engine=2, CC group table)"
+    echo 'aW1wb3J0IHN5cwpwYXRoID0gImRyaXZlcnMvbmV0L2V0aGVybmV0L2ZyZWVzY2FsZS9mbWFuL2ZtYW5fcGNkLmMiCndpdGggb3BlbihwYXRoKSBhcyBmOgogICAgc3JjID0gZi5yZWFkKCkKY2hhbmdlZCA9IDAKbjEgPSBzcmMucmVwbGFjZSgKICAgICJzbG90LT5uZXh0X2VuZ2luZSAgICA9IDM7IiwKICAgICJzbG90LT5uZXh0X2VuZ2luZSAgICA9IDI7IiwKICAgIDEpCmlmIG4xICE9IHNyYzoKICAgIGNoYW5nZWQgKz0gMQpzcmMgPSBuMQpvbGRfYiA9ICJzbG90LT5jY19iYXNlX29mZnNldCA9IDA7IgpuZXdfYiA9ICgKICAgICIvKiBGLTA2ODogQ0MgZ3JvdXAgdGFibGUgKyBDQyBub2RlIHBlciBhc2syMCBDQ0JTXG4iCiAgICAiICovXG4iCiAgICAie1xuIgogICAgIlx0c3RydWN0IG11cmFtX2luZm8gKm11cmFtID0gZm1hbl9nZXRfbXVyYW0oZm1hbik7XG4iCiAgICAiXHRpZiAobXVyYW0pIHtcbiIKICAgICJcdFx0dW5zaWduZWQgbG9uZyBncm8gPSBmbWFuX3BjZF9tdXJhbV9hbGxvYyhwY2QsIDM2KTtcbiIKICAgICJcdFx0aWYgKCFJU19FUlJfVkFMVUUoZ3JvKSkge1xuIgogICAgIlx0XHRcdHZvaWQgX19pb21lbSAqZyA9ICh2b2lkIF9faW9tZW0gKilmbWFuX211cmFtX29mZnNldF90b192YmFzZShtdXJhbSwgZ3JvKTtcbiIKICAgICJcdFx0XHRpb3dyaXRlMzJiZSgwLCBnKTtcbiIKICAgICJcdFx0XHRpb3dyaXRlMzJiZShncm8gKyAxNiwgZyArIDQpO1xuIgogICAgIlx0XHRcdGlvd3JpdGUzMmJlKDB4NDAwMDAwMDAsIGcgKyA4KTtcbiIKICAgICJcdFx0XHRpb3dyaXRlMzJiZSgwLCBnICsgMTIpO1xuIgogICAgIlx0XHRcdGlvd3JpdGUzMmJlKDB4ODAwMDAwMDAsIGcgKyAxNik7XG4iCiAgICAiXHRcdFx0aW93cml0ZTMyYmUoKHUzMilmZV9lbnRlcl9vZmYsIGcgKyAyMCk7XG4iCiAgICAiXHRcdFx0aW93cml0ZTMyYmUoMCwgZyArIDI0KTtcbiIKICAgICJcdFx0XHRpb3dyaXRlMzJiZSgwLCBnICsgMjgpO1xuIgogICAgIlx0XHRcdGlvd3JpdGUzMmJlKDAsIGcgKyAzMik7XG4iCiAgICAiXHRcdFx0c2xvdC0+Y2NfYmFzZV9vZmZzZXQgPSBncm87XG4iCiAgICAiXHRcdH1cbiIKICAgICJcdH1cbiIKICAgICJ9XG4iCikKaWYgb2xkX2IgaW4gc3JjOgogICAgc3JjID0gc3JjLnJlcGxhY2Uob2xkX2IsIG5ld19iLCAxKQogICAgY2hhbmdlZCArPSAxCiAgICBwcmludCgiIyMjIEYtMDY4OiBDQyBncm91cCB0YWJsZSBhbGxvY2F0ZWQiKQpvbGRfYyA9ICJycG9ydCA9IGZtYW5fcG9ydF9sb29rdXBfcngoZm1hbiwgaHdfcG9ydF9pZCk7XG5cdGlmICghcnhwb3J0KVxuXHRcdHJldHVybiAtRU5PREVWO1xuXHRlcnIgPSBmbWFuX3BvcnRfc2V0X2NjX2Jhc2Uocnhwb3J0LCBmZV9lbnRlcl9vZmYpOyIKbmV3X2MgPSAiLyogRi0wNjg6IENDQlMgbW9kZSDigJQgbm8gUkNDQiAqL1xuXHRyZXR1cm4gMDsgLy8gRi0wNjggc3R1YiIKaWYgb2xkX2MgaW4gc3JjOgogICAgc3JjID0gc3JjLnJlcGxhY2Uob2xkX2MsIG5ld19jLCAxKQogICAgY2hhbmdlZCArPSAxCiAgICBwcmludCgiIyMjIEYtMDY4OiByZW1vdmVkIHNldF9jY19iYXNlIikKaWYgY2hhbmdlZCA+IDA6CiAgICB3aXRoIG9wZW4ocGF0aCwgInciKSBhcyBmOgogICAgICAgIGYud3JpdGUoc3JjKQogICAgcHJpbnQoIiMjIyBGLTA2ODogQ0NCUyBtb2RlIGFwcGxpZWQiKQplbHNlOgogICAgcHJpbnQoIiMjIyBGLTA2ODogTk8gQ0hBTkdFUyBhcHBsaWVkIikK' | base64 -d | python3
+    echo "### F-068: CCBS dispatch mode (next_engine=2, CC group table)"
 fi
 
 # Patch 4009 equivalent: fix OEM SFP-10G-T quirk + add OEM SFP-10G-SR quirk
@@ -1747,7 +1665,7 @@ fi
 fi  # close M2-4 fman_port.c if (line 1212)
 
 # === end ls1046a-build patch-loop replacement ===
-'''
+"""
 
 new, n = PATTERN.subn(lambda m: REPLACEMENT, src, count=1)
 if n == 0:
