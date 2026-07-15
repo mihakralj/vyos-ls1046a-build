@@ -39,10 +39,17 @@ engage() {
     echo get   > "$PCD_BASE/fe_pool"         || die "fe_pool get failed"
     echo build > "$PCD_BASE/fe_singletons" 2>/dev/null || true
     echo build > "$PCD_BASE/fe_hashfe" 2>/dev/null || true
-    # F-054: always use PCD-range FQ 0x200 (512) which is in eth3's polled
-    # FQ range (512-639).  The dedicated TX FQ 0x2b9 (697) is outside the
-    # kernel's per-port FQ range so HIT frames are silently lost.
-    ENQ_FQID="200"
+    # F-054/F-070 v2: Use kernel's RX default FQID from /sys for eth4.
+    # The kernel polls this FQ via NAPI — MISS frames enqueued here reach the
+    # Linux network stack.  Fall back to 0x200 (eth3 range) if sysfs unavailable.
+    local rx_fqid_path
+    rx_fqid_path="/sys/devices/platform/soc/1a00000.fman/1af2000.ethernet/net/eth4/fqids"
+    local port_fqid
+    if [ -r "$rx_fqid_path" ]; then
+        port_fqid=$(awk '/^Rx default:/ {print $3}' "$rx_fqid_path")
+    fi
+    ENQ_FQID="${port_fqid:-200}"
+    echo "ASK offload: using FQID $ENQ_FQID for ENQ (kernel RX default)"
     echo "build $ENQ_FQID" > "$PCD_BASE/fe_enq"  || die "fe_enq build failed"
     # F-045: fe_enter build with no argument defaults to hash frontend
     # (fe_hash_off) or MUX, not an invalid port-offset.
