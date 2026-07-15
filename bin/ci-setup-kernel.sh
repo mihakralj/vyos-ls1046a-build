@@ -1669,35 +1669,34 @@ src = new
 
 # 2. Add CC group table allocation, replace cc_base_offset=0
 old = "slot->cc_base_offset = 0;"
-new = """\
-/* F-068: Allocate CC group table (16B CONT_LOOKUP AD + 20B CC node)
- * in MURAM.  The CONT_LOOKUP AD has numKeys=0 (empty match table),
- * AD table at group_off+16 where the CC node lives.
- * CC node is a wildcard pass-through dispatching to FE_ENTER.
- * kgse_ccbs points here to trigger the CCBS implicit walk.
- */
-{
-\tstruct muram_info *muram = fman_get_muram(fman);
-\tif (muram) {
-\t\tunsigned long gro = fman_pcd_muram_alloc(pcd, 36);
-\t\tif (!IS_ERR_VALUE(gro)) {
-\t\t\tvoid __iomem *g = (void __iomem *)fman_muram_offset_to_vbase(muram, gro);
-\t\t\t/* group table[0] = CONT_LOOKUP AD (16B) */
-\t\t\tiowrite32be(0, g + 0);
-\t\t\tiowrite32be(gro + 16, g + 4);
-\t\t\tiowrite32be(0x40000000, g + 8);
-\t\t\tiowrite32be(0, g + 12);
-\t\t\t/* AD table[0] = CC node (20B) pass-through */
-\t\t\tiowrite32be(0x80000000, g + 16);
-\t\t\tiowrite32be((u32)fe_enter_off, g + 20);
-\t\t\tiowrite32be(0, g + 24);
-\t\t\tiowrite32be(0, g + 28);
-\t\t\tiowrite32be(0, g + 32);
-\t\t\tslot->cc_base_offset = gro;
-\t\t}
-\t}
-}
-"""
+new = (
+    "/* F-068: Allocate CC group table (16B CONT_LOOKUP AD + 20B CC node)\n"
+    " * in MURAM.  CONT_LOOKUP AD has numKeys=0, AD table at group+16.\n"
+    " * CC node: wildcard pass-through -> FE_ENTER.\n"
+    " * kgse_ccbs points here to trigger CCBS implicit walk.\n"
+    " */\n"
+    "{\n"
+    "\tstruct muram_info *muram = fman_get_muram(fman);\n"
+    "\tif (muram) {\n"
+    "\t\tunsigned long gro = fman_pcd_muram_alloc(pcd, 36);\n"
+    "\t\tif (!IS_ERR_VALUE(gro)) {\n"
+    "\t\t\tvoid __iomem *g = (void __iomem *)fman_muram_offset_to_vbase(muram, gro);\n"
+    "\t\t\t/* group table[0] = CONT_LOOKUP AD (16B) */\n"
+    "\t\t\tiowrite32be(0, g + 0);\n"
+    "\t\t\tiowrite32be(gro + 16, g + 4);\n"
+    "\t\t\tiowrite32be(0x40000000, g + 8);\n"
+    "\t\t\tiowrite32be(0, g + 12);\n"
+    "\t\t\t/* AD table[0] = CC node (20B) pass-through */\n"
+    "\t\t\tiowrite32be(0x80000000, g + 16);\n"
+    "\t\t\tiowrite32be((u32)fe_enter_off, g + 20);\n"
+    "\t\t\tiowrite32be(0, g + 24);\n"
+    "\t\t\tiowrite32be(0, g + 28);\n"
+    "\t\t\tiowrite32be(0, g + 32);\n"
+    "\t\t\tslot->cc_base_offset = gro;\n"
+    "\t\t}\n"
+    "\t}\n"
+    "}\n"
+)
 if old in src:
     src = src.replace(old, new, 1)
     changed += 1
