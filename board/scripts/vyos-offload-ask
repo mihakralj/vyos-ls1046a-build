@@ -33,9 +33,9 @@ engage() {
     echo "ASK offload: building FE-VM pipeline..."
 
     echo "set $PORT"   > "$PCD_BASE/fe_port"  || die "fe_port set $PORT failed"
-    # 8-byte 4-tuple key (SIP+DIP) — matches EKFC=0x00180006
-    # (EKFC=0x001C0006 with PTYPE1 causes BMI stall — see F-048-R1)
-    echo "set 0x7FFF 8 0" > "$PCD_BASE/fe_ehash" || die "fe_ehash set failed"
+    # 12-byte 4-tuple key (SIP+DIP+SPORT+DPORT) — matches EKFC=0x00180006
+    # NXP §7.2: contextSize MUST equal EKFC extracted key length
+    echo "set 0x7FFF 12 0" > "$PCD_BASE/fe_ehash" || die "fe_ehash set failed"
     echo get   > "$PCD_BASE/fe_pool"         || die "fe_pool get failed"
     echo build > "$PCD_BASE/fe_singletons" 2>/dev/null || true
     echo build > "$PCD_BASE/fe_hashfe" 2>/dev/null || true
@@ -98,9 +98,9 @@ case "${VERB:-status}" in
     flow-add)
         key="${1}"
         enq="${2:-0x55100}"  # F-054: default to MUX FE offset
-        if [ -z "$key" ] || [ "${#key}" -ne 16 ] || ! echo "$key" | grep -qE '^[0-9a-fA-F]{16}$'; then
-            echo "ERROR: key must be 16 hex chars (8 bytes) — SIP(8)+DIP(8)" >&2
-            echo "Usage: $0 flow-add <key_hex_16chars> [enq_off]" >&2
+        if [ -z "$key" ] || [ "${#key}" -ne 24 ] || ! echo "$key" | grep -qE '^[0-9a-fA-F]{24}$'; then
+            echo "ERROR: key must be 24 hex chars (12 bytes) — SIP(8)+DIP(8)+SPORT(4)+DPORT(4)" >&2
+            echo "Usage: $0 flow-add <key_hex_24chars> [enq_off]" >&2
             exit 1
         fi
         echo "add 0 ${key} ${enq}" > "$PCD_BASE/fe_flow" || die "fe_flow add failed"
