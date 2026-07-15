@@ -1200,48 +1200,7 @@ fi
 # error per specs/fman-keygen-flow-key-spec.md v2.0 §5. The crash root cause is not the
 # dispatch mode but the missing missResult/w4 causing wild DMA (fix follows separately).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    # 1. Revert next_engine 2 → 3
-    sed -i 's/slot->next_engine    = 2;/slot->next_engine    = 3;/' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    # 2. Revert CC group table → cc_base_offset = 0
-    #    F-068 replaced "slot->cc_base_offset = 0;" with a multi-line block
-    #    starting with "/* F-068: CC group table". Revert by finding the
-    #    start comment and replacing the entire block.
-    python3 -c "
-import sys, re
-p = 'drivers/net/ethernet/freescale/fman/fman_pcd.c'
-with open(p) as f: s = f.read()
-# Find F-068 block start and replace everything through the closing brace+blank line
-pat = re.compile(r'/\* F-068: CC group table .*?\n\s*\}\n', re.DOTALL)
-if pat.search(s):
-    s = pat.sub('slot->cc_base_offset = 0;', s, count=1)
-    with open(p, 'w') as f: f.write(s)
-    print('### F-068-REVERT: CC group table → cc_base_offset=0')
-else:
-    print('### F-068-REVERT: CC group table already reverted')
-" 2>&1
-    # 3. Restore RCCB code
-    sed -i 's|/\* F-068: CCBS mode . no RCCB \*/\n\treturn 0; // F-068 stub|rxport = fman_port_lookup_rx(fman, hw_port_id);\n\tif (!rxport)\n\t\treturn -ENODEV;\n\terr = fman_port_set_cc_base(rxport, fe_enter_off);|' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c 2>/dev/null || {
-        # sed multi-line failed, try python
-        python3 -c "
-p = 'drivers/net/ethernet/freescale/fman/fman_pcd.c'
-with open(p) as f: s = f.read()
-stub = '/* F-068: CCBS mode'
-orig = 'rxport = fman_port_lookup_rx(fman, hw_port_id);'
-if stub in s and orig not in s:
-    # Replace the stub line + next line (return 0;) with original RCCB code
-    old = '/* F-068: CCBS mode — no RCCB */\n\treturn 0; // F-068 stub'
-    new2 = 'rxport = fman_port_lookup_rx(fman, hw_port_id);\n\tif (!rxport)\n\t\treturn -ENODEV;\n\terr = fman_port_set_cc_base(rxport, fe_enter_off);'
-    s = s.replace(old, new2, 1)
-    with open(p, 'w') as f: f.write(s)
-    print('### F-068-REVERT: RCCB code restored (python)')
-elif orig in s:
-    print('### F-068-REVERT: RCCB already restored')
-else:
-    print('### F-068-REVERT: RCCB stub not found')
-" 2>&1
-    }
+    echo 'aW1wb3J0IHN5cywgcmUKcCA9ICdkcml2ZXJzL25ldC9ldGhlcm5ldC9mcmVlc2NhbGUvZm1hbi9mbWFuX3BjZC5jJwp3aXRoIG9wZW4ocCkgYXMgZjogcyA9IGYucmVhZCgpCmNoYW5nZWQgPSAwCgojIDEuIFJldmVydCBuZXh0X2VuZ2luZSAyIC0+IDMKaWYgJ3Nsb3QtPm5leHRfZW5naW5lICAgID0gMjsnIGluIHM6CiAgICBzID0gcy5yZXBsYWNlKCdzbG90LT5uZXh0X2VuZ2luZSAgICA9IDI7JywgJ3Nsb3QtPm5leHRfZW5naW5lICAgID0gMzsnLCAxKQogICAgY2hhbmdlZCArPSAxCiAgICBwcmludCgnIyMjIEYtMDY4LVJFVkVSVDogbmV4dF9lbmdpbmUgMi0+MycpCgojIDIuIFJldmVydCBDQyBncm91cCB0YWJsZSBibG9jayB0byBzaW1wbGUgY2NfYmFzZV9vZmZzZXQgPSAwCnBhdCA9IHJlLmNvbXBpbGUocicvXCogRi0wNjg6IENDIGdyb3VwIHRhYmxlIC4qP1xuXHMqXH1cbicsIHJlLkRPVEFMTCkKaWYgcGF0LnNlYXJjaChzKToKICAgIHMgPSBwYXQuc3ViKCdzbG90LT5jY19iYXNlX29mZnNldCA9IDA7JywgcywgY291bnQ9MSkKICAgIGNoYW5nZWQgKz0gMQogICAgcHJpbnQoJyMjIyBGLTA2OC1SRVZFUlQ6IENDIGdyb3VwIHRhYmxlIC0+IGNjX2Jhc2Vfb2Zmc2V0PTAnKQoKIyAzLiBSZXN0b3JlIFJDQ0IgY29kZQpzdHViID0gJy8qIEYtMDY4OiBDQ0JTIG1vZGUnCm9yaWcgPSAncnhwb3J0ID0gZm1hbl9wb3J0X2xvb2t1cF9yeChmbWFuLCBod19wb3J0X2lkKTsnCmlmIHN0dWIgaW4gcyBhbmQgb3JpZyBub3QgaW4gczoKICAgIG9sZCA9ICcvKiBGLTA2ODogQ0NCUyBtb2RlIFx4ZTJceDgwXHg5NCBubyBSQ0NCICovXG5cdHJldHVybiAwOyAvLyBGLTA2OCBzdHViJwogICAgbmV3ID0gJ3J4cG9ydCA9IGZtYW5fcG9ydF9sb29rdXBfcngoZm1hbiwgaHdfcG9ydF9pZCk7XG5cdGlmICghcnhwb3J0KVxuXHRcdHJldHVybiAtRU5PREVWO1xuXHRlcnIgPSBmbWFuX3BvcnRfc2V0X2NjX2Jhc2Uocnhwb3J0LCBmZV9lbnRlcl9vZmYpOycKICAgIGlmIG9sZCBpbiBzOgogICAgICAgIHMgPSBzLnJlcGxhY2Uob2xkLCBuZXcsIDEpCiAgICAgICAgY2hhbmdlZCArPSAxCiAgICAgICAgcHJpbnQoJyMjIyBGLTA2OC1SRVZFUlQ6IFJDQ0IgY29kZSByZXN0b3JlZCcpCiAgICBlbHNlOgogICAgICAgIHByaW50KCcjIyMgRi0wNjgtUkVWRVJUOiBSQ0NCIHN0dWIgZm91bmQgYnV0IGV4YWN0IG1hdGNoIGZhaWxlZCAodW5pY29kZT8pJykKZWxpZiBvcmlnIGluIHM6CiAgICBwcmludCgnIyMjIEYtMDY4LVJFVkVSVDogUkNDQiBhbHJlYWR5IHJlc3RvcmVkJykKZWxzZToKICAgIHByaW50KCcjIyMgRi0wNjgtUkVWRVJUOiBSQ0NCIHN0dWIgbm90IGZvdW5kJykKCmlmIGNoYW5nZWQgPiAwOgogICAgd2l0aCBvcGVuKHAsICd3JykgYXMgZjogZi53cml0ZShzKQogICAgcHJpbnQoZicjIyMgRi0wNjgtUkVWRVJUOiBBQ19DQyByZXN0b3JlZCAoe2NoYW5nZWR9IGNoYW5nZXMpJykKZWxzZToKICAgIHByaW50KCcjIyMgRi0wNjgtUkVWRVJUOiBhbHJlYWR5IGF0IEFDX0NDIGJhc2VsaW5lJykK' | base64 -d | python3
     echo "### F-068-REVERT: AC_CC dispatch (next_engine=3, RCCB→FE_ENTER)"
 fi
 
