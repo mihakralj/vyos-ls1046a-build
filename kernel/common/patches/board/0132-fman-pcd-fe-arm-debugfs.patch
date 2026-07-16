@@ -63,7 +63,7 @@ index 0fb8c0a..d58feb6 100644
 +		return -EINVAL;
 +
 +	mutex_lock(&pcd->fe_lock);
-+	if (pcd->fe_refcount == 0 || pcd->fe_root_ad_off != fe_enter_off) {
++	if (fe_enter_off != 0 && (pcd->fe_refcount == 0 || pcd->fe_root_ad_off != fe_enter_off)) {
 +		mutex_unlock(&pcd->fe_lock);
 +		return -EINVAL;
 +	}
