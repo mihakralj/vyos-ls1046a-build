@@ -39,6 +39,16 @@ flowchart TD
 
 **Unifying theory (grounded, qdrant `iter-23`/`iter-45`/`m0-reconciliation`):** terminal frame disposition for a classified frame on 210.10.1 is performed by the **FE opcode VM**, which exists only on the external-hash path. `DATA_FLOW` exits free the BMI FIFO allocation; `CONTRL_FLOW` (FQID-override) exits do not. Exact-match-without-FE that exits via `CONTRL_FLOW` therefore leaks the FIFO. This is the single coherent explanation that reconciles "the SDK runs exact-match CC without an FE buffer" (true — via a `DATA_FLOW` exit) with "our exact-match graft parks" (true — our FQID-override graft is a `CONTRL_FLOW` exit).
 
+### 2.1 The MISS third rail — settled dispatch direction (2026-07-16)
+
+The fork above covers **HIT** disposition. The 2026-07-15/16 silicon campaign settled the **MISS** (non-classified frame → kernel) question, which is orthogonal to both fork paths:
+
+1. **The FE-VM has no viable kernel-delivery terminal.** Three ENQ-as-missNextFE variants failed on silicon: NIA-mode (fqidEn=0, w1=`0x00500002`) delivered zero sustained frames; the vendor byte encoding did no better; fqidEn=1 with the FQID written to the DDR miss context failed because the ENQ reads the **MURAM workspace**, not the DDR context (wrong memory space). EXIT-DEALLOCATE is a safe terminal but a **drop** (100% loss); EXIT-without-DEALLOCATE strands the frame in the BMI FIFO (AC_CC mode has no scheme-NIA fallback) → watchdog reset.
+2. **The vendor never routes MISS through the FE-VM.** The production CDX topology resolves MISS at the CC-lookup layer — fall-through to the KG-computed distribution FQID (kernel-polled PCD FQs). The FE opcode VM executes only on HIT.
+3. **Settled topology (supersedes the 2026-07-10 "RCCB→FE_ENTER direct" ruling):** RCCB → CONT_LOOKUP group table. Shipping state `numKeys=0` → miss-AD → port KG-default/PCD FQ → kernel (silicon-proven: 7.37 Gbps / 0.16% CPU / zero QMan errors, build 28809182051). Future HIT phase: `numKeys>0` match entry targets `FE_ENTER` → this document's FE/ehash machinery — at which point §4's per-port FE support becomes mandatory (see §4 status note).
+
+Authoritative detail: [`specs/fman-keygen-flow-key-spec.md`](../specs/fman-keygen-flow-key-spec.md) v4.0 §6.1.
+
 ---
 
 ## 3. The FE-object MURAM pool (`AllocFEObjs`, global, per-PCD)
@@ -79,6 +89,8 @@ for (i = 0; i < 100; i++) {                       /* a fixed pool of 100 FE obje
 ---
 
 ## 4. Per-port FE support (`FmPortSetFESupport`, the params-page +0x54/+0x58 writes)
+
+> **STATUS (2026-07-15): ported as F-072 (patch 0123 `fe_port` debugfs) and Gate-A-PROVEN on silicon** — pool armed (`0x54400`/8448 B, mgmt `0x56500`/21 B on port 0x11), 600-frame MISS flood survived with zero BMI stall, first clean disengage in program history. This subsystem was the missing piece behind every pre-F-072 FE-VM failure: with params-page `+0x54` = 0, the microcode did read-modify-write bookkeeping at MURAM offset 0 and carved per-frame workspaces at garbage offsets → cumulative MURAM corruption, BMI stall, port deafness, disengage crash. **Teardown order is load-bearing** (vendor `FmPortDeleteFESupport`): clear `+0x54` *while the params page still exists*, free pool + index, THEN detach PCD. Inverting the order writes to freed MURAM. In the settled dispatch topology (§2.1) this subsystem is dormant while shipping (CONT_LOOKUP pass-through never enters the FE-VM) and becomes **mandatory** the moment a `numKeys>0` entry dispatches into `FE_ENTER`.
 
 `FmPortSetFESupport()` — `Port/fm_port.c:2223`, `DPAA_VERSION >= 11`. Triggered from `CcUpdateParam` (`fm_cc.c:1138`, the **active** branch under `#ifndef USE_ENHANCED_EHASH`, line 1196) **iff `p_CcNode->externalHash`**. Idempotent per port (`if (p_FmPort->supportFE) return E_OK`).
 

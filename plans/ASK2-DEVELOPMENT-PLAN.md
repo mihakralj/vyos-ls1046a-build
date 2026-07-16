@@ -608,6 +608,50 @@ REPLACE handler automation:
 using sed injection instead of .patch files for small, well-bounded source
 modifications.
 
+## §9 2026-07-16: Dispatch Topology SETTLED — CONT_LOOKUP Pass-Through, FE-VM Dormant
+
+**[SPEC] Settled direction (supersedes the 2026-07-10 "RCCB→FE_ENTER direct" ruling).**
+MISS→kernel delivery uses **AC_CC + CONT_LOOKUP group-table pass-through**: `numKeys=0` →
+miss-AD → port KG-default/PCD FQ → kernel. The FE-VM chain (pool, singletons, ehash,
+EXT_HASH, MUX/Transition/ENQ) stays in-tree but **dormant**, reserved for the future HIT
+phase (`numKeys>0` match entry → FE_ENTER). Authoritative spec:
+`specs/fman-keygen-flow-key-spec.md` v4.0 §6.1. Reference: microcode doc §7.11.
+
+**[SPEC] Evidence backing the reversal:**
+1. CONT_LOOKUP pass-through is the only silicon-proven kernel-delivery mechanism —
+   build 28809182051 (2026-07-06): ping 3/3, zero QMan errors; M2 gate **7.37 Gbps /
+   0.16% CPU**. It never enters the FE-VM, so the F-072 invalidation does not taint it.
+2. F-072 (`FmPortSetFESupport` — the never-ported per-port FE workspace pool) was the
+   root cause of ALL prior FE-VM corruption: params page `+0x54`=0 → workspace carve at
+   garbage MURAM offsets → BMI stall, port deafness, disengage crash. **Gate A PROVEN
+   2026-07-15**: pool armed (0x54400/8448 B), 600-frame MISS flood survived, first clean
+   disengage in program history (F-074 teardown order: `fe_port del` BEFORE `fe_arm
+   disengage`, per vendor `FmPortDeleteFESupport`).
+3. Three FE-VM ENQ kernel-delivery variants failed on silicon with the pool armed:
+   F-070 NIA-mode, F-073 vendor encoding, F-073B fqidEn=1+DDR-miss-ctx (wrong memory
+   space — ENQ reads the MURAM workspace, not DDR). ENQ's role is the HIT terminal only.
+4. The vendor CDX topology resolves MISS at the CC layer (fall-through to KG distribution
+   FQ); the FE-VM executes only on HIT.
+
+**[SPEC] Implementation:** modify patch `0132-fman-pcd-fe-arm-debugfs.patch` DIRECTLY
+(no more sed layering) to carry the corrected CONT_LOOKUP scaffold; remove F-047
+stripping and all its ci-setup-kernel.sh remnants in the same commit. Scaffold must fix:
+(a) disengage inverse frees group+node (+36 B/cycle leak), pcd-snapshot `used==0` gate;
+(b) RM 8.7.4.1 AD encoding (`w0=(numKeys<<24)|matchTable`, `w1=adTable`,
+`w2=0x40000000|((keySize-1)<<24)`, `w3=0`) — never the `{flags,next_ptr}` format
+(RESULT_CF fqid=0 QMan storm); (c) miss-AD FQID from the `fqids` sysfs (eth4 Rx default
+0x292), never hardcoded; (d) `vyos-offload-ask` pass-through mode — no `fe_port set`,
+no `fe_enq`, no flow insert while shipping.
+
+**[BUG] F-076 port deafness after disengage — OPEN.** After any engage→disengage cycle
+with the FE-VM armed, port RX stays at zero despite pcd-snapshot-clean hardware state
+(schemes=RSS, RCCB=0, RFPNE=0x00480000) and SFP link UP at 10G. `fe_arm.engaged`
+software state also stays YES (blocks re-engage). Cold boot required. Suspected
+incomplete KG-scheme restoration in `detach_cc` for 10G ports. Distinct from the F-072
+corruption deafness (fixed). Must be root-caused before the shipping pass-through mode
+can claim clean reversibility on the FE-VM-armed path (the pass-through-only path had
+clean disengage on 2026-07-06).
+
 ## §9 2026-07-14: Board .185 DAC Confirmed — Dual-Port Topology Unblocked
 
 **[SPEC] 2026-07-14 — Board .185 (kernel 6.18.38-vyos, ISO 2026.07.14-2236-rolling).**

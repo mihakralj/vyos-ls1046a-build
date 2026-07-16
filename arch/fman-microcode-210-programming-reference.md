@@ -376,10 +376,12 @@ The central FE object. It performs: raw CRC-64(hardware key) → bucket index �
 
 | Word | Offset | Contents |
 |---|---|---|
-| `w0` | `0x00` | `FMAN_FE_TYPE_ENQ (0x02010000)` |
-| `w1` | `0x04` | FQID (24-bit). `w1 = 0x00000200` for FQ `0x200` (kernel delivery); `0x00008000` for dedicated offload FQ |
-| `w2` | `0x08` | reserved/context |
-| `w3` | `0x0C` | reserved/context |
+| `w0` | `0x00` | `FMAN_FE_TYPE_ENQ (0x02010000)` — bit 16 = fqidEn; low byte = ws_offset |
+| `w1` | `0x04` | FQID (24-bit) when fqidEn=1, or NIA when fqidEn=0 |
+| `w2` | `0x08` | context — SDK writes `(rspid << 24) \| fqid` |
+| `w3` | `0x0C` | next-FE MURAM offset (chain, e.g. EXIT) |
+
+**⚠ ENQ is NOT a viable MISS→kernel delivery terminal (silicon-proven 2026-07-15/16).** Three variants failed with the workspace pool armed (Gate A passed): (1) NIA-mode `w0=0x02000008, w1=0x00500002` (`NIA_ENG_BMI|AC_ENQ_FRAME`) — zero sustained delivery (one ARP reply passed, then the path died — consistent with FE-buffer depletion); (2) vendor byte encoding — same; (3) fqidEn=1 with the FQID written to the DDR miss context — **wrong memory space**: with ws_offset set, the ENQ reads its FQID from the **MURAM FE workspace** (populated by the microcode during EXT_HASH execution), not from any CPU-writable DDR buffer. MISS→kernel delivery belongs to the CC-layer miss-AD (§7.11), matching the vendor architecture. The ENQ's proven role is the **HIT** terminal (MUX → TRANSITION → ENQ → TX FQ).
 
 ### 7.4 EXIT FE: Byte Layout (210-only)
 
@@ -387,7 +389,7 @@ The central FE object. It performs: raw CRC-64(hardware key) → bucket index �
 |---|---|---|
 | `w0` | `0x00` | `FMAN_FE_TYPE_EXIT | FMAN_FE_EXIT_DEALLOCATE (0x03800000)` |
 
-EXIT-DEALLOCATE is a real terminal MISS disposition on 210.10.1: AC_CC arm → MISS → EXIT → port does NOT park.
+EXIT-DEALLOCATE is a real terminal MISS disposition on 210.10.1: AC_CC arm → MISS → EXIT → port does NOT park. **It is a frame DROP, not kernel delivery** — proven as 100% packet loss on the MISS path. EXIT-without-DEALLOCATE is NOT viable: in AC_CC mode there is no scheme-NIA fallback after the FE-VM, so the frame strands in the BMI FIFO → pool exhaustion → watchdog reset (proven 2026-07-15).
 
 ### 7.5 MUX FE: Byte Layout (210-only)
 
@@ -450,6 +452,31 @@ Equivalent lf-5.4 LSDK functions for reference:
 | `get_indexed_hash_bucket` | L7301 | CRC64 bucket indexer | `fman_pcd_ehash_bucket_index()` |
 
 The lf-5.4 LSDK source is at `/home/vyos/ask-ref/ask/patches/kernel/999-layerscape-ask-kernel_linux_5_4_3_00_0.patch`. The lf-6.6.y and lf-6.12.y kernels stub these functions as empty `UNUSED()` no-ops; the equivalents above are the operational path forward on mainline.
+
+### 7.11 CONT_LOOKUP Group AD + Settled Dispatch Topology (RM 8.7.4.1)
+
+The AD species that fronts the FE-VM in the settled topology (2026-07-16, supersedes the "RCCB→FE_ENTER direct" ruling of 2026-07-10). A 16-byte MURAM AD at `FMBM_RCCB`:
+
+| Word | Offset | Contents |
+|---|---|---|
+| `w0` | `0x00` | `(numKeys << 24) \| (matchTableAddr & 0xFFFFFF)` |
+| `w1` | `0x04` | `(adTableAddr & 0xFFFFFF)` |
+| `w2` | `0x08` | `0x40000000 \| ((keySize-1) << 24)` |
+| `w3` | `0x0C` | `0x00000000` |
+
+**Settled dispatch topology:**
+
+```
+RCCB → CONT_LOOKUP group AD
+   ├─ numKeys=0 (shipping): every frame → miss-AD → port KG-default/PCD FQ → kernel
+   └─ numKeys>0 (future HIT): match entry AD → FE_ENTER (§7.7) → EXT_HASH (§7.2) → FE-VM
+```
+
+- The pass-through (`numKeys=0`) is silicon-proven: 7.37 Gbps / 0.16% CPU / zero QMan errors (build 28809182051, 2026-07-06). MISS→kernel delivery is a **CC-layer responsibility** (miss-AD hardware enqueue), matching the vendor CDX architecture — never an FE-VM ENQ (§7.3 warning).
+- **miss-AD FQID** must be the port's kernel-polled KG-default/PCD FQ, sourced from the `fqids` sysfs at engage time (eth3: PCD base `0x200`; eth4: Rx default `0x292`, PCD `0x300–0x37F`). A TX-channel FQ (e.g. `0x2b9`) or any un-polled FQ silently blackholes the frames.
+- The pre-RM-8.7.4.1 `{flags, next_ptr}` group-entry format decodes as `RESULT_CF fqid=0` (reserved-invalid) → QMan Invalid-Enqueue-State storm. Do not use.
+- **Engage inverse:** free group table + node/AD tables on disarm, clear the driver's group-offset bookkeeping. The historical scaffold leaked +36 B/cycle; the pcd-snapshot gate (`MURAM used == 0` after disengage) is the acceptance test.
+- Any `numKeys>0` entry targeting `FE_ENTER` makes the per-port FE workspace pool (`FmPortSetFESupport`, params page `+0x54`/`+0x58` — see [`fman-fe-ehash.md`](fman-fe-ehash.md) §4) **mandatory** before the first frame dispatches.
 
 
 ## 8. Header Manipulation Opcodes
