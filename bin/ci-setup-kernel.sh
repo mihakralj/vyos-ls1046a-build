@@ -1276,6 +1276,23 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-073D: Terminal ENQ (w0=0x02010000, w3=0) per 210.10.1 §7.1/§7.3"
 fi
 
+# F-078: CCBS bypass mode (next_engine=2, KGSE_CCBS=0) — MISS→kernel delivery.
+# In CCBS mode with KGSE_CCBS=0, the CC engine walk is a no-op and all frames
+# fall through to the KG scheme default NIA (BMI AC_ENQ_FRAME → kernel delivery).
+# This restores RSS-like kernel delivery while keeping the FE pool armed but
+# unused. HIT path (FE-VM forwarding) is deferred — requires exthash node AD.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
+    # Change next_engine 3→2 (CCBS, not AC_CC)
+    sed -i "s/slot->next_engine    = 3;/slot->next_engine    = 2;\/\* F-078: CCBS bypass \*\//"         drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+    # Ensure cc_bits_sel = 0 (no implicit CC walk)
+    sed -i "s/slot->cc_bits_sel   = fe_enter_off;/slot->cc_bits_sel   = 0;\/\* F-078: no CC walk \*\//"         drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+    # Change mode 0x80000006 → 0x80000002 (AC_CC → CCBS)
+    sed -i "/NIA_ENG_FM_CTL.*NIA_FM_CTL_AC_CC/s/0x80000006/0x80000002 \/\* F-078: CCBS bypass \*\//"         drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+    # Remove RCCB set (CCBS doesn't use RCCB)
+    sed -i "s/err = fman_port_set_cc_base(rxport, 0); \/\* F-078.*\*\//err = 0; \/\* F-078: no RCCB in CCBS bypass \*\//"         drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+    echo "### F-078: CCBS bypass (next_engine=2, KGSE_CCBS=0)"
+fi
+
 # F-040/F-002: fman_pcd.c post-patch MURAM zeroing + leak fix.
 # Base64-encoded Python fixer (no escape issues).
 # Runs after kernel post-patches commit, before compilation.
