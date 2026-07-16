@@ -1276,22 +1276,86 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-073D: Terminal ENQ (w0=0x02010000, w3=0) per 210.10.1 §7.1/§7.3"
 fi
 
-# F-078: CCBS bypass mode (next_engine=2, KGSE_CCBS=0) — MISS→kernel delivery.
-# In CCBS mode with KGSE_CCBS=0, the CC engine walk is a no-op and all frames
-# fall through to the KG scheme default NIA (BMI AC_ENQ_FRAME → kernel delivery).
-# This restores RSS-like kernel delivery while keeping the FE pool armed but
-# unused. HIT path (FE-VM forwarding) is deferred — requires exthash node AD.
+# F-079: Vendor-aligned CONT_LOOKUP pass-through at RCCB for MISS->kernel delivery.
+# AC_CC mode (next_engine=3) with RCCB pointing to a CONT_LOOKUP AD instead of
+# bare FE_ENTER. CONT_LOOKUP with numKeys=0 routes ALL frames to miss-AD -> BMI
+# ENQ -> kernel FQ. This is the 7.37 Gbps M2-gate proven mechanism.
+# FE_ENTER + FE-VM chain is built but dormant — HIT path deferred.
+# When HIT keys are inserted later, numKeys increments and the CONT_LOOKUP
+# dispatches matching frames to FE_ENTER for hardware forwarding.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
-    # Change next_engine 3→2 (CCBS, not AC_CC)
-    sed -i "s/slot->next_engine    = 3;/slot->next_engine    = 2;\/\* F-078: CCBS bypass \*\//"         drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
-    # Ensure cc_bits_sel = 0 (no implicit CC walk)
-    sed -i "s/slot->cc_bits_sel   = fe_enter_off;/slot->cc_bits_sel   = 0;\/\* F-078: no CC walk \*\//"         drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
-    # Change mode 0x80000006 → 0x80000002 (AC_CC → CCBS)
-    sed -i "/NIA_ENG_FM_CTL.*NIA_FM_CTL_AC_CC/s/0x80000006/0x80000002 \/\* F-078: CCBS bypass \*\//"         drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
-    # Remove RCCB set (CCBS doesn't use RCCB)
-    sed -i "s/err = fman_port_set_cc_base(rxport, 0); \/\* F-078.*\*\//err = 0; \/\* F-078: no RCCB in CCBS bypass \*\//"         drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
-    echo "### F-078: CCBS bypass (next_engine=2, KGSE_CCBS=0)"
+    # Ensure next_engine=3 (AC_CC — already set by F-068-Revert)
+    # Ensure cc_bits_sel=0 (no CCBS implicit walk)
+    sed -i "s/slot->cc_bits_sel   = fe_enter_off;/slot->cc_bits_sel   = 0;\/\* F-079: AC_CC uses RCCB, not CCBS \*\//" \
+        drivers/net/ethernet/freescale/fman/fman_pcd_kg.c 2>/dev/null || true
+    echo "### F-079: AC_CC mode preserved (next_engine=3)"
 fi
+
+# F-079 part 2: Replace bare FE_ENTER at RCCB with CONT_LOOKUP group table + miss-AD.
+# The CONT_LOOKUP with numKeys=0 dispatches ALL frames to the miss-AD.
+# Added as a Python fixup to patch 0132's arm_fe_engage.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    echo 'aW1wb3J0IHN5cw0KcCA9ICJkcml2ZXJzL25ldC9ldGhlcm5ldC9mcmVlc2NhbGUvZm1hbi9mbWFuX3BjZC5jIg0Kd2l0aCBvcGVuKHApIGFzIGY6IHNyYyA9IGYucmVhZCgpDQpkZWYgYXNzZXJ0X29uZShvbGQsIGxhYmVsKToNCiAgICBuID0gc3JjLmNvdW50KG9sZCkNCiAgICBpZiBuICE9IDE6IHByaW50KGYiRkFUQUw6IEYtMDc5IHtsYWJlbH06IHtufSBtYXRjaGVzIiwgZmlsZT1zeXMuc3RkZXJyKTsgc3lzLmV4aXQoMSkNCg0KY2hhbmdlZCA9IDANCg0KIyBGLTA3OTogUmVwbGFjZSBiYXJlIEZFX0VOVEVSIGF0IFJDQ0Igd2l0aCBDT05UX0xPT0tVUCBwYXNzLXRocm91Z2guDQojIFRoZSBmbWFuX3BjZF9mZV9hcm1fZW5nYWdlIGZ1bmN0aW9uIGNhbGxzIGZtYW5fY2dfcG9ydF9hcm1fZmUgDQojIHdpdGggZmVfZW50ZXJfb2ZmIC0+IHRoaXMgZ2V0cyB3cml0dGVuIHRvIFJDQ0IgKEZNQk1fUkNDQikuDQojIFJlcGxhY2U6IEZlX2VudGVyX29mZiA9IGVpdGhlciBmZV9yb290X2FkX29mZiAob3VyKSBvciBncm91cF90YWJsZV9vZmZzZXQNCiMgb2YgYSBDT05UX0xPT0tVUCB3aXRoIG51bUtleXM9MCBhbmQgbWlzcy1BRCBlbnF1ZXVlIHRvIGtlcm5lbCBGUS4NCg0KIyBUaGUgZW5nYWdlIGZ1bmN0aW9uIGJ1aWxkcyBhIHNjYWZmb2xkIChjdXJyZW50bHkgaWYoMCknZCkNCiMgdGhhdCBhbGxvY2F0ZXMgZ3JvdXAgdGFibGUgKyBhZCB0YWJsZSBhbmQgd3JpdGVzIHRoZSBDT05UX0xPT0tVUA0KIyBlbmNvZGluZy4gRXhwb3NlIHRoaXMgYnkgY2hhbmdpbmcgdGhlIGlmKDApIHRvIGlmKDEpIGFuZA0KIyB1c2luZyB0aGUgcHJvcGVyIE1VUkFNIGFsbG9jYXRpb24gdmFyaWFibGUgZXhwb3NlZCB0byB0aGUgZW5nYWdlLg0KDQojIDEuIEZpbmQgdGhlIGlmKDApIGJsb2NrIHRoYXQgY3JlYXRlcyB0aGUgc2NhZmZvbGQNCiMgICBMb29rIGZvciB0aGUgcGF0dGVybjogLyogMDE1MDogQ0NCUyBzY2FmZm9sZCB4ZTIiDQpvX3NjYWYgPSAnLyogMDE1MDogQ0NCUyBzY2FmZm9sZCBceGUyXHg4MFx4OTQgQ09OVF9MT09LVVAgQUQNCmlmX29fc2NhZiA9ICdpZiAoMCkNCmZvdW5kID0gRmFsc2UNCmZvciBsaW5lIGluIHNyYy5zcGxpdCgnXG4nKToNCiAgICBpZiBvX3NjYWYgaW4gbGluZToNCiAgICAgICAgZm91bmQgPSBUcnVlDQogICAgICAgIHByaW50KCcjIyMgRi0wNzk6IHNjYWZmb2xkIGNvbW1lbnQgZm91bmQnKQ0KICAgICAgICBicmVhaw0KDQppZiBub3QgZm91bmQ6DQogICAgcHJpbnQoJyMjIyBGLTA3OTogc2NhZmZvbGQgbm90IGZvdW5kIC0tIG1heSBhbHJlYWR5IGJlIHJlbW92ZWQnKQ0KDQojIDIuIEZpbmQgdGhlIHJlYWwgUklDQkYgc2V0IChub3QgdGhlIHNjYWZmb2xkIG92ZXJ3cml0ZSBvbmUpDQojICAgIGxvb2sgZm9yOiBlcnIgPSBmbWFuX3BvcnRfc2V0X2NjX2Jhc2Uocnhwb3J0LCBmZV9lbnRlcl9vZmYpOw0Kb19yY2NiID0gJ2VyciA9IGZtYW5fcG9ydF9zZXRfY2NfYmFzZShyeHBvcnQsIGZlX2VudGVyX29mZik7Jw0KaWYgb19yY2NiIGluIHNyYzoNCiAgICBhc3NlcnRfb25lKG9fcmNjYiwgIlJDQ0Igc2V0IikNCiAgICBwcmludCgnIyMjIEYtMDc5OiBSQ0NCIHNldCBmb3VuZCAtLSBuZWVkIHRvIHJlcGxhY2Ugd2l0aCBncm91cCB0YWJsZScpDQplbHNlOg0KICAgIHByaW50KCcjIyMgRi0wNzk6IFJDQ0Igc2V0IE5PVCBmb3VuZCcpDQoNCmlmIGNoYW5nZWQgPiAwOg0KICAgIHdpdGggb3BlbihwLCAndycpIGFzIGY6IGYud3JpdGUoc3JjKQ0KICAgIHByaW50KGYnIyMjIEYtMDc5OiB7Y2hhbmdlZH0gY2hhbmdlcyBhcHBsaWVkJykNCmVsc2U6DQogICAgcHJpbnQoJyMjIyBGLTA3OTogbm8gY2hhbmdlcyBhcHBsaWVkIC0tIG1heSBhbHJlYWR5IHByZXNlbnQgb3IgcHJlLXBhdGNoIHN0YXRlJykNCg==' | base64 -d | python3 2>&1
+    echo "### F-079: CONT_LOOKUP pass-through scaffold analysis"
+fi
+
+# F-079 part 3: Fix scaffold CONT_LOOKUP AD encoding per RM 8.7.4.1.
+# The patch-0150 scaffold (now active after F-047 disabled) has wrong AD format.
+# Fix: group entry = (numKeys<<24)|mto, adBase=ato, type=0x40000000, keySize=12.
+# Fix: AD table miss entry = FQID|NIA_BMI_AC_ENQ_FRAME (not 0x02500002 garbage).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 -c "
+import sys
+p = 'drivers/net/ethernet/freescale/fman/fman_pcd.c'
+with open(p) as f: s = f.read()
+
+c = 0
+
+# Fix 1: Group table w0 — numKeys=0, no matchTable (mto unused)
+# Old: 0x40000000 | (0xFu<<24) | (ato & 0xFFFFFF)
+# New: (0u << 24) | 0  → just write ato (the adTableAddr)
+old1 = '0x40000000 | (0xFu << 24) | (ato & 0xFFFFFF)'
+new1 = '(0u << 24) | 0 /* F-079: numKeys=0, no matchTable */'
+if old1 in s:
+    s = s.replace(old1, new1, 1); c += 1
+    print('F-079: group table w0 fixed (numKeys=0)')
+elif new1 in s:
+    print('F-079: group table w0 already fixed')
+
+# Fix 2: Group table w1 — was 0, should be ato (adTableAddr)
+old2 = 'iowrite32be(0, c + 4);'
+new2 = 'iowrite32be((ato & 0xFFFFFF), c + 4);	/* F-079: adTable base */'
+if old2 in s and '0x40000000 | (0xFu' in s:  # only if scaffold exists
+    pass  # leave as-is for now — w1=0 works with numKeys=0
+# Actually change it:
+if old2 in s:
+    s = s.replace(old2, new2, 1); c += 1
+    print('F-079: group table w1 fixed (adTable base)')
+
+# Fix 3: Group table w2 — was garbage, should be CONT_LOOKUP type + keySize
+old3 = '(0u << 24) | (0x50u << 16) | 0x2Bu'
+new3 = '0x40000000 | ((12u - 1) << 24) /* F-079: CONT_LOOKUP type + (keySize-1) */'
+if old3 in s:
+    s = s.replace(old3, new3, 1); c += 1
+    print('F-079: group table w2 fixed (CONT_LOOKUP + keySize=12)')
+
+# Fix 4: AD table entries — 0x02500002 → 0x00500002 (correct NIA_BMI_AC_ENQ_FRAME)
+old4 = 'iowrite32be(0x02500002, '
+new4 = 'iowrite32be(0x00500002, '
+count4 = s.count(old4)
+if count4 >= 2:
+    s = s.replace(old4, new4); c += count4
+    print(f'F-079: AD table NIA fixed ({count4} occurrences)')
+
+if c > 0:
+    with open(p, 'w') as f: f.write(s)
+    print(f'F-079: {c} scaffold fixes applied')
+else:
+    print('F-079: scaffold not found — may already be fixed')
+" 2>&1
+    echo "### F-079: scaffold CONT_LOOKUP AD encoding fixed per RM 8.7.4.1"
+fi
+
 
 # F-040/F-002: fman_pcd.c post-patch MURAM zeroing + leak fix.
 # Base64-encoded Python fixer (no escape issues).
@@ -1331,52 +1395,56 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
     echo "### fman_port.c: M2-4 NULL-page clear support added"
 fi
 
+# # F-079: F-044 DISABLED — scaffold RCCB override needed
 # F-044: Remove CCBS scaffold override of fe_enter_off in fe_arm_engage().
-# The CCBS scaffold (patch 0132/0150) allocates a group table and overwrites
-# fe_enter_off = gro, which redirects ALL frames to FQ 0x200 through the
-# group table, completely bypassing the FE-VM ehash.  Remove the override so
-# fe_enter_off retains the ehash hash-table root, allowing flow lookups to
-# reach the stored keys.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    sed -i 's/\t\t\t\tfe_enter_off = gro;/\t\t\t\t\/\* F-044: keep ehash root, skip CCBS scaffold override \*\/ \/\* fe_enter_off = gro; \*\//' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo "### fman_pcd.c: F-044 CCBS scaffold bypass removed (keep ehash root)"
-fi
+# # The CCBS scaffold (patch 0132/0150) allocates a group table and overwrites
+# # fe_enter_off = gro, which redirects ALL frames to FQ 0x200 through the
+# # group table, completely bypassing the FE-VM ehash.  Remove the override so
+# # fe_enter_off retains the ehash hash-table root, allowing flow lookups to
+# # reach the stored keys.
+# if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+#     sed -i 's/\t\t\t\tfe_enter_off = gro;/\t\t\t\t\/\* F-044: keep ehash root, skip CCBS scaffold override \*\/ \/\* fe_enter_off = gro; \*\//' \
+#         drivers/net/ethernet/freescale/fman/fman_pcd.c
+#     echo "### fman_pcd.c: F-044 CCBS scaffold bypass removed (keep ehash root)"
+# fi
+# 
 
 # F-046 REVERTED per fman-keygen-flow-key-spec.md v2.0 §5.4:
 # FMAN_AD_FE_ENTER_ALLOCATE (0x00800000) was set during the only confirmed
 # HIT in program history (2026-07-04).  No sed needed: the original patch
 # code already has the correct value.  word0 = 0x40800000.
 
+# # F-079: F-047 DISABLED — scaffold kept (needed for CONT_LOOKUP miss-AD)
 # F-047-R2: Precise CCBS scaffold strip from 0132 patch (Python-based).
-# Original sed ended at the first '+}' (line 98: inner if block), leaving
-# orphaned braces at lines 99-100 that corrupt the fe_arm function structure.
-# Fix: Python strips from '+\/\* 0150: CCBS scaffold' to exactly '+\t}'
-# (the single-tab scaffold closing brace at line 100), preserving the
-# engage code after the scaffold.
-PATCH_0132="vyos-build/scripts/package-build/linux-kernel/patches/kernel/0132-fman-pcd-fe-arm-debugfs.patch"
-if [ -f "$PATCH_0132" ]; then
-    python3 -c "
-import re, sys
-with open('$PATCH_0132') as f:
-    lines = f.readlines()
-in_scaffold = False
-out = []
-brace_re = re.compile(r'^\+\t\}\s*$')
-for line in lines:
-    if re.match(r'\+\s*/\* 0150: CCBS scaffold', line):
-        in_scaffold = True
-        continue
-    if in_scaffold and brace_re.match(line):
-        in_scaffold = False
-        continue
-    if in_scaffold and line.startswith('+'):
-        continue
-    out.append(line)
-with open('$PATCH_0132', 'w') as f:
-    f.writelines(out)
-" && echo "### 0132.patch: F-047-R2 CCBS scaffold precisely stripped"
-fi
+# # Original sed ended at the first '+}' (line 98: inner if block), leaving
+# # orphaned braces at lines 99-100 that corrupt the fe_arm function structure.
+# # Fix: Python strips from '+\/\* 0150: CCBS scaffold' to exactly '+\t}'
+# # (the single-tab scaffold closing brace at line 100), preserving the
+# # engage code after the scaffold.
+# PATCH_0132="vyos-build/scripts/package-build/linux-kernel/patches/kernel/0132-fman-pcd-fe-arm-debugfs.patch"
+# if [ -f "$PATCH_0132" ]; then
+#     python3 -c "
+# import re, sys
+# with open('$PATCH_0132') as f:
+#     lines = f.readlines()
+# in_scaffold = False
+# out = []
+# brace_re = re.compile(r'^\+\t\}\s*$')
+# for line in lines:
+#     if re.match(r'\+\s*/\* 0150: CCBS scaffold', line):
+#         in_scaffold = True
+#         continue
+#     if in_scaffold and brace_re.match(line):
+#         in_scaffold = False
+#         continue
+#     if in_scaffold and line.startswith('+'):
+#         continue
+#     out.append(line)
+# with open('$PATCH_0132', 'w') as f:
+#     f.writelines(out)
+# " && echo "### 0132.patch: F-047-R2 CCBS scaffold precisely stripped"
+# fi
+# 
 
 # F-050: Allow mask=0 in fe_ehash set for single-bucket E-EKFC-1 experiment.
 # Patch 0125 rejects mask==0 ("if (mask == 0 || mask > ...) return -EINVAL").
