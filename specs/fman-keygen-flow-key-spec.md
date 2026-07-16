@@ -1,8 +1,8 @@
 # FMan KeyGen Flow-Key Architecture for ASK2 (LS1046A / DPAA1)
 
-**Status:** v3.1 — Clean Reference Spec. 2026-07-14.
+**Status:** v4.0 — Settled Dispatch Topology. 2026-07-16.
 **Branch:** dpaa1
-**Changes since v3.0:** Extraction order confirmed by CRC-64 hash-match on hardware (2026-07-13); self-test gate implementation status noted; F-063 keysize fix recorded.
+**Changes since v3.1:** Dispatch topology SETTLED (supersedes v2.0 §5 "RCCB→FE_ENTER direct" ruling): AC_CC + CONT_LOOKUP group-table pass-through for MISS→kernel delivery (silicon-proven 7.37 Gbps, build 28809182051), FE-VM chain retained dormant for future HIT phase. FmPortSetFESupport workspace-pool requirement documented (Gate A proven 2026-07-15). Three FE-VM ENQ delivery variants recorded as failed and closed.
 **Scope:** FMan KeyGen EKFC extraction, FE-VM dispatch, ehash flow-table architecture, and the software/silicon contract that ASK2 must satisfy.
 **References:**
 - `drivers/net/ethernet/freescale/fman/fman_keygen.c` (mainline, NXP 2017) — EKFC register definitions, KGSE indirect-write protocol
@@ -22,14 +22,16 @@ flowchart LR
     BMI --> Parser[Hard Parser]
     Parser --> KG[KeyGen Engine]
     KG --> |AC_CC mode| RCCB[RCCB Register]
-    RCCB --> FE_ENTER[FE-VM Root AD]
-    FE_ENTER --> HashFE[EXT_HASH FE]
-    HashFE --> DDR[(DDR ehash Table)]
-    DDR --> |HIT| MUX[MUX FE]
-    MUX --> ENQ[ENQ FE]
-    ENQ --> QMan[QMan TX FQ]
-    DDR --> |MISS| Exit[EXIT-DEALLOCATE FE]
-    Exit --> Kernel[Kernel RSS FQ]
+    RCCB --> GRP[CONT_LOOKUP Group Table]
+    GRP --> |numKeys=0: every frame| MISSAD[miss-AD]
+    MISSAD --> KFQ[Port KG-default / PCD FQ]
+    KFQ --> Kernel[Kernel NAPI poll]
+    GRP -.-> |future HIT: numKeys>0 entry| FE_ENTER[FE-VM Root AD - DORMANT]
+    FE_ENTER -.-> HashFE[EXT_HASH FE]
+    HashFE -.-> DDR[(DDR ehash Table)]
+    DDR -.-> |HIT| MUX[MUX FE]
+    MUX -.-> ENQ[ENQ FE]
+    ENQ -.-> QMan[QMan TX FQ]
 ```
 
 The FMan v3 (LS1046A, microcode 210.10.1) implements a Parse → Classify → Distribute pipeline:
@@ -369,17 +371,52 @@ u64 bucket = (crc >> shift) & mask;    /* mask=0x7fff → 32768 buckets */
 
 ## 6. FE-VM Dispatch Architecture
 
-### 6.1 Topology
+### 6.1 Topology (SETTLED 2026-07-16 — supersedes v2.0 §5)
 
-The FM Controller in AC_CC mode dispatches to the Action Descriptor at `FMBM_RCCB` (per-port register, offset 0x34 in the BMI port register window). This AD is the **FE-VM root** (FE_ENTER), not a CC group table entry.
+The FM Controller in AC_CC mode dispatches to the Action Descriptor at `FMBM_RCCB` (per-port register, offset 0x34 in the BMI port register window). The settled topology fronts the FE-VM with a **CC CONT_LOOKUP group table** — matching the vendor architecture, where MISS disposition is resolved at the CC layer and the FE-VM is entered only for classified (HIT-candidate) traffic:
 
 ```
 BMI RX → KeyGen (AC_CC: mode=0x80000006, ccbs=0)
-       → FMBM_RCCB → FE_ENTER (FE-VM root AD)
-       → EXT_HASH FE → ehash lookup in DDR
-       → HIT: MUX → ENQ (forward to TX FQ)
-       → MISS: EXIT-DEALLOCATE (return to kernel RSS)
+       → FMBM_RCCB → CONT_LOOKUP group table
+       → numKeys=0 (shipping): every frame → miss-AD → port KG-default/PCD FQ → kernel
+       → numKeys>0 (future HIT): match entry → FE_ENTER → EXT_HASH → ehash → MUX → ENQ → TX FQ
 ```
+
+**Why this supersedes the v2.0 "RCCB→FE_ENTER direct" ruling.** The v2.0 ruling was made before three facts were established on silicon:
+
+1. **The FE-VM requires the per-port workspace pool** (`FmPortSetFESupport`, params page `+0x54`/`+0x58`) — never ported until F-072 (2026-07-15). Every pre-F-072 FE-VM frame carved its workspace at a garbage MURAM offset, corrupting MURAM cumulatively (BMI stall, port deafness, disengage crash). All pre-F-072 FE-VM delivery results are void. Gate A (2026-07-15): pool armed, 600-frame MISS flood survived, first clean disengage in program history.
+2. **The FE-VM has no viable kernel-delivery terminal.** Three ENQ variants failed on silicon: F-070 NIA-mode (fqidEn=0, w1=0x00500002 — zero sustained delivery), F-073 vendor encoding (same), F-073B (fqidEn=1 with FQID written to the DDR miss context — wrong memory space; the ENQ reads the MURAM workspace, not the DDR context). EXIT-DEALLOCATE drops the frame (proven: 100% ping loss); EXIT-without-DEALLOCATE leaves the frame stranded in the BMI FIFO (no scheme-NIA fallback exists in AC_CC mode — watchdog reset).
+3. **The vendor never asks the FE-VM to deliver MISS frames.** The production CDX/ASK topology (RSR 10.3.0.B1 `cdx_pcd.xml` + 999-patch) resolves MISS at the CC-lookup layer, falling through to the KG-computed distribution FQID. The FE-VM opcode machinery executes only on HIT.
+
+The CONT_LOOKUP pass-through (numKeys=0 → miss-AD → kernel FQ) is silicon-proven: build 28809182051 (2026-07-06) — ping 3/3, **zero QMan errors**, clean disengage; M2 gate **7.37 Gbps / 0.16% CPU**. The group table costs 2–3 extra MURAM fetches per frame; that cost buys the only proven MISS→kernel mechanism on 210.10.1.
+
+### 6.1.1 CONT_LOOKUP Group AD (RM 8.7.4.1)
+
+The AD at RCCB, 16 bytes MURAM:
+
+```
+Offset  Value                                    Field
+0x00    (numKeys<<24) | (matchTableAddr&0xFFFFFF)  word0
+0x04    (adTableAddr&0xFFFFFF)                     word1
+0x08    0x40000000 | ((keySize-1)<<24)             word2
+0x0C    0x00000000                                 word3
+```
+
+With `numKeys=0` the match walk can never match; every frame takes the miss-AD (last slot of the AD table). The miss-AD is a hardware enqueue AD targeting the port's **KG-default/PCD FQ, sourced from the `fqids` sysfs at engage time — never hardcoded** (eth3: PCD base 0x200; eth4: Rx default 0x292, PCD 0x300–0x37F). Frames enqueued to an un-polled FQ are silently lost — this was the failure mode of two prior attempts (dedicated TX FQ 0x2b9 is a TX-channel FQ, wrong direction).
+
+The pre-v3 `{flags, next_ptr}` group-entry format decodes as `RESULT_CF fqid=0` (reserved-invalid) and floods QMan with Invalid Enqueue State errors — do not resurrect it.
+
+**Engage inverse (reversibility contract):** disarm must read the node offset from the group entry, free the group table and node/AD tables, and clear `pcd->fe_cc_grp_off`. The historical scaffold leaked +36 B per engage cycle; the pcd-snapshot gate (`MURAM used == 0` after disengage) is the acceptance test.
+
+### 6.1.2 Workspace-Pool Precondition for the Future HIT Path
+
+The moment any frame crosses into the FE-VM (a `numKeys>0` entry targeting FE_ENTER), the per-port FE internal buffer pool becomes **mandatory**:
+
+- Pool: `total_tnums × 512 B` MURAM, 256-aligned, zeroed
+- Management index ring: `(5 + tnums)` bytes — byte0 = cursor (0x04), bytes 1–3 = 24-bit pool offset, then index ring `0,1,…,tnums-1,0xFF`
+- Params page publication: `+0x54` = index MURAM offset, `+0x58` = 0 (depletion counter)
+
+Without it, the microcode does read-modify-write bookkeeping at MURAM offset 0 and carves frame workspaces at garbage offsets (F-072 root cause). Teardown order per the vendor `FmPortDeleteFESupport`: clear `+0x54` **while the params page still exists**, free pool and index, then detach PCD. Inverting this order (PCD detach first) writes to freed MURAM — the disengage-crash failure mode.
 
 ### 6.2 FE-VM Action Descriptors
 
@@ -426,11 +463,13 @@ MUX (multiplexer, routes HIT frames to ENQ):
 8 bytes: type 0x04000000, next-FE offset → ENQ
 ```
 
-EXIT (deallocates workspace, returns frame to kernel):
+EXIT (deallocates workspace AND frame — terminal drop, NOT kernel delivery):
 
 ```
 4 bytes: type 0x03800000 (EXIT | DEALLOCATE)
 ```
+
+EXIT-DEALLOCATE frees the BMI FIFO allocation and terminates the frame — proven on silicon as 100% packet loss for frames taking this path. It is a safe terminal disposition (the port does not stall) but it is a **drop**, not a return-to-kernel. In AC_CC mode there is no scheme-NIA fallback after the FE-VM; kernel delivery is the CC-layer miss-AD's job (§6.1.1).
 
 ### 6.3 Ehash Record Format
 
@@ -555,14 +594,21 @@ Adding `PTYPE1` (one byte) to go from 4-tuple to 5-tuple has negligible performa
 
 ### 9.2 Dispatch Topology
 
-The AC_CC direct path (RCCB → FE_ENTER) involves:
+The shipping pass-through path (RCCB → CONT_LOOKUP → miss-AD → kernel FQ) involves:
 
 1. KeyGen extraction and hash (per-frame, in silicon)
-2. One MURAM descriptor fetch (FE_ENTER workspace allocation)
-3. One DDR bucket read (ehash head pointer)
-4. Chain walk: one DDR record read per entry in the bucket chain
-5. On HIT: one MUX fetch + one ENQ fetch (both in MURAM)
-6. On MISS: one EXIT-DEALLOCATE fetch (MURAM)
+2. One MURAM group-entry fetch + one miss-AD fetch
+3. Hardware enqueue to the port's KG-default/PCD FQ (kernel NAPI polls it)
+
+Measured: 7.37 Gbps / 0.16% CPU / zero QMan errors (M2 gate, build 28809182051).
+
+The future HIT path (numKeys>0 entry → FE_ENTER → EXT_HASH) adds:
+
+1. One MURAM descriptor fetch (FE_ENTER, workspace allocation from the per-port pool)
+2. One DDR bucket read (ehash head pointer)
+3. Chain walk: one DDR record read per entry in the bucket chain
+4. On HIT: one MUX fetch + one ENQ fetch (both in MURAM)
+5. On MISS within the FE-VM: one EXIT-DEALLOCATE fetch (MURAM) — but note MISS traffic should be filtered at the CC layer before entering the FE-VM
 
 At a load factor of 0.023 (750 max flows / 32768 buckets), essentially every bucket is empty or contains one entry. Chain walks are one record deep.
 
@@ -582,7 +628,10 @@ The EKFC order problem is a one-time engineering cost paid at development time. 
 | Extraction order | Data-driven; table `fman_kg_order_v4[]` | §3.2 |
 | Order verification | `fman_pcd_key_selftest()` via debugfs | §3.4 |
 | Engagement gate | `key_verified == 1` required | §3.5 |
-| Dispatch | RCCB → FE_ENTER → EXT_HASH → DDR ehash | §6.1 |
+| Dispatch (shipping) | RCCB → CONT_LOOKUP (numKeys=0) → miss-AD → port PCD FQ → kernel | §6.1 |
+| Dispatch (future HIT) | CONT_LOOKUP match entry → FE_ENTER → EXT_HASH → DDR ehash (dormant) | §6.1 |
+| Workspace pool | `FmPortSetFESupport` mandatory before any FE-VM entry | §6.1.2 |
+| miss-AD FQID | Sourced from `fqids` sysfs at engage — never hardcoded | §6.1.1 |
 | Hash algorithm | CRC-64 ECMA-182 (fixed silicon) | §5.4 |
 | Bucket index | `(crc64(key, key_len) >> 48) & 0x7FFF` | §5.4 |
 | Buckets / table size | 32768 / 512 KiB DDR | §6.4 |

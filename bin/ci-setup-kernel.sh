@@ -1277,76 +1277,6 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
 fi
 
 
-# F-079 part 2: Replace bare FE_ENTER at RCCB with CONT_LOOKUP group table + miss-AD.
-# The CONT_LOOKUP with numKeys=0 dispatches ALL frames to the miss-AD.
-# Added as a Python fixup to patch 0132's arm_fe_engage.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    echo 'aW1wb3J0IHN5cw0KcCA9ICJkcml2ZXJzL25ldC9ldGhlcm5ldC9mcmVlc2NhbGUvZm1hbi9mbWFuX3BjZC5jIg0Kd2l0aCBvcGVuKHApIGFzIGY6IHNyYyA9IGYucmVhZCgpDQpkZWYgYXNzZXJ0X29uZShvbGQsIGxhYmVsKToNCiAgICBuID0gc3JjLmNvdW50KG9sZCkNCiAgICBpZiBuICE9IDE6IHByaW50KGYiRkFUQUw6IEYtMDc5IHtsYWJlbH06IHtufSBtYXRjaGVzIiwgZmlsZT1zeXMuc3RkZXJyKTsgc3lzLmV4aXQoMSkNCg0KY2hhbmdlZCA9IDANCg0KIyBGLTA3OTogUmVwbGFjZSBiYXJlIEZFX0VOVEVSIGF0IFJDQ0Igd2l0aCBDT05UX0xPT0tVUCBwYXNzLXRocm91Z2guDQojIFRoZSBmbWFuX3BjZF9mZV9hcm1fZW5nYWdlIGZ1bmN0aW9uIGNhbGxzIGZtYW5fY2dfcG9ydF9hcm1fZmUgDQojIHdpdGggZmVfZW50ZXJfb2ZmIC0+IHRoaXMgZ2V0cyB3cml0dGVuIHRvIFJDQ0IgKEZNQk1fUkNDQikuDQojIFJlcGxhY2U6IEZlX2VudGVyX29mZiA9IGVpdGhlciBmZV9yb290X2FkX29mZiAob3VyKSBvciBncm91cF90YWJsZV9vZmZzZXQNCiMgb2YgYSBDT05UX0xPT0tVUCB3aXRoIG51bUtleXM9MCBhbmQgbWlzcy1BRCBlbnF1ZXVlIHRvIGtlcm5lbCBGUS4NCg0KIyBUaGUgZW5nYWdlIGZ1bmN0aW9uIGJ1aWxkcyBhIHNjYWZmb2xkIChjdXJyZW50bHkgaWYoMCknZCkNCiMgdGhhdCBhbGxvY2F0ZXMgZ3JvdXAgdGFibGUgKyBhZCB0YWJsZSBhbmQgd3JpdGVzIHRoZSBDT05UX0xPT0tVUA0KIyBlbmNvZGluZy4gRXhwb3NlIHRoaXMgYnkgY2hhbmdpbmcgdGhlIGlmKDApIHRvIGlmKDEpIGFuZA0KIyB1c2luZyB0aGUgcHJvcGVyIE1VUkFNIGFsbG9jYXRpb24gdmFyaWFibGUgZXhwb3NlZCB0byB0aGUgZW5nYWdlLg0KDQojIDEuIEZpbmQgdGhlIGlmKDApIGJsb2NrIHRoYXQgY3JlYXRlcyB0aGUgc2NhZmZvbGQNCiMgICBMb29rIGZvciB0aGUgcGF0dGVybjogLyogMDE1MDogQ0NCUyBzY2FmZm9sZCB4ZTIiDQpvX3NjYWYgPSAnLyogMDE1MDogQ0NCUyBzY2FmZm9sZCBceGUyXHg4MFx4OTQgQ09OVF9MT09LVVAgQUQNCmlmX29fc2NhZiA9ICdpZiAoMCkNCmZvdW5kID0gRmFsc2UNCmZvciBsaW5lIGluIHNyYy5zcGxpdCgnXG4nKToNCiAgICBpZiBvX3NjYWYgaW4gbGluZToNCiAgICAgICAgZm91bmQgPSBUcnVlDQogICAgICAgIHByaW50KCcjIyMgRi0wNzk6IHNjYWZmb2xkIGNvbW1lbnQgZm91bmQnKQ0KICAgICAgICBicmVhaw0KDQppZiBub3QgZm91bmQ6DQogICAgcHJpbnQoJyMjIyBGLTA3OTogc2NhZmZvbGQgbm90IGZvdW5kIC0tIG1heSBhbHJlYWR5IGJlIHJlbW92ZWQnKQ0KDQojIDIuIEZpbmQgdGhlIHJlYWwgUklDQkYgc2V0IChub3QgdGhlIHNjYWZmb2xkIG92ZXJ3cml0ZSBvbmUpDQojICAgIGxvb2sgZm9yOiBlcnIgPSBmbWFuX3BvcnRfc2V0X2NjX2Jhc2Uocnhwb3J0LCBmZV9lbnRlcl9vZmYpOw0Kb19yY2NiID0gJ2VyciA9IGZtYW5fcG9ydF9zZXRfY2NfYmFzZShyeHBvcnQsIGZlX2VudGVyX29mZik7Jw0KaWYgb19yY2NiIGluIHNyYzoNCiAgICBhc3NlcnRfb25lKG9fcmNjYiwgIlJDQ0Igc2V0IikNCiAgICBwcmludCgnIyMjIEYtMDc5OiBSQ0NCIHNldCBmb3VuZCAtLSBuZWVkIHRvIHJlcGxhY2Ugd2l0aCBncm91cCB0YWJsZScpDQplbHNlOg0KICAgIHByaW50KCcjIyMgRi0wNzk6IFJDQ0Igc2V0IE5PVCBmb3VuZCcpDQoNCmlmIGNoYW5nZWQgPiAwOg0KICAgIHdpdGggb3BlbihwLCAndycpIGFzIGY6IGYud3JpdGUoc3JjKQ0KICAgIHByaW50KGYnIyMjIEYtMDc5OiB7Y2hhbmdlZH0gY2hhbmdlcyBhcHBsaWVkJykNCmVsc2U6DQogICAgcHJpbnQoJyMjIyBGLTA3OTogbm8gY2hhbmdlcyBhcHBsaWVkIC0tIG1heSBhbHJlYWR5IHByZXNlbnQgb3IgcHJlLXBhdGNoIHN0YXRlJykNCg==' | base64 -d | python3 2>&1
-    echo "##
-# F-079 part 3: Fix scaffold CONT_LOOKUP AD encoding per RM 8.7.4.1.
-# The patch-0150 scaffold (now active after F-047 disabled) has wrong AD format.
-# Fix: group entry = (numKeys<<24)|mto, adBase=ato, type=0x40000000, keySize=12.
-# Fix: AD table miss entry = FQID|NIA_BMI_AC_ENQ_FRAME (not 0x02500002 garbage).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 -c "
-import sys
-p = 'drivers/net/ethernet/freescale/fman/fman_pcd.c'
-with open(p) as f: s = f.read()
-
-c = 0
-
-# Fix 1: Group table w0 — numKeys=0, no matchTable (mto unused)
-# Old: 0x40000000 | (0xFu<<24) | (ato & 0xFFFFFF)
-# New: (0u << 24) | 0  → just write ato (the adTableAddr)
-old1 = '0x40000000 | (0xFu << 24) | (ato & 0xFFFFFF)'
-new1 = '(0u << 24) | 0 /* F-079: numKeys=0, no matchTable */'
-if old1 in s:
-    s = s.replace(old1, new1, 1); c += 1
-    print('F-079: group table w0 fixed (numKeys=0)')
-elif new1 in s:
-    print('F-079: group table w0 already fixed')
-
-# Fix 2: Group table w1 — was 0, should be ato (adTableAddr)
-old2 = 'iowrite32be(0, c + 4);'
-new2 = 'iowrite32be((ato & 0xFFFFFF), c + 4);	/* F-079: adTable base */'
-if old2 in s and '0x40000000 | (0xFu' in s:  # only if scaffold exists
-    pass  # leave as-is for now — w1=0 works with numKeys=0
-# Actually change it:
-if old2 in s:
-    s = s.replace(old2, new2, 1); c += 1
-    print('F-079: group table w1 fixed (adTable base)')
-
-# Fix 3: Group table w2 — was garbage, should be CONT_LOOKUP type + keySize
-old3 = '(0u << 24) | (0x50u << 16) | 0x2Bu'
-new3 = '0x40000000 | ((12u - 1) << 24) /* F-079: CONT_LOOKUP type + (keySize-1) */'
-if old3 in s:
-    s = s.replace(old3, new3, 1); c += 1
-    print('F-079: group table w2 fixed (CONT_LOOKUP + keySize=12)')
-
-# Fix 4: AD table entries — 0x02500002 → 0x00500002 (correct NIA_BMI_AC_ENQ_FRAME)
-old4 = 'iowrite32be(0x02500002, '
-new4 = 'iowrite32be(0x00500002, '
-count4 = s.count(old4)
-if count4 >= 2:
-    s = s.replace(old4, new4); c += count4
-    print(f'F-079: AD table NIA fixed ({count4} occurrences)')
-
-if c > 0:
-    with open(p, 'w') as f: f.write(s)
-    print(f'F-079: {c} scaffold fixes applied')
-else:
-    print('F-079: scaffold not found — may already be fixed')
-" 2>&1
-    echo "##
-
-# F-040/F-002: fman_pcd.c post-patch MURAM zeroing + leak fix.
-# Base64-encoded Python fixer (no escape issues).
-# Runs after kernel post-patches commit, before compilation.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    echo 'aW1wb3J0IHN5cwoKcGF0aCA9ICJkcml2ZXJzL25ldC9ldGhlcm5ldC9mcmVlc2NhbGUvZm1hbi9mbWFuX3BjZC5jIgp3aXRoIG9wZW4ocGF0aCkgYXMgZjogc3JjID0gZi5yZWFkKCkKY2hhbmdlcyA9IDAKCiMgMC4gRGVmaW5lIGJvdGggZ2xvYmFscwpmb3IgZyBpbiBbInVuc2lnbmVkIGludCBmbWFuX3BjZF9oYXNoX29mZnNldCIsICJ2b2lkICpmbWFuX3BjZF9pY192YWRkciJdOgogICAgaWYgZyBub3QgaW4gc3JjOgogICAgICAgIGZpcnN0X2luYyA9IHNyYy5maW5kKCIjaW5jbHVkZSIpCiAgICAgICAgaWYgZmlyc3RfaW5jID4gMDoKICAgICAgICAgICAgc3JjID0gc3JjWzpmaXJzdF9pbmNdICsgZyArICI7XG4iICsgc3JjW2ZpcnN0X2luYzpdCiAgICAgICAgICAgIGNoYW5nZXMgKz0gMQogICAgICAgICAgICBwcmludChmIiMjIyBmbWFuX3BjZC5jOiBGLTA2OWIgdjYge2d9IGRlZmluZWQiKQoKIyAxLiBJbnNlcnQgaWNfcHJvYmVfc2hvdyBpZiBub3QgcHJlc2VudCAoaGFuZGxlIGZyZXNoIEFORCB1cGdyYWRlIGZyb20gb2xkIHY0KQppZiAiZm1hbl9wY2RfaWNfcHJvYmVfc2hvdyIgbm90IGluIHNyYzoKICAgIGFuY2hvciA9ICJzdGF0aWMgaW50IGZtYW5fcGNkX2ZlX3Byb2JlX3Nob3ciCiAgICBpZiBhbmNob3IgaW4gc3JjOgogICAgICAgIGNvZGUgPSAoCiAgICAgICAgICAgICIvKiBGLTA2OWIgdjY6IGljX3Byb2JlIGRlYnVnZnMgLSBkdW1wIEZNYW4gSUMgYXQgY29ycmVjdCBvZmZzZXRzICovXG4iCiAgICAgICAgICAgICJzdGF0aWMgaW50IGZtYW5fcGNkX2ljX3Byb2JlX3Nob3coc3RydWN0IHNlcV9maWxlICpzLCB2b2lkICp1bnVzZWQpXG4iCiAgICAgICAgICAgICJ7XG4iCiAgICAgICAgICAgICJcdHZvaWQgKnZhZGRyO1xuIgogICAgICAgICAgICAiXHR1bnNpZ25lZCBpbnQgaGFzaF9vZmYsIHByc19vZmYsIGk7XG4iCiAgICAgICAgICAgICJcbiIKICAgICAgICAgICAgIlx0c21wX3JtYigpO1xuIgogICAgICAgICAgICAiXHR2YWRkciA9IGZtYW5fcGNkX2ljX3ZhZGRyO1xuIgogICAgICAgICAgICAiXHRpZiAoIXZhZGRyKSB7XG4iCiAgICAgICAgICAgICJcdFx0c2VxX3B1dHMocywgXCJubyBmcmFtZSBjYXB0dXJlZFxcblwiKTtcbiIKICAgICAgICAgICAgIlx0XHRyZXR1cm4gMDtcbiIKICAgICAgICAgICAgIlx0fVxuIgogICAgICAgICAgICAiXHRoYXNoX29mZiA9IGZtYW5fcGNkX2hhc2hfb2Zmc2V0O1xuIgogICAgICAgICAgICAiXHRwcnNfb2ZmID0gaGFzaF9vZmYgLSAweDI4O1xuIgogICAgICAgICAgICAiXHRzZXFfcHJpbnRmKHMsIFwidmFkZHI9JXB4IGhhc2hfb2ZmPSV1IHByc19vZmY9JXVcXG5cIiwgdmFkZHIsIGhhc2hfb2ZmLCBwcnNfb2ZmKTtcbiIKICAgICAgICAgICAgIlx0c2VxX3ByaW50ZihzLCBcInBhcnNlX3Jlc3VsdDogXCIpO1xuIgogICAgICAgICAgICAiXHRmb3IgKGkgPSAwOyBpIDwgODsgaSsrKSB7XG4iCiAgICAgICAgICAgICJcdFx0dTMyIHYgPSBiZTMyX3RvX2NwdSgoKHUzMiAqKXZhZGRyKVtwcnNfb2ZmLzQgKyBpXSk7XG4iCiAgICAgICAgICAgICJcdFx0c2VxX3ByaW50ZihzLCBcIiBbJTAyZF09JTA4eFwiLCBwcnNfb2ZmLzQgKyBpLCB2KTtcbiIKICAgICAgICAgICAgIlx0fVxuIgogICAgICAgICAgICAiXHRzZXFfcHJpbnRmKHMsIFwiXFxuaGFzaDogICAgICAgXCIpO1xuIgogICAgICAgICAgICAiXHRmb3IgKGkgPSAwOyBpIDwgMjsgaSsrKSB7XG4iCiAgICAgICAgICAgICJcdFx0dTMyIHYgPSBiZTMyX3RvX2NwdSgoKHUzMiAqKXZhZGRyKVtoYXNoX29mZi80ICsgaV0pO1xuIgogICAgICAgICAgICAiXHRcdHNlcV9wcmludGYocywgXCIgWyUwMmRdPSUwOHhcIiwgaGFzaF9vZmYvNCArIGksIHYpO1xuIgogICAgICAgICAgICAiXHR9XG4iCiAgICAgICAgICAgICJcdHNlcV9wdXRzKHMsIFwiXFxuXCIpO1xuIgogICAgICAgICAgICAiXHRyZXR1cm4gMDtcbiIKICAgICAgICAgICAgIn1cbiIKICAgICAgICAgICAgIlxuIgogICAgICAgICAgICAic3RhdGljIGludCBmbWFuX3BjZF9pY19wcm9iZV9vcGVuKHN0cnVjdCBpbm9kZSAqaW5vZGUsIHN0cnVjdCBmaWxlICpmaWxlKVxuIgogICAgICAgICAgICAie1xuIgogICAgICAgICAgICAiXHRyZXR1cm4gc2luZ2xlX29wZW4oZmlsZSwgZm1hbl9wY2RfaWNfcHJvYmVfc2hvdywgaW5vZGUtPmlfcHJpdmF0ZSk7XG4iCiAgICAgICAgICAgICJ9XG4iCiAgICAgICAgICAgICJcbiIKICAgICAgICAgICAgInN0YXRpYyBjb25zdCBzdHJ1Y3QgZmlsZV9vcGVyYXRpb25zIGZtYW5fcGNkX2ljX3Byb2JlX2ZvcHMgPSB7XG4iCiAgICAgICAgICAgICJcdC5vd25lclx0XHQ9IFRISVNfTU9EVUxFLFxuIgogICAgICAgICAgICAiXHQub3Blblx0XHQ9IGZtYW5fcGNkX2ljX3Byb2JlX29wZW4sXG4iCiAgICAgICAgICAgICJcdC5yZWFkXHRcdD0gc2VxX3JlYWQsXG4iCiAgICAgICAgICAgICJcdC5sbHNlZWtcdFx0PSBzZXFfbHNlZWssXG4iCiAgICAgICAgICAgICJcdC5yZWxlYXNlXHQ9IHNpbmdsZV9yZWxlYXNlLFxuIgogICAgICAgICAgICAifTtcblxuIgogICAgICAgICkKICAgICAgICBzcmMgPSBzcmMucmVwbGFjZShhbmNob3IsIGNvZGUgKyBhbmNob3IpCiAgICAgICAgY2hhbmdlcyArPSAxCiAgICAgICAgcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBGLTA2OWIgdjYgaWNfcHJvYmVfc2hvdyBpbnNlcnRlZCIpCiAgICBlbHNlOgogICAgICAgIHByaW50KCIjIyMgZm1hbl9wY2QuYzogRi0wNjliIHY2IGFuY2hvciBub3QgZm91bmQiKQplbHNlOgogICAgcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBGLTA2OWIgdjYgaWNfcHJvYmVfc2hvdyBhbHJlYWR5IHByZXNlbnQiKQoKIyAyLiBSZWdpc3RlciBkZWJ1Z2ZzCmlmICdkZWJ1Z2ZzX2NyZWF0ZV9maWxlKCJpY19wcm9iZSInIG5vdCBpbiBzcmM6CiAgICBkYmdfYW5jaG9yID0gJ2RlYnVnZnNfY3JlYXRlX2ZpbGUoImZlX3Byb2JlIicKICAgIGlmIGRiZ19hbmNob3IgaW4gc3JjOgogICAgICAgIHByb2JlX2RiZyA9ICgKICAgICAgICAgICAgJ1x0XHRcdGRlYnVnZnNfY3JlYXRlX2ZpbGUoImljX3Byb2JlIiwgMDQ0NCxcbicKICAgICAgICAgICAgJ1x0XHRcdFx0XHQgICAgcGNkLT5kZWJ1Z2ZzX2RpciwgcGNkLFxuJwogICAgICAgICAgICAnXHRcdFx0XHRcdCAgICAmZm1hbl9wY2RfaWNfcHJvYmVfZm9wcyk7XG4nCiAgICAgICAgICAgICdcdFx0XHQnICsgZGJnX2FuY2hvcgogICAgICAgICkKICAgICAgICBzcmMgPSBzcmMucmVwbGFjZShkYmdfYW5jaG9yLCBwcm9iZV9kYmcpCiAgICAgICAgY2hhbmdlcyArPSAxCiAgICAgICAgcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBGLTA2OWIgdjYgaWNfcHJvYmUgcmVnaXN0ZXJlZCIpCgppZiBjaGFuZ2VzID4gMDoKICAgIHdpdGggb3BlbihwYXRoLCAidyIpIGFzIGY6IGYud3JpdGUoc3JjKQogICAgcHJpbnQoZiIjIyMgZm1hbl9wY2QuYzogRi0wNjliIHY2IHtjaGFuZ2VzfSBjaGFuZ2UocykgYXBwbGllZCIpCmVsc2U6CiAgICBwcmludCgiIyMjIGZtYW5fcGNkLmM6IEYtMDY5YiB2NiBubyBjaGFuZ2VzIikK' | base64 -d | python3
-fi
-
-
 # M2-4: fix fman_port_lookup_rx — all LS1046A fman_port->port_id==0
 # (mainline of_alias_get_id fallback returns -ENODEV).  The lookup
 # comparison p->port_id == port_id always fails for non-zero port_id.
@@ -1798,19 +1728,6 @@ else
 fi
 
 
-# F-079: Fix scaffold CONT_LOOKUP AD encoding IN THE PATCH FILE before application.
-# The 0132 patch scaffold has wrong AD format (garbage w2, wrong NIA).
-# Fix it in the .patch text BEFORE git apply, so the applied code is correct.
-PATCH_0132="vyos-build/scripts/package-build/linux-kernel/patches/kernel/0132-fman-pcd-fe-arm-debugfs.patch"
-if [ -f "$PATCH_0132" ]; then
-    # Fix 1: Group table w0 — numKeys=0 (not 15=0xF)
-    sed -i "s/+\t\t\tiowrite32be(0x40000000 | (0xFu << 24) | (ato \& 0xFFFFFF), c + 0);/+\t\t\tiowrite32be((0u << 24) | (ato \& 0xFFFFFF), c + 0);\/\* F-079: numKeys=0 \*\//" "$PATCH_0132"
-    # Fix 2: Group table w2 — CONT_LOOKUP type + (keysize-1)
-    sed -i "s/+\t\t\tiowrite32be((0u << 24) | (0x50u << 16) | 0x2Bu, c + 8);/+\t\t\tiowrite32be(0x40000000 | ((12u - 1) << 24), c + 8);\/\* F-079: CONT_LOOKUP+(keySize-1) \*\//" "$PATCH_0132"
-    # Fix 3: AD table NIA — 0x02500002 -> 0x00500002
-    sed -i "s/0x02500002/0x00500002 \/\* F-079: NIA_BMI_AC_ENQ_FRAME \*\//g" "$PATCH_0132"
-    echo "### F-079: 0132.patch scaffold CONT_LOOKUP AD fixed in-place"
-fi
 # === end ASK2 v2 post-bindeb-pkg headers snapshot ===
 '''
 
