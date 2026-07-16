@@ -1278,8 +1278,6 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-073B: fallback B' — ENQ fqidEn=1 + miss_ctx FQID"
 fi
 
-fi
-
 # F-040/F-002: fman_pcd.c post-patch MURAM zeroing + leak fix.
 # Base64-encoded Python fixer (no escape issues).
 # Runs after kernel post-patches commit, before compilation.
