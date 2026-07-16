@@ -32,7 +32,7 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethern
 index 0fb8c0a..d58feb6 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -2103,6 +2103,147 @@ static const struct file_operations fman_pcd_fe_hashfe_fops = {
+@@ -2103,6 +2103,153 @@ static const struct file_operations fman_pcd_fe_hashfe_fops = {
  	.release	= single_release,
  };
  
