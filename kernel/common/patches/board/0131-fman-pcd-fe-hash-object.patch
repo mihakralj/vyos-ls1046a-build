@@ -52,10 +52,12 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethern
 index 0df6585..0fb8c0a 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -132,6 +132,7 @@ struct fman_pcd {
+@@ -132,6 +132,9 @@ struct fman_pcd {
  	size_t fe_int_buf_raw_size;
  	int fe_int_buf_refcount;
  	unsigned long fe_root_ad_off;	/* sec.5 FE_ENTER root AD (16 B) */
++	u8 fe_armed_port;		/* F-079-R4: last engaged port */
++	unsigned int fe_miss_fqid;	/* F-079-R4: miss-AD delivery FQ */
 +	unsigned long fe_hash_off;	/* sec.5 t_ExtHashFe FE-hash object */
  
  	struct dentry *debugfs_dir;
