@@ -51,15 +51,15 @@ index 0fb8c0a..d58feb6 100644
 +{
 +	unsigned int port_id;
 +	unsigned long fe_enter_off;
-	unsigned int miss_fqid = 0;  /* F-079-R4 optional 3rd arg */
++	unsigned int miss_fqid = 0;  /* F-079-R4 optional 3rd arg */
 +	u8 saved_engine = 0;
 +	int err;
 +
 +	if (sscanf(args, "engage %x %lx %x", &port_id, &fe_enter_off, &miss_fqid) < 2)
 +		return -EINVAL;
-+		if (miss_fqid == 0)
-		miss_fqid = 0x200;  /* backward compat: eth3 default */
-	if (port_id < 0x08 || port_id >= 0x28 || fe_enter_off == 0)
++	if (miss_fqid == 0)
++		miss_fqid = 0x200;  /* backward compat: eth3 default */
++	if (port_id < 0x08 || port_id >= 0x28 || fe_enter_off == 0)
 +		return -EINVAL;
 +
 +	mutex_lock(&pcd->fe_lock);
@@ -108,9 +108,9 @@ index 0fb8c0a..d58feb6 100644
 +	if (err)
 +		return err;
 +
-+			pcd->fe_armed_port = (u8)port_id;
-		pcd->fe_miss_fqid = miss_fqid;
-		pr_info("fman_pcd fe_arm: port 0x%02x ENGAGED FE_ENTER=0x%lx (AC_CC)\n",
++	+		pcd->fe_armed_port = (u8)port_id;
++		pcd->fe_miss_fqid = miss_fqid;
++		pr_info("fman_pcd fe_arm: port 0x%02x ENGAGED FE_ENTER=0x%lx (AC_CC)\n",
 +		port_id, fe_enter_off);
 +	return 0;
 +}
