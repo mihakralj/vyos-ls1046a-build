@@ -134,6 +134,22 @@ jobs:
           echo "NVMe scratch ready at /mnt/build-workspace"
           df -h /mnt
 
+      - name: Unmount stale chroot bind-mounts (self-hosted)
+        run: |
+          # live-build mount --bind's proc/sys/dev into the chroot.
+          # If a previous build fails mid-way, these mounts survive
+          # and block actions/checkout from cleaning the workspace.
+          # Force lazy-unmount any stale mounts under the chroot.
+          for d in proc sys dev/pts dev; do
+            mp="${GITHUB_WORKSPACE}/vyos-build/build/chroot/${d}"
+            if mountpoint -q "$mp" 2>/dev/null; then
+              echo "Unmounting stale bind mount: $mp"
+              sudo umount -l "$mp" 2>/dev/null || true
+            fi
+          done
+          # Also try to clean entirely if the workspace exists
+          sudo rm -rf "${GITHUB_WORKSPACE}/vyos-build/build/chroot" 2>/dev/null || true
+
       - name: Reset workspace ownership (self-hosted)
         run: |
           # The build steps run via `sudo -E bash` and create root-owned
