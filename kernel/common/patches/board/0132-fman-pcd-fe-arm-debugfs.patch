@@ -108,7 +108,7 @@ index 0fb8c0a..d58feb6 100644
 +	if (err)
 +		return err;
 +
-+	+		pcd->fe_armed_port = (u8)port_id;
++		pcd->fe_armed_port = (u8)port_id;
 +		pcd->fe_miss_fqid = miss_fqid;
 +		pr_info("fman_pcd fe_arm: port 0x%02x ENGAGED FE_ENTER=0x%lx (AC_CC)\n",
 +		port_id, fe_enter_off);
