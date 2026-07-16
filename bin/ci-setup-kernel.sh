@@ -1276,29 +1276,13 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-073D: Terminal ENQ (w0=0x02010000, w3=0) per 210.10.1 §7.1/§7.3"
 fi
 
-# F-079: Vendor-aligned CONT_LOOKUP pass-through at RCCB for MISS->kernel delivery.
-# AC_CC mode (next_engine=3) with RCCB pointing to a CONT_LOOKUP AD instead of
-# bare FE_ENTER. CONT_LOOKUP with numKeys=0 routes ALL frames to miss-AD -> BMI
-# ENQ -> kernel FQ. This is the 7.37 Gbps M2-gate proven mechanism.
-# FE_ENTER + FE-VM chain is built but dormant — HIT path deferred.
-# When HIT keys are inserted later, numKeys increments and the CONT_LOOKUP
-# dispatches matching frames to FE_ENTER for hardware forwarding.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
-    # Ensure next_engine=3 (AC_CC — already set by F-068-Revert)
-    # Ensure cc_bits_sel=0 (no CCBS implicit walk)
-    sed -i "s/slot->cc_bits_sel   = fe_enter_off;/slot->cc_bits_sel   = 0;\/\* F-079: AC_CC uses RCCB, not CCBS \*\//" \
-        drivers/net/ethernet/freescale/fman/fman_pcd_kg.c 2>/dev/null || true
-    echo "### F-079: AC_CC mode preserved (next_engine=3)"
-fi
 
 # F-079 part 2: Replace bare FE_ENTER at RCCB with CONT_LOOKUP group table + miss-AD.
 # The CONT_LOOKUP with numKeys=0 dispatches ALL frames to the miss-AD.
 # Added as a Python fixup to patch 0132's arm_fe_engage.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo 'aW1wb3J0IHN5cw0KcCA9ICJkcml2ZXJzL25ldC9ldGhlcm5ldC9mcmVlc2NhbGUvZm1hbi9mbWFuX3BjZC5jIg0Kd2l0aCBvcGVuKHApIGFzIGY6IHNyYyA9IGYucmVhZCgpDQpkZWYgYXNzZXJ0X29uZShvbGQsIGxhYmVsKToNCiAgICBuID0gc3JjLmNvdW50KG9sZCkNCiAgICBpZiBuICE9IDE6IHByaW50KGYiRkFUQUw6IEYtMDc5IHtsYWJlbH06IHtufSBtYXRjaGVzIiwgZmlsZT1zeXMuc3RkZXJyKTsgc3lzLmV4aXQoMSkNCg0KY2hhbmdlZCA9IDANCg0KIyBGLTA3OTogUmVwbGFjZSBiYXJlIEZFX0VOVEVSIGF0IFJDQ0Igd2l0aCBDT05UX0xPT0tVUCBwYXNzLXRocm91Z2guDQojIFRoZSBmbWFuX3BjZF9mZV9hcm1fZW5nYWdlIGZ1bmN0aW9uIGNhbGxzIGZtYW5fY2dfcG9ydF9hcm1fZmUgDQojIHdpdGggZmVfZW50ZXJfb2ZmIC0+IHRoaXMgZ2V0cyB3cml0dGVuIHRvIFJDQ0IgKEZNQk1fUkNDQikuDQojIFJlcGxhY2U6IEZlX2VudGVyX29mZiA9IGVpdGhlciBmZV9yb290X2FkX29mZiAob3VyKSBvciBncm91cF90YWJsZV9vZmZzZXQNCiMgb2YgYSBDT05UX0xPT0tVUCB3aXRoIG51bUtleXM9MCBhbmQgbWlzcy1BRCBlbnF1ZXVlIHRvIGtlcm5lbCBGUS4NCg0KIyBUaGUgZW5nYWdlIGZ1bmN0aW9uIGJ1aWxkcyBhIHNjYWZmb2xkIChjdXJyZW50bHkgaWYoMCknZCkNCiMgdGhhdCBhbGxvY2F0ZXMgZ3JvdXAgdGFibGUgKyBhZCB0YWJsZSBhbmQgd3JpdGVzIHRoZSBDT05UX0xPT0tVUA0KIyBlbmNvZGluZy4gRXhwb3NlIHRoaXMgYnkgY2hhbmdpbmcgdGhlIGlmKDApIHRvIGlmKDEpIGFuZA0KIyB1c2luZyB0aGUgcHJvcGVyIE1VUkFNIGFsbG9jYXRpb24gdmFyaWFibGUgZXhwb3NlZCB0byB0aGUgZW5nYWdlLg0KDQojIDEuIEZpbmQgdGhlIGlmKDApIGJsb2NrIHRoYXQgY3JlYXRlcyB0aGUgc2NhZmZvbGQNCiMgICBMb29rIGZvciB0aGUgcGF0dGVybjogLyogMDE1MDogQ0NCUyBzY2FmZm9sZCB4ZTIiDQpvX3NjYWYgPSAnLyogMDE1MDogQ0NCUyBzY2FmZm9sZCBceGUyXHg4MFx4OTQgQ09OVF9MT09LVVAgQUQNCmlmX29fc2NhZiA9ICdpZiAoMCkNCmZvdW5kID0gRmFsc2UNCmZvciBsaW5lIGluIHNyYy5zcGxpdCgnXG4nKToNCiAgICBpZiBvX3NjYWYgaW4gbGluZToNCiAgICAgICAgZm91bmQgPSBUcnVlDQogICAgICAgIHByaW50KCcjIyMgRi0wNzk6IHNjYWZmb2xkIGNvbW1lbnQgZm91bmQnKQ0KICAgICAgICBicmVhaw0KDQppZiBub3QgZm91bmQ6DQogICAgcHJpbnQoJyMjIyBGLTA3OTogc2NhZmZvbGQgbm90IGZvdW5kIC0tIG1heSBhbHJlYWR5IGJlIHJlbW92ZWQnKQ0KDQojIDIuIEZpbmQgdGhlIHJlYWwgUklDQkYgc2V0IChub3QgdGhlIHNjYWZmb2xkIG92ZXJ3cml0ZSBvbmUpDQojICAgIGxvb2sgZm9yOiBlcnIgPSBmbWFuX3BvcnRfc2V0X2NjX2Jhc2Uocnhwb3J0LCBmZV9lbnRlcl9vZmYpOw0Kb19yY2NiID0gJ2VyciA9IGZtYW5fcG9ydF9zZXRfY2NfYmFzZShyeHBvcnQsIGZlX2VudGVyX29mZik7Jw0KaWYgb19yY2NiIGluIHNyYzoNCiAgICBhc3NlcnRfb25lKG9fcmNjYiwgIlJDQ0Igc2V0IikNCiAgICBwcmludCgnIyMjIEYtMDc5OiBSQ0NCIHNldCBmb3VuZCAtLSBuZWVkIHRvIHJlcGxhY2Ugd2l0aCBncm91cCB0YWJsZScpDQplbHNlOg0KICAgIHByaW50KCcjIyMgRi0wNzk6IFJDQ0Igc2V0IE5PVCBmb3VuZCcpDQoNCmlmIGNoYW5nZWQgPiAwOg0KICAgIHdpdGggb3BlbihwLCAndycpIGFzIGY6IGYud3JpdGUoc3JjKQ0KICAgIHByaW50KGYnIyMjIEYtMDc5OiB7Y2hhbmdlZH0gY2hhbmdlcyBhcHBsaWVkJykNCmVsc2U6DQogICAgcHJpbnQoJyMjIyBGLTA3OTogbm8gY2hhbmdlcyBhcHBsaWVkIC0tIG1heSBhbHJlYWR5IHByZXNlbnQgb3IgcHJlLXBhdGNoIHN0YXRlJykNCg==' | base64 -d | python3 2>&1
-    echo "### F-079: CONT_LOOKUP pass-through scaffold analysis"
-fi
-
+    echo "##
 # F-079 part 3: Fix scaffold CONT_LOOKUP AD encoding per RM 8.7.4.1.
 # The patch-0150 scaffold (now active after F-047 disabled) has wrong AD format.
 # Fix: group entry = (numKeys<<24)|mto, adBase=ato, type=0x40000000, keySize=12.
@@ -1353,9 +1337,7 @@ if c > 0:
 else:
     print('F-079: scaffold not found — may already be fixed')
 " 2>&1
-    echo "### F-079: scaffold CONT_LOOKUP AD encoding fixed per RM 8.7.4.1"
-fi
-
+    echo "##
 
 # F-040/F-002: fman_pcd.c post-patch MURAM zeroing + leak fix.
 # Base64-encoded Python fixer (no escape issues).
@@ -1395,69 +1377,7 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
     echo "### fman_port.c: M2-4 NULL-page clear support added"
 fi
 
-# # F-079: F-044 DISABLED — scaffold RCCB override needed
-# F-044: Remove CCBS scaffold override of fe_enter_off in fe_arm_engage().
-# # The CCBS scaffold (patch 0132/0150) allocates a group table and overwrites
-# # fe_enter_off = gro, which redirects ALL frames to FQ 0x200 through the
-# # group table, completely bypassing the FE-VM ehash.  Remove the override so
-# # fe_enter_off retains the ehash hash-table root, allowing flow lookups to
-# # reach the stored keys.
-# if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-#     sed -i 's/\t\t\t\tfe_enter_off = gro;/\t\t\t\t\/\* F-044: keep ehash root, skip CCBS scaffold override \*\/ \/\* fe_enter_off = gro; \*\//' \
-#         drivers/net/ethernet/freescale/fman/fman_pcd.c
-#     echo "### fman_pcd.c: F-044 CCBS scaffold bypass removed (keep ehash root)"
-# fi
 # 
-
-# F-046 REVERTED per fman-keygen-flow-key-spec.md v2.0 §5.4:
-# FMAN_AD_FE_ENTER_ALLOCATE (0x00800000) was set during the only confirmed
-# HIT in program history (2026-07-04).  No sed needed: the original patch
-# code already has the correct value.  word0 = 0x40800000.
-
-# # F-079: F-047 DISABLED — scaffold kept (needed for CONT_LOOKUP miss-AD)
-# F-047-R2: Precise CCBS scaffold strip from 0132 patch (Python-based).
-# # Original sed ended at the first '+}' (line 98: inner if block), leaving
-# # orphaned braces at lines 99-100 that corrupt the fe_arm function structure.
-# # Fix: Python strips from '+\/\* 0150: CCBS scaffold' to exactly '+\t}'
-# # (the single-tab scaffold closing brace at line 100), preserving the
-# # engage code after the scaffold.
-# PATCH_0132="vyos-build/scripts/package-build/linux-kernel/patches/kernel/0132-fman-pcd-fe-arm-debugfs.patch"
-# if [ -f "$PATCH_0132" ]; then
-#     python3 -c "
-# import re, sys
-# with open('$PATCH_0132') as f:
-#     lines = f.readlines()
-# in_scaffold = False
-# out = []
-# brace_re = re.compile(r'^\+\t\}\s*$')
-# for line in lines:
-#     if re.match(r'\+\s*/\* 0150: CCBS scaffold', line):
-#         in_scaffold = True
-#         continue
-#     if in_scaffold and brace_re.match(line):
-#         in_scaffold = False
-#         continue
-#     if in_scaffold and line.startswith('+'):
-#         continue
-#     out.append(line)
-# with open('$PATCH_0132', 'w') as f:
-#     f.writelines(out)
-# " && echo "### 0132.patch: F-047-R2 CCBS scaffold precisely stripped"
-# fi
-# 
-
-# F-050: Allow mask=0 in fe_ehash set for single-bucket E-EKFC-1 experiment.
-# Patch 0125 rejects mask==0 ("if (mask == 0 || mask > ...) return -EINVAL").
-# With mask=0, both software CRC64 and silicon hash AND to bucket 0, so flow
-# HIT depends ONLY on key content, not on hash algorithm agreement (kgse_hc).
-# This is the isolation experiment defined in specs/ekfc-5tuple-upgrade-spec.md
-# section 6.1.  Remove the mask==0 check, keep the upper-bound check.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    sed -i 's/if (mask == 0 || mask > FMAN_EHASH_MASK_MAX)/if (mask > FMAN_EHASH_MASK_MAX)  \/\* F-050: allow mask=0 for single-bucket E-EKFC-1 \*\//' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo "### fman_pcd.c: F-050 mask=0 allowed (E-EKFC-1 single-bucket isolation)"
-fi
-
 # F-051: Force-clear kgse_bmch, kgse_bmcl, kgse_hc, and kgse_ekdv to zero
 # inside keygen_scheme_setup() AFTER the scheme_regs struct is populated but
 # BEFORE it's written to hardware.  The DPAA1 RSS driver may leave byte masks
@@ -1875,6 +1795,21 @@ if [ -n "$ASK_HEADERS_DEB" ] && [ -f "$ASK_KEY_PEM" ]; then
     fi
 else
     echo "WARNING: ASK2 v2 — snapshot skipped: ASK_HEADERS_DEB='$ASK_HEADERS_DEB' ASK_KEY_PEM='$ASK_KEY_PEM'"
+fi
+
+
+# F-079: Fix scaffold CONT_LOOKUP AD encoding IN THE PATCH FILE before application.
+# The 0132 patch scaffold has wrong AD format (garbage w2, wrong NIA).
+# Fix it in the .patch text BEFORE git apply, so the applied code is correct.
+PATCH_0132="vyos-build/scripts/package-build/linux-kernel/patches/kernel/0132-fman-pcd-fe-arm-debugfs.patch"
+if [ -f "$PATCH_0132" ]; then
+    # Fix 1: Group table w0 — numKeys=0 (not 15=0xF)
+    sed -i "s/+\t\t\tiowrite32be(0x40000000 | (0xFu << 24) | (ato \& 0xFFFFFF), c + 0);/+\t\t\tiowrite32be((0u << 24) | (ato \& 0xFFFFFF), c + 0);\/\* F-079: numKeys=0 \*\//" "$PATCH_0132"
+    # Fix 2: Group table w2 — CONT_LOOKUP type + (keysize-1)
+    sed -i "s/+\t\t\tiowrite32be((0u << 24) | (0x50u << 16) | 0x2Bu, c + 8);/+\t\t\tiowrite32be(0x40000000 | ((12u - 1) << 24), c + 8);\/\* F-079: CONT_LOOKUP+(keySize-1) \*\//" "$PATCH_0132"
+    # Fix 3: AD table NIA — 0x02500002 -> 0x00500002
+    sed -i "s/0x02500002/0x00500002 \/\* F-079: NIA_BMI_AC_ENQ_FRAME \*\//g" "$PATCH_0132"
+    echo "### F-079: 0132.patch scaffold CONT_LOOKUP AD fixed in-place"
 fi
 # === end ASK2 v2 post-bindeb-pkg headers snapshot ===
 '''
