@@ -1543,8 +1543,6 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-072 v2 FmPortSetFESupport ported"
 fi
 
-fi  # close M2-4 fman_port.c if (line 1212)
-
 # === end ls1046a-build patch-loop replacement ===
 """
 
