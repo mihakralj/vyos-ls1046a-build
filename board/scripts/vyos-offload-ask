@@ -41,25 +41,29 @@ engage() {
     echo build > "$PCD_BASE/fe_singletons" 2>/dev/null || true
     echo build > "$PCD_BASE/fe_hashfe" 2>/dev/null || true
 
+    # F-079-R4: Read the port's Rx default FQID from sysfs fqids.
+    # Pass it as the 3rd arg to fe_arm engage so the CONT_LOOKUP
+    # miss-AD delivers to the correct queue (never hardcoded).
+    local rx_fqid_path port_fqid_dec fqid_hex
+    rx_fqid_path=$(find /sys/devices/platform/soc -name fqids -path "*net/*" 2>/dev/null | head -1)
+    if [ -z "$rx_fqid_path" ]; then
+        # Fallback: construct from known OF path
+        rx_fqid_path="/sys/devices/platform/soc/1a00000.fman/1af2000.ethernet/net/eth4/fqids"
+        [ "$PORT" = "0x10" ] && rx_fqid_path="/sys/devices/platform/soc/1a00000.fman/1af0000.ethernet/net/eth3/fqids"
+    fi
+    if [ -r "$rx_fqid_path" ]; then
+        port_fqid_dec=$(awk '/^Rx default:/ {print $3}' "$rx_fqid_path")
+        fqid_hex=$(printf "%x" "$port_fqid_dec" 2>/dev/null || echo "200")
+    fi
+    local MISS_FQID="${fqid_hex:-200}"
+    echo "ASK offload: port $PORT miss-FQID 0x$MISS_FQID (from $rx_fqid_path)"
+
+    # Gate A: MISS→EXIT(DEALLOCATE) — no ENQ, pool isolation test.
     if [ "$GATE_A" -eq 1 ]; then
-        # Gate A: MISS→EXIT(DEALLOCATE) with pool armed.
-        # Skip ENQ build — hash FE word6 stays at EXIT.
-        # Frames are deallocated (ping loss expected), but port must
-        # NOT stall, and disengage must be clean.
         echo "ASK offload: Gate A — MISS→EXIT (no ENQ, pool isolation test)"
     else
         # Gate B: MISS→ENQ(NIA)→EXIT (vendor encoding).
-        # F-054/F-070 v2: Use kernel's RX default FQID from /sys.
-        local rx_fqid_path
-        rx_fqid_path="/sys/devices/platform/soc/1a00000.fman/1af2000.ethernet/net/eth4/fqids"
-        local port_fqid_dec fqid_hex
-        if [ -r "$rx_fqid_path" ]; then
-            port_fqid_dec=$(awk '/^Rx default:/ {print $3}' "$rx_fqid_path")
-            fqid_hex=$(printf "%x" "$port_fqid_dec" 2>/dev/null || echo "200")
-        fi
-        ENQ_FQID="${fqid_hex:-200}"
-        echo "ASK offload: using FQID $ENQ_FQID (decimal $port_fqid_dec) for ENQ"
-        echo "build $ENQ_FQID" > "$PCD_BASE/fe_enq"  || die "fe_enq build failed"
+        echo "build $MISS_FQID" > "$PCD_BASE/fe_enq"  || die "fe_enq build failed"
     fi
     # F-045: fe_enter build with no argument defaults to hash frontend
     # (fe_hash_off) or MUX, not an invalid port-offset.
@@ -72,7 +76,7 @@ engage() {
         enter_off="0x59200"
     fi
 
-    echo "engage $PORT $enter_off" > "$PCD_BASE/fe_arm" || die "fe_arm engage failed"
+    echo "engage $PORT $enter_off $MISS_FQID" > "$PCD_BASE/fe_arm" || die "fe_arm engage failed"
 
     # F-072: params page is created during fe_arm engage (patch 0116 ensure).
     # fe_port set must run AFTER engage so the FE buffer pool is armed with
