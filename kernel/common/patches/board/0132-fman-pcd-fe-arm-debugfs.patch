@@ -180,7 +180,7 @@ index 0fb8c0a..d58feb6 100644
  /**
   * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
   * @fman: parent FMan controller.  Must have a live MURAM pool (mainline
-@@ -2225,6 +2365,9 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
+@@ -2225,5 +2365,8 @@ struct fman_pcd *fman_pcd_init(struct fman *fman)
  			debugfs_create_file("fe_hashfe", 0644,
  					    pcd->debugfs_dir, pcd,
  					    &fman_pcd_fe_hashfe_fops);
