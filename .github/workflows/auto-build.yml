@@ -228,6 +228,19 @@ jobs:
       - name: Setup vyos-build (config, chroot files, hooks)
         run: bin/ci-setup-vyos-build.sh
 
+      - name: Clear stale build caches (self-hosted)
+        run: |
+          set -e
+          CACHE_ROOT="${RUNNER_TOOL_CACHE:-/tmp}"
+          echo "### Clearing kernel cache: ${CACHE_ROOT}/linux-kernel-cache/"
+          rm -rf "${CACHE_ROOT}/linux-kernel-cache/"* 2>/dev/null || true
+          echo "### Clearing vyos-1x cache: ${CACHE_ROOT}/vyos-1x-cache/"
+          rm -rf "${CACHE_ROOT}/vyos-1x-cache/"* 2>/dev/null || true
+          echo "### Clearing ccache"
+          rm -rf /home/vyos/.ccache/* 2>/dev/null || true
+          df -h / /mnt 2>/dev/null || true
+          echo "### Caches cleared"
+
       - name: Build Image Packages
         run: bin/ci-build-packages.sh
 
