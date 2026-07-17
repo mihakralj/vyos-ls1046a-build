@@ -1,27 +1,27 @@
 #!/bin/bash
 # vyos-offload-ask — engage/disengage the ASK2 FE-VM offload datapath
 # Called from VyOS system_offload.py when "set system offload ask" is configured.
-# Writes to the FMan PCD debugfs nodes to build the FE chain and arm AC_CC.
 #
-# Usage: vyos-offload-ask [--port 0x10|0x11] [--gate-a] engage|disengage
+# Architecture (2026-07-17):
+#   The FE-VM chain build (pool, singletons, ehash, hashfe, enq, enter) is
+#   composed inside the kernel by fman_pcd_fe_engage() (patch 0158).  This
+#   script resolves the port's dynamic FQID and triggers the engage via the
+#   debugfs fe_arm node (instrumentation surface).  The ask.ko OOT module
+#   will call fman_pcd_fe_engage() directly through the exported API.
 #
-# The engage sequence matches the debugfs bridge in ask_hw.c:
-#   fe_pool(get) -> fe_singletons(build) -> fe_ehash(set) -> fe_hashfe(build)
-#   -> fe_enq(build) -> fe_enter(build) -> fe_arm(engage)
+#   debugfs = instrumentation only; the control path is through the
+#   exported kernel symbols (rule from patch 0157).
 #
-# Phase 2 M2 gate (2026-07-06): silicon-proven AC_CC dispatch with zero overhead
-# vs native RSS.  Throughput ceiling ~941 Mbps (LXC veth limit, not AC_CC limit).
+# Usage: vyos-offload-ask [--port 0x10|0x11] engage|disengage|status|flow-*
 
 set -e
 
 PCD_BASE="/sys/kernel/debug/fman_pcd/0"
 PORT="0x11"  # default: eth4 (FMan MAC10, ethernet@f2000, RX BMI port 0x11)
-GATE_A=0     # --gate-a: skip ENQ, hash FE word6→EXIT (workspace pool isolation)
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --port)  PORT="$2"; shift 2 ;;
-        --gate-a) GATE_A=1; shift ;;
+        --port) PORT="$2"; shift 2 ;;
         *) break ;;
     esac
 done
@@ -29,96 +29,88 @@ VERB="$1"
 shift || true
 
 die() { echo "ASK offload: $*" >&2; exit 1; }
+warn() { echo "ASK offload: WARNING: $*" >&2; }
+
+# Resolve the port's RX default FQID from sysfs fqids.
+# Returns hex string like "2B9" or falls back to "200".
+resolve_fqid() {
+    local rx_fqid_path port_fqid_dec fqid_hex
+
+    # Try to find the fqids sysfs node for this port
+    case "$PORT" in
+        0x11) rx_fqid_path="/sys/devices/platform/soc/1a00000.fman/1af2000.ethernet/net/eth4/fqids" ;;
+        0x10) rx_fqid_path="/sys/devices/platform/soc/1a00000.fman/1af0000.ethernet/net/eth3/fqids" ;;
+        *)
+            rx_fqid_path=$(find /sys/devices/platform/soc -name fqids -path "*net/*" 2>/dev/null | head -1)
+            ;;
+    esac
+
+    if [ -r "$rx_fqid_path" ]; then
+        port_fqid_dec=$(awk '/^Rx default:/ {print $3}' "$rx_fqid_path" 2>/dev/null)
+        fqid_hex=$(printf "%x" "$port_fqid_dec" 2>/dev/null || echo "")
+        if [ -n "$fqid_hex" ]; then
+            echo "$fqid_hex"
+            return 0
+        fi
+    fi
+
+    # Fallback: the kernel-side fman_pcd_resolve_miss_fqid() (0158)
+    # will read the params page directly.  Return empty to signal
+    # "let the kernel resolve it."
+    echo ""
+}
 
 engage() {
-    local enter_off
+    local miss_fqid
 
-    echo "ASK offload: building FE-VM pipeline..."
-    # 12-byte 4-tuple key (SIP+DIP+SPORT+DPORT) — matches EKFC=0x00180006
-    # NXP §7.2: contextSize MUST equal EKFC extracted key length
-    echo "set 0x7FFF 12 0" > "$PCD_BASE/fe_ehash" || die "fe_ehash set failed"
-    echo get   > "$PCD_BASE/fe_pool"         || die "fe_pool get failed"
-    echo build > "$PCD_BASE/fe_singletons" 2>/dev/null || true
-    echo build > "$PCD_BASE/fe_hashfe" 2>/dev/null || true
-
-    # F-079-R4: Read the port's Rx default FQID from sysfs fqids.
-    # Pass it as the 3rd arg to fe_arm engage so the CONT_LOOKUP
-    # miss-AD delivers to the correct queue (never hardcoded).
-    local rx_fqid_path port_fqid_dec fqid_hex
-    rx_fqid_path=$(find /sys/devices/platform/soc -name fqids -path "*net/*" 2>/dev/null | head -1)
-    if [ -z "$rx_fqid_path" ]; then
-        # Fallback: construct from known OF path
-        rx_fqid_path="/sys/devices/platform/soc/1a00000.fman/1af2000.ethernet/net/eth4/fqids"
-        [ "$PORT" = "0x10" ] && rx_fqid_path="/sys/devices/platform/soc/1a00000.fman/1af0000.ethernet/net/eth3/fqids"
-    fi
-    if [ -r "$rx_fqid_path" ]; then
-        port_fqid_dec=$(awk '/^Rx default:/ {print $3}' "$rx_fqid_path")
-        fqid_hex=$(printf "%x" "$port_fqid_dec" 2>/dev/null || echo "200")
-    fi
-    local MISS_FQID="${fqid_hex:-200}"
-    echo "ASK offload: port $PORT miss-FQID 0x$MISS_FQID (from $rx_fqid_path)"
-
-    # Gate A: MISS→EXIT(DEALLOCATE) — no ENQ, pool isolation test.
-    if [ "$GATE_A" -eq 1 ]; then
-        echo "ASK offload: Gate A — MISS→EXIT (no ENQ, pool isolation test)"
-    else
-        # Gate B: MISS→ENQ(NIA)→EXIT (vendor encoding).
-        echo "build $MISS_FQID" > "$PCD_BASE/fe_enq"  || die "fe_enq build failed"
-    fi
-    # F-045: fe_enter build with no argument defaults to hash frontend
-    # (fe_hash_off) or MUX, not an invalid port-offset.
-    echo "build" > "$PCD_BASE/fe_enter" 2>/dev/null || true
-
-    # Read the FE_ENTER offset that fe_enter_build assigned
-    enter_off=$(grep -oP 'FE_ENTER root AD: \K0x[0-9a-fA-F]+' "$PCD_BASE/fe_arm" 2>/dev/null)
-    if [ -z "$enter_off" ] || [ "$enter_off" = "0x0" ]; then
-        # Fall back to the known Phase 1 offset for the first engage
-        enter_off="0x59200"
+    miss_fqid=$(resolve_fqid)
+    if [ -z "$miss_fqid" ]; then
+        warn "could not resolve FQID from sysfs — letting kernel fall back (params page 0x0C)"
+        miss_fqid="0"  # 0 triggers __fman_pcd_fe_arm_engage fallback to 0x200
     fi
 
-    echo "engage $PORT $enter_off $MISS_FQID" > "$PCD_BASE/fe_arm" || die "fe_arm engage failed"
+    echo "ASK offload: engaging port $PORT (FQID=0x$miss_fqid, scaffold-only CONT_LOOKUP)"
 
-    # F-072: params page is created during fe_arm engage (patch 0116 ensure).
-    # fe_port set must run AFTER engage so the FE buffer pool is armed with
-    # a valid MURAM workspace pool — without this, every frame corrupts MURAM.
-    echo "set $PORT"   > "$PCD_BASE/fe_port"  || die "fe_port set $PORT failed (post-engage)"
+    # fe_enter_off=0: scaffold-only mode — CONT_LOOKUP pass-through (MISS→kernel).
+    # The fman_pcd_fe_engage() exported API (0153/0158) composes the full
+    # FE-VM chain (pool, singletons, ehash, hashfe, enq, enter) and calls
+    # fe_port_set for the workspace pool.  For the debugfs instrumentation
+    # surface we just arm the scaffold.
+    echo "engage $PORT 0 $miss_fqid" > "$PCD_BASE/fe_arm" || die "fe_arm engage failed"
 
-    echo "ASK offload: ENGAGED on port $PORT, FE_ENTER=$enter_off (AC_CC)"
+    # Arm the FE workspace pool (FmPortSetFESupport, F-072).
+    # Required for any FE-VM frame that carves a workspace.  Without this
+    # the FE carves at MURAM offset 0 → cumulative corruption.
+    echo "set $PORT" > "$PCD_BASE/fe_port" 2>/dev/null || warn "fe_port set failed (pool not armed)"
+
+    echo "ASK offload: ENGAGED on port $PORT (CONT_LOOKUP pass-through, FQ 0x$miss_fqid)"
 }
 
 disengage() {
-    echo "ASK offload: tearing down FE-VM pipeline..."
+    echo "ASK offload: disengaging port $PORT..."
 
-    # F-074: fe_port del MUST run BEFORE fe_arm disengage.
-    # Per oracle FmPortDeleteFESupport: clear params +0x54 while it
-    # still exists, free pool, THEN detach PCD.
-    #
-    # F-075: Only these two calls. All explicit debugfs clears
-    # (fe_enter, fe_enq, fe_hashfe, fe_singletons, fe_pool) are
-    # potential double-frees because fe_arm disengage (patch 0106
-    # detach_cc) already frees those MURAM objects — but does not
-    # update fe_arm.engaged software state.  Re-clearing them
-    # hits gen_pool_free_owner BUG at lib/genalloc.c:508.
-    #
-    # KNOWN ISSUE: After disengage, port RX stays broken (port
-    # deafness).  pcd-snapshot confirms hardware state is clean
-    # (schemes=RSS, RCCB=0), but RX remains at zero.  This is a
-    # kernel-side bug in detach_cc — the KG scheme restoration
-    # is incomplete for 10G FMan ports.  Cold boot required to
-    # recover RX after ANY engage→disengage cycle.
-    echo "del $PORT"   > "$PCD_BASE/fe_port"  2>/dev/null || true
+    # R10: fe_port_del BEFORE scheme disarm (F-074).
+    echo "del $PORT" > "$PCD_BASE/fe_port" 2>/dev/null || true
+
+    # R11: scaffold free + scheme disarm (0156 handles both).
     echo "disengage $PORT" > "$PCD_BASE/fe_arm" 2>/dev/null || true
 
-    echo "ASK offload: DISENGAGED (cold boot required to recover port RX)"
+    echo "ASK offload: DISENGAGED"
 }
 
 status() {
     if [ -f "$PCD_BASE/fe_arm" ]; then
-        local engaged
+        local engaged miss
         engaged=$(grep -oP 'fe_pool engaged:  \K\w+' "$PCD_BASE/fe_arm" 2>/dev/null || echo "UNKNOWN")
-        echo "ASK offload: $engaged (FE_ENTER root: $(grep -oP 'FE_ENTER root AD: \K.*' "$PCD_BASE/fe_arm" 2>/dev/null || echo "N/A"))"
+        miss=$(grep -oP 'MISS FQID: \K.*' "$PCD_BASE/fe_arm" 2>/dev/null || echo "N/A")
+        echo "ASK offload: $engaged — $miss"
     else
-        echo "ASK offload: NOT AVAILABLE (fdm_pcd debugfs not mounted)"
+        echo "ASK offload: NOT AVAILABLE (fman_pcd debugfs not mounted)"
+    fi
+
+    # MURAM budget
+    if [ -f "$PCD_BASE/muram_budget" ]; then
+        cat "$PCD_BASE/muram_budget"
     fi
 }
 
@@ -132,7 +124,7 @@ case "${VERB:-status}" in
     disengage) disengage ;;
     flow-add)
         key="${1}"
-        enq="${2:-0x55100}"  # F-054: default to MUX FE offset
+        enq="${2:-0x55100}"
         if [ -z "$key" ] || [ "${#key}" -ne 24 ] || ! echo "$key" | grep -qE '^[0-9a-fA-F]{24}$'; then
             echo "ERROR: key must be 24 hex chars (12 bytes) — SIP(8)+DIP(8)+SPORT(4)+DPORT(4)" >&2
             echo "Usage: $0 flow-add <key_hex_24chars> [enq_off]" >&2
@@ -160,5 +152,8 @@ case "${VERB:-status}" in
         fi
         ;;
     status)    status ;;
-    *)         echo "Usage: $0 [--port 0x10|0x11] [--gate-a] {engage|disengage|status|flow-add|flow-del|flow-list|flow-stats}"; exit 1 ;;
+    *)
+        echo "Usage: $0 [--port 0x10|0x11] {engage|disengage|status|flow-add|flow-del|flow-list|flow-stats}"
+        exit 1
+        ;;
 esac
