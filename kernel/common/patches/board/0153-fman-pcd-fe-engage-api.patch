@@ -1,0 +1,127 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 731f418..468bfa9 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -2392,6 +2392,101 @@ static const struct file_operations fman_pcd_fe_arm_fops = {
+ 	.release	= single_release,
+ };
+ 
++/* ---- FE-VM engage/flow API for ask.ko (0153) ---- */
++
++int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id)
++{
++	struct fman_pcd *pcd;
++	struct fman_port *rxport;
++	char buf[64];
++	unsigned int miss_fqid;
++	int err;
++
++	if (!fm || hw_port_id < 0x08 || hw_port_id >= 0x28)
++		return -EINVAL;
++	pcd = fman_get_pcd(fm);
++	if (!pcd)
++		return -ENXIO;
++
++	rxport = fman_port_lookup_rx(fm, hw_port_id);
++	if (!rxport)
++		return -ENODEV;
++
++	miss_fqid = (hw_port_id == 0x10) ? 0x200 : 0x2B9;
++
++	err = fman_pcd_port_ensure_params_page(pcd, rxport);
++	if (err)
++		return err;
++
++	snprintf(buf, sizeof(buf), "engage %x 0 %x", hw_port_id, miss_fqid);
++	err = fman_pcd_fe_arm_engage(pcd, buf);
++	if (err)
++		return err;
++
++	err = fman_pcd_fe_port_set(pcd, hw_port_id);
++	if (err) {
++		snprintf(buf, sizeof(buf), "disengage %x", hw_port_id);
++		fman_pcd_fe_arm_disengage(pcd, buf);
++		return err;
++	}
++
++	pr_info("fman_pcd: FE engage port 0x%02x FQ=0x%x (AC_CC)\n",
++		hw_port_id, miss_fqid);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_fe_engage);
++
++void fman_pcd_fe_disengage(struct fman *fm, u8 hw_port_id)
++{
++	struct fman_pcd *pcd;
++	char buf[32];
++
++	if (!fm)
++		return;
++	pcd = fman_get_pcd(fm);
++	if (!pcd)
++		return;
++
++	fman_pcd_fe_port_del(pcd, hw_port_id);
++	snprintf(buf, sizeof(buf), "disengage %x", hw_port_id);
++	fman_pcd_fe_arm_disengage(pcd, buf);
++
++	pr_info("fman_pcd: FE disengage port 0x%02x\n", hw_port_id);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_fe_disengage);
++
++int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
++			 const u8 *key, u8 key_size, unsigned long enq_off)
++{
++	struct fman_pcd *pcd;
++	struct fman_pcd_ehash_table *t;
++
++	if (!fm || !key || key_size == 0)
++		return -EINVAL;
++	pcd = fman_get_pcd(fm);
++	if (!pcd)
++		return -ENXIO;
++
++	t = fman_pcd_ehash_table_by_index(pcd, 0);
++	if (!t)
++		return -ENODEV;
++
++	return fman_pcd_ehash_add_key(t, key, key_size, enq_off);
++}
++EXPORT_SYMBOL_GPL(fman_pcd_fe_flow_add);
++
++int fman_pcd_fe_flow_del(struct fman *fm, u8 hw_port_id,
++			 const u8 *key, u8 key_size)
++{
++	(void)hw_port_id;
++	(void)key;
++	(void)key_size;
++	fman_pcd_ehash_flow_clear_all(fman_get_pcd(fm));
++	return 0;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_fe_flow_del);
++
++
+ /**
+  * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
+  * @fman: parent FMan controller.  Must have a live MURAM pool (mainline
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 3901c10..3a8ab3d 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -318,6 +318,16 @@ int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
+ void fman_pcd_kg_port_disarm_fe(struct fman_pcd *pcd, u8 hw_port_id,
+ 				u8 saved_engine);
+ 
++
++/* ── FE-VM engage/flow API (§10.1) ── */
++
++int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id);
++void fman_pcd_fe_disengage(struct fman *fm, u8 hw_port_id);
++int fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
++			 const u8 *key, u8 key_size, unsigned long enq_off);
++int fman_pcd_fe_flow_del(struct fman *fm, u8 hw_port_id,
++			 const u8 *key, u8 key_size);
++
+ /**
+  * fman_pcd_kg_scheme_destroy() - tear down a previously created scheme.
+  * @scheme: handle from fman_pcd_kg_scheme_create().  NULL-safe.

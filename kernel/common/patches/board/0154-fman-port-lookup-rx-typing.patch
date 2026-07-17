@@ -1,0 +1,26 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index 077ced2..01482f6 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -1546,7 +1546,7 @@ EXPORT_SYMBOL(fman_port_use_kg_hash);
+ static LIST_HEAD(fman_port_active_list);
+ static DEFINE_MUTEX(fman_port_active_lock);
+ 
+-struct fman_port *fman_port_lookup_rx(void *fm, u8 port_id)
++struct fman_port *fman_port_lookup_rx(struct fman *fm, u8 port_id)
+ {
+ 	struct fman_port *p, *found = NULL;
+ 
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.h b/drivers/net/ethernet/freescale/fman/fman_port.h
+index f32d5af..4cedb38 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.h
++++ b/drivers/net/ethernet/freescale/fman/fman_port.h
+@@ -169,7 +169,7 @@ int fman_port_set_silicon_hit_release_mode(struct fman_port *port,
+ 					   bool enable);
+ int fman_port_set_silicon_hit_release_all(struct fman *fm, bool enable);
+ 
+-struct fman_port *fman_port_lookup_rx(void *fm, u8 port_id);
++struct fman_port *fman_port_lookup_rx(struct fman *fm, u8 port_id);
+ 
+ /* 0116: FM_CTL ctrl-params page (required by CC result-AD NIA AC 0x28) */
+ u32 fman_port_get_params_page(struct fman_port *port);
