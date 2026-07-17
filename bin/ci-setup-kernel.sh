@@ -1557,7 +1557,7 @@ for i in range(body_start, len(src)):
     elif src[i] == "}":
         depth -= 1
         if depth == 0: body_end = i + 1; break
-new_body = """{
+new_body = '''{
     struct muram_info *muram = fman_get_muram(pcd->fman);
     u32 pp_off, idx_off, pool_off;
     u8 tnums;
@@ -1584,7 +1584,7 @@ new_body = """{
             fman_pcd_muram_free(pcd, pool_off, tnums * BMI_FIFO_UNITS * 2);
         fman_pcd_muram_free(pcd, idx_off, 5 + tnums);
     }
-}"""
+}'''
 src = src[:body_start] + new_body + src[body_end:]
 with open(sys.argv[1], "w") as f: f.write(src)
 print("### fman_pcd.c: F-079-LEAKFIX v3 teardown rewritten with muram_free")
