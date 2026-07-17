@@ -1,0 +1,136 @@
+# VyOS LS1046A kernel patch series — Quilt model.
+# Applied in order by ci-setup-kernel.sh via git apply --3way.
+# Each line is a filename relative to kernel/common/patches/board/.
+# Blank lines and #-comments are ignored.
+# Patches prefixed with # SKIP are intentionally excluded
+# (see BOARD_STAGE_SKIP for the whitelist).
+
+# ── DPAA1 / AF_XDP stack ──
+# 0068–0077: FMan DPAA flavor ops + XDP pool setup
+0068-dpaa-flavor-ops.patch
+0069-dpaa-flavor-hooks.patch
+0069a-dpaa-flavor-ops-retro-attach.patch
+0070-dpaa1-xsk-wakeup.patch
+0071-dpaa1-xsk-pool-setup.patch
+0072-dpaa1-xsk-zc-datapath-scaffold.patch
+0073-dpaa-af-xdp-pool-skeleton.patch
+0074-dpaa-af-xdp-pool-wakeup.patch
+0075a-dpaa-af-xdp-pool-liodn-and-attach-validation.patch
+0075b-dpaa-af-xdp-pool-attach-bman-seed-rcu.patch
+0075c-dpaa-af-xdp-pool-remove-liodn-gate.patch
+0076-dpaa-af-xdp-pool-detach.patch
+0077-dpaa-xsk-max-qbands-default.patch
+
+# ── AF_XDP observability + NAPI ──
+# 0079–0085: ethtool counters, NAPI distribution, XSK datapath
+0079-dpaa-ethtool-expose-xsk-counters.patch
+0080-dpaa-af-xdp-pool-bind-napi-and-arm-rx-need-wakeup.patch
+0081-dpaa-af-xdp-pool-distribute-napi-across-cpus.patch
+0082-dpaa-af-xdp-pool-qmap-debugfs.patch
+0082b-dpaa-dedicated-qman-channels-per-qband.patch
+0083-dpaa-rx-xsk-branch-eligibility-probe.patch
+0084-dpaa-napi-hooked-bman-refill.patch
+0085-dpaa-tx-zc-and-inflight-backpressure.patch
+
+# ── FMan PCD subsystem bootstrap ──
+# 0086–0091a: FMan capabilities, CC stub, HM stub, policer
+0086-dpaa-fman-caps-detection-and-cc-stub.patch
+0086a-dpaa-fman-caps-probe-dt.patch
+0086b-dpaa-fman-cc-productive-structs.patch
+0088-dpaa-afxdp-use-rx-dma-dev-for-xsk-pool-dma-map.patch
+0090-dpaa-fman-hm-stub.patch
+0090a-dpaa-fman-hm-productive-structs.patch
+0091-dpaa-fman-policer-stub.patch
+0091a-dpaa-fman-policer-productive-structs.patch
+
+# ── FMan PCD core ──
+# 0092–0100: PCD subsystem, KeyGen, CC, HM, policer
+0092-fman-pcd-subsystem.patch
+0093-dpaa1-true-zc-rx-eligibility-probe.patch
+0094-dpaa1-true-zc-rx-arm-observability.patch
+0095-dpaa1-xsk-fill-ring-guard-audit.patch
+0096-dpaa1-true-zc-rx-recover-readside.patch
+0097-fman-pcd-keygen.patch
+0098-fman-pcd-cc-static-install.patch
+0099-fman-pcd-hm-install.patch
+0100-fman-pcd-plcr-install.patch
+
+# ── DPAA / FMan port primitives ──
+# 0101–0106: VLAN strip, bpool, CC base, KeyGen graft
+0101-dpaa-hw-vlan-strip-ndo-set-features-bridge.patch
+0102-fman-port-set-rx-bpool-primitive.patch
+0102b-fman-port-debug-readback.patch
+0103a-dpaa1-true-zc-rx-recover-swring.patch
+0103b-dpaa1-true-zc-rx-reprogram-redirect.patch
+0103c-dpaa1-true-zc-rx-classify-before-bpid-guard.patch
+0103e-dpaa1-true-zc-rx-bpf-net-ctx-fix.patch
+0103f-dpaa1-true-zc-rx-rxhook-before-bpidpool.patch
+0103g-dpaa1-true-zc-rx-register-zc-rxq.patch
+0104-dpaa-ingress-policer-tc-matchall-bridge.patch
+0104a-dpaa-netdev-advertise-hw-tc.patch
+0104b-dpaa-ceetm-stub.patch
+0105-fman-port-set-cc-base-primitive.patch
+0106-fman-pcd-cc-keygen-graft-wiring.patch
+
+# ── CEETM / ethtool / QMan ──
+# 0107–0112: CC debugfs, per-key FQ, ntuple bridge, CEETM
+0107-fman-pcd-cc-test-debugfs-harness.patch
+0108-fman-pcd-cc-per-key-fq-enqueue-ad.patch
+0109-dpaa-ethtool-ntuple-cc-steering-bridge.patch
+0110-dpaa1-true-zc-rx-napi-only-flush.patch
+0111-qman-ceetm.patch
+0112-dpaa-ceetm-htb.patch
+
+# ── FMan PCD bringup ──
+# 0113–0121: DCSR, realign, SDK convergent, params page, ucode,
+#            CC revert, HM ops, nexthop, export resolvers
+0113-fman-pcd-dcsr-error-taps.patch
+0114-dpaa1-xsk-zc-eligible-realign.patch
+0115-fman-pcd-cc-sdk-convergent-bringup.patch
+0116-fman-pcd-cc-fmctl-enq-params-page.patch
+0117-fman-load-ctrl-microcode.patch
+0118-fman-pcd-cc-revert-ccbs-dispatch.patch
+0119-fman-pcd-hm-l3-forward-ops.patch
+0120-fman-pcd-hm-nexthop-dedup.patch
+0121-dpaa-export-cc-target-resolvers.patch
+
+# ── FE-VM / ehash / FE chain ──
+# 0122–0133: FE ehash init, port support, singletons, ehash table,
+#            MURAM genpool, ENQ root, flow insert, offload engage,
+#            DMA coherent, hash object, arm debugfs, AC_CC
+0122-fman-pcd-fe-ehash-init.patch
+0123-fman-pcd-fe-port-support.patch
+0124-fman-pcd-fe-vm-singletons.patch
+0125-fman-pcd-fe-ehash-table.patch
+0126-fman-pcd-muram-genpool.patch
+0127-fman-pcd-fe-vm-enq-root.patch
+0128-fman-pcd-fe-vm-flow-insert.patch
+0129-fman-pcd-offload-engage.patch
+0130-fman-pcd-fe-ehash-dma-coherent.patch
+0131-fman-pcd-fe-hash-object.patch
+0132-fman-pcd-fe-arm-debugfs.patch
+0133-fman-pcd-fe-arm-real-accc.patch
+
+# ── CAAM + FE context + TX bypass + manip ──
+0134-caam-qi-share.patch
+0135-fman-pcd-fe-context-build.patch
+0136-fman-port-tx-confirm-bypass.patch
+0137-fman-pcd-manip-create-chain.patch
+
+# ── DPAA fixups ──
+0139-dpaa-af-xdp-bman-refill-bpid-fix.patch
+0145-dpaa-flow-offload-backend-slot.patch
+
+# ── KeyGen debug ──
+0148-keygen-debug-ekfc-log.patch
+
+# SKIP 0150 — intentionally excluded (was broken placeholder)
+# 0151 — reserved for fe_buffer_setup/teardown standalone patch
+
+# ── Board-specific patches (4xxx, 1xx) ──
+101-sfp-rollball-phylink-fallback.patch
+4002-hwmon-ina2xx-add-ina234-support.patch
+4005-phylink-inband-sfp-fallback.patch
+4006-dpaa-xdp-rxq-queue-index.patch
+4007-xhci-ls1046a-dwc3-quirks.patch
+4009-sfp-oem-rollball-quirk.patch

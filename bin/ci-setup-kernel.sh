@@ -132,56 +132,58 @@ echo "### Cleaning stale patches in $KERNEL_PATCHES (preserving 0001-*, 0003-*)"
 find "$KERNEL_PATCHES" -maxdepth 1 -type f -name '*.patch' \
   ! -name '0001-*' ! -name '0003-*' -print -delete
 
-echo "### Staging LS1046A board patches from $BOARD_PATCH_DIR"
-cp "$BOARD_PATCH_DIR/0068-dpaa-flavor-ops.patch"              "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0069-dpaa-flavor-hooks.patch"            "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0069a-dpaa-flavor-ops-retro-attach.patch" "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0070-dpaa1-xsk-wakeup.patch"             "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0071-dpaa1-xsk-pool-setup.patch"         "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0072-dpaa1-xsk-zc-datapath-scaffold.patch" "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0073-dpaa-af-xdp-pool-skeleton.patch"    "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0074-dpaa-af-xdp-pool-wakeup.patch"      "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0075a-dpaa-af-xdp-pool-liodn-and-attach-validation.patch" "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0075b-dpaa-af-xdp-pool-attach-bman-seed-rcu.patch"        "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0075c-dpaa-af-xdp-pool-remove-liodn-gate.patch"           "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0076-dpaa-af-xdp-pool-detach.patch"      "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0077-dpaa-xsk-max-qbands-default.patch"  "$KERNEL_PATCHES/"
+echo "### Staging LS1046A board patches from $BOARD_PATCH_DIR (series file)"
+_count=0
+_series="$BOARD_PATCH_DIR/series"
+if [ ! -r "$_series" ]; then
+    echo "ERROR: patch series file not found: $_series"
+    exit 1
+fi
+while IFS= read -r _p; do
+    # Skip empty lines and comments
+    [ -z "$_p" ] && continue
+    [[ "$_p" == \#* ]] && continue
+    _src="$BOARD_PATCH_DIR/$_p"
+    if [ -f "$_src" ]; then
+        cp "$_src" "$KERNEL_PATCHES/"
+        _count=$((_count + 1))
+    else
+        echo "WARNING: patch listed in series but file missing: $_p"
+    fi
+done < "$_series"
+echo "### Staged $_count LS1046A board patches"
+unset _count _series _src _p
+
+# ── Staging-completeness guard
 # 0078 (dpaa MODULE_SOFTDEP on af_xdp_pool) intentionally NOT staged:
 # under CONFIG_FSL_DPAA_ETH=y and CONFIG_DPAA_AF_XDP_POOL=y the softdep
 # is unreachable (modprobe never loads either of them). Autoload is
 # guaranteed by the =y flip in kernel/common/kernel-config/08-dpaa1.config
 # instead — af_xdp_pool_init() runs at late_initcall before
 # dpaa_eth_probe()'s register_netdev().
-cp "$BOARD_PATCH_DIR/0079-dpaa-ethtool-expose-xsk-counters.patch" "$KERNEL_PATCHES/"
 # M3-3 step 1: bind a real NAPI to qmap[].napi at xsk_pool_attach time
 # (BSP cpu 0's per-CPU NAPI portal) and stop xsk_set_rx_need_wakeup being
 # a stub. First reviewable slice of Phase 3 per spec sec 5.2 final paragraph
 # + sec 5.4 RX path step 5. No throughput change yet — control-plane
 # wiring; ZC RX/TX datapath lands in 0081+.
-cp "$BOARD_PATCH_DIR/0080-dpaa-af-xdp-pool-bind-napi-and-arm-rx-need-wakeup.patch" "$KERNEL_PATCHES/"
 # M3-3 step 2a: distribute qband NAPI across online CPUs.  Promotes
 # the cpu=0 stopgap from 0080 to (queue_id % num_online_cpus()) so
 # four-qband bindings fan out across all four LS1046A A72 cores
 # instead of piling onto cpu 0's QMan SWP.  Still no dedicated BMan
 # channels (step 2b) and no cluster-aware refinement (step 2c).
 # Spec sec 5.2 "Queue mapping correctness" items 3-5.
-cp "$BOARD_PATCH_DIR/0081-dpaa-af-xdp-pool-distribute-napi-across-cpus.patch" "$KERNEL_PATCHES/"
 # M3-3 step 2b: observability for step 2a's pointer wiring. Adds the
 # /sys/kernel/debug/af_xdp_pool/qmap node so priv->qmap[].napi/.cpu can
 # be verified per-netdev without kgdb or a crash dump. Pure observability —
 # zero datapath change, zero new core-driver exports. Spec sec 5.2.
-cp "$BOARD_PATCH_DIR/0082-dpaa-af-xdp-pool-qmap-debugfs.patch" "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0082b-dpaa-dedicated-qman-channels-per-qband.patch" "$KERNEL_PATCHES/"
 # M3-3 step 3: real dpaa_fq_to_qband() + xsk_rx_branch counter +
 # observational RX hot-path eligibility probe. Strictly diagnostic --
 # no datapath change. ZC redirect lands in 0084+. Spec sec 6.1.2.
-cp "$BOARD_PATCH_DIR/0083-dpaa-rx-xsk-branch-eligibility-probe.patch" "$KERNEL_PATCHES/"
 # M3-3 step 4: NAPI-hooked BMan refill from the XSK fill ring + new
 # xsk_bman_refill_batches counter. Folded into the existing rcu_read_lock()
 # block in dpaa_eth_poll() right after xsk_set_rx_need_wakeup. With no XSK
 # pool bound (default flavor) the new ops->napi_refill callback walks zero
 # bound qbands and returns; no datapath cost. Spec sec 6.1.3.
-cp "$BOARD_PATCH_DIR/0084-dpaa-napi-hooked-bman-refill.patch" "$KERNEL_PATCHES/"
 # M3-3 step 5: TX ZC submission + xsk_tx_inflight backpressure + TxConf
 # round-trip closure. Three new flavor ops (napi_tx_zc, xsk_set_tx_need_wakeup,
 # tx_conf_zc) wired into dpaa_eth_poll() tail (same RCU section as 0084) and
@@ -190,7 +192,6 @@ cp "$BOARD_PATCH_DIR/0084-dpaa-napi-hooked-bman-refill.patch" "$KERNEL_PATCHES/"
 # walk zero bound qbands and the tx_conf_zc claim probe returns false on
 # bpid mismatch -- skb fast path unchanged. ≥ 7 Gbps acceptance gate on
 # vpp flavor. Spec sec 6.1.4.
-cp "$BOARD_PATCH_DIR/0085-dpaa-tx-zc-and-inflight-backpressure.patch" "$KERNEL_PATCHES/"
 # M3-3b: FMan PCD capability detection + CC-steering stub API. Adds
 # CONFIG_DPAA_HW_CC_STEERING (default y), priv->fman_caps snapshot via
 # dpaa_fman_get_caps() at probe, one-shot KERN_INFO log, hw_offload_unavailable
@@ -200,7 +201,6 @@ cp "$BOARD_PATCH_DIR/0085-dpaa-tx-zc-and-inflight-backpressure.patch" "$KERNEL_P
 # lets developers simulate ucode 210 for unit testing downstream consumers
 # (af_xdp_pool qband-select, ASK2 flowtable bridge, vyos-1x classify CLI).
 # Spec sec 3.5 + sec 5.4.
-cp "$BOARD_PATCH_DIR/0086-dpaa-fman-caps-detection-and-cc-stub.patch" "$KERNEL_PATCHES/"
 # M3-3 step 6 blocker A residual: DMA device mismatch between the XSK
 # pool map (was: parent MAC device, 32-bit mask) and the BMan FBPR
 # validation domain (FMan RX port device, 40-bit mask). Switches
@@ -209,7 +209,6 @@ cp "$BOARD_PATCH_DIR/0086-dpaa-fman-caps-detection-and-cc-stub.patch" "$KERNEL_P
 # (0086 chunked release-by-8, 0087 pre-zero bmbs[i].data) were absorbed
 # into 0084 v3 directly -- the patch stack is now stand-alone. Spec
 # sec 6.1.5 / 6.1.6.
-cp "$BOARD_PATCH_DIR/0088-dpaa-afxdp-use-rx-dma-dev-for-xsk-pool-dma-map.patch" "$KERNEL_PATCHES/"
 # M3-3b productive: replace the dpaa_fman_caps.force= stub body of
 # dpaa_fman_get_caps() with a real DT walk of the FMan firmware blob
 # (/proc/device-tree/soc/fman@1a00000/fman-firmware/fsl,firmware,
@@ -222,7 +221,6 @@ cp "$BOARD_PATCH_DIR/0088-dpaa-afxdp-use-rx-dma-dev-for-xsk-pool-dma-map.patch" 
 # the HC doorbell. force= still wins as operator override. Caps are
 # cached after first DT probe so subsequent dpaa_eth_probe() calls (5x
 # on this board) don't re-walk. Spec sec 3.5.
-cp "$BOARD_PATCH_DIR/0086a-dpaa-fman-caps-probe-dt.patch"      "$KERNEL_PATCHES/"
 # M3-3c: HM (Header Manipulation) stub API. Mirrors the 0086 cadence
 # exactly -- fman_hm_node_install/destroy stubs return -ENOTSUPP,
 # fman_hm_caps_supported() wraps (caps & FMAN_CAP_HM_NODES). Adds
@@ -232,7 +230,6 @@ cp "$BOARD_PATCH_DIR/0086a-dpaa-fman-caps-probe-dt.patch"      "$KERNEL_PATCHES/
 # egress rewrite, vyos-1x NAT offload CLI, ASK2 flowtable bridge) can
 # wire calls today and gracefully degrade on ucode <210 silicon. Spec
 # sec 5.5.
-cp "$BOARD_PATCH_DIR/0090-dpaa-fman-hm-stub.patch"              "$KERNEL_PATCHES/"
 # M3-3d: Policer (srTCM/trTCM) stub API. Mirrors the 0090 cadence exactly --
 # fman_policer_install returns -ENOTSUPP, fman_policer_destroy is an
 # idempotent void no-op, fman_policer_caps_supported() wraps
@@ -242,7 +239,6 @@ cp "$BOARD_PATCH_DIR/0090-dpaa-fman-hm-stub.patch"              "$KERNEL_PATCHES
 # fixed now so downstream consumers (vyos-1x firewall limit offload CLI,
 # VPP per-qband rate-limit, ASK2 nft limit offload backend) can wire calls
 # today and gracefully degrade on ucode <210 silicon. Spec sec 5.6.
-cp "$BOARD_PATCH_DIR/0091-dpaa-fman-policer-stub.patch"         "$KERNEL_PATCHES/"
 # M3-3b productive struct contract: replaces the opaque {u32 reserved;}
 # placeholders for struct fman_cc_key / fman_cc_static_tree (from 0086)
 # with the real 5-tuple key + static-tree layout per spec sec 5.4. The
@@ -251,13 +247,11 @@ cp "$BOARD_PATCH_DIR/0091-dpaa-fman-policer-stub.patch"         "$KERNEL_PATCHES
 # qband-select, vyos-1x classify CLI, ASK2 flowtable bridge) can build
 # real specs. The silicon AD/group-table CONT_LOOKUP encoding lands in a
 # follow-up. Applies on the final post-0091 dpaa_fman_caps.h. Spec sec 5.4.
-cp "$BOARD_PATCH_DIR/0086b-dpaa-fman-cc-productive-structs.patch" "$KERNEL_PATCHES/"
 # M3-3c productive struct contract: replaces the opaque struct
 # fman_hm_spec {u32 reserved;} placeholder (from 0090) with the real
 # ordered-op-list layout (enum fman_hm_op_type + VLAN/MPLS op params +
 # ops[8]) per spec sec 5.5. fman_hm_* entry points stay -ENOTSUPP stubs.
 # Must apply AFTER 0086b (both edit dpaa_fman_caps.h). Spec sec 5.5.
-cp "$BOARD_PATCH_DIR/0090a-dpaa-fman-hm-productive-structs.patch" "$KERNEL_PATCHES/"
 # M3-3d productive struct contract: replaces the opaque struct
 # fman_policer_profile {u32 reserved;} placeholder (from 0091) with the
 # real srTCM/trTCM metering layout (enum fman_policer_mode +
@@ -268,11 +262,6 @@ cp "$BOARD_PATCH_DIR/0090a-dpaa-fman-hm-productive-structs.patch" "$KERNEL_PATCH
 # profiles. The FMan exp/mant rate-field + MURAM record encoding (RM
 # 8.7.6) lands in a follow-up. Must apply AFTER 0090a (both edit
 # dpaa_fman_caps.h). Spec sec 5.6.
-cp "$BOARD_PATCH_DIR/0091a-dpaa-fman-policer-productive-structs.patch" "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0093-dpaa1-true-zc-rx-eligibility-probe.patch" "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0094-dpaa1-true-zc-rx-arm-observability.patch" "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0095-dpaa1-xsk-fill-ring-guard-audit.patch" "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0096-dpaa1-true-zc-rx-recover-readside.patch" "$KERNEL_PATCHES/"
 # FMan PCD (Parse/Classify/Distribute) orchestration subsystem — COMMON
 # (all flavors). Forward-port of the ask20 0004 skeleton re-anchored to
 # 6.18.31: new files fman_pcd.c / fman_pcd_internal.h /
@@ -286,7 +275,6 @@ cp "$BOARD_PATCH_DIR/0096-dpaa1-true-zc-rx-recover-readside.patch" "$KERNEL_PATC
 # MURAM/registers through this subsystem instead of -ENOTSUPP. The
 # ASK2-only fman_host_cmd.c microcode-doorbell transport is intentionally
 # NOT forward-ported. Spec sec 5.4/5.5/5.6.
-cp "$BOARD_PATCH_DIR/0092-fman-pcd-subsystem.patch"             "$KERNEL_PATCHES/"
 # 0097 (PR2): FMan PCD KeyGen exact-match scheme API. Builds on 0092 —
 # promotes struct keygen_scheme / struct fman_keygen to a new module-internal
 # fman_keygen_internal.h and exports the two existing keygen_scheme_setup /
@@ -299,7 +287,6 @@ cp "$BOARD_PATCH_DIR/0092-fman-pcd-subsystem.patch"             "$KERNEL_PATCHES
 # 0092 (PCD skeleton) AND after the unrelated 0093-0096 true-ZC patches (which
 # do not touch Makefile/fman_pcd.h/fman_keygen.c), so the KeyGen delta still
 # applies on top of the 0092 PCD skeleton. Spec sec 5.4/5.5/5.6.
-cp "$BOARD_PATCH_DIR/0097-fman-pcd-keygen.patch"                "$KERNEL_PATCHES/"
 # 0098 (PR3): FMan CC static-tree install (productive, M3-3b). Builds on
 # 0092 (PCD subsystem) + 0097 (KeyGen) — adds the new fman_pcd_cc.c
 # silicon-programming TU (struct fman_pcd_cc_tree + fman_pcd_cc_static_install/
@@ -311,9 +298,6 @@ cp "$BOARD_PATCH_DIR/0097-fman-pcd-keygen.patch"                "$KERNEL_PATCHES
 # -ENOTSUPP (HC-dispatch gated; board caps=0x17, HC bit clear). Common
 # (built-in via FSL_FMAN_PCD) for default/vpp/ask alike. Sorts after 0097 so
 # the Makefile/fman_pcd.h deltas apply on top of the KeyGen base. Spec sec 5.4.
-cp "$BOARD_PATCH_DIR/0098-fman-pcd-cc-static-install.patch"     "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0099-fman-pcd-hm-install.patch"            "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0100-fman-pcd-plcr-install.patch"          "$KERNEL_PATCHES/"
 # 0101 (M3-3c bridge): wire NETIF_F_HW_VLAN_CTAG_RX -> fman_hm_node_install via
 # a new dpaa_set_features() .ndo_set_features handler in dpaa_eth.c, so the
 # dormant HM install body (0099) is reachable from userspace (ethtool -K /
@@ -321,22 +305,18 @@ cp "$BOARD_PATCH_DIR/0100-fman-pcd-plcr-install.patch"          "$KERNEL_PATCHES
 # Depends on 0099 (fman_hm_node_install productive) + 0090a (struct fman_hm_spec)
 # + 0086a (fman_hm_caps_supported), so it MUST sort after 0100. Common
 # (built-in) for default/vpp/ask. Spec sec 5.5.
-cp "$BOARD_PATCH_DIR/0101-dpaa-hw-vlan-strip-ndo-set-features-bridge.patch" "$KERNEL_PATCHES/"
 # 0102: dormant exported fman_port_set_rx_bpool() reprogram primitive
 # (M3-3 step 7 sub-increment 4, WRITE mechanism, no caller). Edits
 # fman_port.c/.h only; independent of the 0092-0100 PCD stack. Spec sec 6.1.7.
-cp "$BOARD_PATCH_DIR/0102-fman-port-set-rx-bpool-primitive.patch" "$KERNEL_PATCHES/"
 # 0102b: one-shot dev_info FMBM_EBMPI register readback at reprogram time
 # (GAP-1 evidence that the 0102 BPID re-commit reached silicon). Diagnostic
 # only; stacks on 0102. Spec sec 6.1.17 / plans/ZC-RX-SCOPE.md GAP 1.
-cp "$BOARD_PATCH_DIR/0102b-fman-port-debug-readback.patch" "$KERNEL_PATCHES/"
 # 0103a: dormant true-ZC RX Recover sw-ring reverse-map (M3-3 step 7
 # sub-increment 4a, infrastructure only, NO datapath consumer). Adds the
 # per-qband chunk-DMA -> xdp_buff reverse map + record/lookup helpers that
 # 0103b needs (kernel 6.18.31 has no xsk_buff_recv() retrieve-by-dma
 # primitive). Self-tested at attach; byte-identical datapath to 0102.
 # Spec sec 6.1.15 (corrected) / 6.1.16 (API gap).
-cp "$BOARD_PATCH_DIR/0103a-dpaa1-true-zc-rx-recover-swring.patch" "$KERNEL_PATCHES/"
 # 0103b: PRODUCTIVE true-ZC RX -- the INSEPARABLE reprogram-WRITE +
 # Recover-redirect pair (M3-3 step 7 sub-increment 4b). Fires the FMan
 # RX-port BPID swap (fman_port_set_rx_bpool, 0102) at attach AND wires the
@@ -345,33 +325,27 @@ cp "$BOARD_PATCH_DIR/0103a-dpaa1-true-zc-rx-recover-swring.patch" "$KERNEL_PATCH
 # the XSKMAP (xsk_zc_rx_redirect, 22nd xsk_* counter). Both halves MUST land
 # together (firing either alone -> sec 6.1.8 crash class). Byte-identical on
 # default/vpp (only reached on XDP_ZEROCOPY bind). Spec sec 6.1.16.
-cp "$BOARD_PATCH_DIR/0103b-dpaa1-true-zc-rx-reprogram-redirect.patch" "$KERNEL_PATCHES/"
 # 0103c: true-ZC RX stage-3 -- sub-increment-4 reorder + IPI wakeup +
 # unconditional NAPI refill + pre-arm RX NEED_WAKEUP + BPID restore on
 # detach. Makes the productive xsk_zc_rx_redirect oracle (0103b) actually
 # reachable under load. Edits af_xdp_pool_main.c (+ dpaa_eth) on top of
 # 0103b; sorts after 0103b, before 0104. Spec sec 6.1.17.
-cp "$BOARD_PATCH_DIR/0103c-dpaa1-true-zc-rx-classify-before-bpid-guard.patch" "$KERNEL_PATCHES/"
 # 0103e: bpf_net_ctx NULL-deref fix in af_xdp_pool_rx_hook (the rx_hook
 # runs outside the NAPI bpf_net_ctx the redirect path assumes). Stacks on
 # 0103c. Spec sec 6.1.17.
-cp "$BOARD_PATCH_DIR/0103e-dpaa1-true-zc-rx-bpf-net-ctx-fix.patch" "$KERNEL_PATCHES/"
 # 0103f: dispatch the qmgmt_ops->rx_hook BEFORE the dpaa_bpid2pool() NULL
 # guard in rx_default_dqrr. Without this, FDs carrying the XSK bpid resolve
 # to no kernel pool and are consumed/dropped at ~2855 before the 0103b hook
 # at ~2901 ever sees them -> xsk_zc_rx_redirect stuck at 0. Stacks on 0103e.
-cp "$BOARD_PATCH_DIR/0103f-dpaa1-true-zc-rx-rxhook-before-bpidpool.patch" "$KERNEL_PATCHES/"
 # 0103g: register per-band MEM_TYPE_XSK_BUFF_POOL xdp_rxq_info at ZC attach
 # + xsk_pool_set_rxq_info; fixes the NULL xdp->rxq Oops in __xsk_map_redirect
 # on the first Recovered frame (HW serial capture 2026-06-09). Stacks on 0103f.
-cp "$BOARD_PATCH_DIR/0103g-dpaa1-true-zc-rx-register-zc-rxq.patch" "$KERNEL_PATCHES/"
 # 0104: PRODUCTIVE M3-3d policer consumer -- .ndo_setup_tc TC_SETUP_BLOCK
 # handler mapping a single ingress `tc filter matchall action police` onto
 # fman_policer_install() slot 0 (board 0100). Fail-soft -EOPNOTSUPP when
 # !fman_policer_caps_supported(). Edits dpaa_eth.c/.h only; sorts after
 # 0103e, before 101-sfp. This is the kernel backend for the vyos-1x-025
 # `set interfaces ethernet ethX ingress-policer` CLI. Spec sec 5.6.
-cp "$BOARD_PATCH_DIR/0104-dpaa-ingress-policer-tc-matchall-bridge.patch" "$KERNEL_PATCHES/"
 # 0104a: advertise NETIF_F_HW_TC in dpaa_netdev_init() so tc_can_offload() is
 # true and the tc core actually routes an ingress `matchall action police`
 # filter to 0104's TC_SETUP_BLOCK handler. Without it the netdev shows
@@ -381,7 +355,6 @@ cp "$BOARD_PATCH_DIR/0104-dpaa-ingress-policer-tc-matchall-bridge.patch" "$KERNE
 # NETIF_F_HW_VLAN_CTAG_RX block 0101 adds just above. Touches only
 # dpaa_netdev_init() (no overlap with 0104's hunks); sorts after 0104, before
 # 101-sfp. Spec sec 5.6.
-cp "$BOARD_PATCH_DIR/0104a-dpaa-netdev-advertise-hw-tc.patch" "$KERNEL_PATCHES/"
 # 0104b: M3-3e CEETM scaffold -- pins the QMan egress-shaper stub API
 # (dpaa_ceetm_qdisc_install / dpaa_ceetm_qdisc_destroy / dpaa_ceetm_supported)
 # + CONFIG_DPAA_HW_CEETM in dpaa_fman_caps.{c,h} + Kconfig. supported() returns
@@ -389,7 +362,6 @@ cp "$BOARD_PATCH_DIR/0104a-dpaa-netdev-advertise-hw-tc.patch" "$KERNEL_PATCHES/"
 # forward-port lands; fixes the VyOS CLI contract now. Touches only the tails
 # of caps.{c,h}/Kconfig (no overlap with 0104/0104a); sorts after 0104a, before
 # 101-sfp. Spec sec 5.7.
-cp "$BOARD_PATCH_DIR/0104b-dpaa-ceetm-stub.patch" "$KERNEL_PATCHES/"
 # 0105: dormant exported fman_port_set_cc_base() RX coarse-classification
 # base primitive (M3-3b keystone, WRITE mechanism, no caller). Programs the
 # BMI fmbm_rccb register -- the RAW MURAM offset of the 0098 CC tree root
@@ -399,7 +371,6 @@ cp "$BOARD_PATCH_DIR/0104b-dpaa-ceetm-stub.patch" "$KERNEL_PATCHES/"
 # independent of the 0092-0104b PCD stack (cross-module EXPORT consumed by
 # the future productive caller). Sorts after 0104b, before 101-sfp. Spec
 # sec 13.
-cp "$BOARD_PATCH_DIR/0105-fman-port-set-cc-base-primitive.patch" "$KERNEL_PATCHES/"
 # 0106: M3-3b productive CC steering wiring -- the HW-proven KGSE_CCBS graft
 # (silicon captures 2026-05-23/25: NIA stays BMI direct-enqueue 0x80500002,
 # a non-zero KGSE_CCBS = CC root group-table MURAM offset dispatches the CC
@@ -409,7 +380,6 @@ cp "$BOARD_PATCH_DIR/0105-fman-port-set-cc-base-primitive.patch" "$KERNEL_PATCHE
 # steering fix), and completes fman_cc_tree_install()/destroy() in
 # dpaa_fman_caps.c (install -> get_base -> graft; destroy detaches first).
 # Sorts after 0105, before 101-sfp. Spec sec 5.4 (M3-3b).
-cp "$BOARD_PATCH_DIR/0106-fman-pcd-cc-keygen-graft-wiring.patch" "$KERNEL_PATCHES/"
 # 0107: debugfs CC steering test harness -- /sys/kernel/debug/fman_pcd/<N>/
 # cc_test drives the EXACT 0106 productive sequence (static_install ->
 # get_base -> kg_port_attach_cc; clear = detach_cc -> static_destroy) so the
@@ -418,7 +388,6 @@ cp "$BOARD_PATCH_DIR/0106-fman-pcd-cc-keygen-graft-wiring.patch" "$KERNEL_PATCHE
 # fsl_dpaa_fman.ko + intra-module fman_pcd_cc_seq_dump() helper; 0600
 # root-only node, zero datapath cost, no new EXPORT_SYMBOLs. Sorts after
 # 0106, before 101-sfp. Spec sec 5.4 (M3-3b DUT validation).
-cp "$BOARD_PATCH_DIR/0107-fman-pcd-cc-test-debugfs-harness.patch" "$KERNEL_PATCHES/"
 # 0108: M3-3b close-out -- per-key FQ enqueue-AD + silicon-truth CC key
 # layout. Replaces 0098's soft leaf-AD encoding (qband<<16|hm<<8|type,
 # graceful fall-through) with the ask20-HW-PROVEN RM 8.7.4.3 hardware
@@ -431,7 +400,6 @@ cp "$BOARD_PATCH_DIR/0107-fman-pcd-cc-test-debugfs-harness.patch" "$KERNEL_PATCH
 # and extends the 0107 cc_test harness with an optional [fqid-hex] arg.
 # fqid 0 keeps the DUT-validated fall-through byte-identical. Sorts after
 # 0107, before 101-sfp. Spec sec 5.4 (M3-3b).
-cp "$BOARD_PATCH_DIR/0108-fman-pcd-cc-per-key-fq-enqueue-ad.patch" "$KERNEL_PATCHES/"
 # 0109: M3-3b production consumer -- ethtool ntuple (rxnfc) -> FMan CC
 # static-tree bridge in dpaa_ethtool.c. ETHTOOL_SRXCLSRLINS/DEL rules
 # rebuild the port's CC tree via fman_cc_tree_destroy()+install() (the
@@ -441,7 +409,6 @@ cp "$BOARD_PATCH_DIR/0108-fman-pcd-cc-per-key-fq-enqueue-ad.patch" "$KERNEL_PATC
 # ('set system offload classify'). Mirrors the 0104 policer pattern
 # (userspace -> standard kernel tool -> driver bridge). Sorts after
 # 0108, before 101-sfp. Spec sec 5.4 (M3-3b production consumer).
-cp "$BOARD_PATCH_DIR/0109-dpaa-ethtool-ntuple-cc-steering-bridge.patch" "$KERNEL_PATCHES/"
 # 0110: true-ZC RX NAPI-only hook dispatch + xdp_do_flush (supersedes the
 # never-shipped 0103h). Fixes TWO coupled defects in the 0103e/0103f hook
 # path: (1) missing xdp_do_flush() after XSKMAP redirect -- the local
@@ -456,7 +423,6 @@ cp "$BOARD_PATCH_DIR/0109-dpaa-ethtool-ntuple-cc-steering-bridge.patch" "$KERNEL
 # 2026-06-10: functional PASS, SIGKILL-teardown stress PASS, 8-way flood
 # survival PASS. Diff base is post-0109 (dpaa_eth.c overlaps 0104/0109),
 # hence the 0110 number. Sorts after 0109, before 101-sfp. Spec sec 6.1.18.
-cp "$BOARD_PATCH_DIR/0110-dpaa1-true-zc-rx-napi-only-flush.patch" "$KERNEL_PATCHES/"
 # 0111: QMan CEETM hierarchical egress shaper core (M3-3e). Ports the NXP
 # SDK CEETM API (qman_high.c 3283-5772 + qman_config.c CCSR) to mainline
 # style: new drivers/soc/fsl/qbman/qman_ceetm.c (~1100 LOC, Kconfig
@@ -470,7 +436,6 @@ cp "$BOARD_PATCH_DIR/0110-dpaa1-true-zc-rx-napi-only-flush.patch" "$KERNEL_PATCH
 # DCP0/rev-3.2 only. Wire structs are explicit __beN -- BUILD_BUG_ON
 # layout-asserted (cmd 63B / rsp 64B). Consumer lands in 0112. Sorts
 # after 0110, before 101-sfp. Spec sec 5.7 (M3-3e).
-cp "$BOARD_PATCH_DIR/0111-qman-ceetm.patch" "$KERNEL_PATCHES/"
 # 0112: dpaa HTB-offload consumer of the 0111 CEETM core (M3-3e). New
 # dpaa_ceetm.{c,h} (Kconfig DPAA_HW_CEETM, rewritten from the 0104b
 # scaffold entry; stubs removed from dpaa_fman_caps.{c,h}). Modern
@@ -486,32 +451,26 @@ cp "$BOARD_PATCH_DIR/0111-qman-ceetm.patch" "$KERNEL_PATCHES/"
 # dpaa_max_num_txqs()+32, real_num grown per LEAF_ALLOC_QUEUE, restored
 # on DESTROY. NB tc_htb_qopt_offload rate/ceil are BYTES/s (x8 applied).
 # Sorts after 0111, before 101-sfp. Spec sec 5.7 (M3-3e consumer).
-cp "$BOARD_PATCH_DIR/0112-dpaa-ceetm-htb.patch" "$KERNEL_PATCHES/"
 # DCSR error observability: read-only debugfs taps for the FMan common-block
 # error/status registers (fpm/bmi/qmi/parser/kg/pol). fpm_err decodes the 50
 # per-hwport status words incl. STALL — the M3-3b forensic view. Spec §5.8.
-cp "$BOARD_PATCH_DIR/0113-fman-pcd-dcsr-error-taps.patch" "$KERNEL_PATCHES/"
 # True-ZC RX gate-counter realign: moves xsk_zc_eligible/xsk_zc_rx_recovered
 # into af_xdp_pool_rx_hook() (the 0110 NAPI-only flush rework left the old
 # probe site unreachable). Makes xsk-zc-check's verdict meaningful again.
-cp "$BOARD_PATCH_DIR/0114-dpaa1-xsk-zc-eligible-realign.patch" "$KERNEL_PATCHES/"
 # M3-3b wedge fix: SDK-convergent CC bring-up (root CONT_LOOKUP AD, RESULT
 # leaf ADs, productive FMBM_RCCB bind + NIA_KG_CC_EN via fman_port_lookup_rx
 # registry, KG NIA=FM_CTL|AC_CC with CCBS=grpBits). Spec §5.4, v5.19.
-cp "$BOARD_PATCH_DIR/0115-fman-pcd-cc-sdk-convergent-bringup.patch" "$KERNEL_PATCHES/"
 # M3-3b wedge fix iteration 3: CC result-AD NIA must exit via FM_CTL
 # AC_NO_IPACC_PRE_BMI_ENQ_FRAME (0x28) on A006675/SW006 silicon — the 0115
 # direct NIA_ENG_BMI|ENQ exit leaked one FMan task per CC-dispatched frame
 # (MAC RDRP ate everything, no FPM stall, reboot-only). Also brings up the
 # per-port FM_CTL ctrl-params page (FMBM_RGPR) the 0x28 ucode consumes.
-cp "$BOARD_PATCH_DIR/0116-fman-pcd-cc-fmctl-enq-params-page.patch" "$KERNEL_PATCHES/"
 # M3-3b ROOT-CAUSE fix (iter-25): mainline fman_init() clear_iram()s the
 # U-Boot-uploaded FM_CTL microcode and never reloads it — IRAM all-0xFF,
 # IREADY=0, so every CC dispatch (KG→FM_CTL|AC_CC) parks its FMan task and
 # leaks BMI FIFO units (freeze @~46 frames). 0117 re-uploads the DTB QEF
 # blob (proprietary 210.10.1, fman-firmware/fsl,firmware) into IRAM right
 # after clear_iram, per SDK LoadFmanCtrlCode (fm.c:426-480). Spec §5.4.
-cp "$BOARD_PATCH_DIR/0117-fman-load-ctrl-microcode.patch" "$KERNEL_PATCHES/"
 # M3-3b iter-48 fix: revert 0115's KeyGen→CC dispatch encoding back to the
 # HW-proven CCBS model (KGSE_MODE NIA = BMI direct-enqueue 0x80500002 +
 # KGSE_CCBS = CC root group-table MURAM offset). 0115's AC_CC NIA-flip
@@ -520,24 +479,20 @@ cp "$BOARD_PATCH_DIR/0117-fman-load-ctrl-microcode.patch" "$KERNEL_PATCHES/"
 # the FMan port on the first CC frame, whereas live-rewriting the scheme to
 # CCBS cured the stall (no STL/60s, ping 5/5). Keeps the rest of 0115/0116/
 # 0117 — only the 3 KeyGen/CC-scheme files revert. Spec §5.4.
-cp "$BOARD_PATCH_DIR/0118-fman-pcd-cc-revert-ccbs-dispatch.patch" "$KERNEL_PATCHES/"
 # ASK2 M2 step 1: extend the HM op-set (0090a/0099) with 3 additive
 # L3-forward primitives — RMV_ETHERNET, INSRT_GENERIC, IPV4_FORWARD —
 # across all four HM layers. SDK-grounded encodings (NXP fm_manip): single
 # generic HMAN_OC=0x35 HMTD, RMV=0x01000e00 / INSRT=0x02000e00+BE payload /
 # IPV4=0x0c040001 (TTL+L4 checksum). No existing VLAN/MPLS op altered.
-cp "$BOARD_PATCH_DIR/0119-fman-pcd-hm-l3-forward-ops.patch" "$KERNEL_PATCHES/"
 # ASK2 M2 step 2: dormant next-hop HM dedup refcount API
 # (fman_hm_nexthop_get/put) caches+refcounts one shared HMTD per L3
 # adjacency (egress_tx_fqid, src_mac, dst_mac) so MURAM scales
 # O(next-hops) not O(flows). EXPORT_SYMBOL_GPL, dormant (ask.ko consumes).
-cp "$BOARD_PATCH_DIR/0120-fman-pcd-hm-nexthop-dedup.patch" "$KERNEL_PATCHES/"
 # ASK2 Gap-A: export two net_device -> hardware-id resolvers
 # (dpaa_get_rx_fman_port / dpaa_get_tx_fqid) on the common dpaa_fman_caps.h
 # substrate so the OOT ask.ko PCD consumer can derive the fman_cc_tree_*
 # port key and a CC target_fqid. EXPORT_SYMBOL_GPL, dormant (no in-tree
 # caller). Bodies are the proven dead-ask-flavor 0031/0039 reparented.
-cp "$BOARD_PATCH_DIR/0121-dpaa-export-cc-target-resolvers.patch" "$KERNEL_PATCHES/"
 # ASK2 Fork B M1 step 1: FE-object MURAM pool scaffold (arch/fman-fe-ehash.md
 # §3 AllocFEObjs). Lazy + refcounted pool of 100×28 B FE records carved from
 # FMan MURAM, driven by a new debugfs fman_pcd/<id>/fe_pool (0644) get/put
@@ -546,7 +501,6 @@ cp "$BOARD_PATCH_DIR/0121-dpaa-export-cc-target-resolvers.patch" "$KERNEL_PATCHE
 # Single-file fman_pcd.c, internal/static, no ABI export. Scaffold only —
 # allocates+zeroes MURAM, does NOT program the FE records and does NOT flow
 # traffic; the FE-VM core (FmPcdCcBuildFE/ContextByFE) lands later from lf-5.4.
-cp "$BOARD_PATCH_DIR/0122-fman-pcd-fe-ehash-init.patch" "$KERNEL_PATCHES/"
 # ASK2 Fork B M1 step 2: per-port FE support (arch/fman-fe-ehash.md §4
 # FmPortSetFESupport/FmPortDeleteFESupport). Carves a per-port FE internal-
 # buffer pool (total_tnums × 0x100 × 2, 256 B aligned) + a management free-list
@@ -559,7 +513,6 @@ cp "$BOARD_PATCH_DIR/0122-fman-pcd-fe-ehash-init.patch" "$KERNEL_PATCHES/"
 # fman_pcd/<id>/fe_port (0644) "set <id>"/"del <id>" node. Allocate-only —
 # ships DORMANT, does NOT flow classified traffic (needs §5 + FE-VM core).
 # Sorts after 0122, before 101-sfp. Spec arch/fman-fe-ehash.md §4 (M1 Fork B).
-cp "$BOARD_PATCH_DIR/0123-fman-pcd-fe-port-support.patch" "$KERNEL_PATCHES/"
 # ASK2 Fork B M1 — FE virtual-machine core, increment 1 (arch/fman-fe-ehash.md
 # §5 FE-VM). Transcribes the lf-5.4 SDK FmPcdCcBuildFE() descriptor encoder and
 # the FM_PCD_Init() FE-singleton setup, adapted to mainline gen_pool MURAM (the
@@ -573,7 +526,6 @@ cp "$BOARD_PATCH_DIR/0123-fman-pcd-fe-port-support.patch" "$KERNEL_PATCHES/"
 # Forward (build) + inverse (clear) in this one patch; clear restores the exact
 # pre-build pool state and pool_free drains the singletons, so pcd-snapshot
 # gen_pool "used" returns to baseline (reversibility gate stays clean).
-cp "$BOARD_PATCH_DIR/0124-fman-pcd-fe-vm-singletons.patch" "$KERNEL_PATCHES/"
 # ASK2 Fork B M1 — §5 ExternalHashTableSet (arch/fman-fe-ehash.md §5/§6). The
 # vendor enhanced-ehash flow store — the only config proven to FLOW on 210.10.1
 # (§8). Lazily reserves a per-PCD internal-buffer-management MURAM pool (32 KiB
@@ -586,7 +538,6 @@ cp "$BOARD_PATCH_DIR/0124-fman-pcd-fe-vm-singletons.patch" "$KERNEL_PATCHES/"
 # only; nothing dispatches into the hash store until the fm_cc.c FE_ENTER wrapper
 # + FE-VM core land. Forward (set) + inverse (clear/drain) in one patch; clear
 # returns gen_pool "used" to baseline (reversibility gate stays clean).
-cp "$BOARD_PATCH_DIR/0125-fman-pcd-fe-ehash-table.patch" "$KERNEL_PATCHES/"
 # 0126 — convert fman_pcd_muram_alloc/_free into a gen_pool sub-allocator over
 # the reserved 64 KiB MURAM partition (0092 reserved the arena but the wrappers
 # re-called the GLOBAL fman_muram_alloc, competing for the ~21 KiB post-CAM/FIFO
@@ -595,7 +546,6 @@ cp "$BOARD_PATCH_DIR/0125-fman-pcd-fe-ehash-table.patch" "$KERNEL_PATCHES/"
 # with [muram_offset,+64KiB); all PCD MURAM now sub-allocates from it, bounding
 # PCD use to the reservation and unblocking the FE/ehash forward path. Substrate
 # change — full S0↔S1 + fe_pool + fe_ehash forward regression gate required.
-cp "$BOARD_PATCH_DIR/0126-fman-pcd-muram-genpool.patch" "$KERNEL_PATCHES/"
 # 0127 — FE-VM core increment 2 (arch/fman-fe-ehash.md §5): the per-flow ENQ
 # Flow-Entry (FmPcdCcBuildContextByFE — ENQ-type FE carrying the 24-bit target
 # FQID in word1) and the AC_CC root action-descriptor FE_ENTER wiring
@@ -607,7 +557,6 @@ cp "$BOARD_PATCH_DIR/0126-fman-pcd-muram-genpool.patch" "$KERNEL_PATCHES/"
 # Ships DORMANT (programs descriptors only; nothing dispatches into the FE VM
 # until the ehash bucket indexer lands). Forward+inverse in one patch; each
 # inverse re-zeros + frees its MURAM so pcd-snapshot stays reversible.
-cp "$BOARD_PATCH_DIR/0127-fman-pcd-fe-vm-enq-root.patch" "$KERNEL_PATCHES/"
 # 0128: FE-VM core increment 3 — per-flow ehash insertion (arch/fman-fe-ehash.md
 # §5). The SDK get_indexed_hash_bucket() CRC64 bucket indexer +
 # ExternalHashTableAddKey() head-insert: CRC64 the key → byte-shift+mask to a
@@ -620,7 +569,6 @@ cp "$BOARD_PATCH_DIR/0127-fman-pcd-fe-vm-enq-root.patch" "$KERNEL_PATCHES/"
 # anti-pattern: never fall the flow store to MURAM) so gen_pool "used" is
 # UNCHANGED — reversibility = all records freed + every bucket head restored.
 # Ships DORMANT; forward (add) + inverse (LIFO drain, byte-exact) in one patch.
-cp "$BOARD_PATCH_DIR/0128-fman-pcd-fe-vm-flow-insert.patch" "$KERNEL_PATCHES/"
 # 0129: M1 coarse ask offload engage/disengage mode-switch (fman_pcd.h export).
 # Adds two EXPORT_SYMBOL_GPL entry points to fman_pcd.c + their prototypes to
 # <linux/fsl/fman_pcd.h>: fman_pcd_offload_engage()/_disengage(struct fman *,
@@ -632,7 +580,6 @@ cp "$BOARD_PATCH_DIR/0128-fman-pcd-fe-vm-flow-insert.patch" "$KERNEL_PATCHES/"
 # ask_fman_caps.h) and drives them via /sys/kernel/debug/ask/offload. Ships
 # DORMANT (nothing calls them until the debugfs trigger / M7 op-mode); M1
 # carries no classification semantics. Forward + inverse in one patch.
-cp "$BOARD_PATCH_DIR/0129-fman-pcd-offload-engage.patch" "$KERNEL_PATCHES/"
 # 0130: D9.1 (M2 activate) increment 1 — switch the dormant FE/ehash flow store
 # (0125 ehash table + 0128 per-flow records) from kzalloc()+virt_to_phys() to
 # dma_alloc_coherent(). The en_exthash_node table-base words and each bucket head
@@ -646,7 +593,6 @@ cp "$BOARD_PATCH_DIR/0129-fman-pcd-offload-engage.patch" "$KERNEL_PATCHES/"
 # still all records dma_free'd + every bucket head restored byte-exactly. Ships
 # DORMANT (no new dispatch); the 0128 on-board record layout is byte-identical.
 # Forward (dma_alloc) + inverse (dma_free) in one patch.
-cp "$BOARD_PATCH_DIR/0130-fman-pcd-fe-ehash-dma-coherent.patch" "$KERNEL_PATCHES/"
 # 0131: D9-A (M2 activate) increment 3 — the genuine 28-byte external-hash
 # Flow-Entry object (SDK t_ExtHashFe) that the 0127 FE_ENTER root AD dispatches
 # into. Binds the §5 DDR bucket array (0125/0130) to the FE VM and links HIT →
@@ -658,8 +604,6 @@ cp "$BOARD_PATCH_DIR/0130-fman-pcd-fe-ehash-dma-coherent.patch" "$KERNEL_PATCHES
 # while quiescent BEFORE arming, since the M3-3b stall latches ZERO fault).
 # Ships DORMANT; forward+inverse in one patch; gen_pool "used" returns to the
 # warm-S0' baseline on clear (pcd-snapshot reversibility gate stays clean).
-cp "$BOARD_PATCH_DIR/0131-fman-pcd-fe-hash-object.patch" "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0132-fman-pcd-fe-arm-debugfs.patch"   "$KERNEL_PATCHES/"
 # 0133: D9-B (M2 activate) — correct the fe_arm encoding from the 0132 KGSE_CCBS
 # placebo (next_engine=2, mode 0x80500002, which NEVER dispatches the CC walk —
 # frames bypass into RSS) to the REAL AC_CC encoding. Adds a next_engine==3 branch
@@ -673,7 +617,6 @@ cp "$BOARD_PATCH_DIR/0132-fman-pcd-fe-arm-debugfs.patch"   "$KERNEL_PATCHES/"
 # M2 dispatch experiment — the only encoding that genuinely enters the FE VM
 # terminal disposition a bare exact-match leaf lacks (M3-3b iter-50 park).
 # 0133: D9-B (M2 activate) — adds AC_CC keygen_scheme_setup branch (board 0133 v1); arm function now in 0132 v3
-cp "$BOARD_PATCH_DIR/0133-fman-pcd-fe-arm-real-accc.patch" "$KERNEL_PATCHES/"
 # 0134: CAAM/QI descriptor sharing for ASK2 IPsec HW offload (spec §8.1, PR10).
 # Adds caam_qi_ext_consumer_register()/_release() to drivers/crypto/caam/qi.c +
 # the ext_lock/ext_active fields in struct caam_drv_ctx (qi.h) + the new header
@@ -686,62 +629,43 @@ cp "$BOARD_PATCH_DIR/0133-fman-pcd-fe-arm-real-accc.patch" "$KERNEL_PATCHES/"
 # the symbols EXPORT_SYMBOL_GPL but they stay dormant (no caller until the CAAM
 # datapath lands). This cp line is MANDATORY — the staging-completeness guard
 # below fails the build if any board/*.patch lacks one.
-cp "$BOARD_PATCH_DIR/0134-caam-qi-share.patch"               "$KERNEL_PATCHES/"
 # 0135: FE-VM context builder — port of lf-5.4 LSDK FmPcdCcBuildContextByFE().
 # Adds fman_pcd_fe_context_build() + struct fman_pcd_fe_context_params (the
 # centralized per-FE context writer the SDK calls at 999-patch line 8954).
 # Ships dormant (no callers yet — callers wire in a later patch to populate
 # MUX/TRANSITION/ENQ/HM per-instance context after the FE descriptor build,
 # matching the SDK two-step FmPcdCcBuildFE→FmPcdCcBuildContextByFE sequence).
-cp "$BOARD_PATCH_DIR/0135-fman-pcd-fe-context-build.patch"   "$KERNEL_PATCHES/"
 # 0136: TX confirm bypass — fman_port_set_silicon_hit_release_mode().
 # Flips the TX port BMI to release silicon-HIT FDs (FCO=0) directly to BMan
 # without QMan TX-confirm enqueue.  Kernel TX (FCO=1) is unaffected.
 # This eliminates the ~20% CPU softirq floor proved on hardware 2026-05-25.
-cp "$BOARD_PATCH_DIR/0136-fman-port-tx-confirm-bypass.patch" "$KERNEL_PATCHES/"
 # 0137: MANIP creation + chain API for L3 forwarding (fman_pcd_manip_create/_destroy/_chain_create/_chain_destroy/_hmtd_off).
-cp "$BOARD_PATCH_DIR/0137-fman-pcd-manip-create-chain.patch" "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0139-dpaa-af-xdp-bman-refill-bpid-fix.patch" "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/101-sfp-rollball-phylink-fallback.patch" "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/4002-hwmon-ina2xx-add-ina234-support.patch" "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/4005-phylink-inband-sfp-fallback.patch"  "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/4006-dpaa-xdp-rxq-queue-index.patch"     "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/4007-xhci-ls1046a-dwc3-quirks.patch"     "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/4009-sfp-oem-rollball-quirk.patch"       "$KERNEL_PATCHES/"
 # ASK2 M2.2: external flow-offload backend registration slot (single-slot
 # RCU-protected dpaa_register/unregister_flow_offload_handler). 0145 is a
 # board/common patch (not flavor-gated) because the dpaa driver is built-in
 # for all flavors.
-cp "$BOARD_PATCH_DIR/0145-dpaa-flow-offload-backend-slot.patch" "$KERNEL_PATCHES/"
-# 0146: Phase 2 integration — wire 0135 FE-VM context builder into fe_arm engage.
-# Contexts (ENQ/MUX/Transition) are built immediately before the AC_CC arm
-# reprograms KeyGen/BMI, so the FE-VM can resolve HIT→ENQ and MISS→Exit.
-# F-079: 0146 SKIPPED — context builder dormant, hunk shifted by 0132 scaffold
-# cp "$BOARD_PATCH_DIR/0146-fman-pcd-fe-context-build-integration.patch" "$KERNEL_PATCHES/"
-# 0150: Phase 2 — FE-VM engage/flow API for ask.ko
-#0150 (PLACEHOLDER — functions embedded into 0146)
-#cp "$BOARD_PATCH_DIR/0150-fman-pcd-fe-engage-api.patch"      "$KERNEL_PATCHES/"
-cp "$BOARD_PATCH_DIR/0148-keygen-debug-ekfc-log.patch" "$KERNEL_PATCHES/"
-
 
 # ── Staging-completeness guard ────────────────────────────────────────
-# Every kernel/common/patches/board/*.patch must either be cp'd above or
-# listed here as an intentional skip. Failure mode (observed 2026-06-11,
-# run 27362572444): 0113/0114/0115 were committed to board/ but their cp
-# lines were forgotten, so CI silently shipped a kernel without them —
-# the image looked healthy (same KVER) but lacked the new code entirely.
-# Space-separated basenames of board patches deliberately not staged
-# (currently none — 0078 was never committed as a file; see its comment above).
+# Every .patch file in kernel/common/patches/board/ must be listed in
+# the series file. SKIPPED patches are marked with # SKIP in series.
+# This catches orphaned patches with no series entry (the old guard
+# caught forgotten cp lines — now the loop reads series directly so
+# the failure mode is a patch file committed without a series entry).
 BOARD_STAGE_SKIP="0146-fman-pcd-fe-context-build-integration.patch 0150-fman-pcd-fe-engage-api.patch"
 _missing=""
-for _p in "$BOARD_PATCH_DIR"/*.patch; do
-  _b=$(basename "$_p")
-  case " $BOARD_STAGE_SKIP " in *" $_b "*) continue ;; esac
-  [ -f "$KERNEL_PATCHES/$_b" ] || _missing="$_missing $_b"
-done
+# Cross-check: every .patch in board/ must be in series or SKIP list
+{
+  # Extract patch basenames from series file (skip comments/blanks/SKIPs)
+  awk '!/^#/ && !/^$/ && !/SKIP/ {print $1}' "$BOARD_PATCH_DIR/series"
+  # Also accept the BOARD_STAGE_SKIP whitelist
+  for _s in $BOARD_STAGE_SKIP; do echo "$_s"; done
+} | sort -u > /tmp/_staged.$$
+find "$BOARD_PATCH_DIR" -maxdepth 1 -name '*.patch' -printf '%f\n' | sort > /tmp/_on_disk.$$
+_missing=$(comm -23 /tmp/_on_disk.$$ /tmp/_staged.$$ | tr '\n' ' ')
+rm -f /tmp/_staged.$$ /tmp/_on_disk.$$
 if [ -n "$_missing" ]; then
-  echo "::error::board patches present in $BOARD_PATCH_DIR but NOT staged:$_missing"
-  echo "::error::add a cp line in bin/ci-setup-kernel.sh (or list in BOARD_STAGE_SKIP)"
+  echo "::error::board patches NOT in series file: $_missing"
+  echo "::error::add to kernel/common/patches/board/series (or BOARD_STAGE_SKIP)"
   exit 1
 fi
 echo "### Board patch staging-completeness guard: OK"
