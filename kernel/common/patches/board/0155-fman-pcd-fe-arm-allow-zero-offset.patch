@@ -1,0 +1,24 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 468bfa9..1b888fd 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -2261,15 +2261,12 @@ static int fman_pcd_fe_arm_engage(struct fman_pcd *pcd, const char *args)
+ 		return -EINVAL;
+ 	if (miss_fqid == 0)
+ 		miss_fqid = 0x200;  /* backward compat: eth3 default */
+-	if (port_id < 0x08 || port_id >= 0x28 || fe_enter_off == 0)
++	if (port_id < 0x08 || port_id >= 0x28)
+ 		return -EINVAL;
+ 
+-	mutex_lock(&pcd->fe_lock);
+-	if (fe_enter_off != 0 && (pcd->fe_refcount == 0 || pcd->fe_root_ad_off != fe_enter_off)) {
+-		mutex_unlock(&pcd->fe_lock);
+-		return -EINVAL;
+-	}
+-	mutex_unlock(&pcd->fe_lock);
++	/* F-079-R5: allow fe_enter_off==0 for scaffold-only CONT_LOOKUP
++	 * pass-through (no FE-VM chain).  The fman_pcd_kg_port_arm_fe()
++	 * call below rejects double-engage; no need for a refcount gate. */
+ 
+ 	/* F-079: CONT_LOOKUP pass-through scaffold (RM 8.7.4.1).
+ 	 * AC_CC dispatch (next_engine=3) with RCCB→group_table.
