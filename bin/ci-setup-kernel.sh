@@ -773,8 +773,10 @@ fi
 FILES_DIR=kernel/common/files
 [ -f "$FILES_DIR/fsl_fmd_shim.c" ] || { echo "ERROR: $FILES_DIR/fsl_fmd_shim.c missing"; exit 1; }
 [ -d "$FILES_DIR/lp5812" ]         || { echo "ERROR: $FILES_DIR/lp5812 missing"; exit 1; }
+[ -f "$FILES_DIR/fman_pcd_recover.c" ] || { echo "ERROR: $FILES_DIR/fman_pcd_recover.c missing"; exit 1; }
 cp "$FILES_DIR/fsl_fmd_shim.c" "$KERNEL_BUILD/"
 cp -r "$FILES_DIR/lp5812"      "$KERNEL_BUILD/"
+cp "$FILES_DIR/fman_pcd_recover.c" "$KERNEL_BUILD/"
 
 # Write injection block to temp file (heredoc avoids all quoting issues).
 # Note: the former phylink / dpaa-xdp / xhci-ls1046a Python patchers have
@@ -1369,12 +1371,11 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
         drivers/net/ethernet/freescale/fman/fman_pcd.c
     echo "### fman_pcd.c: F-085d fe_recover debugfs + write handler"
 
-    # F-085e: Copy fman_pcd_recover.c and add to Kbuild.
-    # The port_recover function is defined in a separate .c file to avoid
-    # sed-injection complexity.  The file is staged at kernel/common/files/.
-    if [ -f "$GITHUB_WORKSPACE/kernel/common/files/fman_pcd_recover.c" ]; then
-        cp "$GITHUB_WORKSPACE/kernel/common/files/fman_pcd_recover.c" \
-            drivers/net/ethernet/freescale/fman/fman_pcd_recover.c
+    # F-085e: Copy fman_pcd_recover.c (already staged by ci-setup-kernel.sh)
+    # and add to Kbuild.  File was copied to the build directory alongside
+    # fsl_fmd_shim.c — just needs Makefile wiring.
+    if [ -f fman_pcd_recover.c ]; then
+        cp fman_pcd_recover.c drivers/net/ethernet/freescale/fman/
         sed -i 's/fman_pcd.o/fman_pcd.o fman_pcd_recover.o/' \
             drivers/net/ethernet/freescale/fman/Makefile
         echo "### fman: fman_pcd_recover.c staged + Kbuild updated"
