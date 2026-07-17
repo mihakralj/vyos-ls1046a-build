@@ -1542,11 +1542,53 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-072 v3 FmPortSetFESupport ported"
 fi
 
-# F-079-LEAKFIX v3: rewrite teardown with muram_free (standalone script, no base64)
+# F-079-LEAKFIX v3: rewrite teardown with muram_free (embedded Python)
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    cp kernel/common/files/fix-teardown-leak.py /tmp/fix-teardown-leak.py
-    python3 /tmp/fix-teardown-leak.py 2>/dev/null || true
-    rm -f /tmp/fix-teardown-leak.py
+    python3 - "$(pwd)/drivers/net/ethernet/freescale/fman/fman_pcd.c" << 'PYEOF'
+import sys
+with open(sys.argv[1]) as f: src = f.read()
+fn = "static void fman_pcd_fe_buffer_teardown"
+pos = src.find(fn)
+if pos < 0: sys.exit(0)
+body_start = src.find("{", pos)
+depth = 0; body_end = body_start
+for i in range(body_start, len(src)):
+    if src[i] == "{": depth += 1
+    elif src[i] == "}":
+        depth -= 1
+        if depth == 0: body_end = i + 1; break
+new_body = """{
+    struct muram_info *muram = fman_get_muram(pcd->fman);
+    u32 pp_off, idx_off, pool_off;
+    u8 tnums;
+    void __iomem *pp, *idx;
+    static const unsigned int BMI_FIFO_UNITS = 0x100;
+
+    if (!muram || !port)
+        return;
+    tnums = fman_port_get_total_tnums(port);
+    if (!tnums)
+        return;
+    pp_off = fman_port_get_params_page(port);
+    if (IS_ERR_VALUE(pp_off))
+        return;
+    pp = fman_muram_offset_to_vbase(muram, pp_off);
+
+    idx_off = ioread32be((void __iomem *)((u8 __iomem *)pp + 0x54));
+    iowrite32be(0, (void __iomem *)((u8 __iomem *)pp + 0x54));
+
+    if (idx_off && idx_off != 0xFFFFFFFF) {
+        idx = fman_muram_offset_to_vbase(muram, idx_off);
+        pool_off = ioread32be(idx) & 0x00FFFFFF;
+        if (pool_off)
+            fman_pcd_muram_free(pcd, pool_off, tnums * BMI_FIFO_UNITS * 2);
+        fman_pcd_muram_free(pcd, idx_off, 5 + tnums);
+    }
+}"""
+src = src[:body_start] + new_body + src[body_end:]
+with open(sys.argv[1], "w") as f: f.write(src)
+print("### fman_pcd.c: F-079-LEAKFIX v3 teardown rewritten with muram_free")
+PYEOF
 fi
 
 # === end ls1046a-build patch-loop replacement ===
