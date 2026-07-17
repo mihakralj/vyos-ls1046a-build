@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Thu, 17 Jul 2026 19:05:00 +0000
+Subject: [PATCH] fman_pcd: fix FE_ENTER compose target (EXT_HASH, not ENQ)
+
+The 0158 compose function __fman_pcd_fe_build_vm_chain() used the first
+ENQ FE's MURAM offset as the FE_ENTER target.  This is architecturally
+wrong: FE_ENTER dispatches to the chain head (the EXT_HASH FE), not the
+terminal disposition (the ENQ FE).  The EXT_HASH FE performs the hardware
+hash lookup and routes HIT→MUX→ENQ or MISS→EXIT — it is the first FE
+that frames encounter after FE_ENTER, not ENQ.
+
+With the ENQ offset as target, frames entering the FE-VM bypass the ehash
+lookup entirely, going straight to the ENQ disposition (FQ 0x200).  No
+flow matching occurs regardless of inserted keys.
+
+Fix: use pcd->fe_hash_off (set by fe_hash_build() above) as the FE_ENTER
+target.  The EXT_HASH FE must have been built immediately before this
+call (fe_hash_build returns error before we reach here if it wasn't).
+
+Reference: arch/fman-microcode-210-programming-reference.md §2 and §7.2.
+The EXT_HASH FE byte layout defines word5=nextFEPtr (HIT→MUX) and
+word6=missNextFE (MISS→EXIT).  The FE_ENTER's word3 is the chain head.
+
+Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
+---
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -2403,14 +2403,14 @@ static int __fman_pcd_fe_build_vm_chain(struct fman_pcd *pcd)
+ 	 * FE_ENTER root AD links the classifier to the FE chain.
+-	 * Use the first ENQ FE's MURAM offset as the chain head.
+-	 * TODO: store enq_off for future flow_add() use.
++	 * Dispatch to the EXT_HASH FE (not ENQ) — the EXT_HASH FE
++	 * performs the hardware hash lookup and routes HIT→MUX→ENQ
++	 * or MISS→EXIT (§7.2).  The ENQ FE is the terminal
++	 * disposition, not the chain head.
+ 	 */
+ 	{
+-		struct fman_pcd_fe_obj *e;
+-
+-		if (list_empty(&pcd->fe_enq))
+-			return -ENOENT;
+-
+-		e = list_first_entry(&pcd->fe_enq,
+-				     struct fman_pcd_fe_obj, node);
+-		err = fman_pcd_fe_enter_build(pcd, e->muram_off);
++		err = fman_pcd_fe_enter_build(pcd, pcd->fe_hash_off);
+ 		if (err)
+ 			return err;
+ 	}

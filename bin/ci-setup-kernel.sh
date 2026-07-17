@@ -1397,15 +1397,12 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: stripped EXPORT_SYMBOL_GPL (before includes)"
 fi
 
-# Suppress -Wunused-function for fman_pcd_fe_build_contexts (leftover
-# from CCBS scaffold removal). The function was called from 0150 which
-# F-047 removed.  Avoids -Werror build failure.
+# F-083: fman_pcd_fe_build_contexts now called from fe_arm_engage scaffold
+# (restored by 0163).  No longer unused — __maybe_unused removed.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    sed -i 's/static void fman_pcd_fe_build_contexts/static __maybe_unused void fman_pcd_fe_build_contexts/' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
     sed -i 's/fman_muram_offset_to_vbase(muram,/(void *)fman_muram_offset_to_vbase(muram,/' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo "### fman_pcd.c: fe_build_contexts fixed (__maybe_unused + cast)"
+    echo "### fman_pcd.c: void* cast applied to muram_offset_to_vbase"
 fi
 
 
