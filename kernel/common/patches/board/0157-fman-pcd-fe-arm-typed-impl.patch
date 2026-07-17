@@ -1,0 +1,191 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 75e279b..f3290c4 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -2249,56 +2249,55 @@ static void fman_pcd_fe_arm_free_scaffold(struct fman_pcd *pcd)
+  *
+  * Verbs:  engage <port_hex> <fe_enter_off_hex> [miss_fqid_hex]  |  disengage <port_hex>
+  */
+-static int fman_pcd_fe_arm_engage(struct fman_pcd *pcd, const char *args)
++
++/*
++ * Typed engage — called by both the debugfs wrapper and the exported
++ * fman_pcd_fe_engage() (0153).  No string parsing.
++ */
++static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
++				    unsigned int port_id,
++				    unsigned long fe_enter_off,
++				    unsigned int miss_fqid)
+ {
+-	unsigned int port_id;
+-	unsigned long fe_enter_off;
+-	unsigned int miss_fqid = 0;  /* F-079-R4 optional 3rd arg */
+ 	u8 saved_engine = 0;
+ 	int err;
+ 
+-	if (sscanf(args, "engage %x %lx %x", &port_id, &fe_enter_off, &miss_fqid) < 2)
+-		return -EINVAL;
+-	if (miss_fqid == 0)
+-		miss_fqid = 0x200;  /* backward compat: eth3 default */
+ 	if (port_id < 0x08 || port_id >= 0x28)
+ 		return -EINVAL;
++	if (miss_fqid == 0)
++		miss_fqid = 0x200;
+ 
+-	/* F-079-R5: allow fe_enter_off==0 for scaffold-only CONT_LOOKUP
+-	 * pass-through (no FE-VM chain).  The fman_pcd_kg_port_arm_fe()
+-	 * call below rejects double-engage; no need for a refcount gate. */
+-
+-	/* F-079: CONT_LOOKUP pass-through scaffold (RM 8.7.4.1).
+-	 * AC_CC dispatch (next_engine=3) with RCCB→group_table.
+-	 * numKeys=0 → all frames miss → miss-AD → kernel FQ (dynamic per port).
+-	 * 7.37 Gbps proven at M2 gate, 0% CPU, zero QMan errors.
+-	 * MURAM: 256+16+32 = 304B. FE-VM chain dormant (future HIT).
+-	 */
+ 	{
+ 		struct muram_info *muram = fman_get_muram(pcd->fman);
+ 		unsigned long gro, mto, ato;
++
+ 		if (muram) {
+ 			gro = fman_pcd_muram_alloc(pcd, 256);
+ 			mto = fman_pcd_muram_alloc(pcd, 16);
+ 			ato = fman_pcd_muram_alloc(pcd, 32);
+-			if (!IS_ERR_VALUE(gro) && !IS_ERR_VALUE(mto) && !IS_ERR_VALUE(ato)) {
++			if (!IS_ERR_VALUE(gro) && !IS_ERR_VALUE(mto) &&
++			    !IS_ERR_VALUE(ato)) {
+ 				void __iomem *c;
+-				c = (void __iomem *)fman_muram_offset_to_vbase(muram, gro);
+-				iowrite32be((0u << 24) | (mto & 0xFFFFFF), c + 0);	/* F-079-R3: numKeys=0, matchTableAddr=mto */
+-				iowrite32be((ato & 0xFFFFFF), c + 4);  /* M2-proven: AD-table ptr */
+-				iowrite32be(0x4F000000  /* M2-proven: keySize=16 */, c + 8);	/* M2-proven: w2=0x4F000000 */
++
++				c = (void __iomem *)
++					fman_muram_offset_to_vbase(muram, gro);
++				iowrite32be((0u << 24) | (mto & 0xFFFFFF),
++					    c + 0);
++				iowrite32be((ato & 0xFFFFFF), c + 4);
++				iowrite32be(0x4F000000, c + 8);
+ 				iowrite32be(0, c + 12);
+-				c = (void __iomem *)fman_muram_offset_to_vbase(muram, ato);
++				c = (void __iomem *)
++					fman_muram_offset_to_vbase(muram, ato);
+ 				iowrite32be((u32)miss_fqid, c + 0);
+ 				iowrite32be(0, c + 4);
+-				iowrite32be(0, c + 8);  /* w2: RESULT_CF (M2-proven) */
++				iowrite32be(0, c + 8);
+ 				iowrite32be(0, c + 12);
+ 				iowrite32be((u32)miss_fqid, c + 16);
+ 				iowrite32be(0, c + 20);
+-				iowrite32be(0, c + 24); /* w2: RESULT_CF (M2-proven) */
++				iowrite32be(0, c + 24);
+ 				iowrite32be(0, c + 28);
+ 				fe_enter_off = gro;
+-				/* Trace MURAM blocks so disengage can free them (0152). */
++
+ 				pcd->fe_scaffold_gro = gro;
+ 				pcd->fe_scaffold_mto = mto;
+ 				pcd->fe_scaffold_ato = ato;
+@@ -2313,31 +2312,50 @@ static int fman_pcd_fe_arm_engage(struct fman_pcd *pcd, const char *args)
+ 
+ 	pcd->fe_armed_port = (u8)port_id;
+ 	pcd->fe_miss_fqid = miss_fqid;
+-		pr_info("fman_pcd fe_arm: port 0x%02x ENGAGED FE_ENTER=0x%lx (AC_CC)\n",
+-		port_id, fe_enter_off);
++	pr_info("fman_pcd fe_arm: port 0x%02x ENGAGED (AC_CC)\n", port_id);
+ 	return 0;
+ }
+ 
+-static int fman_pcd_fe_arm_disengage(struct fman_pcd *pcd, const char *args)
++/* Debugfs wrapper — parse string, delegate to __fman_pcd_fe_arm_engage(). */
++static int fman_pcd_fe_arm_engage(struct fman_pcd *pcd, const char *args)
+ {
+ 	unsigned int port_id;
++	unsigned long fe_enter_off;
++	unsigned int miss_fqid = 0;
+ 
+-	if (sscanf(args, "disengage %x", &port_id) != 1)
++	if (sscanf(args, "engage %x %lx %x", &port_id, &fe_enter_off, &miss_fqid) < 2)
+ 		return -EINVAL;
++	return __fman_pcd_fe_arm_engage(pcd, port_id, fe_enter_off, miss_fqid);
++}
++
++
++/*
++ * Typed disengage — called by both the debugfs wrapper and the exported
++ * fman_pcd_fe_disengage() (0153).  No string parsing.
++ */
++static int __fman_pcd_fe_arm_disengage(struct fman_pcd *pcd,
++				       unsigned int port_id)
++{
+ 	if (port_id < 0x08 || port_id >= 0x28)
+ 		return -EINVAL;
+ 
+-	/* R10: FE port teardown (pool+index) BEFORE scaffold free (0156). */
+ 	fman_pcd_fe_port_del(pcd, (u8)port_id);
+-
+-	/* Free scaffold MURAM before scheme disarm (0152). */
+ 	fman_pcd_fe_arm_free_scaffold(pcd);
+-
+ 	fman_pcd_kg_port_disarm_fe(pcd, (u8)port_id, 0);
+ 	pr_info("fman_pcd fe_arm: port 0x%02x DISENGAGED\n", port_id);
+ 	return 0;
+ }
+ 
++/* Debugfs wrapper — parse string, delegate to __fman_pcd_fe_arm_disengage(). */
++static int fman_pcd_fe_arm_disengage(struct fman_pcd *pcd, const char *args)
++{
++	unsigned int port_id;
++
++	if (sscanf(args, "disengage %x", &port_id) != 1)
++		return -EINVAL;
++	return __fman_pcd_fe_arm_disengage(pcd, port_id);
++}
++
+ static int fman_pcd_fe_arm_show(struct seq_file *s, void *unused)
+ {
+ 	struct fman_pcd *pcd = s->private;
+@@ -2398,7 +2416,6 @@ int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id)
+ {
+ 	struct fman_pcd *pcd;
+ 	struct fman_port *rxport;
+-	char buf[64];
+ 	unsigned int miss_fqid;
+ 	int err;
+ 
+@@ -2418,15 +2435,13 @@ int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id)
+ 	if (err)
+ 		return err;
+ 
+-	snprintf(buf, sizeof(buf), "engage %x 0 %x", hw_port_id, miss_fqid);
+-	err = fman_pcd_fe_arm_engage(pcd, buf);
++	err = __fman_pcd_fe_arm_engage(pcd, hw_port_id, 0, miss_fqid);
+ 	if (err)
+ 		return err;
+ 
+ 	err = fman_pcd_fe_port_set(pcd, hw_port_id);
+ 	if (err) {
+-		snprintf(buf, sizeof(buf), "disengage %x", hw_port_id);
+-		fman_pcd_fe_arm_disengage(pcd, buf);
++		__fman_pcd_fe_arm_disengage(pcd, hw_port_id);
+ 		return err;
+ 	}
+ 
+@@ -2439,7 +2454,6 @@ EXPORT_SYMBOL_GPL(fman_pcd_fe_engage);
+ void fman_pcd_fe_disengage(struct fman *fm, u8 hw_port_id)
+ {
+ 	struct fman_pcd *pcd;
+-	char buf[32];
+ 
+ 	if (!fm)
+ 		return;
+@@ -2447,9 +2461,7 @@ void fman_pcd_fe_disengage(struct fman *fm, u8 hw_port_id)
+ 	if (!pcd)
+ 		return;
+ 
+-	fman_pcd_fe_port_del(pcd, hw_port_id);
+-	snprintf(buf, sizeof(buf), "disengage %x", hw_port_id);
+-	fman_pcd_fe_arm_disengage(pcd, buf);
++	__fman_pcd_fe_arm_disengage(pcd, hw_port_id);
+ 
+ 	pr_info("fman_pcd: FE disengage port 0x%02x\n", hw_port_id);
+ }

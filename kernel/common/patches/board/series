@@ -151,3 +151,4 @@
 # ── F-079-R5: allow fe_enter_off==0 for scaffold-only CONT_LOOKUP ──
 0155-fman-pcd-fe-arm-allow-zero-offset.patch
 0156-fman-pcd-fe-arm-disengage-port-del.patch
+0157-fman-pcd-fe-arm-typed-impl.patch
