@@ -1,0 +1,75 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index fc0e843..731f418 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -134,6 +134,10 @@ struct fman_pcd {
+ 	unsigned long fe_root_ad_off;	/* sec.5 FE_ENTER root AD (16 B) */
+ 	u8 fe_armed_port;		/* F-079-R4: last engaged port */
+ 	unsigned int fe_miss_fqid;	/* F-079-R4: miss-AD delivery FQ */
++	/* Scaffold MURAM tracking — freed on disengage (0152). */
++	unsigned long fe_scaffold_gro;	/* group table (256 B) */
++	unsigned long fe_scaffold_mto;	/* match table (16 B) */
++	unsigned long fe_scaffold_ato;	/* AD table    (32 B) */
+ 	unsigned long fe_hash_off;	/* sec.5 t_ExtHashFe FE-hash object */
+ 
+ 	struct dentry *debugfs_dir;
+@@ -2213,6 +2217,27 @@ static void fman_pcd_fe_build_contexts(struct fman_pcd *pcd)
+ 	}
+ }
+ 
++
++/*
++ * Free the CONT_LOOKUP scaffold MURAM blocks allocated by fe_arm engage.
++ * NULL-safe — callable with all-zero offsets (no-op).
++ */
++static void fman_pcd_fe_arm_free_scaffold(struct fman_pcd *pcd)
++{
++	if (pcd->fe_scaffold_ato) {
++		fman_pcd_muram_free(pcd, pcd->fe_scaffold_ato, 32);
++		pcd->fe_scaffold_ato = 0;
++	}
++	if (pcd->fe_scaffold_mto) {
++		fman_pcd_muram_free(pcd, pcd->fe_scaffold_mto, 16);
++		pcd->fe_scaffold_mto = 0;
++	}
++	if (pcd->fe_scaffold_gro) {
++		fman_pcd_muram_free(pcd, pcd->fe_scaffold_gro, 256);
++		pcd->fe_scaffold_gro = 0;
++	}
++}
++
+ /*
+  * fe_arm - arm the FE-VM datapath on a single FMan RX port (Phase 1
+  * D9-B, patch 0132).  Reprograms the port's KGSE scheme to next_engine=CC
+@@ -2276,6 +2301,10 @@ static int fman_pcd_fe_arm_engage(struct fman_pcd *pcd, const char *args)
+ 				iowrite32be(0, c + 24); /* w2: RESULT_CF (M2-proven) */
+ 				iowrite32be(0, c + 28);
+ 				fe_enter_off = gro;
++				/* Trace MURAM blocks so disengage can free them (0152). */
++				pcd->fe_scaffold_gro = gro;
++				pcd->fe_scaffold_mto = mto;
++				pcd->fe_scaffold_ato = ato;
+ 			}
+ 		}
+ 	}
+@@ -2285,8 +2314,8 @@ static int fman_pcd_fe_arm_engage(struct fman_pcd *pcd, const char *args)
+ 	if (err)
+ 		return err;
+ 
+-		pcd->fe_armed_port = (u8)port_id;
+-		pcd->fe_miss_fqid = miss_fqid;
++	pcd->fe_armed_port = (u8)port_id;
++	pcd->fe_miss_fqid = miss_fqid;
+ 		pr_info("fman_pcd fe_arm: port 0x%02x ENGAGED FE_ENTER=0x%lx (AC_CC)\n",
+ 		port_id, fe_enter_off);
+ 	return 0;
+@@ -2301,6 +2330,9 @@ static int fman_pcd_fe_arm_disengage(struct fman_pcd *pcd, const char *args)
+ 	if (port_id < 0x08 || port_id >= 0x28)
+ 		return -EINVAL;
+ 
++	/* Free scaffold MURAM before scheme disarm (0152). */
++	fman_pcd_fe_arm_free_scaffold(pcd);
++
+ 	fman_pcd_kg_port_disarm_fe(pcd, (u8)port_id, 0);
+ 	pr_info("fman_pcd fe_arm: port 0x%02x DISENGAGED\n", port_id);
+ 	return 0;

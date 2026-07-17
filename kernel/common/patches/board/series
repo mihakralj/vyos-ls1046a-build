@@ -124,8 +124,21 @@
 # ── KeyGen debug ──
 0148-keygen-debug-ekfc-log.patch
 
+0146-fman-pcd-fe-context-build-integration.patch
+# SKIP 0146 was removed 2026-07-17 — applies cleanly via 3-way merge
 # SKIP 0150 — intentionally excluded (was broken placeholder)
-# 0151 — reserved for fe_buffer_setup/teardown standalone patch
+
+# ── C1a/C1b symmetry inverses (§16.3) ──
+0151-fman-pcd-kg-unbind-detach.patch
+
+# ── MURAM scaffold tracking + leakfix ──
+0152-fman-pcd-fe-scaffold-tracking.patch
+
+# ── FE-VM engage/flow API (ask.ko, replaces 0150) ──
+0153-fman-pcd-fe-engage-api.patch
+
+# ── T1 typing fix (§16.2) ──
+0154-fman-port-lookup-rx-typing.patch
 
 # ── Board-specific patches (4xxx, 1xx) ──
 101-sfp-rollball-phylink-fallback.patch

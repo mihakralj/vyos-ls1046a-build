@@ -1,6 +1,6 @@
 # FMan PCD Kernel API Reference (LS1046A)
 
-**Version 2.0.0 · 2026-07-17 · HADS 1.0.0**
+**Version 2.1.0 · 2026-07-17 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -16,7 +16,7 @@ Companion docs: `arch/fman-microcode-210-programming-reference.md` (register/MUR
 
 **[SPEC]** This reference covers the **kernel-side, process-context control-plane API** only. It programs FMan tables at flow-setup rate; the per-packet fast path never enters these calls — the FMan silicon does the lookup directly against the MURAM/DDR tables these functions install.
 
-**[SPEC]** The API is exported from three kernel objects: `fsl_dpaa_fman.ko`/built-in (the `fman_*`, `fman_pcd_*`, and demoted-static `keygen_*` families, owning all MURAM), the DPAA driver bridge (`dpaa_fman_caps.c` + `dpaa_eth.c` — the port-scoped consumer wrappers and the `dpaa_*` flavor-ops/flow-offload registration surface), and `caam` (`caam_qi_ext_consumer_*`, the SEC QI share for future IPsec). All symbols are `EXPORT_SYMBOL_GPL`. Total exported surface at this revision: **~78 functions** across 14 groups, plus the FE-VM debugfs bring-up surface (§10.2, deliberately NOT exported) and the planned `fman_port_recover()` (§13, design-only). The QMan-CEETM shaper surface (~40 `qman_ceetm_*` exports, patches `0111`/`0112`) is control-plane API for the egress-QoS capability but lives in the QMan driver — documented in [`arch/qman-ceetm.md`](qman-ceetm.md), cross-referenced in §14.4.
+**[SPEC]** The API is exported from three kernel objects: `fsl_dpaa_fman.ko`/built-in (the `fman_*`, `fman_pcd_*`, and demoted-static `keygen_*` families, owning all MURAM), the DPAA driver bridge (`dpaa_fman_caps.c` + `dpaa_eth.c` — the port-scoped consumer wrappers and the `dpaa_*` flavor-ops/flow-offload registration surface), and `caam` (`caam_qi_ext_consumer_*`, the SEC QI share for future IPsec). All symbols are `EXPORT_SYMBOL_GPL`. Total exported surface at this revision: **~84 functions** across 14 groups, plus the FE-VM debugfs bring-up surface (§10.2, deliberately NOT exported) and the planned `fman_port_recover()` (§13, design-only). The QMan-CEETM shaper surface (~40 `qman_ceetm_*` exports, patches `0111`/`0112`) is control-plane API for the egress-QoS capability but lives in the QMan driver — documented in [`arch/qman-ceetm.md`](qman-ceetm.md), cross-referenced in §14.4.
 
 **[NOTE]** This is not the NXP SDK API. The design deliberately rejected the SDK's `handle_t` opaque-pointer ABI, `fsl-ncsw` OS-shim, AMP IPC, and 16-flavor `NextEngineParams` hierarchy in favour of typed `struct fman_pcd_*` handles, `ERR_PTR` error propagation, `devm_*` teardown, `rhashtable`, and kunit. The SDK was consulted only as a silicon-behaviour oracle (MURAM byte layouts, register-write ordering).
 
@@ -129,7 +129,9 @@ struct fman_pcd_kg_scheme *fman_pcd_kg_scheme_create(struct fman_pcd *pcd,
                               const struct fman_pcd_kg_scheme_params *params);
 void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme);
 int  fman_pcd_kg_bind_port(struct fman_pcd_kg_scheme *scheme, u8 port_id);
+int  fman_pcd_kg_unbind_port(struct fman_pcd_kg_scheme *scheme);
 int  fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme, struct fman_pcd_cc_tree *cc);
+int  fman_pcd_kg_detach_cc(struct fman_pcd_kg_scheme *scheme);
 int  fman_pcd_kg_port_attach_cc(struct fman_pcd *pcd, u8 hw_port_id, fman_muram_off_t cc_group_off);
 int  fman_pcd_kg_port_detach_cc(struct fman_pcd *pcd, u8 hw_port_id);
 int  fman_pcd_kg_port_attach_policer(struct fman_pcd *pcd, u8 hw_port_id, u8 profile_id);
@@ -138,7 +140,7 @@ int  fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id, fman_muram_off
 void fman_pcd_kg_port_disarm_fe(struct fman_pcd *pcd, u8 hw_port_id, u8 saved_engine);
 /* demoted from file-static in fman_keygen.c (patch 0097/0133) — low-level scheme plumbing */
 int  keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id, bool enable);                    /* [?] */
-int  keygen_bind_port_to_schemes(struct fman_keygen *keygen, u8 hwport_id, u32 schemes, bool bind); /* [?] */
+int  keygen_bind_port_to_schemes(struct fman_keygen *keygen, u8 scheme_id, bool bind);             /* [?] */
 ```
 
 **[SPEC]** `keygen_scheme_setup` / `keygen_bind_port_to_schemes` — mainline `fman_keygen.c` internals demoted to `EXPORT_SYMBOL_GPL` so the PCD layer can flip a scheme's next-engine (RSS ↔ AC_CC ↔ PLCR) and rebind ports without duplicating the FMKG_AR indirect-write protocol (microcode reference §4.1). **Plumbing, not consumer API** — wrapper bodies call them; bridges and `ask.ko` MUST NOT. **[?]** Exact signatures inferred — verify against the header before use.
@@ -147,7 +149,11 @@ int  keygen_bind_port_to_schemes(struct fman_keygen *keygen, u8 hwport_id, u32 s
 
 **[SPEC]** `fman_pcd_kg_scheme_destroy(scheme)` — disable and free the scheme (frees its MURAM, clears the KGSE entry).
 
+**[SPEC]** `fman_pcd_kg_detach_cc(scheme)` — object-level inverse of `fman_pcd_kg_attach_cc()`. Clears KGSE_CCBS and restores `next_engine=0` (BMI direct-enqueue). NULL-safe, idempotent. Does NOT touch the port's FMBM_RCCB — use `fman_pcd_kg_port_detach_cc()` for full per-port arm/disarm. Added by patch 0151 (C1b closure).
+
 **[SPEC]** `fman_pcd_kg_bind_port(scheme, port_id)` — bind the scheme to a hardware port (writes `fmkg_pe_sp[hwport]`, reverse-bit encoded per RM 8.7.4; lowest-scheme-id-wins on multi-scheme ports).
+
+**[SPEC]** `fman_pcd_kg_unbind_port(scheme)` — exact inverse of `fman_pcd_kg_bind_port()`. Calls the mainline `keygen_bind_port_to_schemes()` with `bind=false` to clear the `fmkg_pe_sp` binding. NULL-safe, idempotent. Added by patch 0151 (C1a closure).
 
 **[SPEC]** `fman_pcd_kg_attach_cc(scheme, cc)` — flip a scheme into CC next-engine mode by RMW of `KGSE_CCBS` with the tree's group-table offset. `KGSE_MODE` stays `0x80500002` — CC walking on FMan v3 is implicit when `KGSE_CCBS != 0`. Arg 2 is `struct fman_pcd_cc_tree *cc` (**non-const** — the attach links scheme↔tree state; confirmed in patch `0097`).
 
@@ -259,7 +265,9 @@ int  fman_pcd_fe_flow_del  (struct fman *fm, u8 hw_port_id, const u8 *key, u8 ke
 int  fman_pcd_fe_context_build(void __iomem *ctx, u16 ws_offset, const struct fman_pcd_fe_context_params *p);
 ```
 
-**[SPEC]** `fman_pcd_fe_engage(fm, hw_port_id)` — arm the offload path on a port, in this mandatory order: (1) build the CONT_LOOKUP group table + miss-AD (RM 8.7.4.1 encoding — `w0=(numKeys<<24)|matchTable`, `w1=adTable`, `w2=0x40000000|((keySize-1)<<24)`, `w3=0`; miss-AD = `{w0=fqid, w1=0, w2=RESULT_CF(0), w3=0}` with the FQID **sourced from the port's kernel-polled RX/PCD range at engage time — never hardcoded** (rule T8)); (2) `ensure_params_page`; (3) graft the port's scheme to AC_CC (`next_engine=3, KGSE_CCBS=0`) and point RCCB at the group table; (4) **if and only if any entry dispatches into the FE-VM**, arm the per-port FE workspace pool (`FmPortSetFESupport` port — pool `tnums×512 B` + management index ring, publish params page `+0x54`, zero `+0x58`). Without step 4, any FE-VM frame carves its workspace at MURAM offset 0 → cumulative corruption (F-072, §16.4).
+**[SPEC]** `fman_pcd_fe_engage(fm, hw_port_id)` — arm the offload path on a port, in this mandatory order: (1) **`fman_pcd_port_ensure_params_page()`** — idempotent allocate-and-init the per-port FM_CTL params page; (2) **build the CONT_LOOKUP group table + miss-AD** (RM 8.7.4.1 encoding — `w0=(numKeys<<24)|matchTable`, `w1=adTable`, `w2=0x40000000|((keySize-1)<<24)`, `w3=0`; miss-AD = `{w0=fqid, w1=0, w2=RESULT_CF(0), w3=0}` with the FQID sourced from the port's kernel-polled RX/PCD range at engage time — never hardcoded (rule T8)); (3) **graft the port's scheme to AC_CC** (`next_engine=3, KGSE_CCBS=0`) and point RCCB at the group table via `fman_pcd_kg_port_arm_fe()`; (4) **if and only if any entry dispatches into the FE-VM, arm the per-port FE workspace pool** (`FmPortSetFESupport` port — pool `tnums×512 B` + management index ring, publish params page `+0x54`, zero `+0x58` via `fman_pcd_fe_port_set`). Without step 4, any FE-VM frame carves its workspace at MURAM offset 0 → cumulative corruption (F-072, §16.4).
+
+**[NOTE]** Patch 0153 implements this as the compose of internal debugfs-proven verbs. The old 0150 placeholder (broken, calling non-existent functions) is superseded and remains in `BOARD_STAGE_SKIP`. Scaffold MURAM is now tracked and freed on disengage (patch 0152), closing the 304 B/cycle leak.
 
 **[SPEC]** `fman_pcd_fe_disengage(fm, hw_port_id)` — the exact inverse, in the **vendor `FmPortDeleteFESupport` order (rule R10)**: clear params page `+0x54` and free the FE pool **while the params page still exists**, THEN restore the scheme/RCCB, then free the group/AD tables (the historical +36 B/cycle scaffold leak is an R4 violation). Each MURAM object is freed **exactly once by its single owner (rule R11)** — duplicated teardown verbs double-free into `gen_pool` (`BUG at lib/genalloc.c:508`, F-075).
 
@@ -323,7 +331,7 @@ int  fman_port_set_silicon_hit_release_all(struct fman *fm, bool enable);
 
 **[SPEC]** `fman_port_set_params_page(port, muram_off, page)` / `fman_port_get_params_page(port)` — set/get the per-port FM_CTL params page (MURAM offset + iomem pointer). `fman_pcd_port_ensure_params_page(pcd, rxport)` — allocate-and-init the params page for an RX port if absent (idempotent); writes the FE-buffer free-list fields (+0x54/+0x58) for the FE-VM path.
 
-**[SPEC]** `fman_port_get_liodn(port)` — the port's LIODN (logical IO device number). `fman_port_get_total_tnums(port)` — committed + extra task (tnum) count; bounds the drain loop in port quiesce/recovery. `fman_port_lookup_rx(fm, port_id)` — resolve a `struct fman_port *` for an RX BMI port id. The as-built code types the first argument `void *fm`; the mandated signature is `struct fman *fm` (rule T1 — no `void *` in a typed API), a one-line conformance fix. 
+**[SPEC]** `fman_port_get_liodn(port)` — the port's LIODN (logical IO device number). `fman_port_get_total_tnums(port)` — committed + extra task (tnum) count; bounds the drain loop in port quiesce/recovery. `fman_port_lookup_rx(fm, port_id)` — resolve a `struct fman_port *` for an RX BMI port id. The first argument is `struct fman *fm` (fixed from `void *fm` by patch 0154, T1 conformance).
 
 **[SPEC]** `fman_port_set_silicon_hit_release_mode(port, enable)` / `_all(fm, enable)` — control silicon release of internal FE buffers on HIT for one port / all ports. Relevant to internal-FE-buffer lifetime and the recovery path (§13).
 
@@ -502,11 +510,12 @@ Every function parameter or return that names a MURAM location uses `fman_muram_
 | `caam_qi_ext_consumer_register` | `caam_qi_ext_consumer_release` | ✅ (dormant — unexercised) |
 | debugfs `fe_port set` | debugfs `fe_port del` | ✅ (order-sensitive, R10) |
 | `fman_port_set_cc_base(off)` / `set_rx_bpool(a,b)` / `set_silicon_hit_release_mode(en)` | self-inverse via argument (0 / reversed / false) | ✅ (must roll back on failure) |
-| `fman_pcd_kg_bind_port` | — | ⚠️ **GAP C1a**: no explicit unbind; reversal only via `scheme_destroy`. Add `fman_pcd_kg_unbind_port()` or document `scheme_destroy` as the sole inverse. |
-| `fman_pcd_kg_attach_cc` (object-level) | — | ⚠️ **GAP C1b**: no object-level `detach_cc`; reversal via `scheme_destroy` or the port-level `detach_cc`. Add the symmetric inverse or document. |
+| `fman_pcd_kg_bind_port` | `fman_pcd_kg_unbind_port` | ✅ (0151) |
+| `fman_pcd_kg_attach_cc` (object-level) | `fman_pcd_kg_detach_cc` | ✅ (0151) |
+| | | |
 | `fman_pcd_fe_context_build` | — | ✅ by design: writes into caller-owned `__iomem` workspace whose lifetime is owned by the enclosing FE object; documented, no separate destroy. |
 
-**[NOTE]** GAP C1a/C1b are the only asymmetries in the surface. Both are *safe today* (the destroy path does reverse them) but violate C1's "explicit inverse" rule; closing them removes a class of "I unbound the port but the scheme still holds a stale CCBS" reviewer question. Track as follow-up API additions, not blockers.
+**[NOTE]** GAP C1a/C1b closed 2026-07-17 by patch 0151 (`fman_pcd_kg_unbind_port` + `fman_pcd_kg_detach_cc`). T1 (`fman_port_lookup_rx`) fixed by patch 0154 (`void *` → `struct fman *`). The broken 0150 exporter placeholder was superseded by 0153 (composing the working debugfs-proven CONT_LOOKUP pass-through sequence). Scaffold MURAM leak fixed by 0152 (tracking + free on disengage).
 
 ### 16.4 Defect register
 

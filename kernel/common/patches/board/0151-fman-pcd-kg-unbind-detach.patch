@@ -1,0 +1,118 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+index e49a801..69b28da 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+@@ -374,6 +374,41 @@ int fman_pcd_kg_bind_port(struct fman_pcd_kg_scheme *scheme, u8 port_id)
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_kg_bind_port);
+ 
++/**
++ * fman_pcd_kg_unbind_port() - unbind a scheme from its hardware port.
++ * @scheme: scheme handle from fman_pcd_kg_scheme_create()
++ *
++ * Exact inverse of fman_pcd_kg_bind_port().  Calls the mainline
++ * keygen_bind_port_to_schemes() with bind=false to clear the
++ * fmkg_pe_sp binding.  NULL-safe, idempotent — safe on an
++ * already-unbound scheme.
++ *
++ * Return: 0 on success; negative errno.
++ */
++int fman_pcd_kg_unbind_port(struct fman_pcd_kg_scheme *scheme)
++{
++	struct fman_keygen *keygen;
++	struct fman *fman;
++	struct mutex *lock;
++	int err;
++
++	if (!scheme)
++		return -EINVAL;
++
++	fman = fman_pcd_get_fman(scheme->pcd);
++	if (!fman || !fman->keygen)
++		return -ENXIO;
++	keygen = fman->keygen;
++	lock = fman_pcd_get_lock(scheme->pcd);
++
++	mutex_lock(lock);
++	err = keygen_bind_port_to_schemes(keygen, scheme->id, false);
++	mutex_unlock(lock);
++
++	return err;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_kg_unbind_port);
++
+ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
+ 			  struct fman_pcd_cc_tree *cc)
+ {
+@@ -441,6 +476,50 @@ int fman_pcd_kg_attach_cc(struct fman_pcd_kg_scheme *scheme,
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_kg_attach_cc);
+ 
++/**
++ * fman_pcd_kg_detach_cc() - clear a scheme's CC binding (object-level).
++ * @scheme: scheme handle from fman_pcd_kg_scheme_create()
++ *
++ * Object-level inverse of fman_pcd_kg_attach_cc().  Clears KGSE_CCBS
++ * and restores next_engine=0 (BMI direct-enqueue).  Idempotent —
++ * safe on an already-detached scheme.  Does NOT touch the port's
++ * FMBM_RCCB (use fman_pcd_kg_port_detach_cc() for that).
++ *
++ * Return: 0 on success; negative errno.
++ */
++int fman_pcd_kg_detach_cc(struct fman_pcd_kg_scheme *scheme)
++{
++	struct keygen_scheme *slot;
++	struct fman_keygen *keygen;
++	struct fman *fman;
++	struct mutex *lock;
++	int err;
++
++	if (!scheme)
++		return -EINVAL;
++
++	fman = fman_pcd_get_fman(scheme->pcd);
++	if (!fman || !fman->keygen)
++		return -ENXIO;
++	keygen = fman->keygen;
++	lock = fman_pcd_get_lock(scheme->pcd);
++
++	mutex_lock(lock);
++	slot = &keygen->schemes[scheme->id];
++	slot->next_engine    = 0;
++	slot->cc_base_offset = 0;
++	slot->cc_bits_sel    = 0;
++
++	err = keygen_scheme_setup(keygen, (u8)scheme->id, true);
++	mutex_unlock(lock);
++
++	if (err)
++		pr_warn("fman_pcd_kg: detach_cc scheme %u failed: %d\n",
++			 scheme->id, err);
++	return err;
++}
++EXPORT_SYMBOL_GPL(fman_pcd_kg_detach_cc);
++
+ void fman_pcd_kg_scheme_destroy(struct fman_pcd_kg_scheme *scheme)
+ {
+ 	struct fman_keygen *keygen;
+diff --git a/include/linux/fsl/fman_pcd.h b/include/linux/fsl/fman_pcd.h
+index 29c2986..3901c10 100644
+--- a/include/linux/fsl/fman_pcd.h
++++ b/include/linux/fsl/fman_pcd.h
+@@ -197,6 +197,16 @@ fman_pcd_kg_scheme_create(struct fman_pcd *pcd,
+  */
+ int fman_pcd_kg_bind_port(struct fman_pcd_kg_scheme *scheme, u8 port_id);
+ 
++/**
++ * fman_pcd_kg_unbind_port() - unbind a scheme from its hardware port.
++ * @scheme: scheme handle from fman_pcd_kg_scheme_create()
++ *
++ * Exact inverse of fman_pcd_kg_bind_port().  NULL-safe, idempotent.
++ *
++ * Return: 0 on success; negative errno.
++ */
++int fman_pcd_kg_unbind_port(struct fman_pcd_kg_scheme *scheme);
++
+ /**
+  * fman_pcd_kg_port_attach_policer() - route an RX port's existing RSS
+  *                                     scheme through a policer profile.
