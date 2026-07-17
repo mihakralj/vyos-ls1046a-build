@@ -629,6 +629,22 @@ remove(bucket_idx):
 
 All bucket and record memory is DDR. gen_pool `used` is unchanged.
 
+### 10.5 FmPortSetFESupport Confirmation and keysize=13 Resolution (2026-07-17)
+
+**FmPortSetFESupport is confirmed working on port 0x11** (eth4): params page `+0x54=0x00056500` (internalFEBufferManagementIndexAddr), FE buffer pool at MURAM `0x54400` (8192 B = 16 tnums × 512 B), management index at `0x56500` (21 B = 5+16). dmesg: `fman_pcd: FE support on port 0x11 (tnums 16, pool 0x54400/8192 B, mgmt 0x56500/21 B)`.
+
+**The keysize=13 BMI stall (qdrant F-063, 2026-07-12) was from a build WITHOUT FmPortSetFESupport.** Without it, params page `+0x54=0`, and the microcode FE_ENTER ALLOCATE performs read-modify-write bookkeeping at MURAM offset 0, carving frame workspaces at a garbage pool offset on every FE frame. This causes cumulative MURAM corruption that survives disengage and requires cold-boot to clear. With FmPortSetFESupport present, the workspace is properly allocated from the per-port pool and the 256 B DDR record easily accommodates 13-byte keys.
+
+**contextSize verification:** EXT_HASH FE word1 = `0x7fff0c00` → hashMask=`0x7fff`, contextSize-1=`0x0c` (12), hashShift=`0x00`. contextSize = 13 = EKFC key length ✓. The DDR record is 256 B (`FMAN_EHASH_FLOW_REC_SIZE`), providing ample space for the 13-byte key at offset 8. No DDR access past boundary.
+
+**Bucket index formula verification:** `bucket_index = (crc64_raw >> ((6 - hashShift) * 8)) & hashMask`. With hashShift=0: `(crc >> 48) & 0x7fff`. For the test key `0A63026A0A6302B906D6D91451` (SIP=10.99.2.106, DIP=10.99.2.185, PROTO=6, SPORT=55001, DPORT=5201): `crc64_raw = 0x145a4d6c34d37089`, `bucket = (0x145a4d6c34d37089 >> 48) & 0x7fff = 0x145a`. This matches the flow insertion bucket exactly. **Note:** `hash & 0x7fff` (low bits) is WRONG — the correct formula uses the HIGH bits after the shift.
+
+**F-083 (scaffold always) and HIT path are mutually exclusive.** F-083 makes the CONT_LOOKUP scaffold unconditional, overwriting `fe_enter_off = gro` (group table offset) regardless of the caller-provided value. RCCB points at the group table, not the FE_ENTER AD, so frames bypass the FE-VM entirely. For HIT, the scaffold must be conditional (0161 behavior): `fe_enter_off==0` → scaffold (CONT_LOOKUP pass-through), `fe_enter_off!=0` → RCCB→FE_ENTER direct (FE-VM active).
+
+**F-084 compose fix:** The 0158 compose function `__fman_pcd_fe_build_vm_chain()` used the first ENQ FE's MURAM offset as the FE_ENTER target. This is architecturally wrong: FE_ENTER dispatches to the chain head (EXT_HASH FE), not the terminal disposition (ENQ FE). Fix: single-line sed `e->muram_off` → `pcd->fe_hash_off`. The ENQ list walk becomes dead code (unused variable `e` = warning, not error with `-Werror`).
+
+**EKFC 4th arg confirmed:** `engage 11 0 2B9 1C0006` → dmesg shows `ekfc=0x001c0006 (slot->ekfc=0x001c0006)`. The strsep tokenizer (0160) correctly parses the 4th arg and propagates it through `fman_pcd_kg_port_arm_fe` → `keygen_scheme_setup` → `keygen_write_scheme`.
+
 
 ## 11. Resource Ceilings (Hard Hardware Limits)
 
