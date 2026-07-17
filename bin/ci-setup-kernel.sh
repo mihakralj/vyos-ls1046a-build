@@ -1344,6 +1344,15 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # The F-072 v3 fixup's engage anchor (scaffold comment) was not found
     # because the comment format changed across patch revisions.  Use the
     # fman_pcd_kg_port_arm_fe call line as anchor instead — it's stable.
+    #
+    # F-072c: Forward-declare fman_pcd_fe_buffer_setup before the internal
+    # function __fman_pcd_fe_arm_engage (which is defined BEFORE the wrapper
+    # where F-072 v3 injects the function body).  Without this, the call
+    # injected by F-072b sees an implicit declaration → -Werror.
+    sed -i '/^static int __fman_pcd_fe_arm_engage/i\static int fman_pcd_fe_buffer_setup(struct fman_pcd *, struct fman_port *, u8);' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    echo "### fman_pcd.c: F-072c forward-decl fman_pcd_fe_buffer_setup"
+
     sed -i 's/err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,/{ struct fman_port *rxp = fman_port_lookup_rx(pcd->fman, (u8)port_id); int _b; if (!rxp) return -ENODEV; _b = fman_pcd_fe_buffer_setup(pcd, rxp, (u8)port_id); if (_b) return _b; } err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,/' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
     echo "### fman_pcd.c: F-072b FmPortSetFESupport call injected before arm_fe"
@@ -1356,11 +1365,10 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-084 compose FE_ENTER target = EXT_HASH"
 
     # F-085: Suppress -Wunused-function for static functions whose callers
-    # may be behind conditional code paths or fixup-anchor mismatches.
+     # may be behind conditional code paths or fixup-anchor mismatches.
     sed -i 's/static int __fman_pcd_fe_build_vm_chain/static __maybe_unused int __fman_pcd_fe_build_vm_chain/' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
-    sed -i 's/^static int fman_pcd_fe_buffer_setup/static __maybe_unused int fman_pcd_fe_buffer_setup/' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    # fman_pcd_fe_buffer_setup now called via F-072b — no __maybe_unused needed
 
     # F-085b: Fix -Wunused-result from kstrtouint in fe_arm engage tokenizer.
     sed -i 's/kstrtouint(tok, 16, \&miss_fqid);/(void)kstrtouint(tok, 16, \&miss_fqid);/' \
