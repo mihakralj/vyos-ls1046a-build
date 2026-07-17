@@ -1334,11 +1334,11 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo 'aW1wb3J0IHJlCgpwYXRoID0gImRyaXZlcnMvbmV0L2V0aGVybmV0L2ZyZWVzY2FsZS9mbWFuL2ZtYW5fcGNkLmMiCndpdGggb3BlbihwYXRoKSBhcyBmOgogICAgc3JjID0gZi5yZWFkKCkKCiMgRi0wNjAgdjM6IEZpeCBNVVggY29udGV4dCB3cml0ZSB0YXJnZXQgZnJvbSBBRCswIHRvIEFEKzQgKHdvcmQgMSkKIyBGLTA1NS9GLTA1NiB3cm90ZSB0aGUgTVVYIHdyaXRlIGFjcm9zcyBUV08gbGluZXMuICBTZWFyY2ggZm9yIHRoZQojIHBhcnRpYWwgdW5pcXVlIG1hcmtlciB0aGVuIHVzZSByZWdleCB0byByZXBsYWNlIHRoZSAyLWxpbmUgYmxvY2suCiMgQVZPSUQgXHMgaW4gcmVnZXggKGJhZCBlc2NhcGUgdGhyb3VnaCB0aGUgNC1sYXllciBuZXN0aW5nIHBpcGVsaW5lKS4KCnRyaWdnZXIgPSAiKHUzMillbnEtPm11cmFtX29mZiwiCmlmIHRyaWdnZXIgaW4gc3JjOgogICAgIyBNYXRjaDogaW93cml0ZTMyYmUoKHUzMillbnEtPm11cmFtX29mZixcbjx3aGl0ZXNwYWNlPm11eCk7CiAgICAjIFJlcGxhY2Ugd2l0aCBzaW5nbGUtbGluZSB3cml0ZSB0byB3b3JkIDEgKEFEKzQpCiAgICBvbGRfcnggPSByZS5jb21waWxlKAogICAgICAgIHIiXHRcdFx0XHRpb3dyaXRlMzJiZVwoXCh1MzJcKWVucS0+bXVyYW1fb2ZmLFsgXHRdKlxuWyBcdF0qbXV4XCk7WyBcdF0qXG4iCiAgICApCiAgICByZXBsYWNlbWVudCA9ICJcdFx0XHRcdGlvd3JpdGUzMmJlKCh1MzIpZW5xLT5tdXJhbV9vZmYsICh1MzIgX19pb21lbSAqKW11eCArIDEpOyAvKiBGLTA2MDogU0RLLWNvbXBsaWFudCBNVVggY29udGV4dCBhdCBBRCs0ICovXG4iCiAgICBzcmMsIG4gPSBvbGRfcnguc3VibihyZXBsYWNlbWVudCwgc3JjLCBjb3VudD0xKQogICAgaWYgbiA+IDA6CiAgICAgICAgcHJpbnQoZiIjIyMgZm1hbl9wY2QuYzogRi0wNjAgdjM6IE1VWCB3cml0ZSBmaXhlZCB0byBBRCs0ICh7bn0gcmVwbGFjZW1lbnQpIikKICAgIGVsc2U6CiAgICAgICAgcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBGLTA2MCB2MzogcmVnZXggY29tcGlsZWQgYnV0IDAgbWF0Y2hlcyAoYWxyZWFkeSBhcHBsaWVkPykiKQplbHNlOgogICAgcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBGLTA2MCB2MzogdHJpZ2dlciBub3QgZm91bmQgKEYtMDU1L0YtMDU2IG5vdCBhcHBsaWVkPykiKQoKd2l0aCBvcGVuKHBhdGgsICJ3IikgYXMgZjoKICAgIGYud3JpdGUoc3JjKQo=' | base64 -d | python3
     echo "### fman_pcd.c: F-060 v3d: MUX context write fixed to AD+4"
 
-    # F-083: Remove 0161 guard — CONT_LOOKUP scaffold always runs.
-    # Single-line sed: if(fe_enter_off==0){ → {  (qdrant 2026-07-16)
-    sed -i 's/\tif (fe_enter_off == 0) {/\t{/' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo "### fman_pcd.c: F-083 scaffold always-active"
+    # F-083 REMOVED — scaffold guard (fe_enter_off==0) preserved.
+    # The CONT_LOOKUP scaffold is the correct path when fe_enter_off==0.
+    # When fe_enter_off!=0, RCCB→FE_ENTER direct activates the FE-VM for HIT.
+    # FmPortSetFESupport (F-072) provides proper FE workspace allocation,
+    # preventing the BMI stall that plagued earlier builds without it.
 
     # F-084: Fix 0158 compose FE_ENTER target — EXT_HASH not ENQ.
     # Single-line sed: e->muram_off → pcd->fe_hash_off
