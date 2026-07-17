@@ -646,11 +646,15 @@ The EKFC order problem is a one-time engineering cost paid at development time. 
 
 ### 11.1 FmPortSetFESupport Confirmed Working
 
-FmPortSetFESupport is confirmed working on port 0x11 (eth4): params page `+0x54=0x00056500`, FE buffer pool at MURAM `0x54400` (8192 B = 16 tnums × 512 B), management index at `0x56500` (21 B). This was the missing subsystem that caused the BMI stall in earlier builds (qdrant F-063, 2026-07-12). Without it, the microcode FE_ENTER ALLOCATE carved workspaces at garbage MURAM offset 0, causing cumulative corruption. With it present, the workspace is properly allocated from the per-port pool.
+**[SPEC]** FmPortSetFESupport is confirmed working on port 0x11 (eth4). Params page `+0x54=0x00056500`, FE buffer pool at MURAM `0x54400` (8192 B = 16 tnums × 512 B), management index at `0x56500` (21 B). This was the missing subsystem that caused the BMI stall in earlier builds (qdrant F-063, 2026-07-12). Without it, params page `+0x54=0` and the microcode FE_ENTER ALLOCATE carved workspaces at garbage MURAM offset 0, causing cumulative corruption. With it present, the workspace is properly allocated from the per-port pool.
+
+**[NOTE]** The original F-072 v3 `fman_pcd_fe_buffer_teardown` (2026-07-15) only cleared `+0x54` without freeing the pool and index MURAM allocations — a leak of `tnums×512 + (5+tnums)` bytes per engage/disengage cycle (~8.2 KB for tnums=16). SDK `FmPortDeleteFESupport` (~L14604) frees both. Fixed in F-072d (2026-07-17): teardown now reads `+0x54` → index offset → pool offset from index bytes 1-3 (masked 24-bit, byte0=0x04 cursor), then `fman_pcd_muram_free`s both after zeroing `+0x54`.
 
 ### 11.2 keysize=13 Resolution
 
-The keysize=13 BMI stall was from a build WITHOUT FmPortSetFESupport. With it present:
+**[BUG] keysize=13 BMI stall (qdrant F-063).** Symptom: keysize=13 (5-tuple EKFC=0x001C0006) caused BMI port stall on first frame. **Cause:** build without FmPortSetFESupport — params page `+0x54=0` → FE_ENTER ALLOCATE corrupting MURAM at offset 0. **Fix:** arm FmPortSetFESupport before FE-VM activity (F-072).
+
+**[SPEC]** With FmPortSetFESupport present:
 - DDR record is 256 B (`FMAN_EHASH_FLOW_REC_SIZE`), ample for 13-byte key at offset 8
 - EXT_HASH FE contextSize = 13 (word1 = `0x7fff0c00`), matching EKFC key length
 - Bucket index formula: `(crc64_raw >> 48) & 0x7fff` (HIGH bits, not low bits)
@@ -658,17 +662,17 @@ The keysize=13 BMI stall was from a build WITHOUT FmPortSetFESupport. With it pr
 
 ### 11.3 F-083 / F-084 Findings
 
-**F-083 (scaffold always) and HIT path are mutually exclusive.** F-083 makes the CONT_LOOKUP scaffold unconditional, overwriting `fe_enter_off = gro` (group table) regardless of caller-provided value. RCCB points at the group table, not the FE_ENTER AD, bypassing the FE-VM entirely. For HIT, the scaffold must be conditional (0161 behavior): `fe_enter_off==0` → scaffold (CONT_LOOKUP pass-through), `fe_enter_off!=0` → RCCB→FE_ENTER direct (FE-VM active).
+**[NOTE] F-083 (scaffold always) and HIT path are mutually exclusive.** F-083 made the CONT_LOOKUP scaffold unconditional, overwriting `fe_enter_off = gro` (group table) regardless of caller-provided value. RCCB pointed at the group table, not the FE_ENTER AD, bypassing the FE-VM entirely. For HIT, the scaffold must be conditional (0161 behavior): `fe_enter_off==0` → scaffold (CONT_LOOKUP pass-through), `fe_enter_off!=0` → RCCB→FE_ENTER direct (FE-VM active). F-083 was removed in commit 9a0954a (2026-07-17).
 
-**F-084 compose fix:** The 0158 compose function used the first ENQ FE's MURAM offset as the FE_ENTER target. This is architecturally wrong: FE_ENTER dispatches to the chain head (EXT_HASH FE), not the terminal disposition (ENQ FE). Fix: single-line sed `e->muram_off` → `pcd->fe_hash_off`. Verified on board: FE_ENTER word3 = `0x0004af00` (EXT_HASH), not `0x0004b000` (ENQ).
+**[NOTE] F-084 compose fix.** The 0158 compose function used the first ENQ FE's MURAM offset as the FE_ENTER target. This is architecturally wrong: FE_ENTER dispatches to the chain head (EXT_HASH FE), not the terminal disposition (ENQ FE). With the ENQ offset as target, frames bypassed the ehash lookup entirely. **Fix (commit 67647d0):** single-line sed `e->muram_off` → `pcd->fe_hash_off`. Board-verified: FE_ENTER word3 = `0x0004af00` (EXT_HASH), not `0x0004b000` (ENQ).
 
 ### 11.4 EKFC 4th Arg Confirmed
 
-`engage 11 0 2B9 1C0006` → dmesg shows `ekfc=0x001c0006 (slot->ekfc=0x001c0006)`. The strsep tokenizer (0160) correctly parses the 4th arg and propagates it through `fman_pcd_kg_port_arm_fe` → `keygen_scheme_setup` → `keygen_write_scheme`.
+**[SPEC]** `engage 11 0 2B9 1C0006` → dmesg shows `ekfc=0x001c0006 (slot->ekfc=0x001c0006)`. The strsep tokenizer (0160) correctly parses the 4th arg and propagates it through `fman_pcd_kg_port_arm_fe` → `keygen_scheme_setup` → `keygen_write_scheme`.
 
 ### 11.5 CONT_LOOKUP Pass-Through Validated
 
-The shipping pass-through path (RCCB → CONT_LOOKUP → miss-AD → kernel FQ) is validated:
+**[SPEC]** The shipping pass-through path (RCCB → CONT_LOOKUP → miss-AD → kernel FQ) is validated:
 - Throughput: 6.87 Gbps (93% of 7.37 Gbps M2 gate, within AC_CC overhead ~3.6%)
 - Ping: 0% loss on both management and dataplane
 - MURAM: used=0 after disengage, high-water=304 B (256B group table + 16B match table + 32B AD table)
@@ -677,8 +681,9 @@ The shipping pass-through path (RCCB → CONT_LOOKUP → miss-AD → kernel FQ) 
 
 ### 11.6 Next Steps for HIT Gate
 
-1. **Build without F-083** (conditional scaffold) — enables FE-VM when `fe_enter_off != 0`
-2. **Engage with FE_ENTER offset + EKFC** — `engage 11 <fe_enter_off> 2B9 1C0006`
-3. **Insert flow key** — 13-byte key in MSB-first order (SIP→DIP→PROTO→SPORT→DPORT)
-4. **Send matching TCP traffic** — verify HIT (flow stats increment, frames dispatched to ENQ)
-5. **Verify hash_probe** — `fe_port set` + `fe_hash_probe` should show `hw_hash` matching `sw_crc`
+**[SPEC]** Required steps to reach the HIT gate:
+1. Build without F-083 (conditional scaffold) — enables FE-VM when `fe_enter_off != 0`
+2. Engage with FE_ENTER offset + EKFC — `engage 11 <fe_enter_off> 2B9 1C0006`
+3. Insert flow key — 13-byte key in MSB-first order (SIP→DIP→PROTO→SPORT→DPORT)
+4. Send matching TCP traffic — verify HIT (flow stats increment, frames dispatched to ENQ)
+5. Verify hash_probe — `fe_port set` + `fe_hash_probe` should show `hw_hash` matching `sw_crc`
