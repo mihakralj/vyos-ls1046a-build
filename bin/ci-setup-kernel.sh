@@ -1340,6 +1340,14 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # FmPortSetFESupport (F-072) provides proper FE workspace allocation,
     # preventing the BMI stall that plagued earlier builds without it.
 
+    # F-072b: Inject FmPortSetFESupport call BEFORE fman_pcd_kg_port_arm_fe.
+    # The F-072 v3 fixup's engage anchor (scaffold comment) was not found
+    # because the comment format changed across patch revisions.  Use the
+    # fman_pcd_kg_port_arm_fe call line as anchor instead — it's stable.
+    sed -i 's/err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,/{ struct fman_port *rxp = fman_port_lookup_rx(pcd->fman, (u8)port_id); int _b; if (!rxp) return -ENODEV; _b = fman_pcd_fe_buffer_setup(pcd, rxp, (u8)port_id); if (_b) return _b; } err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,/' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    echo "### fman_pcd.c: F-072b FmPortSetFESupport call injected before arm_fe"
+
     # F-084: Fix 0158 compose FE_ENTER target — EXT_HASH not ENQ.
     # Single-line sed: e->muram_off → pcd->fe_hash_off
     # The ENQ list walk becomes dead code (unused var 'e' = warning, not error).
