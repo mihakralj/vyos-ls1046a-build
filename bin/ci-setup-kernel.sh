@@ -1353,7 +1353,7 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
         drivers/net/ethernet/freescale/fman/fman_pcd.c
     echo "### fman_pcd.c: F-072c forward-decl fman_pcd_fe_buffer_setup"
 
-    sed -i 's/err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,/{ struct fman_port *rxp = fman_port_lookup_rx(pcd->fman, (u8)port_id); int _b; if (!rxp) return -ENODEV; _b = fman_pcd_fe_buffer_setup(pcd, rxp, (u8)port_id); if (_b) return _b; } err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,/' \
+    sed -i 's|err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,|{ struct fman_port *rxp = fman_port_lookup_rx(pcd->fman, (u8)port_id); int _b; if (!rxp) return -ENODEV; _b = fman_pcd_fe_buffer_setup(pcd, rxp, (u8)port_id); if (_b) return _b; } err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,|' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
     echo "### fman_pcd.c: F-072b FmPortSetFESupport call injected before arm_fe"
 
