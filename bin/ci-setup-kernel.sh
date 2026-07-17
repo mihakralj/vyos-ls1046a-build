@@ -1548,7 +1548,6 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 /tmp/fix-teardown-leak.py 2>/dev/null || true
     rm -f /tmp/fix-teardown-leak.py
 fi
-fi
 
 # === end ls1046a-build patch-loop replacement ===
 """
