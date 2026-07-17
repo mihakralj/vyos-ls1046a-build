@@ -1,0 +1,124 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+index 75e279b..a6c559c 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
+@@ -461,6 +461,7 @@ static const struct file_operations fman_pcd_fe_pool_fops = {
+ };
+ 
+ /* FM_CTL ctrl-params page FE fields (SDK t_FmPcdCtrlParamsPage). */
++#define FMAN_PP_RX_DEFAULT_FQID_OFF	0x0C
+ #define FMAN_PP_FE_MGMT_IDX_OFF	0x54
+ #define FMAN_PP_FE_DEPL_CNT_OFF	0x58
+ /* BMI FIFO unit; FE internal-buffer pool size unit and alignment. */
+@@ -2392,6 +2393,102 @@ static const struct file_operations fman_pcd_fe_arm_fops = {
+ 	.release	= single_release,
+ };
+ 
++
++/*
++ * Resolve the port's default RX frame-queue ID from its FM_CTL params
++ * page (+0x0C).  Falls back to 0x200 if the page is not set up.
++ * Rule T8: FQID from authoritative source, never hardcoded.
++ */
++static unsigned int fman_pcd_resolve_miss_fqid(struct fman_pcd *pcd,
++					       u8 hw_port_id)
++{
++	struct fman *fman = fman_pcd_get_fman(pcd);
++	struct fman_port *port;
++	u32 params_off;
++	struct muram_info *muram;
++	void __iomem *page;
++
++	if (!fman)
++		return 0x200;
++
++	port = fman_port_lookup_rx(fman, hw_port_id);
++	if (!port)
++		return 0x200;
++
++	params_off = fman_port_get_params_page(port);
++	if (!params_off)
++		return 0x200;
++
++	muram = fman_get_muram(fman);
++	if (!muram)
++		return 0x200;
++
++	page = fman_muram_offset_to_vbase(muram, params_off);
++	if (!page)
++		return 0x200;
++
++	return ioread32be((u32 __iomem *)((u8 __iomem *)page +
++					  FMAN_PP_RX_DEFAULT_FQID_OFF));
++}
++
++
++/*
++ * Build the full FE-VM descriptor chain for hardware flow dispatch.
++ * Composes the debugfs-proven verbs in bring-up order.  Non-fatal:
++ * returns 0 or -errno; caller decides whether to roll back.
++ */
++static int __fman_pcd_fe_build_vm_chain(struct fman_pcd *pcd)
++{
++	int err;
++
++	/* Defaults: 5-tuple IPv4, CRC-64, 13-byte key, 32K buckets */
++	const u32 ehash_mask    = 0x7FFF;
++	const u8  ehash_key_sz  = 13;
++	const u8  ehash_shift   = 0;
++	const u32 tx_fqid       = 0x200;  /* TODO: dedicated offload TX FQ */
++
++	err = fman_pcd_fe_pool_get(pcd);
++	if (err)
++		return err;
++
++	err = fman_pcd_fe_singletons_build(pcd);
++	if (err)
++		return err;
++
++	err = fman_pcd_ehash_table_set(pcd, ehash_mask,
++				       ehash_key_sz, ehash_shift);
++	if (err)
++		return err;
++
++	err = fman_pcd_fe_hash_build(pcd);
++	if (err)
++		return err;
++
++	err = fman_pcd_fe_enq_build(pcd, tx_fqid, 0);
++	if (err)
++		return err;
++
++	/*
++	 * FE_ENTER root AD links the classifier to the FE chain.
++	 * Use the first ENQ FE's MURAM offset as the chain head.
++	 * TODO: store enq_off for future flow_add() use.
++	 */
++	{
++		struct fman_pcd_fe_obj *e;
++
++		if (list_empty(&pcd->fe_enq))
++			return -ENOENT;
++
++		e = list_first_entry(&pcd->fe_enq,
++				     struct fman_pcd_fe_obj, node);
++		err = fman_pcd_fe_enter_build(pcd, e->muram_off);
++		if (err)
++			return err;
++	}
++
++	return 0;
++}
++
+ /* ---- FE-VM engage/flow API for ask.ko (0153) ---- */
+ 
+ int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id)
+@@ -2412,7 +2509,7 @@ int fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id)
+ 	if (!rxport)
+ 		return -ENODEV;
+ 
+-	miss_fqid = (hw_port_id == 0x10) ? 0x200 : 0x2B9;
++	miss_fqid = fman_pcd_resolve_miss_fqid(pcd, hw_port_id);
+ 
+ 	err = fman_pcd_port_ensure_params_page(pcd, rxport);
+ 	if (err)

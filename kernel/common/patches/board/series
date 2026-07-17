@@ -152,3 +152,4 @@
 0155-fman-pcd-fe-arm-allow-zero-offset.patch
 0156-fman-pcd-fe-arm-disengage-port-del.patch
 0157-fman-pcd-fe-arm-typed-impl.patch
+0158-fman-pcd-fqid-resolution-compose.patch
