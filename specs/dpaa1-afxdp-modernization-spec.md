@@ -4,7 +4,7 @@
 **Kernel base:** Linux 6.18.x mainline (VyOS rolling release)
 **Silicon:** NXP LS1046A — Cortex-A72 ×4 (2 clusters of 2 over CCI-400), FMan v3 Rev>1, QMan, BMan, MURAM (384 KiB), PAMU, SEC 5.4 (CAAM), CEETM, SerDes/XFI PCS, CoreNet
 **FMan microcode:** package `fsl_fman_ucode_ls1046a_r1.0_210.x.bin` (NXP LSDK; U-Boot loads from SPI `mtd3` "fman-ucode", flash offset 0x400000 — NOT mtd4, which is "recovery-dtb", an extended-args FDT; see the §5.4 archaeology note)
-**Document version:** v5.22, 2026-06-14. M3-3e CEETM close-out: DEFECT A (additive effective rate) FIXED + HW-validated; DEFECT B (special-default-channel blackhole) CLOSED as a documented LS1046A 8-channel CEETM dequeue-scheduler silicon limitation — product-impact NONE (VyOS `traffic-policy shaper` never emits raw `htb default 0`, so the special default channel is never reached; unclassified egress routes to a real default leaf at 0% loss). Ships Option-B (`580e637`); the LFQMT diagnostic (`db99f92`) is reverted; the `0111` CEETM size `#define`s are narrowed to the true 8-channel / 1024-LFQID silicon limits. Prior revision history (v5.0–v5.21) archived in Qdrant `topic=dpaa1-afxdp-spec-milestone-archive`.
+**Document version:** v5.23, 2026-07-17. Adds §5.9 `fman_port_recover()` (M3-3f, planned/design-only) — a best-effort, port-scoped software de-wedge for the "port deaf after disengage / FMan wedged" failure class (leaked internal FE buffers, `internalFEBufferDepletionCounter` +0x58), tiered Tier-0 clean re-teardown → Tier-1 per-port BMI quiesce + internal-free-list rebuild, with an explicit `-EAGAIN`/cold-boot fallback (a warm reboot provably does NOT clear the deepest BMI/MURAM corruption). NOT a claimed POR-equivalent; Tier-2 FMan-global FPM soft reset is serial-only/all-ports/flagged and out of the port-scoped entry point. Prior line: v5.22, 2026-06-14. M3-3e CEETM close-out: DEFECT A (additive effective rate) FIXED + HW-validated; DEFECT B (special-default-channel blackhole) CLOSED as a documented LS1046A 8-channel CEETM dequeue-scheduler silicon limitation — product-impact NONE (VyOS `traffic-policy shaper` never emits raw `htb default 0`, so the special default channel is never reached; unclassified egress routes to a real default leaf at 0% loss). Ships Option-B (`580e637`); the LFQMT diagnostic (`db99f92`) is reverted; the `0111` CEETM size `#define`s are narrowed to the true 8-channel / 1024-LFQID silicon limits. Prior revision history (v5.0–v5.21) archived in Qdrant `topic=dpaa1-afxdp-spec-milestone-archive`.
 
 ---
 
@@ -45,6 +45,7 @@ Full per-row validation detail (board counter readings, ftrace evidence, iperf3 
 | **M3-3d**       | Policer — per-flow HW ingress rate-limit | 5.6 | **dut-validated (3a + 3b-non-revert)** | `0091`/`0097`/`0100`/`0104` + vyos-1x-025 — BUG 3a (FMPL `GCR.EN\|STEN` clear at boot) fixed `1a48948`; flood-crash half (3b) + throughput-cap number open. §5.6 |
 | **M3-3e**       | CEETM — HW hierarchical egress shaping as tc qdisc | 5.7 | **shipped; A fixed, B closed (silicon)** | `0111`/`0112` (`580e637`) — modern HTB-offload rewrite; DEFECT B = documented LS1046A 8-ch limitation, product-impact NONE. §5.7 |
 | **M3-3 step 7** | True ZC RX (FMan DMAs into XSK-pool BMan chunks) | 6.1 | **dut-validated (productive ZC)** | `0093`-`0096`/`0102`/`0102b`/`0103a`/`0103b`/`0103g`/`0110`/`0114` — oracle `xsk_zc_rx_redirect` fired, BPID flip proven in silicon, NAPI-only dispatch hardened. GAP 2 wire-rate number needs §8 harness. §6.1.18-19 |
+| **M3-3f**       | FMan port recover — software de-wedge without cold boot | 5.9 | **planned (design-only)** | `fman_port_recover(fm, port_id)`: Tier-0 clean re-teardown → Tier-1 per-port BMI quiesce + internal-FE-buffer free-list rebuild + depletion-counter zero; `-EAGAIN`/cold-boot fallback (warm reboot provably does NOT clear deepest BMI/MURAM corruption). Composes existing exports; no new low-level MURAM writer. §5.9 |
 
 **What remains for a complete DPAA1 driver.** The shared kernel substrate (M0–M3-3 step 6) is dut-validated and shipping; the four HW-offload milestones are at varying completeness. The remaining work to reach a *feature-complete* DPAA1 driver, in dependency order:
 
@@ -548,6 +549,59 @@ Per-qband or per-flow ingress rate-limit using srTCM/trTCM. Yellow/red drop in F
 **Patches:** `0079` (ethtool `xsk_*` counter suite — dut-validated) + `0113` (debugfs error-window taps — landed 2026-06-11, awaiting board validation). Per §4.9, the taps live under the FMan-common PCD debugfs root (NOT per-iface — these are per-FMan common blocks): `/sys/kernel/debug/fman_pcd/<N>/dcsr/{fpm,bmi,qmi,parser,kg,pol}_err`. Pure read-only `ioread32be` sweeps — no W1C register is acknowledged, so the taps never disturb ISR paths. Reads rate-limited ≥ 1 ms. `fpm_err` additionally renders the 50 per-hwport FPM status words with `[STALLED]` decode — the first-stop forensic view for the M3-3b CC dispatch wedge.
 
 **Consumers:** all three flavors equally.
+
+### 5.9 FMan port recovery — `fman_port_recover()` (M3-3f)
+
+**Patches:** none yet — **design-only, this spec entry**. **Status: planned.** Motivated by the recurring "port goes deaf after disengage / FMan wedged → cold reboot required" failure class (F-069 post-mortem 2026-07-15; F6 engage/disengage bisect 2026-07-09; both archived in Qdrant `topic=f069-postmortem-exit-deallocate-leak-port-deafness` and `tags=F6,bisect`). The goal is a **best-effort, port-scoped software de-wedge that often saves a cold boot** — explicitly NOT a claimed software-equivalent of power-on-reset (POR).
+
+**The failure this recovers.** The FE-VM/BMI RX path draws 256-byte internal buffers from a **per-port free-list in MURAM**, accounted by the FM_CTL params-page fields `internalFEBufferManagementIndexAddr` (+0x54) and `internalFEBufferDepletionCounter` (+0x58) (see §6.1 / `fman-microcode-210-programming-reference.md` §6). A MISS terminal built without DEALLOCATE (or any teardown that skips zeroing +0x58) **leaks one internal buffer per affected frame**; over an engaged window the free-list drains, RX starves, and the BMI port goes silent ("deaf"). Plain `fman_pcd_offload_disengage()` frees the MURAM *tables* but does **not replenish the internal free-list** — hence the historical cold-boot requirement. The F6 bisect proved that on a *clean* build with correct teardown the port is fully reversible (4 cycles, 0% loss, MURAM `used=0`), so most historical hangs were **self-inflicted corruption from buggy builds**, not intrinsic un-recoverable silicon state. `fman_port_recover()` targets the *residual* wedged state after correct teardown has failed to clear it.
+
+**Tiered algorithm (escalate only as needed; each tier is measurable).**
+- **Tier 0 — clean re-teardown.** Re-run `fman_pcd_offload_disengage(fm, port_id)` ensuring the MISS terminal carries DEALLOCATE and +0x58 is zeroed. If the port recovers (see success test), return `0`. This tier owns most real recoveries and must run first — do not "reset" around a teardown bug.
+- **Tier 1 — per-port BMI quiesce + internal-free-list rebuild (the surgical path; port-scoped, does NOT touch other ports).**
+  1. Disable the RX BMI port (`FMBM_RCFG` enable bit) and poll in-flight tnums to drain (bounded, ≤ `fman_port_get_total_tnums(port)` iterations).
+  2. Reset next-engine to plain RSS: `FMBM_RFPNE = 0x00480000` (or `0x00500002`) and clear `FMBM_RCCB` via `fman_port_set_cc_base(port, 0)`.
+  3. Force-release the leaked internal FE buffers via `fman_port_set_silicon_hit_release_all(fm, true)` / `fman_port_set_silicon_hit_release_mode(port, …)`, then rebuild the per-port internal free-list and **zero `internalFEBufferDepletionCounter` (+0x58)** through `fman_pcd_port_ensure_params_page()`.
+  4. Re-enable the port.
+- **Tier 2 — FMan-global FPM soft reset + re-probe (LAST RESORT, all-ports, serial-console-only).** Write `FPM_RSTC_FM_RESET (0x80000000)` to the FPM reset-command register, poll, then re-run the probe sequence: `clear_iram` → reload FM_CTL microcode (as patch `0117 load_fman_ctrl_code()` already does) → re-init MURAM → re-init all BMI ports → re-attach every DPAA netdev's QMan FQs. **Gated behind an explicit `all_ports`/`last_resort` caller flag; NOT reachable through the port-scoped `fman_port_recover()` entry point in v1.**
+
+**Building blocks (all already exported — §Layer-2 API):** `fman_port_lookup_rx()`, `fman_port_set_cc_base()`, `fman_port_set_silicon_hit_release_mode()`, `fman_port_set_silicon_hit_release_all()`, `fman_port_get_total_tnums()`, `fman_pcd_port_ensure_params_page()`, `fman_pcd_offload_disengage()`. Tier 1 is a composition of these; no new low-level MURAM writer is required beyond the BMI enable/quiesce helper.
+
+```c
+/*
+ * fman_port_recover() - best-effort software de-wedge of a stalled RX port.
+ * @fm:       FMan instance.
+ * @port_id:  BMI hardware port id (eth3 = 0x10, eth4 = 0x11; RJ45 0x08-0x0d).
+ *
+ * Escalates Tier 0 (clean re-teardown) -> Tier 1 (per-port BMI quiesce +
+ * internal-FE-buffer free-list rebuild + depletion-counter zero). Verifies
+ * recovery by readback before returning.
+ *
+ * Return:
+ *   0        recovered and verified (depletion counter cleared, RX counters moving)
+ *   -EAGAIN  software recovery insufficient for THIS corruption class -> cold boot
+ *            (POR) required; caller/operator advised, port left safely disabled
+ *   -EBUSY   in-flight tnums did not drain within bound
+ *   -ENODEV / -EINVAL  bad port / caps
+ *
+ * MUST NOT be invoked on the management port (eth0) of a live session.
+ * The all-ports Tier-2 FPM reset is a separate, flagged, serial-only entry.
+ */
+int fman_port_recover(struct fman *fm, u8 port_id);
+```
+
+**Return contract & the hard caveat (do not over-promise).** The standing project rule "**a warm reboot does not clear BMI/MURAM state**" is direct evidence that re-running `fman_init()` — which includes the FPM path — is **insufficient** for the deepest corruption; if the FPM soft reset cleared the internal free-list and BMI FIFO pointers, a warm reboot would already fix these hangs, and it does not. Two candidate reasons, **both UNVERIFIED and to be characterized on silicon**: (a) on LS1046A the FMan soft reset is entangled with **erratum A007273** (sequencing), so a naive `FM_RSTC` write may be a partial/no-op; (b) the FPM logic reset resets *processing engines*, not necessarily **MURAM contents or BMI FIFO occupancy** — precisely the leaked state. Therefore `fman_port_recover()` MUST treat success as **measured, not assumed**, and return `-EAGAIN` (advise cold boot, leave the port safely disabled) when the depletion counter does not clear — never silently claim recovery.
+
+**Blast-radius & coexistence rules.** (1) Port-scoped only — Tier 0/1 touch exactly `port_id`; never eth0 mid-session. (2) Tier 2 is an **RC#31-class hazard**: FMan holds no authority over QMan/BMan, which keep FQ/buffer state independently, so an FMan-global reset desyncs them (documented `ecir.fqid=0x0` / QMan ErrInt storm) — a safe Tier 2 MUST also drain/reinit the affected QMan FQs and BMan pools and can only run from serial console with a power-cycle standing by. (3) Mutually exclusive with an active engage on the same port — the caller quiesces the offload consumer (AF_XDP socket / ASK flow table) first.
+
+**Success test (readback-driven, the only trustworthy signal).** After a tier, recovery is confirmed iff: `internalFEBufferDepletionCounter` (+0x58) reads back 0 **and** the port's BMI RX frame counter advances under a few probe packets **and** the `0113` DCSR `fpm_err` tap no longer decodes `[STALLED]` for that hwport. Absent all three, escalate or return `-EAGAIN`.
+
+**Acceptance gate M3-3f.**
+1. From a **cold boot**, reproduce a deterministic deaf-port state on eth3 with **one variable** (e.g. force EXIT-without-DEALLOCATE under a *few* MISS packets — never a flood, never eth0).
+2. `fman_port_recover(fm, 0x10)` returns `0`; success test passes; forwarding restored on eth3.
+3. **Cold-boot between every trial** (warm reboot inherits corruption → false negatives).
+4. If Tier 1 is proven insufficient for a given corruption class, `fman_port_recover()` returns `-EAGAIN` (not a false `0`), and only then is Tier 2 characterized on serial console.
+5. Per the AGENTS.md three-source rule, the `FM_RSTC` sequence and A007273 handling are cross-checked against the NXP SDK `FM_Reset()`, Qdrant silicon docs, and the live `.106` ASK reference **before any register is written**.
 
 ---
 
