@@ -140,9 +140,9 @@ if [ ! -r "$_series" ]; then
     exit 1
 fi
 while IFS= read -r _p; do
-    # Skip empty lines and comments
-    [ -z "$_p" ] && continue
-    [[ "$_p" == \#* ]] && continue
+    case "$_p" in
+        ""|\#*) continue ;;
+    esac
     _src="$BOARD_PATCH_DIR/$_p"
     if [ -f "$_src" ]; then
         cp "$_src" "$KERNEL_PATCHES/"
