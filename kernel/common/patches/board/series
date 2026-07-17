@@ -147,3 +147,6 @@
 4006-dpaa-xdp-rxq-queue-index.patch
 4007-xhci-ls1046a-dwc3-quirks.patch
 4009-sfp-oem-rollball-quirk.patch
+
+# ── F-079-R5: allow fe_enter_off==0 for scaffold-only CONT_LOOKUP ──
+0155-fman-pcd-fe-arm-allow-zero-offset.patch
