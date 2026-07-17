@@ -1540,66 +1540,48 @@ fi
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo 'aW1wb3J0IHN5cwoKcGF0aCA9ICJkcml2ZXJzL25ldC9ldGhlcm5ldC9mcmVlc2NhbGUvZm1hbi9mbWFuX3BjZC5jIgp0cnk6CiAgICB3aXRoIG9wZW4ocGF0aCkgYXMgZjogc3JjID0gZi5yZWFkKCkKZXhjZXB0IEZpbGVOb3RGb3VuZEVycm9yOgogICAgcHJpbnQoIiMjIyBGLTA3MiB2MyBmaWxlIG5vdCBmb3VuZCIpCiAgICBzeXMuZXhpdCgwKQoKY2hhbmdlcyA9IDAKCmFuY2hvciA9ICJzdGF0aWMgaW50IGZtYW5fcGNkX2ZlX2FybV9lbmdhZ2Uoc3RydWN0IGZtYW5fcGNkICpwY2QsIGNvbnN0IGNoYXIgKmFyZ3MpIgppZiBhbmNob3Igbm90IGluIHNyYzoKICAgIHByaW50KCIjIyMgRi0wNzIgdjMgZmVfYXJtX2VuZ2FnZSBhbmNob3Igbm90IGZvdW5kIikKICAgIHN5cy5leGl0KDApCgpzZXR1cF9mdW5jID0gKAogICAgIi8qIEYtMDcyIHYzOiBQb3J0IEZtUG9ydFNldEZFU3VwcG9ydC4gSW50ZXJuYWwgRkUgYnVmZmVyIHBvb2wgKyBtZ210IGluZGV4IGluIE1VUkFNLlxuIgogICAgIiAqIFNESyA5OTktcGF0Y2ggfkwxNDU0NS4gdG51bXMqNTEyQiBwb29sICgyNTYtYWxpZ24gYXV0byB2aWEgZ2VuX3Bvb2wgZ3JhbnVsZSksXG4iCiAgICAiICogKDUrdG51bXMpIGJ5dGUgaW5kZXguIFBhcmFtcyBwYWdlICsweDU0PWluZGV4IE1VUkFNIG9mZiwgKzB4NTg9MC5cbiIKICAgICIgKiBwb3J0X2lkIGlzIHU4IGh3IHBvcnQgbnVtYmVyIChub3QgcG9ydC0+cG9ydF9pZCDigJQgc3RydWN0IGZtYW5fcG9ydCBpcyBvcGFxdWUpLlxuIgogICAgIiAqL1xuIgogICAgInN0YXRpYyBpbnQgZm1hbl9wY2RfZmVfYnVmZmVyX3NldHVwKHN0cnVjdCBmbWFuX3BjZCAqcGNkLFxuIgogICAgIiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHN0cnVjdCBmbWFuX3BvcnQgKnBvcnQsIHU4IHBvcnRfaWQpXG4iCiAgICAie1xuIgogICAgIiAgICBzdHJ1Y3QgbXVyYW1faW5mbyAqbXVyYW0gPSBmbWFuX2dldF9tdXJhbShwY2QtPmZtYW4pO1xuIgogICAgIiAgICB1OCB0bnVtcztcbiIKICAgICIgICAgdW5zaWduZWQgbG9uZyBwb29sX29mZiwgaWR4X29mZjtcbiIKICAgICIgICAgdTMyIHBwX29mZjtcbiIKICAgICIgICAgdm9pZCBfX2lvbWVtICpwcCwgKmlkeDtcbiIKICAgICIgICAgaW50IGk7XG4iCiAgICAiXG4iCiAgICAiICAgIHN0YXRpYyBjb25zdCB1bnNpZ25lZCBpbnQgQk1JX0ZJRk9fVU5JVFMgPSAweDEwMDtcbiIKICAgICJcbiIKICAgICIgICAgaWYgKCFtdXJhbSB8fCAhcG9ydClcbiIKICAgICIgICAgICAgIHJldHVybiAtRUlOVkFMO1xuIgogICAgIlxuIgogICAgIiAgICB0bnVtcyA9IGZtYW5fcG9ydF9nZXRfdG90YWxfdG51bXMocG9ydCk7XG4iCiAgICAiICAgIGlmICghdG51bXMpXG4iCiAgICAiICAgICAgICByZXR1cm4gLUVJTlZBTDtcbiIKICAgICJcbiIKICAgICIgICAgcHBfb2ZmID0gZm1hbl9wb3J0X2dldF9wYXJhbXNfcGFnZShwb3J0KTtcbiIKICAgICIgICAgaWYgKElTX0VSUl9WQUxVRShwcF9vZmYpKVxuIgogICAgIiAgICAgICAgcmV0dXJuIChpbnQpcHBfb2ZmO1xuIgogICAgIlxuIgogICAgIiAgICAvKiBnZW5fcG9vbCBNVVJBTSBncmFudWxlIGlzIDI1NiAoTVVSQU1fT1JERVI9OCksIHNvIGFsbG9jIGlzIDI1Ni1hbGlnbmVkICovXG4iCiAgICAiICAgIHBvb2xfb2ZmID0gZm1hbl9wY2RfbXVyYW1fYWxsb2MocGNkLCB0bnVtcyAqIEJNSV9GSUZPX1VOSVRTICogMik7XG4iCiAgICAiICAgIGlmIChJU19FUlJfVkFMVUUocG9vbF9vZmYpKVxuIgogICAgIiAgICAgICAgcmV0dXJuIChpbnQpcG9vbF9vZmY7XG4iCiAgICAiXG4iCiAgICAiICAgIG1lbXNldF9pbyhmbWFuX211cmFtX29mZnNldF90b192YmFzZShtdXJhbSwgcG9vbF9vZmYpLCAwLFxuIgogICAgIiAgICAgICAgICAgICAgdG51bXMgKiBCTUlfRklGT19VTklUUyAqIDIpO1xuIgogICAgIlxuIgogICAgIiAgICBpZHhfb2ZmID0gZm1hbl9wY2RfbXVyYW1fYWxsb2MocGNkLCA1ICsgdG51bXMpO1xuIgogICAgIiAgICBpZiAoSVNfRVJSX1ZBTFVFKGlkeF9vZmYpKSB7XG4iCiAgICAiICAgICAgICBmbWFuX3BjZF9tdXJhbV9mcmVlKHBjZCwgcG9vbF9vZmYsIHRudW1zICogQk1JX0ZJRk9fVU5JVFMgKiAyKTtcbiIKICAgICIgICAgICAgIHJldHVybiAoaW50KWlkeF9vZmY7XG4iCiAgICAiICAgIH1cbiIKICAgICJcbiIKICAgICIgICAgaWR4ID0gZm1hbl9tdXJhbV9vZmZzZXRfdG9fdmJhc2UobXVyYW0sIGlkeF9vZmYpO1xuIgogICAgIiAgICBpb3dyaXRlMzJiZShwb29sX29mZiwgaWR4KTtcbiIKICAgICIgICAgaW93cml0ZTgoNCwgaWR4KTtcbiIKICAgICIgICAgZm9yIChpID0gMDsgaSA8IHRudW1zOyBpKyspXG4iCiAgICAiICAgICAgICBpb3dyaXRlOChpLCAodm9pZCBfX2lvbWVtICopKCh1OCBfX2lvbWVtICopaWR4ICsgNCArIGkpKTtcbiIKICAgICIgICAgaW93cml0ZTgoMHhGRiwgKHZvaWQgX19pb21lbSAqKSgodTggX19pb21lbSAqKWlkeCArIDQgKyB0bnVtcykpO1xuIgogICAgIlxuIgogICAgIiAgICBwcCA9IGZtYW5fbXVyYW1fb2Zmc2V0X3RvX3ZiYXNlKG11cmFtLCBwcF9vZmYpO1xuIgogICAgIiAgICBpb3dyaXRlMzJiZSgodTMyKWlkeF9vZmYsICh2b2lkIF9faW9tZW0gKikoKHU4IF9faW9tZW0gKilwcCArIDB4NTQpKTtcbiIKICAgICIgICAgaW93cml0ZTMyYmUoMCwgICAgICAgICAgKHZvaWQgX19pb21lbSAqKSgodTggX19pb21lbSAqKXBwICsgMHg1OCkpO1xuIgogICAgIlxuIgogICAgIiAgICBwcl9pbmZvKFwiZm1hbl9wY2Q6IEYtMDcyIHBvcnQgMHglMDJ4IEZFIGJ1ZmZlciBwb29sPSUjbHggaWR4PSUjbHggdG51bXM9JXVcXG5cIixcbiIKICAgICIgICAgICAgICAgICBwb3J0X2lkLCBwb29sX29mZiwgaWR4X29mZiwgdG51bXMpO1xuIgogICAgIiAgICByZXR1cm4gMDtcbiIKICAgICJ9XG4iCiAgICAiXG4iCiAgICAic3RhdGljIHZvaWQgZm1hbl9wY2RfZmVfYnVmZmVyX3RlYXJkb3duKHN0cnVjdCBmbWFuX3BjZCAqcGNkLFxuIgogICAgIiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHN0cnVjdCBmbWFuX3BvcnQgKnBvcnQpXG4iCiAgICAie1xuIgogICAgIiAgICBzdHJ1Y3QgbXVyYW1faW5mbyAqbXVyYW0gPSBmbWFuX2dldF9tdXJhbShwY2QtPmZtYW4pO1xuIgogICAgIiAgICB1MzIgcHBfb2ZmO1xuIgogICAgIiAgICB2b2lkIF9faW9tZW0gKnBwO1xuIgogICAgIlxuIgogICAgIiAgICBpZiAoIW11cmFtIHx8ICFwb3J0KVxuIgogICAgIiAgICAgICAgcmV0dXJuO1xuIgogICAgIiAgICBwcF9vZmYgPSBmbWFuX3BvcnRfZ2V0X3BhcmFtc19wYWdlKHBvcnQpO1xuIgogICAgIiAgICBpZiAoSVNfRVJSX1ZBTFVFKHBwX29mZikpXG4iCiAgICAiICAgICAgICByZXR1cm47XG4iCiAgICAiICAgIHBwID0gZm1hbl9tdXJhbV9vZmZzZXRfdG9fdmJhc2UobXVyYW0sIHBwX29mZik7XG4iCiAgICAiICAgIGlvd3JpdGUzMmJlKDAsICh2b2lkIF9faW9tZW0gKikoKHU4IF9faW9tZW0gKilwcCArIDB4NTQpKTtcbiIKICAgICJ9XG4iCiAgICAiXG4iCikKCnNyYyA9IHNyYy5yZXBsYWNlKGFuY2hvciwgc2V0dXBfZnVuYyArIGFuY2hvciwgMSkKY2hhbmdlcyArPSAxCnByaW50KCIjIyMgZm1hbl9wY2QuYzogRi0wNzIgdjMgYnVmZmVyIHNldHVwL3RlYXJkb3duIGZ1bmN0aW9ucyBhZGRlZCIpCgpjYWxsX2FuY2hvciA9ICIvKiBGLTA3OTogQ09OVF9MT09LVVAgcGFzcy10aHJvdWdoIHNjYWZmb2xkIChSTSA4LjcuNC4xKS4iCmlmIGNhbGxfYW5jaG9yIGluIHNyYzoKICAgIHNldHVwX2NhbGwgPSAoCiAgICAgICAgIlx0LyogRi0wNzIgdjM6IGFybSBGRSBidWZmZXIgcG9vbCBCRUZPUkUgc2NhZmZvbGQgKi9cbiIKICAgICAgICAiXHR7XG4iCiAgICAgICAgIlx0XHRzdHJ1Y3QgZm1hbl9wb3J0ICpyeHBvcnQgPSBmbWFuX3BvcnRfbG9va3VwX3J4KHBjZC0+Zm1hbiwgKHU4KXBvcnRfaWQpO1xuIgogICAgICAgICJcdFx0aW50IF9iZnI7XG4iCiAgICAgICAgIlx0XHRpZiAoIXJ4cG9ydClcbiIKICAgICAgICAiXHRcdFx0cmV0dXJuIC1FTk9ERVY7XG4iCiAgICAgICAgIlx0XHRfYmZyID0gZm1hbl9wY2RfZmVfYnVmZmVyX3NldHVwKHBjZCwgcnhwb3J0LCAodTgpcG9ydF9pZCk7XG4iCiAgICAgICAgIlx0XHRpZiAoX2JmcilcbiIKICAgICAgICAiXHRcdFx0cmV0dXJuIF9iZnI7XG4iCiAgICAgICAgIlx0fVxuIgogICAgICAgICJcbiIKICAgICAgICAiXHQiICsgY2FsbF9hbmNob3IKICAgICkKICAgIHNyYyA9IHNyYy5yZXBsYWNlKGNhbGxfYW5jaG9yLCBzZXR1cF9jYWxsLCAxKQogICAgY2hhbmdlcyArPSAxCiAgICBwcmludCgiIyMjIGZtYW5fcGNkLmM6IEYtMDcyIHYzIGJ1ZmZlciBzZXR1cCBjYWxsIGluc2VydGVkIGluIGVuZ2FnZSIpCgpkaXNhbmNob3IgPSAiZm1hbl9wY2Rfa2dfcG9ydF9kaXNhcm1fZmUocGNkLCAodTgpcG9ydF9pZCwgMCk7IgppZiBkaXNhbmNob3IgaW4gc3JjOgogICAgdGVhcmRvd25fY2FsbCA9ICgKICAgICAgICAiXHQvKiBGLTA3MiB2MzogdGVhciBkb3duIEZFIGJ1ZmZlciBCRUZPUkUgUENEIGRpc2FybSAqL1xuIgogICAgICAgICJcdHtcbiIKICAgICAgICAiXHRcdHN0cnVjdCBmbWFuX3BvcnQgKnJ4cG9ydCA9IGZtYW5fcG9ydF9sb29rdXBfcngocGNkLT5mbWFuLCAodTgpcG9ydF9pZCk7XG4iCiAgICAgICAgIlx0XHRpZiAocnhwb3J0KVxuIgogICAgICAgICJcdFx0XHRmbWFuX3BjZF9mZV9idWZmZXJfdGVhcmRvd24ocGNkLCByeHBvcnQpO1xuIgogICAgICAgICJcdH1cbiIKICAgICAgICAiXG4iCiAgICAgICAgIlx0IiArIGRpc2FuY2hvcgogICAgKQogICAgc3JjID0gc3JjLnJlcGxhY2UoZGlzYW5jaG9yLCB0ZWFyZG93bl9jYWxsLCAxKQogICAgY2hhbmdlcyArPSAxCiAgICBwcmludCgiIyMjIGZtYW5fcGNkLmM6IEYtMDcyIHYzIGJ1ZmZlciB0ZWFyZG93biBjYWxsIGluc2VydGVkIGluIGRpc2VuZ2FnZSIpCgpkYmdfYW5jaG9yID0gJ2RlYnVnZnNfY3JlYXRlX2ZpbGUoImZlX2FybSIsIDA2MDAsJwppZiBkYmdfYW5jaG9yIGluIHNyYzoKICAgIGRiZ19ub2RlID0gJ2RlYnVnZnNfY3JlYXRlX2ZpbGUoImZlX2J1ZmZlciIsIDA0NDQsIHBjZC0+ZGVidWdmc19kaXIsIHBjZCwgJmZtYW5fcGNkX2ZlX2J1ZmZlcl9mb3BzKTtcblx0XHRcdCcKICAgIHNyYyA9IHNyYy5yZXBsYWNlKGRiZ19hbmNob3IsIGRiZ19ub2RlICsgZGJnX2FuY2hvciwgMSkKICAgIGNoYW5nZXMgKz0gMQogICAgcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBGLTA3MiB2MyBmZV9idWZmZXIgZGVidWdmcyByZWdpc3RlcmVkIikKCmJ1Zl9zaG93X2FuY2hvciA9ICJzdGF0aWMgaW50IGZtYW5fcGNkX2ZlX2FybV9zaG93IgppZiBidWZfc2hvd19hbmNob3IgaW4gc3JjOgogICAgYnVmZmVyX3Nob3cgPSAoCiAgICAgICAgInN0YXRpYyBpbnQgZm1hbl9wY2RfZmVfYnVmZmVyX3Nob3coc3RydWN0IHNlcV9maWxlICpzLCB2b2lkICp1bnVzZWQpXG4iCiAgICAgICAgIntcbiIKICAgICAgICAiXHRzdHJ1Y3QgZm1hbl9wY2QgKnBjZCA9IHMtPnByaXZhdGU7XG4iCiAgICAgICAgIlx0c3RydWN0IG11cmFtX2luZm8gKm11cmFtID0gZm1hbl9nZXRfbXVyYW0ocGNkLT5mbWFuKTtcbiIKICAgICAgICAiXHRpbnQgcG9ydF9pZDtcbiIKICAgICAgICAiXHR2b2lkIF9faW9tZW0gKnBwO1xuIgogICAgICAgICJcdHUzMiB2NTQsIHY1ODtcbiIKICAgICAgICAiXG4iCiAgICAgICAgIlx0Zm9yIChwb3J0X2lkID0gMHgwODsgcG9ydF9pZCA8PSAweDExOyBwb3J0X2lkKyspIHtcbiIKICAgICAgICAiXHRcdHN0cnVjdCBmbWFuX3BvcnQgKnBvcnQgPSBmbWFuX3BvcnRfbG9va3VwX3J4KHBjZC0+Zm1hbiwgcG9ydF9pZCk7XG4iCiAgICAgICAgIlx0XHR1MzIgcHBfb2ZmO1xuIgogICAgICAgICJcdFx0aWYgKCFwb3J0KVxuIgogICAgICAgICJcdFx0XHRjb250aW51ZTtcbiIKICAgICAgICAiXHRcdHBwX29mZiA9IGZtYW5fcG9ydF9nZXRfcGFyYW1zX3BhZ2UocG9ydCk7XG4iCiAgICAgICAgIlx0XHRpZiAoSVNfRVJSX1ZBTFVFKHBwX29mZikpXG4iCiAgICAgICAgIlx0XHRcdGNvbnRpbnVlO1xuIgogICAgICAgICJcdFx0cHAgPSBmbWFuX211cmFtX29mZnNldF90b192YmFzZShtdXJhbSwgcHBfb2ZmKTtcbiIKICAgICAgICAiXHRcdHY1NCA9IGlvcmVhZDMyYmUoKHZvaWQgX19pb21lbSAqKSgodTggX19pb21lbSAqKXBwICsgMHg1NCkpO1xuIgogICAgICAgICJcdFx0djU4ID0gaW9yZWFkMzJiZSgodm9pZCBfX2lvbWVtICopKCh1OCBfX2lvbWVtICopcHAgKyAweDU4KSk7XG4iCiAgICAgICAgIlx0XHRzZXFfcHJpbnRmKHMsIFwicG9ydCAweCUwMng6ICsweDU0PSUjMDEweCArMHg1OD0lIzAxMHggdG51bXM9JXVcXG5cIixcbiIKICAgICAgICAiXHRcdFx0ICAgcG9ydF9pZCwgdjU0LCB2NTgsIGZtYW5fcG9ydF9nZXRfdG90YWxfdG51bXMocG9ydCkpO1xuIgogICAgICAgICJcdH1cbiIKICAgICAgICAiXHRyZXR1cm4gMDtcbiIKICAgICAgICAifVxuIgogICAgICAgICJcbiIKICAgICAgICAic3RhdGljIGludCBmbWFuX3BjZF9mZV9idWZmZXJfb3BlbihzdHJ1Y3QgaW5vZGUgKmlub2RlLCBzdHJ1Y3QgZmlsZSAqZmlsZSlcbiIKICAgICAgICAie1xuIgogICAgICAgICJcdHJldHVybiBzaW5nbGVfb3BlbihmaWxlLCBmbWFuX3BjZF9mZV9idWZmZXJfc2hvdywgaW5vZGUtPmlfcHJpdmF0ZSk7XG4iCiAgICAgICAgIn1cbiIKICAgICAgICAiXG4iCiAgICAgICAgInN0YXRpYyBjb25zdCBzdHJ1Y3QgZmlsZV9vcGVyYXRpb25zIGZtYW5fcGNkX2ZlX2J1ZmZlcl9mb3BzID0ge1xuIgogICAgICAgICJcdC5vd25lclx0XHQ9IFRISVNfTU9EVUxFLFxuIgogICAgICAgICJcdC5vcGVuXHRcdD0gZm1hbl9wY2RfZmVfYnVmZmVyX29wZW4sXG4iCiAgICAgICAgIlx0LnJlYWRcdFx0PSBzZXFfcmVhZCxcbiIKICAgICAgICAiXHQubGxzZWVrXHRcdD0gc2VxX2xzZWVrLFxuIgogICAgICAgICJcdC5yZWxlYXNlXHQ9IHNpbmdsZV9yZWxlYXNlLFxuIgogICAgICAgICJ9O1xuIgogICAgICAgICJcbiIKICAgICkKICAgIHNyYyA9IHNyYy5yZXBsYWNlKGJ1Zl9zaG93X2FuY2hvciwgYnVmZmVyX3Nob3cgKyBidWZfc2hvd19hbmNob3IsIDEpCiAgICBjaGFuZ2VzICs9IDEKICAgIHByaW50KCIjIyMgZm1hbl9wY2QuYzogRi0wNzIgdjMgZmVfYnVmZmVyIHNob3cgZnVuY3Rpb24gYWRkZWQiKQoKaWYgY2hhbmdlczoKICAgIHdpdGggb3BlbihwYXRoLCAidyIpIGFzIGY6IGYud3JpdGUoc3JjKQogICAgcHJpbnQoZiIjIyMgZm1hbl9wY2QuYzogRi0wNzIgdjMge2NoYW5nZXN9IGNoYW5nZShzKSBhcHBsaWVkIikKZWxzZToKICAgIHByaW50KCIjIyMgZm1hbl9wY2QuYzogRi0wNzIgdjMgbm8gY2hhbmdlcyBhcHBsaWVkIikK' | base64 -d | python3
     echo "### fman_pcd.c: F-072 v3 FmPortSetFESupport ported"
-# F-079-LEAKFIX: F-072 teardown frees pool+index (SDK FmPortDeleteFESupport)
-# The v3 teardown only zeros +0x54 but never calls fman_pcd_muram_free(),
-# leaking tnums*512B pool + (5+tnums)B index per engage/disengage cycle.
-# This fixup adds muram_free calls to the teardown function body.
+# F-079-LEAKFIX v2: add muram_free to F-072 teardown (simple sed)
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    # Replace the teardown body with one that frees MURAM
-    python3 -c "
-import sys, re
-path = 'drivers/net/ethernet/freescale/fman/fman_pcd.c'
+    # Find the line that zeros +0x54 in the teardown function
+    # and insert muram_free calls BEFORE it (using saved idx_off and computed pool_off)
+    python3 -c '
+import re
+path = "drivers/net/ethernet/freescale/fman/fman_pcd.c"
 with open(path) as f: src = f.read()
 
-# Find fman_pcd_fe_buffer_teardown function
-pattern = r'(static void fman_pcd_fe_buffer_teardown\(.*?\)
-\{)(.*?)(
-\})'
-def fix_teardown(m):
-    prefix, body, suffix = m.group(1), m.group(2), m.group(3)
-    # The body currently zeros +0x54 but doesn't free pool+index
-    # Add muram_free calls: need to re-read +0x54 to get index_off,
-    # then read index_off to get pool_off (stored in bytes1-3),
-    # then free both.
-    new_body = (
-        '    struct muram_info *muram = fman_get_muram(pcd->fman);\n'
-        '    u32 pp_off, idx_off, pool_off;\n'
-        '    u8 tnums;\n'
-        '    void __iomem *pp, *idx;\n'
-        '    static const unsigned int BMI_FIFO_UNITS = 0x100;\n'
-        '\n'
-        '    if (!muram || !port)\n'
-        '        return;\n'
-        '    tnums = fman_port_get_total_tnums(port);\n'
-        '    if (!tnums)\n'
-        '        return;\n'
-        '    pp_off = fman_port_get_params_page(port);\n'
-        '    if (IS_ERR_VALUE(pp_off))\n'
-        '        return;\n'
-        '    pp = fman_muram_offset_to_vbase(muram, pp_off);\n'
-        '\n'
-        '    /* Read index offset from +0x54 before zeroing it */\n'
-        '    idx_off = ioread32be((void __iomem *)((u8 __iomem *)pp + 0x54));\n'
-        '    iowrite32be(0, (void __iomem *)((u8 __iomem *)pp + 0x54));\n'
-        '\n'
-        '    if (idx_off && idx_off != 0xFFFFFFFF) {\n'
-        '        idx = fman_muram_offset_to_vbase(muram, idx_off);\n'
-        '        pool_off = ioread32be(idx) & 0x00FFFFFF;\n'
-        '        if (pool_off) {\n'
-        '            /* Free the pool: tnums * BMI_FIFO_UNITS * 2 bytes */\n'
-        '            fman_pcd_muram_free(pcd, pool_off, tnums * BMI_FIFO_UNITS * 2);\n'
-        '        }\n'
-        '        /* Free the index: 5 + tnums bytes */\n'
-        '        fman_pcd_muram_free(pcd, idx_off, 5 + tnums);\n'
-        '    }\n'
-    )
-    return prefix + new_body + suffix
+# Replace the teardown function body — simple replacement of the closing brace
+# of the teardown function, which currently just zeros +0x54 and returns.
+# The old body (after variables) is:
+#   pp = fman_muram_offset_to_vbase(muram, pp_off);
+#   iowrite32be(0, (void __iomem *)((u8 __iomem *)pp + 0x54));
 
-src = re.sub(pattern, fix_teardown, src, flags=re.DOTALL)
-with open(path, 'w') as f: f.write(src)
-print('### fman_pcd.c: F-079-LEAKFIX teardown now frees pool+index')
-"
-    echo "### fman_pcd.c: F-079-LEAKFIX MURAM free added to teardown"
+# We replace the last line of the teardown with a block that also frees.
+old_line = "    iowrite32be(0, (void __iomem *)((u8 __iomem *)pp + 0x54));"
+teardown_free_block = (
+    "    /* F-079-LEAKFIX: read pool offset from index, free both */\n"
+    "    {\n"
+    "        u32 idx_off = ioread32be((void __iomem *)((u8 __iomem *)pp + 0x54));\n"
+    "        u32 pool_off;\n"
+    "        void __iomem *idx;\n"
+    "        u8 tnums = fman_port_get_total_tnums(port);\n"
+    "        static const unsigned int BMI_FIFO_UNITS = 0x100;\n"
+    "        iowrite32be(0, (void __iomem *)((u8 __iomem *)pp + 0x54));\n"
+    "        if (idx_off && idx_off != 0xFFFFFFFF && tnums) {\n"
+    "            idx = fman_muram_offset_to_vbase(muram, idx_off);\n"
+    "            pool_off = ioread32be(idx) & 0x00FFFFFF;\n"
+    "            if (pool_off)\n"
+    "                fman_pcd_muram_free(pcd, pool_off, tnums * BMI_FIFO_UNITS * 2);\n"
+    "            fman_pcd_muram_free(pcd, idx_off, 5 + tnums);\n"
+    "        }\n"
+    "    }"
+)
+if old_line in src:
+    src = src.replace(old_line, teardown_free_block, 1)
+    with open(path, "w") as f: f.write(src)
+    print("### fman_pcd.c: F-079-LEAKFIX v2 teardown frees pool+index")
+else:
+    print("### fman_pcd.c: F-079-LEAKFIX v2 target line not found")
+' 2>/dev/null || true
 fi
 fi
 
