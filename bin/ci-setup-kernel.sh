@@ -1334,34 +1334,26 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo 'aW1wb3J0IHJlCgpwYXRoID0gImRyaXZlcnMvbmV0L2V0aGVybmV0L2ZyZWVzY2FsZS9mbWFuL2ZtYW5fcGNkLmMiCndpdGggb3BlbihwYXRoKSBhcyBmOgogICAgc3JjID0gZi5yZWFkKCkKCiMgRi0wNjAgdjM6IEZpeCBNVVggY29udGV4dCB3cml0ZSB0YXJnZXQgZnJvbSBBRCswIHRvIEFEKzQgKHdvcmQgMSkKIyBGLTA1NS9GLTA1NiB3cm90ZSB0aGUgTVVYIHdyaXRlIGFjcm9zcyBUV08gbGluZXMuICBTZWFyY2ggZm9yIHRoZQojIHBhcnRpYWwgdW5pcXVlIG1hcmtlciB0aGVuIHVzZSByZWdleCB0byByZXBsYWNlIHRoZSAyLWxpbmUgYmxvY2suCiMgQVZPSUQgXHMgaW4gcmVnZXggKGJhZCBlc2NhcGUgdGhyb3VnaCB0aGUgNC1sYXllciBuZXN0aW5nIHBpcGVsaW5lKS4KCnRyaWdnZXIgPSAiKHUzMillbnEtPm11cmFtX29mZiwiCmlmIHRyaWdnZXIgaW4gc3JjOgogICAgIyBNYXRjaDogaW93cml0ZTMyYmUoKHUzMillbnEtPm11cmFtX29mZixcbjx3aGl0ZXNwYWNlPm11eCk7CiAgICAjIFJlcGxhY2Ugd2l0aCBzaW5nbGUtbGluZSB3cml0ZSB0byB3b3JkIDEgKEFEKzQpCiAgICBvbGRfcnggPSByZS5jb21waWxlKAogICAgICAgIHIiXHRcdFx0XHRpb3dyaXRlMzJiZVwoXCh1MzJcKWVucS0+bXVyYW1fb2ZmLFsgXHRdKlxuWyBcdF0qbXV4XCk7WyBcdF0qXG4iCiAgICApCiAgICByZXBsYWNlbWVudCA9ICJcdFx0XHRcdGlvd3JpdGUzMmJlKCh1MzIpZW5xLT5tdXJhbV9vZmYsICh1MzIgX19pb21lbSAqKW11eCArIDEpOyAvKiBGLTA2MDogU0RLLWNvbXBsaWFudCBNVVggY29udGV4dCBhdCBBRCs0ICovXG4iCiAgICBzcmMsIG4gPSBvbGRfcnguc3VibihyZXBsYWNlbWVudCwgc3JjLCBjb3VudD0xKQogICAgaWYgbiA+IDA6CiAgICAgICAgcHJpbnQoZiIjIyMgZm1hbl9wY2QuYzogRi0wNjAgdjM6IE1VWCB3cml0ZSBmaXhlZCB0byBBRCs0ICh7bn0gcmVwbGFjZW1lbnQpIikKICAgIGVsc2U6CiAgICAgICAgcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBGLTA2MCB2MzogcmVnZXggY29tcGlsZWQgYnV0IDAgbWF0Y2hlcyAoYWxyZWFkeSBhcHBsaWVkPykiKQplbHNlOgogICAgcHJpbnQoIiMjIyBmbWFuX3BjZC5jOiBGLTA2MCB2MzogdHJpZ2dlciBub3QgZm91bmQgKEYtMDU1L0YtMDU2IG5vdCBhcHBsaWVkPykiKQoKd2l0aCBvcGVuKHBhdGgsICJ3IikgYXMgZjoKICAgIGYud3JpdGUoc3JjKQo=' | base64 -d | python3
     echo "### fman_pcd.c: F-060 v3d: MUX context write fixed to AD+4"
 
-# F-083: Remove 0161 guard — CONT_LOOKUP scaffold always runs.
-# The 0161 patch made the scaffold conditional on fe_enter_off==0, causing
-# non-zero fe_enter_off to skip the scaffold and RCCB→FE_ENTER direct
-# (BMI corruption).  Revert to unconditional scaffold (qdrant 2026-07-16).
-#
-# F-084: Fix 0158 compose FE_ENTER target — use pcd->fe_hash_off (EXT_HASH
-# FE) instead of walking the ENQ list.  The ENQ FE is the terminal
-# disposition, not the chain head (arch/fman-...-reference.md §7.2).
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    echo 'aW1wb3J0IHJlCgpwYXRoID0gJ2RyaXZlcnMvbmV0L2V0aGVybmV0L2ZyZWVzY2FsZS9mbWFuL2ZtYW5fcGNkLmMnCndpdGggb3BlbihwYXRoKSBhcyBmOgogICAgc3JjID0gZi5yZWFkKCkKCmNoYW5nZXMgPSAwCgojIEZJWFVQIEE6IFJlbW92ZSAwMTYxIGd1YXJkIOKAlCBzY2FmZm9sZCBhbHdheXMgcnVucwojIFJlcGxhY2VzOiBcdGlmIChmZV9lbnRlcl9vZmYgPT0gMCkgewojIFdpdGg6ICAgICBcdHsKb2xkX2EgPSAnXHRpZiAoZmVfZW50ZXJfb2ZmID09IDApIHsnCm5ld19hID0gJ1x0eycKaWYgb2xkX2EgaW4gc3JjOgogICAgc3JjID0gc3JjLnJlcGxhY2Uob2xkX2EsIG5ld19hLCAxKQogICAgY2hhbmdlcyArPSAxCiAgICBwcmludCgnIyMjIGZtYW5fcGNkLmM6IEYtMDgzIHNjYWZmb2xkIGFsd2F5cy1hY3RpdmUgKHJlbW92ZWQgMDE2MSBndWFyZCknKQplbHNlOgogICAgcHJpbnQoJyMjIyBmbWFuX3BjZC5jOiBGLTA4MyBzY2FmZm9sZCBndWFyZCBub3QgZm91bmQgKGFscmVhZHkgcmVtb3ZlZD8pJykKCiMgRklYVVAgQjogRml4IEZFX0VOVEVSIGNvbXBvc2UgdGFyZ2V0IOKAlCBFWFRfSEFTSCBub3QgRU5RCiMgUmVwbGFjZSB0aGUgRU5RIGxpc3Qgd2FsayBpbiBfX2ZtYW5fcGNkX2ZlX2J1aWxkX3ZtX2NoYWluCm9sZF9iID0gKAogICAgJ1x0ICogVXNlIHRoZSBmaXJzdCBFTlEgRkVcJ3MgTVVSQU0gb2Zmc2V0IGFzIHRoZSBjaGFpbiBoZWFkLlxuJwogICAgJ1x0ICogVE9ETzogc3RvcmUgZW5xX29mZiBmb3IgZnV0dXJlIGZsb3dfYWRkKCkgdXNlLlxuJwogICAgJ1x0ICovXG4nCiAgICAnXHR7XG4nCiAgICAnXHRcdHN0cnVjdCBmbWFuX3BjZF9mZV9vYmogKmU7XG4nCiAgICAnXG4nCiAgICAnXHRcdGlmIChsaXN0X2VtcHR5KCZwY2QtPmZlX2VucSkpXG4nCiAgICAnXHRcdFx0cmV0dXJuIC1FTk9FTlQ7XG4nCiAgICAnXG4nCiAgICAnXHRcdGUgPSBsaXN0X2ZpcnN0X2VudHJ5KCZwY2QtPmZlX2VucSxcbicKICAgICdcdFx0XHRcdCAgICAgc3RydWN0IGZtYW5fcGNkX2ZlX29iaiwgbm9kZSk7XG4nCiAgICAnXHRcdGVyciA9IGZtYW5fcGNkX2ZlX2VudGVyX2J1aWxkKHBjZCwgZS0+bXVyYW1fb2ZmKTtcbicKKQpuZXdfYiA9ICgKICAgICdcdCAqIERpc3BhdGNoIHRvIHRoZSBFWFRfSEFTSCBGRSAobm90IEVOUSkg4oCUIHRoZSBFWFRfSEFTSCBGRVxuJwogICAgJ1x0ICogcGVyZm9ybXMgdGhlIGhhcmR3YXJlIGhhc2ggbG9va3VwIGFuZCByb3V0ZXMgSElULT5NVVgtPkVOUVxuJwogICAgJ1x0ICogb3IgTUlTUy0+RVhJVCAoc2VjdC43LjIpLiAgVGhlIEVOUSBGRSBpcyB0aGUgdGVybWluYWxcbicKICAgICdcdCAqIGRpc3Bvc2l0aW9uLCBub3QgdGhlIGNoYWluIGhlYWQuXG4nCiAgICAnXHQgKi9cbicKICAgICdcdGVyciA9IGZtYW5fcGNkX2ZlX2VudGVyX2J1aWxkKHBjZCwgcGNkLT5mZV9oYXNoX29mZik7XG4nCikKaWYgb2xkX2IgaW4gc3JjOgogICAgc3JjID0gc3JjLnJlcGxhY2Uob2xkX2IsIG5ld19iLCAxKQogICAgY2hhbmdlcyArPSAxCiAgICBwcmludCgnIyMjIGZtYW5fcGNkLmM6IEYtMDg0IEZFX0VOVEVSIGNvbXBvc2UgdGFyZ2V0ID0gRVhUX0hBU0ggKHdhcyBFTlEpJykKZWxzZToKICAgIHByaW50KCcjIyMgZm1hbl9wY2QuYzogRi0wODQgRU5RIHdhbGsgbm90IGZvdW5kIChhbHJlYWR5IGZpeGVkPyknKQoKaWYgY2hhbmdlczoKICAgIHdpdGggb3BlbihwYXRoLCAndycpIGFzIGY6CiAgICAgICAgZi53cml0ZShzcmMpCg==' | base64 -d | python3
-    echo "### fman_pcd.c: F-083 scaffold always + F-084 compose EXT_HASH target"
+    # F-083: Remove 0161 guard — CONT_LOOKUP scaffold always runs.
+    # Single-line sed: if(fe_enter_off==0){ → {  (qdrant 2026-07-16)
+    sed -i 's/\tif (fe_enter_off == 0) {/\t{/' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    echo "### fman_pcd.c: F-083 scaffold always-active"
 
-# F-085: Suppress -Wunused-function for three static functions whose callers
-# may be behind conditional code paths or fixup-anchor mismatches.
-# - __fman_pcd_fe_build_vm_chain: called from fman_pcd_fe_engage (0158)
-# - fman_pcd_fe_buffer_setup: called from fe_arm_engage via F-072 anchor
-# - fman_pcd_fe_build_contexts: called via 0146 (F-047 may have removed call site)
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    # F-085: Suppress -Wunused-function for static functions whose callers
+    # may be behind conditional code paths or fixup-anchor mismatches.
     sed -i 's/static int __fman_pcd_fe_build_vm_chain/static __maybe_unused int __fman_pcd_fe_build_vm_chain/' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
-    sed -i 's/static int fman_pcd_fe_buffer_setup/static __maybe_unused int fman_pcd_fe_buffer_setup/' \
+    sed -i 's/^static int fman_pcd_fe_buffer_setup/static __maybe_unused int fman_pcd_fe_buffer_setup/' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
-    sed -i 's/static void fman_pcd_fe_build_contexts/static __maybe_unused void fman_pcd_fe_build_contexts/' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo "### fman_pcd.c: F-085 __maybe_unused on build_vm_chain, buffer_setup, build_contexts"
-fi
 
-fi
+    # F-085b: Fix -Wunused-result from kstrtouint in fe_arm engage tokenizer.
+    sed -i 's/kstrtouint(tok, 16, \&miss_fqid);/(void)kstrtouint(tok, 16, \&miss_fqid);/' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    sed -i 's/kstrtouint(tok, 16, \&ekfc);/(void)kstrtouint(tok, 16, \&ekfc);/' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    echo "### fman_pcd.c: F-085 __maybe_unused + kstrtouint casts"
+
 # F-061: fe_probe debugfs — dump FE pool workspace to read KG-extracted key bytes.
 # The FE_ENTER ALLOCATE allocates a workspace per-frame from the FE pool.
 # After exit, gen_pool_free does NOT zero the MURAM, so the KG hash result
@@ -1425,12 +1417,15 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: stripped EXPORT_SYMBOL_GPL (before includes)"
 fi
 
-# F-083: fman_pcd_fe_build_contexts now called from fe_arm_engage scaffold
-# (restored by 0163).  No longer unused — __maybe_unused removed.
+# Suppress -Wunused-function for fman_pcd_fe_build_contexts (leftover
+# from CCBS scaffold removal). The function was called from 0150 which
+# F-047 removed.  Avoids -Werror build failure.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    sed -i 's/static void fman_pcd_fe_build_contexts/static __maybe_unused void fman_pcd_fe_build_contexts/' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
     sed -i 's/fman_muram_offset_to_vbase(muram,/(void *)fman_muram_offset_to_vbase(muram,/' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo "### fman_pcd.c: void* cast applied to muram_offset_to_vbase"
+    echo "### fman_pcd.c: fe_build_contexts fixed (__maybe_unused + cast)"
 fi
 
 
