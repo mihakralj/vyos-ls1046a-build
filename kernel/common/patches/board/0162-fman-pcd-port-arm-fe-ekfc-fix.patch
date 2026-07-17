@@ -1,0 +1,13 @@
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+index f8a5cb4..b45c215 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
++++ b/drivers/net/ethernet/freescale/fman/fman_pcd_kg.c
+@@ -808,6 +808,8 @@ int fman_pcd_kg_port_arm_fe(struct fman_pcd *pcd, u8 hw_port_id,
+ 		mutex_unlock(lock);
+ 		return -ENODEV;
+ 	}
++	if (ekfc)
++		slot->ekfc = ekfc;
+ 	*saved_engine = slot->next_engine;
+ 
+ 	/*
