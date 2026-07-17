@@ -24,9 +24,14 @@ word6=missNextFE (MISS→EXIT).  The FE_ENTER's word3 is the chain head.
 
 Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 ---
+ drivers/net/ethernet/freescale/fman/fman_pcd.c | 15 ++++-----------
+ 1 file changed, 4 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -2403,14 +2403,14 @@ static int __fman_pcd_fe_build_vm_chain(struct fman_pcd *pcd)
+@@ ... @@ static int __fman_pcd_fe_build_vm_chain(struct fman_pcd *pcd)
+ 	/*
  	 * FE_ENTER root AD links the classifier to the FE chain.
 -	 * Use the first ENQ FE's MURAM offset as the chain head.
 -	 * TODO: store enq_off for future flow_add() use.
@@ -35,7 +40,7 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 +	 * or MISS→EXIT (§7.2).  The ENQ FE is the terminal
 +	 * disposition, not the chain head.
  	 */
- 	{
+-	{
 -		struct fman_pcd_fe_obj *e;
 -
 -		if (list_empty(&pcd->fe_enq))
@@ -44,7 +49,10 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 -		e = list_first_entry(&pcd->fe_enq,
 -				     struct fman_pcd_fe_obj, node);
 -		err = fman_pcd_fe_enter_build(pcd, e->muram_off);
-+		err = fman_pcd_fe_enter_build(pcd, pcd->fe_hash_off);
- 		if (err)
- 			return err;
- 	}
++	err = fman_pcd_fe_enter_build(pcd, pcd->fe_hash_off);
+ 	if (err)
+ 		return err;
+-	}
+ 
+ 	return 0;
+ }

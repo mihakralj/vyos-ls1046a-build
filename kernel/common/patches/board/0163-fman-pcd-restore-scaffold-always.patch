@@ -22,9 +22,13 @@ numKeys=0 → miss-AD → PCD FQ → kernel RSS.  M2-gate proven: 7.37 Gbps,
 
 Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 ---
+ drivers/net/ethernet/freescale/fman/fman_pcd.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -2269,7 +2269,7 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
+@@ -2272,7 +2272,7 @@ static int __fman_pcd_fe_arm_engage(struct fman_pcd *pcd,
  	if (miss_fqid == 0)
  		miss_fqid = 0x200;
  
