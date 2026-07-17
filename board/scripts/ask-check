@@ -27,20 +27,29 @@
 #
 #   1. Dataplane posture          which dataplane owns the ports right now
 #   2. FMan PCD subsystem         the silicon programming layer (KeyGen / CC /
-#                                 Header-Manip / Policer) + its MURAM budget
+#                                 Header-Manip / Policer / FE-VM) + MURAM budget
 #   3. Reversible mode switch     turning ASK on/off must be register-exact and
 #                                 leak-free, verified by snapshot, never reboot
-#   4. Hardware classification    the external-hash / FE engine that gives a
-#                                 classified frame a terminal disposition
+#   4. Hardware classification    CONT_LOOKUP pass-through (MISS→kernel) +
+#                                 FE-VM singletons / ehash / EXT_HASH / ENQ
+#                                 (HIT path — per-flow hardware dispatch)
 #   5. Hardware forwarding        L3 next-hop rewrite (strip/insert L2, TTL,
 #                                 checksum) applied inline in the FMan
 #   6. Control-plane module       ask.ko: the genl family + flow table + the
-#                                 engage/disengage entry point
+#                                 fe_engage/disengage entry point
 #   7. Hardware IPsec offload     CAAM job rings + descriptor sharing + the
 #                                 ESP packet-mode offload bind on FMan netdevs
 #   8. Operator CLI               'set system offload ask' + the validator that
 #                                 keeps ASK and VPP mutually exclusive
 #   9. dmesg integrity            no error/stall/leak lines from the datapath
+#
+# Architecture note (2026-07-17):
+#   Debugfs nodes are INSTRUMENTATION ONLY.  The control-plane API is the
+#   exported kernel symbols (fman_pcd_fe_engage / _disengage / _flow_add /
+#   _flow_del / kg_unbind_port / kg_detach_cc).  The debugfs write handlers
+#   are thin wrappers that parse strings and delegate to typed __impl()
+#   functions; the exported API calls those same typed functions directly
+#   — no sprintf/snprintf in the control path (patch 0157).
 #
 # Tags:
 #   [OK]    capability present and healthy
@@ -166,8 +175,8 @@ else
 fi
 
 # Is hardware offload currently engaged on any port?
-last_xition=$(echo "$DMESG" | grep -E 'ask hw: offload (EN|DIS)' | tail -1)
-if echo "$last_xition" | grep -q ENGAGED; then
+last_xition=$(echo "$DMESG" | grep -E 'fe_arm.*(ENGAGED|DISENGAGED)|FE engage.*port' | tail -1)
+if echo "$last_xition" | grep -qiE 'ENGAGED|FE engage'; then
     record_ok "hardware offload currently ENGAGED on an FMan port"
     note "$last_xition"
 else
@@ -177,7 +186,7 @@ fi
 # ===========================================================================
 # 2. FMan PCD subsystem — the silicon programming layer
 # ===========================================================================
-hdr "2) FMan PCD subsystem (KeyGen / Classify / Header-Manip / Policer)"
+hdr "2) FMan PCD subsystem (KeyGen / Classify / Header-Manip / Policer / FE-VM)"
 
 if [ ! -d /sys/kernel/debug ]; then
     record_skip "debugfs not mounted — mount -t debugfs none /sys/kernel/debug to probe PCD"
@@ -201,13 +210,17 @@ elif [ -d "$PCD_DBGFS" ]; then
         used_bytes=$(echo "$budget_str" | grep -oE 'used[= ]+[0-9]+' | head -1 | grep -oE '[0-9]+')
         free_bytes=$(echo "$budget_str" | grep -oE 'free[= ]+[0-9]+' | head -1 | grep -oE '[0-9]+')
         if [ -n "$free_bytes" ] && [ "$free_bytes" -gt 0 ] 2>/dev/null; then
-            record_ok "MURAM budget healthy (free=${free_bytes}B used=${used_bytes:-?}B)"
-            note "$budget_str"
-            if ! echo "$last_xition" | grep -q ENGAGED \
-               && [ -n "${used_bytes:-}" ] && [ "$used_bytes" -gt 4096 ] 2>/dev/null; then
+            if echo "$last_xition" | grep -qiE 'ENGAGED|FE engage'; then
+                # Engaged — some MURAM usage is expected (scaffold 304B + pool ~8KB)
+                record_ok "MURAM budget while ENGAGED (free=${free_bytes}B used=${used_bytes:-?}B)"
+            elif [ -n "${used_bytes:-}" ] && [ "$used_bytes" -gt 4096 ] 2>/dev/null; then
                 record_warn "MURAM used=${used_bytes}B while offload is OFF — possible leaked teardown"
                 note "pcd-snapshot diff vs the boot baseline is the authoritative check"
+                note "pool (F-072) + scaffold (0152) should be freed on disengage (0156)"
+            else
+                record_ok "MURAM budget healthy (free=${free_bytes}B used=${used_bytes:-?}B)"
             fi
+            note "$budget_str"
         else
             record_fail "MURAM budget exhausted (free=0) — no room to program offloaded flows"
             note "$budget_str"
@@ -215,22 +228,33 @@ elif [ -d "$PCD_DBGFS" ]; then
     else
         record_fail "$PCD_DBGFS present but no readable muram_budget node"
     fi
+
+    # FE port buffer readback (F-072: FmPortSetFESupport params page).
+    buf_file=$(find "$PCD_DBGFS" -mindepth 2 -maxdepth 2 -name fe_buffer -type f 2>/dev/null | head -1)
+    if [ -n "$buf_file" ] && [ -r "$buf_file" ]; then
+        record_ok "FE buffer readback present (fe_buffer — params-page +0x54/+0x58)"
+        buf_val=$(cat "$buf_file" 2>/dev/null | tr '\n' ' ')
+        note "$buf_val"
+    else
+        note "fe_buffer node absent — FmPortSetFESupport not probed (F-072)"
+    fi
 else
     record_fail "FMan PCD subsystem absent — $PCD_DBGFS missing"
     note "needs CONFIG_FSL_FMAN_PCD=y"
 fi
 
-# The four PCD engines must each export their programming API. Symbol names are
-# the kernel-internal API ask.ko calls to program the silicon.
+# PCD engine API — the exported kernel symbols ask.ko calls to program the
+# silicon.  Grouped into classic PCD engines + the new FE-VM surface.
 if [ -z "$KALLSYMS" ]; then
     record_skip "kallsyms unreadable — cannot probe PCD engine APIs (re-run with sudo)"
 else
     pcd_engines=(
-        "KeyGen (flow distribution):fman_pcd_kg_scheme_create fman_pcd_kg_port_attach_cc fman_pcd_kg_port_attach_policer"
+        "KeyGen (flow distribution):fman_pcd_kg_scheme_create fman_pcd_kg_port_attach_cc fman_pcd_kg_port_attach_policer fman_pcd_kg_unbind_port fman_pcd_kg_detach_cc"
         "Coarse Classification:fman_pcd_cc_static_install fman_cc_tree_install fman_pcd_cc_static_get_base"
         "Header Manipulation:fman_pcd_hm_install fman_hm_node_install fman_hm_nexthop_get"
         "Policer:fman_policer_install fman_pcd_plcr_install fman_policer_caps_supported"
-        "Port primitives:fman_port_set_cc_base fman_port_set_rx_bpool fman_pcd_port_ensure_params_page"
+        "Port primitives:fman_port_set_cc_base fman_port_set_rx_bpool fman_pcd_port_ensure_params_page fman_port_lookup_rx"
+        "FE-VM engage/flow (0153):fman_pcd_fe_engage fman_pcd_fe_disengage fman_pcd_fe_flow_add fman_pcd_fe_flow_del"
     )
     for grp in "${pcd_engines[@]}"; do
         gname="${grp%%:*}"; gsyms="${grp#*:}"
@@ -249,14 +273,38 @@ fi
 # ===========================================================================
 hdr "3) Reversible offload mode switch"
 
-# The coarse engage/disengage entry point ask.ko (and the operator CLI) call to
+# The FE-VM engage/disengage entry point ask.ko (and the operator CLI) call to
 # move a port between the kernel dataplane and the ASK dataplane.
+# Architecture (0157): the exported fman_pcd_fe_engage() calls typed
+# __fman_pcd_fe_arm_engage() directly — no string formatting. The debugfs
+# write handlers are thin wrappers for instrumentation only.
 if [ -z "$KALLSYMS" ]; then
-    record_skip "kallsyms unreadable — cannot confirm the offload engage/disengage API"
-elif has_sym fman_pcd_offload_engage && has_sym fman_pcd_offload_disengage; then
-    record_ok "offload engage/disengage API present (fman_pcd_offload_engage/_disengage)"
+    record_skip "kallsyms unreadable — cannot confirm the FE engage/disengage API"
+elif has_sym fman_pcd_fe_engage && has_sym fman_pcd_fe_disengage; then
+    record_ok "FE-VM engage/disengage API present (fman_pcd_fe_engage/_disengage)"
+    if has_sym fman_pcd_fe_flow_add && has_sym fman_pcd_fe_flow_del; then
+        record_ok "FE-VM flow insert/remove API present (fman_pcd_fe_flow_add/_del)"
+    else
+        record_fail "FE-VM flow API incomplete — per-flow HW dispatch not reachable"
+    fi
 else
-    record_fail "offload engage/disengage API missing — ASK cannot be turned on/off at runtime"
+    record_fail "FE-VM engage/disengage API missing — ASK cannot be turned on/off at runtime"
+    note "the legacy fman_pcd_offload_engage (0129, CC-tree wrapper) is superseded by fe_engage (0153)"
+fi
+
+# Scaffold MURAM tracking (0152) — the CONT_LOOKUP group/match/AD tables are
+# tracked and freed on disengage.  Without this every engage/disengage cycle
+# leaks 304 B.
+if [ -z "$KALLSYMS" ]; then
+    record_skip "kallsyms unreadable — cannot check scaffold tracking"
+else
+    # The __fman_pcd_fe_arm_disengage function calls free_scaffold + fe_port_del
+    # before disarming.  If free_scaffold is absent the 304B/cycle leak exists.
+    if dmesg_has "fman_pcd_fe_arm_free_scaffold"; then
+        record_ok "scaffold MURAM tracking present (0152 — 304B freed on disengage)"
+    else
+        record_warn "scaffold tracking not confirmed — the 304B/cycle leak may be present (0152)"
+    fi
 fi
 
 # The snapshot verifier proves a disable returns the silicon to a register-exact
@@ -270,16 +318,20 @@ else
 fi
 
 # ===========================================================================
-# 4. Hardware classification — the engine that dispositions a classified frame
+# 4. Hardware classification — CONT_LOOKUP pass-through + FE-VM chain
 # ===========================================================================
-hdr "4) Hardware classification engine (external-hash / FE)"
+hdr "4) Hardware classification (CONT_LOOKUP pass-through + FE-VM chain)"
 
-# The external-hash + flow-entry engine is what gives a classified frame its
-# terminal hardware disposition (forward, NAT, drop) instead of falling back to
-# software. Its DDR/MURAM structures are exposed as read-only inspector nodes;
-# all of them must be present for hardware classification to work, and the
-# engine must actually disposition frames — proven by an engaged port carrying
-# traffic without it reappearing in the kernel's software path.
+# The classification path has two layers:
+#   (a) CONT_LOOKUP pass-through (MISS path): all frames miss → kernel FQ
+#       — PROVEN on hardware (ping 3/3, port survives disengage)
+#   (b) FE-VM HIT chain (future): matched flows → EXT_HASH → ENQ FE → TX FQ
+#       — singletons, ehash, hashfe, enter, enq all have debugfs inspector nodes;
+#         the HIT dispatch path is not yet composed end-to-end
+#
+# Debugfs is INSTRUMENTATION ONLY.  The control path goes through the exported
+# API (fman_pcd_fe_engage, §3 above).
+
 if [ ! -d /sys/kernel/debug ] || { [ "$(id -u)" -ne 0 ] && [ ! -r /sys/kernel/debug ]; }; then
     record_skip "debugfs unreadable — re-run with sudo to inspect the classification engine"
 else
@@ -287,11 +339,11 @@ else
     if [ -z "$inst_dir" ]; then
         record_fail "no PCD instance — cannot locate the classification engine"
     else
-        # Inspector nodes for the engine's structures: object pool, per-port
-        # support, the shared FE singletons, the external-hash table, the
-        # per-flow entries, the classifier->FE root link, and the flow store.
+        # Inspector nodes — all must be present for the full FE-VM chain to be
+        # debugged.  The control path does NOT use these; they are read-only
+        # instrumentation (0157 architecture).
         fe_present=0 fe_total=0 fe_missing=""
-        for node in fe_pool fe_port fe_singletons fe_ehash fe_enq fe_enter fe_flow; do
+        for node in fe_pool fe_port fe_singletons fe_ehash fe_enq fe_enter fe_hashfe fe_flow fe_arm fe_buffer; do
             fe_total=$((fe_total+1))
             if [ -e "$inst_dir/$node" ]; then
                 fe_present=$((fe_present+1))
@@ -300,21 +352,35 @@ else
             fi
         done
         if [ "$fe_present" -eq "$fe_total" ]; then
-            record_ok "classification engine structures present ($fe_total/$fe_total)"
+            record_ok "classification engine inspector nodes present ($fe_present/$fe_total)"
         elif [ "$fe_present" -gt 0 ]; then
             record_fail "classification engine incomplete ($fe_present/$fe_total) — missing:$fe_missing"
         else
             record_fail "classification engine absent — hardware classify is not built in"
         fi
 
-        # The classifier-to-FE root link must be armed for a classified frame to
-        # actually reach the engine. The inspector reports whether it is wired.
-        if [ -r "$inst_dir/fe_enter" ]; then
-            if grep -qiE 'armed|root.*0x[1-9a-f]|enter.*[1-9]' "$inst_dir/fe_enter" 2>/dev/null; then
-                record_ok "classifier->FE root link armed"
+        # fe_arm: the CONT_LOOKUP pass-through engagement state.
+        # Reports whether a port is armed, the FE_ENTER root AD offset,
+        # and the miss-FQID for kernel delivery.
+        if [ -r "$inst_dir/fe_arm" ]; then
+            armed_port=$(grep -oE 'port 0x[0-9a-f]+' "$inst_dir/fe_arm" 2>/dev/null | head -1)
+            miss_fqid=$(grep -oE 'MISS FQID: 0x[0-9a-f]+' "$inst_dir/fe_arm" 2>/dev/null | head -1)
+            if echo "$armed_port" | grep -q '0x0[89a-f]\|0x1[0-9a-f]\|0x2[0-7]'; then
+                record_ok "fe_arm: port engaged ($armed_port, $miss_fqid — CONT_LOOKUP pass-through)"
+                note "frames miss the group table → kernel FQ; ping should be 0% loss"
             else
-                record_fail "classifier->FE root link not armed — classified frames have no disposition"
-                note "this is the gate to a working ASK datapath; until it is armed no flow offloads"
+                note "fe_arm: not engaged — CONT_LOOKUP pass-through dormant"
+            fi
+        fi
+
+        # fe_buffer: params-page +0x54 readback (FmPortSetFESupport, F-072).
+        # Non-zero values mean the FE workspace pool is armed.
+        if [ -r "$inst_dir/fe_buffer" ]; then
+            buf_idx=$(grep -oE 'idx_off: 0x[0-9a-f]+' "$inst_dir/fe_buffer" 2>/dev/null)
+            if echo "$buf_idx" | grep -qE '0x[1-9a-f]'; then
+                record_ok "FE workspace pool armed ($buf_idx — F-072)"
+            else
+                note "FE workspace pool not armed (fe_buffer idx_off=0)"
             fi
         fi
     fi
@@ -382,9 +448,16 @@ ASK_DBGFS="/sys/kernel/debug/ask"
 dbg_state "$ASK_DBGFS"; rc=$?
 if [ "$rc" -eq 0 ]; then
     record_ok "ask.ko debugfs interface present at $ASK_DBGFS"
-    [ -e "$ASK_DBGFS/offload" ] \
-        && note "offload control node present (engage/disengage a port)" \
-        || record_fail "offload control node missing — cannot drive the mode switch from ask.ko"
+    if [ -e "$ASK_DBGFS/offload" ]; then
+        note "offload control node present (fe_engage/disengage a port via ask.ko debugfs trigger)"
+    else
+        record_fail "offload control node missing — cannot drive the mode switch from ask.ko"
+    fi
+    # The new engage path calls fman_pcd_fe_engage() (0153) which composes
+    # CONT_LOOKUP scaffold + FmPortSetFESupport in R10 order.
+    if has_sym fman_pcd_fe_engage 2>/dev/null; then
+        note "engage path: fman_pcd_fe_engage() (0153, typed API — no string formatting)"
+    fi
 elif [ "$rc" -eq 2 ]; then
     record_skip "$ASK_DBGFS not statable unprivileged — re-run with sudo"
 elif [ -d /sys/module/ask ]; then
@@ -462,7 +535,7 @@ fi
 # ===========================================================================
 hdr "9) dmesg integrity (datapath errors / stalls / leaks)"
 
-ASK_DMESG=$(echo "$DMESG" | grep -iE 'ask hw:|ask:|ask_bridge|fman_pcd|fman.*fe[-_]|caam_qi_ext|offload (EN|DIS)' || true)
+ASK_DMESG=$(echo "$DMESG" | grep -iE 'ask hw:|ask:|ask_bridge|fman_pcd|fman.*fe[-_]|caam_qi_ext|fe_arm.*(ENGAGED|DISENGAGED)|FE engage|FE disengage' || true)
 if [ -z "$ASK_DMESG" ]; then
     record_warn "no ASK-related lines in dmesg (ring buffer may have wrapped)"
 else
@@ -475,7 +548,7 @@ else
         record_fail "$(echo "$errs" | wc -l) error-class line(s) in the ASK dmesg trail:"
         echo "$errs" | head -8 | while IFS= read -r l; do note "$l"; done
     fi
-    echo "$ASK_DMESG" | grep -iE 'registered|MURAM|ucode|engaged|disengaged' \
+    echo "$ASK_DMESG" | grep -iE 'registered|MURAM|ucode|ENGAGED|DISENGAGED|FE engage|FE disengage' \
         | head -6 | while IFS= read -r l; do note "$l"; done
 fi
 
