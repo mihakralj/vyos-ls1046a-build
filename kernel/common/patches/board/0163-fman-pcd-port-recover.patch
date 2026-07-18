@@ -11,7 +11,7 @@ Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -1,0 +1,48 @@
+@@ -1,0 +1,48 @@ /** fman_pcd_init() -- initialise the PCD subsystem for an FMan instance. */
 +int fman_pcd_port_recover(struct fman_pcd *pcd, u8 port_id)
 +{
 +	struct fman_port *port;
