@@ -2,8 +2,6 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A CI <ci@vyos-ls1046a>
 Date: Wed, 17 Jun 2026 12:00:00 +0000
 Subject: [PATCH] fman_pcd: FE-VM EXT_HASH flow-entry object (M2 activate,
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: A
  increment 3)
 
 Board patches 0124/0127 built the FE-VM singletons (MUX/Transition/Exit),

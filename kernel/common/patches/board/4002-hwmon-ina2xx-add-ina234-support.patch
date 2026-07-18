@@ -1,8 +1,6 @@
 From: VyOS LS1046A build <noreply@vyos-ls1046a>
 Date: Sun, 07 Jun 2026 00:00:00 +0000
 Subject: [PATCH] hwmon: ina2xx: add TI INA234 support
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: A
 
 The Mono Gateway DK populates 8x TI INA234 power monitors behind a
 pca9545 i2c mux (buses 12/13, addr 0x40-0x43). Mainline 6.18.x ina2xx

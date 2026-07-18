@@ -1,8 +1,6 @@
 From: VyOS LS1046A maintainers <ls1046a@vyos.local>
 Date: 2026-05-27
 Subject: [PATCH] DPAA1 AF_XDP pool: remove LIODN sanity gate (arm64 has no fsl,liodn)
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: A
 
 Patch 0075a added a LIODN sanity arm to af_xdp_pool_xsk_pool_attach()
 that rejected an XSK pool attach if fman_port_get_liodn(rxp) returned 0,

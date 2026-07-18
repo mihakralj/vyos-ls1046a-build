@@ -2,8 +2,6 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: ci <ci@local>
 Date: Thu, 28 May 2026 18:22:56 +0000
 Subject: [PATCH 1/2] 0086a productive DT ucode probe
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: A
 
 ---
  .../ethernet/freescale/dpaa/dpaa_fman_caps.c  | 112 +++++++++++++++++-

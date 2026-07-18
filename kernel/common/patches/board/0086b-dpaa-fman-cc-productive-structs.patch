@@ -1,8 +1,6 @@
 From: ci <ci@local>
 Date: Thu, 28 May 2026 23:40:00 +0000
 Subject: [PATCH] dpaa: FMan CC productive key/tree struct layout (M3-3b)
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: A
 
 Replaces the opaque `struct fman_cc_static_tree`/`struct fman_cc_key`
 `{ u32 reserved; }` placeholders from 0086 with the productive 5-tuple

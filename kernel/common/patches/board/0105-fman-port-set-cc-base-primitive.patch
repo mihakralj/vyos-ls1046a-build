@@ -2,8 +2,6 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A CI <ci@vyos-ls1046a>
 Date: Sun, 08 Jun 2026 18:10:00 +0000
 Subject: [PATCH] fman_port: add dormant fman_port_set_cc_base() RX coarse-
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: C
  classification base primitive (M3-3b keystone, write mechanism, no caller)
 
 M3-3b (per-flow exact-match RX FQ steering, spec sec 13) requires binding

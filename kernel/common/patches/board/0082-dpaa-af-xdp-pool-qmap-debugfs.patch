@@ -1,8 +1,6 @@
 From: vyos-ls1046a-build M3-3 step 2b <noreply@vyos-ls1046a-build>
 Date: 2026-05-27
 Subject: [PATCH] dpaa: af_xdp_pool - expose per-netdev qmap via debugfs
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: A
 
 M3-3 step 2b (second reviewable slice of spec sec 5.2 step 2 "Per-CPU
 NAPI + dedicated BMan channels").  Adds debugfs node

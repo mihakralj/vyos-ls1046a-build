@@ -2,8 +2,6 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: ci <ci@local>
 Date: Thu, 28 May 2026 21:00:00 +0000
 Subject: [PATCH] 0091 M3-3d Policer stub
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: A
 
 ---
  drivers/net/ethernet/freescale/dpaa/Kconfig   | 23 ++++++

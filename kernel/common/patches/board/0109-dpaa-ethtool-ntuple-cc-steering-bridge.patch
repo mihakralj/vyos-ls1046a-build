@@ -2,8 +2,6 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A maintainers <dpaa1@vyos-ls1046a-build>
 Date: Tue, 10 Jun 2026 14:30:00 +0000
 Subject: [PATCH] dpaa: ethtool ntuple -> FMan CC static-tree bridge (M3-3b
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: C
  production consumer)
 
 The fman_cc_tree_install() consumer API (0098/0106/0108) had no

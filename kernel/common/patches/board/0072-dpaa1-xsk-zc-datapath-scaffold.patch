@@ -1,8 +1,6 @@
 From: vyos-ls1046a-build M3 implementation <noreply@vyos-ls1046a-build>
 Date: 2026-05-26
 Subject: [PATCH] dpaa: Phase 3a - ZC datapath scaffold + qband + NAPI rx-need-wakeup dispatch
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: C
 
 Phase 3a driver-side scaffold for the AF_XDP zero-copy datapath described
 in spec sec 5.4. Lands the data-structure plumbing and the single

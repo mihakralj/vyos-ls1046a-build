@@ -2,8 +2,6 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
 Date: Mon, 23 Jun 2026 04:00:00 +0000
 Subject: [PATCH] fman_port: TX confirm bypass for silicon-HIT frames (0136)
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: C
 ---
 diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
 index 8b8e2c366..077ced237 100644

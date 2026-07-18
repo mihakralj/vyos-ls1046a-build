@@ -1,8 +1,6 @@
 From: vyos-ls1046a-build M1 implementation <noreply@vyos-ls1046a-build>
 Date: 2026-05-26
 Subject: [PATCH] dpaa: Phase 1 — advertise XSK_ZEROCOPY + wire ndo_xsk_wakeup trampoline
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: C
 
 Mainline DPAA1 6.18.x exposes XDP_DROP/PASS/TX/REDIRECT and ndo_xdp_xmit
 but does NOT advertise NETDEV_XDP_ACT_XSK_ZEROCOPY and does NOT implement
