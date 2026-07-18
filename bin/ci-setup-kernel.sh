@@ -1399,6 +1399,15 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-086 fe_recover debugfs"
 fi
 
+# F-086c: forward-declare fman_pcd_fe_recover_fops before fman_pcd_init().
+# 0163 defines the fops AFTER fman_pcd_init() closes; F-086 registers it
+# INSIDE fman_pcd_init().  Without a forward declaration the compiler sees
+# the symbol as undeclared at the registration point.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    echo 'aW1wb3J0IHBhdGhsaWIKcCA9IHBhdGhsaWIuUGF0aCgnZHJpdmVycy9uZXQvZXRoZXJuZXQvZnJlZXNjYWxlL2ZtYW4vZm1hbl9wY2QuYycpCnMgPSBwLnJlYWRfdGV4dCgpCmZ3ZCA9ICdzdGF0aWMgY29uc3Qgc3RydWN0IGZpbGVfb3BlcmF0aW9ucyBmbWFuX3BjZF9mZV9yZWNvdmVyX2ZvcHM7JyArIGNocigxMCkKYW5jaG9yID0gJ3N0cnVjdCBmbWFuX3BjZCAqZm1hbl9wY2RfaW5pdCcKaWYgJ2ZtYW5fcGNkX2ZlX3JlY292ZXJfZm9wczsnIGluIHM6CiAgICBwcmludCgnIyMjIGZtYW5fcGNkLmM6IEYtMDg2YyBmd2QgZGVjbCBhbHJlYWR5IHByZXNlbnQnKQplbGlmIGFuY2hvciBpbiBzOgogICAgcC53cml0ZV90ZXh0KHMucmVwbGFjZShhbmNob3IsIGZ3ZCArIGFuY2hvciwgMSkpCiAgICBwcmludCgnIyMjIGZtYW5fcGNkLmM6IEYtMDg2YyBmb3J3YXJkIGRlY2xhcmF0aW9uIGluc2VydGVkIGJlZm9yZSBmbWFuX3BjZF9pbml0JykKZWxzZToKICAgIHByaW50KCcjIyMgZm1hbl9wY2QuYzogRi0wODZjIFdBUk5JTkc6IGFuY2hvciBub3QgZm91bmQnKQo=' | base64 -d | python3
+    echo "### fman_pcd.c: F-086c forward declaration"
+fi
+
 # F-068: IC key probe — extend dpaa_eth IC copy to include KG key region.
 # The mainline dpaa_eth IC copy (FMBM_RICP: iciof=0, size=48B) only copies
 # parser results + timestamp + hash. The KG-extracted key at IC offset 0x48
