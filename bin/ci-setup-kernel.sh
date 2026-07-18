@@ -1392,20 +1392,43 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
 fi
 
 # F-086: Register fe_recover debugfs write node (patch 0163 Tier-1 recovery).
-# Inserts debugfs_create_file("fe_recover",...) before the fe_arm registration.
-# Usage: echo 0x11 > /sys/kernel/debug/fman_pcd/0/fe_recover
+# F-086c: Forward-declare fman_pcd_fe_recover_fops before fman_pcd_init().
+# 0163 defines the fops AFTER fman_pcd_init(); F-086 registers it INSIDE
+# fman_pcd_init(). Without a forward declaration the compiler rejects it.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    echo 'aW1wb3J0IHBhdGhsaWIKcCA9IHBhdGhsaWIuUGF0aCgnZHJpdmVycy9uZXQvZXRoZXJuZXQvZnJlZXNjYWxlL2ZtYW4vZm1hbl9wY2QuYycpCnMgPSBwLnJlYWRfdGV4dCgpCmEgPSAnZGVidWdmc19jcmVhdGVfZmlsZSgiZmVfYXJtIiwgMDYwMCwnCm4gPSBjaHIoOSkqMyArICdkZWJ1Z2ZzX2NyZWF0ZV9maWxlKCJmZV9yZWNvdmVyIiwgMDIwMCwgcGNkLT5kZWJ1Z2ZzX2RpciwgcGNkLCAmZm1hbl9wY2RfZmVfcmVjb3Zlcl9mb3BzKTsnICsgY2hyKDEwKSArIGNocig5KSozICsgYQppZiAnImZlX3JlY292ZXIiJyBpbiBzOgogICAgcHJpbnQoJyMjIyBmbWFuX3BjZC5jOiBGLTA4NiBmZV9yZWNvdmVyIGFscmVhZHkgcHJlc2VudCcpCmVsaWYgYSBpbiBzOgogICAgcC53cml0ZV90ZXh0KHMucmVwbGFjZShhLCBuLCAxKSkKICAgIHByaW50KCcjIyMgZm1hbl9wY2QuYzogRi0wODYgZmVfcmVjb3ZlciBkZWJ1Z2ZzIHJlZ2lzdGVyZWQnKQplbHNlOgogICAgcHJpbnQoJyMjIyBmbWFuX3BjZC5jOiBGLTA4NiBXQVJOSU5HOiBmZV9hcm0gYW5jaG9yIG5vdCBmb3VuZCcpCg==' | base64 -d | python3
-    echo "### fman_pcd.c: F-086 fe_recover debugfs"
-fi
+    python3 << 'PYEOF'
+import pathlib
+p = pathlib.Path('drivers/net/ethernet/freescale/fman/fman_pcd.c')
+s = p.read_text()
+changed = False
 
-# F-086c: forward-declare fman_pcd_fe_recover_fops before fman_pcd_init().
-# 0163 defines the fops AFTER fman_pcd_init() closes; F-086 registers it
-# INSIDE fman_pcd_init().  Without a forward declaration the compiler sees
-# the symbol as undeclared at the registration point.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    echo 'aW1wb3J0IHBhdGhsaWIKcCA9IHBhdGhsaWIuUGF0aCgnZHJpdmVycy9uZXQvZXRoZXJuZXQvZnJlZXNjYWxlL2ZtYW4vZm1hbl9wY2QuYycpCnMgPSBwLnJlYWRfdGV4dCgpCmZ3ZCA9ICdzdGF0aWMgY29uc3Qgc3RydWN0IGZpbGVfb3BlcmF0aW9ucyBmbWFuX3BjZF9mZV9yZWNvdmVyX2ZvcHM7JyArIGNocigxMCkKYW5jaG9yID0gJ3N0cnVjdCBmbWFuX3BjZCAqZm1hbl9wY2RfaW5pdCcKaWYgJ2ZtYW5fcGNkX2ZlX3JlY292ZXJfZm9wczsnIGluIHM6CiAgICBwcmludCgnIyMjIGZtYW5fcGNkLmM6IEYtMDg2YyBmd2QgZGVjbCBhbHJlYWR5IHByZXNlbnQnKQplbGlmIGFuY2hvciBpbiBzOgogICAgcC53cml0ZV90ZXh0KHMucmVwbGFjZShhbmNob3IsIGZ3ZCArIGFuY2hvciwgMSkpCiAgICBwcmludCgnIyMjIGZtYW5fcGNkLmM6IEYtMDg2YyBmb3J3YXJkIGRlY2xhcmF0aW9uIGluc2VydGVkIGJlZm9yZSBmbWFuX3BjZF9pbml0JykKZWxzZToKICAgIHByaW50KCcjIyMgZm1hbl9wY2QuYzogRi0wODZjIFdBUk5JTkc6IGFuY2hvciBub3QgZm91bmQnKQo=' | base64 -d | python3
-    echo "### fman_pcd.c: F-086c forward declaration"
+# F-086c: insert forward declaration before fman_pcd_init
+fwd = 'static const struct file_operations fman_pcd_fe_recover_fops;' + chr(10)
+init_anchor = 'struct fman_pcd *fman_pcd_init'
+if 'fman_pcd_fe_recover_fops;' not in s and init_anchor in s:
+    s = s.replace(init_anchor, fwd + init_anchor, 1)
+    print('### fman_pcd.c: F-086c forward declaration inserted before fman_pcd_init')
+    changed = True
+elif 'fman_pcd_fe_recover_fops;' in s:
+    print('### fman_pcd.c: F-086c forward declaration already present')
+else:
+    print('### fman_pcd.c: F-086c WARNING: fman_pcd_init anchor not found')
+
+# F-086: insert debugfs_create_file("fe_recover",...) before fe_arm registration
+arm_anchor = 'debugfs_create_file("fe_arm", 0600,'
+recover_line = chr(9)*3 + 'debugfs_create_file("fe_recover", 0200, pcd->debugfs_dir, pcd, &fman_pcd_fe_recover_fops);' + chr(10) + chr(9)*3
+if '"fe_recover"' not in s and arm_anchor in s:
+    s = s.replace(arm_anchor, recover_line + arm_anchor, 1)
+    print('### fman_pcd.c: F-086 fe_recover debugfs registered')
+    changed = True
+elif '"fe_recover"' in s:
+    print('### fman_pcd.c: F-086 fe_recover already registered')
+else:
+    print('### fman_pcd.c: F-086 WARNING: fe_arm anchor not found')
+
+if changed:
+    p.write_text(s)
+PYEOF
 fi
 
 # F-068: IC key probe — extend dpaa_eth IC copy to include KG key region.
