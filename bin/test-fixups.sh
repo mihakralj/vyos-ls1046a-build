@@ -61,5 +61,32 @@ if missing:
     ok = False
 else:
     print(f"OK [3]: all {len(set(refs))} referenced fixup files exist on disk")
+# ── 4. No-zombie gate: all fixup files match manifest ──────────────────────
+import json
+with open('bin/kernel-fixups/manifest.json') as f:
+    manifest = json.load(f)
+on_disk = set(f.name for f in pathlib.Path('bin/kernel-fixups').glob('*.py'))
+manifested = set(manifest['active'].keys())
+referenced = set(m.group(1) for m in re.finditer(
+    r'bin/kernel-fixups/(\S+\.py)', content))
+
+zombie_disk = on_disk - manifested
+zombie_manifest = manifested - on_disk
+zombie_refs = referenced - manifested
+
+all_ok = True
+if zombie_disk:
+    print(f"FAIL [4]: {len(zombie_disk)} unmanifested fixup files on disk: {zombie_disk}")
+    all_ok = False
+elif zombie_manifest:
+    print(f"FAIL [4]: {len(zombie_manifest)} manifest entries missing from disk: {zombie_manifest}")
+    all_ok = False
+elif zombie_refs:
+    print(f"FAIL [4]: {len(zombie_refs)} fixups referenced but not manifest: {zombie_refs}")
+    all_ok = False
+else:
+    print(f"OK [4]: all {len(manifested)} fixup files match manifest ({len(referenced)} referenced)")
+ok = ok and all_ok
 
 sys.exit(0 if ok else 1)
+
