@@ -1395,15 +1395,8 @@ fi
 # Inserts debugfs_create_file("fe_recover",...) before the fe_arm registration.
 # Usage: echo 0x11 > /sys/kernel/debug/fman_pcd/0/fe_recover
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    if grep -q '"fe_recover"' drivers/net/ethernet/freescale/fman/fman_pcd.c; then
-        echo "### fman_pcd.c: F-086 fe_recover already present"
-    elif grep -q '"fe_arm", 0600,' drivers/net/ethernet/freescale/fman/fman_pcd.c; then
-        sed -i 's/debugfs_create_file("fe_arm", 0600,/debugfs_create_file("fe_recover", 0200, pcd->debugfs_dir, pcd, \&fman_pcd_fe_recover_fops);\n\t\t\tdebugfs_create_file("fe_arm", 0600,/' \
-            drivers/net/ethernet/freescale/fman/fman_pcd.c
-        echo "### fman_pcd.c: F-086 fe_recover debugfs registered"
-    else
-        echo "### fman_pcd.c: F-086 WARNING: fe_arm anchor not found"
-    fi
+    echo 'aW1wb3J0IHBhdGhsaWIKcCA9IHBhdGhsaWIuUGF0aCgnZHJpdmVycy9uZXQvZXRoZXJuZXQvZnJlZXNjYWxlL2ZtYW4vZm1hbl9wY2QuYycpCnMgPSBwLnJlYWRfdGV4dCgpCmEgPSAnZGVidWdmc19jcmVhdGVfZmlsZSgiZmVfYXJtIiwgMDYwMCwnCm4gPSBjaHIoOSkqMyArICdkZWJ1Z2ZzX2NyZWF0ZV9maWxlKCJmZV9yZWNvdmVyIiwgMDIwMCwgcGNkLT5kZWJ1Z2ZzX2RpciwgcGNkLCAmZm1hbl9wY2RfZmVfcmVjb3Zlcl9mb3BzKTsnICsgY2hyKDEwKSArIGNocig5KSozICsgYQppZiAnImZlX3JlY292ZXIiJyBpbiBzOgogICAgcHJpbnQoJyMjIyBmbWFuX3BjZC5jOiBGLTA4NiBmZV9yZWNvdmVyIGFscmVhZHkgcHJlc2VudCcpCmVsaWYgYSBpbiBzOgogICAgcC53cml0ZV90ZXh0KHMucmVwbGFjZShhLCBuLCAxKSkKICAgIHByaW50KCcjIyMgZm1hbl9wY2QuYzogRi0wODYgZmVfcmVjb3ZlciBkZWJ1Z2ZzIHJlZ2lzdGVyZWQnKQplbHNlOgogICAgcHJpbnQoJyMjIyBmbWFuX3BjZC5jOiBGLTA4NiBXQVJOSU5HOiBmZV9hcm0gYW5jaG9yIG5vdCBmb3VuZCcpCg==' | base64 -d | python3
+    echo "### fman_pcd.c: F-086 fe_recover debugfs"
 fi
 
 # F-068: IC key probe — extend dpaa_eth IC copy to include KG key region.
