@@ -1,6 +1,6 @@
-# ASK2 Architecture — Canonical Index (v1.8)
+# ASK2 Architecture — Canonical Index (v1.9)
 
-**Status:** Architecture index — this document maps the ASK2 architecture landscape. It does NOT contain the architecture itself. The full ASK2 rewrite spec (v1.1–v1.7, ~6 kLOC) was retired 2026-07-14 when the Fork-B FE-VM ehash path invalidated the Fork-A/OH-port-era ceiling numbers and MURAM budget assumptions.
+**Status:** Architecture index — this document maps the ASK2 architecture landscape. It does NOT contain the architecture itself. The full ASK2 rewrite spec (v1.1–v1.7, ~6 kLOC) was retired 2026-07-14 when the Fork-B FE-VM ehash path invalidated the Fork-A/OH-port-era ceiling numbers and MURAM budget assumptions. v1.9 adds the 2026-07-18 journey review and 0164 true-ZC fix to the execution plans index.
 
 ## AI READING INSTRUCTION
 
@@ -52,12 +52,13 @@ This document is an index. For silicon facts, go to `arch/`. For design intent, 
 
 | Document | Topic |
 |---|---|
-| `plans/DUAL-DATAPLANE.md` | Dataplane mode state machine (S0/S1/S2). |
-| `plans/ASK2-DEVELOPMENT-PLAN.md` | Fork-B execution plan. |
+| `plans/DUAL-DATAPLANE.md` | Dataplane mode state machine (S0/S1/S2). v1.2 (2026-07-18). |
+| `plans/ASK2-DEVELOPMENT-PLAN.md` | Fork-B execution plan. **Frozen 2026-06-16 — superseded by journey review below.** |
+| `plans/ASK2-JOURNEY-REVIEW-2026-07-18.md` | **Current ASK2 status + forward plan.** M2 PASS, M3 infrastructure, NXP SDK oracle comparison, 0163/0164, F-072b/c/d, defect register. |
 | `plans/ASK2-PHASE2-AUTOMATION-PLAN.md` | Flow offload automation (M2 gate passed: 7.37 Gbps). |
 | `plans/COMPLETION-PLAN.md` | Consolidated cross-track roadmap. |
 | `plans/OFFLOAD-CAPABILITIES.md` | Living inventory of silicon-verified offload capabilities. |
-| `plans/MODULE-INVENTORY.md` | Delivered kernel patch inventory (91 board patches). |
+| `plans/MODULE-INVENTORY.md` | Delivered kernel patch inventory (107 board patches as of 2026-07-18). |
 
 ## 5. Architecture decision records (archive)
 

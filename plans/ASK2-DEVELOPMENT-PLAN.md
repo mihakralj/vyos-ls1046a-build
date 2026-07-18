@@ -1,6 +1,14 @@
 # ASK2 Development Plan — from dormant substrate to operational offload
 **Version 1.0.0 · 2026-06-16 · HADS 1.0.0**
 
+> **⚠ SUPERSEDED 2026-07-18 by [`plans/ASK2-JOURNEY-REVIEW-2026-07-18.md`](ASK2-JOURNEY-REVIEW-2026-07-18.md).**
+> This document is frozen at the 2026-06-16 state (M0 oracle delivery, Fork-B decision).
+> The journey review incorporates 32 days of subsequent development including:
+> M2 gate PASS (7.37 Gbps, 0.16% CPU), F-072b/c/d auto-arm of FmPortSetFESupport,
+> 0163 `fman_pcd_port_recover`, 0164 true-ZC fix, and the settled dispatch topology.
+> **Read the journey review for current state; this document is preserved for historical
+> context on the Fork-A→Fork-B transition and the M0 architectural decisions.**
+
 ---
 
 ## AI READING INSTRUCTION
