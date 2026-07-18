@@ -1391,6 +1391,29 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### fman_pcd.c: F-061 fe_probe debugfs (KG key dump from FE pool workspace)"
 fi
 
+# F-086: Register fe_recover debugfs write node (patch 0163 Tier-1 recovery).
+# Adds debugfs_create_file("fe_recover", 0200, ...) right before the
+# fe_arm registration so userspace can trigger fman_pcd_port_recover().
+# Usage: echo 0x11 > /sys/kernel/debug/fman_pcd/0/fe_recover
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 - << 'F086EOF'
+import pathlib, sys
+p = pathlib.Path('drivers/net/ethernet/freescale/fman/fman_pcd.c')
+s = p.read_text()
+anchor = 'debugfs_create_file("fe_arm", 0600,'
+insert = '\t\t\tdebugfs_create_file("fe_recover", 0200,\n\t\t\t\t\t    pcd->debugfs_dir, pcd,\n\t\t\t\t\t    &fman_pcd_fe_recover_fops);\n\t\t\t'
+if 'fe_recover' in s:
+    print('### fman_pcd.c: F-086 fe_recover already present')
+elif anchor in s:
+    p.write_text(s.replace(anchor, insert + anchor, 1))
+    print('### fman_pcd.c: F-086 fe_recover debugfs registered')
+else:
+    print('### fman_pcd.c: F-086 WARNING: fe_arm anchor not found', file=sys.stderr)
+    sys.exit(1)
+F086EOF
+    echo "### fman_pcd.c: F-086 fe_recover debugfs"
+fi
+
 # F-068: IC key probe — extend dpaa_eth IC copy to include KG key region.
 # The mainline dpaa_eth IC copy (FMBM_RICP: iciof=0, size=48B) only copies
 # parser results + timestamp + hash. The KG-extracted key at IC offset 0x48
