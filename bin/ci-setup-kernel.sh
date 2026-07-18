@@ -1201,6 +1201,49 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-073D: Terminal ENQ (w0=0x02010000, w3=0) per 210.10.1 §7.1/§7.3"
 fi
 
+# F-073E: Fix ENQ encoding to SDK-correct NIA mode.
+# F-073D uses fqidEn=1 (raw FQID in w1=0x292) — this does NOT work.
+# The BMI doesn't dispatch engine 0 action 0x292 → ENQ no-ops → buffer leaks.
+# SDK oracle: w0=0x02000008 (ws=8, fqidEn=0), w1=0x00500002 (NIA_BMI_AC_ENQ_FRAME),
+# w3=exit_off (chain to EXIT(DEALLOCATE)). The FQID comes from the KG scheme's
+# hfqb register (0x300 = first kernel-polled PCD FQ 768).
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 << 'F086PY'
+import pathlib
+p = pathlib.Path('drivers/net/ethernet/freescale/fman/fman_pcd.c')
+s = p.read_text()
+
+# F-073D already ran and set these lines. Override with SDK-correct values.
+t9 = chr(9)
+old_flags = t9 + 'p.flags = FMAN_FE_ENQ_FQID;' + t9*2 + '/* F-073D: ENQ fqidEn=1, ws=0 per 210.10.1'
+new_flags = t9 + 'p.flags = 8;' + t9*3 + '/* F-073E: NIA mode (ws=8, fqidEn=0) — KG hfqb delivery'
+if old_flags in s:
+    s = s.replace(old_flags, new_flags, 1)
+    print('### F-073E: ENQ flags -> NIA mode')
+else:
+    print('### F-073E: flags anchor not found (may already be SDK-correct)')
+
+old_nia = t9 + 'p.nia = fqid;' + t9*3 + '/* F-073D: 24-bit FQID in w1 */'
+new_nia = t9 + 'p.nia = 0x00500002;' + t9*2 + '/* F-073E: NIA_BMI_AC_ENQ_FRAME — enqueue via kg hfqb'
+if old_nia in s:
+    s = s.replace(old_nia, new_nia, 1)
+    print('### F-073E: ENQ nia -> 0x00500002 (NIA_BMI_AC_ENQ_FRAME)')
+else:
+    print('### F-073E: nia anchor not found')
+
+old_next = t9 + 'p.next_fe_off = 0;' + t9*3 + '/* F-073D: terminal (w3=0)'
+new_next = t9 + 'p.next_fe_off = pcd->fe_exit_off;' + t9 + '/* F-073E: chain ENQ -> EXIT(DEALLOCATE)'
+if old_next in s:
+    s = s.replace(old_next, new_next, 1)
+    print('### F-073E: ENQ next_fe_off -> chained to EXIT')
+else:
+    print('### F-073E: next_fe_off anchor not found')
+
+p.write_text(s)
+F086PY
+    echo "### F-073E: SDK ENQ encoding applied"
+fi
+
 
 # M2-4: fix fman_port_lookup_rx — all LS1046A fman_port->port_id==0
 # (mainline of_alias_get_id fallback returns -ENODEV).  The lookup
