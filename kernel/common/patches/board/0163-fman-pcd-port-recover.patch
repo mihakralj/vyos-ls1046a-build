@@ -34,13 +34,13 @@ e.g.:  echo 0x11 > /sys/kernel/debug/fman_pcd/0/fe_recover
 
 Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 ---
- drivers/net/ethernet/freescale/fman/fman_pcd.c | 130 ++++++++++++++++++++++
- 1 file changed, 130 insertions(+)
+ drivers/net/ethernet/freescale/fman/fman_pcd.c | 133 ++++++++++++++++++++++
+ 1 file changed, 133 insertions(+)
 
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -7,6 +7,136 @@ err_free:
+@@ -7,6 +7,139 @@ err_free:
  }
  EXPORT_SYMBOL_GPL(fman_pcd_init);
  
@@ -125,15 +125,14 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethern
 +	/* Step 4: zero the depletion counter. */
 +	iowrite32be(0, (void __iomem *)((u8 __iomem *)pp + 0x58));
 +
-+	/* Step 5: brief settle so in-flight tasks see the new free-list. */
-+	mdelay(1);
-+
-+	/* Step 6: re-enable BMI RX. */
++	/* Step 5: re-enable BMI RX — stalled ALLOCATE tasks now see a
++	 * full free-list and can resume without a delay.
++	 */
 +	ret = fman_port_enable(port);
 +	if (ret)
 +		return ret;
 +
-+	/* Step 7: verify depletion counter stayed zero. */
++	/* Step 6: verify depletion counter stayed zero. */
 +	v58 = ioread32be((void __iomem *)((u8 __iomem *)pp + 0x58));
 +	if (v58 != 0)
 +		return -EAGAIN;
@@ -143,6 +142,12 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethern
 +	return 0;
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_port_recover);
++
++static int fman_pcd_fe_recover_open(struct inode *inode, struct file *file)
++{
++	/* Minimal open for a write-only recovery node. */
++	return single_open(file, NULL, inode->i_private);
++}
 +
 +static ssize_t fman_pcd_fe_recover_write(struct file *f,
 +					  const char __user *ubuf,
@@ -167,10 +172,8 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethern
 +
 +static const struct file_operations fman_pcd_fe_recover_fops = {
 +	.owner   = THIS_MODULE,
-+	.open    = fman_pcd_fe_arm_open,
-+	.read    = seq_read,
++	.open    = fman_pcd_fe_recover_open,
 +	.write   = fman_pcd_fe_recover_write,
-+	.llseek  = seq_lseek,
 +	.release = single_release,
 +};
 +
