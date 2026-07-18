@@ -1050,6 +1050,7 @@ drivers/net/ethernet/freescale/fman/fman_pcd*.c    -merge
 drivers/net/ethernet/freescale/fman/fman_keygen.c  -merge
 MERGATTR
     git -c user.email=ci@local -c user.name=ci add -A .gitattributes
+    git -c user.email=ci@local -c user.name=ci add -A
     git -c user.email=ci@local -c user.name=ci commit -q -m "kernel pristine (pre-patches)" --allow-empty || true
 fi
 
