@@ -2,6 +2,8 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A CI <ci@vyos-ls1046a>
 Date: Tue, 16 Jun 2026 21:00:00 +0000
 Subject: [PATCH] fman_pcd: coarse ask offload engage/disengage mode-switch
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: A
  (M1 fman_pcd.h export)
 
 Expose a two-symbol coarse entry point the out-of-tree ask.ko calls to

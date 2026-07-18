@@ -1,6 +1,8 @@
 From: vyos-ls1046a-build Phase 1 implementation <noreply@vyos-ls1046a-build>
 Date: 2026-05-26
 Subject: [PATCH] dpaa: af_xdp_pool - implement xsk_wakeup NAPI kick (Phase 1 wake gate)
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: A
 
 Phase 1 wake-gate deliverable per specs/dpaa1-afxdp-modernization-spec.md
 sec 5.2.  Replaces the -EOPNOTSUPP stub installed by patch 0073 with the

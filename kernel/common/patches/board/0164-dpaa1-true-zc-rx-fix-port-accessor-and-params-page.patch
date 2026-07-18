@@ -2,6 +2,8 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A CI <ci@vyos-ls1046a>
 Date: Sat, 18 Jul 2026 04:17:00 +0000
 Subject: [PATCH] dpaa1: fix true-ZC RX — wrong port accessor and missing params page
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: A
 
 Two conformance gaps against arch/fman-pcd-api-reference.md §12 (Group I)
 that caused fman_port_set_rx_bpool() to return -EINVAL (-22) on every

@@ -1,6 +1,8 @@
 From: vyos-ls1046a-build CI <ci@local>
 Date: Mon, 16 Jun 2026 00:00:00 +0000
 Subject: [PATCH] dpaa: export OOT CC-target resolvers
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: C
  (dpaa_get_rx_fman_port/dpaa_get_tx_fqid)
 
 Single-image Gap-A prerequisite for repointing the out-of-tree ASK2 PCD

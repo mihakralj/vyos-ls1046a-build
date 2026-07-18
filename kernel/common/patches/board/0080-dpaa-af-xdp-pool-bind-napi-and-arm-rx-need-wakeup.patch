@@ -1,6 +1,8 @@
 From: vyos-ls1046a-build M3-3 step 1 <noreply@vyos-ls1046a-build>
 Date: 2026-05-27
 Subject: [PATCH] dpaa: af_xdp_pool - bind NAPI to qmap + arm rx-need-wakeup
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: A
 
 M3-3 step 1 (first reviewable slice of Phase 3) per spec sec 5.2 final
 paragraph and sec 5.4 RX path step 5.  Two minimal, runtime-observable

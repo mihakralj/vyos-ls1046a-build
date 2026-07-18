@@ -1,6 +1,8 @@
 From: vyos-ls1046a-build M0 implementation <noreply@vyos-ls1046a-build>
 Date: 2026-05-26
 Subject: [PATCH 2/2] dpaa: wire flavor-ops install/teardown into probe/remove
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: C
 
 With the abstraction landed in patch 0068, wire two call sites:
 

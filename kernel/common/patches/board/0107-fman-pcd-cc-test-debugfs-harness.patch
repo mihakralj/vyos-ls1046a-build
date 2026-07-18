@@ -2,6 +2,8 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A CI <ci@vyos-ls1046a>
 Date: Tue, 10 Jun 2026 01:20:00 +0000
 Subject: [PATCH] fman: add debugfs CC steering test harness (M3-3b
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: A
  DUT-validation trigger)
 
 The fman_cc_tree_install() consumer API (0098 + 0106) has no in-tree

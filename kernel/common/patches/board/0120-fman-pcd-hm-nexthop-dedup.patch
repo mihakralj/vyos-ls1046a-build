@@ -1,6 +1,8 @@
 From: vyos-ls1046a-build CI <ci@local>
 Date: Sat, 14 Jun 2026 00:00:00 +0000
 Subject: [PATCH] dpaa: FMan PCD next-hop HM dedup refcount API
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: A
  (fman_hm_nexthop_get/put)
 
 Adds a small refcounted next-hop cache on top of the productive HM op-set

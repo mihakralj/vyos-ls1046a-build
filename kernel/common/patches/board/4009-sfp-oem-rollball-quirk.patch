@@ -1,6 +1,8 @@
 From: VyOS LS1046A Build <build@vyos.io>
 Date: Sun, 10 May 2026 00:00:00 +0000
 Subject: [PATCH] net: sfp: upgrade OEM SFP-10G-T quirk to rewrite SR codes
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: C
 
 The unbranded "OEM SFP-10G-T" 10GBASE-T copper SFP+ module advertises
 SFP-MSA transceiver code 0x10 (10GBASE-SR fiber) in its EEPROM byte 3

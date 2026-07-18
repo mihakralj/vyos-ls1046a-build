@@ -2,6 +2,8 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A CI <ci@vyos-ls1046a>
 Date: Thu, 29 May 2026 06:10:00 +0000
 Subject: [PATCH] dpaa1: M3-3 step 7 sub-increment 3 - true-ZC RX Recover
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: C
  read-side (xsk_zc_rx_recovered counter, dormant recovery branch)
 
 M3-3 step 7 (true zero-copy RX, spec sec 6.1.7) has a three-mechanism

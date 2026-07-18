@@ -1,6 +1,8 @@
 From: VyOS LS1046A Build <build@vyos.io>
 Date: Mon, 30 Mar 2026 00:00:00 +0000
 Subject: [PATCH] net: sfp: treat EINVAL from sfp_add_phy as non-fatal for
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: C
  rollball modules
 
 When a rollball copper SFP+ module (e.g. SFP-10G-T with RTL8261 PHY)

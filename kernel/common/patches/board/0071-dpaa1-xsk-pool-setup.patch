@@ -1,6 +1,8 @@
 From: vyos-ls1046a-build M2 implementation <noreply@vyos-ls1046a-build>
 Date: 2026-05-26
 Subject: [PATCH] dpaa: Phase 2 — AF_XDP XSK pool fields + XDP_SETUP_XSK_POOL dispatch
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: C
 
 Phase 2 driver-side scaffold for the AF_XDP zerocopy plumbing described
 in spec sec 5.3. Lands two pieces that ALL flavor modules and the future

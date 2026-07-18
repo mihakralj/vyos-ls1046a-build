@@ -1,6 +1,8 @@
 From: vyos-ls1046a-build CI <ci@local>
 Date: Sun, 14 Jun 2026 00:00:00 +0000
 Subject: [PATCH] dpaa: FMan PCD HM L3-forward op-set (RMV_ETHERNET +
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: A
  INSRT_GENERIC + IPV4_FORWARD)
 
 Extends the dpaa1 Header-Manipulation op-set (board patches 0090a/0099)

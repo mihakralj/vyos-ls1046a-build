@@ -2,6 +2,8 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A CI <ci@vyos-ls1046a>
 Date: Fri, 30 May 2026 04:26:00 +0000
 Subject: [PATCH] dpaa/af_xdp_pool: add dormant true-ZC RX Recover sw-ring
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: A
  reverse-map (M3-3 step 7 sub-increment 4a, infrastructure, no datapath
  consumer)
 

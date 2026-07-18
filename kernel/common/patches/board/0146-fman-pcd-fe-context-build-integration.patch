@@ -1,5 +1,7 @@
 From: ASK2 Phase 2 integration v2
 Subject: [PATCH] fman_pcd: FE-VM context builder call during fe_arm engage (0146)
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: A
 
 Patch 0135 defines fman_pcd_fe_context_build() but never calls it.
 The FE-VM cannot dispatch flow lookups without runtime context

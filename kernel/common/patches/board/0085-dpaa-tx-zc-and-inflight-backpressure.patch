@@ -1,6 +1,8 @@
 From: vyos-ls1046a-build M3-3 step 5 v3 <noreply@vyos-ls1046a-build>
 Date: 2026-05-28
 Subject: [PATCH] dpaa: TX ZC submission, xsk_tx_inflight backpressure, TxConf round-trip closure (v3: stand-alone)
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: C
 
 M3-3 step 5 (spec sec 6.1.4, "TX ZC + backpressure + round-trip closure").
 Closes the AF_XDP zero-copy datapath by wiring three new flavor ops into

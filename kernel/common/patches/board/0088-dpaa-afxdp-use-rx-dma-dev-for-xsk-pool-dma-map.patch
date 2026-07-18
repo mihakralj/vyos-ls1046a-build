@@ -1,6 +1,8 @@
 From: vyos-ls1046a-build M3-3 step 6 <noreply@vyos-ls1046a-build>
 Date: 2026-05-28
 Subject: [PATCH] dpaa: use priv->rx_dma_dev for xsk_pool_dma_map (fix BMan ErrInt)
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: A
 
 M3-3 step 6 blocker A residual root cause (spec sec 6.1.5,
 "BMan Invalid Command Verb"). After patches 0086 (8-buffer chunked
