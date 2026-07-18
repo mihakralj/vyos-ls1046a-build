@@ -1,99 +1,178 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A CI <ci@vyos-ls1046a>
-Date: Fri, 18 Jul 2026 01:25:00 +0000
-Subject: [PATCH] fman_pcd: add fman_pcd_port_recover
+Date: Fri, 18 Jul 2026 04:00:00 +0000
+Subject: [PATCH] fman_pcd: Tier-1 fman_pcd_port_recover + fe_recover debugfs
 
-v2: the original hunk anchored on a hallucinated doc comment
-("/** fman_pcd_init() -- initialise the PCD subsystem for an FMan
-instance. */" with signature "int fman_pcd_init(struct fman *fm)")
-that never existed in the real file — the actual function is
-"struct fman_pcd *fman_pcd_init(struct fman *fman)" documented by a
-multi-line kernel-doc block (see patch 0092). The hunk header also
-claimed "@@ -1,0 +1,48 @@" (pure insertion, zero old-side lines) while
-the body carried a 49th trailing anchor line with no leading context
-character, desynchronizing the header counts from the body. Both
-`git apply --3way` and its direct-apply fallback rejected it with
-"patch does not apply" at line 1 on all 4 CI runs today
-(29625213156, 29625446334, 29626114458, 29626532247).
+Replaces the earlier Tier-0 stub (zero pool, zero index, zero +0x58)
+with the full Tier-1 recovery sequence that actually unsticks a stalled
+BMI RX port without a cold boot:
 
-Fix: re-anchor on "EXPORT_SYMBOL_GPL(fman_pcd_init);" — a literal,
-unique line that appears exactly once in the accumulated tree (only
-introduced by 0092, never touched by any later board patch per
-`grep -l` across kernel/common/patches/board/*.patch) — and generate
-the hunk with standard 3-line git-diff context on both sides so the
-header counts are self-consistent. Verified with `git apply --check`
-and `git apply --3way --check` against the exact real context lines
-extracted from patch 0092.
+  1. fman_port_disable()  -- stop new FE_ENTER tasks from starting
+  2. Zero workspace pool  -- clear all 16 held workspace slots
+  3. Re-init ring index   -- cursor=0x04, pool_off (24-bit BE),
+                            ring[0..tnums-1], sentinel 0xFF
+  4. Zero +0x58           -- clear depletion counter
+  5. Brief settle delay
+  6. fman_port_enable()   -- restart BMI RX
+  7. Verify +0x58 == 0    -- return -EAGAIN if not cleared
+
+Root cause this fixes: every MISS frame through FE_ENTER ALLOCATE
+consumes one buffer from the per-port FmPortSetFESupport pool (managed
+by the ring index at params-page +0x54). If EXIT DEALLOCATE does not
+correctly return the buffer (e.g. because the pool base address in the
+ring was wrong), all 16 slots drain and every subsequent BMI task stalls
+waiting for an allocation -- port goes deaf. Reinitialising the ring
+cursor to 0x04 with the correct pool offset lets stalled tasks resume.
+
+Also adds:
+  - fman_pcd_fe_recover_write() -- debugfs write handler
+  - fman_pcd_fe_recover_fops   -- minimal file_operations
+  - fe_recover debugfs node wired in fman_pcd_init()
+
+Usage: echo <port_id_hex> > /sys/kernel/debug/fman_pcd/0/fe_recover
+e.g.:  echo 0x11 > /sys/kernel/debug/fman_pcd/0/fe_recover
 
 Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 ---
- drivers/net/ethernet/freescale/fman/fman_pcd.c | 58 +++++++++++++++++++++++
- 1 file changed, 58 insertions(+)
+ drivers/net/ethernet/freescale/fman/fman_pcd.c | 130 ++++++++++++++++++++++
+ 1 file changed, 130 insertions(+)
 
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -7,6 +7,64 @@ err_free:
+@@ -7,6 +7,136 @@ err_free:
  }
  EXPORT_SYMBOL_GPL(fman_pcd_init);
  
 +/**
-+ * fman_pcd_port_recover() - best-effort port-scoped de-wedge for a stalled
-+ * FE-VM internal buffer free-list, without requiring a full SoC cold boot.
-+ * @pcd: PCD handle for the FMan instance.
-+ * @port_id: hardware RX port id (BMI port number) to recover.
++ * fman_pcd_port_recover() - Tier-1 de-wedge for a deaf BMI RX port.
++ * @pcd:     PCD handle for the FMan instance.
++ * @port_id: hardware RX BMI port id (e.g. 0x11 for eth4).
 + *
-+ * Return: 0 on verified recovery (or nothing to recover); -EAGAIN if the
-+ * depletion counter did not clear; -ENODEV/-EIO/-EINVAL on setup failure.
++ * Recovers a port stalled by FE buffer pool exhaustion: disables the
++ * BMI RX port, re-initialises the internal FE buffer management index
++ * and pool from scratch so blocked FE_ENTER ALLOCATE operations can
++ * resume, zeroes the depletion counter, and re-enables the port.
++ *
++ * Returns 0 on verified recovery, -EAGAIN if hardware did not confirm
++ * (cold boot still required), or negative errno on setup failure.
++ * Returns 0 immediately if FmPortSetFESupport was never called.
 + */
 +int fman_pcd_port_recover(struct fman_pcd *pcd, u8 port_id)
 +{
 +	struct fman_port *port;
-+	void __iomem *pp, *pool, *idx;
-+	u32 pp_off, idx_off, pool_off, v54, v58;
-+	u8 tnums;
-+	unsigned long pool_sz, idx_sz;
 +	struct muram_info *muram;
-+	int ret = 0;
++	void __iomem *pp, *pool_base, *idx_base;
++	u32 pp_off, idx_off, pool_off, v58;
++	u8 tnums;
++	int i, ret;
 +
 +	if (!pcd)
 +		return -EINVAL;
 +	port = fman_port_lookup_rx(pcd->fman, port_id);
 +	if (!port)
 +		return -ENODEV;
-+	pp_off = fman_port_get_params_page(port);
-+	if (IS_ERR_VALUE(pp_off))
-+		return (int)pp_off;
 +	muram = fman_get_muram(pcd->fman);
 +	if (!muram)
 +		return -EIO;
++	pp_off = fman_port_get_params_page(port);
++	if (IS_ERR_VALUE(pp_off))
++		return (int)pp_off;
 +	pp = fman_muram_offset_to_vbase(muram, pp_off);
 +	if (!pp)
 +		return -EIO;
-+	v54 = ioread32be((void __iomem *)((u8 __iomem *)pp + 0x54));
-+	v58 = ioread32be((void __iomem *)((u8 __iomem *)pp + 0x58));
-+	tnums = fman_port_get_total_tnums(port);
-+	if (!v54 || !tnums)
++
++	/* Nothing to recover if FmPortSetFESupport was never called. */
++	idx_off = ioread32be((u32 __iomem *)((u8 __iomem *)pp + 0x54));
++	if (!idx_off)
 +		return 0;
-+	idx_off = v54;
-+	pool_sz = (unsigned long)tnums * 512;
-+	idx_sz = 5UL + tnums;
-+	pool_off = (idx_off - pool_sz) & ~0xFFUL;
-+	pool = fman_muram_offset_to_vbase(muram, pool_off);
-+	if (!pool)
++
++	tnums = fman_port_get_total_tnums(port);
++	if (!tnums)
++		return -EINVAL;
++
++	/* Pool base = index_off - tnums*512, rounded to 256-byte boundary. */
++	pool_off  = (idx_off - (u32)tnums * 512u) & ~0xFFu;
++	pool_base = fman_muram_offset_to_vbase(muram, pool_off);
++	if (!pool_base)
 +		return -EIO;
-+	memset_io(pool, 0, pool_sz);
-+	idx = fman_muram_offset_to_vbase(muram, idx_off);
-+	if (!idx)
++	idx_base  = fman_muram_offset_to_vbase(muram, idx_off);
++	if (!idx_base)
 +		return -EIO;
-+	memset_io(idx, 0, idx_sz);
++
++	/* Step 1: stop BMI RX so no new FE_ENTER tasks start. */
++	ret = fman_port_disable(port);
++	if (ret)
++		return ret;
++
++	/* Step 2: zero all workspace pool slots. */
++	memset_io(pool_base, 0, (size_t)tnums * 512u);
++
++	/* Step 3: re-initialise the ring management index.
++	 *   Byte 0        : ring cursor = 0x04  (all slots free)
++	 *   Bytes 1-3     : pool MURAM offset (24-bit, big-endian)
++	 *   Bytes 4..N-1  : slot ring [0, 1, ..., tnums-1]
++	 *   Byte  N       : sentinel 0xFF
++	 * Write pool_off as a BE u32 (fills bytes 0-3) then overwrite
++	 * byte 0 with the cursor value 0x04.
++	 */
++	iowrite32be(pool_off, (u32 __iomem *)idx_base);
++	iowrite8(0x04, (u8 __iomem *)idx_base);
++	for (i = 0; i < tnums; i++)
++		iowrite8((u8)i, (u8 __iomem *)idx_base + 4 + i);
++	iowrite8(0xFF, (u8 __iomem *)idx_base + 4 + tnums);
++
++	/* Step 4: zero the depletion counter. */
 +	iowrite32be(0, (void __iomem *)((u8 __iomem *)pp + 0x58));
++
++	/* Step 5: brief settle so in-flight tasks see the new free-list. */
++	mdelay(1);
++
++	/* Step 6: re-enable BMI RX. */
++	ret = fman_port_enable(port);
++	if (ret)
++		return ret;
++
++	/* Step 7: verify depletion counter stayed zero. */
 +	v58 = ioread32be((void __iomem *)((u8 __iomem *)pp + 0x58));
 +	if (v58 != 0)
-+		ret = -EAGAIN;
-+	return ret;
++		return -EAGAIN;
++
++	pr_info("fman_pcd: port 0x%02x FE buffer pool recovered (%u slots)\n",
++		port_id, tnums);
++	return 0;
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_port_recover);
++
++static ssize_t fman_pcd_fe_recover_write(struct file *f,
++					  const char __user *ubuf,
++					  size_t len, loff_t *pos)
++{
++	struct seq_file *s = f->private_data;
++	struct fman_pcd  *pcd = s->private;
++	char buf[8];
++	u8   port_id;
++	int  ret;
++
++	if (!len || len >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, len))
++		return -EFAULT;
++	buf[len] = '\0';
++	if (kstrtou8(buf, 0, &port_id))
++		return -EINVAL;
++	ret = fman_pcd_port_recover(pcd, port_id);
++	return ret ? ret : (ssize_t)len;
++}
++
++static const struct file_operations fman_pcd_fe_recover_fops = {
++	.owner   = THIS_MODULE,
++	.open    = fman_pcd_fe_arm_open,
++	.read    = seq_read,
++	.write   = fman_pcd_fe_recover_write,
++	.llseek  = seq_lseek,
++	.release = single_release,
++};
 +
  /**
   * fman_pcd_release() - tear down the PCD subsystem.

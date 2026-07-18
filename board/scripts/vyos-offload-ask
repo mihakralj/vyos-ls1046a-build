@@ -107,22 +107,26 @@ disengage() {
 }
 
 # ---------------------------------------------------------------------------
-# hit_engage [keysize] [ekfc_hex]
+# hit_engage [keysize] [ekfc_hex] [preflow_key_hex]
 #
 # SHORT-TERM HIT VERIFICATION: builds full FE chain via debugfs verbs with
 # miss_fqid as ENQ target, then arms RCCB→FE_ENTER direct.
 #
-# Defaults: keysize=8 (SIP+DIP, safe — won't stall BMI port)
-#           ekfc=00180000 (IPSRC1|IPDST1 = 8 bytes MSB-first)
+# CRITICAL: preflow_key_hex (optional) is inserted BEFORE the fe_arm write.
+# This eliminates the MISS window between RFPNE switching to AC_CC mode and
+# flow insertion — every arriving frame is a HIT from the very first packet.
+# Without pre-insertion, the pool depletes from MISS frames and port goes deaf.
 #
-# Once keysize=8 HIT is confirmed, iterate to:
-#           keysize=13  ekfc=001c0006  (full 5-tuple)
+# Defaults: keysize=8 (SIP+DIP, safe)
+#           ekfc=00180000 (IPSRC1|IPDST1 = 8 bytes MSB-first)
+#           preflow = (none — insert separately via flow-add)
 # ---------------------------------------------------------------------------
 hit_engage() {
-    local keysize ekfc miss_fqid hash_fe_off fe_enter_off enq_fe_off
+    local keysize ekfc preflow miss_fqid hash_fe_off fe_enter_off enq_fe_off
 
     keysize="${1:-8}"
     ekfc="${2:-00180000}"
+    preflow="${3:-}"
 
     miss_fqid=$(resolve_fqid)
     [ -z "$miss_fqid" ] && die "cannot resolve port Rx FQID — sysfs fqids not available"
@@ -167,7 +171,18 @@ hit_engage() {
     [ -z "$fe_enter_off" ] && die "cannot read FE_ENTER offset from fe_enter"
     info "HIT-TEST: FE_ENTER AD @ $fe_enter_off"
 
-    # Step 9 (now final): engage RCCB→FE_ENTER direct (fe_enter_off != 0 → FE-VM active)
+    # CRITICAL: pre-insert flow BEFORE engaging RFPNE to AC_CC mode.
+    # This eliminates the MISS window — if the first frame is a HIT,
+    # the FE buffer pool is consumed AND returned correctly (no leak).
+    # Without this, background traffic fills the pool before flow-add.
+    if [ -n "$preflow" ]; then
+        enq_fe_off=$(read_fe_offset "fe_enq" 'enq\[0\]\s+off=')
+        echo "add 0 ${preflow} ${enq_fe_off:-0}" > "$PCD_BASE/fe_flow" \
+            || die "pre-flow insert failed"
+        info "HIT-TEST: pre-inserted flow key=$preflow (bucket will be computed by kernel)"
+    fi
+
+    # Step 10 (final): engage RCCB→FE_ENTER direct (fe_enter_off != 0 → FE-VM active)
     echo "engage $PORT $fe_enter_off $miss_fqid $ekfc" > "$PCD_BASE/fe_arm" \
         || die "fe_arm engage failed"
 
