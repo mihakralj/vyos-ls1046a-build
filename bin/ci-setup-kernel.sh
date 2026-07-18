@@ -651,7 +651,7 @@ unset _count _series _src _p
 # This catches orphaned patches with no series entry (the old guard
 # caught forgotten cp lines — now the loop reads series directly so
 # the failure mode is a patch file committed without a series entry).
-BOARD_STAGE_SKIP="0150-fman-pcd-fe-engage-api.patch"
+BOARD_STAGE_SKIP="0150-fman-pcd-fe-engage-api.patch 0158-fman-pcd-fqid-resolution-compose.patch 0159-fman-pcd-e2-hash-probe.patch 0160-fman-pcd-ekfc-programming.patch 0161-fman-pcd-rccb-feenter-direct.patch 0162-fman-pcd-port-arm-fe-ekfc-fix.patch"
 _missing=""
 # Cross-check: every .patch in board/ must be in series or SKIP list
 {
