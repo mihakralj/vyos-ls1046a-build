@@ -110,3 +110,4 @@ kernel/common/files/fman_pcd_plcr_test.c
 kernel/common/patches/board/0103d-dpaa1-true-zc-rx-readback-debug.patch
 data/vyos-1x-025-policer-offload.patch
 $HOME/.cache/
+_fixup_bash_check.sh
