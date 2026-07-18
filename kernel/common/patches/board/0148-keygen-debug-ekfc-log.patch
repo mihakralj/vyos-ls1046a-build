@@ -1,8 +1,6 @@
 From: VyOS LS1046A Build <build@vyos.io>
 Date: Sun, 6 Jul 2026 00:00:00 +0000
 Subject: [PATCH] debug(ask2): 0148 — log KG scheme EKFC/MV during setup
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: C
 
 Add pr_info in keygen_scheme_setup to log the exact EKFC, match vector,
 hash control, and FQ base values written to hardware for each scheme.

@@ -2,8 +2,6 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
 Date: Mon, 23 Jun 2026 05:00:00 +0000
 Subject: [PATCH] fman_pcd: MANIP creation + chain API (0137) — SDK HMAN_OC_IP_MANIP=0x34 fix
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: A
 
 Fixes critical bug: HMAN_OC_IP_MANIP was 0x36, SDK fm_manip.h defines 0x34.
 Adds HMCD_LAST intermediate clearing in chain_create (SDK FmPcdManipChain pattern).

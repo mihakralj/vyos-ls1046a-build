@@ -2,8 +2,6 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A CI <ci@vyos-ls1046a>
 Date: Tue, 10 Jun 2026 12:00:00 +0000
 Subject: [PATCH] fman: per-key FQ enqueue-AD + silicon-truth CC key layout
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: A
  (M3-3b close-out)
 
 Closes the last M3-3b gap (spec sec 5.4): a CC key can now steer a

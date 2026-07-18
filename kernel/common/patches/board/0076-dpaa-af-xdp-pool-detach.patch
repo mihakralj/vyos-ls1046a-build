@@ -1,8 +1,6 @@
 From: VyOS LS1046A Build <build@vyos-ls1046a-build>
 Date: Tue, 26 May 2026 16:42:00 +0000
 Subject: [PATCH] dpaa af_xdp pool detach: 9-step BMI quiescence
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: A
 
 0076-dpaa-af-xdp-pool-detach
 

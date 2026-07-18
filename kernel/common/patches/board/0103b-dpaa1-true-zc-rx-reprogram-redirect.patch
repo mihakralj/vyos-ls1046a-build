@@ -60,7 +60,6 @@ Files:
   - dpaa_ethtool.c : "xsk_zc_rx_redirect" stats string.
 
 Signed-off-by: VyOS LS1046A maintainersUpstream-Status: Inappropriate [LS1046A Mono Gateway DK]
-Risk-Tier: C
 
 diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
 index 0a5fa49..f3ae28b 100644

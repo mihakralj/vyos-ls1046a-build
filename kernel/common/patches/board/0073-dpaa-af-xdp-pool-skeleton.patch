@@ -1,8 +1,6 @@
 From: vyos-ls1046a-build M3.1 implementation <noreply@vyos-ls1046a-build>
 Date: 2026-05-26
 Subject: [PATCH] dpaa: Phase 3.1 - af_xdp_pool.ko flavor module skeleton
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: A
 
 M3.1 deliverable per specs/dpaa1-afxdp-modernization-spec.md sec 5.4.
 

@@ -1,8 +1,6 @@
 From: ci <ci@local>
 Date: Thu, 28 May 2026 16:48:00 +0000
 Subject: [PATCH] dpaa: FMan PCD capability detection + CC steering stubs (M3-3b)
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: C
 
 Observability-only stub for spec sec 3.5 (FMan PCD capability layer)
 and sec 5.4 (CC steering API).  All productive paths return -ENOTSUPP;

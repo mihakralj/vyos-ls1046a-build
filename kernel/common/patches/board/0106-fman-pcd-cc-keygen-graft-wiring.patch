@@ -2,8 +2,6 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A CI <ci@vyos-ls1046a>
 Date: Tue, 10 Jun 2026 00:45:00 +0000
 Subject: [PATCH] fman/dpaa: wire CC steering end-to-end via the HW-proven
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: C
  KGSE_CCBS graft (M3-3b)
 
 fman_cc_tree_install() (board patch 0098) installed the MURAM

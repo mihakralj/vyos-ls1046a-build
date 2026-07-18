@@ -1,8 +1,6 @@
 From: vyos-ls1046a-build M3-3 step 2c <noreply@vyos-ls1046a-build>
 Date: 2026-05-27
 Subject: [PATCH] dpaa: dedicated QMan dispatch channels per qband
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: C
 
 M3-3 step 2c (third reviewable slice of spec sec 5.2 step 2 "Per-CPU
 NAPI + dedicated BMan channels").  Replaces the round-robin PCD-FQ ->

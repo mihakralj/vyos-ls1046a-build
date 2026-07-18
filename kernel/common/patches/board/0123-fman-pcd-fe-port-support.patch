@@ -1,6 +1,3 @@
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK]
-Risk-Tier: C
-
 diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
 index c50c2e7..f0a1b2c 100644
 --- a/drivers/net/ethernet/freescale/fman/fman_port.c

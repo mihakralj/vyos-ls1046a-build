@@ -2,8 +2,6 @@ From f7791aafbf6aded9b2cc9c81eacb6cce796a58d8 Mon Sep 17 00:00:00 2001
 From: ci <ci@local>
 Date: Thu, 11 Jun 2026 06:27:35 +0000
 Subject: [PATCH] dpaa: add CEETM HTB-offload egress shaper consumer
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: C
 
 Add a TC_SETUP_QDISC_HTB offload consumer that bridges the stock iproute2
 HTB-offload contract ("tc qdisc add dev ethX root handle 1: htb offload")

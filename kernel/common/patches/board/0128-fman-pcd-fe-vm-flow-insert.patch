@@ -2,8 +2,6 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Copilot <223556219+Copilot@users.noreply.github.com>
 Date: Mon, 16 Jun 2026 00:00:00 +0000
 Subject: [PATCH] fman_pcd: FE-VM increment 3 - per-flow ehash insertion
-Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
-Risk-Tier: A
 
  arch/fman-fe-ehash.md section 5: CRC64 bucket indexer + 256-byte DDR
  flow-record head-insert linking a classified 5-tuple to its ENQ FE.
