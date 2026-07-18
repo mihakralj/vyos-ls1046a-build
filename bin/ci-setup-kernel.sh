@@ -1040,7 +1040,16 @@ REPLACEMENT = SENTINEL + """
 # pre-patch blobs in object storage when context drifts.
 if [ ! -d .git ]; then
     git -c init.defaultBranch=main init -q
-    git -c user.email=ci@local -c user.name=ci add -A
+    # mergiraf .gitattributes: allowlist low-risk files, deny silicon-encoding
+    cat > .gitattributes << 'MERGATTR'
+# Low-risk: mergiraf reduces placement conflicts
+drivers/net/ethernet/freescale/dpaa/*.c   merge=mergiraf
+*.h                                        merge=mergiraf
+# Silicon-encoding: NEVER auto-merge
+drivers/net/ethernet/freescale/fman/fman_pcd*.c    -merge
+drivers/net/ethernet/freescale/fman/fman_keygen.c  -merge
+MERGATTR
+    git -c user.email=ci@local -c user.name=ci add -A .gitattributes
     git -c user.email=ci@local -c user.name=ci commit -q -m "kernel pristine (pre-patches)" --allow-empty || true
 fi
 
@@ -1049,11 +1058,15 @@ PATCH_FAIL_LIST=""
 for patch in $(find "${PATCH_DIR}" -maxdepth 1 -type f -name '*.patch' | sort); do
     pname=$(basename "$patch")
     echo "I: Apply Kernel patch: $patch"
-    if ! git apply --3way --whitespace=nowarn "$patch"; then
+    if ! git apply --3way --whitespace=nowarn "$patch" 2>/tmp/_apply_stderr; then
         echo "::error::Kernel patch FAILED to apply (git apply --3way): $pname" >&2
         PATCH_FAIL=$((PATCH_FAIL + 1))
         PATCH_FAIL_LIST="$PATCH_FAIL_LIST $pname"
     else
+        # Detect silent 3-way fallback — patch landed but with drifted context
+        if grep -q "Falling back to three-way merge" /tmp/_apply_stderr; then
+            echo "### 3-way-fallback: $pname applied via 3-way merge (context drifted)"
+        fi
         # Commit each successfully-applied patch so that subsequent patches'
         # `git apply --3way` sees the cumulative on-disk state as their merge
         # base. Without this commit step, every patch re-bases against the
@@ -1194,8 +1207,8 @@ else:
 fi
 
 # F-069: MISS context (DDR + MURAM t_ExtHashResult) with exact anchors.
-# Every fixup asserts count()==1 or the build fails loudly — four prior
-# silent no-ops cost four board sessions (F-062a, F-062g, F-069a v1/v2).
+# FIXME: Fixup anchors are NOT count()==1 asserted — bin/test-fixups.sh is the current gate.
+# Four prior silent no-ops cost four board sessions (F-062a, F-062g, F-069a v1/v2).
 # Per NXP LSDK ExternalHashTableSet (999-layerscape-ask):
 #  - Adds miss_res_off (6th parameter, distinct from w6 miss_off)
 #  - w4 = miss_res_off MURAM offset of 16B t_ExtHashResult
@@ -1374,8 +1387,11 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # F-084: Fix 0158 compose FE_ENTER target — EXT_HASH not ENQ.
     # Single-line sed: e->muram_off → pcd->fe_hash_off
     # The ENQ list walk becomes dead code (unused var 'e' = warning, not error).
-    sed -i 's/err = fman_pcd_fe_enter_build(pcd, e->muram_off);/err = fman_pcd_fe_enter_build(pcd, pcd->fe_hash_off);/' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c \
+        "err = fman_pcd_fe_enter_build(pcd, e->muram_off);" \
+        "err = fman_pcd_fe_enter_build(pcd, pcd->fe_hash_off);" \
+        1 "F-084: compose FE_ENTER target = EXT_HASH"
     echo "### fman_pcd.c: F-084 compose FE_ENTER target = EXT_HASH"
 
     # F-085: Suppress -Wunused-function for static functions whose callers

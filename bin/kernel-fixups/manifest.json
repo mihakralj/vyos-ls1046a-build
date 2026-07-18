@@ -1,0 +1,34 @@
+{
+  "active": {
+    "F_054.py": "fman_pcd.c: F-054 MUX/Transition AD direct writes (fix context_build corruption)",
+    "F_055.py": "fman_pcd.c: F-060 v3d: MUX context write fixed to AD+4",
+    "F_056.py": "fman_pcd.c: F-058 MUX/Transition/ENQ AD writes in fe_arm_engage (SDK raw offsets)",
+    "F_057.py": "fman_pcd.c: F-057 removed per-record next-FE from DDR (SDK-compliant)",
+    "F_061.py": "fman_pcd.c: F-061 fe_probe debugfs (KG key dump from FE pool workspace)",
+    "F_068.py": "F-068-REVERT: AC_CC dispatch (next_engine=3, RCCB\u2192FE_ENTER)",
+    "F_068_2.py": "dpaa_eth.c: F-068 IC key probe (HWA size extended +32B for KG key)",
+    "F_069.py": "F-069: MISS context + DDR alloc (count-asserted anchors)",
+    "F_069a.py": "dpaa_eth.c: F-069a v9 buf_base + vaddr captures\\n",
+    "F_069b.py": "no description",
+    "F_071.py": "no description",
+    "F_072.py": "no description",
+    "F_072_2.py": "fman_pcd.c: F-072 v3 FmPortSetFESupport ported",
+    "F_073D.py": "F-073D: Terminal ENQ (w0=0x02010000, w3=0) per 210.10.1 \u00a77.1/\u00a77.3",
+    "M2_4.py": "fman_port.c: M2-4 fman_port_lookup_rx fixed",
+    "M2_4_2.py": "fman_port.c: M2-4 NULL-page clear support added",
+    "M2_4_3.py": "fman_pcd_kg.c: M2-4 params page freed on disarm",
+    "M2_4_4.py": "no description",
+    "fe_flow_key_fix.py": "no description",
+    "mutate.py": "count-gated text replacement helper \u2014 F-084 and future conversions"
+  },
+  "count": 20,
+  "removed_dead": [
+    "F_070b.py \u2014 unreferenced in ci-setup-kernel.sh"
+  ],
+  "rule": "All fixup files MUST be listed here. No unmanifested F-0xx markers in the tree.",
+  "versioned_notes": {
+    "F_068_2.py": "separate anchor (dpaa_eth.c) from F_068 (fman_pcd.c) \u2014 not a duplicate",
+    "F_072_2.py": "separate anchor (FmPortSetFESupport porting) from F_072 \u2014 not a duplicate",
+    "M2_4_{2,3,4}.py": "separate files (fman_port.c, fman_pcd_kg.c, fman_pcd.c) \u2014 not duplicates"
+  }
+}
