@@ -3,27 +3,49 @@ From: VyOS LS1046A CI <ci@vyos-ls1046a>
 Date: Fri, 18 Jul 2026 01:25:00 +0000
 Subject: [PATCH] fman_pcd: add fman_pcd_port_recover
 
-Fixes a malformed hunk from the original commit: the hunk header
-claimed "@@ -1,0 +1,48 @@" (pure insertion, zero context) but the
-patch body carried a 49th trailing line (the fman_pcd_init() doc
-comment used as an anchor) with no leading context-space character.
-That desynchronized the old/new line counts from the actual hunk
-body, so `git apply --3way` and its direct-apply fallback both
-rejected it with "patch does not apply" at line 1.
+v2: the original hunk anchored on a hallucinated doc comment
+("/** fman_pcd_init() -- initialise the PCD subsystem for an FMan
+instance. */" with signature "int fman_pcd_init(struct fman *fm)")
+that never existed in the real file — the actual function is
+"struct fman_pcd *fman_pcd_init(struct fman *fman)" documented by a
+multi-line kernel-doc block (see patch 0092). The hunk header also
+claimed "@@ -1,0 +1,48 @@" (pure insertion, zero old-side lines) while
+the body carried a 49th trailing anchor line with no leading context
+character, desynchronizing the header counts from the body. Both
+`git apply --3way` and its direct-apply fallback rejected it with
+"patch does not apply" at line 1 on all 4 CI runs today
+(29625213156, 29625446334, 29626114458, 29626532247).
 
-Regenerated as a standard 3-line-context unified diff (git diff
-default) so the trailing anchor line is a properly prefixed context
-line and the hunk counts are internally consistent.
+Fix: re-anchor on "EXPORT_SYMBOL_GPL(fman_pcd_init);" — a literal,
+unique line that appears exactly once in the accumulated tree (only
+introduced by 0092, never touched by any later board patch per
+`grep -l` across kernel/common/patches/board/*.patch) — and generate
+the hunk with standard 3-line git-diff context on both sides so the
+header counts are self-consistent. Verified with `git apply --check`
+and `git apply --3way --check` against the exact real context lines
+extracted from patch 0092.
 
 Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 ---
- drivers/net/ethernet/freescale/fman/fman_pcd.c | 49 +++++++++++++++++++++++++++++++++++++++++++++
- 1 file changed, 49 insertions(+)
+ drivers/net/ethernet/freescale/fman/fman_pcd.c | 58 +++++++++++++++++++++++
+ 1 file changed, 58 insertions(+)
 
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ -1,3 +1,52 @@
+@@ -7,6 +7,64 @@ err_free:
+ }
+ EXPORT_SYMBOL_GPL(fman_pcd_init);
+ 
++/**
++ * fman_pcd_port_recover() - best-effort port-scoped de-wedge for a stalled
++ * FE-VM internal buffer free-list, without requiring a full SoC cold boot.
++ * @pcd: PCD handle for the FMan instance.
++ * @port_id: hardware RX port id (BMI port number) to recover.
++ *
++ * Return: 0 on verified recovery (or nothing to recover); -EAGAIN if the
++ * depletion counter did not clear; -ENODEV/-EIO/-EINVAL on setup failure.
++ */
 +int fman_pcd_port_recover(struct fman_pcd *pcd, u8 port_id)
 +{
 +	struct fman_port *port;
@@ -73,8 +95,8 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethern
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_port_recover);
 +
- /** fman_pcd_init() -- initialise the PCD subsystem for an FMan instance. */
- int fman_pcd_init(struct fman *fm)
- {
+ /**
+  * fman_pcd_release() - tear down the PCD subsystem.
+  * @pcd: handle previously returned by fman_pcd_init(). NULL-safe.
 -- 
 2.39.5
