@@ -1031,7 +1031,7 @@ REPLACEMENT = SENTINEL + """
 #
 # Python inline code strings (in base64 blobs):
 #   Use chr(10) for newline, chr(9) for tab — avoids all escape collisions.
-#   Never write \n or \t inside base64-decoded Python string literals.
+#   Never write backslash-n or backslash-t inside base64-decoded Python string literals.
 #
 # Validate before pushing: python3 bin/test-fixups.sh
 # ──────────────────────────────────────────────────────────────────────────────
