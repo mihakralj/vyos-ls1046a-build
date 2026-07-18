@@ -1,50 +1,17 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A CI <ci@vyos-ls1046a>
 Date: Fri, 18 Jul 2026 01:25:00 +0000
-Subject: [PATCH] fman_pcd: port recovery -- rebuild FE buffer free-list after
- BMI stall
-
-Adds fman_pcd_port_recover() to recover a stalled/deaf RX port from
-FE-VM workspace corruption without requiring a cold boot.  The function
-rebuilds the per-port internal FE buffer free-list (FmPortSetFESupport
-pool) by zeroing the MURAM pool memory and re-initialising the
-management index, then zeroing the depletion counter at params page
-+0x58.
-
-Recovery sequence:
- 1. Look up the RX port and ensure params page is valid
- 2. Read +0x54 (internalFEBufferManagementIndexAddr) and +0x58
- 3. If +0x54 is zero, the pool was never armed -- nothing to rebuild
- 4. Compute pool offset (idx_off - tnums * 512, 256-aligned)
- 5. Zero the entire pool memory (tnums * 512 bytes)
- 6. Zero the management index (5 + tnums bytes -- marks all slots free)
- 7. Write +0x58 = 0 (zero depletion counter)
- 8. Read-back verify: confirm +0x58 == 0 and +0x54 unchanged
- 9. Return 0 on success, -EAGAIN if readback fails, -ENODEV on bad port
+Subject: [PATCH] fman_pcd: add fman_pcd_port_recover
 
 Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
 ---
- drivers/net/ethernet/freescale/fman/fman_pcd.c | 69 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
- 1 file changed, 69 insertions(+)
+ drivers/net/ethernet/freescale/fman/fman_pcd.c | 68 ++++++++++
+ 1 file changed, 68 insertions(+)
 
 diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethernet/freescale/fman/fman_pcd.c
 --- a/drivers/net/ethernet/freescale/fman/fman_pcd.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_pcd.c
-@@ ... @@ static const struct file_operations fman_pcd_fe_flow_fops = {
- 	.release	= single_release,
- };
- 
-+/**
-+ * fman_pcd_port_recover - rebuild FE buffer free-list after BMI stall
-+ * @pcd: FMan PCD instance
-+ * @port_id: hardware RX port number (e.g. 0x11 for eth4)
-+ *
-+ * Port-scoped software de-wedge per dpaa1-afxdp-modernization-spec section 5.9.
-+ * Rebuilds the internal FE buffer free-list by zeroing the MURAM pool
-+ * memory and re-initialising the management index, then zeroing the
-+ * depletion counter at params page +0x58.  Returns 0 on success,
-+ * -EAGAIN if readback fails (cold boot may be needed).
-+ */
+@@ -1,0 +1,48 @@
 +int fman_pcd_port_recover(struct fman_pcd *pcd, u8 port_id)
 +{
 +	struct fman_port *port;
@@ -75,7 +42,7 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethern
 +	if (!v54 || !tnums)
 +		return 0;
 +	idx_off = v54;
-+	pool_sz = (unsigned long)tnums * 0x100 * 2;
++	pool_sz = (unsigned long)tnums * 512;
 +	idx_sz = 5UL + tnums;
 +	pool_off = (idx_off - pool_sz) & ~0xFFUL;
 +	pool = fman_muram_offset_to_vbase(muram, pool_off);
@@ -93,7 +60,4 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethern
 +	return ret;
 +}
 +EXPORT_SYMBOL_GPL(fman_pcd_port_recover);
-+
- /**
-  * fman_pcd_init() - initialise the PCD subsystem for an FMan instance.
-  */
+ /** fman_pcd_init() -- initialise the PCD subsystem for an FMan instance. */
