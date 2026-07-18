@@ -1021,6 +1021,20 @@ PATTERN = re.compile(
 )
 
 REPLACEMENT = SENTINEL + """
+# ── REPLACEMENT BLOCK — ESCAPING RULES ────────────────────────────────────────
+# This triple-quoted Python string is injected into build-kernel.sh verbatim
+# AFTER Python processes its escape sequences.  Rules for writing new fixups:
+#
+#  \\n → \\n (two chars, safe in sed/bash)   ← write \\\\n in this source
+#  \\t → \\t (two chars, safe)               ← write \\\\t in this source
+#  \\  → \\ in output                        ← write \\\\ in this source
+#
+# Python inline code strings (in base64 blobs):
+#   Use chr(10) for newline, chr(9) for tab — avoids all escape collisions.
+#   Never write \n or \t inside base64-decoded Python string literals.
+#
+# Validate before pushing: python3 bin/test-fixups.sh
+# ──────────────────────────────────────────────────────────────────────────────
 # Initialise the kernel source tree as a throwaway git repo so that
 # `git apply --3way` can fall back to a real 3-way merge using the
 # pre-patch blobs in object storage when context drifts.
@@ -1755,3 +1769,5 @@ PYEOF
 
 echo "### Kernel setup complete"
 
+
+# vim: set ft=bash:
