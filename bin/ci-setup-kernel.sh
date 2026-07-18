@@ -1094,7 +1094,7 @@ fi
 # For 13-byte 5-tuple keys, this truncated PROTO+SPORT+DPORT, making
 # TCP/UDP flow matching unverifiable. Fix: display only flow key at
 # FMAN_EHASH_FLOW_KEY_OFF (offset 8) for flow->key_size bytes.
-python3 "${CWD}/bin/kernel-fixups/fe_flow_key_fix.py" 2>&1
+python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/fe_flow_key_fix.py" 2>&1
 
 
 # Performance: OVFQ=1 on TX FQ context_a for FMan hardware direct enqueue.
@@ -1139,7 +1139,7 @@ fi
 # error per specs/fman-keygen-flow-key-spec.md v2.0 §5. The crash root cause is not the
 # dispatch mode but the missing missResult/w4 causing wild DMA (fix follows separately).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${CWD}/bin/kernel-fixups/F_068.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_068.py" 2>&1
     echo "### F-068-REVERT: AC_CC dispatch (next_engine=3, RCCB→FE_ENTER)"
 fi
 
@@ -1202,7 +1202,7 @@ fi
 #  - DDR miss context (256B, dma_alloc_coherent via t->dev from 0130)
 #  - Persists in struct fman_pcd, freed on hash_free teardown
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${CWD}/bin/kernel-fixups/F_069.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_069.py" 2>&1
     echo "### F-069: MISS context + DDR alloc (count-asserted anchors)"
 fi
 
@@ -1211,7 +1211,7 @@ fi
 # w1 = fqid (24-bit FQID). w3 = 0 (terminal, per §7.1 "Terminal enqueue").
 # + F-070b w6→ENQ rewire + F-070c params zeroing on disengage.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${CWD}/bin/kernel-fixups/F_073D.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_073D.py" 2>&1
     echo "### F-073D: Terminal ENQ (w0=0x02010000, w3=0) per 210.10.1 §7.1/§7.3"
 fi
 
@@ -1222,7 +1222,7 @@ fi
 # Remove the port_id check; match on fm + port_type only.
 # cc_test works by accident (%hhi "0x10" → port_id=0, which matches).
 if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
-    python3 "${CWD}/bin/kernel-fixups/M2_4.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/M2_4.py" 2>&1
     echo "### fman_port.c: M2-4 fman_port_lookup_rx fixed"
 
 # F-063 DISABLED FOR BISECT: EXT_HASH FE contextSize must match keysize.
@@ -1242,7 +1242,7 @@ fi
 # Makes fman_port_set_params_page(rxport, 0, NULL) clear ctrl_params_page
 # so fman_pcd_kg.c can zero the field without direct struct dereference.
 if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
-    python3 "${CWD}/bin/kernel-fixups/M2_4_2.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/M2_4_2.py" 2>&1
     echo "### fman_port.c: M2-4 NULL-page clear support added"
 fi
 
@@ -1306,7 +1306,7 @@ fi
 # MUX AD word 0 becomes FMAN_FE_TYPE_MUX|enq_off (type+next-FE in one word).
 # Transition AD word 1 becomes the exit FE offset (correct 2-word layout).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${CWD}/bin/kernel-fixups/F_054.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_054.py" 2>&1
     echo "### fman_pcd.c: F-054 MUX/Transition AD direct writes (fix context_build corruption)"
 fi
 
@@ -1321,7 +1321,7 @@ fi
 # F-056: MUX AD word 0 = enq->muram_off (raw offset, no type byte — SDK-compliant)
 # Transition AD word 1 = pcd->fe_exit_off (chains to EXIT for MISS handling)
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${CWD}/bin/kernel-fixups/F_056.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_056.py" 2>&1
     echo "### fman_pcd.c: F-058 MUX/Transition/ENQ AD writes in fe_arm_engage (SDK raw offsets)"
 fi
 
@@ -1335,7 +1335,7 @@ fi
 # The enq_fe_off parameter becomes unused (kept for ABI compatibility).
 # All HIT flows now dispatch through the hash FE's word 5, not per-record.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${CWD}/bin/kernel-fixups/F_057.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_057.py" 2>&1
     echo "### fman_pcd.c: F-057 removed per-record next-FE from DDR (SDK-compliant)"
 fi
 
@@ -1345,7 +1345,7 @@ fi
 # v3d avoids backslash-s (bad escape through the 4-layer pipeline) — uses [ \t]* instead.
 # F-055/F-056 wrote across TWO lines; regex matches the 2-line pattern.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${CWD}/bin/kernel-fixups/F_055.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_055.py" 2>&1
     echo "### fman_pcd.c: F-060 v3d: MUX context write fixed to AD+4"
 
     # F-083 REMOVED — scaffold guard (fe_enter_off==0) preserved.
@@ -1401,7 +1401,7 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
 # Idempotent: checks for existing fe_pool_off / fe_probe_show / debugfs
 # registration before inserting each piece.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${CWD}/bin/kernel-fixups/F_061.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_061.py" 2>&1
     echo "### fman_pcd.c: F-061 fe_probe debugfs (KG key dump from FE pool workspace)"
 fi
 
@@ -1453,7 +1453,7 @@ fi
 # RX path (rx_default_dqrr -> vaddr + prs_result_offset + key_offset).
 # Temporary — removed once extraction order is determined.
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
-    python3 "${CWD}/bin/kernel-fixups/F_068_2.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_068_2.py" 2>&1
     echo "### dpaa_eth.c: F-068 IC key probe (HWA size extended +32B for KG key)"
 fi
 
@@ -1461,20 +1461,20 @@ fi
 # Stores the DMA buffer virtual address in shared global fman_pcd_ic_vaddr
 # at the top of rx_default_dqrr() so fman_pcd can dump the IC.
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
-    python3 "${CWD}/bin/kernel-fixups/F_069a.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_069a.py" 2>&1
     echo "### dpaa_eth.c: F-069a v9 buf_base + vaddr captures\n"
 fi
 
 # F-072: capture full 8-byte KG CRC-64 hash from dpaa_eth RXHASH path.
 # Reads be64_to_cpu(vaddr+hash_offset) and stores in fman_pcd_kg_hash.
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
-    python3 "${CWD}/bin/kernel-fixups/F_072.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_072.py" 2>&1
 fi
 
 # F-069b: IC probe debugfs node — reads buffer captured by F-069a.
 # Shows 32 u32 words (128 bytes) from the DMA buffer headroom.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${CWD}/bin/kernel-fixups/F_069b.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_069b.py" 2>&1
 fi
 
 # Strip EXPORT_SYMBOL_GPL placed before #include by F-069b v3.
@@ -1484,7 +1484,7 @@ fi
 # F-071: hash_probe debugfs — read full 8-byte KG CRC-64 hash from annotation.
 # Uses fman_pcd_ic_vaddr (from F-069a) and fman_pcd_hash_off (from F-070).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${CWD}/bin/kernel-fixups/F_071.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_071.py" 2>&1
 fi
 
 # without exporting.
@@ -1545,13 +1545,13 @@ echo "### fman_pcd.c: F-062d DISABLED (ENQ ALLOCATE may cause QMan FD corruption
 
 # M2-4: free params page on disengage (was leaking 256 B per cycle)
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd_kg.c ]; then
-    python3 "${CWD}/bin/kernel-fixups/M2_4_3.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/M2_4_3.py" 2>&1
     echo "### fman_pcd_kg.c: M2-4 params page freed on disarm"
 fi
 
 # M2-4: fe_port_set lazy-allocates params page if not yet created
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${CWD}/bin/kernel-fixups/M2_4_4.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/M2_4_4.py" 2>&1
 fi
 fi
 
@@ -1559,7 +1559,7 @@ fi
 # SDK 999-patch ~L14545. Uses gen_pool MURAM granule (256B auto-align).
 # port_id passed as u8 (struct fman_port is opaque — no port->port_id).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${CWD}/bin/kernel-fixups/F_072_2.py" 2>&1
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_072_2.py" 2>&1
     echo "### fman_pcd.c: F-072 v3 FmPortSetFESupport ported"
 fi
 
