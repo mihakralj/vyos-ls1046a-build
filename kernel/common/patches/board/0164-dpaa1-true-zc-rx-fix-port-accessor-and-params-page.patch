@@ -1,0 +1,122 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Sat, 18 Jul 2026 04:17:00 +0000
+Subject: [PATCH] dpaa1: fix true-ZC RX — wrong port accessor and missing params page
+
+Two conformance gaps against arch/fman-pcd-api-reference.md §12 (Group I)
+that caused fman_port_set_rx_bpool() to return -EINVAL (-22) on every
+XDP_ZEROCOPY bind, silently leaving true-ZC RX disabled:
+
+GAP 1 — Wrong port accessor (root cause of the -EINVAL)
+
+  af_xdp_pool_main.c used `priv->mac_dev->port[DPAA_MAC_PORT_RX]` where
+  DPAA_MAC_PORT_RX is defined as 0.  However mac_dev->port[] is indexed
+  by the DTS `fsl,fman-ports` phandle order { RX=0, TX=1 } which is the
+  INVERSE of enum fman_port_type { TX=0, RX=1 } in fman.h.  Index 0 is
+  therefore the TX port, not the RX port.  fman_port_set_rx_bpool()
+  internally calls set_bpools() which rejects any port whose
+  port->port_type != FMAN_PORT_TYPE_RX with -EINVAL.  The correct
+  accessor is fman_port_lookup_rx(fm, hw_port_id) (API ref §12 Group I).
+
+  The comment at line 57 of the original file ACKNOWLEDGES the inversion
+  but documents it as "matches mainline dpaa_eth.c usage `mac_dev->port[RX]`"
+  — that usage in dpaa_eth.c is a separate file-local RX=0 enum which
+  happens to coincide; the general AF_XDP pool code should use the
+  canonical lookup accessor, not rely on coincidental index parity.
+
+GAP 2 — Missing fman_pcd_port_ensure_params_page() before BPID reprogram
+
+  The per-port FM_CTL params page (+0x54 internalFEBufferManagementIndexAddr)
+  must be allocated and initialised before any FE-VM frame dispatches —
+  without it, FE_ENTER ALLOCATE performs RMW bookkeeping at MURAM offset 0
+  and carves per-frame workspaces at garbage offsets, corrupting MURAM
+  cumulatively (F-072, arch/fman-pcd-api-reference.md §16.4, confirmed
+  hardware-proven 2026-07-15).  Once the BPID reprogram succeeds, FMan
+  starts DMAing frames into XSK BPID chunks which FE_ENTER then processes
+  — so the params page MUST be valid at reprogram time, not at some later
+  engage call.  API ref §12 mandates fman_pcd_port_ensure_params_page()
+  as the first step before any FE-VM-touching call (Group H / §10).
+
+Fix
+  Both sites that obtain rxp (attach + detach) now use:
+    struct fman *_fm = fman_bind(priv->mac_dev->fman_dev);
+    rxp = _fm ? fman_port_lookup_rx(_fm, fman_port_get_id(
+              priv->mac_dev->port[DPAA_MAC_PORT_RX])) : NULL;
+
+  The reprogram-WRITE block (attach path only, where the ZC BPID flip
+  happens) now calls fman_pcd_port_ensure_params_page(pcd, rxp) before
+  fman_port_disable()/set_rx_bpool()/enable().
+
+  Two new includes: fman.h (fman_bind, fman_get_pcd) and fman_pcd.h
+  (fman_pcd_port_ensure_params_page).
+
+Verified: patch applies cleanly with `git apply --check` and
+`git apply --3way --check` against the real accumulated tree
+(work/linux-6.18.34, patches 0092-0163 applied).
+
+Expected on-board result after this patch: `fman_port_set_rx_bpool()`
+returns 0 instead of -22, the "qband N FMan RX port reprogrammed to XSK
+BPID X -- true-ZC RX live" dmesg line appears on first XDP_ZEROCOPY bind,
+and xsk_zc_eligible + xsk_zc_rx_redirect climb under traffic.
+
+Signed-off-by: VyOS LS1046A CI <ci@vyos-ls1046a>
+---
+ .../freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c | 22 +++++++++++++++++-----
+ 1 file changed, 17 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+--- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
++++ b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
+@@ -46,8 +46,10 @@
+ 
+ #include "dpaa_flavor.h"
+ #include "dpaa_eth.h"
++#include "../../fman/fman.h"
+ #include "../../fman/fman_port.h"
+ #include "../../fman/mac.h"
++#include <linux/fsl/fman_pcd.h>
+ 
+ /*
+  * mac_dev->port[] is indexed by dpaa_eth.c's file-local
+@@ -521,7 +523,11 @@ priv->xsk_pool_attach_fail++;
+ return -ENODEV;
+ }
+ 
+-rxp = priv->mac_dev->port[DPAA_MAC_PORT_RX];
++{
++	struct fman *_fm = fman_bind(priv->mac_dev->fman_dev);
++	rxp = _fm ? fman_port_lookup_rx(_fm, fman_port_get_id(
++		priv->mac_dev->port[DPAA_MAC_PORT_RX])) : NULL;
++}
+ if (!rxp) {
+ priv->xsk_pamu_window_fail++;
+ priv->xsk_pool_attach_fail++;
+@@ -803,6 +809,15 @@ xsk_pool_set_rxq_info(pool, &priv->xsk_zc_rxq[queue_id]);
+  */
+ if (rxp) {
+ int wret;
++struct fman *_fm2 = fman_bind(priv->mac_dev->fman_dev);
++struct fman_pcd *_pcd = _fm2 ? fman_get_pcd(_fm2) : NULL;
++
++/* Ensure per-port FM_CTL params page (+0x54) is valid before the
++ * BPID reprogram — without it FE_ENTER ALLOCATE books workspace
++ * at MURAM offset 0, corrupting MURAM on every ZC frame (F-072).
++ */
++if (_pcd)
++	(void)fman_pcd_port_ensure_params_page(_pcd, rxp);
+ 
+ wret = fman_port_disable(rxp);
+ if (!wret) {
+@@ -949,7 +964,9 @@ if (!priv->mac_dev || !priv->mac_dev->port[DPAA_MAC_PORT_RX]) {
+  * touching FMan but still tear down the rest. */
+ rxp = NULL;
+ } else {
+-rxp = priv->mac_dev->port[DPAA_MAC_PORT_RX];
++struct fman *_fm = fman_bind(priv->mac_dev->fman_dev);
++rxp = _fm ? fman_port_lookup_rx(_fm, fman_port_get_id(
++	priv->mac_dev->port[DPAA_MAC_PORT_RX])) : NULL;
+ }
+ 
+ /* Step 1: hide the pool pointer from new readers. */
+-- 
+2.39.5
