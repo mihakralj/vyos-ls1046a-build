@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A CI <ci@vyos-ls1046a>
 Date: Fri, 18 Jul 2026 01:25:00 +0000
-Subject: [PATCH] fman_pcd: port recovery — rebuild FE buffer free-list after
+Subject: [PATCH] fman_pcd: port recovery -- rebuild FE buffer free-list after
  BMI stall
 
 Adds fman_pcd_port_recover() to recover a stalled/deaf RX port from
@@ -14,10 +14,10 @@ management index, then zeroing the depletion counter at params page
 Recovery sequence:
  1. Look up the RX port and ensure params page is valid
  2. Read +0x54 (internalFEBufferManagementIndexAddr) and +0x58
- 3. If +0x54 is zero, the pool was never armed — nothing to rebuild
+ 3. If +0x54 is zero, the pool was never armed -- nothing to rebuild
  4. Compute pool offset (idx_off - tnums * 512, 256-aligned)
  5. Zero the entire pool memory (tnums * 512 bytes)
- 6. Zero the management index (5 + tnums bytes — marks all slots free)
+ 6. Zero the management index (5 + tnums bytes -- marks all slots free)
  7. Write +0x58 = 0 (zero depletion counter)
  8. Read-back verify: confirm +0x58 == 0 and +0x54 unchanged
  9. Return 0 on success, -EAGAIN if readback fails, -ENODEV on bad port
@@ -39,7 +39,7 @@ diff --git a/drivers/net/ethernet/freescale/fman/fman_pcd.c b/drivers/net/ethern
 + * @pcd: FMan PCD instance
 + * @port_id: hardware RX port number (e.g. 0x11 for eth4)
 + *
-+ * Port-scoped software de-wedge per dpaa1-afxdp-modernization-spec §5.9.
++ * Port-scoped software de-wedge per dpaa1-afxdp-modernization-spec section 5.9.
 + * Rebuilds the internal FE buffer free-list by zeroing the MURAM pool
 + * memory and re-initialising the management index, then zeroing the
 + * depletion counter at params page +0x58.  Returns 0 on success,
