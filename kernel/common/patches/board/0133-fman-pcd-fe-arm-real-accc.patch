@@ -21,6 +21,9 @@ disposition that a bare exact-match leaf lacks (M3-3b iter-50 park).
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ---
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK]
+Risk-Tier: C
+
 diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
 --- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
 +++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c

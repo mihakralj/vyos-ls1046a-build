@@ -32,6 +32,9 @@ MEM_TYPE_XSK_BUFF_POOL also routes xsk_rcv() down the true-ZC branch
 (xsk_rcv_zc) instead of the copy fallback. Native arm64 compile
 0 warn / 0 err; stacks on 0103f.
 
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK]
+Risk-Tier: A
+
 diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
 index ac83c37..5b426ca 100644
 --- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c

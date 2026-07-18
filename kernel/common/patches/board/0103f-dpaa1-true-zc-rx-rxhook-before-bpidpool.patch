@@ -1,3 +1,6 @@
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK]
+Risk-Tier: C
+
 diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
 index 6fe417c..e27abdd 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c

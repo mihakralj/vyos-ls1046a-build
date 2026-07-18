@@ -28,6 +28,9 @@ Two coupled fixes for the M3-3 step 7 sub-increment 4 true-ZC RX path
 Default flavor (ops NULL): both hunks are dead code, byte-identical
 mainline behaviour.  Supersedes the unreleased 0103h.
 
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK]
+Risk-Tier: C
+
 diff --git a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c b/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
 index 5b426ca..496e14c 100644
 --- a/drivers/net/ethernet/freescale/dpaa/af_xdp_pool/af_xdp_pool_main.c
