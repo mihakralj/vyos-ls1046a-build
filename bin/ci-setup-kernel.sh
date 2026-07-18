@@ -773,11 +773,8 @@ fi
 FILES_DIR=kernel/common/files
 [ -f "$FILES_DIR/fsl_fmd_shim.c" ] || { echo "ERROR: $FILES_DIR/fsl_fmd_shim.c missing"; exit 1; }
 [ -d "$FILES_DIR/lp5812" ]         || { echo "ERROR: $FILES_DIR/lp5812 missing"; exit 1; }
-[ -f "$FILES_DIR/fman_pcd_recover.c" ] || { echo "ERROR: $FILES_DIR/fman_pcd_recover.c missing"; exit 1; }
 cp "$FILES_DIR/fsl_fmd_shim.c" "$KERNEL_BUILD/"
 cp -r "$FILES_DIR/lp5812"      "$KERNEL_BUILD/"
-cp "$FILES_DIR/fman_pcd_recover.c" "$KERNEL_BUILD/"
-echo "### fman_pcd_recover.c staged to kernel build dir"
 
 # Write injection block to temp file (heredoc avoids all quoting issues).
 # Note: the former phylink / dpaa-xdp / xhci-ls1046a Python patchers have
@@ -1379,15 +1376,6 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     sed -i 's/kstrtouint(tok, 16, \&ekfc);/(void)kstrtouint(tok, 16, \&ekfc);/' \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
     echo "### fman_pcd.c: F-085 __maybe_unused + kstrtouint casts"
-
-    # F-085e: Wire fman_pcd_recover.c into Kbuild + copy to fman dir.
-    # The file was staged to the kernel build dir by ci-setup-kernel.sh.
-    if [ -f fman_pcd_recover.c ]; then
-        cp fman_pcd_recover.c drivers/net/ethernet/freescale/fman/
-        sed -i 's|fman_pcd.o|fman_pcd.o fman_pcd_recover.o|' \
-            drivers/net/ethernet/freescale/fman/Makefile
-        echo "### fman: fman_pcd_recover.o added to Kbuild"
-    fi
 
 # F-061: fe_probe debugfs — dump FE pool workspace to read KG-extracted key bytes.
 # The FE_ENTER ALLOCATE allocates a workspace per-frame from the FE pool.
