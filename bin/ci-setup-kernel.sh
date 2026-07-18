@@ -1396,7 +1396,7 @@ fi
 # 0163 defines the fops AFTER fman_pcd_init(); F-086 registers it INSIDE
 # fman_pcd_init(). Without a forward declaration the compiler rejects it.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 << 'PYEOF'
+    python3 << 'F086PY'
 import pathlib
 p = pathlib.Path('drivers/net/ethernet/freescale/fman/fman_pcd.c')
 s = p.read_text()
@@ -1428,7 +1428,7 @@ else:
 
 if changed:
     p.write_text(s)
-PYEOF
+F086PY
 fi
 
 # F-068: IC key probe — extend dpaa_eth IC copy to include KG key region.
