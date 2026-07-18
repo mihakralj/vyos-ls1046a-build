@@ -228,7 +228,10 @@ jobs:
         run: bin/ci-setup-vyos1x.sh
 
       - name: Setup kernel config and patches
-        run: bin/ci-setup-kernel.sh
+        run: |
+          # P3: validate fixup files before running them (2-second gate)
+          python3 bin/test-fixups.sh
+          bin/ci-setup-kernel.sh
 
       # ASK2 (rewrite-in-progress): the legacy ASK 1.x build steps
       # (Consume prebuilt ASK kernel, Setup ASK fast-path kernel) were
