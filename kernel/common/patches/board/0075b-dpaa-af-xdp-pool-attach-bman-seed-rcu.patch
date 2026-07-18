@@ -1,6 +1,8 @@
 From: VyOS LS1046A maintainers <ls1046a@vyos.local>
 Date: 2026-05-26
 Subject: [PATCH] DPAA1 AF_XDP pool: DMA-map + BMan seed + RCU publish for attach
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: A
 
 DPAA1 AF_XDP modernization spec sec 5.3 (Phase 2).
 

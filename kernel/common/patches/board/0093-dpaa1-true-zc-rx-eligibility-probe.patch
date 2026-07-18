@@ -2,6 +2,8 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A CI <ci@vyos-ls1046a>
 Date: Thu, 29 May 2026 04:00:00 +0000
 Subject: [PATCH] dpaa1: M3-3 step 7 sub-increment 1 - true-ZC RX eligibility
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: C
  probe (xsk_zc_eligible counter)
 
 M3-3 step 7 (true zero-copy RX, spec sec 6.1.7 mechanism 1) is the only

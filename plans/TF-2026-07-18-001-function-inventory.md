@@ -16,11 +16,11 @@ ranks findings by cost-to-value ratio.
 **Document ID:** TF-2026-07-18-001
 **Repository:** `mihakralj/vyos-ls1046a-build`
 **Branch:** `dpaa1`
-**Commit:** `d983388` (original); `4493ce8` (F-08 implemented)
+**Commit:** doc origin `73e39e9` → current `dpaa1` HEAD `159752e` (2026-07-18). **The P1–P3 closure series `4493ce8`→`9970745` was reset OUT of the branch after a CI cascade — see §1.2.**
 **Scope:** All stubbed, incomplete, or type-drifted functions across `kernel/flavors/ask/oot-modules/ask/` and `kernel/common/patches/board/`
 **Reference specs:** `arch/fman-pcd-api-reference.md` v3.0.0, `specs/ask2-rewrite-spec.md`, `arch/fman-microcode-210-programming-reference.md`
 **Methodology:** Static analysis of source and patch text, cross-reference against v3.0.0 API contract, symbol-presence grep across `EXPORT_SYMBOL_GPL` surface.
-**Progress:** 1/23 resolved (F-08); 22 open. Progress: █░░░░░ 4.3%
+**Progress:** **0/23 resolved on `dpaa1` HEAD `159752e`.** The full P1–P3 closure was implemented on 2026-07-18 (commits `4493ce8`→`9970745`) but every CI build failed and the series was reset off the branch (§1.2); re-land in progress behind `bin/test-fixups.sh`. Progress: ░░░░░░ 0.0%
 
 ---
 
@@ -39,6 +39,14 @@ ranks findings by cost-to-value ratio.
 | **MEDIUM** | Signature drift or missing observability. Feature works but violates a spec rule (T1/T2/T8/T9/T10) or hides state. |
 | **LOW** | Documented deferral. Listed for tracking, no action required this cycle. |
 
+### 1.2 Current Branch State — P1–P3 closure reset out (2026-07-18)
+
+**[BUG] The entire P1–P3 remediation series was implemented, CI-failed, and reset off `dpaa1`.** On 2026-07-18 the Priority-1/2/3 fixes (§5) were committed as `4493ce8` (F-08 `fman_pcd_fe_verify`) → `ec61aa2` (P1: F-08/F-09/F-10/F-11/F-12/F-15) → `cb2ebbd` (P2: F-093/F-13/F-16/F-17/F-18/F-19 + type hygiene) → `28ed22d` (P3: F-01/F-02/F-07/F-20/F-21/F-22/F-23) → `9970745` (F-13 `sh`-init CI fix). Every CI run of the series failed in a cascade of escape-sequence bugs inside the `bin/ci-setup-kernel.sh` REPLACEMENT / base64-Python / heredoc fixup blocks that inject the C changes into the kernel tree: F-11 and F-12 Python `SyntaxError` (raw `\n`/`\t` in triple-quoted strings), F-088 forward-declaration + heredoc-marker collisions, a bash `syntax error` at line 449 (`\n` in a comment), the F093PY `\n`-inside-triple-quote fault, and finally `NameError: name 'sh' is not defined` in the F-13 edit (`sh` used before assignment). The nearest-green kernel still tripped the OOT-module builder guard `FATAL: …/linux-6.18.38/certs/signing_key.pem missing — MODULE_SIG_KEYS broken?` because `kernel/flavors/ask/oot-modules/ask/ci-build.sh:67` only switches to the headers-snapshot tree when `Module.symvers` is absent, not when only `certs/signing_key.pem` was wiped. The branch was reset to `73e39e9` (this doc's origin) to recover; `159752e` then added `bin/test-fixups.sh`, which decodes the REPLACEMENT block and every base64 Python blob and runs `bash -n` + `compile()` on them BEFORE any push — the missing pre-flight gate whose absence produced the cascade.
+
+**[NOTE]** The orphaned closure commits (`4493ce8`, `ec61aa2`, `cb2ebbd`, `28ed22d`, `9970745`) are NOT in the branch but remain reachable via `git reflog` / `git cherry-pick` (not yet garbage-collected). The design and code for every P1–P3 finding are therefore recoverable — the reset unwound the *landing*, not the *work*. Re-land discipline: run `bin/test-fixups.sh` and confirm it passes before every push; land the OOT-builder snapshot-fallback broadening (switch to the snapshot whenever the source tree is missing ANY of `Module.symvers` / `scripts/sign-file` / `certs/signing_key.pem`, not only `Module.symvers`) in the same series so the `signing_key.pem` FATAL cannot recur.
+
+**[SPEC]** Because the series was reset out, the authoritative status of every finding on `dpaa1` HEAD `159752e` is **open** — including F-08, which §2 previously marked resolved via `4493ce8`. Treat every row in §2 as fully open until the re-land is confirmed green in CI and merged into `dpaa1`. Section-level statuses in §3 that read "RESOLVED" describe the orphaned implementation, not the current branch.
+
 ---
 
 ## 2. Findings Summary Table
@@ -52,7 +60,7 @@ ranks findings by cost-to-value ratio.
 | F-05 | HIGH | `ask_stats.c` is 21-line init/exit stub | `ask_stats.c` | [ ] |
 | F-06 | HIGH | `ask_bridge.c` is 21-line init/exit stub | `ask_bridge.c` | [ ] |
 | F-07 | HIGH | `xdo_dev_state_delete` callback does not exist | `ask_xfrm.c` | [ ] |
-| F-08 | HIGH | `fman_pcd_fe_verify` absent from tree | spec §10.1, §17 | [x] `4493ce8` |
+| F-08 | HIGH | `fman_pcd_fe_verify` absent from tree | spec §10.1, §17 | [ ] (impl `4493ce8`, reset out — §1.2) |
 | F-09 | HIGH | `dpaa_get_rx_default_fqid` absent from tree | spec §14.2 | [ ] |
 | F-10 | HIGH | `dpaa_get_rx_pcd_fqid_range` absent from tree | spec §14.2 | [ ] |
 | F-11 | MED | `fman_pcd_fe_flow_add` uses `unsigned long enq_off` | `0153-fman-pcd-fe-engage-api.patch:72` | [ ] |
@@ -188,7 +196,9 @@ No CAAM Job Ring descriptor is built, no PDB is written, no SPI is programmed in
 
 ---
 
-### F-08 (HIGH — [x] RESOLVED): `fman_pcd_fe_verify` implemented
+### F-08 (HIGH — [ ] OPEN, impl reset out): `fman_pcd_fe_verify` implemented then orphaned
+
+**[SPEC]** Status on `dpaa1` HEAD `159752e`: **OPEN.** The implementation described below landed in commit `4493ce8` but was reset off the branch (§1.2); `grep fman_pcd_fe_verify bin/ci-setup-kernel.sh` returns zero hits in the current tree. The account below documents the orphaned implementation for re-land.
 
 **[SPEC]**
 

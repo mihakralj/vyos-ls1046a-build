@@ -2,6 +2,8 @@ From d79543687c120230584eb5a03d30565e2e6ebd0d Mon Sep 17 00:00:00 2001
 From: ci <ci@local>
 Date: Thu, 11 Jun 2026 05:57:12 +0000
 Subject: [PATCH] soc: fsl: qbman: add CEETM hierarchical egress shaper support
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: A
 
 Port the QorIQ QMan CEETM (Customer Edge Egress Traffic Management) API
 from the legacy NXP SDK, modernised to mainline style. Provides

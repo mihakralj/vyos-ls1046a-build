@@ -1,6 +1,8 @@
 From: vyos-ls1046a-build M3-3 step 3 <noreply@vyos-ls1046a-build>
 Date: 2026-05-27
 Subject: [PATCH] dpaa: rx xsk-branch eligibility probe + real dpaa_fq_to_qband
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: C
 
 M3-3 step 3 (spec sec 6.1.2, "RX ZC datapath"). First reviewable slice
 of the kernel-side RX zero-copy plumbing. Strictly observational --

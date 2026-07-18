@@ -2,6 +2,8 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A maintainers <ask20@vyos-ls1046a-build>
 Date: Tue, 24 Jun 2026 05:15:00 +0000
 Subject: [PATCH] dpaa1: fix BMan IVCI crash in NAPI refill — set bpid on each slot (0139)
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: A
 
 Patch 0084's af_xdp_pool_napi_refill() calls bman_release() with
 XSK UMEM DMA cookies.  bman_release() composes the RCR (Release Command

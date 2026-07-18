@@ -1,6 +1,8 @@
 From: VyOS LS1046A maintainers <noreply@example.com>
 Date: Tue, 26 May 2026 22:00:00 +0000
 Subject: [PATCH] dpaa: default priv->xsk_max_qbands=4 at probe
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: C
 
 Per spec §5.1, priv->xsk_max_qbands is zero-initialised at probe time and
 was meant to be set by a flavor module's pcd_ops->install callback. The

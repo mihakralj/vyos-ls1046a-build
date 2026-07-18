@@ -1,6 +1,8 @@
 From: vyos-ls1046a-build M0 fix <noreply@vyos-ls1046a-build>
 Date: 2026-05-26
 Subject: [PATCH] dpaa: retro-attach flavor ops to all probed privs on register
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: A
 
 The init-order bug: LS1046A has DPAA1 built-in. All five FMan MACs probe
 at boot calling dpaa_priv_attach_flavor_ops() while dpaa_*_ops_global are

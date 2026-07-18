@@ -2,6 +2,8 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A CI <ci@vyos-ls1046a>
 Date: Thu, 29 May 2026 05:45:00 +0000
 Subject: [PATCH] dpaa1: M3-3 step 7 sub-increment 3 GATE - XSK FILL-ring
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: A
  double-release guard audit (xsk_fill_guard_block counter)
 
 M3-3 step 7 sub-increment 4 will perform the hardware-risky true-ZC RX

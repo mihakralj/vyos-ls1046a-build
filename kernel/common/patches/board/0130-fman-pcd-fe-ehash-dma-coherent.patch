@@ -2,6 +2,8 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: VyOS LS1046A CI <ci@vyos-ls1046a>
 Date: Wed, 17 Jun 2026 09:00:00 +0000
 Subject: [PATCH] fman_pcd: FE-VM ehash store uses dma_alloc_coherent (M2
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: A
  activate, increment 1)
 
 The dormant FE/ehash flow store (board patches 0125 ehash table + 0128

@@ -1,6 +1,8 @@
 From: ci <ci@local>
 Date: Thu, 28 May 2026 23:55:00 +0000
 Subject: [PATCH] dpaa: FMan Policer productive srTCM/trTCM profile struct (M3-3d)
+Upstream-Status: Inappropriate [LS1046A Mono Gateway DK hardware-specific]
+Risk-Tier: A
 
 Replaces the opaque `struct fman_policer_profile { u32 reserved; }`
 placeholder from 0091 with the productive srTCM/trTCM metering layout
