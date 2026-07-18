@@ -130,41 +130,44 @@ hit_engage() {
     info "HIT-TEST engage: port $PORT  keysize=$keysize  EKFC=0x$ekfc  ENQ→FQ 0x$miss_fqid"
     info "HIT-TEST NOTE: ENQ targets kernel Rx FQ for observability — SHORT-TERM ONLY"
 
-    # Step 1: acquire FE pool reference
+    # Step 1: arm workspace pool FIRST (FmPortSetFESupport).
+    # CRITICAL: must allocate MURAM workspace BEFORE the FE chain so the pool
+    # range does not overlap FE_ENTER or singletons.  Overlap caused BMI stall
+    # on first frame (pool carved workspace at FE_ENTER AD offset, corrupt).
+    echo "set $PORT" > "$PCD_BASE/fe_port" || die "fe_port set failed (FmPortSetFESupport)"
+
+    # Step 2: acquire FE pool reference
     echo "get" > "$PCD_BASE/fe_pool" || die "fe_pool get failed"
 
-    # Step 2: build singletons — EXIT, MUX, TRANSITION (ENQ built separately)
+    # Step 3: build singletons — EXIT, MUX, TRANSITION (ENQ built separately)
     echo "build" > "$PCD_BASE/fe_singletons" || die "fe_singletons build failed"
 
-    # Step 3: configure ehash table
+    # Step 4: configure ehash table
     echo "set 0x7fff $keysize 0" > "$PCD_BASE/fe_ehash" || die "fe_ehash set failed"
 
-    # Step 4: build EXT_HASH FE (consumes ehash config)
-    echo "build" > "$PCD_BASE/fe_hash" || die "fe_hash build failed"
+    # Step 5: build EXT_HASH FE (consumes ehash config)
+    echo "build" > "$PCD_BASE/fe_hashfe" || die "fe_hashfe build failed"
 
-    # Step 5: build ENQ FE — target is miss_fqid (kernel Rx FQ)
+    # Step 6: build ENQ FE — target is miss_fqid (kernel Rx FQ)
     # ARCHITECTURE NOTE: production path targets dedicated TX FQ on FMan
     # DC portal, allocated by ask.ko.  This uses the Rx FQ as a loopback
     # for HIT observation.  HIT frames reach the kernel normally via NAPI.
     echo "build $miss_fqid" > "$PCD_BASE/fe_enq" || die "fe_enq build failed"
 
-    # Step 6: read EXT_HASH FE MURAM offset for FE_ENTER wiring
-    hash_fe_off=$(read_fe_offset "fe_hash" 'hash\[0\]\s+off=')
-    [ -z "$hash_fe_off" ] && die "cannot read EXT_HASH FE offset from fe_hash"
+    # Step 7: read EXT_HASH FE MURAM offset for FE_ENTER wiring
+    hash_fe_off=$(read_fe_offset "fe_hashfe" 'hash_fe\s+off=')
+    [ -z "$hash_fe_off" ] && die "cannot read EXT_HASH FE offset from fe_hashfe"
     info "HIT-TEST: EXT_HASH FE @ $hash_fe_off"
 
-    # Step 7: build FE_ENTER AD pointing to EXT_HASH FE
+    # Step 8: build FE_ENTER AD pointing to EXT_HASH FE
     echo "build $hash_fe_off" > "$PCD_BASE/fe_enter" || die "fe_enter build failed"
 
-    # Step 8: read FE_ENTER MURAM offset
+    # Step 9 (now renumbered): read FE_ENTER MURAM offset
     fe_enter_off=$(read_fe_offset "fe_enter" 'root_ad\s+off=')
     [ -z "$fe_enter_off" ] && die "cannot read FE_ENTER offset from fe_enter"
     info "HIT-TEST: FE_ENTER AD @ $fe_enter_off"
 
-    # Step 9: arm workspace pool (FmPortSetFESupport — mandatory before any FE frame)
-    echo "set $PORT" > "$PCD_BASE/fe_port" || die "fe_port set failed"
-
-    # Step 10: engage RCCB→FE_ENTER direct (fe_enter_off != 0 → FE-VM active)
+    # Step 9 (now final): engage RCCB→FE_ENTER direct (fe_enter_off != 0 → FE-VM active)
     echo "engage $PORT $fe_enter_off $miss_fqid $ekfc" > "$PCD_BASE/fe_arm" \
         || die "fe_arm engage failed"
 
@@ -191,7 +194,7 @@ hit_disengage() {
     echo "clear" > "$PCD_BASE/fe_flow"       2>/dev/null || true
     echo "clear" > "$PCD_BASE/fe_enter"      2>/dev/null || true
     echo "clear" > "$PCD_BASE/fe_enq"        2>/dev/null || true
-    echo "clear" > "$PCD_BASE/fe_hash"       2>/dev/null || true
+    echo "clear" > "$PCD_BASE/fe_hashfe"       2>/dev/null || true
     echo "clear" > "$PCD_BASE/fe_ehash"      2>/dev/null || true
     echo "clear" > "$PCD_BASE/fe_singletons" 2>/dev/null || true
     echo "put"   > "$PCD_BASE/fe_pool"       2>/dev/null || true
