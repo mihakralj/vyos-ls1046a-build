@@ -1,4 +1,12 @@
-# ── Board patch series with Upstream-Status + Risk-Tier metadata ──
+# VyOS LS1046A kernel patch series — Quilt model.
+# Applied in order by ci-setup-kernel.sh via git apply --3way.
+# Each line is a filename relative to kernel/common/patches/board/.
+# Blank lines and #-comments are ignored.
+# Patches prefixed with # SKIP are intentionally excluded
+# (see BOARD_STAGE_SKIP for the whitelist).
+
+# ── DPAA1 / AF_XDP stack ──
+# 0068–0077: FMan DPAA flavor ops + XDP pool setup
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0068-dpaa-flavor-ops.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
@@ -25,6 +33,9 @@
 0076-dpaa-af-xdp-pool-detach.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0077-dpaa-xsk-max-qbands-default.patch
+
+# ── AF_XDP observability + NAPI ──
+# 0079–0085: ethtool counters, NAPI distribution, XSK datapath
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0079-dpaa-ethtool-expose-xsk-counters.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
@@ -41,6 +52,9 @@
 0084-dpaa-napi-hooked-bman-refill.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0085-dpaa-tx-zc-and-inflight-backpressure.patch
+
+# ── FMan PCD subsystem bootstrap ──
+# 0086–0091a: FMan capabilities, CC stub, HM stub, policer
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0086-dpaa-fman-caps-detection-and-cc-stub.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
@@ -57,6 +71,9 @@
 0091-dpaa-fman-policer-stub.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0091a-dpaa-fman-policer-productive-structs.patch
+
+# ── FMan PCD core ──
+# 0092–0100: PCD subsystem, KeyGen, CC, HM, policer
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0092-fman-pcd-subsystem.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
@@ -75,6 +92,9 @@
 0099-fman-pcd-hm-install.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0100-fman-pcd-plcr-install.patch
+
+# ── DPAA / FMan port primitives ──
+# 0101–0106: VLAN strip, bpool, CC base, KeyGen graft
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0101-dpaa-hw-vlan-strip-ndo-set-features-bridge.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
@@ -103,6 +123,9 @@
 0105-fman-port-set-cc-base-primitive.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0106-fman-pcd-cc-keygen-graft-wiring.patch
+
+# ── CEETM / ethtool / QMan ──
+# 0107–0112: CC debugfs, per-key FQ, ntuple bridge, CEETM
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0107-fman-pcd-cc-test-debugfs-harness.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
@@ -115,6 +138,10 @@
 0111-qman-ceetm.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0112-dpaa-ceetm-htb.patch
+
+# ── FMan PCD bringup ──
+# 0113–0121: DCSR, realign, SDK convergent, params page, ucode,
+#            CC revert, HM ops, nexthop, export resolvers
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0113-fman-pcd-dcsr-error-taps.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
@@ -133,6 +160,11 @@
 0120-fman-pcd-hm-nexthop-dedup.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0121-dpaa-export-cc-target-resolvers.patch
+
+# ── FE-VM / ehash / FE chain ──
+# 0122–0133: FE ehash init, port support, singletons, ehash table,
+#            MURAM genpool, ENQ root, flow insert, offload engage,
+#            DMA coherent, hash object, arm debugfs, AC_CC
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0122-fman-pcd-fe-ehash-init.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
@@ -157,6 +189,8 @@
 0132-fman-pcd-fe-arm-debugfs.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0133-fman-pcd-fe-arm-real-accc.patch
+
+# ── CAAM + FE context + TX bypass + manip ──
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0134-caam-qi-share.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
@@ -165,22 +199,39 @@
 0136-fman-port-tx-confirm-bypass.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0137-fman-pcd-manip-create-chain.patch
+
+# ── DPAA fixups ──
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0139-dpaa-af-xdp-bman-refill-bpid-fix.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0145-dpaa-flow-offload-backend-slot.patch
+
+# ── KeyGen debug ──
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0148-keygen-debug-ekfc-log.patch
+
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0146-fman-pcd-fe-context-build-integration.patch
+# SKIP 0146 was removed 2026-07-17 — applies cleanly via 3-way merge
+# SKIP 0150 — intentionally excluded (was broken placeholder)
+
+# ── C1a/C1b symmetry inverses (§16.3) ──
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0151-fman-pcd-kg-unbind-detach.patch
+
+# ── MURAM scaffold tracking + leakfix ──
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0152-fman-pcd-fe-scaffold-tracking.patch
+
+# ── FE-VM engage/flow API (ask.ko, replaces 0150) ──
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0153-fman-pcd-fe-engage-api.patch
+
+# ── T1 typing fix (§16.2) ──
 # Upstream-Status: Inappropriate | Risk-Tier: C
 0154-fman-port-lookup-rx-typing.patch
+
+# ── Board-specific patches (4xxx, 1xx) ──
 # Upstream-Status: Inappropriate | Risk-Tier: C
 101-sfp-rollball-phylink-fallback.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
@@ -193,6 +244,8 @@
 4007-xhci-ls1046a-dwc3-quirks.patch
 # Upstream-Status: Inappropriate | Risk-Tier: C
 4009-sfp-oem-rollball-quirk.patch
+
+# ── F-079-R5: allow fe_enter_off==0 for scaffold-only CONT_LOOKUP ──
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0155-fman-pcd-fe-arm-allow-zero-offset.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
