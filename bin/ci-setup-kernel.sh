@@ -1177,22 +1177,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-068-REVERT: AC_CC dispatch (next_engine=3, RCCB→FE_ENTER)"
 fi
 
-# Patch 4009 equivalent: fix OEM SFP-10G-T quirk + add OEM SFP-10G-SR quirk
+# Patch 4009 equivalent: add OEM SFP-10G-SR quirk entry
+# (4009-sfp-oem-rollball-quirk.patch already renames sfp_fixup_rollball_cc→sfp_fixup_fs_10gt)
 if [ -f drivers/net/phy/sfp.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
-        drivers/net/phy/sfp.c \
-        'SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_rollball_cc)' \
-        'SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_fs_10gt)' \
-        1 \
-        "SFP: OEM SFP-10G-T quirk rename"
-    # Add OEM SFP-10G-SR quirk entry
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
         drivers/net/phy/sfp.c \
         'SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_fs_10gt),' \
         'SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_fs_10gt),\n\tSFP_QUIRK_F("OEM", "SFP-10G-SR", sfp_fixup_fs_10gt),' \
         1 \
-        "SFP: OEM SFP-10G-SR quirk appended"
-    echo "### sfp.c: OEM SFP-10G-T/SR rollball quirk injected (mutate)"
+        "SFP: OEM SFP-10G-SR quirk appended (4009 handles rename)"
+    echo "### sfp.c: OEM SFP-10G-SR rollball quirk injected (mutate)"
 fi
 
 # F-048: Set EKFC to 0x00180006 — IPSRC1|IPDST1|L4PSRC|L4PDST.
