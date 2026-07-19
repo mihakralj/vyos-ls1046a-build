@@ -1629,6 +1629,26 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-096: FE-VM context build call (unparks FE-VM)"
 fi
 
+# F-097 (T-P1-1 / F-08): fman_pcd_fe_verify — arm-time readback gate.
+# Injects fman_pcd_fe_verify_internal() + call in engage path BEFORE KG arm.
+# Catches F-072..F-079 silent-write defects (params page, EXT_HASH, MUX,
+# EXIT, ENQ descriptor validation) before frames reach the silicon.
+# Approximately 60 LOC.  Full 150-LOC version re-land incrementally.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_097.py" 2>&1
+    echo "### F-097: fman_pcd_fe_verify arm-time readback gate"
+fi
+
+# F-098 (T-P1-4 / F-12): Retype fman_pcd_fe_context_build DDR writes.
+# Replaces void __iomem *ctx with struct fman_ddr_region *ctx + defines
+# the struct.  Replaces iowrite32be -> __raw_writel(cpu_to_be32(...)),
+# memcpy_toio -> memcpy.  DDR is NOT iomem — writing through iowrite
+# has wrong barrier semantics and hides the error from sparse.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_098.py" 2>&1
+    echo "### F-098: context_build retype (DDR not MMIO)"
+fi
+
 # F-095 (DELETED — stub, never implemented)
 
 fi

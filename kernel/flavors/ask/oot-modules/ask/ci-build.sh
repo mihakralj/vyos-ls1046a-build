@@ -64,7 +64,15 @@ PKG_DIR="${2:?PKG_DIR required as \$2}"
 # cert was embedded in vmlinux's trusted keyring. Signing ask.ko with this
 # key produces a module that passes MODULE_SIG_FORCE at insmod time.
 SNAP_DIR="$(dirname "$KSRC")/ask-kernel-snapshot"
-if [ ! -f "$KSRC/Module.symvers" ] && [ -d "$SNAP_DIR" ] && [ -e "$SNAP_DIR/.done" ]; then
+# T-P1-5: switch to the headers snapshot whenever ANY of the three required
+# artefacts is missing from the bindeb-pkg-cleaned kernel source tree — not
+# only Module.symvers.  On 2026-07-18 the bindeb-pkg chain wiped certs/ but
+# left Module.symvers intact, causing FATAL "signing_key.pem missing" because
+# the snapshot guard only triggered on Module.symvers absence.
+if [ ! -f "$KSRC/Module.symvers" ] || \
+   [ ! -x "$KSRC/scripts/sign-file" ] || \
+   [ ! -f "$KSRC/certs/signing_key.pem" ] && \
+   [ -d "$SNAP_DIR" ] && [ -e "$SNAP_DIR/.done" ]; then
     # Resolve the snapshot KSRC. Prefer the convenience symlink; fall back
     # to find under extracted/ if the symlink is missing for some reason.
     if [ -L "$SNAP_DIR/ksrc" ] || [ -d "$SNAP_DIR/ksrc" ]; then
@@ -72,13 +80,16 @@ if [ ! -f "$KSRC/Module.symvers" ] && [ -d "$SNAP_DIR" ] && [ -e "$SNAP_DIR/.don
     else
         SNAP_KSRC="$(find "$SNAP_DIR/extracted/usr/src" -maxdepth 1 -type d -name 'linux-headers-*' 2>/dev/null | head -1)"
     fi
-    if [ -n "$SNAP_KSRC" ] && [ -f "$SNAP_KSRC/Module.symvers" ]; then
-        echo "### Original \$KSRC=$KSRC has no Module.symvers (post-bindeb-pkg clean)."
+    if [ -n "$SNAP_KSRC" ] && \
+       [ -f "$SNAP_KSRC/Module.symvers" ] && \
+       [ -x "$SNAP_KSRC/scripts/sign-file" ] && \
+       [ -f "$SNAP_KSRC/certs/signing_key.pem" ]; then
+        echo "### Original \$KSRC=$KSRC missing build artefacts (post-bindeb-pkg clean)."
         echo "### Switching to snapshot KSRC: $SNAP_KSRC"
         KSRC="$SNAP_KSRC"
     else
         echo "FATAL: snapshot dir exists at $SNAP_DIR but ksrc resolution failed"
-        echo "FATAL:   SNAP_KSRC='$SNAP_KSRC'"
+        echo "FATAL:   SNAP_KSRC='$SNAP_KSRC' — missing build artefacts (need Module.symvers + sign-file + signing_key.pem)"
         ls -la "$SNAP_DIR" "$SNAP_DIR/extracted/usr/src" 2>&1 || true
         exit 1
     fi
