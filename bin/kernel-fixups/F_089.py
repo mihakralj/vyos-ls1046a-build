@@ -52,18 +52,25 @@ if os.path.exists(pcd_c):
 
     include_line = '#include "fman-pcd-fe-static-asserts.h"'
     if include_line not in src:
-        # Insert after the last FE type #define block
-        anchor = "#define FMAN_FE_TYPE_EXT_HASH"
+        # Insert after the LAST FE #define — FMAN_FE_HASH_SIZE from patch 0131
+        # (FMAN_FE_TYPE_* is from 0124, SIZE/FE_HASH_SIZE from 0131 — need the later one)
+        anchor = "#define FMAN_FE_HASH_SIZE"
+        if anchor not in src:
+            # Fallback: use FMAN_FE_HASH_CONTEXT_SIZE
+            anchor = "#define FMAN_FE_HASH_CONTEXT_SIZE"
         if anchor in src:
-            # Find the end of that #define line
             idx = src.find(anchor)
             newline = src.index('\n', idx)
             src = src[:newline + 1] + '\n' + include_line + '\n' + src[newline + 1:]
             with open(pcd_c, 'w') as f: f.write(src)
             changes += 1
-            print(f"### F-089: #include injected into fman_pcd.c")
+            print(f"### F-089: #include injected into fman_pcd.c after {anchor.split()[1]}")
         else:
-            print("### F-089: WARNING — FMAN_FE_TYPE_EXT_HASH anchor not found in fman_pcd.c")
+            # Last resort: append at end before any KUnit guard
+            print("### F-089: WARNING — no FE define anchor found; appending at EOF")
+            src += '\n' + include_line + '\n'
+            with open(pcd_c, 'w') as f: f.write(src)
+            changes += 1
     else:
         print("### F-089: #include already present in fman_pcd.c")
 else:
