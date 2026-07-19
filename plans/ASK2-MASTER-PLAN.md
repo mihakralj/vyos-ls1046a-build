@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 1.1.0 · 2026-07-19 · HADS 1.0.0**
+**Version 1.2.0 · 2026-07-19 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -33,7 +33,7 @@ Where this plan and those documents disagree, they win — update this plan.
 | **1. FMan PCD subsystem** (KG / CC / HM / PLCR) | ✅ SHIPPING — patches 0092–0118, 0151–0155 | — |
 | **2. FE-VM ehash substrate** (pool, singletons, ehash, EXT_HASH, MUX/ENQ, arm) | ✅ BUILT, DORMANT — patches 0124–0131; byte-verified via `fe_*` debugfs against lf-5.4 LSDK oracle | — |
 | **3. Classifier→FE arm** | ✅ PROVEN — F-091 HIT scaffold (numKeys=1 + FE_ENTER AD at ato+32); `FmPortSetFESupport` auto-armed (F-072b/c/d); `fman_pcd_port_recover` de-wedge (0163/F-086) | — |
-| **4. ask.ko datapath** (genl + flow table + debugfs, ships dormant) | 🔴 DORMANT → NOW UNBLOCKED | Wiring to FE-VM chain builder needed (M5) |
+| **4. ask.ko datapath** (genl + flow table + debugfs) | 🟡 BUILDING — engage/disengage now calls kernel API (F-092); 5-fixup chain (F-090→F-094) in CI 29701819606; flow insert still uses debugfs bridge (P1 backlog) | Deploy + test M5 gate |
 | **5. VyOS CLI + mutual exclusion** | 🔴 NOT STARTED | Gated on ask.ko datapath (M5) |
 
 ### 1.2 Status: unblocked
@@ -58,7 +58,9 @@ sequential gate.
 | CRC-64 raw, no final complement | 2026-07-13 | `crc64_raw(key)=0x600824e70ae4d573` matched HW @IC+0x48 |
 | `fman_pcd_port_recover` functional | 2026-07-18 | debugfs `fe_recover` wired (0163/F-086) — cold-boot bottleneck eliminated |
 | **M3 HIT gate PASSED** | **2026-07-19** | **FE-VM ehash flow matching: TCP port 5201 consumed by FMan (tcpdump 0 pkts); clear flow restores kernel path (tcpdump sees SYN+RST). 13B 5-tuple EKFC 0x1C0006, raw CRC-64, 32768 DDR buckets. CI run 29697031761, ISO vyos-2026.07.19-1732, dpaa1 bb3a3cf.** |
-| AF_XDP true-ZC fix committed | 2026-07-18 | 0164: RX-port accessor + params-page; awaiting HW deploy |
+| AF_XDP true-ZC fix committed | 2026-07-18 | 0164: RX-port accessor + params-page corrections; deployed in kernel |
+| **M4 ZC test** | **2026-07-19** | **AF_XDP copy-mode works (VPP binds eth4). ZC mode still EINVAL on xsk_socket__create() — 0164 fixed two blockers but at least one more remains. dpaa_xsk_dma_cmp/wakeup symbols present (copy-mode XSK). ZC counters 0093-0096 deployed but dormant.** |
+| F-090→F-094 fixup chain | 2026-07-19 | 5 new fixups: struct fields, HIT scaffold, production API, dynamic FQID, flow_add retype. All pass test-fixups.sh 4/4, local compile clean. CI build 29701819606 succeeded. |
 | Dual-DAC topology unblocked | 2026-07-14 | eth3+eth4 both SFP-H10GB-CU1M @10G on .185 |
 
 ---
@@ -198,20 +200,23 @@ graph LR
 - **Key outcome:** 13-byte 5-tuple keysize no longer stalls (F-072b fix validated).
 - **Calendar:** 1 board session (2026-07-19 17:00–18:00 UTC).
 
-### M4 — AF_XDP true-ZC RX 🟡 parallel (AWAITING-HW)
+### M4 — AF_XDP true-ZC RX 🟡 parallel (BLOCKED on kernel EINVAL)
 
 - **Gate:** `xsk_zc_rx_redirect` > 0 under XDP_ZEROCOPY bind + traffic.
-- **Dependencies:** 0164 deployed ✅, builder available. ~1 board session.
+- **Tested 2026-07-19:** AF_XDP copy-mode works (VPP 25.10 binds eth4, hugepages allocated live). ZC mode `xsk_socket__create()` returns EINVAL — 0164 fixed port accessor + params page but at least one more blocker remains. `dpaa_xsk_dma_cmp`/`dpaa_xsk_wakeup` present (copy-mode XSK), ZC bind path incomplete.
+- **Next:** dedicated kernel debug session — trace `xsk_socket__create` → driver `xsk_bind` to find the failing ZC precondition.
 
-### M5 — First classified + FE-forwarded flow 🟢 ACTIVE (was gated on M3)
+### M5 — First classified + FE-forwarded flow 🟢 ACTIVE (CI build 29701819606 ready)
 
 - **Gate:** ask.ko inserts a flow → traffic HITs → kernel receives on TX FQ;
   `conntrack -L` shows the flow offloaded; teardown byte-clean.
 - **Architecture:** `CONT_LOOKUP numKeys=1 match entry → FE_ENTER → EXT_HASH →
-  DDR lookup → HIT → MUX → ENQ → TX FQ` (Gap C handshake). Now proven at M3
-  gate via debugfs; M5 makes it programmatic through ask.ko.
+  DDR lookup → HIT → MUX → ENQ → TX FQ`. Proven at M3 via debugfs; M5 makes
+  it programmatic through ask.ko API.
+- **Build:** CI 29701819606 (dpaa1 07f9158) includes F-090→F-094 fixup chain.
+  All fixups apply cleanly, test-fixups.sh 4/4 OK, kernel compiles.
+  **Deploy → `echo engage 10 > /sys/kernel/debug/ask/offload` → flows via API.**
 - **Stretch:** automated nft flowtable offload ≥7 Gbps; NXP TX parity ≥8 Gbps.
-- **Calendar:** ~1 week after M3.
 
 ### M6 — IPv6 + bridge + IPsec (parallel tracks, GATED on M5)
 
@@ -311,6 +316,7 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 | **BUG 3b flood half** | iperf3 flood under policer → watchdog reset | OPEN | M8 | Needs serial capture + cold power-cycle; **always repro policer with a few pings, never a flood** |
 | **eth4 intermittent** | Link 10G up, zero traffic after engage/disengage on port 0x11 | OPEN | M3 (if eth4 used) | Likely F-076 family; pcd-snapshot A/B + prefer eth3 for bring-up |
 | **nft ingress hook** | `flags offload` flowtable at hook ingress permanently breaks kernel forwarding | OPEN | M5 | Use `hook forward` (T-M5-4) or Path-B YNL interim |
+| **ZC EINVAL** | `xsk_socket__create()` returns EINVAL for XDP_ZEROCOPY on DPAA1; 0164 fixed port accessor + params page but ZC still blocked | OPEN 2026-07-19 | M4 | Trace `xsk_socket__create` → driver `xsk_bind` path; likely missing ZC pool/queue setup in dpaa_eth XSK init |
 
 ---
 
