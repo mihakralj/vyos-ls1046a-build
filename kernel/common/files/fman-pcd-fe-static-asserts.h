@@ -36,8 +36,8 @@ static_assert(FMAN_FE_ENQ_SIZE        == 16,
 	"§17: ENQ FE = 16 B (4 words)");
 static_assert(FMAN_FE_EXIT_SIZE       == 4,
 	"§17: EXIT FE = 4 B (1 word)");
-static_assert(FMAN_FE_MUX_SIZE        == 8,
-	"§17: MUX FE = 8 B (2 words)");
+static_assert(FMAN_FE_MUX_SIZE        == 4,
+	"§17: MUX FE = 4 B (1 word)");
 static_assert(FMAN_FE_TRANSITION_SIZE == 8,
 	"§17: TRANSITION FE = 8 B (2 words)");
 static_assert(FMAN_FE_HASH_SIZE       == 28,
