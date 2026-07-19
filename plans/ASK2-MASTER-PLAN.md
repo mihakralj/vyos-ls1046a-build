@@ -311,11 +311,11 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 
 ### P1 — Function-inventory re-land (~400 LOC) 🔨 IN PROGRESS
 
-- [ ] **T-P1-1** `@___` — F-08 `fman_pcd_fe_verify` (arm-time descriptor readback gate).
+- [x] **T-P1-1** `@mihakralj` — F-08 `fman_pcd_fe_verify` (arm-time descriptor readback gate). ✅ F-097 fixup written; injects verify function + call before KG arm in __fman_pcd_fe_arm_engage.
 - [x] **T-P1-2** `@mihakralj` — F-09+F-10+F-15: `fman_pcd_resolve_miss_fqid` + kill hardcoded `tx_fqid=0x200`. ✅ F-093 fixup written; dynamic FQID from port params page. Next build.
 - [x] **T-P1-3** `@mihakralj` — F-11: `fman_pcd_fe_flow_add` retype → `const struct fman_pcd_fe_flow_action *`. ✅ F-094 fixup written; struct defined in fman_pcd.h with key+size+enq_off+flags.
-- [ ] **T-P1-4** `@___` — F-12: `fman_pcd_fe_context_build` retype → `struct fman_ddr_region *`.
-- [ ] **T-P1-5** `@___` — OOT-builder snapshot-fallback broadening (missing ANY of `Module.symvers` / `scripts/sign-file` / `certs/signing_key.pem`).
+- [x] **T-P1-4** `@mihakralj` — F-12: `fman_pcd_fe_context_build` retype → `struct fman_ddr_region *`. ✅ F-098 fixup written; defines struct + replaces iowrite32be→__raw_writel(cpu_to_be32(...)).
+- [x] **T-P1-5** `@mihakralj` — OOT-builder snapshot-fallback broadening (missing ANY of `Module.symvers` / `scripts/sign-file` / `certs/signing_key.pem` → switch to snapshot). ✅ ci-build.sh condition expanded.
 
 ### M4 — true-ZC (parallel)
 
