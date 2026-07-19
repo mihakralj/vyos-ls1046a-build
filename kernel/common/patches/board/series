@@ -252,7 +252,9 @@
 0156-fman-pcd-fe-arm-disengage-port-del.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0157-fman-pcd-fe-arm-typed-impl.patch
-# Upstream-Status: Inappropriate | Risk-Tier: A0158-fman-pcd-fqid-resolution-compose.patch
+# Upstream-Status: Inappropriate | Risk-Tier: A
+# Upstream-Status: Inappropriate | Risk-Tier: A
+0158-fman-pcd-fqid-resolution-compose.patch
 0163-fman-pcd-port-recover.patch
 # Upstream-Status: Inappropriate | Risk-Tier: A
 0164-dpaa1-true-zc-rx-fix-port-accessor-and-params-page.patch
