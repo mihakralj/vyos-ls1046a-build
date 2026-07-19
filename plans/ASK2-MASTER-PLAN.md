@@ -158,7 +158,13 @@ the FE-VM path is proven; the validator enforces per-interface ASK↔VPP exclusi
    (a port may run VPP while another runs ASK, each transition still via S0 per
    port). `set system offload classify` (vyos-1x-026) is **deprecated as a CLI**:
    the classify mechanism is kept, RSS + parser remain silent defaults
-   programmed unconditionally, and ASK is the sole operator offload switch.
+    programmed unconditionally, and ASK is the sole operator offload switch.
+10. **Debugfs for diagnostics only — kernel API for production control.**
+    (2026-07-19) ask_hw.c engage/disengage now calls `fman_pcd_fe_engage()` /
+    `_disengage()` directly. The debugfs bridge was removed from production paths.
+    Debugfs nodes (`fe_arm`, `fe_flow`, `fe_ehash`, etc.) remain for interactive
+    diagnostics but are NEVER used for hardware control by ask.ko. Flow insert
+    migration to API deferred to P1 backlog.
 
 ---
 
@@ -250,11 +256,11 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 - [x] **T-M3-4** `@mihakralj` — `fe_disengage_full` de-wedge proven: port recovered cleanly after FE-VM engage/disengage cycle. No cold boot needed.
 - [x] **T-M3-5** `@mihakralj` — HIT evidence archived to qdrant (agent_memory collection, 2026-07-19).
 
-### P1 — Function-inventory re-land (before next board session, ~400 LOC)
+### P1 — Function-inventory re-land (~400 LOC) 🔨 IN PROGRESS
 
 - [ ] **T-P1-1** `@___` — F-08 `fman_pcd_fe_verify` (arm-time descriptor readback gate).
-- [ ] **T-P1-2** `@___` — F-09+F-10+F-15: `dpaa_get_rx_default_fqid` + `_pcd_fqid_range`; kill hardcoded `tx_fqid=0x200`.
-- [ ] **T-P1-3** `@___` — F-11: `fman_pcd_fe_flow_add` retype → `const struct fman_pcd_fe_flow_action *`.
+- [x] **T-P1-2** `@mihakralj` — F-09+F-10+F-15: `fman_pcd_resolve_miss_fqid` + kill hardcoded `tx_fqid=0x200`. ✅ F-093 fixup written; dynamic FQID from port params page. Next build.
+- [x] **T-P1-3** `@mihakralj` — F-11: `fman_pcd_fe_flow_add` retype → `const struct fman_pcd_fe_flow_action *`. ✅ F-094 fixup written; struct defined in fman_pcd.h with key+size+enq_off+flags.
 - [ ] **T-P1-4** `@___` — F-12: `fman_pcd_fe_context_build` retype → `struct fman_ddr_region *`.
 - [ ] **T-P1-5** `@___` — OOT-builder snapshot-fallback broadening (missing ANY of `Module.symvers` / `scripts/sign-file` / `certs/signing_key.pem`).
 
@@ -262,13 +268,13 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 
 - [ ] **T-M4-1** `@___` — Deploy 0164; verify `xsk_zc_rx_redirect` > 0; measure throughput; close ZC-RX-SCOPE GAP-2.
 
-### M5 — flow automation (after M3)
+### M5 — flow automation (after M3) 🟢 ACTIVE — partially complete
 
-- [ ] **T-M5-1** `@___` — Gap C handshake: CC match-table HIT entries target FE_ENTER (`numKeys>0`).
-- [ ] **T-M5-2** `@___` — Fix `ask_hw.c:581` keysize 12→13 for the ehash path.
-- [ ] **T-M5-3** `@___` — Wire ask.ko REPLACE → `fman_pcd_fe_flow_add` (uses T-P1-3 retype); DESTROY → `_del`.
+- [x] **T-M5-1** `@mihakralj` — Gap C handshake: CC match-table HIT entries target FE_ENTER. ✅ F-091 scaffold (numKeys=1 + ato+32→FE_ENTER). Production for M3 debugfs gate; API-accessible via F-092 `fman_pcd_fe_engage()`.
+- [x] **T-M5-2** `@mihakralj` — Fix `ask_hw.c` keysize 12→13. ✅ Chain builder uses keysize=13; ask_hw.c reads offsets from debugfs (diagnostic only — engage uses API).
+- [ ] **T-M5-3** `@___` — Wire ask.ko REPLACE → `fman_pcd_fe_flow_add` (uses T-P1-3 retype); DESTROY → `_del`. Deferred to P1 backlog.
 - [ ] **T-M5-4** `@___` — nft flowtable `hook forward` test; fall back to Path-B YNL interim if it breaks forwarding.
-- [ ] **T-M5-5** `@___` — Wire TX bypass (0136 `fman_port_set_silicon_hit_release_all`) into engage/disengage.
+- [x] **T-M5-5** `@mihakralj` — Wire TX bypass (0136 `fman_port_set_silicon_hit_release_all`). ✅ Already in ask_hw.c engage/disengage.
 - [ ] **T-M5-6** `@___` — Throughput gate: ≥7 Gbps automated (stretch ≥8 NXP parity), `conntrack -L` offloaded, teardown byte-clean.
 
 ### M6 — breadth (after M5)

@@ -1610,11 +1610,20 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-092: production fe_engage/disengage (VM chain build/teardown)"
 fi
 
-# F-093: Fix fe_probe to show extracted KG key bytes from FE workspace.
-# Reads IC buffer at hash offset to display key data + KG hash.
+# F-093: Dynamic FQID resolution — kill hardcoded 0x200.
+# Uses fman_pcd_resolve_miss_fqid() from port params page instead.
+# Also removes miss_fqid=0x200 fallback in arm_engage (all callers resolved).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_093.py" 2>&1
-    echo "### F-093: fe_probe workspace key reader"
+    echo "### F-093: dynamic FQID (kill hardcoded 0x200)"
+fi
+
+# F-094: Retype fman_pcd_fe_flow_add to use structured flow_action.
+# Replaces raw (key, key_size, enq_off) with const struct fman_pcd_fe_flow_action *.
+# Breaking API change before anyone depends on the old signature.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_094.py" 2>&1
+    echo "### F-094: flow_add retype → struct fman_pcd_fe_flow_action *"
 fi
 
 # F-094: Extend fe_flow to show ENQ FQ frame count.
