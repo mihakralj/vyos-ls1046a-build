@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Sun, 19 Jul 2026 23:12:00 +0000
+Subject: [PATCH] vpp: ARM64 resource defaults — cap main-heap-size and buffers
+
+Upstream VyOS defaults main-heap-size=3G which requires ~3.2GB of
+hugepages. The LS1046A has 7.4GB total RAM with 4GB in hugepages and
+needs the kernel + OS to share the remaining ~3.4GB.
+
+Override for ARM64/LS1046A:
+  main-heap-size:  3G → 256M   (256M is the minimum, sufficient for AF_XDP)
+  buffers-per-numa: auto → 16384 (prevents auto-calc allocating 32768+)
+
+With these defaults VPP needs ~1GB in hugepages (256M heap + 128M stats
++ 32M buffers), not ~3.2GB.
+
+---
+diff --git a/interface-definitions/vpp.xml.in b/interface-definitions/vpp.xml.in
+--- a/interface-definitions/vpp.xml.in
++++ b/interface-definitions/vpp.xml.in
+@@ -229,7 +229,7 @@
+                         <regex>(auto)</regex>
+                       </constraint>
+                     </properties>
+-                    <defaultValue>auto</defaultValue>
++                    <defaultValue>16384</defaultValue>
+                   </leafNode>
+                   <leafNode name="data-size">
+                     <properties>
+@@ -303,7 +303,7 @@
+                       <help>Main heap size</help>
+                       #include <include/unformat_memory_size.xml.i>
+                     </properties>
+-                    <defaultValue>3G</defaultValue>
++                    <defaultValue>256M</defaultValue>
+                   </leafNode>
+                   <leafNode name="main-heap-page-size">
+                     <properties>
