@@ -1620,9 +1620,6 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
 fi
 
 # F-095 (DELETED — stub, never implemented)
-fi
-
-
 
 fi
 

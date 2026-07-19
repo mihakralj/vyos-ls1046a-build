@@ -1,220 +1,207 @@
-# VPP on NXP LS1046A DPAA1 — AF_XDP Integration & HW Offload
+# VPP DPAA1 Acceleration Specification for NXP LS1046A (ASK2 Architecture)
 
-**Status:** Draft v0.4. 2026-06-12. Supersedes v0.3. **Dual-dataplane alignment** (`plans/DUAL-DATAPLANE.md`): single dual-dataplane image decided — VPP ships in **every** image (dormant until configured), the per-flavor ISO split is retired (made immediate 2026-06-14, ahead of DUAL-DATAPLANE M7); §1.3 reworked accordingly. Global ASK↔VPP mutual exclusion added to §4.1. No datapath change.
-**Status:** Draft v0.3. 2026-06-01. Supersedes v0.2 (deferred native-VyOS HW-offload CLI to a later phase). Supersedes v0.1 (native plugin proposal — REJECTED, preserved in Appendix A).
-**Target:** VPP 25.10+ with `af_xdp` plugin, Linux 6.18+ (VyOS rolling), ARM64.
-**Pre-requisite spec:** `specs/dpaa1-afxdp-modernization-spec.md` — all datapath and HW offload APIs consumed by this spec are defined there.
-
-> **CLI policy (v0.3):** VPP configuration and operation continue to use the **existing** surface — VPP's own `vppctl`/`startup.conf` plus the already-shipped `set vpp settings interface ethX` (patch `vyos-1x-010-vpp-platform-bus.patch`). This spec does **not** introduce any new native VyOS `set vpp settings hw-offload …` verbs. Native VyOS CLI for the §3 HW-offload primitives is **deferred to a separate, later phase** (tracked as a follow-on, out of scope for the AF_XDP datapath milestones). In the interim, the DPAA1 §5 HW-offload kernel APIs are reachable only through their native kernel interfaces (`ethtool -K`, sysfs, kernel module params / VPP startup config), not through new VyOS config nodes.
+This document defines the architecture, design boundaries, and integration interfaces for running the Vector Packet Processing (VPP) engine on NXP QorIQ LS1046A (DPAA1) hardware within VyOS. This specification supersedes all legacy out-of-tree userspace SDK (USDPAA) and proprietary DPDK Poll Mode Driver (PMD) approaches in favor of the modernized **ASK2 (`ask.ko`) dual-dataplane architecture**.
 
 ---
 
-## 1. Architecture
+## 1. Executive Summary & Architectural Paradigm Shift
 
-### 1.1 Design Decision: AF_XDP, NOT a Native Plugin
+Legacy DPAA1 acceleration models rely on userspace drivers (such as `dpaa_bus` or custom VPP C-plugins) that seize exclusive ownership of NXP Queue Manager (QMan) and Buffer Manager (BMan) hardware portals. In a routing OS like VyOS, this legacy model introduces severe architectural failures:
+* **Global Hardware Lockout:** Binding hardware portals to userspace detaches network interfaces from the Linux kernel, preventing seamless sharing of 1G RJ45 management interfaces (`eth0`–`eth2`) with mainline routing daemons (FRRouting).
+* **Memory Pool Contention:** Recreating buffer management inside VPP fragments system RAM and competes directly with Linux page allocators.
+* **Continuous ABI Drift:** Out-of-tree VPP device plugins break across upstream VPP releases due to changes in vector polling loops and `vnet_buffer_opaque` structures.
 
-VPP on LS1046A uses the **kernel AF_XDP zero-copy datapath** provided by the DPAA1 modernization driver. The v0.1 proposal (`fsl-dpaa1-um.ko` + userspace QMan/BMan portal ownership + userspace PCD) was **REJECTED** for three reasons:
+The **ASK2 architecture** resolves these issues by establishing a clean separation of concerns:
+1. **The Linux Kernel** retains ownership of the DPAA1 hardware portals via a modernized network device driver with native `AF_XDP` (XDP Socket) zero-copy support.
+2. **The `ask.ko` Kernel Module** acts as the direct hardware orchestrator for NXP Frame Manager (FMan) ASICs, Coarse Classification (CC) tables, and CAAM crypto job rings.
+3. **VPP** operates as a high-speed userspace dataplane consumer via its **unmodified upstream `af_xdp` plugin**, supplemented by a lightweight control-plane bridge plugin (`ask_cp.so`).
 
-1. **RC#31 — userspace QBMan ownership kills all kernel interfaces.** QMan/BMan state is SoC-global. A userspace process reprogramming portal mappings and BMan buffer pools corrupts the kernel's DPAA1 stack identically to how DPDK's `dpaa_bus` probe did (confirmed on hardware, 2026-04-03). Mixed kernel+userspace DPAA1 ownership is architecturally impossible without a SoC-level bifurcation that does not exist.
-2. **AF_XDP ZC already delivers the desired architecture.** The DPAA1 modernization spec's M1–M3-3 step 7 provides `ndo_xsk_wakeup`, XSK-backed BMan pool, per-CPU NAPI with qband mapping, and `fman_port_set_rx_bpool()` reprogram-WRITE — all board-validated on real LS1046A silicon. Total kernel-side code: ~3 kLOC. The v0.1 proposal would have required ~12 kLOC of new, untested code for the same result.
-3. **Port exclusivity is the wrong model.** AF_XDP creates sockets on kernel-owned netdevs — no unbind/rebind, no DT `fsl,userspace-managed` flag. The kernel retains full ownership of all FMan MACs. This is the proven production model (~3.5 Gbps AF_XDP today, targeting ≥7 Gbps with ZC).
+---
 
-### 1.2 Component Layout
-
-VPP on LS1046A uses only standard VPP components:
+## 2. High-Level Architecture
 
 ```
-VPP process
-├── af_xdp plugin (upstream)  ← creates AF_XDP ZC sockets on kernel netdevs
-├── dpdk plugin (optional)    ← for management/profiling only; NO DPAA PMD
-├── ipsec* plugins (optional) ← kernel xfrm offload via ASK2 (future)
-└── standard graph nodes      ← ip4-lookup, ip6-lookup, etc.
-
-Kernel (single binary, all flavors)
-├── fsl_dpaa_eth.ko (built-in)         ← owns all FMan MACs
-├── af_xdp_pool.ko (CONFIG_DPAA_AF_XDP_POOL=y)  ← XSK-backed BMan pool
-├── CONFIG_FSL_FMAN_PCD=y              ← shared PCD: CC, HM, Policer
-└── fman_cc_tree_*, fman_hm_node_*, fman_policer_* APIs
++-----------------------------------------------------------------+
+|                       VyOS Control Plane                        |
+|        (CLI Shell / Python Commit Daemon / vpp_papi)            |
++-----------------------------------------------------------------+
+          |                                       |
+          | (Binary API / vpp_papi)               | (Netlink IPC)
+          v                                       v
++-----------------------------------+   +-------------------------+
+|     VPP Userspace Engine          |   |  Linux Kernel Space     |
+|                                   |   |                         |
+|  +-----------------------------+  |   |  +-------------------+  |
+|  | Upstream af_xdp Plugin      |  |   |  | ask.ko Accelerator|  |
+|  | (Zero-Copy Packet I/O)      |  |   |  | (FMan/QBMan/CC)   |  |
+|  +-----------------------------+  |   |  +-------------------+  |
+|                 ^                 |   |            ^            |
+|                 | (XSK / UMEM)    |   |            | (HW Offload|
+|  +-----------------------------+  |   |  +-------------------+  |
+|  | ask_cp.so Control Bridge    |=====>|  | Modernized DPAA1  |  |
+|  | (Metadata & Flow Steering)  |  |   |  | Netdev Driver     |  |
+|  +-----------------------------+  |   |  +-------------------+  |
++-----------------------------------+   +------------|------------+
+                                                     |
+=====================================================v=============
+           NXP LS1046A Silicon (FMan / QBMan / BMan / CAAM)
 ```
 
-### 1.3 Dataplane Modes (v0.4 — single dual-dataplane image)
+---
 
-> **DECIDED 2026-06-12 (`plans/DUAL-DATAPLANE.md` §5/§7):** one ISO ships both dataplanes. VPP and `ask.ko` are both present in every image and both dormant by default; the operator's config selects the mode. The historical per-flavor table (v0.3 §1.3) is retired — `version-ask.json`/`version-vpp.json` feeds are now identical aliases of the single image's `version.json` feed (flavor split retired 2026-06-14).
+## 3. Dataplane I/O: Zero-Copy AF_XDP
 
-| Mode | Silicon state | Trigger | Datapath | HW Offload (interim) |
-|---|---|---|---|---|
-| (default) | S0 — mainline RSS | none | Kernel skbuf (improved by DPAA1 §5.2) | Existing kernel interfaces (RPS, NETIF_F_HW_VLAN via `ethtool -K`, tc/nftables) |
-| VPP | S0 + AF_XDP overlay (zero silicon delta) | `set vpp settings interface ethN` | AF_XDP ZC on SFP+ (eth3/eth4) | VPP `vppctl`/`startup.conf` + kernel-native (`ethtool -K`, sysfs) |
-| ASK | S1 — AC_CC + FE (silicon fast path) | `set interfaces ethernet ethN offload ask` | Kernel skbuf + ASK2 silicon forwarding | Via ASK2 (nft flow offload, xfrm IPsec) — per `specs/ask2-rewrite-spec.md` v1.7 |
+VPP does not execute proprietary polling loops against NXP hardware portals. All high-speed packet I/O is handled through VPP's native `af_xdp` device driver plugin communicating with the modernized DPAA1 kernel network driver.
 
-VPP and ASK are **mutually exclusive per interface** (commit validator, §4.1): one port cannot be both ASK and VPP; other ports are free. The ASK-off state (S0) is exactly the VPP-ready state — switching a port ASK→VPP requires snapshot-verified ASK teardown back to S0 on that port, never a direct transition.
+### 3.1 UMEM to BMan Pool Mapping
+* On high-speed 10GbE SFP+ interfaces (`eth3`/`eth4`), VPP initializes an AF_XDP socket (`XSK`) and registers a User Memory (`UMEM`) area.
+* The modernized DPAA1 kernel driver maps VPP's UMEM memory frames directly into hardware BMan buffer pools.
+* When FMan receives a frame from the physical PHY, it DMAs the packet payload directly into a UMEM frame and pushes the Frame Descriptor to a QMan channel polled by the XSK NAPI loop.
+* VPP worker threads consume these buffers via zero-copy (ZC) RX queues, eliminating software data copies entirely.
+
+### 3.2 Line-Rate Performance Targets
+By avoiding buffer copies and userspace QMan locking, the four Cortex-A72 cores on the LS1046A achieve line-rate forwarding on 10GbE interfaces (~2.47 Mpps per port for 64-byte frames) using standard VPP vector sizes (up to 256 packets per cycle).
 
 ---
 
-## 2. Datapath
+## 4. The `ask_cp.so` Control-Plane Bridge Plugin
 
-### 2.1 AF_XDP Zero-Copy RX/TX
+To bridge VPP's software forwarding graph with the hardware capabilities of the NXP silicon, VPP loads `ask_cp.so`—a specialized out-of-tree control-plane and metadata plugin. This plugin does not perform packet I/O; instead, it optimizes the graph and manages silicon offloading via Netlink IPC to `ask.ko`.
 
-VPP creates AF_XDP sockets in ZC mode on eth3/eth4. The kernel DPAA1 driver delivers frames directly into XSK UMEM chunks via BMan (FMan BMI → XSK pool BPID → UMEM).
+### 4.1 Hardware Parse Result (PR) Consumption
+The NXP FMan hardware parser evaluates L2, L3, and L4 headers at line rate before packet delivery.
+* **XDP Metadata Extraction:** The modernized DPAA1 kernel driver prepends FMan's hardware Parse Result (PR) into the XDP metadata area directly ahead of the packet payload.
+* **Graph Optimization:** `ask_cp.so` registers a feature arc node immediately after `af-xdp-input`. This node reads the hardware-calculated L3/L4 byte offsets and checksum validation flags from the XDP metadata, instantly populating `vnet_buffer(b)->l2_hdr_offset` and `l3_hdr_offset`.
+* **CPU Cycle Savings:** Software parsing nodes (`ethernet-input`, `ip4-input-check`, `ip6-input-check`) are bypassed entirely for valid frames, routing vectors straight to `ip4-lookup` or `ip6-lookup`.
 
-**Consumption of DPAA1 modernization milestones:**
+### 4.2 Coarse Classification (CC) Flow Steering
+Active, persistent traffic flows (such as established NAT sessions, IPsec tunnels, or BGP-routed elephant flows) are offloaded from VPP software execution into NXP silicon.
+* **Flow Threshold Monitoring:** `ask_cp.so` monitors active forwarding tables. When a flow exceeds a configurable packet-per-second threshold, the plugin initiates a hardware offload request.
+* **Silicon Execution:** The plugin transmits the 5-tuple matching key and action (e.g., encapsulation, MAC rewrite, egress port) to `ask.ko` via Netlink.
+* **Hardware Switching:** `ask.ko` programs FMan's hardware Coarse Classification (CC) tables. Subsequent frames matching this 5-tuple are switched in the FMan ASIC and redirected to the egress physical port without waking VPP worker threads or consuming CPU cycles.
 
-| Capability | DPAA1 Milestone | VPP Benefit |
-|---|---|---|
-| `ndo_xsk_wakeup` | M1 (dut-validated) | VPP idle CPU < 10%. No `poll-sleep-usec` needed. |
-| XSK pool attach/detach | M2 (dut-validated) | `bind(XDP_ZEROCOPY)` returns 0. 100× churn clean. |
-| Per-CPU NAPI + qband mapping | M3-3 step 2 (dut-validated) | True queue_id identity. `xdpsock -q N` works. Cluster-aware pinning. |
-| NAPI-hooked BMan refill | M3-3 step 4 (dut-validated) | 60 s hold: 0 IVCI / 0 BUG/WARN / 16 refill batches. |
-| True ZC RX (reprogram-WRITE + Recover) | M3-3 step 7 sub-increment 4b (`0103b`, entry-gate-validated) | Crash-free, reversible. Productive oracle gated on BMI register effectiveness confirm + traffic steering. Not required for ≥7 Gbps gate-3. |
-| Gate-3 capacity | M3-3 (option A+C validated) | 0% drop from driver; 5.57 Gbps aggregate TCP with softirq distributed. Consumer/methodology-bound, not driver-bound. |
+### 4.3 Hardware Policer & QoS Mirroring
+To defend VPP worker threads against volumetric DDoS attacks and line-rate bursts, QoS policing is pushed to ingress hardware.
+* **QoS API Interception:** `ask_cp.so` intercepts VPP QoS and policer definitions.
+* **Hardware Token Buckets:** The plugin translates software rate-limiting rules into FMan hardware token-bucket profiles via `ask.ko`.
+* **Silicon Drop & Coloring:** Traffic exceeding configured CIR/PIR thresholds is dropped or DSCP-remarked by the FMan ASIC before consuming BMan buffers or QMan descriptors.
 
-### 2.2 Per-Worker Configuration
+### 4.4 Plugin Binary API (`.api`) Schema
+The plugin exposes the following API definitions for external control:
 
-VPP workers 1–3 (CPU 1–3). VPP main thread on CPU 0. DPAA1 qband mapping (§5.2) distributes RX across QMan SWPs matching the VPP worker CPUs.
+```c
+syntax = "default";
 
-```conf
-# /etc/vpp/startup.conf (VPP flavor only)
-cpu {
-    main-core 0
-    corelist-workers 1-3
-}
+import "vnet/interface_types.api";
 
-af_xdp {
-    create eth3
-    create eth4
-}
+/** \brief Enable/disable ask_cp hardware acceleration on an interface
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - target interface
+    @param enable_hw_parser - read FMan Parse Results from XDP hints
+    @param enable_flow_offload - enable automatic CC silicon offloading
+    @param flow_offload_threshold_pps - packet rate to trigger CC offload
+*/
+autoreply define ask_cp_interface_enable_disable {
+    u32 client_index;
+    u32 context;
+    vl_api_interface_index_t sw_if_index;
+    bool enable_hw_parser;
+    bool enable_flow_offload;
+    u32 flow_offload_threshold_pps;
+};
 
-# No dpdk {} block for DPAA1 paths.
-# No unix { poll-sleep-usec 100 } — ndo_xsk_wakeup eliminates polling.
+/** \brief Dump active ask_cp silicon offloaded flows */
+define ask_cp_flow_dump {
+    u32 client_index;
+    u32 context;
+    vl_api_interface_index_t sw_if_index;
+};
+
+define ask_cp_flow_details {
+    u32 context;
+    u32 src_ip;
+    u32 dst_ip;
+    u16 src_port;
+    u16 dst_port;
+    u8 protocol;
+    u64 hardware_packets;
+    u64 hardware_bytes;
+};
 ```
 
-### 2.3 Jumbo Frame Limitation
+---
 
-AF_XDP ZC MTU is limited to 3290 (DPAA1 spec §6.1.1). This is a `fsl_dpaa_mac` XDP MTU cap — not a VPP limitation. Jumbo frames on kernel-managed RJ45 ports (eth0–eth2) retain full 9578 MTU.
+## 5. Runtime State Machine & Reversibility
+
+To ensure system stability and avoid interface lockups during configuration changes, the specification enforces a strict 3-state runtime state machine across the OS. Transitions between states do not require a system reboot or bus rebinding.
+
+| State | VPP Engine | Interface Control | Hardware & Driver State |
+|---|---|---|---|
+| **0: Dormant** | Stopped / Unloaded | Mainline Linux Kernel | Standard DPAA1 netdev driver active; RSS NAPI distributes frames to Linux network stack. |
+| **1: Kernel Offload** | Stopped / Unloaded | Mainline Linux Kernel | `ask.ko` active; Coarse Classification offloads flows via Linux `nftables` flowtable hooks. |
+| **2: VPP Overlay** | Active (`af_xdp`) | VPP (`eth3`/`eth4`), Linux (`eth0`–`eth2`) | BMan pools mapped to XSK UMEM; `ask_cp.so` manages FMan CC flow steering and XDP hints. |
 
 ---
 
-## 3. HW Offload Consumption
+## 6. VyOS Control-Plane Integration
 
-All HW offloads are consumed through the shared DPAA1 modernization PCD APIs. The kernel APIs (and their native kernel-side interfaces) are available now; the **native VyOS CLI verbs shown below as `set vpp settings hw-offload …` are NOT part of this spec's deliverable** — they are deferred to a separate, later "native VyOS CLI" phase. Until that phase lands, VPP HW-offload is driven through VPP's own configuration (`vppctl`/`startup.conf`) and the kernel-native interfaces (`ethtool -K`, sysfs, module params). The `set vpp settings hw-offload …` strings are retained here only as the **target syntax** for the future phase, not as a current commitment.
+The integration into VyOS abstracts all low-level VPP and Netlink operations behind standard VyOS configuration nodes.
 
-### 3.1 CC Steering (DPAA1 §5.4)
-
-**API:** `fman_cc_tree_install/add_key/remove_key/destroy`
-**Interim surface:** kernel-native (CC tree programmed via the §5.4 kernel API / `ndo_rx_flow_steer`); no VyOS config node.
-**Future native VyOS CLI (deferred phase):** `set vpp settings hw-offload classify rule <N> protocol <tcp|udp|vxlan> target-qband <0-3>`
-**Behavior:** Installs static CC tree at `pcd_ops->install`. Rules direct matching flows to specific qbands. Static tree; `commit` rebuilds. No netdev flap.
-
-### 3.2 HM Offload (DPAA1 §5.5)
-
-**API:** `fman_hm_node_install/destroy/caps_supported`
-**Interim surface:** kernel-native — `ethtool -K ethX rxvlan on` drives the §5.5 `.ndo_set_features` bridge (`0101`); no VyOS config node.
-**Future native VyOS CLI (deferred phase):** `set vpp settings hw-offload vlan-strip-on-ingress`
-**Behavior:** FMan strips VLAN tags before frames reach the XSK socket. VPP sees untagged frames. Sub-100 ns HM cost vs. multi-µs software path.
-
-### 3.3 Policer (DPAA1 §5.6)
-
-**API:** `fman_policer_install/destroy/caps_supported`
-**Interim surface:** kernel-native (§5.6 kernel API); no VyOS config node.
-**Future native VyOS CLI (deferred phase):** `set vpp settings hw-offload policer per-qband-limit <rate> per-flow-limit <rate>`
-**Behavior:** srTCM/trTCM per-qband or per-flow ingress rate-limit. DoS protection and SLA enforcement in silicon.
-
-### 3.4 CEETM (DPAA1 §5.7 — blocked on SDK forward-port)
-
-**Future native VyOS CLI (deferred phase):** `set qos policy shaper hardware ceetm …`
-**Status:** Doubly gated — (a) blocked until `qman_ceetm.c` + `dpaa_eth_ceetm.c` are forward-ported from NXP LSDK, and (b) the VyOS CLI verb itself belongs to the deferred native-CLI phase. Once both land, VPP and kernel traffic share the CEETM root qdisc.
-
----
-
-## 4. VyOS CLI Integration
-
-### 4.1 VPP Datapath Configuration (existing — in scope)
+### 6.1 CLI Configuration Schema
+Interface acceleration properties are defined under the standard interface tree:
 
 ```
-set vpp settings interface eth3
-set vpp settings interface eth4
+set interfaces ethernet eth3 vpp-options offload-mode 'ask-xdp'
+set interfaces ethernet eth3 vpp-options hw-parser-metadata 'enable'
+set interfaces ethernet eth3 vpp-options flow-steering 'enable'
+set interfaces ethernet eth3 vpp-options flow-steering-threshold '15000'
+set interfaces ethernet eth3 vpp-options rx-queues '2'
 ```
 
-Triggers VPP startup via `vyos-1x-010-vpp-platform-bus.patch` (AF_XDP mode). No `fsl,userspace-managed` DT property needed. No kernel netdev unbind. This is the **only** VyOS config surface this spec ships; VPP itself is otherwise configured/operated through its existing `vppctl`/`startup.conf`.
+### 6.2 Commit Orchestration (`vpp_papi` Backend)
+During a VyOS configuration `commit`, the configuration backend executes a structured sequence:
+1. **Validation:** Verifies that the target interface is a supported 10G SFP+ port (`eth3` or `eth4`) and that `ask.ko` is loaded in the kernel.
+2. **AF_XDP Binding:** Connects to VPP via `vpp_papi` and calls `af_xdp_create` to attach the target netdev with zero-copy mode explicitly requested (`mode 2`).
+3. **Bridge Activation:** Invokes `ask_cp_interface_enable_disable` via `vpp_papi` to activate hardware parser metadata extraction and CC flow steering thresholds.
+4. **Interface Up:** Brings the interface administratively up within the VPP forwarding graph (`sw_interface_set_flags`).
 
-**Mutual exclusion (v0.5, 2026-07-19):** the commit validator rejects a config where the same `ethN` appears in both `vpp settings interface ethN` and `interfaces ethernet ethN offload ask` — **per-interface** mutual exclusion (`plans/DUAL-DATAPLANE.md` §3.2); other ports are free. VPP requires the silicon in S0; engaging VPP on a port while ASK silicon state (S1) is live on that same port is never permitted.
+---
 
-### 4.2 HW Offload Configuration (DEFERRED to a later native-VyOS-CLI phase — NOT in scope)
+## 7. Observability & Debugging
 
-> The verbs in this subsection are **not implemented by this spec**. They are the target syntax for a future, separate phase that incorporates native VyOS commands. Until that phase, drive HW offload through VPP's own config and the kernel-native interfaces (`ethtool -K`, sysfs).
+The plugin must register interactive commands with the VPP debug console (`vppctl`) to provide deep visibility into hardware-software boundaries.
 
+### 7.1 Interface & Metadata Inspection
+Verifies that UMEM zero-copy mapping is active and shows the ratio of packets successfully using FMan Parse Results versus falling back to software parsing:
 ```
-# Future phase only — do NOT expect these to exist on a current vpp-flavor image:
-set vpp settings hw-offload vlan-strip-on-ingress
-set vpp settings hw-offload classify rule 10 protocol tcp target-qband 0
-set vpp settings hw-offload policer per-qband-limit 2500000000
+vppctl show ask-cp interfaces
+```
+*Expected Output:*
+```
+Interface eth3 (sw_if_index 1):
+  Mode: AF_XDP Zero-Copy (UMEM backed by BMan Pool 4)
+  Hardware Parser Hints: ENABLED
+    - HW Parsed Packets: 14,892,104 (99.8%)
+    - SW Fallback Packets: 29,102 (0.2% - fragmented/unsupported L4)
+  Flow Steering: ENABLED (Threshold: 15,000 pps)
 ```
 
-When the deferred phase lands, the VyOS validator will enforce CEETM ↔ VPP-internal shaping mutual exclusion per-port (DPAA1 spec §7.4). That validator is part of the deferred phase, not of the current AF_XDP datapath deliverable.
+### 7.2 Silicon Flow Table Dump
+Displays all active flows currently offloaded from VPP software execution into the NXP FMan Coarse Classification ASIC:
+```
+vppctl show ask-cp flows
+```
+*Expected Output:*
+```
+Active Silicon Offloaded Flows (FMan CC Table):
+[0] 10.100.0.10:443 -> 192.168.1.50:52104 (TCP) | Egress: eth4 | HW Pkts: 8,402,110 | HW Rate: 42,100 pps
+[1] 10.100.0.12:5001 -> 192.168.1.51:5001 (UDP)  | Egress: eth4 | HW Pkts: 1,102,400 | HW Rate: 18,400 pps
+Total Offloaded Flows: 2 | Total Silicon Switching Rate: 60,500 pps
+```
 
----
-
-## 5. Performance Targets
-
-Performance targets are inherited from DPAA1 modernization spec §8.3. VPP does not add new constraints.
-
-| Test | DPAA1 Spec Target | VPP Relevance |
-|---|---|---|
-| 1500B single-flow fwd | ≥ 7 Gbps | M3-3 gate-3 (flavor-agnostic; VPP `af_xdp` plugin is a valid XSK producer) |
-| 1500B 4-flow 4-core | ≥ 9 Gbps | VPP 3-worker configuration |
-| 64B unidirectional 1 qband | ≥ 1.5 Mpps | VPP small-packet forwarding |
-| Idle CPU with ZC + need_wakeup | < 10% | VPP worker threads not busy-spinning |
-
----
-
-## 6. VPP Plugin Changes (None Required)
-
-No new VPP plugin is needed. The upstream `af_xdp` plugin works as-is. No DPDK DPAA PMD. No `libdpaa1_um.so`. No char devices. No custom kernel module.
-
-### 6.1 What We Do NOT Build
-
-- `fsl-dpaa1-um.ko` — REJECTED. Kernel module with userspace DPAA1 portal ownership.
-- `libdpaa1_um.so` — REJECTED. Userspace QMan/BMan/FD library.
-- `dpaa1_plugin.so` — REJECTED. Custom VPP I/O plugin.
-- `/dev/dpaa1/*` char devices — REJECTED. Portal mmap from userspace.
-- PAMU programming for userspace DMA — REJECTED. PAMU is PPC-only (DPAA1 spec §4.6).
-- Microcode 106.4.18 — WRONG. Mono Gateway ships ucode 210.10.1.
-- `fsl,userspace-managed` DT property — UNNECESSARY. AF_XDP coexists with kernel netdev ownership.
-
----
-
-## 7. Open Questions
-
-1. **VPP `af_xdp` plugin multi-queue.** The upstream VPP `af_xdp` plugin creates one XSK socket per queue. Does it support `xdpsock -q N` semantics (bind specific queue)? Needed for per-worker qband affinity.
-2. **VPP buffer pool integration with UMEM.** VPP's internal buffer allocator vs. AF_XDP UMEM chunks. Start with separate pools; evaluate unified pool in v2.
-3. **A050385 erratum interaction with VPP headroom.** VPP defaults `XDP_PACKET_HEADROOM = 256`, which satisfies the ≥64 B UMEM headroom requirement (DPAA1 spec §6.1.5).
-
----
-
-## Appendix A: Rejected v0.1 Native Plugin Proposal (Historical Record)
-
-**This appendix is historical only. The v0.1 proposal was REJECTED on 2026-05-31.**
-
-The v0.1 spec proposed a `fsl-dpaa1-um.ko` kernel module + userspace library +
-VPP plugin stack (~12 kLOC) that would own QMan/BMan portals from userspace,
-program FMan PCD via a custom ioctl interface, and manage hugepage-backed buffer
-pools independently from the kernel. Key rejection reasons:
-
-1. RC#31: userspace QBMan reprogramming kills all kernel FMan interfaces globally.
-2. AF_XDP ZC already delivers the architecture with 25% of the code and proven board stability.
-3. Port exclusivity breaks VyOS's kernel-managed management ports.
-4. PAMU programming is architecturally impossible on arm64 LS1046A (DPAA1 spec §4.6).
-
-[Original v0.1 text follows, verbatim.]
-
----
-
-## 1. Scope
-
-A VPP input/output plugin that drives the LS1046A DPAA1 datapath directly, without DPDK, USDPAA, or NXP's `fmlib`/`fmc`. The plugin owns QMan and BMan portals from userspace, configures FMan ports and PCD via a small kernel helper, and feeds packets into VPP's vector graph using the native buffer format.
-
-[... rest of original v0.1 content preserved in git history ...]
-
----
-
-**End of v0.1 spec.**
+### 7.3 Hardware Policer Telemetry
+Displays token-bucket drop statistics collected directly from the FMan hardware policers:
+```
+vppctl show ask-cp policers
+```
