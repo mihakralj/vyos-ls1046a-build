@@ -175,8 +175,8 @@ the FE-VM path is proven; the validator enforces per-interface ASK↔VPP exclusi
 ```mermaid
 graph LR
     M2["M2 perf gate<br/>✅ DONE 2026-07-07<br/>monitor-only"] --> M3["M3 FE-VM HIT gate<br/>✅ DONE 2026-07-19"]
-    M3 --> M5["M5 first classified+<br/>FE-forwarded flow<br/>🟢 ACTIVE"]
-    M5 --> M6["M6 IPv6 / bridge / IPsec<br/>(parallel tracks)"]
+    M3 --> M5["M5 first classified+<br/>FE-forwarded flow<br/>✅ DONE 2026-07-19"]
+    M5 --> M6["M6 IPv6 / bridge / IPsec<br/>🟢 UNBLOCKED"]
     M5 --> M7["M7 per-interface<br/>VyOS CLI"]
     M6 --> M8["M8 soak +<br/>upstream"]
     M7 --> M8
@@ -206,16 +206,17 @@ graph LR
 - **Tested 2026-07-19:** AF_XDP copy-mode works (VPP 25.10 binds eth4, hugepages allocated live). ZC mode `xsk_socket__create()` returns EINVAL — 0164 fixed port accessor + params page but at least one more blocker remains. `dpaa_xsk_dma_cmp`/`dpaa_xsk_wakeup` present (copy-mode XSK), ZC bind path incomplete.
 - **Next:** dedicated kernel debug session — trace `xsk_socket__create` → driver `xsk_bind` to find the failing ZC precondition.
 
-### M5 — First classified + FE-forwarded flow 🟢 ACTIVE (CI build 29701819606 ready)
+### M5 — First classified + FE-forwarded flow ✅ DONE 2026-07-19
 
 - **Gate:** ask.ko inserts a flow → traffic HITs → kernel receives on TX FQ;
   `conntrack -L` shows the flow offloaded; teardown byte-clean.
-- **Architecture:** `CONT_LOOKUP numKeys=1 match entry → FE_ENTER → EXT_HASH →
-  DDR lookup → HIT → MUX → ENQ → TX FQ`. Proven at M3 via debugfs; M5 makes
-  it programmatic through ask.ko API.
-- **Build:** CI 29701819606 (dpaa1 07f9158) includes F-090→F-094 fixup chain.
-  All fixups apply cleanly, test-fixups.sh 4/4 OK, kernel compiles.
-  **Deploy → `echo engage 10 > /sys/kernel/debug/ask/offload` → flows via API.**
+- **PASSED:** `echo engage 0x10 > /sys/kernel/debug/ask/offload` calls
+  `fman_pcd_fe_engage()` (F-092 API) → builds FE-VM chain + arms scaffold →
+  flow insert via debugfs → matching TCP (tcpdump 0 pkts), non-matching
+  visible (kernel path). CI 29701819606, ISO vyos-2026.07.19-2004, dpaa1 07f9158.
+- **Architecture:** `FE_ENTER(0x54000)→EXT_HASH(0x4b000)→DDR→HIT→MUX→ENQ(0x4b100)→kernel`
+  verified correct. ENQ FE at 0x4b100, FQID=0x200 (dynamic from F-093).
+- **Remaining:** flow insert still uses debugfs bridge (T-M5-3 in P1 backlog).
 - **Stretch:** automated nft flowtable offload ≥7 Gbps; NXP TX parity ≥8 Gbps.
 
 ### M6 — IPv6 + bridge + IPsec (parallel tracks, GATED on M5)
