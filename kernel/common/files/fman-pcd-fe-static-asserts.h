@@ -46,14 +46,24 @@ static_assert(FMAN_PCD_FE_MAX_SIZE    == 28,
 	"§17: FE_MAX_SIZE = 28 B (= EXT_HASH)");
 
 /* ── §5.1: NIA (Next Instruction Address) encodings ──────────────────── */
+/* NIA_ENG_BMI, NIA_BMI_AC_ENQ_FRAME, NIA_FM_CTL_AC_CC, ENQUEUE_KG_DFLT_NIA
+ * are defined in fman_keygen.c, not fman_pcd.c.  Guard with #ifdef so the
+ * header compiles from both translation units.
+ */
+#ifdef NIA_ENG_BMI
 static_assert(NIA_ENG_BMI          == 0x00500000,
 	"§17: NIA engine = BMI (0x00500000)");
 static_assert(NIA_BMI_AC_ENQ_FRAME == 0x00000002,
 	"§17: BMI action = enqueue frame (0x00000002)");
+#endif
+#ifdef NIA_FM_CTL_AC_CC
 static_assert(NIA_FM_CTL_AC_CC     == 0x00000006,
 	"§17: FM_CTL action = AC_CC (0x00000006)");
+#endif
+#ifdef ENQUEUE_KG_DFLT_NIA
 static_assert(ENQUEUE_KG_DFLT_NIA  == 0x80500002,
 	"§17: KG default NIA = BMI|ENQ_FRAME (0x80500002)");
+#endif
 
 /* ── §17.2: EXT_HASH FE field widths ─────────────────────────────────── */
 static_assert(FMAN_EHASH_MASK_MAX  == 0x7FFF,
