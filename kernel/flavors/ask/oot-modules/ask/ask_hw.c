@@ -615,76 +615,31 @@ int ask_hw_offload_engage(u8 hw_port_id)
                 goto out_unlock;
         }
 
-        /* Fix L2: Build FE-VM pipeline via debugfs bridge (Fork-B path only).
-         * The FE-VM chain (pool/singletons/ehash/hashfe/enq/enter/arm) is built
-         * entirely via debugfs writes — the EXACT sequence proven at M3 HIT gate
-         * (2026-07-19, bb3a3cf).  Offsets are read back from debugfs after each
-         * build step to avoid hardcoding gen_pool allocation order.
-         * Once FE-VM builders are exported as kernel API (P1 backlog), this
-         * debugfs bridge can be replaced with direct calls. */
-        {
-                char buf[64];
-                char read_buf[256];
-                unsigned long hashfe_off, enq_off, fe_enter_off;
-                int n;
-
-                /* Step 1-5: build chain (M3-proven sequence) */
-                debugfs_fe_write("fe_pool", "get", 3);
-                debugfs_fe_write("fe_singletons", "build", 5);
-                debugfs_fe_write("fe_ehash", "set 0x7FFF 13 0", 17);
-                debugfs_fe_write("fe_hashfe", "build", 5);
-                debugfs_fe_write("fe_enq", "build 0x200", 11);
-
-                /* Read ENQ FE offset from debugfs */
-                if (debugfs_fe_read("fe_enq", read_buf, sizeof(read_buf)) > 0) {
-                        enq_off = parse_enq_offset(read_buf);
-                        if (enq_off)
-                                ask_hw_enq_fe_off = enq_off;
-                }
-                if (!ask_hw_enq_fe_off) {
-                        ask_pr_err("hw: cannot determine ENQ FE offset\n");
-                        rc = -ENXIO;
-                        goto out_unlock;
-                }
-                ask_pr_info("hw: ENQ FE offset 0x%lx\n", ask_hw_enq_fe_off);
-
-                /* Read EXT_HASH FE offset from debugfs */
-                hashfe_off = 0;
-                if (debugfs_fe_read("fe_hashfe", read_buf, sizeof(read_buf)) > 0) {
-                        const char *p = strstr(read_buf, "off=0x");
-                        if (p) sscanf(p, "off=0x%lx", &hashfe_off);
-                }
-                if (!hashfe_off) {
-                        ask_pr_err("hw: cannot determine EXT_HASH FE offset\n");
-                        rc = -ENXIO;
-                        goto out_unlock;
-                }
-                ask_pr_info("hw: EXT_HASH FE offset 0x%lx\n", hashfe_off);
-
-                /* Build FE_ENTER AD pointing at EXT_HASH FE */
-                n = snprintf(buf, sizeof(buf), "build 0x%lx", hashfe_off);
-                debugfs_fe_write("fe_enter", buf, n);
-
-                /* Read FE_ENTER AD offset from debugfs */
-                fe_enter_off = 0;
-                if (debugfs_fe_read("fe_enter", read_buf, sizeof(read_buf)) > 0) {
-                        const char *p = strstr(read_buf, "off=0x");
-                        if (p) sscanf(p, "off=0x%lx", &fe_enter_off);
-                }
-                if (!fe_enter_off) {
-                        ask_pr_err("hw: cannot determine FE_ENTER AD offset\n");
-                        rc = -ENXIO;
-                        goto out_unlock;
-                }
-                ask_pr_info("hw: FE_ENTER AD offset 0x%lx\n", fe_enter_off);
-
-                /* Step 6: engage with F-091 HIT scaffold (numKeys=1 → FE_ENTER) */
-                n = snprintf(buf, sizeof(buf), "engage 0x%02x 0x%lx 0x2B9 0x1C0006",
-                             hw_port_id, fe_enter_off);
-                rc = debugfs_fe_write("fe_arm", buf, n);
-        }
-        if (rc)
+        /* F-092: Build + arm FE-VM via kernel API (not debugfs).
+         * fman_pcd_fe_engage() now builds the full VM chain via
+         * __fman_pcd_fe_build_vm_chain(), creates the CONT_LOOKUP scaffold
+         * with numKeys=1 (F-091), and arms the port for FE-VM dispatch.
+         * This replaces the debugfs bridge — debugfs is for diagnostics only.
+         */
+        rc = fman_pcd_fe_engage(h->fman, hw_port_id);
+        if (rc) {
+                ask_pr_err("hw: fman_pcd_fe_engage port 0x%02x failed: %d\n",
+                           hw_port_id, rc);
                 goto out_unlock;
+        }
+
+        /* Diagnostic: read ENQ FE offset from debugfs for flow_insert use.
+         * Debugfs is READ-ONLY here — hardware control uses the API above. */
+        {
+                char read_buf[256];
+                if (debugfs_fe_read("fe_enq", read_buf, sizeof(read_buf)) > 0) {
+                        unsigned long off = parse_enq_offset(read_buf);
+                        if (off)
+                                ask_hw_enq_fe_off = off;
+                }
+                ask_pr_info("hw: ENQ FE offset 0x%lx (diagnostic read)\n",
+                            ask_hw_enq_fe_off);
+        }
 
         /*
          * Enable silicon HIT-release on all FMan TX ports so that
@@ -735,23 +690,10 @@ void ask_hw_offload_disengage(u8 hw_port_id)
                 return;                 /* idempotent no-op */
         }
 
-        /* Fix C2: Tear down FE-VM pipeline via debugfs bridge (Fork-B path).
-         * Replaces the Fork-A fman_pcd_offload_disengage() call with the
-         * symmetric debugfs bridge teardown that mirrors the engage sequence.
-         * This ensures engage/disengage symmetry: both use Fork-B FE-VM path. */
-        {
-                char buf[64];
-                int n;
-
-                n = snprintf(buf, sizeof(buf), "disengage 0x%02x", hw_port_id);
-                debugfs_fe_write("fe_arm", buf, n);
-                debugfs_fe_write("fe_enter", "clear", 5);
-                debugfs_fe_write("fe_enq", "clear", 5);
-                debugfs_fe_write("fe_hashfe", "clear", 5);
-                debugfs_fe_write("fe_ehash", "clear", 5);
-                debugfs_fe_write("fe_singletons", "clear", 5);
-                debugfs_fe_write("fe_pool", "put", 3);
-        }
+        /* F-092: Disarm + tear down FE-VM via kernel API (not debugfs).
+         * fman_pcd_fe_disengage() now tears down the VM chain after disarming.
+         */
+        fman_pcd_fe_disengage(h->fman, hw_port_id);
 
         /*
          * Reverse the FMan-global TX-confirm bypass set at engage so the
