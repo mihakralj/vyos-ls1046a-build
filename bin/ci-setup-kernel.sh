@@ -1056,6 +1056,8 @@ fi
 
 PATCH_FAIL=0
 PATCH_FAIL_LIST=""
+PATCH_FALLBACK_COUNT=0
+PATCH_FALLBACK_LIST=""
 for patch in $(find "${PATCH_DIR}" -maxdepth 1 -type f -name '*.patch' | sort); do
     pname=$(basename "$patch")
     echo "I: Apply Kernel patch: $patch"
@@ -1066,7 +1068,9 @@ for patch in $(find "${PATCH_DIR}" -maxdepth 1 -type f -name '*.patch' | sort); 
     else
         # Detect silent 3-way fallback — patch landed but with drifted context
         if grep -q "Falling back to three-way merge" /tmp/_apply_stderr; then
-            echo "### 3-way-fallback: $pname applied via 3-way merge (context drifted)"
+            echo "::warning::3-way-fallback: $pname applied via 3-way merge (context drifted)" >&2
+            PATCH_FALLBACK_COUNT=$((PATCH_FALLBACK_COUNT + 1))
+            PATCH_FALLBACK_LIST="$PATCH_FALLBACK_LIST $pname"
         fi
         # Commit each successfully-applied patch so that subsequent patches'
         # `git apply --3way` sees the cumulative on-disk state as their merge
@@ -1084,6 +1088,11 @@ if [ "$PATCH_FAIL" -ne 0 ]; then
     echo "::error::$PATCH_FAIL kernel patch(es) failed to apply:$PATCH_FAIL_LIST" >&2
     echo "::error::Aborting build. The legacy patch -p1 loop would have continued silently with a partially-patched kernel." >&2
     exit 1
+fi
+
+if [ "$PATCH_FALLBACK_COUNT" -ne 0 ]; then
+    echo "::warning::$PATCH_FALLBACK_COUNT kernel patch(es) applied via 3-way fallback (context drifted):$PATCH_FALLBACK_LIST" >&2
+    echo "::warning::Drifted patches should be refreshed via: bin/kernel-roundtrip.sh export" >&2
 fi
 
 # Snapshot the patched tree so subsequent injections (LP5812 olddefconfig,
@@ -1459,6 +1468,13 @@ if changed:
 F086PY
 fi
 
+# F-076: atomic fe_disengage_full debugfs — SDK-correct ordered teardown.
+# Replaces 7-step manual sequence that crashes board (F-076, 2026-07-18).
+# Calls __fman_pcd_fe_arm_disengage + fman_pcd_port_recover in one write.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_076.py" 2>&1
+fi
+
 # F-068: IC key probe — extend dpaa_eth IC copy to include KG key region.
 # The mainline dpaa_eth IC copy (FMBM_RICP: iciof=0, size=48B) only copies
 # parser results + timestamp + hash. The KG-extracted key at IC offset 0x48
@@ -1467,7 +1483,6 @@ fi
 # RX path (rx_default_dqrr -> vaddr + prs_result_offset + key_offset).
 # Temporary — removed once extraction order is determined.
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_068_2.py" 2>&1
     echo "### dpaa_eth.c: F-068 IC key probe (HWA size extended +32B for KG key)"
 fi
 
