@@ -1619,6 +1619,16 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-094: flow_add retype → struct fman_pcd_fe_flow_action *"
 fi
 
+# F-096: Call fman_pcd_fe_build_contexts() during fe_arm engage.
+# Patch 0146 defines the function but the call site was lost when
+# F-091/F-092 modified __fman_pcd_fe_arm_engage(). Without working-store
+# context, the FE-VM MUX cannot read its next-FE pointer and parks on
+# first frame under load. This unparks the FE-VM for hardware forwarding.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_096.py" 2>&1
+    echo "### F-096: FE-VM context build call (unparks FE-VM)"
+fi
+
 # F-095 (DELETED — stub, never implemented)
 
 fi

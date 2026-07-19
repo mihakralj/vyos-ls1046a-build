@@ -22,9 +22,10 @@
     "F_091.py": "fman_pcd.c: F-091 HIT scaffold — numKeys=1 + FE_ENTER AD at ato+32",
     "F_093.py": "fman_pcd.c: F-093 dynamic FQID — kill hardcoded 0x200 via fman_pcd_resolve_miss_fqid()",
     "F_094.py": "fman_pcd.c/h: F-094 retype flow_add → struct fman_pcd_fe_flow_action *",
-    "F_092.py": "fman_pcd.c: F-092 production fe_engage/disengage — build/teardown VM chain via API"
+    "F_092.py": "fman_pcd.c: F-092 production fe_engage/disengage — build/teardown VM chain via API",
+    "F_096.py": "fman_pcd.c: F-096 call fman_pcd_fe_build_contexts() during fe_arm engage — unparks FE-VM"
   },
-  "count": 23,
+  "count": 24,
   "removed_dead": [
     "F_070b.py — unreferenced in ci-setup-kernel.sh"
   ],
@@ -137,6 +138,10 @@
     "F_092.py": {
       "action": "fold-into 0158+0153",
       "reason": "fe_engage should build VM chain; fe_disengage should tear down — belongs with the API patches"
+    },
+    "F_096.py": {
+      "action": "fold-into 0146/0158",
+      "reason": "Context build call belongs with the arm_engage function — 0146 lost call site, F-091/F-092 overwrote it"
     }
   }
 }
