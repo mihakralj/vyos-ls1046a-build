@@ -651,7 +651,7 @@ unset _count _series _src _p
 # This catches orphaned patches with no series entry (the old guard
 # caught forgotten cp lines — now the loop reads series directly so
 # the failure mode is a patch file committed without a series entry).
-BOARD_STAGE_SKIP="0150-fman-pcd-fe-engage-api.patch 0158-fman-pcd-fqid-resolution-compose.patch 0159-fman-pcd-e2-hash-probe.patch 0160-fman-pcd-ekfc-programming.patch 0161-fman-pcd-rccb-feenter-direct.patch 0162-fman-pcd-port-arm-fe-ekfc-fix.patch"
+BOARD_STAGE_SKIP="0150-fman-pcd-fe-engage-api.patch"
 _missing=""
 # Cross-check: every .patch in board/ must be in series or SKIP list
 {
@@ -1394,7 +1394,7 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
 
     # F-085: Suppress -Wunused-function for static functions whose callers
      # may be behind conditional code paths or fixup-anchor mismatches.
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" drivers/net/ethernet/freescale/fman/fman_pcd.c "static int __fman_pcd_fe_build_vm_chain" "static __maybe_unused int __fman_pcd_fe_build_vm_chain" -1 "F-085: __maybe_unused on vm_chain (optional — 0158 skipped)" \
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" drivers/net/ethernet/freescale/fman/fman_pcd.c "static int __fman_pcd_fe_build_vm_chain" "static __maybe_unused int __fman_pcd_fe_build_vm_chain" 1 "F-085: __maybe_unused on vm_chain" \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
     # fman_pcd_fe_buffer_setup now called via F-072b — no __maybe_unused needed
 
