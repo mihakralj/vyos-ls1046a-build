@@ -44,8 +44,7 @@ else:
 \tif (err)
 \t\treturn err;
 
-\t{}
-""".format(engage_anchor)
+\t""" + engage_anchor
 
     new_engage_block = """err = fman_pcd_port_ensure_params_page(pcd, rxport);
 \tif (err)
