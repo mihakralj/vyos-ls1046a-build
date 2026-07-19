@@ -18,9 +18,12 @@
     "mutate.py": "count-gated text replacement helper — F-084 and future conversions",
     "F_076.py": "fman_pcd.c: F-076 atomic fe_disengage_full (SDK-correct teardown + port de-wedge)",
     "F_089.py": "fman_pcd.c: F-089 §17 FE descriptor static_asserts + KUnit test injection",
-    "F_090.py": "fman_pcd.c: F-090 fe_chain debugfs — wires __fman_pcd_fe_build_vm_chain"
+    "F_090.py": "fman_pcd.c: F-090 fe_chain debugfs — wires __fman_pcd_fe_build_vm_chain",
+    "F_091.py": "stub placeholder — no changes",
+    "F_093.py": "stub placeholder — no changes",
+    "F_094.py": "stub placeholder — no changes"
   },
-  "count": 19,
+  "count": 22,
   "removed_dead": [
     "F_070b.py — unreferenced in ci-setup-kernel.sh"
   ],
@@ -117,6 +120,18 @@
     "F_090.py": {
       "action": "fold-into 0158",
       "reason": "fe_chain debugfs node belongs with the builder it calls — 0158 defines __fman_pcd_fe_build_vm_chain"
+    },
+    "F_091.py": {
+      "action": "permanent",
+      "reason": "Placeholder stub for future fixup"
+    },
+    "F_093.py": {
+      "action": "permanent",
+      "reason": "Placeholder stub for future fixup"
+    },
+    "F_094.py": {
+      "action": "permanent",
+      "reason": "Placeholder stub for future fixup"
     }
   }
 }
