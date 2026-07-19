@@ -34,6 +34,7 @@
 
 /* Opaque to the OOT consumer; resolved inside fsl_dpa.ko. */
 struct fman;
+struct fman_pcd_fe_flow_action;     /* defined in <linux/fsl/fman_pcd.h> */
 
 /* L4 protocol selector for fman_cc_key.proto (IANA numbers). 0 = any. */
 #define FMAN_CC_PROTO_ANY	0
@@ -178,7 +179,7 @@ void fman_pcd_offload_disengage(struct fman *fm, u8 hw_port_id);
 int  fman_pcd_fe_engage(struct fman *fm, u8 hw_port_id);
 void fman_pcd_fe_disengage(struct fman *fm, u8 hw_port_id);
 int  fman_pcd_fe_flow_add(struct fman *fm, u8 hw_port_id,
-                          const u8 *key, u8 key_size, unsigned long enq_off);
+			   const struct fman_pcd_fe_flow_action *action);
 int  fman_pcd_fe_flow_del(struct fman *fm, u8 hw_port_id,
                           const u8 *key, u8 key_size);
 
