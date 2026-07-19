@@ -1653,6 +1653,14 @@ fi
 
 fi
 
+# F-099 (M4 ZC instrumentation): Add pr_err diagnostics at every error
+# return in xp_assign_dev(), xsk_bind(), and dpaa_xdp() to trace which
+# kernel precondition causes xsk_socket__create() EINVAL with XDP_ZEROCOPY.
+# Targets core kernel files net/xdp/xsk_buff_pool.c + net/xdp/xsk.c + dpaa_eth.c.
+# Temporary — remove once M4 root cause is identified.
+python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_099.py" 2>&1
+echo "### F-099: AF_XDP ZC bind path instrumented"
+
 # F-062a DELETED — was a functional no-op. The sed s/pcd->fe_exit_off,/pcd->fe_mux_off,/
 # never matched because the hash FE encode call uses named parameters split across
 # two lines. w5 was already MUX from patch 0131.

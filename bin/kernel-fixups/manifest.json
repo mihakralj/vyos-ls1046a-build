@@ -25,9 +25,10 @@
     "F_092.py": "fman_pcd.c: F-092 production fe_engage/disengage — build/teardown VM chain via API",
     "F_096.py": "fman_pcd.c: F-096 call fman_pcd_fe_build_contexts() during fe_arm engage — unparks FE-VM",
     "F_097.py": "fman_pcd.c: T-P1-1 F-08 — fman_pcd_fe_verify arm-time descriptor readback gate (catches F-072..F-079 silent-write defects before KG arm)",
-    "F_098.py": "fman_pcd.c: T-P1-4 F-12 — fman_pcd_fe_context_build retype void __iomem* → struct fman_ddr_region* (DDR not MMIO)"
+    "F_098.py": "fman_pcd.c: T-P1-4 F-12 — fman_pcd_fe_context_build retype void __iomem* → struct fman_ddr_region* (DDR not MMIO)",
+    "F_099.py": "net/xdp/*.c + dpaa_eth.c: M4 ZC-bind instrumentation — pr_err at every error return to trace xsk_socket__create() EINVAL"
   },
-  "count": 26,
+  "count": 27,
   "removed_dead": [
     "F_070b.py — unreferenced in ci-setup-kernel.sh"
   ],
@@ -152,6 +153,10 @@
     "F_098.py": {
       "action": "fold-into 0135",
       "reason": "context_build type fix belongs with the function definition in 0135"
+    },
+    "F_099.py": {
+      "action": "remove-after-M4",
+      "reason": "temporary diagnostic — traces ZC bind failure; remove once root cause identified"
     }
   }
 }
