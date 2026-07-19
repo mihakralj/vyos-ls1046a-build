@@ -14,13 +14,13 @@ Read `[NOTE]` only if additional context is needed.
 ## 1. STATUS & SCOPE
 
 **[SPEC]**
-- Current-state reference for the `vpp` build flavor.
+- Current-state reference for the single-image AF_XDP dataplane (no build flavor — flavor split retired 2026-06-14).
 - Mainline Linux 6.18.x (pinned via `vyos-build/data/defaults.toml` `kernel_version = "6.18.31"`), VPP from upstream VyOS arm64 packages, AF_XDP datapath on DPAA1 FMan via the in-tree `fsl_dpa` driver.
 - Status: plumbed and shipping in CI; not benchmarked on hardware after the patch-022 AF_XDP cutover.
 
 ---
 
-## 2. WHAT THIS FLAVOR IS
+## 2. WHAT THIS MODE IS
 
 **[SPEC]**
 ```mermaid
@@ -55,7 +55,7 @@ flowchart LR
 ## 3. INTERFACE NAMING
 
 **[SPEC]**
-- LS1046A FMan MACs probe in DT unit-address order, not physical-port order. Combined with `vyos_net_name` hw-id matching on installed systems, the visible names on the vpp flavor are `e2..e6`, not `eth0..eth4`.
+- LS1046A FMan MACs probe in DT unit-address order, not physical-port order. Combined with `vyos_net_name` hw-id matching on installed systems, the visible names on the VPP-enabled system are `e2..e6`, not `eth0..eth4`.
 
 | Visible name | Physical port      | Role on vpp ISO            |
 |--------------|--------------------|----------------------------|
@@ -69,10 +69,10 @@ flowchart LR
 
 ---
 
-## 4. BAKED-IN DEFAULTS (vpp flavor ISO ships VPP ON)
+## 4. BAKED-IN DEFAULTS (VPP ON by default when configured)
 
 **[SPEC]**
-- Unlike `default` and `ask`, the vpp flavor's `config.boot.default` is `config.boot.vpp`:
+- When VPP mode is active, the effective configuration diverges from the baseline `config.boot.default`: the VPP-specific config template (`config.boot.vpp`) is referenced here.
 
 ```
 system {
@@ -233,7 +233,7 @@ for z in /sys/class/thermal/thermal_zone*/temp; do echo "$z: $(($(cat $z)/1000))
 **[SPEC]**
 Order of work, smallest first:
 1. Boot a vpp ISO on hardware; capture `show interface` / `show runtime` / `fan-check` / thermal-zone temps under idle and under iperf3 load. Record real throughput per direction on a single 10G SFP+ link, then on both.
-2. Strip the dead DPDK branches out of patch 010's `startup.conf.j2` block now that 022 makes them unreachable on the vpp flavor.
+2. Strip the dead DPDK branches out of patch 010's `startup.conf.j2` block now that 022 makes them unreachable on the VPP dataplane path.
 3. Enable a single VPP worker thread (`cpu-cores 2`, worker on core 1) once fan-pid is validated under sustained 10G load, and re-benchmark.
 4. CAAM crypto via VPP — load `crypto_native` / `crypto_openssl` plugins and benchmark IPsec AES-GCM through the in-kernel CAAM driver (`/dev/crypto` or AF_ALG path). CAAM is already enabled.
 5. L3 forwarding + NAT44 via VPP, with FRR on the control plane talking over the LCP taps.
