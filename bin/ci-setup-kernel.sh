@@ -1394,7 +1394,7 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
 
     # F-085: Suppress -Wunused-function for static functions whose callers
      # may be behind conditional code paths or fixup-anchor mismatches.
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "static int __fman_pcd_fe_build_vm_chain" "static __maybe_unused int __fman_pcd_fe_build_vm_chain" 1 "F-085: __maybe_unused on vm_chain" \
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" drivers/net/ethernet/freescale/fman/fman_pcd.c "static int __fman_pcd_fe_build_vm_chain" "static __maybe_unused int __fman_pcd_fe_build_vm_chain" 0 "F-085: __maybe_unused on vm_chain (optional — 0158 skipped)" \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
     # fman_pcd_fe_buffer_setup now called via F-072b — no __maybe_unused needed
 
