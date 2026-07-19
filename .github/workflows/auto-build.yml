@@ -260,6 +260,12 @@ jobs:
           df -h / /mnt 2>/dev/null || true
           echo "### Caches cleared"
 
+      - name: Clone Linux Kernel (git repo, not tarball)
+        run: |
+          bin/clone-kernel.sh "${KERNEL_VERSION:-6.18.38}"
+          # The clone goes to vyos-build/scripts/package-build/linux-kernel/linux/
+          # build.py skips the tarball download when this directory exists.
+
       - name: Build Image Packages
         run: bin/ci-build-packages.sh
 
