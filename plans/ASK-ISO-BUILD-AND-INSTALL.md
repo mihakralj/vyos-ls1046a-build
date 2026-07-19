@@ -1,13 +1,15 @@
 # Build the single LS1046A image and install it on the live board
 **Version 1.1.0** · 2026-06-14 · HADS 1.0.0
 
-> Part of the ASK documentation set. Index and source-of-truth hierarchy: [`plans/ASK-PLANS.md`](ASK-PLANS.md).
+> Part of the ASK documentation set. Execution plan: [`plans/ASK2-MASTER-PLAN.md`](ASK2-MASTER-PLAN.md) (single authoritative). Architecture index: `specs/ask2-rewrite-spec.md`.
 
 > **Single-image model (2026-06-14):** the historical per-flavor `FLAVOR=ask`
 > build path has been **retired**. There is now **one** ISO
 > (`vyos-<version>-LS1046A-arm64.iso`) that ships every dataplane — mainline
 > DPAA, VPP AF_XDP, and (once it lands) a dormant `ask.ko`. Install that one
-> image and **enable ASK at runtime** with `set system offload ask`. Where the
+> image and **enable ASK at runtime** per interface with
+> `set interfaces ethernet eth<n> offload ask` (per-interface CLI contract,
+> 2026-07-19 — supersedes the retired `set system offload ask` global knob). Where the
 > text below historically said "build a `FLAVOR=ask` ISO", read "build the
 > single image"; where it said `latest-ask.iso`, read `latest.iso`.
 
@@ -28,7 +30,8 @@ End-to-end recipe, three stages:
 - Build the single LS1046A ISO on this Cobalt 100 ARM64 VM.
 - Publish it to the LXC 200 HTTP relay.
 - Install it on the running LS1046A board via `add system image <url>`, then
-  enable the offload at runtime with `set system offload ask`.
+  enable the offload at runtime per interface with
+  `set interfaces ethernet eth<n> offload ask`.
 
 **[SPEC]**
 - The HTTP relay on LXC 200 is a systemd service (`tftp-http.service`, rooted at `/srv/tftp/`, listening on `:8080`).
@@ -53,7 +56,7 @@ set system image default-image vyos-<version>-LS1046A-arm64
 reboot
 
 # Enable the ASK offload at runtime (once the ask.ko component lands):
-set system offload ask
+set interfaces ethernet eth3 offload ask
 commit ; save
 ```
 
@@ -148,7 +151,7 @@ What it does, in order:
    - `ci-setup-vyos1x.sh` (patches vyos-1x)
    - `ci-setup-kernel.sh` (kernel config + patches + Mono DTB)
    - `ci-compile-mono-dtb.sh`
-   - `ci-setup-vyos-build.sh` (stages the single image's chroot; the ASK2 offload ships dormant until the spec components land — `set system offload ask` is a no-op until then)
+   - `ci-setup-vyos-build.sh` (stages the single image's chroot; the ASK2 offload ships dormant until the spec components land — `set interfaces ethernet eth<n> offload ask` is a no-op until then)
    - `ci-build-packages.sh` (kernel + vyos-1x)
    - `ci-pick-packages.sh`
    - `ci-install-extra-packages.sh`
@@ -215,7 +218,7 @@ ssh vyos sudo /tmp/ask-check
 **[SPEC]**
 What should change vs. the default-flavor image:
 
-| Probe | offload disabled (default) | offload engaged (`set system offload ask`) |
+| Probe | offload disabled (default) | offload engaged (`set interfaces ethernet eth<n> offload ask`) |
 |---|---|---|
 | `caam_qi_ext_consumer_register` in kallsyms | absent | **present** (patch 0001) |
 | `ethtool -k eth0 \| grep hw-tc-offload` | `off [fixed]` | **`on [fixed]`** (patch 0002) |
@@ -226,7 +229,7 @@ What should change vs. the default-flavor image:
 | `askd.service`, `ask-cli`, `set system ask` CLI | absent | **TBD** — userspace M5 still pending |
 
 **[NOTE]**
-The four in-tree kernel patches + PCD subsystem ship built-in in every image, so `ask-check` shows them OK today. The OOT `ask.ko` module and the `set system offload ask` engagement remain TODO until those components land.
+The four in-tree kernel patches + PCD subsystem ship built-in in every image, so `ask-check` shows them OK today. The OOT `ask.ko` module and the `set interfaces ethernet eth<n> offload ask` engagement remain TODO until those components land.
 
 ---
 

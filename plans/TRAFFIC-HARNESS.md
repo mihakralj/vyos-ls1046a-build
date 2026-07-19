@@ -15,7 +15,7 @@ Read `[NOTE]` only if additional context is needed.
 
 **[SPEC]**
 - Date: 2026-06-08.
-- Live and validated. Supersedes the "10.99.1.2 undocumented / not SSH-able" note in `plans/COMPLETION-PLAN.md` §6.
+- Live and validated. Supersedes the "10.99.1.2 undocumented / not SSH-able" note in `plans/archive/COMPLETION-PLAN.md` §6.
 
 **[NOTE]**
 This is the controllable traffic generator that unblocks every remaining functional acceptance gate (DPAA1 M3-3b/3c/3d/3e wire tests, gate-3 ≥7 Gbps, VPP HW benchmark, ASK2 M2 ≥7 Gbps @ ≤5% CPU). It already exists.

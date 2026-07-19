@@ -1127,7 +1127,7 @@ python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/fe_flow_key_fix.py" 2>&1
 # Performance: OVFQ=1 on TX FQ context_a for FMan hardware direct enqueue.
 # OVFQ=1 means FMan uses the FQID from the ENQUEUE_PKT opcode operand
 # instead of the ICAD — required for the AC_CC FE/ehash HIT path.
-# B0V is kept at 1 (kernel TX confirmation safety — see plans/ASK2-
+# B0V is kept at 1 (kernel TX confirmation safety — see plans/archive/ASK2-
 # PERFORMANCE-MODERNIZATION.md §7 for the dedicated-FQ plan with B0V=0).
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
     python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \

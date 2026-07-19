@@ -1,6 +1,6 @@
 # Dual Dataplane — Full ASK Offload, Switchable to VPP
 
-**Status:** Adopted v1.2. 2026-07-18 (single-image flavor collapse made **immediate** 2026-06-14; v1.2 incorporates M2 gate PASS + M3 infrastructure landing). The `default | ask | vpp` build-flavor split is **retired** — CI ships one flavor-neutral ISO + one `version.json` feed (aliases kept for fielded installs). This is the current build/packaging model.
+**Status:** Adopted v1.3. 2026-07-19 (single-image flavor collapse made **immediate** 2026-06-14; v1.2 incorporated M2 gate PASS + M3 infrastructure landing; v1.3 adopts the **per-interface CLI contract** — `set interfaces ethernet eth<n> offload ask` replaces the `set system offload ask` global knob, mutual exclusion becomes per-interface, and `set system offload classify` is deprecated as a CLI while its mechanism stays a silent default). The `default | ask | vpp` build-flavor split is **retired** — CI ships one flavor-neutral ISO + one `version.json` feed (aliases kept for fielded installs). This is the current build/packaging model. Sequencing/milestones live in `plans/ASK2-MASTER-PLAN.md`; this document owns the state machine and the CLI contract.
 **Goal:** One installed VyOS image on the LS1046A Mono Gateway that supports the *full* NXP-ASK-equivalent FMan hardware offload (classification, FE forwarding, NAT, IPsec, frag/reassembly) **and** can disable that offload to run the VPP/AF_XDP dataplane instead — switched by VyOS config commit, no reflash.
 
 **Authority split.** This plan does not re-specify either dataplane:
@@ -43,7 +43,7 @@ The vendor stack is one-way: cdx + dpa_app program the FMan once at boot and the
 ```mermaid
 stateDiagram-v2
     [*] --> S0 : boot (U-Boot ucode inject,\nmainline probe, RSS via 0116/0117)
-    S0 --> S1 : commit "set system offload ask"\nask.ko engages pcd install
+    S0 --> S1 : commit "set interfaces ethernet eth<n> offload ask"\nask.ko engages pcd install on that port
     S1 --> S0 : delete offload ask → drain flows,\nunbind CC root, restore RSS modes,\nfree FE MURAM, verify snapshot
     S0 --> S2 : commit "set vpp settings interface ethX"\nVPP binds AF_XDP sockets
     S2 --> S0 : delete vpp settings → XSK release,\nkernel retains netdev
@@ -86,20 +86,37 @@ Each item lands with its inverse in the same patch, and the inverse is exercised
 ### 3.1 Mode selection
 
 ```
-# ASK mode (full HW offload)
-set system offload ask                       # global enable (engages FE init)
-set system offload ask interface eth0..eth4  # ports under ASK classification
+# ASK mode (full HW offload) — PER INTERFACE (v1.3 contract)
+set interfaces ethernet eth3 offload ask     # engage ASK on eth3
+set interfaces ethernet eth4 offload ask     # engage ASK on eth4
+delete interfaces ethernet eth3 offload ask  # restore S0 on eth3
 
 # VPP mode
 set vpp settings interface eth3
 set vpp settings interface eth4
 ```
 
-### 3.2 Mutual exclusion (v1: global; v2: per-port)
+There is **no global ASK knob**. The retired `set system offload ask` global
+enable and the deprecated `set system offload classify` CLI (vyos-1x-026) are
+gone from the operator surface: the classify mechanism (HW exact-match ingress
+steering) is kept, RSS + parser remain silent defaults programmed
+unconditionally, and `interfaces ethernet eth<n> offload ask` is the **sole
+operator offload switch**.
 
-- **v1 rule (validator-enforced):** `system offload ask` and `vpp settings interface` are mutually exclusive *globally*. Commit rejects a config containing both. Switching = delete one subtree, commit (passes through S0), set the other, commit.
-- **v2 relaxation (stretch, after port-isolation soak):** per-port exclusivity only — ASK on RJ45 routing ports (eth0–eth2) while VPP runs AF_XDP on SFP+ (eth3/eth4) simultaneously. Technically plausible because KG scheme binds and `fmbm_rfpne` are per-port and FE MURAM init is inert for ports left in RSS dispatch; gated on proving no shared-resource bleed (MURAM budget, KG scheme count, parser state) on hardware.
-- **Hybrid flow-level mode** (ASK fast path + memif promote-to-VPP ACL, ASK2 spec §9) remains the long-horizon v3 — explicitly out of scope here; nothing in this plan forecloses it.
+### 3.2 Mutual exclusion (v1.3: per-interface)
+
+- **Rule (validator-enforced):** one port cannot be both ASK and VPP. Commit
+  rejects a config where the same `eth<n>` appears in both
+  `interfaces ethernet eth<n> offload ask` and `vpp settings interface eth<n>`.
+- **Other ports are free.** ASK on eth0 while VPP runs on eth3 is a legal
+  config — KG scheme binds and `fmbm_rfpne` are per-port, and FE MURAM init is
+  inert for ports left in RSS dispatch. (This is what earlier drafts called the
+  "v2 stretch"; it is the v1.3 baseline rule.)
+- **Switching a port** = delete one offload claim, commit (that port passes
+  through S0), set the other, commit.
+- **Hybrid flow-level mode** (ASK fast path + memif promote-to-VPP ACL, ASK2
+  spec §9) remains the long-horizon v3 — explicitly out of scope here; nothing
+  in this plan forecloses it.
 
 ### 3.3 Switch UX guarantees
 
@@ -158,7 +175,7 @@ graph LR
 > entangled with the open **M3-3b CC-disposition defect** (the CC walk executes
 > but the frame's terminal enqueue/discard never fires; iter-49 refuted the arming
 > theory → the missing **FE opcode VM** is the disposition mechanism, [`arch/fman-fe-ehash.md`](../arch/fman-fe-ehash.md) §1/§8.3). The
-> ask.ko engage-wiring (§3.1 `set system offload ask`) waits on item 3 because
+> ask.ko engage-wiring (§3.1 `set interfaces ethernet eth<n> offload ask`) waits on item 3 because
 > AC_CC stalls the port under load until disposition works.
 
 **M2 — HW classification (the parity keystone).** Engage the classifier and make a classified frame reach its egress FQ, deleting the `0118` CCBS placebo (which *bypasses* classification rather than enabling it). **Fork decision RESOLVED (2026-06-16): Fork B.** Option B (the missing-controller-arming theory) is **exhausted & refuted** — iter-49 (`ccexp47_rfne.py`) tested the strongest untested lead, the SDK `rfne`-last detach/re-arm discipline, byte-perfectly and the port **still stalled** (`FMFP_PS[STL]=0x80800000` at rfrc=+2, identical to baseline); with gmask/exit-NIA/leaf-AD/extraction/RCMNE/params-page/ucode all previously exonerated, **classic exact-match (Fork A) cannot flow on 210.10.1** (qdrant `m3-3b-option-b-rfne-last-REFUTED-forkB-decision`). This confirms the M0 oracle ([`arch/fman-fe-ehash.md`](../arch/fman-fe-ehash.md) §1/§8.3): bare AC_CC `CONTRL_FLOW` has no terminal BMI-FIFO disposition without the **FE opcode VM**. **The path is therefore Fork B** — reproduce the vendor external-hash/FE init contract (doc §3–§5: `AllocFEObjs` MURAM pool + per-port `FmPortSetFESupport` + `ExternalHashTableSet` DDR buckets, each with its inverse), the **only** config proven to flow on this silicon and the eventual substrate for NAT/frag/stats. **⚠ Source-of-truth (corrected 2026-06-15):** the doc §3–§5 *allocation* skeleton is genuine lf-6.6.y archive source, but the FE-VM *programming* core (`FmPcdCcBuildFE` / `FmPcdCcBuildContextByFE` / `get_indexed_hash_bucket`) is **stubbed** in that archive **and in the shipping `lf-6.12.49-2.2.0` mono port** (both no-op `UNUSED()`) — Fork B must extract those three from the **lf-5.4 Layerscape SDK** (`we-are-mono/ASK` `999-…patch`: `FmPcdCcBuildFE` L8883, `FmPcdCcBuildContextByFE` L8954, `get_indexed_hash_bucket` L7301), the only tree with working bodies. The `106.4.18` ucode swap is **ruled out** (iter-42: identical handler code; ccexp12: parks identically). Fork B lands its inverse in the same patch (§3.5 reversibility). First packet of a flow → exception to kernel; subsequent packets classified in silicon.
@@ -182,7 +199,7 @@ graph LR
 **M6 — HW frag/reassembly.** FMan reassembly contexts for inbound frags on offloaded flows; fragmentation on egress where MTU demands.
 *Gate:* fragmented offloaded flow reassembled in silicon; teardown inverse verified.
 
-**M7 — Productization.** VyOS CLI (`set system offload ask …`) + the §3.2 mutual-exclusion validator + op-mode (`show offload ask flows` via YNL) + `ask-check` board script (sfp-check/fan-check style) + INSTALL/AGENTS docs + 24 h soak alternating ASK and VPP modes hourly.
+**M7 — Productization.** VyOS CLI (`set interfaces ethernet eth<n> offload ask`) + the §3.2 per-interface mutual-exclusion validator + op-mode (`show interfaces ethernet eth<n> offload ask flows` via YNL) + `ask-check` board script (sfp-check/fan-check style) + INSTALL/AGENTS docs + 24 h soak alternating ASK and VPP modes hourly.
 *Gate:* soak clean; a single image demonstrably runs full-ASK Monday and full-VPP Tuesday with two commits.
 
 **M8 — Stretch: per-port coexistence (§3.2 v2).** Only after M7 soak; gated on MURAM/scheme-budget audit and a dedicated bleed-hunt soak.
@@ -194,7 +211,7 @@ graph LR
 | Deliverable | Where | Notes |
 |---|---|---|
 | Mode-switch + FE/AC_CC primitives | `kernel/common/patches/board/` 0119+ series | extends 0097/0116/0117; **every patch must be wired in `bin/ci-setup-kernel.sh` in the same commit** (stranded-patch lesson, 2026-06-07) |
-| ask.ko control plane | `kernel/flavors/ask/oot-modules/ask/` per ASK2 spec §10.1 | signed post-build (`MODULE_SIG_FORCE`), `LOCALVERSION=-vyos`; with the single-image decision the module builds into **every** image (CI wires it unconditionally, not behind `FLAVOR=ask`) — dormant until `set system offload ask` |
+| ask.ko control plane | `kernel/flavors/ask/oot-modules/ask/` per ASK2 spec §10.1 | signed post-build (`MODULE_SIG_FORCE`), `LOCALVERSION=-vyos`; with the single-image decision the module builds into **every** image (CI wires it unconditionally, not behind `FLAVOR=ask`) — dormant until `set interfaces ethernet eth<n> offload ask` |
 | Snapshot tool | `board/scripts/pcd-snapshot` (+ `ask-check`) | productized d14 dumpers; used by CI gates and field diagnostics |
 | VyOS CLI + validator | `data/vyos-1x-0NN-*.patch` | offload subtree + ASK/VPP mutual exclusion; follows vyos-1x-010 precedent |
 | Image strategy | `auto-build.yml` | **ADOPTED (flavor split retired 2026-06-14): single dual-dataplane image.** One ISO ships ask.ko *and* VPP; the dataplane choice is config-only. The `FLAVOR=ask\|vpp\|default` axis is collapsed: CI builds one flavor-neutral artifact (`vyos-<version>-LS1046A-arm64.iso`) and publishes one `version.json`, copied verbatim to `version-{default,ask,vpp}.json` aliases so existing field installs on all three update streams converge onto it (the legacy-alias precedent of `version.json`). |
@@ -224,6 +241,6 @@ graph LR
 
 Open (to confirm before M1 code):
 
-2. **ASK default-on or default-off in shipped config:** recommend default-off (S0 boot, operator opts in) — matches the state-machine safety argument and VyOS convention.
-3. **v1 mutual-exclusion scope:** confirm global (not per-port) is acceptable for first ship.
+2. **ASK default-on or default-off in shipped config:** recommend default-off (S0 boot, operator opts in per interface) — matches the state-machine safety argument and VyOS convention.
+3. ~~**v1 mutual-exclusion scope**~~ — **RESOLVED 2026-07-19 (v1.3):** per-interface, not global. One port cannot be both ASK and VPP; other ports are free.
 4. **M4/M5/M6 ordering:** parallel after M3 as drawn, or serialized by review bandwidth.
