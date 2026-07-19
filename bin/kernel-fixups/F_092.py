@@ -67,8 +67,7 @@ else:
 \t/* F-092: Use FE_ENTER AD offset (non-zero) so F-091 creates
 \t * numKeys=1 scaffold routing frames to FE_ENTER.
 \t */
-\t{}
-""".format(engage_anchor)
+\t""" + engage_anchor
 
     if old_engage_block in src:
         src = src.replace(old_engage_block, new_engage_block, 1)
