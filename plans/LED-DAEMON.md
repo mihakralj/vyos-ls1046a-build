@@ -385,7 +385,7 @@ segment. Out of scope for v1; flagged here so the future-proofing
 isn't a surprise.
 
 **Caveats — ASK fast-path.** Conntrack-offloaded flows that go
-through the SDK DPAA fast-path still pass through the netdev TX/RX
+through the ASK2 offloaded paths still pass through the netdev TX/RX
 path on their way in/out of the box, so the byte counters reflect
 them. The fast-path bypasses *protocol stack* CPU work, not the
 netdev counters.

@@ -230,11 +230,11 @@ Five components make `install image` → reboot → `add system image` → reboo
 
 **1. DTB at ISO root:** The compiled `mono-gw.dtb` is placed at the ISO root (via `includes.binary/`). During `install image`, the DTB is copied from the live media to the boot directory. Patch `vyos-1x-011` also copies `.dtb` files during `add system image` upgrades (from ISO root to `{root_dir}/boot/{image_name}/`).
 
-**2. `/boot/vyos.env` file** (`vyos-1x-011`): Patched into `grub.set_default()` — whenever VyOS sets the default boot image (install, upgrade, `set system image default-boot`, rename), it also writes `/boot/vyos.env` containing `vyos_image=<image-name>`. U-Boot reads this file via `ext4load` + `env import -t` to determine which image to boot. The `vyos_direct` U-Boot command is static — it never needs `fw_setenv` updates after initial setup.
+**2. `/boot/vyos.env` file** (`vyos-1x-011`): Patched into `grub.set_default()` — whenever VyOS sets the default boot image (install, upgrade, `set system image default-boot`, rename), it also writes `/boot/vyos.env` containing `vyos_image=<image-name>`. U-Boot reads this file via `ext4load` + `env import -t` to determine which image to boot. The `vyos` U-Boot command is static — it never needs `fw_setenv` updates after initial setup.
 
 **3. vyos-postinstall script** (`/usr/local/bin/vyos-postinstall`): Called automatically by `install_image()` during first install. Handles:
 - Writing `/boot/vyos.env` (safety net — also done by the grub.py hook)
-- One-time `fw_setenv` to set static `vyos_direct`, `usb_vyos`, and `bootcmd` U-Boot env vars (only runs if U-Boot env doesn't already reference `vyos.env`)
+- One-time `fw_setenv` to set static `vyos`, `usb_vyos`, and `bootcmd` U-Boot env vars (only runs if U-Boot env doesn't already reference `vyos.env`)
 - No-op on non-LS1046A hardware (checks `/proc/device-tree/compatible`)
 
 **4. Systemd safety net** (`vyos-postinstall.service`): Runs `vyos-postinstall` on every boot (`After=local-fs.target`). Ensures `/boot/vyos.env` matches the running image even if the image_installer.py hook was bypassed. Also retries the one-time U-Boot setup if it failed during install.
@@ -376,8 +376,8 @@ flowchart TD
   RCW --> ATF["BL31 / ATF\nEL3 runtime, PSCI"]
   ATF --> UB["U-Boot 2025.04\nmtd2, 2 MB — EL2"]
 
-  UB -->|"bootcmd"| CMD{"run vyos_direct\n‖ run recovery"}
-  CMD -->|"vyos_direct"| VYOS["ext4load mmc 0:3\nvmlinuz → DTB → initrd ⚠️\nbooti addr:size"]
+  UB -->|"bootcmd"| CMD{"run vyos\n‖ run recovery"}
+  CMD -->|"vyos"| VYOS["ext4load mmc 0:3\nvmlinuz → DTB → initrd ⚠️\nbooti addr:size"]
   CMD -->|"recovery"| REC["sf read mtd7\nrecovery kernel"]
   VYOS --> BOOT["Linux Kernel\nlive-boot → VyOS"]
 
@@ -391,7 +391,7 @@ flowchart TD
 
 **U-Boot `${filesize}` gotcha:** Each `ext4load` overwrites `${filesize}`. The `booti` command uses `${ramdisk_addr_r}:${filesize}` to tell the kernel the initrd size. If DTB is loaded after initrd, `${filesize}` = DTB size (94KB) instead of initrd size (~33MB), causing "ZSTD-compressed data is truncated" kernel panic. The load order looks arbitrary. It is not.
 
-**vyos-postinstall automation:** `install image` automatically calls `vyos-postinstall`, which writes `/boot/vyos.env` and performs one-time `fw_setenv` to set a static `vyos_direct` command. Future `add system image` upgrades only update `/boot/vyos.env` (via patched `grub.set_default()`). A systemd service runs `vyos-postinstall` on every boot as a safety net. No SPI flash writes after initial setup. The U-Boot environment is touched exactly once, then never again.
+**vyos-postinstall automation:** `install image` automatically calls `vyos-postinstall`, which writes `/boot/vyos.env` and performs one-time `fw_setenv` to set a static `vyos` command. Future `add system image` upgrades only update `/boot/vyos.env` (via patched `grub.set_default()`). A systemd service runs `vyos-postinstall` on every boot as a safety net. No SPI flash writes after initial setup. The U-Boot environment is touched exactly once, then never again.
 
 U-Boot key addresses:
 
@@ -404,6 +404,8 @@ kernel_comp_addr_r = 0x90000000
 
 ---
 
+**[NOTE] ⚠️ Partition numbering shifted in kernel 6.18. The uboot-env partition is now at `/dev/mtd2` (was `/dev/mtd3` before 2026-04-03). The diagram below may have other stale mtd labels — for the definitive current `/proc/mtd` layout see `AGENTS.md` S5 and `plans/BOOT-PROCESS.md`.**
+
 ## MTD Flash Layout
 
 ```mermaid
@@ -413,7 +415,7 @@ block-beta
     columns 4
     mtd1["mtd1\nrcw-bl2\n1 MB"]
     mtd2["mtd2\nuboot\n2 MB"]
-    mtd3["mtd3\nuboot-env\n1 MB"]
+    mtd2["mtd2\nuboot-env\n1 MB"]
     mtd4["mtd4\nfman-ucode\n1 MB"]
     mtd5["mtd5\nrecovery-dtb\n1 MB"]
     mtd6["mtd6\nbackup\n4 MB"]
@@ -425,7 +427,7 @@ block-beta
   style mtd7 fill:#a84,stroke:#333,color:#fff
 ```
 
-`fw_printenv` requires `/etc/fw_env.config` pointing at `/dev/mtd3`. Config: `/dev/mtd3 0x0 0x20000 0x20000`.
+`fw_printenv` requires `/etc/fw_env.config pointing at `/dev/mtd2`. Config: `/dev/mtd2 0x0 0x2000 0x1000`.
 
 ---
 

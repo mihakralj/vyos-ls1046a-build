@@ -16,11 +16,11 @@ ranks findings by cost-to-value ratio.
 **Document ID:** TF-2026-07-18-001
 **Repository:** `mihakralj/vyos-ls1046a-build`
 **Branch:** `dpaa1`
-**Commit:** doc origin `73e39e9` → current `dpaa1` HEAD `159752e` (2026-07-18). **The P1–P3 closure series `4493ce8`→`9970745` was reset OUT of the branch after a CI cascade — see §1.2.**
+**Commit:** doc origin `73e39e9` → current `dpaa1` HEAD `9f67b56` (2026-07-18). **The P1–P3 closure series `4493ce8`→`9970745` was reset OUT of the branch after a CI cascade — see §1.2.**
 **Scope:** All stubbed, incomplete, or type-drifted functions across `kernel/flavors/ask/oot-modules/ask/` and `kernel/common/patches/board/`
 **Reference specs:** `arch/fman-pcd-api-reference.md` v3.0.0, `specs/ask2-rewrite-spec.md`, `arch/fman-microcode-210-programming-reference.md`
 **Methodology:** Static analysis of source and patch text, cross-reference against v3.0.0 API contract, symbol-presence grep across `EXPORT_SYMBOL_GPL` surface.
-**Progress:** **0/23 resolved on `dpaa1` HEAD `159752e`.** The full P1–P3 closure was implemented on 2026-07-18 (commits `4493ce8`→`9970745`) but every CI build failed and the series was reset off the branch (§1.2); re-land in progress behind `bin/test-fixups.sh`. Progress: ░░░░░░ 0.0%
+**Progress:** **0/23 resolved on `dpaa1` HEAD `9f67b56`.** The full P1–P3 closure was implemented on 2026-07-18 (commits `4493ce8`→`9970745`) but every CI build failed and the series was reset off the branch (§1.2); re-land in progress behind `bin/test-fixups.sh`. Progress: ░░░░░░ 0.0%
 
 ---
 
@@ -45,7 +45,7 @@ ranks findings by cost-to-value ratio.
 
 **[NOTE]** The orphaned closure commits (`4493ce8`, `ec61aa2`, `cb2ebbd`, `28ed22d`, `9970745`) are NOT in the branch but remain reachable via `git reflog` / `git cherry-pick` (not yet garbage-collected). The design and code for every P1–P3 finding are therefore recoverable — the reset unwound the *landing*, not the *work*. Re-land discipline: run `bin/test-fixups.sh` and confirm it passes before every push; land the OOT-builder snapshot-fallback broadening (switch to the snapshot whenever the source tree is missing ANY of `Module.symvers` / `scripts/sign-file` / `certs/signing_key.pem`, not only `Module.symvers`) in the same series so the `signing_key.pem` FATAL cannot recur.
 
-**[SPEC]** Because the series was reset out, the authoritative status of every finding on `dpaa1` HEAD `159752e` is **open** — including F-08, which §2 previously marked resolved via `4493ce8`. Treat every row in §2 as fully open until the re-land is confirmed green in CI and merged into `dpaa1`. Section-level statuses in §3 that read "RESOLVED" describe the orphaned implementation, not the current branch.
+**[SPEC]** Because the series was reset out, the authoritative status of every finding on `dpaa1` HEAD `9f67b56` is **open** — including F-08, which §2 previously marked resolved via `4493ce8`. Treat every row in §2 as fully open until the re-land is confirmed green in CI and merged into `dpaa1`. Section-level statuses in §3 that read "RESOLVED" describe the orphaned implementation, not the current branch.
 
 ---
 
@@ -198,7 +198,7 @@ No CAAM Job Ring descriptor is built, no PDB is written, no SPI is programmed in
 
 ### F-08 (HIGH — [ ] OPEN, impl reset out): `fman_pcd_fe_verify` implemented then orphaned
 
-**[SPEC]** Status on `dpaa1` HEAD `159752e`: **OPEN.** The implementation described below landed in commit `4493ce8` but was reset off the branch (§1.2); `grep fman_pcd_fe_verify bin/ci-setup-kernel.sh` returns zero hits in the current tree. The account below documents the orphaned implementation for re-land.
+**[SPEC]** Status on `dpaa1` HEAD `9f67b56`: **OPEN.** The implementation described below landed in commit `4493ce8` but was reset off the branch (§1.2); `grep fman_pcd_fe_verify bin/ci-setup-kernel.sh` returns zero hits in the current tree. The account below documents the orphaned implementation for re-land.
 
 **[SPEC]**
 
