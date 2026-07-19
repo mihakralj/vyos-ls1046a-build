@@ -20,8 +20,8 @@
     "F_089.py": "fman_pcd.c: F-089 §17 FE descriptor static_asserts + KUnit test injection",
     "F_090.py": "fman_pcd.c: F-090 fe_chain debugfs — wires __fman_pcd_fe_build_vm_chain",
     "F_091.py": "fman_pcd.c: F-091 HIT scaffold — numKeys=1 + FE_ENTER AD at ato+32",
-    "F_093.py": "stub placeholder — no changes",
-    "F_094.py": "stub placeholder — no changes",
+    "F_093.py": "fman_pcd.c: F-093 dynamic FQID — kill hardcoded 0x200 via fman_pcd_resolve_miss_fqid()",
+    "F_094.py": "fman_pcd.c/h: F-094 retype flow_add → struct fman_pcd_fe_flow_action *",
     "F_092.py": "fman_pcd.c: F-092 production fe_engage/disengage — build/teardown VM chain via API"
   },
   "count": 23,
@@ -127,12 +127,12 @@
       "reason": "Scaffold HIT path — belongs with the engage/arm code in 0132/0158"
     },
     "F_093.py": {
-      "action": "permanent",
-      "reason": "Placeholder stub for future fixup"
+      "action": "fold-into 0158",
+      "reason": "Dynamic FQID belongs with the arm_engage/chain builder in 0158"
     },
     "F_094.py": {
       "action": "permanent",
-      "reason": "Placeholder stub for future fixup"
+      "reason": "API cleanup — structured params instead of raw (key, size, offset)"
     },
     "F_092.py": {
       "action": "fold-into 0158+0153",
