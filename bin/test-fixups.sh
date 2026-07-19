@@ -28,7 +28,7 @@ except Exception as e:
 
 with open('_fixup_bash_check.sh', 'w') as f:
     f.write('#!/bin/bash\n' + processed)
-r = subprocess.run(['bash', '-n', '/tmp/_fixup_bash_check.sh' if __import__('os').access('/tmp', __import__('os').W_OK) else '_fixup_bash_check.sh'], capture_output=True, text=True)
+r = subprocess.run(['bash', '-n', '_fixup_bash_check.sh'], capture_output=True, text=True)
 if r.returncode != 0:
     print(f"FAIL [1]: REPLACEMENT bash syntax:\n{r.stderr}")
     ok = False
