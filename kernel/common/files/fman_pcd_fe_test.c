@@ -42,14 +42,20 @@ static void fe_sizes(struct kunit *test)
 	KUNIT_EXPECT_GT(test, FMAN_PCD_FE_MAX_SIZE,  8);
 }
 
-/* ── Test 3: NIA encodings match 210.10.1 silicon ────────────────────── */
+/* ── Test 3: NIA encodings match 210.10.1 silicon (fman_keygen.c scope) */
+#ifdef NIA_ENG_BMI
 static void fe_nia_constants(struct kunit *test)
 {
 	KUNIT_EXPECT_EQ(test, (u32)NIA_ENG_BMI,          0x00500000U);
 	KUNIT_EXPECT_EQ(test, (u32)NIA_BMI_AC_ENQ_FRAME, 0x00000002U);
+#ifdef NIA_FM_CTL_AC_CC
 	KUNIT_EXPECT_EQ(test, (u32)NIA_FM_CTL_AC_CC,     0x00000006U);
+#endif
+#ifdef ENQUEUE_KG_DFLT_NIA
 	KUNIT_EXPECT_EQ(test, (u32)ENQUEUE_KG_DFLT_NIA,  0x80500002U);
+#endif
 }
+#endif /* NIA_ENG_BMI */
 
 /* ── Test 4: FE_ENTER root AD word encodings ─────────────────────────── */
 static void fe_enter_ad_encoding(struct kunit *test)
@@ -116,7 +122,9 @@ static void fe_type_range(struct kunit *test)
 static struct kunit_case fman_pcd_fe_test_cases[] = {
 	KUNIT_CASE(fe_type_constants),
 	KUNIT_CASE(fe_sizes),
+#ifdef NIA_ENG_BMI
 	KUNIT_CASE(fe_nia_constants),
+#endif
 	KUNIT_CASE(fe_enter_ad_encoding),
 	KUNIT_CASE(fe_enq_encoding),
 	KUNIT_CASE(fe_exit_encoding),
