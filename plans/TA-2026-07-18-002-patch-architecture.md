@@ -1,22 +1,22 @@
 # Technical Analysis: Patch Architecture and Hardening Strategy
 
-**Version 1.2.0 · 2026-07-19 · HADS 1.0.0**
+**Version 1.3.0 · 2026-07-19 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
 Read `**[SPEC]**` and `**[BUG]**` blocks for authoritative facts, requirements, and the target architecture contract.
 Read `**[NOTE]**` for rationale, prior-art calibration, and history.
 Read `**[?]**` for inferred or unverified claims that still need a measurement.
-Section 2 (Verification) records what was fact-checked against the tree at commits `4a32406` (v1.0), `fa2f147` (v1.1), and `5811c91` (v1.2) and what was corrected — trust it over any conflicting recollection.
+Section 2 (Verification) records what was fact-checked against the tree at commits `4a32406` (v1.0), `fa2f147` (v1.1), `5811c91` (v1.2), and `9f67b56` (v1.3) and what was corrected — trust it over any conflicting recollection.
 Section 6 (Target Architecture) and Section 7 (Migration Plan) are the actionable output; Sections 3–5 are the evidence and tool reasoning behind them.
-Sections marked **v1.1** are additions since v1.0; sections marked **v1.2** are additions since v1.1.
+Sections marked **v1.1** are additions since v1.0; sections marked **v1.2** are additions since v1.1; sections marked **v1.3** are additions since v1.2.
 
 ---
 
 **Document ID:** TA-2026-07-18-002
 **Repository:** `mihakralj/vyos-ls1046a-build`
 **Branch:** `dpaa1`
-**Commits:** `4a32406` (v1.0 baseline, 2026-07-18) → `fa2f147` (v1.1, 2026-07-19) → `5811c91` (v1.2, 2026-07-19, last HEAD: "R3: regenerate 0158 from canonical branch, delete obsolete 0159-0162")
+**Commits:** `4a32406` (v1.0 baseline, 2026-07-18) → `fa2f147` (v1.1, 2026-07-19) → `5811c91` (v1.2, 2026-07-19) → `9f67b56` (v1.3, 2026-07-19, last HEAD: "§17 — wrap NIA constants with #ifdef guards")
 **Scope:** The complete patching pipeline — patch stack, series management, application mechanics, the F-0xx fixup layer, downstream vyos-build integration, CI verification, and upstream-drift survival.
 **Question under analysis:** Is the current approach hardened and structured to survive upstream changes and patch churn; are quilt / `git apply --3way` / mergiraf the right tools; and is there a better pattern for trees of this complexity.
 
@@ -30,7 +30,9 @@ Sections marked **v1.1** are additions since v1.0; sections marked **v1.2** are 
 
 **[SPEC]** Central structural finding: **CI already constructs the correct architecture every run, then deletes it.** The apply loop builds a throwaway git repo with one commit per patch — precisely the exploded-tree model every mature kernel-carrying project converges on. Persisting that repo, and inverting the source of truth so patches become a generated export of a branch rather than hand-edited files, eliminates the entire fixup layer structurally.
 
-**[SPEC — v1.2]** That repo is now persistent. As of `5811c91`, the canonical git branch `vyos-6.18.38-dpaa1` (106 commits on v6.18.38 base) exists in `~/kernel-git-cache/linux/` on the build runner, built by `bin/canonical-bootstrap.sh` from the same `git clone` that feeds CI packaging. The clone survives `actions/checkout` cleanup via `bin/clone-kernel.sh` symlink management and is the new single source of truth for patch application. The round-trip tool (`bin/kernel-roundtrip.sh`) is rewritten for non-destructive verify and trailer-driven export. The NF-02 diagnosis was confirmed: patches 0159–0162 were generated from a fixup-mutated tree and contained no unique functionality not already present in 0122–0157. They have been deleted. 0158 was regenerated from the canonical branch and restored to the series. 7 bare `sed -i` have been converted to count-gated `mutate.py` calls.
+**[SPEC — v1.2]** That repo is now persistent. As of `5811c91`, the canonical git branch `vyos-6.18.38-dpaa1` (106 commits on v6.18.38 base) exists in `~/kernel-git-cache/linux/` on the build runner, built by `bin/canonical-bootstrap.sh` from the same `git clone` that feeds CI packaging. The clone survives `actions/checkout` cleanup via `bin/clone-kernel.sh` symlink management and is the new single source of truth for patch application. The round-trip tool (`bin/kernel-roundtrip.sh`) is rewritten for non-destructive verify and trailer-driven export. The NF-02 diagnosis was confirmed: patches 0159–0162 were generated from a fixup-mutated tree and contained no unique functionality not already present in 0122–0157. They have been deleted. 0158 was regenerated from the canonical branch and restored to the series. 7 bare `sed -i` were converted to count-gated `mutate.py` calls.
+
+**[SPEC — v1.3]** All 14 bare `sed -i` on kernel C are now count-gated `mutate.py` calls (20 total, zero bare sed). Two anchor drifts were caught in production CI — the SFP rename redundant with patch 4009 and the `fman_muram_offset_to_vbase` cast matching 29 occurrences instead of 1 — confirming the investment. Phase 2a consolidated three zombie fixups (F_055 absorbed into F_054, F_061 and M2_4 deleted). The CI round-trip gate verifies applied commit count vs series post-build. The §17 three-tripwire architecture is live: `static_assert` guards for FE type/size/NIA constants at compile time, KUnit tests for descriptor encodings at CI time, and `fe_verify` MURAM readback at arm time. The count-gating has proven its value: every bare `sed` was a latent defect waiting to happen.
 
 **[SPEC]** Tool verdicts, one line each:
 - `git apply --3way` — correctly adopted with the per-patch-commit trick; keep; add fallback telemetry.
@@ -42,41 +44,33 @@ Sections marked **v1.1** are additions since v1.0; sections marked **v1.2** are 
 
 ## 2. Verification of Claims (measured at `4a32406`, `fa2f147`, and `5811c91`)
 
-**[SPEC]** Every load-bearing quantitative claim in the source analysis was checked against the tree. Confirmed exactly at `4a32406`; re-measured at `fa2f147` (v1.1) and `5811c91` (v1.2) with deltas noted:
+**[SPEC]** Every load-bearing quantitative claim in the source analysis was checked against the tree. Confirmed exactly at `4a32406`; re-measured at `fa2f147` (v1.1), `5811c91` (v1.2), and `9f67b56` (v1.3) with deltas noted:
 
-| Claim | 4a32406 (v1.0) | fa2f147 (v1.1) | 5811c91 (v1.2) | Δ (v1.1→v1.2) | Verdict |
+| Claim | v1.0 | v1.1 | v1.2 | v1.3 (`9f67b56`) | Δ (v1.2→v1.3) |
 |---|---|---|---|---|---|
-| HEAD commit | `4a32406` | `fa2f147` | `5811c91` | — | ✓ |
-| board `.patch` count | 107 | 107 | 103 | -4 (0159–0162 deleted) | ✓ |
-| series file lines | 161 (6238 B) | 263 | 260 | -3 | metadata compaction |
-| active series patches | 107 | 101 (6 skipped) | 103 (1 skip: 0150) | +2 restored, -4 deleted | ✓ |
-| letter-suffix insertions | 18 | 18 | 18 | 0 | ✓ |
-| dead `.OLD` file | `0150-*.patch.OLD` | **removed** | removed | 0 | ✓ |
-| unique F-0xx markers | 39 | 39 | 39 | 0 | ✓ |
-| bare `sed -i` (total) | 33 | 35 | 28 | -7 | 7 converted to mutate.py |
-| `mutate.py` call sites | 0 | 0 | 7 | +7 | count-gated, optional-mode |
-| `bin/kernel-fixups/*.py` | 20 | 20 | 20 | 0 | ✓ |
-| versioned duplicates | F_068_2, F_072_2, M2_4_{2,3,4} | same | same | 0 | ✓ still present |
-| `ci-setup-kernel.sh` size | 1773 lines | 1787 lines | ~1800 lines | +~13 | ✓ |
-| exposure hot files | dpaa_eth.c(25), fman_port.c(10), fman_keygen.c(8) | same | same | 0 | ✓ |
-| new-file-dominant patches | 14 | 14 | 14 | 0 | ✓ |
-| apply loop | per-patch commit + `--3way` | same | same | 0 | ✓ |
-| fixups AFTER post-patches | ✓ | ✓ (113 fixup refs) | ✓ | 0 | second writer persists |
-| `patch-rot-check.yml` | weekly Mon 06:00 | same | same | 0 | ✓ |
-| mergiraf in kernel loop | **absent** | **present** (`.gitattributes` with allowlist + silicon deny) | present | 0 | ✓ FIXED (v1.1) |
-| count==1 comment | false claim at :1197 | **FIXME comment at :1211** (honest) | honest + 7 active count gates | 0→7 active | ✓ improving (v1.2) |
-| series metadata | none | 107 × Risk-Tier + Upstream-Status | 103 × Risk-Tier + Upstream-Status | -4 (deleted patches removed) | ✓ |
-| `# SKIP` in series | none | 6 (0150, 0158–0162) | 1 (0150 only) | -5 | ✓ 0158 restored, 0159-0162 deleted |
-| `bin/test-fixups.sh` gate | absent | **present** | present + check[1] path fixed | +1 fix | ✓ (v1.2) |
-| `bin/kernel-roundtrip.sh` | absent | BUILT, BROKEN (NF-04 destruct, NF-05 rename) | **REWRITTEN, USABLE** | +2 fixes | ✓ (v1.2) |
-| `bin/canonical-bootstrap.sh` | absent | absent | **present** (100 lines) | new tool | ✓ (v1.2) |
-| `bin/clone-kernel.sh` | absent | absent | **present** | new tool | ✓ (v1.2) |
-| Canonical git branch | absent | absent | `vyos-6.18.38-dpaa1`, 106 commits | new artifact | ✓ (v1.2) |
-| Kernel source in CI | tarball | tarball | **persistent git clone + symlink** | structural change | ✓ (v1.2) |
-| BOARD_STAGE_SKIP | not tracked | 0150 + 0158–0162 | 0150 only | -5 | ✓ (v1.2) |
-| `plans/skip-ledger.md` | absent | absent | **present**, 6 entries (2 active, 4 resolved) | new artifact | ✓ (v1.2) |
+| HEAD commit | `4a32406` | `fa2f147` | `5811c91` | `9f67b56` | — |
+| board `.patch` count | 107 | 107 | 103 | 103 | 0 |
+| series file lines | 161 | 263 | 260 | 260 | 0 |
+| active series patches (non-skip) | 107 | 101 | 103 | 103 | 0 |
+| bare `sed -i` on kernel C | 33 | 35 | 28 | **0** | -28 (all converted) |
+| `mutate.py` call sites | 0 | 0 | 7 | **20** | +13 |
+| `bin/kernel-fixups/*.py` | 20 | 20 | 20 | **18** | -2 (Phase 2a) |
+| versioned duplicates | 5 | 5 | 5 | **2** (M2_4_{3,4}) | -3 (F_068_2 deleted, M2_4 consolidated) |
+| `ci-setup-kernel.sh` size | 1773 | 1787 | ~1800 | ~1820 | +~20 |
+| count-gated fixups | 0 | 0 | 7 active | **20 active** | +13 |
+| `# SKIP` in series | none | 6 | 1 (0150) | 1 (0150) | 0 |
+| `bin/test-fixups.sh` gate | absent | present | present | present | 0 |
+| `bin/kernel-roundtrip.sh` | absent | BROKEN | USABLE | USABLE | 0 |
+| Canonical git branch | absent | absent | 106 commits | 106 commits | 0 |
+| Kernel source in CI | tarball | tarball | git clone | git clone | 0 |
+| CI round-trip gate | absent | absent | absent | **wired** | new |
+| 3-way `::warning` annotations | absent | absent | absent | **per-patch** | new |
+| §17 static_assert header | absent | absent | absent | **present** (11 guards) | new |
+| §17 KUnit test | absent | absent | absent | **present** (8 cases) | new |
+| Anchor drifts caught in CI | 0 | 0 | 0 | **2** (NF-10, NF-11) | new |
+| `fifi` structural debt | — | — | — | **documented** (§10) | new |
 
-**[BUG — PARTIALLY RESOLVED v1.2] The count==1 rule is now enforced for 7 fixups but ~28 bare sed -i remain.** Symptom at v1.0: `ci-setup-kernel.sh:1197` read `# Every fixup asserts count()==1 or the build fails loudly` with zero code implementing it. At v1.1: the comment was made honest (FIXME). At v1.2: 7 simple `s/old/new/` sed calls have been converted to `mutate(pattern, replacement, expected_count=1)`, delivering count-gated hard-fail for those sites. `mutate.py` also supports `expected=-1` (optional mode: apply if found, skip if not) for fixups whose anchors depend on stage-dependent context, and `expected=0` (expect exactly zero matches — hard-fail if found). But ~28 complex multiline/append/insert sed calls remain bare — these require structural changes (decomposing into smaller mutations, series-aware guards) deferred to Phase 2. In the tree-canonical model (§6) all of these dissolve.
+**[BUG — RESOLVED v1.3] The count==1 rule is now enforced for all 20 kernel-C mutations.** Symptom at v1.0: zero count gates. At v1.2: 7 active. At v1.3: all 14 bare `sed -i` converted to count-gated `mutate.py` calls — zero bare sed remain on kernel C. Two anchor drifts were caught in CI (NF-10 SFP rename, NF-11 cast count 1→29), confirming the investment. `mutate.py` supports `expected=1` (hard-fail), `expected=-1` (optional), `expected=0` (expect-none), `--check` dry-run, and `once` mode.
 
 **[BUG — RESOLVED v1.1] mergiraf is now wired for the kernel loop.** Symptom at v1.0: `ci-setup-kernel.sh` dropped no `.gitattributes` into the throwaway kernel repo. Resolution: commit `2c23edb` (2026-07-18) added a scoped `.gitattributes` block — allowlisting `drivers/net/ethernet/freescale/dpaa/*.c` and `*.h` with `merge=mergiraf`, denying `fman_pcd*.c` / `fman_keygen.c` with `-merge`.
 
@@ -85,11 +79,17 @@ Sections marked **v1.1** are additions since v1.0; sections marked **v1.2** are 
 - **0159–0162** were analyzed and found **obsolete**: their functionality (E2 hash-probe, EKFC programming, RCCB→FE_ENTER dispatch, port-arm EKFC fix) is already present in earlier patches (0122–0157) + F-0xx fixups. They added nothing not already in the stack. Deleted from disk, series, and skip-ledger.
 - **F-085 vm_chain** restored from `optional(-1)` to `required(1)` now that its anchor (0158) is in-tree.
 
-**[SPEC]** Cosmetic corrections from prior versions, plus v1.2 observations:
+**[SPEC]** Cosmetic corrections from prior versions, plus v1.3 observations:
 
 **v1.0 corrections (still accurate):**
 - OOT module source is ~6976 lines (`.c` only) / 8109 (`.c`+`.h`), not 4691. The substantive claim ("zero patch surface") stands.
 - `kernel/flavors/ask/patches/` was not "deleted entirely": the active patch set is gone, but `README.md`, `archive-2026-06-21-pre-6.18.34/`, and `archive-grafted-2026-05-24/` remain.
+
+**v1.3 additions (2026-07-19):**
+- **[NOTE]** The count-gating investment paid for itself within hours of being wired into CI. Two anchor drifts were caught — both would have been silent regressions under the old bare-sed regime. The first (NF-10, SFP-10G-T rename) was redundant with patch 4009; the second (NF-11, `fman_muram_offset_to_vbase` cast) matched 29 occurrences instead of the assumed 1. Each bare `sed -i` was a latent defect waiting to happen — the count-gates proved it.
+- **[NOTE]** Phase 2a (three zombie deletions) was achieved via no-op substitution (replacing `python3` calls with `: # folded into ...` comments) rather than structural deletion. The REPLACEMENT block in `ci-setup-kernel.sh` has accumulated if/fi imbalances from 30+ commits of surgical edits and resists piecemeal structural changes. The block carries 3 dead no-op lines — a small price for avoiding cascading `fi` mismatches.
+- **[NOTE]** The §17 three-tripwire architecture is live at `9f67b56`. Tripwire 1 (compile time): 11 `static_assert` guards in `fman-pcd-fe-static-asserts.h` validate FE type constants, descriptor sizes, NIA encodings, and ehash mask. NIA constants are `#ifdef`-guarded because they're defined in `fman_keygen.c` (not visible from `fman_pcd.c` where the header is included). Tripwire 2 (KUnit, CI time): 8 test cases in `fman_pcd_fe_test.c` validate type ranges, encoding contracts, and size invariants under `CONFIG_FSL_FMAN_PCD_KUNIT_TEST=y`. Tripwire 3 (arm time, already existed): `fe_verify` debugfs MURAM readback at engage time. The F-089 fixup injects both files plus Kconfig entry.
+- **[!]** `fifi` structural debt in the REPLACEMENT block is documented in IP-003 §10. The if/fi nesting was never validated as a structural invariant; the wrong-but-working balance is an accidental invariant. Durable fix: tree-canonical migration dissolves the entire block into commit history.
 
 **v1.1 additions (still accurate, unless superseded by v1.2):**
 - Series file metadata convention adopted (Yocto `Upstream-Status` + `Risk-Tier` per patch).
@@ -313,11 +313,11 @@ New patch:       ordinary commit at the right point in the stack; insertion
 ```text
 KEEP    patch-rot-check weekly probe
 KEEP    persistent git clone + canonical-bootstrap.sh (v1.2)
-ADD     round-trip identity gate (export == import(export))            [not yet]
+ADD     round-trip identity gate (export == import(export))            [wired v1.3 (commit count)]
 ADD     3way-fallback counter summary + ::warning per event            [partial]
 ADD     no-zombie gate: F-0xx markers in built tree not in ACTIVE     [test-fixups.sh check[4]]
          manifest fail the build
-ADD     §17 static asserts + KUnit descriptor audit in every build     [not yet]
+ADD     §17 static asserts + KUnit descriptor audit in every build     [DONE v1.3]
 KEEP    mergiraf .gitattributes in kernel throwaway repo              [v1.1]
 KEEP    pcd-snapshot reversibility gate as-is
 ```
@@ -326,11 +326,11 @@ KEEP    pcd-snapshot reversibility gate as-is
 
 **[SPEC — v1.2 PROGRESS]** Phase 0 hardening (v1.1, commit `9a6cec4`) and Phase R recovery (v1.2, `9060ad2..5811c91`) have delivered substantially. One structural item remains.
 
-**Completed (v1.1+v1.2):**
-- ✅ `mutate.py` with `expected=1` (count-gated), `expected=-1` (optional), `expected=0` (expect-none), and `--check` dry-run mode. 7 fixup sites converted.
-- ✅ Honest count==1 comment (v1.1) + 7 active count gates (v1.2).
+**Completed (v1.1+v1.2+v1.3):**
+- ✅ `mutate.py` with `expected=1` (count-gated), `expected=-1` (optional), `expected=0` (expect-none), and `--check` dry-run mode. All 14 bare `sed` on kernel C converted → 20 count-gated calls. (v1.3)
+- ✅ Honest count==1 comment (v1.1) + 20 active count gates (v1.3).
 - ✅ mergiraf `.gitattributes` in kernel loop.
-- ✅ 3way-fallback counter in the apply loop (per-patch echo; no end-of-run summary yet).
+- ✅ 3way-fallback `::warning` per drifted patch + end-of-run counter summary. (v1.3)
 - ✅ `bin/test-fixups.sh` CI gate (4 checks, check[1] path bug fixed v1.2).
 - ✅ Dead `F_070b.py` removed. Base64 blobs migrated to `.py` files.
 - ✅ `bin/kernel-roundtrip.sh` rewritten: non-destructive `verify`, trailer-driven `export`, protects 0001-*/0003-* namespace, dirty-dir refusal. (v1.2)
@@ -339,14 +339,17 @@ KEEP    pcd-snapshot reversibility gate as-is
 - ✅ Canonical branch `vyos-6.18.38-dpaa1` bootstrapped (106 commits). (v1.2)
 - ✅ `bin/clone-kernel.sh` wired into CI — persistent git clone replaces tarball. (v1.2)
 - ✅ 0158 regenerated from canonical branch, 0159–0162 deleted as obsolete. F-084 anchor resolved, F-085 restored to required(1). (v1.2)
+- ✅ CI round-trip commit-count gate wired into `auto-build.yml`. (v1.3)
+- ✅ `fe_disengage_full` atomic debugfs operation (F_076.py). (v1.3)
+- ✅ Phase 2a: F_055→F_054 absorbed, F_061+M2_4 deleted (18 active fixups). (v1.3)
+- ✅ §17 static_assert header (11 guards) + KUnit test (8 cases) via F_089. (v1.3)
+- ✅ Versioned duplicates reduced from 5 to 2 (F_068_2 deleted, M2_4 consolidated). (v1.3)
 
 **Still open:**
-- ❌ Delete 8 versioned duplicates: `F_068_2.py`, `F_072_2.py`, `M2_4_{2,3,4}.py`.
-- ❌ Convert remaining ~28 bare `sed -i` → `mutate()` calls (complex multiline — deferred to Phase 2 structural fix).
-- ❌ The second writer (Layer 2) still exists — this is tourniquet, not cure.
-- ❌ `fe_disengage_full` atomic debugfs operation (F-076 board crash on manual 7-step teardown).
-- ❌ Round-trip identity gate not yet wired into CI.
-- ❌ 3-way fallback counter not yet emitting `::warning` annotations in CI.
+- ❌ Delete remaining 2 versioned duplicates: `M2_4_3.py`, `M2_4_4.py` (independent fixups, not true duplicates — consolidated disposition).
+- ❌ The second writer (Layer 2) still exists — 18 fixup files. Tourniquet, not cure.
+- ❌ Full pixel-perfect round-trip identity gate (needs remote canonical branch or fresh-clone bootstrap).
+- ❌ §17 NIA `static_assert` guards are `#ifdef`-disabled from `fman_pcd.c` (constants in `fman_keygen.c`). Move to shared header to activate.
 
 ---
 
@@ -437,7 +440,7 @@ Phase 4 (next bump): first rebase-driven bump with rerere; enable mergiraf for
 | # | Item | Rationale | Est. |
 |---|---|---|---|
 | R7 | **Fold all ACTIVE fixups into owning commits** | One fixup at a time, board-verify FE-VM-relevant ones against `fe_verify`. Zombies deleted. After this, `ci-setup-kernel.sh` fixup section shrinks to near-zero. | 1–2 weeks |
-| R8 | **§17 static asserts + KUnit descriptor audit** | Catches "wrong NIA in descriptor word 1" at compile time + KUnit time. Three tripwires before silicon. | 3 days |
+| R8 | **§17 static asserts + KUnit descriptor audit** | Catches "wrong NIA in descriptor word 1" at compile time + KUnit time. Three tripwires before silicon. | — | **DONE (v1.3, `9f67b56`)** |
 | R9 | **3-way fallback `::warning` annotations** | Per-patch fallback counter summary with `::warning` annotation per drifted patch + refresh artifact upload. | 1h |
 
 ### Deferred (post-migration)
