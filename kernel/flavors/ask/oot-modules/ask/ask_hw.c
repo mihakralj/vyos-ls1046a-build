@@ -617,29 +617,70 @@ int ask_hw_offload_engage(u8 hw_port_id)
 
         /* Fix L2: Build FE-VM pipeline via debugfs bridge (Fork-B path only).
          * The FE-VM chain (pool/singletons/ehash/hashfe/enq/enter/arm) is built
-         * entirely via debugfs writes. Flow insert uses ask_debugfs_fe_flow_write()
-         * in ask_flow_offload.c which writes to fe_flow debugfs node.
-         * Once FE-VM builders are exported as kernel API (P3.3), this debugfs
-         * bridge can be replaced with direct fman_pcd_fe_vm_arm() calls. */
+         * entirely via debugfs writes — the EXACT sequence proven at M3 HIT gate
+         * (2026-07-19, bb3a3cf).  Offsets are read back from debugfs after each
+         * build step to avoid hardcoding gen_pool allocation order.
+         * Once FE-VM builders are exported as kernel API (P1 backlog), this
+         * debugfs bridge can be replaced with direct calls. */
         {
                 char buf[64];
                 char read_buf[256];
+                unsigned long hashfe_off, enq_off, fe_enter_off;
                 int n;
 
+                /* Step 1-5: build chain (M3-proven sequence) */
                 debugfs_fe_write("fe_pool", "get", 3);
                 debugfs_fe_write("fe_singletons", "build", 5);
                 debugfs_fe_write("fe_ehash", "set 0x7FFF 13 0", 17);
                 debugfs_fe_write("fe_hashfe", "build", 5);
                 debugfs_fe_write("fe_enq", "build 0x200", 11);
-                /* Capture ENQ FE offset for flow insert (fix C3: enq_off=0 bug).
-                 * The fe_enq debugfs file doesn't support kernel reads, so we
-                 * hardcode the offset. The ENQ FE is always built at MURAM
-                 * offset 0x55500 (first available slot after FE pool at 0x55000). */
-                ask_hw_enq_fe_off = 0x55500;
-                ask_pr_info("hw: using hardcoded ENQ FE offset 0x%lx\n", ask_hw_enq_fe_off);
-                n = snprintf(buf, sizeof(buf), "build 0x%02x", hw_port_id);
+
+                /* Read ENQ FE offset from debugfs */
+                if (debugfs_fe_read("fe_enq", read_buf, sizeof(read_buf)) > 0) {
+                        enq_off = parse_enq_offset(read_buf);
+                        if (enq_off)
+                                ask_hw_enq_fe_off = enq_off;
+                }
+                if (!ask_hw_enq_fe_off) {
+                        ask_pr_err("hw: cannot determine ENQ FE offset\n");
+                        rc = -ENXIO;
+                        goto out_unlock;
+                }
+                ask_pr_info("hw: ENQ FE offset 0x%lx\n", ask_hw_enq_fe_off);
+
+                /* Read EXT_HASH FE offset from debugfs */
+                hashfe_off = 0;
+                if (debugfs_fe_read("fe_hashfe", read_buf, sizeof(read_buf)) > 0) {
+                        const char *p = strstr(read_buf, "off=0x");
+                        if (p) sscanf(p, "off=0x%lx", &hashfe_off);
+                }
+                if (!hashfe_off) {
+                        ask_pr_err("hw: cannot determine EXT_HASH FE offset\n");
+                        rc = -ENXIO;
+                        goto out_unlock;
+                }
+                ask_pr_info("hw: EXT_HASH FE offset 0x%lx\n", hashfe_off);
+
+                /* Build FE_ENTER AD pointing at EXT_HASH FE */
+                n = snprintf(buf, sizeof(buf), "build 0x%lx", hashfe_off);
                 debugfs_fe_write("fe_enter", buf, n);
-                n = snprintf(buf, sizeof(buf), "engage 0x%02x 0x59200", hw_port_id);
+
+                /* Read FE_ENTER AD offset from debugfs */
+                fe_enter_off = 0;
+                if (debugfs_fe_read("fe_enter", read_buf, sizeof(read_buf)) > 0) {
+                        const char *p = strstr(read_buf, "off=0x");
+                        if (p) sscanf(p, "off=0x%lx", &fe_enter_off);
+                }
+                if (!fe_enter_off) {
+                        ask_pr_err("hw: cannot determine FE_ENTER AD offset\n");
+                        rc = -ENXIO;
+                        goto out_unlock;
+                }
+                ask_pr_info("hw: FE_ENTER AD offset 0x%lx\n", fe_enter_off);
+
+                /* Step 6: engage with F-091 HIT scaffold (numKeys=1 → FE_ENTER) */
+                n = snprintf(buf, sizeof(buf), "engage 0x%02x 0x%lx 0x2B9 0x1C0006",
+                             hw_port_id, fe_enter_off);
                 rc = debugfs_fe_write("fe_arm", buf, n);
         }
         if (rc)

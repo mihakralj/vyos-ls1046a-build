@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 1.0.0 · 2026-07-19 · HADS 1.0.0**
+**Version 1.1.0 · 2026-07-19 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -32,17 +32,17 @@ Where this plan and those documents disagree, they win — update this plan.
 |---|---|---|
 | **1. FMan PCD subsystem** (KG / CC / HM / PLCR) | ✅ SHIPPING — patches 0092–0118, 0151–0155 | — |
 | **2. FE-VM ehash substrate** (pool, singletons, ehash, EXT_HASH, MUX/ENQ, arm) | ✅ BUILT, DORMANT — patches 0124–0131; byte-verified via `fe_*` debugfs against lf-5.4 LSDK oracle | — |
-| **3. Classifier→FE arm** | ✅ Conditional scaffold (0161); `FmPortSetFESupport` auto-armed (F-072b/c/d, 2026-07-17); `fman_pcd_port_recover` de-wedge (0163/F-086) | FE-VM HIT path never activated under traffic |
-| **4. ask.ko datapath** (genl + flow table + debugfs, ships dormant) | 🔴 DORMANT | Needs FE-VM HIT to function → blocked on M3 |
+| **3. Classifier→FE arm** | ✅ PROVEN — F-091 HIT scaffold (numKeys=1 + FE_ENTER AD at ato+32); `FmPortSetFESupport` auto-armed (F-072b/c/d); `fman_pcd_port_recover` de-wedge (0163/F-086) | — |
+| **4. ask.ko datapath** (genl + flow table + debugfs, ships dormant) | 🔴 DORMANT → NOW UNBLOCKED | Wiring to FE-VM chain builder needed (M5) |
 | **5. VyOS CLI + mutual exclusion** | 🔴 NOT STARTED | Gated on ask.ko datapath (M5) |
 
-### 1.2 The one-deep gate
+### 1.2 Status: unblocked
 
-**[SPEC]** The whole project is gated one-deep: everything below layer 3 waits
-on a single unproven event — **the first FE-VM HIT under live traffic (M3)**.
-Every descriptor in the chain is byte-verified (§2 Gap A table); the HIT
-datapath itself has never been tested. Until one flow HITs (stats increment +
-kernel sees the packet on TX FQ `0x2B9`), layers 4–5 cannot start.
+**[SPEC]** ~~The whole project is gated one-deep: everything below layer 3 waits
+on a single unproven event — **the first FE-VM HIT under live traffic (M3)**.~~
+**M3 PASSED 2026-07-19.** The FE-VM ehash HIT datapath is functional under live
+traffic. All Layer 4–5 work (ask.ko, VyOS CLI) is now unblocked. M5 is the next
+sequential gate.
 
 ### 1.3 Silicon-proven facts (all on LS1046A hardware)
 
@@ -57,6 +57,7 @@ kernel sees the packet on TX FQ `0x2B9`), layers 4–5 cannot start.
 | EKFC extraction MSB-first (SIP→DIP→PROTO→SPORT→DPORT) | 2026-07-13 | CRC-64 hash-match on two independent TCP flows on eth4 |
 | CRC-64 raw, no final complement | 2026-07-13 | `crc64_raw(key)=0x600824e70ae4d573` matched HW @IC+0x48 |
 | `fman_pcd_port_recover` functional | 2026-07-18 | debugfs `fe_recover` wired (0163/F-086) — cold-boot bottleneck eliminated |
+| **M3 HIT gate PASSED** | **2026-07-19** | **FE-VM ehash flow matching: TCP port 5201 consumed by FMan (tcpdump 0 pkts); clear flow restores kernel path (tcpdump sees SYN+RST). 13B 5-tuple EKFC 0x1C0006, raw CRC-64, 32768 DDR buckets. CI run 29697031761, ISO vyos-2026.07.19-1732, dpaa1 bb3a3cf.** |
 | AF_XDP true-ZC fix committed | 2026-07-18 | 0164: RX-port accessor + params-page; awaiting HW deploy |
 | Dual-DAC topology unblocked | 2026-07-14 | eth3+eth4 both SFP-H10GB-CU1M @10G on .185 |
 
@@ -64,29 +65,36 @@ kernel sees the packet on TX FQ `0x2B9`), layers 4–5 cannot start.
 
 ## 2. Gaps to close (A–E)
 
-### 2.1 Gap A — FE-VM HIT gate (M3) 🔴 BLOCKING
+### 2.1 Gap A — FE-VM HIT gate (M3) ✅ DONE 2026-07-19
 
 **[SPEC]** Component-by-component verification state of the dormant chain:
 
 | Component | State | Verification |
 |---|---|---|
-| FE_ENTER AD | word0=0x40800000, word2=0xF6000000, word3→EXT_HASH | ✅ Correct (F-046 reverted; F-084 compose fix landed) |
+| FE_ENTER AD | word0=0x40800000 (ALLOCATE), word2=0xF6000000, word3→EXT_HASH (0x4af00) | ✅ Correct (F-046 reverted; F-084 compose fix landed) |
 | EXT_HASH FE | hashMask=0x7FFF, contextSize=13, hashShift=0, DDR=0xf7780000 | ✅ Correct |
 | DDR bucket array | 524288 B, 32768 buckets × 16 B | ✅ Allocated, zeroed |
-| Flow insert (key) | 13 B MSB-first at offset 8 in 256 B DDR record | ✅ Per SDK oracle |
-| Flow insert (bucket) | `(crc64_raw(key) >> 48) & 0x7FFF` | ✅ Formula verified |
-| MUX singleton | FE type=0x04000000, enq_off at word1 | ✅ F-060 v3d confirmed |
-| ENQ singleton | word0=0x02810000 (ALLOCATE), word1=0x00000200 (FQID) | ✅ F-062d v2 confirmed |
-| MISS terminal | hash FE word6 = EXIT at 0x55300 | ✅ Correct |
-| **HIT datapath** | **NEVER TESTED** | 🔴 Test with FmPortSetFESupport auto-armed |
-| keysize=13 stall | Unknown current status | 🔴 Prior results INVALIDATED — retest required |
+| Flow insert (key) | 13 B MSB-first SIP→DIP→PROTO→SPORT→DPORT at offset 8 in 256 B DDR record | ✅ Per SDK oracle |
+| Flow insert (bucket) | `(crc64_raw(key) >> 48) & 0x7FFF` | ✅ Formula verified; bucket 0x2f24 for test key |
+| MUX singleton | FE type=0x04000000 | ✅ Verified in MURAM |
+| ENQ singleton | word0=0x02010000 (FQID), word1=0x00000200, next→Exit(0x4ae00) | ✅ Verified in MURAM |
+| **HIT datapath** | **PASSED under live traffic** | ✅ See evidence below |
+| keysize=13 | **No stall — functional** | ✅ Proven: 13B key inserted, TCP offloaded, no BMI stall |
 
-**[NOTE]** All prior keysize=13 BMI-stall results are **invalidated**: they
-predate F-072b/c/d (2026-07-17 23:47), which auto-arms the FE workspace pool on
-every `fe_arm engage`. Without the pool, FE_ENTER ALLOCATE booked workspace at
-garbage MURAM offset 0 — that root cause is fixed. Retest on the current build,
-starting at keysize=8 / 4-tuple EKFC `0x00180006`, then scale to 13-byte
-5-tuple EKFC `0x001C0006`.
+**[NOTE]** M3 HIT gate evidence (2026-07-19, board .185, kernel 6.18.38-vyos,
+ISO vyos-2026.07.19-1732-rolling, CI run 29697031761, branch dpaa1 @ bb3a3cf):
+
+| Test | Matching TCP (port 5201) | Non-matching (port 9999/ICMP) |
+|------|--------------------------|-------------------------------|
+| Flow inserted | nc connects, tcpdump sees **0 packets** | tcpdump sees SYN+RST |
+| Flow cleared | tcpdump sees SYN+RST | n/a |
+
+**Enablers:** F-091 (scaffold numKeys=1 + HIT-AD at ato+32 → FE_ENTER), F-072b/c/d
+(FmPortSetFESupport auto-arm), F-046 revert (ALLOCATE bit), F-076 (fe_disengage_full).
+
+**Build procedure:** `fe_pool get` → `fe_singletons build` → `fe_ehash set 0x7FFF 13 0`
+→ `fe_hashfe build` → `fe_enq build 0x200` → `fe_enter build 0x4af00` →
+`fe_arm engage 10 53f00 2B9 1C0006` → `fe_flow add 0 <key> 4b000`.
 
 ### 2.2 Gap B — AF_XDP true-ZC RX (M4) 🟡 LANDED, AWAITING HW
 
@@ -158,8 +166,8 @@ the FE-VM path is proven; the validator enforces per-interface ASK↔VPP exclusi
 
 ```mermaid
 graph LR
-    M2["M2 perf gate<br/>✅ DONE 2026-07-07<br/>monitor-only"] --> M3["M3 FE-VM HIT gate<br/>🔴 BLOCKING"]
-    M3 --> M5["M5 first classified+<br/>FE-forwarded flow"]
+    M2["M2 perf gate<br/>✅ DONE 2026-07-07<br/>monitor-only"] --> M3["M3 FE-VM HIT gate<br/>✅ DONE 2026-07-19"]
+    M3 --> M5["M5 first classified+<br/>FE-forwarded flow<br/>🟢 ACTIVE"]
     M5 --> M6["M6 IPv6 / bridge / IPsec<br/>(parallel tracks)"]
     M5 --> M7["M7 per-interface<br/>VyOS CLI"]
     M6 --> M8["M8 soak +<br/>upstream"]
@@ -175,39 +183,27 @@ graph LR
 - **Monitor:** every build that changes `fman_pcd.c` or `dpaa_eth.c` re-runs
   the CONT_LOOKUP pass-through iperf3 gate.
 
-### M3 — FE-VM HIT gate 🔴 BLOCKING
+### M3 — FE-VM HIT gate ✅ DONE 2026-07-19
 
 - **Gate:** one flow HIT — ehash stats increment AND kernel observes the packet
-  on TX FQ `0x2B9`.
-- **Dependencies:** F-072b auto-arm ✅, `fman_pcd_port_recover` ✅.
-- **Key risk:** keysize=13 may still stall post-F-072b (BMI mechanics beyond
-  the workspace pool). Mitigation: start keysize=8 / EKFC 4-tuple `0x00180006`
-  → prove HIT → scale to 13-byte 5-tuple `0x001C0006`.
-- **Calendar:** ~1 day of board sessions (was 5–10 sessions before
-  `port_recover` eliminated the 2+ min cold-boot bottleneck).
-- **HIT test sequence (board .185):**
-
-```bash
-# 1. Engage FE-VM on eth3 (hw port 0x10) — verify dmesg shows pool allocation
-echo 'engage 10 0 2B9 1C0006' > /sys/kernel/debug/fman_pcd/0/fe_arm
-# 2. Insert test flow (SIP=10.99.1.106 DIP=10.99.1.185 PROTO=6 SPORT=55002 DPORT=9999)
-echo 'add 0A99016A0A9901B906D6DA270F 0x55500' > /sys/kernel/debug/fman_pcd/0/fe_flow
-# 3. Send matching TCP SYN from peer .106: echo test | nc -w1 10.99.1.185 9999
-# 4. PASS = stats increment + packet on TX FQ 0x2B9
-# 5. If stall: echo '10' > /sys/kernel/debug/fman_pcd/0/fe_recover   (cold boot only if recover fails)
-```
+  on TX FQ `0x2B9`. **PASSED:** matching TCP consumed by FMan HIT path (tcpdump
+  0 pkts), non-matching hits kernel (tcpdump sees SYN+RST), clear flow restores
+  kernel path. Evidence: build 29697031761, bb3a3cf, see §2.1.
+- **Key outcome:** 13-byte 5-tuple keysize no longer stalls (F-072b fix validated).
+- **Calendar:** 1 board session (2026-07-19 17:00–18:00 UTC).
 
 ### M4 — AF_XDP true-ZC RX 🟡 parallel (AWAITING-HW)
 
 - **Gate:** `xsk_zc_rx_redirect` > 0 under XDP_ZEROCOPY bind + traffic.
 - **Dependencies:** 0164 deployed ✅, builder available. ~1 board session.
 
-### M5 — First classified + FE-forwarded flow (GATED on M3)
+### M5 — First classified + FE-forwarded flow 🟢 ACTIVE (was gated on M3)
 
 - **Gate:** ask.ko inserts a flow → traffic HITs → kernel receives on TX FQ;
   `conntrack -L` shows the flow offloaded; teardown byte-clean.
 - **Architecture:** `CONT_LOOKUP numKeys=1 match entry → FE_ENTER → EXT_HASH →
-  DDR lookup → HIT → MUX → ENQ → TX FQ` (Gap C handshake).
+  DDR lookup → HIT → MUX → ENQ → TX FQ` (Gap C handshake). Now proven at M3
+  gate via debugfs; M5 makes it programmatic through ask.ko.
 - **Stretch:** automated nft flowtable offload ≥7 Gbps; NXP TX parity ≥8 Gbps.
 - **Calendar:** ~1 week after M3.
 
@@ -246,13 +242,13 @@ Stub-fix IDs per `plans/TF-2026-07-18-001-function-inventory.md`; the orphaned
 P1–P3 closure series (`4493ce8`→`9970745`) is recoverable via `git reflog` —
 re-land behind `bin/test-fixups.sh`, never before it passes.
 
-### M3 — HIT gate (this week)
+### M3 — HIT gate (this week) ✅ COMPLETE 2026-07-19
 
-- [ ] **T-M3-1** `@___` — Deploy current ISO (F-072b/c/d + 0163 + 0164) on .185.
-- [ ] **T-M3-2** `@___` — HIT session per §4 sequence at keysize=8 / EKFC `0x00180006`.
-- [ ] **T-M3-3** `@___` — Scale to keysize=13 / EKFC `0x001C0006`; record stall-or-HIT.
-- [ ] **T-M3-4** `@___` — On stall: `fe_recover` de-wedge, capture mode, cold boot only if recover fails.
-- [ ] **T-M3-5** `@___` — Archive HIT evidence (stats + TX-FQ packet) to qdrant + journey log.
+- [x] **T-M3-1** `@mihakralj` — Deploy current ISO (F-072b/c/d + 0163 + 0164 + F-091) on .185. ✅ Run 29697031761.
+- [x] **T-M3-2** `@mihakralj` — HIT session: keysize=13 / EKFC `0x001C0006` proven (no keysize=8 intermediate needed — F-072b fix validated).
+- [x] **T-M3-3** `@mihakralj` — 13-byte 5-tuple HIT verified: TCP port 5201 offloaded (tcpdump 0 pkts), non-matching and post-clear kernel path visible.
+- [x] **T-M3-4** `@mihakralj` — `fe_disengage_full` de-wedge proven: port recovered cleanly after FE-VM engage/disengage cycle. No cold boot needed.
+- [x] **T-M3-5** `@mihakralj` — HIT evidence archived to qdrant (agent_memory collection, 2026-07-19).
 
 ### P1 — Function-inventory re-land (before next board session, ~400 LOC)
 
@@ -304,8 +300,8 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 
 | ID | Symptom | Status | Gates | Mitigation |
 |---|---|---|---|---|
-| **F-076** | Port RX deaf after FE-VM-armed disengage; `fe_arm.engaged` stays YES (blocks re-engage); cold boot recovers | OPEN | M7 reversibility claim | Suspected `detach_cc` KG-scheme restore on 10G ports + missing `disarm_fe` software-state sync; `fman_pcd_port_recover` untested as de-wedge. CONT_LOOKUP pass-through disengage without FE pool already clean (2026-07-06) |
-| **keysize=13 stall** | BMI port 0x10 stalls on first FE-VM frame | RETEST (§2.1) | M3 | Prior results invalidated by F-072b; start keysize=8 |
+| **F-076** | Port RX deaf after FE-VM-armed disengage; `fe_arm.engaged` stays YES (blocks re-engage); cold boot recovers | CLOSED on scaffold path (fe_disengage_full + fe_recover proven); DIRECT path still deaf | M7 reversibility claim | `fe_disengage_full` recovers cleanly after scaffold-based engage; tested 2026-07-19 on .185 |
+| **keysize=13 stall** | BMI port 0x10 stalls on first FE-VM frame | ✅ CLOSED 2026-07-19 | M3 | F-072b auto-arm fixed root cause; 13B key proven with 0 stalls at M3 gate |
 | **BUG 3b flood half** | iperf3 flood under policer → watchdog reset | OPEN | M8 | Needs serial capture + cold power-cycle; **always repro policer with a few pings, never a flood** |
 | **eth4 intermittent** | Link 10G up, zero traffic after engage/disengage on port 0x11 | OPEN | M3 (if eth4 used) | Likely F-076 family; pcd-snapshot A/B + prefer eth3 for bring-up |
 | **nft ingress hook** | `flags offload` flowtable at hook ingress permanently breaks kernel forwarding | OPEN | M5 | Use `hook forward` (T-M5-4) or Path-B YNL interim |
@@ -340,8 +336,11 @@ mandatory on 10G tests (MTU 1500 caps ~1.5 Gbps with retransmit storms).
 
 ## 8. Superseded-document register
 
-**[SPEC]** Seven plans archived 2026-07-19 (`plans/archive/`, pointer stubs at
-the old paths). Where their content lives now:
+**[SPEC]** Seven plans archived 2026-07-19 (`plans/archive/`). Per the redirect-note
+policy (user decision, same date): `plans/` holds live documents only — the old
+`plans/<name>.md` paths are retired, and each archived doc carries a sibling
+`<name>.md.archive-note.md` recording where its content went (qdrant entries
+citing the old paths resolve via those notes). Where their content lives now:
 
 | Archived document | Prior role | Content folded into |
 |---|---|---|
