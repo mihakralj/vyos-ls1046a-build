@@ -1602,6 +1602,14 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-091: QMan FQ fq_stats debugfs"
 fi
 
+# F-092: Production-ready fman_pcd_fe_engage/disengage.
+# Builds FE-VM chain before arming, tears down after disarming.
+# Enables ask.ko to call kernel APIs instead of debugfs bridge.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_092.py" 2>&1
+    echo "### F-092: production fe_engage/disengage (VM chain build/teardown)"
+fi
+
 # F-093: Fix fe_probe to show extracted KG key bytes from FE workspace.
 # Reads IC buffer at hash offset to display key data + KG hash.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
