@@ -1495,6 +1495,15 @@ if changed:
 F086PY
 fi
 
+# F-089: §17 FE descriptor static_asserts + KUnit test injection.
+# Injects fman-pcd-fe-static-asserts.h (compile-time BUILD_BUG_ON guards
+# for all 6 FE types, NIA encodings, sizes) and fman_pcd_fe_test.c
+# (KUnit suite, 8 test cases). Both copied from kernel/common/files/.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_089.py" 2>&1
+    echo "### F-089: §17 static_asserts + KUnit injected"
+fi
+
 # F-076: atomic fe_disengage_full debugfs — SDK-correct ordered teardown.
 # Replaces 7-step manual sequence that crashes board (F-076, 2026-07-18).
 # Calls __fman_pcd_fe_arm_disengage + fman_pcd_port_recover in one write.
