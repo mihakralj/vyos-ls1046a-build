@@ -19,7 +19,7 @@
     "F_076.py": "fman_pcd.c: F-076 atomic fe_disengage_full (SDK-correct teardown + port de-wedge)",
     "F_089.py": "fman_pcd.c: F-089 §17 FE descriptor static_asserts + KUnit test injection",
     "F_090.py": "fman_pcd.c: F-090 fe_chain debugfs — wires __fman_pcd_fe_build_vm_chain",
-    "F_091.py": "stub placeholder — no changes",
+    "F_091.py": "fman_pcd.c: F-091 HIT scaffold — numKeys=1 + FE_ENTER AD entry when fe_enter_off != 0",
     "F_093.py": "stub placeholder — no changes",
     "F_094.py": "stub placeholder — no changes"
   },
@@ -122,8 +122,8 @@
       "reason": "fe_chain debugfs node belongs with the builder it calls — 0158 defines __fman_pcd_fe_build_vm_chain"
     },
     "F_091.py": {
-      "action": "permanent",
-      "reason": "Placeholder stub for future fixup"
+      "action": "fold-into 0158",
+      "reason": "Scaffold HIT path — belongs with the engage/arm code in 0132/0158"
     },
     "F_093.py": {
       "action": "permanent",
