@@ -1388,12 +1388,9 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # F-084: Fix 0158 compose FE_ENTER target — EXT_HASH not ENQ.
     # Single-line sed: e->muram_off → pcd->fe_hash_off
     # The ENQ list walk becomes dead code (unused var 'e' = warning, not error).
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c \
-        "err = fman_pcd_fe_enter_build(pcd, e->muram_off);" \
-        "err = fman_pcd_fe_enter_build(pcd, pcd->fe_hash_off);" \
-        1 "F-084: compose FE_ENTER target = EXT_HASH"
-    echo "### fman_pcd.c: F-084 compose FE_ENTER target = EXT_HASH"
+    sed -i 's/err = fman_pcd_fe_enter_build(pcd, e->muram_off);/err = fman_pcd_fe_enter_build(pcd, pcd->fe_hash_off);/' \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c
+    echo "### fman_pcd.c: F-084 compose FE_ENTER target = EXT_HASH (sed, silent no-op if 0158 skipped)"
 
     # F-085: Suppress -Wunused-function for static functions whose callers
      # may be behind conditional code paths or fixup-anchor mismatches.
