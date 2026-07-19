@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 1.3.0 · 2026-07-19 · HADS 1.0.0**
+**Version 1.4.0 · 2026-07-19 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -62,7 +62,7 @@ sequential gate.
 | **M4 ZC test** | **2026-07-19** | **AF_XDP copy-mode works (VPP binds eth4). ZC mode still EINVAL on xsk_socket__create() — 0164 fixed two blockers but at least one more remains. dpaa_xsk_dma_cmp/wakeup symbols present (copy-mode XSK). ZC counters 0093-0096 deployed but dormant.** |
 | F-090→F-094 fixup chain | 2026-07-19 | 5 new fixups: struct fields, HIT scaffold, production API, dynamic FQID, flow_add retype. All pass test-fixups.sh 4/4, local compile clean. CI build 29701819606 succeeded. |
 | **M5 HIT gate PASSED** | **2026-07-19** | **ask.ko → fman_pcd_fe_engage(F-092 API) → chain built + armed → flow insert → TCP HIT (tcpdump 0 pkts). iperf3 single-stream offload: 1.28 Gbps 0 retrans (TCP-limited, identical to kernel 1.32 Gbps). M2 reference: 7.37 Gbps @ 8 streams via pass-through (no DDR).** |
-| **Throughput bottleneck: DDR on every frame** | **2026-07-19** | **F-091 scaffolds ALL frames through EXT_HASH DDR lookup. Single-stream TCP-limited (~1.3 Gbps). 8-stream: 1.53 Gbps + 163K retrans — DDR latency (~50-100ns/frame) serializes at high PPS. 10 Gbps requires selective-offload: only FMan-flowed frames go through DDR; non-matching → fast pass-through (M2 path @ 7.37 Gbps).** |
+| **Throughput bottleneck: kernel software forwarding** | **2026-07-19** | **1.53 Gbps iperf3 is kernel NAPI→route→qman_enqueue — NOT FE-VM MURAM overhead (retracted theory). M2 7.37 Gbps was hardware pass-through to kernel FQ (no software routing). NXP cdx.ko 8.58 Gbps TX uses full hardware opcode chain: STRIP_ETH_HDR→TTL_DEC→ETH_REBUILD→ENQUEUE_PKT (FMan silicon, zero CPU). When FE-VM correctly armed, manual HIT achieves 6.65 Gbps single-stream (peak 8.67) — within 8% of cdx.ko. Three gaps to 10 Gbps: FmPcdCcBuildContextByFE (stubbed), opcode chain (not implemented), dedicated TX FQ.** |
 | **F-093-R1: FQ=0x0 root cause** | **2026-07-19** | **`fman_pcd_resolve_miss_fqid(pcd, 0x10)` returns 0 when called from chain builder — params page not allocated yet (arm_engage sets it up AFTER chain builder runs). Fix: revert chain builder to hardcoded 0x200; keep dynamic resolution only in arm_engage path. CI 29703599019.** |
 | **gen_pool double-free BUG** | **2026-07-19** | **`fe_arm disengage` debugfs → `gen_pool_free_owner` BUG at lib/genalloc.c:508. Root cause: double-arm without disengage guard — API `fman_pcd_fe_engage()` arms port, `ask/offload disengage` fails silently, API called again → second arm overwrites first KG scheme MURAM → disengage double-frees. Fix: engagement guard in `fman_pcd_fe_engage()` (P1 backlog).** |
 | Dual-DAC topology unblocked | 2026-07-14 | eth3+eth4 both SFP-H10GB-CU1M @10G on .185 |
@@ -128,29 +128,39 @@ the `muram_budget` debugfs node (`arch/fman-pcd-api-reference.md` §16).
 `set interfaces ethernet eth<n> offload ask` (§3 decision 9). Ready to wire once
 the FE-VM path is proven; the validator enforces per-interface ASK↔VPP exclusion.
 
-### 2.6 Gap F — Throughput: selective offload for 10 Gbps 🔴 BLOCKING M5 stretch
+### 2.6 Gap F — Throughput: hardware TX opcode chain for 10 Gbps 🔴 BLOCKING
 
-**[SPEC]** The current F-091 scaffold routes **every frame** through
-`FE_ENTER → EXT_HASH → DDR lookup`. For M3/M5 proof this was correct, but it
-caps throughput at ~1.5 Gbps (DDR latency ~50-100ns/frame serializes at high
-PPS). The M2 reference (pass-through, no DDR) achieves 7.37 Gbps.
+**[SPEC]** The 1.53 Gbps iperf3 result is **kernel software forwarding**
+(NAPI → route → `qman_enqueue`), NOT FE-VM MURAM overhead. The M2 7.37 Gbps
+gate was hardware pass-through to kernel FQ (no software routing) — a
+fundamentally different test. The NXP cdx.ko reference achieves 8.58 Gbps TX
+by executing the full L3 forwarding chain inside the FMan FE opcode VM:
 
-**[NOTE]** The architectural fix: restore `numKeys=0` in the CONT_LOOKUP group
-table (fast pass-through = 7.37 Gbps for non-matching frames). When a flow is
-offloaded (nft flowtable or ask.ko API), add a CC match entry for that 5-tuple
-pointing at FE_ENTER, and increment numKeys. This way only offloaded flows pay
-the DDR cost; the remaining traffic takes the fast path.
+```
+RX → KeyGen → FE_ENTER → EXT_HASH(DDR) → HIT → MUX →
+  STRIP_ETH_HDR → TTL_DECREMENT → ETH_HEADER_REBUILD → ENQUEUE_PKT →
+  QMan TX FQ (direct hardware enqueue) → Wire
+```
 
-**[NOTE]** The Gap C handshake (CC match → FE_ENTER, §2.3) is the enabler:
-- **Engage**: `numKeys=0` scaffold → all frames fast-path to kernel
-- **Flow insert**: `fman_pcd_fe_flow_add()` (F-094) adds DDR entry **plus**
-  `fman_cc_tree_add_key()` adds CC match entry → `numKeys++`
-- **Flow remove**: reverse
-- **Net throughput**: 7.37 Gbps baseline, minus DDR overhead for offloaded flows only
+**[SPEC]** Three gaps to 10 Gbps (priority order, from `arch/fman-fe-ehash.md` §10):
 
-**[SPEC]** M5 stretch target ≥7 Gbps with ASK engaged and flows offloaded. Gate:
-8-stream iperf3 with 2 offloaded flows → aggregate ≥7 Gbps. The 10 Gbps target
-requires the selective-offload architecture plus TX-bypass optimization (0136).
+1. **`FmPcdCcBuildContextByFE`** — populates per-task working-store context so
+   the MUX FE can read its next-FE pointer. Stubbed in all public source trees;
+   only the lf-5.4 LSDK (`999-layerscape-ask-kernel` patch, L8954) has the
+   working body. 🔴 Blocker — FE-VM parks without it.
+2. **Full opcode chain** — `STRIP_ETH_HDR` (0x80000010), `TTL_DECREMENT`
+   (0x80000200), `ETH_HEADER_REBUILD` (0x8000C001 + new MACs), `ENQUEUE_PKT`
+   (0x81000000 + TX FQID). Encoded in per-flow DDR records. 🔴 Blocker — L3
+   forwarding requires kernel help without these.
+3. **Dedicated TX FQ per port** — `dpaa_get_tx_fqid()` resolution, per-port
+   `DPAA_FWD_TX_QUEUES`. 🟡 After opcode chain — F-093 dynamic FQID partial.
+
+**[NOTE]** When the FE-VM IS correctly armed (no stubbed context), the manual
+HIT path already achieves **6.65 Gbps single-stream (peak 8.67)** — within 8%
+of cdx.ko's peak. The hardware is capable; the gaps are software. The selective-
+offload architecture (Gap C) is still needed for the CC→FE_ENTER handshake but
+is secondary — even bare pass-through, kernel software forwarding is the
+bottleneck, not DDR lookup.
 
 ---
 
@@ -195,12 +205,15 @@ requires the selective-offload architecture plus TX-bypass optimization (0136).
     Debugfs nodes (`fe_arm`, `fe_flow`, `fe_ehash`, etc.) remain for interactive
     diagnostics but are NEVER used for hardware control by ask.ko. Flow insert
     migration to API deferred to P1 backlog.
-11. **Selective-offload architecture for 10 Gbps (2026-07-19).** The F-091
-    scaffold routes ALL frames through FE-VM → DDR, capping throughput at ~1.5
-    Gbps. The production architecture uses `numKeys=0` (fast pass-through = 7.37
-    Gbps) and ONLY adds CC match entries (→ FE_ENTER, DDR path) for offloaded
-    flows. This requires the Gap C handshake: `fman_cc_tree_add_key()` for
-    per-flow dispatch, enabling 7+ Gbps aggregate throughput with ASK engaged.
+11. **NXP hardware TX opcode chain is the 10 Gbps path (2026-07-19).** The
+    1.53 Gbps cap is kernel software forwarding (NAPI→route→qman_enqueue),
+    NOT FE-VM MURAM overhead (retracted). NXP cdx.ko achieves 8.58 Gbps TX
+    via full hardware opcode chain: `STRIP_ETH_HDR → TTL_DECREMENT →
+    ETH_HEADER_REBUILD → ENQUEUE_PKT` in FMan FE opcode VM — zero CPU.
+    Encodings from lf-5.4 LSDK 999-layerscape-ask-kernel patch; must reproduce
+    `FmPcdCcBuildContextByFE` (stubbed in public trees) + opcode chain in
+    per-flow DDR records + dedicated TX FQ per port. When FE-VM correctly
+    armed, manual HIT already achieves 6.65 Gbps (peak 8.67).
 
 ---
 
@@ -318,6 +331,10 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 - [ ] **T-M5-6** `@___` — Throughput gate: ≥7 Gbps with ASK engaged + flows offloaded. 8-stream iperf3, 2+ offloaded flows, aggregate ≥7 Gbps (stretch ≥8 NXP parity).
 - [ ] **T-M5-7** `@mihakralj` — Selective-offload architecture (Gap F): restore `numKeys=0` pass-through + `fman_cc_tree_add_key()` for per-flow CC→FE_ENTER. Replaces F-091 "all frames→DDR" approach. Requires Gap C handshake (§2.3). **Blocker F-093-R1 fixed (FQ=0x0 → 0x200); CI 29703599019 building.**
 - [ ] **T-M5-8** `@___` — `conntrack -L` offloaded verification; teardown byte-clean; `fe_disengage_full` S1→S0 recovery.
+- [ ] **T-M5-9** `@___` — **Opcode chain in DDR records**: encode `STRIP_ETH_HDR` (0x80000010) + `TTL_DECREMENT` (0x80000200) + `ETH_HEADER_REBUILD` (0x8000C001) + `ENQUEUE_PKT` (0x81000000+TX_FQID) in per-flow 256B DDR records. Lift encoding from lf-5.4 LSDK `999-layerscape-ask-kernel` patch (`FmPcdCcBuildFE` at L8883).
+- [ ] **T-M5-10** `@___` — **`FmPcdCcBuildContextByFE`**: reproduce the per-task working-store context population from lf-5.4 LSDK (L8954). Unstubs the function — FE-VM MUX reads its next-FE pointer from the working store. Without this the FE-VM parks on first frame under load.
+- [ ] **T-M5-11** `@___` — **Dedicated TX FQ**: resolve `dpaa_get_tx_fqid()` per port, allocate `DPAA_FWD_TX_QUEUES`, wire ENQUEUE_PKT `actionSpecific` = TX FQID.
+- [ ] **T-M5-12** `@___` — **Throughput gate**: ≥7 Gbps single-stream with opcode chain active (stretch ≥8 NXP parity). Reference: manual HIT already achieves 6.65 Gbps when FE-VM is correctly armed.
 
 ### M6 — breadth (after M5)
 
