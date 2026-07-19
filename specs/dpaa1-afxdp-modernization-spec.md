@@ -10,7 +10,7 @@
 
 ## TL;DR
 
-1. **One driver core, one classifier API, one HW-accelerated AF_XDP stack — three flavors that consume it differently.** Shared substrate: two ops tables (`pcd_ops`, `qmgmt_ops`) installed per-`dpaa_priv`. `default` leaves them NULL (mainline behaviour); `vpp` populates them with UMEM-backed BMan pool + ZC RX/TX hooks; `ask` populates them with dynamic CC tree + Host Command reconfig hooks. RCU-NULL-safe — when no flavor module is loaded the driver is byte-identical to mainline.
+1. **One driver core, one classifier API, one HW-accelerated AF_XDP stack — three consumer roles that consume it differently.** Shared substrate: two ops tables (`pcd_ops`, `qmgmt_ops`) installed per-`dpaa_priv`. `default` leaves them NULL (mainline behaviour); `vpp` populates them with UMEM-backed BMan pool + ZC RX/TX hooks; `ask` populates them with dynamic CC tree + Host Command reconfig hooks. RCU-NULL-safe — when no flavor module is loaded the driver is byte-identical to mainline.
 
 2. **The hardware offloads (CC / HM / Policer / CEETM) are not VPP-only.** Each exposes a kernel-side consumer that benefits `default` and `ask` too: CC trees back kernel RPS or ASK2 flow steering; HM nodes hook into `NETIF_F_HW_VLAN_CTAG_*`; Policer profiles back tc/nftables ingress rate-limit offload; CEETM is QMan-silicon hierarchical egress shaping (the Linux tc-qdisc driver is NOT in mainline 6.18 and must be forward-ported from the NXP LSDK — see §5.7). **CLI policy (v5.13):** this spec delivers only the **kernel-side APIs** and their existing kernel-native interfaces (`ethtool -K`, sysfs, tc/nftables offload, module params). The **native VyOS CLI surfaces** — `set vpp settings hw-offload …`, `set system offload …`, `set qos policy shaper hardware …`, `set firewall … offload …` — are **DEFERRED to a separate, later "native VyOS CLI" phase** and are explicitly out of this spec's scope. In particular, VPP keeps its **existing** config/ops surface (`vppctl`/`startup.conf` + the already-shipped `set vpp settings interface ethX`); we do **not** add new `set vpp settings hw-offload …` verbs now. Every `set vpp settings hw-offload …` / `set system offload …` / `set qos policy shaper …` / `set firewall … offload` string elsewhere in this document denotes **target syntax for that future phase**, never a current deliverable. See `specs/vpp-dpaa1-ls1046a-spec.md` v0.3. **Amendment (2026-06-10, operator-directed):** `set system offload classify` is UN-deferred and SHIPPED — vyos-1x patch `vyos-1x-026-system-offload-classify.patch` (config-mode CLI → `ethtool -N` ntuple) + board patch `0109` (dpaa rxnfc → `fman_cc_tree_install()` bridge). The other CLI surfaces remain deferred.
 
@@ -22,7 +22,7 @@
 
 ## Milestone Tracker
 
-DPAA1 driver work is cross-flavor by construction (see §1.3, §7) — `default` / `vpp` / `ask` all share the same kernel binary; whether a given milestone *manifests behavior* on a flavor depends solely on whether that flavor has a userspace consumer loaded (AF_XDP socket, VPP `af_xdp` plugin, ASK2 module). Status: **planned**, **in-progress**, **landed** (in-tree, patch-health-clean), **dut-validated**, **stub-landed**, **blocked**, **deferred**.
+DPAA1 driver work is cross-consumer by construction (see §1.3, §7) — `default` / `vpp` / `ask` consumer roles all share the same kernel binary (single-image model, flavor split retired 2026-06-14); whether a given milestone *manifests behavior* for a consumer role depends solely on whether that role has a userspace consumer loaded (AF_XDP socket, VPP `af_xdp` plugin, ASK2 module). Status: **planned**, **in-progress**, **landed** (in-tree, patch-health-clean), **dut-validated**, **stub-landed**, **blocked**, **deferred**.
 
 Full per-row validation detail (board counter readings, ftrace evidence, iperf3 numbers, gate pass/fail per port class) is archived in Qdrant under `topic=dpaa1-afxdp-spec-milestone-archive`. The Notes column below carries only the patch reference, commit SHA, and one-line outcome anchor.
 
@@ -67,7 +67,7 @@ Full per-row validation detail (board counter readings, ftrace evidence, iperf3 
 
 ## 1. Purpose and Scope
 
-Kernel-side changes to `drivers/net/ethernet/freescale/dpaa/` + FMan/QMan/BMan support code to modernize DPAA1 on LS1046A across all three VyOS flavors. The deliverable is a single kernel binary that:
+Kernel-side changes to `drivers/net/ethernet/freescale/dpaa/` + FMan/QMan/BMan support code to modernize DPAA1 on LS1046A across all three VyOS consumer roles (`default` / `vpp` / `ask` — runtime-selected in the single image). The deliverable is a single kernel binary that:
 
 - Exposes a per-`dpaa_priv` flavor-ops abstraction (M0).
 - Implements `ndo_xsk_wakeup`, `XDP_SETUP_XSK_POOL`, advertises `NETDEV_XDP_ACT_XSK_ZEROCOPY`.

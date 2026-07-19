@@ -29,6 +29,7 @@ The design specs and deep-dives behind the build. Start here to understand *how*
 
 | Document | What's inside |
 |---|---|
+| [arch/README.md](arch/README.md) | **Hardware architecture reference index** — the in-repo distilled silicon reference (DPAA1/FMan v3/QMan/BMan/SEC): register-level facts, hardware constants, CCSR map, and per-module docs (`fman-pcd.md`, `fman-microcode-210-programming-reference.md`, `fman-pcd-api-reference.md`, `muram.md`, …) for when the NDA manuals aren't open |
 | [specs/dpaa1-afxdp-modernization-spec.md](specs/dpaa1-afxdp-modernization-spec.md) | **DPAA1 AF_XDP driver modernization** — the flavor-ops abstraction, XSK-backed BMan pools, per-CPU NAPI on dedicated QMan channels, the four FMan HW offloads (CC / HM / Policer / CEETM), and the per-milestone status tracker |
 | [plans/NETWORKING-DEEP-DIVE.md](plans/NETWORKING-DEEP-DIVE.md) | **DPAA1 networking internals** — FMan architecture, QBMan portal allocation, the three-driver split (`fsl_dpaa_mac` / `fsl_dpa` / `fsl_dpaa_eth`), and how packets flow before the CPU sees them |
 | [plans/DUAL-DATAPLANE.md](plans/DUAL-DATAPLANE.md) | **Single-image dual-dataplane model** — one ISO ships every datapath; the silicon mode state machine (mainline/RSS ↔ ASK offload, with VPP as an AF_XDP overlay), runtime switching, and the reversibility contract |
@@ -38,7 +39,7 @@ The design specs and deep-dives behind the build. Start here to understand *how*
 
 ## Build and Release Assets
 
-Automated weekly (Friday 01:00 UTC) via GitHub Actions.
+Built on demand via GitHub Actions (`workflow_dispatch` — trigger "VyOS LS1046A build (self-hosted)"; no schedule).
 
 | File | Description |
 |------|-------------|
