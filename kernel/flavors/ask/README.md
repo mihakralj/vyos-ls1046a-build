@@ -1,8 +1,9 @@
 # ASK2 source tree — `kernel/flavors/ask/`
 
-**Status:** scaffold only. Implementation tracked in
-[`specs/ask2-rewrite-spec.md`](../../../specs/ask2-rewrite-spec.md)
-(v1.8, 2026-06-14).
+**Status:** scaffold only. Execution plan:
+[`plans/ASK2-MASTER-PLAN.md`](../../../plans/ASK2-MASTER-PLAN.md)
+(v1.0.0, 2026-07-19 — single authoritative). Architecture index:
+[`specs/ask2-rewrite-spec.md`](../../../specs/ask2-rewrite-spec.md) (v1.10).
 
 This directory is the **modern rewrite** of the NXP ASK fast-path for
 LS1046A. It supersedes the legacy ASK 1.x stack (proprietary `cdx.ko`,
@@ -15,7 +16,8 @@ The brand "ASK" carries forward unchanged, but ASK2 is **no longer a
 separate build flavor**. Per the single-image decision (2026-06-14,
 `plans/DUAL-DATAPLANE.md`), the contents of this tree are wired into the
 **common** build — `ask.ko` ships in **every** image, dormant until
-`set system offload ask` engages it at runtime. `kernel/flavors/ask/`
+`set interfaces ethernet eth<n> offload ask` engages it at runtime
+(per-interface CLI contract, 2026-07-19). `kernel/flavors/ask/`
 remains only the *source location* for ASK-specific patches and OOT code;
 the directory name is historical and does not imply a `FLAVOR=ask` build
 target. The 210-series FMan microcode (loaded by U-Boot from SPI flash on

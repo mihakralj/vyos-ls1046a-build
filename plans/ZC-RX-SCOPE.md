@@ -3,7 +3,7 @@
 **Status:** ✅ **FUNCTIONALLY RESOLVED 2026-06-10** — true-ZC RX is HW-validated: oracle `xsk_zc_rx_redirect` 0→7→8 reproducible (ISO `2026.06.10-0124-rolling`, kernel `6.18.34-vyos`, board `192.168.1.190`). GAP 1 closed (`0102b` BMI readback: `FMBM_EBMPI[0]` bpid 3→5 in silicon), GAP 1b closed (`0103g` NULL-`xdp.rxq` crash fixed, i40e `MEM_TYPE_XSK_BUFF_POOL` rxq registration), dispatch-placement fixed (`0103f`). Crash-free + reversible (serial-capture clean). **Only optimization remains:** GAP 2 = bulk-flow steering onto the XSK default FQ for a *high-rate* ZC throughput number (not gate-3-blocking — copy-mode already meets capacity). See spec §6.1.18. Original brief preserved below for the GAP-2 follow-up.
 **Owner:** (assign)
 **Branch:** `dpaa1` (do **not** disrupt `main`).
-**Authoritative spec:** `specs/dpaa1-afxdp-modernization-spec.md` §6.1.10–§6.1.17 (M3-3 step 7). This brief is a self-contained pointer; the spec is the source of truth. Cross-ref `plans/COMPLETION-PLAN.md` §4.3.
+**Authoritative spec:** `specs/dpaa1-afxdp-modernization-spec.md` §6.1.10–§6.1.17 (M3-3 step 7). This brief is a self-contained pointer; the spec is the source of truth. Cross-ref `plans/archive/COMPLETION-PLAN.md` §4.3.
 
 ---
 

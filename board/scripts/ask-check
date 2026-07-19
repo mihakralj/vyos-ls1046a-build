@@ -39,8 +39,9 @@
 #                                 fe_engage/disengage entry point
 #   7. Hardware IPsec offload     CAAM job rings + descriptor sharing + the
 #                                 ESP packet-mode offload bind on FMan netdevs
-#   8. Operator CLI               'set system offload ask' + the validator that
-#                                 keeps ASK and VPP mutually exclusive
+#   8. Operator CLI               'set interfaces ethernet eth<n> offload ask'
+#                                 + the validator enforcing the per-interface
+#                                 ASK↔VPP mutex (a port can't be both)
 #   9. dmesg integrity            no error/stall/leak lines from the datapath
 #
 # Architecture note (2026-07-17):
@@ -513,21 +514,23 @@ else
 fi
 
 # ===========================================================================
-# 8. Operator CLI — 'set system offload ask'
+# 8. Operator CLI — 'set interfaces ethernet eth<n> offload ask'
 # ===========================================================================
-hdr "8) Operator CLI ('set system offload ask')"
+hdr "8) Operator CLI ('set interfaces ethernet eth<n> offload ask')"
 
-# The ASK enable/per-port CLI, and the validator that keeps ASK and VPP from
-# both claiming a port. Probe specifically for the 'ask' leaf so the unrelated
-# stock 'system offload classify' subtree does not false-positive.
-if [ -d /opt/vyatta/share/vyatta-cfg/templates/system/offload/ask ] \
-   || find /usr/libexec/vyos/conf_mode -maxdepth 1 -name 'system_offload*ask*' 2>/dev/null | grep -q . \
-   || (command -v cli-shell-api >/dev/null 2>&1 && cli-shell-api existsActive system offload ask 2>/dev/null); then
-    record_ok "'set system offload ask' CLI present"
-    note "the validator must keep ASK and VPP mutually exclusive on any port"
+# The per-interface ASK enable CLI (v1.3 contract, 2026-07-19 — supersedes the
+# retired global 'set system offload ask'), and the validator that enforces the
+# per-interface ASK↔VPP mutex (one port can't be both; other ports free).
+# Probe for the 'offload ask' leaf under the ethernet interface template so the
+# deprecated 'system offload classify' subtree does not false-positive.
+if [ -d /opt/vyatta/share/vyatta-cfg/templates/interfaces/ethernet/node.tag/offload/ask ] \
+   || find /usr/libexec/vyos/conf_mode -maxdepth 1 -name '*ethernet*offload*' 2>/dev/null | grep -q . \
+   || (command -v cli-shell-api >/dev/null 2>&1 && cli-shell-api showCfg --show-active-only interfaces 2>/dev/null | grep -q 'offload ask'); then
+    record_ok "'set interfaces ethernet eth<n> offload ask' CLI present"
+    note "the validator must keep ASK and VPP mutually exclusive per port"
 else
-    record_fail "'set system offload ask' CLI absent — operator cannot enable ASK"
-    note "('system offload classify' is a different, unrelated feature)"
+    record_fail "'set interfaces ethernet eth<n> offload ask' CLI absent — operator cannot enable ASK"
+    note "('system offload classify' CLI is deprecated; mechanism runs as silent default)"
 fi
 
 # ===========================================================================

@@ -154,8 +154,8 @@
 ### Phase 5: Operator CLI
 | Component | Description | Dependency |
 |-----------|-------------|------------|
-| `set system offload ask` | VyOS native CLI for ASK engage/disengage | Phase 2 |
-| VPP mutual exclusion | Global ASK↔VPP mutually exclusive (runtime select, single image) | Phase 2 |
+| `set interfaces ethernet eth<n> offload ask` | VyOS native per-interface CLI for ASK engage/disengage | Phase 2 |
+| VPP mutual exclusion | Per-interface ASK↔VPP exclusion (a port can't be both; other ports free) | Phase 2 |
 | Telemetry | ethtool -S ASK counters, ask-check integration | Phase 2 |
 
 ### Phase 6: Soak & Performance

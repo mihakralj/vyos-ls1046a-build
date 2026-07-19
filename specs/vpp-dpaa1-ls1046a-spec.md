@@ -45,9 +45,9 @@ Kernel (single binary, all flavors)
 |---|---|---|---|---|
 | (default) | S0 — mainline RSS | none | Kernel skbuf (improved by DPAA1 §5.2) | Existing kernel interfaces (RPS, NETIF_F_HW_VLAN via `ethtool -K`, tc/nftables) |
 | VPP | S0 + AF_XDP overlay (zero silicon delta) | `set vpp settings interface ethN` | AF_XDP ZC on SFP+ (eth3/eth4) | VPP `vppctl`/`startup.conf` + kernel-native (`ethtool -K`, sysfs) |
-| ASK | S1 — AC_CC + FE (silicon fast path) | `set system offload ask` | Kernel skbuf + ASK2 silicon forwarding | Via ASK2 (nft flow offload, xfrm IPsec) — per `specs/ask2-rewrite-spec.md` v1.7 |
+| ASK | S1 — AC_CC + FE (silicon fast path) | `set interfaces ethernet ethN offload ask` | Kernel skbuf + ASK2 silicon forwarding | Via ASK2 (nft flow offload, xfrm IPsec) — per `specs/ask2-rewrite-spec.md` v1.7 |
 
-VPP and ASK are **globally mutually exclusive in v1** (commit validator, §4.1). The ASK-off state (S0) is exactly the VPP-ready state — switching ASK→VPP requires snapshot-verified ASK teardown back to S0, never a direct transition.
+VPP and ASK are **mutually exclusive per interface** (commit validator, §4.1): one port cannot be both ASK and VPP; other ports are free. The ASK-off state (S0) is exactly the VPP-ready state — switching a port ASK→VPP requires snapshot-verified ASK teardown back to S0 on that port, never a direct transition.
 
 ---
 
@@ -137,7 +137,7 @@ set vpp settings interface eth4
 
 Triggers VPP startup via `vyos-1x-010-vpp-platform-bus.patch` (AF_XDP mode). No `fsl,userspace-managed` DT property needed. No kernel netdev unbind. This is the **only** VyOS config surface this spec ships; VPP itself is otherwise configured/operated through its existing `vppctl`/`startup.conf`.
 
-**Mutual exclusion (v0.4):** the commit validator rejects a config containing both `vpp settings interface …` and `system offload ask` — globally mutually exclusive in v1 (`plans/DUAL-DATAPLANE.md` §3.2). VPP requires the silicon in S0; engaging VPP while ASK silicon state (S1) is live is never permitted.
+**Mutual exclusion (v0.5, 2026-07-19):** the commit validator rejects a config where the same `ethN` appears in both `vpp settings interface ethN` and `interfaces ethernet ethN offload ask` — **per-interface** mutual exclusion (`plans/DUAL-DATAPLANE.md` §3.2); other ports are free. VPP requires the silicon in S0; engaging VPP on a port while ASK silicon state (S1) is live on that same port is never permitted.
 
 ### 4.2 HW Offload Configuration (DEFERRED to a later native-VyOS-CLI phase — NOT in scope)
 

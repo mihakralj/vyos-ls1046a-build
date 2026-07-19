@@ -1,6 +1,6 @@
-# ASK2 Architecture — Canonical Index (v1.9)
+# ASK2 Architecture — Canonical Index (v1.10)
 
-**Status:** Architecture index — this document maps the ASK2 architecture landscape. It does NOT contain the architecture itself. The full ASK2 rewrite spec (v1.1–v1.7, ~6 kLOC) was retired 2026-07-14 when the Fork-B FE-VM ehash path invalidated the Fork-A/OH-port-era ceiling numbers and MURAM budget assumptions. v1.9 adds the 2026-07-18 journey review and 0164 true-ZC fix to the execution plans index.
+**Status:** Architecture index — this document maps the ASK2 architecture landscape. It does NOT contain the architecture itself. The full ASK2 rewrite spec (v1.1–v1.7, ~6 kLOC) was retired 2026-07-14 when the Fork-B FE-VM ehash path invalidated the Fork-A/OH-port-era ceiling numbers and MURAM budget assumptions. v1.10 (2026-07-19) points execution sequencing at the single authoritative `plans/ASK2-MASTER-PLAN.md` and records the per-interface CLI contract (`set interfaces ethernet eth<n> offload ask`, per-interface ASK↔VPP mutex, `system offload classify` CLI deprecated — mechanism kept as silent default).
 
 ## AI READING INSTRUCTION
 
@@ -33,8 +33,8 @@ This document is an index. For silicon facts, go to `arch/`. For design intent, 
 | `specs/fman-keygen-flow-key-spec.md` | EKFC extraction, CRC-64 hash, FE-VM ehash flow-table architecture. Confirmed 5-tuple extraction order (MSB-first). |
 | `specs/dpaa1-afxdp-modernization-spec.md` | Shared kernel driver substrate (PCD, QMgmt, AF_XDP ZC) serving all consumers. |
 | `specs/vpp-dpaa1-ls1046a-spec.md` | VPP AF_XDP integration on DPAA1. |
-| `plans/DUAL-DATAPLANE.md` | S0↔S1 dataplane mode state machine, reversibility contract, CLI semantics. |
-| `plans/ASK2-DEVELOPMENT-PLAN.md` | Current execution plan (Fork-B FE-VM path). |
+| `plans/DUAL-DATAPLANE.md` | S0↔S1 dataplane mode state machine, reversibility contract, CLI semantics (per-interface `set interfaces ethernet eth<n> offload ask`). |
+| `plans/ASK2-MASTER-PLAN.md` | **Single authoritative execution plan** — milestones M2–M8, gates, live TODO list. |
 
 ## 3. Hardware silicon reference (arch/)
 
@@ -52,11 +52,10 @@ This document is an index. For silicon facts, go to `arch/`. For design intent, 
 
 | Document | Topic |
 |---|---|
-| `plans/DUAL-DATAPLANE.md` | Dataplane mode state machine (S0/S1/S2). v1.2 (2026-07-18). |
-| `plans/ASK2-DEVELOPMENT-PLAN.md` | Fork-B execution plan. **Frozen 2026-06-16 — superseded by journey review below.** |
-| `plans/ASK2-JOURNEY-REVIEW-2026-07-18.md` | **Current ASK2 status + forward plan.** M2 PASS, M3 infrastructure, NXP SDK oracle comparison, 0163/0164, F-072b/c/d, defect register. |
-| `plans/ASK2-PHASE2-AUTOMATION-PLAN.md` | Flow offload automation (M2 gate passed: 7.37 Gbps). |
-| `plans/COMPLETION-PLAN.md` | Consolidated cross-track roadmap. |
+| `plans/ASK2-MASTER-PLAN.md` | **THE authoritative ASK2 execution plan (v1.0.0, 2026-07-19).** Ground state, gaps A–E, binding decisions, milestone chain M2–M8 with gates, live TODO list, open defects, harness/gate mechanics, superseded-doc register. Read this and nothing else for sequencing. |
+| `plans/DUAL-DATAPLANE.md` | Dataplane mode state machine (S0/S1/S2) + CLI contract. v1.3 (2026-07-19). |
+| `plans/TF-2026-07-18-001-function-inventory.md` | Stub/type-drift inventory (F-01–F-23) feeding the master plan §5 re-land series. |
+| `plans/TRAFFIC-HARNESS.md` | Board SFP+ acceptance-gate traffic generator (CT201/CT202). |
 | `plans/OFFLOAD-CAPABILITIES.md` | Living inventory of silicon-verified offload capabilities. |
 | `plans/MODULE-INVENTORY.md` | Delivered kernel patch inventory (107 board patches as of 2026-07-18). |
 
@@ -66,6 +65,13 @@ This document is an index. For silicon facts, go to `arch/`. For design intent, 
 |---|---|
 | `plans/archive/ASK2-PATH-A-ARCHITECTURE-DECISION-RECORD.md` | **Combined Path A decision record** — Part 1: ASK-vs-ASK2 comparative analysis (Path A origin), Part 2: Architecture review (five simplifications), Part 3: Course-correction execution plan (five phases, 28-patch audit). All three parts superseded by Fork B — FE-VM ehash (July 2026). |
 | `plans/archive/ASK2-IMPLEMENTATION.md` | Historical implementation plan — superseded by Fork-B |
+| `plans/archive/ASK2-JOURNEY-REVIEW-2026-07-18.md` | Journey review (M2 PASS, M3 infrastructure, NXP SDK oracle comparison) — folded into `plans/ASK2-MASTER-PLAN.md` §1/§2/§3/§4/§6 (archived 2026-07-19) |
+| `plans/archive/ASK2-DEVELOPMENT-PLAN.md` | Phase 0–6 execution plan — folded into master plan §1/§3/§4/§5/§7 (archived 2026-07-19) |
+| `plans/archive/COMPLETION-PLAN.md` | Cross-track DPAA1/VPP/ASK2 roadmap — folded into master plan §4/§7 (archived 2026-07-19) |
+| `plans/archive/ASK2-PHASE2-AUTOMATION-PLAN.md` | Flow-offload automation T1–T6 — folded into master plan §5 M5 + §6 (archived 2026-07-19) |
+| `plans/archive/ASK2-PERFORMANCE-MODERNIZATION.md` | cdx.ko parity + opcode gaps — folded into master plan §4/§5/§7 (archived 2026-07-19) |
+| `plans/archive/ASK2-F3-F6-UNBLOCK-PROPOSAL.md` | F3/F6 bisect findings — folded into master plan §6 (archived 2026-07-19) |
+| `plans/archive/ASK-PLANS.md` | 2026-06-09 doc hub — role superseded by this index + master plan §8 (archived 2026-07-19) |
 
 ---
 

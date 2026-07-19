@@ -148,7 +148,7 @@ No CAAM Job Ring descriptor is built, no PDB is written, no SPI is programmed in
 
 **Symptom:** Init/exit prints only. No genl handler wires here; the VyOS op-mode CLI has no kernel-side receiver except the debugfs escape hatch.
 
-**Impact:** VyOS `set system offload ask` cannot engage. The only path to `ask_hw_offload_engage` is `echo "engage 0x10" > /sys/kernel/debug/ask/offload`, which is bring-up ergonomics, not shipped op-mode.
+**Impact:** VyOS `set interfaces ethernet eth<n> offload ask` cannot engage. The only path to `ask_hw_offload_engage` is `echo "engage 0x10" > /sys/kernel/debug/ask/offload`, which is bring-up ergonomics, not shipped op-mode.
 
 **Fix:** Land the op-mode netlink attribute set and validator. Compose against existing `ask_hw_offload_engage`/`_disengage` (already real in `ask_hw.c`).
 
@@ -487,4 +487,4 @@ const u32 tx_fqid       = 0x200;  /* TODO: dedicated offload TX FQ */
 
 **[NOTE]** Findings F-08, F-09, F-10, F-15, F-11, and F-12 close three of the last five silicon incidents at compile or arm time and cost fewer than 400 lines total. Recommend landing as a single series before further FE-VM board testing.
 
-**[SPEC]** The `arch/fman-pcd-api-reference.md` v3.0.0, `plans/ASK2-JOURNEY-REVIEW-2026-07-18.md`, and the `plans/DUAL-DATAPLANE.md` v1.2 milestone tracker should be cross-referenced against this inventory to ensure no finding contradicts a released gate claim.
+**[SPEC]** The `arch/fman-pcd-api-reference.md` v3.0.0, `plans/ASK2-MASTER-PLAN.md`, and the `plans/DUAL-DATAPLANE.md` v1.2 milestone tracker should be cross-referenced against this inventory to ensure no finding contradicts a released gate claim.
