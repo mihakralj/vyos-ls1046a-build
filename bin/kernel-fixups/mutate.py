@@ -43,7 +43,12 @@ def main():
     src = p.read_text()
     n   = src.count(old_text)
 
-    if n != expected:
+    if expected < 0:
+        # expected=-1 means optional: apply if found, skip if not
+        if n == 0:
+            print(f"### {label}: optional — anchor not present, skipping")
+            return
+    elif n != expected:
         print(
             f"FATAL: {label}: expected {expected} match(es), found {n}. "
             f"Fixup anchor drifted — aborting build.",
