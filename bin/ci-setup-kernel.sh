@@ -1261,8 +1261,7 @@ fi
 # Remove the port_id check; match on fm + port_type only.
 # cc_test works by accident (%hhi "0x10" → port_id=0, which matches).
 if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/M2_4.py" 2>&1
-    echo "### fman_port.c: M2-4 fman_port_lookup_rx fixed"
+    : # M2_4 folded into M2_4_2.py (fe_probe v4→v6 consolidation)
 
 # F-063 DISABLED FOR BISECT: EXT_HASH FE contextSize must match keysize.
 # Commented out to test if contextSize change (256→key_size-1) causes stall.
@@ -1388,8 +1387,7 @@ fi
 # v3d avoids backslash-s (bad escape through the 4-layer pipeline) — uses [ \t]* instead.
 # F-055/F-056 wrote across TWO lines; regex matches the 2-line pattern.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_055.py" 2>&1
-    echo "### fman_pcd.c: F-060 v3d: MUX context write fixed to AD+4"
+    : # F_055 folded into F_054.py (MUX write AD+0→AD+4 correction)
 
     # F-083 REMOVED — scaffold guard (fe_enter_off==0) preserved.
     # The CONT_LOOKUP scaffold is the correct path when fe_enter_off==0.
@@ -1454,8 +1452,7 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
 # Idempotent: checks for existing fe_pool_off / fe_probe_show / debugfs
 # registration before inserting each piece.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_061.py" 2>&1
-    echo "### fman_pcd.c: F-061 fe_probe debugfs (KG key dump from FE pool workspace)"
+    : # F_061 folded into M2_4_2.py (fe_probe v6 consolidation)
 fi
 
 # F-086: Register fe_recover debugfs write node (patch 0163 Tier-1 recovery).
