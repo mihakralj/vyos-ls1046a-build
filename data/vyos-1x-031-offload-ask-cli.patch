@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VyOS LS1046A CI <ci@vyos-ls1046a>
+Date: Sun, 19 Jul 2026 23:14:00 +0000
+Subject: [PATCH] ethernet: add 'offload ask' CLI node + NOP Python stub
+
+XML: adds valueless `offload ask` leafNode under ethernet offload
+options.  When set, signals that ASK hardware forwarding via FMan
+FE-VM should be engaged on this interface.
+
+Python: adds 'offload.ask' to the interface defaults list and a NOP
+stub comment in the update() method.  M6 will wire it to actual
+fman_pcd_fe_engage() / fman_pcd_fe_disengage() per interface.
+
+---
+diff --git a/interface-definitions/interfaces_ethernet.xml.in b/interface-definitions/interfaces_ethernet.xml.in
+--- a/interface-definitions/interfaces_ethernet.xml.in
++++ b/interface-definitions/interfaces_ethernet.xml.in
+@@ -131,6 +131,12 @@
+                   <valueless/>
+                 </properties>
+               </leafNode>
++              <leafNode name="ask">
++                <properties>
++                  <help>ASK (Accelerated Switching Kernel) offload — FMan FE-VM hardware forwarding for this interface (NXP LS1046A)</help>
++                  <valueless/>
++                </properties>
++              </leafNode>
+             </children>
+           </node>
+           <leafNode name="speed">
+diff --git a/python/vyos/ifconfig/ethernet.py b/python/vyos/ifconfig/ethernet.py
+--- a/python/vyos/ifconfig/ethernet.py
++++ b/python/vyos/ifconfig/ethernet.py
+@@ -107,6 +107,7 @@
+             'offload.gro',
+             'offload.gso',
+             'offload.lro',
++            'offload.ask',
+             'offload.rfs',
+             'offload.rps',
+             'offload.sg',
+@@ -603,6 +604,9 @@
+         # Hardware VLAN tag stripping on receive (DPAA1 FMan HM offload)
+         self.set_vlan_strip(dict_search('offload.vlan_strip', config) is not None)
+ 
++        # ASK offload — NOP stub (M6: fman_pcd_fe_engage/disengage per interface)
++        # dict_search('offload.ask', config) is not None -> future engage trigger
++
+         # RPS - Receive Packet Steering
+         self.set_rps(dict_search('offload.rps', config) is not None)
+ 
