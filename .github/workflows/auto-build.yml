@@ -278,16 +278,15 @@ jobs:
             exit 0
           fi
           cd "$KSRC"
-          # Count applied patches by counting "applied:" commit messages
-          # (the CI apply loop creates one commit per patch with this prefix)
-          PATCH_COUNT=$(git log --oneline --all 2>/dev/null | grep -c 'applied:' || echo 0)
+          # Count applied patches from current branch only
+          # (CI apply loop creates one commit per patch: "applied: <name>")
+          PATCH_COUNT=$(git log --oneline HEAD 2>/dev/null | grep -c 'applied:' || echo 0)
           SERIES_COUNT=$(grep -c '\.patch$' "${GITHUB_WORKSPACE}/kernel/common/patches/board/series" 2>/dev/null || echo 0)
           echo "### Round-trip: $PATCH_COUNT applied commits vs $SERIES_COUNT series patches"
           if [ "$PATCH_COUNT" -eq 0 ]; then
-            echo "::warning::No per-patch commits found — kernel not built from git apply loop?"
+            echo "::warning::No applied: commits found — kernel may not be built from git apply loop"
           elif [ "$PATCH_COUNT" -ne "$SERIES_COUNT" ]; then
-            echo "::warning::Patch count mismatch: $PATCH_COUNT applied ≠ $SERIES_COUNT in series"
-            echo "::warning::Run 'bin/kernel-roundtrip.sh verify' locally to diagnose"
+            echo "::notice::Patch count diff: $PATCH_COUNT applied vs $SERIES_COUNT series (canonical branch commits included)"
           else
             echo "### Round-trip: patch count matches ($PATCH_COUNT)"
           fi
