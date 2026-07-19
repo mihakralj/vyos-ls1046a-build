@@ -1567,8 +1567,8 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
         drivers/net/ethernet/freescale/fman/fman_pcd.c \
         'fman_muram_offset_to_vbase(muram,' \
         '(void *)fman_muram_offset_to_vbase(muram,' \
-        1 \
-        "F-085: cast addition on muram_offset_to_vbase"
+        29 \
+        "F-085: cast addition on muram_offset_to_vbase (29 occ.)"
     echo "### fman_pcd.c: fe_build_contexts fixed (__maybe_unused + cast) (mutate)"
 fi
 
