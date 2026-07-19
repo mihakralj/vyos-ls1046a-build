@@ -1504,6 +1504,15 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-089: §17 static_asserts + KUnit injected"
 fi
 
+# F-090: fe_chain debugfs — wires __fman_pcd_fe_build_vm_chain to a
+# writable debugfs node so the full FE-VM descriptor chain (singletons,
+# EXT_HASH FE, ENQ FE, FE_ENTER AD) can be built interactively at the
+# HIT gate. Accepts "build" and "destroy" verbs.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_090.py" 2>&1
+    echo "### F-090: fe_chain debugfs wired"
+fi
+
 # F-076: atomic fe_disengage_full debugfs — SDK-correct ordered teardown.
 # Replaces 7-step manual sequence that crashes board (F-076, 2026-07-18).
 # Calls __fman_pcd_fe_arm_disengage + fman_pcd_port_recover in one write.
@@ -1576,6 +1585,35 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
         29 \
         "F-085: cast addition on muram_offset_to_vbase (29 occ.)"
     echo "### fman_pcd.c: fe_build_contexts fixed (__maybe_unused + cast) (mutate)"
+fi
+
+# F-090: MISS→kernel bypass ENQ — route non-matching frames to kernel FQ.
+# Adds a second ENQ FE that enqueues MISS frames to miss_fqid instead of EXIT drop.
+# Enables ARP/ICMP to work through FE-VM, which is the #1 blocker for HIT testing.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_090.py" 2>&1
+    echo "### F-090: MISS->kernel bypass ENQ"
+fi
+
+# F-091: QMan FQ frame counter debugfs (fq_stats node).
+# Write FQID hex to read frame count. Answers "did any frame reach this FQ?"
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_091.py" 2>&1
+    echo "### F-091: QMan FQ fq_stats debugfs"
+fi
+
+# F-093: Fix fe_probe to show extracted KG key bytes from FE workspace.
+# Reads IC buffer at hash offset to display key data + KG hash.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_093.py" 2>&1
+    echo "### F-093: fe_probe workspace key reader"
+fi
+
+# F-094: Extend fe_flow to show ENQ FQ frame count.
+# Reads qman_query_fq for miss_fqid to report frames delivered to ENQ FQ.
+if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_094.py" 2>&1
+    echo "### F-094: fe_flow ENQ FQ counters"
 fi
 
 

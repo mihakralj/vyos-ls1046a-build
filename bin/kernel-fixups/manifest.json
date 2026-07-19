@@ -3,43 +3,44 @@
     "F_054.py": "fman_pcd.c: F-054 MUX/Transition AD direct writes (fix context_build corruption)",
     "F_056.py": "fman_pcd.c: F-058 MUX/Transition/ENQ AD writes in fe_arm_engage (SDK raw offsets)",
     "F_057.py": "fman_pcd.c: F-057 removed per-record next-FE from DDR (SDK-compliant)",
-    "F_068.py": "F-068-REVERT: AC_CC dispatch (next_engine=3, RCCB\u2192FE_ENTER)",
+    "F_068.py": "F-068-REVERT: AC_CC dispatch (next_engine=3, RCCB→FE_ENTER)",
     "F_069.py": "F-069: MISS context + DDR alloc (count-asserted anchors)",
     "F_069a.py": "dpaa_eth.c: F-069a v9 buf_base + vaddr captures\\n",
     "F_069b.py": "no description",
     "F_071.py": "no description",
     "F_072.py": "no description",
     "F_072_2.py": "fman_pcd.c: F-072 v3 FmPortSetFESupport ported",
-    "F_073D.py": "F-073D: Terminal ENQ (w0=0x02010000, w3=0) per 210.10.1 \u00a77.1/\u00a77.3",
+    "F_073D.py": "F-073D: Terminal ENQ (w0=0x02010000, w3=0) per 210.10.1 §7.1/§7.3",
     "M2_4_2.py": "fman_port.c: M2-4 NULL-page clear support added",
     "M2_4_3.py": "fman_pcd_kg.c: M2-4 params page freed on disarm",
     "M2_4_4.py": "no description",
     "fe_flow_key_fix.py": "no description",
-    "mutate.py": "count-gated text replacement helper \u2014 F-084 and future conversions",
+    "mutate.py": "count-gated text replacement helper — F-084 and future conversions",
     "F_076.py": "fman_pcd.c: F-076 atomic fe_disengage_full (SDK-correct teardown + port de-wedge)",
-    "F_089.py": "fman_pcd.c: F-089 \u00a717 FE descriptor static_asserts + KUnit test injection"
+    "F_089.py": "fman_pcd.c: F-089 §17 FE descriptor static_asserts + KUnit test injection",
+    "F_090.py": "fman_pcd.c: F-090 fe_chain debugfs — wires __fman_pcd_fe_build_vm_chain"
   },
-  "count": 18,
+  "count": 19,
   "removed_dead": [
-    "F_070b.py \u2014 unreferenced in ci-setup-kernel.sh"
+    "F_070b.py — unreferenced in ci-setup-kernel.sh"
   ],
   "rule": "All fixup files MUST be listed here. No unmanifested F-0xx markers in the tree.",
   "versioned_notes": {
-    "F_072_2.py": "separate anchor (FmPortSetFESupport porting) from F_072 \u2014 not a duplicate",
-    "M2_4_{2,3,4}.py": "separate files (fman_port.c, fman_pcd_kg.c, fman_pcd.c) \u2014 not duplicates"
+    "F_072_2.py": "separate anchor (FmPortSetFESupport porting) from F_072 — not a duplicate",
+    "M2_4_{2,3,4}.py": "separate files (fman_port.c, fman_pcd_kg.c, fman_pcd.c) — not duplicates"
   },
   "dispositions": {
     "F_054.py": {
       "action": "permanent",
-      "reason": "MUX(AD+4)/Transition AD direct writes \u2014 F_055 correction folded in"
+      "reason": "MUX(AD+4)/Transition AD direct writes — F_055 correction folded in"
     },
     "F_055.py": {
       "action": "fold-into F_054.py",
-      "reason": "Correction to F_054 MUX write target (AD+0\u2192AD+4). Merge into single fixup."
+      "reason": "Correction to F_054 MUX write target (AD+0→AD+4). Merge into single fixup."
     },
     "F_056.py": {
       "action": "permanent",
-      "reason": "MUX/Transition/ENQ AD writes in fe_arm_engage \u2014 workaround for F-047 patch drift"
+      "reason": "MUX/Transition/ENQ AD writes in fe_arm_engage — workaround for F-047 patch drift"
     },
     "F_057.py": {
       "action": "permanent",
@@ -51,7 +52,7 @@
     },
     "F_068.py": {
       "action": "permanent",
-      "reason": "Settled AC_CC direct topology (RCCB\u2192FE_ENTER, not CCBS)"
+      "reason": "Settled AC_CC direct topology (RCCB→FE_ENTER, not CCBS)"
     },
     "F_069.py": {
       "action": "permanent",
@@ -111,7 +112,11 @@
     },
     "F_089.py": {
       "action": "permanent",
-      "reason": "\u00a717 canonical FE descriptor compile-time + KUnit guards (three-tripwire architecture)"
+      "reason": "§17 canonical FE descriptor compile-time + KUnit guards (three-tripwire architecture)"
+    },
+    "F_090.py": {
+      "action": "fold-into 0158",
+      "reason": "fe_chain debugfs node belongs with the builder it calls — 0158 defines __fman_pcd_fe_build_vm_chain"
     }
   }
 }
