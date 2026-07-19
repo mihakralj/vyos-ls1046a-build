@@ -219,7 +219,7 @@ XFI/10GBASE-KR, see [`serdes-ethernet.md`](serdes-ethernet.md).
 ## 8. The "210 ucode" and Independent Mode
 
 - The FMan executes **microcode (ucode)** loaded at boot that defines the controller's behaviour. The
-  ASK/ASK2 stack targets the **QorIQ Engine Firmware (QEF) 210** family (e.g. `fsl_fman_ucode_ls1046_r1.0_106_4_18.bin`).
+  ASK/ASK2 stack targets the **QorIQ Engine Firmware (QEF) 210** family — the proprietary **210.10.1** blob this board ships (U-Boot injects it from SPI `mtd4`; *not* the public open-source `106.4.18` baseline, which is a narrower subset — see the 210-vs-106 scope note in the microcode reference).
   Stock QEF 210.10.1 does **not** implement CEV doorbell / REV events — relevant to the IRQ discussion
   in [`soc-integration.md`](soc-integration.md) and ASK2 spec §2.4.
 - **Independent Mode (IM)** bypasses QMan and BMan entirely (BD-ring model managed by the FMan

@@ -1,5 +1,17 @@
 # VPP DPAA1 Acceleration Specification for NXP LS1046A (ASK2 Architecture)
 
+> **Status: DRAFT v0.5 — design intent, partially aspirational (2026-07-19).**
+> The shipped VPP dataplane is `set vpp settings interface ethX` over unmodified
+> upstream `af_xdp` (per `plans/VPP.md` + AGENTS.md S5) — Sections 1–3 describe
+> that reality. **Sections 4, 6.1 (`vpp-options`), and 7 describe the
+> `ask_cp.so` control-plane plugin, which is NOT YET IMPLEMENTED** (no source
+> exists; it is the "v3 hybrid flow-level mode" of `plans/DUAL-DATAPLANE.md`).
+> Where this document's CLI schema or state machine conflicts with the settled
+> contracts, the settled contracts win: the per-interface offload CLI is
+> `set interfaces ethernet eth<n> offload ask`; the silicon state machine is
+> `plans/DUAL-DATAPLANE.md` S0↔S1↔S2 (per-interface). Kernel-side AF_XDP design
+> authority: `specs/dpaa1-afxdp-modernization-spec.md`.
+
 This document defines the architecture, design boundaries, and integration interfaces for running the Vector Packet Processing (VPP) engine on NXP QorIQ LS1046A (DPAA1) hardware within VyOS. This specification supersedes all legacy out-of-tree userspace SDK (USDPAA) and proprietary DPDK Poll Mode Driver (PMD) approaches in favor of the modernized **ASK2 (`ask.ko`) dual-dataplane architecture**.
 
 ---
@@ -134,13 +146,17 @@ define ask_cp_flow_details {
 
 ## 5. Runtime State Machine & Reversibility
 
-To ensure system stability and avoid interface lockups during configuration changes, the specification enforces a strict 3-state runtime state machine across the OS. Transitions between states do not require a system reboot or bus rebinding.
+> **Superseded by `plans/DUAL-DATAPLANE.md` §2.1** — the authoritative silicon
+> state machine is S0 (mainline/RSS) ↔ S1 (ASK) ↔ S2 (VPP overlay), **per
+> interface** (one port cannot be both ASK and VPP; other ports free). The
+> 3-state table below is the original VPP-centric framing, retained for the
+> `ask_cp.so` design context; do not implement against it.
 
 | State | VPP Engine | Interface Control | Hardware & Driver State |
 |---|---|---|---|
 | **0: Dormant** | Stopped / Unloaded | Mainline Linux Kernel | Standard DPAA1 netdev driver active; RSS NAPI distributes frames to Linux network stack. |
-| **1: Kernel Offload** | Stopped / Unloaded | Mainline Linux Kernel | `ask.ko` active; Coarse Classification offloads flows via Linux `nftables` flowtable hooks. |
-| **2: VPP Overlay** | Active (`af_xdp`) | VPP (`eth3`/`eth4`), Linux (`eth0`–`eth2`) | BMan pools mapped to XSK UMEM; `ask_cp.so` manages FMan CC flow steering and XDP hints. |
+| **1: Kernel Offload** | Stopped / Unloaded | Mainline Linux Kernel | `ask.ko` active on the offloaded port(s); FE-VM ehash offloads flows (nftables flowtable hooks). |
+| **2: VPP Overlay** | Active (`af_xdp`) | VPP on the assigned port(s), Linux elsewhere | BMan pools mapped to XSK UMEM; `ask_cp.so` (future) manages FMan CC flow steering and XDP hints. |
 
 ---
 
@@ -149,9 +165,16 @@ To ensure system stability and avoid interface lockups during configuration chan
 The integration into VyOS abstracts all low-level VPP and Netlink operations behind standard VyOS configuration nodes.
 
 ### 6.1 CLI Configuration Schema
-Interface acceleration properties are defined under the standard interface tree:
+
+> **ASPIRATIONAL — the `vpp-options` subtree below does not exist.** Settled
+> shipped CLIs: VPP assignment is `set vpp settings interface ethX`
+> (`plans/VPP.md`); ASK offload is `set interfaces ethernet eth<n> offload ask`
+> (per-interface, `plans/DUAL-DATAPLANE.md` §3). The `vpp-options` schema is the
+> design intent for the future `ask_cp.so` plugin and is shown for that
+> implementation's reference only:
 
 ```
+# FUTURE (ask_cp.so, not implemented):
 set interfaces ethernet eth3 vpp-options offload-mode 'ask-xdp'
 set interfaces ethernet eth3 vpp-options hw-parser-metadata 'enable'
 set interfaces ethernet eth3 vpp-options flow-steering 'enable'
