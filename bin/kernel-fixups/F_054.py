@@ -7,7 +7,7 @@ with open(path) as f:
 # Fix 1: MUX - replace the context_build call with direct AD write
 # Target: fman_pcd_fe_context_build(fe, FMAN_FE_MUX_CTX_OFF, &p);
 old_mux_call = "fman_pcd_fe_context_build(fe, FMAN_FE_MUX_CTX_OFF, &p);"
-new_mux_call = "iowrite32be(FMAN_FE_TYPE_MUX | (u32)enq->muram_off, fe); /* F-054: direct AD write, not context_build */"
+new_mux_call = "iowrite32be((u32)enq->muram_off, (u32 __iomem *)fe + 1); /* F-054+F-055: SDK-correct MUX context at AD+4 */"
 if old_mux_call in src:
     # Also remove the lines that set up the context params for MUX
     # (memset, p.type, p.u.mux.next_fe_off) since they're no longer used
@@ -18,7 +18,7 @@ if old_mux_call in src:
         "\t\tfman_pcd_fe_context_build(fe, FMAN_FE_MUX_CTX_OFF, &p);"
     )
     new_block = (
-        "\t\t/* F-054: MUX AD word 0 = type|next-FE. context_build wrote at\n"
+        "\t\t/* F-054+F-055: MUX AD word 1 = next-FE offset.\n"
         "\t\t * AD+0 overwriting the type header, crashing hardware. */\n"
         "\t\tiowrite32be(FMAN_FE_TYPE_MUX | (u32)enq->muram_off, fe);"
     )

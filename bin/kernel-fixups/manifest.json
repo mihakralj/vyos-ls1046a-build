@@ -1,10 +1,8 @@
 {
   "active": {
     "F_054.py": "fman_pcd.c: F-054 MUX/Transition AD direct writes (fix context_build corruption)",
-    "F_055.py": "fman_pcd.c: F-060 v3d: MUX context write fixed to AD+4",
     "F_056.py": "fman_pcd.c: F-058 MUX/Transition/ENQ AD writes in fe_arm_engage (SDK raw offsets)",
     "F_057.py": "fman_pcd.c: F-057 removed per-record next-FE from DDR (SDK-compliant)",
-    "F_061.py": "fman_pcd.c: F-061 fe_probe debugfs (KG key dump from FE pool workspace)",
     "F_068.py": "F-068-REVERT: AC_CC dispatch (next_engine=3, RCCB\u2192FE_ENTER)",
     "F_069.py": "F-069: MISS context + DDR alloc (count-asserted anchors)",
     "F_069a.py": "dpaa_eth.c: F-069a v9 buf_base + vaddr captures\\n",
@@ -13,7 +11,6 @@
     "F_072.py": "no description",
     "F_072_2.py": "fman_pcd.c: F-072 v3 FmPortSetFESupport ported",
     "F_073D.py": "F-073D: Terminal ENQ (w0=0x02010000, w3=0) per 210.10.1 \u00a77.1/\u00a77.3",
-    "M2_4.py": "fman_port.c: M2-4 fman_port_lookup_rx fixed",
     "M2_4_2.py": "fman_port.c: M2-4 NULL-page clear support added",
     "M2_4_3.py": "fman_pcd_kg.c: M2-4 params page freed on disarm",
     "M2_4_4.py": "no description",
@@ -21,7 +18,7 @@
     "mutate.py": "count-gated text replacement helper \u2014 F-084 and future conversions",
     "F_076.py": "fman_pcd.c: F-076 atomic fe_disengage_full (SDK-correct teardown + port de-wedge)"
   },
-  "count": 20,
+  "count": 17,
   "removed_dead": [
     "F_070b.py \u2014 unreferenced in ci-setup-kernel.sh"
   ],
@@ -33,7 +30,7 @@
   "dispositions": {
     "F_054.py": {
       "action": "permanent",
-      "reason": "Core fix for context_build corruption (MUX/Transition AD writes)"
+      "reason": "MUX(AD+4)/Transition AD direct writes \u2014 F_055 correction folded in"
     },
     "F_055.py": {
       "action": "fold-into F_054.py",
@@ -93,7 +90,7 @@
     },
     "M2_4_2.py": {
       "action": "permanent",
-      "reason": "Current fe_probe debugfs (v6: 64-word scan, non-zero filter, slot-5 save)"
+      "reason": "Current fe_probe v6 (64-word scan, non-zero filter, slot-5). F_061 v1 + M2_4 v4 folded in."
     },
     "M2_4_3.py": {
       "action": "permanent",
