@@ -1106,9 +1106,13 @@ git -c user.email=ci@local -c user.name=ci commit -q -m "kernel post-patches" --
 # -EOPNOTSUPP from its default: case.  Injected via sed (not a
 # .patch file) to avoid the git apply --3way context-matching wall.
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
-    sed -i "/case TC_SETUP_BLOCK:/a\        case TC_SETUP_FT:\n                return dpaa_setup_tc_flow_block(net_dev, type_data);" \
-        drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-    echo "### dpaa_eth.c: TC_SETUP_FT case injected (sed)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
+        drivers/net/ethernet/freescale/dpaa/dpaa_eth.c \
+        'case TC_SETUP_BLOCK:' \
+        'case TC_SETUP_BLOCK:\n\t\tcase TC_SETUP_FT:\n\t\t\treturn dpaa_setup_tc_flow_block(net_dev, type_data);' \
+        1 \
+        "TC_SETUP_FT: case injected after TC_SETUP_BLOCK"
+    echo "### dpaa_eth.c: TC_SETUP_FT case injected (mutate)"
 fi
 
 # Fix fe_flow debugfs 8-byte key truncation (post-patch fixup)
@@ -1126,28 +1130,35 @@ python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/fe_flow_key_fix.py" 2>&1
 # B0V is kept at 1 (kernel TX confirmation safety — see plans/ASK2-
 # PERFORMANCE-MODERNIZATION.md §7 for the dedicated-FQ plan with B0V=0).
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
-    sed -i "s/0x1e00000080000000ULL/0x9e00000080000000ULL/" \
-        drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-    echo "### dpaa_eth.c: OVFQ=1 injected (sed)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
+        drivers/net/ethernet/freescale/dpaa/dpaa_eth.c \
+        '0x1e00000080000000ULL' \
+        '0x9e00000080000000ULL' \
+        1 \
+        "F-052b: OVFQ=1 on TX FQ context_a"
+    echo "### dpaa_eth.c: OVFQ=1 injected (mutate)"
 
     # B0V=0: disable context_b writebacks for hardware-offloaded frames.
-    # With EBD=1 (FMan deallocates buffers in hardware), the QMan portal
-    # does not need to write buffer-release confirmations to context_b.
-    # cdx.ko uses hi=0x9a000000 (B0V=0); we follow suit.  Safe for
-    # non-offloaded TX because buffer-release confirmation goes through
-    # a separate TX_CONFIRM FQ, not context_b of the TX FQ.
-    sed -i "s/0x9e00000080000000ULL/0x9a00000080000000ULL/" \
-        drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-    echo "### dpaa_eth.c: B0V=0 injected (sed)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
+        drivers/net/ethernet/freescale/dpaa/dpaa_eth.c \
+        '0x9e00000080000000ULL' \
+        '0x9a00000080000000ULL' \
+        1 \
+        "F-052: B0V=0 on TX FQ context_a"
+    echo "### dpaa_eth.c: B0V=0 injected (mutate)"
 fi
 
 # Performance: deeper TX FQ taildrop (2MB -> 4MB) for 10G throughput.
 # The 2MB default fills quickly at 10G line rate; 4MB gives more headroom
 # before QMan taildrop kicks in, reducing per-flow backpressure.
 if [ -f drivers/net/ethernet/freescale/dpaa/dpaa_eth.c ]; then
-    sed -i "s/#define DPAA_FQ_TD 0x200000/#define DPAA_FQ_TD 0x400000/" \
-        drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
-    echo "### dpaa_eth.c: DPAA_FQ_TD=4MB injected (sed)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
+        drivers/net/ethernet/freescale/dpaa/dpaa_eth.c \
+        '#define DPAA_FQ_TD 0x200000' \
+        '#define DPAA_FQ_TD 0x400000' \
+        1 \
+        "F-053: TX FQ taildrop 2MB->4MB"
+    echo "### dpaa_eth.c: DPAA_FQ_TD=4MB injected (mutate)"
 fi
 
 # Performance: deeper TX FQ taildrop (2MB -> 4MB) for 10G throughput.
@@ -1168,13 +1179,20 @@ fi
 
 # Patch 4009 equivalent: fix OEM SFP-10G-T quirk + add OEM SFP-10G-SR quirk
 if [ -f drivers/net/phy/sfp.c ]; then
-    # Change sfp_fixup_rollball_cc to sfp_fixup_fs_10gt for OEM SFP-10G-T
-    sed -i 's/SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_rollball_cc)/SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_fs_10gt)/' \
-        drivers/net/phy/sfp.c
-    # Add OEM SFP-10G-SR quirk entry (our modules report "SR" but are copper rollball)
-    sed -i '/SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_fs_10gt)/a\	SFP_QUIRK_F("OEM", "SFP-10G-SR", sfp_fixup_fs_10gt),' \
-        drivers/net/phy/sfp.c
-    echo "### sfp.c: OEM SFP-10G-T/SR rollball quirk injected (sed)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
+        drivers/net/phy/sfp.c \
+        'SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_rollball_cc)' \
+        'SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_fs_10gt)' \
+        1 \
+        "SFP: OEM SFP-10G-T quirk rename"
+    # Add OEM SFP-10G-SR quirk entry
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
+        drivers/net/phy/sfp.c \
+        'SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_fs_10gt),' \
+        'SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_fs_10gt),\n\tSFP_QUIRK_F("OEM", "SFP-10G-SR", sfp_fixup_fs_10gt),' \
+        1 \
+        "SFP: OEM SFP-10G-SR quirk appended"
+    echo "### sfp.c: OEM SFP-10G-T/SR rollball quirk injected (mutate)"
 fi
 
 # F-048: Set EKFC to 0x00180006 — IPSRC1|IPDST1|L4PSRC|L4PDST.
@@ -1183,9 +1201,13 @@ fi
 # was proven to stall port 0x10/0x11 on the first frame (2026-07-14).
 # The 2026-07-10 working build used 0x00180006 without stall.
 if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
-    sed -i 's/scheme_regs\.kgse_ekfc = DEFAULT_HASH_KEY_EXTRACT_FIELDS;/scheme_regs.kgse_ekfc = 0x00180006; \/\* F-048-R1: 12B key = SIP+DIP+SPORT+DPORT (no PTYPE1) \*\//' \
-        drivers/net/ethernet/freescale/fman/fman_keygen.c
-    echo "### fman_keygen.c: EKFC 0x00180206→0x00180006 (remove PTYPE1, no stall)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
+        drivers/net/ethernet/freescale/fman/fman_keygen.c \
+        'scheme_regs.kgse_ekfc = DEFAULT_HASH_KEY_EXTRACT_FIELDS;' \
+        'scheme_regs.kgse_ekfc = 0x00180006; /* F-048-R1: 12B key = SIP+DIP+SPORT+DPORT (no PTYPE1) */' \
+        1 \
+        "F-048-R1: EKFC 4-tuple extraction (no PTYPE1)"
+    echo "### fman_keygen.c: EKFC 0x00180006 (remove PTYPE1, no stall) (mutate)"
 fi
 
 # F-062c-R2: RESTORE pure AC_CC encoding (0x80000006, no DFLT_NIA).
@@ -1257,8 +1279,13 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_port.c ]; then
 # M2-4: reduce FE pool 100->16 to fit 64KB MURAM
 # 100x28B rounded 256B = 25600B + pool 8192B + ehash 33280B > 65536B
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    sed -i 's/FMAN_PCD_FE_POOL_COUNT[[:space:]]*100/FMAN_PCD_FE_POOL_COUNT 16/' drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo '### fman_pcd.c: M2-4 FE pool reduced 100->16'
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c \
+        'FMAN_PCD_FE_POOL_COUNT	100' \
+        'FMAN_PCD_FE_POOL_COUNT 16' \
+        1 \
+        "M2-4: FE pool reduced 100→16"
+    echo "### fman_pcd.c: M2-4 FE pool reduced 100->16 (mutate)"
 fi
 
 # M2-4: fman_port_set_params_page NULL-page clear support (before params-page-free)
@@ -1276,14 +1303,13 @@ fi
 # or hash config that interfere with exact-match ehash.  Anchored on the
 # '/* Write scheme registers */' comment that precedes the write call.
 if [ -f drivers/net/ethernet/freescale/fman/fman_keygen.c ]; then
-    sed -i '/\/\* Write scheme registers \*\//i\
-	/* F-051: force-clear RSS mask/hash config for exact-match ehash */\
-	scheme_regs.kgse_bmch = 0;\
-	scheme_regs.kgse_bmcl = 0;\
-	scheme_regs.kgse_hc   = 0;\
-	scheme_regs.kgse_ekdv = 0;' \
-        drivers/net/ethernet/freescale/fman/fman_keygen.c
-    echo "### fman_keygen.c: F-051 BM/HC/EKDV zeroed (RSS isolation)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
+        drivers/net/ethernet/freescale/fman/fman_keygen.c \
+        '\t/* Write scheme registers */' \
+        '\t/* F-051: force-clear RSS mask/hash config for exact-match ehash */\n\tscheme_regs.kgse_bmch = 0;\n\tscheme_regs.kgse_bmcl = 0;\n\tscheme_regs.kgse_hc   = 0;\n\tscheme_regs.kgse_ekdv = 0;\n\t/* Write scheme registers */' \
+        1 \
+        "F-051: BM/HC/EKDV zeroed before scheme write"
+    echo "### fman_keygen.c: F-051 BM/HC/EKDV zeroed (RSS isolation) (mutate)"
 fi
 
 # F-052: Suppress -Werror=unused-function for fman_pcd_debugfs_root_get.
@@ -1386,20 +1412,30 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # function __fman_pcd_fe_arm_engage (which is defined BEFORE the wrapper
     # where F-072 v3 injects the function body).  Without this, the call
     # injected by F-072b sees an implicit declaration → -Werror.
-    sed -i '/^static int __fman_pcd_fe_arm_engage/i\static int fman_pcd_fe_buffer_setup(struct fman_pcd *, struct fman_port *, u8);' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo "### fman_pcd.c: F-072c forward-decl fman_pcd_fe_buffer_setup"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c \
+        'static int __fman_pcd_fe_arm_engage(' \
+        'static int fman_pcd_fe_buffer_setup(struct fman_pcd *, struct fman_port *, u8);\n\nstatic int __fman_pcd_fe_arm_engage(' \
+        1 \
+        "F-072c: forward-decl fman_pcd_fe_buffer_setup"
+    echo "### fman_pcd.c: F-072c forward-decl fman_pcd_fe_buffer_setup (mutate)"
 
-    sed -i 's/err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,/{ struct fman_port *rxp = fman_port_lookup_rx(pcd->fman, (u8)port_id); int _b; if (!rxp) return -ENODEV; _b = fman_pcd_fe_buffer_setup(pcd, rxp, (u8)port_id); if (_b) return _b; } err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,/' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo "### fman_pcd.c: F-072b FmPortSetFESupport call injected before arm_fe"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c \
+        'err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,' \
+        '{ struct fman_port *rxp = fman_port_lookup_rx(pcd->fman, (u8)port_id); int _b; if (!rxp) return -ENODEV; _b = fman_pcd_fe_buffer_setup(pcd, rxp, (u8)port_id); if (_b) return _b; } err = fman_pcd_kg_port_arm_fe(pcd, (u8)port_id,' \
+        1 \
+        "F-072b: FmPortSetFESupport call injected before arm_fe"
+    echo "### fman_pcd.c: F-072b FmPortSetFESupport call injected (mutate)"
 
     # F-084: Fix 0158 compose FE_ENTER target — EXT_HASH not ENQ.
-    # Single-line sed: e->muram_off → pcd->fe_hash_off
-    # The ENQ list walk becomes dead code (unused var 'e' = warning, not error).
-    sed -i 's/err = fman_pcd_fe_enter_build(pcd, e->muram_off);/err = fman_pcd_fe_enter_build(pcd, pcd->fe_hash_off);/' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo "### fman_pcd.c: F-084 compose FE_ENTER target = EXT_HASH (sed, silent no-op if 0158 skipped)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c \
+        'err = fman_pcd_fe_enter_build(pcd, e->muram_off);' \
+        'err = fman_pcd_fe_enter_build(pcd, pcd->fe_hash_off);' \
+        1 \
+        "F-084: compose FE_ENTER target = EXT_HASH"
+    echo "### fman_pcd.c: F-084 compose FE_ENTER target = EXT_HASH (mutate)"
 
     # F-085: Suppress -Wunused-function for static functions whose callers
      # may be behind conditional code paths or fixup-anchor mismatches.
@@ -1527,11 +1563,19 @@ fi
 # from CCBS scaffold removal). The function was called from 0150 which
 # F-047 removed.  Avoids -Werror build failure.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    sed -i 's/static void fman_pcd_fe_build_contexts/static __maybe_unused void fman_pcd_fe_build_contexts/' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    sed -i 's/fman_muram_offset_to_vbase(muram,/(void *)fman_muram_offset_to_vbase(muram,/' \
-        drivers/net/ethernet/freescale/fman/fman_pcd.c
-    echo "### fman_pcd.c: fe_build_contexts fixed (__maybe_unused + cast)"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c \
+        'static void fman_pcd_fe_build_contexts' \
+        'static __maybe_unused void fman_pcd_fe_build_contexts' \
+        1 \
+        "F-085: __maybe_unused on fman_pcd_fe_build_contexts"
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" \
+        drivers/net/ethernet/freescale/fman/fman_pcd.c \
+        'fman_muram_offset_to_vbase(muram,' \
+        '(void *)fman_muram_offset_to_vbase(muram,' \
+        1 \
+        "F-085: cast addition on muram_offset_to_vbase"
+    echo "### fman_pcd.c: fe_build_contexts fixed (__maybe_unused + cast) (mutate)"
 fi
 
 
