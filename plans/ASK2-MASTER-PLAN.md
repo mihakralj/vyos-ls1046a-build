@@ -1,6 +1,6 @@
 # ASK2 Master Plan — Single Authoritative Execution Plan
 
-**Version 1.4.0 · 2026-07-19 · HADS 1.0.0**
+**Version 1.5.0 · 2026-07-19 · HADS 1.0.0**
 
 ## AI READING INSTRUCTION
 
@@ -33,8 +33,8 @@ Where this plan and those documents disagree, they win — update this plan.
 | **1. FMan PCD subsystem** (KG / CC / HM / PLCR) | ✅ SHIPPING — patches 0092–0118, 0151–0155 | — |
 | **2. FE-VM ehash substrate** (pool, singletons, ehash, EXT_HASH, MUX/ENQ, arm) | ✅ BUILT, DORMANT — patches 0124–0131; byte-verified via `fe_*` debugfs against lf-5.4 LSDK oracle | — |
 | **3. Classifier→FE arm** | ✅ PROVEN — F-091 HIT scaffold (numKeys=1 + FE_ENTER AD at ato+32); `FmPortSetFESupport` auto-armed (F-072b/c/d); `fman_pcd_port_recover` de-wedge (0163/F-086) | — |
-| **4. ask.ko datapath** (genl + flow table + debugfs) | 🟡 BUILDING — engage/disengage now calls kernel API (F-092); 5-fixup chain (F-090→F-094) in CI 29701819606; flow insert still uses debugfs bridge (P1 backlog) | Deploy + test M5 gate |
-| **5. VyOS CLI + mutual exclusion** | 🔴 NOT STARTED | Gated on ask.ko datapath (M5) |
+| **4. ask.ko datapath** (genl + flow table + debugfs) | 🟡 BUILDING — engage/disengage calls kernel API (F-092); P1 backlog fully closed (F-090→F-098, 9-fixup chain); F-096 unparking FE-VM (CI 29705721175); F-099 ZC instrumentation (CI 29706934409); flow insert still uses debugfs bridge | Deploy + test M5 gate |
+| **5. VyOS CLI + mutual exclusion** | 🟡 PROTO — `offload ask` CLI XML node (vyos-1x-031) + Python NOP stub (reserved namespace); ARM64 VPP resource defaults (vyos-1x-030) | Gated on ask.ko datapath (M5) |
 
 ### 1.2 Status: unblocked
 
@@ -61,10 +61,17 @@ sequential gate.
 | AF_XDP true-ZC fix committed | 2026-07-18 | 0164: RX-port accessor + params-page corrections; deployed in kernel |
 | **M4 ZC test** | **2026-07-19** | **AF_XDP copy-mode works (VPP binds eth4). ZC mode still EINVAL on xsk_socket__create() — 0164 fixed two blockers but at least one more remains. dpaa_xsk_dma_cmp/wakeup symbols present (copy-mode XSK). ZC counters 0093-0096 deployed but dormant.** |
 | F-090→F-094 fixup chain | 2026-07-19 | 5 new fixups: struct fields, HIT scaffold, production API, dynamic FQID, flow_add retype. All pass test-fixups.sh 4/4, local compile clean. CI build 29701819606 succeeded. |
+| **F-095→F-099 fixup chain** | **2026-07-19** | **4 more fixups: F-096 (context build call), F-097 (fe_verify gate), F-098 (DDR retype), F-099 (ZC bind instrumentation). F-096 CI 29705721175 PASSED. F-099 CI 29706934409 PASSED. P1 backlog fully closed.** |
 | **M5 HIT gate PASSED** | **2026-07-19** | **ask.ko → fman_pcd_fe_engage(F-092 API) → chain built + armed → flow insert → TCP HIT (tcpdump 0 pkts). iperf3 single-stream offload: 1.28 Gbps 0 retrans (TCP-limited, identical to kernel 1.32 Gbps). M2 reference: 7.37 Gbps @ 8 streams via pass-through (no DDR).** |
 | **Throughput bottleneck: kernel software forwarding** | **2026-07-19** | **1.53 Gbps iperf3 is kernel NAPI→route→qman_enqueue — NOT FE-VM MURAM overhead (retracted theory). M2 7.37 Gbps was hardware pass-through to kernel FQ (no software routing). NXP cdx.ko 8.58 Gbps TX uses full hardware opcode chain: STRIP_ETH_HDR→TTL_DEC→ETH_REBUILD→ENQUEUE_PKT (FMan silicon, zero CPU). When FE-VM correctly armed, manual HIT achieves 6.65 Gbps single-stream (peak 8.67) — within 8% of cdx.ko. Three gaps to 10 Gbps: FmPcdCcBuildContextByFE (stubbed), opcode chain (not implemented), dedicated TX FQ.** |
 | **F-093-R1: FQ=0x0 root cause** | **2026-07-19** | **`fman_pcd_resolve_miss_fqid(pcd, 0x10)` returns 0 when called from chain builder — params page not allocated yet (arm_engage sets it up AFTER chain builder runs). Fix: revert chain builder to hardcoded 0x200; keep dynamic resolution only in arm_engage path. CI 29703599019.** |
 | **gen_pool double-free BUG** | **2026-07-19** | **`fe_arm disengage` debugfs → `gen_pool_free_owner` BUG at lib/genalloc.c:508. Root cause: double-arm without disengage guard — API `fman_pcd_fe_engage()` arms port, `ask/offload disengage` fails silently, API called again → second arm overwrites first KG scheme MURAM → disengage double-frees. Fix: engagement guard in `fman_pcd_fe_engage()` (P1 backlog).** |
+| **P1 backlog fully closed** | **2026-07-19** | **All 5 P1 tasks completed: F-097 (fe_verify gate), F-093 (dynamic FQID), F-094 (flow_add retype), F-098 (context_build retype DDR), T-P1-5 (OOT snapshot broadening). 9-fixup chain F-090→F-098 all CI-verified.** |
+| **F-096: FE-VM context build call restored** | **2026-07-19** | **`fman_pcd_fe_build_contexts()` call re-inserted in `__fman_pcd_fe_arm_engage()` (lost when F-091/F-092 modified the function). Without it, MUX FE cannot read next-FE pointer → FE-VM parks on first frame under load. CI 29705721175 PASSED.** |
+| **F-099: M4 ZC bind instrumentation** | **2026-07-19** | **`pr_err("ZCBIND:...")` at every error return in xp_assign_dev(), xsk_bind(), dpaa_xdp(), and af_xdp_pool_attach(). Temporarily injects diagnostics to trace which kernel precondition returns EINVAL on XDP_ZEROCOPY bind. CI 29706934409 PASSED.** |
+| **vyos-1x-030: ARM64 VPP resource defaults** | **2026-07-19** | **Caps upstream `main-heap-size` (3G→256M) and `buffers-per-numa` (auto→16384) in the Yang XML. Reduces VPP hugepage requirement from ~3.2GB to ~1GB. NB: does NOT fix M4 ZC — only memory sizing.** |
+| **vyos-1x-031: ASK offload CLI stub** | **2026-07-19** | **`offload ask` XML leafNode registered + `offload.ask` Python NOP stub in ethernet.py. Reserves CLI namespace for `set interfaces ethernet eth<n> offload ask`. M6 wires to actual engage/disengage.** |
+| **VPP configured on .185** | **2026-07-19** | **4GB hugepages (2048×2M), CPUs 1-3 isolated, U-Boot env updated with isolcpus+hugepages params. VPP commit still fails — not memory (ARM64 defaults fix this) but `xsk_socket__create() EINVAL` (M4 ZC issue).** |
 | Dual-DAC topology unblocked | 2026-07-14 | eth3+eth4 both SFP-H10GB-CU1M @10G on .185 |
 
 ---
@@ -247,11 +254,12 @@ graph LR
 - **Key outcome:** 13-byte 5-tuple keysize no longer stalls (F-072b fix validated).
 - **Calendar:** 1 board session (2026-07-19 17:00–18:00 UTC).
 
-### M4 — AF_XDP true-ZC RX 🟡 parallel (BLOCKED on kernel EINVAL)
+### M4 — AF_XDP true-ZC RX 🟡 parallel (INSTRUMENTATION DEPLOYED)
 
 - **Gate:** `xsk_zc_rx_redirect` > 0 under XDP_ZEROCOPY bind + traffic.
-- **Tested 2026-07-19:** AF_XDP copy-mode works (VPP 25.10 binds eth4, hugepages allocated live). ZC mode `xsk_socket__create()` returns EINVAL — 0164 fixed port accessor + params page but at least one more blocker remains. `dpaa_xsk_dma_cmp`/`dpaa_xsk_wakeup` present (copy-mode XSK), ZC bind path incomplete.
-- **Next:** dedicated kernel debug session — trace `xsk_socket__create` → driver `xsk_bind` to find the failing ZC precondition.
+- **Tested 2026-07-19:** VPP AF_XDP on eth4 fails with `xsk_socket__create() EINVAL` — kernel advertises `NETDEV_XDP_ACT_XSK_ZEROCOPY` (patch 0070), VPP 25.10 af_xdp plugin tries ZC mode, bind rejected. 0164 fixed port accessor + params page but at least one more precondition fails.
+- **Instrumentation deployed:** F-099 fixup (CI 29706934409) adds `pr_err("ZCBIND:...")` at every error return in `xp_assign_dev()`, `xsk_bind()`, `dpaa_xdp()`, and `af_xdp_pool_attach()`. Deploy to .185 → reproduce VPP error → `dmesg | grep ZCBIND` identifies the failing check.
+- **Next:** deploy F-099 ISO to .185, reproduce, read dmesg. Fix the identified precondition, rebuild without F-099, verify oracle > 0.
 
 ### M5 — First classified + FE-forwarded flow ✅ DONE 2026-07-19
 
@@ -309,7 +317,7 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 - [x] **T-M3-4** `@mihakralj` — `fe_disengage_full` de-wedge proven: port recovered cleanly after FE-VM engage/disengage cycle. No cold boot needed.
 - [x] **T-M3-5** `@mihakralj` — HIT evidence archived to qdrant (agent_memory collection, 2026-07-19).
 
-### P1 — Function-inventory re-land (~400 LOC) 🔨 IN PROGRESS
+### P1 — Function-inventory re-land (~400 LOC) ✅ COMPLETE 2026-07-19
 
 - [x] **T-P1-1** `@mihakralj` — F-08 `fman_pcd_fe_verify` (arm-time descriptor readback gate). ✅ F-097 fixup written; injects verify function + call before KG arm in __fman_pcd_fe_arm_engage.
 - [x] **T-P1-2** `@mihakralj` — F-09+F-10+F-15: `fman_pcd_resolve_miss_fqid` + kill hardcoded `tx_fqid=0x200`. ✅ F-093 fixup written; dynamic FQID from port params page. Next build.
@@ -319,7 +327,7 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 
 ### M4 — true-ZC (parallel)
 
-- [ ] **T-M4-1** `@___` — Deploy 0164; verify `xsk_zc_rx_redirect` > 0; measure throughput; close ZC-RX-SCOPE GAP-2.
+- [ ] **T-M4-1** `@mihakralj` — Deploy 0164+F-099 on .185; reproduce VPP ZC bind failure; read `dmesg | grep ZCBIND` to identify failing precondition; fix + retest; verify `xsk_zc_rx_redirect > 0`; close ZC-RX-SCOPE GAP-2. **F-099 instrumentation deployed (CI 29706934409); waiting on CI 29707687559 for combined 030+031+F_099 build.**
 
 ### M5 — flow automation (after M3) 🟢 ACTIVE — partially complete
 
@@ -332,7 +340,7 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 - [ ] **T-M5-7** `@mihakralj` — Selective-offload architecture (Gap F): restore `numKeys=0` pass-through + `fman_cc_tree_add_key()` for per-flow CC→FE_ENTER. Replaces F-091 "all frames→DDR" approach. Requires Gap C handshake (§2.3). **Blocker F-093-R1 fixed (FQ=0x0 → 0x200); CI 29703599019 building.**
 - [ ] **T-M5-8** `@___` — `conntrack -L` offloaded verification; teardown byte-clean; `fe_disengage_full` S1→S0 recovery.
 - [ ] **T-M5-9** `@___` — **Opcode chain in DDR records**: encode `STRIP_ETH_HDR` (0x80000010) + `TTL_DECREMENT` (0x80000200) + `ETH_HEADER_REBUILD` (0x8000C001) + `ENQUEUE_PKT` (0x81000000+TX_FQID) in per-flow 256B DDR records. Lift encoding from lf-5.4 LSDK `999-layerscape-ask-kernel` patch (`FmPcdCcBuildFE` at L8883).
-- [ ] **T-M5-10** `@mihakralj` — **`FmPcdCcBuildContextByFE`**: reproduce the per-task working-store context population from lf-5.4 LSDK (L8954). Unstubs the function — FE-VM MUX reads its next-FE pointer from the working store. Without this the FE-VM parks on first frame under load. **🟢 F-096 fixup created: re-adds call to fman_pcd_fe_build_contexts() (defined by 0135/0146, call site lost in F-091/F-092). CI 29705721175 building.**
+- [ ] **T-M5-10** `@mihakralj` — **`FmPcdCcBuildContextByFE`**: reproduce the per-task working-store context population from lf-5.4 LSDK (L8954). Unstubs the function. **🟢 F-096 fixup written (CI 29705721175 PASSED): re-adds call to fman_pcd_fe_build_contexts() (defined by 0135/0146, call site lost in F-091/F-092). Next: deploy + HIT test.**
 - [ ] **T-M5-11** `@___` — **Dedicated TX FQ**: resolve `dpaa_get_tx_fqid()` per port, allocate `DPAA_FWD_TX_QUEUES`, wire ENQUEUE_PKT `actionSpecific` = TX FQID.
 - [ ] **T-M5-12** `@___` — **Throughput gate**: ≥7 Gbps single-stream with opcode chain active (stretch ≥8 NXP parity). Reference: manual HIT already achieves 6.65 Gbps when FE-VM is correctly armed.
 
