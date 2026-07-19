@@ -55,7 +55,7 @@ git add -A
 git commit -q -m "kernel pristine (v6.18.38 base)" --allow-empty || true
 
 # Apply each patch from the series
-SKIP_LIST="0150-fman-pcd-fe-engage-api 0158-fman-pcd-fqid-resolution-compose 0159-fman-pcd-e2-hash-probe 0160-fman-pcd-ekfc-programming 0161-fman-pcd-rccb-feenter-direct 0162-fman-pcd-port-arm-fe-ekfc-fix"
+SKIP_LIST="0150-fman-pcd-fe-engage-api"
 PATCH_COUNT=0; FAIL_COUNT=0; SKIP_COUNT=0
 
 while IFS= read -r line; do
