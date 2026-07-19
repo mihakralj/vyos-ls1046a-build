@@ -102,7 +102,7 @@ else:
 \tstruct fman_pcd *pcd;
 \tstruct fman_pcd_ehash_table *t;
 
-\tif (!fm || !action || !action->key || action->key_size == 0)
+\tif (!fm || !action || action->key_size == 0)
 \t\treturn -EINVAL;
 \tpcd = fman_get_pcd(fm);
 \tif (!pcd)

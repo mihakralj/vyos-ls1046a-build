@@ -1504,14 +1504,7 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-089: §17 static_asserts + KUnit injected"
 fi
 
-# F-090: fe_chain debugfs — wires __fman_pcd_fe_build_vm_chain to a
-# writable debugfs node so the full FE-VM descriptor chain (singletons,
-# EXT_HASH FE, ENQ FE, FE_ENTER AD) can be built interactively at the
-# HIT gate. Accepts "build" and "destroy" verbs.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_090.py" 2>&1
-    echo "### F-090: fe_chain debugfs wired"
-fi
+# F-080 (DELETED — folded into F-069)
 
 # F-076: atomic fe_disengage_full debugfs — SDK-correct ordered teardown.
 # Replaces 7-step manual sequence that crashes board (F-076, 2026-07-18).
@@ -1626,11 +1619,7 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     echo "### F-094: flow_add retype → struct fman_pcd_fe_flow_action *"
 fi
 
-# F-094: Extend fe_flow to show ENQ FQ frame count.
-# Reads qman_query_fq for miss_fqid to report frames delivered to ENQ FQ.
-if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/F_094.py" 2>&1
-    echo "### F-094: fe_flow ENQ FQ counters"
+# F-095 (DELETED — stub, never implemented)
 fi
 
 
