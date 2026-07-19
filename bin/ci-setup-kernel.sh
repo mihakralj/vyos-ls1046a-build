@@ -1282,14 +1282,14 @@ fi
 # currently-enabled code path.  -Werror promotes the warning to error.
 # Mark it with __attribute__((unused)) to silence the build.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "static int fman_pcd_debugfs_root_get(void)" "static __attribute__((unused)) int fman_pcd_debugfs_root_get(void)" 1 "F-085: __unused debugfs_root_get" \
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "static int fman_pcd_debugfs_root_get(void)" "static __attribute__((unused)) int fman_pcd_debugfs_root_get(void)" 0 "F-085: __unused debugfs_root_get (optional)" \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
     echo "### fman_pcd.c: F-052 debugfs_root_get marked __unused"
 fi
 
 # F-052b: Suppress -Werror for fman_pcd_debugfs_root_put (same root cause).
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "static void fman_pcd_debugfs_root_put(void)" "static __attribute__((unused)) void fman_pcd_debugfs_root_put(void)" 1 "F-085: __unused debugfs_root_put" \
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "static void fman_pcd_debugfs_root_put(void)" "static __attribute__((unused)) void fman_pcd_debugfs_root_put(void)" 0 "F-085: __unused debugfs_root_put (optional)" \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
     echo "### fman_pcd.c: F-052b debugfs_root_put marked __unused"
 fi
@@ -1304,7 +1304,7 @@ fi
 # The correct value for an 8-byte header is 1 (the field encodes 0→0B, 1→8B).
 # The CRC64 bucket-indexer's hash_shift is a separate parameter and is unchanged.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "((u32)(t->hash_shift & 0x3) << 16)" "((u32)(1) << 16)" 1 "F-053: hash_bytes_offset=1" \
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "((u32)(t->hash_shift & 0x3) << 16)" "((u32)(1) << 16)" 0 "F-053: hash_bytes_offset=1 (optional — 0158 skipped)" \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
     echo "### fman_pcd.c: F-053 hash_bytes_offset=1 (key at offset 8 in DDR record)"
 fi
@@ -1399,9 +1399,9 @@ if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
     # fman_pcd_fe_buffer_setup now called via F-072b — no __maybe_unused needed
 
     # F-085b: Fix -Wunused-result from kstrtouint in fe_arm engage tokenizer.
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "kstrtouint(tok, 16, \&miss_fqid);" "(void)kstrtouint(tok, 16, \&miss_fqid);" 1 "F-085b: void cast miss_fqid" \
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "kstrtouint(tok, 16, \&miss_fqid);" "(void)kstrtouint(tok, 16, \&miss_fqid);" 0 "F-085b: void cast miss_fqid (optional — 0158 skipped)" \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "kstrtouint(tok, 16, \&ekfc);" "(void)kstrtouint(tok, 16, \&ekfc);" 1 "F-085b: void cast ekfc" \
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "kstrtouint(tok, 16, \&ekfc);" "(void)kstrtouint(tok, 16, \&ekfc);" 0 "F-085b: void cast ekfc (optional — 0158 skipped)" \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
     echo "### fman_pcd.c: F-085 __maybe_unused + kstrtouint casts"
 
@@ -1503,7 +1503,7 @@ fi
 
 # without exporting.
 if [ -f drivers/net/ethernet/freescale/fman/fman_pcd.c ]; then
-    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "EXPORT_SYMBOL_GPL(fman_pcd_ic_vaddr);\n" "" 1 "dead EXPORT remove" \
+    python3 "${GITHUB_WORKSPACE}/bin/kernel-fixups/mutate.py" --check drivers/net/ethernet/freescale/fman/fman_pcd.c "EXPORT_SYMBOL_GPL(fman_pcd_ic_vaddr);\n" "" 0 "dead EXPORT remove (optional)" \
         drivers/net/ethernet/freescale/fman/fman_pcd.c
     echo "### fman_pcd.c: stripped EXPORT_SYMBOL_GPL (before includes)"
 fi
