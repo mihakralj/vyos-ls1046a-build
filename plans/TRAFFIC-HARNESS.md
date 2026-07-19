@@ -82,10 +82,10 @@ ssh heidi 'sudo pct exec 201 -- iperf3 -c 10.11.1.2 -u -b 9G -l 1400 -t 30'
 ```
 
 **[SPEC]**
-- Baseline measured 2026-06-08 (default-flavor image, plain kernel L3 forwarding, no offload): 4.14 Gbit/s @ 8 TCP streams.
+- Baseline measured 2026-06-08 (plain kernel L3 forwarding (single-image model), no offload): 4.14 Gbit/s @ 8 TCP streams.
 
 **[NOTE]**
-That 4.14 Gbit/s is the software-routing floor; the offloaded flavors (ASK2 M2, DPAA1 CC/CEETM) are measured against the ≥7 Gbps gate from there.
+That 4.14 Gbit/s is the software-routing floor; the offload targets (ASK2 M2, DPAA1 CC/CEETM) are measured against the ≥7 Gbps gate from there.
 
 ---
 
@@ -98,7 +98,7 @@ That 4.14 Gbit/s is the software-routing floor; the offloaded flavors (ASK2 M2, 
 | Gate-3 ≥7 Gbps literal | multi-stream iperf3 (`-P`), or UDP `-b`; for true wire-rate use TRex on an SR-IOV VF (below) |
 | M3-3d policer throughput cap | UDP `iperf3 -u -b 9G` offered into a policed flow; watch board red-drop counters |
 | ASK2 M2 (≥7 Gbps @ ≤5% CPU) | CT201→board→CT202 forwarding load while sampling board kernel-net CPU |
-| VPP flavor benchmark | same forwarding path with eth3/eth4 assigned to VPP (MTU ≤3290 on AF_XDP) |
+| VPP benchmark | same forwarding path with eth3/eth4 assigned to VPP (MTU ≤3290 on AF_XDP) |
 | M3-3c HM 802.1Q strip/insert | **needs tagged frames** — bridge is untagged; use `scapy`/`trafgen`/TRex to push 802.1Q (iperf3 cannot tag) |
 
 ---
