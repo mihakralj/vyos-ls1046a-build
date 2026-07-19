@@ -61,6 +61,8 @@ sequential gate.
 | AF_XDP true-ZC fix committed | 2026-07-18 | 0164: RX-port accessor + params-page corrections; deployed in kernel |
 | **M4 ZC test** | **2026-07-19** | **AF_XDP copy-mode works (VPP binds eth4). ZC mode still EINVAL on xsk_socket__create() — 0164 fixed two blockers but at least one more remains. dpaa_xsk_dma_cmp/wakeup symbols present (copy-mode XSK). ZC counters 0093-0096 deployed but dormant.** |
 | F-090→F-094 fixup chain | 2026-07-19 | 5 new fixups: struct fields, HIT scaffold, production API, dynamic FQID, flow_add retype. All pass test-fixups.sh 4/4, local compile clean. CI build 29701819606 succeeded. |
+| **M5 HIT gate PASSED** | **2026-07-19** | **ask.ko → fman_pcd_fe_engage(F-092 API) → chain built + armed → flow insert → TCP HIT (tcpdump 0 pkts). iperf3 single-stream offload: 1.28 Gbps 0 retrans (TCP-limited, identical to kernel 1.32 Gbps). M2 reference: 7.37 Gbps @ 8 streams via pass-through (no DDR).** |
+| **Throughput bottleneck: DDR on every frame** | **2026-07-19** | **F-091 scaffolds ALL frames through EXT_HASH DDR lookup. Single-stream TCP-limited (~1.3 Gbps). 8-stream: 1.53 Gbps + 163K retrans — DDR latency (~50-100ns/frame) serializes at high PPS. 10 Gbps requires selective-offload: only FMan-flowed frames go through DDR; non-matching → fast pass-through (M2 path @ 7.37 Gbps).** |
 | Dual-DAC topology unblocked | 2026-07-14 | eth3+eth4 both SFP-H10GB-CU1M @10G on .185 |
 
 ---
@@ -124,6 +126,30 @@ the `muram_budget` debugfs node (`arch/fman-pcd-api-reference.md` §16).
 `set interfaces ethernet eth<n> offload ask` (§3 decision 9). Ready to wire once
 the FE-VM path is proven; the validator enforces per-interface ASK↔VPP exclusion.
 
+### 2.6 Gap F — Throughput: selective offload for 10 Gbps 🔴 BLOCKING M5 stretch
+
+**[SPEC]** The current F-091 scaffold routes **every frame** through
+`FE_ENTER → EXT_HASH → DDR lookup`. For M3/M5 proof this was correct, but it
+caps throughput at ~1.5 Gbps (DDR latency ~50-100ns/frame serializes at high
+PPS). The M2 reference (pass-through, no DDR) achieves 7.37 Gbps.
+
+**[NOTE]** The architectural fix: restore `numKeys=0` in the CONT_LOOKUP group
+table (fast pass-through = 7.37 Gbps for non-matching frames). When a flow is
+offloaded (nft flowtable or ask.ko API), add a CC match entry for that 5-tuple
+pointing at FE_ENTER, and increment numKeys. This way only offloaded flows pay
+the DDR cost; the remaining traffic takes the fast path.
+
+**[NOTE]** The Gap C handshake (CC match → FE_ENTER, §2.3) is the enabler:
+- **Engage**: `numKeys=0` scaffold → all frames fast-path to kernel
+- **Flow insert**: `fman_pcd_fe_flow_add()` (F-094) adds DDR entry **plus**
+  `fman_cc_tree_add_key()` adds CC match entry → `numKeys++`
+- **Flow remove**: reverse
+- **Net throughput**: 7.37 Gbps baseline, minus DDR overhead for offloaded flows only
+
+**[SPEC]** M5 stretch target ≥7 Gbps with ASK engaged and flows offloaded. Gate:
+8-stream iperf3 with 2 offloaded flows → aggregate ≥7 Gbps. The 10 Gbps target
+requires the selective-offload architecture plus TX-bypass optimization (0136).
+
 ---
 
 ## 3. Binding architecture decisions
@@ -167,6 +193,12 @@ the FE-VM path is proven; the validator enforces per-interface ASK↔VPP exclusi
     Debugfs nodes (`fe_arm`, `fe_flow`, `fe_ehash`, etc.) remain for interactive
     diagnostics but are NEVER used for hardware control by ask.ko. Flow insert
     migration to API deferred to P1 backlog.
+11. **Selective-offload architecture for 10 Gbps (2026-07-19).** The F-091
+    scaffold routes ALL frames through FE-VM → DDR, capping throughput at ~1.5
+    Gbps. The production architecture uses `numKeys=0` (fast pass-through = 7.37
+    Gbps) and ONLY adds CC match entries (→ FE_ENTER, DDR path) for offloaded
+    flows. This requires the Gap C handshake: `fman_cc_tree_add_key()` for
+    per-flow dispatch, enabling 7+ Gbps aggregate throughput with ASK engaged.
 
 ---
 
@@ -281,7 +313,9 @@ re-land behind `bin/test-fixups.sh`, never before it passes.
 - [ ] **T-M5-3** `@___` — Wire ask.ko REPLACE → `fman_pcd_fe_flow_add` (uses T-P1-3 retype); DESTROY → `_del`. Deferred to P1 backlog.
 - [ ] **T-M5-4** `@___` — nft flowtable `hook forward` test; fall back to Path-B YNL interim if it breaks forwarding.
 - [x] **T-M5-5** `@mihakralj` — Wire TX bypass (0136 `fman_port_set_silicon_hit_release_all`). ✅ Already in ask_hw.c engage/disengage.
-- [ ] **T-M5-6** `@___` — Throughput gate: ≥7 Gbps automated (stretch ≥8 NXP parity), `conntrack -L` offloaded, teardown byte-clean.
+- [ ] **T-M5-6** `@___` — Throughput gate: ≥7 Gbps with ASK engaged + flows offloaded. 8-stream iperf3, 2+ offloaded flows, aggregate ≥7 Gbps (stretch ≥8 NXP parity).
+- [ ] **T-M5-7** `@___` — Selective-offload architecture (Gap F): restore `numKeys=0` pass-through + `fman_cc_tree_add_key()` for per-flow CC→FE_ENTER. Replaces F-091 "all frames→DDR" approach. Requires Gap C handshake (§2.3).
+- [ ] **T-M5-8** `@___` — `conntrack -L` offloaded verification; teardown byte-clean; `fe_disengage_full` S1→S0 recovery.
 
 ### M6 — breadth (after M5)
 
