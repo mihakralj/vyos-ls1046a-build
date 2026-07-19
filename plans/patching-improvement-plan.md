@@ -1,14 +1,14 @@
 # Improvement Plan: Scalable and Resilient Patching Pipeline
 
-**Document ID:** IP-2026-07-19-003 · **Version 1.2.0** · **HADS 1.0.0**
-**Repository:** `mihakralj/vyos-ls1046a-build`, branch `dpaa1`, reviewed at `cbc5365`
-**Baseline:** `plans/TA-2026-07-18-002-patch-architecture.md` v1.2, implemented across 30 commits (`9a6cec4..cbc5365`)
-**Purpose:** Score Phase 0 + Phase R + Phase 2a implementation, register new defects surfaced by count-gating, and lay out remaining work.
+**Document ID:** IP-2026-07-19-003 · **Version 1.3.0** · **HADS 1.0.0**
+**Repository:** `mihakralj/vyos-ls1046a-build`, branch `dpaa1`, reviewed at `9f67b56`
+**Baseline:** `plans/TA-2026-07-18-002-patch-architecture.md` v1.3, implemented across ~35 commits (`9a6cec4..9f67b56`)
+**Purpose:** Score Phase 0 + Phase R + Phase 2a + §17 implementation, register the new defects surfaced by count-gating, and lay out remaining work for the corrected sequencing.
 
 ## AI READING INSTRUCTION
 
 Read `[SPEC]` and `[BUG]` blocks for authoritative facts. Read `[NOTE]` for rationale.
-Sections marked **v1.2 update** are new since the v1.1 baseline.
+Sections marked **v1.3 update** are new since the v1.2 baseline.
 
 ---
 
@@ -188,21 +188,23 @@ Patch-type policy enforced; skip ledger empty; §17 static asserts + KUnit.
 ## 9. Success Metrics
 
 ```text
-Metric                                   v1.0 Baseline   v1.2 Current     Target (Phase 2 exit)
-Kernel-C fixups active                   ~19             17 (manifest)    0
-Bare sed -i on kernel C                  33              **0**            0
-Patches skipped / dropped from build     6 (0150, 0158-0162)  1 (0150)   0 non-permanent
-3-way fallbacks per clean build          unmeasured      0 + ::warning    0 steady-state, every event artifacted
-Round-trip verify                        broken (NF-04)  non-destructive  green, in CI
-Time to refresh one drifted patch        skip-or-sed     hours (R3 done)  < 30 min
-Kernel bump wall time                    unknown         unknown          < 1 day for 6.18.y minor
-Canonical branch                         absent          106 commits      pushed, protected, CI-gated
-Count-gated fixup mutations              0               **20**           0 (all folded)
-CI round-trip gate                       absent          **wired**        pixel-perfect identity
-Anchor drift caught in CI               never           **2 (NF-10, NF-11)**  0 (none slipped through)
+Metric                                   v1.0 Baseline   v1.2 Current     v1.3 Current     Target (Phase 2 exit)
+Kernel-C fixups active                   ~19             17               18 (+F_076, +F_089)  0
+Bare sed -i on kernel C                  33              **0**            **0**             0
+Patches skipped / dropped from build     6 (0150, 0158-0162)  1 (0150)   1 (0150)          0 non-permanent
+3-way fallbacks per clean build          unmeasured      0 + ::warning    0 + ::warning     0 steady-state, every event artifacted
+Round-trip verify                        broken (NF-04)  non-destructive  non-destructive   green, in CI
+Time to refresh one drifted patch        skip-or-sed     hours (R3 done)  hours (R3 done)   < 30 min
+Kernel bump wall time                    unknown         unknown          unknown           < 1 day for 6.18.y minor
+Canonical branch                         absent          106 commits      106 commits       pushed, protected, CI-gated
+Count-gated fixup mutations              0               **20**           **20**             0 (all folded)
+CI round-trip gate                       absent          **wired**        **wired**          pixel-perfect identity
+Anchor drift caught in CI               never           **2 (NF-10, NF-11)**  **2**         0 (none slipped through)
+§17 static_assert guards                 0               0                **11**            11
+§17 KUnit test cases                     0               0                **8**             8
 ```
 
-The count-gating investment has already paid for itself: two silent regressions were caught in CI that the old bare-sed regime would have shipped. Every remaining `mutate.py` call is a tripwire watching for exactly this class of drift.
+The count-gating investment has already paid for itself: two silent regressions were caught in CI that the old bare-sed regime would have shipped. The §17 three-tripwire architecture (compile-time static_assert + KUnit CI + arm-time fe_verify) makes the ENQ-regression class structurally impossible.
 
 ---
 
@@ -211,5 +213,27 @@ The count-gating investment has already paid for itself: two silent regressions 
 **[BUG — RESOLVED v1.2] The REPLACEMENT block has accumulated structural if/fi imbalance from 30+ commits of surgical edits.** Symptom: attempting to remove an `if ... fi` block from the REPLACEMENT string in `ci-setup-kernel.sh` causes cascading `fi` mismatches at unrelated locations. Cause: the if/fi nesting was never validated as a structural invariant; each edit removed or inserted individual lines without re-verifying the overall balance. The wrong-but-working balance became an accidental invariant that resists further change.
 
 **Resolution (this session):** The Phase 2a fold-in was achieved by replacing fixup calls with `:` no-ops — preserving the exact if/fi structure without deletion. This is a tourniquet: the block still carries dead code, but the zombie files are deleted and the manifest is accurate.
+
+**Durable fix:** The tree-canonical migration (Phase 1→2 combined) dissolves the entire REPLACEMENT block into commit history. The fixups become commits on the canonical branch; the block is deleted in one atomic operation rather than piecemeal. Until then, individual fixup deletions must use the no-op substitution pattern, not structural deletion.
+
+---
+
+## 11. v1.3 Additions — §17 Three-Tripwire Architecture
+
+**[SPEC — v1.3]** The §17 static_assert + KUnit work (TA R8) landed at `9f67b56`. The three-time ENQ regression (wrong NIA in descriptor word 1) survived because nothing between "edit" and "silicon" knew the correct value. The three-tripwire architecture makes this class of regression structurally impossible:
+
+| Tripwire | Mechanism | When | Catches |
+|---|---|---|---|
+| 1 | `static_assert` in `fman-pcd-fe-static-asserts.h` | Compile time (every `make`) | Wrong FE type constants, descriptor sizes, NIA encodings, ehash mask |
+| 2 | KUnit `fman_pcd_fe_test.c` (8 cases) | CI time (`CONFIG_FSL_FMAN_PCD_KUNIT_TEST=y`) | Type range validation, encoding contracts, size invariants |
+| 3 | `fe_verify` debugfs | Arm time (on board, already existed) | MURAM readback against canonical tables |
+
+**Current limitation:** NIA constants (`NIA_ENG_BMI`, `NIA_BMI_AC_ENQ_FRAME`, etc.) are defined in `fman_keygen.c` (patch 0097) and not visible from `fman_pcd.c`. Both the static_assert header and KUnit test guard NIA references with `#ifdef NIA_ENG_BMI`. When these constants move to a shared header (tree-canonical migration), the guards auto-activate.
+
+**Files created:**
+- `kernel/common/files/fman-pcd-fe-static-asserts.h` — 11 `static_assert` guards
+- `kernel/common/files/fman_pcd_fe_test.c` — 8 KUnit test cases
+- `bin/kernel-fixups/F_089.py` — injects both + Kconfig `CONFIG_FSL_FMAN_PCD_KUNIT_TEST=y`
+- `kernel/common/kernel-config/00-board.config` — Kconfig entry
 
 **Durable fix:** The tree-canonical migration (Phase 1→2 combined) dissolves the entire REPLACEMENT block into commit history. The fixups become commits on the canonical branch; the block is deleted in one atomic operation rather than piecemeal. Until then, individual fixup deletions must use the no-op substitution pattern, not structural deletion.
